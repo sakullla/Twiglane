@@ -32,7 +32,49 @@ Git 由 Rust 以参数数组异步启动，不经过 shell。同一仓库的写�
 
 撤销最近提交和放弃文件修改是两件不同的事。撤销只针对唯一远程上尚未推送的普通提交，并保留文件改动；已推送、首个提交、合并提交、脏暂存区、进行中的操作，或离线、传播范围不明时都不会写入，写入前也会再次核对 HEAD。放弃会先列出所选文件的暂存和未暂存影响，以及不能恢复的边界。取消不写入；确认只影响所选文件。
 
-安装包验证还不属于这一层。没有成功检查过远程时，状态栏里的上游数字只表示本地已记录的跟踪信息。本地提交不会因为存在远程就自动推送。
+没有成功检查过远程时，状态栏里的上游数字只表示本地已记录的跟踪信息。本地提交不会因为存在远程就自动推送。主界面可以打开“运行依赖”，查看 Git 和 WebView2 缺失时的说明。首版不提供研发平台业务、游戏资源专用管理或 AI 聊天。
+
+## 支持范围
+
+候选范围是 macOS 13 及以上的 arm64 与 x64，以及 Windows 11 x64。只有实际安装并跑过的系统和架构可以写成已验证；没有覆盖的最低版本不能写成全部兼容。当前记录见 `docs/verification/report.json`。没有对应通过记录时，不能把候选范围说成已验证。
+
+## 安装与运行
+
+安装显示名是 Twiglane。macOS 产物是 app 和 DMG，Windows 产物是 NSIS 安装包。发布构建启用优化并裁剪符号。
+
+需要系统安装 Git。应用不捆绑 Git。缺失时界面会说明去哪里安装，并可以重新检测或手动选择可执行文件。推荐 Git 2.48 或更高；更低版本会提示并继续尝试。
+
+macOS 使用系统 WebKit，不下载 WebView2。Windows 使用系统 WebView2。安装器不包含 WebView2 runtime，缺失时用 downloadBootstrapper 另行下载引导程序，再由 Microsoft 下载 Evergreen runtime。引导程序约 1.8 MiB，离线 runtime 约 127 MiB（这是 Tauri 文档里的安装器增量说明，不是本仓库实测的下载字节）。这两项不计入应用安装包不超过 30 MiB、安装目录不超过 80 MiB 的预算。没有网络时，安装器应说明 WebView2 下载失败，应用也无法在缺少 runtime 时启动。
+
+仓库不保存签名或公证凭据。macOS 打包使用 ad-hoc 身份，没有公证。Windows 不配置证书。产物是测试分发，系统可能提示来自未识别的开发者。不能把这种包写成已签名公开发布。
+
+## 恢复边界
+
+撤销最近提交只针对唯一远程上尚未推送的普通提交，并保留文件改动。已推送、首个提交、合并提交、脏暂存区、进行中的操作，或离线、传播范围不明时不会写入。放弃修改会先列出所选文件的暂存和未暂存影响；取消不写入，确认只影响所选文件。合并中止只恢复这次合并，不删除预先存在的临时保存。临时保存恢复失败时保留原记录。这些操作都不能从这里找回已经丢弃的未提交内容。
+
+## 性能口径
+
+预算来自技术方案里的首轮工程预算，不是已经达标的结果。S/M/L 由 `scripts/generate-fixture.mjs` 固定生成，并核对真实文件数、提交数和未提交改动。界面耗时从真实安装包进程开始，记到主要控件可操作或差异显示为止；脚本里的 Git 时间只作为对照，不能代替界面延迟。不把未清除系统缓存的结果叫做磁盘冷启动。内存按本机口径记录，macOS 与 Windows 的数字不能直接比较。缺测、超预算或构建摘要不一致时，`node scripts/verify-delivery.mjs` 必须失败，不能生成通过记录。
+
+## 已知限制
+
+尚未在 Windows 上安装运行，也没有受控 HTTPS/SSH 远程的成功与认证失败记录，公开发布签名同样没有。这些缺口留在验证记录的下一步里。本地 bare remote 只能说明同步语义，不能代替协议验收。CI 配置存在也不等于已经在两个系统上跑过。
+
+## 验证
+
+```bash
+npm run check
+npm run test
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+npm run tauri build
+node scripts/generate-fixture.mjs --size S --dest /tmp/twiglane-S
+node scripts/measure-delivery.mjs
+node scripts/verify-delivery.mjs
+```
+
+`measure-delivery` 只写入实际跑到的样本。正式验收看 `verify-delivery` 的退出码，不看测量脚本有没有把报告写出来。
 
 ## 开发
 

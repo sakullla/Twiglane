@@ -69,6 +69,7 @@ pub struct GitScheduler<R> {
     timeout: Duration,
     output_limit: usize,
     extra_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    read_cancel: StdMutex<Arc<Shutdown>>,
 }
 
 impl<R: ProcessRunner> GitScheduler<R> {
@@ -88,7 +89,24 @@ impl<R: ProcessRunner> GitScheduler<R> {
             timeout,
             output_limit,
             extra_env,
+            read_cancel: StdMutex::new(Arc::new(Shutdown::new())),
         }
+    }
+
+    pub fn cancel_reads(&self) {
+        let mut slot = self
+            .read_cancel
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        slot.cancel();
+        *slot = Arc::new(Shutdown::new());
+    }
+
+    fn read_cancel_token(&self) -> Arc<Shutdown> {
+        self.read_cancel
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     pub fn current_generation(&self, repo_key: &str) -> u64 {
@@ -133,6 +151,10 @@ impl<R: ProcessRunner> GitScheduler<R> {
         if self.shutdown.is_cancelled() {
             return Err(AppError::new("cancelled", "操作已取消。"));
         }
+        let cancel = match job.kind {
+            JobKind::Read => Some(self.read_cancel_token()),
+            JobKind::Write => None,
+        };
         let result = self
             .runner
             .run(RunRequest {
@@ -142,6 +164,7 @@ impl<R: ProcessRunner> GitScheduler<R> {
                 timeout: self.timeout,
                 output_limit: job.output_limit.unwrap_or(self.output_limit),
                 shutdown: self.shutdown.clone(),
+                cancel,
                 stdin: job.stdin,
                 truncate_stdout: job.truncate_stdout,
             })
@@ -203,6 +226,7 @@ impl<'a, R: ProcessRunner> WriteGuard<'a, R> {
                 timeout: self.scheduler.timeout,
                 output_limit: spec.output_limit.unwrap_or(self.scheduler.output_limit),
                 shutdown: self.scheduler.shutdown.clone(),
+                cancel: None,
                 stdin: spec.stdin,
                 truncate_stdout: spec.truncate_stdout,
             })
@@ -530,5 +554,57 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "stale");
         assert_eq!(error.generation, Some(2));
+    }
+
+    struct CancelAwareRunner {
+        started: Arc<AtomicUsize>,
+    }
+
+    impl ProcessRunner for CancelAwareRunner {
+        async fn run(&self, request: RunRequest) -> Result<ProcessOutput, RunnerError> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let Some(cancel) = request.cancel else {
+                return Err(RunnerError::Io("read was not cancellable".into()));
+            };
+            cancel.cancelled().await;
+            Err(RunnerError::Cancelled)
+        }
+    }
+
+    async fn until_started(counter: &AtomicUsize, value: usize) {
+        let began = std::time::Instant::now();
+        while counter.load(Ordering::SeqCst) < value {
+            if began.elapsed() > Duration::from_secs(2) {
+                panic!("runner did not start");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_reads_stops_the_current_read_only() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let scheduler = Arc::new(GitScheduler::new(
+            CancelAwareRunner {
+                started: Arc::clone(&started),
+            },
+            Arc::new(Shutdown::new()),
+            Duration::from_secs(5),
+            1024,
+            Vec::new(),
+        ));
+        let running = Arc::clone(&scheduler);
+        let first = tokio::spawn(async move { running.execute(job("repo", JobKind::Read, 1, 1)).await });
+        until_started(&started, 1).await;
+        scheduler.cancel_reads();
+        assert_eq!(first.await.unwrap().unwrap_err().code, "cancelled");
+
+        let running = Arc::clone(&scheduler);
+        let second = tokio::spawn(async move { running.execute(job("repo", JobKind::Read, 2, 1)).await });
+        until_started(&started, 2).await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(!second.is_finished());
+        scheduler.cancel_reads();
+        assert_eq!(second.await.unwrap().unwrap_err().code, "cancelled");
     }
 }

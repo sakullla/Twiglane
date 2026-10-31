@@ -1,0 +1,12 @@
+{"detail":{"controls":true},"elapsedMs":305,"name":"shell-ready","pid":25559}
+{"detail":{"changes":1,"contentOk":true,"elapsedMs":41,"expectChanges":1,"expectHead":null,"head":"765444c73a1b727f6e0c9ea616c4d71e9b573ce9","launch":null,"mark":null,"method":"gui-open-to-first-screen"},"elapsedMs":347,"name":"status-open","pid":25559}
+{"detail":{"contentOk":true,"head":"9a49d3534721eba58f293d90a2df60ee3df92bba","hunks":2,"method":"gui-partial-commit-push","path":"notes.txt"},"elapsedMs":505,"name":"stage-commit-push","pid":25559}
+{"detail":{},"elapsedMs":506,"name":"finished","pid":25559}
+{"detail":{"controls":true},"elapsedMs":320,"name":"shell-ready","pid":26161}
+{"detail":{"changes":1,"contentOk":true,"elapsedMs":49,"expectChanges":1,"expectHead":null,"head":"23d0d6e303b7a700f4b09b4e0e32cd2800c7b069","launch":null,"mark":null,"method":"gui-open-to-first-screen"},"elapsedMs":371,"name":"status-open","pid":26161}
+{"detail":{"contentOk":true,"head":"97d450fcf7409d2a794e0c6c61df55eb4c5c6b22","hunks":2,"method":"gui-partial-commit-push","path":"notes.txt"},"elapsedMs":531,"name":"stage-commit-push","pid":26161}
+{"detail":{},"elapsedMs":532,"name":"finished","pid":26161}
+{"detail":{"controls":true},"elapsedMs":247,"name":"shell-ready","pid":26658}
+{"detail":{"changes":1,"contentOk":true,"elapsedMs":100,"expectChanges":1,"expectHead":null,"head":"c7cc46b523407f84aec9247a8a1f544d02fa136f","launch":null,"mark":null,"method":"gui-open-to-first-screen"},"elapsedMs":348,"name":"status-open","pid":26658}
+{"detail":{"contentOk":true,"head":"bb7bcaa61e28266ac45113d5174cebcbb8585e98","hunks":2,"method":"gui-partial-commit-push","path":"notes.txt"},"elapsedMs":514,"name":"stage-commit-push","pid":26658}
+{"detail":{},"elapsedMs":514,"name":"finished","pid":26658}

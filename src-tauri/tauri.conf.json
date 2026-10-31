@@ -30,12 +30,41 @@
   "bundle": {
     "active": true,
     "targets": ["app", "dmg", "nsis"],
+    "publisher": "Twiglane",
+    "category": "DeveloperTool",
+    "shortDescription": "Twiglane 轻量 Git 桌面客户端",
+    "longDescription": "让每次改动，都清晰有序。安装包不包含 Git。Windows 安装器不包含 WebView2，缺失时另行下载，该下载不计入应用体积。未做公开发布签名或公证。",
+    "copyright": "Unsigned test distribution",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "-",
+      "hardenedRuntime": false
+    },
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": null,
+      "signCommand": null,
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": false
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": false,
+        "compression": "lzma",
+        "customLanguageFiles": {
+          "SimpChinese": "./windows/SimpChinese.nsh",
+          "English": "./windows/English.nsh"
+        }
+      }
+    }
   }
 }

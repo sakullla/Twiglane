@@ -66,6 +66,11 @@ fn capabilities_do_not_grant_a_shell() {
         "allow-set-theme",
         "allow-set-panel-widths",
         "allow-save-draft",
+        "allow-cancel-reads",
+        "allow-measure-probe",
+        "allow-measure-sample",
+        "allow-measure-finish",
+        "allow-measure-wait",
     ];
     assert_eq!(permissions, expected);
     assert!(permissions.iter().all(|permission| {
@@ -73,6 +78,12 @@ fn capabilities_do_not_grant_a_shell() {
     }));
     let config = fs::read_to_string(root.join("tauri.conf.json")).unwrap();
     assert!(config.contains("\"productName\": \"Twiglane\""));
+    assert!(config.contains("\"app\""));
+    assert!(config.contains("\"dmg\""));
+    assert!(config.contains("\"nsis\""));
+    assert!(config.contains("\"downloadBootstrapper\""));
+    assert!(config.contains("\"minimumSystemVersion\": \"13.0\""));
+    assert!(config.contains("\"signingIdentity\": \"-\""));
     assert!(!config.to_ascii_lowercase().contains("shell"));
     let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
     assert!(!cargo.contains("tauri-plugin-shell"));

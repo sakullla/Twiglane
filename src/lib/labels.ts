@@ -140,10 +140,19 @@ export function rowLabel(row: FileRow): string {
 
 export function gitInstallHint(platform: string): string {
   if (platform.includes("Mac") || platform === "macos") {
-    return "在 macOS 上可安装 Xcode 命令行工具，或从 git-scm.com 安装 Git。";
+    return "在 macOS 上可安装 Xcode 命令行工具，或从 git-scm.com 安装 Git。Twiglane 不包含 Git，使用系统 WebKit，不会下载 WebView2。";
   }
   if (platform.includes("Win") || platform === "windows") {
-    return "在 Windows 上可从 git-scm.com 安装 Git，并确认安装程序已将其加入 PATH。";
+    return "在 Windows 上可从 git-scm.com 安装 Git，并确认安装程序已将其加入 PATH。Twiglane 不包含 Git，也不包含 WebView2。安装器只在缺失时另行下载引导程序和 Evergreen runtime，该下载不计入应用体积；没有 WebView2 时应用无法启动。";
   }
-  return "请安装 Git 2.48 或更高版本，并确保应用能找到该可执行文件。";
+  return "请安装 Git 2.48 或更高版本，并确保应用能找到该可执行文件。Twiglane 不包含 Git。";
+}
+
+export function dependencyNote(platform: string): string {
+  return [
+    gitInstallHint(platform),
+    "应用安装包和安装目录的体积不包含 Git，也不包含 WebView2。Windows 首次下载成本单列：引导程序约 1.8 MiB，Evergreen 离线 runtime 约 127 MiB（均来自 Tauri 对安装器增量的说明，不是本机实测下载字节）。",
+    "安装显示名是 Twiglane。当前构建使用 ad-hoc 或未配置的测试签名，没有公证，不能当作已签名的公开发布。",
+    "首版不包含研发平台业务、游戏资源专用管理或 AI 聊天。",
+  ].join("\n");
 }

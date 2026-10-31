@@ -55,6 +55,11 @@
     "allow-discard-changes",
     "allow-set-theme",
     "allow-set-panel-widths",
-    "allow-save-draft"
+    "allow-save-draft",
+    "allow-cancel-reads",
+    "allow-measure-probe",
+    "allow-measure-sample",
+    "allow-measure-finish",
+    "allow-measure-wait"
   ]
 }

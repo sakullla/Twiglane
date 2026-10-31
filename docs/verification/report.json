@@ -1,0 +1,890 @@
+{
+  "format": "twiglane-delivery-verification/v1",
+  "sourceFingerprint": "ab282588ce09329561386e82df5cad0c60f510ac9356d4f94c0979792a3c3147",
+  "generatedAt": "2026-10-31T12:27:23.262Z",
+  "hostPlatform": "darwin",
+  "checks": [
+    {
+      "id": "docs.support",
+      "status": "pass",
+      "summary": "README 写明了支持范围、安装、恢复边界、性能口径和已知限制。",
+      "evidence": {}
+    },
+    {
+      "id": "package.git-explained",
+      "status": "pass",
+      "summary": "界面和说明写明 Git 与 WebView2 缺失时的行为。",
+      "evidence": {}
+    },
+    {
+      "id": "package.webview2-cost",
+      "status": "pass",
+      "summary": "WebView2 使用另行下载，成本不计入应用体积；本机没有 Windows 下载实测。",
+      "evidence": {
+        "includedInInstaller": false,
+        "mode": "downloadBootstrapper",
+        "measuredDownloadBytes": null,
+        "estimateNote": "引导程序约 1.8 MiB，Evergreen 离线 runtime 约 127 MiB，不计入应用体积。"
+      }
+    },
+    {
+      "id": "package.macos.app",
+      "status": "pass",
+      "summary": "macOS app 目录 6778755 字节，显示名 Twiglane。",
+      "evidence": {
+        "path": "../../.cache/cargo-target/release/bundle/macos/Twiglane.app",
+        "sha256": "6fcde335e748be25e84e0a4853cd4cfbe644a156fc6aaa247c4af793bcf4254a",
+        "productName": "Twiglane",
+        "bytes": 6778755
+      }
+    },
+    {
+      "id": "package.signature",
+      "status": "pass",
+      "summary": "macOS 产物没有公证，不能当作已签名公开发布。",
+      "evidence": {
+        "notarized": false,
+        "trustedDistribution": false,
+        "codesign": "Executable=/Users/yanggeng/.cache/cargo-target/release/bundle/macos/Twiglane.app/Contents/MacOS/twiglane\nIdentifier=app.twiglane.desktop\nFormat=app bundle with Mach-O thin (arm64)\nCodeDirectory v=20400 size=13421 flags=0x2(adhoc) hashes=413+3 location=embedded\nVersionPlatform=1\nVersionMin=851968\nVersionSDK=1769472\nHash type=sha256 size=32\nCandidateCDHash sha256=3125e0905146a801a760f7146ba82c5e8290198b\nCandidateCDHashFull sha256=3125e0905146a801a760f7146ba82c5e8290198b1852c0a19758642bac60365b\nHash choices=sha256\nCMSDigest=3125e0905146a801a760f7146ba82c5e8290198b1852c0a19758642bac60365b\nCMSDigestType=2\nExecutable Segment base=0\nExecutable Segment limit=6275072\nExecutable Segment flags=0x1\nPage size=16384\nCDHash=3125e0905146a801a760f7146ba82c5e8290198b\nSignature=adhoc\nInfo.plist entries=16\nTeamIdentifier=not set\nSealed Resources version=2 rules=13 files=1\nInternal requirements count=0 size=12\nTotal signatures=1\nChosen signature=1",
+        "statement": "ad-hoc 或未配置的测试签名，未公证"
+      }
+    },
+    {
+      "id": "package.macos.dmg",
+      "status": "pass",
+      "summary": "DMG 3288036 字节。",
+      "evidence": {
+        "path": "../../.cache/cargo-target/release/bundle/dmg/Twiglane_0.1.0_aarch64.dmg",
+        "sha256": "f8e98ad860370c3faa3dbf66f092a80a0558860238653eadfb52ac8c872587c2",
+        "productName": "Twiglane",
+        "bytes": 3288036
+      }
+    },
+    {
+      "id": "package.windows.nsis",
+      "status": "gap",
+      "summary": "本机还没有生成 NSIS 安装包。",
+      "nextStep": "在 macOS 上执行 Tauri 的 nsis 目标以确认配置可构建；Windows 安装运行仍须在 Windows 11 x64 上单独验收。",
+      "evidence": {
+        "runtimeVerified": false
+      }
+    },
+    {
+      "id": "perf.startup.s",
+      "status": "gap",
+      "summary": "macOS 启动样本 5 条。 Windows 仍缺，不能通过。",
+      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "evidence": {
+        "platforms": {
+          "darwin": {
+            "method": "gui-controls-ready",
+            "contentOk": true,
+            "firstMs": [
+              255
+            ],
+            "laterMs": [
+              269,
+              258,
+              481,
+              260
+            ],
+            "openMs": [
+              106,
+              104,
+              107,
+              105,
+              105
+            ],
+            "fileCache": "not-purged",
+            "prerequisite": {
+              "release": true,
+              "ssd": true,
+              "acPower": true,
+              "memoryBytes": 17179869184,
+              "diskColdStart": false
+            },
+            "browserMock": false
+          }
+        }
+      }
+    },
+    {
+      "id": "perf.status.s",
+      "status": "gap",
+      "summary": "macOS S 状态样本 30 条。 Windows 仍缺，不能通过。",
+      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "evidence": {
+        "platforms": {
+          "darwin": {
+            "prerequisite": {
+              "release": true,
+              "ssd": true,
+              "acPower": true,
+              "memoryBytes": 17179869184,
+              "diskColdStart": false
+            },
+            "browserMock": false,
+            "method": "gui-refresh-to-first-screen",
+            "contentOk": true,
+            "samplesMs": [
+              16,
+              16,
+              17,
+              16,
+              17,
+              16,
+              18,
+              16,
+              16,
+              18,
+              17,
+              16,
+              17,
+              16,
+              17,
+              17,
+              16,
+              17,
+              17,
+              16,
+              17,
+              17,
+              17,
+              16,
+              17,
+              16,
+              17,
+              16,
+              17,
+              17
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "perf.status.m",
+      "status": "gap",
+      "summary": "macOS M 状态样本 30 条。 Windows 仍缺，不能通过。",
+      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "evidence": {
+        "platforms": {
+          "darwin": {
+            "prerequisite": {
+              "release": true,
+              "ssd": true,
+              "acPower": true,
+              "memoryBytes": 17179869184,
+              "diskColdStart": false
+            },
+            "browserMock": false,
+            "method": "gui-refresh-to-first-screen",
+            "contentOk": true,
+            "samplesMs": [
+              34,
+              33,
+              32,
+              33,
+              34,
+              32,
+              33,
+              33,
+              32,
+              33,
+              32,
+              38,
+              32,
+              32,
+              34,
+              32,
+              33,
+              32,
+              32,
+              33,
+              33,
+              33,
+              33,
+              34,
+              33,
+              32,
+              33,
+              34,
+              35,
+              33
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "perf.status.l",
+      "status": "gap",
+      "summary": "macOS L 状态样本 30 条。 Windows 仍缺，不能通过。",
+      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "evidence": {
+        "platforms": {
+          "darwin": {
+            "prerequisite": {
+              "release": true,
+              "ssd": true,
+              "acPower": true,
+              "memoryBytes": 17179869184,
+              "diskColdStart": false
+            },
+            "browserMock": false,
+            "method": "gui-refresh-to-first-screen",
+            "contentOk": true,
+            "samplesMs": [
+              171,
+              165,
+              166,
+              166,
+              169,
+              165,
+              170,
+              199,
+              173,
+              187,
+              173,
+              180,
+              178,
+              176,
+              183,
+              188,
+              198,
+              173,
+              174,
+              184,
+              191,
+              166,
+              174,
+              190,
+              181,
+              163,
+              162,
+              169,
+              170,
+              163
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "perf.diff.cached",
+      "status": "gap",
+      "summary": "macOS 已缓存差异。 Windows 仍缺，不能通过。",
+      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "evidence": {
+        "platforms": {
+          "darwin": {
+            "prerequisite": {
+              "release": true,
+              "ssd": true,
+              "acPower": true,
+              "memoryBytes": 17179869184,
+              "diskColdStart": false
+            },
+            "browserMock": false,
+            "method": "gui-diff-switch",
+            "contentOk": true,
+            "samplesMs": [
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              19,
+              21,
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              19,
+              21,
+              20,
+              20
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "perf.diff.uncached",
+      "status": "gap",
+      "summary": "macOS 未缓存差异。 Windows 仍缺，不能通过。",
+      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "evidence": {
+        "platforms": {
+          "darwin": {
+            "prerequisite": {
+              "release": true,
+              "ssd": true,
+              "acPower": true,
+              "memoryBytes": 17179869184,
+              "diskColdStart": false
+            },
+            "browserMock": false,
+            "method": "gui-diff-switch",
+            "contentOk": true,
+            "samplesMs": [
+              34,
+              32,
+              34,
+              33,
+              33,
+              20,
+              20,
+              20,
+              20,
+              19,
+              21,
+              20,
+              20,
+              20,
+              19,
+              21,
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              20,
+              19,
+              21,
+              20,
+              20,
+              20
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "perf.diff.large",
+      "status": "gap",
+      "summary": "macOS 大文件摘要。 Windows 仍缺，不能通过。",
+      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "evidence": {
+        "platforms": {
+          "darwin": {
+            "prerequisite": {
+              "release": true,
+              "ssd": true,
+              "acPower": true,
+              "memoryBytes": 17179869184,
+              "diskColdStart": false
+            },
+            "browserMock": false,
+            "method": "gui-large-summary",
+            "contentOk": true,
+            "truncated": true,
+            "samplesMs": [
+              85
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "perf.feedback",
+      "status": "gap",
+      "summary": "macOS 反馈延迟。 Windows 仍缺，不能通过。",
+      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "evidence": {
+        "platforms": {
+          "darwin": {
+            "prerequisite": {
+              "release": true,
+              "ssd": true,
+              "acPower": true,
+              "memoryBytes": 17179869184,
+              "diskColdStart": false
+            },
+            "browserMock": false,
+            "method": "gui-feedback",
+            "contentOk": true,
+            "samplesMs": [
+              10,
+              16,
+              17,
+              16,
+              17,
+              17,
+              16,
+              17,
+              17,
+              16,
+              17,
+              17,
+              16,
+              17,
+              16,
+              17,
+              17,
+              17,
+              17,
+              16,
+              17,
+              17,
+              16,
+              17,
+              17,
+              16,
+              16,
+              18,
+              16,
+              17
+            ],
+            "painted": true
+          }
+        }
+      }
+    },
+    {
+      "id": "perf.scroll.m",
+      "status": "gap",
+      "summary": "macOS 列表滚动帧。 Windows 仍缺，不能通过。",
+      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "evidence": {
+        "platforms": {
+          "darwin": {
+            "prerequisite": {
+              "release": true,
+              "ssd": true,
+              "acPower": true,
+              "memoryBytes": 17179869184,
+              "diskColdStart": false
+            },
+            "browserMock": false,
+            "method": "gui-scroll-frames",
+            "contentOk": true,
+            "frameMs": [
+              16,
+              16,
+              17,
+              17,
+              17,
+              16,
+              17,
+              16,
+              16,
+              17,
+              16,
+              17,
+              16,
+              16,
+              17,
+              16,
+              17,
+              17,
+              16,
+              16,
+              17,
+              16,
+              16,
+              16,
+              16,
+              17,
+              16,
+              16,
+              16,
+              16,
+              16,
+              15,
+              17,
+              17,
+              16,
+              16,
+              16,
+              16,
+              17,
+              15,
+              17,
+              16,
+              16,
+              16,
+              16,
+              16,
+              17,
+              17,
+              16,
+              15,
+              18,
+              16,
+              16,
+              16,
+              17,
+              16,
+              18,
+              16,
+              16,
+              16,
+              17,
+              16,
+              15,
+              17,
+              15,
+              18,
+              14,
+              17,
+              17,
+              15,
+              16,
+              16,
+              17,
+              17,
+              15,
+              16,
+              16,
+              15,
+              16,
+              17,
+              16,
+              16,
+              15,
+              16,
+              18,
+              14,
+              17,
+              16,
+              17,
+              16,
+              16,
+              16,
+              17,
+              14,
+              17,
+              17,
+              15,
+              16,
+              16,
+              16,
+              16,
+              16,
+              16,
+              16,
+              17,
+              16,
+              17,
+              16,
+              17,
+              16,
+              17,
+              16,
+              17,
+              17,
+              16,
+              16,
+              17,
+              16,
+              16
+            ],
+            "painted": true
+          }
+        }
+      }
+    },
+    {
+      "id": "perf.interact.l",
+      "status": "gap",
+      "summary": "macOS 加载大仓库时的键盘、取消和切换。 Windows 仍缺，不能通过。",
+      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "evidence": {
+        "platforms": {
+          "darwin": {
+            "prerequisite": {
+              "release": true,
+              "ssd": true,
+              "acPower": true,
+              "memoryBytes": 17179869184,
+              "diskColdStart": false
+            },
+            "browserMock": false,
+            "method": "gui-cancel-and-switch",
+            "contentOk": true,
+            "keyboard": true,
+            "cancelled": true,
+            "switched": true
+          }
+        }
+      }
+    },
+    {
+      "id": "perf.memory.s",
+      "status": "gap",
+      "summary": "macOS 空闲 phys_footprint。 Windows 仍缺，不能通过。",
+      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "evidence": {
+        "platforms": {
+          "darwin": {
+            "prerequisite": {
+              "release": true,
+              "ssd": true,
+              "acPower": true,
+              "memoryBytes": 17179869184,
+              "diskColdStart": false
+            },
+            "browserMock": false,
+            "method": "gui-idle",
+            "contentOk": true,
+            "privateBytes": 27262976,
+            "metric": "phys_footprint"
+          }
+        }
+      }
+    },
+    {
+      "id": "perf.cpu.s",
+      "status": "gap",
+      "summary": "macOS 空闲 CPU。 Windows 仍缺，不能通过。",
+      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "evidence": {
+        "platforms": {
+          "darwin": {
+            "prerequisite": {
+              "release": true,
+              "ssd": true,
+              "acPower": true,
+              "memoryBytes": 17179869184,
+              "diskColdStart": false
+            },
+            "browserMock": false,
+            "method": "gui-idle",
+            "contentOk": true,
+            "cpuPercent": 0.004
+          }
+        }
+      }
+    },
+    {
+      "id": "perf.git-idle",
+      "status": "gap",
+      "summary": "macOS 空闲 Git 子进程。 Windows 仍缺，不能通过。",
+      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "evidence": {
+        "platforms": {
+          "darwin": {
+            "prerequisite": {
+              "release": true,
+              "ssd": true,
+              "acPower": true,
+              "memoryBytes": 17179869184,
+              "diskColdStart": false
+            },
+            "browserMock": false,
+            "method": "gui-idle",
+            "contentOk": true,
+            "lingeringGit": false
+          }
+        }
+      }
+    },
+    {
+      "id": "perf.stability",
+      "status": "gap",
+      "summary": "macOS 长时文件切换 100 次、仓库切换 20 次，但没有读到回收前后的 phys_footprint。",
+      "nextStep": "在参考机上用 footprint 重测 100 次文件切换和 20 次仓库切换，并在 Windows 11 x64 补同样本。",
+      "evidence": {
+        "platforms": {
+          "darwin": {
+            "prerequisite": {
+              "release": true,
+              "ssd": true,
+              "acPower": true,
+              "memoryBytes": 17179869184,
+              "diskColdStart": false
+            },
+            "browserMock": false,
+            "method": "gui-stability",
+            "contentOk": false,
+            "growth": null,
+            "fileSwitches": 100,
+            "repoSwitches": 20,
+            "lingeringProcesses": false,
+            "baselineBytes": 27262976,
+            "afterBytes": null
+          }
+        }
+      }
+    },
+    {
+      "id": "perf.native-git",
+      "status": "gap",
+      "summary": "已记录本机原生 Git 状态耗时，Windows 仍缺。",
+      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "evidence": {
+        "platforms": {
+          "darwin": {
+            "method": "git-cli",
+            "samplesMs": {
+              "S": [
+                7.6731670000000065,
+                6.670709000000016,
+                6.187624999999997,
+                5.9776250000000175,
+                6.505957999999993,
+                7.162499999999994,
+                6.706707999999992,
+                6.097499999999997,
+                6.116374999999977,
+                6.137499999999989,
+                5.90704199999999,
+                6.091000000000008,
+                6.673416000000003,
+                5.977374999999995,
+                5.920209,
+                5.900916999999993,
+                5.976916000000017,
+                6.420083999999974,
+                6.520583999999985,
+                6.329541000000006,
+                5.932208000000003,
+                6.094583999999998,
+                5.937833000000012,
+                6.908457999999996,
+                6.047792000000015,
+                5.901666999999975,
+                6.011332999999979,
+                5.847624999999994,
+                5.925292000000013,
+                6.575416000000018
+              ],
+              "M": [
+                33.57304199999999,
+                28.859083999999996,
+                30.998041,
+                30.920000000000016,
+                30.52449999999999,
+                31.255959000000075,
+                30.994625000000042,
+                30.07295899999997,
+                30.202583000000004,
+                30.432416999999987,
+                30.78225000000009,
+                30.64879099999996,
+                30.64179200000001,
+                30.370625000000018,
+                30.81975,
+                30.63979100000006,
+                29.918416000000093,
+                30.435792000000106,
+                30.428541999999993,
+                30.527082999999948,
+                30.683667000000014,
+                30.048500000000104,
+                30.519208000000162,
+                31.05012499999998,
+                30.9375,
+                30.70954199999983,
+                30.406749999999874,
+                29.975125000000162,
+                30.55583300000012,
+                30.833040999999866
+              ],
+              "L": [
+                173.23245799999995,
+                151.07487500000002,
+                149.488208,
+                148.76575000000003,
+                148.4419579999999,
+                149.55600000000004,
+                148.8236670000001,
+                149.383875,
+                148.81362500000023,
+                148.1234589999999,
+                150.5822079999998,
+                150.9180839999999,
+                149.80591700000014,
+                149.05133300000034,
+                149.62304099999983,
+                150.04545800000005,
+                150.7222499999998,
+                149.66850000000022,
+                150.5370829999997,
+                149.60170800000014,
+                151.4970829999993,
+                150.0229159999999,
+                152.36945899999955,
+                150.7378749999998,
+                151.91849999999977,
+                150.2470830000002,
+                151.880083,
+                150.5099169999994,
+                152.47758299999987,
+                151.62245800000073
+              ]
+            },
+            "contentOk": true
+          }
+        }
+      }
+    },
+    {
+      "id": "accept.macos",
+      "status": "gap",
+      "summary": "macOS 安装包完成了克隆、部分提交推送、合并和双主题键盘，但当前会话无法截取桌面画面。",
+      "nextStep": "在有可用显示器的 macOS 图形会话里重跑验收并保存截图；不要把这次缺失写成已有桌面证据。",
+      "evidence": {
+        "method": "installed-app-ipc-and-dom",
+        "hostPlatform": "darwin",
+        "browserMock": false,
+        "oids": [
+          "bb7bcaa61e28266ac45113d5174cebcbb8585e98",
+          "bb7bcaa61e28266ac45113d5174cebcbb8585e98",
+          "b3e960a5e7229c1dca0c423ddaa33cdac42d0b6d"
+        ],
+        "partialCommit": true,
+        "pushed": true,
+        "mergeOid": "b3e960a5e7229c1dca0c423ddaa33cdac42d0b6d",
+        "themes": [
+          "light",
+          "dark"
+        ],
+        "keyboard": true,
+        "screenshot": "",
+        "screenshotError": "could not create image from display",
+        "stderr": "\n\n"
+      }
+    },
+    {
+      "id": "accept.windows",
+      "status": "gap",
+      "summary": "还没有 Windows 安装运行记录。",
+      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "evidence": {}
+    },
+    {
+      "id": "protocol.https",
+      "status": "gap",
+      "summary": "没有受控 HTTPS 远程的成功与认证失败记录。",
+      "nextStep": "设置 TWIGLANE_HTTPS_REMOTE、TWIGLANE_HTTPS_DENY_REMOTE、TWIGLANE_SSH_REMOTE、TWIGLANE_SSH_DENY_REMOTE 后重跑测量。分别记录成功访问和认证失败，并确认输出不含凭据。不要把本地 bare remote 记成协议通过。",
+      "evidence": {}
+    },
+    {
+      "id": "protocol.ssh",
+      "status": "gap",
+      "summary": "没有受控 SSH 远程的成功与认证失败记录。",
+      "nextStep": "设置 TWIGLANE_HTTPS_REMOTE、TWIGLANE_HTTPS_DENY_REMOTE、TWIGLANE_SSH_REMOTE、TWIGLANE_SSH_DENY_REMOTE 后重跑测量。分别记录成功访问和认证失败，并确认输出不含凭据。不要把本地 bare remote 记成协议通过。",
+      "evidence": {}
+    }
+  ]
+}

@@ -6,7 +6,7 @@ import { classifyDiffLine } from "../src/lib/diff";
 import { DraftBuffer } from "../src/lib/draft";
 import { normalizeError } from "../src/lib/errors";
 import { toSideRows } from "../src/lib/diff";
-import { branchLabel, commitScope, filterRows, gitInstallHint, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "../src/lib/labels";
+import { branchLabel, commitScope, dependencyNote, filterRows, gitInstallHint, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "../src/lib/labels";
 import { finishDiffAttempt } from "../src/lib/diff";
 import { clampWidth, nextIndex, scrollByRows, scrollIndexIntoView, shouldPoll, visibleRange } from "../src/lib/layout";
 import { filterRecent } from "../src/lib/recent";
@@ -173,6 +173,9 @@ describe("工作区状态", () => {
     });
     expect(gitInstallHint("MacIntel")).toContain("macOS");
     expect(gitInstallHint("windows")).toContain("Windows");
+    expect(gitInstallHint("windows")).toContain("WebView2");
+    expect(dependencyNote("windows")).toContain("不计入");
+    expect(dependencyNote("macos")).toContain("未");
   });
 });
 

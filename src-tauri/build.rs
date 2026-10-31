@@ -51,6 +51,11 @@ fn main() {
             "set_theme",
             "set_panel_widths",
             "save_draft",
+            "cancel_reads",
+            "measure_probe",
+            "measure_sample",
+            "measure_finish",
+            "measure_wait",
         ]),
     ))
     .expect("failed to run tauri-build");

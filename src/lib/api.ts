@@ -260,4 +260,11 @@ export const api = {
   setTheme: (theme: Theme) => invoke<void>("set_theme", { theme }),
   setPanelWidths: (widths: PanelWidths) => invoke<PanelWidths>("set_panel_widths", { widths }),
   saveDraft: (path: string, message: string) => invoke<void>("save_draft", { path, message }),
+  cancelReads: () => invoke<void>("cancel_reads"),
+  measureProbe: () =>
+    invoke<{ enabled: boolean; elapsedMs: number; script: { steps?: unknown[] } | null }>("measure_probe"),
+  measureSample: (name: string, detail: Record<string, unknown>) =>
+    invoke<void>("measure_sample", { name, detail }),
+  measureFinish: () => invoke<void>("measure_finish"),
+  measureWait: (ms: number) => invoke<void>("measure_wait", { ms }),
 };

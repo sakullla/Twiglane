@@ -6,7 +6,8 @@
   import { DraftBuffer } from "./lib/draft";
   import { normalizeError } from "./lib/errors";
   import { clampWidth, FALLBACK_POLL_MS, nudgeWidth, shouldPoll } from "./lib/layout";
-  import { branchLabel, commitScope, gitInstallHint, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
+  import { branchLabel, commitScope, dependencyNote, gitInstallHint, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
+  import { startDesktopMeasure } from "./lib/measure";
   import type {
     AppFailure,
     DiffHunk,
@@ -24,12 +25,9 @@
   import DetailDialog from "./lib/components/DetailDialog.svelte";
   import DiffView from "./lib/components/DiffView.svelte";
   import FileList from "./lib/components/FileList.svelte";
-  import HistoryPanel from "./lib/components/HistoryPanel.svelte";
-  import MergePanel from "./lib/components/MergePanel.svelte";
   import RecoveryActions from "./lib/components/RecoveryActions.svelte";
   import RepoDialogs from "./lib/components/RepoDialogs.svelte";
   import RepoSidebar from "./lib/components/RepoSidebar.svelte";
-  import StashPanel from "./lib/components/StashPanel.svelte";
 
   let theme = $state<Theme>("light");
   let widths = $state<PanelWidths>({ sidebar: 280, files: 340 });
@@ -46,6 +44,13 @@
   let diffError = $state<string | null>(null);
   let diffLoading = $state(false);
   let pending = $state<string | null>(null);
+  let reading = $state(false);
+  let readSerial = 0;
+  let dependencyOpen = $state(false);
+  let historyPanel = $state<Promise<typeof import("./lib/components/HistoryPanel.svelte")> | null>(null);
+  let mergePanel = $state<Promise<typeof import("./lib/components/MergePanel.svelte")> | null>(null);
+  let stashPanel = $state<Promise<typeof import("./lib/components/StashPanel.svelte")> | null>(null);
+  let writeLocked = $derived(pending !== null || reading);
   let navCollapsed = $state(false);
   let detail = $state<{ title: string; value: string } | null>(null);
   let confirmPath = $state<string | null>(null);
@@ -213,20 +218,27 @@
     historyPath = null;
   }
 
+  function useView(view: "changes" | "history" | "stash" | "merge") {
+    workspaceView = view;
+    if (view === "history") historyPanel ??= import("./lib/components/HistoryPanel.svelte");
+    if (view === "merge") mergePanel ??= import("./lib/components/MergePanel.svelte");
+    if (view === "stash") stashPanel ??= import("./lib/components/StashPanel.svelte");
+  }
+
   function showHistory() {
-    workspaceView = "history";
     historyPath = null;
+    useView("history");
   }
 
   function openFileHistory(path: string) {
     historyPath = path;
-    workspaceView = "history";
+    useView("history");
   }
 
   function openConflict(path: string) {
     conflictFocus = path;
-    workspaceView = "merge";
     historyPath = null;
+    useView("merge");
   }
 
   function applySnapshot(snapshot: StatusSnapshot) {
@@ -248,7 +260,7 @@
 
   async function stagePath(relative: string) {
     const current = opened;
-    if (!current || pending) return;
+    if (!current || pending || reading) return;
     pending = "stage";
     live = "正在暂存文件";
     try {
@@ -266,7 +278,7 @@
 
   async function unstagePath(relative: string) {
     const current = opened;
-    if (!current || pending) return;
+    if (!current || pending || reading) return;
     pending = "unstage";
     live = "正在取消暂存";
     try {
@@ -286,7 +298,7 @@
     const current = opened;
     const choice = selected;
     const currentDiff = diff;
-    if (!current || !choice || !currentDiff || pending || !hunk.stageable) return;
+    if (!current || !choice || !currentDiff || pending || reading || !hunk.stageable) return;
     pending = "hunk";
     live = choice.side === "staged" ? "正在取消暂存代码块" : "正在暂存代码块";
     try {
@@ -316,7 +328,7 @@
     const current = opened;
     const choice = selected;
     const currentDiff = diff;
-    if (!current || !choice || !currentDiff || pending) return;
+    if (!current || !choice || !currentDiff || pending || reading) return;
     if (currentDiff.offset + currentDiff.lines.length >= currentDiff.totalLines) return;
     pending = "diff";
     try {
@@ -360,7 +372,7 @@
 
   async function commitLocal() {
     const current = opened;
-    if (!current || pending) return;
+    if (!current || pending || reading) return;
     const message = draft;
     if (!message.trim()) {
       banner = "请先填写提交说明。";
@@ -398,7 +410,7 @@
 
   async function commitAndPush() {
     const current = opened;
-    if (!current || pending) return;
+    if (!current || pending || reading) return;
     const message = draft;
     if (!message.trim()) {
       banner = "请先填写提交说明。";
@@ -435,7 +447,7 @@
 
   async function retryPush() {
     const current = opened;
-    if (!current || pending) return;
+    if (!current || pending || reading) return;
     pending = "push";
     phaseNote = "正在重试推送，不会再次提交";
     live = phaseNote;
@@ -461,7 +473,7 @@
 
   async function runSync(name: string, action: (path: string, generation: number) => Promise<StatusSnapshot>) {
     const current = opened;
-    if (!current || pending) return;
+    if (!current || pending || reading) return;
     pending = name;
     live =
       name === "fetch"
@@ -498,7 +510,7 @@
   }
 
   async function addRepo() {
-    if (pending) return;
+    if (pending || reading) return;
     pending = "add";
     live = "正在选择目录";
     try {
@@ -515,7 +527,7 @@
   }
 
   async function chooseCreate() {
-    if (pending) return;
+    if (pending || reading) return;
     const path = await pickDirectory("选择要新建仓库的目录");
     if (!path) return;
     confirmPath = path;
@@ -523,7 +535,7 @@
 
   async function confirmCreate() {
     const path = confirmPath;
-    if (!path || pending) return;
+    if (!path || pending || reading) return;
     confirmPath = null;
     pending = "create";
     live = "正在初始化仓库";
@@ -540,16 +552,39 @@
 
   async function openRecent(path: string) {
     if (pending) return;
-    pending = "open";
+    const serial = ++readSerial;
+    reading = true;
     live = "正在读取仓库状态";
     try {
+      await api.cancelReads();
+      if (serial !== readSerial) return;
       const openedRepo = await api.openRepository(path, nextId());
+      if (serial !== readSerial) return;
       banner = null;
       rememberOpened(openedRepo);
+      live = `已打开 ${openedRepo.summary.name}`;
     } catch (error) {
+      if (serial !== readSerial) return;
+      const failure = normalizeError(error);
+      if (failure.code === "cancelled") {
+        live = "已取消读取，没有写入仓库。";
+        return;
+      }
       showError(error);
     } finally {
-      pending = null;
+      if (serial === readSerial) reading = false;
+    }
+  }
+
+  async function cancelReading() {
+    if (!reading) return;
+    readSerial += 1;
+    reading = false;
+    live = "已取消读取，没有写入仓库。";
+    try {
+      await api.cancelReads();
+    } catch (error) {
+      showError(error);
     }
   }
 
@@ -673,6 +708,206 @@
     void persistWidths();
   }
 
+  function sleep(ms: number) {
+    return new Promise<void>((resolve) => setTimeout(resolve, ms));
+  }
+
+  function nextPaint(): Promise<{ elapsed: number; painted: boolean }> {
+    const started = performance.now();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (painted: boolean) => {
+        if (settled) return;
+        settled = true;
+        resolve({ elapsed: performance.now() - started, painted });
+      };
+      const timer = setTimeout(() => finish(false), 48);
+      requestAnimationFrame(() => {
+        clearTimeout(timer);
+        finish(true);
+      });
+    });
+  }
+
+  async function waitForDiff(path: string) {
+    const started = performance.now();
+    while (performance.now() - started < 30000) {
+      if (diff && diff.path === path && !diffLoading) return diff;
+      if (diffError && !diffLoading) throw new Error(diffError);
+      await sleep(16);
+    }
+    throw new Error("差异未在时限内显示");
+  }
+
+  async function refreshTimes(count: number) {
+    const samples: number[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const started = performance.now();
+      await refresh();
+      await nextPaint();
+      samples.push(performance.now() - started);
+    }
+    return samples;
+  }
+
+  async function diffCycle(paths: string[], count: number) {
+    const cached: number[] = [];
+    const uncached: number[] = [];
+    const truncated: boolean[] = [];
+    const seen = new Set<string>();
+    if (paths.length === 0 || count <= 0) return { cached, uncached, truncated };
+    for (let index = 0; index < count; index += 1) {
+      const path = paths[index % paths.length];
+      const started = performance.now();
+      selectFile({ path, side: "unstaged" });
+      const result = await waitForDiff(path);
+      const elapsed = performance.now() - started;
+      truncated.push(result.truncated || result.summary.includes("预览上限"));
+      if (seen.has(path)) cached.push(elapsed);
+      else {
+        seen.add(path);
+        uncached.push(elapsed);
+      }
+    }
+    return { cached, uncached, truncated };
+  }
+
+  async function scrollFrames(frames: number) {
+    const list = document.querySelector<HTMLElement>(".file-list");
+    if (!list) return { samples: [], painted: false };
+    const samples: number[] = [];
+    let painted = true;
+    list.scrollTop = 0;
+    for (let index = 0; index < frames; index += 1) {
+      list.scrollTop += 48;
+      const frame = await nextPaint();
+      painted &&= frame.painted;
+      if (index > 0) samples.push(frame.elapsed);
+    }
+    return { samples, painted };
+  }
+
+  async function feedbackSamples(count: number) {
+    const samples: number[] = [];
+    let painted = true;
+    for (let index = 0; index < count; index += 1) {
+      const started = performance.now();
+      live = index % 2 === 0 ? "正在读取仓库状态" : "正在准备 Twiglane";
+      const frame = await nextPaint();
+      painted &&= frame.painted;
+      samples.push(performance.now() - started);
+    }
+    return { samples, painted };
+  }
+
+  async function keyboardAndTheme() {
+    const themes: string[] = [];
+    await changeTheme("light");
+    themes.push(document.documentElement.dataset.theme ?? "");
+    await changeTheme("dark");
+    themes.push(document.documentElement.dataset.theme ?? "");
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, ctrlKey: true, bubbles: true }));
+    const search = document.getElementById("repo-search");
+    const list = document.querySelector<HTMLElement>(".file-list");
+    list?.focus();
+    list?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    return { theme: themes, keyboard: document.activeElement === search || document.activeElement === list };
+  }
+
+  async function cancelDuringOpen(slowRepo: string, nextRepo: string) {
+    const search = document.getElementById("repo-search") as HTMLInputElement | null;
+    const opening = openRecent(slowRepo);
+    const started = performance.now();
+    while (performance.now() - started < 15000 && live !== "正在读取仓库状态") await sleep(5);
+    const sawReading = live === "正在读取仓库状态";
+    const keyboard = Boolean(search && !search.disabled);
+    search?.focus();
+    search?.dispatchEvent(new KeyboardEvent("keydown", { key: "k", bubbles: true }));
+    await cancelReading();
+    await opening;
+    const cancelled = sawReading && live.includes("已取消读取");
+    await openRecent(nextRepo);
+    const normalizePath = (value: string) => value.replace(/\/+$/, "").replace(/^\/private/, "");
+    return {
+      cancelled,
+      switched: Boolean(opened && normalizePath(opened.summary.path) === normalizePath(nextRepo)),
+      keyboard: keyboard && document.activeElement === search,
+    };
+  }
+
+  async function cloneRepo(url: string, parent: string, name: string) {
+    pending = "clone";
+    live = "正在克隆";
+    try {
+      const result = await api.cloneRepository(url, parent, name, nextId());
+      banner = null;
+      rememberOpened(result.opened);
+      live = `已克隆 ${result.path}`;
+      return result.path;
+    } finally {
+      pending = null;
+    }
+  }
+
+  async function stageFirstMeasured() {
+    const current = opened;
+    if (!current) throw new Error("没有打开的仓库");
+    const file = current.snapshot.files.find((item) => item.unstaged !== "none" || item.untracked);
+    if (!file) throw new Error("没有可暂存的改动");
+    selectFile({ path: file.path, side: "unstaged" });
+    const currentDiff = await waitForDiff(file.path);
+    const hunk = currentDiff.hunks.find((item) => item.stageable);
+    if (!hunk) throw new Error("没有可暂存的完整代码块");
+    await stageHunk(hunk);
+    return { path: file.path, hunks: currentDiff.hunks.length };
+  }
+
+  async function commitMeasured(message: string) {
+    const current = opened;
+    if (!current) throw new Error("没有打开的仓库");
+    onDraftInput(message);
+    live = "正在创建本地提交";
+    const result = await api.commitChanges(current.summary.path, message, current.generation, nextId());
+    if (opened?.summary.path !== current.summary.path) return;
+    draft = "";
+    applySnapshot(result.snapshot);
+    live = `已提交 ${result.oid.slice(0, 7)}`;
+  }
+
+  async function pushMeasured() {
+    const current = opened;
+    if (!current) throw new Error("没有打开的仓库");
+    live = "正在推送";
+    const snapshot = await api.pushBranch(current.summary.path, current.generation, nextId());
+    if (opened?.summary.path !== current.summary.path) return;
+    applySnapshot(snapshot);
+    live = "推送已完成，没有强行推送。";
+  }
+
+  async function mergeMeasured(source: string, content: string) {
+    const current = opened;
+    if (!current) throw new Error("没有打开的仓库");
+    live = "正在合并";
+    const session = await api.startMerge(current.summary.path, source, current.generation, nextId());
+    applySnapshot(session.snapshot);
+    useView("merge");
+    const conflict = session.conflicts[0];
+    if (!conflict) throw new Error("没有出现冲突");
+    await api.conflictView(current.summary.path, conflict.path, session.generation, nextId());
+    const resolved = await api.resolveConflict(
+      current.summary.path,
+      conflict.path,
+      "text",
+      content,
+      session.generation,
+      nextId(),
+    );
+    const done = await api.completeMerge(current.summary.path, "合并分支", resolved.generation, nextId());
+    applySnapshot(done.snapshot);
+    live = `已完成合并 ${done.oid.slice(0, 7)}`;
+    return done.oid;
+  }
+
   function focusSearch(event: KeyboardEvent) {
     const key = event.key.toLowerCase();
     if ((event.metaKey || event.ctrlKey) && key === "k") {
@@ -718,7 +953,32 @@
     const poll = window.setInterval(() => {
       if (shouldPoll(degraded, windowFocused, opened !== null)) void refresh();
     }, FALLBACK_POLL_MS);
-    void loadSettings();
+    void loadSettings().then(() =>
+      startDesktopMeasure({
+        openRepo: openRecent,
+        cloneRepo,
+        stageFirstHunk: stageFirstMeasured,
+        commit: commitMeasured,
+        push: pushMeasured,
+        merge: mergeMeasured,
+        refreshTimes,
+        diffCycle,
+        scrollFrames,
+        feedbackSamples,
+        keyboardAndTheme,
+        cancelDuringOpen,
+        sleep,
+        getOpened: () =>
+          opened
+            ? {
+                path: opened.summary.path,
+                head: opened.snapshot.branch.headOid,
+                changes: opened.snapshot.files.length,
+                generation: opened.generation,
+              }
+            : null,
+      }),
+    );
     return () => {
       window.removeEventListener("keydown", keyListener);
       window.clearInterval(poll);
@@ -751,30 +1011,37 @@
       <button type="button" class="ghost" onclick={() => (detail = { title: "完整分支", value: branchText })}>查看完整分支</button>
     {/if}
     <span class="spacer"></span>
-    <button type="button" class="ghost" onclick={() => (dialog = "clone")} disabled={pending !== null}>克隆</button>
-    <button type="button" class="ghost" onclick={addRepo} disabled={pending !== null}>添加仓库</button>
-    <button type="button" class="primary" onclick={chooseCreate} disabled={pending !== null}>新建仓库</button>
+    <button type="button" class="ghost" onclick={() => (dependencyOpen = true)}>运行依赖</button>
+    <button type="button" class="ghost" onclick={() => (dialog = "clone")} disabled={writeLocked}>克隆</button>
+    <button type="button" class="ghost" onclick={addRepo} disabled={writeLocked}>添加仓库</button>
+    <button type="button" class="primary" onclick={chooseCreate} disabled={writeLocked}>新建仓库</button>
   </header>
   {#if opened}
     <div class="toolbar" aria-label="同步与分支">
       <div class="view-tabs" role="tablist" aria-label="工作区">
         <button type="button" role="tab" class="theme-btn" aria-selected={workspaceView === "changes"} onclick={showChanges}>改动</button>
         <button type="button" role="tab" class="theme-btn" aria-selected={workspaceView === "history"} onclick={showHistory}>历史</button>
-        <button type="button" role="tab" class="theme-btn" aria-selected={workspaceView === "stash"} onclick={() => (workspaceView = "stash")}>临时保存</button>
-        <button type="button" role="tab" class="theme-btn" aria-selected={workspaceView === "merge"} onclick={() => (workspaceView = "merge")}>合并</button>
+        <button type="button" role="tab" class="theme-btn" aria-selected={workspaceView === "stash"} onclick={() => useView("stash")}>临时保存</button>
+        <button type="button" role="tab" class="theme-btn" aria-selected={workspaceView === "merge"} onclick={() => useView("merge")}>合并</button>
       </div>
-      <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => runSync("fetch", (path, generation) => api.fetchRemote(path, generation, nextId()))}>检查远程</button>
-      <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => runSync("pull", (path, generation) => api.pullFastForward(path, generation, nextId()))}>拉取</button>
-      <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => runSync("push", (path, generation) => api.pushBranch(path, generation, nextId()))}>推送</button>
+      <button type="button" class="ghost compact" disabled={writeLocked} onclick={() => runSync("fetch", (path, generation) => api.fetchRemote(path, generation, nextId()))}>检查远程</button>
+      <button type="button" class="ghost compact" disabled={writeLocked} onclick={() => runSync("pull", (path, generation) => api.pullFastForward(path, generation, nextId()))}>拉取</button>
+      <button type="button" class="ghost compact" disabled={writeLocked} onclick={() => runSync("push", (path, generation) => api.pushBranch(path, generation, nextId()))}>推送</button>
       {#if !opened.snapshot.branch.upstream}
-        <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => runSync("publish", (path, generation) => api.publishBranch(path, "", generation, nextId()))}>发布分支</button>
-        <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => runSync("associate", (path, generation) => api.associateUpstream(path, "", generation, nextId()))}>只关联上游</button>
+        <button type="button" class="ghost compact" disabled={writeLocked} onclick={() => runSync("publish", (path, generation) => api.publishBranch(path, "", generation, nextId()))}>发布分支</button>
+        <button type="button" class="ghost compact" disabled={writeLocked} onclick={() => runSync("associate", (path, generation) => api.associateUpstream(path, "", generation, nextId()))}>只关联上游</button>
       {/if}
       {#if pushRetry}
-        <button type="button" class="primary compact" disabled={pending !== null} onclick={retryPush}>重试推送</button>
+        <button type="button" class="primary compact" disabled={writeLocked} onclick={retryPush}>重试推送</button>
       {/if}
-      <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => (dialog = "branch")}>分支</button>
-      <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => (dialog = "remote")}>远程</button>
+      <button type="button" class="ghost compact" disabled={writeLocked} onclick={() => (dialog = "branch")}>分支</button>
+      <button type="button" class="ghost compact" disabled={writeLocked} onclick={() => (dialog = "remote")}>远程</button>
+    </div>
+  {/if}
+  {#if reading}
+    <div class="banner" role="status">
+      <span>正在读取，可以切换仓库或使用键盘。取消只停止这次读取，不会写入仓库。</span>
+      <button type="button" class="ghost" onclick={cancelReading}>取消读取</button>
     </div>
   {/if}
   {#if phaseNote}<div class="banner ok" role="status">{phaseNote}</div>{/if}
@@ -824,53 +1091,71 @@
       ></div>
     {/if}
     {#if opened && workspaceView === "history"}
-      <HistoryPanel
-        {opened}
-        filePath={historyPath}
-        disabled={pending !== null}
-        {nextId}
-        onGeneration={adoptGeneration}
-        onFailure={handleMutationError}
-        onFilePath={openFileHistory}
-        onClearFile={() => (historyPath = null)}
-      />
+      {#if historyPanel}
+        {#await historyPanel}
+          <p class="hint">正在打开历史。</p>
+        {:then module}
+          <module.default
+            {opened}
+            filePath={historyPath}
+            disabled={writeLocked}
+            {nextId}
+            onGeneration={adoptGeneration}
+            onFailure={handleMutationError}
+            onFilePath={openFileHistory}
+            onClearFile={() => (historyPath = null)}
+          />
+        {/await}
+      {/if}
     {:else if opened && workspaceView === "merge"}
-      <MergePanel
-        {opened}
-        focusPath={conflictFocus}
-        disabled={pending !== null}
-        {nextId}
-        onGeneration={adoptGeneration}
-        onSnapshot={applySnapshot}
-        onFailure={handleMutationError}
-        onNotice={(message) => {
-          phaseNote = message;
-          live = message;
-          banner = null;
-        }}
-        onOpenStash={() => (workspaceView = "stash")}
-      />
+      {#if mergePanel}
+        {#await mergePanel}
+          <p class="hint">正在打开合并。</p>
+        {:then module}
+          <module.default
+            {opened}
+            focusPath={conflictFocus}
+            disabled={writeLocked}
+            {nextId}
+            onGeneration={adoptGeneration}
+            onSnapshot={applySnapshot}
+            onFailure={handleMutationError}
+            onNotice={(message) => {
+              phaseNote = message;
+              live = message;
+              banner = null;
+            }}
+            onOpenStash={() => useView("stash")}
+          />
+        {/await}
+      {/if}
     {:else if opened && workspaceView === "stash"}
-      <StashPanel
-        {opened}
-        disabled={pending !== null}
-        {nextId}
-        onGeneration={adoptGeneration}
-        onSnapshot={applySnapshot}
-        onFailure={handleMutationError}
-        onNotice={(message) => {
-          phaseNote = message;
-          live = message;
-          banner = null;
-        }}
-        onOpenChanges={openConflict}
-      />
+      {#if stashPanel}
+        {#await stashPanel}
+          <p class="hint">正在打开临时保存。</p>
+        {:then module}
+          <module.default
+            {opened}
+            disabled={writeLocked}
+            {nextId}
+            onGeneration={adoptGeneration}
+            onSnapshot={applySnapshot}
+            onFailure={handleMutationError}
+            onNotice={(message) => {
+              phaseNote = message;
+              live = message;
+              banner = null;
+            }}
+            onOpenChanges={openConflict}
+          />
+        {/await}
+      {/if}
     {:else}
     <section class="files" aria-label="改动与提交">
       {#if opened}
         <RecoveryActions
           {opened}
-          disabled={pending !== null}
+          disabled={writeLocked}
           {nextId}
           onSnapshot={applySnapshot}
           onFailure={handleMutationError}
@@ -879,13 +1164,13 @@
             live = message;
             banner = null;
           }}
-          onMerge={() => (workspaceView = "merge")}
+          onMerge={() => useView("merge")}
         />
         <FileList
           files={opened.snapshot.files}
           {selected}
           query={fileQuery}
-          disabled={pending !== null}
+          disabled={writeLocked}
           onQuery={(value) => (fileQuery = value)}
           onSelect={selectFile}
           onStage={stagePath}
@@ -896,7 +1181,7 @@
           scope={scope.label}
           paths={scope.paths}
           value={draft}
-          disabled={pending !== null}
+          disabled={writeLocked}
           onInput={onDraftInput}
           onBlur={() => void flushDraft(drafts.path)}
           onCommit={commitLocal}
@@ -906,7 +1191,7 @@
         <div class="empty">
           <strong>打开一个仓库</strong>
           <p>{BRAND.full}。{BRAND.tagline} 添加已有目录只会检查它是不是仓库；新建会先确认，取消不会写入。克隆也不会覆盖已有文件。</p>
-          <p class="hint">搜索快捷键是 {MODIFIER_LABEL}+K。</p>
+          <p class="hint">搜索快捷键是 {MODIFIER_LABEL}+K。运行依赖说明 Git 与 WebView2 的安装方式。</p>
         </div>
       {/if}
     </section>
@@ -927,7 +1212,7 @@
       {diff}
       error={diffError}
       loading={diffLoading}
-      disabled={pending !== null}
+      disabled={writeLocked}
       onStageHunk={stageHunk}
       onLoadMore={loadMoreDiff}
       onFileHistory={openFileHistory}
@@ -939,7 +1224,7 @@
 <RepoDialogs
   mode={dialog}
   {opened}
-  disabled={pending !== null}
+  disabled={writeLocked}
   onClose={() => (dialog = null)}
   onBusy={(name) => (pending = name)}
   onSnapshot={applySnapshot}
@@ -955,6 +1240,14 @@
   }}
   {nextId}
 />
+{#if dependencyOpen}
+  <DetailDialog
+    title="运行依赖"
+    value={dependencyNote(navigator.platform ?? "")}
+    body="这些说明只描述安装和缺失时的行为，不表示已经在所有系统上完成验收。"
+    onClose={() => (dependencyOpen = false)}
+  />
+{/if}
 {#if detail}
   <DetailDialog title={detail.title} value={detail.value} onClose={() => (detail = null)} />
 {/if}

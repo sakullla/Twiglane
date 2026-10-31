@@ -1,0 +1,5 @@
+Error: On branch main
+nothing to commit, working tree clean
+    at mustRun (file:///Users/yanggeng/github/Twiglane/scripts/measure-delivery.mjs:43:34)
+    at main (file:///Users/yanggeng/github/Twiglane/scripts/measure-delivery.mjs:516:5)
+    at file:///Users/yanggeng/github/Twiglane/scripts/measure-delivery.mjs:765:7

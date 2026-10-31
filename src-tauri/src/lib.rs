@@ -1,11 +1,14 @@
 mod atomic;
 mod error;
 mod git;
+mod measure;
 mod model;
 mod redact;
 mod shutdown;
 mod state;
 mod watch;
+
+pub use measure::mark_process_start;
 
 #[cfg(test)]
 mod security;
@@ -102,7 +105,12 @@ pub fn run() {
             discard_changes,
             set_theme,
             set_panel_widths,
-            save_draft
+            save_draft,
+            cancel_reads,
+            measure_probe,
+            measure_sample,
+            measure_finish,
+            measure_wait
         ])
         .build(tauri::generate_context!())
         .expect("启动 Twiglane 失败");
@@ -873,6 +881,63 @@ fn save_draft(
     message: String,
 ) -> Result<(), AppError> {
     ops::save_draft(state.inner(), &path, &message)
+}
+
+#[tauri::command]
+fn cancel_reads(state: State<'_, Arc<Backend>>) -> Result<(), AppError> {
+    state.scheduler.cancel_reads();
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MeasureProbe {
+    enabled: bool,
+    elapsed_ms: u128,
+    script: Option<serde_json::Value>,
+}
+
+#[tauri::command]
+fn measure_probe() -> Result<MeasureProbe, AppError> {
+    let enabled = measure::directory().is_some();
+    let script = if enabled {
+        measure::load_script().map_err(|message| AppError::new("measure", message))?
+    } else {
+        None
+    };
+    Ok(MeasureProbe {
+        enabled,
+        elapsed_ms: measure::elapsed_ms(),
+        script,
+    })
+}
+
+#[tauri::command]
+fn measure_sample(name: String, detail: serde_json::Value) -> Result<(), AppError> {
+    if measure::directory().is_none() {
+        return Err(AppError::new("measure", "测量模式未开启。"));
+    }
+    measure::append_sample(&name, &detail).map_err(|message| AppError::new("measure", message))
+}
+
+#[tauri::command]
+async fn measure_wait(ms: u64) -> Result<(), AppError> {
+    if measure::directory().is_none() {
+        return Err(AppError::new("measure", "测量模式未开启。"));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(ms.min(120_000))).await;
+    Ok(())
+}
+
+#[tauri::command]
+fn measure_finish(app: AppHandle) -> Result<(), AppError> {
+    if measure::directory().is_none() {
+        return Err(AppError::new("measure", "测量模式未开启。"));
+    }
+    measure::append_sample("finished", &serde_json::json!({}))
+        .map_err(|message| AppError::new("measure", message))?;
+    app.exit(0);
+    Ok(())
 }
 
 #[cfg(test)]

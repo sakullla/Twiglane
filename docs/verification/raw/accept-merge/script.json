@@ -1,0 +1,1 @@
+{"steps":[{"op":"open","repo":"/var/folders/vy/lszwy3c52plgsr4_19b2pxvh0000gn/T/twiglane-acceptance/merge","expectChanges":0,"expectHead":"13e7983ad9f001d7284fee2a6dd64a42e453612a"},{"op":"merge","source":"other","content":"resolved\n"},{"op":"keyboard-theme"},{"op":"sleep","ms":3000,"mark":"screenshot"}]}

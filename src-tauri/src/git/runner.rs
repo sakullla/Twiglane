@@ -35,6 +35,7 @@ pub struct RunRequest {
     pub timeout: Duration,
     pub output_limit: usize,
     pub shutdown: Arc<Shutdown>,
+    pub cancel: Option<Arc<Shutdown>>,
     pub stdin: Option<Vec<u8>>,
     /// When set, stdout stops at `output_limit` and the process is killed instead of failing.
     pub truncate_stdout: bool,
@@ -78,6 +79,7 @@ impl RealRunner {
             timeout: self.timeout,
             output_limit: self.output_limit,
             shutdown,
+            cancel: None,
             stdin: None,
             truncate_stdout: false,
         }
@@ -187,6 +189,16 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
                 let _ = child.wait().await;
                 return Err(RunnerError::Cancelled);
             }
+            _ = async {
+                match &request.cancel {
+                    Some(cancel) => cancel.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(RunnerError::Cancelled);
+            }
         }
         if stdout_buf.is_some() && stderr_buf.is_some() && status.is_some() {
             break;
@@ -266,6 +278,7 @@ mod tests {
             timeout: Duration::from_secs(10),
             output_limit: 1024,
             shutdown,
+            cancel: None,
             stdin: None,
             truncate_stdout: false,
         })
@@ -294,6 +307,7 @@ mod tests {
             timeout: Duration::from_secs(10),
             output_limit: 1024,
             shutdown,
+            cancel: None,
             stdin: None,
             truncate_stdout: false,
         })

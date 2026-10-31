@@ -1,0 +1,19 @@
+{
+  "platform": "darwin",
+  "arch": "arm64",
+  "osRelease": "27.0.0",
+  "osVersion": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:05:41 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8122",
+  "cpus": 8,
+  "memoryBytes": 17179869184,
+  "ssd": true,
+  "acPower": true,
+  "diskColdStart": false,
+  "git": "git version 2.48.1",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "node": "v24.13.1",
+  "commit": "c0c2f4eadd5fc64d49b748c3350e58305fa667ea",
+  "macos": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0\nBuildVersion:\t\t26A428",
+  "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22413411)\t80%; AC attached; not charging present: true",
+  "disk": "Device Identifier:         disk3s1s1\n   Device Node:               /dev/disk3s1s1\n   Whole:                     No\n   Part of Whole:             disk3\n\n   Volume Name:               Macintosh HD\n   Mounted:                   Yes\n   Mount Point:               /\n\n   Partition Type:            41504653-0000-11AA-AA11-00306543ECAC\n   File System Personality:   APFS\n   Type (Bundle):             apfs\n   Name (User Visible):       APFS\n   Owners:                    Enabled\n\n   OS Can Be Installed:    ",
+  "referenceReady": true
+}

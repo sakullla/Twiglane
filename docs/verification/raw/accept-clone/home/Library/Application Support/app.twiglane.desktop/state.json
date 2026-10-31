@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "theme": "light",
+  "panelWidths": {
+    "sidebar": 280,
+    "files": 340
+  },
+  "recent": [
+    {
+      "name": "cloned",
+      "path": "/private/var/folders/vy/lszwy3c52plgsr4_19b2pxvh0000gn/T/twiglane-acceptance/parent/cloned",
+      "openedAtMs": 1793449638755
+    }
+  ],
+  "drafts": {}
+}

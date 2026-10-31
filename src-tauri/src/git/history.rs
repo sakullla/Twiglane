@@ -402,7 +402,7 @@ pub async fn apply_stash(
         .actions
         .enter(action_key("stash", &repo_key(&root)))?;
     let mut guard = stash_lock(backend, &root, generation, request_id).await?;
-    let outcome = apply_in_guard(&mut guard, &git.path, &root, &oid).await;
+    let outcome = apply_in_guard(&mut guard, backend, &git.path, &root, &oid).await;
     let generation = guard.finish();
     let applied = outcome.map_err(|error| attach_generation(error, generation))?;
     let snapshot = read_status(backend, &root, generation, internal_request_id()).await?;
@@ -414,27 +414,19 @@ pub async fn apply_stash(
         )
         .with_generation(snapshot.generation));
     }
-    let conflict_paths: Vec<String> = snapshot
-        .files
-        .iter()
-        .filter(|file| file.unmerged)
-        .map(|file| file.path.clone())
-        .collect();
-    if applied.exit_code != 0 && conflict_paths.is_empty() {
-        return Err(git_failure(
-            "stash_apply_failed",
-            &applied,
-            "没有恢复成功。临时保存记录仍保留，已有内容没有被丢弃。",
-        )
-        .with_generation(snapshot.generation));
+    // Paths already unmerged belong to an earlier merge. A failed apply that
+    // adds none is not a restored stash conflict.
+    let conflict_paths = new_unmerged_paths(&snapshot, &applied.before_unmerged);
+    if applied.output.exit_code != 0 && conflict_paths.is_empty() {
+        let fallback = if applied.merge_in_progress {
+            "没有恢复成功。仓库正在进行分支合并，临时保存没有写入工作区，记录仍保留，已有内容没有被丢弃。"
+        } else {
+            "没有恢复成功。临时保存记录仍保留，已有内容没有被丢弃。"
+        };
+        return Err(git_failure("stash_apply_failed", &applied.output, fallback)
+            .with_generation(snapshot.generation));
     }
     let conflicted = !conflict_paths.is_empty();
-    let note = if conflicted {
-        "恢复发生冲突，原保存记录仍保留。这不是分支合并，没有可中止的合并。请在改动里处理冲突文件。"
-            .to_string()
-    } else {
-        "已把改动恢复到工作区，临时保存记录仍保留。需要移除时请单独确认删除。".to_string()
-    };
     Ok(StashApplyResult {
         generation: snapshot.generation,
         oid,
@@ -443,7 +435,7 @@ pub async fn apply_stash(
         conflicted,
         conflict_paths,
         can_abort_merge: false,
-        note,
+        note: stash_apply_note(conflicted, applied.merge_in_progress),
         snapshot,
     })
 }
@@ -811,12 +803,19 @@ async fn save_in_guard(
     Ok((preview, output))
 }
 
+struct StashApplyAttempt {
+    output: ProcessOutput,
+    before_unmerged: HashSet<String>,
+    merge_in_progress: bool,
+}
+
 async fn apply_in_guard(
     guard: &mut WriteGuard<'_, RealRunner>,
+    backend: &Backend,
     git: &Path,
     root: &Path,
     oid: &str,
-) -> Result<ProcessOutput, AppError> {
+) -> Result<StashApplyAttempt, AppError> {
     let records = stash_records_in_guard(guard, git, root).await?;
     if !records.iter().any(|record| record.oid == oid) {
         return Err(AppError::new(
@@ -824,8 +823,10 @@ async fn apply_in_guard(
             "没有找到这条临时保存，未恢复，也没有删除其他记录。",
         ));
     }
+    let before = status_in_guard(guard, backend, git, root).await?;
+    let before_unmerged = unmerged_path_set(&before);
     let (program, args) = stash_apply_command(git, root, oid);
-    guard
+    let output = guard
         .run(CommandSpec {
             program,
             args,
@@ -834,7 +835,62 @@ async fn apply_in_guard(
             output_limit: None,
             writes: true,
         })
-        .await
+        .await?;
+    let merge_in_progress = merge_head_present(guard, git, root).await?;
+    Ok(StashApplyAttempt {
+        output,
+        before_unmerged,
+        merge_in_progress,
+    })
+}
+
+fn unmerged_path_set(snapshot: &StatusSnapshot) -> HashSet<String> {
+    snapshot
+        .files
+        .iter()
+        .filter(|file| file.unmerged)
+        .map(|file| file.path.clone())
+        .collect()
+}
+
+fn new_unmerged_paths(snapshot: &StatusSnapshot, before: &HashSet<String>) -> Vec<String> {
+    snapshot
+        .files
+        .iter()
+        .filter(|file| file.unmerged && !before.contains(&file.path))
+        .map(|file| file.path.clone())
+        .collect()
+}
+
+fn stash_apply_note(conflicted: bool, merge_in_progress: bool) -> String {
+    if !conflicted {
+        return "已把改动恢复到工作区，临时保存记录仍保留。需要移除时请单独确认删除。".to_string();
+    }
+    if merge_in_progress {
+        return "恢复发生冲突，原保存记录仍保留。仓库仍有正在进行的分支合并。请在改动里处理冲突文件。"
+            .to_string();
+    }
+    "恢复发生冲突，原保存记录仍保留。这不是分支合并，没有可中止的合并。请在改动里处理冲突文件。"
+        .to_string()
+}
+
+async fn merge_head_present(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+) -> Result<bool, AppError> {
+    let (program, args) = rev_parse_command(git, root, "MERGE_HEAD");
+    let output = guard
+        .run(CommandSpec {
+            program,
+            args,
+            stdin: None,
+            truncate_stdout: false,
+            output_limit: None,
+            writes: false,
+        })
+        .await?;
+    Ok(output.exit_code == 0 && !normalized_oid(&output.stdout).is_empty())
 }
 
 async fn delete_in_guard(
@@ -1671,6 +1727,23 @@ mod tests {
         git_env(dir, &[], args);
     }
 
+    fn git_exit(dir: &Path, args: &[&str]) -> std::process::ExitStatus {
+        Command::new(crate::test_support::system_git())
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                crate::test_support::isolated_gitconfig(),
+            )
+            .env("GIT_AUTHOR_NAME", "Twiglane Test")
+            .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Twiglane Test")
+            .env("GIT_COMMITTER_EMAIL", "twiglane-test@example.com")
+            .status()
+            .unwrap()
+    }
+
     fn git_env(dir: &Path, env: &[(&str, &str)], args: &[&str]) {
         let mut command = Command::new(crate::test_support::system_git());
         command
@@ -2121,5 +2194,121 @@ mod tests {
         assert_eq!(fs::read_to_string(repo.join("other.txt")).unwrap(), "keep\n");
         assert!(git_text(&repo, &["stash", "list", "--format=%H"]).contains(&saved.oid));
         assert!(!repo.join(".git/MERGE_HEAD").exists());
+    }
+
+    #[tokio::test]
+    async fn stash_apply_during_an_open_merge_is_not_a_restored_conflict() {
+        let fixture = crate::test_support::git_fixture("stash-during-merge");
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "base\n").unwrap();
+        fs::write(repo.join("both.txt"), "base\n").unwrap();
+        fs::write(repo.join("other.txt"), "keep\n").unwrap();
+        git(&repo, &["add", "--", "file.txt", "both.txt", "other.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        let backend = fixture.backend();
+        let root = canonical_existing(&repo).unwrap();
+        let generation = generation(&backend, &root);
+        fs::write(repo.join("file.txt"), "stashed\n").unwrap();
+        let saved_file = save_stash(&backend, &repo_key(&root), false, "file", generation, 1)
+            .await
+            .unwrap();
+        fs::write(repo.join("other.txt"), "restored-other\n").unwrap();
+        let saved_other = save_stash(
+            &backend,
+            &repo_key(&root),
+            false,
+            "other",
+            saved_file.state.generation,
+            2,
+        )
+        .await
+        .unwrap();
+        fs::write(repo.join("file.txt"), "local\n").unwrap();
+        git(&repo, &["commit", "-am", "local"]);
+        git(&repo, &["checkout", "-b", "side"]);
+        fs::write(repo.join("both.txt"), "side\n").unwrap();
+        git(&repo, &["commit", "-am", "side"]);
+        git(&repo, &["checkout", "main"]);
+        fs::write(repo.join("both.txt"), "main\n").unwrap();
+        git(&repo, &["commit", "-am", "main"]);
+        let merge = git_exit(&repo, &["merge", "side"]);
+        assert_eq!(merge.code(), Some(1));
+        assert!(repo.join(".git/MERGE_HEAD").exists());
+        let markers = fs::read_to_string(repo.join("both.txt")).unwrap();
+        assert!(markers.contains("<<<<<<<"));
+        assert_eq!(fs::read_to_string(repo.join("file.txt")).unwrap(), "local\n");
+        assert_eq!(fs::read_to_string(repo.join("other.txt")).unwrap(), "keep\n");
+
+        let blocked = apply_stash(
+            &backend,
+            &repo_key(&root),
+            &saved_file.oid,
+            saved_other.state.generation,
+            3,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(blocked.code, "stash_apply_failed");
+        assert!(blocked.message.contains("正在进行分支合并"));
+        assert!(!blocked.message.contains("没有可中止的合并"));
+        assert!(!blocked.message.contains("恢复发生冲突"));
+        assert!(!blocked.message.contains("已把改动恢复"));
+        assert_eq!(fs::read_to_string(repo.join("both.txt")).unwrap(), markers);
+        assert_eq!(fs::read_to_string(repo.join("file.txt")).unwrap(), "local\n");
+        assert_eq!(fs::read_to_string(repo.join("other.txt")).unwrap(), "keep\n");
+        assert!(repo.join(".git/MERGE_HEAD").exists());
+        let stashes = git_text(&repo, &["stash", "list", "--format=%H"]);
+        assert!(stashes.contains(&saved_file.oid));
+        assert!(stashes.contains(&saved_other.oid));
+
+        git(&repo, &["checkout", "--ours", "--", "both.txt"]);
+        git(&repo, &["add", "--", "both.txt"]);
+        assert!(repo.join(".git/MERGE_HEAD").exists());
+        assert!(git_text(&repo, &["diff", "--name-only", "--diff-filter=U"]).is_empty());
+        let restored = apply_stash(
+            &backend,
+            &repo_key(&root),
+            &saved_other.oid,
+            blocked.generation.expect("failed apply generation"),
+            4,
+        )
+        .await
+        .unwrap();
+        assert!(!restored.conflicted);
+        assert!(restored.conflict_paths.is_empty());
+        assert!(!restored.can_abort_merge);
+        assert!(restored.note.contains("已把改动恢复"));
+        assert!(!restored.note.contains("没有可中止的合并"));
+        assert_eq!(fs::read_to_string(repo.join("other.txt")).unwrap(), "restored-other\n");
+        assert_eq!(fs::read_to_string(repo.join("file.txt")).unwrap(), "local\n");
+        assert_eq!(fs::read_to_string(repo.join("both.txt")).unwrap(), "main\n");
+        assert!(repo.join(".git/MERGE_HEAD").exists());
+
+        let applied = apply_stash(
+            &backend,
+            &repo_key(&root),
+            &saved_file.oid,
+            restored.generation,
+            5,
+        )
+        .await
+        .unwrap();
+        assert!(applied.conflicted);
+        assert!(applied.kept);
+        assert!(!applied.can_abort_merge);
+        assert_eq!(applied.operation, "stash");
+        assert_eq!(applied.conflict_paths, vec!["file.txt".to_string()]);
+        assert!(applied.note.contains("正在进行的分支合并"));
+        assert!(!applied.note.contains("没有可中止的合并"));
+        let body = fs::read_to_string(repo.join("file.txt")).unwrap();
+        assert!(body.contains("local"));
+        assert!(body.contains("stashed"));
+        assert_eq!(fs::read_to_string(repo.join("both.txt")).unwrap(), "main\n");
+        assert_eq!(fs::read_to_string(repo.join("other.txt")).unwrap(), "restored-other\n");
+        assert!(repo.join(".git/MERGE_HEAD").exists());
+        let stashes = git_text(&repo, &["stash", "list", "--format=%H"]);
+        assert!(stashes.contains(&saved_file.oid));
+        assert!(stashes.contains(&saved_other.oid));
     }
 }

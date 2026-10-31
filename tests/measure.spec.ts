@@ -8,7 +8,7 @@ import {
   keyboardContentOk,
   largeSummaryContentOk,
 } from "../src/lib/measure";
-import { measureProtocol, remoteKind, resetSampleLog, startupTiming } from "../scripts/measure-delivery.mjs";
+import { idleCpuPercent, measureProtocol, parseCpuTime, remoteKind, resetSampleLog, startupTiming } from "../scripts/measure-delivery.mjs";
 
 const scratch: string[] = [];
 
@@ -73,6 +73,19 @@ describe("测量口径", () => {
   it("取消和切换必须发生在仓库读取已经开始之后", () => {
     expect(cancelContentOk({ cancelled: true, switched: true, keyboard: true })).toBe(false);
     expect(cancelContentOk({ cancelled: true, switched: true, keyboard: true, readStarted: true })).toBe(true);
+  });
+
+  it("空闲 CPU 只计算空闲窗口内的 CPU 时间差", () => {
+    expect(parseCpuTime("0:00.18")).toBeCloseTo(0.18);
+    expect(parseCpuTime("62:47.50")).toBeCloseTo(3767.5);
+    expect(parseCpuTime("10:18:03")).toBe(37083);
+    expect(parseCpuTime("1-00:00:01")).toBe(86401);
+    expect(parseCpuTime("nope")).toBeNull();
+    expect(idleCpuPercent([{ at: 0, cpuSeconds: 1.5 }])).toBeNull();
+    expect(idleCpuPercent([
+      { at: 1_000, cpuSeconds: 1.5 },
+      { at: 66_000, cpuSeconds: 1.6 },
+    ])).toBeCloseTo((0.1 / 65) * 100);
   });
 
   it("启动计时使用本次进程，不使用会话里更早的样本", () => {

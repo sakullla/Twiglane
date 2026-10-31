@@ -3,25 +3,24 @@
   "hostPlatform": "darwin",
   "browserMock": false,
   "oids": [
-    "bb7bcaa61e28266ac45113d5174cebcbb8585e98",
-    "bb7bcaa61e28266ac45113d5174cebcbb8585e98",
-    "b3e960a5e7229c1dca0c423ddaa33cdac42d0b6d"
+    "5b52b46f7b49a1472783328bb8d1ccb70cb56503",
+    "5b52b46f7b49a1472783328bb8d1ccb70cb56503",
+    "c57adfb8436f9b5b044cb891713c4360ac764af5"
   ],
   "partialCommit": true,
   "pushed": true,
-  "mergeOid": "b3e960a5e7229c1dca0c423ddaa33cdac42d0b6d",
+  "mergeOid": "c57adfb8436f9b5b044cb891713c4360ac764af5",
   "themes": [
     "light",
     "dark"
   ],
-  "keyboard": false,
+  "keyboard": true,
+  "shortcutFocused": true,
+  "selectionChanged": true,
+  "selectionBefore": "",
+  "selectionMoved": "unstaged:a.txt",
+  "selectionAfter": "unstaged:b.txt",
   "screenshot": "",
   "screenshotError": "could not create image from display",
-  "stderr": "\n\n",
-  "shortcutFocused": false,
-  "selectionChanged": false,
-  "selectionBefore": "",
-  "selectionMoved": "",
-  "selectionAfter": "",
-  "keyboardInvalidated": "旧键盘检查只把焦点放在文件列表上，没有验证快捷键或方向键改变选择。"
+  "stderr": "\n\n"
 }

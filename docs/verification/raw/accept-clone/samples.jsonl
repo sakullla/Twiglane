@@ -1,9 +1,3 @@
-{"detail":{"controls":true},"elapsedMs":299,"name":"shell-ready","pid":25532}
-{"detail":{"contentOk":true,"head":"765444c73a1b727f6e0c9ea616c4d71e9b573ce9","method":"gui-clone","path":"/private/var/folders/vy/lszwy3c52plgsr4_19b2pxvh0000gn/T/twiglane-acceptance/parent/cloned"},"elapsedMs":342,"name":"clone","pid":25532}
-{"detail":{},"elapsedMs":343,"name":"finished","pid":25532}
-{"detail":{"controls":true},"elapsedMs":316,"name":"shell-ready","pid":26126}
-{"detail":{"contentOk":true,"head":"23d0d6e303b7a700f4b09b4e0e32cd2800c7b069","method":"gui-clone","path":"/private/var/folders/vy/lszwy3c52plgsr4_19b2pxvh0000gn/T/twiglane-acceptance/parent/cloned"},"elapsedMs":361,"name":"clone","pid":26126}
-{"detail":{},"elapsedMs":363,"name":"finished","pid":26126}
-{"detail":{"controls":true},"elapsedMs":244,"name":"shell-ready","pid":26640}
-{"detail":{"contentOk":true,"head":"c7cc46b523407f84aec9247a8a1f544d02fa136f","method":"gui-clone","path":"/private/var/folders/vy/lszwy3c52plgsr4_19b2pxvh0000gn/T/twiglane-acceptance/parent/cloned"},"elapsedMs":289,"name":"clone","pid":26640}
-{"detail":{},"elapsedMs":290,"name":"finished","pid":26640}
+{"detail":{"controls":true},"elapsedMs":298,"name":"shell-ready","pid":8025}
+{"detail":{"contentOk":true,"head":"559cef5248ad128ad8a4fa0d38a6535a250c7017","method":"gui-clone","path":"/private/var/folders/vy/lszwy3c52plgsr4_19b2pxvh0000gn/T/twiglane-acceptance/parent/cloned"},"elapsedMs":353,"name":"clone","pid":8025}
+{"detail":{},"elapsedMs":355,"name":"finished","pid":8025}

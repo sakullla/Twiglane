@@ -324,6 +324,34 @@ function measuredOrGap(id, summary, darwin, over, windowsNext) {
   return gap(id, `${summary} Windows 仍缺，不能通过。`, windowsNext, evidence);
 }
 
+export function parseCpuTime(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  let days = 0;
+  let clock = text;
+  const day = text.match(/^(\d+)-(.+)$/);
+  if (day) {
+    days = Number(day[1]);
+    clock = day[2];
+  }
+  const parts = clock.split(":");
+  if (parts.length < 2 || parts.length > 3) return null;
+  const numbers = parts.map(Number);
+  if (numbers.some((item) => !Number.isFinite(item) || item < 0)) return null;
+  const [hours, minutes, seconds] = parts.length === 3 ? numbers : [0, numbers[0], numbers[1]];
+  return ((days * 24 + hours) * 60 + minutes) * 60 + seconds;
+}
+
+export function idleCpuPercent(samples) {
+  if (!Array.isArray(samples) || samples.length < 2) return null;
+  const first = samples[0];
+  const last = samples[samples.length - 1];
+  const elapsedMs = Number(last?.at) - Number(first?.at);
+  const delta = Number(last?.cpuSeconds) - Number(first?.cpuSeconds);
+  if (!(elapsedMs >= 1000) || !Number.isFinite(delta) || delta < 0) return null;
+  return (delta / (elapsedMs / 1000)) * 100;
+}
+
 function parseFootprint(pid) {
   const result = run("footprint", ["-p", String(pid)]);
   const text = textOf(result);
@@ -351,17 +379,34 @@ function groupFootprint(pid) {
 }
 
 function processRows() {
-  const result = run("ps", ["-ax", "-o", "pid=,ppid=,pcpu=,rss=,comm="]);
+  const result = run("ps", ["-ax", "-o", "pid=,ppid=,pcpu=,rss=,time=,comm="]);
   return textOf(result)
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
-      const match = line.match(/^(\d+)\s+(\d+)\s+([0-9.]+)\s+(\d+)\s+(.*)$/);
+      const match = line.match(/^(\d+)\s+(\d+)\s+([0-9.]+)\s+(\d+)\s+(\S+)\s+(.*)$/);
       if (!match) return null;
-      return { pid: Number(match[1]), ppid: Number(match[2]), cpu: Number(match[3]), rss: Number(match[4]) * 1024, command: match[5] };
+      return {
+        pid: Number(match[1]),
+        ppid: Number(match[2]),
+        cpu: Number(match[3]),
+        rss: Number(match[4]) * 1024,
+        cpuSeconds: parseCpuTime(match[5]),
+        command: match[6],
+      };
     })
     .filter(Boolean);
+}
+
+function recordIdleCpu(pid, bucket) {
+  const rows = groupOf(pid);
+  if (!rows.length || rows.some((row) => !Number.isFinite(row.cpuSeconds))) return;
+  bucket.cpu.push({
+    at: Date.now(),
+    cpuSeconds: rows.reduce((sum, row) => sum + row.cpuSeconds, 0),
+  });
+  bucket.sawGit = bucket.sawGit || rows.some((row) => /(^|\/)git$/.test(row.command));
 }
 
 function groupOf(pid) {
@@ -463,11 +508,7 @@ async function main() {
     const alive = processRows().some((row) => row.pid === pid);
     const idleStarted = samples.some((item) => item.name === "idle");
     const idleEnded = samples.some((item) => item.name === "idle-end");
-    if (alive && idleStarted && !idleEnded && watch.cpu.length < 70) {
-      const rows = groupOf(pid);
-      watch.cpu.push(rows.reduce((sum, row) => sum + row.cpu, 0));
-      watch.sawGit = watch.sawGit || rows.some((row) => /(^|\/)git$/.test(row.command));
-    }
+    if (alive && idleStarted && !idleEnded && watch.cpu.length < 70) recordIdleCpu(pid, watch);
     if (alive && idleEnded && !watch.footprint) watch.footprint = groupFootprint(pid);
     if (alive && samples.some((item) => item.name === "after-reclaim-end") && !watch.after) watch.after = groupFootprint(pid);
     writeFileSync(watchFile, JSON.stringify(watch));
@@ -476,6 +517,7 @@ async function main() {
     return;
   }
   mkdirSync(rawDir, { recursive: true });
+  rmSync(path.join(rawDir, "measure-error.txt"), { force: true });
   const environment = probeEnvironment();
   referenceReady = environment.referenceReady;
   writeFileSync(path.join(outDir, "environment.json"), `${JSON.stringify(environment, null, 2)}\n`);
@@ -783,11 +825,7 @@ async function main() {
       perfRun = await launchApp(binary, sessionDir, perfSteps, 45 * 60 * 1000, (samples, pid) => {
         const idleStarted = samples.some((item) => item.name === "idle");
         const idleEnded = samples.some((item) => item.name === "idle-end");
-        if (idleStarted && !idleEnded && idleWatch.cpu.length < 70) {
-          const rows = groupOf(pid);
-          idleWatch.cpu.push(rows.reduce((sum, row) => sum + row.cpu, 0));
-          idleWatch.sawGit = idleWatch.sawGit || rows.some((row) => /(^|\/)git$/.test(row.command));
-        }
+        if (idleStarted && !idleEnded && idleWatch.cpu.length < 70) recordIdleCpu(pid, idleWatch);
         if (idleEnded && !idleWatch.footprint) idleWatch.footprint = groupFootprint(pid);
         if (samples.some((item) => item.name === "after-reclaim-end") && !idleWatch.after) idleWatch.after = groupFootprint(pid);
       });
@@ -838,7 +876,8 @@ async function main() {
     const cancel = sampleByName(perfRun.samples, "cancel-open").at(-1)?.detail;
     if (cancel) replaceCheck(checks, measuredOrGap("perf.interact.l", "macOS 加载大仓库时的键盘、取消和切换。", { ...base, method: "gui-cancel-and-switch", contentOk: cancel.contentOk === true && cancel.readStarted === true, keyboard: cancel.keyboard === true, cancelled: cancel.cancelled === true, switched: cancel.switched === true, readStarted: cancel.readStarted === true }, cancel.contentOk !== true || cancel.readStarted !== true, windowsNext));
     if (sampleByName(perfRun.samples, "idle").length) {
-    const cpu = idleWatch.cpu.length ? idleWatch.cpu.reduce((sum, value) => sum + value, 0) / idleWatch.cpu.length : null;
+    writeFileSync(path.join(sessionDir, "idle-cpu.json"), `${JSON.stringify(idleWatch.cpu)}\n`);
+    const cpu = idleCpuPercent(idleWatch.cpu);
     replaceCheck(checks, measuredOrGap("perf.cpu.s", "macOS 空闲 CPU。", { ...base, method: "gui-idle", contentOk: cpu !== null, cpuPercent: cpu }, cpu === null || cpu > BUDGETS.idleCpuPercent, windowsNext));
     replaceCheck(checks, measuredOrGap("perf.git-idle", "macOS 空闲 Git 子进程。", { ...base, method: "gui-idle", contentOk: true, lingeringGit: idleWatch.sawGit }, idleWatch.sawGit, windowsNext));
     const memoryBytes = idleWatch.footprint?.bytes ?? null;

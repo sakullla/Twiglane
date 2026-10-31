@@ -4,13 +4,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::error::AppError;
-use crate::git::command::{diff_command, init_command, status_command, toplevel_command};
+use crate::git::command::{init_command, status_command, toplevel_command};
 use crate::git::locate::{detect_git_binary, validate_git, GitLocator, ResolvedGit};
-use crate::git::parse::{classify_diff, parse_status, DiffBody};
+use crate::git::parse::parse_status;
 use crate::git::runner::{ProcessOutput, RealRunner};
 use crate::git::schedule::{GitJob, GitScheduler, JobKind, ScheduledOutput};
 use crate::model::{
-    DiffResponse, GitInfo, OpenedRepository, PanelWidths, RecentRepo, RepoSummary, SettingsDto,
+    GitInfo, OpenedRepository, PanelWidths, RecentRepo, RepoSummary, SettingsDto,
     StatusSnapshot, Theme,
 };
 use crate::redact::redact_error_text;
@@ -222,48 +222,6 @@ pub async fn refresh_status(
     status_from_output(&scheduled)
 }
 
-pub async fn load_diff(
-    backend: &Backend,
-    path: &str,
-    relative: &str,
-    staged: bool,
-    generation: u64,
-    request_id: u64,
-) -> Result<DiffResponse, AppError> {
-    let root = canonical_existing(&validate_input_path(path)?)?;
-    let relative_path = safe_relative(relative)?;
-    let git = require_git(backend).await?;
-    let (program, args) = diff_command(&git.path, &root, &relative_path, staged);
-    let scheduled = run_git(
-        backend,
-        &repo_key(&root),
-        JobKind::Read,
-        request_id,
-        program,
-        args,
-        Some(generation),
-    )
-    .await?;
-    if scheduled.output.exit_code != 0 {
-        return Err(git_failure(
-            "diff_failed",
-            &scheduled.output,
-            "无法读取差异，未修改仓库。",
-        ));
-    }
-    let body = classify_diff(&scheduled.output.stdout)?;
-    Ok(DiffResponse {
-        generation: scheduled.generation,
-        path: relative.to_string(),
-        staged,
-        binary: matches!(body, DiffBody::Binary),
-        text: match body {
-            DiffBody::Text(text) => Some(text),
-            DiffBody::Empty | DiffBody::Binary => None,
-        },
-    })
-}
-
 async fn open_root(
     backend: &Backend,
     root: PathBuf,
@@ -300,7 +258,7 @@ async fn open_root(
     })
 }
 
-fn status_from_output(scheduled: &ScheduledOutput) -> Result<StatusSnapshot, AppError> {
+pub(crate) fn status_from_output(scheduled: &ScheduledOutput) -> Result<StatusSnapshot, AppError> {
     if scheduled.output.exit_code != 0 {
         return Err(git_failure(
             "status_failed",
@@ -446,7 +404,7 @@ fn toplevel_text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[..end]).trim().to_string()
 }
 
-async fn run_git(
+pub(crate) async fn run_git(
     backend: &Backend,
     repo_key: &str,
     kind: JobKind,
@@ -467,6 +425,9 @@ async fn run_git(
                 generation: current,
                 program: program.clone(),
                 args: args.clone(),
+                stdin: None,
+                truncate_stdout: false,
+                output_limit: None,
             })
             .await;
         match result {
@@ -481,7 +442,7 @@ async fn run_git(
     }
 }
 
-async fn require_git(backend: &Backend) -> Result<ResolvedGit, AppError> {
+pub(crate) async fn require_git(backend: &Backend) -> Result<ResolvedGit, AppError> {
     if let Some(resolved) = lock_git(backend).resolved().cloned() {
         return Ok(resolved);
     }
@@ -589,7 +550,7 @@ fn repo_name(path: &Path) -> String {
         .unwrap_or_else(|| repo_key(path))
 }
 
-fn git_failure(code: &str, output: &ProcessOutput, fallback: &str) -> AppError {
+pub(crate) fn git_failure(code: &str, output: &ProcessOutput, fallback: &str) -> AppError {
     let detail = redact_error_text(String::from_utf8_lossy(&output.stderr).trim());
     if detail.is_empty() {
         AppError::new(code, fallback)
@@ -695,13 +656,16 @@ mod tests {
             .files
             .iter()
             .any(|file| file.path == "file one.txt"));
-        let diff = load_diff(
+        let diff = crate::git::changes::load_diff(
             &backend,
             &opened.summary.path,
             "file one.txt",
+            None,
             false,
             opened.generation,
             2,
+            0,
+            0,
         )
         .await
         .unwrap();
@@ -759,6 +723,7 @@ mod tests {
             exit_code,
             stdout: Vec::new(),
             stderr: stderr.to_vec(),
+            stdout_truncated: false,
         }
     }
 

@@ -25,3 +25,17 @@ export function nudgeWidth(current: number, key: string): number | null {
   if (key === "ArrowRight") return clampWidth(current + 16);
   return null;
 }
+
+export function visibleRange(
+  total: number,
+  scrollTop: number,
+  viewport: number,
+  rowHeight: number,
+  overscan = 8,
+): { start: number; end: number } {
+  if (total <= 0 || rowHeight <= 0) return { start: 0, end: 0 };
+  if (viewport <= 0) return { start: 0, end: Math.min(total, 40) };
+  const start = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan);
+  const count = Math.ceil(viewport / rowHeight) + overscan * 2;
+  return { start, end: Math.min(total, start + count) };
+}

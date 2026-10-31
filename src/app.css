@@ -104,6 +104,7 @@ button { cursor: pointer; }
   overflow: auto;
   background: var(--bg-elev);
 }
+.files, .diff { overflow: hidden; }
 .sidebar { padding: 14px 12px 18px; display: flex; flex-direction: column; gap: 12px; }
 .files, .diff { display: flex; flex-direction: column; }
 .resizer {
@@ -154,8 +155,19 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   font-size: 12px;
   color: var(--fg-muted);
 }
-.file-list { padding: 8px; }
-.file-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center; }
+.file-tools { padding: 8px 8px 0; }
+.file-list { min-height: 0; flex: 1; overflow: auto; padding: 8px; position: relative; }
+.file-row {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+.virtual-space { position: relative; }
+.compact { padding: 4px 8px; }
 .badge {
   font-size: 12px;
   border: 1px solid var(--border);
@@ -174,6 +186,30 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   gap: 8px;
 }
 textarea { min-height: 88px; resize: vertical; font-family: var(--font); }
+.diff-toolbar, .diff-more { padding: 8px 12px; gap: 8px; align-items: center; }
+.diff-toolbar { display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); }
+.diff-scroll { min-height: 0; flex: 1; overflow: auto; }
+.diff-line, .side-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: grid;
+  grid-template-columns: 3.2em 3.2em minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 0 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre;
+}
+.side-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
+.ln { color: var(--fg-muted); text-align: right; }
+.code, .side-cell { overflow: hidden; text-overflow: ellipsis; }
+.side-cell.add { background: var(--add-bg); color: var(--add-fg); }
+.side-cell.del { background: var(--del-bg); color: var(--del-fg); }
+.side-cell.hunk, .side-cell.meta { color: var(--fg-muted); }
+.scope-list { margin: 0; padding-left: 18px; font-family: var(--mono); font-size: 12px; }
+.scope-list li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .diff-body, textarea.full-value { margin: 0; padding: 12px; overflow: auto; font-family: var(--mono); font-size: 12px; line-height: 1.55; }
 textarea.full-value { width: 100%; min-height: 72px; resize: vertical; white-space: pre-wrap; }
 .diff-line { display: block; white-space: pre; padding: 0 8px; }

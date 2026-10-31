@@ -5,9 +5,10 @@
   import { DraftBuffer } from "./lib/draft";
   import { normalizeError } from "./lib/errors";
   import { clampWidth, FALLBACK_POLL_MS, nudgeWidth, shouldPoll } from "./lib/layout";
-  import { branchLabel, gitInstallHint, retainSelection, syncLabel } from "./lib/labels";
+  import { branchLabel, commitScope, gitInstallHint, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
   import type {
     AppFailure,
+    DiffHunk,
     DiffResponse,
     FileSelection,
     GitInfo,
@@ -15,6 +16,7 @@
     PanelWidths,
     RecentRepo,
     RepoChanged,
+    StatusSnapshot,
     Theme,
   } from "./lib/types";
   import CommitDraft from "./lib/components/CommitDraft.svelte";
@@ -44,11 +46,13 @@
   let degraded = $state(false);
   let windowFocused = $state(true);
   let requestSerial = 1;
+  let fileQuery = $state("");
   const drafts = new DraftBuffer();
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
 
   let branchText = $derived(opened ? branchLabel(opened.snapshot.branch) : "未打开仓库");
   let syncText = $derived(opened ? syncLabel(opened.snapshot.branch) : "未检查远程");
+  let scope = $derived(opened ? commitScope(branchText, opened.snapshot.files) : { label: "", paths: [] as string[] });
 
   function nextId(): number {
     requestSerial += 1;
@@ -135,12 +139,16 @@
     diffLoading = true;
     diffError = null;
     try {
+      const file = current.snapshot.files.find((item) => item.path === choice.path);
       const result = await api.loadDiff(
         current.summary.path,
         choice.path,
         choice.side === "staged",
         current.generation,
         nextId(),
+        file?.originalPath ?? null,
+        0,
+        0,
       );
       if (opened?.summary.path !== current.summary.path) return;
       if (selected?.path !== choice.path || selected.side !== choice.side) return;
@@ -164,6 +172,177 @@
   function selectFile(selection: FileSelection) {
     selected = selection;
     void loadSelectedDiff();
+  }
+
+  function applySnapshot(snapshot: StatusSnapshot) {
+    if (!opened) return;
+    const previous = selected;
+    opened = { ...opened, snapshot, generation: snapshot.generation };
+    selected = selectionAfterEdit(snapshot.files, previous);
+    void loadSelectedDiff();
+  }
+
+  function handleMutationError(error: unknown) {
+    const failure = normalizeError(error);
+    if (
+      (failure.code === "stale" || failure.code === "stale_patch") &&
+      failure.generation !== undefined &&
+      opened
+    ) {
+      opened = { ...opened, generation: failure.generation };
+      void refresh();
+    }
+    showError(failure);
+  }
+
+  async function stagePath(relative: string) {
+    const current = opened;
+    if (!current || pending) return;
+    pending = "stage";
+    live = "正在暂存文件";
+    try {
+      const snapshot = await api.stageFiles(current.summary.path, [relative], current.generation, nextId());
+      if (opened?.summary.path !== current.summary.path) return;
+      banner = null;
+      applySnapshot(snapshot);
+      live = `已暂存 ${relative}`;
+    } catch (error) {
+      if (opened?.summary.path === current.summary.path) handleMutationError(error);
+    } finally {
+      pending = null;
+    }
+  }
+
+  async function unstagePath(relative: string) {
+    const current = opened;
+    if (!current || pending) return;
+    pending = "unstage";
+    live = "正在取消暂存";
+    try {
+      const snapshot = await api.unstageFiles(current.summary.path, [relative], current.generation, nextId());
+      if (opened?.summary.path !== current.summary.path) return;
+      banner = null;
+      applySnapshot(snapshot);
+      live = `已取消暂存 ${relative}`;
+    } catch (error) {
+      if (opened?.summary.path === current.summary.path) handleMutationError(error);
+    } finally {
+      pending = null;
+    }
+  }
+
+  async function stageHunk(hunk: DiffHunk) {
+    const current = opened;
+    const choice = selected;
+    const currentDiff = diff;
+    if (!current || !choice || !currentDiff || pending || !hunk.stageable) return;
+    pending = "hunk";
+    live = choice.side === "staged" ? "正在取消暂存代码块" : "正在暂存代码块";
+    try {
+      const file = current.snapshot.files.find((item) => item.path === choice.path);
+      const snapshot = await api.stageHunks(
+        current.summary.path,
+        choice.path,
+        choice.side === "staged",
+        [hunk.index],
+        currentDiff.snapshot,
+        current.generation,
+        nextId(),
+        file?.originalPath ?? null,
+      );
+      if (opened?.summary.path !== current.summary.path) return;
+      banner = null;
+      applySnapshot(snapshot);
+      live = choice.side === "staged" ? "已取消暂存所选代码块" : "已暂存所选代码块";
+    } catch (error) {
+      if (opened?.summary.path === current.summary.path) handleMutationError(error);
+    } finally {
+      pending = null;
+    }
+  }
+
+  async function loadMoreDiff() {
+    const current = opened;
+    const choice = selected;
+    const currentDiff = diff;
+    if (!current || !choice || !currentDiff || pending) return;
+    if (currentDiff.offset + currentDiff.lines.length >= currentDiff.totalLines) return;
+    pending = "diff";
+    try {
+      const file = current.snapshot.files.find((item) => item.path === choice.path);
+      const result = await api.loadDiff(
+        current.summary.path,
+        choice.path,
+        choice.side === "staged",
+        current.generation,
+        nextId(),
+        file?.originalPath ?? null,
+        currentDiff.offset + currentDiff.lines.length,
+        400,
+      );
+      if (opened?.summary.path !== current.summary.path) return;
+      if (selected?.path !== choice.path || selected.side !== choice.side) return;
+      const base = currentDiff.lines.length;
+      diff = {
+        ...result,
+        offset: currentDiff.offset,
+        lines: [...currentDiff.lines, ...result.lines],
+        hunks: mergeHunks(currentDiff.hunks, result.hunks, base),
+        totalLines: result.totalLines,
+      };
+    } catch (error) {
+      if (opened?.summary.path === current.summary.path) handleMutationError(error);
+    } finally {
+      pending = null;
+    }
+  }
+
+  function mergeHunks(current: DiffHunk[], extra: DiffHunk[], base: number): DiffHunk[] {
+    const merged = new Map(current.map((hunk) => [hunk.index, hunk]));
+    for (const hunk of extra) {
+      if (!merged.has(hunk.index)) {
+        merged.set(hunk.index, { ...hunk, startLine: hunk.startLine + base });
+      }
+    }
+    return [...merged.values()];
+  }
+
+  async function commitLocal() {
+    const current = opened;
+    if (!current || pending) return;
+    const message = draft;
+    if (!message.trim()) {
+      banner = "请先填写提交说明。";
+      live = banner;
+      return;
+    }
+    if (commitScope(branchText, current.snapshot.files).paths.length === 0) {
+      banner = "暂存区是空的，没有可以提交的内容。";
+      live = banner;
+      return;
+    }
+    pending = "commit";
+    live = "正在创建本地提交";
+    try {
+      await flushDraft(current.summary.path);
+      const result = await api.commitChanges(current.summary.path, message, current.generation, nextId());
+      if (opened?.summary.path !== current.summary.path) return;
+      if (result.pushed) {
+        banner = "本地提交不应触发推送，请刷新后确认远程没有变化。";
+        live = banner;
+      }
+      draft = "";
+      drafts.load(current.summary.path, "");
+      opened = { ...opened, snapshot: result.snapshot, generation: result.generation, draft: "" };
+      selected = selectionAfterEdit(result.snapshot.files, selected);
+      banner = result.pushed ? banner : null;
+      live = result.summary;
+      await loadSelectedDiff();
+    } catch (error) {
+      if (opened?.summary.path === current.summary.path) handleMutationError(error);
+    } finally {
+      pending = null;
+    }
   }
 
   async function addRepo() {
@@ -342,15 +521,23 @@
 
   function focusSearch(event: KeyboardEvent) {
     const key = event.key.toLowerCase();
-    if (!(event.metaKey || event.ctrlKey) || key !== "k") return;
-    event.preventDefault();
-    document.getElementById("repo-search")?.focus();
+    if ((event.metaKey || event.ctrlKey) && key === "k") {
+      event.preventDefault();
+      document.getElementById("repo-search")?.focus();
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !confirmPath) {
+      event.preventDefault();
+      void commitLocal();
+    }
   }
 
   onMount(() => {
     let stopFocus = () => {};
     let stopBlur = () => {};
     let stopRepo = () => {};
+    let stopCommit = () => {};
+    let stopSearch = () => {};
     const keyListener = (event: KeyboardEvent) => focusSearch(event);
     window.addEventListener("keydown", keyListener);
     void (async () => {
@@ -360,6 +547,12 @@
       });
       stopBlur = await listenEvent("window-blurred", () => {
         windowFocused = false;
+      });
+      stopSearch = await listenEvent("menu-search", () => {
+        document.getElementById("repo-search")?.focus();
+      });
+      stopCommit = await listenEvent("menu-commit", () => {
+        void commitLocal();
       });
       stopRepo = await listenEvent<RepoChanged>("repo-changed", (event) => {
         if (!opened || event.path !== opened.summary.path) return;
@@ -379,6 +572,8 @@
       stopFocus();
       stopBlur();
       stopRepo();
+      stopCommit();
+      stopSearch();
     };
   });
 </script>
@@ -452,8 +647,26 @@
     {/if}
     <section class="files" aria-label="改动与提交">
       {#if opened}
-        <FileList files={opened.snapshot.files} {selected} onSelect={selectFile} />
-        <CommitDraft branch={branchText} value={draft} disabled={false} onInput={onDraftInput} onBlur={() => void flushDraft(drafts.path)} />
+        <FileList
+          files={opened.snapshot.files}
+          {selected}
+          query={fileQuery}
+          disabled={pending !== null}
+          onQuery={(value) => (fileQuery = value)}
+          onSelect={selectFile}
+          onStage={stagePath}
+          onUnstage={unstagePath}
+        />
+        <CommitDraft
+          branch={branchText}
+          scope={scope.label}
+          paths={scope.paths}
+          value={draft}
+          disabled={pending !== null}
+          onInput={onDraftInput}
+          onBlur={() => void flushDraft(drafts.path)}
+          onCommit={commitLocal}
+        />
       {:else}
         <div class="empty">
           <strong>打开一个仓库</strong>
@@ -474,7 +687,15 @@
       onpointerdown={(event) => startResize(event, "files")}
       onkeydown={(event) => resizeKey(event, "files")}
     ></div>
-    <DiffView selection={selected} {diff} error={diffError} loading={diffLoading} />
+    <DiffView
+      selection={selected}
+      {diff}
+      error={diffError}
+      loading={diffLoading}
+      disabled={pending !== null}
+      onStageHunk={stageHunk}
+      onLoadMore={loadMoreDiff}
+    />
   </div>
 </div>
 

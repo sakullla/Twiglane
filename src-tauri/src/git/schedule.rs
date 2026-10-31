@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, OwnedMutexGuard, Semaphore};
 
 use crate::error::AppError;
 use crate::git::runner::{ProcessOutput, ProcessRunner, RunRequest, RunnerError};
@@ -25,6 +25,18 @@ pub struct GitJob {
     pub generation: u64,
     pub program: PathBuf,
     pub args: Vec<std::ffi::OsString>,
+    pub stdin: Option<Vec<u8>>,
+    pub truncate_stdout: bool,
+    pub output_limit: Option<usize>,
+}
+
+pub struct CommandSpec {
+    pub program: PathBuf,
+    pub args: Vec<std::ffi::OsString>,
+    pub stdin: Option<Vec<u8>>,
+    pub truncate_stdout: bool,
+    pub output_limit: Option<usize>,
+    pub writes: bool,
 }
 
 #[derive(Debug)]
@@ -34,7 +46,7 @@ pub struct ScheduledOutput {
 }
 
 struct RepoLane {
-    write: Mutex<()>,
+    write: Arc<Mutex<()>>,
     generation: AtomicU64,
 }
 
@@ -112,8 +124,10 @@ impl<R: ProcessRunner> GitScheduler<R> {
                 args: job.args,
                 extra_env: self.extra_env.clone(),
                 timeout: self.timeout,
-                output_limit: self.output_limit,
+                output_limit: job.output_limit.unwrap_or(self.output_limit),
                 shutdown: self.shutdown.clone(),
+                stdin: job.stdin,
+                truncate_stdout: job.truncate_stdout,
             })
             .await;
         if job.kind == JobKind::Write {
@@ -138,11 +152,91 @@ impl<R: ProcessRunner> GitScheduler<R> {
             .entry(repo_key.to_string())
             .or_insert_with(|| {
                 Arc::new(RepoLane {
-                    write: Mutex::new(()),
+                    write: Arc::new(Mutex::new(())),
                     generation: AtomicU64::new(1),
                 })
             })
             .clone()
+    }
+}
+
+pub struct WriteGuard<'a, R: ProcessRunner> {
+    scheduler: &'a GitScheduler<R>,
+    lane: Arc<RepoLane>,
+    _write: OwnedMutexGuard<()>,
+    _request: RequestGuard<'a>,
+    wrote: bool,
+}
+
+impl<'a, R: ProcessRunner> WriteGuard<'a, R> {
+    pub async fn run(&mut self, spec: CommandSpec) -> Result<ProcessOutput, AppError> {
+        if self.scheduler.shutdown.is_cancelled() {
+            return Err(AppError::new("cancelled", "操作已取消。"));
+        }
+        if spec.writes {
+            self.wrote = true;
+        }
+        let output = self
+            .scheduler
+            .runner
+            .run(RunRequest {
+                program: spec.program,
+                args: spec.args,
+                extra_env: self.scheduler.extra_env.clone(),
+                timeout: self.scheduler.timeout,
+                output_limit: spec.output_limit.unwrap_or(self.scheduler.output_limit),
+                shutdown: self.scheduler.shutdown.clone(),
+                stdin: spec.stdin,
+                truncate_stdout: spec.truncate_stdout,
+            })
+            .await;
+        map_runner(output)
+    }
+
+    pub fn finish(mut self) -> u64 {
+        if self.wrote {
+            self.wrote = false;
+            self.lane.generation.fetch_add(1, Ordering::SeqCst) + 1
+        } else {
+            self.lane.generation.load(Ordering::SeqCst)
+        }
+    }
+}
+
+impl<R: ProcessRunner> Drop for WriteGuard<'_, R> {
+    fn drop(&mut self) {
+        if self.wrote {
+            self.lane.generation.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl<R: ProcessRunner> GitScheduler<R> {
+    pub async fn lock_write(
+        &self,
+        repo_key: &str,
+        request_id: u64,
+        generation: u64,
+    ) -> Result<WriteGuard<'_, R>, AppError> {
+        if self.shutdown.is_cancelled() {
+            return Err(AppError::new("cancelled", "操作已取消。"));
+        }
+        let request = RequestGuard::enter(&self.inflight, request_id)?;
+        let lane = self.lane(repo_key);
+        let write = lane.write.clone().lock_owned().await;
+        let current = lane.generation.load(Ordering::SeqCst);
+        if current != generation {
+            return Err(
+                AppError::new("stale", "仓库状态已变化，请查看刷新后的结果。").with_generation(current)
+            );
+        }
+        Ok(WriteGuard {
+            scheduler: self,
+            lane,
+            _write: write,
+            _request: request,
+            wrote: false,
+        })
     }
 }
 
@@ -223,6 +317,7 @@ mod tests {
                 exit_code: 0,
                 stdout: Vec::new(),
                 stderr: Vec::new(),
+                stdout_truncated: false,
             })
         }
     }
@@ -245,6 +340,9 @@ mod tests {
             generation,
             program: PathBuf::from("git"),
             args: vec!["status".into()],
+            stdin: None,
+            truncate_stdout: false,
+            output_limit: None,
         }
     }
 

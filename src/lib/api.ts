@@ -1,5 +1,6 @@
 import { normalizeError } from "./errors";
 import type {
+  CommitResult,
   DiffResponse,
   GitInfo,
   OpenedRepository,
@@ -60,14 +61,46 @@ export const api = {
     staged: boolean,
     generation: number,
     requestId: number,
+    original: string | null = null,
+    offset = 0,
+    limit = 0,
   ) =>
     invoke<DiffResponse>("load_diff", {
       path,
       relative,
+      original,
       staged,
       generation,
       requestId,
+      offset,
+      limit,
     }),
+  stageFiles: (path: string, paths: string[], generation: number, requestId: number) =>
+    invoke<StatusSnapshot>("stage_files", { path, paths, generation, requestId }),
+  unstageFiles: (path: string, paths: string[], generation: number, requestId: number) =>
+    invoke<StatusSnapshot>("unstage_files", { path, paths, generation, requestId }),
+  stageHunks: (
+    path: string,
+    relative: string,
+    staged: boolean,
+    hunks: number[],
+    snapshot: string,
+    generation: number,
+    requestId: number,
+    original: string | null = null,
+  ) =>
+    invoke<StatusSnapshot>("stage_hunks", {
+      path,
+      relative,
+      original,
+      staged,
+      hunks,
+      snapshot,
+      generation,
+      requestId,
+    }),
+  commitChanges: (path: string, message: string, generation: number, requestId: number) =>
+    invoke<CommitResult>("commit_changes", { path, message, generation, requestId }),
   setTheme: (theme: Theme) => invoke<void>("set_theme", { theme }),
   setPanelWidths: (widths: PanelWidths) => invoke<PanelWidths>("set_panel_widths", { widths }),
   saveDraft: (path: string, message: string) => invoke<void>("save_draft", { path, message }),

@@ -1,6 +1,7 @@
 use crate::error::AppError;
 use crate::model::{BranchInfo, ChangeKind, FileChange, StatusSnapshot};
 
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum DiffBody {
     Empty,
@@ -78,6 +79,7 @@ pub fn parse_status(bytes: &[u8]) -> Result<StatusSnapshot, AppError> {
     })
 }
 
+#[cfg(test)]
 pub fn classify_diff(bytes: &[u8]) -> Result<DiffBody, AppError> {
     let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
         AppError::new(

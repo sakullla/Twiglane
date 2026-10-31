@@ -17,6 +17,10 @@
     "allow-forget-recent",
     "allow-refresh-status",
     "allow-load-diff",
+    "allow-stage-files",
+    "allow-unstage-files",
+    "allow-stage-hunks",
+    "allow-commit-changes",
     "allow-set-theme",
     "allow-set-panel-widths",
     "allow-save-draft"

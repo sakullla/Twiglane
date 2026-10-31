@@ -57,12 +57,49 @@ export interface StatusSnapshot {
   files: FileChange[];
 }
 
+export interface DiffLine {
+  kind: "add" | "del" | "context" | "hunk" | "meta" | "nonewline" | string;
+  text: string;
+  oldNo: number | null;
+  newNo: number | null;
+  hunkIndex: number | null;
+}
+
+export interface DiffHunk {
+  index: number;
+  header: string;
+  complete: boolean;
+  stageable: boolean;
+  startLine: number;
+  lineCount: number;
+}
+
 export interface DiffResponse {
   generation: number;
   path: string;
   staged: boolean;
   binary: boolean;
   text: string | null;
+  summary: string;
+  additions: number;
+  deletions: number;
+  complete: boolean;
+  truncated: boolean;
+  snapshot: string;
+  hunks: DiffHunk[];
+  lines: DiffLine[];
+  offset: number;
+  totalLines: number;
+}
+
+export interface CommitResult {
+  oid: string;
+  generation: number;
+  branch: string;
+  summary: string;
+  files: string[];
+  pushed: boolean;
+  snapshot: StatusSnapshot;
 }
 
 export interface OpenedRepository {

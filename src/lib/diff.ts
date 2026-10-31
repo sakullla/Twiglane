@@ -28,3 +28,82 @@ export function diffLines(text: string): string[] {
   if (lines.at(-1) === "") lines.pop();
   return lines;
 }
+
+export interface SideCell {
+  text: string;
+  kind: DiffLineKind | "empty";
+  no: number | null;
+}
+
+export interface SideRow {
+  left: SideCell | null;
+  right: SideCell | null;
+  span: boolean;
+  hunkIndex: number | null;
+  showStage: boolean;
+}
+
+export interface ViewLine {
+  kind: string;
+  text: string;
+  oldNo: number | null;
+  newNo: number | null;
+  hunkIndex: number | null;
+}
+
+export function toSideRows(lines: ViewLine[]): SideRow[] {
+  const rows: SideRow[] = [];
+  let pending: SideRow[] = [];
+  const flush = () => {
+    rows.push(...pending);
+    pending = [];
+  };
+  for (const line of lines) {
+    if (line.kind === "hunk" || line.kind === "meta" || line.kind === "nonewline") {
+      flush();
+      rows.push({
+        left: { text: line.text, kind: line.kind === "nonewline" ? "meta" : (line.kind as DiffLineKind), no: line.oldNo },
+        right: { text: line.text, kind: line.kind === "nonewline" ? "meta" : (line.kind as DiffLineKind), no: line.newNo },
+        span: true,
+        hunkIndex: line.hunkIndex,
+        showStage: line.kind === "hunk",
+      });
+      continue;
+    }
+    if (line.kind === "del") {
+      pending.push({
+        left: { text: line.text, kind: "del", no: line.oldNo },
+        right: null,
+        span: false,
+        hunkIndex: line.hunkIndex,
+        showStage: false,
+      });
+      continue;
+    }
+    if (line.kind === "add") {
+      const slot = pending.find((row) => row.right === null);
+      if (slot) {
+        slot.right = { text: line.text, kind: "add", no: line.newNo };
+      } else {
+        rows.push({
+          left: null,
+          right: { text: line.text, kind: "add", no: line.newNo },
+          span: false,
+          hunkIndex: line.hunkIndex,
+          showStage: false,
+        });
+      }
+      continue;
+    }
+    flush();
+    rows.push({
+      left: { text: line.text, kind: "context", no: line.oldNo },
+      right: { text: line.text, kind: "context", no: line.newNo },
+      span: false,
+      hunkIndex: line.hunkIndex,
+      showStage: false,
+    });
+  }
+  flush();
+  return rows;
+}

@@ -135,12 +135,56 @@ pub struct StatusSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct DiffLine {
+    pub kind: String,
+    pub text: String,
+    pub old_no: Option<u32>,
+    pub new_no: Option<u32>,
+    pub hunk_index: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffHunk {
+    pub index: u32,
+    pub header: String,
+    pub complete: bool,
+    pub stageable: bool,
+    pub start_line: u32,
+    pub line_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct DiffResponse {
     pub generation: u64,
     pub path: String,
     pub staged: bool,
     pub binary: bool,
     pub text: Option<String>,
+    pub summary: String,
+    pub additions: u64,
+    pub deletions: u64,
+    pub complete: bool,
+    pub truncated: bool,
+    pub snapshot: String,
+    pub hunks: Vec<DiffHunk>,
+    pub lines: Vec<DiffLine>,
+    pub offset: u32,
+    pub total_lines: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitResult {
+    pub oid: String,
+    pub generation: u64,
+    pub branch: String,
+    pub summary: String,
+    pub files: Vec<String>,
+    /// Local commit never pushes. The flag stays false so the two actions stay distinct.
+    pub pushed: bool,
+    pub snapshot: StatusSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

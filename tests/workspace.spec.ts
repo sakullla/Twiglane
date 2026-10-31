@@ -5,8 +5,9 @@ import { BRAND } from "../src/lib/brand";
 import { classifyDiffLine } from "../src/lib/diff";
 import { DraftBuffer } from "../src/lib/draft";
 import { normalizeError } from "../src/lib/errors";
-import { branchLabel, gitInstallHint, groupFiles, retainSelection, syncLabel } from "../src/lib/labels";
-import { clampWidth, nextIndex, shouldPoll } from "../src/lib/layout";
+import { toSideRows } from "../src/lib/diff";
+import { branchLabel, commitScope, filterRows, gitInstallHint, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "../src/lib/labels";
+import { clampWidth, nextIndex, shouldPoll, visibleRange } from "../src/lib/layout";
 import { filterRecent } from "../src/lib/recent";
 import type { BranchInfo, FileChange, RecentRepo } from "../src/lib/types";
 
@@ -72,6 +73,21 @@ describe("工作区状态", () => {
     expect(groups.staged.map((file) => file.path)).toEqual(["new.txt"]);
     expect(retainSelection(files, { path: "src/app.ts", side: "unstaged" })?.path).toBe("src/app.ts");
     expect(retainSelection(files, { path: "src/app.ts", side: "staged" })).toBeNull();
+    expect(selectionAfterEdit(files, { path: "new.txt", side: "unstaged" })?.side).toBe("staged");
+    expect(filterRows(groups.unstaged.concat(groups.staged), "app").map((row) => row.path)).toEqual(["src/app.ts"]);
+    expect(commitScope("main", files).label).toBe("提交到 main · 1 个已暂存文件");
+    expect(commitScope("main", files).paths).toEqual(["new.txt"]);
+    const long = Array.from({ length: 1000 }, (_, index) => index);
+    expect(visibleRange(long.length, 800, 200, 40).start).toBeGreaterThan(0);
+    expect(visibleRange(long.length, 800, 200, 40).end).toBeLessThan(long.length);
+    const paired = toSideRows([
+      { kind: "hunk", text: "@@ -1 +1 @@", oldNo: null, newNo: null, hunkIndex: 0 },
+      { kind: "del", text: "-old", oldNo: 1, newNo: null, hunkIndex: 0 },
+      { kind: "add", text: "+new", oldNo: null, newNo: 1, hunkIndex: 0 },
+    ]);
+    expect(paired[1]?.left?.text).toBe("-old");
+    expect(paired[1]?.right?.text).toBe("+new");
+    expect(paired[0]?.showStage).toBe(true);
     expect(nextIndex(-1, "ArrowDown", 2)).toBe(0);
     expect(nextIndex(0, "ArrowUp", 2)).toBe(0);
     expect(nextIndex(1, "End", 2)).toBe(1);

@@ -48,25 +48,150 @@ pub fn status_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     )
 }
 
-pub fn diff_command(git: &Path, root: &Path, relative: &Path, staged: bool) -> (PathBuf, Vec<OsString>) {
-    let mut args = vec![
-        OsString::from("--literal-pathspecs"),
-        OsString::from("-C"),
-        root.as_os_str().to_os_string(),
-        OsString::from("--no-optional-locks"),
-        OsString::from("diff"),
-    ];
-    if staged {
+pub fn file_diff_command(
+    git: &Path,
+    root: &Path,
+    paths: &[PathBuf],
+    staged: bool,
+    numstat: bool,
+    untracked: bool,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.push(OsString::from("diff"));
+    if untracked {
+        args.push(OsString::from("--no-index"));
+    } else if staged {
         args.push(OsString::from("--cached"));
     }
     args.extend([
         OsString::from("--no-color"),
         OsString::from("--no-ext-diff"),
-        OsString::from("--unified=3"),
+        OsString::from("--no-textconv"),
+        OsString::from("--find-renames"),
+    ]);
+    if numstat {
+        args.push(OsString::from("--numstat"));
+        args.push(OsString::from("-z"));
+    } else {
+        args.push(OsString::from("--unified=3"));
+    }
+    if untracked {
+        args.push(OsString::from(null_device()));
+        if let Some(path) = paths.first() {
+            args.push(path.as_os_str().to_os_string());
+        }
+    } else {
+        args.push(OsString::from("--"));
+        for path in paths {
+            args.push(path.as_os_str().to_os_string());
+        }
+    }
+    (git.to_path_buf(), args)
+}
+
+pub fn add_command(git: &Path, root: &Path, paths: &[PathBuf]) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.push(OsString::from("add"));
+    args.push(OsString::from("--"));
+    for path in paths {
+        args.push(path.as_os_str().to_os_string());
+    }
+    (git.to_path_buf(), args)
+}
+
+pub fn restore_staged_command(git: &Path, root: &Path, paths: &[PathBuf]) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("restore"),
+        OsString::from("--staged"),
+        OsString::from("--source=HEAD"),
+        OsString::from("--"),
+    ]);
+    for path in paths {
+        args.push(path.as_os_str().to_os_string());
+    }
+    (git.to_path_buf(), args)
+}
+
+pub fn unstage_unborn_command(git: &Path, root: &Path, paths: &[PathBuf]) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("rm"),
+        OsString::from("--cached"),
+        OsString::from("--ignore-unmatch"),
+        OsString::from("--"),
+    ]);
+    for path in paths {
+        args.push(path.as_os_str().to_os_string());
+    }
+    (git.to_path_buf(), args)
+}
+
+pub fn apply_cached_command(git: &Path, root: &Path, reverse: bool, check: bool) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("apply"),
+        OsString::from("--cached"),
+        OsString::from("--whitespace=nowarn"),
+    ]);
+    if reverse {
+        args.push(OsString::from("--reverse"));
+    }
+    if check {
+        args.push(OsString::from("--check"));
+    }
+    (git.to_path_buf(), args)
+}
+
+pub fn commit_command(git: &Path, root: &Path, message: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("commit"),
+        OsString::from("-m"),
+        OsString::from(message),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn head_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([OsString::from("rev-parse"), OsString::from("HEAD")]);
+    (git.to_path_buf(), args)
+}
+
+pub fn identity_command(git: &Path, root: &Path, variable: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([OsString::from("var"), OsString::from(variable)]);
+    (git.to_path_buf(), args)
+}
+
+pub fn ls_files_command(git: &Path, root: &Path, relative: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("ls-files"),
+        OsString::from("-z"),
         OsString::from("--"),
         relative.as_os_str().to_os_string(),
     ]);
     (git.to_path_buf(), args)
+}
+
+fn repo_prefix(root: &Path, optional_locks: bool) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("-c"),
+        OsString::from("core.quotePath=false"),
+        OsString::from("--literal-pathspecs"),
+        OsString::from("-C"),
+        root.as_os_str().to_os_string(),
+    ];
+    if optional_locks {
+        args.push(OsString::from("--no-optional-locks"));
+    }
+    args
+}
+
+fn null_device() -> &'static str {
+    if cfg!(windows) { "NUL" } else { "/dev/null" }
 }
 
 // cdylib 不会把仅测试调用算作可达，避免 dead_code 挡住 clippy。
@@ -98,9 +223,10 @@ mod tests {
         assert_structured(git, &init_args);
         assert_eq!(init_args[1], root.as_os_str());
         assert_eq!(init_args[2], "init");
-        let relative = Path::new("dir/file;name.txt");
-        let (_program, diff_args) = diff_command(git, root, relative, false);
+        let relative = PathBuf::from("dir/file;name.txt");
+        let (_program, diff_args) = file_diff_command(git, root, std::slice::from_ref(&relative), false, false, false);
         assert_eq!(diff_args.last().unwrap(), relative.as_os_str());
         assert!(diff_args.iter().any(|arg| arg == "--"));
+        assert!(diff_args.windows(2).any(|pair| pair[0] == "-c" && pair[1] == "core.quotePath=false"));
     }
 }

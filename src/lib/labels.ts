@@ -63,6 +63,48 @@ export function flattenRows(files: FileChange[]): FileRow[] {
   return [...groups.unstaged, ...groups.staged];
 }
 
+export function filterRows<T extends { path: string; originalPath: string | null }>(
+  rows: T[],
+  query: string,
+): T[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return rows;
+  return rows.filter(
+    (row) =>
+      row.path.toLowerCase().includes(needle) ||
+      (row.originalPath ?? "").toLowerCase().includes(needle),
+  );
+}
+
+export function stagedFiles(files: FileChange[]): FileChange[] {
+  return files.filter((file) => !file.unmerged && file.staged !== "none");
+}
+
+export function commitScope(branch: string, files: FileChange[]): { label: string; paths: string[] } {
+  const staged = stagedFiles(files);
+  const paths = staged.map((file) =>
+    file.originalPath ? `${file.originalPath} → ${file.path}` : file.path,
+  );
+  if (paths.length === 0) {
+    return { label: `提交到 ${branch} · 暂存区是空的`, paths };
+  }
+  return { label: `提交到 ${branch} · ${paths.length} 个已暂存文件`, paths };
+}
+
+export function selectionAfterEdit(
+  files: FileChange[],
+  selected: { path: string; side: FileRow["side"] } | null,
+): { path: string; side: FileRow["side"] } | null {
+  if (!selected) return null;
+  return (
+    retainSelection(files, selected) ??
+    retainSelection(files, {
+      path: selected.path,
+      side: selected.side === "staged" ? "unstaged" : "staged",
+    })
+  );
+}
+
 export function retainSelection(
   files: FileChange[],
   selected: { path: string; side: FileRow["side"] } | null,

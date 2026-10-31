@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const invoke = vi.hoisted(() => vi.fn(async () => ({ ok: true })));
+const invoke = vi.hoisted(() =>
+  vi.fn(async (_command: string, _args?: Record<string, unknown>) => ({ ok: true })),
+);
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke,
@@ -31,9 +33,12 @@ describe("Tauri 命令参数", () => {
     expect(invoke).toHaveBeenNthCalledWith(5, "load_diff", {
       path: "/repo",
       relative: "a b.txt",
+      original: null,
       staged: false,
       generation: 8,
       requestId: 9,
+      offset: 0,
+      limit: 0,
     });
     for (const call of invoke.mock.calls) {
       expect(call[1]).not.toHaveProperty("request_id");

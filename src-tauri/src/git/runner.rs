@@ -3,7 +3,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::shutdown::Shutdown;
@@ -16,6 +16,7 @@ pub struct ProcessOutput {
     pub exit_code: i32,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    pub stdout_truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +35,9 @@ pub struct RunRequest {
     pub timeout: Duration,
     pub output_limit: usize,
     pub shutdown: Arc<Shutdown>,
+    pub stdin: Option<Vec<u8>>,
+    /// When set, stdout stops at `output_limit` and the process is killed instead of failing.
+    pub truncate_stdout: bool,
 }
 
 pub trait ProcessRunner: Send + Sync {
@@ -69,6 +73,8 @@ impl RealRunner {
             timeout: self.timeout,
             output_limit: self.output_limit,
             shutdown,
+            stdin: None,
+            truncate_stdout: false,
         }
     }
 }
@@ -86,31 +92,57 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
     let mut command = Command::new(&request.program);
     command
         .args(&request.args)
-        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .env("GIT_TERMINAL_PROMPT", "0");
+    if request.stdin.is_some() {
+        command.stdin(Stdio::piped());
+    } else {
+        command.stdin(Stdio::null());
+    }
     for (key, value) in &request.extra_env {
         command.env(key, value);
     }
     let mut child = command.spawn().map_err(|error| RunnerError::Spawn(error.to_string()))?;
-    let stdout = child.stdout.take().ok_or_else(|| RunnerError::Io("缺少 stdout".into()))?;
-    let stderr = child.stderr.take().ok_or_else(|| RunnerError::Io("缺少 stderr".into()))?;
-    let mut stdout_read = Box::pin(read_limited(stdout, request.output_limit));
-    let mut stderr_read = Box::pin(read_limited(stderr, request.output_limit));
+    if let Some(bytes) = request.stdin {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| RunnerError::Io("缺少 stdin".into()))?;
+        stdin
+            .write_all(&bytes)
+            .await
+            .map_err(|error| RunnerError::Io(error.to_string()))?;
+    }
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| RunnerError::Io("缺少 stdout".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| RunnerError::Io("缺少 stderr".into()))?;
+    let mut stdout_read = Box::pin(read_capped(stdout, request.output_limit, request.truncate_stdout));
+    let mut stderr_read = Box::pin(read_capped(stderr, request.output_limit, false));
     let mut stdout_buf = None;
     let mut stderr_buf = None;
+    let mut stdout_truncated = false;
     let mut status = None;
     let sleep = tokio::time::sleep(request.timeout);
     tokio::pin!(sleep);
     loop {
         tokio::select! {
             result = &mut stdout_read, if stdout_buf.is_none() => {
-                stdout_buf = Some(result?);
+                let (buf, truncated) = result?;
+                if truncated {
+                    stdout_truncated = true;
+                    let _ = child.kill().await;
+                }
+                stdout_buf = Some(buf);
             }
             result = &mut stderr_read, if stderr_buf.is_none() => {
-                stderr_buf = Some(result?);
+                stderr_buf = Some(result?.0);
             }
             result = child.wait(), if status.is_none() => {
                 status = Some(result.map_err(|error| RunnerError::Io(error.to_string()))?);
@@ -135,10 +167,11 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
         exit_code: status.code().unwrap_or(-1),
         stdout: stdout_buf.unwrap_or_default(),
         stderr: stderr_buf.unwrap_or_default(),
+        stdout_truncated,
     })
 }
 
-async fn read_limited<R>(mut reader: R, limit: usize) -> Result<Vec<u8>, RunnerError>
+async fn read_capped<R>(mut reader: R, limit: usize, truncate: bool) -> Result<(Vec<u8>, bool), RunnerError>
 where
     R: AsyncRead + Unpin,
 {
@@ -150,10 +183,15 @@ where
             .await
             .map_err(|error| RunnerError::Io(error.to_string()))?;
         if read == 0 {
-            return Ok(buf);
+            return Ok((buf, false));
         }
         if buf.len().saturating_add(read) > limit {
-            return Err(RunnerError::OutputLimit);
+            if !truncate {
+                return Err(RunnerError::OutputLimit);
+            }
+            let room = limit.saturating_sub(buf.len());
+            buf.extend_from_slice(&chunk[..room]);
+            return Ok((buf, true));
         }
         buf.extend_from_slice(&chunk[..read]);
     }
@@ -191,6 +229,8 @@ mod tests {
             timeout: Duration::from_secs(10),
             output_limit: 1024,
             shutdown,
+            stdin: None,
+            truncate_stdout: false,
         })
         .await
         .unwrap_err();
@@ -217,6 +257,8 @@ mod tests {
             timeout: Duration::from_secs(10),
             output_limit: 1024,
             shutdown,
+            stdin: None,
+            truncate_stdout: false,
         })
         .await
         .unwrap_err();

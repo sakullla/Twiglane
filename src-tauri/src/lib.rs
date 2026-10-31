@@ -22,8 +22,8 @@ use crate::error::AppError;
 use crate::git::ops::{self, Backend};
 use crate::git::runner::RealRunner;
 use crate::model::{
-    DiffResponse, GitInfo, OpenedRepository, PanelWidths, RecentRepo, RepoChanged, SettingsDto,
-    StatusSnapshot, Theme,
+    CommitResult, DiffResponse, GitInfo, OpenedRepository, PanelWidths, RecentRepo, RepoChanged,
+    SettingsDto, StatusSnapshot, Theme,
 };
 use crate::shutdown::Shutdown;
 use crate::state::AppStore;
@@ -57,6 +57,10 @@ pub fn run() {
             forget_recent,
             refresh_status,
             load_diff,
+            stage_files,
+            unstage_files,
+            stage_hunks,
+            commit_changes,
             set_theme,
             set_panel_widths,
             save_draft
@@ -78,8 +82,17 @@ pub fn run() {
 
 fn install_menu(app: &tauri::App) -> tauri::Result<()> {
     let search = MenuItem::with_id(app, "focus-search", "搜索仓库", true, Some("CmdOrCtrl+K"))?;
-    let menu = Menu::with_items(app, &[&search])?;
+    let commit = MenuItem::with_id(app, "commit-local", "提交到本地", true, Some("CmdOrCtrl+Enter"))?;
+    let menu = Menu::with_items(app, &[&search, &commit])?;
     app.set_menu(menu)?;
+    app.on_menu_event(|app_handle, event| {
+        let name = match event.id().0.as_str() {
+            "focus-search" => "menu-search",
+            "commit-local" => "menu-commit",
+            _ => return,
+        };
+        let _ = app_handle.emit(name, ());
+    });
     Ok(())
 }
 
@@ -240,16 +253,91 @@ async fn refresh_status(
     ops::refresh_status(state.inner(), &path, generation, request_id).await
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command(rename_all = "camelCase")]
 async fn load_diff(
     state: State<'_, Arc<Backend>>,
     path: String,
     relative: String,
+    original: Option<String>,
     staged: bool,
     generation: u64,
     request_id: u64,
+    offset: Option<u32>,
+    limit: Option<u32>,
 ) -> Result<DiffResponse, AppError> {
-    ops::load_diff(state.inner(), &path, &relative, staged, generation, request_id).await
+    crate::git::changes::load_diff(
+        state.inner(),
+        &path,
+        &relative,
+        original.as_deref(),
+        staged,
+        generation,
+        request_id,
+        offset.unwrap_or(0),
+        limit.unwrap_or(0),
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn stage_files(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    paths: Vec<String>,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    crate::git::changes::stage_files(state.inner(), &path, &paths, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn unstage_files(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    paths: Vec<String>,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    crate::git::changes::unstage_files(state.inner(), &path, &paths, generation, request_id).await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+async fn stage_hunks(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    relative: String,
+    original: Option<String>,
+    staged: bool,
+    hunks: Vec<u32>,
+    snapshot: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    crate::git::changes::stage_hunks(
+        state.inner(),
+        &path,
+        &relative,
+        original.as_deref(),
+        staged,
+        &hunks,
+        &snapshot,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn commit_changes(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    message: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<CommitResult, AppError> {
+    crate::git::changes::commit_index(state.inner(), &path, &message, generation, request_id).await
 }
 
 #[tauri::command]
@@ -349,6 +437,10 @@ mod ipc_contract {
             "open_repository",
             "refresh_status",
             "load_diff",
+            "stage_files",
+            "unstage_files",
+            "stage_hunks",
+            "commit_changes",
         ] {
             let payload = payload_after(command);
             assert!(payload.contains("requestId"), "{command}: {payload}");
@@ -375,7 +467,11 @@ mod ipc_contract {
                 super::create_repository,
                 super::open_repository,
                 super::refresh_status,
-                super::load_diff
+                super::load_diff,
+                super::stage_files,
+                super::unstage_files,
+                super::stage_hunks,
+                super::commit_changes
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("ipc test app");
@@ -406,6 +502,45 @@ mod ipc_contract {
                     "path": "/tmp/unused",
                     "relative": "a",
                     "staged": false,
+                    "generation": 1,
+                    "request_id": 1
+                }),
+            ),
+            (
+                "stage_files",
+                serde_json::json!({
+                    "path": "/tmp/unused",
+                    "paths": ["a"],
+                    "generation": 1,
+                    "request_id": 1
+                }),
+            ),
+            (
+                "unstage_files",
+                serde_json::json!({
+                    "path": "/tmp/unused",
+                    "paths": ["a"],
+                    "generation": 1,
+                    "request_id": 1
+                }),
+            ),
+            (
+                "stage_hunks",
+                serde_json::json!({
+                    "path": "/tmp/unused",
+                    "relative": "a",
+                    "staged": false,
+                    "hunks": [0],
+                    "snapshot": "abc",
+                    "generation": 1,
+                    "request_id": 1
+                }),
+            ),
+            (
+                "commit_changes",
+                serde_json::json!({
+                    "path": "/tmp/unused",
+                    "message": "note",
                     "generation": 1,
                     "request_id": 1
                 }),

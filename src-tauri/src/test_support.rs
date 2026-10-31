@@ -58,10 +58,14 @@ impl GitFixture {
     }
 
     pub fn backend(&self) -> Backend {
-        self.backend_with_extra_env(Vec::new())
+        self.backend_with_limit(1024 * 1024, Vec::new())
     }
 
     pub fn backend_with_extra_env(&self, extra: Vec<(OsString, OsString)>) -> Backend {
+        self.backend_with_limit(1024 * 1024, extra)
+    }
+
+    pub fn backend_with_limit(&self, limit: usize, extra: Vec<(OsString, OsString)>) -> Backend {
         let mut extra_env = vec![
             (OsString::from("GIT_CONFIG_NOSYSTEM"), OsString::from("1")),
             (
@@ -90,7 +94,7 @@ impl GitFixture {
         let store = AppStore::open(self.root.path().join("state.json"));
         let runner = RealRunner {
             timeout: Duration::from_secs(30),
-            output_limit: 1024 * 1024,
+            output_limit: limit,
             extra_env,
         };
         Backend::new(store, runner, std::sync::Arc::new(Shutdown::new()))

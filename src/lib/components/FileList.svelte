@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { visibleRange } from "../layout";
+  import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
   import { filterRows, groupFiles, rowLabel } from "../labels";
   import type { FileChange, FileRow, FileSelection } from "../types";
 
@@ -21,23 +21,26 @@
   let rows = $derived(filterRows([...groups.unstaged, ...groups.staged], query));
   let scrollTop = $state(0);
   let viewport = $state(0);
-  let range = $derived(visibleRange(rows.length, scrollTop, viewport, ROW_HEIGHT));
+  let list = $state<HTMLDivElement | null>(null);
+  let range = $derived(
+    visibleRange(rows.length, scrollTop, viewport > 0 ? viewport : scrollTop > 0 ? ROW_HEIGHT : 0, ROW_HEIGHT),
+  );
   let visible = $derived(rows.slice(range.start, range.end));
 
+  function reveal(index: number) {
+    const height = viewport > 0 ? viewport : (list?.clientHeight ?? 0);
+    const next = scrollIndexIntoView(index, scrollTop, height, ROW_HEIGHT);
+    scrollTop = next;
+    if (list) list.scrollTop = next;
+  }
+
   function onKey(event: KeyboardEvent) {
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
     const current = rows.findIndex((row) => row.path === selected?.path && row.side === selected.side);
-    const move =
-      event.key === "ArrowDown"
-        ? Math.min(rows.length - 1, current < 0 ? 0 : current + 1)
-        : event.key === "ArrowUp"
-          ? Math.max(0, current < 0 ? 0 : current - 1)
-          : event.key === "Home"
-            ? 0
-            : event.key === "End"
-              ? rows.length - 1
-              : null;
-    if (move === null || rows.length === 0) return;
+    const move = nextIndex(current, event.key, rows.length);
+    if (move === null) return;
     event.preventDefault();
+    reveal(move);
     const row = rows[move];
     if (row) onSelect({ path: row.path, side: row.side });
   }
@@ -73,6 +76,7 @@
   role="listbox"
   aria-label="改动文件"
   tabindex="0"
+  bind:this={list}
   onkeydown={onKey}
   onscroll={(event) => (scrollTop = event.currentTarget.scrollTop)}
   bind:clientHeight={viewport}

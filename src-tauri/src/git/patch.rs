@@ -258,9 +258,11 @@ fn body_counts(lines: &[&str]) -> (u32, u32) {
         if body.starts_with('\\') {
             continue;
         }
-        if body.starts_with('+') && !body.starts_with("+++") {
+        // Preamble file headers are not in the hunk body. A leading '+' or '-' is the marker,
+        // so "+++ ..." and "--- ..." are added or deleted lines.
+        if body.starts_with('+') {
             new_seen = new_seen.saturating_add(1);
-        } else if body.starts_with('-') && !body.starts_with("---") {
+        } else if body.starts_with('-') {
             old_seen = old_seen.saturating_add(1);
         } else if body.starts_with(' ') || body.is_empty() {
             old_seen = old_seen.saturating_add(1);
@@ -296,7 +298,7 @@ fn hunk_display_lines(index: u32, header: &str, lines: &[&str]) -> Vec<DiffLine>
             });
             continue;
         }
-        if body.starts_with('+') && !body.starts_with("+++") {
+        if body.starts_with('+') {
             let current = new_no;
             new_no = new_no.saturating_add(1);
             display.push(DiffLine {
@@ -306,7 +308,7 @@ fn hunk_display_lines(index: u32, header: &str, lines: &[&str]) -> Vec<DiffLine>
                 new_no: Some(current),
                 hunk_index: Some(index),
             });
-        } else if body.starts_with('-') && !body.starts_with("---") {
+        } else if body.starts_with('-') {
             let current = old_no;
             old_no = old_no.saturating_add(1);
             display.push(DiffLine {
@@ -492,6 +494,51 @@ diff --git a/n.txt b/n.txt
         assert_ne!(left, right);
         assert_ne!(left, staged);
         assert_eq!(left.len(), 64);
+    }
+
+    #[test]
+    fn hunk_body_dash_and_plus_markers_are_stageable_changes() {
+        let raw = "\
+diff --git a/marks.txt b/marks.txt
+index 1111111..2222222 100644
+--- a/marks.txt
++++ b/marks.txt
+@@ -1,5 +1,5 @@
+ line 1
+--- dash
++++ plus
+ line 3
+ line 4
+ line 5
+@@ -12,7 +12,7 @@ line 11
+ line 12
+ line 13
+ line 14
+-keep
++other
+ line 16
+ line 17
+ line 18
+";
+        let parsed = parse_diff(raw.as_bytes(), false).unwrap();
+        assert!(parsed.hunks.iter().all(|hunk| hunk.complete));
+        assert_eq!(parsed.additions, 2);
+        assert_eq!(parsed.deletions, 2);
+        let first = &parsed.hunks[0];
+        assert_eq!(first.lines[2].kind, "del");
+        assert_eq!(first.lines[2].text, "--- dash");
+        assert_eq!(first.lines[2].old_no, Some(2));
+        assert_eq!(first.lines[2].new_no, None);
+        assert_eq!(first.lines[3].kind, "add");
+        assert_eq!(first.lines[3].text, "+++ plus");
+        assert_eq!(first.lines[3].old_no, None);
+        assert_eq!(first.lines[3].new_no, Some(2));
+        let patch = String::from_utf8(build_patch(&parsed, &[0]).unwrap()).unwrap();
+        assert!(patch.contains("--- a/marks.txt"));
+        assert!(patch.contains("+++ b/marks.txt"));
+        assert!(patch.contains("--- dash"));
+        assert!(patch.contains("+++ plus"));
+        assert!(!patch.contains("+other"));
     }
 
     #[test]

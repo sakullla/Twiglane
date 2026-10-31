@@ -14,7 +14,7 @@ use crate::git::patch::{
     build_patch, first_file_diff, parse_diff, parse_numstat, snapshot_token, view_lines, DIFF_PREVIEW_BYTES,
 };
 use crate::git::runner::ProcessOutput;
-use crate::git::schedule::{CommandSpec, JobKind, WriteGuard};
+use crate::git::schedule::{internal_request_id, CommandSpec, JobKind, WriteGuard};
 use crate::model::{CommitResult, DiffResponse, FileChange, StatusSnapshot, MAX_DRAFT_CHARS};
 use crate::redact::{redact_error_text, reject_secret_draft};
 
@@ -52,7 +52,7 @@ pub async fn load_diff(
         .execute(crate::git::schedule::GitJob {
             repo_key: key,
             kind: JobKind::Read,
-            request_id: request_id.wrapping_add(1),
+            request_id: internal_request_id(),
             generation,
             program,
             args,
@@ -71,7 +71,7 @@ pub async fn load_diff(
     let raw = first_file_diff(&scheduled.output.stdout);
     let truncated = scheduled.output.stdout_truncated || raw.len() != scheduled.output.stdout.len();
     let parsed = parse_diff(raw, truncated)?;
-    let counts = numstat_counts(backend, &git.path, &root, &paths, staged, untracked, generation, request_id.wrapping_add(2))
+    let counts = numstat_counts(backend, &git.path, &root, &paths, staged, untracked, generation, internal_request_id())
         .await?;
     response_from_diff(
         scheduled.generation,
@@ -104,7 +104,7 @@ pub async fn stage_files(
         backend,
         &repo_key(&root),
         JobKind::Write,
-        request_id.wrapping_add(1),
+        internal_request_id(),
         program,
         args,
         Some(status.generation),
@@ -114,7 +114,7 @@ pub async fn stage_files(
         return Err(classify_write("stage_failed", &scheduled.output, "暂存失败，暂存区保持原样。")
             .with_generation(scheduled.generation));
     }
-    read_status(backend, &root, scheduled.generation, request_id.wrapping_add(2)).await
+    read_status(backend, &root, scheduled.generation, internal_request_id()).await
 }
 
 pub async fn unstage_files(
@@ -153,7 +153,7 @@ pub async fn unstage_files(
         backend,
         &repo_key(&root),
         JobKind::Write,
-        request_id.wrapping_add(1),
+        internal_request_id(),
         program,
         args,
         Some(status.generation),
@@ -167,7 +167,7 @@ pub async fn unstage_files(
         )
         .with_generation(scheduled.generation));
     }
-    read_status(backend, &root, scheduled.generation, request_id.wrapping_add(2)).await
+    read_status(backend, &root, scheduled.generation, internal_request_id()).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -301,7 +301,7 @@ pub async fn stage_hunks(
         ));
     }
     let generation = guard.finish();
-    read_status(backend, &root, generation, request_id.wrapping_add(1)).await
+    read_status(backend, &root, generation, internal_request_id()).await
 }
 
 pub async fn commit_index(
@@ -346,14 +346,14 @@ pub async fn commit_index(
             "暂存区是空的，没有可以提交的内容。说明草稿未改动。",
         ));
     }
-    ensure_identity(backend, &git.path, &root, status.generation, request_id.wrapping_add(1)).await?;
+    ensure_identity(backend, &git.path, &root, status.generation).await?;
     ensure_no_index_lock(&root)?;
     let (program, args) = commit_command(&git.path, &root, message);
     let scheduled = run_git(
         backend,
         &repo_key(&root),
         JobKind::Write,
-        request_id.wrapping_add(3),
+        internal_request_id(),
         program,
         args,
         Some(status.generation),
@@ -368,7 +368,7 @@ pub async fn commit_index(
         backend,
         &repo_key(&root),
         JobKind::Read,
-        request_id.wrapping_add(4),
+        internal_request_id(),
         head_program,
         head_args,
         Some(scheduled.generation),
@@ -379,7 +379,7 @@ pub async fn commit_index(
             .with_generation(head.generation));
     }
     let oid = String::from_utf8_lossy(&head.output.stdout).trim().to_string();
-    let snapshot = read_status(backend, &root, head.generation, request_id.wrapping_add(5)).await?;
+    let snapshot = read_status(backend, &root, head.generation, internal_request_id()).await?;
     let branch = snapshot
         .branch
         .name
@@ -564,15 +564,14 @@ async fn ensure_identity(
     git: &Path,
     root: &Path,
     generation: u64,
-    request_id: u64,
 ) -> Result<(), AppError> {
-    for (offset, variable) in [(0_u64, "GIT_AUTHOR_IDENT"), (1, "GIT_COMMITTER_IDENT")] {
+    for variable in ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"] {
         let (program, args) = identity_command(git, root, variable);
         let scheduled = run_git(
             backend,
             &repo_key(root),
             JobKind::Read,
-            request_id.wrapping_add(offset),
+            internal_request_id(),
             program,
             args,
             Some(generation),
@@ -1228,5 +1227,177 @@ mod tests {
         assert_eq!(fs::read(repo.join(".git").join("index.lock")).unwrap(), b"locked");
         fs::remove_file(repo.join(".git").join("index.lock")).unwrap();
         assert!(git_bytes(&repo, &["diff", "--cached"]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn dash_and_plus_hunk_can_be_staged_without_the_other_hunk() {
+        let fixture = crate::test_support::git_fixture("dash-hunk");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Twiglane Test"]);
+        git(&repo, &["config", "user.email", "twiglane-test@example.com"]);
+        let mut lines: Vec<String> = (1..=20).map(|index| format!("line {index}")).collect();
+        lines[1] = "-- dash".to_string();
+        lines[14] = "keep".to_string();
+        fs::write(repo.join("demo.txt"), lines.join("\n") + "\n").unwrap();
+        git(&repo, &["add", "--", "demo.txt"]);
+        git(&repo, &["commit", "-m", "init"]);
+        lines[1] = "++ plus".to_string();
+        lines[14] = "CHANGED B".to_string();
+        fs::write(repo.join("demo.txt"), lines.join("\n") + "\n").unwrap();
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let diff = load_diff(&backend, &path, "demo.txt", None, false, generation, 2, 0, 0)
+            .await
+            .unwrap();
+        assert!(diff.lines.iter().any(|line| line.kind == "del" && line.text == "--- dash"));
+        assert!(diff.lines.iter().any(|line| line.kind == "add" && line.text == "+++ plus"));
+        assert!(diff.hunks.len() >= 2, "hunks {:?}", diff.hunks);
+        assert!(diff.hunks.iter().all(|hunk| hunk.complete && hunk.stageable));
+        let staged = stage_hunks(
+            &backend,
+            &path,
+            "demo.txt",
+            None,
+            false,
+            &[diff.hunks[0].index],
+            &diff.snapshot,
+            diff.generation,
+            3,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("hunk with ---/+++ was not stageable: {} {}", error.code, error.message));
+        let committed = commit_index(&backend, &path, "only markers", staged.generation, 4)
+            .await
+            .unwrap();
+        assert!(!committed.pushed);
+        let head = String::from_utf8(git_bytes(&repo, &["show", "HEAD:demo.txt"])).unwrap();
+        let work = String::from_utf8(fs::read(repo.join("demo.txt")).unwrap()).unwrap();
+        assert!(head.contains("++ plus\n"));
+        assert!(head.contains("keep\n"));
+        assert!(!head.contains("CHANGED B"));
+        assert!(work.contains("++ plus\n"));
+        assert!(work.contains("CHANGED B\n"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn next_user_request_is_not_blocked_by_an_in_flight_diff() {
+        let fixture = crate::test_support::git_fixture("request-gap");
+        let backend = std::sync::Arc::new(fixture.backend());
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("demo.txt"), "before\n").unwrap();
+        git(&repo, &["add", "--", "demo.txt"]);
+        git(&repo, &["commit", "-m", "init"]);
+        fs::write(repo.join("demo.txt"), "after\n").unwrap();
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let started = fixture.path().join("diff-started");
+        let release = fixture.path().join("diff-release");
+        let _release_guard = ReleaseFile(release.clone());
+        install_diff_shim(fixture.path(), &started, &release);
+        {
+            let mut locator = backend.git.lock().unwrap_or_else(|error| error.into_inner());
+            locator.set_resolved(crate::git::locate::ResolvedGit {
+                path: fixture.path().join("git-shim"),
+                version: "2.50.0".into(),
+                major: 2,
+                minor: 50,
+                below_baseline: false,
+            });
+        }
+
+        let first = spawn_diff(backend.clone(), path.clone(), generation, 30);
+        wait_for_gate(&started, 1).await;
+        let second = spawn_diff(backend.clone(), path.clone(), generation, 31);
+        let overlapped = tokio::time::timeout(std::time::Duration::from_secs(8), wait_for_gate(&started, 2)).await;
+        if overlapped.is_err() {
+            if second.is_finished() {
+                let error = second.await.unwrap().unwrap_err();
+                panic!("second diff was rejected early: {} {}", error.code, error.message);
+            }
+            panic!("second diff never reached git");
+        }
+        fs::write(&release, b"go").unwrap();
+        let left = first.await.unwrap().unwrap();
+        let right = second.await.unwrap().unwrap();
+        assert!(left.text.as_ref().unwrap().contains("+after"));
+        assert!(right.text.as_ref().unwrap().contains("+after"));
+
+        fs::remove_file(&release).unwrap();
+        let third = spawn_diff(backend.clone(), path.clone(), left.generation, 40);
+        let held = tokio::time::timeout(std::time::Duration::from_secs(8), wait_for_gate(&started, 3)).await;
+        if held.is_err() {
+            panic!("diff did not stay in flight for the next user request");
+        }
+        let staged = stage_files(&backend, &path, &["demo.txt".to_string()], left.generation, 41)
+            .await
+            .unwrap_or_else(|error| panic!("next request was blocked: {} {}", error.code, error.message));
+        assert!(staged
+            .files
+            .iter()
+            .any(|file| file.path == "demo.txt" && file.staged != crate::model::ChangeKind::None));
+        fs::write(&release, b"go").unwrap();
+        let finished = third.await.unwrap().unwrap_err();
+        assert_ne!(finished.code, "duplicate");
+        assert_eq!(finished.code, "stale");
+    }
+
+    #[cfg(unix)]
+    fn spawn_diff(
+        backend: std::sync::Arc<crate::git::ops::Backend>,
+        path: String,
+        generation: u64,
+        request_id: u64,
+    ) -> tokio::task::JoinHandle<Result<crate::model::DiffResponse, AppError>> {
+        tokio::spawn(async move {
+            load_diff(&backend, &path, "demo.txt", None, false, generation, request_id, 0, 0).await
+        })
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_gate(path: &Path, bytes: u64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        loop {
+            let len = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+            if len >= bytes {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("diff gate stayed at {len} bytes, wanted {bytes}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    fn install_diff_shim(root: &Path, started: &Path, release: &Path) {
+        let script = root.join("git-shim");
+        let body = format!(
+            "#!/bin/sh\nreal={real}\nstarted={started}\nrelease={release}\nunified=0\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--unified=3\" ]; then\n    unified=1\n  fi\ndone\nif [ \"$unified\" -eq 1 ]; then\n  printf x >> \"$started\"\n  while [ ! -f \"$release\" ]; do\n    sleep 0.02\n  done\nfi\nexec \"$real\" \"$@\"\n",
+            real = shell_quote(&crate::test_support::system_git()),
+            started = shell_quote(started),
+            release = shell_quote(release),
+        );
+        fs::write(&script, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn shell_quote(path: &Path) -> String {
+        format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+    }
+
+    #[cfg(unix)]
+    struct ReleaseFile(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for ReleaseFile {
+        fn drop(&mut self) {
+            let _ = fs::write(&self.0, b"go");
+        }
     }
 }

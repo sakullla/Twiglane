@@ -1,6 +1,6 @@
 <script lang="ts">
   import { toSideRows, type ViewLine } from "../diff";
-  import { visibleRange } from "../layout";
+  import { scrollByRows, visibleRange } from "../layout";
   import type { DiffHunk, DiffResponse, FileSelection } from "../types";
 
   interface Props {
@@ -19,11 +19,41 @@
   let mode = $state<"unified" | "split">("unified");
   let scrollTop = $state(0);
   let viewport = $state(0);
+  let scroller = $state<HTMLDivElement | null>(null);
   let lines = $derived<ViewLine[]>(diff?.lines ?? []);
   let sideRows = $derived(mode === "split" ? toSideRows(lines) : []);
   let total = $derived(mode === "split" ? sideRows.length : lines.length);
-  let range = $derived(visibleRange(total, scrollTop, viewport, ROW_HEIGHT));
+  let range = $derived(
+    visibleRange(total, scrollTop, viewport > 0 ? viewport : scrollTop > 0 ? ROW_HEIGHT : 0, ROW_HEIGHT),
+  );
   let hunkForLine = $derived((index: number) => diff?.hunks.find((hunk) => hunk.startLine === index) ?? null);
+
+  function applyScroll(next: number) {
+    scrollTop = next;
+    if (scroller) scroller.scrollTop = next;
+  }
+
+  function onDiffKey(event: KeyboardEvent) {
+    if (event.target !== event.currentTarget) return;
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    const height = viewport > 0 ? viewport : (scroller?.clientHeight ?? 0);
+    if (event.key === "Home") {
+      event.preventDefault();
+      applyScroll(0);
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      applyScroll(scrollByRows(0, total, total, height, ROW_HEIGHT));
+      return;
+    }
+    const page = Math.max(1, height > 0 ? Math.floor(height / ROW_HEIGHT) : 1);
+    const delta =
+      event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : event.key === "PageDown" ? page : event.key === "PageUp" ? -page : null;
+    if (delta === null) return;
+    event.preventDefault();
+    applyScroll(scrollByRows(scrollTop, delta, total, height, ROW_HEIGHT));
+  }
 
   function lineClass(kind: string): string {
     if (kind === "add") return "diff-line add";
@@ -71,8 +101,13 @@
   {:else}
     <div
       class="diff-scroll"
-      role="region"
+      role="textbox"
+      aria-readonly="true"
+      aria-multiline="true"
+      tabindex="0"
       aria-label="差异文本"
+      bind:this={scroller}
+      onkeydown={onDiffKey}
       onscroll={(event) => (scrollTop = event.currentTarget.scrollTop)}
       bind:clientHeight={viewport}
     >

@@ -1,3 +1,41 @@
+export interface DiffAttempt {
+  token: number;
+  repo: string;
+  path: string;
+  side: string;
+}
+
+export interface DiffViewTarget {
+  token: number;
+  repo: string | null;
+  path: string | null;
+  side: string | null;
+}
+
+export function diffResultApplies(attempt: DiffAttempt, current: DiffViewTarget): boolean {
+  return (
+    attempt.token === current.token &&
+    current.repo === attempt.repo &&
+    current.path === attempt.path &&
+    current.side === attempt.side
+  );
+}
+
+export async function finishDiffAttempt<T>(
+  attempt: DiffAttempt,
+  current: () => DiffViewTarget,
+  run: () => Promise<T>,
+): Promise<{ state: "applied"; value: T } | { state: "discarded" } | { state: "failed"; error: unknown }> {
+  try {
+    const value = await run();
+    if (!diffResultApplies(attempt, current())) return { state: "discarded" };
+    return { state: "applied", value };
+  } catch (error) {
+    if (!diffResultApplies(attempt, current())) return { state: "discarded" };
+    return { state: "failed", error };
+  }
+}
+
 export type DiffLineKind = "add" | "del" | "hunk" | "meta" | "context";
 
 export function classifyDiffLine(line: string): DiffLineKind {

@@ -12,6 +12,16 @@ use crate::shutdown::Shutdown;
 
 pub const MAX_CONCURRENT_READS: usize = 2;
 
+const INTERNAL_REQUEST_BIT: u64 = 1 << 63;
+static INTERNAL_REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
+
+// Frontend request ids are sequential JSON integers. Internal Git steps stay above this bit
+// so an in-flight diff, stage, or commit cannot occupy the next user command.
+pub fn internal_request_id() -> u64 {
+    let seq = INTERNAL_REQUEST_SEQ.fetch_add(1, Ordering::Relaxed);
+    INTERNAL_REQUEST_BIT | (seq & (INTERNAL_REQUEST_BIT - 1))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobKind {
     Read,
@@ -343,6 +353,20 @@ mod tests {
             stdin: None,
             truncate_stdout: false,
             output_limit: None,
+        }
+    }
+
+    #[test]
+    fn internal_request_ids_stay_outside_the_user_sequence() {
+        let first = internal_request_id();
+        let second = internal_request_id();
+        assert!(first >= INTERNAL_REQUEST_BIT);
+        assert!(second > first);
+        for user in [1_u64, 2, 5, 41] {
+            assert_ne!(first, user);
+            assert_ne!(second, user);
+            assert_ne!(first, user.wrapping_add(1));
+            assert_ne!(second, user.wrapping_add(1));
         }
     }
 

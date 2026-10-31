@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { api, listenEvent, pickDirectory, pickFile } from "./lib/api";
   import { BRAND, MODIFIER_LABEL } from "./lib/brand";
+  import { finishDiffAttempt } from "./lib/diff";
   import { DraftBuffer } from "./lib/draft";
   import { normalizeError } from "./lib/errors";
   import { clampWidth, FALLBACK_POLL_MS, nudgeWidth, shouldPoll } from "./lib/layout";
@@ -46,6 +47,7 @@
   let degraded = $state(false);
   let windowFocused = $state(true);
   let requestSerial = 1;
+  let diffToken = 0;
   let fileQuery = $state("");
   const drafts = new DraftBuffer();
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
@@ -129,43 +131,55 @@
   }
 
   async function loadSelectedDiff() {
+    const token = ++diffToken;
     const current = opened;
     const choice = selected;
     if (!current || !choice) {
       diff = null;
+      diffError = null;
       diffLoading = false;
       return;
     }
     diffLoading = true;
     diffError = null;
+    const file = current.snapshot.files.find((item) => item.path === choice.path);
     try {
-      const file = current.snapshot.files.find((item) => item.path === choice.path);
-      const result = await api.loadDiff(
-        current.summary.path,
-        choice.path,
-        choice.side === "staged",
-        current.generation,
-        nextId(),
-        file?.originalPath ?? null,
-        0,
-        0,
+      const outcome = await finishDiffAttempt(
+        { token, repo: current.summary.path, path: choice.path, side: choice.side },
+        () => ({
+          token: diffToken,
+          repo: opened?.summary.path ?? null,
+          path: selected?.path ?? null,
+          side: selected?.side ?? null,
+        }),
+        () =>
+          api.loadDiff(
+            current.summary.path,
+            choice.path,
+            choice.side === "staged",
+            current.generation,
+            nextId(),
+            file?.originalPath ?? null,
+            0,
+            0,
+          ),
       );
-      if (opened?.summary.path !== current.summary.path) return;
-      if (selected?.path !== choice.path || selected.side !== choice.side) return;
-      diff = result;
-    } catch (error) {
-      const failure = normalizeError(error);
-      if (failure.code === "stale" && failure.generation !== undefined && opened?.summary.path === current.summary.path) {
-        opened = { ...opened, generation: failure.generation };
-        void refresh();
-        return;
-      }
-      if (opened?.summary.path === current.summary.path) {
+      if (outcome.state === "discarded") return;
+      if (outcome.state === "failed") {
+        const failure = normalizeError(outcome.error);
+        if (failure.code === "stale" && failure.generation !== undefined && opened?.summary.path === current.summary.path) {
+          opened = { ...opened, generation: failure.generation };
+          void refresh();
+          return;
+        }
         diffError = failure.message;
         diff = null;
+        return;
       }
+      diff = outcome.value;
+      diffError = null;
     } finally {
-      if (opened?.summary.path === current.summary.path) diffLoading = false;
+      if (token === diffToken && opened?.summary.path === current.summary.path) diffLoading = false;
     }
   }
 

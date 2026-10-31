@@ -7,7 +7,8 @@ import { DraftBuffer } from "../src/lib/draft";
 import { normalizeError } from "../src/lib/errors";
 import { toSideRows } from "../src/lib/diff";
 import { branchLabel, commitScope, filterRows, gitInstallHint, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "../src/lib/labels";
-import { clampWidth, nextIndex, shouldPoll, visibleRange } from "../src/lib/layout";
+import { finishDiffAttempt } from "../src/lib/diff";
+import { clampWidth, nextIndex, scrollByRows, scrollIndexIntoView, shouldPoll, visibleRange } from "../src/lib/layout";
 import { filterRecent } from "../src/lib/recent";
 import type { BranchInfo, FileChange, RecentRepo } from "../src/lib/types";
 
@@ -92,6 +93,13 @@ describe("工作区状态", () => {
     expect(nextIndex(0, "ArrowUp", 2)).toBe(0);
     expect(nextIndex(1, "End", 2)).toBe(1);
     expect(nextIndex(0, "ArrowDown", 0)).toBeNull();
+    expect(scrollIndexIntoView(2, 0, 200, 40)).toBe(0);
+    expect(scrollIndexIntoView(10, 0, 200, 40)).toBe(240);
+    expect(scrollIndexIntoView(1, 80, 200, 40)).toBe(40);
+    expect(scrollIndexIntoView(20, 0, 0, 40)).toBe(800);
+    expect(scrollByRows(0, 1, 80, 220, 22)).toBe(22);
+    expect(scrollByRows(0, 10, 80, 220, 22)).toBe(220);
+    expect(scrollByRows(0, 80, 80, 220, 22)).toBe(80 * 22 - 220);
   });
 
   it("差异符号不只依赖颜色", () => {
@@ -113,6 +121,39 @@ describe("工作区状态", () => {
     buffer.load("/b", "");
     expect(buffer.takePending("/a")).toBeNull();
     expect(buffer.takePending("/b")).toBeNull();
+  });
+
+  it("被取代的差异结果和错误都丢弃", async () => {
+    let token = 1;
+    let path = "a.txt";
+    const current = () => ({ token, repo: "/repo", path, side: "unstaged" as const });
+    const attempt = { token: 1, repo: "/repo", path: "a.txt", side: "unstaged" };
+    await expect(finishDiffAttempt(attempt, current, async () => "diff")).resolves.toEqual({
+      state: "applied",
+      value: "diff",
+    });
+    await expect(
+      finishDiffAttempt(attempt, current, async () => {
+        token = 2;
+        path = "b.txt";
+        throw new Error("该操作正在执行，未重复启动。");
+      }),
+    ).resolves.toEqual({ state: "discarded" });
+    await expect(
+      finishDiffAttempt(attempt, current, async () => {
+        token = 3;
+        return "old";
+      }),
+    ).resolves.toEqual({ state: "discarded" });
+    await expect(
+      finishDiffAttempt(
+        { token: 3, repo: "/repo", path: "b.txt", side: "unstaged" },
+        current,
+        async () => {
+          throw new Error("读取失败");
+        },
+      ),
+    ).resolves.toMatchObject({ state: "failed" });
   });
 
   it("错误和 Git 提示不泄漏原始对象", () => {

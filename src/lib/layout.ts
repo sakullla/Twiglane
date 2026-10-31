@@ -26,6 +26,36 @@ export function nudgeWidth(current: number, key: string): number | null {
   return null;
 }
 
+export function scrollIndexIntoView(
+  index: number,
+  scrollTop: number,
+  viewport: number,
+  rowHeight: number,
+): number {
+  if (!Number.isFinite(index) || index < 0 || rowHeight <= 0) return Math.max(0, scrollTop);
+  const top = index * rowHeight;
+  if (!(viewport > 0)) return top;
+  const bottom = top + rowHeight;
+  if (top < scrollTop) return top;
+  if (bottom > scrollTop + viewport) return Math.max(0, bottom - viewport);
+  return scrollTop;
+}
+
+export function scrollByRows(
+  scrollTop: number,
+  rowDelta: number,
+  rowCount: number,
+  viewport: number,
+  rowHeight: number,
+): number {
+  if (rowCount <= 0 || rowHeight <= 0) return 0;
+  const max = Math.max(0, rowCount * rowHeight - Math.max(0, viewport));
+  const next = scrollTop + rowDelta * rowHeight;
+  if (next <= 0) return 0;
+  if (next >= max) return max;
+  return next;
+}
+
 export function visibleRange(
   total: number,
   scrollTop: number,

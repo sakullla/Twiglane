@@ -1,0 +1,226 @@
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::process::Command;
+
+use crate::shutdown::Shutdown;
+
+pub const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+pub const DEFAULT_GIT_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessOutput {
+    pub exit_code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunnerError {
+    Spawn(String),
+    Io(String),
+    Timeout,
+    OutputLimit,
+    Cancelled,
+}
+
+pub struct RunRequest {
+    pub program: PathBuf,
+    pub args: Vec<std::ffi::OsString>,
+    pub extra_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    pub timeout: Duration,
+    pub output_limit: usize,
+    pub shutdown: Arc<Shutdown>,
+}
+
+pub trait ProcessRunner: Send + Sync {
+    fn run(
+        &self,
+        request: RunRequest,
+    ) -> impl std::future::Future<Output = Result<ProcessOutput, RunnerError>> + Send;
+}
+
+#[derive(Clone)]
+pub struct RealRunner {
+    pub timeout: Duration,
+    pub output_limit: usize,
+    pub extra_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+}
+
+impl Default for RealRunner {
+    fn default() -> Self {
+        Self {
+            timeout: DEFAULT_GIT_TIMEOUT,
+            output_limit: MAX_GIT_OUTPUT_BYTES,
+            extra_env: Vec::new(),
+        }
+    }
+}
+
+impl RealRunner {
+    pub fn base_request(&self, program: PathBuf, args: Vec<std::ffi::OsString>, shutdown: Arc<Shutdown>) -> RunRequest {
+        RunRequest {
+            program,
+            args,
+            extra_env: self.extra_env.clone(),
+            timeout: self.timeout,
+            output_limit: self.output_limit,
+            shutdown,
+        }
+    }
+}
+
+impl ProcessRunner for RealRunner {
+    async fn run(&self, request: RunRequest) -> Result<ProcessOutput, RunnerError> {
+        run_process(request).await
+    }
+}
+
+pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerError> {
+    if request.shutdown.is_cancelled() {
+        return Err(RunnerError::Cancelled);
+    }
+    let mut command = Command::new(&request.program);
+    command
+        .args(&request.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .env("GIT_TERMINAL_PROMPT", "0");
+    for (key, value) in &request.extra_env {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().map_err(|error| RunnerError::Spawn(error.to_string()))?;
+    let stdout = child.stdout.take().ok_or_else(|| RunnerError::Io("缺少 stdout".into()))?;
+    let stderr = child.stderr.take().ok_or_else(|| RunnerError::Io("缺少 stderr".into()))?;
+    let mut stdout_read = Box::pin(read_limited(stdout, request.output_limit));
+    let mut stderr_read = Box::pin(read_limited(stderr, request.output_limit));
+    let mut stdout_buf = None;
+    let mut stderr_buf = None;
+    let mut status = None;
+    let sleep = tokio::time::sleep(request.timeout);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            result = &mut stdout_read, if stdout_buf.is_none() => {
+                stdout_buf = Some(result?);
+            }
+            result = &mut stderr_read, if stderr_buf.is_none() => {
+                stderr_buf = Some(result?);
+            }
+            result = child.wait(), if status.is_none() => {
+                status = Some(result.map_err(|error| RunnerError::Io(error.to_string()))?);
+            }
+            _ = &mut sleep => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(RunnerError::Timeout);
+            }
+            _ = request.shutdown.cancelled() => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(RunnerError::Cancelled);
+            }
+        }
+        if stdout_buf.is_some() && stderr_buf.is_some() && status.is_some() {
+            break;
+        }
+    }
+    let status = status.expect("status checked");
+    Ok(ProcessOutput {
+        exit_code: status.code().unwrap_or(-1),
+        stdout: stdout_buf.unwrap_or_default(),
+        stderr: stderr_buf.unwrap_or_default(),
+    })
+}
+
+async fn read_limited<R>(mut reader: R, limit: usize) -> Result<Vec<u8>, RunnerError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut buf = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let read = reader
+            .read(&mut chunk)
+            .await
+            .map_err(|error| RunnerError::Io(error.to_string()))?;
+        if read == 0 {
+            return Ok(buf);
+        }
+        if buf.len().saturating_add(read) > limit {
+            return Err(RunnerError::OutputLimit);
+        }
+        buf.extend_from_slice(&chunk[..read]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn python() -> Option<PathBuf> {
+        std::env::var_os("PYTHON").map(PathBuf::from).or_else(|| {
+            ["python3", "python"].iter().find_map(|name| {
+                std::env::var_os("PATH").and_then(|path| {
+                    std::env::split_paths(&path).find_map(|dir| {
+                        let candidate = dir.join(name);
+                        candidate.is_file().then_some(candidate)
+                    })
+                })
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn output_limit_stops_a_flood_of_bytes() {
+        let Some(program) = python() else {
+            panic!("需要 Python 来验证输出上限");
+        };
+        let shutdown = Arc::new(Shutdown::new());
+        let started = Instant::now();
+        let error = run_process(RunRequest {
+            program,
+            args: vec!["-c".into(), "import sys; sys.stdout.buffer.write(b'a'*2000000)".into()],
+            extra_env: Vec::new(),
+            timeout: Duration::from_secs(10),
+            output_limit: 1024,
+            shutdown,
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error, RunnerError::OutputLimit);
+        assert!(started.elapsed() < Duration::from_secs(8));
+    }
+
+    #[tokio::test]
+    async fn shutdown_kills_a_sleeping_process() {
+        let Some(program) = python() else {
+            panic!("需要 Python 来验证关闭时停止子进程");
+        };
+        let shutdown = Arc::new(Shutdown::new());
+        let cancel = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            cancel.cancel();
+        });
+        let started = Instant::now();
+        let error = run_process(RunRequest {
+            program,
+            args: vec!["-c".into(), "import time; time.sleep(30)".into()],
+            extra_env: Vec::new(),
+            timeout: Duration::from_secs(10),
+            output_limit: 1024,
+            shutdown,
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error, RunnerError::Cancelled);
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+}

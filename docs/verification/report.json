@@ -72,29 +72,16 @@
     {
       "id": "perf.startup.s",
       "status": "gap",
-      "summary": "macOS 启动样本 5 条。 Windows 仍缺，不能通过。",
-      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "summary": "此前 macOS 启动计时取了会话里最旧的一条，不是本次进程，不能当成内容正确。",
+      "nextStep": "用修复后的测量按本次进程重测 5 次 S 仓库启动，并在 Windows 11 x64 安装同一个 NSIS 包补同样本。",
       "evidence": {
         "platforms": {
           "darwin": {
             "method": "gui-controls-ready",
-            "contentOk": true,
-            "firstMs": [
-              255
-            ],
-            "laterMs": [
-              269,
-              258,
-              481,
-              260
-            ],
-            "openMs": [
-              106,
-              104,
-              107,
-              105,
-              105
-            ],
+            "contentOk": false,
+            "firstMs": [],
+            "laterMs": [],
+            "openMs": [],
             "fileCache": "not-purged",
             "prerequisite": {
               "release": true,
@@ -103,7 +90,8 @@
               "memoryBytes": 17179869184,
               "diskColdStart": false
             },
-            "browserMock": false
+            "browserMock": false,
+            "invalidated": "startup 样本文件混有其他 pid，旧汇总结论使用了第 0 条。"
           }
         }
       }
@@ -381,8 +369,8 @@
     {
       "id": "perf.diff.large",
       "status": "gap",
-      "summary": "macOS 大文件摘要。 Windows 仍缺，不能通过。",
-      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "summary": "此前 macOS 大文件摘要只保存了 1 次未缓存耗时，没有按 30 次摘要交互记录，不能当成内容正确。",
+      "nextStep": "用修复后的测量对大文件摘要记录 30 次且每次都是截断摘要，并在 Windows 11 x64 安装同一个 NSIS 包补同样本。",
       "evidence": {
         "platforms": {
           "darwin": {
@@ -395,11 +383,10 @@
             },
             "browserMock": false,
             "method": "gui-large-summary",
-            "contentOk": true,
-            "truncated": true,
-            "samplesMs": [
-              85
-            ]
+            "contentOk": false,
+            "truncated": false,
+            "samplesMs": [],
+            "invalidated": "旧样本 uncachedMs 只有 1 条，truncated 虽有 30 项但不构成 30 次摘要耗时。"
           }
         }
       }
@@ -407,8 +394,8 @@
     {
       "id": "perf.feedback",
       "status": "gap",
-      "summary": "macOS 反馈延迟。 Windows 仍缺，不能通过。",
-      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "summary": "此前 macOS 反馈只改了状态文案并等一帧，没有启动克隆、同步或提交，不能当成内容正确。",
+      "nextStep": "用修复后的测量分别启动克隆、同步和提交并记录 30 次反馈，并在 Windows 11 x64 安装同一个 NSIS 包补同样本。",
       "evidence": {
         "platforms": {
           "darwin": {
@@ -421,40 +408,11 @@
             },
             "browserMock": false,
             "method": "gui-feedback",
-            "contentOk": true,
-            "samplesMs": [
-              10,
-              16,
-              17,
-              16,
-              17,
-              17,
-              16,
-              17,
-              17,
-              16,
-              17,
-              17,
-              16,
-              17,
-              16,
-              17,
-              17,
-              17,
-              17,
-              16,
-              17,
-              17,
-              16,
-              17,
-              17,
-              16,
-              16,
-              18,
-              16,
-              17
-            ],
-            "painted": true
+            "contentOk": false,
+            "samplesMs": [],
+            "painted": false,
+            "tasks": [],
+            "invalidated": "旧样本没有 operations，只是给 live 赋值后的绘制时间。"
           }
         }
       }
@@ -606,8 +564,8 @@
     {
       "id": "perf.interact.l",
       "status": "gap",
-      "summary": "macOS 加载大仓库时的键盘、取消和切换。 Windows 仍缺，不能通过。",
-      "nextStep": "在 Windows 11 x64 上安装同一个版本的 NSIS 包，完成 S/M/L 界面测量、克隆到部分提交推送、合并冲突、双主题键盘，并保存 OID 与截图。",
+      "summary": "此前 macOS 在 L 的读取开始前就取消并记成成功，不能当成加载期间仍可键盘、取消和切换。",
+      "nextStep": "用修复后的测量在 L 的 openRepository 已开始后验证键盘、取消和仓库切换，并在 Windows 11 x64 安装同一个 NSIS 包补同样本。",
       "evidence": {
         "platforms": {
           "darwin": {
@@ -620,10 +578,12 @@
             },
             "browserMock": false,
             "method": "gui-cancel-and-switch",
-            "contentOk": true,
-            "keyboard": true,
-            "cancelled": true,
-            "switched": true
+            "contentOk": false,
+            "keyboard": false,
+            "cancelled": false,
+            "switched": false,
+            "readStarted": false,
+            "invalidated": "旧 cancel-open 距 shell-ready 约 30 毫秒，随后另一次打开 L 才花了约 226 毫秒。"
           }
         }
       }
@@ -841,8 +801,8 @@
     {
       "id": "accept.macos",
       "status": "gap",
-      "summary": "macOS 安装包完成了克隆、部分提交推送、合并和双主题键盘，但当前会话无法截取桌面画面。",
-      "nextStep": "在有可用显示器的 macOS 图形会话里重跑验收并保存截图；不要把这次缺失写成已有桌面证据。",
+      "summary": "macOS 安装包完成了克隆、部分提交推送和合并；主题有切换记录，但键盘没有验证快捷键和方向键选择变化，也没有桌面截图。",
+      "nextStep": "在有可用显示器的 macOS 图形会话里，用至少两个改动文件重测快捷键聚焦和方向键改变选择，并保存截图。不要把焦点落在列表上写成键盘通过。",
       "evidence": {
         "method": "installed-app-ipc-and-dom",
         "hostPlatform": "darwin",
@@ -859,10 +819,15 @@
           "light",
           "dark"
         ],
-        "keyboard": true,
+        "keyboard": false,
         "screenshot": "",
         "screenshotError": "could not create image from display",
-        "stderr": "\n\n"
+        "stderr": "\n\n",
+        "shortcutFocused": false,
+        "selectionChanged": false,
+        "selectionBefore": "",
+        "selectionMoved": "",
+        "selectionAfter": ""
       }
     },
     {

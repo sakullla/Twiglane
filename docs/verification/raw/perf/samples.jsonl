@@ -1,5 +1,4 @@
 {"detail":{"controls":true},"elapsedMs":294,"name":"shell-ready","pid":24935}
-{"detail":{"cancelled":true,"contentOk":true,"keyboard":true,"method":"gui-cancel-and-switch","switched":true},"elapsedMs":324,"name":"cancel-open","pid":24935}
 {"detail":{"changes":2000,"contentOk":true,"elapsedMs":226,"expectChanges":2000,"expectHead":"e9ba79b1f307d771fd6c42f65cf3084a13a05ebd","head":"e9ba79b1f307d771fd6c42f65cf3084a13a05ebd","launch":null,"mark":null,"method":"gui-open-to-first-screen"},"elapsedMs":550,"name":"status-open","pid":24935}
 {"detail":{"changes":2000,"contentOk":true,"head":"e9ba79b1f307d771fd6c42f65cf3084a13a05ebd","method":"gui-refresh-to-first-screen","samplesMs":[171,165,166,166,169,165,170,199,173,187,173,180,178,176,183,188,198,173,174,184,191,166,174,190,181,163,162,169,170,163],"size":"L"},"elapsedMs":5819,"name":"status-refresh","pid":24935}
 {"detail":{},"elapsedMs":5820,"name":"finished","pid":24935}

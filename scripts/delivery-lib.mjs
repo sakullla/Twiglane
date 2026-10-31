@@ -184,10 +184,13 @@ function validatePerf(id, evidence) {
       if (block.truncated !== true) reasons.push("大文件没有以摘要展示");
     } else if (id === "perf.feedback") {
       if (!finiteSamples(block.samplesMs, 30) || p95(block.samplesMs) > BUDGETS.feedbackP95Ms) reasons.push("反馈超预算或样本不足");
+      const tasks = Array.isArray(block.tasks) ? block.tasks : [];
+      if (!["clone", "sync", "commit"].every((task) => tasks.includes(task))) reasons.push("反馈没有启动克隆、同步或提交");
     } else if (id === "perf.scroll.m") {
       if (!finiteSamples(block.frameMs, 30) || p95(block.frameMs) > BUDGETS.scrollFrameP95Ms) reasons.push("滚动帧超预算或样本不足");
     } else if (id === "perf.interact.l") {
       if (block.keyboard !== true || block.cancelled !== true || block.switched !== true) reasons.push("加载 L 时键盘、取消或仓库切换不可用");
+      if (block.readStarted !== true) reasons.push("取消或切换时 L 的读取尚未开始");
     } else if (id === "perf.memory.s") {
       if (!(Number(block.privateBytes) <= BUDGETS.idlePrivateBytes)) reasons.push("空闲内存超预算");
       if (block.metric !== "phys_footprint" && block.metric !== "private-working-set") reasons.push("内存口径不是该平台的私有内存");
@@ -292,8 +295,25 @@ function validateAccept(id, evidence) {
   const oids = Array.isArray(evidence?.oids) ? evidence.oids : [];
   if (!oids.every((oid) => /^[0-9a-f]{7,64}$/.test(oid)) || oids.length < 2) reasons.push("缺少真实 Git OID");
   if (evidence?.partialCommit !== true || evidence?.pushed !== true || typeof evidence?.mergeOid !== "string") reasons.push("克隆到部分提交、推送或合并没有完成");
-  if (!Array.isArray(evidence?.themes) || !evidence.themes.includes("light") || !evidence.themes.includes("dark") || evidence?.keyboard !== true) {
-    reasons.push("双主题或键盘验收不足");
+  if (!Array.isArray(evidence?.themes) || !evidence.themes.includes("light") || !evidence.themes.includes("dark")) {
+    reasons.push("双主题验收不足");
+  }
+  const before = evidence?.selectionBefore;
+  const moved = evidence?.selectionMoved;
+  const after = evidence?.selectionAfter;
+  if (
+    evidence?.keyboard !== true ||
+    evidence?.shortcutFocused !== true ||
+    evidence?.selectionChanged !== true ||
+    typeof before !== "string" ||
+    typeof moved !== "string" ||
+    typeof after !== "string" ||
+    !moved ||
+    !after ||
+    moved === before ||
+    after === moved
+  ) {
+    reasons.push("键盘没有用快捷键聚焦或用方向键改变选择");
   }
   return reasons;
 }

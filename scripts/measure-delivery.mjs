@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, wri
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { pathToFileURL } from "node:url";
 import {
   BUDGETS,
   FIXTURE_SEED,
@@ -44,8 +45,128 @@ function mustRun(command, args, options = {}) {
   return result;
 }
 
-function redact(text) {
-  return text.replace(/:\/\/[^/\s]*:[^@\s]+@/g, "://***@");
+export function redact(text) {
+  return String(text ?? "").replace(/:\/\/[^/\s]*:[^@\s]+@/g, "://***@");
+}
+
+function redactSecrets(text, urls) {
+  let out = redact(text);
+  for (const url of urls) {
+    const match = String(url).match(/:\/\/(?:[^/\s:]*)?:([^@\s]+)@/);
+    if (match?.[1]) out = out.split(match[1]).join("***");
+  }
+  return out;
+}
+
+export function remoteKind(url) {
+  const value = String(url ?? "").trim();
+  if (/^https:\/\//i.test(value)) return "https";
+  if (/^ssh:\/\//i.test(value) || /^git@[^:\s]+:\S+$/.test(value)) return "ssh";
+  return "local";
+}
+
+const AUTH_FAILURE = /authentication failed|authentication required|permission denied|could not read username|terminal prompts disabled|access rights|publickey|invalid credentials|401 unauthorized|403 forbidden|auth fail/i;
+
+export async function measureProtocol(kind, env, runGit) {
+  const id = kind === "https" ? "protocol.https" : "protocol.ssh";
+  const remoteKey = kind === "https" ? "TWIGLANE_HTTPS_REMOTE" : "TWIGLANE_SSH_REMOTE";
+  const denyKey = kind === "https" ? "TWIGLANE_HTTPS_DENY_REMOTE" : "TWIGLANE_SSH_DENY_REMOTE";
+  const remote = String(env?.[remoteKey] ?? "").trim();
+  const deny = String(env?.[denyKey] ?? "").trim();
+  const nextStep = "设置 TWIGLANE_HTTPS_REMOTE、TWIGLANE_HTTPS_DENY_REMOTE、TWIGLANE_SSH_REMOTE、TWIGLANE_SSH_DENY_REMOTE 后重跑测量。分别记录成功访问和认证失败，并确认输出不含凭据。不要把本地 bare remote 记成协议通过。";
+  if (!remote || !deny) {
+    return gap(id, `没有受控 ${kind.toUpperCase()} 远程的成功与认证失败记录。`, nextStep, {
+      remoteConfigured: Boolean(remote),
+      denyConfigured: Boolean(deny),
+    });
+  }
+  if (remoteKind(remote) !== kind || remoteKind(deny) !== kind) {
+    return gap(id, `${kind.toUpperCase()} 配置不是受控远程，本地路径或 bare remote 不能代替。`, nextStep, {
+      localBare: true,
+      success: false,
+      authFailure: false,
+      redacted: false,
+      transcript: "",
+    });
+  }
+  const success = await runGit(remote);
+  const denied = await runGit(deny);
+  const transcript = redactSecrets(
+    [`success exit ${success.status}`, success.stdout ?? "", success.stderr ?? "", `deny exit ${denied.status}`, denied.stdout ?? "", denied.stderr ?? ""].join("\n"),
+    [remote, deny],
+  ).slice(0, 4000);
+  const leaked = /:\/\/[^/\s]*:[^@\s]+@/.test(transcript);
+  const evidence = {
+    success: success.status === 0,
+    authFailure: denied.status !== 0 && AUTH_FAILURE.test(`${denied.stdout ?? ""}\n${denied.stderr ?? ""}`),
+    redacted: !leaked,
+    localBare: false,
+    transcript,
+  };
+  if (evidence.success && evidence.authFailure && evidence.redacted && transcript.length >= 20) {
+    return passed(id, `${kind.toUpperCase()} 受控远程完成了成功访问和认证失败，记录已脱敏。`, evidence);
+  }
+  return {
+    id,
+    status: "fail",
+    summary: `${kind.toUpperCase()} 受控远程没有同时完成成功访问、认证失败和脱敏。`,
+    nextStep: "检查受控远程地址、凭据和认证失败输出后重跑。不要把失败改写成通过，也不要写入未脱敏的凭据。",
+    evidence,
+  };
+}
+
+function gitLsRemote(url) {
+  return new Promise((resolve) => {
+    const child = spawn("git", ["ls-remote", url], {
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_SSH_COMMAND: "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      stderr += "\n测量超时，已停止等待认证。";
+      child.kill("SIGKILL");
+    }, 20000);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ status: 1, stdout, stderr: `${stderr}\n${error.message}` });
+    });
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      resolve({ status: code ?? 1, stdout, stderr });
+    });
+  });
+}
+
+export function resetSampleLog(file) {
+  rmSync(file, { force: true });
+}
+
+export function startupTiming(samples, pid) {
+  const mine = (Array.isArray(samples) ? samples : []).filter((item) => Number(item?.pid) === Number(pid));
+  const latest = (name) => {
+    const matched = mine.filter((item) => item.name === name);
+    return matched.length ? matched[matched.length - 1] : null;
+  };
+  const open = latest("startup");
+  const ready = latest("shell-ready");
+  const controlsMs = Number(ready?.elapsedMs);
+  return {
+    launch: open?.detail?.launch ?? null,
+    contentOk: open?.detail?.contentOk === true && Number.isFinite(controlsMs),
+    controlsMs,
+    openMs: Number(open?.detail?.elapsedMs),
+  };
 }
 
 function probeEnvironment() {
@@ -146,6 +267,7 @@ function launchApp(binary, sessionDir, steps, timeoutMs, onTick) {
   mkdirSync(path.join(home, "Library", "Application Support"), { recursive: true });
   writeFileSync(path.join(sessionDir, "script.json"), JSON.stringify({ steps }));
   const sampleFile = path.join(sessionDir, "samples.jsonl");
+  resetSampleLog(sampleFile);
   return new Promise((resolve) => {
     const child = spawn(binary, [], {
       env: { ...process.env, HOME: home, TWIGLANE_MEASURE_DIR: sessionDir },
@@ -171,7 +293,13 @@ function launchApp(binary, sessionDir, steps, timeoutMs, onTick) {
     child.on("exit", (code) => {
       clearTimeout(timer);
       clearInterval(poll);
-      resolve({ code, stdout, stderr, samples: readSamples(sampleFile), pid: child.pid });
+      resolve({
+        code,
+        stdout,
+        stderr,
+        samples: readSamples(sampleFile).filter((item) => Number(item.pid) === child.pid),
+        pid: child.pid,
+      });
     });
   });
 }
@@ -528,16 +656,7 @@ async function main() {
       writeFileSync(path.join(session, "launch.json"), JSON.stringify({ code: result.code, stderr: result.stderr.slice(0, 4000) }, null, 2));
       startup.push(result);
     }
-    const startupRows = startup.map((result) => {
-      const open = sampleByName(result.samples, "startup")[0];
-      const ready = sampleByName(result.samples, "shell-ready")[0];
-      return {
-        launch: open?.detail?.launch,
-        contentOk: open?.detail?.contentOk === true,
-        controlsMs: Number(ready?.elapsedMs),
-        openMs: Number(open?.detail?.elapsedMs),
-      };
-    });
+    const startupRows = startup.map((result) => startupTiming(result.samples, result.pid));
     const first = startupRows.filter((item) => item.launch === "first").map((item) => item.controlsMs);
     const later = startupRows.filter((item) => item.launch === "later").map((item) => item.controlsMs);
     const startupOk = startupRows.every((item) => item.contentOk && Number.isFinite(item.controlsMs));
@@ -569,6 +688,24 @@ async function main() {
     mustRun("git", ["add", "wide.txt"], { cwd: largeRepo });
     mustRun("git", ["commit", "-m", "wide"], { cwd: largeRepo });
     writeFileSync(path.join(largeRepo, "wide.txt"), `${"b".repeat(80)}\n`.repeat(40000));
+    const feedbackDir = path.join(fixtureRoot, "feedback");
+    rmSync(feedbackDir, { recursive: true, force: true });
+    mkdirSync(feedbackDir, { recursive: true });
+    const feedbackOrigin = path.join(feedbackDir, "origin.git");
+    const feedbackParent = path.join(feedbackDir, "clones");
+    mkdirSync(feedbackParent, { recursive: true });
+    mustRun("git", ["init", "--bare", "-b", "main", feedbackOrigin]);
+    const feedbackSeed = path.join(feedbackDir, "seed");
+    mkdirSync(feedbackSeed, { recursive: true });
+    mustRun("git", ["init", "-b", "main"], { cwd: feedbackSeed });
+    mustRun("git", ["config", "user.name", "Twiglane Fixture"], { cwd: feedbackSeed });
+    mustRun("git", ["config", "user.email", "fixture@twiglane.invalid"], { cwd: feedbackSeed });
+    writeFileSync(path.join(feedbackSeed, "note.txt"), "feedback\n");
+    mustRun("git", ["add", "note.txt"], { cwd: feedbackSeed });
+    mustRun("git", ["commit", "-m", "feedback"], { cwd: feedbackSeed });
+    mustRun("git", ["remote", "add", "origin", feedbackOrigin], { cwd: feedbackSeed });
+    mustRun("git", ["push", "-u", "origin", "main"], { cwd: feedbackSeed });
+    mustRun("git", ["remote", "add", "origin", feedbackOrigin], { cwd: largeRepo });
     const second = path.join(fixtureRoot, "S-copy");
     rmSync(second, { recursive: true, force: true });
     mkdirSync(second, { recursive: true });
@@ -603,7 +740,7 @@ async function main() {
       large: [
         { op: "open", repo: largeRepo, expectChanges: 1 },
         { op: "large-diff", path: "wide.txt", count: 30 },
-        { op: "feedback", count: 30 },
+        { op: "feedback", count: 30, cloneUrl: feedbackOrigin, cloneParent: feedbackParent },
       ],
       "l-status": [
         { op: "cancel-open", slowRepo: manifests.L.repo, nextRepo: manifests.S.repo },
@@ -677,13 +814,16 @@ async function main() {
     replaceCheck(checks, measuredOrGap("perf.diff.cached", "macOS 已缓存差异。", { ...base, method: "gui-diff-switch", contentOk: diff.contentOk === true, samplesMs: diff.cachedMs ?? [] }, (p95(diff.cachedMs ?? []) ?? Infinity) > BUDGETS.diffCachedP95Ms, windowsNext));
     replaceCheck(checks, measuredOrGap("perf.diff.uncached", "macOS 未缓存差异。", { ...base, method: "gui-diff-switch", contentOk: Array.isArray(diff.uncachedMs) && diff.uncachedMs.length >= 30, samplesMs: diff.uncachedMs ?? [] }, (p95(diff.uncachedMs ?? []) ?? Infinity) > BUDGETS.diffUncachedP95Ms, windowsNext));
     }
-    const largeSample = sampleByName(perfRun.samples, "large-diff")[0];
+    const largeSample = sampleByName(perfRun.samples, "large-diff").at(-1);
     const large = largeSample?.detail ?? {};
-    const largeSamples = [...(large.uncachedMs ?? []), ...(large.cachedMs ?? [])];
-    if (largeSample) replaceCheck(checks, measuredOrGap("perf.diff.large", "macOS 大文件摘要。", { ...base, method: "gui-large-summary", contentOk: large.contentOk === true, truncated: Array.isArray(large.truncated) && large.truncated.some(Boolean), samplesMs: largeSamples }, (p95(largeSamples) ?? Infinity) > BUDGETS.largeSummaryP95Ms, windowsNext));
-    const feedback = sampleByName(perfRun.samples, "feedback")[0]?.detail;
+    const largeSamples = Array.isArray(large.samplesMs) ? large.samplesMs : [];
+    const largeTruncated = Array.isArray(large.truncated) && large.truncated.length >= 30 && large.truncated.every(Boolean);
+    if (largeSample) replaceCheck(checks, measuredOrGap("perf.diff.large", "macOS 大文件摘要。", { ...base, method: "gui-large-summary", contentOk: largeSamples.length >= 30 && largeTruncated, truncated: largeTruncated, samplesMs: largeSamples }, (p95(largeSamples) ?? Infinity) > BUDGETS.largeSummaryP95Ms || largeSamples.length < 30 || !largeTruncated, windowsNext));
+    const feedback = sampleByName(perfRun.samples, "feedback").at(-1)?.detail;
     if (feedback) {
-    const feedbackDarwin = { ...base, method: "gui-feedback", contentOk: feedback.contentOk === true, samplesMs: feedback.samplesMs ?? [], painted: feedback.painted === true };
+    const feedbackTasks = Array.isArray(feedback.operations) ? feedback.operations : [];
+    const feedbackStarted = ["clone", "sync", "commit"].every((task) => feedbackTasks.includes(task));
+    const feedbackDarwin = { ...base, method: "gui-feedback", contentOk: feedback.contentOk === true && feedbackStarted, samplesMs: feedback.samplesMs ?? [], painted: feedback.painted === true, tasks: feedbackTasks };
     replaceCheck(checks, feedback.painted === false
       ? gap("perf.feedback", "macOS 反馈没有等到绘制帧，不能把超时回退当成界面延迟。", "让 Twiglane 窗口处于可见前台后重测任务反馈，并在 Windows 11 x64 补同样本。", { platforms: { darwin: feedbackDarwin } })
       : measuredOrGap("perf.feedback", "macOS 反馈延迟。", feedbackDarwin, (p95(feedback.samplesMs ?? []) ?? Infinity) > BUDGETS.feedbackP95Ms, windowsNext));
@@ -695,8 +835,8 @@ async function main() {
       ? gap("perf.scroll.m", "macOS 列表没有收到绘制帧，不能把超时回退当成滚动耗时。", "让 Twiglane 窗口处于可见前台后重测 M 列表滚动，并在 Windows 11 x64 补同样本。", { platforms: { darwin: scrollDarwin } })
       : measuredOrGap("perf.scroll.m", "macOS 列表滚动帧。", scrollDarwin, (p95(scroll.frameMs ?? []) ?? Infinity) > BUDGETS.scrollFrameP95Ms, windowsNext));
     }
-    const cancel = sampleByName(perfRun.samples, "cancel-open")[0]?.detail;
-    if (cancel) replaceCheck(checks, measuredOrGap("perf.interact.l", "macOS 加载大仓库时的键盘、取消和切换。", { ...base, method: "gui-cancel-and-switch", contentOk: cancel.contentOk === true, keyboard: cancel.keyboard === true, cancelled: cancel.cancelled === true, switched: cancel.switched === true }, cancel.contentOk !== true, windowsNext));
+    const cancel = sampleByName(perfRun.samples, "cancel-open").at(-1)?.detail;
+    if (cancel) replaceCheck(checks, measuredOrGap("perf.interact.l", "macOS 加载大仓库时的键盘、取消和切换。", { ...base, method: "gui-cancel-and-switch", contentOk: cancel.contentOk === true && cancel.readStarted === true, keyboard: cancel.keyboard === true, cancelled: cancel.cancelled === true, switched: cancel.switched === true, readStarted: cancel.readStarted === true }, cancel.contentOk !== true || cancel.readStarted !== true, windowsNext));
     if (sampleByName(perfRun.samples, "idle").length) {
     const cpu = idleWatch.cpu.length ? idleWatch.cpu.reduce((sum, value) => sum + value, 0) / idleWatch.cpu.length : null;
     replaceCheck(checks, measuredOrGap("perf.cpu.s", "macOS 空闲 CPU。", { ...base, method: "gui-idle", contentOk: cpu !== null, cpuPercent: cpu }, cpu === null || cpu > BUDGETS.idleCpuPercent, windowsNext));
@@ -754,6 +894,18 @@ async function main() {
       : { samples: [], stderr: "clone 没有返回路径", code: 1 };
     const mergeRepo = await prepareMergeRepo(acceptanceDir);
     const mergeHead = await gitText(mergeRepo, ["rev-parse", "HEAD"]);
+    const keyboardRepo = path.join(acceptanceDir, "keyboard");
+    mkdirSync(keyboardRepo, { recursive: true });
+    mustRun("git", ["init", "-b", "main"], { cwd: keyboardRepo });
+    mustRun("git", ["config", "user.name", "Twiglane Fixture"], { cwd: keyboardRepo });
+    mustRun("git", ["config", "user.email", "fixture@twiglane.invalid"], { cwd: keyboardRepo });
+    writeFileSync(path.join(keyboardRepo, "a.txt"), "a\n");
+    writeFileSync(path.join(keyboardRepo, "b.txt"), "b\n");
+    mustRun("git", ["add", "a.txt", "b.txt"], { cwd: keyboardRepo });
+    mustRun("git", ["commit", "-m", "base"], { cwd: keyboardRepo });
+    writeFileSync(path.join(keyboardRepo, "a.txt"), "a changed\n");
+    writeFileSync(path.join(keyboardRepo, "b.txt"), "b changed\n");
+    const keyboardHead = await gitText(keyboardRepo, ["rev-parse", "HEAD"]);
     const mergeSession = path.join(rawDir, "accept-merge");
     const screenshot = path.join(rawDir, "macos-desktop.png");
     let shot = false;
@@ -766,6 +918,7 @@ async function main() {
     const mergePromise = launchApp(binary, mergeSession, [
       { op: "open", repo: mergeRepo, expectChanges: 0, expectHead: mergeHead },
       { op: "merge", source: "other", content: "resolved\n" },
+      { op: "open", repo: keyboardRepo, expectChanges: 2, expectHead: keyboardHead },
       { op: "keyboard-theme" },
       { op: "sleep", ms: 3000, mark: "screenshot" },
     ], 180000, (samples) => {
@@ -795,7 +948,14 @@ async function main() {
       if (merged === "resolved\n" && mergeOid && mergeOid !== mergeHead) oids.push(mergeOid);
       else mergeOid = "";
     }
-    const theme = sampleByName(mergeRun.samples, "keyboard-theme")[0]?.detail ?? {};
+    const theme = sampleByName(mergeRun.samples, "keyboard-theme").at(-1)?.detail ?? {};
+    const keyboardOk =
+      theme.shortcutFocused === true &&
+      theme.selectionChanged === true &&
+      Boolean(theme.selectionMoved) &&
+      Boolean(theme.selectionAfter) &&
+      theme.selectionMoved !== theme.selectionBefore &&
+      theme.selectionAfter !== theme.selectionMoved;
     const shotOk = existsSync(screenshot) && statSync(screenshot).size > 1000;
     const acceptEvidence = {
       method: "installed-app-ipc-and-dom",
@@ -806,12 +966,17 @@ async function main() {
       pushed,
       mergeOid,
       themes: theme.theme ?? [],
-      keyboard: theme.keyboard === true,
+      keyboard: keyboardOk,
+      shortcutFocused: theme.shortcutFocused === true,
+      selectionChanged: theme.selectionChanged === true,
+      selectionBefore: typeof theme.selectionBefore === "string" ? theme.selectionBefore : "",
+      selectionMoved: typeof theme.selectionMoved === "string" ? theme.selectionMoved : "",
+      selectionAfter: typeof theme.selectionAfter === "string" ? theme.selectionAfter : "",
       screenshot: shotOk ? relativeToRoot(screenshot) : "",
       screenshotError: shotError.slice(0, 500),
       stderr: [cloneRun.stderr, pushRun.stderr, mergeRun.stderr].join("\n").slice(0, 4000),
     };
-    const operationsReady = partialOk && pushed && Boolean(mergeOid) && theme.keyboard === true && (theme.theme ?? []).includes("light") && (theme.theme ?? []).includes("dark");
+    const operationsReady = partialOk && pushed && Boolean(mergeOid) && keyboardOk && (theme.theme ?? []).includes("light") && (theme.theme ?? []).includes("dark");
     const acceptReady = operationsReady && shotOk;
     const acceptIndex = checks.findIndex((check) => check.id === "accept.macos");
     checks[acceptIndex] = acceptReady
@@ -831,6 +996,9 @@ async function main() {
       }
     }
   }
+
+  replaceCheck(checks, await measureProtocol("https", process.env, gitLsRemote));
+  replaceCheck(checks, await measureProtocol("ssh", process.env, gitLsRemote));
 
   const fingerprint = sourceFingerprint(root);
   const report = {
@@ -854,4 +1022,6 @@ async function main() {
   console.log(`已写入 docs/verification/report.json。未通过 ${failing.length} 项。`);
 }
 
-await main();
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  await main();
+}

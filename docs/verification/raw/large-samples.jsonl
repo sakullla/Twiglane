@@ -1,5 +1,0 @@
-{"detail":{"controls":true},"elapsedMs":278,"name":"shell-ready","pid":21935}
-{"detail":{"changes":1,"contentOk":true,"elapsedMs":60,"expectChanges":1,"expectHead":null,"head":"3753fce7af4f16dcde6edaadf1107514613ce1f5","launch":null,"mark":null,"method":"gui-open-to-first-screen"},"elapsedMs":339,"name":"status-open","pid":21935}
-{"detail":{"contentOk":true,"elapsedMs":2405,"method":"gui-large-summary","truncated":[true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true],"uncachedMs":[85]},"elapsedMs":2745,"name":"large-diff","pid":21935}
-{"detail":{"contentOk":true,"method":"gui-feedback","painted":true,"samplesMs":[10,16,17,16,17,17,16,17,17,16,17,17,16,17,16,17,17,17,17,16,17,17,16,17,17,16,16,18,16,17]},"elapsedMs":3239,"name":"feedback","pid":21935}
-{"detail":{},"elapsedMs":3240,"name":"finished","pid":21935}

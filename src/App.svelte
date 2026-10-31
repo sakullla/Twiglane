@@ -46,6 +46,7 @@
   let pending = $state<string | null>(null);
   let reading = $state(false);
   let readSerial = 0;
+  let readPhase: "idle" | "reading" | "settled" = "idle";
   let dependencyOpen = $state(false);
   let historyPanel = $state<Promise<typeof import("./lib/components/HistoryPanel.svelte")> | null>(null);
   let mergePanel = $state<Promise<typeof import("./lib/components/MergePanel.svelte")> | null>(null);
@@ -554,10 +555,12 @@
     if (pending) return;
     const serial = ++readSerial;
     reading = true;
+    readPhase = "idle";
     live = "正在读取仓库状态";
     try {
       await api.cancelReads();
       if (serial !== readSerial) return;
+      readPhase = "reading";
       const openedRepo = await api.openRepository(path, nextId());
       if (serial !== readSerial) return;
       banner = null;
@@ -572,7 +575,10 @@
       }
       showError(error);
     } finally {
-      if (serial === readSerial) reading = false;
+      if (serial === readSerial) {
+        reading = false;
+        readPhase = "settled";
+      }
     }
   }
 
@@ -754,14 +760,16 @@
     const cached: number[] = [];
     const uncached: number[] = [];
     const truncated: boolean[] = [];
+    const samplesMs: number[] = [];
     const seen = new Set<string>();
-    if (paths.length === 0 || count <= 0) return { cached, uncached, truncated };
+    if (paths.length === 0 || count <= 0) return { cached, uncached, truncated, samplesMs };
     for (let index = 0; index < count; index += 1) {
       const path = paths[index % paths.length];
       const started = performance.now();
       selectFile({ path, side: "unstaged" });
       const result = await waitForDiff(path);
       const elapsed = performance.now() - started;
+      samplesMs.push(elapsed);
       truncated.push(result.truncated || result.summary.includes("预览上限"));
       if (seen.has(path)) cached.push(elapsed);
       else {
@@ -769,7 +777,7 @@
         uncached.push(elapsed);
       }
     }
-    return { cached, uncached, truncated };
+    return { cached, uncached, truncated, samplesMs };
   }
 
   async function scrollFrames(frames: number) {
@@ -787,17 +795,42 @@
     return { samples, painted };
   }
 
-  async function feedbackSamples(count: number) {
+  function selectionKey() {
+    return selected ? `${selected.side}:${selected.path}` : "";
+  }
+
+  async function feedbackSamples(count: number, plan?: { cloneUrl?: string; cloneParent?: string }) {
     const samples: number[] = [];
+    const operations: string[] = [];
     let painted = true;
+    let started = true;
+    const cloneUrl = plan?.cloneUrl ?? "";
+    const cloneParent = plan?.cloneParent ?? "";
     for (let index = 0; index < count; index += 1) {
-      const started = performance.now();
-      live = index % 2 === 0 ? "正在读取仓库状态" : "正在准备 Twiglane";
+      const kind = (["clone", "sync", "commit"] as const)[index % 3];
+      const expected = kind === "clone" ? "正在克隆" : kind === "sync" ? "正在检查远程" : "正在创建本地提交";
+      const startedAt = performance.now();
+      const task =
+        kind === "clone"
+          ? cloneUrl && cloneParent
+            ? cloneRepo(cloneUrl, cloneParent, `feedback-${index}`)
+            : Promise.reject(new Error("没有克隆目标"))
+          : kind === "sync"
+            ? runSync("fetch", (path, generation) => api.fetchRemote(path, generation, nextId()))
+            : commitMeasured(`测量反馈 ${index}`);
+      const guarded = Promise.resolve(task).then(
+        () => undefined,
+        () => undefined,
+      );
+      const saw = live === expected;
       const frame = await nextPaint();
-      painted &&= frame.painted;
-      samples.push(performance.now() - started);
+      painted &&= frame.painted && saw;
+      if (!saw) started = false;
+      samples.push(performance.now() - startedAt);
+      operations.push(kind);
+      await guarded;
     }
-    return { samples, painted };
+    return { samples, painted, operations, started };
   }
 
   async function keyboardAndTheme() {
@@ -806,32 +839,74 @@
     themes.push(document.documentElement.dataset.theme ?? "");
     await changeTheme("dark");
     themes.push(document.documentElement.dataset.theme ?? "");
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, ctrlKey: true, bubbles: true }));
     const search = document.getElementById("repo-search");
+    if (document.activeElement === search && search instanceof HTMLElement) search.blur();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, ctrlKey: true, bubbles: true }));
+    const shortcutFocused = Boolean(search && document.activeElement === search);
     const list = document.querySelector<HTMLElement>(".file-list");
+    const before = selectionKey();
     list?.focus();
     list?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
-    return { theme: themes, keyboard: document.activeElement === search || document.activeElement === list };
+    const moved = selectionKey();
+    list?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    const after = selectionKey();
+    const selectionChanged = moved.length > 0 && after.length > 0 && moved !== before && after !== moved;
+    return {
+      theme: themes,
+      shortcutFocused,
+      selectionChanged,
+      selectionBefore: before,
+      selectionMoved: moved,
+      selectionAfter: after,
+      keyboard: shortcutFocused && selectionChanged,
+    };
+  }
+
+  async function waitUntilRepositoryRead(opening: Promise<unknown>) {
+    const started = performance.now();
+    while (performance.now() - started < 15000) {
+      if (readPhase === "reading") return true;
+      if (readPhase === "settled") return false;
+      await sleep(5);
+    }
+    await opening.catch(() => undefined);
+    return false;
   }
 
   async function cancelDuringOpen(slowRepo: string, nextRepo: string) {
-    const search = document.getElementById("repo-search") as HTMLInputElement | null;
-    const opening = openRecent(slowRepo);
-    const started = performance.now();
-    while (performance.now() - started < 15000 && live !== "正在读取仓库状态") await sleep(5);
-    const sawReading = live === "正在读取仓库状态";
-    const keyboard = Boolean(search && !search.disabled);
-    search?.focus();
-    search?.dispatchEvent(new KeyboardEvent("keydown", { key: "k", bubbles: true }));
-    await cancelReading();
-    await opening;
-    const cancelled = sawReading && live.includes("已取消读取");
-    await openRecent(nextRepo);
     const normalizePath = (value: string) => value.replace(/\/+$/, "").replace(/^\/private/, "");
+    const search = document.getElementById("repo-search");
+    const opening = openRecent(slowRepo);
+    const sawRead = await waitUntilRepositoryRead(opening);
+    let keyboard = false;
+    if (sawRead && readPhase === "reading") {
+      if (document.activeElement === search && search instanceof HTMLElement) search.blur();
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, ctrlKey: true, bubbles: true }));
+      keyboard = Boolean(search && document.activeElement === search && readPhase === "reading");
+      const cancelButton = [...document.querySelectorAll("button")].find((button) => button.textContent?.includes("取消读取"));
+      if (cancelButton instanceof HTMLButtonElement && !cancelButton.disabled && readPhase === "reading") cancelButton.click();
+      else await cancelReading();
+    }
+    await opening;
+    const cancelled =
+      sawRead &&
+      live.includes("已取消读取") &&
+      normalizePath(opened?.summary.path ?? "") !== normalizePath(slowRepo);
+    const openingSlow = openRecent(slowRepo);
+    const sawReadAgain = await waitUntilRepositoryRead(openingSlow);
+    let switchedDuringRead = false;
+    if (sawReadAgain && readPhase === "reading") {
+      switchedDuringRead = true;
+      await openRecent(nextRepo);
+    }
+    await openingSlow;
+    const switched =
+      switchedDuringRead && Boolean(opened && normalizePath(opened.summary.path) === normalizePath(nextRepo));
     return {
       cancelled,
-      switched: Boolean(opened && normalizePath(opened.summary.path) === normalizePath(nextRepo)),
-      keyboard: keyboard && document.activeElement === search,
+      switched,
+      keyboard,
+      readStarted: sawRead && sawReadAgain,
     };
   }
 

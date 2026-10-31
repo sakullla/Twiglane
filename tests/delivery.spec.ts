@@ -148,9 +148,9 @@ describe("交付测量", () => {
       { id: "perf.diff.cached", status: "pass", summary: "缓存差异", evidence: both({ samplesMs: samples }) },
       { id: "perf.diff.uncached", status: "pass", summary: "未缓存差异", evidence: both({ samplesMs: samples }) },
       { id: "perf.diff.large", status: "pass", summary: "大文件", evidence: both({ samplesMs: samples, truncated: true }) },
-      { id: "perf.feedback", status: "pass", summary: "反馈", evidence: both({ samplesMs: samples }) },
+      { id: "perf.feedback", status: "pass", summary: "反馈", evidence: both({ samplesMs: samples, tasks: ["clone", "sync", "commit"] }) },
       { id: "perf.scroll.m", status: "pass", summary: "滚动", evidence: both({ frameMs: samples }) },
-      { id: "perf.interact.l", status: "pass", summary: "交互", evidence: both({ keyboard: true, cancelled: true, switched: true }) },
+      { id: "perf.interact.l", status: "pass", summary: "交互", evidence: both({ keyboard: true, cancelled: true, switched: true, readStarted: true }) },
       {
         id: "perf.memory.s",
         status: "pass",
@@ -195,6 +195,11 @@ describe("交付测量", () => {
           mergeOid: "c".repeat(40),
           themes: ["light", "dark"],
           keyboard: true,
+          shortcutFocused: true,
+          selectionChanged: true,
+          selectionBefore: "",
+          selectionMoved: "unstaged:a.txt",
+          selectionAfter: "unstaged:b.txt",
         },
       },
       {
@@ -211,6 +216,11 @@ describe("交付测量", () => {
           mergeOid: "f".repeat(40),
           themes: ["light", "dark"],
           keyboard: true,
+          shortcutFocused: true,
+          selectionChanged: true,
+          selectionBefore: "unstaged:a.txt",
+          selectionMoved: "unstaged:b.txt",
+          selectionAfter: "unstaged:c.txt",
         },
       },
       {
@@ -238,5 +248,77 @@ describe("交付测量", () => {
       check.id === "accept.windows" ? { ...check, status: "gap", nextStep: "在 Windows 11 x64 上安装后重跑验收。" } : check,
     );
     expect(judgeReport(root, report, report.sourceFingerprint, "darwin").ok).toBe(false);
+  });
+
+  it("只给状态文案、未开始的读取或未改变选择不能通过", () => {
+    const root = tempDir();
+    const base = {
+      prerequisite: {
+        release: true,
+        ssd: true,
+        acPower: true,
+        memoryBytes: BUDGETS.referenceMemoryBytes,
+        diskColdStart: false,
+      },
+      contentOk: true,
+      browserMock: false,
+      method: "gui-synthetic",
+    };
+    const samples = Array.from({ length: 30 }, () => 10);
+    const both = (extra: Record<string, unknown>) => ({
+      platforms: {
+        darwin: { ...base, ...extra },
+        win32: { ...base, metric: "private-working-set", ...extra },
+      },
+    });
+    expect(
+      validateCheck(
+        { id: "perf.feedback", status: "pass", summary: "反馈", evidence: both({ samplesMs: samples }) },
+        { root, hostPlatform: "darwin" },
+      ).some((reason: string) => reason.includes("克隆")),
+    ).toBe(true);
+    expect(
+      validateCheck(
+        {
+          id: "perf.interact.l",
+          status: "pass",
+          summary: "交互",
+          evidence: both({ keyboard: true, cancelled: true, switched: true }),
+        },
+        { root, hostPlatform: "darwin" },
+      ).some((reason: string) => reason.includes("尚未开始")),
+    ).toBe(true);
+    expect(
+      validateCheck(
+        {
+          id: "perf.diff.large",
+          status: "pass",
+          summary: "大文件",
+          evidence: both({ samplesMs: [85], truncated: true }),
+        },
+        { root, hostPlatform: "darwin" },
+      ).some((reason: string) => reason.includes("样本不足")),
+    ).toBe(true);
+    expect(
+      validateCheck(
+        {
+          id: "accept.macos",
+          status: "pass",
+          summary: "验收",
+          evidence: {
+            method: "installed-app",
+            hostPlatform: "darwin",
+            browserMock: false,
+            oids: ["a".repeat(40), "b".repeat(40)],
+            partialCommit: true,
+            pushed: true,
+            mergeOid: "c".repeat(40),
+            themes: ["light", "dark"],
+            keyboard: true,
+          },
+        },
+        { root, hostPlatform: "darwin" },
+      ).some((reason: string) => reason.includes("方向键")),
+    ).toBe(true);
   });
 });

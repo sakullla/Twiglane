@@ -15,11 +15,25 @@ export interface MeasureActions {
   push: () => Promise<void>;
   merge: (source: string, content: string) => Promise<string>;
   refreshTimes: (count: number) => Promise<number[]>;
-  diffCycle: (paths: string[], count: number) => Promise<{ cached: number[]; uncached: number[]; truncated: boolean[] }>;
+  diffCycle: (paths: string[], count: number) => Promise<{ cached: number[]; uncached: number[]; truncated: boolean[]; samplesMs: number[] }>;
   scrollFrames: (frames: number) => Promise<{ samples: number[]; painted: boolean }>;
-  feedbackSamples: (count: number) => Promise<{ samples: number[]; painted: boolean }>;
-  keyboardAndTheme: () => Promise<{ theme: string[]; keyboard: boolean }>;
-  cancelDuringOpen: (slowRepo: string, nextRepo: string) => Promise<{ cancelled: boolean; switched: boolean; keyboard: boolean }>;
+  feedbackSamples: (
+    count: number,
+    plan?: { cloneUrl?: string; cloneParent?: string },
+  ) => Promise<{ samples: number[]; painted: boolean; operations: string[]; started: boolean }>;
+  keyboardAndTheme: () => Promise<{
+    theme: string[];
+    keyboard: boolean;
+    shortcutFocused: boolean;
+    selectionChanged: boolean;
+    selectionBefore: string;
+    selectionMoved: string;
+    selectionAfter: string;
+  }>;
+  cancelDuringOpen: (
+    slowRepo: string,
+    nextRepo: string,
+  ) => Promise<{ cancelled: boolean; switched: boolean; keyboard: boolean; readStarted: boolean }>;
   sleep: (ms: number) => Promise<void>;
   getOpened: () => OpenedView | null;
 }
@@ -27,6 +41,58 @@ export interface MeasureActions {
 interface Step {
   op: string;
   [key: string]: unknown;
+}
+
+export function largeSummaryContentOk(samplesMs: number[], truncated: boolean[], count: number): boolean {
+  return count >= 30 && samplesMs.length === count && truncated.length === count && truncated.every(Boolean);
+}
+
+export function feedbackContentOk(
+  result: { samples: number[]; painted: boolean; operations: string[]; started: boolean },
+  count: number,
+): boolean {
+  const operations = new Set(result.operations);
+  return (
+    count >= 30 &&
+    result.started &&
+    result.painted &&
+    result.samples.length === count &&
+    operations.has("clone") &&
+    operations.has("sync") &&
+    operations.has("commit")
+  );
+}
+
+export function keyboardContentOk(result: {
+  theme: string[];
+  shortcutFocused?: boolean;
+  selectionChanged?: boolean;
+  selectionBefore?: string;
+  selectionMoved?: string;
+  selectionAfter?: string;
+}): boolean {
+  const before = result.selectionBefore ?? "";
+  const moved = result.selectionMoved ?? "";
+  const after = result.selectionAfter ?? "";
+  return (
+    result.shortcutFocused === true &&
+    result.selectionChanged === true &&
+    moved.length > 0 &&
+    after.length > 0 &&
+    moved !== before &&
+    after !== moved &&
+    result.theme.includes("light") &&
+    result.theme.includes("dark")
+  );
+}
+
+export function cancelContentOk(result: {
+  cancelled: boolean;
+  switched: boolean;
+  keyboard: boolean;
+  readStarted?: boolean;
+}): boolean {
+  return result.readStarted === true && result.cancelled && result.switched && result.keyboard;
 }
 
 function frames(count = 2): Promise<void> {
@@ -136,13 +202,17 @@ async function runStep(step: Step, actions: MeasureActions) {
     return;
   }
   if (step.op === "large-diff") {
+    const count = Number(step.count ?? 30);
     const started = performance.now();
-    const result = await actions.diffCycle([String(step.path)], Number(step.count ?? 30));
+    const result = await actions.diffCycle([String(step.path)], count);
+    const samplesMs = result.samplesMs;
     await sample("large-diff", {
       method: "gui-large-summary",
       elapsedMs: performance.now() - started,
+      samplesMs,
       uncachedMs: result.uncached,
-      contentOk: result.uncached.length === 1 && result.truncated.some(Boolean),
+      cachedMs: result.cached,
+      contentOk: largeSummaryContentOk(samplesMs, result.truncated, count),
       truncated: result.truncated,
     });
     return;
@@ -158,23 +228,29 @@ async function runStep(step: Step, actions: MeasureActions) {
     return;
   }
   if (step.op === "feedback") {
-    const result = await actions.feedbackSamples(Number(step.count ?? 30));
+    const count = Number(step.count ?? 30);
+    const result = await actions.feedbackSamples(count, {
+      cloneUrl: String(step.cloneUrl ?? ""),
+      cloneParent: String(step.cloneParent ?? ""),
+    });
     await sample("feedback", {
       method: "gui-feedback",
       samplesMs: result.samples,
       painted: result.painted,
-      contentOk: result.painted && result.samples.length > 0,
+      operations: result.operations,
+      started: result.started,
+      contentOk: feedbackContentOk(result, count),
     });
     return;
   }
   if (step.op === "keyboard-theme") {
     const result = await actions.keyboardAndTheme();
-    await sample("keyboard-theme", { method: "gui-keyboard-theme", ...result, contentOk: result.keyboard && result.theme.length >= 2 });
+    await sample("keyboard-theme", { method: "gui-keyboard-theme", ...result, contentOk: keyboardContentOk(result) });
     return;
   }
   if (step.op === "cancel-open") {
     const result = await actions.cancelDuringOpen(String(step.slowRepo), String(step.nextRepo));
-    await sample("cancel-open", { method: "gui-cancel-and-switch", ...result, contentOk: result.cancelled && result.switched && result.keyboard });
+    await sample("cancel-open", { method: "gui-cancel-and-switch", ...result, contentOk: cancelContentOk(result) });
     return;
   }
   if (step.op === "clone") {

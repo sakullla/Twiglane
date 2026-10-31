@@ -14,8 +14,14 @@
     "light",
     "dark"
   ],
-  "keyboard": true,
+  "keyboard": false,
   "screenshot": "",
   "screenshotError": "could not create image from display",
-  "stderr": "\n\n"
+  "stderr": "\n\n",
+  "shortcutFocused": false,
+  "selectionChanged": false,
+  "selectionBefore": "",
+  "selectionMoved": "",
+  "selectionAfter": "",
+  "keyboardInvalidated": "旧键盘检查只把焦点放在文件列表上，没有验证快捷键或方向键改变选择。"
 }

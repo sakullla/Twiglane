@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "preview:ui": "vite --config scripts/ui-preview/vite.config.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json --threshold error",
     "test": "vitest run",
     "tauri": "tauri",

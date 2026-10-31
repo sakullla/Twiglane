@@ -95,6 +95,14 @@ cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
+只调界面样式时，可以不启动 Tauri，用内置的模拟数据在浏览器里预览（`scripts/ui-preview/`，不参与构建，也不代表真实 Git 行为）：
+
+```bash
+npm run preview:ui   # 打开 http://127.0.0.1:1430
+```
+
+界面快捷键：`Ctrl/⌘+K` 搜索仓库，`Ctrl/⌘+1–4` 切换改动、历史、临时保存与合并，`Ctrl/⌘+B` 折叠仓库栏，`Ctrl/⌘+Enter` 提交到本地；在改动列表里用方向键移动，空格或双击暂存、取消暂存。
+
 这些命令只覆盖当前开发环境。正式交付还需要双平台安装包、协议和性能记录，不能用这里的本地测试代替。
 
 ## 数据

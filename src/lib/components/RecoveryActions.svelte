@@ -4,6 +4,8 @@
   import { changeLabel } from "../labels";
   import { discardActionLabel, discardBoundary, undoActionLabel } from "../resolve";
   import type { DiscardFilePlan, OpenedRepository, StatusSnapshot, UndoResult } from "../types";
+  import Icon from "./Icon.svelte";
+  import Modal from "./Modal.svelte";
 
   interface Props {
     opened: OpenedRepository;
@@ -25,7 +27,8 @@
   let busy = $state(false);
   let errorText = $state<string | null>(null);
   let blocked = $derived(disabled || busy);
-  let conflicted = $derived(opened.snapshot.files.some((file) => file.unmerged));
+  let conflicts = $derived(opened.snapshot.files.filter((file) => file.unmerged).length);
+  let allChecked = $derived(plans.length > 0 && checked.length === plans.length);
 
   function changedPaths(): string[] {
     return opened.snapshot.files.filter((file) => !file.unmerged).map((file) => file.path);
@@ -35,6 +38,7 @@
     const paths = changedPaths();
     if (paths.length === 0) {
       errorText = "没有可放弃的本地改动。";
+      onFailure({ code: "nothing_to_discard", message: errorText });
       return;
     }
     busy = true;
@@ -61,6 +65,10 @@
 
   function toggle(path: string, value: boolean) {
     checked = value ? [...checked, path] : checked.filter((item) => item !== path);
+  }
+
+  function toggleAll() {
+    checked = allChecked ? [] : plans.map((plan) => plan.path);
   }
 
   async function confirmDiscard() {
@@ -92,6 +100,7 @@
     const head = opened.snapshot.branch.headOid;
     if (!head) {
       errorText = "没有可撤销的提交。";
+      onFailure({ code: "nothing_to_undo", message: errorText });
       return;
     }
     busy = true;
@@ -149,59 +158,110 @@
   }
 </script>
 
-<div class="row recovery-row">
-  {#if conflicted}
-    <button type="button" class="ghost compact" disabled={blocked} onclick={onMerge}>处理冲突</button>
-  {/if}
-  <button type="button" class="ghost compact" disabled={blocked} onclick={openUndo}>{undoActionLabel()}</button>
-  <button type="button" class="danger compact" disabled={blocked || changedPaths().length === 0} onclick={openDiscard}>{discardActionLabel()}</button>
-</div>
+{#if conflicts > 0}
+  <button type="button" class="btn btn-warning-soft btn-sm" disabled={blocked} title="去合并视图逐个处理冲突文件" onclick={onMerge}>
+    <Icon name="alert" size={13} />处理冲突
+    <span class="count warning">{conflicts}</span>
+  </button>
+{/if}
+<button
+  type="button"
+  class="icon-btn"
+  aria-label={undoActionLabel()}
+  title={`${undoActionLabel()}（仅限未推送的普通提交）`}
+  disabled={blocked}
+  onclick={openUndo}
+>
+  <Icon name="undo" />
+</button>
+<button
+  type="button"
+  class="icon-btn danger"
+  aria-label={discardActionLabel()}
+  title={`${discardActionLabel()}（会先列出影响，确认后才写入）`}
+  disabled={blocked || changedPaths().length === 0}
+  onclick={openDiscard}
+>
+  <Icon name="trash" />
+</button>
 {#if errorText && mode === null}
-  <p class="hint">{errorText}</p>
+  <p class="sr-only" role="status">{errorText}</p>
 {/if}
 {#if mode === "discard"}
-  <div class="modal-backdrop" role="presentation">
-    <div class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="discard-title">
-      <h2 id="discard-title">放弃文件修改</h2>
-      <p>这不是撤销提交。{boundary}</p>
-      <div class="branch-list">
-        {#each plans as plan (plan.path)}
-          <label class="branch-row">
-            <span>
-              <input
-                type="checkbox"
-                checked={checked.includes(plan.path)}
-                onchange={(event) => toggle(plan.path, (event.currentTarget as HTMLInputElement).checked)}
-              />
-              <strong title={planTitle(plan)}>{planTitle(plan)}</strong>
-              <span class="hint">{sideText(plan)}</span>
-              <span class="hint">{plan.impact} {plan.recovery}</span>
-            </span>
-          </label>
-        {/each}
-      </div>
-      {#if errorText}<div class="banner" role="alert">{errorText}</div>{/if}
-      <div class="row">
-        <button type="button" class="ghost" onclick={cancelDiscard}>取消</button>
+  <Modal
+    title="放弃文件修改"
+    titleId="discard-title"
+    icon="trash"
+    tone="danger"
+    size="lg"
+    description={`这不是撤销提交。${boundary}`}
+    onClose={cancelDiscard}
+  >
+    <div class="list-box" style="max-height: 360px">
+      <div class="list-section">
+        <span>{checked.length} / {plans.length} 个文件已选择</span>
         <span class="spacer"></span>
-        <button type="button" class="danger" disabled={blocked || checked.length === 0} onclick={confirmDiscard}>确认放弃所选</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick={toggleAll}>{allChecked ? "全不选" : "全选"}</button>
       </div>
+      {#each plans as plan, index (plan.path)}
+        <label class="list-row">
+          <input
+            type="checkbox"
+            class="checkbox"
+            data-autofocus={index === 0 ? "" : undefined}
+            checked={checked.includes(plan.path)}
+            onchange={(event) => toggle(plan.path, (event.currentTarget as HTMLInputElement).checked)}
+          />
+          <span class="lr-main">
+            <span class="lr-title mono"><span title={planTitle(plan)}>{planTitle(plan)}</span></span>
+            <span class="lr-sub">{sideText(plan)}</span>
+            <span class="lr-desc">{plan.impact} {plan.recovery}</span>
+          </span>
+        </label>
+      {/each}
     </div>
-  </div>
+    <div class="callout warn">
+      <Icon name="alert" size={15} />
+      <span>放弃后 Git 不会保留这些未提交内容，这里也不能找回。不确定时，可以先去「临时保存」。</span>
+    </div>
+    {#if errorText}<div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{errorText}</span></div>{/if}
+    {#snippet footer()}
+      <button type="button" class="btn btn-secondary" onclick={cancelDiscard}>取消</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn btn-danger" disabled={blocked || checked.length === 0} onclick={confirmDiscard}>
+        <Icon name="trash" size={14} />确认放弃所选
+      </button>
+    {/snippet}
+  </Modal>
 {/if}
 {#if mode === "undo" && undo}
-  <div class="modal-backdrop" role="presentation">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="undo-title">
-      <h2 id="undo-title">撤销最近提交并保留改动</h2>
-      <p>{undo.summary || "最近一次提交"} · {undo.headOid.slice(0, 7)}</p>
-      <p>{undo.reason}</p>
-      <p class="hint">这不会放弃文件内容。已推送、合并提交、首个提交、脏暂存区、进行中的操作，或无法确认传播范围时都不会写入。</p>
-      {#if errorText}<div class="banner" role="alert">{errorText}</div>{/if}
-      <div class="row">
-        <button type="button" class="ghost" onclick={cancelUndo}>取消</button>
-        <span class="spacer"></span>
-        <button type="button" class="primary" disabled={blocked || !undo.eligible} onclick={confirmUndo}>确认撤销提交</button>
+  <Modal
+    title="撤销最近提交并保留改动"
+    titleId="undo-title"
+    icon="undo"
+    tone={undo.eligible ? "default" : "warning"}
+    description="这不会放弃文件内容，改动会回到工作区。"
+    onClose={cancelUndo}
+  >
+    <div class="list-box">
+      <div class="list-row">
+        <Icon name="commit" />
+        <span class="lr-main">
+          <span class="lr-title"><span>{undo.summary || "最近一次提交"}</span></span>
+          <span class="lr-sub mono">{undo.headOid.slice(0, 7)}</span>
+        </span>
       </div>
     </div>
-  </div>
+    <div class={`callout ${undo.eligible ? "ok" : "warn"}`}>
+      <Icon name={undo.eligible ? "check-circle" : "alert"} size={15} />
+      <span>{undo.reason}</span>
+    </div>
+    <p class="hint">已推送、合并提交、首个提交、脏暂存区、进行中的操作，或无法确认传播范围时都不会写入。</p>
+    {#if errorText}<div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{errorText}</span></div>{/if}
+    {#snippet footer()}
+      <button type="button" class="btn btn-secondary" onclick={cancelUndo}>取消</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn btn-primary" disabled={blocked || !undo?.eligible} onclick={confirmUndo}>确认撤销提交</button>
+    {/snippet}
+  </Modal>
 {/if}

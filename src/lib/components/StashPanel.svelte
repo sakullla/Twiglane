@@ -3,6 +3,9 @@
   import { normalizeError } from "../errors";
   import { formatAuthoredAt, shortOid, stashPathBadge } from "../history";
   import type { OpenedRepository, StashApplyResult, StashRecord, StashState, StatusSnapshot } from "../types";
+  import { relativeTime } from "../ui";
+  import Icon from "./Icon.svelte";
+  import Modal from "./Modal.svelte";
 
   interface Props {
     opened: OpenedRepository;
@@ -159,95 +162,125 @@
 </script>
 
 <section class="span-main" aria-label="临时保存">
-  <div class="stash-body">
-    <p>{preview?.summary ?? "正在确认将保存的范围。"}</p>
-    <label class="row">
-      <input
-        type="checkbox"
-        checked={includeUntracked}
-        disabled={busy || disabled}
-        onchange={(event) => (includeUntracked = (event.currentTarget as HTMLInputElement).checked)}
-      />
-      包含未跟踪文件
-    </label>
-    <p class="hint">忽略文件不会保存。未勾选时，未跟踪文件也不进入这次临时保存。</p>
-    {#if preview}
-      <div class="chip-row" aria-label="保存范围">
-        {#each preview.trackedPaths as path (path)}
-          <span class="chip" title={path}>{stashPathBadge("tracked", includeUntracked)} {path}</span>
-        {/each}
-        {#each preview.untrackedPaths as path (path)}
-          <span class="chip skip" title={path}>{stashPathBadge("untracked", includeUntracked)} {path}</span>
-        {/each}
-        {#each preview.ignoredPaths as path (path)}
-          <span class="chip ignore" title={path}>{stashPathBadge("ignored", includeUntracked)} {path}</span>
-        {/each}
+  <div class="panel-scroll stash-body">
+    <div class="panel-inner">
+      <div class="card">
+        <div class="card-head">
+          <span class="ch-icon"><Icon name="archive" size={15} /></span>
+          <h2>新建临时保存</h2>
+          <span class="spacer"></span>
+          <label class="switch">
+            <input
+              type="checkbox"
+              checked={includeUntracked}
+              disabled={busy || disabled}
+              onchange={(event) => (includeUntracked = (event.currentTarget as HTMLInputElement).checked)}
+            />
+            包含未跟踪文件
+          </label>
+        </div>
+        <div class="card-body">
+          <p>{preview?.summary ?? "正在确认将保存的范围。"}</p>
+          {#if preview}
+            <div class="path-chips" aria-label="保存范围">
+              {#each preview.trackedPaths as path (path)}
+                <span class="chip save" title={path}>{stashPathBadge("tracked", includeUntracked)} {path}</span>
+              {/each}
+              {#each preview.untrackedPaths as path (path)}
+                <span class={`chip ${includeUntracked ? "save" : "skip"}`} title={path}>{stashPathBadge("untracked", includeUntracked)} {path}</span>
+              {/each}
+              {#each preview.ignoredPaths as path (path)}
+                <span class="chip ignore" title={path}>{stashPathBadge("ignored", includeUntracked)} {path}</span>
+              {/each}
+            </div>
+            {#if preview.trackedCount > preview.trackedPaths.length || preview.untrackedCount > preview.untrackedPaths.length || preview.ignoredCount > preview.ignoredPaths.length}
+              <p class="hint">路径较多，这里只列出一部分。数量以上面的说明为准。</p>
+            {/if}
+          {/if}
+          <p class="hint">忽略文件不会保存。未勾选时，未跟踪文件也不进入这次临时保存。</p>
+        </div>
+        <div class="card-foot">
+          <input
+            class="input"
+            aria-label="临时保存说明"
+            placeholder="可选说明，例如：先放一放的实验"
+            value={message}
+            disabled={busy || disabled}
+            oninput={(event) => (message = (event.currentTarget as HTMLInputElement).value)}
+            onkeydown={(event) => {
+              if (event.key === "Enter") save();
+            }}
+          />
+          <button type="button" class="btn btn-primary" disabled={disabled || busy || !preview?.canSave} onclick={save}>
+            {#if busy}<span class="spinner"></span>{:else}<Icon name="archive" size={14} />{/if}
+            临时保存
+          </button>
+        </div>
       </div>
-      {#if preview.trackedCount > preview.trackedPaths.length || preview.untrackedCount > preview.untrackedPaths.length || preview.ignoredCount > preview.ignoredPaths.length}
-        <p class="hint">路径较多，这里只列出一部分。数量以保存前的说明为准。</p>
+
+      {#if errorText}
+        <div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{errorText}</span></div>
       {/if}
-    {/if}
-    <input
-      class="text-input"
-      aria-label="临时保存说明"
-      placeholder="可选说明"
-      value={message}
-      disabled={busy || disabled}
-      oninput={(event) => (message = (event.currentTarget as HTMLInputElement).value)}
-    />
-    <div class="row">
-      <button type="button" class="primary" disabled={disabled || busy || !preview?.canSave} onclick={save}>临时保存</button>
-    </div>
-    {#if errorText}
-      <div class="banner" role="alert">{errorText}</div>
-    {/if}
-    {#if applied}
-      <div class="banner ok" role="status">
-        <p>{applied.note}</p>
-        {#if applied.kept}<p>记录 {shortOid(applied.oid)} 仍保留。</p>{/if}
-        {#if applied.conflicted}
-          <div class="row">
-            {#each applied.conflictPaths as path (path)}
-              <button type="button" class="ghost compact" onclick={() => onOpenChanges(path)}>查看冲突 {path}</button>
-            {/each}
+      {#if applied}
+        <div class={`callout ${applied.conflicted ? "warn" : "ok"}`} role="status">
+          <Icon name={applied.conflicted ? "alert" : "check-circle"} size={15} />
+          <div class="callout-body">
+            <p>{applied.note}</p>
+            {#if applied.kept}<p>记录 {shortOid(applied.oid)} 仍保留。</p>{/if}
+            {#if applied.conflicted}
+              <div class="row">
+                {#each applied.conflictPaths as path (path)}
+                  <button type="button" class="btn btn-secondary btn-sm" onclick={() => onOpenChanges(path)}>查看冲突 {path}</button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        </div>
+      {/if}
+
+      <div class="card">
+        <div class="card-head">
+          <span class="ch-icon info"><Icon name="layers" size={15} /></span>
+          <h2>已有记录</h2>
+          {#if stash}<span class="count">{stash.records.length}</span>{/if}
+          <span class="spacer"></span>
+          <span class="hint">恢复会保留记录；删除前会再次核验身份</span>
+        </div>
+        {#if stash && stash.records.length === 0}
+          <div class="empty compact" role="status">
+            <span class="empty-icon"><Icon name="archive" size={22} /></span>
+            <strong>还没有临时保存记录</strong>
+            <p>保存前会先说明已跟踪、未跟踪和忽略文件的范围。没有可保存的内容时不会创建记录。</p>
           </div>
         {/if}
-      </div>
-    {/if}
-    <h2 class="section-label">已有记录</h2>
-    <p class="hint">恢复会把改动放回工作区并保留记录。删除需要确认，并在执行前再次核验记录身份。</p>
-    {#if stash && stash.records.length === 0}
-      <div class="empty" role="status">
-        <strong>还没有临时保存记录</strong>
-        <p>保存前会先说明已跟踪、未跟踪和忽略文件的范围。没有可保存的内容时不会创建记录。</p>
-      </div>
-    {/if}
-    <div class="stash-list">
-      {#each stash?.records ?? [] as record (record.oid)}
-        <div class="stash-record">
-          <div>
-            <strong>{record.message || "未填写说明"}</strong>
-            <div class="hint" title={record.oid}>{shortOid(record.oid)} · {formatAuthoredAt(record.committedAt)}</div>
-          </div>
-          <button type="button" class="ghost compact" disabled={disabled || busy} onclick={() => restore(record.oid)}>恢复</button>
-          <button type="button" class="danger compact" disabled={disabled || busy} onclick={() => askDelete(record)}>删除</button>
+        <div class="stash-list">
+          {#each stash?.records ?? [] as record (record.oid)}
+            <div class="stash-record">
+              <span class="sr-icon"><Icon name="archive" size={15} /></span>
+              <div class="sr-main">
+                <strong class:untitled={!record.message}>{record.message || "未填写说明"}</strong>
+                <span class="hint" title={`${record.oid}\n${formatAuthoredAt(record.committedAt)}`}>
+                  <span class="mono">{shortOid(record.oid)}</span> · {relativeTime(record.committedAt)}
+                </span>
+              </div>
+              <button type="button" class="btn btn-secondary btn-sm" disabled={disabled || busy} onclick={() => restore(record.oid)}>恢复</button>
+              <button type="button" class="btn btn-danger-soft btn-sm" disabled={disabled || busy} onclick={() => askDelete(record)}>删除</button>
+            </div>
+          {/each}
         </div>
-      {/each}
+      </div>
     </div>
   </div>
   {#if confirmRecord}
-    <div class="modal-backdrop" role="presentation">
-      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="stash-delete-title">
-        <h2 id="stash-delete-title">删除临时保存</h2>
-        <p>
-          将删除 {shortOid(confirmRecord.oid)}。确认时会再次核验这条记录的身份。取消不会删除，工作区也不会改变。
-        </p>
-        <div class="row">
-          <button type="button" class="ghost" onclick={cancelDelete}>取消</button>
-          <span class="spacer"></span>
-          <button type="button" class="danger" onclick={confirmDelete}>确认删除</button>
-        </div>
-      </div>
-    </div>
+    <Modal title="删除临时保存" titleId="stash-delete-title" icon="trash" tone="danger" size="sm" onClose={cancelDelete}>
+      <p>
+        将删除 <span class="mono">{shortOid(confirmRecord.oid)}</span>{confirmRecord.message ? `（${confirmRecord.message}）` : ""}。确认时会再次核验这条记录的身份。取消不会删除，工作区也不会改变。
+      </p>
+      {#snippet footer()}
+        <button type="button" class="btn btn-secondary" onclick={cancelDelete}>取消</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-danger" onclick={confirmDelete}>确认删除</button>
+      {/snippet}
+    </Modal>
   {/if}
 </section>

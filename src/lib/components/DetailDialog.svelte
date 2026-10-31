@@ -1,45 +1,46 @@
 <script lang="ts">
+  import type { IconName } from "../icons";
+  import Icon from "./Icon.svelte";
+  import Modal from "./Modal.svelte";
+
   interface Props {
     title: string;
     value: string;
     body?: string;
     confirmLabel?: string;
+    icon?: IconName;
+    prose?: boolean;
     onClose: () => void;
     onConfirm?: () => void;
   }
-  let { title, value, body = "", confirmLabel = "", onClose, onConfirm }: Props = $props();
-  let copyMessage = $state("");
+  let { title, value, body = "", confirmLabel = "", icon = "info", prose = false, onClose, onConfirm }: Props = $props();
+  let copied = $state<"" | "ok" | "fail">("");
 
   async function copyValue() {
     try {
       await navigator.clipboard.writeText(value);
-      copyMessage = "已复制完整内容。";
+      copied = "ok";
     } catch {
-      copyMessage = "无法写入剪贴板，请手动选择下面的文本。";
-    }
-  }
-
-  function onKey(event: KeyboardEvent) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      onClose();
+      copied = "fail";
     }
   }
 </script>
 
-<div class="modal-backdrop" role="presentation" onkeydown={onKey}>
-  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="detail-title">
-    <h2 id="detail-title">{title}</h2>
-    {#if body}<p>{body}</p>{/if}
-    <textarea class="full-value" readonly aria-label={title}>{value}</textarea>
-    {#if copyMessage}<p class="hint" role="status">{copyMessage}</p>{/if}
-    <div class="row">
-      <button type="button" class="ghost" onclick={copyValue}>复制</button>
-      <span class="spacer"></span>
-      <button type="button" class="ghost" onclick={onClose}>取消</button>
-      {#if onConfirm}
-        <button type="button" class="primary" onclick={onConfirm}>{confirmLabel}</button>
-      {/if}
-    </div>
-  </div>
-</div>
+<Modal {title} titleId="detail-title" {icon} description={body} size={prose ? "lg" : "md"} {onClose}>
+  <textarea class="full-value" class:prose readonly aria-label={title} rows={prose ? 12 : 3}>{value}</textarea>
+  {#if copied === "ok"}
+    <p class="hint" role="status">已复制完整内容。</p>
+  {:else if copied === "fail"}
+    <p class="hint" role="status">无法写入剪贴板，请手动选择上面的文本。</p>
+  {/if}
+  {#snippet footer()}
+    <button type="button" class="btn btn-ghost" onclick={copyValue}>
+      <Icon name={copied === "ok" ? "check" : "copy"} size={14} />复制
+    </button>
+    <span class="spacer"></span>
+    <button type="button" class="btn btn-secondary" onclick={onClose}>{onConfirm ? "取消" : "关闭"}</button>
+    {#if onConfirm}
+      <button type="button" class="btn btn-primary" onclick={onConfirm}>{confirmLabel}</button>
+    {/if}
+  {/snippet}
+</Modal>

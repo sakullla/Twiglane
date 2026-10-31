@@ -2,6 +2,8 @@
   import { toSideRows, type ViewLine } from "../diff";
   import { scrollByRows, visibleRange } from "../layout";
   import type { DiffHunk, DiffResponse, FileSelection } from "../types";
+  import { splitPath } from "../ui";
+  import Icon from "./Icon.svelte";
 
   interface Props {
     selection: FileSelection | null;
@@ -39,6 +41,8 @@
     visibleRange(total, scrollTop, viewport > 0 ? viewport : scrollTop > 0 ? ROW_HEIGHT : 0, ROW_HEIGHT),
   );
   let hunkForLine = $derived((index: number) => diff?.hunks.find((hunk) => hunk.startLine === index) ?? null);
+  let parts = $derived(selection ? splitPath(selection.path) : null);
+  let showStats = $derived(Boolean(diff && !diff.binary && (diff.additions > 0 || diff.deletions > 0)));
 
   function applyScroll(next: number) {
     scrollTop = next;
@@ -73,43 +77,83 @@
     if (kind === "hunk" || kind === "meta" || kind === "nonewline") return "diff-line hunk";
     return "diff-line";
   }
+
+  function hunkLabel(hunk: DiffHunk): string {
+    if (!hunk.stageable) return "已截断";
+    return selection?.side === "staged" ? "取消暂存此块" : "暂存此块";
+  }
 </script>
 
 <section class="diff" aria-label="差异详情">
   <div class="diff-toolbar">
-    <div class="row" role="group" aria-label="差异布局">
-      <button type="button" class="theme-btn" aria-pressed={mode === "unified"} onclick={() => (mode = "unified")}>统一</button>
-      <button type="button" class="theme-btn" aria-pressed={mode === "split"} onclick={() => (mode = "split")}>并排</button>
+    <div class="diff-file">
+      {#if selection && parts}
+        <Icon name="file-diff" size={15} />
+        <span class="diff-path" title={selection.path}>
+          <bdi>{#if parts.dir}<span class="dir">{parts.dir}/</span>{/if}<strong>{parts.name}</strong></bdi>
+        </span>
+        {#if !readOnly}
+          <span class="diff-side" class:staged={selection.side === "staged"}>
+            {selection.side === "staged" ? "已暂存" : "未暂存"}
+          </span>
+        {/if}
+        {#if showStats && diff}
+          <span class="diff-stats" aria-label={`新增 ${diff.additions} 行，删除 ${diff.deletions} 行`}>
+            <span class="plus">+{diff.additions}</span>
+            <span class="minus">−{diff.deletions}</span>
+          </span>
+        {/if}
+        {#if diff && !showStats}
+          <span class="diff-summary" title={diff.summary}>{diff.summary}</span>
+        {/if}
+      {:else}
+        <span class="hint">差异</span>
+      {/if}
     </div>
-    {#if diff}
-      <span class="hint">{diff.summary}</span>
-    {/if}
+    {#if loading && diff}<span class="spinner muted" aria-hidden="true"></span>{/if}
     {#if onFileHistory && selection}
-      <button type="button" class="ghost compact" onclick={() => onFileHistory?.(selection.path)}>此文件历史</button>
+      <button
+        type="button"
+        class="btn btn-ghost btn-sm"
+        aria-label="此文件历史"
+        title="查看这个文件的提交历史"
+        onclick={() => onFileHistory?.(selection.path)}
+      >
+        <Icon name="history" size={14} /><span class="diff-hist-label">此文件历史</span>
+      </button>
     {/if}
+    <div class="segmented" role="group" aria-label="差异布局">
+      <button type="button" aria-pressed={mode === "unified"} title="统一视图" onclick={() => (mode = "unified")}>统一</button>
+      <button type="button" aria-pressed={mode === "split"} title="并排视图" onclick={() => (mode = "split")}>并排</button>
+    </div>
   </div>
   {#if error}
     <div class="empty" role="status">
+      <span class="empty-icon err"><Icon name="alert-circle" size={24} /></span>
       <strong>差异没有读取完成</strong>
       <p>{error}</p>
     </div>
   {:else if !selection}
     <div class="empty">
-      <strong>未选择文件</strong>
-      <p>从中间列表选择一个文件，在这里查看差异。方向键可以移动选择，焦点会保持可见。</p>
+      <span class="empty-icon"><Icon name="file-diff" size={24} /></span>
+      <strong>选择一个文件查看差异</strong>
+      <p>用 ↑ ↓ 在列表中移动，空格暂存或取消暂存，双击也可以切换。</p>
     </div>
   {:else if loading && !diff}
     <div class="empty" role="status" aria-busy="true">
+      <span class="spinner"></span>
       <strong>正在读取差异</strong>
       <p>{selection.path}</p>
     </div>
   {:else if diff?.binary}
     <div class="empty" role="status">
+      <span class="empty-icon"><Icon name="file" size={24} /></span>
       <strong>二进制文件</strong>
       <p>{selection.path} 有变动，但不能按文本预览，因此这里不显示伪差异。</p>
     </div>
   {:else if !diff || (diff.lines.length === 0 && diff.totalLines === 0)}
     <div class="empty" role="status">
+      <span class="empty-icon"><Icon name="file" size={24} /></span>
       <strong>没有文本差异</strong>
       <p>{selection.path} 当前这一侧没有可显示的文本差异。</p>
     </div>
@@ -139,13 +183,11 @@
                 {#if hunk}
                   <button
                     type="button"
-                    class="ghost compact"
+                    class={`btn btn-sm hunk-btn ${hunk.stageable ? "btn-secondary" : "btn-ghost"}`}
                     disabled={disabled || !hunk.stageable}
                     title={hunk.stageable ? "" : "截断的代码块不能部分暂存"}
                     onclick={() => onStageHunk(hunk)}
-                  >
-                    {hunk.stageable ? (selection.side === "staged" ? "取消暂存此块" : "暂存此块") : "已截断"}
-                  </button>
+                  >{hunkLabel(hunk)}</button>
                 {/if}
               {/if}
             </div>
@@ -154,20 +196,22 @@
           {#each sideRows.slice(range.start, range.end) as row, index (`s-${range.start + index}`)}
             {@const absolute = range.start + index}
             <div class="side-row" class:span={row.span} style={`top:${absolute * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}>
-              <span class={`side-cell ${row.left?.kind ?? "empty"}`}>{row.left ? `${row.left.no ?? ""} ${row.left.text}` : ""}</span>
-              <span class={`side-cell ${row.right?.kind ?? "empty"}`}>{row.right ? `${row.right.no ?? ""} ${row.right.text}` : ""}</span>
+              <span class={`side-cell ${row.left?.kind ?? "empty"}`}>
+                {#if row.left}<span class="ln">{row.left.no ?? ""}</span><span class="code">{row.left.text}</span>{/if}
+              </span>
+              <span class={`side-cell ${row.right?.kind ?? "empty"}`}>
+                {#if row.right}<span class="ln">{row.right.no ?? ""}</span><span class="code">{row.right.text}</span>{/if}
+              </span>
               {#if !readOnly && row.showStage && row.hunkIndex !== null}
                 {@const hunk = diff.hunks.find((item) => item.index === row.hunkIndex)}
                 {#if hunk}
                   <button
                     type="button"
-                    class="ghost compact"
+                    class={`btn btn-sm hunk-btn ${hunk.stageable ? "btn-secondary" : "btn-ghost"}`}
                     disabled={disabled || !hunk.stageable}
                     title={hunk.stageable ? "" : "截断的代码块不能部分暂存"}
                     onclick={() => onStageHunk(hunk)}
-                  >
-                    {hunk.stageable ? (selection.side === "staged" ? "取消暂存此块" : "暂存此块") : "已截断"}
-                  </button>
+                  >{hunkLabel(hunk)}</button>
                 {/if}
               {/if}
             </div>
@@ -176,9 +220,9 @@
       </div>
     </div>
     {#if diff.offset + diff.lines.length < diff.totalLines}
-      <div class="row diff-more">
-        <p class="hint">已显示 {diff.lines.length} 行，共 {diff.totalLines} 行。长差异按窗口读取，未显示的截断代码块不能部分暂存。</p>
-        <button type="button" class="ghost" disabled={disabled || loading} onclick={onLoadMore}>继续加载</button>
+      <div class="diff-more">
+        <p class="hint">已显示 {diff.lines.length} / {diff.totalLines} 行。长差异按窗口读取，未显示的截断代码块不能部分暂存。</p>
+        <button type="button" class="btn btn-secondary btn-sm" disabled={disabled || loading} onclick={onLoadMore}>继续加载</button>
       </div>
     {/if}
   {/if}

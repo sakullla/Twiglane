@@ -63,7 +63,8 @@ describe("差异与提交", () => {
     const list = screen.getByRole("listbox", { name: "改动文件" });
     await fireEvent.keyDown(list, { key: "End" });
     expect(selected.path).toBe("item-79.txt");
-    expect(list.scrollTop).toBe(79 * 40);
+    // 分组表头“未暂存的改动”占第 0 行，文件从第 1 行开始；每行 34px。
+    expect(list.scrollTop).toBe(80 * 34);
     await view.rerender(props());
     expect(screen.getByRole("option", { selected: true }).textContent).toContain("item-79.txt");
     expect(screen.queryByText("item-0.txt")).toBeNull();

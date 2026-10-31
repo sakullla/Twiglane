@@ -13,7 +13,9 @@
   } from "../history";
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
   import type { CommitDetail, DiffHunk, DiffResponse, FileSelection, HistoryPage, OpenedRepository } from "../types";
+  import { hueOf, initialOf, relativeTime, splitPath, statusMark } from "../ui";
   import DiffView from "./DiffView.svelte";
+  import Icon from "./Icon.svelte";
 
   interface Props {
     opened: OpenedRepository;
@@ -26,8 +28,8 @@
     onClearFile: () => void;
   }
 
-  const ROW_HEIGHT = 84;
-  const FILE_ROW_HEIGHT = 36;
+  const ROW_HEIGHT = 62;
+  const FILE_ROW_HEIGHT = 30;
 
   let {
     opened,
@@ -313,6 +315,28 @@
     return [...merged.values()];
   }
 
+  let copiedOid = $state<string | null>(null);
+
+  async function copyOid(oid: string) {
+    try {
+      await navigator.clipboard.writeText(oid);
+      copiedOid = oid;
+      setTimeout(() => {
+        if (copiedOid === oid) copiedOid = null;
+      }, 1500);
+    } catch {
+      copiedOid = null;
+    }
+  }
+
+  function refTone(kind: string, current: boolean): string {
+    if (current) return "current";
+    if (kind === "remote") return "remote";
+    if (kind === "tag") return "tag";
+    if (kind === "head") return "head";
+    return "branch";
+  }
+
   function fileTitle(file: { path: string; originalPath: string | null }): string {
     return file.originalPath ? `${file.originalPath} → ${file.path}` : file.path;
   }
@@ -321,23 +345,39 @@
 <section class="span-main" aria-label="提交历史" aria-busy={loading}>
   <div class="panel-toolbar">
     {#if filePath}
-      <button type="button" class="ghost compact" onclick={onClearFile}>返回全部历史</button>
-      <span class="hint" title={filePath}>文件历史：{filePath}</span>
+      <button type="button" class="btn btn-ghost btn-sm" onclick={onClearFile}>
+        <Icon name="arrow-left" size={14} />返回全部历史
+      </button>
+      <span class="chip remote" title={filePath}><Icon name="file" size={12} />文件历史：{filePath}</span>
     {:else}
-      <input
-        class="search"
-        aria-label="搜索全部历史"
-        placeholder="说明、作者或提交标识"
-        value={query}
-        oninput={(event) => scheduleSearch((event.currentTarget as HTMLInputElement).value)}
-      />
+      <div class="field sm">
+        <Icon name="search" size={14} />
+        <input
+          aria-label="搜索全部历史"
+          placeholder="搜索全部历史：说明、作者或提交标识"
+          autocomplete="off"
+          spellcheck="false"
+          value={query}
+          oninput={(event) => scheduleSearch((event.currentTarget as HTMLInputElement).value)}
+        />
+        {#if loading}<span class="spinner"></span>{/if}
+      </div>
     {/if}
-    <button type="button" class="ghost compact" disabled={offset === 0 || loading} onclick={pageBack}>上一页</button>
-    <button type="button" class="ghost compact" disabled={!page?.hasMore || loading} onclick={pageForward}>下一页</button>
-    <span class="hint">每页 {page?.pageSize ?? 100} 条{page ? ` · 从 ${page.offset + 1} 起` : ""}</span>
+    <span class="spacer"></span>
+    <div class="pager">
+      <span class="hint">
+        {#if page && commits.length > 0}第 {page.offset + 1}–{page.offset + commits.length} 条{:else}每页 {page?.pageSize ?? 100} 条{/if}
+      </span>
+      <button type="button" class="icon-btn sm" aria-label="上一页" title="上一页" disabled={offset === 0 || loading} onclick={pageBack}>
+        <Icon name="chevron-left" size={15} />
+      </button>
+      <button type="button" class="icon-btn sm" aria-label="下一页" title="下一页" disabled={!page?.hasMore || loading} onclick={pageForward}>
+        <Icon name="chevron-right" size={15} />
+      </button>
+    </div>
   </div>
   {#if listError}
-    <div class="banner" role="alert">{listError}</div>
+    <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{listError}</span></div>
   {/if}
   <div class="history-layout">
     <div
@@ -351,9 +391,12 @@
       onkeydown={onListKey}
     >
       {#if loading && !page}
-        <div class="empty" role="status"><strong>正在读取历史</strong></div>
+        <div class="empty" role="status"><span class="spinner"></span><strong>正在读取历史</strong></div>
       {:else if statusText}
-        <div class="empty" role="status"><strong>{statusText}</strong></div>
+        <div class="empty" role="status">
+          <span class="empty-icon"><Icon name="history" size={22} /></span>
+          <strong>{statusText}</strong>
+        </div>
       {:else if commits.length === 0}
         <div class="empty" role="status"><strong>这一页没有提交。</strong></div>
       {:else}
@@ -364,18 +407,30 @@
               class="history-row"
               role="option"
               aria-selected={selectedOid === commit.oid}
-              style={`top:${(range.start + index) * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}
+              style={`top:${(range.start + index) * ROW_HEIGHT}px;height:${ROW_HEIGHT - 2}px`}
+              title={`${commit.summary}\n${commit.authorName} · ${formatAuthoredAt(commit.authoredAt)}\n${commit.oid}`}
               onclick={() => pick(commit.oid)}
             >
-              <span class="file-path" title={commit.oid}>{shortOid(commit.oid)} {commit.summary}</span>
-              <span class="hint">{commit.authorName} · {formatAuthoredAt(commit.authoredAt)} · {parentCaption(commit.parents)}</span>
-              {#if commit.labels.length > 0}
-                <span class="chip-row">
+              <span class="avatar" style={`--hue:${hueOf(commit.authorName)}`} aria-hidden="true">{initialOf(commit.authorName)}</span>
+              <span class="hr-main">
+                <span class="hr-line">
                   {#each commit.labels as label (`${label.kind}:${label.name}`)}
-                    <span class="chip" class:current={label.current}>{refLabel(label.kind, label.name, label.current)}</span>
+                    <span class={`chip ${refTone(label.kind, label.current)}`}>{refLabel(label.kind, label.name, label.current)}</span>
                   {/each}
+                  <span class="hr-summary">{commit.summary}</span>
                 </span>
-              {/if}
+                <span class="hr-meta">
+                  <span class="hr-author">{commit.authorName}</span>
+                  <span class="hr-dot"></span>
+                  <span>{relativeTime(commit.authoredAt)}</span>
+                  <span class="hr-dot"></span>
+                  <span class="mono">{shortOid(commit.oid)}</span>
+                  {#if commit.parents.length > 1}
+                    <span class="hr-dot"></span>
+                    <span class="merge-note">{parentCaption(commit.parents)}</span>
+                  {/if}
+                </span>
+              </span>
             </button>
           {/each}
         </div>
@@ -383,43 +438,63 @@
     </div>
     <div class="history-detail">
       {#if detailError}
-        <div class="banner" role="alert">{detailError}</div>
+        <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{detailError}</span></div>
       {/if}
       {#if detail}
         <div class="history-meta">
-          <strong title={detail.commit.oid}>{shortOid(detail.commit.oid)} {detail.commit.summary}</strong>
-          <p class="hint">{detail.commit.authorName} &lt;{detail.commit.authorEmail}&gt; · {formatAuthoredAt(detail.commit.authoredAt)}</p>
-          <p>{parentCaption(detail.commit.parents, detail.root)}</p>
+          <h2 class="commit-title">{detail.commit.summary}</h2>
+          <div class="commit-meta">
+            <span class="avatar" style={`--hue:${hueOf(detail.commit.authorName)}`} aria-hidden="true">{initialOf(detail.commit.authorName)}</span>
+            <strong>{detail.commit.authorName}</strong>
+            <span>&lt;{detail.commit.authorEmail}&gt;</span>
+            <span class="hr-dot"></span>
+            <span title={formatAuthoredAt(detail.commit.authoredAt)}>{formatAuthoredAt(detail.commit.authoredAt)}</span>
+          </div>
+          <div class="commit-meta">
+            <span class="oid-chip" title={detail.commit.oid}>
+              {shortOid(detail.commit.oid)}
+              <button type="button" aria-label="复制完整提交标识" title={copiedOid === detail.commit.oid ? "已复制" : "复制完整提交标识"} onclick={() => copyOid(detail?.commit.oid ?? "")}>
+                <Icon name={copiedOid === detail.commit.oid ? "check" : "copy"} size={12} />
+              </button>
+            </span>
+            <span>{parentCaption(detail.commit.parents, detail.root)}</span>
+          </div>
           {#if detail.body.trim()}
             <pre class="commit-body">{detail.body}</pre>
           {/if}
           {#if detail.merge}
-            <div class="row" role="group" aria-label="选择父提交">
-              {#each detail.commit.parents as parent (parent)}
-                <button
-                  type="button"
-                  class="theme-btn"
-                  aria-pressed={(parentChoice ?? detail.selectedParent) === parent}
-                  onclick={() => (parentChoice = parent)}
-                >
-                  相对 {shortOid(parent)}
-                </button>
-              {/each}
+            <div class="row">
+              <span class="hint">比较对象</span>
+              <div class="segmented" role="group" aria-label="选择父提交">
+                {#each detail.commit.parents as parent (parent)}
+                  <button
+                    type="button"
+                    aria-pressed={(parentChoice ?? detail.selectedParent) === parent}
+                    onclick={() => (parentChoice = parent)}
+                  >
+                    相对 {shortOid(parent)}
+                  </button>
+                {/each}
+              </div>
             </div>
           {/if}
           {#if detail.files.length === 0}
             <p class="hint">这次提交没有文件变化。</p>
           {:else}
+            <div class="section-caption">变更文件 <span class="count">{detail.files.length}</span></div>
             <div
               class="file-list history-files"
               role="listbox"
               aria-label="提交中的文件"
               tabindex="0"
+              style={`height:${Math.min(detail.files.length, 6) * FILE_ROW_HEIGHT + 2}px`}
               bind:clientHeight={fileViewport}
               onscroll={(event) => (fileScroll = event.currentTarget.scrollTop)}
             >
               <div class="virtual-space" style={`height:${detail.files.length * FILE_ROW_HEIGHT}px`}>
                 {#each visibleFiles as file, index (`${file.status}:${file.path}`)}
+                  {@const mark = statusMark(commitFileLabel(file.status))}
+                  {@const parts = splitPath(file.path)}
                   <button
                     type="button"
                     class="file-row"
@@ -429,8 +504,15 @@
                     title={fileTitle(file)}
                     onclick={() => (manualPath = file.path)}
                   >
-                    <span class="badge">{commitFileLabel(file.status)}</span>
-                    <span class="file-path">{fileTitle(file)}</span>
+                    <span class={`st ${mark.tone}`} title={commitFileLabel(file.status)}>{mark.letter}</span>
+                    <span class="file-name">
+                      <span class="fn">{parts.name}</span>
+                      {#if file.originalPath}
+                        <span class="fd from" title={`重命名自 ${file.originalPath}`}>← {file.originalPath}</span>
+                      {:else if parts.dir}
+                        <span class="fd"><bdi>{parts.dir}</bdi></span>
+                      {/if}
+                    </span>
                   </button>
                 {/each}
               </div>
@@ -450,6 +532,7 @@
         />
       {:else if !loading}
         <div class="empty" role="status">
+          <span class="empty-icon"><Icon name="commit" size={24} /></span>
           <strong>未选择提交</strong>
           <p>选择左侧一条记录后，这里显示其中的文件和差异。查看不会改变当前分支、暂存区或工作区。</p>
         </div>

@@ -23,6 +23,9 @@ tauri = { version = "2.12.5", features = [] }
 tauri-plugin-dialog = "2.8.4"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
 
+[dev-dependencies]
+tauri = { version = "2.12.5", features = ["test"] }
+
 [features]
 default = []
 custom-protocol = ["tauri/custom-protocol"]

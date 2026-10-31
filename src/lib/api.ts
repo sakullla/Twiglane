@@ -45,15 +45,15 @@ export const api = {
   clearGitExecutable: () => invoke<GitInfo>("clear_git_executable"),
   getSettings: () => invoke<SettingsDto>("get_settings"),
   addRepository: (path: string, requestId: number) =>
-    invoke<OpenedRepository>("add_repository", { path, request_id: requestId }),
+    invoke<OpenedRepository>("add_repository", { path, requestId }),
   createRepository: (path: string, requestId: number) =>
-    invoke<OpenedRepository>("create_repository", { path, request_id: requestId }),
+    invoke<OpenedRepository>("create_repository", { path, requestId }),
   openRepository: (path: string, requestId: number) =>
-    invoke<OpenedRepository>("open_repository", { path, request_id: requestId }),
+    invoke<OpenedRepository>("open_repository", { path, requestId }),
   closeRepository: () => invoke<void>("close_repository"),
   forgetRecent: (path: string) => invoke<RecentRepo[]>("forget_recent", { path }),
   refreshStatus: (path: string, generation: number, requestId: number) =>
-    invoke<StatusSnapshot>("refresh_status", { path, generation, request_id: requestId }),
+    invoke<StatusSnapshot>("refresh_status", { path, generation, requestId }),
   loadDiff: (
     path: string,
     relative: string,
@@ -66,7 +66,7 @@ export const api = {
       relative,
       staged,
       generation,
-      request_id: requestId,
+      requestId,
     }),
   setTheme: (theme: Theme) => invoke<void>("set_theme", { theme }),
   setPanelWidths: (widths: PanelWidths) => invoke<PanelWidths>("set_panel_widths", { widths }),

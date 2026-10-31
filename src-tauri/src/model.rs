@@ -118,8 +118,9 @@ pub struct BranchInfo {
     pub unborn: bool,
     pub head_oid: Option<String>,
     pub upstream: Option<String>,
-    pub ahead: Option<i64>,
-    pub behind: Option<i64>,
+    /// `branch.ab` counts. Porcelain signs are directions, so both values stay non-negative.
+    pub ahead: Option<u64>,
+    pub behind: Option<u64>,
     /// T1 never contacts the network. Tracking numbers are local records only.
     pub live_remote_checked: bool,
 }

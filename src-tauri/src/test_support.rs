@@ -58,34 +58,40 @@ impl GitFixture {
     }
 
     pub fn backend(&self) -> Backend {
+        self.backend_with_extra_env(Vec::new())
+    }
+
+    pub fn backend_with_extra_env(&self, extra: Vec<(OsString, OsString)>) -> Backend {
+        let mut extra_env = vec![
+            (OsString::from("GIT_CONFIG_NOSYSTEM"), OsString::from("1")),
+            (
+                OsString::from("GIT_CONFIG_GLOBAL"),
+                isolated_gitconfig().as_os_str().to_os_string(),
+            ),
+            (
+                OsString::from("GIT_CEILING_DIRECTORIES"),
+                self.root.path().as_os_str().to_os_string(),
+            ),
+            (OsString::from("GIT_AUTHOR_NAME"), OsString::from("Twiglane Test")),
+            (
+                OsString::from("GIT_AUTHOR_EMAIL"),
+                OsString::from("twiglane-test@example.com"),
+            ),
+            (
+                OsString::from("GIT_COMMITTER_NAME"),
+                OsString::from("Twiglane Test"),
+            ),
+            (
+                OsString::from("GIT_COMMITTER_EMAIL"),
+                OsString::from("twiglane-test@example.com"),
+            ),
+        ];
+        extra_env.extend(extra);
         let store = AppStore::open(self.root.path().join("state.json"));
         let runner = RealRunner {
             timeout: Duration::from_secs(30),
             output_limit: 1024 * 1024,
-            extra_env: vec![
-                (OsString::from("GIT_CONFIG_NOSYSTEM"), OsString::from("1")),
-                (
-                    OsString::from("GIT_CONFIG_GLOBAL"),
-                    isolated_gitconfig().as_os_str().to_os_string(),
-                ),
-                (
-                    OsString::from("GIT_CEILING_DIRECTORIES"),
-                    self.root.path().as_os_str().to_os_string(),
-                ),
-                (OsString::from("GIT_AUTHOR_NAME"), OsString::from("Twiglane Test")),
-                (
-                    OsString::from("GIT_AUTHOR_EMAIL"),
-                    OsString::from("twiglane-test@example.com"),
-                ),
-                (
-                    OsString::from("GIT_COMMITTER_NAME"),
-                    OsString::from("Twiglane Test"),
-                ),
-                (
-                    OsString::from("GIT_COMMITTER_EMAIL"),
-                    OsString::from("twiglane-test@example.com"),
-                ),
-            ],
+            extra_env,
         };
         Backend::new(store, runner, std::sync::Arc::new(Shutdown::new()))
     }

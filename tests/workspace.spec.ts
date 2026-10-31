@@ -17,7 +17,7 @@ const branch: BranchInfo = {
   headOid: "abc1234",
   upstream: "origin/feature/very-long-name",
   ahead: 1,
-  behind: -2,
+  behind: 1,
   liveRemoteChecked: false,
 };
 
@@ -39,8 +39,8 @@ describe("最近仓库", () => {
 
 describe("工作区状态", () => {
   it("同步标签明确未检查远程", () => {
-    expect(syncLabel(branch)).toContain("未检查远程");
-    expect(syncLabel(branch)).toContain("+1");
+    expect(syncLabel(branch)).toBe("相对已记录上游 +1 −1 · 未检查远程");
+    expect(syncLabel(branch)).not.toContain("−-");
     expect(syncLabel({ ...branch, upstream: null })).toBe("无上游 · 未检查远程");
     expect(branchLabel({ ...branch, detached: true, name: null, headOid: "abcdef123456" })).toBe(
       "游离 HEAD abcdef1",

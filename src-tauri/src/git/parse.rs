@@ -119,8 +119,8 @@ fn apply_header(branch: &mut BranchInfo, header: &str) {
         }
     } else if let Some(value) = header.strip_prefix("branch.ab ") {
         let mut pieces = value.split_whitespace();
-        branch.ahead = pieces.next().and_then(|piece| piece.parse().ok());
-        branch.behind = pieces.next().and_then(|piece| piece.parse().ok());
+        branch.ahead = pieces.next().and_then(parse_divergence);
+        branch.behind = pieces.next().and_then(parse_divergence);
     }
     branch.live_remote_checked = false;
 }
@@ -162,6 +162,14 @@ fn parse_unmerged(record: &str) -> Result<FileChange, AppError> {
         untracked: false,
         unmerged: true,
     })
+}
+
+fn parse_divergence(token: &str) -> Option<u64> {
+    let digits = token.strip_prefix('+').or_else(|| token.strip_prefix('-'))?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 fn xy(value: &str) -> Result<(ChangeKind, ChangeKind), AppError> {
@@ -214,7 +222,7 @@ mod tests {
         assert_eq!(status.branch.name.as_deref(), Some("main"));
         assert_eq!(status.branch.upstream.as_deref(), Some("origin/main"));
         assert_eq!(status.branch.ahead, Some(1));
-        assert_eq!(status.branch.behind, Some(-2));
+        assert_eq!(status.branch.behind, Some(2));
         assert!(!status.branch.live_remote_checked);
         assert_eq!(status.files.len(), 3);
         assert_eq!(status.files[0].path, "dir/file one.txt");
@@ -224,6 +232,19 @@ mod tests {
         assert_eq!(status.files[1].staged, ChangeKind::Renamed);
         assert!(status.files[2].untracked);
         assert_eq!(status.files[2].path, "new file.txt");
+    }
+
+    #[test]
+    fn branch_ab_signs_are_directions() {
+        let diverged = parse_status(b"# branch.ab +1 -1\0").unwrap();
+        assert_eq!(diverged.branch.ahead, Some(1));
+        assert_eq!(diverged.branch.behind, Some(1));
+        let level = parse_status(b"# branch.ab +0 -0\0").unwrap();
+        assert_eq!(level.branch.ahead, Some(0));
+        assert_eq!(level.branch.behind, Some(0));
+        let broken = parse_status(b"# branch.ab +\0").unwrap();
+        assert_eq!(broken.branch.ahead, None);
+        assert_eq!(broken.branch.behind, None);
     }
 
     #[test]

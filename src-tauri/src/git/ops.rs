@@ -314,9 +314,15 @@ fn status_from_output(scheduled: &ScheduledOutput) -> Result<StatusSnapshot, App
     Ok(snapshot)
 }
 
+#[derive(Debug)]
 enum Probe {
     NotRepo,
     Failed(AppError),
+}
+
+enum ProbeClass {
+    NotRepo,
+    Failed(&'static str),
 }
 
 async fn show_toplevel(
@@ -340,19 +346,104 @@ async fn show_toplevel(
         Ok(scheduled) => scheduled,
         Err(error) => return Err(Probe::Failed(error)),
     };
-    if scheduled.output.exit_code != 0 {
-        return Err(Probe::NotRepo);
+    classify_toplevel(&scheduled.output)
+}
+
+fn classify_toplevel(output: &ProcessOutput) -> Result<PathBuf, Probe> {
+    if output.exit_code == 0 {
+        let found = toplevel_text(&output.stdout);
+        if found.is_empty() {
+            return Err(Probe::Failed(AppError::new(
+                "repository_probe",
+                "无法确认仓库根目录，未创建或修改任何文件。",
+            )));
+        }
+        return Ok(PathBuf::from(found));
     }
-    let bytes = &scheduled.output.stdout;
+    match probe_class(&probe_text(output)) {
+        ProbeClass::NotRepo => Err(Probe::NotRepo),
+        ProbeClass::Failed(code) => Err(Probe::Failed(probe_failure(code, output))),
+    }
+}
+
+// Git localizes these lines. Only an explicit "not a repository" may allow init.
+fn probe_class(text: &str) -> ProbeClass {
+    let lower = text.to_ascii_lowercase();
+    if has_probe_phrase(
+        &lower,
+        &[
+            "dubious ownership",
+            "unsafe repository",
+            "safe.directory",
+            "可疑的仓库所有权",
+        ],
+    ) {
+        return ProbeClass::Failed("repository_ownership");
+    }
+    if has_probe_phrase(
+        &lower,
+        &["permission denied", "operation not permitted", "权限不够"],
+    ) {
+        return ProbeClass::Failed("permission");
+    }
+    if has_probe_phrase(
+        &lower,
+        &[
+            "must be run in a work tree",
+            "not a working tree",
+            "必须在一个工作区中运行",
+        ],
+    ) {
+        return ProbeClass::Failed("not_work_tree");
+    }
+    if has_probe_phrase(&lower, &["not a git repository", "不是 git 仓库"]) {
+        return ProbeClass::NotRepo;
+    }
+    ProbeClass::Failed("repository_probe")
+}
+
+fn has_probe_phrase(haystack: &str, phrases: &[&str]) -> bool {
+    phrases.iter().any(|phrase| haystack.contains(phrase))
+}
+
+fn probe_failure(code: &str, output: &ProcessOutput) -> AppError {
+    let fallback = match code {
+        "repository_ownership" => "Git 因仓库所有权拒绝读取，未创建或修改任何文件。",
+        "permission" => "Git 因权限拒绝读取，未创建或修改任何文件。",
+        "not_work_tree" => "该路径不是 Git 工作区，未创建或修改任何文件。",
+        _ => "无法确认该目录是否为 Git 仓库，未创建或修改任何文件。",
+    };
+    let detail = redact_error_text(command_detail(output).trim());
+    if detail.is_empty() {
+        AppError::new(code, fallback)
+    } else {
+        AppError::new(code, format!("{fallback} {detail}"))
+    }
+}
+
+fn probe_text(output: &ProcessOutput) -> String {
+    format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    )
+}
+
+fn command_detail(output: &ProcessOutput) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        return stderr.to_string();
+    }
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn toplevel_text(bytes: &[u8]) -> String {
     let end = bytes
         .iter()
         .position(|byte| *byte == 0 || *byte == b'\n')
         .unwrap_or(bytes.len());
-    let found = String::from_utf8_lossy(&bytes[..end]).trim().to_string();
-    if found.is_empty() {
-        return Err(Probe::NotRepo);
-    }
-    Ok(PathBuf::from(found))
+    String::from_utf8_lossy(&bytes[..end]).trim().to_string()
 }
 
 async fn run_git(
@@ -510,9 +601,11 @@ fn git_failure(code: &str, output: &ProcessOutput, fallback: &str) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::fs;
     use std::process::Command;
 
+    use crate::git::runner::ProcessOutput;
     use crate::state::AppStore;
 
     #[tokio::test]
@@ -652,5 +745,281 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "{args:?}");
+    }
+
+    fn extra_env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        pairs
+            .iter()
+            .map(|(key, value)| (OsString::from(*key), OsString::from(*value)))
+            .collect()
+    }
+
+    fn git_output(exit_code: i32, stderr: &[u8]) -> ProcessOutput {
+        ProcessOutput {
+            exit_code,
+            stdout: Vec::new(),
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    #[test]
+    fn only_confirmed_non_repositories_allow_initialization() {
+        let not_repo = git_output(
+            128,
+            b"fatal: not a git repository (or any of the parent directories): .git\n",
+        );
+        assert!(matches!(
+            super::classify_toplevel(&not_repo),
+            Err(super::Probe::NotRepo)
+        ));
+        let chinese = git_output(128, "致命错误：不是 git 仓库（或者任何父目录）：.git\n".as_bytes());
+        assert!(matches!(
+            super::classify_toplevel(&chinese),
+            Err(super::Probe::NotRepo)
+        ));
+
+        let owned = git_output(
+            128,
+            b"fatal: detected dubious ownership in repository at '/tmp/repo'\n\tgit config --global --add safe.directory /tmp/repo\n",
+        );
+        match super::classify_toplevel(&owned) {
+            Err(super::Probe::Failed(error)) => {
+                assert_eq!(error.code, "repository_ownership");
+                assert!(error.message.contains("dubious ownership"));
+                assert!(!error.message.contains("不是 Git 仓库"));
+            }
+            other => panic!("ownership probe was not rejected: {other:?}"),
+        }
+        let owned_zh = git_output(
+            128,
+            "致命错误：在 '/tmp/repo' 检测到可疑的仓库所有权\n\tgit config --global --add safe.directory /tmp/repo\n"
+                .as_bytes(),
+        );
+        match super::classify_toplevel(&owned_zh) {
+            Err(super::Probe::Failed(error)) => assert_eq!(error.code, "repository_ownership"),
+            other => panic!("{other:?}"),
+        }
+
+        let bare = git_output(128, b"fatal: this operation must be run in a work tree\n");
+        match super::classify_toplevel(&bare) {
+            Err(super::Probe::Failed(error)) => {
+                assert_eq!(error.code, "not_work_tree");
+                assert!(error.message.contains("work tree"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let bare_zh = git_output(128, "致命错误：该操作必须在一个工作区中运行\n".as_bytes());
+        match super::classify_toplevel(&bare_zh) {
+            Err(super::Probe::Failed(error)) => assert_eq!(error.code, "not_work_tree"),
+            other => panic!("{other:?}"),
+        }
+
+        let denied = git_output(128, b"fatal: cannot change to '/tmp/locked': Permission denied\n");
+        match super::classify_toplevel(&denied) {
+            Err(super::Probe::Failed(error)) => {
+                assert_eq!(error.code, "permission");
+                assert!(error.message.to_ascii_lowercase().contains("permission denied"));
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let unknown = git_output(128, b"fatal: something unexpected\n");
+        match super::classify_toplevel(&unknown) {
+            Err(super::Probe::Failed(error)) => assert_eq!(error.code, "repository_probe"),
+            other => panic!("{other:?}"),
+        }
+        let empty = git_output(0, b"");
+        match super::classify_toplevel(&empty) {
+            Err(super::Probe::NotRepo) => panic!("empty success was treated as a missing repository"),
+            Err(super::Probe::Failed(error)) => assert_eq!(error.code, "repository_probe"),
+            Ok(path) => panic!("empty success returned {}", path.display()),
+        }
+
+        let secret = git_output(
+            128,
+            b"fatal: detected dubious ownership in repository at '/tmp/ghp_abcdefghijklmnopqrstuvwxyz1234'\n",
+        );
+        match super::classify_toplevel(&secret) {
+            Err(super::Probe::Failed(error)) => {
+                assert!(!error.message.contains("ghp_abcdefghijklmnopqrstuvwxyz1234"));
+                assert!(error.message.contains("dubious ownership"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_failures_do_not_initialize_a_nested_repository() {
+        let fixture = crate::test_support::git_fixture("probe-guard");
+        let owned = fixture.repo("owned");
+        fs::write(owned.join("keep.txt"), b"keep").unwrap();
+        run_git_ok(&owned, &["init", "-b", "main"]);
+        let ownership = fixture.backend_with_extra_env(extra_env(&[("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")]));
+        let added = add_repository(&ownership, &repo_key(&owned), 1)
+            .await
+            .unwrap_err();
+        assert_eq!(added.code, "repository_ownership");
+        assert!(
+            added.message.contains("dubious ownership") || added.message.contains("safe.directory"),
+            "{}",
+            added.message
+        );
+        assert!(!added.message.contains("不是 Git 仓库"));
+        assert_eq!(fs::read(owned.join("keep.txt")).unwrap(), b"keep");
+        assert!(owned.join(".git").is_dir());
+
+        let child = owned.join("child");
+        fs::create_dir(&child).unwrap();
+        fs::write(child.join("keep.txt"), b"child").unwrap();
+        let created = create_repository(&ownership, &repo_key(&child), 2)
+            .await
+            .unwrap_err();
+        assert_eq!(created.code, "repository_ownership");
+        assert!(!created.message.contains("不是 Git 仓库"));
+        assert!(!child.join(".git").exists());
+        assert_eq!(fs::read(child.join("keep.txt")).unwrap(), b"child");
+
+        let normal = fixture.backend();
+        let opened = add_repository(&normal, &repo_key(&owned), 3).await.unwrap();
+        assert_eq!(opened.snapshot.branch.name.as_deref(), Some("main"));
+
+        let bare = fixture.path().join("bare.git");
+        run_git_ok(fixture.path(), &["init", "--bare", "bare.git"]);
+        let head = fs::read(bare.join("HEAD")).unwrap();
+        let bare_add = add_repository(&normal, &repo_key(&bare), 4).await.unwrap_err();
+        assert_eq!(bare_add.code, "not_work_tree");
+        assert!(
+            bare_add.message.to_ascii_lowercase().contains("work tree")
+                || bare_add.message.contains("工作区")
+        );
+        assert!(!bare_add.message.contains("不是 Git 仓库"));
+        assert!(!bare.join(".git").exists());
+        assert_eq!(fs::read(bare.join("HEAD")).unwrap(), head);
+        let bare_create = create_repository(&normal, &repo_key(&bare), 5)
+            .await
+            .unwrap_err();
+        assert_ne!(bare_create.code, "not_repository");
+        assert!(!bare.join(".git").exists());
+        assert_eq!(fs::read(bare.join("HEAD")).unwrap(), head);
+    }
+
+    #[tokio::test]
+    async fn localized_probe_keeps_explicit_create_and_blocks_nested_init() {
+        let fixture = crate::test_support::git_fixture("probe-locale");
+        let backend = fixture.backend_with_extra_env(extra_env(&[
+            ("LC_ALL", "zh_CN.UTF-8"),
+            ("LANG", "zh_CN.UTF-8"),
+        ]));
+        let plain = fixture.path().join("plain-dir");
+        fs::create_dir(&plain).unwrap();
+        fs::write(plain.join("keep.txt"), b"same").unwrap();
+        let missing = add_repository(&backend, &repo_key(&plain), 1)
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code, "not_repository");
+        assert!(!plain.join(".git").exists());
+        let created = create_repository(&backend, &repo_key(&plain), 2).await.unwrap();
+        assert!(plain.join(".git").is_dir());
+        assert_eq!(fs::read(plain.join("keep.txt")).unwrap(), b"same");
+        assert!(created.snapshot.branch.unborn || created.snapshot.branch.name.is_some());
+        let nested = plain.join("nested");
+        fs::create_dir(&nested).unwrap();
+        let nested_error = create_repository(&backend, &repo_key(&nested), 5)
+            .await
+            .unwrap_err();
+        assert_eq!(nested_error.code, "inside_repository");
+        assert!(!nested.join(".git").exists());
+
+        let owned = fixture.repo("owned");
+        fs::write(owned.join("keep.txt"), b"keep").unwrap();
+        run_git_ok(&owned, &["init", "-b", "main"]);
+        let ownership = fixture.backend_with_extra_env(extra_env(&[
+            ("LC_ALL", "zh_CN.UTF-8"),
+            ("LANG", "zh_CN.UTF-8"),
+            ("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1"),
+        ]));
+        let child = owned.join("child");
+        fs::create_dir(&child).unwrap();
+        fs::write(child.join("keep.txt"), b"child").unwrap();
+        let blocked = create_repository(&ownership, &repo_key(&child), 6)
+            .await
+            .unwrap_err();
+        assert_ne!(blocked.code, "not_repository");
+        assert!(!blocked.message.contains("不是 Git 仓库"));
+        assert!(!child.join(".git").exists());
+        assert_eq!(fs::read(child.join("keep.txt")).unwrap(), b"child");
+
+        let bare = fixture.path().join("bare.git");
+        run_git_ok(fixture.path(), &["init", "--bare", "bare.git"]);
+        let bare_add = add_repository(&backend, &repo_key(&bare), 7).await.unwrap_err();
+        assert_eq!(bare_add.code, "not_work_tree");
+        assert!(!bare.join(".git").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unreadable_directory_probe_is_permission_and_does_not_init() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = crate::test_support::git_fixture("probe-permission");
+        let backend = fixture.backend();
+        let locked = fixture.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("keep.txt"), b"perm").unwrap();
+        let info = detect_git(&backend).await.unwrap();
+        let git = PathBuf::from(info.path.expect("git"));
+        let mut perms = fs::metadata(&locked).unwrap().permissions();
+        perms.set_mode(0o0);
+        fs::set_permissions(&locked, perms).unwrap();
+        struct Reset(PathBuf);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = fs::metadata(&self.0) {
+                    let mut perms = meta.permissions();
+                    perms.set_mode(0o755);
+                    let _ = fs::set_permissions(&self.0, perms);
+                }
+            }
+        }
+        let _reset = Reset(locked.clone());
+        let error = match super::show_toplevel(&backend, &git, &locked, 1).await {
+            Err(super::Probe::Failed(error)) => error,
+            Err(super::Probe::NotRepo) => panic!("permission failure was treated as a missing repository"),
+            Ok(path) => panic!("unexpected toplevel {}", path.display()),
+        };
+        let created = create_repository(&backend, &repo_key(&locked), 2)
+            .await
+            .unwrap_err();
+        let mut perms = fs::metadata(&locked).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&locked, perms).unwrap();
+        assert_eq!(error.code, "permission");
+        assert!(error.message.to_ascii_lowercase().contains("permission denied"));
+        assert_eq!(created.code, "permission");
+        assert!(!locked.join(".git").exists());
+        assert_eq!(fs::read(locked.join("keep.txt")).unwrap(), b"perm");
+    }
+
+    #[tokio::test]
+    async fn recorded_divergence_uses_non_negative_counts() {
+        let fixture = crate::test_support::git_fixture("divergence");
+        let backend = fixture.backend();
+        let origin = fixture.repo("origin");
+        run_git_ok(&origin, &["init", "-b", "main"]);
+        fs::write(origin.join("file.txt"), "base\n").unwrap();
+        run_git_ok(&origin, &["add", "--", "file.txt"]);
+        run_git_ok(&origin, &["commit", "-m", "base"]);
+        let work = fixture.path().join("work");
+        let origin_path = repo_key(&origin);
+        run_git_ok(fixture.path(), &["clone", origin_path.as_str(), "work"]);
+        fs::write(work.join("file.txt"), "base\nlocal\n").unwrap();
+        run_git_ok(&work, &["commit", "-am", "local"]);
+        fs::write(origin.join("file.txt"), "base\nupstream\n").unwrap();
+        run_git_ok(&origin, &["commit", "-am", "upstream"]);
+        run_git_ok(&work, &["fetch", "origin"]);
+        let opened = add_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        assert_eq!(opened.snapshot.branch.ahead, Some(1));
+        assert_eq!(opened.snapshot.branch.behind, Some(1));
+        assert!(!opened.snapshot.branch.live_remote_checked);
     }
 }

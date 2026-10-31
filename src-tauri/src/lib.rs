@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tauri::menu::{Menu, MenuItem};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime, State, WindowEvent};
 
 use crate::error::AppError;
 use crate::git::ops::{self, Backend};
@@ -124,7 +124,7 @@ fn stop_backend(app: &AppHandle, fallback: &Shutdown) {
     }
 }
 
-fn start_watch(app: &AppHandle, backend: &Arc<Backend>, path: &str) -> bool {
+fn start_watch<R: Runtime>(app: &AppHandle<R>, backend: &Arc<Backend>, path: &str) -> bool {
     let watched = path.to_string();
     let backend_for_event = Arc::clone(backend);
     let app_for_event = app.clone();
@@ -181,9 +181,9 @@ async fn get_settings(state: State<'_, Arc<Backend>>) -> Result<SettingsDto, App
     ops::get_settings(state.inner()).await
 }
 
-#[tauri::command]
-async fn add_repository(
-    app: AppHandle,
+#[tauri::command(rename_all = "camelCase")]
+async fn add_repository<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, Arc<Backend>>,
     path: String,
     request_id: u64,
@@ -194,9 +194,9 @@ async fn add_repository(
     Ok(opened)
 }
 
-#[tauri::command]
-async fn create_repository(
-    app: AppHandle,
+#[tauri::command(rename_all = "camelCase")]
+async fn create_repository<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, Arc<Backend>>,
     path: String,
     request_id: u64,
@@ -207,9 +207,9 @@ async fn create_repository(
     Ok(opened)
 }
 
-#[tauri::command]
-async fn open_repository(
-    app: AppHandle,
+#[tauri::command(rename_all = "camelCase")]
+async fn open_repository<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, Arc<Backend>>,
     path: String,
     request_id: u64,
@@ -230,7 +230,7 @@ fn forget_recent(state: State<'_, Arc<Backend>>, path: String) -> Result<Vec<Rec
     ops::forget_recent(state.inner(), &path)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 async fn refresh_status(
     state: State<'_, Arc<Backend>>,
     path: String,
@@ -240,7 +240,7 @@ async fn refresh_status(
     ops::refresh_status(state.inner(), &path, generation, request_id).await
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 async fn load_diff(
     state: State<'_, Arc<Backend>>,
     path: String,
@@ -268,4 +268,207 @@ fn set_panel_widths(
 #[tauri::command]
 fn save_draft(state: State<'_, Arc<Backend>>, path: String, message: String) -> Result<(), AppError> {
     ops::save_draft(state.inner(), &path, &message)
+}
+
+#[cfg(test)]
+mod ipc_contract {
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::git::ops::repo_key;
+
+    const API_SOURCE: &str = include_str!("../../src/lib/api.ts");
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new(crate::test_support::system_git())
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", crate::test_support::isolated_gitconfig())
+            .env("GIT_AUTHOR_NAME", "Twiglane Test")
+            .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Twiglane Test")
+            .env("GIT_COMMITTER_EMAIL", "twiglane-test@example.com")
+            .status()
+            .unwrap();
+        assert!(status.success(), "{args:?}");
+    }
+
+    fn payload_after(command: &str) -> &str {
+        let marker = format!("\"{command}\"");
+        let start = API_SOURCE
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing {command}"));
+        let rest = &API_SOURCE[start + marker.len()..];
+        let end = rest.find("invoke<").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    fn invoke<W>(
+        webview: &W,
+        cmd: &str,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, String>
+    where
+        W: AsRef<tauri::Webview<tauri::test::MockRuntime>>,
+    {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        webview.as_ref().clone().on_message(
+            tauri::webview::InvokeRequest {
+                cmd: cmd.to_string(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "tauri://localhost".parse().expect("local origin"),
+                body: tauri::ipc::InvokeBody::Json(body),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+            Box::new(move |_webview, _cmd, response, _callback, _error| {
+                let _ = tx.send(response);
+            }),
+        );
+        let response = rx
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| format!("ipc timed out: {cmd}"))?;
+        match response {
+            tauri::ipc::InvokeResponse::Ok(body) => {
+                body.deserialize().map_err(|error| error.to_string())
+            }
+            tauri::ipc::InvokeResponse::Err(tauri::ipc::InvokeError(value)) => Err(value.to_string()),
+        }
+    }
+
+    #[test]
+    fn frontend_and_ipc_use_request_id_camel_case() {
+        for command in [
+            "add_repository",
+            "create_repository",
+            "open_repository",
+            "refresh_status",
+            "load_diff",
+        ] {
+            let payload = payload_after(command);
+            assert!(payload.contains("requestId"), "{command}: {payload}");
+            assert!(!payload.contains("request_id"), "{command}: {payload}");
+        }
+
+        let fixture = crate::test_support::git_fixture("ipc-contract");
+        let repo = fixture.repo("demo");
+        fs::create_dir_all(repo.join("sub")).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("file one.txt"), "before\n").unwrap();
+        git(&repo, &["add", "--", "file one.txt"]);
+        git(&repo, &["commit", "-m", "init"]);
+        fs::write(repo.join("file one.txt"), "before\nafter\n").unwrap();
+        let plain = fixture.path().join("plain-dir");
+        fs::create_dir(&plain).unwrap();
+        fs::write(plain.join("keep.txt"), b"same").unwrap();
+
+        let backend = Arc::new(fixture.backend());
+        let app = tauri::test::mock_builder()
+            .manage(Arc::clone(&backend))
+            .invoke_handler(tauri::generate_handler![
+                super::add_repository,
+                super::create_repository,
+                super::open_repository,
+                super::refresh_status,
+                super::load_diff
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("ipc test app");
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("ipc test window");
+
+        for (cmd, body) in [
+            (
+                "add_repository",
+                serde_json::json!({"path": "/tmp/unused", "request_id": 1}),
+            ),
+            (
+                "create_repository",
+                serde_json::json!({"path": "/tmp/unused", "request_id": 1}),
+            ),
+            (
+                "open_repository",
+                serde_json::json!({"path": "/tmp/unused", "request_id": 1}),
+            ),
+            (
+                "refresh_status",
+                serde_json::json!({"path": "/tmp/unused", "generation": 1, "request_id": 1}),
+            ),
+            (
+                "load_diff",
+                serde_json::json!({
+                    "path": "/tmp/unused",
+                    "relative": "a",
+                    "staged": false,
+                    "generation": 1,
+                    "request_id": 1
+                }),
+            ),
+        ] {
+            let error = invoke(&window, cmd, body).expect_err(cmd);
+            assert!(error.contains("requestId"), "{cmd}: {error}");
+        }
+
+        let repo_path = repo_key(&crate::git::ops::canonical_existing(&repo).unwrap());
+        let sub_path = repo_key(&repo.join("sub"));
+        let opened = invoke(
+            &window,
+            "add_repository",
+            serde_json::json!({"path": sub_path, "requestId": 11}),
+        )
+        .expect("add");
+        assert_eq!(opened["summary"]["path"], repo_path);
+        assert_eq!(opened["snapshot"]["branch"]["name"], "main");
+        assert_eq!(opened["snapshot"]["branch"]["liveRemoteChecked"], false);
+        assert!(opened["snapshot"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file["path"] == "file one.txt"));
+        let generation = opened["generation"].as_u64().unwrap();
+        let refreshed = invoke(
+            &window,
+            "refresh_status",
+            serde_json::json!({"path": repo_path, "generation": generation, "requestId": 12}),
+        )
+        .expect("refresh");
+        assert_eq!(refreshed["branch"]["name"], "main");
+        let diff = invoke(
+            &window,
+            "load_diff",
+            serde_json::json!({
+                "path": repo_path,
+                "relative": "file one.txt",
+                "staged": false,
+                "generation": generation,
+                "requestId": 13
+            }),
+        )
+        .expect("diff");
+        assert!(diff["text"].as_str().unwrap().contains("+after"));
+        let reopened = invoke(
+            &window,
+            "open_repository",
+            serde_json::json!({"path": repo_path, "requestId": 14}),
+        )
+        .expect("open");
+        assert_eq!(reopened["summary"]["path"], repo_path);
+        let plain_path = repo_key(&plain);
+        let created = invoke(
+            &window,
+            "create_repository",
+            serde_json::json!({"path": plain_path, "requestId": 15}),
+        )
+        .expect("create");
+        assert_eq!(created["summary"]["name"], "plain-dir");
+        assert!(plain.join(".git").is_dir());
+        assert_eq!(fs::read(plain.join("keep.txt")).unwrap(), b"same");
+        backend.watches.stop();
+    }
 }

@@ -10,7 +10,6 @@ import {
   directoryBytes,
   p95,
   sha256File,
-  sourceFingerprint,
   validateCheck,
 } from "./delivery-lib.mjs";
 import { filePath, generateFixture } from "./generate-fixture.mjs";
@@ -1039,10 +1038,8 @@ async function main() {
   replaceCheck(checks, await measureProtocol("https", process.env, gitLsRemote));
   replaceCheck(checks, await measureProtocol("ssh", process.env, gitLsRemote));
 
-  const fingerprint = sourceFingerprint(root);
   const report = {
     format: "twiglane-delivery-verification/v1",
-    sourceFingerprint: fingerprint,
     generatedAt: new Date().toISOString(),
     hostPlatform: process.platform,
     checks,

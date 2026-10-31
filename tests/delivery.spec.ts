@@ -8,7 +8,6 @@ import {
   judgeReport,
   p95,
   sha256File,
-  sourceFingerprint,
   validateCheck,
   verifyDelivery,
 } from "../scripts/delivery-lib.mjs";
@@ -239,15 +238,14 @@ describe("交付测量", () => {
     expect(checks.map((check) => check.id).sort()).toEqual([...REQUIRED_CHECKS].sort());
     const report = {
       format: "twiglane-delivery-verification/v1",
-      sourceFingerprint: sourceFingerprint(root),
       checks,
     };
-    const judged = judgeReport(root, report, report.sourceFingerprint, "darwin");
+    const judged = judgeReport(root, report, "darwin");
     expect(judged.ok).toBe(true);
     report.checks = report.checks.map((check) =>
       check.id === "accept.windows" ? { ...check, status: "gap", nextStep: "在 Windows 11 x64 上安装后重跑验收。" } : check,
     );
-    expect(judgeReport(root, report, report.sourceFingerprint, "darwin").ok).toBe(false);
+    expect(judgeReport(root, report, "darwin").ok).toBe(false);
   });
 
   it("只给状态文案、未开始的读取或未改变选择不能通过", () => {

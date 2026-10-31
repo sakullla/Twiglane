@@ -1,6 +1,5 @@
 {
   "format": "twiglane-delivery-verification/v1",
-  "sourceFingerprint": "8e1d2a89aa9e8647eef6a181d53471378df476eb081dd362a83ee577ee583b9f",
   "generatedAt": "2026-10-31T13:32:42.307Z",
   "hostPlatform": "darwin",
   "checks": [

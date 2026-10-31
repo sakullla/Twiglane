@@ -368,6 +368,7 @@ export interface UndoResult {
 
 export interface DiscardFilePlan {
   path: string;
+  originalPath: string | null;
   staged: ChangeKind;
   unstaged: ChangeKind;
   untracked: boolean;

@@ -798,8 +798,41 @@ pub fn fetch_one_command(git: &Path, root: &Path, remote: &str) -> (PathBuf, Vec
     args.extend([
         OsString::from("fetch"),
         OsString::from("--prune"),
+        OsString::from("--tags"),
         OsString::from("--"),
         OsString::from(remote),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn ls_remote_tags_command(git: &Path, root: &Path, remote: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("ls-remote"),
+        OsString::from("--tags"),
+        OsString::from("--"),
+        OsString::from(remote),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn remote_tracking_command(git: &Path, root: &Path, remote: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("for-each-ref"),
+        OsString::from("--format=%(refname)"),
+        OsString::from(format!("refs/remotes/{remote}")),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn push_reflog_command(git: &Path, root: &Path, refname: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("reflog"),
+        OsString::from("show"),
+        OsString::from("--format=%H%x1f%gs"),
+        OsString::from(refname),
     ]);
     (git.to_path_buf(), args)
 }
@@ -831,6 +864,43 @@ pub fn reset_soft_command(git: &Path, root: &Path, parent: &str) -> (PathBuf, Ve
         OsString::from("reset"),
         OsString::from("--soft"),
         OsString::from(parent),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn checkout_index_stage_command(
+    git: &Path,
+    root: &Path,
+    stage: &str,
+    path: &Path,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("checkout-index"),
+        OsString::from("-f"),
+        OsString::from(format!("--stage={stage}")),
+        OsString::from("--"),
+        path.as_os_str().to_os_string(),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn hash_object_command(git: &Path, root: &Path, path: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("hash-object"),
+        OsString::from("-w"),
+        OsString::from("--"),
+        path.as_os_str().to_os_string(),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn update_index_info_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("update-index"),
+        OsString::from("--index-info"),
     ]);
     (git.to_path_buf(), args)
 }
@@ -875,6 +945,28 @@ pub fn restore_worktree_command(
         OsString::from("--source=HEAD"),
         OsString::from("--staged"),
         OsString::from("--worktree"),
+        OsString::from("--"),
+    ]);
+    for path in paths {
+        args.push(path.as_os_str().to_os_string());
+    }
+    (git.to_path_buf(), args)
+}
+
+pub fn head_match_command(
+    git: &Path,
+    root: &Path,
+    cached: bool,
+    paths: &[PathBuf],
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.push(OsString::from("diff"));
+    if cached {
+        args.push(OsString::from("--cached"));
+    }
+    args.extend([
+        OsString::from("--quiet"),
+        OsString::from("HEAD"),
         OsString::from("--"),
     ]);
     for path in paths {
@@ -962,26 +1054,44 @@ mod tests {
         let merge_args = merge_no_commit_command(git, root, "feature").1;
         assert!(merge_args.iter().any(|arg| arg == "--no-commit"));
         assert!(merge_args.iter().any(|arg| arg == "--no-ff"));
-        assert_eq!(merge_args.last().map(OsString::as_os_str), Some(std::ffi::OsStr::new("feature")));
+        assert_eq!(
+            merge_args.last().map(OsString::as_os_str),
+            Some(std::ffi::OsStr::new("feature"))
+        );
         let reset_args = reset_soft_command(git, root, "abc123").1;
         assert!(reset_args.iter().any(|arg| arg == "--soft"));
-        assert!(!reset_args.iter().any(|arg| arg == "--hard" || arg == "--mixed"));
+        assert!(!reset_args
+            .iter()
+            .any(|arg| arg == "--hard" || arg == "--mixed"));
         let clean_args = clean_files_command(git, root, &[PathBuf::from("only.txt")]).1;
         assert!(clean_args.iter().any(|arg| arg == "-f"));
-        assert!(!clean_args.iter().any(|arg| arg == "-d" || arg == "-x" || arg == "-fd"));
-        assert_eq!(clean_args.last().map(OsString::as_os_str), Some(std::ffi::OsStr::new("only.txt")));
+        assert!(!clean_args
+            .iter()
+            .any(|arg| arg == "-d" || arg == "-x" || arg == "-fd"));
+        assert_eq!(
+            clean_args.last().map(OsString::as_os_str),
+            Some(std::ffi::OsStr::new("only.txt"))
+        );
         for builder in [
             merge_args,
             merge_abort_command(git, root).1,
             reset_args,
             fetch_one_command(git, root, "origin").1,
+            ls_remote_tags_command(git, root, "origin").1,
+            remote_tracking_command(git, root, "origin").1,
+            push_reflog_command(git, root, "refs/remotes/origin/main").1,
+            head_match_command(git, root, true, &[PathBuf::from("a.txt")]).1,
             checkout_side_command(git, root, "--ours", Path::new("my file.txt")).1,
             restore_worktree_command(git, root, &[PathBuf::from("my file.txt")]).1,
         ] {
             assert_no_force(&builder);
             assert!(!builder.iter().any(|arg| {
                 let text = arg.to_string_lossy();
-                text == "sh" || text == "bash" || text == "cmd" || text == "cmd.exe" || text == "--hard"
+                text == "sh"
+                    || text == "bash"
+                    || text == "cmd"
+                    || text == "cmd.exe"
+                    || text == "--hard"
             }));
         }
         for builder in [

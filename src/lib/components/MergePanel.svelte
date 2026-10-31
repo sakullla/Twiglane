@@ -10,6 +10,7 @@
   import type {
     BranchRecord,
     ConflictView,
+    MergePreview,
     MergeSession,
     OpenedRepository,
     StatusSnapshot,
@@ -17,6 +18,7 @@
 
   interface Props {
     opened: OpenedRepository;
+    focusPath?: string | null;
     disabled: boolean;
     nextId: () => number;
     onSnapshot: (snapshot: StatusSnapshot) => void;
@@ -28,6 +30,7 @@
 
   let {
     opened,
+    focusPath = null,
     disabled,
     nextId,
     onSnapshot,
@@ -48,7 +51,9 @@
   let aborting = $state(false);
   let abortNote = $state("");
   let abortPaths = $state<string[]>([]);
+  let pendingPreview = $state<MergePreview | null>(null);
   let loadedKey = "";
+  let openedFocus = "";
 
   let blocked = $derived(disabled || busy);
   let choices = $derived(
@@ -107,12 +112,23 @@
     if (!current || !branch) return;
     void run(async () => {
       const preview = await api.mergePreview(opened.summary.path, branch, current.generation, nextId());
+      pendingPreview = preview;
       onGeneration(preview.generation);
-      if (!preview.canStart) {
-        errorText = preview.note;
-        return;
-      }
-      const started = await api.startMerge(opened.summary.path, branch, preview.generation, nextId());
+      if (session) session = { ...session, generation: preview.generation };
+    });
+  }
+
+  function confirmStart() {
+    const preview = pendingPreview;
+    if (!preview?.canStart) return;
+    void run(async () => {
+      const started = await api.startMerge(
+        opened.summary.path,
+        preview.source,
+        preview.generation,
+        nextId(),
+      );
+      pendingPreview = null;
       session = started;
       onSnapshot(started.snapshot);
       onNotice(started.note);
@@ -130,6 +146,18 @@
       onGeneration(next.generation);
     });
   }
+
+  $effect(() => {
+    const path = focusPath;
+    const current = session;
+    if (!path || !current) return;
+    if (current.operation !== "merge" && current.operation !== "unmerged") return;
+    const key = `${current.generation}:${path}`;
+    if (openedFocus === key) return;
+    if (!current.conflicts.some((entry) => entry.path === path)) return;
+    openedFocus = key;
+    openConflict(path);
+  });
 
   function resolve(choice: string) {
     const current = session;
@@ -205,19 +233,46 @@
     {#if session?.operation === "none"}
       <label>
         来源分支
-        <select aria-label="来源分支" bind:value={source} disabled={blocked}>
+        <select
+          aria-label="来源分支"
+          bind:value={source}
+          disabled={blocked}
+          onchange={() => (pendingPreview = null)}
+        >
           {#each choices as branch (branch.name)}
             <option value={branch.name}>{branch.remote ? `远程 ${branch.name}` : branch.name}</option>
           {/each}
         </select>
       </label>
-      <p class="hint">目标是当前分支 {opened.snapshot.branch.name ?? "当前分支"}。有本地改动时会先引导临时保存，不会开始合并。</p>
+      <p class="hint">目标是当前分支 {opened.snapshot.branch.name ?? "当前分支"}。确认前不会开始合并。</p>
       <div class="row">
-        <button type="button" class="primary" disabled={blocked || source.trim() === ""} onclick={previewMerge}>预览并合并</button>
+        <button type="button" class="primary" disabled={blocked || source.trim() === ""} onclick={previewMerge}>预览合并</button>
         <button type="button" class="ghost" disabled={blocked} onclick={onOpenStash}>去临时保存</button>
       </div>
-    {:else if session?.operation === "merge"}
-      <p class="hint">来源 {session.source ?? "另一分支"}，目标 {session.target ?? "当前分支"}。未解决时不能完成。</p>
+      {#if pendingPreview}
+        <div aria-label="合并预览">
+          <p>来源 {pendingPreview.source}，目标 {pendingPreview.target}。</p>
+          {#if pendingPreview.localPaths.length === 0}
+            <p>当前没有未提交改动。</p>
+          {:else}
+            <ul class="scope-list" aria-label="本地改动">
+              {#each pendingPreview.localPaths as path (path)}
+                <li title={path}>{path}</li>
+              {/each}
+            </ul>
+          {/if}
+          <p>{pendingPreview.note}</p>
+          {#if pendingPreview.canStart}
+            <button type="button" class="primary" disabled={blocked} onclick={confirmStart}>确认开始合并</button>
+          {/if}
+        </div>
+      {/if}
+    {:else if session?.operation === "merge" || session?.operation === "unmerged"}
+      {#if session.operation === "merge"}
+        <p class="hint">来源 {session.source ?? "另一分支"}，目标 {session.target ?? "当前分支"}。未解决时不能完成。</p>
+      {:else}
+        <p class="hint">这些未合并文件可以逐个编辑、选择一侧或处理修改/删除。这不是分支合并，不能中止，也不会调用中止合并。</p>
+      {/if}
       <div class="chip-row" aria-label="冲突文件">
         {#each session.conflicts as entry (entry.path)}
           <button type="button" class="ghost compact" disabled={blocked} onclick={() => openConflict(entry.path)}>
@@ -261,23 +316,25 @@
           {/if}
         </div>
       {/if}
-      <label>
-        合并说明
-        <textarea aria-label="合并说明" bind:value={message} disabled={blocked}></textarea>
-      </label>
-      <p class="hint">完成只会提交已经标记的合并结果，不会推送。失败时说明和已标记内容都会保留。</p>
-      <button
-        type="button"
-        class="primary"
-        disabled={blocked || !canCompleteMerge(session.operation, session.unresolved) || message.trim() === ""}
-        onclick={complete}
-      >完成合并</button>
-      {#if session.unresolved > 0}
-        <p class="hint">还有 {session.unresolved} 个未解决冲突，不能完成合并。</p>
+      {#if session.operation === "merge"}
+        <label>
+          合并说明
+          <textarea aria-label="合并说明" bind:value={message} disabled={blocked}></textarea>
+        </label>
+        <p class="hint">完成只会提交已经标记的合并结果，不会推送。失败时说明和已标记内容都会保留。</p>
+        <button
+          type="button"
+          class="primary"
+          disabled={blocked || !canCompleteMerge(session.operation, session.unresolved) || message.trim() === ""}
+          onclick={complete}
+        >完成合并</button>
+        {#if session.unresolved > 0}
+          <p class="hint">还有 {session.unresolved} 个未解决冲突，不能完成合并。</p>
+        {/if}
+      {:else}
+        <p class="hint">标记后的文件可以在改动区提交。临时保存记录不会被删除。</p>
+        <button type="button" class="ghost" disabled={blocked} onclick={onOpenStash}>查看临时保存</button>
       {/if}
-    {:else if session?.operation === "unmerged"}
-      <p class="hint">请到改动或临时保存处理这些文件。这里不会把它当成可以中止的分支合并。</p>
-      <button type="button" class="ghost" disabled={blocked} onclick={onOpenStash}>查看临时保存</button>
     {/if}
     {#if errorText}
       <div class="banner" role="alert">{errorText}</div>

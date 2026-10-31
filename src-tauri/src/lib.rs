@@ -849,15 +849,8 @@ async fn delete_stash(
     generation: u64,
     request_id: u64,
 ) -> Result<StashState, AppError> {
-    crate::git::history::delete_stash(
-        state.inner(),
-        &path,
-        &oid,
-        confirm,
-        generation,
-        request_id,
-    )
-    .await
+    crate::git::history::delete_stash(state.inner(), &path, &oid, confirm, generation, request_id)
+        .await
 }
 
 #[tauri::command]

@@ -58,6 +58,7 @@
   let diffToken = 0;
   let fileQuery = $state("");
   let workspaceView = $state<"changes" | "history" | "stash" | "merge">("changes");
+  let conflictFocus = $state<string | null>(null);
   let historyPath = $state<string | null>(null);
   const drafts = new DraftBuffer();
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
@@ -223,9 +224,9 @@
   }
 
   function openConflict(path: string) {
-    workspaceView = "changes";
+    conflictFocus = path;
+    workspaceView = "merge";
     historyPath = null;
-    selectFile({ path, side: "unstaged" });
   }
 
   function applySnapshot(snapshot: StatusSnapshot) {
@@ -836,6 +837,7 @@
     {:else if opened && workspaceView === "merge"}
       <MergePanel
         {opened}
+        focusPath={conflictFocus}
         disabled={pending !== null}
         {nextId}
         onGeneration={adoptGeneration}

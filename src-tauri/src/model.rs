@@ -496,6 +496,8 @@ pub struct UndoResult {
 #[serde(rename_all = "camelCase")]
 pub struct DiscardFilePlan {
     pub path: String,
+    /// Set for a rename so the confirmation list names both sides.
+    pub original_path: Option<String>,
     pub staged: ChangeKind,
     pub unstaged: ChangeKind,
     pub untracked: bool,

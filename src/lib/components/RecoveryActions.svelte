@@ -143,6 +143,10 @@
     const unstaged = changeLabel(plan.unstaged);
     return `已暂存 ${staged ?? "无"} · 未暂存 ${unstaged ?? "无"}`;
   }
+
+  function planTitle(plan: DiscardFilePlan): string {
+    return plan.originalPath ? `${plan.originalPath} → ${plan.path}` : plan.path;
+  }
 </script>
 
 <div class="row recovery-row">
@@ -169,7 +173,7 @@
                 checked={checked.includes(plan.path)}
                 onchange={(event) => toggle(plan.path, (event.currentTarget as HTMLInputElement).checked)}
               />
-              <strong title={plan.path}>{plan.path}</strong>
+              <strong title={planTitle(plan)}>{planTitle(plan)}</strong>
               <span class="hint">{sideText(plan)}</span>
               <span class="hint">{plan.impact} {plan.recovery}</span>
             </span>

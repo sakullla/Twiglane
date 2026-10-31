@@ -124,6 +124,7 @@ describe("合并面板", () => {
     branchState.mockReset();
     mergePreview.mockReset();
     startMerge.mockReset();
+    conflictView.mockReset();
     branchState.mockResolvedValue({ generation: 4, branches: [], snapshot: opened.snapshot });
   });
 
@@ -175,7 +176,7 @@ describe("合并面板", () => {
     expect(screen.getByRole("button", { name: "中止合并" })).toBeTruthy();
   });
 
-  it("脏工作区只提示保存，不开始合并", async () => {
+  it("脏工作区先列出路径，确认前不开始合并", async () => {
     mergeSession.mockResolvedValue(session());
     branchState.mockResolvedValue({
       generation: 4,
@@ -194,7 +195,7 @@ describe("合并面板", () => {
       localPaths: ["keep.txt"],
       canStart: false,
       operation: "none",
-      note: "工作区有未提交改动，合并前请先提交或临时保存。未开始合并。",
+      note: "工作区有 4 处未提交改动，下面只展示 1 条，还有 3 条未展示。合并前请先提交或临时保存。未开始合并。",
     });
     render(MergePanel, {
       opened,
@@ -206,10 +207,93 @@ describe("合并面板", () => {
       onNotice: () => {},
       onOpenStash: () => {},
     });
-    await screen.findByRole("button", { name: "预览并合并" });
-    await fireEvent.click(screen.getByRole("button", { name: "预览并合并" }));
-    expect((await screen.findByRole("alert")).textContent ?? "").toContain("临时保存");
+    await screen.findByRole("button", { name: "预览合并" });
+    await fireEvent.click(screen.getByRole("button", { name: "预览合并" }));
+    expect(await screen.findByText(/来源 feature，目标 main/)).toBeTruthy();
+    expect(screen.getByRole("list", { name: "本地改动" }).textContent).toContain("keep.txt");
+    expect(screen.getByText(/还有 3 条未展示/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "确认开始合并" })).toBeNull();
     expect(startMerge).not.toHaveBeenCalled();
+  });
+
+  it("干净工作区写明没有改动，确认后才开始合并", async () => {
+    mergeSession.mockResolvedValue(session());
+    branchState.mockResolvedValue({
+      generation: 4,
+      branches: [
+        { name: "main", remote: false, current: true, upstream: null, worktree: null },
+        { name: "feature", remote: false, current: false, upstream: null, worktree: null },
+      ],
+      snapshot: opened.snapshot,
+    });
+    mergePreview.mockResolvedValue({
+      generation: 5,
+      source: "feature",
+      target: "main",
+      headOid: "a".repeat(40),
+      dirty: false,
+      localPaths: [],
+      canStart: true,
+      operation: "none",
+      note: "将把 feature 合并到 main。当前没有未提交改动。",
+    });
+    startMerge.mockResolvedValue(session({ operation: "merge", note: "正在合并 feature。" }));
+    render(MergePanel, {
+      opened,
+      disabled: false,
+      nextId: () => 1,
+      onSnapshot: () => {},
+      onGeneration: () => {},
+      onFailure: () => {},
+      onNotice: () => {},
+      onOpenStash: () => {},
+    });
+    await screen.findByRole("button", { name: "预览合并" });
+    await fireEvent.click(screen.getByRole("button", { name: "预览合并" }));
+    expect(await screen.findByText("当前没有未提交改动。")).toBeTruthy();
+    expect(screen.getByText(/来源 feature，目标 main/)).toBeTruthy();
+    expect(startMerge).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole("button", { name: "确认开始合并" }));
+    expect(startMerge).toHaveBeenCalledWith("/repo", "feature", 5, 1);
+  });
+
+  it("未合并文件可以逐项处理，但不能中止合并", async () => {
+    mergeSession.mockResolvedValue(
+      session({
+        operation: "unmerged",
+        canAbort: false,
+        unresolved: 1,
+        conflicts: [{ path: "file.txt", kind: "text", summary: "文本" }],
+        note: "这不是合并，不能中止合并。",
+      }),
+    );
+    conflictView.mockResolvedValue({
+      generation: 4,
+      path: "file.txt",
+      kind: "text",
+      editable: true,
+      ours: { present: true, binary: false, truncated: false, text: "ours\n", summary: "本地" },
+      theirs: { present: true, binary: false, truncated: false, text: "theirs\n", summary: "另一侧" },
+      result: { present: true, binary: false, truncated: false, text: "both\n", summary: "结果" },
+      note: "可以编辑合并结果。",
+    });
+    render(MergePanel, {
+      opened,
+      disabled: false,
+      nextId: () => 1,
+      onSnapshot: () => {},
+      onGeneration: () => {},
+      onFailure: () => {},
+      onNotice: () => {},
+      onOpenStash: () => {},
+    });
+    expect(await screen.findByRole("button", { name: "文本冲突 file.txt" })).toBeTruthy();
+    expect(screen.getAllByText(/不能中止/).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "中止合并" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "完成合并" })).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "文本冲突 file.txt" }));
+    expect(await screen.findByRole("button", { name: "标记编辑结果" })).toBeTruthy();
+    expect(conflictView).toHaveBeenCalledWith("/repo", "file.txt", 4, 1);
   });
 });
 
@@ -228,14 +312,16 @@ describe("放弃与撤销", () => {
       files: [
         {
           path: "drop.txt",
-          staged: "modified",
-          unstaged: "modified",
+          originalPath: "from.txt",
+          staged: "renamed",
+          unstaged: "none",
           untracked: false,
-          impact: "暂存区和未暂存的修改都会回到当前提交。",
+          impact: "这是重命名：from.txt → drop.txt。确认后原路径和新路径都会回到当前提交。",
           recovery: "放弃后 Git 不保留这份未提交内容，本应用不能撤销这次放弃。",
         },
         {
           path: "keep.txt",
+          originalPath: null,
           staged: "none",
           unstaged: "modified",
           untracked: false,
@@ -255,7 +341,8 @@ describe("放弃与撤销", () => {
     });
     await fireEvent.click(screen.getByRole("button", { name: discardActionLabel() }));
     expect(await screen.findByText(/取消不写入/)).toBeTruthy();
-    expect(screen.getByText(/暂存区和未暂存/)).toBeTruthy();
+    expect(screen.getByText("from.txt → drop.txt")).toBeTruthy();
+    expect(screen.getByText(/原路径和新路径都会回到当前提交/)).toBeTruthy();
     await fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(discardChanges).toHaveBeenCalledTimes(1);
     expect(discardChanges).toHaveBeenCalledWith("/repo", ["keep.txt", "drop.txt"], false, 4, 2);

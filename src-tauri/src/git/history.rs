@@ -49,7 +49,15 @@ pub async fn history_page(
     let refs = load_labels(backend, &root, &git.path, generation, request_id).await?;
     let generation = refs.0;
     let (mut commits, has_more, generation) = if query.is_empty() {
-        browse_commits(backend, &root, &git.path, offset, generation, internal_request_id()).await?
+        browse_commits(
+            backend,
+            &root,
+            &git.path,
+            offset,
+            generation,
+            internal_request_id(),
+        )
+        .await?
     } else {
         search_commits(
             backend,
@@ -129,8 +137,15 @@ pub async fn commit_detail(
     )
     .await?;
     let selected = choose_parent(&commit, parent)?;
-    let (files, generation) =
-        load_commit_files(backend, &root, &git.path, &oid, selected.as_deref(), generation).await?;
+    let (files, generation) = load_commit_files(
+        backend,
+        &root,
+        &git.path,
+        &oid,
+        selected.as_deref(),
+        generation,
+    )
+    .await?;
     Ok(CommitDetail {
         generation,
         root: commit.parents.is_empty(),
@@ -360,12 +375,10 @@ pub async fn save_stash(
         if text.contains("no local changes") {
             return Err(AppError::new("stash_empty", before.summary).with_generation(generation));
         }
-        return Err(git_failure(
-            "stash_failed",
-            &pushed,
-            "没有保存改动，工作区保持原样。",
-        )
-        .with_generation(generation));
+        return Err(
+            git_failure("stash_failed", &pushed, "没有保存改动，工作区保持原样。")
+                .with_generation(generation),
+        );
     }
     let state = load_stash_state(
         backend,
@@ -381,7 +394,8 @@ pub async fn save_stash(
         .first()
         .map(|record| record.oid.clone())
         .ok_or_else(|| {
-            AppError::new("stash_failed", "保存命令已结束，但没有找到新的记录。").with_generation(generation)
+            AppError::new("stash_failed", "保存命令已结束，但没有找到新的记录。")
+                .with_generation(generation)
         })?;
     let note = format!("已按保存前的范围完成临时保存。{}", before.summary);
     Ok(StashSaveResult { oid, note, state })
@@ -406,7 +420,14 @@ pub async fn apply_stash(
     let generation = guard.finish();
     let applied = outcome.map_err(|error| attach_generation(error, generation))?;
     let snapshot = read_status(backend, &root, generation, internal_request_id()).await?;
-    let records = list_stashes(backend, &root, &git.path, snapshot.generation, internal_request_id()).await?;
+    let records = list_stashes(
+        backend,
+        &root,
+        &git.path,
+        snapshot.generation,
+        internal_request_id(),
+    )
+    .await?;
     if !records.iter().any(|record| record.oid == oid) {
         return Err(AppError::new(
             "stash_lost",
@@ -600,11 +621,7 @@ async fn history_state(
     )
     .await?;
     if bytes.iter().any(|byte| !byte.is_ascii_whitespace()) {
-        let state = if query.is_empty() {
-            "ok"
-        } else {
-            "no_match"
-        };
+        let state = if query.is_empty() { "ok" } else { "no_match" };
         Ok((generation, state.to_string()))
     } else {
         Ok((generation, "empty_repository".to_string()))
@@ -700,13 +717,7 @@ async fn load_stash_state(
     let blocked = snapshot.files.iter().any(|file| file.unmerged);
     Ok(StashState {
         generation,
-        preview: build_preview(
-            &tracked,
-            &untracked,
-            &ignored,
-            include_untracked,
-            blocked,
-        ),
+        preview: build_preview(&tracked, &untracked, &ignored, include_untracked, blocked),
         records,
         snapshot,
     })
@@ -758,10 +769,7 @@ async fn ignored_paths(
             continue;
         }
         let path = String::from_utf8(part.to_vec()).map_err(|_| {
-            AppError::new(
-                "stash_failed",
-                "忽略文件的路径无法安全显示，因此没有保存。",
-            )
+            AppError::new("stash_failed", "忽略文件的路径无法安全显示，因此没有保存。")
         })?;
         paths.push(path);
     }
@@ -1012,10 +1020,7 @@ async fn ignored_in_guard(
             continue;
         }
         paths.push(String::from_utf8(part.to_vec()).map_err(|_| {
-            AppError::new(
-                "stash_failed",
-                "忽略文件的路径无法安全显示，因此没有保存。",
-            )
+            AppError::new("stash_failed", "忽略文件的路径无法安全显示，因此没有保存。")
         })?);
     }
     Ok(paths)
@@ -1077,8 +1082,7 @@ async fn read_log(
     request_id: u64,
     command: (PathBuf, Vec<std::ffi::OsString>),
 ) -> Result<(Vec<u8>, u64), AppError> {
-    let (output, generation) =
-        read_output(backend, root, generation, request_id, command).await?;
+    let (output, generation) = read_output(backend, root, generation, request_id, command).await?;
     Ok((log_bytes(&output)?, generation))
 }
 
@@ -1089,8 +1093,7 @@ async fn read_bytes(
     request_id: u64,
     command: (PathBuf, Vec<std::ffi::OsString>),
 ) -> Result<(Vec<u8>, u64), AppError> {
-    let (output, generation) =
-        read_output(backend, root, generation, request_id, command).await?;
+    let (output, generation) = read_output(backend, root, generation, request_id, command).await?;
     if output.exit_code != 0 {
         return Err(git_failure(
             "history_failed",
@@ -1232,10 +1235,7 @@ fn merge_hits(groups: &[Vec<Hit>]) -> Vec<Hit> {
     for hit in groups.iter().flatten() {
         found.entry(hit.oid.clone()).or_insert(hit.at);
     }
-    let mut hits: Vec<Hit> = found
-        .into_iter()
-        .map(|(oid, at)| Hit { oid, at })
-        .collect();
+    let mut hits: Vec<Hit> = found.into_iter().map(|(oid, at)| Hit { oid, at }).collect();
     hits.sort_by(|left, right| {
         right
             .at
@@ -1245,7 +1245,10 @@ fn merge_hits(groups: &[Vec<Hit>]) -> Vec<Hit> {
     hits
 }
 
-fn order_commits(oids: &[String], commits: Vec<HistoryCommit>) -> Result<Vec<HistoryCommit>, AppError> {
+fn order_commits(
+    oids: &[String],
+    commits: Vec<HistoryCommit>,
+) -> Result<Vec<HistoryCommit>, AppError> {
     let by_oid: HashMap<String, HistoryCommit> = commits
         .into_iter()
         .map(|commit| (commit.oid.clone(), commit))
@@ -1444,9 +1447,15 @@ fn parse_stash_list(bytes: &[u8]) -> Result<Vec<StashRecord>, AppError> {
     Ok(records)
 }
 
-fn choose_parent(commit: &HistoryCommit, requested: Option<&str>) -> Result<Option<String>, AppError> {
+fn choose_parent(
+    commit: &HistoryCommit,
+    requested: Option<&str>,
+) -> Result<Option<String>, AppError> {
     if commit.parents.is_empty() {
-        if requested.map(str::trim).is_some_and(|parent| !parent.is_empty()) {
+        if requested
+            .map(str::trim)
+            .is_some_and(|parent| !parent.is_empty())
+        {
             return Err(AppError::new(
                 "invalid_revision",
                 "首个提交没有父提交。差异按空树比较，未修改仓库。",
@@ -1613,7 +1622,8 @@ fn is_oid_prefix(query: &str) -> bool {
 
 fn validate_oid(oid: &str) -> Result<String, AppError> {
     let oid = oid.trim().to_ascii_lowercase();
-    if (oid.len() == 40 || oid.len() == 64) && oid.chars().all(|character| character.is_ascii_hexdigit())
+    if (oid.len() == 40 || oid.len() == 64)
+        && oid.chars().all(|character| character.is_ascii_hexdigit())
     {
         Ok(oid)
     } else {
@@ -1709,10 +1719,7 @@ fn utf8_piece(bytes: &[u8]) -> Result<String, AppError> {
 }
 
 fn name_status_error() -> AppError {
-    AppError::new(
-        "history_parse",
-        "无法解析提交中的文件，未修改仓库。",
-    )
+    AppError::new("history_parse", "无法解析提交中的文件，未修改仓库。")
 }
 
 #[cfg(test)]
@@ -1801,10 +1808,13 @@ mod tests {
     fn parsers_cover_parents_renames_and_stash_scope() {
         let raw = "abc\u{1f}def 123\u{1f}Ada\u{1f}ada@example.com\u{1f}10\u{1f}subject\u{1e}";
         let commits = parse_history_records(raw.as_bytes()).unwrap();
-        assert_eq!(commits[0].parents, vec!["def".to_string(), "123".to_string()]);
+        assert_eq!(
+            commits[0].parents,
+            vec!["def".to_string(), "123".to_string()]
+        );
         assert_eq!(commits[0].summary, "subject");
-        let files = parse_name_status(b"M\0file.txt\0R100\0old name.txt\0new.txt\0D\0gone.txt\0")
-            .unwrap();
+        let files =
+            parse_name_status(b"M\0file.txt\0R100\0old name.txt\0new.txt\0D\0gone.txt\0").unwrap();
         assert_eq!(files[0].status, "modified");
         assert_eq!(files[1].status, "renamed");
         assert_eq!(files[1].original_path.as_deref(), Some("old name.txt"));
@@ -1813,10 +1823,13 @@ mod tests {
         assert!(summary.contains("已跟踪"));
         assert!(summary.contains("未跟踪文件 2 个这次不保存"));
         assert!(summary.contains("忽略文件 3 个不会保存"));
-        let (program, args) = stash_push_command(Path::new("git"), Path::new("/tmp/repo"), true, Some("note"));
+        let (program, args) =
+            stash_push_command(Path::new("git"), Path::new("/tmp/repo"), true, Some("note"));
         assert!(program.ends_with("git"));
         assert!(args.iter().any(|arg| arg == "--include-untracked"));
-        assert!(!args.iter().any(|arg| arg == "--all" || arg == "-a" || arg == "--include-ignored"));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "--all" || arg == "-a" || arg == "--include-ignored"));
     }
 
     #[tokio::test]
@@ -1845,10 +1858,7 @@ mod tests {
             let message = format!("filler {index}");
             git_env(
                 &repo,
-                &[
-                    ("GIT_AUTHOR_DATE", &stamp),
-                    ("GIT_COMMITTER_DATE", &stamp),
-                ],
+                &[("GIT_AUTHOR_DATE", &stamp), ("GIT_COMMITTER_DATE", &stamp)],
                 &["commit", "--allow-empty", "-m", &message],
             );
         }
@@ -1862,8 +1872,14 @@ mod tests {
         assert_eq!(page.state, "ok");
         assert_eq!(page.commits.len(), HISTORY_PAGE_SIZE as usize);
         assert!(page.has_more);
-        assert!(page.commits.iter().all(|commit| commit.summary.starts_with("filler")));
-        assert!(page.commits[0].labels.iter().any(|label| label.name == "main" && label.current));
+        assert!(page
+            .commits
+            .iter()
+            .all(|commit| commit.summary.starts_with("filler")));
+        assert!(page.commits[0]
+            .labels
+            .iter()
+            .any(|label| label.name == "main" && label.current));
         assert!(page.commits.iter().all(|commit| !commit.parents.is_empty()));
         let by_message = history_page(
             &backend,
@@ -1902,9 +1918,16 @@ mod tests {
         .unwrap();
         assert_eq!(by_oid.commits.len(), 1);
         assert_eq!(by_oid.commits[0].oid, needle);
-        let missing = history_page(&backend, &repo_key(&root), "zzz-no-such-commit", 0, generation, 5)
-            .await
-            .unwrap();
+        let missing = history_page(
+            &backend,
+            &repo_key(&root),
+            "zzz-no-such-commit",
+            0,
+            generation,
+            5,
+        )
+        .await
+        .unwrap();
         assert_eq!(missing.state, "no_match");
         assert!(missing.commits.is_empty());
         assert_eq!(stamp(&root), before);
@@ -1944,7 +1967,10 @@ mod tests {
             .unwrap();
         assert!(root_detail.root);
         assert!(root_detail.selected_parent.is_none());
-        assert!(root_detail.files.iter().any(|file| file.path == "file.txt" && file.status == "added"));
+        assert!(root_detail
+            .files
+            .iter()
+            .any(|file| file.path == "file.txt" && file.status == "added"));
         let root_diff = commit_file_diff(
             &backend,
             &repo_key(&root),
@@ -1965,7 +1991,10 @@ mod tests {
             .unwrap();
         assert!(merge.merge);
         assert_eq!(merge.commit.parents.len(), 2);
-        assert_eq!(merge.selected_parent.as_deref(), Some(merge.commit.parents[0].as_str()));
+        assert_eq!(
+            merge.selected_parent.as_deref(),
+            Some(merge.commit.parents[0].as_str())
+        );
         assert!(merge.files.iter().any(|file| file.path == "side.txt"));
         let other = commit_detail(
             &backend,
@@ -1977,7 +2006,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(other.selected_parent.as_deref(), Some(merge.commit.parents[1].as_str()));
+        assert_eq!(
+            other.selected_parent.as_deref(),
+            Some(merge.commit.parents[1].as_str())
+        );
         assert!(other.files.iter().any(|file| file.path == "main.txt"));
         assert!(other.files.iter().all(|file| file.path != "side.txt"));
 
@@ -1990,9 +2022,16 @@ mod tests {
             .iter()
             .find(|commit| commit.summary == "remove-file")
             .unwrap();
-        let removal_detail = commit_detail(&backend, &repo_key(&root), &removal.oid, None, generation, 6)
-            .await
-            .unwrap();
+        let removal_detail = commit_detail(
+            &backend,
+            &repo_key(&root),
+            &removal.oid,
+            None,
+            generation,
+            6,
+        )
+        .await
+        .unwrap();
         assert!(removal_detail
             .files
             .iter()
@@ -2032,7 +2071,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(edit_diff.lines.iter().any(|line| line.text.contains("edited")));
+        assert!(edit_diff
+            .lines
+            .iter()
+            .any(|line| line.text.contains("edited")));
         let absent = file_history(&backend, &repo_key(&root), "missing.txt", 0, generation, 10)
             .await
             .unwrap();
@@ -2078,18 +2120,31 @@ mod tests {
             .await
             .unwrap();
         assert!(preview.preview.summary.contains("已跟踪"));
-        assert!(preview.preview.summary.contains("未跟踪文件 1 个这次不保存"));
+        assert!(preview
+            .preview
+            .summary
+            .contains("未跟踪文件 1 个这次不保存"));
         assert!(preview.preview.summary.contains("忽略文件 1 个不会保存"));
         assert!(preview.preview.can_save);
         assert_eq!(preview.preview.tracked_paths, vec!["file.txt".to_string()]);
-        let saved = save_stash(&backend, &repo_key(&root), false, "keep tracked", preview.generation, 2)
-            .await
-            .unwrap();
+        let saved = save_stash(
+            &backend,
+            &repo_key(&root),
+            false,
+            "keep tracked",
+            preview.generation,
+            2,
+        )
+        .await
+        .unwrap();
         assert!(saved.note.contains("未跟踪文件 1 个这次不保存"));
         assert!(saved.note.contains("忽略文件"));
         assert_eq!(fs::read_to_string(repo.join("file.txt")).unwrap(), "base\n");
         assert_eq!(fs::read_to_string(repo.join("new.txt")).unwrap(), "free\n");
-        assert_eq!(fs::read_to_string(repo.join("ignored.log")).unwrap(), "secret\n");
+        assert_eq!(
+            fs::read_to_string(repo.join("ignored.log")).unwrap(),
+            "secret\n"
+        );
         let shown = git_text(&repo, &["stash", "show", "--name-only", "stash@{0}"]);
         assert!(shown.contains("file.txt"));
         assert!(!shown.contains("new.txt"));
@@ -2108,18 +2163,38 @@ mod tests {
         .await
         .unwrap();
         assert!(!repo.join("new.txt").exists());
-        assert_eq!(fs::read_to_string(repo.join("ignored.log")).unwrap(), "secret\n");
+        assert_eq!(
+            fs::read_to_string(repo.join("ignored.log")).unwrap(),
+            "secret\n"
+        );
         let shown_untracked = git_text(
             &repo,
-            &["stash", "show", "--include-untracked", "--name-only", "stash@{0}"],
+            &[
+                "stash",
+                "show",
+                "--include-untracked",
+                "--name-only",
+                "stash@{0}",
+            ],
         );
         assert!(shown_untracked.contains("new.txt"));
         assert!(!shown_untracked.contains("ignored.log"));
-        assert!(again.state.records.iter().any(|record| record.oid == saved.oid));
+        assert!(again
+            .state
+            .records
+            .iter()
+            .any(|record| record.oid == saved.oid));
 
-        let refused = delete_stash(&backend, &repo_key(&root), &saved.oid, false, again.state.generation, 4)
-            .await
-            .unwrap_err();
+        let refused = delete_stash(
+            &backend,
+            &repo_key(&root),
+            &saved.oid,
+            false,
+            again.state.generation,
+            4,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(refused.code, "stash_confirm");
         assert!(git_text(&repo, &["stash", "list", "--format=%H"]).contains(&saved.oid));
         let wrong = delete_stash(
@@ -2134,19 +2209,34 @@ mod tests {
         .unwrap_err();
         assert_eq!(wrong.code, "stash_missing");
         let kept_file = fs::read_to_string(repo.join("file.txt")).unwrap();
-        let deleted = delete_stash(&backend, &repo_key(&root), &saved.oid, true, wrong.generation.unwrap(), 6)
-            .await
-            .unwrap();
+        let deleted = delete_stash(
+            &backend,
+            &repo_key(&root),
+            &saved.oid,
+            true,
+            wrong.generation.unwrap(),
+            6,
+        )
+        .await
+        .unwrap();
         assert!(deleted.records.iter().all(|record| record.oid != saved.oid));
         assert!(deleted.records.iter().any(|record| record.oid == again.oid));
-        assert_eq!(fs::read_to_string(repo.join("file.txt")).unwrap(), kept_file);
+        assert_eq!(
+            fs::read_to_string(repo.join("file.txt")).unwrap(),
+            kept_file
+        );
         assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), head);
 
         let empty = save_stash(&backend, &repo_key(&root), false, "", deleted.generation, 7)
             .await
             .unwrap_err();
         assert_eq!(empty.code, "stash_empty");
-        assert_eq!(deleted.records.len(), git_text(&repo, &["stash", "list", "--format=%H"]).lines().count());
+        assert_eq!(
+            deleted.records.len(),
+            git_text(&repo, &["stash", "list", "--format=%H"])
+                .lines()
+                .count()
+        );
     }
 
     #[tokio::test]
@@ -2168,9 +2258,15 @@ mod tests {
         fs::write(repo.join("file.txt"), "local\n").unwrap();
         git(&repo, &["add", "--", "file.txt"]);
         git(&repo, &["commit", "-m", "local"]);
-        let applied = apply_stash(&backend, &repo_key(&root), &saved.oid, saved.state.generation, 2)
-            .await
-            .unwrap();
+        let applied = apply_stash(
+            &backend,
+            &repo_key(&root),
+            &saved.oid,
+            saved.state.generation,
+            2,
+        )
+        .await
+        .unwrap();
         assert!(applied.conflicted);
         assert!(applied.kept);
         assert!(!applied.can_abort_merge);
@@ -2180,18 +2276,33 @@ mod tests {
         let body = fs::read_to_string(repo.join("file.txt")).unwrap();
         assert!(body.contains("local"));
         assert!(body.contains("stashed"));
-        assert_eq!(fs::read_to_string(repo.join("other.txt")).unwrap(), "keep\n");
+        assert_eq!(
+            fs::read_to_string(repo.join("other.txt")).unwrap(),
+            "keep\n"
+        );
         assert!(!repo.join(".git/MERGE_HEAD").exists());
         assert!(git_text(&repo, &["stash", "list", "--format=%H"]).contains(&saved.oid));
 
         git(&repo, &["reset", "--hard", "HEAD"]);
         fs::write(repo.join("file.txt"), "dirty\n").unwrap();
-        let blocked = apply_stash(&backend, &repo_key(&root), &saved.oid, applied.generation, 3)
-            .await
-            .unwrap_err();
+        let blocked = apply_stash(
+            &backend,
+            &repo_key(&root),
+            &saved.oid,
+            applied.generation,
+            3,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(blocked.code, "stash_apply_failed");
-        assert_eq!(fs::read_to_string(repo.join("file.txt")).unwrap(), "dirty\n");
-        assert_eq!(fs::read_to_string(repo.join("other.txt")).unwrap(), "keep\n");
+        assert_eq!(
+            fs::read_to_string(repo.join("file.txt")).unwrap(),
+            "dirty\n"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join("other.txt")).unwrap(),
+            "keep\n"
+        );
         assert!(git_text(&repo, &["stash", "list", "--format=%H"]).contains(&saved.oid));
         assert!(!repo.join(".git/MERGE_HEAD").exists());
     }
@@ -2237,8 +2348,14 @@ mod tests {
         assert!(repo.join(".git/MERGE_HEAD").exists());
         let markers = fs::read_to_string(repo.join("both.txt")).unwrap();
         assert!(markers.contains("<<<<<<<"));
-        assert_eq!(fs::read_to_string(repo.join("file.txt")).unwrap(), "local\n");
-        assert_eq!(fs::read_to_string(repo.join("other.txt")).unwrap(), "keep\n");
+        assert_eq!(
+            fs::read_to_string(repo.join("file.txt")).unwrap(),
+            "local\n"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join("other.txt")).unwrap(),
+            "keep\n"
+        );
 
         let blocked = apply_stash(
             &backend,
@@ -2255,8 +2372,14 @@ mod tests {
         assert!(!blocked.message.contains("恢复发生冲突"));
         assert!(!blocked.message.contains("已把改动恢复"));
         assert_eq!(fs::read_to_string(repo.join("both.txt")).unwrap(), markers);
-        assert_eq!(fs::read_to_string(repo.join("file.txt")).unwrap(), "local\n");
-        assert_eq!(fs::read_to_string(repo.join("other.txt")).unwrap(), "keep\n");
+        assert_eq!(
+            fs::read_to_string(repo.join("file.txt")).unwrap(),
+            "local\n"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join("other.txt")).unwrap(),
+            "keep\n"
+        );
         assert!(repo.join(".git/MERGE_HEAD").exists());
         let stashes = git_text(&repo, &["stash", "list", "--format=%H"]);
         assert!(stashes.contains(&saved_file.oid));
@@ -2280,8 +2403,14 @@ mod tests {
         assert!(!restored.can_abort_merge);
         assert!(restored.note.contains("已把改动恢复"));
         assert!(!restored.note.contains("没有可中止的合并"));
-        assert_eq!(fs::read_to_string(repo.join("other.txt")).unwrap(), "restored-other\n");
-        assert_eq!(fs::read_to_string(repo.join("file.txt")).unwrap(), "local\n");
+        assert_eq!(
+            fs::read_to_string(repo.join("other.txt")).unwrap(),
+            "restored-other\n"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join("file.txt")).unwrap(),
+            "local\n"
+        );
         assert_eq!(fs::read_to_string(repo.join("both.txt")).unwrap(), "main\n");
         assert!(repo.join(".git/MERGE_HEAD").exists());
 
@@ -2305,7 +2434,10 @@ mod tests {
         assert!(body.contains("local"));
         assert!(body.contains("stashed"));
         assert_eq!(fs::read_to_string(repo.join("both.txt")).unwrap(), "main\n");
-        assert_eq!(fs::read_to_string(repo.join("other.txt")).unwrap(), "restored-other\n");
+        assert_eq!(
+            fs::read_to_string(repo.join("other.txt")).unwrap(),
+            "restored-other\n"
+        );
         assert!(repo.join(".git/MERGE_HEAD").exists());
         let stashes = git_text(&repo, &["stash", "list", "--format=%H"]);
         assert!(stashes.contains(&saved_file.oid));

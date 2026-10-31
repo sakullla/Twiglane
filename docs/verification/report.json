@@ -1,6 +1,6 @@
 {
   "format": "twiglane-delivery-verification/v1",
-  "sourceFingerprint": "3cb3af63cb471769d7622eb31fafc00c688c953b59e90b52f008a0e3b78731ef",
+  "sourceFingerprint": "8e1d2a89aa9e8647eef6a181d53471378df476eb081dd362a83ee577ee583b9f",
   "generatedAt": "2026-10-31T13:32:42.307Z",
   "hostPlatform": "darwin",
   "checks": [
@@ -52,12 +52,12 @@
     {
       "id": "package.macos.dmg",
       "status": "pass",
-      "summary": "DMG 2732969 字节。",
+      "summary": "DMG 2732965 字节。",
       "evidence": {
         "path": "../../.cache/cargo-target/release/bundle/dmg/Twiglane_0.1.0_aarch64.dmg",
-        "sha256": "d6b3811f591abb28581208a430390db566ff2ac1e53f51990984f1b1ab454616",
+        "sha256": "05af1646342517a2093ced716fea1114e306538a5ff98e2b52627a5ceabda49c",
         "productName": "Twiglane",
-        "bytes": 2732969
+        "bytes": 2732965
       }
     },
     {

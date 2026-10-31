@@ -14,6 +14,10 @@ export function startupTiming(
   pid: number,
 ): { launch: string | null; contentOk: boolean; controlsMs: number; openMs: number };
 
+export function parseCpuTime(value: string): number | null;
+
+export function idleCpuPercent(samples: Array<{ at: number; cpuSeconds: number }>): number | null;
+
 export function measureProtocol(
   kind: "https" | "ssh",
   env: Record<string, string | undefined>,

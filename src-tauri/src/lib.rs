@@ -22,10 +22,11 @@ use crate::error::AppError;
 use crate::git::ops::{self, Backend};
 use crate::git::runner::RealRunner;
 use crate::model::{
-    BranchState, CloneResult, CommitDetail, CommitPushReport, CommitResult, DiffResponse,
-    FileHistoryPage, GitInfo, HistoryPage, OpenedRepository, PanelWidths, RecentRepo, RemoteState,
-    RepoChanged, SettingsDto, StashApplyResult, StashSaveResult, StashState, StatusSnapshot,
-    Theme,
+    AbortImpact, BranchState, CloneResult, CommitDetail, CommitPushReport, CommitResult,
+    ConflictView, DiffResponse, DiscardResult, FileHistoryPage, GitInfo, HistoryPage,
+    MergeComplete, MergePreview, MergeSession, OpenedRepository, PanelWidths, RecentRepo,
+    RemoteState, RepoChanged, SettingsDto, StashApplyResult, StashSaveResult, StashState,
+    StatusSnapshot, Theme, UndoResult,
 };
 use crate::shutdown::Shutdown;
 use crate::state::AppStore;
@@ -90,6 +91,15 @@ pub fn run() {
             save_stash,
             apply_stash,
             delete_stash,
+            merge_preview,
+            start_merge,
+            merge_session,
+            conflict_view,
+            resolve_conflict,
+            complete_merge,
+            abort_merge,
+            undo_commit,
+            discard_changes,
             set_theme,
             set_panel_widths,
             save_draft
@@ -702,6 +712,135 @@ async fn apply_stash(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+async fn merge_preview(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    source: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<MergePreview, AppError> {
+    crate::git::resolve::merge_preview(state.inner(), &path, &source, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn start_merge(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    source: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<MergeSession, AppError> {
+    crate::git::resolve::start_merge(state.inner(), &path, &source, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn merge_session(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<MergeSession, AppError> {
+    crate::git::resolve::merge_session(state.inner(), &path, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn conflict_view(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    relative: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<ConflictView, AppError> {
+    crate::git::resolve::conflict_view(state.inner(), &path, &relative, generation, request_id)
+        .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn resolve_conflict(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    relative: String,
+    choice: String,
+    content: Option<String>,
+    generation: u64,
+    request_id: u64,
+) -> Result<MergeSession, AppError> {
+    crate::git::resolve::resolve_conflict(
+        state.inner(),
+        &path,
+        &relative,
+        &choice,
+        content,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn complete_merge(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    message: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<MergeComplete, AppError> {
+    crate::git::resolve::complete_merge(state.inner(), &path, &message, generation, request_id)
+        .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn abort_merge(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    confirm: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<AbortImpact, AppError> {
+    crate::git::resolve::abort_merge(state.inner(), &path, confirm, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn undo_commit(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    expected_head: String,
+    confirm: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<UndoResult, AppError> {
+    crate::git::resolve::undo_commit(
+        state.inner(),
+        &path,
+        &expected_head,
+        confirm,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn discard_changes(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    paths: Vec<String>,
+    confirm: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<DiscardResult, AppError> {
+    crate::git::resolve::discard_changes(
+        state.inner(),
+        &path,
+        &paths,
+        confirm,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
 async fn delete_stash(
     state: State<'_, Arc<Backend>>,
     path: String,
@@ -854,6 +993,15 @@ mod ipc_contract {
             "save_stash",
             "apply_stash",
             "delete_stash",
+            "merge_preview",
+            "start_merge",
+            "merge_session",
+            "conflict_view",
+            "resolve_conflict",
+            "complete_merge",
+            "abort_merge",
+            "undo_commit",
+            "discard_changes",
         ] {
             let payload = payload_after(command);
             assert!(payload.contains("requestId"), "{command}: {payload}");
@@ -890,7 +1038,11 @@ mod ipc_contract {
                 super::commit_and_push,
                 super::delete_branch,
                 super::history_page,
-                super::delete_stash
+                super::delete_stash,
+                super::merge_session,
+                super::abort_merge,
+                super::undo_commit,
+                super::discard_changes
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("ipc test app");
@@ -1011,6 +1163,39 @@ mod ipc_contract {
                 serde_json::json!({
                     "path": "/tmp/unused",
                     "oid": "abc",
+                    "confirm": false,
+                    "generation": 1,
+                    "request_id": 1
+                }),
+            ),
+            (
+                "merge_session",
+                serde_json::json!({"path": "/tmp/unused", "generation": 1, "request_id": 1}),
+            ),
+            (
+                "abort_merge",
+                serde_json::json!({
+                    "path": "/tmp/unused",
+                    "confirm": false,
+                    "generation": 1,
+                    "request_id": 1
+                }),
+            ),
+            (
+                "undo_commit",
+                serde_json::json!({
+                    "path": "/tmp/unused",
+                    "expectedHead": "abc",
+                    "confirm": false,
+                    "generation": 1,
+                    "request_id": 1
+                }),
+            ),
+            (
+                "discard_changes",
+                serde_json::json!({
+                    "path": "/tmp/unused",
+                    "paths": ["a"],
                     "confirm": false,
                     "generation": 1,
                     "request_id": 1

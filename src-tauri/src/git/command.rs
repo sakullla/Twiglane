@@ -728,6 +728,174 @@ pub fn ignored_files_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>
     (git.to_path_buf(), args)
 }
 
+pub fn merge_no_commit_command(git: &Path, root: &Path, branch: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("merge"),
+        OsString::from("--no-commit"),
+        OsString::from("--no-ff"),
+        OsString::from("--no-edit"),
+        OsString::from("--"),
+        OsString::from(branch),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn merge_abort_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([OsString::from("merge"), OsString::from("--abort")]);
+    (git.to_path_buf(), args)
+}
+
+pub fn unmerged_index_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("ls-files"),
+        OsString::from("-u"),
+        OsString::from("-z"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn cat_blob_command(git: &Path, root: &Path, oid: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("cat-file"),
+        OsString::from("blob"),
+        OsString::from(oid),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn git_path_command(git: &Path, root: &Path, name: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("rev-parse"),
+        OsString::from("--git-path"),
+        OsString::from(name),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn head_record_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("log"),
+        OsString::from("-1"),
+        OsString::from("--format=%H%x1f%P%x1f%s"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn remote_names_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([OsString::from("remote")]);
+    (git.to_path_buf(), args)
+}
+
+pub fn fetch_one_command(git: &Path, root: &Path, remote: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("fetch"),
+        OsString::from("--prune"),
+        OsString::from("--"),
+        OsString::from(remote),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn branch_contains_command(git: &Path, root: &Path, oid: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("branch"),
+        OsString::from("-r"),
+        OsString::from("--contains"),
+        OsString::from(oid),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn cached_diff_quiet_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("diff"),
+        OsString::from("--cached"),
+        OsString::from("--quiet"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn reset_soft_command(git: &Path, root: &Path, parent: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("reset"),
+        OsString::from("--soft"),
+        OsString::from(parent),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn checkout_side_command(
+    git: &Path,
+    root: &Path,
+    side: &str,
+    path: &Path,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("checkout"),
+        OsString::from(side),
+        OsString::from("--"),
+        path.as_os_str().to_os_string(),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn remove_path_command(git: &Path, root: &Path, paths: &[PathBuf]) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("rm"),
+        OsString::from("-f"),
+        OsString::from("--"),
+    ]);
+    for path in paths {
+        args.push(path.as_os_str().to_os_string());
+    }
+    (git.to_path_buf(), args)
+}
+
+pub fn restore_worktree_command(
+    git: &Path,
+    root: &Path,
+    paths: &[PathBuf],
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("restore"),
+        OsString::from("--source=HEAD"),
+        OsString::from("--staged"),
+        OsString::from("--worktree"),
+        OsString::from("--"),
+    ]);
+    for path in paths {
+        args.push(path.as_os_str().to_os_string());
+    }
+    (git.to_path_buf(), args)
+}
+
+pub fn clean_files_command(git: &Path, root: &Path, paths: &[PathBuf]) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("clean"),
+        OsString::from("-f"),
+        OsString::from("--"),
+    ]);
+    for path in paths {
+        args.push(path.as_os_str().to_os_string());
+    }
+    (git.to_path_buf(), args)
+}
+
 // cdylib 不会把仅测试调用算作可达，避免 dead_code 挡住 clippy。
 #[allow(dead_code)]
 pub fn assert_structured(program: &Path, args: &[OsString]) {
@@ -791,6 +959,31 @@ mod tests {
         assert!(!upstream_args
             .iter()
             .any(|arg| arg == "push" || arg == "--set-upstream" || arg == "-u"));
+        let merge_args = merge_no_commit_command(git, root, "feature").1;
+        assert!(merge_args.iter().any(|arg| arg == "--no-commit"));
+        assert!(merge_args.iter().any(|arg| arg == "--no-ff"));
+        assert_eq!(merge_args.last().map(OsString::as_os_str), Some(std::ffi::OsStr::new("feature")));
+        let reset_args = reset_soft_command(git, root, "abc123").1;
+        assert!(reset_args.iter().any(|arg| arg == "--soft"));
+        assert!(!reset_args.iter().any(|arg| arg == "--hard" || arg == "--mixed"));
+        let clean_args = clean_files_command(git, root, &[PathBuf::from("only.txt")]).1;
+        assert!(clean_args.iter().any(|arg| arg == "-f"));
+        assert!(!clean_args.iter().any(|arg| arg == "-d" || arg == "-x" || arg == "-fd"));
+        assert_eq!(clean_args.last().map(OsString::as_os_str), Some(std::ffi::OsStr::new("only.txt")));
+        for builder in [
+            merge_args,
+            merge_abort_command(git, root).1,
+            reset_args,
+            fetch_one_command(git, root, "origin").1,
+            checkout_side_command(git, root, "--ours", Path::new("my file.txt")).1,
+            restore_worktree_command(git, root, &[PathBuf::from("my file.txt")]).1,
+        ] {
+            assert_no_force(&builder);
+            assert!(!builder.iter().any(|arg| {
+                let text = arg.to_string_lossy();
+                text == "sh" || text == "bash" || text == "cmd" || text == "cmd.exe" || text == "--hard"
+            }));
+        }
         for builder in [
             fetch_command(git, root).1,
             pull_ff_command(git, root).1,

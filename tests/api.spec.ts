@@ -82,6 +82,15 @@ describe("Tauri 命令参数", () => {
     await api.saveStash("/repo", true, "wip", 8, 25);
     await api.applyStash("/repo", "abc123", 8, 26);
     await api.deleteStash("/repo", "abc123", true, 8, 27);
+    await api.mergePreview("/repo", "feature", 8, 28);
+    await api.startMerge("/repo", "feature", 8, 29);
+    await api.mergeSession("/repo", 8, 30);
+    await api.conflictView("/repo", "my file.txt", 8, 31);
+    await api.resolveConflict("/repo", "my file.txt", "text", "final\n", 8, 32);
+    await api.completeMerge("/repo", "合并", 8, 33);
+    await api.abortMerge("/repo", false, 8, 34);
+    await api.undoCommit("/repo", "abc123", false, 8, 35);
+    await api.discardChanges("/repo", ["my file.txt"], false, 8, 36);
 
     expect(invoke).toHaveBeenNthCalledWith(1, "history_page", {
       path: "/repo",
@@ -139,6 +148,63 @@ describe("Tauri 命令参数", () => {
       confirm: true,
       generation: 8,
       requestId: 27,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(9, "merge_preview", {
+      path: "/repo",
+      source: "feature",
+      generation: 8,
+      requestId: 28,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(10, "start_merge", {
+      path: "/repo",
+      source: "feature",
+      generation: 8,
+      requestId: 29,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(11, "merge_session", {
+      path: "/repo",
+      generation: 8,
+      requestId: 30,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(12, "conflict_view", {
+      path: "/repo",
+      relative: "my file.txt",
+      generation: 8,
+      requestId: 31,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(13, "resolve_conflict", {
+      path: "/repo",
+      relative: "my file.txt",
+      choice: "text",
+      content: "final\n",
+      generation: 8,
+      requestId: 32,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(14, "complete_merge", {
+      path: "/repo",
+      message: "合并",
+      generation: 8,
+      requestId: 33,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(15, "abort_merge", {
+      path: "/repo",
+      confirm: false,
+      generation: 8,
+      requestId: 34,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(16, "undo_commit", {
+      path: "/repo",
+      expectedHead: "abc123",
+      confirm: false,
+      generation: 8,
+      requestId: 35,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(17, "discard_changes", {
+      path: "/repo",
+      paths: ["my file.txt"],
+      confirm: false,
+      generation: 8,
+      requestId: 36,
     });
     for (const call of invoke.mock.calls) {
       expect(call[1]).not.toHaveProperty("request_id");

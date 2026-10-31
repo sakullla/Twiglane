@@ -285,3 +285,100 @@ export interface StashApplyResult {
   note: string;
   snapshot: StatusSnapshot;
 }
+
+export interface MergePreview {
+  generation: number;
+  source: string;
+  target: string;
+  headOid: string | null;
+  dirty: boolean;
+  localPaths: string[];
+  canStart: boolean;
+  operation: string;
+  note: string;
+}
+
+export interface ConflictEntry {
+  path: string;
+  kind: string;
+  summary: string;
+}
+
+export interface MergeSession {
+  generation: number;
+  operation: string;
+  canContinue: boolean;
+  canAbort: boolean;
+  source: string | null;
+  target: string | null;
+  headOid: string | null;
+  conflicts: ConflictEntry[];
+  unresolved: number;
+  note: string;
+  snapshot: StatusSnapshot;
+}
+
+export interface ConflictSide {
+  present: boolean;
+  binary: boolean;
+  truncated: boolean;
+  text: string | null;
+  summary: string;
+}
+
+export interface ConflictView {
+  generation: number;
+  path: string;
+  kind: string;
+  editable: boolean;
+  ours: ConflictSide;
+  theirs: ConflictSide;
+  result: ConflictSide;
+  note: string;
+}
+
+export interface MergeComplete {
+  oid: string;
+  generation: number;
+  summary: string;
+  files: string[];
+  snapshot: StatusSnapshot;
+}
+
+export interface AbortImpact {
+  generation: number;
+  wrote: boolean;
+  paths: string[];
+  stashOids: string[];
+  note: string;
+  snapshot: StatusSnapshot;
+}
+
+export interface UndoResult {
+  generation: number;
+  code: string;
+  eligible: boolean;
+  wrote: boolean;
+  headOid: string;
+  parentOid: string | null;
+  summary: string;
+  reason: string;
+  snapshot: StatusSnapshot;
+}
+
+export interface DiscardFilePlan {
+  path: string;
+  staged: ChangeKind;
+  unstaged: ChangeKind;
+  untracked: boolean;
+  impact: string;
+  recovery: string;
+}
+
+export interface DiscardResult {
+  generation: number;
+  wrote: boolean;
+  files: DiscardFilePlan[];
+  boundary: string;
+  snapshot: StatusSnapshot;
+}

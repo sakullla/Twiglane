@@ -274,6 +274,23 @@ textarea.full-value { width: 100%; min-height: 72px; resize: vertical; white-spa
 }
 .footer-brand { margin-top: auto; }
 .view-tabs { display: flex; gap: 4px; }
+.recovery-row { padding: 8px 12px 0; }
+.conflict-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.conflict-grid textarea,
+.conflict-grid pre {
+  max-height: 240px;
+  overflow: auto;
+}
+.conflict-grid textarea {
+  width: 100%;
+  min-height: 160px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
 .span-main {
   grid-column: 3 / -1;
   min-width: 0;

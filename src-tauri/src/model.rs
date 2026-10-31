@@ -395,3 +395,120 @@ pub struct StashApplyResult {
     pub note: String,
     pub snapshot: StatusSnapshot,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MergePreview {
+    pub generation: u64,
+    pub source: String,
+    pub target: String,
+    pub head_oid: Option<String>,
+    pub dirty: bool,
+    pub local_paths: Vec<String>,
+    pub can_start: bool,
+    pub operation: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictEntry {
+    pub path: String,
+    pub kind: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeSession {
+    pub generation: u64,
+    pub operation: String,
+    pub can_continue: bool,
+    pub can_abort: bool,
+    pub source: Option<String>,
+    pub target: Option<String>,
+    pub head_oid: Option<String>,
+    pub conflicts: Vec<ConflictEntry>,
+    pub unresolved: u32,
+    pub note: String,
+    pub snapshot: StatusSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictSide {
+    pub present: bool,
+    pub binary: bool,
+    pub truncated: bool,
+    pub text: Option<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictView {
+    pub generation: u64,
+    pub path: String,
+    pub kind: String,
+    pub editable: bool,
+    pub ours: ConflictSide,
+    pub theirs: ConflictSide,
+    pub result: ConflictSide,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeComplete {
+    pub oid: String,
+    pub generation: u64,
+    pub summary: String,
+    pub files: Vec<String>,
+    pub snapshot: StatusSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AbortImpact {
+    pub generation: u64,
+    pub wrote: bool,
+    pub paths: Vec<String>,
+    pub stash_oids: Vec<String>,
+    pub note: String,
+    pub snapshot: StatusSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoResult {
+    pub generation: u64,
+    pub code: String,
+    pub eligible: bool,
+    pub wrote: bool,
+    pub head_oid: String,
+    pub parent_oid: Option<String>,
+    pub summary: String,
+    pub reason: String,
+    pub snapshot: StatusSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscardFilePlan {
+    pub path: String,
+    pub staged: ChangeKind,
+    pub unstaged: ChangeKind,
+    pub untracked: bool,
+    pub impact: String,
+    pub recovery: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscardResult {
+    pub generation: u64,
+    pub wrote: bool,
+    pub files: Vec<DiscardFilePlan>,
+    pub boundary: String,
+    pub snapshot: StatusSnapshot,
+}

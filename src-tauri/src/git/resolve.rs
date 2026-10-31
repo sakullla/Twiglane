@@ -1,0 +1,2473 @@
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+use crate::atomic::atomic_write;
+use crate::error::AppError;
+use crate::git::command::{
+    add_command, branch_contains_command, cached_diff_quiet_command, cat_blob_command,
+    checkout_side_command, clean_files_command, commit_command, fetch_one_command, git_path_command,
+    head_command, head_record_command, merge_abort_command, merge_no_commit_command,
+    remote_names_command, remove_path_command, reset_soft_command, restore_worktree_command,
+    rev_parse_command, status_command, stash_list_command, unmerged_index_command,
+};
+use crate::git::gate::action_key;
+use crate::git::ops::{
+    canonical_existing, git_failure, repo_key, require_git, run_git, safe_relative,
+    status_from_output, validate_input_path, Backend,
+};
+use crate::git::parse::parse_status;
+use crate::git::patch::DIFF_PREVIEW_BYTES;
+use crate::git::runner::{ProcessOutput, RealRunner};
+use crate::git::schedule::{internal_request_id, CommandSpec, JobKind, WriteGuard};
+use crate::model::{
+    AbortImpact, ChangeKind, ConflictEntry, ConflictSide, ConflictView, DiscardFilePlan,
+    DiscardResult, FileChange, MergeComplete, MergePreview, MergeSession, StatusSnapshot,
+    UndoResult, MAX_DRAFT_CHARS,
+};
+use crate::redact::{contains_secret, redact_error_text};
+
+const MAX_LISTED_PATHS: usize = 200;
+const MERGE_MSG_LIMIT: usize = 8 * 1024;
+
+struct Stages {
+    #[allow(dead_code)]
+    base: Option<String>,
+    ours: Option<String>,
+    theirs: Option<String>,
+}
+
+struct HeadRecord {
+    oid: String,
+    parents: Vec<String>,
+    summary: String,
+}
+
+struct SideBytes {
+    present: bool,
+    truncated: bool,
+    bytes: Vec<u8>,
+}
+
+pub async fn merge_preview(
+    backend: &Backend,
+    path: &str,
+    source: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<MergePreview, AppError> {
+    let root = repo_root(path)?;
+    let source = validate_branch_name(source)?;
+    let git = require_git(backend).await?;
+    let snapshot = read_status(backend, &root, generation, request_id).await?;
+    let operation = operation_kind(backend, &root, &git.path, snapshot.generation, internal_request_id()).await?;
+    ensure_ref(backend, &root, &git.path, &source, snapshot.generation, internal_request_id()).await?;
+    Ok(preview_from(&snapshot, &source, &operation))
+}
+
+pub async fn start_merge(
+    backend: &Backend,
+    path: &str,
+    source: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<MergeSession, AppError> {
+    let root = repo_root(path)?;
+    ensure_no_index_lock(&root)?;
+    let source = validate_branch_name(source)?;
+    let git = require_git(backend).await?;
+    let _gate = backend.actions.enter(action_key("merge", &repo_key(&root)))?;
+    let mut guard = write_lock(backend, &root, generation, request_id).await?;
+    let outcome = start_in_guard(&mut guard, backend, &git.path, &root, &source).await;
+    let generation = guard.finish();
+    outcome.map_err(|error| attach_generation(error, generation))?;
+    merge_session(backend, path, generation, internal_request_id()).await
+}
+
+pub async fn merge_session(
+    backend: &Backend,
+    path: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<MergeSession, AppError> {
+    let root = repo_root(path)?;
+    let git = require_git(backend).await?;
+    let snapshot = read_status(backend, &root, generation, request_id).await?;
+    let operation = operation_kind(backend, &root, &git.path, snapshot.generation, internal_request_id()).await?;
+    let stages = if operation == "merge" || operation == "unmerged" {
+        read_stages(backend, &root, &git.path, snapshot.generation, internal_request_id()).await?
+    } else {
+        (snapshot.generation, BTreeMap::new())
+    };
+    let message = if operation == "merge" {
+        read_named_file(backend, &root, &git.path, "MERGE_MSG", stages.0, internal_request_id()).await?
+    } else {
+        (stages.0, String::new())
+    };
+    Ok(session_from(&snapshot, &operation, &stages.1, &message.1, message.0))
+}
+
+pub async fn conflict_view(
+    backend: &Backend,
+    path: &str,
+    relative: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<ConflictView, AppError> {
+    let root = repo_root(path)?;
+    let relative_path = safe_relative(relative)?;
+    let git = require_git(backend).await?;
+    let operation = operation_kind(backend, &root, &git.path, generation, request_id).await?;
+    if operation != "merge" {
+        return Err(AppError::new(
+            "unsupported_operation",
+            "当前不是分支合并，不能按合并冲突展示或处理。",
+        ));
+    }
+    let (generation, stages) = read_stages(backend, &root, &git.path, generation, internal_request_id()).await?;
+    let Some(entry) = stages.get(relative) else {
+        return Err(AppError::new(
+            "conflict_resolved",
+            "这个文件已经不在冲突列表中，未读取为可编辑的合并结果。",
+        ).with_generation(generation));
+    };
+    let limit = capture_limit(backend);
+    let ours = read_blob(backend, &root, &git.path, entry.ours.as_deref(), generation, internal_request_id(), limit).await?;
+    let theirs = read_blob(backend, &root, &git.path, entry.theirs.as_deref(), ours.0, internal_request_id(), limit).await?;
+    let result = read_worktree_side(&root, &relative_path, limit)?;
+    Ok(view_from(relative, entry, &ours.1, &theirs.1, &result, theirs.0))
+}
+
+pub async fn resolve_conflict(
+    backend: &Backend,
+    path: &str,
+    relative: &str,
+    choice: &str,
+    content: Option<String>,
+    generation: u64,
+    request_id: u64,
+) -> Result<MergeSession, AppError> {
+    let root = repo_root(path)?;
+    ensure_no_index_lock(&root)?;
+    let relative_path = safe_relative(relative)?;
+    let git = require_git(backend).await?;
+    let _gate = backend.actions.enter(action_key("merge", &repo_key(&root)))?;
+    let mut guard = write_lock(backend, &root, generation, request_id).await?;
+    let outcome = resolve_in_guard(
+        &mut guard,
+        backend,
+        &git.path,
+        &root,
+        &relative_path,
+        choice,
+        content.as_deref(),
+    )
+    .await;
+    let generation = guard.finish();
+    outcome.map_err(|error| attach_generation(error, generation))?;
+    merge_session(backend, path, generation, internal_request_id()).await
+}
+
+pub async fn complete_merge(
+    backend: &Backend,
+    path: &str,
+    message: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<MergeComplete, AppError> {
+    let message = normalize_message(message)?;
+    let root = repo_root(path)?;
+    ensure_no_index_lock(&root)?;
+    let git = require_git(backend).await?;
+    let _gate = backend.actions.enter(action_key("merge", &repo_key(&root)))?;
+    let mut guard = write_lock(backend, &root, generation, request_id).await?;
+    let outcome = complete_in_guard(&mut guard, backend, &git.path, &root, &message).await;
+    let generation = guard.finish();
+    let prepared = outcome.map_err(|error| attach_generation(error, generation))?;
+    let snapshot = read_status(backend, &root, generation, internal_request_id()).await?;
+    if snapshot.branch.head_oid.as_deref() != Some(prepared.oid.as_str()) {
+        return Err(AppError::new(
+            "commit_unverified",
+            "合并提交命令已返回，但 HEAD 与预期不一致。请刷新后查看历史，不要重复完成。",
+        )
+        .with_generation(snapshot.generation));
+    }
+    Ok(MergeComplete {
+        oid: prepared.oid,
+        generation: snapshot.generation,
+        summary: prepared.summary,
+        files: prepared.files,
+        snapshot,
+    })
+}
+
+pub async fn abort_merge(
+    backend: &Backend,
+    path: &str,
+    confirm: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<AbortImpact, AppError> {
+    let root = repo_root(path)?;
+    let git = require_git(backend).await?;
+    if !confirm {
+        return abort_preview(backend, &root, &git.path, generation, request_id).await;
+    }
+    ensure_no_index_lock(&root)?;
+    let _gate = backend.actions.enter(action_key("merge", &repo_key(&root)))?;
+    let mut guard = write_lock(backend, &root, generation, request_id).await?;
+    let outcome = abort_in_guard(&mut guard, backend, &git.path, &root).await;
+    let generation = guard.finish();
+    let impact = outcome.map_err(|error| attach_generation(error, generation))?;
+    let snapshot = read_status(backend, &root, generation, internal_request_id()).await?;
+    Ok(AbortImpact {
+        generation: snapshot.generation,
+        wrote: true,
+        paths: impact.paths,
+        stash_oids: impact.stash_oids,
+        note: impact.note,
+        snapshot,
+    })
+}
+
+pub async fn undo_commit(
+    backend: &Backend,
+    path: &str,
+    expected_head: &str,
+    confirm: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<UndoResult, AppError> {
+    let expected_head = validate_oid(expected_head)?;
+    let root = repo_root(path)?;
+    let git = require_git(backend).await?;
+    if !confirm {
+        return undo_preview(backend, &root, &git.path, &expected_head, generation, request_id).await;
+    }
+    ensure_no_index_lock(&root)?;
+    let _gate = backend.actions.enter(action_key("undo", &repo_key(&root)))?;
+    let mut guard = write_lock(backend, &root, generation, request_id).await?;
+    let outcome = undo_in_guard(&mut guard, backend, &git.path, &root, &expected_head).await;
+    let generation = guard.finish();
+    let undone = outcome.map_err(|error| attach_generation(error, generation))?;
+    let snapshot = read_status(backend, &root, generation, internal_request_id()).await?;
+    if snapshot.branch.head_oid.as_deref() != Some(undone.parent.as_str()) {
+        return Err(AppError::new(
+            "undo_unverified",
+            "撤销命令已返回，但 HEAD 与父提交不一致。请刷新后确认，不要再次撤销。",
+        )
+        .with_generation(snapshot.generation));
+    }
+    Ok(UndoResult {
+        generation: snapshot.generation,
+        code: "ok".to_string(),
+        eligible: true,
+        wrote: true,
+        head_oid: undone.parent.clone(),
+        parent_oid: Some(undone.parent),
+        summary: undone.summary,
+        reason: "已撤销最近一次未推送的普通提交，文件改动仍保留在暂存区。".to_string(),
+        snapshot,
+    })
+}
+
+pub async fn discard_changes(
+    backend: &Backend,
+    path: &str,
+    paths: &[String],
+    confirm: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<DiscardResult, AppError> {
+    let root = repo_root(path)?;
+    let git = require_git(backend).await?;
+    let snapshot = read_status(backend, &root, generation, request_id).await?;
+    let plan = discard_plan(&snapshot, paths)
+        .map_err(|error| attach_generation(error, snapshot.generation))?;
+    if !confirm {
+        return Ok(DiscardResult {
+            generation: snapshot.generation,
+            wrote: false,
+            files: plan,
+            boundary: discard_boundary(),
+            snapshot,
+        });
+    }
+    ensure_no_index_lock(&root)?;
+    let _gate = backend.actions.enter(action_key("discard", &repo_key(&root)))?;
+    let mut guard = write_lock(backend, &root, snapshot.generation, internal_request_id()).await?;
+    let outcome = discard_in_guard(&mut guard, backend, &git.path, &root, paths).await;
+    let generation = guard.finish();
+    let files = outcome.map_err(|error| attach_generation(error, generation))?;
+    let snapshot = read_status(backend, &root, generation, internal_request_id()).await?;
+    Ok(DiscardResult {
+        generation: snapshot.generation,
+        wrote: true,
+        files,
+        boundary: discard_boundary(),
+        snapshot,
+    })
+}
+
+fn preview_from(snapshot: &StatusSnapshot, source: &str, operation: &str) -> MergePreview {
+    let target = target_name(snapshot);
+    let local_paths: Vec<String> = snapshot.files.iter().map(|file| file.path.clone()).collect();
+    let dirty = !local_paths.is_empty();
+    let same = snapshot.branch.name.as_deref() == Some(source);
+    let mut can_start = operation == "none" && !dirty && !same && !snapshot.branch.detached && !snapshot.branch.unborn;
+    let note = if operation != "none" {
+        can_start = false;
+        operation_note(operation, None, 0)
+    } else if snapshot.branch.detached || snapshot.branch.unborn {
+        can_start = false;
+        "当前不在可合并的本地分支上。请先切换到目标分支，未开始合并。".to_string()
+    } else if same {
+        "来源分支就是当前分支，未开始合并。".to_string()
+    } else if dirty {
+        format!(
+            "工作区有 {} 处未提交改动，合并前请先提交或临时保存，避免覆盖。未开始合并。",
+            local_paths.len()
+        )
+    } else {
+        format!("将把 {source} 合并到 {target}。当前没有未提交改动。")
+    };
+    let shown = local_paths.iter().take(MAX_LISTED_PATHS).cloned().collect();
+    MergePreview {
+        generation: snapshot.generation,
+        source: source.to_string(),
+        target,
+        head_oid: snapshot.branch.head_oid.clone(),
+        dirty,
+        local_paths: shown,
+        can_start,
+        operation: operation.to_string(),
+        note,
+    }
+}
+
+fn session_from(
+    snapshot: &StatusSnapshot,
+    operation: &str,
+    stages: &BTreeMap<String, Stages>,
+    merge_message: &str,
+    generation: u64,
+) -> MergeSession {
+    let conflicts = conflict_entries(stages);
+    let unresolved = u32::try_from(conflicts.len()).unwrap_or(u32::MAX);
+    let source = parse_merge_source(merge_message);
+    let can_abort = operation == "merge";
+    let can_continue = operation == "merge" && unresolved == 0;
+    let note = operation_note(operation, source.as_deref(), unresolved);
+    MergeSession {
+        generation,
+        operation: operation.to_string(),
+        can_continue,
+        can_abort,
+        source,
+        target: snapshot.branch.name.clone(),
+        head_oid: snapshot.branch.head_oid.clone(),
+        conflicts,
+        unresolved,
+        note,
+        snapshot: snapshot.clone(),
+    }
+}
+
+fn operation_note(operation: &str, source: Option<&str>, unresolved: u32) -> String {
+    match operation {
+        "merge" if unresolved == 0 => {
+            let source = source.unwrap_or("来源分支");
+            format!("正在把 {source} 合并到当前分支，冲突已全部标记。完成前不会结束合并；中止会撤销合并中的编辑。")
+        }
+        "merge" => {
+            let source = source.unwrap_or("来源分支");
+            format!("正在把 {source} 合并到当前分支。还有 {unresolved} 个未解决冲突，不能完成。中止会撤销合并中的编辑，并恢复合并前的状态。")
+        }
+        "rebase" => "检测到 rebase 进行中。这里不会继续、跳过或中止 rebase。".to_string(),
+        "cherry-pick" => "检测到 cherry-pick 进行中。这里不会提供继续、跳过或中止。".to_string(),
+        "revert" => "检测到 revert 进行中。这里不会伪造 revert 的继续或中止。".to_string(),
+        "bisect" => "检测到 bisect 进行中。这里不会伪造 bisect 操作。".to_string(),
+        "unmerged" => "工作区有未合并文件，但没有分支合并进行中。这不是合并，不能完成合并，也不能中止合并。若来自临时保存，原记录仍按临时保存处理。".to_string(),
+        "none" => "当前没有进行中的合并。".to_string(),
+        _ => "检测到未支持的进行中状态。不会伪造对应操作。".to_string(),
+    }
+}
+
+fn conflict_entries(stages: &BTreeMap<String, Stages>) -> Vec<ConflictEntry> {
+    stages
+        .iter()
+        .map(|(path, entry)| {
+            let kind = stage_kind(entry);
+            ConflictEntry {
+                path: path.clone(),
+                summary: kind_summary(kind).to_string(),
+                kind: kind.to_string(),
+            }
+        })
+        .collect()
+}
+
+fn stage_kind(entry: &Stages) -> &'static str {
+    match (entry.ours.is_some(), entry.theirs.is_some()) {
+        (true, true) => "content",
+        (true, false) => "modify_delete",
+        (false, true) => "delete_modify",
+        (false, false) => "both_deleted",
+    }
+}
+
+fn kind_summary(kind: &str) -> &'static str {
+    match kind {
+        "text" => "文本冲突，可以对照三方并编辑合并结果。",
+        "binary" => "二进制冲突，不能按文本合并，只能选择一侧的完整版本。",
+        "content" => "双方都改了这个文件。打开后可以按文本编辑，或在二进制时选择一侧。",
+        "modify_delete" => "当前分支修改了文件，来源分支删除了它。",
+        "delete_modify" => "当前分支删除了文件，来源分支修改了它。",
+        "both_deleted" => "双方都删除了这个文件。",
+        _ => "冲突",
+    }
+}
+
+fn view_from(
+    path: &str,
+    entry: &Stages,
+    ours: &SideBytes,
+    theirs: &SideBytes,
+    result: &SideBytes,
+    generation: u64,
+) -> ConflictView {
+    let ours_side = side_from(ours, "本地版本");
+    let theirs_side = side_from(theirs, "另一分支版本");
+    let result_side = side_from(result, "当前合并结果");
+    let binary = ours_side.binary || theirs_side.binary || result_side.binary;
+    let truncated = ours_side.truncated || theirs_side.truncated || result_side.truncated;
+    let stage_kind = stage_kind(entry);
+    let kind = match stage_kind {
+        "content" if binary => "binary",
+        "content" => "text",
+        other => other,
+    };
+    let editable = kind == "text" && !truncated && !binary;
+    let note = if kind == "binary" {
+        "这是二进制冲突，不能按文本合并。请明确保留本地版本或另一分支版本。".to_string()
+    } else if truncated {
+        "内容超过预览上限。不能把截断文本写回；可以改用本地或另一分支的完整版本。".to_string()
+    } else if kind == "text" {
+        "可以编辑合并结果。标记后只解决这个文件，其他冲突保持不变。".to_string()
+    } else {
+        kind_summary(kind).to_string()
+    };
+    ConflictView {
+        generation,
+        path: path.to_string(),
+        kind: kind.to_string(),
+        editable,
+        ours: ours_side,
+        theirs: theirs_side,
+        result: result_side,
+        note,
+    }
+}
+
+fn side_from(side: &SideBytes, label: &str) -> ConflictSide {
+    if !side.present {
+        return ConflictSide {
+            present: false,
+            binary: false,
+            truncated: false,
+            text: None,
+            summary: format!("{label}不存在。"),
+        };
+    }
+    if side.bytes.contains(&0) || std::str::from_utf8(&side.bytes).is_err() {
+        return ConflictSide {
+            present: true,
+            binary: true,
+            truncated: side.truncated,
+            text: None,
+            summary: format!("{label}是二进制，不显示伪文本。"),
+        };
+    }
+    if side.truncated {
+        return ConflictSide {
+            present: true,
+            binary: false,
+            truncated: true,
+            text: None,
+            summary: format!("{label}超过预览上限，未当作可编辑全文。"),
+        };
+    }
+    let text = String::from_utf8(side.bytes.clone()).unwrap_or_default();
+    ConflictSide {
+        present: true,
+        binary: false,
+        truncated: false,
+        summary: format!("{label}，{} 个字符。", text.chars().count()),
+        text: Some(text),
+    }
+}
+
+async fn start_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    backend: &Backend,
+    git: &Path,
+    root: &Path,
+    source: &str,
+) -> Result<(), AppError> {
+    let snapshot = status_in_guard(guard, backend, git, root).await?;
+    let operation = operation_in_guard(guard, git, root, &snapshot).await?;
+    if operation != "none" {
+        return Err(AppError::new("unsupported_operation", operation_note(&operation, None, 0)));
+    }
+    if snapshot.branch.detached || snapshot.branch.unborn {
+        return Err(AppError::new(
+            "merge_detached",
+            "当前不在可合并的本地分支上，未开始合并。",
+        ));
+    }
+    if snapshot.branch.name.as_deref() == Some(source) {
+        return Err(AppError::new("merge_same", "来源分支就是当前分支，未开始合并。"));
+    }
+    if !snapshot.files.is_empty() {
+        return Err(AppError::new(
+            "merge_dirty",
+            "工作区有未提交改动。请先提交或临时保存，未开始合并。",
+        ));
+    }
+    if !ref_in_guard(guard, git, root, source).await? {
+        return Err(AppError::new("branch_missing", "找不到来源分支，未开始合并。"));
+    }
+    let output = run_spec(guard, merge_no_commit_command(git, root, source), true, false).await?;
+    let started = path_exists_in_guard(guard, git, root, "MERGE_HEAD").await?;
+    if started {
+        return Ok(());
+    }
+    if output.exit_code == 0 {
+        return Ok(());
+    }
+    Err(git_failure("merge_failed", &output, "合并没有开始，工作区应保持原样。"))
+}
+
+async fn resolve_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    backend: &Backend,
+    git: &Path,
+    root: &Path,
+    relative: &Path,
+    choice: &str,
+    content: Option<&str>,
+) -> Result<(), AppError> {
+    let snapshot = status_in_guard(guard, backend, git, root).await?;
+    let operation = operation_in_guard(guard, git, root, &snapshot).await?;
+    if operation != "merge" {
+        return Err(AppError::new(
+            "unsupported_operation",
+            "当前不是分支合并，未写入解决结果。",
+        ));
+    }
+    let stages = stages_in_guard(guard, git, root).await?;
+    let key = relative.to_string_lossy();
+    let Some(entry) = stages.get(key.as_ref()) else {
+        return Err(AppError::new(
+            "conflict_resolved",
+            "这个文件已经不在冲突列表中，未再次写入。",
+        ));
+    };
+    apply_choice(guard, git, root, relative, entry, choice, content).await
+}
+
+async fn apply_choice(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+    relative: &Path,
+    entry: &Stages,
+    choice: &str,
+    content: Option<&str>,
+) -> Result<(), AppError> {
+    let limit = DIFF_PREVIEW_BYTES;
+    match choice {
+        "text" => {
+            if entry.ours.is_none() || entry.theirs.is_none() {
+                return Err(AppError::new(
+                    "resolve_choice",
+                    "修改/删除冲突不能按文本结果写回。请选择保留的一侧。",
+                ));
+            }
+            let ours = blob_in_guard(guard, git, root, entry.ours.as_deref(), limit).await?;
+            let theirs = blob_in_guard(guard, git, root, entry.theirs.as_deref(), limit).await?;
+            if side_blocks_text(&ours) || side_blocks_text(&theirs) {
+                return Err(AppError::new(
+                    "resolve_binary",
+                    "二进制或超过预览上限的文件不能按编辑文本写回，未修改这个文件。",
+                ));
+            }
+            let Some(content) = content else {
+                return Err(AppError::new("resolve_empty", "合并结果是空的，未写入。"));
+            };
+            if content.len() > DIFF_PREVIEW_BYTES {
+                return Err(AppError::new(
+                    "resolve_too_large",
+                    "合并结果超过预览上限，未写入。",
+                ));
+            }
+            write_conflict_file(root, relative, content.as_bytes())?;
+            add_path(guard, git, root, relative).await
+        }
+        "ours" | "theirs" => {
+            let present = if choice == "ours" { entry.ours.is_some() } else { entry.theirs.is_some() };
+            if !present {
+                return Err(AppError::new(
+                    "resolve_choice",
+                    "这一侧没有版本，未写入。",
+                ));
+            }
+            let flag = if choice == "ours" { "--ours" } else { "--theirs" };
+            let output = run_spec(guard, checkout_side_command(git, root, flag, relative), true, false).await?;
+            if output.exit_code != 0 {
+                return Err(git_failure("resolve_failed", &output, "没有取回所选版本。"));
+            }
+            add_path(guard, git, root, relative).await
+        }
+        "delete" => {
+            if entry.ours.is_some() && entry.theirs.is_some() {
+                return Err(AppError::new(
+                    "resolve_choice",
+                    "双方都有版本时不能直接删除，请编辑结果或选择一侧。",
+                ));
+            }
+            let output = run_spec(guard, remove_path_command(git, root, &[relative.to_path_buf()]), true, false).await?;
+            if output.exit_code != 0 {
+                return Err(git_failure("resolve_failed", &output, "没有接受删除。"));
+            }
+            Ok(())
+        }
+        _ => Err(AppError::new("resolve_choice", "不支持的解决方式，未写入。")),
+    }
+}
+
+fn side_blocks_text(side: &SideBytes) -> bool {
+    !side.present || side.truncated || side.bytes.contains(&0) || std::str::from_utf8(&side.bytes).is_err()
+}
+
+async fn add_path(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+    relative: &Path,
+) -> Result<(), AppError> {
+    let output = run_spec(guard, add_command(git, root, &[relative.to_path_buf()]), true, false).await?;
+    if output.exit_code != 0 {
+        return Err(git_failure(
+            "resolve_failed",
+            &output,
+            "文件内容已保留，但还没有标记为已解决。请修正后重试。",
+        ));
+    }
+    Ok(())
+}
+
+fn write_conflict_file(root: &Path, relative: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    let target = root.join(relative);
+    let parent = target.parent().unwrap_or(root);
+    let canon_root = canonical_existing(root)?;
+    let canon_parent = canonical_existing(parent).map_err(|_| {
+        AppError::new("invalid_path", "冲突文件的目录不可用，未写入合并结果。")
+    })?;
+    if !canon_parent.starts_with(&canon_root) {
+        return Err(AppError::new("invalid_path", "合并结果必须留在仓库内部。"));
+    }
+    if target.symlink_metadata().is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(AppError::new(
+            "resolve_link",
+            "冲突路径是符号链接，不能按文本覆盖，未写入。",
+        ));
+    }
+    atomic_write(&target, bytes).map_err(|_| {
+        AppError::new("resolve_failed", "无法写入合并结果，原文件保持写入前的内容。")
+    })
+}
+
+struct CompletedMerge {
+    oid: String,
+    summary: String,
+    files: Vec<String>,
+}
+
+async fn complete_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    backend: &Backend,
+    git: &Path,
+    root: &Path,
+    message: &str,
+) -> Result<CompletedMerge, AppError> {
+    let snapshot = status_in_guard(guard, backend, git, root).await?;
+    let operation = operation_in_guard(guard, git, root, &snapshot).await?;
+    if operation != "merge" {
+        return Err(AppError::new(
+            "unsupported_operation",
+            format!("{} 未创建提交。", operation_note(&operation, None, 0)),
+        ));
+    }
+    let stages = stages_in_guard(guard, git, root).await?;
+    if !stages.is_empty() {
+        return Err(AppError::new(
+            "conflicts_open",
+            "还有未解决的冲突，不能完成合并。已填写的说明和文件内容都还保留。",
+        ));
+    }
+    let files: Vec<String> = snapshot
+        .files
+        .iter()
+        .filter(|file| file.staged != ChangeKind::None || file.unstaged != ChangeKind::None)
+        .map(|file| file.path.clone())
+        .collect();
+    let before = head_in_guard(guard, git, root).await?;
+    let output = run_spec(guard, commit_command(git, root, message), true, false).await?;
+    if output.exit_code != 0 {
+        return Err(classify_commit(&output));
+    }
+    let after = head_in_guard(guard, git, root).await?;
+    if after.is_empty() || after == before {
+        return Err(AppError::new(
+            "commit_unverified",
+            "提交命令已返回，但没有确认新的合并提交。请刷新后查看，不要重复完成。说明和暂存内容都还保留。",
+        ));
+    }
+    if !path_exists_in_guard(guard, git, root, "MERGE_HEAD").await? {
+        return Ok(CompletedMerge {
+            oid: after,
+            summary: format!("已完成合并提交，包含 {} 个路径。", files.len()),
+            files,
+        });
+    }
+    Err(AppError::new(
+        "commit_unverified",
+        "提交命令已返回，但合并仍在进行。请刷新后查看，不要重复完成。",
+    ))
+}
+
+struct AbortPreview {
+    paths: Vec<String>,
+    stash_oids: Vec<String>,
+    note: String,
+}
+
+async fn abort_preview(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    generation: u64,
+    request_id: u64,
+) -> Result<AbortImpact, AppError> {
+    let snapshot = read_status(backend, root, generation, request_id).await?;
+    let operation = operation_kind(backend, root, git, snapshot.generation, internal_request_id()).await?;
+    if operation != "merge" {
+        return Err(AppError::new(
+            "unsupported_operation",
+            format!("{} 未中止任何合并。", operation_note(&operation, None, 0)),
+        )
+        .with_generation(snapshot.generation));
+    }
+    let (generation, stash_oids) = stash_oids(backend, root, git, snapshot.generation, internal_request_id()).await?;
+    let paths = listed_paths(&snapshot);
+    Ok(AbortImpact {
+        generation,
+        wrote: false,
+        note: abort_note(&paths),
+        paths,
+        stash_oids,
+        snapshot,
+    })
+}
+
+async fn abort_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    backend: &Backend,
+    git: &Path,
+    root: &Path,
+) -> Result<AbortPreview, AppError> {
+    let snapshot = status_in_guard(guard, backend, git, root).await?;
+    let operation = operation_in_guard(guard, git, root, &snapshot).await?;
+    if operation != "merge" {
+        return Err(AppError::new(
+            "unsupported_operation",
+            format!("{} 未中止任何合并。", operation_note(&operation, None, 0)),
+        ));
+    }
+    let before = stash_oids_in_guard(guard, git, root).await?;
+    let paths = listed_paths(&snapshot);
+    let output = run_spec(guard, merge_abort_command(git, root), true, false).await?;
+    if output.exit_code != 0 {
+        return Err(git_failure(
+            "merge_abort_failed",
+            &output,
+            "没有中止合并。合并中的编辑和临时保存都还保留。",
+        ));
+    }
+    if path_exists_in_guard(guard, git, root, "MERGE_HEAD").await? {
+        return Err(AppError::new(
+            "merge_abort_failed",
+            "中止命令已返回，但合并标记仍在。请刷新后确认，不要假设已经恢复。",
+        ));
+    }
+    let after = stash_oids_in_guard(guard, git, root).await?;
+    if after != before {
+        return Err(AppError::new(
+            "stash_changed",
+            "合并已中止，但临时保存记录与中止前不一致。请先核对临时保存，不要继续删除。",
+        ));
+    }
+    Ok(AbortPreview {
+        paths,
+        stash_oids: after,
+        note: "已中止合并，工作区恢复到合并前的状态。预先存在的临时保存仍保留。".to_string(),
+    })
+}
+
+fn abort_note(paths: &[String]) -> String {
+    if paths.is_empty() {
+        "中止会撤销合并中的编辑，并把暂存区和工作区恢复到合并前。预先存在的临时保存会保留。取消不会写入。".to_string()
+    } else {
+        format!(
+            "中止会撤销这 {} 处合并中的编辑，包括已经标记但尚未完成提交的内容，并恢复到合并前的状态。预先存在的临时保存会保留。取消不会写入。",
+            paths.len()
+        )
+    }
+}
+
+struct UndoPlan {
+    code: String,
+    eligible: bool,
+    head_oid: String,
+    parent_oid: Option<String>,
+    summary: String,
+    reason: String,
+    remote: Option<String>,
+}
+
+async fn undo_preview(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    expected_head: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<UndoResult, AppError> {
+    let snapshot = read_status(backend, root, generation, request_id).await?;
+    let operation = operation_kind(backend, root, git, snapshot.generation, internal_request_id()).await?;
+    let record = read_head_record(backend, root, git, snapshot.generation, internal_request_id()).await?;
+    let dirty = index_dirty(backend, root, git, record.0, internal_request_id()).await?;
+    let remotes = remote_names(backend, root, git, dirty.0, internal_request_id()).await?;
+    let plan = undo_plan(&snapshot, &operation, record.1.as_ref(), dirty.1, &remotes.1, expected_head, false);
+    Ok(undo_result(remotes.0, &plan, false, snapshot))
+}
+
+struct Undone {
+    parent: String,
+    summary: String,
+}
+
+async fn undo_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    backend: &Backend,
+    git: &Path,
+    root: &Path,
+    expected_head: &str,
+) -> Result<Undone, AppError> {
+    let snapshot = status_in_guard(guard, backend, git, root).await?;
+    let operation = operation_in_guard(guard, git, root, &snapshot).await?;
+    let record = head_record_in_guard(guard, git, root).await?;
+    let dirty = cached_dirty_in_guard(guard, git, root).await?;
+    let remotes = remote_names_in_guard(guard, git, root).await?;
+    let plan = undo_plan(&snapshot, &operation, record.as_ref(), dirty, &remotes, expected_head, true);
+    if !plan.eligible {
+        return Err(AppError::new(plan.code, plan.reason));
+    }
+    let remote = plan.remote.clone().ok_or_else(|| {
+        AppError::new("undo_unclear", "没有可核对的单个远程，未撤销提交。")
+    })?;
+    let fetched = run_spec(guard, fetch_one_command(git, root, &remote), true, false).await?;
+    if fetched.exit_code != 0 {
+        return Err(git_failure(
+            "undo_offline",
+            &fetched,
+            "无法检查远程，不能确认这次提交是否已经传播。未撤销提交。",
+        ));
+    }
+    let reread = head_record_in_guard(guard, git, root).await?;
+    let Some(reread) = reread else {
+        return Err(AppError::new("undo_head_changed", "当前提交已经变化，未撤销。"));
+    };
+    if reread.oid != expected_head || reread.parents.len() != 1 {
+        return Err(AppError::new(
+            "undo_head_changed",
+            "写入前核对时 HEAD 已变化，未撤销提交。",
+        ));
+    }
+    if cached_dirty_in_guard(guard, git, root).await? {
+        return Err(AppError::new(
+            "undo_dirty_index",
+            "暂存区在写入前发生了变化，未撤销提交。",
+        ));
+    }
+    let contained = run_spec(guard, branch_contains_command(git, root, &reread.oid), false, false).await?;
+    if contained.exit_code != 0 && contained.exit_code != 1 {
+        return Err(git_failure(
+            "undo_unclear",
+            &contained,
+            "无法确认提交是否已在远程分支上，未撤销。",
+        ));
+    }
+    if remote_contains(&contained.stdout)? {
+        return Err(AppError::new(
+            "undo_pushed",
+            "这个提交已经出现在该远程的分支上，未改写共享历史。",
+        ));
+    }
+    let parent = reread.parents[0].clone();
+    let output = run_spec(guard, reset_soft_command(git, root, &parent), true, false).await?;
+    if output.exit_code != 0 {
+        return Err(git_failure("undo_failed", &output, "没有撤销提交，HEAD 应保持原样。"));
+    }
+    Ok(Undone {
+        parent,
+        summary: reread.summary,
+    })
+}
+
+fn undo_plan(
+    snapshot: &StatusSnapshot,
+    operation: &str,
+    record: Option<&HeadRecord>,
+    dirty_index: bool,
+    remotes: &[String],
+    expected_head: &str,
+    confirming: bool,
+) -> UndoPlan {
+    let head_oid = record.map(|item| item.oid.clone()).unwrap_or_default();
+    let parent_oid = record.and_then(|item| item.parents.first().cloned());
+    let summary = record.map(|item| item.summary.clone()).unwrap_or_default();
+    let blocked = |code: &str, reason: &str| UndoPlan {
+        code: code.to_string(),
+        eligible: false,
+        head_oid: head_oid.clone(),
+        parent_oid: parent_oid.clone(),
+        summary: summary.clone(),
+        reason: reason.to_string(),
+        remote: None,
+    };
+    if operation != "none" {
+        return blocked("undo_in_progress", "有进行中的操作，未撤销提交。");
+    }
+    if snapshot.branch.detached {
+        return blocked("undo_detached", "当前不在分支上，不能用这个入口撤销提交。");
+    }
+    let Some(record) = record else {
+        return blocked("undo_root", "还没有可以撤销的普通提交。");
+    };
+    if record.oid != expected_head {
+        return blocked("undo_head_changed", "当前提交与打开撤销时看到的不一致，未写入。");
+    }
+    if record.parents.is_empty() {
+        return blocked("undo_root", "这是首个提交，不能撤销并保留改动。");
+    }
+    if record.parents.len() != 1 {
+        return blocked("undo_merge", "这是合并提交，不能用这个入口撤销。");
+    }
+    if dirty_index {
+        return blocked("undo_dirty_index", "暂存区已有内容。撤销会和它混在一起，未撤销提交。");
+    }
+    if remotes.len() != 1 {
+        return blocked("undo_unclear", "需要且仅能核对一个远程。没有唯一远程时，传播范围不明，未撤销提交。");
+    }
+    let remote = remotes[0].clone();
+    if !confirming {
+        return UndoPlan {
+            code: "needs_remote".to_string(),
+            eligible: true,
+            head_oid,
+            parent_oid,
+            summary,
+            reason: format!("确认时会检查远程 {remote}。离线、已推送或 HEAD 已变化都会停止，不会撤销。"),
+            remote: Some(remote),
+        };
+    }
+    UndoPlan {
+        code: "ok".to_string(),
+        eligible: true,
+        head_oid,
+        parent_oid,
+        summary,
+        reason: String::new(),
+        remote: Some(remote),
+    }
+}
+
+fn undo_result(generation: u64, plan: &UndoPlan, wrote: bool, snapshot: StatusSnapshot) -> UndoResult {
+    UndoResult {
+        generation,
+        code: plan.code.clone(),
+        eligible: plan.eligible,
+        wrote,
+        head_oid: plan.head_oid.clone(),
+        parent_oid: plan.parent_oid.clone(),
+        summary: plan.summary.clone(),
+        reason: plan.reason.clone(),
+        snapshot,
+    }
+}
+
+fn discard_plan(snapshot: &StatusSnapshot, paths: &[String]) -> Result<Vec<DiscardFilePlan>, AppError> {
+    if paths.is_empty() {
+        return Err(AppError::new("discard_empty", "没有选择文件，未放弃任何改动。"));
+    }
+    if paths.len() > MAX_LISTED_PATHS {
+        return Err(AppError::new(
+            "discard_too_many",
+            "一次放弃的文件过多。请缩小范围，未写入。",
+        ));
+    }
+    let mut selected = Vec::new();
+    for path in paths {
+        let relative = safe_relative(path)?;
+        let key = relative.to_string_lossy();
+        let Some(file) = snapshot.files.iter().find(|file| file.path == key) else {
+            return Err(AppError::new(
+                "discard_unknown",
+                format!("未在当前改动中找到 {path}，没有放弃任何文件。"),
+            ));
+        };
+        if file.unmerged {
+            return Err(AppError::new(
+                "discard_unmerged",
+                "冲突文件不能用放弃改动处理。请在合并里解决，或中止合并。未写入。",
+            ));
+        }
+        selected.push(discard_file(file));
+    }
+    Ok(selected)
+}
+
+fn discard_file(file: &FileChange) -> DiscardFilePlan {
+    let (impact, recovery) = if file.untracked {
+        (
+            "这是未跟踪文件。确认后会删除该文件。".to_string(),
+            "删除后不能通过 Git 恢复，本应用也不能撤销这次放弃。".to_string(),
+        )
+    } else {
+        let staged = file.staged != ChangeKind::None;
+        let unstaged = file.unstaged != ChangeKind::None;
+        let impact = match (staged, unstaged) {
+            (true, true) => "暂存区和未暂存的修改都会回到当前提交。",
+            (true, false) => "已暂存的修改会从暂存区和工作区移除，回到当前提交。",
+            (false, true) => "未暂存的修改会回到当前提交。",
+            (false, false) => "这个文件没有可放弃的本地修改。",
+        };
+        (
+            impact.to_string(),
+            "放弃后 Git 不保留这份未提交内容，本应用不能撤销这次放弃。".to_string(),
+        )
+    };
+    DiscardFilePlan {
+        path: file.path.clone(),
+        staged: file.staged,
+        unstaged: file.unstaged,
+        untracked: file.untracked,
+        impact,
+        recovery,
+    }
+}
+
+fn discard_boundary() -> String {
+    "确认只影响所选文件。取消不写入，未选择的文件保持原内容。已放弃的内容不能用撤销提交找回。".to_string()
+}
+
+async fn discard_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    backend: &Backend,
+    git: &Path,
+    root: &Path,
+    paths: &[String],
+) -> Result<Vec<DiscardFilePlan>, AppError> {
+    let snapshot = status_in_guard(guard, backend, git, root).await?;
+    let operation = operation_in_guard(guard, git, root, &snapshot).await?;
+    if operation == "merge" || operation == "rebase" || operation == "cherry-pick" || operation == "revert" {
+        return Err(AppError::new(
+            "discard_busy",
+            "有进行中的合并或其他操作时，不能放弃文件。未写入。",
+        ));
+    }
+    let plan = discard_plan(&snapshot, paths)?;
+    let mut tracked = Vec::new();
+    let mut untracked = Vec::new();
+    for file in &plan {
+        let relative = safe_relative(&file.path)?;
+        if file.untracked {
+            untracked.push(relative);
+        } else {
+            tracked.push(relative);
+        }
+    }
+    if !tracked.is_empty() {
+        let output = run_spec(guard, restore_worktree_command(git, root, &tracked), true, false).await?;
+        if output.exit_code != 0 {
+            return Err(git_failure("discard_failed", &output, "没有放弃所选文件。"));
+        }
+    }
+    if !untracked.is_empty() {
+        let output = run_spec(guard, clean_files_command(git, root, &untracked), true, false).await?;
+        if output.exit_code != 0 {
+            return Err(git_failure(
+                "discard_failed",
+                &output,
+                "已跟踪文件可能已经恢复，未跟踪文件没有全部删除。请刷新后确认范围。",
+            ));
+        }
+    }
+    Ok(plan)
+}
+
+fn listed_paths(snapshot: &StatusSnapshot) -> Vec<String> {
+    snapshot
+        .files
+        .iter()
+        .take(MAX_LISTED_PATHS)
+        .map(|file| file.path.clone())
+        .collect()
+}
+
+fn target_name(snapshot: &StatusSnapshot) -> String {
+    if snapshot.branch.detached {
+        "游离 HEAD".to_string()
+    } else {
+        snapshot.branch.name.clone().unwrap_or_else(|| "当前分支".to_string())
+    }
+}
+
+fn parse_merge_source(message: &str) -> Option<String> {
+    let line = message.lines().next()?.trim();
+    let start = line.find('\'')?;
+    let end = line[start + 1..].find('\'')?;
+    let name = &line[start + 1..start + 1 + end];
+    validate_branch_name(name).ok()
+}
+
+fn normalize_message(message: &str) -> Result<String, AppError> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::new(
+            "empty_message",
+            "请先填写合并说明。冲突处理结果未改动。",
+        ));
+    }
+    if trimmed.chars().count() > MAX_DRAFT_CHARS {
+        return Err(AppError::new(
+            "message_too_large",
+            "合并说明过长，未创建提交。已标记的结果都还保留。",
+        ));
+    }
+    if contains_secret(trimmed) {
+        return Err(AppError::new(
+            "draft_secret",
+            "合并说明包含疑似凭据或私钥，未创建提交。已标记的结果都还保留。",
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn classify_commit(output: &ProcessOutput) -> AppError {
+    let detail = redact_error_text(command_text(output).trim());
+    let lower = detail.to_ascii_lowercase();
+    if lower.contains("author identity unknown")
+        || lower.contains("committer identity unknown")
+        || lower.contains("empty ident")
+        || detail.contains("作者身份未知")
+    {
+        return AppError::new(
+            "identity_missing",
+            format!("缺少提交身份，合并没有完成。说明和已标记的结果都还保留。{detail}"),
+        );
+    }
+    if lower.contains("hook") {
+        return AppError::new(
+            "hook_rejected",
+            format!("提交钩子拒绝了合并完成。说明和已标记的结果都还保留。{detail}"),
+        );
+    }
+    AppError::new(
+        "commit_failed",
+        format!("合并没有完成。说明和已标记的结果都还保留。{detail}"),
+    )
+}
+
+fn validate_branch_name(name: &str) -> Result<String, AppError> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.starts_with('-')
+        || name.chars().any(|character| character.is_whitespace() || character.is_control())
+        || name.contains(['~', '^', ':', '?', '*', '[', '\\'])
+        || name.contains("..")
+        || name.contains("@{")
+        || name.ends_with('.')
+        || name.ends_with(".lock")
+        || name == "HEAD"
+    {
+        return Err(AppError::new("branch_invalid", "分支名称无效，未开始合并。"));
+    }
+    Ok(name.to_string())
+}
+
+fn validate_oid(oid: &str) -> Result<String, AppError> {
+    let oid = oid.trim().to_ascii_lowercase();
+    if (oid.len() == 40 || oid.len() == 64) && oid.chars().all(|character| character.is_ascii_hexdigit()) {
+        Ok(oid)
+    } else {
+        Err(AppError::new("invalid_revision", "提交标识无效，未撤销提交。"))
+    }
+}
+
+fn remote_contains(bytes: &[u8]) -> Result<bool, AppError> {
+    let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
+        AppError::new("undo_unclear", "远程分支列表无法安全解析，未撤销提交。")
+    })?;
+    Ok(text.lines().any(|line| {
+        let line = line.trim();
+        !line.is_empty() && !line.starts_with('(')
+    }))
+}
+
+fn parse_stages(bytes: &[u8]) -> Result<BTreeMap<String, Stages>, AppError> {
+    let mut stages = BTreeMap::new();
+    for part in bytes.split(|byte| *byte == 0) {
+        if part.is_empty() {
+            continue;
+        }
+        let text = std::str::from_utf8(part).map_err(|_| {
+            AppError::new("status_encoding", "冲突路径无法安全显示，未据此修改仓库。")
+        })?;
+        let Some((meta, path)) = text.split_once('\t') else {
+            return Err(AppError::new("status_parse", "冲突索引不完整，未据此修改仓库。"));
+        };
+        let mut fields = meta.split_whitespace();
+        let _mode = fields.next();
+        let oid = fields.next().unwrap_or("");
+        let stage = fields.next().unwrap_or("");
+        if !is_oid(oid) {
+            return Err(AppError::new("status_parse", "冲突索引中的对象无效，未据此修改仓库。"));
+        }
+        let entry = stages.entry(path.to_string()).or_insert_with(|| Stages {
+            base: None,
+            ours: None,
+            theirs: None,
+        });
+        match stage {
+            "1" => entry.base = Some(oid.to_string()),
+            "2" => entry.ours = Some(oid.to_string()),
+            "3" => entry.theirs = Some(oid.to_string()),
+            _ => {
+                return Err(AppError::new(
+                    "status_parse",
+                    "冲突阶段无法识别，未据此修改仓库。",
+                ))
+            }
+        }
+    }
+    Ok(stages)
+}
+
+fn is_oid(value: &str) -> bool {
+    (value.len() == 40 || value.len() == 64) && value.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+fn parse_head_record(bytes: &[u8]) -> Result<Option<HeadRecord>, AppError> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
+        AppError::new("history_parse", "当前提交无法安全显示，未撤销。")
+    })?;
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    let mut parts = line.splitn(3, '\u{1f}');
+    let oid = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+    let parents = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+    let summary = parts.next().unwrap_or("").trim().to_string();
+    if !is_oid(&oid) {
+        return Err(AppError::new("history_parse", "当前提交标识无法核对，未撤销。"));
+    }
+    let parents = if parents.is_empty() {
+        Vec::new()
+    } else {
+        parents
+            .split_whitespace()
+            .map(|item| item.to_ascii_lowercase())
+            .collect()
+    };
+    if parents.iter().any(|item| !is_oid(item)) {
+        return Err(AppError::new("history_parse", "父提交标识无法核对，未撤销。"));
+    }
+    Ok(Some(HeadRecord { oid, parents, summary }))
+}
+
+fn parse_remote_names(bytes: &[u8]) -> Result<Vec<String>, AppError> {
+    let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
+        AppError::new("undo_unclear", "远程名称无法安全显示，未撤销提交。")
+    })?;
+    let mut names = Vec::new();
+    for line in text.lines() {
+        let name = line.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if name.starts_with('-') || name.chars().any(|character| character.is_whitespace() || character.is_control()) {
+            return Err(AppError::new("undo_unclear", "远程名称无法安全核对，未撤销提交。"));
+        }
+        names.push(name.to_string());
+    }
+    Ok(names)
+}
+
+fn parse_stash_oids(bytes: &[u8]) -> Result<Vec<String>, AppError> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
+        AppError::new("stash_failed", "临时保存记录无法安全显示，未继续写入。")
+    })?;
+    let mut oids = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let oid = line.split('\u{1f}').next().unwrap_or("").trim().to_ascii_lowercase();
+        if !is_oid(&oid) {
+            return Err(AppError::new("stash_failed", "临时保存标识无法核对，未继续写入。"));
+        }
+        oids.push(oid);
+    }
+    Ok(oids)
+}
+
+fn repo_root(path: &str) -> Result<PathBuf, AppError> {
+    let root = canonical_existing(&validate_input_path(path)?)?;
+    if !root.join(".git").exists() {
+        return Err(AppError::new("not_repository", "该目录不是 Git 仓库，未执行此操作。"));
+    }
+    Ok(root)
+}
+
+fn ensure_no_index_lock(root: &Path) -> Result<(), AppError> {
+    if root.join(".git").join("index.lock").exists() {
+        return Err(AppError::new(
+            "index_lock",
+            "索引锁仍在，可能有另一个 Git 进程正在写入。未删除该锁，也没有继续。",
+        ));
+    }
+    Ok(())
+}
+
+fn capture_limit(backend: &Backend) -> usize {
+    backend.runner.output_limit.min(DIFF_PREVIEW_BYTES)
+}
+
+async fn write_lock<'a>(
+    backend: &'a Backend,
+    root: &Path,
+    generation: u64,
+    request_id: u64,
+) -> Result<WriteGuard<'a, RealRunner>, AppError> {
+    backend
+        .scheduler
+        .lock_write(&repo_key(root), request_id, generation)
+        .await
+}
+
+async fn run_spec(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    command: (PathBuf, Vec<std::ffi::OsString>),
+    writes: bool,
+    truncate: bool,
+) -> Result<ProcessOutput, AppError> {
+    let (program, args) = command;
+    guard
+        .run(CommandSpec {
+            program,
+            args,
+            stdin: None,
+            truncate_stdout: truncate,
+            output_limit: None,
+            writes,
+        })
+        .await
+}
+
+async fn run_read(
+    backend: &Backend,
+    root: &Path,
+    generation: u64,
+    request_id: u64,
+    command: (PathBuf, Vec<std::ffi::OsString>),
+) -> Result<(ProcessOutput, u64), AppError> {
+    let (program, args) = command;
+    let scheduled = run_git(
+        backend,
+        &repo_key(root),
+        JobKind::Read,
+        request_id,
+        program,
+        args,
+        Some(generation),
+    )
+    .await?;
+    Ok((scheduled.output, scheduled.generation))
+}
+
+async fn read_status(
+    backend: &Backend,
+    root: &Path,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    let git = require_git(backend).await?;
+    let (output, generation) = run_read(
+        backend,
+        root,
+        generation,
+        request_id,
+        status_command(&git.path, root),
+    )
+    .await?;
+    if output.exit_code != 0 {
+        return Err(git_failure("status_failed", &output, "无法读取仓库状态。").with_generation(generation));
+    }
+    status_from_output(
+        backend,
+        &repo_key(root),
+        &crate::git::schedule::ScheduledOutput { output, generation },
+    )
+}
+
+async fn status_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    backend: &Backend,
+    git: &Path,
+    root: &Path,
+) -> Result<StatusSnapshot, AppError> {
+    let output = run_spec(guard, status_command(git, root), false, false).await?;
+    if output.exit_code != 0 {
+        return Err(git_failure("status_failed", &output, "无法读取仓库状态。"));
+    }
+    let mut snapshot = parse_status(&output.stdout)?;
+    snapshot.generation = backend.scheduler.current_generation(&repo_key(root));
+    Ok(snapshot)
+}
+
+async fn operation_kind(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    generation: u64,
+    request_id: u64,
+) -> Result<String, AppError> {
+    let snapshot = read_status(backend, root, generation, request_id).await?;
+    let mut generation = snapshot.generation;
+    for (name, kind) in sequencer_markers() {
+        let (output, next) = run_read(backend, root, generation, internal_request_id(), git_path_command(git, root, name)).await?;
+        generation = next;
+        if output.exit_code == 0 && git_path_exists(root, &output.stdout) {
+            return Ok(kind.to_string());
+        }
+    }
+    if snapshot.files.iter().any(|file| file.unmerged) {
+        return Ok("unmerged".to_string());
+    }
+    Ok("none".to_string())
+}
+
+async fn operation_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+    snapshot: &StatusSnapshot,
+) -> Result<String, AppError> {
+    for (name, kind) in sequencer_markers() {
+        if path_exists_in_guard(guard, git, root, name).await? {
+            return Ok(kind.to_string());
+        }
+    }
+    if snapshot.files.iter().any(|file| file.unmerged) {
+        return Ok("unmerged".to_string());
+    }
+    Ok("none".to_string())
+}
+
+fn sequencer_markers() -> [(&'static str, &'static str); 6] {
+    [
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+        ("BISECT_START", "bisect"),
+        ("MERGE_HEAD", "merge"),
+    ]
+}
+
+fn git_path_exists(root: &Path, stdout: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(stdout);
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    let path = PathBuf::from(text);
+    let full = if path.is_absolute() { path } else { root.join(path) };
+    full.exists()
+}
+
+async fn path_exists_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+    name: &str,
+) -> Result<bool, AppError> {
+    let output = run_spec(guard, git_path_command(git, root, name), false, false).await?;
+    if output.exit_code != 0 {
+        return Ok(false);
+    }
+    Ok(git_path_exists(root, &output.stdout))
+}
+
+async fn ensure_ref(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    name: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<(), AppError> {
+    let (output, _) = run_read(
+        backend,
+        root,
+        generation,
+        request_id,
+        rev_parse_command(git, root, name),
+    )
+    .await?;
+    if output.exit_code != 0 {
+        return Err(AppError::new("branch_missing", "找不到来源分支，未开始合并。"));
+    }
+    Ok(())
+}
+
+async fn ref_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+    name: &str,
+) -> Result<bool, AppError> {
+    let output = run_spec(guard, rev_parse_command(git, root, name), false, false).await?;
+    Ok(output.exit_code == 0)
+}
+
+async fn read_stages(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    generation: u64,
+    request_id: u64,
+) -> Result<(u64, BTreeMap<String, Stages>), AppError> {
+    let (output, generation) = run_read(
+        backend,
+        root,
+        generation,
+        request_id,
+        unmerged_index_command(git, root),
+    )
+    .await?;
+    if output.exit_code != 0 {
+        return Err(git_failure("status_failed", &output, "无法读取冲突索引。").with_generation(generation));
+    }
+    Ok((generation, parse_stages(&output.stdout)?))
+}
+
+async fn stages_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+) -> Result<BTreeMap<String, Stages>, AppError> {
+    let output = run_spec(guard, unmerged_index_command(git, root), false, false).await?;
+    if output.exit_code != 0 {
+        return Err(git_failure("status_failed", &output, "无法读取冲突索引。"));
+    }
+    parse_stages(&output.stdout)
+}
+
+async fn read_blob(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    oid: Option<&str>,
+    generation: u64,
+    request_id: u64,
+    limit: usize,
+) -> Result<(u64, SideBytes), AppError> {
+    let Some(oid) = oid else {
+        return Ok((
+            generation,
+            SideBytes {
+                present: false,
+                truncated: false,
+                bytes: Vec::new(),
+            },
+        ));
+    };
+    let (program, args) = cat_blob_command(git, root, oid);
+    let scheduled = backend
+        .scheduler
+        .execute(crate::git::schedule::GitJob {
+            repo_key: repo_key(root),
+            kind: JobKind::Read,
+            request_id,
+            generation,
+            program,
+            args,
+            stdin: None,
+            truncate_stdout: true,
+            output_limit: Some(limit),
+        })
+        .await?;
+    if scheduled.output.exit_code != 0 {
+        return Err(git_failure("conflict_read", &scheduled.output, "无法读取冲突中的版本。")
+            .with_generation(scheduled.generation));
+    }
+    Ok((
+        scheduled.generation,
+        SideBytes {
+            present: true,
+            truncated: scheduled.output.stdout_truncated,
+            bytes: scheduled.output.stdout,
+        },
+    ))
+}
+
+async fn blob_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+    oid: Option<&str>,
+    limit: usize,
+) -> Result<SideBytes, AppError> {
+    let Some(oid) = oid else {
+        return Ok(SideBytes {
+            present: false,
+            truncated: false,
+            bytes: Vec::new(),
+        });
+    };
+    let (program, args) = cat_blob_command(git, root, oid);
+    let output = guard
+        .run(CommandSpec {
+            program,
+            args,
+            stdin: None,
+            truncate_stdout: true,
+            output_limit: Some(limit),
+            writes: false,
+        })
+        .await?;
+    if output.exit_code != 0 {
+        return Err(git_failure("conflict_read", &output, "无法读取冲突中的版本。"));
+    }
+    Ok(SideBytes {
+        present: true,
+        truncated: output.stdout_truncated,
+        bytes: output.stdout,
+    })
+}
+
+fn read_worktree_side(root: &Path, relative: &Path, limit: usize) -> Result<SideBytes, AppError> {
+    let target = root.join(relative);
+    if !target.exists() {
+        return Ok(SideBytes {
+            present: false,
+            truncated: false,
+            bytes: Vec::new(),
+        });
+    }
+    if target.symlink_metadata().is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Ok(SideBytes {
+            present: true,
+            truncated: false,
+            bytes: vec![0],
+        });
+    }
+    let (bytes, truncated) = read_prefix(&target, limit).map_err(|_| {
+        AppError::new("conflict_read", "无法读取当前合并结果，未修改仓库。")
+    })?;
+    Ok(SideBytes {
+        present: true,
+        truncated,
+        bytes,
+    })
+}
+
+fn read_prefix(path: &Path, limit: usize) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut file = File::open(path)?;
+    let mut buf = vec![0_u8; limit + 1];
+    let mut read = 0;
+    while read <= limit {
+        let size = file.read(&mut buf[read..])?;
+        if size == 0 {
+            break;
+        }
+        read += size;
+    }
+    let truncated = read > limit;
+    buf.truncate(read.min(limit));
+    Ok((buf, truncated))
+}
+
+async fn read_named_file(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    name: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<(u64, String), AppError> {
+    let (output, generation) = run_read(
+        backend,
+        root,
+        generation,
+        request_id,
+        git_path_command(git, root, name),
+    )
+    .await?;
+    if output.exit_code != 0 {
+        return Ok((generation, String::new()));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let path = PathBuf::from(text.trim());
+    let full = if path.is_absolute() { path } else { root.join(path) };
+    if !full.is_file() {
+        return Ok((generation, String::new()));
+    }
+    let (bytes, _) = read_prefix(&full, MERGE_MSG_LIMIT).unwrap_or((Vec::new(), false));
+    Ok((generation, String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+async fn read_head_record(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    generation: u64,
+    request_id: u64,
+) -> Result<(u64, Option<HeadRecord>), AppError> {
+    let (output, generation) = run_read(
+        backend,
+        root,
+        generation,
+        request_id,
+        head_record_command(git, root),
+    )
+    .await?;
+    if output.exit_code != 0 {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        if stderr.contains("does not have any commits") {
+            return Ok((generation, None));
+        }
+        return Err(git_failure("history_failed", &output, "无法读取当前提交，未撤销。").with_generation(generation));
+    }
+    Ok((generation, parse_head_record(&output.stdout)?))
+}
+
+async fn head_record_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+) -> Result<Option<HeadRecord>, AppError> {
+    let output = run_spec(guard, head_record_command(git, root), false, false).await?;
+    if output.exit_code != 0 {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        if stderr.contains("does not have any commits") {
+            return Ok(None);
+        }
+        return Err(git_failure("history_failed", &output, "无法读取当前提交，未撤销。"));
+    }
+    parse_head_record(&output.stdout)
+}
+
+async fn head_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+) -> Result<String, AppError> {
+    let output = run_spec(guard, head_command(git, root), false, false).await?;
+    if output.exit_code != 0 {
+        return Err(git_failure("history_failed", &output, "无法读取 HEAD。"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_ascii_lowercase())
+}
+
+async fn index_dirty(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    generation: u64,
+    request_id: u64,
+) -> Result<(u64, bool), AppError> {
+    let (output, generation) = run_read(
+        backend,
+        root,
+        generation,
+        request_id,
+        cached_diff_quiet_command(git, root),
+    )
+    .await?;
+    match output.exit_code {
+        0 => Ok((generation, false)),
+        1 => Ok((generation, true)),
+        _ => Err(git_failure("status_failed", &output, "无法核对暂存区，未撤销。").with_generation(generation)),
+    }
+}
+
+async fn cached_dirty_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+) -> Result<bool, AppError> {
+    let output = run_spec(guard, cached_diff_quiet_command(git, root), false, false).await?;
+    match output.exit_code {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(git_failure("status_failed", &output, "无法核对暂存区，未撤销。")),
+    }
+}
+
+async fn remote_names(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    generation: u64,
+    request_id: u64,
+) -> Result<(u64, Vec<String>), AppError> {
+    let (output, generation) = run_read(
+        backend,
+        root,
+        generation,
+        request_id,
+        remote_names_command(git, root),
+    )
+    .await?;
+    if output.exit_code != 0 {
+        return Err(git_failure("undo_unclear", &output, "无法读取远程列表，未撤销提交。").with_generation(generation));
+    }
+    Ok((generation, parse_remote_names(&output.stdout)?))
+}
+
+async fn remote_names_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+) -> Result<Vec<String>, AppError> {
+    let output = run_spec(guard, remote_names_command(git, root), false, false).await?;
+    if output.exit_code != 0 {
+        return Err(git_failure("undo_unclear", &output, "无法读取远程列表，未撤销提交。"));
+    }
+    parse_remote_names(&output.stdout)
+}
+
+async fn stash_oids(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    generation: u64,
+    request_id: u64,
+) -> Result<(u64, Vec<String>), AppError> {
+    let (output, generation) = run_read(
+        backend,
+        root,
+        generation,
+        request_id,
+        stash_list_command(git, root),
+    )
+    .await?;
+    if output.exit_code != 0 {
+        return Err(git_failure("stash_failed", &output, "无法读取临时保存，未中止合并。").with_generation(generation));
+    }
+    Ok((generation, parse_stash_oids(&output.stdout)?))
+}
+
+async fn stash_oids_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+) -> Result<Vec<String>, AppError> {
+    let output = run_spec(guard, stash_list_command(git, root), false, false).await?;
+    if output.exit_code != 0 {
+        return Err(git_failure("stash_failed", &output, "无法读取临时保存，未继续写入。"));
+    }
+    parse_stash_oids(&output.stdout)
+}
+
+fn command_text(output: &ProcessOutput) -> String {
+    format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    )
+}
+
+fn attach_generation(error: AppError, generation: u64) -> AppError {
+    if error.generation.is_some() {
+        error
+    } else {
+        error.with_generation(generation)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new(crate::test_support::system_git())
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", crate::test_support::isolated_gitconfig())
+            .env("GIT_AUTHOR_NAME", "Twiglane Test")
+            .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Twiglane Test")
+            .env("GIT_COMMITTER_EMAIL", "twiglane-test@example.com")
+            .status()
+            .unwrap();
+        assert!(status.success(), "{args:?}");
+    }
+
+    fn git_text(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new(crate::test_support::system_git())
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", crate::test_support::isolated_gitconfig())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?} {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn generation(backend: &Backend, root: &Path) -> u64 {
+        backend.scheduler.current_generation(&repo_key(root))
+    }
+
+    fn init_pair(repo: &Path) {
+        git(repo, &["init", "-b", "main"]);
+        fs::write(repo.join("my file.txt"), "base\n").unwrap();
+        fs::write(repo.join("other.txt"), "other\n").unwrap();
+        git(repo, &["add", "--", "my file.txt", "other.txt"]);
+        git(repo, &["commit", "-m", "base"]);
+        git(repo, &["checkout", "-b", "feature"]);
+        fs::write(repo.join("my file.txt"), "theirs\n").unwrap();
+        fs::write(repo.join("other.txt"), "other-theirs\n").unwrap();
+        git(repo, &["commit", "-am", "feature"]);
+        git(repo, &["checkout", "main"]);
+        fs::write(repo.join("my file.txt"), "ours\n").unwrap();
+        fs::write(repo.join("other.txt"), "other-ours\n").unwrap();
+        git(repo, &["commit", "-am", "ours"]);
+    }
+
+    #[test]
+    fn stage_parser_keeps_modify_delete_sides() {
+        let raw = b"100644 abcdefabcdefabcdefabcdefabcdefabcdefabcd 2\tmy file.txt\0";
+        let stages = parse_stages(raw).unwrap();
+        assert!(stages["my file.txt"].ours.is_some());
+        assert!(stages["my file.txt"].theirs.is_none());
+        assert_eq!(stage_kind(&stages["my file.txt"]), "modify_delete");
+        let record = parse_head_record(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u{1f}bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\u{1f}subject\n"
+                .as_bytes(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(record.parents.len(), 1);
+        assert_eq!(record.summary, "subject");
+        assert!(parse_head_record(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u{1f}\u{1f}root\n".as_bytes(),
+        )
+        .unwrap()
+        .unwrap()
+        .parents
+        .is_empty());
+    }
+
+    #[tokio::test]
+    async fn text_merge_edits_one_file_and_blocks_until_both_are_resolved() {
+        let fixture = crate::test_support::git_fixture("merge-text");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        init_pair(&repo);
+        let path = repo_key(&repo);
+        let generation = generation(&backend, &repo);
+        let preview = merge_preview(&backend, &path, "feature", generation, 1).await.unwrap();
+        assert_eq!(preview.source, "feature");
+        assert_eq!(preview.target, "main");
+        assert!(!preview.dirty);
+        assert!(preview.can_start);
+        assert!(preview.note.contains("feature"));
+        let session = start_merge(&backend, &path, "feature", preview.generation, 2).await.unwrap();
+        assert_eq!(session.operation, "merge");
+        assert_eq!(session.unresolved, 2);
+        assert!(!session.can_continue);
+        assert!(session.can_abort);
+        assert!(repo.join(".git/MERGE_HEAD").exists());
+        let blocked = complete_merge(&backend, &path, "应该失败", session.generation, 3).await.unwrap_err();
+        assert_eq!(blocked.code, "conflicts_open");
+        assert!(fs::read_to_string(repo.join("my file.txt")).unwrap().contains("<<<<<<<"));
+        assert_eq!(git_text(&repo, &["log", "-1", "--format=%s"]), "ours");
+        let view = conflict_view(&backend, &path, "my file.txt", session.generation, 4).await.unwrap();
+        assert_eq!(view.kind, "text");
+        assert!(view.editable);
+        assert_eq!(view.ours.text.as_deref(), Some("ours\n"));
+        assert_eq!(view.theirs.text.as_deref(), Some("theirs\n"));
+        assert!(view.result.text.unwrap().contains("<<<<<<<"));
+        let resolved = resolve_conflict(
+            &backend,
+            &path,
+            "my file.txt",
+            "text",
+            Some("final\n".to_string()),
+            session.generation,
+            5,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved.unresolved, 1);
+        assert_eq!(fs::read_to_string(repo.join("my file.txt")).unwrap(), "final\n");
+        assert!(fs::read_to_string(repo.join("other.txt")).unwrap().contains("<<<<<<<"));
+        let still = complete_merge(&backend, &path, "还不行", resolved.generation, 6).await.unwrap_err();
+        assert_eq!(still.code, "conflicts_open");
+        assert_eq!(fs::read_to_string(repo.join("my file.txt")).unwrap(), "final\n");
+        let both = resolve_conflict(
+            &backend,
+            &path,
+            "other.txt",
+            "ours",
+            None,
+            resolved.generation,
+            7,
+        )
+        .await
+        .unwrap();
+        assert_eq!(both.unresolved, 0);
+        assert!(both.can_continue);
+        let done = complete_merge(&backend, &path, "合并结果", both.generation, 8).await.unwrap();
+        assert!(!repo.join(".git/MERGE_HEAD").exists());
+        assert_eq!(done.snapshot.branch.head_oid.as_deref(), Some(done.oid.as_str()));
+        assert_eq!(fs::read_to_string(repo.join("my file.txt")).unwrap(), "final\n");
+        assert_eq!(fs::read_to_string(repo.join("other.txt")).unwrap(), "other-ours\n");
+        assert_eq!(git_text(&repo, &["log", "-1", "--format=%s"]), "合并结果");
+        assert_eq!(git_text(&repo, &["log", "-1", "--format=%P"]).split_whitespace().count(), 2);
+        let quiet = merge_session(&backend, &path, done.generation, 9).await.unwrap();
+        assert_eq!(quiet.operation, "none");
+        assert!(!quiet.can_abort);
+    }
+
+    #[tokio::test]
+    async fn hook_rejection_keeps_the_resolved_file_and_message_is_not_committed() {
+        let fixture = crate::test_support::git_fixture("merge-hook");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        init_pair(&repo);
+        let path = repo_key(&repo);
+        let session = start_merge(&backend, &path, "feature", generation(&backend, &repo), 1).await.unwrap();
+        let first = resolve_conflict(&backend, &path, "my file.txt", "text", Some("kept\n".to_string()), session.generation, 2).await.unwrap();
+        let ready = resolve_conflict(&backend, &path, "other.txt", "theirs", None, first.generation, 3).await.unwrap();
+        let hook = repo.join(".git/hooks/commit-msg");
+        fs::write(&hook, "#!/bin/sh\necho hook refused >&2\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&hook).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&hook, permissions).unwrap();
+        }
+        let rejected = complete_merge(&backend, &path, "保留的说明", ready.generation, 4).await.unwrap_err();
+        assert_eq!(rejected.code, "hook_rejected");
+        assert!(rejected.message.contains("保留"));
+        assert_eq!(fs::read_to_string(repo.join("my file.txt")).unwrap(), "kept\n");
+        assert_eq!(fs::read_to_string(repo.join("other.txt")).unwrap(), "other-theirs\n");
+        assert!(repo.join(".git/MERGE_HEAD").exists());
+        assert_eq!(git_text(&repo, &["log", "-1", "--format=%s"]), "ours");
+        fs::remove_file(&hook).unwrap();
+        let done = complete_merge(&backend, &path, "保留的说明", rejected.generation.unwrap(), 5).await.unwrap();
+        assert_eq!(git_text(&repo, &["log", "-1", "--format=%s"]), "保留的说明");
+        assert_eq!(fs::read(repo.join("my file.txt")).unwrap(), b"kept\n");
+        assert!(!repo.join(".git/MERGE_HEAD").exists());
+        assert!(done.files.iter().any(|file| file == "my file.txt"));
+    }
+
+    #[tokio::test]
+    async fn binary_choice_and_modify_delete_follow_the_selected_side() {
+        let fixture = crate::test_support::git_fixture("merge-binary");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("bin.dat"), b"bin\0ours").unwrap();
+        fs::write(repo.join("file.txt"), "base\n").unwrap();
+        fs::write(repo.join("gone.txt"), "base-gone\n").unwrap();
+        git(&repo, &["add", "--", "bin.dat", "file.txt", "gone.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        git(&repo, &["checkout", "-b", "feature"]);
+        fs::write(repo.join("bin.dat"), b"bin\0theirs").unwrap();
+        git(&repo, &["rm", "file.txt"]);
+        fs::write(repo.join("gone.txt"), "theirs-gone\n").unwrap();
+        git(&repo, &["add", "--", "bin.dat", "gone.txt"]);
+        git(&repo, &["commit", "-m", "feature"]);
+        git(&repo, &["checkout", "main"]);
+        fs::write(repo.join("bin.dat"), b"bin\0local").unwrap();
+        fs::write(repo.join("file.txt"), "ours-file\n").unwrap();
+        git(&repo, &["rm", "gone.txt"]);
+        git(&repo, &["add", "--", "bin.dat", "file.txt"]);
+        git(&repo, &["commit", "-m", "ours"]);
+        let path = repo_key(&repo);
+        let session = start_merge(&backend, &path, "feature", generation(&backend, &repo), 1).await.unwrap();
+        let binary = conflict_view(&backend, &path, "bin.dat", session.generation, 2).await.unwrap();
+        assert_eq!(binary.kind, "binary");
+        assert!(!binary.editable);
+        assert!(binary.ours.text.is_none());
+        assert!(binary.note.contains("二进制"));
+        let text_choice = resolve_conflict(&backend, &path, "bin.dat", "text", Some("nope".to_string()), session.generation, 3).await.unwrap_err();
+        assert_eq!(text_choice.code, "resolve_binary");
+        assert!(fs::read(repo.join("bin.dat")).unwrap().contains(&0));
+        let after_bin = resolve_conflict(&backend, &path, "bin.dat", "theirs", None, session.generation, 4).await.unwrap();
+        assert_eq!(fs::read(repo.join("bin.dat")).unwrap(), b"bin\0theirs");
+        let modify_delete = conflict_view(&backend, &path, "file.txt", after_bin.generation, 5).await.unwrap();
+        assert_eq!(modify_delete.kind, "modify_delete");
+        let delete_modify = conflict_view(&backend, &path, "gone.txt", after_bin.generation, 6).await.unwrap();
+        assert_eq!(delete_modify.kind, "delete_modify");
+        let kept = resolve_conflict(&backend, &path, "file.txt", "ours", None, after_bin.generation, 7).await.unwrap();
+        assert_eq!(fs::read_to_string(repo.join("file.txt")).unwrap(), "ours-file\n");
+        let deleted = resolve_conflict(&backend, &path, "gone.txt", "delete", None, kept.generation, 8).await.unwrap();
+        assert_eq!(deleted.unresolved, 0);
+        let done = complete_merge(&backend, &path, "选择版本", deleted.generation, 9).await.unwrap();
+        assert_eq!(fs::read(repo.join("bin.dat")).unwrap(), b"bin\0theirs");
+        assert_eq!(fs::read_to_string(repo.join("file.txt")).unwrap(), "ours-file\n");
+        assert!(!repo.join("gone.txt").exists());
+        assert!(!repo.join(".git/MERGE_HEAD").exists());
+        assert!(done.summary.contains("完成"));
+    }
+
+    #[tokio::test]
+    async fn dirty_worktree_is_not_merged_and_abort_restores_without_dropping_stash() {
+        let fixture = crate::test_support::git_fixture("merge-abort");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        init_pair(&repo);
+        fs::write(repo.join("notes.txt"), "stashed\n").unwrap();
+        git(&repo, &["add", "--", "notes.txt"]);
+        git(&repo, &["stash", "push", "-m", "keep-me"]);
+        let stashed = git_text(&repo, &["rev-parse", "stash@{0}"]);
+        fs::write(repo.join("notes.txt"), "dirty\n").unwrap();
+        let path = repo_key(&repo);
+        let generation = generation(&backend, &repo);
+        let preview = merge_preview(&backend, &path, "feature", generation, 1).await.unwrap();
+        assert!(preview.dirty);
+        assert!(!preview.can_start);
+        assert!(preview.note.contains("临时保存"));
+        let refused = start_merge(&backend, &path, "feature", preview.generation, 2).await.unwrap_err();
+        assert_eq!(refused.code, "merge_dirty");
+        assert_eq!(fs::read_to_string(repo.join("notes.txt")).unwrap(), "dirty\n");
+        assert!(!repo.join(".git/MERGE_HEAD").exists());
+        fs::remove_file(repo.join("notes.txt")).unwrap();
+        let head = git_text(&repo, &["rev-parse", "HEAD"]);
+        let session = start_merge(&backend, &path, "feature", refused.generation.unwrap(), 3).await.unwrap();
+        fs::write(repo.join("my file.txt"), "edited during merge\n").unwrap();
+        let impact = abort_merge(&backend, &path, false, session.generation, 4).await.unwrap();
+        assert!(!impact.wrote);
+        assert!(impact.paths.iter().any(|item| item == "my file.txt"));
+        assert!(impact.note.contains("取消不会写入"));
+        assert!(impact.stash_oids.iter().any(|oid| oid == &stashed));
+        assert_eq!(fs::read_to_string(repo.join("my file.txt")).unwrap(), "edited during merge\n");
+        assert!(repo.join(".git/MERGE_HEAD").exists());
+        let aborted = abort_merge(&backend, &path, true, impact.generation, 5).await.unwrap();
+        assert!(aborted.wrote);
+        assert!(!repo.join(".git/MERGE_HEAD").exists());
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(fs::read_to_string(repo.join("my file.txt")).unwrap(), "ours\n");
+        assert_eq!(git_text(&repo, &["rev-parse", "stash@{0}"]), stashed);
+        assert!(aborted.stash_oids.iter().any(|oid| oid == &stashed));
+    }
+
+    #[tokio::test]
+    async fn external_sequencer_and_stash_conflicts_are_not_merge_actions() {
+        let fixture = crate::test_support::git_fixture("merge-external");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "base\n").unwrap();
+        git(&repo, &["add", "--", "file.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        git(&repo, &["checkout", "-b", "feature"]);
+        fs::write(repo.join("file.txt"), "feature\n").unwrap();
+        git(&repo, &["commit", "-am", "feature"]);
+        git(&repo, &["checkout", "main"]);
+        fs::write(repo.join("file.txt"), "main\n").unwrap();
+        git(&repo, &["commit", "-am", "main"]);
+        let path = repo_key(&repo);
+        let status = Command::new(crate::test_support::system_git())
+            .current_dir(&repo)
+            .args(["cherry-pick", "feature"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", crate::test_support::isolated_gitconfig())
+            .env("GIT_AUTHOR_NAME", "Twiglane Test")
+            .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Twiglane Test")
+            .env("GIT_COMMITTER_EMAIL", "twiglane-test@example.com")
+            .status()
+            .unwrap();
+        assert!(!status.success());
+        assert!(repo.join(".git/CHERRY_PICK_HEAD").exists());
+        assert!(!repo.join(".git/MERGE_HEAD").exists());
+        let session = merge_session(&backend, &path, generation(&backend, &repo), 1).await.unwrap();
+        assert_eq!(session.operation, "cherry-pick");
+        assert!(!session.can_abort);
+        assert!(!session.can_continue);
+        assert!(session.note.contains("cherry-pick"));
+        assert!(session.note.contains("不会"));
+        let abort = abort_merge(&backend, &path, true, session.generation, 2).await.unwrap_err();
+        assert_eq!(abort.code, "unsupported_operation");
+        let complete = complete_merge(&backend, &path, "nope", session.generation, 3).await.unwrap_err();
+        assert_eq!(complete.code, "unsupported_operation");
+        assert!(repo.join(".git/CHERRY_PICK_HEAD").exists());
+        git(&repo, &["cherry-pick", "--abort"]);
+        fs::write(repo.join("file.txt"), "local\n").unwrap();
+        git(&repo, &["stash", "push", "-m", "wip"]);
+        fs::write(repo.join("file.txt"), "other\n").unwrap();
+        git(&repo, &["commit", "-am", "other"]);
+        let apply = Command::new(crate::test_support::system_git())
+            .current_dir(&repo)
+            .args(["stash", "apply"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", crate::test_support::isolated_gitconfig())
+            .status()
+            .unwrap();
+        assert!(!apply.success());
+        let stash = merge_session(&backend, &path, generation(&backend, &repo), 4).await.unwrap();
+        assert_eq!(stash.operation, "unmerged");
+        assert!(!stash.can_abort);
+        assert!(stash.note.contains("不是合并"));
+        let refused = abort_merge(&backend, &path, false, stash.generation, 5).await.unwrap_err();
+        assert_eq!(refused.code, "unsupported_operation");
+        assert!(!repo.join(".git/MERGE_HEAD").exists());
+    }
+
+    #[tokio::test]
+    async fn rebase_in_progress_is_reported_without_actions() {
+        let fixture = crate::test_support::git_fixture("merge-rebase");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "base\n").unwrap();
+        git(&repo, &["add", "--", "file.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        git(&repo, &["checkout", "-b", "feature"]);
+        fs::write(repo.join("file.txt"), "feature\n").unwrap();
+        git(&repo, &["commit", "-am", "feature"]);
+        git(&repo, &["checkout", "main"]);
+        fs::write(repo.join("file.txt"), "main\n").unwrap();
+        git(&repo, &["commit", "-am", "main"]);
+        git(&repo, &["checkout", "feature"]);
+        let status = Command::new(crate::test_support::system_git())
+            .current_dir(&repo)
+            .args(["rebase", "main"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", crate::test_support::isolated_gitconfig())
+            .env("GIT_AUTHOR_NAME", "Twiglane Test")
+            .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Twiglane Test")
+            .env("GIT_COMMITTER_EMAIL", "twiglane-test@example.com")
+            .status()
+            .unwrap();
+        assert!(!status.success());
+        let session = merge_session(&backend, &repo_key(&repo), generation(&backend, &repo), 1).await.unwrap();
+        assert_eq!(session.operation, "rebase");
+        assert!(!session.can_abort);
+        assert!(!session.can_continue);
+        assert!(session.note.contains("rebase"));
+        let head = git_text(&repo, &["rev-parse", "HEAD"]);
+        let refused = complete_merge(&backend, &repo_key(&repo), "no", session.generation, 2).await.unwrap_err();
+        assert_eq!(refused.code, "unsupported_operation");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), head);
+        assert!(repo.join(".git/rebase-merge").exists() || repo.join(".git/rebase-apply").exists());
+    }
+
+    #[tokio::test]
+    async fn undo_keeps_unpushed_changes_and_refuses_unsafe_history() {
+        let fixture = crate::test_support::git_fixture("undo-commit");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        let bare = fixture.path().join("remote.git");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("a.txt"), "root\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        git(&repo, &["commit", "-m", "root"]);
+        fs::create_dir_all(&bare).unwrap();
+        git(&bare, &["init", "--bare"]);
+        git(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        git(&repo, &["push", "-u", "origin", "main"]);
+        let root_oid = git_text(&repo, &["rev-parse", "HEAD"]);
+        fs::write(repo.join("a.txt"), "local\n").unwrap();
+        git(&repo, &["commit", "-am", "local"]);
+        let local_oid = git_text(&repo, &["rev-parse", "HEAD"]);
+        let path = repo_key(&repo);
+        let generation = generation(&backend, &repo);
+        let preview = undo_commit(&backend, &path, &local_oid, false, generation, 1).await.unwrap();
+        assert!(preview.eligible);
+        assert!(!preview.wrote);
+        assert_eq!(preview.code, "needs_remote");
+        assert!(preview.reason.contains("远程"));
+        let undone = undo_commit(&backend, &path, &local_oid, true, preview.generation, 2).await.unwrap();
+        assert!(undone.wrote);
+        assert_eq!(undone.snapshot.branch.head_oid.as_deref(), Some(root_oid.as_str()));
+        assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "local\n");
+        assert_eq!(git_text(&repo, &["diff", "--cached", "--name-only"]), "a.txt");
+        git(&repo, &["commit", "-m", "local again"]);
+        let again = git_text(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["push", "origin", "main"]);
+        let pushed = undo_commit(&backend, &path, &again, true, undone.generation, 3).await.unwrap_err();
+        assert_eq!(pushed.code, "undo_pushed");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), again);
+        let mismatch = undo_commit(&backend, &path, &root_oid, true, pushed.generation.unwrap(), 4).await.unwrap_err();
+        assert_eq!(mismatch.code, "undo_head_changed");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), again);
+        fs::write(repo.join("a.txt"), "staged\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        let dirty = undo_commit(&backend, &path, &again, true, mismatch.generation.unwrap(), 5).await.unwrap_err();
+        assert_eq!(dirty.code, "undo_dirty_index");
+        assert_eq!(git_text(&repo, &["diff", "--cached", "--name-only"]), "a.txt");
+        git(&repo, &["reset", "--hard", "HEAD"]);
+        git(&repo, &["remote", "add", "other", bare.to_str().unwrap()]);
+        let unclear = undo_commit(&backend, &path, &again, true, dirty.generation.unwrap(), 6).await.unwrap_err();
+        assert_eq!(unclear.code, "undo_unclear");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), again);
+        git(&repo, &["remote", "remove", "other"]);
+        git(&repo, &["remote", "remove", "origin"]);
+        let none = undo_commit(&backend, &path, &again, false, unclear.generation.unwrap(), 7).await.unwrap();
+        assert!(!none.eligible);
+        assert_eq!(none.code, "undo_unclear");
+        git(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        let offline_remote = fixture.path().join("missing.git");
+        git(&repo, &["remote", "set-url", "origin", offline_remote.to_str().unwrap()]);
+        let offline = undo_commit(&backend, &path, &again, true, none.generation, 8).await.unwrap_err();
+        assert_eq!(offline.code, "undo_offline");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), again);
+    }
+
+    #[tokio::test]
+    async fn undo_refuses_root_merge_and_in_progress_before_writing() {
+        let fixture = crate::test_support::git_fixture("undo-shape");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        let bare = fixture.path().join("remote.git");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("a.txt"), "root\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        git(&repo, &["commit", "-m", "root"]);
+        fs::create_dir_all(&bare).unwrap();
+        git(&bare, &["init", "--bare"]);
+        git(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        let root_oid = git_text(&repo, &["rev-parse", "HEAD"]);
+        let path = repo_key(&repo);
+        let root = undo_commit(&backend, &path, &root_oid, true, generation(&backend, &repo), 1).await.unwrap_err();
+        assert_eq!(root.code, "undo_root");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), root_oid);
+        git(&repo, &["checkout", "-b", "feature"]);
+        fs::write(repo.join("feature.txt"), "feature\n").unwrap();
+        git(&repo, &["add", "--", "feature.txt"]);
+        git(&repo, &["commit", "-m", "feature"]);
+        git(&repo, &["checkout", "main"]);
+        fs::write(repo.join("main.txt"), "main\n").unwrap();
+        git(&repo, &["add", "--", "main.txt"]);
+        git(&repo, &["commit", "-m", "main"]);
+        git(&repo, &["merge", "--no-ff", "--no-edit", "feature"]);
+        let merge_oid = git_text(&repo, &["rev-parse", "HEAD"]);
+        let merged = undo_commit(&backend, &path, &merge_oid, true, root.generation.unwrap(), 2).await.unwrap_err();
+        assert_eq!(merged.code, "undo_merge");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), merge_oid);
+        git(&repo, &["checkout", "-b", "side"]);
+        fs::write(repo.join("a.txt"), "side\n").unwrap();
+        git(&repo, &["commit", "-am", "side"]);
+        git(&repo, &["checkout", "main"]);
+        fs::write(repo.join("a.txt"), "again\n").unwrap();
+        git(&repo, &["commit", "-am", "again"]);
+        let status = Command::new(crate::test_support::system_git())
+            .current_dir(&repo)
+            .args(["merge", "--no-commit", "--no-ff", "side"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", crate::test_support::isolated_gitconfig())
+            .env("GIT_AUTHOR_NAME", "Twiglane Test")
+            .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Twiglane Test")
+            .env("GIT_COMMITTER_EMAIL", "twiglane-test@example.com")
+            .status()
+            .unwrap();
+        assert!(!status.success());
+        let head = git_text(&repo, &["rev-parse", "HEAD"]);
+        let busy = undo_commit(&backend, &path, &head, true, merged.generation.unwrap(), 3).await.unwrap_err();
+        assert_eq!(busy.code, "undo_in_progress");
+        assert!(repo.join(".git/MERGE_HEAD").exists());
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), head);
+    }
+
+    #[tokio::test]
+    async fn discard_cancel_writes_nothing_and_confirm_keeps_the_other_file() {
+        let fixture = crate::test_support::git_fixture("discard-files");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("my file.txt"), "one\n").unwrap();
+        fs::write(repo.join("other.txt"), "two\n").unwrap();
+        git(&repo, &["add", "--", "my file.txt", "other.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        fs::write(repo.join("my file.txt"), "one changed\n").unwrap();
+        git(&repo, &["add", "--", "my file.txt"]);
+        fs::write(repo.join("my file.txt"), "one changed again\n").unwrap();
+        fs::write(repo.join("other.txt"), "two changed\n").unwrap();
+        fs::write(repo.join("extra.txt"), "new\n").unwrap();
+        let path = repo_key(&repo);
+        let paths = vec!["my file.txt".to_string(), "other.txt".to_string(), "extra.txt".to_string()];
+        let preview = discard_changes(&backend, &path, &paths, false, generation(&backend, &repo), 1).await.unwrap();
+        assert!(!preview.wrote);
+        assert!(preview.boundary.contains("取消不写入"));
+        let staged = preview.files.iter().find(|file| file.path == "my file.txt").unwrap();
+        assert!(staged.impact.contains("暂存区"));
+        assert!(staged.impact.contains("未暂存"));
+        assert!(staged.recovery.contains("不能撤销"));
+        let extra = preview.files.iter().find(|file| file.path == "extra.txt").unwrap();
+        assert!(extra.untracked);
+        assert!(extra.recovery.contains("不能通过 Git 恢复"));
+        assert_eq!(fs::read_to_string(repo.join("my file.txt")).unwrap(), "one changed again\n");
+        assert_eq!(fs::read_to_string(repo.join("other.txt")).unwrap(), "two changed\n");
+        assert_eq!(fs::read_to_string(repo.join("extra.txt")).unwrap(), "new\n");
+        let selected = vec!["my file.txt".to_string()];
+        let discarded = discard_changes(&backend, &path, &selected, true, preview.generation, 2).await.unwrap();
+        assert!(discarded.wrote);
+        assert_eq!(discarded.files.len(), 1);
+        assert_eq!(fs::read_to_string(repo.join("my file.txt")).unwrap(), "one\n");
+        assert_eq!(fs::read_to_string(repo.join("other.txt")).unwrap(), "two changed\n");
+        assert_eq!(fs::read_to_string(repo.join("extra.txt")).unwrap(), "new\n");
+        let unknown = discard_changes(&backend, &path, &["missing.txt".to_string()], true, discarded.generation, 3).await.unwrap_err();
+        assert_eq!(unknown.code, "discard_unknown");
+        assert_eq!(fs::read_to_string(repo.join("other.txt")).unwrap(), "two changed\n");
+        let removed = discard_changes(&backend, &path, &["extra.txt".to_string()], true, unknown.generation.unwrap(), 4).await.unwrap();
+        assert!(!repo.join("extra.txt").exists());
+        assert_eq!(fs::read_to_string(repo.join("other.txt")).unwrap(), "two changed\n");
+        assert!(removed.wrote);
+    }
+}

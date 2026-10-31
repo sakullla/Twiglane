@@ -25,6 +25,8 @@
   import DiffView from "./lib/components/DiffView.svelte";
   import FileList from "./lib/components/FileList.svelte";
   import HistoryPanel from "./lib/components/HistoryPanel.svelte";
+  import MergePanel from "./lib/components/MergePanel.svelte";
+  import RecoveryActions from "./lib/components/RecoveryActions.svelte";
   import RepoDialogs from "./lib/components/RepoDialogs.svelte";
   import RepoSidebar from "./lib/components/RepoSidebar.svelte";
   import StashPanel from "./lib/components/StashPanel.svelte";
@@ -55,7 +57,7 @@
   let requestSerial = 1;
   let diffToken = 0;
   let fileQuery = $state("");
-  let workspaceView = $state<"changes" | "history" | "stash">("changes");
+  let workspaceView = $state<"changes" | "history" | "stash" | "merge">("changes");
   let historyPath = $state<string | null>(null);
   const drafts = new DraftBuffer();
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
@@ -758,6 +760,7 @@
         <button type="button" role="tab" class="theme-btn" aria-selected={workspaceView === "changes"} onclick={showChanges}>改动</button>
         <button type="button" role="tab" class="theme-btn" aria-selected={workspaceView === "history"} onclick={showHistory}>历史</button>
         <button type="button" role="tab" class="theme-btn" aria-selected={workspaceView === "stash"} onclick={() => (workspaceView = "stash")}>临时保存</button>
+        <button type="button" role="tab" class="theme-btn" aria-selected={workspaceView === "merge"} onclick={() => (workspaceView = "merge")}>合并</button>
       </div>
       <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => runSync("fetch", (path, generation) => api.fetchRemote(path, generation, nextId()))}>检查远程</button>
       <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => runSync("pull", (path, generation) => api.pullFastForward(path, generation, nextId()))}>拉取</button>
@@ -830,6 +833,21 @@
         onFilePath={openFileHistory}
         onClearFile={() => (historyPath = null)}
       />
+    {:else if opened && workspaceView === "merge"}
+      <MergePanel
+        {opened}
+        disabled={pending !== null}
+        {nextId}
+        onGeneration={adoptGeneration}
+        onSnapshot={applySnapshot}
+        onFailure={handleMutationError}
+        onNotice={(message) => {
+          phaseNote = message;
+          live = message;
+          banner = null;
+        }}
+        onOpenStash={() => (workspaceView = "stash")}
+      />
     {:else if opened && workspaceView === "stash"}
       <StashPanel
         {opened}
@@ -848,6 +866,19 @@
     {:else}
     <section class="files" aria-label="改动与提交">
       {#if opened}
+        <RecoveryActions
+          {opened}
+          disabled={pending !== null}
+          {nextId}
+          onSnapshot={applySnapshot}
+          onFailure={handleMutationError}
+          onNotice={(message) => {
+            phaseNote = message;
+            live = message;
+            banner = null;
+          }}
+          onMerge={() => (workspaceView = "merge")}
+        />
         <FileList
           files={opened.snapshot.files}
           {selected}

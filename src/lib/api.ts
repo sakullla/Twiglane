@@ -14,11 +14,18 @@ import type {
   RecentRepo,
   RemoteState,
   SettingsDto,
+  AbortImpact,
+  ConflictView,
+  DiscardResult,
+  MergeComplete,
+  MergePreview,
+  MergeSession,
   StashApplyResult,
   StashSaveResult,
   StashState,
   StatusSnapshot,
   Theme,
+  UndoResult,
 } from "./types";
 
 async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -218,6 +225,38 @@ export const api = {
     invoke<StashApplyResult>("apply_stash", { path, oid, generation, requestId }),
   deleteStash: (path: string, oid: string, confirm: boolean, generation: number, requestId: number) =>
     invoke<StashState>("delete_stash", { path, oid, confirm, generation, requestId }),
+  mergePreview: (path: string, source: string, generation: number, requestId: number) =>
+    invoke<MergePreview>("merge_preview", { path, source, generation, requestId }),
+  startMerge: (path: string, source: string, generation: number, requestId: number) =>
+    invoke<MergeSession>("start_merge", { path, source, generation, requestId }),
+  mergeSession: (path: string, generation: number, requestId: number) =>
+    invoke<MergeSession>("merge_session", { path, generation, requestId }),
+  conflictView: (path: string, relative: string, generation: number, requestId: number) =>
+    invoke<ConflictView>("conflict_view", { path, relative, generation, requestId }),
+  resolveConflict: (
+    path: string,
+    relative: string,
+    choice: string,
+    content: string | null,
+    generation: number,
+    requestId: number,
+  ) =>
+    invoke<MergeSession>("resolve_conflict", {
+      path,
+      relative,
+      choice,
+      content,
+      generation,
+      requestId,
+    }),
+  completeMerge: (path: string, message: string, generation: number, requestId: number) =>
+    invoke<MergeComplete>("complete_merge", { path, message, generation, requestId }),
+  abortMerge: (path: string, confirm: boolean, generation: number, requestId: number) =>
+    invoke<AbortImpact>("abort_merge", { path, confirm, generation, requestId }),
+  undoCommit: (path: string, expectedHead: string, confirm: boolean, generation: number, requestId: number) =>
+    invoke<UndoResult>("undo_commit", { path, expectedHead, confirm, generation, requestId }),
+  discardChanges: (path: string, paths: string[], confirm: boolean, generation: number, requestId: number) =>
+    invoke<DiscardResult>("discard_changes", { path, paths, confirm, generation, requestId }),
   setTheme: (theme: Theme) => invoke<void>("set_theme", { theme }),
   setPanelWidths: (widths: PanelWidths) => invoke<PanelWidths>("set_panel_widths", { widths }),
   saveDraft: (path: string, message: string) => invoke<void>("save_draft", { path, message }),

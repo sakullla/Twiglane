@@ -5,13 +5,14 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::error::AppError;
 use crate::git::command::{init_command, status_command, toplevel_command};
+use crate::git::gate::{remote_check_is_stale, ActionGate, RemoteChecks};
 use crate::git::locate::{detect_git_binary, validate_git, GitLocator, ResolvedGit};
 use crate::git::parse::parse_status;
 use crate::git::runner::{ProcessOutput, RealRunner};
 use crate::git::schedule::{GitJob, GitScheduler, JobKind, ScheduledOutput};
 use crate::model::{
-    GitInfo, OpenedRepository, PanelWidths, RecentRepo, RepoSummary, SettingsDto,
-    StatusSnapshot, Theme,
+    GitInfo, OpenedRepository, PanelWidths, RecentRepo, RepoSummary, SettingsDto, StatusSnapshot,
+    Theme,
 };
 use crate::redact::redact_error_text;
 use crate::shutdown::Shutdown;
@@ -25,6 +26,8 @@ pub struct Backend {
     pub watches: WatchHub,
     pub shutdown: Arc<Shutdown>,
     pub runner: RealRunner,
+    pub actions: ActionGate,
+    pub remote_checks: RemoteChecks,
 }
 
 impl Backend {
@@ -44,6 +47,8 @@ impl Backend {
             watches: WatchHub::new(),
             shutdown,
             runner,
+            actions: ActionGate::default(),
+            remote_checks: RemoteChecks::default(),
         }
     }
 }
@@ -219,7 +224,7 @@ pub async fn refresh_status(
         Some(generation),
     )
     .await?;
-    status_from_output(&scheduled)
+    status_from_output(backend, &repo_key(&root), &scheduled)
 }
 
 async fn open_root(
@@ -239,7 +244,7 @@ async fn open_root(
         None,
     )
     .await?;
-    let snapshot = status_from_output(&scheduled)?;
+    let snapshot = status_from_output(backend, &repo_key(&root), &scheduled)?;
     let summary = RepoSummary {
         name: repo_name(&root),
         path: repo_key(&root),
@@ -258,7 +263,11 @@ async fn open_root(
     })
 }
 
-pub(crate) fn status_from_output(scheduled: &ScheduledOutput) -> Result<StatusSnapshot, AppError> {
+pub(crate) fn status_from_output(
+    backend: &Backend,
+    repo: &str,
+    scheduled: &ScheduledOutput,
+) -> Result<StatusSnapshot, AppError> {
     if scheduled.output.exit_code != 0 {
         return Err(git_failure(
             "status_failed",
@@ -268,7 +277,11 @@ pub(crate) fn status_from_output(scheduled: &ScheduledOutput) -> Result<StatusSn
     }
     let mut snapshot = parse_status(&scheduled.output.stdout)?;
     snapshot.generation = scheduled.generation;
-    snapshot.branch.live_remote_checked = false;
+    let checked_at = backend.remote_checks.get(repo);
+    snapshot.branch.remote_checked_at_ms = checked_at;
+    let stale = checked_at.is_some_and(|at| remote_check_is_stale(at, crate::state::now_ms()));
+    snapshot.branch.remote_check_stale = stale;
+    snapshot.branch.live_remote_checked = checked_at.is_some() && !stale;
     Ok(snapshot)
 }
 
@@ -450,14 +463,19 @@ pub(crate) async fn require_git(backend: &Backend) -> Result<ResolvedGit, AppErr
     if !info.available {
         return Err(AppError::new("git_missing", info.message));
     }
-    lock_git(backend)
-        .resolved()
-        .cloned()
-        .ok_or_else(|| AppError::new("git_missing", "未检测到 Git。请安装 Git 或选择可执行文件后重试。"))
+    lock_git(backend).resolved().cloned().ok_or_else(|| {
+        AppError::new(
+            "git_missing",
+            "未检测到 Git。请安装 Git 或选择可执行文件后重试。",
+        )
+    })
 }
 
 fn lock_git(backend: &Backend) -> std::sync::MutexGuard<'_, GitLocator> {
-    backend.git.lock().unwrap_or_else(|error| error.into_inner())
+    backend
+        .git
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
 }
 
 pub fn validate_input_path(path: &str) -> Result<PathBuf, AppError> {
@@ -486,19 +504,16 @@ pub fn safe_relative(path: &str) -> Result<PathBuf, AppError> {
     }
     let relative = Path::new(path);
     if relative.is_absolute()
-        || relative.components().any(|component| {
-            !matches!(component, Component::Normal(_) | Component::CurDir)
-        })
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
     {
-        return Err(AppError::new(
-            "invalid_path",
-            "差异路径必须留在仓库内部。",
-        ));
+        return Err(AppError::new("invalid_path", "差异路径必须留在仓库内部。"));
     }
     Ok(relative.to_path_buf())
 }
 
-fn ensure_directory(path: &Path) -> Result<(), AppError> {
+pub(crate) fn ensure_directory(path: &Path) -> Result<(), AppError> {
     if !path.exists() {
         return Err(AppError::new(
             "path_missing",
@@ -602,7 +617,9 @@ mod tests {
         assert_eq!(fs::read(&keep).unwrap(), b"same");
         assert_eq!(fs::metadata(&keep).unwrap().modified().unwrap(), modified);
 
-        let newline = add_repository(&backend, "/tmp/bad\npath", 4).await.unwrap_err();
+        let newline = add_repository(&backend, "/tmp/bad\npath", 4)
+            .await
+            .unwrap_err();
         assert_eq!(newline.code, "invalid_path");
         assert!(safe_relative("a\nb").is_err());
         assert!(safe_relative("../outside").is_err());
@@ -649,7 +666,10 @@ mod tests {
         let opened = add_repository(&backend, &repo_key(&first.join("sub")), 1)
             .await
             .unwrap();
-        assert_eq!(opened.summary.path, repo_key(&canonical_existing(&first).unwrap()));
+        assert_eq!(
+            opened.summary.path,
+            repo_key(&canonical_existing(&first).unwrap())
+        );
         assert_eq!(opened.snapshot.branch.name.as_deref(), Some("main"));
         assert!(opened
             .snapshot
@@ -701,7 +721,10 @@ mod tests {
             .current_dir(dir)
             .args(args)
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", crate::test_support::isolated_gitconfig())
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                crate::test_support::isolated_gitconfig(),
+            )
             .env("GIT_AUTHOR_NAME", "Twiglane Test")
             .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
             .env("GIT_COMMITTER_NAME", "Twiglane Test")
@@ -737,7 +760,10 @@ mod tests {
             super::classify_toplevel(&not_repo),
             Err(super::Probe::NotRepo)
         ));
-        let chinese = git_output(128, "致命错误：不是 git 仓库（或者任何父目录）：.git\n".as_bytes());
+        let chinese = git_output(
+            128,
+            "致命错误：不是 git 仓库（或者任何父目录）：.git\n".as_bytes(),
+        );
         assert!(matches!(
             super::classify_toplevel(&chinese),
             Err(super::Probe::NotRepo)
@@ -779,11 +805,17 @@ mod tests {
             other => panic!("{other:?}"),
         }
 
-        let denied = git_output(128, b"fatal: cannot change to '/tmp/locked': Permission denied\n");
+        let denied = git_output(
+            128,
+            b"fatal: cannot change to '/tmp/locked': Permission denied\n",
+        );
         match super::classify_toplevel(&denied) {
             Err(super::Probe::Failed(error)) => {
                 assert_eq!(error.code, "permission");
-                assert!(error.message.to_ascii_lowercase().contains("permission denied"));
+                assert!(error
+                    .message
+                    .to_ascii_lowercase()
+                    .contains("permission denied"));
             }
             other => panic!("{other:?}"),
         }
@@ -795,7 +827,9 @@ mod tests {
         }
         let empty = git_output(0, b"");
         match super::classify_toplevel(&empty) {
-            Err(super::Probe::NotRepo) => panic!("empty success was treated as a missing repository"),
+            Err(super::Probe::NotRepo) => {
+                panic!("empty success was treated as a missing repository")
+            }
             Err(super::Probe::Failed(error)) => assert_eq!(error.code, "repository_probe"),
             Ok(path) => panic!("empty success returned {}", path.display()),
         }
@@ -819,7 +853,8 @@ mod tests {
         let owned = fixture.repo("owned");
         fs::write(owned.join("keep.txt"), b"keep").unwrap();
         run_git_ok(&owned, &["init", "-b", "main"]);
-        let ownership = fixture.backend_with_extra_env(extra_env(&[("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")]));
+        let ownership =
+            fixture.backend_with_extra_env(extra_env(&[("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")]));
         let added = add_repository(&ownership, &repo_key(&owned), 1)
             .await
             .unwrap_err();
@@ -851,7 +886,9 @@ mod tests {
         let bare = fixture.path().join("bare.git");
         run_git_ok(fixture.path(), &["init", "--bare", "bare.git"]);
         let head = fs::read(bare.join("HEAD")).unwrap();
-        let bare_add = add_repository(&normal, &repo_key(&bare), 4).await.unwrap_err();
+        let bare_add = add_repository(&normal, &repo_key(&bare), 4)
+            .await
+            .unwrap_err();
         assert_eq!(bare_add.code, "not_work_tree");
         assert!(
             bare_add.message.to_ascii_lowercase().contains("work tree")
@@ -883,7 +920,9 @@ mod tests {
             .unwrap_err();
         assert_eq!(missing.code, "not_repository");
         assert!(!plain.join(".git").exists());
-        let created = create_repository(&backend, &repo_key(&plain), 2).await.unwrap();
+        let created = create_repository(&backend, &repo_key(&plain), 2)
+            .await
+            .unwrap();
         assert!(plain.join(".git").is_dir());
         assert_eq!(fs::read(plain.join("keep.txt")).unwrap(), b"same");
         assert!(created.snapshot.branch.unborn || created.snapshot.branch.name.is_some());
@@ -916,7 +955,9 @@ mod tests {
 
         let bare = fixture.path().join("bare.git");
         run_git_ok(fixture.path(), &["init", "--bare", "bare.git"]);
-        let bare_add = add_repository(&backend, &repo_key(&bare), 7).await.unwrap_err();
+        let bare_add = add_repository(&backend, &repo_key(&bare), 7)
+            .await
+            .unwrap_err();
         assert_eq!(bare_add.code, "not_work_tree");
         assert!(!bare.join(".git").exists());
     }
@@ -949,7 +990,9 @@ mod tests {
         let _reset = Reset(locked.clone());
         let error = match super::show_toplevel(&backend, &git, &locked, 1).await {
             Err(super::Probe::Failed(error)) => error,
-            Err(super::Probe::NotRepo) => panic!("permission failure was treated as a missing repository"),
+            Err(super::Probe::NotRepo) => {
+                panic!("permission failure was treated as a missing repository")
+            }
             Ok(path) => panic!("unexpected toplevel {}", path.display()),
         };
         let created = create_repository(&backend, &repo_key(&locked), 2)
@@ -959,7 +1002,10 @@ mod tests {
         perms.set_mode(0o755);
         fs::set_permissions(&locked, perms).unwrap();
         assert_eq!(error.code, "permission");
-        assert!(error.message.to_ascii_lowercase().contains("permission denied"));
+        assert!(error
+            .message
+            .to_ascii_lowercase()
+            .contains("permission denied"));
         assert_eq!(created.code, "permission");
         assert!(!locked.join(".git").exists());
         assert_eq!(fs::read(locked.join("keep.txt")).unwrap(), b"perm");

@@ -8,9 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::atomic::atomic_write;
 use crate::error::AppError;
-use crate::model::{
-    PanelWidths, RecentRepo, Theme, MAX_DRAFT_CHARS, MAX_RECENT,
-};
+use crate::model::{PanelWidths, RecentRepo, Theme, MAX_DRAFT_CHARS, MAX_RECENT};
 use crate::redact::reject_secret_draft;
 
 const STATE_VERSION: u32 = 1;
@@ -68,9 +66,9 @@ impl AppStore {
 
     pub fn settings_warning(&self) -> Option<String> {
         let guard = self.lock();
-        guard.corrupt.then(|| {
-            "设置文件无法读取，本次使用默认设置，未覆盖原文件。".to_string()
-        })
+        guard
+            .corrupt
+            .then(|| "设置文件无法读取，本次使用默认设置，未覆盖原文件。".to_string())
     }
 
     pub fn snapshot(&self) -> Persisted {
@@ -146,10 +144,7 @@ impl AppStore {
 
     pub fn save_draft(&self, path: &str, message: &str) -> Result<(), AppError> {
         if message.chars().count() > MAX_DRAFT_CHARS {
-            return Err(AppError::new(
-                "draft_too_large",
-                "提交说明过长，未保存。",
-            ));
+            return Err(AppError::new("draft_too_large", "提交说明过长，未保存。"));
         }
         reject_secret_draft(message)?;
         let path = path.to_string();
@@ -164,7 +159,10 @@ impl AppStore {
         })
     }
 
-    fn update(&self, change: impl FnOnce(&mut Persisted) -> Result<(), AppError>) -> Result<(), AppError> {
+    fn update(
+        &self,
+        change: impl FnOnce(&mut Persisted) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
         let mut guard = self.lock();
         if guard.corrupt {
             return Err(AppError::new(
@@ -174,12 +172,10 @@ impl AppStore {
         }
         let mut next = guard.data.clone();
         change(&mut next)?;
-        let bytes = serde_json::to_vec_pretty(&next).map_err(|error| {
-            AppError::new("settings_encode", format!("无法编码设置：{error}"))
-        })?;
-        atomic_write(&self.path, &bytes).map_err(|error| {
-            AppError::new("settings_write", format!("无法保存设置：{error}"))
-        })?;
+        let bytes = serde_json::to_vec_pretty(&next)
+            .map_err(|error| AppError::new("settings_encode", format!("无法编码设置：{error}")))?;
+        atomic_write(&self.path, &bytes)
+            .map_err(|error| AppError::new("settings_write", format!("无法保存设置：{error}")))?;
         guard.data = next;
         Ok(())
     }
@@ -268,7 +264,8 @@ mod tests {
         let snapshot = store.snapshot();
         assert_eq!(snapshot.panel_widths.sidebar, 160);
         assert_eq!(snapshot.panel_widths.files, 560);
-        let value: Value = serde_json::from_str(&fs::read_to_string(store.path()).unwrap()).unwrap();
+        let value: Value =
+            serde_json::from_str(&fs::read_to_string(store.path()).unwrap()).unwrap();
         let keys = object_keys(&value);
         for key in keys {
             let lower = key.to_ascii_lowercase();
@@ -312,7 +309,10 @@ mod tests {
         let snapshot = store.snapshot();
         assert_eq!(snapshot.recent.len(), MAX_RECENT);
         assert!(!snapshot.drafts.contains_key("/repo/0"));
-        assert_eq!(snapshot.drafts.get("/repo/1").map(String::as_str), Some("说明"));
+        assert_eq!(
+            snapshot.drafts.get("/repo/1").map(String::as_str),
+            Some("说明")
+        );
     }
 
     fn object_keys(value: &Value) -> Vec<String> {

@@ -21,6 +21,8 @@ const branch: BranchInfo = {
   ahead: 1,
   behind: 1,
   liveRemoteChecked: false,
+  remoteCheckedAtMs: null,
+  remoteCheckStale: false,
 };
 
 describe("最近仓库", () => {
@@ -44,6 +46,13 @@ describe("工作区状态", () => {
     expect(syncLabel(branch)).toBe("相对已记录上游 +1 −1 · 未检查远程");
     expect(syncLabel(branch)).not.toContain("−-");
     expect(syncLabel({ ...branch, upstream: null })).toBe("无上游 · 未检查远程");
+    expect(syncLabel({ ...branch, liveRemoteChecked: true, remoteCheckedAtMs: Date.UTC(2026, 9, 31, 1, 2) })).toContain(
+      "已于",
+    );
+    expect(syncLabel({ ...branch, remoteCheckStale: true, remoteCheckedAtMs: Date.UTC(2026, 9, 31, 1, 2) })).toContain(
+      "过期",
+    );
+    expect(syncLabel({ ...branch, liveRemoteChecked: true })).not.toContain("未检查远程");
     expect(branchLabel({ ...branch, detached: true, name: null, headOid: "abcdef123456" })).toBe(
       "游离 HEAD abcdef1",
     );

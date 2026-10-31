@@ -1,11 +1,15 @@
 import { normalizeError } from "./errors";
 import type {
+  BranchState,
+  CloneResult,
+  CommitPushReport,
   CommitResult,
   DiffResponse,
   GitInfo,
   OpenedRepository,
   PanelWidths,
   RecentRepo,
+  RemoteState,
   SettingsDto,
   StatusSnapshot,
   Theme,
@@ -101,6 +105,60 @@ export const api = {
     }),
   commitChanges: (path: string, message: string, generation: number, requestId: number) =>
     invoke<CommitResult>("commit_changes", { path, message, generation, requestId }),
+  cloneRepository: (url: string, parent: string, name: string, requestId: number) =>
+    invoke<CloneResult>("clone_repository", { url, parent, name, requestId }),
+  remoteState: (path: string, generation: number, requestId: number) =>
+    invoke<RemoteState>("remote_state", { path, generation, requestId }),
+  addRemote: (path: string, name: string, url: string, generation: number, requestId: number) =>
+    invoke<RemoteState>("add_remote", { path, name, url, generation, requestId }),
+  setRemoteUrl: (path: string, name: string, url: string, generation: number, requestId: number) =>
+    invoke<RemoteState>("set_remote_url", { path, name, url, generation, requestId }),
+  fetchRemote: (path: string, generation: number, requestId: number) =>
+    invoke<StatusSnapshot>("fetch_remote", { path, generation, requestId }),
+  pullFastForward: (path: string, generation: number, requestId: number) =>
+    invoke<StatusSnapshot>("pull_fast_forward", { path, generation, requestId }),
+  pushBranch: (path: string, generation: number, requestId: number) =>
+    invoke<StatusSnapshot>("push_branch", { path, generation, requestId }),
+  publishBranch: (path: string, remote: string, generation: number, requestId: number) =>
+    invoke<StatusSnapshot>("publish_branch", { path, remote, generation, requestId }),
+  commitAndPush: (path: string, message: string, generation: number, requestId: number) =>
+    invoke<CommitPushReport>("commit_and_push", { path, message, generation, requestId }),
+  branchState: (path: string, generation: number, requestId: number) =>
+    invoke<BranchState>("branch_state", { path, generation, requestId }),
+  createBranch: (path: string, name: string, generation: number, requestId: number) =>
+    invoke<BranchState>("create_branch", { path, name, generation, requestId }),
+  switchBranch: (path: string, name: string, generation: number, requestId: number) =>
+    invoke<BranchState>("switch_branch", { path, name, generation, requestId }),
+  deleteBranch: (
+    path: string,
+    name: string,
+    confirmUnmerged: boolean,
+    generation: number,
+    requestId: number,
+  ) =>
+    invoke<BranchState>("delete_branch", {
+      path,
+      name,
+      confirmUnmerged,
+      generation,
+      requestId,
+    }),
+  deleteRemoteBranch: (
+    path: string,
+    remote: string,
+    name: string,
+    confirm: boolean,
+    generation: number,
+    requestId: number,
+  ) =>
+    invoke<BranchState>("delete_remote_branch", {
+      path,
+      remote,
+      name,
+      confirm,
+      generation,
+      requestId,
+    }),
   setTheme: (theme: Theme) => invoke<void>("set_theme", { theme }),
   setPanelWidths: (widths: PanelWidths) => invoke<PanelWidths>("set_panel_widths", { widths }),
   saveDraft: (path: string, message: string) => invoke<void>("save_draft", { path, message }),

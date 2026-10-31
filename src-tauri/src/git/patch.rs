@@ -90,7 +90,9 @@ pub fn parse_diff(bytes: &[u8], truncated_input: bool) -> Result<ParsedDiff, App
             .map(|offset| cursor + 1 + offset)
             .unwrap_or(hunk_lines.len());
         let raw = hunk_lines[cursor..end].concat();
-        let header = hunk_lines[cursor].trim_end_matches(['\n', '\r']).to_string();
+        let header = hunk_lines[cursor]
+            .trim_end_matches(['\n', '\r'])
+            .to_string();
         let last = end == hunk_lines.len();
         let complete = hunk_is_complete(&header, &hunk_lines[cursor..end], truncated_input && last);
         let display = hunk_display_lines(hunks.len() as u32, &header, &hunk_lines[cursor..end]);
@@ -123,24 +125,37 @@ pub fn build_patch(parsed: &ParsedDiff, indexes: &[u32]) -> Result<Vec<u8>, AppE
         ));
     }
     if indexes.is_empty() {
-        return Err(AppError::new("empty_hunks", "没有选中的代码块，未修改暂存区。"));
+        return Err(AppError::new(
+            "empty_hunks",
+            "没有选中的代码块，未修改暂存区。",
+        ));
     }
     if indexes.len() > 500 {
-        return Err(AppError::new("too_many_hunks", "一次选择的代码块过多，未修改暂存区。"));
+        return Err(AppError::new(
+            "too_many_hunks",
+            "一次选择的代码块过多，未修改暂存区。",
+        ));
     }
     let mut ordered = indexes.to_vec();
     ordered.sort_unstable();
     if ordered.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(AppError::new("duplicate_hunk", "代码块选择重复，未修改暂存区。"));
+        return Err(AppError::new(
+            "duplicate_hunk",
+            "代码块选择重复，未修改暂存区。",
+        ));
     }
     let mut patch = parsed.preamble.clone();
     if !patch.is_empty() && !patch.ends_with('\n') {
         patch.push('\n');
     }
     for index in ordered {
-        let hunk = parsed.hunks.iter().find(|hunk| hunk.index == index).ok_or_else(|| {
-            AppError::new("hunk_missing", "所选代码块已不在当前差异中，未修改暂存区。")
-        })?;
+        let hunk = parsed
+            .hunks
+            .iter()
+            .find(|hunk| hunk.index == index)
+            .ok_or_else(|| {
+                AppError::new("hunk_missing", "所选代码块已不在当前差异中，未修改暂存区。")
+            })?;
         if !hunk.complete {
             return Err(AppError::new(
                 "truncated_hunk",
@@ -155,7 +170,11 @@ pub fn build_patch(parsed: &ParsedDiff, indexes: &[u32]) -> Result<Vec<u8>, AppE
     Ok(patch.into_bytes())
 }
 
-pub fn view_lines(parsed: &ParsedDiff, offset: u32, limit: u32) -> (Vec<DiffLine>, Vec<DiffHunk>, u32) {
+pub fn view_lines(
+    parsed: &ParsedDiff,
+    offset: u32,
+    limit: u32,
+) -> (Vec<DiffLine>, Vec<DiffHunk>, u32) {
     let mut all = Vec::new();
     for line in split_keep(&parsed.preamble) {
         let text = line.trim_end_matches(['\n', '\r']).to_string();
@@ -184,7 +203,11 @@ pub fn view_lines(parsed: &ParsedDiff, offset: u32, limit: u32) -> (Vec<DiffLine
         });
     }
     let total = all.len() as u32;
-    let limit = if limit == 0 { DIFF_VIEW_LINE_LIMIT } else { limit.min(DIFF_VIEW_LINE_LIMIT) };
+    let limit = if limit == 0 {
+        DIFF_VIEW_LINE_LIMIT
+    } else {
+        limit.min(DIFF_VIEW_LINE_LIMIT)
+    };
     let offset = offset.min(total);
     let end = offset.saturating_add(limit).min(total);
     let window = all[offset as usize..end as usize].to_vec();
@@ -204,7 +227,10 @@ pub fn view_lines(parsed: &ParsedDiff, offset: u32, limit: u32) -> (Vec<DiffLine
 
 pub fn first_file_diff(bytes: &[u8]) -> &[u8] {
     let marker = b"\ndiff --git ";
-    if let Some(index) = bytes.windows(marker.len()).position(|window| window == marker) {
+    if let Some(index) = bytes
+        .windows(marker.len())
+        .position(|window| window == marker)
+    {
         if index > 0 {
             return &bytes[..index + 1];
         }

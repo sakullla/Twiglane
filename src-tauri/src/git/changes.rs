@@ -3,15 +3,17 @@ use std::path::{Path, PathBuf};
 
 use crate::error::AppError;
 use crate::git::command::{
-    add_command, apply_cached_command, commit_command, file_diff_command, head_command, identity_command,
-    ls_files_command, restore_staged_command, status_command, unstage_unborn_command,
+    add_command, apply_cached_command, commit_command, file_diff_command, head_command,
+    identity_command, ls_files_command, restore_staged_command, status_command,
+    unstage_unborn_command,
 };
 use crate::git::ops::{
-    canonical_existing, git_failure, repo_key, require_git, run_git, safe_relative, status_from_output,
-    validate_input_path,
+    canonical_existing, git_failure, repo_key, require_git, run_git, safe_relative,
+    status_from_output, validate_input_path,
 };
 use crate::git::patch::{
-    build_patch, first_file_diff, parse_diff, parse_numstat, snapshot_token, view_lines, DIFF_PREVIEW_BYTES,
+    build_patch, first_file_diff, parse_diff, parse_numstat, snapshot_token, view_lines,
+    DIFF_PREVIEW_BYTES,
 };
 use crate::git::runner::ProcessOutput;
 use crate::git::schedule::{internal_request_id, CommandSpec, JobKind, WriteGuard};
@@ -43,7 +45,15 @@ pub async fn load_diff(
     let untracked = if staged {
         false
     } else {
-        is_untracked(backend, &git.path, &root, &relative_path, generation, request_id).await?
+        is_untracked(
+            backend,
+            &git.path,
+            &root,
+            &relative_path,
+            generation,
+            request_id,
+        )
+        .await?
     };
     let paths = diff_paths(&relative_path, original_path.as_ref());
     let (program, args) = file_diff_command(&git.path, &root, &paths, staged, false, untracked);
@@ -71,8 +81,17 @@ pub async fn load_diff(
     let raw = first_file_diff(&scheduled.output.stdout);
     let truncated = scheduled.output.stdout_truncated || raw.len() != scheduled.output.stdout.len();
     let parsed = parse_diff(raw, truncated)?;
-    let counts = numstat_counts(backend, &git.path, &root, &paths, staged, untracked, generation, internal_request_id())
-        .await?;
+    let counts = numstat_counts(
+        backend,
+        &git.path,
+        &root,
+        &paths,
+        staged,
+        untracked,
+        generation,
+        internal_request_id(),
+    )
+    .await?;
     response_from_diff(
         scheduled.generation,
         relative,
@@ -111,8 +130,12 @@ pub async fn stage_files(
     )
     .await?;
     if scheduled.output.exit_code != 0 {
-        return Err(classify_write("stage_failed", &scheduled.output, "暂存失败，暂存区保持原样。")
-            .with_generation(scheduled.generation));
+        return Err(classify_write(
+            "stage_failed",
+            &scheduled.output,
+            "暂存失败，暂存区保持原样。",
+        )
+        .with_generation(scheduled.generation));
     }
     read_status(backend, &root, scheduled.generation, internal_request_id()).await
 }
@@ -135,7 +158,8 @@ pub async fn unstage_files(
         let text = target.to_string_lossy();
         status.files.iter().any(|file| {
             file.staged != crate::model::ChangeKind::None
-                && (file.path == text.as_ref() || file.original_path.as_deref() == Some(text.as_ref()))
+                && (file.path == text.as_ref()
+                    || file.original_path.as_deref() == Some(text.as_ref()))
         })
     }) {
         return Err(AppError::new(
@@ -183,7 +207,10 @@ pub async fn stage_hunks(
     request_id: u64,
 ) -> Result<StatusSnapshot, AppError> {
     if snapshot.is_empty() {
-        return Err(AppError::new("invalid_snapshot", "缺少差异快照，未修改暂存区。"));
+        return Err(AppError::new(
+            "invalid_snapshot",
+            "缺少差异快照，未修改暂存区。",
+        ));
     }
     let root = canonical_existing(&validate_input_path(path)?)?;
     let relative_path = repo_file(relative)?;
@@ -276,7 +303,11 @@ pub async fn stage_hunks(
     if check.exit_code != 0 {
         return Err(finish_error(
             guard,
-            classify_write("apply_failed", &check, "代码块与当前索引不一致，未修改暂存区。"),
+            classify_write(
+                "apply_failed",
+                &check,
+                "代码块与当前索引不一致，未修改暂存区。",
+            ),
         ));
     }
     let (apply_program, apply_args) = apply_cached_command(&git.path, &root, staged, false);
@@ -375,10 +406,16 @@ pub async fn commit_index(
     )
     .await?;
     if head.output.exit_code != 0 {
-        return Err(git_failure("commit_unverified", &head.output, "提交命令已返回，但无法确认新的提交。请刷新后查看历史，不要重复提交。")
-            .with_generation(head.generation));
+        return Err(git_failure(
+            "commit_unverified",
+            &head.output,
+            "提交命令已返回，但无法确认新的提交。请刷新后查看历史，不要重复提交。",
+        )
+        .with_generation(head.generation));
     }
-    let oid = String::from_utf8_lossy(&head.output.stdout).trim().to_string();
+    let oid = String::from_utf8_lossy(&head.output.stdout)
+        .trim()
+        .to_string();
     let snapshot = read_status(backend, &root, head.generation, internal_request_id()).await?;
     let branch = snapshot
         .branch
@@ -412,8 +449,12 @@ fn response_from_diff(
     limit: u32,
 ) -> Result<DiffResponse, AppError> {
     let binary = parsed.binary || parsed.undecodable || counts == Some((None, None));
-    let additions = counts.and_then(|(added, _)| added).unwrap_or(parsed.additions);
-    let deletions = counts.and_then(|(_, deleted)| deleted).unwrap_or(parsed.deletions);
+    let additions = counts
+        .and_then(|(added, _)| added)
+        .unwrap_or(parsed.additions);
+    let deletions = counts
+        .and_then(|(_, deleted)| deleted)
+        .unwrap_or(parsed.deletions);
     let snapshot = snapshot_token(raw, parsed.truncated, relative, staged);
     if binary {
         let summary = if parsed.undecodable {
@@ -603,15 +644,21 @@ async fn read_status(
         Some(generation),
     )
     .await?;
-    status_from_output(&scheduled)
+    status_from_output(backend, &repo_key(root), &scheduled)
 }
 
 fn validate_paths(paths: &[String]) -> Result<Vec<String>, AppError> {
     if paths.is_empty() {
-        return Err(AppError::new("empty_paths", "没有选中的文件，未修改暂存区。"));
+        return Err(AppError::new(
+            "empty_paths",
+            "没有选中的文件，未修改暂存区。",
+        ));
     }
     if paths.len() > MAX_PATHS {
-        return Err(AppError::new("too_many_paths", "一次选择的文件过多，未修改暂存区。"));
+        return Err(AppError::new(
+            "too_many_paths",
+            "一次选择的文件过多，未修改暂存区。",
+        ));
     }
     let mut clean = Vec::with_capacity(paths.len());
     for path in paths {
@@ -623,8 +670,14 @@ fn validate_paths(paths: &[String]) -> Result<Vec<String>, AppError> {
 
 fn repo_file(path: &str) -> Result<PathBuf, AppError> {
     let relative = safe_relative(path)?;
-    if relative.components().any(|component| component.as_os_str() == ".git") {
-        return Err(AppError::new("invalid_path", "不能把 .git 当作普通文件暂存。"));
+    if relative
+        .components()
+        .any(|component| component.as_os_str() == ".git")
+    {
+        return Err(AppError::new(
+            "invalid_path",
+            "不能把 .git 当作普通文件暂存。",
+        ));
     }
     Ok(relative)
 }
@@ -666,7 +719,10 @@ fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
 }
 
 fn reject_unmerged(status: &StatusSnapshot, requested: &[String]) -> Result<(), AppError> {
-    let blocked = status.files.iter().any(|file| file.unmerged && path_selected(file, requested));
+    let blocked = status
+        .files
+        .iter()
+        .any(|file| file.unmerged && path_selected(file, requested));
     if blocked {
         Err(AppError::new(
             "unmerged",
@@ -678,7 +734,9 @@ fn reject_unmerged(status: &StatusSnapshot, requested: &[String]) -> Result<(), 
 }
 
 fn path_selected(file: &FileChange, requested: &[String]) -> bool {
-    requested.iter().any(|path| path == &file.path || file.original_path.as_deref() == Some(path))
+    requested
+        .iter()
+        .any(|path| path == &file.path || file.original_path.as_deref() == Some(path))
 }
 
 fn ensure_no_index_lock(root: &Path) -> Result<(), AppError> {
@@ -828,7 +886,10 @@ mod tests {
             .current_dir(dir)
             .args(args)
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", crate::test_support::isolated_gitconfig())
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                crate::test_support::isolated_gitconfig(),
+            )
             .env("GIT_AUTHOR_NAME", "Twiglane Test")
             .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
             .env("GIT_COMMITTER_NAME", "Twiglane Test")
@@ -843,10 +904,17 @@ mod tests {
             .current_dir(dir)
             .args(args)
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", crate::test_support::isolated_gitconfig())
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                crate::test_support::isolated_gitconfig(),
+            )
             .output()
             .unwrap();
-        assert!(output.status.success(), "{args:?} {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{args:?} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         output.stdout
     }
 
@@ -868,7 +936,10 @@ mod tests {
         let repo = fixture.repo("demo");
         git(&repo, &["init", "-b", "main"]);
         git(&repo, &["config", "user.name", "Twiglane Test"]);
-        git(&repo, &["config", "user.email", "twiglane-test@example.com"]);
+        git(
+            &repo,
+            &["config", "user.email", "twiglane-test@example.com"],
+        );
         let mut lines: Vec<String> = (1..=20).map(|index| format!("line {index}")).collect();
         fs::write(repo.join("demo.txt"), lines.join("\n") + "\n").unwrap();
         git(&repo, &["add", "--", "demo.txt"]);
@@ -878,11 +949,16 @@ mod tests {
         fs::write(repo.join("demo.txt"), lines.join("\n") + "\n").unwrap();
         let bare = fixture.path().join("bare.git");
         git(fixture.path(), &["init", "--bare", "bare.git"]);
-        git(&repo, &["remote", "add", "origin", repo_key(&bare).as_str()]);
+        git(
+            &repo,
+            &["remote", "add", "origin", repo_key(&bare).as_str()],
+        );
         let (path, generation) = open_repo(&backend, &repo).await;
-        let diff = load_diff(&backend, &path, "demo.txt", None, false, generation, 2, 0, 0)
-            .await
-            .unwrap();
+        let diff = load_diff(
+            &backend, &path, "demo.txt", None, false, generation, 2, 0, 0,
+        )
+        .await
+        .unwrap();
         assert!(!diff.binary);
         assert!(diff.text.as_ref().unwrap().contains("+CHANGED A"));
         assert_eq!(diff.hunks.iter().filter(|hunk| hunk.stageable).count(), 2);
@@ -927,9 +1003,11 @@ mod tests {
         git(&repo, &["commit", "-m", "init"]);
         fs::write(repo.join("demo.txt"), "ONE\ntwo\nthree\n").unwrap();
         let (path, generation) = open_repo(&backend, &repo).await;
-        let diff = load_diff(&backend, &path, "demo.txt", None, false, generation, 2, 0, 0)
-            .await
-            .unwrap();
+        let diff = load_diff(
+            &backend, &path, "demo.txt", None, false, generation, 2, 0, 0,
+        )
+        .await
+        .unwrap();
         fs::write(repo.join("demo.txt"), "ONE\nTWO\nthree\n").unwrap();
         let error = stage_hunks(
             &backend,
@@ -948,7 +1026,10 @@ mod tests {
         assert!(error.generation.is_some());
         let cached = git_bytes(&repo, &["diff", "--cached", "--", "demo.txt"]);
         assert!(cached.is_empty());
-        assert_eq!(fs::read(repo.join("demo.txt")).unwrap(), b"ONE\nTWO\nthree\n");
+        assert_eq!(
+            fs::read(repo.join("demo.txt")).unwrap(),
+            b"ONE\nTWO\nthree\n"
+        );
     }
 
     #[tokio::test]
@@ -958,14 +1039,19 @@ mod tests {
         let repo = fixture.repo("demo");
         git(&repo, &["init", "-b", "main"]);
         git(&repo, &["config", "user.name", "Twiglane Test"]);
-        git(&repo, &["config", "user.email", "twiglane-test@example.com"]);
+        git(
+            &repo,
+            &["config", "user.email", "twiglane-test@example.com"],
+        );
         fs::write(repo.join("file.txt"), "keep\n").unwrap();
         git(&repo, &["add", "--", "file.txt"]);
         git(&repo, &["commit", "-m", "init"]);
         fs::write(repo.join("file.txt"), "changed\n").unwrap();
         let (path, generation) = open_repo(&backend, &repo).await;
         backend.store.save_draft(&path, "保留的说明").unwrap();
-        let empty = commit_index(&backend, &path, "   ", generation, 2).await.unwrap_err();
+        let empty = commit_index(&backend, &path, "   ", generation, 2)
+            .await
+            .unwrap_err();
         assert_eq!(empty.code, "empty_message");
         let unstaged = commit_index(&backend, &path, "保留的说明", generation, 3)
             .await
@@ -976,9 +1062,16 @@ mod tests {
         let staged = stage_files(&backend, &path, &["file.txt".to_string()], generation, 4)
             .await
             .unwrap();
-        assert!(staged.files.iter().any(|file| file.path == "file.txt" && file.staged != crate::model::ChangeKind::None));
+        assert!(staged
+            .files
+            .iter()
+            .any(|file| file.path == "file.txt" && file.staged != crate::model::ChangeKind::None));
         let hook = repo.join(".git").join("hooks").join("pre-commit");
-        fs::write(&hook, "#!/bin/sh\necho hook refused the commit >&2\nexit 1\n").unwrap();
+        fs::write(
+            &hook,
+            "#!/bin/sh\necho hook refused the commit >&2\nexit 1\n",
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1012,7 +1105,11 @@ mod tests {
         assert_eq!(missing.code, "identity_missing");
         assert!(missing.message.contains("user.name"));
         assert_eq!(anonymous.store.draft(&path), "保留的说明");
-        assert!(String::from_utf8_lossy(&git_bytes(&repo, &["diff", "--cached", "--", "file.txt"])).contains("+changed"));
+        assert!(String::from_utf8_lossy(&git_bytes(
+            &repo,
+            &["diff", "--cached", "--", "file.txt"]
+        ))
+        .contains("+changed"));
     }
 
     #[tokio::test]
@@ -1022,7 +1119,10 @@ mod tests {
         let repo = fixture.repo("demo");
         git(&repo, &["init", "-b", "main"]);
         git(&repo, &["config", "user.name", "Twiglane Test"]);
-        git(&repo, &["config", "user.email", "twiglane-test@example.com"]);
+        git(
+            &repo,
+            &["config", "user.email", "twiglane-test@example.com"],
+        );
         git(&repo, &["config", "core.autocrlf", "false"]);
         fs::create_dir(repo.join("dir")).unwrap();
         fs::write(repo.join("dir").join("文件 名.txt"), "你好\n").unwrap();
@@ -1038,14 +1138,33 @@ mod tests {
         .await
         .unwrap();
         assert!(staged.branch.unborn);
-        let removed = unstage_files(&backend, &path, &["weird[name].txt".to_string()], staged.generation, 3)
-            .await
-            .unwrap();
-        assert!(removed.files.iter().any(|file| file.path == "weird[name].txt" && file.untracked));
-        assert!(removed.files.iter().any(|file| file.path == "dir/文件 名.txt" && file.staged == crate::model::ChangeKind::Added));
-        let committed = commit_index(&backend, &path, "初始提交 $(touch should-not-run)", removed.generation, 4)
-            .await
-            .unwrap();
+        let removed = unstage_files(
+            &backend,
+            &path,
+            &["weird[name].txt".to_string()],
+            staged.generation,
+            3,
+        )
+        .await
+        .unwrap();
+        assert!(removed
+            .files
+            .iter()
+            .any(|file| file.path == "weird[name].txt" && file.untracked));
+        assert!(removed
+            .files
+            .iter()
+            .any(|file| file.path == "dir/文件 名.txt"
+                && file.staged == crate::model::ChangeKind::Added));
+        let committed = commit_index(
+            &backend,
+            &path,
+            "初始提交 $(touch should-not-run)",
+            removed.generation,
+            4,
+        )
+        .await
+        .unwrap();
         assert!(!committed.pushed);
         assert!(!repo.join("should-not-run").exists());
         assert!(!git_bytes(&repo, &["rev-list", "--max-parents=0", "HEAD"]).is_empty());
@@ -1057,17 +1176,41 @@ mod tests {
             .unwrap();
         assert!(!parents.status.success());
 
-        fs::write(repo.join("crlf.txt"), b"a\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng\r\nh\r\ni\r\nj\r\n").unwrap();
-        let added = stage_files(&backend, &path, &["crlf.txt".to_string()], committed.generation, 6)
-            .await
-            .unwrap();
+        fs::write(
+            repo.join("crlf.txt"),
+            b"a\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng\r\nh\r\ni\r\nj\r\n",
+        )
+        .unwrap();
+        let added = stage_files(
+            &backend,
+            &path,
+            &["crlf.txt".to_string()],
+            committed.generation,
+            6,
+        )
+        .await
+        .unwrap();
         let base = commit_index(&backend, &path, "crlf base", added.generation, 7)
             .await
             .unwrap();
-        fs::write(repo.join("crlf.txt"), b"A\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng\r\nh\r\ni\r\nJ\r\n").unwrap();
-        let diff = load_diff(&backend, &path, "crlf.txt", None, false, base.generation, 8, 0, 0)
-            .await
-            .unwrap();
+        fs::write(
+            repo.join("crlf.txt"),
+            b"A\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng\r\nh\r\ni\r\nJ\r\n",
+        )
+        .unwrap();
+        let diff = load_diff(
+            &backend,
+            &path,
+            "crlf.txt",
+            None,
+            false,
+            base.generation,
+            8,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
         assert!(diff.hunks.len() >= 2);
         let staged_hunk = stage_hunks(
             &backend,
@@ -1092,11 +1235,20 @@ mod tests {
         assert!(work.windows(3).any(|window| window == b"J\r\n"));
         assert!(!committed_crlf.pushed);
 
-        let nl_base: String = (1..=16).map(|index| format!("n{index}")).collect::<Vec<_>>().join("\n");
+        let nl_base: String = (1..=16)
+            .map(|index| format!("n{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         fs::write(repo.join("n.txt"), nl_base.as_bytes()).unwrap();
-        let added_n = stage_files(&backend, &path, &["n.txt".to_string()], committed_crlf.generation, 12)
-            .await
-            .unwrap();
+        let added_n = stage_files(
+            &backend,
+            &path,
+            &["n.txt".to_string()],
+            committed_crlf.generation,
+            12,
+        )
+        .await
+        .unwrap();
         let base_n = commit_index(&backend, &path, "nl base", added_n.generation, 13)
             .await
             .unwrap();
@@ -1104,11 +1256,29 @@ mod tests {
         nl_lines[0] = "N1".to_string();
         nl_lines[15] = "N16".to_string();
         fs::write(repo.join("n.txt"), nl_lines.join("\n").as_bytes()).unwrap();
-        let nl = load_diff(&backend, &path, "n.txt", None, false, base_n.generation, 14, 0, 0)
-            .await
-            .unwrap();
-        assert!(nl.text.as_ref().unwrap().contains("\\ No newline at end of file"));
-        assert!(nl.hunks.len() >= 2, "hunks {:?}", nl.hunks.iter().map(|hunk| &hunk.header).collect::<Vec<_>>());
+        let nl = load_diff(
+            &backend,
+            &path,
+            "n.txt",
+            None,
+            false,
+            base_n.generation,
+            14,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+        assert!(nl
+            .text
+            .as_ref()
+            .unwrap()
+            .contains("\\ No newline at end of file"));
+        assert!(
+            nl.hunks.len() >= 2,
+            "hunks {:?}",
+            nl.hunks.iter().map(|hunk| &hunk.header).collect::<Vec<_>>()
+        );
         let staged_nl = stage_hunks(
             &backend,
             &path,
@@ -1150,33 +1320,84 @@ mod tests {
         fs::write(repo.join("note.txt"), "staged\nunstaged\n").unwrap();
         let (path, generation) = open_repo(&backend, &repo).await;
         let status = read_status(&backend, &repo, generation, 2).await.unwrap();
-        let renamed = status.files.iter().find(|file| file.path == "new.txt").unwrap();
+        let renamed = status
+            .files
+            .iter()
+            .find(|file| file.path == "new.txt")
+            .unwrap();
         assert_eq!(renamed.staged, crate::model::ChangeKind::Renamed);
         assert_eq!(renamed.original_path.as_deref(), Some("old.txt"));
-        let binary = status.files.iter().find(|file| file.path == "data.bin").unwrap();
+        let binary = status
+            .files
+            .iter()
+            .find(|file| file.path == "data.bin")
+            .unwrap();
         assert_eq!(binary.staged, crate::model::ChangeKind::Added);
-        let note = status.files.iter().find(|file| file.path == "note.txt").unwrap();
+        let note = status
+            .files
+            .iter()
+            .find(|file| file.path == "note.txt")
+            .unwrap();
         assert_ne!(note.staged, crate::model::ChangeKind::None);
         assert_ne!(note.unstaged, crate::model::ChangeKind::None);
-        let staged_diff = load_diff(&backend, &path, "note.txt", None, true, status.generation, 3, 0, 0)
-            .await
-            .unwrap();
-        let unstaged_diff = load_diff(&backend, &path, "note.txt", None, false, status.generation, 4, 0, 0)
-            .await
-            .unwrap();
+        let staged_diff = load_diff(
+            &backend,
+            &path,
+            "note.txt",
+            None,
+            true,
+            status.generation,
+            3,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+        let unstaged_diff = load_diff(
+            &backend,
+            &path,
+            "note.txt",
+            None,
+            false,
+            status.generation,
+            4,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
         assert!(staged_diff.text.as_ref().unwrap().contains("+staged"));
         assert!(unstaged_diff.text.as_ref().unwrap().contains("+unstaged"));
-        let binary_diff = load_diff(&backend, &path, "data.bin", None, true, status.generation, 5, 0, 0)
-            .await
-            .unwrap();
+        let binary_diff = load_diff(
+            &backend,
+            &path,
+            "data.bin",
+            None,
+            true,
+            status.generation,
+            5,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
         assert!(binary_diff.binary);
         assert!(binary_diff.text.is_none());
         assert!(binary_diff.hunks.is_empty());
         assert!(binary_diff.summary.contains("二进制"));
-        let unstaged_rename = unstage_files(&backend, &path, &["new.txt".to_string()], status.generation, 6)
-            .await
-            .unwrap();
-        assert!(unstaged_rename.files.iter().any(|file| file.path == "old.txt"));
+        let unstaged_rename = unstage_files(
+            &backend,
+            &path,
+            &["new.txt".to_string()],
+            status.generation,
+            6,
+        )
+        .await
+        .unwrap();
+        assert!(unstaged_rename
+            .files
+            .iter()
+            .any(|file| file.path == "old.txt"));
     }
 
     #[tokio::test]
@@ -1186,7 +1407,10 @@ mod tests {
         let repo = fixture.repo("demo");
         git(&repo, &["init", "-b", "main"]);
         git(&repo, &["config", "user.name", "Twiglane Test"]);
-        git(&repo, &["config", "user.email", "twiglane-test@example.com"]);
+        git(
+            &repo,
+            &["config", "user.email", "twiglane-test@example.com"],
+        );
         let original = format!("{}\nsecond\n", "a".repeat(40));
         fs::write(repo.join("wide.txt"), &original).unwrap();
         git(&repo, &["add", "--", "wide.txt"]);
@@ -1194,9 +1418,11 @@ mod tests {
         let changed = format!("{}\n{}", "B".repeat(40), "C".repeat(4000));
         fs::write(repo.join("wide.txt"), &changed).unwrap();
         let (path, generation) = open_repo(&backend, &repo).await;
-        let diff = load_diff(&backend, &path, "wide.txt", None, false, generation, 2, 0, 400)
-            .await
-            .unwrap();
+        let diff = load_diff(
+            &backend, &path, "wide.txt", None, false, generation, 2, 0, 400,
+        )
+        .await
+        .unwrap();
         assert!(diff.truncated || !diff.complete);
         assert!(diff.text.is_none() || diff.truncated);
         let incomplete = diff.hunks.iter().find(|hunk| !hunk.stageable);
@@ -1220,11 +1446,20 @@ mod tests {
             panic!("expected a truncated hunk, hunks={:?}", diff.hunks);
         }
         fs::write(repo.join(".git").join("index.lock"), b"locked").unwrap();
-        let locked = stage_files(&backend, &path, &["wide.txt".to_string()], diff.generation, 4)
-            .await
-            .unwrap_err();
+        let locked = stage_files(
+            &backend,
+            &path,
+            &["wide.txt".to_string()],
+            diff.generation,
+            4,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(locked.code, "index_lock");
-        assert_eq!(fs::read(repo.join(".git").join("index.lock")).unwrap(), b"locked");
+        assert_eq!(
+            fs::read(repo.join(".git").join("index.lock")).unwrap(),
+            b"locked"
+        );
         fs::remove_file(repo.join(".git").join("index.lock")).unwrap();
         assert!(git_bytes(&repo, &["diff", "--cached"]).is_empty());
     }
@@ -1236,7 +1471,10 @@ mod tests {
         let repo = fixture.repo("demo");
         git(&repo, &["init", "-b", "main"]);
         git(&repo, &["config", "user.name", "Twiglane Test"]);
-        git(&repo, &["config", "user.email", "twiglane-test@example.com"]);
+        git(
+            &repo,
+            &["config", "user.email", "twiglane-test@example.com"],
+        );
         let mut lines: Vec<String> = (1..=20).map(|index| format!("line {index}")).collect();
         lines[1] = "-- dash".to_string();
         lines[14] = "keep".to_string();
@@ -1247,13 +1485,24 @@ mod tests {
         lines[14] = "CHANGED B".to_string();
         fs::write(repo.join("demo.txt"), lines.join("\n") + "\n").unwrap();
         let (path, generation) = open_repo(&backend, &repo).await;
-        let diff = load_diff(&backend, &path, "demo.txt", None, false, generation, 2, 0, 0)
-            .await
-            .unwrap();
-        assert!(diff.lines.iter().any(|line| line.kind == "del" && line.text == "--- dash"));
-        assert!(diff.lines.iter().any(|line| line.kind == "add" && line.text == "+++ plus"));
+        let diff = load_diff(
+            &backend, &path, "demo.txt", None, false, generation, 2, 0, 0,
+        )
+        .await
+        .unwrap();
+        assert!(diff
+            .lines
+            .iter()
+            .any(|line| line.kind == "del" && line.text == "--- dash"));
+        assert!(diff
+            .lines
+            .iter()
+            .any(|line| line.kind == "add" && line.text == "+++ plus"));
         assert!(diff.hunks.len() >= 2, "hunks {:?}", diff.hunks);
-        assert!(diff.hunks.iter().all(|hunk| hunk.complete && hunk.stageable));
+        assert!(diff
+            .hunks
+            .iter()
+            .all(|hunk| hunk.complete && hunk.stageable));
         let staged = stage_hunks(
             &backend,
             &path,
@@ -1266,7 +1515,12 @@ mod tests {
             3,
         )
         .await
-        .unwrap_or_else(|error| panic!("hunk with ---/+++ was not stageable: {} {}", error.code, error.message));
+        .unwrap_or_else(|error| {
+            panic!(
+                "hunk with ---/+++ was not stageable: {} {}",
+                error.code, error.message
+            )
+        });
         let committed = commit_index(&backend, &path, "only markers", staged.generation, 4)
             .await
             .unwrap();
@@ -1297,7 +1551,10 @@ mod tests {
         let _release_guard = ReleaseFile(release.clone());
         install_diff_shim(fixture.path(), &started, &release);
         {
-            let mut locator = backend.git.lock().unwrap_or_else(|error| error.into_inner());
+            let mut locator = backend
+                .git
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             locator.set_resolved(crate::git::locate::ResolvedGit {
                 path: fixture.path().join("git-shim"),
                 version: "2.50.0".into(),
@@ -1310,11 +1567,18 @@ mod tests {
         let first = spawn_diff(backend.clone(), path.clone(), generation, 30);
         wait_for_gate(&started, 1).await;
         let second = spawn_diff(backend.clone(), path.clone(), generation, 31);
-        let overlapped = tokio::time::timeout(std::time::Duration::from_secs(8), wait_for_gate(&started, 2)).await;
+        let overlapped = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            wait_for_gate(&started, 2),
+        )
+        .await;
         if overlapped.is_err() {
             if second.is_finished() {
                 let error = second.await.unwrap().unwrap_err();
-                panic!("second diff was rejected early: {} {}", error.code, error.message);
+                panic!(
+                    "second diff was rejected early: {} {}",
+                    error.code, error.message
+                );
             }
             panic!("second diff never reached git");
         }
@@ -1326,13 +1590,25 @@ mod tests {
 
         fs::remove_file(&release).unwrap();
         let third = spawn_diff(backend.clone(), path.clone(), left.generation, 40);
-        let held = tokio::time::timeout(std::time::Duration::from_secs(8), wait_for_gate(&started, 3)).await;
+        let held = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            wait_for_gate(&started, 3),
+        )
+        .await;
         if held.is_err() {
             panic!("diff did not stay in flight for the next user request");
         }
-        let staged = stage_files(&backend, &path, &["demo.txt".to_string()], left.generation, 41)
-            .await
-            .unwrap_or_else(|error| panic!("next request was blocked: {} {}", error.code, error.message));
+        let staged = stage_files(
+            &backend,
+            &path,
+            &["demo.txt".to_string()],
+            left.generation,
+            41,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("next request was blocked: {} {}", error.code, error.message)
+        });
         assert!(staged
             .files
             .iter()
@@ -1351,7 +1627,10 @@ mod tests {
         request_id: u64,
     ) -> tokio::task::JoinHandle<Result<crate::model::DiffResponse, AppError>> {
         tokio::spawn(async move {
-            load_diff(&backend, &path, "demo.txt", None, false, generation, request_id, 0, 0).await
+            load_diff(
+                &backend, &path, "demo.txt", None, false, generation, request_id, 0, 0,
+            )
+            .await
         })
     }
 

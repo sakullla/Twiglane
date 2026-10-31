@@ -76,7 +76,10 @@ impl GitFixture {
                 OsString::from("GIT_CEILING_DIRECTORIES"),
                 self.root.path().as_os_str().to_os_string(),
             ),
-            (OsString::from("GIT_AUTHOR_NAME"), OsString::from("Twiglane Test")),
+            (
+                OsString::from("GIT_AUTHOR_NAME"),
+                OsString::from("Twiglane Test"),
+            ),
             (
                 OsString::from("GIT_AUTHOR_EMAIL"),
                 OsString::from("twiglane-test@example.com"),

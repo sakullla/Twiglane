@@ -34,13 +34,29 @@ export function branchLabel(branch: BranchInfo): string {
   return branch.name ?? "未知分支";
 }
 
+export function formatCheckedAt(ms: number): string {
+  const date = new Date(ms);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 export function syncLabel(branch: BranchInfo): string {
-  if (branch.liveRemoteChecked) {
-    return "远程已检查";
-  }
-  if (!branch.upstream) return "无上游 · 未检查远程";
   const ahead = branch.ahead ?? 0;
   const behind = branch.behind ?? 0;
+  const when = branch.remoteCheckedAtMs ? formatCheckedAt(branch.remoteCheckedAtMs) : "";
+  if (!branch.upstream) {
+    if (branch.liveRemoteChecked) return when ? `无上游 · 已于 ${when} 检查` : "无上游 · 已检查远程";
+    if (branch.remoteCheckStale) return when ? `无上游 · 检查已于 ${when} 过期` : "无上游 · 检查已过期";
+    return "无上游 · 未检查远程";
+  }
+  if (branch.liveRemoteChecked) {
+    return when ? `领先 ${ahead} · 落后 ${behind} · 已于 ${when} 检查` : `领先 ${ahead} · 落后 ${behind} · 已检查远程`;
+  }
+  if (branch.remoteCheckStale) {
+    return when
+      ? `领先 ${ahead} · 落后 ${behind} · 检查已于 ${when} 过期`
+      : `领先 ${ahead} · 落后 ${behind} · 检查已过期`;
+  }
   return `相对已记录上游 +${ahead} −${behind} · 未检查远程`;
 }
 

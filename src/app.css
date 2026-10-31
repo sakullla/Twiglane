@@ -67,10 +67,19 @@ button { cursor: pointer; }
   border: 0;
 }
 .shell {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   height: 100%;
   min-width: 720px;
+}
+.toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
 }
 .topbar {
   display: flex;
@@ -93,6 +102,7 @@ button { cursor: pointer; }
 .top-actions, .row, .brand-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .spacer { flex: 1; }
 .workspace {
+  flex: 1;
   min-height: 0;
   display: grid;
   grid-template-columns: var(--sidebar) 8px var(--files) 8px minmax(0, 1fr);
@@ -229,6 +239,21 @@ textarea.full-value { width: 100%; min-height: 72px; resize: vertical; white-spa
   background: color-mix(in srgb, var(--danger) 8%, var(--bg-elev));
 }
 .banner.warn { color: var(--warning); }
+.banner.ok {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-elev));
+}
+.modal-card.wide { width: min(720px, 100%); max-height: min(82vh, 820px); overflow: auto; }
+.branch-list { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow: auto; }
+.branch-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+}
 .modal-backdrop {
   position: fixed;
   inset: 0;

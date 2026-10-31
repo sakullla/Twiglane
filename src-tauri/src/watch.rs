@@ -75,7 +75,12 @@ impl WatchHub {
     }
 
     pub fn stop(&self) {
-        if let Some(session) = self.session.lock().unwrap_or_else(|error| error.into_inner()).take() {
+        if let Some(session) = self
+            .session
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
             session.abort.abort();
             drop(session.watcher);
         }
@@ -93,17 +98,22 @@ impl WatchHub {
         }
         let (tx, mut rx) = mpsc::channel(32);
         let tx_events = tx.clone();
-        let mut watcher = notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
-            let message = if result.is_ok() { WatchMsg::Event } else { WatchMsg::Error };
-            match tx_events.try_send(message) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
-                    let _ = tx_events.try_send(WatchMsg::Error);
+        let mut watcher =
+            notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
+                let message = if result.is_ok() {
+                    WatchMsg::Event
+                } else {
+                    WatchMsg::Error
+                };
+                match tx_events.try_send(message) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        let _ = tx_events.try_send(WatchMsg::Error);
+                    }
+                    Err(TrySendError::Closed(_)) => {}
                 }
-                Err(TrySendError::Closed(_)) => {}
-            }
-        })
-        .map_err(|_| AppError::new("watch_unavailable", "文件监听不可用。"))?;
+            })
+            .map_err(|_| AppError::new("watch_unavailable", "文件监听不可用。"))?;
         watcher
             .watch(&path, RecursiveMode::Recursive)
             .map_err(|_| AppError::new("watch_unavailable", "文件监听不可用。"))?;
@@ -136,7 +146,10 @@ impl WatchHub {
             }
         });
         let abort = handle.abort_handle();
-        *self.session.lock().unwrap_or_else(|error| error.into_inner()) = Some(Session { watcher, abort });
+        *self
+            .session
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(Session { watcher, abort });
         Ok(())
     }
 }

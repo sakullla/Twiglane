@@ -49,6 +49,8 @@ export interface BranchInfo {
   ahead: number | null;
   behind: number | null;
   liveRemoteChecked: boolean;
+  remoteCheckedAtMs: number | null;
+  remoteCheckStale: boolean;
 }
 
 export interface StatusSnapshot {
@@ -127,6 +129,49 @@ export interface RepoChanged {
   path: string;
   generation: number;
   degraded: boolean;
+}
+
+export interface RemoteInfo {
+  name: string;
+  fetchUrl: string;
+  pushUrl: string | null;
+}
+
+export interface RemoteState {
+  generation: number;
+  remotes: RemoteInfo[];
+  snapshot: StatusSnapshot;
+}
+
+export interface BranchRecord {
+  name: string;
+  remote: boolean;
+  current: boolean;
+  upstream: string | null;
+  worktree: string | null;
+}
+
+export interface BranchState {
+  generation: number;
+  branches: BranchRecord[];
+  snapshot: StatusSnapshot;
+}
+
+export interface CloneResult {
+  path: string;
+  opened: OpenedRepository;
+}
+
+export interface CommitPushReport {
+  committed: boolean;
+  pushed: boolean;
+  retryPush: boolean;
+  oid: string;
+  branch: string;
+  summary: string;
+  pushError: string | null;
+  generation: number;
+  snapshot: StatusSnapshot;
 }
 
 export interface AppFailure {

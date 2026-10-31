@@ -22,8 +22,9 @@ use crate::error::AppError;
 use crate::git::ops::{self, Backend};
 use crate::git::runner::RealRunner;
 use crate::model::{
-    CommitResult, DiffResponse, GitInfo, OpenedRepository, PanelWidths, RecentRepo, RepoChanged,
-    SettingsDto, StatusSnapshot, Theme,
+    BranchState, CloneResult, CommitPushReport, CommitResult, DiffResponse, GitInfo,
+    OpenedRepository, PanelWidths, RecentRepo, RemoteState, RepoChanged, SettingsDto,
+    StatusSnapshot, Theme,
 };
 use crate::shutdown::Shutdown;
 use crate::state::AppStore;
@@ -41,7 +42,11 @@ pub fn run() {
                 .map_err(|error| error.to_string())?;
             std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
             let store = AppStore::open(dir.join("state.json"));
-            let backend = Arc::new(Backend::new(store, RealRunner::default(), Arc::new(shutdown)));
+            let backend = Arc::new(Backend::new(
+                store,
+                RealRunner::default(),
+                Arc::new(shutdown),
+            ));
             app.manage(backend);
             Ok(())
         })
@@ -61,6 +66,20 @@ pub fn run() {
             unstage_files,
             stage_hunks,
             commit_changes,
+            clone_repository,
+            remote_state,
+            add_remote,
+            set_remote_url,
+            fetch_remote,
+            pull_fast_forward,
+            push_branch,
+            publish_branch,
+            commit_and_push,
+            branch_state,
+            create_branch,
+            switch_branch,
+            delete_branch,
+            delete_remote_branch,
             set_theme,
             set_panel_widths,
             save_draft
@@ -82,7 +101,13 @@ pub fn run() {
 
 fn install_menu(app: &tauri::App) -> tauri::Result<()> {
     let search = MenuItem::with_id(app, "focus-search", "搜索仓库", true, Some("CmdOrCtrl+K"))?;
-    let commit = MenuItem::with_id(app, "commit-local", "提交到本地", true, Some("CmdOrCtrl+Enter"))?;
+    let commit = MenuItem::with_id(
+        app,
+        "commit-local",
+        "提交到本地",
+        true,
+        Some("CmdOrCtrl+Enter"),
+    )?;
     let menu = Menu::with_items(app, &[&search, &commit])?;
     app.set_menu(menu)?;
     app.on_menu_event(|app_handle, event| {
@@ -160,7 +185,9 @@ fn start_watch<R: Runtime>(app: &AppHandle<R>, backend: &Arc<Backend>, path: &st
                 );
             }),
             Arc::new(move || {
-                let generation = degraded_backend.scheduler.current_generation(&degraded_path);
+                let generation = degraded_backend
+                    .scheduler
+                    .current_generation(&degraded_path);
                 let _ = degraded_app.emit(
                     "repo-changed",
                     RepoChanged {
@@ -180,7 +207,10 @@ async fn detect_git(state: State<'_, Arc<Backend>>) -> Result<GitInfo, AppError>
 }
 
 #[tauri::command]
-async fn set_git_executable(state: State<'_, Arc<Backend>>, path: String) -> Result<GitInfo, AppError> {
+async fn set_git_executable(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+) -> Result<GitInfo, AppError> {
     ops::set_git_executable(state.inner(), &path).await
 }
 
@@ -239,7 +269,10 @@ fn close_repository(state: State<'_, Arc<Backend>>) {
 }
 
 #[tauri::command]
-fn forget_recent(state: State<'_, Arc<Backend>>, path: String) -> Result<Vec<RecentRepo>, AppError> {
+fn forget_recent(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+) -> Result<Vec<RecentRepo>, AppError> {
     ops::forget_recent(state.inner(), &path)
 }
 
@@ -340,6 +373,183 @@ async fn commit_changes(
     crate::git::changes::commit_index(state.inner(), &path, &message, generation, request_id).await
 }
 
+#[tauri::command(rename_all = "camelCase")]
+async fn clone_repository<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, Arc<Backend>>,
+    url: String,
+    parent: String,
+    name: String,
+    request_id: u64,
+) -> Result<CloneResult, AppError> {
+    let backend = Arc::clone(state.inner());
+    let mut cloned =
+        crate::git::sync::clone_repository(&backend, &url, &parent, &name, request_id).await?;
+    cloned.opened.watch_degraded = start_watch(&app, &backend, &cloned.opened.summary.path);
+    Ok(cloned)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn remote_state(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<RemoteState, AppError> {
+    crate::git::sync::remote_state(state.inner(), &path, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn add_remote(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    name: String,
+    url: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<RemoteState, AppError> {
+    crate::git::sync::add_remote(state.inner(), &path, &name, &url, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn set_remote_url(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    name: String,
+    url: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<RemoteState, AppError> {
+    crate::git::sync::set_remote_url(state.inner(), &path, &name, &url, generation, request_id)
+        .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn fetch_remote(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    crate::git::sync::fetch_remote(state.inner(), &path, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn pull_fast_forward(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    crate::git::sync::pull_fast_forward(state.inner(), &path, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn push_branch(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    crate::git::sync::push_branch(state.inner(), &path, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn publish_branch(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    remote: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    crate::git::sync::publish_branch(state.inner(), &path, &remote, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn commit_and_push(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    message: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<CommitPushReport, AppError> {
+    crate::git::sync::commit_and_push(state.inner(), &path, &message, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn branch_state(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    crate::git::sync::branch_state(state.inner(), &path, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn create_branch(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    name: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    crate::git::sync::create_branch(state.inner(), &path, &name, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn switch_branch(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    name: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    crate::git::sync::switch_branch(state.inner(), &path, &name, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn delete_branch(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    name: String,
+    confirm_unmerged: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    crate::git::sync::delete_branch(
+        state.inner(),
+        &path,
+        &name,
+        confirm_unmerged,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn delete_remote_branch(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    remote: String,
+    name: String,
+    confirm: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    crate::git::sync::delete_remote_branch(
+        state.inner(),
+        &path,
+        &remote,
+        &name,
+        confirm,
+        generation,
+        request_id,
+    )
+    .await
+}
+
 #[tauri::command]
 fn set_theme(state: State<'_, Arc<Backend>>, theme: Theme) -> Result<(), AppError> {
     ops::set_theme(state.inner(), theme)
@@ -354,7 +564,11 @@ fn set_panel_widths(
 }
 
 #[tauri::command]
-fn save_draft(state: State<'_, Arc<Backend>>, path: String, message: String) -> Result<(), AppError> {
+fn save_draft(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    message: String,
+) -> Result<(), AppError> {
     ops::save_draft(state.inner(), &path, &message)
 }
 
@@ -375,7 +589,10 @@ mod ipc_contract {
             .current_dir(dir)
             .args(args)
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", crate::test_support::isolated_gitconfig())
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                crate::test_support::isolated_gitconfig(),
+            )
             .env("GIT_AUTHOR_NAME", "Twiglane Test")
             .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
             .env("GIT_COMMITTER_NAME", "Twiglane Test")
@@ -425,7 +642,9 @@ mod ipc_contract {
             tauri::ipc::InvokeResponse::Ok(body) => {
                 body.deserialize().map_err(|error| error.to_string())
             }
-            tauri::ipc::InvokeResponse::Err(tauri::ipc::InvokeError(value)) => Err(value.to_string()),
+            tauri::ipc::InvokeResponse::Err(tauri::ipc::InvokeError(value)) => {
+                Err(value.to_string())
+            }
         }
     }
 
@@ -441,6 +660,20 @@ mod ipc_contract {
             "unstage_files",
             "stage_hunks",
             "commit_changes",
+            "clone_repository",
+            "remote_state",
+            "add_remote",
+            "set_remote_url",
+            "fetch_remote",
+            "pull_fast_forward",
+            "push_branch",
+            "publish_branch",
+            "commit_and_push",
+            "branch_state",
+            "create_branch",
+            "switch_branch",
+            "delete_branch",
+            "delete_remote_branch",
         ] {
             let payload = payload_after(command);
             assert!(payload.contains("requestId"), "{command}: {payload}");
@@ -471,7 +704,11 @@ mod ipc_contract {
                 super::stage_files,
                 super::unstage_files,
                 super::stage_hunks,
-                super::commit_changes
+                super::commit_changes,
+                super::clone_repository,
+                super::fetch_remote,
+                super::commit_and_push,
+                super::delete_branch
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("ipc test app");
@@ -541,6 +778,38 @@ mod ipc_contract {
                 serde_json::json!({
                     "path": "/tmp/unused",
                     "message": "note",
+                    "generation": 1,
+                    "request_id": 1
+                }),
+            ),
+            (
+                "clone_repository",
+                serde_json::json!({
+                    "url": "https://example.com/app.git",
+                    "parent": "/tmp/unused",
+                    "name": "app",
+                    "request_id": 1
+                }),
+            ),
+            (
+                "fetch_remote",
+                serde_json::json!({"path": "/tmp/unused", "generation": 1, "request_id": 1}),
+            ),
+            (
+                "commit_and_push",
+                serde_json::json!({
+                    "path": "/tmp/unused",
+                    "message": "note",
+                    "generation": 1,
+                    "request_id": 1
+                }),
+            ),
+            (
+                "delete_branch",
+                serde_json::json!({
+                    "path": "/tmp/unused",
+                    "name": "topic",
+                    "confirmUnmerged": false,
                     "generation": 1,
                     "request_id": 1
                 }),

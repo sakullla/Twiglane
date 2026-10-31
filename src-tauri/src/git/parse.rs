@@ -167,7 +167,9 @@ fn parse_unmerged(record: &str) -> Result<FileChange, AppError> {
 }
 
 fn parse_divergence(token: &str) -> Option<u64> {
-    let digits = token.strip_prefix('+').or_else(|| token.strip_prefix('-'))?;
+    let digits = token
+        .strip_prefix('+')
+        .or_else(|| token.strip_prefix('-'))?;
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
@@ -179,9 +181,10 @@ fn xy(value: &str) -> Result<(ChangeKind, ChangeKind), AppError> {
     let staged = chars.next();
     let unstaged = chars.next();
     match (staged, unstaged, chars.next()) {
-        (Some(staged), Some(unstaged), None) => {
-            Ok((ChangeKind::from_status_char(staged), ChangeKind::from_status_char(unstaged)))
-        }
+        (Some(staged), Some(unstaged), None) => Ok((
+            ChangeKind::from_status_char(staged),
+            ChangeKind::from_status_char(unstaged),
+        )),
         _ => Err(AppError::new(
             "status_parse",
             "Git 状态标记无法识别，未据此修改仓库。",
@@ -230,7 +233,10 @@ mod tests {
         assert_eq!(status.files[0].path, "dir/file one.txt");
         assert_eq!(status.files[0].unstaged, ChangeKind::Modified);
         assert_eq!(status.files[1].path, "file two.txt");
-        assert_eq!(status.files[1].original_path.as_deref(), Some("file one.txt"));
+        assert_eq!(
+            status.files[1].original_path.as_deref(),
+            Some("file one.txt")
+        );
         assert_eq!(status.files[1].staged, ChangeKind::Renamed);
         assert!(status.files[2].untracked);
         assert_eq!(status.files[2].path, "new file.txt");

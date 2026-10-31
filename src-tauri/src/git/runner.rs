@@ -65,7 +65,12 @@ impl Default for RealRunner {
 }
 
 impl RealRunner {
-    pub fn base_request(&self, program: PathBuf, args: Vec<std::ffi::OsString>, shutdown: Arc<Shutdown>) -> RunRequest {
+    pub fn base_request(
+        &self,
+        program: PathBuf,
+        args: Vec<std::ffi::OsString>,
+        shutdown: Arc<Shutdown>,
+    ) -> RunRequest {
         RunRequest {
             program,
             args,
@@ -85,6 +90,25 @@ impl ProcessRunner for RealRunner {
     }
 }
 
+pub const SSH_BATCH_COMMAND: &str = "ssh -o BatchMode=yes";
+
+fn apply_noninteractive(
+    command: &mut Command,
+    extra_env: &[(std::ffi::OsString, std::ffi::OsString)],
+) {
+    let overridden = |name: &str| extra_env.iter().any(|(key, _)| key == name);
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    if !overridden("GCM_INTERACTIVE") {
+        command.env("GCM_INTERACTIVE", "Never");
+    }
+    let ssh_overridden = overridden("GIT_SSH_COMMAND") || overridden("GIT_SSH");
+    let ssh_inherited =
+        std::env::var_os("GIT_SSH_COMMAND").is_some() || std::env::var_os("GIT_SSH").is_some();
+    if !ssh_overridden && !ssh_inherited {
+        command.env("GIT_SSH_COMMAND", SSH_BATCH_COMMAND);
+    }
+}
+
 pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerError> {
     if request.shutdown.is_cancelled() {
         return Err(RunnerError::Cancelled);
@@ -94,8 +118,7 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
         .args(&request.args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .env("GIT_TERMINAL_PROMPT", "0");
+        .kill_on_drop(true);
     if request.stdin.is_some() {
         command.stdin(Stdio::piped());
     } else {
@@ -104,7 +127,10 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
     for (key, value) in &request.extra_env {
         command.env(key, value);
     }
-    let mut child = command.spawn().map_err(|error| RunnerError::Spawn(error.to_string()))?;
+    apply_noninteractive(&mut command, &request.extra_env);
+    let mut child = command
+        .spawn()
+        .map_err(|error| RunnerError::Spawn(error.to_string()))?;
     if let Some(bytes) = request.stdin {
         let mut stdin = child
             .stdin
@@ -123,7 +149,11 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
         .stderr
         .take()
         .ok_or_else(|| RunnerError::Io("缺少 stderr".into()))?;
-    let mut stdout_read = Box::pin(read_capped(stdout, request.output_limit, request.truncate_stdout));
+    let mut stdout_read = Box::pin(read_capped(
+        stdout,
+        request.output_limit,
+        request.truncate_stdout,
+    ));
     let mut stderr_read = Box::pin(read_capped(stderr, request.output_limit, false));
     let mut stdout_buf = None;
     let mut stderr_buf = None;
@@ -171,7 +201,11 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
     })
 }
 
-async fn read_capped<R>(mut reader: R, limit: usize, truncate: bool) -> Result<(Vec<u8>, bool), RunnerError>
+async fn read_capped<R>(
+    mut reader: R,
+    limit: usize,
+    truncate: bool,
+) -> Result<(Vec<u8>, bool), RunnerError>
 where
     R: AsyncRead + Unpin,
 {
@@ -224,7 +258,10 @@ mod tests {
         let started = Instant::now();
         let error = run_process(RunRequest {
             program,
-            args: vec!["-c".into(), "import sys; sys.stdout.buffer.write(b'a'*2000000)".into()],
+            args: vec![
+                "-c".into(),
+                "import sys; sys.stdout.buffer.write(b'a'*2000000)".into(),
+            ],
             extra_env: Vec::new(),
             timeout: Duration::from_secs(10),
             output_limit: 1024,

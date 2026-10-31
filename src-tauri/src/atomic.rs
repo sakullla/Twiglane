@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "state path has no parent")
-    })?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "state path has no parent"))?;
     fs::create_dir_all(parent)?;
     let tmp = temp_path(path);
     let write_result = (|| {
@@ -33,10 +33,7 @@ fn temp_path(path: &Path) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    parent.join(format!(
-        ".{name}.{}.{seq}.tmp",
-        std::process::id()
-    ))
+    parent.join(format!(".{name}.{}.{seq}.tmp", std::process::id()))
 }
 
 fn sync_dir(parent: &Path) {

@@ -10,8 +10,9 @@
     onInput: (value: string) => void;
     onBlur: () => void;
     onCommit: () => void;
+    onCommitPush?: () => void;
   }
-  let { branch, scope, paths, value, disabled, onInput, onBlur, onCommit }: Props = $props();
+  let { branch, scope, paths, value, disabled, onInput, onBlur, onCommit, onCommitPush }: Props = $props();
   let shown = $derived(paths.slice(0, 8));
   let ready = $derived(value.trim().length > 0 && paths.length > 0 && !disabled);
 </script>
@@ -41,7 +42,8 @@
   ></textarea>
   <div class="row">
     <button type="button" class="primary" disabled={!ready} onclick={onCommit}>提交到本地</button>
+    <button type="button" class="ghost" disabled={!ready || !onCommitPush} onclick={() => onCommitPush?.()}>提交并推送</button>
     <span class="hint">{MODIFIER_LABEL}+Enter</span>
   </div>
-  <p class="hint">说明按仓库保存在本机应用数据中。失败时会保留说明和仍然有效的暂存。不会保存凭据，也不会自动推送。</p>
+  <p class="hint">说明按仓库保存在本机应用数据中。失败时会保留说明和仍然有效的暂存。提交到本地不会推送。提交并推送会先创建提交，再单独推送；推送失败可以只重试推送。</p>
 </section>

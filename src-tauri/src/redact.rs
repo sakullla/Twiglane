@@ -12,9 +12,8 @@ static BEARER: LazyLock<Regex> =
 static GH_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b").expect("gh token regex")
 });
-static GH_PAT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b").expect("github pat regex")
-});
+static GH_PAT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b").expect("github pat regex"));
 static GL_PAT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\bglpat-[A-Za-z0-9_\-]{20,}\b").expect("gitlab pat regex"));
 static PEM: LazyLock<Regex> = LazyLock::new(|| {
@@ -25,14 +24,14 @@ static PEM_HEADER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----").expect("pem header regex")
 });
 static ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)\b(password|passwd|token|secret|api[_-]?key|authorization)\b(\s*[:=]\s*)(\S+)",
-    )
-    .expect("assignment regex")
+    Regex::new(r"(?i)\b(password|passwd|token|secret|api[_-]?key|authorization)\b(\s*[:=]\s*)(\S+)")
+        .expect("assignment regex")
 });
 
 pub fn redact(input: &str) -> String {
-    let mut text = PEM.replace_all(input, "[redacted-private-key]").into_owned();
+    let mut text = PEM
+        .replace_all(input, "[redacted-private-key]")
+        .into_owned();
     text = PEM_HEADER
         .replace_all(&text, "[redacted-private-key]")
         .into_owned();
@@ -40,18 +39,10 @@ pub fn redact(input: &str) -> String {
         .replace_all(&text, "$1://[redacted]@")
         .into_owned();
     text = BEARER.replace_all(&text, "Bearer [redacted]").into_owned();
-    text = GH_TOKEN
-        .replace_all(&text, "[redacted-token]")
-        .into_owned();
-    text = GH_PAT
-        .replace_all(&text, "[redacted-token]")
-        .into_owned();
-    text = GL_PAT
-        .replace_all(&text, "[redacted-token]")
-        .into_owned();
-    ASSIGNMENT
-        .replace_all(&text, "$1$2[redacted]")
-        .into_owned()
+    text = GH_TOKEN.replace_all(&text, "[redacted-token]").into_owned();
+    text = GH_PAT.replace_all(&text, "[redacted-token]").into_owned();
+    text = GL_PAT.replace_all(&text, "[redacted-token]").into_owned();
+    ASSIGNMENT.replace_all(&text, "$1$2[redacted]").into_owned()
 }
 
 pub fn contains_secret(input: &str) -> bool {

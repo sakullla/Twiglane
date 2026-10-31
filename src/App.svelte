@@ -24,6 +24,7 @@
   import DetailDialog from "./lib/components/DetailDialog.svelte";
   import DiffView from "./lib/components/DiffView.svelte";
   import FileList from "./lib/components/FileList.svelte";
+  import RepoDialogs from "./lib/components/RepoDialogs.svelte";
   import RepoSidebar from "./lib/components/RepoSidebar.svelte";
 
   let theme = $state<Theme>("light");
@@ -44,6 +45,9 @@
   let navCollapsed = $state(false);
   let detail = $state<{ title: string; value: string } | null>(null);
   let confirmPath = $state<string | null>(null);
+  let dialog = $state<"clone" | "remote" | "branch" | null>(null);
+  let pushRetry = $state(false);
+  let phaseNote = $state<string | null>(null);
   let degraded = $state(false);
   let windowFocused = $state(true);
   let requestSerial = 1;
@@ -99,6 +103,8 @@
     selected = retainSelection(next.snapshot.files, selected);
     diff = null;
     diffError = null;
+    pushRetry = false;
+    phaseNote = null;
     recent = [
       { name: next.summary.name, path: next.summary.path, openedAtMs: Date.now() },
       ...recent.filter((repo) => repo.path !== next.summary.path),
@@ -198,13 +204,9 @@
 
   function handleMutationError(error: unknown) {
     const failure = normalizeError(error);
-    if (
-      (failure.code === "stale" || failure.code === "stale_patch") &&
-      failure.generation !== undefined &&
-      opened
-    ) {
+    if (failure.generation !== undefined && opened && failure.generation !== opened.generation) {
       opened = { ...opened, generation: failure.generation };
-      void refresh();
+      if (failure.code === "stale" || failure.code === "stale_patch") void refresh();
     }
     showError(failure);
   }
@@ -352,6 +354,94 @@
       banner = result.pushed ? banner : null;
       live = result.summary;
       await loadSelectedDiff();
+    } catch (error) {
+      if (opened?.summary.path === current.summary.path) handleMutationError(error);
+    } finally {
+      pending = null;
+    }
+  }
+
+  async function commitAndPush() {
+    const current = opened;
+    if (!current || pending) return;
+    const message = draft;
+    if (!message.trim()) {
+      banner = "请先填写提交说明。";
+      live = banner;
+      return;
+    }
+    if (commitScope(branchText, current.snapshot.files).paths.length === 0) {
+      banner = "暂存区是空的，没有可以提交的内容。";
+      live = banner;
+      return;
+    }
+    pending = "commit-push";
+    phaseNote = "正在创建本地提交";
+    live = phaseNote;
+    try {
+      await flushDraft(current.summary.path);
+      const result = await api.commitAndPush(current.summary.path, message, current.generation, nextId());
+      if (opened?.summary.path !== current.summary.path) return;
+      draft = "";
+      drafts.load(current.summary.path, "");
+      opened = { ...opened, snapshot: result.snapshot, generation: result.generation, draft: "" };
+      selected = selectionAfterEdit(result.snapshot.files, selected);
+      pushRetry = result.retryPush;
+      phaseNote = result.summary;
+      banner = result.pushed ? null : result.pushError;
+      live = result.summary;
+      await loadSelectedDiff();
+    } catch (error) {
+      if (opened?.summary.path === current.summary.path) handleMutationError(error);
+    } finally {
+      pending = null;
+    }
+  }
+
+  async function retryPush() {
+    const current = opened;
+    if (!current || pending) return;
+    pending = "push";
+    phaseNote = "正在重试推送，不会再次提交";
+    live = phaseNote;
+    try {
+      const snapshot = await api.pushBranch(current.summary.path, current.generation, nextId());
+      if (opened?.summary.path !== current.summary.path) return;
+      applySnapshot(snapshot);
+      pushRetry = false;
+      phaseNote = "推送已完成。没有再次创建提交。";
+      banner = null;
+      live = phaseNote;
+    } catch (error) {
+      if (opened?.summary.path === current.summary.path) {
+        pushRetry = true;
+        handleMutationError(error);
+      }
+    } finally {
+      pending = null;
+    }
+  }
+
+  async function runSync(name: string, action: (path: string, generation: number) => Promise<StatusSnapshot>) {
+    const current = opened;
+    if (!current || pending) return;
+    pending = name;
+    live = name === "fetch" ? "正在检查远程" : name === "pull" ? "正在快进拉取" : name === "publish" ? "正在发布分支" : "正在推送";
+    try {
+      const snapshot = await action(current.summary.path, current.generation);
+      if (opened?.summary.path !== current.summary.path) return;
+      applySnapshot(snapshot);
+      banner = null;
+      if (name === "push" || name === "publish") pushRetry = false;
+      phaseNote =
+        name === "fetch"
+          ? "远程检查已完成，工作区文件没有因为检查而改变。"
+          : name === "pull"
+            ? "快进拉取已完成，文件和同步状态已刷新。"
+            : name === "publish"
+              ? "分支已发布并关联上游。"
+              : "推送已完成，没有强行推送。";
+      live = phaseNote;
     } catch (error) {
       if (opened?.summary.path === current.summary.path) handleMutationError(error);
     } finally {
@@ -611,9 +701,26 @@
       <button type="button" class="ghost" onclick={() => (detail = { title: "完整分支", value: branchText })}>查看完整分支</button>
     {/if}
     <span class="spacer"></span>
+    <button type="button" class="ghost" onclick={() => (dialog = "clone")} disabled={pending !== null}>克隆</button>
     <button type="button" class="ghost" onclick={addRepo} disabled={pending !== null}>添加仓库</button>
     <button type="button" class="primary" onclick={chooseCreate} disabled={pending !== null}>新建仓库</button>
   </header>
+  {#if opened}
+    <div class="toolbar" aria-label="同步与分支">
+      <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => runSync("fetch", (path, generation) => api.fetchRemote(path, generation, nextId()))}>检查远程</button>
+      <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => runSync("pull", (path, generation) => api.pullFastForward(path, generation, nextId()))}>拉取</button>
+      <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => runSync("push", (path, generation) => api.pushBranch(path, generation, nextId()))}>推送</button>
+      {#if !opened.snapshot.branch.upstream}
+        <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => runSync("publish", (path, generation) => api.publishBranch(path, "", generation, nextId()))}>发布分支</button>
+      {/if}
+      {#if pushRetry}
+        <button type="button" class="primary compact" disabled={pending !== null} onclick={retryPush}>重试推送</button>
+      {/if}
+      <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => (dialog = "branch")}>分支</button>
+      <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => (dialog = "remote")}>远程</button>
+    </div>
+  {/if}
+  {#if phaseNote}<div class="banner ok" role="status">{phaseNote}</div>{/if}
   {#if banner}<div class="banner" role="alert">{banner}</div>{/if}
   {#if warning}<div class="banner warn" role="status">{warning}</div>{/if}
   {#if git && !git.available}
@@ -680,11 +787,12 @@
           onInput={onDraftInput}
           onBlur={() => void flushDraft(drafts.path)}
           onCommit={commitLocal}
+          onCommitPush={commitAndPush}
         />
       {:else}
         <div class="empty">
           <strong>打开一个仓库</strong>
-          <p>{BRAND.full}。{BRAND.tagline} 添加已有目录只会检查它是不是仓库；新建会先确认，取消不会写入。</p>
+          <p>{BRAND.full}。{BRAND.tagline} 添加已有目录只会检查它是不是仓库；新建会先确认，取消不会写入。克隆也不会覆盖已有文件。</p>
           <p class="hint">搜索快捷键是 {MODIFIER_LABEL}+K。</p>
         </div>
       {/if}
@@ -713,6 +821,25 @@
   </div>
 </div>
 
+<RepoDialogs
+  mode={dialog}
+  {opened}
+  disabled={pending !== null}
+  onClose={() => (dialog = null)}
+  onBusy={(name) => (pending = name)}
+  onSnapshot={applySnapshot}
+  onOpened={(repo) => {
+    banner = null;
+    rememberOpened(repo);
+  }}
+  onFailure={handleMutationError}
+  onNotice={(message) => {
+    phaseNote = message;
+    live = message;
+    banner = null;
+  }}
+  {nextId}
+/>
 {#if detail}
   <DetailDialog title={detail.title} value={detail.value} onClose={() => (detail = null)} />
 {/if}

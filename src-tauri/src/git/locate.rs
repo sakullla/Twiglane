@@ -122,7 +122,6 @@ impl GitLocator {
             message: "未检测到 Git。请安装 Git 或选择可执行文件后重试。".into(),
         }
     }
-
 }
 
 pub enum Detection {
@@ -212,10 +211,7 @@ pub fn parse_git_version(text: &str) -> Result<ResolvedGit, AppError> {
     };
     let major: u64 = captures[1].parse().unwrap_or(0);
     let minor: u64 = captures[2].parse().unwrap_or(0);
-    let patch = captures
-        .get(3)
-        .map(|value| value.as_str())
-        .unwrap_or("0");
+    let patch = captures.get(3).map(|value| value.as_str()).unwrap_or("0");
     let version = format!("{major}.{minor}.{patch}");
     Ok(ResolvedGit {
         path: PathBuf::new(),
@@ -242,7 +238,11 @@ fn candidates() -> Vec<PathBuf> {
 }
 
 fn git_file_name() -> &'static str {
-    if cfg!(windows) { "git.exe" } else { "git" }
+    if cfg!(windows) {
+        "git.exe"
+    } else {
+        "git"
+    }
 }
 
 fn known_locations() -> Vec<PathBuf> {

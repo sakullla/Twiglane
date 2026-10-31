@@ -4,10 +4,9 @@ use std::path::Path;
 #[test]
 fn capabilities_do_not_grant_a_shell() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let capabilities: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(root.join("capabilities/default.json")).unwrap(),
-    )
-    .unwrap();
+    let capabilities: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.join("capabilities/default.json")).unwrap())
+            .unwrap();
     let permissions: Vec<&str> = capabilities["permissions"]
         .as_array()
         .unwrap()
@@ -32,6 +31,20 @@ fn capabilities_do_not_grant_a_shell() {
         "allow-unstage-files",
         "allow-stage-hunks",
         "allow-commit-changes",
+        "allow-clone-repository",
+        "allow-remote-state",
+        "allow-add-remote",
+        "allow-set-remote-url",
+        "allow-fetch-remote",
+        "allow-pull-fast-forward",
+        "allow-push-branch",
+        "allow-publish-branch",
+        "allow-commit-and-push",
+        "allow-branch-state",
+        "allow-create-branch",
+        "allow-switch-branch",
+        "allow-delete-branch",
+        "allow-delete-remote-branch",
         "allow-set-theme",
         "allow-set-panel-widths",
         "allow-save-draft",

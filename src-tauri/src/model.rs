@@ -121,8 +121,12 @@ pub struct BranchInfo {
     /// `branch.ab` counts. Porcelain signs are directions, so both values stay non-negative.
     pub ahead: Option<u64>,
     pub behind: Option<u64>,
-    /// T1 never contacts the network. Tracking numbers are local records only.
+    /// True only after a successful remote check that is still inside the fresh window.
     pub live_remote_checked: bool,
+    #[serde(default)]
+    pub remote_checked_at_ms: Option<u64>,
+    #[serde(default)]
+    pub remote_check_stale: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -213,4 +217,59 @@ pub struct RepoChanged {
     pub path: String,
     pub generation: u64,
     pub degraded: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteInfo {
+    pub name: String,
+    pub fetch_url: String,
+    pub push_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteState {
+    pub generation: u64,
+    pub remotes: Vec<RemoteInfo>,
+    pub snapshot: StatusSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchRecord {
+    pub name: String,
+    pub remote: bool,
+    pub current: bool,
+    pub upstream: Option<String>,
+    pub worktree: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchState {
+    pub generation: u64,
+    pub branches: Vec<BranchRecord>,
+    pub snapshot: StatusSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneResult {
+    pub path: String,
+    pub opened: OpenedRepository,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitPushReport {
+    pub committed: bool,
+    pub pushed: bool,
+    pub retry_push: bool,
+    pub oid: String,
+    pub branch: String,
+    pub summary: String,
+    pub push_error: Option<String>,
+    pub generation: u64,
+    pub snapshot: StatusSnapshot,
 }

@@ -145,5 +145,7 @@ describe("差异与提交", () => {
     expect(screen.getByText("提交到 main（尚无提交） · 暂存区是空的")).toBeTruthy();
     expect(screen.getByText(/只创建本地提交，不会推送。/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "提交到本地" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "提交并推送" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText(/推送失败可以只重试推送/)).toBeTruthy();
   });
 });

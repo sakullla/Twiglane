@@ -96,7 +96,10 @@ impl<R: ProcessRunner> GitScheduler<R> {
     }
 
     pub fn bump_generation(&self, repo_key: &str) -> u64 {
-        self.lane(repo_key).generation.fetch_add(1, Ordering::SeqCst) + 1
+        self.lane(repo_key)
+            .generation
+            .fetch_add(1, Ordering::SeqCst)
+            + 1
     }
 
     pub async fn execute(&self, job: GitJob) -> Result<ScheduledOutput, AppError> {
@@ -122,7 +125,10 @@ impl<R: ProcessRunner> GitScheduler<R> {
         }
         let generation = lane.generation.load(Ordering::SeqCst);
         if generation != job.generation {
-            return Err(AppError::new("stale", "仓库状态已变化，请查看刷新后的结果。").with_generation(generation));
+            return Err(
+                AppError::new("stale", "仓库状态已变化，请查看刷新后的结果。")
+                    .with_generation(generation),
+            );
         }
         if self.shutdown.is_cancelled() {
             return Err(AppError::new("cancelled", "操作已取消。"));
@@ -147,7 +153,8 @@ impl<R: ProcessRunner> GitScheduler<R> {
         let after = lane.generation.load(Ordering::SeqCst);
         if job.kind == JobKind::Read && after != job.generation {
             return Err(
-                AppError::new("stale", "仓库状态已变化，请查看刷新后的结果。").with_generation(after)
+                AppError::new("stale", "仓库状态已变化，请查看刷新后的结果。")
+                    .with_generation(after),
             );
         }
         Ok(ScheduledOutput {
@@ -237,7 +244,8 @@ impl<R: ProcessRunner> GitScheduler<R> {
         let current = lane.generation.load(Ordering::SeqCst);
         if current != generation {
             return Err(
-                AppError::new("stale", "仓库状态已变化，请查看刷新后的结果。").with_generation(current)
+                AppError::new("stale", "仓库状态已变化，请查看刷新后的结果。")
+                    .with_generation(current),
             );
         }
         Ok(WriteGuard {
@@ -259,10 +267,7 @@ impl<'a> RequestGuard<'a> {
     fn enter(inflight: &'a StdMutex<HashSet<u64>>, id: u64) -> Result<Self, AppError> {
         let mut guard = inflight.lock().unwrap_or_else(|error| error.into_inner());
         if !guard.insert(id) {
-            return Err(AppError::new(
-                "duplicate",
-                "该操作正在执行，未重复启动。",
-            ));
+            return Err(AppError::new("duplicate", "该操作正在执行，未重复启动。"));
         }
         drop(guard);
         Ok(Self { inflight, id })
@@ -281,17 +286,24 @@ fn map_runner(result: Result<ProcessOutput, RunnerError>) -> Result<ProcessOutpu
     match result {
         Ok(output) => Ok(output),
         Err(RunnerError::Timeout) => Err(AppError::new("timeout", "操作超时并已停止。")),
-        Err(RunnerError::OutputLimit) => {
-            Err(AppError::new("output_limit", "命令输出超过上限，已停止读取。"))
-        }
+        Err(RunnerError::OutputLimit) => Err(AppError::new(
+            "output_limit",
+            "命令输出超过上限，已停止读取。",
+        )),
         Err(RunnerError::Cancelled) => Err(AppError::new("cancelled", "操作已取消。")),
         Err(RunnerError::Spawn(message)) => Err(AppError::new(
             "git_spawn",
-            format!("无法启动 Git：{}", crate::redact::redact_error_text(&message)),
+            format!(
+                "无法启动 Git：{}",
+                crate::redact::redact_error_text(&message)
+            ),
         )),
         Err(RunnerError::Io(message)) => Err(AppError::new(
             "git_io",
-            format!("读取 Git 输出失败：{}", crate::redact::redact_error_text(&message)),
+            format!(
+                "读取 Git 输出失败：{}",
+                crate::redact::redact_error_text(&message)
+            ),
         )),
     }
 }
@@ -314,7 +326,12 @@ mod tests {
         async fn run(&self, _request: RunRequest) -> Result<ProcessOutput, RunnerError> {
             let now = self.current.fetch_add(1, Ordering::SeqCst) + 1;
             self.max.fetch_max(now, Ordering::SeqCst);
-            if let Some(sender) = self.started.lock().unwrap_or_else(|error| error.into_inner()).take() {
+            if let Some(sender) = self
+                .started
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+            {
                 let _ = sender.send(());
             }
             if let Some(release) = &self.release {
@@ -385,7 +402,10 @@ mod tests {
         for id in 1..=6 {
             let scheduler = scheduler.clone();
             tasks.push(tokio::spawn(async move {
-                scheduler.execute(job("repo", JobKind::Read, id, 1)).await.unwrap();
+                scheduler
+                    .execute(job("repo", JobKind::Read, id, 1))
+                    .await
+                    .unwrap();
             }));
         }
         for task in tasks {
@@ -431,13 +451,19 @@ mod tests {
         let left = {
             let scheduler = scheduler.clone();
             tokio::spawn(async move {
-                scheduler.execute(job("a", JobKind::Write, 3, 1)).await.unwrap();
+                scheduler
+                    .execute(job("a", JobKind::Write, 3, 1))
+                    .await
+                    .unwrap();
             })
         };
         let right = {
             let scheduler = scheduler.clone();
             tokio::spawn(async move {
-                scheduler.execute(job("b", JobKind::Write, 4, 1)).await.unwrap();
+                scheduler
+                    .execute(job("b", JobKind::Write, 4, 1))
+                    .await
+                    .unwrap();
             })
         };
         left.await.unwrap();
@@ -461,7 +487,10 @@ mod tests {
             tokio::spawn(async move { scheduler.execute(job("repo", JobKind::Read, 7, 1)).await })
         };
         started_rx.await.unwrap();
-        let duplicate = scheduler.execute(job("repo", JobKind::Read, 7, 1)).await.unwrap_err();
+        let duplicate = scheduler
+            .execute(job("repo", JobKind::Read, 7, 1))
+            .await
+            .unwrap_err();
         assert_eq!(duplicate.code, "duplicate");
         let current = scheduler.bump_generation("repo");
         assert_eq!(current, 2);

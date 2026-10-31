@@ -2,6 +2,7 @@ pub mod advice;
 pub mod changes;
 pub mod command;
 pub mod gate;
+pub mod history;
 pub mod locate;
 pub mod ops;
 pub mod parse;

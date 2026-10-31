@@ -438,7 +438,7 @@ pub async fn commit_index(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn response_from_diff(
+pub(crate) fn response_from_diff(
     generation: u64,
     relative: &str,
     staged: bool,

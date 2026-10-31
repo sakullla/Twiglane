@@ -430,6 +430,304 @@ fn null_device() -> &'static str {
     }
 }
 
+pub const HISTORY_PAGE_SIZE: u32 = 100;
+pub const EMPTY_TREE_OID: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+fn history_format() -> OsString {
+    OsString::from("--pretty=format:%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1e")
+}
+
+pub fn history_page_command(
+    git: &Path,
+    root: &Path,
+    skip: u32,
+    limit: u32,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("log"),
+        OsString::from("--all"),
+        OsString::from("--date=unix"),
+        history_format(),
+        OsString::from(format!("--skip={skip}")),
+        OsString::from(format!("--max-count={limit}")),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn history_grep_command(git: &Path, root: &Path, query: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("log"),
+        OsString::from("--all"),
+        OsString::from("-i"),
+        OsString::from("--fixed-strings"),
+        OsString::from("--pretty=format:%H%x1f%at"),
+        OsString::from(format!("--grep={query}")),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn history_author_command(git: &Path, root: &Path, query: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("log"),
+        OsString::from("--all"),
+        OsString::from("-i"),
+        OsString::from("--fixed-strings"),
+        OsString::from("--pretty=format:%H%x1f%at"),
+        OsString::from(format!("--author={query}")),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn history_oid_index_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("log"),
+        OsString::from("--all"),
+        OsString::from("--pretty=format:%H%x1f%at"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn history_details_command(
+    git: &Path,
+    root: &Path,
+    oids: &[String],
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("log"),
+        OsString::from("--no-walk"),
+        OsString::from("--date=unix"),
+        history_format(),
+    ]);
+    for oid in oids {
+        args.push(OsString::from(oid));
+    }
+    args.push(OsString::from("--"));
+    (git.to_path_buf(), args)
+}
+
+pub fn file_history_command(git: &Path, root: &Path, relative: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("log"),
+        OsString::from("--all"),
+        OsString::from("--follow"),
+        OsString::from("--date=unix"),
+        history_format(),
+        OsString::from("--"),
+        relative.as_os_str().to_os_string(),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn commit_header_command(git: &Path, root: &Path, oid: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("log"),
+        OsString::from("-1"),
+        OsString::from("--date=unix"),
+        history_format(),
+        OsString::from(oid),
+        OsString::from("--"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn commit_body_command(git: &Path, root: &Path, oid: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("log"),
+        OsString::from("-1"),
+        OsString::from("--format=%B"),
+        OsString::from(oid),
+        OsString::from("--"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn any_commit_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("rev-list"),
+        OsString::from("-n"),
+        OsString::from("1"),
+        OsString::from("--all"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn ref_labels_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("for-each-ref"),
+        OsString::from(
+            "--format=%(if)%(*objectname)%(then)%(*objectname)%(else)%(objectname)%(end)%09%(refname)%09%(HEAD)",
+        ),
+        OsString::from("HEAD"),
+        OsString::from("refs/heads"),
+        OsString::from("refs/remotes"),
+        OsString::from("refs/tags"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn diff_tree_command(
+    git: &Path,
+    root: &Path,
+    parent: Option<&str>,
+    commit: &str,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("diff-tree"),
+        OsString::from("-z"),
+        OsString::from("--no-commit-id"),
+        OsString::from("--name-status"),
+        OsString::from("--find-renames"),
+        OsString::from("-r"),
+    ]);
+    if let Some(parent) = parent {
+        args.push(OsString::from(parent));
+        args.push(OsString::from(commit));
+    } else {
+        args.push(OsString::from("--root"));
+        args.push(OsString::from(commit));
+    }
+    (git.to_path_buf(), args)
+}
+
+pub fn commit_diff_command(
+    git: &Path,
+    root: &Path,
+    parent: &str,
+    commit: &str,
+    paths: &[PathBuf],
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("diff"),
+        OsString::from("--no-color"),
+        OsString::from("--no-ext-diff"),
+        OsString::from("--no-textconv"),
+        OsString::from("--find-renames"),
+        OsString::from("--unified=3"),
+        OsString::from(parent),
+        OsString::from(commit),
+        OsString::from("--"),
+    ]);
+    for path in paths {
+        args.push(path.as_os_str().to_os_string());
+    }
+    (git.to_path_buf(), args)
+}
+
+pub fn commit_numstat_command(
+    git: &Path,
+    root: &Path,
+    parent: &str,
+    commit: &str,
+    paths: &[PathBuf],
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("diff"),
+        OsString::from("--numstat"),
+        OsString::from("-z"),
+        OsString::from(parent),
+        OsString::from(commit),
+        OsString::from("--"),
+    ]);
+    for path in paths {
+        args.push(path.as_os_str().to_os_string());
+    }
+    (git.to_path_buf(), args)
+}
+
+pub fn stash_list_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("stash"),
+        OsString::from("list"),
+        OsString::from("--format=%H%x1f%ct%x1f%gs"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+fn stash_prefix(root: &Path) -> Vec<OsString> {
+    // stash push -u removes untracked files with pathspec magic. Global
+    // --literal-pathspecs records them but leaves the worktree copy in place.
+    vec![
+        OsString::from("-c"),
+        OsString::from("core.quotePath=false"),
+        OsString::from("-C"),
+        root.as_os_str().to_os_string(),
+    ]
+}
+
+pub fn stash_push_command(
+    git: &Path,
+    root: &Path,
+    include_untracked: bool,
+    message: Option<&str>,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = stash_prefix(root);
+    args.extend([OsString::from("stash"), OsString::from("push")]);
+    if include_untracked {
+        args.push(OsString::from("--include-untracked"));
+    }
+    if let Some(message) = message {
+        args.push(OsString::from("-m"));
+        args.push(OsString::from(message));
+    }
+    (git.to_path_buf(), args)
+}
+
+pub fn stash_apply_command(git: &Path, root: &Path, oid: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = stash_prefix(root);
+    args.extend([
+        OsString::from("stash"),
+        OsString::from("apply"),
+        OsString::from(oid),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn stash_drop_command(git: &Path, root: &Path, stash_ref: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = stash_prefix(root);
+    args.extend([
+        OsString::from("stash"),
+        OsString::from("drop"),
+        OsString::from(stash_ref),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn rev_parse_command(git: &Path, root: &Path, revision: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("rev-parse"),
+        OsString::from("--verify"),
+        OsString::from(revision),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn ignored_files_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("ls-files"),
+        OsString::from("-z"),
+        OsString::from("-o"),
+        OsString::from("-i"),
+        OsString::from("--exclude-standard"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
 // cdylib 不会把仅测试调用算作可达，避免 dead_code 挡住 clippy。
 #[allow(dead_code)]
 pub fn assert_structured(program: &Path, args: &[OsString]) {

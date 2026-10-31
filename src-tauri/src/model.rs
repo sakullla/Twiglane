@@ -273,3 +273,125 @@ pub struct CommitPushReport {
     pub generation: u64,
     pub snapshot: StatusSnapshot,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryLabel {
+    pub name: String,
+    pub kind: String,
+    pub current: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryCommit {
+    pub oid: String,
+    pub parents: Vec<String>,
+    pub summary: String,
+    pub author_name: String,
+    pub author_email: String,
+    pub authored_at: i64,
+    pub labels: Vec<HistoryLabel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryPage {
+    pub generation: u64,
+    pub query: String,
+    pub offset: u32,
+    pub page_size: u32,
+    pub has_more: bool,
+    /// `ok`, `empty_repository`, or `no_match`.
+    pub state: String,
+    pub commits: Vec<HistoryCommit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitFileChange {
+    pub path: String,
+    pub original_path: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitDetail {
+    pub generation: u64,
+    pub commit: HistoryCommit,
+    pub body: String,
+    pub root: bool,
+    pub merge: bool,
+    /// Parent used for the file list. `None` compares the first commit with the empty tree.
+    pub selected_parent: Option<String>,
+    pub files: Vec<CommitFileChange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileHistoryPage {
+    pub generation: u64,
+    pub path: String,
+    pub offset: u32,
+    pub page_size: u32,
+    pub has_more: bool,
+    /// `ok`, `empty_repository`, or `no_file_history`.
+    pub state: String,
+    pub commits: Vec<HistoryCommit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StashPreview {
+    pub tracked_count: u32,
+    pub untracked_count: u32,
+    pub ignored_count: u32,
+    pub tracked_paths: Vec<String>,
+    pub untracked_paths: Vec<String>,
+    pub ignored_paths: Vec<String>,
+    pub include_untracked: bool,
+    pub can_save: bool,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StashRecord {
+    pub oid: String,
+    pub message: String,
+    pub committed_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StashState {
+    pub generation: u64,
+    pub preview: StashPreview,
+    pub records: Vec<StashRecord>,
+    pub snapshot: StatusSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StashSaveResult {
+    pub oid: String,
+    pub note: String,
+    pub state: StashState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StashApplyResult {
+    pub generation: u64,
+    pub oid: String,
+    pub kept: bool,
+    /// Always `stash`. Callers must not present this as a branch merge.
+    pub operation: String,
+    pub conflicted: bool,
+    pub conflict_paths: Vec<String>,
+    /// Stash apply never creates a merge that can be aborted.
+    pub can_abort_merge: bool,
+    pub note: String,
+    pub snapshot: StatusSnapshot,
+}

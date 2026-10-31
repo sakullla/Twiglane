@@ -2,15 +2,21 @@ import { normalizeError } from "./errors";
 import type {
   BranchState,
   CloneResult,
+  CommitDetail,
   CommitPushReport,
   CommitResult,
   DiffResponse,
+  FileHistoryPage,
   GitInfo,
+  HistoryPage,
   OpenedRepository,
   PanelWidths,
   RecentRepo,
   RemoteState,
   SettingsDto,
+  StashApplyResult,
+  StashSaveResult,
+  StashState,
   StatusSnapshot,
   Theme,
 } from "./types";
@@ -161,6 +167,57 @@ export const api = {
       generation,
       requestId,
     }),
+  historyPage: (path: string, query: string, offset: number, generation: number, requestId: number) =>
+    invoke<HistoryPage>("history_page", { path, query, offset, generation, requestId }),
+  commitDetail: (
+    path: string,
+    oid: string,
+    parent: string | null,
+    generation: number,
+    requestId: number,
+  ) => invoke<CommitDetail>("commit_detail", { path, oid, parent, generation, requestId }),
+  commitFileDiff: (
+    path: string,
+    oid: string,
+    parent: string | null,
+    relative: string,
+    generation: number,
+    requestId: number,
+    offset = 0,
+    limit = 0,
+  ) =>
+    invoke<DiffResponse>("commit_file_diff", {
+      path,
+      oid,
+      parent,
+      relative,
+      generation,
+      requestId,
+      offset,
+      limit,
+    }),
+  fileHistory: (path: string, relative: string, offset: number, generation: number, requestId: number) =>
+    invoke<FileHistoryPage>("file_history", { path, relative, offset, generation, requestId }),
+  stashState: (path: string, includeUntracked: boolean, generation: number, requestId: number) =>
+    invoke<StashState>("stash_state", { path, includeUntracked, generation, requestId }),
+  saveStash: (
+    path: string,
+    includeUntracked: boolean,
+    message: string,
+    generation: number,
+    requestId: number,
+  ) =>
+    invoke<StashSaveResult>("save_stash", {
+      path,
+      includeUntracked,
+      message,
+      generation,
+      requestId,
+    }),
+  applyStash: (path: string, oid: string, generation: number, requestId: number) =>
+    invoke<StashApplyResult>("apply_stash", { path, oid, generation, requestId }),
+  deleteStash: (path: string, oid: string, confirm: boolean, generation: number, requestId: number) =>
+    invoke<StashState>("delete_stash", { path, oid, confirm, generation, requestId }),
   setTheme: (theme: Theme) => invoke<void>("set_theme", { theme }),
   setPanelWidths: (widths: PanelWidths) => invoke<PanelWidths>("set_panel_widths", { widths }),
   saveDraft: (path: string, message: string) => invoke<void>("save_draft", { path, message }),

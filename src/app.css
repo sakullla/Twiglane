@@ -273,6 +273,95 @@ textarea.full-value { width: 100%; min-height: 72px; resize: vertical; white-spa
   padding: 8px;
 }
 .footer-brand { margin-top: auto; }
+.view-tabs { display: flex; gap: 4px; }
+.span-main {
+  grid-column: 3 / -1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+.panel-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.panel-toolbar .search { width: min(420px, 100%); }
+.history-layout {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(260px, 380px) minmax(0, 1fr);
+}
+.history-list, .history-detail, .stash-body { min-width: 0; min-height: 0; }
+.history-list {
+  overflow: auto;
+  position: relative;
+  border-right: 1px solid var(--border);
+}
+.history-detail { display: flex; flex-direction: column; overflow: hidden; }
+.history-detail > .diff { flex: 1; min-height: 0; }
+.history-meta {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+  max-height: 46%;
+}
+.history-row {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  overflow: hidden;
+}
+.history-files { height: 168px; padding-top: 0; }
+.chip-row { display: flex; gap: 4px; flex-wrap: wrap; }
+.chip {
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 6px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chip.current { border-color: var(--accent); }
+.chip.skip, .chip.ignore { color: var(--fg-muted); }
+.commit-body {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: var(--font);
+  font-size: 13px;
+}
+.stash-body {
+  overflow: auto;
+  padding: 12px 14px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.stash-list { display: flex; flex-direction: column; gap: 8px; }
+.stash-record {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+}
+.stash-body h2 { margin: 0; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; scroll-behavior: auto !important; }
 }

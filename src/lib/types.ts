@@ -190,3 +190,98 @@ export interface FileSelection {
 export interface FileRow extends FileChange {
   side: DiffSide;
 }
+
+export interface HistoryLabel {
+  name: string;
+  kind: string;
+  current: boolean;
+}
+
+export interface HistoryCommit {
+  oid: string;
+  parents: string[];
+  summary: string;
+  authorName: string;
+  authorEmail: string;
+  authoredAt: number;
+  labels: HistoryLabel[];
+}
+
+export interface HistoryPage {
+  generation: number;
+  query: string;
+  offset: number;
+  pageSize: number;
+  hasMore: boolean;
+  state: string;
+  commits: HistoryCommit[];
+}
+
+export interface CommitFileChange {
+  path: string;
+  originalPath: string | null;
+  status: string;
+}
+
+export interface CommitDetail {
+  generation: number;
+  commit: HistoryCommit;
+  body: string;
+  root: boolean;
+  merge: boolean;
+  selectedParent: string | null;
+  files: CommitFileChange[];
+}
+
+export interface FileHistoryPage {
+  generation: number;
+  path: string;
+  offset: number;
+  pageSize: number;
+  hasMore: boolean;
+  state: string;
+  commits: HistoryCommit[];
+}
+
+export interface StashPreview {
+  trackedCount: number;
+  untrackedCount: number;
+  ignoredCount: number;
+  trackedPaths: string[];
+  untrackedPaths: string[];
+  ignoredPaths: string[];
+  includeUntracked: boolean;
+  canSave: boolean;
+  summary: string;
+}
+
+export interface StashRecord {
+  oid: string;
+  message: string;
+  committedAt: number;
+}
+
+export interface StashState {
+  generation: number;
+  preview: StashPreview;
+  records: StashRecord[];
+  snapshot: StatusSnapshot;
+}
+
+export interface StashSaveResult {
+  oid: string;
+  note: string;
+  state: StashState;
+}
+
+export interface StashApplyResult {
+  generation: number;
+  oid: string;
+  kept: boolean;
+  operation: string;
+  conflicted: boolean;
+  conflictPaths: string[];
+  canAbortMerge: boolean;
+  note: string;
+  snapshot: StatusSnapshot;
+}

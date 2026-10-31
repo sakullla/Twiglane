@@ -9,13 +9,25 @@
     error: string | null;
     loading: boolean;
     disabled: boolean;
+    readOnly?: boolean;
     onStageHunk: (hunk: DiffHunk) => void;
     onLoadMore: () => void;
+    onFileHistory?: (path: string) => void;
   }
 
   const ROW_HEIGHT = 22;
 
-  let { selection, diff, error, loading, disabled, onStageHunk, onLoadMore }: Props = $props();
+  let {
+    selection,
+    diff,
+    error,
+    loading,
+    disabled,
+    readOnly = false,
+    onStageHunk,
+    onLoadMore,
+    onFileHistory,
+  }: Props = $props();
   let mode = $state<"unified" | "split">("unified");
   let scrollTop = $state(0);
   let viewport = $state(0);
@@ -72,6 +84,9 @@
     {#if diff}
       <span class="hint">{diff.summary}</span>
     {/if}
+    {#if onFileHistory && selection}
+      <button type="button" class="ghost compact" onclick={() => onFileHistory?.(selection.path)}>此文件历史</button>
+    {/if}
   </div>
   {#if error}
     <div class="empty" role="status">
@@ -119,7 +134,7 @@
               <span class="ln">{line.oldNo ?? ""}</span>
               <span class="ln">{line.newNo ?? ""}</span>
               <span class="code">{line.text.length === 0 ? " " : line.text}</span>
-              {#if hunkForLine(absolute)}
+              {#if !readOnly && hunkForLine(absolute)}
                 {@const hunk = hunkForLine(absolute)}
                 {#if hunk}
                   <button
@@ -141,7 +156,7 @@
             <div class="side-row" class:span={row.span} style={`top:${absolute * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}>
               <span class={`side-cell ${row.left?.kind ?? "empty"}`}>{row.left ? `${row.left.no ?? ""} ${row.left.text}` : ""}</span>
               <span class={`side-cell ${row.right?.kind ?? "empty"}`}>{row.right ? `${row.right.no ?? ""} ${row.right.text}` : ""}</span>
-              {#if row.showStage && row.hunkIndex !== null}
+              {#if !readOnly && row.showStage && row.hunkIndex !== null}
                 {@const hunk = diff.hunks.find((item) => item.index === row.hunkIndex)}
                 {#if hunk}
                   <button

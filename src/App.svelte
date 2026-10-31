@@ -24,8 +24,10 @@
   import DetailDialog from "./lib/components/DetailDialog.svelte";
   import DiffView from "./lib/components/DiffView.svelte";
   import FileList from "./lib/components/FileList.svelte";
+  import HistoryPanel from "./lib/components/HistoryPanel.svelte";
   import RepoDialogs from "./lib/components/RepoDialogs.svelte";
   import RepoSidebar from "./lib/components/RepoSidebar.svelte";
+  import StashPanel from "./lib/components/StashPanel.svelte";
 
   let theme = $state<Theme>("light");
   let widths = $state<PanelWidths>({ sidebar: 280, files: 340 });
@@ -53,6 +55,8 @@
   let requestSerial = 1;
   let diffToken = 0;
   let fileQuery = $state("");
+  let workspaceView = $state<"changes" | "history" | "stash">("changes");
+  let historyPath = $state<string | null>(null);
   const drafts = new DraftBuffer();
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -105,6 +109,8 @@
     diffError = null;
     pushRetry = false;
     phaseNote = null;
+    workspaceView = "changes";
+    historyPath = null;
     recent = [
       { name: next.summary.name, path: next.summary.path, openedAtMs: Date.now() },
       ...recent.filter((repo) => repo.path !== next.summary.path),
@@ -192,6 +198,32 @@
   function selectFile(selection: FileSelection) {
     selected = selection;
     void loadSelectedDiff();
+  }
+
+  function adoptGeneration(generation: number) {
+    if (!opened || opened.generation === generation) return;
+    opened = { ...opened, generation };
+  }
+
+  function showChanges() {
+    workspaceView = "changes";
+    historyPath = null;
+  }
+
+  function showHistory() {
+    workspaceView = "history";
+    historyPath = null;
+  }
+
+  function openFileHistory(path: string) {
+    historyPath = path;
+    workspaceView = "history";
+  }
+
+  function openConflict(path: string) {
+    workspaceView = "changes";
+    historyPath = null;
+    selectFile({ path, side: "unstaged" });
   }
 
   function applySnapshot(snapshot: StatusSnapshot) {
@@ -528,6 +560,8 @@
         diff = null;
         draft = "";
         degraded = false;
+        workspaceView = "changes";
+        historyPath = null;
       }
     } catch (error) {
       showError(error);
@@ -720,6 +754,11 @@
   </header>
   {#if opened}
     <div class="toolbar" aria-label="同步与分支">
+      <div class="view-tabs" role="tablist" aria-label="工作区">
+        <button type="button" role="tab" class="theme-btn" aria-selected={workspaceView === "changes"} onclick={showChanges}>改动</button>
+        <button type="button" role="tab" class="theme-btn" aria-selected={workspaceView === "history"} onclick={showHistory}>历史</button>
+        <button type="button" role="tab" class="theme-btn" aria-selected={workspaceView === "stash"} onclick={() => (workspaceView = "stash")}>临时保存</button>
+      </div>
       <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => runSync("fetch", (path, generation) => api.fetchRemote(path, generation, nextId()))}>检查远程</button>
       <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => runSync("pull", (path, generation) => api.pullFastForward(path, generation, nextId()))}>拉取</button>
       <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => runSync("push", (path, generation) => api.pushBranch(path, generation, nextId()))}>推送</button>
@@ -780,6 +819,33 @@
         onkeydown={(event) => resizeKey(event, "sidebar")}
       ></div>
     {/if}
+    {#if opened && workspaceView === "history"}
+      <HistoryPanel
+        {opened}
+        filePath={historyPath}
+        disabled={pending !== null}
+        {nextId}
+        onGeneration={adoptGeneration}
+        onFailure={handleMutationError}
+        onFilePath={openFileHistory}
+        onClearFile={() => (historyPath = null)}
+      />
+    {:else if opened && workspaceView === "stash"}
+      <StashPanel
+        {opened}
+        disabled={pending !== null}
+        {nextId}
+        onGeneration={adoptGeneration}
+        onSnapshot={applySnapshot}
+        onFailure={handleMutationError}
+        onNotice={(message) => {
+          phaseNote = message;
+          live = message;
+          banner = null;
+        }}
+        onOpenChanges={openConflict}
+      />
+    {:else}
     <section class="files" aria-label="改动与提交">
       {#if opened}
         <FileList
@@ -831,7 +897,9 @@
       disabled={pending !== null}
       onStageHunk={stageHunk}
       onLoadMore={loadMoreDiff}
+      onFileHistory={openFileHistory}
     />
+    {/if}
   </div>
 </div>
 

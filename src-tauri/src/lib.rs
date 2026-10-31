@@ -22,9 +22,10 @@ use crate::error::AppError;
 use crate::git::ops::{self, Backend};
 use crate::git::runner::RealRunner;
 use crate::model::{
-    BranchState, CloneResult, CommitPushReport, CommitResult, DiffResponse, GitInfo,
-    OpenedRepository, PanelWidths, RecentRepo, RemoteState, RepoChanged, SettingsDto,
-    StatusSnapshot, Theme,
+    BranchState, CloneResult, CommitDetail, CommitPushReport, CommitResult, DiffResponse,
+    FileHistoryPage, GitInfo, HistoryPage, OpenedRepository, PanelWidths, RecentRepo, RemoteState,
+    RepoChanged, SettingsDto, StashApplyResult, StashSaveResult, StashState, StatusSnapshot,
+    Theme,
 };
 use crate::shutdown::Shutdown;
 use crate::state::AppStore;
@@ -81,6 +82,14 @@ pub fn run() {
             switch_branch,
             delete_branch,
             delete_remote_branch,
+            history_page,
+            commit_detail,
+            commit_file_diff,
+            file_history,
+            stash_state,
+            save_stash,
+            apply_stash,
+            delete_stash,
             set_theme,
             set_panel_widths,
             save_draft
@@ -563,6 +572,155 @@ async fn delete_remote_branch(
     .await
 }
 
+#[tauri::command(rename_all = "camelCase")]
+async fn history_page(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    query: String,
+    offset: u32,
+    generation: u64,
+    request_id: u64,
+) -> Result<HistoryPage, AppError> {
+    crate::git::history::history_page(state.inner(), &path, &query, offset, generation, request_id)
+        .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn commit_detail(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    oid: String,
+    parent: Option<String>,
+    generation: u64,
+    request_id: u64,
+) -> Result<CommitDetail, AppError> {
+    crate::git::history::commit_detail(
+        state.inner(),
+        &path,
+        &oid,
+        parent.as_deref(),
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+async fn commit_file_diff(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    oid: String,
+    parent: Option<String>,
+    relative: String,
+    generation: u64,
+    request_id: u64,
+    offset: Option<u32>,
+    limit: Option<u32>,
+) -> Result<DiffResponse, AppError> {
+    crate::git::history::commit_file_diff(
+        state.inner(),
+        &path,
+        &oid,
+        parent.as_deref(),
+        &relative,
+        generation,
+        request_id,
+        offset.unwrap_or(0),
+        limit.unwrap_or(0),
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn file_history(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    relative: String,
+    offset: u32,
+    generation: u64,
+    request_id: u64,
+) -> Result<FileHistoryPage, AppError> {
+    crate::git::history::file_history(
+        state.inner(),
+        &path,
+        &relative,
+        offset,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn stash_state(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    include_untracked: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<StashState, AppError> {
+    crate::git::history::stash_state(
+        state.inner(),
+        &path,
+        include_untracked,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn save_stash(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    include_untracked: bool,
+    message: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StashSaveResult, AppError> {
+    crate::git::history::save_stash(
+        state.inner(),
+        &path,
+        include_untracked,
+        &message,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn apply_stash(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    oid: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StashApplyResult, AppError> {
+    crate::git::history::apply_stash(state.inner(), &path, &oid, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn delete_stash(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    oid: String,
+    confirm: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<StashState, AppError> {
+    crate::git::history::delete_stash(
+        state.inner(),
+        &path,
+        &oid,
+        confirm,
+        generation,
+        request_id,
+    )
+    .await
+}
+
 #[tauri::command]
 fn set_theme(state: State<'_, Arc<Backend>>, theme: Theme) -> Result<(), AppError> {
     ops::set_theme(state.inner(), theme)
@@ -688,6 +846,14 @@ mod ipc_contract {
             "switch_branch",
             "delete_branch",
             "delete_remote_branch",
+            "history_page",
+            "commit_detail",
+            "commit_file_diff",
+            "file_history",
+            "stash_state",
+            "save_stash",
+            "apply_stash",
+            "delete_stash",
         ] {
             let payload = payload_after(command);
             assert!(payload.contains("requestId"), "{command}: {payload}");
@@ -722,7 +888,9 @@ mod ipc_contract {
                 super::clone_repository,
                 super::fetch_remote,
                 super::commit_and_push,
-                super::delete_branch
+                super::delete_branch,
+                super::history_page,
+                super::delete_stash
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("ipc test app");
@@ -824,6 +992,26 @@ mod ipc_contract {
                     "path": "/tmp/unused",
                     "name": "topic",
                     "confirmUnmerged": false,
+                    "generation": 1,
+                    "request_id": 1
+                }),
+            ),
+            (
+                "history_page",
+                serde_json::json!({
+                    "path": "/tmp/unused",
+                    "query": "",
+                    "offset": 0,
+                    "generation": 1,
+                    "request_id": 1
+                }),
+            ),
+            (
+                "delete_stash",
+                serde_json::json!({
+                    "path": "/tmp/unused",
+                    "oid": "abc",
+                    "confirm": false,
                     "generation": 1,
                     "request_id": 1
                 }),

@@ -285,6 +285,22 @@ pub fn publish_command(
     (git.to_path_buf(), args)
 }
 
+pub fn set_upstream_to_command(
+    git: &Path,
+    root: &Path,
+    upstream: &str,
+    branch: &str,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("branch"),
+        OsString::from(format!("--set-upstream-to={upstream}")),
+        OsString::from("--"),
+        OsString::from(branch),
+    ]);
+    (git.to_path_buf(), args)
+}
+
 pub fn delete_remote_branch_command(
     git: &Path,
     root: &Path,
@@ -465,12 +481,25 @@ mod tests {
         assert_structured(git, &clone_args);
         assert_eq!(clone_args[2], "https://example.com/acme/app.git");
         assert_eq!(clone_args[3], destination.as_os_str());
+        let upstream_args = set_upstream_to_command(git, root, "origin/main", "main").1;
+        assert!(upstream_args
+            .iter()
+            .any(|arg| arg == "--set-upstream-to=origin/main"));
+        assert!(upstream_args.iter().any(|arg| arg == "--"));
+        assert_eq!(
+            upstream_args.last().map(OsString::as_os_str),
+            Some(std::ffi::OsStr::new("main"))
+        );
+        assert!(!upstream_args
+            .iter()
+            .any(|arg| arg == "push" || arg == "--set-upstream" || arg == "-u"));
         for builder in [
             fetch_command(git, root).1,
             pull_ff_command(git, root).1,
             push_command(git, root).1,
             publish_command(git, root, "origin", "main").1,
             delete_remote_branch_command(git, root, "origin", "feature").1,
+            set_upstream_to_command(git, root, "origin/main", "main").1,
         ] {
             assert_no_force(&builder);
             assert!(!builder.iter().any(|arg| {

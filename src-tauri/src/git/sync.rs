@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -8,8 +9,8 @@ use crate::git::command::{
     branch_list_command, check_branch_command, clone_command, create_branch_command,
     delete_branch_command, delete_remote_branch_command, delete_remote_tracking_command,
     fetch_command, publish_command, pull_ff_command, push_command, remote_add_command,
-    remote_set_url_command, remote_verbose_command, status_command, switch_command,
-    switch_track_command,
+    remote_set_url_command, remote_verbose_command, set_upstream_to_command, status_command,
+    switch_command, switch_track_command,
 };
 use crate::git::gate::action_key;
 use crate::git::ops::{
@@ -248,8 +249,9 @@ pub async fn pull_fast_forward(
     if before.branch.upstream.is_none() {
         return Err(AppError::new(
             "no_upstream",
-            "当前分支没有上游。请先发布或关联远程分支。工作区没有改动。",
-        ));
+            "当前分支没有上游。请先发布，或只关联上游后再快进拉取。工作区没有改动。",
+        )
+        .with_generation(before.generation));
     }
     let (program, args) = pull_ff_command(&git.path, &root);
     let scheduled = write_repo(
@@ -295,6 +297,89 @@ pub async fn publish_branch(
     let key = repo_key(&root);
     let _guard = backend.actions.enter(action_key("sync", &key))?;
     publish_to(backend, &root, remote, generation, request_id).await
+}
+
+pub async fn associate_upstream(
+    backend: &Backend,
+    path: &str,
+    remote: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    let root = repo_root(path)?;
+    let key = repo_key(&root);
+    let _guard = backend.actions.enter(action_key("sync", &key))?;
+    let git = require_git(backend).await?;
+    let before = snapshot_at(backend, &root, generation, request_id).await?;
+    if before.branch.unborn {
+        return Err(AppError::new(
+            "no_commit",
+            "还没有提交，不能关联上游。没有推送。",
+        ));
+    }
+    if before.branch.detached {
+        return Err(detached_error());
+    }
+    let Some(branch) = before.branch.name.clone() else {
+        return Err(detached_error());
+    };
+    validate_branch_input(&branch)?;
+    let remote = resolve_remote(backend, &root, &git.path, remote, before.generation).await?;
+    let upstream = format!("{remote}/{branch}");
+    let (program, args) = fetch_command(&git.path, &root);
+    reject_force(&args)?;
+    let fetched = write_repo(
+        backend,
+        &root,
+        before.generation,
+        internal_request_id(),
+        program,
+        args,
+    )
+    .await?;
+    if fetched.output.exit_code != 0 {
+        return Err(finish_remote(
+            "fetch_failed",
+            &fetched,
+            "没有关联上游，工作区没有改动。",
+        ));
+    }
+    let (program, args) = set_upstream_to_command(&git.path, &root, &upstream, &branch);
+    reject_force(&args)?;
+    let scheduled = write_repo(
+        backend,
+        &root,
+        fetched.generation,
+        internal_request_id(),
+        program,
+        args,
+    )
+    .await?;
+    if scheduled.output.exit_code != 0 {
+        let text = output_text(&scheduled.output);
+        if upstream_ref_missing(&text) {
+            return Err(AppError::new(
+                "upstream_missing",
+                format!("远程还没有 {upstream}，未建立上游，也没有推送。请使用发布创建远程分支。"),
+            )
+            .with_generation(scheduled.generation));
+        }
+        return Err(finish_remote(
+            "upstream_failed",
+            &scheduled,
+            "没有关联上游，也没有推送。",
+        ));
+    }
+    backend.remote_checks.note(&key, now_ms());
+    let after = snapshot_at(backend, &root, scheduled.generation, internal_request_id()).await?;
+    if after.branch.upstream.as_deref() != Some(upstream.as_str()) {
+        return Err(AppError::new(
+            "upstream_unconfirmed",
+            "上游关联没有被 Git 确认，没有推送。",
+        )
+        .with_generation(after.generation));
+    }
+    Ok(after)
 }
 
 pub async fn commit_and_push(
@@ -425,6 +510,15 @@ pub async fn switch_branch(
     let (program, args) = match switch_plan(&current.branches, name) {
         SwitchPlan::Local(local) => switch_command(&git.path, &root, &local),
         SwitchPlan::Track(remote) => switch_track_command(&git.path, &root, &remote),
+        SwitchPlan::UpstreamMismatch { local, selected } => {
+            return Err(AppError::new(
+                "branch_upstream_mismatch",
+                format!(
+                    "本地分支 {local} 已占用这个短名，但它的上游不是 {selected}。没有切换，HEAD 和工作区保持原样。"
+                ),
+            )
+            .with_generation(current.generation));
+        }
         SwitchPlan::Missing => {
             return Err(AppError::new("branch_missing", "没有这个分支，未切换。"));
         }
@@ -568,10 +662,7 @@ async fn push_with_upstream(
         return Err(detached_error());
     }
     if before.branch.upstream.is_none() {
-        return Err(AppError::new(
-            "no_upstream",
-            "当前分支没有上游。请使用发布建立关联。没有推送，也没有强行推送。",
-        ));
+        return publish_to(backend, root, "", before.generation, internal_request_id()).await;
     }
     let git = require_git(backend).await?;
     let (program, args) = push_command(&git.path, root);
@@ -1025,31 +1116,67 @@ fn validate_branch_input(name: &str) -> Result<(), AppError> {
 enum SwitchPlan {
     Local(String),
     Track(String),
+    UpstreamMismatch { local: String, selected: String },
     Missing,
 }
 
 fn switch_plan(branches: &[BranchRecord], name: &str) -> SwitchPlan {
     if branches
         .iter()
+        .any(|branch| branch.remote && branch.name == name)
+    {
+        // 远程行只在本地分支已经跟踪这条远程 ref 时复用短名。
+        let Some((_, short)) = name.split_once('/') else {
+            return SwitchPlan::Track(name.to_string());
+        };
+        if let Some(local) = branches
+            .iter()
+            .find(|branch| !branch.remote && branch.name == short)
+        {
+            if local.upstream.as_deref() == Some(name) {
+                return SwitchPlan::Local(short.to_string());
+            }
+            return SwitchPlan::UpstreamMismatch {
+                local: short.to_string(),
+                selected: name.to_string(),
+            };
+        }
+        return SwitchPlan::Track(name.to_string());
+    }
+    if branches
+        .iter()
         .any(|branch| !branch.remote && branch.name == name)
     {
         return SwitchPlan::Local(name.to_string());
     }
-    if branches
-        .iter()
-        .any(|branch| branch.remote && branch.name == name)
-    {
-        if let Some((_, short)) = name.split_once('/') {
-            if branches
-                .iter()
-                .any(|branch| !branch.remote && branch.name == short)
-            {
-                return SwitchPlan::Local(short.to_string());
-            }
-        }
-        return SwitchPlan::Track(name.to_string());
-    }
     SwitchPlan::Missing
+}
+
+fn reject_force(args: &[OsString]) -> Result<(), AppError> {
+    let forced = args.iter().any(|arg| {
+        let text = arg.to_string_lossy();
+        text == "--force"
+            || text == "-f"
+            || text == "--force-with-lease"
+            || text.starts_with("--force=")
+            || text.starts_with("--force-with-lease")
+    });
+    if forced {
+        Err(AppError::new(
+            "force_rejected",
+            "不会强行推送，也不会强行改写分支。这次没有改写远程。",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn upstream_ref_missing(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("does not exist")
+        || lower.contains("no such ref")
+        || text.contains("不存在")
+        || text.contains("没有这个")
 }
 
 fn protect_local_delete(state: &BranchState, root: &Path, name: &str) -> Result<(), AppError> {
@@ -1199,6 +1326,7 @@ fn parse_branches(bytes: &[u8]) -> Result<Vec<BranchRecord>, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::process::Command;
 
     use crate::git::changes::stage_files;
@@ -1824,5 +1952,399 @@ mod tests {
             .branches
             .iter()
             .any(|branch| branch.remote && branch.name == "origin/topic"));
+    }
+
+    fn record(name: &str, remote: bool, upstream: Option<&str>) -> BranchRecord {
+        BranchRecord {
+            name: name.to_string(),
+            remote,
+            current: false,
+            upstream: upstream.map(str::to_string),
+            worktree: None,
+        }
+    }
+
+    #[test]
+    fn remote_switch_reuses_local_only_when_upstream_matches() {
+        let branches = vec![
+            record("feature", false, None),
+            record("origin/feature", true, None),
+            record("tracked", false, Some("origin/tracked")),
+            record("origin/tracked", true, None),
+            record("origin/fresh", true, None),
+            record("other", false, Some("upstream/other")),
+            record("upstream/other", true, None),
+            record("origin/other", true, None),
+            record("origin/feature", false, None),
+        ];
+        assert!(
+            matches!(switch_plan(&branches, "feature"), SwitchPlan::Local(name) if name == "feature")
+        );
+        assert!(matches!(
+            switch_plan(&branches, "origin/feature"),
+            SwitchPlan::UpstreamMismatch { local, selected }
+                if local == "feature" && selected == "origin/feature"
+        ));
+        assert!(
+            matches!(switch_plan(&branches, "origin/tracked"), SwitchPlan::Local(name) if name == "tracked")
+        );
+        assert!(
+            matches!(switch_plan(&branches, "origin/fresh"), SwitchPlan::Track(name) if name == "origin/fresh")
+        );
+        assert!(matches!(
+            switch_plan(&branches, "origin/other"),
+            SwitchPlan::UpstreamMismatch { local, .. } if local == "other"
+        ));
+        assert!(
+            matches!(switch_plan(&branches, "upstream/other"), SwitchPlan::Local(name) if name == "other")
+        );
+        assert!(matches!(
+            switch_plan(&branches, "missing"),
+            SwitchPlan::Missing
+        ));
+        let exact_name = vec![
+            record("origin/feature", true, None),
+            record("origin/feature", false, Some("origin/main")),
+        ];
+        assert!(matches!(
+            switch_plan(&exact_name, "origin/feature"),
+            SwitchPlan::Track(name) if name == "origin/feature"
+        ));
+        let forced = vec![OsString::from("branch"), OsString::from("--force")];
+        assert_eq!(reject_force(&forced).unwrap_err().code, "force_rejected");
+        assert!(reject_force(&[OsString::from("--force-with-lease")]).is_err());
+    }
+
+    #[tokio::test]
+    async fn remote_switch_does_not_move_head_onto_unrelated_local_branch() {
+        let fixture = crate::test_support::git_fixture("remote-switch");
+        let backend = fixture.backend();
+        let (origin, work) = seed_bare(&fixture);
+        let other = fixture.path().join("other");
+        git(
+            fixture.path(),
+            &["clone", repo_key(&origin).as_str(), "other"],
+        );
+        git(&other, &["switch", "-c", "feature"]);
+        fs::write(other.join("feature.txt"), "remote-b\n").unwrap();
+        git(&other, &["add", "--", "feature.txt"]);
+        git(&other, &["commit", "-m", "remote feature"]);
+        git(&other, &["push", "-u", "origin", "feature"]);
+        git(&work, &["fetch", "origin"]);
+        git(&work, &["branch", "feature"]);
+        let main_oid = git_text(&work, &["rev-parse", "HEAD"]);
+        let local_feature = git_text(&work, &["rev-parse", "feature"]);
+        let remote_feature = git_text(&work, &["rev-parse", "origin/feature"]);
+        assert_eq!(local_feature, main_oid);
+        assert_ne!(local_feature, remote_feature);
+        fs::write(work.join("file.txt"), "base\ndirty\n").unwrap();
+        let opened = add_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        let blocked = switch_branch(
+            &backend,
+            &opened.summary.path,
+            "origin/feature",
+            opened.generation,
+            2,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(blocked.code, "branch_upstream_mismatch");
+        assert!(blocked.message.contains("origin/feature"));
+        assert_eq!(git_text(&work, &["rev-parse", "HEAD"]), main_oid);
+        assert_eq!(git_text(&work, &["branch", "--show-current"]), "main");
+        assert_eq!(fs::read(work.join("file.txt")).unwrap(), b"base\ndirty\n");
+        assert!(!work.join("feature.txt").exists());
+
+        fs::write(work.join("file.txt"), "base\n").unwrap();
+        git(
+            &work,
+            &["branch", "--set-upstream-to=origin/main", "feature"],
+        );
+        let wrong_upstream = switch_branch(
+            &backend,
+            &opened.summary.path,
+            "origin/feature",
+            blocked.generation.expect("mismatch generation"),
+            3,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(wrong_upstream.code, "branch_upstream_mismatch");
+        assert_eq!(git_text(&work, &["rev-parse", "HEAD"]), main_oid);
+        assert!(!work.join("feature.txt").exists());
+
+        git(
+            &work,
+            &["branch", "--set-upstream-to=origin/feature", "feature"],
+        );
+        let switched = switch_branch(
+            &backend,
+            &opened.summary.path,
+            "origin/feature",
+            wrong_upstream
+                .generation
+                .expect("second mismatch generation"),
+            4,
+        )
+        .await
+        .unwrap();
+        assert_eq!(switched.snapshot.branch.name.as_deref(), Some("feature"));
+        assert_eq!(git_text(&work, &["rev-parse", "HEAD"]), local_feature);
+        assert_ne!(git_text(&work, &["rev-parse", "HEAD"]), remote_feature);
+        assert!(!work.join("feature.txt").exists());
+        let back = switch_branch(
+            &backend,
+            &opened.summary.path,
+            "main",
+            switched.generation,
+            5,
+        )
+        .await
+        .unwrap();
+        git(&work, &["branch", "-D", "feature"]);
+        let tracked = switch_branch(
+            &backend,
+            &opened.summary.path,
+            "origin/feature",
+            back.generation,
+            6,
+        )
+        .await
+        .unwrap();
+        assert_eq!(tracked.snapshot.branch.name.as_deref(), Some("feature"));
+        assert_eq!(
+            tracked.snapshot.branch.upstream.as_deref(),
+            Some("origin/feature")
+        );
+        assert_eq!(git_text(&work, &["rev-parse", "HEAD"]), remote_feature);
+        assert_eq!(fs::read(work.join("feature.txt")).unwrap(), b"remote-b\n");
+    }
+
+    fn upstream_configured(dir: &Path) -> bool {
+        Command::new(crate::test_support::system_git())
+            .current_dir(dir)
+            .args([
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{upstream}",
+            ])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                crate::test_support::isolated_gitconfig(),
+            )
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    #[tokio::test]
+    async fn rejected_publish_associates_without_push_then_fast_forwards() {
+        let fixture = crate::test_support::git_fixture("associate-ff");
+        let backend = fixture.backend();
+        let (origin, work) = seed_bare(&fixture);
+        git(&work, &["branch", "--unset-upstream"]);
+        let other = fixture.path().join("other");
+        git(
+            fixture.path(),
+            &["clone", repo_key(&origin).as_str(), "other"],
+        );
+        fs::write(other.join("file.txt"), "base\nremote\n").unwrap();
+        git(&other, &["commit", "-am", "remote"]);
+        git(&other, &["push"]);
+        let remote_oid = git_text(
+            fixture.path(),
+            &["--git-dir", "origin.git", "rev-parse", "main"],
+        );
+        let local_oid = git_text(&work, &["rev-parse", "HEAD"]);
+        assert_ne!(local_oid, remote_oid);
+        let opened = add_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        assert!(opened.snapshot.branch.upstream.is_none());
+        let published = publish_branch(&backend, &opened.summary.path, "", opened.generation, 2)
+            .await
+            .unwrap_err();
+        assert_eq!(published.code, "push_rejected");
+        assert!(published.message.contains("只关联上游"));
+        assert!(published.message.contains("快进拉取"));
+        assert!(published.message.contains("没有强行推送"));
+        assert!(!published.message.contains("请先拉取或合并"));
+        assert!(!upstream_configured(&work));
+        assert_eq!(
+            git_text(
+                fixture.path(),
+                &["--git-dir", "origin.git", "rev-parse", "main"]
+            ),
+            remote_oid
+        );
+        let pulled = pull_fast_forward(
+            &backend,
+            &opened.summary.path,
+            published.generation.expect("publish generation"),
+            3,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(pulled.code, "no_upstream");
+        assert!(pulled.message.contains("只关联上游"));
+        assert_eq!(fs::read(work.join("file.txt")).unwrap(), b"base\n");
+        assert_eq!(git_text(&work, &["rev-parse", "HEAD"]), local_oid);
+        let retried = push_branch(
+            &backend,
+            &opened.summary.path,
+            pulled.generation.expect("pull generation"),
+            4,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(retried.code, "push_rejected");
+        assert_ne!(retried.code, "no_upstream");
+        assert_eq!(git_text(&work, &["rev-list", "--count", "HEAD"]), "1");
+        assert_eq!(
+            git_text(
+                fixture.path(),
+                &["--git-dir", "origin.git", "rev-parse", "main"]
+            ),
+            remote_oid
+        );
+        let associated = associate_upstream(
+            &backend,
+            &opened.summary.path,
+            "",
+            retried.generation.expect("retry generation"),
+            5,
+        )
+        .await
+        .unwrap();
+        assert_eq!(associated.branch.upstream.as_deref(), Some("origin/main"));
+        assert!(associated.branch.live_remote_checked);
+        assert_eq!(associated.branch.behind, Some(1));
+        assert_eq!(fs::read(work.join("file.txt")).unwrap(), b"base\n");
+        assert_eq!(git_text(&work, &["rev-parse", "HEAD"]), local_oid);
+        assert_eq!(
+            git_text(
+                fixture.path(),
+                &["--git-dir", "origin.git", "rev-parse", "main"]
+            ),
+            remote_oid
+        );
+        let forwarded = pull_fast_forward(&backend, &opened.summary.path, associated.generation, 6)
+            .await
+            .unwrap();
+        assert_eq!(fs::read(work.join("file.txt")).unwrap(), b"base\nremote\n");
+        assert_eq!(git_text(&work, &["rev-parse", "HEAD"]), remote_oid);
+        assert_eq!(
+            git_text(
+                fixture.path(),
+                &["--git-dir", "origin.git", "rev-parse", "main"]
+            ),
+            remote_oid
+        );
+        assert_eq!(forwarded.branch.ahead, Some(0));
+        assert_eq!(forwarded.branch.behind, Some(0));
+    }
+
+    #[tokio::test]
+    async fn associate_does_not_merge_or_force_when_histories_diverge() {
+        let fixture = crate::test_support::git_fixture("associate-diverge");
+        let backend = fixture.backend();
+        let (origin, work) = seed_bare(&fixture);
+        git(&work, &["branch", "--unset-upstream"]);
+        let other = fixture.path().join("other");
+        git(
+            fixture.path(),
+            &["clone", repo_key(&origin).as_str(), "other"],
+        );
+        fs::write(other.join("file.txt"), "base\nremote\n").unwrap();
+        git(&other, &["commit", "-am", "remote"]);
+        git(&other, &["push"]);
+        fs::write(work.join("file.txt"), "base\nlocal\n").unwrap();
+        git(&work, &["commit", "-am", "local"]);
+        let remote_oid = git_text(
+            fixture.path(),
+            &["--git-dir", "origin.git", "rev-parse", "main"],
+        );
+        let local_oid = git_text(&work, &["rev-parse", "HEAD"]);
+        let opened = add_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        let published = publish_branch(&backend, &opened.summary.path, "", opened.generation, 2)
+            .await
+            .unwrap_err();
+        assert_eq!(published.code, "push_rejected");
+        assert!(!upstream_configured(&work));
+        let associated = associate_upstream(
+            &backend,
+            &opened.summary.path,
+            "origin",
+            published.generation.expect("publish generation"),
+            3,
+        )
+        .await
+        .unwrap();
+        assert_eq!(associated.branch.upstream.as_deref(), Some("origin/main"));
+        assert_eq!(fs::read(work.join("file.txt")).unwrap(), b"base\nlocal\n");
+        assert_eq!(git_text(&work, &["rev-parse", "HEAD"]), local_oid);
+        let diverged = pull_fast_forward(&backend, &opened.summary.path, associated.generation, 4)
+            .await
+            .unwrap_err();
+        assert_eq!(diverged.code, "diverged");
+        assert!(diverged.message.contains("合并"));
+        assert_eq!(fs::read(work.join("file.txt")).unwrap(), b"base\nlocal\n");
+        assert_eq!(git_text(&work, &["rev-parse", "HEAD"]), local_oid);
+        assert_eq!(
+            git_text(
+                fixture.path(),
+                &["--git-dir", "origin.git", "rev-parse", "main"]
+            ),
+            remote_oid
+        );
+    }
+
+    #[tokio::test]
+    async fn associate_refuses_missing_remote_branch_without_pushing() {
+        let fixture = crate::test_support::git_fixture("associate-missing");
+        let backend = fixture.backend();
+        let (_origin, work) = seed_bare(&fixture);
+        git(&work, &["branch", "--unset-upstream"]);
+        git(&work, &["switch", "-c", "topic"]);
+        let opened = add_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        let missing = associate_upstream(
+            &backend,
+            &opened.summary.path,
+            "origin",
+            opened.generation,
+            2,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing.code, "upstream_missing");
+        assert!(!missing.message.contains("强行推送已"));
+        assert!(!upstream_configured(&work));
+        assert!(!git_text(
+            fixture.path(),
+            &["--git-dir", "origin.git", "branch", "--list"]
+        )
+        .contains("topic"));
+        assert_eq!(git_text(&work, &["branch", "--show-current"]), "topic");
+        let broken = fixture.path().join("not-a-repo");
+        git(
+            &work,
+            &["remote", "set-url", "origin", repo_key(&broken).as_str()],
+        );
+        let failed = associate_upstream(
+            &backend,
+            &opened.summary.path,
+            "origin",
+            missing.generation.expect("missing generation"),
+            3,
+        )
+        .await
+        .unwrap_err();
+        assert_ne!(failed.code, "upstream_unconfirmed");
+        assert!(!upstream_configured(&work));
+        assert_eq!(
+            git_text(&work, &["rev-parse", "HEAD"]),
+            git_text(&work, &["rev-parse", "topic"])
+        );
     }
 }

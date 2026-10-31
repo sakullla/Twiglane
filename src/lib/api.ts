@@ -121,6 +121,8 @@ export const api = {
     invoke<StatusSnapshot>("push_branch", { path, generation, requestId }),
   publishBranch: (path: string, remote: string, generation: number, requestId: number) =>
     invoke<StatusSnapshot>("publish_branch", { path, remote, generation, requestId }),
+  associateUpstream: (path: string, remote: string, generation: number, requestId: number) =>
+    invoke<StatusSnapshot>("associate_upstream", { path, remote, generation, requestId }),
   commitAndPush: (path: string, message: string, generation: number, requestId: number) =>
     invoke<CommitPushReport>("commit_and_push", { path, message, generation, requestId }),
   branchState: (path: string, generation: number, requestId: number) =>

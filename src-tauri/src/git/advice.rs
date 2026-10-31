@@ -140,7 +140,7 @@ pub fn problem_error(problem: GitProblem, detail: &str) -> AppError {
         ),
         GitProblem::PushRejected => (
             "push_rejected",
-            "推送被拒绝，因为远程已有新提交。没有强行推送。请先拉取或合并远程变化，然后再试。",
+            "推送被拒绝，因为远程已有新提交。没有强行推送。若还没有上游，请先只关联上游（不会推送），再快进拉取；已经有上游时请先快进拉取。不能快进时请走分支合并，不要强行推送。",
         ),
         GitProblem::LocalChanges => (
             "local_changes",
@@ -222,6 +222,9 @@ mod tests {
         let rejected = problem_error(GitProblem::PushRejected, "");
         assert!(!rejected.message.contains("强行推送已"));
         assert!(rejected.message.contains("没有强行推送"));
+        assert!(rejected.message.contains("只关联上游"));
+        assert!(rejected.message.contains("快进拉取"));
+        assert!(!rejected.message.contains("请先拉取或合并"));
         assert_eq!(
             classify_problem("error: Your local changes to the following files would be overwritten by checkout:\nPlease commit your changes or stash them before you switch branches.").unwrap(),
             GitProblem::LocalChanges

@@ -405,7 +405,9 @@
     phaseNote = "正在重试推送，不会再次提交";
     live = phaseNote;
     try {
-      const snapshot = await api.pushBranch(current.summary.path, current.generation, nextId());
+      const snapshot = current.snapshot.branch.upstream
+        ? await api.pushBranch(current.summary.path, current.generation, nextId())
+        : await api.publishBranch(current.summary.path, "", current.generation, nextId());
       if (opened?.summary.path !== current.summary.path) return;
       applySnapshot(snapshot);
       pushRetry = false;
@@ -426,7 +428,16 @@
     const current = opened;
     if (!current || pending) return;
     pending = name;
-    live = name === "fetch" ? "正在检查远程" : name === "pull" ? "正在快进拉取" : name === "publish" ? "正在发布分支" : "正在推送";
+    live =
+      name === "fetch"
+        ? "正在检查远程"
+        : name === "pull"
+          ? "正在快进拉取"
+          : name === "publish"
+            ? "正在发布分支"
+            : name === "associate"
+              ? "正在关联上游，不会推送"
+              : "正在推送";
     try {
       const snapshot = await action(current.summary.path, current.generation);
       if (opened?.summary.path !== current.summary.path) return;
@@ -440,7 +451,9 @@
             ? "快进拉取已完成，文件和同步状态已刷新。"
             : name === "publish"
               ? "分支已发布并关联上游。"
-              : "推送已完成，没有强行推送。";
+              : name === "associate"
+                ? "已关联上游。这一步没有推送。"
+                : "推送已完成，没有强行推送。";
       live = phaseNote;
     } catch (error) {
       if (opened?.summary.path === current.summary.path) handleMutationError(error);
@@ -712,6 +725,7 @@
       <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => runSync("push", (path, generation) => api.pushBranch(path, generation, nextId()))}>推送</button>
       {#if !opened.snapshot.branch.upstream}
         <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => runSync("publish", (path, generation) => api.publishBranch(path, "", generation, nextId()))}>发布分支</button>
+        <button type="button" class="ghost compact" disabled={pending !== null} onclick={() => runSync("associate", (path, generation) => api.associateUpstream(path, "", generation, nextId()))}>只关联上游</button>
       {/if}
       {#if pushRetry}
         <button type="button" class="primary compact" disabled={pending !== null} onclick={retryPush}>重试推送</button>

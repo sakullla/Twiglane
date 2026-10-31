@@ -24,6 +24,7 @@ fn main() {
             "pull_fast_forward",
             "push_branch",
             "publish_branch",
+            "associate_upstream",
             "commit_and_push",
             "branch_state",
             "create_branch",

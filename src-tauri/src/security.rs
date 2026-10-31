@@ -39,6 +39,7 @@ fn capabilities_do_not_grant_a_shell() {
         "allow-pull-fast-forward",
         "allow-push-branch",
         "allow-publish-branch",
+        "allow-associate-upstream",
         "allow-commit-and-push",
         "allow-branch-state",
         "allow-create-branch",

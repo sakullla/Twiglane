@@ -74,6 +74,7 @@ pub fn run() {
             pull_fast_forward,
             push_branch,
             publish_branch,
+            associate_upstream,
             commit_and_push,
             branch_state,
             create_branch,
@@ -466,6 +467,18 @@ async fn publish_branch(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+async fn associate_upstream(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    remote: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    crate::git::sync::associate_upstream(state.inner(), &path, &remote, generation, request_id)
+        .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
 async fn commit_and_push(
     state: State<'_, Arc<Backend>>,
     path: String,
@@ -668,6 +681,7 @@ mod ipc_contract {
             "pull_fast_forward",
             "push_branch",
             "publish_branch",
+            "associate_upstream",
             "commit_and_push",
             "branch_state",
             "create_branch",

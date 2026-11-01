@@ -41,6 +41,83 @@ function block(css: string, regex: RegExp): Map<string, string> {
   return tokensOf(match[1]);
 }
 
+/** 一条 CSS 规则（不含 @ 前缀的 at-rule 本身）；selector 为未拆分的完整前导串。 */
+type ParsedRule = { selector: string; body: string };
+
+/**
+ * 极简 CSS 规则扫描：只做本仓库需要的两件事——取到规则前导与声明体、进入 @media/@container
+ * 继续扫描、跳过 @keyframes 里的关键帧块。规则体内不允许再嵌套花括号（本仓库无嵌套语法）。
+ */
+function parseRules(css: string): ParsedRule[] {
+  const text = stripComments(css);
+  const rules: ParsedRule[] = [];
+  const atRules: string[] = [];
+  let prelude = "";
+  let index = 0;
+  while (index < text.length) {
+    const char = text[index];
+    if (char === "{") {
+      const head = prelude.trim();
+      prelude = "";
+      if (head.startsWith("@")) {
+        atRules.push(head);
+        index += 1;
+        continue;
+      }
+      const end = text.indexOf("}", index);
+      if (end === -1) throw new Error(`规则未闭合：${head}`);
+      const inKeyframes = atRules.some((at) => at.startsWith("@keyframes"));
+      if (head && !inKeyframes) rules.push({ selector: head, body: text.slice(index + 1, end) });
+      index = end + 1;
+      continue;
+    }
+    if (char === "}") {
+      atRules.pop();
+      prelude = "";
+      index += 1;
+      continue;
+    }
+    if (char === ";") {
+      prelude = "";
+      index += 1;
+      continue;
+    }
+    prelude += char;
+    index += 1;
+  }
+  return rules;
+}
+
+/** 拆选择器组：只在括号外（:not(...) 等）按逗号分割。 */
+function splitSelectorList(selector: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const char of selector) {
+    if (char === "(") depth += 1;
+    if (char === ")") depth -= 1;
+    if (char === "," && depth === 0) {
+      parts.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+/** 引用装饰发丝线的 var(--border) / var(--border-strong)（不会命中 --control-border）。 */
+const HAIRLINE_REFERENCE = /var\(\s*--border(?:-strong)?\s*\)/;
+
+/** 取出声明体内所有引用发丝线的 border / border-color / border-* 声明。 */
+function hairlineBorderDeclarations(body: string): string[] {
+  return body
+    .split(";")
+    .map((declaration) => declaration.trim())
+    .filter((declaration) => /^border(?:-[a-z]+)*\s*:/.test(declaration) && HAIRLINE_REFERENCE.test(declaration));
+}
+
 const tokensCss = read(path.join(stylesDir, "tokens.css"));
 const shared = block(tokensCss, /(?:^|\n)\s*:root\s*\{([^}]*)\}/);
 const light = block(tokensCss, /:root,\s*\[data-theme="light"\]\s*\{([^}]*)\}/);
@@ -208,5 +285,203 @@ describe("样式分层结构", () => {
     expect(imports).toEqual(["./styles/tokens.css", "./styles/base.css", "./styles/components.css", "./styles/layout.css"]);
     const withoutImports = entry.replace(/@import\s+"[^"]+";/g, "").trim();
     expect(withoutImports, "入口文件不应包含规则").toBe("");
+  });
+});
+
+/**
+ * 装饰性发丝线白名单 —— 「默认拒绝」门禁的事实清单
+ * ---------------------------------------------------------------------------
+ * 为什么是白名单而不是逐条列举控件：`--border` / `--border-strong` 是发丝线，
+ * 在白底上只有 1.1:1，只允许出现在「没有交互态、不承担控件边界」的轮廓与分隔线上。
+ * 反过来（枚举所有控件）每加一个控件就漏一次，因此改成：任何在 border 族声明里
+ * 引用发丝线的规则，只要选择器不在下表，测试就红。新增控件必须显式改用
+ * `--control-border` / `--control-border-hover`（或可测的 `--accent` 状态边界），
+ * 否则唯一的合法出路是带着理由进这张表。
+ *
+ * 每条的理由都要回答「为什么这里不需要 ≥3:1 的可辨识边界」：通常是因为
+ * (a) 元素本身不可交互、没有 hover/focus/pressed 态；或
+ * (b) 它是容器/表格轮廓，容器内的可交互控件各自带控件边界；
+ * 或 (c) 它只做分区（标题栏底部、卡片头部底部这类横向分隔线）。
+ *
+ * 本门禁扫描 base.css / components.css / layout.css 三层（比要求的组件层+布局层多含基础层，
+ * 因为 kbd、滚动条这些基础规则的边界同样不该冒充控件边界）。覆盖边界（明说不含糊）：
+ * - 只审 `border` / `border-color` / `border-*` 声明。用 `background` 或 `box-shadow`
+ *   画出来的线不在内（`.resizer`、`.menu-sep`、`.merge-step-line`、
+ *   `.art-branch-line > span`、`.empty-icon`、`.context-separator` 的 `color`）：
+ *   它们同样只做分区/描边，且没有哪一处是某个控件唯一的可见边界。
+ * - 以 `transparent` 为常态的控件不会被命中：它们的可辨识度由其它手段承担，属另一套判据，
+ *   不在本门禁内。现存四处，逐个说明为何可接受：
+ *   `.btn`（文字按钮/实心按钮由标签与填充识别，ghost 有 hover 背景）、
+ *   `.file-row` 与 `.history-row`（列表行由 hover 背景 + 选中态 accent-soft 填充与 accent 竖条识别）、
+ *   `.action-card.primary`（强调卡是实心 accent 填充，边界本就无意义）。
+ *   注意 `.file-tools .field` 曾经也是 transparent，填充差只有 1.04:1，已被改为继承
+ *   `.field` 的 --control-border（见下方「被点名过的控件」用例）。
+ */
+const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
+  // --- base.css ---
+  kbd: "键位提示标签，纯展示文本；按钮内的 kbd 不承载点击态",
+
+  // --- components.css：容器与浮层外框（容器内的控件各自带边界） ---
+  ".menu": "浮层外框；菜单项自身用 hover 背景与文字色标示，外框不充当控件边界",
+  ".toast": "通知卡外框，卡体不可交互（关闭按钮自带 hover 背景）",
+  ".toast.error": "错误通知的语义色描边，仍是通知卡外框而非控件边界",
+  ".modal-card": "modal 卡片外框；层次由遮罩与阴影表达，卡内输入/按钮各自带边界",
+  ".modal-foot": "modal 底部横向分隔线，分隔正文与操作区",
+  ".callout": "提示框外框，静态说明块，无交互态",
+  ".card": "卡片骨架外框（任务面板容器），卡内控件各自带边界",
+  ".card-head": "卡片头部横向分隔线",
+  ".card-foot": "卡片底部横向分隔线",
+  ".list-box": "列表容器外框，行结构由行分隔线与 hover 背景表达",
+  ".list-row": "列表行底部分隔线；行 hover 用背景色、选中用 accent 竖条",
+  ".list-section": "分组标题底部分隔线，纯分区",
+  ".list-empty": "空状态底部分隔线，纯分区",
+  ".scope-list": "提交范围路径清单容器轮廓，清单项是只读文本",
+  ".composer": "提交区与上方差异面板之间的顶部分区线",
+  ".diff": "差异面板容器外框；工具条控件各自带边界",
+  ".diff-toolbar": "差异工具条底部分隔线",
+  ".diff-more": "差异面板底部横向分隔线",
+  ".full-value": "详情弹窗的只读展示框（readonly textarea），只区分文本块；可编辑态 textarea.full-value.editable 用控件边界",
+  ".commit-body": "提交信息正文块的容器轮廓，只读文本",
+  ".history-files": "提交内文件列表的容器轮廓",
+  ".multi-file": "多文件卡外框，卡内文件行自带交互反馈",
+  ".span-main": "历史/合并面板容器外框",
+  ".branch-current": "当前分支卡的 accent 16% 强调描边，是状态容器而非控件边界",
+  ".branch-create": "新建分支表单容器轮廓；内部 .input/.field 自带控件边界",
+  ".tag-create": "新建标签表单容器轮廓；内部 .input 自带控件边界",
+  ".merge-guide": "合并指引卡外框；卡内 select 与按钮各自带边界",
+  ".merge-guide-branch": "指引里的分支卡外框；内部 select 无边框但由卡片强调区分",
+  ".merge-status-card": "合并状态卡外框；卡内按钮与进度条各自表达状态",
+  ".merge-guide-result": "合并结果块外框；就绪/受阻态另有 accent/warning 描边",
+  ".merge-branch-card": "合并源/目标卡外框",
+  ".conflict-pane": "冲突三栏的栏容器外框；栏内编辑器为只读/可写文本区，不靠 1px 边界识别",
+  ".three-way-merge": "三方合并容器外框",
+  ".art-card": "起始页插画卡外框（装饰性插画，不可交互）",
+  ".welcome-recent": "最近仓库网格外框",
+  ".toolbar-group": "标题栏按钮组外框；组内 .tb-btn 自带 hover 背景",
+  ".view-heading-status": "视图标题右侧状态胶囊，静态展示",
+  ".chip.ignore": "忽略标记 chip 的虚线描边，是状态标记而非可点击控件",
+  ".history-hash": "哈希 chip 外框；内部复制按钮自带 hover 背景",
+  ".branch-current-sync > span": "上游/下游计数胶囊，静态展示",
+  ".merge-step-index": "步骤序号圆圈；当前步以 accent 描边强调，圆圈本身不可点",
+
+  // --- components.css：表格/列分隔线与分区线 ---
+  ".pane-head": "面板标题栏底部横向分隔线",
+  ".panel-toolbar": "面板工具条底部横向分隔线",
+  ".history-list": "历史列表与详情之间的竖向分栏线",
+  ".history-meta": "提交元信息区块底部横向分隔线",
+  ".history-multi-head": "多选头部底部横向分隔线",
+  ".multi-file.expanded .multi-file-head": "展开的文件卡头部底部横向分隔线",
+  ".stash-record": "临时保存记录底部横向分隔线",
+  ".conflict-pane-head": "冲突栏标题底部横向分隔线",
+  ".merge-steps": "合并步骤条底部横向分隔线",
+  ".merge-guide-actions": "指引操作条顶部横向分隔线",
+  ".conflict-sidebar": "冲突侧栏右分隔线（分区线，不是行边界）",
+  ".conflict-sidebar-head": "冲突侧栏标题底部横向分隔线",
+  ".conflict-sidebar-foot": "冲突侧栏底部顶部横向分隔线",
+  ".three-way-title": "三方合并表头底部横向分隔线",
+  ".three-way-foot": "三方合并表尾顶部横向分隔线",
+  ".diff-line .ln + .ln": "差异视图行号列的表格竖线",
+  ".side-cell + .side-cell": "双栏差异的列分隔竖线",
+  ".three-way-title.result": "结果列表头的左右表格竖线",
+  ".three-way-pane.result": "结果栏的左右表格竖线",
+  ".merge-resolution-count .resolved-count": "已解决计数前的竖分隔线",
+
+  // --- components.css：语义色混合的容器描边（不是控件边界） ---
+  ".conflict-pane.result": "结果栏的 accent 混合描边，表示「这是输出栏」；栏内 textarea 自带焦点态",
+  ".merge-branch-card.source": "源分支卡 info 混合描边，状态强调",
+  ".merge-branch-card.target": "目标分支卡 accent 混合描边，状态强调",
+  ".merge-guide-branch.target": "目标分支卡 accent 混合描边，状态强调",
+  ".merge-guide-result.ready": "结果块就绪态 accent 混合描边，状态强调",
+  ".merge-guide-result.blocked": "结果块受阻态 warning 混合描边，状态强调",
+
+  // --- layout.css ---
+  ".topbar": "标题栏底部横向分区线",
+  ".infobar": "通知条底部横向分区线",
+  ".workspace-nav": "侧栏导航组底部横向分区线",
+  ".sidebar-foot": "侧栏底部顶部横向分区线",
+  ".files": "文件列表面板外框；行内交互由 .file-row 的选中竖条承担",
+  ".view-title-line .count": "视图标题计数胶囊描边，纯装饰数字标记",
+  ".sidebar-section .count": "侧栏分组计数胶囊描边，纯装饰数字标记",
+  ".welcome-recent button": "最近仓库网格的行分隔线；行本身由文字与 hover 背景标示，与 .list-row 同类",
+  ".welcome-recent button:nth-child(odd)": "最近仓库网格的列分隔竖线",
+  ".welcome-recent button:nth-last-child(-n+2)": "网格末行去掉底部分隔线（覆盖为分区修正）",
+  ".statusbar": "状态栏顶部横向分区线",
+};
+
+describe("控件边界策略（默认拒绝）", () => {
+  const layerFilesToScan = ["base.css", "components.css", "layout.css"] as const;
+
+  it("引用装饰发丝线的 border 声明必须落在显式白名单内", () => {
+    const offenders: string[] = [];
+    const used = new Set<string>();
+    for (const file of layerFilesToScan) {
+      const css = read(path.join(stylesDir, file));
+      for (const rule of parseRules(css)) {
+        const declarations = hairlineBorderDeclarations(rule.body);
+        if (declarations.length === 0) continue;
+        for (const selector of splitSelectorList(rule.selector)) {
+          used.add(selector);
+          if (!Object.prototype.hasOwnProperty.call(DECORATIVE_HAIRLINE_RULES, selector)) {
+            offenders.push(`${file} :: ${selector} { ${declarations.join("; ")} }`);
+          }
+        }
+      }
+    }
+    expect(
+      offenders,
+      "以下规则的边界引用了装饰发丝线 --border/--border-strong，却不在 tests/tokens.spec.ts 的装饰白名单内：" +
+        "请在 components.css/layout.css 里改用 --control-border / --control-border-hover（或可测的 --accent 状态边界），" +
+        "或把选择器连同「为什么它是纯装饰」的理由加进 DECORATIVE_HAIRLINE_RULES",
+    ).toEqual([]);
+  });
+
+  it("白名单没有过期条目，且每条都写了理由", () => {
+    const used = new Set<string>();
+    for (const file of layerFilesToScan) {
+      for (const rule of parseRules(read(path.join(stylesDir, file)))) {
+        if (hairlineBorderDeclarations(rule.body).length === 0) continue;
+        for (const selector of splitSelectorList(rule.selector)) used.add(selector);
+      }
+    }
+    const stale = Object.keys(DECORATIVE_HAIRLINE_RULES).filter((selector) => !used.has(selector));
+    expect(stale, "白名单条目已不再引用发丝线（规则被删或改用了控件边界），请同步删除").toEqual([]);
+    const unexplained = Object.entries(DECORATIVE_HAIRLINE_RULES)
+      .filter(([, reason]) => reason.trim().length < 8)
+      .map(([selector]) => selector);
+    expect(unexplained, "白名单条目必须写明为什么是纯装饰").toEqual([]);
+  });
+
+  it("被点名过的控件不再借装饰发丝线做边界", () => {
+    const components = read(path.join(stylesDir, "components.css"));
+    const fileToolsField = ruleBody(components, ".file-tools .field");
+    expect(fileToolsField, ".file-tools .field 不能把边界覆盖成透明").not.toMatch(/border(-color)?:\s*[^;]*transparent/);
+    for (const selector of [
+      ".composer-box",
+      ".composer-box:hover",
+      ".composer-box:focus-within",
+      "textarea.full-value.editable",
+      "textarea.full-value.editable:hover",
+      "textarea.full-value.editable:focus",
+      ".conflict-sidebar .conflict-file",
+      ".conflict-sidebar .conflict-file:hover:not(:disabled)",
+      '.conflict-sidebar .conflict-file[aria-pressed="true"]',
+      ".file-tools .field:focus-within",
+    ]) {
+      expect(ruleBody(components, selector), selector).not.toMatch(/var\(--border(-strong)?\)/);
+    }
+    expect(ruleBody(components, ".composer-box"), ".composer-box 常态").toMatch(/var\(--control-border\)/);
+    expect(ruleBody(components, ".composer-box:hover"), ".composer-box hover").toMatch(/var\(--control-border-hover\)/);
+    expect(ruleBody(components, "textarea.full-value.editable"), ".full-value.editable 常态").toMatch(/var\(--control-border\)/);
+    expect(ruleBody(components, "textarea.full-value.editable:hover"), ".full-value.editable hover").toMatch(
+      /var\(--control-border-hover\)/,
+    );
+    for (const selector of [
+      ".conflict-sidebar .conflict-file",
+      ".conflict-sidebar .conflict-file:hover:not(:disabled)",
+      '.conflict-sidebar .conflict-file[aria-pressed="true"]',
+    ]) {
+      const body = ruleBody(components, selector);
+      expect(body, selector).toMatch(/border(-color)?:\s*1px solid var\(--(control-border(-hover)?|accent)\)|border-color:\s*var\(--(control-border(-hover)?|accent)\)/);
+    }
   });
 });

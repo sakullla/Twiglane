@@ -12,8 +12,12 @@
  *   信息/警告），也包含可交互控件的自身边界令牌 --control-border /
  *   --control-border-hover——表单控件、次级按钮与可点击的 bordered 行只靠这条
  *   1px 边界与所在表面区分，因此它们是 R14「交互元素边界」的验收对象。
+ *   --accent 同时承担「已选中/正在编辑」控件的状态边界（如冲突文件行的
+ *   aria-pressed 态），所以它不只对 --surface/--bg 校验，也对 --surface-2 /
+ *   --surface-3 校验，覆盖侧栏这类浅一档的底色。
  *   装饰性发丝线 --border / --border-strong 只做面板外框、分隔线与卡片框架，
- *   不承担控件边界，故不计入门禁；tests/tokens.spec.ts 断言控件规则不引用它们。
+ *   不承担控件边界，故不计入门禁；tests/tokens.spec.ts 用「默认拒绝 + 装饰白名单」
+ *   的结构性断言保证没有任何 border 声明偷偷引用它们。
  *
  * 半透明令牌（如 --accent-soft）先按主题表面合成后再计算，避免把 alpha 当成颜色。
  * 不在解析范围的两类底色：渐变（--brand-grad，其上是品牌图标）与按需叠加的
@@ -77,6 +81,8 @@ const HUE_SAMPLES = Array.from({ length: 24 }, (_, index) => index * 15);
 const UI_PAIRS = [
   ["accent", "surface"],
   ["accent", "bg"],
+  ["accent", "surface-2"],
+  ["accent", "surface-3"],
   ["focus", "surface"],
   ["focus", "bg"],
   ["danger", "surface"],

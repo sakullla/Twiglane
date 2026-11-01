@@ -19,7 +19,7 @@ mounted=false
 cleanup() {
   if [[ "$mounted" == true ]]; then hdiutil detach "$mount" || true; fi
   if [[ -f "$work/certificate.pem" ]]; then
-    security remove-trusted-cert -d "$work/certificate.pem" >/dev/null 2>&1 || true
+    sudo -n security remove-trusted-cert -d "$work/certificate.pem" >/dev/null 2>&1 || true
   fi
   security delete-keychain "$keychain" >/dev/null 2>&1 || true
   rm -rf "$work"
@@ -42,7 +42,8 @@ rm -f "$work/certificate.p12"
 # The persistent self-signed identity must be trusted for code signing on this
 # disposable runner. Importing its P12 alone does not establish that trust.
 security find-certificate -c "$APPLE_SIGNING_IDENTITY" -p "$keychain" > "$work/certificate.pem"
-security add-trusted-cert -d -r trustRoot -p codeSign -k "$keychain" "$work/certificate.pem"
+perl -e 'alarm 30; exec @ARGV' sudo -n security add-trusted-cert \
+  -d -r trustRoot -p codeSign -k "$keychain" "$work/certificate.pem"
 identity_hash="$(openssl x509 -in "$work/certificate.pem" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')"
 security find-identity -v -p codesigning "$keychain" | grep -F "$identity_hash"
 

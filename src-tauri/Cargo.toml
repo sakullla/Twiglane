@@ -1,10 +1,14 @@
 [package]
 name = "twiglane"
-version = "0.2.3"
+version = "0.2.4"
 description = "Twiglane desktop Git workspace"
 edition = "2021"
 publish = false
 license = "UNLICENSED"
+
+[lints.rust]
+# rustc excludes linker_messages from the warnings lint group.
+linker_messages = "deny"
 
 [lib]
 name = "twiglane"

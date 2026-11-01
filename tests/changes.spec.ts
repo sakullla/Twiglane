@@ -639,6 +639,16 @@ describe("主工作台", () => {
     expect(document.querySelector<HTMLElement>(".workspace")!.style.getPropertyValue("--sidebar")).toBe("56px");
     expect(document.querySelector("#repo-search"), "折叠态不再渲染搜索框").toBeNull();
 
+    // 阈值正好是 1000：README 写的是「低于 1000px」，所以 999 折叠、1000 不折叠。
+    resizeTo(999);
+    await tick();
+    expect(document.querySelector(".sidebar.rail.collapsed"), "999 仍在阈值下方").toBeTruthy();
+    resizeTo(1000);
+    await tick();
+    expect(document.querySelector(".sidebar.rail.collapsed"), "1000 不折叠").toBeNull();
+    resizeTo(900);
+    await tick();
+
     // 手动展开优先于宽度推导：窗口仍然窄，但这次是用户的选择
     await press("b");
     expect(document.querySelector(".sidebar.rail.collapsed")).toBeNull();

@@ -625,5 +625,39 @@ describe("应用外壳", () => {
       within(document.querySelector<HTMLElement>(".welcome")!).getByRole("button", { name: /没有找到 Git/ }),
       "关掉通知条不影响起始页自己的诊断入口",
     ).toBeTruthy();
+
+    // 关闭只在「这次缺失」内记住：Git 恢复可用后重新武装，再缺一次通知照样回来。
+    mocks.detectGit
+      .mockResolvedValueOnce({
+        available: true,
+        path: "git",
+        version: "2.49.0",
+        overridden: false,
+        belowBaseline: false,
+        message: "Git 2.49.0 可用",
+      })
+      .mockResolvedValueOnce({
+        available: false,
+        path: null,
+        version: null,
+        overridden: false,
+        belowBaseline: false,
+        message: "没有找到 Git",
+      });
+    await fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    const settings = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>('[data-task-modal="settings"]');
+      expect(node, "设置 modal 要能从标题栏打开").toBeTruthy();
+      return node!;
+    });
+    const redetect = within(settings).getByRole("button", { name: "重新检测" });
+    await fireEvent.click(redetect);
+    await waitFor(() => expect(mocks.detectGit).toHaveBeenCalledTimes(1));
+    expect(document.querySelector(".infobar.error"), "Git 可用时本来就不该有诊断通知").toBeNull();
+    await fireEvent.click(redetect);
+    await waitFor(() => expect(mocks.detectGit).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(document.querySelector(".infobar.error"), "恢复可用后重新武装，再缺失时通知要回来").toBeTruthy(),
+    );
   });
 });

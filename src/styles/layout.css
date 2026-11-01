@@ -90,7 +90,9 @@
 .workspace-nav-item .nav-icon { display: grid; place-items: center; width: 22px; color: var(--fg-subtle); }
 .workspace-nav-item.active .nav-icon { color: var(--accent-text); }
 .workspace-nav-item kbd { opacity: 0; border: 0; box-shadow: none; background: transparent; padding: 2px 0; transition: opacity var(--duration-fast) var(--ease); }
-.workspace-nav-item:hover kbd, .workspace-nav-item:focus-visible kbd { opacity: 0.75; }
+/* 键位提示是正文信息：出现时用不透明度 1，0.75 会把 --fg-subtle 从 5.10:1 压到 3.11:1（浅）。
+   隐藏→显示的过渡仍由 opacity 承担。 */
+.workspace-nav-item:hover kbd, .workspace-nav-item:focus-visible kbd { opacity: 1; }
 .workspace-nav-item.active .count { background: var(--accent); color: var(--accent-fg); }
 .repo-section-title { padding-top: 12px; }
 .sidebar-scroll { flex: 1; min-height: 0; overflow: auto; padding: 0 9px 10px; }
@@ -254,8 +256,6 @@
   .merge-resolver-layout { grid-template-columns: 1fr; }
   .conflict-sidebar { max-height: 225px; border-right: 0; border-bottom: 1px solid var(--border); overflow: auto; }
   .conflict-sidebar-foot { display: none; }
-  .conflict-grid { grid-template-columns: 1fr; }
-  .conflict-pane.result { grid-column: auto; }
   .conflict-actions { align-items: stretch; flex-direction: column; }
   .conflict-actions > .btn { align-self: flex-end; }
   .merge-flow { grid-template-columns: 1fr; }

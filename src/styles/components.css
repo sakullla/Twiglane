@@ -185,7 +185,8 @@
 .file-name { display: flex; flex-direction: column; justify-content: center; gap: 1px; min-width: 0; flex: 1; overflow: hidden; line-height: var(--leading-tight); }
 .file-name .fn { font-size: 11.5px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .file-name .fd { font-size: 9.5px; color: var(--fg-subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; min-width: 0; }
-.file-name .fd.from { direction: ltr; color: var(--purple); opacity: 0.85; }
+/* 重命名行的「来源路径」：弱化靠令牌而不是 opacity——0.85 淡化的合成值只有 4.27:1（浅）。 */
+.file-name .fd.from { direction: ltr; color: var(--purple-dimmed); }
 .file-name .fd bdi { direction: ltr; unicode-bidi: isolate; }
 .file-row .row-action { opacity: 0; transition: opacity var(--duration-fast) var(--ease); flex: none; }
 .file-row .row-action.btn { height: 24px; font-size: 10px; padding: 0 6px; }
@@ -448,16 +449,6 @@ label.list-row .checkbox { margin-top: 2px; }
 .conflict-file:hover:not(:disabled) { border-color: var(--control-border-hover); background: var(--surface-2); }
 .conflict-file[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-softer); }
 .conflict-file .icon { color: var(--danger); }
-.conflict-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-.conflict-pane { display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
-.conflict-pane-head { display: flex; align-items: center; gap: var(--space-6); padding: var(--space-8) 10px; font-size: 11.5px; font-weight: 600; border-bottom: 1px solid var(--border); background: var(--surface-2); }
-.conflict-pane-head .dot { width: 7px; height: 7px; border-radius: 50%; }
-.conflict-pane.ours .dot { background: var(--info); }
-.conflict-pane.theirs .dot { background: var(--purple); }
-.conflict-pane.result .dot { background: var(--accent); }
-.conflict-pane.result { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
-.conflict-pane pre, .conflict-pane textarea { margin: 0; min-height: 200px; max-height: 340px; overflow: auto; padding: 11px; font-family: var(--mono); font-size: 11.5px; line-height: var(--leading-relaxed); white-space: pre; border: 0; background: var(--surface); resize: none; outline: none; color: var(--fg); width: 100%; }
-.conflict-pane textarea { resize: vertical; }
 
 /* ---------- 分支与标签 modal ---------- */
 .modal-card.modal-xl { width: min(860px, 100%); }
@@ -622,7 +613,11 @@ label.list-row .checkbox { margin-top: 2px; }
 .conflict-file-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; font-weight: 580; }
 .conflict-file-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-subtle); font-size: 8.5px; direction: rtl; text-align: left; }
 .conflict-sidebar .conflict-file > .icon:last-child { color: var(--fg-subtle); }
-.conflict-sidebar .conflict-file.resolved { cursor: default; opacity: 0.75; }
+/* 已标记行是完成态（不可点）：弱化只作用在名字上，走 --fg-dimmed 而不是整行 opacity。
+   整行 0.75 淡化会把 --fg-subtle 压到 3.11:1（浅）/3.55:1（深）、把本行 --control-border
+   压到 2.46:1（浅）/2.78:1（深），正文与控件边界同时不达标。 */
+.conflict-sidebar .conflict-file.resolved { cursor: default; }
+.conflict-file.resolved .conflict-file-copy strong { color: var(--fg-dimmed); }
 .conflict-file.resolved .conflict-file-icon { background: var(--accent-soft); }
 .conflict-file.resolved .conflict-file-icon .icon { color: var(--accent-text); }
 .conflict-file.resolved .chip { height: 17px; padding: 0 5px; font-size: 8px; }
@@ -640,12 +635,6 @@ label.list-row .checkbox { margin-top: 2px; }
 .comparison-diff .diff { border-radius: 10px; box-shadow: none; }
 .comparison-diff .diff-toolbar { min-height: 43px; }
 .source-versions { margin-bottom: 0; }
-.conflict-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.conflict-pane.result { grid-column: 1 / -1; margin-top: 14px; }
-.conflict-pane-head { min-height: 34px; font-size: 10.5px; }
-.conflict-pane-head .chip { margin-left: auto; height: 17px; font-size: 8px; }
-.conflict-pane pre { min-height: 135px; max-height: 210px; font-size: 10.5px; }
-.conflict-pane.result textarea, .conflict-pane.result pre { min-height: 155px; max-height: 330px; }
 .result-reset { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 3px 5px; border-radius: 5px; color: var(--fg-muted); font-size: 8.5px; }
 .result-reset:hover:not(:disabled) { background: var(--hover); color: var(--fg); }
 .result-reset + .editable-label { margin-left: 3px; }
@@ -664,7 +653,14 @@ label.list-row .checkbox { margin-top: 2px; }
 .three-way-title .btn { height: 25px; padding: 0 7px; font-size: 9px; }
 .three-way-body { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); height: clamp(360px, 48vh, 600px); min-width: 660px; }
 .three-way-pane { min-width: 0; overflow: auto; background: var(--surface); }
-.three-way-pane.result { border-right: 1px solid var(--border); border-left: 1px solid var(--border); }
+/* 合并结果编辑框是这一栏唯一的可视边界：栏内 textarea 是 border:0、outline:none，
+   与左右两栏同为 --surface，没有别的辨识标记。因此左右边界必须承担控件边界的角色：
+   常态走 --control-border（对 --surface 3.75:1 浅 / 4.08:1 深），聚焦时整栏改用 --accent，
+   并给 textarea 补回被清零的焦点环——textarea 铺满整栏，栏上的内描边会被它盖住，
+   所以焦点环只能画在 textarea 自身上。 */
+.three-way-pane.result { border-right: 1px solid var(--control-border); border-left: 1px solid var(--control-border); }
+.three-way-pane.result:focus-within { border-color: var(--accent); }
+.three-way-pane.result textarea:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .three-way-pane textarea, .three-way-pane pre { display: block; width: 100%; height: 100%; min-height: 100%; margin: 0; padding: 7px 10px; border: 0; outline: none; resize: none; background: var(--surface); color: var(--fg); font-family: var(--mono); font-size: 10.5px; line-height: 20px; white-space: pre; tab-size: 2; }
 .three-way-line { display: grid; grid-template-columns: 36px minmax(0, 1fr); min-height: 20px; font-family: var(--mono); font-size: 10.5px; line-height: 20px; white-space: pre; }
 .three-way-line .ln { padding-right: var(--space-8); background: var(--surface-2); color: var(--fg-subtle); font-size: 8.5px; text-align: right; user-select: none; }

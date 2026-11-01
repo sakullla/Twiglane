@@ -16,7 +16,10 @@
      列举控件来守，而是由 tests/tokens.spec.ts 的「默认拒绝 + 装饰白名单」门禁守：
      任何在 border 族声明里引用发丝线的规则，选择器必须在该文件的白名单里并写明
      为什么是纯装饰，否则测试失败。--accent 可承担「已选中/正在编辑」态的状态边界。
-   - scripts/check-contrast.mjs 解析本文件，按 R14 校验正文与交互对比度。
+   - 弱化文字只走 --fg-dimmed / --purple-dimmed，不用元素级 opacity：opacity 会把
+     前景与所在表面按 α 合成，令牌级的通过值在渲染时可能掉到 4.5:1 以下。
+   - scripts/check-contrast.mjs 解析本文件，按 R14 校验正文与交互对比度，
+     并按合成后的结果校验登记在案的 opacity 淡化对。
    ========================================================================== */
 
 :root {
@@ -89,6 +92,11 @@
   --fg: #19241f;
   --fg-muted: #55645c;
   --fg-subtle: #616e66;
+  /* 弱化正文：已完成/已标记等非活动行的主文字（如冲突侧栏的已标记文件）。
+     整行或文字 opacity 会把前景与所在表面按 α 混合，令牌层 5.10:1 的 --fg-subtle
+     在 0.75 淡化后只剩 3.11:1，因此弱化不走 opacity，改用本令牌：取值已把余量算进来，
+     即使再叠加元素级 0.75 淡化，对 --surface / --surface-2 仍 ≥4.5:1。 */
+  --fg-dimmed: #3b4941;
   --accent: #16865f;
   --accent-hover: #0f7350;
   --accent-soft: rgba(22, 134, 95, 0.095);
@@ -110,6 +118,9 @@
   --info-text: #3968b5;
   --purple: #6f52b8;
   --purple-soft: rgba(111, 82, 184, 0.1);
+  /* 重命名行「来源路径」的弱化色：与 --fg-dimmed 同一口径，按 0.85 元素级淡化的
+     合成结果标定，对 --surface / --surface-2 均 ≥4.5:1。 */
+  --purple-dimmed: #5f449f;
   --add-bg: #eaf7f0;
   --add-strong: #d3ecdf;
   --add-fg: #13704b;
@@ -165,6 +176,8 @@
   --fg: #e8efeb;
   --fg-muted: #a0aea6;
   --fg-subtle: #86948b;
+  /* 弱化正文：与浅色主题同义，取值按 0.75 元素级淡化的合成结果标定。 */
+  --fg-dimmed: #a8b6ae;
   --accent: #48c993;
   --accent-hover: #65d9a6;
   --accent-soft: rgba(72, 201, 147, 0.13);
@@ -186,6 +199,8 @@
   --info-text: #9abcef;
   --purple: #b39ade;
   --purple-soft: rgba(179, 154, 222, 0.13);
+  /* 重命名行「来源路径」的弱化色：与浅色主题同义，按 0.85 淡化标定。 */
+  --purple-dimmed: #bda3e6;
   --add-bg: rgba(57, 158, 107, 0.12);
   --add-strong: rgba(72, 201, 147, 0.18);
   --add-fg: #83dcb0;

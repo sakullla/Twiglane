@@ -22,6 +22,16 @@
  * 半透明令牌（如 --accent-soft）先按主题表面合成后再计算，避免把 alpha 当成颜色。
  * 不在解析范围的两类底色：渐变（--brand-grad，其上是品牌图标）与按需叠加的
  * 半透明徽标底（--push-count-bg，数字前景继承所在按钮，实测 6.24:1 / 7.82:1）。
+ *
+ * 重要：令牌级通过 ≠ 含 opacity 的渲染通过。
+ * 元素级的 opacity 会把前景与所在表面按 α 混合，令牌层算出的 5.10:1 在整行 0.75
+ * 淡化后只剩 3.11:1（浅）/ 3.55:1（深）；同样位置上的 1px 控件边界也会掉到 3:1 以下。
+ * 因此：
+ * - 弱化文字一律走专门令牌（--fg-dimmed / --purple-dimmed），不用元素级 opacity；
+ * - 任何仍然用 opacity 淡化文字的位置，必须登记进下面的 COMPOSITE_TEXT_PAIRS，
+ *   按合成后的结果判定（弱化令牌的取值已按这些 α 标定，叠加后仍 ≥4.5:1）。
+ * 只做「令牌 A 对令牌 B」的校验会漏掉这一整类回归——A4 之前就是这样漏的。
+ *
  * 用法：node scripts/check-contrast.mjs [--verbose]
  */
 import { readFileSync } from "node:fs";
@@ -44,6 +54,12 @@ const TEXT_PAIRS = [
   ["fg-subtle", "surface"],
   ["fg-subtle", "surface-2"],
   ["fg-subtle", "surface-3"],
+  ["fg-dimmed", "bg"],
+  ["fg-dimmed", "surface"],
+  ["fg-dimmed", "surface-2"],
+  ["fg-dimmed", "surface-3"],
+  ["purple-dimmed", "surface"],
+  ["purple-dimmed", "surface-2"],
   ["accent-text", "surface"],
   ["accent-text", "accent-soft"],
   ["accent-text", "accent-softer"],
@@ -76,6 +92,22 @@ const HUE_TEXT_PAIRS = [
 
 /** 逐色相校验的取样点：0–345° 步长 15，覆盖 60°/240° 等最差色相。 */
 const HUE_SAMPLES = Array.from({ length: 24 }, (_, index) => index * 15);
+
+/**
+ * 显式合成对：文字所在元素带元素级 opacity 淡化时的渲染值，阈值 4.5:1。
+ *
+ * 每一对把「前景令牌 × 淡化系数」按所在表面合成后判定，也就是浏览器实际渲染的
+ * 结果；不登记的淡化位点不受本层保护，所以新增任何用 opacity 淡化文字的地方，
+ * 必须在这里补一行。清单里的 α 取自被取代的写法（整行淡化 0.75、来源路径淡化
+ * 0.85）：弱化令牌的取值即按这些 α 标定，因此即使同类淡化重新出现也不会跌破 4.5:1；
+ * 同时 tests/tokens.spec.ts 断言这两个弱化位点不再使用元素级 opacity。
+ */
+const COMPOSITE_TEXT_PAIRS = [
+  { fg: "fg-dimmed", bg: "surface", opacity: 0.75 },
+  { fg: "fg-dimmed", bg: "surface-2", opacity: 0.75 },
+  { fg: "purple-dimmed", bg: "surface", opacity: 0.85 },
+  { fg: "purple-dimmed", bg: "surface-2", opacity: 0.85 },
+];
 
 /** 交互对：状态色与控件边界 × 背景，阈值 3:1 */
 const UI_PAIRS = [
@@ -292,12 +324,25 @@ function main() {
         if (!fg) continue;
         const value = ratio(fg, bg);
         const pass = value + 1e-9 >= min;
-        rows.push({ label, value, min, pass });
+        rows.push({ label, value, min, kind, pass });
         if (!pass) failures.push(`${label} = ${value.toFixed(2)}:1 (< ${min}:1)`);
       }
     };
     check(TEXT_PAIRS, MIN_TEXT, "text");
     check(UI_PAIRS, MIN_UI, "ui");
+    for (const pair of COMPOSITE_TEXT_PAIRS) {
+      const label = `${theme}/composite --${pair.fg}@${pair.opacity} on --${pair.bg}`;
+      const bg = background(tokens, pair.bg, label, problems);
+      if (!bg) continue;
+      const fg = resolve(tokens, pair.fg, bg, label, problems);
+      if (!fg) continue;
+      // 元素级 opacity：前景与所在表面按 α 混合后的实际渲染色。
+      const rendered = over({ ...fg, a: pair.opacity }, bg);
+      const value = ratio(rendered, bg);
+      const pass = value + 1e-9 >= MIN_TEXT;
+      rows.push({ label, value, min: MIN_TEXT, kind: "composite", pass });
+      if (!pass) failures.push(`${label} = ${value.toFixed(2)}:1 (< ${MIN_TEXT}:1)`);
+    }
     for (const hue of HUE_SAMPLES) {
       for (const pair of HUE_TEXT_PAIRS) {
         const label = `${theme}/text ${sideLabel(pair.fg)} on ${sideLabel(pair.bg)} @hue ${hue}`;
@@ -320,15 +365,18 @@ function main() {
     }
   }
 
-  const textRows = rows.filter((r) => r.min === MIN_TEXT);
+  const textRows = rows.filter((r) => r.min === MIN_TEXT && r.kind !== "composite");
   const uiRows = rows.filter((r) => r.min === MIN_UI);
+  const compositeRows = rows.filter((r) => r.kind === "composite");
   const worst = (list) => list.sort((a, b) => a.value - b.value)[0];
   const worstText = worst([...textRows]);
   const worstUi = worst([...uiRows]);
+  const worstComposite = worst([...compositeRows]);
   console.log(
-    `对比度检查：${rows.length} 对（正文 ${textRows.length} / 交互 ${uiRows.length}），` +
+    `对比度检查：${rows.length} 对（正文 ${textRows.length} / 交互 ${uiRows.length} / 含 opacity 合成 ${compositeRows.length}），` +
       `正文最低 ${worstText ? `${worstText.value.toFixed(2)}:1（${worstText.label}）` : "n/a"}，` +
-      `交互最低 ${worstUi ? `${worstUi.value.toFixed(2)}:1（${worstUi.label}）` : "n/a"}`,
+      `交互最低 ${worstUi ? `${worstUi.value.toFixed(2)}:1（${worstUi.label}）` : "n/a"}，` +
+      `合成最低 ${worstComposite ? `${worstComposite.value.toFixed(2)}:1（${worstComposite.label}）` : "n/a"}`,
   );
 
   if (problems.length > 0) {
@@ -341,7 +389,7 @@ function main() {
     process.exitCode = 1;
     return;
   }
-  console.log("对比度检查通过：两套主题正文 ≥ 4.5:1（含逐色相的徽标/头像首字母），交互元素边界 ≥ 3:1");
+  console.log("对比度检查通过：两套主题正文 ≥ 4.5:1（含逐色相的徽标/头像首字母与已登记的 opacity 合成对），交互元素边界 ≥ 3:1");
   process.exitCode = 0;
 }
 

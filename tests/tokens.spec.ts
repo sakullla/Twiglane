@@ -353,7 +353,6 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".merge-status-card": "合并状态卡外框；卡内按钮与进度条各自表达状态",
   ".merge-guide-result": "合并结果块外框；就绪/受阻态另有 accent/warning 描边",
   ".merge-branch-card": "合并源/目标卡外框",
-  ".conflict-pane": "冲突三栏的栏容器外框；栏内编辑器为只读/可写文本区，不靠 1px 边界识别",
   ".three-way-merge": "三方合并容器外框",
   ".art-card": "起始页插画卡外框（装饰性插画，不可交互）",
   ".welcome-recent": "最近仓库网格外框",
@@ -372,7 +371,6 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".history-multi-head": "多选头部底部横向分隔线",
   ".multi-file.expanded .multi-file-head": "展开的文件卡头部底部横向分隔线",
   ".stash-record": "临时保存记录底部横向分隔线",
-  ".conflict-pane-head": "冲突栏标题底部横向分隔线",
   ".merge-steps": "合并步骤条底部横向分隔线",
   ".merge-guide-actions": "指引操作条顶部横向分隔线",
   ".conflict-sidebar": "冲突侧栏右分隔线（分区线，不是行边界）",
@@ -383,11 +381,9 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".diff-line .ln + .ln": "差异视图行号列的表格竖线",
   ".side-cell + .side-cell": "双栏差异的列分隔竖线",
   ".three-way-title.result": "结果列表头的左右表格竖线",
-  ".three-way-pane.result": "结果栏的左右表格竖线",
   ".merge-resolution-count .resolved-count": "已解决计数前的竖分隔线",
 
   // --- components.css：语义色混合的容器描边（不是控件边界） ---
-  ".conflict-pane.result": "结果栏的 accent 混合描边，表示「这是输出栏」；栏内 textarea 自带焦点态",
   ".merge-branch-card.source": "源分支卡 info 混合描边，状态强调",
   ".merge-branch-card.target": "目标分支卡 accent 混合描边，状态强调",
   ".merge-guide-branch.target": "目标分支卡 accent 混合描边，状态强调",
@@ -466,6 +462,8 @@ describe("控件边界策略（默认拒绝）", () => {
       ".conflict-sidebar .conflict-file:hover:not(:disabled)",
       '.conflict-sidebar .conflict-file[aria-pressed="true"]',
       ".file-tools .field:focus-within",
+      ".three-way-pane.result",
+      ".three-way-pane.result:focus-within",
     ]) {
       expect(ruleBody(components, selector), selector).not.toMatch(/var\(--border(-strong)?\)/);
     }
@@ -482,6 +480,57 @@ describe("控件边界策略（默认拒绝）", () => {
     ]) {
       const body = ruleBody(components, selector);
       expect(body, selector).toMatch(/border(-color)?:\s*1px solid var\(--(control-border(-hover)?|accent)\)|border-color:\s*var\(--(control-border(-hover)?|accent)\)/);
+    }
+    expect(ruleBody(components, ".three-way-pane.result"), ".three-way-pane.result 常态").toMatch(
+      /border-(right|left):\s*1px solid var\(--control-border\)/,
+    );
+    expect(ruleBody(components, ".three-way-pane.result:focus-within"), ".three-way-pane.result 焦点态").toMatch(
+      /var\(--accent\)/,
+    );
+    // 栏内 textarea 铺满整栏，栏上的内描边会被它盖住，因此焦点环必须落在 textarea 自身上。
+    expect(ruleBody(components, ".three-way-pane.result textarea:focus-visible"), "合并结果编辑框焦点环").toMatch(
+      /outline:\s*2px solid var\(--focus\)/,
+    );
+  });
+
+  /**
+   * 弱化位点的判据：不用元素级 opacity，改用弱化令牌。
+   * 整行/文字 opacity 会把前景与所在表面按 α 合成，令牌层通过的值渲染后可能掉到
+   * 4.5:1 以下（整行 0.75 会把 --fg-subtle 的 5.10:1 压到 3.11:1，同时把该行的
+   * --control-border 压到 2.46:1）。scripts/check-contrast.mjs 的 COMPOSITE_TEXT_PAIRS
+   * 按合成值兜底，这里挡住「重新加回 opacity」这一步。
+   */
+  it("弱化文字走弱化令牌，不用元素级 opacity", () => {
+    const components = read(path.join(stylesDir, "components.css"));
+    const layout = read(path.join(stylesDir, "layout.css"));
+    const opacityDecl = /(?:^|;)\s*opacity\s*:\s*([\d.]+)\s*(?:;|$)/;
+
+    const resolvedRow = ruleBody(components, ".conflict-sidebar .conflict-file.resolved");
+    expect(opacityDecl.test(resolvedRow), ".conflict-file.resolved 不能用整行 opacity 弱化").toBe(false);
+    expect(ruleBody(components, ".conflict-file.resolved .conflict-file-copy strong"), "已标记行名字").toMatch(
+      /color:\s*var\(--fg-dimmed\)/,
+    );
+
+    const fromPath = ruleBody(components, ".file-name .fd.from");
+    expect(opacityDecl.test(fromPath), ".fd.from 不能用文字 opacity 弱化").toBe(false);
+    expect(fromPath, "来源路径弱化色").toMatch(/color:\s*var\(--purple-dimmed\)/);
+
+    // 键位提示是正文信息：显示时必须完全不透明（0.75 会把 --fg-subtle 压到 3.11:1）。
+    const navKbd = ruleBody(layout, ".workspace-nav-item:hover kbd, .workspace-nav-item:focus-visible kbd");
+    expect(navKbd, "键位提示显示态").toMatch(/opacity:\s*1(?:;|\s|$)/);
+
+    // 弱化令牌两套主题都要定义，且不得与基础正文色同值（否则「弱化」没有语义）。
+    for (const [theme, tokens] of [
+      ["light", light],
+      ["dark", dark],
+    ] as const) {
+      for (const [dim, base] of [
+        ["--fg-dimmed", "--fg-subtle"],
+        ["--purple-dimmed", "--purple"],
+      ] as const) {
+        expect(tokens.get(dim), `${theme} ${dim}`).toBeTruthy();
+        expect(tokens.get(dim), `${theme} ${dim} 不应等于 ${base}`).not.toBe(tokens.get(base));
+      }
     }
   });
 });

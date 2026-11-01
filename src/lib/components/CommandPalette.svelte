@@ -5,6 +5,7 @@
   /**
    * 命令面板：动作由调用方的注册表提供（同一份数据也驱动标题栏、rail 与溢出菜单）。
    * 支持上下移动与回车执行；不可用动作就地显示原因；Esc 关闭并把焦点还给触发元素。
+   * 键位挂在卡片上而非搜索框上：Tab 把焦点送进选项之后，Esc/方向键/回车仍然可用。
    */
   interface PaletteCommand {
     id: string;
@@ -80,9 +81,18 @@
     onClose();
   }
 
+  /** 选项在 DOM 里的展开顺序与 filtered 一致（分组按首次出现排序，组内保持原序）。 */
+  function optionAt(index: number): HTMLElement | null {
+    return card?.querySelectorAll<HTMLElement>(".palette-item")[index] ?? null;
+  }
+
   function move(step: number) {
     if (filtered.length === 0) return;
     active = (active + step + filtered.length) % filtered.length;
+    // 焦点已经落在某个选项上时，方向键要把焦点一起带走：
+    // 否则高亮（aria-selected）跑到下一项、键盘焦点仍留在上一项，回车执行的和看到的不一致。
+    const current = document.activeElement;
+    if (current instanceof HTMLElement && current.classList.contains("palette-item")) optionAt(active)?.focus();
   }
 
   /** Tab / Shift+Tab 只在面板内首尾环绕，绝不回落到背后的主界面。 */
@@ -95,8 +105,16 @@
     next?.focus();
   }
 
-  function onKeydown(event: KeyboardEvent) {
+  /**
+   * 键位统一挂在卡片上，靠冒泡覆盖面板内所有焦点位置。
+   * 搜索框与选项都是卡片的后代，所以焦点落在选项上时 Esc/方向键/回车同样生效；
+   * 只挂在搜索框上会让「Tab 进选项」之后的这几个键全部失效。
+   * Space 不在这里：搜索框里的空格是输入内容，空格执行只留在选项自己那一支。
+   */
+  function onCardKeydown(event: KeyboardEvent) {
+    if (event.defaultPrevented) return;
     if (event.key === "Escape") {
+      // 面板自己吃掉 Esc：既关掉自己，也不让文档级快捷键（T5 键盘层）再关一次别的层
       event.preventDefault();
       event.stopPropagation();
       onClose();
@@ -122,13 +140,6 @@
       const item = filtered[active];
       if (item) runCommand(item);
     }
-  }
-
-  /** 焦点落在选项上时，Tab 事件冒泡到这里；已被搜索框处理过的就不再重复移动。 */
-  function onCardKeydown(event: KeyboardEvent) {
-    if (event.defaultPrevented || event.key !== "Tab") return;
-    event.preventDefault();
-    trapFocus(event.shiftKey ? -1 : 1);
   }
 
   function onBackdrop(event: MouseEvent) {
@@ -162,7 +173,6 @@
             autocomplete="off"
             spellcheck="false"
             {placeholder}
-            onkeydown={onKeydown}
           />
           <kbd>{MODIFIER_LABEL} K</kbd>
         </div>
@@ -185,7 +195,9 @@
                   onmouseenter={() => (active = positionOf(item))}
                   onclick={() => runCommand(item)}
                   onkeydown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
+                    // 只剩空格在选项本地处理（搜索框里的空格必须留给输入）；
+                    // Esc / 方向键 / 回车统一由卡片上的 onCardKeydown 承担
+                    if (event.key === " ") {
                       event.preventDefault();
                       runCommand(item);
                     }

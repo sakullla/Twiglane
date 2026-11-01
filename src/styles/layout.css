@@ -186,8 +186,11 @@
 .sidebar.rail.collapsed .workspace-nav { padding: 0 var(--space-6) var(--space-6); }
 .sidebar.rail.collapsed .workspace-nav-item { justify-content: center; gap: 0; width: 44px; height: 36px; margin: 0 auto; padding: 0; }
 .sidebar.rail.collapsed .workspace-nav-item .spacer, .sidebar.rail.collapsed .workspace-nav-item kbd { display: none; }
-.sidebar.rail.collapsed .workspace-nav-item .count, .sidebar.rail.collapsed .workspace-nav-item .rail-status-dot { position: absolute; top: 3px; right: 3px; }
-.sidebar.rail.collapsed .workspace-nav-item .count { height: 14px; min-width: 14px; padding: 0 3px; font-size: 9px; }
+/* 折叠态：每项收成图标方块，计数与合并标记浮到图标项上；名称仍由 aria-label 与 title 承载。
+   两个位点必须错开：计数徽标（14px）占右上，「合并进行中」圆点（7px + 3px 光环）占右下。
+   曾把两者都写成 top:3/right:3，冲突数与进行中同时成立时圆点会盖住徽标右半，折叠态读不出数量。 */
+.sidebar.rail.collapsed .workspace-nav-item .count { position: absolute; top: 3px; right: 3px; height: 14px; min-width: 14px; padding: 0 3px; font-size: 9px; }
+.sidebar.rail.collapsed .workspace-nav-item .rail-status-dot { position: absolute; right: 3px; bottom: 3px; }
 .sidebar.rail.collapsed .sidebar-foot-brand { display: none; }
 .sidebar.rail.collapsed .rail-foot { justify-content: center; padding: var(--space-8) 0 var(--space-12); }
 .theme-switch { display: flex; width: 100%; }

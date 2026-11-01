@@ -125,6 +125,19 @@ describe("rail 分组与折叠", () => {
     expect(bothMerge?.textContent).toContain("2");
   });
 
+  it("折叠态同时呈现冲突数与进行中的合并，两种信息都不丢", () => {
+    const { container } = render(WorkspaceRail, {
+      props: railProps({ collapsed: true, conflictCount: 2, mergeInProgress: true }) as never,
+    });
+    const merge = container.querySelector<HTMLElement>('[aria-label="分支合并 2（合并进行中）"]');
+    expect(merge, "折叠后名称、数量与状态仍由标签承载").toBeTruthy();
+    const count = merge?.querySelector(".count");
+    const dot = merge?.querySelector("[data-rail-status]");
+    expect(count?.textContent, "数量由徽标本身承载").toBe("2");
+    expect(dot, "进行中的合并另有独立标记").toBeTruthy();
+    expect(count === dot, "两者必须是两个节点，样式层才有错开位点的余地").toBe(false);
+  });
+
   it("折叠后只留图标，名称仍可通过标签与提示访问", async () => {
     const onView = vi.fn();
     const onToggleCollapsed = vi.fn();
@@ -322,6 +335,59 @@ describe("命令面板", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("焦点在选项上时 Esc 关掉面板并把焦点还给触发元素", async () => {
+    const trigger = document.createElement("button");
+    trigger.textContent = "打开命令面板";
+    document.body.append(trigger);
+    trigger.focus();
+
+    const onClose = vi.fn();
+    const view = render(CommandPalette, { props: { open: true, onClose, commands } as never });
+    const input = screen.getByRole("combobox", { name: "搜索命令" });
+    const option = screen.getAllByRole("option")[0];
+
+    await fireEvent.keyDown(input, { key: "Tab" });
+    expect(document.activeElement, "复现路径的第一步：Tab 把焦点送进选中项").toBe(option);
+
+    await fireEvent.keyDown(option, { key: "Escape" });
+    expect(onClose, "焦点在选项上时 Esc 仍要关闭面板").toHaveBeenCalledTimes(1);
+
+    await view.rerender({ open: false } as never);
+    expect(document.activeElement, "关闭后焦点回到打开面板前的触发元素").toBe(trigger);
+
+    trigger.remove();
+  });
+
+  it("焦点在选项上时方向键仍移动游标，回车执行当前项", async () => {
+    const runs = commands.map(() => vi.fn());
+    render(CommandPalette, {
+      props: {
+        open: true,
+        onClose: () => {},
+        commands: [
+          { ...commands[0], run: runs[0] },
+          { ...commands[1], run: runs[1] },
+          { ...commands[2], run: runs[2] },
+        ],
+      } as never,
+    });
+    const input = screen.getByRole("combobox", { name: "搜索命令" });
+    const options = screen.getAllByRole("option");
+
+    input.focus();
+    await fireEvent.keyDown(input, { key: "Tab" });
+    expect(document.activeElement).toBe(options[0]);
+
+    await fireEvent.keyDown(options[0], { key: "ArrowDown" });
+    expect(options[1].getAttribute("aria-selected"), "方向键在选项上把游标下移").toBe("true");
+    expect(options[0].getAttribute("aria-selected")).toBe("false");
+    expect(document.activeElement, "焦点跟随游标，高亮与键盘焦点不分叉").toBe(options[1]);
+
+    await fireEvent.keyDown(options[1], { key: "Enter" });
+    expect(runs[1], "选项上的回车执行当前项").toHaveBeenCalledTimes(1);
+    expect(runs[0]).not.toHaveBeenCalled();
+  });
+
   it("Tab 在面板内首尾环绕，不把焦点落到背景", async () => {
     render(CommandPalette, { props: { open: true, onClose: () => {}, commands } as never });
     const dialog = screen.getByRole("dialog", { name: "命令面板" });
@@ -497,6 +563,18 @@ describe("外壳样式契约", () => {
     expect(layoutCss).toMatch(/\.workspace:has\(> \.sidebar\.rail\.collapsed\)\s*\{[^}]*56px/);
     // 折叠态每项收成图标方块（R4：折叠后只显示图标）
     expect(ruleBody(layoutCss, ".sidebar.rail.collapsed .workspace-nav-item")).toMatch(/justify-content:\s*center/);
+  });
+
+  /** 折叠态两个标记的位点：冲突计数徽标与「合并进行中」圆点可以同时成立，位点必须错开。 */
+  it("折叠态计数徽标与合并进行中圆点位点错开，并存时不遮挡", () => {
+    const badge = ruleBody(layoutCss, ".sidebar.rail.collapsed .workspace-nav-item .count");
+    const dot = ruleBody(layoutCss, ".sidebar.rail.collapsed .workspace-nav-item .rail-status-dot");
+    expect(badge).toMatch(/position:\s*absolute/);
+    expect(badge).toMatch(/top:\s*3px/);
+    expect(dot).toMatch(/position:\s*absolute/);
+    expect(dot, "圆点不能与 14px 计数徽标同占右上角").not.toMatch(/top:\s*3px/);
+    expect(dot, "圆点挪到图标项右下角").toMatch(/bottom:\s*3px/);
+    expect(badge, "徽标留在右上角，与圆点不同侧").not.toMatch(/bottom:\s*3px/);
   });
 
   it("进度条跟随标题栏高度令牌，不再写死 63/57", () => {

@@ -28,7 +28,11 @@
   let query = $state("");
   let active = $state(0);
   let inputEl = $state<HTMLInputElement | null>(null);
+  let card = $state<HTMLDivElement | null>(null);
   let previous: HTMLElement | null = null;
+
+  /** 面板内可 Tab 的元素：搜索框 + 当前选中项（选项用游标式 tabindex 只留一个入口）。 */
+  const FOCUSABLE = 'input:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
   let filtered = $derived.by(() => {
     const needle = query.trim().toLowerCase();
@@ -81,11 +85,26 @@
     active = (active + step + filtered.length) % filtered.length;
   }
 
+  /** Tab / Shift+Tab 只在面板内首尾环绕，绝不回落到背后的主界面。 */
+  function trapFocus(step: number) {
+    if (!card) return;
+    const items = [...card.querySelectorAll<HTMLElement>(FOCUSABLE)];
+    if (items.length === 0) return;
+    const index = items.indexOf(document.activeElement as HTMLElement);
+    const next = index === -1 ? items[0] : items[(index + step + items.length) % items.length];
+    next?.focus();
+  }
+
   function onKeydown(event: KeyboardEvent) {
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
       onClose();
+      return;
+    }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      trapFocus(event.shiftKey ? -1 : 1);
       return;
     }
     if (event.key === "ArrowDown") {
@@ -105,6 +124,13 @@
     }
   }
 
+  /** 焦点落在选项上时，Tab 事件冒泡到这里；已被搜索框处理过的就不再重复移动。 */
+  function onCardKeydown(event: KeyboardEvent) {
+    if (event.defaultPrevented || event.key !== "Tab") return;
+    event.preventDefault();
+    trapFocus(event.shiftKey ? -1 : 1);
+  }
+
   function onBackdrop(event: MouseEvent) {
     if (event.target === event.currentTarget) onClose();
   }
@@ -112,7 +138,15 @@
 
 {#if open}
   <div class="modal-backdrop palette-backdrop" role="presentation" onmousedown={onBackdrop}>
-    <div class="modal-card palette-card" role="dialog" aria-modal="true" aria-label="命令面板">
+    <div
+      class="modal-card palette-card"
+      role="dialog"
+      aria-modal="true"
+      aria-label="命令面板"
+      tabindex="-1"
+      bind:this={card}
+      onkeydown={onCardKeydown}
+    >
       <div class="palette-search">
         <label class="sr-only" for="palette-input">搜索命令</label>
         <div class="field">
@@ -145,7 +179,7 @@
                   class="menu-item palette-item"
                   class:active={filtered[active] === item}
                   role="option"
-                  tabindex="-1"
+                  tabindex={filtered[active] === item ? 0 : -1}
                   aria-selected={filtered[active] === item}
                   aria-disabled={!enabled(item)}
                   onmouseenter={() => (active = positionOf(item))}

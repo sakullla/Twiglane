@@ -18,6 +18,7 @@
     workspaceEnabled?: boolean;
     changeCount?: number;
     conflictCount?: number;
+    mergeInProgress?: boolean;
     collapsed?: boolean;
     onView?: (view: WorkspaceView) => void;
     onQuery: (value: string) => void;
@@ -40,6 +41,7 @@
     workspaceEnabled = false,
     changeCount = 0,
     conflictCount = 0,
+    mergeInProgress = false,
     collapsed = false,
     onView,
     onQuery,
@@ -66,6 +68,7 @@
   {workspaceEnabled}
   {changeCount}
   {conflictCount}
+  {mergeInProgress}
   {collapsed}
   {disabled}
   onView={(view) => onView?.(view)}

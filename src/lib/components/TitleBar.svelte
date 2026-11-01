@@ -275,7 +275,7 @@
       title="设置：外观与运行环境"
       onclick={onSettings}
     >
-      <Icon name="layers" size={16} />
+      <Icon name="settings" size={16} />
     </button>
 
     {#if hasWindowControl}

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { fireEvent, render, screen } from "@testing-library/svelte";
 import { describe, expect, it, vi } from "vitest";
 import CommandPalette from "../src/lib/components/CommandPalette.svelte";
@@ -100,6 +102,27 @@ describe("rail 分组与折叠", () => {
     await fireEvent.click(screen.getByRole("button", { name: "分支与标签" }));
     expect(onTask).toHaveBeenCalledWith("branch");
     expect(onView).not.toHaveBeenCalled();
+  });
+
+  it("冲突清零但合并仍在进行时，分支合并入口仍有独立标记", () => {
+    const merging = render(WorkspaceRail, {
+      props: railProps({ conflictCount: 0, mergeInProgress: true }) as never,
+    });
+    const merge = merging.container.querySelector<HTMLElement>('[aria-label="分支合并（合并进行中）"]');
+    expect(merge, "进行中的合并必须在任务入口的 aria-label 上可见").toBeTruthy();
+    expect(merge?.getAttribute("title")).toContain("合并进行中");
+    const marker = merge?.querySelector("[data-rail-status]");
+    expect(marker, "进行中的合并要有独立于冲突计数的标记").toBeTruthy();
+    expect(marker?.getAttribute("aria-hidden")).toBe("true");
+    expect(merge?.querySelector(".count"), "冲突数为 0 时不该出现计数").toBeNull();
+
+    // 计数与「进行中」互不替代：同时成立时两者都渲染
+    const both = render(WorkspaceRail, {
+      props: railProps({ conflictCount: 2, mergeInProgress: true }) as never,
+    });
+    const bothMerge = both.container.querySelector<HTMLElement>('[aria-label="分支合并 2（合并进行中）"]');
+    expect(bothMerge?.querySelector("[data-rail-status]")).toBeTruthy();
+    expect(bothMerge?.textContent).toContain("2");
   });
 
   it("折叠后只留图标，名称仍可通过标签与提示访问", async () => {
@@ -298,6 +321,27 @@ describe("命令面板", () => {
     await fireEvent.keyDown(input, { key: "Escape" });
     expect(onClose).toHaveBeenCalled();
   });
+
+  it("Tab 在面板内首尾环绕，不把焦点落到背景", async () => {
+    render(CommandPalette, { props: { open: true, onClose: () => {}, commands } as never });
+    const dialog = screen.getByRole("dialog", { name: "命令面板" });
+    const input = screen.getByRole("combobox", { name: "搜索命令" });
+    const first = screen.getAllByRole("option")[0];
+    expect(first.getAttribute("tabindex"), "当前选中项要能被 Tab 命中").toBe("0");
+
+    input.focus();
+    await fireEvent.keyDown(input, { key: "Tab" });
+    expect(document.activeElement, "Tab 从搜索框进入选中项").toBe(first);
+    expect(dialog.contains(document.activeElement)).toBe(true);
+
+    await fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Tab" });
+    expect(document.activeElement, "末位 Tab 回到面板首个可聚焦元素").toBe(input);
+    expect(dialog.contains(document.activeElement)).toBe(true);
+
+    await fireEvent.keyDown(input, { key: "Tab", shiftKey: true });
+    expect(document.activeElement, "Shift+Tab 从首位回到末位").toBe(first);
+    expect(document.activeElement).not.toBe(document.body);
+  });
 });
 
 describe("起始页", () => {
@@ -334,3 +378,137 @@ describe("起始页", () => {
     expect(onDiagnose).toHaveBeenCalled();
   });
 });
+
+/**
+ * 外壳类名契约 —— 「样式写完了」的可执行事实
+ * ---------------------------------------------------------------------------
+ * 上轮阻断项是：外壳四组件在 DOM 上引入的类名在 src/styles 里一条规则都没有，
+ * 于是 40px 标题栏、交通灯避让、折叠成图标栏这些验收全落空，而 DOM 层测试仍全绿。
+ * 这里直接读样式层文本核对两件事：组件用到的每个新类名都在规则里出现；
+ * 计划写死的尺寸（40/78/46×3=138/240/56/560）确实写进了样式，而不是留在组件内联。
+ * 判据是「类名出现在某条规则的选择器里」，所以 `.sync-pill .subtle-count` 这类
+ * 后代规则同样算覆盖；纯字面量子串（例如 `.titlebar` 被 `.titlebar-group` 含住）不算。
+ */
+describe("外壳样式契约", () => {
+  const stylesDir = path.resolve(__dirname, "../src/styles");
+  const readLayer = (file: string) => readFileSync(path.join(stylesDir, file), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const layoutCss = readLayer("layout.css");
+  const componentsCss = readLayer("components.css");
+
+  /** 规则前导串：忽略 @media 等 at-rule 本身，够本仓库的「一行/一段选择器 + {」使用。 */
+  function selectorsOf(css: string): string[] {
+    return [...css.matchAll(/(?:^|[}\n;])\s*([^{}@]+?)\s*\{/g)].map((match) => match[1]);
+  }
+
+  function classTokens(css: string): Set<string> {
+    const tokens = new Set<string>();
+    for (const selector of selectorsOf(css)) {
+      for (const part of selector.split(/[\s>+~]+/)) {
+        for (const match of part.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)) tokens.add(`.${match[1]}`);
+      }
+    }
+    return tokens;
+  }
+
+  function ruleBodies(css: string, selector: string): string[] {
+    const bodies: string[] = [];
+    for (const match of css.matchAll(/(?:^|[}\n;])\s*([^{}@]+?)\s*\{([^}]*)\}/g)) {
+      const selectors = match[1].split(",").map((item) => item.trim());
+      if (selectors.includes(selector)) bodies.push(match[2]);
+    }
+    return bodies;
+  }
+
+  /** 某选择器的全部声明体拼起来：同一个选择器可以在多处补声明（例如 .shell, .titlebar）。 */
+  function ruleBody(css: string, selector: string): string {
+    const bodies = ruleBodies(css, selector);
+    if (bodies.length === 0) throw new Error(`未找到规则 ${selector}`);
+    return bodies.join("\n");
+  }
+
+  it("标题栏、rail、命令面板与起始页的每个新类名都有真实规则", () => {
+    const layoutClasses = classTokens(layoutCss);
+    const componentClasses = classTokens(componentsCss);
+    const required: [Set<string>, string[]][] = [
+      [
+        layoutClasses,
+        [
+          ".titlebar",
+          ".titlebar-group",
+          ".titlebar-context",
+          ".titlebar-actions",
+          ".titlebar-spacer",
+          ".titlebar-brand",
+          ".titlebar-macos",
+          ".titlebar-window-controls",
+          ".titlebar-win-btn",
+          ".titlebar-settings",
+          ".branch-hint",
+          ".sync-pill",
+          ".subtle-count",
+          ".rail",
+          ".rail-head",
+          ".rail-toggle",
+          ".rail-add",
+          ".rail-nav",
+          ".rail-tasks",
+          ".rail-foot",
+          ".rail-status-dot",
+          ".collapsed",
+          ".welcome-compact",
+          ".welcome-inner-compact",
+          ".welcome-empty",
+          ".welcome-diagnostic",
+          ".welcome-section",
+        ],
+      ],
+      [
+        componentClasses,
+        [
+          ".palette-backdrop",
+          ".palette-card",
+          ".palette-search",
+          ".palette-body",
+          ".palette-group",
+          ".palette-group-title",
+          ".palette-item",
+          ".palette-reason",
+          ".palette-empty",
+        ],
+      ],
+    ];
+    const missing = required.flatMap(([tokens, names]) => names.filter((name) => !tokens.has(name)));
+    expect(missing, "以下类名没有对应的样式规则（样式未实现时组件等于裸 DOM）").toEqual([]);
+  });
+
+  it("标题栏 40px、交通灯 78px、Windows 三键 46×40 合计 138px 都写进样式", () => {
+    expect(layoutCss).toMatch(/--titlebar-height:\s*40px/);
+    expect(ruleBody(layoutCss, ".titlebar")).toMatch(/height:\s*var\(--titlebar-height\)/);
+    expect(ruleBody(layoutCss, ".titlebar-macos")).toMatch(/padding-left:\s*78px/);
+    expect(ruleBody(layoutCss, ".titlebar-window-controls")).toMatch(/width:\s*138px/);
+    expect(ruleBody(layoutCss, ".titlebar-window-controls")).toMatch(/height:\s*40px/);
+    expect(ruleBody(layoutCss, ".titlebar-win-btn")).toMatch(/width:\s*46px/);
+    expect(ruleBody(layoutCss, ".titlebar-win-btn")).toMatch(/height:\s*40px/);
+  });
+
+  it("rail 展开 240px、折叠 56px，折叠态同时收窄网格轨道", () => {
+    expect(ruleBody(layoutCss, ".rail")).toMatch(/240px/);
+    expect(ruleBody(layoutCss, ".sidebar.rail.collapsed")).toMatch(/--rail-width:\s*56px/);
+    expect(layoutCss).toMatch(/\.workspace:has\(> \.sidebar\.rail\.collapsed\)\s*\{[^}]*56px/);
+    // 折叠态每项收成图标方块（R4：折叠后只显示图标）
+    expect(ruleBody(layoutCss, ".sidebar.rail.collapsed .workspace-nav-item")).toMatch(/justify-content:\s*center/);
+  });
+
+  it("进度条跟随标题栏高度令牌，不再写死 63/57", () => {
+    const line = ruleBody(layoutCss, ".progress-line");
+    expect(line).toMatch(/top:\s*var\(--titlebar-height\)/);
+    expect(line).not.toMatch(/top:\s*\d+px/);
+    expect(layoutCss).not.toMatch(/\.progress-line\s*\{\s*top:\s*\d+px/);
+  });
+
+  it("命令面板 560px 宽并复用 modal 背板与卡片外壳", () => {
+    expect(ruleBody(componentsCss, ".palette-card")).toMatch(/560px/);
+    expect(componentsCss).toMatch(/\.palette-backdrop[^{]*\{[^}]*var\(--z-palette\)/);
+  });
+});
+

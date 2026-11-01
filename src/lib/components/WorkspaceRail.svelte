@@ -23,6 +23,12 @@
     workspaceEnabled?: boolean;
     changeCount?: number;
     conflictCount?: number;
+    /**
+     * 合并已开始（MergeSession.operation === "merge" / canAbortMerge）。
+     * 冲突可能已经全部解决、conflictCount 归零，但合并仍未完成，任务入口必须还能表达这件事，
+     * 因此标记与计数分开：计数只表示未解决冲突数，圆点只表示「有进行中的合并」。
+     */
+    mergeInProgress?: boolean;
     collapsed?: boolean;
     disabled?: boolean;
     onView: (view: WorkspaceView) => void;
@@ -45,6 +51,7 @@
     workspaceEnabled = false,
     changeCount = 0,
     conflictCount = 0,
+    mergeInProgress = false,
     collapsed = false,
     disabled = false,
     onView,
@@ -108,6 +115,20 @@
 
   function navLabel(label: string, count: number): string {
     return count > 0 ? `${label} ${count}` : label;
+  }
+
+  /** 合并进行中是独立状态，不并入冲突计数：两种情形可以同时成立。 */
+  function taskState(task: RailTask): "merge" | null {
+    return task === "merge" && mergeInProgress ? "merge" : null;
+  }
+
+  function taskLabel(task: RailTask, label: string, conflicts: number): string {
+    const base = navLabel(label, conflicts);
+    return taskState(task) === "merge" ? `${base}（合并进行中）` : base;
+  }
+
+  function taskTitle(task: RailTask, label: string): string {
+    return taskState(task) === "merge" ? `${label}：合并进行中` : label;
   }
 
   function navCount(id: "changes" | "history"): number {
@@ -227,18 +248,23 @@
     {#if !collapsed}<div class="sidebar-section"><span>任务</span></div>{/if}
     {#each taskItems as task (task.id)}
       {@const conflicts = task.id === "merge" ? conflictCount : 0}
+      {@const state = taskState(task.id)}
       <button
         type="button"
         class="workspace-nav-item"
-        aria-label={navLabel(task.label, conflicts)}
+        class:merging={state === "merge"}
+        aria-label={taskLabel(task.id, task.label, conflicts)}
         disabled={!workspaceEnabled}
-        title={task.label}
+        title={taskTitle(task.id, task.label)}
         onclick={() => onTask(task.id)}
       >
         <span class="nav-icon"><Icon name={task.icon} size={17} /></span>
         {#if !collapsed}<span>{task.label}</span>{/if}
         <span class="spacer"></span>
         {#if conflicts > 0}<span class="count danger">{conflicts}</span>{/if}
+        {#if state === "merge"}
+          <span class="rail-status-dot" data-rail-status="merge" aria-hidden="true"></span>
+        {/if}
       </button>
     {/each}
   </nav>

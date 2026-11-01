@@ -259,6 +259,7 @@ function commandState(overrides: Partial<CommandState> = {}): CommandState {
     writeLocked: false,
     writing: false,
     reading: false,
+    switchingBlocked: false,
     upstreamMissing: true,
     stagedCount: 2,
     stageTargets: ["src/App.svelte"],

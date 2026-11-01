@@ -8,6 +8,8 @@
     OVERFLOW_COMMAND_IDS,
     paletteItems,
     REPO_SWITCH_PREFIX,
+    switchBlocked,
+    switchBlockedReason,
     type CommandState,
   } from "./lib/commands";
   import { finishDiffAttempt } from "./lib/diff";
@@ -184,6 +186,8 @@
     // 把它算成写入会让读取期间的不可用原因失真（R11）。
     writing: pending !== null && pending !== "diff",
     reading: reading || pending === "diff",
+    // 与 openRecent 的执行 guard 同源：任何 pending（含差异续读）都不切换仓库（R11）。
+    switchingBlocked: pending !== null,
     upstreamMissing,
     stagedCount: scope.paths.length,
     stageTargets,
@@ -906,7 +910,12 @@
   }
 
   async function openRecent(path: string) {
-    if (pending) return;
+    if (switchBlocked(commandState)) {
+      // R11：标题栏仓库菜单与命令面板已按同一条判定禁用，rail 的仓库行仍可点，
+      // 所以这里不能静默返回——把同一个原因说出来，三个入口的结论才一致。
+      notice(switchBlockedReason(commandState));
+      return;
+    }
     const serial = ++readSerial;
     reading = true;
     readPhase = "idle";
@@ -1489,7 +1498,7 @@
             class="menu-item repo-menu-item"
             role="menuitemradio"
             aria-checked={repo.path === opened?.summary.path}
-            disabled={pending !== null}
+            disabled={switchBlocked(commandState)}
             onclick={() => {
               repoMenuOpen = false;
               void openRecent(repo.path);

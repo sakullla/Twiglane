@@ -22,11 +22,17 @@ export interface CommandState {
   writeLocked: boolean;
   /**
    * 仅指「有写操作在飞行中」（暂存、提交、同步等），不含「正在读取仓库」与「差异续读」。
-   * 读取期间仍允许切换仓库，写操作期间不允许。
+   * 它只影响不可用原因的措辞，不再决定切换仓库是否可用。
    */
   writing: boolean;
   /** 有读取在飞行中（读取仓库或续读差异）：它只锁写动作，不锁切换仓库。 */
   reading: boolean;
+  /**
+   * 切换仓库会不会被外壳拒绝：等价于「有任意操作在飞行中」（写、克隆，或差异续读）。
+   * 它是 openRecent 的执行 guard 与三个入口共用的唯一判定——只读整仓库时它仍为假，
+   * 因为那时切换是「取消上一次读取」的文档化路径，外壳会取消旧读取再打开新仓库（R11）。
+   */
+  switchingBlocked: boolean;
   upstreamMissing: boolean;
   /** 提交范围口径的已暂存文件数，与提交区 paths.length 同源。 */
   stagedCount: number;
@@ -72,6 +78,17 @@ function busyReason(state: CommandState): string {
 
 /** 有仓库 + 空闲才可用的命令：没仓库时说仓库，有仓库说在读还是在写。 */
 const repoBusyReason = (state: CommandState) => (state.hasRepo ? busyReason(state) : "先打开一个仓库");
+
+/**
+ * 切换仓库的唯一判定（R11）：标题栏仓库菜单、rail 的仓库行与命令面板都读它，
+ * 外壳的 openRecent 也用同一个判定提前返回并说明原因。
+ * 三个入口以前各写一套：面板看「没在写」就说能用、标题栏菜单看 pending 就禁用、
+ * rail 交给 openRecent 的静默返回，于是差异续读期间点下去什么都不发生。
+ */
+export const switchBlocked = (state: CommandState) => state.switchingBlocked;
+
+/** 被拒的原因与外层一致：写操作说写入，差异续读说读取（R11 要求说清为什么）。 */
+export const switchBlockedReason = (state: CommandState) => busyReason(state);
 
 /**
  * 提交可用性与提交区按钮同源：暂存区非空且草稿非空（CommitDraft 的 ready 条件）。
@@ -351,8 +368,8 @@ export const REPO_SWITCH_PREFIX = "repo.switch:";
  * 切换仓库：最近仓库每个一条命令，动作与标题栏仓库菜单里的同名条目相同（都走 openRecent）。
  * 这些命令依赖运行时数据，所以由状态推导，不放进静态注册表。
  *
- * 可用性只看「有没有写操作在飞行中」：读取期间按界面提示仍允许切换仓库，
- * 但写操作期间 openRecent 会直接返回，面板在这里必须说清原因而不是静默失败（R11）。
+ * 可用性与 openRecent 的执行 guard 同源（switchBlocked）：有任意操作在飞行中时
+ * 面板就地说明原因，而不是显示可点、按下却什么都不发生（R11）。
  */
 export function repoSwitchCommands(state: CommandState): CommandSpec[] {
   // 命令 id 里带仓库路径，而命令面板用 id 做 keyed each：同一路径只保留一条。
@@ -369,8 +386,8 @@ export function repoSwitchCommands(state: CommandState): CommandSpec[] {
     hint: repo.path,
     // 面板过滤要认路径：同名仓库靠路径区分，只按名称搜会分不出是哪一个（R11）。
     keywords: repo.path,
-    available: (current: CommandState) => !current.writing,
-    reason: () => "正在写入，稍后再试",
+    available: (current: CommandState) => !switchBlocked(current),
+    reason: switchBlockedReason,
   }));
 }
 

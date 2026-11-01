@@ -185,6 +185,7 @@ function commandState(overrides: Partial<CommandState> = {}): CommandState {
     writeLocked: false,
     writing: false,
     reading: false,
+    switchingBlocked: false,
     upstreamMissing: true,
     stagedCount: 2,
     stageTargets: ["src/App.svelte"],
@@ -489,9 +490,76 @@ describe("应用外壳", () => {
       expect(reasonOf(writing, id), `${id} 在写操作期间的原因`).toBe("正在写入，稍后再试");
     }
 
-    // 只读不锁切换仓库：写操作才锁。
-    expect(reading.find((item) => item.id === `${REPO_SWITCH_PREFIX}${repoPath}`)?.enabled).toBe(true);
-    expect(writing.find((item) => item.id === `${REPO_SWITCH_PREFIX}${repoPath}`)?.enabled).toBe(false);
+    // 切换仓库只听「有没有任意操作在飞行中」：只读整仓库仍可切换（外壳会取消上一次读取），
+    // 差异续读与写操作都被拒，原因按写/读分开说（R11）。
+    const switchId = `${REPO_SWITCH_PREFIX}${repoPath}`;
+    const diffReading = paletteItems(commandState({ writeLocked: true, writing: false, reading: true, switchingBlocked: true }));
+    const writingState = paletteItems(commandState({ writeLocked: true, writing: true, reading: false, switchingBlocked: true }));
+    expect(reading.find((item) => item.id === switchId)?.enabled, "只读整仓库不锁切换").toBe(true);
+    expect(diffReading.find((item) => item.id === switchId)?.enabled, "差异续读期间不能切仓库").toBe(false);
+    expect(reasonOf(diffReading, switchId)).toBe("正在读取，稍后再试");
+    expect(writingState.find((item) => item.id === switchId)?.enabled).toBe(false);
+    expect(reasonOf(writingState, switchId)).toBe("正在写入，稍后再试");
+  });
+
+  it("差异续读期间三个入口对切换仓库的结论一致，rail 点击会说明原因而不是静默失败（R11）", async () => {
+    // 续读那一次 loadDiff 挂起不结算，把外壳稳定停在 pending="diff" 上。
+    let hold: ((value: DiffResponse) => void) | null = null;
+    mocks.loadDiff.mockImplementation(
+      async (_repo: string, path: string, staged: boolean, _generation: number, _request: number, _original: string | null, offset: number) => {
+        const base = diffFor(path, staged);
+        // 首屏只给 3 行、声明总共 12 行：差异区因此出现「继续加载」。
+        if (offset === 0) return { ...base, lines: base.lines.slice(0, 3), hunks: [{ ...base.hunks[0], lineCount: 3 }], totalLines: 12 };
+        return new Promise<DiffResponse>((resolve) => {
+          hold = resolve;
+        });
+      },
+    );
+
+    render(App);
+    await openRepo();
+    const openedBefore = mocks.openRepository.mock.calls.length;
+    // 这是 App 内的真实路径：rail 的仓库行、标题栏菜单与面板都通向同一个 openRecent。
+    const clicked = () => mocks.openRepository.mock.calls.length;
+
+    await fireEvent.click(screen.getByRole("button", { name: "继续加载" }));
+    await waitFor(() => expect(hold, "续读已经开始且没有结算").not.toBeNull());
+
+    // 入口一：命令面板就地禁用并说明「正在读取」，点了也不会偷偷发请求。
+    let palette = await openPalette();
+    const switchOption = () => within(palette).getByRole("option", { name: /切换到 demo/ });
+    expect(switchOption().getAttribute("aria-disabled"), "面板与执行 guard 同源").toBe("true");
+    expect(switchOption().textContent).toContain("正在读取，稍后再试");
+    await fireEvent.click(switchOption());
+    expect(clicked(), "面板里点不动就不该发请求").toBe(openedBefore);
+    await fireEvent.keyDown(palette, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "命令面板" })).toBeNull());
+
+    // 入口二：标题栏仓库菜单里的同名条目同样禁用。
+    await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
+    const menuItem = await waitFor(() => {
+      const node = document.querySelector<HTMLButtonElement>(".repo-menu-item");
+      expect(node, "仓库菜单里有当前仓库的条目").toBeTruthy();
+      return node!;
+    });
+    expect(menuItem.hasAttribute("disabled"), "标题栏菜单与面板同源").toBe(true);
+    await press("Escape");
+    await waitFor(() => expect(document.querySelector(".titlebar-menu")).toBeNull());
+
+    // 入口三：rail 的仓库行不是禁用态，所以点击必须给出同一个原因，而不是什么都不发生。
+    await fireEvent.click(document.querySelector<HTMLElement>(".repo-main")!);
+    await waitFor(() => expect(document.querySelector(".toast.ok .toast-text")?.textContent).toBe("正在读取，稍后再试"));
+    expect(clicked(), "rail 点击同样不发请求").toBe(openedBefore);
+
+    // 续读结算后三个入口一起恢复：面板可用、rail 点击真的换仓库。
+    const release = hold as unknown as (value: DiffResponse) => void;
+    release(diffFor("src/App.svelte", false));
+    palette = await openPalette();
+    await waitFor(() => expect(within(palette).getByRole("option", { name: /切换到 demo/ }).getAttribute("aria-disabled")).toBe("false"));
+    await fireEvent.keyDown(palette, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "命令面板" })).toBeNull());
+    await fireEvent.click(document.querySelector<HTMLElement>(".repo-main")!);
+    await waitFor(() => expect(clicked()).toBe(openedBefore + 1));
   });
 
   it("Git 不可用：入口可关闭、指向设置运行环境分区，起始页也接上了诊断（R10、R13）", async () => {

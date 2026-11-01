@@ -728,6 +728,13 @@ label.list-row .checkbox { margin-top: 2px; }
 .composer-more-menu { min-width: 208px; }
 .composer-more-menu .icon-btn { width: 30px; height: 30px; }
 
+/* 文件列表收到最窄 160px 时仍要守住 R5 的 200px：标题与元信息行只补
+   nowrap / min-width / 省略，取原值不动。没有这三条时「创建提交」会被挤成
+   每行一个字（标题行 70px）、「摘要」折成两行（元信息行 36.5px），整块顶到 222px。 */
+.composer-heading > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.composer-meta > span { white-space: nowrap; }
+.composer-meta > span:first-child { flex: none; min-width: 0; }
+
 /* 溢出菜单里的动作行：撤销提交、放弃修改由外壳注入，排成一行图标按钮。 */
 .menu-row { display: flex; align-items: center; gap: var(--space-6); padding: var(--space-4) var(--space-8) var(--space-6); }
 .menu-row > .menu-row-title { flex: 1; min-width: 0; color: var(--fg-subtle); font-size: var(--text-xs); }

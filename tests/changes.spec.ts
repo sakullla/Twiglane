@@ -145,6 +145,7 @@ vi.mock("../src/lib/api", () => ({
 }));
 
 import App from "../src/App.svelte";
+import { paletteItems, REPO_SWITCH_PREFIX, type CommandState } from "../src/lib/commands";
 
 /* ------------------------------------------------------------------ *
  * 组件级夹具：只关心差异密度与提交区形状。
@@ -206,6 +207,57 @@ async function openRepo() {
   await fireEvent.click(document.querySelector<HTMLButtonElement>(".welcome-recent button")!);
   await waitFor(() => expect(document.querySelector(".file-list")).toBeTruthy());
   await waitFor(() => expect(document.querySelectorAll("[data-diff-row]").length).toBeGreaterThan(0));
+}
+
+/**
+ * R11 列出的动作类别逐项对应的注册表 id（切换仓库另有一条带路径的动态命令）。
+ * 面板条目按这份清单比对，而不是只数条目数量。
+ */
+const R11_COMMAND_IDS = [
+  "view.changes",
+  "view.history",
+  "stage.all",
+  "unstage.all",
+  "task.scope",
+  "commit.local",
+  "commit.push",
+  "task.publish",
+  "sync.fetch",
+  "sync.pull",
+  "sync.push",
+  "repo.copyPath",
+  "task.stash",
+  "task.merge",
+  "task.branch",
+  "task.remote",
+  "task.settings",
+  "repo.add",
+  "repo.clone",
+  "repo.create",
+  "theme.light",
+  "theme.dark",
+  "theme.system",
+  "dialog.dependencies",
+];
+
+/** 注册表状态夹具：暂存区有 2 个文件、草稿已填，是「看起来都能用」的那一侧。 */
+function commandState(overrides: Partial<CommandState> = {}): CommandState {
+  return {
+    hasRepo: true,
+    workspaceView: "changes",
+    taskModal: null,
+    navCollapsed: false,
+    writeLocked: false,
+    writing: false,
+    upstreamMissing: true,
+    stagedCount: 2,
+    stageTargets: ["src/App.svelte"],
+    unstageTargets: ["README.md"],
+    draft: "写一条说明",
+    theme: "dark",
+    recentRepos: [{ name: "demo", path: repoPath, openedAtMs: 1 }],
+    ...overrides,
+  };
 }
 
 beforeEach(() => {
@@ -343,6 +395,108 @@ describe("主工作台", () => {
     await fireEvent.click(screen.getByRole("option", { name: /获取更新/ }));
     expect(mocks.fetchRemote).toHaveBeenCalledTimes(2);
     expect(mocks.fetchRemote.mock.calls[0][0]).toBe(repoPath);
+  });
+
+  it("命令注册表按 R11 清单覆盖每一类动作，含切库、全部暂存与复制路径", async () => {
+    const items = paletteItems(commandState());
+    const ids = items.map((item) => item.id);
+    expect(ids).toEqual(expect.arrayContaining(R11_COMMAND_IDS));
+    expect(ids).toContain(`${REPO_SWITCH_PREFIX}${repoPath}`);
+    // 四类新增动作此刻都真的可执行，不是灰着的占位
+    for (const id of ["stage.all", "unstage.all", "repo.copyPath", `${REPO_SWITCH_PREFIX}${repoPath}`]) {
+      expect(items.find((item) => item.id === id)?.enabled, `${id} 应该可执行`).toBe(true);
+    }
+    // R11：不可用的动作必须带原因，不允许静默失败
+    expect(items.filter((item) => !item.enabled && !item.reason)).toEqual([]);
+
+    renderApp();
+    await openRepo();
+    await press("k");
+    await screen.findByRole("dialog", { name: "命令面板" });
+    for (const title of ["全部暂存", "全部取消暂存", "复制路径", "切换到 demo"]) {
+      expect(screen.getByRole("option", { name: new RegExp(title) }), title).toBeTruthy();
+    }
+  });
+
+  it("草稿为空时面板里的提交项与提交区按钮一样不可用，并就地说明原因", async () => {
+    renderApp();
+    await openRepo();
+
+    // 暂存区非空、草稿为空：提交区按钮是灰的，标题给的就是这条原因
+    const localButton = screen.getByRole("button", { name: "提交到本地" });
+    expect(localButton.hasAttribute("disabled")).toBe(true);
+    expect(localButton.getAttribute("title")).toContain("填写提交说明后即可提交");
+
+    await press("k");
+    await screen.findByRole("dialog", { name: "命令面板" });
+    for (const name of [/提交到本地/, /提交并推送/]) {
+      const option = screen.getByRole("option", { name });
+      expect(option.getAttribute("aria-disabled")).toBe("true");
+      expect(option.textContent).toContain("填写提交说明后即可提交");
+    }
+    await fireEvent.click(screen.getByRole("option", { name: /提交到本地/ }));
+    expect(mocks.commitChanges).not.toHaveBeenCalled();
+
+    // 填好草稿后两处一起恢复可用
+    await fireEvent.keyDown(screen.getByRole("dialog", { name: "命令面板" }), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "命令面板" })).toBeNull());
+    await fireEvent.input(document.querySelector<HTMLTextAreaElement>(".composer textarea")!, {
+      target: { value: "重做工作台外壳" },
+    });
+    expect(screen.getByRole("button", { name: "提交到本地" }).hasAttribute("disabled")).toBe(false);
+    await press("k");
+    await screen.findByRole("dialog", { name: "命令面板" });
+    expect(screen.getByRole("option", { name: /提交到本地/ }).getAttribute("aria-disabled")).toBe("false");
+  });
+
+  it("面板里的全部暂存、全部取消暂存、复制路径与切换仓库都复用按钮的 handler", async () => {
+    mocks.stageFiles.mockResolvedValue(snapshot);
+    mocks.unstageFiles.mockResolvedValue(snapshot);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    renderApp();
+    await openRepo();
+
+    // 全部暂存：先点分组头按钮，再从面板触发，两次的目标路径必须一致
+    await fireEvent.click(screen.getByRole("button", { name: "全部暂存" }));
+    await waitFor(() => expect(mocks.stageFiles).toHaveBeenCalledTimes(1));
+    await press("k");
+    await screen.findByRole("dialog", { name: "命令面板" });
+    await fireEvent.click(screen.getByRole("option", { name: /全部暂存/ }));
+    await waitFor(() => expect(mocks.stageFiles).toHaveBeenCalledTimes(2));
+    expect(mocks.stageFiles.mock.calls[1][0]).toBe(repoPath);
+    expect(mocks.stageFiles.mock.calls[1][1]).toEqual([
+      "src/App.svelte",
+      "src/app.css",
+      "docs/start.md",
+      "public/logo.png",
+      "src/lib/icon.ts",
+    ]);
+    expect(mocks.stageFiles.mock.calls[1][1]).toEqual(mocks.stageFiles.mock.calls[0][1]);
+
+    // 全部取消暂存：同上，目标路径与分组头按钮完全一致
+    await fireEvent.click(screen.getByRole("button", { name: "全部取消暂存" }));
+    await waitFor(() => expect(mocks.unstageFiles).toHaveBeenCalledTimes(1));
+    await press("k");
+    await screen.findByRole("dialog", { name: "命令面板" });
+    await fireEvent.click(screen.getByRole("option", { name: /全部取消暂存/ }));
+    await waitFor(() => expect(mocks.unstageFiles).toHaveBeenCalledTimes(2));
+    expect(mocks.unstageFiles.mock.calls[1][1]).toEqual(["src/app.css", "README.md"]);
+    expect(mocks.unstageFiles.mock.calls[1][1]).toEqual(mocks.unstageFiles.mock.calls[0][1]);
+
+    // 复制路径：与标题栏仓库菜单调的是同一个 copyPath
+    await press("k");
+    await screen.findByRole("dialog", { name: "命令面板" });
+    await fireEvent.click(screen.getByRole("option", { name: /复制路径/ }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(repoPath));
+
+    // 切换仓库：与仓库菜单里的条目调的是同一个 openRecent
+    const openedBefore = mocks.openRepository.mock.calls.length;
+    await press("k");
+    await screen.findByRole("dialog", { name: "命令面板" });
+    await fireEvent.click(screen.getByRole("option", { name: /切换到 demo/ }));
+    await waitFor(() => expect(mocks.openRepository.mock.calls.length).toBe(openedBefore + 1));
+    expect(mocks.openRepository.mock.lastCall?.[0]).toBe(repoPath);
   });
 
   it("历史与改动来回切换后各自滚动与选中保留，浏览历史不写入", async () => {

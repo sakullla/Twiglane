@@ -7,13 +7,14 @@
     commandReason,
     OVERFLOW_COMMAND_IDS,
     paletteItems,
+    REPO_SWITCH_PREFIX,
     type CommandState,
   } from "./lib/commands";
   import { finishDiffAttempt } from "./lib/diff";
   import { DraftBuffer } from "./lib/draft";
   import { normalizeError } from "./lib/errors";
   import { clampWidth, FALLBACK_POLL_MS, nudgeWidth, shouldPoll } from "./lib/layout";
-  import { branchLabel, commitScope, dependencyNote, gitInstallHint, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
+  import { branchLabel, commitScope, dependencyNote, filterRows, gitInstallHint, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
   import { startDesktopMeasure } from "./lib/measure";
   import { shortcutCommand } from "./lib/shortcuts";
   import type {
@@ -137,6 +138,20 @@
           : "off",
   );
 
+  /* 「全部暂存 / 全部取消暂存」的目标路径：与 FileList 分组头用的是同一套 groupFiles + filterRows，
+     所以命令面板与分组头按钮作用在同一批文件上（冲突文件两边都排除）。 */
+  let fileGroups = $derived(groupFiles(opened?.snapshot.files ?? []));
+  let stageTargets = $derived(
+    filterRows(fileGroups.unstaged, fileQuery)
+      .filter((row) => !row.unmerged)
+      .map((row) => row.path),
+  );
+  let unstageTargets = $derived(
+    filterRows(fileGroups.staged, fileQuery)
+      .filter((row) => !row.unmerged)
+      .map((row) => row.path),
+  );
+
   /* 命令注册表的唯一状态输入：标题栏、rail、溢出菜单与命令面板都读这一份。 */
   let commandState = $derived<CommandState>({
     hasRepo: opened !== null,
@@ -144,10 +159,14 @@
     taskModal,
     navCollapsed,
     writeLocked,
+    writing: pending !== null,
     upstreamMissing,
     stagedCount: scope.paths.length,
+    stageTargets,
+    unstageTargets,
     draft,
     theme,
+    recentRepos: recent,
   });
   let paletteCommands = $derived(
     paletteItems(commandState).map((item) => ({
@@ -227,6 +246,15 @@
       case "view.refresh":
         void refresh();
         return;
+      case "stage.all":
+        void stagePaths(commandState.stageTargets);
+        return;
+      case "unstage.all":
+        void unstagePaths(commandState.unstageTargets);
+        return;
+      case "repo.copyPath":
+        void copyPath(opened?.summary.path ?? "");
+        return;
       case "task.stash":
       case "task.merge":
       case "task.branch":
@@ -275,6 +303,8 @@
         dependencyOpen = true;
         return;
       default:
+        // 切换仓库的命令 id 带仓库路径，与标题栏仓库菜单里的条目共用 openRecent。
+        if (id.startsWith(REPO_SWITCH_PREFIX)) void openRecent(id.slice(REPO_SWITCH_PREFIX.length));
         return;
     }
   }
@@ -1407,6 +1437,7 @@
             class="menu-item repo-menu-item"
             role="menuitemradio"
             aria-checked={repo.path === opened?.summary.path}
+            disabled={pending !== null}
             onclick={() => {
               repoMenuOpen = false;
               void openRecent(repo.path);

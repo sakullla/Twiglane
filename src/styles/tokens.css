@@ -125,15 +125,15 @@
   --on-danger: #ffffff;
   --warning: #b97a1e;
   --warning-soft: rgba(185, 122, 30, 0.11);
-  --warning-text: #85560f;
+  --warning-text: #7a4e0c;
   --info: #1f7a9e;
   --info-soft: rgba(31, 122, 158, 0.09);
-  --info-text: #1a6785;
-  --purple: #8f3fa8;
-  --purple-soft: rgba(143, 63, 168, 0.1);
+  --info-text: #175f7c;
+  --purple: #82369a;
+  --purple-soft: rgba(130, 54, 154, 0.1);
   /* 重命名行「来源路径」的弱化色：与 --fg-dimmed 同一口径，按 0.85 元素级淡化的
      合成结果标定，对 --surface / --surface-2 均 ≥4.5:1。 */
-  --purple-dimmed: #7c3592;
+  --purple-dimmed: #76318c;
   --add-bg: #e4f6e8;
   --add-strong: #c9ecd1;
   --add-fg: #14682c;
@@ -199,12 +199,12 @@
   --control-border-hover: #7e818b;
   --fg: #e8e9ec;
   --fg-muted: #9a9da6;
-  --fg-subtle: #8f929b;
+  --fg-subtle: #93969f;
   /* 弱化正文：与浅色主题同义，取值按 0.75 元素级淡化的合成结果标定。 */
   --fg-dimmed: #b3b6be;
   --accent: #7c83f7;
   --accent-hover: #959bfa;
-  --accent-soft: rgba(124, 131, 247, 0.16);
+  --accent-soft: rgba(124, 131, 247, 0.13);
   --accent-softer: rgba(124, 131, 247, 0.09);
   --accent-fg: #0d0f2b;
   --accent-text: #a9aefb;
@@ -270,7 +270,7 @@
   --syn-constant: #8cc8ff;
   --syn-function: #d8b4ff;
   --syn-parameter: #ffae63;
-  --syn-comment: #98a3ad;
+  --syn-comment: #a4aeb8;
   --syn-punctuation: #c9d1d9;
   --syn-link: #a5d6ff;
   --push-count-bg: rgba(0, 0, 0, 0.15);

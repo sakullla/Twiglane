@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -328,6 +329,7 @@ describe("石墨靛蓝配色（R1）", () => {
       ".conflict-file-progress.ok",
       ".conflict-file.resolved .conflict-file-icon",
       ".conflict-file.resolved .conflict-file-icon .icon",
+      ".conflict-file.resolved .chip",
       ".cr-line.res",
       ".cr-line.res .ln",
       ".cr-dot.ok",
@@ -363,6 +365,28 @@ describe("石墨靛蓝配色（R1）", () => {
     for (const file of layerFiles) {
       const css = stripComments(read(path.join(stylesDir, file))).toLowerCase();
       for (const value of retired) expect(css.includes(value), `${file} 残留 ${value}`).toBe(false);
+    }
+  });
+});
+
+describe("对比度门禁按实际渲染层合成", () => {
+  const run = () =>
+    spawnSync(process.execPath, [path.join(root, "scripts", "check-contrast.mjs"), "--verbose"], { encoding: "utf8" });
+
+  it("门禁通过，且半透明底和选中行逐个表面判定", () => {
+    const result = run();
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    for (const theme of ["light", "dark"]) {
+      for (const base of ["surface", "surface-2"]) {
+        for (const label of [
+          `${theme}/text --accent-text on --accent-soft over --${base} =`,
+          `${theme}/selected --fg-subtle over --${base} =`,
+          `${theme}/selected --warning-text on --warning-soft over --${base} + --accent-soft =`,
+          `${theme}/selected --success-text on --success-soft over --${base} + --accent-soft =`,
+        ]) {
+          expect(result.stdout, label).toContain(label);
+        }
+      }
     }
   });
 });

@@ -19,13 +19,15 @@
  *   不承担控件边界，故不计入门禁；tests/tokens.spec.ts 用「默认拒绝 + 装饰白名单」
  *   的结构性断言保证没有任何 border 声明偷偷引用它们。
  *
- * 半透明令牌（如 --accent-soft）先按主题表面合成后再计算，避免把 alpha 当成颜色。
+ * 半透明令牌（如 --accent-soft）不只叠在画布上：它们实际落在 --bg、--surface、--surface-2
+ * 上，深色里表面越亮、合成后的底越亮，只按 --bg 算会高估对比度。因此半透明底逐个表面
+ * 合成后判定（TRANSLUCENT_BASES）；选中行里的文字和徽标再多叠一层选中底（SELECTED_ROW_*）。
  * 不在解析范围的两类底色：渐变（--brand-grad，其上是品牌图标）与按需叠加的
  * 半透明徽标底（--push-count-bg，数字前景继承所在按钮，实测 6.24:1 / 7.82:1）。
  *
  * 重要：令牌级通过 ≠ 含 opacity 的渲染通过。
  * 元素级的 opacity 会把前景与所在表面按 α 混合，令牌层算出的 6.55:1 在整行 0.75
- * 淡化后只剩 3.64:1（浅）/ 3.69:1（深）；同样位置上的 1px 控件边界也会掉到 3:1 以下。
+ * 淡化后只剩 3.64:1（浅）/ 3.91:1（深）；同样位置上的 1px 控件边界也会掉到 3:1 以下。
  * 因此：
  * - 弱化文字一律走专门令牌（--fg-dimmed / --purple-dimmed），不用元素级 opacity；
  * - 任何仍然用 opacity 淡化文字的位置，必须登记进下面的 COMPOSITE_TEXT_PAIRS，
@@ -205,6 +207,30 @@ const UI_PAIRS = [
   ["control-border-hover", "surface-3"],
 ];
 
+/** 半透明底实际落在的表面：画布、面板、侧栏与合并侧栏这一档。 */
+const TRANSLUCENT_BASES = ["bg", "surface", "surface-2"];
+
+/**
+ * 选中行：--accent-soft 叠在所在表面上，行内元素再落在这层底上。
+ * 主文件行在 --surface（T3 后在 --surface-2），冲突文件行和提交文件行在 --surface-2，
+ * 提交列表在 --surface，所以两档表面都要算。hover 规则不会盖过选中规则，不需要再叠 --hover。
+ */
+const SELECTED_ROW_BASES = ["surface", "surface-2"];
+const SELECTED_ROW_LAYER = "accent-soft";
+/** 直接落在选中底上的文字：行名、作者时间、目录与 Hash、重命名来源、合并标记。 */
+const SELECTED_ROW_TEXT = ["fg", "fg-muted", "fg-subtle", "accent-text", "purple", "purple-dimmed"];
+/** 行内徽标：自带底色再叠到选中底上。覆盖状态字母、冲突进度、冲突图标和引用胶囊。 */
+const SELECTED_ROW_BADGES = [
+  ["warning-text", "warning-soft"],
+  ["success-text", "success-soft"],
+  ["danger-text", "danger-soft"],
+  ["info-text", "info-soft"],
+  ["purple", "purple-soft"],
+  ["accent-text", "accent-soft"],
+  ["add-fg", "add-bg"],
+  ["del-fg", "del-bg"],
+];
+
 const MIN_TEXT = 4.5;
 const MIN_UI = 3;
 
@@ -361,13 +387,28 @@ function resolve(tokens, name, base, label, problems, hue) {
   return base ? over(parsed, base) : parsed;
 }
 
-/** 背景类令牌半透明时，按主题画布 --bg 合成（surface-2/3 本身不透明）。 */
-function background(tokens, name, label, problems, hue) {
-  const resolved = resolve(tokens, name, null, label, problems, hue);
-  if (!resolved) return null;
-  if (resolved.a >= 1) return resolved;
-  const base = resolve(tokens, "bg", null, label, problems, hue);
-  return base ? over(resolved, base) : null;
+/** 按从下到上的顺序逐层合成底色；最底层必须是不透明表面。 */
+function stacked(tokens, layers, label, problems) {
+  let result = null;
+  for (const name of layers) {
+    const layer = resolve(tokens, name, result, label, problems);
+    if (!layer) return null;
+    result = layer;
+  }
+  return result;
+}
+
+/** 单个底色令牌的全部实际渲染层：不透明令牌只有自身，半透明令牌逐个表面各一组。 */
+function backgroundStacks(tokens, name, label, problems) {
+  const parsed = resolve(tokens, name, null, label, problems);
+  if (!parsed || parsed.a >= 1) return [[name]];
+  return TRANSLUCENT_BASES.map((base) => [base, name]);
+}
+
+/** 不透明底色：合成对与淡化位点的所在表面都是实色。 */
+function background(tokens, name, label, problems) {
+  const [layers] = backgroundStacks(tokens, name, label, problems);
+  return stacked(tokens, layers, label, problems);
 }
 
 /** 读取 --名 的百分比配比（如 --avatar-bg-sat: 42%）。 */
@@ -626,19 +667,33 @@ function main() {
     checkPalette(theme, tokens, failures, problems);
     const check = (pairs, min, kind) => {
       for (const [fgName, bgName] of pairs) {
-        const label = `${theme}/${kind} --${fgName} on --${bgName}`;
-        const bg = background(tokens, bgName, label, problems);
-        if (!bg) continue;
-        const fg = resolve(tokens, fgName, bg, label, problems);
-        if (!fg) continue;
-        const value = ratio(fg, bg);
-        const pass = value + 1e-9 >= min;
-        rows.push({ label, value, min, kind, pass });
-        if (!pass) failures.push(`${label} = ${value.toFixed(2)}:1 (< ${min}:1)`);
+        const pairLabel = `${theme}/${kind} --${fgName} on --${bgName}`;
+        for (const layers of backgroundStacks(tokens, bgName, pairLabel, problems)) {
+          judgeStack(pairLabel, fgName, layers, min, kind);
+        }
       }
+    };
+    const judgeStack = (pairLabel, fgName, layers, min, kind) => {
+      const label = layers.length > 1 ? `${pairLabel} over --${layers.slice(0, -1).join(" + --")}` : pairLabel;
+      const bg = stacked(tokens, layers, label, problems);
+      if (!bg) return;
+      const fg = resolve(tokens, fgName, bg, label, problems);
+      if (!fg) return;
+      const value = ratio(fg, bg);
+      const pass = value + 1e-9 >= min;
+      rows.push({ label, value, min, kind, pass });
+      if (!pass) failures.push(`${label} = ${value.toFixed(2)}:1 (< ${min}:1)`);
     };
     check(TEXT_PAIRS, MIN_TEXT, "text");
     check(UI_PAIRS, MIN_UI, "ui");
+    for (const base of SELECTED_ROW_BASES) {
+      for (const fgName of SELECTED_ROW_TEXT) {
+        judgeStack(`${theme}/selected --${fgName}`, fgName, [base, SELECTED_ROW_LAYER], MIN_TEXT, "selected");
+      }
+      for (const [fgName, badge] of SELECTED_ROW_BADGES) {
+        judgeStack(`${theme}/selected --${fgName} on --${badge}`, fgName, [base, SELECTED_ROW_LAYER, badge], MIN_TEXT, "selected");
+      }
+    }
     for (const pair of COMPOSITE_TEXT_PAIRS) {
       const label = `${theme}/composite --${pair.fg}@${pair.opacity} on --${pair.bg}`;
       const bg = background(tokens, pair.bg, label, problems);

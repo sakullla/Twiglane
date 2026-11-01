@@ -10,9 +10,11 @@ pub const MAX_DRAFT_CHARS: usize = 64 * 1024;
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
-    #[default]
     Light,
+    #[default]
     Dark,
+    /// Follows the system appearance. The frontend resolves it to light or dark.
+    System,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

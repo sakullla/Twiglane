@@ -29,7 +29,7 @@ impl Default for Persisted {
     fn default() -> Self {
         Self {
             version: STATE_VERSION,
-            theme: Theme::Light,
+            theme: Theme::Dark,
             panel_widths: PanelWidths::default(),
             git_executable: None,
             recent: Vec::new(),
@@ -281,6 +281,25 @@ mod tests {
     }
 
     #[test]
+    fn theme_defaults_to_dark_and_keeps_three_states_on_disk() {
+        let dir = crate::test_support::TempDir::new("state-theme");
+        let store = store_in(dir.path());
+        assert_eq!(Persisted::default().theme, Theme::Dark);
+        assert_eq!(store.snapshot().theme, Theme::Dark);
+        for (theme, wire) in [
+            (Theme::Light, "light"),
+            (Theme::Dark, "dark"),
+            (Theme::System, "system"),
+        ] {
+            store.set_theme(theme).unwrap();
+            let written: Value =
+                serde_json::from_str(&fs::read_to_string(store.path()).unwrap()).unwrap();
+            assert_eq!(written["theme"], Value::String(wire.into()), "{wire}");
+            assert_eq!(store_in(dir.path()).snapshot().theme, theme, "{wire}");
+        }
+    }
+
+    #[test]
     fn corrupt_file_is_not_overwritten_and_temp_is_ignored() {
         let dir = crate::test_support::TempDir::new("state-corrupt");
         let path = dir.path().join("state.json");
@@ -292,7 +311,7 @@ mod tests {
         let error = store.set_theme(Theme::Dark).unwrap_err();
         assert_eq!(error.code, "settings_corrupt");
         assert_eq!(fs::read(&path).unwrap(), original);
-        assert_eq!(store.snapshot().theme, Theme::Light);
+        assert_eq!(store.snapshot().theme, Theme::Dark);
     }
 
     #[test]

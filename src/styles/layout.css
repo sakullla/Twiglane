@@ -186,7 +186,14 @@
 .action-card.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; box-shadow: 0 7px 18px color-mix(in srgb, var(--accent) 18%, transparent); }
 .action-card.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: transparent; }
 .action-card.primary .ac-icon { background: var(--on-accent-soft); color: inherit; }
-.action-card.primary .ac-copy > span, .action-card.primary > .icon { color: color-mix(in srgb, var(--accent-fg) 75%, transparent); }
+/* 主行动卡的说明文字是正文（9.5px，浅色底 accent）：必须完全不透明地取 --accent-fg
+   （对 --accent 浅 4.56:1 / 深 7.55:1，对 --accent-hover 浅 5.85:1 / 深 9.04:1）。
+   曾经的 75% 淡化合成后只剩 3.27:1（浅）/ 4.46:1（深），低于正文 4.5:1。 */
+.action-card.primary .ac-copy > span { color: var(--accent-fg); }
+/* 右上角箭头是纯字形指示，不承载文字信息：75% 淡化对 --accent 3.27:1 / 对
+   --accent-hover 4.04:1（浅），满足非文本 3:1。该淡化位点登记在
+   scripts/check-contrast.mjs 的 COLOR_MIX_ALPHA_SITES 里，改比例必须同步校准。 */
+.action-card.primary > .icon { color: color-mix(in srgb, var(--accent-fg) 75%, transparent); }
 .welcome-section-head { display: flex; align-items: flex-end; padding: 0 2px 11px; }
 .section-kicker { display: block; margin-bottom: 2px; color: var(--fg-subtle); font-size: 9.5px; letter-spacing: 0.05em; }
 .welcome-section-head h2 { font-size: var(--text-md); font-weight: 650; letter-spacing: -0.02em; }

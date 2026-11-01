@@ -19,7 +19,12 @@
    - 弱化文字只走 --fg-dimmed / --purple-dimmed，不用元素级 opacity：opacity 会把
      前景与所在表面按 α 合成，令牌级的通过值在渲染时可能掉到 4.5:1 以下。
    - scripts/check-contrast.mjs 解析本文件，按 R14 校验正文与交互对比度，
-     并按合成后的结果校验登记在案的 opacity 淡化对。
+     并按合成后的结果校验登记在案的 opacity 与 color-mix 淡化对。
+   - 等效 alpha 同等对待：color: color-mix(in srgb, var(--x) 75%, transparent) 与元素级
+     opacity 0.75 是同一件事，color: var(--<半透明令牌>) 也一样——渲染时都是「前景按 α
+     叠到所在表面」。因此样式层任何 color 声明只要走这两条通道，就必须登记进
+     scripts/check-contrast.mjs 的 COLOR_MIX_ALPHA_SITES（写明淡化比例、所在表面与理由），
+     按合成结果达标（文字 4.5:1 / 纯字形 3:1），否则门禁失败。
    ========================================================================== */
 
 :root {

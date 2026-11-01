@@ -352,7 +352,6 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".merge-guide-branch": "指引里的分支卡外框；内部 select 无边框但由卡片强调区分",
   ".merge-status-card": "合并状态卡外框；卡内按钮与进度条各自表达状态",
   ".merge-guide-result": "合并结果块外框；就绪/受阻态另有 accent/warning 描边",
-  ".merge-branch-card": "合并源/目标卡外框",
   ".three-way-merge": "三方合并容器外框",
   ".art-card": "起始页插画卡外框（装饰性插画，不可交互）",
   ".welcome-recent": "最近仓库网格外框",
@@ -384,8 +383,6 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".merge-resolution-count .resolved-count": "已解决计数前的竖分隔线",
 
   // --- components.css：语义色混合的容器描边（不是控件边界） ---
-  ".merge-branch-card.source": "源分支卡 info 混合描边，状态强调",
-  ".merge-branch-card.target": "目标分支卡 accent 混合描边，状态强调",
   ".merge-guide-branch.target": "目标分支卡 accent 混合描边，状态强调",
   ".merge-guide-result.ready": "结果块就绪态 accent 混合描边，状态强调",
   ".merge-guide-result.blocked": "结果块受阻态 warning 混合描边，状态强调",
@@ -531,6 +528,47 @@ describe("控件边界策略（默认拒绝）", () => {
         expect(tokens.get(dim), `${theme} ${dim}`).toBeTruthy();
         expect(tokens.get(dim), `${theme} ${dim} 不应等于 ${base}`).not.toBe(tokens.get(base));
       }
+    }
+  });
+
+  /**
+   * 主行动卡（起始页第一入口）的说明文字是正文：必须取不透明的 --accent-fg
+   * （对 --accent 浅 4.56:1 / 深 7.55:1，对 --accent-hover 浅 5.85:1 / 深 9.04:1）。
+   * 75% 的 color-mix 淡化合成后只剩 3.27:1（浅）/ 4.46:1（深），低于正文 4.5:1；
+   * 淡化只留给同一行那个纯字形箭头，并由 scripts/check-contrast.mjs 的
+   * COLOR_MIX_ALPHA_SITES 按非文本 3:1 校验。
+   */
+  it("主行动卡的正文不淡化，淡化只留给图标字形", () => {
+    const layout = read(path.join(stylesDir, "layout.css"));
+    const copy = ruleBody(layout, ".action-card.primary .ac-copy > span");
+    expect(copy, "主行动卡正文取不透明 --accent-fg").toMatch(/color:\s*var\(--accent-fg\)/);
+    expect(copy, "主行动卡正文不能再用 alpha 淡化").not.toMatch(/color-mix|transparent/);
+    const glyph = ruleBody(layout, ".action-card.primary > .icon");
+    expect(glyph, "箭头字形保留 75% 淡化（已登记进 check-contrast 的淡化位点清单）").toMatch(
+      /color-mix\(in srgb, var\(--accent-fg\) 75%, transparent\)/,
+    );
+  });
+
+  /**
+   * 焦点可见性：被清零 outline 的可聚焦元素/容器必须补回 ≥3:1 的可见焦点环。
+   * 判据是「环本身的颜色」而不是它旁边有什么：--accent-soft 只是 9.5%（深 13%）alpha 的
+   * tint，对 --surface 合成后约 1.13:1，画出来的环等于不可见；--focus 对 --surface 浅
+   * 3.56:1 / 深 9.31:1、对 --surface-2 浅 3.40:1 / 深 8.84:1，也已在 check-contrast 的
+   * 交互对里。R15 的验收归 T5，这里只挡住样式层把洞开回去。
+   */
+  it("被清零 outline 的可聚焦元素都补回可见焦点环", () => {
+    const components = read(path.join(stylesDir, "components.css"));
+    for (const selector of [
+      ".menu-item:focus-visible",
+      ".file-list:focus-visible",
+      ".diff-scroll:focus-visible",
+      ".history-list:focus-visible",
+      ".merge-guide-select select:focus-visible",
+      ".three-way-pane.result textarea:focus-visible",
+    ]) {
+      const body = ruleBody(components, selector);
+      expect(body, `${selector} 必须有可见焦点环`).toMatch(/outline:\s*2px solid var\(--focus\)/);
+      expect(body, `${selector} 不能再用低透明度色块冒充焦点环`).not.toMatch(/var\(--accent-soft(?:er)?\)/);
     }
   });
 });

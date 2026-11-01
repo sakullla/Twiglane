@@ -146,7 +146,10 @@
 .menu.left { left: 0; right: auto; }
 .sidebar-menu { width: 100%; min-width: 245px; }
 .menu-item { display: flex; align-items: flex-start; gap: 11px; width: 100%; padding: 10px; border-radius: 9px; text-align: left; }
-.menu-item:hover:not(:disabled), .menu-item:focus-visible { background: var(--hover); outline: none; }
+/* 菜单项聚焦：只用 hover 背景（4.5% 覆盖）看不出焦点，必须补可见焦点环。
+   写法和合并结果编辑框一致：2px --focus，负偏移保证环画在菜单项自身范围内。 */
+.menu-item:hover:not(:disabled) { background: var(--hover); }
+.menu-item:focus-visible { background: var(--hover); outline: 2px solid var(--focus); outline-offset: -2px; }
 .menu-item:disabled { opacity: 0.45; cursor: not-allowed; }
 .menu-item > .icon { color: var(--accent-text); margin-top: 2px; }
 .menu-item span { display: flex; flex-direction: column; line-height: 1.4; font-size: var(--text-sm); font-weight: 550; }
@@ -172,7 +175,12 @@
 .file-tools .field { background: var(--surface-2); }
 .file-tools .field:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, var(--control-border)); background: var(--surface); }
 .file-list { min-height: 0; flex: 1; overflow: auto; padding: 0 0 8px; position: relative; outline: none; }
-.file-list:focus-visible { box-shadow: inset 0 0 0 2px var(--accent-soft); border-radius: 0; outline: none; }
+/* 文件列表、差异面板、历史列表这三个可聚焦滚动容器同一判据：原来用 --accent-soft
+   （9.5% alpha）画环，对 --surface 合成后约 1.13:1，等于没有焦点指示。改用全局焦点环
+   同款的 --focus（对 --surface 浅 3.56:1 / 深 9.31:1，对 --surface-2 3.40:1 / 8.84:1），
+   并统一用 outline 而不是 inset box-shadow——容器内的行是绝对定位子元素，会盖住内阴影，
+   而 outline 画在内容之上。 */
+.file-list:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; border-radius: 0; }
 .virtual-space { position: relative; }
 .file-group { position: absolute; left: 8px; right: 8px; display: flex; align-items: center; gap: 7px; padding: 0 3px 0 8px; font-size: 10px; font-weight: 630; letter-spacing: 0.025em; color: var(--fg-subtle); }
 .file-group .count { font-size: 9.5px; height: 16px; min-width: 16px; background: transparent; }
@@ -246,7 +254,8 @@
 .diff-toolbar .segmented { padding: 2px; border-radius: 8px; }
 .diff-toolbar .segmented button { height: 24px; padding: 0 8px; font-size: 10px; }
 .diff-scroll { min-height: 0; flex: 1; overflow: auto; outline: none; background: var(--surface); }
-.diff-scroll:focus-visible { box-shadow: inset 0 0 0 2px var(--accent-soft); }
+/* 可聚焦滚动容器（与 .file-list / .history-list 同一判据）：焦点环用 --focus 画在内容之上。 */
+.diff-scroll:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .diff-line, .side-row { position: absolute; left: 0; right: 0; display: grid; align-items: center; font-family: var(--mono); font-size: 11.5px; line-height: 22px; white-space: pre; }
 .diff-line { grid-template-columns: 46px 46px minmax(0, 1fr) auto; }
 .diff-line .ln, .side-cell .ln { color: var(--fg-subtle); text-align: right; padding-right: 11px; font-size: 10px; user-select: none; height: 22px; background: var(--surface-2); }
@@ -351,7 +360,7 @@ label.list-row .checkbox { margin-top: 2px; }
 .pager .hint { padding: 0 6px; font-size: 10.5px; white-space: nowrap; }
 .history-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(280px, 37%) minmax(0, 1fr); }
 .history-list { min-width: 0; min-height: 0; overflow: auto; position: relative; border-right: 1px solid var(--border); padding: 6px 0; outline: none; }
-.history-list:focus-visible { box-shadow: inset 0 0 0 2px var(--accent-soft); }
+.history-list:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .history-detail { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .history-detail .diff { border: 0; border-radius: 0; box-shadow: none; }
 .history-row { position: absolute; left: 7px; right: 7px; display: flex; align-items: flex-start; gap: 10px; padding: var(--space-8) 9px; border-radius: 9px; text-align: left; overflow: hidden; border: 1px solid transparent; cursor: pointer; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease); }
@@ -527,16 +536,6 @@ label.list-row .checkbox { margin-top: 2px; }
 .merge-setup-card .card-head > div, .merge-complete-copy > div { display: flex; flex-direction: column; gap: 2px; }
 .merge-setup-card .card-head .hint, .merge-complete-copy .hint { font-size: 10px; }
 .merge-flow { display: grid; grid-template-columns: minmax(0, 1fr) 38px minmax(0, 1fr); align-items: stretch; gap: 10px; }
-.merge-branch-card { padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); }
-.merge-branch-card.source { border-color: color-mix(in srgb, var(--info) 18%, var(--border)); }
-.merge-branch-card.target { border-color: color-mix(in srgb, var(--accent) 22%, var(--border)); background: var(--accent-softer); }
-.merge-branch-label { display: block; margin-bottom: var(--space-8); color: var(--fg-subtle); font-size: 10px; font-weight: 600; }
-.merge-branch-value { display: flex; align-items: center; gap: var(--space-8); min-height: 28px; color: var(--fg); }
-.merge-branch-value > .icon { color: var(--accent-text); }
-.merge-branch-value.source > .icon { color: var(--info-text); }
-.merge-branch-value strong, .merge-branch-value select { min-width: 0; font-size: 14px; font-weight: 630; letter-spacing: -0.015em; }
-.merge-branch-value select { flex: 1; border: 0; outline: none; background: transparent; color: var(--fg); cursor: pointer; }
-.merge-branch-card small { display: block; margin-top: 7px; color: var(--fg-subtle); font-size: 9.5px; }
 .merge-flow-arrow { display: grid; place-items: center; color: var(--fg-subtle); }
 .merge-preview-hint { display: flex; align-items: center; justify-content: center; gap: var(--space-6); font-size: 10.5px; }
 .merge-guide { overflow: hidden; border: 1px solid var(--border); border-radius: 15px; background: var(--surface); box-shadow: var(--shadow-sm); }
@@ -553,6 +552,10 @@ label.list-row .checkbox { margin-top: 2px; }
 .merge-guide-select, .merge-guide-target { display: flex; align-items: center; gap: 7px; min-height: 30px; }
 .merge-guide-select > .icon:first-child, .merge-guide-target > .icon { color: var(--accent-text); }
 .merge-guide-select select { flex: 1; min-width: 0; border: 0; outline: none; appearance: none; background: transparent; color: var(--fg); font-size: 14px; font-weight: 630; cursor: pointer; }
+/* 分支下拉把 outline 清零了却没给补偿，键盘 Tab 过来完全看不出焦点：
+   补回全局同款的 --focus 焦点环（对 --surface 浅 3.56:1 / 深 9.31:1，
+   对卡片底色 --surface-2 / --accent-softer 仍 ≥3:1）。 */
+.merge-guide-select select:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; border-radius: var(--radius-sm); }
 .merge-guide-select > .icon:last-child { color: var(--fg-subtle); pointer-events: none; }
 .merge-guide-target strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 630; }
 .merge-guide-target .chip { margin-left: auto; height: 18px; font-size: 8px; }

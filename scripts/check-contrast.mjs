@@ -32,6 +32,15 @@
  *   按合成后的结果判定（弱化令牌的取值已按这些 α 标定，叠加后仍 ≥4.5:1）。
  * 只做「令牌 A 对令牌 B」的校验会漏掉这一整类回归——A4 之前就是这样漏的。
  *
+ * 等效 alpha 同等对待：`color: color-mix(in srgb, var(--x) 75%, transparent)` 与元素级
+ * opacity 0.75 是同一件事（前景按 75% 叠到所在表面），只是写法不同；半透明令牌直接当
+ * color 用（`color: var(--accent-soft)`）也属同类。这类位点由下面的 DEFAULT-DENY 扫描
+ * 逐个拦下：样式层（base/components/layout）里任何 `color:` 声明只要带 color-mix 的
+ * transparent 混合或引用半透明令牌，就必须出现在 COLOR_MIX_ALPHA_SITES 里、写明淡化
+ * 比例、所在表面与理由，并按合成结果达标（文字 4.5:1 / 非文本字形 3:1），否则失败。
+ * 注意字面色（rgba(...) 字面量、#aabbcc80）不在这里审——tests/tokens.spec.ts 已禁止
+ * 令牌层以外出现颜色字面量，因此上面这条是样式层唯一的 alpha 通道。
+ *
  * 用法：node scripts/check-contrast.mjs [--verbose]
  */
 import { readFileSync } from "node:fs";
@@ -40,6 +49,7 @@ import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const TOKENS_PATH = path.resolve(here, "../src/styles/tokens.css");
+const STYLES_DIR = path.resolve(here, "../src/styles");
 
 /** 正文对：前景 × 背景，阈值 4.5:1 */
 const TEXT_PAIRS = [
@@ -109,14 +119,54 @@ const COMPOSITE_TEXT_PAIRS = [
   { fg: "purple-dimmed", bg: "surface-2", opacity: 0.85 },
 ];
 
+/** 被扫描的样式层文件：令牌层以外所有可能声明 `color:` 的地方。 */
+const STYLE_LAYERS = ["base.css", "components.css", "layout.css"];
+
+/**
+ * 已标定的 alpha 淡化位点 —— 「默认拒绝」门禁的事实清单。
+ *
+ * 判据：样式层里任何 `color:` 声明，只要①用 `color-mix(..., transparent)` 把前景按
+ * α 淡化，或②直接把半透明令牌当颜色用，就必须在下面登记一行。没有登记就失败。
+ * 登记项同时承担校验与说明：
+ * - `mix`：声明里保留前景的比例（0–1）。脚本会从声明中解析出实际比例并比对，
+ *   所以改 CSS 里的百分比却不同步改这里会直接失败，不会静默漂移。
+ * - `kind`：text（承载文字，≥4.5:1）或 glyph（纯字形指示，≥3:1）。
+ * - `pairs`：前景令牌 × 所在表面令牌，逐个按合成结果判定；淡化位点在不同状态下有
+ *   多个底色时（如强调卡 hover 变亮）必须逐个列出。
+ * - `reason`：为什么这个位点的淡化可以接受（例如「它只是方向箭头，不是正文」）。
+ *
+ * 现状只有一条：主行动卡右上角的箭头图标。正文本行（.ac-copy > span）已改回不透明
+ * --accent-fg，因此不再出现在本清单里——这正是本门禁想要的形状：淡化要么是证据，
+ * 要么不存在。
+ */
+const COLOR_MIX_ALPHA_SITES = [
+  {
+    file: "layout.css",
+    selector: ".action-card.primary > .icon",
+    mix: 0.75,
+    kind: "glyph",
+    pairs: [
+      ["accent-fg", "accent"],
+      ["accent-fg", "accent-hover"],
+    ],
+    reason:
+      "主行动卡右上角的方向箭头：纯字形指示、不承载文字信息（说明文字已改用不透明 --accent-fg），3:1 即可辨识",
+  },
+];
+
 /** 交互对：状态色与控件边界 × 背景，阈值 3:1 */
 const UI_PAIRS = [
   ["accent", "surface"],
   ["accent", "bg"],
   ["accent", "surface-2"],
   ["accent", "surface-3"],
+  // 焦点环不再只落在画布上：文件列表/差异面板/历史列表的环画在 --surface，
+  // 合并分支下拉的环落在 --surface-2 与 --accent-softer 的卡片底色上。
   ["focus", "surface"],
   ["focus", "bg"],
+  ["focus", "surface-2"],
+  ["focus", "surface-3"],
+  ["focus", "accent-softer"],
   ["danger", "surface"],
   ["info", "surface"],
   ["warning", "surface"],
@@ -132,6 +182,9 @@ const UI_PAIRS = [
 
 const MIN_TEXT = 4.5;
 const MIN_UI = 3;
+
+/** 登记项的阈值：承载文字按正文口径，纯字形按非文本口径。 */
+const ALPHA_SITE_MIN = { text: MIN_TEXT, glyph: MIN_UI };
 
 function parseThemeBlocks(css) {
   const stripped = css.replace(/\/\*[\s\S]*?\*\//g, "");
@@ -295,6 +348,168 @@ function sideLabel(side) {
   return side.recipe ? `hsl(--${side.recipe}-sat/light)` : `--${side.token}`;
 }
 
+/**
+ * 极简 CSS 规则扫描（与 tests/tokens.spec.ts 同一套最小实现）：取规则前导与声明体，
+ * 进入 @media/@container 继续扫描，跳过 @keyframes 内的关键帧块。规则体内不嵌套花括号。
+ */
+function parseRules(css) {
+  const text = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  const rules = [];
+  const atRules = [];
+  let prelude = "";
+  let index = 0;
+  while (index < text.length) {
+    const char = text[index];
+    if (char === "{") {
+      const head = prelude.trim();
+      prelude = "";
+      if (head.startsWith("@")) {
+        atRules.push(head);
+        index += 1;
+        continue;
+      }
+      const end = text.indexOf("}", index);
+      if (end === -1) break;
+      const inKeyframes = atRules.some((at) => at.startsWith("@keyframes"));
+      if (head && !inKeyframes) rules.push({ selector: head, body: text.slice(index + 1, end) });
+      index = end + 1;
+      continue;
+    }
+    if (char === "}") {
+      atRules.pop();
+      prelude = "";
+      index += 1;
+      continue;
+    }
+    if (char === ";") {
+      prelude = "";
+      index += 1;
+      continue;
+    }
+    prelude += char;
+    index += 1;
+  }
+  return rules;
+}
+
+/** 拆选择器组：只在括号外（:not(...) 等）按逗号分割。 */
+function splitSelectorList(selector) {
+  const parts = [];
+  let depth = 0;
+  let current = "";
+  for (const char of selector) {
+    if (char === "(") depth += 1;
+    if (char === ")") depth -= 1;
+    if (char === "," && depth === 0) {
+      parts.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+/** 取出顶层 color-mix(...) 的实参列表（第一项是插值方式，之后是颜色与比例）。 */
+function colorMixArgs(value) {
+  const start = value.toLowerCase().indexOf("color-mix(");
+  if (start === -1) return null;
+  let depth = 0;
+  let end = -1;
+  for (let index = start + "color-mix".length; index < value.length; index += 1) {
+    if (value[index] === "(") depth += 1;
+    else if (value[index] === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        end = index;
+        break;
+      }
+    }
+  }
+  if (end === -1) return null;
+  return value
+    .slice(start + "color-mix(".length, end)
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+/**
+ * 从 `color-mix(in srgb, var(--x) 75%, transparent)` 里解出保留下来的前景比例（0.75）。
+ * 不是「与 transparent 混合」的 color-mix 返回 null（那种混合两个不透明色，结果不透明）。
+ * CSS 缺省规则：只写一侧比例时另一侧为 100% − 该比例；两侧都不写则各占 50%。
+ */
+function colorMixTransparentShare(value) {
+  const args = colorMixArgs(value);
+  if (!args) return null;
+  const colors = args.slice(1);
+  const transparentIndex = colors.findIndex((part) => /\btransparent\b/i.test(part));
+  if (transparentIndex === -1) return null;
+  const shareOf = (part) => {
+    const match = part.match(/([\d.]+)%/);
+    return match ? Number(match[1]) / 100 : null;
+  };
+  for (const [index, part] of colors.entries()) {
+    if (index === transparentIndex) continue;
+    const share = shareOf(part);
+    if (share !== null) return share;
+  }
+  const transparentShare = shareOf(colors[transparentIndex]);
+  return transparentShare === null ? 0.5 : 1 - transparentShare;
+}
+
+/** 令牌里所有半透明色的 α（rgba/hsla 令牌与其字面量），用于识别「把淡色当 color 用」。 */
+function alphaTokenSet(blocks) {
+  const set = new Set();
+  for (const tokens of Object.values(blocks)) {
+    if (!tokens) continue;
+    for (const [key, raw] of tokens) {
+      const parsed = parseColor(raw);
+      if (parsed && parsed.a < 1) set.add(key);
+    }
+  }
+  return set;
+}
+
+/**
+ * 扫描样式层里所有「承载 color 的 alpha 淡化位点」：
+ * - `color: color-mix(..., transparent)` —— 等效于元素级 opacity 的整段淡化；
+ * - `color: var(--<半透明令牌>)` —— 直接把淡色当文字色，合成结果同样是淡化。
+ * 返回值里每项自带淡化比例，交由调用方按 COLOR_MIX_ALPHA_SITES 逐个核对。
+ */
+function scanAlphaColorSites(blocks, problems) {
+  const alphaTokens = alphaTokenSet(blocks);
+  const sites = [];
+  for (const file of STYLE_LAYERS) {
+    let css;
+    try {
+      css = readFileSync(path.join(STYLES_DIR, file), "utf8");
+    } catch {
+      problems.push(`样式层缺少 ${file}`);
+      continue;
+    }
+    for (const rule of parseRules(css)) {
+      for (const raw of rule.body.split(";")) {
+        const declaration = raw.trim();
+        const match = declaration.match(/^color\s*:/);
+        if (!match) continue;
+        const value = declaration.slice(match[0].length).trim();
+        let share = colorMixTransparentShare(value);
+        if (share === null) {
+          const tokenOnly = value.match(/^var\(\s*(--[a-z0-9-]+)\s*\)$/i);
+          if (tokenOnly && alphaTokens.has(tokenOnly[1])) share = 1;
+        }
+        if (share === null) continue;
+        for (const selector of splitSelectorList(rule.selector)) {
+          sites.push({ file, selector, value, declaration, share });
+        }
+      }
+    }
+  }
+  return sites;
+}
+
 function main() {
   const verbose = process.argv.includes("--verbose");
   const css = readFileSync(TOKENS_PATH, "utf8");
@@ -358,6 +573,60 @@ function main() {
     }
   }
 
+  // ---- 样式层 alpha 淡化位点（默认拒绝 + 显式标定） ----
+  const alphaSites = scanAlphaColorSites(blocks, problems);
+  const registered = new Map(COLOR_MIX_ALPHA_SITES.map((site) => [`${site.file} :: ${site.selector}`, site]));
+  const seen = new Set();
+  for (const site of alphaSites) {
+    const key = `${site.file} :: ${site.selector}`;
+    const entry = registered.get(key);
+    if (!entry) {
+      failures.push(
+        `${key} 用「${site.declaration}」淡化了文字/图标颜色，却不在 check-contrast.mjs 的 COLOR_MIX_ALPHA_SITES 里登记` +
+          `（color-mix 的 transparent 混合与半透明令牌都是等效 alpha，必须逐个标定，或改回不透明令牌）`,
+      );
+      continue;
+    }
+    seen.add(key);
+    if (Math.abs(entry.mix - site.share) > 1e-9) {
+      failures.push(
+        `${key} 声明里的淡化比例是 ${(site.share * 100).toFixed(0)}%，登记值是 ${(entry.mix * 100).toFixed(0)}%：` +
+          `改比例必须同步重新标定 COLOR_MIX_ALPHA_SITES`,
+      );
+      continue;
+    }
+    const min = ALPHA_SITE_MIN[entry.kind];
+    if (!min) {
+      failures.push(`${key} 的 kind=${entry.kind} 无效（只能是 text 或 glyph）`);
+      continue;
+    }
+    for (const theme of ["light", "dark"]) {
+      for (const [fgName, bgName] of entry.pairs) {
+        const label = `${theme}/alpha --${fgName}@${entry.mix} on --${bgName}（${key}）`;
+        const bg = background(blocks[theme], bgName, label, problems);
+        if (!bg) continue;
+        const fg = resolve(blocks[theme], fgName, bg, label, problems);
+        if (!fg) continue;
+        // color-mix 的 α 与令牌自身 α 相乘，结果再按所在表面合成：浏览器实际渲染的颜色。
+        const rendered = over({ ...fg, a: fg.a * entry.mix }, bg);
+        const value = ratio(rendered, bg);
+        const pass = value + 1e-9 >= min;
+        rows.push({ label, value, min, kind: "alpha", pass });
+        if (!pass) {
+          failures.push(`${label} = ${value.toFixed(2)}:1 (< ${min}:1，kind=${entry.kind})`);
+        }
+      }
+    }
+  }
+  for (const [key, entry] of registered) {
+    if (!seen.has(key)) {
+      failures.push(`COLOR_MIX_ALPHA_SITES 的 ${key} 已没有对应的淡化声明：规则被删或改用了不透明色，请同步删除该条目`);
+    }
+    if (String(entry.reason ?? "").trim().length < 8) {
+      failures.push(`COLOR_MIX_ALPHA_SITES 的 ${key} 必须写明为什么这个淡化位点可以接受`);
+    }
+  }
+
   if (verbose || failures.length > 0) {
     for (const row of rows) {
       const mark = row.pass ? "ok  " : "FAIL";
@@ -366,17 +635,21 @@ function main() {
   }
 
   const textRows = rows.filter((r) => r.min === MIN_TEXT && r.kind !== "composite");
-  const uiRows = rows.filter((r) => r.min === MIN_UI);
+  const uiRows = rows.filter((r) => r.min === MIN_UI && r.kind !== "alpha");
   const compositeRows = rows.filter((r) => r.kind === "composite");
+  const alphaRows = rows.filter((r) => r.kind === "alpha");
   const worst = (list) => list.sort((a, b) => a.value - b.value)[0];
   const worstText = worst([...textRows]);
   const worstUi = worst([...uiRows]);
   const worstComposite = worst([...compositeRows]);
+  const worstAlpha = worst([...alphaRows]);
   console.log(
-    `对比度检查：${rows.length} 对（正文 ${textRows.length} / 交互 ${uiRows.length} / 含 opacity 合成 ${compositeRows.length}），` +
+    `对比度检查：${rows.length} 对（正文 ${textRows.length} / 交互 ${uiRows.length} / 含 opacity 合成 ${compositeRows.length} / ` +
+      `color-mix 淡化 ${alphaRows.length}，覆盖 ${new Set(alphaSites.map((s) => `${s.file} :: ${s.selector}`)).size} 个位点），` +
       `正文最低 ${worstText ? `${worstText.value.toFixed(2)}:1（${worstText.label}）` : "n/a"}，` +
       `交互最低 ${worstUi ? `${worstUi.value.toFixed(2)}:1（${worstUi.label}）` : "n/a"}，` +
-      `合成最低 ${worstComposite ? `${worstComposite.value.toFixed(2)}:1（${worstComposite.label}）` : "n/a"}`,
+      `合成最低 ${worstComposite ? `${worstComposite.value.toFixed(2)}:1（${worstComposite.label}）` : "n/a"}，` +
+      `淡化最低 ${worstAlpha ? `${worstAlpha.value.toFixed(2)}:1（${worstAlpha.label}）` : "n/a"}`,
   );
 
   if (problems.length > 0) {
@@ -389,7 +662,10 @@ function main() {
     process.exitCode = 1;
     return;
   }
-  console.log("对比度检查通过：两套主题正文 ≥ 4.5:1（含逐色相的徽标/头像首字母与已登记的 opacity 合成对），交互元素边界 ≥ 3:1");
+  console.log(
+    "对比度检查通过：两套主题正文 ≥ 4.5:1（含逐色相的徽标/头像首字母、已登记的 opacity 合成对与 color-mix 淡化位点），" +
+      "交互元素边界与焦点环 ≥ 3:1",
+  );
   process.exitCode = 0;
 }
 

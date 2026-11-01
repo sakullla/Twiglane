@@ -1,3 +1,4 @@
+import { tick } from "svelte";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { BranchState, OpenedRepository } from "../src/lib/types";
@@ -136,6 +137,94 @@ describe("分支右键菜单", () => {
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "新建分支" })));
     await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
     expect((screen.getByRole("combobox", { name: "新分支的起点" }) as HTMLSelectElement).value).toBe("");
+  });
+
+  it("未合入才升级强删确认：焦点落在取消，再次确认才带 force", async () => {
+    api.deleteBranch.mockRejectedValueOnce({ code: "branch_unmerged", message: "未合入" }).mockResolvedValueOnce(state);
+    setup();
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+    await fireEvent.click(screen.getByRole("button", { name: "删除 main" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
+    const force = await screen.findByRole("button", { name: "确认删除未合入分支" });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "取消" })));
+    expect(api.deleteBranch).toHaveBeenCalledTimes(1);
+    expect(api.deleteBranch.mock.calls[0][2]).toBe(false);
+    await fireEvent.click(force);
+    await waitFor(() => expect(api.deleteBranch).toHaveBeenCalledTimes(2));
+    expect(api.deleteBranch.mock.calls[1][2]).toBe(true);
+    await waitFor(() => expect(document.querySelector("[data-modal-impact]")).toBeNull());
+  });
+
+  it("其它失败不升级强删：收起确认、焦点回到触发按钮", async () => {
+    api.deleteBranch.mockRejectedValueOnce({ code: "unknown", message: "网络不可用" });
+    const { onNotice } = setup();
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+    const trigger = screen.getByRole("button", { name: "删除 main" });
+    trigger.focus();
+    await fireEvent.click(trigger);
+    await fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
+    await waitFor(() => expect(document.querySelector("[data-modal-impact]")).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(api.deleteBranch).toHaveBeenCalledTimes(1);
+    expect(onNotice).not.toHaveBeenCalled();
+  });
+
+  it("远程删除：确认后才调用，失败时不报成功", async () => {
+    api.branchState.mockResolvedValue({
+      ...state,
+      branches: [...state.branches, { name: "origin/old", remote: true, current: false, upstream: null, worktree: null }],
+    });
+    api.deleteRemoteBranch.mockRejectedValueOnce({ code: "unknown", message: "网络不可用" }).mockResolvedValueOnce(state);
+    const { onNotice } = setup();
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+    await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
+    await fireEvent.click(await screen.findByRole("button", { name: "删除远程 origin/old" }));
+    expect(api.deleteRemoteBranch).not.toHaveBeenCalled();
+    await fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
+    await waitFor(() => expect(api.deleteRemoteBranch).toHaveBeenCalledTimes(1));
+    expect(api.deleteRemoteBranch.mock.calls[0].slice(0, 4)).toEqual(["/repo", "origin", "old", true]);
+    await waitFor(() => expect(document.querySelector("[data-modal-impact]")).toBeNull());
+    expect(onNotice).not.toHaveBeenCalled();
+
+    await fireEvent.click(await screen.findByRole("button", { name: "删除远程 origin/old" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("已删除远程分支 origin/old"));
+  });
+
+  it("重命名区替换列表、焦点落在输入框；Esc 和取消后回到触发按钮", async () => {
+    const { onClose } = setup();
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+    const more = screen.getByRole("button", { name: "main 的更多操作" });
+    more.focus();
+    await fireEvent.click(more);
+    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "重命名…" }));
+    const input = await screen.findByLabelText(/重命名本地分支/);
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    expect(document.querySelector<HTMLElement>(".branch-list")!.hidden).toBe(true);
+    await fireEvent.keyDown(input, { key: "Escape" });
+    await waitFor(() => expect(document.activeElement).toBe(more));
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("重命名写入在途时取消禁用、Esc 不收起，成功后焦点落在搜索框", async () => {
+    let finish: (value: unknown) => void = () => {};
+    api.renameBranch.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    setup();
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+    await fireEvent.contextMenu(rowOf("main"), { clientX: 100, clientY: 100 });
+    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "重命名…" }));
+    const input = await screen.findByLabelText(/重命名本地分支/);
+    await fireEvent.input(input, { target: { value: "trunk" } });
+    await fireEvent.click(screen.getByRole("button", { name: "确认重命名" }));
+    await waitFor(() => expect(api.renameBranch).toHaveBeenCalled());
+    await tick();
+    expect((screen.getByRole("button", { name: "取消" }) as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.keyDown(input, { key: "Escape" });
+    await tick();
+    expect(document.querySelector("[data-branch-rename]")).toBeTruthy();
+    finish(state);
+    await waitFor(() => expect(document.querySelector("[data-branch-rename]")).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("搜索分支")));
   });
 
   it("重命名：就地输入新名称，确认后调用后端；名称没变时不可确认", async () => {

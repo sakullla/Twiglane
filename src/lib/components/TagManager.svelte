@@ -25,6 +25,13 @@
   let nameInput = $state<HTMLInputElement | null>(null);
   let searchInput = $state<HTMLInputElement | null>(null);
   let createToggle = $state<HTMLButtonElement | null>(null);
+  let listBox = $state<HTMLDivElement | null>(null);
+  let confirmBox = $state<HTMLDivElement | null>(null);
+  let confirmCancel = $state<HTMLButtonElement | null>(null);
+  /** 写入在途：取消按钮禁用、Esc 不收起，结果未定时不能让界面看起来已经放弃。 */
+  let writing = $state(false);
+  /** 确认区打开前的焦点和列表滚动位置，收起时原样还回去。 */
+  let promptOrigin: { focus: HTMLElement | null; scrollTop: number } | null = null;
   let query = $state("");
   let name = $state("");
   let target = $state("HEAD");
@@ -68,6 +75,15 @@
     }
   }
 
+  async function write<T>(action: () => Promise<T>): Promise<T | undefined> {
+    writing = true;
+    try {
+      return await run(action);
+    } finally {
+      writing = false;
+    }
+  }
+
   function apply(result: TagState) {
     tags = result.tags;
     onSnapshot(result.snapshot);
@@ -95,13 +111,12 @@
     const tagTarget = target.trim() || "HEAD";
     const annotated = message.trim().length > 0;
     if (!tagName || !target.trim()) return;
-    const result = await run(() => api.createTag(current.summary.path, tagName, tagTarget, message.trim(), current.generation, nextId()));
+    // 提交按钮在途时会被禁用，先把焦点放回一直可用的名称框。
+    nameInput?.focus();
+    const result = await write(() => api.createTag(current.summary.path, tagName, tagTarget, message.trim(), current.generation, nextId()));
     if (opened.summary.path !== current.summary.path) return;
-    if (!result) {
-      // 提交按钮在途时被禁用，焦点已经丢失；失败时表单留着，让用户直接修改后重试。
-      nameInput?.focus();
-      return;
-    }
+    // 失败时表单和焦点都留着，让用户直接修改后重试。
+    if (!result) return;
     apply(result);
     void closeCreate();
     onNotice(`已创建标签 ${tagName}${annotated ? "（附注标签）" : ""}。`);
@@ -109,7 +124,6 @@
 
   async function openCreate() {
     creating = true;
-    confirmTag = null;
     await tick();
     nameInput?.focus();
   }
@@ -138,15 +152,41 @@
     onNotice(`标签 ${tag.name} 已推送到 ${remote}，没有强制覆盖。`);
   }
 
+  /** 确认区替换搜索与列表，不用算高度，也不必滚动就能看全说明和按钮。 */
+  async function askRemove(tag: TagRecord) {
+    promptOrigin = {
+      focus: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+      scrollTop: listBox?.scrollTop ?? 0,
+    };
+    confirmTag = tag;
+    await tick();
+    // 默认落在安全的取消上，破坏性操作必须多走一步。
+    confirmCancel?.focus();
+  }
+
+  /** 列表显示回来后还原滚动，焦点回到触发按钮；它已不存在时落在搜索框。 */
+  async function closeConfirm() {
+    const origin = promptOrigin;
+    promptOrigin = null;
+    confirmTag = null;
+    await tick();
+    if (listBox && origin) listBox.scrollTop = origin.scrollTop;
+    const target = origin?.focus;
+    if (target?.isConnected && !target.matches(":disabled")) target.focus({ preventScroll: true });
+    else searchInput?.focus();
+  }
+
   async function remove() {
     const tag = confirmTag;
-    if (!tag) return;
-    confirmTag = null;
+    if (!tag || blocked) return;
     const current = opened;
-    const result = await run(() => api.deleteTag(current.summary.path, tag.name, true, current.generation, nextId()));
-    if (!result || opened.summary.path !== current.summary.path) return;
-    apply(result);
-    onNotice(`已删除本地标签 ${tag.name}，远程上的同名标签不受影响。`);
+    // 确认按钮在途时会被禁用，先把焦点放到确认区容器，Esc 才还到得了键盘处理。
+    confirmBox?.focus();
+    const result = await write(() => api.deleteTag(current.summary.path, tag.name, true, current.generation, nextId()));
+    if (opened.summary.path !== current.summary.path) return;
+    if (result) apply(result);
+    await closeConfirm();
+    if (result) onNotice(`已删除本地标签 ${tag.name}，远程上的同名标签不受影响。`);
   }
 
   async function copyOid(oid: string) {
@@ -177,14 +217,14 @@
         if (event.key !== "Escape") return;
         event.preventDefault();
         event.stopPropagation();
-        void closeCreate();
+        if (!writing) void closeCreate();
       }}
     >
       <div class="tag-create-grid">
         <div class="form-group">
           <label class="label" for="tag-name">标签名称</label>
           <!-- 不随 blocked 禁用：禁用会把刚给的焦点弄丢；提交本身由 run 拦住。 -->
-          <input id="tag-name" class="input" bind:this={nameInput} bind:value={name} placeholder="例如 v1.0.0" autocomplete="off" spellcheck="false" />
+          <input id="tag-name" class="input" readonly={writing} bind:this={nameInput} bind:value={name} placeholder="例如 v1.0.0" autocomplete="off" spellcheck="false" />
         </div>
         <div class="form-group">
           <label class="label" for="tag-target">目标提交</label>
@@ -194,18 +234,18 @@
       <input class="input" aria-label="标签附注" bind:value={message} placeholder="可选附注；填写后创建附注标签" disabled={blocked} />
       <p class="hint">标记当前提交，或输入另一个提交 Hash。</p>
       <div class="create-form-actions">
-        <button type="button" class="btn btn-secondary" onclick={closeCreate}>取消</button>
+        <button type="button" class="btn btn-secondary" disabled={writing} onclick={closeCreate}>取消</button>
         <button type="submit" class="btn btn-primary" disabled={blocked || !name.trim() || !target.trim()}><Icon name="plus" size={14} />创建标签</button>
       </div>
     </form>
   {:else}
-    <div class="tag-list-tools">
+    <div class="tag-list-tools" hidden={confirmTag !== null}>
       <div class="field"><Icon name="search" size={14} /><input aria-label="搜索标签" bind:this={searchInput} bind:value={query} placeholder="搜索标签、Hash 或附注" autocomplete="off" spellcheck="false" /></div>
       {#if loaded?.ok}<span class="count">{tags.length}</span>{/if}
       <button type="button" class="btn btn-secondary" aria-expanded="false" aria-controls="tag-create-form" bind:this={createToggle} onclick={openCreate}><Icon name="plus" size={14} />新建标签</button>
     </div>
 
-    <div class="list-box tag-list">
+    <div class="list-box tag-list" bind:this={listBox} hidden={confirmTag !== null}>
       {#if !loaded?.ok}
         <div class="empty compact" data-tag-loading>
           {#if loaded}
@@ -235,7 +275,7 @@
             <span class="lr-actions">
               <button type="button" class="btn btn-ghost btn-sm" disabled={blocked} onclick={() => onOpenHistory(tag.targetOid)}><Icon name="history" size={12} />查看提交</button>
               <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={() => push(tag)}><Icon name="arrow-up" size={12} />推送</button>
-              <button type="button" class="icon-btn sm danger" aria-label={`删除标签 ${tag.name}`} title="删除本地标签" disabled={blocked} onclick={() => (confirmTag = tag)}><Icon name="trash" size={13} /></button>
+              <button type="button" class="icon-btn sm danger" aria-label={`删除标签 ${tag.name}`} title="删除本地标签" disabled={blocked} onclick={() => askRemove(tag)}><Icon name="trash" size={13} /></button>
             </span>
           </div>
         {/each}
@@ -244,11 +284,26 @@
   {/if}
 
   {#if confirmTag}
-    <div class="callout warn" role="alert">
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div
+      class="callout warn"
+      role="alert"
+      tabindex="-1"
+      bind:this={confirmBox}
+      onkeydown={(event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!writing) void closeConfirm();
+      }}
+    >
       <Icon name="alert" size={15} />
       <div class="callout-body">
         <p>删除本地标签 <strong>{confirmTag.name}</strong>？远程上的同名标签不会删除，目标提交也不会删除。</p>
-        <div class="row"><button type="button" class="btn btn-secondary btn-sm" onclick={() => (confirmTag = null)}>取消</button><button type="button" class="btn btn-danger btn-sm" disabled={blocked} onclick={remove}>确认删除标签</button></div>
+        <div class="row">
+          <button type="button" class="btn btn-secondary btn-sm" disabled={writing} bind:this={confirmCancel} onclick={closeConfirm}>取消</button>
+          <button type="button" class="btn btn-danger btn-sm" disabled={blocked} onclick={remove}>确认删除标签</button>
+        </div>
       </div>
     </div>
   {/if}

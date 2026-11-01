@@ -8,12 +8,14 @@ const switchBranch = vi.hoisted(() => vi.fn());
 const tagState = vi.hoisted(() => vi.fn());
 const remoteState = vi.hoisted(() => vi.fn());
 const addRemote = vi.hoisted(() => vi.fn());
+const createBranchFrom = vi.hoisted(() => vi.fn());
 
 vi.mock("../src/lib/api", () => ({
   api: {
     branchState,
     switchBranch,
     createBranch: vi.fn(),
+    createBranchFrom,
     deleteBranch: vi.fn(),
     deleteRemoteBranch: vi.fn(),
     tagState,
@@ -304,6 +306,93 @@ describe("分支管理", () => {
     expect((screen.getByLabelText("新建分支") as HTMLInputElement).disabled).toBe(false);
     expect(document.activeElement).toBe(screen.getByLabelText("新建分支"));
     finish({ generation: 4, branches: [], snapshot: opened.snapshot });
+  });
+
+  it("新建写入在途时取消禁用、Esc 不收起，失败后表单和草稿都在", async () => {
+    let fail: (reason: unknown) => void = () => {};
+    createBranchFrom.mockReturnValueOnce(new Promise((_, reject) => (fail = reject)));
+    render(BranchDialog, { props: { ...props(), startCreating: true } });
+    await waitFor(() => expect(document.querySelector("[data-branch-create] select option[value='main']")).toBeTruthy());
+    const input = screen.getByLabelText("新建分支") as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: "spike" } });
+    await fireEvent.click(screen.getByRole("button", { name: /创建并切换/ }));
+    await waitFor(() => expect(createBranchFrom).toHaveBeenCalled());
+    await tick();
+    expect((screen.getByRole("button", { name: "取消" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(document.activeElement).toBe(input);
+    await fireEvent.keyDown(input, { key: "Escape" });
+    await tick();
+    expect(screen.queryByLabelText("新建分支")).toBeTruthy();
+    fail({ code: "unknown", message: "已存在" });
+    await waitFor(() => expect((screen.getByRole("button", { name: "取消" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(input.value).toBe("spike");
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("新建表单打开时切分区：收起并清空，切回不残留，切到远程也不显示表单", async () => {
+    render(BranchDialog, { props: props() });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
+    await fireEvent.input(screen.getByLabelText("新建分支"), { target: { value: "draft" } });
+    await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
+    expect(screen.queryByLabelText("新建分支")).toBeNull();
+    expect(screen.getByRole("tab", { name: /远程分支/ }).getAttribute("aria-selected")).toBe("true");
+    await fireEvent.click(screen.getByRole("tab", { name: /本地分支/ }));
+    expect(screen.queryByLabelText("新建分支")).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
+    expect((screen.getByLabelText("新建分支") as HTMLInputElement).value).toBe("");
+  });
+
+  it("在远程分区点新建：落到本地分区，高亮和表单一致", async () => {
+    render(BranchDialog, { props: props() });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
+    expect(screen.getByLabelText("新建分支")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: /本地分支/ }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("删除确认替换列表，焦点在取消上；取消后回到触发按钮和原滚动位置", async () => {
+    render(BranchDialog, { props: props() });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    const list = document.querySelector<HTMLElement>(".branch-list")!;
+    list.scrollTop = 40;
+    const trigger = screen.getByRole("button", { name: "删除 main" });
+    trigger.focus();
+    await fireEvent.click(trigger);
+    await waitFor(() => expect(document.activeElement).toBe(document.querySelector("[data-modal-impact] .btn-secondary")));
+    expect(document.activeElement?.textContent).toBe("取消");
+    expect(list.hidden).toBe(true);
+    expect(document.querySelector<HTMLElement>(".branch-manager-tools")!.hidden).toBe(true);
+    await fireEvent.click(document.activeElement!);
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(list.hidden).toBe(false);
+    expect(list.scrollTop).toBe(40);
+  });
+
+  it("删除确认里 Esc 只收起确认，不关 modal，焦点回到触发按钮", async () => {
+    const base = props();
+    render(BranchDialog, { props: base });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    const trigger = screen.getByRole("button", { name: "删除 main" });
+    trigger.focus();
+    await fireEvent.click(trigger);
+    await waitFor(() => expect(document.querySelector("[data-modal-impact]")).toBeTruthy());
+    await fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(document.querySelector("[data-modal-impact]")).toBeNull();
+    expect(base.onClose).not.toHaveBeenCalled();
+  });
+
+  it("切分区时收起删除确认，切回时列表正常显示", async () => {
+    render(BranchDialog, { props: props() });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    await fireEvent.click(screen.getByRole("button", { name: "删除 main" }));
+    await waitFor(() => expect(document.querySelector("[data-modal-impact]")).toBeTruthy());
+    await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
+    await fireEvent.click(screen.getByRole("tab", { name: /本地分支/ }));
+    expect(document.querySelector("[data-modal-impact]")).toBeNull();
+    expect(document.querySelector<HTMLElement>(".branch-list")!.hidden).toBe(false);
   });
 
   it("切换成功后更新状态并自动关闭", async () => {

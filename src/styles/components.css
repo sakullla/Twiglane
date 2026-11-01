@@ -771,6 +771,7 @@ label.list-row .checkbox { margin-top: 2px; }
 .branch-status-sync { display: inline-flex; align-items: center; gap: var(--space-2); flex: none; font-variant-numeric: tabular-nums; }
 [data-task-modal="branch"] .modal-body > .segmented { align-self: flex-start; }
 .branch-panel { display: flex; flex-direction: column; gap: var(--space-12); min-width: 0; }
+.branch-panel [hidden], .tag-manager [hidden] { display: none; }
 .branch-manager-tools { display: flex; align-items: center; gap: 10px; }
 .branch-search { flex: 1; min-width: 180px; }
 .branch-list, .tag-list { max-height: min(calc(86vh - 290px), 440px); min-height: 170px; border: 0; background: var(--surface-2); }

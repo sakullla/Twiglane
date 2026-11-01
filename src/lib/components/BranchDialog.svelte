@@ -57,6 +57,14 @@
   let nameInput = $state<HTMLInputElement | null>(null);
   let searchInput = $state<HTMLInputElement | null>(null);
   let createToggle = $state<HTMLButtonElement | null>(null);
+  let listBox = $state<HTMLDivElement | null>(null);
+  let confirmBox = $state<HTMLDivElement | null>(null);
+  let confirmCancel = $state<HTMLButtonElement | null>(null);
+  let renameInput = $state<HTMLInputElement | null>(null);
+  /** 写入在途：取消按钮禁用、Esc 不收起，结果未定时不能让界面看起来已经放弃。 */
+  let writing = $state(false);
+  /** 确认区打开前的焦点和列表滚动位置，收起时原样还回去。 */
+  let promptOrigin: { focus: HTMLElement | null; scrollTop: number } | null = null;
   let tab = $state<BranchTab>("local");
   let localBusy = $state(false);
   let errorText = $state<string | null>(null);
@@ -85,6 +93,8 @@
   ];
 
   let blocked = $derived(disabled || localBusy);
+  /** 确认区和重命名区替换搜索与列表，不用算高度，也不必滚动就能看全说明和按钮。 */
+  let prompting = $derived(confirmDelete !== null || renaming !== null);
   let localCount = $derived(branches.filter((branch) => !branch.remote).length);
   let remoteCount = $derived(branches.filter((branch) => branch.remote).length);
   let listScope = $derived(tab === "remote" ? "remote" : "local");
@@ -122,6 +132,47 @@
       localBusy = false;
       onBusy(null);
     }
+  }
+
+  async function write<T>(action: () => Promise<T>): Promise<T | undefined> {
+    writing = true;
+    try {
+      return await run(action);
+    } finally {
+      writing = false;
+    }
+  }
+
+  function rememberOrigin() {
+    promptOrigin = {
+      focus: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+      scrollTop: listBox?.scrollTop ?? 0,
+    };
+  }
+
+  /** 列表显示回来后还原滚动，焦点回到触发按钮；它已不存在（行被删、被改名）时落在搜索框。 */
+  async function restoreOrigin() {
+    const origin = promptOrigin;
+    promptOrigin = null;
+    await tick();
+    if (listBox && origin) listBox.scrollTop = origin.scrollTop;
+    const target = origin?.focus;
+    if (target?.isConnected && !target.matches(":disabled")) target.focus({ preventScroll: true });
+    else searchInput?.focus();
+  }
+
+  function cancelPrompt() {
+    if (writing) return;
+    confirmDelete = null;
+    renaming = null;
+    void restoreOrigin();
+  }
+
+  function onPromptKey(event: KeyboardEvent) {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    cancelPrompt();
   }
 
   function applyBranches(result: BranchState) {
@@ -173,17 +224,15 @@
     if (!name) return;
     const start = startPoint();
     const checkout = createCheckout;
-    const result = await run(() =>
+    // 提交按钮在途时会被禁用，先把焦点放回一直可用的名称框。
+    nameInput?.focus();
+    const result = await write(() =>
       api.createBranchFrom(currentRepo.summary.path, name, start, checkout, currentRepo.generation, nextId()),
     );
     if (opened.summary.path !== currentRepo.summary.path) return;
-    if (!result) {
-      // 提交按钮在途时被禁用，焦点已经丢失；失败时表单留着，让用户直接改名重试。
-      nameInput?.focus();
-      return;
-    }
+    // 失败时表单和焦点都留着，让用户直接改名重试。
+    if (!result) return;
     applyBranches(result);
-    tab = "local";
     void closeCreate();
     if (checkout) {
       onNotice(`已从 ${start} 创建并切换到 ${name}。`);
@@ -193,34 +242,40 @@
     }
   }
 
+  /** 新分支总是本地分支：在远程分区点新建也落到本地分区，高亮和内容一致。 */
   async function openCreate(base = "") {
+    tab = "local";
     creating = true;
     createBase = base;
-    renaming = null;
-    confirmDelete = null;
     await tick();
     nameInput?.focus();
   }
 
-  /** 创建或取消后收起并清空；表单节点随之消失，焦点交还给「新建分支」按钮。 */
-  async function closeCreate() {
+  function resetCreate() {
     creating = false;
     branchName = "";
     createBase = "";
+  }
+
+  /** 创建或取消后收起并清空；表单节点随之消失，焦点交还给「新建分支」按钮。 */
+  async function closeCreate() {
+    resetCreate();
     await tick();
     createToggle?.focus();
   }
 
   function createFrom(branch: BranchRecord) {
-    tab = "local";
     menu = null;
     // 起点下拉不列当前分支本身，它由空值代表。
     void openCreate(branch.current ? "" : branch.name);
   }
 
-  function askRename(branch: BranchRecord) {
+  async function askRename(branch: BranchRecord) {
+    rememberOrigin();
     renaming = { name: branch.name, value: branch.name };
-    confirmDelete = null;
+    await tick();
+    renameInput?.focus();
+    renameInput?.select();
   }
 
   async function confirmRename() {
@@ -229,14 +284,15 @@
     if (!target) return;
     const next = target.value.trim();
     if (!next || next === target.name) {
-      renaming = null;
+      cancelPrompt();
       return;
     }
-    const result = await run(() =>
+    const result = await write(() =>
       api.renameBranch(currentRepo.summary.path, target.name, next, currentRepo.generation, nextId()),
     );
     if (!result || opened.summary.path !== currentRepo.summary.path) return;
     renaming = null;
+    void restoreOrigin();
     applyBranches(result);
     onNotice(`已把分支 ${target.name} 重命名为 ${next}。远程上的同名分支不受影响。`);
   }
@@ -291,7 +347,7 @@
     }
     entries.push({ separator: true });
     if (!branch.remote) {
-      entries.push({ id: "rename", label: "重命名…", icon: "pencil", disabledReason: elsewhere ?? busy, run: () => askRename(branch) });
+      entries.push({ id: "rename", label: "重命名…", icon: "pencil", disabledReason: elsewhere ?? busy, run: () => void askRename(branch) });
     }
     entries.push({ id: "copy", label: "复制分支名", icon: "copy", run: () => void copyName(branch.name) });
     entries.push({ separator: true });
@@ -301,7 +357,7 @@
       icon: "trash",
       danger: true,
       disabledReason: branch.current ? "不能删除当前分支，先切换到其他分支" : (elsewhere ?? busy),
-      run: () => askDelete(branch),
+      run: () => void askDelete(branch),
     });
     menu = { x: point.x, y: point.y, entries, label: `${branch.name} 的操作` };
   }
@@ -315,68 +371,79 @@
     onClose();
   }
 
-  function askDelete(branch: BranchRecord) {
+  async function askDelete(branch: BranchRecord) {
+    let prompt: typeof confirmDelete;
     if (branch.remote) {
       const slash = branch.name.indexOf("/");
       if (slash <= 0) return;
-      confirmDelete = {
+      prompt = {
         kind: "remote",
         remote: branch.name.slice(0, slash),
         name: branch.name.slice(slash + 1),
         body: `将从远程删除 ${branch.name}。这不会强行推送，但远程上的该分支会被移除。取消则不会执行。`,
         force: false,
       };
-      return;
+    } else {
+      prompt = {
+        kind: "local",
+        name: branch.name,
+        body: "将删除这个本地分支。如果它还有未合入当前分支的提交，需要再次确认。取消则不会执行。",
+        force: false,
+      };
     }
-    confirmDelete = {
-      kind: "local",
-      name: branch.name,
-      body: "将删除这个本地分支。如果它还有未合入当前分支的提交，需要再次确认。取消则不会执行。",
-      force: false,
-    };
+    rememberOrigin();
+    confirmDelete = prompt;
+    await tick();
+    // 默认落在安全的取消上，破坏性操作必须多走一步。
+    confirmCancel?.focus();
   }
 
   async function confirmRemoval() {
     const currentRepo = opened;
     const target = confirmDelete;
     if (!target || blocked) return;
-    if (target.kind === "remote") {
-      confirmDelete = null;
-      const result = await run(() =>
-        api.deleteRemoteBranch(currentRepo.summary.path, target.remote, target.name, true, currentRepo.generation, nextId()),
-      );
-      if (!result) return;
-      applyBranches(result);
-      onNotice(`已删除远程分支 ${target.remote}/${target.name}`);
-      return;
-    }
-    const result = await run(() =>
-      api.deleteBranch(currentRepo.summary.path, target.name, target.force, currentRepo.generation, nextId()),
+    // 确认按钮在途时会被禁用，先把焦点放到确认区容器，Esc 才还到得了键盘处理。
+    confirmBox?.focus();
+    const result = await write(() =>
+      target.kind === "remote"
+        ? api.deleteRemoteBranch(currentRepo.summary.path, target.remote, target.name, true, currentRepo.generation, nextId())
+        : api.deleteBranch(currentRepo.summary.path, target.name, target.force, currentRepo.generation, nextId()),
     );
-    if (result) {
-      confirmDelete = null;
-      applyBranches(result);
-      onNotice(`已删除本地分支 ${target.name}`);
-      return;
-    }
     // 只有「未合入」这一种失败才升级为强删确认；其它失败按普通错误处理并收起确认层。
-    if (!target.force && lastFailureCode === "branch_unmerged") {
+    if (!result && target.kind === "local" && !target.force && lastFailureCode === "branch_unmerged") {
       confirmDelete = {
         kind: "local",
         name: target.name,
         body: "该分支含有尚未合入当前分支的提交。确认后才会删除，删除后这些提交不能由这里自动恢复。",
         force: true,
       };
-    } else {
-      confirmDelete = null;
+      await tick();
+      confirmCancel?.focus();
+      return;
     }
+    confirmDelete = null;
+    void restoreOrigin();
+    if (!result) return;
+    applyBranches(result);
+    onNotice(target.kind === "remote" ? `已删除远程分支 ${target.remote}/${target.name}` : `已删除本地分支 ${target.name}`);
+  }
+
+  /** 切分区统一放弃当前的表单和确认区，切回时不残留；写入在途时结果未定，先不让切。 */
+  function selectTab(next: BranchTab) {
+    if (next === tab) return;
+    if (writing) return;
+    resetCreate();
+    confirmDelete = null;
+    renaming = null;
+    promptOrigin = null;
+    tab = next;
   }
 
   function focusTab(key: string) {
     const order = TABS.map((entry) => entry.id);
     const index = order.indexOf(tab);
     const next = key === "ArrowRight" ? (index + 1) % order.length : (index - 1 + order.length) % order.length;
-    tab = order[next];
+    selectTab(order[next]);
     document.getElementById(`branch-tab-${order[next]}`)?.focus();
   }
 </script>
@@ -409,7 +476,7 @@
         aria-selected={tab === entry.id}
         aria-controls="branch-tab-panel"
         tabindex={tab === entry.id ? 0 : -1}
-        onclick={() => (tab = entry.id)}
+        onclick={() => selectTab(entry.id)}
         onkeydown={(event) => {
           if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
           event.preventDefault();
@@ -452,7 +519,7 @@
           if (event.key !== "Escape") return;
           event.preventDefault();
           event.stopPropagation();
-          void closeCreate();
+          if (!writing) void closeCreate();
         }}
       >
         <label class="label" for="branch-name">新建分支</label>
@@ -461,6 +528,7 @@
           id="branch-name"
           class="input"
           data-autofocus
+          readonly={writing}
           bind:this={nameInput}
           bind:value={branchName}
           placeholder="例如 feature/login"
@@ -484,14 +552,14 @@
         </div>
         <p class="hint">{createCheckout ? "切换沿用分支切换的保护：会覆盖未提交修改时停下，工作区保持原样。" : "只创建分支，当前分支和工作区都不变。"}</p>
         <div class="create-form-actions">
-          <button type="button" class="btn btn-secondary" onclick={closeCreate}>取消</button>
+          <button type="button" class="btn btn-secondary" disabled={writing} onclick={closeCreate}>取消</button>
           <button type="submit" class="btn btn-primary" disabled={blocked || branchName.trim().length === 0}>
             <Icon name="plus" size={14} />{createCheckout ? "创建并切换" : "创建分支"}
           </button>
         </div>
       </form>
     {:else}
-      <div class="branch-manager-tools">
+      <div class="branch-manager-tools" hidden={prompting}>
         <div class="field branch-search">
           <Icon name="search" size={14} />
           <label class="sr-only" for="branch-search">搜索分支</label>
@@ -520,7 +588,7 @@
         </button>
       </div>
 
-      <div class="list-box branch-list" aria-label={listScope === "local" ? "本地分支" : "远程分支"}>
+      <div class="list-box branch-list" aria-label={listScope === "local" ? "本地分支" : "远程分支"} bind:this={listBox} hidden={prompting}>
         <div class="list-section">
           <span>{listScope === "local" ? "本地分支" : "远程分支"}</span>
           <span class="spacer"></span>
@@ -608,7 +676,7 @@
                     disabled={blocked}
                     onclick={(event) => {
                       event.stopPropagation();
-                      askDelete(branch);
+                      void askDelete(branch);
                     }}
                     onkeydown={(event) => event.stopPropagation()}
                   >
@@ -622,37 +690,36 @@
       </div>
 
       {#if renaming}
-        <div class="callout branch-rename" data-branch-rename>
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="callout branch-rename" data-branch-rename onkeydown={onPromptKey}>
           <Icon name="pencil" size={15} />
           <div class="callout-body">
             <label class="label" for="branch-rename">重命名本地分支 {renaming.name}</label>
             <div class="row">
-              <!-- svelte-ignore a11y_autofocus -->
               <input
                 id="branch-rename"
                 class="input"
-                autofocus
+                bind:this={renameInput}
                 bind:value={renaming.value}
                 autocomplete="off"
                 spellcheck="false"
-                disabled={blocked}
+                readonly={writing}
                 onkeydown={(event) => {
                   if (event.key === "Enter") {
                     event.preventDefault();
                     void confirmRename();
-                  } else if (event.key === "Escape") {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    renaming = null;
                   }
                 }}
               />
-              <button type="button" class="btn btn-secondary btn-sm" onclick={() => (renaming = null)}>取消</button>
+              <button type="button" class="btn btn-secondary btn-sm" disabled={writing} onclick={cancelPrompt}>取消</button>
               <button
                 type="button"
                 class="btn btn-primary btn-sm"
                 disabled={blocked || renaming.value.trim().length === 0 || renaming.value.trim() === renaming.name}
-                onclick={confirmRename}
+                onclick={() => {
+                  renameInput?.focus();
+                  void confirmRename();
+                }}
               >确认重命名</button>
             </div>
             <p class="hint">只改本地分支名；已关联的上游配置随之保留，远程上的同名分支不会改动。</p>
@@ -661,7 +728,8 @@
       {/if}
 
       {#if confirmDelete}
-        <div class="callout warn" role="alert" data-modal-impact="branch-delete">
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <div class="callout warn" role="alert" tabindex="-1" data-modal-impact="branch-delete" bind:this={confirmBox} onkeydown={onPromptKey}>
           <Icon name="alert" size={15} />
           <div class="callout-body">
             <p>{confirmDelete.body}</p>
@@ -669,7 +737,7 @@
               <li>{confirmDelete.kind === "remote" ? `远程分支 ${confirmDelete.remote}/${confirmDelete.name}` : `本地分支 ${confirmDelete.name}`}</li>
             </ul>
             <div class="row">
-              <button type="button" class="btn btn-secondary btn-sm" onclick={() => (confirmDelete = null)}>取消</button>
+              <button type="button" class="btn btn-secondary btn-sm" disabled={writing} bind:this={confirmCancel} onclick={cancelPrompt}>取消</button>
               {#if confirmDelete.kind === "local" && confirmDelete.force}
                 <button type="button" class="btn btn-danger btn-sm" disabled={blocked} onclick={confirmRemoval}>确认删除未合入分支</button>
               {:else}

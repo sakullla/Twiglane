@@ -1,3 +1,4 @@
+import { tick } from "svelte";
 import { fireEvent, render, screen } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenedRepository } from "../src/lib/types";
@@ -116,6 +117,66 @@ describe("标签管理", () => {
     expect((screen.getByLabelText("标签名称") as HTMLInputElement).value).toBe("v1.0.0");
   });
 
+  it("创建写入在途时取消禁用、Esc 不收起", async () => {
+    let finish: (value: unknown) => void = () => {};
+    createTag.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    renderTags();
+    await screen.findByText("v1.0.0");
+    await fireEvent.click(screen.getByRole("button", { name: "新建标签" }));
+    const input = screen.getByLabelText("标签名称");
+    await fireEvent.input(input, { target: { value: "v2.0.0" } });
+    await fireEvent.click(screen.getByRole("button", { name: "创建标签" }));
+    await vi.waitFor(() => expect(createTag).toHaveBeenCalled());
+    await tick();
+    expect((screen.getByRole("button", { name: "取消" }) as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.keyDown(input, { key: "Escape" });
+    await tick();
+    expect(screen.queryByLabelText("标签名称")).toBeTruthy();
+    finish({ generation: 4, tags: [existing], snapshot: { ...opened.snapshot, generation: 4 } });
+    await vi.waitFor(() => expect(screen.queryByLabelText("标签名称")).toBeNull());
+  });
+
+  it("删除确认替换列表，焦点在取消上；Esc 和取消后回到触发按钮", async () => {
+    renderTags();
+    await screen.findByText("v1.0.0");
+    const trigger = screen.getByRole("button", { name: "删除标签 v1.0.0" });
+    const list = document.querySelector<HTMLElement>(".tag-list")!;
+    trigger.focus();
+    await fireEvent.click(trigger);
+    await vi.waitFor(() => expect(document.activeElement?.textContent).toBe("取消"));
+    expect(list.hidden).toBe(true);
+    await fireEvent.click(document.activeElement!);
+    await vi.waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(list.hidden).toBe(false);
+
+    await fireEvent.click(trigger);
+    await vi.waitFor(() => expect(document.activeElement?.textContent).toBe("取消"));
+    await fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    await vi.waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
+  it("删除写入在途时取消禁用、Esc 不收起，失败后回到触发按钮", async () => {
+    let fail: (reason: unknown) => void = () => {};
+    deleteTag.mockReturnValueOnce(new Promise((_, reject) => (fail = reject)));
+    renderTags();
+    await screen.findByText("v1.0.0");
+    const trigger = screen.getByRole("button", { name: "删除标签 v1.0.0" });
+    trigger.focus();
+    await fireEvent.click(trigger);
+    await vi.waitFor(() => expect(document.activeElement?.textContent).toBe("取消"));
+    await fireEvent.click(screen.getByRole("button", { name: "确认删除标签" }));
+    await vi.waitFor(() => expect(deleteTag).toHaveBeenCalled());
+    await tick();
+    expect((screen.getByRole("button", { name: "取消" }) as HTMLButtonElement).disabled).toBe(true);
+    const box = document.querySelector<HTMLElement>(".tag-manager [role='alert']")!;
+    expect(document.activeElement).toBe(box);
+    await fireEvent.keyDown(box, { key: "Escape" });
+    await tick();
+    expect(document.querySelector(".tag-manager [role='alert'] .btn-danger")).toBeTruthy();
+    fail({ code: "unknown", message: "删不掉" });
+    await vi.waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
   it("重试后焦点落在搜索框，不随按钮一起消失", async () => {
     tagState.mockReset();
     tagState.mockRejectedValueOnce({ code: "unknown", message: "读不到" });
@@ -138,7 +199,7 @@ describe("标签管理", () => {
     await fireEvent.click(screen.getByRole("button", { name: "删除标签 v1.0.0" }));
     await fireEvent.click(screen.getByRole("button", { name: "确认删除标签" }));
     await vi.waitFor(() => expect(deleteTag).toHaveBeenCalledWith("/repo", "v1.0.0", true, 3, 7));
-    expect(screen.queryByText("v1.0.0")).toBeNull();
+    await vi.waitFor(() => expect(screen.queryByText("v1.0.0")).toBeNull());
   });
 
   it("自身不创建 dialog，因此可以嵌在分支 modal 的同一层里", async () => {

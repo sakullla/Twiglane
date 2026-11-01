@@ -57,7 +57,9 @@ export async function closeWindow(): Promise<void> {
   await win?.close();
 }
 
-/** 订阅最大化状态变化，返回取消订阅函数；Windows 自绘按钮靠它跟随系统状态。 */
+/** 订阅最大化状态变化，返回取消订阅函数；Windows 自绘按钮靠它跟随系统状态。
+ * 退订走 @tauri-apps/api 的 unlisten 命令，capabilities/default.json 已授予
+ * core:event:allow-unlisten；窗口销毁时监听由 Tauri 自动清理，不依赖退订。 */
 export async function watchWindowMaximized(
   handler: (maximized: boolean) => void,
 ): Promise<() => void> {

@@ -15,6 +15,13 @@ fn capabilities_do_not_grant_a_shell() {
         .collect();
     let expected = [
         "core:event:allow-listen",
+        "core:event:allow-unlisten",
+        "core:window:allow-start-dragging",
+        "core:window:allow-minimize",
+        "core:window:allow-toggle-maximize",
+        "core:window:allow-close",
+        "core:window:allow-is-maximized",
+        "core:window:allow-internal-toggle-maximize",
         "dialog:allow-open",
         "allow-detect-git",
         "allow-set-git-executable",
@@ -88,6 +95,58 @@ fn capabilities_do_not_grant_a_shell() {
     let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
     assert!(!cargo.contains("tauri-plugin-shell"));
     assert_source_has_no_shell(root.join("src").as_path());
+}
+
+/// macOS 需要原生装饰框承载交通灯，Windows 用自绘标题栏。平台覆盖文件由 Tauri 以 RFC 7396
+/// JSON Merge Patch 合并（`app.windows` 数组整体替换），所以这里直接调用 Tauri 的配置解析入口，
+/// 核对 macOS 与 Windows 构建各自拿到的最终窗口配置。
+#[test]
+fn window_config_is_frameless_on_windows_and_decorated_on_macos() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let macos = merged_window(root, tauri::utils::platform::Target::MacOS);
+    let windows = merged_window(root, tauri::utils::platform::Target::Windows);
+    assert_eq!(windows["label"].as_str(), Some("main"));
+    assert_eq!(
+        windows["decorations"].as_bool(),
+        Some(false),
+        "Windows 用自绘标题栏"
+    );
+    assert!(
+        windows.get("titleBarStyle").is_none(),
+        "macOS 专属字段不得出现在 Windows 生效配置里"
+    );
+    assert_eq!(
+        macos["decorations"].as_bool(),
+        Some(true),
+        "macOS 必须有装饰框，否则没有交通灯"
+    );
+    assert_eq!(macos["titleBarStyle"].as_str(), Some("Overlay"));
+    assert_eq!(macos["hiddenTitle"].as_bool(), Some(true));
+    for key in [
+        "title",
+        "width",
+        "height",
+        "minWidth",
+        "minHeight",
+        "resizable",
+        "fullscreen",
+    ] {
+        assert_eq!(
+            macos[key], windows[key],
+            "{key} 在 base 与 macOS 覆盖中必须一致：合并会整体替换 app.windows 数组"
+        );
+    }
+    for window in [&windows, &macos] {
+        serde_json::from_value::<tauri::utils::config::WindowConfig>(window.clone())
+            .expect("窗口配置必须被 Tauri 的窗口定义接受");
+    }
+}
+
+fn merged_window(root: &Path, target: tauri::utils::platform::Target) -> serde_json::Value {
+    let (config, paths) = tauri::utils::config::parse::read_from(target, root)
+        .unwrap_or_else(|error| panic!("{target} 配置无法解析: {error}"));
+    assert!(!paths.is_empty());
+    config["app"]["windows"][0].clone()
 }
 
 fn assert_source_has_no_shell(dir: &Path) {

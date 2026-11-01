@@ -331,14 +331,4 @@
     </div>
   {/if}
 
-  <div class="sidebar-foot rail-foot">
-    {#if !collapsed}
-      <div class="sidebar-foot-brand">
-        <span class="local-dot"></span>
-        <span>本地优先，无需登录</span>
-      </div>
-    {:else}
-      <span class="local-dot" title="本地优先，无需登录"></span>
-    {/if}
-  </div>
 </aside>

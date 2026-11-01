@@ -210,7 +210,7 @@
         <input id="remote-url" class="input code" bind:value={remoteUrl} placeholder="不包含令牌的 HTTPS、SSH 或本机路径" autocomplete="off" spellcheck="false" />
       </div>
     </div>
-    <p class="hint">本地查看和提交不需要登录研发平台。名称已存在时会更新地址，否则新增远程。</p>
+    <p class="hint">名称已存在时会更新地址，否则新增远程。</p>
     {#snippet footer()}
       <span class="spacer"></span>
       <button type="button" class="btn btn-secondary" onclick={onClose}>关闭</button>

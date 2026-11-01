@@ -386,7 +386,6 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".topbar": "标题栏底部横向分区线",
   ".infobar": "通知条底部横向分区线",
   ".workspace-nav": "侧栏导航组底部横向分区线",
-  ".sidebar-foot": "侧栏底部顶部横向分区线",
   ".files": "文件列表面板外框；行内交互由 .file-row 的选中竖条承担",
   ".view-title-line .count": "视图标题计数胶囊描边，纯装饰数字标记",
   ".sidebar-section .count": "侧栏分组计数胶囊描边，纯装饰数字标记",

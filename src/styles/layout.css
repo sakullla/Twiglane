@@ -162,9 +162,6 @@
 .repo-path bdi { direction: ltr; unicode-bidi: isolate; }
 .repo-actions { position: absolute; right: 5px; display: flex; gap: 0; opacity: 0; border-radius: 7px; background: var(--surface); box-shadow: -8px 0 10px var(--surface); transition: opacity var(--duration-fast) var(--ease); }
 .repo:hover .repo-actions, .repo:focus-within .repo-actions { opacity: 1; }
-.sidebar-foot { padding: 11px 13px 13px; border-top: 1px solid var(--border); }
-.sidebar-foot-brand { display: flex; align-items: center; gap: var(--space-8); padding: 0 3px 10px; color: var(--fg-subtle); font-size: var(--text-xs); }
-.sidebar-foot-brand .local-dot { width: 5px; height: 5px; }
 
 /* ---------- rail：导航组（改动、提交历史）+ 任务组（临时保存、分支合并、分支与标签、远程） ---------- */
 /* 宽度：展开跟随外壳的 --sidebar（新外壳不设该变量时即 240），折叠固定 56 只留图标。
@@ -179,7 +176,6 @@
 .rail-add { flex: 1; min-width: 0; }
 .rail-nav { padding: 0 var(--space-8) var(--space-8); }
 .rail-tasks { padding: var(--space-4) var(--space-8) var(--space-8); }
-.rail-foot { display: flex; align-items: center; }
 /* 合并进行中：与冲突计数分开的独立标记（冲突清零后仍在，R4 适用边界） */
 .rail-status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warning); box-shadow: 0 0 0 3px var(--warning-soft); flex: none; }
 .workspace-nav-item.merging .nav-icon { color: var(--warning-text); }
@@ -194,8 +190,6 @@
    曾把两者都写成 top:3/right:3，冲突数与进行中同时成立时圆点会盖住徽标右半，折叠态读不出数量。 */
 .sidebar.rail.collapsed .workspace-nav-item .count { position: absolute; top: 3px; right: 3px; height: 14px; min-width: 14px; padding: 0 3px; font-size: var(--text-xs); }
 .sidebar.rail.collapsed .workspace-nav-item .rail-status-dot { position: absolute; right: 3px; bottom: 3px; }
-.sidebar.rail.collapsed .sidebar-foot-brand { display: none; }
-.sidebar.rail.collapsed .rail-foot { justify-content: center; padding: var(--space-8) 0 var(--space-12); }
 .theme-switch { display: flex; width: 100%; }
 .theme-switch button { flex: 1; }
 .brand { display: flex; gap: 10px; align-items: center; min-width: 0; flex: 1; }

@@ -222,7 +222,6 @@
               <p class="hint">路径较多，这里只列出一部分。数量以上面的说明为准。</p>
             {/if}
           {/if}
-          <p class="hint">忽略文件不会保存。未勾选时，未跟踪文件也不进入这次临时保存。</p>
         </div>
         <div class="card-foot">
           <input
@@ -269,7 +268,6 @@
           <h2>已有记录</h2>
           {#if stash}<span class="count">{stash.records.length}</span>{/if}
           <span class="spacer"></span>
-          <span class="hint">恢复会保留记录；删除前会再次核验身份</span>
         </div>
         {#if stash && stash.records.length === 0}
           <div class="empty compact" role="status">
@@ -311,7 +309,6 @@
           {shortOid(confirmRecord.oid)} · {confirmRecord.message || "未填写说明"} · {formatAuthoredAt(confirmRecord.committedAt)}
         </li>
       </ul>
-      <p class="hint">确认时会再次核验这条记录的身份；身份不符时不会删除。</p>
       {#snippet footer()}
         <button type="button" class="btn btn-secondary" onclick={cancelDelete}>取消</button>
         <span class="spacer"></span>

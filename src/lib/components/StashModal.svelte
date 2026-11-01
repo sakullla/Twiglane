@@ -1,6 +1,5 @@
 <script lang="ts">
   import type { OpenedRepository, StatusSnapshot } from "../types";
-  import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
   import StashPanel from "./StashPanel.svelte";
 
@@ -40,7 +39,6 @@
     embedded
   />
   {#snippet footer()}
-    <span class="hint"><Icon name="check-circle" size={12} />主视图内容保持不变</span>
     <span class="spacer"></span>
     <button type="button" class="btn btn-secondary" onclick={onClose}>关闭</button>
   {/snippet}

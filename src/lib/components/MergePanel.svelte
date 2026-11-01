@@ -730,8 +730,6 @@
     {:else if session?.operation === "unmerged"}
       <span class="mp-status"><Icon name="info" size={13} />标记后的文件可以在改动区提交，临时保存记录不会被删除。</span>
       <button type="button" class="btn btn-ghost btn-sm" disabled={blocked} onclick={onOpenStash}>查看临时保存</button>
-    {:else if session?.operation === "none" && !finished}
-      <span class="mp-status"><Icon name="info" size={13} />只在本地操作，不会推送；有冲突时可以随时中止并恢复原样。</span>
     {/if}
     <span class="spacer"></span>
     {#if onClose}<button type="button" class="btn btn-secondary" onclick={onClose}>{finished ? "完成" : "关闭"}</button>{/if}

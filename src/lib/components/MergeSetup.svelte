@@ -206,7 +206,7 @@
           {:else}
             <strong>可以合并，没有冲突</strong>
           {/if}
-          <p>{preview.note}{#if preview.canStart && conflicts} 开始后会进入冲突编辑器逐处解决，随时可以中止并恢复原样。{/if}</p>
+          <p>{preview.note}{#if preview.canStart && conflicts} 开始后逐处解决，可随时中止。{/if}</p>
         </div>
         {#if previewing}<span class="spinner muted"></span>{/if}
       </div>

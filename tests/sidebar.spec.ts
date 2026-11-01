@@ -565,7 +565,6 @@ describe("外壳样式契约", () => {
           ".rail-add",
           ".rail-nav",
           ".rail-tasks",
-          ".rail-foot",
           ".rail-status-dot",
           ".collapsed",
           ".welcome-compact",

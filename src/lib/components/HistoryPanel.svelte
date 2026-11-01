@@ -730,7 +730,7 @@
         <div class="empty" role="status">
           <span class="empty-icon"><Icon name="commit" size={24} /></span>
           <strong>未选择提交</strong>
-          <p>选择左侧一条记录后，这里显示其中的文件和差异。查看不会改变当前分支、暂存区或工作区。</p>
+          <p>选择左侧一条记录查看文件和差异。</p>
         </div>
       {/if}
     </div>

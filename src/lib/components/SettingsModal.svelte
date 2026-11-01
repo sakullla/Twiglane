@@ -67,7 +67,6 @@
   titleId="settings-modal-title"
   size="lg"
   task="settings"
-  description="外观与运行环境集中在这里。"
   onClose={onClose}
 >
   <div class="card" data-settings-section="appearance">

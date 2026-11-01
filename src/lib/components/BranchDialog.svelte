@@ -329,7 +329,6 @@
   icon="branch"
   size="xl"
   task="branch"
-  description="分支、标签在同一层切换。切换分支成功后自动关闭。"
   {onClose}
 >
   <div class="branch-current">
@@ -606,7 +605,6 @@
     <ContextMenu request={menu} onClose={() => (menu = null)} />
   {/if}
   {#snippet footer()}
-    <span class="hint"><Icon name="check-circle" size={12} />{tab === "tags" ? "标签可直接定位到目标提交" : "切换成功后自动关闭"}</span>
     <span class="spacer"></span>
     <button type="button" class="btn btn-secondary" onclick={onClose}>关闭</button>
   {/snippet}

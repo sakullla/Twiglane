@@ -1854,6 +1854,7 @@
       {#snippet paneResizer()}
         <PaneResizer
           value={paneWidth}
+          saved={widths.files}
           label="调整侧栏宽度"
           fit={(width) => fitPaneWidth(width, windowWidth)}
           onResize={(width) => (widths = { ...widths, files: width })}

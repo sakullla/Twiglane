@@ -100,6 +100,7 @@
   let moreAnchor = $state<HTMLDivElement | null>(null);
   let moreButton = $state<HTMLButtonElement | null>(null);
   let section = $state<HTMLElement | null>(null);
+  let textarea = $state<HTMLTextAreaElement | null>(null);
   let menuStyle = $state("");
   let height = $state(readStoredHeight());
   /** 拖动中的显示高度：从按下时看到的高度起算，所以收起态开始拖也不会跳变。 */
@@ -171,7 +172,8 @@
   function maxHeight(): number {
     const panel = section?.parentElement;
     if (!panel || !section || panel.clientHeight === 0) return MESSAGE_HEIGHT_MAX;
-    const chrome = section.offsetHeight - shownHeight;
+    // 两个值都从 DOM 读：状态刚切换、DOM 还没更新时，用状态相减会把提交区其余部分算错。
+    const chrome = section.offsetHeight - (textarea?.offsetHeight || shownHeight);
     return panel.clientHeight - chrome - FILE_LIST_RESERVE;
   }
 
@@ -213,16 +215,14 @@
     };
     const up = () => {
       const final = dragHeight ?? startHeight;
-      dragHeight = null;
       handle.removeEventListener("pointermove", move);
       handle.removeEventListener("pointerup", up);
       handle.removeEventListener("pointercancel", up);
-      // 没拖动或收起态往下拖：布局不变，也不改写记住的高度。
-      if (!moved || (fromCompact && final <= startHeight)) {
-        active = wasActive;
-        return;
-      }
-      setHeight(final);
+      // 净变化为 0，或收起态没拖到最小高度：按点击处理，布局和记住的高度都不变。
+      const committed = final !== startHeight && !(fromCompact && final < MESSAGE_HEIGHT_MIN);
+      if (committed) setHeight(final);
+      else active = wasActive;
+      dragHeight = null;
     };
     handle.addEventListener("pointermove", move);
     handle.addEventListener("pointerup", up);
@@ -323,6 +323,7 @@
       aria-label="提交说明草稿"
       placeholder="提交说明（第一行是摘要）"
       spellcheck="false"
+      bind:this={textarea}
       style={`height:${shownHeight}px`}
       {value}
       disabled={disabled}

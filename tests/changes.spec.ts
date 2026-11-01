@@ -809,6 +809,24 @@ describe("主工作台", () => {
     expect(workspace.style.getPropertyValue("--files")).toBe("360px");
   });
 
+  it("拖走再拖回原位不改写保存值，窗口放宽后回到原宽度", async () => {
+    resizeTo(900);
+    renderApp();
+    await openRepo();
+    const workspace = document.querySelector<HTMLElement>(".workspace")!;
+    const slider = screen.getByRole("slider", { name: "调整侧栏宽度" });
+    await fireEvent.pointerDown(slider, { clientX: 340, pointerId: 1 });
+    await fireEvent.pointerMove(slider, { clientX: 300, pointerId: 1 });
+    expect(workspace.style.getPropertyValue("--files")).toBe("300px");
+    await fireEvent.pointerMove(slider, { clientX: 340, pointerId: 1 });
+    await fireEvent.pointerUp(slider, { clientX: 340, pointerId: 1 });
+    await tick();
+    expect(mocks.setPanelWidths, "净变化为 0 不提交").not.toHaveBeenCalled();
+    resizeTo(1280);
+    await tick();
+    expect(workspace.style.getPropertyValue("--files"), "内存里的宽度也要恢复").toBe("360px");
+  });
+
   it("没有仓库时 ⌘B 不改写左栏状态，打开仓库后左栏可见", async () => {
     renderApp();
     await waitFor(() => expect(document.querySelector(".welcome-recent button")).toBeTruthy());

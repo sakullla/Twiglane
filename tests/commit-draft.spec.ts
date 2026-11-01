@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/svelte";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { tick } from "svelte";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTextDiff } from "../src/lib/diff";
 import { hasCommitSummary } from "../src/lib/ui";
 import CommitDraft, {
@@ -10,6 +11,28 @@ import CommitDraft, {
   clampMessageHeight,
 } from "../src/lib/components/CommitDraft.svelte";
 import DiffView from "../src/lib/components/DiffView.svelte";
+
+/** 提交区除说明框外的高度和面板高度：上限 = 面板 − 其余部分 − 文件列表保留的 300。 */
+const LAYOUT_CHROME = 118;
+const LAYOUT_PANEL = 772;
+const LAYOUT_LIMIT = LAYOUT_PANEL - LAYOUT_CHROME - 300;
+
+/**
+ * happy-dom 没有布局，clientHeight 恒为 0 时上限计算直接跳过，问题看不出来。
+ * 这里让尺寸跟着说明框已渲染的 style 走，与真实 DOM 一样：状态变了、DOM 没刷新时读到的还是旧值。
+ */
+function mockLayout(panel = LAYOUT_PANEL) {
+  vi.restoreAllMocks();
+  const textareaHeight = (element: HTMLElement) =>
+    Number.parseFloat(element.querySelector("textarea")?.style.height ?? "0");
+  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+    if (this instanceof HTMLTextAreaElement) return Number.parseFloat(this.style.height);
+    return this.matches(".composer") ? LAYOUT_CHROME + textareaHeight(this) : 0;
+  });
+  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+    return this.querySelector(":scope > .composer") ? panel : 0;
+  });
+}
 
 function renderDraft(extra: Record<string, unknown> = {}) {
   const onInput = vi.fn();
@@ -35,6 +58,8 @@ function renderDraft(extra: Record<string, unknown> = {}) {
 
 const message = () => screen.getByRole("textbox", { name: "提交说明草稿" }) as HTMLTextAreaElement;
 const handle = () => screen.getByRole("separator", { name: "调整提交说明高度" });
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("提交区", () => {
   beforeEach(() => localStorage.clear());
@@ -163,13 +188,86 @@ describe("提交区", () => {
     expect(localStorage.getItem("twiglane.commitMessageHeight")).toBe("240");
   });
 
-  it("收起态拖一小段，松手落到最小高度并保持可见", async () => {
+  it("收起态上拖没到最小高度按点击处理：恢复收起，不改写记住的高度", async () => {
+    localStorage.setItem("twiglane.commitMessageHeight", "240");
     renderDraft();
+    for (const clientY of [496, 490, 481]) {
+      await fireEvent.pointerDown(handle(), { button: 0, clientY: 500, pointerId: 1 });
+      await fireEvent.pointerMove(handle(), { clientY, pointerId: 1 });
+      expect(message().style.height).toBe(`${MESSAGE_HEIGHT_COMPACT + 500 - clientY}px`);
+      await fireEvent.pointerUp(handle(), { clientY, pointerId: 1 });
+      expect(message().style.height, `上拖 ${500 - clientY}px`).toBe(`${MESSAGE_HEIGHT_COMPACT}px`);
+      expect(localStorage.getItem("twiglane.commitMessageHeight")).toBe("240");
+    }
+  });
+
+  it("收起态刚好拖到最小高度时算一次调整", async () => {
+    renderDraft();
+    const clientY = 500 - (MESSAGE_HEIGHT_MIN - MESSAGE_HEIGHT_COMPACT);
     await fireEvent.pointerDown(handle(), { button: 0, clientY: 500, pointerId: 1 });
-    await fireEvent.pointerMove(handle(), { clientY: 490, pointerId: 1 });
-    expect(message().style.height).toBe(`${MESSAGE_HEIGHT_COMPACT + 10}px`);
-    await fireEvent.pointerUp(handle(), { clientY: 490, pointerId: 1 });
+    await fireEvent.pointerMove(handle(), { clientY, pointerId: 1 });
+    await fireEvent.pointerUp(handle(), { clientY, pointerId: 1 });
     expect(message().style.height).toBe(`${MESSAGE_HEIGHT_MIN}px`);
+    expect(localStorage.getItem("twiglane.commitMessageHeight")).toBe(String(MESSAGE_HEIGHT_MIN));
+  });
+
+  it("窗口收紧过的高度上拖动再拖回原位，不把收紧值写成偏好", async () => {
+    mockLayout();
+    localStorage.setItem("twiglane.commitMessageHeight", "500");
+    renderDraft({ value: "草稿" });
+    expect(message().style.height).toBe(`${LAYOUT_LIMIT}px`);
+    await fireEvent.pointerDown(handle(), { button: 0, clientY: 500, pointerId: 1 });
+    await fireEvent.pointerMove(handle(), { clientY: 540, pointerId: 1 });
+    await fireEvent.pointerMove(handle(), { clientY: 500, pointerId: 1 });
+    await fireEvent.pointerUp(handle(), { clientY: 500, pointerId: 1 });
+    expect(localStorage.getItem("twiglane.commitMessageHeight")).toBe("500");
+  });
+
+  describe("真实布局尺寸下的上限", () => {
+    /** 拖到目标高度再松手：松手值和保存值都必须等于松手前的显示值。 */
+    async function dragTo(target: number, startHeight: number) {
+      await fireEvent.pointerDown(handle(), { button: 0, clientY: 600, pointerId: 1 });
+      await fireEvent.pointerMove(handle(), { clientY: 600 - (target - startHeight), pointerId: 1 });
+      const before = message().style.height;
+      await fireEvent.pointerUp(handle(), { clientY: 600 - (target - startHeight), pointerId: 1 });
+      await tick();
+      expect(message().style.height, `拖到 ${target}`).toBe(before);
+      expect(`${localStorage.getItem("twiglane.commitMessageHeight")}px`).toBe(before);
+      return before;
+    }
+
+    beforeEach(() => mockLayout());
+
+    for (const target of [156, 236, 262, 304, 316, LAYOUT_LIMIT]) {
+      it(`收起态拖到 ${target}，松手值和保存值都不变`, async () => {
+        renderDraft();
+        expect(await dragTo(target, MESSAGE_HEIGHT_COMPACT)).toBe(`${target}px`);
+      });
+
+      it(`有草稿时拖到 ${target}，松手值和保存值都不变`, async () => {
+        renderDraft({ value: "草稿" });
+        expect(await dragTo(target, MESSAGE_HEIGHT_DEFAULT)).toBe(`${target}px`);
+      });
+    }
+
+    it("拖过上限时停在上限，松手不回退", async () => {
+      renderDraft({ value: "草稿" });
+      expect(await dragTo(LAYOUT_LIMIT + 200, MESSAGE_HEIGHT_DEFAULT)).toBe(`${LAYOUT_LIMIT}px`);
+    });
+
+    it("矮窗口上限更低时同样不回退", async () => {
+      mockLayout(532);
+      renderDraft();
+      expect(await dragTo(114, MESSAGE_HEIGHT_COMPACT)).toBe("114px");
+    });
+
+    it("收起态双击按展开后的尺寸计算上限，不会超过上限", async () => {
+      mockLayout(500);
+      localStorage.setItem("twiglane.commitMessageHeight", "60");
+      renderDraft();
+      await fireEvent.dblClick(handle());
+      expect(message().style.height).toBe("82px");
+    });
   });
 
   it("收起态双击恢复默认高度，结果看得见", async () => {

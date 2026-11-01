@@ -713,3 +713,29 @@ label.list-row .checkbox { margin-top: 2px; }
 .merge-complete-warning, .merge-complete-ready { display: flex; align-items: center; gap: 5px; margin-top: 9px; font-size: 9.5px; }
 .merge-complete-warning { color: var(--warning-text); }
 .merge-complete-ready { color: var(--accent-text); }
+
+/* ==========================================================================
+   T5 · 工作台编排
+   只新增修饰类，不改上面任何既有规则：密度与溢出菜单都挂在 .dense/.compact 上，
+   基础层（T1）的取值保持不变。
+   ========================================================================== */
+
+/* 提交区（R5）：默认高度 ≤200px。收紧内边距、间距与输入框起始高度。 */
+.composer.compact { gap: var(--space-6); padding: var(--space-8) var(--space-12); }
+.composer.compact .composer-box textarea { min-height: 52px; }
+.composer.compact .composer-heading strong { font-size: 10px; }
+.composer-scope { gap: var(--space-4); color: var(--fg-muted); flex: none; }
+.composer-more-menu { min-width: 208px; }
+.composer-more-menu .icon-btn { width: 30px; height: 30px; }
+
+/* 溢出菜单里的动作行：撤销提交、放弃修改由外壳注入，排成一行图标按钮。 */
+.menu-row { display: flex; align-items: center; gap: var(--space-6); padding: var(--space-4) var(--space-8) var(--space-6); }
+.menu-row > .menu-row-title { flex: 1; min-width: 0; color: var(--fg-subtle); font-size: var(--text-xs); }
+
+/* 差异密度（R3）：与 DiffView 里的 ROW_HEIGHT=16 配套，两处必须同步。 */
+.diff.dense .diff-toolbar { min-height: 34px; padding: 0 var(--space-8) 0 var(--space-12); }
+.diff.dense .diff-line, .diff.dense .side-row { line-height: 16px; font-size: 11px; }
+.diff.dense .diff-line { grid-template-columns: 40px 40px minmax(0, 1fr) auto; }
+.diff.dense .diff-line .ln, .diff.dense .side-cell .ln { height: 16px; font-size: 9.5px; }
+.diff.dense .diff-line .code { padding-left: var(--space-8); padding-right: var(--space-8); }
+.diff.dense .hunk-btn { height: 14px; padding: 0 var(--space-4); font-size: 9px; }

@@ -17,7 +17,12 @@
     onFileHistory?: (path: string) => void;
   }
 
-  const ROW_HEIGHT = 22;
+  /**
+   * 行高 16px 是 R3 的硬约束：1280×840 下要让同屏差异至少完全可见 40 行。
+   * 22px 的行高在扣掉标题栏、状态栏、差异工具栏与留白后只能放进 30 行左右，
+   * 因此密度由这里和 `components.css` 的 `.diff.dense` 一起决定，两处必须同步。
+   */
+  const ROW_HEIGHT = 16;
 
   let {
     selection,
@@ -95,7 +100,7 @@
   }
 </script>
 
-<section class="diff" aria-label="差异详情">
+<section class="diff dense" aria-label="差异详情">
   <div class="diff-toolbar">
     <div class="diff-file">
       {#if selection && parts}
@@ -148,7 +153,6 @@
     <div class="empty">
       <span class="empty-icon"><Icon name="file-diff" size={24} /></span>
       <strong>选择一个文件查看差异</strong>
-      <p>用 ↑ ↓ 在列表中移动，空格暂存或取消暂存，双击也可以切换。</p>
     </div>
   {:else if loading && !currentDiff}
     <div class="empty" role="status" aria-busy="true">
@@ -159,14 +163,14 @@
   {:else if currentDiff?.binary}
     <div class="empty" role="status">
       <span class="empty-icon"><Icon name="file" size={24} /></span>
-      <strong>二进制文件</strong>
-      <p>{selection.path} 有变动，但不能按文本预览，因此这里不显示伪差异。</p>
+      <strong>二进制文件有变动</strong>
+      <p>{selection.path}</p>
     </div>
   {:else if !currentDiff || (currentDiff.lines.length === 0 && currentDiff.totalLines === 0)}
     <div class="empty" role="status">
       <span class="empty-icon"><Icon name="file" size={24} /></span>
       <strong>没有文本差异</strong>
-      <p>{selection.path} 当前这一侧没有可显示的文本差异。</p>
+      <p>{selection.path}</p>
     </div>
   {:else}
     <div
@@ -185,7 +189,7 @@
         {#if mode === "unified"}
           {#each lines.slice(range.start, range.end) as line, index (`u-${range.start + index}`)}
             {@const absolute = range.start + index}
-            <div class={lineClass(line.kind)} style={`top:${absolute * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}>
+            <div class={lineClass(line.kind)} data-diff-row="" style={`top:${absolute * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}>
               <span class="ln">{line.oldNo ?? ""}</span>
               <span class="ln">{line.newNo ?? ""}</span>
               <span class="code">{line.text.length === 0 ? " " : line.text}</span>
@@ -206,7 +210,7 @@
         {:else}
           {#each sideRows.slice(range.start, range.end) as row, index (`s-${range.start + index}`)}
             {@const absolute = range.start + index}
-            <div class="side-row" class:span={row.span} style={`top:${absolute * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}>
+            <div class="side-row" class:span={row.span} data-diff-row="" style={`top:${absolute * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}>
               <span class={`side-cell ${row.left?.kind ?? "empty"}`}>
                 {#if row.left}<span class="ln">{row.left.no ?? ""}</span><span class="code">{row.left.text}</span>{/if}
               </span>
@@ -232,7 +236,7 @@
     </div>
     {#if currentDiff.offset + currentDiff.lines.length < currentDiff.totalLines}
       <div class="diff-more">
-        <p class="hint">已显示 {currentDiff.lines.length} / {currentDiff.totalLines} 行。长差异按窗口读取，未显示的截断代码块不能部分暂存。</p>
+        <p class="hint">已显示 {currentDiff.lines.length} / {currentDiff.totalLines} 行。</p>
         <button type="button" class="btn btn-secondary btn-sm" disabled={disabled || loading} onclick={onLoadMore}>继续加载</button>
       </div>
     {/if}

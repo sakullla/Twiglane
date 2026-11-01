@@ -1,5 +1,8 @@
 export type Theme = "light" | "dark" | "system";
-export type WorkspaceView = "changes" | "history" | "stash" | "merge";
+/** 主视图只有两个：改动与提交历史。临时保存、合并等低频任务进 modal 槽位。 */
+export type WorkspaceView = "changes" | "history";
+/** 单槽 modal 的七个任务入口（data-task-modal 的取值集合就由它决定）。 */
+export type TaskModal = "stash" | "merge" | "branch" | "remote" | "settings" | "scope" | "publish";
 
 export type ChangeKind =
   | "none"

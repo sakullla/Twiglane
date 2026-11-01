@@ -1,13 +1,21 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, listenEvent, pickDirectory, pickFile } from "./lib/api";
-  import { MODIFIER_LABEL } from "./lib/brand";
+  import {
+    commandAvailable,
+    commandById,
+    commandReason,
+    OVERFLOW_COMMAND_IDS,
+    paletteItems,
+    type CommandState,
+  } from "./lib/commands";
   import { finishDiffAttempt } from "./lib/diff";
   import { DraftBuffer } from "./lib/draft";
   import { normalizeError } from "./lib/errors";
   import { clampWidth, FALLBACK_POLL_MS, nudgeWidth, shouldPoll } from "./lib/layout";
   import { branchLabel, commitScope, dependencyNote, gitInstallHint, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
   import { startDesktopMeasure } from "./lib/measure";
+  import { shortcutCommand } from "./lib/shortcuts";
   import type {
     AppFailure,
     DiffHunk,
@@ -19,21 +27,52 @@
     RecentRepo,
     RepoChanged,
     StatusSnapshot,
+    TaskModal,
     Theme,
     WorkspaceView,
   } from "./lib/types";
   import { hueOf, initialOf } from "./lib/ui";
+  import BranchDialog from "./lib/components/BranchDialog.svelte";
+  import CommandPalette from "./lib/components/CommandPalette.svelte";
   import CommitDraft from "./lib/components/CommitDraft.svelte";
-  import Icon from "./lib/components/Icon.svelte";
-  import Welcome from "./lib/components/Welcome.svelte";
   import DetailDialog from "./lib/components/DetailDialog.svelte";
   import DiffView from "./lib/components/DiffView.svelte";
   import FileList from "./lib/components/FileList.svelte";
+  import Icon from "./lib/components/Icon.svelte";
+  import MergeModal from "./lib/components/MergeModal.svelte";
+  import PublishModal from "./lib/components/PublishModal.svelte";
   import RecoveryActions from "./lib/components/RecoveryActions.svelte";
   import RepoDialogs from "./lib/components/RepoDialogs.svelte";
-  import RepoSidebar from "./lib/components/RepoSidebar.svelte";
+  import ScopeModal from "./lib/components/ScopeModal.svelte";
+  import SettingsModal from "./lib/components/SettingsModal.svelte";
+  import StashModal from "./lib/components/StashModal.svelte";
+  import StatusBar from "./lib/components/StatusBar.svelte";
+  import TitleBar from "./lib/components/TitleBar.svelte";
+  import Welcome from "./lib/components/Welcome.svelte";
+  import WorkspaceRail from "./lib/components/WorkspaceRail.svelte";
 
-  let theme = $state<Theme>("light");
+  /* 外观：三态选择 + 系统解析。documentElement 上只写 light / dark，
+     "system" 由 matchMedia 解析，并跟随系统变化（R14/T2 的 Theme 收口在这里）。 */
+  const DARK_QUERY = "(prefers-color-scheme: dark)";
+
+  function systemPrefersDark(): boolean {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return true;
+    return window.matchMedia(DARK_QUERY).matches;
+  }
+
+  function resolveTheme(choice: Theme, systemDark: boolean): "light" | "dark" {
+    if (choice === "system") return systemDark ? "dark" : "light";
+    return choice;
+  }
+
+  let systemDark = $state(systemPrefersDark());
+  let theme = $state<Theme>("dark");
+  let resolvedTheme = $derived(resolveTheme(theme, systemDark));
+
+  $effect(() => {
+    if (typeof document !== "undefined") document.documentElement.dataset.theme = resolvedTheme;
+  });
+
   let widths = $state<PanelWidths>({ sidebar: 256, files: 360 });
   let recent = $state<RecentRepo[]>([]);
   let query = $state("");
@@ -53,14 +92,12 @@
   let readPhase: "idle" | "reading" | "settled" = "idle";
   let dependencyOpen = $state(false);
   let historyPanel = $state<Promise<typeof import("./lib/components/HistoryPanel.svelte")> | null>(null);
-  let mergePanel = $state<Promise<typeof import("./lib/components/MergePanel.svelte")> | null>(null);
-  let stashPanel = $state<Promise<typeof import("./lib/components/StashPanel.svelte")> | null>(null);
   let writeLocked = $derived(pending !== null || reading);
   let navCollapsed = $state(false);
   let repoMenuOpen = $state(false);
   let repoMenuAnchor = $state<HTMLDivElement | null>(null);
   let confirmPath = $state<string | null>(null);
-  let dialog = $state<"clone" | "remote" | "branch" | null>(null);
+  let cloneOpen = $state(false);
   let pushRetry = $state(false);
   let phaseNote = $state<string | null>(null);
   let degraded = $state(false);
@@ -72,6 +109,10 @@
   let conflictFocus = $state<string | null>(null);
   let historyPath = $state<string | null>(null);
   let historyQuery = $state("");
+  let taskModal = $state<TaskModal | null>(null);
+  let paletteOpen = $state(false);
+  let mergeInProgress = $state(false);
+  let remoteName = $state<string | null>(null);
   const drafts = new DraftBuffer();
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -82,6 +123,10 @@
   let behind = $derived(opened?.snapshot.branch.behind ?? 0);
   let changeCount = $derived(opened?.snapshot.files.length ?? 0);
   let conflictCount = $derived(opened?.snapshot.files.filter((file) => file.unmerged).length ?? 0);
+  let upstreamMissing = $derived(opened ? !opened.snapshot.branch.upstream : false);
+  let syncPending = $derived<"fetch" | "pull" | "push" | null>(
+    pending === "fetch" || pending === "pull" || pending === "push" ? pending : null,
+  );
   let remoteState = $derived(
     !opened
       ? "off"
@@ -91,19 +136,35 @@
           ? "stale"
           : "off",
   );
-  const VIEWS = [
-    { id: "changes", label: "改动", icon: "file-diff" },
-    { id: "history", label: "提交历史", icon: "history" },
-    { id: "stash", label: "临时保存", icon: "archive" },
-    { id: "merge", label: "分支合并", icon: "merge" },
-  ] as const;
-  const VIEW_DETAILS: Record<WorkspaceView, { title: string; description: string }> = {
-    changes: { title: "工作区改动", description: "查看差异、整理暂存，再完成一个清晰的提交。" },
-    history: { title: "提交历史", description: "沿着提交记录，理解项目每一次变化。" },
-    stash: { title: "临时保存", description: "收起未完成的工作，随时回来继续。" },
-    merge: { title: "分支合并", description: "预览合并影响，逐一处理每一处冲突。" },
-  };
-  let viewInfo = $derived(VIEW_DETAILS[workspaceView]);
+
+  /* 命令注册表的唯一状态输入：标题栏、rail、溢出菜单与命令面板都读这一份。 */
+  let commandState = $derived<CommandState>({
+    hasRepo: opened !== null,
+    workspaceView,
+    taskModal,
+    navCollapsed,
+    writeLocked,
+    upstreamMissing,
+    stagedCount: scope.paths.length,
+    draft,
+    theme,
+  });
+  let paletteCommands = $derived(
+    paletteItems(commandState).map((item) => ({
+      id: item.id,
+      group: item.group,
+      title: item.title,
+      shortcut: item.shortcut,
+      enabled: item.enabled,
+      reason: item.reason,
+      run: () => runCommand(item.id),
+    })),
+  );
+  let overflowCommands = $derived(
+    OVERFLOW_COMMAND_IDS.map((id) => commandById(id)).filter(
+      (command): command is NonNullable<typeof command> => Boolean(command),
+    ),
+  );
 
   $effect(() => {
     if (!repoMenuOpen) return;
@@ -135,6 +196,12 @@
     return requestSerial;
   }
 
+  function notice(message: string) {
+    phaseNote = message;
+    live = message;
+    banner = null;
+  }
+
   function showError(error: unknown) {
     const failure = error as AppFailure;
     const normalized = failure?.message ? failure : normalizeError(error);
@@ -144,7 +211,118 @@
 
   function applyTheme(next: Theme) {
     theme = next;
-    document.documentElement.dataset.theme = next;
+    // 首帧与测量钩子都要立即拿到解析结果，因此这里同步写一次；$effect 继续承担系统变化。
+    if (typeof document !== "undefined") document.documentElement.dataset.theme = resolveTheme(next, systemDark);
+  }
+
+  /** 命令执行的唯一入口：四个入口都调它，结果因此一致（R11）。 */
+  function runCommand(id: string) {
+    switch (id) {
+      case "view.changes":
+        showChanges();
+        return;
+      case "view.history":
+        showHistory();
+        return;
+      case "view.refresh":
+        void refresh();
+        return;
+      case "task.stash":
+      case "task.merge":
+      case "task.branch":
+      case "task.remote":
+      case "task.scope":
+      case "task.publish":
+      case "task.settings":
+        openTask(id.slice(5) as TaskModal);
+        return;
+      case "commit.local":
+        void commitLocal();
+        return;
+      case "commit.push":
+        void commitAndPush();
+        return;
+      case "sync.fetch":
+        void runSync("fetch", (path, generation) => api.fetchRemote(path, generation, nextId()));
+        return;
+      case "sync.pull":
+        void runSync("pull", (path, generation) => api.pullFastForward(path, generation, nextId()));
+        return;
+      case "sync.push":
+        void runSync("push", (path, generation) => api.pushBranch(path, generation, nextId()));
+        return;
+      case "rail.toggle":
+        navCollapsed = !navCollapsed;
+        return;
+      case "palette.open":
+        openPalette();
+        return;
+      case "repo.add":
+        void addRepo();
+        return;
+      case "repo.clone":
+        openClone();
+        return;
+      case "repo.create":
+        void chooseCreate();
+        return;
+      case "theme.light":
+      case "theme.dark":
+      case "theme.system":
+        void changeTheme(id.slice(6) as Theme);
+        return;
+      case "dialog.dependencies":
+        dependencyOpen = true;
+        return;
+      default:
+        return;
+    }
+  }
+
+  /** 七个任务入口共用单槽：任一时刻只有一个任务 modal。 */
+  function openTask(task: TaskModal) {
+    if (task !== "settings" && !opened) return;
+    repoMenuOpen = false;
+    cloneOpen = false;
+    paletteOpen = false;
+    taskModal = task;
+    if (task === "merge") void probeMerge();
+    if (task === "publish") void loadRemoteName();
+  }
+
+  /** 发布目标取仓库实际配置的第一个远程，而不是写死 origin。 */
+  async function loadRemoteName() {
+    const current = opened;
+    if (!current) return;
+    try {
+      const result = await api.remoteState(current.summary.path, current.generation, nextId());
+      if (opened?.summary.path !== current.summary.path) return;
+      remoteName = result.remotes[0]?.name ?? null;
+    } catch {
+      if (opened?.summary.path === current.summary.path) remoteName = null;
+    }
+  }
+
+  function closeTask() {
+    const closed = taskModal;
+    taskModal = null;
+    if (closed === "merge") {
+      conflictFocus = null;
+      void probeMerge();
+    }
+  }
+
+  function openClone() {
+    if (writeLocked) return;
+    taskModal = null;
+    paletteOpen = false;
+    cloneOpen = true;
+  }
+
+  function openPalette() {
+    if (taskModal || cloneOpen) return;
+    repoMenuOpen = false;
+    paletteOpen = true;
   }
 
   async function loadSettings() {
@@ -164,6 +342,21 @@
     }
   }
 
+  async function probeMerge() {
+    const current = opened;
+    if (!current) {
+      mergeInProgress = false;
+      return;
+    }
+    try {
+      const session = await api.mergeSession(current.summary.path, current.generation, nextId());
+      if (opened?.summary.path !== current.summary.path) return;
+      mergeInProgress = session.operation === "merge" || session.canAbort;
+    } catch {
+      if (opened?.summary.path === current.summary.path) mergeInProgress = false;
+    }
+  }
+
   function rememberOpened(next: OpenedRepository) {
     if (draftTimer) clearTimeout(draftTimer);
     drafts.load(next.summary.path, next.draft);
@@ -180,11 +373,18 @@
     workspaceView = "changes";
     historyPath = null;
     historyQuery = "";
+    taskModal = null;
+    paletteOpen = false;
+    cloneOpen = false;
+    repoMenuOpen = false;
+    conflictFocus = null;
+    remoteName = null;
     recent = [
       { name: next.summary.name, path: next.summary.path, openedAtMs: Date.now() },
       ...recent.filter((repo) => repo.path !== next.summary.path),
     ];
     live = `已打开 ${next.summary.name}`;
+    void probeMerge();
     void loadSelectedDiff();
   }
 
@@ -282,20 +482,12 @@
   function useView(view: WorkspaceView) {
     workspaceView = view;
     if (view === "history") historyPanel ??= import("./lib/components/HistoryPanel.svelte");
-    if (view === "merge") mergePanel ??= import("./lib/components/MergePanel.svelte");
-    if (view === "stash") stashPanel ??= import("./lib/components/StashPanel.svelte");
   }
 
   function showHistory() {
     historyPath = null;
     historyQuery = "";
     useView("history");
-  }
-
-  function navigate(view: WorkspaceView) {
-    if (view === "changes") showChanges();
-    else if (view === "history") showHistory();
-    else useView(view);
   }
 
   function openFileHistory(path: string) {
@@ -312,8 +504,7 @@
 
   function openConflict(path: string) {
     conflictFocus = path;
-    historyPath = null;
-    useView("merge");
+    openTask("merge");
   }
 
   function applySnapshot(snapshot: StatusSnapshot) {
@@ -322,6 +513,11 @@
     opened = { ...opened, snapshot, generation: snapshot.generation };
     selected = selectionAfterEdit(snapshot.files, previous);
     void loadSelectedDiff();
+  }
+
+  function mergeSnapshot(snapshot: StatusSnapshot) {
+    applySnapshot(snapshot);
+    void probeMerge();
   }
 
   function handleMutationError(error: unknown) {
@@ -688,6 +884,10 @@
         degraded = false;
         workspaceView = "changes";
         historyPath = null;
+        taskModal = null;
+        cloneOpen = false;
+        paletteOpen = false;
+        mergeInProgress = false;
       }
     } catch (error) {
       showError(error);
@@ -697,9 +897,7 @@
   async function copyPath(path: string) {
     try {
       await navigator.clipboard.writeText(path);
-      phaseNote = "已复制仓库完整路径。";
-      live = phaseNote;
-      banner = null;
+      notice("已复制仓库完整路径。");
     } catch {
       showError(new Error("无法写入剪贴板，请手动复制仓库路径。"));
     }
@@ -807,6 +1005,23 @@
     void persistWidths();
   }
 
+  /** 键盘层：把按键翻成命令 id，再走与四个入口相同的 runCommand。 */
+  function onWindowKeydown(event: KeyboardEvent) {
+    if (paletteOpen) return;
+    if (taskModal !== null || cloneOpen || dependencyOpen || confirmPath !== null) return;
+    const id = shortcutCommand(event);
+    if (!id) return;
+    event.preventDefault();
+    const command = commandById(id);
+    if (!command) return;
+    if (!commandAvailable(command, commandState)) {
+      const reason = commandReason(command, commandState);
+      if (reason) notice(reason);
+      return;
+    }
+    runCommand(id);
+  }
+
   function sleep(ms: number) {
     return new Promise<void>((resolve) => setTimeout(resolve, ms));
   }
@@ -892,6 +1107,11 @@
     return selected ? `${selected.side}:${selected.path}` : "";
   }
 
+  function paletteInput(): HTMLElement | null {
+    const input = document.getElementById("palette-input");
+    return input instanceof HTMLElement ? input : null;
+  }
+
   async function feedbackSamples(count: number, plan?: { cloneUrl?: string; cloneParent?: string }) {
     const samples: number[] = [];
     const operations: string[] = [];
@@ -932,10 +1152,10 @@
     themes.push(document.documentElement.dataset.theme ?? "");
     await changeTheme("dark");
     themes.push(document.documentElement.dataset.theme ?? "");
-    const search = document.getElementById("repo-search");
-    if (document.activeElement === search && search instanceof HTMLElement) search.blur();
+    // ⌘K 现在打开命令面板：焦点落在面板搜索框，Esc 之后回到主界面。
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, ctrlKey: true, bubbles: true }));
-    const shortcutFocused = Boolean(search && document.activeElement === search);
+    const shortcutFocused = Boolean(paletteInput()) && document.activeElement === paletteInput();
+    paletteOpen = false;
     const list = document.querySelector<HTMLElement>(".file-list");
     const before = selectionKey();
     list?.focus();
@@ -968,14 +1188,13 @@
 
   async function cancelDuringOpen(slowRepo: string, nextRepo: string) {
     const normalizePath = (value: string) => value.replace(/\/+$/, "").replace(/^\/private/, "");
-    const search = document.getElementById("repo-search");
     const opening = openRecent(slowRepo);
     const sawRead = await waitUntilRepositoryRead(opening);
     let keyboard = false;
     if (sawRead && readPhase === "reading") {
-      if (document.activeElement === search && search instanceof HTMLElement) search.blur();
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, ctrlKey: true, bubbles: true }));
-      keyboard = Boolean(search && document.activeElement === search && readPhase === "reading");
+      keyboard = Boolean(paletteInput()) && document.activeElement === paletteInput() && readPhase === "reading";
+      paletteOpen = false;
       const cancelButton = [...document.querySelectorAll("button")].find((button) => button.textContent?.includes("取消读取"));
       if (cancelButton instanceof HTMLButtonElement && !cancelButton.disabled && readPhase === "reading") cancelButton.click();
       else await cancelReading();
@@ -1058,7 +1277,7 @@
     live = "正在合并";
     const session = await api.startMerge(current.summary.path, source, current.generation, nextId());
     applySnapshot(session.snapshot);
-    useView("merge");
+    openTask("merge");
     const conflict = session.conflicts[0];
     if (!conflict) throw new Error("没有出现冲突");
     await api.conflictView(current.summary.path, conflict.path, session.generation, nextId());
@@ -1076,40 +1295,23 @@
     return done.oid;
   }
 
-  function focusSearch(event: KeyboardEvent) {
-    const key = event.key.toLowerCase();
-    if ((event.metaKey || event.ctrlKey) && key === "k") {
-      event.preventDefault();
-      document.getElementById("repo-search")?.focus();
-      return;
-    }
-    if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !confirmPath) {
-      event.preventDefault();
-      void commitLocal();
-      return;
-    }
-    if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && /^[1-4]$/.test(event.key) && opened) {
-      event.preventDefault();
-      const view = VIEWS[Number(event.key) - 1].id;
-      if (view === "changes") showChanges();
-      else if (view === "history") showHistory();
-      else useView(view);
-      return;
-    }
-    if ((event.metaKey || event.ctrlKey) && key === "b" && !event.altKey && !event.shiftKey) {
-      event.preventDefault();
-      navCollapsed = !navCollapsed;
-    }
-  }
-
   onMount(() => {
     let stopFocus = () => {};
     let stopBlur = () => {};
     let stopRepo = () => {};
     let stopCommit = () => {};
     let stopSearch = () => {};
-    const keyListener = (event: KeyboardEvent) => focusSearch(event);
+    let stopMedia = () => {};
+    const keyListener = (event: KeyboardEvent) => onWindowKeydown(event);
     window.addEventListener("keydown", keyListener);
+    if (typeof window.matchMedia === "function") {
+      const media = window.matchMedia(DARK_QUERY);
+      const onChange = (event: MediaQueryListEvent) => {
+        systemDark = event.matches;
+      };
+      media.addEventListener("change", onChange);
+      stopMedia = () => media.removeEventListener("change", onChange);
+    }
     void (async () => {
       stopFocus = await listenEvent("window-focused", () => {
         windowFocused = true;
@@ -1119,7 +1321,7 @@
         windowFocused = false;
       });
       stopSearch = await listenEvent("menu-search", () => {
-        document.getElementById("repo-search")?.focus();
+        openPalette();
       });
       stopCommit = await listenEvent("menu-commit", () => {
         void commitLocal();
@@ -1169,158 +1371,66 @@
       stopRepo();
       stopCommit();
       stopSearch();
+      stopMedia();
     };
   });
 </script>
 
 <div class="sr-only" aria-live="polite">{live}</div>
 <div class="shell">
-  <header class="topbar">
-    <button
-      type="button"
-      class="icon-btn nav-toggle"
-      aria-label={navCollapsed ? "展开导航" : "折叠导航"}
-      title={`${navCollapsed ? "展开" : "折叠"}仓库栏（${MODIFIER_LABEL}+B）`}
-      aria-expanded={!navCollapsed}
-      onclick={() => (navCollapsed = !navCollapsed)}
-    >
-      <Icon name="sidebar" size={18} />
-    </button>
-    {#if opened}
-      <div class="topbar-context">
-        <div class="menu-anchor repo-switch-anchor" bind:this={repoMenuAnchor}>
+  <TitleBar
+    repo={opened?.summary ?? null}
+    branch={opened ? branchText : null}
+    {upstreamMissing}
+    {ahead}
+    {behind}
+    pending={syncPending}
+    {theme}
+    disabled={writeLocked}
+    onBrand={() => runCommand("palette.open")}
+    onRepo={() => (repoMenuOpen = !repoMenuOpen)}
+    onBranch={() => runCommand("task.branch")}
+    onFetch={() => runCommand("sync.fetch")}
+    onPull={() => runCommand("sync.pull")}
+    onPush={() => runCommand("sync.push")}
+    onTheme={(next) => runCommand(`theme.${next}`)}
+    onSettings={() => runCommand("task.settings")}
+  />
+
+  {#if repoMenuOpen}
+    <div class="menu-anchor titlebar-menu" bind:this={repoMenuAnchor}>
+      <div class="menu left" role="menu" aria-label="切换仓库">
+        <div class="repo-menu-title">选择要打开的仓库</div>
+        {#each recent.slice(0, 6) as repo (repo.path)}
           <button
             type="button"
-            class="repo-switch"
-            title={`${opened.summary.path}\n点击切换仓库`}
-            aria-haspopup="menu"
-            aria-expanded={repoMenuOpen}
-            onclick={() => (repoMenuOpen = !repoMenuOpen)}
+            class="menu-item repo-menu-item"
+            role="menuitemradio"
+            aria-checked={repo.path === opened?.summary.path}
+            onclick={() => {
+              repoMenuOpen = false;
+              void openRecent(repo.path);
+            }}
           >
-            <span class="repo-badge" style={`--hue:${hueOf(opened.summary.path)}`} aria-hidden="true">{initialOf(opened.summary.name)}</span>
-            <span class="repo-switch-text">
-              <strong>{opened.summary.name}</strong>
-              <span><bdi>{opened.summary.path}</bdi></span>
-            </span>
-            <Icon name="chevron-down" size={13} />
+            <span class="repo-badge" style={`--hue:${hueOf(repo.path)}`} aria-hidden="true">{initialOf(repo.name)}</span>
+            <span><strong>{repo.name}</strong><small><bdi>{repo.path}</bdi></small></span>
+            {#if repo.path === opened?.summary.path}<Icon name="check" size={14} />{/if}
           </button>
-          {#if repoMenuOpen}
-            <div class="menu left repo-switch-menu" role="menu" aria-label="切换仓库">
-              <div class="repo-menu-title">选择要打开的仓库</div>
-              {#each recent.slice(0, 6) as repo (repo.path)}
-                <button
-                  type="button"
-                  class="menu-item repo-menu-item"
-                  role="menuitemradio"
-                  aria-checked={repo.path === opened?.summary.path}
-                  onclick={() => {
-                    repoMenuOpen = false;
-                    void openRecent(repo.path);
-                  }}
-                >
-                  <span class="repo-badge" style={`--hue:${hueOf(repo.path)}`} aria-hidden="true">{initialOf(repo.name)}</span>
-                  <span><strong>{repo.name}</strong><small><bdi>{repo.path}</bdi></small></span>
-                  {#if repo.path === opened?.summary.path}<Icon name="check" size={14} />{/if}
-                </button>
-              {/each}
-              <div class="menu-sep"></div>
-              <button type="button" class="menu-item" role="menuitem" disabled={writeLocked} onclick={() => { repoMenuOpen = false; void addRepo(); }}>
-                <Icon name="plus" /><span>添加仓库<small>打开一个本地 Git 仓库</small></span>
-              </button>
-              <button type="button" class="menu-item" role="menuitem" onclick={() => { repoMenuOpen = false; void copyPath(opened?.summary.path ?? ""); }}>
-                <Icon name="copy" /><span>复制当前仓库路径</span>
-              </button>
-            </div>
-          {/if}
-        </div>
-        <span class="context-separator" aria-hidden="true">/</span>
-        <button
-          type="button"
-          class="branch-pill"
-          title={`当前分支：${branchText}\n点击搜索、切换、创建或删除分支`}
-          disabled={writeLocked}
-          onclick={() => (dialog = "branch")}
-        >
-          <Icon name="branch" size={15} />
-          <span class="truncate">{branchText}</span>
-          <Icon name="chevron-down" size={13} />
+        {/each}
+        <div class="menu-sep"></div>
+        <button type="button" class="menu-item" role="menuitem" disabled={writeLocked} onclick={() => { repoMenuOpen = false; runCommand("repo.add"); }}>
+          <Icon name="plus" /><span>添加仓库<small>打开一个本地 Git 仓库</small></span>
+        </button>
+        <button type="button" class="menu-item" role="menuitem" disabled={writeLocked} onclick={() => { repoMenuOpen = false; runCommand("repo.clone"); }}>
+          <Icon name="download" /><span>克隆仓库<small>克隆到新目录并打开</small></span>
+        </button>
+        <button type="button" class="menu-item" role="menuitem" onclick={() => { repoMenuOpen = false; void copyPath(opened?.summary.path ?? ""); }}>
+          <Icon name="copy" /><span>复制当前仓库路径</span>
         </button>
       </div>
-    {:else}
-      <div class="topbar-empty-title"><span>开始</span><span class="topbar-empty-note">打开一个仓库，继续你的工作</span></div>
-    {/if}
-    <span class="spacer"></span>
-    {#if opened}
-      <div class="topbar-actions">
-        {#if pushRetry}
-          <button type="button" class="btn btn-primary btn-sm" disabled={writeLocked} onclick={retryPush}>
-            {#if pending === "push"}<span class="spinner"></span>{:else}<Icon name="refresh" size={14} />{/if}
-            重试推送
-          </button>
-        {/if}
-        {#if !opened.snapshot.branch.upstream}
-          <button
-            type="button"
-            class="btn btn-accent-soft btn-sm"
-            disabled={writeLocked}
-            title="把当前分支推送到远程并建立上游关联"
-            onclick={() => runSync("publish", (path, generation) => api.publishBranch(path, "", generation, nextId()))}
-          >
-            <Icon name="upload" size={14} />发布分支
-          </button>
-          <button
-            type="button"
-            class="btn btn-ghost btn-sm associate-btn"
-            disabled={writeLocked}
-            title="只建立上游关联，不推送"
-            onclick={() => runSync("associate", (path, generation) => api.associateUpstream(path, "", generation, nextId()))}
-          >
-            <Icon name="link" size={14} />只关联上游
-          </button>
-        {/if}
-        <button type="button" class="icon-btn refresh-workspace" aria-label="刷新工作区" title="重新读取工作区与当前差异" disabled={writeLocked} onclick={() => void refresh()}>
-          <Icon name="refresh" size={16} />
-        </button>
-        <div class="toolbar-group" role="group" aria-label="远程同步">
-          <button
-            type="button"
-            class="tb-btn"
-            class:busy={pending === "fetch"}
-            disabled={writeLocked}
-            title={`获取更新：下载远程分支和提交信息，不修改本地文件\n需要把提交带入当前分支时，再执行“拉取”\n${syncText}`}
-            onclick={() => runSync("fetch", (path, generation) => api.fetchRemote(path, generation, nextId()))}
-          >
-            <Icon name="download" size={14} /><span class="tb-label">获取更新</span>
-          </button>
-          <button
-            type="button"
-            class="tb-btn"
-            class:busy={pending === "pull"}
-            disabled={writeLocked}
-            title={behind > 0 ? `快进拉取 ${behind} 个提交` : "快进拉取（不会自动合并分叉）"}
-            onclick={() => runSync("pull", (path, generation) => api.pullFastForward(path, generation, nextId()))}
-          >
-            <Icon name="arrow-down" size={14} /><span class="tb-label">拉取</span>
-            {#if behind > 0}<span class="count subtle-count">{behind}</span>{/if}
-          </button>
-        </div>
-        <button
-          type="button"
-          class="btn btn-primary btn-sm push-button"
-          class:busy={pending === "push"}
-          disabled={writeLocked}
-          title={ahead > 0 ? `推送 ${ahead} 个本地提交（不会强行推送）` : "推送（不会强行推送）"}
-          onclick={() => runSync("push", (path, generation) => api.pushBranch(path, generation, nextId()))}
-        >
-          {#if pending === "push"}<span class="spinner"></span>{:else}<Icon name="arrow-up" size={14} />{/if}
-          <span>推送</span>{#if ahead > 0}<span class="push-count">{ahead}</span>{/if}
-        </button>
-        <button type="button" class="icon-btn" aria-label="远程" title="管理远程地址" disabled={writeLocked} onclick={() => (dialog = "remote")}>
-          <Icon name="globe" size={17} />
-        </button>
-      </div>
-    {/if}
-  </header>
+    </div>
+  {/if}
+
   {#if reading}
     <div class="progress-line" aria-hidden="true"></div>
     <div class="infobar info" role="status">
@@ -1346,32 +1456,36 @@
       <span class="infobar-text">{git.message}</span>
     </div>
   {/if}
+
   <div
-    class:nav-collapsed={navCollapsed}
     class="workspace"
-    style={`--sidebar:${widths.sidebar}px; --files:${widths.files}px`}
+    style={`--sidebar:${navCollapsed ? 56 : widths.sidebar}px; --files:${widths.files}px`}
   >
-    {#if !navCollapsed}
-      <RepoSidebar
-        repos={recent}
-        {query}
-        selectedPath={opened?.summary.path ?? null}
-        {theme}
-        disabled={writeLocked}
-        {workspaceView}
-        workspaceEnabled={opened !== null}
-        {changeCount}
-        {conflictCount}
-        onView={navigate}
-        onQuery={(value) => (query = value)}
-        onSelect={openRecent}
-        onForget={forget}
-        onShowPath={copyPath}
-        onTheme={changeTheme}
-        onAdd={addRepo}
-        onClone={() => (dialog = "clone")}
-        onCreate={chooseCreate}
-      />
+    <WorkspaceRail
+      repos={recent}
+      {query}
+      selectedPath={opened?.summary.path ?? null}
+      {workspaceView}
+      workspaceEnabled={opened !== null}
+      {changeCount}
+      {conflictCount}
+      {mergeInProgress}
+      collapsed={navCollapsed}
+      disabled={writeLocked}
+      onView={(view) => runCommand(`view.${view}`)}
+      onTask={(task) => runCommand(`task.${task}`)}
+      onToggleCollapsed={() => runCommand("rail.toggle")}
+      onQuery={(value) => (query = value)}
+      onSelect={openRecent}
+      onForget={forget}
+      onShowPath={copyPath}
+      onAdd={() => runCommand("repo.add")}
+      onClone={() => runCommand("repo.clone")}
+      onCreate={() => runCommand("repo.create")}
+    />
+    {#if navCollapsed}
+      <div class="resizer" aria-hidden="true"></div>
+    {:else}
       <div
         class="resizer"
         role="slider"
@@ -1387,102 +1501,22 @@
     {/if}
     <main class="content">
       {#if opened}
-        <div class="view-heading">
-          <div class="view-heading-copy">
-            <div class="view-title-line">
-              <h1>{viewInfo.title}</h1>
-              {#if workspaceView === "changes" && changeCount > 0}<span class="count">{changeCount}</span>{/if}
-              {#if workspaceView === "merge" && conflictCount > 0}<span class="count danger">{conflictCount}</span>{/if}
-            </div>
-            <p>{viewInfo.description}</p>
-          </div>
-          <div class="view-heading-status" title={syncText}>
-            <span class={`status-orb ${remoteState}`}></span>
-            <span>{remoteState === "live" ? "远程状态已检查" : remoteState === "stale" ? "远程状态待更新" : "本地工作区"}</span>
-          </div>
-        </div>
-        <div class="view-body" class:view-changes={workspaceView === "changes"}>
-          {#if workspaceView === "history"}
-            {#if historyPanel}
-              {#await historyPanel}
-                <div class="view-loading"><span class="spinner"></span></div>
-              {:then module}
-                <module.default
-                  {opened}
-                  filePath={historyPath}
-                  searchQuery={historyQuery}
-                  disabled={writeLocked}
-                  {nextId}
-                  onGeneration={adoptGeneration}
-                  onFailure={handleMutationError}
-                  onFilePath={openFileHistory}
-                  onClearFile={() => (historyPath = null)}
-                />
-              {/await}
-            {/if}
-          {:else if workspaceView === "merge"}
-            {#if mergePanel}
-              {#await mergePanel}
-                <div class="view-loading"><span class="spinner"></span></div>
-              {:then module}
-                <module.default
-                  {opened}
-                  focusPath={conflictFocus}
-                  disabled={writeLocked}
-                  {nextId}
-                  onGeneration={adoptGeneration}
-                  onSnapshot={applySnapshot}
-                  onFailure={handleMutationError}
-                  onNotice={(message) => {
-                    phaseNote = message;
-                    live = message;
-                    banner = null;
-                  }}
-                  onOpenStash={() => useView("stash")}
-                  onOpenChanges={showChanges}
-                />
-              {/await}
-            {/if}
-          {:else if workspaceView === "stash"}
-            {#if stashPanel}
-              {#await stashPanel}
-                <div class="view-loading"><span class="spinner"></span></div>
-              {:then module}
-                <module.default
-                  {opened}
-                  disabled={writeLocked}
-                  {nextId}
-                  onGeneration={adoptGeneration}
-                  onSnapshot={applySnapshot}
-                  onFailure={handleMutationError}
-                  onNotice={(message) => {
-                    phaseNote = message;
-                    live = message;
-                    banner = null;
-                  }}
-                  onOpenChanges={openConflict}
-                />
-              {/await}
-            {/if}
-          {:else}
-            <div class="changes">
+        <div class="workbench-views">
+          <div
+            class="workbench-view"
+            data-active={workspaceView === "changes"}
+            aria-hidden={workspaceView !== "changes"}
+            inert={workspaceView !== "changes"}
+          >
+            <div class="changes dense">
               <section class="files" aria-label="改动与提交">
                 <div class="pane-head">
                   <span class="pane-title">本地改动</span>
+                  <span class="count" title="改动文件数">{changeCount}</span>
                   <span class="spacer"></span>
-                  <RecoveryActions
-                    {opened}
-                    disabled={writeLocked}
-                    {nextId}
-                    onSnapshot={applySnapshot}
-                    onFailure={handleMutationError}
-                    onNotice={(message) => {
-                      phaseNote = message;
-                      live = message;
-                      banner = null;
-                    }}
-                    onMerge={() => useView("merge")}
-                  />
+                  {#if conflictCount > 0}
+                    <span class="count danger" title="未解决冲突">{conflictCount}</span>
+                  {/if}
                 </div>
                 <FileList
                   files={opened.snapshot.files}
@@ -1507,7 +1541,39 @@
                   onBlur={() => void flushDraft(drafts.path)}
                   onCommit={commitLocal}
                   onCommitPush={commitAndPush}
-                />
+                  onScope={() => runCommand("task.scope")}
+                >
+                  {#snippet overflow()}
+                    <div class="menu-row" role="none">
+                      <span class="menu-row-title">撤销与放弃</span>
+                      {#if opened}
+                        <RecoveryActions
+                          opened={opened}
+                          disabled={writeLocked}
+                          {nextId}
+                          onSnapshot={applySnapshot}
+                          onFailure={handleMutationError}
+                          onNotice={notice}
+                          onMerge={() => runCommand("task.merge")}
+                        />
+                      {/if}
+                    </div>
+                    <div class="menu-sep"></div>
+                    {#each overflowCommands as command (command.id)}
+                      <button
+                        type="button"
+                        class="menu-item"
+                        role="menuitem"
+                        disabled={!commandAvailable(command, commandState)}
+                        title={commandReason(command, commandState) || command.hint}
+                        onclick={() => runCommand(command.id)}
+                      >
+                        <Icon name="chevron-right" />
+                        <span>{command.title}<small>{command.hint}</small></span>
+                      </button>
+                    {/each}
+                  {/snippet}
+                </CommitDraft>
               </section>
               <div
                 class="resizer"
@@ -1532,74 +1598,145 @@
                 onFileHistory={openFileHistory}
               />
             </div>
-          {/if}
+          </div>
+          <div
+            class="workbench-view"
+            data-active={workspaceView === "history"}
+            aria-hidden={workspaceView !== "history"}
+            inert={workspaceView !== "history"}
+          >
+            {#if historyPanel}
+              {#await historyPanel}
+                <div class="view-loading"><span class="spinner"></span></div>
+              {:then module}
+                <module.default
+                  {opened}
+                  filePath={historyPath}
+                  searchQuery={historyQuery}
+                  disabled={writeLocked}
+                  {nextId}
+                  onGeneration={adoptGeneration}
+                  onFailure={handleMutationError}
+                  onFilePath={openFileHistory}
+                  onClearFile={() => (historyPath = null)}
+                />
+              {/await}
+            {/if}
+          </div>
         </div>
       {:else}
         <Welcome
           {recent}
           disabled={writeLocked}
-          onAdd={addRepo}
-          onClone={() => (dialog = "clone")}
-          onCreate={chooseCreate}
+          onAdd={() => runCommand("repo.add")}
+          onClone={() => runCommand("repo.clone")}
+          onCreate={() => runCommand("repo.create")}
           onOpen={openRecent}
         />
       {/if}
     </main>
   </div>
-  <footer class="statusbar">
-    <span class="sb-item sb-live" class:sb-busy={pending !== null || reading} title={live}>
-      {#if pending !== null || reading}<span class="spinner"></span>{/if}
-      {live}
-    </span>
-    {#if opened}
-      {#if degraded}
-        <span class="sb-item sb-warn" title="文件监听不可用，窗口在前台时低频重新读取">
-          <Icon name="alert" size={12} />低频刷新
-        </span>
-      {/if}
-      <span class="sb-item" title={syncText}>
-        <span class={`sb-dot ${remoteState === "live" ? "" : remoteState}`}></span>
-        <span class="truncate">{syncText}</span>
-      </span>
-    {/if}
-    {#if git?.available && git.version}
-      <span class="sb-item" title={git.path ?? ""}>Git {git.version}</span>
-    {/if}
-    <button type="button" class="sb-item" onclick={() => (dependencyOpen = true)}>
-      <Icon name="package" size={12} />运行依赖
-    </button>
-  </footer>
+
+  <StatusBar
+    branch={opened ? branchText : null}
+    sync={syncText}
+    {changeCount}
+    {conflictCount}
+    busy={writeLocked}
+    refreshing={pending !== null || reading}
+    {degraded}
+    warning={warning}
+    onRefresh={() => runCommand("view.refresh")}
+  />
 </div>
 
-<div class="toasts">
-  {#if banner}
-    <div class="toast error" role="alert">
-      <span class="toast-icon"><Icon name="alert-circle" size={16} /></span>
-      <span class="toast-text">{banner}</span>
-      <button type="button" class="icon-btn sm" aria-label="关闭提示" onclick={() => (banner = null)}><Icon name="x" size={14} /></button>
-    </div>
-  {/if}
-  {#if phaseNote}
-    <div class="toast ok" role="status">
-      <span class="toast-icon"><Icon name="check-circle" size={16} /></span>
-      <span class="toast-text">{phaseNote}</span>
-      <button type="button" class="icon-btn sm" aria-label="关闭提示" onclick={() => (phaseNote = null)}><Icon name="x" size={14} /></button>
-    </div>
-  {/if}
-  {#if warning}
-    <div class="toast warn" role="status">
-      <span class="toast-icon"><Icon name="alert" size={16} /></span>
-      <span class="toast-text">{warning}</span>
-      <button type="button" class="icon-btn sm" aria-label="关闭提示" onclick={() => (warning = null)}><Icon name="x" size={14} /></button>
-    </div>
-  {/if}
-</div>
+<CommandPalette open={paletteOpen} commands={paletteCommands} onClose={() => (paletteOpen = false)} />
+
+{#if opened && taskModal === "stash"}
+  <StashModal
+    {opened}
+    disabled={writeLocked}
+    {nextId}
+    onClose={closeTask}
+    onGeneration={adoptGeneration}
+    onSnapshot={mergeSnapshot}
+    onFailure={handleMutationError}
+    onNotice={notice}
+    onOpenChanges={openConflict}
+  />
+{:else if opened && taskModal === "merge"}
+  <MergeModal
+    {opened}
+    focusPath={conflictFocus}
+    disabled={writeLocked}
+    {nextId}
+    onClose={closeTask}
+    onSnapshot={mergeSnapshot}
+    onGeneration={adoptGeneration}
+    onFailure={handleMutationError}
+    onNotice={notice}
+    onOpenStash={() => runCommand("task.stash")}
+    onOpenChanges={() => {
+      closeTask();
+      showChanges();
+    }}
+  />
+{:else if opened && taskModal === "branch"}
+  <BranchDialog
+    {opened}
+    disabled={writeLocked}
+    onClose={closeTask}
+    onBusy={(name) => (pending = name)}
+    onSnapshot={applySnapshot}
+    onFailure={handleMutationError}
+    onNotice={notice}
+    onOpenHistory={(next) => {
+      closeTask();
+      openCommitSearch(next);
+    }}
+    {nextId}
+  />
+{:else if taskModal === "settings"}
+  <SettingsModal
+    {theme}
+    {git}
+    disabled={writeLocked}
+    onClose={closeTask}
+    onTheme={(next) => runCommand(`theme.${next}`)}
+    onRedetect={redetectGit}
+    onChooseGit={chooseGit}
+    onClearGit={clearGit}
+  />
+{:else if opened && taskModal === "scope"}
+  <ScopeModal scopeLabel={scope.label} paths={scope.paths} onClose={closeTask} />
+{:else if opened && taskModal === "publish"}
+  <PublishModal
+    branch={branchText}
+    upstream={opened.snapshot.branch.upstream}
+    remote={remoteName ?? "origin"}
+    {ahead}
+    disabled={writeLocked}
+    busy={pending}
+    onClose={closeTask}
+    onPublish={() => {
+      closeTask();
+      runSync("publish", (path, generation) => api.publishBranch(path, "", generation, nextId()));
+    }}
+    onAssociate={() => {
+      closeTask();
+      runSync("associate", (path, generation) => api.associateUpstream(path, "", generation, nextId()));
+    }}
+  />
+{/if}
 
 <RepoDialogs
-  mode={dialog}
+  mode={cloneOpen ? "clone" : taskModal === "remote" ? "remote" : null}
   {opened}
   disabled={writeLocked}
-  onClose={() => (dialog = null)}
+  onClose={() => {
+    cloneOpen = false;
+    if (taskModal === "remote") taskModal = null;
+  }}
   onBusy={(name) => (pending = name)}
   onSnapshot={applySnapshot}
   onOpened={(repo) => {
@@ -1607,14 +1744,11 @@
     rememberOpened(repo);
   }}
   onFailure={handleMutationError}
-  onNotice={(message) => {
-    phaseNote = message;
-    live = message;
-    banner = null;
-  }}
+  onNotice={notice}
   onOpenHistory={openCommitSearch}
   {nextId}
 />
+
 {#if dependencyOpen}
   <DetailDialog
     title="运行依赖"
@@ -1639,3 +1773,27 @@
     onConfirm={confirmCreate}
   />
 {/if}
+
+<div class="toasts">
+  {#if banner}
+    <div class="toast error" role="alert">
+      <span class="toast-icon"><Icon name="alert-circle" size={16} /></span>
+      <span class="toast-text">{banner}</span>
+      <button type="button" class="icon-btn sm" aria-label="关闭提示" onclick={() => (banner = null)}><Icon name="x" size={14} /></button>
+    </div>
+  {/if}
+  {#if phaseNote}
+    <div class="toast ok" role="status">
+      <span class="toast-icon"><Icon name="check-circle" size={16} /></span>
+      <span class="toast-text">{phaseNote}</span>
+      <button type="button" class="icon-btn sm" aria-label="关闭提示" onclick={() => (phaseNote = null)}><Icon name="x" size={14} /></button>
+    </div>
+  {/if}
+  {#if warning}
+    <div class="toast warn" role="status">
+      <span class="toast-icon"><Icon name="alert" size={16} /></span>
+      <span class="toast-text">{warning}</span>
+      <button type="button" class="icon-btn sm" aria-label="关闭提示" onclick={() => (warning = null)}><Icon name="x" size={14} /></button>
+    </div>
+  {/if}
+</div>

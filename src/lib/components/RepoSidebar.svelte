@@ -54,10 +54,11 @@
     onToggleCollapsed,
   }: Props = $props();
 
-  function taskAsView(task: RailTask) {
-    // 旧外壳把临时保存与合并当作视图；分支与远程在旧外壳里是 dialog，留给新外壳接线。
-    if (task === "stash" || task === "merge") onView?.(task);
-  }
+  const taskAsView = (_task: RailTask) => {
+    // WorkspaceView 已收为 changes / history 两个主视图，临时保存与合并都改成 modal，
+    // 兼容层没有 modal 槽位，所以这里不再把任务点击当视图切换转发。
+    // 新外壳直接使用 WorkspaceRail 的 onTask（见 src/App.svelte）。
+  };
 </script>
 
 <WorkspaceRail

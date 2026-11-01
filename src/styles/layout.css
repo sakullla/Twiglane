@@ -376,3 +376,20 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--warning) 
   .welcome-hero { min-height: 225px; }
   .welcome-compact { padding-top: var(--space-24); }
 }
+
+/* ==========================================================================
+   T5 · 工作台编排（只新增类，不改上面的既有规则）
+   ========================================================================== */
+
+/* 标题栏下的仓库切换菜单：标题栏本身不是 .menu-anchor，这里给菜单一个锚点。 */
+.titlebar-menu { position: absolute; top: var(--titlebar-height); left: var(--space-8); z-index: var(--z-menu); }
+
+/* 主工作台：改动与提交历史两个视图同时挂载，只切换可见性。
+   display:none 会丢掉滚动位置，因此隐藏态用 visibility + 绝对定位，
+   各自列表的滚动与选中在来回切换后仍然保留（R12）。 */
+.workbench-views { flex: 1; min-height: 0; display: flex; position: relative; }
+.workbench-view { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.workbench-view[data-active="false"] { position: absolute; inset: 0; visibility: hidden; pointer-events: none; }
+
+/* 改动视图在 1280×840 下要放下 40 行以上差异：纵向留白收到 8px。 */
+.changes.dense { padding: 0 var(--space-12) var(--space-8); }

@@ -1,8 +1,14 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
   import { MODIFIER_LABEL } from "../brand";
   import { summaryLength } from "../ui";
   import Icon from "./Icon.svelte";
 
+  /**
+   * 提交区（R5）：整块高度不超过 200px，正文只留一行以内的说明。
+   * 变更范围改成「计数按钮」打开提交范围 modal，低频动作（撤销提交、放弃修改）
+   * 收进右上角的溢出菜单，不再直接占位。
+   */
   interface Props {
     branch: string;
     scope: string;
@@ -14,28 +20,84 @@
     onBlur: () => void;
     onCommit: () => void;
     onCommitPush?: () => void;
+    /** 打开「本次提交范围」modal。 */
+    onScope?: () => void;
+    /** 溢出菜单内容：撤销提交与放弃修改由外壳注入。 */
+    overflow?: Snippet;
   }
-  let { branch, scope, paths, value, disabled, busy = null, onInput, onBlur, onCommit, onCommitPush }: Props = $props();
-  let shown = $derived(paths.slice(0, 50));
-  let ready = $derived(value.trim().length > 0 && paths.length > 0 && !disabled);
+
+  let { branch, scope, paths, value, disabled, busy = null, onInput, onBlur, onCommit, onCommitPush, onScope, overflow }: Props =
+    $props();
+
   let firstLine = $derived(summaryLength(value));
+  let moreOpen = $state(false);
+  let moreAnchor = $state<HTMLDivElement | null>(null);
+  let ready = $derived(value.trim().length > 0 && paths.length > 0 && !disabled);
   let blocker = $derived(
     paths.length === 0 ? "先暂存要提交的文件" : value.trim().length === 0 ? "填写提交说明后即可提交" : "",
   );
+
+  $effect(() => {
+    if (!moreOpen) return;
+    const close = (event: MouseEvent) => {
+      if (moreAnchor && !moreAnchor.contains(event.target as Node)) moreOpen = false;
+    };
+    const key = (event: KeyboardEvent) => {
+      if (event.key === "Escape") moreOpen = false;
+    };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", key);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", key);
+    };
+  });
 </script>
 
-<section class="composer" aria-label="本地提交">
+<section class="composer compact" aria-label="本地提交">
   <div class="composer-head">
     <span class="composer-head-icon"><Icon name="commit" size={15} /></span>
     <div class="composer-heading">
       <span>创建提交</span>
       <strong title={`目标是 ${branch}`}>{scope}</strong>
     </div>
+    <span class="spacer"></span>
+    {#if onScope}
+      <button
+        type="button"
+        class="btn btn-ghost btn-sm composer-scope"
+        aria-label={`本次提交范围：${paths.length} 个已暂存文件`}
+        title="查看本次提交范围"
+        onclick={onScope}
+      >
+        <Icon name="layers" size={13} /><span class="count">{paths.length}</span>
+      </button>
+    {/if}
+    {#if overflow}
+      <div class="menu-anchor" bind:this={moreAnchor}>
+        <button
+          type="button"
+          class="icon-btn sm composer-more"
+          aria-label="更多提交操作"
+          aria-haspopup="menu"
+          aria-expanded={moreOpen}
+          title="更多：撤销提交与放弃修改"
+          onclick={() => (moreOpen = !moreOpen)}
+        >
+          <Icon name="more" size={15} />
+        </button>
+        {#if moreOpen}
+          <div class="menu composer-more-menu" role="menu" aria-label="更多提交操作">
+            {@render overflow()}
+          </div>
+        {/if}
+      </div>
+    {/if}
   </div>
   <div class="composer-box">
     <textarea
       aria-label="提交说明草稿"
-      placeholder={"提交说明：第一行写摘要\n\n空一行后可以补充细节"}
+      placeholder={"提交说明：第一行写摘要"}
       {value}
       disabled={disabled}
       oninput={(event) => onInput((event.currentTarget as HTMLTextAreaElement).value)}
@@ -44,24 +106,9 @@
     <div class="composer-meta">
       <span class:over={firstLine > 72} title="摘要建议不超过 72 个字符">摘要 {firstLine}/72</span>
       <span class="spacer"></span>
-      <span>草稿自动保存</span>
+      <span title="输入停止后自动保存为草稿">草稿自动保存</span>
     </div>
   </div>
-  {#if paths.length === 0}
-    <p class="hint">范围：暂存区是空的。</p>
-  {:else}
-    <details class="scope-details">
-      <summary><Icon name="chevron-right" size={13} />查看本次提交的 {paths.length} 个文件</summary>
-      <ul class="scope-list">
-        {#each shown as path (path)}
-          <li title={path}>{path}</li>
-        {/each}
-      </ul>
-      {#if paths.length > shown.length}
-        <p class="hint">另有 {paths.length - shown.length} 个已暂存文件。</p>
-      {/if}
-    </details>
-  {/if}
   <div class="composer-actions">
     <button
       type="button"
@@ -86,5 +133,4 @@
       提交并推送
     </button>
   </div>
-  <p class="hint">只创建本地提交，不会推送。「提交并推送」会先提交再单独推送，推送失败可以只重试推送。</p>
 </section>

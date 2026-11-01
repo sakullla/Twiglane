@@ -39,6 +39,12 @@
   let tab = $state<BranchTab>("local");
   let localBusy = $state(false);
   let errorText = $state<string | null>(null);
+  /**
+   * 最近一次失败的 code。删除本地分支后是否给出「强删」引导必须看它：
+   * 只有 Git 明确回报 branch_unmerged 才说明是「未合入」，
+   * 认证、网络、权限等失败不能把用户带向更危险的动作。
+   */
+  let lastFailureCode = $state<string | null>(null);
   let loadedKey = "";
   let confirmDelete = $state<
     | { kind: "local"; name: string; body: string; force: boolean }
@@ -76,11 +82,13 @@
     if (blocked) return undefined;
     localBusy = true;
     errorText = null;
+    lastFailureCode = null;
     onBusy("branch");
     try {
       return await action();
     } catch (error) {
       const failure = normalizeError(error);
+      lastFailureCode = failure.code;
       errorText = failure.message;
       onFailure(failure);
       return undefined;
@@ -167,7 +175,8 @@
       onNotice(`已删除本地分支 ${target.name}`);
       return;
     }
-    if (!target.force) {
+    // 只有「未合入」这一种失败才升级为强删确认；其它失败按普通错误处理并收起确认层。
+    if (!target.force && lastFailureCode === "branch_unmerged") {
       confirmDelete = {
         kind: "local",
         name: target.name,

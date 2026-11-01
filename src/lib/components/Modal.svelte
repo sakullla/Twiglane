@@ -24,7 +24,13 @@
     return openLayers.length > 0 ? openLayers[openLayers.length - 1] : null;
   }
 
-  /** 当前打开的 modal 层数：任务 modal 打开期间应为 1，关闭后回到 0。 */
+  /**
+   * 当前打开的 modal 层数（不是「任务槽位」的计数）。
+   *
+   * 一个任务 modal 打开期间通常是 1，但危险确认层可以叠在它上面（例如放弃修改确认），
+   * 此时层数会变成 2。所以「同一时刻只有一个任务 modal」的断言必须数
+   * `[data-task-modal]` 节点，不能数这个层数；层数只用来判断最上层由谁接管背景 inert。
+   */
   export function openModalCount(): number {
     return openLayers.length;
   }

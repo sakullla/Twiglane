@@ -141,13 +141,11 @@
     <div class="empty">
       <span class="empty-icon ok"><Icon name="check-circle" size={24} /></span>
       <strong>工作区很干净</strong>
-      <p>没有需要查看的本地改动。在编辑器中修改文件后，回到这里会在聚焦或外部更新时自动刷新。</p>
     </div>
   {:else if rows.length === 0}
     <div class="empty">
       <span class="empty-icon"><Icon name="search" size={22} /></span>
       <strong>没有匹配的文件</strong>
-      <p>当前筛选没有对应的改动。清空筛选后，原来的选择还会在。</p>
     </div>
   {:else}
     <div class="virtual-space" style={`height:${items.length * ROW_HEIGHT}px`}>

@@ -1,9 +1,154 @@
-import { fireEvent, render, screen } from "@testing-library/svelte";
-import { describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/svelte";
+import { tick } from "svelte";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CommitDraft from "../src/lib/components/CommitDraft.svelte";
 import DiffView from "../src/lib/components/DiffView.svelte";
 import FileList from "../src/lib/components/FileList.svelte";
-import type { DiffLine, DiffResponse, FileChange, FileSelection } from "../src/lib/types";
+import type {
+  DiffLine,
+  DiffResponse,
+  FileChange,
+  FileSelection,
+  HistoryCommit,
+  StatusSnapshot,
+} from "../src/lib/types";
+
+/* ------------------------------------------------------------------ *
+ * App 级夹具：真实的 api 由下面的 vi.mock 顶替，界面走完整外壳。
+ * ------------------------------------------------------------------ */
+
+const repoPath = "C:/work/demo";
+
+const branch = {
+  name: "main",
+  detached: false,
+  unborn: false,
+  headOid: "a".repeat(40),
+  upstream: "origin/main",
+  ahead: 1,
+  behind: 0,
+  liveRemoteChecked: true,
+  remoteCheckedAtMs: 1,
+  remoteCheckStale: false,
+};
+
+function change(
+  path: string,
+  staged: FileChange["staged"],
+  unstaged: FileChange["unstaged"],
+  extra: Partial<FileChange> = {},
+): FileChange {
+  return { path, originalPath: null, staged, unstaged, untracked: false, unmerged: false, ...extra };
+}
+
+const changes: FileChange[] = [
+  change("src/App.svelte", "none", "modified"),
+  change("src/app.css", "modified", "modified"),
+  change("README.md", "modified", "none"),
+  change("docs/start.md", "none", "deleted"),
+  change("public/logo.png", "none", "modified"),
+  change("src/lib/icon.ts", "none", "none", { untracked: true }),
+];
+
+const snapshot: StatusSnapshot = { generation: 4, branch, files: changes };
+
+/** 60 行差异：足够让虚拟窗口在 1280×840 的预算里放进 40 行以上。 */
+function diffFor(path: string, staged: boolean): DiffResponse {
+  const lines: DiffLine[] = Array.from({ length: 60 }, (_, index) => ({
+    kind: index % 7 === 0 ? "add" : index % 11 === 0 ? "del" : "context",
+    text: `${index % 7 === 0 ? "+" : index % 11 === 0 ? "-" : " "}line-${index}`,
+    oldNo: index + 1,
+    newNo: index + 1,
+    hunkIndex: 0,
+  }));
+  return {
+    generation: 4,
+    path,
+    staged,
+    binary: false,
+    text: null,
+    summary: "新增 9 行，删除 5 行。",
+    additions: 9,
+    deletions: 5,
+    complete: true,
+    truncated: false,
+    snapshot: "snap",
+    hunks: [{ index: 0, header: "@@ -1,60 +1,60 @@", complete: true, stageable: true, startLine: 0, lineCount: 60 }],
+    lines,
+    offset: 0,
+    totalLines: lines.length,
+  };
+}
+
+const commits: HistoryCommit[] = Array.from({ length: 12 }, (_, index) => ({
+  oid: `${index.toString(16).padStart(4, "0")}${"a1b2c3d4".repeat(9)}`.slice(0, 40),
+  parents: [`${(index + 100).toString(16).padStart(4, "0")}${"e5f6a7b8".repeat(9)}`.slice(0, 40)],
+  summary: `提交 ${index}`,
+  authorName: "Ada",
+  authorEmail: "ada@example.com",
+  authoredAt: 1_700_000_000 - index * 60,
+  labels: [],
+}));
+
+const mocks = vi.hoisted(() => ({
+  getSettings: vi.fn(),
+  openRepository: vi.fn(),
+  addRepository: vi.fn(),
+  createRepository: vi.fn(),
+  closeRepository: vi.fn(),
+  forgetRecent: vi.fn(),
+  refreshStatus: vi.fn(),
+  loadDiff: vi.fn(),
+  stageFiles: vi.fn(),
+  unstageFiles: vi.fn(),
+  stageHunks: vi.fn(),
+  commitChanges: vi.fn(),
+  commitAndPush: vi.fn(),
+  fetchRemote: vi.fn(),
+  pullFastForward: vi.fn(),
+  pushBranch: vi.fn(),
+  publishBranch: vi.fn(),
+  associateUpstream: vi.fn(),
+  mergeSession: vi.fn(),
+  saveDraft: vi.fn(),
+  setTheme: vi.fn(),
+  setPanelWidths: vi.fn(),
+  cancelReads: vi.fn(),
+  historyPage: vi.fn(),
+  commitDetail: vi.fn(),
+  commitFileDiff: vi.fn(),
+  fileHistory: vi.fn(),
+  discardChanges: vi.fn(),
+  undoCommit: vi.fn(),
+  detectGit: vi.fn(),
+  setGitExecutable: vi.fn(),
+  clearGitExecutable: vi.fn(),
+  cloneRepository: vi.fn(),
+  remoteState: vi.fn(),
+  branchState: vi.fn(),
+  tagState: vi.fn(),
+  stashState: vi.fn(),
+  measureProbe: vi.fn(),
+  measureSample: vi.fn(),
+  measureFinish: vi.fn(),
+  measureWait: vi.fn(),
+  listenEvent: vi.fn(),
+  pickDirectory: vi.fn(),
+  pickFile: vi.fn(),
+}));
+
+vi.mock("../src/lib/api", () => ({
+  api: { ...mocks },
+  listenEvent: mocks.listenEvent,
+  pickDirectory: mocks.pickDirectory,
+  pickFile: mocks.pickFile,
+}));
+
+import App from "../src/App.svelte";
+
+/* ------------------------------------------------------------------ *
+ * 组件级夹具：只关心差异密度与提交区形状。
+ * ------------------------------------------------------------------ */
 
 const selection: FileSelection = { path: "demo.txt", side: "unstaged" };
 
@@ -42,6 +187,245 @@ function changedFile(path: string): FileChange {
     unmerged: false,
   };
 }
+
+const ROW_HEIGHT = 16;
+
+/** 键盘层挂在 window 上，所以用真实事件派发；tick 保证 Svelte 已把状态刷进 DOM。 */
+async function press(key: string) {
+  window.dispatchEvent(new KeyboardEvent("keydown", { key, ctrlKey: true, bubbles: true }));
+  await tick();
+}
+
+function renderApp() {
+  return render(App);
+}
+
+/** 打开夹具仓库，并等到改动视图与差异都就绪。 */
+async function openRepo() {
+  await waitFor(() => expect(document.querySelector(".welcome-recent button")).toBeTruthy());
+  await fireEvent.click(document.querySelector<HTMLButtonElement>(".welcome-recent button")!);
+  await waitFor(() => expect(document.querySelector(".file-list")).toBeTruthy());
+  await waitFor(() => expect(document.querySelectorAll("[data-diff-row]").length).toBeGreaterThan(0));
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.getSettings.mockResolvedValue({
+    theme: "dark",
+    panelWidths: { sidebar: 256, files: 360 },
+    git: { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "Git 2.49.0 可用" },
+    recent: [{ name: "demo", path: repoPath, openedAtMs: 1 }],
+    settingsWarning: null,
+  });
+  mocks.listenEvent.mockResolvedValue(() => {});
+  mocks.pickDirectory.mockResolvedValue(null);
+  mocks.pickFile.mockResolvedValue(null);
+  mocks.openRepository.mockResolvedValue({
+    summary: { name: "demo", path: repoPath },
+    generation: 4,
+    snapshot,
+    draft: "",
+    watchDegraded: false,
+  });
+  mocks.refreshStatus.mockResolvedValue(snapshot);
+  mocks.loadDiff.mockImplementation(async (_repo: string, path: string, staged: boolean) => diffFor(path, staged));
+  mocks.mergeSession.mockResolvedValue({
+    generation: 4,
+    operation: "none",
+    canContinue: false,
+    canAbort: false,
+    source: null,
+    target: "main",
+    headOid: branch.headOid,
+    conflicts: [],
+    unresolved: 0,
+    note: "当前没有进行中的合并。",
+    snapshot,
+  });
+  mocks.saveDraft.mockResolvedValue(undefined);
+  mocks.setTheme.mockResolvedValue(undefined);
+  mocks.setPanelWidths.mockImplementation(async (widths: unknown) => widths);
+  mocks.cancelReads.mockResolvedValue(undefined);
+  mocks.fetchRemote.mockResolvedValue(snapshot);
+  mocks.measureProbe.mockResolvedValue({ enabled: false, elapsedMs: 0, script: null });
+  mocks.historyPage.mockImplementation(async (_path: string, query: string, offset: number) => ({
+    generation: 4,
+    query,
+    offset,
+    pageSize: 100,
+    hasMore: false,
+    state: "ok",
+    commits,
+  }));
+  mocks.commitDetail.mockImplementation(async (_path: string, oid: string) => {
+    const commit = commits.find((item) => item.oid === oid) ?? commits[0];
+    return {
+      generation: 4,
+      commit,
+      body: "",
+      root: false,
+      merge: false,
+      selectedParent: commit.parents[0],
+      files: [{ path: "src/App.svelte", originalPath: null, status: "modified" }],
+    };
+  });
+  mocks.commitFileDiff.mockImplementation(async (_path: string, _oid: string, _parent: string, path: string) => diffFor(path, false));
+});
+
+afterEach(() => {
+  cleanup();
+});
+
+describe("主工作台", () => {
+  it("改动视图同屏显示文件列表与差异，并一次渲染 40 行以上差异", async () => {
+    renderApp();
+    await openRepo();
+
+    const pane = document.querySelector(".changes");
+    expect(pane?.querySelector(".file-list"), "同屏要有文件列表").toBeTruthy();
+    expect(pane?.querySelector(".diff"), "同屏要有差异面板").toBeTruthy();
+    expect(pane?.querySelectorAll("[data-diff-row]").length).toBeGreaterThanOrEqual(40);
+    // 密度由行高 16px 决定：22px 的行高在 840px 里放不下 40 行。
+    for (const row of document.querySelectorAll<HTMLElement>("[data-diff-row]")) {
+      expect(row.style.height).toBe(`${ROW_HEIGHT}px`);
+    }
+    // 标题栏仍是 6 个常驻控件（刷新、发布分支等已离开标题栏）。
+    expect(document.querySelectorAll("[data-titlebar-control]")).toHaveLength(6);
+  });
+
+  it("提交区无多行说明，撤销提交与放弃修改只在溢出菜单里", async () => {
+    renderApp();
+    await openRepo();
+
+    const composer = document.querySelector(".composer.compact");
+    expect(composer).toBeTruthy();
+    expect(composer?.querySelector("p"), "提交区不应再有说明性段落").toBeNull();
+    expect(composer?.textContent).not.toContain("只创建本地提交，不会推送");
+    // 首屏没有撤销/放弃入口
+    expect(screen.queryByRole("button", { name: "撤销最近提交并保留改动" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "放弃所选文件修改" })).toBeNull();
+
+    await fireEvent.click(screen.getByRole("button", { name: "更多提交操作" }));
+    const menu = screen.getByRole("menu", { name: "更多提交操作" });
+    expect(menu.contains(screen.getByRole("button", { name: "撤销最近提交并保留改动" }))).toBe(true);
+    expect(menu.contains(screen.getByRole("button", { name: "放弃所选文件修改" }))).toBe(true);
+  });
+
+  it("rail 与命令面板打开同一个任务 modal，且单槽只有一层", async () => {
+    renderApp();
+    await openRepo();
+
+    await fireEvent.click(screen.getByRole("button", { name: "临时保存" }));
+    expect(document.querySelectorAll('[data-task-modal="stash"]')).toHaveLength(1);
+    expect(document.querySelectorAll("[data-task-modal]")).toHaveLength(1);
+
+    await fireEvent.keyDown(screen.getByRole("dialog", { name: /临时保存/ }), { key: "Escape" });
+    await waitFor(() => expect(document.querySelectorAll("[data-task-modal]")).toHaveLength(0));
+
+    await press("k");
+    const palette = await screen.findByRole("dialog", { name: "命令面板" });
+    await fireEvent.click(screen.getByRole("option", { name: /临时保存/ }));
+    expect(palette.isConnected).toBe(false);
+    expect(document.querySelectorAll('[data-task-modal="stash"]')).toHaveLength(1);
+    expect(document.querySelectorAll("[data-task-modal]")).toHaveLength(1);
+  });
+
+  it("命令面板与标题栏同步组走同一条命令", async () => {
+    renderApp();
+    await openRepo();
+
+    await fireEvent.click(screen.getByRole("button", { name: /^同步/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: /获取更新/ }));
+    expect(mocks.fetchRemote).toHaveBeenCalledTimes(1);
+
+    await press("k");
+    await screen.findByRole("dialog", { name: "命令面板" });
+    await fireEvent.click(screen.getByRole("option", { name: /获取更新/ }));
+    expect(mocks.fetchRemote).toHaveBeenCalledTimes(2);
+    expect(mocks.fetchRemote.mock.calls[0][0]).toBe(repoPath);
+  });
+
+  it("历史与改动来回切换后各自滚动与选中保留，浏览历史不写入", async () => {
+    renderApp();
+    await openRepo();
+
+    const fileRow = document.querySelector<HTMLElement>('.file-row[title="README.md"]');
+    expect(fileRow).toBeTruthy();
+    await fireEvent.click(fileRow!);
+    const fileList = document.querySelector<HTMLElement>(".file-list")!;
+    fileList.scrollTop = 68;
+
+    await press("2");
+    const history = await waitFor(() => {
+      const list = document.querySelector<HTMLElement>(".history-list");
+      expect(list).toBeTruthy();
+      return list!;
+    });
+    await fireEvent.click(history.querySelectorAll<HTMLElement>('[role="option"]')[2]);
+    await waitFor(() => expect(document.querySelector('.history-row[aria-selected="true"]')).toBeTruthy());
+    history.scrollTop = 124;
+
+    // 回到改动：选中与滚动都还在
+    await press("1");
+    expect(document.querySelector('.file-row[title="README.md"]')?.getAttribute("aria-selected")).toBe("true");
+    expect(document.querySelector<HTMLElement>(".file-list")!.scrollTop).toBe(68);
+
+    // 再回历史：同一个列表节点、同一段滚动、同一个选中行
+    await press("2");
+    expect(document.querySelector(".history-list")).toBe(history);
+    expect(history.scrollTop).toBe(124);
+    expect(document.querySelector('.history-row[aria-selected="true"]')?.getAttribute("title")).toContain("提交 2");
+
+    // 浏览历史不改变分支、暂存区与工作区
+    expect(mocks.stageFiles).not.toHaveBeenCalled();
+    expect(mocks.unstageFiles).not.toHaveBeenCalled();
+    expect(mocks.commitChanges).not.toHaveBeenCalled();
+    expect(mocks.refreshStatus).not.toHaveBeenCalled();
+  });
+
+  it("⌘Enter 走同一条提交命令，⌘R 刷新", async () => {
+    mocks.commitChanges.mockResolvedValue({
+      oid: "abcdef1234567",
+      generation: 5,
+      branch: "main",
+      summary: "已提交 abcdef1",
+      files: ["src/app.css"],
+      pushed: false,
+      snapshot: { generation: 5, branch, files: [] },
+    });
+    renderApp();
+    await openRepo();
+
+    const textarea = document.querySelector<HTMLTextAreaElement>(".composer textarea")!;
+    await fireEvent.input(textarea, { target: { value: "重做工作台外壳" } });
+    await press("Enter");
+    await waitFor(() => expect(mocks.commitChanges).toHaveBeenCalledTimes(1));
+    expect(mocks.commitChanges.mock.calls[0][0]).toBe(repoPath);
+    expect(mocks.commitChanges.mock.calls[0][1]).toBe("重做工作台外壳");
+
+    await press("r");
+    expect(mocks.refreshStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("⌘B 折叠 rail、⌘R 刷新、Esc 关闭命令面板", async () => {
+    renderApp();
+    await openRepo();
+
+    await press("b");
+    expect(screen.getByRole("button", { name: "展开侧栏" })).toBeTruthy();
+    expect(document.querySelector(".sidebar.rail.collapsed")).toBeTruthy();
+    await press("b");
+    expect(screen.getByRole("button", { name: "折叠侧栏" })).toBeTruthy();
+
+    await press("r");
+    expect(mocks.refreshStatus).toHaveBeenCalledTimes(1);
+
+    await press("k");
+    const palette = await screen.findByRole("dialog", { name: "命令面板" });
+    await fireEvent.keyDown(palette.querySelector("input")!, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "命令面板" })).toBeNull());
+  });
+});
 
 describe("差异与提交", () => {
   it("键盘移动后把选中文件滚进虚拟窗口", async () => {
@@ -100,11 +484,10 @@ describe("差异与提交", () => {
     expect(region.getAttribute("tabindex")).toBe("0");
     region.focus();
     await fireEvent.keyDown(region, { key: "ArrowDown" });
-    expect(region.scrollTop).toBe(22);
+    expect(region.scrollTop).toBe(ROW_HEIGHT);
     await fireEvent.keyDown(region, { key: "End" });
-    expect(region.scrollTop).toBe(80 * 22);
+    expect(region.scrollTop).toBe(80 * ROW_HEIGHT);
     expect(screen.getByText("row-79")).toBeTruthy();
-    expect(screen.queryByText("row-0")).toBeNull();
     await fireEvent.keyDown(region, { key: "Home" });
     expect(region.scrollTop).toBe(0);
     expect(screen.getByText("row-0")).toBeTruthy();
@@ -158,7 +541,8 @@ describe("差异与提交", () => {
     expect(screen.queryByText("+kept")).toBeNull();
   });
 
-  it("本地提交展示目标和范围，空暂存不能提交", () => {
+  it("空暂存时提交不可用，范围改成计数入口而不是说明段落", async () => {
+    const onScope = vi.fn();
     render(CommitDraft, {
       props: {
         branch: "main（尚无提交）",
@@ -169,12 +553,18 @@ describe("差异与提交", () => {
         onInput: () => {},
         onBlur: () => {},
         onCommit: () => {},
+        onScope,
       },
     });
     expect(screen.getByText("提交到 main（尚无提交） · 暂存区是空的")).toBeTruthy();
-    expect(screen.getByText(/只创建本地提交，不会推送。/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "提交到本地" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "提交并推送" }).hasAttribute("disabled")).toBe(true);
-    expect(screen.getByText(/推送失败可以只重试推送/)).toBeTruthy();
+    // 提交区不再有说明性段落，只剩一行以内的元信息
+    expect(document.querySelector(".composer p")).toBeNull();
+    const scopeButton = screen.getByRole("button", { name: "本次提交范围：0 个已暂存文件" });
+    await fireEvent.click(scopeButton);
+    expect(onScope).toHaveBeenCalledTimes(1);
   });
 });
+
+

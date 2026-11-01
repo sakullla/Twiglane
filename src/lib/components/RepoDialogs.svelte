@@ -126,7 +126,6 @@
     title="克隆仓库"
     titleId="repo-dialog-title"
     icon="download"
-    task="clone"
     description="克隆到新目录后会直接打开。目标里已有文件时不会覆盖。"
     {onClose}
   >

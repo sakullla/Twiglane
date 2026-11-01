@@ -305,6 +305,26 @@ describe("状态栏", () => {
     expect((screen.getByRole("button", { name: "刷新工作区" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("合并提示只在左栏隐藏时出现，文案与左栏一致，点击打开合并", async () => {
+    const onOpenMerge = vi.fn();
+    const base = { hasRepo: true, sync: "", conflictCount: 2, mergeInProgress: true, onOpenMerge };
+    const { container, rerender } = render(StatusBar, { props: base as never });
+    expect(container.querySelector("[data-merge-status]"), "左栏显示时不重复").toBeNull();
+
+    await rerender({ ...base, sidebarHidden: true } as never);
+    const notice = screen.getByRole("button", { name: "合并进行中，2 个冲突待处理，打开分支合并" });
+    expect(notice.textContent).toContain("2 个冲突待处理");
+    await fireEvent.click(notice);
+    expect(onOpenMerge).toHaveBeenCalledTimes(1);
+
+    await rerender({ ...base, sidebarHidden: true, conflictCount: 0 } as never);
+    expect(container.querySelector("[data-merge-status]")?.textContent, "冲突解决但未完成时仍在").toContain("可以完成合并");
+    await rerender({ ...base, sidebarHidden: true, conflictCount: 0, mergeInProgress: false } as never);
+    expect(container.querySelector("[data-merge-status]")).toBeNull();
+    await rerender({ ...base, sidebarHidden: true, hasRepo: false } as never);
+    expect(container.querySelector("[data-merge-status]")).toBeNull();
+  });
+
   it("隐藏侧栏按钮说出下一步动作，没有仓库时不显示", async () => {
     const onToggleSidebar = vi.fn();
     const { rerender } = render(StatusBar, { props: { hasRepo: true, sync: "", onToggleSidebar } as never });
@@ -653,6 +673,11 @@ describe("外壳样式契约", () => {
     expect(flat).toMatch(/border:\s*0/);
     expect(flat).toMatch(/border-radius:\s*0/);
     expect(flat).toMatch(/box-shadow:\s*none/);
+  });
+
+  it("窄左栏里分组动作收成图标，把宽度留给分组标题", () => {
+    const narrow = componentsCss.match(/@container file-list \(max-width: 240px\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(narrow).toMatch(/\.file-group-action\s*\{[^}]*display:\s*none/);
   });
 
   it("窄左栏里两个提交按钮上下排列，都不收成图标", () => {

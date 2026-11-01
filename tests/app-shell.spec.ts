@@ -679,6 +679,88 @@ describe("应用外壳", () => {
     await waitFor(() => expect(document.querySelector('[data-panel="merge"], .merge-panel')).toBeTruthy());
   });
 
+  it("左栏隐藏时状态栏接替合并提示，可点击进入，左栏显示时不重复", async () => {
+    mocks.mergeSession.mockResolvedValue(mergeSessionWith("merge"));
+    render(App);
+    await openRepo();
+    const status = () => document.querySelector<HTMLElement>("[data-merge-status]");
+    const banner = () => document.querySelector<HTMLElement>('.workbench-view[data-active="true"] [data-merge-banner]');
+    await waitFor(() => expect(banner()).toBeTruthy());
+    expect(status(), "左栏显示时只有左栏一处").toBeNull();
+
+    await press("b");
+    expect(status()?.tagName).toBe("BUTTON");
+    expect(status()?.textContent, "文案与左栏一致").toContain(banner()!.textContent!.trim());
+    expect(status()?.getAttribute("aria-label")).toBe(banner()?.getAttribute("aria-label"));
+    await fireEvent.click(status()!);
+    await waitFor(() => expect(document.querySelector('[data-panel="merge"], .merge-panel')).toBeTruthy());
+  });
+
+  it("没有合并时左栏隐藏，状态栏也没有提示", async () => {
+    render(App);
+    await openRepo();
+    await press("b");
+    expect(document.querySelector("[data-merge-status]")).toBeNull();
+  });
+
+  it("探测返回 stale 时保留合并提示，其他失败才收起", async () => {
+    mocks.mergeSession.mockResolvedValue(mergeSessionWith("merge"));
+    render(App);
+    await openRepo();
+    const banner = () => document.querySelector('.workbench-view[data-active="true"] [data-merge-banner]');
+    await waitFor(() => expect(banner()).toBeTruthy());
+
+    const calls = mocks.mergeSession.mock.calls.length;
+    mocks.mergeSession.mockRejectedValue({ code: "stale", message: "状态已变化", generation: 9 });
+    await press("r");
+    await waitFor(() => expect(mocks.mergeSession.mock.calls.length).toBe(calls + 1));
+    await tick();
+    await tick();
+    expect(banner(), "stale 不代表合并结束").toBeTruthy();
+
+    mocks.mergeSession.mockRejectedValue({ code: "merge_failed", message: "读取失败" });
+    await press("r");
+    await waitFor(() => expect(banner()).toBeNull());
+  });
+
+  it("较早的探测晚到达时不盖掉新结果", async () => {
+    mocks.mergeSession.mockResolvedValue(mergeSessionWith("merge"));
+    render(App);
+    await openRepo();
+    const banner = () => document.querySelector('.workbench-view[data-active="true"] [data-merge-banner]');
+    await waitFor(() => expect(banner()).toBeTruthy());
+
+    const resolvers: ((value: unknown) => void)[] = [];
+    mocks.mergeSession.mockImplementation(() => new Promise((resolve) => resolvers.push(resolve)));
+    await press("r");
+    await waitFor(() => expect(resolvers).toHaveLength(1));
+    await waitFor(() => expect(document.querySelector("[data-diff-row]")).toBeTruthy());
+    await tick();
+    await press("r");
+    await waitFor(() => expect(resolvers).toHaveLength(2));
+
+    resolvers[1](mergeSessionWith("merge"));
+    await tick();
+    resolvers[0](mergeSessionWith("none"));
+    await tick();
+    await tick();
+    expect(banner(), "旧探测说没有合并，也不能盖掉较新的结果").toBeTruthy();
+
+    // 同一旧结果反过来也不能抢先：较新探测说结束时提示收起。
+    const more: ((value: unknown) => void)[] = [];
+    mocks.mergeSession.mockImplementation(() => new Promise((resolve) => more.push(resolve)));
+    await press("r");
+    await waitFor(() => expect(more).toHaveLength(1));
+    await press("r");
+    await waitFor(() => expect(more).toHaveLength(2));
+    more[1](mergeSessionWith("none"));
+    await waitFor(() => expect(banner()).toBeNull());
+    more[0](mergeSessionWith("merge"));
+    await tick();
+    await tick();
+    expect(banner()).toBeNull();
+  });
+
   it("合并在外部完成后，下一次刷新收起提示", async () => {
     mocks.mergeSession.mockResolvedValue(mergeSessionWith("merge"));
     render(App);

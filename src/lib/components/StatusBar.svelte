@@ -1,10 +1,12 @@
 <script lang="ts">
   import { MODIFIER_LABEL } from "../brand";
   import Icon from "./Icon.svelte";
+  import { mergeNotice } from "./MergeBanner.svelte";
 
   /**
    * 状态栏：只放同步结论、警告、忙碌和刷新。分支名在标题栏、改动数在左栏，这里不重复。
    * 隐藏侧栏的按钮放在这里，因为左栏隐藏后它是唯一还看得见的鼠标入口。
+   * 左栏隐藏时合并提示跟着看不见，这里接替它，进行中的合并始终醒目且能一键进入（R7）。
    */
   interface Props {
     hasRepo: boolean;
@@ -16,6 +18,9 @@
     onRefresh?: () => void;
     sidebarHidden?: boolean;
     onToggleSidebar?: () => void;
+    conflictCount?: number;
+    mergeInProgress?: boolean;
+    onOpenMerge?: () => void;
   }
 
   let {
@@ -28,9 +33,13 @@
     onRefresh,
     sidebarHidden = false,
     onToggleSidebar,
+    conflictCount = 0,
+    mergeInProgress = false,
+    onOpenMerge,
   }: Props = $props();
 
   let dotClass = $derived(degraded || warning ? "stale" : hasRepo ? "" : "off");
+  let notice = $derived(hasRepo && sidebarHidden && onOpenMerge ? mergeNotice(conflictCount, mergeInProgress) : null);
   let sidebarAction = $derived(sidebarHidden ? "显示侧栏" : "隐藏侧栏");
 </script>
 
@@ -51,6 +60,19 @@
     <span class={`sb-dot ${dotClass}`} aria-hidden="true"></span>
     <span>{hasRepo ? sync : "无仓库"}</span>
   </span>
+  {#if notice}
+    <button
+      type="button"
+      class="sb-item sb-merge"
+      data-merge-status
+      aria-label={notice.label}
+      title="打开分支合并继续处理"
+      onclick={onOpenMerge}
+    >
+      <Icon name="merge" size={12} />
+      <span>{notice.text}</span>
+    </button>
+  {/if}
   {#if busy}<span class="sb-item sb-busy"><span class="spinner"></span>写入中</span>{/if}
   {#if warning}
     <span class="sb-item sb-warn" title={warning}>{warning}</span>

@@ -273,6 +273,10 @@
 /* 窄栏里隐藏的行内动作不占位，把宽度留给文件名；键盘用空格暂存，悬停和选中时才出现。 */
 @container file-list (max-width: 240px) {
   .file-row:not(:hover, [aria-selected="true"]) .row-action { display: none; }
+  /* 分组动作收成图标，名称由 aria-label 和悬停提示承载，分组标题才读得全。 */
+  .file-group-action { display: none; }
+  .file-group { gap: var(--space-4); padding-left: var(--space-6); }
+  .file-group .btn { padding: 0 var(--space-4); }
 }
 
 /* ---------- 提交区 ---------- */

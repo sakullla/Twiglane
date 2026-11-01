@@ -197,30 +197,33 @@
                 type="button"
                 class="btn btn-ghost btn-sm"
                 disabled={disabled}
+                aria-label="去处理"
                 title="打开分支合并，逐处处理这些冲突文件"
                 onclick={() => onResolve?.(null)}
               >
-                <Icon name="merge" size={13} />去处理
+                <Icon name="merge" size={13} /><span class="file-group-action">去处理</span>
               </button>
             {:else if item.side === "unstaged" && onStageAll && item.paths.length > 0}
               <button
                 type="button"
                 class="btn btn-ghost btn-sm"
                 disabled={disabled}
+                aria-label="全部暂存"
                 title="暂存列表中所有未暂存文件（冲突文件除外）"
                 onclick={() => onStageAll?.(item.paths)}
               >
-                <Icon name="plus" size={13} />全部暂存
+                <Icon name="plus" size={13} /><span class="file-group-action">全部暂存</span>
               </button>
             {:else if item.side === "staged" && onUnstageAll && item.paths.length > 0}
               <button
                 type="button"
                 class="btn btn-ghost btn-sm"
                 disabled={disabled}
+                aria-label="全部取消暂存"
                 title="把列表中所有已暂存文件移回未暂存"
                 onclick={() => onUnstageAll?.(item.paths)}
               >
-                <Icon name="minus" size={13} />全部取消暂存
+                <Icon name="minus" size={13} /><span class="file-group-action">全部取消暂存</span>
               </button>
             {/if}
           </div>

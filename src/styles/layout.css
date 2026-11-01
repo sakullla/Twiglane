@@ -236,6 +236,7 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--warning) 
 .statusbar .sb-live { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .statusbar .sb-busy { color: var(--accent-text); }
 .statusbar .sb-warn { color: var(--warning-text); }
+.statusbar .sb-merge { background: var(--warning-soft); color: var(--warning-text); font-weight: var(--weight-medium); }
 .statusbar .spinner { width: 11px; height: 11px; border-width: 1.5px; }
 .statusbar button.sb-item { padding: 0 6px; height: 21px; border-radius: 5px; }
 .statusbar button.sb-item:hover { background: var(--hover); color: var(--fg); }

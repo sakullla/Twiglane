@@ -121,8 +121,67 @@ describe("提交区", () => {
     expect(message().style.height).toBe("240px");
   });
 
-  it("拖动上沿分隔线：向上拖拉高说明框，向下拖还给文件列表", async () => {
+  it("收起态按下分隔线不跳变，拖动从显示高度起算，松手后结果保持可见并记住", async () => {
+    const outside = document.createElement("button");
+    document.body.append(outside);
     renderDraft();
+    await fireEvent.pointerDown(handle(), { button: 0, clientY: 500, pointerId: 1 });
+    expect(message().style.height, "按下时分隔线不能和指针错开").toBe(`${MESSAGE_HEIGHT_COMPACT}px`);
+    await fireEvent.pointerMove(handle(), { clientY: 380, pointerId: 1 });
+    expect(message().style.height).toBe(`${MESSAGE_HEIGHT_COMPACT + 120}px`);
+    await fireEvent.pointerUp(handle(), { clientY: 380, pointerId: 1 });
+    expect(message().style.height, "松手不收回").toBe(`${MESSAGE_HEIGHT_COMPACT + 120}px`);
+    expect(localStorage.getItem("twiglane.commitMessageHeight")).toBe(String(MESSAGE_HEIGHT_COMPACT + 120));
+
+    await fireEvent.pointerDown(document.querySelector(".composer-scope")!);
+    expect(message().style.height, "点提交区内部仍不收起").toBe(`${MESSAGE_HEIGHT_COMPACT + 120}px`);
+    await fireEvent.pointerDown(outside);
+    expect(message().style.height, "离开提交区才收起").toBe(`${MESSAGE_HEIGHT_COMPACT}px`);
+    await fireEvent.focus(message());
+    expect(message().style.height, "再次聚焦回到拖出来的高度").toBe(`${MESSAGE_HEIGHT_COMPACT + 120}px`);
+    outside.remove();
+  });
+
+  it("收起态只点一下或手抖不改变布局，也不改写记住的高度", async () => {
+    localStorage.setItem("twiglane.commitMessageHeight", "240");
+    renderDraft();
+    await fireEvent.pointerDown(handle(), { button: 0, clientY: 500, pointerId: 1 });
+    await fireEvent.pointerMove(handle(), { clientY: 498, pointerId: 1 });
+    await fireEvent.pointerUp(handle(), { clientY: 498, pointerId: 1 });
+    expect(message().style.height).toBe(`${MESSAGE_HEIGHT_COMPACT}px`);
+    expect(localStorage.getItem("twiglane.commitMessageHeight")).toBe("240");
+  });
+
+  it("收起态向下拖没有效果，不改写记住的高度", async () => {
+    localStorage.setItem("twiglane.commitMessageHeight", "240");
+    renderDraft();
+    await fireEvent.pointerDown(handle(), { button: 0, clientY: 500, pointerId: 1 });
+    await fireEvent.pointerMove(handle(), { clientY: 560, pointerId: 1 });
+    expect(message().style.height).toBe(`${MESSAGE_HEIGHT_COMPACT}px`);
+    await fireEvent.pointerUp(handle(), { clientY: 560, pointerId: 1 });
+    expect(message().style.height).toBe(`${MESSAGE_HEIGHT_COMPACT}px`);
+    expect(localStorage.getItem("twiglane.commitMessageHeight")).toBe("240");
+  });
+
+  it("收起态拖一小段，松手落到最小高度并保持可见", async () => {
+    renderDraft();
+    await fireEvent.pointerDown(handle(), { button: 0, clientY: 500, pointerId: 1 });
+    await fireEvent.pointerMove(handle(), { clientY: 490, pointerId: 1 });
+    expect(message().style.height).toBe(`${MESSAGE_HEIGHT_COMPACT + 10}px`);
+    await fireEvent.pointerUp(handle(), { clientY: 490, pointerId: 1 });
+    expect(message().style.height).toBe(`${MESSAGE_HEIGHT_MIN}px`);
+  });
+
+  it("收起态双击恢复默认高度，结果看得见", async () => {
+    localStorage.setItem("twiglane.commitMessageHeight", "240");
+    renderDraft();
+    await fireEvent.dblClick(handle());
+    expect(message().style.height).toBe(`${MESSAGE_HEIGHT_DEFAULT}px`);
+    expect(localStorage.getItem("twiglane.commitMessageHeight")).toBe(String(MESSAGE_HEIGHT_DEFAULT));
+  });
+
+  it("拖动上沿分隔线：向上拖拉高说明框，向下拖还给文件列表", async () => {
+    renderDraft({ value: "草稿" });
     await fireEvent.pointerDown(handle(), { button: 0, clientY: 500, pointerId: 1 });
     await fireEvent.pointerMove(handle(), { clientY: 380, pointerId: 1 });
     expect(message().style.height).toBe(`${MESSAGE_HEIGHT_DEFAULT + 120}px`);

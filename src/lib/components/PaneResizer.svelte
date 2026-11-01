@@ -3,16 +3,18 @@
 
   /**
    * 左栏右沿的拖动条，改动和历史共用。value 是当前渲染宽度：窗口窄时它可能小于已保存宽度，
-   * 所以只有真的拖动或按键才回写，单纯点一下不会把收紧后的值存成偏好。
+   * 所以只有渲染宽度真的变了才回写。点一下、或顶着窗口上限继续调宽，都不会把收紧后的值存成偏好。
    */
   interface Props {
     value: number;
     label: string;
+    /** 把想要的宽度换算成实际渲染宽度。 */
+    fit: (width: number) => number;
     onResize: (width: number) => void;
     onCommit: () => void;
   }
 
-  let { value, label, onResize, onCommit }: Props = $props();
+  let { value, label, fit, onResize, onCommit }: Props = $props();
 
   function start(event: PointerEvent) {
     const target = event.currentTarget;
@@ -22,8 +24,10 @@
     let moved = false;
     target.setPointerCapture?.(event.pointerId);
     const move = (pointer: PointerEvent) => {
+      const next = clampWidth(startValue + pointer.clientX - startX);
+      if (fit(next) === value) return;
       moved = true;
-      onResize(clampWidth(startValue + pointer.clientX - startX));
+      onResize(next);
     };
     const stop = () => {
       target.removeEventListener("pointermove", move);
@@ -40,6 +44,7 @@
     const next = nudgeWidth(value, event.key);
     if (next === null) return;
     event.preventDefault();
+    if (fit(next) === value) return;
     onResize(next);
     onCommit();
   }

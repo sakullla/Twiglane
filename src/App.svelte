@@ -326,7 +326,8 @@
         void runSync("push", (path, generation) => api.pushBranch(path, generation, nextId()));
         return;
       case "rail.toggle":
-        sidebarHidden = !sidebarHidden;
+        // 没有仓库时没有左栏可隐藏，这里记下状态会让下次打开仓库时看不到左栏。
+        if (opened) sidebarHidden = !sidebarHidden;
         return;
       case "palette.open":
         openPalette();
@@ -461,8 +462,10 @@
       const session = await api.mergeSession(current.summary.path, current.generation, nextId());
       if (serial !== mergeProbeSerial || opened?.summary.path !== current.summary.path) return;
       mergeInProgress = session.operation === "merge" || session.canAbort;
-    } catch {
-      if (serial === mergeProbeSerial && opened?.summary.path === current.summary.path) mergeInProgress = false;
+    } catch (error) {
+      if (serial !== mergeProbeSerial || opened?.summary.path !== current.summary.path) return;
+      // stale 只说明这次探测用了旧 generation，不代表合并结束，提示不能因此消失。
+      if (normalizeError(error).code !== "stale") mergeInProgress = false;
     }
   }
 
@@ -1852,6 +1855,7 @@
         <PaneResizer
           value={paneWidth}
           label="调整侧栏宽度"
+          fit={(width) => fitPaneWidth(width, windowWidth)}
           onResize={(width) => (widths = { ...widths, files: width })}
           onCommit={persistWidths}
         />
@@ -2002,6 +2006,9 @@
     onRefresh={() => runCommand("view.refresh")}
     {sidebarHidden}
     onToggleSidebar={() => runCommand("rail.toggle")}
+    {conflictCount}
+    {mergeInProgress}
+    onOpenMerge={() => runCommand("task.merge")}
   />
 </div>
 

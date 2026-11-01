@@ -91,6 +91,8 @@
   const SUMMARY_SOFT = 50;
   const SUMMARY_HARD = 72;
   const KEY_STEP = 16;
+  /** 按下后移动不到这个距离算点击，手抖不改写记住的高度。 */
+  const DRAG_SLOP = 3;
   const FILE_LIST_RESERVE = 300;
 
   let summaryChars = $derived(summaryLength(value));
@@ -100,10 +102,12 @@
   let section = $state<HTMLElement | null>(null);
   let menuStyle = $state("");
   let height = $state(readStoredHeight());
-  let dragging = $state(false);
+  /** 拖动中的显示高度：从按下时看到的高度起算，所以收起态开始拖也不会跳变。 */
+  let dragHeight = $state<number | null>(null);
+  let dragging = $derived(dragHeight !== null);
   /** 用户正在写说明或调高度。只由说明框和分隔线打开，点提交区里的按钮不改变布局，否则按钮会在按下时移位。 */
   let active = $state(false);
-  let shownHeight = $derived(active || dragging || value.length > 0 ? height : MESSAGE_HEIGHT_COMPACT);
+  let shownHeight = $derived(dragHeight ?? (active || value.length > 0 ? height : MESSAGE_HEIGHT_COMPACT));
   let committing = $derived(busy === "commit" || busy === "commit-push");
   let ready = $derived(hasCommitSummary(value) && paths.length > 0 && !disabled);
   let blocker = $derived(
@@ -192,20 +196,43 @@
     event.preventDefault();
     const handle = event.currentTarget as HTMLElement;
     const startY = event.clientY;
-    const startHeight = height;
-    dragging = true;
+    const startHeight = shownHeight;
+    const wasActive = active;
+    const fromCompact = startHeight < MESSAGE_HEIGHT_MIN;
+    let moved = false;
+    active = true;
+    dragHeight = startHeight;
     handle.setPointerCapture?.(event.pointerId);
-    const move = (next: PointerEvent) => setHeight(startHeight + (startY - next.clientY), false);
+    const move = (next: PointerEvent) => {
+      const delta = startY - next.clientY;
+      if (!moved && Math.abs(delta) < DRAG_SLOP) return;
+      moved = true;
+      const upper = clampMessageHeight(MESSAGE_HEIGHT_MAX, maxHeight());
+      const lower = fromCompact ? MESSAGE_HEIGHT_COMPACT : MESSAGE_HEIGHT_MIN;
+      dragHeight = Math.round(Math.min(upper, Math.max(lower, startHeight + delta)));
+    };
     const up = () => {
-      dragging = false;
-      storeHeight(height);
+      const final = dragHeight ?? startHeight;
+      dragHeight = null;
       handle.removeEventListener("pointermove", move);
       handle.removeEventListener("pointerup", up);
       handle.removeEventListener("pointercancel", up);
+      // 没拖动或收起态往下拖：布局不变，也不改写记住的高度。
+      if (!moved || (fromCompact && final <= startHeight)) {
+        active = wasActive;
+        return;
+      }
+      setHeight(final);
     };
     handle.addEventListener("pointermove", move);
     handle.addEventListener("pointerup", up);
     handle.addEventListener("pointercancel", up);
+  }
+
+  /** 收起态双击也要看得到结果，所以先展开再恢复默认高度。 */
+  function resetHeight() {
+    active = true;
+    setHeight(MESSAGE_HEIGHT_DEFAULT);
   }
 
   function resizeKey(event: KeyboardEvent) {
@@ -246,7 +273,7 @@
     onpointerdown={startResize}
     onkeydown={resizeKey}
     onfocus={() => (active = true)}
-    ondblclick={() => setHeight(MESSAGE_HEIGHT_DEFAULT)}
+    ondblclick={resetHeight}
   ></div>
   <span class="sr-only">{scope}</span>
   <div class="composer-head">

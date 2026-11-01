@@ -87,6 +87,11 @@
   let live = $state("正在准备 Twiglane");
   let opened = $state<OpenedRepository | null>(null);
   let draft = $state("");
+  /**
+   * R5：上一次提交失败的原因。它只在提交区就地显示（CommitDraft 的 data-commit-error），
+   * 与右下角通知条并行而不是替代——通知条会自己消失，提交区这份留到下次尝试或说明改动为止。
+   */
+  let commitError = $state<string | null>(null);
   let selected = $state<FileSelection | null>(null);
   let diff = $state<DiffResponse | null>(null);
   let diffError = $state<string | null>(null);
@@ -448,6 +453,7 @@
     selected = retainSelection(next.snapshot.files, selected) ?? (first ? { path: first.path, side: first.side } : null);
     diff = null;
     diffError = null;
+    commitError = null;
     pushRetry = false;
     phaseNote = null;
     workspaceView = "changes";
@@ -600,13 +606,15 @@
     void probeMerge();
   }
 
-  function handleMutationError(error: unknown) {
+  /** 写操作的失败出口：通知条统一在这里落，调用方还能拿到归一化后的失败去就地说明。 */
+  function handleMutationError(error: unknown): AppFailure {
     const failure = normalizeError(error);
     if (failure.generation !== undefined && opened && failure.generation !== opened.generation) {
       opened = { ...opened, generation: failure.generation };
       if (failure.code === "stale" || failure.code === "stale_patch") void refresh();
     }
     showError(failure);
+    return failure;
   }
 
   async function stagePath(relative: string) {
@@ -745,6 +753,8 @@
     }
     pending = "commit";
     live = "正在创建本地提交";
+    // 新一次尝试开始：上一次失败的原因不再代表当前状态。
+    commitError = null;
     try {
       await flushDraft(current.summary.path);
       const result = await api.commitChanges(current.summary.path, message, current.generation, nextId());
@@ -761,7 +771,11 @@
       live = result.summary;
       await loadSelectedDiff();
     } catch (error) {
-      if (opened?.summary.path === current.summary.path) handleMutationError(error);
+      if (opened?.summary.path === current.summary.path) {
+        // R5：失败原因要留在提交区里（缺身份、钩子拒绝、索引锁、过期各自可辨），
+        // 草稿与仍然有效的暂存都不动，通知条只是第二条渠道。
+        commitError = handleMutationError(error).message;
+      }
     } finally {
       pending = null;
     }
@@ -784,6 +798,8 @@
     pending = "commit-push";
     phaseNote = "正在创建本地提交";
     live = phaseNote;
+    // 与「提交到本地」同源：新一次尝试开始就清掉上一次的行内原因。
+    commitError = null;
     try {
       await flushDraft(current.summary.path);
       const result = await api.commitAndPush(current.summary.path, message, current.generation, nextId());
@@ -798,7 +814,11 @@
       live = result.summary;
       await loadSelectedDiff();
     } catch (error) {
-      if (opened?.summary.path === current.summary.path) handleMutationError(error);
+      if (opened?.summary.path === current.summary.path) {
+        // 这里失败的是「先完成本地提交」那一段（推送失败走 pushError，不抛）。
+        // 两条提交路径因此给出同一份就地原因，而不是只有「提交到本地」这一条。
+        commitError = handleMutationError(error).message;
+      }
     } finally {
       pending = null;
     }
@@ -1010,6 +1030,8 @@
 
   function onDraftInput(value: string) {
     draft = value;
+    // 说明一改，上一次失败的原因就不再对应现在这条说明；重试前先收起来。
+    commitError = null;
     drafts.edit(value);
     scheduleDraftSave();
   }
@@ -1493,12 +1515,18 @@
       <div class="menu left" role="menu" aria-label="切换仓库">
         <div class="repo-menu-title">选择要打开的仓库</div>
         {#each recent.slice(0, 6) as repo (repo.path)}
+          <!-- R11：禁用态也要给出原因。面板与 rail 各有一份措辞，菜单只有灰按钮就成了一条静默失败的路。 -->
           <button
             type="button"
             class="menu-item repo-menu-item"
             role="menuitemradio"
             aria-checked={repo.path === opened?.summary.path}
             disabled={switchBlocked(commandState)}
+            title={switchBlocked(commandState)
+              ? switchBlockedReason(commandState)
+              : repo.path === opened?.summary.path
+                ? `当前仓库：${repo.path}`
+                : `切换到 ${repo.name}`}
             onclick={() => {
               repoMenuOpen = false;
               void openRecent(repo.path);
@@ -1634,6 +1662,7 @@
                   value={draft}
                   disabled={writeLocked}
                   busy={pending}
+                  error={commitError}
                   onInput={onDraftInput}
                   onBlur={() => void flushDraft(drafts.path)}
                   onCommit={commitLocal}

@@ -226,6 +226,11 @@
 .composer-actions .btn-primary { flex: 1; }
 .composer-actions kbd { font-size: 9px; }
 .composer .hint { font-size: 10px; line-height: 1.5; color: var(--fg-subtle); }
+/* 提交失败的行内原因（R5）：与 data-commit-blocker 同一行、同一块，只是换成危险语义。
+   必须排在上面 .composer .hint 之后：两者同为两个类，靠顺序取危险色。
+   --danger-text 在 --surface 上的比值已由 check-contrast 的 danger-text/surface 一对守住；
+   文字靠 .truncate 保持单行，所以新增这一行不会把提交区顶过 R5 的 200px。 */
+.composer-meta .composer-error { color: var(--danger-text); }
 .scope-details summary { display: flex; align-items: center; gap: 5px; cursor: pointer; font-size: 10.5px; color: var(--fg-muted); list-style: none; user-select: none; width: fit-content; border-radius: 4px; }
 .scope-details summary:hover { color: var(--fg); }
 .scope-details summary::-webkit-details-marker { display: none; }

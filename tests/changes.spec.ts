@@ -542,6 +542,67 @@ describe("主工作台", () => {
     expect(mocks.openRepository.mock.lastCall?.[0]).toBe(repoPath);
   });
 
+  it("提交失败时在提交区就地说明原因，两条提交路径都算，草稿与暂存都保留（R5）", async () => {
+    // Rust 侧 classify_commit 的真实措辞：钩子拒绝与缺身份分别可辨，不是笼统的「提交失败」。
+    const hookFailure = {
+      code: "hook_rejected",
+      message: "提交钩子拒绝了这次提交。.git/hooks/pre-commit 以 1 退出。 说明和已暂存内容都还保留。",
+    };
+    const identityFailure = {
+      code: "identity_missing",
+      message: "缺少提交身份。请配置 user.name 与 user.email 后再试。说明和已暂存内容都还保留。",
+    };
+    mocks.commitChanges.mockRejectedValueOnce(hookFailure);
+    renderApp();
+    await openRepo();
+
+    const textarea = () => document.querySelector<HTMLTextAreaElement>(".composer textarea")!;
+    await fireEvent.input(textarea(), { target: { value: "重做工作台外壳" } });
+    await fireEvent.click(screen.getByRole("button", { name: "提交到本地" }));
+
+    const inline = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>("[data-commit-error]");
+      expect(node, "提交区要就地给出失败原因").toBeTruthy();
+      return node!;
+    });
+    expect(inline.textContent?.trim()).toContain("提交钩子拒绝了这次提交");
+    expect(inline.getAttribute("title")).toContain("提交钩子拒绝了这次提交");
+    // 通知条可以留着，但它不能是唯一渠道：两块文本同时说同一件事。
+    await waitFor(() =>
+      expect(document.querySelector(".toast.error .toast-text")?.textContent).toContain("提交钩子拒绝了这次提交"),
+    );
+    // 失败不吞掉输入：说明还在，按钮仍然可用（暂存也还在）。
+    expect(textarea().value).toBe("重做工作台外壳");
+    const localButton = screen.getByRole("button", { name: "提交到本地" });
+    expect(localButton.hasAttribute("disabled")).toBe(false);
+    expect(document.querySelector("[data-commit-blocker]"), "有失败原因时不再显示「草稿自动保存」").toBeNull();
+
+    // 说明一改，上一次的原因就不再对应现在这条说明。
+    await fireEvent.input(textarea(), { target: { value: "重做工作台外壳，补一句" } });
+    expect(document.querySelector("[data-commit-error]")).toBeNull();
+
+    // 第二条提交路径（提交并推送的「先完成本地提交」阶段）给出同一份就地原因。
+    mocks.commitAndPush.mockRejectedValueOnce(identityFailure);
+    await fireEvent.click(screen.getByRole("button", { name: "提交并推送" }));
+    await waitFor(() =>
+      expect(document.querySelector("[data-commit-error]")?.textContent?.trim()).toContain("缺少提交身份"),
+    );
+
+    // 重试成功后就地原因消失，改由 blocker 说明下一次为什么点不动。
+    mocks.commitChanges.mockResolvedValueOnce({
+      oid: "abcdef1234567",
+      generation: 5,
+      branch: "main",
+      summary: "已提交 abcdef1",
+      files: ["src/app.css"],
+      pushed: false,
+      snapshot: { generation: 5, branch, files: [] },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "提交到本地" }));
+    await waitFor(() => expect(document.querySelector("[data-commit-error]")).toBeNull());
+    expect(document.querySelector("[data-commit-blocker]")?.textContent?.trim()).toBe("先暂存要提交的文件");
+  });
+
   it("历史与改动来回切换后各自滚动与选中保留，浏览历史不写入", async () => {
     renderApp();
     await openRepo();

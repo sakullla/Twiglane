@@ -16,6 +16,11 @@
     value: string;
     disabled: boolean;
     busy?: string | null;
+    /**
+     * 上一次提交失败的原因（R5）：缺身份、钩子拒绝、索引锁或过期都走这里。
+     * 与右下角通知条同源，但提交区里必须也留一份可见文本，通知条不能是唯一渠道。
+     */
+    error?: string | null;
     onInput: (value: string) => void;
     onBlur: () => void;
     onCommit: () => void;
@@ -26,7 +31,7 @@
     overflow?: Snippet;
   }
 
-  let { branch, scope, paths, value, disabled, busy = null, onInput, onBlur, onCommit, onCommitPush, onScope, overflow }: Props =
+  let { branch, scope, paths, value, disabled, busy = null, error = null, onInput, onBlur, onCommit, onCommitPush, onScope, overflow }: Props =
     $props();
 
   let firstLine = $derived(summaryLength(value));
@@ -111,6 +116,11 @@
              与「草稿自动保存」二选一，并用 .truncate 保持单行：
              窄文件列表（最小 160px）里折行会把提交区顶过 R5 的 200px 上限。 -->
         <span class="hint truncate" data-commit-blocker title={blocker}>{blocker}</span>
+      {:else if error}
+        <!-- R5：提交失败（缺身份 / 钩子拒绝 / 索引锁 / 过期）同样在这块就地说明。
+             优先级低于 blocker：按钮又变成灰的时候，「为什么点不动」比上次为什么失败更要紧。
+             完整原因留在 title 里，可见文本用 .truncate 保住单行与 200px 上限。 -->
+        <span class="hint truncate composer-error" data-commit-error title={error}>{error}</span>
       {:else}
         <span title="输入停止后自动保存为草稿">草稿自动保存</span>
       {/if}

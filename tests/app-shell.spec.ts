@@ -543,6 +543,8 @@ describe("应用外壳", () => {
       return node!;
     });
     expect(menuItem.hasAttribute("disabled"), "标题栏菜单与面板同源").toBe(true);
+    // 灰按钮也要说出原因：README 承诺「就地禁用并给出原因」，菜单因此不能只剩一个禁用态。
+    expect(menuItem.getAttribute("title"), "菜单条目上带着同一个原因").toBe("正在读取，稍后再试");
     await press("Escape");
     await waitFor(() => expect(document.querySelector(".titlebar-menu")).toBeNull());
 

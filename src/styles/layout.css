@@ -139,7 +139,7 @@
 /* 展开态的当前项给一条左沿竖条，与文件列表/历史列表的选中行同一语言 */
 .sidebar.rail:not(.collapsed) .workspace-nav-item.active::before { content: ""; position: absolute; left: 2px; top: 9px; bottom: 9px; width: 2.5px; border-radius: 2px; background: var(--accent); }
 .workspace-nav-item kbd { opacity: 0; border: 0; box-shadow: none; background: transparent; padding: 2px 0; transition: opacity var(--duration-fast) var(--ease); }
-/* 键位提示是正文信息：出现时用不透明度 1，0.75 会把 --fg-subtle 从 5.10:1 压到 3.11:1（浅）。
+/* 键位提示是正文信息：出现时用不透明度 1，0.75 会把 --fg-subtle 从 6.55:1 压到 3.64:1（浅）。
    隐藏→显示的过渡仍由 opacity 承担。 */
 .workspace-nav-item:hover kbd, .workspace-nav-item:focus-visible kbd { opacity: 1; }
 .workspace-nav-item.active .count { background: var(--accent); color: var(--accent-fg); }
@@ -154,7 +154,7 @@
 .repo[aria-current="true"] { background: var(--surface); box-shadow: var(--repo-current-shadow); }
 .repo[aria-current="true"]::before { content: ""; position: absolute; left: 0; top: 13px; bottom: 13px; width: 2.5px; border-radius: 2px; background: var(--accent); }
 .repo-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: var(--space-8) var(--space-8); text-align: left; border-radius: var(--radius-sm); }
-.repo-badge { display: grid; place-items: center; width: 31px; height: 31px; border-radius: 9px; font-size: var(--text-sm); font-weight: var(--weight-semibold); flex: none; color: hsl(var(--hue, 150) var(--repo-badge-fg-sat) var(--repo-badge-fg-light)); background: hsl(var(--hue, 150) var(--repo-badge-bg-sat) var(--repo-badge-bg-light)); box-shadow: inset 0 0 0 1px hsl(var(--hue, 150) var(--repo-badge-ring-sat) var(--repo-badge-ring-light) / var(--repo-badge-ring-alpha)); }
+.repo-badge { display: grid; place-items: center; width: 31px; height: 31px; border-radius: 9px; font-size: var(--text-sm); font-weight: var(--weight-semibold); flex: none; color: hsl(var(--hue, 238) var(--repo-badge-fg-sat) var(--repo-badge-fg-light)); background: hsl(var(--hue, 238) var(--repo-badge-bg-sat) var(--repo-badge-bg-light)); box-shadow: inset 0 0 0 1px hsl(var(--hue, 238) var(--repo-badge-ring-sat) var(--repo-badge-ring-light) / var(--repo-badge-ring-alpha)); }
 .topbar .repo-badge { width: 33px; height: 33px; }
 .repo-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.35; }
 .repo-name { font-size: var(--text-sm); font-weight: var(--weight-medium); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -263,11 +263,11 @@
 .action-card.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: transparent; transform: translateY(-2px); box-shadow: 0 12px 26px color-mix(in srgb, var(--accent) 26%, transparent), inset 0 1px 0 var(--on-accent-line); }
 .action-card.primary .ac-icon { background: var(--on-accent-soft); color: inherit; }
 /* 主行动卡的说明文字是正文（9.5px，浅色底 accent）：必须完全不透明地取 --accent-fg
-   （对 --accent 浅 4.56:1 / 深 7.55:1，对 --accent-hover 浅 5.85:1 / 深 9.04:1）。
-   曾经的 75% 淡化合成后只剩 3.27:1（浅）/ 4.46:1（深），低于正文 4.5:1。 */
+   （对 --accent 浅 5.62:1 / 深 5.75:1，对 --accent-hover 浅 6.97:1 / 深 7.45:1）。
+   75% 淡化合成后只剩 3.91:1（浅）/ 3.99:1（深），低于正文 4.5:1。 */
 .action-card.primary .ac-copy > span { color: var(--accent-fg); }
-/* 右上角箭头是纯字形指示，不承载文字信息：75% 淡化对 --accent 3.27:1 / 对
-   --accent-hover 4.04:1（浅），满足非文本 3:1。该淡化位点登记在
+/* 右上角箭头是纯字形指示，不承载文字信息：75% 淡化对 --accent 3.91:1 / 对
+   --accent-hover 4.68:1（浅），满足非文本 3:1。该淡化位点登记在
    scripts/check-contrast.mjs 的 COLOR_MIX_ALPHA_SITES 里，改比例必须同步校准。 */
 .action-card.primary > .icon { color: color-mix(in srgb, var(--accent-fg) 75%, transparent); }
 .welcome-section-head { display: flex; align-items: flex-end; padding: 0 2px 11px; }
@@ -307,7 +307,7 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--warning) 
 .statusbar .spinner { width: 11px; height: 11px; border-width: 1.5px; }
 .statusbar button.sb-item { padding: 0 6px; height: 21px; border-radius: 5px; }
 .statusbar button.sb-item:hover { background: var(--hover); color: var(--fg); }
-.sb-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
+.sb-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); flex: none; }
 .sb-dot.stale { background: var(--warning); }
 .sb-dot.off { background: var(--fg-subtle); }
 

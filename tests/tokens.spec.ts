@@ -181,7 +181,7 @@ describe("设计令牌", () => {
       expect(body, selector).toMatch(/var\(--control-border(-hover)?\)/);
       expect(body, selector).not.toMatch(/var\(--border(-strong)?\)/);
     };
-    for (const selector of [".field", ".input, .textarea, .select", ".checkbox", ".switch input", ".btn-secondary", ".conflict-file"]) {
+    for (const selector of [".field", ".input, .textarea, .select", ".checkbox", ".switch input", ".btn-secondary"]) {
       expectControlBoundary(components, selector);
     }
     for (const selector of [".branch-pill", ".action-card", ".sidebar-add"]) {
@@ -190,7 +190,6 @@ describe("设计令牌", () => {
     for (const [file, css, selector] of [
       ["components.css", components, ".field:hover"],
       ["components.css", components, ".btn-secondary:hover:not(:disabled)"],
-      ["components.css", components, ".conflict-file:hover:not(:disabled)"],
       ["layout.css", layout, ".branch-pill:hover:not(:disabled)"],
       ["layout.css", layout, ".action-card:hover:not(:disabled)"],
       ["layout.css", layout, ".sidebar-add:hover:not(:disabled)"],
@@ -232,6 +231,176 @@ describe("设计令牌", () => {
   });
 });
 
+describe("石墨靛蓝配色（R1）", () => {
+  type Rgb = { r: number; g: number; b: number };
+
+  const toRgb = (value: string): Rgb => {
+    const hex = value.match(/^#([0-9a-fA-F]{6})$/);
+    if (hex) {
+      const [r, g, b] = [0, 2, 4].map((offset) => Number.parseInt(hex[1].slice(offset, offset + 2), 16));
+      return { r, g, b };
+    }
+    const rgba = value.match(/^rgba?\(\s*(\d+),\s*(\d+),\s*(\d+)/);
+    if (!rgba) throw new Error(`无法解析颜色：${value}`);
+    return { r: Number(rgba[1]), g: Number(rgba[2]), b: Number(rgba[3]) };
+  };
+
+  const hueOf = ({ r, g, b }: Rgb): number => {
+    const max = Math.max(r, g, b);
+    const chroma = max - Math.min(r, g, b);
+    if (chroma === 0) return 0;
+    if (max === r) return (((g - b) / chroma + 6) % 6) * 60;
+    if (max === g) return ((b - r) / chroma + 2) * 60;
+    return ((r - g) / chroma + 4) * 60;
+  };
+
+  const tokenHue = (tokens: Map<string, string>, name: string): number => hueOf(toRgb(tokens.get(name) as string));
+
+  it("目标色值按需求落地，且默认文档主题是深色", () => {
+    const targets: Record<"dark" | "light", Record<string, string>> = {
+      dark: {
+        "--bg": "#111214",
+        "--surface": "#18191c",
+        "--border": "#26282d",
+        "--fg": "#e8e9ec",
+        "--fg-muted": "#9a9da6",
+        "--accent": "#7c83f7",
+      },
+      light: { "--bg": "#f7f7f8", "--surface": "#ffffff", "--accent": "#4f56e0" },
+    };
+    for (const [name, expected] of Object.entries(targets.dark)) expect(dark.get(name), `dark ${name}`).toBe(expected);
+    for (const [name, expected] of Object.entries(targets.light)) expect(light.get(name), `light ${name}`).toBe(expected);
+    expect(read(path.join(root, "index.html"))).toMatch(/<html[^>]*data-theme="dark"/);
+  });
+
+  it("强调色、焦点环和品牌渐变都是靛蓝", () => {
+    for (const [theme, tokens] of [["light", light], ["dark", dark]] as const) {
+      for (const name of ["--accent", "--accent-hover", "--accent-text", "--accent-soft", "--accent-softer", "--focus"]) {
+        const hue = tokenHue(tokens, name);
+        expect(hue, `${theme} ${name}`).toBeGreaterThanOrEqual(225);
+        expect(hue, `${theme} ${name}`).toBeLessThanOrEqual(250);
+      }
+      const stops = (tokens.get("--brand-grad") ?? "").match(/#[0-9a-fA-F]{6}/g) ?? [];
+      expect(stops.length, `${theme} --brand-grad 色标`).toBeGreaterThanOrEqual(2);
+      for (const stop of stops) {
+        expect(hueOf(toRgb(stop)), `${theme} --brand-grad ${stop}`).toBeGreaterThanOrEqual(225);
+        expect(hueOf(toRgb(stop)), `${theme} --brand-grad ${stop}`).toBeLessThanOrEqual(250);
+      }
+    }
+  });
+
+  it("新增行仍是语义绿，并与强调色明显不同", () => {
+    for (const [theme, tokens] of [["light", light], ["dark", dark]] as const) {
+      for (const name of ["--add-fg", "--add-bg", "--add-strong"]) {
+        const hue = tokenHue(tokens, name);
+        expect(hue, `${theme} ${name}`).toBeGreaterThanOrEqual(100);
+        expect(hue, `${theme} ${name}`).toBeLessThanOrEqual(170);
+        expect(tokenHue(tokens, "--accent") - hue, `${theme} ${name} 与强调色的色相差`).toBeGreaterThanOrEqual(60);
+      }
+    }
+  });
+
+  it("成功语义令牌是语义绿，且与强调色明显不同", () => {
+    for (const [theme, tokens] of [["light", light], ["dark", dark]] as const) {
+      for (const name of ["--success", "--success-soft", "--success-softer", "--success-text"]) {
+        const hue = tokenHue(tokens, name);
+        expect(hue, `${theme} ${name}`).toBeGreaterThanOrEqual(100);
+        expect(hue, `${theme} ${name}`).toBeLessThanOrEqual(170);
+        expect(tokenHue(tokens, "--accent") - hue, `${theme} ${name} 与强调色的色相差`).toBeGreaterThanOrEqual(60);
+      }
+    }
+  });
+
+  it("表示成功、完成、通过的位置走语义绿，不借用靛蓝强调色", () => {
+    const components = read(path.join(stylesDir, "components.css"));
+    const layout = read(path.join(stylesDir, "layout.css"));
+    const componentSelectors = [
+      ".composer-meta:has(.composer-ready) > .icon",
+      ".empty-icon.ok",
+      ".toast.ok .toast-icon",
+      ".callout.ok",
+      ".merge-verdict.ok",
+      ".merge-verdict.ok .merge-verdict-icon",
+      ".merge-stat.ok strong",
+      ".merge-done-icon",
+      ".mp-status.ok",
+      ".merge-progress > span",
+      ".conflict-file-progress.ok",
+      ".conflict-file.resolved .conflict-file-icon",
+      ".conflict-file.resolved .conflict-file-icon .icon",
+      ".cr-line.res",
+      ".cr-line.res .ln",
+      ".cr-dot.ok",
+      '.chip.current[data-hunk-state="resolved"]',
+      ".cr-ruler-mark.ok",
+      ".cr-progress > span",
+    ];
+    for (const selector of componentSelectors) {
+      const body = ruleBody(components, selector);
+      expect(body, selector).toMatch(/var\(--(success|on-success)/);
+      expect(body, selector).not.toMatch(/var\(--accent/);
+    }
+    expect(ruleBody(layout, ".sb-dot"), ".sb-dot 常态").toMatch(/background:\s*var\(--success\)/);
+  });
+
+  it("样式层没有旧绿色强调色残留", () => {
+    const retired = [
+      "#0e7c55",
+      "#0a6b49",
+      "#0b6b4a",
+      "#12976a",
+      "#35c98c",
+      "#43d69a",
+      "#5ce0aa",
+      "#6fe0b2",
+      "#4bd89f",
+      "#4ade9d",
+      "#1d9d6d",
+      "rgba(14, 124, 85",
+      "rgba(67, 214, 154",
+      "--hue, 150",
+    ];
+    for (const file of layerFiles) {
+      const css = stripComments(read(path.join(stylesDir, file))).toLowerCase();
+      for (const value of retired) expect(css.includes(value), `${file} 残留 ${value}`).toBe(false);
+    }
+  });
+});
+
+describe("行静止时没有描边卡片（R2）", () => {
+  const components = read(path.join(stylesDir, "components.css"));
+  const declares = (body: string, property: string) => new RegExp(`(?:^|;)\\s*${property}\\s*:`).test(body);
+
+  it("文件行、提交行和冲突文件行静止时只有透明边界，没有填充和阴影", () => {
+    for (const selector of [".file-row", ".history-row", ".conflict-file"]) {
+      const body = ruleBody(components, selector);
+      expect(body, `${selector} 边界`).toMatch(/border:\s*1px solid transparent/);
+      expect(declares(body, "box-shadow"), `${selector} 阴影`).toBe(false);
+      expect(body, `${selector} 填充`).not.toMatch(/(?:^|;)\s*background\s*:(?!\s*transparent)/);
+    }
+  });
+
+  it("分支行不再带行分隔线", () => {
+    expect(ruleBody(components, ".branch-row"), ".branch-row").toMatch(/border-bottom:\s*0/);
+  });
+
+  it("悬停和选中才出现状态底色，选中不再叠描边和阴影", () => {
+    for (const selector of [".file-row:hover", ".history-row:hover", ".conflict-file:hover:not(:disabled)"]) {
+      expect(ruleBody(components, selector), selector).toMatch(/background:\s*var\(--hover\)/);
+    }
+    for (const selector of [
+      '.file-row[aria-selected="true"]',
+      '.history-row[aria-selected="true"]',
+      '.conflict-sidebar .conflict-file[aria-pressed="true"]',
+    ]) {
+      const body = ruleBody(components, selector);
+      expect(body, selector).toMatch(/background:\s*var\(--accent-soft\)/);
+      expect(declares(body, "border-color"), `${selector} 描边`).toBe(false);
+      expect(declares(body, "box-shadow"), `${selector} 阴影`).toBe(false);
+    }
+  });
+});
+
 describe("样式分层结构", () => {
   it("四层文件齐备", () => {
     for (const file of layerFiles) {
@@ -244,7 +413,7 @@ describe("样式分层结构", () => {
       const css = stripComments(read(path.join(stylesDir, file)));
       const withoutUrls = css.replace(/url\((['"]?)[^)]*\1\)/g, "url()");
       expect(withoutUrls, file).not.toMatch(/#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?\b/);
-      // 颜色函数只允许由 var() 组合（如 hsl(var(--hue, 150) var(--x-sat) var(--x-light))），
+      // 颜色函数只允许由 var() 组合（如 hsl(var(--hue, 238) var(--x-sat) var(--x-light))），
       // 首参是数值或十六进制即属写死的颜色。
       expect(withoutUrls, file).not.toMatch(/\b(?:rgba?|hsla?)\((?!\s*var\()/);
       // data URI 里的 %23abcdef 同样是写死的颜色，无法随主题切换
@@ -258,9 +427,9 @@ describe("样式分层结构", () => {
     const layout = read(path.join(stylesDir, "layout.css"));
     const avatar = ruleBody(components, ".avatar");
     const badge = ruleBody(layout, ".repo-badge");
-    expect(avatar).toMatch(/background:\s*hsl\(var\(--hue, 150\) var\(--avatar-bg-sat\) var\(--avatar-bg-light\)\)/);
-    expect(badge).toMatch(/color:\s*hsl\(var\(--hue, 150\) var\(--repo-badge-fg-sat\) var\(--repo-badge-fg-light\)\)/);
-    expect(badge).toMatch(/background:\s*hsl\(var\(--hue, 150\) var\(--repo-badge-bg-sat\) var\(--repo-badge-bg-light\)\)/);
+    expect(avatar).toMatch(/background:\s*hsl\(var\(--hue, 238\) var\(--avatar-bg-sat\) var\(--avatar-bg-light\)\)/);
+    expect(badge).toMatch(/color:\s*hsl\(var\(--hue, 238\) var\(--repo-badge-fg-sat\) var\(--repo-badge-fg-light\)\)/);
+    expect(badge).toMatch(/background:\s*hsl\(var\(--hue, 238\) var\(--repo-badge-bg-sat\) var\(--repo-badge-bg-light\)\)/);
     // 派生颜色不能再以 :root 令牌的形式出现（那样 var(--hue) 会在根元素上取缺省值）
     const tokensCss = stripComments(read(path.join(stylesDir, "tokens.css")));
     for (const name of ["--avatar-bg", "--repo-badge-fg", "--repo-badge-bg"]) {
@@ -292,7 +461,7 @@ describe("样式分层结构", () => {
  * 装饰性发丝线白名单 —— 「默认拒绝」门禁的事实清单
  * ---------------------------------------------------------------------------
  * 为什么是白名单而不是逐条列举控件：`--border` / `--border-strong` 是发丝线，
- * 在白底上只有 1.1:1，只允许出现在「没有交互态、不承担控件边界」的轮廓与分隔线上。
+ * 在白底上只有 1.3:1，只允许出现在「没有交互态、不承担控件边界」的轮廓与分隔线上。
  * 反过来（枚举所有控件）每加一个控件就漏一次，因此改成：任何在 border 族声明里
  * 引用发丝线的规则，只要选择器不在下表，测试就红。新增控件必须显式改用
  * `--control-border` / `--control-border-hover`（或可测的 `--accent` 状态边界），
@@ -310,9 +479,9 @@ describe("样式分层结构", () => {
  *   `.art-branch-line > span`、`.empty-icon`、`.context-separator` 的 `color`）：
  *   它们同样只做分区/描边，且没有哪一处是某个控件唯一的可见边界。
  * - 以 `transparent` 为常态的控件不会被命中：它们的可辨识度由其它手段承担，属另一套判据，
- *   不在本门禁内。现存四处，逐个说明为何可接受：
+ *   不在本门禁内。现存五处，逐个说明为何可接受：
  *   `.btn`（文字按钮/实心按钮由标签与填充识别，ghost 有 hover 背景）、
- *   `.file-row` 与 `.history-row`（列表行由 hover 背景 + 选中态 accent-soft 填充与 accent 竖条识别）、
+ *   `.file-row`、`.history-row` 与 `.conflict-file`（列表行由 hover 背景 + 选中态 accent-soft 填充与 accent 竖条识别）、
  *   `.action-card.primary`（强调卡是实心 accent 填充，边界本就无意义）。
  *   注意 `.file-tools .field` 曾经也是 transparent，填充差只有 1.04:1，已被改为继承
  *   `.field` 的 --control-border（见下方「被点名过的控件」用例）。
@@ -449,8 +618,8 @@ describe("控件边界策略（默认拒绝）", () => {
       "textarea.full-value.editable",
       "textarea.full-value.editable:hover",
       "textarea.full-value.editable:focus",
-      ".conflict-sidebar .conflict-file",
-      ".conflict-sidebar .conflict-file:hover:not(:disabled)",
+      ".conflict-file",
+      ".conflict-file:hover:not(:disabled)",
       '.conflict-sidebar .conflict-file[aria-pressed="true"]',
       ".file-tools .field:focus-within",
       ".three-way-pane.result",
@@ -464,14 +633,11 @@ describe("控件边界策略（默认拒绝）", () => {
     expect(ruleBody(components, "textarea.full-value.editable:hover"), ".full-value.editable hover").toMatch(
       /var\(--control-border-hover\)/,
     );
-    for (const selector of [
-      ".conflict-sidebar .conflict-file",
-      ".conflict-sidebar .conflict-file:hover:not(:disabled)",
-      '.conflict-sidebar .conflict-file[aria-pressed="true"]',
-    ]) {
-      const body = ruleBody(components, selector);
-      expect(body, selector).toMatch(/border(-color)?:\s*1px solid var\(--(control-border(-hover)?|accent)\)|border-color:\s*var\(--(control-border(-hover)?|accent)\)/);
-    }
+    // 冲突文件行按列表行判定（见下方「行静止时没有描边卡片」），当前编辑对象仍靠 --accent 竖条标示，
+    // 不能退回只有浅底的选中态：--accent 对 --surface-2 的 ≥3:1 由 check-contrast 校验。
+    expect(ruleBody(components, '.conflict-sidebar .conflict-file[aria-pressed="true"]::before'), "冲突文件行选中竖条").toMatch(
+      /background:\s*var\(--accent\)/,
+    );
     expect(ruleBody(components, ".three-way-pane.result"), ".three-way-pane.result 常态").toMatch(
       /border-(right|left):\s*1px solid var\(--control-border\)/,
     );
@@ -487,8 +653,8 @@ describe("控件边界策略（默认拒绝）", () => {
   /**
    * 弱化位点的判据：不用元素级 opacity，改用弱化令牌。
    * 整行/文字 opacity 会把前景与所在表面按 α 合成，令牌层通过的值渲染后可能掉到
-   * 4.5:1 以下（整行 0.75 会把 --fg-subtle 的 5.10:1 压到 3.11:1，同时把该行的
-   * --control-border 压到 2.46:1）。scripts/check-contrast.mjs 的 COMPOSITE_TEXT_PAIRS
+   * 4.5:1 以下（整行 0.75 会把 --fg-subtle 的 6.55:1 压到 3.64:1，同时把该行的
+   * --control-border 压到 2.57:1）。scripts/check-contrast.mjs 的 COMPOSITE_TEXT_PAIRS
    * 按合成值兜底，这里挡住「重新加回 opacity」这一步。
    */
   it("弱化文字走弱化令牌，不用元素级 opacity", () => {
@@ -506,7 +672,7 @@ describe("控件边界策略（默认拒绝）", () => {
     expect(opacityDecl.test(fromPath), ".fd.from 不能用文字 opacity 弱化").toBe(false);
     expect(fromPath, "来源路径弱化色").toMatch(/color:\s*var\(--purple-dimmed\)/);
 
-    // 键位提示是正文信息：显示时必须完全不透明（0.75 会把 --fg-subtle 压到 3.11:1）。
+    // 键位提示是正文信息：显示时必须完全不透明（0.75 会把 --fg-subtle 压到 3.64:1）。
     const navKbd = ruleBody(layout, ".workspace-nav-item:hover kbd, .workspace-nav-item:focus-visible kbd");
     expect(navKbd, "键位提示显示态").toMatch(/opacity:\s*1(?:;|\s|$)/);
 
@@ -527,8 +693,8 @@ describe("控件边界策略（默认拒绝）", () => {
 
   /**
    * 主行动卡（起始页第一入口）的说明文字是正文：必须取不透明的 --accent-fg
-   * （对 --accent 浅 4.56:1 / 深 7.55:1，对 --accent-hover 浅 5.85:1 / 深 9.04:1）。
-   * 75% 的 color-mix 淡化合成后只剩 3.27:1（浅）/ 4.46:1（深），低于正文 4.5:1；
+   * （对 --accent 浅 5.62:1 / 深 5.75:1，对 --accent-hover 浅 6.97:1 / 深 7.45:1）。
+   * 75% 的 color-mix 淡化合成后只剩 3.91:1（浅）/ 3.99:1（深），低于正文 4.5:1；
    * 淡化只留给同一行那个纯字形箭头，并由 scripts/check-contrast.mjs 的
    * COLOR_MIX_ALPHA_SITES 按非文本 3:1 校验。
    */
@@ -546,8 +712,8 @@ describe("控件边界策略（默认拒绝）", () => {
   /**
    * 焦点可见性：被清零 outline 的可聚焦元素/容器必须补回 ≥3:1 的可见焦点环。
    * 判据是「环本身的颜色」而不是它旁边有什么：--accent-soft 只是 9.5%（深 13%）alpha 的
-   * tint，对 --surface 合成后约 1.13:1，画出来的环等于不可见；--focus 对 --surface 浅
-   * 3.56:1 / 深 9.31:1、对 --surface-2 浅 3.40:1 / 深 8.84:1，也已在 check-contrast 的
+   * tint，对 --surface 合成后约 1.15:1，画出来的环等于不可见；--focus 对 --surface 浅
+   * 5.62:1 / 深 6.99:1、对 --surface-2 浅 5.07:1 / 深 6.54:1，也已在 check-contrast 的
    * 交互对里。R15 的验收归 T5，这里只挡住样式层把洞开回去。
    */
   it("被清零 outline 的可聚焦元素都补回可见焦点环", () => {

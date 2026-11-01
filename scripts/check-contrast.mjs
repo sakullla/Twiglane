@@ -6,14 +6,14 @@
  * 判定口径（与需求 R14 对应）：
  * - 正文对（text）阈值 4.5:1：所有承载文字的令牌在两套主题的各级表面上。
  *   由 --hue 派生的首字母令牌（--avatar-*、--repo-badge-*）逐个色相校验
- *   （0–345°，步长 15），避免只测缺省色相 150 而漏掉最差情况（黄绿色相）；
+ *   （0–345°，步长 15），避免只测缺省色相 238 而漏掉最差情况（黄绿色相）；
  *   这些颜色由 --<名>-sat / --<名>-light 在元素上与 --hue 合成。
  * - 交互对（ui）阈值 3:1：既包含标示交互状态的语义色（焦点环、强调、危险/
  *   信息/警告），也包含可交互控件的自身边界令牌 --control-border /
  *   --control-border-hover——表单控件、次级按钮与可点击的 bordered 行只靠这条
  *   1px 边界与所在表面区分，因此它们是 R14「交互元素边界」的验收对象。
- *   --accent 同时承担「已选中/正在编辑」控件的状态边界（如冲突文件行的
- *   aria-pressed 态），所以它不只对 --surface/--bg 校验，也对 --surface-2 /
+ *   --accent 同时承担「已选中/正在编辑」控件的状态边界（如合并方式卡片的
+ *   aria-checked 态），所以它不只对 --surface/--bg 校验，也对 --surface-2 /
  *   --surface-3 校验，覆盖侧栏这类浅一档的底色。
  *   装饰性发丝线 --border / --border-strong 只做面板外框、分隔线与卡片框架，
  *   不承担控件边界，故不计入门禁；tests/tokens.spec.ts 用「默认拒绝 + 装饰白名单」
@@ -24,8 +24,8 @@
  * 半透明徽标底（--push-count-bg，数字前景继承所在按钮，实测 6.24:1 / 7.82:1）。
  *
  * 重要：令牌级通过 ≠ 含 opacity 的渲染通过。
- * 元素级的 opacity 会把前景与所在表面按 α 混合，令牌层算出的 5.10:1 在整行 0.75
- * 淡化后只剩 3.11:1（浅）/ 3.55:1（深）；同样位置上的 1px 控件边界也会掉到 3:1 以下。
+ * 元素级的 opacity 会把前景与所在表面按 α 混合，令牌层算出的 6.55:1 在整行 0.75
+ * 淡化后只剩 3.64:1（浅）/ 3.69:1（深）；同样位置上的 1px 控件边界也会掉到 3:1 以下。
  * 因此：
  * - 弱化文字一律走专门令牌（--fg-dimmed / --purple-dimmed），不用元素级 opacity；
  * - 任何仍然用 opacity 淡化文字的位置，必须登记进下面的 COMPOSITE_TEXT_PAIRS，
@@ -73,6 +73,18 @@ const TEXT_PAIRS = [
   ["accent-text", "surface"],
   ["accent-text", "accent-soft"],
   ["accent-text", "accent-softer"],
+  // 选中的文件行、提交行：底色是 --accent-soft，行内的正文、作者时间与目录都落在它上面。
+  ["fg", "accent-soft"],
+  ["fg-muted", "accent-soft"],
+  ["fg-subtle", "accent-soft"],
+  // 成功语义：实心徽标、浅底提示，以及已解决冲突行（正文与空结果说明都落在 --success-softer 上）。
+  ["success-text", "surface"],
+  ["success-text", "surface-2"],
+  ["success-text", "success-soft"],
+  ["success-text", "success-softer"],
+  ["on-success", "success"],
+  ["fg", "success-softer"],
+  ["fg-muted", "success-softer"],
   ["accent-fg", "accent"],
   ["accent-fg", "accent-hover"],
   ["on-danger", "danger"],
@@ -93,7 +105,7 @@ const TEXT_PAIRS = [
   // 语法高亮：每个颜色 × 它可能落在的每种底色（差异的增删行与行内改动底、冲突两侧与结果底）。
   ...["keyword", "string", "string-expression", "constant", "function", "parameter", "comment", "punctuation", "link"].flatMap(
     (name) =>
-      ["surface", "surface-2", "add-bg", "add-strong", "del-bg", "del-strong", "info-soft", "purple-soft", "accent-softer", "warning-soft"].map(
+      ["surface", "surface-2", "add-bg", "add-strong", "del-bg", "del-strong", "info-soft", "purple-soft", "accent-softer", "success-softer", "warning-soft"].map(
         (bg) => [`syn-${name}`, bg],
       ),
   ),
@@ -177,6 +189,12 @@ const UI_PAIRS = [
   ["danger", "surface"],
   ["info", "surface"],
   ["warning", "surface"],
+  // 成功色是纯字形和小色块（圆点、标尺刻度、进度填充），落在这四级表面和自身浅底上。
+  ["success", "surface"],
+  ["success", "bg"],
+  ["success", "surface-2"],
+  ["success", "surface-3"],
+  ["success", "success-soft"],
   ["control-border", "surface"],
   ["control-border", "bg"],
   ["control-border", "surface-2"],
@@ -189,6 +207,31 @@ const UI_PAIRS = [
 
 const MIN_TEXT = 4.5;
 const MIN_UI = 3;
+
+/**
+ * 配色方向（R1）：靛蓝强调、语义绿新增、中性石墨灰。对比度达标不等于方向对：
+ * 旧绿色强调色也能过全部对比度对，所以这里单独按色相与饱和度校验。
+ * 半透明令牌只看颜色本身，不合成到底色上。
+ */
+const INDIGO_HUE = [225, 250];
+const SEMANTIC_GREEN_HUE = [100, 170];
+const NEUTRAL_MAX_SATURATION = 0.15;
+const INDIGO_TOKENS = ["accent", "accent-hover", "accent-text", "accent-soft", "accent-softer", "focus"];
+const SEMANTIC_GREEN_TOKENS = ["add-fg", "add-bg", "add-strong", "success", "success-soft", "success-softer", "success-text"];
+const NEUTRAL_TOKENS = [
+  "bg",
+  "surface",
+  "surface-2",
+  "surface-3",
+  "border",
+  "border-strong",
+  "control-border",
+  "control-border-hover",
+  "fg",
+  "fg-muted",
+  "fg-subtle",
+  "fg-dimmed",
+];
 
 /** 登记项的阈值：承载文字按正文口径，纯字形按非文本口径。 */
 const ALPHA_SITE_MIN = { text: MIN_TEXT, glyph: MIN_UI };
@@ -517,6 +560,49 @@ function scanAlphaColorSites(blocks, problems) {
   return sites;
 }
 
+/** sRGB 转 HSL 的色相（0–360）与饱和度（0–1）。 */
+function hueAndSaturation({ r, g, b }) {
+  const [red, green, blue] = [r / 255, g / 255, b / 255];
+  const max = Math.max(red, green, blue);
+  const min = Math.min(red, green, blue);
+  const chroma = max - min;
+  if (chroma === 0) return { hue: 0, saturation: 0 };
+  let hue;
+  if (max === red) hue = ((green - blue) / chroma + 6) % 6;
+  else if (max === green) hue = (blue - red) / chroma + 2;
+  else hue = (red - green) / chroma + 4;
+  return { hue: hue * 60, saturation: chroma / (1 - Math.abs(max + min - 1)) };
+}
+
+/** 校验配色方向：色相落在靛蓝/语义绿区间，中性令牌不带明显色相，--brand-grad 的色标都是靛蓝。 */
+function checkPalette(theme, tokens, failures, problems) {
+  const inRange = (hue, [low, high]) => hue >= low && hue <= high;
+  const expectHue = (label, color, range, family) => {
+    const { hue } = hueAndSaturation(color);
+    if (!inRange(hue, range)) failures.push(`${theme}/palette ${label} 色相 ${hue.toFixed(0)}° 不在${family}区间 ${range[0]}–${range[1]}°`);
+  };
+  const read = (name) => resolve(tokens, name, null, `${theme}/palette`, problems);
+  for (const name of INDIGO_TOKENS) {
+    const color = read(name);
+    if (color) expectHue(`--${name}`, color, INDIGO_HUE, "靛蓝");
+  }
+  for (const name of SEMANTIC_GREEN_TOKENS) {
+    const color = read(name);
+    if (color) expectHue(`--${name}`, color, SEMANTIC_GREEN_HUE, "语义绿");
+  }
+  for (const name of NEUTRAL_TOKENS) {
+    const color = read(name);
+    if (!color) continue;
+    const { saturation } = hueAndSaturation(color);
+    if (saturation > NEUTRAL_MAX_SATURATION) {
+      failures.push(`${theme}/palette --${name} 饱和度 ${(saturation * 100).toFixed(0)}% 超过中性灰上限 ${NEUTRAL_MAX_SATURATION * 100}%`);
+    }
+  }
+  const stops = String(tokens.get("--brand-grad") ?? "").match(/#[0-9a-fA-F]{6}/g) ?? [];
+  if (stops.length === 0) failures.push(`${theme}/palette --brand-grad 没有可校验的色标`);
+  for (const stop of stops) expectHue(`--brand-grad ${stop}`, parseColor(stop), INDIGO_HUE, "靛蓝");
+}
+
 function main() {
   const verbose = process.argv.includes("--verbose");
   const css = readFileSync(TOKENS_PATH, "utf8");
@@ -537,6 +623,7 @@ function main() {
 
   for (const theme of ["light", "dark"]) {
     const tokens = blocks[theme];
+    checkPalette(theme, tokens, failures, problems);
     const check = (pairs, min, kind) => {
       for (const [fgName, bgName] of pairs) {
         const label = `${theme}/${kind} --${fgName} on --${bgName}`;
@@ -671,7 +758,7 @@ function main() {
   }
   console.log(
     "对比度检查通过：两套主题正文 ≥ 4.5:1（含逐色相的徽标/头像首字母、已登记的 opacity 合成对与 color-mix 淡化位点），" +
-      "交互元素边界与焦点环 ≥ 3:1",
+      "交互元素边界与焦点环 ≥ 3:1，配色方向为中性灰加靛蓝强调",
   );
   process.exitCode = 0;
 }

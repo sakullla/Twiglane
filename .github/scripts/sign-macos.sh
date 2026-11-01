@@ -17,11 +17,15 @@ keychain="$work/signing.keychain-db"
 mount="$work/mount"
 mounted=false
 cleanup() {
+  echo 'Cleaning temporary signing resources'
   if [[ "$mounted" == true ]]; then hdiutil detach "$mount" || true; fi
   if [[ -f "$work/certificate.pem" ]]; then
-    sudo -n security remove-trusted-cert -d "$work/certificate.pem" >/dev/null 2>&1 || true
+    # Set the alarm after sudo: sudo may reset an inherited alarm. Trust removal
+    # can request GUI authorization even on a disposable hosted runner.
+    sudo -n perl -e 'alarm 10; exec @ARGV' security remove-trusted-cert \
+      -d "$work/certificate.pem" >/dev/null 2>&1 || true
   fi
-  security delete-keychain "$keychain" >/dev/null 2>&1 || true
+  perl -e 'alarm 10; exec @ARGV' security delete-keychain "$keychain" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -42,10 +46,11 @@ rm -f "$work/certificate.p12"
 # The persistent self-signed identity must be trusted for code signing on this
 # disposable runner. Importing its P12 alone does not establish that trust.
 security find-certificate -c "$APPLE_SIGNING_IDENTITY" -p "$keychain" > "$work/certificate.pem"
-perl -e 'alarm 30; exec @ARGV' sudo -n security add-trusted-cert \
+sudo -n perl -e 'alarm 30; exec @ARGV' security add-trusted-cert \
   -d -r trustRoot -p codeSign -k "$keychain" "$work/certificate.pem"
 identity_hash="$(openssl x509 -in "$work/certificate.pem" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')"
 security find-identity -v -p codesigning "$keychain" | grep -F "$identity_hash"
+echo 'Persistent signing identity is ready'
 
 # Fail signing setup before spending time building the application.
 export TAURI_BUNDLER_DMG_IGNORE_CI=true

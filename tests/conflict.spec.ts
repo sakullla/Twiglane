@@ -235,6 +235,62 @@ describe("逐处处理冲突", () => {
     expect(head(1).querySelector('[data-hunk-state="resolved"]')?.textContent).toBe("采用共同祖先");
   });
 
+  it("快捷键提示默认不占行，按需打开，Esc 只收起帮助并把焦点还给冲突流", async () => {
+    renderResolver();
+    expect(document.querySelector(".cr-keys")).toBeNull();
+    const toggle = screen.getByRole("button", { name: "快捷键" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    await fireEvent.click(toggle);
+    const help = screen.getByRole("dialog", { name: "冲突处理快捷键" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    for (const label of ["上一处未处理", "下一处未处理", "采用当前", "采用来源", "当前 + 来源", "来源 + 当前", "采用共同祖先", "手动编辑", "撤销这一处"]) {
+      expect(within(help).getByText(label)).toBeTruthy();
+    }
+
+    const bubbled = vi.fn();
+    window.addEventListener("keydown", bubbled);
+    await fireEvent.keyDown(window, { key: "Escape" });
+    window.removeEventListener("keydown", bubbled);
+    expect(screen.queryByRole("dialog", { name: "冲突处理快捷键" })).toBeNull();
+    expect(bubbled, "Esc 不能继续冒泡去关闭合并窗口").not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(screen.getByRole("region", { name: "逐处处理冲突" }));
+
+    await fireEvent.click(toggle);
+    await fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole("dialog", { name: "冲突处理快捷键" })).toBeNull();
+  });
+
+  it("次要动作收敛后仍可一次点击，1–5 与按钮一一对应", async () => {
+    renderResolver();
+    const actions = within(head(1));
+    expect(actions.getByRole("button", { name: "采用当前" }).classList.contains("quiet")).toBe(false);
+    expect(actions.getByRole("button", { name: "采用来源" }).classList.contains("quiet")).toBe(false);
+    for (const name of ["当前 + 来源", "来源 + 当前", "祖先", "编辑"]) {
+      expect(actions.getByRole("button", { name }).classList.contains("quiet"), name).toBe(true);
+    }
+    expect(actions.getByRole("button", { name: "祖先" }).getAttribute("title")).toContain("（5）");
+  });
+
+  it("底部落到宿主指定的位置：操作照常，切换或卸载后不残留", async () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    const { onResolve, unmount } = renderResolver(TWO, { footTarget: target });
+    const mark = within(target).getByRole("button", { name: "标记编辑结果" });
+    expect(document.querySelector("[data-conflict-resolver] .cr-foot")).toBeNull();
+    expect(within(target).getByRole("group", { name: "冲突导航" })).toBeTruthy();
+    expect(within(target).getByRole("progressbar", { name: "本文件冲突处理进度" })).toBeTruthy();
+
+    await fireEvent.click(within(head(0)).getByRole("button", { name: "采用当前" }));
+    await fireEvent.click(within(head(1)).getByRole("button", { name: "采用当前" }));
+    await fireEvent.click(mark);
+    expect(onResolve).toHaveBeenCalledTimes(1);
+
+    unmount();
+    expect(target.childElementCount).toBe(0);
+    target.remove();
+  });
+
   it("手动编辑一处：在两侧内容基础上改写，完成后计入已处理", async () => {
     const { onResolve } = renderResolver();
     await fireEvent.click(within(head(0)).getByRole("button", { name: "编辑" }));

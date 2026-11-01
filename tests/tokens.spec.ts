@@ -452,6 +452,34 @@ describe("行静止时没有描边卡片（R2）", () => {
   });
 });
 
+describe("冲突卡靠明度分层（R2、R9）", () => {
+  const components = read(path.join(stylesDir, "components.css"));
+
+  it("冲突卡没有描边和渐变，当前一处靠 --accent 竖条", () => {
+    for (const rule of parseRules(components)) {
+      if (!/\.cr-(card|head|cols|pair|half|row|main|ruler)\b/.test(rule.selector)) continue;
+      expect(rule.body, rule.selector).not.toMatch(/(?:^|;)\s*border(?!-radius)(-[a-z]+)*\s*:(?!\s*0)/);
+      expect(rule.body, rule.selector).not.toMatch(/gradient/);
+    }
+    expect(ruleBody(components, ".cr-card.current::before")).toMatch(/background:\s*var\(--accent\)/);
+  });
+
+  it("当前/来源两侧用 --info/--purple 语义，常用动作保留控件边界", () => {
+    expect(ruleBody(components, ".cr-col.ours")).toMatch(/var\(--info-soft\)/);
+    expect(ruleBody(components, ".cr-col.theirs")).toMatch(/var\(--purple-soft\)/);
+    expect(ruleBody(components, ".cr-act.ours")).toMatch(/var\(--info-text\)/);
+    expect(ruleBody(components, ".cr-act.theirs")).toMatch(/var\(--purple\)/);
+    expect(ruleBody(components, ".cr-act")).toMatch(/border:\s*1px solid var\(--control-border\)/);
+    expect(ruleBody(components, ".cr-act.quiet")).toMatch(/border-color:\s*transparent/);
+    expect(ruleBody(components, ".cr-act.quiet:hover:not(:disabled)")).toMatch(/background:\s*var\(--hover\)/);
+  });
+
+  it("路由并入 modal 标题行，底部一条靠明度与正文分层", () => {
+    expect(ruleBody(components, ".merge-panel.embedded .mp-head")).toMatch(/position:\s*absolute/);
+    expect(ruleBody(components, ".mp-foot")).not.toMatch(/border-top/);
+  });
+});
+
 describe("样式分层结构", () => {
   it("四层文件齐备", () => {
     for (const file of layerFiles) {
@@ -530,8 +558,9 @@ describe("样式分层结构", () => {
  *   `.empty-icon`、`.context-separator` 的 `color`）：
  *   它们同样只做分区/描边，且没有哪一处是某个控件唯一的可见边界。
  * - 以 `transparent` 为常态的控件不会被命中：它们的可辨识度由其它手段承担，属另一套判据，
- *   不在本门禁内。现存五处，逐个说明为何可接受：
+ *   不在本门禁内。现存六处，逐个说明为何可接受：
  *   `.btn`（文字按钮/实心按钮由标签与填充识别，ghost 有 hover 背景）、
+ *   `.cr-act.quiet`（冲突卡的次要动作，文字按钮，由标签与 hover 底色识别；主路径两个按钮仍带控件边界）、
  *   `.file-row`、`.history-row` 与 `.conflict-file`（列表行由 hover 背景 + 选中态 accent-soft 填充与 accent 竖条识别）、
  *   `.action-card.primary`（强调卡是实心 accent 填充，边界本就无意义）。
  *   注意 `.file-tools .field` 曾经也是 transparent，填充差只有 1.04:1，已被改为继承
@@ -565,7 +594,6 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".branch-current": "当前分支卡的 accent 16% 强调描边，是状态容器而非控件边界",
   ".branch-create": "新建分支表单容器轮廓；内部 .input/.field 自带控件边界",
   ".tag-create": "新建标签表单容器轮廓；内部 .input 自带控件边界",
-  ".three-way-merge": "三方合并容器外框",
   ".toolbar-group": "标题栏按钮组外框；组内 .tb-btn 自带 hover 背景",
   ".view-heading-status": "视图标题右侧状态胶囊，静态展示",
   ".chip.ignore": "忽略标记 chip 的虚线描边，是状态标记而非可点击控件",
@@ -578,23 +606,8 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".history-multi-head": "多选头部底部横向分隔线",
   ".multi-file.expanded .multi-file-head": "展开的文件卡头部底部横向分隔线",
   ".stash-record": "临时保存记录底部横向分隔线",
-  ".conflict-sidebar": "冲突侧栏右分隔线（分区线，不是行边界）",
-  ".three-way-title": "三方合并表头底部横向分隔线",
-  ".three-way-foot": "三方合并表尾顶部横向分隔线",
   ".diff-line .ln + .ln": "差异视图行号列的表格竖线",
   ".side-cell + .side-cell": "双栏差异的列分隔竖线",
-  ".three-way-title.result": "结果列表头的左右表格竖线",
-
-  // --- components.css：合并 modal 与逐处处理冲突 ---
-  ".mp-head": "合并面板标题条底部横向分隔线",
-  ".mp-foot": "合并面板底部操作条顶部横向分隔线",
-  ".cr-main": "冲突流容器外框；内部可交互的是各处冲突的按钮，按钮自带控件边界",
-  ".cr-card": "冲突块左右轮廓，只把同一处冲突的行框成一组；当前一处另用 --accent 状态边",
-  ".cr-head": "冲突块头部顶边，卡片轮廓的一部分；头部里的按钮各自带控件边界",
-  ".cr-cols": "当前/来源列标题行底部分隔线",
-  ".cr-half + .cr-half": "并排两栏之间的表格竖线",
-  ".cr-row.last": "冲突块末行底边，卡片轮廓的一部分",
-  ".cr-ruler": "总览标尺与冲突流之间的竖向分隔线；刻度本身是按钮，用实心色块标示",
 
   // --- components.css：语义色混合的容器描边（不是控件边界） ---
 

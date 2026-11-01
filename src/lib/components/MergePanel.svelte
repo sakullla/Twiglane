@@ -122,10 +122,13 @@
   let openedFocus = "";
   let autoOpenedKey = "";
   let previewToken = 0;
+  let footFile = $state<HTMLDivElement | null>(null);
 
   let blocked = $derived(disabled || busy);
   let current = $derived(opened.snapshot.branch.detached || opened.snapshot.branch.unborn ? null : opened.snapshot.branch.name);
   let active = $derived(session?.operation === "merge" || session?.operation === "unmerged");
+  /** 合并进行中：头部和底部都收成一条细条，把高度让给冲突内容。 */
+  let strip = $derived(Boolean(session && active));
   let external = $derived(Boolean(session && session.operation !== "none" && !active));
   let conflictTotal = $derived((session?.unresolved ?? 0) + resolvedPaths.length);
   let resolvedPercent = $derived(conflictTotal > 0 ? Math.round((resolvedPaths.length / conflictTotal) * 100) : 0);
@@ -515,26 +518,19 @@
         <span class="merge-route-arrow"><Icon name="arrow-right" size={14} /></span>
         <span class="merge-route-branch target"><Icon name="branch" size={12} />{currentLabel}</span>
       </span>
-      {#if conflictTotal > 0}
-        <span class="mp-progress-text">已解决 <strong>{resolvedPaths.length}</strong> / {conflictTotal} 个文件</span>
+      {#if session.operation === "unmerged"}
+        <span class="mp-note truncate" title={session.note}>{session.note}</span>
       {/if}
       <span class="spacer"></span>
       {#if showMergeAbort(session.operation, session.canAbort)}
         <button type="button" class="btn btn-danger-soft btn-sm" disabled={blocked} onclick={askAbort}><Icon name="x" size={14} />中止合并</button>
       {/if}
     </div>
-    {#if session.operation === "unmerged"}
-      <div class="mp-note" title={session.note}>
-        <Icon name="info" size={13} /><span class="truncate">{session.note}</span>
-      </div>
-    {/if}
     <div class="mp-body">
       <aside class="conflict-sidebar" aria-label="冲突文件列表">
         <div class="conflict-sidebar-head">
           <span>冲突文件</span>
           {#if session.unresolved > 0}<span class="count danger" title="未解决冲突">{session.unresolved}</span>{/if}
-          <span class="spacer"></span>
-          {#if conflictTotal > 0}<span class="conflict-sidebar-ratio">{resolvedPaths.length}/{conflictTotal} 已标记</span>{/if}
         </div>
         {#if conflictTotal > 0}
           <div
@@ -598,14 +594,6 @@
 
       <div class="conflict-editor">
         {#if view}
-          <div class="conflict-editor-head">
-            <span class="conflict-editor-icon"><Icon name="file-diff" size={15} /></span>
-            <div class="conflict-editor-titles">
-              <h2 class="truncate mono" title={view.path}>{view.path}</h2>
-              <p class="conflict-editor-note truncate" title={view.note}>{view.note}</p>
-            </div>
-            <span class="chip">{conflictKindLabel(view.kind)}</span>
-          </div>
           {#if view.editable}
             {#key `${view.path}:${view.generation}`}
               <ConflictResolver
@@ -616,9 +604,27 @@
                 disabled={blocked}
                 onDraft={(draft, progress) => view && storeDraft(view.path, draft, progress)}
                 onResolve={resolve}
-              />
+                footTarget={footFile}
+              >
+                {#snippet lead()}
+                  {#if view}
+                    <div class="cr-file">
+                      <h2 class="truncate mono" title={`${view.path}\n${view.note}`}>{splitPath(view.path).name}</h2>
+                      <span class="chip">{conflictKindLabel(view.kind)}</span>
+                    </div>
+                  {/if}
+                {/snippet}
+              </ConflictResolver>
             {/key}
           {:else}
+            <div class="conflict-editor-head">
+              <span class="conflict-editor-icon"><Icon name="file-diff" size={15} /></span>
+              <div class="conflict-editor-titles">
+                <h2 class="truncate mono" title={view.path}>{view.path}</h2>
+                <p class="conflict-editor-note truncate" title={view.note}>{view.note}</p>
+              </div>
+              <span class="chip">{conflictKindLabel(view.kind)}</span>
+            </div>
             <div class="conflict-sides">
               <ThreeWayMerge
                 {view}
@@ -710,7 +716,8 @@
     <div class="callout error mp-error" role="alert"><Icon name="alert-circle" size={15} /><span>{errorText}</span></div>
   {/if}
 
-  <div class="mp-foot">
+  <div class="mp-foot" class:strip>
+    <div class="mp-foot-file" bind:this={footFile}></div>
     {#if session?.operation === "merge"}
       <label class="sr-only" for="merge-message">合并说明</label>
       <input
@@ -722,21 +729,29 @@
         oninput={() => messageByRepo.set(opened.summary.path, message)}
         disabled={blocked}
       />
+    {/if}
+    {#if strip && conflictTotal > 0}
+      <span class="mp-progress-text">已解决 <strong>{resolvedPaths.length}</strong> / {conflictTotal} 个文件</span>
+    {/if}
+    {#if session?.operation === "merge"}
       {#if session.unresolved > 0}
-        <span class="mp-status warn"><Icon name="alert" size={13} />还有 {session.unresolved} 个未解决冲突，不能完成合并。</span>
+        {@const reason = `还有 ${session.unresolved} 个未解决冲突，不能完成合并。`}
+        <span class="mp-status warn" title={reason}><Icon name="alert" size={13} /><span class="truncate">{reason}</span></span>
       {:else}
-        <span class="mp-status ok"><Icon name="check-circle" size={13} />冲突已全部处理，完成只会提交，不会推送。</span>
+        {@const reason = "冲突已全部处理，完成只会提交，不会推送。"}
+        <span class="mp-status ok" title={reason}><Icon name="check-circle" size={13} /><span class="truncate">{reason}</span></span>
       {/if}
     {:else if session?.operation === "unmerged"}
-      <span class="mp-status"><Icon name="info" size={13} />标记后的文件可以在改动区提交，临时保存记录不会被删除。</span>
+      {@const reason = "标记后的文件可以在改动区提交，临时保存记录不会被删除。"}
+      <span class="mp-status" title={reason}><Icon name="info" size={13} /><span class="truncate">{reason}</span></span>
       <button type="button" class="btn btn-ghost btn-sm" disabled={blocked} onclick={onOpenStash}>查看临时保存</button>
     {/if}
     <span class="spacer"></span>
-    {#if onClose}<button type="button" class="btn btn-secondary" onclick={onClose}>{finished ? "完成" : "关闭"}</button>{/if}
+    {#if onClose}<button type="button" class={`btn btn-secondary ${strip ? "btn-sm" : ""}`} onclick={onClose}>{finished ? "完成" : "关闭"}</button>{/if}
     {#if session?.operation === "merge"}
       <button
         type="button"
-        class="btn btn-primary"
+        class="btn btn-primary btn-sm"
         disabled={blocked || !canCompleteMerge(session.operation, session.unresolved) || message.trim() === ""}
         onclick={complete}
       >

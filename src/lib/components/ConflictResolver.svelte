@@ -3,7 +3,7 @@
 </script>
 
 <script lang="ts">
-  import { onDestroy, onMount, tick, untrack } from "svelte";
+  import { onDestroy, onMount, tick, untrack, type Snippet } from "svelte";
   import {
     alignHunk,
     choiceLabel,
@@ -51,15 +51,19 @@
     onDraft?: (draft: ConflictDraft, progress: { total: number; done: number }) => void;
     /** choice 为 "text" 时 content 是要写回的完整结果；"ours"/"theirs"/"delete" 由后端取整份版本。 */
     onResolve: (choice: string, content?: string) => void;
+    /** 工具条最前面的内容（文件名），由宿主提供，这样文件头和视图切换共用一条。 */
+    lead?: Snippet;
+    /** 底部进度与标记的落点：宿主把它们和「完成合并」收在同一条；不提供时留在组件底部。 */
+    footTarget?: HTMLElement | null;
   }
 
-  let { view, currentLabel, incomingLabel, draft = null, disabled, onDraft, onResolve }: Props = $props();
+  let { view, currentLabel, incomingLabel, draft = null, disabled, onDraft, onResolve, lead, footTarget = null }: Props = $props();
 
   const ROW = 20;
-  const HEAD = 44;
-  const COLS = 26;
-  const FOLD = 32;
-  const GAP = 14;
+  const HEAD = 36;
+  const COLS = 22;
+  const FOLD = 28;
+  const GAP = 10;
   const CONTEXT = 3;
   const REVEAL = 20;
   const MAX_CH = 600;
@@ -84,6 +88,8 @@
   let reveal = $state<Record<number, { head: number; tail: number }>>({});
   let moreOpen = $state(false);
   let moreAnchor = $state<HTMLDivElement | null>(null);
+  let keysOpen = $state(false);
+  let keysAnchor = $state<HTMLDivElement | null>(null);
 
   let total = $derived(parsed.hunks.length);
   let remaining = $derived(unresolvedCount(parsed, resolutions));
@@ -650,24 +656,51 @@
     }
   }
 
-  $effect(() => {
-    if (!moreOpen) return;
-    const close = (event: MouseEvent) => {
-      if (moreAnchor && !moreAnchor.contains(event.target as Node)) moreOpen = false;
+  /** 浮层的统一收起方式：点外面，或 Esc（只收起浮层，不关闭合并窗口）。 */
+  function dismissOutside(anchor: () => HTMLElement | null, close: (byKey: boolean) => void) {
+    const pointer = (event: MouseEvent) => {
+      const root = anchor();
+      if (root && !root.contains(event.target as Node)) close(false);
     };
     const key = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.stopPropagation();
-        moreOpen = false;
+        close(true);
       }
     };
-    window.addEventListener("mousedown", close);
+    window.addEventListener("mousedown", pointer);
     window.addEventListener("keydown", key, true);
     return () => {
-      window.removeEventListener("mousedown", close);
+      window.removeEventListener("mousedown", pointer);
       window.removeEventListener("keydown", key, true);
     };
+  }
+
+  $effect(() => {
+    if (!moreOpen) return;
+    return dismissOutside(() => moreAnchor, () => (moreOpen = false));
   });
+
+  $effect(() => {
+    if (!keysOpen) return;
+    return dismissOutside(() => keysAnchor, (byKey) => {
+      keysOpen = false;
+      // 帮助是看完就接着按键的：Esc 收起后焦点回到冲突流，键位立即可用。
+      if (byKey) scroller?.focus({ preventScroll: true });
+    });
+  });
+
+  /** 把节点搬到宿主给的落点；落点要随组件销毁一起清掉，否则节点会留在宿主里。 */
+  function portal(node: HTMLElement, target: HTMLElement | null) {
+    const place = (to: HTMLElement | null) => {
+      if (to) to.append(node);
+    };
+    place(target);
+    return {
+      update: place,
+      destroy: () => node.remove(),
+    };
+  }
 
   /* ---------- 呈现辅助 ---------- */
 
@@ -711,6 +744,9 @@
   let markBlocked = $derived(
     disabled || (hunkMode && effectiveMode !== "whole" && (remaining > 0 || editing !== null)),
   );
+  let footText = $derived(
+    hunkMode && effectiveMode !== "whole" && remaining > 0 ? `已处理 ${done} / ${total} 处` : null,
+  );
   let footNote = $derived(
     effectiveMode === "whole" || !hunkMode
       ? wholeMarkers
@@ -728,40 +764,30 @@
 
 <div class="cr" data-conflict-resolver>
   <div class="cr-toolbar">
+    {@render lead?.()}
     <div class="segmented" role="group" aria-label="冲突查看方式">
       {#if hunkMode}
-        <button type="button" aria-pressed={effectiveMode === "hunks"} onclick={() => setMode("hunks")}>
-          <Icon name="layers" size={13} />逐处处理
+        <button type="button" aria-label="逐处处理" title="逐处处理" aria-pressed={effectiveMode === "hunks"} onclick={() => setMode("hunks")}>
+          <Icon name="layers" size={13} /><span class="cr-seg-label">逐处处理</span>
         </button>
-        <button type="button" aria-pressed={effectiveMode === "preview"} onclick={() => setMode("preview")}>
-          <Icon name="eye" size={13} />结果预览
+        <button type="button" aria-label="结果预览" title="结果预览" aria-pressed={effectiveMode === "preview"} onclick={() => setMode("preview")}>
+          <Icon name="eye" size={13} /><span class="cr-seg-label">结果预览</span>
         </button>
       {/if}
-      <button type="button" aria-pressed={effectiveMode === "whole"} onclick={() => setMode("whole")}>
-        <Icon name="split" size={13} />整文件编辑
+      <button type="button" aria-label="整文件编辑" title="整文件编辑" aria-pressed={effectiveMode === "whole"} onclick={() => setMode("whole")}>
+        <Icon name="split" size={13} /><span class="cr-seg-label">整文件编辑</span>
       </button>
       <button
         type="button"
+        aria-label="两侧差异"
         aria-pressed={effectiveMode === "diff"}
         disabled={view.ours.text === null || view.theirs.text === null}
         title="当前与来源两个完整版本的差异"
         onclick={() => setMode("diff")}
       >
-        <Icon name="file-diff" size={13} />两侧差异
+        <Icon name="file-diff" size={13} /><span class="cr-seg-label">两侧差异</span>
       </button>
     </div>
-
-    {#if hunkMode && effectiveMode === "hunks"}
-      <div class="cr-nav" role="group" aria-label="冲突导航">
-        <button type="button" class="icon-btn sm" aria-label="上一处冲突" title="上一处未处理（Alt+↑ / Shift+F7）" onclick={() => go(-1)}>
-          <Icon name="arrow-up" size={14} />
-        </button>
-        <span class="cr-nav-label" aria-live="polite">第 <strong>{Math.min(current + 1, total)}</strong> / {total} 处</span>
-        <button type="button" class="icon-btn sm" aria-label="下一处冲突" title="下一处未处理（Alt+↓ / F7）" onclick={() => go(1)}>
-          <Icon name="arrow-down" size={14} />
-        </button>
-      </div>
-    {/if}
 
     <span class="spacer"></span>
 
@@ -769,19 +795,51 @@
     {#if hunkMode && effectiveMode === "hunks" && simple.length > 0}
       <button
         type="button"
-        class="btn btn-accent-soft btn-sm"
+        class="btn btn-accent-soft btn-sm cr-simple"
         disabled={disabled}
+        aria-label={`处理 ${simple.length} 处简单冲突`}
         title="两侧相同，或有共同祖先且只有一侧改动的冲突，结论是确定的"
         onclick={applySimple}
       >
-        <Icon name="check-circle" size={13} />处理 {simple.length} 处简单冲突
+        <Icon name="check-circle" size={13} /><span class="cr-simple-wide">处理 {simple.length} 处简单冲突</span><span class="cr-simple-narrow" aria-hidden="true">{simple.length}</span>
       </button>
     {/if}
     {#if hunkMode && effectiveMode === "hunks"}
       <label class="cr-toggle" title={hasBase ? "在每处冲突上方显示共同祖先版本" : "冲突标记里没有共同祖先。可设置 git config merge.conflictStyle zdiff3 后重新合并"}>
         <input type="checkbox" class="checkbox" bind:checked={showBase} disabled={!hasBase} />
-        <span>共同祖先</span>
+        <span><span class="cr-toggle-wide">共同</span>祖先</span>
       </label>
+      <div class="menu-anchor" bind:this={keysAnchor}>
+        <button
+          type="button"
+          class="icon-btn sm"
+          aria-label="快捷键"
+          aria-haspopup="dialog"
+          aria-expanded={keysOpen}
+          title="快捷键"
+          onclick={() => (keysOpen = !keysOpen)}
+        >
+          <Icon name="keyboard" size={15} />
+        </button>
+        {#if keysOpen}
+          <div class="menu cr-help" role="dialog" aria-label="冲突处理快捷键">
+            <dl class="cr-keys">
+              <div><dt><kbd>Alt</kbd><kbd>↑</kbd><i>或</i><kbd>Shift</kbd><kbd>F7</kbd></dt><dd>上一处未处理</dd></div>
+              <div><dt><kbd>Alt</kbd><kbd>↓</kbd><i>或</i><kbd>F7</kbd></dt><dd>下一处未处理</dd></div>
+              <div><dt><kbd>1</kbd></dt><dd>采用当前</dd></div>
+              <div><dt><kbd>2</kbd></dt><dd>采用来源</dd></div>
+              <div><dt><kbd>3</kbd></dt><dd>当前 + 来源</dd></div>
+              <div><dt><kbd>4</kbd></dt><dd>来源 + 当前</dd></div>
+              <div><dt><kbd>5</kbd></dt><dd>采用共同祖先</dd></div>
+              <div><dt><kbd>E</kbd></dt><dd>手动编辑</dd></div>
+              <div><dt><kbd>U</kbd></dt><dd>撤销这一处</dd></div>
+              <div><dt><kbd>Ctrl</kbd><kbd>Enter</kbd></dt><dd>完成编辑</dd></div>
+              <div><dt><kbd>Esc</kbd></dt><dd>取消编辑</dd></div>
+            </dl>
+            <p class="hint">焦点在冲突代码区时生效。</p>
+          </div>
+        {/if}
+      </div>
     {/if}
     <div class="menu-anchor" bind:this={moreAnchor}>
       <button
@@ -853,7 +911,7 @@
             {@const top = offsets[index]}
             {@const height = rowHeight(row)}
             {@const hunk = rowHunk(row)}
-            {@const pinned = viewWidth > 0 ? `left:${scrollLeft + (row.kind === "ctx" || row.kind === "fold" ? 0 : 12)}px;width:${Math.max(0, viewWidth - (row.kind === "ctx" || row.kind === "fold" ? 0 : 24))}px;` : ""}
+            {@const pinned = viewWidth > 0 ? `left:${scrollLeft}px;width:${viewWidth}px;` : ""}
             {#if row.kind === "fold"}
               <div class="cr-row cr-fold" style={`top:${top}px;height:${height}px;${pinned}`}>
                 {#if row.up}
@@ -907,12 +965,12 @@
                   <div class="cr-actions" role="group" aria-label={`冲突 ${row.hunk + 1} 的处理方式`}>
                     <button type="button" class="cr-act ours" disabled={disabled} title="只保留当前分支这一侧（1）" onclick={() => choose(row.hunk, "ours")}>采用当前</button>
                     <button type="button" class="cr-act theirs" disabled={disabled} title="只保留来源分支这一侧（2）" onclick={() => choose(row.hunk, "theirs")}>采用来源</button>
-                    <button type="button" class="cr-act" disabled={disabled} title="两侧都保留，当前在前（3）；请检查重复代码" onclick={() => choose(row.hunk, "ours-theirs")}>当前 + 来源</button>
-                    <button type="button" class="cr-act" disabled={disabled} title="两侧都保留，来源在前（4）" onclick={() => choose(row.hunk, "theirs-ours")}>来源 + 当前</button>
+                    <button type="button" class="cr-act quiet" disabled={disabled} title="两侧都保留，当前在前（3）；请检查重复代码" onclick={() => choose(row.hunk, "ours-theirs")}>当前 + 来源</button>
+                    <button type="button" class="cr-act quiet" disabled={disabled} title="两侧都保留，来源在前（4）" onclick={() => choose(row.hunk, "theirs-ours")}>来源 + 当前</button>
                     {#if h?.base}
-                      <button type="button" class="cr-act" disabled={disabled} title="恢复为共同祖先（5）" onclick={() => choose(row.hunk, "base")}>祖先</button>
+                      <button type="button" class="cr-act quiet" disabled={disabled} title="恢复为共同祖先（5）" onclick={() => choose(row.hunk, "base")}>祖先</button>
                     {/if}
-                    <button type="button" class="cr-act" disabled={disabled} title="在两侧内容基础上手动编辑（E）" onclick={() => startEdit(row.hunk)}><Icon name="pencil" size={12} />编辑</button>
+                    <button type="button" class="cr-act quiet" disabled={disabled} title="在两侧内容基础上手动编辑（E）" onclick={() => startEdit(row.hunk)}><Icon name="pencil" size={12} />编辑</button>
                   </div>
                 {/if}
               </div>
@@ -991,16 +1049,6 @@
         </div>
       {/if}
     </div>
-    {#if effectiveMode === "hunks"}
-      <div class="cr-keys" aria-hidden="true">
-        <span><kbd>Alt</kbd><kbd>↑</kbd><kbd>↓</kbd>上/下一处</span>
-        <span><kbd>1</kbd>当前</span>
-        <span><kbd>2</kbd>来源</span>
-        <span><kbd>3</kbd><kbd>4</kbd>两者</span>
-        <span><kbd>E</kbd>编辑</span>
-        <span><kbd>U</kbd>撤销</span>
-      </div>
-    {/if}
   {:else if effectiveMode === "whole"}
     <div class="cr-whole">
       <ThreeWayMerge
@@ -1037,7 +1085,7 @@
     </div>
   {/if}
 
-  <div class="cr-foot">
+  <div class="cr-foot" use:portal={footTarget}>
     {#if hunkMode && effectiveMode !== "whole"}
       <div
         class="cr-progress"
@@ -1050,12 +1098,22 @@
         <span style={`width:${total > 0 ? (done / total) * 100 : 0}%`}></span>
       </div>
     {/if}
-    <span class="cr-foot-note" class:warn={wholeMarkers || armed}>{footNote}</span>
-    <span class="spacer"></span>
-    {#if hunkMode && effectiveMode === "hunks" && remaining > 0}
-      <button type="button" class="btn btn-secondary btn-sm" onclick={() => go(1)}>
-        <Icon name="arrow-down" size={13} />下一处未处理
-      </button>
+    <span class="cr-foot-note truncate" class:warn={wholeMarkers || armed} title={footNote}>{footText ?? footNote}</span>
+    {#if hunkMode && effectiveMode === "hunks"}
+      <div class="cr-nav" role="group" aria-label="冲突导航">
+        <button type="button" class="icon-btn sm" aria-label="上一处冲突" title="上一处未处理（Alt+↑ / Shift+F7）" onclick={() => go(-1)}>
+          <Icon name="arrow-up" size={14} />
+        </button>
+        <span class="cr-nav-label" aria-live="polite">第 <strong>{Math.min(current + 1, total)}</strong> / {total} 处</span>
+        <button type="button" class="icon-btn sm" aria-label="下一处冲突" title="下一处未处理（Alt+↓ / F7）" onclick={() => go(1)}>
+          <Icon name="arrow-down" size={14} />
+        </button>
+      </div>
+      {#if remaining > 0}
+        <button type="button" class="btn btn-secondary btn-sm cr-next" onclick={() => go(1)}>
+          <Icon name="arrow-down" size={13} />下一处未处理
+        </button>
+      {/if}
     {/if}
     <button
       type="button"

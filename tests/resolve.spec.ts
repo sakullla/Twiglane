@@ -616,6 +616,45 @@ describe("合并任务 modal", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("进度、下一处、标记和完成合并收在同一条底部，文件头并入工具条", async () => {
+    mergeSession.mockResolvedValue(
+      session({
+        operation: "merge",
+        canAbort: true,
+        unresolved: 1,
+        conflicts: [{ path: "src/file.txt", kind: "text", summary: "文本" }],
+        note: "还有 1 个未解决冲突，不能完成。",
+      }),
+    );
+    conflictView.mockResolvedValue({
+      generation: 4,
+      path: "src/file.txt",
+      kind: "text",
+      editable: true,
+      ours: { present: true, binary: false, truncated: false, text: "ours\n", summary: "本地" },
+      theirs: { present: true, binary: false, truncated: false, text: "theirs\n", summary: "另一侧" },
+      result: { present: true, binary: false, truncated: false, text: "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> main\n", summary: "结果" },
+      note: "可以编辑合并结果。",
+    });
+    renderMergeModal();
+    const mark = await screen.findByRole("button", { name: "标记编辑结果" });
+    const foot = document.querySelector<HTMLElement>(".mp-foot");
+    expect(foot?.contains(mark)).toBe(true);
+    expect(within(foot as HTMLElement).getByRole("button", { name: "完成合并" }).hasAttribute("disabled")).toBe(true);
+    expect(within(foot as HTMLElement).getByText(/还有 1 个未解决冲突，不能完成合并/)).toBeTruthy();
+    expect(within(foot as HTMLElement).getByRole("button", { name: "下一处冲突" })).toBeTruthy();
+    expect(within(foot as HTMLElement).getByRole("button", { name: "下一处未处理" })).toBeTruthy();
+    expect(within(foot as HTMLElement).getByText(/个文件/)).toBeTruthy();
+    expect(document.querySelector(".mp-head .mp-progress-text")).toBeNull();
+
+    const toolbar = document.querySelector<HTMLElement>(".cr-toolbar");
+    const title = within(toolbar as HTMLElement).getByRole("heading", { name: "file.txt" });
+    expect(title.getAttribute("title")).toContain("src/file.txt");
+    expect(title.getAttribute("title")).toContain("可以编辑合并结果。");
+    expect(document.querySelector(".conflict-editor-head")).toBeNull();
+    expect(document.querySelectorAll(".cr-foot")).toHaveLength(1);
+  });
+
   it("中止合并列出受影响路径，取消不写入", async () => {
     mergeSession.mockResolvedValue(
       session({ operation: "merge", canAbort: true, canContinue: true, unresolved: 0, conflicts: [], note: "冲突已全部标记。" }),

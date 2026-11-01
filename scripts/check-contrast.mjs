@@ -247,10 +247,11 @@ const CODE_STACKS = [
   { site: ".cr-line.base（共同祖先）", layers: ["surface", "surface-2"] },
   { site: ".cr-half.ours", layers: ["surface", "info-soft"] },
   { site: ".cr-half.ours .mk", layers: ["surface", "info-soft", MARK_INFO] },
-  { site: ".cr-pair.same .cr-half.ours .mk", layers: ["surface", MARK_INFO] },
+  { site: ".cr-pair.same .cr-half", layers: ["surface", "surface-2"] },
+  { site: ".cr-pair.same .cr-half.ours .mk", layers: ["surface", "surface-2", MARK_INFO] },
   { site: ".cr-half.theirs", layers: ["surface", "purple-soft"] },
   { site: ".cr-half.theirs .mk", layers: ["surface", "purple-soft", MARK_PURPLE] },
-  { site: ".cr-pair.same .cr-half.theirs .mk", layers: ["surface", MARK_PURPLE] },
+  { site: ".cr-pair.same .cr-half.theirs .mk", layers: ["surface", "surface-2", MARK_PURPLE] },
 ];
 
 /** 代码旁的说明文字：行号、块标题与冲突块头部，同样落在叠层上，但不可选中，不叠选区。 */
@@ -266,6 +267,12 @@ const CODE_CHROME_STACKS = [
   { fg: "warning-text", layers: ["surface", "warning-soft"], site: ".cr-line.warn .ln" },
   { fg: "fg-subtle", layers: ["surface", "info-soft"], site: ".cr-half.ours .ln" },
   { fg: "fg-subtle", layers: ["surface", "purple-soft"], site: ".cr-half.theirs .ln" },
+  { fg: "info-text", layers: ["surface", "info-soft"], site: ".cr-col.ours" },
+  { fg: "purple", layers: ["surface", "purple-soft"], site: ".cr-col.theirs" },
+  { fg: "fg-subtle", layers: ["surface", "info-soft"], site: ".cr-col.ours small" },
+  { fg: "fg-subtle", layers: ["surface", "purple-soft"], site: ".cr-col.theirs small" },
+  { fg: "warning-text", layers: ["surface", "surface-2"], site: ".cr-cols.base .cr-col" },
+  { fg: "fg-subtle", layers: ["surface", "surface-2"], site: ".cr-cols.base .cr-col small" },
   { fg: "fg", layers: ["surface", "accent-softer"], site: ".cr-head.current" },
   { fg: "fg-subtle", layers: ["surface", "accent-softer"], site: ".cr-head.current .cr-of" },
   { fg: "fg-subtle", layers: ["surface", "accent-softer", "hover"], site: ".cr-head-title:hover .cr-of" },

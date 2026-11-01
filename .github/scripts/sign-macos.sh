@@ -8,22 +8,19 @@ set -euo pipefail
 : "${APPLE_SIGNING_IDENTITY:?Missing APPLE_SIGNING_IDENTITY secret}"
 : "${TARGET:?Missing Rust target}"
 
-export TAURI_BUNDLER_DMG_IGNORE_CI=true
-env -u APPLE_CERTIFICATE -u APPLE_CERTIFICATE_PASSWORD -u APPLE_SIGNING_IDENTITY \
-  npm run tauri -- build --target "$TARGET" --bundles dmg --no-sign -- --locked
-
 version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
 identifier="$(node -p "require('./src-tauri/tauri.conf.json').identifier")"
 arch="${TARGET%%-*}"
 dmg="src-tauri/target/$TARGET/release/bundle/dmg/Twiglane_${version}_${arch}.dmg"
-test -f "$dmg"
-
 work="$(mktemp -d "$RUNNER_TEMP/twiglane-signing.XXXXXX")"
 keychain="$work/signing.keychain-db"
 mount="$work/mount"
 mounted=false
 cleanup() {
   if [[ "$mounted" == true ]]; then hdiutil detach "$mount" || true; fi
+  if [[ -f "$work/certificate.pem" ]]; then
+    security remove-trusted-cert -d "$work/certificate.pem" >/dev/null 2>&1 || true
+  fi
   security delete-keychain "$keychain" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
@@ -33,12 +30,27 @@ keychain_password="$(openssl rand -hex 32)"
 security create-keychain -p "$keychain_password" "$keychain"
 security set-keychain-settings -lut 21600 "$keychain"
 security unlock-keychain -p "$keychain_password" "$keychain"
+security list-keychains -d user -s "$keychain"
+security default-keychain -s "$keychain"
 base64 --decode > "$work/certificate.p12" <<< "$APPLE_CERTIFICATE"
 security import "$work/certificate.p12" -k "$keychain" \
   -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
   -k "$keychain_password" "$keychain"
 rm -f "$work/certificate.p12"
+
+# The persistent self-signed identity must be trusted for code signing on this
+# disposable runner. Importing its P12 alone does not establish that trust.
+security find-certificate -c "$APPLE_SIGNING_IDENTITY" -p "$keychain" > "$work/certificate.pem"
+security add-trusted-cert -d -r trustRoot -p codeSign -k "$keychain" "$work/certificate.pem"
+identity_hash="$(openssl x509 -in "$work/certificate.pem" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')"
+security find-identity -v -p codesigning "$keychain" | grep -F "$identity_hash"
+
+# Fail signing setup before spending time building the application.
+export TAURI_BUNDLER_DMG_IGNORE_CI=true
+env -u APPLE_CERTIFICATE -u APPLE_CERTIFICATE_PASSWORD -u APPLE_SIGNING_IDENTITY \
+  npm run tauri -- build --target "$TARGET" --bundles dmg --no-sign -- --locked
+test -f "$dmg"
 
 hdiutil convert "$dmg" -format UDRW -o "$work/writable.dmg"
 size_mib=$(( ($(stat -f %z "$work/writable.dmg") + 1048575) / 1048576 + 64 ))
@@ -55,10 +67,10 @@ find "$work/Twiglane.app" -type f -print0 | while IFS= read -r -d '' bin; do
   if file -b "$bin" | grep -q 'Mach-O'; then printf '%s\n' "$bin"; fi
 done | awk '{ print length($0) "\t" $0 }' | sort -nr | cut -f2- | while IFS= read -r bin; do
   codesign --force --timestamp=none --options runtime --keychain "$keychain" \
-    --sign "$APPLE_SIGNING_IDENTITY" "$bin"
+    --sign "$identity_hash" "$bin"
 done
 codesign --force --timestamp=none --options runtime --keychain "$keychain" \
-  --sign "$APPLE_SIGNING_IDENTITY" "$work/Twiglane.app"
+  --sign "$identity_hash" "$work/Twiglane.app"
 codesign --verify --deep --strict --verbose=2 "$work/Twiglane.app"
 
 rm -rf "$mount/Twiglane.app"

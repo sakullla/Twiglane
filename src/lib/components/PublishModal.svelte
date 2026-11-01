@@ -1,0 +1,60 @@
+<script lang="ts">
+  import Icon from "./Icon.svelte";
+  import Modal from "./Modal.svelte";
+
+  interface Props {
+    /** 当前分支名，用于展示将发布的对象。 */
+    branch: string;
+    /** 已记录的上游；为空表示这次发布会建立上游关联。 */
+    upstream: string | null;
+    /** 将推送到的远程名，例如 origin。 */
+    remote: string;
+    /** 领先提交数，仅用于说明将推送的内容。 */
+    ahead?: number;
+    disabled: boolean;
+    busy?: string | null;
+    onClose: () => void;
+    onPublish: () => void;
+    /** 只建立上游关联，不推送。 */
+    onAssociate?: () => void;
+  }
+
+  let { branch, upstream, remote, ahead = 0, disabled, busy = null, onClose, onPublish, onAssociate }: Props = $props();
+
+  let working = $derived(busy === "publish" || busy === "associate");
+  let blocked = $derived(disabled || working);
+</script>
+
+<Modal
+  title="发布分支"
+  titleId="publish-modal-title"
+  icon="upload"
+  size="md"
+  task="publish"
+  description="发布只推送当前分支一次并建立上游关联，不会强行推送。"
+  onClose={onClose}
+>
+  <ul class="scope-list" style="max-height: none" aria-label="发布对象">
+    <li title={branch}>当前分支 · {branch}</li>
+    <li title={remote}>目标远程 · {remote}</li>
+    <li title={upstream ?? remote}>{upstream ? `上游 · ${upstream}` : `上游 · 发布后在 ${remote} 建立关联`}</li>
+    <li>待推送提交 · {ahead}</li>
+  </ul>
+  <div class="callout info">
+    <Icon name="info" size={15} />
+    <span>推送使用系统凭据助手或 SSH agent，不保存凭据；远程已存在同名分支时不会覆盖。</span>
+  </div>
+  {#snippet footer()}
+    <button type="button" class="btn btn-secondary" onclick={onClose}>取消</button>
+    {#if onAssociate}
+      <button type="button" class="btn btn-ghost" disabled={blocked} onclick={() => onAssociate?.()}>
+        <Icon name="link" size={14} />只关联上游
+      </button>
+    {/if}
+    <span class="spacer"></span>
+    <button type="button" class="btn btn-primary" disabled={blocked} onclick={() => onPublish()}>
+      {#if busy === "publish"}<span class="spinner"></span>{:else}<Icon name="upload" size={14} />{/if}
+      发布分支
+    </button>
+  {/snippet}
+</Modal>

@@ -35,6 +35,7 @@ vi.mock("../src/lib/api", () => ({
 }));
 
 import HistoryPanel from "../src/lib/components/HistoryPanel.svelte";
+import StashModal from "../src/lib/components/StashModal.svelte";
 import StashPanel from "../src/lib/components/StashPanel.svelte";
 
 const opened: OpenedRepository = {
@@ -306,6 +307,92 @@ describe("临时保存", () => {
     expect(screen.queryByRole("button", { name: "中止合并" })).toBeNull();
     expect(screen.getByText(/没有可中止的合并/)).toBeTruthy();
     expect(applyStash).toHaveBeenCalledWith("/repo", "cccccccccccccccccccccccccccccccccccccccc", 3, 2);
+  });
+});
+
+describe("临时保存 modal", () => {
+  const preview: StashState = {
+    generation: 3,
+    preview: {
+      trackedCount: 1,
+      untrackedCount: 0,
+      ignoredCount: 0,
+      trackedPaths: ["file.txt"],
+      untrackedPaths: [],
+      ignoredPaths: [],
+      includeUntracked: false,
+      canSave: true,
+      summary: "将保存已跟踪的暂存和未暂存改动 1 个。",
+    },
+    records: [
+      {
+        oid: "cccccccccccccccccccccccccccccccccccccccc",
+        message: "wip",
+        committedAt: 1_700_000_000,
+      },
+    ],
+    snapshot: opened.snapshot,
+  };
+
+  beforeEach(() => {
+    stashState.mockReset();
+    deleteStash.mockReset();
+    stashState.mockResolvedValue(preview);
+  });
+
+  function renderModal() {
+    const onClose = vi.fn();
+    render(StashModal, {
+      props: {
+        opened,
+        disabled: false,
+        nextId: () => 2,
+        onClose,
+        onGeneration: () => {},
+        onSnapshot: () => {},
+        onFailure: () => {},
+        onNotice: () => {},
+        onOpenChanges: () => {},
+      },
+    });
+    return { onClose };
+  }
+
+  it("以单一任务 modal 打开，删除确认列出受影响记录且取消不写入", async () => {
+    renderModal();
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.getAttribute("data-task-modal")).toBe("stash");
+    expect(document.querySelectorAll("[data-task-modal]")).toHaveLength(1);
+
+    await fireEvent.click(await screen.findByRole("button", { name: "删除" }));
+    const confirm = await screen.findByRole("dialog", { name: /删除临时保存/ });
+    expect(confirm).toBeTruthy();
+    // 破坏性确认是叠在任务 modal 之上的确认层，不是第二个任务 modal。
+    expect(document.querySelectorAll("[data-task-modal]")).toHaveLength(1);
+    const impact = screen.getByRole("list", { name: "受影响的临时保存记录" }).textContent ?? "";
+    expect(impact).toContain("ccccccc");
+    expect(impact).toContain("wip");
+    expect(screen.getByText(/本应用不能恢复/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "确认删除" }).className).toContain("btn-danger");
+
+    await fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(deleteStash).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: /删除临时保存/ })).toBeNull();
+    expect(document.querySelectorAll("[data-task-modal]")).toHaveLength(1);
+
+    await fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    await screen.findByRole("dialog", { name: /删除临时保存/ });
+    await fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    await vi.waitFor(() =>
+      expect(deleteStash).toHaveBeenCalledWith("/repo", "cccccccccccccccccccccccccccccccccccccccc", true, 3, 2),
+    );
+  });
+
+  it("关闭按钮让出任务 modal 槽位", async () => {
+    const { onClose } = renderModal();
+    await screen.findByRole("dialog");
+    await fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
 

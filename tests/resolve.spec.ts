@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/svelte";
+import { fireEvent, render, screen, within } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   canCompleteMerge,
@@ -38,7 +38,11 @@ vi.mock("../src/lib/api", () => ({
 }));
 
 import MergePanel from "../src/lib/components/MergePanel.svelte";
+import MergeModal from "../src/lib/components/MergeModal.svelte";
+import PublishModal from "../src/lib/components/PublishModal.svelte";
 import RecoveryActions from "../src/lib/components/RecoveryActions.svelte";
+import ScopeModal from "../src/lib/components/ScopeModal.svelte";
+import SettingsModal from "../src/lib/components/SettingsModal.svelte";
 
 const opened: OpenedRepository = {
   summary: { name: "demo", path: "/repo" },
@@ -470,5 +474,225 @@ describe("放弃与撤销", () => {
     await fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(undoCommit).toHaveBeenCalledTimes(1);
     expect(undoCommit).toHaveBeenCalledWith("/repo", "a".repeat(40), false, 4, 3);
+  });
+
+  it("撤销的确认按钮是危险语义并列出受影响提交", async () => {
+    undoCommit.mockResolvedValue({
+      generation: 4,
+      code: "undo_ready",
+      eligible: true,
+      wrote: false,
+      headOid: "a".repeat(40),
+      parentOid: "b".repeat(40),
+      summary: "修复登录跳转",
+      reason: "这个提交还没有推送，可以撤销。",
+      snapshot: opened.snapshot,
+    });
+    render(RecoveryActions, {
+      opened,
+      disabled: false,
+      nextId: () => 3,
+      onSnapshot: () => {},
+      onFailure: () => {},
+      onNotice: () => {},
+      onMerge: () => {},
+    });
+    await fireEvent.click(screen.getByRole("button", { name: undoActionLabel() }));
+    const confirm = await screen.findByRole("button", { name: "确认撤销提交" });
+    expect(confirm.className).toContain("btn-danger");
+    expect(screen.getByText("修复登录跳转")).toBeTruthy();
+    expect(screen.getByText("aaaaaaa")).toBeTruthy();
+    expect(undoCommit).toHaveBeenCalledWith("/repo", "a".repeat(40), false, 4, 3);
+  });
+});
+
+describe("合并任务 modal", () => {
+  beforeEach(() => {
+    mergeSession.mockReset();
+    branchState.mockReset();
+    abortMerge.mockReset();
+    branchState.mockResolvedValue({ generation: 4, branches: [], snapshot: opened.snapshot });
+  });
+
+  function renderMergeModal() {
+    const onClose = vi.fn();
+    render(MergeModal, {
+      props: {
+        opened,
+        disabled: false,
+        nextId: () => 1,
+        onClose,
+        onSnapshot: () => {},
+        onGeneration: () => {},
+        onFailure: () => {},
+        onNotice: () => {},
+        onOpenStash: () => {},
+      },
+    });
+    return { onClose };
+  }
+
+  it("以单一任务 modal 打开，未解决冲突时不能完成合并", async () => {
+    mergeSession.mockResolvedValue(
+      session({
+        operation: "merge",
+        canAbort: true,
+        unresolved: 1,
+        conflicts: [],
+        note: "还有 1 个未解决冲突，不能完成。",
+      }),
+    );
+    const { onClose } = renderMergeModal();
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.getAttribute("data-task-modal")).toBe("merge");
+    expect(document.querySelectorAll("[data-task-modal]")).toHaveLength(1);
+    const complete = await screen.findByRole("button", { name: "完成合并" });
+    expect(complete.hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText(/还有 1 个未解决冲突，不能完成合并/)).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("中止合并列出受影响路径，取消不写入", async () => {
+    mergeSession.mockResolvedValue(
+      session({ operation: "merge", canAbort: true, canContinue: true, unresolved: 0, conflicts: [], note: "冲突已全部标记。" }),
+    );
+    abortMerge.mockResolvedValue({
+      generation: 4,
+      wrote: false,
+      paths: ["a.txt", "b.txt"],
+      stashOids: [],
+      note: "将撤销 2 个文件的合并编辑。取消不会写入。",
+      snapshot: opened.snapshot,
+    });
+    renderMergeModal();
+    await fireEvent.click(await screen.findByRole("button", { name: "中止合并" }));
+    await screen.findByRole("dialog", { name: "中止合并" });
+    const impact = screen.getByRole("list", { name: "受影响的路径" }).textContent ?? "";
+    expect(impact).toContain("a.txt");
+    expect(impact).toContain("b.txt");
+    // 确认层叠在合并任务 modal 之上，任务 modal 仍只有一个。
+    expect(document.querySelectorAll("[data-task-modal]")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "确认中止" }).className).toContain("btn-danger");
+    expect(abortMerge).toHaveBeenCalledWith("/repo", false, 4, 1);
+
+    await fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(abortMerge).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog", { name: "中止合并" })).toBeNull();
+
+    await fireEvent.click(screen.getByRole("button", { name: "中止合并" }));
+    await screen.findByRole("list", { name: "受影响的路径" });
+    await fireEvent.click(screen.getByRole("button", { name: "确认中止" }));
+    await vi.waitFor(() => expect(abortMerge).toHaveBeenCalledWith("/repo", true, 4, 1));
+  });
+});
+
+describe("任务 modal（设置 / 提交范围 / 发布）", () => {
+  const unavailableGit = {
+    available: false,
+    path: null,
+    version: null,
+    overridden: false,
+    belowBaseline: false,
+    message: "没有找到 Git",
+  };
+
+  it("设置 modal 同时含外观三态与运行环境诊断", async () => {
+    const onTheme = vi.fn();
+    const onRedetect = vi.fn();
+    render(SettingsModal, {
+      props: {
+        theme: "dark",
+        git: unavailableGit,
+        disabled: false,
+        onClose: () => {},
+        onTheme,
+        onRedetect,
+        onChooseGit: () => {},
+        onClearGit: () => {},
+      },
+    });
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.getAttribute("data-task-modal")).toBe("settings");
+    const appearance = screen.getByRole("group", { name: "外观" });
+    const options = within(appearance).getAllByRole("button");
+    expect(options.map((option) => option.textContent?.trim())).toEqual(["浅色", "深色", "跟随系统"]);
+    expect(options[1].getAttribute("aria-pressed")).toBe("true");
+    await fireEvent.click(options[2]);
+    expect(onTheme).toHaveBeenCalledWith("system");
+
+    const diagnostics = screen.getByRole("list", { name: "Git 诊断" }).textContent ?? "";
+    expect(diagnostics).toContain("没有找到 Git");
+    expect(screen.getByText("Git 不可用")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "重新检测" }));
+    expect(onRedetect).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "选择 Git" })).toBeTruthy();
+    const webview = screen.getByLabelText("WebView2 与安装说明") as HTMLTextAreaElement;
+    expect(webview.value).toContain("WebView2");
+    expect(webview.value).toContain("Git");
+  });
+
+  it("提交范围 modal 列出全部路径并显示总数", async () => {
+    const paths = Array.from({ length: 40 }, (_, index) => `src/dir/file-${index}.ts`);
+    render(ScopeModal, { props: { scopeLabel: "提交到 main · 40 个已暂存文件", paths, onClose: () => {} } });
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.getAttribute("data-task-modal")).toBe("scope");
+    expect(screen.getByText(/40 个已暂存文件/)).toBeTruthy();
+    expect(screen.getByText(/共 40 个文件/)).toBeTruthy();
+    const list = screen.getByRole("list", { name: "本次提交的文件" });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(40);
+    // 全部路径都在可滚动容器里，而不是被截断成前 50 条之外的空清单。
+    expect(list.style.maxHeight).not.toBe("");
+    expect(list.textContent).toContain("src/dir/file-39.ts");
+  });
+
+  it("暂存区为空时显示空状态而不是空清单", async () => {
+    render(ScopeModal, { props: { scopeLabel: "提交到 main · 暂存区是空的", paths: [], onClose: () => {} } });
+    expect(await screen.findByText("暂存区是空的")).toBeTruthy();
+    expect(screen.queryByRole("list", { name: "本次提交的文件" })).toBeNull();
+  });
+
+  it("发布 modal 列出发布对象，确认前不推送", async () => {
+    const onPublish = vi.fn();
+    const onAssociate = vi.fn();
+    render(PublishModal, {
+      props: {
+        branch: "feature/ui",
+        upstream: null,
+        remote: "origin",
+        ahead: 3,
+        disabled: false,
+        onClose: () => {},
+        onPublish,
+        onAssociate,
+      },
+    });
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.getAttribute("data-task-modal")).toBe("publish");
+    const impact = screen.getByRole("list", { name: "发布对象" }).textContent ?? "";
+    expect(impact).toContain("feature/ui");
+    expect(impact).toContain("origin");
+    expect(impact).toContain("待推送提交 · 3");
+    expect(onPublish).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole("button", { name: "发布分支" }));
+    expect(onPublish).toHaveBeenCalledTimes(1);
+    await fireEvent.click(screen.getByRole("button", { name: "只关联上游" }));
+    expect(onAssociate).toHaveBeenCalledTimes(1);
+  });
+
+  it("发布进行中时发布入口不可用", async () => {
+    render(PublishModal, {
+      props: {
+        branch: "feature/ui",
+        upstream: "origin/feature/ui",
+        remote: "origin",
+        disabled: false,
+        busy: "publish",
+        onClose: () => {},
+        onPublish: () => {},
+      },
+    });
+    const publish = await screen.findByRole("button", { name: "发布分支" });
+    expect(publish.hasAttribute("disabled")).toBe(true);
   });
 });

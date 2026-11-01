@@ -126,6 +126,7 @@
     title="克隆仓库"
     titleId="repo-dialog-title"
     icon="download"
+    task="clone"
     description="克隆到新目录后会直接打开。目标里已有文件时不会覆盖。"
     {onClose}
   >
@@ -175,6 +176,7 @@
     titleId="repo-dialog-title"
     icon="globe"
     size="lg"
+    task="remote"
     description="名称和地址来自 Git 配置。凭据不会保存，展示时也会隐藏。"
     {onClose}
   >

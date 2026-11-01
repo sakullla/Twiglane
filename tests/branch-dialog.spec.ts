@@ -4,6 +4,9 @@ import type { OpenedRepository } from "../src/lib/types";
 
 const branchState = vi.hoisted(() => vi.fn());
 const switchBranch = vi.hoisted(() => vi.fn());
+const tagState = vi.hoisted(() => vi.fn());
+const remoteState = vi.hoisted(() => vi.fn());
+const addRemote = vi.hoisted(() => vi.fn());
 
 vi.mock("../src/lib/api", () => ({
   api: {
@@ -12,10 +15,21 @@ vi.mock("../src/lib/api", () => ({
     createBranch: vi.fn(),
     deleteBranch: vi.fn(),
     deleteRemoteBranch: vi.fn(),
+    tagState,
+    createTag: vi.fn(),
+    deleteTag: vi.fn(),
+    pushTag: vi.fn(),
+    remoteState,
+    addRemote,
+    setRemoteUrl: vi.fn(),
+    cloneRepository: vi.fn(),
   },
+  pickDirectory: vi.fn(),
 }));
 
 import BranchDialog from "../src/lib/components/BranchDialog.svelte";
+import { openModalCount } from "../src/lib/components/Modal.svelte";
+import RepoDialogs from "../src/lib/components/RepoDialogs.svelte";
 
 const opened: OpenedRepository = {
   summary: { name: "demo", path: "/repo" },
@@ -57,12 +71,18 @@ describe("分支管理", () => {
   beforeEach(() => {
     branchState.mockReset();
     switchBranch.mockReset();
+    tagState.mockReset();
     branchState.mockResolvedValue({
       generation: 4,
       branches: [
         { name: "feature/ui", remote: false, current: true, upstream: "origin/feature/ui", worktree: null },
         { name: "main", remote: false, current: false, upstream: "origin/main", worktree: null },
       ],
+      snapshot: opened.snapshot,
+    });
+    tagState.mockResolvedValue({
+      generation: 4,
+      tags: [{ name: "v1.0.0", targetOid: "b".repeat(40), message: "release", createdAt: 1_700_000_000 }],
       snapshot: opened.snapshot,
     });
   });
@@ -96,5 +116,106 @@ describe("分支管理", () => {
     await screen.findByRole("button", { name: "切换到 main" });
     await fireEvent.click(screen.getByRole("button", { name: /^关闭$/ }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("分支与标签在同一 modal 内同层切换，不出现第二层 dialog", async () => {
+    render(BranchDialog, { props: props() });
+    await screen.findByRole("button", { name: "切换到 main" });
+
+    const dialog = screen.getByRole("dialog");
+    expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+    expect(document.querySelectorAll("[data-task-modal]")).toHaveLength(1);
+    expect(dialog.getAttribute("data-task-modal")).toBe("branch");
+    expect(openModalCount()).toBe(1);
+
+    const tablist = screen.getByRole("tablist", { name: "分支与标签分区" });
+    expect(tablist).toBeTruthy();
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs.map((tab) => tab.textContent?.trim())).toHaveLength(3);
+    expect(tabs[0].getAttribute("aria-selected")).toBe("true");
+    const panel = document.getElementById("branch-tab-panel")!;
+    expect(panel.getAttribute("data-branch-panel")).toBe("local");
+    expect(dialog.contains(panel)).toBe(true);
+
+    await fireEvent.click(screen.getByRole("tab", { name: "标签" }));
+    expect(await screen.findByText("v1.0.0")).toBeTruthy();
+    expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+    expect(document.querySelectorAll("[data-task-modal]")).toHaveLength(1);
+    expect(openModalCount()).toBe(1);
+    expect(document.getElementById("branch-tab-panel")!.getAttribute("data-branch-panel")).toBe("tags");
+    expect(dialog.contains(screen.getByText("v1.0.0"))).toBe(true);
+
+    await fireEvent.click(screen.getByRole("tab", { name: /本地分支/ }));
+    expect(await screen.findByRole("button", { name: "切换到 main" })).toBeTruthy();
+    expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+  });
+
+  it("背景施加 inert，Esc 关闭后焦点回到触发元素", async () => {
+    const shell = document.createElement("div");
+    shell.id = "app-shell";
+    const trigger = document.createElement("button");
+    trigger.textContent = "打开分支与标签";
+    shell.appendChild(trigger);
+    document.body.appendChild(shell);
+    const toasts = document.createElement("div");
+    toasts.className = "toasts";
+    toasts.style.position = "fixed";
+    document.body.appendChild(toasts);
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+
+    const onClose = vi.fn();
+    const view = render(BranchDialog, { props: props({ onClose }) });
+    const dialog = await screen.findByRole("dialog");
+    expect(shell.hasAttribute("inert")).toBe(true);
+    expect(shell.getAttribute("aria-hidden")).toBe("true");
+    // 画在 modal 之上的固定层（toast）保持可交互与可读。
+    expect(toasts.hasAttribute("inert")).toBe(false);
+    expect(document.activeElement === trigger).toBe(false);
+
+    await fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(trigger);
+
+    view.unmount();
+    expect(shell.hasAttribute("inert")).toBe(false);
+    expect(shell.hasAttribute("aria-hidden")).toBe(false);
+    expect(openModalCount()).toBe(0);
+    shell.remove();
+    toasts.remove();
+  });
+});
+
+describe("远程管理 modal", () => {
+  it("以单一任务 modal 打开并列出远程地址", async () => {
+    remoteState.mockReset();
+    addRemote.mockReset();
+    remoteState.mockResolvedValue({
+      generation: 4,
+      remotes: [{ name: "origin", fetchUrl: "git@example.com:demo.git", pushUrl: null }],
+      snapshot: opened.snapshot,
+    });
+    render(RepoDialogs, {
+      props: {
+        mode: "remote",
+        opened,
+        disabled: false,
+        onClose: vi.fn(),
+        onBusy: vi.fn(),
+        onSnapshot: vi.fn(),
+        onOpened: vi.fn(),
+        onFailure: vi.fn(),
+        onNotice: vi.fn(),
+        onOpenHistory: vi.fn(),
+        nextId: () => 5,
+      },
+    });
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.getAttribute("data-task-modal")).toBe("remote");
+    expect(document.querySelectorAll("[data-task-modal]")).toHaveLength(1);
+    expect(await screen.findByText("origin")).toBeTruthy();
+    expect(remoteState).toHaveBeenCalledWith("/repo", 4, 5);
+    expect(dialog.querySelector(".modal-desc")?.textContent).toContain("凭据不会保存");
+    expect(screen.getByRole("button", { name: /保存远程/ })).toBeTruthy();
   });
 });

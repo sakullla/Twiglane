@@ -92,4 +92,10 @@ describe("标签管理", () => {
     await vi.waitFor(() => expect(deleteTag).toHaveBeenCalledWith("/repo", "v1.0.0", true, 3, 7));
     expect(screen.queryByText("v1.0.0")).toBeNull();
   });
+
+  it("自身不创建 dialog，因此可以嵌在分支 modal 的同一层里", async () => {
+    renderTags();
+    await screen.findByText("v1.0.0");
+    expect(screen.queryAllByRole("dialog")).toHaveLength(0);
+  });
 });

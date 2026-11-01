@@ -16,9 +16,21 @@
     onFailure: (error: unknown) => void;
     onNotice: (message: string) => void;
     onOpenChanges: (path: string) => void;
+    /** 作为任务 modal 的内容时不再自带整页面板外框与滚动容器。 */
+    embedded?: boolean;
   }
 
-  let { opened, disabled, nextId, onGeneration, onSnapshot, onFailure, onNotice, onOpenChanges }: Props = $props();
+  let {
+    opened,
+    disabled,
+    nextId,
+    onGeneration,
+    onSnapshot,
+    onFailure,
+    onNotice,
+    onOpenChanges,
+    embedded = false,
+  }: Props = $props();
 
   let includeUntracked = $state(false);
   let message = $state("");
@@ -161,7 +173,7 @@
   }
 </script>
 
-<section class="span-main" aria-label="临时保存">
+<section class={embedded ? "" : "span-main"} aria-label="临时保存" data-panel="stash">
   <div class="panel-scroll stash-body">
     <div class="panel-inner">
       <div class="card">
@@ -272,10 +284,21 @@
     </div>
   </div>
   {#if confirmRecord}
-    <Modal title="删除临时保存" titleId="stash-delete-title" icon="trash" tone="danger" size="sm" onClose={cancelDelete}>
-      <p>
-        将删除 <span class="mono">{shortOid(confirmRecord.oid)}</span>{confirmRecord.message ? `（${confirmRecord.message}）` : ""}。确认时会再次核验这条记录的身份。取消不会删除，工作区也不会改变。
-      </p>
+    <Modal
+      title="删除临时保存"
+      titleId="stash-delete-title"
+      icon="trash"
+      tone="danger"
+      size="sm"
+      description="删除后 Git 不再保留这条记录，本应用不能恢复。取消不会删除，工作区也不会改变。"
+      onClose={cancelDelete}
+    >
+      <ul class="scope-list" aria-label="受影响的临时保存记录">
+        <li title={confirmRecord.oid}>
+          {shortOid(confirmRecord.oid)} · {confirmRecord.message || "未填写说明"} · {formatAuthoredAt(confirmRecord.committedAt)}
+        </li>
+      </ul>
+      <p class="hint">确认时会再次核验这条记录的身份；身份不符时不会删除。</p>
       {#snippet footer()}
         <button type="button" class="btn btn-secondary" onclick={cancelDelete}>取消</button>
         <span class="spacer"></span>

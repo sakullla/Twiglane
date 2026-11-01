@@ -29,6 +29,8 @@
     onNotice: (message: string) => void;
     onOpenStash: () => void;
     onOpenChanges?: () => void;
+    /** 作为任务 modal 的内容时不再自带整页面板外框。 */
+    embedded?: boolean;
   }
 
   let {
@@ -42,6 +44,7 @@
     onNotice,
     onOpenStash,
     onOpenChanges,
+    embedded = false,
   }: Props = $props();
 
   let session = $state<MergeSession | null>(null);
@@ -274,7 +277,7 @@
   }
 </script>
 
-<section class="span-main" aria-label="分支合并">
+<section class={embedded ? "" : "span-main"} aria-label="分支合并" data-panel="merge">
   <div class="panel-toolbar">
     <span class="panel-title"><Icon name="merge" size={16} /><strong>{operationCaption(session?.operation ?? "none")}</strong></span>
     {#if session && session.unresolved > 0}<span class="count danger" title="未解决冲突">{session.unresolved}</span>{/if}
@@ -440,9 +443,19 @@
   </div>
 
   {#if aborting}
-    <Modal title="中止合并" titleId="abort-merge-title" icon="alert" tone="danger" description={abortNote} onClose={() => (aborting = false)}>
+    <Modal
+      title="中止合并"
+      titleId="abort-merge-title"
+      icon="alert"
+      tone="danger"
+      description={abortNote}
+      onClose={() => (aborting = false)}
+    >
+      <p class="hint">中止后这次合并的解决结果会被撤销，不能由这里找回。取消则保持当前合并状态。</p>
       {#if abortPaths.length > 0}
-        <ul class="scope-list">{#each abortPaths as path (path)}<li title={path}>{path}</li>{/each}</ul>
+        <ul class="scope-list" aria-label="受影响的路径">
+          {#each abortPaths as path (path)}<li title={path}>{path}</li>{/each}
+        </ul>
       {:else}
         <p>没有需要撤销的合并编辑。</p>
       {/if}

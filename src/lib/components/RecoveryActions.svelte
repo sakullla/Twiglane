@@ -239,7 +239,7 @@
     title="撤销最近提交并保留改动"
     titleId="undo-title"
     icon="undo"
-    tone={undo.eligible ? "default" : "warning"}
+    tone={undo.eligible ? "danger" : "warning"}
     description="这不会放弃文件内容，改动会回到工作区。"
     onClose={cancelUndo}
   >
@@ -261,7 +261,7 @@
     {#snippet footer()}
       <button type="button" class="btn btn-secondary" onclick={cancelUndo}>取消</button>
       <span class="spacer"></span>
-      <button type="button" class="btn btn-primary" disabled={blocked || !undo?.eligible} onclick={confirmUndo}>确认撤销提交</button>
+      <button type="button" class="btn btn-danger" disabled={blocked || !undo?.eligible} onclick={confirmUndo}>确认撤销提交</button>
     {/snippet}
   </Modal>
 {/if}

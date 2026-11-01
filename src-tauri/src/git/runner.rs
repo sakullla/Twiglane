@@ -253,7 +253,7 @@ mod tests {
             ["python3", "python"].iter().find_map(|name| {
                 std::env::var_os("PATH").and_then(|path| {
                     std::env::split_paths(&path).find_map(|dir| {
-                        let candidate = dir.join(name);
+                        let candidate = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
                         candidate.is_file().then_some(candidate)
                     })
                 })

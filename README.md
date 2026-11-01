@@ -52,7 +52,7 @@ Git 由 Rust 以参数数组异步启动，不经过 shell。同一仓库的写�
 
 macOS 使用系统 WebKit，不下载 WebView2。Windows 使用系统 WebView2。安装器不包含 WebView2 runtime，缺失时用 downloadBootstrapper 另行下载引导程序，再由 Microsoft 下载 Evergreen runtime。引导程序约 1.8 MiB，离线 runtime 约 127 MiB（这是 Tauri 文档里的安装器增量说明，不是本仓库实测的下载字节）。这两项不计入应用安装包不超过 30 MiB、安装目录不超过 80 MiB 的预算。没有网络时，安装器应说明 WebView2 下载失败，应用也无法在缺少 runtime 时启动。
 
-仓库不保存签名或公证凭据。macOS 打包使用 ad-hoc 身份，没有公证。Windows 不配置证书。产物是测试分发，系统可能提示来自未识别的开发者。不能把这种包写成已签名公开发布。
+仓库不保存签名或公证凭据。本地 macOS 打包默认使用 ad-hoc 身份；Release workflow 使用固定自签证书，安装包内的应用必须通过签名完整性和证书身份检查。Windows 不配置证书。macOS 尚无 Apple 公证，产物仍是测试分发，系统可能提示来自未识别的开发者。
 
 ## 恢复边界
 
@@ -67,6 +67,18 @@ macOS 使用系统 WebKit，不下载 WebView2。Windows 使用系统 WebView2�
 尚未在 Windows 上安装运行，也没有受控 HTTPS/SSH 远程的成功与认证失败记录，公开发布签名同样没有。这些缺口留在验证记录的下一步里。本地 bare remote 只能说明同步语义，不能代替协议验收。CI 配置存在也不等于已经在两个系统上跑过。
 
 ## 验证
+
+### CI 与版本发布
+
+Pull request 和 main 分支的 push 运行 `ci`：参考 cliora，前端检查、测试与构建运行一次，Linux 执行 Rust 测试和 Clippy，macOS 执行 arm64 目标检查；另保留 Windows Rust 测试和 Clippy 以覆盖本次修复的平台问题。Linux 共用 cliora 的依赖安装脚本，Rust 缓存按平台复用，普通 CI 不重复生成安装包。
+
+发布使用 `vMAJOR.MINOR.PATCH` 标签。先同步 `package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 和 `src-tauri/tauri.conf.json` 的版本，将提交合入 main，再为该提交推送版本标签。
+
+`Release` 最多等待 30 分钟，要求标签对应的**同一提交**已通过 main 的 push CI，且提交仍属于 main 历史。其他分支或 PR 的成功记录不能放行。CI 失败、取消、版本不匹配或等待超时都会阻止构建；CI 修复后可重新运行发布 workflow。若需修改代码，请使用新提交和新版本标签。
+
+通过检查后先创建草稿，再构建 Windows x64 NSIS、macOS arm64 DMG、Linux x64 deb/AppImage。三端构建都成功、四种安装包非空且标签没有移动时才正式发布。失败时保留草稿供重试，已发布版本不会被覆盖。发布使用 workflow 的 `GITHUB_TOKEN`。macOS 必须配置 `APPLE_CERTIFICATE`（P12 的 base64）、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY` 三个 repository secrets，所有版本复用同一证书；缺失时发布失败，不降级为 ad-hoc。请保管证书及密码备份，不要在每次发布时重新生成证书。固定签名身份不等于 Apple 公证，也不提供应用内自动更新。
+
+Twiglane 尚未接入 cliora 的应用内更新功能，因此不生成 `latest.json` 或要求 updater 签名密钥。Linux 是新增构建目标，尚待实际安装验收；GitHub Release 的安装包构建成功不等同于 `verify:delivery` 的安装与运行验收通过。
 
 ```bash
 npm run check

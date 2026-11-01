@@ -1,57 +1,115 @@
 name: ci
 
 on:
-  push:
   pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
+  frontend:
+    name: Frontend checks, tests and build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Node
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
+      - name: Check
+        run: npm run check
+      - name: Test
+        run: npm test
+      - name: Test release gate
+        run: node --test .github/scripts/release-gate.test.cjs
+      - name: Build
+        run: npm run build
+
+  rust:
+    name: Rust tests and clippy
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install Tauri system dependencies
+        timeout-minutes: 10
+        run: bash .github/scripts/install-linux-deps.sh
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - run: npm ci
-      - run: npm run check
-      - run: npm run test
-      - run: npm run build
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Setup Python for process tests
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          cache-workspace-crates: true
+          cache-bin: false
+      - name: Test
+        timeout-minutes: 15
+        run: /usr/bin/time -v timeout --signal=TERM --kill-after=15s 12m cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=4
+      - name: Clippy
+        timeout-minutes: 10
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
-  package:
-    name: package (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            bundles: app,dmg
-          - os: windows-latest
-            bundles: nsis
+  rust-macos:
+    name: Rust macOS target check
+    runs-on: macos-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: 22
-          cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-      - run: npm ci
-      - run: npm run tauri build -- --bundles ${{ matrix.bundles }}
-      - uses: actions/upload-artifact@v4
+          targets: aarch64-apple-darwin
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
         with:
-          name: twiglane-${{ matrix.os }}
-          path: |
-            src-tauri/target/release/bundle/macos
-            src-tauri/target/release/bundle/nsis
-          if-no-files-found: error
+          workspaces: src-tauri -> target
+          cache-workspace-crates: true
+          cache-bin: false
+      - name: Check macOS target
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml --target aarch64-apple-darwin
+
+  rust-windows:
+    name: Rust Windows tests and clippy
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Setup Python for process tests
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          cache-workspace-crates: true
+          cache-bin: false
+      - name: Test
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Clippy
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

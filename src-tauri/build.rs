@@ -1,6 +1,22 @@
 fn main() {
-    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
-        tauri_build::AppManifest::new().commands(&[
+    let attributes = tauri_build::Attributes::new();
+    let attributes = if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        // tauri-build links its manifest only into application binaries. Library
+        // tests also need Common Controls v6 or they fail with 0xc0000139.
+        // https://github.com/tauri-apps/tauri/issues/13419
+        let manifest = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
+            .join("windows/app.manifest");
+        println!("cargo:rerun-if-changed={}", manifest.display());
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
+        attributes.windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest())
+    } else {
+        attributes
+    };
+    tauri_build::try_build(
+        attributes.app_manifest(tauri_build::AppManifest::new().commands(&[
             "detect_git",
             "set_git_executable",
             "clear_git_executable",
@@ -56,7 +72,7 @@ fn main() {
             "measure_sample",
             "measure_finish",
             "measure_wait",
-        ]),
-    ))
+        ])),
+    )
     .expect("failed to run tauri-build");
 }

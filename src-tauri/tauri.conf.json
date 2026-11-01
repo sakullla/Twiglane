@@ -29,7 +29,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "nsis"],
+    "targets": ["app", "dmg", "nsis", "deb", "appimage"],
     "publisher": "Twiglane",
     "category": "DeveloperTool",
     "shortDescription": "Twiglane 轻量 Git 桌面客户端",

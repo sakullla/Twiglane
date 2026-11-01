@@ -1,0 +1,9 @@
+Use case: logo-brand
+Asset type: production-ready 1024 by 1024 desktop application icon for Twiglane, a lightweight Git client named "branches in order".
+Primary request: design one original, beautifully balanced abstract branching-path emblem. Two broad, flowing ivory ribbons join into a single upright stem and separate into two upward paths, suggesting a young twig and a clean Git branching graph. Use three confident rounded terminal shapes integrated into the silhouette, not tiny floating dots. The shape should feel distinctive, calm, precise and immediately recognizable at small sizes.
+Scene/backdrop: one emerald-green rounded-square app tile centered on a perfectly flat pure white canvas. The tile occupies 84 percent of the square canvas, with equal margins. Keep everything outside the tile pure white, with no shadows or glow, so it can be cleanly made transparent afterwards.
+Style/medium: refined flat vector-like icon design, crisp antialiased edges, geometric curves, generous negative space, only a restrained jade-to-deep-emerald gradient within the tile. The ivory branching mark is bold, simple and clean; a small mint plane may give the ribbons a subtle folded quality without looking three-dimensional.
+Composition: straight-on, centered, one tile and one unified emblem only; strong silhouette, broad strokes, balanced optical weight. Emblem occupies about 62 percent of the tile width. Designed to read clearly at 16, 24 and 32 pixels.
+Palette: emerald #0e7c55, jade #35c98c, pale mint and warm ivory; this is the existing application's palette.
+Text: none.
+Avoid: letters, wordmarks, watermarks, existing company marks, literal trees, fine leaves, circuit boards, arrows, code brackets, ornate detail, glass effects, photorealism, 3D extrusion, drop shadows, texture, extra symbols, multiple concepts, a presentation sheet or mockup. Deliver only the finished square icon artwork.

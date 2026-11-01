@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { filterRecent } from "../recent";
+  import { filterRecent, repeatedNames } from "../recent";
   import type { IconName } from "../icons";
   import type { RecentRepo } from "../types";
   import { hueOf, initialOf } from "../ui";
@@ -38,12 +38,7 @@
   let active = $state(0);
   let visible = $derived(filterRecent(repos, query));
   /** 同名仓库只能靠路径区分，这些行显示完整路径而不是截断（R6）。 */
-  let sameNames = $derived.by(() => {
-    const seen = new Set<string>();
-    const repeated = new Set<string>();
-    for (const repo of repos) (seen.has(repo.name) ? repeated : seen).add(repo.name);
-    return repeated;
-  });
+  let sameNames = $derived(repeatedNames(repos));
 
   /** 打开弹层或换关键词后，默认项落在第一个可切过去的仓库上：一次回车就能切换（R6）。 */
   $effect(() => {

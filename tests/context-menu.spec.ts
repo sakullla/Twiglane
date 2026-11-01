@@ -272,6 +272,41 @@ describe("仓库弹层的仓库操作", () => {
   });
 });
 
+describe("起始页的最近仓库菜单", () => {
+  async function startPageRow() {
+    mocks.getSettings.mockResolvedValue({
+      theme: "dark",
+      panelWidths: { sidebar: 256, files: 360 },
+      git: { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "" },
+      recent: [{ name: "demo", path: repoPath, openedAtMs: 1 }],
+      settingsWarning: null,
+    });
+    render(App);
+    await waitFor(() => expect(document.querySelector(".welcome-recent button")).toBeTruthy());
+    return document.querySelector<HTMLButtonElement>(".welcome-recent button")!;
+  }
+
+  it("右键列出打开、显示、复制路径和移除，移除后列表回到空状态", async () => {
+    mocks.forgetRecent.mockResolvedValue([]);
+    const menu = await rightClick(await startPageRow());
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual([
+      "打开",
+      "在资源管理器中显示",
+      "复制完整路径",
+      "从最近列表移除",
+    ]);
+    expect(mocks.openRepository, "右键不会打开仓库").not.toHaveBeenCalled();
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "从最近列表移除" }));
+    await waitFor(() => expect(mocks.forgetRecent).toHaveBeenCalledWith(repoPath));
+    await waitFor(() => expect(screen.getByText("还没有最近仓库，先打开或克隆一个。")).toBeTruthy());
+  });
+
+  it("键盘菜单键同样打开菜单", async () => {
+    await fireEvent.keyDown(await startPageRow(), { key: "ContextMenu" });
+    expect(screen.getByRole("menu", { name: "demo 的操作" })).toBeTruthy();
+  });
+});
+
 describe("差异区", () => {
   it("可展开为完整文件（按大上下文重新读取），展开后不提供按块暂存", async () => {
     await openRepo();

@@ -9,7 +9,7 @@ import {
   showMergeAbort,
   undoActionLabel,
 } from "../src/lib/resolve";
-import type { MergeSession, OpenedRepository } from "../src/lib/types";
+import type { GitInfo, MergeSession, OpenedRepository } from "../src/lib/types";
 
 const mergeSession = vi.hoisted(() => vi.fn());
 const branchState = vi.hoisted(() => vi.fn());
@@ -690,9 +690,65 @@ describe("任务 modal（设置 / 提交范围 / 发布）", () => {
     await fireEvent.click(screen.getByRole("button", { name: "重新检测" }));
     expect(onRedetect).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "选择 Git" })).toBeTruthy();
-    const webview = screen.getByLabelText("WebView2 与安装说明") as HTMLTextAreaElement;
-    expect(webview.value).toContain("WebView2");
-    expect(webview.value).toContain("Git");
+    const note = screen.getByText("WebView2 与安装说明").closest("details") as HTMLDetailsElement;
+    expect(note.textContent).toContain("WebView2");
+    expect(note.textContent).toContain("Git");
+  });
+
+  describe("运行环境说明按需显示（R11）", () => {
+    const healthyGit = { available: true, path: "/usr/bin/git", version: "2.49.0", overridden: false, belowBaseline: false, message: "Git 2.49.0 可用" };
+    const oldGit = { ...healthyGit, version: "2.30.0", belowBaseline: true, message: "Git 2.30.0 低于基线 2.48" };
+    const open = (git: GitInfo | null) =>
+      render(SettingsModal, {
+        props: { theme: "dark", git, disabled: false, onClose: () => {}, onTheme: () => {}, onRedetect: () => {}, onChooseGit: () => {}, onClearGit: () => {} },
+      });
+    const noteOf = (container: HTMLElement) => container.querySelector<HTMLDetailsElement>('[data-settings-section="runtime"] details')!;
+
+    it("Git 正常时说明收起，展开后才可见，状态是语义绿", async () => {
+      const { container } = open(healthyGit);
+      await screen.findByRole("dialog");
+      const note = noteOf(container);
+      expect(note.open, "默认收起").toBe(false);
+      expect(screen.getByText("Git 可用").className).toContain("ok");
+      expect(screen.getByRole("list", { name: "Git 诊断" }).textContent, "诊断列表只有状态").not.toContain("安装");
+      expect(container.querySelector("textarea"), "说明不再是常驻文本框").toBeNull();
+      note.open = true;
+      expect(note.querySelectorAll("p").length).toBeGreaterThan(1);
+    });
+
+    it("Git 缺失时默认展开，低于基线时也展开并写明原因", async () => {
+      const missing = open(unavailableGit);
+      await screen.findByRole("dialog");
+      expect(noteOf(missing.container).open, "缺失").toBe(true);
+      expect(screen.getByText("Git 不可用").className).toContain("danger");
+      missing.unmount();
+
+      const below = open(oldGit);
+      await screen.findByRole("dialog");
+      expect(noteOf(below.container).open, "低于基线").toBe(true);
+      expect(screen.getByRole("list", { name: "Git 诊断" }).textContent).toContain("低于基线 2.48");
+      expect(screen.getByText("版本过低").className).toContain("warn");
+      below.unmount();
+    });
+
+    it("尚未检测时不报不可用，也不展开说明", async () => {
+      const { container } = open(null);
+      await screen.findByRole("dialog");
+      expect(noteOf(container).open).toBe(false);
+      expect(screen.queryByText("Git 不可用")).toBeNull();
+      expect(screen.getAllByText(/尚未检测/).length).toBeGreaterThan(0);
+    });
+
+    it("问题说明和操作排在长说明之前，语法高亮开关保留", async () => {
+      const { container } = open(unavailableGit);
+      await screen.findByRole("dialog");
+      const redetect = screen.getByRole("button", { name: "重新检测" });
+      const list = screen.getByRole("list", { name: "Git 诊断" });
+      const follows = (a: Element, b: Element) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+      expect(follows(list, redetect), "问题说明在操作之前").toBe(true);
+      expect(follows(redetect, noteOf(container)), "操作在长说明之前").toBe(true);
+      expect(screen.getByRole("checkbox", { name: /代码语法高亮/ })).toBeTruthy();
+    });
   });
 
   it("传 section=runtime 时把焦点与分区锚点落在运行环境，不传时首屏不变", async () => {

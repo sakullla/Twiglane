@@ -517,8 +517,59 @@ describe("起始页", () => {
     expect(screen.getByRole("button", { name: /新建仓库/ })).toBeTruthy();
     expect(screen.getAllByText("demo")).toHaveLength(2);
     expect(screen.queryByText(/都清晰有序/)).toBeNull();
+    expect(document.querySelector("h1"), "没有 hero 标题").toBeNull();
+    for (const removed of [".welcome-hero", ".welcome-art", ".welcome-assurances", ".welcome-footer"]) {
+      expect(document.querySelector(removed), removed).toBeNull();
+    }
+    expect(screen.queryByText(/本地优先/), "没有卖点").toBeNull();
     await fireEvent.click(screen.getByText("/work/beta/demo"));
     expect(onOpen).toHaveBeenCalledWith("/work/beta/demo");
+  });
+
+  it("同名仓库显示完整路径，其余仓库仍是单行路径", () => {
+    const named = [...repos, { name: "solo", path: "/work/solo", openedAtMs: 0 }];
+    const { container } = render(Welcome, {
+      props: { recent: named, disabled: false, onAdd: () => {}, onClone: () => {}, onCreate: () => {}, onOpen: () => {} },
+    });
+    expect([...container.querySelectorAll(".repo-path-full")].map((node) => node.textContent)).toEqual(
+      named.filter((item) => item.name === "demo").map((item) => item.path),
+    );
+    expect(container.querySelector(".repo-path")?.textContent).toBe("/work/solo");
+  });
+
+  it("最多列五个最近仓库，多出来时说明总数", () => {
+    const many = Array.from({ length: 7 }, (_, index) => ({ name: `repo-${index}`, path: `/work/${index}`, openedAtMs: index }));
+    const { container } = render(Welcome, {
+      props: { recent: many, disabled: false, onAdd: () => {}, onClone: () => {}, onCreate: () => {}, onOpen: () => {} },
+    });
+    expect(container.querySelectorAll(".welcome-recent button")).toHaveLength(5);
+    expect(screen.getByText("共 7 个")).toBeTruthy();
+  });
+
+  it("最近仓库右键和键盘菜单键都能打开仓库操作，右键不会顺带打开仓库", async () => {
+    const onOpen = vi.fn();
+    const onContextMenu = vi.fn();
+    render(Welcome, {
+      props: { recent: repos, disabled: false, onAdd: () => {}, onClone: () => {}, onCreate: () => {}, onOpen, onContextMenu },
+    });
+    const row = screen.getByText("/work/beta/demo").closest("button")!;
+    await fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
+    expect(onContextMenu).toHaveBeenLastCalledWith(expect.objectContaining({ path: "/work/beta/demo" }), { x: 40, y: 60 });
+    await fireEvent.keyDown(row, { key: "F10", shiftKey: true });
+    await fireEvent.keyDown(row, { key: "ContextMenu" });
+    expect(onContextMenu).toHaveBeenCalledTimes(3);
+    await fireEvent.keyDown(row, { key: "a" });
+    expect(onContextMenu).toHaveBeenCalledTimes(3);
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it("禁用时三个入口都不可点", () => {
+    render(Welcome, {
+      props: { recent: [], disabled: true, onAdd: () => {}, onClone: () => {}, onCreate: () => {}, onOpen: () => {} },
+    });
+    for (const name of [/打开本地仓库/, /克隆远程仓库/, /新建仓库/]) {
+      expect((screen.getByRole("button", { name }) as HTMLButtonElement).disabled, String(name)).toBe(true);
+    }
   });
 
   it("没有最近仓库时只给一句结论，Git 不可用时可进入诊断", async () => {
@@ -612,8 +663,10 @@ describe("外壳样式契约", () => {
           ".changes",
           ".history-layout",
           ".merge-banner",
-          ".welcome-compact",
-          ".welcome-inner-compact",
+          ".welcome-inner",
+          ".welcome-brand",
+          ".welcome-actions",
+          ".welcome-recent",
           ".welcome-empty",
           ".welcome-diagnostic",
           ".welcome-section",

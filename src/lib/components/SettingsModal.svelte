@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { dependencyNote, gitInstallHint } from "../labels";
+  import { dependencyNote } from "../labels";
   import type { GitInfo, Theme } from "../types";
   import { LANGUAGE_OPTIONS } from "../syntax/languages";
   import { setSyntaxEnabled, syntaxPrefs } from "../syntax/prefs.svelte";
@@ -41,15 +41,15 @@
     { id: "system", label: "跟随系统" },
   ];
 
-  let runtimeCard = $state<HTMLDivElement | null>(null);
+  let runtimeSection = $state<HTMLElement | null>(null);
 
   /* 诊断入口要真的落到运行环境分区：Modal 的首焦点读 [data-autofocus]，
      这里再补一次滚动，避免那一块在 modal 滚动区之外。 */
   $effect(() => {
     if (section !== "runtime") return;
-    const card = runtimeCard;
-    if (!card || typeof card.scrollIntoView !== "function") return;
-    card.scrollIntoView({ block: "start" });
+    const target = runtimeSection;
+    if (!target || typeof target.scrollIntoView !== "function") return;
+    target.scrollIntoView({ block: "start" });
   });
 
   let platform = $derived(navigator.platform ?? "");
@@ -60,72 +60,79 @@
         ? `Git ${git.version ?? "已可用"}${git.path ? ` · ${git.path}` : ""}${git.overridden ? " · 手动指定" : ""}`
         : (git.message ?? "Git 不可用"),
   );
+  /** Git 缺失或低于基线时用户正需要这些说明，默认展开，不让人再去找（R11）。 */
+  let needsHelp = $derived(git !== null && (!git.available || git.belowBaseline));
+  let gitStatus = $derived.by(() => {
+    if (git === null) return { tone: "skip", label: "尚未检测" };
+    if (!git.available) return { tone: "danger", label: "Git 不可用" };
+    if (git.belowBaseline) return { tone: "warn", label: "版本过低" };
+    return { tone: "ok", label: "Git 可用" };
+  });
 </script>
 
 <Modal
   title="设置"
   titleId="settings-modal-title"
-  size="lg"
   task="settings"
   onClose={onClose}
 >
-  <div class="card" data-settings-section="appearance">
-    <div class="card-head">
-      <span class="ch-icon"><Icon name="sun" size={15} /></span>
-      <h2>外观</h2>
-      <span class="spacer"></span>
-      <span class="hint">默认深色</span>
-    </div>
-    <div class="card-body">
-      <div class="segmented" role="group" aria-label="外观">
-        {#each THEMES as option (option.id)}
-          <button type="button" aria-pressed={theme === option.id} disabled={disabled} onclick={() => onTheme(option.id)}>
-            {option.label}
-          </button>
-        {/each}
+  <section class="settings-section" data-settings-section="appearance">
+    <h2>外观</h2>
+    <div class="settings-group">
+      <div class="settings-row">
+        <span class="settings-label">主题<small>重启后保持</small></span>
+        <div class="segmented" role="group" aria-label="外观">
+          {#each THEMES as option (option.id)}
+            <button type="button" aria-pressed={theme === option.id} disabled={disabled} onclick={() => onTheme(option.id)}>
+              {option.label}
+            </button>
+          {/each}
+        </div>
       </div>
-      <p class="hint">选择写入设置后重启仍保持；跟随系统时按系统的浅深设置切换。</p>
-      <label class="switch settings-syntax">
+      <label class="settings-row switch">
+        <span class="settings-label">代码语法高亮<small>支持 {LANGUAGE_OPTIONS.length} 种语言，可在差异工具条上按文件类型改用别的语言</small></span>
         <input
           type="checkbox"
           checked={syntaxPrefs.enabled}
           onchange={(event) => setSyntaxEnabled((event.currentTarget as HTMLInputElement).checked)}
         />
-        <span>代码语法高亮<small>差异、提交历史与冲突处理里按语言着色，支持 {LANGUAGE_OPTIONS.length} 种语言；单个文件类型可在差异工具条上改用别的语言</small></span>
       </label>
     </div>
-  </div>
+  </section>
 
-  <div
-    class="card"
+  <section
+    class="settings-section"
     data-settings-section="runtime"
     tabindex="-1"
     data-autofocus={section === "runtime" ? "" : undefined}
-    bind:this={runtimeCard}
+    bind:this={runtimeSection}
   >
-    <div class="card-head">
-      <span class="ch-icon info"><Icon name="package" size={15} /></span>
+    <div class="settings-section-head">
       <h2>运行环境</h2>
-      <span class="spacer"></span>
-      <span class={`chip ${git?.available ? "current" : "skip"}`}>{git?.available ? "Git 可用" : "Git 不可用"}</span>
+      <span class={`chip ${gitStatus.tone}`}>{gitStatus.label}</span>
     </div>
-    <div class="card-body">
-      <ul class="scope-list" style="max-height: none" aria-label="Git 诊断">
-        <li title={gitLine}>{gitLine}</li>
-        {#if git && git.belowBaseline}
-          <li title={git.message}>{git.message}</li>
+    <div class="settings-group">
+      <ul class="settings-diagnostics" aria-label="Git 诊断">
+        <li>{gitLine}</li>
+        {#if git?.belowBaseline}
+          <li>{git.message}</li>
         {/if}
-        <li title={gitInstallHint(platform)}>{gitInstallHint(platform)}</li>
       </ul>
-      <div class="row">
+      <div class="settings-actions">
         <button type="button" class="btn btn-secondary btn-sm" disabled={disabled} onclick={onRedetect}>重新检测</button>
         <button type="button" class="btn btn-secondary btn-sm" disabled={disabled} onclick={onChooseGit}>选择 Git</button>
         {#if git?.overridden}
           <button type="button" class="btn btn-ghost btn-sm" disabled={disabled} onclick={onClearGit}>恢复自动检测</button>
         {/if}
       </div>
-      <label class="label" for="settings-runtime-note">WebView2 与安装说明</label>
-      <textarea id="settings-runtime-note" class="full-value prose" readonly rows={8}>{dependencyNote(platform)}</textarea>
+      <details class="scope-details settings-details" open={needsHelp}>
+        <summary><Icon name="chevron-right" size={13} />WebView2 与安装说明</summary>
+        <div class="settings-note">
+          {#each dependencyNote(platform).split("\n") as line (line)}
+            <p>{line}</p>
+          {/each}
+        </div>
+      </details>
     </div>
-  </div>
+  </section>
 </Modal>

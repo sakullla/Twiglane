@@ -157,11 +157,20 @@
 .switch input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%; background: var(--switch-knob); box-shadow: var(--shadow-sm); transition: transform var(--duration-base) var(--ease); }
 .switch input:checked { background: var(--accent); }
 .switch input:checked::after { transform: translateX(15px); }
-.settings-syntax { align-items: flex-start; }
-.settings-syntax input { margin-top: 2px; }
-.settings-syntax > span { display: flex; flex-direction: column; gap: 2px; color: var(--fg); font-weight: var(--weight-medium); }
-.settings-syntax small { color: var(--fg-muted); font-size: var(--text-xs); font-weight: var(--weight-normal); line-height: var(--leading-normal); }
 .switch input:disabled { opacity: 0.5; cursor: not-allowed; }
+/* 设置：外观和运行环境各一组，组是 --surface 上的一块 --surface-2，不再叠圆角描边卡片（R2、R11）。 */
+.settings-section { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
+.settings-section:focus-visible { outline-offset: var(--space-4); }
+.settings-section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-height: 21px; }
+.settings-section h2 { color: var(--fg-muted); font-size: var(--text-sm); font-weight: var(--weight-medium); letter-spacing: 0; }
+.settings-group { display: flex; flex-direction: column; gap: var(--space-12); padding: var(--space-12); border-radius: var(--radius); background: var(--surface-2); }
+.settings-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); min-width: 0; }
+.settings-label { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; color: var(--fg); font-size: var(--text-base); font-weight: var(--weight-medium); }
+.settings-label small { color: var(--fg-muted); font-size: var(--text-xs); font-weight: var(--weight-normal); line-height: var(--leading-normal); }
+.settings-diagnostics { display: flex; flex-direction: column; gap: var(--space-4); margin: 0; padding: 0; list-style: none; color: var(--fg); font-size: var(--text-base); line-height: var(--leading-normal); overflow-wrap: anywhere; }
+.settings-actions { display: flex; flex-wrap: wrap; gap: var(--space-8); }
+.settings-details summary { font-size: var(--text-sm); }
+.settings-note { display: flex; flex-direction: column; gap: var(--space-8); margin-top: var(--space-8); color: var(--fg-muted); font-size: var(--text-sm); line-height: var(--leading-relaxed); user-select: text; }
 
 /* ---------- chip 与状态标记 ---------- */
 .chip { display: inline-flex; align-items: center; gap: var(--space-4); height: 21px; padding: 0 7px; border-radius: 7px; font-size: var(--text-xs); font-weight: var(--weight-medium); background: var(--surface-3); color: var(--fg-muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: none; }
@@ -171,6 +180,8 @@
 .chip.head { background: var(--purple-soft); color: var(--purple); }
 .chip.save { background: var(--accent-soft); color: var(--accent-text); }
 .chip.skip { background: var(--surface-3); color: var(--fg-muted); }
+.chip.ok { background: var(--success-soft); color: var(--success-text); }
+.chip.danger { background: var(--danger-soft); color: var(--danger-text); }
 .chip.ignore { background: transparent; border: 1px dashed var(--border-strong); color: var(--fg-subtle); }
 .chip-row { display: flex; gap: var(--space-6); flex-wrap: wrap; }
 .st { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 7px; font-family: var(--mono); font-size: var(--text-xs); font-weight: var(--weight-bold); flex: none; background: var(--surface-3); color: var(--fg-muted); }

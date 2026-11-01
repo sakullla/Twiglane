@@ -333,6 +333,7 @@ describe("石墨靛蓝配色（R1）", () => {
       ".cr-line.res .ln",
       ".cr-dot.ok",
       '.chip.current[data-hunk-state="resolved"]',
+      ".chip.ok",
       ".cr-ruler-mark.ok",
       ".cr-progress > span",
     ];
@@ -526,7 +527,7 @@ describe("样式分层结构", () => {
  * 因为 kbd、滚动条这些基础规则的边界同样不该冒充控件边界）。覆盖边界（明说不含糊）：
  * - 只审 `border` / `border-color` / `border-*` 声明。用 `background` 或 `box-shadow`
  *   画出来的线不在内（`.resizer`、`.menu-sep`、`.merge-step-line`、
- *   `.art-branch-line > span`、`.empty-icon`、`.context-separator` 的 `color`）：
+ *   `.empty-icon`、`.context-separator` 的 `color`）：
  *   它们同样只做分区/描边，且没有哪一处是某个控件唯一的可见边界。
  * - 以 `transparent` 为常态的控件不会被命中：它们的可辨识度由其它手段承担，属另一套判据，
  *   不在本门禁内。现存五处，逐个说明为何可接受：
@@ -565,8 +566,6 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".branch-create": "新建分支表单容器轮廓；内部 .input/.field 自带控件边界",
   ".tag-create": "新建标签表单容器轮廓；内部 .input 自带控件边界",
   ".three-way-merge": "三方合并容器外框",
-  ".art-card": "起始页插画卡外框（装饰性插画，不可交互）",
-  ".welcome-recent": "最近仓库网格外框",
   ".toolbar-group": "标题栏按钮组外框；组内 .tb-btn 自带 hover 背景",
   ".view-heading-status": "视图标题右侧状态胶囊，静态展示",
   ".chip.ignore": "忽略标记 chip 的虚线描边，是状态标记而非可点击控件",
@@ -603,9 +602,6 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".topbar": "标题栏底部横向分区线",
   ".infobar": "通知条底部横向分区线",
   ".view-title-line .count": "视图标题计数胶囊描边，纯装饰数字标记",
-  ".welcome-recent button": "最近仓库网格的行分隔线；行本身由文字与 hover 背景标示，与 .list-row 同类",
-  ".welcome-recent button:nth-child(odd)": "最近仓库网格的列分隔竖线",
-  ".welcome-recent button:nth-last-child(-n+2)": "网格末行去掉底部分隔线（覆盖为分区修正）",
   ".statusbar": "状态栏顶部横向分区线",
 };
 
@@ -737,20 +733,39 @@ describe("控件边界策略（默认拒绝）", () => {
 
   /**
    * 主行动卡（起始页第一入口）的说明文字是正文：必须取不透明的 --accent-fg
-   * （对 --accent 浅 5.62:1 / 深 5.75:1，对 --accent-hover 浅 6.97:1 / 深 7.45:1）。
-   * 75% 的 color-mix 淡化合成后只剩 3.91:1（浅）/ 3.99:1（深），低于正文 4.5:1；
-   * 淡化只留给同一行那个纯字形箭头，并由 scripts/check-contrast.mjs 的
-   * COLOR_MIX_ALPHA_SITES 按非文本 3:1 校验。
+   * （--accent-fg 对 --accent 与 --accent-hover 的 4.5:1 由 check-contrast 校验）。
+   * 75% 的 color-mix 淡化合成后低于正文 4.5:1，所以这张卡上任何文字和图标都不淡化；
+   * 真要淡化必须先进 scripts/check-contrast.mjs 的 COLOR_MIX_ALPHA_SITES。
    */
-  it("主行动卡的正文不淡化，淡化只留给图标字形", () => {
+  it("主行动卡的正文和图标都不淡化", () => {
     const layout = read(path.join(stylesDir, "layout.css"));
     const copy = ruleBody(layout, ".action-card.primary .ac-copy > span");
     expect(copy, "主行动卡正文取不透明 --accent-fg").toMatch(/color:\s*var\(--accent-fg\)/);
     expect(copy, "主行动卡正文不能再用 alpha 淡化").not.toMatch(/color-mix|transparent/);
     const glyph = ruleBody(layout, ".action-card.primary > .icon");
-    expect(glyph, "箭头字形保留 75% 淡化（已登记进 check-contrast 的淡化位点清单）").toMatch(
-      /color-mix\(in srgb, var\(--accent-fg\) 75%, transparent\)/,
-    );
+    expect(glyph, "主行动卡图标取不透明 --accent-fg").toMatch(/color:\s*var\(--accent-fg\)/);
+    expect(glyph, "主行动卡图标不能再用 alpha 淡化").not.toMatch(/color-mix|transparent/);
+  });
+
+  it("起始页和设置的禁用态不用元素级 opacity，控件边界走 --control-border", () => {
+    const layout = read(path.join(stylesDir, "layout.css"));
+    const disabled = parseRules(layout).filter((rule) => splitSelectorList(rule.selector).includes(".action-card:disabled"));
+    expect(disabled.length, ".action-card:disabled 规则").toBeGreaterThan(0);
+    for (const rule of disabled) {
+      expect(rule.body, ".action-card:disabled").not.toMatch(/(?:^|;)\s*opacity\s*:/);
+    }
+    expect(disabled.map((rule) => rule.body).join(";"), "禁用卡片仍有控件边界").toMatch(/border-color:\s*var\(--control-border\)/);
+  });
+
+  it("起始页的画布和最近仓库没有彩色光斑、描边和阴影", () => {
+    const layout = read(path.join(stylesDir, "layout.css"));
+    const welcome = ruleBody(layout, ".welcome");
+    expect(welcome, "画布只取 --bg").toMatch(/background:\s*var\(--bg\)/);
+    expect(welcome, "画布不用渐变光斑").not.toMatch(/gradient/);
+    const list = ruleBody(layout, ".welcome-recent");
+    expect(list, "最近仓库靠 --surface 明度分层").toMatch(/background:\s*var\(--surface\)/);
+    expect(list, "最近仓库没有外框").not.toMatch(/(?:^|;)\s*border\s*:/);
+    expect(list, "最近仓库没有阴影").not.toMatch(/box-shadow/);
   });
 
   /**

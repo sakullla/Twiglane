@@ -1992,6 +1992,7 @@
           onClone={() => runCommand("repo.clone")}
           onCreate={() => runCommand("repo.create")}
           onOpen={openRecent}
+          onContextMenu={repoContextMenu}
         />
       {/if}
     </main>

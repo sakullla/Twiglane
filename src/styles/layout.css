@@ -141,94 +141,48 @@
 .merge-banner > .icon { flex: none; }
 
 /* ---------- 起始页 ---------- */
-.welcome { flex: 1; overflow: auto; background: radial-gradient(900px 480px at 85% 0%, var(--accent-soft), transparent 68%), radial-gradient(700px 420px at 0% 85%, var(--info-soft), transparent 72%), radial-gradient(600px 400px at 55% 110%, var(--purple-soft), transparent 70%), var(--bg); }
-.welcome-inner { width: min(1080px, 100%); margin: 0 auto; padding: 36px 36px 24px; display: flex; flex-direction: column; gap: 22px; }
-.welcome-hero { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(300px, 0.85fr); align-items: center; gap: 54px; min-height: 232px; }
-.welcome-copy { padding: var(--space-8) 0; }
-.welcome-eyebrow { display: inline-flex; align-items: center; gap: 9px; height: 26px; padding: 0 12px 0 6px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-size: var(--text-xs); font-weight: var(--weight-semibold); letter-spacing: 0.04em; }
-.welcome-eyebrow .brand { flex: none; }
-.welcome-eyebrow .brand-logo { width: 18px; height: 18px; border-radius: 6px; box-shadow: none; }
-.welcome-eyebrow .brand-text { display: none; }
-.welcome-copy h1 { margin-top: 18px; font-size: clamp(32px, 3.5vw, 46px); line-height: 1.16; font-weight: var(--weight-bold); letter-spacing: -0.05em; }
-/* 标题里的关键词用品牌渐变压字：背景来自 --brand-grad 令牌，文字裁成镂空 */
-.welcome-copy h1 span { background: var(--brand-grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
-.welcome-copy > p { margin-top: 17px; color: var(--fg-muted); font-size: var(--text-base); line-height: 1.85; }
-.welcome-assurances { display: flex; flex-wrap: wrap; gap: 15px; margin-top: 19px; color: var(--fg-muted); font-size: var(--text-xs); }
-.welcome-assurances span { display: inline-flex; align-items: center; gap: 5px; }
-.welcome-assurances .icon { color: var(--accent-text); }
-.welcome-art { position: relative; min-height: 238px; display: grid; place-items: center; }
-.art-glow { position: absolute; width: 280px; height: 280px; border-radius: 50%; background: color-mix(in srgb, var(--accent) 14%, transparent); filter: blur(56px); }
-.art-card { position: absolute; width: min(340px, 94%); border-radius: 18px; border: 1px solid var(--border); background: var(--surface); box-shadow: var(--shadow-md); }
-.art-card-back { height: 190px; transform: rotate(7deg) translate(16px, -4px); opacity: 0.52; padding: var(--space-24); }
-.art-card-back span { display: block; height: 8px; margin-bottom: 14px; border-radius: 6px; background: var(--surface-3); }
-.art-card-back span:nth-child(2) { width: 70%; }
-.art-card-back span:nth-child(3) { width: 82%; }
-.art-card-front { padding: 18px; transform: rotate(-2.5deg); box-shadow: var(--shadow-lg); }
-.art-card-head { display: flex; align-items: center; margin-bottom: var(--space-16); }
-.art-card-head .brand-logo { width: 25px; height: 25px; border-radius: 8px; }
-.art-card-head .brand-text strong { font-size: var(--text-xs); }
-.art-card-head .brand-text span { display: none; }
-.art-chip { margin-left: auto; padding: 3px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-size: var(--text-xs); }
-.art-branch-line { display: flex; align-items: center; gap: var(--space-6); margin-bottom: 10px; }
-.art-branch-line > span:last-child { width: 42px; height: 1px; background: var(--border-strong); }
-.art-node { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.art-card-front > strong { display: block; font-size: var(--text-base); font-weight: var(--weight-semibold); }
-.art-path { display: block; margin: 3px 0 13px; font-family: var(--mono); font-size: var(--text-xs); color: var(--fg-subtle); }
-.art-diff { padding: 5px 8px; font-family: var(--mono); font-size: var(--text-xs); }
-.art-diff.add { background: var(--add-bg); color: var(--add-fg); border-radius: 5px 5px 0 0; }
-.art-diff.del { background: var(--del-bg); color: var(--del-fg); border-radius: 0 0 5px 5px; }
-.art-commit { display: flex; align-items: center; gap: 5px; margin-top: 13px; color: var(--fg-muted); font-size: var(--text-xs); }
-.art-commit .icon { color: var(--accent-text); }
-.welcome-actions { display: grid; grid-template-columns: 1.25fr 1fr 1fr; gap: 11px; }
-.action-card { position: relative; display: flex; align-items: center; gap: var(--space-12); min-width: 0; padding: 16px; border-radius: 14px; border: 1px solid var(--control-border); background: color-mix(in srgb, var(--surface) 90%, transparent); text-align: left; box-shadow: var(--shadow-sm); transition: transform var(--duration-base) var(--ease), box-shadow var(--duration-base) var(--ease), border-color var(--duration-base) var(--ease), background var(--duration-base) var(--ease); }
-.action-card:hover:not(:disabled) { transform: translateY(-2px); box-shadow: var(--shadow-md); border-color: var(--control-border-hover); }
-.action-card:disabled { opacity: 0.48; cursor: not-allowed; }
-.action-card .ac-icon { display: grid; place-items: center; width: 39px; height: 39px; border-radius: 11px; background: var(--surface-3); color: var(--fg-muted); flex: none; }
-.action-card:nth-child(2) .ac-icon { background: var(--info-soft); color: var(--info-text); }
-.action-card:nth-child(3) .ac-icon { background: var(--purple-soft); color: var(--purple); }
-.action-card > .icon { margin-left: auto; color: var(--fg-subtle); }
-.action-card .action-arrow { transform: rotate(45deg); }
-.ac-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.ac-copy strong { font-size: var(--text-base); font-weight: var(--weight-semibold); }
-.ac-copy > span { font-size: var(--text-xs); line-height: 1.5; color: var(--fg-muted); }
-.action-card.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; box-shadow: 0 8px 20px color-mix(in srgb, var(--accent) 22%, transparent), inset 0 1px 0 var(--on-accent-line); }
-.action-card.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: transparent; transform: translateY(-2px); box-shadow: 0 12px 26px color-mix(in srgb, var(--accent) 26%, transparent), inset 0 1px 0 var(--on-accent-line); }
-.action-card.primary .ac-icon { background: var(--on-accent-soft); color: inherit; }
-/* 主行动卡的说明文字是正文（9.5px，浅色底 accent）：必须完全不透明地取 --accent-fg
-   （对 --accent 浅 5.62:1 / 深 5.75:1，对 --accent-hover 浅 6.97:1 / 深 7.45:1）。
-   75% 淡化合成后只剩 3.91:1（浅）/ 3.99:1（深），低于正文 4.5:1。 */
+/* 单屏：品牌标记、三个入口、最近仓库（R8）。画布保持无色，层次只靠明度：
+   --bg 上放一块 --surface 列表；靛蓝只留给主操作和焦点。
+   内容靠 margin: auto 居中，窗口放不下时从顶部开始滚动，不会被裁掉上半截。 */
+.welcome { flex: 1; min-width: 0; min-height: 0; display: flex; padding: var(--space-24) var(--space-32); overflow: auto; background: var(--bg); }
+.welcome-inner { width: min(680px, 100%); margin: auto; display: flex; flex-direction: column; gap: var(--space-24); }
+.welcome-brand .brand { flex: none; gap: var(--space-12); }
+.welcome-brand .brand-logo { width: 40px; height: 40px; border-radius: var(--radius); }
+.welcome-brand .brand-text strong { font-size: var(--text-lg); font-weight: var(--weight-semibold); letter-spacing: -0.02em; }
+.welcome-brand .brand-text span { margin-top: var(--space-2); color: var(--fg-muted); }
+.welcome-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-8); }
+.action-card { display: flex; align-items: center; gap: var(--space-12); min-width: 0; padding: var(--space-12) 14px; border-radius: var(--radius); border: 1px solid var(--control-border); background: var(--surface); color: var(--fg); text-align: left; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease); }
+.action-card:hover:not(:disabled) { background: var(--surface-2); border-color: var(--control-border-hover); }
+.action-card > .icon { flex: none; color: var(--fg-muted); }
+.ac-copy { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.ac-copy strong { font-size: var(--text-base); font-weight: var(--weight-semibold); white-space: nowrap; }
+.ac-copy > span { font-size: var(--text-xs); line-height: var(--leading-normal); color: var(--fg-muted); }
+/* 主操作是实心 --accent，边界没有意义；说明文字是正文，必须取不透明的 --accent-fg。 */
+.action-card.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+.action-card.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: transparent; }
+.action-card.primary > .icon { color: var(--accent-fg); }
 .action-card.primary .ac-copy > span { color: var(--accent-fg); }
-/* 右上角箭头是纯字形指示，不承载文字信息：75% 淡化对 --accent 3.91:1 / 对
-   --accent-hover 4.68:1（浅），满足非文本 3:1。该淡化位点登记在
-   scripts/check-contrast.mjs 的 COLOR_MIX_ALPHA_SITES 里，改比例必须同步校准。 */
-.action-card.primary > .icon { color: color-mix(in srgb, var(--accent-fg) 75%, transparent); }
-.welcome-section-head { display: flex; align-items: flex-end; padding: 0 2px 11px; }
-.section-kicker { display: block; margin-bottom: 2px; color: var(--fg-subtle); font-size: var(--text-xs); letter-spacing: 0.05em; }
-.welcome-section-head h2 { font-size: var(--text-md); font-weight: var(--weight-semibold); letter-spacing: 0; }
-.welcome-section-head > .hint { margin-left: auto; font-size: var(--text-xs); }
-.welcome-recent { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; background: var(--surface); box-shadow: var(--shadow-sm); }
-.welcome-recent button { display: flex; align-items: center; gap: 11px; min-width: 0; padding: var(--space-12) 14px; text-align: left; border-bottom: 1px solid var(--border); transition: background var(--duration-fast) var(--ease); }
-.welcome-recent button:nth-child(odd) { border-right: 1px solid var(--border); }
-.welcome-recent button:nth-last-child(-n+2) { border-bottom: 0; }
-.welcome-recent button:last-child:nth-child(odd) { border-bottom: 0; }
+.action-card:disabled, .action-card.primary:disabled { background: var(--surface-2); border-color: var(--control-border); color: var(--fg-subtle); cursor: not-allowed; }
+.action-card:disabled > .icon, .action-card.primary:disabled > .icon, .action-card:disabled .ac-copy > span, .action-card.primary:disabled .ac-copy > span { color: var(--fg-subtle); }
+.welcome-section { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
+.welcome-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-12); }
+.welcome-section-head h2 { color: var(--fg-muted); font-size: var(--text-sm); font-weight: var(--weight-medium); letter-spacing: 0; }
+.welcome-section-head > .hint { font-size: var(--text-xs); }
+.welcome-recent { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-4); border-radius: var(--radius); background: var(--surface); }
+.welcome-recent button { display: flex; align-items: center; gap: 10px; width: 100%; min-width: 0; padding: var(--space-6) var(--space-8); border-radius: var(--radius-sm); text-align: left; transition: background var(--duration-fast) var(--ease); }
 .welcome-recent button:hover { background: var(--surface-2); }
-.recent-open { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; color: var(--fg-subtle); font-size: var(--text-xs); opacity: 0; transform: translateX(-4px); transition: opacity var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease); }
-.recent-open .icon { transform: rotate(45deg); }
-.welcome-recent button:hover .recent-open { opacity: 1; transform: none; }
-.welcome-footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-top: 2px; }
-.shortcuts { display: flex; gap: 15px; flex-wrap: wrap; color: var(--fg-muted); font-size: var(--text-xs); }
-.shortcuts span { display: inline-flex; align-items: center; gap: 5px; }
-.welcome-note { text-align: right; font-size: var(--text-xs); color: var(--fg-subtle); line-height: 1.6; }
-
-/* 起始页：单屏三入口 + 最近仓库，不堆营销段落（R13）。紧凑形态只覆盖间距与列宽，
-   卡片、列表与文字仍是上面那套 .welcome-* 规则，避免出现第二份视觉实现。 */
-.welcome-compact { display: flex; align-items: flex-start; justify-content: center; padding: var(--space-32) var(--space-24) var(--space-24); }
-.welcome-inner-compact { width: min(880px, 100%); padding: 0; gap: var(--space-24); }
-.welcome-compact .welcome-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-8); }
-.welcome-section { display: flex; flex-direction: column; min-width: 0; }
-.welcome-empty { padding: var(--space-16) 0; }
-.welcome-diagnostic { display: inline-flex; align-items: center; gap: var(--space-6); align-self: flex-start; padding: var(--space-6) var(--space-12); border-radius: 999px; background: var(--warning-soft); color: var(--warning-text); font-size: var(--text-sm); font-weight: var(--weight-medium); }
+.welcome-recent button:focus-visible { outline-offset: -2px; }
+.welcome-recent .repo-badge { box-shadow: none; }
+.welcome-empty { margin: 0; }
+.welcome-diagnostic { display: flex; align-items: center; gap: var(--space-8); width: 100%; padding: var(--space-8) var(--space-12); border-radius: var(--radius-sm); background: var(--warning-soft); color: var(--warning-text); font-size: var(--text-sm); font-weight: var(--weight-medium); text-align: left; }
+.welcome-diagnostic > span { flex: 1; min-width: 0; }
+.welcome-diagnostic > .icon { flex: none; }
 button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--warning) 18%, transparent); }
+/* 最小窗口叠上 Git 诊断通知条时仍要一屏放下：只收间距，版式不变（R8、R14）。 */
+@media (max-height: 680px) {
+  .welcome { padding-block: var(--space-16); }
+  .welcome-inner { gap: var(--space-16); }
+}
 
 /* ---------- 状态栏 ---------- */
 .statusbar { display: flex; align-items: center; gap: 14px; height: 28px; padding: 0 10px 0 14px; border-top: 1px solid var(--border); background: var(--surface); color: var(--fg-subtle); font-size: var(--text-xs); flex: none; }
@@ -250,8 +204,6 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--warning) 
   .repo-switch-text span { max-width: 150px; }
   .topbar { gap: 9px; padding: 0 13px; }
   .topbar-actions { gap: 5px; }
-  .welcome-inner { padding-left: 28px; padding-right: 28px; }
-  .welcome-hero { gap: 30px; }
 }
 @media (max-width: 1120px) {
   .repo-switch-text span { display: none; }
@@ -259,21 +211,9 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--warning) 
   .view-heading-status { display: none; }
   .tb-btn .tb-label { display: none; }
   .tb-btn { padding: 0 7px; }
-  .welcome-hero { grid-template-columns: minmax(0, 1.2fr) minmax(260px, 0.8fr); }
-  .welcome-actions { grid-template-columns: 1fr; }
-  .action-card { padding: 13px 15px; }
-  .welcome-footer { align-items: flex-start; flex-direction: column; gap: var(--space-12); }
-  .welcome-note { text-align: left; }
   .branch-current-badge { display: none; }
 }
 @media (max-width: 960px) {
-  .welcome-art { display: none; }
-  .welcome-hero { grid-template-columns: 1fr; min-height: 0; }
-  .welcome-copy { max-width: 590px; }
-  .welcome-copy h1 { font-size: 38px; }
-  .welcome-recent { grid-template-columns: 1fr; }
-  .welcome-recent button, .welcome-recent button:nth-child(odd), .welcome-recent button:nth-last-child(-n+2) { border-right: 0; border-bottom: 1px solid var(--border); }
-  .welcome-recent button:last-child { border-bottom: 0; }
   .associate-btn { display: none; }
   .view-heading { padding-left: 19px; padding-right: 19px; }
   .span-main { margin-left: 12px; margin-right: 12px; }
@@ -292,10 +232,6 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--warning) 
   .shell:has(> .topbar) { --titlebar-height: 58px; }
   .topbar { height: 58px; }
   .view-heading { min-height: 66px; padding-top: 10px; padding-bottom: 10px; }
-  .welcome-inner { padding-top: 30px; gap: var(--space-24); }
-  .welcome-inner-compact { padding: 0; }
-  .welcome-hero { min-height: 225px; }
-  .welcome-compact { padding-top: var(--space-24); }
 }
 
 /* ==========================================================================

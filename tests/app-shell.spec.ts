@@ -1387,6 +1387,10 @@ describe("应用外壳", () => {
     const runtime = modal.querySelector<HTMLElement>('[data-settings-section="runtime"]');
     expect(runtime, "设置 modal 要有运行环境分区锚点").toBeTruthy();
     expect(runtime!.contains(document.activeElement), "打开后焦点落在运行环境分区").toBe(true);
+    expect(within(runtime!).getByRole("list", { name: "Git 诊断" }).textContent, "直接看到问题说明").toContain("没有找到 Git");
+    expect(within(runtime!).getByRole("button", { name: "重新检测" })).toBeTruthy();
+    expect(within(runtime!).getByRole("button", { name: "选择 Git" })).toBeTruthy();
+    expect(runtime!.querySelector("details")?.open, "Git 缺失时说明默认展开").toBe(true);
 
     // Esc 关闭后焦点回到触发元素
     await fireEvent.keyDown(modal, { key: "Escape" });

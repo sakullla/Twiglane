@@ -157,24 +157,11 @@ const STYLE_LAYERS = ["base.css", "components.css", "layout.css"];
  *   多个底色时（如强调卡 hover 变亮）必须逐个列出。
  * - `reason`：为什么这个位点的淡化可以接受（例如「它只是方向箭头，不是正文」）。
  *
- * 现状只有一条：主行动卡右上角的箭头图标。正文本行（.ac-copy > span）已改回不透明
- * --accent-fg，因此不再出现在本清单里——这正是本门禁想要的形状：淡化要么是证据，
- * 要么不存在。
+ * 现状没有任何淡化位点：起始页重写后主操作的图标和说明文字都取不透明 --accent-fg，
+ * 清单为空正是本门禁想要的形状——淡化要么是证据，要么不存在。扫描仍然生效，
+ * 新增位点没有登记就失败。
  */
-const COLOR_MIX_ALPHA_SITES = [
-  {
-    file: "layout.css",
-    selector: ".action-card.primary > .icon",
-    mix: 0.75,
-    kind: "glyph",
-    pairs: [
-      ["accent-fg", "accent"],
-      ["accent-fg", "accent-hover"],
-    ],
-    reason:
-      "主行动卡右上角的方向箭头：纯字形指示、不承载文字信息（说明文字已改用不透明 --accent-fg），3:1 即可辨识",
-  },
-];
+const COLOR_MIX_ALPHA_SITES = [];
 
 /** 交互对：状态色与控件边界 × 背景，阈值 3:1 */
 const UI_PAIRS = [

@@ -15,8 +15,16 @@ import { sampleFor } from "./samples";
 const wait = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms));
 const now = Math.floor(Date.now() / 1000);
 
-/** 进入预览 mock 平时到不了的状态：?switch=fail 让切换分支失败，?diff=paged 让差异续读挂住 8 秒。 */
+/**
+ * 进入预览 mock 平时到不了的状态：?switch=fail 让切换分支失败，?diff=paged 让差异续读挂住 8 秒，
+ * ?git=missing / ?git=old 模拟 Git 缺失或低于基线，?recent=empty 清空最近仓库。
+ */
 const previewParams = new URLSearchParams(location.search);
+const healthyGit = { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "Git 2.49.0 可用" };
+const previewGit = {
+  missing: { available: false, path: null, version: null, overridden: false, belowBaseline: false, message: "没有找到 Git，请安装后重新检测" },
+  old: { available: true, path: "/usr/bin/git", version: "2.30.1", overridden: false, belowBaseline: true, message: "Git 2.30.1 低于 2.48 基线，请升级" },
+}[previewParams.get("git") ?? ""] ?? healthyGit;
 
 let generation = 1;
 let theme: Theme = (localStorage.getItem("preview-theme") as Theme) || "light";
@@ -27,6 +35,7 @@ let recent = [
   { name: "demo", path: "/work/alpha/demo", openedAtMs: Date.now() - 3000 },
   { name: "demo", path: "/work/beta/demo", openedAtMs: Date.now() - 4000 },
 ];
+if (previewParams.get("recent") === "empty") recent = [];
 
 function file(path: string, staged: FileChange["staged"], unstaged: FileChange["unstaged"], extra: Partial<FileChange> = {}): FileChange {
   return { path, originalPath: null, staged, unstaged, untracked: false, unmerged: false, ...extra };
@@ -313,14 +322,14 @@ export async function pickFile() {
 }
 
 export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
-  detectGit: () => ok({ available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "Git 2.49.0 可用" }),
+  detectGit: () => ok(previewGit),
   setGitExecutable: () => ok({}),
   clearGitExecutable: () => ok({}),
   getSettings: () =>
     ok({
       theme,
       panelWidths: { sidebar: 264, files: 360 },
-      git: { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "Git 2.49.0 可用" },
+      git: previewGit,
       recent,
       settingsWarning: null,
     }),

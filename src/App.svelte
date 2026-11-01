@@ -88,7 +88,10 @@
   let warning = $state<string | null>(null);
   let banner = $state<string | null>(null);
   let live = $state("正在准备 Twiglane");
-  let opened = $state<OpenedRepository | null>(null);
+  let opened = $state.raw<OpenedRepository | null>(null);
+  let repositoryEpoch = 0;
+  let refreshTask: { epoch: number; again: boolean; promise: Promise<boolean> } | null = null;
+  let draggingRepository = $state(false);
   let draft = $state("");
   /**
    * R5：上一次提交失败的原因。它只在提交区就地显示（CommitDraft 的 data-commit-error），
@@ -96,7 +99,7 @@
    */
   let commitError = $state<string | null>(null);
   let selected = $state<FileSelection | null>(null);
-  let diff = $state<DiffResponse | null>(null);
+  let diff = $state.raw<DiffResponse | null>(null);
   let diffError = $state<string | null>(null);
   let diffLoading = $state(false);
   let pending = $state<string | null>(null);
@@ -460,6 +463,7 @@
   }
 
   function rememberOpened(next: OpenedRepository) {
+    repositoryEpoch += 1;
     if (draftTimer) clearTimeout(draftTimer);
     drafts.load(next.summary.path, next.draft);
     draft = next.draft;
@@ -491,9 +495,30 @@
     void loadSelectedDiff();
   }
 
-  async function refresh() {
+  function refresh(): Promise<boolean> {
+    if (!opened) return Promise.resolve(false);
+    if (refreshTask?.epoch === repositoryEpoch) {
+      refreshTask.again = true;
+      return refreshTask.promise;
+    }
+    const task = { epoch: repositoryEpoch, again: false, promise: Promise.resolve(false) };
+    refreshTask = task;
+    task.promise = (async () => {
+      let ok = false;
+      do {
+        task.again = false;
+        ok = await refreshOnce(task.epoch);
+      } while (task.again && task.epoch === repositoryEpoch && opened);
+      return ok;
+    })().finally(() => {
+      if (refreshTask === task) refreshTask = null;
+    });
+    return task.promise;
+  }
+
+  async function refreshOnce(epoch: number): Promise<boolean> {
     const current = opened;
-    if (!current) return;
+    if (!current) return false;
     try {
       let generation = current.generation;
       let snapshot;
@@ -505,12 +530,18 @@
         generation = failure.generation;
         snapshot = await api.refreshStatus(current.summary.path, generation, nextId());
       }
-      if (opened?.summary.path !== current.summary.path) return;
+      if (epoch !== repositoryEpoch || opened?.summary.path !== current.summary.path) return false;
+      if (snapshot.generation < opened.generation) {
+        // 更新事件已经排队时会再读一次；旧响应本身不触发无限重试。
+        return false;
+      }
       opened = { ...opened, snapshot, generation: snapshot.generation };
       selected = retainSelection(snapshot.files, selected);
       await loadSelectedDiff();
+      return true;
     } catch (error) {
-      if (opened?.summary.path === current.summary.path) showError(error);
+      if (epoch === repositoryEpoch && opened?.summary.path === current.summary.path) showError(error);
+      return false;
     }
   }
 
@@ -908,12 +939,34 @@
   }
 
   async function addRepo() {
+    await addExistingRepository();
+  }
+
+  async function dropRepository(paths: string[]) {
+    draggingRepository = false;
+    if (writeLocked) {
+      notice(switchBlockedReason(commandState));
+      return;
+    }
+    if (taskModal || cloneOpen || dependencyOpen || confirmPath || paletteOpen) {
+      notice("请先关闭当前对话框，再拖入仓库文件夹。");
+      return;
+    }
+    if (paths.length !== 1) {
+      notice("请一次拖入一个仓库文件夹。");
+      return;
+    }
+    await addExistingRepository(paths[0]);
+  }
+
+  async function addExistingRepository(droppedPath?: string) {
     if (pending || reading) return;
     pending = "add";
-    live = "正在选择目录";
+    live = droppedPath ? "正在读取仓库状态" : "正在选择目录";
     try {
-      const path = await pickDirectory("添加已有仓库");
+      const path = droppedPath ?? await pickDirectory("添加已有仓库");
       if (!path) return;
+      if ((await flushDraft(drafts.path)) === false) return;
       const openedRepo = await api.addRepository(path, nextId());
       banner = null;
       rememberOpened(openedRepo);
@@ -1001,6 +1054,7 @@
       recent = await api.forgetRecent(path);
       if (opened?.summary.path === path) {
         await api.closeRepository();
+        repositoryEpoch += 1;
         opened = null;
         selected = null;
         diff = null;
@@ -1213,6 +1267,7 @@
     } catch (error) {
       if (drafts.peek(path) === null) drafts.edit(message);
       showError(error);
+      return false;
     }
   }
 
@@ -1352,7 +1407,7 @@
     const samples: number[] = [];
     for (let index = 0; index < count; index += 1) {
       const started = performance.now();
-      await refresh();
+      if ((await refresh()) !== true) throw new Error("仓库状态刷新失败");
       await nextPaint();
       samples.push(performance.now() - started);
     }
@@ -1591,6 +1646,22 @@
   }
 
   onMount(() => {
+    let disposed = false;
+    const stopDrag: (() => void)[] = [];
+    const registerDrag = async <T,>(name: string, handler: (payload: T) => void) => {
+      const stop = await listenEvent<T>(name, (payload) => {
+        if (!disposed) handler(payload);
+      });
+      if (disposed) stop();
+      else stopDrag.push(stop);
+    };
+    void Promise.all([
+      registerDrag("tauri://drag-enter", () => { draggingRepository = true; }),
+      registerDrag("tauri://drag-leave", () => { draggingRepository = false; }),
+      registerDrag<{ paths: string[] }>("tauri://drag-drop", (event) => {
+        void dropRepository(event.paths);
+      }),
+    ]).catch((error) => { if (!disposed) showError(error); });
     let stopFocus = () => {};
     let stopBlur = () => {};
     let stopRepo = () => {};
@@ -1663,6 +1734,8 @@
       }),
     );
     return () => {
+      disposed = true;
+      stopDrag.forEach((stop) => stop());
       window.removeEventListener("keydown", keyListener);
       window.removeEventListener("resize", onResize);
       window.clearInterval(poll);
@@ -1679,6 +1752,13 @@
 
 <div class="sr-only" aria-live="polite">{live}</div>
 <div class="shell">
+  {#if draggingRepository}
+    <div class="repository-drop-hint" role="status">
+      <Icon name="folder-open" size={32} />
+      <strong>松开以打开仓库文件夹</strong>
+      <span>一次拖入一个文件夹</span>
+    </div>
+  {/if}
   <TitleBar
     repo={opened?.summary ?? null}
     branch={opened ? branchText : null}

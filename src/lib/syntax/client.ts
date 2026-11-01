@@ -22,28 +22,63 @@ interface Pending {
 }
 
 const CACHE_LIMIT = 48;
-const cache = new Map<string, SyntaxLine[]>();
+export const HIGHLIGHT_CACHE_BYTES = 8 * 1024 * 1024;
+export const HIGHLIGHT_WORKER_IDLE_MS = 30_000;
+const cache = new Map<string, { lines: SyntaxLine[]; bytes: number }>();
+let cacheBytes = 0;
+let idleTimer: ReturnType<typeof setTimeout> | undefined;
 const inflight = new Map<string, { id: number; pending: Pending }>();
 const byId = new Map<number, Pending>();
 let worker: Worker | null | undefined;
 let nextId = 1;
 
 function cacheKey(lang: string, lines: string[]): string {
-  // 内容本身作键：同一份文本重复请求时直接命中；长文本用长度 + 抽样，避免巨型键。
-  const joined = lines.join("\n");
-  if (joined.length <= 4096) return `${lang}\u0000${joined}`;
+  // 长文本逐行哈希，避免先 join 出另一份完整的大字符串。
+  const length = lines.reduce((sum, line) => sum + line.length, lines.length - 1);
+  if (length <= 4096) return `${lang}\u0000${lines.join("\n")}`;
   let hash = 2166136261;
-  for (let index = 0; index < joined.length; index += 1) {
-    hash ^= joined.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
+  for (let row = 0; row < lines.length; row += 1) {
+    if (row > 0) hash = Math.imul(hash ^ 10, 16777619);
+    const line = lines[row];
+    for (let index = 0; index < line.length; index += 1) {
+      hash ^= line.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
   }
-  return `${lang}\u0000${joined.length}\u0000${(hash >>> 0).toString(36)}`;
+  return `${lang}\u0000${length}\u0000${(hash >>> 0).toString(36)}`;
 }
 
 function remember(key: string, lines: SyntaxLine[]) {
+  // 估算字符串、数组与 token 对象的保留开销；这是缓存预算，不是整页 JS 堆上限。
+  let bytes = key.length * 2 + 64;
+  for (const line of lines) {
+    bytes += 48;
+    for (const token of line) bytes += 64 + 2 * (token.t.length + token.k.length);
+    if (bytes > HIGHLIGHT_CACHE_BYTES) return;
+  }
+  const previous = cache.get(key);
+  if (previous) cacheBytes -= previous.bytes;
   cache.delete(key);
-  cache.set(key, lines);
-  while (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value as string);
+  cache.set(key, { lines, bytes });
+  cacheBytes += bytes;
+  while (cache.size > CACHE_LIMIT || cacheBytes > HIGHLIGHT_CACHE_BYTES) {
+    const oldest = cache.keys().next().value!;
+    cacheBytes -= cache.get(oldest)!.bytes;
+    cache.delete(oldest);
+  }
+}
+
+function releaseWhenIdle() {
+  if (idleTimer !== undefined) clearTimeout(idleTimer);
+  idleTimer = undefined;
+  if (!worker || byId.size > 0) return;
+  const target = worker;
+  idleTimer = setTimeout(() => {
+    idleTimer = undefined;
+    if (worker !== target || byId.size > 0) return;
+    target.terminate();
+    worker = undefined;
+  }, HIGHLIGHT_WORKER_IDLE_MS);
 }
 
 function getWorker(): Worker | null {
@@ -83,6 +118,7 @@ function finish(id: number, pending: Pending, ok: boolean) {
   inflight.delete(pending.key);
   if (ok) remember(pending.key, pending.lines);
   for (const listener of pending.listeners) listener.onDone(ok);
+  releaseWhenIdle();
 }
 
 async function runInThread(id: number, lang: string, lines: string[], pending: Pending) {
@@ -113,8 +149,9 @@ export function highlightLines(
   const key = cacheKey(lang, input);
   const hit = cache.get(key);
   if (hit) {
-    remember(key, hit);
-    onChunk(0, hit);
+    cache.delete(key);
+    cache.set(key, hit);
+    onChunk(0, hit.lines);
     onDone(true);
     return () => {};
   }
@@ -136,6 +173,8 @@ export function highlightLines(
     }
     entry.pending.listeners.add(listener);
   } else {
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    idleTimer = undefined;
     const id = nextId++;
     const pending: Pending = { key, lines: [], listeners: new Set([listener]) };
     entry = { id, pending };
@@ -152,6 +191,7 @@ export function highlightLines(
       byId.delete(current.id);
       inflight.delete(current.pending.key);
       worker?.postMessage({ cancel: current.id });
+      releaseWhenIdle();
     }
   };
 }
@@ -159,6 +199,11 @@ export function highlightLines(
 /** 测试用：清空缓存与进行中的请求。 */
 export function resetHighlightCache(): void {
   cache.clear();
+  cacheBytes = 0;
   inflight.clear();
   byId.clear();
+  if (idleTimer !== undefined) clearTimeout(idleTimer);
+  idleTimer = undefined;
+  worker?.terminate();
+  worker = undefined;
 }

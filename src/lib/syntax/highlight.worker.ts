@@ -8,15 +8,17 @@ import { tokenizeInChunks } from "./engine";
 type Request = { id: number; lang: string; lines: string[] } | { cancel: number };
 
 const cancelled = new Set<number>();
+const active = new Set<number>();
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 
 scope.onmessage = (event: MessageEvent<Request>) => {
   const data = event.data;
   if ("cancel" in data) {
-    cancelled.add(data.cancel);
+    if (active.has(data.cancel)) cancelled.add(data.cancel);
     return;
   }
   const { id, lang, lines } = data;
+  active.add(id);
   void tokenizeInChunks(
     lang,
     lines,
@@ -27,7 +29,8 @@ scope.onmessage = (event: MessageEvent<Request>) => {
       // 每块之间让出事件循环，保证取消消息能及时处理。
       yieldBetween: () => new Promise((resolve) => setTimeout(resolve, 0)),
     },
-  ).then((ok) => {
+  ).catch(() => false).then((ok) => {
+    active.delete(id);
     cancelled.delete(id);
     scope.postMessage({ id, done: true, ok });
   });

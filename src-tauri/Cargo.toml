@@ -1,6 +1,6 @@
 [package]
 name = "twiglane"
-version = "0.2.5"
+version = "0.2.6"
 description = "Twiglane desktop Git workspace"
 edition = "2021"
 publish = false
@@ -11,7 +11,7 @@ license = "UNLICENSED"
 linker_messages = "deny"
 
 [lib]
-name = "twiglane"
+name = "twiglane_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

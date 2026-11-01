@@ -116,6 +116,10 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
         return Err(RunnerError::Cancelled);
     }
     let mut command = Command::new(&request.program);
+    // Git runs behind the desktop UI. Piped output alone does not prevent
+    // Windows from creating a console for every status/diff/refresh process.
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     command
         .args(&request.args)
         .stdout(Stdio::piped())
@@ -259,6 +263,28 @@ mod tests {
                 })
             })
         })
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn background_process_has_no_console_window_and_preserves_output() {
+        let program = python().expect("需要 Python 来验证 Windows 后台进程");
+        // CREATE_NO_WINDOW retains a private console (and its code page), so
+        // inspect its window and membership rather than GetConsoleCP(). This
+        // also detects accidental inheritance of a headless test terminal.
+        let probe = format!(
+            "import ctypes, sys; k=ctypes.windll.kernel32; pids=(ctypes.c_ulong*256)(); k.GetConsoleProcessList(pids, 256); print(int(bool(k.GetConsoleWindow())), int({} in pids)); print('diagnostic', file=sys.stderr); sys.exit(7)",
+            std::process::id(),
+        );
+        let request = RealRunner::default().base_request(
+            program,
+            vec!["-c".into(), probe.into()],
+            Arc::new(Shutdown::new()),
+        );
+        let output = run_process(request).await.unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0 0");
+        assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), "diagnostic");
+        assert_eq!(output.exit_code, 7);
     }
 
     #[tokio::test]

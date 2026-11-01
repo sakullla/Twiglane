@@ -1,4 +1,5 @@
 import { api } from "./api";
+import { highlightLines } from "./syntax/client";
 
 export interface OpenedView {
   path: string;
@@ -147,6 +148,33 @@ export async function startDesktopMeasure(actions: MeasureActions): Promise<void
 }
 
 async function runStep(step: Step, actions: MeasureActions) {
+  if (step.op === "syntax") {
+    const lang = String(step.lang ?? "typescript");
+    const lines = Array.isArray(step.lines) ? step.lines.map(String) : ["const value = 1;"];
+    const started = performance.now();
+    let tokenCount = 0;
+    const result: string[] = [];
+    let styled = false;
+    await new Promise<void>((resolve, reject) => {
+      let cancel = () => {};
+      const timer = setTimeout(() => { cancel(); reject(new Error("原生语法高亮超时")); }, 20_000);
+      cancel = highlightLines(lang, lines, (start, chunk) => {
+        chunk.forEach((line, index) => {
+          result[start + index] = line.map((token) => token.t).join("");
+          tokenCount += line.length;
+          styled ||= line.some((token) => token.k.length > 0);
+        });
+      }, (ok) => {
+        clearTimeout(timer);
+        if (ok) resolve();
+        else reject(new Error("原生语法高亮失败"));
+      });
+    });
+    const contentOk = styled && result.length === lines.length && result.every((line, index) => line === lines[index]);
+    await sample("syntax", { lang, tokenCount, elapsedMs: performance.now() - started, contentOk });
+    if (!contentOk) throw new Error("原生语法高亮内容不匹配");
+    return;
+  }
   if (step.op === "sleep") {
     const ms = Number(step.ms ?? 0);
     await sample(String(step.mark ?? "sleep"), { phase: "start", ms });

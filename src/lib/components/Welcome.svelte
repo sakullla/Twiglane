@@ -67,7 +67,7 @@
     <section class="welcome-actions" aria-label="开始使用">
       <button type="button" class="action-card primary" {disabled} onclick={onAdd}>
         <span class="ac-icon"><Icon name="folder-open" size={21} /></span>
-        <span class="ac-copy"><strong>打开本地仓库</strong><span>选择已有目录</span></span>
+        <span class="ac-copy"><strong>打开本地仓库</strong><span>选择目录，或拖入仓库文件夹</span></span>
         <Icon name="arrow-up" size={17} class="action-arrow" />
       </button>
       <button type="button" class="action-card" {disabled} onclick={onClone}>

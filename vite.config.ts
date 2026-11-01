@@ -6,6 +6,8 @@ export default defineConfig({
   plugins: [svelte(), svelteTesting()],
   resolve: process.env.VITEST ? { conditions: ["browser"] } : {},
   clearScreen: false,
+  // 保留语法的动态 import，避免默认 IIFE 把全部语言内联进首个 Worker。
+  worker: { format: "es" },
   server: {
     port: 1420,
     strictPort: true,

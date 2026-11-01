@@ -140,6 +140,193 @@ vi.mock("../src/lib/api", () => ({
 import App from "../src/App.svelte";
 import { paletteItems, REPO_SWITCH_PREFIX, type CommandState } from "../src/lib/commands";
 
+describe("原生状态测量", () => {
+  it("旧 generation 响应不会自行触发无上限重试", async () => {
+    mocks.openRepository.mockResolvedValue({
+      summary: { name: "demo", path: repoPath }, generation: 5,
+      snapshot: { ...snapshot, generation: 5 }, draft: "", watchDegraded: false,
+    });
+    mocks.refreshStatus.mockImplementation(async () => {
+      if (mocks.refreshStatus.mock.calls.length > 1) throw new Error("不应自行重试旧响应");
+      return snapshot;
+    });
+    render(App);
+    await openRepo();
+    const focus = mocks.listenEvent.mock.calls.find(([name]) => name === "window-focused")![1];
+    focus();
+    await tick();
+    await tick();
+    expect(mocks.refreshStatus).toHaveBeenCalledTimes(1);
+    expect(document.querySelectorAll("[data-diff-row]").length).toBeGreaterThan(0);
+  });
+
+  it("密集刷新只保留在途读取和一次后续读取", async () => {
+    let finish!: (value: StatusSnapshot) => void;
+    mocks.refreshStatus.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    render(App);
+    await openRepo();
+    const focus = mocks.listenEvent.mock.calls.find(([name]) => name === "window-focused")![1];
+    for (let i = 0; i < 20; i += 1) focus();
+    expect(mocks.refreshStatus).toHaveBeenCalledTimes(1);
+    finish(snapshot);
+    await waitFor(() => expect(mocks.refreshStatus).toHaveBeenCalledTimes(2));
+    await tick();
+    expect(mocks.refreshStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it("监听事件推进 generation 后不应用旧状态，合并读取最新版本", async () => {
+    let finish!: (value: StatusSnapshot) => void;
+    mocks.refreshStatus.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    mocks.refreshStatus.mockResolvedValue({ ...snapshot, generation: 5 });
+    render(App);
+    await openRepo();
+    const focus = mocks.listenEvent.mock.calls.find(([name]) => name === "window-focused")![1];
+    const changed = mocks.listenEvent.mock.calls.find(([name]) => name === "repo-changed")![1];
+    focus();
+    changed({ path: repoPath, generation: 5, degraded: false });
+    finish({ ...snapshot, files: [], generation: 4 });
+    await waitFor(() => expect(mocks.refreshStatus).toHaveBeenCalledTimes(2));
+    expect(mocks.refreshStatus).toHaveBeenLastCalledWith(repoPath, 5, expect.any(Number));
+    await waitFor(() => expect(document.querySelectorAll("[data-diff-row]").length).toBeGreaterThan(0));
+  });
+
+  it("重新打开同一路径后丢弃旧会话的刷新结果", async () => {
+    let finish!: (value: StatusSnapshot) => void;
+    mocks.refreshStatus.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    render(App);
+    await openRepo();
+    const focus = mocks.listenEvent.mock.calls.find(([name]) => name === "window-focused")![1];
+    focus();
+    await fireEvent.click(document.querySelector<HTMLElement>(".repo-main")!);
+    await waitFor(() => expect(mocks.openRepository).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(document.querySelectorAll("[data-diff-row]").length).toBeGreaterThan(0));
+    finish({ ...snapshot, files: [] });
+    await tick();
+    expect(document.querySelectorAll("[data-diff-row]").length).toBeGreaterThan(0);
+  });
+
+  it("刷新失败不能用旧快照报告测量成功", async () => {
+    mocks.measureProbe.mockResolvedValue({ enabled: true, script: { steps: [
+      { op: "open", repo: repoPath, expectChanges: changes.length },
+      { op: "refresh", count: 1, expectChanges: changes.length },
+    ] } });
+    mocks.refreshStatus.mockRejectedValue({ code: "status_failed", message: "无法读取仓库状态。" });
+    render(App);
+    await waitFor(() => expect(mocks.measureSample).toHaveBeenCalledWith("measure-error", { message: "仓库状态刷新失败" }));
+    expect(mocks.measureSample.mock.calls.some(([name]) => name === "status-refresh")).toBe(false);
+  });
+});
+
+async function dragEvent(name: "enter" | "leave" | "drop", paths: string[] = []) {
+  const eventName = `tauri://drag-${name}`;
+  await waitFor(() => expect(mocks.listenEvent.mock.calls.some(([event]) => event === eventName)).toBe(true));
+  const handler = mocks.listenEvent.mock.calls.find(([event]) => event === eventName)![1];
+  handler({ paths });
+  await tick();
+}
+
+describe("原生文件夹拖放", () => {
+  it("拖入后显示提示，离开清除，放下后通过已有仓库校验打开", async () => {
+    mocks.addRepository.mockResolvedValue({
+      summary: { name: "dropped", path: "C:/work/dropped" },
+      generation: 4, snapshot, draft: "", watchDegraded: false,
+    });
+    render(App);
+    await dragEvent("enter", ["C:/work/dropped"]);
+    expect(screen.getByText("松开以打开仓库文件夹")).toBeTruthy();
+    await dragEvent("leave");
+    expect(screen.queryByText("松开以打开仓库文件夹")).toBeNull();
+    await dragEvent("drop", ["C:/work/dropped"]);
+    await waitFor(() => expect(mocks.addRepository).toHaveBeenCalledWith("C:/work/dropped", expect.any(Number)));
+    await waitFor(() => expect(document.querySelector(".file-list")).toBeTruthy());
+    expect(mocks.pickDirectory).not.toHaveBeenCalled();
+  });
+
+  it("拒绝多文件夹拖放，不静默选择其中一个", async () => {
+    render(App);
+    await dragEvent("drop", ["C:/one", "C:/two"]);
+    expect(screen.getAllByText("请一次拖入一个仓库文件夹。").length).toBeGreaterThan(0);
+    expect(mocks.addRepository).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["not_repository", "该目录不是 Git 仓库，未做任何修改。"],
+    ["not_directory", "请选择文件夹。"],
+  ])("%s 失败保留当前仓库", async (code, message) => {
+    mocks.addRepository.mockRejectedValue({ code, message });
+    render(App);
+    await openRepo();
+    await dragEvent("drop", ["C:/invalid"]);
+    await waitFor(() => expect(screen.getAllByText(message).length).toBeGreaterThan(0));
+    expect(document.querySelector(".file-list")).toBeTruthy();
+    expect(mocks.createRepository).not.toHaveBeenCalled();
+  });
+
+  it("打开尚未结束时拒绝连续拖入，避免覆盖在途结果", async () => {
+    let finish!: (value: unknown) => void;
+    mocks.addRepository.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    render(App);
+    await dragEvent("drop", ["C:/first"]);
+    await waitFor(() => expect(mocks.addRepository).toHaveBeenCalledTimes(1));
+    await dragEvent("drop", ["C:/second"]);
+    expect(mocks.addRepository).toHaveBeenCalledTimes(1);
+    finish({ summary: { name: "first", path: "C:/first" }, generation: 4, snapshot, draft: "", watchDegraded: false });
+    await waitFor(() => expect(document.querySelector(".file-list")).toBeTruthy());
+  });
+
+  it("对话框打开时不切换仓库", async () => {
+    render(App);
+    await openPalette();
+    await dragEvent("drop", ["C:/other"]);
+    expect(mocks.addRepository).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "命令面板" })).toBeTruthy();
+  });
+
+  it("拖放切换前保存尚未自动保存的提交草稿", async () => {
+    mocks.addRepository.mockResolvedValue({
+      summary: { name: "other", path: "C:/other" }, generation: 4, snapshot, draft: "", watchDegraded: false,
+    });
+    render(App);
+    await openRepo();
+    await fireEvent.input(document.querySelector<HTMLTextAreaElement>(".composer textarea")!, {
+      target: { value: "保留当前仓库的说明" },
+    });
+    await dragEvent("drop", ["C:/other"]);
+    await waitFor(() => expect(mocks.addRepository).toHaveBeenCalled());
+    expect(mocks.saveDraft).toHaveBeenCalledWith(repoPath, "保留当前仓库的说明");
+    expect(mocks.saveDraft.mock.invocationCallOrder[0]).toBeLessThan(mocks.addRepository.mock.invocationCallOrder[0]);
+  });
+
+  it("草稿保存失败时保留当前仓库和输入", async () => {
+    mocks.saveDraft.mockRejectedValue({ code: "state_write", message: "无法保存草稿。" });
+    render(App);
+    await openRepo();
+    await fireEvent.input(document.querySelector<HTMLTextAreaElement>(".composer textarea")!, {
+      target: { value: "尚未保存的说明" },
+    });
+    await dragEvent("drop", ["C:/other"]);
+    await waitFor(() => expect(screen.getAllByText("无法保存草稿。").length).toBeGreaterThan(0));
+    expect(mocks.addRepository).not.toHaveBeenCalled();
+    expect(document.querySelector<HTMLTextAreaElement>(".composer textarea")!.value).toBe("尚未保存的说明");
+  });
+
+  it("卸载后完成的原生拖放监听注册立即取消", async () => {
+    const registrations: (() => void)[] = [];
+    const stops = [vi.fn(), vi.fn(), vi.fn()];
+    mocks.listenEvent.mockImplementation((name: string) => {
+      if (!name.startsWith("tauri://drag-")) return Promise.resolve(() => {});
+      const stop = stops[registrations.length];
+      return new Promise((resolve) => { registrations.push(() => resolve(stop)); });
+    });
+    const view = render(App);
+    await waitFor(() => expect(registrations).toHaveLength(3));
+    view.unmount();
+    registrations.forEach((finish) => finish());
+    await waitFor(() => stops.forEach((stop) => expect(stop).toHaveBeenCalledOnce()));
+    mocks.listenEvent.mockReset();
+  });
+});
+
 /**
  * R11 的动作清单：id 与面板上要看到的标题一一对应，顺序就是注册表顺序。
  * 仓库切换那条命令的 id 带路径，动态拼在最前面。
@@ -524,6 +711,9 @@ describe("应用外壳", () => {
 
     await fireEvent.click(screen.getByRole("button", { name: "继续加载" }));
     await waitFor(() => expect(hold, "续读已经开始且没有结算").not.toBeNull());
+
+    await dragEvent("drop", ["C:/another"]);
+    expect(mocks.addRepository, "差异续读时拖入目录也不能切换").not.toHaveBeenCalled();
 
     // 入口一：命令面板就地禁用并说明「正在读取」，点了也不会偷偷发请求。
     let palette = await openPalette();

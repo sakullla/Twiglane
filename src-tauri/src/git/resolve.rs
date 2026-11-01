@@ -9,12 +9,15 @@ use crate::git::command::{
     add_command, branch_contains_command, cached_diff_quiet_command, cat_blob_command,
     checkout_index_stage_command, checkout_side_command, clean_files_command, commit_command,
     fetch_one_command, git_path_command, hash_object_command, head_command, head_match_command,
-    head_record_command, ls_remote_tags_command, merge_abort_command, merge_no_commit_command,
-    push_reflog_command, remote_names_command, remote_tracking_command, remove_path_command,
-    reset_soft_command, restore_worktree_command, rev_parse_command, stash_list_command,
-    status_command, unmerged_index_command, update_index_info_command,
+    head_record_command, ls_remote_tags_command, merge_abort_command, merge_divergence_command,
+    merge_ff_only_command, merge_incoming_files_command, merge_incoming_log_command,
+    merge_no_commit_command, merge_tree_command, push_reflog_command, remote_names_command,
+    remote_tracking_command, remove_path_command, reset_soft_command, restore_worktree_command,
+    rev_parse_command, stash_list_command, status_command, switch_command, unmerged_index_command,
+    update_index_info_command,
 };
 use crate::git::gate::action_key;
+use crate::git::history::{parse_history_records, parse_name_status};
 use crate::git::ops::{
     canonical_existing, git_failure, repo_key, require_git, run_git, safe_relative,
     status_from_output, validate_input_path, Backend,
@@ -24,9 +27,9 @@ use crate::git::patch::DIFF_PREVIEW_BYTES;
 use crate::git::runner::{ProcessOutput, RealRunner};
 use crate::git::schedule::{internal_request_id, CommandSpec, JobKind, WriteGuard};
 use crate::model::{
-    AbortImpact, ChangeKind, ConflictEntry, ConflictSide, ConflictView, DiscardFilePlan,
-    DiscardResult, FileChange, MergeComplete, MergePreview, MergeSession, StatusSnapshot,
-    UndoResult, MAX_DRAFT_CHARS,
+    AbortImpact, ChangeKind, CommitFileChange, ConflictEntry, ConflictSide, ConflictView,
+    DiscardFilePlan, DiscardResult, FileChange, HistoryCommit, MergeComplete, MergePreview,
+    MergeSession, StatusSnapshot, UndoResult, MAX_DRAFT_CHARS,
 };
 use crate::redact::{contains_secret, redact_error_text};
 
@@ -58,11 +61,16 @@ pub async fn merge_preview(
     backend: &Backend,
     path: &str,
     source: &str,
+    target: Option<&str>,
     generation: u64,
     request_id: u64,
 ) -> Result<MergePreview, AppError> {
     let root = repo_root(path)?;
     let source = validate_branch_name(source)?;
+    let target = match target.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => Some(validate_branch_name(name)?),
+        None => None,
+    };
     let git = require_git(backend).await?;
     let snapshot = read_status(backend, &root, generation, request_id).await?;
     let operation = operation_kind(
@@ -82,28 +90,100 @@ pub async fn merge_preview(
         internal_request_id(),
     )
     .await?;
-    Ok(preview_from(&snapshot, &source, &operation))
+    let mut preview = preview_from(&snapshot, &source, target.as_deref(), &operation);
+    let target_name = preview.target.clone();
+    let target_local = if target.is_none() && (snapshot.branch.detached || snapshot.branch.unborn) {
+        false
+    } else {
+        ref_exists(
+            backend,
+            &root,
+            &git.path,
+            &format!("refs/heads/{target_name}"),
+            preview.generation,
+        )
+        .await?
+    };
+    if !target_local {
+        if target.is_some() {
+            block_preview(
+                &mut preview,
+                "remote_target",
+                format!("{target_name} 不是本地分支。只能合并到本地分支，未开始合并。"),
+            );
+        }
+        return Ok(preview);
+    }
+    if source == target_name {
+        return Ok(preview);
+    }
+    let facts = read_merge_facts(
+        backend,
+        &root,
+        &git.path,
+        &target_name,
+        &source,
+        preview.generation,
+    )
+    .await?;
+    apply_facts(&mut preview, facts);
+    Ok(preview)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start_merge(
     backend: &Backend,
     path: &str,
     source: &str,
+    target: Option<&str>,
+    mode: Option<&str>,
     generation: u64,
     request_id: u64,
 ) -> Result<MergeSession, AppError> {
     let root = repo_root(path)?;
     ensure_no_index_lock(&root)?;
     let source = validate_branch_name(source)?;
+    let target = match target.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => Some(validate_branch_name(name)?),
+        None => None,
+    };
+    let fast_forward = match mode.unwrap_or("merge") {
+        "merge" | "no-ff" => false,
+        "ff-only" => true,
+        _ => {
+            return Err(AppError::new(
+                "merge_mode_invalid",
+                "不支持的合并方式，未开始合并。",
+            ))
+        }
+    };
     let git = require_git(backend).await?;
     let _gate = backend
         .actions
         .enter(action_key("merge", &repo_key(&root)))?;
     let mut guard = write_lock(backend, &root, generation, request_id).await?;
-    let outcome = start_in_guard(&mut guard, backend, &git.path, &root, &source).await;
+    let outcome = start_in_guard(
+        &mut guard,
+        backend,
+        &git.path,
+        &root,
+        &source,
+        target.as_deref(),
+        fast_forward,
+    )
+    .await;
     let generation = guard.finish();
-    outcome.map_err(|error| attach_generation(error, generation))?;
-    merge_session(backend, path, generation, internal_request_id()).await
+    let started = outcome.map_err(|error| attach_generation(error, generation))?;
+    let mut session = settle_read!(backend, &root, generation, |current| merge_session(
+        backend,
+        path,
+        current,
+        internal_request_id()
+    )
+    .await)?;
+    session.switched_from = started.switched_from;
+    session.fast_forwarded = started.fast_forwarded;
+    Ok(session)
 }
 
 pub async fn merge_session(
@@ -235,7 +315,13 @@ pub async fn resolve_conflict(
     .await;
     let generation = guard.finish();
     outcome.map_err(|error| attach_generation(error, generation))?;
-    merge_session(backend, path, generation, internal_request_id()).await
+    settle_read!(backend, &root, generation, |current| merge_session(
+        backend,
+        path,
+        current,
+        internal_request_id()
+    )
+    .await)
 }
 
 pub async fn complete_merge(
@@ -256,7 +342,13 @@ pub async fn complete_merge(
     let outcome = complete_in_guard(&mut guard, backend, &git.path, &root, &message).await;
     let generation = guard.finish();
     let prepared = outcome.map_err(|error| attach_generation(error, generation))?;
-    let snapshot = read_status(backend, &root, generation, internal_request_id()).await?;
+    let snapshot = settle_read!(backend, &root, generation, |current| read_status(
+        backend,
+        &root,
+        current,
+        internal_request_id()
+    )
+    .await)?;
     if snapshot.branch.head_oid.as_deref() != Some(prepared.oid.as_str()) {
         return Err(AppError::new(
             "commit_unverified",
@@ -293,7 +385,13 @@ pub async fn abort_merge(
     let outcome = abort_in_guard(&mut guard, backend, &git.path, &root).await;
     let generation = guard.finish();
     let impact = outcome.map_err(|error| attach_generation(error, generation))?;
-    let snapshot = read_status(backend, &root, generation, internal_request_id()).await?;
+    let snapshot = settle_read!(backend, &root, generation, |current| read_status(
+        backend,
+        &root,
+        current,
+        internal_request_id()
+    )
+    .await)?;
     Ok(AbortImpact {
         generation: snapshot.generation,
         wrote: true,
@@ -334,7 +432,13 @@ pub async fn undo_commit(
     let outcome = undo_in_guard(&mut guard, backend, &git.path, &root, &expected_head).await;
     let generation = guard.finish();
     let undone = outcome.map_err(|error| attach_generation(error, generation))?;
-    let snapshot = read_status(backend, &root, generation, internal_request_id()).await?;
+    let snapshot = settle_read!(backend, &root, generation, |current| read_status(
+        backend,
+        &root,
+        current,
+        internal_request_id()
+    )
+    .await)?;
     if snapshot.branch.head_oid.as_deref() != Some(undone.parent.as_str()) {
         return Err(AppError::new(
             "undo_unverified",
@@ -385,7 +489,13 @@ pub async fn discard_changes(
     let outcome = discard_in_guard(&mut guard, backend, &git.path, &root, paths).await;
     let generation = guard.finish();
     let files = outcome.map_err(|error| attach_generation(error, generation))?;
-    let snapshot = read_status(backend, &root, generation, internal_request_id()).await?;
+    let snapshot = settle_read!(backend, &root, generation, |current| read_status(
+        backend,
+        &root,
+        current,
+        internal_request_id()
+    )
+    .await)?;
     Ok(DiscardResult {
         generation: snapshot.generation,
         wrote: true,
@@ -395,44 +505,74 @@ pub async fn discard_changes(
     })
 }
 
-fn preview_from(snapshot: &StatusSnapshot, source: &str, operation: &str) -> MergePreview {
-    let target = target_name(snapshot);
+fn preview_from(
+    snapshot: &StatusSnapshot,
+    source: &str,
+    target: Option<&str>,
+    operation: &str,
+) -> MergePreview {
+    let current = if snapshot.branch.detached || snapshot.branch.unborn {
+        None
+    } else {
+        snapshot.branch.name.clone()
+    };
+    let explicit = target.is_some();
+    let target = target
+        .map(str::to_string)
+        .unwrap_or_else(|| target_name(snapshot));
+    let needs_switch = current.as_deref() != Some(target.as_str());
+    // 未跟踪文件不阻止合并：Git 只会在合并或切换要覆盖它们时拒绝，且拒绝时不写入任何内容。
+    // 只有已跟踪文件的未提交改动才需要先提交或临时保存。
     let local_paths: Vec<String> = snapshot
         .files
         .iter()
+        .filter(|file| !file.untracked)
         .map(|file| file.path.clone())
         .collect();
     let dirty = !local_paths.is_empty();
-    let same = snapshot.branch.name.as_deref() == Some(source);
-    let mut can_start = operation == "none"
-        && !dirty
-        && !same
-        && !snapshot.branch.detached
-        && !snapshot.branch.unborn;
-    let note = if operation != "none" {
-        can_start = false;
-        operation_note(operation, None, 0)
-    } else if snapshot.branch.detached || snapshot.branch.unborn {
-        can_start = false;
-        "当前不在可合并的本地分支上。请先切换到目标分支，未开始合并。".to_string()
+    let same = source == target;
+    let (blocker, note) = if operation != "none" {
+        (Some("operation"), operation_note(operation, None, 0))
+    } else if current.is_none() && !explicit {
+        (
+            Some("detached"),
+            "当前不在可合并的本地分支上。请先选择一个本地分支作为目标，未开始合并。".to_string(),
+        )
     } else if same {
-        "来源分支就是当前分支，未开始合并。".to_string()
+        (
+            Some("same"),
+            "来源和目标是同一个分支，未开始合并。".to_string(),
+        )
     } else if dirty {
         let omitted = local_paths.len().saturating_sub(MAX_LISTED_PATHS);
-        if omitted > 0 {
+        let action = if needs_switch {
+            "切换分支并合并前"
+        } else {
+            "合并前"
+        };
+        let note = if omitted > 0 {
             format!(
-                "工作区有 {} 处未提交改动，下面只展示 {} 条，还有 {omitted} 条未展示。合并前请先提交或临时保存，避免覆盖。未开始合并。",
+                "工作区有 {} 处未提交改动，下面只展示 {} 条，还有 {omitted} 条未展示。{action}请先提交或临时保存，避免覆盖。未开始合并。",
                 local_paths.len(),
                 local_paths.len() - omitted
             )
         } else {
             format!(
-                "工作区有 {} 处未提交改动，合并前请先提交或临时保存，避免覆盖。未开始合并。",
+                "工作区有 {} 处未提交改动，{action}请先提交或临时保存，避免覆盖。未开始合并。",
                 local_paths.len()
             )
-        }
+        };
+        (Some("dirty"), note)
+    } else if needs_switch {
+        (
+            None,
+            format!("将先切换到 {target}，再把 {source} 合并进去。当前没有未提交改动。"),
+        )
     } else {
-        format!("将把 {source} 合并到 {target}。当前没有未提交改动。")
+        (
+            None,
+            format!("将把 {source} 合并到 {target}。当前没有未提交改动。"),
+        )
     };
     let shown = local_paths.iter().take(MAX_LISTED_PATHS).cloned().collect();
     MergePreview {
@@ -442,10 +582,212 @@ fn preview_from(snapshot: &StatusSnapshot, source: &str, operation: &str) -> Mer
         head_oid: snapshot.branch.head_oid.clone(),
         dirty,
         local_paths: shown,
-        can_start,
+        can_start: blocker.is_none(),
         operation: operation.to_string(),
         note,
+        current,
+        needs_switch,
+        incoming: 0,
+        outgoing: 0,
+        up_to_date: false,
+        fast_forward: false,
+        commits: Vec::new(),
+        files: Vec::new(),
+        files_total: 0,
+        conflict_check: "unknown".to_string(),
+        conflict_paths: Vec::new(),
+        blocker: blocker.map(str::to_string),
     }
+}
+
+fn block_preview(preview: &mut MergePreview, code: &str, note: String) {
+    preview.can_start = false;
+    preview.blocker = Some(code.to_string());
+    preview.note = note;
+}
+
+struct MergeFacts {
+    generation: u64,
+    incoming: u32,
+    outgoing: u32,
+    commits: Vec<HistoryCommit>,
+    files: Vec<CommitFileChange>,
+    files_total: u32,
+    conflict_check: String,
+    conflict_paths: Vec<String>,
+}
+
+fn apply_facts(preview: &mut MergePreview, facts: MergeFacts) {
+    preview.generation = facts.generation;
+    preview.incoming = facts.incoming;
+    preview.outgoing = facts.outgoing;
+    preview.up_to_date = facts.incoming == 0;
+    preview.fast_forward = facts.incoming > 0 && facts.outgoing == 0;
+    preview.commits = facts.commits;
+    preview.files = facts.files;
+    preview.files_total = facts.files_total;
+    preview.conflict_check = facts.conflict_check;
+    preview.conflict_paths = facts.conflict_paths;
+    // 目标已经包含全部提交比「工作区有改动」更根本：什么都不用做。
+    if preview.up_to_date && preview.operation == "none" {
+        let note = format!(
+            "{} 已经包含 {} 的全部提交，不需要合并。",
+            preview.target, preview.source
+        );
+        block_preview(preview, "up_to_date", note);
+    }
+}
+
+async fn ref_exists(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    name: &str,
+    generation: u64,
+) -> Result<bool, AppError> {
+    let (output, _) = run_read(
+        backend,
+        root,
+        generation,
+        internal_request_id(),
+        rev_parse_command(git, root, name),
+    )
+    .await?;
+    Ok(output.exit_code == 0)
+}
+
+const MAX_PREVIEW_COMMITS: u32 = 100;
+
+async fn read_merge_facts(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    target: &str,
+    source: &str,
+    generation: u64,
+) -> Result<MergeFacts, AppError> {
+    let (counts, generation) = run_read(
+        backend,
+        root,
+        generation,
+        internal_request_id(),
+        merge_divergence_command(git, root, target, source),
+    )
+    .await?;
+    if counts.exit_code != 0 {
+        return Err(git_failure(
+            "merge_preview_failed",
+            &counts,
+            "无法比较两个分支，未开始合并。",
+        )
+        .with_generation(generation));
+    }
+    let (outgoing, incoming) = parse_divergence(&counts.stdout)?;
+    if incoming == 0 {
+        return Ok(MergeFacts {
+            generation,
+            incoming,
+            outgoing,
+            commits: Vec::new(),
+            files: Vec::new(),
+            files_total: 0,
+            conflict_check: "clean".to_string(),
+            conflict_paths: Vec::new(),
+        });
+    }
+    let (log, generation) = run_read(
+        backend,
+        root,
+        generation,
+        internal_request_id(),
+        merge_incoming_log_command(git, root, target, source, MAX_PREVIEW_COMMITS),
+    )
+    .await?;
+    let commits = if log.exit_code == 0 {
+        parse_history_records(&log.stdout).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let (names, generation) = run_read(
+        backend,
+        root,
+        generation,
+        internal_request_id(),
+        merge_incoming_files_command(git, root, target, source),
+    )
+    .await?;
+    let mut files = if names.exit_code == 0 && !names.stdout_truncated {
+        parse_name_status(&names.stdout).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let files_total = u32::try_from(files.len()).unwrap_or(u32::MAX);
+    files.truncate(MAX_LISTED_PATHS);
+    let (conflict_check, conflict_paths, generation) = if outgoing == 0 {
+        ("clean".to_string(), Vec::new(), generation)
+    } else {
+        let (tree, generation) = run_read(
+            backend,
+            root,
+            generation,
+            internal_request_id(),
+            merge_tree_command(git, root, target, source),
+        )
+        .await?;
+        match tree.exit_code {
+            0 => ("clean".to_string(), Vec::new(), generation),
+            1 => (
+                "conflicts".to_string(),
+                parse_merge_tree_conflicts(&tree.stdout),
+                generation,
+            ),
+            _ => ("unknown".to_string(), Vec::new(), generation),
+        }
+    };
+    Ok(MergeFacts {
+        generation,
+        incoming,
+        outgoing,
+        commits,
+        files,
+        files_total,
+        conflict_check,
+        conflict_paths,
+    })
+}
+
+fn parse_divergence(bytes: &[u8]) -> Result<(u32, u32), AppError> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut parts = text.split_whitespace().map(str::parse::<u32>);
+    match (parts.next(), parts.next()) {
+        (Some(Ok(left)), Some(Ok(right))) => Ok((left, right)),
+        _ => Err(AppError::new(
+            "merge_preview_failed",
+            "无法解析分支差异，未开始合并。",
+        )),
+    }
+}
+
+/// `merge-tree --write-tree --name-only -z` 的输出：树 oid、冲突路径（各以 NUL 结尾），
+/// 之后是空段与（已用 --no-messages 关闭的）消息区。
+fn parse_merge_tree_conflicts(bytes: &[u8]) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for (index, part) in bytes.split(|byte| *byte == 0).enumerate() {
+        if index == 0 {
+            continue;
+        }
+        if part.is_empty() {
+            break;
+        }
+        let path = String::from_utf8_lossy(part).to_string();
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+        if paths.len() >= MAX_LISTED_PATHS {
+            break;
+        }
+    }
+    paths
 }
 
 fn session_from(
@@ -473,6 +815,8 @@ fn session_from(
         unresolved,
         note,
         snapshot: snapshot.clone(),
+        switched_from: None,
+        fast_forwarded: false,
     }
 }
 
@@ -614,14 +958,21 @@ fn side_from(side: &SideBytes, label: &str) -> ConflictSide {
     }
 }
 
+struct StartedMerge {
+    switched_from: Option<String>,
+    fast_forwarded: bool,
+}
+
 async fn start_in_guard(
     guard: &mut WriteGuard<'_, RealRunner>,
     backend: &Backend,
     git: &Path,
     root: &Path,
     source: &str,
-) -> Result<(), AppError> {
-    let snapshot = status_in_guard(guard, backend, git, root).await?;
+    target: Option<&str>,
+    fast_forward: bool,
+) -> Result<StartedMerge, AppError> {
+    let mut snapshot = status_in_guard(guard, backend, git, root).await?;
     let operation = operation_in_guard(guard, git, root, &snapshot).await?;
     if operation != "none" {
         return Err(AppError::new(
@@ -629,19 +980,13 @@ async fn start_in_guard(
             operation_note(&operation, None, 0),
         ));
     }
-    if snapshot.branch.detached || snapshot.branch.unborn {
-        return Err(AppError::new(
-            "merge_detached",
-            "当前不在可合并的本地分支上，未开始合并。",
-        ));
-    }
-    if snapshot.branch.name.as_deref() == Some(source) {
+    if target == Some(source) {
         return Err(AppError::new(
             "merge_same",
-            "来源分支就是当前分支，未开始合并。",
+            "来源和目标是同一个分支，未开始合并。",
         ));
     }
-    if !snapshot.files.is_empty() {
+    if snapshot.files.iter().any(|file| !file.untracked) {
         return Err(AppError::new(
             "merge_dirty",
             "工作区有未提交改动。请先提交或临时保存，未开始合并。",
@@ -653,6 +998,65 @@ async fn start_in_guard(
             "找不到来源分支，未开始合并。",
         ));
     }
+    let original = if snapshot.branch.detached || snapshot.branch.unborn {
+        None
+    } else {
+        snapshot.branch.name.clone()
+    };
+    let mut switched_from = None;
+    if let Some(target) = target.filter(|name| original.as_deref() != Some(*name)) {
+        if !ref_in_guard(guard, git, root, &format!("refs/heads/{target}")).await? {
+            return Err(AppError::new(
+                "merge_target_invalid",
+                format!("{target} 不是本地分支。只能合并到本地分支，未开始合并。"),
+            ));
+        }
+        let output = run_spec(guard, switch_command(git, root, target), true, false).await?;
+        if output.exit_code != 0 {
+            return Err(git_failure(
+                "switch_failed",
+                &output,
+                &format!("无法切换到 {target}，未开始合并。"),
+            ));
+        }
+        switched_from = Some(original.clone().unwrap_or_else(|| "游离 HEAD".to_string()));
+        snapshot = status_in_guard(guard, backend, git, root).await?;
+    }
+    let landed = |message: String| -> String {
+        match (&switched_from, target) {
+            (Some(_), Some(target)) => {
+                format!("{message}（已切换到 {target}，可以从分支菜单切回。）")
+            }
+            _ => message,
+        }
+    };
+    if snapshot.branch.detached || snapshot.branch.unborn {
+        return Err(AppError::new(
+            "merge_detached",
+            "当前不在可合并的本地分支上，未开始合并。",
+        ));
+    }
+    if snapshot.branch.name.as_deref() == Some(source) {
+        return Err(AppError::new(
+            "merge_same",
+            landed("来源分支就是当前分支，未开始合并。".to_string()),
+        ));
+    }
+    if fast_forward {
+        let output = run_spec(guard, merge_ff_only_command(git, root, source), true, false).await?;
+        if output.exit_code != 0 {
+            let error = git_failure(
+                "merge_ff_failed",
+                &output,
+                "两个分支已经分叉，不能快进。请改用「创建合并提交」。",
+            );
+            return Err(AppError::new(error.code, landed(error.message)));
+        }
+        return Ok(StartedMerge {
+            switched_from,
+            fast_forwarded: true,
+        });
+    }
     let output = run_spec(
         guard,
         merge_no_commit_command(git, root, source),
@@ -661,17 +1065,14 @@ async fn start_in_guard(
     )
     .await?;
     let started = path_exists_in_guard(guard, git, root, "MERGE_HEAD").await?;
-    if started {
-        return Ok(());
+    if started || output.exit_code == 0 {
+        return Ok(StartedMerge {
+            switched_from,
+            fast_forwarded: false,
+        });
     }
-    if output.exit_code == 0 {
-        return Ok(());
-    }
-    Err(git_failure(
-        "merge_failed",
-        &output,
-        "合并没有开始，工作区应保持原样。",
-    ))
+    let error = git_failure("merge_failed", &output, "合并没有开始，工作区应保持原样。");
+    Err(AppError::new(error.code, landed(error.message)))
 }
 
 async fn resolve_in_guard(
@@ -1232,7 +1633,13 @@ async fn undo_preview(
     let mut guard = write_lock(backend, root, remotes.0, internal_request_id()).await?;
     let outcome = assess_unpushed(&mut guard, git, root, &remote, expected_head).await;
     let generation = guard.finish();
-    let refreshed = read_status(backend, root, generation, internal_request_id()).await;
+    let refreshed = settle_read!(backend, root, generation, |current| read_status(
+        backend,
+        root,
+        current,
+        internal_request_id()
+    )
+    .await);
     match outcome {
         Ok(ready) => {
             let snapshot = refreshed.map_err(|error| attach_generation(error, generation))?;
@@ -2904,6 +3311,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn merge_into_another_branch_switches_first_and_can_fast_forward() {
+        let fixture = crate::test_support::git_fixture("merge-reverse");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(
+            repo.join("a.txt"),
+            "base
+",
+        )
+        .unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        git(&repo, &["checkout", "-b", "feature"]);
+        fs::write(
+            repo.join("b.txt"),
+            "feature
+",
+        )
+        .unwrap();
+        git(&repo, &["add", "--", "b.txt"]);
+        git(&repo, &["commit", "-m", "add b"]);
+        let path = repo_key(&repo);
+
+        // 站在 feature 上，把 feature 合并到 main：预览只读，不切换分支。
+        let preview = merge_preview(
+            &backend,
+            &path,
+            "feature",
+            Some("main"),
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(preview.can_start, "{}", preview.note);
+        assert!(preview.needs_switch);
+        assert_eq!(preview.current.as_deref(), Some("feature"));
+        assert_eq!(preview.incoming, 1);
+        assert_eq!(preview.outgoing, 0);
+        assert!(preview.fast_forward);
+        assert_eq!(preview.conflict_check, "clean");
+        assert_eq!(git_text(&repo, &["branch", "--show-current"]), "feature");
+
+        // 远程或不存在的本地分支不能作为目标。
+        let remote = merge_preview(
+            &backend,
+            &path,
+            "main",
+            Some("origin/main"),
+            generation(&backend, &repo),
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(!remote.can_start);
+        assert_eq!(remote.blocker.as_deref(), Some("remote_target"));
+
+        let session = start_merge(
+            &backend,
+            &path,
+            "feature",
+            Some("main"),
+            Some("ff-only"),
+            preview.generation,
+            3,
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.operation, "none");
+        assert!(session.fast_forwarded);
+        assert_eq!(session.switched_from.as_deref(), Some("feature"));
+        assert_eq!(git_text(&repo, &["branch", "--show-current"]), "main");
+        assert_eq!(
+            git_text(&repo, &["rev-parse", "main"]),
+            git_text(&repo, &["rev-parse", "feature"])
+        );
+
+        // 合并完成后目标已包含来源：再次预览明确提示不需要合并。
+        let again = merge_preview(
+            &backend,
+            &path,
+            "feature",
+            Some("main"),
+            session.generation,
+            4,
+        )
+        .await
+        .unwrap();
+        assert!(!again.can_start);
+        assert!(again.up_to_date);
+        assert_eq!(again.blocker.as_deref(), Some("up_to_date"));
+    }
+
+    #[test]
+    fn merge_tree_conflict_output_lists_unique_paths() {
+        let raw = b"0123456789abcdef0123456789abcdef01234567\0a.txt\0dir/b c.txt\0a.txt\0\0";
+        assert_eq!(
+            parse_merge_tree_conflicts(raw),
+            vec!["a.txt".to_string(), "dir/b c.txt".to_string()]
+        );
+        assert_eq!(
+            parse_divergence(b"3\t5\n").unwrap(),
+            (3, 5)
+        );
+        assert!(parse_divergence(b"oops").is_err());
+    }
+
+    #[tokio::test]
     async fn text_merge_edits_one_file_and_blocks_until_both_are_resolved() {
         let fixture = crate::test_support::git_fixture("merge-text");
         let backend = fixture.backend();
@@ -2911,7 +3427,7 @@ mod tests {
         init_pair(&repo);
         let path = repo_key(&repo);
         let generation = generation(&backend, &repo);
-        let preview = merge_preview(&backend, &path, "feature", generation, 1)
+        let preview = merge_preview(&backend, &path, "feature", None, generation, 1)
             .await
             .unwrap();
         assert_eq!(preview.source, "feature");
@@ -2919,9 +3435,30 @@ mod tests {
         assert!(!preview.dirty);
         assert!(preview.can_start);
         assert!(preview.note.contains("feature"));
-        let session = start_merge(&backend, &path, "feature", preview.generation, 2)
-            .await
-            .unwrap();
+        assert!(!preview.needs_switch);
+        assert_eq!(preview.incoming, 1);
+        assert_eq!(preview.outgoing, 1);
+        assert!(!preview.fast_forward);
+        assert_eq!(preview.commits.len(), 1);
+        assert_eq!(preview.commits[0].summary, "feature");
+        assert_eq!(preview.files_total, 2);
+        assert_eq!(preview.conflict_check, "conflicts");
+        assert!(preview
+            .conflict_paths
+            .iter()
+            .any(|path| path == "my file.txt"));
+        assert!(!repo.join(".git/MERGE_HEAD").exists());
+        let session = start_merge(
+            &backend,
+            &path,
+            "feature",
+            None,
+            None,
+            preview.generation,
+            2,
+        )
+        .await
+        .unwrap();
         assert_eq!(session.operation, "merge");
         assert_eq!(session.unresolved, 2);
         assert!(!session.can_continue);
@@ -3020,9 +3557,17 @@ mod tests {
         let repo = fixture.repo("demo");
         init_pair(&repo);
         let path = repo_key(&repo);
-        let session = start_merge(&backend, &path, "feature", generation(&backend, &repo), 1)
-            .await
-            .unwrap();
+        let session = start_merge(
+            &backend,
+            &path,
+            "feature",
+            None,
+            None,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
         let first = resolve_conflict(
             &backend,
             &path,
@@ -3109,9 +3654,17 @@ mod tests {
         git(&repo, &["add", "--", "bin.dat", "file.txt"]);
         git(&repo, &["commit", "-m", "ours"]);
         let path = repo_key(&repo);
-        let session = start_merge(&backend, &path, "feature", generation(&backend, &repo), 1)
-            .await
-            .unwrap();
+        let session = start_merge(
+            &backend,
+            &path,
+            "feature",
+            None,
+            None,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
         let binary = conflict_view(&backend, &path, "bin.dat", session.generation, 2)
             .await
             .unwrap();
@@ -3202,29 +3755,61 @@ mod tests {
         git(&repo, &["add", "--", "notes.txt"]);
         git(&repo, &["stash", "push", "-m", "keep-me"]);
         let stashed = git_text(&repo, &["rev-parse", "stash@{0}"]);
-        fs::write(repo.join("notes.txt"), "dirty\n").unwrap();
+        fs::write(repo.join("other.txt"), "dirty\n").unwrap();
+        // 未跟踪文件不算阻止合并的本地改动。
+        fs::write(repo.join("scratch.txt"), "untracked\n").unwrap();
         let path = repo_key(&repo);
         let generation = generation(&backend, &repo);
-        let preview = merge_preview(&backend, &path, "feature", generation, 1)
+        let preview = merge_preview(&backend, &path, "feature", None, generation, 1)
             .await
             .unwrap();
         assert!(preview.dirty);
         assert!(!preview.can_start);
+        assert_eq!(preview.blocker.as_deref(), Some("dirty"));
+        assert_eq!(preview.local_paths, vec!["other.txt".to_string()]);
         assert!(preview.note.contains("临时保存"));
-        let refused = start_merge(&backend, &path, "feature", preview.generation, 2)
-            .await
-            .unwrap_err();
+        let refused = start_merge(
+            &backend,
+            &path,
+            "feature",
+            None,
+            None,
+            preview.generation,
+            2,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(refused.code, "merge_dirty");
         assert_eq!(
-            fs::read_to_string(repo.join("notes.txt")).unwrap(),
+            fs::read_to_string(repo.join("other.txt")).unwrap(),
             "dirty\n"
         );
         assert!(!repo.join(".git/MERGE_HEAD").exists());
-        fs::remove_file(repo.join("notes.txt")).unwrap();
+        git(&repo, &["checkout", "--", "other.txt"]);
+        let untracked_only = merge_preview(
+            &backend,
+            &path,
+            "feature",
+            None,
+            refused.generation.unwrap(),
+            6,
+        )
+        .await
+        .unwrap();
+        assert!(untracked_only.can_start, "{}", untracked_only.note);
+        assert!(!untracked_only.dirty);
         let head = git_text(&repo, &["rev-parse", "HEAD"]);
-        let session = start_merge(&backend, &path, "feature", refused.generation.unwrap(), 3)
-            .await
-            .unwrap();
+        let session = start_merge(
+            &backend,
+            &path,
+            "feature",
+            None,
+            None,
+            untracked_only.generation,
+            3,
+        )
+        .await
+        .unwrap();
         fs::write(repo.join("my file.txt"), "edited during merge\n").unwrap();
         let impact = abort_merge(&backend, &path, false, session.generation, 4)
             .await
@@ -3736,7 +4321,7 @@ mod tests {
             },
             files: Vec::new(),
         };
-        let preview = preview_from(&clean, "feature", "none");
+        let preview = preview_from(&clean, "feature", None, "none");
         assert!(preview.can_start);
         assert!(preview.local_paths.is_empty());
         assert!(preview.note.contains("没有未提交改动"));
@@ -3756,7 +4341,7 @@ mod tests {
             branch: clean.branch.clone(),
             files: dirty_files,
         };
-        let blocked = preview_from(&dirty, "feature", "none");
+        let blocked = preview_from(&dirty, "feature", None, "none");
         assert!(!blocked.can_start);
         assert_eq!(blocked.local_paths.len(), 200);
         assert!(blocked.note.contains("201"));

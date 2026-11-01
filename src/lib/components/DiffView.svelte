@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { toSideRows, type ViewLine } from "../diff";
+  import { hunkCaption, toSideRows, visibleDiffLines, type ViewLine } from "../diff";
   import { scrollByRows, visibleRange } from "../layout";
   import type { DiffHunk, DiffResponse, FileSelection } from "../types";
   import { splitPath } from "../ui";
@@ -27,11 +27,11 @@
   }
 
   /**
-   * 行高 16px 是 R3 的硬约束：1280×840 下要让同屏差异至少完全可见 40 行。
-   * 22px 的行高在扣掉标题栏、状态栏、差异工具栏与留白后只能放进 30 行左右，
-   * 因此密度由这里和 `components.css` 的 `.diff.dense` 一起决定，两处必须同步。
+   * 行高 18px：R3 要求 1280×840 下同屏差异至少完全可见 40 行。差异滚动区在该尺寸下实测
+   * 729px 高，18px 正好放下 40 行；16px 能放更多但 12px 代码挤在一起难读，22px 只剩 33 行。
+   * 密度由这里和 `components.css` 的 `.diff.dense` 一起决定，两处必须同步。
    */
-  const ROW_HEIGHT = 16;
+  const ROW_HEIGHT = 18;
 
   let {
     selection,
@@ -55,13 +55,21 @@
   let currentDiff = $derived(
     selection && diff?.path === selection.path && diff.staged === (selection.side === "staged") ? diff : null,
   );
-  let lines = $derived<ViewLine[]>(currentDiff?.lines ?? []);
+  /* Git 的文件头（diff --git / index / --- / +++ / new file mode …）对读差异的人是噪音：
+     文件路径、状态和增删统计都已经在工具条里。这里只保留代码行与块标题，
+     并记下每一行在原始列表里的位置，按块暂存仍按原始下标找块。 */
+  let shown = $derived(visibleDiffLines(currentDiff?.lines ?? []));
+  let lines = $derived<ViewLine[]>(shown.lines);
+  let metaOnly = $derived(shown.lines.length === 0 && shown.meta.length > 0);
   let sideRows = $derived(mode === "split" ? toSideRows(lines) : []);
   let total = $derived(mode === "split" ? sideRows.length : lines.length);
   let range = $derived(
     visibleRange(total, scrollTop, viewport > 0 ? viewport : scrollTop > 0 ? ROW_HEIGHT : 0, ROW_HEIGHT),
   );
-  let hunkForLine = $derived((index: number) => currentDiff?.hunks.find((hunk) => hunk.startLine === index) ?? null);
+  let hunkForLine = $derived((index: number) => {
+    const origin = shown.origin[index];
+    return origin === undefined ? null : (currentDiff?.hunks.find((hunk) => hunk.startLine === origin) ?? null);
+  });
   let parts = $derived(selection ? splitPath(selection.path) : null);
   let showStats = $derived(
     Boolean(currentDiff && !currentDiff.binary && (currentDiff.additions > 0 || currentDiff.deletions > 0)),
@@ -205,7 +213,7 @@
 
   function hunkLabel(hunk: DiffHunk): string {
     if (!hunk.stageable) return "已截断";
-    return selection?.side === "staged" ? "取消暂存此块" : "暂存此块";
+    return selection?.side === "staged" ? "取消暂存" : "暂存此块";
   }
 </script>
 
@@ -289,6 +297,12 @@
       <strong>二进制文件有变动</strong>
       <p>{selection.path}</p>
     </div>
+  {:else if metaOnly}
+    <div class="empty" role="status">
+      <span class="empty-icon"><Icon name="file" size={24} /></span>
+      <strong>只有文件属性变化</strong>
+      <p>{shown.meta.join("；")}</p>
+    </div>
   {:else if !currentDiff || (currentDiff.lines.length === 0 && currentDiff.totalLines === 0)}
     <div class="empty" role="status">
       <span class="empty-icon"><Icon name="file" size={24} /></span>
@@ -330,6 +344,9 @@
               {#if line.kind === "add" || line.kind === "del" || line.kind === "context"}
                 {@const segs = segmentsAt(absolute)}
                 <span class="code" data-sign={sign(line.text)}>{#if segs.length === 1 && !segs[0].k && !segs[0].m}{segs[0].t}{:else}{#each segs as seg, i (i)}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/each}{/if}</span>
+              {:else if line.kind === "hunk"}
+                {@const caption = hunkCaption(line.text)}
+                <span class="code hunk-caption"><span class="hunk-at">{caption.at}</span>{#if caption.context}<span class="hunk-context">{caption.context}</span>{/if}</span>
               {:else}
                 <span class="code">{line.text.length === 0 ? " " : line.text}</span>
               {/if}
@@ -358,12 +375,17 @@
               style={`top:${absolute * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}
             >
               <!-- 占位格用 blank 而不是 empty：.empty 是全局空状态（flex + 32px 内边距），会把单元格撑到 64px，相邻行文字叠在一起。 -->
+              {#if row.span && row.left?.kind === "hunk"}
+                {@const caption = hunkCaption(row.left.text)}
+                <span class="side-cell hunk side-hunk"><span class="ln"></span><span class="code hunk-caption"><span class="hunk-at">{caption.at}</span>{#if caption.context}<span class="hunk-context">{caption.context}</span>{/if}</span></span>
+              {:else}
               <span class={`side-cell ${row.left?.kind ?? "blank"}`}>
                 {#if row.left}<span class="ln">{row.left.no ?? ""}</span>{#if row.left.index !== undefined && !row.span}<span class="code" data-sign={sign(row.left.text)}>{#each segmentsAt(row.left.index) as seg, i (i)}{#if !seg.k && !seg.m}{seg.t}{:else}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/if}{/each}</span>{:else}<span class="code">{row.left.text}</span>{/if}{/if}
               </span>
               <span class={`side-cell ${row.right?.kind ?? "blank"}`}>
                 {#if row.right}<span class="ln">{row.right.no ?? ""}</span>{#if row.right.index !== undefined && !row.span}<span class="code" data-sign={sign(row.right.text)}>{#each segmentsAt(row.right.index) as seg, i (i)}{#if !seg.k && !seg.m}{seg.t}{:else}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/if}{/each}</span>{:else}<span class="code">{row.right.text}</span>{/if}{/if}
               </span>
+              {/if}
               {#if !readOnly && !fullFile && row.showStage && row.hunkIndex !== null}
                 {@const hunk = currentDiff.hunks.find((item) => item.index === row.hunkIndex)}
                 {#if hunk}

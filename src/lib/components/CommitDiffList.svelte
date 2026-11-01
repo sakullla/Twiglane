@@ -11,6 +11,8 @@
     opened: OpenedRepository;
     detail: CommitDetail;
     parent: string | null;
+    /** 从左侧文件列表点选的文件：展开并滚动到它。 */
+    focusPath?: string | null;
     disabled: boolean;
     nextId: () => number;
     onGeneration: (generation: number) => void;
@@ -18,7 +20,19 @@
     onFileHistory: (path: string) => void;
   }
 
-  let { opened, detail, parent, disabled, nextId, onGeneration, onFailure, onFileHistory }: Props = $props();
+  let { opened, detail, parent, focusPath = null, disabled, nextId, onGeneration, onFailure, onFileHistory }: Props = $props();
+  let scroller = $state<HTMLDivElement | null>(null);
+
+  $effect(() => {
+    const path = focusPath;
+    const host = scroller;
+    if (!path || !host) return;
+    if (!expandedPaths.includes(path)) expandedPaths = [...expandedPaths, path];
+    queueMicrotask(() => {
+      const target = [...host.querySelectorAll<HTMLElement>("[data-path]")].find((node) => node.dataset.path === path);
+      target?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+    });
+  });
 
   let expandedPaths = $state<string[]>([]);
   let fileDiffs = $state<Record<string, DiffResponse>>({});
@@ -124,13 +138,13 @@
 
 <section class="history-multi" aria-label="多文件差异">
   <div class="history-multi-head">
-    <div><strong>本次提交的全部差异</strong><span>{loadedCount} / {expandedPaths.length} 个已展开文件已加载</span></div>
+    <div><strong>全部文件</strong><span>已展开 {expandedPaths.length} / {detail.files.length} 个，已加载 {loadedCount} 个</span></div>
     <div class="row">
       <button type="button" class="btn btn-ghost btn-sm" disabled={expandedPaths.length === detail.files.length} onclick={() => (expandedPaths = detail.files.map((file) => file.path))}><Icon name="plus" size={12} />展开全部</button>
       <button type="button" class="btn btn-ghost btn-sm" disabled={expandedPaths.length === 0} onclick={() => (expandedPaths = [])}><Icon name="minus" size={12} />全部收起</button>
     </div>
   </div>
-  <div class="history-multi-scroll">
+  <div class="history-multi-scroll" bind:this={scroller}>
     {#if detail.files.length === 0}
       <div class="empty"><span class="empty-icon"><Icon name="file" size={22} /></span><strong>这次提交没有文件变化</strong></div>
     {:else if expandedPaths.length === 0}
@@ -141,13 +155,13 @@
         {@const expanded = expandedPaths.includes(file.path)}
         {@const mark = statusMark(commitFileLabel(file.status))}
         {@const parts = splitPath(file.path)}
-        <article class="multi-file" class:expanded>
+        <article class="multi-file" class:expanded data-path={file.path} class:focused={focusPath === file.path}>
           <div class="multi-file-head">
             <button type="button" class="multi-file-toggle" aria-label={`${expanded ? "收起" : "展开"} ${file.path}`} aria-expanded={expanded} onclick={() => toggle(file.path)}>
               <span class={`st ${mark.tone}`}>{mark.letter}</span>
               <span class="multi-file-name"><strong>{parts.name}</strong>{#if parts.dir}<small>{parts.dir}</small>{/if}</span>
               <span class="chip">{commitFileLabel(file.status)}</span>
-              <Icon name="chevron-down" size={13} class={expanded ? "expanded" : ""} />
+              <Icon name="chevron-down" size={13} class={expanded ? "flip" : ""} />
             </button>
             <button type="button" class="icon-btn sm" aria-label={`查看 ${file.path} 的文件历史`} title="查看此文件历史" onclick={() => onFileHistory(file.path)}><Icon name="history" size={13} /></button>
           </div>

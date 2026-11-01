@@ -7,7 +7,10 @@ import {
   mergeAbortAvailable,
   parentCaption,
   preferredCommitFile,
+  commitBodyRest,
   refLabel,
+  refPills,
+  shortOid,
   stashPathBadge,
 } from "../src/lib/history";
 import type { DiffResponse, FileSelection, HistoryCommit, OpenedRepository, StashState } from "../src/lib/types";
@@ -133,6 +136,31 @@ describe("历史文案", () => {
     expect(stashPathBadge("ignored", true)).toBe("忽略不保存");
     expect(mergeAbortAvailable(false)).toBe(false);
   });
+
+  it("引用胶囊把本地分支与同名远程合并，当前分支排最前", () => {
+    const pills = refPills([
+      { name: "origin/main", kind: "remote", current: false },
+      { name: "v1.0", kind: "tag", current: false },
+      { name: "main", kind: "branch", current: false },
+      { name: "feature", kind: "branch", current: true },
+      { name: "origin/HEAD", kind: "remote", current: false },
+      { name: "origin/other", kind: "remote", current: false },
+    ]);
+    expect(pills.map((pill) => `${pill.kind}:${pill.name}`)).toEqual([
+      "branch:feature",
+      "branch:main",
+      "tag:v1.0",
+      "remote:origin/other",
+    ]);
+    expect(pills[1].remote).toBe("origin");
+    expect(pills[1].label).toContain("origin/main");
+  });
+
+  it("详情只显示标题之后的正文", () => {
+    expect(commitBodyRest("修复登录\n\n- 第一条\n- 第二条\n", "修复登录")).toBe("- 第一条\n- 第二条");
+    expect(commitBodyRest("1\n", "1")).toBe("");
+    expect(commitBodyRest("别的说明", "标题")).toBe("别的说明");
+  });
 });
 
 describe("历史面板", () => {
@@ -169,9 +197,13 @@ describe("历史面板", () => {
     });
     render(HistoryPanel, { props: panelProps() });
     expect(await screen.findByRole("option", { name: /commit-0/ })).toBeTruthy();
-    expect(screen.getByText(/合并提交/)).toBeTruthy();
-    expect(screen.getByText("分支 feature · 当前")).toBeTruthy();
-    expect(screen.getAllByRole("button", { name: /复制提交 .*完整 Hash/ }).length).toBeGreaterThan(0);
+    // 合并提交在行内用紫色「合并」标记，完整父提交说明放在悬停提示里。
+    expect(screen.getAllByTitle(/合并提交，父提交 aaaaaaa、bbbbbbb/).length).toBeGreaterThan(0);
+    // 引用胶囊的可访问名称保留完整含义（种类、名称、是否当前）。
+    expect(screen.getAllByLabelText("分支 feature · 当前").length).toBeGreaterThan(0);
+    // 行内只显示短 Hash，复制等操作收进右键菜单，不再每行一个复制按钮。
+    expect(screen.getAllByText(shortOid(first.oid)).length).toBeGreaterThan(0);
+    expect(screen.queryAllByRole("button", { name: /复制提交 .*完整 Hash/ })).toHaveLength(0);
     expect(screen.queryByRole("option", { name: /commit-99/ })).toBeNull();
     expect(historyPage).toHaveBeenCalledWith("/repo", "", 0, 3, 1);
   });
@@ -422,5 +454,44 @@ describe("只读差异", () => {
     expect(screen.queryByRole("button", { name: "暂存此块" })).toBeNull();
     await fireEvent.click(screen.getByRole("button", { name: "此文件历史" }));
     expect(openedPath).toBe("notes.txt");
+  });
+
+  it("不显示 Git 文件头，块标题换成行号与所在函数，按块暂存仍对准原始块", async () => {
+    const selection: FileSelection = { path: "notes.txt", side: "unstaged" };
+    const withHeaders: DiffResponse = {
+      ...diff,
+      totalLines: 7,
+      hunks: [{ index: 0, header: "@@ -68,6 +68,7 @@ fn render()", complete: true, stageable: true, startLine: 4, lineCount: 3 }],
+      lines: [
+        { kind: "meta", text: "diff --git a/notes.txt b/notes.txt", oldNo: null, newNo: null, hunkIndex: null },
+        { kind: "meta", text: "index 833f1f8..b476ae7 100644", oldNo: null, newNo: null, hunkIndex: null },
+        { kind: "meta", text: "--- a/notes.txt", oldNo: null, newNo: null, hunkIndex: null },
+        { kind: "meta", text: "+++ b/notes.txt", oldNo: null, newNo: null, hunkIndex: null },
+        { kind: "hunk", text: "@@ -68,6 +68,7 @@ fn render()", oldNo: null, newNo: null, hunkIndex: 0 },
+        { kind: "context", text: " keep", oldNo: 68, newNo: 68, hunkIndex: 0 },
+        { kind: "add", text: "+added", oldNo: null, newNo: 69, hunkIndex: 0 },
+      ],
+    };
+    const staged: number[] = [];
+    const view = render(DiffView, {
+      props: {
+        selection,
+        diff: withHeaders,
+        error: null,
+        loading: false,
+        disabled: false,
+        onStageHunk: (hunk: { index: number }) => staged.push(hunk.index),
+        onLoadMore: () => {},
+      },
+    });
+    const text = view.container.querySelector(".diff-scroll")?.textContent ?? "";
+    expect(text).not.toContain("diff --git");
+    expect(text).not.toContain("index 833f1f8");
+    expect(text).not.toContain("+++ b/notes.txt");
+    expect(text).not.toContain("@@");
+    expect(text).toContain("第 68–74 行");
+    expect(text).toContain("fn render()");
+    await fireEvent.click(screen.getByRole("button", { name: "暂存此块" }));
+    expect(staged).toEqual([0]);
   });
 });

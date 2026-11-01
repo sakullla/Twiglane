@@ -82,6 +82,16 @@
     }
   }
 
+  /** 写操作失败后按最新状态重读列表：失败提示之外，界面要反映仓库里真实存在的记录。 */
+  async function reloadAfterFailure(repo: string) {
+    try {
+      const fresh = await api.stashState(repo, includeUntracked, opened.generation, nextId());
+      if (opened.summary.path === repo) stash = fresh;
+    } catch {
+      // 重读失败不覆盖原有错误提示。
+    }
+  }
+
   async function withBusy(action: () => Promise<void>) {
     if (busy || disabled) return;
     busy = true;
@@ -115,6 +125,7 @@
         const failure = normalizeError(error);
         errorText = failure.message;
         onFailure(failure);
+        await reloadAfterFailure(repo);
       }
     });
   }
@@ -135,6 +146,7 @@
         const failure = normalizeError(error);
         errorText = failure.message;
         onFailure(failure);
+        await reloadAfterFailure(repo);
       }
     });
   }
@@ -168,6 +180,7 @@
         const failure = normalizeError(error);
         errorText = failure.message;
         onFailure(failure);
+        await reloadAfterFailure(repo);
       }
     });
   }

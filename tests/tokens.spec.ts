@@ -340,35 +340,28 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".diff-toolbar": "差异工具条底部分隔线",
   ".diff-more": "差异面板底部横向分隔线",
   ".full-value": "详情弹窗的只读展示框（readonly textarea），只区分文本块；可编辑态 textarea.full-value.editable 用控件边界",
-  ".commit-body": "提交信息正文块的容器轮廓，只读文本",
-  ".history-files": "提交内文件列表的容器轮廓",
   ".multi-file": "多文件卡外框，卡内文件行自带交互反馈",
   ".span-main": "历史/合并面板容器外框",
   ".branch-current": "当前分支卡的 accent 16% 强调描边，是状态容器而非控件边界",
   ".branch-create": "新建分支表单容器轮廓；内部 .input/.field 自带控件边界",
   ".tag-create": "新建标签表单容器轮廓；内部 .input 自带控件边界",
-  ".merge-guide": "合并指引卡外框；卡内 select 与按钮各自带边界",
-  ".merge-guide-branch": "指引里的分支卡外框；内部 select 无边框但由卡片强调区分",
-  ".merge-guide-result": "合并结果块外框；就绪/受阻态另有 accent/warning 描边",
   ".three-way-merge": "三方合并容器外框",
   ".art-card": "起始页插画卡外框（装饰性插画，不可交互）",
   ".welcome-recent": "最近仓库网格外框",
   ".toolbar-group": "标题栏按钮组外框；组内 .tb-btn 自带 hover 背景",
   ".view-heading-status": "视图标题右侧状态胶囊，静态展示",
   ".chip.ignore": "忽略标记 chip 的虚线描边，是状态标记而非可点击控件",
-  ".history-hash": "哈希 chip 外框；内部复制按钮自带 hover 背景",
   ".branch-current-sync > span": "上游/下游计数胶囊，静态展示",
-  ".merge-step-index": "步骤序号圆圈；当前步以 accent 描边强调，圆圈本身不可点",
 
   // --- components.css：表格/列分隔线与分区线 ---
   ".pane-head": "面板标题栏底部横向分隔线",
   ".panel-toolbar": "面板工具条底部横向分隔线",
   ".history-list": "历史列表与详情之间的竖向分栏线",
-  ".history-meta": "提交元信息区块底部横向分隔线",
+  ".commit-head": "提交信息区底部横向分隔线，纯分区",
+  ".commit-files": "提交文件栏与差异之间的竖向分栏线；文件行自带 hover/选中反馈",
   ".history-multi-head": "多选头部底部横向分隔线",
   ".multi-file.expanded .multi-file-head": "展开的文件卡头部底部横向分隔线",
   ".stash-record": "临时保存记录底部横向分隔线",
-  ".merge-guide-actions": "指引操作条顶部横向分隔线",
   ".conflict-sidebar": "冲突侧栏右分隔线（分区线，不是行边界）",
   ".three-way-title": "三方合并表头底部横向分隔线",
   ".three-way-foot": "三方合并表尾顶部横向分隔线",
@@ -388,9 +381,6 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".cr-ruler": "总览标尺与冲突流之间的竖向分隔线；刻度本身是按钮，用实心色块标示",
 
   // --- components.css：语义色混合的容器描边（不是控件边界） ---
-  ".merge-guide-branch.target": "目标分支卡 accent 混合描边，状态强调",
-  ".merge-guide-result.ready": "结果块就绪态 accent 混合描边，状态强调",
-  ".merge-guide-result.blocked": "结果块受阻态 warning 混合描边，状态强调",
 
   // --- layout.css ---
   ".topbar": "标题栏底部横向分区线",
@@ -568,7 +558,6 @@ describe("控件边界策略（默认拒绝）", () => {
       ".file-list:focus-visible",
       ".diff-scroll:focus-visible",
       ".history-list:focus-visible",
-      ".merge-guide-select select:focus-visible",
       ".three-way-pane.result textarea:focus-visible",
     ]) {
       const body = ruleBody(components, selector);

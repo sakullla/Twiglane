@@ -47,6 +47,7 @@
   --weight-normal: 400;
   --weight-medium: 500;
   --weight-semibold: 600;
+  --weight-bold: 700;
   --leading-tight: 1.25;
   --leading-normal: 1.45;
   --leading-relaxed: 1.65;
@@ -96,8 +97,8 @@
   --control-border: #7e8c83;
   --control-border-hover: #68766d;
   --fg: #12211a;
-  --fg-muted: #4e5f57;
-  --fg-subtle: #5e6d64;
+  --fg-muted: #44544c;
+  --fg-subtle: #56655c;
   /* 弱化正文：已完成/已标记等非活动行的主文字（如冲突侧栏的已标记文件）。
      整行或文字 opacity 会把前景与所在表面按 α 混合，因此弱化不走 opacity，改用本令牌：
      取值已把余量算进来，即使再叠加元素级 0.75 淡化，对 --surface / --surface-2 仍 ≥4.5:1。 */
@@ -190,8 +191,8 @@
   --control-border: #67776e;
   --control-border-hover: #75857c;
   --fg: #e7efe9;
-  --fg-muted: #9dada4;
-  --fg-subtle: #84948a;
+  --fg-muted: #aab8b0;
+  --fg-subtle: #919f97;
   /* 弱化正文：与浅色主题同义，取值按 0.75 元素级淡化的合成结果标定。 */
   --fg-dimmed: #a8b7ae;
   --accent: #43d69a;

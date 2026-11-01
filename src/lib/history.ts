@@ -68,3 +68,52 @@ export function stashPathBadge(kind: "tracked" | "untracked" | "ignored", includ
   if (kind === "ignored") return "忽略不保存";
   return includeUntracked ? "会一并保存" : "不保存";
 }
+
+export interface RefPill {
+  kind: "branch" | "remote" | "tag" | "head";
+  name: string;
+  current: boolean;
+  /** 同名远程分支指向同一提交时合并成一枚胶囊，这里记远程名（例如 origin）。 */
+  remote: string | null;
+  /** 完整说明，作为可访问名称与悬停提示。 */
+  label: string;
+}
+
+const PILL_ORDER: Record<RefPill["kind"], number> = { head: 0, branch: 1, tag: 2, remote: 3 };
+
+/** 把提交上的引用整理成胶囊：本地分支与指向同一提交的同名远程分支合成一枚，当前分支排最前。 */
+export function refPills(labels: { name: string; kind: string; current: boolean }[]): RefPill[] {
+  const remotes = labels.filter((label) => label.kind === "remote");
+  const absorbed = new Set<string>();
+  const pills: RefPill[] = [];
+  for (const label of labels) {
+    if (label.kind !== "branch") continue;
+    const twin = remotes.find((remote) => remote.name.slice(remote.name.indexOf("/") + 1) === label.name);
+    if (twin) absorbed.add(twin.name);
+    const remote = twin ? twin.name.slice(0, twin.name.indexOf("/")) : null;
+    const base = refLabel("branch", label.name, label.current);
+    pills.push({
+      kind: "branch",
+      name: label.name,
+      current: label.current,
+      remote,
+      label: remote ? `${base}，与远程 ${twin?.name} 一致` : base,
+    });
+  }
+  for (const label of labels) {
+    if (label.kind === "branch" || absorbed.has(label.name)) continue;
+    if (label.kind === "remote" && label.name.endsWith("/HEAD")) continue;
+    const kind = label.kind === "remote" || label.kind === "tag" || label.kind === "head" ? label.kind : "branch";
+    pills.push({ kind, name: label.name, current: label.current, remote: null, label: refLabel(label.kind, label.name, label.current) });
+  }
+  return pills.sort((left, right) => Number(right.current) - Number(left.current) || PILL_ORDER[left.kind] - PILL_ORDER[right.kind]);
+}
+
+/** 提交说明里除去标题行之后的正文（%B 含标题，详情区已单独显示标题）。 */
+export function commitBodyRest(body: string, summary: string): string {
+  const text = body.replace(/\r\n/g, "\n").trim();
+  if (!text) return "";
+  const [first, ...rest] = text.split("\n");
+  if (first.trim() !== summary.trim()) return text;
+  return rest.join("\n").trim();
+}

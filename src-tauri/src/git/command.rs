@@ -480,11 +480,21 @@ pub fn check_tag_command(git: &Path, root: &Path, name: &str) -> (PathBuf, Vec<O
     (git.to_path_buf(), args)
 }
 
-pub fn create_tag_command(git: &Path, root: &Path, name: &str, target: &str, message: &str) -> (PathBuf, Vec<OsString>) {
+pub fn create_tag_command(
+    git: &Path,
+    root: &Path,
+    name: &str,
+    target: &str,
+    message: &str,
+) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, false);
     args.push(OsString::from("tag"));
     if !message.trim().is_empty() {
-        args.extend([OsString::from("-a"), OsString::from("-m"), OsString::from(message)]);
+        args.extend([
+            OsString::from("-a"),
+            OsString::from("-m"),
+            OsString::from(message),
+        ]);
     }
     args.extend([
         OsString::from("--"),
@@ -505,7 +515,12 @@ pub fn delete_tag_command(git: &Path, root: &Path, name: &str) -> (PathBuf, Vec<
     (git.to_path_buf(), args)
 }
 
-pub fn push_tag_command(git: &Path, root: &Path, remote: &str, name: &str) -> (PathBuf, Vec<OsString>) {
+pub fn push_tag_command(
+    git: &Path,
+    root: &Path,
+    remote: &str,
+    name: &str,
+) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, false);
     args.extend([
         OsString::from("push"),
@@ -845,6 +860,95 @@ pub fn merge_no_commit_command(git: &Path, root: &Path, branch: &str) -> (PathBu
         OsString::from("--no-edit"),
         OsString::from("--"),
         OsString::from(branch),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn merge_ff_only_command(git: &Path, root: &Path, branch: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("merge"),
+        OsString::from("--ff-only"),
+        OsString::from("--no-edit"),
+        OsString::from("--"),
+        OsString::from(branch),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// `target..source` 上待带入的提交（最新在前），格式与历史列表一致。
+pub fn merge_incoming_log_command(
+    git: &Path,
+    root: &Path,
+    target: &str,
+    source: &str,
+    limit: u32,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("log"),
+        OsString::from("--date=unix"),
+        history_format(),
+        OsString::from(format!("--max-count={limit}")),
+        OsString::from(format!("{target}..{source}")),
+        OsString::from("--"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// 输出 `<只在 target 的提交数>\t<只在 source 的提交数>`。
+pub fn merge_divergence_command(
+    git: &Path,
+    root: &Path,
+    target: &str,
+    source: &str,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("rev-list"),
+        OsString::from("--left-right"),
+        OsString::from("--count"),
+        OsString::from(format!("{target}...{source}")),
+        OsString::from("--"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// 来源相对共同祖先改了哪些文件（即合并会带入的文件）。
+pub fn merge_incoming_files_command(
+    git: &Path,
+    root: &Path,
+    target: &str,
+    source: &str,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("diff"),
+        OsString::from("--name-status"),
+        OsString::from("-z"),
+        OsString::from("--find-renames"),
+        OsString::from(format!("{target}...{source}")),
+        OsString::from("--"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// 不碰工作区与索引的试合并（Git 2.38+）：退出码 0 无冲突、1 有冲突，其余视为无法预测。
+pub fn merge_tree_command(
+    git: &Path,
+    root: &Path,
+    target: &str,
+    source: &str,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("merge-tree"),
+        OsString::from("--write-tree"),
+        OsString::from("--name-only"),
+        OsString::from("--no-messages"),
+        OsString::from("-z"),
+        OsString::from(target),
+        OsString::from(source),
     ]);
     (git.to_path_buf(), args)
 }

@@ -380,15 +380,15 @@ pub async fn save_stash(
                 .with_generation(generation),
         );
     }
-    let state = load_stash_state(
+    let state = settle_read!(backend, &root, generation, |current| load_stash_state(
         backend,
         &root,
         &git.path,
         include_untracked,
-        generation,
+        current,
         internal_request_id(),
     )
-    .await?;
+    .await)?;
     let oid = state
         .records
         .first()
@@ -419,15 +419,20 @@ pub async fn apply_stash(
     let outcome = apply_in_guard(&mut guard, backend, &git.path, &root, &oid).await;
     let generation = guard.finish();
     let applied = outcome.map_err(|error| attach_generation(error, generation))?;
-    let snapshot = read_status(backend, &root, generation, internal_request_id()).await?;
-    let records = list_stashes(
-        backend,
-        &root,
-        &git.path,
-        snapshot.generation,
-        internal_request_id(),
-    )
-    .await?;
+    let (snapshot, records) = settle_read!(backend, &root, generation, |current| {
+        match read_status(backend, &root, current, internal_request_id()).await {
+            Ok(snapshot) => list_stashes(
+                backend,
+                &root,
+                &git.path,
+                snapshot.generation,
+                internal_request_id(),
+            )
+            .await
+            .map(|records| (snapshot, records)),
+            Err(error) => Err(error),
+        }
+    })?;
     if !records.iter().any(|record| record.oid == oid) {
         return Err(AppError::new(
             "stash_lost",
@@ -486,15 +491,15 @@ pub async fn delete_stash(
     let outcome = delete_in_guard(&mut guard, &git.path, &root, &oid).await;
     let generation = guard.finish();
     outcome.map_err(|error| attach_generation(error, generation))?;
-    load_stash_state(
+    settle_read!(backend, &root, generation, |current| load_stash_state(
         backend,
         &root,
         &git.path,
         false,
-        generation,
+        current,
         internal_request_id(),
     )
-    .await
+    .await)
 }
 
 async fn browse_commits(
@@ -1151,7 +1156,7 @@ fn log_bytes(output: &ProcessOutput) -> Result<Vec<u8>, AppError> {
     ))
 }
 
-fn parse_history_records(bytes: &[u8]) -> Result<Vec<HistoryCommit>, AppError> {
+pub(crate) fn parse_history_records(bytes: &[u8]) -> Result<Vec<HistoryCommit>, AppError> {
     if bytes.is_empty() {
         return Ok(Vec::new());
     }
@@ -1351,7 +1356,7 @@ fn attach_labels(commits: &mut [HistoryCommit], labels: &HashMap<String, Vec<His
     }
 }
 
-fn parse_name_status(bytes: &[u8]) -> Result<Vec<CommitFileChange>, AppError> {
+pub(crate) fn parse_name_status(bytes: &[u8]) -> Result<Vec<CommitFileChange>, AppError> {
     if bytes.is_empty() {
         return Ok(Vec::new());
     }
@@ -2098,6 +2103,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(files.state, "empty_repository");
+    }
+
+    /// 写后读取遇到 stale（文件监视器在写锁释放后推高 generation）时，后端用最新
+    /// generation 重读，不把 stale 交给前端——否则前端会把已成功的写操作再执行一次。
+    #[tokio::test]
+    async fn post_write_reads_settle_instead_of_reporting_stale() {
+        let fixture = crate::test_support::git_fixture("settle-read");
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        let backend = fixture.backend();
+        let root = canonical_existing(&repo).unwrap();
+        let start = generation(&backend, &root);
+        let mut seen = Vec::new();
+        let result: Result<u64, AppError> = settle_read!(&backend, &root, start, |current| {
+            seen.push(current);
+            if seen.len() < 3 {
+                backend.scheduler.bump_generation(&repo_key(&root));
+                Err(AppError::new("stale", "changed"))
+            } else {
+                Ok(current)
+            }
+        });
+        assert_eq!(result.unwrap(), start + 2);
+        assert_eq!(seen, vec![start, start + 1, start + 2]);
+        let other: Result<u64, AppError> =
+            settle_read!(&backend, &root, start, |_current| Err(AppError::new("boom", "x")));
+        assert_eq!(other.unwrap_err().code, "boom");
     }
 
     #[tokio::test]

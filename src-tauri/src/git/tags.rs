@@ -76,7 +76,7 @@ pub async fn create_tag(
     if scheduled.output.exit_code != 0 {
         return Err(tag_failure("tag_create_failed", &scheduled.output, scheduled.generation, "没有创建标签。"));
     }
-    load_tags(backend, &root, scheduled.generation, internal_request_id()).await
+    settle_read!(backend, &root, scheduled.generation, |current| load_tags(backend, &root, current, internal_request_id()).await)
 }
 
 pub async fn delete_tag(
@@ -112,7 +112,7 @@ pub async fn delete_tag(
     if scheduled.output.exit_code != 0 {
         return Err(tag_failure("tag_delete_failed", &scheduled.output, scheduled.generation, "没有删除标签。"));
     }
-    load_tags(backend, &root, scheduled.generation, internal_request_id()).await
+    settle_read!(backend, &root, scheduled.generation, |current| load_tags(backend, &root, current, internal_request_id()).await)
 }
 
 pub async fn push_tag(
@@ -146,7 +146,7 @@ pub async fn push_tag(
     if scheduled.output.exit_code != 0 {
         return Err(tag_failure("tag_push_failed", &scheduled.output, scheduled.generation, "没有推送标签，远程未被强行改写。"));
     }
-    load_tags(backend, &root, scheduled.generation, internal_request_id()).await
+    settle_read!(backend, &root, scheduled.generation, |current| load_tags(backend, &root, current, internal_request_id()).await)
 }
 
 async fn load_tags(

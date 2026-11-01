@@ -255,10 +255,18 @@ export const api = {
     invoke<StashApplyResult>("apply_stash", { path, oid, generation, requestId }),
   deleteStash: (path: string, oid: string, confirm: boolean, generation: number, requestId: number) =>
     invoke<StashState>("delete_stash", { path, oid, confirm, generation, requestId }),
-  mergePreview: (path: string, source: string, generation: number, requestId: number) =>
-    invoke<MergePreview>("merge_preview", { path, source, generation, requestId }),
-  startMerge: (path: string, source: string, generation: number, requestId: number) =>
-    invoke<MergeSession>("start_merge", { path, source, generation, requestId }),
+  /** 只读预览：target 为空时合并到当前分支。 */
+  mergePreview: (path: string, source: string, target: string | null, generation: number, requestId: number) =>
+    invoke<MergePreview>("merge_preview", { path, source, target, generation, requestId }),
+  /** target 不是当前分支时后端先切换过去；mode 为 merge（创建合并提交）或 ff-only（快进）。 */
+  startMerge: (
+    path: string,
+    source: string,
+    target: string | null,
+    mode: "merge" | "ff-only",
+    generation: number,
+    requestId: number,
+  ) => invoke<MergeSession>("start_merge", { path, source, target, mode, generation, requestId }),
   mergeSession: (path: string, generation: number, requestId: number) =>
     invoke<MergeSession>("merge_session", { path, generation, requestId }),
   conflictView: (path: string, relative: string, generation: number, requestId: number) =>

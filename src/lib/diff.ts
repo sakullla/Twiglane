@@ -279,3 +279,42 @@ export function createTextDiff(path: string, before: string, after: string, gene
     totalLines: lines.length,
   };
 }
+
+/** 去掉 Git 文件头后的可读行，origin 记录每行在原始列表里的下标（按块暂存按原始下标找块）。 */
+export interface VisibleDiffLines<T extends { kind: string; text: string }> {
+  lines: T[];
+  origin: number[];
+  /** 被隐藏的元信息里对读者有意义的部分（权限、重命名），只在没有代码行时展示。 */
+  meta: string[];
+}
+
+export function visibleDiffLines<T extends { kind: string; text: string }>(all: T[]): VisibleDiffLines<T> {
+  const lines: T[] = [];
+  const origin: number[] = [];
+  const meta: string[] = [];
+  all.forEach((line, index) => {
+    if (line.kind === "meta") {
+      const text = line.text;
+      if (/^(old mode|new mode|rename from|rename to|similarity index|new file mode|deleted file mode)/.test(text)) meta.push(text);
+      return;
+    }
+    lines.push(line);
+    origin.push(index);
+  });
+  return { lines, origin, meta };
+}
+
+/** 把 `@@ -68,6 +68,7 @@ fn name` 变成人能读的块标题：「第 68 行」+ 所在函数。 */
+export function hunkCaption(text: string): { at: string; context: string } {
+  const match = /^@@+ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@+ ?(.*)$/.exec(text);
+  if (!match) return { at: text, context: "" };
+  const newCount = match[4] === undefined ? 1 : Number(match[4]);
+  // 新侧没有行（整段删除）时按旧侧行号描述。
+  const removed = newCount === 0;
+  const start = Number(removed ? match[1] : match[3]);
+  const count = removed ? (match[2] === undefined ? 1 : Number(match[2])) : newCount;
+  const prefix = removed ? "原" : "";
+  const first = Math.max(start, 1);
+  const at = count <= 1 ? `${prefix}第 ${first} 行` : `${prefix}第 ${first}–${first + count - 1} 行`;
+  return { at, context: match[5].trim() };
+}

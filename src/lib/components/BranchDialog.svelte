@@ -21,6 +21,8 @@
     onOpenHistory?: (query: string) => void;
     /** 把某个分支合并到当前分支：关闭本 modal，打开分支合并并预选来源。 */
     onMergeBranch?: (name: string) => void;
+    /** 把当前分支合并到某个本地分支：打开分支合并并预选目标。 */
+    onMergeInto?: (name: string) => void;
     nextId: () => number;
   }
 
@@ -34,6 +36,7 @@
     onNotice,
     onOpenHistory,
     onMergeBranch,
+    onMergeInto,
     nextId,
   }: Props = $props();
 
@@ -217,6 +220,15 @@
         icon: "merge",
         disabledReason: currentReason ?? busy,
         run: () => onMergeBranch?.(branch.name),
+      });
+    }
+    if (onMergeInto && !branch.remote && current.name) {
+      entries.push({
+        id: "merge-into",
+        label: `把 ${current.name} 合并到此分支…`,
+        icon: "merge",
+        disabledReason: currentReason ?? elsewhere ?? busy,
+        run: () => onMergeInto?.(branch.name),
       });
     }
     entries.push({ separator: true });

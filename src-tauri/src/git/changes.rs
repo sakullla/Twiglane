@@ -164,7 +164,13 @@ pub async fn stage_files(
         )
         .with_generation(scheduled.generation));
     }
-    read_status(backend, &root, scheduled.generation, internal_request_id()).await
+    settle_read!(backend, &root, scheduled.generation, |current| read_status(
+        backend,
+        &root,
+        current,
+        internal_request_id()
+    )
+    .await)
 }
 
 pub async fn unstage_files(
@@ -218,7 +224,13 @@ pub async fn unstage_files(
         )
         .with_generation(scheduled.generation));
     }
-    read_status(backend, &root, scheduled.generation, internal_request_id()).await
+    settle_read!(backend, &root, scheduled.generation, |current| read_status(
+        backend,
+        &root,
+        current,
+        internal_request_id()
+    )
+    .await)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -359,7 +371,13 @@ pub async fn stage_hunks(
         ));
     }
     let generation = guard.finish();
-    read_status(backend, &root, generation, internal_request_id()).await
+    settle_read!(backend, &root, generation, |current| read_status(
+        backend,
+        &root,
+        current,
+        internal_request_id()
+    )
+    .await)
 }
 
 pub async fn commit_index(
@@ -421,17 +439,19 @@ pub async fn commit_index(
         return Err(classify_commit(&root, &scheduled.output).with_generation(scheduled.generation));
     }
     let _ = backend.store.save_draft(&repo_key(&root), "");
-    let (head_program, head_args) = head_command(&git.path, &root);
-    let head = run_git(
-        backend,
-        &repo_key(&root),
-        JobKind::Read,
-        internal_request_id(),
-        head_program,
-        head_args,
-        Some(scheduled.generation),
-    )
-    .await?;
+    let head = settle_read!(backend, &root, scheduled.generation, |current| {
+        let (head_program, head_args) = head_command(&git.path, &root);
+        run_git(
+            backend,
+            &repo_key(&root),
+            JobKind::Read,
+            internal_request_id(),
+            head_program,
+            head_args,
+            Some(current),
+        )
+        .await
+    })?;
     if head.output.exit_code != 0 {
         return Err(git_failure(
             "commit_unverified",
@@ -443,7 +463,13 @@ pub async fn commit_index(
     let oid = String::from_utf8_lossy(&head.output.stdout)
         .trim()
         .to_string();
-    let snapshot = read_status(backend, &root, head.generation, internal_request_id()).await?;
+    let snapshot = settle_read!(backend, &root, head.generation, |current| read_status(
+        backend,
+        &root,
+        current,
+        internal_request_id()
+    )
+    .await)?;
     let branch = snapshot
         .branch
         .name

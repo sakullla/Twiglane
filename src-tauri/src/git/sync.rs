@@ -7,11 +7,10 @@ use crate::git::advice::{classify_problem, problem_error, remote_timeout};
 use crate::git::changes::commit_index;
 use crate::git::command::{
     branch_list_command, check_branch_command, clone_command, create_branch_at_command,
-    create_branch_command, rename_branch_command,
-    delete_branch_command, delete_remote_branch_command, delete_remote_tracking_command,
-    fetch_command, publish_command, pull_ff_command, push_command, remote_add_command,
-    remote_set_url_command, remote_verbose_command, set_upstream_to_command, status_command,
-    switch_command, switch_track_command,
+    create_branch_command, delete_branch_command, delete_remote_branch_command,
+    delete_remote_tracking_command, fetch_command, publish_command, pull_ff_command, push_command,
+    remote_add_command, remote_set_url_command, remote_verbose_command, rename_branch_command,
+    set_upstream_to_command, status_command, switch_command, switch_track_command,
 };
 use crate::git::gate::action_key;
 use crate::git::ops::{
@@ -146,8 +145,10 @@ pub async fn add_remote(
     if scheduled.output.exit_code != 0 {
         return Err(finish_remote("remote_failed", &scheduled, "没有添加远程。"));
     }
-    confirm_remote_url(backend, &root, &git.path, name, url, scheduled.generation).await?;
-    load_remote_state(backend, &root, scheduled.generation, internal_request_id()).await
+    settle_read!(backend, &root, scheduled.generation, |current| confirm_remote_url(backend, &root, &git.path, name, url, current).await)?;
+    settle_read!(backend, &root, scheduled.generation, |current| {
+        load_remote_state(backend, &root, current, internal_request_id()).await
+    })
 }
 
 pub async fn set_remote_url(
@@ -190,8 +191,10 @@ pub async fn set_remote_url(
             "没有修改远程地址。",
         ));
     }
-    confirm_remote_url(backend, &root, &git.path, name, url, scheduled.generation).await?;
-    load_remote_state(backend, &root, scheduled.generation, internal_request_id()).await
+    settle_read!(backend, &root, scheduled.generation, |current| confirm_remote_url(backend, &root, &git.path, name, url, current).await)?;
+    settle_read!(backend, &root, scheduled.generation, |current| {
+        load_remote_state(backend, &root, current, internal_request_id()).await
+    })
 }
 
 pub async fn fetch_remote(
@@ -230,7 +233,13 @@ pub async fn fetch_remote(
         ));
     }
     backend.remote_checks.note(&key, now_ms());
-    snapshot_at(backend, &root, scheduled.generation, internal_request_id()).await
+    settle_read!(backend, &root, scheduled.generation, |current| snapshot_at(
+        backend,
+        &root,
+        current,
+        internal_request_id()
+    )
+    .await)
 }
 
 pub async fn pull_fast_forward(
@@ -272,7 +281,13 @@ pub async fn pull_fast_forward(
         ));
     }
     backend.remote_checks.note(&key, now_ms());
-    snapshot_at(backend, &root, scheduled.generation, internal_request_id()).await
+    settle_read!(backend, &root, scheduled.generation, |current| snapshot_at(
+        backend,
+        &root,
+        current,
+        internal_request_id()
+    )
+    .await)
 }
 
 pub async fn push_branch(
@@ -372,7 +387,13 @@ pub async fn associate_upstream(
         ));
     }
     backend.remote_checks.note(&key, now_ms());
-    let after = snapshot_at(backend, &root, scheduled.generation, internal_request_id()).await?;
+    let after = settle_read!(backend, &root, scheduled.generation, |current| snapshot_at(
+        backend,
+        &root,
+        current,
+        internal_request_id()
+    )
+    .await)?;
     if after.branch.upstream.as_deref() != Some(upstream.as_str()) {
         return Err(AppError::new(
             "upstream_unconfirmed",
@@ -491,7 +512,9 @@ pub async fn create_branch(
         }
         return Err(finish_remote("branch_failed", &scheduled, "没有创建分支。"));
     }
-    load_branch_state(backend, &root, scheduled.generation, internal_request_id()).await
+    settle_read!(backend, &root, scheduled.generation, |current| {
+        load_branch_state(backend, &root, current, internal_request_id()).await
+    })
 }
 
 /// 从指定起点创建分支，可选创建后立即切换。
@@ -538,25 +561,34 @@ pub async fn create_branch_from(
         .await?;
         if scheduled.output.exit_code != 0 {
             let text = output_text(&scheduled.output);
-            if text.to_ascii_lowercase().contains("already exists") || text.contains("已经存在") {
+            if text.to_ascii_lowercase().contains("already exists") || text.contains("已经存在")
+            {
                 return Err(duplicate_branch().with_generation(scheduled.generation));
             }
             return Err(finish_remote("branch_failed", &scheduled, "没有创建分支。"));
         }
-        load_branch_state(backend, &root, scheduled.generation, internal_request_id()).await?
+        settle_read!(backend, &root, scheduled.generation, |current| {
+            load_branch_state(backend, &root, current, internal_request_id()).await
+        })?
     };
     if !checkout {
         return Ok(created);
     }
-    switch_branch(backend, path, name, created.generation, internal_request_id())
-        .await
-        .map_err(|error| {
-            AppError::new(
-                error.code,
-                format!("分支 {name} 已创建，但没有切换过去：{}", error.message),
-            )
-            .with_generation(error.generation.unwrap_or(created.generation))
-        })
+    switch_branch(
+        backend,
+        path,
+        name,
+        created.generation,
+        internal_request_id(),
+    )
+    .await
+    .map_err(|error| {
+        AppError::new(
+            error.code,
+            format!("分支 {name} 已创建，但没有切换过去：{}", error.message),
+        )
+        .with_generation(error.generation.unwrap_or(created.generation))
+    })
 }
 
 /// 起点：已知分支名原样使用；否则必须是 7–40 位十六进制提交标识。
@@ -599,8 +631,10 @@ pub async fn rename_branch(
         .iter()
         .find(|branch| !branch.remote && branch.name == old)
     else {
-        return Err(AppError::new("branch_missing", "没有这个本地分支，未重命名。")
-            .with_generation(current.generation));
+        return Err(
+            AppError::new("branch_missing", "没有这个本地分支，未重命名。")
+                .with_generation(current.generation),
+        );
     };
     if let Some(worktree) = &branch.worktree {
         if !branch.current && !same_worktree(worktree, &root) {
@@ -632,9 +666,15 @@ pub async fn rename_branch(
     )
     .await?;
     if scheduled.output.exit_code != 0 {
-        return Err(finish_remote("branch_rename_failed", &scheduled, "没有重命名分支。"));
+        return Err(finish_remote(
+            "branch_rename_failed",
+            &scheduled,
+            "没有重命名分支。",
+        ));
     }
-    load_branch_state(backend, &root, scheduled.generation, internal_request_id()).await
+    settle_read!(backend, &root, scheduled.generation, |current| {
+        load_branch_state(backend, &root, current, internal_request_id()).await
+    })
 }
 
 pub async fn switch_branch(
@@ -683,7 +723,9 @@ pub async fn switch_branch(
             "没有切换分支，工作区保持原样。",
         ));
     }
-    load_branch_state(backend, &root, scheduled.generation, internal_request_id()).await
+    settle_read!(backend, &root, scheduled.generation, |current| {
+        load_branch_state(backend, &root, current, internal_request_id()).await
+    })
 }
 
 pub async fn delete_branch(
@@ -730,12 +772,15 @@ pub async fn delete_branch(
             if forced.output.exit_code != 0 {
                 return Err(finish_remote("delete_failed", &forced, "没有删除分支。"));
             }
-            return load_branch_state(backend, &root, forced.generation, internal_request_id())
-                .await;
+            return settle_read!(backend, &root, forced.generation, |current| {
+                load_branch_state(backend, &root, current, internal_request_id()).await
+            });
         }
         return Err(finish_remote("delete_failed", &scheduled, "没有删除分支。"));
     }
-    load_branch_state(backend, &root, scheduled.generation, internal_request_id()).await
+    settle_read!(backend, &root, scheduled.generation, |current| {
+        load_branch_state(backend, &root, current, internal_request_id()).await
+    })
 }
 
 pub async fn delete_remote_branch(
@@ -780,7 +825,9 @@ pub async fn delete_remote_branch(
         args,
     )
     .await?;
-    load_branch_state(backend, &root, pruned.generation, internal_request_id()).await
+    settle_read!(backend, &root, pruned.generation, |current| {
+        load_branch_state(backend, &root, current, internal_request_id()).await
+    })
 }
 
 async fn push_after_commit(
@@ -827,7 +874,13 @@ async fn push_with_upstream(
         ));
     }
     backend.remote_checks.note(&repo_key(root), now_ms());
-    snapshot_at(backend, root, scheduled.generation, internal_request_id()).await
+    settle_read!(backend, root, scheduled.generation, |current| snapshot_at(
+        backend,
+        root,
+        current,
+        internal_request_id()
+    )
+    .await)
 }
 
 async fn publish_to(
@@ -867,7 +920,13 @@ async fn publish_to(
         ));
     }
     backend.remote_checks.note(&repo_key(root), now_ms());
-    snapshot_at(backend, root, scheduled.generation, internal_request_id()).await
+    settle_read!(backend, root, scheduled.generation, |current| snapshot_at(
+        backend,
+        root,
+        current,
+        internal_request_id()
+    )
+    .await)
 }
 
 async fn resolve_remote(
@@ -2532,9 +2591,20 @@ mod start_point_tests {
     fn start_point_accepts_known_branches_and_commit_ids_only() {
         let known = state(&[("main", false), ("origin/main", true)]);
         assert_eq!(validate_start_point(&known, "main").unwrap(), "main");
-        assert_eq!(validate_start_point(&known, "origin/main").unwrap(), "origin/main");
+        assert_eq!(
+            validate_start_point(&known, "origin/main").unwrap(),
+            "origin/main"
+        );
         assert_eq!(validate_start_point(&known, "ABCDEF1").unwrap(), "abcdef1");
-        for bad in ["--orphan", "HEAD~1", "main^", "abc", "deadbeef; rm", "", "nope/branch"] {
+        for bad in [
+            "--orphan",
+            "HEAD~1",
+            "main^",
+            "abc",
+            "deadbeef; rm",
+            "",
+            "nope/branch",
+        ] {
             let error = validate_start_point(&known, bad).unwrap_err();
             assert_eq!(error.code, "branch_start_invalid", "{bad}");
         }

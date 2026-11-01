@@ -115,8 +115,8 @@ describe("Tauri 命令参数", () => {
     await api.saveStash("/repo", true, "wip", 8, 25);
     await api.applyStash("/repo", "abc123", 8, 26);
     await api.deleteStash("/repo", "abc123", true, 8, 27);
-    await api.mergePreview("/repo", "feature", 8, 28);
-    await api.startMerge("/repo", "feature", 8, 29);
+    await api.mergePreview("/repo", "feature", "main", 8, 28);
+    await api.startMerge("/repo", "feature", "main", "ff-only", 8, 29);
     await api.mergeSession("/repo", 8, 30);
     await api.conflictView("/repo", "my file.txt", 8, 31);
     await api.resolveConflict("/repo", "my file.txt", "text", "final\n", 8, 32);
@@ -185,12 +185,15 @@ describe("Tauri 命令参数", () => {
     expect(invoke).toHaveBeenNthCalledWith(9, "merge_preview", {
       path: "/repo",
       source: "feature",
+      target: "main",
       generation: 8,
       requestId: 28,
     });
     expect(invoke).toHaveBeenNthCalledWith(10, "start_merge", {
       path: "/repo",
       source: "feature",
+      target: "main",
+      mode: "ff-only",
       generation: 8,
       requestId: 29,
     });

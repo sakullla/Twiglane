@@ -686,7 +686,16 @@ async fn create_tag(
     generation: u64,
     request_id: u64,
 ) -> Result<TagState, AppError> {
-    crate::git::tags::create_tag(state.inner(), &path, &name, &target, &message, generation, request_id).await
+    crate::git::tags::create_tag(
+        state.inner(),
+        &path,
+        &name,
+        &target,
+        &message,
+        generation,
+        request_id,
+    )
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -847,10 +856,19 @@ async fn merge_preview(
     state: State<'_, Arc<Backend>>,
     path: String,
     source: String,
+    target: Option<String>,
     generation: u64,
     request_id: u64,
 ) -> Result<MergePreview, AppError> {
-    crate::git::resolve::merge_preview(state.inner(), &path, &source, generation, request_id).await
+    crate::git::resolve::merge_preview(
+        state.inner(),
+        &path,
+        &source,
+        target.as_deref(),
+        generation,
+        request_id,
+    )
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -858,10 +876,21 @@ async fn start_merge(
     state: State<'_, Arc<Backend>>,
     path: String,
     source: String,
+    target: Option<String>,
+    mode: Option<String>,
     generation: u64,
     request_id: u64,
 ) -> Result<MergeSession, AppError> {
-    crate::git::resolve::start_merge(state.inner(), &path, &source, generation, request_id).await
+    crate::git::resolve::start_merge(
+        state.inner(),
+        &path,
+        &source,
+        target.as_deref(),
+        mode.as_deref(),
+        generation,
+        request_id,
+    )
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1074,6 +1103,41 @@ mod ipc_contract {
     use crate::git::ops::repo_key;
 
     const API_SOURCE: &str = include_str!("../../src/lib/api.ts");
+    const LIB_SOURCE: &str = include_str!("lib.rs");
+    const BUILD_SOURCE: &str = include_str!("../build.rs");
+    const CAPABILITIES: &str = include_str!("../capabilities/default.json");
+
+    fn handler_commands() -> Vec<String> {
+        let start = LIB_SOURCE
+            .find("generate_handler![")
+            .expect("invoke handler")
+            + "generate_handler![".len();
+        let end = start + LIB_SOURCE[start..].find(']').expect("handler end");
+        LIB_SOURCE[start..end]
+            .split(',')
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
+
+    /// 注册到 invoke handler 的命令必须同时进入 app manifest 与主窗口 capability，
+    /// 否则前端调用会在运行时报 `Command xxx not allowed by ACL`。
+    #[test]
+    fn every_handler_command_is_allowed_by_acl() {
+        let commands = handler_commands();
+        assert!(commands.len() > 40, "{commands:?}");
+        let mut missing = Vec::new();
+        for command in &commands {
+            if !BUILD_SOURCE.contains(&format!("\"{command}\"")) {
+                missing.push(format!("build.rs: {command}"));
+            }
+            let permission = format!("\"allow-{}\"", command.replace('_', "-"));
+            if !CAPABILITIES.contains(&permission) {
+                missing.push(format!("capabilities/default.json: {permission}"));
+            }
+        }
+        assert!(missing.is_empty(), "命令未放行：{missing:#?}");
+    }
 
     fn git(dir: &Path, args: &[&str]) {
         let status = Command::new(crate::test_support::system_git())

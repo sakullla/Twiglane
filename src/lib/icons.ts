@@ -104,6 +104,9 @@ export const ICONS = {
   split: [rect(3, 3, 18, 18, 2), "M12 3v18"],
   rows: [rect(3, 3, 18, 18, 2), "M3 12h18"],
   user: [circle(12, 8, 5), "M20 21a8 8 0 0 0-16 0"],
+  // 左右互换：合并方向对调。
+  swap: ["m16 3 4 4-4 4", "M20 7H4", "m8 21-4-4 4-4", "M4 17h16"],
+  sparkle: ["M12 3v4", "M12 17v4", "M3 12h4", "M17 12h4", "m5.6 5.6 2.8 2.8", "m15.6 15.6 2.8 2.8", "m18.4 5.6-2.8 2.8", "m8.4 15.6-2.8 2.8"],
 } as const;
 
 export type IconName = keyof typeof ICONS;

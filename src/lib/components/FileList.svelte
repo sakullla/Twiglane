@@ -26,7 +26,9 @@
     | { kind: "header"; side: DiffSide | "conflicted"; count: number; paths: string[] }
     | { kind: "row"; row: FileRow };
 
-  const ROW_HEIGHT = 34;
+  /** 每行 44px：文件行实际画 40px、上下各留 2px 呼吸；分组表头用整行，文字贴底，与上一组拉开距离。 */
+  const ROW_HEIGHT = 44;
+  const ROW_GAP = 4;
 
   let {
     files,
@@ -229,7 +231,7 @@
           <div
             class="file-row"
             role="option"
-            style={`top:${top}px;height:${ROW_HEIGHT}px`}
+            style={`top:${top + ROW_GAP / 2}px;height:${ROW_HEIGHT - ROW_GAP}px`}
             aria-selected={isSelected(row)}
             tabindex="-1"
             title={row.originalPath ? `${row.originalPath} → ${row.path}` : row.path}

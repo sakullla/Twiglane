@@ -313,6 +313,23 @@ export interface MergePreview {
   canStart: boolean;
   operation: string;
   note: string;
+  /** 当前所在分支；目标不是它时开始合并会先切换。 */
+  current: string | null;
+  needsSwitch: boolean;
+  /** 来源有、目标没有的提交数（合并会带入）。 */
+  incoming: number;
+  /** 目标有、来源没有的提交数；为 0 时可以快进。 */
+  outgoing: number;
+  upToDate: boolean;
+  fastForward: boolean;
+  commits: HistoryCommit[];
+  files: CommitFileChange[];
+  filesTotal: number;
+  /** clean / conflicts / unknown */
+  conflictCheck: string;
+  conflictPaths: string[];
+  /** dirty / operation / detached / same / remote_target / up_to_date */
+  blocker: string | null;
 }
 
 export interface ConflictEntry {
@@ -333,6 +350,10 @@ export interface MergeSession {
   unresolved: number;
   note: string;
   snapshot: StatusSnapshot;
+  /** 开始前从哪个分支切换过来（目标不是原当前分支时）。 */
+  switchedFrom?: string | null;
+  /** 以快进方式完成，没有创建合并提交。 */
+  fastForwarded?: boolean;
 }
 
 export interface ConflictSide {

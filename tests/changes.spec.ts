@@ -190,7 +190,7 @@ function changedFile(path: string): FileChange {
   };
 }
 
-const ROW_HEIGHT = 16;
+const ROW_HEIGHT = 18;
 
 /** 键盘层挂在 window 上，所以用真实事件派发；tick 保证 Svelte 已把状态刷进 DOM。 */
 async function press(key: string) {
@@ -350,7 +350,7 @@ describe("主工作台", () => {
     expect(pane?.querySelector(".file-list"), "同屏要有文件列表").toBeTruthy();
     expect(pane?.querySelector(".diff"), "同屏要有差异面板").toBeTruthy();
     expect(pane?.querySelectorAll("[data-diff-row]").length).toBeGreaterThanOrEqual(40);
-    // 密度由行高 16px 决定：22px 的行高在 840px 里放不下 40 行。
+    // 密度由行高 18px 决定：22px 的行高在 840px 里放不下 40 行。
     for (const row of document.querySelectorAll<HTMLElement>("[data-diff-row]")) {
       expect(row.style.height).toBe(`${ROW_HEIGHT}px`);
     }
@@ -773,8 +773,8 @@ describe("差异与提交", () => {
     const list = screen.getByRole("listbox", { name: "改动文件" });
     await fireEvent.keyDown(list, { key: "End" });
     expect(selected.path).toBe("item-79.txt");
-    // 分组表头“未暂存的改动”占第 0 行，文件从第 1 行开始；每行 34px。
-    expect(list.scrollTop).toBe(80 * 34);
+    // 分组表头“未暂存的改动”占第 0 行，文件从第 1 行开始；每行 44px。
+    expect(list.scrollTop).toBe(80 * 44);
     await view.rerender(props());
     expect(screen.getByRole("option", { selected: true }).textContent).toContain("item-79.txt");
     expect(screen.queryByText("item-0.txt")).toBeNull();

@@ -135,6 +135,7 @@
   let conflictFocus = $state<string | null>(null);
   /** 从分支菜单「合并到当前分支」进入时预选的来源分支。 */
   let mergeSource = $state<string | null>(null);
+  let mergeTarget = $state<string | null>(null);
   let historyPath = $state<string | null>(null);
   let historyQuery = $state("");
   let taskModal = $state<TaskModal | null>(null);
@@ -413,6 +414,7 @@
     if (closed === "merge") {
       conflictFocus = null;
       mergeSource = null;
+      mergeTarget = null;
       void probeMerge();
     }
   }
@@ -1625,7 +1627,7 @@
     const current = opened;
     if (!current) throw new Error("没有打开的仓库");
     live = "正在合并";
-    const session = await api.startMerge(current.summary.path, source, current.generation, nextId());
+    const session = await api.startMerge(current.summary.path, source, null, "merge", current.generation, nextId());
     applySnapshot(session.snapshot);
     openTask("merge");
     const conflict = session.conflicts[0];
@@ -2093,6 +2095,7 @@
     {opened}
     focusPath={conflictFocus}
     initialSource={mergeSource}
+    initialTarget={mergeTarget}
     disabled={writeLocked}
     {nextId}
     onClose={closeTask}
@@ -2104,6 +2107,10 @@
     onOpenChanges={() => {
       closeTask();
       showChanges();
+    }}
+    onOpenHistory={() => {
+      closeTask();
+      showHistory();
     }}
   />
 {:else if opened && taskModal === "branch"}
@@ -2122,6 +2129,14 @@
     onMergeBranch={(name) => {
       closeTask();
       mergeSource = name;
+      mergeTarget = null;
+      openTask("merge");
+    }}
+    onMergeInto={(name) => {
+      const from = opened?.snapshot.branch.name ?? null;
+      closeTask();
+      mergeSource = from;
+      mergeTarget = name;
       openTask("merge");
     }}
     {nextId}

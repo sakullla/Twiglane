@@ -427,6 +427,24 @@ pub struct MergePreview {
     pub can_start: bool,
     pub operation: String,
     pub note: String,
+    /// 当前所在分支；目标不是它时会先切换。
+    pub current: Option<String>,
+    /// 目标不是当前分支：开始前需要先切换过去。
+    pub needs_switch: bool,
+    /// 来源有、目标没有的提交数（合并会带入）。
+    pub incoming: u32,
+    /// 目标有、来源没有的提交数；为 0 时可以快进。
+    pub outgoing: u32,
+    pub up_to_date: bool,
+    pub fast_forward: bool,
+    pub commits: Vec<HistoryCommit>,
+    pub files: Vec<CommitFileChange>,
+    pub files_total: u32,
+    /// 冲突预测：`clean` / `conflicts` / `unknown`（Git 过旧或无法预测）。
+    pub conflict_check: String,
+    pub conflict_paths: Vec<String>,
+    /// 阻止开始的原因代码：dirty / operation / detached / same / remote_target / up_to_date / worktree。
+    pub blocker: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -451,6 +469,12 @@ pub struct MergeSession {
     pub unresolved: u32,
     pub note: String,
     pub snapshot: StatusSnapshot,
+    /// 开始前从哪个分支切换过来（目标不是原当前分支时）。
+    #[serde(default)]
+    pub switched_from: Option<String>,
+    /// 以快进方式完成，没有创建合并提交。
+    #[serde(default)]
+    pub fast_forwarded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

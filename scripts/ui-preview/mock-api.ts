@@ -181,6 +181,23 @@ function diffFor(path: string, staged: boolean): DiffResponse {
   };
 }
 
+/** 真实后端的差异带 Git 文件头（diff --git / index / --- / +++），预览也带上，界面负责隐藏。 */
+function withHeaders(diff: DiffResponse): DiffResponse {
+  if (diff.binary) return diff;
+  const head: DiffLine[] = [
+    { kind: "meta", text: `diff --git a/${diff.path} b/${diff.path}`, oldNo: null, newNo: null, hunkIndex: null },
+    { kind: "meta", text: "index 833f1f8..b476ae7 100644", oldNo: null, newNo: null, hunkIndex: null },
+    { kind: "meta", text: `--- a/${diff.path}`, oldNo: null, newNo: null, hunkIndex: null },
+    { kind: "meta", text: `+++ b/${diff.path}`, oldNo: null, newNo: null, hunkIndex: null },
+  ];
+  return {
+    ...diff,
+    lines: [...head, ...diff.lines],
+    hunks: diff.hunks.map((hunk) => ({ ...hunk, startLine: hunk.startLine + head.length })),
+    totalLines: diff.totalLines + head.length,
+  };
+}
+
 const authors = ["林知远", "Ada Lovelace", "陈一鸣", "Grace Hopper", "周小满"];
 const summaries = [
   "重做界面：现代化布局与深色模式",
@@ -255,12 +272,14 @@ function stashData(include: boolean) {
   };
 }
 
-let mergeOperation = "merge";
+// 预览默认从「没有进行中的合并」开始；URL 带 ?merge=conflict 时直接进入冲突处理。
+let mergeOperation = new URLSearchParams(location.search).get("merge") === "conflict" ? "merge" : "none";
+let mergeSourceName = "main";
 
 function mergeData() {
   const conflicts = files.filter((item) => item.unmerged).map((item) => ({ path: item.path, kind: "text", summary: "文本" }));
   const active = mergeOperation === "merge";
-  const sourceName = branch.name === "main" ? "feature/modern-ui" : "main";
+  const sourceName = mergeSourceName;
   return {
     generation,
     operation: mergeOperation,
@@ -312,7 +331,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   },
   cancelReads: () => ok(undefined),
   refreshStatus: () => ok(snapshot()),
-  loadDiff: (_repo: string, path: string, staged: boolean) => ok(diffFor(path, staged)),
+  loadDiff: (_repo: string, path: string, staged: boolean) => ok(withHeaders(diffFor(path, staged))),
   stageFiles: (_repo: string, paths: string[]) => {
     files = files.map((item) =>
       paths.includes(item.path) && !item.unmerged
@@ -448,7 +467,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     return ok({
       generation,
       commit,
-      body: "这次提交重新组织了主界面：\n- 顶栏集中同步操作\n- 改动列表分组并支持全部暂存\n- 统一的对话框与提示样式",
+      body: commit.summary + "\n\n这次提交重新组织了主界面：\n- 顶栏集中同步操作\n- 改动列表分组并支持全部暂存\n- 统一的对话框与提示样式",
       root: false,
       merge: commit.parents.length > 1,
       selectedParent: commit.parents[0],
@@ -460,7 +479,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       ],
     });
   },
-  commitFileDiff: (_repo: string, _oid: string, _parent: string, path: string) => ok(diffFor(path, false)),
+  commitFileDiff: (_repo: string, _oid: string, _parent: string, path: string) => ok(withHeaders(diffFor(path, false))),
   stashState: (_repo: string, include: boolean) => ok(stashData(include)),
   saveStash: (_repo: string, include: boolean, message: string) => {
     const oid = "12345678abcdef12345678abcdef12345678abcd";
@@ -479,15 +498,49 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     generation += 1;
     return ok(stashData(false));
   },
-  mergePreview: (_repo: string, source: string) => {
-    const localPaths = files.map((item) => item.path);
-    const canStart = localPaths.length === 0;
-    return ok({ generation, source, target: branch.name, headOid: branch.headOid, dirty: !canStart, localPaths, canStart, operation: mergeOperation, note: canStart ? "工作区干净，可以开始合并。确认前不会写入。" : `工作区有 ${localPaths.length} 处未提交改动。合并前请先提交或临时保存。未开始合并。` });
+  mergePreview: (_repo: string, source: string, target: string | null) => {
+    const into = target ?? branch.name;
+    const localPaths = files.filter((item) => !item.untracked && !item.unmerged).map((item) => item.path);
+    const dirty = localPaths.length > 0 && new URLSearchParams(location.search).get("dirty") === "1";
+    const upToDate = source === "origin/feature/modern-ui";
+    const fastForward = into === "main" && source === "feature/modern-ui";
+    const conflictPaths = source === "main" ? ["src/lib/merge.ts", "src/styles/theme.css"] : [];
+    const blocker = upToDate ? "up_to_date" : dirty ? "dirty" : null;
+    const incoming = upToDate ? 0 : source === "main" ? 6 : 3;
+    return ok({
+      generation, source, target: into, headOid: branch.headOid, dirty, localPaths: dirty ? localPaths : [],
+      canStart: !blocker, operation: "none",
+      note: upToDate ? `${into} 已经包含 ${source} 的全部提交，不需要合并。` : dirty ? `工作区有 ${localPaths.length} 处未提交改动，合并前请先提交或临时保存，避免覆盖。未开始合并。` : into !== branch.name ? `将先切换到 ${into}，再把 ${source} 合并进去。当前没有未提交改动。` : `将把 ${source} 合并到 ${into}。当前没有未提交改动。`,
+      current: branch.name, needsSwitch: into !== branch.name, incoming, outgoing: fastForward ? 0 : 2, upToDate, fastForward,
+      commits: upToDate ? [] : commits.slice(1, 1 + incoming),
+      files: upToDate ? [] : [
+        { path: "src/lib/merge.ts", originalPath: null, status: "modified" },
+        { path: "src/styles/theme.css", originalPath: null, status: "modified" },
+        { path: "src/lib/components/BranchPicker.svelte", originalPath: null, status: "added" },
+        { path: "docs/guide/merge.md", originalPath: "docs/merge.md", status: "renamed" },
+        { path: "src/lib/legacy.ts", originalPath: null, status: "deleted" },
+      ],
+      filesTotal: upToDate ? 0 : 5,
+      conflictCheck: upToDate || fastForward ? "clean" : conflictPaths.length ? "conflicts" : "clean",
+      conflictPaths,
+      blocker,
+    }, 260);
   },
-  startMerge: () => {
-    mergeOperation = "merge";
+  startMerge: (_repo: string, source: string, target: string | null, mode: string) => {
+    const from = branch.name;
+    if (target && target !== branch.name) {
+      for (const item of branches) item.current = !item.remote && item.name === target;
+      branch.name = target;
+    }
     generation += 1;
-    return ok(mergeData());
+    mergeSourceName = source;
+    if (mode === "ff-only") {
+      mergeOperation = "none";
+      return ok({ ...mergeData(), switchedFrom: target && target !== from ? from : null, fastForwarded: true }, 400);
+    }
+    mergeOperation = "merge";
+    if (source !== "main") files = files.filter((item) => !item.unmerged);
+    return ok({ ...mergeData(), switchedFrom: target && target !== from ? from : null, fastForwarded: false }, 400);
   },
   mergeSession: () => ok(mergeData()),
   conflictView: (_repo: string, path: string) => {

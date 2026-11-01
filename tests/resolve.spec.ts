@@ -128,6 +128,7 @@ describe("合并面板", () => {
     branchState.mockReset();
     mergePreview.mockReset();
     startMerge.mockReset();
+    completeMerge.mockReset();
     conflictView.mockReset();
     branchState.mockResolvedValue({ generation: 4, branches: [], snapshot: opened.snapshot });
   });
@@ -180,57 +181,18 @@ describe("合并面板", () => {
     expect(screen.getByRole("button", { name: "中止合并" })).toBeTruthy();
   });
 
-  it("脏工作区先列出路径，确认前不开始合并", async () => {
-    mergeSession.mockResolvedValue(session());
-    branchState.mockResolvedValue({
-      generation: 4,
-      branches: [
-        { name: "main", remote: false, current: true, upstream: null, worktree: null },
-        { name: "feature", remote: false, current: false, upstream: null, worktree: null },
-      ],
-      snapshot: opened.snapshot,
-    });
-    mergePreview.mockResolvedValue({
-      generation: 4,
-      source: "feature",
-      target: "main",
-      headOid: "a".repeat(40),
-      dirty: true,
-      localPaths: ["keep.txt"],
-      canStart: false,
-      operation: "none",
-      note: "工作区有 4 处未提交改动，下面只展示 1 条，还有 3 条未展示。合并前请先提交或临时保存。未开始合并。",
-    });
-    render(MergePanel, {
-      opened,
-      disabled: false,
-      nextId: () => 1,
-      onSnapshot: () => {},
-      onGeneration: () => {},
-      onFailure: () => {},
-      onNotice: () => {},
-      onOpenStash: () => {},
-    });
-    await screen.findByRole("button", { name: "预览合并" });
-    await fireEvent.click(screen.getByRole("button", { name: "预览合并" }));
-    expect(await screen.findByText(/来源 feature，目标 main/)).toBeTruthy();
-    expect(screen.getByRole("list", { name: "本地改动" }).textContent).toContain("keep.txt");
-    expect(screen.getByText(/还有 3 条未展示/)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "确认开始合并" })).toBeNull();
-    expect(startMerge).not.toHaveBeenCalled();
-  });
+  const twoBranches = {
+    generation: 4,
+    branches: [
+      { name: "main", remote: false, current: true, upstream: null, worktree: null },
+      { name: "feature", remote: false, current: false, upstream: null, worktree: null },
+      { name: "origin/main", remote: true, current: false, upstream: null, worktree: null },
+    ],
+    snapshot: opened.snapshot,
+  };
 
-  it("干净工作区写明没有改动，确认后才开始合并", async () => {
-    mergeSession.mockResolvedValue(session());
-    branchState.mockResolvedValue({
-      generation: 4,
-      branches: [
-        { name: "main", remote: false, current: true, upstream: null, worktree: null },
-        { name: "feature", remote: false, current: false, upstream: null, worktree: null },
-      ],
-      snapshot: opened.snapshot,
-    });
-    mergePreview.mockResolvedValue({
+  function previewOf(extra: Record<string, unknown> = {}) {
+    return {
       generation: 5,
       source: "feature",
       target: "main",
@@ -240,8 +202,25 @@ describe("合并面板", () => {
       canStart: true,
       operation: "none",
       note: "将把 feature 合并到 main。当前没有未提交改动。",
-    });
-    startMerge.mockResolvedValue(session({ operation: "merge", note: "正在合并 feature。" }));
+      current: "main",
+      needsSwitch: false,
+      incoming: 2,
+      outgoing: 1,
+      upToDate: false,
+      fastForward: false,
+      commits: [
+        { oid: "c".repeat(40), parents: [], summary: "加上登录页", authorName: "Ada", authorEmail: "a@x", authoredAt: 1, labels: [] },
+      ],
+      files: [{ path: "src/login.ts", originalPath: null, status: "added" }],
+      filesTotal: 1,
+      conflictCheck: "clean",
+      conflictPaths: [],
+      blocker: null,
+      ...extra,
+    };
+  }
+
+  function renderPanel(extra: Record<string, unknown> = {}) {
     render(MergePanel, {
       opened,
       disabled: false,
@@ -251,14 +230,98 @@ describe("合并面板", () => {
       onFailure: () => {},
       onNotice: () => {},
       onOpenStash: () => {},
+      ...extra,
     });
-    await screen.findByRole("button", { name: "预览合并" });
-    await fireEvent.click(screen.getByRole("button", { name: "预览合并" }));
-    expect(await screen.findByText("当前没有未提交改动。")).toBeTruthy();
-    expect(screen.getByText(/来源 feature，目标 main/)).toBeTruthy();
+  }
+
+  it("脏工作区自动预览后列出已跟踪改动，不开始合并", async () => {
+    mergeSession.mockResolvedValue(session());
+    branchState.mockResolvedValue(twoBranches);
+    mergePreview.mockResolvedValue(
+      previewOf({
+        generation: 4,
+        dirty: true,
+        localPaths: ["keep.txt"],
+        canStart: false,
+        blocker: "dirty",
+        note: "工作区有 4 处未提交改动，下面只展示 1 条，还有 3 条未展示。合并前请先提交或临时保存。未开始合并。",
+      }),
+    );
+    renderPanel();
+    expect(await screen.findByText("先处理本地改动")).toBeTruthy();
+    // 默认方向：用主干以外的本地分支更新当前分支；目标是当前分支时不传 target。
+    expect(mergePreview).toHaveBeenCalledWith("/repo", "feature", null, 4, 1);
+    expect(screen.getByRole("list", { name: "本地改动" }).textContent).toContain("keep.txt");
+    expect(screen.getByText(/还有 3 条未展示/)).toBeTruthy();
+    expect(screen.getByText(/未跟踪的新文件不会阻止合并/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /合并到 main|合并/ }).hasAttribute("disabled")).toBe(true);
     expect(startMerge).not.toHaveBeenCalled();
-    await fireEvent.click(screen.getByRole("button", { name: "确认开始合并" }));
-    expect(startMerge).toHaveBeenCalledWith("/repo", "feature", 5, 1);
+  });
+
+  it("无冲突时一次完成：开始合并后直接用填写的说明提交", async () => {
+    mergeSession.mockResolvedValue(session());
+    branchState.mockResolvedValue(twoBranches);
+    mergePreview.mockResolvedValue(previewOf());
+    startMerge.mockResolvedValue(session({ generation: 6, operation: "merge", canAbort: true, canContinue: true, source: "feature" }));
+    completeMerge.mockResolvedValue({ oid: "d".repeat(40), generation: 7, summary: "已完成合并提交，包含 1 个路径。", files: [], snapshot: opened.snapshot });
+    renderPanel();
+    expect(await screen.findByText("可以合并，没有冲突")).toBeTruthy();
+    expect(screen.getByRole("list", { name: "将带入的提交" }).textContent).toContain("加上登录页");
+    const input = screen.getByRole("textbox", { name: "合并说明" }) as HTMLInputElement;
+    expect(input.value).toBe("Merge branch 'feature' into main");
+    expect(startMerge).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole("button", { name: "合并到 main" }));
+    await vi.waitFor(() => expect(completeMerge).toHaveBeenCalledWith("/repo", "Merge branch 'feature' into main", 6, 1));
+    expect(startMerge).toHaveBeenCalledWith("/repo", "feature", null, "merge", 5, 1);
+    expect(await screen.findByText("已把 feature 合并到 main")).toBeTruthy();
+  });
+
+  it("把当前分支合并到另一个分支：目标可选，开始时由后端先切换", async () => {
+    mergeSession.mockResolvedValue(session());
+    branchState.mockResolvedValue(twoBranches);
+    mergePreview.mockImplementation(async (_repo: string, source: string, target: string | null) =>
+      previewOf({ source, target: target ?? "main", needsSwitch: target !== null, current: "main", outgoing: 0, fastForward: true }),
+    );
+    startMerge.mockResolvedValue(
+      session({ generation: 6, operation: "none", target: "feature", switchedFrom: "main", fastForwarded: true }),
+    );
+    renderPanel({ initialTarget: "feature" });
+    // 从「把当前分支合并到此分支」进入：来源默认是当前分支，目标是所选分支。
+    await vi.waitFor(() => expect(mergePreview).toHaveBeenCalledWith("/repo", "main", "feature", 4, 1));
+    expect(await screen.findByText(/开始时会先切换到 feature/)).toBeTruthy();
+    await fireEvent.click(screen.getByRole("radio", { name: /快进/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "快进 feature" }));
+    await vi.waitFor(() => expect(startMerge).toHaveBeenCalledWith("/repo", "main", "feature", "ff-only", 5, 1));
+    expect(await screen.findByText("已把 feature 快进到 main")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "切回 main" })).toBeTruthy();
+  });
+
+  it("交换方向后重新预览；远程分支作来源时不能交换", async () => {
+    mergeSession.mockResolvedValue(session());
+    branchState.mockResolvedValue(twoBranches);
+    mergePreview.mockImplementation(async (_repo: string, source: string, target: string | null) =>
+      previewOf({ source, target: target ?? "main", needsSwitch: target !== null }),
+    );
+    renderPanel({ initialSource: "origin/main" });
+    await vi.waitFor(() => expect(mergePreview).toHaveBeenCalledWith("/repo", "origin/main", null, 4, 1));
+    expect(screen.getByRole("button", { name: "交换来源和目标" }).hasAttribute("disabled")).toBe(true);
+    await fireEvent.click(screen.getByRole("button", { name: "来源分支" }));
+    const list = screen.getByRole("listbox", { name: "来源分支" });
+    await fireEvent.click(within(list).getByText("feature"));
+    await vi.waitFor(() => expect(mergePreview).toHaveBeenLastCalledWith("/repo", "feature", null, 4, 1));
+    await fireEvent.click(screen.getByRole("button", { name: "交换来源和目标" }));
+    await vi.waitFor(() => expect(mergePreview).toHaveBeenLastCalledWith("/repo", "main", "feature", 4, 1));
+  });
+
+  it("目标已包含来源时明确提示不需要合并", async () => {
+    mergeSession.mockResolvedValue(session());
+    branchState.mockResolvedValue(twoBranches);
+    mergePreview.mockResolvedValue(
+      previewOf({ canStart: false, blocker: "up_to_date", upToDate: true, incoming: 0, commits: [], files: [], filesTotal: 0, note: "main 已经包含 feature 的全部提交，不需要合并。" }),
+    );
+    renderPanel();
+    expect(await screen.findByText("已经是最新，不需要合并")).toBeTruthy();
+    expect(screen.getByText(/已经包含 feature 的全部提交/)).toBeTruthy();
   });
 
   it("未合并文件可以逐项处理，但不能中止合并", async () => {

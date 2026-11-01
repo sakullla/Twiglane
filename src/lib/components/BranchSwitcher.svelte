@@ -42,6 +42,8 @@
   let query = $state("");
   let active = $state(0);
   let errorText = $state<string | null>(null);
+  /** 切换在途时弹层可能已被收起，甚至换成了别的弹层；那时不能再替它们关闭。 */
+  let mounted = true;
 
   let currentName = $derived(opened.snapshot.branch.name);
   let matched = $derived(
@@ -99,6 +101,9 @@
       .finally(() => {
         loading = false;
       });
+    return () => {
+      mounted = false;
+    };
   });
 
   async function choose(branch: BranchRecord | undefined) {
@@ -115,7 +120,7 @@
       if (opened.summary.path !== repo.summary.path) return;
       onSnapshot(result.snapshot);
       onNotice(`已切换到 ${result.snapshot.branch.name ?? branch.name}`);
-      onClose();
+      if (mounted) onClose();
     } catch (error) {
       const failure = normalizeError(error);
       errorText = failure.message;

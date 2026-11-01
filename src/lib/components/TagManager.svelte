@@ -27,7 +27,8 @@
   let errorText = $state<string | null>(null);
   let confirmTag = $state<TagRecord | null>(null);
   let copied = $state<string | null>(null);
-  let loadedKey = "";
+  /** 标签读取的结果：只有真正读完才写入，写锁期间跳过的那次不算；失败不自动重读。 */
+  let loaded = $state<{ key: string; ok: boolean } | null>(null);
 
   let blocked = $derived(disabled || localBusy);
   let remote = $derived(opened.snapshot.branch.upstream?.split("/")[0] || "origin");
@@ -39,9 +40,7 @@
   );
 
   $effect(() => {
-    const key = `${opened.summary.path}:${opened.generation}`;
-    if (key === loadedKey) return;
-    loadedKey = key;
+    if (loaded?.key === `${opened.summary.path}:${opened.generation}` || blocked) return;
     void loadTags();
   });
 
@@ -70,7 +69,17 @@
 
   async function loadTags() {
     const path = opened.summary.path;
-    const result = await run(() => api.tagState(path, opened.generation, nextId()));
+    const key = `${path}:${opened.generation}`;
+    const result = await run(async () => {
+      try {
+        const state = await api.tagState(path, opened.generation, nextId());
+        loaded = { key, ok: true };
+        return state;
+      } catch (error) {
+        loaded = { key, ok: false };
+        throw error;
+      }
+    });
     if (result && opened.summary.path === path) apply(result);
   }
 
@@ -142,11 +151,22 @@
 
   <div class="tag-list-tools">
     <div class="field sm"><Icon name="search" size={14} /><input aria-label="搜索标签" bind:value={query} placeholder="搜索标签、Hash 或附注" autocomplete="off" spellcheck="false" /></div>
-    <span class="count">{tags.length}</span>
+    {#if loaded?.ok}<span class="count">{tags.length}</span>{/if}
   </div>
 
   <div class="list-box tag-list">
-    {#if visible.length === 0}
+    {#if !loaded?.ok}
+      <div class="empty compact" data-tag-loading>
+        {#if loaded}
+          <span class="empty-icon"><Icon name="alert-circle" size={20} /></span>
+          <strong>没有读到标签</strong>
+          <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={() => (loaded = null)}>重试</button>
+        {:else}
+          <span class="empty-icon"><span class="spinner"></span></span>
+          <strong>正在读取标签</strong>
+        {/if}
+      </div>
+    {:else if visible.length === 0}
       <div class="empty compact"><span class="empty-icon"><Icon name="tag" size={20} /></span><strong>{tags.length === 0 ? "还没有标签" : "没有匹配的标签"}</strong><p>{tags.length === 0 ? "从上方创建第一个版本标记。" : "试试标签名、目标 Hash 或附注内容。"}</p></div>
     {:else}
       {#each visible as tag (tag.name)}

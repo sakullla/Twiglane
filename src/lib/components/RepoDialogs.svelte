@@ -41,15 +41,24 @@
   let remoteName = $state("origin");
   let remoteUrl = $state("");
   let localBusy = $state(false);
-  let loadedKey = "";
+  /**
+   * 远程列表的读取结果：只有真正读完才写入，写锁期间跳过的那次不算。
+   * ok 为假时不再自动重读（失败也会释放锁，否则会循环），由「重试」清空。
+   */
+  let loaded = $state<{ key: string; ok: boolean } | null>(null);
 
   let blocked = $derived(disabled || localBusy);
+  let remotesFailed = $derived(loaded?.key === opened?.summary.path && loaded?.ok === false);
+  let remotesReady = $derived(loaded?.key === opened?.summary.path && loaded?.ok === true);
 
   $effect(() => {
-    const key = `${mode}:${opened?.summary.path ?? ""}`;
-    if (key === loadedKey) return;
-    loadedKey = key;
-    if (mode === "remote" && opened) void loadRemotes();
+    // 这个组件常驻挂载：每次打开都要重新读。
+    if (mode !== "remote" || !opened) {
+      loaded = null;
+      return;
+    }
+    if (loaded?.key === opened.summary.path || blocked) return;
+    void loadRemotes();
   });
 
   async function run<T>(name: string, action: () => Promise<T>): Promise<T | undefined> {
@@ -88,8 +97,21 @@
   async function loadRemotes() {
     const current = opened;
     if (!current) return;
-    const result = await run("remote", () => api.remoteState(current.summary.path, current.generation, nextId()));
-    if (!result || opened?.summary.path !== current.summary.path) return;
+    const key = current.summary.path;
+    const settle = (ok: boolean) => {
+      if (mode === "remote") loaded = { key, ok };
+    };
+    const result = await run("remote", async () => {
+      try {
+        const state = await api.remoteState(key, current.generation, nextId());
+        settle(true);
+        return state;
+      } catch (error) {
+        settle(false);
+        throw error;
+      }
+    });
+    if (!result || opened?.summary.path !== key) return;
     remotes = result.remotes;
     onSnapshot(result.snapshot);
     if (!remoteName && result.remotes[0]) remoteName = result.remotes[0].name;
@@ -180,7 +202,14 @@
     {onClose}
   >
     <div class="list-box">
-      {#if remotes.length === 0}
+      {#if remotesFailed}
+        <div class="list-empty">
+          没有读到远程配置。
+          <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={() => (loaded = null)}>重试</button>
+        </div>
+      {:else if !remotesReady}
+        <div class="list-empty" data-remote-loading><span class="spinner"></span> 正在读取远程</div>
+      {:else if remotes.length === 0}
         <div class="list-empty">还没有远程。在下面添加一个。</div>
       {:else}
         {#each remotes as remote (remote.name)}

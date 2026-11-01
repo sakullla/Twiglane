@@ -1,5 +1,6 @@
-import { fireEvent, render, screen } from "@testing-library/svelte";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/svelte";
+import { tick } from "svelte";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenedRepository } from "../src/lib/types";
 
 const branchState = vi.hoisted(() => vi.fn());
@@ -54,6 +55,8 @@ const opened: OpenedRepository = {
   watchDegraded: false,
 };
 
+afterEach(() => cleanup());
+
 function props(overrides: { onClose?: () => void; onSnapshot?: (snapshot: OpenedRepository["snapshot"]) => void } = {}) {
   return {
     opened,
@@ -66,6 +69,92 @@ function props(overrides: { onClose?: () => void; onSnapshot?: (snapshot: Opened
     nextId: () => 9,
   };
 }
+
+describe("写锁期间的首次读取", () => {
+  const lockedProps = () => ({ ...props(), disabled: true });
+
+  beforeEach(() => {
+    branchState.mockReset();
+    remoteState.mockReset();
+    tagState.mockReset();
+    branchState.mockResolvedValue({
+      generation: 4,
+      branches: [{ name: "feature/ui", remote: false, current: true, upstream: null, worktree: null }],
+      snapshot: opened.snapshot,
+    });
+    remoteState.mockResolvedValue({ generation: 4, remotes: [{ name: "origin", fetchUrl: "https://e.com/r.git", pushUrl: null }], snapshot: opened.snapshot });
+    tagState.mockResolvedValue({ generation: 4, tags: [], snapshot: opened.snapshot });
+  });
+
+  it("分支：锁定时不读取、显示读取中；解锁后读一次并显示真实列表", async () => {
+    const base = lockedProps();
+    const { rerender } = render(BranchDialog, { props: base });
+    await tick();
+    expect(branchState).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-branch-loading]")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("没有匹配的分支");
+    await rerender({ ...base, disabled: false });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    expect(branchState).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("[data-branch-loading]")).toBeNull();
+  });
+
+  it("分支：读取失败不循环重试，重试按钮可恢复", async () => {
+    branchState.mockReset();
+    branchState.mockRejectedValueOnce({ code: "unknown", message: "读不到" });
+    const base = props();
+    render(BranchDialog, { props: base });
+    const retry = await screen.findByRole("button", { name: "重试" });
+    await tick();
+    await tick();
+    expect(branchState).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).not.toContain("没有匹配的分支");
+    branchState.mockResolvedValueOnce({
+      generation: 4,
+      branches: [{ name: "feature/ui", remote: false, current: true, upstream: null, worktree: null }],
+      snapshot: opened.snapshot,
+    });
+    await fireEvent.click(retry);
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    expect(branchState).toHaveBeenCalledTimes(2);
+  });
+
+  it("标签页：锁定时不说「还没有标签」，解锁后读取", async () => {
+    const base = lockedProps();
+    const { rerender } = render(BranchDialog, { props: base });
+    await fireEvent.click(screen.getByRole("tab", { name: /标签/ }));
+    await tick();
+    expect(tagState).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-tag-loading]")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("还没有标签");
+    await rerender({ ...base, disabled: false });
+    await waitFor(() => expect(document.body.textContent).toContain("还没有标签"));
+    expect(document.querySelector("[data-tag-loading]")).toBeNull();
+  });
+
+  it("远程：锁定时不说「还没有远程」；解锁后显示真实远程；失败不循环", async () => {
+    const remoteProps = { ...props(), mode: "remote" as const, opened, disabled: true, onOpened: vi.fn(), onOpenHistory: vi.fn() };
+    const { rerender } = render(RepoDialogs, { props: remoteProps });
+    await tick();
+    expect(remoteState).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-remote-loading]")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("还没有远程");
+    await rerender({ ...remoteProps, disabled: false });
+    await waitFor(() => expect(document.body.textContent).toContain("https://e.com/r.git"));
+    expect(remoteState).toHaveBeenCalledTimes(1);
+
+    await rerender({ ...remoteProps, disabled: false, mode: null });
+    remoteState.mockRejectedValueOnce({ code: "unknown", message: "读不到" });
+    await rerender({ ...remoteProps, disabled: false });
+    const retry = await screen.findByRole("button", { name: "重试" });
+    await tick();
+    await tick();
+    expect(remoteState).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).not.toContain("还没有远程");
+    await fireEvent.click(retry);
+    await waitFor(() => expect(document.body.textContent).toContain("https://e.com/r.git"));
+  });
+});
 
 describe("分支管理", () => {
   beforeEach(() => {

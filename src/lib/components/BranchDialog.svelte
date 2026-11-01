@@ -58,7 +58,11 @@
    * 认证、网络、权限等失败不能把用户带向更危险的动作。
    */
   let lastFailureCode = $state<string | null>(null);
-  let loadedKey = "";
+  /**
+   * 列表读取的结果：只有真正读完才写入，写锁期间跳过的那次不算。
+   * ok 为假时不再自动重读（失败也会释放锁，否则会循环），由「重试」清空。
+   */
+  let loaded = $state<{ key: string; ok: boolean } | null>(null);
   let confirmDelete = $state<
     | { kind: "local"; name: string; body: string; force: boolean }
     | { kind: "remote"; remote: string; name: string; body: string; force: false }
@@ -82,11 +86,11 @@
     ),
   );
   let current = $derived(opened.snapshot.branch);
+  let listReady = $derived(loaded?.key === opened.summary.path && loaded.ok);
+  let listFailed = $derived(loaded?.key === opened.summary.path && !loaded.ok);
 
   $effect(() => {
-    const key = opened.summary.path;
-    if (key === loadedKey) return;
-    loadedKey = key;
+    if (loaded?.key === opened.summary.path || blocked) return;
     confirmDelete = null;
     void loadBranches();
   });
@@ -118,7 +122,16 @@
 
   async function loadBranches() {
     const path = opened.summary.path;
-    const result = await run(() => api.branchState(path, opened.generation, nextId()));
+    const result = await run(async () => {
+      try {
+        const state = await api.branchState(path, opened.generation, nextId());
+        loaded = { key: path, ok: true };
+        return state;
+      } catch (error) {
+        loaded = { key: path, ok: false };
+        throw error;
+      }
+    });
     if (!result || opened.summary.path !== path) return;
     applyBranches(result);
   }
@@ -364,8 +377,8 @@
         }}
       >
         <Icon name={entry.icon} size={12} />{entry.label}
-        {#if entry.id === "local"}<span class="count">{localCount}</span>{/if}
-        {#if entry.id === "remote"}<span class="count">{remoteCount}</span>{/if}
+        {#if entry.id === "local" && listReady}<span class="count">{localCount}</span>{/if}
+        {#if entry.id === "remote" && listReady}<span class="count">{remoteCount}</span>{/if}
       </button>
     {/each}
   </div>
@@ -408,9 +421,20 @@
         <div class="list-section">
           <span>{listScope === "local" ? "本地分支" : "远程分支"}</span>
           <span class="spacer"></span>
-          <span>{visibleBranches.length} 个结果</span>
+          {#if listReady}<span>{visibleBranches.length} 个结果</span>{/if}
         </div>
-        {#if visibleBranches.length === 0}
+        {#if listFailed}
+          <div class="empty compact branch-empty">
+            <span class="empty-icon"><Icon name="alert-circle" size={20} /></span>
+            <strong>没有读到分支列表</strong>
+            <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={() => (loaded = null)}>重试</button>
+          </div>
+        {:else if !listReady}
+          <div class="empty compact branch-empty" data-branch-loading>
+            <span class="empty-icon"><span class="spinner"></span></span>
+            <strong>正在读取分支</strong>
+          </div>
+        {:else if visibleBranches.length === 0}
           <div class="empty compact branch-empty">
             <span class="empty-icon"><Icon name="search" size={20} /></span>
             <strong>没有匹配的分支</strong>

@@ -1000,6 +1000,146 @@ describe("应用外壳", () => {
     expect((await within(popover).findByRole("alert")).textContent).toContain("读取分支失败");
   });
 
+  it("分支弹层：切换在途时再回车不会重复提交，收起换别的弹层后成功也不抢焦点", async () => {
+    mocks.branchState.mockResolvedValue(branchFixture());
+    let finish!: (value: unknown) => void;
+    mocks.switchBranch.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: "当前分支 main" }));
+    const popover = await screen.findByRole("dialog", { name: "切换分支" });
+    await waitFor(() => expect(within(popover).getAllByRole("option").length).toBe(4));
+    const search = within(popover).getByRole("combobox");
+    await fireEvent.keyDown(search, { key: "Enter" });
+    await tick();
+    await fireEvent.keyDown(search, { key: "Enter" });
+    await fireEvent.click(within(popover).getByRole("option", { name: /^develop/ }));
+    expect(mocks.switchBranch, "写锁挡住第二次").toHaveBeenCalledTimes(1);
+    expect(within(popover).getByRole("option", { name: /^develop/ }).textContent).toContain("正在写入，稍后再试");
+
+    await press("Escape");
+    await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
+    const repoPopover = await screen.findByRole("dialog", { name: "切换仓库" });
+    const repoSearch = within(repoPopover).getByRole("combobox");
+    await waitFor(() => expect(document.activeElement).toBe(repoSearch));
+
+    finish({ generation: 5, branches: [], snapshot: { ...snapshot, generation: 5, branch: { ...branch, name: "develop" } } });
+    await screen.findByRole("button", { name: "当前分支 develop" });
+    await tick();
+    expect(screen.getByRole("dialog", { name: "切换仓库" }), "别的弹层不被关掉").toBe(repoPopover);
+    expect(document.activeElement, "焦点留在别的弹层").toBe(repoSearch);
+  });
+
+  it("分支弹层：差异续读期间条目置灰并说明原因，结算后恢复", async () => {
+    mocks.branchState.mockResolvedValue(branchFixture());
+    let hold: ((value: DiffResponse) => void) | null = null;
+    mocks.loadDiff.mockImplementation(
+      async (_repo: string, path: string, staged: boolean, _generation: number, _request: number, _original: string | null, offset: number) => {
+        const base = diffFor(path, staged);
+        if (offset === 0) return { ...base, lines: base.lines.slice(0, 3), hunks: [{ ...base.hunks[0], lineCount: 3 }], totalLines: 12 };
+        return new Promise<DiffResponse>((resolve) => { hold = resolve; });
+      },
+    );
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: "继续加载" }));
+    await waitFor(() => expect(hold).not.toBeNull());
+    await fireEvent.click(screen.getByRole("button", { name: "当前分支 main" }));
+    const popover = await screen.findByRole("dialog", { name: "切换分支" });
+    const develop = await within(popover).findByRole("option", { name: /^develop/ });
+    expect(develop.getAttribute("aria-disabled")).toBe("true");
+    expect(develop.textContent).toContain("正在读取，稍后再试");
+    await fireEvent.click(develop);
+    await fireEvent.keyDown(within(popover).getByRole("combobox"), { key: "Enter" });
+    expect(mocks.switchBranch).not.toHaveBeenCalled();
+
+    (hold as unknown as (value: DiffResponse) => void)(diffFor("src/App.svelte", false));
+    await waitFor(() => expect(develop.getAttribute("aria-disabled")).toBeNull());
+  });
+
+  it("分支弹层：切换返回 stale 时弹层内说明原因，跟上 generation 刷新，重试用新 generation", async () => {
+    mocks.branchState.mockResolvedValue(branchFixture());
+    mocks.switchBranch.mockRejectedValueOnce({ code: "stale", message: "仓库状态已变化，请重试。", generation: 7 });
+    render(App);
+    await openRepo();
+    const refreshes = mocks.refreshStatus.mock.calls.length;
+    await fireEvent.click(screen.getByRole("button", { name: "当前分支 main" }));
+    const popover = await screen.findByRole("dialog", { name: "切换分支" });
+    await waitFor(() => expect(within(popover).getAllByRole("option").length).toBe(4));
+    await fireEvent.click(within(popover).getByRole("option", { name: /^develop/ }));
+    expect((await within(popover).findByRole("alert")).textContent).toContain("仓库状态已变化，请重试。");
+    expect(screen.getByRole("button", { name: "当前分支 main" }), "分支没变").toBeTruthy();
+    await waitFor(() => expect(mocks.refreshStatus.mock.calls.length).toBeGreaterThan(refreshes));
+    expect(mocks.refreshStatus.mock.calls.at(-1)?.[1], "外壳跟上了 generation").toBe(7);
+
+    mocks.refreshStatus.mockResolvedValue({ ...snapshot, generation: 7 });
+    await waitFor(() => expect(within(popover).getByRole("option", { name: /^develop/ }).getAttribute("aria-disabled")).toBeNull());
+    mocks.switchBranch.mockResolvedValueOnce({ generation: 8, branches: [], snapshot: { ...snapshot, generation: 8, branch: { ...branch, name: "develop" } } });
+    await fireEvent.click(within(popover).getByRole("option", { name: /^develop/ }));
+    await waitFor(() => expect(mocks.switchBranch).toHaveBeenLastCalledWith(repoPath, "develop", 7, expect.any(Number)));
+  });
+
+  it("写锁中进入分支管理和远程：显示读取中，不下假结论，锁释放后读到真实列表", async () => {
+    let finish!: (value: StatusSnapshot) => void;
+    const hold = () => { mocks.fetchRemote.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; })); };
+    mocks.branchState.mockResolvedValue(branchFixture());
+    mocks.remoteState.mockResolvedValue({
+      generation: 4,
+      remotes: [{ name: "origin", fetchUrl: "https://example.com/demo.git", pushUrl: null }],
+      snapshot,
+    });
+    render(App);
+    await openRepo();
+    const sync = screen.getByRole("button", { name: /^同步/ });
+    const startFetch = async () => {
+      hold();
+      await fireEvent.click(sync);
+      await fireEvent.click(screen.getByRole("menuitem", { name: /获取更新/ }));
+      await waitFor(() => expect(sync.classList.contains("busy")).toBe(true));
+    };
+
+    await startFetch();
+    await fireEvent.click(screen.getByRole("button", { name: "当前分支 main" }));
+    const popover = await screen.findByRole("dialog", { name: "切换分支" });
+    await fireEvent.click(within(popover).getByRole("button", { name: "管理分支与标签" }));
+    const manager = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>('[data-task-modal="branch"]');
+      expect(node).toBeTruthy();
+      return node!;
+    });
+    expect(manager.querySelector("[data-branch-loading]"), "锁定中是读取态").toBeTruthy();
+    expect(manager.textContent).not.toContain("没有匹配的分支");
+    expect(manager.querySelector("#branch-tab-local .count"), "不显示假的 0").toBeNull();
+    finish(snapshot);
+    await waitFor(() => expect(manager.querySelector("#branch-tab-local .count")?.textContent).toBe("3"));
+    expect(manager.querySelector("[data-branch-loading]")).toBeNull();
+    await fireEvent.click(manager.querySelector<HTMLElement>("[aria-label='关闭对话框']")!);
+    await waitFor(() => expect(document.querySelector("[data-task-modal]")).toBeNull());
+
+    await startFetch();
+    await fireEvent.click(sync);
+    await fireEvent.click(screen.getByRole("menuitem", { name: /^远程/ }));
+    const remote = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>('[data-task-modal="remote"]');
+      expect(node).toBeTruthy();
+      return node!;
+    });
+    expect(remote.querySelector("[data-remote-loading]")).toBeTruthy();
+    expect(remote.textContent).not.toContain("还没有远程");
+    expect(mocks.remoteState, "锁定中不发读取").not.toHaveBeenCalled();
+    finish(snapshot);
+    await waitFor(() => expect(remote.textContent).toContain("https://example.com/demo.git"));
+    expect(mocks.remoteState).toHaveBeenCalledTimes(1);
+    expect(remote.querySelector("[data-remote-loading]")).toBeNull();
+
+    // 关闭后焦点回到同步按钮；再打开时重新读取。
+    await fireEvent.click(remote.querySelector<HTMLElement>("[aria-label='关闭对话框']")!);
+    await waitFor(() => expect(document.activeElement, "Modal 关闭后焦点落在触发按钮").toBe(sync));
+    await fireEvent.click(sync);
+    await fireEvent.click(screen.getByRole("menuitem", { name: /^远程/ }));
+    await waitFor(() => expect(mocks.remoteState).toHaveBeenCalledTimes(2));
+  });
+
   it("低频入口：分支弹层进入新建、合并和管理，同步菜单进入远程，命令面板的分支与标签仍是管理界面", async () => {
     mocks.branchState.mockResolvedValue(branchFixture());
     mocks.tagState.mockResolvedValue({ generation: 4, tags: [], snapshot });

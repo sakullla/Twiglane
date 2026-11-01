@@ -239,6 +239,7 @@ describe("自绘标题栏", () => {
     await fireEvent.click(items.at(-1)!);
     expect(onRemote).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement, "菜单卸载前先把焦点还给触发按钮").toBe(screen.getByRole("button", { name: /^同步/ }));
   });
 
   it("同步菜单全程可用键盘：方向键打开并移动，Esc 关闭并把焦点还给触发按钮", async () => {

@@ -164,13 +164,16 @@
     items[at === -1 ? 0 : (at + step + items.length) % items.length].focus();
   }
 
+  // 菜单项随菜单卸载，焦点要先回到触发按钮；随后打开的 modal 关闭时才回得来。
   function chooseTheme(next: Theme) {
     openMenu = null;
+    themeTrigger?.focus();
     onTheme(next);
   }
 
   function runSync(action: () => void) {
     openMenu = null;
+    syncTrigger?.focus();
     action();
   }
 </script>

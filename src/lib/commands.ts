@@ -82,7 +82,7 @@ function busyReason(state: CommandState): string {
 const repoBusyReason = (state: CommandState) => (state.hasRepo ? busyReason(state) : "先打开一个仓库");
 
 /**
- * 切换仓库的唯一判定（R11）：标题栏仓库菜单、rail 的仓库行与命令面板都读它，
+ * 切换仓库的唯一判定（R11）：标题栏仓库弹层、rail 的仓库行与命令面板都读它，
  * 外壳的 openRecent 也用同一个判定提前返回并说明原因。
  * 三个入口以前各写一套：面板看「没在写」就说能用、标题栏菜单看 pending 就禁用、
  * rail 交给 openRecent 的静默返回，于是差异续读期间点下去什么都不发生。
@@ -367,7 +367,7 @@ export const COMMANDS: CommandSpec[] = [
 export const REPO_SWITCH_PREFIX = "repo.switch:";
 
 /**
- * 切换仓库：最近仓库每个一条命令，动作与标题栏仓库菜单里的同名条目相同（都走 openRecent）。
+ * 切换仓库：最近仓库每个一条命令，动作与标题栏仓库弹层里的同名条目相同（都走 openRecent）。
  * 这些命令依赖运行时数据，所以由状态推导，不放进静态注册表。
  *
  * 可用性与 openRecent 的执行 guard 同源（switchBlocked）：有任意操作在飞行中时

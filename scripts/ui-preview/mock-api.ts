@@ -15,6 +15,9 @@ import { sampleFor } from "./samples";
 const wait = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms));
 const now = Math.floor(Date.now() / 1000);
 
+/** 进入预览 mock 平时到不了的状态：?switch=fail 让切换分支失败，?diff=paged 让差异续读挂住 8 秒。 */
+const previewParams = new URLSearchParams(location.search);
+
 let generation = 1;
 let theme: Theme = (localStorage.getItem("preview-theme") as Theme) || "light";
 let recent = [
@@ -331,7 +334,12 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   },
   cancelReads: () => ok(undefined),
   refreshStatus: () => ok(snapshot()),
-  loadDiff: (_repo: string, path: string, staged: boolean) => ok(withHeaders(diffFor(path, staged))),
+  loadDiff: (_repo: string, path: string, staged: boolean, _generation: number, _request: number, _original: string | null, offset = 0) => {
+    const result = withHeaders(diffFor(path, staged));
+    if (previewParams.get("diff") !== "paged") return ok(result);
+    if (offset === 0) return ok({ ...result, totalLines: result.lines.length + 400 });
+    return ok({ ...result, lines: [], hunks: [], offset }, 8000);
+  },
   stageFiles: (_repo: string, paths: string[]) => {
     files = files.map((item) =>
       paths.includes(item.path) && !item.unmerged
@@ -409,7 +417,11 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     generation += 1;
     return ok(snapshot());
   },
-  switchBranch: (_repo: string, name: string) => {
+  switchBranch: async (_repo: string, name: string) => {
+    if (previewParams.get("switch") === "fail") {
+      await wait(250);
+      throw { code: "switch_failed", generation, message: "此操作会覆盖未提交的修改，已停止。这些修改仍留在工作区。请先提交，或先临时保存，然后再继续。" };
+    }
     const selected = branches.find((item) => item.name === name);
     const localName = selected?.remote ? name.slice(name.indexOf("/") + 1) : name;
     let local = branches.find((item) => !item.remote && item.name === localName);

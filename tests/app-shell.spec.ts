@@ -119,6 +119,7 @@ const mocks = vi.hoisted(() => ({
   cloneRepository: vi.fn(),
   remoteState: vi.fn(),
   branchState: vi.fn(),
+  switchBranch: vi.fn(),
   tagState: vi.fn(),
   stashState: vi.fn(),
   measureProbe: vi.fn(),
@@ -396,6 +397,27 @@ async function openRepo() {
   await fireEvent.click(document.querySelector<HTMLButtonElement>(".welcome-recent button")!);
   await waitFor(() => expect(document.querySelector(".file-list")).toBeTruthy());
   await waitFor(() => expect(document.querySelectorAll("[data-diff-row]").length).toBeGreaterThan(0));
+}
+
+/** 换掉夹具的最近仓库列表，其余设置不变。 */
+function useRecent(recent: { name: string; path: string; openedAtMs: number }[]) {
+  mocks.getSettings.mockResolvedValue({
+    theme: "dark",
+    panelWidths: { sidebar: 256, files: 360 },
+    git: { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "Git 2.49.0 可用" },
+    recent,
+    settingsWarning: null,
+  });
+}
+
+/** 分支夹具：当前分支不在最前，带一条其他工作区占用的分支和 origin/HEAD。 */
+function branchFixture() {
+  const record = (name: string, remote = false, worktree: string | null = null) => ({ name, remote, current: name === "main", upstream: null, worktree });
+  return {
+    generation: 4,
+    branches: [record("origin/HEAD", true), record("origin/develop", true), record("develop"), record("shared", false, "D:/wt"), record("main")],
+    snapshot,
+  };
 }
 
 async function openPalette() {
@@ -703,10 +725,11 @@ describe("应用外壳", () => {
       },
     );
 
+    useRecent([{ name: "demo", path: repoPath, openedAtMs: 1 }, { name: "other", path: "C:/work/other", openedAtMs: 2 }]);
     render(App);
     await openRepo();
     const openedBefore = mocks.openRepository.mock.calls.length;
-    // 这是 App 内的真实路径：rail 的仓库行、标题栏菜单与面板都通向同一个 openRecent。
+    // 这是 App 内的真实路径：rail 的仓库行、标题栏弹层与面板都通向同一个 openRecent。
     const clicked = () => mocks.openRepository.mock.calls.length;
 
     await fireEvent.click(screen.getByRole("button", { name: "继续加载" }));
@@ -725,18 +748,22 @@ describe("应用外壳", () => {
     await fireEvent.keyDown(palette, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "命令面板" })).toBeNull());
 
-    // 入口二：标题栏仓库菜单里的同名条目同样禁用。
-    await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
-    const menuItem = await waitFor(() => {
-      const node = document.querySelector<HTMLButtonElement>(".repo-menu-item");
-      expect(node, "仓库菜单里有当前仓库的条目").toBeTruthy();
-      return node!;
-    });
-    expect(menuItem.hasAttribute("disabled"), "标题栏菜单与面板同源").toBe(true);
-    // 灰按钮也要说出原因：README 承诺「就地禁用并给出原因」，菜单因此不能只剩一个禁用态。
-    expect(menuItem.getAttribute("title"), "菜单条目上带着同一个原因").toBe("正在读取，稍后再试");
+    // 入口二：标题栏仓库弹层里的其他仓库同样置灰，当前仓库不需要切换，不跟着置灰。
+    const trigger = screen.getByRole("button", { name: "当前仓库 demo" });
+    await fireEvent.click(trigger);
+    const popover = await screen.findByRole("dialog", { name: "切换仓库" });
+    const other = within(popover).getByRole("option", { name: /other/ });
+    expect(other.getAttribute("aria-disabled"), "标题栏弹层与面板同源").toBe("true");
+    // 灰条目也要说出原因：README 承诺「就地禁用并给出原因」，所以写进条目文本和 title。
+    expect(other.textContent, "条目上带着同一个原因").toContain("正在读取，稍后再试");
+    expect(other.getAttribute("title")).toBe("正在读取，稍后再试");
+    expect(within(popover).getByRole("option", { name: /demo/ }).getAttribute("aria-disabled")).toBeNull();
+    await fireEvent.click(other);
+    await fireEvent.keyDown(within(popover).getByRole("combobox"), { key: "Enter" });
+    expect(clicked(), "弹层里点不动、回车也不发请求").toBe(openedBefore);
     await press("Escape");
-    await waitFor(() => expect(document.querySelector(".titlebar-menu")).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "切换仓库" })).toBeNull());
+    expect(document.activeElement, "Esc 把焦点还给触发按钮").toBe(trigger);
 
     // 入口三：rail 的仓库行不是禁用态，所以点击必须给出同一个原因，而不是什么都不发生。
     await fireEvent.click(document.querySelector<HTMLElement>(".repo-main")!);
@@ -752,6 +779,259 @@ describe("应用外壳", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "命令面板" })).toBeNull());
     await fireEvent.click(document.querySelector<HTMLElement>(".repo-main")!);
     await waitFor(() => expect(clicked()).toBe(openedBefore + 1));
+  });
+
+  it("仓库弹层：搜索路径后回车直接切换，同名仓库显示完整路径", async () => {
+    const twin = "D:/archive/2019/demo";
+    useRecent([
+      { name: "demo", path: repoPath, openedAtMs: 1 },
+      { name: "demo", path: twin, openedAtMs: 2 },
+      { name: "gateway", path: "C:/work/gateway", openedAtMs: 3 },
+    ]);
+    render(App);
+    await openRepo();
+    const trigger = screen.getByRole("button", { name: "当前仓库 demo" });
+    expect(trigger.getAttribute("aria-haspopup")).toBe("dialog");
+    await fireEvent.click(trigger);
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    const popover = await screen.findByRole("dialog", { name: "切换仓库" });
+    const search = within(popover).getByRole("combobox") as HTMLInputElement;
+    await waitFor(() => expect(document.activeElement, "打开后焦点在搜索框").toBe(search));
+
+    // 同名两条的路径完整显示（不走截断样式），不同名的继续截断。
+    expect(popover.querySelectorAll(".repo-path-full bdi")).toHaveLength(2);
+    expect([...popover.querySelectorAll(".repo-path-full bdi")].map((node) => node.textContent)).toEqual([repoPath, twin]);
+    expect(popover.querySelector(".repo-path bdi")?.textContent).toBe("C:/work/gateway");
+
+    // 默认项跳过当前仓库：不输入也是一次回车换到另一个仓库。
+    const activeId = () => document.getElementById(search.getAttribute("aria-activedescendant") ?? "");
+    expect(activeId()?.title).toBe(twin);
+    await fireEvent.keyDown(search, { key: "ArrowDown" });
+    expect(activeId()?.title).toBe("C:/work/gateway");
+    await fireEvent.keyDown(search, { key: "ArrowDown" });
+    expect(activeId()?.title, "方向键循环").toBe(repoPath);
+
+    await fireEvent.input(search, { target: { value: "archive" } });
+    await waitFor(() => expect(within(popover).getAllByRole("option")).toHaveLength(1));
+    await fireEvent.input(search, { target: { value: "没有这个仓库" } });
+    await waitFor(() => expect(popover.textContent).toContain("没有匹配的仓库"));
+    await fireEvent.keyDown(search, { key: "Enter" });
+    expect(mocks.openRepository, "没有结果时回车什么都不做").toHaveBeenCalledTimes(1);
+
+    await fireEvent.input(search, { target: { value: "archive" } });
+    await waitFor(() => expect(within(popover).getAllByRole("option")).toHaveLength(1));
+    // 输入法选词时的回车不算确认。
+    await fireEvent.keyDown(search, { key: "Enter", isComposing: true });
+    expect(mocks.openRepository).toHaveBeenCalledTimes(1);
+    await fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() => expect(mocks.openRepository).toHaveBeenLastCalledWith(twin, expect.any(Number)));
+    expect(screen.queryByRole("dialog", { name: "切换仓库" })).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("仓库弹层：点外面关闭，选当前仓库只收起，底部是打开、克隆、新建", async () => {
+    render(App);
+    await openRepo();
+    const trigger = screen.getByRole("button", { name: "当前仓库 demo" });
+    const open = async () => {
+      await fireEvent.click(trigger);
+      return screen.findByRole("dialog", { name: "切换仓库" });
+    };
+
+    await open();
+    await fireEvent.mouseDown(document.querySelector(".statusbar")!);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "切换仓库" })).toBeNull());
+
+    // 再点触发按钮是收起，而不是先被「点外面」关掉又重新打开。
+    await open();
+    await fireEvent.mouseDown(trigger);
+    await fireEvent.click(trigger);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "切换仓库" })).toBeNull());
+
+    const calls = mocks.openRepository.mock.calls.length;
+    let popover = await open();
+    await fireEvent.click(within(popover).getByRole("option", { name: /demo/ }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "切换仓库" })).toBeNull());
+    expect(mocks.openRepository, "当前仓库不重新读取").toHaveBeenCalledTimes(calls);
+
+    popover = await open();
+    await fireEvent.click(within(popover).getByRole("button", { name: "打开本地仓库" }));
+    await waitFor(() => expect(mocks.pickDirectory).toHaveBeenCalledWith("添加已有仓库"));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "切换仓库" })).toBeNull());
+
+    popover = await open();
+    await fireEvent.click(within(popover).getByRole("button", { name: "新建仓库" }));
+    await waitFor(() => expect(mocks.pickDirectory).toHaveBeenCalledWith("选择要新建仓库的目录"));
+
+    popover = await open();
+    await fireEvent.click(within(popover).getByRole("button", { name: "克隆远程仓库" }));
+    await screen.findByRole("dialog", { name: "克隆仓库" });
+  });
+
+  it("仓库弹层：Tab 在搜索框与底部动作之间循环，写入期间底部动作禁用并说明原因", async () => {
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
+    const popover = await screen.findByRole("dialog", { name: "切换仓库" });
+    const search = within(popover).getByRole("combobox");
+    const add = within(popover).getByRole("button", { name: "打开本地仓库" });
+    const create = within(popover).getByRole("button", { name: "新建仓库" });
+    await waitFor(() => expect(document.activeElement).toBe(search));
+    await fireEvent.keyDown(search, { key: "Tab" });
+    expect(document.activeElement, "行内按钮不进 Tab 序").toBe(add);
+    await fireEvent.keyDown(add, { key: "ArrowDown" });
+    await fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(create);
+    await fireEvent.keyDown(create, { key: "Tab" });
+    expect(document.activeElement, "到底后回到搜索框").toBe(search);
+    await fireEvent.keyDown(search, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(create);
+
+    let finish!: (value: StatusSnapshot) => void;
+    mocks.fetchRemote.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    await fireEvent.keyDown(create, { key: "Escape" });
+    await fireEvent.click(screen.getByRole("button", { name: /^同步/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: /获取更新/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
+    const busy = await screen.findByRole("dialog", { name: "切换仓库" });
+    const blocked = within(busy).getByRole("button", { name: "打开本地仓库" }) as HTMLButtonElement;
+    expect(blocked.disabled).toBe(true);
+    expect(blocked.title).toBe("正在写入，稍后再试");
+    finish(snapshot);
+    await waitFor(() => expect(blocked.disabled).toBe(false));
+  });
+
+  it("分支弹层：搜索后切换，只调一次切换并用返回的状态刷新标题栏", async () => {
+    const switched = { ...snapshot, generation: 5, branch: { ...branch, name: "develop" } };
+    mocks.branchState.mockResolvedValue(branchFixture());
+    mocks.switchBranch.mockResolvedValue({ generation: 5, branches: [], snapshot: switched });
+    render(App);
+    await openRepo();
+    const trigger = screen.getByRole("button", { name: "当前分支 main" });
+    await fireEvent.click(trigger);
+    const popover = await screen.findByRole("dialog", { name: "切换分支" });
+    await waitFor(() => expect(within(popover).getAllByRole("option").length).toBe(4));
+    const names = within(popover).getAllByRole("option").map((option) => option.querySelector(".branch-option-name")?.textContent);
+    expect(names, "当前分支最前、本地在远程之前、origin/HEAD 不列出").toEqual(["main", "develop", "shared", "origin/develop"]);
+    expect(mocks.branchState, "读分支列表不占写锁").toHaveBeenCalledTimes(1);
+    expect(within(popover).getByRole("option", { name: /main/ }).getAttribute("aria-selected")).toBe("true");
+
+    const search = within(popover).getByRole("combobox");
+    await fireEvent.input(search, { target: { value: "没有" } });
+    await waitFor(() => expect(popover.textContent).toContain("没有匹配的分支"));
+    await fireEvent.input(search, { target: { value: "devel" } });
+    await waitFor(() => expect(within(popover).getAllByRole("option")).toHaveLength(2));
+    await fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() => expect(mocks.switchBranch).toHaveBeenCalledWith(repoPath, "develop", 4, expect.any(Number)));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "切换分支" })).toBeNull());
+    expect(mocks.switchBranch).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "当前分支 develop" })).toBe(trigger);
+    expect(document.activeElement).toBe(trigger);
+    await waitFor(() => expect(document.querySelector(".toast.ok .toast-text")?.textContent).toBe("已切换到 develop"));
+  });
+
+  it("分支弹层：切换失败时弹层内显示原因，分支和文件列表都不变，重试能成功", async () => {
+    const message = "此操作会覆盖未提交的修改，已停止。这些修改仍留在工作区。请先提交，或先临时保存，然后再继续。";
+    mocks.branchState.mockResolvedValue(branchFixture());
+    mocks.switchBranch.mockRejectedValueOnce({ code: "switch_failed", message, generation: 4 });
+    render(App);
+    await openRepo();
+    const fileRows = document.querySelectorAll(".file-row").length;
+    await fireEvent.click(screen.getByRole("button", { name: "当前分支 main" }));
+    const popover = await screen.findByRole("dialog", { name: "切换分支" });
+    await waitFor(() => expect(within(popover).getAllByRole("option").length).toBe(4));
+    await fireEvent.click(within(popover).getByRole("option", { name: /^develop/ }));
+
+    const alert = await within(popover).findByRole("alert");
+    expect(alert.textContent, "原因完整出现在弹层内").toContain(message);
+    expect(screen.getByRole("dialog", { name: "切换分支" }), "失败后弹层留着").toBe(popover);
+    expect(screen.getByRole("button", { name: "当前分支 main" })).toBeTruthy();
+    expect(document.querySelectorAll(".file-row")).toHaveLength(fileRows);
+    await waitFor(() => expect(within(popover).getByRole("option", { name: /^develop/ }).getAttribute("aria-disabled")).toBeNull());
+
+    mocks.switchBranch.mockResolvedValueOnce({ generation: 5, branches: [], snapshot: { ...snapshot, branch: { ...branch, name: "develop" } } });
+    await fireEvent.click(within(popover).getByRole("option", { name: /^develop/ }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "切换分支" })).toBeNull());
+    expect(mocks.switchBranch).toHaveBeenCalledTimes(2);
+  });
+
+  it("分支弹层：切换进行中和差异续读时条目置灰并说明原因，其他工作区的分支不能切", async () => {
+    mocks.branchState.mockResolvedValue(branchFixture());
+    let finish!: (value: StatusSnapshot) => void;
+    mocks.fetchRemote.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: /^同步/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: /获取更新/ }));
+
+    // 写入中分支按钮仍可打开：要在条目上看到原因，而不是一个灰按钮。
+    await fireEvent.click(screen.getByRole("button", { name: "当前分支 main" }));
+    const popover = await screen.findByRole("dialog", { name: "切换分支" });
+    const develop = await within(popover).findByRole("option", { name: /^develop/ });
+    expect(develop.getAttribute("aria-disabled")).toBe("true");
+    expect(develop.textContent).toContain("正在写入，稍后再试");
+    await fireEvent.click(develop);
+    expect(mocks.switchBranch).not.toHaveBeenCalled();
+
+    finish(snapshot);
+    await waitFor(() => expect(develop.getAttribute("aria-disabled")).toBeNull());
+    const shared = within(popover).getByRole("option", { name: /^shared/ });
+    expect(shared.getAttribute("aria-disabled")).toBe("true");
+    expect(shared.textContent).toContain("正被其他工作区使用：D:/wt");
+    await fireEvent.click(shared);
+    expect(mocks.switchBranch).not.toHaveBeenCalled();
+  });
+
+  it("分支弹层：列表过期时跟上 generation 重读一次，读取失败在弹层内说明", async () => {
+    mocks.branchState.mockRejectedValueOnce({ code: "stale", message: "过期", generation: 9 }).mockResolvedValueOnce(branchFixture());
+    render(App);
+    await openRepo();
+    const trigger = screen.getByRole("button", { name: "当前分支 main" });
+    await fireEvent.click(trigger);
+    let popover = await screen.findByRole("dialog", { name: "切换分支" });
+    await waitFor(() => expect(within(popover).getAllByRole("option").length).toBe(4));
+    expect(mocks.branchState.mock.calls[1].slice(0, 2)).toEqual([repoPath, 9]);
+    expect(within(popover).queryByRole("alert")).toBeNull();
+    await press("Escape");
+
+    mocks.branchState.mockRejectedValueOnce({ code: "unknown", message: "读取分支失败" });
+    await fireEvent.click(trigger);
+    popover = await screen.findByRole("dialog", { name: "切换分支" });
+    expect((await within(popover).findByRole("alert")).textContent).toContain("读取分支失败");
+  });
+
+  it("低频入口：分支弹层进入新建、合并和管理，同步菜单进入远程，命令面板的分支与标签仍是管理界面", async () => {
+    mocks.branchState.mockResolvedValue(branchFixture());
+    mocks.tagState.mockResolvedValue({ generation: 4, tags: [], snapshot });
+    mocks.remoteState.mockResolvedValue({ generation: 4, remotes: [], snapshot });
+    render(App);
+    await openRepo();
+    const trigger = screen.getByRole("button", { name: "当前分支 main" });
+    const closeModal = async () => {
+      await fireEvent.click(document.querySelector<HTMLElement>("[data-task-modal] [aria-label='关闭对话框']")!);
+      await waitFor(() => expect(document.querySelector("[data-task-modal]")).toBeNull());
+    };
+    const viaPopover = async (name: string, task: string) => {
+      await fireEvent.click(trigger);
+      const popover = await screen.findByRole("dialog", { name: "切换分支" });
+      await fireEvent.click(within(popover).getByRole("button", { name }));
+      await waitFor(() => expect(document.querySelector(`[data-task-modal="${task}"]`), name).toBeTruthy());
+      expect(screen.queryByRole("dialog", { name: "切换分支" })).toBeNull();
+      await closeModal();
+    };
+    await viaPopover("新建分支", "branch");
+    await viaPopover("合并到当前分支", "merge");
+    await viaPopover("管理分支与标签", "branch");
+
+    await fireEvent.click(screen.getByRole("button", { name: /^同步/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: /^远程/ }));
+    await waitFor(() => expect(document.querySelector('[data-task-modal="remote"]')).toBeTruthy());
+    await closeModal();
+
+    const palette = await openPalette();
+    await fireEvent.click(within(palette).getByRole("option", { name: /分支与标签/ }));
+    await waitFor(() => expect(document.querySelector('[data-task-modal="branch"]')).toBeTruthy());
+    expect(screen.queryByRole("dialog", { name: "切换分支" })).toBeNull();
   });
 
   it("Git 不可用：入口可关闭、指向设置运行环境分区，起始页也接上了诊断（R10、R13）", async () => {

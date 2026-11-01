@@ -203,6 +203,75 @@ describe("文件右键菜单", () => {
   });
 });
 
+describe("仓库弹层的仓库操作", () => {
+  const other = "D:/code/other";
+
+  async function openPopover() {
+    mocks.getSettings.mockResolvedValue({
+      theme: "dark",
+      panelWidths: { sidebar: 256, files: 360 },
+      git: { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "ok" },
+      recent: [{ name: "demo", path: repoPath, openedAtMs: 1 }, { name: "other", path: other, openedAtMs: 2 }],
+      settingsWarning: null,
+    });
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
+    return screen.findByRole("dialog", { name: "切换仓库" });
+  }
+
+  it("右键菜单叠在弹层上：复制路径后弹层还在，Esc 只关菜单这一层", async () => {
+    const popover = await openPopover();
+    const search = within(popover).getByRole("combobox");
+    await waitFor(() => expect(document.activeElement).toBe(search));
+    const option = within(popover).getByRole("option", { name: /other/ });
+    await fireEvent.contextMenu(option, { clientX: 40, clientY: 90 });
+    let menu = screen.getByRole("menu", { name: "other 的操作" });
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual([
+      "打开",
+      "在资源管理器中显示",
+      "复制完整路径",
+      "从最近列表移除",
+    ]);
+    // 点菜单不算点外面。
+    await fireEvent.mouseDown(within(menu).getByRole("menuitem", { name: "复制完整路径" }));
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "复制完整路径" }));
+    expect(writeText).toHaveBeenLastCalledWith(other);
+    expect(screen.getByRole("dialog", { name: "切换仓库" })).toBe(popover);
+
+    await fireEvent.contextMenu(option, { clientX: 40, clientY: 90 });
+    menu = screen.getByRole("menu", { name: "other 的操作" });
+    await fireEvent.keyDown(menu, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByRole("dialog", { name: "切换仓库" })).toBe(popover);
+    await waitFor(() => expect(document.activeElement, "焦点回到搜索框").toBe(search));
+  });
+
+  it("键盘：菜单键打开当前项的菜单，打开动作切换仓库并收起弹层", async () => {
+    mocks.openRepository.mockResolvedValue({ summary: { name: "demo", path: repoPath }, generation: 4, snapshot, draft: "", watchDegraded: false });
+    const popover = await openPopover();
+    const search = within(popover).getByRole("combobox");
+    await fireEvent.keyDown(search, { key: "F10", shiftKey: true });
+    const menu = screen.getByRole("menu", { name: "other 的操作" });
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "打开" }));
+    await waitFor(() => expect(mocks.openRepository).toHaveBeenLastCalledWith(other, expect.any(Number)));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "切换仓库" })).toBeNull());
+  });
+
+  it("行内按钮和右键都能移除；移除不删文件，弹层留着显示剩下的仓库", async () => {
+    mocks.forgetRecent.mockResolvedValue([{ name: "demo", path: repoPath, openedAtMs: 1 }]);
+    const popover = await openPopover();
+    await fireEvent.click(within(popover).getByRole("button", { name: "复制 other 的完整路径" }));
+    expect(writeText).toHaveBeenLastCalledWith(other);
+    await fireEvent.click(within(popover).getByRole("button", { name: "从列表移除 other" }));
+    await waitFor(() => expect(mocks.forgetRecent).toHaveBeenCalledWith(other));
+    await waitFor(() => expect(within(popover).getAllByRole("option")).toHaveLength(1));
+    expect(mocks.closeRepository, "移除别的仓库不关闭当前仓库").not.toHaveBeenCalled();
+    await fireEvent.keyDown(within(popover).getByRole("combobox"), { key: "ContextMenu" });
+    await fireEvent.click(within(screen.getByRole("menu", { name: "demo 的操作" })).getByRole("menuitem", { name: "从最近列表移除" }));
+    await waitFor(() => expect(mocks.forgetRecent).toHaveBeenLastCalledWith(repoPath));
+  });
+});
+
 describe("差异区", () => {
   it("可展开为完整文件（按大上下文重新读取），展开后不提供按块暂存", async () => {
     await openRepo();

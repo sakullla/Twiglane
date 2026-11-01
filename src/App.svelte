@@ -36,8 +36,9 @@
     Theme,
     WorkspaceView,
   } from "./lib/types";
-  import { hasCommitSummary, hueOf, initialOf } from "./lib/ui";
+  import { hasCommitSummary } from "./lib/ui";
   import BranchDialog from "./lib/components/BranchDialog.svelte";
+  import BranchSwitcher from "./lib/components/BranchSwitcher.svelte";
   import CommandPalette from "./lib/components/CommandPalette.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./lib/components/ContextMenu.svelte";
   import CommitDraft from "./lib/components/CommitDraft.svelte";
@@ -49,6 +50,7 @@
   import PublishModal from "./lib/components/PublishModal.svelte";
   import RecoveryActions from "./lib/components/RecoveryActions.svelte";
   import RepoDialogs from "./lib/components/RepoDialogs.svelte";
+  import RepoSwitcher from "./lib/components/RepoSwitcher.svelte";
   import ScopeModal from "./lib/components/ScopeModal.svelte";
   import SettingsModal from "./lib/components/SettingsModal.svelte";
   import StashModal from "./lib/components/StashModal.svelte";
@@ -120,8 +122,8 @@
   let navCollapsed = $derived(manualCollapsed ?? windowWidth < RAIL_COLLAPSE_WIDTH);
   /** 设置 modal 打开时要定位的分区；由 Git 诊断入口置为 runtime，其余入口为空。 */
   let settingsSection = $state<"appearance" | "runtime" | null>(null);
-  let repoMenuOpen = $state(false);
-  let repoMenuAnchor = $state<HTMLDivElement | null>(null);
+  /** 当前打开的标题栏弹层；anchor 是触发按钮，关闭后焦点回到这里。 */
+  let switcher = $state.raw<{ kind: "repo" | "branch"; anchor: HTMLElement } | null>(null);
   let confirmPath = $state<string | null>(null);
   let cloneOpen = $state(false);
   let pushRetry = $state(false);
@@ -240,22 +242,6 @@
   );
 
   $effect(() => {
-    if (!repoMenuOpen) return;
-    const close = (event: MouseEvent) => {
-      if (repoMenuAnchor && !repoMenuAnchor.contains(event.target as Node)) repoMenuOpen = false;
-    };
-    const key = (event: KeyboardEvent) => {
-      if (event.key === "Escape") repoMenuOpen = false;
-    };
-    window.addEventListener("mousedown", close);
-    window.addEventListener("keydown", key);
-    return () => {
-      window.removeEventListener("mousedown", close);
-      window.removeEventListener("keydown", key);
-    };
-  });
-
-  $effect(() => {
     const note = phaseNote;
     if (!note || pushRetry) return;
     const timer = setTimeout(() => {
@@ -372,10 +358,27 @@
     }
   }
 
+  function toggleSwitcher(kind: "repo" | "branch", anchor: HTMLElement) {
+    if (switcher?.kind === kind) closeSwitcher();
+    else switcher = { kind, anchor };
+  }
+
+  function closeSwitcher(refocus = true) {
+    const anchor = switcher?.anchor;
+    switcher = null;
+    if (refocus) anchor?.focus({ preventScroll: true });
+  }
+
+  /** 弹层里的入口：先把焦点还给触发按钮，随后打开的 modal 关闭时才回得来。 */
+  function runFromSwitcher(id: string) {
+    closeSwitcher();
+    runCommand(id);
+  }
+
   /** 七个任务入口共用单槽：任一时刻只有一个任务 modal。 */
   function openTask(task: TaskModal) {
     if (task !== "settings" && !opened) return;
-    repoMenuOpen = false;
+    closeSwitcher();
     cloneOpen = false;
     paletteOpen = false;
     taskModal = task;
@@ -428,7 +431,7 @@
 
   function openPalette() {
     if (taskModal || cloneOpen) return;
-    repoMenuOpen = false;
+    closeSwitcher();
     paletteOpen = true;
   }
 
@@ -485,7 +488,7 @@
     taskModal = null;
     paletteOpen = false;
     cloneOpen = false;
-    repoMenuOpen = false;
+    closeSwitcher(false);
     conflictFocus = null;
     remoteName = null;
     recent = [
@@ -1231,7 +1234,10 @@
         label: current ? "当前仓库" : "打开",
         icon: "folder-open",
         disabledReason: current ? "已经是当前仓库" : switchBlocked(commandState) ? switchBlockedReason(commandState) : undefined,
-        run: () => void openRecent(repo.path),
+        run: () => {
+          closeSwitcher();
+          void openRecent(repo.path);
+        },
       },
       {
         id: "reveal",
@@ -1771,54 +1777,48 @@
     {theme}
     disabled={writeLocked}
     onBrand={() => runCommand("palette.open")}
-    onRepo={() => (repoMenuOpen = !repoMenuOpen)}
-    onBranch={() => runCommand("task.branch")}
+    openSwitcher={switcher?.kind ?? null}
+    onRepo={(anchor) => toggleSwitcher("repo", anchor)}
+    onBranch={(anchor) => toggleSwitcher("branch", anchor)}
     onFetch={() => runCommand("sync.fetch")}
     onPull={() => runCommand("sync.pull")}
     onPush={() => runCommand("sync.push")}
+    onRemote={() => runCommand("task.remote")}
     onTheme={(next) => runCommand(`theme.${next}`)}
     onSettings={() => runCommand("task.settings")}
   />
 
-  {#if repoMenuOpen}
-    <div class="menu-anchor titlebar-menu" bind:this={repoMenuAnchor}>
-      <div class="menu left" role="menu" aria-label="切换仓库">
-        <div class="repo-menu-title">选择要打开的仓库</div>
-        {#each recent.slice(0, 6) as repo (repo.path)}
-          <!-- R11：禁用态也要给出原因。面板与 rail 各有一份措辞，菜单只有灰按钮就成了一条静默失败的路。 -->
-          <button
-            type="button"
-            class="menu-item repo-menu-item"
-            role="menuitemradio"
-            aria-checked={repo.path === opened?.summary.path}
-            disabled={switchBlocked(commandState)}
-            title={switchBlocked(commandState)
-              ? switchBlockedReason(commandState)
-              : repo.path === opened?.summary.path
-                ? `当前仓库：${repo.path}`
-                : `切换到 ${repo.name}`}
-            onclick={() => {
-              repoMenuOpen = false;
-              void openRecent(repo.path);
-            }}
-          >
-            <span class="repo-badge" style={`--hue:${hueOf(repo.path)}`} aria-hidden="true">{initialOf(repo.name)}</span>
-            <span><strong>{repo.name}</strong><small><bdi>{repo.path}</bdi></small></span>
-            {#if repo.path === opened?.summary.path}<Icon name="check" size={14} />{/if}
-          </button>
-        {/each}
-        <div class="menu-sep"></div>
-        <button type="button" class="menu-item" role="menuitem" disabled={writeLocked} onclick={() => { repoMenuOpen = false; runCommand("repo.add"); }}>
-          <Icon name="plus" /><span>添加仓库<small>打开一个本地 Git 仓库</small></span>
-        </button>
-        <button type="button" class="menu-item" role="menuitem" disabled={writeLocked} onclick={() => { repoMenuOpen = false; runCommand("repo.clone"); }}>
-          <Icon name="download" /><span>克隆仓库<small>克隆到新目录并打开</small></span>
-        </button>
-        <button type="button" class="menu-item" role="menuitem" onclick={() => { repoMenuOpen = false; void copyPath(opened?.summary.path ?? ""); }}>
-          <Icon name="copy" /><span>复制当前仓库路径</span>
-        </button>
-      </div>
-    </div>
+  {#if switcher?.kind === "repo"}
+    <RepoSwitcher
+      anchor={switcher.anchor}
+      repos={recent}
+      currentPath={opened?.summary.path ?? null}
+      blockedReason={switchBlocked(commandState) ? switchBlockedReason(commandState) : null}
+      actionReason={writeLocked ? switchBlockedReason(commandState) : null}
+      onSelect={(path) => {
+        closeSwitcher();
+        void openRecent(path);
+      }}
+      onForget={forget}
+      onCopyPath={copyPath}
+      onContextMenu={repoContextMenu}
+      onCommand={runFromSwitcher}
+      onClose={closeSwitcher}
+    />
+  {:else if switcher?.kind === "branch" && opened}
+    <BranchSwitcher
+      anchor={switcher.anchor}
+      {opened}
+      blockedReason={writeLocked ? switchBlockedReason(commandState) : null}
+      {nextId}
+      onBusy={(name) => (pending = name)}
+      onGeneration={adoptGeneration}
+      onSnapshot={applySnapshot}
+      onFailure={handleMutationError}
+      onNotice={notice}
+      onCommand={runFromSwitcher}
+      onClose={closeSwitcher}
+    />
   {/if}
 
   {#if reading}

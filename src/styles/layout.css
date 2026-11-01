@@ -371,9 +371,6 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--warning) 
    T5 · 工作台编排（只新增类，不改上面的既有规则）
    ========================================================================== */
 
-/* 标题栏下的仓库切换菜单：标题栏本身不是 .menu-anchor，这里给菜单一个锚点。 */
-.titlebar-menu { position: absolute; top: var(--titlebar-height); left: var(--space-8); z-index: var(--z-menu); }
-
 /* 主工作台：改动与提交历史两个视图同时挂载，只切换可见性。
    display:none 会丢掉滚动位置，因此隐藏态用 visibility + 绝对定位，
    各自列表的滚动与选中在来回切换后仍然保留（R12）。 */

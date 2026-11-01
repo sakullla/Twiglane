@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { fireEvent, render, screen } from "@testing-library/svelte";
+import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
 import { describe, expect, it, vi } from "vitest";
 import CommandPalette from "../src/lib/components/CommandPalette.svelte";
 import RepoSidebar from "../src/lib/components/RepoSidebar.svelte";
@@ -183,6 +183,7 @@ describe("自绘标题栏", () => {
       onFetch: () => {},
       onPull: () => {},
       onPush: () => {},
+      onRemote: () => {},
       onTheme: () => {},
       onSettings: () => {},
       ...overrides,
@@ -219,13 +220,60 @@ describe("自绘标题栏", () => {
     render(TitleBar, { props: titleProps({ ahead: 2, behind: 1, onFetch, onPull, onPush }) as never });
     const sync = screen.getByRole("button", { name: "同步 领先 2，落后 1" });
     await fireEvent.click(sync);
-    expect(screen.getAllByRole("menuitem")).toHaveLength(3);
+    expect(screen.getAllByRole("menuitem")).toHaveLength(4);
     expect(screen.getByRole("menuitem", { name: /获取更新/ })).toBeTruthy();
     expect(screen.getByRole("menuitem", { name: /拉取 1 个提交/ })).toBeTruthy();
     expect(screen.getByRole("menuitem", { name: /推送 2 个提交/ })).toBeTruthy();
     await fireEvent.click(screen.getByRole("menuitem", { name: /获取更新/ }));
     expect(onFetch).toHaveBeenCalled();
     expect(onPull).not.toHaveBeenCalled();
+  });
+
+  it("同步菜单底部进入远程；写入中菜单仍能打开，同步动作禁用而远程可用", async () => {
+    const onRemote = vi.fn();
+    render(TitleBar, { props: titleProps({ onRemote, disabled: true }) as never });
+    await fireEvent.click(screen.getByRole("button", { name: /^同步/ }));
+    const items = screen.getAllByRole("menuitem") as HTMLButtonElement[];
+    expect(items.at(-1)?.textContent, "远程在菜单最底部").toContain("远程");
+    expect(items.map((item) => item.disabled)).toEqual([true, true, true, false]);
+    await fireEvent.click(items.at(-1)!);
+    expect(onRemote).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("同步菜单全程可用键盘：方向键打开并移动，Esc 关闭并把焦点还给触发按钮", async () => {
+    render(TitleBar, { props: titleProps() as never });
+    const sync = screen.getByRole("button", { name: /^同步/ });
+    sync.focus();
+    await fireEvent.keyDown(sync, { key: "ArrowDown" });
+    const items = screen.getAllByRole("menuitem");
+    await waitFor(() => expect(document.activeElement).toBe(items[0]));
+    await fireEvent.keyDown(items[0], { key: "ArrowUp" });
+    expect(document.activeElement, "向上循环到底部的远程").toBe(items[3]);
+    await fireEvent.keyDown(items[3], { key: "ArrowDown" });
+    expect(document.activeElement).toBe(items[0]);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(document.activeElement).toBe(sync);
+  });
+
+  it("仓库和分支按钮把自己交给外壳，并显示弹层展开状态", async () => {
+    const onRepo = vi.fn();
+    const onBranch = vi.fn();
+    const { rerender } = render(TitleBar, { props: titleProps({ onRepo, onBranch, disabled: true }) as never });
+    const repoButton = screen.getByRole("button", { name: /^当前仓库/ }) as HTMLButtonElement;
+    const branchButton = screen.getByRole("button", { name: /^当前分支/ }) as HTMLButtonElement;
+    expect(branchButton.disabled, "忙碌时仍能打开弹层看原因").toBe(false);
+    await fireEvent.click(repoButton);
+    await fireEvent.click(branchButton);
+    expect(onRepo).toHaveBeenCalledWith(repoButton);
+    expect(onBranch).toHaveBeenCalledWith(branchButton);
+    expect(branchButton.getAttribute("aria-expanded")).toBe("false");
+    await rerender(titleProps({ onRepo, onBranch, openSwitcher: "branch" }) as never);
+    expect(branchButton.getAttribute("aria-expanded")).toBe("true");
+    expect(repoButton.getAttribute("aria-expanded")).toBe("false");
+    await rerender(titleProps({ branch: null }) as never);
+    expect(branchButton.disabled, "没有仓库就没有分支可切").toBe(true);
   });
 
   it("标题栏是拖拽区，按钮与控件不参与拖拽", () => {

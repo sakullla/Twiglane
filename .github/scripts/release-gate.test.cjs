@@ -54,3 +54,12 @@ test("requires a stable tag matching all project versions", () => {
   assert.throws(() => validateVersion("v9999.0.0"), /does not match/);
   assert.throws(() => validateVersion(`v${version}-rc.1`), /vMAJOR/);
 });
+
+test("default gate allows a full 60 minutes before the final check", async () => {
+  const options = fixture([...Array.from({ length: 240 }, () => []), [success]]);
+  delete options.attempts;
+  let elapsed = 0;
+  options.sleep = async (ms) => { elapsed += ms; };
+  assert.equal((await waitForMainCi(options)).id, 1);
+  assert.equal(elapsed, 60 * 60 * 1000);
+});

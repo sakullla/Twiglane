@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+env:
+  RUSTFLAGS: "-D warnings"
+  RUSTDOCFLAGS: "-D warnings"
+
 concurrency:
   group: validation-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -69,7 +73,7 @@ jobs:
         run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
   rust-macos:
-    name: Rust macOS target check
+    name: Rust macOS check and clippy
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -79,6 +83,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
+          components: clippy
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
@@ -87,6 +92,8 @@ jobs:
           cache-bin: false
       - name: Check macOS target
         run: cargo check --locked --manifest-path src-tauri/Cargo.toml --target aarch64-apple-darwin
+      - name: Clippy macOS target
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --target aarch64-apple-darwin --all-targets -- -D warnings
 
   rust-windows:
     name: Rust Windows tests and clippy

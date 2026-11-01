@@ -26,7 +26,7 @@ function validateVersion(tag, root = ".") {
 }
 
 async function waitForMainCi({ github, repo, sha, log = console.log,
-  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), attempts = 120 }) {
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), attempts = 241 }) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const { data } = await github.rest.actions.listWorkflowRuns({
       ...repo, workflow_id: "ci.yml", branch: "main", event: "push", head_sha: sha, per_page: 100,

@@ -21,7 +21,7 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 h1, h2, h3, p { margin: 0; }
 :focus { outline: none; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: var(--radius-sm); }
-::selection { background: color-mix(in srgb, var(--accent) 24%, transparent); }
+::selection { background: color-mix(in srgb, var(--accent) var(--selection-mix), transparent); }
 
 /* 工具类 */
 .icon { flex: none; display: block; }

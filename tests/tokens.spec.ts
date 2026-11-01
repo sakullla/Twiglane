@@ -387,6 +387,33 @@ describe("对比度门禁按实际渲染层合成", () => {
           expect(result.stdout, label).toContain(label);
         }
       }
+      // 代码文字逐一覆盖真实叠层：行内差异是双层，语法色要叠完再判定。
+      for (const [site, top, under] of [
+        [".diff-line.add .wd、.side-cell.add .wd", "--add-strong", "--surface + --add-bg"],
+        [".diff-line.del .wd、.side-cell.del .wd", "--del-strong", "--surface + --del-bg"],
+        [".cr-half.ours .mk", "--info@--mark-mix", "--surface + --info-soft"],
+        [".cr-half.theirs .mk", "--purple@--mark-mix", "--surface + --purple-soft"],
+        [".cr-line.res（已解决行）", "--success-softer", "--surface"],
+        [".cr-line.warn（未解决上下文）", "--warning-soft", "--surface"],
+      ]) {
+        for (const fg of ["--syn-keyword", "--syn-comment", "--fg", "--add-fg"]) {
+          const label = `${theme}/code ${site} ${fg} on ${top} over ${under} =`;
+          expect(result.stdout, label).toContain(label);
+        }
+      }
+    }
+  });
+
+  it("叠层比例由令牌声明，样式层不写死", () => {
+    const components = read(path.join(stylesDir, "components.css"));
+    expect(ruleBody(components, ".cr-half.ours .mk")).toMatch(/color-mix\(in srgb, var\(--info\) var\(--mark-mix\), transparent\)/);
+    expect(ruleBody(components, ".cr-half.theirs .mk")).toMatch(/color-mix\(in srgb, var\(--purple\) var\(--mark-mix\), transparent\)/);
+    expect(ruleBody(read(path.join(stylesDir, "base.css")), "::selection")).toMatch(
+      /color-mix\(in srgb, var\(--accent\) var\(--selection-mix\), transparent\)/,
+    );
+    expect(ruleBody(components, ".code ::selection, .code::selection"), "代码选区统一用 --fg").toMatch(/color:\s*var\(--fg\)/);
+    for (const [theme, tokens] of [["light", light], ["dark", dark]] as const) {
+      for (const name of ["--mark-mix", "--selection-mix"]) expect(tokens.get(name), `${theme} ${name}`).toMatch(/^\d+%$/);
     }
   });
 });

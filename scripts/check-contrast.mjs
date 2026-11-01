@@ -21,7 +21,8 @@
  *
  * 半透明令牌（如 --accent-soft）不只叠在画布上：它们实际落在 --bg、--surface、--surface-2
  * 上，深色里表面越亮、合成后的底越亮，只按 --bg 算会高估对比度。因此半透明底逐个表面
- * 合成后判定（TRANSLUCENT_BASES）；选中行里的文字和徽标再多叠一层选中底（SELECTED_ROW_*）。
+ * 合成后判定（TRANSLUCENT_BASES）；选中行里的文字和徽标再多叠一层选中底（SELECTED_ROW_*）；
+ * 代码文字按差异与冲突流的真实叠层判定，并各叠一层文本选区（CODE_STACKS）。
  * 不在解析范围的两类底色：渐变（--brand-grad，其上是品牌图标）与按需叠加的
  * 半透明徽标底（--push-count-bg，数字前景继承所在按钮，实测 6.24:1 / 7.82:1）。
  *
@@ -231,6 +232,75 @@ const SELECTED_ROW_BADGES = [
   ["del-fg", "del-bg"],
 ];
 
+/** 代码文字的前景：全部语法色、无高亮时的 --fg，以及 .tk-inserted/.tk-deleted/.tk-changed。 */
+const SYNTAX_FOREGROUNDS = ["keyword", "string", "string-expression", "constant", "function", "parameter", "comment", "punctuation", "link"].map(
+  (name) => `syn-${name}`,
+);
+const CODE_FOREGROUNDS = [...SYNTAX_FOREGROUNDS, "fg", "add-fg", "del-fg", "warning-text"];
+
+/** 冲突两侧行内差异的叠层：比例来自 --mark-mix，与 components.css 同一来源。 */
+const MARK_INFO = { token: "info", mix: "mark-mix" };
+const MARK_PURPLE = { token: "purple", mix: "mark-mix" };
+/** 文本选区：浏览器把 ::selection 底色画在元素背景之上，比例来自 --selection-mix；
+ *  选中的代码文字由 .code ::selection 换成 --fg，不再保留语法色。 */
+const SELECTION_LAYER = { token: "accent", mix: "selection-mix" };
+
+/**
+ * 代码文字的真实渲染叠层，从下到上。差异和冲突流的滚动容器都是不透明 --surface，
+ * 所以最底层固定是它；三栏的 pre 与 textarea 直接落在 --surface 上，没有额外叠层。
+ */
+const CODE_STACKS = [
+  { site: ".diff-line / .cr-line（上下文）", layers: ["surface"] },
+  { site: ".diff-line.add、.side-cell.add", layers: ["surface", "add-bg"] },
+  { site: ".diff-line.add .wd、.side-cell.add .wd", layers: ["surface", "add-bg", "add-strong"] },
+  { site: ".diff-line.del、.side-cell.del", layers: ["surface", "del-bg"] },
+  { site: ".diff-line.del .wd、.side-cell.del .wd", layers: ["surface", "del-bg", "del-strong"] },
+  { site: ".cr-line.res（已解决行）", layers: ["surface", "success-softer"] },
+  { site: ".cr-line.warn（未解决上下文）", layers: ["surface", "warning-soft"] },
+  { site: ".cr-line.base（共同祖先）", layers: ["surface", "surface-2"] },
+  { site: ".cr-half.ours", layers: ["surface", "info-soft"] },
+  { site: ".cr-half.ours .mk", layers: ["surface", "info-soft", MARK_INFO] },
+  { site: ".cr-pair.same .cr-half.ours .mk", layers: ["surface", MARK_INFO] },
+  { site: ".cr-half.theirs", layers: ["surface", "purple-soft"] },
+  { site: ".cr-half.theirs .mk", layers: ["surface", "purple-soft", MARK_PURPLE] },
+  { site: ".cr-pair.same .cr-half.theirs .mk", layers: ["surface", MARK_PURPLE] },
+];
+
+/** 代码旁的说明文字：行号、块标题与冲突块头部，同样落在叠层上，但不可选中，不叠选区。 */
+const CODE_CHROME_STACKS = [
+  { fg: "add-fg", layers: ["surface", "add-bg", "add-strong"], site: ".diff-line.add .ln" },
+  { fg: "del-fg", layers: ["surface", "del-bg", "del-strong"], site: ".diff-line.del .ln" },
+  { fg: "fg-subtle", layers: ["surface", "surface-2"], site: ".diff-line .ln" },
+  { fg: "hunk-fg", layers: ["surface", "hunk-bg"], site: ".diff-line.hunk" },
+  { fg: "fg-muted", layers: ["surface", "hunk-bg"], site: ".hunk-context" },
+  { fg: "fg-subtle", layers: ["surface"], site: ".cr-line .ln" },
+  { fg: "success-text", layers: ["surface", "success-softer"], site: ".cr-line.res .ln" },
+  { fg: "fg-muted", layers: ["surface", "success-softer"], site: ".cr-line.res.is-empty .code" },
+  { fg: "warning-text", layers: ["surface", "warning-soft"], site: ".cr-line.warn .ln" },
+  { fg: "fg-subtle", layers: ["surface", "info-soft"], site: ".cr-half.ours .ln" },
+  { fg: "fg-subtle", layers: ["surface", "purple-soft"], site: ".cr-half.theirs .ln" },
+  { fg: "fg", layers: ["surface", "accent-softer"], site: ".cr-head.current" },
+  { fg: "fg-subtle", layers: ["surface", "accent-softer"], site: ".cr-head.current .cr-of" },
+  { fg: "fg-subtle", layers: ["surface", "accent-softer", "hover"], site: ".cr-head-title:hover .cr-of" },
+  { fg: "accent-text", layers: ["surface", "accent-softer", "accent-soft"], site: ".cr-head.current .chip.current" },
+  { fg: "warning-text", layers: ["surface", "accent-softer", "warning-soft"], site: ".cr-head.current .chip.warn" },
+  { fg: "success-text", layers: ["surface", "accent-softer", "success-soft"], site: '.cr-head.current .chip[data-hunk-state="resolved"]' },
+  { fg: "success-text", layers: ["surface-2", "success-soft"], site: '.cr-head .chip[data-hunk-state="resolved"]' },
+  { fg: "warning-text", layers: ["surface-2", "warning-soft"], site: ".cr-head .chip.warn" },
+];
+
+/** 叠层比例的唯一来源：这些声明必须引用令牌，写死百分比门禁就和渲染脱节了。 */
+const LAYER_SOURCE_RULES = [
+  { file: "base.css", selector: "::selection", pattern: /var\(--accent\) var\(--selection-mix\)/ },
+  { file: "components.css", selector: ".code ::selection", pattern: /color:\s*var\(--fg\)/ },
+  { file: "components.css", selector: ".cr-half.ours .mk", pattern: /var\(--info\) var\(--mark-mix\)/ },
+  { file: "components.css", selector: ".cr-half.theirs .mk", pattern: /var\(--purple\) var\(--mark-mix\)/ },
+  { file: "components.css", selector: ".diff-line.add .wd", pattern: /var\(--add-strong\)/ },
+  { file: "components.css", selector: ".side-cell.add .wd", pattern: /var\(--add-strong\)/ },
+  { file: "components.css", selector: ".diff-line.del .wd", pattern: /var\(--del-strong\)/ },
+  { file: "components.css", selector: ".side-cell.del .wd", pattern: /var\(--del-strong\)/ },
+];
+
 const MIN_TEXT = 4.5;
 const MIN_UI = 3;
 
@@ -387,15 +457,28 @@ function resolve(tokens, name, base, label, problems, hue) {
   return base ? over(parsed, base) : parsed;
 }
 
+/** 读取一层底色：令牌名，或 { token, mix }（令牌按 --mix 百分比与 transparent 混合）。 */
+function layerColor(tokens, layer, base, label, problems) {
+  if (typeof layer === "string") return resolve(tokens, layer, base, label, problems);
+  const color = resolve(tokens, layer.token, null, label, problems);
+  const share = percent(tokens, layer.mix, label, problems);
+  if (!color || share === null) return null;
+  return over({ ...color, a: color.a * (share / 100) }, base);
+}
+
 /** 按从下到上的顺序逐层合成底色；最底层必须是不透明表面。 */
 function stacked(tokens, layers, label, problems) {
   let result = null;
-  for (const name of layers) {
-    const layer = resolve(tokens, name, result, label, problems);
-    if (!layer) return null;
-    result = layer;
+  for (const layer of layers) {
+    const color = layerColor(tokens, layer, result, label, problems);
+    if (!color) return null;
+    result = color;
   }
   return result;
+}
+
+function layerName(layer) {
+  return typeof layer === "string" ? `--${layer}` : `--${layer.token}@--${layer.mix}`;
 }
 
 /** 单个底色令牌的全部实际渲染层：不透明令牌只有自身，半透明令牌逐个表面各一组。 */
@@ -674,7 +757,7 @@ function main() {
       }
     };
     const judgeStack = (pairLabel, fgName, layers, min, kind) => {
-      const label = layers.length > 1 ? `${pairLabel} over --${layers.slice(0, -1).join(" + --")}` : pairLabel;
+      const label = layers.length > 1 ? `${pairLabel} over ${layers.slice(0, -1).map(layerName).join(" + ")}` : pairLabel;
       const bg = stacked(tokens, layers, label, problems);
       if (!bg) return;
       const fg = resolve(tokens, fgName, bg, label, problems);
@@ -693,6 +776,17 @@ function main() {
       for (const [fgName, badge] of SELECTED_ROW_BADGES) {
         judgeStack(`${theme}/selected --${fgName} on --${badge}`, fgName, [base, SELECTED_ROW_LAYER, badge], MIN_TEXT, "selected");
       }
+    }
+    for (const { site, layers } of CODE_STACKS) {
+      const top = layerName(layers[layers.length - 1]);
+      for (const fgName of CODE_FOREGROUNDS) {
+        judgeStack(`${theme}/code ${site} --${fgName} on ${top}`, fgName, layers, MIN_TEXT, "code");
+      }
+      // 代码选区把文字统一换成 --fg（.code ::selection），所以这里只判 --fg。
+      judgeStack(`${theme}/code ${site} --fg on ${layerName(SELECTION_LAYER)}`, "fg", [...layers, SELECTION_LAYER], MIN_TEXT, "code");
+    }
+    for (const { site, fg, layers } of CODE_CHROME_STACKS) {
+      judgeStack(`${theme}/code ${site} --${fg} on ${layerName(layers[layers.length - 1])}`, fg, layers, MIN_TEXT, "code");
     }
     for (const pair of COMPOSITE_TEXT_PAIRS) {
       const label = `${theme}/composite --${pair.fg}@${pair.opacity} on --${pair.bg}`;
@@ -720,6 +814,14 @@ function main() {
         if (!pass) failures.push(`${label} = ${value.toFixed(2)}:1 (< ${MIN_TEXT}:1)`);
       }
     }
+  }
+
+  // ---- 叠层比例与样式层同一来源 ----
+  for (const { file, selector, pattern } of LAYER_SOURCE_RULES) {
+    const rules = parseRules(readFileSync(path.join(STYLES_DIR, file), "utf8"));
+    const rule = rules.find((candidate) => splitSelectorList(candidate.selector).includes(selector));
+    if (!rule) failures.push(`${file} :: ${selector} 不存在：叠层清单已过期，请同步 CODE_STACKS 与 LAYER_SOURCE_RULES`);
+    else if (!pattern.test(rule.body)) failures.push(`${file} :: ${selector} 没有引用门禁校验的叠层令牌（${pattern.source}）`);
   }
 
   // ---- 样式层 alpha 淡化位点（默认拒绝 + 显式标定） ----

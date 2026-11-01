@@ -1171,9 +1171,12 @@ label.list-row .checkbox { margin-top: 2px; }
 .cr-pair:not(.same) .cr-half.theirs { background: var(--purple-soft); }
 .cr-half.blank { background: var(--surface-2); }
 .cr-pair:not(.same) .cr-half.blank { background: var(--surface-2); }
+/* 选中代码时统一用 --fg：语法色叠上选区底后过不了 4.5:1，门禁按这条规则判定。 */
+.code ::selection, .code::selection { color: var(--fg); }
 .cr-half .mk { border-radius: 3px; }
-.cr-half.ours .mk { background: color-mix(in srgb, var(--info) 30%, transparent); }
-.cr-half.theirs .mk { background: color-mix(in srgb, var(--purple) 30%, transparent); }
+/* 叠层比例受代码文字 4.5:1 限制，所以再加一条底线，行内差异不只靠底色深浅辨认。 */
+.cr-half.ours .mk { background: color-mix(in srgb, var(--info) var(--mark-mix), transparent); box-shadow: inset 0 -1px 0 var(--info); }
+.cr-half.theirs .mk { background: color-mix(in srgb, var(--purple) var(--mark-mix), transparent); box-shadow: inset 0 -1px 0 var(--purple); }
 .cr-row.last { border-bottom: 1px solid var(--border-strong); border-radius: 0 0 var(--radius-sm) var(--radius-sm); }
 .cr-row.last.current { border-bottom-color: var(--accent); }
 .cr-fold { align-items: center; justify-content: center; gap: var(--space-6); padding: 0 var(--space-12); font-family: var(--font); }

@@ -171,6 +171,10 @@
   --repo-badge-ring-alpha: 0.55;
   /* 语法高亮（Shiki CSS 变量主题输出的语义类）：每个颜色对 surface / 增删行底 / 行内改动底 /
      冲突两侧底都 ≥ 4.5:1，由 scripts/check-contrast.mjs 逐对校验。 */
+  /* 代码文字下的半透明叠层比例：冲突两侧的行内差异（--mark-mix）和文本选区（--selection-mix）。
+     样式层用 color-mix 引用，check-contrast 读同一令牌按真实叠层判定，比例只在这里声明。 */
+  --mark-mix: 14%;
+  --selection-mix: 24%;
   --syn-keyword: #b3122a;
   --syn-string: #0a3069;
   --syn-string-expression: #0e5b23;
@@ -232,7 +236,7 @@
   /* 重命名行「来源路径」的弱化色：与浅色主题同义，按 0.85 淡化标定。 */
   --purple-dimmed: #dcaef0;
   --add-bg: rgba(70, 190, 100, 0.13);
-  --add-strong: rgba(70, 190, 100, 0.22);
+  --add-strong: rgba(70, 190, 100, 0.17);
   --add-fg: #8ae3a2;
   --del-bg: rgba(238, 111, 120, 0.11);
   --del-strong: rgba(238, 111, 120, 0.18);
@@ -264,6 +268,8 @@
   --repo-badge-ring-light: 32%;
   --repo-badge-ring-alpha: 0.5;
   /* 语法高亮：与浅色主题同义，按深色画布取值。 */
+  --mark-mix: 14%;
+  --selection-mix: 24%;
   --syn-keyword: #ff8b82;
   --syn-string: #a5d6ff;
   --syn-string-expression: #8ee99a;

@@ -1596,10 +1596,13 @@ mod tests {
         let backend = fixture.backend();
         let parent = fixture.path().join("parent");
         fs::create_dir(&parent).unwrap();
+        // Exercise a path alias even when TEMP does not use Windows 8.3 names.
+        let parent = parent.join(".");
         let sibling = parent.join("sibling.txt");
         fs::write(&sibling, b"same").unwrap();
         let destination = parent.join("residual");
         fs::create_dir(&destination).unwrap();
+        let expected_destination = canonical_existing(&destination).unwrap();
         let error = clone_repository(
             &backend,
             "https://127.0.0.1:9/nope.git",
@@ -1610,7 +1613,13 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.code, "network");
-        assert!(error.message.contains(&destination.display().to_string()));
+        assert!(
+            error
+                .message
+                .contains(&expected_destination.display().to_string()),
+            "{}",
+            error.message
+        );
         assert!(error.message.contains("重试"));
         assert!(destination.is_dir());
         assert_eq!(fs::read(&sibling).unwrap(), b"same");

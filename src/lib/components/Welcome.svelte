@@ -1,11 +1,13 @@
 <script lang="ts">
   import type { RecentRepo } from "../types";
   import { hueOf, initialOf } from "../ui";
+  import { BRAND, MODIFIER_LABEL } from "../brand";
+  import BrandMark from "./BrandMark.svelte";
   import Icon from "./Icon.svelte";
 
   /**
-   * 起始页：单屏三入口（打开 / 克隆 / 新建）加最近仓库，不堆营销段落。
-   * Git 不可用时只多一行诊断入口，不展开说明。
+   * 起始页：hero（一句话价值 + 产品插画）+ 单屏三入口（打开 / 克隆 / 新建）+ 最近仓库，
+   * 不堆营销段落。Git 不可用时只多一行诊断入口，不展开说明。
    */
   interface Props {
     recent: RecentRepo[];
@@ -30,8 +32,38 @@
   let shown = $derived(recent.slice(0, 5));
 </script>
 
-<div class="welcome welcome-compact">
-  <div class="welcome-inner welcome-inner-compact">
+<div class="welcome">
+  <div class="welcome-inner">
+    <section class="welcome-hero">
+      <div class="welcome-copy">
+        <span class="welcome-eyebrow"><BrandMark compact />{BRAND.full}</span>
+        <h1>把 <span>Git 工作流</span><br />装进一个安静的窗口</h1>
+        <p>改动暂存、差异审阅、提交历史、分支合并与临时保存都在手边；<br />本地优先，打开即用。</p>
+        <div class="welcome-assurances">
+          <span><Icon name="check-circle" size={13} />本地优先，无需登录</span>
+          <span><Icon name="keyboard" size={13} />命令面板与快捷键</span>
+          <span><Icon name="commit" size={13} />基于系统 Git</span>
+          <span><Icon name="layers" size={13} />多仓库并行</span>
+        </div>
+      </div>
+      <div class="welcome-art" aria-hidden="true">
+        <span class="art-glow"></span>
+        <div class="art-card art-card-back"><span></span><span></span><span></span></div>
+        <div class="art-card art-card-front">
+          <div class="art-card-head">
+            <BrandMark compact />
+            <span class="art-chip">feature/modern-ui</span>
+          </div>
+          <div class="art-branch-line"><span class="art-node"></span><span></span></div>
+          <strong>twiglane</strong>
+          <span class="art-path">C:/Users/dev/project/twiglane</span>
+          <div class="art-diff add">+ const view = render("src/App.svelte", {"{"} theme: "modern" {"}"});</div>
+          <div class="art-diff del">- return legacyRender("src/App.svelte", value0);</div>
+          <div class="art-commit"><Icon name="commit" size={11} />2 个提交待推送</div>
+        </div>
+      </div>
+    </section>
+
     <section class="welcome-actions" aria-label="开始使用">
       <button type="button" class="action-card primary" {disabled} onclick={onAdd}>
         <span class="ac-icon"><Icon name="folder-open" size={21} /></span>
@@ -84,5 +116,14 @@
         </div>
       {/if}
     </section>
+
+    <footer class="welcome-footer">
+      <div class="shortcuts">
+        <span><kbd>{MODIFIER_LABEL}</kbd><kbd>K</kbd>命令面板</span>
+        <span><kbd>{MODIFIER_LABEL}</kbd><kbd>1</kbd>改动</span>
+        <span><kbd>{MODIFIER_LABEL}</kbd><kbd>2</kbd>提交历史</span>
+      </div>
+      <p class="welcome-note">{BRAND.full} · 本地优先的 Git 客户端<br />危险操作先确认，不会覆盖或强推</p>
+    </footer>
   </div>
 </div>

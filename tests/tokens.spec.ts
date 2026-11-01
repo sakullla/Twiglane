@@ -324,7 +324,6 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   // --- components.css：容器与浮层外框（容器内的控件各自带边界） ---
   ".menu": "浮层外框；菜单项自身用 hover 背景与文字色标示，外框不充当控件边界",
   ".toast": "通知卡外框，卡体不可交互（关闭按钮自带 hover 背景）",
-  ".toast.error": "错误通知的语义色描边，仍是通知卡外框而非控件边界",
   ".modal-card": "modal 卡片外框；层次由遮罩与阴影表达，卡内输入/按钮各自带边界",
   ".modal-foot": "modal 底部横向分隔线，分隔正文与操作区",
   ".callout": "提示框外框，静态说明块，无交互态",

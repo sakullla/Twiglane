@@ -25,13 +25,15 @@
     onFailure: (error: unknown) => void;
     onNotice: (message: string) => void;
     onCommand: (id: string) => void;
+    /** 「新建分支」：打开分支 modal 并直接展开新建表单。 */
+    onCreateBranch: () => void;
     onClose: (refocus?: boolean) => void;
   }
 
-  let { anchor, opened, blockedReason, nextId, onBusy, onGeneration, onSnapshot, onFailure, onNotice, onCommand, onClose }: Props = $props();
+  let { anchor, opened, blockedReason, nextId, onBusy, onGeneration, onSnapshot, onFailure, onNotice, onCommand, onCreateBranch, onClose }: Props = $props();
 
-  const ACTIONS: { id: string; label: string; icon: IconName }[] = [
-    { id: "task.branch", label: "新建分支", icon: "plus" },
+  const ACTIONS: { id: string; label: string; icon: IconName; create?: boolean }[] = [
+    { id: "task.branch", label: "新建分支", icon: "plus", create: true },
     { id: "task.merge", label: "合并到当前分支", icon: "merge" },
     { id: "task.branch", label: "管理分支与标签", icon: "tag" },
   ];
@@ -185,7 +187,7 @@
   {/snippet}
   {#snippet foot()}
     {#each ACTIONS as action (action.label)}
-      <button type="button" class="menu-item" onclick={() => onCommand(action.id)}>
+      <button type="button" class="menu-item" onclick={() => (action.create ? onCreateBranch() : onCommand(action.id))}>
         <Icon name={action.icon} size={14} />
         <span>{action.label}</span>
       </button>

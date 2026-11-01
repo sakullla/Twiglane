@@ -108,11 +108,34 @@ describe("分支右键菜单", () => {
   it("默认从当前分支创建；取消「创建后切换」时只创建、不关闭", async () => {
     const { onClose } = setup();
     await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+    await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
     await fireEvent.input(screen.getByLabelText("新建分支"), { target: { value: "spike" } });
     await fireEvent.click(screen.getByRole("checkbox", { name: "创建后切换过去" }));
     await fireEvent.click(screen.getByRole("button", { name: /创建分支/ }));
     await waitFor(() => expect(api.createBranchFrom).toHaveBeenCalledWith("/repo", "spike", "feature/ui", false, 4, 7));
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("从当前分支新建时起点落在「当前分支」选项上，不留空下拉", async () => {
+    setup();
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+    await fireEvent.contextMenu(rowOf("feature/ui"), { clientX: 100, clientY: 100 });
+    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "从此分支新建分支…" }));
+    const base = screen.getByRole("combobox", { name: "新分支的起点" }) as HTMLSelectElement;
+    expect(base.value).toBe("");
+    expect(base.selectedIndex).toBe(0);
+  });
+
+  it("从分支菜单新建：表单直接展开并聚焦名称，收起后起点不残留", async () => {
+    setup();
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+    await fireEvent.contextMenu(rowOf("main"), { clientX: 100, clientY: 100 });
+    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "从此分支新建分支…" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("新建分支")));
+    await fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "新建分支" })));
+    await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
+    expect((screen.getByRole("combobox", { name: "新分支的起点" }) as HTMLSelectElement).value).toBe("");
   });
 
   it("重命名：就地输入新名称，确认后调用后端；名称没变时不可确认", async () => {

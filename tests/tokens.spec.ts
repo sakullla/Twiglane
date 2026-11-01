@@ -591,13 +591,9 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".full-value": "详情弹窗的只读展示框（readonly textarea），只区分文本块；可编辑态 textarea.full-value.editable 用控件边界",
   ".multi-file": "多文件卡外框，卡内文件行自带交互反馈",
   ".span-main": "历史/合并面板容器外框",
-  ".branch-current": "当前分支卡的 accent 16% 强调描边，是状态容器而非控件边界",
-  ".branch-create": "新建分支表单容器轮廓；内部 .input/.field 自带控件边界",
-  ".tag-create": "新建标签表单容器轮廓；内部 .input 自带控件边界",
   ".toolbar-group": "标题栏按钮组外框；组内 .tb-btn 自带 hover 背景",
   ".view-heading-status": "视图标题右侧状态胶囊，静态展示",
   ".chip.ignore": "忽略标记 chip 的虚线描边，是状态标记而非可点击控件",
-  ".branch-current-sync > span": "上游/下游计数胶囊，静态展示",
 
   // --- components.css：表格/列分隔线与分区线 ---
   ".panel-toolbar": "面板工具条底部横向分隔线",

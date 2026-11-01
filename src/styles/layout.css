@@ -104,8 +104,8 @@
 .view-title-line .count { background: var(--surface); border: 1px solid var(--border); }
 .view-heading-copy p { margin-top: 4px; color: var(--fg-muted); font-size: var(--text-sm); }
 .view-heading-status { margin-left: auto; display: flex; align-items: center; gap: 7px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in srgb, var(--surface) 70%, transparent); color: var(--fg-muted); font-size: var(--text-xs); white-space: nowrap; }
-.status-orb, .local-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-subtle); flex: none; box-shadow: 0 0 0 3px var(--surface-3); }
-.status-orb.live, .local-dot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.status-orb { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-subtle); flex: none; box-shadow: 0 0 0 3px var(--surface-3); }
+.status-orb.live { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .status-orb.stale { background: var(--warning); box-shadow: 0 0 0 3px var(--warning-soft); }
 .view-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .view-loading { flex: 1; display: grid; place-items: center; color: var(--accent-text); }
@@ -211,7 +211,6 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--warning) 
   .view-heading-status { display: none; }
   .tb-btn .tb-label { display: none; }
   .tb-btn { padding: 0 7px; }
-  .branch-current-badge { display: none; }
 }
 @media (max-width: 960px) {
   .associate-btn { display: none; }
@@ -223,9 +222,6 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--warning) 
   .merge-guide-arrow { flex-direction: row; }
   .merge-guide-sentence { flex-wrap: wrap; }
   .merge-guide-actions { flex-wrap: wrap; }
-  .branch-current-sync { display: none; }
-  .branch-manager-tools { align-items: stretch; flex-direction: column; }
-  .branch-manager-tools .segmented { align-self: flex-start; }
 }
 @media (max-height: 800px) {
   /* 旧 .topbar 外壳在窄高时把顶栏压到 58：变量与高度一起改，进度条自动跟随 */

@@ -138,6 +138,8 @@
   let historyPath = $state<string | null>(null);
   let historyQuery = $state("");
   let taskModal = $state<TaskModal | null>(null);
+  /** 本次打开分支 modal 是为了新建：直接展开表单。每次 openTask 都先清空。 */
+  let branchCreateIntent = $state(false);
   let paletteOpen = $state(false);
   /** 当前打开的右键菜单（文件列表、最近仓库）；任务 modal 里的右键菜单由各自组件承载。 */
   let contextMenu = $state<ContextMenuRequest | null>(null);
@@ -373,12 +375,19 @@
     runCommand(id);
   }
 
+  /** 分支弹层的「新建分支」：和其它入口走同一个命令，只多带一个打开意图。 */
+  function runBranchCreate() {
+    runFromSwitcher("task.branch");
+    if (taskModal === "branch") branchCreateIntent = true;
+  }
+
   /** 七个任务入口共用单槽：任一时刻只有一个任务 modal。 */
   function openTask(task: TaskModal) {
     if (task !== "settings" && !opened) return;
     closeSwitcher();
     cloneOpen = false;
     paletteOpen = false;
+    branchCreateIntent = false;
     taskModal = task;
     if (task === "merge") void probeMerge();
     if (task === "publish") void loadRemoteName();
@@ -1798,6 +1807,7 @@
       onFailure={handleMutationError}
       onNotice={notice}
       onCommand={runFromSwitcher}
+      onCreateBranch={runBranchCreate}
       onClose={closeSwitcher}
     />
   {/if}
@@ -2096,6 +2106,7 @@
       mergeTarget = name;
       openTask("merge");
     }}
+    startCreating={branchCreateIntent}
     {nextId}
   />
 {:else if taskModal === "settings"}

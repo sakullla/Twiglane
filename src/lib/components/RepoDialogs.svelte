@@ -40,10 +40,12 @@
   let remotes = $state<RemoteInfo[]>([]);
   let remoteName = $state("origin");
   let remoteUrl = $state("");
+  let remoteNameInput = $state<HTMLInputElement | null>(null);
   let localBusy = $state(false);
   /**
    * 远程列表的读取结果：只有真正读完才写入，写锁期间跳过的那次不算。
    * ok 为假时不再自动重读（失败也会释放锁，否则会循环），由「重试」清空。
+   * generation 过期不算失败：readRemotes 内部跟上后重读一次，只有重读也失败才记 ok 为假。
    */
   let loaded = $state<{ key: string; ok: boolean } | null>(null);
 
@@ -94,6 +96,17 @@
     onClose();
   }
 
+  /** 过期时用后端给的 generation 重读一次；成功后由 onSnapshot 让外壳跟上，再过期就按失败处理。 */
+  async function readRemotes(path: string, generation: number) {
+    try {
+      return await api.remoteState(path, generation, nextId());
+    } catch (error) {
+      const failure = normalizeError(error);
+      if (failure.code !== "stale" || failure.generation === undefined) throw failure;
+      return api.remoteState(path, failure.generation, nextId());
+    }
+  }
+
   async function loadRemotes() {
     const current = opened;
     if (!current) return;
@@ -103,7 +116,7 @@
     };
     const result = await run("remote", async () => {
       try {
-        const state = await api.remoteState(key, current.generation, nextId());
+        const state = await readRemotes(key, current.generation);
         settle(true);
         return state;
       } catch (error) {
@@ -115,6 +128,12 @@
     remotes = result.remotes;
     onSnapshot(result.snapshot);
     if (!remoteName && result.remotes[0]) remoteName = result.remotes[0].name;
+  }
+
+  /** 重试会把按钮换成加载态：先把焦点放到常驻输入框，否则焦点掉到 body，Esc 就到不了 Modal。 */
+  function retryLoad() {
+    remoteNameInput?.focus();
+    loaded = null;
   }
 
   function editRemote(remote: RemoteInfo) {
@@ -205,7 +224,7 @@
       {#if remotesFailed}
         <div class="list-empty">
           没有读到远程配置。
-          <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={() => (loaded = null)}>重试</button>
+          <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={retryLoad}>重试</button>
         </div>
       {:else if !remotesReady}
         <div class="list-empty" data-remote-loading><span class="spinner"></span> 正在读取远程</div>
@@ -232,7 +251,7 @@
     <div class="row" style="flex-wrap: nowrap; align-items: flex-end">
       <div class="form-group" style="width: 160px; flex: none">
         <label class="label" for="remote-name">名称</label>
-        <input id="remote-name" class="input" bind:value={remoteName} autocomplete="off" spellcheck="false" />
+        <input id="remote-name" class="input" bind:this={remoteNameInput} bind:value={remoteName} autocomplete="off" spellcheck="false" />
       </div>
       <div class="form-group" style="flex: 1">
         <label class="label" for="remote-url">地址</label>

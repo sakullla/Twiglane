@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick, untrack } from "svelte";
   import { api } from "../api";
   import { filterBranches } from "../branches";
   import { normalizeError } from "../errors";
@@ -23,6 +24,8 @@
     onMergeBranch?: (name: string) => void;
     /** 把当前分支合并到某个本地分支：打开分支合并并预选目标。 */
     onMergeInto?: (name: string) => void;
+    /** 打开意图：入口本身就是「新建分支」时，打开即展开表单并聚焦名称，不必再点一次。 */
+    startCreating?: boolean;
     nextId: () => number;
   }
 
@@ -37,11 +40,14 @@
     onOpenHistory,
     onMergeBranch,
     onMergeInto,
+    startCreating = false,
     nextId,
   }: Props = $props();
 
   let branches = $state<BranchRecord[]>([]);
   let branchQuery = $state("");
+  /** 新建表单按需展开，展开时替换搜索和列表（R10：不和列表同时铺开）。 */
+  let creating = $state(untrack(() => startCreating));
   let branchName = $state("");
   /** 新分支的起点：空串表示当前分支（或游离 HEAD 的当前提交）。 */
   let createBase = $state("");
@@ -49,6 +55,8 @@
   let renaming = $state<{ name: string; value: string } | null>(null);
   let menu = $state<ContextMenuRequest | null>(null);
   let nameInput = $state<HTMLInputElement | null>(null);
+  let searchInput = $state<HTMLInputElement | null>(null);
+  let createToggle = $state<HTMLButtonElement | null>(null);
   let tab = $state<BranchTab>("local");
   let localBusy = $state(false);
   let errorText = $state<string | null>(null);
@@ -61,6 +69,7 @@
   /**
    * 列表读取的结果：只有真正读完才写入，写锁期间跳过的那次不算。
    * ok 为假时不再自动重读（失败也会释放锁，否则会循环），由「重试」清空。
+   * generation 过期不算失败：readBranches 内部跟上后重读一次，只有重读也失败才记 ok 为假。
    */
   let loaded = $state<{ key: string; ok: boolean } | null>(null);
   let confirmDelete = $state<
@@ -120,11 +129,22 @@
     onSnapshot(result.snapshot);
   }
 
+  /** 过期时用后端给的 generation 重读一次；成功后由 onSnapshot 让外壳跟上，再过期就按失败处理。 */
+  async function readBranches(path: string): Promise<BranchState> {
+    try {
+      return await api.branchState(path, opened.generation, nextId());
+    } catch (error) {
+      const failure = normalizeError(error);
+      if (failure.code !== "stale" || failure.generation === undefined) throw failure;
+      return api.branchState(path, failure.generation, nextId());
+    }
+  }
+
   async function loadBranches() {
     const path = opened.summary.path;
     const result = await run(async () => {
       try {
-        const state = await api.branchState(path, opened.generation, nextId());
+        const state = await readBranches(path);
         loaded = { key: path, ok: true };
         return state;
       } catch (error) {
@@ -134,6 +154,12 @@
     });
     if (!result || opened.summary.path !== path) return;
     applyBranches(result);
+  }
+
+  /** 重试会把按钮换成加载态：先把焦点放到常驻的搜索框，否则焦点掉到 body，Esc 就到不了 Modal。 */
+  function retryLoad() {
+    searchInput?.focus();
+    loaded = null;
   }
 
   /** 起点的实际值：选了分支就用分支名；默认用当前分支，游离 HEAD 时用当前提交。 */
@@ -150,11 +176,15 @@
     const result = await run(() =>
       api.createBranchFrom(currentRepo.summary.path, name, start, checkout, currentRepo.generation, nextId()),
     );
-    if (!result || opened.summary.path !== currentRepo.summary.path) return;
+    if (opened.summary.path !== currentRepo.summary.path) return;
+    if (!result) {
+      // 提交按钮在途时被禁用，焦点已经丢失；失败时表单留着，让用户直接改名重试。
+      nameInput?.focus();
+      return;
+    }
     applyBranches(result);
-    branchName = "";
-    createBase = "";
     tab = "local";
+    void closeCreate();
     if (checkout) {
       onNotice(`已从 ${start} 创建并切换到 ${name}。`);
       onClose();
@@ -163,14 +193,29 @@
     }
   }
 
-  function createFrom(name: string) {
+  async function openCreate(base = "") {
+    creating = true;
+    createBase = base;
+    renaming = null;
+    confirmDelete = null;
+    await tick();
+    nameInput?.focus();
+  }
+
+  /** 创建或取消后收起并清空；表单节点随之消失，焦点交还给「新建分支」按钮。 */
+  async function closeCreate() {
+    creating = false;
+    branchName = "";
+    createBase = "";
+    await tick();
+    createToggle?.focus();
+  }
+
+  function createFrom(branch: BranchRecord) {
     tab = "local";
-    createBase = name;
     menu = null;
-    void Promise.resolve().then(() => {
-      nameInput?.focus();
-      nameInput?.scrollIntoView?.({ block: "nearest" });
-    });
+    // 起点下拉不列当前分支本身，它由空值代表。
+    void openCreate(branch.current ? "" : branch.name);
   }
 
   function askRename(branch: BranchRecord) {
@@ -223,7 +268,7 @@
         label: "从此分支新建分支…",
         icon: "plus",
         disabledReason: busy,
-        run: () => createFrom(branch.name),
+        run: () => createFrom(branch),
       },
     ];
     if (onMergeBranch) {
@@ -344,20 +389,15 @@
   task="branch"
   {onClose}
 >
-  <div class="branch-current">
-    <span class="branch-current-icon"><Icon name="branch" size={22} /></span>
-    <div class="branch-current-copy">
-      <span>当前分支</span>
-      <strong>{current.name ?? "游离 HEAD"}</strong>
-      <small>{current.upstream ? `跟踪 ${current.upstream}` : "尚未关联上游分支"}</small>
-    </div>
+  <div class="branch-status" data-branch-status>
+    <Icon name="branch" size={13} />
+    <span>当前分支</span>
+    <strong title={current.name ?? "游离 HEAD"}>{current.name ?? "游离 HEAD"}</strong>
+    <span class="branch-status-upstream" title={current.upstream ?? undefined}>{current.upstream ? `跟踪 ${current.upstream}` : "尚未关联上游分支"}</span>
     {#if current.upstream}
-      <div class="branch-current-sync">
-        <span title="待推送提交"><Icon name="arrow-up" size={13} />{current.ahead ?? 0}</span>
-        <span title="待拉取提交"><Icon name="arrow-down" size={13} />{current.behind ?? 0}</span>
-      </div>
+      <span class="branch-status-sync" title={`待推送 ${current.ahead ?? 0} 个提交`}><Icon name="arrow-up" size={12} />{current.ahead ?? 0}</span>
+      <span class="branch-status-sync" title={`待拉取 ${current.behind ?? 0} 个提交`}><Icon name="arrow-down" size={12} />{current.behind ?? 0}</span>
     {/if}
-    <span class="branch-current-badge"><span class="local-dot"></span>正在使用</span>
   </div>
 
   <div class="segmented" role="tablist" aria-label="分支与标签分区">
@@ -383,7 +423,7 @@
     {/each}
   </div>
 
-  <div id="branch-tab-panel" role="tabpanel" aria-labelledby={`branch-tab-${tab}`} data-branch-panel={tab}>
+  <div id="branch-tab-panel" class="branch-panel" role="tabpanel" aria-labelledby={`branch-tab-${tab}`} data-branch-panel={tab}>
     {#if tab === "tags"}
       <TagManager
         {opened}
@@ -398,6 +438,58 @@
         }}
         {nextId}
       />
+    {:else if creating}
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <form
+        id="branch-create-form"
+        class="branch-create"
+        data-branch-create
+        onsubmit={(event) => {
+          event.preventDefault();
+          void createNamedBranch();
+        }}
+        onkeydown={(event) => {
+          if (event.key !== "Escape") return;
+          event.preventDefault();
+          event.stopPropagation();
+          void closeCreate();
+        }}
+      >
+        <label class="label" for="branch-name">新建分支</label>
+        <!-- 不随 blocked 禁用：打开时列表正在读取，禁用会把刚给的焦点弄丢；提交本身由 run 拦住。 -->
+        <input
+          id="branch-name"
+          class="input"
+          data-autofocus
+          bind:this={nameInput}
+          bind:value={branchName}
+          placeholder="例如 feature/login"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <div class="branch-create-options">
+          <label class="branch-base">
+            <span>起点</span>
+            <select class="select" aria-label="新分支的起点" bind:value={createBase} disabled={blocked}>
+              <option value="">当前分支（{current.name ?? "游离 HEAD"}）</option>
+              {#each branches.filter((branch) => !branch.current) as branch (branch.name)}
+                <option value={branch.name}>{branch.remote ? `远程 ${branch.name}` : branch.name}</option>
+              {/each}
+            </select>
+          </label>
+          <label class="switch branch-checkout">
+            <input type="checkbox" bind:checked={createCheckout} disabled={blocked} />
+            <span>创建后切换过去</span>
+          </label>
+        </div>
+        <p class="hint">{createCheckout ? "切换沿用分支切换的保护：会覆盖未提交修改时停下，工作区保持原样。" : "只创建分支，当前分支和工作区都不变。"}</p>
+        <div class="create-form-actions">
+          <button type="button" class="btn btn-secondary" onclick={closeCreate}>取消</button>
+          <button type="submit" class="btn btn-primary" disabled={blocked || branchName.trim().length === 0}>
+            <Icon name="plus" size={14} />{createCheckout ? "创建并切换" : "创建分支"}
+          </button>
+        </div>
+      </form>
     {:else}
       <div class="branch-manager-tools">
         <div class="field branch-search">
@@ -406,6 +498,7 @@
           <input
             id="branch-search"
             data-autofocus
+            bind:this={searchInput}
             bind:value={branchQuery}
             placeholder={`搜索${listScope === "local" ? "本地" : "远程"}分支`}
             autocomplete="off"
@@ -415,6 +508,16 @@
             <button type="button" class="field-clear" aria-label="清空分支搜索" onclick={() => (branchQuery = "")}><Icon name="x" size={12} /></button>
           {/if}
         </div>
+        <button
+          type="button"
+          class="btn btn-secondary"
+          aria-expanded="false"
+          aria-controls="branch-create-form"
+          bind:this={createToggle}
+          onclick={() => openCreate()}
+        >
+          <Icon name="plus" size={14} />新建分支
+        </button>
       </div>
 
       <div class="list-box branch-list" aria-label={listScope === "local" ? "本地分支" : "远程分支"}>
@@ -427,7 +530,7 @@
           <div class="empty compact branch-empty">
             <span class="empty-icon"><Icon name="alert-circle" size={20} /></span>
             <strong>没有读到分支列表</strong>
-            <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={() => (loaded = null)}>重试</button>
+            <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={retryLoad}>重试</button>
           </div>
         {:else if !listReady}
           <div class="empty compact branch-empty" data-branch-loading>
@@ -576,50 +679,6 @@
           </div>
         </div>
       {/if}
-
-      <div class="branch-create">
-        <span class="branch-create-icon"><Icon name="plus" size={17} /></span>
-        <div class="branch-create-copy">
-          <label class="label" for="branch-name">新建分支</label>
-          <div class="row">
-            <input
-              id="branch-name"
-              class="input"
-              bind:this={nameInput}
-              bind:value={branchName}
-              placeholder="例如 feature/login"
-              autocomplete="off"
-              spellcheck="false"
-              disabled={blocked}
-              onkeydown={(event) => {
-                if (event.key === "Enter" && branchName.trim()) {
-                  event.preventDefault();
-                  void createNamedBranch();
-                }
-              }}
-            />
-            <button type="button" class="btn btn-primary" disabled={blocked || branchName.trim().length === 0} onclick={createNamedBranch}>
-              <Icon name="plus" size={14} />{createCheckout ? "创建并切换" : "创建分支"}
-            </button>
-          </div>
-          <div class="branch-create-options">
-            <label class="branch-base">
-              <span>起点</span>
-              <select class="select" aria-label="新分支的起点" bind:value={createBase} disabled={blocked}>
-                <option value="">当前分支（{current.name ?? "游离 HEAD"}）</option>
-                {#each branches.filter((branch) => !branch.current) as branch (branch.name)}
-                  <option value={branch.name}>{branch.remote ? `远程 ${branch.name}` : branch.name}</option>
-                {/each}
-              </select>
-            </label>
-            <label class="switch branch-checkout">
-              <input type="checkbox" bind:checked={createCheckout} disabled={blocked} />
-              <span>创建后切换过去</span>
-            </label>
-          </div>
-          <p class="hint">{createCheckout ? "切换沿用分支切换的保护：会覆盖未提交修改时停下，工作区保持原样。" : "只创建分支，当前分支和工作区都不变。"}</p>
-        </div>
-      </div>
     {/if}
     {#if errorText}
       <div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{errorText}</span></div>

@@ -1320,17 +1320,22 @@ describe("应用外壳", () => {
       await fireEvent.click(document.querySelector<HTMLElement>("[data-task-modal] [aria-label='关闭对话框']")!);
       await waitFor(() => expect(document.querySelector("[data-task-modal]")).toBeNull());
     };
-    const viaPopover = async (name: string, task: string) => {
+    const viaPopover = async (name: string, task: string, inspect?: () => void) => {
       await fireEvent.click(trigger);
       const popover = await screen.findByRole("dialog", { name: "切换分支" });
       await fireEvent.click(within(popover).getByRole("button", { name }));
       await waitFor(() => expect(document.querySelector(`[data-task-modal="${task}"]`), name).toBeTruthy());
       expect(screen.queryByRole("dialog", { name: "切换分支" })).toBeNull();
+      inspect?.();
       await closeModal();
     };
-    await viaPopover("新建分支", "branch");
+    const createForm = () => document.querySelector("[data-branch-create]");
+    await viaPopover("新建分支", "branch", () => {
+      expect(createForm(), "新建入口直接展开表单").toBeTruthy();
+      expect(document.activeElement).toBe(screen.getByLabelText("新建分支"));
+    });
     await viaPopover("合并到当前分支", "merge");
-    await viaPopover("管理分支与标签", "branch");
+    await viaPopover("管理分支与标签", "branch", () => expect(createForm(), "管理入口的意图不残留").toBeNull());
 
     await fireEvent.click(screen.getByRole("button", { name: /^同步/ }));
     await fireEvent.click(screen.getByRole("menuitem", { name: /^远程/ }));

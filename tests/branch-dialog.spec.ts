@@ -119,6 +119,47 @@ describe("写锁期间的首次读取", () => {
     expect(branchState).toHaveBeenCalledTimes(2);
   });
 
+  it("分支：generation 过期不记失败，用新 generation 自动重读一次", async () => {
+    const list = await branchState();
+    branchState.mockReset();
+    branchState.mockRejectedValueOnce({ code: "stale", message: "过期", generation: 6 }).mockResolvedValueOnce(list);
+    const base = props();
+    render(BranchDialog, { props: base });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    expect(branchState.mock.calls.map((call) => call[1])).toEqual([4, 6]);
+    expect(base.onFailure).not.toHaveBeenCalled();
+    expect(base.onSnapshot).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+  });
+
+  it("分支：重读仍过期时按失败处理，不循环读取", async () => {
+    branchState.mockReset();
+    branchState.mockRejectedValue({ code: "stale", message: "过期", generation: 6 });
+    const base = props();
+    render(BranchDialog, { props: base });
+    await screen.findByRole("button", { name: "重试" });
+    await tick();
+    await tick();
+    expect(branchState).toHaveBeenCalledTimes(2);
+    expect(base.onFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it("分支：重试后焦点落在搜索框，Esc 仍能关闭 modal", async () => {
+    branchState.mockReset();
+    branchState.mockRejectedValueOnce({ code: "unknown", message: "读不到" });
+    branchState.mockReturnValueOnce(new Promise(() => {}));
+    const base = props();
+    render(BranchDialog, { props: base });
+    const retry = await screen.findByRole("button", { name: "重试" });
+    retry.focus();
+    await fireEvent.click(retry);
+    await waitFor(() => expect(document.querySelector("[data-branch-loading]")).toBeTruthy());
+    const search = screen.getByLabelText("搜索分支");
+    expect(document.activeElement).toBe(search);
+    await fireEvent.keyDown(search, { key: "Escape" });
+    expect(base.onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("标签页：锁定时不说「还没有标签」，解锁后读取", async () => {
     const base = lockedProps();
     const { rerender } = render(BranchDialog, { props: base });
@@ -156,6 +197,49 @@ describe("写锁期间的首次读取", () => {
   });
 });
 
+describe("远程读取的过期与重试", () => {
+  const remoteList = { generation: 6, remotes: [{ name: "origin", fetchUrl: "https://e.com/r.git", pushUrl: null }], snapshot: opened.snapshot };
+  const remoteProps = () => ({ ...props(), mode: "remote" as const, opened, onOpened: vi.fn(), onOpenHistory: vi.fn() });
+
+  beforeEach(() => {
+    remoteState.mockReset();
+  });
+
+  it("generation 过期不记失败，用新 generation 自动重读一次", async () => {
+    remoteState.mockRejectedValueOnce({ code: "stale", message: "过期", generation: 6 }).mockResolvedValueOnce(remoteList);
+    const base = remoteProps();
+    render(RepoDialogs, { props: base });
+    await waitFor(() => expect(document.body.textContent).toContain("https://e.com/r.git"));
+    expect(remoteState.mock.calls.map((call) => call[1])).toEqual([4, 6]);
+    expect(base.onFailure).not.toHaveBeenCalled();
+  });
+
+  it("重读仍过期时按失败处理，不循环读取", async () => {
+    remoteState.mockRejectedValue({ code: "stale", message: "过期", generation: 6 });
+    const base = remoteProps();
+    render(RepoDialogs, { props: base });
+    await screen.findByRole("button", { name: "重试" });
+    await tick();
+    await tick();
+    expect(remoteState).toHaveBeenCalledTimes(2);
+    expect(base.onFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it("重试后焦点落在远程名称，Esc 仍能关闭 modal", async () => {
+    remoteState.mockRejectedValueOnce({ code: "unknown", message: "读不到" }).mockReturnValueOnce(new Promise(() => {}));
+    const base = remoteProps();
+    render(RepoDialogs, { props: base });
+    const retry = await screen.findByRole("button", { name: "重试" });
+    retry.focus();
+    await fireEvent.click(retry);
+    await waitFor(() => expect(document.querySelector("[data-remote-loading]")).toBeTruthy());
+    const name = screen.getByLabelText("名称");
+    expect(document.activeElement).toBe(name);
+    await fireEvent.keyDown(name, { key: "Escape" });
+    expect(base.onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("分支管理", () => {
   beforeEach(() => {
     branchState.mockReset();
@@ -174,6 +258,52 @@ describe("分支管理", () => {
       tags: [{ name: "v1.0.0", targetOid: "b".repeat(40), message: "release", createdAt: 1_700_000_000 }],
       snapshot: opened.snapshot,
     });
+  });
+
+  it("打开时只有精简的当前分支行，新建表单点击后才出现并替换列表", async () => {
+    render(BranchDialog, { props: props() });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    const status = document.querySelector("[data-branch-status]");
+    expect(status?.textContent).toContain("feature/ui");
+    expect(status?.textContent).toContain("跟踪 origin/feature/ui");
+    expect(screen.queryByLabelText("新建分支")).toBeNull();
+
+    await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("新建分支")));
+    expect(document.querySelector(".branch-row"), "不和列表同时铺开").toBeNull();
+  });
+
+  it("取消和 Esc 都只收起表单、不关 modal，草稿不残留，焦点回到新建按钮", async () => {
+    const base = props();
+    render(BranchDialog, { props: base });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    const open = () => fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
+
+    await open();
+    await fireEvent.input(screen.getByLabelText("新建分支"), { target: { value: "draft" } });
+    await fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "新建分支" })));
+    expect(document.querySelector(".branch-row")).toBeTruthy();
+
+    await open();
+    const input = screen.getByLabelText("新建分支") as HTMLInputElement;
+    expect(input.value).toBe("");
+    await fireEvent.keyDown(input, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByLabelText("新建分支")).toBeNull());
+    expect(base.onClose).not.toHaveBeenCalled();
+  });
+
+  it("带打开意图时直接展开表单，读取中名称也不失焦", async () => {
+    branchState.mockReset();
+    let finish: (value: unknown) => void = () => {};
+    branchState.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    render(BranchDialog, { props: { ...props(), startCreating: true } });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("新建分支")));
+    await waitFor(() => expect(branchState).toHaveBeenCalled());
+    await tick();
+    expect((screen.getByLabelText("新建分支") as HTMLInputElement).disabled).toBe(false);
+    expect(document.activeElement).toBe(screen.getByLabelText("新建分支"));
+    finish({ generation: 4, branches: [], snapshot: opened.snapshot });
   });
 
   it("切换成功后更新状态并自动关闭", async () => {

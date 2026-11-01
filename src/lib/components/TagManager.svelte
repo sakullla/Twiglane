@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { api } from "../api";
   import { normalizeError } from "../errors";
   import { formatAuthoredAt, shortOid } from "../history";
@@ -19,6 +20,11 @@
   let { opened, disabled, onBusy, onSnapshot, onFailure, onNotice, onOpenHistory, nextId }: Props = $props();
 
   let tags = $state<TagRecord[]>([]);
+  /** 新建表单按需展开，展开时替换搜索和列表。 */
+  let creating = $state(false);
+  let nameInput = $state<HTMLInputElement | null>(null);
+  let searchInput = $state<HTMLInputElement | null>(null);
+  let createToggle = $state<HTMLButtonElement | null>(null);
   let query = $state("");
   let name = $state("");
   let target = $state("HEAD");
@@ -88,14 +94,40 @@
     const tagName = name.trim();
     const tagTarget = target.trim() || "HEAD";
     const annotated = message.trim().length > 0;
-    if (!tagName) return;
+    if (!tagName || !target.trim()) return;
     const result = await run(() => api.createTag(current.summary.path, tagName, tagTarget, message.trim(), current.generation, nextId()));
-    if (!result || opened.summary.path !== current.summary.path) return;
+    if (opened.summary.path !== current.summary.path) return;
+    if (!result) {
+      // 提交按钮在途时被禁用，焦点已经丢失；失败时表单留着，让用户直接修改后重试。
+      nameInput?.focus();
+      return;
+    }
     apply(result);
+    void closeCreate();
+    onNotice(`已创建标签 ${tagName}${annotated ? "（附注标签）" : ""}。`);
+  }
+
+  async function openCreate() {
+    creating = true;
+    confirmTag = null;
+    await tick();
+    nameInput?.focus();
+  }
+
+  /** 创建或取消后收起并清空；表单节点随之消失，焦点交还给「新建标签」按钮。 */
+  async function closeCreate() {
+    creating = false;
     name = "";
     target = "HEAD";
     message = "";
-    onNotice(`已创建标签 ${tagName}${annotated ? "（附注标签）" : ""}。`);
+    await tick();
+    createToggle?.focus();
+  }
+
+  /** 重试会把按钮换成加载态：先把焦点放到常驻的搜索框，否则焦点掉到 body，Esc 就到不了 Modal。 */
+  function retryLoad() {
+    searchInput?.focus();
+    loaded = null;
   }
 
   async function push(tag: TagRecord) {
@@ -131,65 +163,85 @@
 </script>
 
 <div class="tag-manager">
-  <div class="tag-create">
-    <div class="tag-create-head"><span class="ch-icon warn"><Icon name="tag" size={15} /></span><div><strong>创建标签</strong><span>标记当前提交，或输入另一个提交 Hash</span></div></div>
-    <div class="tag-create-grid">
-      <div class="form-group">
-        <label class="label" for="tag-name">标签名称</label>
-        <input id="tag-name" class="input" bind:value={name} placeholder="例如 v1.0.0" disabled={blocked} autocomplete="off" spellcheck="false" />
-      </div>
-      <div class="form-group">
-        <label class="label" for="tag-target">目标提交</label>
-        <input id="tag-target" class="input code" bind:value={target} placeholder="HEAD 或提交 Hash" disabled={blocked} autocomplete="off" spellcheck="false" />
-      </div>
-    </div>
-    <div class="tag-create-message">
-      <input class="input" aria-label="标签附注" bind:value={message} placeholder="可选附注；填写后创建附注标签" disabled={blocked} />
-      <button type="button" class="btn btn-primary" disabled={blocked || !name.trim() || !target.trim()} onclick={create}><Icon name="plus" size={14} />创建标签</button>
-    </div>
-  </div>
-
-  <div class="tag-list-tools">
-    <div class="field sm"><Icon name="search" size={14} /><input aria-label="搜索标签" bind:value={query} placeholder="搜索标签、Hash 或附注" autocomplete="off" spellcheck="false" /></div>
-    {#if loaded?.ok}<span class="count">{tags.length}</span>{/if}
-  </div>
-
-  <div class="list-box tag-list">
-    {#if !loaded?.ok}
-      <div class="empty compact" data-tag-loading>
-        {#if loaded}
-          <span class="empty-icon"><Icon name="alert-circle" size={20} /></span>
-          <strong>没有读到标签</strong>
-          <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={() => (loaded = null)}>重试</button>
-        {:else}
-          <span class="empty-icon"><span class="spinner"></span></span>
-          <strong>正在读取标签</strong>
-        {/if}
-      </div>
-    {:else if visible.length === 0}
-      <div class="empty compact"><span class="empty-icon"><Icon name="tag" size={20} /></span><strong>{tags.length === 0 ? "还没有标签" : "没有匹配的标签"}</strong><p>{tags.length === 0 ? "从上方创建第一个版本标记。" : "试试标签名、目标 Hash 或附注内容。"}</p></div>
-    {:else}
-      {#each visible as tag (tag.name)}
-        <div class="list-row tag-row">
-          <span class="tag-row-icon"><Icon name="tag" size={15} /></span>
-          <div class="lr-main">
-            <span class="lr-title"><span title={tag.name}>{tag.name}</span>{#if tag.message}<span class="chip tag">附注</span>{/if}</span>
-            <span class="lr-sub tag-target">
-              <code>{shortOid(tag.targetOid)}</code>
-              <button type="button" aria-label={`复制标签 ${tag.name} 的目标 Hash`} title="复制完整目标 Hash" onclick={() => copyOid(tag.targetOid)}><Icon name={copied === tag.targetOid ? "check" : "copy"} size={11} /></button>
-              <span>·</span><span title={formatAuthoredAt(tag.createdAt)}>{formatAuthoredAt(tag.createdAt)}</span>
-            </span>
-            {#if tag.message}<span class="lr-desc">{tag.message}</span>{/if}
-          </div>
-          <span class="lr-actions">
-            <button type="button" class="btn btn-ghost btn-sm" disabled={blocked} onclick={() => onOpenHistory(tag.targetOid)}><Icon name="history" size={12} />查看提交</button>
-            <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={() => push(tag)}><Icon name="arrow-up" size={12} />推送</button>
-            <button type="button" class="icon-btn sm danger" aria-label={`删除标签 ${tag.name}`} title="删除本地标签" disabled={blocked} onclick={() => (confirmTag = tag)}><Icon name="trash" size={13} /></button>
-          </span>
+  {#if creating}
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <form
+      id="tag-create-form"
+      class="tag-create"
+      data-tag-create
+      onsubmit={(event) => {
+        event.preventDefault();
+        void create();
+      }}
+      onkeydown={(event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        void closeCreate();
+      }}
+    >
+      <div class="tag-create-grid">
+        <div class="form-group">
+          <label class="label" for="tag-name">标签名称</label>
+          <!-- 不随 blocked 禁用：禁用会把刚给的焦点弄丢；提交本身由 run 拦住。 -->
+          <input id="tag-name" class="input" bind:this={nameInput} bind:value={name} placeholder="例如 v1.0.0" autocomplete="off" spellcheck="false" />
         </div>
-      {/each}
-    {/if}
-  </div>
+        <div class="form-group">
+          <label class="label" for="tag-target">目标提交</label>
+          <input id="tag-target" class="input code" bind:value={target} placeholder="HEAD 或提交 Hash" disabled={blocked} autocomplete="off" spellcheck="false" />
+        </div>
+      </div>
+      <input class="input" aria-label="标签附注" bind:value={message} placeholder="可选附注；填写后创建附注标签" disabled={blocked} />
+      <p class="hint">标记当前提交，或输入另一个提交 Hash。</p>
+      <div class="create-form-actions">
+        <button type="button" class="btn btn-secondary" onclick={closeCreate}>取消</button>
+        <button type="submit" class="btn btn-primary" disabled={blocked || !name.trim() || !target.trim()}><Icon name="plus" size={14} />创建标签</button>
+      </div>
+    </form>
+  {:else}
+    <div class="tag-list-tools">
+      <div class="field"><Icon name="search" size={14} /><input aria-label="搜索标签" bind:this={searchInput} bind:value={query} placeholder="搜索标签、Hash 或附注" autocomplete="off" spellcheck="false" /></div>
+      {#if loaded?.ok}<span class="count">{tags.length}</span>{/if}
+      <button type="button" class="btn btn-secondary" aria-expanded="false" aria-controls="tag-create-form" bind:this={createToggle} onclick={openCreate}><Icon name="plus" size={14} />新建标签</button>
+    </div>
+
+    <div class="list-box tag-list">
+      {#if !loaded?.ok}
+        <div class="empty compact" data-tag-loading>
+          {#if loaded}
+            <span class="empty-icon"><Icon name="alert-circle" size={20} /></span>
+            <strong>没有读到标签</strong>
+            <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={retryLoad}>重试</button>
+          {:else}
+            <span class="empty-icon"><span class="spinner"></span></span>
+            <strong>正在读取标签</strong>
+          {/if}
+        </div>
+      {:else if visible.length === 0}
+        <div class="empty compact"><span class="empty-icon"><Icon name="tag" size={20} /></span><strong>{tags.length === 0 ? "还没有标签" : "没有匹配的标签"}</strong><p>{tags.length === 0 ? "点“新建标签”创建第一个版本标记。" : "试试标签名、目标 Hash 或附注内容。"}</p></div>
+      {:else}
+        {#each visible as tag (tag.name)}
+          <div class="list-row tag-row">
+            <span class="tag-row-icon"><Icon name="tag" size={15} /></span>
+            <div class="lr-main">
+              <span class="lr-title"><span title={tag.name}>{tag.name}</span>{#if tag.message}<span class="chip tag">附注</span>{/if}</span>
+              <span class="lr-sub tag-target">
+                <code>{shortOid(tag.targetOid)}</code>
+                <button type="button" aria-label={`复制标签 ${tag.name} 的目标 Hash`} title="复制完整目标 Hash" onclick={() => copyOid(tag.targetOid)}><Icon name={copied === tag.targetOid ? "check" : "copy"} size={11} class={copied === tag.targetOid ? "tag-copied" : ""} /></button>
+                <span>·</span><span title={formatAuthoredAt(tag.createdAt)}>{formatAuthoredAt(tag.createdAt)}</span>
+              </span>
+              {#if tag.message}<span class="lr-desc">{tag.message}</span>{/if}
+            </div>
+            <span class="lr-actions">
+              <button type="button" class="btn btn-ghost btn-sm" disabled={blocked} onclick={() => onOpenHistory(tag.targetOid)}><Icon name="history" size={12} />查看提交</button>
+              <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={() => push(tag)}><Icon name="arrow-up" size={12} />推送</button>
+              <button type="button" class="icon-btn sm danger" aria-label={`删除标签 ${tag.name}`} title="删除本地标签" disabled={blocked} onclick={() => (confirmTag = tag)}><Icon name="trash" size={13} /></button>
+            </span>
+          </div>
+        {/each}
+      {/if}
+    </div>
+  {/if}
 
   {#if confirmTag}
     <div class="callout warn" role="alert">

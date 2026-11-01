@@ -114,7 +114,7 @@
 .segmented { display: inline-flex; padding: 3px; gap: var(--space-2); border-radius: 10px; background: var(--surface-3); flex: none; }
 .segmented button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: 25px; padding: 0 10px; border-radius: 7px; font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--fg-muted); transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease); }
 .segmented button:hover { color: var(--fg); }
-.segmented button[aria-pressed="true"], .view-switcher button[aria-current="page"] { background: var(--segmented-active-bg); color: var(--fg); box-shadow: var(--segmented-active-shadow); }
+.segmented button[aria-pressed="true"], .segmented button[aria-selected="true"], .view-switcher button[aria-current="page"] { background: var(--segmented-active-bg); color: var(--fg); box-shadow: var(--segmented-active-shadow); }
 
 /* ---------- 输入与表单 ---------- */
 .field {
@@ -210,7 +210,7 @@
 .menu-sep { height: 1px; margin: 5px 3px; background: var(--border); }
 
 /* ---------- 新建 / 重命名分支 ---------- */
-.branch-create-options { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-12); margin-top: var(--space-8); }
+.branch-create-options { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-12); }
 .branch-base { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; flex: 1; color: var(--fg-muted); font-size: var(--text-sm); }
 .branch-base .select { flex: 1; min-width: 0; max-width: 320px; }
 .branch-checkout { flex: none; color: var(--fg); }
@@ -763,62 +763,46 @@ label.list-row .checkbox { margin-top: 2px; }
 
 /* ---------- 分支与标签 modal ---------- */
 .modal-card.modal-xl { width: min(860px, 100%); }
-.branch-current { display: flex; align-items: center; gap: 13px; padding: 15px 16px; border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--border)); border-radius: 14px; background: linear-gradient(120deg, var(--accent-soft), var(--surface-2) 68%); }
-.branch-current-icon { display: grid; place-items: center; width: 43px; height: 43px; border-radius: 12px; background: var(--accent); color: var(--accent-fg); box-shadow: 0 6px 16px color-mix(in srgb, var(--accent) 18%, transparent); flex: none; }
-.branch-current-copy { display: flex; flex-direction: column; min-width: 0; line-height: 1.35; }
-.branch-current-copy > span { color: var(--fg-muted); font-size: var(--text-xs); }
-.branch-current-copy strong { margin: 2px 0; font-size: 16px; font-weight: var(--weight-semibold); letter-spacing: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.branch-current-copy small { color: var(--fg-subtle); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.branch-current-sync { display: flex; gap: var(--space-6); margin-left: auto; }
-.branch-current-sync > span { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--fg-muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
-.branch-current-sync > span:first-child .icon { color: var(--accent-text); }
-.branch-current-sync > span:last-child .icon { color: var(--info-text); }
-.branch-current-badge { display: inline-flex; align-items: center; gap: var(--space-6); padding: 5px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-size: var(--text-xs); white-space: nowrap; }
+/* 分支与标签：列表和新建表单都是 --surface-2 铺底，靠明度和弹窗本体分层，不再套描边卡。 */
+.branch-status { display: flex; align-items: center; gap: var(--space-6); min-width: 0; color: var(--fg-muted); font-size: var(--text-xs); white-space: nowrap; }
+.branch-status > .icon { color: var(--accent-text); flex: none; }
+.branch-status strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg); font-size: var(--text-sm); font-weight: var(--weight-semibold); }
+.branch-status-upstream { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg-subtle); }
+.branch-status-sync { display: inline-flex; align-items: center; gap: var(--space-2); flex: none; font-variant-numeric: tabular-nums; }
+[data-task-modal="branch"] .modal-body > .segmented { align-self: flex-start; }
+.branch-panel { display: flex; flex-direction: column; gap: var(--space-12); min-width: 0; }
 .branch-manager-tools { display: flex; align-items: center; gap: 10px; }
-.branch-manager-tools .segmented button { gap: var(--space-6); }
-.branch-manager-tools .segmented .count { height: 15px; min-width: 15px; padding: 0 4px; font-size: var(--text-xs); }
 .branch-search { flex: 1; min-width: 180px; }
-.branch-list { max-height: 292px; min-height: 170px; }
-.branch-list .list-section { font-weight: var(--weight-medium); }
-.branch-row { min-height: 55px; padding: 9px 10px; border-bottom: 0; }
+.branch-list, .tag-list { max-height: min(calc(86vh - 290px), 440px); min-height: 170px; border: 0; background: var(--surface-2); }
+.branch-list .list-section { font-weight: var(--weight-medium); border-bottom: 0; }
+.branch-row { min-height: 44px; padding: var(--space-6) 10px; border-bottom: 0; }
 .branch-row[role="button"] { cursor: pointer; }
-.branch-row[role="button"]:hover { background: var(--surface-2); }
+.branch-row[role="button"]:hover { background: var(--hover); }
 .branch-row[aria-disabled="true"] { cursor: not-allowed; }
 .branch-row[aria-disabled="true"]:not(.current) { opacity: 0.5; }
 .branch-row.current { background: var(--accent-softer); cursor: default; }
-.branch-row-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; background: var(--surface-3); color: var(--fg-muted); flex: none; }
-.branch-row.current .branch-row-icon { background: var(--accent-soft); color: var(--accent-text); }
+.branch-row-icon { display: grid; place-items: center; color: var(--fg-subtle); flex: none; }
+.branch-row.current .branch-row-icon { color: var(--accent-text); }
 .branch-row .lr-title { font-size: var(--text-sm); }
-.branch-row .lr-sub { margin-top: 2px; }
-.branch-row .lr-actions .btn .icon { transform: rotate(90deg); }
 .branch-empty { min-height: 165px; }
 .branch-empty .empty-icon { width: 38px; height: 38px; border-radius: 11px; }
-.branch-create { display: flex; align-items: flex-start; gap: var(--space-12); padding: 13px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); }
-.branch-create-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; background: var(--accent-soft); color: var(--accent-text); flex: none; }
-.branch-create-copy { flex: 1; min-width: 0; }
-.branch-create-copy .label { margin-bottom: 6px; color: var(--fg); font-size: var(--text-xs); }
-.branch-create-copy .row { flex-wrap: nowrap; }
-.branch-create-copy .hint { margin-top: 5px; font-size: var(--text-xs); }
+.branch-create, .tag-create { display: flex; flex-direction: column; gap: var(--space-8); padding: 14px; border-radius: var(--radius); background: var(--surface-2); }
+.branch-create .label { color: var(--fg); }
+.branch-create .hint, .tag-create .hint { font-size: var(--text-xs); }
+.create-form-actions { display: flex; justify-content: flex-end; gap: var(--space-8); }
 .tag-manager { display: flex; flex-direction: column; gap: var(--space-12); }
-.tag-create { padding: 13px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); }
-.tag-create-head { display: flex; align-items: center; gap: 9px; margin-bottom: var(--space-12); }
-.tag-create-head .ch-icon { display: grid; place-items: center; width: 29px; height: 29px; border-radius: 9px; background: var(--warning-soft); color: var(--warning-text); }
-.tag-create-head > div { display: flex; flex-direction: column; }
-.tag-create-head strong { font-size: var(--text-sm); font-weight: var(--weight-semibold); }
-.tag-create-head span { color: var(--fg-subtle); font-size: var(--text-xs); }
 .tag-create-grid { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr); gap: 10px; }
 .tag-create-grid .label { margin-bottom: 5px; font-size: var(--text-xs); }
-.tag-create-message { display: flex; gap: var(--space-8); margin-top: 10px; }
-.tag-create-message .input { min-width: 0; }
 .tag-list-tools { display: flex; align-items: center; gap: var(--space-8); }
 .tag-list-tools .field { flex: 1; }
-.tag-list { max-height: 255px; }
-.tag-row { min-height: 57px; }
-.tag-row-icon { display: grid; place-items: center; width: 29px; height: 29px; border-radius: 8px; background: var(--warning-soft); color: var(--warning-text); flex: none; }
+.tag-row { min-height: 44px; padding: var(--space-6) 10px; border-bottom: 0; }
+.tag-row:hover { background: var(--hover); }
+.tag-row-icon { display: grid; place-items: center; color: var(--warning-text); flex: none; }
 .tag-target { display: flex; align-items: center; gap: 4px; }
 .tag-target code { font-family: var(--mono); font-size: var(--text-xs); }
 .tag-target button { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 4px; color: var(--fg-subtle); }
 .tag-target button:hover { background: var(--hover); color: var(--accent-text); }
+.tag-target .tag-copied { color: var(--success-text); }
 .tag-row .lr-actions { flex-wrap: nowrap; }
 .modal-foot > .hint { display: inline-flex; align-items: center; gap: 5px; font-size: var(--text-xs); }
 .modal-foot > .hint .icon { color: var(--accent-text); }

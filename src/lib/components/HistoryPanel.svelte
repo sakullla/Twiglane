@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
   import { api } from "../api";
   import { normalizeError } from "../errors";
   import {
@@ -43,6 +44,9 @@
     /** 从某个提交新建分支后回写最新状态（切换时工作区与分支都会变）。 */
     onSnapshot?: (snapshot: StatusSnapshot) => void;
     onNotice?: (message: string) => void;
+    /** 左栏头部（视图切换与合并提示）和右沿拖动条：由外壳提供，与改动视图是同一份。 */
+    paneHead?: Snippet;
+    paneResizer?: Snippet;
   }
 
   const ROW_HEIGHT = 60;
@@ -60,6 +64,8 @@
     onClearFile,
     onSnapshot,
     onNotice,
+    paneHead,
+    paneResizer,
   }: Props = $props();
 
   let menu = $state<ContextMenuRequest | null>(null);
@@ -457,124 +463,124 @@
   }
 </script>
 
-<section class="span-main history-view" aria-label="提交历史" aria-busy={loading}>
-  <div class="panel-toolbar history-toolbar">
-    {#if filePath}
-      <button type="button" class="btn btn-ghost btn-sm" onclick={onClearFile}>
-        <Icon name="arrow-left" size={14} />返回全部历史
-      </button>
-      <span class="history-file-scope" title={filePath}><Icon name="file" size={13} /><span class="truncate">{filePath}</span></span>
-    {:else}
-      <div class="field sm history-search">
-        <Icon name="search" size={14} />
-        <input
-          aria-label="搜索全部历史"
-          placeholder="搜索说明、作者或提交 Hash"
-          autocomplete="off"
-          spellcheck="false"
-          value={query}
-          oninput={(event) => scheduleSearch((event.currentTarget as HTMLInputElement).value)}
-        />
-        {#if loading}<span class="spinner"></span>{/if}
-      </div>
-    {/if}
-    <span class="spacer"></span>
-    <div class="segmented history-view-mode" role="group" aria-label="历史差异模式">
-      <button type="button" aria-pressed={viewMode === "single"} title="一次看一个文件" onclick={() => (viewMode = "single")}><Icon name="file" size={12} />单文件</button>
-      <button type="button" aria-pressed={viewMode === "multi"} title="连续查看整次提交的全部文件" onclick={() => (viewMode = "multi")}><Icon name="layers" size={12} />全部文件</button>
-    </div>
-    <div class="pager">
-      <span class="pager-range">
-        {#if page && commits.length > 0}{page.offset + 1}–{page.offset + commits.length}{:else}—{/if}
-      </span>
-      <button type="button" class="icon-btn sm" aria-label="上一页" title="上一页" disabled={offset === 0 || loading} onclick={pageBack}>
-        <Icon name="chevron-left" size={15} />
-      </button>
-      <button type="button" class="icon-btn sm" aria-label="下一页" title="下一页" disabled={!page?.hasMore || loading} onclick={pageForward}>
-        <Icon name="chevron-right" size={15} />
-      </button>
-    </div>
-  </div>
-  {#if listError}
-    <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{listError}</span></div>
-  {/if}
+<section class="history-view" aria-label="提交历史" aria-busy={loading}>
   <div class="history-layout">
-    <div
-      class="history-list"
-      role="listbox"
-      aria-label={filePath ? "文件历史" : "提交历史"}
-      tabindex="0"
-      bind:this={list}
-      bind:clientHeight={viewport}
-      onscroll={(event) => (scrollTop = event.currentTarget.scrollTop)}
-      onkeydown={onListKey}
-    >
-      {#if loading && !page}
-        <div class="empty" role="status"><span class="spinner"></span><strong>正在读取历史</strong></div>
-      {:else if statusText}
-        <div class="empty" role="status">
-          <span class="empty-icon"><Icon name="history" size={22} /></span>
-          <strong>{statusText}</strong>
-        </div>
-      {:else if commits.length === 0}
-        <div class="empty" role="status"><strong>这一页没有提交。</strong></div>
-      {:else}
-        <div class="virtual-space" style={`height:${commits.length * ROW_HEIGHT}px`}>
-          {#each visible as commit, index (commit.oid)}
-            {@const pills = refPills(commit.labels)}
-            <div
-              class="history-row"
-              role="option"
-              aria-selected={selectedOid === commit.oid}
-              tabindex="-1"
-              style={`top:${(range.start + index) * ROW_HEIGHT}px;height:${ROW_HEIGHT - 4}px`}
-              title={`${commit.summary}\n${commit.authorName} · ${formatAuthoredAt(commit.authoredAt)}\n${commit.oid}`}
-              onclick={() => pick(commit.oid)}
-              oncontextmenu={(event) => {
-                event.preventDefault();
-                pick(commit.oid);
-                commitMenu(commit, { x: event.clientX, y: event.clientY });
-              }}
-              onkeydown={(event) => {
-                if (isContextKey(event)) {
-                  event.preventDefault();
-                  commitMenu(commit, pointFor(event.currentTarget));
-                  return;
-                }
-                if (event.key === "Enter") {
+    <aside class="pane history-pane" aria-label="提交列表">
+      {@render paneHead?.()}
+      <div class="history-tools">
+        {#if filePath}
+          <button type="button" class="btn btn-ghost btn-sm" onclick={onClearFile}>
+            <Icon name="arrow-left" size={14} />返回全部历史
+          </button>
+          <span class="history-file-scope" title={filePath}><Icon name="file" size={13} /><span class="truncate">{filePath}</span></span>
+        {:else}
+          <div class="field sm history-search">
+            <Icon name="search" size={14} />
+            <input
+              aria-label="搜索全部历史"
+              placeholder="搜索说明、作者或提交 Hash"
+              autocomplete="off"
+              spellcheck="false"
+              value={query}
+              oninput={(event) => scheduleSearch((event.currentTarget as HTMLInputElement).value)}
+            />
+            {#if loading}<span class="spinner"></span>{/if}
+          </div>
+        {/if}
+      </div>
+      {#if listError}
+        <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{listError}</span></div>
+      {/if}
+      <div
+        class="history-list"
+        role="listbox"
+        aria-label={filePath ? "文件历史" : "提交历史"}
+        tabindex="0"
+        bind:this={list}
+        bind:clientHeight={viewport}
+        onscroll={(event) => (scrollTop = event.currentTarget.scrollTop)}
+        onkeydown={onListKey}
+      >
+        {#if loading && !page}
+          <div class="empty" role="status"><span class="spinner"></span><strong>正在读取历史</strong></div>
+        {:else if statusText}
+          <div class="empty" role="status">
+            <span class="empty-icon"><Icon name="history" size={22} /></span>
+            <strong>{statusText}</strong>
+          </div>
+        {:else if commits.length === 0}
+          <div class="empty" role="status"><strong>这一页没有提交。</strong></div>
+        {:else}
+          <div class="virtual-space" style={`height:${commits.length * ROW_HEIGHT}px`}>
+            {#each visible as commit, index (commit.oid)}
+              {@const pills = refPills(commit.labels)}
+              <div
+                class="history-row"
+                role="option"
+                aria-selected={selectedOid === commit.oid}
+                tabindex="-1"
+                style={`top:${(range.start + index) * ROW_HEIGHT}px;height:${ROW_HEIGHT - 4}px`}
+                title={`${commit.summary}\n${commit.authorName} · ${formatAuthoredAt(commit.authoredAt)}\n${commit.oid}`}
+                onclick={() => pick(commit.oid)}
+                oncontextmenu={(event) => {
                   event.preventDefault();
                   pick(commit.oid);
-                }
-              }}
-            >
-              <span class="avatar" style={`--hue:${hueOf(commit.authorName)}`} aria-hidden="true">{initialOf(commit.authorName)}</span>
-              <span class="hr-main">
-                <span class="hr-line">
-                  <span class="hr-summary">{commit.summary}</span>
-                  <code class="hr-hash">{shortOid(commit.oid)}</code>
+                  commitMenu(commit, { x: event.clientX, y: event.clientY });
+                }}
+                onkeydown={(event) => {
+                  if (isContextKey(event)) {
+                    event.preventDefault();
+                    commitMenu(commit, pointFor(event.currentTarget));
+                    return;
+                  }
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    pick(commit.oid);
+                  }
+                }}
+              >
+                <span class="avatar" style={`--hue:${hueOf(commit.authorName)}`} aria-hidden="true">{initialOf(commit.authorName)}</span>
+                <span class="hr-main">
+                  <span class="hr-line">
+                    <span class="hr-summary">{commit.summary}</span>
+                    <code class="hr-hash">{shortOid(commit.oid)}</code>
+                  </span>
+                  <span class="hr-meta">
+                    {#each pills.slice(0, 2) as pill (`${pill.kind}:${pill.name}`)}
+                      <span class={`ref-pill ${pill.kind}`} class:current={pill.current} title={pill.label} aria-label={pill.label}>
+                        <Icon name={pill.kind === "tag" ? "tag" : pill.kind === "remote" ? "cloud" : "branch"} size={11} />
+                        <span>{pill.name}</span>
+                        {#if pill.remote}<Icon name="cloud" size={10} />{/if}
+                      </span>
+                    {/each}
+                    {#if pills.length > 2}<span class="ref-more" title={pills.slice(2).map((pill) => pill.label).join("\n")}>+{pills.length - 2}</span>{/if}
+                    <span class="hr-author">{commit.authorName}</span>
+                    <span class="hr-dot"></span>
+                    <span class="hr-time">{relativeTime(commit.authoredAt)}</span>
+                    {#if commit.parents.length > 1}
+                      <span class="hr-merge" title={parentCaption(commit.parents)}><Icon name="merge" size={11} />合并</span>
+                    {/if}
+                  </span>
                 </span>
-                <span class="hr-meta">
-                  {#each pills.slice(0, 2) as pill (`${pill.kind}:${pill.name}`)}
-                    <span class={`ref-pill ${pill.kind}`} class:current={pill.current} title={pill.label} aria-label={pill.label}>
-                      <Icon name={pill.kind === "tag" ? "tag" : pill.kind === "remote" ? "cloud" : "branch"} size={11} />
-                      <span>{pill.name}</span>
-                      {#if pill.remote}<Icon name="cloud" size={10} />{/if}
-                    </span>
-                  {/each}
-                  {#if pills.length > 2}<span class="ref-more" title={pills.slice(2).map((pill) => pill.label).join("\n")}>+{pills.length - 2}</span>{/if}
-                  <span class="hr-author">{commit.authorName}</span>
-                  <span class="hr-dot"></span>
-                  <span class="hr-time">{relativeTime(commit.authoredAt)}</span>
-                  {#if commit.parents.length > 1}
-                    <span class="hr-merge" title={parentCaption(commit.parents)}><Icon name="merge" size={11} />合并</span>
-                  {/if}
-                </span>
-              </span>
-            </div>
-          {/each}
-        </div>
-      {/if}
-    </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+      <div class="pager history-pager">
+        <span class="pager-range">
+          {#if page && commits.length > 0}{page.offset + 1}–{page.offset + commits.length}{:else}—{/if}
+        </span>
+        <span class="spacer"></span>
+        <button type="button" class="icon-btn sm" aria-label="上一页" title="上一页" disabled={offset === 0 || loading} onclick={pageBack}>
+          <Icon name="chevron-left" size={15} />
+        </button>
+        <button type="button" class="icon-btn sm" aria-label="下一页" title="下一页" disabled={!page?.hasMore || loading} onclick={pageForward}>
+          <Icon name="chevron-right" size={15} />
+        </button>
+      </div>
+    </aside>
+    {@render paneResizer?.()}
     <div class="history-detail">
       {#if detailError}
         <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{detailError}</span></div>
@@ -601,6 +607,10 @@
             </div>
           </div>
           <div class="commit-facts">
+            <div class="segmented history-view-mode" role="group" aria-label="历史差异模式">
+              <button type="button" aria-pressed={viewMode === "single"} title="一次看一个文件" onclick={() => (viewMode = "single")}><Icon name="file" size={12} />单文件</button>
+              <button type="button" aria-pressed={viewMode === "multi"} title="连续查看整次提交的全部文件" onclick={() => (viewMode = "multi")}><Icon name="layers" size={12} />全部文件</button>
+            </div>
             <span class="oid-chip" title={detail.commit.oid}>
               <Icon name="commit" size={12} />
               {shortOid(detail.commit.oid)}

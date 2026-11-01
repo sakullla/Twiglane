@@ -16,7 +16,7 @@
   import { finishDiffAttempt } from "./lib/diff";
   import { DraftBuffer } from "./lib/draft";
   import { normalizeError } from "./lib/errors";
-  import { clampWidth, FALLBACK_POLL_MS, nudgeWidth, shouldPoll } from "./lib/layout";
+  import { clampWidth, FALLBACK_POLL_MS, fitPaneWidth, shouldPoll } from "./lib/layout";
   import { branchLabel, commitScope, dependencyNote, filterRows, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
   import { startDesktopMeasure } from "./lib/measure";
   import { shortcutCommand } from "./lib/shortcuts";
@@ -46,7 +46,9 @@
   import DiffView from "./lib/components/DiffView.svelte";
   import FileList from "./lib/components/FileList.svelte";
   import Icon from "./lib/components/Icon.svelte";
+  import MergeBanner from "./lib/components/MergeBanner.svelte";
   import MergeModal from "./lib/components/MergeModal.svelte";
+  import PaneResizer from "./lib/components/PaneResizer.svelte";
   import PublishModal from "./lib/components/PublishModal.svelte";
   import RecoveryActions from "./lib/components/RecoveryActions.svelte";
   import RepoDialogs from "./lib/components/RepoDialogs.svelte";
@@ -56,8 +58,8 @@
   import StashModal from "./lib/components/StashModal.svelte";
   import StatusBar from "./lib/components/StatusBar.svelte";
   import TitleBar from "./lib/components/TitleBar.svelte";
+  import ViewSwitcher from "./lib/components/ViewSwitcher.svelte";
   import Welcome from "./lib/components/Welcome.svelte";
-  import WorkspaceRail from "./lib/components/WorkspaceRail.svelte";
 
   /* 外观：三态选择 + 系统解析。documentElement 上只写 light / dark，
      "system" 由 matchMedia 解析，并跟随系统变化（R14/T2 的 Theme 收口在这里）。 */
@@ -83,7 +85,6 @@
 
   let widths = $state<PanelWidths>({ sidebar: 256, files: 360 });
   let recent = $state<RecentRepo[]>([]);
-  let query = $state("");
   let git = $state<GitInfo | null>(null);
   /** 关闭了常驻的 Git 诊断通知条；起始页的空状态入口不受影响（R13 仍要能诊断）。 */
   let gitDismissed = $state(false);
@@ -111,15 +112,11 @@
   let dependencyOpen = $state(false);
   let historyPanel = $state<Promise<typeof import("./lib/components/HistoryPanel.svelte")> | null>(null);
   let writeLocked = $derived(pending !== null || reading);
-  /**
-   * R16：窗口窄于阈值时三段式（rail + 文件列表 + 差异）放不下，rail 自动收成图标栏。
-   * 阈值取最小窗口 900 与默认窗口 1280 之间：900 折叠后差异区仍有 400px 以上，
-   * 1000 以上继续显示完整仓库列表。用户手动折叠/展开优先于自动推导（见 rail.toggle）。
-   */
-  const RAIL_COLLAPSE_WIDTH = 1000;
+  /** 左栏只由用户隐藏（⌘/Ctrl+B）：窗口变窄不会自动隐藏文件列表，只收紧渲染宽度（R14）。 */
+  const FALLBACK_WINDOW_WIDTH = 1280;
   let windowWidth = $state(currentWindowWidth());
-  let manualCollapsed = $state<boolean | null>(null);
-  let navCollapsed = $derived(manualCollapsed ?? windowWidth < RAIL_COLLAPSE_WIDTH);
+  let sidebarHidden = $state(false);
+  let paneWidth = $derived(fitPaneWidth(widths.files, windowWidth));
   /** 设置 modal 打开时要定位的分区；由 Git 诊断入口置为 runtime，其余入口为空。 */
   let settingsSection = $state<"appearance" | "runtime" | null>(null);
   /** 当前打开的标题栏弹层；anchor 是触发按钮，关闭后焦点回到这里。 */
@@ -149,14 +146,15 @@
   const FULL_FILE_CONTEXT = 1_000_000;
   let diffFullFile = $state(readFullFilePreference());
   let mergeInProgress = $state(false);
+  let mergeProbeSerial = 0;
   let remoteName = $state<string | null>(null);
   const drafts = new DraftBuffer();
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
 
-  /** 窗口宽度：只读来源，resize 时更新（R16 的折叠推导与断点判断共用）。 */
+  /** 窗口宽度：只读来源，resize 时更新，左栏渲染宽度由它收紧。 */
   function currentWindowWidth(): number {
-    if (typeof window === "undefined") return RAIL_COLLAPSE_WIDTH;
-    return window.innerWidth || RAIL_COLLAPSE_WIDTH;
+    if (typeof window === "undefined") return FALLBACK_WINDOW_WIDTH;
+    return window.innerWidth || FALLBACK_WINDOW_WIDTH;
   }
 
   /** Git 不可用时的诊断结论：一句，长安装说明只在设置/运行依赖里展开（R12、R13）。 */
@@ -197,12 +195,12 @@
       .map((row) => row.path),
   );
 
-  /* 命令注册表的唯一状态输入：标题栏、rail、溢出菜单与命令面板都读这一份。 */
+  /* 命令注册表的唯一状态输入：标题栏、左栏、溢出菜单与命令面板都读这一份。 */
   let commandState = $derived<CommandState>({
     hasRepo: opened !== null,
     workspaceView,
     taskModal,
-    navCollapsed,
+    sidebarHidden,
     writeLocked,
     // 只把写动作算作「正在写入」：pending 也承载差异续读（"diff"），
     // 把它算成写入会让读取期间的不可用原因失真（R11）。
@@ -328,8 +326,7 @@
         void runSync("push", (path, generation) => api.pushBranch(path, generation, nextId()));
         return;
       case "rail.toggle":
-        // 手动折叠/展开优先：窗口再变窄变宽都保留这次选择（R16 的「自动折叠」只作用于未手动选择时）。
-        manualCollapsed = !navCollapsed;
+        sidebarHidden = !sidebarHidden;
         return;
       case "palette.open":
         openPalette();
@@ -452,7 +449,9 @@
     }
   }
 
+  /** 左栏合并提示的唯一来源。序号防止较早发出的探测晚到时盖掉新结果。 */
   async function probeMerge() {
+    const serial = ++mergeProbeSerial;
     const current = opened;
     if (!current) {
       mergeInProgress = false;
@@ -460,10 +459,10 @@
     }
     try {
       const session = await api.mergeSession(current.summary.path, current.generation, nextId());
-      if (opened?.summary.path !== current.summary.path) return;
+      if (serial !== mergeProbeSerial || opened?.summary.path !== current.summary.path) return;
       mergeInProgress = session.operation === "merge" || session.canAbort;
     } catch {
-      if (opened?.summary.path === current.summary.path) mergeInProgress = false;
+      if (serial === mergeProbeSerial && opened?.summary.path === current.summary.path) mergeInProgress = false;
     }
   }
 
@@ -491,6 +490,7 @@
     closeSwitcher(false);
     conflictFocus = null;
     remoteName = null;
+    mergeInProgress = false;
     recent = [
       { name: next.summary.name, path: next.summary.path, openedAtMs: Date.now() },
       ...recent.filter((repo) => repo.path !== next.summary.path),
@@ -542,6 +542,8 @@
       }
       opened = { ...opened, snapshot, generation: snapshot.generation };
       selected = retainSelection(snapshot.files, selected);
+      // 外部完成或开始合并时只有刷新能发现，提示不能停在旧状态。
+      void probeMerge();
       await loadSelectedDiff();
       return true;
     } catch (error) {
@@ -824,6 +826,7 @@
       selected = selectionAfterEdit(result.snapshot.files, selected);
       banner = result.pushed ? banner : null;
       live = result.summary;
+      void probeMerge();
       await loadSelectedDiff();
     } catch (error) {
       if (opened?.summary.path === current.summary.path) {
@@ -867,6 +870,7 @@
       phaseNote = result.summary;
       banner = result.pushed ? null : result.pushError;
       live = result.summary;
+      void probeMerge();
       await loadSelectedDiff();
     } catch (error) {
       if (opened?.summary.path === current.summary.path) {
@@ -1008,8 +1012,8 @@
 
   async function openRecent(path: string) {
     if (switchBlocked(commandState)) {
-      // R11：标题栏仓库菜单与命令面板已按同一条判定禁用，rail 的仓库行仍可点，
-      // 所以这里不能静默返回——把同一个原因说出来，三个入口的结论才一致。
+      // R11：仓库弹层与命令面板已按同一条判定禁用，但快捷入口和测量钩子仍会走到这里，
+      // 所以不能静默返回——把同一个原因说出来，各入口的结论才一致。
       notice(switchBlockedReason(commandState));
       return;
     }
@@ -1337,32 +1341,6 @@
     }
   }
 
-  function startResize(event: PointerEvent, which: "sidebar" | "files") {
-    const target = event.currentTarget;
-    if (!(target instanceof HTMLElement)) return;
-    const startX = event.clientX;
-    const start = widths[which];
-    target.setPointerCapture(event.pointerId);
-    const move = (pointer: PointerEvent) => {
-      widths = { ...widths, [which]: clampWidth(start + pointer.clientX - startX) };
-    };
-    const stop = () => {
-      target.removeEventListener("pointermove", move);
-      target.removeEventListener("pointerup", stop);
-      void persistWidths();
-    };
-    target.addEventListener("pointermove", move);
-    target.addEventListener("pointerup", stop);
-  }
-
-  function resizeKey(event: KeyboardEvent, which: "sidebar" | "files") {
-    const next = nudgeWidth(widths[which], event.key);
-    if (next === null) return;
-    event.preventDefault();
-    widths = { ...widths, [which]: next };
-    void persistWidths();
-  }
-
   /** 键盘层：把按键翻成命令 id，再走与四个入口相同的 runCommand。 */
   function onWindowKeydown(event: KeyboardEvent) {
     if (paletteOpen) return;
@@ -1678,7 +1656,7 @@
     let stopMedia = () => {};
     const keyListener = (event: KeyboardEvent) => onWindowKeydown(event);
     window.addEventListener("keydown", keyListener);
-    // R16：窗口宽度跨过折叠阈值时 rail 跟着收放（用户手动选择优先，见 navCollapsed）。
+    // 窗口宽度决定左栏的渲染上限（fitPaneWidth）。
     const onResize = () => {
       windowWidth = currentWindowWidth();
     };
@@ -1852,50 +1830,32 @@
     </div>
   {/if}
 
-  <div
-    class="workspace"
-    style={`--sidebar:${navCollapsed ? 56 : widths.sidebar}px; --files:${widths.files}px`}
-  >
-    <WorkspaceRail
-      repos={recent}
-      {query}
-      selectedPath={opened?.summary.path ?? null}
-      {workspaceView}
-      workspaceEnabled={opened !== null}
-      {changeCount}
-      {conflictCount}
-      {mergeInProgress}
-      collapsed={navCollapsed}
-      disabled={writeLocked}
-      onView={(view) => runCommand(`view.${view}`)}
-      onTask={(task) => runCommand(`task.${task}`)}
-      onToggleCollapsed={() => runCommand("rail.toggle")}
-      onQuery={(value) => (query = value)}
-      onSelect={openRecent}
-      onForget={forget}
-      onRepoContextMenu={repoContextMenu}
-      onShowPath={copyPath}
-      onAdd={() => runCommand("repo.add")}
-      onClone={() => runCommand("repo.clone")}
-      onCreate={() => runCommand("repo.create")}
-    />
-    {#if navCollapsed}
-      <div class="resizer" aria-hidden="true"></div>
-    {:else}
-      <div
-        class="resizer"
-        role="slider"
-        tabindex="0"
-        aria-orientation="vertical"
-        aria-label="调整仓库列表宽度"
-        aria-valuemin={160}
-        aria-valuemax={560}
-        aria-valuenow={widths.sidebar}
-        onpointerdown={(event) => startResize(event, "sidebar")}
-        onkeydown={(event) => resizeKey(event, "sidebar")}
-      ></div>
-    {/if}
+  <div class="workspace" data-sidebar={sidebarHidden ? "hidden" : "visible"} style={`--files:${paneWidth}px`}>
     <main class="content">
+      {#snippet paneHead()}
+        <div class="pane-head">
+          <ViewSwitcher view={workspaceView} {changeCount} onView={(view) => runCommand(`view.${view}`)} />
+          <span class="spacer"></span>
+          <button
+            type="button"
+            class="icon-btn sm"
+            aria-label="临时保存"
+            title="临时保存：收起未完成的工作"
+            onclick={() => runCommand("task.stash")}
+          >
+            <Icon name="archive" size={15} />
+          </button>
+        </div>
+        <MergeBanner {conflictCount} {mergeInProgress} onOpen={() => runCommand("task.merge")} />
+      {/snippet}
+      {#snippet paneResizer()}
+        <PaneResizer
+          value={paneWidth}
+          label="调整侧栏宽度"
+          onResize={(width) => (widths = { ...widths, files: width })}
+          onCommit={persistWidths}
+        />
+      {/snippet}
       {#if opened}
         <div class="workbench-views">
           <div
@@ -1904,16 +1864,9 @@
             aria-hidden={workspaceView !== "changes"}
             inert={workspaceView !== "changes"}
           >
-            <div class="changes dense">
-              <section class="files" aria-label="改动与提交">
-                <div class="pane-head">
-                  <span class="pane-title">本地改动</span>
-                  <span class="count" title="改动文件数">{changeCount}</span>
-                  <span class="spacer"></span>
-                  {#if conflictCount > 0}
-                    <span class="count danger" title="未解决冲突">{conflictCount}</span>
-                  {/if}
-                </div>
+            <div class="changes">
+              <section class="pane files" aria-label="改动与提交">
+                {@render paneHead()}
                 <FileList
                   files={opened.snapshot.files}
                   {selected}
@@ -1976,18 +1929,7 @@
                   {/snippet}
                 </CommitDraft>
               </section>
-              <div
-                class="resizer"
-                role="slider"
-                tabindex="0"
-                aria-orientation="vertical"
-                aria-label="调整文件列表宽度"
-                aria-valuemin={160}
-                aria-valuemax={560}
-                aria-valuenow={widths.files}
-                onpointerdown={(event) => startResize(event, "files")}
-                onkeydown={(event) => resizeKey(event, "files")}
-              ></div>
+              {@render paneResizer()}
               <DiffView
                 selection={selected}
                 {diff}
@@ -2010,7 +1952,11 @@
           >
             {#if historyPanel}
               {#await historyPanel}
-                <div class="view-loading"><span class="spinner"></span></div>
+                <div class="history-layout">
+                  <aside class="pane">{@render paneHead()}</aside>
+                  {@render paneResizer()}
+                  <div class="view-loading"><span class="spinner"></span></div>
+                </div>
               {:then module}
                 <module.default
                   {opened}
@@ -2024,6 +1970,8 @@
                   onClearFile={() => (historyPath = null)}
                   onSnapshot={applySnapshot}
                   onNotice={notice}
+                  {paneHead}
+                  {paneResizer}
                 />
               {/await}
             {/if}
@@ -2045,15 +1993,15 @@
   </div>
 
   <StatusBar
-    branch={opened ? branchText : null}
+    hasRepo={opened !== null}
     sync={syncText}
-    {changeCount}
-    {conflictCount}
     busy={writeLocked}
     refreshing={pending !== null || reading}
     {degraded}
     warning={warning}
     onRefresh={() => runCommand("view.refresh")}
+    {sidebarHidden}
+    onToggleSidebar={() => runCommand("rail.toggle")}
   />
 </div>
 

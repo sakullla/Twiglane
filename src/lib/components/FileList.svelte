@@ -26,8 +26,8 @@
     | { kind: "header"; side: DiffSide | "conflicted"; count: number; paths: string[] }
     | { kind: "row"; row: FileRow };
 
-  /** 每行 44px：文件行实际画 40px、上下各留 2px 呼吸；分组表头用整行，文字贴底，与上一组拉开距离。 */
-  const ROW_HEIGHT = 44;
+  /** 每行 40px：文件行实际画 36px、上下各留 2px 呼吸；分组表头用整行，文字贴底，与上一组拉开距离。 */
+  const ROW_HEIGHT = 40;
   const ROW_GAP = 4;
 
   let {

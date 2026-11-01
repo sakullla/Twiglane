@@ -1,10 +1,19 @@
 export const MIN_PANEL_WIDTH = 160;
 export const MAX_PANEL_WIDTH = 560;
 export const FALLBACK_POLL_MS = 5000;
+/** 窗口变窄时主内容至少保留的宽度；900 宽窗口下左栏因此收紧到 340。 */
+export const MIN_MAIN_WIDTH = 560;
+/** 窗口再窄，左栏也不会被自动收到这个宽度以下；用户自己拖得更窄的宽度不受影响。 */
+export const PANE_SQUEEZE_FLOOR = 240;
 
 export function clampWidth(value: number): number {
   if (!Number.isFinite(value)) return MIN_PANEL_WIDTH;
   return Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, Math.round(value)));
+}
+
+/** 左栏渲染宽度：只按窗口收紧显示，不改写已保存的宽度（R14）。 */
+export function fitPaneWidth(saved: number, windowWidth: number): number {
+  return Math.min(saved, Math.max(PANE_SQUEEZE_FLOOR, windowWidth - MIN_MAIN_WIDTH));
 }
 
 export function nextIndex(current: number, key: string, count: number): number | null {

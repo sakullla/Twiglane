@@ -213,8 +213,8 @@ const TRANSLUCENT_BASES = ["bg", "surface", "surface-2"];
 
 /**
  * 选中行：--accent-soft 叠在所在表面上，行内元素再落在这层底上。
- * 主文件行在 --surface（T3 后在 --surface-2），冲突文件行和提交文件行在 --surface-2，
- * 提交列表在 --surface，所以两档表面都要算。hover 规则不会盖过选中规则，不需要再叠 --hover。
+ * 左栏的文件行、提交列表，以及冲突文件行和提交文件行都在 --surface-2，
+ * 弹层里的同款行在 --surface，所以两档表面都要算。hover 规则不会盖过选中规则，不需要再叠 --hover。
  */
 const SELECTED_ROW_BASES = ["surface", "surface-2"];
 const SELECTED_ROW_LAYER = "accent-soft";

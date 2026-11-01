@@ -185,7 +185,7 @@ describe("设计令牌", () => {
     for (const selector of [".field", ".input, .textarea, .select", ".checkbox", ".switch input", ".btn-secondary"]) {
       expectControlBoundary(components, selector);
     }
-    for (const selector of [".branch-pill", ".action-card", ".sidebar-add"]) {
+    for (const selector of [".branch-pill", ".action-card"]) {
       expectControlBoundary(layout, selector);
     }
     for (const [file, css, selector] of [
@@ -193,7 +193,6 @@ describe("设计令牌", () => {
       ["components.css", components, ".btn-secondary:hover:not(:disabled)"],
       ["layout.css", layout, ".branch-pill:hover:not(:disabled)"],
       ["layout.css", layout, ".action-card:hover:not(:disabled)"],
-      ["layout.css", layout, ".sidebar-add:hover:not(:disabled)"],
     ] as const) {
       expect(ruleBody(css, selector), `${file} ${selector}`).toMatch(/var\(--control-border-hover\)/);
     }
@@ -574,9 +573,7 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".branch-current-sync > span": "上游/下游计数胶囊，静态展示",
 
   // --- components.css：表格/列分隔线与分区线 ---
-  ".pane-head": "面板标题栏底部横向分隔线",
   ".panel-toolbar": "面板工具条底部横向分隔线",
-  ".history-list": "历史列表与详情之间的竖向分栏线",
   ".commit-head": "提交信息区底部横向分隔线，纯分区",
   ".commit-files": "提交文件栏与差异之间的竖向分栏线；文件行自带 hover/选中反馈",
   ".history-multi-head": "多选头部底部横向分隔线",
@@ -605,10 +602,7 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   // --- layout.css ---
   ".topbar": "标题栏底部横向分区线",
   ".infobar": "通知条底部横向分区线",
-  ".workspace-nav": "侧栏导航组底部横向分区线",
-  ".files": "文件列表面板外框；行内交互由 .file-row 的选中竖条承担",
   ".view-title-line .count": "视图标题计数胶囊描边，纯装饰数字标记",
-  ".sidebar-section .count": "侧栏分组计数胶囊描边，纯装饰数字标记",
   ".welcome-recent button": "最近仓库网格的行分隔线；行本身由文字与 hover 背景标示，与 .list-row 同类",
   ".welcome-recent button:nth-child(odd)": "最近仓库网格的列分隔竖线",
   ".welcome-recent button:nth-last-child(-n+2)": "网格末行去掉底部分隔线（覆盖为分区修正）",
@@ -723,9 +717,8 @@ describe("控件边界策略（默认拒绝）", () => {
     expect(opacityDecl.test(fromPath), ".fd.from 不能用文字 opacity 弱化").toBe(false);
     expect(fromPath, "来源路径弱化色").toMatch(/color:\s*var\(--purple-dimmed\)/);
 
-    // 键位提示是正文信息：显示时必须完全不透明（0.75 会把 --fg-subtle 压到 3.64:1）。
-    const navKbd = ruleBody(layout, ".workspace-nav-item:hover kbd, .workspace-nav-item:focus-visible kbd");
-    expect(navKbd, "键位提示显示态").toMatch(/opacity:\s*1(?:;|\s|$)/);
+    // 键位提示是正文信息：不能用 opacity 弱化（0.75 会把 --fg-subtle 压到 3.64:1）。
+    expect(opacityDecl.test(ruleBody(components, ".composer-commit kbd")), "提交按钮键位提示").toBe(false);
 
     // 弱化令牌两套主题都要定义，且不得与基础正文色同值（否则「弱化」没有语义）。
     for (const [theme, tokens] of [

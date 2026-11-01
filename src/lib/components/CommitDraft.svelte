@@ -3,6 +3,8 @@
   export const MESSAGE_HEIGHT_DEFAULT = 112;
   export const MESSAGE_HEIGHT_MIN = 56;
   export const MESSAGE_HEIGHT_MAX = 520;
+  /** 静止且没有内容时说明框只占一行，把高度让给文件列表（R4）。 */
+  export const MESSAGE_HEIGHT_COMPACT = 36;
   const STORAGE_KEY = "twiglane.commitMessageHeight";
 
   export function clampMessageHeight(value: number, max = MESSAGE_HEIGHT_MAX): number {
@@ -36,6 +38,7 @@
 
   /**
    * 提交区：目标分支与范围两枚标签 → 一个说明框（第一行是摘要）→ 一行状态 → 主次两个按钮。
+   * 说明框静止时只占一行，聚焦或有内容时展开到记住的高度。
    *
    * 提交区上沿是一条可拖动的分隔线：向上拖把说明框拉高、向下拖还给文件列表，
    * 键盘聚焦后用 ↑/↓ 调整、Home/End 到最小/最大，双击恢复默认高度。
@@ -98,6 +101,9 @@
   let menuStyle = $state("");
   let height = $state(readStoredHeight());
   let dragging = $state(false);
+  /** 用户正在写说明或调高度。只由说明框和分隔线打开，点提交区里的按钮不改变布局，否则按钮会在按下时移位。 */
+  let active = $state(false);
+  let shownHeight = $derived(active || dragging || value.length > 0 ? height : MESSAGE_HEIGHT_COMPACT);
   let committing = $derived(busy === "commit" || busy === "commit-push");
   let ready = $derived(hasCommitSummary(value) && paths.length > 0 && !disabled);
   let blocker = $derived(
@@ -118,6 +124,20 @@
     return () => {
       window.removeEventListener("mousedown", close);
       window.removeEventListener("keydown", key);
+    };
+  });
+
+  /** 按提交区外的位置或焦点离开时才收起，提交区内的点击不会让布局中途变化。 */
+  $effect(() => {
+    if (!active) return;
+    const leave = (event: Event) => {
+      if (section && !section.contains(event.target as Node)) active = false;
+    };
+    window.addEventListener("pointerdown", leave);
+    window.addEventListener("focusin", leave);
+    return () => {
+      window.removeEventListener("pointerdown", leave);
+      window.removeEventListener("focusin", leave);
     };
   });
 
@@ -147,7 +167,7 @@
   function maxHeight(): number {
     const panel = section?.parentElement;
     if (!panel || !section || panel.clientHeight === 0) return MESSAGE_HEIGHT_MAX;
-    const chrome = section.offsetHeight - height;
+    const chrome = section.offsetHeight - shownHeight;
     return panel.clientHeight - chrome - FILE_LIST_RESERVE;
   }
 
@@ -225,6 +245,7 @@
     title="拖动调整高度，双击恢复默认"
     onpointerdown={startResize}
     onkeydown={resizeKey}
+    onfocus={() => (active = true)}
     ondblclick={() => setHeight(MESSAGE_HEIGHT_DEFAULT)}
   ></div>
   <span class="sr-only">{scope}</span>
@@ -273,11 +294,12 @@
     <textarea
       name="commit-message"
       aria-label="提交说明草稿"
-      placeholder="提交说明：第一行写摘要，需要时空一行再写详细说明"
+      placeholder="提交说明（第一行是摘要）"
       spellcheck="false"
-      style={`height:${height}px`}
+      style={`height:${shownHeight}px`}
       {value}
       disabled={disabled}
+      onfocus={() => (active = true)}
       oninput={(event) => onInput((event.currentTarget as HTMLTextAreaElement).value)}
       onblur={onBlur}
     ></textarea>
@@ -333,7 +355,7 @@
       onclick={() => onCommitPush?.()}
     >
       {#if busy === "commit-push"}<span class="spinner"></span>{:else}<Icon name="upload" size={15} />{/if}
-      <span class="composer-push-label">并推送</span>
+      <span class="composer-push-label">提交并推送</span>
     </button>
   </div>
 </section>

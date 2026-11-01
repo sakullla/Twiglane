@@ -4,7 +4,7 @@ import { MODIFIER_LABEL } from "./brand";
 import type { RecentRepo, TaskModal, Theme, WorkspaceView } from "./types";
 
 /**
- * 动作注册表：标题栏、rail、溢出菜单与命令面板都从这里取同一份 id、名称与可用性判断，
+ * 动作注册表：标题栏、左栏、溢出菜单与命令面板都从这里取同一份 id、名称与可用性判断，
  * 四处只是同一条命令的不同入口，因此结果不会分叉（R11）。
  *
  * 本文件保持纯函数：它只描述「有哪些命令、什么时候可用」，
@@ -20,7 +20,7 @@ export interface CommandState {
   hasRepo: boolean;
   workspaceView: WorkspaceView;
   taskModal: TaskModal | null;
-  navCollapsed: boolean;
+  sidebarHidden: boolean;
   writeLocked: boolean;
   /**
    * 仅指「有写操作在飞行中」（暂存、提交、同步等），不含「正在读取仓库」与「差异续读」。
@@ -51,7 +51,7 @@ export interface CommandSpec {
   id: string;
   group: CommandGroup;
   title: string;
-  /** 一行以内的补充说明，标题栏菜单、rail 提示与命令面板共用。 */
+  /** 一行以内的补充说明，标题栏菜单与命令面板共用。 */
   hint: string;
   /**
    * 只参与命令面板过滤、不显示的检索词（例如切换仓库时带上仓库路径）。
@@ -82,10 +82,9 @@ function busyReason(state: CommandState): string {
 const repoBusyReason = (state: CommandState) => (state.hasRepo ? busyReason(state) : "先打开一个仓库");
 
 /**
- * 切换仓库的唯一判定（R11）：标题栏仓库弹层、rail 的仓库行与命令面板都读它，
- * 外壳的 openRecent 也用同一个判定提前返回并说明原因。
- * 三个入口以前各写一套：面板看「没在写」就说能用、标题栏菜单看 pending 就禁用、
- * rail 交给 openRecent 的静默返回，于是差异续读期间点下去什么都不发生。
+ * 切换仓库的唯一判定（R11）：标题栏仓库弹层与命令面板都读它，
+ * 外壳的 openRecent 也用同一个判定提前返回并说明原因，
+ * 否则差异续读期间点下去什么都不发生。
  */
 export const switchBlocked = (state: CommandState) => state.switchingBlocked;
 
@@ -330,8 +329,8 @@ const SHELL_COMMANDS: CommandSpec[] = [
   {
     id: "rail.toggle",
     group: "界面",
-    title: "折叠侧栏",
-    hint: "折叠为仅图标形态",
+    title: "隐藏/显示侧栏",
+    hint: "隐藏左栏让主内容铺满，再次执行恢复原宽度",
     shortcut: `${MODIFIER_LABEL} B`,
     available: () => true,
   },

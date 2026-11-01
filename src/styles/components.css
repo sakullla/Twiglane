@@ -114,7 +114,7 @@
 .segmented { display: inline-flex; padding: 3px; gap: var(--space-2); border-radius: 10px; background: var(--surface-3); flex: none; }
 .segmented button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: 25px; padding: 0 10px; border-radius: 7px; font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--fg-muted); transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease); }
 .segmented button:hover { color: var(--fg); }
-.segmented button[aria-pressed="true"] { background: var(--segmented-active-bg); color: var(--fg); box-shadow: var(--segmented-active-shadow); }
+.segmented button[aria-pressed="true"], .view-switcher button[aria-current="page"] { background: var(--segmented-active-bg); color: var(--fg); box-shadow: var(--segmented-active-shadow); }
 
 /* ---------- 输入与表单 ---------- */
 .field {
@@ -187,7 +187,6 @@
 .menu-anchor { position: relative; }
 .menu { position: absolute; top: calc(100% + 7px); right: 0; min-width: 255px; padding: 6px; border-radius: var(--radius-lg); background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow-lg); z-index: var(--z-menu); animation: pop var(--duration-fast) var(--ease-out); }
 .menu.left { left: 0; right: auto; }
-.sidebar-menu { width: 100%; min-width: 245px; }
 .menu-item { display: flex; align-items: flex-start; gap: 11px; width: 100%; padding: 10px; border-radius: var(--radius-sm); text-align: left; transition: background var(--duration-fast) var(--ease); }
 /* 菜单项聚焦：只用 hover 背景（4.5% 覆盖）看不出焦点，必须补可见焦点环。
    写法和合并结果编辑框一致：2px --focus，负偏移保证环画在菜单项自身范围内。 */
@@ -225,15 +224,22 @@
 .context-menu .menu-sep { margin: var(--space-4) var(--space-2); }
 
 /* ---------- 面板骨架：文件列表 ---------- */
-.pane-head { display: flex; align-items: center; gap: 4px; min-height: 48px; padding: 0 8px 0 15px; border-bottom: 1px solid var(--border); flex: none; }
-.pane-title { font-weight: var(--weight-semibold); font-size: var(--text-base); display: inline-flex; align-items: center; gap: var(--space-8); letter-spacing: 0; }
+.pane-head { display: flex; align-items: center; gap: var(--space-6); min-height: 40px; padding: 0 var(--space-8); flex: none; container-type: inline-size; container-name: pane-head; }
+.pane-head > .icon-btn { flex: none; }
+.view-switcher button { gap: var(--space-6); }
+.view-switcher .count { height: 16px; min-width: 16px; padding: 0 var(--space-4); font-size: var(--text-xs); }
+/* 左栏最窄时收起计数，保证临时保存按钮不被裁掉。 */
+@container pane-head (max-width: 200px) {
+  .view-switcher .count { display: none; }
+  .view-switcher button { padding: 0 var(--space-8); }
+}
 .inline-error { margin: 8px 10px 0; padding: 7px 10px; border-radius: var(--radius-sm); background: var(--danger-soft); color: var(--danger-text); font-size: var(--text-sm); }
-.file-tools { padding: 11px 11px 6px; flex: none; }
-/* 文件列表里的搜索框：与 .sidebar-search .field 同义，底色是 --surface-2，边界继承 .field 的
-   --control-border（原来覆盖成 transparent，填充与 --surface 只差 1.04:1，等于没有边界）。 */
-.file-tools .field { background: var(--surface-2); }
+.file-tools { padding: 0 var(--space-8) var(--space-6); flex: none; }
+/* 左栏搜索框：比 --surface-2 的左栏暗一档，边界继承 .field 的 --control-border。 */
+.file-tools .field { background: var(--surface); }
+.history-tools .field { background: var(--surface); }
 .file-tools .field:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, var(--control-border)); background: var(--surface); }
-.file-list { min-height: 0; flex: 1; overflow: auto; padding: 0 0 8px; position: relative; outline: none; }
+.file-list { min-height: 0; flex: 1; overflow: auto; padding: 0 0 8px; position: relative; outline: none; container-type: inline-size; container-name: file-list; }
 /* 文件列表、差异面板、历史列表这三个可聚焦滚动容器同一判据：原来用 --accent-soft
    （9.5% alpha）画环，对 --surface 合成后约 1.15:1，等于没有焦点指示。改用全局焦点环
    同款的 --focus（对 --surface 浅 5.62:1 / 深 6.99:1，对 --surface-2 5.07:1 / 6.54:1），
@@ -264,6 +270,10 @@
 .file-row .row-action.btn { height: 24px; font-size: var(--text-xs); padding: 0 7px; }
 .file-row:hover .row-action, .file-row[aria-selected="true"] .row-action, .row-action:focus-visible { opacity: 1; }
 .file-row[aria-selected="true"] .row-action { color: var(--accent-text); }
+/* 窄栏里隐藏的行内动作不占位，把宽度留给文件名；键盘用空格暂存，悬停和选中时才出现。 */
+@container file-list (max-width: 240px) {
+  .file-row:not(:hover, [aria-selected="true"]) .row-action { display: none; }
+}
 
 /* ---------- 提交区 ---------- */
 /* 提交区：标签行 → 说明框 → 一行状态 → 主次两个按钮。说明框高度由上沿分隔线拖动调整（记在本机）。 */
@@ -338,7 +348,6 @@
 .composer-box textarea {
   display: block;
   width: 100%;
-  min-height: 56px;
   padding: var(--space-8) var(--space-12);
   border: 0;
   outline: none;
@@ -348,7 +357,7 @@
   font-size: var(--text-sm);
   line-height: 1.6;
 }
-.composer-box textarea::placeholder { color: var(--fg-subtle); font-weight: var(--weight-normal); }
+.composer-box textarea::placeholder { color: var(--fg-subtle); font-weight: var(--weight-normal); white-space: nowrap; }
 .composer-box textarea:disabled { cursor: not-allowed; color: var(--fg-muted); }
 .composer-meta { display: flex; align-items: center; gap: var(--space-6); min-width: 0; min-height: 20px; color: var(--fg-subtle); font-size: var(--text-xs); }
 .composer-meta > .icon { flex: none; }
@@ -379,11 +388,13 @@
 .composer-commit-label { overflow: hidden; text-overflow: ellipsis; }
 .composer-commit kbd { margin-left: auto; font-size: var(--text-xs); }
 .composer-push { flex: none; padding: 0 var(--space-12); }
-/* 窄栏（文件列表最窄 160px）：先收起键位提示，再把「并推送」收成图标，高度与单行原因不变。 */
+/* 窄栏（左栏最窄 160px）：收起键位提示，两个提交按钮上下排列，文字都完整显示（R3）。 */
 @container composer (max-width: 300px) {
   .composer-commit kbd { display: none; }
-  .composer-push-label { display: none; }
-  .composer-push { padding: 0 var(--space-8); }
+  .composer-meta { flex-wrap: wrap; }
+  .composer-meta > span { flex: 1 1 0; min-width: 96px; white-space: normal; }
+  .composer-actions { flex-direction: column; }
+  .composer-commit, .composer-push { flex: none; width: 100%; }
 }
 .scope-details summary { display: flex; align-items: center; gap: 5px; cursor: pointer; font-size: var(--text-xs); color: var(--fg-muted); list-style: none; user-select: none; width: fit-content; border-radius: 4px; }
 .scope-details summary:hover { color: var(--fg); }
@@ -609,12 +620,19 @@ label.list-row .checkbox { margin-top: 2px; }
 .pager { display: inline-flex; align-items: center; gap: 3px; flex: none; }
 .pager .hint { padding: 0 6px; font-size: var(--text-xs); white-space: nowrap; }
 /* 历史：左侧提交列表；右侧上方是提交信息，下方左右分栏——文件列表贴边占满高度，差异占其余。 */
-.history-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(300px, 28%) minmax(0, 1fr); }
-.history-list { min-width: 0; min-height: 0; overflow: auto; position: relative; border-right: 1px solid var(--border); padding: var(--space-6) 0; outline: none; background: var(--surface); }
+.history-view { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--surface); }
+.history-tools { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; padding: 0 var(--space-8) var(--space-6); flex: none; }
+.history-tools .btn { align-self: flex-start; }
+.history-tools .history-file-scope { max-width: 100%; }
+.history-list { flex: 1; min-width: 0; min-height: 0; overflow: auto; position: relative; padding: 0 0 var(--space-6); outline: none; container-type: inline-size; container-name: history-list; }
+/* 窄栏里把宽度留给摘要、作者和时间；Hash 仍在悬停提示和详情里。 */
+@container history-list (max-width: 240px) {
+  .hr-hash, .history-row .avatar { display: none; }
+}
+.history-pager { min-height: 32px; padding: 0 var(--space-8); }
 .history-list:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .history-detail { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--surface); }
-.history-detail .diff { border: 0; border-radius: 0; box-shadow: none; }
-.history-toolbar .history-search { width: min(420px, 100%); }
+.changes .diff, .history-detail .diff { border: 0; border-radius: 0; box-shadow: none; }
 .history-file-scope { display: inline-flex; align-items: center; gap: var(--space-6); min-width: 0; max-width: 420px; height: 28px; padding: 0 var(--space-12); border-radius: 999px; background: var(--info-soft); color: var(--info-text); font-family: var(--mono); font-size: var(--text-sm); }
 .pager-range { padding: 0 var(--space-6); color: var(--fg-muted); font-size: var(--text-sm); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
@@ -664,7 +682,7 @@ label.list-row .checkbox { margin-top: 2px; }
 .oid-chip button { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; color: var(--fg-muted); }
 .oid-chip button:hover { background: var(--hover); color: var(--fg); }
 
-.commit-split { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(200px, 240px) minmax(0, 1fr); }
+.commit-split { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(180px, 26%) minmax(0, 1fr); }
 .commit-files { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--border); background: var(--surface-2); }
 .commit-files-head { display: flex; align-items: center; gap: var(--space-6); min-height: 42px; padding: 0 var(--space-12) 0 var(--space-16); font-size: var(--text-sm); font-weight: var(--weight-semibold); color: var(--fg); flex: none; }
 .file-tally { font-family: var(--mono); font-size: var(--text-xs); font-weight: var(--weight-semibold); }

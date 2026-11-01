@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/svelte";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import DiffView from "../src/lib/components/DiffView.svelte";
 import {
@@ -425,6 +425,35 @@ describe("临时保存 modal", () => {
     await screen.findByRole("dialog");
     await fireEvent.click(screen.getByRole("button", { name: "关闭" }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("历史分栏", () => {
+  it("搜索、提交列表和分页在左栏，详情、变更文件和差异在主内容，差异模式在详情头部", async () => {
+    const only = commit(0);
+    historyPage.mockResolvedValue({ generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [only] });
+    commitDetail.mockResolvedValue({
+      generation: 3,
+      commit: only,
+      body: "",
+      root: false,
+      merge: false,
+      selectedParent: only.parents[0],
+      files: [{ path: "notes.txt", originalPath: null, status: "modified" }],
+    });
+    commitFileDiff.mockResolvedValue(diff);
+    render(HistoryPanel, { props: panelProps() });
+    await waitFor(() => expect(document.querySelector(".commit-head")).toBeTruthy());
+    const pane = document.querySelector<HTMLElement>(".history-layout > .pane")!;
+    const detail = document.querySelector<HTMLElement>(".history-layout > .history-detail")!;
+    expect(within(pane).getByRole("textbox", { name: "搜索全部历史" })).toBeTruthy();
+    expect(within(pane).getByRole("listbox", { name: "提交历史" })).toBeTruthy();
+    expect(within(pane).getByRole("button", { name: "上一页" })).toBeTruthy();
+    expect(within(pane).getByRole("button", { name: "下一页" })).toBeTruthy();
+    expect(pane.contains(document.querySelector(".commit-head")), "详情不进左栏").toBe(false);
+    expect(within(detail).getByRole("group", { name: "历史差异模式" })).toBeTruthy();
+    expect(detail.querySelector(".commit-files")).toBeTruthy();
+    expect(detail.querySelector(".commit-diff")).toBeTruthy();
   });
 });
 

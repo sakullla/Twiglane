@@ -6,7 +6,7 @@ import type { DiffLine, DiffResponse, FileChange, HistoryCommit, StatusSnapshot 
 
 /* ------------------------------------------------------------------ *
  * App 级夹具：真实 api 由 vi.mock 顶替，界面走完整外壳。
- * 本文件只盯外壳的可观察契约（标题栏、rail 分组、命令面板、主题解析），
+ * 本文件只盯外壳的可观察契约（标题栏、左栏、命令面板、主题解析），
  * 逐项比对清单而不是数数量，这样少一条动作或缺一个分组都会立刻失败。
  * ------------------------------------------------------------------ */
 
@@ -198,7 +198,27 @@ describe("原生状态测量", () => {
     await openRepo();
     const focus = mocks.listenEvent.mock.calls.find(([name]) => name === "window-focused")![1];
     focus();
-    await fireEvent.click(document.querySelector<HTMLElement>(".repo-main")!);
+    // 弹层选当前仓库只收起、不重读，同一路径重新打开走命令面板的切换命令。
+    const palette = await openPalette();
+    await fireEvent.click(within(palette).getByRole("option", { name: /切换到 demo/ }));
+    await waitFor(() => expect(mocks.openRepository).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(document.querySelectorAll("[data-diff-row]").length).toBeGreaterThan(0));
+    finish({ ...snapshot, files: [] });
+    await tick();
+    expect(document.querySelectorAll("[data-diff-row]").length).toBeGreaterThan(0);
+  });
+
+  it("从弹层切到另一个仓库后丢弃旧仓库的刷新结果", async () => {
+    let finish!: (value: StatusSnapshot) => void;
+    mocks.refreshStatus.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    useRecent([{ name: "demo", path: repoPath, openedAtMs: 1 }, { name: "other", path: "C:/work/other", openedAtMs: 2 }]);
+    render(App);
+    await openRepo();
+    const focus = mocks.listenEvent.mock.calls.find(([name]) => name === "window-focused")![1];
+    focus();
+    await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
+    const popover = await screen.findByRole("dialog", { name: "切换仓库" });
+    await fireEvent.click(within(popover).getByRole("option", { name: /other/ }));
     await waitFor(() => expect(mocks.openRepository).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(document.querySelectorAll("[data-diff-row]").length).toBeGreaterThan(0));
     finish({ ...snapshot, files: [] });
@@ -358,7 +378,7 @@ const R11_ACTIONS: { id: string; title: string }[] = [
   { id: "theme.dark", title: "深色外观" },
   { id: "theme.system", title: "跟随系统外观" },
   { id: "view.refresh", title: "刷新工作区" },
-  { id: "rail.toggle", title: "折叠侧栏" },
+  { id: "rail.toggle", title: "隐藏/显示侧栏" },
   { id: "palette.open", title: "命令面板" },
   { id: "dialog.dependencies", title: "运行依赖" },
 ];
@@ -369,7 +389,7 @@ function commandState(overrides: Partial<CommandState> = {}): CommandState {
     hasRepo: true,
     workspaceView: "changes",
     taskModal: null,
-    navCollapsed: false,
+    sidebarHidden: false,
     writeLocked: false,
     writing: false,
     reading: false,
@@ -397,6 +417,22 @@ async function openRepo() {
   await fireEvent.click(document.querySelector<HTMLButtonElement>(".welcome-recent button")!);
   await waitFor(() => expect(document.querySelector(".file-list")).toBeTruthy());
   await waitFor(() => expect(document.querySelectorAll("[data-diff-row]").length).toBeGreaterThan(0));
+}
+
+/** 合并会话夹具：只有 operation 与 canAbort 影响左栏提示。 */
+function mergeSessionWith(operation: "merge" | "none") {
+  return {
+    generation: 4,
+    operation,
+    canContinue: false,
+    canAbort: operation === "merge",
+    source: null,
+    target: "main",
+    headOid: branch.headOid,
+    conflicts: [],
+    unresolved: 0,
+    note: "",
+  };
 }
 
 /** 换掉夹具的最近仓库列表，其余设置不变。 */
@@ -567,51 +603,91 @@ describe("应用外壳", () => {
     await waitFor(() => expect(mocks.refreshStatus.mock.calls.length).toBe(before + 1));
   });
 
-  it("rail 分导航与任务两组，导航恰好是改动与提交历史", async () => {
+  it("主界面只有标题栏、左栏、主内容和状态栏，没有常驻仓库列表", async () => {
+    useRecent([{ name: "demo", path: repoPath, openedAtMs: 1 }, { name: "other", path: "C:/work/other", openedAtMs: 2 }]);
+    render(App);
+    await openRepo();
+    expect(document.querySelector(".rail"), "rail 已删除").toBeNull();
+    expect(document.querySelector(".workspace > aside"), "工作区只剩主内容").toBeNull();
+    expect(document.querySelector(".workspace")?.children).toHaveLength(1);
+    expect(document.body.textContent, "其他仓库只在弹层里出现").not.toContain("other");
+    expect(document.querySelector(".pane .file-list"), "文件列表在左栏").toBeTruthy();
+    expect(document.querySelector(".pane .composer"), "提交区在左栏").toBeTruthy();
+  });
+
+  it("左栏头部切换视图，隐藏后仍能进入，导航恰好是改动与提交历史", async () => {
     render(App);
     await openRepo();
 
-    const rail = document.querySelector<HTMLElement>("aside.rail");
-    expect(rail, "rail 要存在").toBeTruthy();
-    const navs = [...rail!.querySelectorAll<HTMLElement>("nav")];
-    // 两组且只有两组：组名进 aria-label，读屏与测试都按名字取。
-    expect(navs.map((nav) => nav.getAttribute("aria-label"))).toEqual(["导航", "任务"]);
-
+    const activeNav = () =>
+      document.querySelector<HTMLElement>('.workbench-view[data-active="true"] nav[aria-label="视图"]')!;
     const labelsOf = (nav: HTMLElement) =>
-      [...nav.querySelectorAll<HTMLElement>(".workspace-nav-item")].map((item) =>
-        (item.getAttribute("aria-label") ?? "").replace(/\s+\d+$/, ""),
-      );
+      [...nav.querySelectorAll<HTMLElement>("button")].map((item) => (item.getAttribute("aria-label") ?? "").replace(/\s+\d+$/, ""));
+    const current = () => activeNav().querySelector<HTMLElement>('[aria-current="page"]')?.getAttribute("aria-label");
 
-    const navLabels = labelsOf(navs[0]);
-    const taskLabels = labelsOf(navs[1]);
-    expect(navLabels).toEqual(["改动", "提交历史"]);
-    expect(taskLabels).toEqual(["临时保存", "分支合并", "分支与标签", "远程"]);
-    // 两组的入口不重叠：任务项不会挤进导航组，反之亦然。
-    expect(navLabels.filter((label) => taskLabels.includes(label))).toEqual([]);
-
-    // 导航组的第一项是当前视图；点第二项真的换成历史，而不是只换高亮。
-    expect(navs[0].querySelector<HTMLElement>('.workspace-nav-item[aria-current="page"]')?.getAttribute("aria-label")).toMatch(/^改动/);
-    await fireEvent.click(screen.getByRole("button", { name: "提交历史" }));
-    await waitFor(() =>
-      expect(navs[0].querySelector<HTMLElement>('.workspace-nav-item[aria-current="page"]')?.getAttribute("aria-label")).toBe(
-        "提交历史",
-      ),
-    );
+    expect(labelsOf(activeNav())).toEqual(["改动", "提交历史"]);
+    expect(current()).toMatch(/^改动/);
+    // 点第二项真的换成历史，而不是只换高亮；历史懒加载期间左栏头部也不消失。
+    await fireEvent.click(within(activeNav()).getByRole("button", { name: "提交历史" }));
+    expect(current()).toBe("提交历史");
     await waitFor(() => expect(document.querySelector(".history-list")).toBeTruthy());
+    expect(current()).toBe("提交历史");
 
-    // 折叠为仅图标后两组与条目都还在，名称改由 aria-label 承载。
+    // 隐藏后条目和名称都还在 DOM，⌘1/⌘2 与命令面板照常切换。
     await press("b");
-    const collapsedRail = document.querySelector<HTMLElement>("aside.rail.collapsed");
-    expect(collapsedRail).toBeTruthy();
-    const collapsedNavs = [...collapsedRail!.querySelectorAll<HTMLElement>("nav")];
-    expect(collapsedNavs.map((nav) => nav.getAttribute("aria-label"))).toEqual(["导航", "任务"]);
-    expect(labelsOf(collapsedNavs[0])).toEqual(["改动", "提交历史"]);
-    expect(labelsOf(collapsedNavs[1])).toEqual(["临时保存", "分支合并", "分支与标签", "远程"]);
-    // 折叠态不再渲染名称文字，只剩图标与计数；名称改由 aria-label 承载。
-    for (const item of collapsedRail!.querySelectorAll<HTMLElement>(".workspace-nav-item")) {
-      expect(item.textContent?.trim() ?? "").not.toMatch(/改动|提交历史|临时保存|分支合并|分支与标签|远程/);
-    }
-    expect(screen.getByRole("button", { name: "提交历史" }), "折叠态仍可进入").toBeTruthy();
+    expect(document.querySelector<HTMLElement>(".workspace")?.dataset.sidebar).toBe("hidden");
+    await press("1");
+    await waitFor(() => expect(current()).toMatch(/^改动/));
+    await press("2");
+    await waitFor(() => expect(current()).toBe("提交历史"));
+    expect(labelsOf(activeNav())).toEqual(["改动", "提交历史"]);
+  });
+
+  it("临时保存一次点击可达，只打开任务，不切换主视图", async () => {
+    render(App);
+    await openRepo();
+    const view = () => document.querySelector('.workbench-view[data-active="true"] [aria-current="page"]')?.getAttribute("data-view");
+    expect(view()).toBe("changes");
+    await fireEvent.click(screen.getByRole("button", { name: "临时保存" }));
+    await waitFor(() => expect(document.querySelector('[data-panel="stash"]')).toBeTruthy());
+    expect(view()).toBe("changes");
+  });
+
+  it("合并提示：无合并不显示，有冲突显示数量，冲突解决但未完成时仍在，点击进入合并，两个视图都有", async () => {
+    const banner = () => document.querySelector<HTMLElement>('.workbench-view[data-active="true"] [data-merge-banner]');
+    render(App);
+    await openRepo();
+    expect(banner(), "没有合并时不占位").toBeNull();
+
+    // 冲突：快照里有未合并文件。
+    const conflicted = { ...changes[0], unmerged: true };
+    mocks.mergeSession.mockResolvedValue(mergeSessionWith("merge"));
+    mocks.refreshStatus.mockResolvedValue({ ...snapshot, files: [conflicted, ...changes.slice(1)] });
+    await press("r");
+    await waitFor(() => expect(banner()?.textContent).toContain("1 个冲突待处理"));
+    expect(banner()?.getAttribute("aria-label")).toContain("合并进行中");
+
+    // 冲突全部解决：计数归零，但合并还没完成。
+    mocks.refreshStatus.mockResolvedValue({ ...snapshot, files: changes });
+    await press("r");
+    await waitFor(() => expect(banner()?.textContent).toContain("可以完成合并"));
+
+    await press("2");
+    await waitFor(() => expect(document.querySelector(".history-list")).toBeTruthy());
+    expect(banner()?.textContent, "历史视图同样显示").toContain("可以完成合并");
+    await fireEvent.click(banner()!);
+    await waitFor(() => expect(document.querySelector('[data-panel="merge"], .merge-panel')).toBeTruthy());
+  });
+
+  it("合并在外部完成后，下一次刷新收起提示", async () => {
+    mocks.mergeSession.mockResolvedValue(mergeSessionWith("merge"));
+    render(App);
+    await openRepo();
+    const banner = () => document.querySelector('.workbench-view[data-active="true"] [data-merge-banner]');
+    await waitFor(() => expect(banner()).toBeTruthy());
+    mocks.mergeSession.mockResolvedValue(mergeSessionWith("none"));
+    await press("r");
+    await waitFor(() => expect(banner()).toBeNull());
   });
 
   it("命令面板按 R11 的 id 清单逐项列出动作，草稿为空时两项提交都带原因", async () => {
@@ -711,7 +787,7 @@ describe("应用外壳", () => {
     expect(reasonOf(writingState, switchId)).toBe("正在写入，稍后再试");
   });
 
-  it("差异续读期间三个入口对切换仓库的结论一致，rail 点击会说明原因而不是静默失败（R11）", async () => {
+  it("差异续读期间三个入口对切换仓库的结论一致，拖入目录会说明原因而不是静默失败（R11）", async () => {
     // 续读那一次 loadDiff 挂起不结算，把外壳稳定停在 pending="diff" 上。
     let hold: ((value: DiffResponse) => void) | null = null;
     mocks.loadDiff.mockImplementation(
@@ -729,14 +805,16 @@ describe("应用外壳", () => {
     render(App);
     await openRepo();
     const openedBefore = mocks.openRepository.mock.calls.length;
-    // 这是 App 内的真实路径：rail 的仓库行、标题栏弹层与面板都通向同一个 openRecent。
+    // 这是 App 内的真实路径：标题栏弹层与面板都通向同一个 openRecent。
     const clicked = () => mocks.openRepository.mock.calls.length;
 
     await fireEvent.click(screen.getByRole("button", { name: "继续加载" }));
     await waitFor(() => expect(hold, "续读已经开始且没有结算").not.toBeNull());
 
+    // 入口三：拖入目录没有可以置灰的条目，所以必须给出同一个原因，而不是什么都不发生。
     await dragEvent("drop", ["C:/another"]);
     expect(mocks.addRepository, "差异续读时拖入目录也不能切换").not.toHaveBeenCalled();
+    await waitFor(() => expect(document.querySelector(".toast.ok .toast-text")?.textContent).toBe("正在读取，稍后再试"));
 
     // 入口一：命令面板就地禁用并说明「正在读取」，点了也不会偷偷发请求。
     let palette = await openPalette();
@@ -765,19 +843,28 @@ describe("应用外壳", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "切换仓库" })).toBeNull());
     expect(document.activeElement, "Esc 把焦点还给触发按钮").toBe(trigger);
 
-    // 入口三：rail 的仓库行不是禁用态，所以点击必须给出同一个原因，而不是什么都不发生。
-    await fireEvent.click(document.querySelector<HTMLElement>(".repo-main")!);
-    await waitFor(() => expect(document.querySelector(".toast.ok .toast-text")?.textContent).toBe("正在读取，稍后再试"));
-    expect(clicked(), "rail 点击同样不发请求").toBe(openedBefore);
+    // 右键菜单的「打开」与条目同源，同样带着原因。
+    await fireEvent.click(trigger);
+    const again = await screen.findByRole("dialog", { name: "切换仓库" });
+    await fireEvent.contextMenu(within(again).getByRole("option", { name: /other/ }));
+    const openItem = await screen.findByRole("menuitem", { name: /打开/ });
+    expect(openItem.getAttribute("aria-disabled") ?? String((openItem as HTMLButtonElement).disabled)).toBe("true");
+    await fireEvent.click(openItem);
+    expect(clicked(), "右键菜单同样不发请求").toBe(openedBefore);
+    await fireEvent.mouseDown(document.querySelector(".statusbar")!);
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "切换仓库" })).toBeNull());
 
-    // 续读结算后三个入口一起恢复：面板可用、rail 点击真的换仓库。
+    // 续读结算后三个入口一起恢复：面板可用、弹层点击真的换仓库。
     const release = hold as unknown as (value: DiffResponse) => void;
     release(diffFor("src/App.svelte", false));
     palette = await openPalette();
     await waitFor(() => expect(within(palette).getByRole("option", { name: /切换到 demo/ }).getAttribute("aria-disabled")).toBe("false"));
     await fireEvent.keyDown(palette, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "命令面板" })).toBeNull());
-    await fireEvent.click(document.querySelector<HTMLElement>(".repo-main")!);
+    await fireEvent.click(trigger);
+    const restored = await screen.findByRole("dialog", { name: "切换仓库" });
+    await fireEvent.click(within(restored).getByRole("option", { name: /other/ }));
     await waitFor(() => expect(clicked()).toBe(openedBefore + 1));
   });
 

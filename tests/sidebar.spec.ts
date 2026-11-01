@@ -1,13 +1,14 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { describe, expect, it, vi } from "vitest";
 import CommandPalette from "../src/lib/components/CommandPalette.svelte";
-import RepoSidebar from "../src/lib/components/RepoSidebar.svelte";
+import MergeBanner from "../src/lib/components/MergeBanner.svelte";
+import RepoSwitcher from "../src/lib/components/RepoSwitcher.svelte";
 import StatusBar from "../src/lib/components/StatusBar.svelte";
 import TitleBar from "../src/lib/components/TitleBar.svelte";
+import ViewSwitcher from "../src/lib/components/ViewSwitcher.svelte";
 import Welcome from "../src/lib/components/Welcome.svelte";
-import WorkspaceRail from "../src/lib/components/WorkspaceRail.svelte";
 import type { RecentRepo, RepoSummary, Theme } from "../src/lib/types";
 
 const repos: RecentRepo[] = [
@@ -17,157 +18,105 @@ const repos: RecentRepo[] = [
 
 const repo: RepoSummary = { name: "demo", path: "/work/alpha/demo" };
 
-describe("仓库侧栏", () => {
+describe("仓库弹层", () => {
+  function repoProps(overrides: Record<string, unknown> = {}) {
+    const anchor = document.createElement("button");
+    document.body.append(anchor);
+    return {
+      anchor,
+      repos,
+      currentPath: repos[0].path,
+      blockedReason: null,
+      actionReason: null,
+      onSelect: () => {},
+      onForget: () => {},
+      onCopyPath: () => {},
+      onContextMenu: () => {},
+      onCommand: () => {},
+      onClose: () => {},
+      ...overrides,
+    };
+  }
+
   it("同时展示同名仓库的完整路径", () => {
-    render(RepoSidebar, {
-      props: {
-        repos,
-        query: "",
-        selectedPath: repos[0].path,
-        theme: "light",
-        onQuery: () => {},
-        onSelect: () => {},
-        onForget: () => {},
-        onShowPath: () => {},
-        onTheme: () => {},
-      },
-    });
+    render(RepoSwitcher, { props: repoProps() as never });
     expect(screen.getAllByText("demo")).toHaveLength(2);
     expect(screen.getByText("/work/alpha/demo")).toBeTruthy();
     expect(screen.getByText("/work/beta/demo")).toBeTruthy();
   });
 
-  it("工作区导航展示改动与冲突数量，并切换视图", async () => {
-    const onView = vi.fn();
-    render(RepoSidebar, {
-      props: {
-        repos,
-        query: "",
-        selectedPath: repos[0].path,
-        theme: "dark",
-        workspaceView: "changes",
-        workspaceEnabled: true,
-        changeCount: 8,
-        conflictCount: 1,
-        onView,
-        onQuery: () => {},
-        onSelect: () => {},
-        onForget: () => {},
-        onShowPath: () => {},
-        onTheme: () => {},
-      },
-    });
-    expect(screen.getByRole("button", { name: /^改动 8/ }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("button", { name: /^分支合并 1/ })).toBeTruthy();
-    await fireEvent.click(screen.getByRole("button", { name: /^提交历史/ }));
-    expect(onView).toHaveBeenCalledWith("history");
+  it("搜索框只过滤最近仓库，框内不挂 Ctrl/⌘K 键帽", () => {
+    render(RepoSwitcher, { props: repoProps() as never });
+    const dialog = screen.getByRole("dialog", { name: "切换仓库" });
+    const input = within(dialog).getByRole("combobox") as HTMLInputElement;
+    expect(input.placeholder).toContain("仓库");
+    expect(input.placeholder).not.toMatch(/命令|Ctrl|⌘/);
+    expect(dialog.querySelector("kbd")).toBeNull();
+  });
+
+  it("打开、克隆、新建入口都在弹层底部，取代 rail 的添加仓库菜单", async () => {
+    const onCommand = vi.fn();
+    render(RepoSwitcher, { props: repoProps({ onCommand }) as never });
+    for (const [name, id] of [["打开本地仓库", "repo.add"], ["克隆远程仓库", "repo.clone"], ["新建仓库", "repo.create"]]) {
+      await fireEvent.click(screen.getByRole("button", { name }));
+      expect(onCommand).toHaveBeenLastCalledWith(id);
+    }
   });
 });
 
-describe("rail 分组与折叠", () => {
-  function railProps(overrides: Record<string, unknown> = {}) {
-    return {
-      repos,
-      query: "",
-      selectedPath: repos[0].path,
-      workspaceView: "changes",
-      workspaceEnabled: true,
-      changeCount: 8,
-      conflictCount: 1,
-      onView: () => {},
-      onTask: () => {},
-      onQuery: () => {},
-      onSelect: () => {},
-      onForget: () => {},
-      onShowPath: () => {},
-      ...overrides,
-    };
-  }
-
-  it("导航组是改动与提交历史，任务组是临时保存、分支合并、分支与标签、远程", () => {
-    render(WorkspaceRail, { props: railProps() as never });
-    const nav = screen.getByRole("navigation", { name: "导航" });
-    const navNames = [...nav.querySelectorAll("button")].map((item) => item.getAttribute("aria-label"));
-    expect(navNames).toEqual(["改动 8", "提交历史"]);
-
-    const tasks = screen.getByRole("navigation", { name: "任务" });
-    const taskNames = [...tasks.querySelectorAll("button")].map((item) => item.getAttribute("aria-label"));
-    expect(taskNames).toEqual(["临时保存", "分支合并 1", "分支与标签", "远程"]);
-  });
-
-  it("点任务项只打开任务，不切换主视图", async () => {
-    const onTask = vi.fn();
+describe("视图切换", () => {
+  it("展示改动数量，标出当前视图，并切换视图", async () => {
     const onView = vi.fn();
-    render(WorkspaceRail, { props: railProps({ onTask, onView }) as never });
-    await fireEvent.click(screen.getByRole("button", { name: "分支与标签" }));
-    expect(onTask).toHaveBeenCalledWith("branch");
-    expect(onView).not.toHaveBeenCalled();
-  });
-
-  it("冲突清零但合并仍在进行时，分支合并入口仍有独立标记", () => {
-    const merging = render(WorkspaceRail, {
-      props: railProps({ conflictCount: 0, mergeInProgress: true }) as never,
-    });
-    const merge = merging.container.querySelector<HTMLElement>('[aria-label="分支合并（合并进行中）"]');
-    expect(merge, "进行中的合并必须在任务入口的 aria-label 上可见").toBeTruthy();
-    expect(merge?.getAttribute("title")).toContain("合并进行中");
-    const marker = merge?.querySelector("[data-rail-status]");
-    expect(marker, "进行中的合并要有独立于冲突计数的标记").toBeTruthy();
-    expect(marker?.getAttribute("aria-hidden")).toBe("true");
-    expect(merge?.querySelector(".count"), "冲突数为 0 时不该出现计数").toBeNull();
-
-    // 计数与「进行中」互不替代：同时成立时两者都渲染
-    const both = render(WorkspaceRail, {
-      props: railProps({ conflictCount: 2, mergeInProgress: true }) as never,
-    });
-    const bothMerge = both.container.querySelector<HTMLElement>('[aria-label="分支合并 2（合并进行中）"]');
-    expect(bothMerge?.querySelector("[data-rail-status]")).toBeTruthy();
-    expect(bothMerge?.textContent).toContain("2");
-  });
-
-  it("折叠态同时呈现冲突数与进行中的合并，两种信息都不丢", () => {
-    const { container } = render(WorkspaceRail, {
-      props: railProps({ collapsed: true, conflictCount: 2, mergeInProgress: true }) as never,
-    });
-    const merge = container.querySelector<HTMLElement>('[aria-label="分支合并 2（合并进行中）"]');
-    expect(merge, "折叠后名称、数量与状态仍由标签承载").toBeTruthy();
-    const count = merge?.querySelector(".count");
-    const dot = merge?.querySelector("[data-rail-status]");
-    expect(count?.textContent, "数量由徽标本身承载").toBe("2");
-    expect(dot, "进行中的合并另有独立标记").toBeTruthy();
-    expect(count === dot, "两者必须是两个节点，样式层才有错开位点的余地").toBe(false);
-  });
-
-  it("折叠后只留图标，名称仍可通过标签与提示访问", async () => {
-    const onView = vi.fn();
-    const onToggleCollapsed = vi.fn();
-    render(WorkspaceRail, { props: railProps({ collapsed: true, onView, onToggleCollapsed }) as never });
-    expect(screen.queryByText("提交历史")).toBeNull();
-    const history = screen.getByRole("button", { name: "提交历史" });
-    expect(history.getAttribute("title")).toContain("提交历史");
-    expect(screen.getByRole("button", { name: "展开侧栏" })).toBeTruthy();
-    await fireEvent.click(history);
+    const { container } = render(ViewSwitcher, { props: { view: "changes", changeCount: 8, onView } });
+    const nav = screen.getByRole("navigation", { name: "视图" });
+    expect([...nav.querySelectorAll("button")].map((item) => item.getAttribute("aria-label"))).toEqual(["改动 8", "提交历史"]);
+    expect(screen.getByRole("button", { name: /^改动 8/ }).getAttribute("aria-current")).toBe("page");
+    expect(container.querySelector(".count")?.textContent).toBe("8");
+    await fireEvent.click(screen.getByRole("button", { name: /^提交历史/ }));
     expect(onView).toHaveBeenCalledWith("history");
-    await fireEvent.click(screen.getByRole("button", { name: "展开侧栏" }));
-    expect(onToggleCollapsed).toHaveBeenCalled();
   });
 
-  it("仓库搜索框只宣称过滤最近仓库列表，不再声称 Ctrl/⌘K 会定位到它", () => {
-    const { container } = render(WorkspaceRail, { props: railProps() as never });
-    const input = container.querySelector<HTMLInputElement>("#repo-search")!;
-    expect(input.placeholder).toContain("过滤最近仓库");
-    expect(input.placeholder).not.toMatch(/搜索/);
-    // 提示里出现的是「过滤列表」与「命令面板用 Ctrl/⌘K」，不是「按 Ctrl/⌘K 定位搜索框」
-    expect(input.getAttribute("title")).toContain("命令面板");
-    expect(input.getAttribute("title")).toContain("只过滤最近仓库列表");
-    // 字段内不再挂 ⌘K 键帽：那个组合键的真实动作是打开命令面板
-    const field = input.closest(".field")!;
-    expect(field.querySelector("kbd")).toBeNull();
-    expect(input.getAttribute("aria-label") ?? container.textContent).toBeTruthy();
-    // 可访问名称来自 label（读屏读到的也是「过滤」而不是「搜索」）
-    const label = container.querySelector<HTMLLabelElement>('label[for="repo-search"]')!;
-    expect(label.textContent).toContain("过滤最近仓库列表");
-    expect(label.textContent).not.toMatch(/搜索/);
+  it("名称和快捷键由标签与提示承载，没有改动时不显示 0", () => {
+    const { container } = render(ViewSwitcher, { props: { view: "history", changeCount: 0, onView: () => {} } });
+    expect(container.querySelector(".count")).toBeNull();
+    const history = screen.getByRole("button", { name: "提交历史" });
+    expect(history.getAttribute("aria-current")).toBe("page");
+    expect(history.getAttribute("title")).toContain("提交历史");
+    expect(history.getAttribute("title")).toContain("+2");
+  });
+});
+
+describe("合并提示", () => {
+  const props = (overrides: Record<string, unknown> = {}) => ({ conflictCount: 0, mergeInProgress: false, onOpen: () => {}, ...overrides });
+
+  it("没有合并也没有冲突时不渲染", () => {
+    const { container } = render(MergeBanner, { props: props() });
+    expect(container.querySelector("[data-merge-banner]")).toBeNull();
+  });
+
+  it("冲突清零但合并仍在进行时提示不消失，点击打开合并，不切换主视图", async () => {
+    const onOpen = vi.fn();
+    const { container } = render(MergeBanner, { props: props({ mergeInProgress: true, onOpen }) });
+    const banner = container.querySelector<HTMLElement>("[data-merge-banner]");
+    expect(banner?.textContent).toContain("可以完成合并");
+    expect(banner?.getAttribute("aria-label")).toContain("合并进行中");
+    expect(banner?.textContent, "冲突数为 0 时不出现计数").not.toMatch(/\d/);
+    await fireEvent.click(banner!);
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+
+  it("冲突数与进行中同时成立时两种信息都在", () => {
+    const { container } = render(MergeBanner, { props: props({ conflictCount: 2, mergeInProgress: true }) });
+    const banner = container.querySelector<HTMLElement>("[data-merge-banner]");
+    expect(banner?.textContent).toContain("2 个冲突待处理");
+    expect(banner?.getAttribute("aria-label")).toContain("合并进行中");
+  });
+
+  it("只有冲突、没有进行中的合并时（例如恢复临时保存），不声称合并进行中", () => {
+    const { container } = render(MergeBanner, { props: props({ conflictCount: 1 }) });
+    const banner = container.querySelector<HTMLElement>("[data-merge-banner]");
+    expect(banner?.textContent).toContain("1 个冲突待处理");
+    expect(banner?.getAttribute("aria-label")).not.toContain("合并进行中");
   });
 });
 
@@ -325,17 +274,48 @@ describe("自绘标题栏", () => {
 });
 
 describe("状态栏", () => {
-  it("显示分支、同步与改动计数，刷新入口在这里", async () => {
+  it("显示同步结论和刷新入口，不重复分支名、改动数和冲突数", async () => {
     const onRefresh = vi.fn();
-    render(StatusBar, {
-      props: { branch: "main", sync: "领先 2", changeCount: 8, conflictCount: 1, onRefresh } as never,
-    });
-    expect(screen.getByText("main")).toBeTruthy();
+    const { container } = render(StatusBar, { props: { hasRepo: true, sync: "领先 2", onRefresh } as never });
     expect(screen.getByText("领先 2")).toBeTruthy();
-    expect(screen.getByText("改动 8")).toBeTruthy();
-    expect(screen.getByText("冲突 1")).toBeTruthy();
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("改动");
+    expect(text).not.toContain("冲突");
     await fireEvent.click(screen.getByRole("button", { name: "刷新工作区" }));
     expect(onRefresh).toHaveBeenCalled();
+  });
+
+  it("健康态圆点保持语义绿，降级或有警告时变警告，没有仓库时熄灭", async () => {
+    const { container, rerender } = render(StatusBar, { props: { hasRepo: true, sync: "领先 2" } as never });
+    const dot = () => container.querySelector(".sb-dot")!.className.trim();
+    expect(dot()).toBe("sb-dot");
+    await rerender({ hasRepo: true, sync: "领先 2", degraded: true } as never);
+    expect(dot()).toContain("stale");
+    await rerender({ hasRepo: true, sync: "领先 2", warning: "设置写入失败" } as never);
+    expect(dot()).toContain("stale");
+    expect(screen.getByText("设置写入失败")).toBeTruthy();
+    await rerender({ hasRepo: false, sync: "未检查远程", degraded: false, warning: null } as never);
+    expect(dot()).toContain("off");
+    expect(screen.getByText("无仓库")).toBeTruthy();
+  });
+
+  it("写入中就地显示，刷新不可用", () => {
+    render(StatusBar, { props: { hasRepo: true, sync: "领先 2", busy: true, onRefresh: () => {} } as never });
+    expect(screen.getByText("写入中")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "刷新工作区" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("隐藏侧栏按钮说出下一步动作，没有仓库时不显示", async () => {
+    const onToggleSidebar = vi.fn();
+    const { rerender } = render(StatusBar, { props: { hasRepo: true, sync: "", onToggleSidebar } as never });
+    const toggle = screen.getByRole("button", { name: "隐藏侧栏" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    await fireEvent.click(toggle);
+    expect(onToggleSidebar).toHaveBeenCalledTimes(1);
+    await rerender({ hasRepo: true, sync: "", sidebarHidden: true, onToggleSidebar } as never);
+    expect(screen.getByRole("button", { name: "显示侧栏" }).getAttribute("aria-expanded")).toBe("false");
+    await rerender({ hasRepo: false, sync: "", onToggleSidebar } as never);
+    expect(screen.queryByRole("button", { name: /侧栏/ })).toBeNull();
   });
 });
 
@@ -588,7 +568,7 @@ describe("外壳样式契约", () => {
     return bodies.join("\n");
   }
 
-  it("标题栏、rail、命令面板与起始页的每个新类名都有真实规则", () => {
+  it("标题栏、左栏、命令面板与起始页的每个新类名都有真实规则", () => {
     const layoutClasses = classTokens(layoutCss);
     const componentClasses = classTokens(componentsCss);
     const required: [Set<string>, string[]][] = [
@@ -608,14 +588,10 @@ describe("外壳样式契约", () => {
           ".branch-hint",
           ".sync-pill",
           ".subtle-count",
-          ".rail",
-          ".rail-head",
-          ".rail-toggle",
-          ".rail-add",
-          ".rail-nav",
-          ".rail-tasks",
-          ".rail-status-dot",
-          ".collapsed",
+          ".pane",
+          ".changes",
+          ".history-layout",
+          ".merge-banner",
           ".welcome-compact",
           ".welcome-inner-compact",
           ".welcome-empty",
@@ -626,6 +602,11 @@ describe("外壳样式契约", () => {
       [
         componentClasses,
         [
+          ".pane-head",
+          ".view-switcher",
+          ".history-view",
+          ".history-tools",
+          ".history-pager",
           ".palette-backdrop",
           ".palette-card",
           ".palette-search",
@@ -652,24 +633,32 @@ describe("外壳样式契约", () => {
     expect(ruleBody(layoutCss, ".titlebar-win-btn")).toMatch(/height:\s*40px/);
   });
 
-  it("rail 展开 240px、折叠 56px，折叠态同时收窄网格轨道", () => {
-    expect(ruleBody(layoutCss, ".rail")).toMatch(/240px/);
-    expect(ruleBody(layoutCss, ".sidebar.rail.collapsed")).toMatch(/--rail-width:\s*56px/);
-    expect(layoutCss).toMatch(/\.workspace:has\(> \.sidebar\.rail\.collapsed\)\s*\{[^}]*56px/);
-    // 折叠态每项收成图标方块（R4：折叠后只显示图标）
-    expect(ruleBody(layoutCss, ".sidebar.rail.collapsed .workspace-nav-item")).toMatch(/justify-content:\s*center/);
+  it("改动和历史的左栏同读 --files，隐藏时收起轨道，且不卸载内容", () => {
+    expect(ruleBody(layoutCss, ".changes")).toMatch(/var\(--files\) 1px minmax\(0, 1fr\)/);
+    expect(ruleBody(layoutCss, ".history-layout")).toMatch(/var\(--files\) 1px minmax\(0, 1fr\)/);
+    expect(ruleBody(layoutCss, '.workspace[data-sidebar="hidden"] .changes')).toMatch(/grid-template-columns:\s*0 0 minmax\(0, 1fr\)/);
+    expect(ruleBody(layoutCss, '.workspace[data-sidebar="hidden"] .history-layout')).toMatch(/grid-template-columns:\s*0 0 minmax\(0, 1fr\)/);
+    // display:none 会丢滚动位置；visibility 同时让隐藏的控件不可聚焦。
+    const hidden = ruleBody(layoutCss, '.workspace[data-sidebar="hidden"] .pane');
+    expect(hidden).toMatch(/visibility:\s*hidden/);
+    expect(hidden).not.toMatch(/display:\s*none/);
+    expect(ruleBody(layoutCss, '.workspace[data-sidebar="hidden"] .resizer')).toMatch(/visibility:\s*hidden/);
   });
 
-  /** 折叠态两个标记的位点：冲突计数徽标与「合并进行中」圆点可以同时成立，位点必须错开。 */
-  it("折叠态计数徽标与合并进行中圆点位点错开，并存时不遮挡", () => {
-    const badge = ruleBody(layoutCss, ".sidebar.rail.collapsed .workspace-nav-item .count");
-    const dot = ruleBody(layoutCss, ".sidebar.rail.collapsed .workspace-nav-item .rail-status-dot");
-    expect(badge).toMatch(/position:\s*absolute/);
-    expect(badge).toMatch(/top:\s*3px/);
-    expect(dot).toMatch(/position:\s*absolute/);
-    expect(dot, "圆点不能与 14px 计数徽标同占右上角").not.toMatch(/top:\s*3px/);
-    expect(dot, "圆点挪到图标项右下角").toMatch(/bottom:\s*3px/);
-    expect(badge, "徽标留在右上角，与圆点不同侧").not.toMatch(/bottom:\s*3px/);
+  it("左栏是贴边平面面板，差异不再是圆角卡片", () => {
+    const pane = ruleBody(layoutCss, ".pane");
+    expect(pane).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(pane).not.toMatch(/border|box-shadow/);
+    const flat = ruleBody(componentsCss, ".changes .diff");
+    expect(flat).toMatch(/border:\s*0/);
+    expect(flat).toMatch(/border-radius:\s*0/);
+    expect(flat).toMatch(/box-shadow:\s*none/);
+  });
+
+  it("窄左栏里两个提交按钮上下排列，都不收成图标", () => {
+    const narrow = componentsCss.match(/@container composer \(max-width: 300px\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(narrow).toMatch(/\.composer-actions\s*\{[^}]*flex-direction:\s*column/);
+    expect(narrow, "文字标签不能隐藏").not.toMatch(/composer-push-label|composer-commit-label/);
   });
 
   it("进度条跟随标题栏高度令牌，不再写死 63/57", () => {

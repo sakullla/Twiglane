@@ -199,7 +199,7 @@ async function press(key: string) {
 }
 
 /**
- * 窗口宽度是 R16 折叠态的唯一输入：改 innerWidth 再派发 resize，模拟桌面窗口缩放。
+ * 窗口宽度是左栏收紧的唯一输入：改 innerWidth 再派发 resize，模拟桌面窗口缩放。
  * 用 defineProperty 覆盖，afterEach 里删掉这条自有属性即可回到 happy-dom 的默认视口。
  */
 function resizeTo(width: number) {
@@ -256,7 +256,7 @@ function commandState(overrides: Partial<CommandState> = {}): CommandState {
     hasRepo: true,
     workspaceView: "changes",
     taskModal: null,
-    navCollapsed: false,
+    sidebarHidden: false,
     writeLocked: false,
     writing: false,
     reading: false,
@@ -403,7 +403,7 @@ describe("主工作台", () => {
     expect(screen.getByRole("menu", { name: "更多提交操作" }).textContent).toContain("运行依赖");
   });
 
-  it("rail 与命令面板打开同一个任务 modal，且单槽只有一层", async () => {
+  it("左栏头部与命令面板打开同一个任务 modal，且单槽只有一层", async () => {
     renderApp();
     await openRepo();
 
@@ -693,15 +693,21 @@ describe("主工作台", () => {
     expect(mocks.refreshStatus).toHaveBeenCalledTimes(1);
   });
 
-  it("⌘B 折叠 rail、⌘R 刷新、Esc 关闭命令面板", async () => {
+  it("⌘B 隐藏左栏、⌘R 刷新、Esc 关闭命令面板", async () => {
     renderApp();
     await openRepo();
+    const workspace = document.querySelector<HTMLElement>(".workspace")!;
+    expect(workspace.dataset.sidebar).toBe("visible");
+    expect(workspace.style.getPropertyValue("--files")).toBe("360px");
 
     await press("b");
-    expect(screen.getByRole("button", { name: "展开侧栏" })).toBeTruthy();
-    expect(document.querySelector(".sidebar.rail.collapsed")).toBeTruthy();
+    expect(workspace.dataset.sidebar).toBe("hidden");
+    expect(screen.getByRole("button", { name: "显示侧栏" })).toBeTruthy();
+    expect(document.querySelector(".file-list"), "隐藏不卸载，列表滚动位置才留得住").toBeTruthy();
     await press("b");
-    expect(screen.getByRole("button", { name: "折叠侧栏" })).toBeTruthy();
+    expect(workspace.dataset.sidebar).toBe("visible");
+    expect(workspace.style.getPropertyValue("--files"), "恢复原宽度").toBe("360px");
+    expect(screen.getByRole("button", { name: "隐藏侧栏" })).toBeTruthy();
 
     await press("r");
     expect(mocks.refreshStatus).toHaveBeenCalledTimes(1);
@@ -712,44 +718,91 @@ describe("主工作台", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "命令面板" })).toBeNull());
   });
 
-  it("窗口宽度低于折叠阈值时 rail 自动折叠为图标形态，手动覆盖优先（R16）", async () => {
+  it("状态栏按钮与 ⌘B 走同一条命令，隐藏后仍有鼠标入口", async () => {
     renderApp();
     await openRepo();
+    const workspace = document.querySelector<HTMLElement>(".workspace")!;
+    await fireEvent.click(screen.getByRole("button", { name: "隐藏侧栏" }));
+    expect(workspace.dataset.sidebar).toBe("hidden");
+    await fireEvent.click(screen.getByRole("button", { name: "显示侧栏" }));
+    expect(workspace.dataset.sidebar).toBe("visible");
+  });
 
-    // 默认窗口（1280 宽）保留完整 rail
-    expect(document.querySelector(".sidebar.rail.collapsed")).toBeNull();
-    expect(document.querySelector<HTMLElement>(".workspace")!.style.getPropertyValue("--sidebar")).toBe("256px");
+  it("窗口变窄不自动隐藏左栏，只收紧渲染宽度，不改写已保存的宽度（R14）", async () => {
+    resizeTo(1280);
+    renderApp();
+    await openRepo();
+    const workspace = document.querySelector<HTMLElement>(".workspace")!;
+    const width = () => workspace.style.getPropertyValue("--files");
+    expect(width()).toBe("360px");
 
-    // 缩到 900×600 的最小窗口：不点任何控件，rail 自己收成图标栏
     resizeTo(900);
     await tick();
-    expect(document.querySelector(".sidebar.rail.collapsed"), "低于阈值自动折叠").toBeTruthy();
-    expect(screen.getByRole("button", { name: "展开侧栏" })).toBeTruthy();
-    expect(document.querySelector<HTMLElement>(".workspace")!.style.getPropertyValue("--sidebar")).toBe("56px");
-    expect(document.querySelector("#repo-search"), "折叠态不再渲染搜索框").toBeNull();
+    expect(workspace.dataset.sidebar, "最小窗口仍显示文件列表").toBe("visible");
+    expect(width(), "900 宽给主内容留 560").toBe("340px");
+    expect(document.querySelector(".file-list")).toBeTruthy();
 
-    // 阈值正好是 1000：README 写的是「低于 1000px」，所以 999 折叠、1000 不折叠。
-    resizeTo(999);
+    resizeTo(720);
     await tick();
-    expect(document.querySelector(".sidebar.rail.collapsed"), "999 仍在阈值下方").toBeTruthy();
-    resizeTo(1000);
-    await tick();
-    expect(document.querySelector(".sidebar.rail.collapsed"), "1000 不折叠").toBeNull();
-    resizeTo(900);
-    await tick();
+    expect(width(), "再窄也不低于 240").toBe("240px");
+    expect(mocks.setPanelWidths, "收紧只影响显示").not.toHaveBeenCalled();
 
-    // 手动展开优先于宽度推导：窗口仍然窄，但这次是用户的选择
-    await press("b");
-    expect(document.querySelector(".sidebar.rail.collapsed")).toBeNull();
-    expect(screen.getByRole("button", { name: "折叠侧栏" })).toBeTruthy();
-
-    // 回到宽窗口：手动选择仍是展开；再手动折叠后即使在宽窗口也保持折叠
     resizeTo(1280);
     await tick();
-    expect(document.querySelector(".sidebar.rail.collapsed")).toBeNull();
+    expect(width(), "窗口放宽后回到保存的宽度").toBe("360px");
+  });
+
+  it("手动隐藏后窗口缩放不改变选择（R14）", async () => {
+    resizeTo(1280);
+    renderApp();
+    await openRepo();
+    const workspace = document.querySelector<HTMLElement>(".workspace")!;
     await press("b");
-    expect(document.querySelector(".sidebar.rail.collapsed")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "展开侧栏" })).toBeTruthy();
+    resizeTo(900);
+    await tick();
+    resizeTo(1280);
+    await tick();
+    expect(workspace.dataset.sidebar).toBe("hidden");
+    await press("b");
+    expect(workspace.style.getPropertyValue("--files")).toBe("360px");
+  });
+
+  it("拖动条改左栏宽度并保存；只点一下不保存，窄窗口的收紧值不会变成偏好", async () => {
+    resizeTo(900);
+    renderApp();
+    await openRepo();
+    const workspace = document.querySelector<HTMLElement>(".workspace")!;
+    const slider = screen.getByRole("slider", { name: "调整侧栏宽度" });
+    expect(slider.getAttribute("aria-valuenow")).toBe("340");
+
+    await fireEvent.pointerDown(slider, { clientX: 340, pointerId: 1 });
+    await fireEvent.pointerUp(slider, { clientX: 340, pointerId: 1 });
+    expect(mocks.setPanelWidths).not.toHaveBeenCalled();
+
+    await fireEvent.pointerDown(slider, { clientX: 340, pointerId: 1 });
+    await fireEvent.pointerMove(slider, { clientX: 300, pointerId: 1 });
+    expect(workspace.style.getPropertyValue("--files")).toBe("300px");
+    await fireEvent.pointerUp(slider, { clientX: 300, pointerId: 1 });
+    await waitFor(() => expect(mocks.setPanelWidths).toHaveBeenCalledTimes(1));
+    expect(mocks.setPanelWidths.mock.calls[0][0]).toMatchObject({ files: 300 });
+
+    await fireEvent.keyDown(slider, { key: "ArrowLeft" });
+    await waitFor(() => expect(mocks.setPanelWidths).toHaveBeenCalledTimes(2));
+    expect(mocks.setPanelWidths.mock.calls[1][0]).toMatchObject({ files: 284 });
+  });
+
+  it("历史视图用同一份左栏宽度：视图切换和拖动条在历史里同样可用", async () => {
+    resizeTo(1280);
+    renderApp();
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: "提交历史" }));
+    await waitFor(() => expect(document.querySelector(".history-pane .history-list")).toBeTruthy());
+    const pane = document.querySelector<HTMLElement>(".history-pane")!;
+    expect(within(pane).getByRole("button", { name: "提交历史" }).getAttribute("aria-current")).toBe("page");
+    await fireEvent.keyDown(document.querySelector<HTMLElement>(".history-layout > .resizer")!, { key: "ArrowRight" });
+    expect(document.querySelector<HTMLElement>(".workspace")!.style.getPropertyValue("--files")).toBe("376px");
+    await fireEvent.click(within(pane).getByRole("button", { name: /^改动/ }));
+    expect(document.querySelectorAll('.workbench-view[data-active="true"] .file-list').length).toBe(1);
   });
 });
 
@@ -773,8 +826,8 @@ describe("差异与提交", () => {
     const list = screen.getByRole("listbox", { name: "改动文件" });
     await fireEvent.keyDown(list, { key: "End" });
     expect(selected.path).toBe("item-79.txt");
-    // 分组表头“未暂存的改动”占第 0 行，文件从第 1 行开始；每行 44px。
-    expect(list.scrollTop).toBe(80 * 44);
+    // 分组表头“未暂存的改动”占第 0 行，文件从第 1 行开始；每行 40px。
+    expect(list.scrollTop).toBe(80 * 40);
     await view.rerender(props());
     expect(screen.getByRole("option", { selected: true }).textContent).toContain("item-79.txt");
     expect(screen.queryByText("item-0.txt")).toBeNull();

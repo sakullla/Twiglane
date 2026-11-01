@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createTextDiff } from "../src/lib/diff";
 import { hasCommitSummary } from "../src/lib/ui";
 import CommitDraft, {
+  MESSAGE_HEIGHT_COMPACT,
   MESSAGE_HEIGHT_DEFAULT,
   MESSAGE_HEIGHT_MAX,
   MESSAGE_HEIGHT_MIN,
@@ -61,8 +62,47 @@ describe("提交区", () => {
     expect(document.querySelector(".composer-count")?.className).toContain("over");
   });
 
-  it("默认说明框够写几行，上沿分隔线可用键盘调高调低并记住", async () => {
+  it("说明框静止且为空时只占一行，聚焦后展开到记住的高度，有内容时保持展开", async () => {
+    localStorage.setItem("twiglane.commitMessageHeight", "240");
+    const outside = document.createElement("button");
+    document.body.append(outside);
     renderDraft();
+    expect(message().style.height).toBe(`${MESSAGE_HEIGHT_COMPACT}px`);
+    expect(MESSAGE_HEIGHT_COMPACT).toBeLessThan(MESSAGE_HEIGHT_MIN);
+
+    await fireEvent.focus(message());
+    expect(message().style.height, "聚焦后展开到已保存高度").toBe("240px");
+    await fireEvent.pointerDown(document.querySelector(".composer-scope")!);
+    expect(message().style.height, "点提交区内的按钮不改变布局，否则按钮会在按下时移位").toBe("240px");
+    await fireEvent.pointerDown(outside);
+    expect(message().style.height, "点到提交区外才收起").toBe(`${MESSAGE_HEIGHT_COMPACT}px`);
+
+    await fireEvent.focus(message());
+    await fireEvent.focusIn(outside);
+    expect(message().style.height, "键盘把焦点移走也收起").toBe(`${MESSAGE_HEIGHT_COMPACT}px`);
+    outside.remove();
+
+    document.body.innerHTML = "";
+    renderDraft({ value: "草稿" });
+    expect(message().style.height, "有内容时不收起").toBe("240px");
+  });
+
+  it("空说明也能用键盘调高：分隔线聚焦时展开，否则调整看不见", async () => {
+    renderDraft();
+    await fireEvent.focus(handle());
+    expect(message().style.height).toBe(`${MESSAGE_HEIGHT_DEFAULT}px`);
+    await fireEvent.keyDown(handle(), { key: "ArrowUp" });
+    expect(message().style.height).toBe(`${MESSAGE_HEIGHT_DEFAULT + 16}px`);
+  });
+
+  it("提交并推送的文字任何宽度都完整显示，不再收成图标", () => {
+    renderDraft();
+    expect(document.querySelector(".composer-commit-label")?.textContent).toBe("提交到本地");
+    expect(document.querySelector(".composer-push-label")?.textContent).toBe("提交并推送");
+  });
+
+  it("默认说明框够写几行，上沿分隔线可用键盘调高调低并记住", async () => {
+    renderDraft({ value: "草稿" });
     expect(MESSAGE_HEIGHT_DEFAULT).toBeGreaterThanOrEqual(100);
     expect(message().style.height).toBe(`${MESSAGE_HEIGHT_DEFAULT}px`);
     expect(handle().getAttribute("aria-valuenow")).toBe(String(MESSAGE_HEIGHT_DEFAULT));
@@ -77,7 +117,7 @@ describe("提交区", () => {
 
     localStorage.setItem("twiglane.commitMessageHeight", "240");
     document.body.innerHTML = "";
-    renderDraft();
+    renderDraft({ value: "草稿" });
     expect(message().style.height).toBe("240px");
   });
 

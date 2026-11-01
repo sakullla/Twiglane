@@ -3,6 +3,7 @@
   import { filterBranches } from "../branches";
   import { normalizeError } from "../errors";
   import type { BranchRecord, BranchState, OpenedRepository, StatusSnapshot } from "../types";
+  import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest, isContextKey, pointFor } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
   import TagManager from "./TagManager.svelte";
@@ -18,6 +19,8 @@
     onFailure: (error: unknown) => void;
     onNotice: (message: string) => void;
     onOpenHistory?: (query: string) => void;
+    /** 把某个分支合并到当前分支：关闭本 modal，打开分支合并并预选来源。 */
+    onMergeBranch?: (name: string) => void;
     nextId: () => number;
   }
 
@@ -30,12 +33,19 @@
     onFailure,
     onNotice,
     onOpenHistory,
+    onMergeBranch,
     nextId,
   }: Props = $props();
 
   let branches = $state<BranchRecord[]>([]);
   let branchQuery = $state("");
   let branchName = $state("");
+  /** 新分支的起点：空串表示当前分支（或游离 HEAD 的当前提交）。 */
+  let createBase = $state("");
+  let createCheckout = $state(true);
+  let renaming = $state<{ name: string; value: string } | null>(null);
+  let menu = $state<ContextMenuRequest | null>(null);
+  let nameInput = $state<HTMLInputElement | null>(null);
   let tab = $state<BranchTab>("local");
   let localBusy = $state(false);
   let errorText = $state<string | null>(null);
@@ -110,16 +120,120 @@
     applyBranches(result);
   }
 
+  /** 起点的实际值：选了分支就用分支名；默认用当前分支，游离 HEAD 时用当前提交。 */
+  function startPoint(): string {
+    return createBase || current.name || current.headOid || "HEAD";
+  }
+
   async function createNamedBranch() {
     const currentRepo = opened;
     const name = branchName.trim();
     if (!name) return;
-    const result = await run(() => api.createBranch(currentRepo.summary.path, name, currentRepo.generation, nextId()));
+    const start = startPoint();
+    const checkout = createCheckout;
+    const result = await run(() =>
+      api.createBranchFrom(currentRepo.summary.path, name, start, checkout, currentRepo.generation, nextId()),
+    );
     if (!result || opened.summary.path !== currentRepo.summary.path) return;
     applyBranches(result);
     branchName = "";
+    createBase = "";
     tab = "local";
-    onNotice(`已创建分支 ${name}，当前分支没有切换。`);
+    if (checkout) {
+      onNotice(`已从 ${start} 创建并切换到 ${name}。`);
+      onClose();
+    } else {
+      onNotice(`已从 ${start} 创建分支 ${name}，当前分支没有切换。`);
+    }
+  }
+
+  function createFrom(name: string) {
+    tab = "local";
+    createBase = name;
+    menu = null;
+    void Promise.resolve().then(() => {
+      nameInput?.focus();
+      nameInput?.scrollIntoView?.({ block: "nearest" });
+    });
+  }
+
+  function askRename(branch: BranchRecord) {
+    renaming = { name: branch.name, value: branch.name };
+    confirmDelete = null;
+  }
+
+  async function confirmRename() {
+    const target = renaming;
+    const currentRepo = opened;
+    if (!target) return;
+    const next = target.value.trim();
+    if (!next || next === target.name) {
+      renaming = null;
+      return;
+    }
+    const result = await run(() =>
+      api.renameBranch(currentRepo.summary.path, target.name, next, currentRepo.generation, nextId()),
+    );
+    if (!result || opened.summary.path !== currentRepo.summary.path) return;
+    renaming = null;
+    applyBranches(result);
+    onNotice(`已把分支 ${target.name} 重命名为 ${next}。远程上的同名分支不受影响。`);
+  }
+
+  async function copyName(name: string) {
+    try {
+      await navigator.clipboard.writeText(name);
+      onNotice(`已复制分支名 ${name}`);
+    } catch {
+      onFailure({ code: "clipboard", message: "无法写入剪贴板，请手动复制分支名。" });
+    }
+  }
+
+  /** 分支行的操作菜单：右键、菜单键或行尾的「⋯」都打开这一份。 */
+  function branchMenu(branch: BranchRecord, point: { x: number; y: number }) {
+    const busy = blocked ? "正在读取或写入，稍后再试" : undefined;
+    const currentReason = branch.current ? "这就是当前分支" : undefined;
+    const elsewhere = branch.worktree && !branch.current ? `正被其他工作区使用：${branch.worktree}` : undefined;
+    const entries: ContextMenuEntry[] = [
+      {
+        id: "switch",
+        label: branch.remote ? "检出为本地分支并切换" : "切换到此分支",
+        icon: "check-circle",
+        disabledReason: currentReason ?? elsewhere ?? busy,
+        run: () => void switchTo(branch.name),
+      },
+      {
+        id: "create",
+        label: "从此分支新建分支…",
+        icon: "plus",
+        disabledReason: busy,
+        run: () => createFrom(branch.name),
+      },
+    ];
+    if (onMergeBranch) {
+      entries.push({
+        id: "merge",
+        label: `合并到当前分支（${current.name ?? "HEAD"}）…`,
+        icon: "merge",
+        disabledReason: currentReason ?? busy,
+        run: () => onMergeBranch?.(branch.name),
+      });
+    }
+    entries.push({ separator: true });
+    if (!branch.remote) {
+      entries.push({ id: "rename", label: "重命名…", icon: "pencil", disabledReason: elsewhere ?? busy, run: () => askRename(branch) });
+    }
+    entries.push({ id: "copy", label: "复制分支名", icon: "copy", run: () => void copyName(branch.name) });
+    entries.push({ separator: true });
+    entries.push({
+      id: "delete",
+      label: branch.remote ? "从远程删除…" : "删除…",
+      icon: "trash",
+      danger: true,
+      disabledReason: branch.current ? "不能删除当前分支，先切换到其他分支" : (elsewhere ?? busy),
+      run: () => askDelete(branch),
+    });
+    menu = { x: point.x, y: point.y, entries, label: `${branch.name} 的操作` };
   }
 
   async function switchTo(name: string) {
@@ -297,14 +411,23 @@
               class="list-row branch-row"
               class:current={branch.current}
               role="button"
-              tabindex={branch.current ? -1 : 0}
+              tabindex="0"
               aria-label={branch.current ? `当前分支 ${branch.name}` : `切换到 ${branch.name}`}
               aria-disabled={branch.current || blocked}
               title={branch.current ? "当前正在使用的分支" : `点击切换到 ${branch.name}`}
               onclick={() => {
                 if (!branch.current) void switchTo(branch.name);
               }}
+              oncontextmenu={(event) => {
+                event.preventDefault();
+                branchMenu(branch, { x: event.clientX, y: event.clientY });
+              }}
               onkeydown={(event) => {
+                if (isContextKey(event)) {
+                  event.preventDefault();
+                  branchMenu(branch, pointFor(event.currentTarget));
+                  return;
+                }
                 if (!branch.current && (event.key === "Enter" || event.key === " ")) {
                   event.preventDefault();
                   void switchTo(branch.name);
@@ -322,8 +445,23 @@
                   {#if branch.upstream}上游 {branch.upstream}{:else if branch.worktree}工作区 {branch.worktree}{:else if branch.remote}远程跟踪分支{:else}仅存在于本地{/if}
                 </span>
               </div>
-              {#if !branch.current}
-                <span class="lr-actions">
+              <span class="lr-actions">
+                <button
+                  type="button"
+                  class="icon-btn sm"
+                  aria-label={`${branch.name} 的更多操作`}
+                  aria-haspopup="menu"
+                  title="更多操作：新建、合并、重命名、复制、删除"
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    branchMenu(branch, { x: rect.right - 232, y: rect.bottom + 4 });
+                  }}
+                  onkeydown={(event) => event.stopPropagation()}
+                >
+                  <Icon name="more" size={14} />
+                </button>
+                {#if !branch.current}
                   <button
                     type="button"
                     class="icon-btn sm danger"
@@ -338,12 +476,51 @@
                   >
                     <Icon name="trash" size={13} />
                   </button>
-                </span>
-              {/if}
+                {/if}
+              </span>
             </div>
           {/each}
         {/if}
       </div>
+
+      {#if renaming}
+        <div class="callout branch-rename" data-branch-rename>
+          <Icon name="pencil" size={15} />
+          <div class="callout-body">
+            <label class="label" for="branch-rename">重命名本地分支 {renaming.name}</label>
+            <div class="row">
+              <!-- svelte-ignore a11y_autofocus -->
+              <input
+                id="branch-rename"
+                class="input"
+                autofocus
+                bind:value={renaming.value}
+                autocomplete="off"
+                spellcheck="false"
+                disabled={blocked}
+                onkeydown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void confirmRename();
+                  } else if (event.key === "Escape") {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    renaming = null;
+                  }
+                }}
+              />
+              <button type="button" class="btn btn-secondary btn-sm" onclick={() => (renaming = null)}>取消</button>
+              <button
+                type="button"
+                class="btn btn-primary btn-sm"
+                disabled={blocked || renaming.value.trim().length === 0 || renaming.value.trim() === renaming.name}
+                onclick={confirmRename}
+              >确认重命名</button>
+            </div>
+            <p class="hint">只改本地分支名；已关联的上游配置随之保留，远程上的同名分支不会改动。</p>
+          </div>
+        </div>
+      {/if}
 
       {#if confirmDelete}
         <div class="callout warn" role="alert" data-modal-impact="branch-delete">
@@ -368,11 +545,12 @@
       <div class="branch-create">
         <span class="branch-create-icon"><Icon name="plus" size={17} /></span>
         <div class="branch-create-copy">
-          <label class="label" for="branch-name">从当前状态创建新分支</label>
+          <label class="label" for="branch-name">新建分支</label>
           <div class="row">
             <input
               id="branch-name"
               class="input"
+              bind:this={nameInput}
               bind:value={branchName}
               placeholder="例如 feature/login"
               autocomplete="off"
@@ -386,10 +564,25 @@
               }}
             />
             <button type="button" class="btn btn-primary" disabled={blocked || branchName.trim().length === 0} onclick={createNamedBranch}>
-              <Icon name="plus" size={14} />创建分支
+              <Icon name="plus" size={14} />{createCheckout ? "创建并切换" : "创建分支"}
             </button>
           </div>
-          <p class="hint">基于当前提交创建，不会自动切换。</p>
+          <div class="branch-create-options">
+            <label class="branch-base">
+              <span>起点</span>
+              <select class="select" aria-label="新分支的起点" bind:value={createBase} disabled={blocked}>
+                <option value="">当前分支（{current.name ?? "游离 HEAD"}）</option>
+                {#each branches.filter((branch) => !branch.current) as branch (branch.name)}
+                  <option value={branch.name}>{branch.remote ? `远程 ${branch.name}` : branch.name}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="switch branch-checkout">
+              <input type="checkbox" bind:checked={createCheckout} disabled={blocked} />
+              <span>创建后切换过去</span>
+            </label>
+          </div>
+          <p class="hint">{createCheckout ? "切换沿用分支切换的保护：会覆盖未提交修改时停下，工作区保持原样。" : "只创建分支，当前分支和工作区都不变。"}</p>
         </div>
       </div>
     {/if}
@@ -397,6 +590,9 @@
       <div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{errorText}</span></div>
     {/if}
   </div>
+  {#if menu}
+    <ContextMenu request={menu} onClose={() => (menu = null)} />
+  {/if}
   {#snippet footer()}
     <span class="hint"><Icon name="check-circle" size={12} />{tab === "tags" ? "标签可直接定位到目标提交" : "切换成功后自动关闭"}</span>
     <span class="spacer"></span>

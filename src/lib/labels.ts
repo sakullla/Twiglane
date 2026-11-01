@@ -60,23 +60,35 @@ export function syncLabel(branch: BranchInfo): string {
   return `相对已记录上游 +${ahead} −${behind} · 未检查远程`;
 }
 
-export function groupFiles(files: FileChange[]): { unstaged: FileRow[]; staged: FileRow[] } {
+/**
+ * 改动分组：冲突 / 未暂存 / 已暂存。
+ *
+ * 冲突文件只出现在「冲突」组：它的索引里有多份版本，既不能当作已暂存提交，也不能按普通未暂存
+ * 文件暂存。以前它同时出现在未暂存与已暂存两组，「已暂存 6」与提交区「3 个文件」对不上——
+ * 后者本来就不含冲突文件（见 stagedFiles）。冲突行沿用 unstaged 侧，读取差异与定位都不变。
+ */
+export function groupFiles(files: FileChange[]): { conflicted: FileRow[]; unstaged: FileRow[]; staged: FileRow[] } {
+  const conflicted: FileRow[] = [];
   const unstaged: FileRow[] = [];
   const staged: FileRow[] = [];
   for (const file of files) {
-    if (file.untracked || file.unmerged || file.unstaged !== "none") {
+    if (file.unmerged) {
+      conflicted.push({ ...file, side: "unstaged" });
+      continue;
+    }
+    if (file.untracked || file.unstaged !== "none") {
       unstaged.push({ ...file, side: "unstaged" });
     }
-    if (file.unmerged || file.staged !== "none") {
+    if (file.staged !== "none") {
       staged.push({ ...file, side: "staged" });
     }
   }
-  return { unstaged, staged };
+  return { conflicted, unstaged, staged };
 }
 
 export function flattenRows(files: FileChange[]): FileRow[] {
   const groups = groupFiles(files);
-  return [...groups.unstaged, ...groups.staged];
+  return [...groups.conflicted, ...groups.unstaged, ...groups.staged];
 }
 
 export function filterRows<T extends { path: string; originalPath: string | null }>(

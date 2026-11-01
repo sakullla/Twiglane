@@ -6,7 +6,8 @@ use crate::error::AppError;
 use crate::git::advice::{classify_problem, problem_error, remote_timeout};
 use crate::git::changes::commit_index;
 use crate::git::command::{
-    branch_list_command, check_branch_command, clone_command, create_branch_command,
+    branch_list_command, check_branch_command, clone_command, create_branch_at_command,
+    create_branch_command, rename_branch_command,
     delete_branch_command, delete_remote_branch_command, delete_remote_tracking_command,
     fetch_command, publish_command, pull_ff_command, push_command, remote_add_command,
     remote_set_url_command, remote_verbose_command, set_upstream_to_command, status_command,
@@ -489,6 +490,149 @@ pub async fn create_branch(
             return Err(duplicate_branch().with_generation(scheduled.generation));
         }
         return Err(finish_remote("branch_failed", &scheduled, "没有创建分支。"));
+    }
+    load_branch_state(backend, &root, scheduled.generation, internal_request_id()).await
+}
+
+/// 从指定起点创建分支，可选创建后立即切换。
+///
+/// 起点只接受已知分支（本地或远程跟踪）或 7–40 位提交标识，不接受任意表达式；
+/// 切换沿用 `switch_branch` 的全部保护（会覆盖未提交修改时停下）。切换失败时分支已经创建，
+/// 错误里会说明这一点，不会回滚删除。
+#[allow(clippy::too_many_arguments)]
+pub async fn create_branch_from(
+    backend: &Backend,
+    path: &str,
+    name: &str,
+    start: &str,
+    checkout: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    let root = repo_root(path)?;
+    validate_branch_input(name)?;
+    let created = {
+        let _guard = backend
+            .actions
+            .enter(action_key("branch", &repo_key(&root)))?;
+        let git = require_git(backend).await?;
+        ensure_branch_format(backend, &root, &git.path, name, generation, request_id).await?;
+        let current = load_branch_state(backend, &root, generation, internal_request_id()).await?;
+        if current
+            .branches
+            .iter()
+            .any(|branch| !branch.remote && branch.name == name)
+        {
+            return Err(duplicate_branch().with_generation(current.generation));
+        }
+        let start = validate_start_point(&current, start)?;
+        let (program, args) = create_branch_at_command(&git.path, &root, name, &start);
+        let scheduled = write_repo(
+            backend,
+            &root,
+            current.generation,
+            internal_request_id(),
+            program,
+            args,
+        )
+        .await?;
+        if scheduled.output.exit_code != 0 {
+            let text = output_text(&scheduled.output);
+            if text.to_ascii_lowercase().contains("already exists") || text.contains("已经存在") {
+                return Err(duplicate_branch().with_generation(scheduled.generation));
+            }
+            return Err(finish_remote("branch_failed", &scheduled, "没有创建分支。"));
+        }
+        load_branch_state(backend, &root, scheduled.generation, internal_request_id()).await?
+    };
+    if !checkout {
+        return Ok(created);
+    }
+    switch_branch(backend, path, name, created.generation, internal_request_id())
+        .await
+        .map_err(|error| {
+            AppError::new(
+                error.code,
+                format!("分支 {name} 已创建，但没有切换过去：{}", error.message),
+            )
+            .with_generation(error.generation.unwrap_or(created.generation))
+        })
+}
+
+/// 起点：已知分支名原样使用；否则必须是 7–40 位十六进制提交标识。
+fn validate_start_point(state: &BranchState, start: &str) -> Result<String, AppError> {
+    let start = start.trim();
+    if state.branches.iter().any(|branch| branch.name == start) {
+        return Ok(start.to_string());
+    }
+    let hex = start.len() >= 7 && start.len() <= 40 && start.chars().all(|c| c.is_ascii_hexdigit());
+    if hex {
+        return Ok(start.to_ascii_lowercase());
+    }
+    Err(AppError::new(
+        "branch_start_invalid",
+        "新分支的起点必须是已有分支或提交标识，未创建分支。",
+    )
+    .with_generation(state.generation))
+}
+
+/// 重命名本地分支。目标名称按创建分支的同一套规则校验；目标已存在、分支正被其他工作区使用时拒绝。
+pub async fn rename_branch(
+    backend: &Backend,
+    path: &str,
+    old: &str,
+    new: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    let root = repo_root(path)?;
+    let _guard = backend
+        .actions
+        .enter(action_key("branch", &repo_key(&root)))?;
+    validate_branch_input(old)?;
+    validate_branch_input(new)?;
+    let git = require_git(backend).await?;
+    ensure_branch_format(backend, &root, &git.path, new, generation, request_id).await?;
+    let current = load_branch_state(backend, &root, generation, internal_request_id()).await?;
+    let Some(branch) = current
+        .branches
+        .iter()
+        .find(|branch| !branch.remote && branch.name == old)
+    else {
+        return Err(AppError::new("branch_missing", "没有这个本地分支，未重命名。")
+            .with_generation(current.generation));
+    };
+    if let Some(worktree) = &branch.worktree {
+        if !branch.current && !same_worktree(worktree, &root) {
+            return Err(AppError::new(
+                "branch_worktree",
+                format!("该分支正被其他工作区使用，未重命名。工作区路径：{worktree}"),
+            )
+            .with_generation(current.generation));
+        }
+    }
+    if old == new {
+        return Ok(current);
+    }
+    if current
+        .branches
+        .iter()
+        .any(|branch| !branch.remote && branch.name == new)
+    {
+        return Err(duplicate_branch().with_generation(current.generation));
+    }
+    let (program, args) = rename_branch_command(&git.path, &root, old, new);
+    let scheduled = write_repo(
+        backend,
+        &root,
+        current.generation,
+        internal_request_id(),
+        program,
+        args,
+    )
+    .await?;
+    if scheduled.output.exit_code != 0 {
+        return Err(finish_remote("branch_rename_failed", &scheduled, "没有重命名分支。"));
     }
     load_branch_state(backend, &root, scheduled.generation, internal_request_id()).await
 }
@@ -2346,5 +2490,44 @@ mod tests {
             git_text(&work, &["rev-parse", "HEAD"]),
             git_text(&work, &["rev-parse", "topic"])
         );
+    }
+}
+
+#[cfg(test)]
+mod start_point_tests {
+    use super::*;
+    use crate::model::{BranchInfo, StatusSnapshot};
+
+    fn state(names: &[(&str, bool)]) -> BranchState {
+        BranchState {
+            generation: 3,
+            branches: names
+                .iter()
+                .map(|(name, remote)| BranchRecord {
+                    name: (*name).to_string(),
+                    remote: *remote,
+                    current: false,
+                    upstream: None,
+                    worktree: None,
+                })
+                .collect(),
+            snapshot: StatusSnapshot {
+                generation: 3,
+                branch: BranchInfo::default(),
+                files: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn start_point_accepts_known_branches_and_commit_ids_only() {
+        let known = state(&[("main", false), ("origin/main", true)]);
+        assert_eq!(validate_start_point(&known, "main").unwrap(), "main");
+        assert_eq!(validate_start_point(&known, "origin/main").unwrap(), "origin/main");
+        assert_eq!(validate_start_point(&known, "ABCDEF1").unwrap(), "abcdef1");
+        for bad in ["--orphan", "HEAD~1", "main^", "abc", "deadbeef; rm", "", "nope/branch"] {
+            let error = validate_start_point(&known, bad).unwrap_err();
+            assert_eq!(error.code, "branch_start_invalid", "{bad}");
+        }
     }
 }

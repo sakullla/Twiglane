@@ -1,3 +1,5 @@
+import { hasCommitSummary } from "./ui";
+import type { IconName } from "./icons";
 import { MODIFIER_LABEL } from "./brand";
 import type { RecentRepo, TaskModal, Theme, WorkspaceView } from "./types";
 
@@ -95,7 +97,7 @@ export const switchBlockedReason = (state: CommandState) => busyReason(state);
  * 面板里因此不会出现「按钮是灰的、面板里却看起来能点」的分叉（R11）。
  */
 const canCommit = (state: CommandState) =>
-  hasRepo(state) && idle(state) && state.stagedCount > 0 && state.draft.trim().length > 0;
+  hasRepo(state) && idle(state) && state.stagedCount > 0 && hasCommitSummary(state.draft);
 const commitReason = (state: CommandState) => {
   if (!state.hasRepo) return "先打开一个仓库";
   if (state.writeLocked) return busyReason(state);
@@ -457,3 +459,13 @@ export const OVERFLOW_COMMAND_IDS = [
   "sync.push",
   "dialog.dependencies",
 ] as const;
+
+/** 溢出菜单里每条动作的图标：菜单项要一眼看出是什么，不再统一用箭头。 */
+export const OVERFLOW_COMMAND_ICONS: Record<(typeof OVERFLOW_COMMAND_IDS)[number], IconName> = {
+  "task.scope": "layers",
+  "task.publish": "upload",
+  "sync.fetch": "download",
+  "sync.pull": "arrow-down",
+  "sync.push": "arrow-up",
+  "dialog.dependencies": "package",
+};

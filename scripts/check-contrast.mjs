@@ -90,6 +90,13 @@ const TEXT_PAIRS = [
   ["del-fg", "del-bg"],
   ["del-fg", "del-strong"],
   ["hunk-fg", "hunk-bg"],
+  // 语法高亮：每个颜色 × 它可能落在的每种底色（差异的增删行与行内改动底、冲突两侧与结果底）。
+  ...["keyword", "string", "string-expression", "constant", "function", "parameter", "comment", "punctuation", "link"].flatMap(
+    (name) =>
+      ["surface", "surface-2", "add-bg", "add-strong", "del-bg", "del-strong", "info-soft", "purple-soft", "accent-softer", "warning-soft"].map(
+        (bg) => [`syn-${name}`, bg],
+      ),
+  ),
 ];
 
 /** 随 --hue 变化的正文对（仓库徽标与作者头像的首字母），逐色相校验，阈值 4.5:1。

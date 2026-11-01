@@ -22,6 +22,8 @@ use crate::redact::{redact_error_text, reject_secret_draft};
 
 const MAX_PATHS: usize = 500;
 
+/// 默认 3 行上下文的差异（既有测试的入口；命令层统一走 `load_diff_with_context`）。
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn load_diff(
     backend: &crate::git::ops::Backend,
@@ -34,6 +36,29 @@ pub async fn load_diff(
     offset: u32,
     limit: u32,
 ) -> Result<DiffResponse, AppError> {
+    load_diff_with_context(
+        backend, path, relative, original, staged, generation, request_id, offset, limit, 3,
+    )
+    .await
+}
+
+/// 「查看完整文件」用到的最大上下文行数：足够覆盖整份文件，又不会让 Git 拿到离谱的数值。
+pub const FULL_FILE_CONTEXT: u32 = 1_000_000;
+
+#[allow(clippy::too_many_arguments)]
+pub async fn load_diff_with_context(
+    backend: &crate::git::ops::Backend,
+    path: &str,
+    relative: &str,
+    original: Option<&str>,
+    staged: bool,
+    generation: u64,
+    request_id: u64,
+    offset: u32,
+    limit: u32,
+    context: u32,
+) -> Result<DiffResponse, AppError> {
+    let context = context.clamp(0, FULL_FILE_CONTEXT);
     let root = canonical_existing(&validate_input_path(path)?)?;
     let relative_path = repo_file(relative)?;
     let original_path = match original {
@@ -56,7 +81,9 @@ pub async fn load_diff(
         .await?
     };
     let paths = diff_paths(&relative_path, original_path.as_ref());
-    let (program, args) = file_diff_command(&git.path, &root, &paths, staged, false, untracked);
+    let (program, args) = crate::git::command::file_diff_command_with_context(
+        &git.path, &root, &paths, staged, false, untracked, context,
+    );
     let scheduled = backend
         .scheduler
         .execute(crate::git::schedule::GitJob {

@@ -234,6 +234,12 @@ impl<'a, R: ProcessRunner> WriteGuard<'a, R> {
         map_runner(output)
     }
 
+    /// 标记这次持锁期间写了仓库（例如直接改写 .gitignore 这类非 Git 命令的写入），
+    /// 让 generation 照常递增，过期响应仍会被拒绝。
+    pub fn mark_written(&mut self) {
+        self.wrote = true;
+    }
+
     pub fn finish(mut self) -> u64 {
         if self.wrote {
             self.wrote = false;

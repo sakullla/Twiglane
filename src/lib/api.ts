@@ -82,6 +82,8 @@ export const api = {
     original: string | null = null,
     offset = 0,
     limit = 0,
+    /** 上下文行数；不传时后端用 3 行。「查看完整文件」传 FULL_FILE_CONTEXT。 */
+    context?: number,
   ) =>
     invoke<DiffResponse>("load_diff", {
       path,
@@ -92,6 +94,7 @@ export const api = {
       requestId,
       offset,
       limit,
+      ...(context === undefined ? {} : { context }),
     }),
   stageFiles: (path: string, paths: string[], generation: number, requestId: number) =>
     invoke<StatusSnapshot>("stage_files", { path, paths, generation, requestId }),
@@ -143,6 +146,24 @@ export const api = {
     invoke<BranchState>("branch_state", { path, generation, requestId }),
   createBranch: (path: string, name: string, generation: number, requestId: number) =>
     invoke<BranchState>("create_branch", { path, name, generation, requestId }),
+  /** 从指定起点（分支名或提交标识）创建分支，checkout 为 true 时创建后立即切换。 */
+  createBranchFrom: (
+    path: string,
+    name: string,
+    start: string,
+    checkout: boolean,
+    generation: number,
+    requestId: number,
+  ) => invoke<BranchState>("create_branch_from", { path, name, start, checkout, generation, requestId }),
+  renameBranch: (path: string, oldName: string, newName: string, generation: number, requestId: number) =>
+    invoke<BranchState>("rename_branch", { path, old: oldName, new: newName, generation, requestId }),
+  /** 在系统文件管理器里显示仓库内的文件（relative 为空时显示仓库根目录）。 */
+  revealPath: (path: string, relative: string) => invoke<void>("reveal_path", { path, relative }),
+  /** 用系统默认程序打开仓库内的文件。 */
+  openPath: (path: string, relative: string) => invoke<void>("open_path", { path, relative }),
+  /** 把一条规则追加到仓库根目录的 .gitignore，返回刷新后的状态。 */
+  ignorePath: (path: string, pattern: string, generation: number, requestId: number) =>
+    invoke<StatusSnapshot>("ignore_path", { path, pattern, generation, requestId }),
   switchBranch: (path: string, name: string, generation: number, requestId: number) =>
     invoke<BranchState>("switch_branch", { path, name, generation, requestId }),
   deleteBranch: (

@@ -8,6 +8,7 @@ const commitFileDiff = vi.hoisted(() => vi.fn());
 vi.mock("../src/lib/api", () => ({ api: { commitFileDiff } }));
 
 import CommitDiffList from "../src/lib/components/CommitDiffList.svelte";
+import { codeLine } from "./helpers/code";
 
 const opened: OpenedRepository = {
   summary: { name: "demo", path: "/repo" },
@@ -105,15 +106,15 @@ describe("多文件差异", () => {
         onFileHistory: () => {},
       },
     });
-    expect(await screen.findByText("+a-content")).toBeTruthy();
-    expect(await screen.findByText("+b-content")).toBeTruthy();
+    expect(await screen.findByText(codeLine("a-content"))).toBeTruthy();
+    expect(await screen.findByText(codeLine("b-content"))).toBeTruthy();
     expect(commitFileDiff).toHaveBeenCalledWith("/repo", detail.commit.oid, "parent0", "src/a.ts", 3, 1, 0, 0);
     expect(commitFileDiff).toHaveBeenCalledWith("/repo", detail.commit.oid, "parent0", "src/b.ts", 3, 1, 0, 0);
     await fireEvent.click(screen.getByRole("button", { name: "收起 src/a.ts" }));
-    expect(screen.queryByText("+a-content")).toBeNull();
-    expect(screen.getByText("+b-content")).toBeTruthy();
+    expect(screen.queryByText(codeLine("a-content"))).toBeNull();
+    expect(screen.getByText(codeLine("b-content"))).toBeTruthy();
     await fireEvent.click(screen.getByRole("button", { name: "展开全部" }));
-    expect(await screen.findByText("+a-content")).toBeTruthy();
-    expect(screen.getByText("+b-content")).toBeTruthy();
+    expect(await screen.findByText(codeLine("a-content"))).toBeTruthy();
+    expect(screen.getByText(codeLine("b-content"))).toBeTruthy();
   });
 });

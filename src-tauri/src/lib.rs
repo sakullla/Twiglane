@@ -83,6 +83,11 @@ pub fn run() {
             commit_and_push,
             branch_state,
             create_branch,
+            create_branch_from,
+            rename_branch,
+            reveal_path,
+            open_path,
+            ignore_path,
             switch_branch,
             delete_branch,
             delete_remote_branch,
@@ -330,8 +335,9 @@ async fn load_diff(
     request_id: u64,
     offset: Option<u32>,
     limit: Option<u32>,
+    context: Option<u32>,
 ) -> Result<DiffResponse, AppError> {
-    crate::git::changes::load_diff(
+    crate::git::changes::load_diff_with_context(
         state.inner(),
         &path,
         &relative,
@@ -341,6 +347,7 @@ async fn load_diff(
         request_id,
         offset.unwrap_or(0),
         limit.unwrap_or(0),
+        context.unwrap_or(3),
     )
     .await
 }
@@ -539,6 +546,71 @@ async fn create_branch(
     request_id: u64,
 ) -> Result<BranchState, AppError> {
     crate::git::sync::create_branch(state.inner(), &path, &name, generation, request_id).await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+async fn create_branch_from(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    name: String,
+    start: String,
+    checkout: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    crate::git::sync::create_branch_from(
+        state.inner(),
+        &path,
+        &name,
+        &start,
+        checkout,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn rename_branch(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    old: String,
+    new: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    crate::git::sync::rename_branch(state.inner(), &path, &old, &new, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn reveal_path(path: String, relative: String) -> Result<(), AppError> {
+    crate::git::workspace::reveal_path(&path, &relative)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn open_path(path: String, relative: String) -> Result<(), AppError> {
+    crate::git::workspace::open_path(&path, &relative)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn ignore_path(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    pattern: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    let written =
+        crate::git::workspace::ignore_path(state.inner(), &path, &pattern, generation, request_id)
+            .await?;
+    ops::refresh_status(
+        state.inner(),
+        &path,
+        written,
+        crate::git::schedule::internal_request_id(),
+    )
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]

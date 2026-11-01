@@ -161,6 +161,17 @@
   --repo-badge-ring-sat: 28%;
   --repo-badge-ring-light: 82%;
   --repo-badge-ring-alpha: 0.55;
+  /* 语法高亮（Shiki CSS 变量主题输出的语义类）：每个颜色对 surface / 增删行底 / 行内改动底 /
+     冲突两侧底都 ≥ 4.5:1，由 scripts/check-contrast.mjs 逐对校验。 */
+  --syn-keyword: #b3122a;
+  --syn-string: #0a3069;
+  --syn-string-expression: #0e5b23;
+  --syn-constant: #0550ae;
+  --syn-function: #6034b0;
+  --syn-parameter: #8a3300;
+  --syn-comment: #535e68;
+  --syn-punctuation: #3b4a42;
+  --syn-link: #0a3069;
   --push-count-bg: rgba(255, 255, 255, 0.17);
 }
 
@@ -238,5 +249,15 @@
   --repo-badge-ring-sat: 20%;
   --repo-badge-ring-light: 32%;
   --repo-badge-ring-alpha: 0.5;
+  /* 语法高亮：与浅色主题同义，按深色画布取值。 */
+  --syn-keyword: #ff8b82;
+  --syn-string: #a5d6ff;
+  --syn-string-expression: #8ee99a;
+  --syn-constant: #8cc8ff;
+  --syn-function: #d8b4ff;
+  --syn-parameter: #ffae63;
+  --syn-comment: #98a3ad;
+  --syn-punctuation: #c9d1d9;
+  --syn-link: #a5d6ff;
   --push-count-bg: rgba(0, 0, 0, 0.15);
 }

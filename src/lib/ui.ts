@@ -71,3 +71,13 @@ export function rowMark(row: FileRow): { letter: string; tone: string; label: st
 export function summaryLength(message: string): number {
   return [...(message.split("\n")[0] ?? "")].length;
 }
+
+/**
+ * 提交说明是否可提交：首行（摘要）必须有内容。只写了详细说明、首行为空时，Git 会把正文顶成
+ * 摘要，结果与界面上看到的不一致，因此提交区、命令面板与快捷键都按这一条判断。
+ */
+export function hasCommitSummary(message: string): boolean {
+  const newline = message.indexOf("\n");
+  const first = newline === -1 ? message : message.slice(0, newline);
+  return first.trim().length > 0;
+}

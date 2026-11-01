@@ -16,20 +16,43 @@
     onUnstage: (path: string) => void;
     onStageAll?: (paths: string[]) => void;
     onUnstageAll?: (paths: string[]) => void;
+    /** 打开某个冲突文件（或不带路径时打开冲突处理）。 */
+    onResolve?: (path: string | null) => void;
+    /** 右键或 Shift+F10 / 菜单键：在 (x, y) 为这一行打开上下文菜单。 */
+    onContextMenu?: (row: FileRow, point: { x: number; y: number }) => void;
   }
 
   type Item =
-    | { kind: "header"; side: DiffSide; count: number; paths: string[] }
+    | { kind: "header"; side: DiffSide | "conflicted"; count: number; paths: string[] }
     | { kind: "row"; row: FileRow };
 
   const ROW_HEIGHT = 34;
 
-  let { files, selected, query, disabled, onQuery, onSelect, onStage, onUnstage, onStageAll, onUnstageAll }: Props =
-    $props();
+  let {
+    files,
+    selected,
+    query,
+    disabled,
+    onQuery,
+    onSelect,
+    onStage,
+    onUnstage,
+    onStageAll,
+    onUnstageAll,
+    onResolve,
+    onContextMenu,
+  }: Props = $props();
   let groups = $derived(groupFiles(files));
+  let conflictedRows = $derived(filterRows(groups.conflicted, query));
   let unstagedRows = $derived(filterRows(groups.unstaged, query));
   let stagedRows = $derived(filterRows(groups.staged, query));
   let items = $derived<Item[]>([
+    ...(conflictedRows.length > 0
+      ? [
+          { kind: "header" as const, side: "conflicted" as const, count: conflictedRows.length, paths: [] },
+          ...conflictedRows.map((row) => ({ kind: "row" as const, row })),
+        ]
+      : []),
     ...(unstagedRows.length > 0
       ? [
           {
@@ -53,7 +76,7 @@
         ]
       : []),
   ]);
-  let rows = $derived([...unstagedRows, ...stagedRows]);
+  let rows = $derived([...conflictedRows, ...unstagedRows, ...stagedRows]);
   let scrollTop = $state(0);
   let viewport = $state(0);
   let list = $state<HTMLDivElement | null>(null);
@@ -61,7 +84,7 @@
     visibleRange(items.length, scrollTop, viewport > 0 ? viewport : scrollTop > 0 ? ROW_HEIGHT : 0, ROW_HEIGHT),
   );
   let visible = $derived(items.slice(range.start, range.end));
-  let total = $derived(groups.unstaged.length + groups.staged.length);
+  let total = $derived(groups.conflicted.length + groups.unstaged.length + groups.staged.length);
 
   function isSelected(row: FileRow): boolean {
     return selected?.path === row.path && selected.side === row.side;
@@ -80,13 +103,24 @@
 
   function toggle(row: FileRow) {
     if (disabled) return;
+    if (row.unmerged) {
+      onResolve?.(row.path);
+      return;
+    }
     if (row.side === "unstaged") onStage(row.path);
     else onUnstage(row.path);
   }
 
   function onKey(event: KeyboardEvent) {
-    if (event.altKey || event.ctrlKey || event.metaKey) return;
     const current = rows.findIndex((row) => row.path === selected?.path && row.side === selected.side);
+    if ((event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) && current >= 0 && onContextMenu) {
+      event.preventDefault();
+      const element = list?.querySelector<HTMLElement>('.file-row[aria-selected="true"]');
+      const rect = element?.getBoundingClientRect();
+      onContextMenu(rows[current], rect ? { x: rect.left + 24, y: rect.bottom - 4 } : { x: 120, y: 120 });
+      return;
+    }
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
     if (event.key === " " && current >= 0) {
       event.preventDefault();
       toggle(rows[current]);
@@ -153,10 +187,20 @@
         {@const top = (range.start + index) * ROW_HEIGHT}
         {#if item.kind === "header"}
           <div class="file-group" role="presentation" style={`top:${top}px;height:${ROW_HEIGHT}px`}>
-            <span>{item.side === "unstaged" ? "未暂存的改动" : "已暂存"}</span>
-            <span class="count">{item.count}</span>
+            <span>{item.side === "conflicted" ? "冲突" : item.side === "unstaged" ? "未暂存的改动" : "已暂存"}</span>
+            <span class="count" class:danger={item.side === "conflicted"}>{item.count}</span>
             <span class="spacer"></span>
-            {#if item.side === "unstaged" && onStageAll && item.paths.length > 0}
+            {#if item.side === "conflicted" && onResolve}
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm"
+                disabled={disabled}
+                title="打开分支合并，逐处处理这些冲突文件"
+                onclick={() => onResolve?.(null)}
+              >
+                <Icon name="merge" size={13} />去处理
+              </button>
+            {:else if item.side === "unstaged" && onStageAll && item.paths.length > 0}
               <button
                 type="button"
                 class="btn btn-ghost btn-sm"
@@ -191,6 +235,12 @@
             title={row.originalPath ? `${row.originalPath} → ${row.path}` : row.path}
             onclick={() => onSelect({ path: row.path, side: row.side })}
             ondblclick={() => toggle(row)}
+            oncontextmenu={(event) => {
+              if (!onContextMenu) return;
+              event.preventDefault();
+              onSelect({ path: row.path, side: row.side });
+              onContextMenu(row, { x: event.clientX, y: event.clientY });
+            }}
             onkeydown={(event) => {
               if (event.key === "Enter") {
                 event.preventDefault();
@@ -207,7 +257,20 @@
                 <span class="fd"><bdi>{parts.dir}</bdi></span>
               {/if}
             </span>
-            {#if row.side === "unstaged"}
+            {#if row.unmerged}
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm row-action"
+                disabled={disabled || !onResolve}
+                title="在分支合并里逐处处理这个文件（空格）"
+                onclick={(event) => {
+                  event.stopPropagation();
+                  onResolve?.(row.path);
+                }}
+              >
+                <Icon name="merge" size={13} />处理
+              </button>
+            {:else if row.side === "unstaged"}
               <button
                 type="button"
                 class="btn btn-ghost btn-sm row-action"

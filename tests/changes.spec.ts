@@ -146,6 +146,7 @@ vi.mock("../src/lib/api", () => ({
 
 import App from "../src/App.svelte";
 import { paletteItems, REPO_SWITCH_PREFIX, type CommandState } from "../src/lib/commands";
+import { codeLine } from "./helpers/code";
 
 /* ------------------------------------------------------------------ *
  * 组件级夹具：只关心差异密度与提交区形状。
@@ -371,8 +372,35 @@ describe("主工作台", () => {
 
     await fireEvent.click(screen.getByRole("button", { name: "更多提交操作" }));
     const menu = screen.getByRole("menu", { name: "更多提交操作" });
-    expect(menu.contains(screen.getByRole("button", { name: "撤销最近提交并保留改动" }))).toBe(true);
-    expect(menu.contains(screen.getByRole("button", { name: "放弃所选文件修改" }))).toBe(true);
+    // 菜单项是带名称与一行说明的竖排菜单项，而不是只靠悬停提示的图标按钮。
+    const undo = screen.getByRole("menuitem", { name: "撤销最近提交并保留改动" });
+    const discard = screen.getByRole("menuitem", { name: "放弃所选文件修改" });
+    expect(menu.contains(undo)).toBe(true);
+    expect(menu.contains(discard)).toBe(true);
+    expect(undo.textContent).toContain("仅限未推送的普通提交");
+    expect(discard.textContent).toContain("确认后才写入");
+  });
+
+  it("运行环境正常时提交区菜单不放「运行依赖」，Git 缺失时它回到菜单里", async () => {
+    renderApp();
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: "更多提交操作" }));
+    const healthy = screen.getByRole("menu", { name: "更多提交操作" });
+    expect(healthy.textContent).not.toContain("运行依赖");
+    expect(healthy.textContent).toContain("获取更新");
+    cleanup();
+
+    mocks.getSettings.mockResolvedValue({
+      theme: "dark",
+      panelWidths: { sidebar: 256, files: 360 },
+      git: { available: false, path: null, version: null, overridden: false, belowBaseline: false, message: "没有找到 Git" },
+      recent: [{ name: "demo", path: repoPath, openedAtMs: 1 }],
+      settingsWarning: null,
+    });
+    renderApp();
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: "更多提交操作" }));
+    expect(screen.getByRole("menu", { name: "更多提交操作" }).textContent).toContain("运行依赖");
   });
 
   it("rail 与命令面板打开同一个任务 modal，且单槽只有一层", async () => {
@@ -785,13 +813,13 @@ describe("差异与提交", () => {
     expect(region.scrollTop).toBe(ROW_HEIGHT);
     await fireEvent.keyDown(region, { key: "End" });
     expect(region.scrollTop).toBe(80 * ROW_HEIGHT);
-    expect(screen.getByText("row-79")).toBeTruthy();
+    expect(screen.getByText(codeLine("row-79"))).toBeTruthy();
     // 虚拟窗口只保留可见附近的行：滚到底之后首行必须已经出窗。
     expect(screen.queryByText("row-0")).toBeNull();
     await fireEvent.keyDown(region, { key: "Home" });
     expect(region.scrollTop).toBe(0);
     expect(screen.getByText("row-0")).toBeTruthy();
-    expect(screen.queryByText("row-79")).toBeNull();
+    expect(screen.queryByText(codeLine("row-79"))).toBeNull();
   });
 
   it("切换并排时保留文件，并拒绝截断代码块", async () => {
@@ -809,7 +837,7 @@ describe("差异与提交", () => {
     expect(screen.getByRole("button", { name: "并排" }).getAttribute("aria-pressed")).toBe("false");
     await fireEvent.click(screen.getByRole("button", { name: "并排" }));
     expect(screen.getByRole("button", { name: "并排" }).getAttribute("aria-pressed")).toBe("true");
-    expect(screen.getByText(/\+kept/)).toBeTruthy();
+    expect(screen.getByText(codeLine("kept"))).toBeTruthy();
     expect(screen.getByRole("button", { name: "暂存此块" }).hasAttribute("disabled")).toBe(false);
     expect(screen.getByRole("button", { name: "已截断" }).hasAttribute("disabled")).toBe(true);
   });
@@ -826,10 +854,10 @@ describe("差异与提交", () => {
         onLoadMore: () => {},
       },
     });
-    expect(screen.getByText("+kept")).toBeTruthy();
+    expect(screen.getByText(codeLine("kept"))).toBeTruthy();
     const nextSelection: FileSelection = { path: "other.txt", side: "unstaged" };
     await view.rerender({ selection: nextSelection, diff, error: null, loading: true, disabled: false, onStageHunk: () => {}, onLoadMore: () => {} });
-    expect(screen.queryByText("+kept")).toBeNull();
+    expect(screen.queryByText(codeLine("kept"))).toBeNull();
     expect(screen.getByText("正在读取差异")).toBeTruthy();
     const nextDiff: DiffResponse = {
       ...diff,
@@ -838,8 +866,8 @@ describe("差异与提交", () => {
       totalLines: 1,
     };
     await view.rerender({ selection: nextSelection, diff: nextDiff, error: null, loading: false, disabled: false, onStageHunk: () => {}, onLoadMore: () => {} });
-    expect(screen.getByText("+new-file-content")).toBeTruthy();
-    expect(screen.queryByText("+kept")).toBeNull();
+    expect(screen.getByText(codeLine("new-file-content"))).toBeTruthy();
+    expect(screen.queryByText(codeLine("kept"))).toBeNull();
   });
 
   it("空暂存时提交不可用，范围改成计数入口而不是说明段落", async () => {

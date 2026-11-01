@@ -98,6 +98,20 @@ describe("工作区状态", () => {
     expect(paired[1]?.left?.text).toBe("-old");
     expect(paired[1]?.right?.text).toBe("+new");
     expect(paired[0]?.showStage).toBe(true);
+    // 一删两增：第二个新增行排在配对行之后，左栏不多出空行，右栏行号保持递增。
+    const uneven = toSideRows([
+      { kind: "context", text: " a", oldNo: 12, newNo: 12, hunkIndex: 0 },
+      { kind: "del", text: "-old", oldNo: 13, newNo: null, hunkIndex: 0 },
+      { kind: "add", text: "+new", oldNo: null, newNo: 13, hunkIndex: 0 },
+      { kind: "add", text: "+more", oldNo: null, newNo: 14, hunkIndex: 0 },
+      { kind: "context", text: " b", oldNo: 14, newNo: 15, hunkIndex: 0 },
+    ]);
+    expect(uneven.map((row) => [row.left?.no ?? null, row.right?.no ?? null])).toEqual([
+      [12, 12],
+      [13, 13],
+      [null, 14],
+      [14, 15],
+    ]);
     expect(nextIndex(-1, "ArrowDown", 2)).toBe(0);
     expect(nextIndex(0, "ArrowUp", 2)).toBe(0);
     expect(nextIndex(1, "End", 2)).toBe(1);

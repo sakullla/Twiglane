@@ -12,11 +12,22 @@
     shortOid,
   } from "../history";
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
-  import type { CommitDetail, DiffHunk, DiffResponse, FileSelection, HistoryPage, OpenedRepository } from "../types";
+  import type {
+    CommitDetail,
+    DiffHunk,
+    DiffResponse,
+    FileSelection,
+    HistoryCommit,
+    HistoryPage,
+    OpenedRepository,
+    StatusSnapshot,
+  } from "../types";
   import { hueOf, initialOf, relativeTime, splitPath, statusMark } from "../ui";
   import CommitDiffList from "./CommitDiffList.svelte";
+  import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest, isContextKey, pointFor } from "./ContextMenu.svelte";
   import DiffView from "./DiffView.svelte";
   import Icon from "./Icon.svelte";
+  import Modal from "./Modal.svelte";
 
   interface Props {
     opened: OpenedRepository;
@@ -28,6 +39,9 @@
     onFailure: (error: unknown) => void;
     onFilePath: (path: string) => void;
     onClearFile: () => void;
+    /** 从某个提交新建分支后回写最新状态（切换时工作区与分支都会变）。 */
+    onSnapshot?: (snapshot: StatusSnapshot) => void;
+    onNotice?: (message: string) => void;
   }
 
   const ROW_HEIGHT = 62;
@@ -43,7 +57,67 @@
     onFailure,
     onFilePath,
     onClearFile,
+    onSnapshot,
+    onNotice,
   }: Props = $props();
+
+  let menu = $state<ContextMenuRequest | null>(null);
+  /** 「从此提交新建分支」的输入层。 */
+  let branchFrom = $state<{ oid: string; summary: string; name: string; checkout: boolean; busy: boolean; error: string | null } | null>(null);
+
+  async function copyText(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      onFailure({ code: "clipboard", message: "无法写入剪贴板，请手动复制。" });
+    }
+  }
+
+  function commitMenu(commit: HistoryCommit, point: { x: number; y: number }) {
+    const entries: ContextMenuEntry[] = [
+      {
+        id: "branch",
+        label: "从此提交新建分支…",
+        icon: "branch",
+        disabledReason: disabled ? "正在读取或写入，稍后再试" : undefined,
+        run: () => (branchFrom = { oid: commit.oid, summary: commit.summary, name: "", checkout: true, busy: false, error: null }),
+      },
+      { separator: true },
+      { id: "hash", label: "复制完整 Hash", icon: "copy", run: () => void copyOid(commit.oid) },
+      { id: "short", label: `复制短 Hash（${shortOid(commit.oid)}）`, icon: "copy", run: () => void copyText(shortOid(commit.oid)) },
+      { id: "summary", label: "复制提交说明", icon: "copy", run: () => void copyText(commit.summary) },
+      {
+        id: "author",
+        label: `复制作者（${commit.authorName}）`,
+        icon: "user",
+        run: () => void copyText(`${commit.authorName} <${commit.authorEmail}>`),
+      },
+    ];
+    menu = { x: point.x, y: point.y, entries, label: `提交 ${shortOid(commit.oid)} 的操作` };
+  }
+
+  async function confirmBranchFrom() {
+    const target = branchFrom;
+    if (!target || target.busy) return;
+    const name = target.name.trim();
+    if (!name) return;
+    branchFrom = { ...target, busy: true, error: null };
+    try {
+      const result = await api.createBranchFrom(opened.summary.path, name, target.oid, target.checkout, opened.generation, nextId());
+      onGeneration(result.generation);
+      onSnapshot?.(result.snapshot);
+      onNotice?.(
+        target.checkout
+          ? `已从 ${shortOid(target.oid)} 创建并切换到 ${name}。`
+          : `已从 ${shortOid(target.oid)} 创建分支 ${name}，当前分支没有切换。`,
+      );
+      branchFrom = null;
+    } catch (error) {
+      const failure = normalizeError(error);
+      onFailure(failure);
+      if (branchFrom) branchFrom = { ...target, busy: false, error: failure.message };
+    }
+  }
 
   let query = $state("");
   let viewMode = $state<"single" | "multi">("single");
@@ -264,8 +338,14 @@
   }
 
   function onListKey(event: KeyboardEvent) {
-    if (event.altKey || event.ctrlKey || event.metaKey) return;
     const current = commits.findIndex((commit) => commit.oid === selectedOid);
+    if (isContextKey(event) && current >= 0) {
+      event.preventDefault();
+      const row = (event.currentTarget as HTMLElement).querySelector('.history-row[aria-selected="true"]');
+      commitMenu(commits[current], row ? pointFor(row) : { x: 160, y: 160 });
+      return;
+    }
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
     const move = nextIndex(current, event.key, commits.length);
     if (move === null) return;
     event.preventDefault();
@@ -431,7 +511,17 @@
               style={`top:${(range.start + index) * ROW_HEIGHT}px;height:${ROW_HEIGHT - 2}px`}
               title={`${commit.summary}\n${commit.authorName} · ${formatAuthoredAt(commit.authoredAt)}\n${commit.oid}`}
               onclick={() => pick(commit.oid)}
+              oncontextmenu={(event) => {
+                event.preventDefault();
+                pick(commit.oid);
+                commitMenu(commit, { x: event.clientX, y: event.clientY });
+              }}
               onkeydown={(event) => {
+                if (isContextKey(event)) {
+                  event.preventDefault();
+                  commitMenu(commit, pointFor(event.currentTarget));
+                  return;
+                }
                 if (event.key === "Enter") {
                   event.preventDefault();
                   pick(commit.oid);
@@ -590,4 +680,59 @@
       {/if}
     </div>
   </div>
+  {#if menu}
+    <ContextMenu request={menu} onClose={() => (menu = null)} />
+  {/if}
+
+  {#if branchFrom}
+    <Modal
+      title="从此提交新建分支"
+      titleId="branch-from-commit-title"
+      icon="branch"
+      size="sm"
+      description={`起点：${shortOid(branchFrom.oid)} ${branchFrom.summary}`}
+      onClose={() => (branchFrom = null)}
+    >
+      <label class="label" for="branch-from-name">分支名称</label>
+      <input
+        id="branch-from-name"
+        class="input"
+        data-autofocus
+        placeholder="例如 hotfix/login"
+        autocomplete="off"
+        spellcheck="false"
+        bind:value={branchFrom.name}
+        disabled={branchFrom.busy}
+        onkeydown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            void confirmBranchFrom();
+          }
+        }}
+      />
+      <label class="switch">
+        <input type="checkbox" bind:checked={branchFrom.checkout} disabled={branchFrom.busy} />
+        <span>创建后切换过去</span>
+      </label>
+      <p class="hint">
+        {branchFrom.checkout
+          ? "切换沿用分支切换的保护：会覆盖未提交修改时停下，分支已创建但不切换。"
+          : "只创建分支，当前分支和工作区都不变。"}
+      </p>
+      {#if branchFrom.error}<div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{branchFrom.error}</span></div>{/if}
+      {#snippet footer()}
+        <button type="button" class="btn btn-secondary" onclick={() => (branchFrom = null)}>取消</button>
+        <span class="spacer"></span>
+        <button
+          type="button"
+          class="btn btn-primary"
+          disabled={branchFrom?.busy || !branchFrom?.name.trim()}
+          onclick={confirmBranchFrom}
+        >
+          {#if branchFrom?.busy}<span class="spinner"></span>{:else}<Icon name="plus" size={14} />{/if}
+          {branchFrom?.checkout ? "创建并切换" : "创建分支"}
+        </button>
+      {/snippet}
+    </Modal>
+  {/if}
 </section>

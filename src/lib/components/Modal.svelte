@@ -49,6 +49,8 @@
     size?: "sm" | "md" | "lg" | "xl";
     /** 覆盖默认档宽，用于接近全宽的合并 modal。 */
     width?: string;
+    /** 占满视口高度：正文不滚动，由内容自己分区滚动（用于合并冲突这类大面板）。 */
+    fill?: boolean;
     /** 任务 modal 标识（stash / merge / branch / remote / settings / scope / publish）。 */
     task?: string;
     description?: string;
@@ -64,6 +66,7 @@
     tone = "default",
     size = "md",
     width = "",
+    fill = false,
     task,
     description = "",
     onClose,
@@ -191,6 +194,7 @@
 >
   <div
     class={`modal-card modal-${size} tone-${tone}`}
+    class:modal-fill={fill}
     role="dialog"
     aria-modal="true"
     aria-labelledby={titleId}

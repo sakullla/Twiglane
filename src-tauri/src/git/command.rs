@@ -56,6 +56,20 @@ pub fn file_diff_command(
     numstat: bool,
     untracked: bool,
 ) -> (PathBuf, Vec<OsString>) {
+    file_diff_command_with_context(git, root, paths, staged, numstat, untracked, 3)
+}
+
+/// 与 `file_diff_command` 相同，但上下文行数可调：「查看完整文件」用一个很大的值让 Git 输出整份文件。
+/// 暂存代码块始终走 3 行上下文的版本，补丁格式不受影响。
+pub fn file_diff_command_with_context(
+    git: &Path,
+    root: &Path,
+    paths: &[PathBuf],
+    staged: bool,
+    numstat: bool,
+    untracked: bool,
+    context: u32,
+) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.push(OsString::from("diff"));
     if untracked {
@@ -73,7 +87,7 @@ pub fn file_diff_command(
         args.push(OsString::from("--numstat"));
         args.push(OsString::from("-z"));
     } else {
-        args.push(OsString::from("--unified=3"));
+        args.push(OsString::from(format!("--unified={context}")));
     }
     if untracked {
         args.push(OsString::from(null_device()));
@@ -347,6 +361,42 @@ pub fn create_branch_command(git: &Path, root: &Path, name: &str) -> (PathBuf, V
         OsString::from("branch"),
         OsString::from("--"),
         OsString::from(name),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// 从指定起点创建分支：`git branch --no-track -- <name> <start>`（起点已由调用方核对过）。
+pub fn create_branch_at_command(
+    git: &Path,
+    root: &Path,
+    name: &str,
+    start: &str,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("branch"),
+        OsString::from("--no-track"),
+        OsString::from("--"),
+        OsString::from(name),
+        OsString::from(start),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// 重命名本地分支：`git branch -m -- <old> <new>`（不加 -M，目标已存在时由 Git 拒绝）。
+pub fn rename_branch_command(
+    git: &Path,
+    root: &Path,
+    old: &str,
+    new: &str,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("branch"),
+        OsString::from("-m"),
+        OsString::from("--"),
+        OsString::from(old),
+        OsString::from(new),
     ]);
     (git.to_path_buf(), args)
 }

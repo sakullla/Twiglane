@@ -15,9 +15,14 @@
     onFailure: (error: unknown) => void;
     onNotice: (message: string) => void;
     onMerge: () => void;
+    /**
+     * toolbar：一排图标按钮（默认）；menu：作为「更多提交操作」菜单里的带说明菜单项，
+     * 名称与说明都直接可见，不再只靠悬停提示。
+     */
+    variant?: "toolbar" | "menu" | "headless";
   }
 
-  let { opened, disabled, nextId, onSnapshot, onFailure, onNotice, onMerge }: Props = $props();
+  let { opened, disabled, nextId, onSnapshot, onFailure, onNotice, onMerge, variant = "toolbar" }: Props = $props();
 
   let mode = $state<"discard" | "undo" | null>(null);
   let plans = $state<DiscardFilePlan[]>([]);
@@ -34,8 +39,17 @@
     return opened.snapshot.files.filter((file) => !file.unmerged).map((file) => file.path);
   }
 
-  async function openDiscard() {
-    const paths = changedPaths();
+  /**
+   * 放弃修改：先列出影响清单再确认。传入 paths 时只针对这些文件（右键菜单），并默认全部勾选；
+   * 不传时列出全部改动、默认只勾第一项（溢出菜单的原有行为）。
+   */
+  export async function discard(paths?: string[]) {
+    await openDiscard(paths);
+  }
+
+  async function openDiscard(only?: string[]) {
+    const changed = changedPaths();
+    const paths = only ? only.filter((path) => changed.includes(path)) : changed;
     if (paths.length === 0) {
       errorText = "没有可放弃的本地改动。";
       onFailure({ code: "nothing_to_discard", message: errorText });
@@ -47,7 +61,7 @@
       const preview = await api.discardChanges(opened.summary.path, paths, false, opened.generation, nextId());
       plans = preview.files;
       boundary = preview.boundary;
-      checked = paths.slice(0, 1);
+      checked = only ? [...paths] : paths.slice(0, 1);
       mode = "discard";
     } catch (error) {
       const failure = normalizeError(error);
@@ -158,32 +172,59 @@
   }
 </script>
 
-{#if conflicts > 0}
-  <button type="button" class="btn btn-warning-soft btn-sm" disabled={blocked} title="去合并视图逐个处理冲突文件" onclick={onMerge}>
-    <Icon name="alert" size={13} />处理冲突
-    <span class="count warning">{conflicts}</span>
+{#if variant === "headless"}
+  <!-- 只承载确认 modal：入口在别处（例如文件右键菜单）通过 discard(paths) 唤起。 -->
+{:else if variant === "menu"}
+  {#if conflicts > 0}
+    <button type="button" class="menu-item warn" role="menuitem" disabled={blocked} onclick={onMerge}>
+      <Icon name="alert" />
+      <span>处理冲突<small>{conflicts} 个文件有冲突，到分支合并里逐处处理</small></span>
+      <span class="count warning">{conflicts}</span>
+    </button>
+  {/if}
+  <button type="button" class="menu-item" role="menuitem" aria-label={undoActionLabel()} disabled={blocked} onclick={openUndo}>
+    <Icon name="undo" />
+    <span>撤销最近提交<small>仅限未推送的普通提交，文件改动保留</small></span>
+  </button>
+  <button
+    type="button"
+    class="menu-item danger"
+    role="menuitem"
+    aria-label={discardActionLabel()}
+    disabled={blocked || changedPaths().length === 0}
+    onclick={() => openDiscard()}
+  >
+    <Icon name="trash" />
+    <span>放弃文件修改…<small>先列出受影响的文件，确认后才写入</small></span>
+  </button>
+{:else}
+  {#if conflicts > 0}
+    <button type="button" class="btn btn-warning-soft btn-sm" disabled={blocked} title="去合并视图逐个处理冲突文件" onclick={onMerge}>
+      <Icon name="alert" size={13} />处理冲突
+      <span class="count warning">{conflicts}</span>
+    </button>
+  {/if}
+  <button
+    type="button"
+    class="icon-btn"
+    aria-label={undoActionLabel()}
+    title={`${undoActionLabel()}（仅限未推送的普通提交）`}
+    disabled={blocked}
+    onclick={openUndo}
+  >
+    <Icon name="undo" />
+  </button>
+  <button
+    type="button"
+    class="icon-btn danger"
+    aria-label={discardActionLabel()}
+    title={`${discardActionLabel()}（会先列出影响，确认后才写入）`}
+    disabled={blocked || changedPaths().length === 0}
+    onclick={() => openDiscard()}
+  >
+    <Icon name="trash" />
   </button>
 {/if}
-<button
-  type="button"
-  class="icon-btn"
-  aria-label={undoActionLabel()}
-  title={`${undoActionLabel()}（仅限未推送的普通提交）`}
-  disabled={blocked}
-  onclick={openUndo}
->
-  <Icon name="undo" />
-</button>
-<button
-  type="button"
-  class="icon-btn danger"
-  aria-label={discardActionLabel()}
-  title={`${discardActionLabel()}（会先列出影响，确认后才写入）`}
-  disabled={blocked || changedPaths().length === 0}
-  onclick={openDiscard}
->
-  <Icon name="trash" />
-</button>
 {#if errorText && mode === null}
   <p class="sr-only" role="status">{errorText}</p>
 {/if}

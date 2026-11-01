@@ -73,6 +73,39 @@ describe("Tauri 命令参数", () => {
     }
   });
 
+  it("右键菜单与分支管理新增的命令按 camelCase 传参，Rust 侧参数名一致", async () => {
+    await api.loadDiff("/repo", "a.ts", true, 8, 40, null, 0, 0, 1_000_000);
+    await api.createBranchFrom("/repo", "hotfix", "main", true, 8, 41);
+    await api.renameBranch("/repo", "old", "new", 8, 42);
+    await api.revealPath("/repo", "src/a.ts");
+    await api.openPath("/repo", "src/a.ts");
+    await api.ignorePath("/repo", "*.log", 8, 43);
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "load_diff", {
+      path: "/repo",
+      relative: "a.ts",
+      original: null,
+      staged: true,
+      generation: 8,
+      requestId: 40,
+      offset: 0,
+      limit: 0,
+      context: 1_000_000,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "create_branch_from", {
+      path: "/repo",
+      name: "hotfix",
+      start: "main",
+      checkout: true,
+      generation: 8,
+      requestId: 41,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "rename_branch", { path: "/repo", old: "old", new: "new", generation: 8, requestId: 42 });
+    expect(invoke).toHaveBeenNthCalledWith(4, "reveal_path", { path: "/repo", relative: "src/a.ts" });
+    expect(invoke).toHaveBeenNthCalledWith(5, "open_path", { path: "/repo", relative: "src/a.ts" });
+    expect(invoke).toHaveBeenNthCalledWith(6, "ignore_path", { path: "/repo", pattern: "*.log", generation: 8, requestId: 43 });
+  });
+
   it("历史和临时保存使用 requestId", async () => {
     await api.historyPage("/repo", "needle", 100, 8, 20);
     await api.commitDetail("/repo", "abc123", null, 8, 21);

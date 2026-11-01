@@ -1,6 +1,8 @@
 <script lang="ts">
   import { dependencyNote, gitInstallHint } from "../labels";
   import type { GitInfo, Theme } from "../types";
+  import { LANGUAGE_OPTIONS } from "../syntax/languages";
+  import { setSyntaxEnabled, syntaxPrefs } from "../syntax/prefs.svelte";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
 
@@ -84,6 +86,14 @@
         {/each}
       </div>
       <p class="hint">选择写入设置后重启仍保持；跟随系统时按系统的浅深设置切换。</p>
+      <label class="switch settings-syntax">
+        <input
+          type="checkbox"
+          checked={syntaxPrefs.enabled}
+          onchange={(event) => setSyntaxEnabled((event.currentTarget as HTMLInputElement).checked)}
+        />
+        <span>代码语法高亮<small>差异、提交历史与冲突处理里按语言着色，支持 {LANGUAGE_OPTIONS.length} 种语言；单个文件类型可在差异工具条上改用别的语言</small></span>
+      </label>
     </div>
   </div>
 

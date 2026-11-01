@@ -3,6 +3,12 @@
   import { scrollByRows, visibleRange } from "../layout";
   import type { DiffHunk, DiffResponse, FileSelection } from "../types";
   import { splitPath } from "../ui";
+  import { buildDiffDocuments, codeOf, signOf } from "../syntax/diffSyntax";
+  import { createHighlight } from "../syntax/highlight.svelte";
+  import { effectiveLanguage } from "../syntax/prefs.svelte";
+  import { lineSegments } from "../syntax/segments";
+  import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
+  import LanguagePicker from "./LanguagePicker.svelte";
   import Icon from "./Icon.svelte";
 
   interface Props {
@@ -15,6 +21,9 @@
     onStageHunk: (hunk: DiffHunk) => void;
     onLoadMore: () => void;
     onFileHistory?: (path: string) => void;
+    /** 是否展开为完整文件（整份文件作上下文）；展开时不提供按块暂存。 */
+    fullFile?: boolean;
+    onFullFile?: (next: boolean) => void;
   }
 
   /**
@@ -34,7 +43,10 @@
     onStageHunk,
     onLoadMore,
     onFileHistory,
+    fullFile = false,
+    onFullFile,
   }: Props = $props();
+  let menu = $state<ContextMenuRequest | null>(null);
   let mode = $state<"unified" | "split">("unified");
   let scrollTop = $state(0);
   let viewport = $state(0);
@@ -54,6 +66,103 @@
   let showStats = $derived(
     Boolean(currentDiff && !currentDiff.binary && (currentDiff.additions > 0 || currentDiff.deletions > 0)),
   );
+
+  /* 语法高亮：旧侧（上下文 + 删除）与新侧（上下文 + 新增）各自整体分词，再按行映射回来；
+     行内改动区间在配对的删除/新增行之间计算。结果逐块到达，未到的行先按纯文本显示。 */
+  let language = $derived(currentDiff && !currentDiff.binary ? effectiveLanguage(currentDiff.path) : null);
+  let documents = $derived(buildDiffDocuments(lines));
+  const oldSyntax = createHighlight(() => ({ lang: language, lines: documents.oldLines }));
+  const newSyntax = createHighlight(() => ({ lang: language, lines: documents.newLines }));
+
+  function segmentsAt(index: number) {
+    const line = lines[index];
+    if (!line) return [];
+    const code = codeOf(line);
+    const side = documents.side[index];
+    const tokens = side === 0 ? oldSyntax.at(documents.at[index]) : side === 1 ? newSyntax.at(documents.at[index]) : undefined;
+    return lineSegments(code, tokens, documents.ranges.get(index) ?? null);
+  }
+
+  const sign = signOf;
+
+  async function copy(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // 剪贴板不可用时静默：菜单项本身不承担报错。
+    }
+  }
+
+  function hunkOf(index: number): DiffHunk | null {
+    const line = lines[index];
+    if (!line || line.hunkIndex === null || !currentDiff) return null;
+    return currentDiff.hunks.find((hunk) => hunk.index === line.hunkIndex) ?? null;
+  }
+
+  /** 右键菜单：复制、展开完整文件、文件历史与按块暂存；命中的行由 data-line 决定。 */
+  function openMenu(event: MouseEvent | KeyboardEvent, point: { x: number; y: number }) {
+    if (!selection) return;
+    const target = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-line]");
+    const index = target ? Number(target.dataset.line) : -1;
+    const line = index >= 0 ? lines[index] : undefined;
+    const picked = typeof window !== "undefined" ? (window.getSelection()?.toString() ?? "") : "";
+    const hunk = index >= 0 ? hunkOf(index) : null;
+    const entries: ContextMenuEntry[] = [
+      {
+        id: "copy-selection",
+        label: "复制选中内容",
+        icon: "copy",
+        disabledReason: picked ? undefined : "先在差异里选中文字",
+        run: () => void copy(picked),
+      },
+      {
+        id: "copy-line",
+        label: "复制此行代码",
+        icon: "copy",
+        disabledReason: line && CODE_KINDS.has(line.kind) ? undefined : "这里不是代码行",
+        run: () => line && void copy(codeOf(line)),
+      },
+      { id: "copy-path", label: "复制文件路径", icon: "copy", run: () => void copy(selection.path) },
+    ];
+    if (onFullFile) {
+      entries.push(
+        { separator: true },
+        {
+          id: "full-file",
+          label: fullFile ? "只看改动部分" : "查看完整文件",
+          icon: "rows",
+          run: () => onFullFile?.(!fullFile),
+        },
+      );
+    }
+    if (onFileHistory) {
+      entries.push({ id: "history", label: "查看文件历史", icon: "history", run: () => onFileHistory?.(selection.path) });
+    }
+    if (!readOnly) {
+      const reason = fullFile
+        ? "完整文件视图不能按块暂存，先切回「只看改动部分」"
+        : !hunk
+          ? "在某个代码块上右键才能按块操作"
+          : !hunk.stageable
+            ? "截断的代码块不能部分暂存"
+            : disabled
+              ? "正在读取或写入，稍后再试"
+              : undefined;
+      entries.push(
+        { separator: true },
+        {
+          id: "stage-hunk",
+          label: selection.side === "staged" ? "取消暂存此块" : "暂存此块",
+          icon: selection.side === "staged" ? "minus" : "plus",
+          disabledReason: reason,
+          run: () => hunk && onStageHunk(hunk),
+        },
+      );
+    }
+    menu = { x: point.x, y: point.y, entries, label: "差异操作" };
+  }
+
+  const CODE_KINDS = new Set(["add", "del", "context"]);
 
   $effect(() => {
     selectionKey;
@@ -127,6 +236,9 @@
       {/if}
     </div>
     {#if loading && currentDiff}<span class="spinner muted" aria-hidden="true"></span>{/if}
+    {#if currentDiff && !currentDiff.binary && selection}
+      <LanguagePicker path={selection.path} />
+    {/if}
     {#if onFileHistory && selection}
       <button
         type="button"
@@ -136,6 +248,17 @@
         onclick={() => onFileHistory?.(selection.path)}
       >
         <Icon name="history" size={14} /><span class="diff-hist-label">此文件历史</span>
+      </button>
+    {/if}
+    {#if onFullFile && selection}
+      <button
+        type="button"
+        class="btn btn-ghost btn-sm diff-full-toggle"
+        aria-pressed={fullFile}
+        title={fullFile ? "只显示改动附近的内容" : "把整份文件都显示出来（改动仍高亮）"}
+        onclick={() => onFullFile?.(!fullFile)}
+      >
+        <Icon name="rows" size={13} /><span class="diff-hist-label">{fullFile ? "完整文件" : "只看改动"}</span>
       </button>
     {/if}
     <div class="segmented" role="group" aria-label="差异布局">
@@ -181,7 +304,19 @@
       tabindex="0"
       aria-label="差异文本"
       bind:this={scroller}
-      onkeydown={onDiffKey}
+      onkeydown={(event) => {
+        if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+          event.preventDefault();
+          const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+          openMenu(event, { x: rect.left + 40, y: rect.top + 40 });
+          return;
+        }
+        onDiffKey(event);
+      }}
+      oncontextmenu={(event) => {
+        event.preventDefault();
+        openMenu(event, { x: event.clientX, y: event.clientY });
+      }}
       onscroll={(event) => (scrollTop = event.currentTarget.scrollTop)}
       bind:clientHeight={viewport}
     >
@@ -189,11 +324,16 @@
         {#if mode === "unified"}
           {#each lines.slice(range.start, range.end) as line, index (`u-${range.start + index}`)}
             {@const absolute = range.start + index}
-            <div class={lineClass(line.kind)} data-diff-row="" style={`top:${absolute * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}>
+            <div class={lineClass(line.kind)} data-diff-row="" data-line={absolute} style={`top:${absolute * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}>
               <span class="ln">{line.oldNo ?? ""}</span>
               <span class="ln">{line.newNo ?? ""}</span>
-              <span class="code">{line.text.length === 0 ? " " : line.text}</span>
-              {#if !readOnly && hunkForLine(absolute)}
+              {#if line.kind === "add" || line.kind === "del" || line.kind === "context"}
+                {@const segs = segmentsAt(absolute)}
+                <span class="code" data-sign={sign(line.text)}>{#if segs.length === 1 && !segs[0].k && !segs[0].m}{segs[0].t}{:else}{#each segs as seg, i (i)}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/each}{/if}</span>
+              {:else}
+                <span class="code">{line.text.length === 0 ? " " : line.text}</span>
+              {/if}
+              {#if !readOnly && !fullFile && hunkForLine(absolute)}
                 {@const hunk = hunkForLine(absolute)}
                 {#if hunk}
                   <button
@@ -210,14 +350,21 @@
         {:else}
           {#each sideRows.slice(range.start, range.end) as row, index (`s-${range.start + index}`)}
             {@const absolute = range.start + index}
-            <div class="side-row" class:span={row.span} data-diff-row="" style={`top:${absolute * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}>
-              <span class={`side-cell ${row.left?.kind ?? "empty"}`}>
-                {#if row.left}<span class="ln">{row.left.no ?? ""}</span><span class="code">{row.left.text}</span>{/if}
+            <div
+              class="side-row"
+              class:span={row.span}
+              data-diff-row=""
+              data-line={row.right?.index ?? row.left?.index ?? undefined}
+              style={`top:${absolute * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}
+            >
+              <!-- 占位格用 blank 而不是 empty：.empty 是全局空状态（flex + 32px 内边距），会把单元格撑到 64px，相邻行文字叠在一起。 -->
+              <span class={`side-cell ${row.left?.kind ?? "blank"}`}>
+                {#if row.left}<span class="ln">{row.left.no ?? ""}</span>{#if row.left.index !== undefined && !row.span}<span class="code" data-sign={sign(row.left.text)}>{#each segmentsAt(row.left.index) as seg, i (i)}{#if !seg.k && !seg.m}{seg.t}{:else}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/if}{/each}</span>{:else}<span class="code">{row.left.text}</span>{/if}{/if}
               </span>
-              <span class={`side-cell ${row.right?.kind ?? "empty"}`}>
-                {#if row.right}<span class="ln">{row.right.no ?? ""}</span><span class="code">{row.right.text}</span>{/if}
+              <span class={`side-cell ${row.right?.kind ?? "blank"}`}>
+                {#if row.right}<span class="ln">{row.right.no ?? ""}</span>{#if row.right.index !== undefined && !row.span}<span class="code" data-sign={sign(row.right.text)}>{#each segmentsAt(row.right.index) as seg, i (i)}{#if !seg.k && !seg.m}{seg.t}{:else}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/if}{/each}</span>{:else}<span class="code">{row.right.text}</span>{/if}{/if}
               </span>
-              {#if !readOnly && row.showStage && row.hunkIndex !== null}
+              {#if !readOnly && !fullFile && row.showStage && row.hunkIndex !== null}
                 {@const hunk = currentDiff.hunks.find((item) => item.index === row.hunkIndex)}
                 {#if hunk}
                   <button
@@ -240,5 +387,8 @@
         <button type="button" class="btn btn-secondary btn-sm" disabled={disabled || loading} onclick={onLoadMore}>继续加载</button>
       </div>
     {/if}
+  {/if}
+  {#if menu}
+    <ContextMenu request={menu} onClose={() => (menu = null)} />
   {/if}
 </section>

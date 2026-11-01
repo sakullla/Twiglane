@@ -9,6 +9,8 @@ import type {
   StatusSnapshot,
   Theme,
 } from "../../src/lib/types";
+import { createTextDiff } from "../../src/lib/diff";
+import { sampleFor } from "./samples";
 
 const wait = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms));
 const now = Math.floor(Date.now() / 1000);
@@ -35,8 +37,76 @@ let files: FileChange[] = [
   file("README.md", "modified", "none"),
   file("docs/guide/getting-started.md", "renamed", "none", { originalPath: "docs/start.md" }),
   file("public/logo.png", "none", "modified"),
+  file("src-tauri/src/repo.rs", "none", "modified"),
+  file("scripts/config.py", "none", "modified"),
+  file("docs/fixtures/rows.txt", "none", "modified"),
   file("src/lib/merge.ts", "unmerged", "unmerged", { unmerged: true }),
+  file("src/styles/theme.css", "unmerged", "unmerged", { unmerged: true }),
+  file("public/hero.png", "unmerged", "unmerged", { unmerged: true }),
 ];
+
+/**
+ * 预览用的大冲突文件：约 2 万行、9 处冲突，覆盖逐处处理的各种形态——
+ * 多行改写、两侧相同（简单冲突）、仅空白不同、带共同祖先（diff3）且一侧未改动、
+ * 超长行、文件末尾的冲突。ours/theirs 是两侧完整版本，result 是带标记的工作区文件。
+ */
+function bigConflict(): { ours: string; theirs: string; result: string } {
+  const ours: string[] = [];
+  const theirs: string[] = [];
+  const result: string[] = [];
+  const common = (count: number, seed: number) => {
+    for (let index = 0; index < count; index += 1) {
+      const line = index % 9 === 0 ? "" : `  const value${seed}_${index} = compute("merge.ts", ${seed}, ${index});`;
+      ours.push(line);
+      theirs.push(line);
+      result.push(line);
+    }
+  };
+  const conflict = (a: string[], b: string[], base: string[] | null = null) => {
+    ours.push(...a);
+    theirs.push(...b);
+    result.push("<<<<<<< HEAD", ...a);
+    if (base) result.push("||||||| merged common ancestors", ...base);
+    result.push("=======", ...b, ">>>>>>> main");
+  };
+  result.push("// merge.ts —— 预览数据");
+  ours.push("// merge.ts —— 预览数据");
+  theirs.push("// merge.ts —— 预览数据");
+  common(40, 0);
+  conflict(
+    ["export function createView(options: ViewOptions) {", '  const mode = "workspace";', "  const size = 12;", '  const sidebar = "expanded";'],
+    ["export function createView(options: ViewOptions, extra?: ViewExtra) {", '  const mode = "review";', "  const size = 14;", '  const sidebar = "compact";', "  const density = extra?.density ?? 1;"],
+  );
+  common(2400, 1);
+  conflict(['import { render } from "./render";'], ['import { render } from "./render";']);
+  common(3100, 2);
+  conflict(["    return  { ok: true, value };"], ["    return { ok: true, value };"]);
+  common(1800, 3);
+  conflict(
+    ["  retries: 3,", "  timeoutMs: 5000,"],
+    ["  retries: 5,", "  timeoutMs: 5000,", "  backoff: \"exponential\","],
+    ["  retries: 3,", "  timeoutMs: 5000,"],
+  );
+  common(4200, 4);
+  conflict(
+    ['  logger.info("merge finished", { files: result.files.length, conflicts: result.conflicts.length, durationMs: Date.now() - started, source: options.source, target: options.target });'],
+    ['  logger.debug("merge finished", { files: result.files.length, conflicts: result.conflicts.length, durationMs: performance.now() - started, source: options.source, target: options.target, strategy: options.strategy });'],
+  );
+  common(2600, 5);
+  conflict(
+    ["function resolveAll(entries: Entry[]) {", "  for (const entry of entries) {", "    apply(entry);", "  }", "}"],
+    ["async function resolveAll(entries: Entry[], signal: AbortSignal) {", "  for (const entry of entries) {", "    if (signal.aborted) return;", "    await apply(entry);", "  }", "}"],
+  );
+  common(3300, 6);
+  conflict(["export const VERSION = \"2.3.0\";"], ["export const VERSION = \"2.4.0-beta.1\";"], ["export const VERSION = \"2.2.0\";"]);
+  common(1500, 7);
+  conflict(["  // 合并完成后刷新缓存", "  cache.clear();"], ["  // 合并完成后只失效相关条目", "  cache.invalidate(result.paths);"]);
+  common(12, 8);
+  conflict(["export default createView;"], ["export default createView;", "export { resolveAll };"]);
+  const join = (lines: string[]) => `${lines.join("\n")}\n`;
+  return { ours: join(ours), theirs: join(theirs), result: join(result) };
+}
+const BIG_CONFLICT = bigConflict();
 
 const branch = {
   name: "feature/modern-ui",
@@ -63,6 +133,28 @@ function opened(path: string): OpenedRepository {
 function diffFor(path: string, staged: boolean): DiffResponse {
   if (path.endsWith(".png")) {
     return { generation, path, staged, binary: true, text: null, summary: "二进制文件有变化。", additions: 0, deletions: 0, complete: true, truncated: false, snapshot: "s", hunks: [], lines: [], offset: 0, totalLines: 0 };
+  }
+  // 有多语言样本的文件用真实感代码，便于看语法高亮与行内改动标记；其余沿用 90 行的长夹具。
+  const sample = sampleFor(path);
+  if (sample) {
+    const diff = createTextDiff(path, sample.before, sample.after, generation);
+    const sampleHunks = diff.lines
+      .map((line, start) => ({ line, start }))
+      .filter(({ line }) => line.kind === "hunk")
+      .map(({ line, start }, hunkIndex, all) => ({
+        index: hunkIndex,
+        header: line.text,
+        complete: true,
+        stageable: true,
+        startLine: start,
+        lineCount: (all[hunkIndex + 1]?.start ?? diff.lines.length) - start,
+      }));
+    let current = -1;
+    const lines = diff.lines.map((line) => {
+      if (line.kind === "hunk") current += 1;
+      return { ...line, hunkIndex: current };
+    });
+    return { ...diff, staged, hunks: sampleHunks, lines, totalLines: lines.length, snapshot: `sample-${path}` };
   }
   const lines: DiffLine[] = [];
   const hunks = [];
@@ -269,6 +361,35 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     generation += 1;
     return ok(branchData());
   },
+  createBranchFrom: (_repo: string, name: string, _start: string, checkout: boolean) => {
+    if (!branches.some((item) => !item.remote && item.name === name)) {
+      branches.push({ name, remote: false, current: false, upstream: null, worktree: null });
+    }
+    if (checkout) {
+      for (const item of branches) item.current = !item.remote && item.name === name;
+      branch.name = name;
+      branch.upstream = null;
+      branch.ahead = 0;
+      branch.behind = 0;
+    }
+    generation += 1;
+    return ok(branchData());
+  },
+  renameBranch: (_repo: string, oldName: string, newName: string) => {
+    const target = branches.find((item) => !item.remote && item.name === oldName);
+    if (target) target.name = newName;
+    if (branch.name === oldName) branch.name = newName;
+    generation += 1;
+    return ok(branchData());
+  },
+  revealPath: () => ok(undefined),
+  openPath: () => ok(undefined),
+  ignorePath: (_repo: string, pattern: string) => {
+    const needle = pattern.replace(/^\//, "").replace(/^\*/, "");
+    files = files.filter((item) => item.unmerged || !(item.untracked && item.path.endsWith(needle)));
+    generation += 1;
+    return ok(snapshot());
+  },
   switchBranch: (_repo: string, name: string) => {
     const selected = branches.find((item) => item.name === name);
     const localName = selected?.remote ? name.slice(name.indexOf("/") + 1) : name;
@@ -370,14 +491,33 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   },
   mergeSession: () => ok(mergeData()),
   conflictView: (_repo: string, path: string) => {
-    const ours = `export interface ViewOptions {\n  theme: "light" | "dark";\n  compact: boolean;\n}\n\nexport function createView(options: ViewOptions) {\n  const mode = "workspace";\n  const size = 12;\n  const sidebar = "expanded";\n  const diff = renderDiff({ mode, size });\n  return { ...options, sidebar, diff };\n}\n`;
-    const theirs = `export interface ViewOptions {\n  theme: "light" | "dark";\n  compact: boolean;\n}\n\nexport function createView(options: ViewOptions) {\n  const mode = "review";\n  const size = 14;\n  const sidebar = "compact";\n  const diff = renderDiff({ mode, size });\n  return { ...options, sidebar, diff };\n}\n`;
+    if (path.endsWith(".png")) {
+      return ok({
+        generation, path, kind: "binary", editable: false,
+        ours: { present: true, binary: true, truncated: false, text: null, summary: "本地版本是二进制，不显示伪文本。" },
+        theirs: { present: true, binary: true, truncated: false, text: null, summary: "另一分支版本是二进制，不显示伪文本。" },
+        result: { present: true, binary: true, truncated: false, text: null, summary: "当前合并结果是二进制。" },
+        note: "这是二进制冲突，不能按文本合并。请明确保留本地版本或另一分支版本。",
+      });
+    }
+    if (path.endsWith(".css")) {
+      const ours = ":root {\n  --accent: #0e7c55;\n  --radius: 11px;\n}\n\n.button {\n  padding: 0 14px;\n}\n";
+      const theirs = ":root {\n  --accent: #10a37f;\n  --radius: 12px;\n}\n\n.button {\n  padding: 0 16px;\n}\n";
+      const result = ":root {\n<<<<<<< HEAD\n  --accent: #0e7c55;\n  --radius: 11px;\n||||||| base\n  --accent: #0e7c55;\n  --radius: 10px;\n=======\n  --accent: #10a37f;\n  --radius: 12px;\n>>>>>>> main\n}\n\n.button {\n<<<<<<< HEAD\n  padding: 0 14px;\n=======\n  padding: 0 16px;\n>>>>>>> main\n}\n";
+      return ok({
+        generation, path, kind: "text", editable: true,
+        ours: { present: true, binary: false, truncated: false, text: ours, summary: "本地" },
+        theirs: { present: true, binary: false, truncated: false, text: theirs, summary: "另一侧" },
+        result: { present: true, binary: false, truncated: false, text: result, summary: "结果" },
+        note: "可以编辑合并结果。标记后只解决这个文件，其他冲突保持不变。",
+      });
+    }
     return ok({
       generation, path, kind: "text", editable: true,
-      ours: { present: true, binary: false, truncated: false, text: ours, summary: "本地" },
-      theirs: { present: true, binary: false, truncated: false, text: theirs, summary: "另一侧" },
-      result: { present: true, binary: false, truncated: false, text: ours.replace("const size = 12", "const size = 14"), summary: "结果" },
-      note: "对比两个版本的差异，编辑最终结果后再标记。",
+      ours: { present: true, binary: false, truncated: false, text: BIG_CONFLICT.ours, summary: "本地" },
+      theirs: { present: true, binary: false, truncated: false, text: BIG_CONFLICT.theirs, summary: "另一侧" },
+      result: { present: true, binary: false, truncated: false, text: BIG_CONFLICT.result, summary: "结果" },
+      note: "可以编辑合并结果。标记后只解决这个文件，其他冲突保持不变。",
     });
   },
   resolveConflict: (_repo: string, path: string) => {

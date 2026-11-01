@@ -38,6 +38,8 @@
     onSelect: (path: string) => void;
     onForget: (path: string) => void;
     onShowPath: (path: string) => void;
+    /** 最近仓库行的右键菜单。 */
+    onRepoContextMenu?: (repo: RecentRepo, point: { x: number; y: number }) => void;
     onAdd?: () => void;
     onClone?: () => void;
     onCreate?: () => void;
@@ -61,6 +63,7 @@
     onSelect,
     onForget,
     onShowPath,
+    onRepoContextMenu,
     onAdd,
     onClone,
     onCreate,
@@ -289,7 +292,24 @@
         <div class="repo-list" role="list">
           {#each visible as repo (repo.path)}
             <div class="repo" role="listitem" aria-current={repo.path === selectedPath ? "true" : undefined}>
-              <button type="button" class="repo-main" title={repo.path} onclick={() => onSelect(repo.path)}>
+              <button
+                type="button"
+                class="repo-main"
+                title={repo.path}
+                onclick={() => onSelect(repo.path)}
+                oncontextmenu={(event) => {
+                  if (!onRepoContextMenu) return;
+                  event.preventDefault();
+                  onRepoContextMenu(repo, { x: event.clientX, y: event.clientY });
+                }}
+                onkeydown={(event) => {
+                  if (onRepoContextMenu && (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) {
+                    event.preventDefault();
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    onRepoContextMenu(repo, { x: rect.left + 24, y: rect.bottom - 4 });
+                  }
+                }}
+              >
                 <span class="repo-badge" style={`--hue:${hueOf(repo.path)}`} aria-hidden="true">{initialOf(repo.name)}</span>
                 <span class="repo-text">
                   <span class="repo-name">{repo.name}</span>

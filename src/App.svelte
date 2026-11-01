@@ -5,6 +5,7 @@
     commandAvailable,
     commandById,
     commandReason,
+    OVERFLOW_COMMAND_ICONS,
     OVERFLOW_COMMAND_IDS,
     paletteItems,
     REPO_SWITCH_PREFIX,
@@ -23,6 +24,7 @@
     AppFailure,
     DiffHunk,
     DiffResponse,
+    FileRow,
     FileSelection,
     GitInfo,
     OpenedRepository,
@@ -34,9 +36,10 @@
     Theme,
     WorkspaceView,
   } from "./lib/types";
-  import { hueOf, initialOf } from "./lib/ui";
+  import { hasCommitSummary, hueOf, initialOf } from "./lib/ui";
   import BranchDialog from "./lib/components/BranchDialog.svelte";
   import CommandPalette from "./lib/components/CommandPalette.svelte";
+  import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./lib/components/ContextMenu.svelte";
   import CommitDraft from "./lib/components/CommitDraft.svelte";
   import DetailDialog from "./lib/components/DetailDialog.svelte";
   import DiffView from "./lib/components/DiffView.svelte";
@@ -127,10 +130,18 @@
   let fileQuery = $state("");
   let workspaceView = $state<WorkspaceView>("changes");
   let conflictFocus = $state<string | null>(null);
+  /** 从分支菜单「合并到当前分支」进入时预选的来源分支。 */
+  let mergeSource = $state<string | null>(null);
   let historyPath = $state<string | null>(null);
   let historyQuery = $state("");
   let taskModal = $state<TaskModal | null>(null);
   let paletteOpen = $state(false);
+  /** 当前打开的右键菜单（文件列表、最近仓库）；任务 modal 里的右键菜单由各自组件承载。 */
+  let contextMenu = $state<ContextMenuRequest | null>(null);
+  let recovery = $state<{ discard: (paths?: string[]) => Promise<void> } | null>(null);
+  /** 差异是否展开为完整文件（记在本机）：开启时按整份文件加上下文读取，暂存代码块暂不可用。 */
+  const FULL_FILE_CONTEXT = 1_000_000;
+  let diffFullFile = $state(readFullFilePreference());
   let mergeInProgress = $state(false);
   let remoteName = $state<string | null>(null);
   const drafts = new DraftBuffer();
@@ -213,10 +224,15 @@
       run: () => runCommand(item.id),
     })),
   );
+  /**
+   * 运行环境正常（Git 可用且版本不低于基线）时，「运行依赖」说明对用户没有行动价值，
+   * 不在提交区菜单里占位；仍可从命令面板与设置 → 运行环境查看。缺失或过低时它才回到菜单里。
+   */
+  let runtimeHealthy = $derived(git !== null && git.available && !git.belowBaseline);
   let overflowCommands = $derived(
-    OVERFLOW_COMMAND_IDS.map((id) => commandById(id)).filter(
-      (command): command is NonNullable<typeof command> => Boolean(command),
-    ),
+    OVERFLOW_COMMAND_IDS.filter((id) => !(id === "dialog.dependencies" && runtimeHealthy))
+      .map((id) => commandById(id))
+      .filter((command): command is NonNullable<typeof command> => Boolean(command)),
   );
 
   $effect(() => {
@@ -393,6 +409,7 @@
     settingsSection = null;
     if (closed === "merge") {
       conflictFocus = null;
+      mergeSource = null;
       void probeMerge();
     }
   }
@@ -449,7 +466,7 @@
     opened = next;
     degraded = next.watchDegraded;
     const groups = groupFiles(next.snapshot.files);
-    const first = groups.unstaged[0] ?? groups.staged[0];
+    const first = groups.unstaged[0] ?? groups.staged[0] ?? groups.conflicted[0];
     selected = retainSelection(next.snapshot.files, selected) ?? (first ? { path: first.path, side: first.side } : null);
     diff = null;
     diffError = null;
@@ -529,6 +546,7 @@
             file?.originalPath ?? null,
             0,
             0,
+            diffFullFile ? FULL_FILE_CONTEXT : undefined,
           ),
       );
       if (outcome.state === "discarded") return;
@@ -709,6 +727,7 @@
         file?.originalPath ?? null,
         currentDiff.offset + currentDiff.lines.length,
         400,
+        diffFullFile ? FULL_FILE_CONTEXT : undefined,
       );
       if (opened?.summary.path !== current.summary.path) return;
       if (selected?.path !== choice.path || selected.side !== choice.side) return;
@@ -741,8 +760,8 @@
     const current = opened;
     if (!current || pending || reading) return;
     const message = draft;
-    if (!message.trim()) {
-      banner = "请先填写提交说明。";
+    if (!hasCommitSummary(message)) {
+      banner = "请先填写提交摘要。";
       live = banner;
       return;
     }
@@ -785,8 +804,8 @@
     const current = opened;
     if (!current || pending || reading) return;
     const message = draft;
-    if (!message.trim()) {
-      banner = "请先填写提交说明。";
+    if (!hasCommitSummary(message)) {
+      banner = "请先填写提交摘要。";
       live = banner;
       return;
     }
@@ -1006,6 +1025,175 @@
     } catch {
       showError(new Error("无法写入剪贴板，请手动复制仓库路径。"));
     }
+  }
+
+  function readFullFilePreference(): boolean {
+    try {
+      return globalThis.localStorage?.getItem("twiglane.diffFullFile") === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  function setFullFile(next: boolean) {
+    diffFullFile = next;
+    try {
+      globalThis.localStorage?.setItem("twiglane.diffFullFile", next ? "1" : "0");
+    } catch {
+      // 存储不可用时只在本次会话里生效。
+    }
+    void loadSelectedDiff();
+  }
+
+  async function copyText(text: string, what: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      notice(`已复制${what}。`);
+    } catch {
+      showError(new Error(`无法写入剪贴板，请手动复制${what}。`));
+    }
+  }
+
+  function absolutePath(relative: string): string {
+    const root = opened?.summary.path ?? "";
+    const separator = root.includes("\\") && !root.includes("/") ? "\\" : "/";
+    // 仓库路径是 Windows 风格（只含反斜杠）时用反斜杠拼接，否则用斜杠；去掉末尾多余的分隔符。
+    return `${root.replace(/[\\/]+$/, "")}${separator}${relative.split("/").join(separator)}`;
+  }
+
+  async function revealInFolder(relative: string) {
+    const current = opened;
+    if (!current) return;
+    try {
+      await api.revealPath(current.summary.path, relative);
+    } catch (error) {
+      showError(normalizeError(error));
+    }
+  }
+
+  async function openWithDefault(relative: string) {
+    const current = opened;
+    if (!current) return;
+    try {
+      await api.openPath(current.summary.path, relative);
+    } catch (error) {
+      showError(normalizeError(error));
+    }
+  }
+
+  /** .gitignore 规则：按文件（锚定到仓库根）、按扩展名、按所在目录三种。 */
+  function ignoreRules(relative: string): { label: string; pattern: string }[] {
+    const rules = [{ label: `忽略此文件（/${relative}）`, pattern: `/${relative}` }];
+    const name = relative.split("/").pop() ?? relative;
+    const dot = name.lastIndexOf(".");
+    if (dot > 0) rules.push({ label: `忽略所有 ${name.slice(dot)} 文件`, pattern: `*${name.slice(dot)}` });
+    const slash = relative.lastIndexOf("/");
+    if (slash > 0) rules.push({ label: `忽略目录 ${relative.slice(0, slash)}/`, pattern: `/${relative.slice(0, slash)}/` });
+    return rules;
+  }
+
+  async function ignore(pattern: string) {
+    const current = opened;
+    if (!current || pending || reading) return;
+    pending = "ignore";
+    try {
+      const snapshot = await api.ignorePath(current.summary.path, pattern, current.generation, nextId());
+      if (opened?.summary.path !== current.summary.path) return;
+      applySnapshot(snapshot);
+      notice(`已把 ${pattern} 加入 .gitignore。已被跟踪的文件不受影响，需要先从索引移除。`);
+    } catch (error) {
+      handleMutationError(error);
+    } finally {
+      pending = null;
+    }
+  }
+
+  function fileContextMenu(row: FileRow, point: { x: number; y: number }) {
+    const busy = writeLocked ? switchBlockedReason(commandState) : undefined;
+    const deleted = row.side === "unstaged" ? row.unstaged === "deleted" : row.staged === "deleted";
+    const entries: ContextMenuEntry[] = [];
+    if (row.unmerged) {
+      entries.push({ id: "resolve", label: "处理冲突…", icon: "merge", run: () => openConflict(row.path) });
+    } else if (row.side === "unstaged") {
+      entries.push({ id: "stage", label: "暂存", icon: "plus", shortcut: "空格", disabledReason: busy, run: () => void stagePath(row.path) });
+    } else {
+      entries.push({ id: "unstage", label: "取消暂存", icon: "minus", shortcut: "空格", disabledReason: busy, run: () => void unstagePath(row.path) });
+    }
+    if (!row.unmerged) {
+      entries.push({
+        id: "discard",
+        label: row.untracked ? "删除未跟踪文件…" : "放弃更改…",
+        icon: "trash",
+        danger: true,
+        disabledReason: busy,
+        run: () => void recovery?.discard([row.path]),
+      });
+    }
+    entries.push({ separator: true });
+    entries.push({
+      id: "full",
+      label: diffFullFile ? "只看改动部分" : "查看完整文件",
+      icon: "rows",
+      run: () => {
+        if (selected?.path !== row.path || selected.side !== row.side) selectFile({ path: row.path, side: row.side });
+        setFullFile(!diffFullFile);
+      },
+    });
+    entries.push({ id: "history", label: "查看文件历史", icon: "history", run: () => openFileHistory(row.path) });
+    entries.push({ separator: true });
+    entries.push({
+      id: "reveal",
+      label: navigator.platform?.toLowerCase().includes("mac") ? "在访达中显示" : "在资源管理器中显示",
+      icon: "folder-open",
+      run: () => void revealInFolder(row.path),
+    });
+    entries.push({
+      id: "open",
+      label: "用默认程序打开",
+      icon: "file",
+      disabledReason: deleted ? "文件已删除，工作区里没有它" : undefined,
+      run: () => void openWithDefault(row.path),
+    });
+    entries.push({ separator: true });
+    entries.push({ id: "copy-rel", label: "复制相对路径", icon: "copy", run: () => void copyText(row.path, "相对路径") });
+    entries.push({ id: "copy-abs", label: "复制完整路径", icon: "copy", run: () => void copyText(absolutePath(row.path), "完整路径") });
+    entries.push({ id: "copy-name", label: "复制文件名", icon: "copy", run: () => void copyText(row.path.split("/").pop() ?? row.path, "文件名") });
+    if (row.untracked) {
+      entries.push({ separator: true }, { heading: "加入 .gitignore" });
+      for (const rule of ignoreRules(row.path)) {
+        entries.push({ id: `ignore:${rule.pattern}`, label: rule.label, icon: "eye", disabledReason: busy, run: () => void ignore(rule.pattern) });
+      }
+    }
+    contextMenu = { x: point.x, y: point.y, entries, label: `${row.path} 的操作` };
+  }
+
+  function repoContextMenu(repo: RecentRepo, point: { x: number; y: number }) {
+    const current = repo.path === opened?.summary.path;
+    const entries: ContextMenuEntry[] = [
+      {
+        id: "open",
+        label: current ? "当前仓库" : "打开",
+        icon: "folder-open",
+        disabledReason: current ? "已经是当前仓库" : switchBlocked(commandState) ? switchBlockedReason(commandState) : undefined,
+        run: () => void openRecent(repo.path),
+      },
+      {
+        id: "reveal",
+        label: navigator.platform?.toLowerCase().includes("mac") ? "在访达中显示" : "在资源管理器中显示",
+        icon: "folder",
+        run: async () => {
+          try {
+            await api.revealPath(repo.path, "");
+          } catch (error) {
+            showError(normalizeError(error));
+          }
+        },
+      },
+      { id: "copy", label: "复制完整路径", icon: "copy", run: () => void copyPath(repo.path) },
+      { separator: true },
+      { id: "forget", label: "从最近列表移除", icon: "x", danger: true, run: () => void forget(repo.path) },
+    ];
+    contextMenu = { x: point.x, y: point.y, entries, label: `${repo.name} 的操作` };
   }
 
   function scheduleDraftSave() {
@@ -1603,6 +1791,7 @@
       onQuery={(value) => (query = value)}
       onSelect={openRecent}
       onForget={forget}
+      onRepoContextMenu={repoContextMenu}
       onShowPath={copyPath}
       onAdd={() => runCommand("repo.add")}
       onClone={() => runCommand("repo.clone")}
@@ -1654,6 +1843,8 @@
                   onUnstage={unstagePath}
                   onStageAll={stagePaths}
                   onUnstageAll={unstagePaths}
+                  onResolve={(path) => (path ? openConflict(path) : runCommand("task.merge"))}
+                  onContextMenu={fileContextMenu}
                 />
                 <CommitDraft
                   branch={branchText}
@@ -1663,6 +1854,8 @@
                   disabled={writeLocked}
                   busy={pending}
                   error={commitError}
+                  stageableCount={stageTargets.length}
+                  onStageAll={() => runCommand("stage.all")}
                   onInput={onDraftInput}
                   onBlur={() => void flushDraft(drafts.path)}
                   onCommit={commitLocal}
@@ -1670,21 +1863,21 @@
                   onScope={() => runCommand("task.scope")}
                 >
                   {#snippet overflow()}
-                    <div class="menu-row" role="none">
-                      <span class="menu-row-title">撤销与放弃</span>
-                      {#if opened}
-                        <RecoveryActions
-                          opened={opened}
-                          disabled={writeLocked}
-                          {nextId}
-                          onSnapshot={applySnapshot}
-                          onFailure={handleMutationError}
-                          onNotice={notice}
-                          onMerge={() => runCommand("task.merge")}
-                        />
-                      {/if}
-                    </div>
+                    <div class="menu-label" role="presentation">撤销与恢复</div>
+                    {#if opened}
+                      <RecoveryActions
+                        opened={opened}
+                        variant="menu"
+                        disabled={writeLocked}
+                        {nextId}
+                        onSnapshot={applySnapshot}
+                        onFailure={handleMutationError}
+                        onNotice={notice}
+                        onMerge={() => runCommand("task.merge")}
+                      />
+                    {/if}
                     <div class="menu-sep"></div>
+                    <div class="menu-label" role="presentation">分支与同步</div>
                     {#each overflowCommands as command (command.id)}
                       <button
                         type="button"
@@ -1694,7 +1887,7 @@
                         title={commandReason(command, commandState) || command.hint}
                         onclick={() => runCommand(command.id)}
                       >
-                        <Icon name="chevron-right" />
+                        <Icon name={OVERFLOW_COMMAND_ICONS[command.id as keyof typeof OVERFLOW_COMMAND_ICONS] ?? "chevron-right"} />
                         <span>{command.title}<small>{command.hint}</small></span>
                       </button>
                     {/each}
@@ -1722,6 +1915,8 @@
                 onStageHunk={stageHunk}
                 onLoadMore={loadMoreDiff}
                 onFileHistory={openFileHistory}
+                fullFile={diffFullFile}
+                onFullFile={setFullFile}
               />
             </div>
           </div>
@@ -1745,6 +1940,8 @@
                   onFailure={handleMutationError}
                   onFilePath={openFileHistory}
                   onClearFile={() => (historyPath = null)}
+                  onSnapshot={applySnapshot}
+                  onNotice={notice}
                 />
               {/await}
             {/if}
@@ -1780,6 +1977,25 @@
 
 <CommandPalette open={paletteOpen} commands={paletteCommands} onClose={() => (paletteOpen = false)} />
 
+{#if contextMenu}
+  <ContextMenu request={contextMenu} onClose={() => (contextMenu = null)} />
+{/if}
+
+{#if opened}
+  <!-- 右键「放弃更改…」的确认层：与溢出菜单同一套影响清单与确认流程，只是入口不同。 -->
+  <RecoveryActions
+    bind:this={recovery}
+    variant="headless"
+    {opened}
+    disabled={writeLocked}
+    {nextId}
+    onSnapshot={applySnapshot}
+    onFailure={handleMutationError}
+    onNotice={notice}
+    onMerge={() => runCommand("task.merge")}
+  />
+{/if}
+
 {#if opened && taskModal === "stash"}
   <StashModal
     {opened}
@@ -1796,6 +2012,7 @@
   <MergeModal
     {opened}
     focusPath={conflictFocus}
+    initialSource={mergeSource}
     disabled={writeLocked}
     {nextId}
     onClose={closeTask}
@@ -1821,6 +2038,11 @@
     onOpenHistory={(next) => {
       closeTask();
       openCommitSearch(next);
+    }}
+    onMergeBranch={(name) => {
+      closeTask();
+      mergeSource = name;
+      openTask("merge");
     }}
     {nextId}
   />

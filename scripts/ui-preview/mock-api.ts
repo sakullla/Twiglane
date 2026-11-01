@@ -68,7 +68,9 @@ function diffFor(path: string, staged: boolean): DiffResponse {
   const hunks = [];
   const name = path.split("/").pop() ?? path;
   let index = 0;
-  for (let h = 0; h < 3; h += 1) {
+  // 9 段 × 10 行 = 90 行：R3 要求 1280×840 下差异视口完整可见 ≥40 行，
+  // 夹具必须多于该阈值，才能在预览里直接数 [data-diff-row]，而不是靠容量推算。
+  for (let h = 0; h < 9; h += 1) {
     const start = lines.length;
     const base = h * 40 + 10;
     lines.push({ kind: "hunk", text: `@@ -${base},8 +${base},9 @@ ${path} · section${h}`, oldNo: null, newNo: null, hunkIndex: index });
@@ -77,12 +79,12 @@ function diffFor(path: string, staged: boolean): DiffResponse {
     lines.push({ kind: "add", text: `+  const view = render("${path}", { theme: "modern" });`, oldNo: null, newNo: base + 3, hunkIndex: index });
     lines.push({ kind: "add", text: `+  return view.mount("${name}");`, oldNo: null, newNo: base + 4, hunkIndex: index });
     for (let i = 0; i < 3; i += 1) lines.push({ kind: "context", text: `   const context${i} = normalize(value${i}, "${name}");`, oldNo: base + 4 + i, newNo: base + 5 + i, hunkIndex: index });
-    hunks.push({ index, header: lines[start].text, complete: true, stageable: h < 2, startLine: start, lineCount: lines.length - start });
+    hunks.push({ index, header: lines[start].text, complete: true, stageable: h < 8, startLine: start, lineCount: lines.length - start });
     index += 1;
   }
   return {
     generation, path, staged, binary: false, text: null,
-    summary: "新增 6 行，删除 3 行。", additions: 6, deletions: 3, complete: true, truncated: false,
+    summary: "新增 18 行，删除 9 行。", additions: 18, deletions: 9, complete: true, truncated: false,
     snapshot: "snap", hunks, lines, offset: 0, totalLines: lines.length,
   };
 }

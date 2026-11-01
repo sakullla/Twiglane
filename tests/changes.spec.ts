@@ -642,9 +642,12 @@ describe("差异与提交", () => {
     await fireEvent.keyDown(region, { key: "End" });
     expect(region.scrollTop).toBe(80 * ROW_HEIGHT);
     expect(screen.getByText("row-79")).toBeTruthy();
+    // 虚拟窗口只保留可见附近的行：滚到底之后首行必须已经出窗。
+    expect(screen.queryByText("row-0")).toBeNull();
     await fireEvent.keyDown(region, { key: "Home" });
     expect(region.scrollTop).toBe(0);
     expect(screen.getByText("row-0")).toBeTruthy();
+    expect(screen.queryByText("row-79")).toBeNull();
   });
 
   it("切换并排时保留文件，并拒绝截断代码块", async () => {

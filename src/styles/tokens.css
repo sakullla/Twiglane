@@ -1,0 +1,192 @@
+/* ==========================================================================
+   设计令牌层 — 主题外观的唯一事实源
+   --------------------------------------------------------------------------
+   1. 共享令牌：与主题无关的间距、字阶、动效时长、层级、圆角与字体栈。
+   2. 浅色主题配色令牌。
+   3. 深色主题配色令牌（键集合必须与浅色完全一致）。
+
+   约束：
+   - 除本文件外不得出现 [data-theme="..."] 选择器，主题切换只能通过这里
+     的变量完成；tests/tokens.spec.ts 断言该约束与两套主题的键集合一致。
+   - 颜色、阴影、渐变只在本文件声明字面值，其它三层只允许引用变量。
+   - scripts/check-contrast.mjs 解析本文件，按 R14 校验正文与交互对比度。
+   ========================================================================== */
+
+:root {
+  /* 间距刻度（4px 基准，例外为 2/6 的发丝间距） */
+  --space-2: 2px;
+  --space-4: 4px;
+  --space-6: 6px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-24: 24px;
+  --space-32: 32px;
+
+  /* 字阶与字重、行高 */
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 15px;
+  --text-lg: 20px;
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --leading-tight: 1.25;
+  --leading-normal: 1.45;
+  --leading-relaxed: 1.65;
+
+  /* 动效时长与缓动 */
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+  --duration-slow: 240ms;
+  --ease: cubic-bezier(0.2, 0.75, 0.25, 1);
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* 层级：resizer 5 / rail 10 / titlebar 20 / menu 30 / palette 40 / modal 50 / toast 60 */
+  --z-sticky: 1;
+  --z-resizer: 5;
+  --z-rail: 10;
+  --z-titlebar: 20;
+  --z-progress: 21;
+  --z-menu: 30;
+  --z-palette: 40;
+  --z-modal: 50;
+  --z-toast: 60;
+
+  /* 圆角、字体栈 */
+  --radius-sm: 7px;
+  --radius: 10px;
+  --radius-lg: 15px;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --mono: "Cascadia Code", "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+/* 浅色主题配色 */
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f3f5f4;
+  --surface: #ffffff;
+  --surface-2: #f8faf9;
+  --surface-3: #edf1ef;
+  --hover: rgba(20, 37, 31, 0.045);
+  --active: rgba(20, 37, 31, 0.075);
+  --border: #e3e9e6;
+  --border-strong: #d3dcd7;
+  --fg: #19241f;
+  --fg-muted: #55645c;
+  --fg-subtle: #616e66;
+  --accent: #16865f;
+  --accent-hover: #0f7350;
+  --accent-soft: rgba(22, 134, 95, 0.095);
+  --accent-softer: rgba(22, 134, 95, 0.055);
+  --accent-fg: #ffffff;
+  --accent-text: #0c6f4d;
+  --on-accent-soft: rgba(255, 255, 255, 0.14);
+  --on-accent-line: rgba(255, 255, 255, 0.2);
+  --danger: #c8404a;
+  --danger-hover: #bd3943;
+  --danger-soft: rgba(200, 64, 74, 0.09);
+  --danger-text: #b8323d;
+  --on-danger: #ffffff;
+  --warning: #bd7a22;
+  --warning-soft: rgba(199, 137, 42, 0.11);
+  --warning-text: #8a5a12;
+  --info: #477bd1;
+  --info-soft: rgba(71, 123, 209, 0.09);
+  --info-text: #3968b5;
+  --purple: #6f52b8;
+  --purple-soft: rgba(111, 82, 184, 0.1);
+  --add-bg: #eaf7f0;
+  --add-strong: #d3ecdf;
+  --add-fg: #13704b;
+  --del-bg: #fdf0f0;
+  --del-strong: #f5dbdc;
+  --del-fg: #a53b43;
+  --hunk-bg: #f0f4f8;
+  --hunk-fg: #56697e;
+  --focus: #1b9a6e;
+  --overlay: rgba(15, 24, 20, 0.36);
+  --shadow-sm: 0 1px 2px rgba(25, 36, 31, 0.035);
+  --shadow-md: 0 8px 24px rgba(25, 36, 31, 0.07), 0 2px 6px rgba(25, 36, 31, 0.04);
+  --shadow-lg: 0 28px 70px rgba(16, 28, 22, 0.18), 0 6px 20px rgba(16, 28, 22, 0.08);
+  --panel-shadow: 0 1px 2px rgba(25, 36, 31, 0.025), 0 8px 24px rgba(25, 36, 31, 0.025);
+  --brand-grad: linear-gradient(145deg, #39bd88 0%, #16865f 72%);
+  --brand-logo-fg: #ffffff;
+  --brand-logo-highlight: rgba(255, 255, 255, 0.25);
+  --avatar-fg: #ffffff;
+  --switch-knob: #ffffff;
+  --repo-current-shadow: 0 1px 3px rgba(25, 36, 31, 0.045), inset 0 0 0 1px var(--border);
+  --segmented-active-bg: #ffffff;
+  --segmented-active-shadow: 0 1px 4px rgba(20, 35, 28, 0.09);
+  --avatar-bg: hsl(var(--hue, 150) 42% 46%);
+  --repo-badge-fg: hsl(var(--hue, 150) 40% 34%);
+  --repo-badge-bg: hsl(var(--hue, 150) 38% 91%);
+  --repo-badge-ring: hsl(var(--hue, 150) 28% 82% / 0.55);
+  --push-count-bg: rgba(255, 255, 255, 0.17);
+}
+
+/* 深色主题配色（键集合必须与上方浅色块一致） */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0e1311;
+  --surface: #151b18;
+  --surface-2: #19201c;
+  --surface-3: #222b26;
+  --hover: rgba(235, 245, 239, 0.045);
+  --active: rgba(235, 245, 239, 0.075);
+  --border: #29332e;
+  --border-strong: #39463f;
+  --fg: #e8efeb;
+  --fg-muted: #a0aea6;
+  --fg-subtle: #86948b;
+  --accent: #48c993;
+  --accent-hover: #65d9a6;
+  --accent-soft: rgba(72, 201, 147, 0.13);
+  --accent-softer: rgba(72, 201, 147, 0.07);
+  --accent-fg: #09281b;
+  --accent-text: #70dbab;
+  --on-accent-soft: rgba(0, 0, 0, 0.12);
+  --on-accent-line: rgba(0, 0, 0, 0.14);
+  --danger: #ed7078;
+  --danger-hover: #f38b91;
+  --danger-soft: rgba(237, 112, 120, 0.12);
+  --danger-text: #f4989e;
+  --on-danger: #2a0b0e;
+  --warning: #dca552;
+  --warning-soft: rgba(220, 165, 82, 0.12);
+  --warning-text: #e8bb75;
+  --info: #7ba5eb;
+  --info-soft: rgba(123, 165, 235, 0.12);
+  --info-text: #9abcef;
+  --purple: #b39ade;
+  --purple-soft: rgba(179, 154, 222, 0.13);
+  --add-bg: rgba(57, 158, 107, 0.12);
+  --add-strong: rgba(72, 201, 147, 0.18);
+  --add-fg: #83dcb0;
+  --del-bg: rgba(214, 75, 84, 0.1);
+  --del-strong: rgba(237, 112, 120, 0.17);
+  --del-fg: #efa0a5;
+  --hunk-bg: rgba(123, 165, 235, 0.075);
+  --hunk-fg: #96acc6;
+  --focus: #55d39c;
+  --overlay: rgba(2, 7, 4, 0.66);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 10px 28px rgba(0, 0, 0, 0.32);
+  --shadow-lg: 0 28px 80px rgba(0, 0, 0, 0.52), 0 0 0 1px rgba(255, 255, 255, 0.025);
+  --panel-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+  --brand-grad: linear-gradient(145deg, #50d49d 0%, #209b6c 75%);
+  --brand-logo-fg: #ffffff;
+  --brand-logo-highlight: rgba(255, 255, 255, 0.25);
+  --avatar-fg: #ffffff;
+  --switch-knob: #ffffff;
+  --repo-current-shadow: 0 1px 3px rgba(25, 36, 31, 0.045), inset 0 0 0 1px var(--border);
+  --segmented-active-bg: #39463f;
+  --segmented-active-shadow: 0 1px 4px rgba(20, 35, 28, 0.09);
+  --avatar-bg: hsl(var(--hue, 150) 34% 35%);
+  --repo-badge-fg: hsl(var(--hue, 150) 60% 76%);
+  --repo-badge-bg: hsl(var(--hue, 150) 25% 20%);
+  --repo-badge-ring: hsl(var(--hue, 150) 20% 32% / 0.5);
+  --push-count-bg: rgba(0, 0, 0, 0.13);
+}

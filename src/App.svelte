@@ -14,7 +14,7 @@
   import { DraftBuffer } from "./lib/draft";
   import { normalizeError } from "./lib/errors";
   import { clampWidth, FALLBACK_POLL_MS, nudgeWidth, shouldPoll } from "./lib/layout";
-  import { branchLabel, commitScope, dependencyNote, filterRows, gitInstallHint, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
+  import { branchLabel, commitScope, dependencyNote, filterRows, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
   import { startDesktopMeasure } from "./lib/measure";
   import { shortcutCommand } from "./lib/shortcuts";
   import type {
@@ -78,6 +78,8 @@
   let recent = $state<RecentRepo[]>([]);
   let query = $state("");
   let git = $state<GitInfo | null>(null);
+  /** 关闭了常驻的 Git 诊断通知条；起始页的空状态入口不受影响（R13 仍要能诊断）。 */
+  let gitDismissed = $state(false);
   let warning = $state<string | null>(null);
   let banner = $state<string | null>(null);
   let live = $state("正在准备 Twiglane");
@@ -94,7 +96,17 @@
   let dependencyOpen = $state(false);
   let historyPanel = $state<Promise<typeof import("./lib/components/HistoryPanel.svelte")> | null>(null);
   let writeLocked = $derived(pending !== null || reading);
-  let navCollapsed = $state(false);
+  /**
+   * R16：窗口窄于阈值时三段式（rail + 文件列表 + 差异）放不下，rail 自动收成图标栏。
+   * 阈值取最小窗口 900 与默认窗口 1280 之间：900 折叠后差异区仍有 400px 以上，
+   * 1000 以上继续显示完整仓库列表。用户手动折叠/展开优先于自动推导（见 rail.toggle）。
+   */
+  const RAIL_COLLAPSE_WIDTH = 1000;
+  let windowWidth = $state(currentWindowWidth());
+  let manualCollapsed = $state<boolean | null>(null);
+  let navCollapsed = $derived(manualCollapsed ?? windowWidth < RAIL_COLLAPSE_WIDTH);
+  /** 设置 modal 打开时要定位的分区；由 Git 诊断入口置为 runtime，其余入口为空。 */
+  let settingsSection = $state<"appearance" | "runtime" | null>(null);
   let repoMenuOpen = $state(false);
   let repoMenuAnchor = $state<HTMLDivElement | null>(null);
   let confirmPath = $state<string | null>(null);
@@ -116,6 +128,15 @@
   let remoteName = $state<string | null>(null);
   const drafts = new DraftBuffer();
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** 窗口宽度：只读来源，resize 时更新（R16 的折叠推导与断点判断共用）。 */
+  function currentWindowWidth(): number {
+    if (typeof window === "undefined") return RAIL_COLLAPSE_WIDTH;
+    return window.innerWidth || RAIL_COLLAPSE_WIDTH;
+  }
+
+  /** Git 不可用时的诊断结论：一句，长安装说明只在设置/运行依赖里展开（R12、R13）。 */
+  let gitDiagnostic = $derived(git !== null && !git.available ? git.message || "Git 不可用" : null);
 
   let branchText = $derived(opened ? branchLabel(opened.snapshot.branch) : "未打开仓库");
   let syncText = $derived(opened ? syncLabel(opened.snapshot.branch) : "未检查远程");
@@ -159,7 +180,10 @@
     taskModal,
     navCollapsed,
     writeLocked,
-    writing: pending !== null,
+    // 只把写动作算作「正在写入」：pending 也承载差异续读（"diff"），
+    // 把它算成写入会让读取期间的不可用原因失真（R11）。
+    writing: pending !== null && pending !== "diff",
+    reading: reading || pending === "diff",
     upstreamMissing,
     stagedCount: scope.paths.length,
     stageTargets,
@@ -174,6 +198,7 @@
       group: item.group,
       title: item.title,
       shortcut: item.shortcut,
+      keywords: item.keywords,
       enabled: item.enabled,
       reason: item.reason,
       run: () => runCommand(item.id),
@@ -208,6 +233,11 @@
       if (phaseNote === note) phaseNote = null;
     }, 6000);
     return () => clearTimeout(timer);
+  });
+
+  /** Git 恢复可用后重新武装诊断入口：下次缺失时它还要再出现一次。 */
+  $effect(() => {
+    if (git?.available) gitDismissed = false;
   });
 
   function nextId(): number {
@@ -261,8 +291,11 @@
       case "task.remote":
       case "task.scope":
       case "task.publish":
-      case "task.settings":
         openTask(id.slice(5) as TaskModal);
+        return;
+      case "task.settings":
+        // 常规入口落在设置首屏；只有 Git 诊断入口才指定运行环境分区。
+        openSettings();
         return;
       case "commit.local":
         void commitLocal();
@@ -280,7 +313,8 @@
         void runSync("push", (path, generation) => api.pushBranch(path, generation, nextId()));
         return;
       case "rail.toggle":
-        navCollapsed = !navCollapsed;
+        // 手动折叠/展开优先：窗口再变窄变宽都保留这次选择（R16 的「自动折叠」只作用于未手动选择时）。
+        manualCollapsed = !navCollapsed;
         return;
       case "palette.open":
         openPalette();
@@ -320,6 +354,17 @@
     if (task === "publish") void loadRemoteName();
   }
 
+  /** 设置 modal：默认落在外观首屏，Git 诊断入口另行指定运行环境分区（R10）。 */
+  function openSettings(section: "appearance" | "runtime" | null = null) {
+    settingsSection = section;
+    openTask("settings");
+  }
+
+  /** R10/R13 的诊断入口：可关闭，动作直接进入设置里的运行环境分区。 */
+  function openGitDiagnostics() {
+    openSettings("runtime");
+  }
+
   /** 发布目标取仓库实际配置的第一个远程，而不是写死 origin。 */
   async function loadRemoteName() {
     const current = opened;
@@ -336,6 +381,7 @@
   function closeTask() {
     const closed = taskModal;
     taskModal = null;
+    settingsSection = null;
     if (closed === "merge") {
       conflictFocus = null;
       void probeMerge();
@@ -1334,6 +1380,11 @@
     let stopMedia = () => {};
     const keyListener = (event: KeyboardEvent) => onWindowKeydown(event);
     window.addEventListener("keydown", keyListener);
+    // R16：窗口宽度跨过折叠阈值时 rail 跟着收放（用户手动选择优先，见 navCollapsed）。
+    const onResize = () => {
+      windowWidth = currentWindowWidth();
+    };
+    window.addEventListener("resize", onResize);
     if (typeof window.matchMedia === "function") {
       const media = window.matchMedia(DARK_QUERY);
       const onChange = (event: MediaQueryListEvent) => {
@@ -1394,6 +1445,7 @@
     );
     return () => {
       window.removeEventListener("keydown", keyListener);
+      window.removeEventListener("resize", onResize);
       window.clearInterval(poll);
       if (draftTimer) clearTimeout(draftTimer);
       stopFocus();
@@ -1470,16 +1522,21 @@
       <button type="button" class="btn btn-secondary btn-sm" onclick={cancelReading}>取消读取</button>
     </div>
   {/if}
-  {#if git && !git.available}
+  {#if gitDiagnostic && !gitDismissed}
+    <!-- R10：一句结论 + 一个可关闭入口；安装说明留在设置/运行依赖里，不堆在首屏（R12）。 -->
     <div class="infobar error" role="status">
       <Icon name="alert-circle" size={16} />
-      <div class="infobar-text">
-        <strong>{git.message}</strong>
-        <p>{gitInstallHint(navigator.platform ?? "")}</p>
-      </div>
-      <button type="button" class="btn btn-secondary btn-sm" onclick={redetectGit}>重新检测</button>
-      <button type="button" class="btn btn-secondary btn-sm" onclick={chooseGit}>选择 Git</button>
-      {#if git.overridden}<button type="button" class="btn btn-ghost btn-sm" onclick={clearGit}>恢复自动检测</button>{/if}
+      <span class="infobar-text">{gitDiagnostic}</span>
+      <button type="button" class="btn btn-secondary btn-sm" onclick={openGitDiagnostics}>运行环境诊断</button>
+      <button
+        type="button"
+        class="icon-btn sm"
+        aria-label="关闭 Git 诊断入口"
+        title="关闭这条通知；设置里的运行环境仍可随时查看"
+        onclick={() => (gitDismissed = true)}
+      >
+        <Icon name="x" size={14} />
+      </button>
     </div>
   {:else if git?.belowBaseline}
     <div class="infobar warn" role="status">
@@ -1659,6 +1716,8 @@
         <Welcome
           {recent}
           disabled={writeLocked}
+          diagnostic={gitDiagnostic}
+          onDiagnose={gitDiagnostic ? openGitDiagnostics : undefined}
           onAdd={() => runCommand("repo.add")}
           onClone={() => runCommand("repo.clone")}
           onCreate={() => runCommand("repo.create")}
@@ -1732,6 +1791,7 @@
     {theme}
     {git}
     disabled={writeLocked}
+    section={settingsSection}
     onClose={closeTask}
     onTheme={(next) => runCommand(`theme.${next}`)}
     onRedetect={redetectGit}

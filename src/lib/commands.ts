@@ -20,8 +20,13 @@ export interface CommandState {
   taskModal: TaskModal | null;
   navCollapsed: boolean;
   writeLocked: boolean;
-  /** 仅指「有写操作在飞行中」：读取期间仍允许切换仓库，写操作期间不允许。 */
+  /**
+   * 仅指「有写操作在飞行中」（暂存、提交、同步等），不含「正在读取仓库」与「差异续读」。
+   * 读取期间仍允许切换仓库，写操作期间不允许。
+   */
   writing: boolean;
+  /** 有读取在飞行中（读取仓库或续读差异）：它只锁写动作，不锁切换仓库。 */
+  reading: boolean;
   upstreamMissing: boolean;
   /** 提交范围口径的已暂存文件数，与提交区 paths.length 同源。 */
   stagedCount: number;
@@ -40,6 +45,11 @@ export interface CommandSpec {
   title: string;
   /** 一行以内的补充说明，标题栏菜单、rail 提示与命令面板共用。 */
   hint: string;
+  /**
+   * 只参与命令面板过滤、不显示的检索词（例如切换仓库时带上仓库路径）。
+   * 面板的过滤串是 title + group + keywords，界面文案仍只看 title 与 hint。
+   */
+  keywords?: string;
   shortcut?: string;
   available: (state: CommandState) => boolean;
   reason?: (state: CommandState) => string;
@@ -48,7 +58,20 @@ export interface CommandSpec {
 const hasRepo = (state: CommandState) => state.hasRepo;
 const hasRepoReason = () => "先打开一个仓库";
 const idle = (state: CommandState) => !state.writeLocked;
-const idleReason = () => "正在写入，稍后再试";
+
+/**
+ * 忙碌原因：写与读分开说。
+ * 以前一律报「正在写入」，可是差异续读、仓库读取期间写动作同样是灰的，
+ * 把它们也说成「正在写入」会让 R11 的原因失真。
+ */
+function busyReason(state: CommandState): string {
+  if (state.writing) return "正在写入，稍后再试";
+  if (state.reading) return "正在读取，稍后再试";
+  return "先等当前操作结束";
+}
+
+/** 有仓库 + 空闲才可用的命令：没仓库时说仓库，有仓库说在读还是在写。 */
+const repoBusyReason = (state: CommandState) => (state.hasRepo ? busyReason(state) : "先打开一个仓库");
 
 /**
  * 提交可用性与提交区按钮同源：暂存区非空且草稿非空（CommitDraft 的 ready 条件）。
@@ -58,7 +81,7 @@ const canCommit = (state: CommandState) =>
   hasRepo(state) && idle(state) && state.stagedCount > 0 && state.draft.trim().length > 0;
 const commitReason = (state: CommandState) => {
   if (!state.hasRepo) return "先打开一个仓库";
-  if (state.writeLocked) return "正在写入，稍后再试";
+  if (state.writeLocked) return busyReason(state);
   return state.stagedCount === 0 ? "先暂存要提交的文件" : "填写提交说明后即可提交";
 };
 
@@ -101,7 +124,7 @@ const COMMIT_COMMANDS: CommandSpec[] = [
     available: (state) => hasRepo(state) && idle(state) && state.stageTargets.length > 0,
     reason: (state) => {
       if (!state.hasRepo) return "先打开一个仓库";
-      if (state.writeLocked) return "正在写入，稍后再试";
+      if (state.writeLocked) return busyReason(state);
       return "没有可暂存的改动";
     },
   },
@@ -113,7 +136,7 @@ const COMMIT_COMMANDS: CommandSpec[] = [
     available: (state) => hasRepo(state) && idle(state) && state.unstageTargets.length > 0,
     reason: (state) => {
       if (!state.hasRepo) return "先打开一个仓库";
-      if (state.writeLocked) return "正在写入，稍后再试";
+      if (state.writeLocked) return busyReason(state);
       return "暂存区是空的";
     },
   },
@@ -151,7 +174,7 @@ const SYNC_COMMANDS: CommandSpec[] = [
     title: "获取更新",
     hint: "只下载远程信息，不改文件",
     available: (state) => hasRepo(state) && idle(state),
-    reason: idleReason,
+    reason: repoBusyReason,
   },
   {
     id: "sync.pull",
@@ -159,7 +182,7 @@ const SYNC_COMMANDS: CommandSpec[] = [
     title: "拉取",
     hint: "快进拉取，不自动合并分叉",
     available: (state) => hasRepo(state) && idle(state),
-    reason: idleReason,
+    reason: repoBusyReason,
   },
   {
     id: "sync.push",
@@ -167,7 +190,7 @@ const SYNC_COMMANDS: CommandSpec[] = [
     title: "推送",
     hint: "不强行推送",
     available: (state) => hasRepo(state) && idle(state),
-    reason: idleReason,
+    reason: repoBusyReason,
   },
 ];
 
@@ -220,7 +243,7 @@ const REPO_COMMANDS: CommandSpec[] = [
     title: "添加仓库",
     hint: "打开一个本地仓库",
     available: idle,
-    reason: idleReason,
+    reason: busyReason,
   },
   {
     id: "repo.clone",
@@ -228,7 +251,7 @@ const REPO_COMMANDS: CommandSpec[] = [
     title: "克隆仓库",
     hint: "克隆到新目录并打开",
     available: idle,
-    reason: idleReason,
+    reason: busyReason,
   },
   {
     id: "repo.create",
@@ -236,7 +259,7 @@ const REPO_COMMANDS: CommandSpec[] = [
     title: "新建仓库",
     hint: "在目录中初始化，确认前不写入",
     available: idle,
-    reason: idleReason,
+    reason: busyReason,
   },
   {
     id: "repo.copyPath",
@@ -283,7 +306,7 @@ const SHELL_COMMANDS: CommandSpec[] = [
     hint: "重新读取状态与当前差异",
     shortcut: `${MODIFIER_LABEL} R`,
     available: (state) => hasRepo(state) && idle(state),
-    reason: (state) => (state.hasRepo ? "正在写入，稍后再试" : "先打开一个仓库"),
+    reason: repoBusyReason,
   },
   {
     id: "rail.toggle",
@@ -344,8 +367,10 @@ export function repoSwitchCommands(state: CommandState): CommandSpec[] {
     group: "仓库" as const,
     title: `切换到 ${repo.name}`,
     hint: repo.path,
+    // 面板过滤要认路径：同名仓库靠路径区分，只按名称搜会分不出是哪一个（R11）。
+    keywords: repo.path,
     available: (current: CommandState) => !current.writing,
-    reason: idleReason,
+    reason: () => "正在写入，稍后再试",
   }));
 }
 
@@ -385,6 +410,8 @@ export interface PaletteItem {
   group: string;
   title: string;
   shortcut?: string;
+  /** 只参与过滤、不显示：仓库路径等不能进标题的检索词。 */
+  keywords?: string;
   enabled: boolean;
   reason?: string;
 }
@@ -397,6 +424,7 @@ export function paletteItems(state: CommandState): PaletteItem[] {
       group: command.group,
       title: command.title,
       shortcut: command.shortcut,
+      keywords: command.keywords,
       enabled,
       reason: enabled ? undefined : commandReason(command, state),
     };

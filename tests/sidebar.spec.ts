@@ -151,6 +151,24 @@ describe("rail 分组与折叠", () => {
     await fireEvent.click(screen.getByRole("button", { name: "展开侧栏" }));
     expect(onToggleCollapsed).toHaveBeenCalled();
   });
+
+  it("仓库搜索框只宣称过滤最近仓库列表，不再声称 Ctrl/⌘K 会定位到它", () => {
+    const { container } = render(WorkspaceRail, { props: railProps() as never });
+    const input = container.querySelector<HTMLInputElement>("#repo-search")!;
+    expect(input.placeholder).toContain("过滤最近仓库");
+    expect(input.placeholder).not.toMatch(/搜索/);
+    // 提示里出现的是「过滤列表」与「命令面板用 Ctrl/⌘K」，不是「按 Ctrl/⌘K 定位搜索框」
+    expect(input.getAttribute("title")).toContain("命令面板");
+    expect(input.getAttribute("title")).toContain("只过滤最近仓库列表");
+    // 字段内不再挂 ⌘K 键帽：那个组合键的真实动作是打开命令面板
+    const field = input.closest(".field")!;
+    expect(field.querySelector("kbd")).toBeNull();
+    expect(input.getAttribute("aria-label") ?? container.textContent).toBeTruthy();
+    // 可访问名称来自 label（读屏读到的也是「过滤」而不是「搜索」）
+    const label = container.querySelector<HTMLLabelElement>('label[for="repo-search"]')!;
+    expect(label.textContent).toContain("过滤最近仓库列表");
+    expect(label.textContent).not.toMatch(/搜索/);
+  });
 });
 
 describe("自绘标题栏", () => {
@@ -333,6 +351,35 @@ describe("命令面板", () => {
     expect(screen.getByText("没有匹配的命令")).toBeTruthy();
     await fireEvent.keyDown(input, { key: "Escape" });
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("keywords 参与过滤但不显示，没有 keywords 的命令仍只按标题与分组匹配", async () => {
+    const withKeywords = [
+      { id: "repo.one", group: "仓库", title: "切换到 demo", keywords: "C:/work/alpha/demo", run: vi.fn() },
+      { id: "repo.two", group: "仓库", title: "切换到 demo", keywords: "C:/work/beta/demo", run: vi.fn() },
+      commands[0],
+    ];
+    render(CommandPalette, { props: { open: true, onClose: () => {}, commands: withKeywords } as never });
+    const input = screen.getByRole("combobox", { name: "搜索命令" });
+
+    // 同名仓库用路径片段区分：只筛出 alpha 那一条
+    await fireEvent.input(input, { target: { value: "alpha" } });
+    const one = screen.getAllByRole("option");
+    expect(one).toHaveLength(1);
+    expect(one[0].textContent).toContain("切换到 demo");
+    // 关键词只参与匹配、不写进选项文案
+    expect(one[0].textContent).not.toContain("alpha");
+
+    // 大小写不敏感，且不带 keywords 的命令按标题照常命中
+    await fireEvent.input(input, { target: { value: "BETA" } });
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    await fireEvent.input(input, { target: { value: "改动" } });
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    expect(screen.getByRole("option", { name: /改动/ })).toBeTruthy();
+
+    // 没有命中任何关键词时仍给结论
+    await fireEvent.input(input, { target: { value: "gamma" } });
+    expect(screen.getByText("没有匹配的命令")).toBeTruthy();
   });
 
   it("焦点在选项上时 Esc 关掉面板并把焦点还给触发元素", async () => {

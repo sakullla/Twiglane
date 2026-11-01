@@ -106,7 +106,14 @@
     <div class="composer-meta">
       <span class:over={firstLine > 72} title="摘要建议不超过 72 个字符">摘要 {firstLine}/72</span>
       <span class="spacer"></span>
-      <span title="输入停止后自动保存为草稿">草稿自动保存</span>
+      {#if blocker}
+        <!-- R5：主按钮不可用时就地给出可见的一行原因，不只挂在 title 上。
+             与「草稿自动保存」二选一，并用 .truncate 保持单行：
+             窄文件列表（最小 160px）里折行会把提交区顶过 R5 的 200px 上限。 -->
+        <span class="hint truncate" data-commit-blocker title={blocker}>{blocker}</span>
+      {:else}
+        <span title="输入停止后自动保存为草稿">草稿自动保存</span>
+      {/if}
     </div>
   </div>
   <div class="composer-actions">

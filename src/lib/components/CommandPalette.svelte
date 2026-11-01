@@ -12,6 +12,8 @@
     group: string;
     title: string;
     shortcut?: string;
+    /** 只参与过滤、不显示：例如切换仓库时带上的仓库路径，让同名仓库也能按路径筛出。 */
+    keywords?: string;
     enabled?: boolean;
     reason?: string;
     run: () => void;
@@ -35,10 +37,16 @@
   /** 面板内可 Tab 的元素：搜索框 + 当前选中项（选项用游标式 tabindex 只留一个入口）。 */
   const FOCUSABLE = 'input:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+  /**
+   * 过滤串 = 标题 + 分组 + 可选的关键词。
+   * 关键词只参与匹配、不进 DOM 文案：切换仓库的路径因此可搜，但选项上仍只显示仓库名。
+   */
   let filtered = $derived.by(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return commands;
-    return commands.filter((item) => `${item.title} ${item.group}`.toLowerCase().includes(needle));
+    return commands.filter((item) =>
+      `${item.title} ${item.group} ${item.keywords ?? ""}`.toLowerCase().includes(needle),
+    );
   });
 
   let groups = $derived.by(() => {

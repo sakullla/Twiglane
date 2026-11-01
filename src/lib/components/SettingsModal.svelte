@@ -14,15 +14,41 @@
     onRedetect: () => void;
     onChooseGit: () => void;
     onClearGit: () => void;
+    /**
+     * 打开时定位的分区：Git 不可用的诊断入口指向 "runtime"，
+     * 其余入口不传（等价于现在的首屏：外观在运行环境之上）。不改任何按钮行为。
+     */
+    section?: "appearance" | "runtime" | null;
   }
 
-  let { theme, git, disabled, onClose, onTheme, onRedetect, onChooseGit, onClearGit }: Props = $props();
+  let {
+    theme,
+    git,
+    disabled,
+    onClose,
+    onTheme,
+    onRedetect,
+    onChooseGit,
+    onClearGit,
+    section = null,
+  }: Props = $props();
 
   const THEMES: { id: Theme; label: string }[] = [
     { id: "light", label: "浅色" },
     { id: "dark", label: "深色" },
     { id: "system", label: "跟随系统" },
   ];
+
+  let runtimeCard = $state<HTMLDivElement | null>(null);
+
+  /* 诊断入口要真的落到运行环境分区：Modal 的首焦点读 [data-autofocus]，
+     这里再补一次滚动，避免那一块在 modal 滚动区之外。 */
+  $effect(() => {
+    if (section !== "runtime") return;
+    const card = runtimeCard;
+    if (!card || typeof card.scrollIntoView !== "function") return;
+    card.scrollIntoView({ block: "start" });
+  });
 
   let platform = $derived(navigator.platform ?? "");
   let gitLine = $derived(
@@ -42,7 +68,7 @@
   description="外观与运行环境集中在这里。"
   onClose={onClose}
 >
-  <div class="card">
+  <div class="card" data-settings-section="appearance">
     <div class="card-head">
       <span class="ch-icon"><Icon name="sun" size={15} /></span>
       <h2>外观</h2>
@@ -61,7 +87,13 @@
     </div>
   </div>
 
-  <div class="card">
+  <div
+    class="card"
+    data-settings-section="runtime"
+    tabindex="-1"
+    data-autofocus={section === "runtime" ? "" : undefined}
+    bind:this={runtimeCard}
+  >
     <div class="card-head">
       <span class="ch-icon info"><Icon name="package" size={15} /></span>
       <h2>运行环境</h2>

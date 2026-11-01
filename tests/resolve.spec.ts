@@ -632,6 +632,52 @@ describe("任务 modal（设置 / 提交范围 / 发布）", () => {
     expect(webview.value).toContain("Git");
   });
 
+  it("传 section=runtime 时把焦点与分区锚点落在运行环境，不传时首屏不变", async () => {
+    // 不传 section：与改动前逐字一致——首焦点是外观三态里的第一个按钮。
+    const plain = render(SettingsModal, {
+      props: {
+        theme: "dark",
+        git: unavailableGit,
+        disabled: false,
+        onClose: () => {},
+        onTheme: () => {},
+        onRedetect: () => {},
+        onChooseGit: () => {},
+        onClearGit: () => {},
+      },
+    });
+    await screen.findByRole("dialog");
+    const appearance = screen.getByRole("group", { name: "外观" });
+    expect(within(appearance).getAllByRole("button")[0], "默认入口仍落在外观首屏").toBe(document.activeElement);
+    const plainRuntime = plain.container.querySelector<HTMLElement>('[data-settings-section="runtime"]');
+    expect(plainRuntime, "运行环境分区要有锚点").toBeTruthy();
+    expect(plainRuntime!.hasAttribute("data-autofocus"), "默认入口不抢焦点").toBe(false);
+    plain.unmount();
+
+    // 传 section=runtime：Git 诊断入口打开的正是运行环境分区，焦点也落在那里。
+    const focused = render(SettingsModal, {
+      props: {
+        theme: "dark",
+        git: unavailableGit,
+        disabled: false,
+        section: "runtime",
+        onClose: () => {},
+        onTheme: () => {},
+        onRedetect: () => {},
+        onChooseGit: () => {},
+        onClearGit: () => {},
+      },
+    });
+    await screen.findByRole("dialog");
+    const runtime = focused.container.querySelector<HTMLElement>('[data-settings-section="runtime"]');
+    expect(runtime?.querySelector("h2")?.textContent).toBe("运行环境");
+    expect(runtime!.tabIndex, "分区要能被程序聚焦（不可 Tab 命中）").toBe(-1);
+    expect(runtime!.contains(document.activeElement), "焦点落在运行环境分区").toBe(true);
+    // 分区内容与按钮行为没有变化
+    expect(within(runtime as HTMLElement).getByRole("list", { name: "Git 诊断" }).textContent).toContain("没有找到 Git");
+    expect(within(runtime as HTMLElement).getByRole("button", { name: "重新检测" })).toBeTruthy();
+  });
+
   it("提交范围 modal 列出全部路径并显示总数", async () => {
     const paths = Array.from({ length: 40 }, (_, index) => `src/dir/file-${index}.ts`);
     render(ScopeModal, { props: { scopeLabel: "提交到 main · 40 个已暂存文件", paths, onClose: () => {} } });

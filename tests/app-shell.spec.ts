@@ -184,6 +184,7 @@ function commandState(overrides: Partial<CommandState> = {}): CommandState {
     navCollapsed: false,
     writeLocked: false,
     writing: false,
+    reading: false,
     upstreamMissing: true,
     stagedCount: 2,
     stageTargets: ["src/App.svelte"],
@@ -474,5 +475,87 @@ describe("应用外壳", () => {
     await fireEvent.click(within(palette).getByRole("option", { name: /深色外观/ }));
     await waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
     expect(mocks.setTheme).toHaveBeenLastCalledWith("dark");
+  });
+
+  it("读与写分开：只读期间说「正在读取」，写操作期间才说「正在写入」", () => {
+    const reading = paletteItems(commandState({ writeLocked: true, writing: false, reading: true }));
+    const writing = paletteItems(commandState({ writeLocked: true, writing: true, reading: false }));
+    const reasonOf = (items: ReturnType<typeof paletteItems>, id: string) =>
+      items.find((item) => item.id === id)?.reason;
+
+    // 同步与刷新在只读期间只是「等读取结束」，不是被写入挡住。
+    for (const id of ["sync.fetch", "sync.pull", "sync.push", "view.refresh", "repo.add", "commit.local"]) {
+      expect(reasonOf(reading, id), `${id} 在只读期间的原因`).toBe("正在读取，稍后再试");
+      expect(reasonOf(writing, id), `${id} 在写操作期间的原因`).toBe("正在写入，稍后再试");
+    }
+
+    // 只读不锁切换仓库：写操作才锁。
+    expect(reading.find((item) => item.id === `${REPO_SWITCH_PREFIX}${repoPath}`)?.enabled).toBe(true);
+    expect(writing.find((item) => item.id === `${REPO_SWITCH_PREFIX}${repoPath}`)?.enabled).toBe(false);
+  });
+
+  it("Git 不可用：入口可关闭、指向设置运行环境分区，起始页也接上了诊断（R10、R13）", async () => {
+    mocks.getSettings.mockResolvedValue({
+      theme: "dark",
+      panelWidths: { sidebar: 256, files: 360 },
+      git: {
+        available: false,
+        path: null,
+        version: null,
+        overridden: false,
+        belowBaseline: false,
+        message: "没有找到 Git",
+      },
+      recent: [{ name: "demo", path: repoPath, openedAtMs: 1 }],
+      settingsWarning: null,
+    });
+    render(App);
+
+    // 首屏只有一句结论加一个入口：长安装说明不再作为段落堆在这里（R12、R13）。
+    const bar = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>(".infobar.error");
+      expect(node, "Git 不可用要有常驻诊断入口").toBeTruthy();
+      return node!;
+    });
+    expect(bar.textContent).toContain("没有找到 Git");
+    expect(bar.querySelector("p"), "通知条里不再有说明段落").toBeNull();
+    expect(bar.textContent).not.toContain("git-scm.com");
+    expect(within(bar).getByRole("button", { name: "关闭 Git 诊断入口" }), "入口必须可关闭").toBeTruthy();
+
+    // 起始页自己也接了诊断入口：Welcome 的 diagnostic/onDiagnose 由外壳传入
+    const welcomeEntry = within(document.querySelector<HTMLElement>(".welcome")!).getByRole("button", {
+      name: /没有找到 Git/,
+    });
+
+    // 诊断动作打开设置 modal 的运行环境分区，并把焦点放进去
+    welcomeEntry.focus();
+    await fireEvent.click(welcomeEntry);
+    const modal = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>('[data-task-modal="settings"]');
+      expect(node, "诊断动作要打开设置 modal").toBeTruthy();
+      return node!;
+    });
+    const runtime = modal.querySelector<HTMLElement>('[data-settings-section="runtime"]');
+    expect(runtime, "设置 modal 要有运行环境分区锚点").toBeTruthy();
+    expect(runtime!.contains(document.activeElement), "打开后焦点落在运行环境分区").toBe(true);
+
+    // Esc 关闭后焦点回到触发元素
+    await fireEvent.keyDown(modal, { key: "Escape" });
+    await waitFor(() => expect(document.querySelector('[data-task-modal="settings"]')).toBeNull());
+    expect(document.activeElement, "关闭后焦点回到起始页的诊断入口").toBe(welcomeEntry);
+
+    // 通知条上的诊断按钮走同一条动作；关掉通知条后起始页入口仍在（R13 不因关闭而消失）
+    await fireEvent.click(within(bar).getByRole("button", { name: "运行环境诊断" }));
+    await waitFor(() => expect(document.querySelector('[data-settings-section="runtime"]')).toBeTruthy());
+    await fireEvent.keyDown(document.querySelector('[data-task-modal="settings"]')!, { key: "Escape" });
+    await waitFor(() => expect(document.querySelector('[data-task-modal="settings"]')).toBeNull());
+
+    await fireEvent.click(within(bar).getByRole("button", { name: "关闭 Git 诊断入口" }));
+    await waitFor(() => expect(document.querySelector(".infobar.error")).toBeNull());
+    expect(screen.queryByRole("button", { name: "关闭 Git 诊断入口" })).toBeNull();
+    expect(
+      within(document.querySelector<HTMLElement>(".welcome")!).getByRole("button", { name: /没有找到 Git/ }),
+      "关掉通知条不影响起始页自己的诊断入口",
+    ).toBeTruthy();
   });
 });

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/svelte";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CommitDraft from "../src/lib/components/CommitDraft.svelte";
@@ -197,6 +197,15 @@ async function press(key: string) {
   await tick();
 }
 
+/**
+ * 窗口宽度是 R16 折叠态的唯一输入：改 innerWidth 再派发 resize，模拟桌面窗口缩放。
+ * 用 defineProperty 覆盖，afterEach 里删掉这条自有属性即可回到 happy-dom 的默认视口。
+ */
+function resizeTo(width: number) {
+  Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: width });
+  window.dispatchEvent(new Event("resize"));
+}
+
 function renderApp() {
   return render(App);
 }
@@ -249,6 +258,7 @@ function commandState(overrides: Partial<CommandState> = {}): CommandState {
     navCollapsed: false,
     writeLocked: false,
     writing: false,
+    reading: false,
     upstreamMissing: true,
     stagedCount: 2,
     stageTargets: ["src/App.svelte"],
@@ -326,6 +336,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  Reflect.deleteProperty(window, "innerWidth");
 });
 
 describe("主工作台", () => {
@@ -418,14 +429,44 @@ describe("主工作台", () => {
     }
   });
 
+  it("命令面板按仓库路径片段能筛出对应仓库，没有关键词的命令行为不变", async () => {
+    // 注册表一侧：切库命令单独带路径关键词，其它命令没有关键词
+    const items = paletteItems(commandState());
+    expect(items.find((item) => item.id === `${REPO_SWITCH_PREFIX}${repoPath}`)?.keywords).toBe(repoPath);
+    expect(items.find((item) => item.id === "view.changes")?.keywords).toBeUndefined();
+
+    renderApp();
+    await openRepo();
+    await press("k");
+    const palette = await screen.findByRole("dialog", { name: "命令面板" });
+    const input = within(palette).getByRole("combobox", { name: "搜索命令" });
+
+    // 路径片段（不是仓库名）也能筛出仓库，且大小写不敏感
+    await fireEvent.input(input, { target: { value: "WORK/demo" } });
+    const byPath = within(palette).getAllByRole("option");
+    expect(byPath, "路径片段只命中那一条仓库命令").toHaveLength(1);
+    expect(byPath[0].textContent).toContain("切换到 demo");
+    // 关键词只参与过滤、不参与显示：选项文案里不出现路径
+    expect(byPath[0].textContent).not.toContain("C:/work");
+
+    // 没有关键词的命令仍只按标题与分组匹配
+    await fireEvent.input(input, { target: { value: "提交历史" } });
+    const byTitle = within(palette).getAllByRole("option");
+    expect(byTitle).toHaveLength(1);
+    expect(byTitle[0].textContent).toContain("提交历史");
+  });
+
   it("草稿为空时面板里的提交项与提交区按钮一样不可用，并就地说明原因", async () => {
     renderApp();
     await openRepo();
 
-    // 暂存区非空、草稿为空：提交区按钮是灰的，标题给的就是这条原因
+    // 暂存区非空、草稿为空：提交区按钮是灰的，原因同时出现在可见文本与 title 上
     const localButton = screen.getByRole("button", { name: "提交到本地" });
     expect(localButton.hasAttribute("disabled")).toBe(true);
     expect(localButton.getAttribute("title")).toContain("填写提交说明后即可提交");
+    const blocker = document.querySelector("[data-commit-blocker]");
+    expect(blocker?.textContent?.trim(), "原因要就地可见，而不是只在悬停提示里").toBe("填写提交说明后即可提交");
+    expect(blocker?.getAttribute("title")).toContain("填写提交说明后即可提交");
 
     await press("k");
     await screen.findByRole("dialog", { name: "命令面板" });
@@ -444,6 +485,7 @@ describe("主工作台", () => {
       target: { value: "重做工作台外壳" },
     });
     expect(screen.getByRole("button", { name: "提交到本地" }).hasAttribute("disabled")).toBe(false);
+    expect(document.querySelector("[data-commit-blocker]"), "可提交后原因消失").toBeNull();
     await press("k");
     await screen.findByRole("dialog", { name: "命令面板" });
     expect(screen.getByRole("option", { name: /提交到本地/ }).getAttribute("aria-disabled")).toBe("false");
@@ -578,6 +620,36 @@ describe("主工作台", () => {
     const palette = await screen.findByRole("dialog", { name: "命令面板" });
     await fireEvent.keyDown(palette.querySelector("input")!, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "命令面板" })).toBeNull());
+  });
+
+  it("窗口宽度低于折叠阈值时 rail 自动折叠为图标形态，手动覆盖优先（R16）", async () => {
+    renderApp();
+    await openRepo();
+
+    // 默认窗口（1280 宽）保留完整 rail
+    expect(document.querySelector(".sidebar.rail.collapsed")).toBeNull();
+    expect(document.querySelector<HTMLElement>(".workspace")!.style.getPropertyValue("--sidebar")).toBe("256px");
+
+    // 缩到 900×600 的最小窗口：不点任何控件，rail 自己收成图标栏
+    resizeTo(900);
+    await tick();
+    expect(document.querySelector(".sidebar.rail.collapsed"), "低于阈值自动折叠").toBeTruthy();
+    expect(screen.getByRole("button", { name: "展开侧栏" })).toBeTruthy();
+    expect(document.querySelector<HTMLElement>(".workspace")!.style.getPropertyValue("--sidebar")).toBe("56px");
+    expect(document.querySelector("#repo-search"), "折叠态不再渲染搜索框").toBeNull();
+
+    // 手动展开优先于宽度推导：窗口仍然窄，但这次是用户的选择
+    await press("b");
+    expect(document.querySelector(".sidebar.rail.collapsed")).toBeNull();
+    expect(screen.getByRole("button", { name: "折叠侧栏" })).toBeTruthy();
+
+    // 回到宽窗口：手动选择仍是展开；再手动折叠后即使在宽窗口也保持折叠
+    resizeTo(1280);
+    await tick();
+    expect(document.querySelector(".sidebar.rail.collapsed")).toBeNull();
+    await press("b");
+    expect(document.querySelector(".sidebar.rail.collapsed")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "展开侧栏" })).toBeTruthy();
   });
 });
 
@@ -716,6 +788,8 @@ describe("差异与提交", () => {
     expect(screen.getByText("提交到 main（尚无提交） · 暂存区是空的")).toBeTruthy();
     expect(screen.getByRole("button", { name: "提交到本地" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "提交并推送" }).hasAttribute("disabled")).toBe(true);
+    // 暂存区为空的原因在可见文本里，且两种空态给的是不同的话
+    expect(document.querySelector("[data-commit-blocker]")?.textContent?.trim()).toBe("先暂存要提交的文件");
     // 提交区不再有说明性段落，只剩一行以内的元信息
     expect(document.querySelector(".composer p")).toBeNull();
     const scopeButton = screen.getByRole("button", { name: "本次提交范围：0 个已暂存文件" });

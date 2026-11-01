@@ -195,12 +195,14 @@
 
   {#if !collapsed}
     <div class="sidebar-search">
-      <label class="sr-only" for="repo-search">搜索最近仓库（{MODIFIER_LABEL}+K）</label>
+      <!-- 这个框只过滤下面的最近仓库列表；命令面板由 Ctrl/⌘K 打开，两者不能混为一谈。 -->
+      <label class="sr-only" for="repo-search">过滤最近仓库列表（按名称或路径）</label>
       <div class="field sm">
         <Icon name="search" size={14} />
         <input
           id="repo-search"
-          placeholder="搜索仓库或路径"
+          placeholder="过滤最近仓库（名称或路径）"
+          title={`只过滤最近仓库列表；命令面板用 ${MODIFIER_LABEL}+K`}
           autocomplete="off"
           spellcheck="false"
           value={query}
@@ -211,8 +213,6 @@
           <button type="button" class="field-clear" aria-label="清空搜索" onclick={() => onQuery("")}>
             <Icon name="x" size={12} />
           </button>
-        {:else}
-          <kbd>{MODIFIER_LABEL} K</kbd>
         {/if}
       </div>
     </div>

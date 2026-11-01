@@ -15,8 +15,8 @@
 .repo-switch-text strong { font-size: 13.5px; font-weight: 650; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .repo-switch-text span { font-size: 10.5px; color: var(--fg-subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 205px; }
 .repo-switch-text span bdi { unicode-bidi: isolate; }
-.branch-pill { display: inline-flex; align-items: center; gap: 7px; height: 32px; max-width: 255px; padding: 0 9px 0 10px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface-2); font-size: var(--text-sm); font-weight: 560; min-width: 0; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease); }
-.branch-pill:hover:not(:disabled) { border-color: var(--border-strong); background: var(--surface-3); }
+.branch-pill { display: inline-flex; align-items: center; gap: 7px; height: 32px; max-width: 255px; padding: 0 9px 0 10px; border-radius: 9px; border: 1px solid var(--control-border); background: var(--surface-2); font-size: var(--text-sm); font-weight: 560; min-width: 0; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease); }
+.branch-pill:hover:not(:disabled) { border-color: var(--control-border-hover); background: var(--surface-3); }
 .branch-pill .icon:first-child { color: var(--accent-text); }
 .branch-pill .icon:last-child { color: var(--fg-subtle); }
 .branch-pill:disabled { opacity: 0.55; cursor: not-allowed; }
@@ -70,8 +70,8 @@
 .sidebar-head { display: flex; align-items: center; gap: var(--space-8); padding: 15px 16px 10px; }
 .sidebar-add-wrap { padding: 5px 13px 7px; }
 .sidebar-add-wrap .menu-anchor { width: 100%; }
-.sidebar-add { display: flex; align-items: center; gap: 9px; width: 100%; height: 38px; padding: 0 10px 0 7px; border-radius: 10px; border: 1px solid color-mix(in srgb, var(--accent) 17%, var(--border)); background: var(--accent-soft); color: var(--accent-text); font-size: var(--text-sm); font-weight: 600; text-align: left; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease); }
-.sidebar-add:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 15%, transparent); border-color: color-mix(in srgb, var(--accent) 28%, var(--border)); }
+.sidebar-add { display: flex; align-items: center; gap: 9px; width: 100%; height: 38px; padding: 0 10px 0 7px; border-radius: 10px; border: 1px solid var(--control-border); background: var(--accent-soft); color: var(--accent-text); font-size: var(--text-sm); font-weight: 600; text-align: left; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease); }
+.sidebar-add:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 15%, transparent); border-color: var(--control-border-hover); }
 .sidebar-add:disabled { opacity: 0.45; cursor: not-allowed; }
 .sidebar-add > span:nth-child(2) { flex: 1; }
 .sidebar-add-icon { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 7px; background: var(--accent); color: var(--accent-fg); }
@@ -103,7 +103,7 @@
 .repo[aria-current="true"] { background: var(--surface); box-shadow: var(--repo-current-shadow); }
 .repo[aria-current="true"]::before { content: ""; position: absolute; left: 0; top: 13px; bottom: 13px; width: 2px; border-radius: 2px; background: var(--accent); }
 .repo-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: var(--space-8) var(--space-8); text-align: left; border-radius: var(--radius); }
-.repo-badge { display: grid; place-items: center; width: 31px; height: 31px; border-radius: 9px; font-size: 11.5px; font-weight: 680; flex: none; color: var(--repo-badge-fg); background: var(--repo-badge-bg); box-shadow: inset 0 0 0 1px var(--repo-badge-ring); }
+.repo-badge { display: grid; place-items: center; width: 31px; height: 31px; border-radius: 9px; font-size: 11.5px; font-weight: 680; flex: none; color: hsl(var(--hue, 150) var(--repo-badge-fg-sat) var(--repo-badge-fg-light)); background: hsl(var(--hue, 150) var(--repo-badge-bg-sat) var(--repo-badge-bg-light)); box-shadow: inset 0 0 0 1px hsl(var(--hue, 150) var(--repo-badge-ring-sat) var(--repo-badge-ring-light) / var(--repo-badge-ring-alpha)); }
 .topbar .repo-badge { width: 33px; height: 33px; }
 .repo-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.35; }
 .repo-name { font-size: var(--text-sm); font-weight: 580; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -170,8 +170,8 @@
 .art-commit { display: flex; align-items: center; gap: 5px; margin-top: 13px; color: var(--fg-muted); font-size: 9px; }
 .art-commit .icon { color: var(--accent-text); }
 .welcome-actions { display: grid; grid-template-columns: 1.25fr 1fr 1fr; gap: 11px; }
-.action-card { display: flex; align-items: center; gap: var(--space-12); min-width: 0; padding: 16px; border-radius: 14px; border: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 90%, transparent); text-align: left; box-shadow: var(--shadow-sm); transition: transform var(--duration-base) var(--ease), box-shadow var(--duration-base) var(--ease), border-color var(--duration-base) var(--ease), background var(--duration-base) var(--ease); }
-.action-card:hover:not(:disabled) { transform: translateY(-2px); box-shadow: var(--shadow-md); border-color: var(--border-strong); }
+.action-card { display: flex; align-items: center; gap: var(--space-12); min-width: 0; padding: 16px; border-radius: 14px; border: 1px solid var(--control-border); background: color-mix(in srgb, var(--surface) 90%, transparent); text-align: left; box-shadow: var(--shadow-sm); transition: transform var(--duration-base) var(--ease), box-shadow var(--duration-base) var(--ease), border-color var(--duration-base) var(--ease), background var(--duration-base) var(--ease); }
+.action-card:hover:not(:disabled) { transform: translateY(-2px); box-shadow: var(--shadow-md); border-color: var(--control-border-hover); }
 .action-card:disabled { opacity: 0.48; cursor: not-allowed; }
 .action-card .ac-icon { display: grid; place-items: center; width: 39px; height: 39px; border-radius: 11px; background: var(--surface-3); color: var(--fg-muted); flex: none; }
 .action-card:nth-child(2) .ac-icon { background: var(--info-soft); color: var(--info-text); }

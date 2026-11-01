@@ -8,7 +8,11 @@
    约束：
    - 除本文件外不得出现 [data-theme="..."] 选择器，主题切换只能通过这里
      的变量完成；tests/tokens.spec.ts 断言该约束与两套主题的键集合一致。
-   - 颜色、阴影、渐变只在本文件声明字面值，其它三层只允许引用变量。
+   - 颜色、阴影、渐变只在本文件声明字面值，其它三层只允许引用变量；唯一例外是
+     逐实例色相的派生色：色相由内联 --hue 提供，组件层用
+     hsl(var(--hue, 150) var(--<名>-sat) var(--<名>-light)) 组合，配比仍来自本文件。
+   - 控件边界只走 --control-border / --control-border-hover；--border 与
+     --border-strong 是装饰发丝线，不承担可交互控件的边界。
    - scripts/check-contrast.mjs 解析本文件，按 R14 校验正文与交互对比度。
    ========================================================================== */
 
@@ -74,6 +78,11 @@
   --active: rgba(20, 37, 31, 0.075);
   --border: #e3e9e6;
   --border-strong: #d3dcd7;
+  /* 控件边界：表单控件、次级按钮与可点击的 bordered 行的自身边界。
+     发丝线 --border/--border-strong 只做面板外框与分隔线，控件边界必须
+     对 surface/bg/surface-2/surface-3 均 ≥ 3:1（R14 交互元素边界）。 */
+  --control-border: #7a8780;
+  --control-border-hover: #68756e;
   --fg: #19241f;
   --fg-muted: #55645c;
   --fg-subtle: #616e66;
@@ -120,10 +129,19 @@
   --repo-current-shadow: 0 1px 3px rgba(25, 36, 31, 0.045), inset 0 0 0 1px var(--border);
   --segmented-active-bg: #ffffff;
   --segmented-active-shadow: 0 1px 4px rgba(20, 35, 28, 0.09);
-  --avatar-bg: hsl(var(--hue, 150) 42% 46%);
-  --repo-badge-fg: hsl(var(--hue, 150) 40% 34%);
-  --repo-badge-bg: hsl(var(--hue, 150) 38% 91%);
-  --repo-badge-ring: hsl(var(--hue, 150) 28% 82% / 0.55);
+  /* --hue 由仓库路径 / 作者名逐实例提供（0–359）。派生色必须在使用它的元素上
+     合成（hsl(var(--hue, 150) var(--<名>-sat) var(--<名>-light))），否则 var(--hue)
+     会在 :root 上提前解析成缺省色相，所有徽标退化成同一颜色。
+     这里只声明配比；首字母对按全部色相 ≥ 4.5:1 取值。 */
+  --avatar-bg-sat: 42%;
+  --avatar-bg-light: 32%;
+  --repo-badge-fg-sat: 40%;
+  --repo-badge-fg-light: 30%;
+  --repo-badge-bg-sat: 38%;
+  --repo-badge-bg-light: 91%;
+  --repo-badge-ring-sat: 28%;
+  --repo-badge-ring-light: 82%;
+  --repo-badge-ring-alpha: 0.55;
   --push-count-bg: rgba(255, 255, 255, 0.17);
 }
 
@@ -138,6 +156,9 @@
   --active: rgba(235, 245, 239, 0.075);
   --border: #29332e;
   --border-strong: #39463f;
+  /* 控件边界：与浅色主题同义，对深色四个表面均 ≥ 3:1。 */
+  --control-border: #6e7e76;
+  --control-border-hover: #7a8a80;
   --fg: #e8efeb;
   --fg-muted: #a0aea6;
   --fg-subtle: #86948b;
@@ -184,9 +205,15 @@
   --repo-current-shadow: 0 1px 3px rgba(25, 36, 31, 0.045), inset 0 0 0 1px var(--border);
   --segmented-active-bg: #39463f;
   --segmented-active-shadow: 0 1px 4px rgba(20, 35, 28, 0.09);
-  --avatar-bg: hsl(var(--hue, 150) 34% 35%);
-  --repo-badge-fg: hsl(var(--hue, 150) 60% 76%);
-  --repo-badge-bg: hsl(var(--hue, 150) 25% 20%);
-  --repo-badge-ring: hsl(var(--hue, 150) 20% 32% / 0.5);
+  /* --hue 派生配比：与浅色主题同义，亮度按深色画布重新取值。 */
+  --avatar-bg-sat: 34%;
+  --avatar-bg-light: 32%;
+  --repo-badge-fg-sat: 60%;
+  --repo-badge-fg-light: 76%;
+  --repo-badge-bg-sat: 25%;
+  --repo-badge-bg-light: 20%;
+  --repo-badge-ring-sat: 20%;
+  --repo-badge-ring-light: 32%;
+  --repo-badge-ring-alpha: 0.5;
   --push-count-bg: rgba(0, 0, 0, 0.13);
 }

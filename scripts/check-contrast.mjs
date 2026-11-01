@@ -5,11 +5,19 @@
  *
  * 判定口径（与需求 R14 对应）：
  * - 正文对（text）阈值 4.5:1：所有承载文字的令牌在两套主题的各级表面上。
- * - 交互对（ui）阈值 3:1：用于标示可交互状态与边界的令牌（焦点环、强调、
- *   危险/信息/警告语义色）在表面上。装饰性发丝线 --border / --border-strong
- *   只是分隔线而非交互边界，按 WCAG 1.4.11 的适用对象不计入门禁。
+ *   由 --hue 派生的首字母令牌（--avatar-*、--repo-badge-*）逐个色相校验
+ *   （0–345°，步长 15），避免只测缺省色相 150 而漏掉最差情况（黄绿色相）；
+ *   这些颜色由 --<名>-sat / --<名>-light 在元素上与 --hue 合成。
+ * - 交互对（ui）阈值 3:1：既包含标示交互状态的语义色（焦点环、强调、危险/
+ *   信息/警告），也包含可交互控件的自身边界令牌 --control-border /
+ *   --control-border-hover——表单控件、次级按钮与可点击的 bordered 行只靠这条
+ *   1px 边界与所在表面区分，因此它们是 R14「交互元素边界」的验收对象。
+ *   装饰性发丝线 --border / --border-strong 只做面板外框、分隔线与卡片框架，
+ *   不承担控件边界，故不计入门禁；tests/tokens.spec.ts 断言控件规则不引用它们。
  *
  * 半透明令牌（如 --accent-soft）先按主题表面合成后再计算，避免把 alpha 当成颜色。
+ * 不在解析范围的两类底色：渐变（--brand-grad，其上是品牌图标）与按需叠加的
+ * 半透明徽标底（--push-count-bg，数字前景继承所在按钮，实测 6.24:1 / 7.82:1）。
  * 用法：node scripts/check-contrast.mjs [--verbose]
  */
 import { readFileSync } from "node:fs";
@@ -54,7 +62,18 @@ const TEXT_PAIRS = [
   ["hunk-fg", "hunk-bg"],
 ];
 
-/** 交互对：状态色 × 背景，阈值 3:1 */
+/** 随 --hue 变化的正文对（仓库徽标与作者头像的首字母），逐色相校验，阈值 4.5:1。
+ *  色相由每个实例的内联 --hue 提供，因此颜色在元素上合成：
+ *  { token: "名" } 取 --名；{ recipe: "名" } 取 --名-sat / --名-light 合成 hsl(--hue …)。 */
+const HUE_TEXT_PAIRS = [
+  { fg: { token: "avatar-fg" }, bg: { recipe: "avatar-bg" } },
+  { fg: { recipe: "repo-badge-fg" }, bg: { recipe: "repo-badge-bg" } },
+];
+
+/** 逐色相校验的取样点：0–345° 步长 15，覆盖 60°/240° 等最差色相。 */
+const HUE_SAMPLES = Array.from({ length: 24 }, (_, index) => index * 15);
+
+/** 交互对：状态色与控件边界 × 背景，阈值 3:1 */
 const UI_PAIRS = [
   ["accent", "surface"],
   ["accent", "bg"],
@@ -63,6 +82,14 @@ const UI_PAIRS = [
   ["danger", "surface"],
   ["info", "surface"],
   ["warning", "surface"],
+  ["control-border", "surface"],
+  ["control-border", "bg"],
+  ["control-border", "surface-2"],
+  ["control-border", "surface-3"],
+  ["control-border-hover", "surface"],
+  ["control-border-hover", "bg"],
+  ["control-border-hover", "surface-2"],
+  ["control-border-hover", "surface-3"],
 ];
 
 const MIN_TEXT = 4.5;
@@ -92,8 +119,34 @@ function parseThemeBlocks(css) {
   };
 }
 
-function parseColor(value) {
-  const text = String(value).trim();
+/** 把 var(--hue, <缺省>) 替换成具体色相；缺省色相用于非逐色相校验。 */
+function substituteHue(text, hue) {
+  return text.replace(/var\(\s*--hue\s*(?:,\s*([^)]*))?\)/g, (_all, fallback) => {
+    if (hue !== undefined && hue !== null) return String(hue);
+    const value = (fallback ?? "").trim();
+    return value === "" ? "" : value;
+  });
+}
+
+function hslToColor(hue, sat, light, alpha) {
+  const s = sat / 100;
+  const l = light / 100;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const hp = ((((hue % 360) + 360) % 360) / 60);
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let rgb;
+  if (hp < 1) rgb = [c, x, 0];
+  else if (hp < 2) rgb = [x, c, 0];
+  else if (hp < 3) rgb = [0, c, x];
+  else if (hp < 4) rgb = [0, x, c];
+  else if (hp < 5) rgb = [x, 0, c];
+  else rgb = [c, 0, x];
+  const m = l - c / 2;
+  return { r: (rgb[0] + m) * 255, g: (rgb[1] + m) * 255, b: (rgb[2] + m) * 255, a: alpha };
+}
+
+function parseColor(value, hue) {
+  const text = substituteHue(String(value).trim(), hue);
   const hex = text.match(/^#([0-9a-fA-F]{3,8})$/);
   if (hex) {
     const digits = hex[1];
@@ -113,6 +166,16 @@ function parseColor(value) {
       a = rgb[4].endsWith("%") ? Number.parseFloat(rgb[4]) / 100 : Number.parseFloat(rgb[4]);
     }
     return { r: Number(rgb[1]), g: Number(rgb[2]), b: Number(rgb[3]), a };
+  }
+  const hsl = text.match(
+    /^hsla?\(\s*([\d.]+)(?:deg)?[\s,]+([\d.]+)%[\s,]+([\d.]+)%(?:[\s,/]+([\d.]+%?))?\s*\)$/,
+  );
+  if (hsl) {
+    let a = 1;
+    if (hsl[4] !== undefined) {
+      a = hsl[4].endsWith("%") ? Number.parseFloat(hsl[4]) / 100 : Number.parseFloat(hsl[4]);
+    }
+    return hslToColor(Number(hsl[1]), Number(hsl[2]), Number(hsl[3]), a);
   }
   return null;
 }
@@ -143,13 +206,13 @@ function ratio(a, b) {
   return (hi + 0.05) / (lo + 0.05);
 }
 
-function resolve(tokens, name, base, label, problems) {
+function resolve(tokens, name, base, label, problems, hue) {
   const raw = tokens.get(`--${name}`);
   if (raw === undefined) {
     problems.push(`${label}: 缺失令牌 --${name}`);
     return null;
   }
-  const parsed = parseColor(raw);
+  const parsed = parseColor(raw, hue);
   if (!parsed) {
     problems.push(`${label}: 令牌 --${name}=${raw} 不是可计算的实色`);
     return null;
@@ -158,12 +221,40 @@ function resolve(tokens, name, base, label, problems) {
 }
 
 /** 背景类令牌半透明时，按主题画布 --bg 合成（surface-2/3 本身不透明）。 */
-function background(tokens, name, label, problems) {
-  const resolved = resolve(tokens, name, null, label, problems);
+function background(tokens, name, label, problems, hue) {
+  const resolved = resolve(tokens, name, null, label, problems, hue);
   if (!resolved) return null;
   if (resolved.a >= 1) return resolved;
-  const base = resolve(tokens, "bg", null, label, problems);
+  const base = resolve(tokens, "bg", null, label, problems, hue);
   return base ? over(resolved, base) : null;
+}
+
+/** 读取 --名 的百分比配比（如 --avatar-bg-sat: 42%）。 */
+function percent(tokens, name, label, problems) {
+  const raw = tokens.get(`--${name}`);
+  if (raw === undefined) {
+    problems.push(`${label}: 缺失令牌 --${name}`);
+    return null;
+  }
+  const match = String(raw).trim().match(/^([\d.]+)%$/);
+  if (!match) {
+    problems.push(`${label}: 令牌 --${name}=${raw} 不是百分比配比`);
+    return null;
+  }
+  return Number(match[1]);
+}
+
+/** 解析逐色相校验的一侧：{ token } 为普通令牌，{ recipe } 为由配比合成的 hsl。 */
+function sideColor(tokens, side, hue, label, problems) {
+  if (!side.recipe) return resolve(tokens, side.token, null, label, problems, hue);
+  const sat = percent(tokens, `${side.recipe}-sat`, label, problems);
+  const light = percent(tokens, `${side.recipe}-light`, label, problems);
+  if (sat === null || light === null) return null;
+  return hslToColor(hue, sat, light, 1);
+}
+
+function sideLabel(side) {
+  return side.recipe ? `hsl(--${side.recipe}-sat/light)` : `--${side.token}`;
 }
 
 function main() {
@@ -201,6 +292,19 @@ function main() {
     };
     check(TEXT_PAIRS, MIN_TEXT, "text");
     check(UI_PAIRS, MIN_UI, "ui");
+    for (const hue of HUE_SAMPLES) {
+      for (const pair of HUE_TEXT_PAIRS) {
+        const label = `${theme}/text ${sideLabel(pair.fg)} on ${sideLabel(pair.bg)} @hue ${hue}`;
+        const bg = sideColor(tokens, pair.bg, hue, label, problems);
+        if (!bg) continue;
+        const fg = sideColor(tokens, pair.fg, hue, label, problems);
+        if (!fg) continue;
+        const value = ratio(fg, bg);
+        const pass = value + 1e-9 >= MIN_TEXT;
+        rows.push({ label, value, min: MIN_TEXT, pass });
+        if (!pass) failures.push(`${label} = ${value.toFixed(2)}:1 (< ${MIN_TEXT}:1)`);
+      }
+    }
   }
 
   if (verbose || failures.length > 0) {
@@ -210,11 +314,15 @@ function main() {
     }
   }
 
-  const worstText = rows.filter((r) => r.min === MIN_TEXT).sort((a, b) => a.value - b.value)[0];
-  const worstUi = rows.filter((r) => r.min === MIN_UI).sort((a, b) => a.value - b.value)[0];
+  const textRows = rows.filter((r) => r.min === MIN_TEXT);
+  const uiRows = rows.filter((r) => r.min === MIN_UI);
+  const worst = (list) => list.sort((a, b) => a.value - b.value)[0];
+  const worstText = worst([...textRows]);
+  const worstUi = worst([...uiRows]);
   console.log(
-    `对比度检查：${rows.length} 对（正文 ${rows.filter((r) => r.min === MIN_TEXT).length} / 交互 ${rows.filter((r) => r.min === MIN_UI).length}），` +
-      `正文最低 ${worstText ? worstText.value.toFixed(2) : "n/a"}:1，交互最低 ${worstUi ? worstUi.value.toFixed(2) : "n/a"}:1`,
+    `对比度检查：${rows.length} 对（正文 ${textRows.length} / 交互 ${uiRows.length}），` +
+      `正文最低 ${worstText ? `${worstText.value.toFixed(2)}:1（${worstText.label}）` : "n/a"}，` +
+      `交互最低 ${worstUi ? `${worstUi.value.toFixed(2)}:1（${worstUi.label}）` : "n/a"}`,
   );
 
   if (problems.length > 0) {
@@ -227,7 +335,7 @@ function main() {
     process.exitCode = 1;
     return;
   }
-  console.log("对比度检查通过：两套主题正文 ≥ 4.5:1，交互边界 ≥ 3:1");
+  console.log("对比度检查通过：两套主题正文 ≥ 4.5:1（含逐色相的徽标/头像首字母），交互元素边界 ≥ 3:1");
   process.exitCode = 0;
 }
 

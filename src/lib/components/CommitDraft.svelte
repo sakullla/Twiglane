@@ -26,8 +26,11 @@
 
 <section class="composer" aria-label="本地提交">
   <div class="composer-head">
-    <Icon name="commit" size={15} />
-    <strong title={`目标是 ${branch}`}>{scope}</strong>
+    <span class="composer-head-icon"><Icon name="commit" size={15} /></span>
+    <div class="composer-heading">
+      <span>创建提交</span>
+      <strong title={`目标是 ${branch}`}>{scope}</strong>
+    </div>
   </div>
   <div class="composer-box">
     <textarea

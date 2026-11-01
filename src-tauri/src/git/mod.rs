@@ -11,3 +11,4 @@ pub mod resolve;
 pub mod runner;
 pub mod schedule;
 pub mod sync;
+pub mod tags;

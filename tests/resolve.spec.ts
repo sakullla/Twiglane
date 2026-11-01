@@ -295,6 +295,97 @@ describe("合并面板", () => {
     expect(await screen.findByRole("button", { name: "标记编辑结果" })).toBeTruthy();
     expect(conflictView).toHaveBeenCalledWith("/repo", "file.txt", 4, 1);
   });
+
+  it("标记冲突后保留有效快照并允许完成合并", async () => {
+    const initial = session({
+      operation: "merge",
+      canAbort: true,
+      unresolved: 1,
+      conflicts: [{ path: "file.txt", kind: "text", summary: "文本" }],
+      note: "还有 1 个未解决冲突。",
+    });
+    const resolved = session({
+      generation: 5,
+      operation: "merge",
+      canContinue: true,
+      canAbort: true,
+      unresolved: 0,
+      conflicts: [],
+      note: "冲突已全部标记。",
+    });
+    mergeSession.mockResolvedValue(initial);
+    conflictView.mockResolvedValue({
+      generation: 4,
+      path: "file.txt",
+      kind: "text",
+      editable: true,
+      ours: { present: true, binary: false, truncated: false, text: "ours\n", summary: "本地" },
+      theirs: { present: true, binary: false, truncated: false, text: "theirs\n", summary: "另一侧" },
+      result: { present: true, binary: false, truncated: false, text: "both\n", summary: "结果" },
+      note: "可以编辑合并结果。",
+    });
+    resolveConflict.mockResolvedValue(resolved);
+    const onSnapshot = vi.fn();
+    const onFailure = vi.fn();
+    render(MergePanel, {
+      opened,
+      disabled: false,
+      nextId: () => 1,
+      onSnapshot,
+      onGeneration: () => {},
+      onFailure,
+      onNotice: () => {},
+      onOpenStash: () => {},
+    });
+    await fireEvent.click(await screen.findByRole("button", { name: "文本冲突 file.txt" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "标记编辑结果" }));
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: "完成合并" }).hasAttribute("disabled")).toBe(false));
+    expect(resolveConflict).toHaveBeenCalledWith("/repo", "file.txt", "text", "both\n", 4, 1);
+    expect(onSnapshot).toHaveBeenCalledWith(resolved.snapshot);
+    expect(onFailure).not.toHaveBeenCalled();
+    expect(screen.getByText("所有冲突都已标记")).toBeTruthy();
+  });
+
+  it("快捷填入只编辑结果，明确标记后才写入", async () => {
+    mergeSession.mockResolvedValue(
+      session({
+        operation: "merge",
+        canAbort: true,
+        unresolved: 1,
+        conflicts: [{ path: "file.txt", kind: "text", summary: "文本" }],
+      }),
+    );
+    conflictView.mockResolvedValue({
+      generation: 4,
+      path: "file.txt",
+      kind: "text",
+      editable: true,
+      ours: { present: true, binary: false, truncated: false, text: "ours\n", summary: "本地" },
+      theirs: { present: true, binary: false, truncated: false, text: "theirs\n", summary: "另一侧" },
+      result: { present: true, binary: false, truncated: false, text: "ours\n", summary: "结果" },
+      note: "可以编辑合并结果。",
+    });
+    resolveConflict.mockReset();
+    resolveConflict.mockResolvedValue(session({ operation: "merge", unresolved: 0, conflicts: [] }));
+    render(MergePanel, {
+      opened,
+      disabled: false,
+      nextId: () => 1,
+      onSnapshot: () => {},
+      onGeneration: () => {},
+      onFailure: () => {},
+      onNotice: () => {},
+      onOpenStash: () => {},
+    });
+    await fireEvent.click(await screen.findByRole("button", { name: "保留双方" }));
+    expect(document.querySelectorAll(".three-way-pane")).toHaveLength(3);
+    expect(screen.getByRole("region", { name: "当前分支版本" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "来源分支版本" })).toBeTruthy();
+    expect(resolveConflict).not.toHaveBeenCalled();
+    expect((screen.getByRole("textbox", { name: "合并结果" }) as HTMLTextAreaElement).value).toBe("ours\ntheirs\n");
+    await fireEvent.click(screen.getByRole("button", { name: "标记编辑结果" }));
+    await vi.waitFor(() => expect(resolveConflict).toHaveBeenCalledWith("/repo", "file.txt", "text", "ours\ntheirs\n", 4, 1));
+  });
 });
 
 describe("放弃与撤销", () => {

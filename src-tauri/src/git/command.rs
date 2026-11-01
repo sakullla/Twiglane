@@ -408,6 +408,64 @@ pub fn delete_remote_tracking_command(
     (git.to_path_buf(), args)
 }
 
+pub fn tag_list_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    let format = "%(refname:short)\u{1f}%(objectname)\u{1f}%(*objectname)\u{1f}%(creatordate:unix)\u{1f}%(subject)".to_string();
+    args.extend([
+        OsString::from("for-each-ref"),
+        OsString::from("--sort=refname"),
+        OsString::from("--format"),
+        OsString::from(format),
+        OsString::from("refs/tags"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn check_tag_command(git: &Path, root: &Path, name: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("check-ref-format"),
+        OsString::from(format!("refs/tags/{name}")),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn create_tag_command(git: &Path, root: &Path, name: &str, target: &str, message: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.push(OsString::from("tag"));
+    if !message.trim().is_empty() {
+        args.extend([OsString::from("-a"), OsString::from("-m"), OsString::from(message)]);
+    }
+    args.extend([
+        OsString::from("--"),
+        OsString::from(name),
+        OsString::from(target),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn delete_tag_command(git: &Path, root: &Path, name: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("tag"),
+        OsString::from("-d"),
+        OsString::from("--"),
+        OsString::from(name),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn push_tag_command(git: &Path, root: &Path, remote: &str, name: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("push"),
+        OsString::from("--"),
+        OsString::from(remote),
+        OsString::from(format!("refs/tags/{name}")),
+    ]);
+    (git.to_path_buf(), args)
+}
+
 fn repo_prefix(root: &Path, optional_locks: bool) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("-c"),

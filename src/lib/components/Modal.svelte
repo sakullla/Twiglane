@@ -8,7 +8,7 @@
     titleId: string;
     icon?: IconName;
     tone?: "default" | "danger" | "warning";
-    size?: "sm" | "md" | "lg";
+    size?: "sm" | "md" | "lg" | "xl";
     description?: string;
     onClose: () => void;
     children: Snippet;

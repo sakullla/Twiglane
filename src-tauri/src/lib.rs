@@ -29,7 +29,7 @@ use crate::model::{
     ConflictView, DiffResponse, DiscardResult, FileHistoryPage, GitInfo, HistoryPage,
     MergeComplete, MergePreview, MergeSession, OpenedRepository, PanelWidths, RecentRepo,
     RemoteState, RepoChanged, SettingsDto, StashApplyResult, StashSaveResult, StashState,
-    StatusSnapshot, Theme, UndoResult,
+    StatusSnapshot, TagState, Theme, UndoResult,
 };
 use crate::shutdown::Shutdown;
 use crate::state::AppStore;
@@ -86,6 +86,10 @@ pub fn run() {
             switch_branch,
             delete_branch,
             delete_remote_branch,
+            tag_state,
+            create_tag,
+            delete_tag,
+            push_tag,
             history_page,
             commit_detail,
             commit_file_diff,
@@ -591,6 +595,53 @@ async fn delete_remote_branch(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+async fn tag_state(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<TagState, AppError> {
+    crate::git::tags::tag_state(state.inner(), &path, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn create_tag(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    name: String,
+    target: String,
+    message: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<TagState, AppError> {
+    crate::git::tags::create_tag(state.inner(), &path, &name, &target, &message, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn delete_tag(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    name: String,
+    confirm: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<TagState, AppError> {
+    crate::git::tags::delete_tag(state.inner(), &path, &name, confirm, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn push_tag(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    remote: String,
+    name: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<TagState, AppError> {
+    crate::git::tags::push_tag(state.inner(), &path, &remote, &name, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
 async fn history_page(
     state: State<'_, Arc<Backend>>,
     path: String,
@@ -1043,6 +1094,10 @@ mod ipc_contract {
             "switch_branch",
             "delete_branch",
             "delete_remote_branch",
+            "tag_state",
+            "create_tag",
+            "delete_tag",
+            "push_tag",
             "history_page",
             "commit_detail",
             "commit_file_diff",

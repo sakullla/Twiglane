@@ -130,6 +130,34 @@ describe("差异与提交", () => {
     expect(screen.getByRole("button", { name: "已截断" }).hasAttribute("disabled")).toBe(true);
   });
 
+  it("切换文件时不展示旧差异，加载后显示新文件内容", async () => {
+    const view = render(DiffView, {
+      props: {
+        selection,
+        diff,
+        error: null,
+        loading: false,
+        disabled: false,
+        onStageHunk: () => {},
+        onLoadMore: () => {},
+      },
+    });
+    expect(screen.getByText("+kept")).toBeTruthy();
+    const nextSelection: FileSelection = { path: "other.txt", side: "unstaged" };
+    await view.rerender({ selection: nextSelection, diff, error: null, loading: true, disabled: false, onStageHunk: () => {}, onLoadMore: () => {} });
+    expect(screen.queryByText("+kept")).toBeNull();
+    expect(screen.getByText("正在读取差异")).toBeTruthy();
+    const nextDiff: DiffResponse = {
+      ...diff,
+      path: "other.txt",
+      lines: [{ kind: "add", text: "+new-file-content", oldNo: null, newNo: 1, hunkIndex: 0 }],
+      totalLines: 1,
+    };
+    await view.rerender({ selection: nextSelection, diff: nextDiff, error: null, loading: false, disabled: false, onStageHunk: () => {}, onLoadMore: () => {} });
+    expect(screen.getByText("+new-file-content")).toBeTruthy();
+    expect(screen.queryByText("+kept")).toBeNull();
+  });
+
   it("本地提交展示目标和范围，空暂存不能提交", () => {
     render(CommitDraft, {
       props: {

@@ -66,16 +66,17 @@ function diffFor(path: string, staged: boolean): DiffResponse {
   }
   const lines: DiffLine[] = [];
   const hunks = [];
+  const name = path.split("/").pop() ?? path;
   let index = 0;
   for (let h = 0; h < 3; h += 1) {
     const start = lines.length;
     const base = h * 40 + 10;
-    lines.push({ kind: "hunk", text: `@@ -${base},8 +${base},9 @@ function section${h}() {`, oldNo: null, newNo: null, hunkIndex: index });
-    for (let i = 0; i < 3; i += 1) lines.push({ kind: "context", text: `   const value${i} = compute(${i}, options);`, oldNo: base + i, newNo: base + i, hunkIndex: index });
-    lines.push({ kind: "del", text: `-  return legacyRender(value0, value1);`, oldNo: base + 3, newNo: null, hunkIndex: index });
-    lines.push({ kind: "add", text: `+  const view = render({ value0, value1, theme: "modern" });`, oldNo: null, newNo: base + 3, hunkIndex: index });
-    lines.push({ kind: "add", text: `+  return view.mount(target);`, oldNo: null, newNo: base + 4, hunkIndex: index });
-    for (let i = 0; i < 3; i += 1) lines.push({ kind: "context", text: `   // 保持原有行为 ${i}`, oldNo: base + 4 + i, newNo: base + 5 + i, hunkIndex: index });
+    lines.push({ kind: "hunk", text: `@@ -${base},8 +${base},9 @@ ${path} · section${h}`, oldNo: null, newNo: null, hunkIndex: index });
+    for (let i = 0; i < 3; i += 1) lines.push({ kind: "context", text: `   const value${i} = compute("${name}", ${i});`, oldNo: base + i, newNo: base + i, hunkIndex: index });
+    lines.push({ kind: "del", text: `-  return legacyRender("${path}", value0);`, oldNo: base + 3, newNo: null, hunkIndex: index });
+    lines.push({ kind: "add", text: `+  const view = render("${path}", { theme: "modern" });`, oldNo: null, newNo: base + 3, hunkIndex: index });
+    lines.push({ kind: "add", text: `+  return view.mount("${name}");`, oldNo: null, newNo: base + 4, hunkIndex: index });
+    for (let i = 0; i < 3; i += 1) lines.push({ kind: "context", text: `   const context${i} = normalize(value${i}, "${name}");`, oldNo: base + 4 + i, newNo: base + 5 + i, hunkIndex: index });
     hunks.push({ index, header: lines[start].text, complete: true, stageable: h < 2, startLine: start, lineCount: lines.length - start });
     index += 1;
   }
@@ -111,6 +112,11 @@ const commits: HistoryCommit[] = Array.from({ length: 60 }, (_, i) => ({
         : [],
 }));
 
+let mockTags = [
+  { name: "v0.1.0", targetOid: commits[3].oid, message: "首个公开测试版本", createdAt: commits[3].authoredAt },
+  { name: "v0.2.0-rc.1", targetOid: commits[1].oid, message: "现代化工作区候选版本", createdAt: commits[1].authoredAt },
+];
+
 const branches: BranchRecord[] = [
   { name: "feature/modern-ui", remote: false, current: true, upstream: "origin/feature/modern-ui", worktree: null },
   { name: "main", remote: false, current: false, upstream: "origin/main", worktree: null },
@@ -123,6 +129,62 @@ const ok = async <T>(value: T, ms?: number) => {
   await wait(ms);
   return value;
 };
+
+function branchData() {
+  return { generation, branches: branches.map((item) => ({ ...item })), snapshot: snapshot() };
+}
+
+let stashRecords = [
+  { oid: "c0ffee1234567890c0ffee1234567890c0ffee12", message: "WIP: 顶栏布局实验", committedAt: now - 7200 },
+  { oid: "deadbeef34567890deadbeef34567890deadbeef", message: "", committedAt: now - 86400 * 2 },
+];
+
+function stashData(include: boolean) {
+  const trackedPaths = files.filter((item) => !item.untracked && !item.unmerged).map((item) => item.path);
+  const untrackedPaths = files.filter((item) => item.untracked).map((item) => item.path);
+  const canSave = trackedPaths.length > 0 || (include && untrackedPaths.length > 0);
+  return {
+    generation,
+    preview: {
+      trackedCount: trackedPaths.length,
+      untrackedCount: untrackedPaths.length,
+      ignoredCount: 1,
+      trackedPaths,
+      untrackedPaths,
+      ignoredPaths: ["debug.log"],
+      includeUntracked: include,
+      canSave,
+      summary: `将保存已跟踪的暂存和未暂存改动 ${trackedPaths.length} 个。未跟踪文件 ${untrackedPaths.length} 个${include ? "会一并保存" : "这次不保存"}。忽略文件 1 个不会保存。`,
+    },
+    records: stashRecords.map((item) => ({ ...item })),
+    snapshot: snapshot(),
+  };
+}
+
+let mergeOperation = "merge";
+
+function mergeData() {
+  const conflicts = files.filter((item) => item.unmerged).map((item) => ({ path: item.path, kind: "text", summary: "文本" }));
+  const active = mergeOperation === "merge";
+  const sourceName = branch.name === "main" ? "feature/modern-ui" : "main";
+  return {
+    generation,
+    operation: mergeOperation,
+    canContinue: active && conflicts.length === 0,
+    canAbort: active,
+    source: active ? sourceName : null,
+    target: branch.name,
+    headOid: branch.headOid,
+    conflicts,
+    unresolved: conflicts.length,
+    note: active
+      ? conflicts.length > 0
+        ? `正在把 ${sourceName} 合并到 ${branch.name}，还有 ${conflicts.length} 个文件需要处理。`
+        : "所有冲突都已标记，可以检查并完成合并。"
+      : "当前没有进行中的合并。",
+    snapshot: snapshot(),
+  };
+}
 
 export async function listenEvent() {
   return () => {};
@@ -197,13 +259,63 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   },
   publishBranch: () => ok(snapshot()),
   associateUpstream: () => ok(snapshot()),
-  branchState: () => ok({ generation, branches, snapshot: snapshot() }),
-  createBranch: () => ok({ generation, branches, snapshot: snapshot() }),
-  switchBranch: () => ok({ generation, branches, snapshot: snapshot() }),
-  deleteBranch: () => ok({ generation, branches, snapshot: snapshot() }),
-  deleteRemoteBranch: () => ok({ generation, branches, snapshot: snapshot() }),
+  branchState: () => ok(branchData()),
+  createBranch: (_repo: string, name: string) => {
+    if (!branches.some((item) => item.name === name)) {
+      branches.push({ name, remote: false, current: false, upstream: null, worktree: null });
+    }
+    generation += 1;
+    return ok(branchData());
+  },
+  switchBranch: (_repo: string, name: string) => {
+    const selected = branches.find((item) => item.name === name);
+    const localName = selected?.remote ? name.slice(name.indexOf("/") + 1) : name;
+    let local = branches.find((item) => !item.remote && item.name === localName);
+    if (!local) {
+      local = { name: localName, remote: false, current: false, upstream: selected?.remote ? name : null, worktree: null };
+      branches.push(local);
+    }
+    for (const item of branches) item.current = item === local;
+    branch.name = localName;
+    branch.upstream = local.upstream;
+    branch.ahead = 0;
+    branch.behind = 0;
+    generation += 1;
+    return ok(branchData(), 250);
+  },
+  deleteBranch: (_repo: string, name: string) => {
+    const index = branches.findIndex((item) => !item.remote && !item.current && item.name === name);
+    if (index >= 0) branches.splice(index, 1);
+    generation += 1;
+    return ok(branchData());
+  },
+  deleteRemoteBranch: (_repo: string, _remote: string, name: string) => {
+    const index = branches.findIndex((item) => item.remote && item.name === name);
+    if (index >= 0) branches.splice(index, 1);
+    generation += 1;
+    return ok(branchData());
+  },
+  tagState: () => ok({ generation, tags: mockTags.map((item) => ({ ...item })), snapshot: snapshot() }),
+  createTag: (_repo: string, name: string, target: string, message: string) => {
+    const targetOid = target === "HEAD" ? commits[0].oid : (commits.find((item) => item.oid.startsWith(target))?.oid ?? commits[0].oid);
+    mockTags = mockTags.filter((item) => item.name !== name);
+    mockTags.push({ name, targetOid, message, createdAt: Math.floor(Date.now() / 1000) });
+    mockTags.sort((a, b) => a.name.localeCompare(b.name));
+    generation += 1;
+    return ok({ generation, tags: mockTags.map((item) => ({ ...item })), snapshot: snapshot() });
+  },
+  deleteTag: (_repo: string, name: string) => {
+    mockTags = mockTags.filter((item) => item.name !== name);
+    generation += 1;
+    return ok({ generation, tags: mockTags.map((item) => ({ ...item })), snapshot: snapshot() });
+  },
+  pushTag: () => {
+    generation += 1;
+    return ok({ generation, tags: mockTags.map((item) => ({ ...item })), snapshot: snapshot() });
+  },
   historyPage: (_repo: string, query: string, offset: number) => {
-    const matched = commits.filter((item) => !query || item.summary.includes(query) || item.authorName.includes(query));
+    const needle = query.trim().toLowerCase();
+    const matched = commits.filter((item) => !needle || item.summary.toLowerCase().includes(needle) || item.authorName.toLowerCase().includes(needle) || item.oid.toLowerCase().startsWith(needle));
     return ok({ generation, query, offset, pageSize: 100, hasMore: false, state: matched.length ? "ok" : "no_match", commits: matched });
   },
   fileHistory: (_repo: string, path: string, offset: number) =>
@@ -226,44 +338,65 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     });
   },
   commitFileDiff: (_repo: string, _oid: string, _parent: string, path: string) => ok(diffFor(path, false)),
-  stashState: (_repo: string, include: boolean) =>
-    ok({
-      generation,
-      preview: {
-        trackedCount: 3, untrackedCount: 1, ignoredCount: 1,
-        trackedPaths: ["src/App.svelte", "src/app.css", "README.md"], untrackedPaths: ["src/lib/components/Icon.svelte"], ignoredPaths: ["debug.log"],
-        includeUntracked: include, canSave: true,
-        summary: `将保存已跟踪的暂存和未暂存改动 3 个。未跟踪文件 1 个${include ? "会一并保存" : "这次不保存"}。忽略文件 1 个不会保存。`,
-      },
-      records: [
-        { oid: "c0ffee1234567890c0ffee1234567890c0ffee12", message: "WIP: 顶栏布局实验", committedAt: now - 7200 },
-        { oid: "deadbeef34567890deadbeef34567890deadbeef", message: "", committedAt: now - 86400 * 2 },
-      ],
-      snapshot: snapshot(),
-    }),
-  saveStash: () => ok({}),
-  applyStash: () => ok({}),
-  deleteStash: () => ok({}),
-  mergePreview: (_repo: string, source: string) =>
-    ok({ generation, source, target: branch.name, headOid: branch.headOid, dirty: true, localPaths: ["src/App.svelte", "src/app.css"], canStart: false, operation: "none", note: "工作区有 2 处未提交改动。合并前请先提交或临时保存。未开始合并。" }),
-  startMerge: () => ok({}),
-  mergeSession: () =>
-    ok({
-      generation, operation: "unmerged", canContinue: false, canAbort: false, source: null, target: branch.name, headOid: branch.headOid,
-      conflicts: [{ path: "src/lib/merge.ts", kind: "text", summary: "文本" }], unresolved: 1,
-      note: "有未合并文件。这不是分支合并，不能中止合并。", snapshot: snapshot(),
-    }),
-  conflictView: (_repo: string, path: string) =>
-    ok({
+  stashState: (_repo: string, include: boolean) => ok(stashData(include)),
+  saveStash: (_repo: string, include: boolean, message: string) => {
+    const oid = "12345678abcdef12345678abcdef12345678abcd";
+    stashRecords.unshift({ oid, message, committedAt: now });
+    files = [];
+    generation += 1;
+    return ok({ oid, note: "当前改动已临时保存，工作区已恢复干净。", state: stashData(include) });
+  },
+  applyStash: (_repo: string, oid: string) => {
+    if (files.length === 0) files = [file("src/lib/restored.ts", "none", "none", { untracked: true })];
+    generation += 1;
+    return ok({ generation, oid, kept: true, operation: "none", conflicted: false, conflictPaths: [], canAbortMerge: false, note: "临时保存已恢复，原记录仍保留。", snapshot: snapshot() });
+  },
+  deleteStash: (_repo: string, oid: string) => {
+    stashRecords = stashRecords.filter((item) => item.oid !== oid);
+    generation += 1;
+    return ok(stashData(false));
+  },
+  mergePreview: (_repo: string, source: string) => {
+    const localPaths = files.map((item) => item.path);
+    const canStart = localPaths.length === 0;
+    return ok({ generation, source, target: branch.name, headOid: branch.headOid, dirty: !canStart, localPaths, canStart, operation: mergeOperation, note: canStart ? "工作区干净，可以开始合并。确认前不会写入。" : `工作区有 ${localPaths.length} 处未提交改动。合并前请先提交或临时保存。未开始合并。` });
+  },
+  startMerge: () => {
+    mergeOperation = "merge";
+    generation += 1;
+    return ok(mergeData());
+  },
+  mergeSession: () => ok(mergeData()),
+  conflictView: (_repo: string, path: string) => {
+    const ours = `export interface ViewOptions {\n  theme: "light" | "dark";\n  compact: boolean;\n}\n\nexport function createView(options: ViewOptions) {\n  const mode = "workspace";\n  const size = 12;\n  const sidebar = "expanded";\n  const diff = renderDiff({ mode, size });\n  return { ...options, sidebar, diff };\n}\n`;
+    const theirs = `export interface ViewOptions {\n  theme: "light" | "dark";\n  compact: boolean;\n}\n\nexport function createView(options: ViewOptions) {\n  const mode = "review";\n  const size = 14;\n  const sidebar = "compact";\n  const diff = renderDiff({ mode, size });\n  return { ...options, sidebar, diff };\n}\n`;
+    return ok({
       generation, path, kind: "text", editable: true,
-      ours: { present: true, binary: false, truncated: false, text: "export const mode = \"ours\";\nexport const size = 12;\n", summary: "本地" },
-      theirs: { present: true, binary: false, truncated: false, text: "export const mode = \"theirs\";\nexport const size = 14;\n", summary: "另一侧" },
-      result: { present: true, binary: false, truncated: false, text: "export const mode = \"ours\";\nexport const size = 14;\n", summary: "结果" },
-      note: "可以编辑合并结果，再标记为已解决。",
-    }),
-  resolveConflict: () => ok({}),
-  completeMerge: () => ok({}),
-  abortMerge: () => ok({}),
+      ours: { present: true, binary: false, truncated: false, text: ours, summary: "本地" },
+      theirs: { present: true, binary: false, truncated: false, text: theirs, summary: "另一侧" },
+      result: { present: true, binary: false, truncated: false, text: ours.replace("const size = 12", "const size = 14"), summary: "结果" },
+      note: "对比两个版本的差异，编辑最终结果后再标记。",
+    });
+  },
+  resolveConflict: (_repo: string, path: string) => {
+    files = files.map((item) => item.path === path ? { ...item, staged: "modified", unstaged: "none", untracked: false, unmerged: false } : item);
+    generation += 1;
+    return ok(mergeData());
+  },
+  completeMerge: () => {
+    mergeOperation = "none";
+    branch.ahead += 1;
+    generation += 1;
+    return ok({ oid: "merge1234567890", generation, summary: "已完成合并 merge123", files: [], snapshot: snapshot() });
+  },
+  abortMerge: (_repo: string, confirm: boolean) => {
+    if (confirm) {
+      files = files.filter((item) => !item.unmerged);
+      mergeOperation = "none";
+      generation += 1;
+    }
+    return ok({ generation, wrote: confirm, paths: ["src/lib/merge.ts"], stashOids: [], note: confirm ? "已中止合并并恢复合并前状态。" : "中止将撤销本次合并中的冲突编辑，其他仓库内容保持不变。", snapshot: snapshot() });
+  },
   undoCommit: (_repo: string, head: string) =>
     ok({ generation, code: "ok", eligible: true, wrote: false, headOid: head, parentOid: "b".repeat(40), summary: "重做界面：现代化布局", reason: "这个提交只在本地，可以撤销并保留改动。", snapshot: snapshot() }),
   discardChanges: (_repo: string, paths: string[]) =>

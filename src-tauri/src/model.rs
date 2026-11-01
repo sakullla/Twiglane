@@ -255,6 +255,23 @@ pub struct BranchState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct TagRecord {
+    pub name: String,
+    pub target_oid: String,
+    pub message: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TagState {
+    pub generation: u64,
+    pub tags: Vec<TagRecord>,
+    pub snapshot: StatusSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct CloneResult {
     pub path: String,
     pub opened: OpenedRepository,

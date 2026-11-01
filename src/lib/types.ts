@@ -1,4 +1,5 @@
 export type Theme = "light" | "dark";
+export type WorkspaceView = "changes" | "history" | "stash" | "merge";
 
 export type ChangeKind =
   | "none"
@@ -154,6 +155,19 @@ export interface BranchRecord {
 export interface BranchState {
   generation: number;
   branches: BranchRecord[];
+  snapshot: StatusSnapshot;
+}
+
+export interface TagRecord {
+  name: string;
+  targetOid: string;
+  message: string;
+  createdAt: number;
+}
+
+export interface TagState {
+  generation: number;
+  tags: TagRecord[];
   snapshot: StatusSnapshot;
 }
 

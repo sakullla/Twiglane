@@ -14,12 +14,14 @@
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
   import type { CommitDetail, DiffHunk, DiffResponse, FileSelection, HistoryPage, OpenedRepository } from "../types";
   import { hueOf, initialOf, relativeTime, splitPath, statusMark } from "../ui";
+  import CommitDiffList from "./CommitDiffList.svelte";
   import DiffView from "./DiffView.svelte";
   import Icon from "./Icon.svelte";
 
   interface Props {
     opened: OpenedRepository;
     filePath: string | null;
+    searchQuery?: string;
     disabled: boolean;
     nextId: () => number;
     onGeneration: (generation: number) => void;
@@ -34,6 +36,7 @@
   let {
     opened,
     filePath,
+    searchQuery = "",
     disabled,
     nextId,
     onGeneration,
@@ -43,7 +46,9 @@
   }: Props = $props();
 
   let query = $state("");
+  let viewMode = $state<"single" | "multi">("single");
   let activeQuery = $state("");
+  let lastSearchSeed = "";
   let offset = $state(0);
   let page = $state<HistoryPage | null>(null);
   let listError = $state<string | null>(null);
@@ -83,6 +88,18 @@
   let diffSelection = $derived<FileSelection | null>(
     activeFile ? { path: activeFile.path, side: "unstaged" } : null,
   );
+
+  $effect(() => {
+    const seed = searchQuery;
+    if (seed === lastSearchSeed) return;
+    lastSearchSeed = seed;
+    query = seed;
+    activeQuery = seed;
+    offset = 0;
+    selectedOid = null;
+    parentChoice = null;
+    manualPath = null;
+  });
 
   $effect(() => {
     if (lastFile === undefined) {
@@ -364,6 +381,10 @@
       </div>
     {/if}
     <span class="spacer"></span>
+    <div class="segmented history-view-mode" role="group" aria-label="历史差异模式">
+      <button type="button" aria-pressed={viewMode === "single"} onclick={() => (viewMode = "single")}><Icon name="file" size={11} />单文件</button>
+      <button type="button" aria-pressed={viewMode === "multi"} onclick={() => (viewMode = "multi")}><Icon name="layers" size={11} />多文件</button>
+    </div>
     <div class="pager">
       <span class="hint">
         {#if page && commits.length > 0}第 {page.offset + 1}–{page.offset + commits.length} 条{:else}每页 {page?.pageSize ?? 100} 条{/if}
@@ -402,14 +423,20 @@
       {:else}
         <div class="virtual-space" style={`height:${commits.length * ROW_HEIGHT}px`}>
           {#each visible as commit, index (commit.oid)}
-            <button
-              type="button"
+            <div
               class="history-row"
               role="option"
               aria-selected={selectedOid === commit.oid}
+              tabindex="-1"
               style={`top:${(range.start + index) * ROW_HEIGHT}px;height:${ROW_HEIGHT - 2}px`}
               title={`${commit.summary}\n${commit.authorName} · ${formatAuthoredAt(commit.authoredAt)}\n${commit.oid}`}
               onclick={() => pick(commit.oid)}
+              onkeydown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  pick(commit.oid);
+                }
+              }}
             >
               <span class="avatar" style={`--hue:${hueOf(commit.authorName)}`} aria-hidden="true">{initialOf(commit.authorName)}</span>
               <span class="hr-main">
@@ -424,14 +451,25 @@
                   <span class="hr-dot"></span>
                   <span>{relativeTime(commit.authoredAt)}</span>
                   <span class="hr-dot"></span>
-                  <span class="mono">{shortOid(commit.oid)}</span>
+                  <span class="history-hash">
+                    <code>{shortOid(commit.oid)}</code>
+                    <button
+                      type="button"
+                      aria-label={`复制提交 ${shortOid(commit.oid)} 的完整 Hash`}
+                      title={copiedOid === commit.oid ? "已复制完整 Hash" : "复制完整 Hash"}
+                      onclick={(event) => {
+                        event.stopPropagation();
+                        void copyOid(commit.oid);
+                      }}
+                    ><Icon name={copiedOid === commit.oid ? "check" : "copy"} size={11} /></button>
+                  </span>
                   {#if commit.parents.length > 1}
                     <span class="hr-dot"></span>
                     <span class="merge-note">{parentCaption(commit.parents)}</span>
                   {/if}
                 </span>
               </span>
-            </button>
+            </div>
           {/each}
         </div>
       {/if}
@@ -441,7 +479,7 @@
         <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{detailError}</span></div>
       {/if}
       {#if detail}
-        <div class="history-meta">
+        <div class="history-meta" class:multi={viewMode === "multi"}>
           <h2 class="commit-title">{detail.commit.summary}</h2>
           <div class="commit-meta">
             <span class="avatar" style={`--hue:${hueOf(detail.commit.authorName)}`} aria-hidden="true">{initialOf(detail.commit.authorName)}</span>
@@ -478,9 +516,9 @@
               </div>
             </div>
           {/if}
-          {#if detail.files.length === 0}
+          {#if viewMode === "single" && detail.files.length === 0}
             <p class="hint">这次提交没有文件变化。</p>
-          {:else}
+          {:else if viewMode === "single"}
             <div class="section-caption">变更文件 <span class="count">{detail.files.length}</span></div>
             <div
               class="file-list history-files"
@@ -519,17 +557,30 @@
             </div>
           {/if}
         </div>
-        <DiffView
-          selection={diffSelection}
-          diff={commitDiff}
-          error={diffError}
-          loading={diffLoading}
-          {disabled}
-          readOnly={true}
-          onStageHunk={() => {}}
-          onLoadMore={loadMoreDiff}
-          onFileHistory={onFilePath}
-        />
+        {#if viewMode === "multi"}
+          <CommitDiffList
+            {opened}
+            {detail}
+            parent={parentChoice ?? detail.selectedParent}
+            {disabled}
+            {nextId}
+            {onGeneration}
+            onFailure={onFailure}
+            onFileHistory={onFilePath}
+          />
+        {:else}
+          <DiffView
+            selection={diffSelection}
+            diff={commitDiff}
+            error={diffError}
+            loading={diffLoading}
+            {disabled}
+            readOnly={true}
+            onStageHunk={() => {}}
+            onLoadMore={loadMoreDiff}
+            onFileHistory={onFilePath}
+          />
+        {/if}
       {:else if !loading}
         <div class="empty" role="status">
           <span class="empty-icon"><Icon name="commit" size={24} /></span>

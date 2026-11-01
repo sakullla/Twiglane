@@ -170,6 +170,7 @@ describe("历史面板", () => {
     expect(await screen.findByRole("option", { name: /commit-0/ })).toBeTruthy();
     expect(screen.getByText(/合并提交/)).toBeTruthy();
     expect(screen.getByText("分支 feature · 当前")).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: /复制提交 .*完整 Hash/ }).length).toBeGreaterThan(0);
     expect(screen.queryByRole("option", { name: /commit-99/ })).toBeNull();
     expect(historyPage).toHaveBeenCalledWith("/repo", "", 0, 3, 1);
   });

@@ -1,0 +1,321 @@
+use std::path::{Path, PathBuf};
+
+use crate::error::AppError;
+use crate::git::advice::{classify_problem, problem_error};
+use crate::git::command::{
+    check_tag_command, create_tag_command, delete_tag_command, push_tag_command, rev_parse_command,
+    status_command, tag_list_command,
+};
+use crate::git::gate::action_key;
+use crate::git::ops::{
+    canonical_existing, git_failure, repo_key, require_git, run_git, status_from_output,
+    validate_input_path, Backend,
+};
+use crate::git::schedule::{internal_request_id, JobKind};
+use crate::model::{TagRecord, TagState};
+
+pub async fn tag_state(
+    backend: &Backend,
+    path: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<TagState, AppError> {
+    let root = repo_root(path)?;
+    load_tags(backend, &root, generation, request_id).await
+}
+
+pub async fn create_tag(
+    backend: &Backend,
+    path: &str,
+    name: &str,
+    target: &str,
+    message: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<TagState, AppError> {
+    let root = repo_root(path)?;
+    let _guard = backend.actions.enter(action_key("tag", &repo_key(&root)))?;
+    validate_tag_name(name)?;
+    validate_target(target)?;
+    let git = require_git(backend).await?;
+    let (program, args) = check_tag_command(&git.path, &root, name);
+    let checked = run_git(backend, &repo_key(&root), JobKind::Read, request_id, program, args, Some(generation)).await?;
+    if checked.output.exit_code != 0 {
+        return Err(AppError::new("tag_invalid", "标签名称无效，未创建标签。").with_generation(checked.generation));
+    }
+    let current = load_tags(backend, &root, checked.generation, internal_request_id()).await?;
+    if current.tags.iter().any(|tag| tag.name == name) {
+        return Err(AppError::new("tag_duplicate", "已有同名标签，未再创建。").with_generation(current.generation));
+    }
+    let revision = format!("{target}^{{commit}}");
+    let (program, args) = rev_parse_command(&git.path, &root, &revision);
+    let verified = run_git(
+        backend,
+        &repo_key(&root),
+        JobKind::Read,
+        internal_request_id(),
+        program,
+        args,
+        Some(current.generation),
+    )
+    .await?;
+    if verified.output.exit_code != 0 {
+        return Err(AppError::new("tag_target", "目标提交不存在或不是有效提交，未创建标签。").with_generation(verified.generation));
+    }
+    let (program, args) = create_tag_command(&git.path, &root, name, target, message);
+    let scheduled = run_git(
+        backend,
+        &repo_key(&root),
+        JobKind::Write,
+        internal_request_id(),
+        program,
+        args,
+        Some(verified.generation),
+    )
+    .await?;
+    if scheduled.output.exit_code != 0 {
+        return Err(tag_failure("tag_create_failed", &scheduled.output, scheduled.generation, "没有创建标签。"));
+    }
+    load_tags(backend, &root, scheduled.generation, internal_request_id()).await
+}
+
+pub async fn delete_tag(
+    backend: &Backend,
+    path: &str,
+    name: &str,
+    confirm: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<TagState, AppError> {
+    if !confirm {
+        return Err(AppError::new("confirm_required", "删除标签需要明确确认，未执行。"));
+    }
+    let root = repo_root(path)?;
+    let _guard = backend.actions.enter(action_key("tag", &repo_key(&root)))?;
+    validate_tag_name(name)?;
+    let git = require_git(backend).await?;
+    let current = load_tags(backend, &root, generation, request_id).await?;
+    if !current.tags.iter().any(|tag| tag.name == name) {
+        return Err(AppError::new("tag_missing", "这个标签已不存在，没有重复删除。").with_generation(current.generation));
+    }
+    let (program, args) = delete_tag_command(&git.path, &root, name);
+    let scheduled = run_git(
+        backend,
+        &repo_key(&root),
+        JobKind::Write,
+        internal_request_id(),
+        program,
+        args,
+        Some(current.generation),
+    )
+    .await?;
+    if scheduled.output.exit_code != 0 {
+        return Err(tag_failure("tag_delete_failed", &scheduled.output, scheduled.generation, "没有删除标签。"));
+    }
+    load_tags(backend, &root, scheduled.generation, internal_request_id()).await
+}
+
+pub async fn push_tag(
+    backend: &Backend,
+    path: &str,
+    remote: &str,
+    name: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<TagState, AppError> {
+    let root = repo_root(path)?;
+    let _guard = backend.actions.enter(action_key("sync", &repo_key(&root)))?;
+    validate_tag_name(name)?;
+    validate_remote(remote)?;
+    let git = require_git(backend).await?;
+    let current = load_tags(backend, &root, generation, request_id).await?;
+    if !current.tags.iter().any(|tag| tag.name == name) {
+        return Err(AppError::new("tag_missing", "这个标签已不存在，没有推送。").with_generation(current.generation));
+    }
+    let (program, args) = push_tag_command(&git.path, &root, remote, name);
+    let scheduled = run_git(
+        backend,
+        &repo_key(&root),
+        JobKind::Write,
+        internal_request_id(),
+        program,
+        args,
+        Some(current.generation),
+    )
+    .await?;
+    if scheduled.output.exit_code != 0 {
+        return Err(tag_failure("tag_push_failed", &scheduled.output, scheduled.generation, "没有推送标签，远程未被强行改写。"));
+    }
+    load_tags(backend, &root, scheduled.generation, internal_request_id()).await
+}
+
+async fn load_tags(
+    backend: &Backend,
+    root: &Path,
+    generation: u64,
+    request_id: u64,
+) -> Result<TagState, AppError> {
+    let git = require_git(backend).await?;
+    let (program, args) = tag_list_command(&git.path, root);
+    let listed = run_git(backend, &repo_key(root), JobKind::Read, request_id, program, args, Some(generation)).await?;
+    if listed.output.exit_code != 0 {
+        return Err(tag_failure("tag_read_failed", &listed.output, listed.generation, "无法读取标签。"));
+    }
+    let tags = parse_tags(&listed.output.stdout)?;
+    let (program, args) = status_command(&git.path, root);
+    let status = run_git(
+        backend,
+        &repo_key(root),
+        JobKind::Read,
+        internal_request_id(),
+        program,
+        args,
+        Some(listed.generation),
+    )
+    .await?;
+    let snapshot = status_from_output(backend, &repo_key(root), &status)?;
+    Ok(TagState {
+        generation: snapshot.generation,
+        tags,
+        snapshot,
+    })
+}
+
+fn parse_tags(bytes: &[u8]) -> Result<Vec<TagRecord>, AppError> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut tags = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\u{1f}').collect();
+        if fields.len() != 5 {
+            return Err(AppError::new("tag_parse", "无法解析标签列表，未修改仓库。"));
+        }
+        let created_at = fields[3].parse::<i64>().unwrap_or(0);
+        tags.push(TagRecord {
+            name: fields[0].to_string(),
+            target_oid: if fields[2].is_empty() { fields[1].to_string() } else { fields[2].to_string() },
+            message: fields[4].to_string(),
+            created_at,
+        });
+    }
+    Ok(tags)
+}
+
+fn repo_root(path: &str) -> Result<PathBuf, AppError> {
+    let root = canonical_existing(&validate_input_path(path)?)?;
+    if !root.join(".git").exists() {
+        return Err(AppError::new("not_repository", "该目录不是 Git 仓库，未执行标签操作。"));
+    }
+    Ok(root)
+}
+
+fn validate_tag_name(name: &str) -> Result<(), AppError> {
+    if name.is_empty()
+        || name.starts_with('-')
+        || name.chars().any(|character| character.is_whitespace() || character.is_control())
+        || name.contains(['~', '^', ':', '?', '*', '[', '\\'])
+        || name.contains("..")
+        || name.contains("@{")
+        || name.ends_with('.')
+        || name.ends_with(".lock")
+    {
+        return Err(AppError::new("tag_invalid", "标签名称无效，未创建或修改标签。"));
+    }
+    Ok(())
+}
+
+fn validate_target(target: &str) -> Result<(), AppError> {
+    if target.trim().is_empty() || target.starts_with('-') || target.chars().any(|character| character.is_control()) {
+        return Err(AppError::new("tag_target", "目标提交无效，未创建标签。"));
+    }
+    Ok(())
+}
+
+fn validate_remote(remote: &str) -> Result<(), AppError> {
+    if remote.is_empty()
+        || remote.starts_with('-')
+        || remote.chars().any(|character| character.is_whitespace() || character.is_control())
+        || remote.contains([':', '\\'])
+    {
+        return Err(AppError::new("remote_invalid", "远程名称无效，未推送标签。"));
+    }
+    Ok(())
+}
+
+fn tag_failure(code: &str, output: &crate::git::runner::ProcessOutput, generation: u64, fallback: &str) -> AppError {
+    let text = format!("{}\n{}", String::from_utf8_lossy(&output.stderr), String::from_utf8_lossy(&output.stdout));
+    if let Some(problem) = classify_problem(&text) {
+        return problem_error(problem, &text).with_generation(generation);
+    }
+    git_failure(code, output, fallback).with_generation(generation)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    use super::{create_tag, delete_tag, push_tag, tag_state};
+    use crate::git::ops::open_repository;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new(crate::test_support::system_git())
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", crate::test_support::isolated_gitconfig())
+            .env("GIT_AUTHOR_NAME", "Twiglane Test")
+            .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Twiglane Test")
+            .env("GIT_COMMITTER_EMAIL", "twiglane-test@example.com")
+            .status()
+            .unwrap();
+        assert!(status.success(), "{args:?}");
+    }
+
+    #[tokio::test]
+    async fn tag_create_push_and_delete_use_real_git() {
+        let fixture = crate::test_support::git_fixture("tag-lifecycle");
+        let repo = fixture.repo("demo");
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "content\n").unwrap();
+        git(&repo, &["add", "--", "file.txt"]);
+        git(&repo, &["commit", "-m", "initial"]);
+        let backend = std::sync::Arc::new(fixture.backend());
+        let opened = open_repository(&backend, &repo.to_string_lossy(), 1).await.unwrap();
+        let created = create_tag(&backend, &repo.to_string_lossy(), "v1.0.0", "HEAD", "release", opened.generation, 2)
+            .await
+            .unwrap();
+        assert_eq!(created.tags.len(), 1);
+        assert_eq!(created.tags[0].name, "v1.0.0");
+        assert_eq!(created.tags[0].target_oid.len(), 40);
+        assert_eq!(created.tags[0].message, "release");
+
+        let bare = fixture.path().join("remote.git");
+        git(fixture.path(), &["init", "--bare", bare.to_string_lossy().as_ref()]);
+        git(&repo, &["remote", "add", "origin", bare.to_string_lossy().as_ref()]);
+        let pushed = push_tag(&backend, &repo.to_string_lossy(), "origin", "v1.0.0", created.generation, 3)
+            .await
+            .unwrap();
+        assert_eq!(pushed.tags.len(), 1);
+        git(&bare, &["show-ref", "--verify", "refs/tags/v1.0.0"]);
+
+        assert!(delete_tag(&backend, &repo.to_string_lossy(), "v1.0.0", false, pushed.generation, 4)
+            .await
+            .is_err());
+        let deleted = delete_tag(&backend, &repo.to_string_lossy(), "v1.0.0", true, pushed.generation, 5)
+            .await
+            .unwrap();
+        assert!(deleted.tags.is_empty());
+        assert!(tag_state(&backend, &repo.to_string_lossy(), deleted.generation, 6)
+            .await
+            .unwrap()
+            .tags
+            .is_empty());
+        backend.watches.stop();
+    }
+}

@@ -34,15 +34,26 @@
   let scrollTop = $state(0);
   let viewport = $state(0);
   let scroller = $state<HTMLDivElement | null>(null);
-  let lines = $derived<ViewLine[]>(diff?.lines ?? []);
+  let selectionKey = $derived(selection ? `${selection.side}:${selection.path}` : "");
+  let currentDiff = $derived(
+    selection && diff?.path === selection.path && diff.staged === (selection.side === "staged") ? diff : null,
+  );
+  let lines = $derived<ViewLine[]>(currentDiff?.lines ?? []);
   let sideRows = $derived(mode === "split" ? toSideRows(lines) : []);
   let total = $derived(mode === "split" ? sideRows.length : lines.length);
   let range = $derived(
     visibleRange(total, scrollTop, viewport > 0 ? viewport : scrollTop > 0 ? ROW_HEIGHT : 0, ROW_HEIGHT),
   );
-  let hunkForLine = $derived((index: number) => diff?.hunks.find((hunk) => hunk.startLine === index) ?? null);
+  let hunkForLine = $derived((index: number) => currentDiff?.hunks.find((hunk) => hunk.startLine === index) ?? null);
   let parts = $derived(selection ? splitPath(selection.path) : null);
-  let showStats = $derived(Boolean(diff && !diff.binary && (diff.additions > 0 || diff.deletions > 0)));
+  let showStats = $derived(
+    Boolean(currentDiff && !currentDiff.binary && (currentDiff.additions > 0 || currentDiff.deletions > 0)),
+  );
+
+  $effect(() => {
+    selectionKey;
+    applyScroll(0);
+  });
 
   function applyScroll(next: number) {
     scrollTop = next;
@@ -97,20 +108,20 @@
             {selection.side === "staged" ? "已暂存" : "未暂存"}
           </span>
         {/if}
-        {#if showStats && diff}
-          <span class="diff-stats" aria-label={`新增 ${diff.additions} 行，删除 ${diff.deletions} 行`}>
-            <span class="plus">+{diff.additions}</span>
-            <span class="minus">−{diff.deletions}</span>
+        {#if showStats && currentDiff}
+          <span class="diff-stats" aria-label={`新增 ${currentDiff.additions} 行，删除 ${currentDiff.deletions} 行`}>
+            <span class="plus">+{currentDiff.additions}</span>
+            <span class="minus">−{currentDiff.deletions}</span>
           </span>
         {/if}
-        {#if diff && !showStats}
-          <span class="diff-summary" title={diff.summary}>{diff.summary}</span>
+        {#if currentDiff && !showStats}
+          <span class="diff-summary" title={currentDiff.summary}>{currentDiff.summary}</span>
         {/if}
       {:else}
         <span class="hint">差异</span>
       {/if}
     </div>
-    {#if loading && diff}<span class="spinner muted" aria-hidden="true"></span>{/if}
+    {#if loading && currentDiff}<span class="spinner muted" aria-hidden="true"></span>{/if}
     {#if onFileHistory && selection}
       <button
         type="button"
@@ -123,8 +134,8 @@
       </button>
     {/if}
     <div class="segmented" role="group" aria-label="差异布局">
-      <button type="button" aria-pressed={mode === "unified"} title="统一视图" onclick={() => (mode = "unified")}>统一</button>
-      <button type="button" aria-pressed={mode === "split"} title="并排视图" onclick={() => (mode = "split")}>并排</button>
+      <button type="button" aria-pressed={mode === "unified"} title="统一视图" onclick={() => (mode = "unified")}><Icon name="rows" size={12} />统一</button>
+      <button type="button" aria-pressed={mode === "split"} title="并排视图" onclick={() => (mode = "split")}><Icon name="split" size={12} />并排</button>
     </div>
   </div>
   {#if error}
@@ -139,19 +150,19 @@
       <strong>选择一个文件查看差异</strong>
       <p>用 ↑ ↓ 在列表中移动，空格暂存或取消暂存，双击也可以切换。</p>
     </div>
-  {:else if loading && !diff}
+  {:else if loading && !currentDiff}
     <div class="empty" role="status" aria-busy="true">
       <span class="spinner"></span>
       <strong>正在读取差异</strong>
       <p>{selection.path}</p>
     </div>
-  {:else if diff?.binary}
+  {:else if currentDiff?.binary}
     <div class="empty" role="status">
       <span class="empty-icon"><Icon name="file" size={24} /></span>
       <strong>二进制文件</strong>
       <p>{selection.path} 有变动，但不能按文本预览，因此这里不显示伪差异。</p>
     </div>
-  {:else if !diff || (diff.lines.length === 0 && diff.totalLines === 0)}
+  {:else if !currentDiff || (currentDiff.lines.length === 0 && currentDiff.totalLines === 0)}
     <div class="empty" role="status">
       <span class="empty-icon"><Icon name="file" size={24} /></span>
       <strong>没有文本差异</strong>
@@ -203,7 +214,7 @@
                 {#if row.right}<span class="ln">{row.right.no ?? ""}</span><span class="code">{row.right.text}</span>{/if}
               </span>
               {#if !readOnly && row.showStage && row.hunkIndex !== null}
-                {@const hunk = diff.hunks.find((item) => item.index === row.hunkIndex)}
+                {@const hunk = currentDiff.hunks.find((item) => item.index === row.hunkIndex)}
                 {#if hunk}
                   <button
                     type="button"
@@ -219,9 +230,9 @@
         {/if}
       </div>
     </div>
-    {#if diff.offset + diff.lines.length < diff.totalLines}
+    {#if currentDiff.offset + currentDiff.lines.length < currentDiff.totalLines}
       <div class="diff-more">
-        <p class="hint">已显示 {diff.lines.length} / {diff.totalLines} 行。长差异按窗口读取，未显示的截断代码块不能部分暂存。</p>
+        <p class="hint">已显示 {currentDiff.lines.length} / {currentDiff.totalLines} 行。长差异按窗口读取，未显示的截断代码块不能部分暂存。</p>
         <button type="button" class="btn btn-secondary btn-sm" disabled={disabled || loading} onclick={onLoadMore}>继续加载</button>
       </div>
     {/if}

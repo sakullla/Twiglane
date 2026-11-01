@@ -6,7 +6,7 @@
   import { DraftBuffer } from "./lib/draft";
   import { normalizeError } from "./lib/errors";
   import { clampWidth, FALLBACK_POLL_MS, nudgeWidth, shouldPoll } from "./lib/layout";
-  import { branchLabel, commitScope, dependencyNote, gitInstallHint, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
+  import { branchLabel, commitScope, dependencyNote, gitInstallHint, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
   import { startDesktopMeasure } from "./lib/measure";
   import type {
     AppFailure,
@@ -20,6 +20,7 @@
     RepoChanged,
     StatusSnapshot,
     Theme,
+    WorkspaceView,
   } from "./lib/types";
   import { hueOf, initialOf } from "./lib/ui";
   import CommitDraft from "./lib/components/CommitDraft.svelte";
@@ -33,7 +34,7 @@
   import RepoSidebar from "./lib/components/RepoSidebar.svelte";
 
   let theme = $state<Theme>("light");
-  let widths = $state<PanelWidths>({ sidebar: 280, files: 340 });
+  let widths = $state<PanelWidths>({ sidebar: 256, files: 360 });
   let recent = $state<RecentRepo[]>([]);
   let query = $state("");
   let git = $state<GitInfo | null>(null);
@@ -56,7 +57,8 @@
   let stashPanel = $state<Promise<typeof import("./lib/components/StashPanel.svelte")> | null>(null);
   let writeLocked = $derived(pending !== null || reading);
   let navCollapsed = $state(false);
-  let detail = $state<{ title: string; value: string } | null>(null);
+  let repoMenuOpen = $state(false);
+  let repoMenuAnchor = $state<HTMLDivElement | null>(null);
   let confirmPath = $state<string | null>(null);
   let dialog = $state<"clone" | "remote" | "branch" | null>(null);
   let pushRetry = $state(false);
@@ -66,9 +68,10 @@
   let requestSerial = 1;
   let diffToken = 0;
   let fileQuery = $state("");
-  let workspaceView = $state<"changes" | "history" | "stash" | "merge">("changes");
+  let workspaceView = $state<WorkspaceView>("changes");
   let conflictFocus = $state<string | null>(null);
   let historyPath = $state<string | null>(null);
+  let historyQuery = $state("");
   const drafts = new DraftBuffer();
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -90,10 +93,33 @@
   );
   const VIEWS = [
     { id: "changes", label: "改动", icon: "file-diff" },
-    { id: "history", label: "历史", icon: "history" },
+    { id: "history", label: "提交历史", icon: "history" },
     { id: "stash", label: "临时保存", icon: "archive" },
-    { id: "merge", label: "合并", icon: "merge" },
+    { id: "merge", label: "分支合并", icon: "merge" },
   ] as const;
+  const VIEW_DETAILS: Record<WorkspaceView, { title: string; description: string }> = {
+    changes: { title: "工作区改动", description: "查看差异、整理暂存，再完成一个清晰的提交。" },
+    history: { title: "提交历史", description: "沿着提交记录，理解项目每一次变化。" },
+    stash: { title: "临时保存", description: "收起未完成的工作，随时回来继续。" },
+    merge: { title: "分支合并", description: "预览合并影响，逐一处理每一处冲突。" },
+  };
+  let viewInfo = $derived(VIEW_DETAILS[workspaceView]);
+
+  $effect(() => {
+    if (!repoMenuOpen) return;
+    const close = (event: MouseEvent) => {
+      if (repoMenuAnchor && !repoMenuAnchor.contains(event.target as Node)) repoMenuOpen = false;
+    };
+    const key = (event: KeyboardEvent) => {
+      if (event.key === "Escape") repoMenuOpen = false;
+    };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", key);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", key);
+    };
+  });
 
   $effect(() => {
     const note = phaseNote;
@@ -144,13 +170,16 @@
     draft = next.draft;
     opened = next;
     degraded = next.watchDegraded;
-    selected = retainSelection(next.snapshot.files, selected);
+    const groups = groupFiles(next.snapshot.files);
+    const first = groups.unstaged[0] ?? groups.staged[0];
+    selected = retainSelection(next.snapshot.files, selected) ?? (first ? { path: first.path, side: first.side } : null);
     diff = null;
     diffError = null;
     pushRetry = false;
     phaseNote = null;
     workspaceView = "changes";
     historyPath = null;
+    historyQuery = "";
     recent = [
       { name: next.summary.name, path: next.summary.path, openedAtMs: Date.now() },
       ...recent.filter((repo) => repo.path !== next.summary.path),
@@ -250,7 +279,7 @@
     historyPath = null;
   }
 
-  function useView(view: "changes" | "history" | "stash" | "merge") {
+  function useView(view: WorkspaceView) {
     workspaceView = view;
     if (view === "history") historyPanel ??= import("./lib/components/HistoryPanel.svelte");
     if (view === "merge") mergePanel ??= import("./lib/components/MergePanel.svelte");
@@ -259,11 +288,25 @@
 
   function showHistory() {
     historyPath = null;
+    historyQuery = "";
     useView("history");
+  }
+
+  function navigate(view: WorkspaceView) {
+    if (view === "changes") showChanges();
+    else if (view === "history") showHistory();
+    else useView(view);
   }
 
   function openFileHistory(path: string) {
     historyPath = path;
+    historyQuery = "";
+    useView("history");
+  }
+
+  function openCommitSearch(query: string) {
+    historyPath = null;
+    historyQuery = query;
     useView("history");
   }
 
@@ -648,6 +691,17 @@
       }
     } catch (error) {
       showError(error);
+    }
+  }
+
+  async function copyPath(path: string) {
+    try {
+      await navigator.clipboard.writeText(path);
+      phaseNote = "已复制仓库完整路径。";
+      live = phaseNote;
+      banner = null;
+    } catch {
+      showError(new Error("无法写入剪贴板，请手动复制仓库路径。"));
     }
   }
 
@@ -1124,107 +1178,147 @@
   <header class="topbar">
     <button
       type="button"
-      class="icon-btn"
+      class="icon-btn nav-toggle"
       aria-label={navCollapsed ? "展开导航" : "折叠导航"}
       title={`${navCollapsed ? "展开" : "折叠"}仓库栏（${MODIFIER_LABEL}+B）`}
       aria-expanded={!navCollapsed}
       onclick={() => (navCollapsed = !navCollapsed)}
     >
-      <Icon name="sidebar" size={17} />
+      <Icon name="sidebar" size={18} />
     </button>
     {#if opened}
-      <button
-        type="button"
-        class="repo-switch"
-        title={`${opened.summary.path}\n点击查看并复制完整路径`}
-        onclick={() => (detail = { title: "完整路径", value: opened?.summary.path ?? "" })}
-      >
-        <span class="repo-badge" style={`--hue:${hueOf(opened.summary.path)}`} aria-hidden="true">{initialOf(opened.summary.name)}</span>
-        <span class="repo-switch-text">
-          <strong>{opened.summary.name}</strong>
-          <span><bdi>{opened.summary.path}</bdi></span>
-        </span>
-      </button>
-      <span class="divider" aria-hidden="true"></span>
-      <button
-        type="button"
-        class="branch-pill"
-        title={`当前分支：${branchText}\n点击搜索、切换、创建或删除分支`}
-        disabled={writeLocked}
-        onclick={() => (dialog = "branch")}
-      >
-        <Icon name="branch" size={15} />
-        <span class="truncate">{branchText}</span>
-        <Icon name="chevron-down" size={14} />
-      </button>
+      <div class="topbar-context">
+        <div class="menu-anchor repo-switch-anchor" bind:this={repoMenuAnchor}>
+          <button
+            type="button"
+            class="repo-switch"
+            title={`${opened.summary.path}\n点击切换仓库`}
+            aria-haspopup="menu"
+            aria-expanded={repoMenuOpen}
+            onclick={() => (repoMenuOpen = !repoMenuOpen)}
+          >
+            <span class="repo-badge" style={`--hue:${hueOf(opened.summary.path)}`} aria-hidden="true">{initialOf(opened.summary.name)}</span>
+            <span class="repo-switch-text">
+              <strong>{opened.summary.name}</strong>
+              <span><bdi>{opened.summary.path}</bdi></span>
+            </span>
+            <Icon name="chevron-down" size={13} />
+          </button>
+          {#if repoMenuOpen}
+            <div class="menu left repo-switch-menu" role="menu" aria-label="切换仓库">
+              <div class="repo-menu-title">选择要打开的仓库</div>
+              {#each recent.slice(0, 6) as repo (repo.path)}
+                <button
+                  type="button"
+                  class="menu-item repo-menu-item"
+                  role="menuitemradio"
+                  aria-checked={repo.path === opened?.summary.path}
+                  onclick={() => {
+                    repoMenuOpen = false;
+                    void openRecent(repo.path);
+                  }}
+                >
+                  <span class="repo-badge" style={`--hue:${hueOf(repo.path)}`} aria-hidden="true">{initialOf(repo.name)}</span>
+                  <span><strong>{repo.name}</strong><small><bdi>{repo.path}</bdi></small></span>
+                  {#if repo.path === opened?.summary.path}<Icon name="check" size={14} />{/if}
+                </button>
+              {/each}
+              <div class="menu-sep"></div>
+              <button type="button" class="menu-item" role="menuitem" disabled={writeLocked} onclick={() => { repoMenuOpen = false; void addRepo(); }}>
+                <Icon name="plus" /><span>添加仓库<small>打开一个本地 Git 仓库</small></span>
+              </button>
+              <button type="button" class="menu-item" role="menuitem" onclick={() => { repoMenuOpen = false; void copyPath(opened?.summary.path ?? ""); }}>
+                <Icon name="copy" /><span>复制当前仓库路径</span>
+              </button>
+            </div>
+          {/if}
+        </div>
+        <span class="context-separator" aria-hidden="true">/</span>
+        <button
+          type="button"
+          class="branch-pill"
+          title={`当前分支：${branchText}\n点击搜索、切换、创建或删除分支`}
+          disabled={writeLocked}
+          onclick={() => (dialog = "branch")}
+        >
+          <Icon name="branch" size={15} />
+          <span class="truncate">{branchText}</span>
+          <Icon name="chevron-down" size={13} />
+        </button>
+      </div>
     {:else}
-      <span class="hint">未打开仓库 · 从左侧选择，或添加一个新仓库</span>
+      <div class="topbar-empty-title"><span>开始</span><span class="topbar-empty-note">打开一个仓库，继续你的工作</span></div>
     {/if}
     <span class="spacer"></span>
     {#if opened}
-      {#if pushRetry}
-        <button type="button" class="btn btn-primary btn-sm" disabled={writeLocked} onclick={retryPush}>
-          {#if pending === "push"}<span class="spinner"></span>{:else}<Icon name="refresh" size={14} />{/if}
-          重试推送
+      <div class="topbar-actions">
+        {#if pushRetry}
+          <button type="button" class="btn btn-primary btn-sm" disabled={writeLocked} onclick={retryPush}>
+            {#if pending === "push"}<span class="spinner"></span>{:else}<Icon name="refresh" size={14} />{/if}
+            重试推送
+          </button>
+        {/if}
+        {#if !opened.snapshot.branch.upstream}
+          <button
+            type="button"
+            class="btn btn-accent-soft btn-sm"
+            disabled={writeLocked}
+            title="把当前分支推送到远程并建立上游关联"
+            onclick={() => runSync("publish", (path, generation) => api.publishBranch(path, "", generation, nextId()))}
+          >
+            <Icon name="upload" size={14} />发布分支
+          </button>
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm associate-btn"
+            disabled={writeLocked}
+            title="只建立上游关联，不推送"
+            onclick={() => runSync("associate", (path, generation) => api.associateUpstream(path, "", generation, nextId()))}
+          >
+            <Icon name="link" size={14} />只关联上游
+          </button>
+        {/if}
+        <button type="button" class="icon-btn refresh-workspace" aria-label="刷新工作区" title="重新读取工作区与当前差异" disabled={writeLocked} onclick={() => void refresh()}>
+          <Icon name="refresh" size={16} />
         </button>
-      {/if}
-      {#if !opened.snapshot.branch.upstream}
+        <div class="toolbar-group" role="group" aria-label="远程同步">
+          <button
+            type="button"
+            class="tb-btn"
+            class:busy={pending === "fetch"}
+            disabled={writeLocked}
+            title={`获取更新：下载远程分支和提交信息，不修改本地文件\n需要把提交带入当前分支时，再执行“拉取”\n${syncText}`}
+            onclick={() => runSync("fetch", (path, generation) => api.fetchRemote(path, generation, nextId()))}
+          >
+            <Icon name="download" size={14} /><span class="tb-label">获取更新</span>
+          </button>
+          <button
+            type="button"
+            class="tb-btn"
+            class:busy={pending === "pull"}
+            disabled={writeLocked}
+            title={behind > 0 ? `快进拉取 ${behind} 个提交` : "快进拉取（不会自动合并分叉）"}
+            onclick={() => runSync("pull", (path, generation) => api.pullFastForward(path, generation, nextId()))}
+          >
+            <Icon name="arrow-down" size={14} /><span class="tb-label">拉取</span>
+            {#if behind > 0}<span class="count subtle-count">{behind}</span>{/if}
+          </button>
+        </div>
         <button
           type="button"
-          class="btn btn-accent-soft btn-sm"
-          disabled={writeLocked}
-          title="把当前分支推送到远程并建立上游关联"
-          onclick={() => runSync("publish", (path, generation) => api.publishBranch(path, "", generation, nextId()))}
-        >
-          <Icon name="upload" size={14} />发布分支
-        </button>
-        <button
-          type="button"
-          class="btn btn-ghost btn-sm"
-          disabled={writeLocked}
-          title="只建立上游关联，不推送"
-          onclick={() => runSync("associate", (path, generation) => api.associateUpstream(path, "", generation, nextId()))}
-        >
-          <Icon name="link" size={14} />只关联上游
-        </button>
-      {/if}
-      <div class="toolbar-group" role="group" aria-label="同步与分支">
-        <button
-          type="button"
-          class="tb-btn"
-          class:busy={pending === "fetch"}
-          disabled={writeLocked}
-          title={`检查远程：只更新远程信息，不改工作区\n${syncText}`}
-          onclick={() => runSync("fetch", (path, generation) => api.fetchRemote(path, generation, nextId()))}
-        >
-          <Icon name="refresh" size={14} /><span class="tb-label">检查远程</span>
-        </button>
-        <button
-          type="button"
-          class="tb-btn"
-          class:busy={pending === "pull"}
-          disabled={writeLocked}
-          title={behind > 0 ? `快进拉取 ${behind} 个提交` : "快进拉取（不会自动合并分叉）"}
-          onclick={() => runSync("pull", (path, generation) => api.pullFastForward(path, generation, nextId()))}
-        >
-          <Icon name="arrow-down" size={14} /><span class="tb-label">拉取</span>
-          {#if behind > 0}<span class="count accent">{behind}</span>{/if}
-        </button>
-        <button
-          type="button"
-          class="tb-btn"
+          class="btn btn-primary btn-sm push-button"
           class:busy={pending === "push"}
           disabled={writeLocked}
           title={ahead > 0 ? `推送 ${ahead} 个本地提交（不会强行推送）` : "推送（不会强行推送）"}
           onclick={() => runSync("push", (path, generation) => api.pushBranch(path, generation, nextId()))}
         >
-          <Icon name="arrow-up" size={14} /><span class="tb-label">推送</span>
-          {#if ahead > 0}<span class="count accent">{ahead}</span>{/if}
+          {#if pending === "push"}<span class="spinner"></span>{:else}<Icon name="arrow-up" size={14} />{/if}
+          <span>推送</span>{#if ahead > 0}<span class="push-count">{ahead}</span>{/if}
+        </button>
+        <button type="button" class="icon-btn" aria-label="远程" title="管理远程地址" disabled={writeLocked} onclick={() => (dialog = "remote")}>
+          <Icon name="globe" size={17} />
         </button>
       </div>
-      <button type="button" class="icon-btn" aria-label="远程" title="管理远程地址" disabled={writeLocked} onclick={() => (dialog = "remote")}>
-        <Icon name="globe" size={17} />
-      </button>
     {/if}
   </header>
   {#if reading}
@@ -1264,10 +1358,15 @@
         selectedPath={opened?.summary.path ?? null}
         {theme}
         disabled={writeLocked}
+        {workspaceView}
+        workspaceEnabled={opened !== null}
+        {changeCount}
+        {conflictCount}
+        onView={navigate}
         onQuery={(value) => (query = value)}
         onSelect={openRecent}
         onForget={forget}
-        onShowPath={(path) => (detail = { title: "完整路径", value: path })}
+        onShowPath={copyPath}
         onTheme={changeTheme}
         onAdd={addRepo}
         onClone={() => (dialog = "clone")}
@@ -1288,31 +1387,21 @@
     {/if}
     <main class="content">
       {#if opened}
-        <div class="viewbar" role="tablist" aria-label="工作区">
-          {#each VIEWS as view, index (view.id)}
-            <button
-              type="button"
-              role="tab"
-              class="view-tab"
-              aria-selected={workspaceView === view.id}
-              title={`${view.label}（${MODIFIER_LABEL}+${index + 1}）`}
-              onclick={() => {
-                if (view.id === "changes") showChanges();
-                else if (view.id === "history") showHistory();
-                else useView(view.id);
-              }}
-            >
-              <Icon name={view.icon} size={15} />
-              <span class="vt-label">{view.label}</span>
-              {#if view.id === "changes" && changeCount > 0}
-                <span class="count">{changeCount}</span>
-              {:else if view.id === "merge" && conflictCount > 0}
-                <span class="count danger" title={`${conflictCount} 个冲突文件`}>{conflictCount}</span>
-              {/if}
-            </button>
-          {/each}
+        <div class="view-heading">
+          <div class="view-heading-copy">
+            <div class="view-title-line">
+              <h1>{viewInfo.title}</h1>
+              {#if workspaceView === "changes" && changeCount > 0}<span class="count">{changeCount}</span>{/if}
+              {#if workspaceView === "merge" && conflictCount > 0}<span class="count danger">{conflictCount}</span>{/if}
+            </div>
+            <p>{viewInfo.description}</p>
+          </div>
+          <div class="view-heading-status" title={syncText}>
+            <span class={`status-orb ${remoteState}`}></span>
+            <span>{remoteState === "live" ? "远程状态已检查" : remoteState === "stale" ? "远程状态待更新" : "本地工作区"}</span>
+          </div>
         </div>
-        <div class="view-body">
+        <div class="view-body" class:view-changes={workspaceView === "changes"}>
           {#if workspaceView === "history"}
             {#if historyPanel}
               {#await historyPanel}
@@ -1321,6 +1410,7 @@
                 <module.default
                   {opened}
                   filePath={historyPath}
+                  searchQuery={historyQuery}
                   disabled={writeLocked}
                   {nextId}
                   onGeneration={adoptGeneration}
@@ -1349,6 +1439,7 @@
                     banner = null;
                   }}
                   onOpenStash={() => useView("stash")}
+                  onOpenChanges={showChanges}
                 />
               {/await}
             {/if}
@@ -1521,6 +1612,7 @@
     live = message;
     banner = null;
   }}
+  onOpenHistory={openCommitSearch}
   {nextId}
 />
 {#if dependencyOpen}
@@ -1533,16 +1625,16 @@
     onClose={() => (dependencyOpen = false)}
   />
 {/if}
-{#if detail}
-  <DetailDialog title={detail.title} icon="folder" value={detail.value} onClose={() => (detail = null)} />
-{/if}
 {#if confirmPath}
   <DetailDialog
     title="新建仓库"
     icon="folder-plus"
     value={confirmPath}
-    body="将在此目录初始化 Git 仓库。已有文件不会被覆盖或删除。取消则不会做任何修改。"
+    body="可以直接编辑仓库目录。已有文件不会被覆盖或删除，取消则不会做任何修改。"
     confirmLabel="初始化仓库"
+    confirmDisabled={confirmPath.trim().length === 0}
+    editable
+    onInput={(value) => (confirmPath = value)}
     onClose={() => (confirmPath = null)}
     onConfirm={confirmCreate}
   />

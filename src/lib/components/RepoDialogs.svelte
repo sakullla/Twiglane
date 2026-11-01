@@ -1,8 +1,8 @@
 <script lang="ts">
   import { api, pickDirectory } from "../api";
-  import { branchLists, filterBranches } from "../branches";
   import { normalizeError } from "../errors";
-  import type { BranchRecord, BranchState, OpenedRepository, RemoteInfo, StatusSnapshot } from "../types";
+  import type { OpenedRepository, RemoteInfo, StatusSnapshot } from "../types";
+  import BranchDialog from "./BranchDialog.svelte";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
 
@@ -16,6 +16,7 @@
     onOpened: (repo: OpenedRepository) => void;
     onFailure: (error: unknown) => void;
     onNotice: (message: string) => void;
+    onOpenHistory: (query: string) => void;
     nextId: () => number;
   }
 
@@ -29,6 +30,7 @@
     onOpened,
     onFailure,
     onNotice,
+    onOpenHistory,
     nextId,
   }: Props = $props();
 
@@ -38,28 +40,16 @@
   let remotes = $state<RemoteInfo[]>([]);
   let remoteName = $state("origin");
   let remoteUrl = $state("");
-  let branches = $state<BranchRecord[]>([]);
-  let branchQuery = $state("");
-  let branchName = $state("");
   let localBusy = $state(false);
-  let confirmDelete = $state<
-    | { kind: "local"; name: string; body: string }
-    | { kind: "remote"; remote: string; name: string; body: string }
-    | null
-  >(null);
   let loadedKey = "";
 
   let blocked = $derived(disabled || localBusy);
-  let visibleBranches = $derived(filterBranches(branches, branchQuery));
-  let grouped = $derived(branchLists(visibleBranches));
 
   $effect(() => {
     const key = `${mode}:${opened?.summary.path ?? ""}`;
     if (key === loadedKey) return;
     loadedKey = key;
-    confirmDelete = null;
     if (mode === "remote" && opened) void loadRemotes();
-    if (mode === "branch" && opened) void loadBranches();
   });
 
   async function run<T>(name: string, action: () => Promise<T>): Promise<T | undefined> {
@@ -69,7 +59,7 @@
     try {
       return await action();
     } catch (error) {
-      onFailure(error);
+      onFailure(normalizeError(error));
       return undefined;
     } finally {
       localBusy = false;
@@ -118,7 +108,7 @@
       onNotice("请填写远程名称和地址。不要把令牌写进地址。");
       return;
     }
-    const exists = remotes.some((remote) => remote.name === name);
+    const exists = remotes.some((item) => item.name === name);
     const result = await run("remote", () =>
       exists
         ? api.setRemoteUrl(current.summary.path, name, url, current.generation, nextId())
@@ -128,110 +118,6 @@
     remotes = result.remotes;
     onSnapshot(result.snapshot);
     onNotice(exists ? `已更新远程 ${name}` : `已添加远程 ${name}`);
-  }
-
-  async function loadBranches() {
-    const current = opened;
-    if (!current) return;
-    const result = await run("branch", () => api.branchState(current.summary.path, current.generation, nextId()));
-    if (!result || opened?.summary.path !== current.summary.path) return;
-    applyBranches(result);
-  }
-
-  function applyBranches(result: BranchState) {
-    branches = result.branches;
-    onSnapshot(result.snapshot);
-  }
-
-  async function createNamedBranch() {
-    const current = opened;
-    const name = branchName.trim();
-    if (!current || !name) return;
-    const result = await run("branch", () => api.createBranch(current.summary.path, name, current.generation, nextId()));
-    if (!result) return;
-    applyBranches(result);
-    branchName = "";
-    onNotice(`已创建分支 ${name}，当前分支没有切换。`);
-  }
-
-  async function switchTo(name: string) {
-    const current = opened;
-    if (!current) return;
-    const result = await run("branch", () => api.switchBranch(current.summary.path, name, current.generation, nextId()));
-    if (!result) return;
-    applyBranches(result);
-    onNotice(`已切换到 ${result.snapshot.branch.name ?? name}`);
-  }
-
-  function askDelete(branch: BranchRecord) {
-    if (branch.remote) {
-      const slash = branch.name.indexOf("/");
-      if (slash <= 0) return;
-      confirmDelete = {
-        kind: "remote",
-        remote: branch.name.slice(0, slash),
-        name: branch.name.slice(slash + 1),
-        body: `将从远程删除 ${branch.name}。这不会强行推送，但远程上的该分支会被移除。取消则不会执行。`,
-      };
-      return;
-    }
-    confirmDelete = {
-      kind: "local",
-      name: branch.name,
-      body: "将删除这个本地分支。如果它还有未合入当前分支的提交，需要再次确认。取消则不会执行。",
-    };
-  }
-
-  async function confirmRemoval() {
-    const current = opened;
-    const target = confirmDelete;
-    if (!current || !target || blocked) return;
-    if (target.kind === "remote") {
-      confirmDelete = null;
-      const result = await run("branch", () =>
-        api.deleteRemoteBranch(current.summary.path, target.remote, target.name, true, current.generation, nextId()),
-      );
-      if (!result) return;
-      applyBranches(result);
-      onNotice(`已删除远程分支 ${target.remote}/${target.name}`);
-      return;
-    }
-    localBusy = true;
-    onBusy("branch");
-    try {
-      const result = await api.deleteBranch(current.summary.path, target.name, false, current.generation, nextId());
-      confirmDelete = null;
-      applyBranches(result);
-      onNotice(`已删除本地分支 ${target.name}`);
-    } catch (error) {
-      const failure = normalizeError(error);
-      if (failure.code === "branch_unmerged") {
-        confirmDelete = {
-          kind: "local",
-          name: target.name,
-          body: "该分支含有尚未合入当前分支的提交。确认后才会删除，删除后这些提交不能由这里自动恢复。",
-        };
-      } else {
-        confirmDelete = null;
-      }
-      onFailure(error);
-    } finally {
-      localBusy = false;
-      onBusy(null);
-    }
-  }
-
-  async function confirmUnmerged() {
-    const current = opened;
-    const target = confirmDelete;
-    if (!current || !target || target.kind !== "local") return;
-    confirmDelete = null;
-    const result = await run("branch", () =>
-      api.deleteBranch(current.summary.path, target.name, true, current.generation, nextId()),
-    );
-    if (!result) return;
-    applyBranches(result);
-    onNotice(`已删除未合入的本地分支 ${target.name}`);
   }
 </script>
 
@@ -332,113 +218,6 @@
       </button>
     {/snippet}
   </Modal>
-{:else if mode === "branch"}
-  <Modal
-    title="分支"
-    titleId="repo-dialog-title"
-    icon="branch"
-    size="lg"
-    description="当前分支、未合入提交和其他工作区正在使用的分支会受到保护。切换若会覆盖修改，会停下来并保留工作区。"
-    {onClose}
-  >
-    <div class="row" style="flex-wrap: nowrap">
-      <div class="field" style="flex: 1">
-        <Icon name="search" size={14} />
-        <label class="sr-only" for="branch-search">搜索分支</label>
-        <input id="branch-search" data-autofocus bind:value={branchQuery} placeholder="搜索本地或远程分支" autocomplete="off" spellcheck="false" />
-      </div>
-    </div>
-    <div class="list-box" style="max-height: 340px">
-      <div class="list-section">本地 <span class="count">{grouped.local.length}</span></div>
-      {#if grouped.local.length === 0}
-        <div class="list-empty">没有匹配的本地分支。</div>
-      {/if}
-      {#each grouped.local as branch (branch.name)}
-        <div class="list-row" class:current={branch.current}>
-          <Icon name={branch.current ? "check-circle" : "branch"} />
-          <div class="lr-main">
-            <span class="lr-title">
-              <span title={branch.name}>{branch.name}</span>
-              {#if branch.current}<span class="chip current">当前</span>{/if}
-            </span>
-            {#if branch.upstream || (branch.worktree && !branch.current)}
-              <span class="lr-sub">
-                {#if branch.upstream}上游 {branch.upstream}{/if}
-                {#if branch.worktree && !branch.current}{branch.upstream ? " · " : ""}工作区 {branch.worktree}{/if}
-              </span>
-            {/if}
-          </div>
-          {#if !branch.current}
-            <span class="lr-actions">
-              <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={() => switchTo(branch.name)}>切换</button>
-              <button type="button" class="icon-btn sm danger" aria-label={`删除 ${branch.name}`} title="删除" disabled={blocked} onclick={() => askDelete(branch)}>
-                <Icon name="trash" size={13} />
-              </button>
-            </span>
-          {/if}
-        </div>
-      {/each}
-      <div class="list-section">远程 <span class="count">{grouped.remote.length}</span></div>
-      {#if grouped.remote.length === 0}
-        <div class="list-empty">没有匹配的远程分支。</div>
-      {/if}
-      {#each grouped.remote as branch (`remote:${branch.name}`)}
-        <div class="list-row">
-          <Icon name="cloud" />
-          <div class="lr-main">
-            <span class="lr-title"><span title={branch.name}>{branch.name}</span></span>
-          </div>
-          <span class="lr-actions">
-            <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={() => switchTo(branch.name)}>切换</button>
-            <button type="button" class="icon-btn sm danger" aria-label={`删除远程 ${branch.name}`} title="删除远程分支" disabled={blocked} onclick={() => askDelete(branch)}>
-              <Icon name="trash" size={13} />
-            </button>
-          </span>
-        </div>
-      {/each}
-    </div>
-    {#if confirmDelete}
-      <div class="callout warn" role="alert">
-        <Icon name="alert" size={15} />
-        <div class="callout-body">
-          <p>{confirmDelete.body}</p>
-          <div class="row">
-            <button type="button" class="btn btn-secondary btn-sm" onclick={() => (confirmDelete = null)}>取消</button>
-            {#if confirmDelete.kind === "local" && confirmDelete.body.includes("尚未合入")}
-              <button type="button" class="btn btn-danger btn-sm" disabled={blocked} onclick={confirmUnmerged}>确认删除未合入分支</button>
-            {:else}
-              <button type="button" class="btn btn-danger btn-sm" disabled={blocked} onclick={confirmRemoval}>确认删除</button>
-            {/if}
-          </div>
-        </div>
-      </div>
-    {/if}
-    <div class="form-group">
-      <label class="label" for="branch-name">从当前状态创建新分支</label>
-      <div class="row" style="flex-wrap: nowrap">
-        <input
-          id="branch-name"
-          class="input"
-          bind:value={branchName}
-          placeholder="例如 feature/login"
-          autocomplete="off"
-          spellcheck="false"
-          onkeydown={(event) => {
-            if (event.key === "Enter" && branchName.trim()) {
-              event.preventDefault();
-              void createNamedBranch();
-            }
-          }}
-        />
-        <button type="button" class="btn btn-primary" disabled={blocked || branchName.trim().length === 0} onclick={createNamedBranch}>
-          <Icon name="plus" size={14} />创建
-        </button>
-      </div>
-      <p class="hint" style="margin-top: 6px">创建后不会自动切换到新分支。</p>
-    </div>
-    {#snippet footer()}
-      <span class="spacer"></span>
-      <button type="button" class="btn btn-secondary" onclick={onClose}>关闭</button>
-    {/snippet}
-  </Modal>
+{:else if mode === "branch" && opened}
+  <BranchDialog {opened} {disabled} {onClose} {onBusy} {onSnapshot} {onFailure} {onNotice} {onOpenHistory} {nextId} />
 {/if}

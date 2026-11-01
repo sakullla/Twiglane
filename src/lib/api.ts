@@ -24,6 +24,7 @@ import type {
   StashSaveResult,
   StashState,
   StatusSnapshot,
+  TagState,
   Theme,
   UndoResult,
 } from "./types";
@@ -174,6 +175,14 @@ export const api = {
       generation,
       requestId,
     }),
+  tagState: (path: string, generation: number, requestId: number) =>
+    invoke<TagState>("tag_state", { path, generation, requestId }),
+  createTag: (path: string, name: string, target: string, message: string, generation: number, requestId: number) =>
+    invoke<TagState>("create_tag", { path, name, target, message, generation, requestId }),
+  deleteTag: (path: string, name: string, confirm: boolean, generation: number, requestId: number) =>
+    invoke<TagState>("delete_tag", { path, name, confirm, generation, requestId }),
+  pushTag: (path: string, remote: string, name: string, generation: number, requestId: number) =>
+    invoke<TagState>("push_tag", { path, remote, name, generation, requestId }),
   historyPage: (path: string, query: string, offset: number, generation: number, requestId: number) =>
     invoke<HistoryPage>("history_page", { path, query, offset, generation, requestId }),
   commitDetail: (

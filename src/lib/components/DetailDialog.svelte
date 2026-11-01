@@ -8,12 +8,15 @@
     value: string;
     body?: string;
     confirmLabel?: string;
+    confirmDisabled?: boolean;
     icon?: IconName;
     prose?: boolean;
+    editable?: boolean;
+    onInput?: (value: string) => void;
     onClose: () => void;
     onConfirm?: () => void;
   }
-  let { title, value, body = "", confirmLabel = "", icon = "info", prose = false, onClose, onConfirm }: Props = $props();
+  let { title, value, body = "", confirmLabel = "", confirmDisabled = false, icon = "info", prose = false, editable = false, onInput, onClose, onConfirm }: Props = $props();
   let copied = $state<"" | "ok" | "fail">("");
 
   async function copyValue() {
@@ -27,7 +30,17 @@
 </script>
 
 <Modal {title} titleId="detail-title" {icon} description={body} size={prose ? "lg" : "md"} {onClose}>
-  <textarea class="full-value" class:prose readonly aria-label={title} rows={prose ? 12 : 3}>{value}</textarea>
+  <textarea
+    class="full-value"
+    class:prose
+    class:editable
+    readonly={!editable}
+    aria-label={title}
+    rows={prose ? 12 : 3}
+    oninput={(event) => {
+      if (editable) onInput?.((event.currentTarget as HTMLTextAreaElement).value);
+    }}
+  >{value}</textarea>
   {#if copied === "ok"}
     <p class="hint" role="status">已复制完整内容。</p>
   {:else if copied === "fail"}
@@ -40,7 +53,7 @@
     <span class="spacer"></span>
     <button type="button" class="btn btn-secondary" onclick={onClose}>{onConfirm ? "取消" : "关闭"}</button>
     {#if onConfirm}
-      <button type="button" class="btn btn-primary" onclick={onConfirm}>{confirmLabel}</button>
+      <button type="button" class="btn btn-primary" disabled={confirmDisabled} onclick={onConfirm}>{confirmLabel}</button>
     {/if}
   {/snippet}
 </Modal>

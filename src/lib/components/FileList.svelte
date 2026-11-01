@@ -108,7 +108,7 @@
     <input
       id="file-search"
       aria-label="搜索改动文件"
-      placeholder="筛选改动文件"
+      placeholder="搜索文件或路径"
       autocomplete="off"
       spellcheck="false"
       value={query}

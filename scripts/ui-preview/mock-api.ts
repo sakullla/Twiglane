@@ -488,7 +488,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     return ok({
       generation,
       commit,
-      body: commit.summary + "\n\n这次提交重新组织了主界面：\n- 顶栏集中同步操作\n- 改动列表分组并支持全部暂存\n- 统一的对话框与提示样式",
+      body: commit.summary + "\n\n这次提交重新组织了主界面：\n- 顶栏集中同步操作\n- 改动列表分组并支持全部暂存\n- 统一的对话框与提示样式" + (previewParams.get("body") === "long" ? "\n- 长说明的一行".repeat(30) : ""),
       root: false,
       merge: commit.parents.length > 1,
       selectedParent: commit.parents[0],

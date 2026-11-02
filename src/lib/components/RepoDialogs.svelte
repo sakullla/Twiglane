@@ -130,7 +130,7 @@
     }
     const result = await runClone(() => api.cloneRepository(url, cloneParent, cloneName.trim(), nextId()));
     if (!result) return;
-    // 打开还是只通知由外壳决定：这时可能已经开着别的窗口。
+    // 打开还是只通知由外壳决定：看用户是否已经收起窗口。
     onOpened(result.opened);
     // 收起后再次打开的可能是别的对话框，只关自己。
     if (mode === "clone") onClose();
@@ -242,7 +242,7 @@
         <span>认证使用系统凭据助手或 SSH agent，不要把令牌写进地址。需要交互输入时会停止，而不是一直等待。</span>
       </div>
       {#if cloning}
-        <p class="hint" role="status" data-clone-running>克隆无法中途取消。可以收起这个窗口，克隆会在后台继续，完成后自动打开仓库；如果那时开着别的窗口，只通知完成，可从仓库弹层打开。失败时通知里说明原因。</p>
+        <p class="hint" role="status" data-clone-running>克隆无法中途取消。留在这里，完成后自动打开仓库；点“在后台继续”后不会打断手上的工作，完成时只通知，可从仓库弹层打开。失败时通知里说明原因。</p>
       {/if}
     </div>
     {#snippet footer()}

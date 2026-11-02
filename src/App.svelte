@@ -48,7 +48,6 @@
   import Icon from "./lib/components/Icon.svelte";
   import MergeBanner from "./lib/components/MergeBanner.svelte";
   import MergeModal from "./lib/components/MergeModal.svelte";
-  import { openModalCount } from "./lib/components/Modal.svelte";
   import PaneResizer from "./lib/components/PaneResizer.svelte";
   import PublishModal from "./lib/components/PublishModal.svelte";
   import RecoveryActions from "./lib/components/RecoveryActions.svelte";
@@ -513,21 +512,14 @@
     void loadSelectedDiff();
   }
 
-  /** 克隆自己的窗口不算：用户等在那里，完成后照常打开。 */
-  function overlayOpen(): boolean {
-    const modals = openModalCount() - (cloneOpen ? 1 : 0);
-    return modals > 0 || paletteOpen || switcher !== null || document.querySelector(".menu, .popover") !== null;
-  }
-
   /**
-   * 后台克隆可能在用户开着别的窗口时结束，这时切换仓库会关掉窗口、丢掉手上的操作：
-   * 只加入最近仓库并通知。后端的文件监听只有一路，克隆完成时已转到新仓库，
-   * 所以要把当前仓库接回来；接不回来就退回低频重读。
+   * 克隆窗口还开着时用户在等结果，完成后照常打开。点过“在后台继续”就不再打断：
+   * 不切换仓库、不关任何窗口，只加入最近仓库并通知。
    */
   function cloneFinished(next: OpenedRepository) {
     banner = null;
     const { name, path } = next.summary;
-    if (!overlayOpen()) {
+    if (cloneOpen) {
       rememberOpened(next);
       notice(`已克隆并打开 ${name}`);
       return;
@@ -537,16 +529,27 @@
     if (opened) void rewatchCurrent(opened.summary.path);
   }
 
+  /**
+   * 克隆命令结束时后端总会启动新仓库的监听，而监听只有一路，当前仓库因此被顶掉。
+   * 重新打开只为把监听接回来，返回的快照不用：等待期间可能已有写入，直接应用会回退。
+   * 空窗内的外部改动由 refresh 补上，它自带 epoch、generation 保护和合并探测。
+   */
   async function rewatchCurrent(path: string) {
     try {
-      const current = await api.openRepository(path, nextId());
+      let current: OpenedRepository;
+      try {
+        current = await api.openRepository(path, nextId());
+      } catch (error) {
+        if (normalizeError(error).code !== "stale") throw error;
+        current = await api.openRepository(path, nextId());
+      }
       if (opened?.summary.path !== path) {
         // 等待期间切了仓库：这次打开可能抢走了新仓库的监听，再接一次。
         if (opened) void rewatchCurrent(opened.summary.path);
         return;
       }
       degraded = current.watchDegraded;
-      applySnapshot(current.snapshot);
+      void refresh();
     } catch {
       if (opened?.summary.path === path) degraded = true;
     }

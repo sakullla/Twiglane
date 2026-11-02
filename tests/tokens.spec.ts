@@ -564,7 +564,7 @@ describe("状态与动效统一（R2、R12）", () => {
     expect(narrow).toMatch(/\.commit-files\.collapsed \.history-files/);
     expect(ruleBody(components, ".commit-files-toggle"), "宽详情没有这个开关").toMatch(/display:\s*none/);
     expect(ruleBody(components, ".commit-body.clamped"), "长说明默认折叠到一行").toMatch(/white-space:\s*nowrap/);
-    expect(narrow, "文件列表按详情高度分配，文件多时至少 3 行").toMatch(/\.commit-split:has\(\.commit-files-filter\)\s*\{[^}]*fit-content\(max\(50%, 222px\)\)/);
+    expect(narrow, "文件列表按详情高度分配，文件多时至少 3 行").toMatch(/\.commit-split:has\(\.commit-files-filter\)\s*\{[^}]*fit-content\(min\(max\(50%, 222px\), calc\(100% - 140px\)\)\)/);
   });
 
   it("合并说明窄窗也不被压缩", () => {

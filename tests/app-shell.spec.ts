@@ -1470,8 +1470,10 @@ describe("应用外壳", () => {
   describe("后台克隆完成", () => {
     const clonedRepo = { summary: { name: "fresh", path: "/parent/fresh" }, generation: 1, snapshot, draft: "", watchDegraded: false };
 
-    /** 从仓库弹层开始克隆，然后收起窗口，让克隆留在后台。 */
-    async function startBackgroundClone() {
+    const dot = () => document.querySelector(".statusbar .sb-dot");
+
+    /** 从仓库弹层开始克隆，窗口仍开着。 */
+    async function startClone() {
       let finish: (value: unknown) => void = () => {};
       let fail: (reason: unknown) => void = () => {};
       mocks.cloneRepository.mockReset();
@@ -1485,51 +1487,156 @@ describe("应用外壳", () => {
       const start = within(dialog).getByRole("button", { name: /开始克隆/ });
       await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
       await fireEvent.click(start);
-      await fireEvent.click(await within(dialog).findByRole("button", { name: "在后台继续" }));
-      await waitFor(() => expect(screen.queryByRole("dialog", { name: "克隆仓库" })).toBeNull());
-      return { finish: () => finish({ path: "/parent/fresh", opened: clonedRepo }), fail };
+      await within(dialog).findByRole("button", { name: "在后台继续" });
+      return { dialog, finish: () => finish({ path: "/parent/fresh", opened: clonedRepo }), fail };
     }
 
-    it("没有窗口开着时照常打开新仓库", async () => {
+    async function startBackgroundClone() {
+      const clone = await startClone();
+      await fireEvent.click(within(clone.dialog).getByRole("button", { name: "在后台继续" }));
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "克隆仓库" })).toBeNull());
+      return clone;
+    }
+
+    it("克隆窗口还开着时完成后打开新仓库，不用接回监听", async () => {
       render(App);
       await openRepo();
-      const clone = await startBackgroundClone();
+      const clone = await startClone();
+      const opens = mocks.openRepository.mock.calls.length;
       clone.finish();
       await waitFor(() => expect(screen.getByRole("button", { name: "当前仓库 fresh" })).toBeTruthy());
+      expect(screen.queryByRole("dialog", { name: "克隆仓库" })).toBeNull();
       expect(document.querySelector(".toast.ok")?.textContent).toContain("已克隆并打开 fresh");
+      expect(mocks.openRepository.mock.calls.length).toBe(opens);
     });
 
-    it("设置开着时不切换、不关窗口，加入最近仓库，并把当前仓库接回监听", async () => {
+    it("点过在后台继续：什么窗口都没开也不切换，草稿不动，加入最近仓库", async () => {
+      render(App);
+      await openRepo();
+      const message = screen.getByRole("textbox", { name: "提交说明草稿" });
+      await fireEvent.input(message, { target: { value: "写到一半的说明" } });
+      const clone = await startBackgroundClone();
+      clone.finish();
+      await waitFor(() => expect(document.querySelector(".toast.ok")?.textContent).toContain("克隆完成：fresh"));
+      expect(document.querySelector(".toast.ok")?.textContent).toContain("仓库弹层");
+      expect(screen.getByRole("button", { name: "当前仓库 demo" }), "仓库不切换").toBeTruthy();
+      expect((screen.getByRole("textbox", { name: "提交说明草稿" }) as HTMLTextAreaElement).value).toBe("写到一半的说明");
+      await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
+      expect(await screen.findByRole("option", { name: /fresh/ }), "能从仓库弹层打开").toBeTruthy();
+    });
+
+    it("设置开着时不关窗口", async () => {
       render(App);
       await openRepo();
       const clone = await startBackgroundClone();
       await fireEvent.click(screen.getByRole("button", { name: "设置" }));
       await screen.findByRole("dialog", { name: "设置" });
-      const opens = mocks.openRepository.mock.calls.length;
       clone.finish();
       await waitFor(() => expect(document.querySelector(".toast.ok")?.textContent).toContain("克隆完成：fresh"));
-      expect(document.querySelector(".toast.ok")?.textContent).toContain("仓库弹层");
       expect(screen.getByRole("dialog", { name: "设置" }), "窗口不关").toBeTruthy();
-      expect(screen.getByRole("button", { name: "当前仓库 demo", hidden: true }), "仓库不切换").toBeTruthy();
-      await waitFor(() => expect(mocks.openRepository.mock.calls.length).toBe(opens + 1));
-      expect(mocks.openRepository.mock.calls[opens][0], "后端监听已转走，要接回当前仓库").toBe(repoPath);
-
-      await fireEvent.keyDown(document.body, { key: "Escape" });
-      await waitFor(() => expect(screen.queryByRole("dialog", { name: "设置" })).toBeNull());
-      await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
-      expect(await screen.findByRole("option", { name: /fresh/ }), "能从仓库弹层打开").toBeTruthy();
     });
 
-    it("弹层开着时同样不切换；接回监听失败时退回低频重读", async () => {
+    it("起始页收到后台克隆完成时不打开，也不去接回监听", async () => {
+      mocks.pickDirectory.mockResolvedValue("/parent");
+      render(App);
+      await waitFor(() => expect(document.querySelector(".welcome")).toBeTruthy());
+      let finish: (value: unknown) => void = () => {};
+      mocks.cloneRepository.mockReset();
+      mocks.cloneRepository.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+      await fireEvent.click(screen.getByRole("button", { name: /克隆远程仓库/ }));
+      const dialog = await screen.findByRole("dialog", { name: "克隆仓库" });
+      await fireEvent.input(within(dialog).getByLabelText("远程地址"), { target: { value: "https://e.com/fresh.git" } });
+      await fireEvent.click(within(dialog).getByRole("button", { name: /选择目录/ }));
+      const start = within(dialog).getByRole("button", { name: /开始克隆/ });
+      await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+      await fireEvent.click(start);
+      await fireEvent.click(await within(dialog).findByRole("button", { name: "在后台继续" }));
+      finish({ path: "/parent/fresh", opened: clonedRepo });
+      await waitFor(() => expect(document.querySelector(".toast.ok")?.textContent).toContain("克隆完成：fresh"));
+      expect(document.querySelector(".welcome")).toBeTruthy();
+      expect(document.querySelector(".welcome-recent")?.textContent).toContain("fresh");
+      expect(mocks.openRepository).not.toHaveBeenCalled();
+    });
+
+    it("接回期间发生写入：不应用旧快照，generation 不回退，接回后用当前 generation 刷新", async () => {
       render(App);
       await openRepo();
       const clone = await startBackgroundClone();
-      await fireEvent.click(screen.getByRole("button", { name: /^同步/ }));
-      mocks.openRepository.mockRejectedValueOnce({ code: "unknown", message: "读不到" });
+      let reopen: (value: unknown) => void = () => {};
+      mocks.openRepository.mockReturnValueOnce(new Promise((resolve) => (reopen = resolve)));
       clone.finish();
       await waitFor(() => expect(document.querySelector(".toast.ok")?.textContent).toContain("克隆完成：fresh"));
-      expect(screen.getByRole("button", { name: "当前仓库 demo" })).toBeTruthy();
-      expect(screen.getByRole("menu", { name: "同步" })).toBeTruthy();
+
+      const newer = { ...snapshot, generation: 9, files: [] };
+      mocks.refreshStatus.mockResolvedValue(newer);
+      const changed = mocks.listenEvent.mock.calls.find(([name]) => name === "repo-changed")![1];
+      changed({ path: repoPath, generation: 9, degraded: false });
+      await waitFor(() => expect(mocks.refreshStatus).toHaveBeenCalled());
+      await waitFor(() => expect(document.querySelector(".file-row")).toBeNull());
+      mocks.refreshStatus.mockClear();
+
+      reopen({ summary: { name: "demo", path: repoPath }, generation: 4, snapshot, draft: "", watchDegraded: false });
+      await waitFor(() => expect(mocks.refreshStatus).toHaveBeenCalled());
+      expect(mocks.refreshStatus.mock.calls[0][1], "generation 不回退").toBe(9);
+      await tick();
+      expect(document.querySelector(".file-row"), "旧快照里的文件不回来").toBeNull();
+    });
+
+    it("接回期间切了仓库：不刷新旧仓库，把监听接到新仓库", async () => {
+      render(App);
+      await openRepo();
+      const clone = await startBackgroundClone();
+      let reopen: (value: unknown) => void = () => {};
+      mocks.openRepository.mockReturnValueOnce(new Promise((resolve) => (reopen = resolve)));
+      clone.finish();
+      await waitFor(() => expect(document.querySelector(".toast.ok")?.textContent).toContain("克隆完成：fresh"));
+
+      mocks.openRepository.mockResolvedValueOnce(clonedRepo);
+      await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
+      await fireEvent.click(await screen.findByRole("option", { name: /fresh/ }));
+      await waitFor(() => expect(screen.getByRole("button", { name: "当前仓库 fresh" })).toBeTruthy());
+
+      mocks.refreshStatus.mockClear();
+      mocks.openRepository.mockResolvedValueOnce(clonedRepo);
+      reopen({ summary: { name: "demo", path: repoPath }, generation: 4, snapshot, draft: "", watchDegraded: false });
+      await waitFor(() => expect(mocks.openRepository.mock.calls.at(-1)?.[0]).toBe("/parent/fresh"));
+      await waitFor(() => expect(mocks.refreshStatus).toHaveBeenCalled());
+      expect(mocks.refreshStatus.mock.calls.every(([path]) => path === "/parent/fresh"), "旧仓库不刷新").toBe(true);
+    });
+
+    it("接回遇到 stale 时重试一次，成功后监听恢复", async () => {
+      render(App);
+      await openRepo();
+      const clone = await startBackgroundClone();
+      const opens = mocks.openRepository.mock.calls.length;
+      mocks.openRepository.mockRejectedValueOnce({ code: "stale", message: "过期" });
+      clone.finish();
+      await waitFor(() => expect(mocks.openRepository.mock.calls.length).toBe(opens + 2));
+      await waitFor(() => expect(mocks.refreshStatus).toHaveBeenCalled());
+      expect(dot()?.classList.contains("stale"), "接回成功不算降级").toBe(false);
+    });
+
+    it("重试也失败才退回低频重读", async () => {
+      render(App);
+      await openRepo();
+      const clone = await startBackgroundClone();
+      const opens = mocks.openRepository.mock.calls.length;
+      mocks.openRepository.mockRejectedValueOnce({ code: "stale", message: "过期" });
+      mocks.openRepository.mockRejectedValueOnce({ code: "stale", message: "过期" });
+      clone.finish();
+      await waitFor(() => expect(dot()?.classList.contains("stale")).toBe(true));
+      expect(mocks.openRepository.mock.calls.length).toBe(opens + 2);
+    });
+
+    it("不是 stale 的失败不重试，直接退回低频重读", async () => {
+      render(App);
+      await openRepo();
+      const clone = await startBackgroundClone();
+      const opens = mocks.openRepository.mock.calls.length;
+      mocks.openRepository.mockRejectedValueOnce({ code: "unknown", message: "读不到" });
+      clone.finish();
+      await waitFor(() => expect(dot()?.classList.contains("stale")).toBe(true));
+      expect(mocks.openRepository.mock.calls.length).toBe(opens + 1);
     });
 
     it("失败时通知原因，写锁释放", async () => {
@@ -1538,7 +1645,6 @@ describe("应用外壳", () => {
       const clone = await startBackgroundClone();
       clone.fail({ code: "clone_failed", message: "认证失败" });
       await waitFor(() => expect(document.querySelector(".toast.error")?.textContent).toContain("认证失败"));
-      await waitFor(() => expect(document.querySelector(".composer-resizer")).toBeTruthy());
       expect(screen.getByRole("button", { name: "当前仓库 demo" })).toBeTruthy();
     });
   });

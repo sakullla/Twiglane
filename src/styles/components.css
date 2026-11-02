@@ -734,9 +734,10 @@ label.list-row .checkbox { margin-top: 2px; }
   .commit-title { grid-column: 1; }
   .commit-facts { grid-column: 2; grid-row: 1; }
   .commit-body-row, .commit-byline { grid-column: 1 / -1; }
-  /* 文件列表按详情高度分配：内容少时贴合内容，上限是一半高度，并保证完整显示 3 行（44px × 3）。 */
-  .commit-split { grid-template-columns: minmax(0, 1fr); grid-template-rows: fit-content(max(50%, 182px)) minmax(0, 1fr); }
-  .commit-split:has(.commit-files-filter) { grid-template-rows: fit-content(max(50%, 222px)) minmax(0, 1fr); }
+  /* 文件列表按详情高度分配：内容少时贴合内容，上限是一半高度，并保证完整显示 3 行（44px × 3）。
+     展开长说明后拆分区可能很矮，这时 3 行让位，差异区至少留 140px（工具条加五六行）。 */
+  .commit-split { grid-template-columns: minmax(0, 1fr); grid-template-rows: fit-content(min(max(50%, 182px), calc(100% - 140px))) minmax(0, 1fr); }
+  .commit-split:has(.commit-files-filter) { grid-template-rows: fit-content(min(max(50%, 222px), calc(100% - 140px))) minmax(0, 1fr); }
   .commit-files { border-right: 0; border-bottom: 1px solid var(--border); }
   .commit-files-toggle { display: inline-grid; }
   .commit-files.collapsed .commit-files-filter, .commit-files.collapsed .history-files, .commit-files.collapsed .commit-files-empty { display: none; }

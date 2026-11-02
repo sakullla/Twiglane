@@ -916,7 +916,7 @@
               </div>
             {:else if row.kind === "ctx"}
               <div class={`cr-row cr-line ${row.tone ?? ""}`} style={`top:${top}px;height:${height}px`}>
-                <span class="ln">{row.no}</span><span class="code"><span class="code-in">{#each lineSegments(row.text, tokensOf(row.bk, row.bi)) as seg, i (i)}<span class={seg.k}>{seg.t}</span>{/each}</span></span>
+                <span class="ln">{row.no}</span><span class="code"><span class="code-in" data-len={row.text.length}>{#each lineSegments(row.text, tokensOf(row.bk, row.bi)) as seg, i (i)}<span class={seg.k}>{seg.t}</span>{/each}</span></span>
               </div>
             {:else if row.kind === "head"}
               {@const h = parsed.hunks[row.hunk]}
@@ -976,10 +976,10 @@
                 style={`top:${top}px;height:${height}px`}
               >
                 <span class="cr-half ours" class:blank={row.ours === null}>
-                  <span class="ln">{row.oNo ?? ""}</span><span class="code"><span class="code-in">{#each o as seg, i (i)}<span class={seg.k} class:mk={seg.m}>{seg.t}</span>{/each}</span></span>
+                  <span class="ln">{row.oNo ?? ""}</span><span class="code"><span class="code-in" data-len={(row.ours ?? "").length}>{#each o as seg, i (i)}<span class={seg.k} class:mk={seg.m}>{seg.t}</span>{/each}</span></span>
                 </span>
                 <span class="cr-half theirs" class:blank={row.theirs === null}>
-                  <span class="ln">{row.tNo ?? ""}</span><span class="code"><span class="code-in">{#each t as seg, i (i)}<span class={seg.k} class:mk={seg.m}>{seg.t}</span>{/each}</span></span>
+                  <span class="ln">{row.tNo ?? ""}</span><span class="code"><span class="code-in" data-len={(row.theirs ?? "").length}>{#each t as seg, i (i)}<span class={seg.k} class:mk={seg.m}>{seg.t}</span>{/each}</span></span>
                 </span>
               </div>
             {:else if row.kind === "basehead"}
@@ -988,11 +988,11 @@
               </div>
             {:else if row.kind === "base"}
               <div class="cr-row cr-line base cr-card" class:current={current === hunk} style={`top:${top}px;height:${height}px`}>
-                <span class="ln">{row.no}</span><span class="code"><span class="code-in">{#each lineSegments(row.text, tokensOf(row.bk, row.bi)) as seg, i (i)}<span class={seg.k}>{seg.t}</span>{/each}</span></span>
+                <span class="ln">{row.no}</span><span class="code"><span class="code-in" data-len={row.text.length}>{#each lineSegments(row.text, tokensOf(row.bk, row.bi)) as seg, i (i)}<span class={seg.k}>{seg.t}</span>{/each}</span></span>
               </div>
             {:else if row.kind === "res"}
               <div class="cr-row cr-line res cr-card" class:current={current === hunk} class:last={isLastRowOfCard(row)} style={`top:${top}px;height:${height}px`}>
-                <span class="ln">{row.no}</span><span class="code"><span class="code-in">{#each lineSegments(row.text, tokensOf(row.bk, row.bi)) as seg, i (i)}<span class={seg.k}>{seg.t}</span>{/each}</span></span>
+                <span class="ln">{row.no}</span><span class="code"><span class="code-in" data-len={row.text.length}>{#each lineSegments(row.text, tokensOf(row.bk, row.bi)) as seg, i (i)}<span class={seg.k}>{seg.t}</span>{/each}</span></span>
               </div>
             {:else if row.kind === "empty"}
               <div class="cr-row cr-line res is-empty cr-card last" class:current={current === hunk} style={`top:${top}px;height:${height}px`}>

@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/svelte";
-import { beforeEach, describe, expect, it } from "vitest";
+import { tick } from "svelte";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createTextDiff } from "../src/lib/diff";
 import { highlightLines, resetHighlightCache } from "../src/lib/syntax/client";
 import { buildDiffDocuments } from "../src/lib/syntax/diffSyntax";
@@ -171,6 +172,43 @@ describe("差异视图里的语法高亮", () => {
     // 缓存命中时结果在 effect 里同步送达：曾因版本号自增被追踪而无限重跑。
     renderDiff("src/panel.ts", "export const LIMIT = 20;\n", "export const LIMIT = 50;\n");
     await waitFor(() => expect(document.querySelector(".diff .tk-keyword")).toBeTruthy(), { timeout: 200 });
+  });
+
+  it("分词缓存命中时切文件，片段复用的中间态不会锁存成滚动宽度", async () => {
+    // happy-dom 没有布局：宽度按测量当下 DOM 里的真实文字算，中间态的多余文字不会被掩盖。
+    const offsetWidth = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return (this.textContent?.length ?? 0) * 10;
+    });
+    const settle = async () => {
+      await tick();
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    };
+    try {
+      const a = `export const routes = [${'"route", '.repeat(30)}];`;
+      const fileA = createTextDiff("src/a.ts", "export const LIMIT = 20;\n", `export const LIMIT = 50;\n${a}\n`, 1);
+      const fileB = createTextDiff("src/b.ts", "let x = 1;\n", "let x = 2;\n", 1);
+      const props = (path: string, diff: typeof fileA) => ({ selection: { path, side: "unstaged" as const }, diff });
+      const view = render(DiffView, {
+        props: { ...props("src/a.ts", fileA), error: null, loading: false, disabled: false, onStageHunk: () => {}, onLoadMore: () => {} },
+      });
+      await waitFor(() => expect(document.querySelector(".diff .tk-keyword")).toBeTruthy(), { timeout: 5000 });
+      await view.rerender(props("src/b.ts", fileB));
+      await waitFor(() => expect(document.querySelector(".diff .tk-keyword")?.textContent).toBe("let"), { timeout: 5000 });
+      await settle();
+      const scroller = document.querySelector(".diff-scroll") as HTMLElement;
+      const stable = () => Math.max(...[...document.querySelectorAll<HTMLElement>(".code-in")].map((node) => node.offsetWidth));
+      for (let round = 0; round < 3; round += 1) {
+        await view.rerender(props("src/a.ts", fileA));
+        await settle();
+        expect(scroller.style.getPropertyValue("--code-floor")).toBe(`${stable()}px`);
+        expect(stable()).toBe(a.length * 10);
+        await view.rerender(props("src/b.ts", fileB));
+        await settle();
+        expect(scroller.style.getPropertyValue("--code-floor")).toBe(`${stable()}px`);
+      }
+    } finally {
+      offsetWidth.mockRestore();
+    }
   });
 
   it("关闭语法高亮后按纯文本显示，行内改动标记仍在", async () => {

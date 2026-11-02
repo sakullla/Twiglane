@@ -356,12 +356,12 @@
               <span class="ln">{line.newNo ?? ""}</span>
               {#if line.kind === "add" || line.kind === "del" || line.kind === "context"}
                 {@const segs = segmentsAt(absolute)}
-                <span class="code"><span class="code-in" data-sign={sign(line.text)}>{#if segs.length === 1 && !segs[0].k && !segs[0].m}{segs[0].t}{:else}{#each segs as seg, i (i)}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/each}{/if}</span></span>
+                <span class="code"><span class="code-in" data-sign={sign(line.text)} data-len={codeOf(line).length}>{#if segs.length === 1 && !segs[0].k && !segs[0].m}{segs[0].t}{:else}{#each segs as seg, i (i)}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/each}{/if}</span></span>
               {:else if line.kind === "hunk"}
                 {@const caption = hunkCaption(line.text)}
                 <span class="code hunk-caption"><span class="hunk-at">{caption.at}</span>{#if caption.context}<span class="hunk-context" title={caption.context}>{caption.context}</span>{/if}</span>
               {:else}
-                <span class="code"><span class="code-in">{line.text.length === 0 ? " " : line.text}</span></span>
+                <span class="code"><span class="code-in" data-len={line.text.length || 1}>{line.text.length === 0 ? " " : line.text}</span></span>
               {/if}
               {#if !readOnly && !fullFile && hunkForLine(absolute)}
                 {@const hunk = hunkForLine(absolute)}
@@ -393,10 +393,10 @@
                 <span class="side-cell hunk side-hunk"><span class="ln"></span><span class="code hunk-caption"><span class="hunk-at">{caption.at}</span>{#if caption.context}<span class="hunk-context" title={caption.context}>{caption.context}</span>{/if}</span></span>
               {:else}
               <span class={`side-cell ${row.left?.kind ?? "blank"}`}>
-                {#if row.left}<span class="ln">{row.left.no ?? ""}</span>{#if row.left.index !== undefined && !row.span}<span class="code"><span class="code-in" data-sign={sign(row.left.text)}>{#each segmentsAt(row.left.index) as seg, i (i)}{#if !seg.k && !seg.m}{seg.t}{:else}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/if}{/each}</span></span>{:else}<span class="code"><span class="code-in">{row.left.text}</span></span>{/if}{/if}
+                {#if row.left}<span class="ln">{row.left.no ?? ""}</span>{#if row.left.index !== undefined && !row.span}<span class="code"><span class="code-in" data-sign={sign(row.left.text)} data-len={codeOf(row.left).length}>{#each segmentsAt(row.left.index) as seg, i (i)}{#if !seg.k && !seg.m}{seg.t}{:else}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/if}{/each}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.left.text.length}>{row.left.text}</span></span>{/if}{/if}
               </span>
               <span class={`side-cell ${row.right?.kind ?? "blank"}`}>
-                {#if row.right}<span class="ln">{row.right.no ?? ""}</span>{#if row.right.index !== undefined && !row.span}<span class="code"><span class="code-in" data-sign={sign(row.right.text)}>{#each segmentsAt(row.right.index) as seg, i (i)}{#if !seg.k && !seg.m}{seg.t}{:else}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/if}{/each}</span></span>{:else}<span class="code"><span class="code-in">{row.right.text}</span></span>{/if}{/if}
+                {#if row.right}<span class="ln">{row.right.no ?? ""}</span>{#if row.right.index !== undefined && !row.span}<span class="code"><span class="code-in" data-sign={sign(row.right.text)} data-len={codeOf(row.right).length}>{#each segmentsAt(row.right.index) as seg, i (i)}{#if !seg.k && !seg.m}{seg.t}{:else}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/if}{/each}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.right.text.length}>{row.right.text}</span></span>{/if}{/if}
               </span>
               {/if}
               {#if !readOnly && !fullFile && row.showStage && row.hunkIndex !== null}

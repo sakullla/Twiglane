@@ -1099,20 +1099,97 @@ describe("差异横向滚动", () => {
     }
   });
 
-  it("已渲染行比标尺宽时撑大标尺，内容换了才归零", async () => {
-    const offsetWidth = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(5000);
+  // happy-dom 没有布局：宽度按当下 DOM 里的真实文字算，中间态的多余文字会如实反映出来。
+  const widthFromText = () =>
+    vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return (this.textContent?.length ?? 0) * 10;
+    });
+  const nextFrame = async () => {
+    await tick();
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+  };
+
+  it("已渲染行比标尺宽时撑大标尺，切布局不缩，内容换了才重新起算", async () => {
+    const offsetWidth = widthFromText();
     try {
       const view = renderDiff();
       const scroller = document.querySelector(".diff-scroll") as HTMLElement;
-      await tick();
-      expect(scroller.style.getPropertyValue("--code-floor")).toBe("5000px");
-      offsetWidth.mockReturnValue(1200);
+      await nextFrame();
+      const floor = `${longLine.length * 10}px`;
+      expect(scroller.style.getPropertyValue("--code-floor")).toBe(floor);
       await fireEvent.click(screen.getByRole("button", { name: /并排/ }));
-      await tick();
-      expect(scroller.style.getPropertyValue("--code-floor")).toBe("5000px");
+      await nextFrame();
+      expect(scroller.style.getPropertyValue("--code-floor")).toBe(floor);
       await view.rerender({ diff: createTextDiff("a.ts", "short\n", "other\n", 1) });
-      await tick();
-      expect(scroller.style.getPropertyValue("--code-floor")).toBe("1200px");
+      await nextFrame();
+      expect(scroller.style.getPropertyValue("--code-floor")).toBe("50px");
+    } finally {
+      offsetWidth.mockRestore();
+    }
+  });
+
+  it("内容相同的刷新不重算：不写 --code-floor，横向位置不动", async () => {
+    const offsetWidth = widthFromText();
+    try {
+      const view = renderDiff();
+      const scroller = document.querySelector(".diff-scroll") as HTMLElement;
+      await nextFrame();
+      scroller.scrollLeft = 500;
+      await fireEvent.scroll(scroller);
+      const writes: string[] = [];
+      const setProperty = vi.spyOn(scroller.style, "setProperty").mockImplementation(function (this: CSSStyleDeclaration, name: string, value: string | null) {
+        if (name === "--code-floor") writes.push(String(value));
+      });
+      await view.rerender({ diff: createTextDiff("a.ts", "short\n", `short\n${longLine}\n`, 2) });
+      await nextFrame();
+      setProperty.mockRestore();
+      expect(writes).toEqual([]);
+      expect(scroller.scrollLeft).toBe(500);
+      expect(scroller.style.getPropertyValue("--code-x")).toBe("500px");
+    } finally {
+      offsetWidth.mockRestore();
+    }
+  });
+
+  it("换内容时一次写入新宽度，不经过中间的 0", async () => {
+    const offsetWidth = widthFromText();
+    try {
+      const view = renderDiff();
+      const scroller = document.querySelector(".diff-scroll") as HTMLElement;
+      await nextFrame();
+      const writes: string[] = [];
+      const original = scroller.style.setProperty.bind(scroller.style);
+      const setProperty = vi.spyOn(scroller.style, "setProperty").mockImplementation((name: string, value: string | null) => {
+        if (name === "--code-floor") writes.push(String(value));
+        original(name, value);
+      });
+      await view.rerender({ diff: createTextDiff("a.ts", "short\n", "other\n", 1) });
+      await nextFrame();
+      setProperty.mockRestore();
+      expect(writes).toEqual(["50px"]);
+    } finally {
+      offsetWidth.mockRestore();
+    }
+  });
+
+  it("行文本长度和数据不一致的行不参与实测，卸载时取消未执行的帧", async () => {
+    const offsetWidth = widthFromText();
+    try {
+      const view = renderDiff();
+      const scroller = document.querySelector(".diff-scroll") as HTMLElement;
+      await nextFrame();
+      const before = scroller.style.getPropertyValue("--code-floor");
+      const code = [...document.querySelectorAll<HTMLElement>(".code-in")].find((node) => node.textContent === longLine);
+      code?.append("这段文字不属于这一行".repeat(50));
+      await fireEvent.click(screen.getByRole("button", { name: /并排/ }));
+      await fireEvent.click(screen.getByRole("button", { name: /统一/ }));
+      await nextFrame();
+      expect(scroller.style.getPropertyValue("--code-floor")).toBe(before);
+      const cancel = vi.spyOn(globalThis, "cancelAnimationFrame");
+      await fireEvent.click(screen.getByRole("button", { name: /并排/ }));
+      view.unmount();
+      expect(cancel).toHaveBeenCalled();
+      cancel.mockRestore();
     } finally {
       offsetWidth.mockRestore();
     }

@@ -59,6 +59,7 @@ fn capabilities_do_not_grant_a_shell() {
         "allow-delete-branch",
         "allow-delete-remote-branch",
         "allow-tag-state",
+        "allow-tag-remote-state",
         "allow-create-tag",
         "allow-delete-tag",
         "allow-push-tag",

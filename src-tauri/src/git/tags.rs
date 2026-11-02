@@ -32,12 +32,16 @@ pub async fn tag_state(
 
 /// 只读查询远程标签。结果描述的是远程，与本地 generation 无关，所以绕开调度器：
 /// 不做 generation 校验，也不占读并发名额，慢网络不会拖住其他读取；过期响应由调用方丢弃。
+/// 同一仓库同时只跑一个，在途时返回 `duplicate`。不复用在途结果：它可能早于刚完成的推送。
 pub async fn tag_remote_state(
     backend: &Backend,
     path: &str,
     remote: &str,
 ) -> Result<Vec<RemoteTag>, AppError> {
     let root = repo_root(path)?;
+    let _guard = backend
+        .actions
+        .enter(action_key("tag-remote", &repo_key(&root)))?;
     validate_remote(remote)
         .map_err(|_| AppError::new("remote_invalid", "远程名称无效，未读取远程标签。"))?;
     let git = require_git(backend).await?;
@@ -332,8 +336,11 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use super::{create_tag, delete_tag, parse_remote_tags, push_tag, tag_remote_state, tag_state};
-    use crate::git::ops::open_repository;
+    use super::{
+        create_tag, delete_tag, parse_remote_tags, push_tag, repo_root, tag_remote_state, tag_state,
+    };
+    use crate::git::gate::action_key;
+    use crate::git::ops::{open_repository, repo_key};
 
     fn git(dir: &Path, args: &[&str]) {
         let status = Command::new(crate::test_support::system_git())
@@ -381,6 +388,12 @@ mod tests {
         assert_eq!(missing.code, "tag_remote_failed");
         let invalid = tag_remote_state(&backend, &path, "--upload-pack=x").await.unwrap_err();
         assert_eq!(invalid.code, "remote_invalid");
+
+        let key = action_key("tag-remote", &repo_key(&repo_root(&path).unwrap()));
+        let held = backend.actions.enter(key).unwrap();
+        let busy = tag_remote_state(&backend, &path, "origin").await.unwrap_err();
+        assert_eq!(busy.code, "duplicate");
+        drop(held);
 
         let bare = fixture.path().join("remote.git");
         git(fixture.path(), &["init", "--bare", bare.to_string_lossy().as_ref()]);

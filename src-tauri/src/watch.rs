@@ -90,8 +90,9 @@ fn is_noise_path(root: &Path, path: &Path) -> bool {
     }
 }
 
+/// 带重扫标记的事件说明有事件丢失（macOS 上还带路径），不能按路径或类型判断，必须放行。
 fn is_ignored(root: &Path, event: &Event) -> bool {
-    is_read_access(&event.kind) || is_internal_noise(root, &event.paths)
+    !event.need_rescan() && (is_read_access(&event.kind) || is_internal_noise(root, &event.paths))
 }
 
 struct Session {
@@ -331,6 +332,34 @@ mod tests {
             assert!(!is_ignored(root, &event(write, "src/main.rs")));
             assert!(is_ignored(root, &event(write, ".git/objects/ab/cdef")));
         }
+    }
+
+    #[test]
+    fn rescan_events_always_refresh() {
+        use notify::event::{Flag, ModifyKind};
+
+        let root = Path::new("/repo");
+        let rescan = |kind: EventKind, path: &str| {
+            Event::new(kind)
+                .set_flag(Flag::Rescan)
+                .add_path(root.join(path))
+        };
+        assert!(!is_ignored(
+            root,
+            &rescan(EventKind::Modify(ModifyKind::Any), ".git/objects/ab/cdef")
+        ));
+        assert!(!is_ignored(
+            root,
+            &rescan(EventKind::Other, ".git/index.lock")
+        ));
+        assert!(!is_ignored(
+            root,
+            &rescan(EventKind::Access(AccessKind::Read), "src/main.rs")
+        ));
+        assert!(!is_ignored(
+            root,
+            &Event::new(EventKind::Other).set_flag(Flag::Rescan)
+        ));
     }
 
     #[tokio::test]

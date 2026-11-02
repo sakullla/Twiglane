@@ -61,6 +61,8 @@
   let remoteChecking = $state(false);
   let remoteError = $state<string | null>(null);
   let remoteToken = 0;
+  /** 同一仓库同时只有一个 ls-remote。前一次还在途时过一会儿再问，它最多跑 20 秒。 */
+  const REMOTE_BUSY_RETRY_MS = 800;
 
   let blocked = $derived(disabled || localBusy);
   let readBlocked = $derived(localBusy || (disabled && !backgroundClone));
@@ -100,12 +102,20 @@
       if (token !== remoteToken || key !== remoteKey) return;
       remoteTags = new Map(listed.map((tag) => [tag.name, tag.oid]));
       remoteError = null;
+      remoteChecking = false;
     } catch (error) {
       if (token !== remoteToken || key !== remoteKey) return;
+      const failure = normalizeError(error);
+      if (failure.code === "duplicate") {
+        // 在途的那次可能早于刚完成的推送，或已被切换分区丢弃：不算失败，保持检查中。
+        setTimeout(() => {
+          if (token === remoteToken) void loadRemoteTags();
+        }, REMOTE_BUSY_RETRY_MS);
+        return;
+      }
       remoteTags = null;
-      remoteError = normalizeError(error).message;
-    } finally {
-      if (token === remoteToken) remoteChecking = false;
+      remoteError = failure.message;
+      remoteChecking = false;
     }
   }
 

@@ -162,6 +162,29 @@ describe("标签管理", () => {
       expect(tagRemoteState).toHaveBeenCalledTimes(2);
     });
 
+    it("上一次查询还在途时不算失败，稍后重问", async () => {
+      tagRemoteState
+        .mockRejectedValueOnce({ code: "duplicate", message: "该操作正在执行，未重复启动。" })
+        .mockResolvedValueOnce([{ name: "v1.0.0", oid: "a".repeat(40) }]);
+      const onFailure = vi.fn();
+      mountTags({ onFailure });
+      await vi.waitFor(() => expect(tagRemoteState).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(statusOf("v1.0.0")).toBe("正在检查远程"));
+      await vi.waitFor(() => expect(statusOf("v1.0.0")).toBe("已推送"), { timeout: 2000 });
+      expect(tagRemoteState).toHaveBeenCalledTimes(2);
+      expect(onFailure).not.toHaveBeenCalled();
+    });
+
+    it("等待重问期间卸载后不再发起查询", async () => {
+      tagRemoteState.mockRejectedValue({ code: "duplicate", message: "该操作正在执行，未重复启动。" });
+      const view = mountTags();
+      await vi.waitFor(() => expect(tagRemoteState).toHaveBeenCalledTimes(1));
+      await tick();
+      view.unmount();
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      expect(tagRemoteState).toHaveBeenCalledTimes(1);
+    });
+
     it("切换仓库或远程时丢弃过期响应", async () => {
       let late: (value: unknown) => void = () => {};
       tagRemoteState.mockReturnValueOnce(new Promise((resolve) => (late = resolve)));

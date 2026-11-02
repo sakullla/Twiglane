@@ -167,14 +167,19 @@
 .action-card:disabled, .action-card.primary:disabled { background: var(--surface-2); border-color: var(--control-border); color: var(--fg-subtle); cursor: not-allowed; }
 .action-card:disabled > .icon, .action-card.primary:disabled > .icon, .action-card:disabled .ac-copy > span, .action-card.primary:disabled .ac-copy > span { color: var(--fg-subtle); }
 .welcome-section { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
-.welcome-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-12); }
+.welcome-section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-height: 32px; }
+.welcome-search { flex: 1; min-width: 0; max-width: 300px; margin-left: auto; }
+.welcome-search input { font-size: var(--text-sm); }
 .welcome-section-head h2 { color: var(--fg-muted); font-size: var(--text-sm); font-weight: var(--weight-medium); letter-spacing: 0; }
-.welcome-section-head > .hint { font-size: var(--text-xs); }
+.welcome-section-head > .hint { flex: none; font-size: var(--text-xs); }
 .welcome-recent { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-4); border-radius: var(--radius); background: var(--surface); }
 .welcome-recent button { display: flex; align-items: center; gap: 10px; width: 100%; min-width: 0; padding: var(--space-6) var(--space-8); border-radius: var(--radius-sm); text-align: left; transition: background var(--duration-fast) var(--ease); }
 .welcome-recent button:hover { background: var(--surface-2); }
 .welcome-recent button:focus-visible { outline-offset: -2px; }
 .welcome-recent .repo-badge { box-shadow: none; }
+/* 搜索时结果行数会变：留够五行的高度，搜索框不跟着上下跳。 */
+.welcome-recent.searchable { min-height: 241px; }
+.welcome-no-match { margin: 0; padding: var(--space-8); }
 .welcome-empty { margin: 0; }
 /* 和主界面的 Git 诊断通知条同一语义：Git 不可用是错误，不是提醒。 */
 .welcome-diagnostic { display: flex; align-items: center; gap: var(--space-8); width: 100%; padding: var(--space-8) var(--space-12); border-radius: var(--radius-sm); background: var(--danger-soft); color: var(--danger-text); font-size: var(--text-sm); font-weight: var(--weight-medium); text-align: left; }

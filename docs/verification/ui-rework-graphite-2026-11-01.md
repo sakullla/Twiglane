@@ -1,20 +1,20 @@
 # 石墨靛蓝界面重做验证记录（2026-11-01）
 
-本文件记录 `docs/requirements/2026-11-01-ui-ux-重做.md` 的实际验证结果。`docs/verification/report.json` 由 `measure-delivery` / `verify-delivery` 在对应平台生成，本次未改动。旧版 `ui-rework-2026-11-01.md` 是上一轮重做的历史记录，其中的 rail 和数据不适用于本次。
+本文件记录 `docs/requirements/2026-11-01-ui-ux-重做.md` 的实际验证结果。`docs/verification/report.json` 由 `measure-delivery` / `verify-delivery` 在对应平台生成，本次未改动。旧版 `ui-rework-2026-11-01.md` 已被本文件取代，其中的 rail 和数据不适用于本次。
 
-环境：Linux，Node 24.22.1，`npm` 不在 PATH，正式命令直接调用 `node_modules/.bin`。候选为 `feat/ui-rework` HEAD `79646d1` 加 T7-A4 修复后的工作区。门禁在修复后复跑。T7-A4 只改了克隆完成逻辑和历史文件区在拆分区过矮时的高度，24 张截图的默认状态不受影响，未重截；历史和合并 8 张来自 T7-A3，其余 16 张来自 T7-A2。
+环境：Linux，Node 24.22.1，`npm` 不在 PATH，正式命令直接调用 `node_modules/.bin`。候选：`<最终提交，Owner 提交后确认>`。第一、二、三节和第四节的 R19–R26 在 T12 上重跑；第四节“T7 沿用的观察”没有重跑。
 
 ## 一、门禁
 
 | 命令 | 结果 | 观察 |
 | --- | --- | --- |
-| `svelte-check --tsconfig ./tsconfig.json --threshold error` | 通过 | 383 个文件，0 错误，0 警告 |
-| `vitest run` | 通过 | 22 个文件，406 个用例（基线 20 个文件，213 个用例） |
+| `svelte-check --tsconfig ./tsconfig.json --threshold error` | 通过 | 387 个文件，0 错误，0 警告 |
+| `vitest run` | 通过 | 22 个文件，565 个用例（基线 20 个文件，213 个用例） |
 | `vite build`（`--outDir` 指向私有目录） | 通过 | 只有 chunk 超 500 kB 的既有提示 |
-| `node scripts/check-contrast.mjs` | 通过 | 1294 对；正文最低 4.58:1，交互最低 3.10:1，合成最低 4.67:1；两套主题 |
-| `git diff --quiet ff78537 -- src-tauri public` | 通过 | 退出码 0，Rust 与图标未改（R16、R18） |
-| `cargo test` | **未验证** | 本机缺 `cc`、`pkg-config` 与 webkit，无法运行，不记为通过 |
-| `cargo clippy --all-targets -- -D warnings` | **未验证** | 同上，由 CI 或具备环境的机器补验 |
+| `node scripts/check-contrast.mjs` | 通过 | 1454 对；正文最低 4.58:1，交互最低 3.10:1，合成最低 4.67:1；两套主题 |
+| `git diff --quiet ff78537 -- public src-tauri/icons` | 通过 | 退出码 0，图标未改（R18）。R22、R23 按 R16 改了 Rust，不再校验整个 `src-tauri` |
+| `cargo test` | **未验证** | 本机缺 webkit 等系统依赖。T8 用桩库在私有副本检查过 Rust 改动，没有跑真实 Tauri，`unreadable_directory_probe` 因 root 身份失败；桩库结果不算通过，待 CI 确认 |
+| `cargo clippy --all-targets -- -D warnings` | **未验证** | 同上，待 CI 确认 |
 
 ## 二、基线对比
 
@@ -26,29 +26,53 @@
 | 完全可见差异行（`rows.txt`） | 45 | 不少于 40 | 41 | 27 |
 | 完全可见文件行 | 8 | 大于 8 | 11 | 6 |
 | 历史差异区宽度 | 约 440px | 大于基线 | 680px | 559px（上下布局，用满详情宽度） |
-| 合并首屏完整冲突代码行 | 5 | 大于基线 | 6 | 5 |
+| 合并首屏完整冲突代码行 | 5 | 大于基线 | 7 | 6 |
 | 合并代码区高度 | 482px | 参考项 | 678px | 438px |
 
 基线来源：前四项来自 `02-technical-solution.md` 的基线表。合并两项是 T5 改动前的实测（T5 审查记录 `evidence/reviews/19.json`，提交 `f487334`，900×600 基线为 4 行），不是 `ff78537` 上的重测。判据只针对 1280×840；900×600 列用于 R4、R14 的可用性观察。
 
 ## 三、截图与横向滚动
 
-`docs/verification/` 下共 24 张，命名 `rework-<屏>-<主题>-<宽x高>.png`：
+`docs/verification/` 下共 40 张，全部在 T12 重截，命名 `rework-<屏>-<主题>-<宽x高>.png`。多选是两个文件的堆叠差异，标签含三种远程状态，起始页搜索和大量仓库来自 `?recent=many`（500 个）：
 
 | 屏 | 深色 1280×840 | 深色 900×600 | 浅色 1280×840 | 浅色 900×600 |
 | --- | --- | --- | --- | --- |
 | 改动 changes | `rework-changes-dark-1280x840.png` | `rework-changes-dark-900x600.png` | `rework-changes-light-1280x840.png` | `rework-changes-light-900x600.png` |
+| 多选 multi | `rework-multi-dark-1280x840.png` | `rework-multi-dark-900x600.png` | `rework-multi-light-1280x840.png` | `rework-multi-light-900x600.png` |
 | 历史 history | `rework-history-dark-1280x840.png` | `rework-history-dark-900x600.png` | `rework-history-light-1280x840.png` | `rework-history-light-900x600.png` |
 | 合并 merge | `rework-merge-dark-1280x840.png` | `rework-merge-dark-900x600.png` | `rework-merge-light-1280x840.png` | `rework-merge-light-900x600.png` |
 | 分支 branch | `rework-branch-dark-1280x840.png` | `rework-branch-dark-900x600.png` | `rework-branch-light-1280x840.png` | `rework-branch-light-900x600.png` |
+| 标签 tags | `rework-tags-dark-1280x840.png` | `rework-tags-dark-900x600.png` | `rework-tags-light-1280x840.png` | `rework-tags-light-900x600.png` |
 | 设置 settings | `rework-settings-dark-1280x840.png` | `rework-settings-dark-900x600.png` | `rework-settings-light-1280x840.png` | `rework-settings-light-900x600.png` |
 | 起始页 welcome | `rework-welcome-dark-1280x840.png` | `rework-welcome-dark-900x600.png` | `rework-welcome-light-1280x840.png` | `rework-welcome-light-900x600.png` |
+| 起始页搜索 welcome-search | `rework-welcome-search-dark-1280x840.png` | `rework-welcome-search-dark-900x600.png` | `rework-welcome-search-light-1280x840.png` | `rework-welcome-search-light-900x600.png` |
+| 大量仓库 repos | `rework-repos-dark-1280x840.png` | `rework-repos-dark-900x600.png` | `rework-repos-light-1280x840.png` | `rework-repos-light-900x600.png` |
 
-24 张逐张读回：`documentElement.scrollWidth` 等于 `clientWidth`（1280 或 900）；`.shell`、`.workspace`、`.content`、`.welcome`、`.pane`、`.file-list`、`.history-list`、`.modal-card`、`.modal-body`、`.mp-foot`、`.cr-toolbar` 等容器没有超出，也没有任何 `overflow-x: auto|scroll` 的元素出现横向滚动。代码视图（`.diff-scroll`、`.cr-scroll`、三栏编辑区）的横向滚动是功能，不在判定内。
+40 张逐张读回：`documentElement.scrollWidth` 等于 `clientWidth`（1280 或 900）；`.shell`、`.workspace`、`.content`、`.welcome`、`.pane`、`.file-list`、`.history-list`、`.modal-card`、`.modal-body`、`.mp-foot`、`.cr-toolbar` 等容器没有超出，也没有其他 `overflow-x: auto|scroll` 的元素出现横向滚动。代码视图（`.diff-scroll`、`.cr-scroll`、三栏编辑区）和多选堆叠的吸底滚动条 `.diff-hbar` 的横向滚动是功能，不在判定内：900×600 下两张多选截图的 `.diff-hbar` 有滚动余量，页面本身没有。
 
 ## 四、浏览器观察
 
-以下均为 mock 预览下的实测。
+以下均为 mock 预览下的实测（headless Chrome，`npm run preview:ui` 同一份 mock）。R19–R26 在 1280×840 和 900×600 各跑一遍，只跑一个尺寸的条目单独写明。
+
+### R19–R26（T12）
+
+- **R19 多选**：`Ctrl+点击` 第 1、3 个可多选文件，主区堆叠这两个文件，头部“已选 2 个文件”；再次 `Ctrl+点击` 取消后回到单选。选中第 2 个后 `Shift+点击` 第 5 个，选中 4 个。右键菜单是“暂存 4 个文件”“放弃 4 个文件的更改…”，暂存后提交区显示 6 个已暂存文件。普通点击回单选。冲突排除、放弃先列影响由 Vitest 覆盖。
+- **R20 上一个、下一个**：改动视图第一个文件时“上一个”禁用，提示“已经是第一个文件”；点“下一个”后列表选中同步；`Alt+←` 退回；最后一个文件时“下一个”禁用，提示“已经是最后一个文件”。提交详情（`?files=many`，24 个文件）同样可用；末尾状态只在 1280×840 走到，900×600 的列表是虚拟的，脚本点到的是渲染出的最后一行 `file-19`，这时“下一个”可用，属脚本取样，不是缺陷。
+- **R21 横向滚动**：含长行的 `merge.ts` 横向可滚 10903px（1280）、11263px（900）。`deltaX=300` 后 `scrollLeft` 300，`Shift+滚轮` 后 500，设到最大值后等于上限；`.code`、`.code-in` 没有省略号样式，行号位置不变，页面横向溢出 0。并排两栏 `transform` 都是 `-120px`。**触控板手势未验证**：这里只有 `wheel` 事件。
+- **R22 标签状态**：`v0.1.0` 已推送、无推送按钮；`v0.2.0-rc.1` 远程不同、无推送按钮；`v0.3.0-dev` 未推送、有推送按钮。`?tags=offline` 下三行都是“远程状态未知”，推送按钮保留，列表正常。真实 `git ls-remote` 和断网没有在这里跑。
+- **R23 合并预检**：打开合并界面 1.5 秒后 `aria-busy=false`，没有 spinner，“开始合并”可点；再静置 4 秒，`mergePreview` 调用次数保持 1。这只说明 mock 下前端不自循环。外部提交后自动更新由 Vitest 覆盖。**根因是读代码的推断，修复待实机确认。**
+- **R24 跨文件跳转**：`F7` 连按：`merge.ts` 第 2 到第 9 处，跳到 `theme.css` 第 1、2 处，再到 `hero.png`（文件 3 / 3，按文件停留）。全部处理完的提示和草稿保留由 Vitest 覆盖。
+- **R25 三栏**：`merge.ts` 三栏高度不同（1280 下上限 378865、379985、378945）。滚当前栏到 900，结果栏 920、来源栏 827；横向 60 三栏相同；任一栏到底时三栏同时等于各自上限，到顶时同时为 0。`theme.css` 打开时行标记为相同 5、冲突标记 7、当前 4、手动 1、来源 3；填入当前后相同 5、当前 3；填入来源后相同 5、来源 3；再手动加一行后多出手动 1。
+- **R26 大量仓库**：`?recent=many`。起始页 5 行、显示“共 500 个”，两个尺寸都不需要滚动；搜 `repo-333` 找到列表外的仓库，回车打开，搜索框位置不跳。弹层内容高 19641px，打开时 15 行，滚完全程 DOM 最多 23 行；逐字输入 7 次，每次到下一帧 10–18ms；方向键绕到第 500 个时在视口内，回车切换，弹层关闭。同名仓库的长路径折成两行（54px），没有重叠；菜单键和右键都能打开仓库菜单（菜单只测 1280×840）。
+
+### 待修项（T12）
+
+只测 1280×840。
+
+- **CRLF 写回**：`?merge=conflict&eol=crlf`，真实 Chrome textarea。第 5 字符处输入 3 个字后光标在 8，读回的 `value` 不含 `\r`。切回逐处再回来，保留双方后再打字，写回内容 CRLF 16 处、裸 LF 0 处、`\r\r` 0 处。整文件编辑后切回逐处、两处都选好再标记，CRLF 9 处、裸 LF 0 处。字节断言由 Vitest 覆盖。
+- **只读三栏**：`?conflict=modify-delete`，200 行修改/删除冲突。当前栏和结果栏上限都是 3437，结果栏滚到底时当前栏也到底，反向滚到 300 时结果栏 300；底部说明和操作在弹窗内，状态文字完整可见。
+
+### T7 沿用的观察
 
 - 合并两条路径：在 1280×840 和 900×600 走完“中止”和“完成”。中止后 `.mp-body`、`.mp-head` 都不存在，只有起始界面；三个冲突文件逐个标记后完成，`.mp-body`、`.mp-head` 都不存在，只有完成页。
 - 通知不挡操作：中止合并后通知底边在 764（1280×840）、524（900×600），底部“关闭”顶边在 778、538，中心点 `elementFromPoint` 命中按钮。普通弹窗（设置，900×600）通知在 16–61，弹窗标题行从 111 开始。
@@ -72,12 +96,14 @@
 
 ## 五、未验证项
 
-1. **`cargo test`、`cargo clippy`**：见第一节，本次未改 Rust，但不记为通过。
+1. **`cargo test`、`cargo clippy`**：见第一节。R22 的 `tag_remote_state` 和 R23 的 `watch.rs` 过滤是 Rust 改动，只在私有副本用桩库检查过，没有跑真实 Tauri，待 CI 确认。
 2. **Windows、macOS 实机**：未运行。自绘标题栏、系统窗口按钮避让、最小窗口的真实表现没有实机证据，不写成已验证。
-3. **真实应用的默认深色**：只核对到 mock 默认值和既有代码，没有在安装包里观察。
-4. **真实 Git 流程**：截图和测量都来自 mock。在途锁定、标签写入、克隆后台继续的路径由 Vitest 受控 mock 覆盖，预览里这些操作瞬间完成，进不了在途状态；只有 `?git=missing` 可在预览看到诊断入口。
-5. **“文件无历史”“空仓库”空状态**：由组件用例覆盖文案和图标互不相同，预览无法进入，没有截图。
-6. **安装包与性能**：本次没有重跑 `measure-delivery`、`verify-delivery`，`report.json` 不代表本候选。
+3. **R23 根因**：未在真实应用复现，修复待实机确认。
+4. **触控板手势和 WKWebView**：横滑不触发后退、Safari 内核下的滚动条和 textarea 表现都没有实测，待 macOS 实机确认。
+5. **真实应用的默认深色**：只核对到 mock 默认值和既有代码，没有在安装包里观察。
+6. **真实 Git 流程**：截图和测量都来自 mock。在途锁定、标签写入、克隆后台继续的路径由 Vitest 受控 mock 覆盖，预览里这些操作瞬间完成，进不了在途状态；只有 `?git=missing` 可在预览看到诊断入口。
+7. **“文件无历史”“空仓库”空状态**：由组件用例覆盖文案和图标互不相同，预览无法进入，没有截图。
+8. **安装包与性能**：本次没有重跑 `measure-delivery`、`verify-delivery`，`report.json` 不代表本候选。
 
 ## 六、已知缺口
 
@@ -87,3 +113,5 @@
 4. **合并基线不是同一提交重测**：见第二节。
 5. **后台克隆只在 Vitest 里验证**：预览的 mock 克隆瞬间完成，下列行为都是受控 mock 的用例，没有真实浏览器或真实 Git 证据：克隆期间打开远程、分支与标签时列表读得到、窗口能关闭、写入仍被拦住、读取不清写锁；完成时按窗口是否开着决定打开或只通知；接回监听的 stale 重试和切仓库竞态。临时保存和合并的读取本来不受写锁限制，设置没有读取。
 6. **后台克隆会占用文件监听**：`src-tauri/src/lib.rs` 的 `clone_repository` 命令结束时无条件启动新仓库监听，`watch.rs` 的监听只有一路，所以前端无法靠不打开来避免，这里保留接回：重新打开当前仓库只为恢复监听，不应用返回的快照，随后走 `refresh()` 补上空窗内的外部改动；遇到 stale 重试一次，仍失败才退回低频重读。这次重新打开会把当前仓库排到后端最近列表顶部，前端列表要到下次启动才反映这个顺序。没有打开仓库时不接回。
+7. **混合行尾**：整文件编辑里动手改过之后，整份按打开时的主导行尾写回，平手算 LF，个别行原有的行尾不保留；不打字时逐字节不变。孤立的 `\r` 会被 textarea 当成换行。填入当前或来源是那一侧的原样字节，打字后才转成打开时的主导行尾。
+8. **命令面板没有虚拟渲染**：R26 只要求弹层和起始页。500 个仓库时面板渲染 529 个选项，打开约 80ms，没有卡顿，但不是只渲染可见行。

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { BUSY_REASON } from "../ui";
+  import { applyEol, detectEol, normalizeEol } from "../conflict";
   import {
     computeMarks,
     exceedsMarkLimit,
@@ -73,9 +74,12 @@
   let theirsPane = $state<HTMLDivElement | null>(null);
   let resultPane = $state<HTMLDivElement | null>(null);
   let resultArea = $state<HTMLTextAreaElement | null>(null);
+  let resultPre = $state<HTMLPreElement | null>(null);
   /** 正在带动另外两栏的那一栏；写入引起的回声滚动按它识别并忽略。 */
   let leader: Pane | null = null;
   let releaseFrame = 0;
+  /** 上一次看到的纵向位置：主动栏用它判断滚动方向。回声不更新，它和写入的值不同就是用户动了。 */
+  const lastTop: Record<Pane, number> = { ours: 0, result: 0, theirs: 0 };
   let resultTop = $state(0);
   let resultHeight = $state(0);
   let marks = $state.raw<ThreeWayMarks | null>(null);
@@ -104,7 +108,7 @@
   function scroller(pane: Pane): HTMLElement | null {
     if (pane === "ours") return oursPane;
     if (pane === "theirs") return theirsPane;
-    return resultArea ?? resultPane;
+    return resultArea ?? resultPre ?? resultPane;
   }
 
   function anchorsOf(pane: Exclude<Pane, "result">, map: ThreeWayMarks): LineAnchors {
@@ -120,6 +124,8 @@
     const sourceMax = source.scrollHeight - source.clientHeight;
     const targetMax = target.scrollHeight - target.clientHeight;
     if (targetMax <= 0) return 0;
+    // 高分屏上 scrollTop 是小数，到底时可能比上限差不到 1px，这里也算到底。
+    if (sourceMax > 0 && source.scrollTop >= sourceMax - 1) return targetMax;
     const progress = sourceMax > 0 ? Math.min(1, Math.max(0, source.scrollTop / sourceMax)) : 0;
     if (!marks) return progress * targetMax;
     const raw = (source.scrollTop + (source.clientHeight - PAD) * progress - PAD) / LINE;
@@ -131,6 +137,14 @@
     return Math.min(targetMax, Math.max(0, top));
   }
 
+  /**
+   * 跟随栏不逆着主动栏走。主动栏穿过对面没有的大段插入时，对齐行停住而参照行还在滑动，
+   * 算出来的位置会慢慢往回退，这里按滚动方向把它压住，等内容重新对上再继续。
+   */
+  function followTop(next: number, current: number, direction: number): number {
+    return direction > 0 ? Math.max(next, current) : Math.min(next, current);
+  }
+
   /** 任一栏滚动都带动另外两栏。回声在下一帧的滚动步骤才到，所以隔两帧才放开。 */
   function sync(from: Pane) {
     const source = scroller(from);
@@ -138,11 +152,15 @@
     if (from === "result" && resultArea) resultTop = resultArea.scrollTop;
     if (leader !== null && leader !== from) return;
     leader = from;
+    const direction = source.scrollTop - lastTop[from];
+    lastTop[from] = source.scrollTop;
     for (const to of ["ours", "result", "theirs"] as const) {
       if (to === from) continue;
       const target = scroller(to);
       if (!target) continue;
-      target.scrollTop = verticalTarget(from, to, source, target);
+      // 纯横向滚动没有方向，纵向位置不动。
+      if (direction !== 0) target.scrollTop = followTop(verticalTarget(from, to, source, target), target.scrollTop, direction);
+      lastTop[to] = target.scrollTop;
       target.scrollLeft = source.scrollLeft;
       if (to === "result" && resultArea) resultTop = resultArea.scrollTop;
     }
@@ -204,10 +222,18 @@
 
   let oursNumbers = $derived(numbers(view.ours.text));
   let theirsNumbers = $derived(numbers(view.theirs.text));
+  let hasText = $derived(view.ours.text !== null || view.theirs.text !== null || view.result.text !== null);
+  /** 主导行尾随打开的版本确定，编辑时不重新判断：删空重打也不会改变文件的行尾。 */
+  let fileEol = $derived(detectEol(view.result.text, view.ours.text, view.theirs.text));
+  /**
+   * textarea 的 value 永远是 LF。这里给它规范化后的文本，Svelte 比较时才认得是同一份内容：
+   * 否则 CRLF 文本每打一个字都要写回一次，光标跳到末尾。
+   */
+  let editorText = $derived(normalizeEol(resultText));
   let deletion = $derived(view.kind === "modify_delete" || view.kind === "delete_modify" || view.kind === "both_deleted");
 </script>
 
-<div class="three-way-merge" class:readonly={!view.editable}>
+<div class="three-way-merge" class:readonly={!view.editable} class:has-text={hasText}>
   <div class="three-way-head">
     <div class="three-way-title ours">
       <span class="dot"></span>
@@ -295,18 +321,18 @@
           </div>
           <textarea
             aria-label="合并结果"
-            value={resultText}
+            value={editorText}
             title={disabled ? BUSY_REASON : undefined}
             disabled={disabled}
             spellcheck="false"
             wrap="off"
             bind:this={resultArea}
             onscroll={() => sync("result")}
-            oninput={(event) => onResult((event.currentTarget as HTMLTextAreaElement).value)}
+            oninput={(event) => onResult(applyEol((event.currentTarget as HTMLTextAreaElement).value, fileEol))}
           ></textarea>
         </div>
       {:else if view.result.text !== null}
-        <pre>{view.result.text}</pre>
+        <pre bind:this={resultPre} onscroll={() => sync("result")}>{view.result.text}</pre>
       {:else}
         <p class="three-way-summary">{view.result.summary}</p>
       {/if}

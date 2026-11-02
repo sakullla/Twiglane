@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { repeatedNames } from "../recent";
+  import { filterRecent, repeatedNames } from "../recent";
   import type { RecentRepo } from "../types";
   import { hueOf, initialOf } from "../ui";
   import BrandMark from "./BrandMark.svelte";
@@ -10,6 +10,7 @@
    * 起始页：品牌标记、打开 / 克隆 / 新建三个入口和最近仓库，一屏放下（R8）。
    * Git 不可用时只多一行诊断入口，说明留在设置的运行环境分区；这里是起始页唯一的提示，
    * 顶部通知条只在打开仓库后出现，所以关掉通知条不影响这个入口。
+   * 最近仓库最多列五行，多出来时才有搜索框：搜索范围是全部仓库，结果同样最多五行（R26）。
    */
   interface Props {
     recent: RecentRepo[];
@@ -36,9 +37,27 @@
     diagnostic = null,
     onDiagnose,
   }: Props = $props();
-  let shown = $derived(recent.slice(0, 5));
+  const LIMIT = 5;
+  let query = $state("");
+  let searchable = $derived(recent.length > LIMIT);
+  let searching = $derived(searchable && query.trim().length > 0);
+  let matches = $derived(searching ? filterRecent(recent, query) : recent);
+  let shown = $derived(matches.slice(0, LIMIT));
   let sameNames = $derived(repeatedNames(recent));
   let actionTitle = $derived(disabled ? disabledReason || undefined : undefined);
+
+  /** 回车打开第一条结果；Esc 只清空关键词。 */
+  function onSearchKey(event: KeyboardEvent) {
+    if (event.isComposing) return;
+    if (event.key === "Enter" && searching && shown.length > 0) {
+      event.preventDefault();
+      onOpen(shown[0].path);
+    } else if (event.key === "Escape" && query) {
+      event.preventDefault();
+      event.stopPropagation();
+      query = "";
+    }
+  }
 
   function onRowKey(event: KeyboardEvent, repo: RecentRepo) {
     if (!isContextKey(event) || !onContextMenu) return;
@@ -85,12 +104,28 @@
     <section class="welcome-section" aria-label="最近仓库">
       <div class="welcome-section-head">
         <h2>最近仓库</h2>
-        {#if recent.length > shown.length}<span class="hint">共 {recent.length} 个</span>{/if}
+        {#if searchable}
+          <div class="field sm welcome-search">
+            <Icon name="search" size={14} />
+            <input aria-label="搜索最近仓库" placeholder="搜索名称或路径" autocomplete="off" spellcheck="false" bind:value={query} onkeydown={onSearchKey} />
+            {#if query}
+              <button type="button" class="field-clear" aria-label="清空搜索" onclick={() => (query = "")}>
+                <Icon name="x" size={12} />
+              </button>
+            {/if}
+          </div>
+          <span class="hint" role="status">
+            {#if !searching}共 {recent.length} 个{:else if matches.length > shown.length}匹配 {matches.length} 个，显示前 {shown.length} 个{:else}匹配 {matches.length} 个{/if}
+          </span>
+        {/if}
       </div>
-      {#if shown.length === 0}
+      {#if recent.length === 0}
         <p class="hint welcome-empty">还没有最近仓库，先打开或克隆一个。</p>
       {:else}
-        <div class="welcome-recent">
+        <div class="welcome-recent" class:searchable>
+          {#if shown.length === 0}
+            <p class="hint welcome-no-match">没有匹配的仓库，试试名称或路径。</p>
+          {/if}
           {#each shown as repo (repo.path)}
             <button
               type="button"

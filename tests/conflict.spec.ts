@@ -1,12 +1,18 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { fireEvent, render, screen, within } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { describe, expect, it, vi } from "vitest";
 import {
   alignHunk,
+  applyEol,
   composeConflictText,
+  detectEol,
   hasConflictMarkers,
   hunkHint,
   inlineRange,
+  keepBothSides,
+  normalizeEol,
   parseConflictText,
   resolvedLines,
   simpleResolution,
@@ -578,6 +584,23 @@ describe("逐处导航跨文件", () => {
     expect((screen.getByRole("textbox", { name: "编辑冲突 1 的结果" }) as HTMLTextAreaElement).value).toBe("half done");
   });
 
+  for (const [name, finish] of [
+    ["取消", () => fireEvent.click(screen.getByRole("button", { name: "取消" }))],
+    ["完成编辑", () => fireEvent.click(screen.getByRole("button", { name: /完成编辑/ }))],
+    ["切换视图", () => fireEvent.click(screen.getByRole("button", { name: "结果预览" }))],
+  ] as const) {
+    it(`编辑以${name}结束时，“先完成编辑”的提示一起消失`, async () => {
+      renderNav(ONE);
+      await fireEvent.keyDown(stream(), { key: "e" });
+      await screen.findByRole("textbox", { name: "编辑冲突 1 的结果" });
+      await fireEvent.click(screen.getByRole("button", { name: "下一处未处理" }));
+      expect(screen.getByText("先完成正在编辑的一处，再切换文件。")).toBeTruthy();
+      await finish();
+      await tick();
+      expect(screen.queryByText("先完成正在编辑的一处，再切换文件。")).toBeNull();
+    });
+  }
+
   it("整文件编辑按文件为单位移动，结果栏里 F7 也生效，普通按键仍是输入", async () => {
     const { onExhausted } = renderNav(TWO, { fileIndex: 2, fileTotal: 3, pendingElsewhere: 1 });
     await fireEvent.click(screen.getByRole("button", { name: /整文件编辑/ }));
@@ -757,14 +780,10 @@ describe("三栏联动与来源标记", () => {
     expect(area.scrollTop).toBeCloseTo((16 + 2000 * 20 - 400) / 2, 0);
   });
 
-  it("只读的三栏也参与联动，且没有标记层", async () => {
+  function renderReadonly(extra: Partial<ConflictView>) {
     render(ThreeWayMerge, {
       props: {
-        view: view("r\n", {
-          editable: false,
-          kind: "modify_delete",
-          theirs: { present: false, binary: false, truncated: false, text: null, summary: "另一侧删除了文件" },
-        }),
+        view: view("r\n", { editable: false, kind: "modify_delete", ...extra }),
         resultText: "",
         disabled: false,
         onResult: () => {},
@@ -773,11 +792,233 @@ describe("三栏联动与来源标记", () => {
         onReset: () => {},
       },
     });
+  }
+  const deleted = { present: false, binary: false, truncated: false, text: null, summary: "另一侧删除了文件" };
+
+  it("修改/删除带文本时，结果栏的 pre 才是滚动元素，两个方向都联动", async () => {
+    renderReadonly({ theirs: deleted });
     expect(document.querySelector(".three-way-legend")).toBeNull();
-    const ours = layout(screen.getByRole("region", { name: "当前分支版本" }), 100);
-    const result = layout(document.querySelector<HTMLElement>(".three-way-pane.result") as HTMLElement, 100);
+    expect(document.querySelector(".three-way-merge")?.classList.contains("has-text")).toBe(true);
+    const ours = layout(screen.getByRole("region", { name: "当前分支版本" }), 200);
+    const pre = layout(document.querySelector<HTMLElement>(".three-way-pane.result > pre") as HTMLElement, 200);
     ours.scrollTop = 500;
     await fireEvent.scroll(ours);
-    expect(result.scrollTop).toBeCloseTo(500, 0);
+    expect(pre.scrollTop).toBeCloseTo(500, 0);
+    await frames();
+    pre.scrollTop = 1200;
+    pre.scrollLeft = 80;
+    await fireEvent.scroll(pre);
+    expect(ours.scrollTop).toBeCloseTo(1200, 0);
+    expect(ours.scrollLeft).toBe(80);
+  });
+
+  it("只有说明文字的只读冲突没有 has-text，仍收成自然高度", () => {
+    const summary = (text: string) => ({ present: true, binary: true, truncated: false, text: null, summary: text });
+    renderReadonly({ kind: "binary", ours: summary("本地"), theirs: summary("另一侧"), result: summary("结果") });
+    expect(document.querySelector(".three-way-merge")?.classList.contains("has-text")).toBe(false);
+    expect(document.querySelector(".three-way-pane.result > pre")).toBeNull();
+  });
+
+  it("带文本的只读三栏走 flex: 1，只有纯说明才收起", () => {
+    const css = readFileSync(path.resolve(__dirname, "../src/styles/components.css"), "utf8");
+    expect(css).toContain(".three-way-merge.readonly:not(.has-text) .three-way-body { flex: none; min-height: 120px; }");
+    expect(css).toContain(".conflict-sides:has(.three-way-merge.readonly:not(.has-text)) { flex: none; }");
+    expect(css).not.toMatch(/\.three-way-merge\.readonly( \.three-way-body)? \{ flex: none/);
+  });
+
+  it("到底时跟随栏取真实上限，小数像素的 scrollTop 也算到底", async () => {
+    const ours = body(300);
+    const extra = Array.from({ length: 37 }, (_, index) => `added ${index}`);
+    const panes = renderThree(ours, ours, [...ours.slice(0, 280), ...extra, ...ours.slice(280)]);
+    panes.ours.scrollTop = 16 + 300 * 20 - 400 - 0.5;
+    await fireEvent.scroll(panes.ours);
+    expect(panes.result.scrollTop).toBe(16 + 337 * 20 - 400);
+    expect(panes.theirs.scrollTop).toBe(16 + 300 * 20 - 400);
+  });
+
+  it("穿过对面没有的大段插入时，跟随栏不反向漂移", async () => {
+    const ours = body(300);
+    const extra = Array.from({ length: 200 }, (_, index) => `added ${index}`);
+    const panes = renderThree(ours, ours, [...ours.slice(0, 50), ...extra, ...ours.slice(50)]);
+    const walk = async (from: number, to: number, step: number) => {
+      const seen: number[] = [];
+      for (let top = from; step > 0 ? top <= to : top >= to; top += step) {
+        panes.result.scrollTop = top;
+        await fireEvent.scroll(panes.result);
+        seen.push(panes.ours.scrollTop);
+      }
+      return seen;
+    };
+    const down = await walk(0, 9600, 400);
+    expect(down.every((top, index) => index === 0 || top >= down[index - 1]), `向下：${down.join(",")}`).toBe(true);
+    const up = await walk(9600, 0, -400);
+    expect(up.every((top, index) => index === 0 || top <= up[index - 1]), `向上：${up.join(",")}`).toBe(true);
+    expect(up.at(-1), "回到顶也真正到顶").toBe(0);
+  });
+
+  it("纯横向滚动不改变任何一栏的纵向位置", async () => {
+    const ours = body(300);
+    const extra = Array.from({ length: 100 }, (_, index) => `added ${index}`);
+    const panes = renderThree(ours, ours, [...ours.slice(0, 100), ...extra, ...ours.slice(100)]);
+    panes.ours.scrollTop = 3000;
+    await fireEvent.scroll(panes.ours);
+    await frames();
+    const top = panes.result.scrollTop;
+    for (const offset of [7, -7]) {
+      panes.result.scrollTop = top + offset;
+      await frames();
+      panes.ours.scrollLeft = 200 + offset;
+      await fireEvent.scroll(panes.ours);
+      expect(panes.result.scrollTop).toBe(top + offset);
+      await frames();
+    }
+    expect(panes.result.scrollLeft).toBe(193);
+  });
+});
+
+describe("整文件编辑的行尾", () => {
+  const crlf = (text: string) => text.replace(/\n/g, "\r\n");
+  const CRLF_TWO = crlf(TWO);
+
+  /** 真实 textarea 读回的 value 永远是 LF：happy-dom 不做这一步，这里按浏览器的结果写入。 */
+  async function type(value: string) {
+    await fireEvent.input(screen.getByRole("textbox", { name: "合并结果" }), { target: { value: normalizeEol(value) } });
+  }
+
+  function open(text: string, extra: Partial<ConflictView> = {}, props: Record<string, unknown> = {}) {
+    const onResolve = vi.fn();
+    render(ConflictResolver, {
+      props: { view: view(text, extra), currentLabel: "main", incomingLabel: "feature", disabled: false, onResolve, ...props },
+    });
+    return onResolve;
+  }
+
+  const whole = () => fireEvent.click(screen.getByRole("button", { name: /整文件编辑/ }));
+  const mark = async () => {
+    await fireEvent.click(screen.getByRole("button", { name: "标记编辑结果" }));
+    if (screen.getByRole("button", { name: "标记编辑结果" }).textContent?.includes("确认")) {
+      await fireEvent.click(screen.getByRole("button", { name: "标记编辑结果" }));
+    }
+  };
+  const FIXED = "one\ntwo\nthree\n";
+
+  it("行尾工具：规范化幂等，主导行尾按多数派，平手算 LF", () => {
+    expect(normalizeEol("a\r\nb\rc\n")).toBe("a\nb\nc\n");
+    expect(applyEol("a\nb\n", "\r\n")).toBe("a\r\nb\r\n");
+    expect(applyEol("a\r\nb\r\n", "\r\n"), "已是 CRLF 不会叠成 \\r\\r\\n").toBe("a\r\nb\r\n");
+    expect(applyEol("a\r\nb\n", "\n")).toBe("a\nb\n");
+    expect(detectEol("a\r\nb\r\nc\n")).toBe("\r\n");
+    expect(detectEol("a\r\nb\n")).toBe("\n");
+    expect(detectEol("没有换行", null, "x\r\n"), "结果没有换行时看两侧").toBe("\r\n");
+    expect(detectEol("", null)).toBe("\n");
+  });
+
+  it("保留双方拼出来只有一种行尾，缺一侧也成立", () => {
+    expect(keepBothSides("a\r\nb\r\n", "c\nd\n", "\r\n")).toBe("a\r\nb\r\nc\r\nd\r\n");
+    expect(keepBothSides("a\r\n", "b\n", "\n")).toBe("a\nb\n");
+    expect(keepBothSides("", "b\r\n", "\r\n")).toBe("b\r\n");
+    expect(keepBothSides("", "", "\r\n")).toBe("");
+  });
+
+  it("打一个字后 CRLF 文件逐字节保持 CRLF", async () => {
+    const onResolve = open(CRLF_TWO);
+    await whole();
+    await type(`${TWO}x\n`);
+    await mark();
+    expect(onResolve).toHaveBeenCalledWith("text", `${CRLF_TWO}x\r\n`);
+  });
+
+  it("LF 文件写回仍是 LF，不打字时混合行尾原样保留", async () => {
+    const mixed = "a\r\nb\r\nc\n";
+    const onResolve = open(mixed);
+    await whole();
+    await mark();
+    expect(onResolve).toHaveBeenLastCalledWith("text", mixed);
+  });
+
+  it("混合行尾文件编辑后按主导行尾写回", async () => {
+    const onResolve = open("a\r\nb\r\nc\n");
+    await whole();
+    await type("a\nb\nc\nd\n");
+    await mark();
+    expect(onResolve).toHaveBeenLastCalledWith("text", "a\r\nb\r\nc\r\nd\r\n");
+  });
+
+  it("删空重打也沿用打开时的行尾", async () => {
+    const onResolve = open("a\r\nb\r\n");
+    await whole();
+    await type("");
+    await type(FIXED);
+    await mark();
+    expect(onResolve).toHaveBeenLastCalledWith("text", crlf(FIXED));
+  });
+
+  it("整文件的保留双方同一行尾，之后再打字也不变", async () => {
+    const side = (text: string) => ({ present: true, binary: false, truncated: false, text, summary: "" });
+    const onResolve = open(CRLF_TWO, { ours: side("o1\r\no2\r\n"), theirs: side("t1\r\nt2\r\n") });
+    await whole();
+    await fireEvent.click(screen.getByRole("button", { name: /保留双方/ }));
+    await mark();
+    expect(onResolve).toHaveBeenLastCalledWith("text", "o1\r\no2\r\nt1\r\nt2\r\n");
+    await type("o1\no2\nt1\nt2\nx\n");
+    await mark();
+    expect(onResolve).toHaveBeenLastCalledWith("text", "o1\r\no2\r\nt1\r\nt2\r\nx\r\n");
+  });
+
+  it("切回逐处后组合结果和手动编辑都是 CRLF", async () => {
+    const onResolve = open(CRLF_TWO);
+    await whole();
+    await type(TWO.replace("head\n", "edited\n"));
+    await fireEvent.click(screen.getByRole("button", { name: /逐处处理/ }));
+    expect(document.querySelectorAll(".cr-head")).toHaveLength(2);
+    const stream = screen.getByRole("region", { name: "逐处处理冲突" });
+    await fireEvent.keyDown(stream, { key: "1" });
+    await fireEvent.keyDown(stream, { key: "e" });
+    await fireEvent.input(await screen.findByRole("textbox", { name: "编辑冲突 2 的结果" }), { target: { value: "hand a\nhand b" } });
+    await fireEvent.click(screen.getByRole("button", { name: /完成编辑/ }));
+    await mark();
+    expect(onResolve).toHaveBeenLastCalledWith("text", "edited\r\nours one\r\nmiddle\r\nhand a\r\nhand b\r\ntail\r\n");
+  });
+
+  it("草稿恢复后继续打字仍是 CRLF", async () => {
+    const onResolve = open(CRLF_TWO, {}, { draft: { original: CRLF_TWO, base: CRLF_TWO, resolutions: {}, whole: crlf("saved\n") } });
+    expect((screen.getByRole("textbox", { name: "合并结果" }) as HTMLTextAreaElement).value).toBe("saved\n");
+    await type("saved\nmore\n");
+    await mark();
+    expect(onResolve).toHaveBeenLastCalledWith("text", crlf("saved\nmore\n"));
+  });
+
+  it("MergePanel 直接用的三栏：oninput 已还原行尾", async () => {
+    const onResult = vi.fn();
+    render(ThreeWayMerge, {
+      props: { view: view("a\r\nb\r\n"), resultText: "a\r\nb\r\n", disabled: false, onResult, onChoice: () => {}, onResolve: () => {}, onReset: () => {} },
+    });
+    await type("a\nb\nc\n");
+    expect(onResult).toHaveBeenCalledWith("a\r\nb\r\nc\r\n");
+  });
+
+  it("CRLF 内容回传时不写回 textarea，光标不跳", async () => {
+    const onResolve = open(CRLF_TWO);
+    await whole();
+    const area = screen.getByRole("textbox", { name: "合并结果" }) as HTMLTextAreaElement;
+    expect(area.value, "展示给 textarea 的是规范化文本").toBe(TWO);
+    const native = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(area), "value") as PropertyDescriptor;
+    const writes: string[] = [];
+    Object.defineProperty(area, "value", {
+      configurable: true,
+      get: () => native.get?.call(area),
+      set: (value: string) => {
+        writes.push(value);
+        native.set?.call(area, value);
+      },
+    });
+    native.set?.call(area, `${TWO}x`);
+    area.setSelectionRange(3, 3);
+    await fireEvent.input(area);
+    await tick();
+    expect(writes, "Svelte 没有把文本写回").toEqual([]);
+    expect(area.selectionStart).toBe(3);
+    await mark();
+    expect(onResolve).toHaveBeenLastCalledWith("text", `${CRLF_TWO}x`);
   });
 });

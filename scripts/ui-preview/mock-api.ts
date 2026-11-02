@@ -17,7 +17,9 @@ const now = Math.floor(Date.now() / 1000);
 
 /**
  * 进入预览 mock 平时到不了的状态：?switch=fail 让切换分支失败，?diff=paged 让差异续读挂住 8 秒，
- * ?git=missing / ?git=old 模拟 Git 缺失或低于基线，?recent=empty 清空最近仓库。
+ * ?git=missing / ?git=old 模拟 Git 缺失或低于基线，?recent=empty 清空最近仓库，?recent=many 模拟 500 个最近仓库。
+ * ?conflict=modify-delete 把 .css 冲突换成 200 行的修改/删除冲突，?eol=crlf 把冲突文本换成 CRLF，
+ * 写回的内容记在 window.__resolved，用来在真实 textarea 上核对字节；window.__mergePreviews 记预检次数。
  */
 const previewParams = new URLSearchParams(location.search);
 const healthyGit = { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "Git 2.49.0 可用" };
@@ -36,6 +38,14 @@ let recent = [
   { name: "demo", path: "/work/beta/demo", openedAtMs: Date.now() - 4000 },
 ];
 if (previewParams.get("recent") === "empty") recent = [];
+if (previewParams.get("recent") === "many") {
+  // 每 50 个有一组同名仓库，路径够长才能看出完整路径折行。
+  for (let index = recent.length; index < 500; index += 1) {
+    const name = index % 50 === 0 ? "demo" : `repo-${String(index).padStart(3, "0")}`;
+    const group = index % 50 === 0 ? `clients/${index}/a-rather-long-directory-name/that-keeps-going/and-going/for-a-while` : `group-${index % 7}`;
+    recent.push({ name, path: `/work/${group}/${name}`, openedAtMs: Date.now() - index * 1000 });
+  }
+}
 
 function file(path: string, staged: FileChange["staged"], unstaged: FileChange["unstaged"], extra: Partial<FileChange> = {}): FileChange {
   return { path, originalPath: null, staged, unstaged, untracked: false, unmerged: false, ...extra };
@@ -540,6 +550,8 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     return ok(stashData(false));
   },
   mergePreview: (_repo: string, source: string, target: string | null) => {
+    const calls = window as unknown as { __mergePreviews?: number };
+    calls.__mergePreviews = (calls.__mergePreviews ?? 0) + 1;
     const into = target ?? branch.name;
     const localPaths = files.filter((item) => !item.untracked && !item.unmerged).map((item) => item.path);
     const dirty = localPaths.length > 0 && new URLSearchParams(location.search).get("dirty") === "1";
@@ -585,6 +597,22 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   },
   mergeSession: () => ok(mergeData()),
   conflictView: (_repo: string, path: string) => {
+    if (previewParams.get("conflict") === "modify-delete" && path.endsWith(".css")) {
+      const text = Array.from({ length: 200 }, (_, index) => `.rule-${index + 1} { padding: ${index}px; }\n`).join("");
+      return ok({
+        generation, path, kind: "modify_delete", editable: false,
+        ours: { present: true, binary: false, truncated: false, text, summary: "本地修改了这个文件。" },
+        theirs: { present: false, binary: false, truncated: false, text: null, summary: "另一分支删除了这个文件。" },
+        result: { present: true, binary: false, truncated: false, text, summary: "工作区保留了本地版本。" },
+        note: "另一分支删除了这个文件。选择保留本地版本，或接受删除。",
+      });
+    }
+    const crlf = (view: Record<string, unknown>) => {
+      if (previewParams.get("eol") !== "crlf") return view;
+      const side = (part: { text: string | null }) => ({ ...part, text: part.text?.replace(/\n/g, "\r\n") ?? null });
+      type Side = { text: string | null };
+      return { ...view, ours: side(view.ours as Side), theirs: side(view.theirs as Side), result: side(view.result as Side) };
+    };
     if (path.endsWith(".png")) {
       return ok({
         generation, path, kind: "binary", editable: false,
@@ -598,23 +626,26 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       const ours = ":root {\n  --accent: #0e7c55;\n  --radius: 11px;\n}\n\n.button {\n  padding: 0 14px;\n}\n";
       const theirs = ":root {\n  --accent: #10a37f;\n  --radius: 12px;\n}\n\n.button {\n  padding: 0 16px;\n}\n";
       const result = ":root {\n<<<<<<< HEAD\n  --accent: #0e7c55;\n  --radius: 11px;\n||||||| base\n  --accent: #0e7c55;\n  --radius: 10px;\n=======\n  --accent: #10a37f;\n  --radius: 12px;\n>>>>>>> main\n}\n\n.button {\n<<<<<<< HEAD\n  padding: 0 14px;\n=======\n  padding: 0 16px;\n>>>>>>> main\n}\n";
-      return ok({
+      return ok(crlf({
         generation, path, kind: "text", editable: true,
         ours: { present: true, binary: false, truncated: false, text: ours, summary: "本地" },
         theirs: { present: true, binary: false, truncated: false, text: theirs, summary: "另一侧" },
         result: { present: true, binary: false, truncated: false, text: result, summary: "结果" },
         note: "可以编辑合并结果。标记后只解决这个文件，其他冲突保持不变。",
-      });
+      }));
     }
-    return ok({
+    return ok(crlf({
       generation, path, kind: "text", editable: true,
       ours: { present: true, binary: false, truncated: false, text: BIG_CONFLICT.ours, summary: "本地" },
       theirs: { present: true, binary: false, truncated: false, text: BIG_CONFLICT.theirs, summary: "另一侧" },
       result: { present: true, binary: false, truncated: false, text: BIG_CONFLICT.result, summary: "结果" },
       note: "可以编辑合并结果。标记后只解决这个文件，其他冲突保持不变。",
-    });
+    }));
   },
-  resolveConflict: (_repo: string, path: string) => {
+  resolveConflict: (...args: never[]) => {
+    const [, path, , content] = args as unknown as [string, string, string, string | undefined];
+    const log = window as unknown as { __resolved?: unknown[] };
+    (log.__resolved ??= []).push({ path, content });
     files = files.map((item) => item.path === path ? { ...item, staged: "modified", unstaged: "none", untracked: false, unmerged: false } : item);
     generation += 1;
     return ok(mergeData());

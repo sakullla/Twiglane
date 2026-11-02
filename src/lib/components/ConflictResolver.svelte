@@ -9,10 +9,12 @@
     alignHunk,
     choiceLabel,
     composeConflictText,
+    detectEol,
     hasConflictMarkers,
     hintLabel,
     hunkHint,
     inlineRange,
+    keepBothSides,
     parseConflictText,
     resolvedLines,
     simpleResolution,
@@ -26,7 +28,7 @@
   } from "../conflict";
   import { createTextDiff } from "../diff";
   import { trackCodeScroll } from "../codeScroll.svelte";
-  import { codeRuler, rulerPadding } from "../layout";
+  import { codeContentSize, codeRuler, rulerPadding } from "../layout";
   import { portal } from "../portal";
   import type { ConflictView } from "../types";
   import { highlightLines, type SyntaxLine } from "../syntax/client";
@@ -150,6 +152,11 @@
 
   $effect(() => {
     onDraft?.({ original, base, resolutions, whole }, { total, done: whole === null ? done : 0 });
+  });
+
+  // 这句提示只对正在编辑的那一处有效：编辑以任何方式结束（完成、取消、切视图、撤销）都一起收掉。
+  $effect(() => {
+    if (editing === null) navNote = null;
   });
 
   /** 跨文件跳转的落点：沿跳转方向的第一处未处理；都处理过时落在首处或末处。 */
@@ -364,14 +371,16 @@
   });
 
   /** 横向滚动宽度取全部行里最长的几行，由隐藏标尺按真实字体排版（全角、tab 都算准）。 */
-  let ruler = $derived.by(() => {
+  let codeTexts = $derived.by(() => {
     const texts: string[] = [];
     for (const row of rows) {
       if (row.kind === "ctx" || row.kind === "res" || row.kind === "base") texts.push(row.text);
       else if (row.kind === "pair") texts.push(row.ours ?? "", row.theirs ?? "");
     }
-    return codeRuler(texts);
+    return texts;
   });
+  let ruler = $derived(codeRuler(codeTexts));
+  let codeSize = $derived(codeContentSize(codeTexts));
 
   /* ---------- 虚拟滚动 ---------- */
 
@@ -405,6 +414,7 @@
     () => scroller,
     () => ruler,
     () => visible,
+    () => codeSize,
   );
 
   /* ---------- 语法高亮（按块、只请求视口附近） ---------- */
@@ -676,10 +686,7 @@
     const theirs = view.theirs.text ?? "";
     if (choice === "ours") whole = ours;
     else if (choice === "theirs") whole = theirs;
-    else {
-      const combined = [ours.trimEnd(), theirs.trimEnd()].filter((part) => part.length > 0).join("\n");
-      whole = combined.length > 0 ? `${combined}\n` : "";
-    }
+    else whole = keepBothSides(ours, theirs, detectEol(original, ours, theirs));
     armed = false;
   }
 

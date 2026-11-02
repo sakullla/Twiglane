@@ -26,6 +26,15 @@ function tagEnd(text: string, start: number): number {
   throw new Error("标签未闭合");
 }
 
+describe("README 与实现一致", () => {
+  const readme = readFileSync(path.join(root, "README.md"), "utf8");
+
+  it("超时和关闭窗口的进程局限写清范围", () => {
+    expect(readme).toContain("超时或关闭窗口只结束 git 进程本身，传输子进程可能短暂残留");
+    expect(readme).not.toContain("超时只结束 `git ls-remote` 本身");
+  });
+});
+
 describe("组件源码约束", () => {
   it("每个可禁用的控件都写明不可用的原因（R12）", () => {
     const missing: string[] = [];

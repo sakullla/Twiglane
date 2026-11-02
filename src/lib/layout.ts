@@ -163,6 +163,13 @@ const ofWide = (item: RulerEntry) => item.wide;
 const ofOther = (item: RulerEntry) => item.other;
 const ofEstimate = (item: RulerEntry) => item.estimate;
 
+/** 代码行的总规模（行数加字符数）：内容换了但最长的几行没变时，靠它识别。 */
+export function codeContentSize(texts: readonly string[]): number {
+  let size = texts.length;
+  for (const text of texts) size += text.length;
+  return size;
+}
+
 /**
  * 从全量行里挑候选，交给隐藏标尺按真实字体排版：横向滚动宽度来自浏览器实测。
  *

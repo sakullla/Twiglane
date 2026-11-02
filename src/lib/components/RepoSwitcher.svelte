@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { filterRecent, repeatedNames } from "../recent";
+  import { tick, untrack } from "svelte";
+  import { filterRecent, repeatedNames, rowOffsets, rowWindow } from "../recent";
   import type { IconName } from "../icons";
   import type { RecentRepo } from "../types";
   import { hueOf, initialOf } from "../ui";
@@ -9,6 +10,10 @@
   /**
    * 标题栏仓库弹层：搜索最近仓库并直接切换，右键或菜单键打开仓库操作，
    * 底部是打开、克隆、新建。切换判定由外壳给出（switchBlocked），这里只负责就地说明原因。
+   *
+   * 几百个仓库时只渲染视口附近的行。同名仓库的完整路径会折行，行高不固定，所以先按估算排版，
+   * 渲染出来后记下实测高度。键盘当前项始终留在 DOM 里，Popover 的 scrollIntoView 和
+   * aria-activedescendant 才有落点。
    */
   interface Props {
     anchor: HTMLElement;
@@ -34,16 +39,128 @@
     { id: "repo.create", label: "新建仓库", icon: "folder-plus" },
   ];
 
+  /** 单行仓库的高度与每多一行的增量，只是实测之前的估算。 */
+  const ROW = 39;
+  const EXTRA_LINE = 15;
+  /** 弹层宽 400 时一行完整路径大约放得下的字符数。 */
+  const PATH_CHARS = 60;
+  const OVERSCAN = 6;
+  const FALLBACK_VIEWPORT = 480;
+
   let query = $state("");
   let active = $state(0);
   let visible = $derived(filterRecent(repos, query));
   /** 同名仓库只能靠路径区分，这些行显示完整路径而不是截断（R6）。 */
   let sameNames = $derived(repeatedNames(repos));
 
-  /** 打开弹层或换关键词后，默认项落在第一个可切过去的仓库上：一次回车就能切换（R6）。 */
+  let space = $state<HTMLElement | null>(null);
+  let list: HTMLElement | null = null;
+  let scrollTop = $state(0);
+  let viewport = $state(0);
+  /** 实测行高；原因文字整体出现或消失时行高都变，换一份重新量。 */
+  let measured = $state.raw(new Map<string, number>());
+  let measuredFor: string | null | undefined;
+  /** 方向键刚移动当前项：行高修正后还要把它留在视口里。 */
+  let following = false;
+
+  function estimate(repo: RecentRepo): number {
+    const pathLines = sameNames.has(repo.name) ? Math.floor(repo.path.length / PATH_CHARS) : 0;
+    return ROW + pathLines * EXTRA_LINE + (reasonFor(repo) ? EXTRA_LINE : 0);
+  }
+
+  function heightOf(repo: RecentRepo): number {
+    return measured.get(repo.path) ?? estimate(repo);
+  }
+
+  let offsets = $derived(rowOffsets(visible.map(heightOf)));
+  let range = $derived(rowWindow(offsets, scrollTop, viewport > 0 ? viewport : FALLBACK_VIEWPORT, OVERSCAN));
+  let rendered = $derived.by(() => {
+    const rows: { repo: RecentRepo; index: number }[] = [];
+    for (let index = range.start; index < range.end; index += 1) rows.push({ repo: visible[index], index });
+    if ((active < range.start || active >= range.end) && visible[active]) rows.push({ repo: visible[active], index: active });
+    return rows;
+  });
+
+  /**
+   * 打开弹层或换关键词后，默认项落在第一个可切过去的仓库上：一次回车就能切换（R6）。
+   * 关键词没变而列表变了（从列表移除）时留在原位，不把当前项甩到视口外。
+   */
+  let seenQuery: string | null = null;
   $effect(() => {
-    const first = visible.findIndex((repo) => repo.path !== currentPath);
-    active = first >= 0 ? first : 0;
+    const rows = visible;
+    const needle = query;
+    untrack(() => {
+      if (needle === seenQuery) {
+        active = Math.min(active, Math.max(0, rows.length - 1));
+        return;
+      }
+      seenQuery = needle;
+      const first = rows.findIndex((repo) => repo.path !== currentPath);
+      active = first >= 0 ? first : 0;
+      if (list) list.scrollTop = 0;
+      scrollTop = 0;
+    });
+  });
+
+  $effect(() => {
+    if (blockedReason === measuredFor) return;
+    measuredFor = blockedReason;
+    measured = new Map();
+  });
+
+  /** 滚动容器是 Popover 的列表区，这里挂在内容轨道上跟着它走。 */
+  function trackList(node: HTMLElement) {
+    const host = node.parentElement as HTMLElement;
+    const read = () => {
+      scrollTop = host.scrollTop;
+      viewport = host.clientHeight;
+    };
+    space = node;
+    list = host;
+    read();
+    host.addEventListener("scroll", read, { passive: true });
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(read);
+    observer?.observe(host);
+    return {
+      destroy() {
+        host.removeEventListener("scroll", read);
+        observer?.disconnect();
+        space = null;
+        list = null;
+      },
+    };
+  }
+
+  /** 视口上方的行变高时同步推开滚动位置，看着的内容不跳。 */
+  function measureRows(node: HTMLElement) {
+    let next: Map<string, number> | null = null;
+    let shift = 0;
+    for (const row of node.querySelectorAll<HTMLElement>("[data-repo-row]")) {
+      const height = row.offsetHeight;
+      const index = Number(row.dataset.repoRow);
+      const repo = visible[index];
+      if (!repo || height <= 0) continue;
+      const known = heightOf(repo);
+      if (height === known) continue;
+      next ??= new Map(measured);
+      next.set(repo.path, height);
+      if (offsets[index] + known <= scrollTop) shift += height - known;
+    }
+    if (!next) {
+      following = false;
+      return;
+    }
+    measured = next;
+    void tick().then(() => {
+      if (shift !== 0 && list) list.scrollTop += shift;
+      if (following) node.querySelector<HTMLElement>(`[data-repo-row="${active}"]`)?.scrollIntoView?.({ block: "nearest" });
+    });
+  }
+
+  $effect(() => {
+    void rendered;
+    const node = space;
+    if (node) untrack(() => measureRows(node));
   });
 
   function reasonFor(repo: RecentRepo): string | null {
@@ -62,7 +179,13 @@
   label="切换仓库"
   placeholder="搜索仓库名称或路径"
   bind:query
-  bind:active
+  bind:active={
+    () => active,
+    (index) => {
+      active = index;
+      following = true;
+    }
+  }
   count={visible.length}
   onChoose={(index) => choose(visible[index])}
   onItemContextMenu={(index, point) => onContextMenu(visible[index], point)}
@@ -74,47 +197,57 @@
     {:else if visible.length === 0}
       <p class="branch-popover-empty">没有匹配的仓库，试试名称或路径。</p>
     {/if}
-    {#each visible as repo, index (repo.path)}
-      {@const reason = reasonFor(repo)}
-      {@const current = repo.path === currentPath}
-      <div class="switcher-row" role="presentation">
-        <div
-          id={`${listId}-${index}`}
-          class="branch-option switcher-option"
-          class:active={index === active}
-          role="option"
-          aria-selected={current}
-          aria-disabled={reason ? "true" : undefined}
-          data-index={index}
-          title={reason ?? repo.path}
-          tabindex="-1"
-          onmousemove={() => (active = index)}
-          onclick={() => choose(repo)}
-          oncontextmenu={(event) => {
-            event.preventDefault();
-            active = index;
-            onContextMenu(repo, { x: event.clientX, y: event.clientY });
-          }}
-          onkeydown={() => {}}
-        >
-          <span class="repo-badge" style={`--hue:${hueOf(repo.path)}`} aria-hidden="true">{initialOf(repo.name)}</span>
-          <span class="repo-text">
-            <span class="repo-name">{repo.name}</span>
-            <span class={sameNames.has(repo.name) ? "repo-path-full" : "repo-path"}><bdi>{repo.path}</bdi></span>
-            {#if reason}<span class="switcher-reason">{reason}</span>{/if}
+    {#if visible.length > 0}
+      <div class="switcher-space" role="presentation" style={`height:${offsets[visible.length]}px`} use:trackList>
+      {#each rendered as { repo, index } (repo.path)}
+        {@const reason = reasonFor(repo)}
+        {@const current = repo.path === currentPath}
+        <div class="switcher-row" role="presentation" data-repo-row={index} style={`top:${offsets[index]}px`}>
+          <div
+            id={`${listId}-${index}`}
+            class="branch-option switcher-option"
+            class:active={index === active}
+            role="option"
+            aria-selected={current}
+            aria-setsize={visible.length}
+            aria-posinset={index + 1}
+            aria-disabled={reason ? "true" : undefined}
+            data-index={index}
+            title={reason ?? repo.path}
+            tabindex="-1"
+            onmousemove={() => {
+              following = false;
+              active = index;
+            }}
+            onclick={() => choose(repo)}
+            oncontextmenu={(event) => {
+              event.preventDefault();
+              following = false;
+              active = index;
+              onContextMenu(repo, { x: event.clientX, y: event.clientY });
+            }}
+            onkeydown={() => {}}
+          >
+            <span class="repo-badge" style={`--hue:${hueOf(repo.path)}`} aria-hidden="true">{initialOf(repo.name)}</span>
+            <span class="repo-text">
+              <span class="repo-name">{repo.name}</span>
+              <span class={sameNames.has(repo.name) ? "repo-path-full" : "repo-path"}><bdi>{repo.path}</bdi></span>
+              {#if reason}<span class="switcher-reason">{reason}</span>{/if}
+            </span>
+            {#if current}<Icon name="check" size={14} class="switcher-check" />{/if}
+          </div>
+          <span class="switcher-actions">
+            <button type="button" class="icon-btn sm" tabindex="-1" aria-label={`复制 ${repo.name} 的完整路径`} title="复制完整路径" onclick={() => onCopyPath(repo.path)}>
+              <Icon name="copy" size={13} />
+            </button>
+            <button type="button" class="icon-btn sm danger" tabindex="-1" aria-label={`从列表移除 ${repo.name}`} title="从列表移除（不删除文件）" onclick={() => onForget(repo.path)}>
+              <Icon name="x" size={13} />
+            </button>
           </span>
-          {#if current}<Icon name="check" size={14} class="switcher-check" />{/if}
         </div>
-        <span class="switcher-actions">
-          <button type="button" class="icon-btn sm" tabindex="-1" aria-label={`复制 ${repo.name} 的完整路径`} title="复制完整路径" onclick={() => onCopyPath(repo.path)}>
-            <Icon name="copy" size={13} />
-          </button>
-          <button type="button" class="icon-btn sm danger" tabindex="-1" aria-label={`从列表移除 ${repo.name}`} title="从列表移除（不删除文件）" onclick={() => onForget(repo.path)}>
-            <Icon name="x" size={13} />
-          </button>
-        </span>
+      {/each}
       </div>
-    {/each}
+    {/if}
   {/snippet}
   {#snippet foot()}
     {#each ACTIONS as action (action.id)}

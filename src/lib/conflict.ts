@@ -100,6 +100,34 @@ function dominantEol(lines: string[]): "\n" | "\r\n" {
   return crlf > lf ? "\r\n" : "\n";
 }
 
+/** 按 textarea 读写时的规范化还原成 LF：\r\n 和孤立的 \r 都算一个换行。 */
+export function normalizeEol(text: string): string {
+  return text.includes("\r") ? text.replace(/\r\n?/g, "\n") : text;
+}
+
+/** 整份文本统一成给定行尾。先规范化再替换，已经是 CRLF 的内容不会变成 \r\r\n。 */
+export function applyEol(text: string, eol: "\n" | "\r\n"): string {
+  const normalized = normalizeEol(text);
+  return eol === "\n" ? normalized : normalized.replace(/\n/g, eol);
+}
+
+/**
+ * 文件的主导行尾：取第一份带换行的文本（通常是打开时的合并结果）的多数派，平手算 LF。
+ * 混合行尾文件一经手动编辑会整份变成主导行尾：textarea 读回时已经没有逐行信息。
+ */
+export function detectEol(...texts: (string | null | undefined)[]): "\n" | "\r\n" {
+  for (const text of texts) {
+    if (text?.includes("\n")) return dominantEol(splitRawLines(text));
+  }
+  return "\n";
+}
+
+/** 保留双方：两侧首尾相接，拼出来的整份文本只有一种行尾。 */
+export function keepBothSides(ours: string, theirs: string, eol: "\n" | "\r\n"): string {
+  const combined = [ours.trimEnd(), theirs.trimEnd()].filter((part) => part.length > 0).join("\n");
+  return combined.length > 0 ? applyEol(`${combined}\n`, eol) : "";
+}
+
 export function parseConflictText(text: string): ParsedConflictFile {
   const lines = splitRawLines(text);
   const eol = dominantEol(lines);

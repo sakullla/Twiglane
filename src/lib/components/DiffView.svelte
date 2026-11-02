@@ -2,7 +2,7 @@
   import { untrack } from "svelte";
   import { hunkCaption, toSideRows, visibleDiffLines, type ViewLine } from "../diff";
   import { trackCodeScroll } from "../codeScroll.svelte";
-  import { codeRuler, rulerPadding, scrollByRows, visibleRange } from "../layout";
+  import { codeContentSize, codeRuler, rulerPadding, scrollByRows, visibleRange } from "../layout";
   import type { DiffHunk, DiffResponse, FileSelection } from "../types";
   import { BUSY_REASON, splitPath, type FileNavState } from "../ui";
   import { buildDiffDocuments, codeOf, signOf } from "../syntax/diffSyntax";
@@ -95,7 +95,9 @@
   let sideRows = $derived(mode === "split" ? toSideRows(lines) : []);
   let total = $derived(mode === "split" ? sideRows.length : lines.length);
   /* 宽度取全量差异的最长行，只随内容变化，不随虚拟窗口或布局切换跳动。 */
-  let ruler = $derived(codeRuler(lines.filter((line) => line.kind !== "hunk").map((line) => codeOf(line))));
+  let codeTexts = $derived(lines.filter((line) => line.kind !== "hunk").map((line) => codeOf(line)));
+  let ruler = $derived(codeRuler(codeTexts));
+  let codeSize = $derived(codeContentSize(codeTexts));
   let range = $derived(
     embedded
       ? visibleRange(total, hostTop, hostHeight, ROW_HEIGHT)
@@ -308,6 +310,7 @@
     () => scroller,
     () => ruler,
     () => [selectionKey, mode, range.start, range.end],
+    () => codeSize,
   );
 
   function applyScroll(next: number) {

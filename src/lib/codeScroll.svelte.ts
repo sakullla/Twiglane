@@ -1,4 +1,5 @@
 import { untrack } from "svelte";
+import type { RulerLine } from "./layout";
 
 /**
  * 代码窗口横向滚动的运行时部分，写在滚动容器上的三个变量：
@@ -14,12 +15,14 @@ import { untrack } from "svelte";
  * 复用的 {#each} 项。第一轮的 $effect 看到的是「旧片段文字 + 新追加片段」，比真实行宽约一倍，
  * 只增不减地锁存就成了幽灵滚动行程。所以放到下一帧量，并用 data-len 核对行文本长度。
  */
-export function trackCodeScroll<T extends { text: string }>(
+export function trackCodeScroll(
   scroller: () => HTMLElement | null,
-  /** 标尺内容：文本序列变了才算内容换了，刷新出来的同内容新对象不算。 */
-  ruler: () => T[],
+  /** 标尺内容：采样文字和余量都相同才算同一份标尺，刷新出来的同内容新对象不算内容换了。 */
+  ruler: () => RulerLine[],
   /** 渲染窗口：变化时重新实测已渲染行。 */
   rendered: () => unknown,
+  /** 全部代码行的规模：标尺只留最长的几行，其余行换了要靠它识别，否则残留的 floor 不会重算。 */
+  size: () => number,
 ): void {
   let floor = 0;
   let measuredKey: string | null = null;
@@ -65,21 +68,22 @@ export function trackCodeScroll<T extends { text: string }>(
     };
   });
 
-  let keyOf: T[] | null = null;
+  let keyOf: RulerLine[] | null = null;
   let key = "";
 
   $effect(() => {
     const node = scroller();
     const lines = ruler();
+    const scale = size();
     rendered();
     if (!node) return;
     return untrack(() => {
       if (lines !== keyOf) {
         keyOf = lines;
-        key = lines.map((line) => line.text).join("\u0000");
+        key = lines.map((line) => `${line.restCh}\u0001${line.restIc}\u0001${line.text}`).join("\u0000");
       }
       syncBox(node);
-      const stableKey = key;
+      const stableKey = `${scale}\u0000${key}`;
       const frame = requestAnimationFrame(() => measure(node, stableKey));
       return () => cancelAnimationFrame(frame);
     });

@@ -915,7 +915,8 @@ label.list-row .checkbox { margin-top: 2px; }
 .popover-foot { flex: none; padding: var(--space-4) var(--space-6) var(--space-6); box-shadow: inset 0 1px 0 var(--border); }
 .popover-foot .menu-item { align-items: center; gap: var(--space-8); padding: var(--space-6) var(--space-8); }
 .popover-foot .menu-item > .icon { color: var(--fg-muted); margin-top: 0; }
-.switcher-row { position: relative; }
+.switcher-space { position: relative; }
+.switcher-row { position: absolute; left: 0; right: 0; }
 .popover .switcher-option { padding-block: var(--space-4); }
 .switcher-option .repo-text { flex: 1; }
 .switcher-option[aria-disabled="true"] .repo-name { color: var(--fg-subtle); }
@@ -1441,10 +1442,11 @@ label.list-row .checkbox { margin-top: 2px; }
 .three-way-summary { padding: var(--space-16); color: var(--fg-muted); font-size: var(--text-sm); }
 .three-way-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-height: 36px; padding: var(--space-2) var(--space-12); background: var(--surface-2); flex: none; }
 .three-way-foot > span { display: inline-flex; align-items: center; gap: var(--space-6); color: var(--fg-subtle); font-size: var(--text-xs); }
-/* 不能按文本合并（二进制、修改/删除）：内容只有一句说明，三栏收成自然高度，选择按钮升为次级实心按钮。 */
-.conflict-sides:has(.three-way-merge.readonly) { flex: none; }
-.three-way-merge.readonly { flex: none; }
-.three-way-merge.readonly .three-way-body { flex: none; min-height: 120px; }
+/* 不能按文本合并（二进制）：内容只有一句说明，三栏收成自然高度。修改/删除带文本时要能滚完全文，
+   所以 has-text 留在 flex: 1 的默认布局里。选择按钮在只读时都升为次级实心按钮。 */
+.conflict-sides:has(.three-way-merge.readonly:not(.has-text)) { flex: none; }
+.three-way-merge.readonly:not(.has-text) { flex: none; }
+.three-way-merge.readonly:not(.has-text) .three-way-body { flex: none; min-height: 120px; }
 .three-way-merge.readonly .three-way-title .btn { border-color: var(--control-border); background: var(--surface); color: var(--fg); }
 
 /* ==========================================================================

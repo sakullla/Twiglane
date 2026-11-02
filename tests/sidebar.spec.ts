@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
+import { tick } from "svelte";
 import { describe, expect, it, vi } from "vitest";
 import CommandPalette from "../src/lib/components/CommandPalette.svelte";
 import MergeBanner from "../src/lib/components/MergeBanner.svelte";
@@ -9,6 +10,7 @@ import StatusBar from "../src/lib/components/StatusBar.svelte";
 import TitleBar from "../src/lib/components/TitleBar.svelte";
 import ViewSwitcher from "../src/lib/components/ViewSwitcher.svelte";
 import Welcome from "../src/lib/components/Welcome.svelte";
+import { rowOffsets, rowWindow } from "../src/lib/recent";
 import type { RecentRepo, RepoSummary, Theme } from "../src/lib/types";
 
 const repos: RecentRepo[] = [
@@ -61,6 +63,163 @@ describe("仓库弹层", () => {
       await fireEvent.click(screen.getByRole("button", { name }));
       expect(onCommand).toHaveBeenLastCalledWith(id);
     }
+  });
+});
+
+describe("大量最近仓库", () => {
+  const many: RecentRepo[] = Array.from({ length: 500 }, (_, index) => {
+    const name = index === 300 || index === 450 ? "demo" : `repo-${index}`;
+    return { name, path: `/work/group-${index}/${name}`, openedAtMs: index };
+  });
+
+  function props(overrides: Record<string, unknown> = {}) {
+    const anchor = document.createElement("button");
+    document.body.append(anchor);
+    return {
+      anchor,
+      repos: many,
+      currentPath: many[0].path,
+      blockedReason: null,
+      actionReason: null,
+      onSelect: vi.fn(),
+      onForget: () => {},
+      onCopyPath: () => {},
+      onContextMenu: vi.fn(),
+      onCommand: () => {},
+      onClose: () => {},
+      ...overrides,
+    };
+  }
+
+  const options = () => [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+  const active = () => document.querySelector<HTMLElement>(".switcher-option.active");
+  const input = () => within(screen.getByRole("dialog", { name: "切换仓库" })).getByRole("combobox") as HTMLInputElement;
+
+  it("行窗口：只覆盖视口和上下余量，首尾不越界", () => {
+    const offsets = rowOffsets(Array.from({ length: 100 }, () => 40));
+    expect(offsets[100]).toBe(4000);
+    expect(rowWindow(offsets, 0, 400, 2)).toEqual({ start: 0, end: 12 });
+    expect(rowWindow(offsets, 2000, 400, 2)).toEqual({ start: 48, end: 62 });
+    expect(rowWindow(offsets, 3900, 400, 2)).toEqual({ start: 95, end: 100 });
+    expect(rowWindow(rowOffsets([]), 0, 400, 2)).toEqual({ start: 0, end: 0 });
+    expect(rowWindow(rowOffsets([10, 100, 10]), 50, 10, 0), "高度不同也落在对的行").toEqual({ start: 1, end: 2 });
+  });
+
+  it("500 个仓库只渲染视口附近的行，内容轨道按全量撑高", () => {
+    render(RepoSwitcher, { props: props() as never });
+    expect(options().length).toBeLessThan(30);
+    expect(parseInt((document.querySelector(".switcher-space") as HTMLElement).style.height, 10)).toBeGreaterThan(500 * 30);
+    expect(options()[0].getAttribute("aria-setsize")).toBe("500");
+  });
+
+  it("滚动后渲染窗口跟着走，定位按全量下标", async () => {
+    render(RepoSwitcher, { props: props() as never });
+    const list = document.querySelector(".popover-list") as HTMLElement;
+    list.scrollTop = 39 * 200;
+    await fireEvent.scroll(list);
+    const indexes = options().map((option) => Number(option.dataset.index));
+    expect(indexes).toContain(200);
+    expect(indexes.filter((index) => index > 1).every((index) => index > 150 && index < 240)).toBe(true);
+    const row = options().find((option) => option.dataset.index === "200")?.parentElement as HTMLElement;
+    expect(row.style.top).toBe(`${39 * 200}px`);
+  });
+
+  it("过滤对全量生效，不区分大小写，能搜路径片段", async () => {
+    render(RepoSwitcher, { props: props() as never });
+    await fireEvent.input(input(), { target: { value: "GROUP-449" } });
+    expect(options()).toHaveLength(1);
+    expect(options()[0].textContent).toContain("repo-449");
+    expect(options()[0].dataset.index).toBe("0");
+  });
+
+  it("换关键词时滚动回到顶部", async () => {
+    render(RepoSwitcher, { props: props() as never });
+    const list = document.querySelector(".popover-list") as HTMLElement;
+    list.scrollTop = 4000;
+    await fireEvent.scroll(list);
+    await fireEvent.input(input(), { target: { value: "repo-1" } });
+    expect(list.scrollTop).toBe(0);
+    expect(options().some((option) => option.dataset.index === "0")).toBe(true);
+  });
+
+  it("方向键能走到窗口外的行，回车切换；反向绕到最后一个", async () => {
+    const onSelect = vi.fn();
+    render(RepoSwitcher, { props: props({ onSelect }) as never });
+    for (let step = 0; step < 60; step += 1) await fireEvent.keyDown(input(), { key: "ArrowDown" });
+    expect(active()?.textContent).toContain("repo-61");
+    expect(active()?.getAttribute("aria-posinset")).toBe("62");
+    expect(input().getAttribute("aria-activedescendant")).toBe(active()?.id);
+    await fireEvent.keyDown(input(), { key: "Enter" });
+    expect(onSelect).toHaveBeenCalledWith(many[61].path);
+  });
+
+  it("首项按向上绕到最后一个仓库，当前项不在窗口里也有节点", async () => {
+    render(RepoSwitcher, { props: props({ currentPath: null }) as never });
+    await fireEvent.keyDown(input(), { key: "ArrowUp" });
+    expect(active()?.dataset.index).toBe("499");
+    expect(document.getElementById(input().getAttribute("aria-activedescendant") as string)).toBe(active());
+  });
+
+  it("滚走之后当前项仍有节点，菜单键落在它身上", async () => {
+    const onContextMenu = vi.fn();
+    render(RepoSwitcher, { props: props({ onContextMenu }) as never });
+    const list = document.querySelector(".popover-list") as HTMLElement;
+    list.scrollTop = 39 * 300;
+    await fireEvent.scroll(list);
+    await fireEvent.keyDown(input(), { key: "F10", shiftKey: true });
+    expect(onContextMenu).toHaveBeenCalledWith(many[1], expect.anything());
+  });
+
+  it("窗口里的行右键给到对应仓库，同名行显示完整路径", async () => {
+    const onContextMenu = vi.fn();
+    render(RepoSwitcher, { props: props({ onContextMenu }) as never });
+    const list = document.querySelector(".popover-list") as HTMLElement;
+    list.scrollTop = 39 * 300;
+    await fireEvent.scroll(list);
+    const row = options().find((option) => option.dataset.index === "300") as HTMLElement;
+    expect(row.querySelector(".repo-path-full")?.textContent).toBe(many[300].path);
+    expect(options().find((option) => option.dataset.index === "301")?.querySelector(".repo-path")).toBeTruthy();
+    await fireEvent.contextMenu(row, { clientX: 5, clientY: 6 });
+    expect(onContextMenu).toHaveBeenCalledWith(many[300], { x: 5, y: 6 });
+    expect(active()?.dataset.index).toBe("300");
+  });
+
+  it("实测行高修正定位；视口上方的行变高时滚动位置同步推开", async () => {
+    const offsetHeight = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.dataset.repoRow === "300" ? 69 : this.dataset.repoRow ? 39 : 0;
+    });
+    try {
+      render(RepoSwitcher, { props: props() as never });
+      const list = document.querySelector(".popover-list") as HTMLElement;
+      list.scrollTop = 39 * 305;
+      await fireEvent.scroll(list);
+      await tick();
+      await tick();
+      const after = options().find((option) => option.dataset.index === "301")?.parentElement as HTMLElement;
+      expect(after.style.top).toBe(`${39 * 301 + 30}px`);
+      expect(list.scrollTop).toBe(39 * 305 + 30);
+    } finally {
+      offsetHeight.mockRestore();
+    }
+  });
+
+  it("从列表移除后当前项留在原位，不甩回开头", async () => {
+    const view = render(RepoSwitcher, { props: props() as never });
+    for (let step = 0; step < 40; step += 1) await fireEvent.keyDown(input(), { key: "ArrowDown" });
+    expect(active()?.dataset.index).toBe("41");
+    await view.rerender({ repos: many.filter((_, index) => index !== 41) });
+    expect(active()?.dataset.index).toBe("41");
+    expect(active()?.textContent).toContain("repo-42");
+    await view.rerender({ repos: many.slice(0, 3) });
+    expect(active()?.dataset.index).toBe("2");
+  });
+
+  it("禁止切换时原因写在行内，行高一起算进去", () => {
+    render(RepoSwitcher, { props: props({ blockedReason: "操作进行中" }) as never });
+    const row = options().find((option) => option.dataset.index === "2") as HTMLElement;
+    expect(row.getAttribute("aria-disabled")).toBe("true");
+    expect(row.textContent).toContain("操作进行中");
+    expect((row.parentElement as HTMLElement).style.top).toBe(`${39 + (39 + 15)}px`);
   });
 });
 
@@ -573,6 +732,70 @@ describe("起始页", () => {
     });
     expect(container.querySelectorAll(".welcome-recent button")).toHaveLength(5);
     expect(screen.getByText("共 7 个")).toBeTruthy();
+  });
+
+  describe("多于 5 个时搜索", () => {
+    const many = Array.from({ length: 500 }, (_, index) => ({ name: `repo-${index}`, path: `/work/Group-${index % 7}/repo-${index}`, openedAtMs: index }));
+    const box = () => screen.getByRole("textbox", { name: "搜索最近仓库" }) as HTMLInputElement;
+    const names = () => [...document.querySelectorAll(".welcome-recent .repo-name")].map((node) => node.textContent);
+    function renderMany(onOpen = vi.fn(), onContextMenu = vi.fn()) {
+      render(Welcome, { props: { recent: many, disabled: false, onAdd: () => {}, onClone: () => {}, onCreate: () => {}, onOpen, onContextMenu } });
+      return { onOpen, onContextMenu };
+    }
+
+    it("5 个以内没有搜索框", () => {
+      render(Welcome, { props: { recent: many.slice(0, 5), disabled: false, onAdd: () => {}, onClone: () => {}, onCreate: () => {}, onOpen: () => {} } });
+      expect(screen.queryByRole("textbox", { name: "搜索最近仓库" })).toBeNull();
+      expect(document.querySelector(".welcome-recent")?.classList.contains("searchable")).toBe(false);
+    });
+
+    it("6 个开始有搜索框，能找到列表外的仓库并打开", async () => {
+      const { onOpen } = renderMany();
+      expect(names()).not.toContain("repo-333");
+      await fireEvent.input(box(), { target: { value: "REPO-333" } });
+      expect(names()).toEqual(["repo-333"]);
+      expect(screen.getByText("匹配 1 个")).toBeTruthy();
+      await fireEvent.click(screen.getByText("/work/Group-4/repo-333"));
+      expect(onOpen).toHaveBeenCalledWith("/work/Group-4/repo-333");
+    });
+
+    it("支持路径片段，结果多时只列五行并说明", async () => {
+      renderMany();
+      await fireEvent.input(box(), { target: { value: "group-2/" } });
+      expect(names()).toHaveLength(5);
+      expect(screen.getByText(/匹配 72 个，显示前 5 个/)).toBeTruthy();
+    });
+
+    it("回车打开第一条结果；Esc 只清空关键词；输入法选词时不动作", async () => {
+      const { onOpen } = renderMany();
+      await fireEvent.keyDown(box(), { key: "Enter" });
+      expect(onOpen, "没有关键词时回车不打开").not.toHaveBeenCalled();
+      await fireEvent.input(box(), { target: { value: "repo-77" } });
+      await fireEvent.keyDown(box(), { key: "Enter", isComposing: true });
+      expect(onOpen).not.toHaveBeenCalled();
+      await fireEvent.keyDown(box(), { key: "Enter" });
+      expect(onOpen).toHaveBeenCalledWith(many[77].path);
+      await fireEvent.keyDown(box(), { key: "Escape" });
+      expect(box().value).toBe("");
+      expect(names()).toHaveLength(5);
+      expect(screen.getByText("共 500 个")).toBeTruthy();
+    });
+
+    it("没有匹配时说明，清空按钮恢复列表", async () => {
+      renderMany();
+      await fireEvent.input(box(), { target: { value: "没有这个" } });
+      expect(names()).toEqual([]);
+      expect(screen.getByText("没有匹配的仓库，试试名称或路径。")).toBeTruthy();
+      await fireEvent.click(screen.getByRole("button", { name: "清空搜索" }));
+      expect(names()).toHaveLength(5);
+    });
+
+    it("搜索结果的右键菜单给到对应仓库", async () => {
+      const { onContextMenu } = renderMany();
+      await fireEvent.input(box(), { target: { value: "repo-333" } });
+      await fireEvent.contextMenu(screen.getByText("/work/Group-4/repo-333").closest("button")!, { clientX: 1, clientY: 2 });
+      expect(onContextMenu).toHaveBeenCalledWith(many[333], { x: 1, y: 2 });
+    });
   });
 
   it("最近仓库右键和键盘菜单键都能打开仓库操作，右键不会顺带打开仓库", async () => {

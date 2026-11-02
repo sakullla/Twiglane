@@ -161,6 +161,7 @@ vi.mock("../src/lib/api", () => ({
 import App from "../src/App.svelte";
 import { paletteItems, REPO_SWITCH_PREFIX, type CommandState } from "../src/lib/commands";
 import { createTextDiff } from "../src/lib/diff";
+import { RULER_LINES, RULER_SAMPLE_CHARS } from "../src/lib/layout";
 import { codeLine } from "./helpers/code";
 
 /* ------------------------------------------------------------------ *
@@ -1160,6 +1161,68 @@ describe("差异横向滚动", () => {
       expect(writes).toEqual([]);
       expect(scroller.scrollLeft).toBe(500);
       expect(scroller.style.getPropertyValue("--code-x")).toBe("500px");
+    } finally {
+      offsetWidth.mockRestore();
+    }
+  });
+
+  it("采样文字和总规模都相同、只有余量不同时也算内容换了，floor 不残留", async () => {
+    // 长度从一行挪到另一行：总字符数和最长行的先后都不变，只有 restCh 能认出来。x 开头的行实测按两倍算。
+    const offsetWidth = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
+      const text = this.textContent ?? "";
+      return text.length * (text.startsWith("x") ? 20 : 10);
+    });
+    try {
+      const x = "x".repeat(RULER_SAMPLE_CHARS);
+      const y = "y".repeat(RULER_SAMPLE_CHARS);
+      const content = (xRest: number, yRest: number) => `${x}${"p".repeat(xRest)}\n${y}${"p".repeat(yRest)}\n`;
+      const view = render(DiffView, {
+        props: {
+          selection: { path: "a.ts", side: "unstaged" },
+          diff: createTextDiff("a.ts", "", content(500, 10), 1),
+          error: null,
+          loading: false,
+          disabled: false,
+          onStageHunk: () => {},
+          onLoadMore: () => {},
+        },
+      });
+      const scroller = document.querySelector(".diff-scroll") as HTMLElement;
+      await nextFrame();
+      expect(scroller.style.getPropertyValue("--code-floor")).toBe(`${(RULER_SAMPLE_CHARS + 500) * 20}px`);
+      await view.rerender({ diff: createTextDiff("a.ts", "", content(400, 110), 1) });
+      await nextFrame();
+      expect(scroller.style.getPropertyValue("--code-floor")).toBe(`${(RULER_SAMPLE_CHARS + 400) * 20}px`);
+    } finally {
+      offsetWidth.mockRestore();
+    }
+  });
+
+  it("最长的几行不变、其余行换了时也重新起算，floor 不残留", async () => {
+    // 标尺只留最长的几行：更短的行实测反而最宽（比如全角多的行）时，只有内容规模能认出它走了。
+    const offsetWidth = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.textContent?.startsWith("wide") ? 9000 : (this.textContent?.length ?? 0) * 10;
+    });
+    try {
+      const longest = Array.from({ length: RULER_LINES * 4 }, (_, index) => `${"long".repeat(20)}${index}`);
+      const joined = (lines: string[]) => `${lines.join("\n")}\n`;
+      const view = render(DiffView, {
+        props: {
+          selection: { path: "a.ts", side: "unstaged" },
+          diff: createTextDiff("a.ts", "", joined(["wide", ...longest]), 1),
+          error: null,
+          loading: false,
+          disabled: false,
+          onStageHunk: () => {},
+          onLoadMore: () => {},
+        },
+      });
+      const scroller = document.querySelector(".diff-scroll") as HTMLElement;
+      await nextFrame();
+      expect(scroller.style.getPropertyValue("--code-floor")).toBe("9000px");
+      await view.rerender({ diff: createTextDiff("a.ts", "", joined(longest), 1) });
+      await nextFrame();
+      expect(scroller.style.getPropertyValue("--code-floor")).not.toBe("9000px");
     } finally {
       offsetWidth.mockRestore();
     }

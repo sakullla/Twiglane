@@ -65,6 +65,7 @@
   import MergeSetup, { type MergeMode } from "./MergeSetup.svelte";
   import Modal from "./Modal.svelte";
   import ThreeWayMerge from "./ThreeWayMerge.svelte";
+  import { detectEol, keepBothSides } from "../conflict";
 
   interface Props {
     opened: OpenedRepository;
@@ -549,10 +550,7 @@
     const theirs = view.theirs.text ?? "";
     if (choice === "ours") resultText = ours;
     else if (choice === "theirs") resultText = theirs;
-    else {
-      const combined = [ours.trimEnd(), theirs.trimEnd()].filter((part) => part.length > 0).join("\n");
-      resultText = combined.length > 0 ? `${combined}\n` : "";
-    }
+    else resultText = keepBothSides(ours, theirs, detectEol(view.result.text, ours, theirs));
   }
 
   function storeDraft(path: string, draft: ConflictDraft, progress: { total: number; done: number }) {

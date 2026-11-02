@@ -48,6 +48,7 @@
   import Icon from "./lib/components/Icon.svelte";
   import MergeBanner from "./lib/components/MergeBanner.svelte";
   import MergeModal from "./lib/components/MergeModal.svelte";
+  import { openModalCount } from "./lib/components/Modal.svelte";
   import PaneResizer from "./lib/components/PaneResizer.svelte";
   import PublishModal from "./lib/components/PublishModal.svelte";
   import RecoveryActions from "./lib/components/RecoveryActions.svelte";
@@ -510,6 +511,45 @@
     live = `已打开 ${next.summary.name}`;
     void probeMerge();
     void loadSelectedDiff();
+  }
+
+  /** 克隆自己的窗口不算：用户等在那里，完成后照常打开。 */
+  function overlayOpen(): boolean {
+    const modals = openModalCount() - (cloneOpen ? 1 : 0);
+    return modals > 0 || paletteOpen || switcher !== null || document.querySelector(".menu, .popover") !== null;
+  }
+
+  /**
+   * 后台克隆可能在用户开着别的窗口时结束，这时切换仓库会关掉窗口、丢掉手上的操作：
+   * 只加入最近仓库并通知。后端的文件监听只有一路，克隆完成时已转到新仓库，
+   * 所以要把当前仓库接回来；接不回来就退回低频重读。
+   */
+  function cloneFinished(next: OpenedRepository) {
+    banner = null;
+    const { name, path } = next.summary;
+    if (!overlayOpen()) {
+      rememberOpened(next);
+      notice(`已克隆并打开 ${name}`);
+      return;
+    }
+    recent = [{ name, path, openedAtMs: Date.now() }, ...recent.filter((repo) => repo.path !== path)];
+    notice(`克隆完成：${name}。可以从标题栏的仓库弹层打开。`);
+    if (opened) void rewatchCurrent(opened.summary.path);
+  }
+
+  async function rewatchCurrent(path: string) {
+    try {
+      const current = await api.openRepository(path, nextId());
+      if (opened?.summary.path !== path) {
+        // 等待期间切了仓库：这次打开可能抢走了新仓库的监听，再接一次。
+        if (opened) void rewatchCurrent(opened.summary.path);
+        return;
+      }
+      degraded = current.watchDegraded;
+      applySnapshot(current.snapshot);
+    } catch {
+      if (opened?.summary.path === path) degraded = true;
+    }
   }
 
   function refresh(): Promise<boolean> {
@@ -2110,6 +2150,7 @@
       openTask("merge");
     }}
     startCreating={branchCreateIntent}
+    backgroundClone={pending === "clone"}
     {nextId}
   />
 {:else if taskModal === "settings"}
@@ -2156,10 +2197,7 @@
   }}
   onBusy={(name) => (pending = name)}
   onSnapshot={applySnapshot}
-  onOpened={(repo) => {
-    banner = null;
-    rememberOpened(repo);
-  }}
+  onOpened={cloneFinished}
   onFailure={handleMutationError}
   onNotice={notice}
   onOpenHistory={openCommitSearch}

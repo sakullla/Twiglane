@@ -1008,7 +1008,8 @@
                   aria-label={`编辑冲突 ${row.hunk + 1} 的结果`}
                   spellcheck="false"
                   bind:value={editText}
-                  title={disabled ? BUSY_REASON : undefined} disabled={disabled}
+                  title={disabled ? BUSY_REASON : undefined}
+                  disabled={disabled}
                 ></textarea>
                 <div class="cr-edit-foot">
                   <button type="button" class="btn btn-ghost btn-sm" onclick={() => (editText = [...(parsed.hunks[row.hunk]?.ours ?? [])].map(stripEol).join("\n"))}>填入当前</button>
@@ -1076,7 +1077,7 @@
   {/if}
 
   <div class="cr-foot" use:portal={footTarget}>
-    {#if hunkMode && effectiveMode !== "whole"}
+    {#if hunkMode && effectiveMode !== "whole" && done > 0}
       <div
         class="cr-progress"
         role="progressbar"

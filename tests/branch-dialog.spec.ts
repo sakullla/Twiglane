@@ -709,7 +709,60 @@ describe("远程管理 modal", () => {
     expect(base.onClose).toHaveBeenCalledTimes(1);
     finish({ path: "/parent/r", opened: { ...opened, summary: { name: "r", path: "/parent/r" } } });
     await waitFor(() => expect(base.onOpened).toHaveBeenCalledTimes(1));
-    expect(base.onNotice).toHaveBeenCalledWith("已克隆并打开 r");
+  });
+
+  it("收起克隆后打开远程：列表读得到、窗口能关闭，写锁不被读取清掉，保存仍受限", async () => {
+    vi.mocked(pickDirectory).mockResolvedValue("/parent");
+    remoteState.mockReset();
+    remoteState.mockResolvedValue({ generation: 4, remotes: [{ name: "origin", fetchUrl: "https://e.com/r.git", pushUrl: null }], snapshot: opened.snapshot });
+    let finish: (value: unknown) => void = () => {};
+    cloneRepository.mockReset();
+    cloneRepository.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    const base = repoProps("clone");
+    const view = render(RepoDialogs, { props: base });
+    await fireEvent.input(screen.getByLabelText("远程地址"), { target: { value: "https://e.com/r.git" } });
+    await fireEvent.click(screen.getByRole("button", { name: /选择目录/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始克隆/ }).hasAttribute("disabled")).toBe(false));
+    await fireEvent.click(screen.getByRole("button", { name: /开始克隆/ }));
+    await tick();
+    expect(base.onBusy).toHaveBeenLastCalledWith("clone");
+
+    // 外壳在克隆期间把 disabled 置真；用户收起克隆，从同步菜单打开远程。
+    await view.rerender({ ...base, disabled: true, mode: "remote" });
+    expect(await screen.findByText("https://e.com/r.git")).toBeTruthy();
+    expect(document.querySelector("[data-remote-loading]"), "不停在“正在读取远程”").toBeNull();
+    expect(base.onBusy, "读取不碰克隆占着的写锁").toHaveBeenLastCalledWith("clone");
+    expect(remoteState).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: /保存远程/ }).hasAttribute("disabled"), "写入仍被拦住").toBe(true);
+    expect(screen.getByRole("button", { name: "关闭" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByRole("button", { name: "关闭对话框" }).hasAttribute("disabled")).toBe(false);
+    await fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(base.onClose).toHaveBeenCalledTimes(1);
+
+    finish({ path: "/parent/r", opened: { ...opened, summary: { name: "r", path: "/parent/r" } } });
+    await waitFor(() => expect(base.onOpened).toHaveBeenCalledTimes(1));
+    expect(base.onClose, "克隆结束时不去关远程窗口").toHaveBeenCalledTimes(1);
+  });
+
+  it("后台克隆期间打开分支与标签：读得到列表，不动写锁，写入仍被拦住", async () => {
+    tagState.mockReset();
+    tagState.mockResolvedValue({ generation: 4, tags: [{ name: "v1", targetOid: "a".repeat(40), message: "", createdAt: 1 }], snapshot: opened.snapshot });
+    branchState.mockReset();
+    branchState.mockResolvedValue({
+      generation: 4,
+      branches: [
+        { name: "feature/ui", remote: false, current: true, upstream: null, worktree: null },
+        { name: "main", remote: false, current: false, upstream: null, worktree: null },
+      ],
+      snapshot: opened.snapshot,
+    });
+    const base = { ...props(), disabled: true, backgroundClone: true };
+    render(BranchDialog, { props: base });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    expect(screen.getByRole("button", { name: "删除 main" }).hasAttribute("disabled"), "写入入口仍禁用").toBe(true);
+    await fireEvent.click(screen.getByRole("tab", { name: /标签/ }));
+    expect(await screen.findByText("v1")).toBeTruthy();
+    expect(base.onBusy, "读取不能把克隆的写锁清掉").not.toHaveBeenCalled();
   });
 
   it("收起后克隆失败仍通知原因，不再去关别的对话框", async () => {

@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { tick } from "svelte";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import DiffView from "../src/lib/components/DiffView.svelte";
 import {
   commitFileLabel,
@@ -480,7 +481,89 @@ describe("历史分栏", () => {
     expect(byline.querySelector(".hr-dot"), "折行时不留孤立的分隔点").toBeNull();
   });
 
-  it("长说明默认折叠，超过两行才给展开入口", async () => {
+  describe("说明按实际溢出决定展开入口", () => {
+    let overflow = { scrollWidth: 300, clientWidth: 300 };
+    let observed: (() => void)[] = [];
+
+    beforeEach(() => {
+      overflow = { scrollWidth: 300, clientWidth: 300 };
+      observed = [];
+      vi.stubGlobal(
+        "ResizeObserver",
+        class {
+          constructor(private callback: () => void) {
+            observed.push(callback);
+          }
+          observe() {}
+          disconnect() {
+            observed = observed.filter((callback) => callback !== this.callback);
+          }
+        },
+      );
+      for (const key of ["scrollWidth", "clientWidth"] as const) {
+        vi.spyOn(HTMLElement.prototype, key, "get").mockImplementation(function (this: HTMLElement) {
+          if (key === "scrollWidth") return this.matches(".commit-body") ? overflow.scrollWidth : 0;
+          return this.matches(".commit-body-row") ? overflow.clientWidth : 0;
+        });
+      }
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    });
+
+    async function renderBody(body: string) {
+      const only = { ...commit(0), summary: "概要" };
+      historyPage.mockResolvedValue({ generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [only] });
+      commitDetail.mockResolvedValue({ generation: 3, commit: only, body, root: false, merge: false, selectedParent: only.parents[0], files: [] });
+      render(HistoryPanel, { props: panelProps() });
+      await waitFor(() => expect(document.querySelector(".commit-body")).toBeTruthy());
+    }
+
+    const entry = () => screen.queryByRole("button", { name: "展开完整说明" });
+    const resize = async (scrollWidth: number, clientWidth: number) => {
+      overflow = { scrollWidth, clientWidth };
+      for (const callback of observed) callback();
+      await tick();
+    };
+
+    it("两行说明连成一行放得下时不给入口，内容都在可见文本里", async () => {
+      await renderBody("概要\n\n第一行\n第二行");
+      expect(document.querySelector(".commit-body.clamped")?.textContent).toContain("第二行");
+      expect(entry()).toBeNull();
+    });
+
+    it("两行说明放不下时给入口", async () => {
+      overflow = { scrollWidth: 500, clientWidth: 300 };
+      await renderBody("概要\n\n第一行\n第二行");
+      expect(entry()).toBeTruthy();
+    });
+
+    it("单行说明在窄宽下被截断也给入口，宽窄切换时重算", async () => {
+      await renderBody("概要\n\n一行比较长的说明");
+      expect(entry()).toBeNull();
+      await resize(500, 200);
+      expect(entry(), "变窄后截断").toBeTruthy();
+      await resize(500, 700);
+      expect(entry(), "变宽后放得下，入口按钮占过的宽度不算").toBeNull();
+    });
+
+    it("展开后能收起，展开期间不重新测量，收起后按当前宽度重算", async () => {
+      overflow = { scrollWidth: 500, clientWidth: 300 };
+      await renderBody("概要\n\n一行比较长的说明");
+      await fireEvent.click(entry()!);
+      expect(document.querySelector(".commit-body.clamped")).toBeNull();
+      const collapse = screen.getByRole("button", { name: "收起说明" });
+      overflow = { scrollWidth: 300, clientWidth: 300 };
+      await fireEvent.click(collapse);
+      await tick();
+      expect(document.querySelector(".commit-body.clamped")).toBeTruthy();
+      expect(entry(), "现在放得下，不留入口").toBeNull();
+    });
+  });
+
+  it("长说明默认折叠", async () => {
     const only = {
       oid: "c".repeat(40), summary: "概要", authorName: "A", authorEmail: "a@e.com", authoredAt: 1, parents: ["d".repeat(40)], labels: [],
     };
@@ -495,10 +578,7 @@ describe("历史分栏", () => {
       files: [],
     });
     render(HistoryPanel, { props: panelProps() });
-    const toggle = await screen.findByRole("button", { name: "展开完整说明" });
-    expect(document.querySelector(".commit-body.clamped")).toBeTruthy();
-    await fireEvent.click(toggle);
-    expect(document.querySelector(".commit-body.clamped")).toBeNull();
+    await waitFor(() => expect(document.querySelector(".commit-body.clamped")).toBeTruthy());
   });
 });
 

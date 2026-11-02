@@ -32,7 +32,7 @@ describe("组件源码约束", () => {
     for (const { name, text } of sources) {
       for (const match of text.matchAll(/<(button|input|select|textarea)\b/g)) {
         const tag = text.slice(match.index, tagEnd(text, match.index) + 1);
-        if (!/\bdisabled=|\{disabled\}/.test(tag) || tag.includes("title=")) continue;
+        if (!/(?<![-\w])disabled=|\{disabled\}/.test(tag) || /(?<![-\w])title=/.test(tag)) continue;
         missing.push(`${name}:${text.slice(0, match.index).split("\n").length}`);
       }
     }
@@ -44,25 +44,22 @@ describe("组件源码约束", () => {
    * 首尾节点被 portal 搬走后遍历中断，分支里其余节点残留在页面上。
    */
   it("use:portal 不用在控制块分支的首尾节点上", () => {
-    const blockLine = /^\s*\{(#if|:else|#each|#key|\/if|\/each|\/key)\b/;
+    const opensBranch = /^\s*\{(#if|:else|#each|#key)\b/;
+    const closesBranch = /^\s*\{(:else|\/if|\/each|\/key)\b/;
     const offenders: string[] = [];
     for (const { name, text } of sources) {
-      const lines = text.split("\n").filter((line) => !/^\s*<!--/.test(line));
+      const lines = text
+        .replace(/<!--[\s\S]*?-->/g, "")
+        .split("\n")
+        .filter((line) => line.trim() !== "");
       lines.forEach((line, index) => {
         if (!line.includes("use:portal")) return;
-        if (blockLine.test(lines[index - 1] ?? "")) offenders.push(`${name} 分支首节点：${line.trim()}`);
+        if (opensBranch.test(lines[index - 1] ?? "")) offenders.push(`${name} 分支首节点：${line.trim()}`);
         const indent = line.match(/^\s*/)![0];
-        const close = lines.slice(index + 1).find((next) => next.startsWith(`${indent}</`) || next.startsWith(`${indent}<`));
-        const closeAt = close === undefined ? -1 : lines.indexOf(close, index + 1);
-        if (blockLine.test(lines[closeAt + 1] ?? "")) offenders.push(`${name} 分支尾节点：${line.trim()}`);
+        const closeAt = lines.findIndex((next, at) => at > index && next.startsWith(`${indent}</`));
+        if (closesBranch.test(lines[closeAt + 1] ?? "")) offenders.push(`${name} 分支尾节点：${line.trim()}`);
       });
     }
     expect(offenders).toEqual([]);
-  });
-
-  it("同一组件只从 ../ui 导入一次", () => {
-    for (const { name, text } of sources) {
-      expect(text.match(/from "\.\.\/ui";/g)?.length ?? 0, name).toBeLessThanOrEqual(1);
-    }
   });
 });

@@ -27,6 +27,8 @@
     onMergeInto?: (name: string) => void;
     /** 打开意图：入口本身就是「新建分支」时，打开即展开表单并聚焦名称，不必再点一次。 */
     startCreating?: boolean;
+    /** 写锁来自后台克隆：它不碰当前仓库，读取照常，写入仍被拦住。 */
+    backgroundClone?: boolean;
     nextId: () => number;
   }
 
@@ -42,6 +44,7 @@
     onMergeBranch,
     onMergeInto,
     startCreating = false,
+    backgroundClone = false,
     nextId,
   }: Props = $props();
 
@@ -96,6 +99,7 @@
   ];
 
   let blocked = $derived(disabled || localBusy);
+  let readBlocked = $derived(localBusy || (disabled && !backgroundClone));
   let writeInFlight = $derived(writing || tagWriting);
   let deleteLabel = $derived(
     confirmDelete?.kind === "remote"
@@ -118,17 +122,19 @@
   let listFailed = $derived(loaded?.key === opened.summary.path && !loaded.ok);
 
   $effect(() => {
-    if (loaded?.key === opened.summary.path || blocked) return;
+    if (loaded?.key === opened.summary.path || readBlocked) return;
     confirmDelete = null;
     void loadBranches();
   });
 
-  async function run<T>(action: () => Promise<T>): Promise<T | undefined> {
-    if (blocked) return undefined;
+  /** reading：只读。后台克隆期间也能跑，但不动宿主的 pending，否则结束时会把克隆的写锁清掉。 */
+  async function run<T>(action: () => Promise<T>, reading = false): Promise<T | undefined> {
+    if (reading ? readBlocked : blocked) return undefined;
+    const quiet = reading && backgroundClone;
     localBusy = true;
     errorText = null;
     lastFailureCode = null;
-    onBusy("branch");
+    if (!quiet) onBusy("branch");
     try {
       return await action();
     } catch (error) {
@@ -139,7 +145,7 @@
       return undefined;
     } finally {
       localBusy = false;
-      onBusy(null);
+      if (!quiet) onBusy(null);
     }
   }
 
@@ -213,7 +219,7 @@
         loaded = { key: path, ok: false };
         throw error;
       }
-    });
+    }, true);
     if (!result || opened.summary.path !== path) return;
     applyBranches(result);
   }
@@ -514,6 +520,7 @@
         bind:writing={tagWriting}
         {opened}
         disabled={blocked}
+        {backgroundClone}
         {onBusy}
         {onSnapshot}
         {onFailure}
@@ -617,7 +624,7 @@
           <div class="empty compact branch-empty">
             <span class="empty-icon"><Icon name="alert-circle" size={20} /></span>
             <strong>没有读到分支列表</strong>
-            <button type="button" class="btn btn-secondary btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={retryLoad}>重试</button>
+            <button type="button" class="btn btn-secondary btn-sm" title={readBlocked ? BUSY_REASON : undefined} disabled={readBlocked} onclick={retryLoad}>重试</button>
           </div>
         {:else if !listReady}
           <div class="empty compact branch-empty" data-branch-loading>
@@ -639,7 +646,7 @@
               tabindex="0"
               aria-label={branch.current ? `当前分支 ${branch.name}` : `切换到 ${branch.name}`}
               aria-disabled={branch.current || blocked}
-              title={branch.current ? "当前正在使用的分支" : `点击切换到 ${branch.name}`}
+              title={branch.current ? "当前正在使用的分支" : blocked ? BUSY_REASON : `点击切换到 ${branch.name}`}
               onclick={() => {
                 if (!branch.current) void switchTo(branch.name);
               }}

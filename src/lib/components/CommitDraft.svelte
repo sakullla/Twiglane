@@ -344,7 +344,8 @@
       bind:this={textarea}
       style={`height:${shownHeight}px`}
       {value}
-      title={disabled ? BUSY_REASON : undefined} disabled={disabled}
+      title={disabled ? BUSY_REASON : undefined}
+      disabled={disabled}
       onfocus={() => (active = true)}
       oninput={(event) => onInput((event.currentTarget as HTMLTextAreaElement).value)}
       onblur={onBlur}

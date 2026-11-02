@@ -744,7 +744,8 @@
           placeholder="合并说明"
           bind:value={message}
           oninput={() => messageByRepo.set(opened.summary.path, message)}
-          title={blocked ? BUSY_REASON : undefined} disabled={blocked}
+          title={blocked ? BUSY_REASON : undefined}
+          disabled={blocked}
         />
         <span class="mp-status ok" title={reason}><Icon name="check-circle" size={13} /><span class="truncate">{reason}</span></span>
       {/if}

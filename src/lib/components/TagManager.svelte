@@ -18,6 +18,8 @@
     nextId: () => number;
     /** 写入在途：宿主据此不切分区、不关闭，结果未定时界面不能看起来已经放弃。 */
     writing?: boolean;
+    /** 写锁来自后台克隆：它不碰当前仓库，读取照常，写入仍被拦住。 */
+    backgroundClone?: boolean;
   }
 
   let {
@@ -30,6 +32,7 @@
     onOpenHistory,
     nextId,
     writing = $bindable(false),
+    backgroundClone = false,
   }: Props = $props();
 
   let tags = $state<TagRecord[]>([]);
@@ -55,6 +58,7 @@
   let loaded = $state<{ key: string; ok: boolean } | null>(null);
 
   let blocked = $derived(disabled || localBusy);
+  let readBlocked = $derived(localBusy || (disabled && !backgroundClone));
   let remote = $derived(opened.snapshot.branch.upstream?.split("/")[0] || "origin");
   let visible = $derived(
     tags.filter((tag) => {
@@ -64,15 +68,17 @@
   );
 
   $effect(() => {
-    if (loaded?.key === `${opened.summary.path}:${opened.generation}` || blocked) return;
+    if (loaded?.key === `${opened.summary.path}:${opened.generation}` || readBlocked) return;
     void loadTags();
   });
 
-  async function run<T>(action: () => Promise<T>): Promise<T | undefined> {
-    if (blocked) return undefined;
+  /** reading：只读。后台克隆期间也能跑，但不动宿主的 pending，否则结束时会把克隆的写锁清掉。 */
+  async function run<T>(action: () => Promise<T>, reading = false): Promise<T | undefined> {
+    if (reading ? readBlocked : blocked) return undefined;
+    const quiet = reading && backgroundClone;
     localBusy = true;
     errorText = null;
-    onBusy("tag");
+    if (!quiet) onBusy("tag");
     try {
       return await action();
     } catch (error) {
@@ -82,7 +88,7 @@
       return undefined;
     } finally {
       localBusy = false;
-      onBusy(null);
+      if (!quiet) onBusy(null);
     }
   }
 
@@ -114,7 +120,7 @@
         loaded = { key, ok: false };
         throw error;
       }
-    });
+    }, true);
     if (result && opened.summary.path === path) apply(result);
   }
 
@@ -264,7 +270,7 @@
           {#if loaded}
             <span class="empty-icon"><Icon name="alert-circle" size={20} /></span>
             <strong>没有读到标签</strong>
-            <button type="button" class="btn btn-secondary btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={retryLoad}>重试</button>
+            <button type="button" class="btn btn-secondary btn-sm" title={readBlocked ? BUSY_REASON : undefined} disabled={readBlocked} onclick={retryLoad}>重试</button>
           {:else}
             <span class="empty-icon"><span class="spinner"></span></span>
             <strong>正在读取标签</strong>

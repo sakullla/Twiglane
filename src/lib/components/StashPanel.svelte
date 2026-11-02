@@ -198,7 +198,8 @@
             <input
               type="checkbox"
               checked={includeUntracked}
-              title={busy || disabled ? BUSY_REASON : undefined} disabled={busy || disabled}
+              title={busy || disabled ? BUSY_REASON : undefined}
+              disabled={busy || disabled}
               onchange={(event) => (includeUntracked = (event.currentTarget as HTMLInputElement).checked)}
             />
             包含未跟踪文件
@@ -229,7 +230,8 @@
             aria-label="临时保存说明"
             placeholder="可选说明，例如：先放一放的实验"
             value={message}
-            title={busy || disabled ? BUSY_REASON : undefined} disabled={busy || disabled}
+            title={busy || disabled ? BUSY_REASON : undefined}
+            disabled={busy || disabled}
             oninput={(event) => (message = (event.currentTarget as HTMLInputElement).value)}
             onkeydown={(event) => {
               if (event.key === "Enter") save();

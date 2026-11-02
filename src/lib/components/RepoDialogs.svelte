@@ -43,8 +43,12 @@
   let remoteUrl = $state("");
   let remoteNameInput = $state<HTMLInputElement | null>(null);
   let localBusy = $state(false);
-  /** 克隆或保存远程在途。保存远程不能关闭；克隆后端不能取消，收起窗口后在后台继续。读取远程时仍可关闭。 */
-  let writing = $state(false);
+  /** 克隆在途：后端不能取消，收起窗口后在后台继续。它占着写锁，但不碰当前仓库。 */
+  let cloning = $state(false);
+  /** 保存远程在途：结果未定，远程窗口不能关闭。读取远程时仍可关闭。 */
+  let remoteWriting = $state(false);
+  /** 后台克隆期间的远程读取：不走 run，否则结束时 onBusy(null) 会把克隆占着的写锁清掉。 */
+  let quietReading = $state(false);
   /**
    * 远程列表的读取结果：只有真正读完才写入，写锁期间跳过的那次不算。
    * ok 为假时不再自动重读（失败也会释放锁，否则会循环），由「重试」清空。
@@ -62,7 +66,7 @@
       loaded = null;
       return;
     }
-    if (loaded?.key === opened.summary.path || blocked) return;
+    if (loaded?.key === opened.summary.path || quietReading || (blocked && !cloning)) return;
     void loadRemotes();
   });
 
@@ -81,13 +85,35 @@
     }
   }
 
-  async function write<T>(name: string, action: () => Promise<T>): Promise<T | undefined> {
+  async function runClone<T>(action: () => Promise<T>): Promise<T | undefined> {
     if (blocked) return undefined;
-    writing = true;
+    cloning = true;
     try {
-      return await run(name, action);
+      return await run("clone", action);
     } finally {
-      writing = false;
+      cloning = false;
+    }
+  }
+
+  async function runRemoteWrite<T>(action: () => Promise<T>): Promise<T | undefined> {
+    if (blocked) return undefined;
+    remoteWriting = true;
+    try {
+      return await run("remote", action);
+    } finally {
+      remoteWriting = false;
+    }
+  }
+
+  async function readWhileCloning<T>(action: () => Promise<T>): Promise<T | undefined> {
+    quietReading = true;
+    try {
+      return await action();
+    } catch (error) {
+      onFailure(normalizeError(error));
+      return undefined;
+    } finally {
+      quietReading = false;
     }
   }
 
@@ -102,9 +128,9 @@
       onNotice("请填写远程地址，并选择一个已存在的父目录。");
       return;
     }
-    const result = await write("clone", () => api.cloneRepository(url, cloneParent, cloneName.trim(), nextId()));
+    const result = await runClone(() => api.cloneRepository(url, cloneParent, cloneName.trim(), nextId()));
     if (!result) return;
-    onNotice(`已克隆并打开 ${result.opened.summary.name}`);
+    // 打开还是只通知由外壳决定：这时可能已经开着别的窗口。
     onOpened(result.opened);
     // 收起后再次打开的可能是别的对话框，只关自己。
     if (mode === "clone") onClose();
@@ -128,7 +154,7 @@
     const settle = (ok: boolean) => {
       if (mode === "remote") loaded = { key, ok };
     };
-    const result = await run("remote", async () => {
+    const read = async () => {
       try {
         const state = await readRemotes(key, current.generation);
         settle(true);
@@ -137,7 +163,8 @@
         settle(false);
         throw error;
       }
-    });
+    };
+    const result = await (cloning ? readWhileCloning(read) : run("remote", read));
     if (!result || opened?.summary.path !== key) return;
     remotes = result.remotes;
     onSnapshot(result.snapshot);
@@ -164,7 +191,7 @@
       return;
     }
     const exists = remotes.some((item) => item.name === name);
-    const result = await write("remote", () =>
+    const result = await runRemoteWrite(() =>
       exists
         ? api.setRemoteUrl(current.summary.path, name, url, current.generation, nextId())
         : api.addRemote(current.summary.path, name, url, current.generation, nextId()),
@@ -214,15 +241,15 @@
         <Icon name="info" size={15} />
         <span>认证使用系统凭据助手或 SSH agent，不要把令牌写进地址。需要交互输入时会停止，而不是一直等待。</span>
       </div>
-      {#if writing}
-        <p class="hint" role="status" data-clone-running>克隆无法中途取消。可以收起这个窗口，克隆会在后台继续，完成后自动打开仓库；失败时通知里说明原因。</p>
+      {#if cloning}
+        <p class="hint" role="status" data-clone-running>克隆无法中途取消。可以收起这个窗口，克隆会在后台继续，完成后自动打开仓库；如果那时开着别的窗口，只通知完成，可从仓库弹层打开。失败时通知里说明原因。</p>
       {/if}
     </div>
     {#snippet footer()}
       <span class="spacer"></span>
-      <button type="button" class="btn btn-secondary" onclick={onClose}>{writing ? "在后台继续" : "取消"}</button>
+      <button type="button" class="btn btn-secondary" onclick={onClose}>{cloning ? "在后台继续" : "取消"}</button>
       <button type="button" class="btn btn-primary" title={blocked ? BUSY_REASON : !cloneUrl.trim() ? "先填写远程地址" : !cloneParent ? "先选择父目录" : undefined} disabled={blocked || !cloneUrl.trim() || !cloneParent} onclick={startClone}>
-        {#if localBusy}<span class="spinner"></span>{:else}<Icon name="download" size={14} />{/if}
+        {#if cloning}<span class="spinner"></span>{:else}<Icon name="download" size={14} />{/if}
         开始克隆
       </button>
     {/snippet}
@@ -235,14 +262,14 @@
     size="lg"
     task="remote"
     description="名称和地址来自 Git 配置。凭据不会保存，展示时也会隐藏。"
-    locked={writing}
+    locked={remoteWriting}
     {onClose}
   >
     <div class="list-box">
       {#if remotesFailed}
         <div class="list-empty">
           没有读到远程配置。
-          <button type="button" class="btn btn-secondary btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={retryLoad}>重试</button>
+          <button type="button" class="btn btn-secondary btn-sm" title={blocked && !cloning ? BUSY_REASON : undefined} disabled={blocked && !cloning} onclick={retryLoad}>重试</button>
         </div>
       {:else if !remotesReady}
         <div class="list-empty" data-remote-loading><span class="spinner"></span> 正在读取远程</div>
@@ -279,7 +306,7 @@
     <p class="hint">名称已存在时会更新地址，否则新增远程。</p>
     {#snippet footer()}
       <span class="spacer"></span>
-      <button type="button" class="btn btn-secondary" title={writing ? BUSY_REASON : undefined} disabled={writing} onclick={onClose}>关闭</button>
+      <button type="button" class="btn btn-secondary" title={remoteWriting ? BUSY_REASON : undefined} disabled={remoteWriting} onclick={onClose}>关闭</button>
       <button type="button" class="btn btn-primary" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={saveRemote}>
         <Icon name="check" size={14} />保存远程
       </button>

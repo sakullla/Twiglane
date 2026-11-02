@@ -492,7 +492,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       root: false,
       merge: commit.parents.length > 1,
       selectedParent: commit.parents[0],
-      files: [
+      files: previewParams.get("files") === "many" ? Array.from({ length: 24 }, (_, index) => ({ path: `src/generated/file-${index}.ts`, originalPath: null, status: "modified" })) : [
         { path: "src/App.svelte", originalPath: null, status: "modified" },
         { path: "src/app.css", originalPath: null, status: "modified" },
         { path: "src/lib/components/Icon.svelte", originalPath: null, status: "added" },

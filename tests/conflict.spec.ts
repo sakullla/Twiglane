@@ -279,9 +279,10 @@ describe("逐处处理冲突", () => {
     const mark = within(target).getByRole("button", { name: "标记编辑结果" });
     expect(document.querySelector("[data-conflict-resolver] .cr-foot")).toBeNull();
     expect(within(target).getByRole("group", { name: "冲突导航" })).toBeTruthy();
-    expect(within(target).getByRole("progressbar", { name: "本文件冲突处理进度" })).toBeTruthy();
+    expect(within(target).queryByRole("progressbar"), "还没有进度时不留空槽").toBeNull();
 
     await fireEvent.click(within(head(0)).getByRole("button", { name: "采用当前" }));
+    expect(within(target).getByRole("progressbar", { name: "本文件冲突处理进度" })).toBeTruthy();
     await fireEvent.click(within(head(1)).getByRole("button", { name: "采用当前" }));
     await fireEvent.click(mark);
     expect(onResolve).toHaveBeenCalledTimes(1);

@@ -158,6 +158,9 @@
   let activeFile = $derived(detail ? preferredCommitFile(detail.files, manualPath ?? filePath) : null);
   let fileFilter = $state("");
   let bodyOpen = $state(false);
+  let bodyEl = $state<HTMLElement | null>(null);
+  /** 折叠的说明是否真的被截断：只看实际溢出，所以随宽度变化重算，放得下时不给入口。 */
+  let bodyClipped = $state(false);
   /** 窄详情里文件列表在差异上方，可以收起，把高度全给差异。宽详情里没有这个开关。 */
   let filesCollapsed = $state(false);
   /** 「全部文件」模式下从左侧点选的文件：右侧滚动到它。 */
@@ -183,6 +186,21 @@
     ),
   );
   let visibleFiles = $derived(filteredFiles.slice(fileRange.start, fileRange.end));
+  $effect(() => {
+    const element = bodyEl;
+    void bodyRest;
+    const row = element?.parentElement;
+    if (!element || !row || bodyOpen) return;
+    // 和整行比，不和说明自身比：入口按钮占着宽度时，说明自身窄，变宽后放得下也量不出来。
+    const measure = () => {
+      bodyClipped = element.scrollWidth > row.clientWidth + 1;
+    };
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(row);
+    return () => observer?.disconnect();
+  });
+
   let statusText = $derived(page && commits.length === 0 ? historyStatus(page.state) : null);
   let diffSelection = $derived<FileSelection | null>(
     activeFile ? { path: activeFile.path, side: "unstaged" } : null,
@@ -594,8 +612,8 @@
             <h2 class="commit-title">{detail.commit.summary}</h2>
             {#if bodyRest}
               <div class="commit-body-row" class:open={bodyOpen}>
-                <pre class="commit-body" class:clamped={!bodyOpen}>{bodyRest}</pre>
-                {#if bodyRest.split("\n").length > 2 || bodyRest.length > 120}
+                <pre class="commit-body" class:clamped={!bodyOpen} bind:this={bodyEl}>{bodyRest}</pre>
+                {#if bodyOpen || bodyClipped}
                   <button type="button" class="btn btn-ghost btn-sm commit-body-toggle" onclick={() => (bodyOpen = !bodyOpen)}>
                     <Icon name="chevron-down" size={12} class={bodyOpen ? "flip" : ""} />{bodyOpen ? "收起说明" : "展开完整说明"}
                   </button>
@@ -607,7 +625,7 @@
               <strong>{detail.commit.authorName}</strong>
               <span class="commit-email">{detail.commit.authorEmail}</span>
               <span title={formatAuthoredAt(detail.commit.authoredAt)}>{relativeTime(detail.commit.authoredAt)} · {formatAuthoredAt(detail.commit.authoredAt)}</span>
-            <span class="commit-parents">{parentCaption(detail.commit.parents, detail.root)}</span>
+              <span class="commit-parents">{parentCaption(detail.commit.parents, detail.root)}</span>
               {#each pills as pill (`${pill.kind}:${pill.name}`)}
                 <span class={`ref-pill ${pill.kind}`} class:current={pill.current} title={pill.label} aria-label={pill.label}>
                   <Icon name={pill.kind === "tag" ? "tag" : pill.kind === "remote" ? "cloud" : "branch"} size={11} />
@@ -777,7 +795,8 @@
         autocomplete="off"
         spellcheck="false"
         bind:value={branchFrom.name}
-        title={branchFrom.busy ? BUSY_REASON : undefined} disabled={branchFrom.busy}
+        title={branchFrom.busy ? BUSY_REASON : undefined}
+        disabled={branchFrom.busy}
         onkeydown={(event) => {
           if (event.key === "Enter") {
             event.preventDefault();

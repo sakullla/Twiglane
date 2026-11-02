@@ -401,6 +401,10 @@ describe("对比度门禁按实际渲染层合成", () => {
         [".cr-half.theirs .mk", "--purple@--mark-mix", "--surface + --purple-soft"],
         [".cr-line.res（已解决行）", "--success-softer", "--surface"],
         [".cr-line.warn（未解决上下文）", "--warning-soft", "--surface"],
+        [".three-way-mark.ours", "--info-soft", "--surface"],
+        [".three-way-mark.theirs", "--purple-soft", "--surface"],
+        [".three-way-mark.manual", "--add-bg", "--surface"],
+        [".three-way-mark.marker", "--warning-soft", "--surface"],
       ]) {
         for (const fg of ["--syn-keyword", "--syn-comment", "--fg", "--add-fg"]) {
           const label = `${theme}/code ${site} ${fg} on ${top} over ${under} =`;
@@ -408,6 +412,19 @@ describe("对比度门禁按实际渲染层合成", () => {
         }
       }
     }
+  });
+
+  it("结果栏来源标记与两侧语义一致，手动编辑不用靛蓝强调色", () => {
+    const components = read(path.join(stylesDir, "components.css"));
+    expect(ruleBody(components, ".three-way-mark.ours")).toContain("var(--info-soft)");
+    expect(ruleBody(components, ".three-way-mark.theirs")).toContain("var(--purple-soft)");
+    expect(ruleBody(components, ".three-way-gutter-row.ours")).toContain("var(--info)");
+    expect(ruleBody(components, ".three-way-gutter-row.theirs")).toContain("var(--purple)");
+    for (const selector of [".three-way-mark.manual", ".three-way-gutter-row.manual", ".three-way-key.manual i"]) {
+      expect(ruleBody(components, selector), selector).not.toMatch(/--accent|--focus|--info|--purple/);
+    }
+    expect(ruleBody(components, ".three-way-editor textarea"), "标记层从 textarea 下方透出").toMatch(/background:\s*transparent/);
+    expect(components).toMatch(/\.three-way-marks, \.three-way-gutter \{[^}]*pointer-events:\s*none/);
   });
 
   it("叠层比例由令牌声明，样式层不写死", () => {

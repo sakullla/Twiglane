@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, within } from "@testing-library/svelte";
+import { tick } from "svelte";
 import { describe, expect, it, vi } from "vitest";
 import {
   alignHunk,
@@ -12,8 +13,19 @@ import {
   splitRawLines,
   unresolvedCount,
 } from "../src/lib/conflict";
+import {
+  computeMarks,
+  exceedsMarkLimit,
+  mapLine,
+  markKindAt,
+  MARK_LINE_LIMIT,
+  runsInRange,
+  splitMarkLines,
+  type ThreeWayMarks,
+} from "../src/lib/three-way-marks";
 import type { ConflictView } from "../src/lib/types";
 import ConflictResolver from "../src/lib/components/ConflictResolver.svelte";
+import ThreeWayMerge from "../src/lib/components/ThreeWayMerge.svelte";
 
 const TWO = [
   "head",
@@ -388,5 +400,384 @@ describe("逐处处理冲突", () => {
     expect(ruler.classList.contains("half")).toBe(false);
     expect(ruler.querySelector<HTMLElement>("span")?.dataset.text).toBe(long);
     expect(document.querySelector(".cr-line .code-in")?.textContent).toBe(long);
+  });
+});
+
+describe("结果栏来源标记", () => {
+  const kinds = (marks: ThreeWayMarks) => Array.from({ length: marks.lines }, (_, line) => markKindAt(marks, line));
+  const OURS = "head\nours a\nours b\nmiddle\nshared\ntail\n";
+  const THEIRS = "head\ntheirs a\nmiddle\nshared\ntail\n";
+
+  it("填入当前后，只有当前侧的行标为来自当前，两侧都有的行不标", () => {
+    const marks = computeMarks(OURS, OURS, THEIRS);
+    expect(kinds(marks)).toEqual(["same", "ours", "ours", "same", "same", "same"]);
+    expect(marks.runs).toEqual([{ kind: "ours", from: 1, to: 3 }]);
+  });
+
+  it("填入来源后，只有来源侧的行标为来自来源", () => {
+    expect(kinds(computeMarks(THEIRS, OURS, THEIRS))).toEqual(["same", "theirs", "same", "same", "same"]);
+  });
+
+  it("手动修改的行标为手动编辑，其余行不受影响", () => {
+    const edited = OURS.replace("ours b", "typed by hand");
+    expect(kinds(computeMarks(edited, OURS, THEIRS))).toEqual(["same", "ours", "manual", "same", "same", "same"]);
+  });
+
+  it("保留双方时两段分别归到各自一侧", () => {
+    const both = "ours a\ntheirs a\n";
+    expect(kinds(computeMarks(both, "ours a\n", "theirs a\n"))).toEqual(["ours", "theirs"]);
+  });
+
+  it("被挪动的行仍算来源，不算手动编辑", () => {
+    const moved = "tail\nhead\nours a\n";
+    expect(kinds(computeMarks(moved, "head\nours a\ntail\n", "head\ntail\n"))).not.toContain("manual");
+  });
+
+  it("冲突标记行单独成类，不算手动编辑；来源里本来就有的同形文字不算标记", () => {
+    const text = "<<<<<<< HEAD\nours a\n=======\ntheirs a\n>>>>>>> main\n";
+    expect(kinds(computeMarks(text, "ours a\n", "theirs a\n"))).toEqual(["marker", "ours", "marker", "theirs", "marker"]);
+    expect(kinds(computeMarks("=======\n", "=======\n", "x\n"))).toEqual(["ours"]);
+  });
+
+  it("比较忽略行尾，CRLF 文件读回 LF 不会整份变成手动编辑", () => {
+    const crlf = "a\r\nb\r\n";
+    expect(splitMarkLines(crlf)).toEqual(["a", "b"]);
+    expect(kinds(computeMarks("a\nb\n", crlf, crlf))).toEqual(["same", "same"]);
+  });
+
+  it("空文本和末尾无换行都能处理", () => {
+    expect(computeMarks("", "", "").lines).toBe(0);
+    expect(splitMarkLines("a\n\n")).toEqual(["a", ""]);
+    expect(kinds(computeMarks("a", "a\n", "b\n"))).toEqual(["ours"]);
+  });
+
+  it("只取视口附近的区段", () => {
+    const runs = [
+      { kind: "ours", from: 0, to: 2 },
+      { kind: "manual", from: 10, to: 12 },
+      { kind: "theirs", from: 20, to: 30 },
+    ] as const;
+    expect(runsInRange(runs, 11, 25).map((run) => run.kind)).toEqual(["manual", "theirs"]);
+    expect(runsInRange(runs, 3, 9)).toEqual([]);
+  });
+
+  it("行数不同时按内容换算：插入之后的行仍对到同一内容", () => {
+    const ours = Array.from({ length: 100 }, (_, index) => `line ${index}`);
+    const longer = [...ours.slice(0, 50), ...Array.from({ length: 30 }, (_, index) => `new ${index}`), ...ours.slice(50)];
+    const marks = computeMarks(`${longer.join("\n")}\n`, `${ours.join("\n")}\n`, `${ours.join("\n")}\n`);
+    expect(mapLine(marks.ours.result, marks.ours.side, 10)).toBe(10);
+    expect(mapLine(marks.ours.result, marks.ours.side, 90)).toBe(60);
+    expect(mapLine(marks.ours.side, marks.ours.result, 60)).toBe(90);
+    expect(mapLine(marks.ours.result, marks.ours.side, 130)).toBe(100);
+    expect(mapLine([], [], 3)).toBe(0);
+  });
+
+  it("几万行与大量重复行都在预算内完成", () => {
+    const unique = Array.from({ length: 60_000 }, (_, index) => `const value${index} = ${index};`);
+    const edited = unique.map((line, index) => (index % 500 === 0 ? `${line} // 改` : line));
+    const repeated = Array.from({ length: 60_000 }, (_, index) => (index % 3 === 0 ? "}" : index % 3 === 1 ? "" : "  x();"));
+    const shifted = ["first", ...repeated.slice(0, 30_000), "middle", ...repeated.slice(30_000).reverse()];
+    const started = performance.now();
+    const marks = computeMarks(`${edited.join("\n")}\n`, `${unique.join("\n")}\n`, `${unique.join("\n")}\n`);
+    computeMarks(`${shifted.join("\n")}\n`, `${repeated.join("\n")}\n`, `${shifted.join("\n")}\n`);
+    expect(performance.now() - started).toBeLessThan(1500);
+    expect(marks.runs).toHaveLength(120);
+    expect(marks.runs.every((run) => run.kind === "manual")).toBe(true);
+  });
+
+  it("超过上限时关闭标记", () => {
+    expect(exceedsMarkLimit("a\n", "b\n")).toBe(false);
+    expect(exceedsMarkLimit("a\n".repeat(MARK_LINE_LIMIT + 1))).toBe(true);
+    expect(exceedsMarkLimit("a\n".repeat(MARK_LINE_LIMIT))).toBe(false);
+  });
+});
+
+describe("逐处导航跨文件", () => {
+  function renderNav(text = TWO, extra: Record<string, unknown> = {}) {
+    const onExhausted = vi.fn(() => false);
+    render(ConflictResolver, {
+      props: {
+        view: view(text),
+        currentLabel: "main",
+        incomingLabel: "feature",
+        disabled: false,
+        onResolve: () => {},
+        onExhausted,
+        ...extra,
+      },
+    });
+    return { onExhausted };
+  }
+  const label = () => document.querySelector(".cr-nav-label")?.textContent?.replace(/\s+/g, " ").trim();
+  const stream = () => screen.getByRole("region", { name: "逐处处理冲突" });
+  const ONE = "<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> m\n";
+
+  it("文件内还有下一处时留在文件内，走完才交给宿主", async () => {
+    const { onExhausted } = renderNav();
+    await fireEvent.click(screen.getByRole("button", { name: "下一处冲突" }));
+    expect(label()).toContain("第 2 / 2 处");
+    expect(onExhausted).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole("button", { name: "下一处未处理" }));
+    expect(onExhausted).toHaveBeenCalledWith(1, true);
+  });
+
+  it("宿主没有别的文件时在本文件绕回；只有一处时留在原地", async () => {
+    renderNav();
+    await fireEvent.keyDown(stream(), { key: "F7", shiftKey: true });
+    expect(label()).toContain("第 2 / 2 处");
+    await fireEvent.keyDown(stream(), { key: "ArrowDown", altKey: true });
+    expect(label()).toContain("第 1 / 2 处");
+  });
+
+  it("只有 1 处冲突时下一处未处理也交给宿主", async () => {
+    const { onExhausted } = renderNav(ONE);
+    await fireEvent.keyDown(stream(), { key: "F7" });
+    expect(onExhausted).toHaveBeenCalledWith(1, true);
+  });
+
+  it("本文件全部选好后不再绕回，告诉宿主无处可留", async () => {
+    const { onExhausted } = renderNav(ONE);
+    await fireEvent.keyDown(stream(), { key: "1" });
+    await fireEvent.keyDown(stream(), { key: "F7" });
+    expect(onExhausted).toHaveBeenCalledWith(1, false);
+    expect(label()).toContain("第 1 / 1 处");
+    expect(screen.queryByRole("button", { name: "下一处未处理" }), "无处可去时不留空转按钮").toBeNull();
+    expect(screen.getByText(/标记后可以完成合并/)).toBeTruthy();
+  });
+
+  it("其他文件还有未处理时，本文件选完也保留下一处未处理", async () => {
+    renderNav(ONE, { pendingElsewhere: 2, fileIndex: 1, fileTotal: 3 });
+    await fireEvent.keyDown(stream(), { key: "1" });
+    expect(screen.getByRole("button", { name: "下一处未处理" })).toBeTruthy();
+    expect(label()).toBe("文件 1 / 3· 第 1 / 1 处");
+  });
+
+  it("从上一文件跳来时定位末处未处理，并把焦点交给冲突流", async () => {
+    renderNav(TWO, { entry: "last" });
+    await tick();
+    await tick();
+    expect(label()).toContain("第 2 / 2 处");
+    expect(document.activeElement).toBe(stream());
+  });
+
+  it("跳来时跳过已经选好的，定位首处未处理", async () => {
+    const original = TWO;
+    const draft = { original, base: original, resolutions: { 0: { choice: "ours" as const } }, whole: null };
+    renderNav(TWO, { entry: "first", draft });
+    expect(label()).toContain("第 2 / 2 处");
+  });
+
+  it("单处编辑没完成时不离开文件，编辑内容还在", async () => {
+    const { onExhausted } = renderNav(ONE);
+    await fireEvent.keyDown(stream(), { key: "e" });
+    const area = await screen.findByRole("textbox", { name: "编辑冲突 1 的结果" });
+    await fireEvent.input(area, { target: { value: "half done" } });
+    await fireEvent.click(screen.getByRole("button", { name: "下一处未处理" }));
+    expect(onExhausted).not.toHaveBeenCalled();
+    expect(screen.getByText("先完成正在编辑的一处，再切换文件。")).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "编辑冲突 1 的结果" }) as HTMLTextAreaElement).value).toBe("half done");
+  });
+
+  it("整文件编辑按文件为单位移动，结果栏里 F7 也生效，普通按键仍是输入", async () => {
+    const { onExhausted } = renderNav(TWO, { fileIndex: 2, fileTotal: 3, pendingElsewhere: 1 });
+    await fireEvent.click(screen.getByRole("button", { name: /整文件编辑/ }));
+    expect(label()).toBe("文件 2 / 3");
+    const area = screen.getByRole("textbox", { name: "合并结果" });
+    await fireEvent.keyDown(area, { key: "F7" });
+    expect(onExhausted).toHaveBeenCalledWith(1, false);
+    await fireEvent.keyDown(area, { key: "ArrowUp", altKey: true });
+    expect(onExhausted).toHaveBeenLastCalledWith(-1, false);
+    onExhausted.mockClear();
+    await fireEvent.keyDown(area, { key: "n" });
+    expect(onExhausted).not.toHaveBeenCalled();
+  });
+});
+
+describe("三栏联动与来源标记", () => {
+  /** happy-dom 不排版：给每个滚动容器一份真实几何，scrollTop 按上限截断。 */
+  function layout(node: HTMLElement, lines: number, height = 400, width = 300, contentWidth = 2000) {
+    let top = 0;
+    let left = 0;
+    const maxTop = 16 + lines * 20 - height;
+    Object.defineProperties(node, {
+      scrollHeight: { configurable: true, get: () => 16 + lines * 20 },
+      clientHeight: { configurable: true, get: () => height },
+      scrollTop: { configurable: true, get: () => top, set: (value: number) => (top = Math.max(0, Math.min(maxTop, value))) },
+      clientWidth: { configurable: true, get: () => width },
+      scrollWidth: { configurable: true, get: () => contentWidth },
+      scrollLeft: { configurable: true, get: () => left, set: (value: number) => (left = Math.max(0, Math.min(contentWidth - width, value))) },
+    });
+    return node;
+  }
+
+  const body = (count: number, from = 0) => Array.from({ length: count }, (_, index) => `line ${from + index}`);
+  const joined = (lines: string[]) => `${lines.join("\n")}\n`;
+
+  function renderThree(oursLines: string[], theirsLines: string[], resultLines: string[]) {
+    render(ThreeWayMerge, {
+      props: {
+        view: view(joined(resultLines), {
+          ours: { present: true, binary: false, truncated: false, text: joined(oursLines), summary: "" },
+          theirs: { present: true, binary: false, truncated: false, text: joined(theirsLines), summary: "" },
+        }),
+        resultText: joined(resultLines),
+        disabled: false,
+        onResult: () => {},
+        onChoice: () => {},
+        onResolve: () => {},
+        onReset: () => {},
+      },
+    });
+    return {
+      ours: layout(screen.getByRole("region", { name: "当前分支版本" }), oursLines.length),
+      theirs: layout(screen.getByRole("region", { name: "来源分支版本" }), theirsLines.length),
+      result: layout(screen.getByRole("textbox", { name: "合并结果" }), resultLines.length),
+    };
+  }
+
+  const frames = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+
+  it("滚动任意一栏，另外两栏纵向、横向都跟随", async () => {
+    const lines = body(300);
+    const panes = renderThree(lines, lines, lines);
+    for (const [from, others] of [
+      ["ours", ["result", "theirs"]],
+      ["result", ["ours", "theirs"]],
+      ["theirs", ["ours", "result"]],
+    ] as const) {
+      await frames();
+      panes[from].scrollTop = from === "ours" ? 800 : from === "result" ? 1600 : 2400;
+      panes[from].scrollLeft = from === "ours" ? 120 : from === "result" ? 240 : 360;
+      await fireEvent.scroll(panes[from]);
+      for (const other of others) {
+        expect(panes[other].scrollTop, `${from} → ${other}`).toBeCloseTo(panes[from].scrollTop, 0);
+        expect(panes[other].scrollLeft, `${from} → ${other}`).toBe(panes[from].scrollLeft);
+      }
+    }
+  });
+
+  it("写入引起的回声不反向带动，防止回环", async () => {
+    const lines = body(300);
+    const panes = renderThree(lines, lines, lines);
+    panes.ours.scrollTop = 800;
+    await fireEvent.scroll(panes.ours);
+    // 回声到达时用户已经继续滚动：回声不能把主动栏拉回去。
+    panes.theirs.scrollTop = 100;
+    await fireEvent.scroll(panes.theirs);
+    expect(panes.ours.scrollTop).toBe(800);
+    await frames();
+    await fireEvent.scroll(panes.theirs);
+    expect(panes.ours.scrollTop, "放开后这一栏可以成为新的主动栏").not.toBe(800);
+  });
+
+  it("行数不同时按内容对齐，同时到顶、同时到底", async () => {
+    const ours = body(300);
+    const extra = Array.from({ length: 100 }, (_, index) => `added ${index}`);
+    const result = [...ours.slice(0, 100), ...extra, ...ours.slice(100)];
+    const panes = renderThree(ours, ours, result);
+    panes.ours.scrollTop = 3000;
+    await fireEvent.scroll(panes.ours);
+    const progress = 3000 / (16 + 300 * 20 - 400);
+    const focusLine = (3000 + 392 * progress - 8) / 20;
+    expect(focusLine).toBeGreaterThan(100);
+    const expected = (focusLine + 100) * 20 + 8 - 392 * progress;
+    expect(panes.result.scrollTop, "第 100 行之后差出插入的 100 行").toBeCloseTo(expected, 0);
+
+    await frames();
+    panes.ours.scrollTop = 1e6;
+    await fireEvent.scroll(panes.ours);
+    expect(panes.result.scrollTop, "到底时结果栏也到底").toBeCloseTo(16 + 400 * 20 - 400, 0);
+    await frames();
+    panes.ours.scrollTop = 0;
+    await fireEvent.scroll(panes.ours);
+    expect(panes.result.scrollTop).toBe(0);
+  });
+
+  it("结果栏有图例，标记层按行定位，文本一字不改", async () => {
+    const ours = ["same", "only ours", "tail"];
+    const theirs = ["same", "only theirs", "tail"];
+    const result = ["same", "only ours", "typed", "only theirs", "tail"];
+    const { result: area } = renderThree(ours, theirs, result);
+    expect((area as HTMLTextAreaElement).value).toBe(joined(result));
+    const legend = document.querySelector(".three-way-legend");
+    for (const text of ["当前", "来源", "手动编辑", "两侧相同"]) expect(legend?.textContent).toContain(text);
+    await vi.waitFor(() => expect(document.querySelectorAll(".three-way-mark")).toHaveLength(3));
+    const mark = (kind: string) => document.querySelector<HTMLElement>(`.three-way-mark.${kind}`)?.getAttribute("style");
+    expect(mark("ours")).toContain("top: 28px");
+    expect(mark("manual")).toContain("top: 48px");
+    expect(mark("theirs")).toContain("top: 68px");
+    expect(document.querySelector(".three-way-gutter-row.manual")?.textContent).toBe("3手");
+    expect((area as HTMLTextAreaElement).value, "标记后文本不变").toBe(joined(result));
+  });
+
+  it("编辑后标记随内容更新", async () => {
+    const ours = ["a", "b"];
+    const theirs = ["a", "c"];
+    const props = {
+      view: view("a\nb\n", {
+        ours: { present: true, binary: false, truncated: false, text: joined(ours), summary: "" },
+        theirs: { present: true, binary: false, truncated: false, text: joined(theirs), summary: "" },
+      }),
+      resultText: "a\nb\n",
+      disabled: false,
+      onResult: () => {},
+      onChoice: () => {},
+      onResolve: () => {},
+      onReset: () => {},
+    };
+    const { rerender } = render(ThreeWayMerge, { props });
+    await vi.waitFor(() => expect(document.querySelector(".three-way-mark.ours")).toBeTruthy());
+    await rerender({ ...props, resultText: "a\nhand\n" });
+    await vi.waitFor(() => expect(document.querySelector(".three-way-mark.manual")).toBeTruthy());
+    expect(document.querySelector(".three-way-mark.ours")).toBeNull();
+  });
+
+  it("超大文件关闭标记并说明，滚动退回按比例", async () => {
+    const big = "x\n".repeat(MARK_LINE_LIMIT + 1);
+    render(ThreeWayMerge, {
+      props: {
+        view: view(big, {
+          ours: { present: true, binary: false, truncated: false, text: big, summary: "" },
+          theirs: { present: true, binary: false, truncated: false, text: "y\n", summary: "" },
+        }),
+        resultText: big,
+        disabled: false,
+        onResult: () => {},
+        onChoice: () => {},
+        onResolve: () => {},
+        onReset: () => {},
+      },
+    });
+    expect(document.querySelector(".three-way-legend")?.textContent).toContain("已关闭来源标记");
+    expect(document.querySelector(".three-way-mark")).toBeNull();
+    const ours = layout(screen.getByRole("region", { name: "当前分支版本" }), 1000);
+    const area = layout(screen.getByRole("textbox", { name: "合并结果" }), 2000);
+    ours.scrollTop = (16 + 1000 * 20 - 400) / 2;
+    await fireEvent.scroll(ours);
+    expect(area.scrollTop).toBeCloseTo((16 + 2000 * 20 - 400) / 2, 0);
+  });
+
+  it("只读的三栏也参与联动，且没有标记层", async () => {
+    render(ThreeWayMerge, {
+      props: {
+        view: view("r\n", {
+          editable: false,
+          kind: "modify_delete",
+          theirs: { present: false, binary: false, truncated: false, text: null, summary: "另一侧删除了文件" },
+        }),
+        resultText: "",
+        disabled: false,
+        onResult: () => {},
+        onChoice: () => {},
+        onResolve: () => {},
+        onReset: () => {},
+      },
+    });
+    expect(document.querySelector(".three-way-legend")).toBeNull();
+    const ours = layout(screen.getByRole("region", { name: "当前分支版本" }), 100);
+    const result = layout(document.querySelector<HTMLElement>(".three-way-pane.result") as HTMLElement, 100);
+    ours.scrollTop = 500;
+    await fireEvent.scroll(ours);
+    expect(result.scrollTop).toBeCloseTo(500, 0);
   });
 });

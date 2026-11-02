@@ -59,9 +59,36 @@
     lead?: Snippet;
     /** 底部进度与标记的落点：宿主把它们和「完成合并」收在同一条；不提供时留在组件底部。 */
     footTarget?: HTMLElement | null;
+    /** 由跨文件跳转打开时的落点：first 定位首处未处理，last 定位末处；用户直接打开时为 null。 */
+    entry?: "first" | "last" | null;
+    /** 本文件在整次合并里的序号（从 1 起）与文件总数，只有多个文件时才显示。 */
+    fileIndex?: number;
+    fileTotal?: number;
+    /** 其他文件里还有多少个有未处理内容。 */
+    pendingElsewhere?: number;
+    /**
+     * 本文件这个方向上已经没有下一处。stay 表示本文件内还能绕回继续。
+     * 返回 true 表示宿主已接管（切到别的文件）；false 表示没有别的文件可去。
+     */
+    onExhausted?: (direction: 1 | -1, stay: boolean) => boolean;
   }
 
-  let { view, currentLabel, incomingLabel, draft = null, disabled, onDraft, onResolve, lead, footTarget = null }: Props = $props();
+  let {
+    view,
+    currentLabel,
+    incomingLabel,
+    draft = null,
+    disabled,
+    onDraft,
+    onResolve,
+    lead,
+    footTarget = null,
+    entry = null,
+    fileIndex = 1,
+    fileTotal = 1,
+    pendingElsewhere = 0,
+    onExhausted,
+  }: Props = $props();
 
   const ROW = 20;
   const HEAD = 36;
@@ -83,7 +110,10 @@
     restored?.whole !== null && restored?.whole !== undefined ? "whole" : "hunks",
   );
   let effectiveMode = $derived<ResolverMode>(hunkMode || mode === "diff" ? mode : "whole");
-  let current = $state(0);
+  let current = $state(untrack(entryHunk));
+  let landing = $state(untrack(() => entry !== null));
+  let root = $state<HTMLDivElement | null>(null);
+  let navNote = $state<string | null>(null);
   let editing = $state<number | null>(null);
   let editText = $state("");
   let showBase = $state(false);
@@ -120,6 +150,28 @@
 
   $effect(() => {
     onDraft?.({ original, base, resolutions, whole }, { total, done: whole === null ? done : 0 });
+  });
+
+  /** 跨文件跳转的落点：沿跳转方向的第一处未处理；都处理过时落在首处或末处。 */
+  function entryHunk(): number {
+    const hunks = parsed.hunks;
+    if (entry === null || hunks.length === 0) return 0;
+    const order = entry === "first" ? hunks : [...hunks].reverse();
+    return (order.find((hunk) => !resolutions[hunk.index]) ?? order[0]).index;
+  }
+
+  // 跳转时点的按钮随旧文件一起销毁，焦点要明确交给目标冲突；宿主忙碌时编辑框还不可聚焦，等它结束。
+  $effect(() => {
+    if (!landing || disabled) return;
+    landing = false;
+    void tick().then(() => {
+      if (effectiveMode === "hunks") {
+        scroller?.focus({ preventScroll: true });
+        void scrollToHunk(current);
+      } else {
+        root?.querySelector<HTMLElement>(".three-way-merge textarea, .cr-scroll")?.focus({ preventScroll: true });
+      }
+    });
   });
 
   /* ---------- 行模型 ---------- */
@@ -548,11 +600,40 @@
     if (mode === "whole") mode = "hunks";
   }
 
+  /** 本文件内沿方向的下一处未处理，不绕回。 */
+  function onwardUnresolved(direction: 1 | -1): number | null {
+    for (let index = current + direction; index >= 0 && index < total; index += direction) {
+      if (!resolutions[index]) return index;
+    }
+    return null;
+  }
+
+  /**
+   * 上一处 / 下一处的唯一入口（F7、Alt+↑↓、底部按钮、箭头）。本文件这个方向走完后交给宿主
+   * 切文件；没有别的文件时才在本文件内绕回。整文件编辑等非逐处视图按文件为单位移动。
+   * 全部处理完时不移动，由宿主提示可以完成合并。
+   */
   function go(direction: 1 | -1) {
-    if (total === 0) return;
-    const target = nextUnresolved(current, direction) ?? (((current + direction) % total) + total) % total;
-    current = target;
-    void scrollToHunk(target);
+    navNote = null;
+    const byHunk = effectiveMode === "hunks" && total > 0;
+    const onward = byHunk ? onwardUnresolved(direction) : null;
+    if (onward !== null) {
+      current = onward;
+      void scrollToHunk(onward);
+      return;
+    }
+    const wrapped = byHunk ? nextUnresolved(current, direction) : null;
+    if (editing !== null) {
+      // 编辑框里的文字还不是草稿，离开文件会丢：留在这里，让用户先完成或取消。
+      navNote = "先完成正在编辑的一处，再切换文件。";
+      void scrollToHunk(editing);
+      return;
+    }
+    if (onExhausted?.(direction, wrapped !== null)) return;
+    if (wrapped !== null) {
+      current = wrapped;
+      void scrollToHunk(wrapped);
+    }
   }
 
   function goTo(index: number) {
@@ -618,6 +699,22 @@
     onResolve("text", composeConflictText(parsed, resolutions));
   }
 
+  function navDirection(event: KeyboardEvent): 1 | -1 | null {
+    if ((event.altKey && event.key === "ArrowDown") || (event.key === "F7" && !event.shiftKey)) return 1;
+    if ((event.altKey && event.key === "ArrowUp") || (event.key === "F7" && event.shiftKey)) return -1;
+    return null;
+  }
+
+  /** 导航键在整个组件内都生效，包括整文件编辑的结果栏；单处编辑框和搜索框里留给输入。 */
+  function onNavKey(event: KeyboardEvent) {
+    const direction = navDirection(event);
+    if (direction === null) return;
+    const target = event.target as HTMLElement;
+    if (target.closest("input, select") || (target.closest("textarea") && editing !== null)) return;
+    event.preventDefault();
+    go(direction);
+  }
+
   function onStreamKey(event: KeyboardEvent) {
     const target = event.target as HTMLElement;
     if (target.closest("textarea, input")) {
@@ -631,17 +728,13 @@
       }
       return;
     }
-    if ((event.altKey && event.key === "ArrowDown") || (event.key === "F7" && !event.shiftKey) || event.key === "n") {
-      event.preventDefault();
-      go(1);
-      return;
-    }
-    if ((event.altKey && event.key === "ArrowUp") || (event.key === "F7" && event.shiftKey) || event.key === "p") {
-      event.preventDefault();
-      go(-1);
-      return;
-    }
+    if (navDirection(event) !== null) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === "n" || event.key === "p") {
+      event.preventDefault();
+      go(event.key === "n" ? 1 : -1);
+      return;
+    }
     const keyed: Record<string, ConflictChoice> = { "1": "ours", "2": "theirs", "3": "ours-theirs", "4": "theirs-ours", "5": "base" };
     if (keyed[event.key]) {
       event.preventDefault();
@@ -745,11 +838,18 @@
             : "整文件编辑：离开此视图时，编辑结果会成为逐处处理的新起点。"
       : remaining > 0
         ? `已处理 ${done} / ${total} 处。每一处都要明确选择后才能标记。`
-        : "全部冲突已处理。标记前可在「结果预览」里通读一遍。",
+        : pendingElsewhere > 0
+          ? "全部冲突已处理。标记前可在「结果预览」里通读一遍。"
+          : "全部冲突已处理，标记后可以完成合并。标记前可在「结果预览」里通读一遍。",
   );
+  let showHunkNav = $derived(hunkMode && effectiveMode === "hunks");
+  let showNav = $derived(showHunkNav || fileTotal > 1);
+  let canAdvance = $derived((showHunkNav && remaining > 0) || pendingElsewhere > 0);
 </script>
 
-<div class="cr" data-conflict-resolver>
+<!-- 这里只监听 F7、Alt+↑↓ 冒泡：它们要在结果栏编辑框里也能跳转，本身不是可交互控件。 -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="cr" data-conflict-resolver bind:this={root} onkeydown={onNavKey}>
   <div class="cr-toolbar">
     {@render lead?.()}
     <div class="segmented" role="group" aria-label="冲突查看方式">
@@ -823,7 +923,7 @@
               <div><dt><kbd>Ctrl</kbd><kbd>Enter</kbd></dt><dd>完成编辑</dd></div>
               <div><dt><kbd>Esc</kbd></dt><dd>取消编辑</dd></div>
             </dl>
-            <p class="hint">焦点在冲突代码区时生效。</p>
+            <p class="hint">焦点在冲突代码区时生效。文件处理完后跨到下一个未处理文件。</p>
           </div>
         {/if}
       </div>
@@ -1074,7 +1174,8 @@
     </div>
   {/if}
 
-  <div class="cr-foot" use:portal={footTarget}>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="cr-foot" use:portal={footTarget} onkeydown={onNavKey}>
     {#if hunkMode && effectiveMode !== "whole" && done > 0}
       <div
         class="cr-progress"
@@ -1087,18 +1188,21 @@
         <span style={`width:${total > 0 ? (done / total) * 100 : 0}%`}></span>
       </div>
     {/if}
-    <span class="cr-foot-note truncate" class:warn={wholeMarkers || armed} title={footNote}>{footText ?? footNote}</span>
-    {#if hunkMode && effectiveMode === "hunks"}
+    <span class="cr-foot-note truncate" class:warn={wholeMarkers || armed || navNote !== null} title={navNote ?? footNote}>{navNote ?? footText ?? footNote}</span>
+    {#if showNav}
       <div class="cr-nav" role="group" aria-label="冲突导航">
-        <button type="button" class="icon-btn sm" aria-label="上一处冲突" title="上一处未处理（Alt+↑ / Shift+F7）" onclick={() => go(-1)}>
+        <button type="button" class="icon-btn sm" aria-label="上一处冲突" title="上一处未处理，可跨文件（Alt+↑ / Shift+F7）" onclick={() => go(-1)}>
           <Icon name="arrow-up" size={14} />
         </button>
-        <span class="cr-nav-label" aria-live="polite">第 <strong>{Math.min(current + 1, total)}</strong> / {total} 处</span>
-        <button type="button" class="icon-btn sm" aria-label="下一处冲突" title="下一处未处理（Alt+↓ / F7）" onclick={() => go(1)}>
+        <span class="cr-nav-label" aria-live="polite">
+          {#if fileTotal > 1}文件 <strong>{fileIndex}</strong> / {fileTotal}{#if showHunkNav}<i>·</i>{/if}{/if}
+          {#if showHunkNav}第 <strong>{Math.min(current + 1, total)}</strong> / {total} 处{/if}
+        </span>
+        <button type="button" class="icon-btn sm" aria-label="下一处冲突" title="下一处未处理，可跨文件（Alt+↓ / F7）" onclick={() => go(1)}>
           <Icon name="arrow-down" size={14} />
         </button>
       </div>
-      {#if remaining > 0}
+      {#if canAdvance}
         <button type="button" class="btn btn-secondary btn-sm cr-next" onclick={() => go(1)}>
           <Icon name="arrow-down" size={13} />下一处未处理
         </button>

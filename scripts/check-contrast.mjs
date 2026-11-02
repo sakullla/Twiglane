@@ -80,6 +80,8 @@ const TEXT_PAIRS = [
   ["fg", "accent-soft"],
   ["fg-muted", "accent-soft"],
   ["fg-subtle", "accent-soft"],
+  // 合并结果栏头部的图例说明落在 --accent-softer 上。
+  ["fg-muted", "accent-softer"],
   // 成功语义：实心徽标、浅底提示，以及已解决冲突行（正文与空结果说明都落在 --success-softer 上）。
   ["success-text", "surface"],
   ["success-text", "surface-2"],
@@ -185,6 +187,9 @@ const UI_PAIRS = [
   ["success", "surface-2"],
   ["success", "surface-3"],
   ["success", "success-soft"],
+  // 三栏结果行号栏的来源色条与图例色块：行号栏是 --surface-2，图例在 --accent-softer 上。
+  ...["info", "purple", "add-fg", "warning"].map((name) => [name, "surface-2"]),
+  ...["info", "purple", "add-fg", "warning-text"].map((name) => [name, "accent-softer"]),
   ["control-border", "surface"],
   ["control-border", "bg"],
   ["control-border", "surface-2"],
@@ -234,7 +239,8 @@ const SELECTION_LAYER = { token: "accent", mix: "selection-mix" };
 
 /**
  * 代码文字的真实渲染叠层，从下到上。差异和冲突流的滚动容器都是不透明 --surface，
- * 所以最底层固定是它；三栏的 pre 与 textarea 直接落在 --surface 上，没有额外叠层。
+ * 所以最底层固定是它；三栏的两侧 pre 直接落在 --surface 上，结果栏 textarea 底色透明，
+ * 文字落在下方的来源标记层上（.three-way-mark）。
  */
 const CODE_STACKS = [
   { site: ".diff-line / .cr-line（上下文）", layers: ["surface"] },
@@ -252,6 +258,10 @@ const CODE_STACKS = [
   { site: ".cr-half.theirs", layers: ["surface", "purple-soft"] },
   { site: ".cr-half.theirs .mk", layers: ["surface", "purple-soft", MARK_PURPLE] },
   { site: ".cr-pair.same .cr-half.theirs .mk", layers: ["surface", "surface-2", MARK_PURPLE] },
+  { site: ".three-way-mark.ours", layers: ["surface", "info-soft"] },
+  { site: ".three-way-mark.theirs", layers: ["surface", "purple-soft"] },
+  { site: ".three-way-mark.manual", layers: ["surface", "add-bg"] },
+  { site: ".three-way-mark.marker", layers: ["surface", "warning-soft"] },
 ];
 
 /** 代码旁的说明文字：行号、块标题与冲突块头部，同样落在叠层上，但不可选中，不叠选区。 */
@@ -280,6 +290,11 @@ const CODE_CHROME_STACKS = [
   { fg: "warning-text", layers: ["surface", "accent-softer", "warning-soft"], site: ".cr-head.current .chip.warn" },
   { fg: "success-text", layers: ["surface", "accent-softer", "success-soft"], site: '.cr-head.current .chip[data-hunk-state="resolved"]' },
   { fg: "success-text", layers: ["surface-2", "success-soft"], site: '.cr-head .chip[data-hunk-state="resolved"]' },
+  { fg: "fg-subtle", layers: ["surface-2"], site: ".three-way-gutter-row" },
+  { fg: "info-text", layers: ["surface-2"], site: ".three-way-gutter-row.ours i" },
+  { fg: "purple", layers: ["surface-2"], site: ".three-way-gutter-row.theirs i" },
+  { fg: "add-fg", layers: ["surface-2"], site: ".three-way-gutter-row.manual i" },
+  { fg: "warning-text", layers: ["surface-2"], site: ".three-way-gutter-row.marker i" },
   { fg: "warning-text", layers: ["surface-2", "warning-soft"], site: ".cr-head .chip.warn" },
 ];
 
@@ -289,6 +304,10 @@ const LAYER_SOURCE_RULES = [
   { file: "components.css", selector: ".code ::selection", pattern: /color:\s*var\(--fg\)/ },
   { file: "components.css", selector: ".cr-half.ours .mk", pattern: /var\(--info\) var\(--mark-mix\)/ },
   { file: "components.css", selector: ".cr-half.theirs .mk", pattern: /var\(--purple\) var\(--mark-mix\)/ },
+  { file: "components.css", selector: ".three-way-mark.ours", pattern: /var\(--info-soft\)/ },
+  { file: "components.css", selector: ".three-way-mark.theirs", pattern: /var\(--purple-soft\)/ },
+  { file: "components.css", selector: ".three-way-mark.manual", pattern: /var\(--add-bg\)/ },
+  { file: "components.css", selector: ".three-way-mark.marker", pattern: /var\(--warning-soft\)/ },
   { file: "components.css", selector: ".diff-line.add .wd", pattern: /var\(--add-strong\)/ },
   { file: "components.css", selector: ".side-cell.add .wd", pattern: /var\(--add-strong\)/ },
   { file: "components.css", selector: ".diff-line.del .wd", pattern: /var\(--del-strong\)/ },

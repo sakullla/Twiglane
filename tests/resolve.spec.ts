@@ -40,7 +40,7 @@ vi.mock("../src/lib/api", () => ({
   },
 }));
 
-import MergePanel from "../src/lib/components/MergePanel.svelte";
+import MergePanel, { adjacentPendingFile, clearConflictDrafts } from "../src/lib/components/MergePanel.svelte";
 import MergeModal from "../src/lib/components/MergeModal.svelte";
 import PublishModal from "../src/lib/components/PublishModal.svelte";
 import RecoveryActions from "../src/lib/components/RecoveryActions.svelte";
@@ -927,6 +927,200 @@ describe("合并任务 modal", () => {
     expect(title.getAttribute("title")).toContain("可以编辑合并结果。");
     expect(document.querySelector(".conflict-editor-head")).toBeNull();
     expect(document.querySelectorAll(".cr-foot")).toHaveLength(1);
+  });
+
+  describe("冲突跨文件跳转", () => {
+    const conflict = (name: string) => `<<<<<<< HEAD\n${name} ours\n=======\n${name} theirs\n>>>>>>> main\n`;
+    const textView = (path: string, hunks = 1) => ({
+      generation: 4,
+      path,
+      kind: "text",
+      editable: true,
+      ours: { present: true, binary: false, truncated: false, text: "ours\n", summary: "本地" },
+      theirs: { present: true, binary: false, truncated: false, text: "theirs\n", summary: "另一侧" },
+      result: {
+        present: true,
+        binary: false,
+        truncated: false,
+        text: Array.from({ length: hunks }, (_, index) => conflict(`${path} ${index}`)).join("mid\n"),
+        summary: "结果",
+      },
+      note: "可以编辑合并结果。",
+    });
+    const binaryView = (path: string) => ({
+      generation: 4,
+      path,
+      kind: "binary",
+      editable: false,
+      ours: { present: true, binary: true, truncated: false, text: null, summary: "本地是二进制" },
+      theirs: { present: true, binary: true, truncated: false, text: null, summary: "另一侧是二进制" },
+      result: { present: true, binary: true, truncated: false, text: null, summary: "结果是二进制" },
+      note: "不能按文本合并。",
+    });
+
+    function setup(paths: string[], views: Record<string, unknown> = {}) {
+      clearConflictDrafts();
+      mergeSession.mockResolvedValue(
+        session({
+          operation: "merge",
+          canAbort: true,
+          unresolved: paths.length,
+          conflicts: paths.map((path) => ({ path, kind: "text", summary: "文本" })),
+        }),
+      );
+      conflictView.mockImplementation(async (_repo: string, path: string) => views[path] ?? textView(path));
+      const onNotice = vi.fn();
+      render(MergeModal, {
+        props: {
+          opened,
+          disabled: false,
+          nextId: () => 1,
+          onClose: () => {},
+          onSnapshot: () => {},
+          onGeneration: () => {},
+          onFailure: () => {},
+          onNotice,
+          onOpenStash: () => {},
+        },
+      });
+      return { onNotice };
+    }
+    const title = (name: string) => screen.findByRole("heading", { name });
+    const label = () => document.querySelector(".mp-foot .cr-nav-label")?.textContent?.replace(/\s+/g, " ").trim();
+    const stream = () => screen.getByRole("region", { name: "逐处处理冲突" });
+    const next = () => fireEvent.click(screen.getByRole("button", { name: "下一处未处理" }));
+
+    it("文件环上找下一个未处理：跳过已选完的，绕回，没有时返回 null", () => {
+      const paths = ["a", "b", "c"];
+      const pending = (list: string[]) => (path: string) => list.includes(path);
+      expect(adjacentPendingFile(paths, "a", 1, pending(["b", "c"]))).toBe("b");
+      expect(adjacentPendingFile(paths, "a", 1, pending(["c"]))).toBe("c");
+      expect(adjacentPendingFile(paths, "c", 1, pending(["a"])), "绕回不甩下未处理文件").toBe("a");
+      expect(adjacentPendingFile(paths, "a", -1, pending(["b", "c"]))).toBe("c");
+      expect(adjacentPendingFile(paths, "b", -1, pending(["a", "c"]))).toBe("a");
+      expect(adjacentPendingFile(paths, "a", 1, pending(["a"]))).toBeNull();
+      expect(adjacentPendingFile(paths, "gone", 1, pending(["a"]))).toBe("a");
+      expect(adjacentPendingFile(paths, "gone", -1, pending(["c"]))).toBe("c");
+      expect(adjacentPendingFile([], "a", 1, () => true)).toBeNull();
+    });
+
+    it("只有 1 处冲突时，下一处未处理切到下一个文件的首处，焦点在目标冲突上，显示文件序号", async () => {
+      setup(["a.txt", "b.txt"], { "b.txt": textView("b.txt", 2) });
+      await title("a.txt");
+      expect(label()).toBe("文件 1 / 2· 第 1 / 1 处");
+      await next();
+      await title("b.txt");
+      await vi.waitFor(() => expect(document.activeElement).toBe(stream()));
+      expect(label()).toBe("文件 2 / 2· 第 1 / 2 处");
+    });
+
+    it("上一处跨到上一个文件的末处；F7 与 Alt 键走同一逻辑", async () => {
+      setup(["a.txt", "b.txt"], { "a.txt": textView("a.txt", 3) });
+      await title("a.txt");
+      await fireEvent.keyDown(stream(), { key: "ArrowDown", altKey: true });
+      await fireEvent.keyDown(stream(), { key: "F7" });
+      expect(label()).toContain("第 3 / 3 处");
+      await fireEvent.keyDown(stream(), { key: "F7" });
+      await title("b.txt");
+      await vi.waitFor(() => expect(document.activeElement).toBe(stream()));
+      await fireEvent.keyDown(stream(), { key: "F7", shiftKey: true });
+      await title("a.txt");
+      await vi.waitFor(() => expect(label()).toContain("第 3 / 3 处"));
+    });
+
+    it("跨文件后回来，已选的草稿还在", async () => {
+      setup(["a.txt", "b.txt"], { "a.txt": textView("a.txt", 2) });
+      await title("a.txt");
+      await fireEvent.keyDown(stream(), { key: "2" });
+      expect(label()).toContain("第 2 / 2 处");
+      await fireEvent.keyDown(stream(), { key: "F7" });
+      await title("b.txt");
+      await fireEvent.keyDown(stream(), { key: "F7", shiftKey: true });
+      await title("a.txt");
+      await vi.waitFor(() => expect(document.querySelectorAll('[data-hunk-state="resolved"]')).toHaveLength(1));
+      expect(label(), "落在没选的那一处").toContain("第 2 / 2 处");
+      expect(screen.getByRole("button", { name: /a\.txt/ }).textContent).toContain("1/2");
+    });
+
+    it("选完的文件被跳过，二进制文件不被跳过且按文件停留", async () => {
+      setup(["a.txt", "b.txt", "c.png", "d.txt"], { "c.png": binaryView("c.png") });
+      await title("a.txt");
+      await next();
+      await title("b.txt");
+      await fireEvent.keyDown(stream(), { key: "1" });
+      await next();
+      await vi.waitFor(() => expect(document.querySelector(".conflict-editor-head h2")?.textContent).toBe("c.png"));
+      await vi.waitFor(() => expect(document.activeElement).toBe(document.querySelector(".conflict-editor")));
+      expect(label()).toBe("文件 3 / 4");
+      await fireEvent.keyDown(document.activeElement as HTMLElement, { key: "F7" });
+      await title("d.txt");
+      await fireEvent.keyDown(stream(), { key: "F7" });
+      await title("a.txt");
+      await fireEvent.keyDown(stream(), { key: "F7" });
+      await vi.waitFor(() => expect(document.querySelector(".conflict-editor-head h2")?.textContent).toBe("c.png"));
+    });
+
+    it("二进制文件的底部按钮可以离开，往回也不跳过未处理文件", async () => {
+      setup(["a.txt", "c.png"], { "c.png": binaryView("c.png") });
+      await title("a.txt");
+      await next();
+      await vi.waitFor(() => expect(document.querySelector(".conflict-editor-head h2")?.textContent).toBe("c.png"));
+      await fireEvent.click(await screen.findByRole("button", { name: "上一处冲突" }));
+      await title("a.txt");
+    });
+
+    it("全部选好后不再跳转，提示标记后可以完成合并", async () => {
+      const { onNotice } = setup(["a.txt", "b.txt"]);
+      await title("a.txt");
+      await fireEvent.keyDown(stream(), { key: "1" });
+      await next();
+      await title("b.txt");
+      await fireEvent.keyDown(stream(), { key: "1" });
+      expect(screen.queryByRole("button", { name: "下一处未处理" })).toBeNull();
+      conflictView.mockClear();
+      await fireEvent.keyDown(stream(), { key: "F7" });
+      await fireEvent.keyDown(stream(), { key: "F7", shiftKey: true });
+      await tick();
+      expect(conflictView, "不循环空转").not.toHaveBeenCalled();
+      expect(onNotice).toHaveBeenLastCalledWith("全部冲突都已处理，把这 2 个文件标记为已解决后可以完成合并。");
+    });
+
+    it("只剩一个不能逐处处理的文件时说明要明确标记", async () => {
+      const { onNotice } = setup(["a.txt", "c.png"], { "c.png": binaryView("c.png") });
+      await title("a.txt");
+      await fireEvent.keyDown(stream(), { key: "1" });
+      await next();
+      await vi.waitFor(() => expect(document.querySelector(".conflict-editor-head h2")?.textContent).toBe("c.png"));
+      expect(screen.queryByRole("button", { name: "下一处未处理" })).toBeNull();
+      await fireEvent.click(screen.getByRole("button", { name: "下一处冲突" }));
+      expect(onNotice).toHaveBeenLastCalledWith("没有其他未处理的文件。明确标记这个文件后可以完成合并。");
+    });
+
+    it("标记后自动到下一个未处理文件，序号算上已解决的", async () => {
+      setup(["a.txt", "b.txt"]);
+      await title("a.txt");
+      resolveConflict.mockResolvedValue(
+        session({ operation: "merge", canAbort: true, unresolved: 1, generation: 5, conflicts: [{ path: "b.txt", kind: "text", summary: "文本" }] }),
+      );
+      await fireEvent.keyDown(stream(), { key: "1" });
+      await fireEvent.click(screen.getByRole("button", { name: "标记编辑结果" }));
+      await title("b.txt");
+      await vi.waitFor(() => expect(label()).toBe("文件 2 / 2· 第 1 / 1 处"));
+    });
+
+    it("整文件编辑的草稿在切换后保留", async () => {
+      setup(["a.txt", "b.txt"]);
+      await title("a.txt");
+      await fireEvent.click(screen.getByRole("button", { name: /整文件编辑/ }));
+      await fireEvent.input(screen.getByRole("textbox", { name: "合并结果" }), { target: { value: "hand written\n" } });
+      await next();
+      await title("b.txt");
+      await fireEvent.keyDown(stream(), { key: "F7" });
+      await title("a.txt");
+      const area = (await screen.findByRole("textbox", { name: "合并结果" })) as HTMLTextAreaElement;
+      expect(area.value).toBe("hand written\n");
+      await vi.waitFor(() => expect(document.activeElement).toBe(area));
+    });
   });
 
   it("中止合并列出受影响路径，取消不写入", async () => {

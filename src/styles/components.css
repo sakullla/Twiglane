@@ -1210,6 +1210,7 @@ label.list-row .checkbox { margin-top: 2px; }
 .cr-nav { display: inline-flex; align-items: center; gap: var(--space-2); flex: none; }
 .cr-nav-label { text-align: center; white-space: nowrap; color: var(--fg-muted); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
 .cr-nav-label strong { color: var(--fg); }
+.cr-nav-label i { margin: 0 var(--space-4); color: var(--fg-subtle); font-style: normal; }
 .cr-toggle { display: inline-flex; align-items: center; flex: none; gap: var(--space-6); white-space: nowrap; color: var(--fg-muted); font-size: var(--text-sm); cursor: pointer; user-select: none; }
 .cr-toggle:has(input:disabled) { cursor: not-allowed; color: var(--fg-subtle); }
 .cr-menu { min-width: 300px; }
@@ -1360,6 +1361,8 @@ label.list-row .checkbox { margin-top: 2px; }
   .cr-next, .cr-foot:has(.cr-nav) .cr-foot-note { display: none; }
   /* 这一段都是不收缩的按钮，限宽只会让它们压到后面的说明框：改由说明框和原因文字让位。 */
   .mp-foot-file:has(.cr-nav) { max-width: none; }
+  /* 窄栏一行放不下全部图例：「两侧相同」没有底色，先收掉它，避免表头多占一行。 */
+  .three-way-key.same { display: none; }
   .mp-foot-file { max-width: 36%; }
 }
 
@@ -1367,7 +1370,7 @@ label.list-row .checkbox { margin-top: 2px; }
 .three-way-merge { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--surface); }
 .three-way-head { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); flex: none; }
 .three-way-title { display: flex; align-items: center; gap: var(--space-8); min-width: 0; min-height: 40px; padding: var(--space-2) var(--space-8) var(--space-2) var(--space-12); background: var(--surface-2); }
-.three-way-title.result { background: var(--accent-softer); }
+.three-way-title.result { flex-wrap: wrap; column-gap: var(--space-8); row-gap: 0; background: var(--accent-softer); }
 .three-way-title > div { display: flex; flex-direction: column; min-width: 0; flex: 1; line-height: var(--leading-tight); }
 .three-way-title strong { font-size: var(--text-sm); font-weight: var(--weight-semibold); }
 .three-way-title > div > span { color: var(--fg-subtle); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1401,9 +1404,40 @@ label.list-row .checkbox { margin-top: 2px; }
   white-space: pre;
   tab-size: 4;
 }
+/* 结果栏：行号栏在滚动容器之外，textarea 底色透明，来源标记从下方透出来；三层共用 20px 行高。 */
+.three-way-pane.result.marked { display: grid; grid-template-columns: 56px minmax(0, 1fr); overflow: hidden; }
+.three-way-editor { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+.three-way-editor textarea { position: relative; padding-left: var(--space-8); background: transparent; }
+.three-way-marks, .three-way-gutter { overflow: hidden; pointer-events: none; user-select: none; }
+.three-way-marks { position: absolute; inset: 0; }
+.three-way-layer { position: relative; }
+.three-way-mark { position: absolute; left: 0; right: 0; }
+.three-way-mark.ours { background: var(--info-soft); }
+.three-way-mark.theirs { background: var(--purple-soft); }
+.three-way-mark.manual { background: var(--add-bg); }
+.three-way-mark.marker { background: var(--warning-soft); }
+.three-way-gutter { position: relative; min-height: 0; background: var(--surface-2); }
+.three-way-gutter-row { position: absolute; left: 0; right: 0; display: grid; grid-template-columns: minmax(0, 1fr) 13px; align-items: center; column-gap: var(--space-2); height: 20px; padding-left: var(--space-2); border-right: 3px solid transparent; color: var(--fg-subtle); font-family: var(--mono); font-size: var(--text-sm); }
+.three-way-gutter-row span { text-align: right; font-variant-numeric: tabular-nums; }
+.three-way-gutter-row i { font-style: normal; font-family: var(--font); font-weight: var(--weight-semibold); text-align: center; }
+.three-way-gutter-row.ours { border-right-color: var(--info); }
+.three-way-gutter-row.ours i { color: var(--info-text); }
+.three-way-gutter-row.theirs { border-right-color: var(--purple); }
+.three-way-gutter-row.theirs i { color: var(--purple); }
+.three-way-gutter-row.manual { border-right-color: var(--add-fg); }
+.three-way-gutter-row.manual i { color: var(--add-fg); }
+.three-way-gutter-row.marker { border-right-color: var(--warning); }
+.three-way-gutter-row.marker i { color: var(--warning-text); }
+.three-way-legend { display: flex; flex: 1 0 100%; flex-wrap: wrap; align-items: center; gap: 0 var(--space-8); min-height: 18px; margin: 0; color: var(--fg-muted); font-size: var(--text-xs); line-height: 18px; }
+.three-way-key { display: inline-flex; align-items: center; gap: var(--space-4); white-space: nowrap; }
+.three-way-key i { width: 3px; height: 11px; flex: none; border-radius: 1px; background: var(--fg-subtle); }
+.three-way-key.ours i { background: var(--info); }
+.three-way-key.theirs i { background: var(--purple); }
+.three-way-key.manual i { background: var(--add-fg); }
+.three-way-key.marker i { background: var(--warning-text); }
 .three-way-text { display: flex; min-width: max-content; min-height: 100%; }
 .three-way-text pre { margin: 0; padding: var(--space-8) var(--space-12) var(--space-8) var(--space-8); font-family: var(--mono); font-size: var(--text-sm); line-height: 20px; white-space: pre; tab-size: 4; color: var(--fg); }
-.three-way-text pre.gutter { position: sticky; left: 0; min-width: 48px; padding-right: var(--space-8); text-align: right; color: var(--fg-subtle); background: var(--surface-2); user-select: none; }
+.three-way-text pre.gutter { position: sticky; left: 0; min-width: 56px; padding-right: var(--space-8); text-align: right; color: var(--fg-subtle); background: var(--surface-2); user-select: none; }
 .three-way-summary { padding: var(--space-16); color: var(--fg-muted); font-size: var(--text-sm); }
 .three-way-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-height: 36px; padding: var(--space-2) var(--space-12); background: var(--surface-2); flex: none; }
 .three-way-foot > span { display: inline-flex; align-items: center; gap: var(--space-6); color: var(--fg-subtle); font-size: var(--text-xs); }

@@ -18,6 +18,26 @@
     conflictProgress.clear();
   }
 
+  /**
+   * 沿方向在冲突文件环上找下一个有未处理内容的文件。按环走：跳过的文件转一圈还会回来，
+   * 不会有未处理的文件被甩在身后；除当前文件外都不需要处理时返回 null。
+   */
+  export function adjacentPendingFile(
+    paths: readonly string[],
+    here: string,
+    direction: 1 | -1,
+    pending: (path: string) => boolean,
+  ): string | null {
+    const count = paths.length;
+    const start = paths.indexOf(here);
+    const origin = start === -1 && direction === -1 ? 0 : start;
+    for (let step = 1; step <= count; step += 1) {
+      const path = paths[(((origin + direction * step) % count) + count) % count];
+      if (path !== here && pending(path)) return path;
+    }
+    return null;
+  }
+
   export function defaultMergeMessage(source: string, target: string, remote: boolean): string {
     if (!source || !target) return "";
     return remote ? `Merge remote-tracking branch '${source}' into ${target}` : `Merge branch '${source}' into ${target}`;
@@ -169,6 +189,15 @@
     return switchedFromByRepo.get(opened.summary.path) ?? null;
   });
 
+  /** 跨文件跳转打开的文件落在哪一处；用户直接点开时为 null。 */
+  let entry = $state<"first" | "last" | null>(null);
+  /** 跳到不能逐处处理的文件后，焦点交给编辑区，F7 和按钮都还能继续走。 */
+  let landOnEditor = $state(false);
+  let editorHost = $state<HTMLDivElement | null>(null);
+  let conflictPaths = $derived((session?.conflicts ?? []).map((item) => item.path));
+  let fileIndex = $derived(resolvedPaths.length + Math.max(0, conflictPaths.indexOf(view?.path ?? "")) + 1);
+  let pendingElsewhere = $derived(conflictPaths.filter((path) => path !== view?.path && filePending(path)).length);
+
   function draftKey(path: string): string {
     return `${opened.summary.path}\u0000${path}`;
   }
@@ -176,6 +205,51 @@
   function fileProgress(path: string): { total: number; done: number } | null {
     void progressTick;
     return conflictProgress.get(draftKey(path)) ?? null;
+  }
+
+  /** 没打开过、没有逐处结构（二进制、整文件编辑）或还有未选的一处，都算未处理。 */
+  function filePending(path: string): boolean {
+    const progress = fileProgress(path);
+    return !progress || progress.total === 0 || progress.done < progress.total;
+  }
+
+  $effect(() => {
+    if (!landOnEditor || blocked || !view || view.editable) return;
+    landOnEditor = false;
+    editorHost?.focus({ preventScroll: true });
+  });
+
+  /** 当前文件这个方向走完了：切到下一个有未处理内容的文件；没有时说明还差什么，不空转。 */
+  function leaveFile(direction: 1 | -1, stay = false): boolean {
+    const state = session;
+    const here = view;
+    if (!state || !here) return false;
+    if (blocked) return true;
+    const target = adjacentPendingFile(conflictPaths, here.path, direction, filePending);
+    if (target) {
+      openConflict(target, direction === 1 ? "first" : "last");
+      return true;
+    }
+    if (stay) return false;
+    const left = state.unresolved;
+    onNotice(
+      filePending(here.path)
+        ? "没有其他未处理的文件。明确标记这个文件后可以完成合并。"
+        : left > 1
+          ? `全部冲突都已处理，把这 ${left} 个文件标记为已解决后可以完成合并。`
+          : "全部冲突都已处理，标记这个文件后可以完成合并。",
+    );
+    return false;
+  }
+
+  function onEditorKey(event: KeyboardEvent) {
+    if (!view || view.editable) return;
+    const down = (event.altKey && event.key === "ArrowDown") || (event.key === "F7" && !event.shiftKey);
+    const up = (event.altKey && event.key === "ArrowUp") || (event.key === "F7" && event.shiftKey);
+    if (!down && !up) return;
+    if ((event.target as HTMLElement).closest("input")) return;
+    event.preventDefault();
+    leaveFile(down ? 1 : -1);
   }
 
   $effect(() => {
@@ -432,12 +506,14 @@
     target = current ?? target;
   }
 
-  function openConflict(path: string) {
+  function openConflict(path: string, landing: "first" | "last" | null = null) {
     const state = session;
     if (!state) return;
     if (view?.path === path) return;
     void run(async () => {
       const next = await api.conflictView(opened.summary.path, path, state.generation, nextId());
+      entry = landing;
+      landOnEditor = landing !== null;
       view = next;
       resultText = next.result.text ?? "";
       onGeneration(next.generation);
@@ -509,6 +585,8 @@
         view = selected;
       } else if (next.conflicts[0]) {
         const nextView = await api.conflictView(opened.summary.path, next.conflicts[0].path, next.generation, nextId());
+        entry = "first";
+        landOnEditor = true;
         view = nextView;
         resultText = nextView.result.text ?? "";
         onGeneration(nextView.generation);
@@ -608,7 +686,9 @@
   </div>
 
   {#if session && active}
-    <div class="mp-body">
+    <!-- 只监听 F7、Alt+↑↓ 冒泡：二进制这类文件没有冲突流，导航键在这里接住。 -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="mp-body" onkeydown={onEditorKey}>
       <aside class="conflict-sidebar" aria-label="冲突文件列表">
         <div class="conflict-sidebar-head">
           <span>冲突文件</span>
@@ -674,7 +754,7 @@
         {#if session.conflicts.length === 0 && resolvedPaths.length === 0}<p class="hint conflict-empty-note">没有待处理的冲突文件。</p>{/if}
       </aside>
 
-      <div class="conflict-editor">
+      <div class="conflict-editor" tabindex="-1" bind:this={editorHost}>
         {#if view}
           {#if view.editable}
             {#key `${view.path}:${view.generation}`}
@@ -687,6 +767,11 @@
                 onDraft={(draft, progress) => view && storeDraft(view.path, draft, progress)}
                 onResolve={resolve}
                 footTarget={footFile}
+                {entry}
+                {fileIndex}
+                fileTotal={conflictTotal}
+                {pendingElsewhere}
+                onExhausted={leaveFile}
               >
                 {#snippet lead()}
                   {#if view}
@@ -800,6 +885,23 @@
 
   <div class="mp-foot" class:strip>
     <div class="mp-foot-file" bind:this={footFile}></div>
+    {#if session && active && view && !view.editable && conflictTotal > 1}
+      <!-- 二进制这类文件按文件停留：没有 ConflictResolver，导航在这里提供，语义相同。 -->
+      <div class="cr-nav" role="group" aria-label="冲突导航">
+        <button type="button" class="icon-btn sm" aria-label="上一处冲突" title="上一个未处理文件（Alt+↑ / Shift+F7）" disabled={blocked} onclick={() => leaveFile(-1)}>
+          <Icon name="arrow-up" size={14} />
+        </button>
+        <span class="cr-nav-label" aria-live="polite">文件 <strong>{fileIndex}</strong> / {conflictTotal}</span>
+        <button type="button" class="icon-btn sm" aria-label="下一处冲突" title="下一个未处理文件（Alt+↓ / F7）" disabled={blocked} onclick={() => leaveFile(1)}>
+          <Icon name="arrow-down" size={14} />
+        </button>
+      </div>
+      {#if pendingElsewhere > 0}
+        <button type="button" class="btn btn-secondary btn-sm cr-next" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={() => leaveFile(1)}>
+          <Icon name="arrow-down" size={13} />下一处未处理
+        </button>
+      {/if}
+    {/if}
     <!-- 底部只留主操作：还有冲突时一句话说清进度和原因，全部解决后才需要合并说明。 -->
     {#if session?.operation === "merge"}
       {#if session.unresolved > 0}

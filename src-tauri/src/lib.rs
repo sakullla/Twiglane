@@ -28,8 +28,8 @@ use crate::model::{
     AbortImpact, BranchState, CloneResult, CommitDetail, CommitPushReport, CommitResult,
     ConflictView, DiffResponse, DiscardResult, FileHistoryPage, GitInfo, HistoryPage,
     MergeComplete, MergePreview, MergeSession, OpenedRepository, PanelWidths, RecentRepo,
-    RemoteState, RepoChanged, SettingsDto, StashApplyResult, StashSaveResult, StashState,
-    StatusSnapshot, TagState, Theme, UndoResult,
+    RemoteState, RemoteTag, RepoChanged, SettingsDto, StashApplyResult, StashSaveResult,
+    StashState, StatusSnapshot, TagState, Theme, UndoResult,
 };
 use crate::shutdown::Shutdown;
 use crate::state::AppStore;
@@ -92,6 +92,7 @@ pub fn run() {
             delete_branch,
             delete_remote_branch,
             tag_state,
+            tag_remote_state,
             create_tag,
             delete_tag,
             push_tag,
@@ -674,6 +675,15 @@ async fn tag_state(
     request_id: u64,
 ) -> Result<TagState, AppError> {
     crate::git::tags::tag_state(state.inner(), &path, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn tag_remote_state(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    remote: String,
+) -> Result<Vec<RemoteTag>, AppError> {
+    crate::git::tags::tag_remote_state(state.inner(), &path, &remote).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

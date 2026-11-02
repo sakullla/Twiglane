@@ -109,6 +109,8 @@
   let previewing = $state(false);
   let previewError = $state<string | null>(null);
   let previewNonce = $state(0);
+  /** 分支名到提交 oid。分支列表不带 oid，由历史首页的引用标注得出，不在首页的分支没有记录。 */
+  let branchTips = $state<Record<string, string>>({});
   let finished = $state<Finished | null>(null);
   let view = $state<ConflictView | null>(null);
   let resultText = $state("");
@@ -126,6 +128,10 @@
   let openedFocus = "";
   let autoOpenedKey = "";
   let previewToken = 0;
+  /** 上一次预检成功时的仓库状态；与当前状态相同说明结论仍然成立。 */
+  let previewedState = "";
+  /** session 与 branchTips 同时读到的 generation；不一致时为 0。 */
+  let factsGeneration = 0;
   let footFile = $state<HTMLDivElement | null>(null);
 
   let blocked = $derived(disabled || busy);
@@ -141,6 +147,21 @@
   let filteredConflicts = $derived(
     (session?.conflicts ?? []).filter((entry) => entry.path.toLowerCase().includes(fileFilter.trim().toLowerCase())),
   );
+  let operation = $derived(session?.operation ?? null);
+  /** 预检依赖的实际仓库状态。generation 推进但它不变时不重新检查：预检不能触发自己。 */
+  let repoState = $derived.by(() => {
+    const snapshot = session?.snapshot;
+    if (!snapshot) return "";
+    const tracked = snapshot.files.filter((file) => !file.untracked).map((file) => `${file.path}:${file.staged}:${file.unstaged}`);
+    return JSON.stringify([
+      opened.summary.path,
+      snapshot.branch.name,
+      snapshot.branch.headOid,
+      branchTips[source.trim()] ?? null,
+      branchTips[target.trim()] ?? null,
+      tracked,
+    ]);
+  });
   let sourceRemote = $derived(branches.find((branch) => branch.name === source)?.remote ?? false);
   let readyPreview = $derived(preview && preview.source === source && preview.target === target ? preview : null);
   let switchedFrom = $derived.by(() => {
@@ -171,6 +192,22 @@
     return base ?? local[0]?.name ?? listed.find((branch) => branch.name !== into && !branch.name.endsWith("/HEAD"))?.name ?? "";
   }
 
+  /** 只是刷新预检依据，读不到时沿用旧值，不影响合并状态本身。 */
+  async function readBranchTips(path: string, generation: number) {
+    try {
+      const page = await api.historyPage(path, "", 0, generation, nextId());
+      const tips: Record<string, string> = {};
+      for (const commit of page.commits) {
+        for (const label of commit.labels) {
+          if (label.kind === "branch" || label.kind === "remote") tips[label.name] = commit.oid;
+        }
+      }
+      return { generation: page.generation, tips };
+    } catch {
+      return null;
+    }
+  }
+
   async function loadSession() {
     errorText = null;
     if (loadedRepo !== opened.summary.path) {
@@ -179,13 +216,16 @@
       view = null;
     }
     try {
-      const [next, listed] = await Promise.all([
+      const [next, listed, tips] = await Promise.all([
         api.mergeSession(opened.summary.path, opened.generation, nextId()),
         api.branchState(opened.summary.path, opened.generation, nextId()),
+        readBranchTips(opened.summary.path, opened.generation),
       ]);
       if (loadedKey !== `${opened.summary.path}:${opened.generation}` && session) return;
       session = next;
       branches = listed.branches;
+      if (tips) branchTips = tips.tips;
+      factsGeneration = tips?.generation === next.generation ? next.generation : 0;
       onGeneration(next.generation);
       const here = next.snapshot.branch.detached || next.snapshot.branch.unborn ? null : next.snapshot.branch.name;
       if (!target) target = here ?? listed.branches.find((branch) => !branch.remote)?.name ?? "";
@@ -197,6 +237,11 @@
       }
     } catch (error) {
       const failure = normalizeError(error);
+      // 过期只说明这次读取落后了：新 generation 会再读一次，不算失败。
+      if (failure.code === "stale" && failure.generation !== undefined) {
+        onGeneration(failure.generation);
+        return;
+      }
       errorText = failure.message;
       onFailure(failure);
     }
@@ -218,39 +263,66 @@
   }
 
   // 两端选定后自动做只读检查（防抖），不需要用户再点「检查」。
+  // 只依赖分支、手动重新检查和 repoState，不读 generation：Git 为预检写入内部对象时，
+  // generation 可能被推进，跟着重跑就成了循环。旧结果保留到新结果到达。
   $effect(() => {
     const from = source.trim();
     const into = target.trim();
-    const state = session;
+    const state = repoState;
     void previewNonce;
-    if (!state || state.operation !== "none" || finished || !from || !into) return;
-    const generation = opened.generation;
-    const repo = opened.summary.path;
     const token = ++previewToken;
+    if (!state || operation !== "none" || finished || !from || !into) {
+      previewing = false;
+      return;
+    }
     previewing = true;
     previewError = null;
-    const timer = setTimeout(async () => {
-      try {
-        const result = await api.mergePreview(repo, from, into === current ? null : into, generation, nextId());
-        if (token !== previewToken) return;
-        preview = result;
-        if (result.generation !== generation) onGeneration(result.generation);
-        if (mode === "ff-only" && !result.fastForward) mode = "merge";
-      } catch (error) {
-        if (token !== previewToken) return;
-        const failure = normalizeError(error);
-        if (failure.code === "stale" && failure.generation !== undefined) {
-          onGeneration(failure.generation);
-          return;
-        }
-        preview = null;
-        previewError = failure.message;
-      } finally {
-        if (token === previewToken) previewing = false;
-      }
-    }, 180);
+    const timer = setTimeout(() => void runPreview(from, into, state, token), 180);
     return () => clearTimeout(timer);
   });
+
+  async function runPreview(from: string, into: string, state: string, token: number) {
+    const repo = opened.summary.path;
+    const ask = (generation: number) => api.mergePreview(repo, from, into === current ? null : into, generation, nextId());
+    try {
+      let result: MergePreview;
+      try {
+        result = await ask(opened.generation);
+      } catch (error) {
+        const failure = normalizeError(error);
+        if (failure.code !== "stale" || failure.generation === undefined) throw failure;
+        if (token !== previewToken) return;
+        // 同一轮检查换新 generation 重试一次，不重走防抖，界面不多闪一轮。
+        onGeneration(failure.generation);
+        result = await ask(failure.generation);
+      }
+      if (token !== previewToken) return;
+      preview = result;
+      previewedState = state;
+      if (result.generation > opened.generation) onGeneration(result.generation);
+      if (mode === "ff-only" && !result.fastForward) mode = "merge";
+    } catch (error) {
+      if (token !== previewToken) return;
+      const failure = normalizeError(error);
+      if (failure.code === "stale") {
+        // 重试后仍然过期：不再自动重来。有旧结果就留着，开始时由 generation 校验拦截。
+        if (failure.generation !== undefined) onGeneration(failure.generation);
+        if (!readyPreview) previewError = "仓库正在变化，这次没有完成检查。";
+        return;
+      }
+      preview = null;
+      previewError = failure.message;
+    } finally {
+      if (token === previewToken) previewing = false;
+    }
+  }
+
+  /** 预检结论是否在较新的 generation 上仍然成立：依据没变，且两端分支的位置都确实读到了。 */
+  function startGeneration(checked: MergePreview): number {
+    const located = (name: string) => name === current || branchTips[name] !== undefined;
+    const unchanged = previewedState === repoState && located(checked.source) && located(checked.target);
+    return unchanged ? Math.max(checked.generation, factsGeneration) : checked.generation;
+  }
 
   $effect(() => {
     if (messageTouched) return;
@@ -288,14 +360,13 @@
     const chosenMode: MergeMode = mode === "ff-only" && checked.fastForward ? "ff-only" : "merge";
     const note = setupMessage.trim() || defaultMergeMessage(checked.source, checked.target, sourceRemote);
     void run(async () => {
-      const started = await api.startMerge(
-        repo,
-        checked.source,
-        checked.needsSwitch ? checked.target : null,
-        chosenMode,
-        checked.generation,
-        nextId(),
-      );
+      const started = await api
+        .startMerge(repo, checked.source, checked.needsSwitch ? checked.target : null, chosenMode, startGeneration(checked), nextId())
+        .catch((error: unknown) => {
+          // 写入前被 generation 校验拦下：结论已不可信，按最新状态重新检查。
+          if (normalizeError(error).code === "stale") previewNonce += 1;
+          throw error;
+        });
       if (started.switchedFrom) {
         switchedFromByRepo.set(repo, started.switchedFrom);
         progressTick += 1;
@@ -776,14 +847,14 @@
       <button
         type="button"
         class="btn btn-primary"
-        title={blocked || previewing
+        title={blocked
           ? BUSY_REASON
           : !readyPreview?.canStart
             ? "先完成上方的合并检查"
             : mode === "merge" && setupMessage.trim() === ""
               ? "填写合并说明后才能开始"
               : undefined}
-        disabled={blocked || !readyPreview?.canStart || previewing || (mode === "merge" && setupMessage.trim() === "")}
+        disabled={blocked || !readyPreview?.canStart || (mode === "merge" && setupMessage.trim() === "")}
         onclick={confirmStart}
       >
         {#if busy}<span class="spinner"></span>{:else}<Icon name="merge" size={14} />{/if}{primaryLabel(readyPreview)}

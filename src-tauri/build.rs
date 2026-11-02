@@ -53,6 +53,7 @@ fn main() {
             "delete_branch",
             "delete_remote_branch",
             "tag_state",
+            "tag_remote_state",
             "create_tag",
             "delete_tag",
             "push_tag",

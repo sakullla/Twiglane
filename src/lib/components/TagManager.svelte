@@ -1,6 +1,6 @@
 <script lang="ts">
   import { BUSY_REASON } from "../ui";
-  import { tick } from "svelte";
+  import { tick, untrack } from "svelte";
   import { api } from "../api";
   import { normalizeError } from "../errors";
   import { formatAuthoredAt, shortOid } from "../history";
@@ -56,10 +56,16 @@
   let copied = $state<string | null>(null);
   /** 标签读取的结果：只有真正读完才写入，写锁期间跳过的那次不算；失败不自动重读。 */
   let loaded = $state<{ key: string; ok: boolean } | null>(null);
+  /** 远程上的标签（名称到解引用后的 oid）；null 表示还不知道或读不到。 */
+  let remoteTags = $state<Map<string, string> | null>(null);
+  let remoteChecking = $state(false);
+  let remoteError = $state<string | null>(null);
+  let remoteToken = 0;
 
   let blocked = $derived(disabled || localBusy);
   let readBlocked = $derived(localBusy || (disabled && !backgroundClone));
   let remote = $derived(opened.snapshot.branch.upstream?.split("/")[0] || "origin");
+  let remoteKey = $derived(`${opened.summary.path}\u0000${remote}`);
   let visible = $derived(
     tags.filter((tag) => {
       const needle = query.trim().toLowerCase();
@@ -71,6 +77,54 @@
     if (loaded?.key === `${opened.summary.path}:${opened.generation}` || readBlocked) return;
     void loadTags();
   });
+
+  // ls-remote 走网络，只跟仓库和远程走：打开时一次、推送后一次、手动刷新，不随 generation 重跑。
+  $effect(() => {
+    void remoteKey;
+    untrack(() => {
+      remoteTags = null;
+      remoteError = null;
+      void loadRemoteTags();
+    });
+    return () => {
+      remoteToken += 1;
+    };
+  });
+
+  async function loadRemoteTags() {
+    const key = remoteKey;
+    const token = ++remoteToken;
+    remoteChecking = true;
+    try {
+      const listed = await api.tagRemoteState(opened.summary.path, remote);
+      if (token !== remoteToken || key !== remoteKey) return;
+      remoteTags = new Map(listed.map((tag) => [tag.name, tag.oid]));
+      remoteError = null;
+    } catch (error) {
+      if (token !== remoteToken || key !== remoteKey) return;
+      remoteTags = null;
+      remoteError = normalizeError(error).message;
+    } finally {
+      if (token === remoteToken) remoteChecking = false;
+    }
+  }
+
+  function remoteStatus(tag: TagRecord): { label: string; tone: string; title: string; canPush: boolean } {
+    if (!remoteTags) {
+      return remoteChecking
+        ? { label: "正在检查远程", tone: "skip", title: `正在读取 ${remote} 上的标签`, canPush: true }
+        : { label: "远程状态未知", tone: "ignore", title: remoteError ?? `无法确认 ${remote} 上的标签`, canPush: true };
+    }
+    const oid = remoteTags.get(tag.name);
+    if (oid === undefined) return { label: "未推送", tone: "tag", title: `${remote} 上没有这个标签`, canPush: true };
+    if (oid === tag.targetOid) return { label: "已推送", tone: "ok", title: `已在 ${remote} 上`, canPush: false };
+    return {
+      label: "远程不同",
+      tone: "danger",
+      title: `${remote} 上的同名标签指向 ${shortOid(oid)}，本地指向 ${shortOid(tag.targetOid)}。这里不提供覆盖，请先核对。`,
+      canPush: false,
+    };
+  }
 
   /** reading：只读。后台克隆期间也能跑，但不动宿主的 pending，否则结束时会把克隆的写锁清掉。 */
   async function run<T>(action: () => Promise<T>, reading = false): Promise<T | undefined> {
@@ -169,6 +223,8 @@
     if (!result || opened.summary.path !== current.summary.path) return;
     apply(result);
     onNotice(`标签 ${tag.name} 已推送到 ${remote}，没有强制覆盖。`);
+    if (remoteTags) remoteTags = new Map(remoteTags).set(tag.name, tag.targetOid);
+    void loadRemoteTags();
   }
 
   /** 确认区替换搜索与列表，不用算高度，也不必滚动就能看全说明和按钮。 */
@@ -261,6 +317,10 @@
     <div class="tag-list-tools" hidden={confirmTag !== null}>
       <div class="field"><Icon name="search" size={14} /><input aria-label="搜索标签" bind:this={searchInput} bind:value={query} placeholder="搜索标签、Hash 或附注" autocomplete="off" spellcheck="false" /></div>
       {#if loaded?.ok}<span class="count">{tags.length}</span>{/if}
+      <!-- 检查中不禁用：禁用会把焦点弄丢，Esc 就到不了 Modal。 -->
+      <button type="button" class="icon-btn" aria-label="刷新远程状态" aria-busy={remoteChecking} title={`重新读取 ${remote} 上的标签`} onclick={() => { if (!remoteChecking) void loadRemoteTags(); }}>
+        {#if remoteChecking}<span class="spinner"></span>{:else}<Icon name="refresh" size={14} />{/if}
+      </button>
       <button type="button" class="btn btn-secondary" aria-expanded="false" aria-controls="tag-create-form" bind:this={createToggle} onclick={openCreate}><Icon name="plus" size={14} />新建标签</button>
     </div>
 
@@ -280,10 +340,11 @@
         <div class="empty compact"><span class="empty-icon"><Icon name="tag" size={20} /></span><strong>{tags.length === 0 ? "还没有标签" : "没有匹配的标签"}</strong><p>{tags.length === 0 ? "点“新建标签”创建第一个版本标记。" : "试试标签名、目标 Hash 或附注内容。"}</p></div>
       {:else}
         {#each visible as tag (tag.name)}
+          {@const status = remoteStatus(tag)}
           <div class="list-row tag-row">
             <span class="tag-row-icon"><Icon name="tag" size={15} /></span>
             <div class="lr-main">
-              <span class="lr-title"><span title={tag.name}>{tag.name}</span>{#if tag.message}<span class="chip tag">附注</span>{/if}</span>
+              <span class="lr-title"><span title={tag.name}>{tag.name}</span>{#if tag.message}<span class="chip tag">附注</span>{/if}<span class={`chip ${status.tone}`} data-remote-status title={status.title}>{status.label}</span></span>
               <span class="lr-sub tag-target">
                 <code>{shortOid(tag.targetOid)}</code>
                 <button type="button" aria-label={`复制标签 ${tag.name} 的目标 Hash`} title="复制完整目标 Hash" onclick={() => copyOid(tag.targetOid)}><Icon name={copied === tag.targetOid ? "check" : "copy"} size={11} class={copied === tag.targetOid ? "tag-copied" : ""} /></button>
@@ -293,7 +354,9 @@
             </div>
             <span class="lr-actions">
               <button type="button" class="btn btn-ghost btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={() => onOpenHistory(tag.targetOid)}><Icon name="history" size={12} />查看提交</button>
-              <button type="button" class="btn btn-secondary btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={() => push(tag)}><Icon name="arrow-up" size={12} />推送</button>
+              {#if status.canPush}
+                <button type="button" class="btn btn-secondary btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={() => push(tag)}><Icon name="arrow-up" size={12} />推送</button>
+              {/if}
               <button type="button" class="icon-btn sm danger" aria-label={`删除标签 ${tag.name}`} title="删除本地标签" disabled={blocked} onclick={() => askRemove(tag)}><Icon name="trash" size={13} /></button>
             </span>
           </div>

@@ -266,6 +266,14 @@ pub struct TagRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct RemoteTag {
+    pub name: String,
+    /// 附注标签是解引用后的提交，可直接与 `TagRecord::target_oid` 比较。
+    pub oid: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct TagState {
     pub generation: u64,
     pub tags: Vec<TagRecord>,

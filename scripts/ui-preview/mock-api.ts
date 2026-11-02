@@ -238,6 +238,7 @@ const commits: HistoryCommit[] = Array.from({ length: 60 }, (_, i) => ({
 let mockTags = [
   { name: "v0.1.0", targetOid: commits[3].oid, message: "首个公开测试版本", createdAt: commits[3].authoredAt },
   { name: "v0.2.0-rc.1", targetOid: commits[1].oid, message: "现代化工作区候选版本", createdAt: commits[1].authoredAt },
+  { name: "v0.3.0-dev", targetOid: commits[0].oid, message: "", createdAt: commits[0].authoredAt },
 ];
 
 const branches: BranchRecord[] = [
@@ -252,6 +253,12 @@ const ok = async <T>(value: T, ms?: number) => {
   await wait(ms);
   return value;
 };
+
+// 默认覆盖已推送、未推送、远程不同三种状态；?tags=offline 模拟读不到远程。
+const remoteTagOids = new Map([
+  ["v0.1.0", commits[3].oid],
+  ["v0.2.0-rc.1", commits[0].oid],
+]);
 
 function branchData() {
   return { generation, branches: branches.map((item) => ({ ...item })), snapshot: snapshot() };
@@ -472,7 +479,13 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     generation += 1;
     return ok({ generation, tags: mockTags.map((item) => ({ ...item })), snapshot: snapshot() });
   },
-  pushTag: () => {
+  tagRemoteState: () => {
+    if (previewParams.get("tags") === "offline") return Promise.reject({ code: "tag_remote_failed", message: "无法读取远程标签。 fatal: unable to access remote" });
+    return ok([...remoteTagOids].map(([name, oid]) => ({ name, oid })));
+  },
+  pushTag: (_repo: string, _remote: string, name: string) => {
+    const tag = mockTags.find((item) => item.name === name);
+    if (tag) remoteTagOids.set(tag.name, tag.targetOid);
     generation += 1;
     return ok({ generation, tags: mockTags.map((item) => ({ ...item })), snapshot: snapshot() });
   },

@@ -15,6 +15,7 @@ import type { GitInfo, MergeSession, OpenedRepository } from "../src/lib/types";
 const mergeSession = vi.hoisted(() => vi.fn());
 const branchState = vi.hoisted(() => vi.fn());
 const mergePreview = vi.hoisted(() => vi.fn());
+const historyPage = vi.hoisted(() => vi.fn());
 const startMerge = vi.hoisted(() => vi.fn());
 const conflictView = vi.hoisted(() => vi.fn());
 const resolveConflict = vi.hoisted(() => vi.fn());
@@ -28,6 +29,7 @@ vi.mock("../src/lib/api", () => ({
     mergeSession,
     branchState,
     mergePreview,
+    historyPage,
     startMerge,
     conflictView,
     resolveConflict,
@@ -128,6 +130,7 @@ describe("合并面板", () => {
     mergeSession.mockReset();
     branchState.mockReset();
     mergePreview.mockReset();
+    historyPage.mockReset();
     startMerge.mockReset();
     completeMerge.mockReset();
     conflictView.mockReset();
@@ -234,6 +237,177 @@ describe("合并面板", () => {
       ...extra,
     });
   }
+
+  const settle = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function tipsPage(generation: number, tips: Record<string, string>) {
+    return {
+      generation,
+      commits: Object.entries(tips).map(([name, oid]) => ({ oid, labels: [{ name, kind: "branch", current: false }] })),
+    };
+  }
+
+  /** 让 session 跟随 generation，并返回能推进 generation 的句柄（相当于 repo-changed 事件）。 */
+  function mountForPreview(extra: Record<string, unknown> = {}) {
+    mergeSession.mockImplementation(async (_repo: string, generation: number) => session({ generation }));
+    branchState.mockResolvedValue(twoBranches);
+    const onGeneration = vi.fn();
+    const props = {
+      opened,
+      disabled: false,
+      nextId: () => 1,
+      onSnapshot: () => {},
+      onGeneration,
+      onFailure: () => {},
+      onNotice: () => {},
+      onOpenStash: () => {},
+      ...extra,
+    };
+    const view = render(MergePanel, props);
+    const bump = (generation: number, snapshot = opened.snapshot) => view.rerender({ opened: { ...opened, generation, snapshot } });
+    return { bump, onGeneration };
+  }
+
+  function previewBusy(): string | null {
+    return document.querySelector(".merge-check")?.getAttribute("aria-busy") ?? null;
+  }
+
+  it("generation 连续变化但仓库状态不变时不重新预检，开始合并保持可点", async () => {
+    mergePreview.mockResolvedValue(previewOf({ generation: 4 }));
+    const { bump } = mountForPreview();
+    const start = await screen.findByRole("button", { name: "合并到 main" });
+    await vi.waitFor(() => expect(previewBusy()).toBe("false"));
+    for (let generation = 5; generation < 12; generation += 1) {
+      await bump(generation);
+      await settle(30);
+      expect(previewBusy()).toBe("false");
+      expect(start.hasAttribute("disabled")).toBe(false);
+    }
+    await settle(240);
+    expect(mergePreview).toHaveBeenCalledTimes(1);
+    expect(mergeSession.mock.calls.length).toBeGreaterThan(1);
+    expect(document.querySelector(".merge-check .spinner")).toBeNull();
+  });
+
+  it("预检自身推进 generation 时不形成循环", async () => {
+    let bump: (generation: number) => Promise<void> = async () => {};
+    // 真实循环：预检写入 .git/objects，监听随后推进 generation，并把新值回传给面板。
+    mergePreview.mockImplementation(async (_repo: string, _source: string, _target: string | null, generation: number) => {
+      void settle(10).then(() => bump(generation + 1));
+      return previewOf({ generation });
+    });
+    const mounted = mountForPreview();
+    bump = mounted.bump;
+    await screen.findByRole("button", { name: "合并到 main" });
+    await settle(800);
+    expect(mergePreview).toHaveBeenCalledTimes(1);
+    expect(previewBusy()).toBe("false");
+  });
+
+  it("预检遇到过期时用新 generation 重试一次，算同一轮检查", async () => {
+    mergePreview
+      .mockRejectedValueOnce({ code: "stale", message: "过期", generation: 6 })
+      .mockResolvedValueOnce(previewOf({ generation: 6 }));
+    const { onGeneration } = mountForPreview();
+    await screen.findByRole("button", { name: "合并到 main" });
+    expect(mergePreview.mock.calls.map((call) => call[3])).toEqual([4, 6]);
+    expect(onGeneration).toHaveBeenCalledWith(6);
+    await settle(240);
+    expect(mergePreview).toHaveBeenCalledTimes(2);
+    expect(previewBusy()).toBe("false");
+  });
+
+  it("重试后仍过期时停下并给出重试入口，不自动再来", async () => {
+    mergePreview.mockRejectedValue({ code: "stale", message: "过期", generation: 6 });
+    mountForPreview();
+    expect(await screen.findByText(/仓库正在变化/)).toBeTruthy();
+    await settle(240);
+    expect(mergePreview).toHaveBeenCalledTimes(2);
+    expect(previewBusy()).toBe("false");
+    mergePreview.mockReset();
+    mergePreview.mockResolvedValue(previewOf({ generation: 6 }));
+    await fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    expect(await screen.findByRole("button", { name: "合并到 main" })).toBeTruthy();
+  });
+
+  it("外部提交到来源分支后更新结果，检查期间保留旧结果且可以开始", async () => {
+    const tips = { main: "a".repeat(40), feature: "b".repeat(40) };
+    historyPage.mockImplementation(async (_repo: string, _query: string, _offset: number, generation: number) => tipsPage(generation, tips));
+    mergePreview.mockResolvedValueOnce(previewOf({ generation: 4, incoming: 2 }));
+    const { bump } = mountForPreview();
+    const start = await screen.findByRole("button", { name: "合并到 main" });
+    expect(screen.getByText("个提交将带入 main").previousElementSibling?.textContent).toBe("2");
+
+    let finish: (value: unknown) => void = () => {};
+    mergePreview.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    tips.feature = "d".repeat(40);
+    await bump(5);
+    await vi.waitFor(() => expect(mergePreview).toHaveBeenCalledTimes(2));
+    expect(previewBusy()).toBe("true");
+    expect(screen.getByText("个提交将带入 main").previousElementSibling?.textContent).toBe("2");
+    expect(start.hasAttribute("disabled")).toBe(false);
+
+    finish(previewOf({ generation: 5, incoming: 3 }));
+    await vi.waitFor(() => expect(screen.getByText("个提交将带入 main").previousElementSibling?.textContent).toBe("3"));
+    expect(previewBusy()).toBe("false");
+  });
+
+  it("当前分支前进或已跟踪文件变化时重新预检", async () => {
+    mergePreview.mockImplementation(async (_repo: string, _source: string, _target: string | null, generation: number) => previewOf({ generation }));
+    mergeSession.mockImplementation(async (_repo: string, generation: number) => session({ generation }));
+    const { bump } = mountForPreview();
+    await screen.findByRole("button", { name: "合并到 main" });
+
+    const moved = { ...opened.snapshot, branch: { ...opened.snapshot.branch, headOid: "e".repeat(40) } };
+    mergeSession.mockImplementation(async (_repo: string, generation: number) => session({ generation, snapshot: moved }));
+    await bump(5);
+    await vi.waitFor(() => expect(mergePreview).toHaveBeenCalledTimes(2));
+
+    const edited = { ...moved, files: [] };
+    mergeSession.mockImplementation(async (_repo: string, generation: number) => session({ generation, snapshot: edited }));
+    await bump(6);
+    await vi.waitFor(() => expect(mergePreview).toHaveBeenCalledTimes(3));
+
+    const untracked = {
+      ...edited,
+      files: [{ path: "new.txt", originalPath: null, staged: "none" as const, unstaged: "none" as const, untracked: true, unmerged: false }],
+    };
+    mergeSession.mockImplementation(async (_repo: string, generation: number) => session({ generation, snapshot: untracked }));
+    await bump(7);
+    await settle(260);
+    expect(mergePreview).toHaveBeenCalledTimes(3);
+  });
+
+  it("依据未变时用最新 generation 开始，后端的校验仍在", async () => {
+    const tips = { main: "a".repeat(40), feature: "b".repeat(40) };
+    historyPage.mockImplementation(async (_repo: string, _query: string, _offset: number, generation: number) => tipsPage(generation, tips));
+    mergePreview.mockResolvedValue(previewOf({ generation: 4 }));
+    startMerge.mockRejectedValue({ code: "stale", message: "仓库状态已变化", generation: 9 });
+    const onFailure = vi.fn();
+    const { bump } = mountForPreview({ onFailure });
+    const start = await screen.findByRole("button", { name: "合并到 main" });
+    await bump(7);
+    await vi.waitFor(() => expect(historyPage).toHaveBeenCalledTimes(2));
+    await tick();
+    await fireEvent.click(start);
+    await vi.waitFor(() => expect(startMerge).toHaveBeenCalledWith("/repo", "feature", null, "merge", 7, 1));
+    // 被 generation 校验拦下后不会写入，并按最新状态重新检查。
+    await vi.waitFor(() => expect(onFailure).toHaveBeenCalled());
+    await vi.waitFor(() => expect(mergePreview).toHaveBeenCalledTimes(2));
+  });
+
+  it("读不到分支位置时不放宽：沿用预检时的 generation", async () => {
+    historyPage.mockRejectedValue(new Error("读不到"));
+    mergePreview.mockResolvedValue(previewOf({ generation: 4 }));
+    startMerge.mockRejectedValue({ code: "stale", message: "仓库状态已变化", generation: 7 });
+    const { bump } = mountForPreview();
+    const start = await screen.findByRole("button", { name: "合并到 main" });
+    await bump(7);
+    await settle(30);
+    await fireEvent.click(start);
+    await vi.waitFor(() => expect(startMerge).toHaveBeenCalledWith("/repo", "feature", null, "merge", 4, 1));
+    await vi.waitFor(() => expect(mergePreview).toHaveBeenCalledTimes(2));
+  });
 
   it("脏工作区自动预览后列出已跟踪改动，不开始合并", async () => {
     mergeSession.mockResolvedValue(session());

@@ -168,6 +168,12 @@ export interface TagRecord {
   createdAt: number;
 }
 
+/** 远程上的标签；oid 已解引用，可直接与 TagRecord.targetOid 比较。 */
+export interface RemoteTag {
+  name: string;
+  oid: string;
+}
+
 export interface TagState {
   generation: number;
   tags: TagRecord[];

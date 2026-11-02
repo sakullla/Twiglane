@@ -13,6 +13,7 @@ import type {
   PanelWidths,
   RecentRepo,
   RemoteState,
+  RemoteTag,
   SettingsDto,
   AbortImpact,
   ConflictView,
@@ -198,6 +199,8 @@ export const api = {
     }),
   tagState: (path: string, generation: number, requestId: number) =>
     invoke<TagState>("tag_state", { path, generation, requestId }),
+  /** 只读查询远程标签：不校验也不推进 generation，过期响应由调用方丢弃。 */
+  tagRemoteState: (path: string, remote: string) => invoke<RemoteTag[]>("tag_remote_state", { path, remote }),
   createTag: (path: string, name: string, target: string, message: string, generation: number, requestId: number) =>
     invoke<TagState>("create_tag", { path, name, target, message, generation, requestId }),
   deleteTag: (path: string, name: string, confirm: boolean, generation: number, requestId: number) =>

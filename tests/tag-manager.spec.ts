@@ -7,8 +7,9 @@ const tagState = vi.hoisted(() => vi.fn());
 const createTag = vi.hoisted(() => vi.fn());
 const deleteTag = vi.hoisted(() => vi.fn());
 const pushTag = vi.hoisted(() => vi.fn());
+const tagRemoteState = vi.hoisted(() => vi.fn());
 
-vi.mock("../src/lib/api", () => ({ api: { tagState, createTag, deleteTag, pushTag } }));
+vi.mock("../src/lib/api", () => ({ api: { tagState, tagRemoteState, createTag, deleteTag, pushTag } }));
 
 import TagManager from "../src/lib/components/TagManager.svelte";
 
@@ -63,7 +64,127 @@ describe("标签管理", () => {
     createTag.mockReset();
     deleteTag.mockReset();
     pushTag.mockReset();
+    tagRemoteState.mockReset();
+    tagRemoteState.mockResolvedValue([]);
     tagState.mockResolvedValue({ generation: 3, tags: [existing], snapshot: opened.snapshot });
+  });
+
+  describe("远程状态", () => {
+    const annotated = { ...existing, name: "v2.0.0" };
+    const moved = { ...existing, name: "v3.0.0", targetOid: "b".repeat(40) };
+    const localOnly = { ...existing, name: "v4.0.0", message: "" };
+
+    function statusOf(name: string): string | null {
+      const row = screen.getByText(name).closest(".tag-row");
+      return row?.querySelector("[data-remote-status]")?.textContent ?? null;
+    }
+
+    function pushButtonOf(name: string): Element | null {
+      const row = screen.getByText(name).closest(".tag-row") as HTMLElement;
+      return row.querySelector(".lr-actions .btn-secondary");
+    }
+
+    function mountTags(extra: Record<string, unknown> = {}) {
+      return render(TagManager, {
+        props: {
+          opened,
+          disabled: false,
+          onBusy: vi.fn(),
+          onSnapshot: vi.fn(),
+          onFailure: vi.fn(),
+          onNotice: vi.fn(),
+          onOpenHistory: vi.fn(),
+          nextId: () => 7,
+          ...extra,
+        },
+      });
+    }
+
+    it("区分已推送、未推送、远程不同，只有未推送的保留推送按钮", async () => {
+      tagState.mockResolvedValue({ generation: 3, tags: [annotated, moved, localOnly], snapshot: opened.snapshot });
+      tagRemoteState.mockResolvedValue([
+        { name: "v2.0.0", oid: "a".repeat(40) },
+        { name: "v3.0.0", oid: "c".repeat(40) },
+      ]);
+      mountTags();
+      await vi.waitFor(() => expect(statusOf("v2.0.0")).toBe("已推送"));
+      expect(tagRemoteState).toHaveBeenCalledWith("/repo", "origin");
+      expect(statusOf("v3.0.0")).toBe("远程不同");
+      expect(statusOf("v4.0.0")).toBe("未推送");
+      expect(pushButtonOf("v2.0.0")).toBeNull();
+      expect(pushButtonOf("v3.0.0")).toBeNull();
+      expect(pushButtonOf("v4.0.0")?.textContent).toContain("推送");
+      const conflict = screen.getByText("v3.0.0").closest(".tag-row")?.querySelector("[data-remote-status]");
+      expect(conflict?.getAttribute("title")).toContain("不提供覆盖");
+    });
+
+    it("推送成功后变为已推送并重新核对远程", async () => {
+      tagRemoteState.mockResolvedValueOnce([]).mockResolvedValue([{ name: "v1.0.0", oid: "a".repeat(40) }]);
+      pushTag.mockResolvedValue({ generation: 5, tags: [existing], snapshot: { ...opened.snapshot, generation: 5 } });
+      mountTags();
+      await vi.waitFor(() => expect(statusOf("v1.0.0")).toBe("未推送"));
+      await fireEvent.click(screen.getByRole("button", { name: "推送" }));
+      await vi.waitFor(() => expect(statusOf("v1.0.0")).toBe("已推送"));
+      await vi.waitFor(() => expect(tagRemoteState).toHaveBeenCalledTimes(2));
+      expect(screen.queryByRole("button", { name: "推送" })).toBeNull();
+    });
+
+    it("读不到远程时标签照常显示为未知，推送按钮保留，也不报错打断", async () => {
+      tagRemoteState.mockRejectedValue({ code: "tag_remote_failed", message: "无法读取远程标签。 fatal: no remote" });
+      const onFailure = vi.fn();
+      mountTags({ onFailure });
+      await vi.waitFor(() => expect(statusOf("v1.0.0")).toBe("远程状态未知"));
+      expect(screen.getByRole("button", { name: "推送" })).toBeTruthy();
+      expect(screen.getByText("远程状态未知").getAttribute("title")).toContain("无法读取远程标签");
+      expect(onFailure).not.toHaveBeenCalled();
+    });
+
+    it("远程迟迟不返回时列表先显示，不阻塞操作", async () => {
+      tagRemoteState.mockReturnValue(new Promise(() => {}));
+      mountTags();
+      await vi.waitFor(() => expect(statusOf("v1.0.0")).toBe("正在检查远程"));
+      expect(screen.getByRole("button", { name: "推送" }).hasAttribute("disabled")).toBe(false);
+      expect(screen.getByRole("button", { name: "新建标签" })).toBeTruthy();
+    });
+
+    it("generation 变化不重跑 ls-remote，手动刷新才重跑", async () => {
+      const view = mountTags();
+      await vi.waitFor(() => expect(statusOf("v1.0.0")).toBe("未推送"));
+      for (const generation of [4, 5, 6]) {
+        await view.rerender({ opened: { ...opened, generation } });
+        await vi.waitFor(() => expect(tagState.mock.lastCall?.[1]).toBe(generation));
+      }
+      expect(tagRemoteState).toHaveBeenCalledTimes(1);
+
+      tagRemoteState.mockResolvedValue([{ name: "v1.0.0", oid: "a".repeat(40) }]);
+      await fireEvent.click(screen.getByRole("button", { name: "刷新远程状态" }));
+      await vi.waitFor(() => expect(statusOf("v1.0.0")).toBe("已推送"));
+      expect(tagRemoteState).toHaveBeenCalledTimes(2);
+    });
+
+    it("切换仓库或远程时丢弃过期响应", async () => {
+      let late: (value: unknown) => void = () => {};
+      tagRemoteState.mockReturnValueOnce(new Promise((resolve) => (late = resolve)));
+      const view = mountTags();
+      await vi.waitFor(() => expect(tagRemoteState).toHaveBeenCalledTimes(1));
+
+      tagRemoteState.mockResolvedValueOnce([]);
+      const other = { ...opened, summary: { name: "other", path: "/other" } };
+      await view.rerender({ opened: other });
+      await vi.waitFor(() => expect(tagRemoteState).toHaveBeenCalledWith("/other", "origin"));
+      await vi.waitFor(() => expect(statusOf("v1.0.0")).toBe("未推送"));
+
+      late([{ name: "v1.0.0", oid: "a".repeat(40) }]);
+      await tick();
+      await tick();
+      expect(statusOf("v1.0.0")).toBe("未推送");
+
+      tagRemoteState.mockResolvedValueOnce([{ name: "v1.0.0", oid: "f".repeat(40) }]);
+      const upstream = { ...other.snapshot.branch, upstream: "fork/main" };
+      await view.rerender({ opened: { ...other, snapshot: { ...other.snapshot, branch: upstream } } });
+      await vi.waitFor(() => expect(tagRemoteState).toHaveBeenCalledWith("/other", "fork"));
+      await vi.waitFor(() => expect(statusOf("v1.0.0")).toBe("远程不同"));
+    });
   });
 
   it("创建标签、推送并跳转到完整目标 Hash", async () => {

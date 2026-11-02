@@ -106,6 +106,11 @@ describe("Tauri 命令参数", () => {
     expect(invoke).toHaveBeenNthCalledWith(6, "ignore_path", { path: "/repo", pattern: "*.log", generation: 8, requestId: 43 });
   });
 
+  it("远程标签查询不带 generation：它不受本地状态校验", async () => {
+    await api.tagRemoteState("/repo", "origin");
+    expect(invoke).toHaveBeenCalledWith("tag_remote_state", { path: "/repo", remote: "origin" });
+  });
+
   it("历史和临时保存使用 requestId", async () => {
     await api.historyPage("/repo", "needle", 100, 8, 20);
     await api.commitDetail("/repo", "abc123", null, 8, 21);

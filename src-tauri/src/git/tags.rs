@@ -1,18 +1,24 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::error::AppError;
 use crate::git::advice::{classify_problem, problem_error};
 use crate::git::command::{
-    check_tag_command, create_tag_command, delete_tag_command, push_tag_command, rev_parse_command,
-    status_command, tag_list_command,
+    check_tag_command, create_tag_command, delete_tag_command, ls_remote_tags_command,
+    push_tag_command, rev_parse_command, status_command, tag_list_command,
 };
 use crate::git::gate::action_key;
 use crate::git::ops::{
     canonical_existing, git_failure, repo_key, require_git, run_git, status_from_output,
     validate_input_path, Backend,
 };
+use crate::git::runner::{run_process, RunnerError};
 use crate::git::schedule::{internal_request_id, JobKind};
-use crate::model::{TagRecord, TagState};
+use crate::model::{RemoteTag, TagRecord, TagState};
+
+/// 网络不通时不等满通用的 Git 超时：列表早已显示，这里只决定状态多久变成“未知”。
+const REMOTE_TAG_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub async fn tag_state(
     backend: &Backend,
@@ -22,6 +28,33 @@ pub async fn tag_state(
 ) -> Result<TagState, AppError> {
     let root = repo_root(path)?;
     load_tags(backend, &root, generation, request_id).await
+}
+
+/// 只读查询远程标签。结果描述的是远程，与本地 generation 无关，所以绕开调度器：
+/// 不做 generation 校验，也不占读并发名额，慢网络不会拖住其他读取；过期响应由调用方丢弃。
+pub async fn tag_remote_state(
+    backend: &Backend,
+    path: &str,
+    remote: &str,
+) -> Result<Vec<RemoteTag>, AppError> {
+    let root = repo_root(path)?;
+    validate_remote(remote)
+        .map_err(|_| AppError::new("remote_invalid", "远程名称无效，未读取远程标签。"))?;
+    let git = require_git(backend).await?;
+    let (program, args) = ls_remote_tags_command(&git.path, &root, remote);
+    let mut request = backend
+        .runner
+        .base_request(program, args, backend.shutdown.clone());
+    request.timeout = request.timeout.min(REMOTE_TAG_TIMEOUT);
+    let output = run_process(request).await.map_err(remote_read_error)?;
+    if output.exit_code != 0 {
+        return Err(git_failure(
+            "tag_remote_failed",
+            &output,
+            "无法读取远程标签。",
+        ));
+    }
+    Ok(parse_remote_tags(&output.stdout))
 }
 
 pub async fn create_tag(
@@ -203,6 +236,47 @@ fn parse_tags(bytes: &[u8]) -> Result<Vec<TagRecord>, AppError> {
     Ok(tags)
 }
 
+/// `ls-remote --tags` 的输出：`<oid>\trefs/tags/<name>`，附注标签紧跟一行 `<name>^{}`
+/// 给出解引用后的提交。本地 `targetOid` 同样是解引用后的值，所以以 `^{}` 行为准。
+fn parse_remote_tags(bytes: &[u8]) -> Vec<RemoteTag> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut tags: BTreeMap<String, String> = BTreeMap::new();
+    for line in text.lines() {
+        let Some((oid, reference)) = line.split_once('\t') else {
+            continue;
+        };
+        let Some(name) = reference.trim().strip_prefix("refs/tags/") else {
+            continue;
+        };
+        let oid = oid.trim().to_ascii_lowercase();
+        if let Some(peeled) = name.strip_suffix("^{}") {
+            tags.insert(peeled.to_string(), oid);
+        } else {
+            tags.entry(name.to_string()).or_insert(oid);
+        }
+    }
+    tags.into_iter()
+        .map(|(name, oid)| RemoteTag { name, oid })
+        .collect()
+}
+
+fn remote_read_error(error: RunnerError) -> AppError {
+    match error {
+        RunnerError::Timeout => AppError::new("timeout", "读取远程标签超时，已停止。"),
+        RunnerError::Cancelled => AppError::new("cancelled", "操作已取消。"),
+        RunnerError::OutputLimit => {
+            AppError::new("output_limit", "远程标签列表超过上限，已停止读取。")
+        }
+        RunnerError::Spawn(message) | RunnerError::Io(message) => AppError::new(
+            "git_io",
+            format!(
+                "无法读取远程标签：{}",
+                crate::redact::redact_error_text(&message)
+            ),
+        ),
+    }
+}
+
 fn repo_root(path: &str) -> Result<PathBuf, AppError> {
     let root = canonical_existing(&validate_input_path(path)?)?;
     if !root.join(".git").exists() {
@@ -258,7 +332,7 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use super::{create_tag, delete_tag, push_tag, tag_state};
+    use super::{create_tag, delete_tag, parse_remote_tags, push_tag, tag_remote_state, tag_state};
     use crate::git::ops::open_repository;
 
     fn git(dir: &Path, args: &[&str]) {
@@ -274,6 +348,57 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "{args:?}");
+    }
+
+    #[test]
+    fn remote_tags_use_the_peeled_commit_of_annotated_tags() {
+        let raw = b"1111\trefs/tags/v1.0.0\n2222\trefs/tags/v2.0.0\nAAAA\trefs/tags/v2.0.0^{}\n3333\trefs/heads/main\nnot a record\n";
+        let tags = parse_remote_tags(raw);
+        let pairs: Vec<(&str, &str)> = tags
+            .iter()
+            .map(|tag| (tag.name.as_str(), tag.oid.as_str()))
+            .collect();
+        assert_eq!(pairs, vec![("v1.0.0", "1111"), ("v2.0.0", "aaaa")]);
+        assert!(parse_remote_tags(b"").is_empty());
+    }
+
+    #[tokio::test]
+    async fn remote_tag_state_reads_without_touching_generation() {
+        let fixture = crate::test_support::git_fixture("tag-remote");
+        let repo = fixture.repo("demo");
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "content\n").unwrap();
+        git(&repo, &["add", "--", "file.txt"]);
+        git(&repo, &["commit", "-m", "initial"]);
+        git(&repo, &["tag", "light"]);
+        git(&repo, &["tag", "-a", "annotated", "-m", "release"]);
+        let path = repo.to_string_lossy().to_string();
+        let backend = std::sync::Arc::new(fixture.backend());
+        let opened = open_repository(&backend, &path, 1).await.unwrap();
+
+        let missing = tag_remote_state(&backend, &path, "origin").await.unwrap_err();
+        assert_eq!(missing.code, "tag_remote_failed");
+        let invalid = tag_remote_state(&backend, &path, "--upload-pack=x").await.unwrap_err();
+        assert_eq!(invalid.code, "remote_invalid");
+
+        let bare = fixture.path().join("remote.git");
+        git(fixture.path(), &["init", "--bare", bare.to_string_lossy().as_ref()]);
+        git(&repo, &["remote", "add", "origin", bare.to_string_lossy().as_ref()]);
+        assert!(tag_remote_state(&backend, &path, "origin").await.unwrap().is_empty());
+        git(&repo, &["push", "origin", "--tags"]);
+
+        let local = tag_state(&backend, &path, opened.generation, 2).await.unwrap();
+        let remote = tag_remote_state(&backend, &path, "origin").await.unwrap();
+        assert_eq!(remote.len(), 2);
+        for tag in &local.tags {
+            let found = remote.iter().find(|item| item.name == tag.name).unwrap();
+            assert_eq!(found.oid, tag.target_oid, "{}", tag.name);
+        }
+        // generation 不变：沿用旧值的读取不会被判为过期。
+        let after = tag_state(&backend, &path, local.generation, 3).await.unwrap();
+        assert_eq!(after.generation, opened.generation);
+        backend.watches.stop();
     }
 
     #[tokio::test]

@@ -722,10 +722,9 @@ describe("外壳样式契约", () => {
     const pane = ruleBody(layoutCss, ".pane");
     expect(pane).toMatch(/background:\s*var\(--surface-2\)/);
     expect(pane).not.toMatch(/border|box-shadow/);
-    const flat = ruleBody(componentsCss, ".changes .diff");
-    expect(flat).toMatch(/border:\s*0/);
-    expect(flat).toMatch(/border-radius:\s*0/);
-    expect(flat).toMatch(/box-shadow:\s*none/);
+    const flat = ruleBody(componentsCss, ".diff");
+    expect(flat).not.toMatch(/(?:^|;)\s*border(?:-radius)?\s*:/);
+    expect(flat).not.toMatch(/box-shadow/);
   });
 
   it("窄左栏里分组动作收成图标，把宽度留给分组标题", () => {

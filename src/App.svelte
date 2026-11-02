@@ -1820,8 +1820,9 @@
       <button type="button" class="btn btn-secondary btn-sm" onclick={cancelReading}>取消读取</button>
     </div>
   {/if}
-  {#if gitDiagnostic && !gitDismissed}
-    <!-- R10：一句结论 + 一个可关闭入口；安装说明留在设置/运行依赖里，不堆在首屏（R12）。 -->
+  {#if gitDiagnostic && !gitDismissed && opened}
+    <!-- R10：一句结论 + 一个可关闭入口；安装说明留在设置/运行依赖里，不堆在首屏（R12）。
+         起始页有自己的诊断入口，这里不再重复同一句话。 -->
     <div class="infobar error" role="status">
       <Icon name="alert-circle" size={16} />
       <span class="infobar-text">{gitDiagnostic}</span>
@@ -1836,7 +1837,7 @@
         <Icon name="x" size={14} />
       </button>
     </div>
-  {:else if git?.belowBaseline}
+  {:else if git?.available && git.belowBaseline}
     <div class="infobar warn" role="status">
       <Icon name="alert" size={15} />
       <span class="infobar-text">{git.message}</span>
@@ -1996,6 +1997,7 @@
         <Welcome
           {recent}
           disabled={writeLocked}
+          disabledReason={writeLocked ? switchBlockedReason(commandState) : ""}
           diagnostic={gitDiagnostic}
           onDiagnose={gitDiagnostic ? openGitDiagnostics : undefined}
           onAdd={() => runCommand("repo.add")}

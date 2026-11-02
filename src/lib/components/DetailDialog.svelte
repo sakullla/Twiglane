@@ -53,7 +53,7 @@
     <span class="spacer"></span>
     <button type="button" class="btn btn-secondary" onclick={onClose}>{onConfirm ? "取消" : "关闭"}</button>
     {#if onConfirm}
-      <button type="button" class="btn btn-primary" disabled={confirmDisabled} onclick={onConfirm}>{confirmLabel}</button>
+      <button type="button" class="btn btn-primary" title={confirmDisabled ? "先填写内容" : undefined} disabled={confirmDisabled} onclick={onConfirm}>{confirmLabel}</button>
     {/if}
   {/snippet}
 </Modal>

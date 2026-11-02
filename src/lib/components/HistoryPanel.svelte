@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { BUSY_REASON } from "../ui";
   import type { Snippet } from "svelte";
   import { api } from "../api";
   import { normalizeError } from "../errors";
@@ -502,14 +503,14 @@
         onkeydown={onListKey}
       >
         {#if loading && !page}
-          <div class="empty" role="status"><span class="spinner"></span><strong>正在读取历史</strong></div>
+          <div class="empty" role="status"><span class="empty-icon"><span class="spinner"></span></span><strong>正在读取历史</strong></div>
         {:else if statusText}
           <div class="empty" role="status">
-            <span class="empty-icon"><Icon name="history" size={22} /></span>
+            <span class="empty-icon"><Icon name={page?.state === "no_match" ? "search" : page?.state === "no_file_history" ? "file" : "commit"} size={22} /></span>
             <strong>{statusText}</strong>
           </div>
         {:else if commits.length === 0}
-          <div class="empty" role="status"><strong>这一页没有提交。</strong></div>
+          <div class="empty" role="status"><span class="empty-icon"><Icon name="history" size={22} /></span><strong>这一页没有提交。</strong></div>
         {:else}
           <div class="virtual-space" style={`height:${commits.length * ROW_HEIGHT}px`}>
             {#each visible as commit, index (commit.oid)}
@@ -756,6 +757,7 @@
       icon="branch"
       size="sm"
       description={`起点：${shortOid(branchFrom.oid)} ${branchFrom.summary}`}
+      locked={branchFrom.busy}
       onClose={() => (branchFrom = null)}
     >
       <label class="label" for="branch-from-name">分支名称</label>
@@ -786,11 +788,12 @@
       </p>
       {#if branchFrom.error}<div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{branchFrom.error}</span></div>{/if}
       {#snippet footer()}
-        <button type="button" class="btn btn-secondary" onclick={() => (branchFrom = null)}>取消</button>
+        <button type="button" class="btn btn-secondary" title={branchFrom?.busy ? "写入完成后才能取消" : undefined} disabled={branchFrom?.busy} onclick={() => (branchFrom = null)}>取消</button>
         <span class="spacer"></span>
         <button
           type="button"
           class="btn btn-primary"
+          title={branchFrom?.busy ? BUSY_REASON : !branchFrom?.name.trim() ? "先填写分支名称" : undefined}
           disabled={branchFrom?.busy || !branchFrom?.name.trim()}
           onclick={confirmBranchFrom}
         >

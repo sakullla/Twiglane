@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { BUSY_REASON } from "../ui";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
 
@@ -47,12 +48,12 @@
   {#snippet footer()}
     <button type="button" class="btn btn-secondary" onclick={onClose}>取消</button>
     {#if onAssociate}
-      <button type="button" class="btn btn-ghost" disabled={blocked} onclick={() => onAssociate?.()}>
+      <button type="button" class="btn btn-ghost" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={() => onAssociate?.()}>
         <Icon name="link" size={14} />只关联上游
       </button>
     {/if}
     <span class="spacer"></span>
-    <button type="button" class="btn btn-primary" disabled={blocked} onclick={() => onPublish()}>
+    <button type="button" class="btn btn-primary" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={() => onPublish()}>
       {#if busy === "publish"}<span class="spinner"></span>{:else}<Icon name="upload" size={14} />{/if}
       发布分支
     </button>

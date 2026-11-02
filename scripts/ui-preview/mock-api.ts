@@ -27,7 +27,7 @@ const previewGit = {
 }[previewParams.get("git") ?? ""] ?? healthyGit;
 
 let generation = 1;
-let theme: Theme = (localStorage.getItem("preview-theme") as Theme) || "light";
+let theme: Theme = (localStorage.getItem("preview-theme") as Theme) || "dark";
 let recent = [
   { name: "twiglane", path: "C:/Users/dev/project/twiglane", openedAtMs: Date.now() },
   { name: "design-system", path: "C:/Users/dev/work/design-system", openedAtMs: Date.now() - 1000 },

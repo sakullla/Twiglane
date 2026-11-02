@@ -9,6 +9,9 @@ const tagState = vi.hoisted(() => vi.fn());
 const remoteState = vi.hoisted(() => vi.fn());
 const addRemote = vi.hoisted(() => vi.fn());
 const createBranchFrom = vi.hoisted(() => vi.fn());
+const renameBranch = vi.hoisted(() => vi.fn());
+const cloneRepository = vi.hoisted(() => vi.fn());
+const deleteTag = vi.hoisted(() => vi.fn());
 
 vi.mock("../src/lib/api", () => ({
   api: {
@@ -16,20 +19,22 @@ vi.mock("../src/lib/api", () => ({
     switchBranch,
     createBranch: vi.fn(),
     createBranchFrom,
+    renameBranch,
     deleteBranch: vi.fn(),
     deleteRemoteBranch: vi.fn(),
     tagState,
     createTag: vi.fn(),
-    deleteTag: vi.fn(),
+    deleteTag,
     pushTag: vi.fn(),
     remoteState,
     addRemote,
     setRemoteUrl: vi.fn(),
-    cloneRepository: vi.fn(),
+    cloneRepository,
   },
   pickDirectory: vi.fn(),
 }));
 
+import { pickDirectory } from "../src/lib/api";
 import BranchDialog from "../src/lib/components/BranchDialog.svelte";
 import { openModalCount } from "../src/lib/components/Modal.svelte";
 import RepoDialogs from "../src/lib/components/RepoDialogs.svelte";
@@ -384,6 +389,123 @@ describe("分支管理", () => {
     expect(base.onClose).not.toHaveBeenCalled();
   });
 
+  it("行内垃圾桶：Esc 收起确认后再按 Esc 关闭 modal", async () => {
+    const base = props();
+    render(BranchDialog, { props: base });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    const trigger = screen.getByRole("button", { name: "删除 main" });
+    trigger.focus();
+    await fireEvent.click(trigger);
+    await waitFor(() => expect(document.querySelector("[data-modal-impact]")).toBeTruthy());
+    await fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(base.onClose).not.toHaveBeenCalled();
+    await fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(base.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("行内「更多操作」按钮上按 Esc 也能到 Modal", async () => {
+    const base = props();
+    render(BranchDialog, { props: base });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    const more = screen.getByRole("button", { name: "main 的更多操作" });
+    more.focus();
+    await fireEvent.keyDown(more, { key: "Escape" });
+    expect(base.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("行内按钮的 Enter 和空格不冒泡成切换分支", async () => {
+    render(BranchDialog, { props: props() });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    switchBranch.mockClear();
+    for (const name of ["main 的更多操作", "删除 main"]) {
+      const button = screen.getByRole("button", { name });
+      await fireEvent.keyDown(button, { key: "Enter" });
+      await fireEvent.keyDown(button, { key: " " });
+    }
+    expect(switchBranch).not.toHaveBeenCalled();
+  });
+
+  it("重命名在途再按回车：不重复写入，取消仍禁用、Esc 不收起", async () => {
+    let finish: (value: unknown) => void = () => {};
+    renameBranch.mockReset();
+    renameBranch.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    const base = props();
+    render(BranchDialog, { props: base });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    await fireEvent.contextMenu(document.querySelector<HTMLElement>('[aria-label="切换到 main"]')!);
+    await fireEvent.click(await screen.findByRole("menuitem", { name: /重命名/ }));
+    const input = await screen.findByLabelText(/重命名本地分支 main/);
+    await fireEvent.input(input, { target: { value: "trunk" } });
+    await fireEvent.keyDown(input, { key: "Enter" });
+    await tick();
+    const cancel = screen.getByRole("button", { name: "取消" });
+    expect(cancel.hasAttribute("disabled")).toBe(true);
+
+    await fireEvent.keyDown(input, { key: "Enter" });
+    await tick();
+    expect(renameBranch).toHaveBeenCalledTimes(1);
+    expect(cancel.hasAttribute("disabled"), "第二次回车不能把写入状态复位").toBe(true);
+    await fireEvent.keyDown(input, { key: "Escape" });
+    expect(document.querySelector("[data-branch-rename]"), "在途不收起").toBeTruthy();
+
+    finish({ generation: 5, branches: [], snapshot: opened.snapshot });
+    await waitFor(() => expect(document.querySelector("[data-branch-rename]")).toBeNull());
+  });
+
+  it("新建在途再次提交不会复位写入状态", async () => {
+    let finish: (value: unknown) => void = () => {};
+    createBranchFrom.mockReset();
+    createBranchFrom.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    render(BranchDialog, { props: props() });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
+    const input = await screen.findByLabelText("新建分支");
+    await fireEvent.input(input, { target: { value: "next" } });
+    const form = document.querySelector<HTMLFormElement>("[data-branch-create]")!;
+    await fireEvent.submit(form);
+    await tick();
+    await fireEvent.submit(form);
+    await tick();
+    expect(createBranchFrom).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "取消" }).hasAttribute("disabled")).toBe(true);
+    finish({ generation: 5, branches: [], snapshot: opened.snapshot });
+    await waitFor(() => expect(document.querySelector("[data-branch-create]")).toBeNull());
+  });
+
+  it("标签写入在途：不能切分区，也不能关闭，完成后恢复", async () => {
+    let finish: (value: unknown) => void = () => {};
+    tagState.mockReset();
+    tagState.mockResolvedValue({
+      generation: 4,
+      tags: [{ name: "v1", targetOid: "a".repeat(40), message: "", createdAt: 1 }],
+      snapshot: opened.snapshot,
+    });
+    deleteTag.mockReset();
+    deleteTag.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    const base = props();
+    render(BranchDialog, { props: base });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    await fireEvent.click(screen.getByRole("tab", { name: /标签/ }));
+    await fireEvent.click(await screen.findByRole("button", { name: "删除标签 v1" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "确认删除标签" }));
+    await tick();
+
+    const local = screen.getByRole("tab", { name: /本地分支/ });
+    expect(local.getAttribute("aria-disabled")).toBe("true");
+    expect(local.getAttribute("title")).toContain("写入完成");
+    await fireEvent.click(local);
+    expect(document.querySelector('[data-branch-panel="tags"]'), "在途不切走").toBeTruthy();
+    await fireEvent.keyDown(document.body, { key: "Escape" });
+    await fireEvent.click(screen.getByRole("button", { name: "关闭对话框" }));
+    expect(base.onClose).not.toHaveBeenCalled();
+
+    finish({ generation: 5, tags: [], snapshot: opened.snapshot });
+    await waitFor(() => expect(local.getAttribute("aria-disabled")).toBeNull());
+    await fireEvent.click(local);
+    expect(document.querySelector('[data-branch-panel="local"]')).toBeTruthy();
+  });
+
   it("切分区时收起删除确认，切回时列表正常显示", async () => {
     render(BranchDialog, { props: props() });
     await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
@@ -525,5 +647,64 @@ describe("远程管理 modal", () => {
     expect(remoteState).toHaveBeenCalledWith("/repo", 4, 5);
     expect(dialog.querySelector(".modal-desc")?.textContent).toContain("凭据不会保存");
     expect(screen.getByRole("button", { name: /保存远程/ })).toBeTruthy();
+  });
+
+  function repoProps(mode: "clone" | "remote") {
+    return {
+      mode,
+      opened,
+      disabled: false,
+      onClose: vi.fn(),
+      onBusy: vi.fn(),
+      onSnapshot: vi.fn(),
+      onOpened: vi.fn(),
+      onFailure: vi.fn(),
+      onNotice: vi.fn(),
+      onOpenHistory: vi.fn(),
+      nextId: () => 5,
+    };
+  }
+
+  it("保存远程在途时不能关闭，读取时仍可关闭", async () => {
+    remoteState.mockReset();
+    addRemote.mockReset();
+    remoteState.mockResolvedValue({ generation: 4, remotes: [], snapshot: opened.snapshot });
+    let finish: (value: unknown) => void = () => {};
+    addRemote.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    const base = repoProps("remote");
+    render(RepoDialogs, { props: base });
+    await screen.findByText("还没有远程。在下面添加一个。");
+    await fireEvent.input(screen.getByLabelText("地址"), { target: { value: "https://e.com/r.git" } });
+    await fireEvent.click(screen.getByRole("button", { name: /保存远程/ }));
+    await tick();
+    await fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(base.onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "关闭" }).hasAttribute("disabled")).toBe(true);
+    finish({ generation: 5, remotes: [], snapshot: opened.snapshot });
+    await waitFor(() => expect(screen.getByRole("button", { name: "关闭" }).hasAttribute("disabled")).toBe(false));
+    await fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(base.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("克隆在途时取消禁用，Esc 不关闭", async () => {
+    vi.mocked(pickDirectory).mockResolvedValue("/parent");
+    let finish: (value: unknown) => void = () => {};
+    cloneRepository.mockReset();
+    cloneRepository.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    const base = repoProps("clone");
+    render(RepoDialogs, { props: { ...base, opened: null } });
+    const start = screen.getByRole("button", { name: /开始克隆/ });
+    expect(start.getAttribute("title"), "不可用时说明原因").toBe("先填写远程地址");
+    await fireEvent.input(screen.getByLabelText("远程地址"), { target: { value: "https://e.com/r.git" } });
+    await fireEvent.click(screen.getByRole("button", { name: /选择目录/ }));
+    await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+    await fireEvent.click(start);
+    await tick();
+    const cancel = screen.getByRole("button", { name: "取消" });
+    expect(cancel.hasAttribute("disabled")).toBe(true);
+    await fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(base.onClose).not.toHaveBeenCalled();
+    finish({ path: "/parent/r", opened: { ...opened, summary: { name: "r", path: "/parent/r" } } });
+    await waitFor(() => expect(base.onClose).toHaveBeenCalledTimes(1));
   });
 });

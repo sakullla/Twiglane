@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { BUSY_REASON } from "../ui";
   import { onMount, tick } from "svelte";
   import { BRAND } from "../brand";
   import type { RepoSummary, Theme } from "../types";
@@ -259,15 +260,15 @@
       </button>
       {#if syncMenu}
         <div class="menu" role="menu" aria-label="同步" tabindex="-1" onkeydown={(event) => onMenuKey(event, "sync")}>
-          <button type="button" class="menu-item" role="menuitem" disabled={disabled} onclick={() => runSync(onFetch)}>
+          <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => runSync(onFetch)}>
             <Icon name="download" />
             <span>获取更新<small>下载远程分支与提交信息，不修改本地文件</small></span>
           </button>
-          <button type="button" class="menu-item" role="menuitem" disabled={disabled} onclick={() => runSync(onPull)}>
+          <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => runSync(onPull)}>
             <Icon name="arrow-down" />
             <span>拉取{behind > 0 ? ` ${behind} 个提交` : ""}<small>快进拉取，不会自动合并分叉</small></span>
           </button>
-          <button type="button" class="menu-item" role="menuitem" disabled={disabled} onclick={() => runSync(onPush)}>
+          <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => runSync(onPush)}>
             <Icon name="arrow-up" />
             <span>推送{ahead > 0 ? ` ${ahead} 个提交` : ""}<small>不会强行推送</small></span>
           </button>

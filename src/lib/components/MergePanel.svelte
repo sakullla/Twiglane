@@ -25,9 +25,11 @@
 </script>
 
 <script lang="ts">
+  import { BUSY_REASON } from "../ui";
   import { untrack } from "svelte";
   import { api } from "../api";
   import { normalizeError } from "../errors";
+  import { portal } from "../portal";
   import { shortOid } from "../history";
   import { canCompleteMerge, conflictKindLabel, operationCaption, showMergeAbort } from "../resolve";
   import type {
@@ -63,6 +65,8 @@
     onOpenHistory?: () => void;
     /** 作为任务 modal 的内容时不再自带整页面板外框。 */
     embedded?: boolean;
+    /** 路由与中止的落点：任务 modal 把它们并入标题行，不再多占一条工具行。 */
+    headTarget?: HTMLElement | null;
     /** 提供时在底部操作条放一个「关闭」，与主操作同一行。 */
     onClose?: () => void;
   }
@@ -82,6 +86,7 @@
     onOpenChanges,
     onOpenHistory,
     embedded = false,
+    headTarget = null,
     onClose,
   }: Props = $props();
 
@@ -512,18 +517,18 @@
 
 <section class={`merge-panel ${embedded ? "embedded" : "span-main"}`} aria-label="分支合并" data-panel="merge">
   {#if session && active}
-    <div class="mp-head">
+    <div class="mp-head" use:portal={headTarget}>
       <span class="merge-route" title={`把 ${incomingLabel} 合并到 ${currentLabel}`}>
-        <span class="merge-route-branch source"><Icon name="branch" size={12} />{incomingLabel}</span>
+        <span class="merge-route-branch source"><Icon name="branch" size={12} /><span class="truncate">{incomingLabel}</span></span>
         <span class="merge-route-arrow"><Icon name="arrow-right" size={14} /></span>
-        <span class="merge-route-branch target"><Icon name="branch" size={12} />{currentLabel}</span>
+        <span class="merge-route-branch target"><Icon name="branch" size={12} /><span class="truncate">{currentLabel}</span></span>
       </span>
       {#if session.operation === "unmerged"}
         <span class="mp-note truncate" title={session.note}>{session.note}</span>
       {/if}
       <span class="spacer"></span>
       {#if showMergeAbort(session.operation, session.canAbort)}
-        <button type="button" class="btn btn-danger-soft btn-sm" disabled={blocked} onclick={askAbort}><Icon name="x" size={14} />中止合并</button>
+        <button type="button" class="btn btn-danger-soft btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={askAbort}><Icon name="x" size={14} />中止合并</button>
       {/if}
     </div>
     <div class="mp-body">
@@ -659,10 +664,10 @@
         </p>
         <div class="merge-done-actions">
           {#if finished.switchedFrom}
-            <button type="button" class="btn btn-secondary" disabled={blocked} onclick={switchBack}><Icon name="arrow-left" size={14} />切回 {finished.switchedFrom}</button>
+            <button type="button" class="btn btn-secondary" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={switchBack}><Icon name="arrow-left" size={14} />切回 {finished.switchedFrom}</button>
           {/if}
           {#if onOpenHistory}<button type="button" class="btn btn-secondary" onclick={onOpenHistory}><Icon name="history" size={14} />查看提交历史</button>{/if}
-          <button type="button" class="btn btn-ghost" disabled={blocked} onclick={startOver}><Icon name="merge" size={14} />再合并一次</button>
+          <button type="button" class="btn btn-ghost" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={startOver}><Icon name="merge" size={14} />再合并一次</button>
         </div>
       </div>
     </div>
@@ -679,7 +684,7 @@
           <div class="merge-back-hint">
             <Icon name="info" size={14} />
             <span>上次为了合并从 <strong>{switchedFrom}</strong> 切换到了 <strong>{current}</strong>。</span>
-            <button type="button" class="btn btn-ghost btn-sm" disabled={blocked} onclick={switchBack}>切回 {switchedFrom}</button>
+            <button type="button" class="btn btn-ghost btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={switchBack}>切回 {switchedFrom}</button>
           </div>
         {/if}
         <MergeSetup
@@ -707,7 +712,7 @@
           {onOpenChanges}
         />
       {:else}
-        <div class="empty" role="status"><span class="spinner"></span><strong>正在读取合并状态</strong></div>
+        <div class="empty" role="status"><span class="empty-icon"><span class="spinner"></span></span><strong>正在读取合并状态</strong></div>
       {/if}
     </div>
   {/if}
@@ -744,7 +749,7 @@
     {:else if session?.operation === "unmerged"}
       {@const reason = "标记后的文件可以在改动区提交，临时保存记录不会被删除。"}
       <span class="mp-status" title={reason}><Icon name="info" size={13} /><span class="truncate">{reason}</span></span>
-      <button type="button" class="btn btn-ghost btn-sm" disabled={blocked} onclick={onOpenStash}>查看临时保存</button>
+      <button type="button" class="btn btn-ghost btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={onOpenStash}>查看临时保存</button>
     {/if}
     <span class="spacer"></span>
     {#if onClose}<button type="button" class={`btn btn-secondary ${strip ? "btn-sm" : ""}`} onclick={onClose}>{finished ? "完成" : "关闭"}</button>{/if}
@@ -752,6 +757,13 @@
       <button
         type="button"
         class="btn btn-primary btn-sm"
+        title={blocked
+          ? BUSY_REASON
+          : !canCompleteMerge(session.operation, session.unresolved)
+            ? `还有 ${session.unresolved} 个未解决冲突，不能完成合并。`
+            : message.trim() === ""
+              ? "填写合并说明后才能完成"
+              : undefined}
         disabled={blocked || !canCompleteMerge(session.operation, session.unresolved) || message.trim() === ""}
         onclick={complete}
       >
@@ -761,6 +773,13 @@
       <button
         type="button"
         class="btn btn-primary"
+        title={blocked || previewing
+          ? BUSY_REASON
+          : !readyPreview?.canStart
+            ? "先完成上方的合并检查"
+            : mode === "merge" && setupMessage.trim() === ""
+              ? "填写合并说明后才能开始"
+              : undefined}
         disabled={blocked || !readyPreview?.canStart || previewing || (mode === "merge" && setupMessage.trim() === "")}
         onclick={confirmStart}
       >
@@ -776,6 +795,7 @@
       icon="alert"
       tone="danger"
       description={abortNote}
+      locked={busy}
       onClose={() => (aborting = false)}
     >
       <p class="hint">中止后这次合并的解决结果（包括这里尚未写入的逐处选择）会被撤销，不能由这里找回。取消则保持当前合并状态。</p>
@@ -787,9 +807,9 @@
         <p>没有需要撤销的合并编辑。</p>
       {/if}
       {#snippet footer()}
-        <button type="button" class="btn btn-secondary" onclick={() => (aborting = false)}>取消</button>
+        <button type="button" class="btn btn-secondary" title={busy ? BUSY_REASON : undefined} disabled={busy} onclick={() => (aborting = false)}>取消</button>
         <span class="spacer"></span>
-        <button type="button" class="btn btn-danger" disabled={blocked} onclick={confirmAbort}>确认中止</button>
+        <button type="button" class="btn btn-danger" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={confirmAbort}>确认中止</button>
       {/snippet}
     </Modal>
   {/if}

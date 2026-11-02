@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { BUSY_REASON } from "../ui";
   import { tick } from "svelte";
   import { api } from "../api";
   import { normalizeError } from "../errors";
@@ -15,9 +16,21 @@
     onNotice: (message: string) => void;
     onOpenHistory: (query: string) => void;
     nextId: () => number;
+    /** 写入在途：宿主据此不切分区、不关闭，结果未定时界面不能看起来已经放弃。 */
+    writing?: boolean;
   }
 
-  let { opened, disabled, onBusy, onSnapshot, onFailure, onNotice, onOpenHistory, nextId }: Props = $props();
+  let {
+    opened,
+    disabled,
+    onBusy,
+    onSnapshot,
+    onFailure,
+    onNotice,
+    onOpenHistory,
+    nextId,
+    writing = $bindable(false),
+  }: Props = $props();
 
   let tags = $state<TagRecord[]>([]);
   /** 新建表单按需展开，展开时替换搜索和列表。 */
@@ -28,8 +41,6 @@
   let listBox = $state<HTMLDivElement | null>(null);
   let confirmBox = $state<HTMLDivElement | null>(null);
   let confirmCancel = $state<HTMLButtonElement | null>(null);
-  /** 写入在途：取消按钮禁用、Esc 不收起，结果未定时不能让界面看起来已经放弃。 */
-  let writing = $state(false);
   /** 确认区打开前的焦点和列表滚动位置，收起时原样还回去。 */
   let promptOrigin: { focus: HTMLElement | null; scrollTop: number } | null = null;
   let query = $state("");
@@ -75,7 +86,9 @@
     }
   }
 
+  /** 被拦下的重复动作不能碰 writing：它属于正在途中的那次写入。 */
   async function write<T>(action: () => Promise<T>): Promise<T | undefined> {
+    if (blocked) return undefined;
     writing = true;
     try {
       return await run(action);
@@ -146,7 +159,7 @@
 
   async function push(tag: TagRecord) {
     const current = opened;
-    const result = await run(() => api.pushTag(current.summary.path, remote, tag.name, current.generation, nextId()));
+    const result = await write(() => api.pushTag(current.summary.path, remote, tag.name, current.generation, nextId()));
     if (!result || opened.summary.path !== current.summary.path) return;
     apply(result);
     onNotice(`标签 ${tag.name} 已推送到 ${remote}，没有强制覆盖。`);
@@ -234,8 +247,8 @@
       <input class="input" aria-label="标签附注" bind:value={message} placeholder="可选附注；填写后创建附注标签" disabled={blocked} />
       <p class="hint">标记当前提交，或输入另一个提交 Hash。</p>
       <div class="create-form-actions">
-        <button type="button" class="btn btn-secondary" disabled={writing} onclick={closeCreate}>取消</button>
-        <button type="submit" class="btn btn-primary" disabled={blocked || !name.trim() || !target.trim()}><Icon name="plus" size={14} />创建标签</button>
+        <button type="button" class="btn btn-secondary" title={writing ? BUSY_REASON : undefined} disabled={writing} onclick={closeCreate}>取消</button>
+        <button type="submit" class="btn btn-primary" title={blocked ? BUSY_REASON : !name.trim() || !target.trim() ? "先填写标签名称和目标提交" : undefined} disabled={blocked || !name.trim() || !target.trim()}><Icon name="plus" size={14} />创建标签</button>
       </div>
     </form>
   {:else}
@@ -251,7 +264,7 @@
           {#if loaded}
             <span class="empty-icon"><Icon name="alert-circle" size={20} /></span>
             <strong>没有读到标签</strong>
-            <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={retryLoad}>重试</button>
+            <button type="button" class="btn btn-secondary btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={retryLoad}>重试</button>
           {:else}
             <span class="empty-icon"><span class="spinner"></span></span>
             <strong>正在读取标签</strong>
@@ -273,8 +286,8 @@
               {#if tag.message}<span class="lr-desc">{tag.message}</span>{/if}
             </div>
             <span class="lr-actions">
-              <button type="button" class="btn btn-ghost btn-sm" disabled={blocked} onclick={() => onOpenHistory(tag.targetOid)}><Icon name="history" size={12} />查看提交</button>
-              <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={() => push(tag)}><Icon name="arrow-up" size={12} />推送</button>
+              <button type="button" class="btn btn-ghost btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={() => onOpenHistory(tag.targetOid)}><Icon name="history" size={12} />查看提交</button>
+              <button type="button" class="btn btn-secondary btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={() => push(tag)}><Icon name="arrow-up" size={12} />推送</button>
               <button type="button" class="icon-btn sm danger" aria-label={`删除标签 ${tag.name}`} title="删除本地标签" disabled={blocked} onclick={() => askRemove(tag)}><Icon name="trash" size={13} /></button>
             </span>
           </div>
@@ -301,8 +314,8 @@
       <div class="callout-body">
         <p>删除本地标签 <strong>{confirmTag.name}</strong>？远程上的同名标签不会删除，目标提交也不会删除。</p>
         <div class="row">
-          <button type="button" class="btn btn-secondary btn-sm" disabled={writing} bind:this={confirmCancel} onclick={closeConfirm}>取消</button>
-          <button type="button" class="btn btn-danger btn-sm" disabled={blocked} onclick={remove}>确认删除标签</button>
+          <button type="button" class="btn btn-secondary btn-sm" title={writing ? BUSY_REASON : undefined} disabled={writing} bind:this={confirmCancel} onclick={closeConfirm}>取消</button>
+          <button type="button" class="btn btn-danger btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={remove}>确认删除标签</button>
         </div>
       </div>
     </div>

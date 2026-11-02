@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { BUSY_REASON } from "../ui";
   import { dependencyNote } from "../labels";
   import type { GitInfo, Theme } from "../types";
   import { LANGUAGE_OPTIONS } from "../syntax/languages";
@@ -83,7 +84,7 @@
         <span class="settings-label">主题<small>重启后保持</small></span>
         <div class="segmented" role="group" aria-label="外观">
           {#each THEMES as option (option.id)}
-            <button type="button" aria-pressed={theme === option.id} disabled={disabled} onclick={() => onTheme(option.id)}>
+            <button type="button" aria-pressed={theme === option.id} title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => onTheme(option.id)}>
               {option.label}
             </button>
           {/each}
@@ -119,10 +120,10 @@
         {/if}
       </ul>
       <div class="settings-actions">
-        <button type="button" class="btn btn-secondary btn-sm" disabled={disabled} onclick={onRedetect}>重新检测</button>
-        <button type="button" class="btn btn-secondary btn-sm" disabled={disabled} onclick={onChooseGit}>选择 Git</button>
+        <button type="button" class="btn btn-secondary btn-sm" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={onRedetect}>重新检测</button>
+        <button type="button" class="btn btn-secondary btn-sm" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={onChooseGit}>选择 Git</button>
         {#if git?.overridden}
-          <button type="button" class="btn btn-ghost btn-sm" disabled={disabled} onclick={onClearGit}>恢复自动检测</button>
+          <button type="button" class="btn btn-ghost btn-sm" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={onClearGit}>恢复自动检测</button>
         {/if}
       </div>
       <details class="scope-details settings-details" open={needsHelp}>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { BUSY_REASON } from "../ui";
   import { hunkCaption, toSideRows, visibleDiffLines, type ViewLine } from "../diff";
   import { scrollByRows, visibleRange } from "../layout";
   import type { DiffHunk, DiffResponse, FileSelection } from "../types";
@@ -287,7 +288,7 @@
     </div>
   {:else if loading && !currentDiff}
     <div class="empty" role="status" aria-busy="true">
-      <span class="spinner"></span>
+      <span class="empty-icon"><span class="spinner"></span></span>
       <strong>正在读取差异</strong>
       <p>{selection.path}</p>
     </div>
@@ -406,7 +407,7 @@
     {#if currentDiff.offset + currentDiff.lines.length < currentDiff.totalLines}
       <div class="diff-more">
         <p class="hint">已显示 {currentDiff.lines.length} / {currentDiff.totalLines} 行。</p>
-        <button type="button" class="btn btn-secondary btn-sm" disabled={disabled || loading} onclick={onLoadMore}>继续加载</button>
+        <button type="button" class="btn btn-secondary btn-sm" title={disabled || loading ? BUSY_REASON : undefined} disabled={disabled || loading} onclick={onLoadMore}>继续加载</button>
       </div>
     {/if}
   {/if}

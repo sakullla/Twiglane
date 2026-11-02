@@ -36,6 +36,9 @@
     onOpenChanges,
     onOpenHistory,
   }: Props = $props();
+
+  /** 路由与中止的落点：在标题行里排在标题之后，宽度不依赖标题长度。 */
+  let headTarget = $state<HTMLElement | null>(null);
 </script>
 
 <!-- 合并内容接近全屏，但仍是 modal 语义：标题、关闭入口与 Esc 都在。
@@ -49,6 +52,9 @@
   task="merge"
   onClose={onClose}
 >
+  {#snippet headExtra()}
+    <div class="mp-head-slot" bind:this={headTarget}></div>
+  {/snippet}
   <MergePanel
     {opened}
     {focusPath}
@@ -65,5 +71,6 @@
     {onOpenHistory}
     {onClose}
     embedded
+    {headTarget}
   />
 </Modal>

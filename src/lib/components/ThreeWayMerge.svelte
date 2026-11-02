@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { BUSY_REASON } from "../ui";
   import type { ConflictSide, ConflictView } from "../types";
   import Icon from "./Icon.svelte";
 
@@ -88,9 +89,9 @@
       <span class="dot"></span>
       <div><strong>合并结果</strong><span>{view.editable ? "可编辑，标记时才写入" : "只读"}</span></div>
       {#if view.editable}
-        <button type="button" class="btn btn-ghost btn-sm" disabled={disabled} onclick={onReset}><Icon name="undo" size={12} />重置</button>
+        <button type="button" class="btn btn-ghost btn-sm" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={onReset}><Icon name="undo" size={12} />重置</button>
         {#if !hideResolve}
-          <button type="button" class="btn btn-primary btn-sm" aria-label="标记编辑结果" disabled={disabled} onclick={() => onResolve("text")}>
+          <button type="button" class="btn btn-primary btn-sm" aria-label="标记编辑结果" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => onResolve("text")}>
             <Icon name="check" size={12} />标记为已解决
           </button>
         {/if}
@@ -158,10 +159,10 @@
   <div class="three-way-foot">
     <div class="row">
       {#if view.editable}
-        <button type="button" class="btn btn-secondary btn-sm" disabled={disabled} onclick={() => onChoice("both")}><Icon name="plus" size={12} />保留双方</button>
+        <button type="button" class="btn btn-secondary btn-sm" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => onChoice("both")}><Icon name="plus" size={12} />保留双方</button>
       {/if}
       {#if deletion}
-        <button type="button" class="btn btn-danger-soft btn-sm" disabled={disabled} onclick={() => onResolve("delete")}>接受删除</button>
+        <button type="button" class="btn btn-danger-soft btn-sm" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => onResolve("delete")}>接受删除</button>
       {/if}
     </div>
     <span>

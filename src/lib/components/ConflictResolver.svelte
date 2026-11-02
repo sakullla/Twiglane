@@ -3,6 +3,7 @@
 </script>
 
 <script lang="ts">
+  import { BUSY_REASON } from "../ui";
   import { onDestroy, onMount, tick, untrack, type Snippet } from "svelte";
   import {
     alignHunk,
@@ -24,6 +25,7 @@
     type ConflictResolutions,
   } from "../conflict";
   import { createTextDiff } from "../diff";
+  import { portal } from "../portal";
   import type { ConflictView } from "../types";
   import { highlightLines, type SyntaxLine } from "../syntax/client";
   import { effectiveLanguage } from "../syntax/prefs.svelte";
@@ -690,18 +692,6 @@
     });
   });
 
-  /** 把节点搬到宿主给的落点；落点要随组件销毁一起清掉，否则节点会留在宿主里。 */
-  function portal(node: HTMLElement, target: HTMLElement | null) {
-    const place = (to: HTMLElement | null) => {
-      if (to) to.append(node);
-    };
-    place(target);
-    return {
-      update: place,
-      destroy: () => node.remove(),
-    };
-  }
-
   /* ---------- 呈现辅助 ---------- */
 
   function pairSegments(row: Extract<Row, { kind: "pair" }>, side: "ours" | "theirs") {
@@ -856,24 +846,24 @@
       {#if moreOpen}
         <div class="menu cr-menu" role="menu" aria-label="更多冲突操作">
           {#if hunkMode && effectiveMode !== "whole"}
-            <button type="button" class="menu-item" role="menuitem" disabled={disabled || remaining === 0} onclick={() => applyRest("ours")}>
+            <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : remaining === 0 ? "所有冲突都已选择" : undefined} disabled={disabled || remaining === 0} onclick={() => applyRest("ours")}>
               <Icon name="arrow-left" />
               <span>其余 {remaining} 处都采用当前<small>只填入草稿，仍可逐处修改</small></span>
             </button>
-            <button type="button" class="menu-item" role="menuitem" disabled={disabled || remaining === 0} onclick={() => applyRest("theirs")}>
+            <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : remaining === 0 ? "所有冲突都已选择" : undefined} disabled={disabled || remaining === 0} onclick={() => applyRest("theirs")}>
               <Icon name="arrow-right" />
               <span>其余 {remaining} 处都采用来源<small>只填入草稿，仍可逐处修改</small></span>
             </button>
             <div class="menu-sep"></div>
           {/if}
           {#if view.ours.present}
-            <button type="button" class="menu-item" role="menuitem" disabled={disabled} onclick={() => { moreOpen = false; onResolve("ours"); }}>
+            <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => { moreOpen = false; onResolve("ours"); }}>
               <Icon name="file" />
               <span>整个文件使用当前版本<small>立即写入并标记；来源分支对此文件的改动全部不保留</small></span>
             </button>
           {/if}
           {#if view.theirs.present}
-            <button type="button" class="menu-item" role="menuitem" disabled={disabled} onclick={() => { moreOpen = false; onResolve("theirs"); }}>
+            <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => { moreOpen = false; onResolve("theirs"); }}>
               <Icon name="file" />
               <span>整个文件使用来源版本<small>立即写入并标记；当前分支对此文件的改动全部不保留</small></span>
             </button>
@@ -959,7 +949,7 @@
                 {#if editing === row.hunk}
                   <span class="hint">Ctrl+Enter 完成 · Esc 取消</span>
                 {:else if state}
-                  <button type="button" class="btn btn-ghost btn-sm" disabled={disabled} onclick={() => startEdit(row.hunk)}><Icon name="pencil" size={13} />编辑</button>
+                  <button type="button" class="btn btn-ghost btn-sm" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => startEdit(row.hunk)}><Icon name="pencil" size={13} />编辑</button>
                   <button type="button" class="btn btn-ghost btn-sm" disabled={disabled} title="撤销这一处的选择（U）" onclick={() => undo(row.hunk)}><Icon name="undo" size={13} />撤销</button>
                 {:else}
                   <div class="cr-actions" role="group" aria-label={`冲突 ${row.hunk + 1} 的处理方式`}>
@@ -1025,7 +1015,7 @@
                   <button type="button" class="btn btn-ghost btn-sm" onclick={() => (editText = [...(parsed.hunks[row.hunk]?.theirs ?? [])].map(stripEol).join("\n"))}>填入来源</button>
                   <span class="spacer"></span>
                   <button type="button" class="btn btn-secondary btn-sm" onclick={cancelEdit}>取消</button>
-                  <button type="button" class="btn btn-primary btn-sm" disabled={disabled} onclick={commitEdit}><Icon name="check" size={13} />完成编辑</button>
+                  <button type="button" class="btn btn-primary btn-sm" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={commitEdit}><Icon name="check" size={13} />完成编辑</button>
                 </div>
               </div>
             {/if}

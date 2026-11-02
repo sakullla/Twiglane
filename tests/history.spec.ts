@@ -233,6 +233,22 @@ describe("历史面板", () => {
     }
   });
 
+  it("空仓库、无搜索结果、文件无历史的空状态文案和图标都不同", async () => {
+    const seen = new Map<string, string>();
+    for (const [state, path] of [["empty_repository", null], ["no_match", null], ["no_file_history", "notes.txt"]] as const) {
+      const page = { generation: 3, query: "", path, offset: 0, pageSize: 100, hasMore: false, state, commits: [] };
+      historyPage.mockResolvedValue(page);
+      fileHistory.mockResolvedValue(page);
+      const view = render(HistoryPanel, { props: panelProps(path ?? undefined) });
+      const text = await screen.findByText(historyStatus(state)!);
+      const icon = text.closest(".empty")!.querySelector(".empty-icon svg")!.innerHTML;
+      seen.set(text.textContent!, icon);
+      view.unmount();
+    }
+    expect(seen.size).toBe(3);
+    expect(new Set(seen.values()).size).toBe(3);
+  });
+
   it("文件历史使用文件接口，并区分没有历史", async () => {
     fileHistory.mockResolvedValue({
       generation: 3,
@@ -245,6 +261,7 @@ describe("历史面板", () => {
     });
     render(HistoryPanel, { props: panelProps("notes.txt") });
     expect(await screen.findByText("这个文件没有可用历史。")).toBeTruthy();
+    expect(document.querySelector(".history-list .empty-icon"), "空状态图标与其它两种不同").toBeTruthy();
     expect(fileHistory).toHaveBeenCalledWith("/repo", "notes.txt", 0, 3, 1);
     expect(historyPage).not.toHaveBeenCalled();
   });

@@ -32,6 +32,15 @@ function mockLayout(panel = LAYOUT_PANEL) {
   vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
     return this.querySelector(":scope > .composer") ? panel : 0;
   });
+  vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) {
+    return this.querySelector(":scope > .composer") ? 340 : 0;
+  });
+}
+
+function mockPanelHeight(panel: number) {
+  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+    return this.querySelector(":scope > .composer") ? panel : 0;
+  });
 }
 
 function renderDraft(extra: Record<string, unknown> = {}) {
@@ -221,6 +230,78 @@ describe("提交区", () => {
     await fireEvent.pointerMove(handle(), { clientY: 500, pointerId: 1 });
     await fireEvent.pointerUp(handle(), { clientY: 500, pointerId: 1 });
     expect(localStorage.getItem("twiglane.commitMessageHeight")).toBe("500");
+  });
+
+  describe("可用空间变化时重算上限", () => {
+    type Callback = () => void;
+    let observers: { callback: Callback; targets: Element[] }[];
+
+    beforeEach(() => {
+      observers = [];
+      vi.stubGlobal(
+        "ResizeObserver",
+        class {
+          entry: { callback: Callback; targets: Element[] };
+          constructor(callback: Callback) {
+            this.entry = { callback, targets: [] };
+            observers.push(this.entry);
+          }
+          observe(target: Element) {
+            this.entry.targets.push(target);
+          }
+          disconnect() {
+            this.entry.targets = [];
+          }
+        },
+      );
+    });
+
+    afterEach(() => vi.unstubAllGlobals());
+
+    const fire = async () => {
+      for (const observer of observers) observer.callback();
+      await tick();
+    };
+
+    it("同时观察提交区和父面板", () => {
+      renderDraft({ value: "草稿" });
+      const section = document.querySelector(".composer")!;
+      expect(observers).toHaveLength(1);
+      expect(observers[0].targets).toEqual([section, section.parentElement]);
+    });
+
+    it("栏宽变窄、提交区变高时收紧说明框，不改写保存值", async () => {
+      mockLayout();
+      localStorage.setItem("twiglane.commitMessageHeight", "300");
+      renderDraft({ value: "草稿" });
+      expect(message().style.height).toBe("300px");
+      // 没有窗口 resize：按钮堆叠让提交区其余部分从 118 变成 200。
+      vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+        if (this instanceof HTMLTextAreaElement) return Number.parseFloat(this.style.height);
+        return this.matches(".composer") ? 200 + Number.parseFloat(this.querySelector("textarea")!.style.height) : 0;
+      });
+      await fire();
+      expect(message().style.height).toBe(`${LAYOUT_PANEL - 200 - 300}px`);
+      expect(localStorage.getItem("twiglane.commitMessageHeight")).toBe("300");
+    });
+
+    it("隐藏的左栏不参与计算，显示回来后按当前空间恢复", async () => {
+      mockLayout(420);
+      localStorage.setItem("twiglane.commitMessageHeight", "90");
+      renderDraft({ value: "草稿" });
+      expect(message().style.height).toBe(`${MESSAGE_HEIGHT_MIN}px`);
+      // 隐藏期间宽度为 0：量到的高度没有意义，不更新。
+      vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(0);
+      mockPanelHeight(LAYOUT_PANEL);
+      await fire();
+      expect(message().style.height).toBe(`${MESSAGE_HEIGHT_MIN}px`);
+      vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) {
+        return this.querySelector(":scope > .composer") ? 340 : 0;
+      });
+      await fire();
+      expect(message().style.height).toBe("90px");
+      expect(localStorage.getItem("twiglane.commitMessageHeight")).toBe("90");
+    });
   });
 
   describe("真实布局尺寸下的上限", () => {

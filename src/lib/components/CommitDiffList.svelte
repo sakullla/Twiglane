@@ -140,8 +140,8 @@
   <div class="history-multi-head">
     <div><strong>全部文件</strong><span>已展开 {expandedPaths.length} / {detail.files.length} 个，已加载 {loadedCount} 个</span></div>
     <div class="row">
-      <button type="button" class="btn btn-ghost btn-sm" disabled={expandedPaths.length === detail.files.length} onclick={() => (expandedPaths = detail.files.map((file) => file.path))}><Icon name="plus" size={12} />展开全部</button>
-      <button type="button" class="btn btn-ghost btn-sm" disabled={expandedPaths.length === 0} onclick={() => (expandedPaths = [])}><Icon name="minus" size={12} />全部收起</button>
+      <button type="button" class="btn btn-ghost btn-sm" title={expandedPaths.length === detail.files.length ? "已经全部展开" : undefined} disabled={expandedPaths.length === detail.files.length} onclick={() => (expandedPaths = detail.files.map((file) => file.path))}><Icon name="plus" size={12} />展开全部</button>
+      <button type="button" class="btn btn-ghost btn-sm" title={expandedPaths.length === 0 ? "已经全部收起" : undefined} disabled={expandedPaths.length === 0} onclick={() => (expandedPaths = [])}><Icon name="minus" size={12} />全部收起</button>
     </div>
   </div>
   <div class="history-multi-scroll" bind:this={scroller}>

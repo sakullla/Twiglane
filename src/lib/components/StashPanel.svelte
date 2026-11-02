@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { BUSY_REASON } from "../ui";
   import { api } from "../api";
   import { normalizeError } from "../errors";
   import { formatAuthoredAt, shortOid, stashPathBadge } from "../history";
@@ -235,7 +236,7 @@
               if (event.key === "Enter") save();
             }}
           />
-          <button type="button" class="btn btn-primary" disabled={disabled || busy || !preview?.canSave} onclick={save}>
+          <button type="button" class="btn btn-primary" title={disabled || busy ? BUSY_REASON : !preview?.canSave ? "没有可保存的改动" : undefined} disabled={disabled || busy || !preview?.canSave} onclick={save}>
             {#if busy}<span class="spinner"></span>{:else}<Icon name="archive" size={14} />{/if}
             临时保存
           </button>
@@ -286,8 +287,8 @@
                   <span class="mono">{shortOid(record.oid)}</span> · {relativeTime(record.committedAt)}
                 </span>
               </div>
-              <button type="button" class="btn btn-secondary btn-sm" disabled={disabled || busy} onclick={() => restore(record.oid)}>恢复</button>
-              <button type="button" class="btn btn-danger-soft btn-sm" disabled={disabled || busy} onclick={() => askDelete(record)}>删除</button>
+              <button type="button" class="btn btn-secondary btn-sm" title={disabled || busy ? BUSY_REASON : undefined} disabled={disabled || busy} onclick={() => restore(record.oid)}>恢复</button>
+              <button type="button" class="btn btn-danger-soft btn-sm" title={disabled || busy ? BUSY_REASON : undefined} disabled={disabled || busy} onclick={() => askDelete(record)}>删除</button>
             </div>
           {/each}
         </div>

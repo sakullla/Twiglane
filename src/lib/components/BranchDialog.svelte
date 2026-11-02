@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { BUSY_REASON } from "../ui";
   import { tick, untrack } from "svelte";
   import { api } from "../api";
   import { filterBranches } from "../branches";
@@ -63,6 +64,8 @@
   let renameInput = $state<HTMLInputElement | null>(null);
   /** 写入在途：取消按钮禁用、Esc 不收起，结果未定时不能让界面看起来已经放弃。 */
   let writing = $state(false);
+  /** 标签分区的写入在途：结果未定时同样不能切走或关闭。 */
+  let tagWriting = $state(false);
   /** 确认区打开前的焦点和列表滚动位置，收起时原样还回去。 */
   let promptOrigin: { focus: HTMLElement | null; scrollTop: number } | null = null;
   let tab = $state<BranchTab>("local");
@@ -93,6 +96,12 @@
   ];
 
   let blocked = $derived(disabled || localBusy);
+  let writeInFlight = $derived(writing || tagWriting);
+  let deleteLabel = $derived(
+    confirmDelete?.kind === "remote"
+      ? `远程分支 ${confirmDelete.remote}/${confirmDelete.name}`
+      : `本地分支 ${confirmDelete?.name ?? ""}`,
+  );
   /** 确认区和重命名区替换搜索与列表，不用算高度，也不必滚动就能看全说明和按钮。 */
   let prompting = $derived(confirmDelete !== null || renaming !== null);
   let localCount = $derived(branches.filter((branch) => !branch.remote).length);
@@ -134,7 +143,9 @@
     }
   }
 
+  /** 被拦下的重复动作不能碰 writing：它属于正在途中的那次写入，复位会让取消重新可用。 */
   async function write<T>(action: () => Promise<T>): Promise<T | undefined> {
+    if (blocked) return undefined;
     writing = true;
     try {
       return await run(action);
@@ -281,7 +292,7 @@
   async function confirmRename() {
     const target = renaming;
     const currentRepo = opened;
-    if (!target) return;
+    if (!target || blocked) return;
     const next = target.value.trim();
     if (!next || next === target.name) {
       cancelPrompt();
@@ -364,7 +375,7 @@
 
   async function switchTo(name: string) {
     const currentRepo = opened;
-    const result = await run(() => api.switchBranch(currentRepo.summary.path, name, currentRepo.generation, nextId()));
+    const result = await write(() => api.switchBranch(currentRepo.summary.path, name, currentRepo.generation, nextId()));
     if (!result || opened.summary.path !== currentRepo.summary.path) return;
     applyBranches(result);
     onNotice(`已切换到 ${result.snapshot.branch.name ?? name}`);
@@ -430,8 +441,7 @@
 
   /** 切分区统一放弃当前的表单和确认区，切回时不残留；写入在途时结果未定，先不让切。 */
   function selectTab(next: BranchTab) {
-    if (next === tab) return;
-    if (writing) return;
+    if (next === tab || writeInFlight) return;
     resetCreate();
     confirmDelete = null;
     renaming = null;
@@ -439,12 +449,17 @@
     tab = next;
   }
 
+  /** 行内按钮的 Enter/空格只属于按钮本身，不能冒泡成切换分支；Esc 等其它键照常上浮到 Modal。 */
+  function keepRowKeys(event: KeyboardEvent) {
+    if (event.key === "Enter" || event.key === " ") event.stopPropagation();
+  }
+
   function focusTab(key: string) {
     const order = TABS.map((entry) => entry.id);
     const index = order.indexOf(tab);
     const next = key === "ArrowRight" ? (index + 1) % order.length : (index - 1 + order.length) % order.length;
     selectTab(order[next]);
-    document.getElementById(`branch-tab-${order[next]}`)?.focus();
+    document.getElementById(`branch-tab-${tab}`)?.focus();
   }
 </script>
 
@@ -454,6 +469,7 @@
   icon="branch"
   size="xl"
   task="branch"
+  locked={writeInFlight}
   {onClose}
 >
   <div class="branch-status" data-branch-status>
@@ -474,6 +490,8 @@
         role="tab"
         id={`branch-tab-${entry.id}`}
         aria-selected={tab === entry.id}
+        aria-disabled={writeInFlight && tab !== entry.id ? "true" : undefined}
+        title={writeInFlight && tab !== entry.id ? "写入完成后才能切换分区" : undefined}
         aria-controls="branch-tab-panel"
         tabindex={tab === entry.id ? 0 : -1}
         onclick={() => selectTab(entry.id)}
@@ -493,6 +511,7 @@
   <div id="branch-tab-panel" class="branch-panel" role="tabpanel" aria-labelledby={`branch-tab-${tab}`} data-branch-panel={tab}>
     {#if tab === "tags"}
       <TagManager
+        bind:writing={tagWriting}
         {opened}
         disabled={blocked}
         {onBusy}
@@ -552,8 +571,8 @@
         </div>
         <p class="hint">{createCheckout ? "切换沿用分支切换的保护：会覆盖未提交修改时停下，工作区保持原样。" : "只创建分支，当前分支和工作区都不变。"}</p>
         <div class="create-form-actions">
-          <button type="button" class="btn btn-secondary" disabled={writing} onclick={closeCreate}>取消</button>
-          <button type="submit" class="btn btn-primary" disabled={blocked || branchName.trim().length === 0}>
+          <button type="button" class="btn btn-secondary" title={writing ? BUSY_REASON : undefined} disabled={writing} onclick={closeCreate}>取消</button>
+          <button type="submit" class="btn btn-primary" title={blocked ? BUSY_REASON : branchName.trim().length === 0 ? "先填写分支名称" : undefined} disabled={blocked || branchName.trim().length === 0}>
             <Icon name="plus" size={14} />{createCheckout ? "创建并切换" : "创建分支"}
           </button>
         </div>
@@ -598,7 +617,7 @@
           <div class="empty compact branch-empty">
             <span class="empty-icon"><Icon name="alert-circle" size={20} /></span>
             <strong>没有读到分支列表</strong>
-            <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={retryLoad}>重试</button>
+            <button type="button" class="btn btn-secondary btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={retryLoad}>重试</button>
           </div>
         {:else if !listReady}
           <div class="empty compact branch-empty" data-branch-loading>
@@ -663,7 +682,7 @@
                     const rect = event.currentTarget.getBoundingClientRect();
                     branchMenu(branch, { x: rect.right - 232, y: rect.bottom + 4 });
                   }}
-                  onkeydown={(event) => event.stopPropagation()}
+                  onkeydown={keepRowKeys}
                 >
                   <Icon name="more" size={14} />
                 </button>
@@ -678,7 +697,7 @@
                       event.stopPropagation();
                       void askDelete(branch);
                     }}
-                    onkeydown={(event) => event.stopPropagation()}
+                    onkeydown={keepRowKeys}
                   >
                     <Icon name="trash" size={13} />
                   </button>
@@ -711,10 +730,11 @@
                   }
                 }}
               />
-              <button type="button" class="btn btn-secondary btn-sm" disabled={writing} onclick={cancelPrompt}>取消</button>
+              <button type="button" class="btn btn-secondary btn-sm" title={writing ? BUSY_REASON : undefined} disabled={writing} onclick={cancelPrompt}>取消</button>
               <button
                 type="button"
                 class="btn btn-primary btn-sm"
+                title={blocked ? BUSY_REASON : renaming.value.trim().length === 0 || renaming.value.trim() === renaming.name ? "先填写新的分支名称" : undefined}
                 disabled={blocked || renaming.value.trim().length === 0 || renaming.value.trim() === renaming.name}
                 onclick={() => {
                   renameInput?.focus();
@@ -734,14 +754,14 @@
           <div class="callout-body">
             <p>{confirmDelete.body}</p>
             <ul class="scope-list">
-              <li>{confirmDelete.kind === "remote" ? `远程分支 ${confirmDelete.remote}/${confirmDelete.name}` : `本地分支 ${confirmDelete.name}`}</li>
+              <li title={deleteLabel}>{deleteLabel}</li>
             </ul>
             <div class="row">
-              <button type="button" class="btn btn-secondary btn-sm" disabled={writing} bind:this={confirmCancel} onclick={cancelPrompt}>取消</button>
+              <button type="button" class="btn btn-secondary btn-sm" title={writing ? BUSY_REASON : undefined} disabled={writing} bind:this={confirmCancel} onclick={cancelPrompt}>取消</button>
               {#if confirmDelete.kind === "local" && confirmDelete.force}
-                <button type="button" class="btn btn-danger btn-sm" disabled={blocked} onclick={confirmRemoval}>确认删除未合入分支</button>
+                <button type="button" class="btn btn-danger btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={confirmRemoval}>确认删除未合入分支</button>
               {:else}
-                <button type="button" class="btn btn-danger btn-sm" disabled={blocked} onclick={confirmRemoval}>确认删除</button>
+                <button type="button" class="btn btn-danger btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={confirmRemoval}>确认删除</button>
               {/if}
             </div>
           </div>
@@ -757,6 +777,6 @@
   {/if}
   {#snippet footer()}
     <span class="spacer"></span>
-    <button type="button" class="btn btn-secondary" onclick={onClose}>关闭</button>
+    <button type="button" class="btn btn-secondary" disabled={writeInFlight} title={writeInFlight ? "写入完成后才能关闭" : undefined} onclick={onClose}>关闭</button>
   {/snippet}
 </Modal>

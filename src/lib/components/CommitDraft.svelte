@@ -31,6 +31,7 @@
 </script>
 
 <script lang="ts">
+  import { BUSY_REASON } from "../ui";
   import type { Snippet } from "svelte";
   import { MODIFIER_LABEL } from "../brand";
   import { hasCommitSummary, summaryLength } from "../ui";
@@ -182,15 +183,27 @@
     if (persist) storeHeight(height);
   }
 
-  /** 窗口变矮时，记住的高度可能放不下：只在显示上收紧，不改写用户记住的偏好。 */
+  /**
+   * 放不下时只在显示上收紧，不改写用户记住的偏好。可用空间不只随窗口变：栏宽改变会让
+   * 按钮堆叠、提交区变高，隐藏后再显示左栏也不触发 resize，所以提交区和父面板都要观察。
+   */
   $effect(() => {
     if (!section || typeof window === "undefined") return;
+    const panel = section.parentElement;
     const fit = () => {
-      if (!dragging) height = clampMessageHeight(readStoredHeight(), maxHeight());
+      // 隐藏的左栏宽度为 0，此时量出来的高度没有意义，等它显示回来再算。
+      if (dragging || panel?.clientWidth === 0) return;
+      height = clampMessageHeight(readStoredHeight(), maxHeight());
     };
     fit();
     window.addEventListener("resize", fit);
-    return () => window.removeEventListener("resize", fit);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(fit);
+    observer?.observe(section);
+    if (panel) observer?.observe(panel);
+    return () => {
+      window.removeEventListener("resize", fit);
+      observer?.disconnect();
+    };
   });
 
   function startResize(event: PointerEvent) {
@@ -339,7 +352,7 @@
       <Icon name="info" size={12} />
       <span class="truncate" data-commit-blocker title={blocker}>{blocker}</span>
       {#if paths.length === 0 && stageableCount > 0 && onStageAll}
-        <button type="button" class="composer-inline-action" disabled={disabled} onclick={onStageAll}>
+        <button type="button" class="composer-inline-action" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={onStageAll}>
           全部暂存 {stageableCount}
         </button>
       {/if}

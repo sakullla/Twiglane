@@ -151,7 +151,7 @@ describe("设计令牌", () => {
       间距: ["--space-2", "--space-4", "--space-6", "--space-8", "--space-12", "--space-16", "--space-24", "--space-32"],
       字阶: ["--text-xs", "--text-sm", "--text-base", "--text-md", "--text-lg", "--weight-normal", "--weight-medium", "--weight-semibold", "--leading-tight", "--leading-normal", "--leading-relaxed"],
       动效: ["--duration-fast", "--duration-base", "--duration-slow", "--ease", "--ease-out"],
-      层级: ["--z-sticky", "--z-resizer", "--z-rail", "--z-titlebar", "--z-progress", "--z-menu", "--z-palette", "--z-modal", "--z-toast"],
+      层级: ["--z-sticky", "--z-resizer", "--z-titlebar", "--z-progress", "--z-menu", "--z-palette", "--z-modal", "--z-toast"],
     };
     for (const [group, keys] of Object.entries(groups)) {
       const missing = keys.filter((key) => !shared.has(key));
@@ -159,12 +159,18 @@ describe("设计令牌", () => {
     }
   });
 
-  it("层级令牌按 resizer < rail < 标题栏 < 菜单 < 面板 < modal < toast 递增", () => {
-    const order = ["--z-resizer", "--z-rail", "--z-titlebar", "--z-menu", "--z-palette", "--z-modal", "--z-toast"];
+  it("层级令牌按 resizer < 标题栏 < 菜单 < 面板 < modal < toast 递增", () => {
+    const order = ["--z-resizer", "--z-titlebar", "--z-menu", "--z-palette", "--z-modal", "--z-toast"];
     const values = order.map((key) => Number.parseInt(shared.get(key) ?? "", 10));
     expect(values.every((value) => Number.isInteger(value))).toBe(true);
     for (let i = 1; i < values.length; i += 1) {
       expect(values[i], `${order[i]} 应大于 ${order[i - 1]}`).toBeGreaterThan(values[i - 1]);
+    }
+  });
+
+  it("已删除的令牌不再出现", () => {
+    for (const file of layerFiles) {
+      expect(read(path.join(stylesDir, file)), file).not.toMatch(/--z-rail|--repo-current-shadow|--panel-shadow/);
     }
   });
 
@@ -475,8 +481,85 @@ describe("冲突卡靠明度分层（R2、R9）", () => {
   });
 
   it("路由并入 modal 标题行，底部一条靠明度与正文分层", () => {
-    expect(ruleBody(components, ".merge-panel.embedded .mp-head")).toMatch(/position:\s*absolute/);
+    const slot = ruleBody(components, ".mp-head-slot");
+    expect(slot, "落点排在标题之后并占满余下宽度").toMatch(/flex:\s*1/);
+    expect(stripComments(components), "不靠绝对定位和写死的标题宽度").not.toMatch(/\.mp-head[^{]*\{[^}]*position:\s*absolute/);
+    expect(ruleBody(components, ".merge-route"), "路由不让位，只收缩 note").toMatch(/flex:\s*none/);
+    expect(ruleBody(components, ".mp-note")).toMatch(/flex:\s*0 1 auto/);
     expect(ruleBody(components, ".mp-foot")).not.toMatch(/border-top/);
+  });
+});
+
+describe("状态与动效统一（R2、R12）", () => {
+  const components = read(path.join(stylesDir, "components.css"));
+  const layout = read(path.join(stylesDir, "layout.css"));
+  const base = read(path.join(stylesDir, "base.css"));
+
+  it("弹窗、弹层和菜单使用同一组入场动画", () => {
+    for (const selector of [".modal-card", ".popover", ".branch-popover", ".menu"]) {
+      expect(ruleBody(components, selector), selector).toMatch(/animation:\s*pop\s/);
+    }
+    expect(stripComments(base), "没有第二套弹窗入场动画").not.toMatch(/@keyframes (modal-in|rise)\b/);
+  });
+
+  it("减少动效时取消全部动画和过渡，弹层弹窗没有位移", () => {
+    const reduced = base.match(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(reduced).toMatch(/animation:\s*none !important/);
+    expect(reduced).toMatch(/transition:\s*none !important/);
+  });
+
+  it("不可用控件的淡化比例只有一个来源", () => {
+    expect(shared.get("--opacity-disabled")).toBe("0.45");
+    for (const [file, css] of [["components.css", components], ["layout.css", layout]] as const) {
+      for (const rule of parseRules(css)) {
+        if (!/:disabled|aria-disabled/.test(rule.selector)) continue;
+        expect(rule.body, `${file} ${rule.selector}`).not.toMatch(/(?:^|;)\s*opacity\s*:\s*[\d.]/);
+      }
+    }
+  });
+
+  it("输入类控件聚焦时画和全局一样的 --focus 环", () => {
+    for (const selector of [
+      ".field:focus-within",
+      ".input:focus, .textarea:focus, .select:focus",
+      ".composer-box:focus-within",
+      "textarea.full-value.editable:focus",
+    ]) {
+      expect(ruleBody(components, selector), selector).toMatch(/outline:\s*2px solid var\(--focus\)/);
+    }
+  });
+
+  it("主工作区的面板不再是圆角描边卡片", () => {
+    for (const selector of [".span-main", ".diff", ".card"]) {
+      const body = ruleBody(components, selector);
+      expect(body, selector).not.toMatch(/(?:^|;)\s*border\s*:/);
+      expect(body, selector).not.toMatch(/box-shadow/);
+    }
+    expect(ruleBody(components, ".span-main"), ".span-main 不留外边距").not.toMatch(/margin/);
+    expect(stripComments(layout), "断点里也不再收 .span-main 的外边距").not.toMatch(/\.span-main/);
+  });
+
+  it("长分支名和标签名在确认区折行，不撑出横向滚动", () => {
+    expect(ruleBody(components, ".callout")).toMatch(/overflow-wrap:\s*anywhere/);
+  });
+
+  it("合并工具条只有文件名收缩，收文字断点在默认窗口之下", () => {
+    const toggle = ruleBody(components, ".cr-toggle");
+    expect(toggle).toMatch(/flex:\s*none/);
+    expect(toggle).toMatch(/white-space:\s*nowrap/);
+    const wide = components.match(/@media \(max-width: 1240px\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(wide).toMatch(/\.cr-toggle-wide/);
+    expect(wide).toMatch(/\.cr-seg-label/);
+  });
+
+  it("行内改动除了底色还有底线", () => {
+    expect(ruleBody(components, ".diff-line.add .wd, .side-cell.add .wd")).toMatch(/box-shadow:\s*inset 0 -1px 0 var\(--add-fg\)/);
+    expect(ruleBody(components, ".diff-line.del .wd, .side-cell.del .wd")).toMatch(/box-shadow:\s*inset 0 -1px 0 var\(--del-fg\)/);
+  });
+
+  it("起始页的 Git 诊断和通知条同一语义色", () => {
+    expect(ruleBody(layout, ".welcome-diagnostic")).toMatch(/var\(--danger-text\)/);
+    expect(ruleBody(layout, ".welcome-diagnostic")).not.toMatch(/--warning/);
   });
 });
 
@@ -576,7 +659,6 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".modal-card": "modal 卡片外框；层次由遮罩与阴影表达，卡内输入/按钮各自带边界",
   ".modal-foot": "modal 底部横向分隔线，分隔正文与操作区",
   ".callout": "提示框外框，静态说明块，无交互态",
-  ".card": "卡片骨架外框（任务面板容器），卡内控件各自带边界",
   ".card-head": "卡片头部横向分隔线",
   ".card-foot": "卡片底部横向分隔线",
   ".list-box": "列表容器外框，行结构由行分隔线与 hover 背景表达",
@@ -585,12 +667,10 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".list-empty": "空状态底部分隔线，纯分区",
   ".scope-list": "提交范围路径清单容器轮廓，清单项是只读文本",
   ".composer": "提交区与上方差异面板之间的顶部分区线",
-  ".diff": "差异面板容器外框；工具条控件各自带边界",
   ".diff-toolbar": "差异工具条底部分隔线",
   ".diff-more": "差异面板底部横向分隔线",
   ".full-value": "详情弹窗的只读展示框（readonly textarea），只区分文本块；可编辑态 textarea.full-value.editable 用控件边界",
   ".multi-file": "多文件卡外框，卡内文件行自带交互反馈",
-  ".span-main": "历史/合并面板容器外框",
   ".toolbar-group": "标题栏按钮组外框；组内 .tb-btn 自带 hover 背景",
   ".view-heading-status": "视图标题右侧状态胶囊，静态展示",
   ".chip.ignore": "忽略标记 chip 的虚线描边，是状态标记而非可点击控件",
@@ -671,7 +751,6 @@ describe("控件边界策略（默认拒绝）", () => {
       ".conflict-file",
       ".conflict-file:hover:not(:disabled)",
       '.conflict-sidebar .conflict-file[aria-pressed="true"]',
-      ".file-tools .field:focus-within",
       ".three-way-pane.result",
       ".three-way-pane.result:focus-within",
     ]) {

@@ -3,6 +3,7 @@
 </script>
 
 <script lang="ts">
+  import { BUSY_REASON } from "../ui";
   import { commitFileLabel, formatAuthoredAt, shortOid } from "../history";
   import type { BranchRecord, MergePreview } from "../types";
   import { hueOf, initialOf, relativeTime, splitPath, statusMark } from "../ui";
@@ -177,7 +178,7 @@
       <div class="merge-verdict blocked">
         <span class="merge-verdict-icon"><Icon name="alert-circle" size={18} /></span>
         <div><strong>没有完成检查</strong><p>{previewError}</p></div>
-        <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={onRecheck}><Icon name="refresh" size={13} />重试</button>
+        <button type="button" class="btn btn-secondary btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={onRecheck}><Icon name="refresh" size={13} />重试</button>
       </div>
     {:else if !source || !target}
       <div class="merge-verdict idle">
@@ -217,10 +218,10 @@
             {#each preview.localPaths as path (path)}<li title={path}><Icon name="file-diff" size={12} />{path}</li>{/each}
           </ul>
           <div class="merge-dirty-actions">
-            <button type="button" class="btn btn-primary btn-sm" disabled={blocked} onclick={onOpenChanges ?? onOpenStash}><Icon name="commit" size={13} />去提交改动</button>
-            <button type="button" class="btn btn-secondary btn-sm" disabled={blocked} onclick={onOpenStash}><Icon name="archive" size={13} />临时保存</button>
+            <button type="button" class="btn btn-primary btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={onOpenChanges ?? onOpenStash}><Icon name="commit" size={13} />去提交改动</button>
+            <button type="button" class="btn btn-secondary btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={onOpenStash}><Icon name="archive" size={13} />临时保存</button>
             <span class="spacer"></span>
-            <button type="button" class="btn btn-ghost btn-sm" disabled={blocked} onclick={onRecheck}><Icon name="refresh" size={13} />处理后重新检查</button>
+            <button type="button" class="btn btn-ghost btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={onRecheck}><Icon name="refresh" size={13} />处理后重新检查</button>
           </div>
           <p class="merge-dirty-note">未跟踪的新文件不会阻止合并；只有已跟踪文件的未提交改动需要先处理。</p>
         </div>
@@ -243,7 +244,7 @@
       {#if ready && preview?.canStart}
         <section class="merge-options" aria-label="合并方式">
           <div class="merge-mode" role="radiogroup" aria-label="合并方式">
-            <button type="button" role="radio" class="merge-mode-card" aria-checked={mode === "merge"} disabled={blocked} onclick={() => onMode("merge")}>
+            <button type="button" role="radio" class="merge-mode-card" aria-checked={mode === "merge"} title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={() => onMode("merge")}>
               <span class="merge-mode-radio"></span>
               <span><strong>创建合并提交</strong><small>保留分支历史，一眼看出这次合并，推荐</small></span>
             </button>

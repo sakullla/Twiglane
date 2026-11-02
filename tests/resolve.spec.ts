@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, within } from "@testing-library/svelte";
+import { tick } from "svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   canCompleteMerge,
@@ -510,6 +511,39 @@ describe("放弃与撤销", () => {
     expect(discardChanges).toHaveBeenLastCalledWith("/repo", ["keep.txt"], true, 4, 2);
   });
 
+  it("放弃写入在途时不能取消：Esc、关闭和取消都不生效，结果落地后才收起", async () => {
+    discardChanges.mockReset();
+    discardChanges.mockResolvedValueOnce({
+      generation: 4,
+      wrote: false,
+      boundary: "取消不写入。",
+      files: [{ path: "keep.txt", originalPath: null, staged: "none", unstaged: "modified", untracked: false, impact: "回到当前提交。", recovery: "不能找回。" }],
+      snapshot: opened.snapshot,
+    });
+    let finish: (value: unknown) => void = () => {};
+    discardChanges.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    render(RecoveryActions, {
+      opened,
+      disabled: false,
+      nextId: () => 2,
+      onSnapshot: () => {},
+      onFailure: () => {},
+      onNotice: () => {},
+      onMerge: () => {},
+    });
+    await fireEvent.click(screen.getByRole("button", { name: discardActionLabel() }));
+    await screen.findByText(/取消不写入/);
+    await fireEvent.click(screen.getByRole("button", { name: "确认放弃所选" }));
+    await tick();
+    expect(screen.getByRole("button", { name: "取消" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "关闭对话框" }).hasAttribute("disabled")).toBe(true);
+    await fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(screen.getByRole("dialog"), "结果未定时不收起").toBeTruthy();
+
+    finish({ generation: 5, wrote: true, boundary: "", files: [], snapshot: opened.snapshot });
+    await vi.waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
   it("不能撤销时说明原因且不写入", async () => {
     undoCommit.mockResolvedValue({
       generation: 4,
@@ -594,6 +628,19 @@ describe("合并任务 modal", () => {
     });
     return { onClose };
   }
+
+  it("路由和中止并入标题行，排在标题之后；note 收缩不影响路由", async () => {
+    mergeSession.mockResolvedValue(
+      session({ operation: "merge", canAbort: true, unresolved: 1, conflicts: [], note: "说明" }),
+    );
+    renderMergeModal();
+    const abort = await screen.findByRole("button", { name: "中止合并" });
+    const head = document.querySelector<HTMLElement>(".modal-head")!;
+    expect(head.contains(abort)).toBe(true);
+    expect(head.querySelector(".modal-titles + .mp-head-slot .mp-head .merge-route")).toBeTruthy();
+    expect(document.querySelector(".modal-body .mp-head"), "正文里不留第二条工具行").toBeNull();
+    expect(document.querySelector("[data-panel='merge']"), "面板仍在正文").toBeTruthy();
+  });
 
   it("以单一任务 modal 打开，未解决冲突时不能完成合并", async () => {
     mergeSession.mockResolvedValue(

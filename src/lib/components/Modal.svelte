@@ -54,9 +54,16 @@
     /** 任务 modal 标识（stash / merge / branch / remote / settings / scope / publish）。 */
     task?: string;
     description?: string;
+    /**
+     * 写入在途：此刻关闭会让界面看起来已经放弃，结果却还会落地。
+     * 为真时 Esc、点背板和右上角关闭都不生效，写入结束后恢复。
+     */
+    locked?: boolean;
     onClose: () => void;
     children: Snippet;
     footer?: Snippet;
+    /** 标题行里的扩展内容，排在标题之后，宽度不依赖标题长度。 */
+    headExtra?: Snippet;
   }
 
   let {
@@ -69,9 +76,11 @@
     fill = false,
     task,
     description = "",
+    locked = false,
     onClose,
     children,
     footer,
+    headExtra,
   }: Props = $props();
 
   let card = $state<HTMLDivElement | null>(null);
@@ -136,6 +145,7 @@
 
   /** 关闭 modal：先解除背景 inert，再交回触发元素的焦点，最后通知宿主收槽位。 */
   function close(): void {
+    if (locked) return;
     const target = previous;
     dropBackground();
     onClose();
@@ -150,7 +160,10 @@
       body?.querySelector<HTMLElement>("[data-autofocus]") ??
       body?.querySelector<HTMLElement>(FOCUSABLE);
     (first ?? card)?.focus();
+    // 监听挂在 document：按钮在途被禁用后焦点会落到 body，绑在背板上的键盘处理就收不到按键了。
+    document.addEventListener("keydown", onKey);
     return () => {
+      document.removeEventListener("keydown", onKey);
       dropBackground();
       releaseModalLayer(layer);
       if (previous?.isConnected) previous.focus();
@@ -158,7 +171,17 @@
     };
   });
 
+  function focusableItems(): HTMLElement[] {
+    if (!card) return [];
+    return [...card.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((item) => item.offsetParent !== null);
+  }
+
+  /**
+   * 只有最上层 modal 响应。内层处理过的按键（确认区、浮层、IME 组字）不再上浮到这里：
+   * 它们要么 stopPropagation，要么 preventDefault，所以这里先看 defaultPrevented。
+   */
   function onKey(event: KeyboardEvent) {
+    if (topModalLayer() !== layer || event.defaultPrevented || event.isComposing) return;
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
@@ -166,14 +189,21 @@
       return;
     }
     if (event.key !== "Tab" || !card) return;
-    const items = [...card.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((item) => item.offsetParent !== null);
+    const items = focusableItems();
+    const active = document.activeElement;
+    // 焦点不在卡片里（落到 body，或停在通知上）：Tab 先把它拉回来，不让它走到背景。
+    if (!(active instanceof Node) || !card.contains(active)) {
+      event.preventDefault();
+      ((event.shiftKey ? items[items.length - 1] : items[0]) ?? card).focus();
+      return;
+    }
     if (items.length === 0) return;
     const first = items[0];
     const last = items[items.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
+    if (event.shiftKey && active === first) {
       event.preventDefault();
       last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
+    } else if (!event.shiftKey && active === last) {
       event.preventDefault();
       first.focus();
     }
@@ -189,7 +219,6 @@
   role="presentation"
   data-modal-backdrop=""
   bind:this={backdrop}
-  onkeydown={onKey}
   onmousedown={onBackdrop}
 >
   <div
@@ -212,7 +241,15 @@
         <h2 id={titleId}>{title}</h2>
         {#if description}<p class="modal-desc">{description}</p>{/if}
       </div>
-      <button type="button" class="icon-btn" aria-label="关闭对话框" title="关闭（Esc）" onclick={close}>
+      {#if headExtra}{@render headExtra()}{/if}
+      <button
+        type="button"
+        class="icon-btn"
+        aria-label="关闭对话框"
+        title={locked ? "写入完成后才能关闭" : "关闭（Esc）"}
+        disabled={locked}
+        onclick={close}
+      >
         <Icon name="x" />
       </button>
     </header>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { BUSY_REASON } from "../ui";
   import { api } from "../api";
   import { normalizeError } from "../errors";
   import { changeLabel } from "../labels";
@@ -73,6 +74,7 @@
   }
 
   function cancelDiscard() {
+    if (busy) return;
     mode = null;
     errorText = null;
   }
@@ -132,6 +134,7 @@
   }
 
   function cancelUndo() {
+    if (busy) return;
     mode = null;
   }
 
@@ -176,13 +179,13 @@
   <!-- 只承载确认 modal：入口在别处（例如文件右键菜单）通过 discard(paths) 唤起。 -->
 {:else if variant === "menu"}
   {#if conflicts > 0}
-    <button type="button" class="menu-item warn" role="menuitem" disabled={blocked} onclick={onMerge}>
+    <button type="button" class="menu-item warn" role="menuitem" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={onMerge}>
       <Icon name="alert" />
       <span>处理冲突<small>{conflicts} 个文件有冲突，到分支合并里逐处处理</small></span>
       <span class="count warning">{conflicts}</span>
     </button>
   {/if}
-  <button type="button" class="menu-item" role="menuitem" aria-label={undoActionLabel()} disabled={blocked} onclick={openUndo}>
+  <button type="button" class="menu-item" role="menuitem" aria-label={undoActionLabel()} title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={openUndo}>
     <Icon name="undo" />
     <span>撤销最近提交<small>仅限未推送的普通提交，文件改动保留</small></span>
   </button>
@@ -191,6 +194,7 @@
     class="menu-item danger"
     role="menuitem"
     aria-label={discardActionLabel()}
+    title={blocked ? BUSY_REASON : changedPaths().length === 0 ? "没有可放弃的本地改动" : undefined}
     disabled={blocked || changedPaths().length === 0}
     onclick={() => openDiscard()}
   >
@@ -236,6 +240,7 @@
     tone="danger"
     size="lg"
     description={`这不是撤销提交。${boundary}`}
+    locked={busy}
     onClose={cancelDiscard}
   >
     <div class="list-box" style="max-height: 360px">
@@ -267,9 +272,9 @@
     </div>
     {#if errorText}<div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{errorText}</span></div>{/if}
     {#snippet footer()}
-      <button type="button" class="btn btn-secondary" onclick={cancelDiscard}>取消</button>
+      <button type="button" class="btn btn-secondary" title={busy ? BUSY_REASON : undefined} disabled={busy} onclick={cancelDiscard}>取消</button>
       <span class="spacer"></span>
-      <button type="button" class="btn btn-danger" disabled={blocked || checked.length === 0} onclick={confirmDiscard}>
+      <button type="button" class="btn btn-danger" title={blocked ? BUSY_REASON : checked.length === 0 ? "至少选择一个文件" : undefined} disabled={blocked || checked.length === 0} onclick={confirmDiscard}>
         <Icon name="trash" size={14} />确认放弃所选
       </button>
     {/snippet}
@@ -282,6 +287,7 @@
     icon="undo"
     tone={undo.eligible ? "danger" : "warning"}
     description="这不会放弃文件内容，改动会回到工作区。"
+    locked={busy}
     onClose={cancelUndo}
   >
     <div class="list-box">
@@ -300,9 +306,9 @@
     <p class="hint">已推送、合并提交、首个提交、脏暂存区、进行中的操作，或无法确认传播范围时都不会写入。</p>
     {#if errorText}<div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{errorText}</span></div>{/if}
     {#snippet footer()}
-      <button type="button" class="btn btn-secondary" onclick={cancelUndo}>取消</button>
+      <button type="button" class="btn btn-secondary" title={busy ? BUSY_REASON : undefined} disabled={busy} onclick={cancelUndo}>取消</button>
       <span class="spacer"></span>
-      <button type="button" class="btn btn-danger" disabled={blocked || !undo?.eligible} onclick={confirmUndo}>确认撤销提交</button>
+      <button type="button" class="btn btn-danger" title={blocked ? BUSY_REASON : !undo?.eligible ? undo?.reason : undefined} disabled={blocked || !undo?.eligible} onclick={confirmUndo}>确认撤销提交</button>
     {/snippet}
   </Modal>
 {/if}

@@ -2,6 +2,9 @@ import type { FileRow } from "./types";
 import { rowLabel } from "./labels";
 
 /** 由字符串得到稳定的色相，用于仓库徽标和作者头像。 */
+/** 控件因为读写在途而不可用时的统一原因，写进 title（R12）。 */
+export const BUSY_REASON = "正在读取或写入，稍后再试";
+
 export function hueOf(value: string): number {
   let hash = 0;
   for (let index = 0; index < value.length; index += 1) {

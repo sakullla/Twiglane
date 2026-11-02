@@ -1365,21 +1365,12 @@ describe("应用外壳", () => {
     });
     render(App);
 
-    // 首屏只有一句结论加一个入口：长安装说明不再作为段落堆在这里（R12、R13）。
-    const bar = await waitFor(() => {
-      const node = document.querySelector<HTMLElement>(".infobar.error");
-      expect(node, "Git 不可用要有常驻诊断入口").toBeTruthy();
-      return node!;
-    });
-    expect(bar.textContent).toContain("没有找到 Git");
-    expect(bar.querySelector("p"), "通知条里不再有说明段落").toBeNull();
-    expect(bar.textContent).not.toContain("git-scm.com");
-    expect(within(bar).getByRole("button", { name: "关闭 Git 诊断入口" }), "入口必须可关闭").toBeTruthy();
-
-    // 起始页自己也接了诊断入口：Welcome 的 diagnostic/onDiagnose 由外壳传入
-    const welcomeEntry = within(document.querySelector<HTMLElement>(".welcome")!).getByRole("button", {
-      name: /没有找到 Git/,
-    });
+    // 起始页只有一处提示：通知条在打开仓库后才出现，同一句话不重复（R8、R12）。
+    const welcomeEntry = await waitFor(() =>
+      within(document.querySelector<HTMLElement>(".welcome")!).getByRole("button", { name: /没有找到 Git/ }),
+    );
+    expect(document.querySelector(".infobar.error"), "起始页不再叠一条通知").toBeNull();
+    expect(document.querySelectorAll(".infobar, .welcome-diagnostic"), "同一句提示只有一处可见").toHaveLength(1);
 
     // 诊断动作打开设置 modal 的运行环境分区，并把焦点放进去
     welcomeEntry.focus();
@@ -1402,19 +1393,21 @@ describe("应用外壳", () => {
     await waitFor(() => expect(document.querySelector('[data-task-modal="settings"]')).toBeNull());
     expect(document.activeElement, "关闭后焦点回到起始页的诊断入口").toBe(welcomeEntry);
 
-    // 通知条上的诊断按钮走同一条动作；关掉通知条后起始页入口仍在（R13 不因关闭而消失）
-    await fireEvent.click(within(bar).getByRole("button", { name: "运行环境诊断" }));
+    // 打开仓库后起始页不在了，诊断由通知条承担：一句结论 + 一个可关闭入口，长说明不堆在这里（R12、R13）。
+    await openRepo();
+    const bar = document.querySelector<HTMLElement>(".infobar.error");
+    expect(bar, "打开仓库后要有诊断入口").toBeTruthy();
+    expect(bar!.textContent).toContain("没有找到 Git");
+    expect(bar!.querySelector("p"), "通知条里不再有说明段落").toBeNull();
+    expect(bar!.textContent).not.toContain("git-scm.com");
+    await fireEvent.click(within(bar!).getByRole("button", { name: "运行环境诊断" }));
     await waitFor(() => expect(document.querySelector('[data-settings-section="runtime"]')).toBeTruthy());
     await fireEvent.keyDown(document.querySelector('[data-task-modal="settings"]')!, { key: "Escape" });
     await waitFor(() => expect(document.querySelector('[data-task-modal="settings"]')).toBeNull());
 
-    await fireEvent.click(within(bar).getByRole("button", { name: "关闭 Git 诊断入口" }));
+    await fireEvent.click(within(bar!).getByRole("button", { name: "关闭 Git 诊断入口" }));
     await waitFor(() => expect(document.querySelector(".infobar.error")).toBeNull());
     expect(screen.queryByRole("button", { name: "关闭 Git 诊断入口" })).toBeNull();
-    expect(
-      within(document.querySelector<HTMLElement>(".welcome")!).getByRole("button", { name: /没有找到 Git/ }),
-      "关掉通知条不影响起始页自己的诊断入口",
-    ).toBeTruthy();
 
     // 关闭只在「这次缺失」内记住：Git 恢复可用后重新武装，再缺一次通知照样回来。
     mocks.detectGit
@@ -1449,5 +1442,44 @@ describe("应用外壳", () => {
     await waitFor(() =>
       expect(document.querySelector(".infobar.error"), "恢复可用后重新武装，再缺失时通知要回来").toBeTruthy(),
     );
+    await fireEvent.keyDown(document.querySelector('[data-task-modal="settings"]')!, { key: "Escape" });
+    await waitFor(() => expect(document.querySelector('[data-task-modal="settings"]')).toBeNull());
+
+    // 关掉通知条后回到起始页，入口仍在（R13 不因关闭而消失）。
+    await fireEvent.click(screen.getByRole("button", { name: "关闭 Git 诊断入口" }));
+    await waitFor(() => expect(document.querySelector(".infobar.error")).toBeNull());
+    mocks.forgetRecent.mockResolvedValue([]);
+    await fireEvent.click(screen.getByRole("button", { name: /^当前仓库/ }));
+    await fireEvent.click(await screen.findByRole("button", { name: /^从列表移除/ }));
+    await waitFor(() => expect(document.querySelector(".welcome")).toBeTruthy());
+    expect(
+      within(document.querySelector<HTMLElement>(".welcome")!).getByRole("button", { name: /没有找到 Git/ }),
+      "关掉通知条不影响起始页自己的诊断入口",
+    ).toBeTruthy();
+    expect(document.querySelector(".infobar.error"), "回到起始页也不重复通知条").toBeNull();
+  });
+
+  it("起始页三个入口不可用时就地说明原因", async () => {
+    let finish: (value: unknown) => void = () => {};
+    render(App);
+    await waitFor(() => expect(document.querySelector(".welcome")).toBeTruthy());
+    expect(document.querySelector("[data-welcome-reason]"), "可用时不占位").toBeNull();
+    for (const card of document.querySelectorAll<HTMLButtonElement>(".action-card")) expect(card.title).toBe("");
+
+    mocks.openRepository.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    await fireEvent.click(document.querySelector<HTMLButtonElement>(".welcome-recent button")!);
+    const reason = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>("[data-welcome-reason]");
+      expect(node, "禁用时要看得到原因").toBeTruthy();
+      return node!;
+    });
+    expect(reason.textContent).toBe("正在读取，稍后再试");
+    const cards = document.querySelectorAll<HTMLButtonElement>(".action-card");
+    expect(cards).toHaveLength(3);
+    for (const card of cards) {
+      expect(card.disabled).toBe(true);
+      expect(card.title).toBe("正在读取，稍后再试");
+    }
+    finish(undefined);
   });
 });

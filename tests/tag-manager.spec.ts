@@ -105,6 +105,24 @@ describe("标签管理", () => {
     expect(createTag).toHaveBeenCalledTimes(1);
   });
 
+  it("创建在途再次提交不会复位写入状态", async () => {
+    let finish: (value: unknown) => void = () => {};
+    createTag.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    renderTags();
+    await screen.findByText("v1.0.0");
+    await fireEvent.click(screen.getByRole("button", { name: "新建标签" }));
+    await fireEvent.input(await screen.findByLabelText("标签名称"), { target: { value: "v2" } });
+    const form = document.querySelector<HTMLFormElement>("[data-tag-create]")!;
+    await fireEvent.submit(form);
+    await tick();
+    await fireEvent.submit(form);
+    await tick();
+    expect(createTag).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "取消" }).hasAttribute("disabled")).toBe(true);
+    finish({ generation: 4, tags: [existing], snapshot: opened.snapshot });
+    await vi.waitFor(() => expect(document.querySelector("[data-tag-create]")).toBeNull());
+  });
+
   it("创建失败时表单留着，焦点回到名称", async () => {
     createTag.mockRejectedValue({ code: "unknown", message: "已存在" });
     const props = renderTags();

@@ -8,7 +8,19 @@ import { normalizeError } from "../src/lib/errors";
 import { toSideRows } from "../src/lib/diff";
 import { branchLabel, commitScope, dependencyNote, filterRows, gitInstallHint, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "../src/lib/labels";
 import { finishDiffAttempt } from "../src/lib/diff";
-import { clampWidth, nextIndex, scrollByRows, scrollIndexIntoView, shouldPoll, visibleRange } from "../src/lib/layout";
+import {
+  clampWidth,
+  codeRuler,
+  MAX_RULER_CELLS,
+  nextIndex,
+  RULER_LINES,
+  RULER_SAMPLE_CHARS,
+  scrollByRows,
+  scrollIndexIntoView,
+  shouldPoll,
+  textCells,
+  visibleRange,
+} from "../src/lib/layout";
 import { filterRecent } from "../src/lib/recent";
 import type { BranchInfo, FileChange, RecentRepo } from "../src/lib/types";
 
@@ -203,5 +215,47 @@ describe("品牌", () => {
     expect(readme).toContain(BRAND.tagline);
     expect(html).toContain("<title>Twiglane</title>");
     expect(html).toContain('lang="zh-CN"');
+  });
+});
+
+describe("代码窗口标尺", () => {
+  it("全角记两列，tab 走到下一制表位，组合符不占列，代理对只算一个字", () => {
+    expect(textCells("abc")).toBe(3);
+    expect(textCells("中文")).toBe(4);
+    expect(textCells("ａ，")).toBe(4);
+    expect(textCells("\tx")).toBe(5);
+    expect(textCells("ab\tx")).toBe(5);
+    expect(textCells("e\u0301")).toBe(1);
+    expect(textCells("😀a")).toBe(3);
+  });
+
+  it("按显示列数而不是字符数挑最长的行，从长到短", () => {
+    const lines = codeRuler(["a".repeat(10), "中".repeat(8), "b"], 2);
+    expect(lines.map((line) => line.text)).toEqual(["中".repeat(8), "a".repeat(10)]);
+  });
+
+  it("只保留固定行数，全量里靠后的最长行也不漏", () => {
+    const texts = Array.from({ length: 50_000 }, (_, index) => `line ${index}`);
+    texts.push("x".repeat(500));
+    const lines = codeRuler(texts);
+    expect(lines).toHaveLength(RULER_LINES);
+    expect(lines[0].text).toBe("x".repeat(500));
+  });
+
+  it("tab 很多的短行不会被长度上界跳过", () => {
+    const lines = codeRuler(["a".repeat(30), "b".repeat(29), "\t".repeat(10)], 2);
+    expect(lines[0].text).toBe("\t".repeat(10));
+  });
+
+  it("超长行只排版样本，其余按估算列数补宽，总宽不超上限", () => {
+    const [long] = codeRuler(["a".repeat(RULER_SAMPLE_CHARS + 500)]);
+    expect(long.text).toHaveLength(RULER_SAMPLE_CHARS);
+    expect(long.rest).toBe(500);
+    const [huge] = codeRuler(["a".repeat(MAX_RULER_CELLS + 500)]);
+    expect(textCells(huge.text) + huge.rest).toBe(MAX_RULER_CELLS);
+  });
+
+  it("空输入不产生标尺", () => {
+    expect(codeRuler([])).toEqual([]);
   });
 });

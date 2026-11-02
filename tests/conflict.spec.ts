@@ -365,4 +365,28 @@ describe("逐处处理冲突", () => {
     expect(rendered).toBeGreaterThan(30);
     expect(rendered).toBeLessThan(80);
   });
+
+  it("超过 600 列的长行也进标尺，行钉在舞台里、只有代码按 --code-x 平移", async () => {
+    const long = `${"中".repeat(900)}END`;
+    renderResolver(`<<<<<<< HEAD\nx\n=======\n${long}\n>>>>>>> m\n`);
+    expect(document.querySelector<HTMLElement>(".code-ruler.half span")?.dataset.text).toBe(long);
+    const scroller = document.querySelector(".cr-scroll") as HTMLElement;
+    scroller.scrollLeft = 120;
+    await fireEvent.scroll(scroller);
+    expect(scroller.style.getPropertyValue("--code-x")).toBe("120px");
+    const pair = document.querySelector(".code-stage .cr-pair") as HTMLElement;
+    expect(pair.style.left).toBe("");
+    expect(pair.querySelectorAll(".cr-half .code-in")).toHaveLength(2);
+    expect(pair.querySelector(".ln .code-in")).toBeNull();
+  });
+
+  it("结果预览按整行计算行程，长行不省略", async () => {
+    const long = `${"a".repeat(800)}END`;
+    renderResolver(`${long}\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> m\n`);
+    await fireEvent.click(screen.getByRole("button", { name: "结果预览" }));
+    const ruler = document.querySelector(".code-ruler") as HTMLElement;
+    expect(ruler.classList.contains("half")).toBe(false);
+    expect(ruler.querySelector<HTMLElement>("span")?.dataset.text).toBe(long);
+    expect(document.querySelector(".cr-line .code-in")?.textContent).toBe(long);
+  });
 });

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { hunkCaption, toSideRows, visibleDiffLines, type ViewLine } from "../diff";
-  import { scrollByRows, visibleRange } from "../layout";
+  import { codeRuler, scrollByRows, visibleRange } from "../layout";
   import type { DiffHunk, DiffResponse, FileSelection } from "../types";
   import { BUSY_REASON, splitPath } from "../ui";
   import { buildDiffDocuments, codeOf, signOf } from "../syntax/diffSyntax";
@@ -49,7 +49,10 @@
   let menu = $state<ContextMenuRequest | null>(null);
   let mode = $state<"unified" | "split">("unified");
   let scrollTop = $state(0);
+  /** 横向偏移：行钉在视口里（.code-stage），代码文字按它平移，两栏因此天然联动。 */
+  let scrollLeft = $state(0);
   let viewport = $state(0);
+  let viewWidth = $state(0);
   let scroller = $state<HTMLDivElement | null>(null);
   let selectionKey = $derived(selection ? `${selection.side}:${selection.path}` : "");
   let currentDiff = $derived(
@@ -63,6 +66,8 @@
   let metaOnly = $derived(shown.lines.length === 0 && shown.meta.length > 0);
   let sideRows = $derived(mode === "split" ? toSideRows(lines) : []);
   let total = $derived(mode === "split" ? sideRows.length : lines.length);
+  /* 宽度取全量差异的最长行，只随内容变化，不随虚拟窗口或布局切换跳动。 */
+  let ruler = $derived(codeRuler(lines.filter((line) => line.kind !== "hunk").map((line) => codeOf(line))));
   let range = $derived(
     visibleRange(total, scrollTop, viewport > 0 ? viewport : scrollTop > 0 ? ROW_HEIGHT : 0, ROW_HEIGHT),
   );
@@ -175,6 +180,13 @@
   $effect(() => {
     selectionKey;
     applyScroll(0);
+    scrollLeft = 0;
+    if (scroller) scroller.scrollLeft = 0;
+  });
+
+  // 滚动容器随空状态重建时横向位置归零，偏移要跟上，否则新容器里的代码是错位的。
+  $effect(() => {
+    scrollLeft = scroller?.scrollLeft ?? 0;
   });
 
   function applyScroll(next: number) {
@@ -331,10 +343,17 @@
         event.preventDefault();
         openMenu(event, { x: event.clientX, y: event.clientY });
       }}
-      onscroll={(event) => (scrollTop = event.currentTarget.scrollTop)}
+      onscroll={(event) => {
+        scrollTop = event.currentTarget.scrollTop;
+        scrollLeft = event.currentTarget.scrollLeft;
+      }}
       bind:clientHeight={viewport}
+      bind:clientWidth={viewWidth}
+      style={`--code-x:${scrollLeft}px;--code-view:${viewWidth}px`}
     >
       <div class="virtual-space" style={`height:${total * ROW_HEIGHT}px`}>
+        <div class="code-ruler" class:half={mode === "split"} aria-hidden="true">{#each ruler as line, i (i)}<span data-text={line.text} style={line.rest ? `padding-right:${line.rest}ch` : undefined}></span>{/each}</div>
+        <div class="code-stage">
         {#if mode === "unified"}
           {#each lines.slice(range.start, range.end) as line, index (`u-${range.start + index}`)}
             {@const absolute = range.start + index}
@@ -343,12 +362,12 @@
               <span class="ln">{line.newNo ?? ""}</span>
               {#if line.kind === "add" || line.kind === "del" || line.kind === "context"}
                 {@const segs = segmentsAt(absolute)}
-                <span class="code" data-sign={sign(line.text)}>{#if segs.length === 1 && !segs[0].k && !segs[0].m}{segs[0].t}{:else}{#each segs as seg, i (i)}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/each}{/if}</span>
+                <span class="code"><span class="code-in" data-sign={sign(line.text)}>{#if segs.length === 1 && !segs[0].k && !segs[0].m}{segs[0].t}{:else}{#each segs as seg, i (i)}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/each}{/if}</span></span>
               {:else if line.kind === "hunk"}
                 {@const caption = hunkCaption(line.text)}
-                <span class="code hunk-caption"><span class="hunk-at">{caption.at}</span>{#if caption.context}<span class="hunk-context">{caption.context}</span>{/if}</span>
+                <span class="code hunk-caption"><span class="hunk-at">{caption.at}</span>{#if caption.context}<span class="hunk-context" title={caption.context}>{caption.context}</span>{/if}</span>
               {:else}
-                <span class="code">{line.text.length === 0 ? " " : line.text}</span>
+                <span class="code"><span class="code-in">{line.text.length === 0 ? " " : line.text}</span></span>
               {/if}
               {#if !readOnly && !fullFile && hunkForLine(absolute)}
                 {@const hunk = hunkForLine(absolute)}
@@ -377,13 +396,13 @@
               <!-- 占位格用 blank 而不是 empty：.empty 是全局空状态（flex + 32px 内边距），会把单元格撑到 64px，相邻行文字叠在一起。 -->
               {#if row.span && row.left?.kind === "hunk"}
                 {@const caption = hunkCaption(row.left.text)}
-                <span class="side-cell hunk side-hunk"><span class="ln"></span><span class="code hunk-caption"><span class="hunk-at">{caption.at}</span>{#if caption.context}<span class="hunk-context">{caption.context}</span>{/if}</span></span>
+                <span class="side-cell hunk side-hunk"><span class="ln"></span><span class="code hunk-caption"><span class="hunk-at">{caption.at}</span>{#if caption.context}<span class="hunk-context" title={caption.context}>{caption.context}</span>{/if}</span></span>
               {:else}
               <span class={`side-cell ${row.left?.kind ?? "blank"}`}>
-                {#if row.left}<span class="ln">{row.left.no ?? ""}</span>{#if row.left.index !== undefined && !row.span}<span class="code" data-sign={sign(row.left.text)}>{#each segmentsAt(row.left.index) as seg, i (i)}{#if !seg.k && !seg.m}{seg.t}{:else}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/if}{/each}</span>{:else}<span class="code">{row.left.text}</span>{/if}{/if}
+                {#if row.left}<span class="ln">{row.left.no ?? ""}</span>{#if row.left.index !== undefined && !row.span}<span class="code"><span class="code-in" data-sign={sign(row.left.text)}>{#each segmentsAt(row.left.index) as seg, i (i)}{#if !seg.k && !seg.m}{seg.t}{:else}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/if}{/each}</span></span>{:else}<span class="code"><span class="code-in">{row.left.text}</span></span>{/if}{/if}
               </span>
               <span class={`side-cell ${row.right?.kind ?? "blank"}`}>
-                {#if row.right}<span class="ln">{row.right.no ?? ""}</span>{#if row.right.index !== undefined && !row.span}<span class="code" data-sign={sign(row.right.text)}>{#each segmentsAt(row.right.index) as seg, i (i)}{#if !seg.k && !seg.m}{seg.t}{:else}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/if}{/each}</span>{:else}<span class="code">{row.right.text}</span>{/if}{/if}
+                {#if row.right}<span class="ln">{row.right.no ?? ""}</span>{#if row.right.index !== undefined && !row.span}<span class="code"><span class="code-in" data-sign={sign(row.right.text)}>{#each segmentsAt(row.right.index) as seg, i (i)}{#if !seg.k && !seg.m}{seg.t}{:else}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/if}{/each}</span></span>{:else}<span class="code"><span class="code-in">{row.right.text}</span></span>{/if}{/if}
               </span>
               {/if}
               {#if !readOnly && !fullFile && row.showStage && row.hunkIndex !== null}
@@ -401,6 +420,7 @@
             </div>
           {/each}
         {/if}
+        </div>
       </div>
     </div>
     {#if currentDiff.offset + currentDiff.lines.length < currentDiff.totalLines}

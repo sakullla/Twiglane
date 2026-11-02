@@ -6,6 +6,12 @@ export interface Sample {
   after: string;
 }
 
+/** 超长行样本：中文全角、tab 和纯 ASCII 各一条，预览里用来核对各窗口都能滚到行尾。 */
+const LONG_CJK = `// 长行样本：${"这一行故意写得很长，用来确认全角字符的真实宽度也能滚到行尾，".repeat(7)}行尾标记 CJK-END`;
+const LONG_TAB = `\t\t\tconst tabbed = [${Array.from({ length: 36 }, (_, index) => `"tab-${index}"`).join(",\t")}]; // TAB-END`;
+const LONG_ASCII = (tail: string) =>
+  `export const routes = [${Array.from({ length: 40 }, (_, index) => `{ path: "/view/${index}", title: "view-${index}" }`).join(", ")}]; // ${tail}`;
+
 const svelte: Sample = {
   before: `<script lang="ts">
   import { onMount } from "svelte";
@@ -105,6 +111,7 @@ export function loadPanels(repo: string): Panel[] {
 }
 
 export const LIMIT = 20;
+${LONG_ASCII("ASCII-OLD-END")}
 `,
   after: `import { api } from "./api";
 import { normalizeError } from "./errors";
@@ -129,6 +136,9 @@ export async function loadPanels(repo: string, signal?: AbortSignal): Promise<Pa
 }
 
 export const LIMIT = 50;
+${LONG_ASCII("ASCII-NEW-END")}
+${LONG_CJK}
+${LONG_TAB}
 `,
 };
 

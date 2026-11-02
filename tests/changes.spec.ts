@@ -146,6 +146,7 @@ vi.mock("../src/lib/api", () => ({
 
 import App from "../src/App.svelte";
 import { paletteItems, REPO_SWITCH_PREFIX, type CommandState } from "../src/lib/commands";
+import { createTextDiff } from "../src/lib/diff";
 import { codeLine } from "./helpers/code";
 
 /* ------------------------------------------------------------------ *
@@ -1019,4 +1020,62 @@ describe("差异与提交", () => {
   });
 });
 
+describe("差异横向滚动", () => {
+  const longLine = `${"中文长行".repeat(40)}LINE-END`;
 
+  function renderDiff() {
+    return render(DiffView, {
+      props: {
+        selection: { path: "a.ts", side: "unstaged" },
+        diff: createTextDiff("a.ts", "short\n", `short\n${longLine}\n`, 1),
+        error: null,
+        loading: false,
+        disabled: false,
+        onStageHunk: () => {},
+        onLoadMore: () => {},
+      },
+    });
+  }
+
+  it("标尺取全量最长行，内容不进文本和选区，切换布局时不变", async () => {
+    renderDiff();
+    const scroller = document.querySelector(".diff-scroll") as HTMLElement;
+    const firstRuler = () => document.querySelector<HTMLElement>(".code-ruler span")?.dataset.text;
+    expect(firstRuler()).toBe(longLine);
+    expect(document.querySelector(".code-ruler")?.getAttribute("aria-hidden")).toBe("true");
+    expect(document.querySelector(".code-ruler")?.textContent).toBe("");
+    expect(document.querySelector(".code-ruler.half")).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: /并排/ }));
+    expect(firstRuler()).toBe(longLine);
+    expect(document.querySelector(".code-ruler.half")).not.toBeNull();
+    expect(scroller.isConnected).toBe(true);
+  });
+
+  it("滚动时只改偏移：两栏共用一个 --code-x，文字在 .code-in 里，符号随代码走", async () => {
+    renderDiff();
+    await fireEvent.click(screen.getByRole("button", { name: /并排/ }));
+    const scroller = document.querySelector(".diff-scroll") as HTMLElement;
+    scroller.scrollLeft = 240;
+    await fireEvent.scroll(scroller);
+    expect(scroller.style.getPropertyValue("--code-x")).toBe("240px");
+    const inner = [...document.querySelectorAll(".side-cell .code-in")].find((node) => node.textContent === longLine);
+    expect(inner?.getAttribute("data-sign")).toBe("+");
+    // 行号、块标题都在 .code-in 之外，不跟着平移。
+    expect(document.querySelector(".ln .code-in, .hunk-caption .code-in")).toBeNull();
+    expect(document.querySelector(".code-stage .side-row")).not.toBeNull();
+  });
+
+  it("换文件时横向位置归零", async () => {
+    const view = renderDiff();
+    const scroller = document.querySelector(".diff-scroll") as HTMLElement;
+    scroller.scrollLeft = 300;
+    await fireEvent.scroll(scroller);
+    await view.rerender({
+      selection: { path: "b.ts", side: "unstaged" },
+      diff: createTextDiff("b.ts", "x\n", "y\n", 1),
+    });
+    await tick();
+    expect(scroller.scrollLeft).toBe(0);
+    expect(scroller.style.getPropertyValue("--code-x")).toBe("0px");
+  });
+});

@@ -25,6 +25,7 @@
     type ConflictResolutions,
   } from "../conflict";
   import { createTextDiff } from "../diff";
+  import { codeRuler } from "../layout";
   import { portal } from "../portal";
   import type { ConflictView } from "../types";
   import { highlightLines, type SyntaxLine } from "../syntax/client";
@@ -68,7 +69,6 @@
   const GAP = 10;
   const CONTEXT = 3;
   const REVEAL = 20;
-  const MAX_CH = 600;
 
   // 初始状态只读一次：同一文件的后续刷新由宿主用 {#key} 重建组件。
   const original = untrack(() => view.result.text ?? "");
@@ -310,22 +310,14 @@
     return map;
   });
 
-  /** 代码区宽度：取所有行的最长显示宽度（CJK 记两格），上限 MAX_CH，保证横向滚动够用。 */
-  function displayWidth(text: string): number {
-    let width = 0;
-    for (let index = 0; index < text.length && width < MAX_CH; index += 1) {
-      width += text.charCodeAt(index) > 0x2e80 ? 2 : text.charCodeAt(index) === 9 ? 4 : 1;
-    }
-    return width;
-  }
-  let codeCh = $derived.by(() => {
-    let max = 40;
+  /** 横向滚动宽度取全部行里最长的几行，由隐藏标尺按真实字体排版（全角、tab 都算准）。 */
+  let ruler = $derived.by(() => {
+    const texts: string[] = [];
     for (const row of rows) {
-      if (row.kind === "ctx" || row.kind === "res" || row.kind === "base") max = Math.max(max, displayWidth(row.text));
-      else if (row.kind === "pair") max = Math.max(max, displayWidth(row.ours ?? ""), displayWidth(row.theirs ?? ""));
-      if (max >= MAX_CH) break;
+      if (row.kind === "ctx" || row.kind === "res" || row.kind === "base") texts.push(row.text);
+      else if (row.kind === "pair") texts.push(row.ours ?? "", row.theirs ?? "");
     }
-    return Math.min(max, MAX_CH);
+    return codeRuler(texts);
   });
 
   /* ---------- 虚拟滚动 ---------- */
@@ -894,16 +886,17 @@
         bind:clientWidth={viewWidth}
         onscroll={onScroll}
         onkeydown={onStreamKey}
-        style={`--cr-ch:${codeCh};--cr-x:${-scrollLeft}px`}
+        style={`--code-x:${scrollLeft}px;--code-view:${viewWidth}px`}
       >
         <div class="cr-space" style={`height:${totalHeight}px`}>
+          <div class="code-ruler" class:half={effectiveMode === "hunks"} aria-hidden="true">{#each ruler as line, i (i)}<span data-text={line.text} style={line.rest ? `padding-right:${line.rest}ch` : undefined}></span>{/each}</div>
+          <div class="code-stage">
           {#each visible as { row, index } (index)}
             {@const top = offsets[index]}
             {@const height = rowHeight(row)}
             {@const hunk = rowHunk(row)}
-            {@const pinned = viewWidth > 0 ? `left:${scrollLeft}px;width:${viewWidth}px;` : ""}
             {#if row.kind === "fold"}
-              <div class="cr-row cr-fold" style={`top:${top}px;height:${height}px;${pinned}`}>
+              <div class="cr-row cr-fold" style={`top:${top}px;height:${height}px`}>
                 {#if row.up}
                   <button type="button" class="icon-btn sm" aria-label="向下展开 20 行" title="展开上方相邻的 20 行" onclick={() => expand(row.seg, "head")}>
                     <Icon name="arrow-down" size={12} />
@@ -919,7 +912,7 @@
                 {/if}
               </div>
             {:else if row.kind === "ctx"}
-              <div class={`cr-row cr-line ${row.tone ?? ""}`} style={`top:${top}px;height:${height}px;${pinned}`}>
+              <div class={`cr-row cr-line ${row.tone ?? ""}`} style={`top:${top}px;height:${height}px`}>
                 <span class="ln">{row.no}</span><span class="code"><span class="code-in">{#each lineSegments(row.text, tokensOf(row.bk, row.bi)) as seg, i (i)}<span class={seg.k}>{seg.t}</span>{/each}</span></span>
               </div>
             {:else if row.kind === "head"}
@@ -930,7 +923,7 @@
                 class="cr-row cr-head cr-card"
                 class:current={current === row.hunk}
                 class:resolved={Boolean(state)}
-                style={`top:${top}px;height:${height}px;${pinned}`}
+                style={`top:${top}px;height:${height}px`}
                 data-hunk={row.hunk}
               >
                 <button type="button" class="cr-head-title" onclick={() => (current = row.hunk)} aria-label={`冲突 ${row.hunk + 1}`}>
@@ -965,7 +958,7 @@
                 {/if}
               </div>
             {:else if row.kind === "cols"}
-              <div class="cr-row cr-cols cr-card" class:current={current === hunk} style={`top:${top}px;height:${height}px;${pinned}`}>
+              <div class="cr-row cr-cols cr-card" class:current={current === hunk} style={`top:${top}px;height:${height}px`}>
                 <span class="cr-col ours"><span class="cr-swatch"></span>当前 · {currentLabel}{#if parsed.hunks[row.hunk]?.oursLabel && parsed.hunks[row.hunk].oursLabel !== currentLabel}<small>{parsed.hunks[row.hunk].oursLabel}</small>{/if}</span>
                 <span class="cr-col theirs"><span class="cr-swatch"></span>来源 · {incomingLabel}{#if parsed.hunks[row.hunk]?.theirsLabel && parsed.hunks[row.hunk].theirsLabel !== incomingLabel}<small>{parsed.hunks[row.hunk].theirsLabel}</small>{/if}</span>
               </div>
@@ -977,7 +970,7 @@
                 class:current={current === hunk}
                 class:last={row.last}
                 class:same={row.same}
-                style={`top:${top}px;height:${height}px;${pinned}`}
+                style={`top:${top}px;height:${height}px`}
               >
                 <span class="cr-half ours" class:blank={row.ours === null}>
                   <span class="ln">{row.oNo ?? ""}</span><span class="code"><span class="code-in">{#each o as seg, i (i)}<span class={seg.k} class:mk={seg.m}>{seg.t}</span>{/each}</span></span>
@@ -987,26 +980,27 @@
                 </span>
               </div>
             {:else if row.kind === "basehead"}
-              <div class="cr-row cr-cols base cr-card" class:current={current === hunk} style={`top:${top}px;height:${height}px;${pinned}`}>
+              <div class="cr-row cr-cols base cr-card" class:current={current === hunk} style={`top:${top}px;height:${height}px`}>
                 <span class="cr-col"><span class="cr-swatch"></span>共同祖先{#if parsed.hunks[row.hunk]?.baseLabel}<small>{parsed.hunks[row.hunk].baseLabel}</small>{/if}</span>
               </div>
             {:else if row.kind === "base"}
-              <div class="cr-row cr-line base cr-card" class:current={current === hunk} style={`top:${top}px;height:${height}px;${pinned}`}>
+              <div class="cr-row cr-line base cr-card" class:current={current === hunk} style={`top:${top}px;height:${height}px`}>
                 <span class="ln">{row.no}</span><span class="code"><span class="code-in">{#each lineSegments(row.text, tokensOf(row.bk, row.bi)) as seg, i (i)}<span class={seg.k}>{seg.t}</span>{/each}</span></span>
               </div>
             {:else if row.kind === "res"}
-              <div class="cr-row cr-line res cr-card" class:current={current === hunk} class:last={isLastRowOfCard(row)} style={`top:${top}px;height:${height}px;${pinned}`}>
+              <div class="cr-row cr-line res cr-card" class:current={current === hunk} class:last={isLastRowOfCard(row)} style={`top:${top}px;height:${height}px`}>
                 <span class="ln">{row.no}</span><span class="code"><span class="code-in">{#each lineSegments(row.text, tokensOf(row.bk, row.bi)) as seg, i (i)}<span class={seg.k}>{seg.t}</span>{/each}</span></span>
               </div>
             {:else if row.kind === "empty"}
-              <div class="cr-row cr-line res is-empty cr-card last" class:current={current === hunk} style={`top:${top}px;height:${height}px;${pinned}`}>
+              <div class="cr-row cr-line res is-empty cr-card last" class:current={current === hunk} style={`top:${top}px;height:${height}px`}>
                 <span class="ln"></span><span class="code">此处结果为空（两侧内容都不保留）</span>
               </div>
             {:else if row.kind === "edit"}
-              <div class="cr-row cr-edit cr-card last" class:current={current === hunk} style={`top:${top}px;height:${height}px;${pinned}`}>
+              <div class="cr-row cr-edit cr-card last" class:current={current === hunk} style={`top:${top}px;height:${height}px`}>
                 <textarea
                   aria-label={`编辑冲突 ${row.hunk + 1} 的结果`}
                   spellcheck="false"
+                  wrap="off"
                   bind:value={editText}
                   title={disabled ? BUSY_REASON : undefined}
                   disabled={disabled}
@@ -1021,6 +1015,7 @@
               </div>
             {/if}
           {/each}
+          </div>
         </div>
       </div>
       {#if effectiveMode === "hunks" && total > 0}

@@ -135,6 +135,7 @@
           title={disabled ? BUSY_REASON : undefined}
           disabled={disabled}
           spellcheck="false"
+          wrap="off"
           oninput={(event) => onResult((event.currentTarget as HTMLTextAreaElement).value)}
         ></textarea>
       {:else if view.result.text !== null}

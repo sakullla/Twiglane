@@ -68,7 +68,12 @@ function bigConflict(): { ours: string; theirs: string; result: string } {
   const result: string[] = [];
   const common = (count: number, seed: number) => {
     for (let index = 0; index < count; index += 1) {
-      const line = index % 9 === 0 ? "" : `  const value${seed}_${index} = compute("merge.ts", ${seed}, ${index});`;
+      const line =
+        index % 9 === 0
+          ? ""
+          : index === 2 && seed === 0
+            ? `  // ${"未冲突的超长行：确认结果预览也能滚到行尾，".repeat(16)}CTX-END`
+            : `  const value${seed}_${index} = compute("merge.ts", ${seed}, ${index});`;
       ours.push(line);
       theirs.push(line);
       result.push(line);
@@ -86,8 +91,8 @@ function bigConflict(): { ours: string; theirs: string; result: string } {
   theirs.push("// merge.ts —— 预览数据");
   common(40, 0);
   conflict(
-    ["export function createView(options: ViewOptions) {", '  const mode = "workspace";', "  const size = 12;", '  const sidebar = "expanded";'],
-    ["export function createView(options: ViewOptions, extra?: ViewExtra) {", '  const mode = "review";', "  const size = 14;", '  const sidebar = "compact";', "  const density = extra?.density ?? 1;"],
+    ["export function createView(options: ViewOptions) {", '  const mode = "workspace";', "  const size = 12;", '  const sidebar = "expanded";', `  // 当前：${"这一侧的中文长行短一些，".repeat(14)}OURS-END`],
+    ["export function createView(options: ViewOptions, extra?: ViewExtra) {", '  const mode = "review";', "  const size = 14;", '  const sidebar = "compact";', "  const density = extra?.density ?? 1;", `  // 来源：${"这一侧的中文长行更长一些，用来确认两栏按较宽的一栏计算行程，".repeat(10)}THEIRS-END`],
   );
   common(2400, 1);
   conflict(['import { render } from "./render";'], ['import { render } from "./render";']);
@@ -179,6 +184,8 @@ function diffFor(path: string, staged: boolean): DiffResponse {
     const base = h * 40 + 10;
     lines.push({ kind: "hunk", text: `@@ -${base},8 +${base},9 @@ ${path} · section${h}`, oldNo: null, newNo: null, hunkIndex: index });
     for (let i = 0; i < 3; i += 1) lines.push({ kind: "context", text: `   const value${i} = compute("${name}", ${i});`, oldNo: base + i, newNo: base + i, hunkIndex: index });
+    // 第一段带超长行（含中文），预览里用来核对横向滚动能到行尾。
+    if (h === 0) lines[lines.length - 1].text = `   // ${"长行样本：确认中文全角字符也能滚到行尾，".repeat(16)}CJK-END`;
     lines.push({ kind: "del", text: `-  return legacyRender("${path}", value0);`, oldNo: base + 3, newNo: null, hunkIndex: index });
     lines.push({ kind: "add", text: `+  const view = render("${path}", { theme: "modern" });`, oldNo: null, newNo: base + 3, hunkIndex: index });
     lines.push({ kind: "add", text: `+  return view.mount("${name}");`, oldNo: null, newNo: base + 4, hunkIndex: index });

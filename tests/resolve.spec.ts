@@ -621,6 +621,8 @@ describe("合并面板", () => {
     });
     await fireEvent.click(await screen.findByRole("button", { name: "保留双方" }));
     expect(document.querySelectorAll(".three-way-pane")).toHaveLength(3);
+    // 编辑栏不折行：长行靠横向滚动看完，WebKit 只认 wrap="off"。
+    expect(document.querySelector(".three-way-pane textarea")?.getAttribute("wrap")).toBe("off");
     expect(screen.getByRole("region", { name: "当前分支版本" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "来源分支版本" })).toBeTruthy();
     expect(resolveConflict).not.toHaveBeenCalled();

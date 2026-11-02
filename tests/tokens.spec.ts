@@ -897,3 +897,37 @@ describe("控件边界策略（默认拒绝）", () => {
     }
   });
 });
+
+describe("代码窗口横向滚动（R21）", () => {
+  const components = read("src/styles/components.css");
+
+  it("代码区不再省略，裁切用 clip：选区拖动时不会把 .code 自己滚走", () => {
+    for (const selector of [".diff-line .code", ".side-cell .code", ".cr-line .code, .cr-half .code"]) {
+      const body = ruleBody(components, selector);
+      expect(body, selector).not.toMatch(/text-overflow/);
+      expect(body, selector).toMatch(/overflow:\s*clip/);
+    }
+  });
+
+  it("滚动容器原生可滚，横滑不触发后退，滚动条常驻", () => {
+    const body = ruleBody(components, ".diff-scroll, .cr-scroll, .three-way-pane, .three-way-pane textarea, .cr-edit textarea");
+    expect(body).toMatch(/overscroll-behavior-x:\s*contain/);
+    expect(body).toMatch(/scrollbar-width:\s*auto/);
+    expect(body).toMatch(/tab-size:\s*4/);
+    expect(ruleBody(components, ".diff-scroll")).toMatch(/overflow:\s*auto/);
+    expect(components).toMatch(/\.cr-scroll \{[^}]*overflow:\s*auto/);
+    expect(ruleBody(components, ".three-way-pane")).toMatch(/overflow:\s*auto/);
+  });
+
+  it("行钉在视口内，代码按 --code-x 平移，标尺不占高度也不可见", () => {
+    const stage = ruleBody(components, ".code-stage");
+    expect(stage).toMatch(/position:\s*sticky/);
+    expect(stage).toMatch(/left:\s*0/);
+    expect(stage).toMatch(/width:\s*var\(--code-view\)/);
+    expect(ruleBody(components, ".code-in")).toMatch(/translateX\(calc\(var\(--code-x, 0px\) \* -1\)\)/);
+    const ruler = ruleBody(components, ".code-ruler");
+    expect(ruler).toMatch(/height:\s*0/);
+    expect(ruler).toMatch(/visibility:\s*hidden/);
+    expect(ruleBody(components, ".virtual-space, .cr-space")).toMatch(/width:\s*max-content/);
+  });
+});

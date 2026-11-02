@@ -257,7 +257,22 @@
    并统一用 outline 而不是 inset box-shadow——容器内的行是绝对定位子元素，会盖住内阴影，
    而 outline 画在内容之上。 */
 .file-list:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; border-radius: 0; }
-.virtual-space { position: relative; }
+/* 代码窗口横向滚动（R21）：滚动容器是原生的，触控板、Shift+滚轮和滚动条都走浏览器；
+   宽度由隐藏标尺撑开，标尺排的是全量最长的几行，所以不随虚拟窗口跳动。
+   行钉在 .code-stage 里（行号、块标题、按块暂存因此不动），只有 .code-in 按 --code-x 平移，
+   并排两栏共用同一偏移，行程按较宽的一栏算。 */
+.virtual-space, .cr-space { position: relative; width: max-content; min-width: 100%; }
+.diff-scroll, .cr-scroll, .three-way-pane, .three-way-pane textarea, .cr-edit textarea { overscroll-behavior-x: contain; tab-size: 4; scrollbar-width: auto; scrollbar-color: auto; }
+/* --code-view 是滚动容器的 clientWidth：100cqw 含竖向滚动条，行尾会被滚动条盖住，滚到头时钉住的行还会左移。 */
+/* 代码窗口的横向滚动条要一眼能看到、也要拖得住，比全局滚动条粗一档。 */
+.diff-scroll::-webkit-scrollbar, .cr-scroll::-webkit-scrollbar, .three-way-pane::-webkit-scrollbar, .three-way-pane textarea::-webkit-scrollbar { width: 12px; height: 12px; }
+.diff-scroll::-webkit-scrollbar-thumb, .cr-scroll::-webkit-scrollbar-thumb, .three-way-pane::-webkit-scrollbar-thumb, .three-way-pane textarea::-webkit-scrollbar-thumb { background-color: var(--fg-subtle); }
+.code-stage { position: sticky; left: 0; width: var(--code-view); height: 100%; }
+.code-ruler { --code-chrome: 116px; height: 0; padding-right: calc(var(--code-chrome) + 4ch); overflow: hidden; visibility: hidden; font-family: var(--mono); font-size: var(--text-sm); white-space: pre; }
+.code-ruler.half { --code-chrome: calc(var(--code-view) / 2 + 76px); }
+.code-ruler > span { display: block; }
+.code-ruler > span::before { content: attr(data-text); }
+.code-in { display: block; width: max-content; transform: translateX(calc(var(--code-x, 0px) * -1)); }
 .file-group { position: absolute; left: 8px; right: 8px; display: flex; align-items: flex-end; gap: 7px; padding: 0 3px 6px 10px; font-size: var(--text-xs); font-weight: var(--weight-semibold); letter-spacing: 0.03em; color: var(--fg-subtle); }
 /* 分组标题在最窄栏宽（160px）下不能逐字折行成竖排：标题单行省略，计数与按钮不收缩。 */
 .file-group > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -451,7 +466,7 @@
 .diff-line { grid-template-columns: 46px 46px minmax(0, 1fr) auto; }
 .diff-line .ln, .side-cell .ln { color: var(--fg-subtle); text-align: right; padding-right: 11px; font-size: var(--text-xs); user-select: none; height: 22px; background: var(--surface-2); }
 .diff-line .ln + .ln { border-right: 1px solid var(--border); }
-.diff-line .code { overflow: hidden; text-overflow: ellipsis; padding-left: 13px; padding-right: 12px; }
+.diff-line .code { overflow: clip; padding-left: 13px; padding-right: 12px; }
 .diff-line.add { background: var(--add-bg); }
 .diff-line.add .code { color: var(--fg); box-shadow: inset 2px 0 color-mix(in srgb, var(--add-fg) 65%, transparent); }
 .diff-line.add .ln { background: var(--add-strong); color: var(--add-fg); }
@@ -470,14 +485,14 @@
 .hunk-btn.btn-secondary { background: var(--accent-soft); color: var(--accent-text); }
 .hunk-btn.btn-secondary:hover:not(:disabled) { background: var(--accent); color: var(--accent-fg); }
 .side-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
-.side-cell { display: grid; grid-template-columns: 48px minmax(0, 1fr); overflow: hidden; min-width: 0; height: 22px; }
+.side-cell { display: grid; grid-template-columns: 48px minmax(0, 1fr); overflow: clip; min-width: 0; height: 22px; }
 .side-cell + .side-cell { border-left: 1px solid var(--border-strong); }
-.side-cell .code { overflow: hidden; text-overflow: ellipsis; padding: 0 10px; }
+.side-cell .code { overflow: clip; padding: 0 10px; }
 /* 增删符号：语法高亮接管了代码文字的颜色，增删由行底色、左沿竖条与这个符号共同表达，不只靠颜色。
    符号由伪元素画出：看得见，但选中复制代码时不会带上 +/-。 */
-.code[data-sign]::before { content: attr(data-sign); display: inline-block; width: 1.6ch; color: var(--fg-subtle); user-select: none; }
-.diff-line.add .code[data-sign]::before, .side-cell.add .code[data-sign]::before { color: var(--add-fg); font-weight: var(--weight-semibold); }
-.diff-line.del .code[data-sign]::before, .side-cell.del .code[data-sign]::before { color: var(--del-fg); font-weight: var(--weight-semibold); }
+.code-in[data-sign]::before { content: attr(data-sign); display: inline-block; width: 1.6ch; color: var(--fg-subtle); user-select: none; }
+.diff-line.add .code-in[data-sign]::before, .side-cell.add .code-in[data-sign]::before { color: var(--add-fg); font-weight: var(--weight-semibold); }
+.diff-line.del .code-in[data-sign]::before, .side-cell.del .code-in[data-sign]::before { color: var(--del-fg); font-weight: var(--weight-semibold); }
 /* 行内改动：配对的删除/新增行之间真正不同的字符，用更深一档的增删底色加一条底线标出，不只靠底色深浅。 */
 .diff-line.add .wd, .side-cell.add .wd { background: var(--add-strong); border-radius: 3px; box-shadow: inset 0 -1px 0 var(--add-fg); }
 .diff-line.del .wd, .side-cell.del .wd { background: var(--del-strong); border-radius: 3px; box-shadow: inset 0 -1px 0 var(--del-fg); }
@@ -1172,10 +1187,6 @@ label.list-row .checkbox { margin-top: 2px; }
 .cr-main { flex: 1; min-height: 0; position: relative; background: var(--surface); overflow: hidden; }
 .cr-scroll { position: absolute; inset: 0 14px 0 0; overflow: auto; font-family: var(--mono); font-size: var(--text-sm); outline: none; }
 .cr-scroll:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
-/* 横向滚动：行本身钉在视口宽度内（两栏始终同时可见），只把代码文字按 --cr-x 平移，
-   滚动条的行程由 --cr-ch（最长行的显示宽度，上限 600 列）决定，两栏因此同步横移。 */
-.cr-space { position: relative; width: calc(100% + var(--cr-ch) * 1ch); }
-.cr-line .code-in, .cr-half .code-in { display: inline-block; transform: translateX(var(--cr-x, 0)); }
 .cr-row { position: absolute; left: 0; right: 0; display: flex; align-items: stretch; box-sizing: border-box; }
 .cr-line { line-height: 20px; white-space: pre; }
 .cr-line .ln, .cr-half .ln {
@@ -1188,7 +1199,7 @@ label.list-row .checkbox { margin-top: 2px; }
   user-select: none;
   font-variant-numeric: tabular-nums;
 }
-.cr-line .code, .cr-half .code { flex: 1; min-width: 0; padding: 0 var(--space-12) 0 var(--space-8); overflow: hidden; white-space: pre; }
+.cr-line .code, .cr-half .code { flex: 1; min-width: 0; padding: 0 var(--space-12) 0 var(--space-8); overflow: clip; white-space: pre; }
 .cr-line.res { background: var(--success-softer); }
 .cr-line.res .ln { color: var(--success-text); }
 .cr-line.res.is-empty .code { font-family: var(--font); color: var(--fg-muted); font-style: italic; }
@@ -1347,6 +1358,7 @@ label.list-row .checkbox { margin-top: 2px; }
   min-height: 100%;
   margin: 0;
   padding: var(--space-8) var(--space-12);
+  overflow: auto;
   border: 0;
   outline: none;
   resize: none;
@@ -1398,7 +1410,7 @@ label.list-row .checkbox { margin-top: 2px; }
 /* 并排视图的单元格必须与行同高：基础层的 22px 留在 16px 的密集行里会上下各溢出 3px，
    相邻行的文字因此叠在一起。 */
 .diff.dense .side-cell { height: 18px; }
-.side-row { overflow: hidden; }
+.side-row { overflow: clip; }
 .diff.dense .diff-line .code { padding-left: var(--space-12); padding-right: var(--space-12); }
 .diff.dense .side-cell .code { padding: 0 var(--space-12) 0 10px; }
 .diff.dense .hunk-btn { height: 18px !important; padding: 0 10px !important; font-size: var(--text-xs) !important; line-height: 18px; }

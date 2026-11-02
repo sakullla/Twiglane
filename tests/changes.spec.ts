@@ -1065,6 +1065,59 @@ describe("差异横向滚动", () => {
     expect(document.querySelector(".code-stage .side-row")).not.toBeNull();
   });
 
+  it("竖向滚动条增减时重读 clientWidth：内容变高和尺寸回调都会更新 --code-view", async () => {
+    const callbacks: (() => void)[] = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: () => void) {
+          callbacks.push(callback);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const clientWidth = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(920);
+    try {
+      const view = renderDiff();
+      const scroller = document.querySelector(".diff-scroll") as HTMLElement;
+      await tick();
+      expect(scroller.style.getPropertyValue("--code-view")).toBe("920px");
+      // 同一实例内内容变高：出现竖向滚动条，外框不变，bind:clientWidth 收不到通知。
+      clientWidth.mockReturnValue(908);
+      await view.rerender({ diff: createTextDiff("a.ts", "short\n", `short\n${longLine}\n${"more\n".repeat(200)}`, 1) });
+      await tick();
+      expect(document.querySelector(".diff-scroll")).toBe(scroller);
+      expect(scroller.style.getPropertyValue("--code-view")).toBe("908px");
+      // 只有滚动条变化、没有内容重算时，靠轨道和容器的 ResizeObserver。
+      clientWidth.mockReturnValue(920);
+      for (const callback of callbacks) callback();
+      expect(scroller.style.getPropertyValue("--code-view")).toBe("920px");
+    } finally {
+      vi.unstubAllGlobals();
+      clientWidth.mockRestore();
+    }
+  });
+
+  it("已渲染行比标尺宽时撑大标尺，内容换了才归零", async () => {
+    const offsetWidth = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(5000);
+    try {
+      const view = renderDiff();
+      const scroller = document.querySelector(".diff-scroll") as HTMLElement;
+      await tick();
+      expect(scroller.style.getPropertyValue("--code-floor")).toBe("5000px");
+      offsetWidth.mockReturnValue(1200);
+      await fireEvent.click(screen.getByRole("button", { name: /并排/ }));
+      await tick();
+      expect(scroller.style.getPropertyValue("--code-floor")).toBe("5000px");
+      await view.rerender({ diff: createTextDiff("a.ts", "short\n", "other\n", 1) });
+      await tick();
+      expect(scroller.style.getPropertyValue("--code-floor")).toBe("1200px");
+    } finally {
+      offsetWidth.mockRestore();
+    }
+  });
+
   it("换文件时横向位置归零", async () => {
     const view = renderDiff();
     const scroller = document.querySelector(".diff-scroll") as HTMLElement;

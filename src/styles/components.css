@@ -258,20 +258,22 @@
    而 outline 画在内容之上。 */
 .file-list:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; border-radius: 0; }
 /* 代码窗口横向滚动（R21）：滚动容器是原生的，触控板、Shift+滚轮和滚动条都走浏览器；
-   宽度由隐藏标尺撑开，标尺排的是全量最长的几行，所以不随虚拟窗口跳动。
+   宽度由隐藏标尺撑开，标尺排的是全量候选的最长行，所以不随虚拟窗口跳动。
    行钉在 .code-stage 里（行号、块标题、按块暂存因此不动），只有 .code-in 按 --code-x 平移，
    并排两栏共用同一偏移，行程按较宽的一栏算。 */
 .virtual-space, .cr-space { position: relative; width: max-content; min-width: 100%; }
 .diff-scroll, .cr-scroll, .three-way-pane, .three-way-pane textarea, .cr-edit textarea { overscroll-behavior-x: contain; tab-size: 4; scrollbar-width: auto; scrollbar-color: auto; }
-/* --code-view 是滚动容器的 clientWidth：100cqw 含竖向滚动条，行尾会被滚动条盖住，滚到头时钉住的行还会左移。 */
+/* --code-view 是滚动容器的 clientWidth（codeScroll 维护）：100cqw 含竖向滚动条，行尾会被盖住，滚到头时钉住的行还会左移。 */
 /* 代码窗口的横向滚动条要一眼能看到、也要拖得住，比全局滚动条粗一档。 */
-.diff-scroll::-webkit-scrollbar, .cr-scroll::-webkit-scrollbar, .three-way-pane::-webkit-scrollbar, .three-way-pane textarea::-webkit-scrollbar { width: 12px; height: 12px; }
-.diff-scroll::-webkit-scrollbar-thumb, .cr-scroll::-webkit-scrollbar-thumb, .three-way-pane::-webkit-scrollbar-thumb, .three-way-pane textarea::-webkit-scrollbar-thumb { background-color: var(--fg-subtle); }
+.diff-scroll::-webkit-scrollbar, .cr-scroll::-webkit-scrollbar, .three-way-pane::-webkit-scrollbar, .three-way-pane textarea::-webkit-scrollbar, .cr-edit textarea::-webkit-scrollbar { width: 12px; height: 12px; }
+.diff-scroll::-webkit-scrollbar-thumb, .cr-scroll::-webkit-scrollbar-thumb, .three-way-pane::-webkit-scrollbar-thumb, .three-way-pane textarea::-webkit-scrollbar-thumb, .cr-edit textarea::-webkit-scrollbar-thumb { background-color: var(--fg-subtle); }
 .code-stage { position: sticky; left: 0; width: var(--code-view); height: 100%; }
 .code-ruler { --code-chrome: 116px; height: 0; padding-right: calc(var(--code-chrome) + 4ch); overflow: hidden; visibility: hidden; font-family: var(--mono); font-size: var(--text-sm); white-space: pre; }
 .code-ruler.half { --code-chrome: calc(var(--code-view) / 2 + 76px); }
 .code-ruler > span { display: block; }
 .code-ruler > span::before { content: attr(data-text); }
+/* 实测兜底：已渲染行比标尺宽时由 --code-floor 撑开（codeScroll 只增不减）。 */
+.code-ruler::after { content: ""; display: block; width: var(--code-floor, 0); }
 .code-in { display: block; width: max-content; transform: translateX(calc(var(--code-x, 0px) * -1)); }
 .file-group { position: absolute; left: 8px; right: 8px; display: flex; align-items: flex-end; gap: 7px; padding: 0 3px 6px 10px; font-size: var(--text-xs); font-weight: var(--weight-semibold); letter-spacing: 0.03em; color: var(--fg-subtle); }
 /* 分组标题在最窄栏宽（160px）下不能逐字折行成竖排：标题单行省略，计数与按钮不收缩。 */

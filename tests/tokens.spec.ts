@@ -919,6 +919,13 @@ describe("代码窗口横向滚动（R21）", () => {
     expect(ruleBody(components, ".three-way-pane")).toMatch(/overflow:\s*auto/);
   });
 
+  it("所有代码滚动容器都用同一档粗滚动条", () => {
+    for (const selector of [".diff-scroll", ".cr-scroll", ".three-way-pane", ".three-way-pane textarea", ".cr-edit textarea"]) {
+      expect(components).toContain(`${selector}::-webkit-scrollbar,`.replace(/,$/, ""));
+      expect(components).toContain(`${selector}::-webkit-scrollbar-thumb`);
+    }
+  });
+
   it("行钉在视口内，代码按 --code-x 平移，标尺不占高度也不可见", () => {
     const stage = ruleBody(components, ".code-stage");
     expect(stage).toMatch(/position:\s*sticky/);
@@ -928,6 +935,7 @@ describe("代码窗口横向滚动（R21）", () => {
     const ruler = ruleBody(components, ".code-ruler");
     expect(ruler).toMatch(/height:\s*0/);
     expect(ruler).toMatch(/visibility:\s*hidden/);
+    expect(ruleBody(components, ".code-ruler::after")).toMatch(/width:\s*var\(--code-floor, 0\)/);
     expect(ruleBody(components, ".virtual-space, .cr-space")).toMatch(/width:\s*max-content/);
   });
 });

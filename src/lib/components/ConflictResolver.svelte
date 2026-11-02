@@ -25,7 +25,8 @@
     type ConflictResolutions,
   } from "../conflict";
   import { createTextDiff } from "../diff";
-  import { codeRuler } from "../layout";
+  import { trackCodeScroll } from "../codeScroll.svelte";
+  import { codeRuler, rulerPadding } from "../layout";
   import { portal } from "../portal";
   import type { ConflictView } from "../types";
   import { highlightLines, type SyntaxLine } from "../syntax/client";
@@ -324,9 +325,7 @@
 
   let scroller = $state<HTMLDivElement | null>(null);
   let scrollTop = $state(0);
-  let scrollLeft = $state(0);
   let viewport = $state(0);
-  let viewWidth = $state(0);
   let windowHeight = $derived(viewport > 0 ? viewport : 720);
 
   function firstVisible(top: number): number {
@@ -348,6 +347,13 @@
     return { start, end };
   });
   let visible = $derived(rows.slice(range.start, range.end).map((row, index) => ({ row, index: range.start + index })));
+
+  /* 行钉在视口里（.code-stage），代码文字按 --code-x 平移，两栏因此同步横移。 */
+  trackCodeScroll(
+    () => scroller,
+    () => ruler,
+    () => visible,
+  );
 
   /* ---------- 语法高亮（按块、只请求视口附近） ---------- */
 
@@ -417,7 +423,6 @@
   function onScroll(event: Event) {
     const target = event.currentTarget as HTMLDivElement;
     scrollTop = target.scrollTop;
-    scrollLeft = target.scrollLeft;
   }
 
   async function scrollToHunk(index: number, onlyIfHidden = false) {
@@ -883,13 +888,11 @@
         data-autofocus
         bind:this={scroller}
         bind:clientHeight={viewport}
-        bind:clientWidth={viewWidth}
         onscroll={onScroll}
         onkeydown={onStreamKey}
-        style={`--code-x:${scrollLeft}px;--code-view:${viewWidth}px`}
       >
         <div class="cr-space" style={`height:${totalHeight}px`}>
-          <div class="code-ruler" class:half={effectiveMode === "hunks"} aria-hidden="true">{#each ruler as line, i (i)}<span data-text={line.text} style={line.rest ? `padding-right:${line.rest}ch` : undefined}></span>{/each}</div>
+          <div class="code-ruler" class:half={effectiveMode === "hunks"} aria-hidden="true">{#each ruler as line, i (i)}<span data-text={line.text} style={rulerPadding(line)}></span>{/each}</div>
           <div class="code-stage">
           {#each visible as { row, index } (index)}
             {@const top = offsets[index]}

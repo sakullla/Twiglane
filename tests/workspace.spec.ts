@@ -11,14 +11,15 @@ import { finishDiffAttempt } from "../src/lib/diff";
 import {
   clampWidth,
   codeRuler,
+  lineWidth,
   MAX_RULER_CELLS,
   nextIndex,
   RULER_LINES,
   RULER_SAMPLE_CHARS,
+  rulerPadding,
   scrollByRows,
   scrollIndexIntoView,
   shouldPoll,
-  textCells,
   visibleRange,
 } from "../src/lib/layout";
 import { filterRecent } from "../src/lib/recent";
@@ -219,40 +220,62 @@ describe("品牌", () => {
 });
 
 describe("代码窗口标尺", () => {
-  it("全角记两列，tab 走到下一制表位，组合符不占列，代理对只算一个字", () => {
-    expect(textCells("abc")).toBe(3);
-    expect(textCells("中文")).toBe(4);
-    expect(textCells("ａ，")).toBe(4);
-    expect(textCells("\tx")).toBe(5);
-    expect(textCells("ab\tx")).toBe(5);
-    expect(textCells("e\u0301")).toBe(1);
-    expect(textCells("😀a")).toBe(3);
+  const texts = (lines: { text: string }[]) => lines.map((line) => line.text);
+
+  it("按宽度分量拆行，全角不折算成固定列数，tab 走到下一制表位", () => {
+    expect(lineWidth("abc")).toEqual({ narrow: 3, wide: 0, other: 0 });
+    expect(lineWidth("中文")).toEqual({ narrow: 0, wide: 2, other: 0 });
+    expect(lineWidth("ａ，").wide).toBe(2);
+    expect(lineWidth("\tx").narrow).toBe(5);
+    expect(lineWidth("ab\tx").narrow).toBe(5);
+    // 组合符和表情的宽度取决于回退字体，归到单独的分量。
+    expect(lineWidth("e\u0301")).toEqual({ narrow: 1, wide: 0, other: 1 });
+    expect(lineWidth("😀a")).toEqual({ narrow: 1, wide: 0, other: 2 });
   });
 
-  it("按显示列数而不是字符数挑最长的行，从长到短", () => {
-    const lines = codeRuler(["a".repeat(10), "中".repeat(8), "b"], 2);
-    expect(lines.map((line) => line.text)).toEqual(["中".repeat(8), "a".repeat(10)]);
+  it("大量中文长行不会把真实更宽的 ASCII 行挤出标尺", () => {
+    const cjk = Array.from({ length: 14 }, (_, index) => `${"中".repeat(100)}${index}`);
+    const ascii = "a".repeat(193);
+    expect(texts(codeRuler([...cjk, ascii]))).toContain(ascii);
   });
 
-  it("只保留固定行数，全量里靠后的最长行也不漏", () => {
-    const texts = Array.from({ length: 50_000 }, (_, index) => `line ${index}`);
-    texts.push("x".repeat(500));
-    const lines = codeRuler(texts);
-    expect(lines).toHaveLength(RULER_LINES);
-    expect(lines[0].text).toBe("x".repeat(500));
+  it("反过来，大量 ASCII 长行也挤不掉全角、表情和组合字符行", () => {
+    const ascii = Array.from({ length: 40 }, (_, index) => `${"a".repeat(300)}${index}`);
+    const cjk = "中".repeat(150);
+    const emoji = "😀".repeat(60);
+    const marks = "e\u0301".repeat(90);
+    const chosen = texts(codeRuler([...ascii, cjk, emoji, marks]));
+    expect(chosen).toEqual(expect.arrayContaining([cjk, emoji, marks]));
+  });
+
+  it("每个分量只保留固定行数，全量里靠后的最长行也不漏", () => {
+    const lines = Array.from({ length: 50_000 }, (_, index) => `line ${index}`);
+    lines.push("x".repeat(500));
+    const chosen = codeRuler(lines);
+    expect(chosen.length).toBeLessThanOrEqual(RULER_LINES * 4);
+    expect(chosen[0].text).toBe("x".repeat(500));
   });
 
   it("tab 很多的短行不会被长度上界跳过", () => {
-    const lines = codeRuler(["a".repeat(30), "b".repeat(29), "\t".repeat(10)], 2);
-    expect(lines[0].text).toBe("\t".repeat(10));
+    const chosen = codeRuler(["a".repeat(30), "b".repeat(29), "\t".repeat(10)], 2);
+    expect(chosen[0].text).toBe("\t".repeat(10));
   });
 
-  it("超长行只排版样本，其余按估算列数补宽，总宽不超上限", () => {
-    const [long] = codeRuler(["a".repeat(RULER_SAMPLE_CHARS + 500)]);
-    expect(long.text).toHaveLength(RULER_SAMPLE_CHARS);
-    expect(long.rest).toBe(500);
+  it("超长行只排版样本，半角按 ch、全角按 ic 补宽", () => {
+    const [ascii] = codeRuler(["a".repeat(RULER_SAMPLE_CHARS + 500)]);
+    expect(ascii).toEqual({ text: "a".repeat(RULER_SAMPLE_CHARS), restCh: 500, restIc: 0 });
+    expect(rulerPadding(ascii)).toBe("padding-right:calc(500ch + 0ic)");
+    const [cjk] = codeRuler(["中".repeat(RULER_SAMPLE_CHARS + 300)]);
+    expect(cjk).toEqual({ text: "中".repeat(RULER_SAMPLE_CHARS), restCh: 0, restIc: 300 });
+    expect(rulerPadding({ text: "a", restCh: 0, restIc: 0 })).toBeUndefined();
+  });
+
+  it("补宽上限不低于后端 2 MiB 差异预览，超过才封顶", () => {
+    expect(MAX_RULER_CELLS).toBeGreaterThanOrEqual(2 * 1024 * 1024);
+    const [atLimit] = codeRuler(["a".repeat(2 * 1024 * 1024)]);
+    expect(atLimit.text.length + atLimit.restCh).toBe(2 * 1024 * 1024);
     const [huge] = codeRuler(["a".repeat(MAX_RULER_CELLS + 500)]);
-    expect(textCells(huge.text) + huge.rest).toBe(MAX_RULER_CELLS);
+    expect(huge.text.length + huge.restCh).toBe(MAX_RULER_CELLS);
   });
 
   it("空输入不产生标尺", () => {

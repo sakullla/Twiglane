@@ -81,12 +81,16 @@ export function visibleRange(
 
 /** 代码窗口的 tab 宽度，与 components.css 里滚动容器的 tab-size 一致。 */
 export const CODE_TAB_SIZE = 4;
-/** 标尺保留的候选行数：估算与真实字形有出入时，真正最长的行仍大概率在其中。 */
-export const RULER_LINES = 12;
-/** 标尺里每行实际排版的字符上限；超出部分按估算列数补宽，不把巨型行再排一遍。 */
+/** 标尺在每个宽度分量上保留的候选行数。 */
+export const RULER_LINES = 8;
+/** 标尺里每行实际排版的字符上限；超出部分按估算宽度补内边距，不把巨型行再排一遍。 */
 export const RULER_SAMPLE_CHARS = 20_000;
-/** 横向滚动宽度上限（列）：约 1400 万像素，低于浏览器约 3300 万像素的布局上限。 */
-export const MAX_RULER_CELLS = 2_000_000;
+/** 补宽上限（列）：不低于后端差异预览的 2 MiB（DIFF_PREVIEW_BYTES），又低于浏览器的布局上限。 */
+export const MAX_RULER_CELLS = 2 * 1024 * 1024;
+/** 全角字形约等于多少个半角：只用于给行排序，真实宽度由标尺排版和 ic 单位决定。 */
+export const WIDE_CH = 5 / 3;
+
+const NON_LATIN = /[^\u0000-\u02ff]/;
 
 function isWideCode(code: number): boolean {
   return (
@@ -100,50 +104,100 @@ function isWideCode(code: number): boolean {
   );
 }
 
-/** 行的估算显示列数：全角记两列、tab 走到下一制表位、组合符不占列。只用来给行排序和估算超长行。 */
-export function textCells(text: string, tabSize = CODE_TAB_SIZE): number {
-  let cells = 0;
+export interface LineWidth {
+  /** 半角部分的列数，tab 按制表位展开。 */
+  narrow: number;
+  /** 全角字符个数。 */
+  wide: number;
+  /** 其余字符的码元数（表情、组合符、非拉丁文字）：宽度取决于回退字体，单独成一个分量。 */
+  other: number;
+}
+
+/** 把一行拆成宽度分量。各分量之间的比例由字体决定，这里不折算，避免把估算当真值。 */
+export function lineWidth(text: string, tabSize = CODE_TAB_SIZE): LineWidth {
+  let narrow = 0;
+  let wide = 0;
+  let other = 0;
   for (let index = 0; index < text.length; index += 1) {
     const code = text.charCodeAt(index);
-    if (code === 9) cells += tabSize - (cells % tabSize);
-    else if (code < 0x300) cells += 1;
-    else if (code >= 0xd800 && code <= 0xdbff) {
-      // 代理对：表情和 CJK 扩展区都按全角算，低位不再单独计列。
-      cells += 2;
-      index += 1;
-    } else if (isWideCode(code)) cells += 2;
-    else if (code > 0x36f) cells += 1;
+    if (code === 9) {
+      const column = narrow + other + Math.ceil(wide * WIDE_CH);
+      narrow += tabSize - (column % tabSize);
+    } else if (code < 0x300) narrow += 1;
+    else if (isWideCode(code)) wide += 1;
+    else other += 1;
   }
-  return cells;
+  return { narrow, wide, other };
 }
 
 export interface RulerLine {
   /** 交给隐藏标尺真实排版的文本。 */
   text: string;
-  /** 被截掉部分的估算列数，由标尺用内边距补上。 */
-  rest: number;
+  /** 被截掉部分的半角列数，由标尺用内边距补上。 */
+  restCh: number;
+  /** 被截掉部分的全角字数，用 ic（当前字体「水」字的宽度）补，不套用固定比例。 */
+  restIc: number;
 }
 
+/** 标尺内联样式：只有被截断的行才需要补宽。 */
+export function rulerPadding(line: RulerLine): string | undefined {
+  return line.restCh || line.restIc ? `padding-right:calc(${line.restCh}ch + ${line.restIc}ic)` : undefined;
+}
+
+interface RulerEntry extends LineWidth {
+  text: string;
+  estimate: number;
+}
+
+function pushTop(top: RulerEntry[], entry: RulerEntry, value: (item: RulerEntry) => number, keep: number): void {
+  const score = value(entry);
+  if (score <= 0 || (top.length === keep && score <= value(top[top.length - 1]))) return;
+  let at = top.length;
+  while (at > 0 && value(top[at - 1]) < score) at -= 1;
+  top.splice(at, 0, entry);
+  if (top.length > keep) top.pop();
+}
+
+const ofNarrow = (item: RulerEntry) => item.narrow;
+const ofWide = (item: RulerEntry) => item.wide;
+const ofOther = (item: RulerEntry) => item.other;
+const ofEstimate = (item: RulerEntry) => item.estimate;
+
 /**
- * 从全量行里挑出最长的几行，交给隐藏标尺按真实字体排版：横向滚动宽度来自浏览器实测，
- * 全角字符、回退字体和 tab 都算得准，也不随虚拟窗口变化。
- * 几万行时大多数行靠长度上界直接跳过，不逐字符计算。
+ * 从全量行里挑候选，交给隐藏标尺按真实字体排版：横向滚动宽度来自浏览器实测。
+ *
+ * 行宽是各分量的加权和，权重取决于字体，所以不能只按一个估算值取前几名——几十行中文长行
+ * 会把真实更宽的 ASCII 行挤出去。这里在每个分量和综合估算上分别取最长，任何比例下最宽的行
+ * 基本都在其中；极端的混合行漏掉时，由 codeScroll 在它渲染后按实测宽度撑大标尺兜底。
+ * 几万行时拉丁行靠长度上界直接跳过，不逐字符计算。
  */
 export function codeRuler(texts: Iterable<string>, keep = RULER_LINES): RulerLine[] {
-  const top: { text: string; cells: number }[] = [];
+  const narrow: RulerEntry[] = [];
+  const wide: RulerEntry[] = [];
+  const other: RulerEntry[] = [];
+  const estimate: RulerEntry[] = [];
   for (const text of texts) {
-    const most = text.length * (text.includes("\t") ? CODE_TAB_SIZE : 2);
-    if (top.length === keep && most <= top[top.length - 1].cells) continue;
-    const cells = textCells(text);
-    if (top.length === keep && cells <= top[top.length - 1].cells) continue;
-    let at = top.length;
-    while (at > 0 && top[at - 1].cells < cells) at -= 1;
-    top.splice(at, 0, { text, cells });
-    if (top.length > keep) top.pop();
+    if (!NON_LATIN.test(text)) {
+      const most = text.length * (text.includes("\t") ? CODE_TAB_SIZE : 1);
+      if (narrow.length === keep && estimate.length === keep && most <= narrow[keep - 1].narrow && most <= estimate[keep - 1].estimate) continue;
+    }
+    const width = lineWidth(text);
+    const entry = { ...width, text, estimate: width.narrow + width.other + width.wide * WIDE_CH };
+    pushTop(narrow, entry, ofNarrow, keep);
+    pushTop(wide, entry, ofWide, keep);
+    pushTop(other, entry, ofOther, keep);
+    pushTop(estimate, entry, ofEstimate, keep);
   }
-  return top.map(({ text, cells }) => {
-    if (text.length <= RULER_SAMPLE_CHARS) return { text, rest: 0 };
-    const sample = text.slice(0, RULER_SAMPLE_CHARS);
-    return { text: sample, rest: Math.max(0, Math.min(cells, MAX_RULER_CELLS) - textCells(sample)) };
+  const chosen = [...new Set([...estimate, ...narrow, ...wide, ...other])];
+  return chosen.map((entry) => {
+    if (entry.text.length <= RULER_SAMPLE_CHARS) return { text: entry.text, restCh: 0, restIc: 0 };
+    const text = entry.text.slice(0, RULER_SAMPLE_CHARS);
+    const sample = lineWidth(text);
+    const sampleCh = sample.narrow + sample.other;
+    return {
+      text,
+      restCh: Math.max(0, Math.min(entry.narrow + entry.other, MAX_RULER_CELLS) - sampleCh),
+      restIc: Math.max(0, Math.min(entry.wide, MAX_RULER_CELLS) - sample.wide),
+    };
   });
 }

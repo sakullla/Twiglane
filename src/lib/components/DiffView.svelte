@@ -1,6 +1,7 @@
 <script lang="ts">
   import { hunkCaption, toSideRows, visibleDiffLines, type ViewLine } from "../diff";
-  import { codeRuler, scrollByRows, visibleRange } from "../layout";
+  import { trackCodeScroll } from "../codeScroll.svelte";
+  import { codeRuler, rulerPadding, scrollByRows, visibleRange } from "../layout";
   import type { DiffHunk, DiffResponse, FileSelection } from "../types";
   import { BUSY_REASON, splitPath } from "../ui";
   import { buildDiffDocuments, codeOf, signOf } from "../syntax/diffSyntax";
@@ -49,10 +50,7 @@
   let menu = $state<ContextMenuRequest | null>(null);
   let mode = $state<"unified" | "split">("unified");
   let scrollTop = $state(0);
-  /** 横向偏移：行钉在视口里（.code-stage），代码文字按它平移，两栏因此天然联动。 */
-  let scrollLeft = $state(0);
   let viewport = $state(0);
-  let viewWidth = $state(0);
   let scroller = $state<HTMLDivElement | null>(null);
   let selectionKey = $derived(selection ? `${selection.side}:${selection.path}` : "");
   let currentDiff = $derived(
@@ -180,14 +178,15 @@
   $effect(() => {
     selectionKey;
     applyScroll(0);
-    scrollLeft = 0;
     if (scroller) scroller.scrollLeft = 0;
   });
 
-  // 滚动容器随空状态重建时横向位置归零，偏移要跟上，否则新容器里的代码是错位的。
-  $effect(() => {
-    scrollLeft = scroller?.scrollLeft ?? 0;
-  });
+  /* 行钉在视口里（.code-stage），代码文字按 --code-x 平移，并排两栏因此天然联动。 */
+  trackCodeScroll(
+    () => scroller,
+    () => ruler,
+    () => [selectionKey, mode, range.start, range.end],
+  );
 
   function applyScroll(next: number) {
     scrollTop = next;
@@ -343,16 +342,11 @@
         event.preventDefault();
         openMenu(event, { x: event.clientX, y: event.clientY });
       }}
-      onscroll={(event) => {
-        scrollTop = event.currentTarget.scrollTop;
-        scrollLeft = event.currentTarget.scrollLeft;
-      }}
+      onscroll={(event) => (scrollTop = event.currentTarget.scrollTop)}
       bind:clientHeight={viewport}
-      bind:clientWidth={viewWidth}
-      style={`--code-x:${scrollLeft}px;--code-view:${viewWidth}px`}
     >
       <div class="virtual-space" style={`height:${total * ROW_HEIGHT}px`}>
-        <div class="code-ruler" class:half={mode === "split"} aria-hidden="true">{#each ruler as line, i (i)}<span data-text={line.text} style={line.rest ? `padding-right:${line.rest}ch` : undefined}></span>{/each}</div>
+        <div class="code-ruler" class:half={mode === "split"} aria-hidden="true">{#each ruler as line, i (i)}<span data-text={line.text} style={rulerPadding(line)}></span>{/each}</div>
         <div class="code-stage">
         {#if mode === "unified"}
           {#each lines.slice(range.start, range.end) as line, index (`u-${range.start + index}`)}

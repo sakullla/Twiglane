@@ -139,6 +139,35 @@ describe("自绘标题栏", () => {
     };
   }
 
+  it("没有打开仓库时不显示分支和同步", () => {
+    const { container } = render(TitleBar, { props: titleProps({ repo: null, branch: null }) as never });
+    expect(container.querySelector(".branch-pill")).toBeNull();
+    expect(container.querySelectorAll("[data-titlebar-control]").length).toBeLessThanOrEqual(6);
+  });
+
+  it("命令面板过滤后游标归零，回车执行第一条匹配", async () => {
+    const run = vi.fn();
+    const skip = vi.fn();
+    render(CommandPalette, {
+      props: {
+        open: true,
+        onClose: () => {},
+        commands: [
+          { id: "a", title: "甲", group: "组", run: skip },
+          { id: "b", title: "乙", group: "组", run: skip },
+          { id: "c", title: "丙命令", group: "组", run },
+        ],
+      } as never,
+    });
+    const input = screen.getByRole("combobox");
+    await fireEvent.keyDown(input, { key: "ArrowDown" });
+    await fireEvent.keyDown(input, { key: "ArrowDown" });
+    await fireEvent.input(input, { target: { value: "丙" } });
+    await fireEvent.keyDown(input, { key: "Enter" });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(skip).not.toHaveBeenCalled();
+  });
+
   it("常驻交互项恰好 6 个，且不含刷新、发布分支、只关联上游、远程管理", () => {
     const { container } = render(TitleBar, { props: titleProps() as never });
     const controls = [...container.querySelectorAll("[data-titlebar-control]")];

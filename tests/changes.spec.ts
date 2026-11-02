@@ -381,6 +381,29 @@ describe("主工作台", () => {
     expect(discard.textContent).toContain("确认后才写入");
   });
 
+  it("从提交区菜单打开撤销确认，收起确认后菜单一起收起，焦点回到「更多」", async () => {
+    mocks.undoCommit.mockResolvedValue({
+      generation: 4,
+      code: "undo_pushed",
+      eligible: false,
+      wrote: false,
+      headOid: "a".repeat(40),
+      parentOid: "b".repeat(40),
+      summary: "已经推送",
+      reason: "这个提交已经推送。",
+      snapshot: { generation: 4, branch: {}, files: [] },
+    });
+    render(App);
+    await openRepo();
+    const more = screen.getByRole("button", { name: "更多提交操作" });
+    await fireEvent.click(more);
+    await fireEvent.click(screen.getByRole("menuitem", { name: "撤销最近提交并保留改动" }));
+    const dialog = await screen.findByRole("dialog", { name: "撤销最近提交并保留改动" });
+    await fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("menu", { name: "更多提交操作" })).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(more));
+  });
+
   it("运行环境正常时提交区菜单不放「运行依赖」，Git 缺失时它回到菜单里", async () => {
     renderApp();
     await openRepo();

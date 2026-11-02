@@ -132,7 +132,7 @@
         <textarea
           aria-label="合并结果"
           value={resultText}
-          disabled={disabled}
+          title={disabled ? BUSY_REASON : undefined} disabled={disabled}
           spellcheck="false"
           oninput={(event) => onResult((event.currentTarget as HTMLTextAreaElement).value)}
         ></textarea>

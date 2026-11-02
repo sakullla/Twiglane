@@ -21,9 +21,11 @@
      * 名称与说明都直接可见，不再只靠悬停提示。
      */
     variant?: "toolbar" | "menu" | "headless";
+    /** 确认层收起（确认或取消）后调用：菜单入口据此一起收起，不留在原地。 */
+    onSettled?: () => void;
   }
 
-  let { opened, disabled, nextId, onSnapshot, onFailure, onNotice, onMerge, variant = "toolbar" }: Props = $props();
+  let { opened, disabled, nextId, onSnapshot, onFailure, onNotice, onMerge, variant = "toolbar", onSettled }: Props = $props();
 
   let mode = $state<"discard" | "undo" | null>(null);
   let plans = $state<DiscardFilePlan[]>([]);
@@ -35,6 +37,15 @@
   let blocked = $derived(disabled || busy);
   let conflicts = $derived(opened.snapshot.files.filter((file) => file.unmerged).length);
   let allChecked = $derived(plans.length > 0 && checked.length === plans.length);
+
+  let confirming = false;
+  $effect(() => {
+    if (mode !== null) confirming = true;
+    else if (confirming) {
+      confirming = false;
+      onSettled?.();
+    }
+  });
 
   function changedPaths(): string[] {
     return opened.snapshot.files.filter((file) => !file.unmerged).map((file) => file.path);

@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { BUSY_REASON } from "../ui";
   import type { Snippet } from "svelte";
   import { api } from "../api";
   import { normalizeError } from "../errors";
@@ -25,7 +24,7 @@
     OpenedRepository,
     StatusSnapshot,
   } from "../types";
-  import { hueOf, initialOf, relativeTime, splitPath, statusMark } from "../ui";
+  import { BUSY_REASON, hueOf, initialOf, relativeTime, splitPath, statusMark } from "../ui";
   import CommitDiffList from "./CommitDiffList.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest, isContextKey, pointFor } from "./ContextMenu.svelte";
   import DiffView from "./DiffView.svelte";
@@ -159,6 +158,8 @@
   let activeFile = $derived(detail ? preferredCommitFile(detail.files, manualPath ?? filePath) : null);
   let fileFilter = $state("");
   let bodyOpen = $state(false);
+  /** 窄详情里文件列表在差异上方，可以收起，把高度全给差异。宽详情里没有这个开关。 */
+  let filesCollapsed = $state(false);
   /** 「全部文件」模式下从左侧点选的文件：右侧滚动到它。 */
   let multiFocus = $state<string | null>(null);
   let filteredFiles = $derived(
@@ -592,19 +593,28 @@
           <div class="commit-head-main">
             <h2 class="commit-title">{detail.commit.summary}</h2>
             {#if bodyRest}
-              <pre class="commit-body" class:clamped={!bodyOpen}>{bodyRest}</pre>
-              {#if bodyRest.split("\n").length > 4 || bodyRest.length > 320}
-                <button type="button" class="btn btn-ghost btn-sm commit-body-toggle" onclick={() => (bodyOpen = !bodyOpen)}>
-                  <Icon name="chevron-down" size={12} class={bodyOpen ? "flip" : ""} />{bodyOpen ? "收起说明" : "展开完整说明"}
-                </button>
-              {/if}
+              <div class="commit-body-row" class:open={bodyOpen}>
+                <pre class="commit-body" class:clamped={!bodyOpen}>{bodyRest}</pre>
+                {#if bodyRest.split("\n").length > 2 || bodyRest.length > 120}
+                  <button type="button" class="btn btn-ghost btn-sm commit-body-toggle" onclick={() => (bodyOpen = !bodyOpen)}>
+                    <Icon name="chevron-down" size={12} class={bodyOpen ? "flip" : ""} />{bodyOpen ? "收起说明" : "展开完整说明"}
+                  </button>
+                {/if}
+              </div>
             {/if}
             <div class="commit-byline">
               <span class="avatar" style={`--hue:${hueOf(detail.commit.authorName)}`} aria-hidden="true">{initialOf(detail.commit.authorName)}</span>
               <strong>{detail.commit.authorName}</strong>
               <span class="commit-email">{detail.commit.authorEmail}</span>
-              <span class="hr-dot"></span>
               <span title={formatAuthoredAt(detail.commit.authoredAt)}>{relativeTime(detail.commit.authoredAt)} · {formatAuthoredAt(detail.commit.authoredAt)}</span>
+            <span class="commit-parents">{parentCaption(detail.commit.parents, detail.root)}</span>
+              {#each pills as pill (`${pill.kind}:${pill.name}`)}
+                <span class={`ref-pill ${pill.kind}`} class:current={pill.current} title={pill.label} aria-label={pill.label}>
+                  <Icon name={pill.kind === "tag" ? "tag" : pill.kind === "remote" ? "cloud" : "branch"} size={11} />
+                  <span>{pill.name}</span>
+                  {#if pill.remote}<Icon name="cloud" size={10} />{/if}
+                </span>
+              {/each}
             </div>
           </div>
           <div class="commit-facts">
@@ -619,18 +629,6 @@
                 <Icon name={copiedOid === detail.commit.oid ? "check" : "copy"} size={12} />
               </button>
             </span>
-            <span class="commit-parents">{parentCaption(detail.commit.parents, detail.root)}</span>
-            {#if pills.length > 0}
-              <span class="commit-refs">
-                {#each pills as pill (`${pill.kind}:${pill.name}`)}
-                  <span class={`ref-pill ${pill.kind}`} class:current={pill.current} title={pill.label} aria-label={pill.label}>
-                    <Icon name={pill.kind === "tag" ? "tag" : pill.kind === "remote" ? "cloud" : "branch"} size={11} />
-                    <span>{pill.name}</span>
-                    {#if pill.remote}<Icon name="cloud" size={10} />{/if}
-                  </span>
-                {/each}
-              </span>
-            {/if}
           </div>
           {#if detail.merge}
             <div class="commit-compare">
@@ -651,10 +649,20 @@
           {/if}
         </header>
         <div class="commit-split">
-          <aside class="commit-files" aria-label="提交中的文件">
+          <aside class="commit-files" class:collapsed={filesCollapsed} aria-label="提交中的文件">
             <div class="commit-files-head">
               <span>变更文件</span>
               <span class="count">{detail.files.length}</span>
+              <button
+                type="button"
+                class="icon-btn sm commit-files-toggle"
+                aria-expanded={!filesCollapsed}
+                aria-label={filesCollapsed ? "展开变更文件" : "收起变更文件"}
+                title={filesCollapsed ? "展开变更文件" : "收起变更文件"}
+                onclick={() => (filesCollapsed = !filesCollapsed)}
+              >
+                <Icon name="chevron-down" size={13} class={filesCollapsed ? "" : "flip"} />
+              </button>
               <span class="spacer"></span>
               {#if fileCounts.added > 0}<span class="file-tally add" title="新增">+{fileCounts.added}</span>{/if}
               {#if fileCounts.modified > 0}<span class="file-tally mod" title="修改">~{fileCounts.modified}</span>{/if}
@@ -769,7 +777,7 @@
         autocomplete="off"
         spellcheck="false"
         bind:value={branchFrom.name}
-        disabled={branchFrom.busy}
+        title={branchFrom.busy ? BUSY_REASON : undefined} disabled={branchFrom.busy}
         onkeydown={(event) => {
           if (event.key === "Enter") {
             event.preventDefault();
@@ -778,7 +786,7 @@
         }}
       />
       <label class="switch">
-        <input type="checkbox" bind:checked={branchFrom.checkout} disabled={branchFrom.busy} />
+        <input type="checkbox" bind:checked={branchFrom.checkout} title={branchFrom.busy ? BUSY_REASON : undefined} disabled={branchFrom.busy} />
         <span>创建后切换过去</span>
       </label>
       <p class="hint">

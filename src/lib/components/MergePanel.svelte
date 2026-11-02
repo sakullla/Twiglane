@@ -25,7 +25,6 @@
 </script>
 
 <script lang="ts">
-  import { BUSY_REASON } from "../ui";
   import { untrack } from "svelte";
   import { api } from "../api";
   import { normalizeError } from "../errors";
@@ -40,7 +39,7 @@
     OpenedRepository,
     StatusSnapshot,
   } from "../types";
-  import { splitPath } from "../ui";
+  import { BUSY_REASON, splitPath } from "../ui";
   import ConflictResolver from "./ConflictResolver.svelte";
   import Icon from "./Icon.svelte";
   import MergeSetup, { type MergeMode } from "./MergeSetup.svelte";
@@ -516,28 +515,35 @@
 </script>
 
 <section class={`merge-panel ${embedded ? "embedded" : "span-main"}`} aria-label="分支合并" data-panel="merge">
+  <!-- 搬走的必须是这个常驻节点：Svelte 销毁 {#if} 分支时沿分支首节点的 nextSibling 走，
+       分支首尾节点被搬走后遍历中断，后面的节点会残留。 -->
+  <div class="mp-head-host" use:portal={headTarget}>
+    {#if session && active}
+      <div class="mp-head">
+        <span class="merge-route" title={`把 ${incomingLabel} 合并到 ${currentLabel}`}>
+          <span class="merge-route-branch source"><Icon name="branch" size={12} /><span class="truncate">{incomingLabel}</span></span>
+          <span class="merge-route-arrow"><Icon name="arrow-right" size={14} /></span>
+          <span class="merge-route-branch target"><Icon name="branch" size={12} /><span class="truncate">{currentLabel}</span></span>
+        </span>
+        {#if session.operation === "unmerged"}
+          <span class="mp-note truncate" title={session.note}>{session.note}</span>
+        {/if}
+        <span class="spacer"></span>
+        {#if showMergeAbort(session.operation, session.canAbort)}
+          <button type="button" class="btn btn-danger-soft btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={askAbort}><Icon name="x" size={14} />中止合并</button>
+        {/if}
+      </div>
+    {/if}
+  </div>
+
   {#if session && active}
-    <div class="mp-head" use:portal={headTarget}>
-      <span class="merge-route" title={`把 ${incomingLabel} 合并到 ${currentLabel}`}>
-        <span class="merge-route-branch source"><Icon name="branch" size={12} /><span class="truncate">{incomingLabel}</span></span>
-        <span class="merge-route-arrow"><Icon name="arrow-right" size={14} /></span>
-        <span class="merge-route-branch target"><Icon name="branch" size={12} /><span class="truncate">{currentLabel}</span></span>
-      </span>
-      {#if session.operation === "unmerged"}
-        <span class="mp-note truncate" title={session.note}>{session.note}</span>
-      {/if}
-      <span class="spacer"></span>
-      {#if showMergeAbort(session.operation, session.canAbort)}
-        <button type="button" class="btn btn-danger-soft btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={askAbort}><Icon name="x" size={14} />中止合并</button>
-      {/if}
-    </div>
     <div class="mp-body">
       <aside class="conflict-sidebar" aria-label="冲突文件列表">
         <div class="conflict-sidebar-head">
           <span>冲突文件</span>
           {#if session.unresolved > 0}<span class="count danger" title="未解决冲突">{session.unresolved}</span>{/if}
         </div>
-        {#if conflictTotal > 0}
+        {#if resolvedPaths.length > 0}
           <div
             class="merge-progress"
             role="progressbar"
@@ -723,27 +729,23 @@
 
   <div class="mp-foot" class:strip>
     <div class="mp-foot-file" bind:this={footFile}></div>
-    {#if session?.operation === "merge"}
-      <label class="sr-only" for="merge-message">合并说明</label>
-      <input
-        id="merge-message"
-        class="input mp-message"
-        aria-label="合并说明"
-        placeholder="合并说明"
-        bind:value={message}
-        oninput={() => messageByRepo.set(opened.summary.path, message)}
-        disabled={blocked}
-      />
-    {/if}
-    {#if strip && conflictTotal > 0}
-      <span class="mp-progress-text">已解决 <strong>{resolvedPaths.length}</strong> / {conflictTotal} 个文件</span>
-    {/if}
+    <!-- 底部只留主操作：还有冲突时一句话说清进度和原因，全部解决后才需要合并说明。 -->
     {#if session?.operation === "merge"}
       {#if session.unresolved > 0}
-        {@const reason = `还有 ${session.unresolved} 个未解决冲突，不能完成合并。`}
+        {@const reason = `${conflictTotal > 0 ? `已解决 ${resolvedPaths.length} / ${conflictTotal} 个文件，` : ""}还有 ${session.unresolved} 个未解决冲突，不能完成合并。`}
         <span class="mp-status warn" title={reason}><Icon name="alert" size={13} /><span class="truncate">{reason}</span></span>
       {:else}
         {@const reason = "冲突已全部处理，完成只会提交，不会推送。"}
+        <label class="sr-only" for="merge-message">合并说明</label>
+        <input
+          id="merge-message"
+          class="input mp-message"
+          aria-label="合并说明"
+          placeholder="合并说明"
+          bind:value={message}
+          oninput={() => messageByRepo.set(opened.summary.path, message)}
+          title={blocked ? BUSY_REASON : undefined} disabled={blocked}
+        />
         <span class="mp-status ok" title={reason}><Icon name="check-circle" size={13} /><span class="truncate">{reason}</span></span>
       {/if}
     {:else if session?.operation === "unmerged"}

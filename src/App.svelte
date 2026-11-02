@@ -1913,12 +1913,13 @@
                   onCommitPush={commitAndPush}
                   onScope={() => runCommand("task.scope")}
                 >
-                  {#snippet overflow()}
+                  {#snippet overflow(closeMore: () => void)}
                     <div class="menu-label" role="presentation">撤销与恢复</div>
                     {#if opened}
                       <RecoveryActions
                         opened={opened}
                         variant="menu"
+                        onSettled={closeMore}
                         disabled={writeLocked}
                         {nextId}
                         onSnapshot={applySnapshot}

@@ -791,12 +791,12 @@
         title="两侧相同，或有共同祖先且只有一侧改动的冲突，结论是确定的"
         onclick={applySimple}
       >
-        <Icon name="check-circle" size={13} /><span class="cr-simple-wide">处理 {simple.length} 处简单冲突</span><span class="cr-simple-narrow" aria-hidden="true">{simple.length}</span>
+        <Icon name="check-circle" size={13} /><span class="cr-simple-wide">处理 {simple.length} 处简单冲突</span><span class="cr-simple-narrow" aria-hidden="true">{simple.length} 处简单</span>
       </button>
     {/if}
     {#if hunkMode && effectiveMode === "hunks"}
       <label class="cr-toggle" title={hasBase ? "在每处冲突上方显示共同祖先版本" : "冲突标记里没有共同祖先。可设置 git config merge.conflictStyle zdiff3 后重新合并"}>
-        <input type="checkbox" class="checkbox" bind:checked={showBase} disabled={!hasBase} />
+        <input type="checkbox" class="checkbox" bind:checked={showBase} title={hasBase ? undefined : "冲突标记里没有共同祖先"} disabled={!hasBase} />
         <span><span class="cr-toggle-wide">共同</span>祖先</span>
       </label>
       <div class="menu-anchor" bind:this={keysAnchor}>
@@ -1008,7 +1008,7 @@
                   aria-label={`编辑冲突 ${row.hunk + 1} 的结果`}
                   spellcheck="false"
                   bind:value={editText}
-                  disabled={disabled}
+                  title={disabled ? BUSY_REASON : undefined} disabled={disabled}
                 ></textarea>
                 <div class="cr-edit-foot">
                   <button type="button" class="btn btn-ghost btn-sm" onclick={() => (editText = [...(parsed.hunks[row.hunk]?.ours ?? [])].map(stripEol).join("\n"))}>填入当前</button>

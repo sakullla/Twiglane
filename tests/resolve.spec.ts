@@ -629,6 +629,57 @@ describe("合并任务 modal", () => {
     return { onClose };
   }
 
+  it("中止后冲突界面完全移除，不和起始界面并存", async () => {
+    mergeSession.mockResolvedValueOnce(
+      session({ operation: "merge", canAbort: true, unresolved: 1, source: "feature", conflicts: [] }),
+    );
+    mergeSession.mockResolvedValue(session());
+    abortMerge.mockResolvedValue({ generation: 5, wrote: false, paths: [], note: "将恢复。", snapshot: opened.snapshot });
+    renderMergeModal();
+    await fireEvent.click(await screen.findByRole("button", { name: "中止合并" }));
+    expect(document.querySelector(".mp-body")).toBeTruthy();
+    await fireEvent.click(await screen.findByRole("button", { name: "确认中止" }));
+    await vi.waitFor(() => expect(document.querySelector(".mp-body")).toBeNull());
+    expect(document.querySelector(".mp-head"), "标题行里的路由也一起移除").toBeNull();
+    expect(document.querySelector(".mp-head-host"), "常驻节点留在落点").toBeTruthy();
+  });
+
+  it("完成后冲突界面完全移除，只剩完成页", async () => {
+    const live = session({ operation: "merge", canAbort: true, canContinue: true, unresolved: 0, source: "feature", conflicts: [] });
+    mergeSession.mockResolvedValueOnce(live);
+    mergeSession.mockResolvedValue(session());
+    completeMerge.mockResolvedValue({ oid: "d".repeat(40), generation: 7, summary: "已完成。", files: [], snapshot: opened.snapshot });
+    renderMergeModal();
+    const input = await screen.findByRole("textbox", { name: "合并说明" });
+    await fireEvent.input(input, { target: { value: "Merge feature" } });
+    await fireEvent.click(screen.getByRole("button", { name: "完成合并" }));
+    await vi.waitFor(() => expect(document.querySelector(".merge-done")).toBeTruthy());
+    expect(document.querySelector(".mp-body")).toBeNull();
+    expect(document.querySelector(".mp-head")).toBeNull();
+  });
+
+  it("有未解决冲突时底部只留一句进度和原因，全部解决后才出现合并说明", async () => {
+    mergeSession.mockResolvedValue(
+      session({
+        operation: "merge",
+        canAbort: true,
+        unresolved: 1,
+        source: "feature",
+        conflicts: [{ path: "a.txt", kind: "both_modified", stages: [] } as never],
+      }),
+    );
+    renderMergeModal();
+    const foot = await vi.waitFor(() => {
+      const node = document.querySelector<HTMLElement>(".mp-foot .mp-status");
+      expect(node).toBeTruthy();
+      return node!;
+    });
+    expect(foot.textContent).toContain("已解决 0 / 1 个文件，还有 1 个未解决冲突，不能完成合并");
+    expect(document.querySelectorAll(".mp-foot .mp-status")).toHaveLength(1);
+    expect(screen.queryByRole("textbox", { name: "合并说明" })).toBeNull();
+    expect(document.querySelector(".merge-progress"), "还没有进度时不留空进度槽").toBeNull();
+  });
+
   it("路由和中止并入标题行，排在标题之后；note 收缩不影响路由", async () => {
     mergeSession.mockResolvedValue(
       session({ operation: "merge", canAbort: true, unresolved: 1, conflicts: [], note: "说明" }),

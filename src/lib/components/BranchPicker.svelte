@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from "svelte";
   import type { BranchRecord } from "../types";
+  import { BUSY_REASON } from "../ui";
   import Icon from "./Icon.svelte";
 
   interface Props {
@@ -161,6 +162,7 @@
     aria-haspopup="listbox"
     aria-expanded={open}
     aria-controls={open ? listId : undefined}
+    title={disabled ? BUSY_REASON : undefined}
     {disabled}
     bind:this={trigger}
     onclick={() => (open ? hide() : void show())}

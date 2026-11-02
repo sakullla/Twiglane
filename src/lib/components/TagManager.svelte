@@ -241,10 +241,10 @@
         </div>
         <div class="form-group">
           <label class="label" for="tag-target">目标提交</label>
-          <input id="tag-target" class="input code" bind:value={target} placeholder="HEAD 或提交 Hash" disabled={blocked} autocomplete="off" spellcheck="false" />
+          <input id="tag-target" class="input code" bind:value={target} placeholder="HEAD 或提交 Hash" title={blocked ? BUSY_REASON : undefined} disabled={blocked} autocomplete="off" spellcheck="false" />
         </div>
       </div>
-      <input class="input" aria-label="标签附注" bind:value={message} placeholder="可选附注；填写后创建附注标签" disabled={blocked} />
+      <input class="input" aria-label="标签附注" bind:value={message} placeholder="可选附注；填写后创建附注标签" title={blocked ? BUSY_REASON : undefined} disabled={blocked} />
       <p class="hint">标记当前提交，或输入另一个提交 Hash。</p>
       <div class="create-form-actions">
         <button type="button" class="btn btn-secondary" title={writing ? BUSY_REASON : undefined} disabled={writing} onclick={closeCreate}>取消</button>

@@ -31,10 +31,9 @@
 </script>
 
 <script lang="ts">
-  import { BUSY_REASON } from "../ui";
-  import type { Snippet } from "svelte";
+  import { tick, type Snippet } from "svelte";
   import { MODIFIER_LABEL } from "../brand";
-  import { hasCommitSummary, summaryLength } from "../ui";
+  import { BUSY_REASON, hasCommitSummary, summaryLength } from "../ui";
   import Icon from "./Icon.svelte";
 
   /**
@@ -67,8 +66,8 @@
     onCommitPush?: () => void;
     /** 打开「本次提交范围」modal。 */
     onScope?: () => void;
-    /** 溢出菜单内容：由外壳注入。 */
-    overflow?: Snippet;
+    /** 溢出菜单内容：由外壳注入，参数用来收起菜单并把焦点还给「更多」按钮。 */
+    overflow?: Snippet<[() => void]>;
   }
 
   let {
@@ -164,6 +163,12 @@
       menuStyle = `position:fixed;top:auto;left:auto;right:${right}px;bottom:${bottom}px;max-height:${room}px`;
     }
     moreOpen = true;
+  }
+
+  async function closeMore() {
+    moreOpen = false;
+    await tick();
+    moreButton?.focus();
   }
 
   /**
@@ -323,7 +328,7 @@
         </button>
         {#if moreOpen}
           <div class="menu composer-more-menu" role="menu" aria-label="更多提交操作" style={menuStyle}>
-            {@render overflow()}
+            {@render overflow(closeMore)}
           </div>
         {/if}
       </div>
@@ -339,7 +344,7 @@
       bind:this={textarea}
       style={`height:${shownHeight}px`}
       {value}
-      disabled={disabled}
+      title={disabled ? BUSY_REASON : undefined} disabled={disabled}
       onfocus={() => (active = true)}
       oninput={(event) => onInput((event.currentTarget as HTMLTextAreaElement).value)}
       onblur={onBlur}

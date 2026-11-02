@@ -1,9 +1,8 @@
 <script lang="ts">
-  import { BUSY_REASON } from "../ui";
   import { hunkCaption, toSideRows, visibleDiffLines, type ViewLine } from "../diff";
   import { scrollByRows, visibleRange } from "../layout";
   import type { DiffHunk, DiffResponse, FileSelection } from "../types";
-  import { splitPath } from "../ui";
+  import { BUSY_REASON, splitPath } from "../ui";
   import { buildDiffDocuments, codeOf, signOf } from "../syntax/diffSyntax";
   import { createHighlight } from "../syntax/highlight.svelte";
   import { effectiveLanguage } from "../syntax/prefs.svelte";

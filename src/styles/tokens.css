@@ -60,6 +60,8 @@
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
   /* 不可用控件统一淡化比例；文字按钮不走它，用中性填充（见 .btn:disabled）。 */
   --opacity-disabled: 0.45;
+  /* 合并底部操作条的高度：通知抬到它上面时同用这个值。 */
+  --mp-foot-height: 44px;
 
   /* 层级：resizer 5 / titlebar 20 / menu 30 / palette 40 / modal 50 / toast 60 */
   --z-sticky: 1;

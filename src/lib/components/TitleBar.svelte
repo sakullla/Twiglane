@@ -1,9 +1,8 @@
 <script lang="ts">
-  import { BUSY_REASON } from "../ui";
   import { onMount, tick } from "svelte";
   import { BRAND } from "../brand";
   import type { RepoSummary, Theme } from "../types";
-  import { hueOf, initialOf } from "../ui";
+  import { BUSY_REASON, hueOf, initialOf } from "../ui";
   import {
     WINDOW_PLATFORM,
     closeWindow,
@@ -20,7 +19,8 @@
   /**
    * 自绘标题栏：整条为窗口拖拽区（`data-tauri-drag-region` 只落在非交互容器上），
    * 交互控件带 `data-titlebar-control`，因此不会被拖拽命中。
-   * R2：常驻交互项恰好 6 个——品牌、仓库、分支、同步组、主题、设置；
+   * R6：常驻交互项不超过 6 个——品牌、仓库、分支、同步组、主题、设置；没有打开仓库时
+   * 分支和同步都没有意义，不显示，只留品牌、打开仓库、主题和设置。
    * 刷新、发布分支、只关联上游都不在这里，远程管理收在同步菜单底部。
    * 仓库与分支弹层由外壳挂载，这里只把触发按钮交出去，并显示展开状态。
    */
@@ -215,71 +215,74 @@
       </span>
       <Icon name="chevron-down" size={13} />
     </button>
-    <button
-      type="button"
-      class="branch-pill"
-      data-titlebar-control
-      disabled={branch === null}
-      aria-label={`当前分支 ${branchText}`}
-      aria-haspopup="dialog"
-      aria-expanded={openSwitcher === "branch"}
-      title={branchTitle}
-      onclick={(event) => onBranch(event.currentTarget)}
-    >
-      <Icon name="branch" size={15} />
-      <span class="truncate">{branchText}</span>
-      {#if upstreamMissing}<span class="branch-hint">未关联上游</span>{/if}
-      <Icon name="chevron-down" size={13} />
-    </button>
+    {#if repo}
+      <button
+        type="button"
+        class="branch-pill"
+        data-titlebar-control
+        disabled={branch === null}
+        aria-label={`当前分支 ${branchText}`}
+        aria-haspopup="dialog"
+        aria-expanded={openSwitcher === "branch"}
+        title={branchTitle}
+        onclick={(event) => onBranch(event.currentTarget)}
+      >
+        <Icon name="branch" size={15} />
+        <span class="truncate">{branchText}</span>
+        {#if upstreamMissing}<span class="branch-hint">未关联上游</span>{/if}
+        <Icon name="chevron-down" size={13} />
+      </button>
+    {/if}
   </div>
 
   <span class="titlebar-spacer" data-tauri-drag-region aria-hidden="true"></span>
 
   <div class="titlebar-group titlebar-actions" data-tauri-drag-region>
-    <div class="menu-anchor" bind:this={syncAnchor}>
-      <button
-        type="button"
-        class="branch-pill sync-pill"
-        data-titlebar-control
-        class:busy={pending !== null}
-        disabled={repo === null}
-        aria-label={`同步 ${syncSummary}`}
-        aria-haspopup="menu"
-        aria-expanded={syncMenu}
-        title={`同步状态：${syncSummary}\n获取、拉取与推送都在这里`}
-        bind:this={syncTrigger}
-        onclick={() => toggleMenu("sync")}
-        onkeydown={(event) => onTriggerKey(event, "sync")}
-      >
-        <Icon name="cloud" size={15} />
-        <span class="truncate">同步</span>
-        {#if ahead > 0}<span class="count">{ahead}</span>{/if}
-        {#if behind > 0}<span class="count subtle-count">{behind}</span>{/if}
-        {#if pending !== null}<span class="spinner"></span>{/if}
-        <Icon name="chevron-down" size={13} />
-      </button>
-      {#if syncMenu}
-        <div class="menu" role="menu" aria-label="同步" tabindex="-1" onkeydown={(event) => onMenuKey(event, "sync")}>
-          <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => runSync(onFetch)}>
-            <Icon name="download" />
-            <span>获取更新<small>下载远程分支与提交信息，不修改本地文件</small></span>
-          </button>
-          <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => runSync(onPull)}>
-            <Icon name="arrow-down" />
-            <span>拉取{behind > 0 ? ` ${behind} 个提交` : ""}<small>快进拉取，不会自动合并分叉</small></span>
-          </button>
-          <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => runSync(onPush)}>
-            <Icon name="arrow-up" />
-            <span>推送{ahead > 0 ? ` ${ahead} 个提交` : ""}<small>不会强行推送</small></span>
-          </button>
-          <div class="menu-sep" role="separator"></div>
-          <button type="button" class="menu-item" role="menuitem" onclick={() => runSync(onRemote)}>
-            <Icon name="globe" />
-            <span>远程<small>查看与修改远程地址</small></span>
-          </button>
-        </div>
-      {/if}
-    </div>
+    {#if repo}
+      <div class="menu-anchor" bind:this={syncAnchor}>
+        <button
+          type="button"
+          class="branch-pill sync-pill"
+          data-titlebar-control
+          class:busy={pending !== null}
+            aria-label={`同步 ${syncSummary}`}
+          aria-haspopup="menu"
+          aria-expanded={syncMenu}
+          title={`同步状态：${syncSummary}\n获取、拉取与推送都在这里`}
+          bind:this={syncTrigger}
+          onclick={() => toggleMenu("sync")}
+          onkeydown={(event) => onTriggerKey(event, "sync")}
+        >
+          <Icon name="cloud" size={15} />
+          <span class="truncate">同步</span>
+          {#if ahead > 0}<span class="count">{ahead}</span>{/if}
+          {#if behind > 0}<span class="count subtle-count">{behind}</span>{/if}
+          {#if pending !== null}<span class="spinner"></span>{/if}
+          <Icon name="chevron-down" size={13} />
+        </button>
+        {#if syncMenu}
+          <div class="menu" role="menu" aria-label="同步" tabindex="-1" onkeydown={(event) => onMenuKey(event, "sync")}>
+            <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => runSync(onFetch)}>
+              <Icon name="download" />
+              <span>获取更新<small>下载远程分支与提交信息，不修改本地文件</small></span>
+            </button>
+            <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => runSync(onPull)}>
+              <Icon name="arrow-down" />
+              <span>拉取{behind > 0 ? ` ${behind} 个提交` : ""}<small>快进拉取，不会自动合并分叉</small></span>
+            </button>
+            <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => runSync(onPush)}>
+              <Icon name="arrow-up" />
+              <span>推送{ahead > 0 ? ` ${ahead} 个提交` : ""}<small>不会强行推送</small></span>
+            </button>
+            <div class="menu-sep" role="separator"></div>
+            <button type="button" class="menu-item" role="menuitem" onclick={() => runSync(onRemote)}>
+              <Icon name="globe" />
+              <span>远程<small>查看与修改远程地址</small></span>
+            </button>
+          </div>
+        {/if}
+      </div>
+    {/if}
 
     <div class="menu-anchor" bind:this={themeAnchor}>
       <button

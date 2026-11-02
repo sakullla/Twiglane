@@ -686,7 +686,7 @@ describe("远程管理 modal", () => {
     expect(base.onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("克隆在途时取消禁用，Esc 不关闭", async () => {
+  it("克隆无法取消：在途时入口写明“在后台继续”，收起后照常打开仓库", async () => {
     vi.mocked(pickDirectory).mockResolvedValue("/parent");
     let finish: (value: unknown) => void = () => {};
     cloneRepository.mockReset();
@@ -700,11 +700,34 @@ describe("远程管理 modal", () => {
     await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
     await fireEvent.click(start);
     await tick();
-    const cancel = screen.getByRole("button", { name: "取消" });
-    expect(cancel.hasAttribute("disabled")).toBe(true);
+    expect(screen.queryByRole("button", { name: "取消" }), "不能写“取消”，后端停不下来").toBeNull();
+    expect(document.querySelector("[data-clone-running]")?.textContent).toContain("无法中途取消");
+    const keepGoing = screen.getByRole("button", { name: "在后台继续" });
+    expect(keepGoing.hasAttribute("disabled")).toBe(false);
+    expect(screen.getByRole("button", { name: "关闭对话框" }).hasAttribute("disabled"), "X 同样可以收起").toBe(false);
     await fireEvent.keyDown(document.body, { key: "Escape" });
-    expect(base.onClose).not.toHaveBeenCalled();
+    expect(base.onClose).toHaveBeenCalledTimes(1);
     finish({ path: "/parent/r", opened: { ...opened, summary: { name: "r", path: "/parent/r" } } });
-    await waitFor(() => expect(base.onClose).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(base.onOpened).toHaveBeenCalledTimes(1));
+    expect(base.onNotice).toHaveBeenCalledWith("已克隆并打开 r");
+  });
+
+  it("收起后克隆失败仍通知原因，不再去关别的对话框", async () => {
+    vi.mocked(pickDirectory).mockResolvedValue("/parent");
+    let fail: (reason: unknown) => void = () => {};
+    cloneRepository.mockReset();
+    cloneRepository.mockReturnValue(new Promise((_, reject) => (fail = reject)));
+    const base = repoProps("clone");
+    const view = render(RepoDialogs, { props: { ...base, opened: null } });
+    await fireEvent.input(screen.getByLabelText("远程地址"), { target: { value: "https://e.com/r.git" } });
+    await fireEvent.click(screen.getByRole("button", { name: /选择目录/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始克隆/ }).hasAttribute("disabled")).toBe(false));
+    await fireEvent.click(screen.getByRole("button", { name: /开始克隆/ }));
+    await tick();
+    await view.rerender({ ...base, opened: null, mode: null });
+    fail({ code: "auth", message: "认证失败" });
+    await waitFor(() => expect(base.onFailure).toHaveBeenCalledTimes(1));
+    expect(base.onOpened).not.toHaveBeenCalled();
+    expect(base.onClose).not.toHaveBeenCalled();
   });
 });

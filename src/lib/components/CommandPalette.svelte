@@ -174,6 +174,7 @@
             id="palette-input"
             bind:this={inputEl}
             bind:value={query}
+            oninput={() => (active = 0)}
             role="combobox"
             aria-expanded="true"
             aria-controls="palette-list"

@@ -3,10 +3,9 @@
 </script>
 
 <script lang="ts">
-  import { BUSY_REASON } from "../ui";
   import { commitFileLabel, formatAuthoredAt, shortOid } from "../history";
   import type { BranchRecord, MergePreview } from "../types";
-  import { hueOf, initialOf, relativeTime, splitPath, statusMark } from "../ui";
+  import { BUSY_REASON, hueOf, initialOf, relativeTime, splitPath, statusMark } from "../ui";
   import BranchPicker from "./BranchPicker.svelte";
   import Icon from "./Icon.svelte";
 
@@ -264,7 +263,7 @@
           {#if mode === "merge"}
             <label class="merge-message">
               <span>合并说明</span>
-              <input class="input" aria-label="合并说明" value={message} disabled={blocked} oninput={(event) => onMessage((event.currentTarget as HTMLInputElement).value)} />
+              <input class="input" aria-label="合并说明" value={message} title={blocked ? BUSY_REASON : undefined} disabled={blocked} oninput={(event) => onMessage((event.currentTarget as HTMLInputElement).value)} />
             </label>
           {/if}
         </section>

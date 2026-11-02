@@ -471,6 +471,34 @@ describe("历史分栏", () => {
     expect(within(detail).getByRole("group", { name: "历史差异模式" })).toBeTruthy();
     expect(detail.querySelector(".commit-files")).toBeTruthy();
     expect(detail.querySelector(".commit-diff")).toBeTruthy();
+    const toggle = within(detail).getByRole("button", { name: "收起变更文件" });
+    await fireEvent.click(toggle);
+    expect(detail.querySelector(".commit-files.collapsed")).toBeTruthy();
+    expect(within(detail).getByRole("button", { name: "展开变更文件" }).getAttribute("aria-expanded")).toBe("false");
+    const byline = detail.querySelector<HTMLElement>(".commit-byline")!;
+    expect(byline.querySelector(".commit-parents"), "父提交并入作者行，详情头不再堆成一列").toBeTruthy();
+    expect(byline.querySelector(".hr-dot"), "折行时不留孤立的分隔点").toBeNull();
+  });
+
+  it("长说明默认折叠，超过两行才给展开入口", async () => {
+    const only = {
+      oid: "c".repeat(40), summary: "概要", authorName: "A", authorEmail: "a@e.com", authoredAt: 1, parents: ["d".repeat(40)], labels: [],
+    };
+    historyPage.mockResolvedValue({ generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [only] });
+    commitDetail.mockResolvedValue({
+      generation: 3,
+      commit: only,
+      body: "概要\n\n第一行\n第二行\n第三行",
+      root: false,
+      merge: false,
+      selectedParent: only.parents[0],
+      files: [],
+    });
+    render(HistoryPanel, { props: panelProps() });
+    const toggle = await screen.findByRole("button", { name: "展开完整说明" });
+    expect(document.querySelector(".commit-body.clamped")).toBeTruthy();
+    await fireEvent.click(toggle);
+    expect(document.querySelector(".commit-body.clamped")).toBeNull();
   });
 });
 

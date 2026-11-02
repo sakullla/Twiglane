@@ -557,7 +557,7 @@
         <div class="branch-create-options">
           <label class="branch-base">
             <span>起点</span>
-            <select class="select" aria-label="新分支的起点" bind:value={createBase} disabled={blocked}>
+            <select class="select" aria-label="新分支的起点" bind:value={createBase} title={blocked ? BUSY_REASON : undefined} disabled={blocked}>
               <option value="">当前分支（{current.name ?? "游离 HEAD"}）</option>
               {#each branches.filter((branch) => !branch.current) as branch (branch.name)}
                 <option value={branch.name}>{branch.remote ? `远程 ${branch.name}` : branch.name}</option>
@@ -565,7 +565,7 @@
             </select>
           </label>
           <label class="switch branch-checkout">
-            <input type="checkbox" bind:checked={createCheckout} disabled={blocked} />
+            <input type="checkbox" bind:checked={createCheckout} title={blocked ? BUSY_REASON : undefined} disabled={blocked} />
             <span>创建后切换过去</span>
           </label>
         </div>

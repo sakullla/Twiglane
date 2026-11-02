@@ -1,10 +1,9 @@
 <script lang="ts">
-  import { BUSY_REASON } from "../ui";
   import { api } from "../api";
   import { normalizeError } from "../errors";
   import { formatAuthoredAt, shortOid, stashPathBadge } from "../history";
   import type { OpenedRepository, StashApplyResult, StashRecord, StashState, StatusSnapshot } from "../types";
-  import { relativeTime } from "../ui";
+  import { BUSY_REASON, relativeTime } from "../ui";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
 
@@ -199,7 +198,7 @@
             <input
               type="checkbox"
               checked={includeUntracked}
-              disabled={busy || disabled}
+              title={busy || disabled ? BUSY_REASON : undefined} disabled={busy || disabled}
               onchange={(event) => (includeUntracked = (event.currentTarget as HTMLInputElement).checked)}
             />
             包含未跟踪文件
@@ -230,7 +229,7 @@
             aria-label="临时保存说明"
             placeholder="可选说明，例如：先放一放的实验"
             value={message}
-            disabled={busy || disabled}
+            title={busy || disabled ? BUSY_REASON : undefined} disabled={busy || disabled}
             oninput={(event) => (message = (event.currentTarget as HTMLInputElement).value)}
             onkeydown={(event) => {
               if (event.key === "Enter") save();

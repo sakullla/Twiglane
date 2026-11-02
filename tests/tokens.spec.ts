@@ -552,6 +552,24 @@ describe("状态与动效统一（R2、R12）", () => {
     expect(wide).toMatch(/\.cr-seg-label/);
   });
 
+  it("弹窗打开时通知不盖住底部操作条", () => {
+    expect(ruleBody(components, ":root:has(.modal-fill) .toasts")).toMatch(/bottom:\s*calc\(var\(--space-16\) \* 2 \+ var\(--mp-foot-height\)\)/);
+    expect(ruleBody(components, ":root:has([data-modal-backdrop]) .toasts")).toMatch(/top:\s*var\(--space-8\)/);
+    expect(ruleBody(components, ".mp-foot.strip")).toMatch(/var\(--mp-foot-height\)/);
+  });
+
+  it("窄详情改成上下布局，文件列表可收起", () => {
+    const narrow = components.match(/@container history-detail \(max-width: 720px\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(narrow).toMatch(/\.commit-split\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\);/);
+    expect(narrow).toMatch(/\.commit-files\.collapsed \.history-files/);
+    expect(ruleBody(components, ".commit-files-toggle"), "宽详情没有这个开关").toMatch(/display:\s*none/);
+    expect(ruleBody(components, ".commit-body.clamped"), "长说明默认折叠到一行").toMatch(/-webkit-line-clamp:\s*1/);
+  });
+
+  it("合并说明窄窗也不被压缩", () => {
+    expect(ruleBody(components, ".mp-foot.strip .mp-message")).toMatch(/min-width:\s*240px/);
+  });
+
   it("行内改动除了底色还有底线", () => {
     expect(ruleBody(components, ".diff-line.add .wd, .side-cell.add .wd")).toMatch(/box-shadow:\s*inset 0 -1px 0 var\(--add-fg\)/);
     expect(ruleBody(components, ".diff-line.del .wd, .side-cell.del .wd")).toMatch(/box-shadow:\s*inset 0 -1px 0 var\(--del-fg\)/);

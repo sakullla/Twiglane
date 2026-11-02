@@ -558,11 +558,19 @@ afterEach(() => {
 });
 
 describe("应用外壳", () => {
-  it("标题栏恰好 6 个常驻控件，刷新、发布分支、只关联上游、远程管理都不在里面", async () => {
+  it("标题栏不超过 6 个常驻控件，刷新、发布分支、只关联上游、远程管理都不在里面", async () => {
     render(App);
 
-    // 未打开仓库时同样是 6 个：常驻是这个标题栏的契约，不是「打开后才补齐」。
-    expect(document.querySelectorAll("[data-titlebar-control]")).toHaveLength(6);
+    // 未打开仓库时不超过 6 个（R6）：分支和同步没有对象，不显示无效控件。
+    const idle = [...document.querySelectorAll<HTMLElement>("[data-titlebar-control]")];
+    expect(idle.length).toBeLessThanOrEqual(6);
+    expect(idle.map((control) => control.getAttribute("aria-label"))).toEqual([
+      `${BRAND.full} 品牌菜单`,
+      "打开仓库",
+      "主题：深色",
+      "设置",
+    ]);
+    expect(document.querySelector(".branch-pill"), "起始页不显示“无分支”和“同步”").toBeNull();
 
     await openRepo();
 

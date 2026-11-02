@@ -43,7 +43,7 @@
   let remoteUrl = $state("");
   let remoteNameInput = $state<HTMLInputElement | null>(null);
   let localBusy = $state(false);
-  /** 克隆或保存远程在途：结果未定，不能取消或关闭。读取远程时仍可关闭。 */
+  /** 克隆或保存远程在途。保存远程不能关闭；克隆后端不能取消，收起窗口后在后台继续。读取远程时仍可关闭。 */
   let writing = $state(false);
   /**
    * 远程列表的读取结果：只有真正读完才写入，写锁期间跳过的那次不算。
@@ -106,7 +106,8 @@
     if (!result) return;
     onNotice(`已克隆并打开 ${result.opened.summary.name}`);
     onOpened(result.opened);
-    onClose();
+    // 收起后再次打开的可能是别的对话框，只关自己。
+    if (mode === "clone") onClose();
   }
 
   /** 过期时用后端给的 generation 重读一次；成功后由 onSnapshot 让外壳跟上，再过期就按失败处理。 */
@@ -181,7 +182,6 @@
     titleId="repo-dialog-title"
     icon="download"
     description="克隆到新目录后会直接打开。目标里已有文件时不会覆盖。"
-    locked={writing}
     {onClose}
   >
     <div class="form-grid">
@@ -214,10 +214,13 @@
         <Icon name="info" size={15} />
         <span>认证使用系统凭据助手或 SSH agent，不要把令牌写进地址。需要交互输入时会停止，而不是一直等待。</span>
       </div>
+      {#if writing}
+        <p class="hint" role="status" data-clone-running>克隆无法中途取消。可以收起这个窗口，克隆会在后台继续，完成后自动打开仓库；失败时通知里说明原因。</p>
+      {/if}
     </div>
     {#snippet footer()}
       <span class="spacer"></span>
-      <button type="button" class="btn btn-secondary" title={writing ? BUSY_REASON : undefined} disabled={writing} onclick={onClose}>取消</button>
+      <button type="button" class="btn btn-secondary" onclick={onClose}>{writing ? "在后台继续" : "取消"}</button>
       <button type="button" class="btn btn-primary" title={blocked ? BUSY_REASON : !cloneUrl.trim() ? "先填写远程地址" : !cloneParent ? "先选择父目录" : undefined} disabled={blocked || !cloneUrl.trim() || !cloneParent} onclick={startClone}>
         {#if localBusy}<span class="spinner"></span>{:else}<Icon name="download" size={14} />{/if}
         开始克隆

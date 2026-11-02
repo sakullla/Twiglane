@@ -282,8 +282,50 @@ describe("多选文件的右键菜单", () => {
     expect(mocks.stageFiles).toHaveBeenCalledTimes(2);
   });
 
-  it("generation 过期时停下，没轮到的文件算未处理", async () => {
-    mocks.stageFiles.mockRejectedValueOnce({ code: "stale", message: "仓库状态已变化", generation: 9 });
+  it("批量自身触发的 stale：git add 写索引，监视器 300ms 防抖后推高 generation，重试后全部完成", async () => {
+    // 模拟后端：写入成功后 300ms 才推高 generation；请求带旧 generation 时什么都不写。
+    let backend = 4;
+    const written: string[] = [];
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    mocks.stageFiles.mockImplementation(async (_repo: string, paths: string[], generation: number) => {
+      if (generation !== backend) throw { code: "stale", message: "仓库状态已变化。", generation: backend };
+      written.push(...paths);
+      const settled = backend;
+      timers.push(setTimeout(() => (backend += 1), 300));
+      await new Promise((resolve) => setTimeout(resolve, 320));
+      return { ...snapshot, generation: settled, files: manyFiles.filter((file) => !written.includes(file.path)) };
+    });
+    await selectThree();
+    await fireEvent.click(row("src/util.ts"), { ctrlKey: true });
+    const menu = await rightClick(row("src/app.css"));
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: /暂存 3 个文件/ }));
+    await waitFor(() => expect(written).toEqual(["src/App.svelte", "src/app.css", "src/util.ts"]), { timeout: 3000 });
+    await waitFor(() => expect(screen.getByRole("button", { name: "刷新工作区" })).toHaveProperty("disabled", false), { timeout: 3000 });
+    timers.forEach(clearTimeout);
+    expect(mocks.stageFiles.mock.calls.length, "第 2、3 个文件各被 stale 拒绝一次").toBe(5);
+    expect(document.querySelector(".toast.error")).toBeNull();
+  });
+
+  it("stale 只重试当前文件，连续 6 次后才停下并说明，已成功的保留", async () => {
+    let attempts = 0;
+    mocks.stageFiles.mockImplementation(async (_repo: string, paths: string[]) => {
+      if (paths[0] === "src/App.svelte") return { ...snapshot, generation: 5, files: manyFiles.filter((file) => file.path !== "src/App.svelte") };
+      attempts += 1;
+      throw { code: "stale", message: "仓库状态已变化", generation: 5 + attempts };
+    });
+    await selectThree();
+    await fireEvent.click(row("src/util.ts"), { ctrlKey: true });
+    const menu = await rightClick(row("src/app.css"));
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: /暂存 3 个文件/ }));
+    await waitFor(() => expect(document.querySelector(".toast.error")?.textContent).toContain("1 个文件未处理"));
+    expect(attempts, "首次加 6 次重试").toBe(7);
+    const text = document.querySelector(".toast.error")?.textContent ?? "";
+    expect(text).toContain("已暂存 1 个文件");
+    expect(text).toContain("src/app.css：仓库状态持续变化，重试 6 次后停止");
+  });
+
+  it("没有新 generation 的 stale 不盲目重试", async () => {
+    mocks.stageFiles.mockRejectedValueOnce({ code: "stale", message: "仓库状态已变化" });
     await selectThree();
     const menu = await rightClick(row("src/app.css"));
     await fireEvent.click(within(menu).getByRole("menuitem", { name: /暂存 2 个文件/ }));

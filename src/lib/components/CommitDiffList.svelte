@@ -13,6 +13,8 @@
     parent: string | null;
     /** 从左侧文件列表点选的文件：展开并滚动到它。 */
     focusPath?: string | null;
+    /** 用户滚动到另一个文件：左侧列表跟过去，下一次切换从这里继续。 */
+    onFocusPath?: (path: string) => void;
     disabled: boolean;
     nextId: () => number;
     onGeneration: (generation: number) => void;
@@ -20,13 +22,34 @@
     onFileHistory: (path: string) => void;
   }
 
-  let { opened, detail, parent, focusPath = null, disabled, nextId, onGeneration, onFailure, onFileHistory }: Props = $props();
+  let { opened, detail, parent, focusPath = null, onFocusPath, disabled, nextId, onGeneration, onFailure, onFileHistory }: Props = $props();
   let scroller = $state<HTMLDivElement | null>(null);
+  /** 只有用户自己动过滚动才跟踪：定位用的平滑滚动不能中途把焦点改到路过的文件上。 */
+  let spying = false;
+  /** 刚由滚动上报的文件：它回到 focusPath 时不再反过来滚动视图。 */
+  let followed: string | null = null;
+
+  /** 上报视口顶部所在的文件。 */
+  function follow() {
+    const host = scroller;
+    if (!spying || !host) return;
+    const top = host.getBoundingClientRect().top + 1;
+    let path: string | null = null;
+    for (const node of host.querySelectorAll<HTMLElement>("[data-path]")) {
+      if (node.getBoundingClientRect().top > top) break;
+      path = node.dataset.path ?? null;
+    }
+    if (!path || path === focusPath) return;
+    followed = path;
+    onFocusPath?.(path);
+  }
 
   $effect(() => {
     const path = focusPath;
     const host = scroller;
-    if (!path || !host) return;
+    if (!path || !host || path === followed) return;
+    followed = null;
+    spying = false;
     if (!expandedPaths.includes(path)) expandedPaths = [...expandedPaths, path];
     queueMicrotask(() => {
       const target = [...host.querySelectorAll<HTMLElement>("[data-path]")].find((node) => node.dataset.path === path);
@@ -144,7 +167,15 @@
       <button type="button" class="btn btn-ghost btn-sm" title={expandedPaths.length === 0 ? "已经全部收起" : undefined} disabled={expandedPaths.length === 0} onclick={() => (expandedPaths = [])}><Icon name="minus" size={12} />全部收起</button>
     </div>
   </div>
-  <div class="history-multi-scroll" bind:this={scroller}>
+  <div
+    class="history-multi-scroll"
+    role="presentation"
+    bind:this={scroller}
+    onscroll={follow}
+    onwheel={() => (spying = true)}
+    onpointerdown={() => (spying = true)}
+    onkeydown={() => (spying = true)}
+  >
     {#if detail.files.length === 0}
       <div class="empty"><span class="empty-icon"><Icon name="file" size={22} /></span><strong>这次提交没有文件变化</strong></div>
     {:else if expandedPaths.length === 0}

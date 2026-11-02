@@ -72,6 +72,8 @@
   }: Props = $props();
 
   let scroller = $state<HTMLDivElement | null>(null);
+  /** 每块的横向位置：块滚出渲染窗口后卸载，回来时要接着看刚才的位置。 */
+  const scrollXs = new Map<string, number>();
   let scrollTop = $state(0);
   let viewport = $state(0);
   let mode = $state<"unified" | "split">("unified");
@@ -186,6 +188,7 @@
     untrack(() => {
       const drop = Object.keys(diffs).filter((key) => !live.has(key));
       for (const key of [...settled.keys()]) if (!live.has(key)) settled.delete(key);
+      for (const key of [...scrollXs.keys()]) if (!live.has(key)) scrollXs.delete(key);
       if (drop.length === 0) return;
       diffs = Object.fromEntries(Object.entries(diffs).filter(([key]) => live.has(key)));
       errors = Object.fromEntries(Object.entries(errors).filter(([key]) => live.has(key)));
@@ -263,7 +266,24 @@
       if (collapsed.has(key)) setCollapsed(key, false);
       spying = false;
       pinned = key;
+      keepFocus(host);
       place();
+    });
+  });
+
+  /** 焦点在块里或已经掉到 body 时收到滚动容器上；在列表和工具栏的焦点不动。 */
+  function keepFocus(host: HTMLElement) {
+    const active = document.activeElement;
+    if (active === document.body || (active !== host && host.contains(active))) host.focus({ preventScroll: true });
+  }
+
+  /* 焦点所在的块要滑出渲染窗口：先收走，否则随块卸载掉到 body，方向键就滚不动了。 */
+  $effect.pre(() => {
+    const live = new Set(shown.map(selectionKey));
+    untrack(() => {
+      const host = scroller;
+      const block = document.activeElement?.closest?.<HTMLElement>(".multi-file");
+      if (host && block && host.contains(block) && !live.has(block.dataset.key ?? "")) host.focus({ preventScroll: true });
     });
   });
 
@@ -338,6 +358,7 @@
     bind:this={scroller}
     bind:clientHeight={viewport}
     role="presentation"
+    tabindex="-1"
     onscroll={(event) => {
       scrollTop = event.currentTarget.scrollTop;
       follow();
@@ -376,6 +397,8 @@
                 embedded
                 scrollHost={scroller}
                 layout={mode}
+                scrollX={scrollXs.get(key) ?? 0}
+                onScrollX={(left) => scrollXs.set(key, left)}
                 selection={{ path: row.path, side: row.side }}
                 diff={loaded}
                 error={errors[key] ?? null}

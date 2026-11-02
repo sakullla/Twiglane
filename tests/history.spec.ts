@@ -476,6 +476,57 @@ describe("提交详情的上一个、下一个文件（R20）", () => {
     await waitFor(() => expect(selectedFile()).toBe("b.ts"));
   });
 
+  it("进入全部文件模式时列表高亮当前行，切回单文件接着看同一个文件", async () => {
+    render(HistoryPanel, { props: panelProps() });
+    await waitFor(() => expect(selectedFile()).toBe("a.ts"));
+    await fireEvent.click(screen.getByRole("button", { name: "下一个文件" }));
+    await waitFor(() => expect(selectedFile()).toBe("b.ts"));
+    await fireEvent.click(screen.getByRole("button", { name: /全部文件/ }));
+    await waitFor(() => expect(document.querySelector(".multi-file.focused")?.getAttribute("data-path")).toBe("b.ts"));
+    expect(selectedFile()).toBe("b.ts");
+    await fireEvent.click(document.querySelector<HTMLElement>(".commit-facts [aria-label='下一个文件']")!);
+    await waitFor(() => expect(selectedFile()).toBe("c.ts"));
+    await fireEvent.click(screen.getByRole("button", { name: /单文件/ }));
+    await waitFor(() => expect(commitFileDiff.mock.calls.at(-1)?.[3]).toBe("c.ts"));
+    expect(selectedFile()).toBe("c.ts");
+  });
+
+  it("全部文件模式下滚动时 multiFocus 跟随，列表高亮移动且不反过来滚动视图", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
+    render(HistoryPanel, { props: panelProps() });
+    await waitFor(() => expect(selectedFile()).toBe("a.ts"));
+    await fireEvent.click(screen.getByRole("button", { name: /全部文件/ }));
+    const host = await waitFor(() => {
+      const element = document.querySelector<HTMLElement>(".history-multi-scroll");
+      expect(element?.querySelector('[data-path="b.ts"]')).toBeTruthy();
+      return element!;
+    });
+    await tick();
+    const blocks = [...host.querySelectorAll<HTMLElement>("[data-path]")];
+    const rectTop = (top: number) => ({ top, bottom: top, left: 0, right: 0, width: 0, height: 0, x: 0, y: top, toJSON: () => ({}) });
+    let tops = [-500, -10, 400];
+    host.getBoundingClientRect = () => rectTop(0);
+    blocks.forEach((block, index) => (block.getBoundingClientRect = () => rectTop(tops[index])));
+
+    // 程序定位的滚动不跟踪：用户没动过时不改焦点。
+    await fireEvent.scroll(host);
+    expect(selectedFile()).toBe("a.ts");
+
+    scrollIntoView.mockClear();
+    await fireEvent.wheel(host);
+    await fireEvent.scroll(host);
+    await waitFor(() => expect(selectedFile()).toBe("b.ts"));
+    await tick();
+    await new Promise((resolve) => queueMicrotask(() => resolve(null)));
+    expect(scrollIntoView, "滚动上报的焦点不再定位").not.toHaveBeenCalled();
+
+    tops = [-900, -500, -20];
+    await fireEvent.scroll(host);
+    await waitFor(() => expect(selectedFile()).toBe("c.ts"));
+    delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+
   it("把状态上报给外壳，全部文件模式也能切换并定位文件块", async () => {
     const onFileNav = vi.fn();
     render(HistoryPanel, { props: { ...panelProps(), onFileNav } });

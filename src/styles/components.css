@@ -799,8 +799,15 @@ label.list-row .checkbox { margin-top: 2px; }
 .multi-stack .multi-file-head { position: sticky; top: 0; z-index: 2; min-height: 40px; background: var(--surface-2); }
 .multi-stack .multi-file-diff { display: block; height: auto; min-height: 0; }
 .multi-stack .multi-file-toggle .diff-side, .multi-stack .multi-file-toggle .diff-stats { flex: none; }
-.diff.embedded { flex: none; width: 100%; }
-.diff.embedded .diff-scroll { flex: none; overflow-x: auto; overflow-y: hidden; }
+/* 块里的原生横条在块尾，长文件要滚到底才够得着（R21）：隐藏它，换成吸在视口底部的代理滚动条，
+   块在视口内就能看到、能拖。.diff 的 overflow: hidden 会截断吸底，这里必须放开；圆角由 .multi-file 的 clip 兜住。 */
+.diff.embedded { flex: none; width: 100%; overflow: visible; }
+.diff.embedded .diff-scroll { flex: none; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.diff.embedded .diff-scroll::-webkit-scrollbar { display: none; }
+.diff-hbar { position: sticky; bottom: 0; z-index: 2; flex: none; height: 12px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: auto; scrollbar-color: auto; background: var(--surface-2); }
+.diff-hbar::-webkit-scrollbar { width: 12px; height: 12px; }
+.diff-hbar::-webkit-scrollbar-thumb { background-color: var(--fg-subtle); }
+.diff-hbar > div { height: 1px; }
 .diff.embedded .empty { padding: var(--space-16) var(--space-12); }
 .multi-collapsed-empty { min-height: 170px; }
 .section-caption { display: flex; align-items: center; gap: var(--space-6); font-size: var(--text-xs); font-weight: var(--weight-semibold); color: var(--fg-subtle); }

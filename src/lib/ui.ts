@@ -145,7 +145,8 @@ export function batchSummary(
   skipped: number,
 ): string {
   const parts = [done > 0 ? `已${verb} ${done} 个文件，成功的改动已保留` : `没有文件被${verb}`];
-  const shown = failed.slice(0, 3).map((item) => `${item.path}：${item.message}`);
+  // 后端原因常以句号结尾，拼进来会出现「。；」「。。」。
+  const shown = failed.slice(0, 3).map((item) => `${item.path}：${item.message.replace(/[。.\s]+$/u, "")}`);
   if (failed.length > 3) shown.push(`另有 ${failed.length - 3} 个文件失败`);
   if (shown.length > 0) parts.push(`失败 ${shown.join("；")}`);
   if (skipped > 0) parts.push(`${skipped} 个文件未处理`);

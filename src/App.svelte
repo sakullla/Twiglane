@@ -50,6 +50,7 @@
   import BranchSwitcher from "./lib/components/BranchSwitcher.svelte";
   import CommandPalette from "./lib/components/CommandPalette.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./lib/components/ContextMenu.svelte";
+  import { openModalCount } from "./lib/components/Modal.svelte";
   import CommitDraft from "./lib/components/CommitDraft.svelte";
   import DetailDialog from "./lib/components/DetailDialog.svelte";
   import DiffView from "./lib/components/DiffView.svelte";
@@ -116,6 +117,10 @@
   /** 多选集合：不足两项时为空，主内容区走单文件差异（R19）。 */
   let selectedSet = $state.raw<FileSelection[]>([]);
   let fileList = $state<ReturnType<typeof FileList> | null>(null);
+  /** 批量写入里单个文件遇到 stale 的重试上限，与后端 settle_read 一致。 */
+  const BATCH_STALE_RETRIES = 6;
+  /** 这次按键发生时是否有弹层打开：在捕获阶段记下，弹层自己处理 Esc 关闭后这里不会误判。 */
+  let layerAtKey = false;
   /** 批量写入进行中：期间的刷新要跟着文件换分组，不能把正在移动的条目当成消失。 */
   let batchRunning = false;
   /** 历史视图的上一个/下一个状态，由 HistoryPanel 上报。 */
@@ -732,6 +737,12 @@
     fileList?.revealRow(item);
   }
 
+  /* 退出多选时多文件视图随即卸载，焦点在里面就会掉到 body：提前交回文件列表。 */
+  $effect.pre(() => {
+    if (multiActive) return;
+    if (document.activeElement?.closest?.(".multi-stack")) fileList?.focusList();
+  });
+
   /** 文件集合变化后收敛选中：按 path+side 保留，减到一个就回到单选。 */
   function settleSelection(resolve: (item: FileSelection) => FileSelection | null) {
     const focus = selected ? resolve(selected) : null;
@@ -860,8 +871,10 @@
   }
 
   /**
-   * 多选批量暂存或取消暂存：沿用单文件 api 逐个串行，全程占着写锁。
-   * 一个文件失败不影响其它文件；generation 过期说明状态已经变了，停下来等刷新，其余算未处理。
+   * 多选批量暂存或取消暂存：沿用单文件 api 逐个串行，全程占着写锁。一个文件失败不影响其它文件。
+   * stale 表示这次什么都没写（见 src-tauri/src/git/mod.rs），而且常常是批量自己引发的：
+   * git add 写 .git/index，监视器防抖后推高 generation。所以收下新 generation 重试当前文件，
+   * 与后端 settle_read 同样最多 6 次；还不行才说明仓库在持续变化，停下来，其余算未处理。
    */
   async function runBatch(kind: "stage" | "unstage", paths: string[]) {
     const current = opened;
@@ -878,26 +891,40 @@
       for (const [index, path] of paths.entries()) {
         if (opened?.summary.path !== current.summary.path) return;
         live = `正在${verb} ${index + 1}/${paths.length}`;
-        try {
-          const call = kind === "stage" ? api.stageFiles : api.unstageFiles;
-          latest = await call(current.summary.path, [path], opened.generation, nextId());
-          if (opened?.summary.path !== current.summary.path) return;
-          opened = { ...opened, snapshot: latest, generation: latest.generation };
-          const files = latest.files;
-          settleSelection((item) => selectionAfterEdit(files, item));
-          done += 1;
-        } catch (error) {
-          const failure = normalizeError(error);
-          lastFailure = failure;
-          failed.push({ path, message: failure.message });
-          if (failure.code === "stale" || failure.code === "stale_patch") {
-            skipped = paths.length - index - 1;
-            break;
+        let retries = 0;
+        let halted = false;
+        while (true) {
+          try {
+            const call = kind === "stage" ? api.stageFiles : api.unstageFiles;
+            const snapshot: StatusSnapshot = await call(current.summary.path, [path], opened.generation, nextId());
+            latest = snapshot;
+            if (opened?.summary.path !== current.summary.path) return;
+            // 响应在路上时监视器可能已经推高 generation，不能退回去，否则下一个文件必然 stale。
+            opened = { ...opened, snapshot, generation: Math.max(opened.generation, snapshot.generation) };
+            settleSelection((item) => selectionAfterEdit(snapshot.files, item));
+            done += 1;
+          } catch (error) {
+            if (opened?.summary.path !== current.summary.path) return;
+            const failure = normalizeError(error);
+            const stale = failure.code === "stale" && failure.generation !== undefined;
+            if (stale && retries < BATCH_STALE_RETRIES) {
+              retries += 1;
+              opened = { ...opened, generation: Math.max(opened.generation, failure.generation ?? 0) };
+              continue;
+            }
+            lastFailure = failure;
+            failed.push({ path, message: stale ? `仓库状态持续变化，重试 ${retries} 次后停止` : failure.message });
+            if (failure.code === "stale" || failure.code === "stale_patch") {
+              skipped = paths.length - index - 1;
+              halted = true;
+            }
           }
+          break;
         }
+        if (halted) break;
       }
       if (opened?.summary.path !== current.summary.path) return;
-      if (latest) applySnapshot(latest);
+      if (latest) applySnapshot({ ...latest, generation: Math.max(opened.generation, latest.generation) });
       const summary = batchSummary(verb, done, failed, skipped);
       if (lastFailure) {
         handleMutationError(lastFailure);
@@ -1560,14 +1587,21 @@
     }
   }
 
+  /**
+   * 任意一层打开着：任务 modal、确认层、标题栏弹层、更多菜单、同步菜单、右键菜单都算。
+   * 这些层的状态分散在各组件里，所以看 modal 计数和 DOM，不逐个枚举。
+   */
+  function anyLayerOpen(): boolean {
+    return openModalCount() > 0 || document.querySelector(".menu, .popover, [role='menu']") !== null;
+  }
+
   /** 键盘层：把按键翻成命令 id，再走与四个入口相同的 runCommand。 */
   function onWindowKeydown(event: KeyboardEvent) {
     if (paletteOpen) return;
     if (taskModal !== null || cloneOpen || dependencyOpen || confirmPath !== null) return;
-    const layered = switcher !== null || contextMenu !== null;
     if (event.key === "Escape") {
       // 上面还有弹层时 Esc 只关那一层；输入框里的 Esc 归输入框。
-      if (multiActive && workspaceView === "changes" && selected && !layered && !event.defaultPrevented && !isTextEntry(event.target)) {
+      if (multiActive && workspaceView === "changes" && selected && !layerAtKey && !event.defaultPrevented && !isTextEntry(event.target)) {
         selectFile(selected);
       }
       return;
@@ -1575,7 +1609,7 @@
     const id = shortcutCommand(event);
     if (!id) return;
     // Alt+←/→ 在输入框里按单词移动光标，弹层打开时也不在背后切文件。
-    if (id.startsWith("file.") && (layered || isTextEntry(event.target))) return;
+    if (id.startsWith("file.") && (layerAtKey || isTextEntry(event.target))) return;
     event.preventDefault();
     const command = commandById(id);
     if (!command) return;
@@ -1884,6 +1918,10 @@
     let stopSearch = () => {};
     let stopMedia = () => {};
     const keyListener = (event: KeyboardEvent) => onWindowKeydown(event);
+    const layerListener = () => {
+      layerAtKey = anyLayerOpen();
+    };
+    window.addEventListener("keydown", layerListener, true);
     window.addEventListener("keydown", keyListener);
     // 窗口宽度决定左栏的渲染上限（fitPaneWidth）。
     const onResize = () => {
@@ -1951,6 +1989,7 @@
     return () => {
       disposed = true;
       stopDrag.forEach((stop) => stop());
+      window.removeEventListener("keydown", layerListener, true);
       window.removeEventListener("keydown", keyListener);
       window.removeEventListener("resize", onResize);
       window.clearInterval(poll);

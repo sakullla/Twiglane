@@ -37,6 +37,9 @@
     scrollHost?: HTMLElement | null;
     /** 外层统一决定的布局；不传时用工具栏自己的切换。 */
     layout?: "unified" | "split";
+    /** embedded：块重新挂载时恢复的横向位置，以及位置变化的上报。 */
+    scrollX?: number;
+    onScrollX?: (left: number) => void;
   }
 
   /**
@@ -62,6 +65,8 @@
     embedded = false,
     scrollHost = null,
     layout,
+    scrollX = 0,
+    onScrollX,
   }: Props = $props();
   let menu = $state<ContextMenuRequest | null>(null);
   let ownMode = $state<"unified" | "split">("unified");
@@ -73,6 +78,10 @@
   let hostHeight = $state(0);
   let scroller = $state<HTMLDivElement | null>(null);
   let root = $state<HTMLElement | null>(null);
+  /** embedded 的吸底横向滚动条：内宽跟随本块 scrollWidth，与 .diff-scroll 双向同步。 */
+  let hbar = $state<HTMLDivElement | null>(null);
+  let trackWidth = $state(0);
+  let trackView = $state(0);
   let selectionKey = $derived(selection ? `${selection.side}:${selection.path}` : "");
   let currentDiff = $derived(
     selection && diff?.path === selection.path && diff.staged === (selection.side === "staged") ? diff : null,
@@ -201,7 +210,56 @@
   $effect(() => {
     selectionKey;
     applyScroll(0);
-    if (scroller) scroller.scrollLeft = 0;
+    // 只跟文件切换和容器换新：embedded 的位置由下面恢复，这里不能归零。
+    if (scroller && !untrack(() => embedded)) scroller.scrollLeft = 0;
+  });
+
+  /* 块重新挂载时恢复横向位置：标尺的实测兜底要等下一帧，所以宽度变化时继续尝试，
+     两帧后放手；恢复完成前不上报，否则半途的位置会盖掉记下的值。 */
+  let restoring: number | null = untrack(() => (embedded && scrollX > 0 ? scrollX : null));
+
+  $effect(() => {
+    const node = scroller;
+    if (!embedded || !node) return;
+    const measure = () => {
+      trackWidth = node.scrollWidth;
+      trackView = node.clientWidth;
+      if (restoring === null) return;
+      node.scrollLeft = restoring;
+      if (node.scrollLeft === restoring) restoring = null;
+    };
+    measure();
+    const frame = requestAnimationFrame(() => {
+      measure();
+      restoring = null;
+    });
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(node);
+    if (node.firstElementChild) observer?.observe(node.firstElementChild);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer?.disconnect();
+    };
+  });
+
+  $effect(() => {
+    const node = scroller;
+    const bar = hbar;
+    if (!node) return;
+    const fromCode = () => {
+      if (bar && bar.scrollLeft !== node.scrollLeft) bar.scrollLeft = node.scrollLeft;
+      if (restoring === null) onScrollX?.(node.scrollLeft);
+    };
+    const fromBar = () => {
+      if (bar && node.scrollLeft !== bar.scrollLeft) node.scrollLeft = bar.scrollLeft;
+    };
+    fromCode();
+    node.addEventListener("scroll", fromCode, { passive: true });
+    bar?.addEventListener("scroll", fromBar, { passive: true });
+    return () => {
+      node.removeEventListener("scroll", fromCode);
+      bar?.removeEventListener("scroll", fromBar);
+    };
   });
 
   $effect(() => {
@@ -484,6 +542,9 @@
         </div>
       </div>
     </div>
+    {#if embedded && trackWidth > trackView}
+      <div class="diff-hbar" aria-hidden="true" tabindex="-1" bind:this={hbar}><div style={`width:${trackWidth}px`}></div></div>
+    {/if}
     {#if currentDiff.offset + currentDiff.lines.length < currentDiff.totalLines}
       <div class="diff-more">
         <p class="hint">已显示 {currentDiff.lines.length} / {currentDiff.totalLines} 行。</p>

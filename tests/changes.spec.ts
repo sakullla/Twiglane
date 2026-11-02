@@ -1392,6 +1392,84 @@ describe("多选文件（R19）", () => {
     await waitFor(() => expect(screen.getByText(`已选 ${fileRows().length} 个文件`)).toBeTruthy());
   });
 
+  it("Shift 扩展的起点不随上一个/下一个漂移，Esc 回单选后对齐焦点文件", async () => {
+    renderApp();
+    await openRepo();
+    await fireEvent.click(fileRows()[1]);
+    await fireEvent.click(fileRows()[3], { shiftKey: true });
+    await waitFor(() => expect(selectedNames()).toEqual(["app.css", "start.md", "logo.png"]));
+    await fireEvent.click(screen.getByRole("button", { name: "下一个文件" }));
+    await fireEvent.click(screen.getByRole("button", { name: "下一个文件" }));
+    await waitFor(() => expect(document.querySelector(".multi-file.focused")?.getAttribute("data-path")).toBe("public/logo.png"));
+    // 起点还是 app.css，范围从它算，不是从定位到的 logo.png 算。
+    await fireEvent.click(fileRows()[2], { shiftKey: true });
+    await waitFor(() => expect(selectedNames()).toEqual(["app.css", "start.md"]));
+
+    await fireEvent.click(fileRows()[4], { shiftKey: true });
+    await fireEvent.click(screen.getByRole("button", { name: "下一个文件" }));
+    await fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(document.querySelector(".multi-stack")).toBeNull());
+    expect(selectedNames()).toEqual(["start.md"]);
+    await fireEvent.click(fileRows()[3], { shiftKey: true });
+    await waitFor(() => expect(selectedNames()).toEqual(["start.md", "logo.png"]));
+  });
+
+  it("更多菜单、同步菜单、放弃确认打开时 Esc 不清多选，Alt+→ 不在背后切文件", async () => {
+    mocks.discardChanges.mockResolvedValue({ generation: 4, wrote: false, boundary: "只影响所选文件。", snapshot, files: [] });
+    renderApp();
+    await openRepo();
+    await ctrlClick(fileRows()[2]);
+    await waitFor(() => expect(blockPaths()).toHaveLength(2));
+    const focused = () => document.querySelector(".multi-file.focused")?.getAttribute("data-path");
+    await fireEvent.click(screen.getByRole("button", { name: "上一个文件" }));
+    await waitFor(() => expect(focused()).toBe("src/App.svelte"));
+
+    const probe = async () => {
+      await altKey("ArrowRight");
+      await tick();
+      expect(focused(), "背后不切文件").toBe("src/App.svelte");
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      await tick();
+      await tick();
+      expect(blockPaths(), "多选还在").toHaveLength(2);
+    };
+
+    await fireEvent.click(screen.getByRole("button", { name: "更多提交操作" }));
+    await waitFor(() => expect(screen.getByRole("menu", { name: "更多提交操作" })).toBeTruthy());
+    await probe();
+    await waitFor(() => expect(screen.queryByRole("menu", { name: "更多提交操作" })).toBeNull());
+
+    await fireEvent.click(document.querySelector<HTMLElement>('[aria-haspopup="menu"][aria-label^="同步"], .titlebar .menu-anchor button')!);
+    await waitFor(() => expect(screen.getByRole("menu", { name: "同步" })).toBeTruthy());
+    await probe();
+    await waitFor(() => expect(screen.queryByRole("menu", { name: "同步" })).toBeNull());
+
+    await fireEvent.click(screen.getByRole("button", { name: /放弃 2 个文件的更改/ }));
+    const dialog = await screen.findByRole("dialog", { name: "放弃文件修改" });
+    await altKey("ArrowRight");
+    await tick();
+    expect(focused(), "确认层打开时不切文件").toBe("src/App.svelte");
+    await fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "放弃文件修改" })).toBeNull());
+    expect(blockPaths(), "Esc 只关确认层").toHaveLength(2);
+  });
+
+  it("定位后焦点从块内收到滚动容器，退出多选交回文件列表", async () => {
+    renderApp();
+    await openRepo();
+    await ctrlClick(fileRows()[2]);
+    await waitFor(() => expect(document.querySelectorAll(".multi-stack .diff-scroll").length).toBeGreaterThan(0));
+    await fireEvent.click(screen.getByRole("button", { name: "上一个文件" }));
+    await waitFor(() => expect(document.querySelector(".multi-file.focused")?.getAttribute("data-path")).toBe("src/App.svelte"));
+    document.querySelector<HTMLElement>(".multi-stack .diff-scroll")!.focus();
+    await altKey("ArrowRight");
+    const host = document.querySelector<HTMLElement>(".multi-stack-scroll")!;
+    await waitFor(() => expect(document.activeElement).toBe(host));
+    await fireEvent.keyDown(host, { key: "Escape" });
+    await waitFor(() => expect(document.querySelector(".multi-stack")).toBeNull());
+    expect(document.activeElement).toBe(document.querySelector(".file-list"));
+  });
+
   it("输入框里的 Esc 和历史视图里的 Esc 不清除多选", async () => {
     renderApp();
     await openRepo();
@@ -1485,6 +1563,10 @@ describe("多选文件（R19）", () => {
     });
     expect(batchSummary("暂存", 2, [{ path: "c.ts", message: "索引被锁定" }], 1)).toBe("已暂存 2 个文件，成功的改动已保留。失败 c.ts：索引被锁定。1 个文件未处理。");
     expect(batchSummary("暂存", 0, [{ path: "c.ts", message: "x" }], 0)).toContain("没有文件被暂存");
+    // 后端原因自带句号时不叠成「。；」或「。。」。
+    expect(batchSummary("暂存", 1, [{ path: "a", message: "索引被锁定。" }, { path: "b", message: "权限不足." }], 0)).toBe(
+      "已暂存 1 个文件，成功的改动已保留。失败 a：索引被锁定；b：权限不足。",
+    );
   });
 
   it("渲染窗口只覆盖视口附近的块，上下由占位补齐", () => {
@@ -1607,6 +1689,64 @@ describe("MultiFileDiff 逐块懒加载（R19）", () => {
     expect(document.querySelectorAll("[data-diff-row]").length).toBeLessThan(100);
     const space = document.querySelector<HTMLElement>(".diff.embedded .virtual-space")!;
     expect(space.style.height).toBe(`${2000 * 18}px`);
+  });
+
+  describe("吸底横向滚动条（R21）", () => {
+    let widths: ReturnType<typeof vi.spyOn>[] = [];
+
+    beforeEach(() => {
+      mocks.loadDiff.mockImplementation(async (_repo: string, path: string) => diffFor(path, false));
+      widths = [
+        vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockReturnValue(2400),
+        vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(800),
+      ];
+    });
+
+    afterEach(() => widths.forEach((spy) => spy.mockRestore()));
+
+    const blockOf = () => document.querySelector<HTMLElement>('.multi-file[data-path="gen/file-0.ts"]')!;
+    const waitBar = () => waitFor(() => {
+      const bar = blockOf()?.querySelector<HTMLElement>(".diff-hbar");
+      expect(bar).toBeTruthy();
+      return bar!;
+    });
+
+    it("代理条内宽等于本块 scrollWidth，与差异区双向同步", async () => {
+      render(MultiFileDiff, { props: props({ rows: rowsOf(2) }) });
+      const bar = await waitBar();
+      const code = blockOf().querySelector<HTMLElement>(".diff-scroll")!;
+      expect((bar.firstElementChild as HTMLElement).style.width).toBe("2400px");
+
+      code.scrollLeft = 300;
+      await fireEvent.scroll(code);
+      expect(bar.scrollLeft).toBe(300);
+      bar.scrollLeft = 640;
+      await fireEvent.scroll(bar);
+      expect(code.scrollLeft).toBe(640);
+    });
+
+    it("没有长行时不显示代理条", async () => {
+      widths[0].mockReturnValue(800);
+      render(MultiFileDiff, { props: props({ rows: rowsOf(1) }) });
+      await waitFor(() => expect(document.querySelector("[data-diff-row]")).toBeTruthy());
+      expect(document.querySelector(".diff-hbar")).toBeNull();
+    });
+
+    it("块卸载再挂载时恢复横向位置，代理条跟着恢复", async () => {
+      render(MultiFileDiff, { props: props({ rows: rowsOf(2) }) });
+      await waitBar();
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+      const code = blockOf().querySelector<HTMLElement>(".diff-scroll")!;
+      code.scrollLeft = 520;
+      await fireEvent.scroll(code);
+
+      await fireEvent.click(screen.getByRole("button", { name: "收起 gen/file-0.ts" }));
+      await waitFor(() => expect(blockOf().querySelector(".diff-scroll")).toBeNull());
+      await fireEvent.click(screen.getByRole("button", { name: "展开 gen/file-0.ts" }));
+      const bar = await waitBar();
+      await waitFor(() => expect(blockOf().querySelector<HTMLElement>(".diff-scroll")!.scrollLeft).toBe(520));
+      await waitFor(() => expect(bar.scrollLeft).toBe(520));
+    });
   });
 
   it("按块暂存带上所在文件块的身份和差异，不是焦点文件的", async () => {

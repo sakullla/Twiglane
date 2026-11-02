@@ -114,6 +114,17 @@
     return multi ? selectedSet.some((item) => sameSelection(item, row)) : isFocus(row);
   }
 
+  /* 单选时起点就是选中文件（含外部切换、Esc 退出多选）；多选期间定位焦点不动起点，
+     否则 Shift 扩展的范围会跟着上一个/下一个漂移。 */
+  $effect(() => {
+    if (!multi && selected) anchor = plain(selected);
+  });
+
+  /** 外壳把焦点交回列表（退出多选时）。 */
+  export function focusList() {
+    list?.focus({ preventScroll: true });
+  }
+
   /** 普通点击、方向键：回到单选，这一行成为新的扩展起点。 */
   function single(row: FileSelection) {
     anchor = plain(row);
@@ -157,7 +168,6 @@
 
   /** 从外部切换文件时让列表跟上（上一个/下一个、多选堆叠的滚动定位）。 */
   export function revealRow(row: FileSelection) {
-    anchor = plain(row);
     const index = itemIndexOf(row);
     if (index >= 0) reveal(index);
   }

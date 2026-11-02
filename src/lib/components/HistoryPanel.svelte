@@ -192,10 +192,8 @@
   );
   let visibleFiles = $derived(filteredFiles.slice(fileRange.start, fileRange.end));
   /* 按筛选后的列表走，与左侧看到的顺序一致；「全部文件」模式还没点选时算在第一个。 */
-  let fileIndex = $derived.by(() => {
-    const path = viewMode === "single" ? activeFile?.path : (multiFocus ?? filteredFiles[0]?.path);
-    return filteredFiles.findIndex((file) => file.path === path);
-  });
+  let currentPath = $derived(viewMode === "single" ? activeFile?.path : (multiFocus ?? filteredFiles[0]?.path));
+  let fileIndex = $derived(filteredFiles.findIndex((file) => file.path === currentPath));
   let fileNav = $derived(detail ? fileNavState(filteredFiles, fileIndex, (file) => goToFile(file.path)) : null);
 
   $effect(() => {
@@ -396,6 +394,14 @@
   function chooseFile(path: string) {
     if (viewMode === "multi") multiFocus = path;
     else manualPath = path;
+  }
+
+  /** 单文件与全部文件之间切换时带上当前文件，列表高亮和差异位置都不丢。 */
+  function useMode(next: "single" | "multi") {
+    if (next === viewMode) return;
+    if (next === "multi") multiFocus = activeFile?.path ?? null;
+    else if (multiFocus) manualPath = multiFocus;
+    viewMode = next;
   }
 
   function goToFile(path: string) {
@@ -664,8 +670,8 @@
           <div class="commit-facts">
             {#if viewMode === "multi" && fileNav}<FileNav nav={fileNav} />{/if}
             <div class="segmented history-view-mode" role="group" aria-label="历史差异模式">
-              <button type="button" aria-pressed={viewMode === "single"} title="一次看一个文件" onclick={() => (viewMode = "single")}><Icon name="file" size={12} />单文件</button>
-              <button type="button" aria-pressed={viewMode === "multi"} title="连续查看整次提交的全部文件" onclick={() => (viewMode = "multi")}><Icon name="layers" size={12} />全部文件</button>
+              <button type="button" aria-pressed={viewMode === "single"} title="一次看一个文件" onclick={() => useMode("single")}><Icon name="file" size={12} />单文件</button>
+              <button type="button" aria-pressed={viewMode === "multi"} title="连续查看整次提交的全部文件" onclick={() => useMode("multi")}><Icon name="layers" size={12} />全部文件</button>
             </div>
             <span class="oid-chip" title={detail.commit.oid}>
               <Icon name="commit" size={12} />
@@ -743,7 +749,7 @@
                       type="button"
                       class="file-row"
                       role="option"
-                      aria-selected={viewMode === "single" ? activeFile?.path === file.path : multiFocus === file.path}
+                      aria-selected={currentPath === file.path}
                       style={`top:${(fileRange.start + index) * FILE_ROW_HEIGHT + 2}px;height:${FILE_ROW_HEIGHT - 4}px`}
                       title={fileTitle(file)}
                       onclick={() => chooseFile(file.path)}
@@ -770,6 +776,7 @@
                 {detail}
                 parent={parentChoice ?? detail.selectedParent}
                 focusPath={multiFocus}
+                onFocusPath={goToFile}
                 {disabled}
                 {nextId}
                 {onGeneration}

@@ -1,5 +1,5 @@
-import type { FileRow } from "./types";
-import { rowLabel } from "./labels";
+import type { DiffHunk, DiffResponse, FileChange, FileRow, FileSelection } from "./types";
+import { filterRows, groupFiles, rowLabel } from "./labels";
 
 /** 控件因为读写在途而不可用时的统一原因，写进 title（R12）。 */
 export const BUSY_REASON = "正在读取或写入，稍后再试";
@@ -83,4 +83,139 @@ export function hasCommitSummary(message: string): boolean {
   const newline = message.indexOf("\n");
   const first = newline === -1 ? message : message.slice(0, newline);
   return first.trim().length > 0;
+}
+
+/** 列表的展示顺序：冲突、未暂存、已暂存。文件列表、上一个/下一个和多选堆叠都按这一份走（R20）。 */
+export function orderedRows(files: FileChange[], query = ""): FileRow[] {
+  const groups = groupFiles(files);
+  return [
+    ...filterRows(groups.conflicted, query),
+    ...filterRows(groups.unstaged, query),
+    ...filterRows(groups.staged, query),
+  ];
+}
+
+/** 同一路径可以同时出现在未暂存和已暂存里，选中身份必须是 path+side。 */
+export function selectionKey(item: FileSelection): string {
+  return `${item.side}:${item.path}`;
+}
+
+export function sameSelection(left: FileSelection | null, right: FileSelection | null): boolean {
+  return Boolean(left && right && left.path === right.path && left.side === right.side);
+}
+
+/** ⌘/Ctrl+点击：已选的移除，未选的加入。 */
+export function toggleSelection(base: FileSelection[], item: FileSelection): FileSelection[] {
+  return base.some((entry) => sameSelection(entry, item))
+    ? base.filter((entry) => !sameSelection(entry, item))
+    : [...base, item];
+}
+
+/** Shift+点击：锚点到目标之间的连续范围，方向不限；锚点不在列表里时从目标自身算起。 */
+export function rangeSelection(rows: FileSelection[], anchor: FileSelection | null, target: FileSelection): FileSelection[] {
+  const end = rows.findIndex((row) => sameSelection(row, target));
+  if (end < 0) return [];
+  const found = rows.findIndex((row) => sameSelection(row, anchor));
+  const start = found < 0 ? end : found;
+  return rows.slice(Math.min(start, end), Math.max(start, end) + 1).map(({ path, side }) => ({ path, side }));
+}
+
+/** 把选中集合排回列表顺序；已经不在列表里的条目随之消失。 */
+export function rowsInSelection(rows: FileRow[], set: FileSelection[]): FileRow[] {
+  const keys = new Set(set.map(selectionKey));
+  return rows.filter((row) => keys.has(selectionKey(row)));
+}
+
+/** 批量动作的精确目标：冲突文件一律排除，同一路径两侧都选中时放弃只算一次。 */
+export function batchTargets(rows: FileRow[]): { stage: string[]; unstage: string[]; discard: string[]; conflicts: number } {
+  const free = rows.filter((row) => !row.unmerged);
+  return {
+    stage: free.filter((row) => row.side === "unstaged").map((row) => row.path),
+    unstage: free.filter((row) => row.side === "staged").map((row) => row.path),
+    discard: [...new Set(free.map((row) => row.path))],
+    conflicts: new Set(rows.filter((row) => row.unmerged).map((row) => row.path)).size,
+  };
+}
+
+/** 批量写入的结论：写清哪些成功保留、哪个文件为什么失败、哪些没有处理。 */
+export function batchSummary(
+  verb: string,
+  done: number,
+  failed: { path: string; message: string }[],
+  skipped: number,
+): string {
+  const parts = [done > 0 ? `已${verb} ${done} 个文件，成功的改动已保留` : `没有文件被${verb}`];
+  const shown = failed.slice(0, 3).map((item) => `${item.path}：${item.message}`);
+  if (failed.length > 3) shown.push(`另有 ${failed.length - 3} 个文件失败`);
+  if (shown.length > 0) parts.push(`失败 ${shown.join("；")}`);
+  if (skipped > 0) parts.push(`${skipped} 个文件未处理`);
+  return `${parts.join("。")}。`;
+}
+
+/** 上一个/下一个文件：工具栏按钮与 file.prev、file.next 命令共用的状态。 */
+export interface FileNavState {
+  index: number;
+  total: number;
+  /** 不可用的原因；可用时为 null。 */
+  prevReason: string | null;
+  nextReason: string | null;
+  onPrev: () => void;
+  onNext: () => void;
+}
+
+export function fileNavState<T>(items: T[], index: number, go: (item: T) => void, noun = "文件"): FileNavState {
+  const prev = index > 0 ? items[index - 1] : undefined;
+  const next = index < 0 ? items[0] : items[index + 1];
+  const empty = items.length === 0 ? `没有可切换的${noun}` : null;
+  return {
+    index,
+    total: items.length,
+    prevReason: empty ?? (index < 0 ? `当前${noun}不在列表里` : index === 0 ? `已经是第一个${noun}` : null),
+    nextReason: empty ?? (index >= items.length - 1 ? `已经是最后一个${noun}` : null),
+    onPrev: () => {
+      if (prev !== undefined) go(prev);
+    },
+    onNext: () => {
+      if (next !== undefined) go(next);
+    },
+  };
+}
+
+/** 每块的累计顶部位置；最后一项是总高度加一个间距，渲染窗口的前后占位都由它算。 */
+export function blockTops(heights: number[], gap: number): number[] {
+  const tops = [0];
+  for (const height of heights) tops.push(tops[tops.length - 1] + height + gap);
+  return tops;
+}
+
+/** 与视口（含上下余量）相交的块。视口尚未测出时只放少量块，选 100 个文件也不会全部挂载。 */
+export function blockWindow(
+  tops: number[],
+  scrollTop: number,
+  viewport: number,
+  overscan: number,
+  fallback = 6,
+): { start: number; end: number; before: number; after: number } {
+  const count = tops.length - 1;
+  let start = 0;
+  let end = Math.min(count, fallback);
+  if (viewport > 0) {
+    const low = scrollTop - overscan;
+    const high = scrollTop + viewport + overscan;
+    while (start < count - 1 && tops[start + 1] <= low) start += 1;
+    end = start;
+    while (end < count && tops[end] < high) end += 1;
+    end = Math.max(end, Math.min(count, start + 1));
+  }
+  return { start, end, before: tops[start] ?? 0, after: count > 0 ? tops[count] - tops[end] : 0 };
+}
+
+/** 续读的一页拼到已读内容后面：块标题下标按已读行数平移。 */
+export function appendDiffPage(current: DiffResponse, page: DiffResponse): DiffResponse {
+  const base = current.lines.length;
+  const hunks = new Map<number, DiffHunk>(current.hunks.map((hunk) => [hunk.index, hunk]));
+  for (const hunk of page.hunks) {
+    if (!hunks.has(hunk.index)) hunks.set(hunk.index, { ...hunk, startLine: hunk.startLine + base });
+  }
+  return { ...page, offset: current.offset, lines: [...current.lines, ...page.lines], hunks: [...hunks.values()], totalLines: page.totalLines };
 }

@@ -42,6 +42,8 @@ export interface CommandState {
   stageTargets: string[];
   /** 「全部取消暂存」的精确目标：列表当前可见、已暂存且非冲突的文件路径。 */
   unstageTargets: string[];
+  /** 当前视图的上一个/下一个文件：null 表示这里没有文件可切，原因字段非空表示到头了。 */
+  fileNav?: { prevReason: string | null; nextReason: string | null } | null;
   draft: string;
   theme: Theme;
   recentRepos: RecentRepo[];
@@ -103,6 +105,10 @@ const commitReason = (state: CommandState) => {
   return state.stagedCount === 0 ? "先暂存要提交的文件" : "填写提交说明后即可提交";
 };
 
+const NO_FILE_REASON = "先选择一个文件";
+/** Alt 在 macOS 键帽上是 ⌥。 */
+const ALT_LABEL = MODIFIER_LABEL === "⌘" ? "⌥" : "Alt";
+
 /** 视图与提交：主工作台的两个视图、提交范围、全部暂存/全部取消暂存与两种提交。 */
 const VIEW_COMMANDS: CommandSpec[] = [
   {
@@ -122,6 +128,24 @@ const VIEW_COMMANDS: CommandSpec[] = [
     shortcut: `${MODIFIER_LABEL} 2`,
     available: hasRepo,
     reason: hasRepoReason,
+  },
+  {
+    id: "file.prev",
+    group: "视图",
+    title: "上一个文件",
+    hint: "按列表顺序切到上一个文件，多选时在选中文件之间切换",
+    shortcut: `${ALT_LABEL} ←`,
+    available: (state) => hasRepo(state) && Boolean(state.fileNav) && !state.fileNav?.prevReason,
+    reason: (state) => (state.hasRepo ? (state.fileNav?.prevReason ?? NO_FILE_REASON) : "先打开一个仓库"),
+  },
+  {
+    id: "file.next",
+    group: "视图",
+    title: "下一个文件",
+    hint: "按列表顺序切到下一个文件，多选时在选中文件之间切换",
+    shortcut: `${ALT_LABEL} →`,
+    available: (state) => hasRepo(state) && Boolean(state.fileNav) && !state.fileNav?.nextReason,
+    reason: (state) => (state.hasRepo ? (state.fileNav?.nextReason ?? NO_FILE_REASON) : "先打开一个仓库"),
   },
 ];
 

@@ -4,12 +4,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CommitDraft from "../src/lib/components/CommitDraft.svelte";
 import DiffView from "../src/lib/components/DiffView.svelte";
 import FileList from "../src/lib/components/FileList.svelte";
+import MultiFileDiff from "../src/lib/components/MultiFileDiff.svelte";
+import { shortcutCommand, isTextEntry } from "../src/lib/shortcuts";
+import {
+  batchSummary,
+  batchTargets,
+  blockTops,
+  blockWindow,
+  fileNavState,
+  orderedRows,
+  rangeSelection,
+  toggleSelection,
+} from "../src/lib/ui";
 import type {
   DiffLine,
   DiffResponse,
   FileChange,
+  FileRow,
   FileSelection,
   HistoryCommit,
+  OpenedRepository,
   StatusSnapshot,
 } from "../src/lib/types";
 
@@ -1207,5 +1221,437 @@ describe("差异横向滚动", () => {
     await tick();
     expect(scroller.scrollLeft).toBe(0);
     expect(scroller.style.getPropertyValue("--code-x")).toBe("0px");
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * R19、R20：多选文件与上一个、下一个文件。
+ * ------------------------------------------------------------------ */
+
+function fileRows(): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>(".file-row")];
+}
+
+function selectedNames(): string[] {
+  return fileRows()
+    .filter((row) => row.getAttribute("aria-selected") === "true")
+    .map((row) => row.querySelector(".fn")?.textContent ?? "");
+}
+
+function blockPaths(): string[] {
+  return [...document.querySelectorAll<HTMLElement>(".multi-stack .multi-file")].map((block) => block.dataset.path ?? "");
+}
+
+function altKey(key: string, target: EventTarget = window) {
+  target.dispatchEvent(new KeyboardEvent("keydown", { key, altKey: true, bubbles: true, cancelable: true }));
+  return tick();
+}
+
+describe("上一个、下一个文件（R20）", () => {
+  it("按列表顺序切换，列表选中同步，首尾不可用并说明原因", async () => {
+    renderApp();
+    await openRepo();
+    const prev = screen.getByRole("button", { name: "上一个文件" }) as HTMLButtonElement;
+    const next = screen.getByRole("button", { name: "下一个文件" }) as HTMLButtonElement;
+    expect(selectedNames()).toEqual(["App.svelte"]);
+    expect(prev.disabled).toBe(true);
+    expect(prev.title).toBe("已经是第一个文件");
+
+    await fireEvent.click(next);
+    await waitFor(() => expect(selectedNames()).toEqual(["app.css"]));
+    await waitFor(() => expect(document.querySelector(".diff-path")?.textContent).toContain("app.css"));
+    expect(prev.disabled).toBe(false);
+
+    // 跨过未暂存分组走进已暂存：最后一行是 README.md。
+    const rows = fileRows();
+    await fireEvent.click(rows[rows.length - 1]);
+    await waitFor(() => expect(next.disabled).toBe(true));
+    expect(next.title).toBe("已经是最后一个文件");
+    await fireEvent.click(prev);
+    await waitFor(() => expect(selectedNames()).toEqual(["app.css"]));
+    await waitFor(() => expect(mocks.loadDiff).toHaveBeenLastCalledWith(repoPath, "src/app.css", true, 4, expect.any(Number), null, 0, 0, undefined));
+  });
+
+  it("走到最后一个文件时焦点交给上一个文件按钮，不掉到 body", async () => {
+    renderApp();
+    await openRepo();
+    const rows = fileRows();
+    await fireEvent.click(rows[rows.length - 2]);
+    const next = screen.getByRole("button", { name: "下一个文件" }) as HTMLButtonElement;
+    await waitFor(() => expect(next.disabled).toBe(false));
+    next.focus();
+    await fireEvent.click(next);
+    await waitFor(() => expect(next.disabled).toBe(true));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "上一个文件" })));
+  });
+
+  it("Alt+←/→ 切换文件，输入框聚焦时让给光标移动", async () => {
+    renderApp();
+    await openRepo();
+    await altKey("ArrowRight");
+    await waitFor(() => expect(selectedNames()).toEqual(["app.css"]));
+    await altKey("ArrowLeft");
+    await waitFor(() => expect(selectedNames()).toEqual(["App.svelte"]));
+
+    const input = document.getElementById("file-search") as HTMLInputElement;
+    input.focus();
+    await altKey("ArrowRight", input);
+    await tick();
+    expect(selectedNames()).toEqual(["App.svelte"]);
+
+    // 到头时快捷键不动，只说明原因。
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", altKey: true, bubbles: true }));
+    await waitFor(() => expect(document.querySelector(".toast.ok")?.textContent).toContain("已经是第一个文件"));
+  });
+
+  it("命令面板能找到 file.prev、file.next，到头时给原因，快捷键映射不影响原有组合", () => {
+    const items = paletteItems(commandState({ fileNav: { prevReason: "已经是第一个文件", nextReason: null } }));
+    expect(items.find((item) => item.id === "file.prev")).toMatchObject({ enabled: false, reason: "已经是第一个文件" });
+    expect(items.find((item) => item.id === "file.next")).toMatchObject({ enabled: true });
+    expect(paletteItems(commandState()).find((item) => item.id === "file.next")).toMatchObject({ enabled: false, reason: "先选择一个文件" });
+
+    expect(shortcutCommand({ key: "ArrowLeft", altKey: true })).toBe("file.prev");
+    expect(shortcutCommand({ key: "ArrowRight", altKey: true })).toBe("file.next");
+    expect(shortcutCommand({ key: "ArrowRight", altKey: true, shiftKey: true })).toBeNull();
+    expect(shortcutCommand({ key: "ArrowRight", altKey: true, ctrlKey: true })).toBeNull();
+    expect(shortcutCommand({ key: "ArrowRight" })).toBeNull();
+    expect(shortcutCommand({ key: "k", altKey: true })).toBeNull();
+    expect(shortcutCommand({ key: "k", altKey: true, ctrlKey: true })).toBeNull();
+    expect(isTextEntry(document.createElement("textarea"))).toBe(true);
+    expect(isTextEntry(document.createElement("div"))).toBe(false);
+  });
+
+  it("fileNavState：筛掉当前文件时从第一个继续，空列表两侧都说明", () => {
+    const go = vi.fn();
+    const filtered = fileNavState(["a", "b"], -1, go);
+    expect(filtered.prevReason).toBe("当前文件不在列表里");
+    expect(filtered.nextReason).toBeNull();
+    filtered.onNext();
+    expect(go).toHaveBeenCalledWith("a");
+    filtered.onPrev();
+    expect(go).toHaveBeenCalledTimes(1);
+    const empty = fileNavState([], -1, go);
+    expect(empty.prevReason).toBe("没有可切换的文件");
+    expect(empty.nextReason).toBe("没有可切换的文件");
+  });
+});
+
+describe("多选文件（R19）", () => {
+  const ctrlClick = (element: Element) => fireEvent.click(element, { ctrlKey: true });
+
+  it("⌘/Ctrl+点击增减，主内容区按列表顺序堆叠，普通点击回到单选", async () => {
+    renderApp();
+    await openRepo();
+    const rows = fileRows();
+    await ctrlClick(rows[2]);
+    await waitFor(() => expect(blockPaths()).toEqual(["src/App.svelte", "docs/start.md"]));
+    expect(screen.getByText("已选 2 个文件")).toBeTruthy();
+    expect(selectedNames()).toEqual(["App.svelte", "start.md"]);
+    expect(document.querySelector(".file-list")?.getAttribute("aria-multiselectable")).toBe("true");
+
+    await ctrlClick(rows[3]);
+    await waitFor(() => expect(blockPaths()).toEqual(["src/App.svelte", "docs/start.md", "public/logo.png"]));
+    // 点击已选文件取消选中；减到一个时回到单文件差异。
+    await ctrlClick(fileRows()[3]);
+    await ctrlClick(fileRows()[0]);
+    await waitFor(() => expect(document.querySelector(".multi-stack")).toBeNull());
+    expect(selectedNames()).toEqual(["start.md"]);
+
+    await ctrlClick(fileRows()[0]);
+    await waitFor(() => expect(blockPaths()).toHaveLength(2));
+    await fireEvent.click(fileRows()[1]);
+    await waitFor(() => expect(document.querySelector(".multi-stack")).toBeNull());
+    expect(selectedNames()).toEqual(["app.css"]);
+  });
+
+  it("Shift+点击选连续范围，Shift+方向键扩展，Ctrl+A 全选当前列表，Esc 回单选", async () => {
+    renderApp();
+    await openRepo();
+    await fireEvent.click(fileRows()[1]);
+    await fireEvent.click(fileRows()[4], { shiftKey: true });
+    await waitFor(() => expect(selectedNames()).toEqual(["app.css", "start.md", "logo.png", "icon.ts"]));
+
+    await fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(document.querySelector(".multi-stack")).toBeNull());
+    expect(selectedNames()).toEqual(["app.css"]);
+
+    const list = document.querySelector<HTMLElement>(".file-list")!;
+    await fireEvent.keyDown(list, { key: "ArrowDown", shiftKey: true });
+    await fireEvent.keyDown(list, { key: "ArrowDown", shiftKey: true });
+    await waitFor(() => expect(selectedNames()).toEqual(["app.css", "start.md", "logo.png"]));
+    await fireEvent.keyDown(list, { key: "ArrowUp", shiftKey: true });
+    await waitFor(() => expect(selectedNames()).toEqual(["app.css", "start.md"]));
+
+    await fireEvent.keyDown(list, { key: "a", ctrlKey: true });
+    await waitFor(() => expect(selectedNames()).toHaveLength(fileRows().length));
+    // 筛选后 Ctrl+A 只选当前列表。
+    await fireEvent.keyDown(window, { key: "Escape" });
+    await fireEvent.input(document.getElementById("file-search")!, { target: { value: "app" } });
+    await waitFor(() => expect(fileRows().length).toBeLessThan(5));
+    await fireEvent.keyDown(document.querySelector(".file-list")!, { key: "a", metaKey: true });
+    await waitFor(() => expect(screen.getByText(`已选 ${fileRows().length} 个文件`)).toBeTruthy());
+  });
+
+  it("输入框里的 Esc 和历史视图里的 Esc 不清除多选", async () => {
+    renderApp();
+    await openRepo();
+    await ctrlClick(fileRows()[2]);
+    await waitFor(() => expect(blockPaths()).toHaveLength(2));
+    const input = document.getElementById("file-search") as HTMLInputElement;
+    await fireEvent.keyDown(input, { key: "Escape" });
+    await tick();
+    expect(blockPaths()).toHaveLength(2);
+
+    await press("2");
+    await fireEvent.keyDown(window, { key: "Escape" });
+    await press("1");
+    expect(blockPaths()).toHaveLength(2);
+  });
+
+  it("多选时上一个、下一个只在选中文件之间走，到头说明原因", async () => {
+    renderApp();
+    await openRepo();
+    await ctrlClick(fileRows()[2]);
+    await ctrlClick(fileRows()[4]);
+    await fireEvent.click(fileRows()[0], { ctrlKey: true });
+    await fireEvent.click(fileRows()[0], { ctrlKey: true });
+    await waitFor(() => expect(blockPaths()).toHaveLength(3));
+    const next = screen.getByRole("button", { name: "下一个文件" }) as HTMLButtonElement;
+    await waitFor(() => expect(document.querySelector(".multi-file.focused")?.getAttribute("data-path")).toBe("src/App.svelte"));
+    await fireEvent.click(next);
+    await waitFor(() => expect(document.querySelector(".multi-file.focused")?.getAttribute("data-path")).toBe("docs/start.md"));
+    expect(selectedNames()).toHaveLength(3);
+    await fireEvent.click(next);
+    await waitFor(() => expect(next.disabled).toBe(true));
+    expect(next.title).toBe("已经是最后一个选中文件");
+  });
+
+  it("刷新后按 path+side 收敛，提交后清理，只剩一个时回到单选", async () => {
+    renderApp();
+    await openRepo();
+    await ctrlClick(fileRows()[1]);
+    await ctrlClick(fileRows()[2]);
+    await waitFor(() => expect(blockPaths()).toEqual(["src/App.svelte", "src/app.css", "docs/start.md"]));
+
+    mocks.refreshStatus.mockResolvedValueOnce({ ...snapshot, generation: 5, files: changes.filter((file) => file.path !== "docs/start.md") });
+    await press("r");
+    await waitFor(() => expect(blockPaths()).toEqual(["src/App.svelte", "src/app.css"]));
+
+    mocks.refreshStatus.mockResolvedValueOnce({ ...snapshot, generation: 6, files: changes.filter((file) => file.path !== "src/app.css") });
+    await press("r");
+    await waitFor(() => expect(document.querySelector(".multi-stack")).toBeNull());
+    expect(selectedNames()).toEqual(["App.svelte"]);
+  });
+
+  it("切换分组后选中集合跟着文件走：批量暂存后仍是这些文件", async () => {
+    mocks.stageFiles.mockImplementation(async (_repo: string, paths: string[]) => ({
+      ...snapshot,
+      generation: 4 + mocks.stageFiles.mock.calls.length,
+      files: changes.map((file) => (paths.includes(file.path) || mocks.stageFiles.mock.calls.some(([, done]) => done.includes(file.path)) ? { ...file, staged: "modified", unstaged: "none", untracked: false } : file)),
+    }));
+    renderApp();
+    await openRepo();
+    await ctrlClick(fileRows()[2]);
+    await waitFor(() => expect(blockPaths()).toHaveLength(2));
+    await fireEvent.click(screen.getByRole("button", { name: "暂存 2 个文件" }));
+    await waitFor(() => expect(mocks.stageFiles).toHaveBeenCalledTimes(2));
+    expect(mocks.stageFiles.mock.calls.map((call) => call[1])).toEqual([["src/App.svelte"], ["docs/start.md"]]);
+    expect(mocks.stageFiles.mock.calls.map((call) => call[2])).toEqual([4, 5]);
+    await waitFor(() => expect(document.querySelectorAll('.multi-stack .diff-side.staged')).toHaveLength(2));
+    expect(blockPaths().sort()).toEqual(["docs/start.md", "src/App.svelte"]);
+  });
+
+  it("纯函数：范围不分方向，切换可增可减，同名文件按 path+side 区分", () => {
+    const rows: FileSelection[] = [
+      { path: "a", side: "unstaged" },
+      { path: "b", side: "unstaged" },
+      { path: "a", side: "staged" },
+    ];
+    expect(rangeSelection(rows, rows[2], rows[1])).toEqual([rows[1], rows[2]]);
+    expect(rangeSelection(rows, null, rows[1])).toEqual([rows[1]]);
+    expect(rangeSelection(rows, rows[0], { path: "gone", side: "staged" })).toEqual([]);
+    expect(toggleSelection([rows[0]], rows[2])).toEqual([rows[0], rows[2]]);
+    expect(toggleSelection([rows[0], rows[2]], rows[0])).toEqual([rows[2]]);
+    expect(orderedRows(changes).map((row) => `${row.side}:${row.path}`).slice(-2)).toEqual(["staged:src/app.css", "staged:README.md"]);
+  });
+
+  it("批量目标排除冲突文件，结论写清成功、失败和未处理", () => {
+    const row = (path: string, side: FileRow["side"], unmerged = false): FileRow => ({ ...change(path, "modified", "modified", { unmerged }), side });
+    expect(batchTargets([row("a", "unstaged"), row("a", "staged"), row("b", "staged"), row("c", "unstaged", true)])).toEqual({
+      stage: ["a"],
+      unstage: ["a", "b"],
+      discard: ["a", "b"],
+      conflicts: 1,
+    });
+    expect(batchSummary("暂存", 2, [{ path: "c.ts", message: "索引被锁定" }], 1)).toBe("已暂存 2 个文件，成功的改动已保留。失败 c.ts：索引被锁定。1 个文件未处理。");
+    expect(batchSummary("暂存", 0, [{ path: "c.ts", message: "x" }], 0)).toContain("没有文件被暂存");
+  });
+
+  it("渲染窗口只覆盖视口附近的块，上下由占位补齐", () => {
+    const tops = blockTops(Array.from({ length: 100 }, () => 100), 10);
+    expect(tops[100]).toBe(11000);
+    const near = blockWindow(tops, 2200, 400, 200);
+    expect(near.start).toBe(18);
+    expect(near.end).toBe(26);
+    expect(near.before).toBe(tops[18]);
+    expect(near.before + (tops[near.end] - tops[near.start]) + near.after).toBe(tops[100]);
+    expect(blockWindow(tops, 0, 0, 200).end).toBe(6);
+    expect(blockWindow(blockTops([], 10), 0, 300, 200)).toEqual({ start: 0, end: 0, before: 0, after: 0 });
+  });
+});
+
+describe("MultiFileDiff 逐块懒加载（R19）", () => {
+  type Pending = { path: string; resolve: (value: DiffResponse) => void; reject: (reason: unknown) => void };
+  let pendingReads: Pending[] = [];
+
+  const opened = (generation = 4, files: FileChange[] = []): OpenedRepository =>
+    ({ summary: { name: "demo", path: repoPath }, generation, snapshot: { ...snapshot, generation, files }, draft: "", watchDegraded: false }) as OpenedRepository;
+  const rowsOf = (count: number): FileRow[] => Array.from({ length: count }, (_, index) => ({ ...change(`gen/file-${index}.ts`, "none", "modified"), side: "unstaged" as const }));
+
+  function props(overrides: Record<string, unknown> = {}) {
+    const rows = (overrides.rows as FileRow[] | undefined) ?? rowsOf(100);
+    return {
+      opened: opened(),
+      rows,
+      focus: { path: rows[0].path, side: rows[0].side },
+      nav: fileNavState(rows, 0, () => {}, "选中文件"),
+      disabled: false,
+      fullFile: false,
+      fullContext: 1_000_000,
+      stageCount: rows.length,
+      unstageCount: 0,
+      discardCount: rows.length,
+      conflictCount: 0,
+      nextId: () => 1,
+      onFocus: vi.fn(),
+      onStale: vi.fn(),
+      onStageHunk: vi.fn(),
+      onFullFile: vi.fn(),
+      onFileHistory: vi.fn(),
+      onStage: vi.fn(),
+      onUnstage: vi.fn(),
+      onDiscard: vi.fn(),
+      onClear: vi.fn(),
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    pendingReads = [];
+    mocks.loadDiff.mockImplementation(
+      (_repo: string, path: string) => new Promise((resolve, reject) => pendingReads.push({ path, resolve, reject })),
+    );
+  });
+
+  it("选 100 个文件时只挂载视口附近的块，读取最多并发 3 个，读完一个再补一个", async () => {
+    render(MultiFileDiff, { props: props() });
+    await waitFor(() => expect(pendingReads).toHaveLength(3));
+    expect(document.querySelectorAll(".multi-file").length).toBeLessThanOrEqual(6);
+    expect(screen.getByText("已选 100 个文件")).toBeTruthy();
+    expect(pendingReads.map((read) => read.path)).toEqual(["gen/file-0.ts", "gen/file-1.ts", "gen/file-2.ts"]);
+
+    pendingReads[0].resolve(diffFor("gen/file-0.ts", false));
+    await waitFor(() => expect(pendingReads).toHaveLength(4));
+    expect(pendingReads[3].path).toBe("gen/file-3.ts");
+    await waitFor(() => expect(document.querySelectorAll("[data-diff-row]").length).toBeGreaterThan(0));
+    // 只堆叠块自己的内容：embedded 差异不画工具栏，也不留纵向滚动。
+    expect(document.querySelector(".diff.embedded .diff-toolbar")).toBeNull();
+  });
+
+  it("单个文件失败只在该块显示原因，其它块继续", async () => {
+    render(MultiFileDiff, { props: props({ rows: rowsOf(3) }) });
+    await waitFor(() => expect(pendingReads).toHaveLength(3));
+    pendingReads[1].reject({ code: "git", message: "读取 file-1 失败" });
+    pendingReads[0].resolve(diffFor("gen/file-0.ts", false));
+    pendingReads[2].resolve(diffFor("gen/file-2.ts", false));
+    await screen.findByText("读取 file-1 失败");
+    const failed = document.querySelector('.multi-file[data-path="gen/file-1.ts"]');
+    expect(failed?.textContent).toContain("差异没有读取完成");
+    await waitFor(() => expect(document.querySelector('.multi-file[data-path="gen/file-0.ts"] [data-diff-row]')).toBeTruthy());
+    expect(document.querySelector('.multi-file[data-path="gen/file-2.ts"] [data-diff-row]')).toBeTruthy();
+  });
+
+  it("generation 变化后丢弃在途响应并重新读取；旧 generation 报 stale 时交给外壳刷新", async () => {
+    const shown = props({ rows: rowsOf(2) });
+    const view = render(MultiFileDiff, { props: shown });
+    await waitFor(() => expect(pendingReads).toHaveLength(2));
+    const old = pendingReads.slice();
+    await view.rerender({ opened: opened(5) });
+    // 旧响应还占着通道：并发上限跨轮次同样有效，只放进来一个新读取。
+    await waitFor(() => expect(pendingReads).toHaveLength(3));
+
+    old[0].resolve({ ...diffFor("gen/file-0.ts", false), additions: 111 });
+    await waitFor(() => expect(pendingReads).toHaveLength(4));
+    expect(document.body.textContent).not.toContain("+111");
+    expect(mocks.loadDiff.mock.calls.slice(2).map((call) => call[3])).toEqual([5, 5]);
+    pendingReads[2].resolve({ ...diffFor("gen/file-0.ts", false), additions: 222 });
+    await screen.findByText("+222");
+    expect(document.body.textContent).not.toContain("+111");
+
+    old[1].reject({ code: "stale", message: "过期", generation: 9 });
+    await tick();
+    expect(shown.onStale, "旧轮次的失败同样丢弃").not.toHaveBeenCalled();
+    pendingReads[3].reject({ code: "stale", message: "过期", generation: 9 });
+    await waitFor(() => expect(shown.onStale).toHaveBeenCalledWith(9));
+  });
+
+  it("块内不滚纵向：按外层视口算虚拟窗口，只渲染可见行", async () => {
+    const rows = rowsOf(1);
+    const long: DiffResponse = {
+      ...diffFor(rows[0].path, false),
+      lines: Array.from({ length: 2000 }, (_, index) => ({ kind: "context" as const, text: ` line-${index}`, oldNo: index + 1, newNo: index + 1, hunkIndex: 0 })),
+    };
+    mocks.loadDiff.mockImplementation(async () => long);
+    render(MultiFileDiff, { props: props({ rows }) });
+    await waitFor(() => expect(document.querySelectorAll("[data-diff-row]").length).toBeGreaterThan(0));
+    expect(document.querySelectorAll("[data-diff-row]").length).toBeLessThan(100);
+    const space = document.querySelector<HTMLElement>(".diff.embedded .virtual-space")!;
+    expect(space.style.height).toBe(`${2000 * 18}px`);
+  });
+
+  it("按块暂存带上所在文件块的身份和差异，不是焦点文件的", async () => {
+    const rows = rowsOf(2);
+    const shown = props({ rows });
+    mocks.loadDiff.mockImplementation(async (_repo: string, path: string, staged: boolean) => {
+      const loaded = diffFor(path, staged);
+      return { ...loaded, lines: [{ kind: "hunk", text: "@@ -1 +1 @@", oldNo: null, newNo: null, hunkIndex: 0 }, ...loaded.lines] };
+    });
+    render(MultiFileDiff, { props: shown });
+    const block = await waitFor(() => {
+      const element = document.querySelector<HTMLElement>('.multi-file[data-path="gen/file-1.ts"]');
+      expect(element?.querySelector(".hunk-btn")).toBeTruthy();
+      return element!;
+    });
+    await fireEvent.click(block.querySelector(".hunk-btn")!);
+    expect(shown.onStageHunk).toHaveBeenCalledWith(
+      { path: "gen/file-1.ts", side: "unstaged" },
+      expect.objectContaining({ path: "gen/file-1.ts" }),
+      expect.objectContaining({ index: 0 }),
+    );
+  });
+
+  it("文件离开选中集合后，它的迟到响应不再写入", async () => {
+    const rows = rowsOf(2);
+    const view = render(MultiFileDiff, { props: props({ rows }) });
+    await waitFor(() => expect(pendingReads).toHaveLength(2));
+    await view.rerender({ rows: rows.slice(0, 1) });
+    pendingReads[1].resolve({ ...diffFor("gen/file-1.ts", false), additions: 333 });
+    await tick();
+    expect(document.body.textContent).not.toContain("+333");
+    expect(blockPaths()).toEqual(["gen/file-0.ts"]);
+  });
+
+  it("每块可折叠，折叠的块不读取；工具栏批量动作说明排除了冲突文件", async () => {
+    render(MultiFileDiff, { props: props({ rows: rowsOf(4), conflictCount: 1 }) });
+    await waitFor(() => expect(pendingReads).toHaveLength(3));
+    await fireEvent.click(screen.getByRole("button", { name: "收起 gen/file-3.ts" }));
+    pendingReads.forEach((read) => read.resolve(diffFor(read.path, false)));
+    await tick();
+    await tick();
+    expect(pendingReads).toHaveLength(3);
+    expect(document.querySelector('.multi-file[data-path="gen/file-3.ts"] .multi-file-diff')).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "展开 gen/file-3.ts" }));
+    await waitFor(() => expect(pendingReads).toHaveLength(4));
+    expect(screen.getByRole("button", { name: "暂存 4 个文件" }).title).toContain("已排除 1 个冲突文件");
   });
 });

@@ -446,6 +446,54 @@ describe("临时保存 modal", () => {
   });
 });
 
+describe("提交详情的上一个、下一个文件（R20）", () => {
+  const files = ["a.ts", "b.ts", "c.ts"].map((path) => ({ path, originalPath: null, status: "modified" }));
+
+  beforeEach(() => {
+    const only = commit(0);
+    historyPage.mockResolvedValue({ generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [only] });
+    commitDetail.mockResolvedValue({ generation: 3, commit: only, body: "", root: false, merge: false, selectedParent: only.parents[0], files });
+    commitFileDiff.mockImplementation(async (_repo: string, _oid: string, _parent: string, path: string) => ({ ...diff, path }));
+  });
+
+  const selectedFile = () => document.querySelector('.history-files .file-row[aria-selected="true"] .fn')?.textContent;
+
+  it("差异工具栏切换变更文件，列表同步，首尾不可用并说明原因", async () => {
+    render(HistoryPanel, { props: panelProps() });
+    const next = (await screen.findByRole("button", { name: "下一个文件" })) as HTMLButtonElement;
+    const prev = screen.getByRole("button", { name: "上一个文件" }) as HTMLButtonElement;
+    await waitFor(() => expect(selectedFile()).toBe("a.ts"));
+    expect(prev.disabled).toBe(true);
+    expect(prev.title).toBe("已经是第一个文件");
+
+    await fireEvent.click(next);
+    await waitFor(() => expect(selectedFile()).toBe("b.ts"));
+    await waitFor(() => expect(commitFileDiff.mock.calls.at(-1)?.[3]).toBe("b.ts"));
+    await fireEvent.click(next);
+    await waitFor(() => expect(next.disabled).toBe(true));
+    expect(next.title).toBe("已经是最后一个文件");
+    await fireEvent.click(prev);
+    await waitFor(() => expect(selectedFile()).toBe("b.ts"));
+  });
+
+  it("把状态上报给外壳，全部文件模式也能切换并定位文件块", async () => {
+    const onFileNav = vi.fn();
+    render(HistoryPanel, { props: { ...panelProps(), onFileNav } });
+    await screen.findByRole("button", { name: "下一个文件" });
+    await waitFor(() => expect(onFileNav.mock.calls.at(-1)?.[0]).toMatchObject({ index: 0, total: 3, prevReason: "已经是第一个文件", nextReason: null }));
+
+    await fireEvent.click(screen.getByRole("button", { name: /全部文件/ }));
+    await waitFor(() => expect(document.querySelector(".history-multi")).toBeTruthy());
+    const nav = within(document.querySelector<HTMLElement>(".commit-facts")!);
+    await fireEvent.click(nav.getByRole("button", { name: "下一个文件" }));
+    await waitFor(() => expect(document.querySelector(".multi-file.focused")?.getAttribute("data-path")).toBe("b.ts"));
+    expect(selectedFile()).toBe("b.ts");
+    onFileNav.mock.calls.at(-1)?.[0].onNext();
+    await waitFor(() => expect(document.querySelector(".multi-file.focused")?.getAttribute("data-path")).toBe("c.ts"));
+    expect(nav.getByRole("button", { name: "下一个文件" })).toHaveProperty("disabled", true);
+  });
+});
+
 describe("历史分栏", () => {
   it("搜索、提交列表和分页在左栏，详情、变更文件和差异在主内容，差异模式在详情头部", async () => {
     const only = commit(0);

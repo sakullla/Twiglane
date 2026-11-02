@@ -19,7 +19,7 @@
   import { clampWidth, FALLBACK_POLL_MS, fitPaneWidth, shouldPoll } from "./lib/layout";
   import { branchLabel, commitScope, dependencyNote, filterRows, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
   import { startDesktopMeasure } from "./lib/measure";
-  import { shortcutCommand } from "./lib/shortcuts";
+  import { isTextEntry, shortcutCommand } from "./lib/shortcuts";
   import type {
     AppFailure,
     DiffHunk,
@@ -36,7 +36,16 @@
     Theme,
     WorkspaceView,
   } from "./lib/types";
-  import { hasCommitSummary } from "./lib/ui";
+  import {
+    batchSummary,
+    batchTargets,
+    fileNavState,
+    hasCommitSummary,
+    orderedRows,
+    rowsInSelection,
+    sameSelection,
+    type FileNavState,
+  } from "./lib/ui";
   import BranchDialog from "./lib/components/BranchDialog.svelte";
   import BranchSwitcher from "./lib/components/BranchSwitcher.svelte";
   import CommandPalette from "./lib/components/CommandPalette.svelte";
@@ -48,6 +57,7 @@
   import Icon from "./lib/components/Icon.svelte";
   import MergeBanner from "./lib/components/MergeBanner.svelte";
   import MergeModal from "./lib/components/MergeModal.svelte";
+  import MultiFileDiff from "./lib/components/MultiFileDiff.svelte";
   import PaneResizer from "./lib/components/PaneResizer.svelte";
   import PublishModal from "./lib/components/PublishModal.svelte";
   import RecoveryActions from "./lib/components/RecoveryActions.svelte";
@@ -101,7 +111,15 @@
    * 与右下角通知条并行而不是替代——通知条会自己消失，提交区这份留到下次尝试或说明改动为止。
    */
   let commitError = $state<string | null>(null);
+  /** 焦点文件：单选时就是选中文件，多选时是当前定位到的文件块。 */
   let selected = $state<FileSelection | null>(null);
+  /** 多选集合：不足两项时为空，主内容区走单文件差异（R19）。 */
+  let selectedSet = $state.raw<FileSelection[]>([]);
+  let fileList = $state<ReturnType<typeof FileList> | null>(null);
+  /** 批量写入进行中：期间的刷新要跟着文件换分组，不能把正在移动的条目当成消失。 */
+  let batchRunning = false;
+  /** 历史视图的上一个/下一个状态，由 HistoryPanel 上报。 */
+  let historyNav = $state.raw<FileNavState | null>(null);
   let diff = $state.raw<DiffResponse | null>(null);
   let diffError = $state<string | null>(null);
   let diffLoading = $state(false);
@@ -197,6 +215,17 @@
       .map((row) => row.path),
   );
 
+  /* 上一个/下一个文件：单选走当前列表（含筛选）的顺序，跨分组；多选只在选中文件之间走（R20）。 */
+  let multiActive = $derived(selectedSet.length > 1);
+  let selectedRows = $derived(rowsInSelection(orderedRows(opened?.snapshot.files ?? []), selectedSet));
+  let batch = $derived(batchTargets(selectedRows));
+  let changesNav = $derived.by(() => {
+    const items = multiActive ? selectedRows : orderedRows(opened?.snapshot.files ?? [], fileQuery);
+    const index = items.findIndex((row) => sameSelection(row, selected));
+    return fileNavState(items, index, goToFile, multiActive ? "选中文件" : "文件");
+  });
+  let activeNav = $derived(workspaceView === "history" ? historyNav : changesNav);
+
   /* 命令注册表的唯一状态输入：标题栏、左栏、溢出菜单与命令面板都读这一份。 */
   let commandState = $derived<CommandState>({
     hasRepo: opened !== null,
@@ -214,6 +243,7 @@
     stagedCount: scope.paths.length,
     stageTargets,
     unstageTargets,
+    fileNav: activeNav,
     draft,
     theme,
     recentRepos: recent,
@@ -287,6 +317,12 @@
         return;
       case "view.history":
         showHistory();
+        return;
+      case "file.prev":
+        activeNav?.onPrev();
+        return;
+      case "file.next":
+        activeNav?.onNext();
         return;
       case "view.refresh":
         void refresh();
@@ -484,6 +520,7 @@
     drafts.load(next.summary.path, next.draft);
     draft = next.draft;
     opened = next;
+    selectedSet = [];
     degraded = next.watchDegraded;
     const groups = groupFiles(next.snapshot.files);
     const first = groups.unstaged[0] ?? groups.staged[0] ?? groups.conflicted[0];
@@ -596,7 +633,7 @@
         return false;
       }
       opened = { ...opened, snapshot, generation: snapshot.generation };
-      selected = retainSelection(snapshot.files, selected);
+      settleSelection((item) => (batchRunning ? selectionAfterEdit : retainSelection)(snapshot.files, item));
       // 外部完成或开始合并时只有刷新能发现，提示不能停在旧状态。
       void probeMerge();
       await loadSelectedDiff();
@@ -611,7 +648,8 @@
     const token = ++diffToken;
     const current = opened;
     const choice = selected;
-    if (!current || !choice) {
+    // 多选时差异由 MultiFileDiff 逐块读取；序号已经递增，单文件的在途响应随之作废。
+    if (!current || !choice || multiActive) {
       diff = null;
       diffError = null;
       diffLoading = false;
@@ -663,7 +701,57 @@
 
   function selectFile(selection: FileSelection) {
     selected = selection;
+    selectedSet = [];
     void loadSelectedDiff();
+  }
+
+  /** 文件列表的多选结果；不足两个文件时就是单选。 */
+  function selectMany(set: FileSelection[], focus: FileSelection) {
+    if (set.length < 2) {
+      selectFile(set[0] ?? focus);
+      return;
+    }
+    selected = focus;
+    selectedSet = set;
+    live = `已选中 ${set.length} 个文件`;
+    void loadSelectedDiff();
+  }
+
+  /** 上一个/下一个文件：列表选中和滚动同步，焦点留在原处。 */
+  function goToFile(row: FileRow) {
+    const item = { path: row.path, side: row.side };
+    if (multiActive) selected = item;
+    else selectFile(item);
+    fileList?.revealRow(item);
+    live = row.path;
+  }
+
+  /** 多文件视图滚到另一块：只移动焦点文件和列表，不重新定位差异。 */
+  function focusBlock(item: FileSelection) {
+    selected = item;
+    fileList?.revealRow(item);
+  }
+
+  /** 文件集合变化后收敛选中：按 path+side 保留，减到一个就回到单选。 */
+  function settleSelection(resolve: (item: FileSelection) => FileSelection | null) {
+    const focus = selected ? resolve(selected) : null;
+    const seen = new Set<string>();
+    const set = selectedSet.flatMap((item) => {
+      const kept = resolve(item);
+      if (!kept || seen.has(`${kept.side}:${kept.path}`)) return [];
+      seen.add(`${kept.side}:${kept.path}`);
+      return [kept];
+    });
+    selected = focus ?? set[0] ?? null;
+    selectedSet = set.length > 1 ? set : [];
+    if (set.length > 1 && !set.some((item) => sameSelection(item, selected))) selected = set[0];
+  }
+
+  /** 多文件视图读到旧 generation：与单文件读取同样处理，收下新值并刷新。 */
+  function adoptStaleDiff(generation: number) {
+    if (!opened) return;
+    opened = { ...opened, generation };
+    void refresh();
   }
 
   function adoptGeneration(generation: number) {
@@ -706,9 +794,8 @@
 
   function applySnapshot(snapshot: StatusSnapshot) {
     if (!opened) return;
-    const previous = selected;
     opened = { ...opened, snapshot, generation: snapshot.generation };
-    selected = selectionAfterEdit(snapshot.files, previous);
+    settleSelection((item) => selectionAfterEdit(snapshot.files, item));
     void loadSelectedDiff();
   }
 
@@ -772,11 +859,67 @@
     }
   }
 
-  async function stageHunk(hunk: DiffHunk) {
+  /**
+   * 多选批量暂存或取消暂存：沿用单文件 api 逐个串行，全程占着写锁。
+   * 一个文件失败不影响其它文件；generation 过期说明状态已经变了，停下来等刷新，其余算未处理。
+   */
+  async function runBatch(kind: "stage" | "unstage", paths: string[]) {
     const current = opened;
-    const choice = selected;
-    const currentDiff = diff;
-    if (!current || !choice || !currentDiff || pending || reading || !hunk.stageable) return;
+    if (!current || pending || reading || paths.length === 0) return;
+    const verb = kind === "stage" ? "暂存" : "取消暂存";
+    const failed: { path: string; message: string }[] = [];
+    let latest: StatusSnapshot | null = null;
+    let lastFailure: unknown = null;
+    let done = 0;
+    let skipped = 0;
+    pending = kind;
+    batchRunning = true;
+    try {
+      for (const [index, path] of paths.entries()) {
+        if (opened?.summary.path !== current.summary.path) return;
+        live = `正在${verb} ${index + 1}/${paths.length}`;
+        try {
+          const call = kind === "stage" ? api.stageFiles : api.unstageFiles;
+          latest = await call(current.summary.path, [path], opened.generation, nextId());
+          if (opened?.summary.path !== current.summary.path) return;
+          opened = { ...opened, snapshot: latest, generation: latest.generation };
+          const files = latest.files;
+          settleSelection((item) => selectionAfterEdit(files, item));
+          done += 1;
+        } catch (error) {
+          const failure = normalizeError(error);
+          lastFailure = failure;
+          failed.push({ path, message: failure.message });
+          if (failure.code === "stale" || failure.code === "stale_patch") {
+            skipped = paths.length - index - 1;
+            break;
+          }
+        }
+      }
+      if (opened?.summary.path !== current.summary.path) return;
+      if (latest) applySnapshot(latest);
+      const summary = batchSummary(verb, done, failed, skipped);
+      if (lastFailure) {
+        handleMutationError(lastFailure);
+        banner = summary;
+      } else {
+        banner = null;
+      }
+      live = summary;
+    } finally {
+      batchRunning = false;
+      pending = null;
+    }
+  }
+
+  async function stageHunk(hunk: DiffHunk) {
+    if (selected && diff) await stageHunkOf(selected, diff, hunk);
+  }
+
+  /** 按块暂存：单文件取当前差异，多文件视图传入所在文件块的差异。 */
+  async function stageHunkOf(choice: FileSelection, currentDiff: DiffResponse, hunk: DiffHunk) {
+    const current = opened;
+    if (!current || pending || reading || !hunk.stageable) return;
     pending = "hunk";
     live = choice.side === "staged" ? "正在取消暂存代码块" : "正在暂存代码块";
     try {
@@ -879,6 +1022,7 @@
       drafts.load(current.summary.path, "");
       opened = { ...opened, snapshot: result.snapshot, generation: result.generation, draft: "" };
       selected = selectionAfterEdit(result.snapshot.files, selected);
+      selectedSet = [];
       banner = result.pushed ? banner : null;
       live = result.summary;
       void probeMerge();
@@ -921,6 +1065,7 @@
       drafts.load(current.summary.path, "");
       opened = { ...opened, snapshot: result.snapshot, generation: result.generation, draft: "" };
       selected = selectionAfterEdit(result.snapshot.files, selected);
+      selectedSet = [];
       pushRetry = result.retryPush;
       phaseNote = result.summary;
       banner = result.pushed ? null : result.pushError;
@@ -1121,6 +1266,7 @@
         repositoryEpoch += 1;
         opened = null;
         selected = null;
+        selectedSet = [];
         diff = null;
         draft = "";
         degraded = false;
@@ -1226,7 +1372,25 @@
     }
   }
 
+  /** 右键已选文件：动作作用于全部选中，冲突文件排除并说明，放弃仍先列出全部影响（R19）。 */
+  function batchContextMenu(point: { x: number; y: number }) {
+    const busy = writeLocked ? switchBlockedReason(commandState) : undefined;
+    const { stage, unstage, discard, conflicts } = batch;
+    const entries: ContextMenuEntry[] = [{ heading: `已选 ${selectedRows.length} 个文件` }];
+    if (stage.length > 0) entries.push({ id: "stage", label: `暂存 ${stage.length} 个文件`, icon: "plus", shortcut: "空格", disabledReason: busy, run: () => void runBatch("stage", stage) });
+    if (unstage.length > 0) entries.push({ id: "unstage", label: `取消暂存 ${unstage.length} 个文件`, icon: "minus", disabledReason: busy, run: () => void runBatch("unstage", unstage) });
+    if (discard.length > 0) entries.push({ id: "discard", label: `放弃 ${discard.length} 个文件的更改…`, icon: "trash", danger: true, disabledReason: busy, run: () => void recovery?.discard(discard) });
+    if (conflicts > 0) entries.push({ heading: `已排除 ${conflicts} 个冲突文件，请到分支合并里处理` });
+    entries.push({ separator: true });
+    entries.push({ id: "copy-rel", label: "复制相对路径", icon: "copy", run: () => void copyText(selectedRows.map((item) => item.path).join("\n"), "相对路径") });
+    contextMenu = { x: point.x, y: point.y, entries, label: `${selectedRows.length} 个文件的操作` };
+  }
+
   function fileContextMenu(row: FileRow, point: { x: number; y: number }) {
+    if (multiActive && selectedRows.some((item) => sameSelection(item, row))) {
+      batchContextMenu(point);
+      return;
+    }
     const busy = writeLocked ? switchBlockedReason(commandState) : undefined;
     const deleted = row.side === "unstaged" ? row.unstaged === "deleted" : row.staged === "deleted";
     const entries: ContextMenuEntry[] = [];
@@ -1400,8 +1564,18 @@
   function onWindowKeydown(event: KeyboardEvent) {
     if (paletteOpen) return;
     if (taskModal !== null || cloneOpen || dependencyOpen || confirmPath !== null) return;
+    const layered = switcher !== null || contextMenu !== null;
+    if (event.key === "Escape") {
+      // 上面还有弹层时 Esc 只关那一层；输入框里的 Esc 归输入框。
+      if (multiActive && workspaceView === "changes" && selected && !layered && !event.defaultPrevented && !isTextEntry(event.target)) {
+        selectFile(selected);
+      }
+      return;
+    }
     const id = shortcutCommand(event);
     if (!id) return;
+    // Alt+←/→ 在输入框里按单词移动光标，弹层打开时也不在背后切文件。
+    if (id.startsWith("file.") && (layered || isTextEntry(event.target))) return;
     event.preventDefault();
     const command = commandById(id);
     if (!command) return;
@@ -1927,12 +2101,16 @@
               <section class="pane files" aria-label="改动与提交">
                 {@render paneHead()}
                 <FileList
+                  bind:this={fileList}
                   files={opened.snapshot.files}
                   {selected}
+                  {selectedSet}
                   query={fileQuery}
                   disabled={writeLocked}
                   onQuery={(value) => (fileQuery = value)}
                   onSelect={selectFile}
+                  onMultiSelect={selectMany}
+                  onBatch={(side) => void runBatch(side === "staged" ? "unstage" : "stage", side === "staged" ? batch.unstage : batch.stage)}
                   onStage={stagePath}
                   onUnstage={unstagePath}
                   onStageAll={stagePaths}
@@ -1990,18 +2168,45 @@
                 </CommitDraft>
               </section>
               {@render paneResizer()}
-              <DiffView
-                selection={selected}
-                {diff}
-                error={diffError}
-                loading={diffLoading}
-                disabled={writeLocked}
-                onStageHunk={stageHunk}
-                onLoadMore={loadMoreDiff}
-                onFileHistory={openFileHistory}
-                fullFile={diffFullFile}
-                onFullFile={setFullFile}
-              />
+              {#if multiActive}
+                <MultiFileDiff
+                  {opened}
+                  rows={selectedRows}
+                  focus={selected}
+                  nav={changesNav}
+                  disabled={writeLocked}
+                  fullFile={diffFullFile}
+                  fullContext={FULL_FILE_CONTEXT}
+                  stageCount={batch.stage.length}
+                  unstageCount={batch.unstage.length}
+                  discardCount={batch.discard.length}
+                  conflictCount={batch.conflicts}
+                  {nextId}
+                  onFocus={focusBlock}
+                  onStale={adoptStaleDiff}
+                  onStageHunk={stageHunkOf}
+                  onFullFile={setFullFile}
+                  onFileHistory={openFileHistory}
+                  onStage={() => void runBatch("stage", batch.stage)}
+                  onUnstage={() => void runBatch("unstage", batch.unstage)}
+                  onDiscard={() => void recovery?.discard(batch.discard)}
+                  onClear={() => selected && selectFile(selected)}
+                />
+              {:else}
+                <DiffView
+                  selection={selected}
+                  {diff}
+                  error={diffError}
+                  loading={diffLoading}
+                  disabled={writeLocked}
+                  onStageHunk={stageHunk}
+                  onLoadMore={loadMoreDiff}
+                  onFileHistory={openFileHistory}
+                  fullFile={diffFullFile}
+                  onFullFile={setFullFile}
+                  fileNav={changesNav}
+                />
+              {/if}
             </div>
           </div>
           <div
@@ -2030,6 +2235,7 @@
                   onClearFile={() => (historyPath = null)}
                   onSnapshot={applySnapshot}
                   onNotice={notice}
+                  onFileNav={(nav) => (historyNav = nav)}
                   {paneHead}
                   {paneResizer}
                 />

@@ -203,6 +203,107 @@ describe("文件右键菜单", () => {
   });
 });
 
+describe("多选文件的右键菜单", () => {
+  const manyFiles: FileChange[] = [
+    change("src/App.svelte", "none", "modified"),
+    change("src/app.css", "none", "modified"),
+    change("src/util.ts", "none", "modified"),
+    change("src/merge.ts", "unmerged", "unmerged", { unmerged: true }),
+  ];
+
+  beforeEach(() => {
+    const many = { ...snapshot, files: manyFiles };
+    mocks.openRepository.mockResolvedValue({ summary: { name: "demo", path: repoPath }, generation: 4, snapshot: many, draft: "", watchDegraded: false });
+    mocks.refreshStatus.mockResolvedValue(many);
+    let generation = 4;
+    mocks.stageFiles.mockImplementation(async (_repo: string, paths: string[]) => {
+      generation += 1;
+      return { ...many, generation, files: manyFiles.filter((file) => !paths.includes(file.path)) };
+    });
+  });
+
+  async function selectThree() {
+    await openRepo();
+    await waitFor(() => expect(document.querySelector('.file-row[aria-selected="true"]')).toBeTruthy());
+    await fireEvent.click(row("src/App.svelte"));
+    await fireEvent.click(row("src/app.css"), { ctrlKey: true });
+    await fireEvent.click(row("src/merge.ts"), { ctrlKey: true });
+    await waitFor(() => expect(document.querySelectorAll('.file-row[aria-selected="true"]')).toHaveLength(3));
+  }
+
+  it("右键已选文件作用于全部选中，冲突文件排除并说明，未选中的文件不动", async () => {
+    await selectThree();
+    const menu = await rightClick(row("src/app.css"));
+    expect(menu.textContent).toContain("已选 3 个文件");
+    expect(menu.textContent).toContain("已排除 1 个冲突文件");
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: /暂存 2 个文件/ }));
+    await waitFor(() => expect(mocks.stageFiles).toHaveBeenCalledTimes(2));
+    expect(mocks.stageFiles.mock.calls.map((call) => call[1])).toEqual([["src/App.svelte"], ["src/app.css"]]);
+  });
+
+  it("右键未选文件变为单选它，菜单回到单文件内容", async () => {
+    await selectThree();
+    const menu = await rightClick(row("src/util.ts"));
+    expect(menu.textContent).not.toContain("已选");
+    expect(within(menu).getByRole("menuitem", { name: /放弃更改/ })).toBeTruthy();
+    await waitFor(() => expect(document.querySelectorAll('.file-row[aria-selected="true"]')).toHaveLength(1));
+    expect(document.querySelector(".multi-stack")).toBeNull();
+  });
+
+  it("放弃先列出全部影响，取消不写入，冲突文件不在清单里", async () => {
+    await selectThree();
+    const menu = await rightClick(row("src/App.svelte"));
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: /放弃 2 个文件的更改/ }));
+    const dialog = await screen.findByRole("dialog", { name: "放弃文件修改" });
+    expect(mocks.discardChanges).toHaveBeenLastCalledWith(repoPath, ["src/App.svelte", "src/app.css"], false, 4, expect.any(Number));
+    expect(dialog.textContent).toContain("src/App.svelte");
+    expect(dialog.textContent).toContain("src/app.css");
+    expect(dialog.textContent).not.toContain("src/merge.ts");
+    await fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "放弃文件修改" })).toBeNull());
+    expect(mocks.discardChanges.mock.calls.some((call) => call[2] === true)).toBe(false);
+    expect(document.querySelectorAll('.file-row[aria-selected="true"]')).toHaveLength(3);
+  });
+
+  it("中途失败说明是哪个文件，已成功的保留，其余继续", async () => {
+    mocks.stageFiles
+      .mockRejectedValueOnce({ code: "git", message: "索引被锁定" })
+      .mockImplementationOnce(async () => ({ ...snapshot, generation: 5, files: manyFiles.filter((file) => file.path !== "src/app.css") }));
+    await selectThree();
+    const menu = await rightClick(row("src/app.css"));
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: /暂存 2 个文件/ }));
+    const toast = await waitFor(() => {
+      const element = document.querySelector(".toast.error");
+      expect(element).toBeTruthy();
+      return element as HTMLElement;
+    });
+    expect(toast.textContent).toContain("已暂存 1 个文件");
+    expect(toast.textContent).toContain("src/App.svelte：索引被锁定");
+    expect(mocks.stageFiles).toHaveBeenCalledTimes(2);
+  });
+
+  it("generation 过期时停下，没轮到的文件算未处理", async () => {
+    mocks.stageFiles.mockRejectedValueOnce({ code: "stale", message: "仓库状态已变化", generation: 9 });
+    await selectThree();
+    const menu = await rightClick(row("src/app.css"));
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: /暂存 2 个文件/ }));
+    await waitFor(() => expect(document.querySelector(".toast.error")?.textContent).toContain("1 个文件未处理"));
+    expect(mocks.stageFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("写锁占用时批量项不可点并说明原因", async () => {
+    let finish: (value: unknown) => void = () => {};
+    mocks.stageFiles.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
+    await selectThree();
+    await fireEvent.click(within(await rightClick(row("src/app.css"))).getByRole("menuitem", { name: /暂存 2 个文件/ }));
+    const menu = await rightClick(row("src/App.svelte"));
+    const item = within(menu).getByRole("menuitem", { name: /暂存 2 个文件/ });
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(item.title).toContain("稍后再试");
+    finish({ ...snapshot, generation: 5, files: manyFiles });
+  });
+});
+
 describe("仓库弹层的仓库操作", () => {
   const other = "D:/code/other";
 

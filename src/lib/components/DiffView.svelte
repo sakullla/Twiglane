@@ -1,14 +1,16 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { hunkCaption, toSideRows, visibleDiffLines, type ViewLine } from "../diff";
   import { trackCodeScroll } from "../codeScroll.svelte";
   import { codeRuler, rulerPadding, scrollByRows, visibleRange } from "../layout";
   import type { DiffHunk, DiffResponse, FileSelection } from "../types";
-  import { BUSY_REASON, splitPath } from "../ui";
+  import { BUSY_REASON, splitPath, type FileNavState } from "../ui";
   import { buildDiffDocuments, codeOf, signOf } from "../syntax/diffSyntax";
   import { createHighlight } from "../syntax/highlight.svelte";
   import { effectiveLanguage } from "../syntax/prefs.svelte";
   import { lineSegments } from "../syntax/segments";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
+  import FileNav from "./FileNav.svelte";
   import LanguagePicker from "./LanguagePicker.svelte";
   import Icon from "./Icon.svelte";
 
@@ -25,6 +27,16 @@
     /** 是否展开为完整文件（整份文件作上下文）；展开时不提供按块暂存。 */
     fullFile?: boolean;
     onFullFile?: (next: boolean) => void;
+    /** 上一个/下一个文件；不传时工具栏不显示这组按钮。 */
+    fileNav?: FileNavState | null;
+    /**
+     * 堆叠在多文件视图里：不画工具栏，纵向滚动交给外层 scrollHost（块内不再嵌套纵向滚动），
+     * 虚拟窗口按本块在外层视口里的位置算；横向滚动仍是本块独立的。
+     */
+    embedded?: boolean;
+    scrollHost?: HTMLElement | null;
+    /** 外层统一决定的布局；不传时用工具栏自己的切换。 */
+    layout?: "unified" | "split";
   }
 
   /**
@@ -46,12 +58,21 @@
     onFileHistory,
     fullFile = false,
     onFullFile,
+    fileNav = null,
+    embedded = false,
+    scrollHost = null,
+    layout,
   }: Props = $props();
   let menu = $state<ContextMenuRequest | null>(null);
-  let mode = $state<"unified" | "split">("unified");
+  let ownMode = $state<"unified" | "split">("unified");
+  let mode = $derived(layout ?? ownMode);
   let scrollTop = $state(0);
   let viewport = $state(0);
+  /** embedded 时外层视口相对本块的位置与高度。 */
+  let hostTop = $state(0);
+  let hostHeight = $state(0);
   let scroller = $state<HTMLDivElement | null>(null);
+  let root = $state<HTMLElement | null>(null);
   let selectionKey = $derived(selection ? `${selection.side}:${selection.path}` : "");
   let currentDiff = $derived(
     selection && diff?.path === selection.path && diff.staged === (selection.side === "staged") ? diff : null,
@@ -67,7 +88,9 @@
   /* 宽度取全量差异的最长行，只随内容变化，不随虚拟窗口或布局切换跳动。 */
   let ruler = $derived(codeRuler(lines.filter((line) => line.kind !== "hunk").map((line) => codeOf(line))));
   let range = $derived(
-    visibleRange(total, scrollTop, viewport > 0 ? viewport : scrollTop > 0 ? ROW_HEIGHT : 0, ROW_HEIGHT),
+    embedded
+      ? visibleRange(total, hostTop, hostHeight, ROW_HEIGHT)
+      : visibleRange(total, scrollTop, viewport > 0 ? viewport : scrollTop > 0 ? ROW_HEIGHT : 0, ROW_HEIGHT),
   );
   let hunkForLine = $derived((index: number) => {
     const origin = shown.origin[index];
@@ -181,6 +204,47 @@
     if (scroller) scroller.scrollLeft = 0;
   });
 
+  $effect(() => {
+    const host = scrollHost;
+    const node = scroller;
+    if (!embedded || !host || !node) return;
+    const sync = () => {
+      const outer = host.getBoundingClientRect();
+      hostTop = Math.max(0, outer.top - node.getBoundingClientRect().top);
+      hostHeight = outer.height;
+    };
+    sync();
+    host.addEventListener("scroll", sync, { passive: true });
+    // 上方的块变高时本块被推走，但外层并没有滚动，所以连内容列表一起观察。
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(sync);
+    observer?.observe(host);
+    if (host.firstElementChild) observer?.observe(host.firstElementChild);
+    return () => {
+      host.removeEventListener("scroll", sync);
+      observer?.disconnect();
+    };
+  });
+
+  /* 切换文件时差异区会先换成读取状态，滚动容器被卸载，焦点会掉到 body，
+     Alt+←/→ 连按和方向键滚动都断了。先把焦点寄放在外框上，新内容出来再还回去。 */
+  let refocus = false;
+
+  $effect.pre(() => {
+    selectionKey;
+    // 只跟文件切换：滚动容器换新时不能重跑，否则刚还回去的焦点又被收走。
+    untrack(() => {
+      if (embedded || !scroller || document.activeElement !== scroller) return;
+      refocus = true;
+      root?.focus({ preventScroll: true });
+    });
+  });
+
+  $effect(() => {
+    if (!scroller || !refocus) return;
+    refocus = false;
+    scroller.focus({ preventScroll: true });
+  });
+
   /* 行钉在视口里（.code-stage），代码文字按 --code-x 平移，并排两栏因此天然联动。 */
   trackCodeScroll(
     () => scroller,
@@ -194,7 +258,7 @@
   }
 
   function onDiffKey(event: KeyboardEvent) {
-    if (event.target !== event.currentTarget) return;
+    if (embedded || event.target !== event.currentTarget) return;
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     const height = viewport > 0 ? viewport : (scroller?.clientHeight ?? 0);
     if (event.key === "Home") {
@@ -228,8 +292,10 @@
   }
 </script>
 
-<section class="diff dense" aria-label="差异详情">
+<section class="diff dense" class:embedded aria-label="差异详情" tabindex="-1" bind:this={root}>
+  {#if !embedded}
   <div class="diff-toolbar">
+    {#if fileNav}<FileNav nav={fileNav} />{/if}
     <div class="diff-file">
       {#if selection && parts}
         <Icon name="file-diff" size={15} />
@@ -281,10 +347,11 @@
       </button>
     {/if}
     <div class="segmented" role="group" aria-label="差异布局">
-      <button type="button" aria-pressed={mode === "unified"} title="统一视图" onclick={() => (mode = "unified")}><Icon name="rows" size={12} />统一</button>
-      <button type="button" aria-pressed={mode === "split"} title="并排视图" onclick={() => (mode = "split")}><Icon name="split" size={12} />并排</button>
+      <button type="button" aria-pressed={mode === "unified"} title="统一视图" onclick={() => (ownMode = "unified")}><Icon name="rows" size={12} />统一</button>
+      <button type="button" aria-pressed={mode === "split"} title="并排视图" onclick={() => (ownMode = "split")}><Icon name="split" size={12} />并排</button>
     </div>
   </div>
+  {/if}
   {#if error}
     <div class="empty" role="status">
       <span class="empty-icon err"><Icon name="alert-circle" size={24} /></span>

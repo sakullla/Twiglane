@@ -383,6 +383,10 @@ const R11_ACTIONS: { id: string; title: string }[] = [
   { id: "dialog.dependencies", title: "运行依赖" },
 ];
 
+/** R20 在原有清单之外新增的命令。 */
+const ADDED_COMMAND_IDS = ["file.prev", "file.next"];
+const ADDED_COMMAND_TITLES = ["上一个文件", "下一个文件"];
+
 /** 注册表状态夹具：暂存区有 2 个文件、草稿已填，是「看起来都能用」的那一侧。 */
 function commandState(overrides: Partial<CommandState> = {}): CommandState {
   return {
@@ -781,18 +785,22 @@ describe("应用外壳", () => {
   });
 
   it("命令面板按 R11 的 id 清单逐项列出动作，草稿为空时两项提交都带原因", async () => {
-    // 注册表一侧：id 清单完整且顺序稳定（仓库切换插在仓库组的末尾）。
-    expect(paletteItems(commandState()).map((item) => item.id)).toEqual(R11_ACTIONS.map((action) => action.id));
+    // 注册表一侧：原 27 条都在且顺序稳定（仓库切换插在仓库组的末尾），新增的只有文件切换两条。
+    const ids = paletteItems(commandState()).map((item) => item.id);
+    expect(ids.filter((id) => !ADDED_COMMAND_IDS.includes(id))).toEqual(R11_ACTIONS.map((action) => action.id));
+    expect(ids.filter((id) => ADDED_COMMAND_IDS.includes(id))).toEqual(ADDED_COMMAND_IDS);
 
     // 暂存区非空、草稿为空：这是「面板里看起来能点、按钮却是灰的」最容易分叉的时刻。
     render(App);
     await openRepo();
     const palette = await openPalette();
     const options = within(palette).getAllByRole("option");
-    expect(options, "面板条目与注册表动作一一对应").toHaveLength(R11_ACTIONS.length);
-    expect(options.map((option) => option.firstElementChild?.textContent?.trim())).toEqual(
-      R11_ACTIONS.map((action) => action.title),
-    );
+    expect(options, "面板条目与注册表动作一一对应").toHaveLength(ids.length);
+    const titles = options.map((option) => option.firstElementChild?.textContent?.trim());
+    expect(titles.filter((title) => !ADDED_COMMAND_TITLES.includes(title ?? ""))).toEqual(R11_ACTIONS.map((action) => action.title));
+    expect(titles, "同组命令连续，文件切换紧跟两个视图").toEqual(expect.arrayContaining(ADDED_COMMAND_TITLES));
+    expect(titles.indexOf("上一个文件")).toBe(titles.indexOf("提交历史") + 1);
+    expect(titles.indexOf("下一个文件")).toBe(titles.indexOf("提交历史") + 2);
 
     // 不可用的条目必须就地给出原因，不允许静默失败。
     for (const option of options) {

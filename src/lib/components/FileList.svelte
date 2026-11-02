@@ -2,16 +2,23 @@
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
   import { filterRows, groupFiles } from "../labels";
   import type { DiffSide, FileChange, FileRow, FileSelection } from "../types";
-  import { rowMark, splitPath } from "../ui";
+  import { rangeSelection, rowMark, sameSelection, splitPath, toggleSelection } from "../ui";
   import Icon from "./Icon.svelte";
 
   interface Props {
     files: FileChange[];
+    /** 焦点文件：单选时就是选中文件，多选时是当前定位到的那一个。 */
     selected: FileSelection | null;
+    /** 多选集合；不足两项表示单选。 */
+    selectedSet?: FileSelection[];
     query: string;
     disabled: boolean;
     onQuery: (value: string) => void;
     onSelect: (selection: FileSelection) => void;
+    /** 多选变化：集合不足两项时外壳按单选处理，focus 是新的焦点文件。 */
+    onMultiSelect?: (set: FileSelection[], focus: FileSelection) => void;
+    /** 对全部选中文件执行暂存或取消暂存；不传时只作用在这一行。 */
+    onBatch?: (side: DiffSide) => void;
     onStage: (path: string) => void;
     onUnstage: (path: string) => void;
     onStageAll?: (paths: string[]) => void;
@@ -33,10 +40,13 @@
   let {
     files,
     selected,
+    selectedSet = [],
     query,
     disabled,
     onQuery,
     onSelect,
+    onMultiSelect,
+    onBatch,
     onStage,
     onUnstage,
     onStageAll,
@@ -88,11 +98,71 @@
   let visible = $derived(items.slice(range.start, range.end));
   let total = $derived(groups.conflicted.length + groups.unstaged.length + groups.staged.length);
 
-  function isSelected(row: FileRow): boolean {
-    return selected?.path === row.path && selected.side === row.side;
+  let multi = $derived(selectedSet.length > 1);
+  /** Shift 扩展选择的起点：普通选择时落下，扩展过程中不动。 */
+  let anchor: FileSelection | null = null;
+
+  function plain(row: FileSelection): FileSelection {
+    return { path: row.path, side: row.side };
   }
 
-  function itemIndexOf(row: FileRow): number {
+  function isFocus(row: FileRow): boolean {
+    return sameSelection(selected, row);
+  }
+
+  function isSelected(row: FileRow): boolean {
+    return multi ? selectedSet.some((item) => sameSelection(item, row)) : isFocus(row);
+  }
+
+  /** 普通点击、方向键：回到单选，这一行成为新的扩展起点。 */
+  function single(row: FileSelection) {
+    anchor = plain(row);
+    onSelect(plain(row));
+  }
+
+  /**
+   * Shift+点击、Shift+↑/↓：从起点到目标的连续范围。键盘要接着往下扩展，焦点跟着目标；
+   * 鼠标选完是要从头看，焦点落在范围第一个文件。
+   */
+  function extendTo(row: FileSelection, follow: boolean) {
+    if (!onMultiSelect) return single(row);
+    anchor ??= selected ?? plain(row);
+    const range = rangeSelection(rows, anchor, row);
+    onMultiSelect(range, follow ? plain(row) : (range[0] ?? plain(row)));
+  }
+
+  /** ⌘/Ctrl+点击：增减这一行。最后一个文件不能减掉，否则主内容区会什么都不显示。 */
+  function toggleRow(row: FileSelection) {
+    if (!onMultiSelect) return single(row);
+    const base = multi ? selectedSet : selected ? [plain(selected)] : [];
+    const next = toggleSelection(base, plain(row));
+    if (next.length === 0) return;
+    const removed = next.length < base.length;
+    anchor = plain(row);
+    onMultiSelect(next, removed ? (sameSelection(selected, row) ? next[0] : (selected ?? next[0])) : plain(row));
+  }
+
+  function selectAll() {
+    if (!onMultiSelect || rows.length === 0) return;
+    onMultiSelect(rows.map(plain), selected && rows.some((row) => isFocus(row)) ? selected : plain(rows[0]));
+  }
+
+  function clickRow(event: MouseEvent, row: FileRow) {
+    if (event.shiftKey) extendTo(row, false);
+    else if (event.metaKey || event.ctrlKey) toggleRow(row);
+    else single(row);
+    // 行是虚拟的，滚出窗口就卸载；焦点放在列表上，键盘操作才不会掉到 body。
+    list?.focus({ preventScroll: true });
+  }
+
+  /** 从外部切换文件时让列表跟上（上一个/下一个、多选堆叠的滚动定位）。 */
+  export function revealRow(row: FileSelection) {
+    anchor = plain(row);
+    const index = itemIndexOf(row);
+    if (index >= 0) reveal(index);
+  }
+
+  function itemIndexOf(row: FileSelection): number {
     return items.findIndex((item) => item.kind === "row" && item.row.path === row.path && item.row.side === row.side);
   }
 
@@ -109,7 +179,8 @@
       onResolve?.(row.path);
       return;
     }
-    if (row.side === "unstaged") onStage(row.path);
+    if (multi && onBatch && isSelected(row)) onBatch(row.side);
+    else if (row.side === "unstaged") onStage(row.path);
     else onUnstage(row.path);
   }
 
@@ -120,6 +191,11 @@
       const element = list?.querySelector<HTMLElement>('.file-row[aria-selected="true"]');
       const rect = element?.getBoundingClientRect();
       onContextMenu(rows[current], rect ? { x: rect.left + 24, y: rect.bottom - 4 } : { x: 120, y: 120 });
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "a") {
+      event.preventDefault();
+      selectAll();
       return;
     }
     if (event.altKey || event.ctrlKey || event.metaKey) return;
@@ -134,7 +210,8 @@
     const row = rows[move];
     if (!row) return;
     reveal(itemIndexOf(row));
-    onSelect({ path: row.path, side: row.side });
+    if (event.shiftKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) extendTo(row, true);
+    else single(row);
   }
 </script>
 
@@ -167,6 +244,7 @@
   class="file-list"
   role="listbox"
   aria-label="改动文件"
+  aria-multiselectable={onMultiSelect ? "true" : undefined}
   tabindex="0"
   bind:this={list}
   onkeydown={onKey}
@@ -236,20 +314,24 @@
             role="option"
             style={`top:${top + ROW_GAP / 2}px;height:${ROW_HEIGHT - ROW_GAP}px`}
             aria-selected={isSelected(row)}
+            data-member={multi && isSelected(row) && !isFocus(row) ? "" : undefined}
             tabindex="-1"
             title={row.originalPath ? `${row.originalPath} → ${row.path}` : row.path}
-            onclick={() => onSelect({ path: row.path, side: row.side })}
-            ondblclick={() => toggle(row)}
+            onclick={(event) => clickRow(event, row)}
+            ondblclick={(event) => {
+              if (!event.shiftKey && !event.ctrlKey && !event.metaKey) toggle(row);
+            }}
             oncontextmenu={(event) => {
               if (!onContextMenu) return;
               event.preventDefault();
-              onSelect({ path: row.path, side: row.side });
+              // 右键已选文件作用于全部选中，右键别的文件变为单选它。
+              if (!(multi && isSelected(row))) single(row);
               onContextMenu(row, { x: event.clientX, y: event.clientY });
             }}
             onkeydown={(event) => {
               if (event.key === "Enter") {
                 event.preventDefault();
-                onSelect({ path: row.path, side: row.side });
+                single(row);
               }
             }}
           >
@@ -283,7 +365,7 @@
                 title="暂存（空格）"
                 onclick={(event) => {
                   event.stopPropagation();
-                  onStage(row.path);
+                  toggle(row);
                 }}
               >
                 <Icon name="plus" size={13} />暂存
@@ -296,7 +378,7 @@
                 title="取消暂存（空格）"
                 onclick={(event) => {
                   event.stopPropagation();
-                  onUnstage(row.path);
+                  toggle(row);
                 }}
               >
                 <Icon name="minus" size={13} />取消暂存

@@ -24,10 +24,11 @@
     OpenedRepository,
     StatusSnapshot,
   } from "../types";
-  import { BUSY_REASON, hueOf, initialOf, relativeTime, splitPath, statusMark } from "../ui";
+  import { BUSY_REASON, fileNavState, hueOf, initialOf, relativeTime, splitPath, statusMark, type FileNavState } from "../ui";
   import CommitDiffList from "./CommitDiffList.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest, isContextKey, pointFor } from "./ContextMenu.svelte";
   import DiffView from "./DiffView.svelte";
+  import FileNav from "./FileNav.svelte";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
 
@@ -44,6 +45,8 @@
     /** 从某个提交新建分支后回写最新状态（切换时工作区与分支都会变）。 */
     onSnapshot?: (snapshot: StatusSnapshot) => void;
     onNotice?: (message: string) => void;
+    /** 变更文件的上一个/下一个状态：外壳据此响应 file.prev、file.next。 */
+    onFileNav?: (nav: FileNavState | null) => void;
     /** 左栏头部（视图切换与合并提示）和右沿拖动条：由外壳提供，与改动视图是同一份。 */
     paneHead?: Snippet;
     paneResizer?: Snippet;
@@ -64,6 +67,7 @@
     onClearFile,
     onSnapshot,
     onNotice,
+    onFileNav,
     paneHead,
     paneResizer,
   }: Props = $props();
@@ -147,6 +151,7 @@
   let list = $state<HTMLDivElement | null>(null);
   let fileScroll = $state(0);
   let fileViewport = $state(0);
+  let fileListEl = $state<HTMLDivElement | null>(null);
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   let lastFile: string | null | undefined = undefined;
 
@@ -186,6 +191,18 @@
     ),
   );
   let visibleFiles = $derived(filteredFiles.slice(fileRange.start, fileRange.end));
+  /* 按筛选后的列表走，与左侧看到的顺序一致；「全部文件」模式还没点选时算在第一个。 */
+  let fileIndex = $derived.by(() => {
+    const path = viewMode === "single" ? activeFile?.path : (multiFocus ?? filteredFiles[0]?.path);
+    return filteredFiles.findIndex((file) => file.path === path);
+  });
+  let fileNav = $derived(detail ? fileNavState(filteredFiles, fileIndex, (file) => goToFile(file.path)) : null);
+
+  $effect(() => {
+    onFileNav?.(fileNav);
+    return () => onFileNav?.(null);
+  });
+
   $effect(() => {
     const element = bodyEl;
     void bodyRest;
@@ -379,6 +396,15 @@
   function chooseFile(path: string) {
     if (viewMode === "multi") multiFocus = path;
     else manualPath = path;
+  }
+
+  function goToFile(path: string) {
+    chooseFile(path);
+    const index = filteredFiles.findIndex((file) => file.path === path);
+    const height = fileViewport > 0 ? fileViewport : (fileListEl?.clientHeight ?? 0);
+    const next = scrollIndexIntoView(index, fileScroll, height, FILE_ROW_HEIGHT);
+    fileScroll = next;
+    if (fileListEl) fileListEl.scrollTop = next;
   }
 
   function reveal(index: number) {
@@ -636,6 +662,7 @@
             </div>
           </div>
           <div class="commit-facts">
+            {#if viewMode === "multi" && fileNav}<FileNav nav={fileNav} />{/if}
             <div class="segmented history-view-mode" role="group" aria-label="历史差异模式">
               <button type="button" aria-pressed={viewMode === "single"} title="一次看一个文件" onclick={() => (viewMode = "single")}><Icon name="file" size={12} />单文件</button>
               <button type="button" aria-pressed={viewMode === "multi"} title="连续查看整次提交的全部文件" onclick={() => (viewMode = "multi")}><Icon name="layers" size={12} />全部文件</button>
@@ -704,6 +731,7 @@
                 role="listbox"
                 aria-label="提交中的文件列表"
                 tabindex="0"
+                bind:this={fileListEl}
                 bind:clientHeight={fileViewport}
                 onscroll={(event) => (fileScroll = event.currentTarget.scrollTop)}
               >
@@ -759,6 +787,7 @@
                 onStageHunk={() => {}}
                 onLoadMore={loadMoreDiff}
                 onFileHistory={onFilePath}
+                {fileNav}
               />
             {/if}
           </div>

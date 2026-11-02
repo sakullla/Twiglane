@@ -527,6 +527,62 @@ describe("提交详情的上一个、下一个文件（R20）", () => {
     delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
   });
 
+  it("从单文件进入全部文件后，折叠不被定位逻辑抢回，下一个文件仍能定位并展开", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
+    const flush = async () => {
+      await tick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await tick();
+    };
+    const expanded = () => document.querySelectorAll('.history-multi .multi-file-toggle[aria-expanded="true"]').length;
+    try {
+      render(HistoryPanel, { props: panelProps() });
+      await waitFor(() => expect(selectedFile()).toBe("a.ts"));
+      await fireEvent.click(screen.getByRole("button", { name: /全部文件/ }));
+      await waitFor(() => expect(expanded()).toBe(3));
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+      const located = () => (scrollIntoView.mock.contexts.at(-1) as HTMLElement | undefined)?.dataset.path;
+      expect(located(), "进入时定位到当前文件").toBe("a.ts");
+
+      // 全部收起：焦点文件也收得起来。
+      await fireEvent.click(screen.getByRole("button", { name: "全部收起" }));
+      await flush();
+      expect(expanded()).toBe(0);
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+      await fireEvent.click(screen.getByRole("button", { name: "展开全部" }));
+      await flush();
+      expect(expanded()).toBe(3);
+
+      // 单独折叠焦点文件和其它文件都不改滚动位置。
+      const host = document.querySelector<HTMLElement>(".history-multi-scroll")!;
+      host.scrollTop = 1063;
+      await fireEvent.click(screen.getByRole("button", { name: "收起 a.ts" }));
+      await flush();
+      await fireEvent.click(screen.getByRole("button", { name: "收起 c.ts" }));
+      await flush();
+      expect(expanded()).toBe(1);
+      expect(host.scrollTop).toBe(1063);
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+      // 换目标才再定位：下一个文件展开并滚到 b.ts，再下一个展开已收起的 c.ts。
+      const next = within(document.querySelector<HTMLElement>(".commit-facts")!).getByRole("button", { name: "下一个文件" });
+      await fireEvent.click(next);
+      await flush();
+      expect(scrollIntoView).toHaveBeenCalledTimes(2);
+      expect(located()).toBe("b.ts");
+      await fireEvent.click(next);
+      await flush();
+      expect(scrollIntoView).toHaveBeenCalledTimes(3);
+      expect(located()).toBe("c.ts");
+      expect(screen.getByRole("button", { name: "收起 c.ts" }).getAttribute("aria-expanded")).toBe("true");
+      expect(screen.getByRole("button", { name: "展开 a.ts" })).toBeTruthy();
+    } finally {
+      delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
+
   it("把状态上报给外壳，全部文件模式也能切换并定位文件块", async () => {
     const onFileNav = vi.fn();
     render(HistoryPanel, { props: { ...panelProps(), onFileNav } });

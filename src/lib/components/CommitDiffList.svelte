@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { api } from "../api";
   import { normalizeError } from "../errors";
   import { commitFileLabel } from "../history";
@@ -44,16 +45,20 @@
     onFocusPath?.(path);
   }
 
+  /* 只跟 focusPath：折叠状态放进 untrack，否则用户每折叠一次都会把焦点文件重新展开并拉回去。 */
   $effect(() => {
     const path = focusPath;
-    const host = scroller;
-    if (!path || !host || path === followed) return;
-    followed = null;
-    spying = false;
-    if (!expandedPaths.includes(path)) expandedPaths = [...expandedPaths, path];
-    queueMicrotask(() => {
-      const target = [...host.querySelectorAll<HTMLElement>("[data-path]")].find((node) => node.dataset.path === path);
-      target?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+    untrack(() => {
+      const host = scroller;
+      const reported = path === followed;
+      followed = null;
+      if (!path || !host || reported) return;
+      spying = false;
+      if (!expandedPaths.includes(path)) expandedPaths = [...expandedPaths, path];
+      queueMicrotask(() => {
+        const target = [...host.querySelectorAll<HTMLElement>("[data-path]")].find((node) => node.dataset.path === path);
+        target?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+      });
     });
   });
 

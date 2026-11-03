@@ -8,13 +8,13 @@ use crate::error::AppError;
 use crate::git::command::{
     add_command, branch_contains_command, cached_diff_quiet_command, cat_blob_command,
     checkout_index_stage_command, checkout_side_command, clean_files_command, commit_command,
-    fetch_one_command, git_path_command, hash_object_command, head_command, head_match_command,
-    head_record_command, ls_remote_tags_command, merge_abort_command, merge_divergence_command,
-    merge_ff_only_command, merge_incoming_files_command, merge_incoming_log_command,
-    merge_no_commit_command, merge_tree_command, push_reflog_command, remote_names_command,
-    remote_tracking_command, remove_path_command, reset_soft_command, restore_worktree_command,
-    rev_parse_command, stash_list_command, status_command, switch_command, unmerged_index_command,
-    update_index_info_command,
+    fetch_one_command, git_path_command, git_paths_command, hash_object_command, head_command,
+    head_match_command, head_record_command, ls_remote_tags_command, merge_abort_command,
+    merge_divergence_command, merge_ff_only_command, merge_incoming_files_command,
+    merge_incoming_log_command, merge_no_commit_command, merge_tree_command, push_reflog_command,
+    remote_names_command, remote_tracking_command, remove_path_command, reset_soft_command,
+    restore_worktree_command, rev_parse_command, stash_list_command, status_command,
+    switch_command, unmerged_index_command, update_index_info_command,
 };
 use crate::git::gate::action_key;
 use crate::git::history::{parse_history_records, parse_name_status};
@@ -73,14 +73,9 @@ pub async fn merge_preview(
     };
     let git = require_git(backend).await?;
     let snapshot = read_status(backend, &root, generation, request_id).await?;
-    let operation = operation_kind(
-        backend,
-        &root,
-        &git.path,
-        snapshot.generation,
-        internal_request_id(),
-    )
-    .await?;
+    let operation =
+        operation_from_snapshot(backend, &root, &git.path, &snapshot, internal_request_id())
+            .await?;
     ensure_ref(
         backend,
         &root,
@@ -195,14 +190,9 @@ pub async fn merge_session(
     let root = repo_root(path)?;
     let git = require_git(backend).await?;
     let snapshot = read_status(backend, &root, generation, request_id).await?;
-    let operation = operation_kind(
-        backend,
-        &root,
-        &git.path,
-        snapshot.generation,
-        internal_request_id(),
-    )
-    .await?;
+    let operation =
+        operation_from_snapshot(backend, &root, &git.path, &snapshot, internal_request_id())
+            .await?;
     let stages = if operation == "merge" || operation == "unmerged" {
         read_stages(
             backend,
@@ -1474,14 +1464,8 @@ async fn abort_preview(
     request_id: u64,
 ) -> Result<AbortImpact, AppError> {
     let snapshot = read_status(backend, root, generation, request_id).await?;
-    let operation = operation_kind(
-        backend,
-        root,
-        git,
-        snapshot.generation,
-        internal_request_id(),
-    )
-    .await?;
+    let operation =
+        operation_from_snapshot(backend, root, git, &snapshot, internal_request_id()).await?;
     if operation != "merge" {
         return Err(AppError::new(
             "unsupported_operation",
@@ -1594,14 +1578,8 @@ async fn undo_preview(
     request_id: u64,
 ) -> Result<UndoResult, AppError> {
     let snapshot = read_status(backend, root, generation, request_id).await?;
-    let operation = operation_kind(
-        backend,
-        root,
-        git,
-        snapshot.generation,
-        internal_request_id(),
-    )
-    .await?;
+    let operation =
+        operation_from_snapshot(backend, root, git, &snapshot, internal_request_id()).await?;
     let record = read_head_record(
         backend,
         root,
@@ -2710,25 +2688,26 @@ async fn operation_kind(
     request_id: u64,
 ) -> Result<String, AppError> {
     let snapshot = read_status(backend, root, generation, request_id).await?;
-    let mut generation = snapshot.generation;
-    for (name, kind) in sequencer_markers() {
-        let (output, next) = run_read(
-            backend,
-            root,
-            generation,
-            internal_request_id(),
-            git_path_command(git, root, name),
-        )
-        .await?;
-        generation = next;
-        if output.exit_code == 0 && git_path_exists(root, &output.stdout) {
-            return Ok(kind.to_string());
-        }
-    }
-    if snapshot.files.iter().any(|file| file.unmerged) {
-        return Ok("unmerged".to_string());
-    }
-    Ok("none".to_string())
+    operation_from_snapshot(backend, root, git, &snapshot, internal_request_id()).await
+}
+
+async fn operation_from_snapshot(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    snapshot: &StatusSnapshot,
+    request_id: u64,
+) -> Result<String, AppError> {
+    let names: Vec<_> = sequencer_markers().iter().map(|(name, _)| *name).collect();
+    let (output, _) = run_read(
+        backend,
+        root,
+        snapshot.generation,
+        request_id,
+        git_paths_command(git, root, &names),
+    )
+    .await?;
+    operation_from_paths(root, snapshot, &output)
 }
 
 async fn operation_in_guard(
@@ -2737,15 +2716,43 @@ async fn operation_in_guard(
     root: &Path,
     snapshot: &StatusSnapshot,
 ) -> Result<String, AppError> {
-    for (name, kind) in sequencer_markers() {
-        if path_exists_in_guard(guard, git, root, name).await? {
+    let names: Vec<_> = sequencer_markers().iter().map(|(name, _)| *name).collect();
+    let output = run_spec(guard, git_paths_command(git, root, &names), false, false).await?;
+    operation_from_paths(root, snapshot, &output)
+}
+
+fn operation_from_paths(
+    root: &Path,
+    snapshot: &StatusSnapshot,
+    output: &ProcessOutput,
+) -> Result<String, AppError> {
+    if output.exit_code != 0 {
+        return Err(git_failure(
+            "operation_failed",
+            output,
+            "无法读取仓库操作状态。",
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let paths: Vec<_> = text.lines().collect();
+    let markers = sequencer_markers();
+    if paths.len() != markers.len() {
+        return Err(AppError::new(
+            "operation_failed",
+            "仓库操作状态路径不完整，未修改仓库。",
+        ));
+    }
+    for (path, (_, kind)) in paths.iter().zip(markers) {
+        if git_path_exists(root, path.as_bytes()) {
             return Ok(kind.to_string());
         }
     }
-    if snapshot.files.iter().any(|file| file.unmerged) {
-        return Ok("unmerged".to_string());
+    Ok(if snapshot.files.iter().any(|file| file.unmerged) {
+        "unmerged"
+    } else {
+        "none"
     }
-    Ok("none".to_string())
+    .to_string())
 }
 
 fn sequencer_markers() -> [(&'static str, &'static str); 6] {
@@ -3311,6 +3318,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idle_merge_probe_scans_status_once_and_batches_marker_paths() {
+        let fixture = crate::test_support::git_fixture("merge-probe-cost");
+        let trace = fixture.path().join("git-trace.log");
+        let backend = fixture
+            .backend_with_extra_env(vec![("GIT_TRACE".into(), trace.as_os_str().to_os_string())]);
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        let started = std::time::Instant::now();
+        let session = merge_session(&backend, &repo_key(&repo), generation(&backend, &repo), 1)
+            .await
+            .unwrap();
+        assert_eq!(session.operation, "none");
+        let log = fs::read_to_string(trace).unwrap();
+        let statuses = log
+            .lines()
+            .filter(|line| line.contains("built-in: git status "))
+            .count();
+        let paths = log
+            .lines()
+            .filter(|line| line.contains("built-in: git rev-parse "))
+            .count();
+        eprintln!(
+            "merge probe: {:?}, status={statuses}, path queries={paths}",
+            started.elapsed()
+        );
+        assert_eq!(
+            statuses, 1,
+            "a merge probe must not scan the worktree twice"
+        );
+        assert_eq!(paths, 1, "resolve all sequencer paths with one Git process");
+    }
+
+    #[tokio::test]
     async fn merge_into_another_branch_switches_first_and_can_fast_forward() {
         let fixture = crate::test_support::git_fixture("merge-reverse");
         let backend = fixture.backend();
@@ -3412,10 +3452,7 @@ mod tests {
             parse_merge_tree_conflicts(raw),
             vec!["a.txt".to_string(), "dir/b c.txt".to_string()]
         );
-        assert_eq!(
-            parse_divergence(b"3\t5\n").unwrap(),
-            (3, 5)
-        );
+        assert_eq!(parse_divergence(b"3\t5\n").unwrap(), (3, 5));
         assert!(parse_divergence(b"oops").is_err());
     }
 

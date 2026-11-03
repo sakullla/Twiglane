@@ -334,7 +334,9 @@ pub fn delete_remote_branch_command(
 
 pub fn branch_list_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
-    let format = "%(refname)\u{1f}%(upstream:short)\u{1f}%(worktreepath)\u{1f}%(HEAD)".to_string();
+    let format =
+        "%(refname)\u{1f}%(upstream:short)\u{1f}%(worktreepath)\u{1f}%(HEAD)\u{1f}%(objectname)"
+            .to_string();
     args.extend([
         OsString::from("for-each-ref"),
         OsString::from("--format"),
@@ -986,6 +988,15 @@ pub fn git_path_command(git: &Path, root: &Path, name: &str) -> (PathBuf, Vec<Os
         OsString::from("--git-path"),
         OsString::from(name),
     ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn git_paths_command(git: &Path, root: &Path, names: &[&str]) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.push(OsString::from("rev-parse"));
+    for name in names {
+        args.extend([OsString::from("--git-path"), OsString::from(name)]);
+    }
     (git.to_path_buf(), args)
 }
 

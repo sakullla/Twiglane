@@ -49,6 +49,7 @@
   import { api } from "../api";
   import { normalizeError } from "../errors";
   import { portal } from "../portal";
+  import { visibleRange, scrollIndexIntoView } from "../layout";
   import { shortOid } from "../history";
   import { canCompleteMerge, conflictKindLabel, operationCaption, showMergeAbort } from "../resolve";
   import type {
@@ -119,7 +120,7 @@
     switchedFrom: string | null;
   }
 
-  let session = $state<MergeSession | null>(null);
+  let session = $state.raw<MergeSession | null>(null);
   let branches = $state<BranchRecord[]>([]);
   let source = $state(untrack(() => initialSource ?? ""));
   let target = $state(untrack(() => initialTarget ?? ""));
@@ -168,6 +169,30 @@
   let filteredConflicts = $derived(
     (session?.conflicts ?? []).filter((entry) => entry.path.toLowerCase().includes(fileFilter.trim().toLowerCase())),
   );
+  const CONFLICT_ROW_HEIGHT = 60;
+  let conflictList = $state<HTMLDivElement | null>(null);
+  let conflictScroll = $state(0);
+  let conflictViewport = $state(0);
+  let conflictRows = $derived([
+    ...filteredConflicts.map((entry) => ({ path: entry.path, entry })),
+    ...resolvedPaths.map((path) => ({ path, entry: null })),
+  ]);
+  let conflictRange = $derived(visibleRange(conflictRows.length, conflictScroll, conflictViewport || 480, CONFLICT_ROW_HEIGHT));
+  let visibleConflicts = $derived(conflictRows.slice(conflictRange.start, conflictRange.end));
+  $effect(() => {
+    void fileFilter;
+    conflictScroll = 0;
+    if (conflictList) conflictList.scrollTop = 0;
+  });
+  $effect(() => {
+    const path = view?.path;
+    if (!path || !conflictList) return;
+    const index = conflictRows.findIndex((row) => row.path === path);
+    untrack(() => {
+      conflictScroll = scrollIndexIntoView(index, conflictScroll, conflictViewport || 480, CONFLICT_ROW_HEIGHT);
+      if (conflictList) conflictList.scrollTop = conflictScroll;
+    });
+  });
   let operation = $derived(session?.operation ?? null);
   /** 预检依赖的实际仓库状态。generation 推进但它不变时不重新检查：预检不能触发自己。 */
   let repoState = $derived.by(() => {
@@ -267,23 +292,10 @@
     return base ?? local[0]?.name ?? listed.find((branch) => branch.name !== into && !branch.name.endsWith("/HEAD"))?.name ?? "";
   }
 
-  /** 只是刷新预检依据，读不到时沿用旧值，不影响合并状态本身。 */
-  async function readBranchTips(path: string, generation: number) {
-    try {
-      const page = await api.historyPage(path, "", 0, generation, nextId());
-      const tips: Record<string, string> = {};
-      for (const commit of page.commits) {
-        for (const label of commit.labels) {
-          if (label.kind === "branch" || label.kind === "remote") tips[label.name] = commit.oid;
-        }
-      }
-      return { generation: page.generation, tips };
-    } catch {
-      return null;
-    }
-  }
-
   async function loadSession() {
+    const repo = opened.summary.path;
+    const generation = opened.generation;
+    const key = `${repo}:${generation}`;
     errorText = null;
     if (loadedRepo !== opened.summary.path) {
       loadedRepo = opened.summary.path;
@@ -291,16 +303,15 @@
       view = null;
     }
     try {
-      const [next, listed, tips] = await Promise.all([
-        api.mergeSession(opened.summary.path, opened.generation, nextId()),
-        api.branchState(opened.summary.path, opened.generation, nextId()),
-        readBranchTips(opened.summary.path, opened.generation),
+      const [next, listed] = await Promise.all([
+        api.mergeSession(repo, generation, nextId()),
+        api.branchState(repo, generation, nextId()),
       ]);
-      if (loadedKey !== `${opened.summary.path}:${opened.generation}` && session) return;
+      if (loadedKey !== key || opened.summary.path !== repo) return;
       session = next;
       branches = listed.branches;
-      if (tips) branchTips = tips.tips;
-      factsGeneration = tips?.generation === next.generation ? next.generation : 0;
+      branchTips = Object.fromEntries(listed.branches.filter((branch) => branch.targetOid).map((branch) => [branch.name, branch.targetOid!]));
+      factsGeneration = listed.generation === next.generation ? next.generation : 0;
       onGeneration(next.generation);
       const here = next.snapshot.branch.detached || next.snapshot.branch.unborn ? null : next.snapshot.branch.name;
       if (!target) target = here ?? listed.branches.find((branch) => !branch.remote)?.name ?? "";
@@ -311,6 +322,7 @@
         message = next.source && next.target ? defaultMergeMessage(next.source, next.target, next.source.includes("/")) : "合并分支";
       }
     } catch (error) {
+      if (loadedKey !== key || opened.summary.path !== repo) return;
       const failure = normalizeError(error);
       // 过期只说明这次读取落后了：新 generation 会再读一次，不算失败。
       if (failure.code === "stale" && failure.generation !== undefined) {
@@ -712,13 +724,18 @@
             </div>
           </div>
         {/if}
-        <div class="conflict-files">
-          {#each filteredConflicts as entry (entry.path)}
+        <div class="conflict-files" bind:this={conflictList} bind:clientHeight={conflictViewport} onscroll={() => (conflictScroll = conflictList?.scrollTop ?? 0)}>
+          <div style={`height:${conflictRows.length * CONFLICT_ROW_HEIGHT}px;position:relative`}>
+          {#each visibleConflicts as row, offset (row.path)}
+            <div style={`position:absolute;top:${(conflictRange.start + offset) * CONFLICT_ROW_HEIGHT}px;left:0;right:0;height:56px`}>
+            {#if row.entry}
+            {@const entry = row.entry}
             {@const parts = splitPath(entry.path)}
             {@const progress = fileProgress(entry.path)}
             <button
               type="button"
               class="conflict-file"
+              style="height:56px"
               aria-label={`${conflictKindLabel(entry.kind)} ${entry.path}`}
               aria-pressed={view?.path === entry.path}
               disabled={blocked}
@@ -736,18 +753,20 @@
                 </span>
               {/if}
             </button>
+            {:else}
+              {@const parts = splitPath(row.path)}
+              <div class="conflict-file resolved" style="height:56px" title={row.path}>
+                <span class="conflict-file-icon"><Icon name="check-circle" size={13} /></span>
+                <span class="conflict-file-copy"><strong>{parts.name}</strong><small>{parts.dir || "已标记"}</small></span>
+                <span class="chip current">已标记</span>
+              </div>
+            {/if}
+            </div>
           {/each}
+          </div>
           {#if filteredConflicts.length === 0 && session.conflicts.length > 0}
             <p class="hint conflict-empty-note">没有匹配的冲突文件。</p>
           {/if}
-          {#each resolvedPaths as path (path)}
-            {@const parts = splitPath(path)}
-            <div class="conflict-file resolved" title={path}>
-              <span class="conflict-file-icon"><Icon name="check-circle" size={13} /></span>
-              <span class="conflict-file-copy"><strong>{parts.name}</strong><small>{parts.dir || "已标记"}</small></span>
-              <span class="chip current">已标记</span>
-            </div>
-          {/each}
         </div>
         {#if session.conflicts.length === 0 && resolvedPaths.length === 0}<p class="hint conflict-empty-note">没有待处理的冲突文件。</p>{/if}
       </aside>

@@ -10,6 +10,7 @@
 
   interface Props {
     opened: OpenedRepository;
+    active?: boolean;
     /** 选中的文件，已按列表顺序排好。 */
     rows: FileRow[];
     /** 焦点文件：变化时定位到对应文件块。 */
@@ -49,6 +50,7 @@
 
   let {
     opened,
+    active = true,
     rows,
     focus,
     nav,
@@ -117,7 +119,7 @@
   }
 
   function pump() {
-    if (destroyed) return;
+    if (destroyed || !active) return;
     for (const row of wanted()) {
       if (running >= MAX_CONCURRENT) return;
       const key = selectionKey(row);
@@ -177,6 +179,7 @@
   let wantedKey = $derived(shown.map(selectionKey).join("\n") + `\n${[...collapsed].join("\n")}`);
 
   $effect(() => {
+    void active;
     void round;
     void wantedKey;
     untrack(pump);

@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { Snippet } from "svelte";
+  import { onDestroy, type Snippet } from "svelte";
+  import { LatestReadQueue } from "../latest-read";
   import { api } from "../api";
   import { normalizeError } from "../errors";
   import {
@@ -34,6 +35,7 @@
 
   interface Props {
     opened: OpenedRepository;
+    active?: boolean;
     filePath: string | null;
     searchQuery?: string;
     disabled: boolean;
@@ -52,11 +54,17 @@
     paneResizer?: Snippet;
   }
 
+  const pageReads = new LatestReadQueue();
+  const detailReads = new LatestReadQueue();
+  const diffReads = new LatestReadQueue();
+  onDestroy(() => { pageReads.close(); detailReads.close(); diffReads.close(); });
+
   const ROW_HEIGHT = 60;
   const FILE_ROW_HEIGHT = 44;
 
   let {
     opened,
+    active = true,
     filePath,
     searchQuery = "",
     disabled,
@@ -135,15 +143,15 @@
   let activeQuery = $state("");
   let lastSearchSeed = "";
   let offset = $state(0);
-  let page = $state<HistoryPage | null>(null);
+  let page = $state.raw<HistoryPage | null>(null);
   let listError = $state<string | null>(null);
   let loading = $state(false);
   let selectedOid = $state<string | null>(null);
   let parentChoice = $state<string | null>(null);
   let manualPath = $state<string | null>(null);
-  let detail = $state<CommitDetail | null>(null);
+  let detail = $state.raw<CommitDetail | null>(null);
   let detailError = $state<string | null>(null);
-  let commitDiff = $state<DiffResponse | null>(null);
+  let commitDiff = $state.raw<DiffResponse | null>(null);
   let diffError = $state<string | null>(null);
   let diffLoading = $state(false);
   let scrollTop = $state(0);
@@ -155,6 +163,8 @@
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   let lastFile: string | null | undefined = undefined;
 
+  let repoPath = $derived(opened.summary.path);
+  let readGeneration = $derived(opened.generation);
   let commits = $derived(page?.commits ?? []);
   let range = $derived(
     visibleRange(commits.length, scrollTop, viewport > 0 ? viewport : scrollTop > 0 ? ROW_HEIGHT : 0, ROW_HEIGHT),
@@ -247,8 +257,9 @@
   });
 
   $effect(() => {
-    const repo = opened.summary.path;
-    const generation = opened.generation;
+    if (!active) return;
+    const repo = repoPath;
+    const generation = readGeneration;
     const relative = filePath;
     const q = relative ? "" : activeQuery;
     const off = offset;
@@ -256,9 +267,9 @@
     loading = true;
     void (async () => {
       try {
-        const result = relative
-          ? await api.fileHistory(repo, relative, off, generation, nextId())
-          : await api.historyPage(repo, q, off, generation, nextId());
+        const result = await pageReads.run(async () => relative
+          ? api.fileHistory(repo, relative, off, generation, nextId())
+          : api.historyPage(repo, q, off, generation, nextId()));
         if (cancelled || opened.summary.path !== repo) return;
         page = {
           generation: result.generation,
@@ -297,8 +308,9 @@
   });
 
   $effect(() => {
-    const repo = opened.summary.path;
-    const generation = opened.generation;
+    if (!active) return;
+    const repo = repoPath;
+    const generation = readGeneration;
     const oid = selectedOid;
     const parent = parentChoice;
     if (!oid) {
@@ -309,7 +321,7 @@
     let cancelled = false;
     void (async () => {
       try {
-        const result = await api.commitDetail(repo, oid, parent, generation, nextId());
+        const result = await detailReads.run(() => api.commitDetail(repo, oid, parent, generation, nextId()));
         if (cancelled || opened.summary.path !== repo || selectedOid !== oid) return;
         detail = result;
         detailError = null;
@@ -332,12 +344,15 @@
   });
 
   $effect(() => {
-    const repo = opened.summary.path;
-    const generation = opened.generation;
+    if (!active) return;
+    const repo = repoPath;
+    const generation = readGeneration;
     const current = detail;
     const file = activeFile;
     const parent = parentChoice ?? current?.selectedParent ?? null;
-    if (!current || !file) {
+    const detailMatches = current?.commit.oid === selectedOid
+      && (parentChoice === null || current?.selectedParent === parentChoice);
+    if (!current || !file || !detailMatches || viewMode !== "single") {
       commitDiff = null;
       diffLoading = false;
       return;
@@ -349,7 +364,7 @@
     diffError = null;
     void (async () => {
       try {
-        const result = await api.commitFileDiff(repo, oid, parent, relative, generation, nextId(), 0, 0);
+        const result = await diffReads.run(() => api.commitFileDiff(repo, oid, parent, relative, generation, nextId(), 0, 0));
         if (cancelled || opened.summary.path !== repo || detail?.commit.oid !== oid || activeFile?.path !== relative) return;
         commitDiff = result;
         if (result.generation !== generation) onGeneration(result.generation);
@@ -772,6 +787,7 @@
           <div class="commit-diff">
             {#if viewMode === "multi"}
               <CommitDiffList
+                {active}
                 {opened}
                 {detail}
                 parent={parentChoice ?? detail.selectedParent}

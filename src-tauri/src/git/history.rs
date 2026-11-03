@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::error::AppError;
 use crate::git::changes::response_from_diff;
@@ -33,6 +34,19 @@ const MAX_BODY_CHARS: usize = 16 * 1024;
 const MAX_PREVIEW_PATHS: usize = 200;
 const MAX_IGNORED_NAMES: usize = 20;
 const MAX_LABELS: usize = 32;
+
+// 同一提交的每个文件都需要重命名信息。仅缓存最近一份文件目录，避免每点一次文件
+// 都重新 diff-tree 整个提交；generation 变化后失效，Git replace 等变化也不会复用。
+#[derive(Default)]
+pub(crate) struct CommitFilesCache(Mutex<Option<CachedCommitFiles>>);
+
+struct CachedCommitFiles {
+    root: PathBuf,
+    oid: String,
+    parent: Option<String>,
+    generation: u64,
+    files: Arc<Vec<CommitFileChange>>,
+}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn history_page(
@@ -153,7 +167,7 @@ pub async fn commit_detail(
         selected_parent: selected,
         body: bounded_body(&body_bytes)?,
         commit,
-        files,
+        files: files.as_ref().clone(),
     })
 }
 
@@ -199,14 +213,14 @@ pub async fn commit_file_diff(
         generation,
     )
     .await?;
-    let Some(file) = files.into_iter().find(|file| file.path == relative) else {
+    let Some(file) = files.iter().find(|file| file.path == relative) else {
         return Err(AppError::new(
             "file_missing",
             "这个提交没有该文件的变化，未修改仓库。",
         ));
     };
     let parent_oid = selected.as_deref().unwrap_or(EMPTY_TREE_OID);
-    let paths = diff_paths(&file, &requested)?;
+    let paths = diff_paths(file, &requested)?;
     let (program, args) = commit_diff_command(&git.path, &root, parent_oid, &oid, &paths);
     let scheduled = backend
         .scheduler
@@ -658,7 +672,28 @@ async fn load_commit_files(
     oid: &str,
     parent: Option<&str>,
     generation: u64,
-) -> Result<(Vec<CommitFileChange>, u64), AppError> {
+) -> Result<(Arc<Vec<CommitFileChange>>, u64), AppError> {
+    let current = backend.scheduler.current_generation(&repo_key(root));
+    if current != generation {
+        return Err(
+            AppError::new("stale", "仓库状态已变化，请查看刷新后的结果。").with_generation(current),
+        );
+    }
+    {
+        let cache = backend
+            .history_files
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(entry) = cache.as_ref().filter(|entry| {
+            entry.root == root
+                && entry.oid == oid
+                && entry.parent.as_deref() == parent
+                && entry.generation == generation
+        }) {
+            return Ok((entry.files.clone(), generation));
+        }
+    }
     let (output, generation) = read_output(
         backend,
         root,
@@ -674,7 +709,19 @@ async fn load_commit_files(
             "无法读取提交中的文件，未修改仓库。",
         ));
     }
-    Ok((parse_name_status(&output.stdout)?, generation))
+    let files = Arc::new(parse_name_status(&output.stdout)?);
+    *backend
+        .history_files
+        .0
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(CachedCommitFiles {
+        root: root.to_path_buf(),
+        oid: oid.to_string(),
+        parent: parent.map(str::to_string),
+        generation,
+        files: files.clone(),
+    });
+    Ok((files, generation))
 }
 
 async fn commit_numstat(
@@ -1805,6 +1852,62 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn file_directory_cache_is_scoped_to_commit_parent_repo_and_generation() {
+        let fixture = crate::test_support::git_fixture("history-file-cache");
+        let trace = fixture.path().join("trace.log");
+        let backend = fixture
+            .backend_with_extra_env(vec![("GIT_TRACE".into(), trace.as_os_str().to_os_string())]);
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "base\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
+        let base = git_text(&repo, &["rev-parse", "HEAD"]);
+        fs::write(repo.join("file.txt"), "changed\n").unwrap();
+        git(&repo, &["commit", "-am", "edit"]);
+        let oid = git_text(&repo, &["rev-parse", "HEAD"]);
+        let git = require_git(&backend).await.unwrap();
+        let gen = generation(&backend, &repo);
+        let first = load_commit_files(&backend, &repo, &git.path, &oid, Some(&base), gen)
+            .await
+            .unwrap();
+        let second = load_commit_files(&backend, &repo, &git.path, &oid, Some(&base), gen)
+            .await
+            .unwrap();
+        assert_eq!(first.0[0].path, second.0[0].path);
+        assert_eq!(
+            fs::read_to_string(&trace)
+                .unwrap()
+                .lines()
+                .filter(|line| line.contains("built-in: git diff-tree "))
+                .count(),
+            1
+        );
+        let next = backend.scheduler.bump_generation(&repo_key(&repo));
+        assert_eq!(
+            load_commit_files(&backend, &repo, &git.path, &oid, Some(&base), gen)
+                .await
+                .unwrap_err()
+                .code,
+            "stale"
+        );
+        load_commit_files(&backend, &repo, &git.path, &oid, Some(&base), next)
+            .await
+            .unwrap();
+        load_commit_files(&backend, &repo, &git.path, &base, None, next)
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(&trace)
+                .unwrap()
+                .lines()
+                .filter(|line| line.contains("built-in: git diff-tree "))
+                .count(),
+            3
+        );
+    }
+
     fn generation(backend: &Backend, root: &Path) -> u64 {
         backend.scheduler.current_generation(&repo_key(root))
     }
@@ -2127,8 +2230,9 @@ mod tests {
         });
         assert_eq!(result.unwrap(), start + 2);
         assert_eq!(seen, vec![start, start + 1, start + 2]);
-        let other: Result<u64, AppError> =
-            settle_read!(&backend, &root, start, |_current| Err(AppError::new("boom", "x")));
+        let other: Result<u64, AppError> = settle_read!(&backend, &root, start, |_current| Err(
+            AppError::new("boom", "x")
+        ));
         assert_eq!(other.unwrap_err().code, "boom");
     }
 

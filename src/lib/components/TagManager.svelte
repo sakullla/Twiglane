@@ -136,10 +136,10 @@
     };
   }
 
-  /** reading：只读。后台克隆期间也能跑，但不动宿主的 pending，否则结束时会把克隆的写锁清掉。 */
+  /** 列表读取只占本组件的读取状态；只有实际写入才占宿主写锁。 */
   async function run<T>(action: () => Promise<T>, reading = false): Promise<T | undefined> {
     if (reading ? readBlocked : blocked) return undefined;
-    const quiet = reading && backgroundClone;
+    const quiet = reading;
     localBusy = true;
     errorText = null;
     if (!quiet) onBusy("tag");

@@ -245,6 +245,8 @@ pub struct BranchRecord {
     pub current: bool,
     pub upstream: Option<String>,
     pub worktree: Option<String>,
+    #[serde(default)]
+    pub target_oid: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

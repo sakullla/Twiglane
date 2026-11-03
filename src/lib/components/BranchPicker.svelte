@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick } from "svelte";
   import type { BranchRecord } from "../types";
-  import { BUSY_REASON } from "../ui";
+  import { blockTops, blockWindow, BUSY_REASON } from "../ui";
   import Icon from "./Icon.svelte";
 
   interface Props {
@@ -49,6 +49,8 @@
     reason: string | null;
   }
 
+  let scrollTop = $state(0);
+  let viewport = $state(0);
   let selected = $derived(branches.find((branch) => branch.name === value) ?? null);
   let options = $derived.by(() => {
     const needle = query.trim().toLowerCase();
@@ -66,6 +68,13 @@
     return rows.sort((a, b) => Number(a.remote) - Number(b.remote) || Number(b.current) - Number(a.current));
   });
   let localCount = $derived(options.filter((option) => !option.remote).length);
+  function hasHeading(index: number): boolean {
+    return index === 0 || (index === localCount && localCount < options.length);
+  }
+  let tops = $derived(blockTops(options.map((_, index) => 34 + (hasHeading(index) ? 28 : 0)), 0));
+  let span = $derived(blockWindow(tops, scrollTop, viewport || Math.max(140, place.maxHeight - 60), 136));
+  let shown = $derived(options.slice(span.start, span.end));
+
 
   function measure() {
     if (!trigger) return;
@@ -103,8 +112,14 @@
   }
 
   function reveal() {
-    const node = listEl?.querySelector<HTMLElement>(`[data-index="${active}"]`);
-    node?.scrollIntoView?.({ block: "nearest" });
+    const host = listEl;
+    if (!host || !options[active]) return;
+    const height = viewport || Math.max(140, place.maxHeight - 60);
+    const top = tops[active];
+    const bottom = tops[active + 1];
+    if (top < host.scrollTop) host.scrollTop = top;
+    else if (bottom > host.scrollTop + height) host.scrollTop = bottom - height;
+    scrollTop = host.scrollTop;
   }
 
   function onKey(event: KeyboardEvent) {
@@ -151,6 +166,8 @@
   $effect(() => {
     void query;
     active = 0;
+    scrollTop = 0;
+    if (listEl) listEl.scrollTop = 0;
   });
 </script>
 
@@ -200,16 +217,23 @@
           onkeydown={onKey}
         />
       </div>
-      <div class="branch-popover-list" id={listId} role="listbox" aria-label={label} bind:this={listEl}>
+      <div class="branch-popover-list" id={listId} role="listbox" aria-label={label} bind:this={listEl} bind:clientHeight={viewport} onscroll={() => (scrollTop = listEl?.scrollTop ?? 0)}>
         {#if options.length === 0}
           <p class="branch-popover-empty">没有匹配的分支</p>
         {/if}
-        {#each options as option, index (`${option.remote}:${option.name}`)}
-          {#if index === 0 && !option.remote}<div class="branch-popover-group">本地分支</div>{/if}
-          {#if option.remote && index === localCount}<div class="branch-popover-group">远程分支</div>{/if}
+        <div style={`height:${tops[options.length]}px;position:relative`}>
+        {#each shown as option, offset (`${option.remote}:${option.name}`)}
+          {@const index = span.start + offset}
+          <div style={`position:absolute;top:${tops[index]}px;left:0;right:0`}>
+
+          {#if index === 0 && !option.remote}<div class="branch-popover-group" style="height:28px">本地分支</div>{/if}
+          {#if option.remote && index === localCount}<div class="branch-popover-group" style="height:28px">远程分支</div>{/if}
           <div
             id={`${listId}-${index}`}
             class="branch-option"
+            style="height:34px"
+            aria-posinset={index + 1}
+            aria-setsize={options.length}
             class:active={index === active}
             role="option"
             aria-selected={option.name === value}
@@ -228,7 +252,9 @@
             {#if option.reason}<span class="branch-option-note">{option.name === exclude ? "已选" : "不可用"}</span>{/if}
             {#if option.name === value}<Icon name="check" size={14} class="branch-option-check" />{/if}
           </div>
+          </div>
         {/each}
+        </div>
       </div>
     </div>
   {/if}

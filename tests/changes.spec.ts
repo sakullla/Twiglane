@@ -684,6 +684,7 @@ describe("主工作台", () => {
     const history = await waitFor(() => {
       const list = document.querySelector<HTMLElement>(".history-list");
       expect(list).toBeTruthy();
+      expect(list!.querySelectorAll('[role="option"]').length).toBeGreaterThan(2);
       return list!;
     });
     await fireEvent.click(history.querySelectorAll<HTMLElement>('[role="option"]')[2]);

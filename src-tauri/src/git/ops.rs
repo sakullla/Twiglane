@@ -28,6 +28,7 @@ pub struct Backend {
     pub runner: RealRunner,
     pub actions: ActionGate,
     pub remote_checks: RemoteChecks,
+    pub(crate) history_files: crate::git::history::CommitFilesCache,
 }
 
 impl Backend {
@@ -49,6 +50,7 @@ impl Backend {
             runner,
             actions: ActionGate::default(),
             remote_checks: RemoteChecks::default(),
+            history_files: crate::git::history::CommitFilesCache::default(),
         }
     }
 }

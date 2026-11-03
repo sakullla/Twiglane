@@ -240,17 +240,18 @@ describe("合并面板", () => {
 
   const settle = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  function tipsPage(generation: number, tips: Record<string, string>) {
-    return {
-      generation,
-      commits: Object.entries(tips).map(([name, oid]) => ({ oid, labels: [{ name, kind: "branch", current: false }] })),
-    };
+  function useBranchTips(tips: Record<string, string>) {
+    branchState.mockImplementation(async (_repo: string, generation: number) => ({
+      ...twoBranches, generation,
+      branches: twoBranches.branches.map((branch) => ({ ...branch, targetOid: tips[branch.name] ?? null })),
+    }));
   }
 
   /** 让 session 跟随 generation，并返回能推进 generation 的句柄（相当于 repo-changed 事件）。 */
-  function mountForPreview(extra: Record<string, unknown> = {}) {
+  function mountForPreview(extra: Record<string, unknown> = {}, tips?: Record<string, string>) {
     mergeSession.mockImplementation(async (_repo: string, generation: number) => session({ generation }));
     branchState.mockResolvedValue(twoBranches);
+    if (tips) useBranchTips(tips);
     const onGeneration = vi.fn();
     const props = {
       opened,
@@ -332,10 +333,10 @@ describe("合并面板", () => {
 
   it("外部提交到来源分支后更新结果，检查期间保留旧结果且可以开始", async () => {
     const tips = { main: "a".repeat(40), feature: "b".repeat(40) };
-    historyPage.mockImplementation(async (_repo: string, _query: string, _offset: number, generation: number) => tipsPage(generation, tips));
     mergePreview.mockResolvedValueOnce(previewOf({ generation: 4, incoming: 2 }));
-    const { bump } = mountForPreview();
+    const { bump } = mountForPreview({}, tips);
     const start = await screen.findByRole("button", { name: "合并到 main" });
+    expect(historyPage).not.toHaveBeenCalled();
     expect(screen.getByText("个提交将带入 main").previousElementSibling?.textContent).toBe("2");
 
     let finish: (value: unknown) => void = () => {};
@@ -380,14 +381,13 @@ describe("合并面板", () => {
 
   it("依据未变时用最新 generation 开始，后端的校验仍在", async () => {
     const tips = { main: "a".repeat(40), feature: "b".repeat(40) };
-    historyPage.mockImplementation(async (_repo: string, _query: string, _offset: number, generation: number) => tipsPage(generation, tips));
     mergePreview.mockResolvedValue(previewOf({ generation: 4 }));
     startMerge.mockRejectedValue({ code: "stale", message: "仓库状态已变化", generation: 9 });
     const onFailure = vi.fn();
-    const { bump } = mountForPreview({ onFailure });
+    const { bump } = mountForPreview({ onFailure }, tips);
     const start = await screen.findByRole("button", { name: "合并到 main" });
     await bump(7);
-    await vi.waitFor(() => expect(historyPage).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(branchState).toHaveBeenCalledTimes(2));
     await tick();
     await fireEvent.click(start);
     await vi.waitFor(() => expect(startMerge).toHaveBeenCalledWith("/repo", "feature", null, "merge", 7, 1));
@@ -397,7 +397,6 @@ describe("合并面板", () => {
   });
 
   it("读不到分支位置时不放宽：沿用预检时的 generation", async () => {
-    historyPage.mockRejectedValue(new Error("读不到"));
     mergePreview.mockResolvedValue(previewOf({ generation: 4 }));
     startMerge.mockRejectedValue({ code: "stale", message: "仓库状态已变化", generation: 7 });
     const { bump } = mountForPreview();

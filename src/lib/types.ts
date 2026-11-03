@@ -153,6 +153,7 @@ export interface BranchRecord {
   current: boolean;
   upstream: string | null;
   worktree: string | null;
+  targetOid?: string | null;
 }
 
 export interface BranchState {

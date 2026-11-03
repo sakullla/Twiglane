@@ -1,7 +1,7 @@
 {
   "name": "twiglane",
   "private": true,
-  "version": "0.2.8",
+  "version": "0.2.9",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,6 +10,7 @@
     "preview:ui": "vite --config scripts/ui-preview/vite.config.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json --threshold error",
     "test": "vitest run",
+    "test:performance": "node scripts/performance/run.mjs",
     "tauri": "tauri",
     "fixture": "node scripts/generate-fixture.mjs",
     "measure": "node scripts/measure-delivery.mjs",

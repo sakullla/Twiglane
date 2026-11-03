@@ -458,6 +458,26 @@ describe("提交详情的上一个、下一个文件（R20）", () => {
 
   const selectedFile = () => document.querySelector('.history-files .file-row[aria-selected="true"] .fn')?.textContent;
 
+  it("切换提交等待新详情时不把旧文件列表重新发给后端", async () => {
+    const first = commit(0);
+    const second = commit(1);
+    historyPage.mockResolvedValue({ generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [first, second] });
+    let finish: (value: unknown) => void = () => {};
+    commitDetail.mockResolvedValueOnce({ generation: 3, commit: first, body: "", root: false, merge: false, selectedParent: first.parents[0], files })
+      .mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
+    render(HistoryPanel, { props: panelProps() });
+    await waitFor(() => expect(selectedFile()).toBe("a.ts"));
+    await fireEvent.click(screen.getByRole("button", { name: "下一个文件" }));
+    await waitFor(() => expect(commitFileDiff.mock.calls.at(-1)?.[3]).toBe("b.ts"));
+    commitFileDiff.mockClear();
+    await fireEvent.click(screen.getByRole("option", { name: /commit-1/ }));
+    await tick();
+    expect(commitFileDiff).not.toHaveBeenCalled();
+    finish({ generation: 3, commit: second, body: "", root: false, merge: false, selectedParent: second.parents[0], files: [{ path: "other.ts", originalPath: null, status: "modified" }] });
+    await waitFor(() => expect(commitFileDiff.mock.calls.at(-1)?.[3]).toBe("other.ts"));
+    expect(commitFileDiff.mock.calls.at(-1)?.[1]).toBe(second.oid);
+  });
+
   it("差异工具栏切换变更文件，列表同步，首尾不可用并说明原因", async () => {
     render(HistoryPanel, { props: panelProps() });
     const next = (await screen.findByRole("button", { name: "下一个文件" })) as HTMLButtonElement;

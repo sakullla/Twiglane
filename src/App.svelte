@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { api, listenEvent, pickDirectory, pickFile } from "./lib/api";
   import {
     commandAvailable,
@@ -13,6 +13,7 @@
     switchBlockedReason,
     type CommandState,
   } from "./lib/commands";
+  import { LatestReadQueue } from "./lib/latest-read";
   import { finishDiffAttempt } from "./lib/diff";
   import { DraftBuffer } from "./lib/draft";
   import { normalizeError } from "./lib/errors";
@@ -74,6 +75,8 @@
 
   /* 外观：三态选择 + 系统解析。documentElement 上只写 light / dark，
      "system" 由 matchMedia 解析，并跟随系统变化（R14/T2 的 Theme 收口在这里）。 */
+  const selectedReads = new LatestReadQueue();
+  onDestroy(() => selectedReads.close());
   const DARK_QUERY = "(prefers-color-scheme: dark)";
 
   function systemPrefersDark(): boolean {
@@ -653,6 +656,10 @@
     const token = ++diffToken;
     const current = opened;
     const choice = selected;
+    if (workspaceView !== "changes") {
+      diffLoading = false;
+      return;
+    }
     // 多选时差异由 MultiFileDiff 逐块读取；序号已经递增，单文件的在途响应随之作废。
     if (!current || !choice || multiActive) {
       diff = null;
@@ -663,6 +670,7 @@
     diffLoading = true;
     diffError = null;
     const file = current.snapshot.files.find((item) => item.path === choice.path);
+    const context = diffFullFile ? FULL_FILE_CONTEXT : undefined;
     try {
       const outcome = await finishDiffAttempt(
         { token, repo: current.summary.path, path: choice.path, side: choice.side },
@@ -672,7 +680,7 @@
           path: selected?.path ?? null,
           side: selected?.side ?? null,
         }),
-        () =>
+        () => selectedReads.run(() =>
           api.loadDiff(
             current.summary.path,
             choice.path,
@@ -682,8 +690,8 @@
             file?.originalPath ?? null,
             0,
             0,
-            diffFullFile ? FULL_FILE_CONTEXT : undefined,
-          ),
+            context,
+          )),
       );
       if (outcome.state === "discarded") return;
       if (outcome.state === "failed") {
@@ -766,18 +774,24 @@
   }
 
   function adoptGeneration(generation: number) {
-    if (!opened || opened.generation === generation) return;
+    if (!opened || opened.generation >= generation) return;
     opened = { ...opened, generation };
   }
 
   function showChanges() {
-    workspaceView = "changes";
+    useView("changes");
     historyPath = null;
   }
 
   function useView(view: WorkspaceView) {
     workspaceView = view;
-    if (view === "history") historyPanel ??= import("./lib/components/HistoryPanel.svelte");
+    if (view === "history") {
+      diffToken += 1;
+      diffLoading = false;
+      historyPanel ??= import("./lib/components/HistoryPanel.svelte");
+    } else {
+      void loadSelectedDiff();
+    }
   }
 
   function showHistory() {
@@ -2209,6 +2223,7 @@
               {@render paneResizer()}
               {#if multiActive}
                 <MultiFileDiff
+                  active={workspaceView === "changes"}
                   {opened}
                   rows={selectedRows}
                   focus={selected}
@@ -2263,6 +2278,7 @@
                 </div>
               {:then module}
                 <module.default
+                  active={workspaceView === "history"}
                   {opened}
                   filePath={historyPath}
                   searchQuery={historyQuery}

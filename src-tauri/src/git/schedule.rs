@@ -126,16 +126,23 @@ impl<R: ProcessRunner> GitScheduler<R> {
         }
         let _request = RequestGuard::enter(&self.inflight, job.request_id)?;
         let lane = self.lane(&job.repo_key);
+        // 取消令牌必须在入队前取得，否则旧队列会在取消后拿到新令牌，继续启动 Git。
+        let cancel = match job.kind {
+            JobKind::Read => Some(self.read_cancel_token()),
+            JobKind::Write => None,
+        };
         let _read_permit;
         let _write_guard;
         match job.kind {
             JobKind::Read => {
-                _read_permit = self
-                    .read_limit
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .map_err(|_| AppError::new("cancelled", "读取调度已关闭。"))?;
+                let token = cancel.as_ref().expect("read cancellation token");
+                _read_permit = tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Err(AppError::new("cancelled", "读取已取消。")),
+                    _ = self.shutdown.cancelled() => return Err(AppError::new("cancelled", "读取调度已关闭。")),
+                    permit = self.read_limit.clone().acquire_owned() => permit
+                        .map_err(|_| AppError::new("cancelled", "读取调度已关闭。"))?,
+                };
             }
             JobKind::Write => {
                 _write_guard = lane.write.lock().await;
@@ -151,10 +158,9 @@ impl<R: ProcessRunner> GitScheduler<R> {
         if self.shutdown.is_cancelled() {
             return Err(AppError::new("cancelled", "操作已取消。"));
         }
-        let cancel = match job.kind {
-            JobKind::Read => Some(self.read_cancel_token()),
-            JobKind::Write => None,
-        };
+        if cancel.as_ref().is_some_and(|token| token.is_cancelled()) {
+            return Err(AppError::new("cancelled", "读取已取消。"));
+        }
         let result = self
             .runner
             .run(RunRequest {
@@ -600,17 +606,51 @@ mod tests {
             Vec::new(),
         ));
         let running = Arc::clone(&scheduler);
-        let first = tokio::spawn(async move { running.execute(job("repo", JobKind::Read, 1, 1)).await });
+        let first =
+            tokio::spawn(async move { running.execute(job("repo", JobKind::Read, 1, 1)).await });
         until_started(&started, 1).await;
         scheduler.cancel_reads();
         assert_eq!(first.await.unwrap().unwrap_err().code, "cancelled");
 
         let running = Arc::clone(&scheduler);
-        let second = tokio::spawn(async move { running.execute(job("repo", JobKind::Read, 2, 1)).await });
+        let second =
+            tokio::spawn(async move { running.execute(job("repo", JobKind::Read, 2, 1)).await });
         until_started(&started, 2).await;
         tokio::time::sleep(Duration::from_millis(80)).await;
         assert!(!second.is_finished());
         scheduler.cancel_reads();
         assert_eq!(second.await.unwrap().unwrap_err().code, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn cancel_reads_drops_waiting_reads_without_starting_git() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let scheduler = Arc::new(GitScheduler::new(
+            CancelAwareRunner {
+                started: started.clone(),
+            },
+            Arc::new(Shutdown::new()),
+            Duration::from_secs(5),
+            1024,
+            Vec::new(),
+        ));
+        // 占满读取许可，直接轮询后续 future 到排队态，避免依赖计时碰运气。
+        let permits = scheduler
+            .read_limit
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_READS as u32)
+            .await
+            .unwrap();
+        let read = scheduler.execute(job("repo", JobKind::Read, 1, 1));
+        tokio::pin!(read);
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(read.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        scheduler.cancel_reads();
+        assert_eq!(read.await.unwrap_err().code, "cancelled");
+        drop(permits);
+        assert_eq!(started.load(Ordering::SeqCst), 0);
     }
 }

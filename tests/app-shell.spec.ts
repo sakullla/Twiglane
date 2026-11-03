@@ -655,6 +655,39 @@ describe("应用外壳", () => {
     expect(labelsOf(activeNav())).toEqual(["改动", "提交历史"]);
   });
 
+  it("隐藏的页面不继续读取，回到页面才读取最新状态", async () => {
+    mocks.historyPage.mockImplementation(async (_repo, query, offset, generation) => ({ generation, query, offset, pageSize: 100, hasMore: false, state: "ok", commits }));
+    mocks.commitDetail.mockImplementation(async (_repo, _oid, _parent, generation) => ({ generation, commit: commits[0], body: "", root: false, merge: false, selectedParent: commits[0].parents[0], files: [{ path: "sample.txt", originalPath: null, status: "modified" }] }));
+    mocks.commitFileDiff.mockImplementation(async (_repo, _oid, _parent, path, generation) => ({ ...diffFor(path, false), generation }));
+    render(App);
+    await openRepo();
+    await press("2");
+    await waitFor(() => expect(mocks.commitFileDiff).toHaveBeenCalled());
+    mocks.loadDiff.mockClear();
+    mocks.refreshStatus.mockResolvedValue({ ...snapshot, generation: 5 });
+    const changed = mocks.listenEvent.mock.calls.find(([name]) => name === "repo-changed")![1];
+    changed({ path: repoPath, generation: 5, degraded: false });
+    await waitFor(() => expect(mocks.refreshStatus).toHaveBeenCalled());
+    await tick();
+    expect(mocks.loadDiff, "历史页显示时不读取隐藏的改动差异").not.toHaveBeenCalled();
+    await press("1");
+    await waitFor(() => expect(mocks.loadDiff).toHaveBeenCalled());
+    await tick();
+    mocks.historyPage.mockClear();
+    mocks.commitDetail.mockClear();
+    mocks.commitFileDiff.mockClear();
+    mocks.refreshStatus.mockResolvedValue({ ...snapshot, generation: 6 });
+    changed({ path: repoPath, generation: 6, degraded: false });
+    await tick();
+    await tick();
+    expect(mocks.historyPage).not.toHaveBeenCalled();
+    expect(mocks.commitDetail).not.toHaveBeenCalled();
+    expect(mocks.commitFileDiff).not.toHaveBeenCalled();
+    await press("2");
+    await waitFor(() => expect(mocks.historyPage).toHaveBeenCalled());
+    expect(mocks.historyPage.mock.calls.at(-1)?.[3]).toBe(6);
+  });
+
   it("临时保存一次点击可达，只打开任务，不切换主视图", async () => {
     render(App);
     await openRepo();

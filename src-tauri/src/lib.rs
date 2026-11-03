@@ -15,6 +15,10 @@ mod security;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+#[cfg(all(test, feature = "performance-tests"))]
+#[path = "../../scripts/performance/git.rs"]
+mod performance_tests;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

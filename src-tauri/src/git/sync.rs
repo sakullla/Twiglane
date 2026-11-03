@@ -145,7 +145,9 @@ pub async fn add_remote(
     if scheduled.output.exit_code != 0 {
         return Err(finish_remote("remote_failed", &scheduled, "没有添加远程。"));
     }
-    settle_read!(backend, &root, scheduled.generation, |current| confirm_remote_url(backend, &root, &git.path, name, url, current).await)?;
+    settle_read!(backend, &root, scheduled.generation, |current| {
+        confirm_remote_url(backend, &root, &git.path, name, url, current).await
+    })?;
     settle_read!(backend, &root, scheduled.generation, |current| {
         load_remote_state(backend, &root, current, internal_request_id()).await
     })
@@ -191,7 +193,9 @@ pub async fn set_remote_url(
             "没有修改远程地址。",
         ));
     }
-    settle_read!(backend, &root, scheduled.generation, |current| confirm_remote_url(backend, &root, &git.path, name, url, current).await)?;
+    settle_read!(backend, &root, scheduled.generation, |current| {
+        confirm_remote_url(backend, &root, &git.path, name, url, current).await
+    })?;
     settle_read!(backend, &root, scheduled.generation, |current| {
         load_remote_state(backend, &root, current, internal_request_id()).await
     })
@@ -1494,6 +1498,10 @@ fn parse_branches(bytes: &[u8]) -> Result<Vec<BranchRecord>, AppError> {
         let upstream = parts.next().unwrap_or("");
         let worktree = parts.next().unwrap_or("");
         let head = parts.next().unwrap_or("");
+        let target_oid = parts
+            .next()
+            .filter(|oid| !oid.is_empty())
+            .map(str::to_string);
         let (name, remote) = if let Some(short) = refname.strip_prefix("refs/remotes/") {
             if short.ends_with("/HEAD") {
                 continue;
@@ -1508,6 +1516,7 @@ fn parse_branches(bytes: &[u8]) -> Result<Vec<BranchRecord>, AppError> {
             continue;
         }
         branches.push(BranchRecord {
+            target_oid,
             name: name.to_string(),
             remote,
             current: !remote && head.trim() == "*",
@@ -2173,6 +2182,7 @@ mod tests {
             current: false,
             upstream: upstream.map(str::to_string),
             worktree: None,
+            target_oid: None,
         }
     }
 
@@ -2577,6 +2587,7 @@ mod start_point_tests {
                     current: false,
                     upstream: None,
                     worktree: None,
+                    target_oid: None,
                 })
                 .collect(),
             snapshot: StatusSnapshot {

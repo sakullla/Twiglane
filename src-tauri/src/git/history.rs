@@ -778,7 +778,8 @@ async fn page_from_hits(
 }
 
 /// 按有上限的 git log 向前扫描。命中在每一批里用作者时间 `%at` 过滤。
-/// 文件历史从上一条提交、以及该提交里当时的路径继续，不使用 `--skip`。
+/// 文件历史每次都从本次查询的同一个起点（HEAD、选定分支或 `--all`）重新 `--follow`，
+/// 只用更大的 `--max-count` 覆盖到本页。不能改成批末提交的祖先游标，否则合并另一侧的更早修改会丢。
 async fn collect_bounded_hits(
     backend: &Backend,
     root: &Path,
@@ -797,19 +798,13 @@ async fn collect_bounded_hits(
     let mut matched = Vec::new();
     let mut generation = generation;
     if follow {
-        let mut path = resolved.path.clone().ok_or_else(|| {
-            AppError::new("invalid_path", "文件历史缺少路径，未读取仓库。")
-        })?;
-        let mut anchor: Option<String> = None;
+        if resolved.path.is_none() {
+            return Err(AppError::new("invalid_path", "文件历史缺少路径，未读取仓库。"));
+        }
+        // offset 加一页；日期没命中时再按批加大，但每一跳都从同一起点重走。
+        let mut limit = offset.saturating_add(HISTORY_PAGE_SIZE).saturating_add(1);
         loop {
-            let batch = HISTORY_SCAN_BATCH.saturating_add(u32::from(anchor.is_some()));
-            let mut log = history_log(resolved, true, None, Some(batch), true, grep.clone());
-            log.name_status = true;
-            log.path = Some(path.clone());
-            if let Some(oid) = &anchor {
-                log.scope_all = false;
-                log.revision = Some(oid.clone());
-            }
+            let log = history_log(resolved, true, None, Some(limit), true, grep.clone());
             let (bytes, next) = read_log(
                 backend,
                 root,
@@ -820,34 +815,20 @@ async fn collect_bounded_hits(
             )
             .await?;
             generation = next;
-            let mut seen = parse_follow_records(&bytes)?;
-            let produced = seen.len();
-            if let Some(oid) = &anchor {
-                if seen.first().map(|record| record.oid.as_str()) == Some(oid.as_str()) {
-                    seen.remove(0);
-                }
-            }
-            let Some(last) = seen.last() else {
-                break;
-            };
-            let next_anchor = last.oid.clone();
-            let next_path = PathBuf::from(&last.path_in_commit);
-            for record in seen {
-                if in_date(record.at, resolved.since, resolved.until) {
-                    matched.push(Hit {
-                        oid: record.oid,
-                        at: record.at,
-                    });
-                }
-            }
-            if matched.len() >= want || produced < batch as usize {
+            let hits = parse_hits(&bytes)?;
+            let produced = hits.len();
+            matched = hits
+                .into_iter()
+                .filter(|hit| in_date(hit.at, resolved.since, resolved.until))
+                .collect();
+            if matched.len() >= want || produced < limit as usize {
                 break;
             }
-            if anchor.as_deref() == Some(next_anchor.as_str()) {
+            let next_limit = limit.saturating_add(HISTORY_SCAN_BATCH);
+            if next_limit == limit {
                 break;
             }
-            anchor = Some(next_anchor);
-            path = next_path;
+            limit = next_limit;
         }
     } else {
         let mut skip = 0_u32;
@@ -1607,6 +1588,7 @@ struct Hit {
     at: i64,
 }
 
+#[cfg(test)]
 struct FollowRecord {
     oid: String,
     at: i64,
@@ -1614,6 +1596,7 @@ struct FollowRecord {
     path_in_commit: String,
 }
 
+#[cfg(test)]
 fn parse_follow_records(bytes: &[u8]) -> Result<Vec<FollowRecord>, AppError> {
     if bytes.is_empty() {
         return Ok(Vec::new());
@@ -1655,6 +1638,7 @@ fn parse_follow_records(bytes: &[u8]) -> Result<Vec<FollowRecord>, AppError> {
     Ok(records)
 }
 
+#[cfg(test)]
 fn path_in_commit(body: &str) -> Result<String, AppError> {
     let fields: Vec<&str> = body
         .split('\0')
@@ -1685,6 +1669,7 @@ fn path_in_commit(body: &str) -> Result<String, AppError> {
     path.map(ToString::to_string).ok_or_else(follow_path_error)
 }
 
+#[cfg(test)]
 fn follow_path_error() -> AppError {
     AppError::new(
         "history_parse",
@@ -2380,6 +2365,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(followed.len(), 3);
+        assert_eq!(followed[0].oid, "a".repeat(40));
         assert_eq!(followed[0].path_in_commit, "new name.txt");
         assert_eq!(followed[1].path_in_commit, "new name.txt");
         assert_eq!(followed[1].at, 1_700_000_200);
@@ -2921,6 +2907,100 @@ mod tests {
         assert!(!followed.is_empty());
         assert!(followed.iter().all(|line| !line.contains("--skip")));
         assert!(followed.iter().any(|line| line.contains("--max-count=")));
+    }
+
+    #[tokio::test]
+    async fn file_history_page_includes_side_line_commits_beyond_the_first_page() {
+        let fixture = crate::test_support::git_fixture("history-follow-side");
+        let trace = fixture.path().join("trace.log");
+        let backend = fixture.backend_with_extra_env(vec![(
+            "GIT_TRACE".into(),
+            trace.as_os_str().to_os_string(),
+        )]);
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "base\n").unwrap();
+        git(&repo, &["add", "--", "file.txt"]);
+        git_env(
+            &repo,
+            &[
+                ("GIT_AUTHOR_DATE", "1000000000 +0000"),
+                ("GIT_COMMITTER_DATE", "1000000000 +0000"),
+            ],
+            &["commit", "-m", "base"],
+        );
+        git(&repo, &["checkout", "-b", "side"]);
+        fs::write(repo.join("file.txt"), "side\n").unwrap();
+        git_env(
+            &repo,
+            &[
+                ("GIT_AUTHOR_DATE", "1000000010 +0000"),
+                ("GIT_COMMITTER_DATE", "1000000010 +0000"),
+            ],
+            &["commit", "-am", "side-old"],
+        );
+        let side_old = git_text(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "main"]);
+        for index in 0u32..101 {
+            fs::write(repo.join("file.txt"), format!("main-{index}\n")).unwrap();
+            let stamp = format!("{} +0000", 1_100_000_000u64 + u64::from(index));
+            git_env(
+                &repo,
+                &[
+                    ("GIT_AUTHOR_DATE", &stamp),
+                    ("GIT_COMMITTER_DATE", &stamp),
+                ],
+                &["commit", "-am", &format!("main-{index}")],
+            );
+        }
+        let conflicted = git_exit(&repo, &["merge", "--no-ff", "side", "-m", "merge-side"]);
+        assert!(!conflicted.success());
+        fs::write(repo.join("file.txt"), "merged\n").unwrap();
+        git(&repo, &["add", "--", "file.txt"]);
+        git_env(
+            &repo,
+            &[
+                ("GIT_AUTHOR_DATE", "1200000000 +0000"),
+                ("GIT_COMMITTER_DATE", "1200000000 +0000"),
+            ],
+            &["commit", "--no-edit"],
+        );
+        let root = canonical_existing(&repo).unwrap();
+        let generation = generation(&backend, &root);
+        let first = file_history(
+            &backend,
+            &repo_key(&root),
+            "file.txt",
+            &HistoryRequest::default(),
+            generation,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.commits.len(), HISTORY_PAGE_SIZE as usize);
+        assert!(first.has_more);
+        assert!(first.commits.iter().all(|commit| commit.oid != side_old));
+        let second = file_history(
+            &backend,
+            &repo_key(&root),
+            "file.txt",
+            &HistoryRequest {
+                offset: HISTORY_PAGE_SIZE,
+                ..HistoryRequest::default()
+            },
+            first.generation,
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(second.commits.iter().any(|commit| commit.oid == side_old));
+        let trace_text = fs::read_to_string(&trace).unwrap();
+        let followed: Vec<_> = trace_text
+            .lines()
+            .filter(|line| line.contains("--follow"))
+            .collect();
+        assert!(!followed.is_empty());
+        assert!(followed.iter().all(|line| !line.contains("--skip")));
     }
 
     #[tokio::test]

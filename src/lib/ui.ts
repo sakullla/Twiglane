@@ -26,31 +26,33 @@ function repoBadgeChars(name: string): string[] {
 
 /**
  * 同一处可见的仓库名各自的徽标文字。
- * 多个名称时取第一个不完全相同的字符并大写；只有一个名称时取首字符；空名是 ?。
- * 空名不参与比较，避免把别人的首字符当成区分点。
+ * 每个名称相对其余名称，取把它和最接近的那个分开的字符并大写。
+ * 只有一个名称、与其余名称完全相同、或区分点超出自身长度时，取首字符。
+ * 空名是 ?，并且不参与比较。比较忽略大小写。
  */
 export function repoBadgeLetters(names: readonly string[]): string[] {
   const glyphs = names.map(repoBadgeChars);
-  const comparable = glyphs.filter((chars) => chars.length > 0);
-  const split = firstDivergentIndex(comparable);
   return names.map((name, index) => {
     const chars = glyphs[index];
     if (chars.length === 0) return "?";
-    if (comparable.length < 2 || split < 0) return initialOf(name);
-    const glyph = chars[split];
-    if (glyph === undefined) return initialOf(name);
-    return glyph.toUpperCase();
+    let split = -1;
+    for (let other = 0; other < glyphs.length; other += 1) {
+      if (other === index || glyphs[other].length === 0) continue;
+      const mismatch = firstMismatch(chars, glyphs[other]);
+      if (mismatch > split) split = mismatch;
+    }
+    const glyph = split >= 0 ? chars[split] : undefined;
+    return glyph === undefined ? initialOf(name) : glyph.toUpperCase();
   });
 }
 
-/** 大小写视为相同，这样 Kite-web 与 kite-api 仍能在后缀上分开。 */
-function firstDivergentIndex(glyphs: string[][]): number {
-  if (glyphs.length < 2) return -1;
-  const limit = Math.max(...glyphs.map((chars) => chars.length));
+/** 大小写视为相同。完全相同返回 -1，这样 Kite-web 与 kite-api 仍在后缀处分歧。 */
+function firstMismatch(left: string[], right: string[]): number {
+  const limit = Math.max(left.length, right.length);
   for (let index = 0; index < limit; index += 1) {
-    const sample = glyphs[0][index]?.toUpperCase() ?? "";
-    const same = glyphs.every((chars) => (chars[index]?.toUpperCase() ?? "") === sample);
-    if (!same) return index;
+    const a = left[index]?.toUpperCase() ?? "";
+    const b = right[index]?.toUpperCase() ?? "";
+    if (a !== b) return index;
   }
   return -1;
 }

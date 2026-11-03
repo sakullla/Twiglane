@@ -1638,6 +1638,11 @@
     return openModalCount() > 0 || document.querySelector(".menu, .popover, [role='menu']") !== null;
   }
 
+  /** 菜单事件没有按键目标，只看当前焦点是不是文本框。 */
+  function textFocused(): boolean {
+    return isTextEntry(document.activeElement);
+  }
+
   /** 键盘层：把按键翻成命令 id，再走与四个入口相同的 runCommand。 */
   function onWindowKeydown(event: KeyboardEvent) {
     if (paletteOpen) return;
@@ -1651,8 +1656,10 @@
     }
     const id = shortcutCommand(event);
     if (!id) return;
-    // Alt+←/→ 在输入框里按单词移动光标，弹层打开时也不在背后切文件。
-    if (id.startsWith("file.") && (layerAtKey || isTextEntry(event.target))) return;
+    // 只看这次按键的目标。非 file.* 与 file.* 一样，目标是文本框才让路；file.* 在弹层打开时也让路。
+    const editing = isTextEntry(event.target);
+    if (editing && !id.startsWith("file.")) return;
+    if (id.startsWith("file.") && (layerAtKey || editing)) return;
     event.preventDefault();
     const command = commandById(id);
     if (!command) return;
@@ -1988,9 +1995,11 @@
         windowFocused = false;
       });
       stopSearch = await listenEvent("menu-search", () => {
+        if (textFocused()) return;
         openPalette();
       });
       stopCommit = await listenEvent("menu-commit", () => {
+        if (textFocused()) return;
         void commitLocal();
       });
       stopRepo = await listenEvent<RepoChanged>("repo-changed", (event) => {

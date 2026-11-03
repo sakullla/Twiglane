@@ -80,16 +80,20 @@ function emptySnapshot() {
 }
 
 describe("仓库徽标文字", () => {
-  it("同前缀取第一个不同字符，单独名称取首字符，空名是问号", () => {
+  it("每个名称相对其余名称取区分字符，单独名称取首字符，空名是问号", () => {
     expect(repoBadgeLetters(["kite-web"])).toEqual(["K"]);
     expect(repoBadgeLetters(["kite-web", "kite-api"])).toEqual(["W", "A"]);
     expect(repoBadgeLetters(["Kite-web", "kite-api"])).toEqual(["W", "A"]);
+    expect(repoBadgeLetters(["docs", "kite-web", "kite-api"])).toEqual(["D", "W", "A"]);
+    expect(repoBadgeLetters(["kite-api", "docs", "Kite-web"])).toEqual(["A", "D", "W"]);
+    expect(repoBadgeLetters(["docs", "", "kite-web", "kite-api"])).toEqual(["D", "?", "W", "A"]);
     expect(repoBadgeLetters(["kite-web", "kite-api", ""])).toEqual(["W", "A", "?"]);
     expect(repoBadgeLetters([""])).toEqual(["?"]);
     expect(repoBadgeLetters(["   "])).toEqual(["?"]);
     expect(repoBadgeLetters(["demo", "demo"])).toEqual(["D", "D"]);
     expect(repoBadgeLetters(["app", "apple"])).toEqual(["A", "L"]);
-    expect(repoBadgeLetter("kite-api", ["kite-web", "kite-api"])).toBe("A");
+    expect(repoBadgeLetter("kite-api", ["docs", "kite-web", "kite-api"])).toBe("A");
+    expect(repoBadgeLetter("kite-web", ["kite-web", "kite-api"])).toBe("W");
   });
 
   it("颜色只由路径决定，同一路径反复计算不变", () => {
@@ -129,6 +133,22 @@ describe("仓库徽标文字", () => {
     expect(badgeText(container)).toEqual(["K", "?"]);
   });
 
+  it("欢迎页还有其它仓库时，kite-web 与 kite-api 仍是 W 和 A", () => {
+    const { container } = render(Welcome, {
+      props: {
+        recent: [repo("docs", "/work/docs", 3), ...pair],
+        disabled: false,
+        onAdd: () => {},
+        onClone: () => {},
+        onCreate: () => {},
+        onOpen: () => {},
+      },
+    });
+    expect(badgeText(container)).toEqual(["D", "W", "A"]);
+    expect(badges(container)[1].getAttribute("style")).toContain(String(hueOf(webPath)));
+    expect(badges(container)[2].getAttribute("style")).toContain(String(hueOf(apiPath)));
+  });
+
   it("仓库切换用当前可见名称区分，滤成一个时回到首字符", async () => {
     const anchor = document.createElement("button");
     document.body.append(anchor);
@@ -151,6 +171,23 @@ describe("仓库徽标文字", () => {
     expect(badges(container)[0].getAttribute("style")).toContain(String(hueOf(webPath)));
     await fireEvent.input(screen.getByRole("combobox", { name: "搜索仓库名称或路径" }), { target: { value: "kite-web" } });
     expect(badgeText(container)).toEqual(["K"]);
+    await fireEvent.input(screen.getByRole("combobox", { name: "搜索仓库名称或路径" }), { target: { value: "" } });
+    const withDocs = render(RepoSwitcher, {
+      props: {
+        anchor,
+        repos: [repo("docs", "/work/docs", 3), ...pair],
+        currentPath: webPath,
+        blockedReason: null,
+        actionReason: null,
+        onSelect: () => {},
+        onForget: () => {},
+        onCopyPath: () => {},
+        onContextMenu: () => {},
+        onCommand: () => {},
+        onClose: () => {},
+      } as never,
+    });
+    expect(badgeText(withDocs.container)).toEqual(["D", "W", "A"]);
   });
 
   it("标题栏使用同时可见的仓库名，只有当前仓库时取首字符", () => {
@@ -177,6 +214,11 @@ describe("仓库徽标文字", () => {
     const together = render(TitleBar, { props: { ...props, repoNames: ["kite-web", "kite-api"] } });
     expect(badgeText(together.container)).toEqual(["W"]);
     expect(badges(together.container)[0].getAttribute("style")).toContain(String(hueOf(webPath)));
+    together.unmount();
+
+    const amongDocs = render(TitleBar, { props: { ...props, repoNames: ["docs", "kite-web", "kite-api"] } });
+    expect(badgeText(amongDocs.container)).toEqual(["W"]);
+    expect(badges(amongDocs.container)[0].getAttribute("style")).toContain(String(hueOf(webPath)));
   });
 });
 
@@ -292,22 +334,65 @@ describe("外壳接线", () => {
     return event;
   }
 
-  it("文本框编辑键不打开搜索也不提交，已登记的 Ctrl+K 仍打开命令面板", async () => {
+  it("文本框聚焦时忽略搜索和提交，焦点离开后这两条快捷键恢复", async () => {
+    const menu = new Map<string, () => void>();
+    mocks.listenEvent.mockImplementation(async (name: string, handler: () => void) => {
+      if (name === "menu-search" || name === "menu-commit") menu.set(name, handler);
+      return () => {};
+    });
     render(App);
     await screen.findByText("kite-web");
-    const area = document.createElement("textarea");
-    document.body.append(area);
-    area.focus();
-    for (const name of ["a", "c", "x", "v", "z"]) {
-      const event = key(area, name, { ctrl: true });
-      expect(event.defaultPrevented, name).toBe(false);
-    }
-    expect(screen.queryByRole("dialog", { name: "命令面板" })).toBeNull();
-    expect(mocks.commitChanges).not.toHaveBeenCalled();
+    await waitFor(() => expect(menu.get("menu-search")).toBeTypeOf("function"));
+    expect(menu.get("menu-commit")).toBeTypeOf("function");
 
-    const openSearch = key(window, "k", { meta: true, ctrl: true });
+    const area = document.createElement("textarea");
+    const field = document.createElement("input");
+    document.body.append(area, field);
+    for (const entry of [area, field]) {
+      entry.focus();
+      for (const name of ["a", "c", "x", "v", "z", "k"]) {
+        const event = key(entry, name, { ctrl: true });
+        expect(event.defaultPrevented, `${entry.tagName} ${name}`).toBe(false);
+      }
+      const enter = key(entry, "Enter", { meta: true });
+      expect(enter.defaultPrevented, entry.tagName).toBe(false);
+      menu.get("menu-search")!();
+      menu.get("menu-commit")!();
+      expect(screen.queryByRole("dialog", { name: "命令面板" })).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(mocks.commitChanges).not.toHaveBeenCalled();
+    }
+
+    const plain = document.createElement("button");
+    document.body.append(plain);
+    plain.focus();
+    const openSearch = key(plain, "k", { ctrl: true });
     expect(openSearch.defaultPrevented).toBe(true);
     expect(await screen.findByRole("dialog", { name: "命令面板" })).toBeTruthy();
+  });
+
+  it("已打开仓库时，提交说明里的菜单提交不执行，焦点离开后才提示", async () => {
+    const menu = new Map<string, () => void>();
+    mocks.listenEvent.mockImplementation(async (name: string, handler: () => void) => {
+      if (name === "menu-commit") menu.set(name, handler);
+      return () => {};
+    });
+    render(App);
+    await screen.findByText(webPath);
+    await fireEvent.click(screen.getByText(webPath));
+    const draft = await screen.findByRole("textbox", { name: "提交说明草稿" });
+    draft.focus();
+    const enter = key(draft, "Enter", { ctrl: true });
+    expect(enter.defaultPrevented).toBe(false);
+    await waitFor(() => expect(menu.get("menu-commit")).toBeTypeOf("function"));
+    menu.get("menu-commit")!();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(mocks.commitChanges).not.toHaveBeenCalled();
+
+    screen.getByRole("button", { name: "当前仓库 kite-web" }).focus();
+    menu.get("menu-commit")!();
+    expect((await screen.findByRole("alert")).textContent).toContain("请先填写提交摘要。");
+    expect(mocks.commitChanges).not.toHaveBeenCalled();
   });
 
   it("三处徽标能区分同前缀仓库，设置修改会按 camelCase 写回", async () => {

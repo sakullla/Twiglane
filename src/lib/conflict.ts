@@ -122,10 +122,10 @@ export function detectEol(...texts: (string | null | undefined)[]): "\n" | "\r\n
   return "\n";
 }
 
-/** 保留双方：两侧首尾相接，拼出来的整份文本只有一种行尾。 */
+/** 保留双方：两侧首尾相接，拼出来的整份文本只有一种行尾。这里没有经过 textarea，孤立的 \r 不是换行，原样保留。 */
 export function keepBothSides(ours: string, theirs: string, eol: "\n" | "\r\n"): string {
   const combined = [ours.trimEnd(), theirs.trimEnd()].filter((part) => part.length > 0).join("\n");
-  return combined.length > 0 ? applyEol(`${combined}\n`, eol) : "";
+  return combined.length > 0 ? `${combined}\n`.replace(/\r?\n/g, eol) : "";
 }
 
 export function parseConflictText(text: string): ParsedConflictFile {

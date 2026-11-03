@@ -920,6 +920,32 @@ describe("整文件编辑的行尾", () => {
     expect(keepBothSides("", "", "\r\n")).toBe("");
   });
 
+  it("保留双方不把孤立的 \\r 拆成换行", () => {
+    expect(keepBothSides("a\rb\n", "c\n", "\n")).toBe("a\rb\nc\n");
+    expect(keepBothSides("a\rb\r\n", "c\r\n", "\r\n")).toBe("a\rb\r\nc\r\n");
+  });
+
+  it("保留双方后不打字，写回的孤立 \\r 原样保留", async () => {
+    const side = (text: string) => ({ present: true, binary: false, truncated: false, text, summary: "" });
+    const onResolve = open(TWO, { ours: side("a\rb\n"), theirs: side("c\n") });
+    await whole();
+    await fireEvent.click(screen.getByRole("button", { name: /保留双方/ }));
+    await mark();
+    expect(onResolve).toHaveBeenLastCalledWith("text", "a\rb\nc\n");
+  });
+
+  it("填入另一侧后再打字，整份按打开时的主导行尾写回", async () => {
+    const side = (text: string) => ({ present: true, binary: false, truncated: false, text, summary: "" });
+    const onResolve = open(CRLF_TWO, { ours: side("o1\no2\n") });
+    await whole();
+    await fireEvent.click(screen.getByRole("button", { name: /填入当前/ }));
+    await mark();
+    expect(onResolve, "不打字是那一侧的原样字节").toHaveBeenLastCalledWith("text", "o1\no2\n");
+    await type("o1\no2\nx\n");
+    await mark();
+    expect(onResolve).toHaveBeenLastCalledWith("text", "o1\r\no2\r\nx\r\n");
+  });
+
   it("打一个字后 CRLF 文件逐字节保持 CRLF", async () => {
     const onResolve = open(CRLF_TWO);
     await whole();

@@ -62,6 +62,8 @@
   let measuredFor: string | null | undefined;
   /** 方向键刚移动当前项：行高修正后还要把它留在视口里。 */
   let following = false;
+  /** 整体重排时钉住的行：视口顶部那一行，和视口顶在行内的偏移。 */
+  let pinned: { path: string; within: number } | null = null;
 
   function estimate(repo: RecentRepo): number {
     const pathLines = sameNames.has(repo.name) ? Math.floor(repo.path.length / PATH_CHARS) : 0;
@@ -102,11 +104,40 @@
     });
   });
 
-  $effect(() => {
+  /* 阻塞出现或解除时几乎每行都变高或变矮，先趁 DOM 还是旧布局记下视口顶部的行，重排后恢复。 */
+  $effect.pre(() => {
     if (blockedReason === measuredFor) return;
     measuredFor = blockedReason;
-    measured = new Map();
+    untrack(() => {
+      pinned = list ? findPinned(list) : null;
+      measured = new Map();
+    });
   });
+
+  function findPinned(host: HTMLElement): { path: string; within: number } | null {
+    let found: { path: string; within: number } | null = null;
+    let best = -Infinity;
+    for (const row of space?.querySelectorAll<HTMLElement>("[data-repo-row]") ?? []) {
+      const top = parseFloat(row.style.top);
+      const path = visible[Number(row.dataset.repoRow)]?.path;
+      if (path === undefined || top > host.scrollTop || top <= best) continue;
+      best = top;
+      found = { path, within: host.scrollTop - top };
+    }
+    return found;
+  }
+
+  function restorePinned(host: HTMLElement) {
+    if (!pinned) return;
+    const { path, within } = pinned;
+    const index = visible.findIndex((repo) => repo.path === path);
+    if (index < 0) {
+      pinned = null;
+      return;
+    }
+    host.scrollTop = offsets[index] + Math.min(within, heightOf(visible[index]) - 1);
+    scrollTop = host.scrollTop;
+  }
 
   /** 滚动容器是 Popover 的列表区，这里挂在内容轨道上跟着它走。 */
   function trackList(node: HTMLElement) {
@@ -147,12 +178,20 @@
       if (offsets[index] + known <= scrollTop) shift += height - known;
     }
     if (!next) {
+      if (list) restorePinned(list);
+      pinned = null;
       following = false;
       return;
     }
     measured = next;
+    // 钉住期间位置由锚点决定；下一轮测量可能先于这里结束钉住，所以在这里就定下不再推开。
+    const push = pinned ? 0 : shift;
     void tick().then(() => {
-      if (shift !== 0 && list) list.scrollTop += shift;
+      if (list && pinned) restorePinned(list);
+      else if (push !== 0 && list) {
+        list.scrollTop += push;
+        scrollTop = list.scrollTop;
+      }
       if (following) node.querySelector<HTMLElement>(`[data-repo-row="${active}"]`)?.scrollIntoView?.({ block: "nearest" });
     });
   }

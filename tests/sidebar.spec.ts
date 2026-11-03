@@ -203,6 +203,47 @@ describe("大量最近仓库", () => {
     }
   });
 
+  it("阻塞解除时行高整体变化，视口顶部的行不跳", async () => {
+    const view = render(RepoSwitcher, { props: props({ blockedReason: "操作进行中" }) as never });
+    const list = document.querySelector(".popover-list") as HTMLElement;
+    const blockedTop = 39 + 54 * 299;
+    list.scrollTop = blockedTop + 10;
+    await fireEvent.scroll(list);
+    await view.rerender({ blockedReason: null });
+    await tick();
+    expect(list.scrollTop, "第 300 行留在视口顶，行内偏移不变").toBe(39 * 300 + 10);
+    expect(options().some((option) => option.dataset.index === "300")).toBe(true);
+    await view.rerender({ blockedReason: "又忙了" });
+    await tick();
+    expect(list.scrollTop, "阻塞出现时同样钉住").toBe(blockedTop + 10);
+  });
+
+  it("重排后实测行高和估算不同，锚点按实测位置恢复；行内偏移不超过新行高", async () => {
+    const offsetHeight = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.dataset.repoRow ? 42 : 0;
+    });
+    try {
+      const view = render(RepoSwitcher, { props: props({ blockedReason: "操作进行中" }) as never });
+      const list = document.querySelector(".popover-list") as HTMLElement;
+      await tick();
+      await tick();
+      const row = () => options().find((option) => option.dataset.index === "20")?.parentElement as HTMLElement;
+      list.scrollTop = 39 * 20;
+      await fireEvent.scroll(list);
+      await tick();
+      await tick();
+      list.scrollTop = parseFloat(row().style.top) + 41;
+      await fireEvent.scroll(list);
+      await tick();
+      await view.rerender({ blockedReason: null });
+      for (let step = 0; step < 30; step += 1) await tick();
+      expect(list.scrollTop - parseFloat(row().style.top), "第 20 行还在视口顶").toBeGreaterThanOrEqual(0);
+      expect(list.scrollTop - parseFloat(row().style.top)).toBeLessThan(42);
+    } finally {
+      offsetHeight.mockRestore();
+    }
+  });
+
   it("从列表移除后当前项留在原位，不甩回开头", async () => {
     const view = render(RepoSwitcher, { props: props() as never });
     for (let step = 0; step < 40; step += 1) await fireEvent.keyDown(input(), { key: "ArrowDown" });

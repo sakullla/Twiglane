@@ -1616,14 +1616,21 @@ async fn continue_sequencer(
     }
     let mid = status_in_guard(guard, backend, git, root).await?;
     let now = operation_in_guard(guard, git, root, &mid).await?;
-    if now == "none" {
+    // commit --no-edit removes CHERRY_PICK_HEAD before later picks run.
+    // sequencer/todo still lists those picks, so this is not completion.
+    let cherry_pick_remains = if operation == "cherry-pick" && now == "none" {
+        cherry_pick_todo_pending(guard, git, root).await?
+    } else {
+        false
+    };
+    if now == "none" && !cherry_pick_remains {
         return Ok(CompletedMerge {
             oid: head_in_guard(guard, git, root).await?,
             summary: continue_summary(operation),
             files,
         });
     }
-    if now != operation {
+    if now != operation && !cherry_pick_remains {
         return Err(AppError::new(
             "unsupported_operation",
             format!("{} 未继续。", operation_note(&now, None, 0)),
@@ -1643,6 +1650,12 @@ async fn continue_sequencer(
     let after = status_in_guard(guard, backend, git, root).await?;
     let after_op = operation_in_guard(guard, git, root, &after).await?;
     if after_op == "none" && output.exit_code == 0 {
+        if operation == "cherry-pick" && cherry_pick_todo_pending(guard, git, root).await? {
+            return Err(AppError::new(
+                "sequencer_paused",
+                "拣选还有后续提交，不能算完成。可以继续，或中止回到操作前。不能跳过。",
+            ));
+        }
         return Ok(CompletedMerge {
             oid: head_in_guard(guard, git, root).await?,
             summary: continue_summary(operation),
@@ -3053,18 +3066,66 @@ fn sequencer_markers() -> [(&'static str, &'static str); 6] {
 }
 
 fn git_path_exists(root: &Path, stdout: &[u8]) -> bool {
+    resolved_git_path(root, stdout).is_some_and(|path| path.exists())
+}
+
+fn resolved_git_path(root: &Path, stdout: &[u8]) -> Option<PathBuf> {
     let text = String::from_utf8_lossy(stdout);
     let text = text.trim();
     if text.is_empty() {
-        return false;
+        return None;
     }
     let path = PathBuf::from(text);
-    let full = if path.is_absolute() {
+    Some(if path.is_absolute() {
         path
     } else {
         root.join(path)
+    })
+}
+
+fn sequencer_todo_has_instruction(contents: &str) -> bool {
+    contents.lines().any(|line| {
+        let line = line.trim();
+        !line.is_empty() && !line.starts_with('#') && !line.starts_with("hint:")
+    })
+}
+
+async fn cherry_pick_todo_pending(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+) -> Result<bool, AppError> {
+    let output = run_spec(
+        guard,
+        git_path_command(git, root, "sequencer/todo"),
+        false,
+        false,
+    )
+    .await?;
+    if output.exit_code != 0 {
+        return Err(git_failure(
+            "operation_failed",
+            &output,
+            "无法确认拣选是否还有后续提交，未把它标成完成。",
+        ));
+    }
+    let Some(path) = resolved_git_path(root, &output.stdout) else {
+        return Err(AppError::new(
+            "operation_failed",
+            "无法确认拣选是否还有后续提交，未把它标成完成。",
+        ));
     };
-    full.exists()
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => {
+            return Err(AppError::new(
+                "operation_failed",
+                "无法确认拣选是否还有后续提交，未把它标成完成。",
+            ))
+        }
+    };
+    Ok(sequencer_todo_has_instruction(&contents))
 }
 
 async fn path_exists_in_guard(
@@ -4293,6 +4354,135 @@ mod tests {
             .unwrap_err();
         assert_eq!(refused.code, "unsupported_operation");
         assert!(!repo.join(".git/MERGE_HEAD").exists());
+    }
+
+    #[test]
+    fn sequencer_todo_with_a_later_pick_is_not_finished() {
+        let todo = "pick abcdef1 one\npick abcdef2 two\nhint: already committed\n# comment\n";
+        assert!(sequencer_todo_has_instruction(todo));
+        assert!(!sequencer_todo_has_instruction("hint: nothing\n# done\n\n"));
+        assert!(!sequencer_todo_has_instruction(""));
+    }
+
+    #[tokio::test]
+    async fn multi_commit_cherry_pick_continue_keeps_later_commits() {
+        let fixture = crate::test_support::git_fixture("cherry-pick-two");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("a.txt"), "base\n").unwrap();
+        fs::write(repo.join("b.txt"), "base\n").unwrap();
+        git(&repo, &["add", "--", "a.txt", "b.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        git(&repo, &["checkout", "-b", "feature"]);
+        fs::write(repo.join("a.txt"), "feature-a\n").unwrap();
+        git(&repo, &["commit", "-am", "one"]);
+        fs::write(repo.join("b.txt"), "feature-b\n").unwrap();
+        git(&repo, &["commit", "-am", "two"]);
+        git(&repo, &["checkout", "main"]);
+        fs::write(repo.join("a.txt"), "main-a\n").unwrap();
+        git(&repo, &["commit", "-am", "main-a"]);
+        fs::write(repo.join("b.txt"), "main-b\n").unwrap();
+        git(&repo, &["commit", "-am", "main-b"]);
+        let one = git_text(&repo, &["rev-parse", "feature~1"]);
+        let two = git_text(&repo, &["rev-parse", "feature"]);
+        let main_tip = git_text(&repo, &["rev-parse", "HEAD"]);
+        let started = Command::new(crate::test_support::system_git())
+            .current_dir(&repo)
+            .args(["cherry-pick", &one, &two])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                crate::test_support::isolated_gitconfig(),
+            )
+            .env("GIT_AUTHOR_NAME", "Twiglane Test")
+            .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Twiglane Test")
+            .env("GIT_COMMITTER_EMAIL", "twiglane-test@example.com")
+            .status()
+            .unwrap();
+        assert!(!started.success());
+        assert!(repo.join(".git/CHERRY_PICK_HEAD").exists());
+        assert!(repo.join(".git/sequencer/todo").exists());
+        let path = repo_key(&repo);
+        let session = merge_session(&backend, &path, generation(&backend, &repo), 1)
+            .await
+            .unwrap();
+        assert_eq!(session.operation, "cherry-pick");
+        assert!(session.can_abort);
+        assert!(!session.can_continue);
+        assert!(session.note.contains("不能跳过"));
+        let resolved = resolve_conflict(
+            &backend,
+            &path,
+            "a.txt",
+            "text",
+            Some("a-ok\n".to_string()),
+            session.generation,
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved.unresolved, 0);
+        assert!(resolved.can_continue);
+        let paused = complete_merge(
+            &backend,
+            &path,
+            "should-not-finish-the-sequence",
+            resolved.generation,
+            3,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(paused.code, "sequencer_paused");
+        assert!(paused.message.contains("不能算完成"));
+        assert!(repo.join(".git/CHERRY_PICK_HEAD").exists());
+        assert!(repo.join(".git/sequencer/todo").exists());
+        assert_eq!(git_text(&repo, &["log", "-1", "--format=%s"]), "one");
+        assert_eq!(
+            git_text(&repo, &["log", "-1", "--format=%P"]),
+            main_tip
+        );
+        let mid = merge_session(&backend, &path, paused.generation.unwrap(), 4)
+            .await
+            .unwrap();
+        assert_eq!(mid.operation, "cherry-pick");
+        assert!(mid.can_abort);
+        assert!(mid.unresolved > 0);
+        assert!(!mid.can_continue);
+        let resolved_next = resolve_conflict(
+            &backend,
+            &path,
+            "b.txt",
+            "text",
+            Some("b-ok\n".to_string()),
+            mid.generation,
+            5,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved_next.unresolved, 0);
+        assert!(resolved_next.can_continue);
+        let done = complete_merge(
+            &backend,
+            &path,
+            "should-not-replace-the-subject",
+            resolved_next.generation,
+            6,
+        )
+        .await
+        .unwrap();
+        assert!(done.summary.contains("没有推送"));
+        assert_eq!(git_text(&repo, &["log", "-2", "--format=%s"]), "two\none");
+        assert_eq!(
+            git_text(&repo, &["log", "-1", "--format=%P", "HEAD~1"]),
+            main_tip
+        );
+        assert!(!repo.join(".git/CHERRY_PICK_HEAD").exists());
+        assert!(!repo.join(".git/sequencer").exists());
+        assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "a-ok\n");
+        assert_eq!(fs::read_to_string(repo.join("b.txt")).unwrap(), "b-ok\n");
+        assert_eq!(git_text(&repo, &["symbolic-ref", "HEAD"]), "refs/heads/main");
     }
 
     #[tokio::test]

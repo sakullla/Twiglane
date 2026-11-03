@@ -67,6 +67,8 @@ fn capabilities_do_not_grant_a_shell() {
         "allow-commit-detail",
         "allow-commit-file-diff",
         "allow-file-history",
+        "allow-cherry-pick-commits",
+        "allow-checkout-commit",
         "allow-stash-state",
         "allow-save-stash",
         "allow-apply-stash",

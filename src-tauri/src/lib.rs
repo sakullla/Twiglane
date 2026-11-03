@@ -29,8 +29,8 @@ use crate::error::AppError;
 use crate::git::ops::{self, Backend};
 use crate::git::runner::RealRunner;
 use crate::model::{
-    AbortImpact, BranchState, CloneResult, CommitDetail, CommitPushReport, CommitResult,
-    ConflictView, DiffResponse, DiscardResult, FileHistoryPage, GitInfo, HistoryPage,
+    AbortImpact, BranchState, CherryPickOutcome, CloneResult, CommitDetail, CommitPushReport,
+    CommitResult, ConflictView, DiffResponse, DiscardResult, FileHistoryPage, GitInfo, HistoryPage,
     MergeComplete, MergePreview, MergeSession, OpenedRepository, PanelWidths, RecentRepo,
     RemoteState, RemoteTag, RepoChanged, StashApplyResult, StashSaveResult, StashState,
     IgnoreOutcome, StatusSnapshot, TagState, Theme, UndoResult,
@@ -104,6 +104,8 @@ pub fn run() {
             commit_detail,
             commit_file_diff,
             file_history,
+            cherry_pick_commits,
+            checkout_commit,
             stash_state,
             save_stash,
             apply_stash,
@@ -845,6 +847,7 @@ async fn push_tag(
     crate::git::tags::push_tag(state.inner(), &path, &remote, &name, generation, request_id).await
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command(rename_all = "camelCase")]
 async fn history_page(
     state: State<'_, Arc<Backend>>,
@@ -853,9 +856,22 @@ async fn history_page(
     offset: u32,
     generation: u64,
     request_id: u64,
+    scope: Option<String>,
+    author: Option<String>,
+    since: Option<i64>,
+    until: Option<i64>,
+    path_filter: Option<String>,
 ) -> Result<HistoryPage, AppError> {
-    crate::git::history::history_page(state.inner(), &path, &query, offset, generation, request_id)
-        .await
+    let request = crate::git::history::HistoryRequest {
+        query,
+        offset,
+        scope: scope.unwrap_or_else(|| "current".to_string()),
+        author: author.unwrap_or_default(),
+        since,
+        until,
+        path: path_filter.unwrap_or_default(),
+    };
+    crate::git::history::history_page(state.inner(), &path, &request, generation, request_id).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -905,6 +921,7 @@ async fn commit_file_diff(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command(rename_all = "camelCase")]
 async fn file_history(
     state: State<'_, Arc<Backend>>,
@@ -913,16 +930,53 @@ async fn file_history(
     offset: u32,
     generation: u64,
     request_id: u64,
+    scope: Option<String>,
+    author: Option<String>,
+    since: Option<i64>,
+    until: Option<i64>,
+    query: Option<String>,
 ) -> Result<FileHistoryPage, AppError> {
+    let request = crate::git::history::HistoryRequest {
+        query: query.unwrap_or_default(),
+        offset,
+        scope: scope.unwrap_or_else(|| "current".to_string()),
+        author: author.unwrap_or_default(),
+        since,
+        until,
+        path: String::new(),
+    };
     crate::git::history::file_history(
         state.inner(),
         &path,
         &relative,
-        offset,
+        &request,
         generation,
         request_id,
     )
     .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn cherry_pick_commits(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    oids: Vec<String>,
+    generation: u64,
+    request_id: u64,
+) -> Result<CherryPickOutcome, AppError> {
+    crate::git::resolve::cherry_pick_commits(state.inner(), &path, &oids, generation, request_id)
+        .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn checkout_commit(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    oid: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    crate::git::resolve::checkout_commit(state.inner(), &path, &oid, generation, request_id).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

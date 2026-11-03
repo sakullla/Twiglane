@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -7,10 +7,12 @@ use crate::atomic::atomic_write;
 use crate::error::AppError;
 use crate::git::advice::{classify_problem, problem_error, GitProblem};
 use crate::git::command::{
-    add_command, branch_contains_command, cached_diff_quiet_command, cat_blob_command,
-    checkout_index_stage_command, checkout_side_command, cherry_pick_abort_command,
-    cherry_pick_continue_command, clean_files_command, commit_command, commit_no_edit_command,
+    add_command, ancestor_command, branch_contains_command, cached_diff_quiet_command,
+    cat_blob_command, checkout_index_stage_command, checkout_side_command,
+    cherry_pick_abort_command, cherry_pick_continue_command, cherry_pick_range_command,
+    clean_files_command, commit_command, commit_no_edit_command, detach_at_command,
     fetch_one_command, git_path_command, git_paths_command, hash_object_command, head_command,
+    history_details_command,
     head_match_command, head_record_command, ls_remote_tags_command, merge_abort_command,
     merge_divergence_command, merge_ff_only_command, merge_incoming_files_command,
     merge_incoming_log_command, merge_no_commit_command, merge_tree_command, push_reflog_command,
@@ -20,7 +22,7 @@ use crate::git::command::{
     update_index_info_command,
 };
 use crate::git::gate::action_key;
-use crate::git::history::{parse_history_records, parse_name_status};
+use crate::git::history::{parse_history_records, parse_name_status, validate_oid as history_oid};
 use crate::git::ops::{
     canonical_existing, git_failure, repo_key, require_git, run_git, safe_relative,
     status_from_output, validate_input_path, Backend,
@@ -30,7 +32,8 @@ use crate::git::patch::DIFF_PREVIEW_BYTES;
 use crate::git::runner::{ProcessOutput, RealRunner};
 use crate::git::schedule::{internal_request_id, CommandSpec, JobKind, WriteGuard};
 use crate::model::{
-    AbortImpact, ChangeKind, CommitFileChange, ConflictEntry, ConflictSide, ConflictView,
+    AbortImpact, ChangeKind, CherryPickOutcome, CommitFileChange, ConflictEntry, ConflictSide,
+    ConflictView,
     DiscardFilePlan, DiscardResult, FileChange, HistoryCommit, MergeComplete, MergePreview,
     MergeSession, StatusSnapshot, UndoResult, MAX_DRAFT_CHARS,
 };
@@ -3579,6 +3582,309 @@ fn attach_generation(error: AppError, generation: u64) -> AppError {
     }
 }
 
+const MAX_CHERRY_PICKS: usize = 100;
+
+pub async fn cherry_pick_commits(
+    backend: &Backend,
+    path: &str,
+    oids: &[String],
+    generation: u64,
+    request_id: u64,
+) -> Result<CherryPickOutcome, AppError> {
+    if oids.is_empty() {
+        return Err(AppError::new("cherry_pick_empty", "没有选择提交，未拣选。"));
+    }
+    if oids.len() > MAX_CHERRY_PICKS {
+        return Err(AppError::new(
+            "cherry_pick_limit",
+            "一次最多拣选 100 个提交，未执行。",
+        ));
+    }
+    let mut seen = HashSet::new();
+    let mut unique = Vec::new();
+    for oid in oids {
+        let oid = history_oid(oid)?;
+        if seen.insert(oid.clone()) {
+            unique.push(oid);
+        }
+    }
+    let root = repo_root(path)?;
+    ensure_no_index_lock(&root)?;
+    let git = require_git(backend).await?;
+    let snapshot = read_status(backend, &root, generation, request_id).await?;
+    if snapshot.branch.detached || snapshot.branch.unborn || snapshot.branch.name.is_none() {
+        return Err(AppError::new(
+            "detached",
+            "当前不在分支上，不能拣选到当前分支。仓库没有改动。",
+        )
+        .with_generation(snapshot.generation));
+    }
+    let operation = operation_from_snapshot(
+        backend,
+        &root,
+        &git.path,
+        &snapshot,
+        internal_request_id(),
+    )
+    .await?;
+    if operation != "none" {
+        return Err(AppError::new(
+            "unsupported_operation",
+            "已有进行中的合并、变基或拣选，未开始新的拣选。",
+        )
+        .with_generation(snapshot.generation));
+    }
+    let commits = load_pick_commits(backend, &root, &git.path, &unique, snapshot.generation).await?;
+    if commits.iter().any(|commit| commit.parents.len() != 1) {
+        return Err(AppError::new(
+            "cherry_pick_merge",
+            "合并提交或没有父提交的提交不能拣选，未执行。仓库没有改动。",
+        )
+        .with_generation(snapshot.generation));
+    }
+    let mut ordered = commits;
+    ordered.sort_by(|left, right| {
+        left.authored_at
+            .cmp(&right.authored_at)
+            .then_with(|| left.oid.cmp(&right.oid))
+    });
+    let mut skipped = Vec::new();
+    let mut todo = Vec::new();
+    let mut generation = snapshot.generation;
+    for commit in &ordered {
+        let (output, next) = run_read(
+            backend,
+            &root,
+            generation,
+            internal_request_id(),
+            ancestor_command(&git.path, &root, &commit.oid, "HEAD"),
+        )
+        .await?;
+        generation = next;
+        if output.exit_code == 0 {
+            skipped.push(commit.oid.clone());
+        } else if output.exit_code == 1 {
+            todo.push(commit.oid.clone());
+        } else {
+            return Err(git_failure(
+                "cherry_pick_failed",
+                &output,
+                "无法确认提交是否已在当前分支中，未拣选。",
+            )
+            .with_generation(generation));
+        }
+    }
+    if todo.is_empty() {
+        return Ok(CherryPickOutcome {
+            generation,
+            conflicted: false,
+            skipped: skipped.clone(),
+            note: only_skipped_note(&skipped),
+            snapshot,
+        });
+    }
+    let _gate = backend
+        .actions
+        .enter(action_key("cherry-pick", &repo_key(&root)))?;
+    let mut guard = write_lock(backend, &root, generation, request_id).await?;
+    let outcome = cherry_pick_in_guard(&mut guard, backend, &git.path, &root, &todo, &skipped).await;
+    let generation = guard.finish();
+    let outcome = outcome.map_err(|error| attach_generation(error, generation))?;
+    let snapshot = settle_read!(backend, &root, generation, |current| read_status(
+        backend,
+        &root,
+        current,
+        internal_request_id(),
+    )
+    .await)?;
+    Ok(CherryPickOutcome {
+        generation: snapshot.generation,
+        conflicted: outcome.0,
+        skipped,
+        note: outcome.1,
+        snapshot,
+    })
+}
+
+pub async fn checkout_commit(
+    backend: &Backend,
+    path: &str,
+    oid: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    let oid = history_oid(oid)?;
+    let root = repo_root(path)?;
+    ensure_no_index_lock(&root)?;
+    let git = require_git(backend).await?;
+    let snapshot = read_status(backend, &root, generation, request_id).await?;
+    let operation = operation_from_snapshot(
+        backend,
+        &root,
+        &git.path,
+        &snapshot,
+        internal_request_id(),
+    )
+    .await?;
+    if operation != "none" {
+        return Err(AppError::new(
+            "unsupported_operation",
+            "已有进行中的合并、变基或拣选，未检出。当前分支没有移动。",
+        )
+        .with_generation(snapshot.generation));
+    }
+    let _gate = backend
+        .actions
+        .enter(action_key("branch", &repo_key(&root)))?;
+    let mut guard = write_lock(backend, &root, snapshot.generation, request_id).await?;
+    let outcome = detach_in_guard(&mut guard, backend, &git.path, &root, &oid).await;
+    let generation = guard.finish();
+    outcome.map_err(|error| attach_generation(error, generation))?;
+    settle_read!(backend, &root, generation, |current| read_status(
+        backend,
+        &root,
+        current,
+        internal_request_id(),
+    )
+    .await)
+}
+
+async fn load_pick_commits(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    oids: &[String],
+    generation: u64,
+) -> Result<Vec<HistoryCommit>, AppError> {
+    let (output, generation) = run_read(
+        backend,
+        root,
+        generation,
+        internal_request_id(),
+        history_details_command(git, root, oids),
+    )
+    .await?;
+    if output.exit_code != 0 {
+        return Err(git_failure(
+            "commit_missing",
+            &output,
+            "找不到所选提交，未拣选。",
+        )
+        .with_generation(generation));
+    }
+    let commits = parse_history_records(&output.stdout)
+        .map_err(|error| attach_generation(error, generation))?;
+    if oids.iter().any(|oid| commits.iter().all(|commit| commit.oid != *oid)) {
+        return Err(AppError::new("commit_missing", "找不到所选提交，未拣选。").with_generation(generation));
+    }
+    Ok(commits)
+}
+
+async fn cherry_pick_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    backend: &Backend,
+    git: &Path,
+    root: &Path,
+    todo: &[String],
+    skipped: &[String],
+) -> Result<(bool, String), AppError> {
+    let snapshot = status_in_guard(guard, backend, git, root).await?;
+    if snapshot.branch.detached || snapshot.branch.unborn || snapshot.branch.name.is_none() {
+        return Err(AppError::new(
+            "detached",
+            "当前不在分支上，不能拣选到当前分支。仓库没有改动。",
+        ));
+    }
+    let operation = operation_in_guard(guard, git, root, &snapshot).await?;
+    if operation != "none" {
+        return Err(AppError::new(
+            "unsupported_operation",
+            "已有进行中的合并、变基或拣选，未开始新的拣选。",
+        ));
+    }
+    let output = run_spec(
+        guard,
+        cherry_pick_range_command(git, root, todo),
+        true,
+        false,
+    )
+    .await?;
+    let after = status_in_guard(guard, backend, git, root).await?;
+    let after_op = operation_in_guard(guard, git, root, &after).await?;
+    if after_op == "cherry-pick" {
+        return Ok((true, conflict_note(skipped)));
+    }
+    if output.exit_code != 0 {
+        return Err(classified_git(
+            "cherry_pick_failed",
+            &output,
+            "拣选没有完成。会覆盖未提交修改时不会开始，当前分支应保持原样。",
+        ));
+    }
+    Ok((false, success_note(skipped)))
+}
+
+async fn detach_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    backend: &Backend,
+    git: &Path,
+    root: &Path,
+    oid: &str,
+) -> Result<(), AppError> {
+    let snapshot = status_in_guard(guard, backend, git, root).await?;
+    let operation = operation_in_guard(guard, git, root, &snapshot).await?;
+    if operation != "none" {
+        return Err(AppError::new(
+            "unsupported_operation",
+            "已有进行中的合并、变基或拣选，未检出。当前分支没有移动。",
+        ));
+    }
+    let output = run_spec(guard, detach_at_command(git, root, oid), true, false).await?;
+    if output.exit_code != 0 {
+        return Err(classified_git(
+            "checkout_failed",
+            &output,
+            "没有检出这个提交。会覆盖未提交修改时不会切换，当前分支和工作区应保持原样。",
+        ));
+    }
+    Ok(())
+}
+
+fn oid_list(oids: &[String]) -> String {
+    oids.iter()
+        .take(8)
+        .map(|oid| &oid[..oid.len().min(7)])
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
+fn only_skipped_note(skipped: &[String]) -> String {
+    format!(
+        "这些提交已经在当前分支中，已跳过，没有新增提交：{}。",
+        oid_list(skipped)
+    )
+}
+
+fn success_note(skipped: &[String]) -> String {
+    if skipped.is_empty() {
+        "已按从旧到新拣选到当前分支。没有推送。".to_string()
+    } else {
+        format!(
+            "已跳过已在当前分支中的提交：{}。其余提交已按从旧到新拣选。没有推送。",
+            oid_list(skipped)
+        )
+    }
+}
+
+fn conflict_note(skipped: &[String]) -> String {
+    let skipped = if skipped.is_empty() {
+        String::new()
+    } else {
+        format!("已跳过已在当前分支中的提交：{}。", oid_list(skipped))
+    };
+    format!("{skipped}拣选停在冲突，更晚的提交还没有应用。解决后可以继续，也可以中止回到拣选前。不能跳过。")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4485,6 +4791,154 @@ mod tests {
         assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "a-ok\n");
         assert_eq!(fs::read_to_string(repo.join("b.txt")).unwrap(), "b-ok\n");
         assert_eq!(git_text(&repo, &["symbolic-ref", "HEAD"]), "refs/heads/main");
+    }
+
+    fn commit_dated(repo: &Path, message: &str, date: &str) {
+        let name = format!("{message}.txt");
+        fs::write(repo.join(&name), format!("{message}\n")).unwrap();
+        git(repo, &["add", "--", &name]);
+        let status = Command::new(crate::test_support::system_git())
+            .current_dir(repo)
+            .args(["commit", "-m", message])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                crate::test_support::isolated_gitconfig(),
+            )
+            .env("GIT_AUTHOR_NAME", "Twiglane Test")
+            .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Twiglane Test")
+            .env("GIT_COMMITTER_EMAIL", "twiglane-test@example.com")
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{message}");
+    }
+
+    fn commit_at(repo: &Path, message: &str, date: &str) {
+        let status = Command::new(crate::test_support::system_git())
+            .current_dir(repo)
+            .args(["commit", "-m", message])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                crate::test_support::isolated_gitconfig(),
+            )
+            .env("GIT_AUTHOR_NAME", "Twiglane Test")
+            .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Twiglane Test")
+            .env("GIT_COMMITTER_EMAIL", "twiglane-test@example.com")
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{message}");
+    }
+
+    #[tokio::test]
+    async fn cherry_pick_applies_oldest_first_skips_ancestors_and_abort_restores() {
+        let fixture = crate::test_support::git_fixture("history-cherry-pick");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "base\n").unwrap();
+        git(&repo, &["add", "--", "file.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        let base = git_text(&repo, &["rev-parse", "HEAD"]);
+        commit_dated(&repo, "already", "1000000100 +0000");
+        let already = git_text(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "-b", "feature", &base]);
+        commit_dated(&repo, "newer", "1000000300 +0000");
+        let newer = git_text(&repo, &["rev-parse", "HEAD"]);
+        commit_dated(&repo, "older", "1000000200 +0000");
+        let older = git_text(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "main"]);
+        let path = repo_key(&repo);
+        let started = cherry_pick_commits(
+            &backend,
+            &path,
+            &[newer.clone(), already.clone(), older.clone()],
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(!started.conflicted);
+        assert_eq!(started.skipped, vec![already.clone()]);
+        assert!(started.note.contains("已跳过"));
+        assert_eq!(git_text(&repo, &["log", "-3", "--format=%s"]), "newer\nolder\nalready");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD~1~1"]), already);
+        let main_tip = git_text(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "-b", "side", &base]);
+        fs::write(repo.join("a.txt"), "side-a\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        commit_at(&repo, "side-a", "2000000100 +0000");
+        fs::write(repo.join("b.txt"), "side-b\n").unwrap();
+        git(&repo, &["add", "--", "b.txt"]);
+        commit_at(&repo, "side-b", "2000000200 +0000");
+        let side_old = git_text(&repo, &["rev-parse", "HEAD~1"]);
+        let side_new = git_text(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "main"]);
+        fs::write(repo.join("a.txt"), "main-a\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        git(&repo, &["commit", "-m", "main-a"]);
+        let tip_before = git_text(&repo, &["rev-parse", "HEAD"]);
+        let conflicted = cherry_pick_commits(
+            &backend,
+            &path,
+            &[side_new, side_old],
+            generation(&backend, &repo),
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(conflicted.conflicted);
+        assert!(conflicted.note.contains("更晚的提交还没有应用"));
+        assert!(conflicted.note.contains("不能跳过"));
+        assert_ne!(fs::read_to_string(repo.join("b.txt")).unwrap_or_default(), "side-b\n");
+        let session = merge_session(&backend, &path, conflicted.generation, 3)
+            .await
+            .unwrap();
+        assert_eq!(session.operation, "cherry-pick");
+        assert!(session.can_abort);
+        let aborted = abort_merge(&backend, &path, true, session.generation, 4)
+            .await
+            .unwrap();
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), tip_before);
+        assert_eq!(git_text(&repo, &["symbolic-ref", "HEAD"]), "refs/heads/main");
+        assert!(!repo.join(".git/CHERRY_PICK_HEAD").exists());
+        assert_eq!(aborted.snapshot.branch.name.as_deref(), Some("main"));
+        let _ = main_tip;
+    }
+
+    #[tokio::test]
+    async fn checkout_commit_detaches_and_refuses_to_overwrite() {
+        let fixture = crate::test_support::git_fixture("history-checkout");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "base\n").unwrap();
+        git(&repo, &["add", "--", "file.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        let base = git_text(&repo, &["rev-parse", "HEAD"]);
+        fs::write(repo.join("file.txt"), "next\n").unwrap();
+        git(&repo, &["commit", "-am", "next"]);
+        let path = repo_key(&repo);
+        fs::write(repo.join("file.txt"), "dirty\n").unwrap();
+        let blocked = checkout_commit(&backend, &path, &base, generation(&backend, &repo), 1)
+            .await
+            .unwrap_err();
+        assert_eq!(blocked.code, "local_changes");
+        assert_eq!(git_text(&repo, &["symbolic-ref", "HEAD"]), "refs/heads/main");
+        assert_eq!(fs::read_to_string(repo.join("file.txt")).unwrap(), "dirty\n");
+        fs::write(repo.join("file.txt"), "next\n").unwrap();
+        let detached = checkout_commit(&backend, &path, &base, blocked.generation.unwrap(), 2)
+            .await
+            .unwrap();
+        assert!(detached.branch.detached);
+        assert_eq!(detached.branch.head_oid.as_deref(), Some(base.as_str()));
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), base);
     }
 
     #[tokio::test]

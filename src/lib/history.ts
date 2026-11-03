@@ -11,11 +11,82 @@ export function formatAuthoredAt(seconds: number): string {
 
 export function historyStatus(state: string): string | null {
   if (state === "empty_repository") return "这个仓库还没有任何提交。";
-  if (state === "no_match") {
-    return "没有匹配记录。搜索会查找全部历史中的说明、作者和提交标识，不是只过滤当前页。";
-  }
+  if (state === "empty_branch") return "当前分支还没有提交。范围是当前分支。";
+  if (state === "no_match") return "没有符合条件的提交。";
   if (state === "no_file_history") return "这个文件没有可用历史。";
   return null;
+}
+
+export interface HistoryConditionInput {
+  scope: string;
+  head: string | null;
+  author: string;
+  since: string;
+  until: string;
+  path: string;
+  query: string;
+}
+
+export function historyScopeLabel(scope: string, head: string | null): string {
+  if (scope === "all") return "全部分支";
+  if (!scope || scope === "current") return head ? `当前分支 ${head}` : "当前分支";
+  return `分支 ${scope}`;
+}
+
+/** 无结果时写明仍在生效的条件。说明搜索和作者是两项，不会并成一次查询。 */
+export function historyConditions(filters: HistoryConditionInput): string {
+  const parts = [`范围：${historyScopeLabel(filters.scope, filters.head)}`];
+  const author = filters.author.trim();
+  if (author) parts.push(`作者：${author}`);
+  if (filters.since || filters.until) {
+    parts.push(`日期：${filters.since || "不限"} 至 ${filters.until || "不限"}（含起止当天）`);
+  }
+  const path = filters.path.trim();
+  if (path) parts.push(`路径：${path}`);
+  const query = filters.query.trim();
+  if (query) parts.push(`说明或哈希：${query}`);
+  return `生效条件：${parts.join("；")}。仓库没有被修改。`;
+}
+
+/** 本地日历日的含当日边界，单位秒。结束日取到 23:59:59。非法日期返回 null。 */
+export function historyDayBound(day: string, end: boolean): number | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day.trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const date = Number(match[3]);
+  const stamp = new Date(year, month - 1, date, end ? 23 : 0, end ? 59 : 0, end ? 59 : 0);
+  if (stamp.getFullYear() !== year || stamp.getMonth() !== month - 1 || stamp.getDate() !== date) return null;
+  return Math.floor(stamp.getTime() / 1000);
+}
+
+/** 距底部不足三行时追加。视口高度未知时不追加，避免高度为 0 时连续请求。 */
+export function shouldAppendHistory(
+  scrollTop: number,
+  viewport: number,
+  contentHeight: number,
+  hasMore: boolean,
+  busy: boolean,
+): boolean {
+  if (!hasMore || busy || viewport <= 0) return false;
+  return contentHeight - scrollTop - viewport <= 180;
+}
+
+export function commitSelectionRange(oids: string[], anchor: string | null, target: string): string[] {
+  const end = oids.indexOf(target);
+  if (end < 0) return [];
+  const found = anchor ? oids.indexOf(anchor) : -1;
+  const start = found < 0 ? end : found;
+  return oids.slice(Math.min(start, end), Math.max(start, end) + 1);
+}
+
+/** 最后一个提交不能取消，避免详情区空白。 */
+export function toggleCommitSelection(base: string[], oid: string): string[] {
+  if (base.includes(oid)) {
+    const next = base.filter((item) => item !== oid);
+    return next.length === 0 ? base : next;
+  }
+  return [...base, oid];
 }
 
 export function parentCaption(parents: string[], root = false): string {

@@ -345,9 +345,13 @@ pub struct HistoryPage {
     pub offset: u32,
     pub page_size: u32,
     pub has_more: bool,
-    /// `ok`, `empty_repository`, or `no_match`.
+    /// `ok`, `empty_repository`, `empty_branch`, or `no_match`.
     pub state: String,
     pub commits: Vec<HistoryCommit>,
+    /// `current`、`all`，或本地分支名。
+    pub scope: String,
+    pub branches: Vec<String>,
+    pub head: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -393,9 +397,22 @@ pub struct FileHistoryPage {
     pub offset: u32,
     pub page_size: u32,
     pub has_more: bool,
-    /// `ok`, `empty_repository`, or `no_file_history`.
+    /// `ok`, `empty_repository`, `no_file_history`, or `no_match`.
     pub state: String,
     pub commits: Vec<HistoryCommit>,
+    pub scope: String,
+    pub branches: Vec<String>,
+    pub head: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CherryPickOutcome {
+    pub generation: u64,
+    pub conflicted: bool,
+    pub skipped: Vec<String>,
+    pub note: String,
+    pub snapshot: StatusSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

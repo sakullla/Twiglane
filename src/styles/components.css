@@ -687,6 +687,17 @@ label.list-row .checkbox { margin-top: 2px; }
 .history-tools { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; padding: 0 var(--space-8) var(--space-6); flex: none; }
 .history-tools .btn { align-self: flex-start; }
 .history-tools .history-file-scope { max-width: 100%; }
+.history-filters { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+.history-filters .field, .history-filters .select { width: 100%; }
+.history-filter-row { display: flex; gap: var(--space-4); min-width: 0; }
+.history-filter-row .input { flex: 1; min-width: 0; height: 32px; }
+.history-conditions { margin: 0; padding: 0 var(--space-12) var(--space-8); color: var(--fg-muted); font-size: var(--text-sm); line-height: 1.5; }
+.history-multi-list { margin: 0; padding: 0 var(--space-12) var(--space-8); list-style: none; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.history-multi-list li { display: flex; gap: var(--space-6); min-width: 0; color: var(--fg-muted); font-size: var(--text-sm); }
+.history-multi-list code { flex: none; }
+.history-multi-diffs { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: var(--space-8); padding-bottom: var(--space-8); }
+.history-union-files .file-row { position: relative; top: auto; height: 40px; margin: 2px 0; }
+.history-multi-diff h3 { margin: 0; padding: var(--space-8) var(--space-12) 0; font-size: var(--text-sm); font-weight: var(--weight-semibold); }
 .history-list { flex: 1; min-width: 0; min-height: 0; overflow: auto; position: relative; padding: 0 0 var(--space-6); outline: none; container-type: inline-size; container-name: history-list; }
 /* 窄栏里把宽度留给摘要、作者和时间；Hash 仍在悬停提示和详情里。 */
 @container history-list (max-width: 240px) {

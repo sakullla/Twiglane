@@ -4,6 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import DiffView from "../src/lib/components/DiffView.svelte";
 import {
   commitFileLabel,
+  commitSelectionRange,
+  historyConditions,
+  historyDayBound,
   historyStatus,
   mergeAbortAvailable,
   parentCaption,
@@ -12,7 +15,9 @@ import {
   refLabel,
   refPills,
   shortOid,
+  shouldAppendHistory,
   stashPathBadge,
+  toggleCommitSelection,
 } from "../src/lib/history";
 import type { DiffResponse, FileSelection, HistoryCommit, OpenedRepository, StashState } from "../src/lib/types";
 
@@ -24,6 +29,10 @@ const stashState = vi.hoisted(() => vi.fn());
 const saveStash = vi.hoisted(() => vi.fn());
 const applyStash = vi.hoisted(() => vi.fn());
 const deleteStash = vi.hoisted(() => vi.fn());
+const cherryPickCommits = vi.hoisted(() => vi.fn());
+const checkoutCommit = vi.hoisted(() => vi.fn());
+const revealPath = vi.hoisted(() => vi.fn());
+const createBranchFrom = vi.hoisted(() => vi.fn());
 
 vi.mock("../src/lib/api", () => ({
   api: {
@@ -35,6 +44,10 @@ vi.mock("../src/lib/api", () => ({
     saveStash,
     applyStash,
     deleteStash,
+    cherryPickCommits,
+    checkoutCommit,
+    revealPath,
+    createBranchFrom,
   },
 }));
 
@@ -112,11 +125,44 @@ function panelProps(filePath: string | null = null) {
 describe("历史文案", () => {
   it("区分空仓库、无匹配和无文件历史", () => {
     expect(historyStatus("empty_repository")).toBe("这个仓库还没有任何提交。");
-    expect(historyStatus("no_match")).toContain("全部历史");
+    expect(historyStatus("empty_branch")).toBe("当前分支还没有提交。范围是当前分支。");
+    expect(historyStatus("no_match")).toBe("没有符合条件的提交。");
+    expect(historyStatus("no_match")).not.toContain("作者");
     expect(historyStatus("no_file_history")).toBe("这个文件没有可用历史。");
     expect(historyStatus("ok")).toBeNull();
     expect(historyStatus("empty_repository")).not.toBe(historyStatus("no_match"));
     expect(historyStatus("no_match")).not.toBe(historyStatus("no_file_history"));
+  });
+
+  it("生效条件按交集书写，日期含当天，接近底部才追加", () => {
+    const text = historyConditions({
+      scope: "current",
+      head: "main",
+      author: "Ada",
+      since: "2024-01-02",
+      until: "2024-01-03",
+      path: "docs",
+      query: "needle",
+    });
+    expect(text).toContain("范围：当前分支 main");
+    expect(text).toContain("作者：Ada");
+    expect(text).toContain("路径：docs");
+    expect(text).toContain("说明或哈希：needle");
+    expect(text).toContain("含起止当天");
+    expect(text).toContain("仓库没有被修改");
+    const start = historyDayBound("2024-01-02", false);
+    const end = historyDayBound("2024-01-02", true);
+    expect(start).not.toBeNull();
+    expect(end! - start!).toBe(86_399);
+    expect(new Date(start! * 1000).getHours()).toBe(0);
+    expect(new Date(end! * 1000).getDate()).toBe(2);
+    expect(historyDayBound("2024-02-31", false)).toBeNull();
+    expect(commitSelectionRange(["a", "b", "c"], "a", "c")).toEqual(["a", "b", "c"]);
+    expect(toggleCommitSelection(["a"], "a")).toEqual(["a"]);
+    expect(toggleCommitSelection(["a"], "b")).toEqual(["a", "b"]);
+    expect(shouldAppendHistory(0, 0, 1000, true, false)).toBe(false);
+    expect(shouldAppendHistory(800, 200, 1000, true, false)).toBe(true);
+    expect(shouldAppendHistory(800, 200, 1000, false, false)).toBe(false);
   });
 
   it("说明父提交、引用、重命名后的路径和保存范围", () => {
@@ -224,7 +270,7 @@ describe("历史面板", () => {
       render(HistoryPanel, { props: panelProps() });
       await vi.runAllTimersAsync();
       historyPage.mockClear();
-      await fireEvent.input(screen.getByLabelText("搜索全部历史"), { target: { value: "UNIQUE-NEEDLE" } });
+      await fireEvent.input(screen.getByLabelText("搜索说明或提交哈希"), { target: { value: "UNIQUE-NEEDLE" } });
       await vi.advanceTimersByTimeAsync(299);
       expect(historyPage).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
@@ -265,6 +311,226 @@ describe("历史面板", () => {
     expect(document.querySelector(".history-list .empty-icon"), "空状态图标与其它两种不同").toBeTruthy();
     expect(fileHistory).toHaveBeenCalledWith("/repo", "notes.txt", 0, 3, 1);
     expect(historyPage).not.toHaveBeenCalled();
+  });
+
+  it("筛选取交集，清除路径时保留作者，当前分支没有提交时写明范围", async () => {
+    vi.useFakeTimers();
+    try {
+      historyPage.mockResolvedValue({
+        generation: 3,
+        query: "",
+        offset: 0,
+        pageSize: 100,
+        hasMore: false,
+        state: "ok",
+        commits: [commit(0)],
+        scope: "current",
+        branches: ["main", "feature"],
+        head: "main",
+      });
+      render(HistoryPanel, { props: panelProps() });
+      await vi.runAllTimersAsync();
+      historyPage.mockClear();
+      await fireEvent.input(screen.getByLabelText("作者"), { target: { value: "Ada" } });
+      await fireEvent.input(screen.getByLabelText("路径"), { target: { value: "docs" } });
+      await fireEvent.input(screen.getByLabelText("搜索说明或提交哈希"), { target: { value: "needle" } });
+      await fireEvent.input(screen.getByLabelText("开始日期"), { target: { value: "2024-01-02" } });
+      await fireEvent.input(screen.getByLabelText("结束日期"), { target: { value: "2024-01-02" } });
+      await vi.advanceTimersByTimeAsync(300);
+      const since = historyDayBound("2024-01-02", false);
+      const until = historyDayBound("2024-01-02", true);
+      expect(historyPage).toHaveBeenCalledWith("/repo", "needle", 0, 3, 1, {
+        author: "Ada",
+        path: "docs",
+        since,
+        until,
+      });
+      historyPage.mockClear();
+      await fireEvent.click(screen.getByRole("button", { name: "清除路径" }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(historyPage).toHaveBeenCalledWith("/repo", "needle", 0, 3, 1, {
+        author: "Ada",
+        since,
+        until,
+      });
+      historyPage.mockResolvedValue({
+        generation: 3,
+        query: "",
+        offset: 0,
+        pageSize: 100,
+        hasMore: false,
+        state: "empty_branch",
+        commits: [],
+        scope: "current",
+        branches: [],
+        head: "main",
+      });
+      historyPage.mockClear();
+      await fireEvent.click(screen.getByRole("button", { name: "清除作者" }));
+      await fireEvent.click(screen.getByRole("button", { name: "清除说明或哈希" }));
+      await fireEvent.click(screen.getByRole("button", { name: "清除开始日期" }));
+      await fireEvent.click(screen.getByRole("button", { name: "清除结束日期" }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await screen.findByText("当前分支还没有提交。范围是当前分支。")).toBeTruthy();
+      expect(screen.getByText(/生效条件：范围：当前分支 main/)).toBeTruthy();
+      expect(screen.getByText(/仓库没有被修改/)).toBeTruthy();
+      expect(historyPage).toHaveBeenCalledWith("/repo", "", 0, 3, 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("接近底部追加更早提交，失败时保留已显示的提交", async () => {
+    const first = commit(0);
+    const older = commit(1);
+    historyPage
+      .mockResolvedValueOnce({
+        generation: 3, query: "", offset: 0, pageSize: 100, hasMore: true, state: "ok", commits: [first],
+        scope: "current", branches: ["main"], head: "main",
+      })
+      .mockResolvedValueOnce({
+        generation: 3, query: "", offset: 1, pageSize: 100, hasMore: false, state: "ok", commits: [older],
+        scope: "current", branches: ["main"], head: "main",
+      });
+    render(HistoryPanel, { props: panelProps() });
+    expect(await screen.findByRole("option", { name: /commit-0/ })).toBeTruthy();
+    const detailCalls = commitDetail.mock.calls.length;
+    const list = screen.getByRole("listbox", { name: "提交历史" });
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 120 });
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 400 });
+    list.scrollTop = 300;
+    await fireEvent.scroll(list);
+    expect(await screen.findByRole("option", { name: /commit-1/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /commit-0/ })).toBeTruthy();
+    expect(screen.getByText(/已加载最新 1–2 条/)).toBeTruthy();
+    expect(historyPage.mock.calls.at(-1)?.[2]).toBe(1);
+    expect(commitDetail.mock.calls.length).toBe(detailCalls);
+    await fireEvent.click(screen.getByRole("button", { name: "回到最新" }));
+    expect(list.scrollTop).toBe(0);
+  });
+
+  it("追加失败时保留已加载提交并说明原因", async () => {
+    const first = commit(0);
+    historyPage
+      .mockResolvedValueOnce({
+        generation: 3, query: "", offset: 0, pageSize: 100, hasMore: true, state: "ok", commits: [first],
+        scope: "current", branches: ["main"], head: "main",
+      })
+      .mockRejectedValueOnce({ code: "history_failed", message: "读取更早提交失败。" });
+    render(HistoryPanel, { props: panelProps() });
+    expect(await screen.findByRole("option", { name: /commit-0/ })).toBeTruthy();
+    const list = screen.getByRole("listbox", { name: "提交历史" });
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 120 });
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 400 });
+    list.scrollTop = 300;
+    await fireEvent.scroll(list);
+    expect(await screen.findByText(/读取更早提交失败。已显示的提交仍保留。/)).toBeTruthy();
+    expect(screen.getByRole("option", { name: /commit-0/ })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /commit-1/ })).toBeNull();
+  });
+
+  it("单条与多条提交的菜单不同，多条显示第一父提交的文件并集", async () => {
+    const first = commit(0);
+    const second = commit(1);
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [first, second],
+      scope: "current", branches: ["main"], head: "main",
+    });
+    commitDetail.mockImplementation(async (_repo: string, oid: string) => ({
+      generation: 3,
+      commit: oid === second.oid ? second : first,
+      body: "",
+      root: false,
+      merge: false,
+      selectedParent: "parent",
+      files: oid === second.oid
+        ? [{ path: "b.txt", originalPath: null, status: "modified", additions: 1, deletions: 0 }, { path: "c.txt", originalPath: null, status: "added", additions: 1, deletions: 0 }]
+        : [{ path: "a.txt", originalPath: null, status: "modified", additions: 1, deletions: 0 }, { path: "b.txt", originalPath: null, status: "modified", additions: 2, deletions: 1 }],
+    }));
+    const onNotice = vi.fn();
+    const onSnapshot = vi.fn();
+    render(HistoryPanel, { props: { ...panelProps(), onNotice, onSnapshot } });
+    const row = await screen.findByRole("option", { name: /commit-0/ });
+    await fireEvent.contextMenu(row);
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual([
+      "拣选到当前分支",
+      "检出此提交",
+      "从此提交新建分支",
+      "复制提交哈希",
+    ]);
+    expect(screen.queryByRole("menuitem", { name: /还原/ })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /重置/ })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /复制作者/ })).toBeNull();
+    await fireEvent.click(screen.getByRole("menuitem", { name: "检出此提交" }));
+    expect(await screen.findByText(/游离 HEAD/)).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(checkoutCommit).not.toHaveBeenCalled();
+    checkoutCommit.mockResolvedValue({ ...opened.snapshot, generation: 4, branch: { ...opened.snapshot.branch, detached: true, name: null } });
+    await fireEvent.contextMenu(row);
+    await fireEvent.click(screen.getByRole("menuitem", { name: "检出此提交" }));
+    await fireEvent.click(screen.getByRole("button", { name: "检出" }));
+    await waitFor(() => expect(checkoutCommit).toHaveBeenCalledWith("/repo", first.oid, 3, 1));
+    expect(onSnapshot).toHaveBeenCalled();
+    cherryPickCommits.mockResolvedValue({
+      generation: 5,
+      conflicted: false,
+      skipped: [],
+      note: "已按从旧到新拣选到当前分支。没有推送。",
+      snapshot: opened.snapshot,
+    });
+    await fireEvent.click(screen.getByRole("option", { name: /commit-1/ }), { shiftKey: true });
+    expect(await screen.findByText("已选择 2 个提交")).toBeTruthy();
+    expect(await screen.findByText("a.txt")).toBeTruthy();
+    expect(screen.getByText("b.txt")).toBeTruthy();
+    expect(screen.getByText("c.txt")).toBeTruthy();
+    expect(commitDetail).toHaveBeenCalledWith("/repo", first.oid, null, 3, 1);
+    expect(commitDetail).toHaveBeenCalledWith("/repo", second.oid, null, 3, 1);
+    await fireEvent.contextMenu(screen.getByRole("option", { name: /commit-1/ }));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["拣选这些提交", "复制哈希"]);
+    await fireEvent.click(screen.getByRole("menuitem", { name: "拣选这些提交" }));
+    await waitFor(() => expect(cherryPickCommits).toHaveBeenCalledWith("/repo", [first.oid, second.oid], 3, 1));
+    expect(onNotice).toHaveBeenCalledWith("已按从旧到新拣选到当前分支。没有推送。");
+    await fireEvent.click(screen.getByRole("option", { name: /commit-1/ }), { ctrlKey: true });
+    expect(screen.queryByText("已选择 2 个提交")).toBeNull();
+  });
+
+  it("提交中的文件行只有历史、复制路径和文件管理器", async () => {
+    const only = commit(0);
+    const onFailure = vi.fn();
+    const onSnapshot = vi.fn();
+    const onFilePath = vi.fn();
+    historyPage.mockResolvedValue({ generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [only] });
+    commitDetail.mockResolvedValue({
+      generation: 3,
+      commit: only,
+      body: "",
+      root: false,
+      merge: false,
+      selectedParent: only.parents[0],
+      files: [{ path: "notes.txt", originalPath: null, status: "added", additions: 1, deletions: 0 }],
+    });
+    revealPath.mockRejectedValue({ code: "open_failed", message: "无法打开文件管理器。" });
+    render(HistoryPanel, { props: { ...panelProps(), onFailure, onSnapshot, onFilePath } });
+    await waitFor(() => expect(document.querySelector(".history-files .file-row")).toBeTruthy());
+    const fileRow = document.querySelector<HTMLElement>(".history-files .file-row")!;
+    await fireEvent.contextMenu(fileRow);
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual([
+      "查看此文件历史",
+      "复制相对路径",
+      "在系统文件管理器中显示",
+    ]);
+    expect(screen.queryByRole("menuitem", { name: /拣选/ })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /检出/ })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /哈希/ })).toBeNull();
+    await fireEvent.click(screen.getByRole("menuitem", { name: "查看此文件历史" }));
+    expect(onFilePath).toHaveBeenCalledWith("notes.txt");
+    await fireEvent.contextMenu(fileRow);
+    await fireEvent.click(screen.getByRole("menuitem", { name: "在系统文件管理器中显示" }));
+    await waitFor(() => expect(revealPath).toHaveBeenCalledWith("/repo", "notes.txt"));
+    expect(onFailure).toHaveBeenCalledWith(expect.objectContaining({ code: "open_failed" }));
+    expect(onSnapshot).not.toHaveBeenCalled();
+    expect(checkoutCommit).not.toHaveBeenCalled();
+    expect(cherryPickCommits).not.toHaveBeenCalled();
   });
 });
 
@@ -639,10 +905,10 @@ describe("历史分栏", () => {
     await waitFor(() => expect(document.querySelector(".commit-head")).toBeTruthy());
     const pane = document.querySelector<HTMLElement>(".history-layout > .pane")!;
     const detail = document.querySelector<HTMLElement>(".history-layout > .history-detail")!;
-    expect(within(pane).getByRole("textbox", { name: "搜索全部历史" })).toBeTruthy();
+    expect(within(pane).getByRole("textbox", { name: "搜索说明或提交哈希" })).toBeTruthy();
     expect(within(pane).getByRole("listbox", { name: "提交历史" })).toBeTruthy();
-    expect(within(pane).getByRole("button", { name: "上一页" })).toBeTruthy();
-    expect(within(pane).getByRole("button", { name: "下一页" })).toBeTruthy();
+    expect(within(pane).getByRole("button", { name: "回到最新" })).toBeTruthy();
+    expect(within(pane).getByText(/已加载最新 1–1 条/)).toBeTruthy();
     expect(pane.contains(document.querySelector(".commit-head")), "详情不进左栏").toBe(false);
     expect(within(detail).getByRole("group", { name: "历史差异模式" })).toBeTruthy();
     expect(detail.querySelector(".commit-files")).toBeTruthy();

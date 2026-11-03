@@ -257,4 +257,50 @@ describe("Tauri 命令参数", () => {
       expect(call[1]).not.toHaveProperty("request_id");
     }
   });
+
+  it("历史筛选、拣选和检出使用 camelCase，空筛选不额外传字段", async () => {
+    await api.historyPage("/repo", "needle", 0, 8, 50, {
+      scope: "all",
+      author: "Ada",
+      since: 10,
+      until: 20,
+      path: "docs",
+    });
+    await api.fileHistory("/repo", "docs/a.txt", 0, 8, 51, { author: "Ada", query: "fix" });
+    await api.cherryPickCommits("/repo", ["aaa", "bbb"], 8, 52);
+    await api.checkoutCommit("/repo", "abc", 8, 53);
+    expect(invoke).toHaveBeenNthCalledWith(1, "history_page", {
+      path: "/repo",
+      query: "needle",
+      offset: 0,
+      generation: 8,
+      requestId: 50,
+      scope: "all",
+      author: "Ada",
+      since: 10,
+      until: 20,
+      pathFilter: "docs",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "file_history", {
+      path: "/repo",
+      relative: "docs/a.txt",
+      offset: 0,
+      generation: 8,
+      requestId: 51,
+      author: "Ada",
+      query: "fix",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "cherry_pick_commits", {
+      path: "/repo",
+      oids: ["aaa", "bbb"],
+      generation: 8,
+      requestId: 52,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(4, "checkout_commit", {
+      path: "/repo",
+      oid: "abc",
+      generation: 8,
+      requestId: 53,
+    });
+  });
 });

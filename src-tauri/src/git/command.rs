@@ -562,56 +562,103 @@ fn history_format() -> OsString {
     OsString::from("--pretty=format:%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1e")
 }
 
-pub fn history_page_command(
+/// 历史读取范围。默认是当前 HEAD，不再带 `--all`。
+#[derive(Clone, Debug)]
+pub struct HistoryLog {
+    pub scope_all: bool,
+    pub revision: Option<String>,
+    pub author: Option<String>,
+    pub grep: Option<String>,
+    pub path: Option<PathBuf>,
+    pub follow: bool,
+    pub skip: Option<u32>,
+    pub max_count: Option<u32>,
+    pub hits_only: bool,
+}
+
+impl Default for HistoryLog {
+    fn default() -> Self {
+        Self {
+            scope_all: false,
+            revision: None,
+            author: None,
+            grep: None,
+            path: None,
+            follow: false,
+            skip: None,
+            max_count: None,
+            hits_only: false,
+        }
+    }
+}
+
+pub fn history_log_command(git: &Path, root: &Path, log: &HistoryLog) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.push(OsString::from("log"));
+    args.push(OsString::from("--date=unix"));
+    if log.hits_only {
+        args.push(OsString::from("--pretty=format:%H%x1f%at%x1e"));
+    } else {
+        args.push(history_format());
+    }
+    if log.author.is_some() || log.grep.is_some() {
+        args.push(OsString::from("-i"));
+        args.push(OsString::from("--fixed-strings"));
+    }
+    if let Some(author) = &log.author {
+        args.push(OsString::from(format!("--author={author}")));
+    }
+    if let Some(grep) = &log.grep {
+        args.push(OsString::from(format!("--grep={grep}")));
+    }
+    if log.follow {
+        args.push(OsString::from("--follow"));
+    }
+    if log.scope_all {
+        args.push(OsString::from("--all"));
+    } else if let Some(revision) = &log.revision {
+        args.push(OsString::from(revision));
+    }
+    if let Some(skip) = log.skip {
+        args.push(OsString::from(format!("--skip={skip}")));
+    }
+    if let Some(max_count) = log.max_count {
+        args.push(OsString::from(format!("--max-count={max_count}")));
+    }
+    args.push(OsString::from("--"));
+    if let Some(path) = &log.path {
+        args.push(path.as_os_str().to_os_string());
+    }
+    (git.to_path_buf(), args)
+}
+
+pub fn show_current_branch_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([OsString::from("branch"), OsString::from("--show-current")]);
+    (git.to_path_buf(), args)
+}
+
+pub fn local_branch_names_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("for-each-ref"),
+        OsString::from("--format=%(refname:short)"),
+        OsString::from("refs/heads"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn verify_local_branch_command(
     git: &Path,
     root: &Path,
-    skip: u32,
-    limit: u32,
+    name: &str,
 ) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.extend([
-        OsString::from("log"),
-        OsString::from("--all"),
-        OsString::from("--date=unix"),
-        history_format(),
-        OsString::from(format!("--skip={skip}")),
-        OsString::from(format!("--max-count={limit}")),
-    ]);
-    (git.to_path_buf(), args)
-}
-
-pub fn history_grep_command(git: &Path, root: &Path, query: &str) -> (PathBuf, Vec<OsString>) {
-    let mut args = repo_prefix(root, true);
-    args.extend([
-        OsString::from("log"),
-        OsString::from("--all"),
-        OsString::from("-i"),
-        OsString::from("--fixed-strings"),
-        OsString::from("--pretty=format:%H%x1f%at"),
-        OsString::from(format!("--grep={query}")),
-    ]);
-    (git.to_path_buf(), args)
-}
-
-pub fn history_author_command(git: &Path, root: &Path, query: &str) -> (PathBuf, Vec<OsString>) {
-    let mut args = repo_prefix(root, true);
-    args.extend([
-        OsString::from("log"),
-        OsString::from("--all"),
-        OsString::from("-i"),
-        OsString::from("--fixed-strings"),
-        OsString::from("--pretty=format:%H%x1f%at"),
-        OsString::from(format!("--author={query}")),
-    ]);
-    (git.to_path_buf(), args)
-}
-
-pub fn history_oid_index_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
-    let mut args = repo_prefix(root, true);
-    args.extend([
-        OsString::from("log"),
-        OsString::from("--all"),
-        OsString::from("--pretty=format:%H%x1f%at"),
+        OsString::from("rev-parse"),
+        OsString::from("--verify"),
+        OsString::from("--quiet"),
+        OsString::from(format!("refs/heads/{name}")),
     ]);
     (git.to_path_buf(), args)
 }
@@ -635,16 +682,42 @@ pub fn history_details_command(
     (git.to_path_buf(), args)
 }
 
-pub fn file_history_command(git: &Path, root: &Path, relative: &Path) -> (PathBuf, Vec<OsString>) {
+pub fn ancestor_command(
+    git: &Path,
+    root: &Path,
+    ancestor: &str,
+    descendant: &str,
+) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.extend([
-        OsString::from("log"),
-        OsString::from("--all"),
-        OsString::from("--follow"),
-        OsString::from("--date=unix"),
-        history_format(),
+        OsString::from("merge-base"),
+        OsString::from("--is-ancestor"),
+        OsString::from(ancestor),
+        OsString::from(descendant),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn cherry_pick_range_command(
+    git: &Path,
+    root: &Path,
+    oids: &[String],
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.push(OsString::from("cherry-pick"));
+    for oid in oids {
+        args.push(OsString::from(oid));
+    }
+    (git.to_path_buf(), args)
+}
+
+pub fn detach_at_command(git: &Path, root: &Path, oid: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("switch"),
+        OsString::from("--detach"),
         OsString::from("--"),
-        relative.as_os_str().to_os_string(),
+        OsString::from(oid),
     ]);
     (git.to_path_buf(), args)
 }
@@ -1286,6 +1359,48 @@ pub fn assert_structured(program: &Path, args: &[OsString]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_log_defaults_to_head_and_keeps_author_out_of_grep() {
+        let git = Path::new("git");
+        let root = Path::new("/repo");
+        let plain = history_log_command(git, root, &HistoryLog::default());
+        assert!(plain.1.iter().any(|arg| arg == "log"));
+        assert!(!plain.1.iter().any(|arg| arg == "--all"));
+        assert!(!plain.1.iter().any(|arg| arg == "--author"));
+        let mut filtered = HistoryLog::default();
+        filtered.scope_all = true;
+        filtered.author = Some("Ada".to_string());
+        filtered.grep = Some("needle".to_string());
+        filtered.path = Some(PathBuf::from("docs/a.txt"));
+        filtered.skip = Some(10);
+        filtered.max_count = Some(5);
+        let args = history_log_command(git, root, &filtered).1;
+        assert!(args.iter().any(|arg| arg == "--all"));
+        assert!(args.iter().any(|arg| arg == "--author=Ada"));
+        assert!(args.iter().any(|arg| arg == "--grep=needle"));
+        assert!(args.iter().any(|arg| arg == "--fixed-strings"));
+        assert!(args.windows(2).any(|pair| pair[0] == "--" && pair[1] == "docs/a.txt"));
+        assert!(args.iter().any(|arg| arg == "--skip=10"));
+        assert!(args.iter().any(|arg| arg == "--max-count=5"));
+        let mut branch = HistoryLog::default();
+        branch.revision = Some("feature".to_string());
+        branch.follow = true;
+        let branch_args = history_log_command(git, root, &branch).1;
+        assert!(branch_args.iter().any(|arg| arg == "feature"));
+        assert!(branch_args.iter().any(|arg| arg == "--follow"));
+        assert!(!branch_args.iter().any(|arg| arg == "--all"));
+        let pick = cherry_pick_range_command(git, root, &["aaa".to_string(), "bbb".to_string()]);
+        assert_eq!(
+            pick.1.iter().filter(|arg| *arg == "cherry-pick" || *arg == "aaa" || *arg == "bbb").count(),
+            3
+        );
+        assert!(!pick.1.iter().any(|arg| arg == "--all" || arg == "-n" || arg == "--no-commit"));
+        let detach = detach_at_command(git, root, "abc");
+        assert!(detach.1.windows(2).any(|pair| pair[0] == "--detach" && pair[1] == "--"));
+        assert!(detach.1.iter().any(|arg| arg == "abc"));
+        assert!(!detach.1.iter().any(|arg| arg == "--force" || arg == "-f"));
+    }
 
     #[test]
     fn repo_commands_keep_paths_as_single_arguments() {

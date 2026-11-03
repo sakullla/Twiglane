@@ -1,29 +1,34 @@
 <script lang="ts">
-  import { onDestroy, type Snippet } from "svelte";
+  import { onDestroy, untrack, type Snippet } from "svelte";
   import { LatestReadQueue } from "../latest-read";
-  import { api } from "../api";
+  import { api, type HistoryFilters } from "../api";
   import { normalizeError } from "../errors";
   import {
     commitFileLabel,
     commitLineStat,
+    commitSelectionRange,
     formatAuthoredAt,
     HISTORY_SEARCH_DEBOUNCE_MS,
+    historyConditions,
+    historyDayBound,
     historyStatus,
     parentCaption,
     commitBodyRest,
     preferredCommitFile,
     refPills,
     shortOid,
+    shouldAppendHistory,
+    toggleCommitSelection,
   } from "../history";
   import { bucketByDirectory } from "../labels";
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
   import type {
     CommitDetail,
+    CommitFileChange,
     DiffHunk,
     DiffResponse,
     FileSelection,
     HistoryCommit,
-    HistoryPage,
     OpenedRepository,
     StatusSnapshot,
   } from "../types";
@@ -95,27 +100,111 @@
     }
   }
 
+  function writeReason(): string | undefined {
+    return disabled ? "正在读取或写入，稍后再试" : undefined;
+  }
+
+  function orderedSelection(ids: string[]): string[] {
+    const chosen = new Set(ids);
+    return commits.filter((commit) => chosen.has(commit.oid)).map((commit) => commit.oid);
+  }
+
   function commitMenu(commit: HistoryCommit, point: { x: number; y: number }) {
+    let ids = selectedOids;
+    if (!ids.includes(commit.oid)) {
+      ids = [commit.oid];
+      anchorOid = commit.oid;
+      selectedOids = ids;
+    }
+    const ordered = orderedSelection(ids);
+    const entries: ContextMenuEntry[] = ordered.length > 1
+      ? [
+          {
+            id: "pick",
+            label: "拣选这些提交",
+            icon: "merge",
+            disabledReason: writeReason(),
+            run: () => void runCherryPick(ordered),
+          },
+          { id: "hash", label: "复制哈希", icon: "copy", run: () => void copyText(ordered.join("\n")) },
+        ]
+      : [
+          {
+            id: "pick",
+            label: "拣选到当前分支",
+            icon: "merge",
+            disabledReason: writeReason(),
+            run: () => void runCherryPick([commit.oid]),
+          },
+          {
+            id: "checkout",
+            label: "检出此提交",
+            icon: "commit",
+            disabledReason: writeReason(),
+            run: () => {
+              checkoutError = null;
+              checkoutTarget = commit;
+            },
+          },
+          {
+            id: "branch",
+            label: "从此提交新建分支",
+            icon: "branch",
+            disabledReason: writeReason(),
+            run: () => (branchFrom = { oid: commit.oid, summary: commit.summary, name: "", checkout: true, busy: false, error: null }),
+          },
+          { id: "hash", label: "复制提交哈希", icon: "copy", run: () => void copyText(commit.oid) },
+        ];
+    menu = { x: point.x, y: point.y, entries, label: ordered.length > 1 ? `已选 ${ordered.length} 个提交的操作` : `提交 ${shortOid(commit.oid)} 的操作` };
+  }
+
+  function fileMenu(relative: string, point: { x: number; y: number }) {
     const entries: ContextMenuEntry[] = [
-      {
-        id: "branch",
-        label: "从此提交新建分支…",
-        icon: "branch",
-        disabledReason: disabled ? "正在读取或写入，稍后再试" : undefined,
-        run: () => (branchFrom = { oid: commit.oid, summary: commit.summary, name: "", checkout: true, busy: false, error: null }),
-      },
-      { separator: true },
-      { id: "hash", label: "复制完整 Hash", icon: "copy", run: () => void copyOid(commit.oid) },
-      { id: "short", label: `复制短 Hash（${shortOid(commit.oid)}）`, icon: "copy", run: () => void copyText(shortOid(commit.oid)) },
-      { id: "summary", label: "复制提交说明", icon: "copy", run: () => void copyText(commit.summary) },
-      {
-        id: "author",
-        label: `复制作者（${commit.authorName}）`,
-        icon: "user",
-        run: () => void copyText(`${commit.authorName} <${commit.authorEmail}>`),
-      },
+      { id: "history", label: "查看此文件历史", icon: "history", run: () => onFilePath(relative) },
+      { id: "copy", label: "复制相对路径", icon: "copy", run: () => void copyText(relative) },
+      { id: "reveal", label: "在系统文件管理器中显示", icon: "folder", run: () => void revealFile(relative) },
     ];
-    menu = { x: point.x, y: point.y, entries, label: `提交 ${shortOid(commit.oid)} 的操作` };
+    menu = { x: point.x, y: point.y, entries, label: `文件 ${relative} 的操作` };
+  }
+
+  async function revealFile(relative: string) {
+    try {
+      await api.revealPath(opened.summary.path, relative);
+    } catch (error) {
+      onFailure(normalizeError(error));
+    }
+  }
+
+  async function runCherryPick(oids: string[]) {
+    if (disabled || oids.length === 0) return;
+    try {
+      const result = await api.cherryPickCommits(opened.summary.path, oids, opened.generation, nextId());
+      onGeneration(result.generation);
+      onSnapshot?.(result.snapshot);
+      onNotice?.(result.note);
+    } catch (error) {
+      onFailure(normalizeError(error));
+    }
+  }
+
+  async function confirmCheckout() {
+    const target = checkoutTarget;
+    if (!target || checkoutBusy) return;
+    checkoutBusy = true;
+    checkoutError = null;
+    try {
+      const snapshot = await api.checkoutCommit(opened.summary.path, target.oid, opened.generation, nextId());
+      onGeneration(snapshot.generation);
+      onSnapshot?.(snapshot);
+      onNotice?.(`已检出 ${shortOid(target.oid)}，当前处于游离 HEAD。`);
+      checkoutTarget = null;
+    } catch (error) {
+      const failure = normalizeError(error);
+      checkoutError = failure.message;
+      onFailure(failure);
+    } finally {
+      checkoutBusy = false;
+    }
   }
 
   async function confirmBranchFrom() {
@@ -142,14 +231,41 @@
   }
 
   let query = $state("");
+  let author = $state("");
+  let pathFilter = $state("");
+  let sinceDay = $state("");
+  let untilDay = $state("");
+  let scope = $state("current");
   let viewMode = $state<"single" | "multi">("single");
   let activeQuery = $state("");
+  let activeAuthor = $state("");
+  let activePath = $state("");
+  let activeSince = $state("");
+  let activeUntil = $state("");
+  let activeScope = $state("current");
   let lastSearchSeed = "";
-  let offset = $state(0);
-  let page = $state.raw<HistoryPage | null>(null);
+  let page = $state.raw<{
+    generation: number;
+    state: string;
+    hasMore: boolean;
+    pageSize: number;
+    scope: string;
+    branches: string[];
+    head: string | null;
+  } | null>(null);
+  let commits = $state<HistoryCommit[]>([]);
   let listError = $state<string | null>(null);
+  let appendError = $state<string | null>(null);
+  let appendStopped = $state(false);
   let loading = $state(false);
-  let selectedOid = $state<string | null>(null);
+  let selectedOids = $state<string[]>([]);
+  let anchorOid = $state<string | null>(null);
+  let checkoutTarget = $state<HistoryCommit | null>(null);
+  let checkoutBusy = $state(false);
+  let checkoutError = $state<string | null>(null);
+  let multiDetails = $state.raw<CommitDetail[]>([]);
+  let multiError = $state<string | null>(null);
+  let multiDiffs = $state.raw<{ oid: string; summary: string; diff: DiffResponse | null; error: string | null }[]>([]);
   let parentChoice = $state<string | null>(null);
   let manualPath = $state<string | null>(null);
   let detail = $state.raw<CommitDetail | null>(null);
@@ -164,11 +280,10 @@
   let fileViewport = $state(0);
   let fileListEl = $state<HTMLDivElement | null>(null);
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
-  let lastFile: string | null | undefined = undefined;
 
   let repoPath = $derived(opened.summary.path);
   let readGeneration = $derived(opened.generation);
-  let commits = $derived(page?.commits ?? []);
+  let selectedOid = $derived(selectedOids.length === 1 ? selectedOids[0] : null);
   let range = $derived(
     visibleRange(commits.length, scrollTop, viewport > 0 ? viewport : scrollTop > 0 ? ROW_HEIGHT : 0, ROW_HEIGHT),
   );
@@ -254,10 +369,52 @@
     return () => observer?.disconnect();
   });
 
-  let statusText = $derived(page && commits.length === 0 ? historyStatus(page.state) : null);
+  let statusText = $derived(!listError && page && commits.length === 0 ? historyStatus(page.state) : null);
+  let showConditions = $derived(
+    Boolean(page && commits.length === 0 && (page.state === "no_match" || page.state === "empty_branch" || page.state === "no_file_history" || listError)),
+  );
+  let conditionText = $derived(historyConditions({
+    scope: activeScope,
+    head: page?.head ?? null,
+    author: activeAuthor,
+    since: activeSince,
+    until: activeUntil,
+    path: filePath ?? activePath,
+    query: activeQuery,
+  }));
+  let scopeNames = $derived.by(() => {
+    const names = page?.branches ?? [];
+    if (scope !== "current" && scope !== "all" && !names.includes(scope)) return [...names, scope];
+    return names;
+  });
+  let selectedCommits = $derived(commits.filter((commit) => selectedOids.includes(commit.oid)));
+  let unionFiles = $derived(unionCommitFiles(multiDetails));
+  let unionActive = $derived(unionFiles.find((file) => file.path === multiFocus) ?? unionFiles[0] ?? null);
   let diffSelection = $derived<FileSelection | null>(
     activeFile ? { path: activeFile.path, side: "unstaged" } : null,
   );
+  let loadSerial = 0;
+
+  function historyFilters(forFile: boolean): HistoryFilters | undefined {
+    const filters: HistoryFilters = {};
+    if (activeScope !== "current") filters.scope = activeScope;
+    if (activeAuthor) filters.author = activeAuthor;
+    const since = activeSince ? historyDayBound(activeSince, false) : null;
+    const until = activeUntil ? historyDayBound(activeUntil, true) : null;
+    if (since != null) filters.since = since;
+    if (until != null) filters.until = until;
+    if (!forFile && activePath) filters.path = activePath;
+    if (forFile && activeQuery) filters.query = activeQuery;
+    return Object.keys(filters).length > 0 ? filters : undefined;
+  }
+
+  function dateProblem(): string | null {
+    const since = activeSince ? historyDayBound(activeSince, false) : null;
+    const until = activeUntil ? historyDayBound(activeUntil, true) : null;
+    if ((activeSince && since == null) || (activeUntil && until == null)) return "日期无效，未读取历史，仓库没有改动。";
+    if (since != null && until != null && since > until) return "开始日期晚于结束日期，未读取历史，仓库没有改动。";
+    return null;
+  }
 
   $effect(() => {
     const seed = searchQuery;
@@ -265,23 +422,6 @@
     lastSearchSeed = seed;
     query = seed;
     activeQuery = seed;
-    offset = 0;
-    selectedOid = null;
-    parentChoice = null;
-    manualPath = null;
-  });
-
-  $effect(() => {
-    if (lastFile === undefined) {
-      lastFile = filePath;
-      return;
-    }
-    if (lastFile === filePath) return;
-    lastFile = filePath;
-    offset = 0;
-    selectedOid = null;
-    parentChoice = null;
-    manualPath = null;
   });
 
   $effect(() => {
@@ -289,37 +429,73 @@
     const repo = repoPath;
     const generation = readGeneration;
     const relative = filePath;
-    const q = relative ? "" : activeQuery;
-    const off = offset;
-    let cancelled = false;
+    const q = activeQuery;
+    const scopeName = activeScope;
+    const problem = dateProblem();
+    const filters = historyFilters(Boolean(relative));
+    const previousPage = untrack(() => page);
+    const serial = ++loadSerial;
+    appendStopped = false;
+    appendError = null;
     loading = true;
+    let cancelled = false;
     void (async () => {
       try {
+        if (problem) {
+          if (cancelled || serial !== loadSerial) return;
+          commits = [];
+          page = {
+            generation,
+            state: "no_match",
+            hasMore: false,
+            pageSize: previousPage?.pageSize ?? 100,
+            scope: scopeName,
+            branches: previousPage?.branches ?? [],
+            head: previousPage?.head ?? null,
+          };
+          listError = problem;
+          selectedOids = [];
+          anchorOid = null;
+          return;
+        }
         const result = await pageReads.run(async () => relative
-          ? api.fileHistory(repo, relative, off, generation, nextId())
-          : api.historyPage(repo, q, off, generation, nextId()));
-        if (cancelled || opened.summary.path !== repo) return;
+          ? (filters
+            ? api.fileHistory(repo, relative, 0, generation, nextId(), filters)
+            : api.fileHistory(repo, relative, 0, generation, nextId()))
+          : (filters
+            ? api.historyPage(repo, q, 0, generation, nextId(), filters)
+            : api.historyPage(repo, q, 0, generation, nextId())));
+        if (cancelled || serial !== loadSerial || opened.summary.path !== repo) return;
+        scrollTop = 0;
+        if (list) list.scrollTop = 0;
+        commits = result.commits;
         page = {
           generation: result.generation,
-          query: "query" in result ? result.query : "",
-          offset: result.offset,
-          pageSize: result.pageSize,
-          hasMore: result.hasMore,
           state: result.state,
-          commits: result.commits,
+          hasMore: result.hasMore,
+          pageSize: result.pageSize,
+          scope: result.scope ?? scopeName,
+          branches: result.branches ?? [],
+          head: result.head ?? null,
         };
         listError = null;
-        const still = result.commits.some((commit) => commit.oid === selectedOid);
-        const nextOid = still ? selectedOid : (result.commits[0]?.oid ?? null);
-        if (nextOid !== selectedOid) {
-          selectedOid = nextOid;
+        const ids = new Set(result.commits.map((commit) => commit.oid));
+        const previous = selectedOids;
+        const kept = previous.filter((oid) => ids.has(oid));
+        if (kept.length === 0) {
+          selectedOids = result.commits[0] ? [result.commits[0].oid] : [];
+          anchorOid = selectedOids[0] ?? null;
           parentChoice = null;
           manualPath = null;
+          multiFocus = null;
+        } else if (kept.length !== previous.length) {
+          selectedOids = kept;
         }
         if (result.generation !== generation) onGeneration(result.generation);
       } catch (error) {
-        if (cancelled || opened.summary.path !== repo) return;
+        if (cancelled || serial !== loadSerial || opened.summary.path !== repo) return;
         const failure = normalizeError(error);
+        if (failure.code === "cancelled") return;
         if (failure.code === "stale" && failure.generation !== undefined && failure.generation !== generation) {
           onGeneration(failure.generation);
           return;
@@ -327,12 +503,25 @@
         listError = failure.message;
         onFailure(failure);
       } finally {
-        if (!cancelled) loading = false;
+        if (!cancelled && serial === loadSerial) loading = false;
       }
     })();
     return () => {
       cancelled = true;
     };
+  });
+
+  $effect(() => {
+    const height = viewport;
+    const more = page?.hasMore;
+    const count = commits.length;
+    void height;
+    void more;
+    void count;
+    void loading;
+    void appendStopped;
+    if (!active) return;
+    untrack(() => maybeAppend(list));
   });
 
   $effect(() => {
@@ -415,23 +604,212 @@
     };
   });
 
-  function scheduleSearch(value: string) {
-    query = value;
+  $effect(() => {
+    if (!active) return;
+    const ids = selectedOids;
+    if (ids.length < 2) {
+      multiDetails = [];
+      multiError = null;
+      return;
+    }
+    const repo = repoPath;
+    const generation = readGeneration;
+    let cancelled = false;
+    void (async () => {
+      const rows: CommitDetail[] = [];
+      const errors: string[] = [];
+      await Promise.all(ids.map(async (oid) => {
+        try {
+          rows.push(await api.commitDetail(repo, oid, null, generation, nextId()));
+        } catch (error) {
+          const failure = normalizeError(error);
+          if (failure.code !== "cancelled" && failure.code !== "stale") errors.push(failure.message);
+        }
+      }));
+      if (cancelled || opened.summary.path !== repo) return;
+      rows.sort((left, right) => ids.indexOf(left.commit.oid) - ids.indexOf(right.commit.oid));
+      multiDetails = rows;
+      multiError = errors[0] ?? null;
+    })();
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  $effect(() => {
+    if (!active || selectedOids.length < 2) {
+      multiDiffs = [];
+      return;
+    }
+    const file = unionActive?.path ?? null;
+    const details = multiDetails;
+    const repo = repoPath;
+    const generation = readGeneration;
+    if (!file) {
+      multiDiffs = [];
+      return;
+    }
+    const sources = details.filter((detail) => detail.files.some((item) => item.path === file));
+    let cancelled = false;
+    void (async () => {
+      const rows = await Promise.all(sources.map(async (detail) => {
+        try {
+          const diff = await api.commitFileDiff(
+            repo,
+            detail.commit.oid,
+            detail.selectedParent,
+            file,
+            generation,
+            nextId(),
+            0,
+            0,
+          );
+          return { oid: detail.commit.oid, summary: detail.commit.summary, diff, error: null as string | null };
+        } catch (error) {
+          return {
+            oid: detail.commit.oid,
+            summary: detail.commit.summary,
+            diff: null,
+            error: normalizeError(error).message,
+          };
+        }
+      }));
+      if (cancelled) return;
+      multiDiffs = rows;
+    })();
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  function scheduleText() {
     if (searchTimer) clearTimeout(searchTimer);
     searchTimer = setTimeout(() => {
-      offset = 0;
       activeQuery = query.trim();
+      activeAuthor = author.trim();
+      activePath = pathFilter.trim();
     }, HISTORY_SEARCH_DEBOUNCE_MS);
   }
 
-  function pick(oid: string) {
-    if (selectedOid === oid) return;
-    selectedOid = oid;
+  function setScope(value: string) {
+    scope = value;
+    activeScope = value;
+  }
+
+  function setDay(kind: "since" | "until", value: string) {
+    if (kind === "since") {
+      sinceDay = value;
+      activeSince = value;
+    } else {
+      untilDay = value;
+      activeUntil = value;
+    }
+  }
+
+  function clearFilter(kind: "query" | "author" | "path" | "since" | "until") {
+    if (kind === "query") query = "";
+    if (kind === "author") author = "";
+    if (kind === "path") pathFilter = "";
+    if (kind === "since") sinceDay = "";
+    if (kind === "until") untilDay = "";
+    activeQuery = query.trim();
+    activeAuthor = author.trim();
+    activePath = pathFilter.trim();
+    activeSince = sinceDay;
+    activeUntil = untilDay;
+  }
+
+  function singleSelect(oid: string) {
+    if (selectedOids.length === 1 && selectedOids[0] === oid) {
+      anchorOid = oid;
+      return;
+    }
+    anchorOid = oid;
+    selectedOids = [oid];
     parentChoice = null;
     manualPath = null;
     multiFocus = null;
     fileFilter = "";
     bodyOpen = false;
+  }
+
+  function clickCommit(event: MouseEvent, oid: string) {
+    if (event.shiftKey) {
+      selectedOids = commitSelectionRange(commits.map((commit) => commit.oid), anchorOid, oid);
+    } else if (event.metaKey || event.ctrlKey) {
+      const next = toggleCommitSelection(selectedOids, oid);
+      if (next === selectedOids) return;
+      anchorOid = oid;
+      selectedOids = next;
+    } else {
+      singleSelect(oid);
+    }
+    list?.focus({ preventScroll: true });
+  }
+
+  function maybeAppend(host: HTMLElement | null) {
+    if (!host || !page) return;
+    if (shouldAppendHistory(host.scrollTop, host.clientHeight, host.scrollHeight, page.hasMore, loading || appendStopped)) {
+      void appendOlder();
+    }
+  }
+
+  async function appendOlder() {
+    if (!page?.hasMore || loading || appendStopped || !active) return;
+    const serial = loadSerial;
+    const repo = repoPath;
+    const generation = readGeneration;
+    const relative = filePath;
+    const offset = commits.length;
+    const filters = historyFilters(Boolean(relative));
+    const q = activeQuery;
+    loading = true;
+    try {
+      const result = await (relative
+        ? (filters
+          ? api.fileHistory(repo, relative, offset, generation, nextId(), filters)
+          : api.fileHistory(repo, relative, offset, generation, nextId()))
+        : (filters
+          ? api.historyPage(repo, q, offset, generation, nextId(), filters)
+          : api.historyPage(repo, q, offset, generation, nextId())));
+      if (serial !== loadSerial || opened.summary.path !== repo) return;
+      const seen = new Set(commits.map((commit) => commit.oid));
+      const extra = result.commits.filter((commit) => !seen.has(commit.oid));
+      if (extra.length === 0) {
+        page = { ...page, hasMore: false };
+        appendStopped = true;
+      } else {
+        commits = [...commits, ...extra];
+        page = {
+          generation: result.generation,
+          state: result.state,
+          hasMore: result.hasMore,
+          pageSize: result.pageSize,
+          scope: result.scope ?? page.scope,
+          branches: result.branches ?? page.branches,
+          head: result.head ?? page.head,
+        };
+      }
+      appendError = null;
+      if (result.generation !== generation) onGeneration(result.generation);
+    } catch (error) {
+      if (serial !== loadSerial || opened.summary.path !== repo) return;
+      const failure = normalizeError(error);
+      if (failure.code === "stale" && failure.generation !== undefined && failure.generation !== generation) {
+        onGeneration(failure.generation);
+        return;
+      }
+      appendError = failure.message;
+      appendStopped = true;
+      onFailure(failure);
+    } finally {
+      if (serial === loadSerial) loading = false;
+    }
+  }
+
+  function backToNewest() {
+    scrollTop = 0;
+    if (list) list.scrollTop = 0;
   }
 
   function chooseFile(path: string) {
@@ -490,11 +868,20 @@
   }
 
   function onListKey(event: KeyboardEvent) {
-    const current = commits.findIndex((commit) => commit.oid === selectedOid);
+    const anchor = anchorOid ?? selectedOids[0] ?? null;
+    const current = commits.findIndex((commit) => commit.oid === anchor);
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+      event.preventDefault();
+      if (commits.length === 0) return;
+      selectedOids = commits.map((commit) => commit.oid);
+      anchorOid ??= commits[0]?.oid ?? null;
+      return;
+    }
     if (isContextKey(event) && current >= 0) {
       event.preventDefault();
       const row = (event.currentTarget as HTMLElement).querySelector('.history-row[aria-selected="true"]');
-      commitMenu(commits[current], row ? pointFor(row) : { x: 160, y: 160 });
+      const commit = commits[current];
+      if (commit) commitMenu(commit, row ? pointFor(row) : { x: 160, y: 160 });
       return;
     }
     if (event.altKey || event.ctrlKey || event.metaKey) return;
@@ -503,18 +890,35 @@
     event.preventDefault();
     reveal(move);
     const commit = commits[move];
-    if (commit) pick(commit.oid);
+    if (!commit) return;
+    if (event.shiftKey) selectedOids = commitSelectionRange(commits.map((item) => item.oid), anchorOid, commit.oid);
+    else singleSelect(commit.oid);
   }
 
-  function pageBack() {
-    const size = page?.pageSize || 100;
-    offset = Math.max(0, offset - size);
-  }
-
-  function pageForward() {
-    const size = page?.pageSize || 100;
-    if (!page?.hasMore) return;
-    offset += size;
+  function unionCommitFiles(details: CommitDetail[]): CommitFileChange[] {
+    const map = new Map<string, CommitFileChange>();
+    for (const detail of details) {
+      for (const file of detail.files) {
+        const existing = map.get(file.path);
+        if (!existing) {
+          map.set(file.path, { ...file });
+          continue;
+        }
+        if (file.binary || existing.binary) {
+          existing.binary = true;
+          existing.additions = null;
+          existing.deletions = null;
+        } else if (existing.additions != null && file.additions != null && existing.deletions != null && file.deletions != null) {
+          existing.additions += file.additions;
+          existing.deletions += file.deletions;
+        } else {
+          existing.additions = null;
+          existing.deletions = null;
+        }
+        if (existing.status !== file.status) existing.status = "modified";
+      }
+    }
+    return [...map.values()];
   }
 
   async function loadMoreDiff() {
@@ -594,23 +998,88 @@
             <Icon name="arrow-left" size={14} />返回全部历史
           </button>
           <span class="history-file-scope" title={filePath}><Icon name="file" size={13} /><span class="truncate">{filePath}</span></span>
-        {:else}
+        {/if}
+        <div class="history-filters">
+          <label class="sr-only" for="history-scope">历史范围</label>
+          <select id="history-scope" class="select" value={scope} onchange={(event) => setScope(event.currentTarget.value)}>
+            <option value="current">当前分支{page?.head ? `（${page.head}）` : ""}</option>
+            <option value="all">全部分支</option>
+            {#each scopeNames as name (name)}
+              <option value={name}>{name}</option>
+            {/each}
+          </select>
           <div class="field sm history-search">
             <Icon name="search" size={14} />
             <input
-              aria-label="搜索全部历史"
-              placeholder="搜索说明、作者或提交 Hash"
+              aria-label="搜索说明或提交哈希"
+              placeholder="搜索说明或提交哈希"
               autocomplete="off"
               spellcheck="false"
               value={query}
-              oninput={(event) => scheduleSearch((event.currentTarget as HTMLInputElement).value)}
+              oninput={(event) => {
+                query = event.currentTarget.value;
+                scheduleText();
+              }}
             />
+            {#if query}
+              <button type="button" class="field-clear" aria-label="清除说明或哈希" onclick={() => clearFilter("query")}><Icon name="x" size={12} /></button>
+            {/if}
             {#if loading}<span class="spinner"></span>{/if}
           </div>
-        {/if}
+          <div class="field sm">
+            <Icon name="user" size={14} />
+            <input
+              aria-label="作者"
+              placeholder="作者"
+              autocomplete="off"
+              spellcheck="false"
+              value={author}
+              oninput={(event) => {
+                author = event.currentTarget.value;
+                scheduleText();
+              }}
+            />
+            {#if author}
+              <button type="button" class="field-clear" aria-label="清除作者" onclick={() => clearFilter("author")}><Icon name="x" size={12} /></button>
+            {/if}
+          </div>
+          <div class="history-filter-row">
+            <input class="input" type="date" aria-label="开始日期" value={sinceDay} oninput={(event) => setDay("since", event.currentTarget.value)} />
+            <input class="input" type="date" aria-label="结束日期" value={untilDay} oninput={(event) => setDay("until", event.currentTarget.value)} />
+          </div>
+          {#if sinceDay || untilDay}
+            <div class="history-filter-row">
+              {#if sinceDay}<button type="button" class="btn btn-ghost btn-sm" onclick={() => clearFilter("since")}>清除开始日期</button>{/if}
+              {#if untilDay}<button type="button" class="btn btn-ghost btn-sm" onclick={() => clearFilter("until")}>清除结束日期</button>{/if}
+            </div>
+          {/if}
+          <div class="field sm">
+            <Icon name="folder" size={14} />
+            <input
+              aria-label="路径"
+              placeholder="路径"
+              autocomplete="off"
+              spellcheck="false"
+              value={filePath ?? pathFilter}
+              disabled={Boolean(filePath)}
+              oninput={(event) => {
+                if (filePath) return;
+                pathFilter = event.currentTarget.value;
+                scheduleText();
+              }}
+            />
+            {#if !filePath && pathFilter}
+              <button type="button" class="field-clear" aria-label="清除路径" onclick={() => clearFilter("path")}><Icon name="x" size={12} /></button>
+            {/if}
+          </div>
+        </div>
       </div>
       {#if listError}
         <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{listError}</span></div>
+        {#if showConditions}<p class="history-conditions">{conditionText}</p>{/if}
+      {/if}
+      {#if appendError}
+        <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{appendError}已显示的提交仍保留。</span></div>
       {/if}
       <div
         class="history-list"
@@ -619,15 +1088,20 @@
         tabindex="0"
         bind:this={list}
         bind:clientHeight={viewport}
-        onscroll={(event) => (scrollTop = event.currentTarget.scrollTop)}
+        aria-multiselectable="true"
+        onscroll={(event) => {
+          scrollTop = event.currentTarget.scrollTop;
+          maybeAppend(event.currentTarget);
+        }}
         onkeydown={onListKey}
       >
         {#if loading && !page}
           <div class="empty" role="status"><span class="empty-icon"><span class="spinner"></span></span><strong>正在读取历史</strong></div>
         {:else if statusText}
           <div class="empty" role="status">
-            <span class="empty-icon"><Icon name={page?.state === "no_match" ? "search" : page?.state === "no_file_history" ? "file" : "commit"} size={22} /></span>
+            <span class="empty-icon"><Icon name={page?.state === "no_match" ? "search" : page?.state === "no_file_history" ? "file" : page?.state === "empty_branch" ? "branch" : "commit"} size={22} /></span>
             <strong>{statusText}</strong>
+            {#if showConditions}<p class="history-conditions">{conditionText}</p>{/if}
           </div>
         {:else if commits.length === 0}
           <div class="empty" role="status"><span class="empty-icon"><Icon name="history" size={22} /></span><strong>这一页没有提交。</strong></div>
@@ -638,14 +1112,13 @@
               <div
                 class="history-row"
                 role="option"
-                aria-selected={selectedOid === commit.oid}
+                aria-selected={selectedOids.includes(commit.oid)}
                 tabindex="-1"
                 style={`top:${(range.start + index) * ROW_HEIGHT}px;height:${ROW_HEIGHT - 4}px`}
                 title={`${commit.summary}\n${commit.authorName} · ${formatAuthoredAt(commit.authoredAt)}\n${commit.oid}`}
-                onclick={() => pick(commit.oid)}
+                onclick={(event) => clickCommit(event, commit.oid)}
                 oncontextmenu={(event) => {
                   event.preventDefault();
-                  pick(commit.oid);
                   commitMenu(commit, { x: event.clientX, y: event.clientY });
                 }}
                 onkeydown={(event) => {
@@ -656,7 +1129,7 @@
                   }
                   if (event.key === "Enter") {
                     event.preventDefault();
-                    pick(commit.oid);
+                    singleSelect(commit.oid);
                   }
                 }}
               >
@@ -690,15 +1163,10 @@
       </div>
       <div class="pager history-pager">
         <span class="pager-range">
-          {#if page && commits.length > 0}{page.offset + 1}–{page.offset + commits.length}{:else}—{/if}
+          {#if commits.length > 0}已加载最新 1–{commits.length} 条{page?.hasMore ? "，还有更早的提交" : ""}{:else}—{/if}
         </span>
         <span class="spacer"></span>
-        <button type="button" class="icon-btn sm" aria-label="上一页" title="上一页" disabled={offset === 0 || loading} onclick={pageBack}>
-          <Icon name="chevron-left" size={15} />
-        </button>
-        <button type="button" class="icon-btn sm" aria-label="下一页" title="下一页" disabled={!page?.hasMore || loading} onclick={pageForward}>
-          <Icon name="chevron-right" size={15} />
-        </button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick={backToNewest} disabled={commits.length === 0}>回到最新</button>
       </div>
     </aside>
     {@render paneResizer?.()}
@@ -706,7 +1174,75 @@
       {#if detailError}
         <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{detailError}</span></div>
       {/if}
-      {#if detail}
+      {#if multiError}
+        <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{multiError}</span></div>
+      {/if}
+      {#if selectedOids.length > 1}
+        <header class="commit-head">
+          <div class="commit-head-main">
+            <h2 class="commit-title">已选择 {selectedOids.length} 个提交</h2>
+            <p class="hint">文件和差异是这些提交各自相对第一父提交的并集。</p>
+          </div>
+        </header>
+        <ul class="history-multi-list">
+          {#each selectedCommits as commit (commit.oid)}
+            <li><code>{shortOid(commit.oid)}</code><span class="truncate">{commit.summary}</span></li>
+          {/each}
+        </ul>
+        <div class="commit-split">
+          <aside class="commit-files" aria-label="提交中的文件">
+            <div class="commit-files-head"><span>变更文件</span><span class="count">{unionFiles.length}</span></div>
+            {#if unionFiles.length === 0}
+              <p class="commit-files-empty">这些提交没有文件变化。</p>
+            {:else}
+              <div class="file-list history-files history-union-files" role="listbox" aria-label="提交中的文件列表">
+                {#each unionFiles as file (file.path)}
+                  {@const mark = statusMark(commitFileLabel(file.status))}
+                  {@const parts = splitPath(file.path)}
+                  <button
+                    type="button"
+                    class="file-row"
+                    role="option"
+                    aria-selected={unionActive?.path === file.path}
+                    title={fileTitle(file)}
+                    onclick={() => (multiFocus = file.path)}
+                    oncontextmenu={(event) => {
+                      event.preventDefault();
+                      fileMenu(file.path, { x: event.clientX, y: event.clientY });
+                    }}
+                  >
+                    <span class={`st ${mark.tone}`} title={commitFileLabel(file.status)}>{mark.letter}</span>
+                    <span class="file-name"><span class="fn">{parts.name}</span></span>
+                    <LineCounts stat={commitLineStat(file)} />
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </aside>
+          <div class="commit-diff history-multi-diffs">
+            {#each multiDiffs as item (item.oid)}
+              <section class="history-multi-diff">
+                <h3>{shortOid(item.oid)} {item.summary}</h3>
+                {#if item.error}
+                  <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{item.error}</span></div>
+                {:else}
+                  <DiffView
+                    selection={unionActive ? { path: unionActive.path, side: "unstaged" } : null}
+                    diff={item.diff}
+                    error={item.error}
+                    loading={item.diff === null && item.error === null}
+                    {disabled}
+                    readOnly={true}
+                    onStageHunk={() => {}}
+                    onLoadMore={() => {}}
+                    onFileHistory={onFilePath}
+                  />
+                {/if}
+              </section>
+            {/each}
+          </div>
+        </div>
+      {:else if detail}
         {@const pills = refPills(detail.commit.labels)}
         <header class="commit-head">
           <div class="commit-head-main">
@@ -846,6 +1382,10 @@
                         style={`top:${(fileRange.start + index) * FILE_ROW_HEIGHT + 2}px;height:${FILE_ROW_HEIGHT - 4}px`}
                         title={fileTitle(file)}
                         onclick={() => chooseFile(file.path)}
+                        oncontextmenu={(event) => {
+                          event.preventDefault();
+                          fileMenu(file.path, { x: event.clientX, y: event.clientY });
+                        }}
                       >
                         <span class={`st ${mark.tone}`} title={commitFileLabel(file.status)}>{mark.letter}</span>
                         <span class="file-name">
@@ -906,6 +1446,31 @@
   </div>
   {#if menu}
     <ContextMenu request={menu} onClose={() => (menu = null)} />
+  {/if}
+
+  {#if checkoutTarget}
+    <Modal
+      title="检出此提交"
+      titleId="checkout-commit-title"
+      icon="commit"
+      size="sm"
+      description={`检出 ${shortOid(checkoutTarget.oid)} 会进入游离 HEAD，当前分支不会移动。如果未提交的修改会被覆盖，则不会切换，仓库保持原样。`}
+      locked={checkoutBusy}
+      onClose={() => {
+        if (!checkoutBusy) checkoutTarget = null;
+      }}
+    >
+      <p class="hint">取消不会检出。继续后当前不在任何分支上，之后的提交不会带动现有分支。</p>
+      {#if checkoutError}<div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{checkoutError}</span></div>{/if}
+      {#snippet footer()}
+        <button type="button" class="btn btn-secondary" disabled={checkoutBusy} onclick={() => (checkoutTarget = null)}>取消</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-primary" disabled={checkoutBusy} onclick={() => void confirmCheckout()}>
+          {#if checkoutBusy}<span class="spinner"></span>{/if}
+          检出
+        </button>
+      {/snippet}
+    </Modal>
   {/if}
 
   {#if branchFrom}

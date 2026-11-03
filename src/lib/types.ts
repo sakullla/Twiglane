@@ -253,8 +253,13 @@ export interface HistoryPage {
   offset: number;
   pageSize: number;
   hasMore: boolean;
+  /** ok、empty_repository、empty_branch、no_match。 */
   state: string;
   commits: HistoryCommit[];
+  /** current、all，或本地分支名。 */
+  scope: string;
+  branches: string[];
+  head: string | null;
 }
 
 export interface CommitFileChange {
@@ -288,8 +293,20 @@ export interface FileHistoryPage {
   offset: number;
   pageSize: number;
   hasMore: boolean;
+  /** ok、empty_repository、no_file_history、no_match。 */
   state: string;
   commits: HistoryCommit[];
+  scope: string;
+  branches: string[];
+  head: string | null;
+}
+
+export interface CherryPickOutcome {
+  generation: number;
+  conflicted: boolean;
+  skipped: string[];
+  note: string;
+  snapshot: StatusSnapshot;
 }
 
 export interface StashPreview {

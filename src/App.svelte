@@ -2353,7 +2353,7 @@
                   onFailure={handleMutationError}
                   onFilePath={openFileHistory}
                   onClearFile={() => (historyPath = null)}
-                  onSnapshot={applySnapshot}
+                  onSnapshot={mergeSnapshot}
                   onNotice={notice}
                   onFileNav={(nav) => (historyNav = nav)}
                   {paneHead}

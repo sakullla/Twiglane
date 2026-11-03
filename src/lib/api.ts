@@ -8,6 +8,7 @@ import type {
   DiffResponse,
   FileHistoryPage,
   GitInfo,
+  CherryPickOutcome,
   HistoryPage,
   IgnoreOutcome,
   OpenedRepository,
@@ -31,6 +32,28 @@ import type {
   PullIntegration,
   UndoResult,
 } from "./types";
+
+/** 历史筛选。缺省字段不传，后端按当前分支、无作者、无日期、无路径处理。 */
+export interface HistoryFilters {
+  scope?: string;
+  author?: string;
+  since?: number;
+  until?: number;
+  path?: string;
+  query?: string;
+}
+
+function historyFilterPayload(filters: HistoryFilters | undefined, fileHistory: boolean): Record<string, unknown> {
+  if (!filters) return {};
+  const payload: Record<string, unknown> = {};
+  if (filters.scope) payload.scope = filters.scope;
+  if (filters.author) payload.author = filters.author;
+  if (filters.since != null) payload.since = filters.since;
+  if (filters.until != null) payload.until = filters.until;
+  if (!fileHistory && filters.path) payload.pathFilter = filters.path;
+  if (fileHistory && filters.query) payload.query = filters.query;
+  return payload;
+}
 
 async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke: call } = await import("@tauri-apps/api/core");
@@ -209,8 +232,22 @@ export const api = {
     invoke<TagState>("delete_tag", { path, name, confirm, generation, requestId }),
   pushTag: (path: string, remote: string, name: string, generation: number, requestId: number) =>
     invoke<TagState>("push_tag", { path, remote, name, generation, requestId }),
-  historyPage: (path: string, query: string, offset: number, generation: number, requestId: number) =>
-    invoke<HistoryPage>("history_page", { path, query, offset, generation, requestId }),
+  historyPage: (
+    path: string,
+    query: string,
+    offset: number,
+    generation: number,
+    requestId: number,
+    filters?: HistoryFilters,
+  ) =>
+    invoke<HistoryPage>("history_page", {
+      path,
+      query,
+      offset,
+      generation,
+      requestId,
+      ...historyFilterPayload(filters, false),
+    }),
   commitDetail: (
     path: string,
     oid: string,
@@ -238,8 +275,26 @@ export const api = {
       offset,
       limit,
     }),
-  fileHistory: (path: string, relative: string, offset: number, generation: number, requestId: number) =>
-    invoke<FileHistoryPage>("file_history", { path, relative, offset, generation, requestId }),
+  fileHistory: (
+    path: string,
+    relative: string,
+    offset: number,
+    generation: number,
+    requestId: number,
+    filters?: HistoryFilters,
+  ) =>
+    invoke<FileHistoryPage>("file_history", {
+      path,
+      relative,
+      offset,
+      generation,
+      requestId,
+      ...historyFilterPayload(filters, true),
+    }),
+  cherryPickCommits: (path: string, oids: string[], generation: number, requestId: number) =>
+    invoke<CherryPickOutcome>("cherry_pick_commits", { path, oids, generation, requestId }),
+  checkoutCommit: (path: string, oid: string, generation: number, requestId: number) =>
+    invoke<StatusSnapshot>("checkout_commit", { path, oid, generation, requestId }),
   stashState: (path: string, includeUntracked: boolean, generation: number, requestId: number) =>
     invoke<StashState>("stash_state", { path, includeUntracked, generation, requestId }),
   saveStash: (

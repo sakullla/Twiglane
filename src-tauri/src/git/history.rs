@@ -6,10 +6,10 @@ use crate::error::AppError;
 use crate::git::changes::response_from_diff;
 use crate::git::command::{
     any_commit_command, commit_body_command, commit_diff_command, commit_header_command,
-    commit_numstat_command, diff_tree_command, file_history_command, history_author_command,
-    history_details_command, history_grep_command, history_oid_index_command, history_page_command,
-    ignored_files_command, ref_labels_command, rev_parse_command, stash_apply_command,
-    stash_drop_command, stash_list_command, stash_push_command, status_command, EMPTY_TREE_OID,
+    commit_numstat_command, diff_tree_command, history_details_command, history_log_command,
+    ignored_files_command, local_branch_names_command, ref_labels_command, rev_parse_command,
+    show_current_branch_command, stash_apply_command, stash_drop_command, stash_list_command,
+    stash_push_command, status_command, verify_local_branch_command, HistoryLog, EMPTY_TREE_OID,
     HISTORY_PAGE_SIZE,
 };
 use crate::git::gate::action_key;
@@ -51,61 +51,78 @@ struct CachedCommitFiles {
     files: Arc<Vec<CommitFileChange>>,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(Debug, Clone)]
+pub struct HistoryRequest {
+    pub query: String,
+    pub offset: u32,
+    pub scope: String,
+    pub author: String,
+    pub since: Option<i64>,
+    pub until: Option<i64>,
+    pub path: String,
+}
+
+impl Default for HistoryRequest {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            offset: 0,
+            scope: "current".to_string(),
+            author: String::new(),
+            since: None,
+            until: None,
+            path: String::new(),
+        }
+    }
+}
+
 pub async fn history_page(
     backend: &Backend,
     path: &str,
-    query: &str,
-    offset: u32,
+    request: &HistoryRequest,
     generation: u64,
     request_id: u64,
 ) -> Result<HistoryPage, AppError> {
     let root = repo_root(path)?;
-    let query = normalize_query(query)?;
+    let resolved = resolve_history(request, None)?;
     let git = require_git(backend).await?;
+    let generation = ensure_scope(backend, &root, &git.path, &resolved, generation, request_id).await?;
     let refs = load_labels(backend, &root, &git.path, generation, request_id).await?;
     let generation = refs.0;
-    let (mut commits, has_more, generation) = if query.is_empty() {
-        browse_commits(
-            backend,
-            &root,
-            &git.path,
-            offset,
-            generation,
-            internal_request_id(),
-        )
-        .await?
-    } else {
-        search_commits(
-            backend,
-            &root,
-            &git.path,
-            &query,
-            offset,
-            generation,
-            internal_request_id(),
-        )
-        .await?
-    };
-    attach_labels(&mut commits, &refs.1);
-    let state = history_state(
+    let (mut commits, has_more, generation) = load_history_page(
         backend,
         &root,
         &git.path,
-        &query,
-        offset,
-        commits.is_empty(),
+        &resolved,
+        request.offset,
+        false,
         generation,
+    )
+    .await?;
+    attach_labels(&mut commits, &refs.1);
+    let meta = load_branch_meta(backend, &root, &git.path, generation).await?;
+    let state = classify_history(
+        backend,
+        &root,
+        &git.path,
+        &resolved,
+        request.offset,
+        commits.is_empty(),
+        false,
+        meta.2,
     )
     .await?;
     Ok(HistoryPage {
         generation: state.0,
-        query,
-        offset,
+        query: resolved.query,
+        offset: request.offset,
         page_size: HISTORY_PAGE_SIZE,
         has_more,
         state: state.1,
         commits,
+        scope: resolved.scope_label,
+        branches: meta.0,
+        head: meta.1,
     })
 }
 
@@ -276,67 +293,51 @@ pub async fn file_history(
     backend: &Backend,
     path: &str,
     relative: &str,
-    offset: u32,
+    request: &HistoryRequest,
     generation: u64,
     request_id: u64,
 ) -> Result<FileHistoryPage, AppError> {
     let root = repo_root(path)?;
     let relative_path = safe_relative(relative)?;
+    let resolved = resolve_history(request, Some(relative_path))?;
     let git = require_git(backend).await?;
-    let (bytes, generation) = read_log(
+    let generation = ensure_scope(backend, &root, &git.path, &resolved, generation, request_id).await?;
+    let (mut commits, has_more, generation) = load_history_page(
         backend,
         &root,
         &git.path,
+        &resolved,
+        request.offset,
+        true,
         generation,
-        request_id,
-        file_history_command(&git.path, &root, &relative_path),
     )
     .await?;
-    let mut commits = parse_history_records(&bytes)?;
-    commits.sort_by(|left, right| {
-        right
-            .authored_at
-            .cmp(&left.authored_at)
-            .then_with(|| right.oid.cmp(&left.oid))
-    });
     let (generation, labels) =
         load_labels(backend, &root, &git.path, generation, internal_request_id()).await?;
     attach_labels(&mut commits, &labels);
-    let empty_history = commits.is_empty();
-    let offset_usize = offset as usize;
-    let page_size = HISTORY_PAGE_SIZE as usize;
-    let has_more = commits.len() > offset_usize.saturating_add(page_size);
-    let page = if offset_usize >= commits.len() {
-        Vec::new()
-    } else {
-        commits
-            .into_iter()
-            .skip(offset_usize)
-            .take(page_size)
-            .collect()
-    };
-    let state = if empty_history {
-        history_state(backend, &root, &git.path, "file", 0, true, generation)
-            .await
-            .map(|(generation, state)| {
-                let state = if state == "empty_repository" {
-                    state
-                } else {
-                    "no_file_history".to_string()
-                };
-                (generation, state)
-            })?
-    } else {
-        (generation, "ok".to_string())
-    };
+    let meta = load_branch_meta(backend, &root, &git.path, generation).await?;
+    let state = classify_history(
+        backend,
+        &root,
+        &git.path,
+        &resolved,
+        request.offset,
+        commits.is_empty(),
+        true,
+        meta.2,
+    )
+    .await?;
     Ok(FileHistoryPage {
         generation: state.0,
         path: relative.to_string(),
-        offset,
+        offset: request.offset,
         page_size: HISTORY_PAGE_SIZE,
         has_more,
         state: state.1,
-        commits: page,
+        commits,
+        scope: resolved.scope_label,
+        branches: meta.0,
+        head: meta.1,
     })
 }
 
@@ -519,79 +520,203 @@ pub async fn delete_stash(
     .await)
 }
 
-async fn browse_commits(
-    backend: &Backend,
-    root: &Path,
-    git: &Path,
-    offset: u32,
-    generation: u64,
-    request_id: u64,
-) -> Result<(Vec<HistoryCommit>, bool, u64), AppError> {
-    let limit = HISTORY_PAGE_SIZE.saturating_add(1);
-    let (bytes, generation) = read_log(
-        backend,
-        root,
-        git,
-        generation,
-        request_id,
-        history_page_command(git, root, offset, limit),
-    )
-    .await?;
-    let mut commits = parse_history_records(&bytes)?;
-    let has_more = commits.len() > HISTORY_PAGE_SIZE as usize;
-    commits.truncate(HISTORY_PAGE_SIZE as usize);
-    Ok((commits, has_more, generation))
+struct ResolvedHistory {
+    scope_all: bool,
+    revision: Option<String>,
+    scope_label: String,
+    head_scope: bool,
+    author: Option<String>,
+    path: Option<PathBuf>,
+    since: Option<i64>,
+    until: Option<i64>,
+    query: String,
 }
 
-async fn search_commits(
+fn resolve_history(request: &HistoryRequest, file_path: Option<PathBuf>) -> Result<ResolvedHistory, AppError> {
+    let query = normalize_query(&request.query)?;
+    let author = normalize_query(&request.author)?;
+    let raw = request.scope.trim();
+    let (scope_all, revision, scope_label, head_scope) = if raw.is_empty() || raw == "current" {
+        (false, None, "current".to_string(), true)
+    } else if raw == "all" {
+        (true, None, "all".to_string(), false)
+    } else {
+        let name = raw.strip_prefix("branch:").unwrap_or(raw);
+        validate_scope_branch(name)?;
+        (false, Some(name.to_string()), name.to_string(), false)
+    };
+    let path = if let Some(path) = file_path {
+        Some(path)
+    } else if request.path.trim().is_empty() {
+        None
+    } else {
+        Some(safe_relative(request.path.trim())?)
+    };
+    Ok(ResolvedHistory {
+        scope_all,
+        revision,
+        scope_label,
+        head_scope,
+        author: if author.is_empty() { None } else { Some(author) },
+        path,
+        since: request.since,
+        until: request.until,
+        query,
+    })
+}
+
+fn validate_scope_branch(name: &str) -> Result<(), AppError> {
+    if name.is_empty()
+        || name.starts_with('-')
+        || name.starts_with('.')
+        || name.ends_with('.')
+        || name.ends_with('/')
+        || name.ends_with(".lock")
+        || name.contains([' ', '\t', '~', '^', ':', '?', '*', '[', '\\', '\0'])
+        || name.contains("..")
+        || name.contains("@{")
+        || name.contains("//")
+    {
+        return Err(AppError::new(
+            "branch_invalid",
+            "分支名称无效，未读取历史，仓库没有改动。",
+        ));
+    }
+    Ok(())
+}
+
+fn history_log(resolved: &ResolvedHistory, follow: bool, skip: Option<u32>, max_count: Option<u32>, hits_only: bool, grep: Option<String>) -> HistoryLog {
+    HistoryLog {
+        scope_all: resolved.scope_all,
+        revision: resolved.revision.clone(),
+        author: resolved.author.clone(),
+        grep,
+        path: resolved.path.clone(),
+        follow,
+        skip,
+        max_count,
+        hits_only,
+    }
+}
+
+fn in_date(at: i64, since: Option<i64>, until: Option<i64>) -> bool {
+    if since.is_some_and(|since| at < since) {
+        return false;
+    }
+    if until.is_some_and(|until| at > until) {
+        return false;
+    }
+    true
+}
+
+fn filter_hits(hits: Vec<Hit>, resolved: &ResolvedHistory) -> Vec<Hit> {
+    hits.into_iter()
+        .filter(|hit| in_date(hit.at, resolved.since, resolved.until))
+        .collect()
+}
+
+async fn ensure_scope(
     backend: &Backend,
     root: &Path,
     git: &Path,
-    query: &str,
-    offset: u32,
+    resolved: &ResolvedHistory,
     generation: u64,
     request_id: u64,
-) -> Result<(Vec<HistoryCommit>, bool, u64), AppError> {
-    let (message_hits, generation) = read_log(
+) -> Result<u64, AppError> {
+    let Some(revision) = &resolved.revision else {
+        return Ok(generation);
+    };
+    let (output, generation) = read_output(
         backend,
         root,
-        git,
         generation,
         request_id,
-        history_grep_command(git, root, query),
+        verify_local_branch_command(git, root, revision),
     )
     .await?;
-    let (author_hits, generation) = read_log(
-        backend,
-        root,
-        git,
-        generation,
-        internal_request_id(),
-        history_author_command(git, root, query),
-    )
-    .await?;
-    let mut groups = vec![parse_hits(&message_hits)?, parse_hits(&author_hits)?];
-    let generation = if is_oid_prefix(query) {
-        let (index, generation) = read_log(
+    if output.exit_code != 0 {
+        return Err(AppError::new(
+            "branch_missing",
+            "没有这个分支，未读取历史，仓库没有改动。",
+        )
+        .with_generation(generation));
+    }
+    Ok(generation)
+}
+
+async fn load_history_page(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    resolved: &ResolvedHistory,
+    offset: u32,
+    follow: bool,
+    generation: u64,
+) -> Result<(Vec<HistoryCommit>, bool, u64), AppError> {
+    let prefix = is_oid_prefix(&resolved.query);
+    let dated = resolved.since.is_some() || resolved.until.is_some();
+    if !prefix && !dated {
+        let limit = HISTORY_PAGE_SIZE.saturating_add(1);
+        let grep = if resolved.query.is_empty() {
+            None
+        } else {
+            Some(resolved.query.clone())
+        };
+        let (bytes, generation) = read_log(
             backend,
             root,
             git,
             generation,
             internal_request_id(),
-            history_oid_index_command(git, root),
+            history_log_command(
+                git,
+                root,
+                &history_log(resolved, follow, Some(offset), Some(limit), false, grep),
+            ),
         )
         .await?;
-        let prefix = query.to_ascii_lowercase();
-        groups.push(
-            parse_hits(&index)?
-                .into_iter()
-                .filter(|hit| hit.oid.starts_with(&prefix))
-                .collect(),
-        );
-        generation
-    } else {
-        generation
-    };
+        let mut commits = parse_history_records(&bytes)?;
+        let has_more = commits.len() > HISTORY_PAGE_SIZE as usize;
+        commits.truncate(HISTORY_PAGE_SIZE as usize);
+        return Ok((commits, has_more, generation));
+    }
+    let mut groups = Vec::new();
+    let mut generation = generation;
+    if !resolved.query.is_empty() {
+        let (bytes, next) = read_log(
+            backend,
+            root,
+            git,
+            generation,
+            internal_request_id(),
+            history_log_command(
+                git,
+                root,
+                &history_log(resolved, follow, None, None, true, Some(resolved.query.clone())),
+            ),
+        )
+        .await?;
+        generation = next;
+        groups.push(filter_hits(parse_hits(&bytes)?, resolved));
+    }
+    if prefix || resolved.query.is_empty() {
+        let (bytes, next) = read_log(
+            backend,
+            root,
+            git,
+            generation,
+            internal_request_id(),
+            history_log_command(git, root, &history_log(resolved, follow, None, None, true, None)),
+        )
+        .await?;
+        generation = next;
+        let mut hits = parse_hits(&bytes)?;
+        if prefix {
+            let needle = resolved.query.to_ascii_lowercase();
+            hits.retain(|hit| hit.oid.starts_with(&needle));
+        }
+        groups.push(filter_hits(hits, resolved));
+    }
     let hits = merge_hits(&groups);
     let offset_usize = offset as usize;
     let page_size = HISTORY_PAGE_SIZE as usize;
@@ -615,23 +740,21 @@ async fn search_commits(
     )
     .await?;
     let commits = parse_history_records(&bytes)?;
-    let ordered = order_commits(&page, commits)?;
-    Ok((ordered, has_more, generation))
+    Ok((order_commits(&page, commits)?, has_more, generation))
 }
 
-async fn history_state(
+#[allow(clippy::too_many_arguments)]
+async fn classify_history(
     backend: &Backend,
     root: &Path,
     git: &Path,
-    query: &str,
+    resolved: &ResolvedHistory,
     offset: u32,
     empty_page: bool,
+    file_history: bool,
     generation: u64,
 ) -> Result<(u64, String), AppError> {
-    if !empty_page {
-        return Ok((generation, "ok".to_string()));
-    }
-    if offset > 0 {
+    if !empty_page || offset > 0 {
         return Ok((generation, "ok".to_string()));
     }
     let (bytes, generation) = read_bytes(
@@ -642,12 +765,76 @@ async fn history_state(
         any_commit_command(git, root),
     )
     .await?;
-    if bytes.iter().any(|byte| !byte.is_ascii_whitespace()) {
-        let state = if query.is_empty() { "ok" } else { "no_match" };
-        Ok((generation, state.to_string()))
-    } else {
-        Ok((generation, "empty_repository".to_string()))
+    if !bytes.iter().any(|byte| !byte.is_ascii_whitespace()) {
+        return Ok((generation, "empty_repository".to_string()));
     }
+    let narrowing = !resolved.query.is_empty()
+        || resolved.author.is_some()
+        || resolved.since.is_some()
+        || resolved.until.is_some()
+        || (!file_history && resolved.path.is_some())
+        || !resolved.head_scope;
+    let state = if file_history {
+        if narrowing { "no_match" } else { "no_file_history" }
+    } else if resolved.head_scope && !narrowing {
+        "empty_branch"
+    } else {
+        "no_match"
+    };
+    Ok((generation, state.to_string()))
+}
+
+async fn load_branch_meta(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    generation: u64,
+) -> Result<(Vec<String>, Option<String>, u64), AppError> {
+    let (bytes, generation) = read_bytes(
+        backend,
+        root,
+        generation,
+        internal_request_id(),
+        local_branch_names_command(git, root),
+    )
+    .await?;
+    let mut branches = parse_branch_names(&bytes)?;
+    branches.sort();
+    let (current, generation) = read_bytes(
+        backend,
+        root,
+        generation,
+        internal_request_id(),
+        show_current_branch_command(git, root),
+    )
+    .await?;
+    let head = String::from_utf8(current).map_err(|_| {
+        AppError::new(
+            "history_encoding",
+            "分支名称包含无法安全显示的内容，已停止读取且未修改仓库。",
+        )
+    })?;
+    let head = head.trim();
+    Ok((
+        branches,
+        if head.is_empty() { None } else { Some(head.to_string()) },
+        generation,
+    ))
+}
+
+fn parse_branch_names(bytes: &[u8]) -> Result<Vec<String>, AppError> {
+    let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
+        AppError::new(
+            "history_encoding",
+            "分支名称包含无法安全显示的内容，已停止读取且未修改仓库。",
+        )
+    })?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToString::to_string)
+        .collect())
 }
 
 async fn load_labels(
@@ -1698,7 +1885,7 @@ fn is_oid_prefix(query: &str) -> bool {
     (4..=64).contains(&query.len()) && query.chars().all(|character| character.is_ascii_hexdigit())
 }
 
-fn validate_oid(oid: &str) -> Result<String, AppError> {
+pub(crate) fn validate_oid(oid: &str) -> Result<String, AppError> {
     let oid = oid.trim().to_ascii_lowercase();
     if (oid.len() == 40 || oid.len() == 64)
         && oid.chars().all(|character| character.is_ascii_hexdigit())
@@ -2000,9 +2187,15 @@ mod tests {
         let root = canonical_existing(&repo).unwrap();
         let generation = generation(&backend, &root);
         let before = stamp(&root);
-        let page = history_page(&backend, &repo_key(&root), "", 0, generation, 1)
-            .await
-            .unwrap();
+        let page = history_page(
+            &backend,
+            &repo_key(&root),
+            &HistoryRequest::default(),
+            generation,
+            1,
+        )
+        .await
+        .unwrap();
         assert_eq!(page.state, "ok");
         assert_eq!(page.commits.len(), HISTORY_PAGE_SIZE as usize);
         assert!(page.has_more);
@@ -2018,8 +2211,10 @@ mod tests {
         let by_message = history_page(
             &backend,
             &repo_key(&root),
-            "UNIQUE-NEEDLE",
-            0,
+            &HistoryRequest {
+                query: "UNIQUE-NEEDLE".to_string(),
+                ..HistoryRequest::default()
+            },
             page.generation,
             2,
         )
@@ -2035,18 +2230,43 @@ mod tests {
             .labels
             .iter()
             .any(|label| label.kind == "tag" && label.name == "v1"));
-        let by_author = history_page(&backend, &repo_key(&root), "Lovelace", 0, generation, 3)
-            .await
-            .unwrap();
+        let author_as_text = history_page(
+            &backend,
+            &repo_key(&root),
+            &HistoryRequest {
+                query: "Lovelace".to_string(),
+                ..HistoryRequest::default()
+            },
+            generation,
+            3,
+        )
+        .await
+        .unwrap();
+        assert!(author_as_text.commits.is_empty());
+        assert_eq!(author_as_text.state, "no_match");
+        let by_author = history_page(
+            &backend,
+            &repo_key(&root),
+            &HistoryRequest {
+                author: "Lovelace".to_string(),
+                ..HistoryRequest::default()
+            },
+            generation,
+            4,
+        )
+        .await
+        .unwrap();
         assert_eq!(by_author.commits.len(), 1);
         assert_eq!(by_author.commits[0].oid, needle);
         let by_oid = history_page(
             &backend,
             &repo_key(&root),
-            &needle[..7].to_ascii_uppercase(),
-            0,
+            &HistoryRequest {
+                query: needle[..7].to_ascii_uppercase(),
+                ..HistoryRequest::default()
+            },
             generation,
-            4,
+            5,
         )
         .await
         .unwrap();
@@ -2055,10 +2275,12 @@ mod tests {
         let missing = history_page(
             &backend,
             &repo_key(&root),
-            "zzz-no-such-commit",
-            0,
+            &HistoryRequest {
+                query: "zzz-no-such-commit".to_string(),
+                ..HistoryRequest::default()
+            },
             generation,
-            5,
+            6,
         )
         .await
         .unwrap();
@@ -2147,7 +2369,14 @@ mod tests {
         assert!(other.files.iter().any(|file| file.path == "main.txt"));
         assert!(other.files.iter().all(|file| file.path != "side.txt"));
 
-        let history = file_history(&backend, &repo_key(&root), "file.txt", 0, generation, 5)
+        let history = file_history(
+            &backend,
+            &repo_key(&root),
+            "file.txt",
+            &HistoryRequest::default(),
+            generation,
+            5,
+        )
             .await
             .unwrap();
         assert_eq!(history.state, "ok");
@@ -2184,7 +2413,14 @@ mod tests {
         .await
         .unwrap();
         assert!(removal_diff.deletions > 0);
-        let edits = file_history(&backend, &repo_key(&root), "main.txt", 0, generation, 8)
+        let edits = file_history(
+            &backend,
+            &repo_key(&root),
+            "main.txt",
+            &HistoryRequest::default(),
+            generation,
+            8,
+        )
             .await
             .unwrap();
         let edit = edits
@@ -2209,11 +2445,155 @@ mod tests {
             .lines
             .iter()
             .any(|line| line.text.contains("edited")));
-        let absent = file_history(&backend, &repo_key(&root), "missing.txt", 0, generation, 10)
+        let absent = file_history(
+            &backend,
+            &repo_key(&root),
+            "missing.txt",
+            &HistoryRequest::default(),
+            generation,
+            10,
+        )
             .await
             .unwrap();
         assert_eq!(absent.state, "no_file_history");
         assert_eq!(stamp(&root), before);
+    }
+
+    #[tokio::test]
+    async fn history_filters_intersect_on_the_current_branch_without_writing() {
+        let fixture = crate::test_support::git_fixture("history-filters");
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::create_dir(repo.join("docs")).unwrap();
+        let day1 = "1700000000 +0000";
+        let day2 = "1700086400 +0000";
+        let commit_as = |message: &str, author: &str, date: &str, file: &str, body: &str| {
+            fs::write(repo.join(file), body).unwrap();
+            git(&repo, &["add", "--", file]);
+            git_env(
+                &repo,
+                &[
+                    ("GIT_AUTHOR_NAME", author),
+                    ("GIT_AUTHOR_EMAIL", "person@example.com"),
+                    ("GIT_AUTHOR_DATE", date),
+                    ("GIT_COMMITTER_DATE", date),
+                ],
+                &["commit", "-m", message],
+            );
+        };
+        commit_as("needle alpha", "Ada", day1, "docs/a.txt", "alpha\n");
+        let alpha = git_text(&repo, &["rev-parse", "HEAD"]);
+        commit_as("needle beta", "Ada", day1, "other.txt", "beta\n");
+        let beta = git_text(&repo, &["rev-parse", "HEAD"]);
+        commit_as("needle gamma", "Grace", day1, "docs/a.txt", "gamma\n");
+        commit_as("needle delta", "Ada", day2, "docs/a.txt", "delta\n");
+        git(&repo, &["checkout", "-b", "feature", &alpha]);
+        commit_as("needle feature", "Ada", day1, "docs/a.txt", "feature\n");
+        let feature_oid = git_text(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "main"]);
+        let backend = fixture.backend();
+        let root = canonical_existing(&repo).unwrap();
+        let generation = generation(&backend, &root);
+        let before = stamp(&root);
+        let narrow = HistoryRequest {
+            query: "needle".to_string(),
+            author: "Ada".to_string(),
+            since: Some(1_700_000_000),
+            until: Some(1_700_000_000 + 86_399),
+            path: "docs".to_string(),
+            ..HistoryRequest::default()
+        };
+        let page = history_page(&backend, &repo_key(&root), &narrow, generation, 1)
+            .await
+            .unwrap();
+        assert_eq!(page.commits.iter().map(|commit| commit.oid.as_str()).collect::<Vec<_>>(), vec![alpha.as_str()]);
+        assert_eq!(page.scope, "current");
+        assert_eq!(page.head.as_deref(), Some("main"));
+        assert!(page.branches.iter().any(|branch| branch == "feature"));
+        let cleared_path = HistoryRequest {
+            path: String::new(),
+            ..narrow.clone()
+        };
+        let cleared = history_page(&backend, &repo_key(&root), &cleared_path, page.generation, 2)
+            .await
+            .unwrap();
+        let cleared_oids: Vec<&str> = cleared.commits.iter().map(|commit| commit.oid.as_str()).collect();
+        assert!(cleared_oids.contains(&alpha.as_str()));
+        assert!(cleared_oids.contains(&beta.as_str()));
+        assert!(!cleared_oids.contains(&feature_oid.as_str()));
+        assert!(cleared.commits.iter().all(|commit| commit.author_name == "Ada"));
+        assert!(cleared.commits.iter().all(|commit| commit.summary != "needle delta" && commit.summary != "needle gamma"));
+        let all = HistoryRequest {
+            scope: "all".to_string(),
+            ..narrow.clone()
+        };
+        let all_page = history_page(&backend, &repo_key(&root), &all, cleared.generation, 3)
+            .await
+            .unwrap();
+        let all_oids: Vec<&str> = all_page.commits.iter().map(|commit| commit.oid.as_str()).collect();
+        assert!(all_oids.contains(&alpha.as_str()));
+        assert!(all_oids.contains(&feature_oid.as_str()));
+        assert!(!all_oids.contains(&beta.as_str()));
+        let exact = HistoryRequest {
+            query: "needle alpha".to_string(),
+            since: Some(1_700_000_000),
+            until: Some(1_700_000_000),
+            ..HistoryRequest::default()
+        };
+        let exact_page = history_page(&backend, &repo_key(&root), &exact, all_page.generation, 4)
+            .await
+            .unwrap();
+        assert_eq!(exact_page.commits.len(), 1);
+        let before_second = HistoryRequest {
+            query: "needle alpha".to_string(),
+            since: Some(1_700_000_000),
+            until: Some(1_699_999_999),
+            ..HistoryRequest::default()
+        };
+        let missed = history_page(&backend, &repo_key(&root), &before_second, exact_page.generation, 5)
+            .await
+            .unwrap();
+        assert_eq!(missed.state, "no_match");
+        assert!(missed.commits.is_empty());
+        let default_page = history_page(
+            &backend,
+            &repo_key(&root),
+            &HistoryRequest::default(),
+            missed.generation,
+            6,
+        )
+        .await
+        .unwrap();
+        assert!(default_page.commits.iter().all(|commit| commit.oid != feature_oid));
+        assert!(default_page.commits.iter().any(|commit| commit.summary == "needle delta"));
+        let all_plain = history_page(
+            &backend,
+            &repo_key(&root),
+            &HistoryRequest {
+                scope: "all".to_string(),
+                ..HistoryRequest::default()
+            },
+            default_page.generation,
+            7,
+        )
+        .await
+        .unwrap();
+        assert!(all_plain.commits.iter().any(|commit| commit.oid == feature_oid));
+        assert_eq!(stamp(&root), before);
+        git(&repo, &["checkout", "--orphan", "empty"]);
+        let empty = history_page(
+            &backend,
+            &repo_key(&root),
+            &HistoryRequest::default(),
+            all_plain.generation,
+            8,
+        )
+        .await
+        .unwrap();
+        assert!(empty.commits.is_empty());
+        assert_eq!(empty.state, "empty_branch");
+        assert_eq!(empty.head.as_deref(), Some("empty"));
+        assert_eq!(empty.scope, "current");
     }
 
     #[tokio::test]
@@ -2224,11 +2604,27 @@ mod tests {
         let backend = fixture.backend();
         let root = canonical_existing(&repo).unwrap();
         let generation = generation(&backend, &root);
-        let page = history_page(&backend, &repo_key(&root), "needle", 0, generation, 1)
-            .await
-            .unwrap();
+        let page = history_page(
+            &backend,
+            &repo_key(&root),
+            &HistoryRequest {
+                query: "needle".to_string(),
+                ..HistoryRequest::default()
+            },
+            generation,
+            1,
+        )
+        .await
+        .unwrap();
         assert_eq!(page.state, "empty_repository");
-        let files = file_history(&backend, &repo_key(&root), "file.txt", 0, generation, 2)
+        let files = file_history(
+            &backend,
+            &repo_key(&root),
+            "file.txt",
+            &HistoryRequest::default(),
+            generation,
+            2,
+        )
             .await
             .unwrap();
         assert_eq!(files.state, "empty_repository");

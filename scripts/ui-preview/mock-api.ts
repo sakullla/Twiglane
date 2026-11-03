@@ -516,13 +516,42 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     generation += 1;
     return ok({ generation, tags: mockTags.map((item) => ({ ...item })), snapshot: snapshot() });
   },
-  historyPage: (_repo: string, query: string, offset: number) => {
+  historyPage: (_repo: string, query: string, offset: number, _generation?: number, _requestId?: number, filters?: { scope?: string; author?: string; path?: string }) => {
     const needle = query.trim().toLowerCase();
-    const matched = commits.filter((item) => !needle || item.summary.toLowerCase().includes(needle) || item.authorName.toLowerCase().includes(needle) || item.oid.toLowerCase().startsWith(needle));
-    return ok({ generation, query, offset, pageSize: 100, hasMore: false, state: matched.length ? "ok" : "no_match", commits: matched });
+    const author = filters?.author?.trim().toLowerCase() ?? "";
+    const matched = commits.filter((item) => {
+      const text = !needle || item.summary.toLowerCase().includes(needle) || item.oid.toLowerCase().startsWith(needle);
+      const who = !author || item.authorName.toLowerCase().includes(author);
+      return text && who;
+    });
+    return ok({
+      generation,
+      query,
+      offset,
+      pageSize: 100,
+      hasMore: false,
+      state: matched.length ? "ok" : "no_match",
+      commits: matched,
+      scope: filters?.scope ?? "current",
+      branches: ["main"],
+      head: "main",
+    });
   },
-  fileHistory: (_repo: string, path: string, offset: number) =>
-    ok({ generation, path, offset, pageSize: 100, hasMore: false, state: "ok", commits: commits.slice(0, 8) }),
+  fileHistory: (_repo: string, path: string, offset: number, _generation?: number, _requestId?: number, filters?: { scope?: string; query?: string }) =>
+    ok({
+      generation,
+      path,
+      offset,
+      pageSize: 100,
+      hasMore: false,
+      state: "ok",
+      commits: commits.slice(0, 8).filter((item) => !filters?.query || item.summary.toLowerCase().includes(filters.query.toLowerCase())),
+      scope: filters?.scope ?? "current",
+      branches: ["main"],
+      head: "main",
+    }),
+  cherryPickCommits: () => ok({ generation, conflicted: false, skipped: [], note: "已按从旧到新拣选到当前分支。没有推送。", snapshot: snapshot() }),
+  checkoutCommit: () => ok({ ...snapshot(), branch: { ...snapshot().branch, detached: true, name: null } }),
   commitDetail: (_repo: string, oid: string) => {
     const commit = commits.find((item) => item.oid === oid) ?? commits[0];
     return ok({

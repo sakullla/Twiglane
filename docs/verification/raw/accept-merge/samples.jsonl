@@ -1,8 +1,0 @@
-{"detail":{"controls":true},"elapsedMs":294,"name":"shell-ready","pid":8253}
-{"detail":{"changes":0,"contentOk":true,"elapsedMs":46,"expectChanges":0,"expectHead":"f8bd959183e8d54d7d30a364a2195ac02424f28d","head":"f8bd959183e8d54d7d30a364a2195ac02424f28d","launch":null,"mark":null,"method":"gui-open-to-first-screen"},"elapsedMs":341,"name":"status-open","pid":8253}
-{"detail":{"contentOk":true,"method":"gui-merge","oid":"c57adfb8436f9b5b044cb891713c4360ac764af5"},"elapsedMs":668,"name":"merge","pid":8253}
-{"detail":{"changes":2,"contentOk":true,"elapsedMs":39,"expectChanges":2,"expectHead":"7f2e45e4391f7147a7fa5888c0ac162e3a92560e","head":"7f2e45e4391f7147a7fa5888c0ac162e3a92560e","launch":null,"mark":null,"method":"gui-open-to-first-screen"},"elapsedMs":708,"name":"status-open","pid":8253}
-{"detail":{"contentOk":true,"keyboard":true,"method":"gui-keyboard-theme","selectionAfter":"unstaged:b.txt","selectionBefore":"","selectionChanged":true,"selectionMoved":"unstaged:a.txt","shortcutFocused":true,"theme":["light","dark"]},"elapsedMs":724,"name":"keyboard-theme","pid":8253}
-{"detail":{"ms":3000,"phase":"start"},"elapsedMs":726,"name":"screenshot","pid":8253}
-{"detail":{"ms":3000,"phase":"end"},"elapsedMs":3732,"name":"screenshot-end","pid":8253}
-{"detail":{},"elapsedMs":3737,"name":"finished","pid":8253}

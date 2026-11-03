@@ -1,3 +1,0 @@
-{"detail":{"controls":true},"elapsedMs":303,"name":"shell-ready","pid":5864}
-{"detail":{"changes":20,"contentOk":true,"elapsedMs":59,"expectChanges":20,"expectHead":"e4584efbba9a07221f01b7fa1986f3e09f1bc1f0","head":"e4584efbba9a07221f01b7fa1986f3e09f1bc1f0","launch":"first","mark":null,"method":"gui-open-to-first-screen"},"elapsedMs":363,"name":"startup","pid":5864}
-{"detail":{},"elapsedMs":364,"name":"finished","pid":5864}

@@ -1,4 +1,0 @@
-{"detail":{"controls":true},"elapsedMs":302,"name":"shell-ready","pid":8077}
-{"detail":{"changes":1,"contentOk":true,"elapsedMs":41,"expectChanges":1,"expectHead":null,"head":"559cef5248ad128ad8a4fa0d38a6535a250c7017","launch":null,"mark":null,"method":"gui-open-to-first-screen"},"elapsedMs":344,"name":"status-open","pid":8077}
-{"detail":{"contentOk":true,"head":"5b52b46f7b49a1472783328bb8d1ccb70cb56503","hunks":2,"method":"gui-partial-commit-push","path":"notes.txt"},"elapsedMs":528,"name":"stage-commit-push","pid":8077}
-{"detail":{},"elapsedMs":529,"name":"finished","pid":8077}

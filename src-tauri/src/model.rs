@@ -269,6 +269,9 @@ pub struct BranchState {
     pub generation: u64,
     pub branches: Vec<BranchRecord>,
     pub snapshot: StatusSnapshot,
+    /// 默认分支：`origin/HEAD` 指向的本地分支；否则依次取存在的 main、master、develop。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

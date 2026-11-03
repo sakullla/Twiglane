@@ -18,6 +18,10 @@
     onFailure: (error: unknown) => void;
     onNotice: (message: string) => void;
     onOpenHistory: (query: string) => void;
+    /** 分支分组。缺省开启。 */
+    branchGroups?: boolean;
+    /** 从被占用的分支打开另一个工作区。 */
+    onOpenWorktree?: (repo: OpenedRepository) => void;
     nextId: () => number;
   }
 
@@ -32,6 +36,8 @@
     onFailure,
     onNotice,
     onOpenHistory,
+    branchGroups = true,
+    onOpenWorktree,
     nextId,
   }: Props = $props();
 
@@ -313,5 +319,5 @@
     {/snippet}
   </Modal>
 {:else if mode === "branch" && opened}
-  <BranchDialog {opened} {disabled} {onClose} {onBusy} {onSnapshot} {onFailure} {onNotice} {onOpenHistory} {nextId} />
+  <BranchDialog {opened} {disabled} {branchGroups} {onClose} {onBusy} {onSnapshot} {onFailure} {onNotice} {onOpenHistory} onOpened={onOpenWorktree} {nextId} />
 {/if}

@@ -176,6 +176,8 @@ export interface BranchState {
   generation: number;
   branches: BranchRecord[];
   snapshot: StatusSnapshot;
+  /** 分支刷新时算好的默认分支。没有符合判定的分支时缺省或为 null。 */
+  defaultBranch?: string | null;
 }
 
 export interface TagRecord {

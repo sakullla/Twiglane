@@ -2,7 +2,7 @@
   import { BUSY_REASON } from "../ui";
   import { tick, untrack } from "svelte";
   import { api } from "../api";
-  import { filterBranches } from "../branches";
+  import { bucketBranches, filterBranches, groupIsOpen, isDefaultBranch } from "../branches";
   import { normalizeError } from "../errors";
   import type { BranchRecord, BranchState, OpenedRepository, StatusSnapshot } from "../types";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest, isContextKey, pointFor } from "./ContextMenu.svelte";
@@ -31,6 +31,12 @@
     startCreating?: boolean;
     /** 写锁来自后台克隆：它不碰当前仓库，读取照常，写入仍被拦住。 */
     backgroundClone?: boolean;
+    /** 设置里的分支分组。缺省开启，与持久化缺省一致。 */
+    branchGroups?: boolean;
+    /** 写入或读取进行中时，打开其他工作区被拒绝的原因。 */
+    blockedReason?: string | null;
+    /** 打开其他工作区成功后交给外壳切换当前仓库。 */
+    onOpened?: (repo: OpenedRepository) => void;
     nextId: () => number;
   }
 
@@ -48,10 +54,16 @@
     onRebaseBranch,
     startCreating = false,
     backgroundClone = false,
+    branchGroups = true,
+    blockedReason = null,
+    onOpened,
     nextId,
   }: Props = $props();
 
   let branches = $state<BranchRecord[]>([]);
+  let defaultBranch = $state<string | null>(null);
+  let groupOverrides = $state<Record<string, boolean>>({});
+  let openingWorktree = $state(false);
   let branchQuery = $state("");
   /** 新建表单按需展开，展开时替换搜索和列表（R10：不和列表同时铺开）。 */
   let creating = $state(untrack(() => startCreating));
@@ -123,6 +135,17 @@
   let current = $derived(opened.snapshot.branch);
   let listReady = $derived(loaded?.key === opened.summary.path && loaded.ok);
   let listFailed = $derived(loaded?.key === opened.summary.path && !loaded.ok);
+  let grouping = $derived(branchGroups !== false && branchQuery.trim() === "");
+  let buckets = $derived(grouping ? bucketBranches(visibleBranches) : { top: visibleBranches, groups: [] });
+  /** 换仓库或重新打开分组时回到「当前分支所在组展开」。 */
+  let layoutKey = "";
+
+  $effect(() => {
+    const nextKey = `${opened.summary.path}\0${branchGroups !== false}`;
+    if (nextKey === layoutKey) return;
+    layoutKey = nextKey;
+    groupOverrides = {};
+  });
 
   $effect(() => {
     if (loaded?.key === opened.summary.path || readBlocked) return;
@@ -197,7 +220,35 @@
 
   function applyBranches(result: BranchState) {
     branches = result.branches;
+    defaultBranch = result.defaultBranch ?? null;
     onSnapshot(result.snapshot);
+  }
+
+  function isDefault(branch: BranchRecord): boolean {
+    return isDefaultBranch(branch, defaultBranch);
+  }
+
+  /** 别的工作区正在用这个分支。这时只打开那个工作区，不在当前工作区检出。 */
+  function elsewhereReason(branch: BranchRecord): string | undefined {
+    return branch.worktree && !branch.current ? `正被其他工作区使用：${branch.worktree}` : undefined;
+  }
+
+  function rowLabel(branch: BranchRecord): string {
+    const base = branch.current ? `当前分支 ${branch.name}` : `切换到 ${branch.name}`;
+    return isDefault(branch) ? `${base}，默认分支` : base;
+  }
+
+  function groupKey(prefix: string): string {
+    return `${listScope}:${prefix}`;
+  }
+
+  function groupOpen(prefix: string, members: BranchRecord[]): boolean {
+    return groupIsOpen(members, current.name, groupOverrides, groupKey(prefix));
+  }
+
+  function toggleGroup(prefix: string, members: BranchRecord[]) {
+    const open = groupOpen(prefix, members);
+    groupOverrides = { ...groupOverrides, [groupKey(prefix)]: !open };
   }
 
   /** 过期时用后端给的 generation 重读一次；成功后由 onSnapshot 让外壳跟上，再过期就按失败处理。 */
@@ -328,9 +379,9 @@
 
   /** 分支行的操作菜单：右键、菜单键或行尾的「⋯」都打开这一份。 */
   function branchMenu(branch: BranchRecord, point: { x: number; y: number }) {
-    const busy = blocked ? "正在读取或写入，稍后再试" : undefined;
+    const busy = blocked || openingWorktree ? (blockedReason ?? BUSY_REASON) : undefined;
     const currentReason = branch.current ? "这就是当前分支" : undefined;
-    const elsewhere = branch.worktree && !branch.current ? `正被其他工作区使用：${branch.worktree}` : undefined;
+    const elsewhere = elsewhereReason(branch);
     const entries: ContextMenuEntry[] = [
       {
         id: "switch",
@@ -339,6 +390,17 @@
         disabledReason: currentReason ?? elsewhere ?? busy,
         run: () => void switchTo(branch.name),
       },
+    ];
+    if (branch.worktree && !branch.current) {
+      entries.push({
+        id: "open-worktree",
+        label: "打开此工作区",
+        icon: "folder-open",
+        disabledReason: busy,
+        run: () => void openWorktree(branch.worktree ?? ""),
+      });
+    }
+    entries.push(
       {
         id: "create",
         label: "从此分支新建分支…",
@@ -346,7 +408,7 @@
         disabledReason: busy,
         run: () => createFrom(branch),
       },
-    ];
+    );
     if (onMergeBranch) {
       entries.push({
         id: "merge",
@@ -389,6 +451,32 @@
       run: () => void askDelete(branch),
     });
     menu = { x: point.x, y: point.y, entries, label: `${branch.name} 的操作` };
+  }
+
+  /** 打开占用该分支的工作区。不检出到当前工作区，也不改两边的提交和文件。 */
+  async function openWorktree(path: string) {
+    if (!path || blocked || openingWorktree) {
+      if (blocked) errorText = blockedReason ?? BUSY_REASON;
+      return;
+    }
+    const currentRepo = opened;
+    menu = null;
+    openingWorktree = true;
+    errorText = null;
+    onBusy("open");
+    try {
+      const next = await api.openRepository(path, nextId());
+      if (opened.summary.path !== currentRepo.summary.path) return;
+      onOpened?.(next);
+      onClose();
+    } catch (error) {
+      const failure = normalizeError(error);
+      errorText = failure.message;
+      onFailure(failure);
+    } finally {
+      openingWorktree = false;
+      onBusy(null);
+    }
   }
 
   async function switchTo(name: string) {
@@ -650,17 +738,18 @@
             <p>换一个关键词，或清空搜索后再试。</p>
           </div>
         {:else}
-          {#each visibleBranches as branch (branch.name)}
+          {#snippet branchRow(branch: BranchRecord)}
+            {@const occupied = elsewhereReason(branch)}
             <div
               class="list-row branch-row"
               class:current={branch.current}
               role="button"
               tabindex="0"
-              aria-label={branch.current ? `当前分支 ${branch.name}` : `切换到 ${branch.name}`}
-              aria-disabled={branch.current || blocked}
-              title={branch.current ? "当前正在使用的分支" : blocked ? BUSY_REASON : `点击切换到 ${branch.name}`}
+              aria-label={rowLabel(branch)}
+              aria-disabled={branch.current || occupied || blocked ? "true" : undefined}
+              title={branch.current ? "当前正在使用的分支" : occupied ? occupied : blocked ? (blockedReason ?? BUSY_REASON) : `点击切换到 ${branch.name}`}
               onclick={() => {
-                if (!branch.current) void switchTo(branch.name);
+                if (!branch.current && !occupied) void switchTo(branch.name);
               }}
               oncontextmenu={(event) => {
                 event.preventDefault();
@@ -672,7 +761,7 @@
                   branchMenu(branch, pointFor(event.currentTarget));
                   return;
                 }
-                if (!branch.current && (event.key === "Enter" || event.key === " ")) {
+                if (!branch.current && !occupied && (event.key === "Enter" || event.key === " ")) {
                   event.preventDefault();
                   void switchTo(branch.name);
                 }
@@ -682,6 +771,7 @@
               <div class="lr-main">
                 <span class="lr-title">
                   <span title={branch.name}>{branch.name}</span>
+                  {#if isDefault(branch)}<span class="chip default-branch" data-default-branch>默认</span>{/if}
                   {#if branch.current}<span class="chip current">当前</span>{/if}
                   {#if branch.worktree && !branch.current}<span class="chip">其他工作区</span>{/if}
                 </span>
@@ -723,6 +813,29 @@
                 {/if}
               </span>
             </div>
+          {/snippet}
+          {#each buckets.top as branch (branch.name)}
+            {@render branchRow(branch)}
+          {/each}
+          {#each buckets.groups as group (group.prefix)}
+            {@const open = groupOpen(group.prefix, group.branches)}
+            <button
+              type="button"
+              class="branch-group"
+              data-branch-group={group.prefix}
+              aria-expanded={open}
+              aria-label={`${open ? "收起" : "展开"}分组 ${group.prefix}`}
+              onclick={() => toggleGroup(group.prefix, group.branches)}
+            >
+              <Icon name={open ? "chevron-down" : "chevron-right"} size={12} />
+              <span>{group.prefix}</span>
+              <span class="count">{group.branches.length}</span>
+            </button>
+            {#if open}
+              {#each group.branches as branch (branch.name)}
+                {@render branchRow(branch)}
+              {/each}
+            {/if}
           {/each}
         {/if}
       </div>

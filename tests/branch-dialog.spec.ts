@@ -1,4 +1,6 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/svelte";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenedRepository } from "../src/lib/types";
@@ -12,6 +14,7 @@ const createBranchFrom = vi.hoisted(() => vi.fn());
 const renameBranch = vi.hoisted(() => vi.fn());
 const cloneRepository = vi.hoisted(() => vi.fn());
 const deleteTag = vi.hoisted(() => vi.fn());
+const openRepository = vi.hoisted(() => vi.fn());
 
 vi.mock("../src/lib/api", () => ({
   api: {
@@ -30,12 +33,14 @@ vi.mock("../src/lib/api", () => ({
     addRemote,
     setRemoteUrl: vi.fn(),
     cloneRepository,
+    openRepository,
   },
   pickDirectory: vi.fn(),
 }));
 
 import { pickDirectory } from "../src/lib/api";
 import BranchDialog from "../src/lib/components/BranchDialog.svelte";
+import BranchSwitcher from "../src/lib/components/BranchSwitcher.svelte";
 import { openModalCount } from "../src/lib/components/Modal.svelte";
 import RepoDialogs from "../src/lib/components/RepoDialogs.svelte";
 
@@ -782,5 +787,299 @@ describe("远程管理 modal", () => {
     await waitFor(() => expect(base.onFailure).toHaveBeenCalledTimes(1));
     expect(base.onOpened).not.toHaveBeenCalled();
     expect(base.onClose).not.toHaveBeenCalled();
+  });
+});
+
+describe("打开其他工作区、默认徽章与斜杠分组", () => {
+  const anchors: HTMLElement[] = [];
+
+  beforeEach(() => {
+    branchState.mockReset();
+    switchBranch.mockReset();
+    openRepository.mockReset();
+    tagState.mockReset();
+    tagState.mockResolvedValue({ generation: 4, tags: [], snapshot: opened.snapshot });
+  });
+
+  afterEach(() => {
+    for (const anchor of anchors) anchor.remove();
+    anchors.length = 0;
+  });
+
+  function record(name: string, current = false, worktree: string | null = null, remote = false) {
+    return { name, remote, current, upstream: null, worktree };
+  }
+
+  function onBranch(name: string): OpenedRepository {
+    return { ...opened, snapshot: { ...opened.snapshot, branch: { ...opened.snapshot.branch, name } } };
+  }
+
+  function rowNames(): string[] {
+    return [...document.querySelectorAll<HTMLElement>(".branch-row")].map((row) => row.querySelector(".lr-title span")?.textContent ?? "");
+  }
+
+  function badgedRows(): string[] {
+    return [...document.querySelectorAll<HTMLElement>(".branch-row [data-default-branch]")].map(
+      (chip) => chip.closest(".branch-row")?.querySelector(".lr-title span")?.textContent ?? "",
+    );
+  }
+
+  function optionNames(): string[] {
+    return [...document.querySelectorAll<HTMLElement>('[role="option"] .branch-option-name')].map((node) => node.textContent ?? "");
+  }
+
+  function badgedOptions(): string[] {
+    return [...document.querySelectorAll<HTMLElement>('[role="option"] [data-default-branch]')].map(
+      (chip) => chip.closest('[role="option"]')?.querySelector(".branch-option-name")?.textContent ?? "",
+    );
+  }
+
+  async function showDialog(branches: ReturnType<typeof record>[], defaultBranch: string | null, current = "feature/ui") {
+    branchState.mockResolvedValue({ generation: 4, branches, snapshot: opened.snapshot, defaultBranch });
+    const props = {
+      ...propsBase(),
+      opened: onBranch(current),
+    };
+    const view = render(BranchDialog, { props });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    return { view, props };
+  }
+
+  function propsBase(extra: Record<string, unknown> = {}) {
+    return {
+      opened,
+      disabled: false,
+      blockedReason: null as string | null,
+      onClose: vi.fn(),
+      onBusy: vi.fn(),
+      onSnapshot: vi.fn(),
+      onFailure: vi.fn(),
+      onNotice: vi.fn(),
+      onOpened: vi.fn(),
+      nextId: () => 9,
+      branchGroups: true,
+      ...extra,
+    };
+  }
+
+  function showSwitcher(
+    branches: ReturnType<typeof record>[],
+    defaultBranch: string | null,
+    current = "feature/ui",
+    extra: Record<string, unknown> = {},
+  ) {
+    branchState.mockResolvedValue({ generation: 4, branches, snapshot: opened.snapshot, defaultBranch });
+    const anchor = document.createElement("button");
+    document.body.append(anchor);
+    anchors.push(anchor);
+    const props = {
+      anchor,
+      opened: onBranch(current),
+      blockedReason: null as string | null,
+      nextId: () => 9,
+      onBusy: vi.fn(),
+      onGeneration: vi.fn(),
+      onSnapshot: vi.fn(),
+      onFailure: vi.fn(),
+      onNotice: vi.fn(),
+      onCommand: vi.fn(),
+      onCreateBranch: vi.fn(),
+      onOpened: vi.fn(),
+      onClose: vi.fn(),
+      branchGroups: true,
+      ...extra,
+    };
+    const view = render(BranchSwitcher, { props });
+    return { view, props };
+  }
+
+  it("分支菜单打开其他工作区；路径无效或正在写入时留在原仓库", async () => {
+    const listed = [record("feature/ui", true), record("shared", false, "D:/wt")];
+    const next = { ...opened, summary: { name: "wt", path: "D:/wt" }, generation: 8 };
+    openRepository.mockResolvedValueOnce(next);
+    const { props } = await showDialog(listed, null);
+    const shared = () => {
+      const found = [...document.querySelectorAll<HTMLElement>(".branch-row")].find((row) => row.querySelector(".lr-title span")?.textContent === "shared");
+      if (!found) throw new Error("没有 shared");
+      return found;
+    };
+    await fireEvent.click(shared());
+    expect(switchBranch).not.toHaveBeenCalled();
+    await fireEvent.contextMenu(shared(), { clientX: 12, clientY: 12 });
+    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "打开此工作区" }));
+    await waitFor(() => expect(openRepository).toHaveBeenCalledWith("D:/wt", 9));
+    expect(props.onOpened).toHaveBeenCalledWith(next);
+    expect(props.onClose).toHaveBeenCalled();
+    expect(switchBranch).not.toHaveBeenCalled();
+    cleanup();
+
+    openRepository.mockRejectedValueOnce({ code: "not_repository", message: "该目录不是 Git 仓库，未做任何修改。" });
+    const failed = await showDialog(listed, null);
+    await fireEvent.contextMenu(shared(), { clientX: 12, clientY: 20 });
+    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "打开此工作区" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("该目录不是 Git 仓库，未做任何修改。");
+    expect(failed.props.onOpened).not.toHaveBeenCalled();
+    expect(failed.props.onClose).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-branch-status]")?.textContent).toContain("feature/ui");
+    cleanup();
+
+    const blocked = await showDialog(listed, null);
+    await blocked.view.rerender({ ...blocked.props, disabled: true, blockedReason: "正在写入，稍后再试" });
+    await fireEvent.contextMenu(shared(), { clientX: 12, clientY: 28 });
+    const item = within(screen.getByRole("menu")).getByRole("menuitem", { name: "打开此工作区" });
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(item.getAttribute("title")).toBe("正在写入，稍后再试");
+    await fireEvent.click(item);
+    expect(openRepository).toHaveBeenCalledTimes(2);
+    expect(blocked.props.onOpened).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-branch-status]")?.textContent).toContain("feature/ui");
+  });
+
+  it("切换器打开其他工作区；路径不存在或正在写入时不切走", async () => {
+    const listed = [record("feature/ui", true), record("shared", false, "D:/wt"), record("origin/shared", false, null, true)];
+    const next = { ...opened, summary: { name: "wt", path: "D:/wt" }, generation: 8 };
+    openRepository.mockResolvedValueOnce(next);
+    const openedSwitcher = showSwitcher(listed, null);
+    const button = async () => within(await screen.findByRole("dialog", { name: "切换分支" })).findByRole("button", { name: "打开此工作区" });
+    const option = async () => within(await screen.findByRole("dialog", { name: "切换分支" })).findByRole("option", { name: /^shared/ });
+    await fireEvent.click(await option());
+    expect(switchBranch).not.toHaveBeenCalled();
+    await fireEvent.click(await button());
+    await waitFor(() => expect(openRepository).toHaveBeenCalledWith("D:/wt", 9));
+    expect(openedSwitcher.props.onOpened).toHaveBeenCalledWith(next);
+    expect(openedSwitcher.props.onClose).toHaveBeenCalled();
+    expect(openedSwitcher.props.onBusy).toHaveBeenCalledWith("open");
+    expect(switchBranch).not.toHaveBeenCalled();
+    cleanup();
+
+    openRepository.mockRejectedValueOnce({ code: "path_missing", message: "路径不存在，未创建或修改任何文件。" });
+    const missing = showSwitcher(listed, null);
+    await fireEvent.click(await button());
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("路径不存在，未创建或修改任何文件。");
+    expect(missing.props.onOpened).not.toHaveBeenCalled();
+    expect(missing.props.onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "切换分支" })).toBeTruthy();
+    expect(switchBranch).not.toHaveBeenCalled();
+    cleanup();
+
+    const writing = showSwitcher(listed, null, "feature/ui", { blockedReason: "正在写入，稍后再试" });
+    const blockedButton = await button();
+    expect((blockedButton as HTMLButtonElement).disabled).toBe(true);
+    expect(blockedButton.getAttribute("title")).toBe("正在写入，稍后再试");
+    await fireEvent.click(blockedButton);
+    await fireEvent.click(await option());
+    expect(openRepository).toHaveBeenCalledTimes(2);
+    expect(switchBranch).not.toHaveBeenCalled();
+    expect(writing.props.onOpened).not.toHaveBeenCalled();
+    expect(writing.props.onClose).not.toHaveBeenCalled();
+  });
+
+  it("列表和切换器按四种结果标默认徽章，徽章不单独占横幅", async () => {
+    await showDialog(
+      [record("feature/ui", true), record("main"), record("master"), record("release"), record("origin/main", false, null, true)],
+      "release",
+    );
+    expect(badgedRows()).toEqual(["release"]);
+    expect(document.querySelector(".branch-status [data-default-branch], .list-section [data-default-branch]")).toBeNull();
+    cleanup();
+
+    const currentDefault = showSwitcher([record("main", true), record("master"), record("origin/main", false, null, true)], "main", "main");
+    await waitFor(() => expect(badgedOptions()).toEqual(["main"]));
+    const mainOption = screen.getByRole("option", { name: /^main/ });
+    expect(mainOption.textContent).toContain("默认");
+    expect(mainOption.textContent).toContain("当前");
+    expect(mainOption.querySelector("[data-default-branch]")?.textContent).toBe("默认");
+    expect(currentDefault.props.onCommand).not.toHaveBeenCalled();
+    cleanup();
+
+    await showDialog([record("feature/ui", true), record("master"), record("develop")], "master");
+    expect(badgedRows()).toEqual(["master"]);
+    cleanup();
+    await showDialog([record("feature/ui", true), record("develop")], "develop");
+    expect(badgedRows()).toEqual(["develop"]);
+    cleanup();
+    await showDialog([record("feature/ui", true), record("main"), record("master"), record("develop")], "main");
+    expect(badgedRows()).toEqual(["main"]);
+    cleanup();
+
+    const none = showSwitcher([record("topic", true)], null, "topic");
+    await waitFor(() => expect(optionNames()).toEqual(["topic"]));
+    expect(document.querySelector("[data-default-branch]")).toBeNull();
+    expect(none.props.onClose).not.toHaveBeenCalled();
+  });
+
+  it("切换器分组展开当前组，标题不能检出，搜索显示完整名称", async () => {
+    switchBranch.mockResolvedValue({ generation: 5, branches: [], snapshot: opened.snapshot });
+    const listed = [record("feature/a", true), record("feature/b"), record("bugfix/x"), record("main"), record("origin/feature/a", false, null, true)];
+    showSwitcher(listed, "main", "feature/a");
+    await waitFor(() => expect(optionNames()).toEqual(["main", "feature/a", "feature/b"]));
+    expect(badgedOptions()).toEqual(["main"]);
+    expect(screen.getByRole("option", { name: /^feature\/a/ }).getAttribute("aria-selected")).toBe("true");
+    const title = screen.getByRole("button", { name: "收起分组 feature" });
+    expect(title.getAttribute("role")).not.toBe("option");
+    await fireEvent.click(title);
+    await fireEvent.click(screen.getByRole("button", { name: "展开分组 bugfix" }));
+    expect(switchBranch).not.toHaveBeenCalled();
+    expect(screen.queryByRole("option", { name: /^feature\/a/ })).toBeNull();
+
+    const search = screen.getByRole("combobox", { name: "搜索本地或远程分支" });
+    await fireEvent.input(search, { target: { value: "feature/b" } });
+    await waitFor(() => expect(optionNames()).toEqual(["feature/b"]));
+    expect(screen.queryByRole("button", { name: /分组/ })).toBeNull();
+    await fireEvent.click(screen.getByRole("option", { name: "feature/b" }));
+    await waitFor(() => expect(switchBranch).toHaveBeenCalledWith("/repo", "feature/b", 4, 9));
+  });
+
+  it("切换器关闭分组后平铺，再次开启仍分组且当前分支不变", async () => {
+    const listed = [record("feature/a", true), record("feature/b"), record("bugfix/x"), record("main")];
+    const mounted = showSwitcher(listed, "main", "feature/a");
+    await waitFor(() => expect(optionNames()).toEqual(["main", "feature/a", "feature/b"]));
+    await fireEvent.click(screen.getByRole("button", { name: "展开分组 bugfix" }));
+    expect(optionNames()).toContain("bugfix/x");
+
+    await mounted.view.rerender({ ...mounted.props, branchGroups: false });
+    await waitFor(() => expect(optionNames()).toEqual(["feature/a", "feature/b", "bugfix/x", "main"]));
+    expect(screen.queryByRole("button", { name: /分组/ })).toBeNull();
+    expect(badgedOptions()).toEqual(["main"]);
+    expect(screen.getByRole("option", { name: "bugfix/x" }).querySelector(".branch-option-name")?.textContent).toBe("bugfix/x");
+
+    await mounted.view.rerender({ ...mounted.props, branchGroups: true });
+    await waitFor(() => expect(optionNames()).toEqual(["main", "feature/a", "feature/b"]));
+    expect(screen.getByRole("button", { name: "展开分组 bugfix" })).toBeTruthy();
+    expect(badgedOptions()).toEqual(["main"]);
+    expect(screen.getByRole("option", { name: /^feature\/a/ }).getAttribute("aria-selected")).toBe("true");
+    expect(switchBranch).not.toHaveBeenCalled();
+    expect(openRepository).not.toHaveBeenCalled();
+  });
+
+  it("对话框分组随设置关闭后平铺，再打开仍只展开当前分支所在组", async () => {
+    const listed = [record("feature/ui", true), record("feature/extra"), record("bugfix/login"), record("main")];
+    const mounted = await showDialog(listed, "main");
+    expect(rowNames()).toEqual(["main", "feature/ui", "feature/extra"]);
+    await mounted.view.rerender({ ...mounted.props, branchGroups: false });
+    await waitFor(() => expect(rowNames()).toEqual(["feature/ui", "feature/extra", "bugfix/login", "main"]));
+    expect(document.querySelector(".branch-group")).toBeNull();
+    expect(badgedRows()).toEqual(["main"]);
+    await mounted.view.rerender({ ...mounted.props, branchGroups: true });
+    await waitFor(() => expect(rowNames()).toEqual(["main", "feature/ui", "feature/extra"]));
+    expect(screen.getByRole("button", { name: "展开分组 bugfix" })).toBeTruthy();
+    const title = screen.getByRole("button", { name: "收起分组 feature" });
+    await fireEvent.click(title);
+    expect(switchBranch).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-branch-status]")?.textContent).toContain("feature/ui");
+    expect(badgedRows()).toEqual(["main"]);
+  });
+
+  it("默认徽章不大于当前分支标记", () => {
+    const css = readFileSync(path.join(__dirname, "../src/styles/components.css"), "utf8");
+    const height = (selector: string) => {
+      const pattern = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{[^}]*?height:\\s*(\\d+)px`);
+      const found = css.match(pattern);
+      if (!found) throw new Error(`没有 ${selector} 的高度`);
+      return Number(found[1]);
+    };
+    expect(height(".branch-row .chip.default-branch")).toBeLessThanOrEqual(height(".chip"));
+    expect(height(".branch-picker-tag.default-branch")).toBeLessThanOrEqual(height(".branch-picker-tag"));
   });
 });

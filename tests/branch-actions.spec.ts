@@ -1,6 +1,6 @@
 import { tick } from "svelte";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BranchState, OpenedRepository } from "../src/lib/types";
 
 const api = vi.hoisted(() => ({
@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   deleteBranch: vi.fn(),
   deleteRemoteBranch: vi.fn(),
   tagState: vi.fn(),
+  openRepository: vi.fn(),
 }));
 
 vi.mock("../src/lib/api", () => ({ api }));
@@ -60,6 +61,20 @@ function rowOf(name: string): HTMLElement {
   return found;
 }
 
+function rowNames(): string[] {
+  return [...document.querySelectorAll<HTMLElement>(".branch-row")].map((row) => row.querySelector(".lr-title span")?.textContent ?? "");
+}
+
+function badgedBranchNames(): string[] {
+  return [...document.querySelectorAll<HTMLElement>(".branch-row [data-default-branch]")].map(
+    (chip) => chip.closest(".branch-row")?.querySelector(".lr-title span")?.textContent ?? "",
+  );
+}
+
+function branchRecord(name: string, current = false, worktree: string | null = null, remote = false) {
+  return { name, remote, current, upstream: null, worktree };
+}
+
 beforeEach(() => {
   Object.values(api).forEach((fn) => fn.mockReset());
   api.branchState.mockResolvedValue(state);
@@ -67,6 +82,8 @@ beforeEach(() => {
   api.createBranchFrom.mockResolvedValue(state);
   api.renameBranch.mockResolvedValue(state);
 });
+
+afterEach(() => cleanup());
 
 describe("分支右键菜单", () => {
   it("给出切换、新建、合并、重命名、复制与删除；当前分支不能删也不能合并到自己", async () => {
@@ -137,6 +154,7 @@ describe("分支右键菜单", () => {
 
     await fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
     await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "展开分组 origin" }));
     await waitFor(() => expect(rowOf("origin/main")).toBeTruthy());
     await fireEvent.contextMenu(rowOf("origin/main"), { clientX: 80, clientY: 200 });
     const remote = within(screen.getByRole("menu")).getByRole("menuitem", { name: "把当前分支变基到此分支…" });
@@ -229,6 +247,7 @@ describe("分支右键菜单", () => {
     const { onNotice } = setup();
     await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
     await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "展开分组 origin" }));
     await fireEvent.click(await screen.findByRole("button", { name: "删除远程 origin/old" }));
     expect(api.deleteRemoteBranch).not.toHaveBeenCalled();
     await fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
@@ -289,4 +308,225 @@ describe("分支右键菜单", () => {
     await fireEvent.click(screen.getByRole("button", { name: "确认重命名" }));
     await waitFor(() => expect(api.renameBranch).toHaveBeenCalledWith("/repo", "main", "trunk", 4, 7));
   });
+
+  function occupiedState() {
+    return {
+      ...state,
+      branches: [...state.branches, branchRecord("shared", false, "D:/other")],
+    };
+  }
+
+  function dialogProps(extra: Record<string, unknown> = {}) {
+    return {
+      opened,
+      disabled: false,
+      blockedReason: null as string | null,
+      onBusy: vi.fn(),
+      onSnapshot: vi.fn(),
+      onFailure: vi.fn(),
+      onNotice: vi.fn(),
+      onClose: vi.fn(),
+      onOpened: vi.fn(),
+      onMergeBranch: vi.fn(),
+      nextId: () => 7,
+      ...extra,
+    };
+  }
+
+  it("其他工作区：菜单打开该路径，不把分支检出到当前工作区", async () => {
+    api.branchState.mockResolvedValue(occupiedState());
+    const next = { ...opened, summary: { name: "other", path: "D:/other" }, generation: 8 };
+    api.openRepository.mockResolvedValue(next);
+    const props = dialogProps();
+    render(BranchDialog, { props });
+    await waitFor(() => expect(rowOf("shared")).toBeTruthy());
+    await fireEvent.click(rowOf("shared"));
+    await fireEvent.keyDown(rowOf("shared"), { key: "Enter" });
+    expect(api.switchBranch).not.toHaveBeenCalled();
+
+    await fireEvent.contextMenu(rowOf("shared"), { clientX: 40, clientY: 40 });
+    const menu = screen.getByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: "切换到此分支" }).getAttribute("aria-disabled")).toBe("true");
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "打开此工作区" }));
+    await waitFor(() => expect(api.openRepository).toHaveBeenCalledWith("D:/other", 7));
+    expect(props.onOpened).toHaveBeenCalledWith(next);
+    expect(props.onClose).toHaveBeenCalled();
+    expect(props.onBusy).toHaveBeenCalledWith("open");
+    expect(props.onBusy).toHaveBeenLastCalledWith(null);
+    expect(api.switchBranch).not.toHaveBeenCalled();
+  });
+
+  it("其他工作区路径不存在或不是仓库时留在原仓库并说明原因", async () => {
+    api.branchState.mockResolvedValue(occupiedState());
+    api.openRepository
+      .mockRejectedValueOnce({ code: "path_missing", message: "路径不存在，未创建或修改任何文件。" })
+      .mockRejectedValueOnce({ code: "not_repository", message: "该目录不是 Git 仓库，未做任何修改。" });
+    const props = dialogProps();
+    render(BranchDialog, { props });
+    await waitFor(() => expect(rowOf("shared")).toBeTruthy());
+
+    await fireEvent.contextMenu(rowOf("shared"), { clientX: 40, clientY: 40 });
+    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "打开此工作区" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("路径不存在，未创建或修改任何文件。");
+
+    await fireEvent.contextMenu(rowOf("shared"), { clientX: 40, clientY: 80 });
+    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "打开此工作区" }));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("该目录不是 Git 仓库，未做任何修改。"));
+    expect(api.openRepository).toHaveBeenCalledTimes(2);
+    expect(props.onOpened).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(api.switchBranch).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-branch-status]")?.textContent).toContain("feature/ui");
+  });
+
+  it("当前仓库正在写入时不打开其他工作区，并说明原因", async () => {
+    api.branchState.mockResolvedValue(occupiedState());
+    const props = dialogProps();
+    const view = render(BranchDialog, { props });
+    await waitFor(() => expect(rowOf("shared")).toBeTruthy());
+    await view.rerender({ ...props, disabled: true, blockedReason: "正在写入，稍后再试" });
+    await fireEvent.click(rowOf("shared"));
+    await fireEvent.contextMenu(rowOf("shared"), { clientX: 24, clientY: 24 });
+    const item = within(screen.getByRole("menu")).getByRole("menuitem", { name: "打开此工作区" });
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(item.getAttribute("title")).toBe("正在写入，稍后再试");
+    await fireEvent.click(item);
+    expect(api.openRepository).not.toHaveBeenCalled();
+    expect(api.switchBranch).not.toHaveBeenCalled();
+    expect(props.onOpened).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-branch-status]")?.textContent).toContain("feature/ui");
+  });
+
+  it("远程 HEAD 指向的本地分支才带默认徽章，远程同名分支不带", async () => {
+    const { onMergeBranch } = await openListed(
+      [
+        branchRecord("feature/ui", true),
+        branchRecord("main"),
+        branchRecord("master"),
+        branchRecord("release"),
+        branchRecord("origin/main", false, null, true),
+      ],
+      "release",
+    );
+    expect(badgedBranchNames()).toEqual(["release"]);
+    expect(rowOf("release").querySelector(".chip.current")).toBeNull();
+    expect(document.querySelector(".branch-status [data-default-branch]")).toBeNull();
+    await fireEvent.contextMenu(rowOf("release"), { clientX: 30, clientY: 30 });
+    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: /合并到当前分支/ }));
+    expect(onMergeBranch).toHaveBeenCalledWith("release");
+
+    await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "展开分组 origin" }));
+    expect(rowOf("origin/main").querySelector("[data-default-branch]")).toBeNull();
+  });
+
+  it("当前分支同时是默认分支时，当前标记和徽章都在", async () => {
+    await openListed([branchRecord("main", true), branchRecord("master")], "main", "main");
+    const row = rowOf("main");
+    expect(row.querySelector(".chip.current")?.textContent).toBe("当前");
+    expect(row.querySelector("[data-default-branch]")?.textContent).toBe("默认");
+    expect(badgedBranchNames()).toEqual(["main"]);
+  });
+
+  it("没有远程 HEAD 时徽章按 main、master、develop 取第一个存在的本地分支", async () => {
+    await openListed(
+      [branchRecord("feature/ui", true), branchRecord("main"), branchRecord("master"), branchRecord("develop")],
+      "main",
+    );
+    expect(badgedBranchNames()).toEqual(["main"]);
+    cleanup();
+
+    await openListed([branchRecord("feature/ui", true), branchRecord("master"), branchRecord("develop")], "master");
+    expect(badgedBranchNames()).toEqual(["master"]);
+    cleanup();
+
+    await openListed([branchRecord("feature/ui", true), branchRecord("develop")], "develop");
+    expect(badgedBranchNames()).toEqual(["develop"]);
+  });
+
+  it("main、master、develop 都不存在时没有默认徽章", async () => {
+    await openListed([branchRecord("topic", true), branchRecord("feature/extra")], null, "topic");
+    expect(document.querySelector("[data-default-branch]")).toBeNull();
+    expect(rowOf("topic").querySelector(".chip.current")).toBeTruthy();
+  });
+
+  it("当前分支所在组展开，分组标题不能检出，搜索显示完整名称", async () => {
+    api.switchBranch.mockResolvedValue(state);
+    const props = dialogProps();
+    api.branchState.mockResolvedValue({
+      ...state,
+      defaultBranch: "main",
+      branches: [
+        branchRecord("feature/ui", true),
+        branchRecord("feature/extra"),
+        branchRecord("bugfix/login"),
+        branchRecord("main"),
+      ],
+    });
+    render(BranchDialog, { props });
+    await waitFor(() => expect(rowNames()).toEqual(["main", "feature/ui", "feature/extra"]));
+    expect(badgedBranchNames()).toEqual(["main"]);
+    const title = screen.getByRole("button", { name: "收起分组 feature" });
+    expect(title.getAttribute("role")).not.toBe("option");
+    await fireEvent.click(title);
+    await fireEvent.click(screen.getByRole("button", { name: "展开分组 bugfix" }));
+    expect(api.switchBranch).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-branch-status]")?.textContent).toContain("feature/ui");
+
+    await fireEvent.input(screen.getByLabelText("搜索分支"), { target: { value: "feature/extra" } });
+    await waitFor(() => expect(rowNames()).toEqual(["feature/extra"]));
+    expect(document.querySelector(".branch-group")).toBeNull();
+    expect(rowOf("feature/extra").querySelector(".lr-title span")?.textContent).toBe("feature/extra");
+    await fireEvent.click(rowOf("feature/extra"));
+    await waitFor(() => expect(api.switchBranch).toHaveBeenCalledWith("/repo", "feature/extra", 4, 7));
+    expect(props.onMergeBranch).not.toHaveBeenCalled();
+  });
+
+  it("关闭分组后平铺完整名称，再次开启仍分组且当前分支不变", async () => {
+    const props = dialogProps({ branchGroups: true });
+    api.branchState.mockResolvedValue({
+      ...state,
+      defaultBranch: "main",
+      branches: [
+        branchRecord("feature/ui", true),
+        branchRecord("feature/extra"),
+        branchRecord("bugfix/login"),
+        branchRecord("main"),
+      ],
+    });
+    const view = render(BranchDialog, { props });
+    await waitFor(() => expect(rowNames()).toEqual(["main", "feature/ui", "feature/extra"]));
+    await fireEvent.click(screen.getByRole("button", { name: "展开分组 bugfix" }));
+    expect(rowNames()).toContain("bugfix/login");
+
+    await view.rerender({ ...props, branchGroups: false });
+    await waitFor(() => expect(rowNames()).toEqual(["feature/ui", "feature/extra", "bugfix/login", "main"]));
+    expect(document.querySelector(".branch-group")).toBeNull();
+    expect(badgedBranchNames()).toEqual(["main"]);
+    expect(rowOf("bugfix/login").querySelector(".lr-title span")?.textContent).toBe("bugfix/login");
+
+    await view.rerender({ ...props, branchGroups: true });
+    await waitFor(() => expect(rowNames()).toEqual(["main", "feature/ui", "feature/extra"]));
+    expect(screen.getByRole("button", { name: "展开分组 bugfix" })).toBeTruthy();
+    expect(badgedBranchNames()).toEqual(["main"]);
+    expect(api.switchBranch).not.toHaveBeenCalled();
+    expect(api.renameBranch).not.toHaveBeenCalled();
+    expect(api.deleteBranch).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-branch-status]")?.textContent).toContain("feature/ui");
+  });
+
+  async function openListed(
+    branches: ReturnType<typeof branchRecord>[],
+    defaultBranch: string | null,
+    current = "feature/ui",
+  ) {
+    api.branchState.mockResolvedValue({ ...state, branches, defaultBranch });
+    const props = dialogProps({
+      opened: { ...opened, snapshot: { ...snapshot, branch: { ...snapshot.branch, name: current } } },
+    });
+    render(BranchDialog, { props });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    return props;
+  }
 });

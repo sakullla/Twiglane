@@ -887,6 +887,11 @@ label.list-row .checkbox { margin-top: 2px; }
 .branch-row-icon { display: grid; place-items: center; color: var(--fg-subtle); flex: none; }
 .branch-row.current .branch-row-icon { color: var(--accent-text); }
 .branch-row .lr-title { font-size: var(--text-sm); }
+.branch-row .chip.default-branch { height: 18px; padding: 0 6px; background: var(--surface-3); color: var(--fg-muted); }
+.branch-picker-tag.default-branch { height: 18px; line-height: 18px; padding: 0 6px; background: var(--surface-3); color: var(--fg-muted); }
+.branch-group { display: flex; align-items: center; gap: var(--space-6); width: 100%; min-height: 28px; margin: 0; padding: 4px 10px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--fg-muted); font-size: var(--text-xs); font-weight: var(--weight-semibold); text-align: left; cursor: pointer; }
+.branch-group:hover { background: var(--hover); color: var(--fg); }
+.branch-open-worktree { flex: none; }
 .branch-empty { min-height: 165px; }
 .branch-empty .empty-icon { width: 38px; height: 38px; border-radius: 11px; }
 .branch-create, .tag-create { display: flex; flex-direction: column; gap: var(--space-8); padding: 14px; border-radius: var(--radius); background: var(--surface-2); }

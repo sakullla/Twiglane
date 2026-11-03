@@ -334,9 +334,7 @@ pub fn delete_remote_branch_command(
 
 pub fn branch_list_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
-    let format =
-        "%(refname)\u{1f}%(upstream:short)\u{1f}%(worktreepath)\u{1f}%(HEAD)\u{1f}%(objectname)"
-            .to_string();
+    let format = "%(refname)\u{1f}%(upstream:short)\u{1f}%(worktreepath)\u{1f}%(HEAD)\u{1f}%(objectname)\u{1f}%(symref:short)".to_string();
     args.extend([
         OsString::from("for-each-ref"),
         OsString::from("--format"),
@@ -1577,6 +1575,24 @@ mod tests {
                 text == "sh" || text == "bash" || text == "cmd" || text == "cmd.exe"
             }));
         }
+    }
+
+    #[test]
+    fn branch_list_reads_origin_head_without_a_shell() {
+        let git = Path::new("/usr/bin/git");
+        let root = Path::new("/tmp/demo");
+        let (program, args) = branch_list_command(git, root);
+        assert_eq!(program, git);
+        assert!(args.iter().any(|arg| arg == "for-each-ref"));
+        assert!(args.iter().any(|arg| arg == "refs/heads"));
+        assert!(args.iter().any(|arg| arg == "refs/remotes"));
+        assert!(args
+            .iter()
+            .any(|arg| arg.to_string_lossy().contains("%(symref:short)")));
+        assert!(!args.iter().any(|arg| {
+            let text = arg.to_string_lossy();
+            text == "sh" || text == "bash" || text == "cmd" || text == "cmd.exe"
+        }));
     }
 
     fn assert_no_force(args: &[OsString]) {

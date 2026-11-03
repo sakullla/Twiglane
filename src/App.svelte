@@ -2135,6 +2135,7 @@
       anchor={switcher.anchor}
       {opened}
       blockedReason={writeLocked ? switchBlockedReason(commandState) : null}
+      {branchGroups}
       {nextId}
       onBusy={(name) => (pending = name)}
       onGeneration={adoptGeneration}
@@ -2143,6 +2144,7 @@
       onNotice={notice}
       onCommand={runFromSwitcher}
       onCreateBranch={runBranchCreate}
+      onOpened={rememberOpened}
       onClose={closeSwitcher}
     />
   {/if}
@@ -2491,6 +2493,9 @@
     }}
     startCreating={branchCreateIntent}
     backgroundClone={pending === "clone"}
+    {branchGroups}
+    blockedReason={writeLocked ? switchBlockedReason(commandState) : null}
+    onOpened={rememberOpened}
     {nextId}
   />
 {:else if taskModal === "settings"}
@@ -2545,6 +2550,8 @@
   onFailure={handleMutationError}
   onNotice={notice}
   onOpenHistory={openCommitSearch}
+  {branchGroups}
+  onOpenWorktree={rememberOpened}
   {nextId}
 />
 

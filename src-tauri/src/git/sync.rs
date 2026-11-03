@@ -1044,7 +1044,8 @@ async fn load_branch_state(
                 .with_generation(listed.generation),
         );
     }
-    let mut branches = parse_branches(&listed.output.stdout)?;
+    let parsed = parse_branches(&listed.output.stdout)?;
+    let mut branches = parsed.branches;
     branches.sort_by(|left, right| {
         right
             .current
@@ -1052,11 +1053,13 @@ async fn load_branch_state(
             .then(left.remote.cmp(&right.remote))
             .then(left.name.cmp(&right.name))
     });
+    let default_branch = choose_default_branch(&branches, &parsed.origin_head);
     let snapshot = snapshot_at(backend, root, listed.generation, internal_request_id()).await?;
     Ok(BranchState {
         generation: snapshot.generation,
         branches,
         snapshot,
+        default_branch,
     })
 }
 
@@ -1483,10 +1486,49 @@ fn parse_remote_pairs(bytes: &[u8]) -> Result<Vec<RemotePair>, AppError> {
     Ok(pairs)
 }
 
-fn parse_branches(bytes: &[u8]) -> Result<Vec<BranchRecord>, AppError> {
+enum OriginHead {
+    Missing,
+    /// 有 `origin/HEAD`，但指不到一个本地分支名。此时不再退回 main/master/develop。
+    Unreadable,
+    Local(String),
+}
+
+struct ParsedBranchList {
+    branches: Vec<BranchRecord>,
+    origin_head: OriginHead,
+}
+
+fn local_name_from_origin_head(symref: &str) -> Option<String> {
+    let trimmed = symref.trim();
+    let name = trimmed
+        .strip_prefix("refs/remotes/origin/")
+        .or_else(|| trimmed.strip_prefix("origin/"))?;
+    if name.is_empty() || name == "HEAD" || name.ends_with("/HEAD") {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+fn choose_default_branch(branches: &[BranchRecord], origin_head: &OriginHead) -> Option<String> {
+    let named = |name: &str| {
+        branches
+            .iter()
+            .find(|branch| !branch.remote && branch.name == name)
+            .map(|branch| branch.name.clone())
+    };
+    match origin_head {
+        OriginHead::Local(name) => named(name),
+        OriginHead::Unreadable => None,
+        OriginHead::Missing => ["main", "master", "develop"].into_iter().find_map(named),
+    }
+}
+
+fn parse_branches(bytes: &[u8]) -> Result<ParsedBranchList, AppError> {
     let text = String::from_utf8(bytes.to_vec())
         .map_err(|_| AppError::new("branch_encoding", "分支名称无法安全解码，未修改仓库。"))?;
     let mut branches = Vec::new();
+    let mut origin_head = OriginHead::Missing;
     for line in text.split('\n') {
         if line.is_empty() {
             continue;
@@ -1502,7 +1544,15 @@ fn parse_branches(bytes: &[u8]) -> Result<Vec<BranchRecord>, AppError> {
             .next()
             .filter(|oid| !oid.is_empty())
             .map(str::to_string);
+        let symref = parts.next().unwrap_or("");
         let (name, remote) = if let Some(short) = refname.strip_prefix("refs/remotes/") {
+            if short == "origin/HEAD" {
+                origin_head = match local_name_from_origin_head(symref) {
+                    Some(local) => OriginHead::Local(local),
+                    None => OriginHead::Unreadable,
+                };
+                continue;
+            }
             if short.ends_with("/HEAD") {
                 continue;
             }
@@ -1532,7 +1582,10 @@ fn parse_branches(bytes: &[u8]) -> Result<Vec<BranchRecord>, AppError> {
             },
         });
     }
-    Ok(branches)
+    Ok(ParsedBranchList {
+        branches,
+        origin_head,
+    })
 }
 
 #[cfg(test)]
@@ -2599,6 +2652,234 @@ mod tests {
             git_text(&work, &["rev-parse", "topic"])
         );
     }
+
+    fn branch_line(fields: [&str; 6]) -> String {
+        fields.join("\u{1f}")
+    }
+
+    #[test]
+    fn default_branch_prefers_origin_head_then_main_master_develop() {
+        let origin_main = parse_branches(
+            [
+                branch_line(["refs/remotes/origin/HEAD", "", "", " ", "abc", "origin/main"]),
+                branch_line(["refs/heads/master", "", "", " ", "def", ""]),
+                branch_line(["refs/heads/main", "", "", "*", "abc", ""]),
+                branch_line(["refs/remotes/origin/main", "", "", " ", "abc", ""]),
+                branch_line(["refs/remotes/upstream/HEAD", "", "", " ", "def", "upstream/master"]),
+            ]
+            .join("\n")
+            .as_bytes(),
+        )
+        .unwrap();
+        assert!(
+            !origin_main
+                .branches
+                .iter()
+                .any(|branch| branch.name.ends_with("/HEAD")),
+            "远程 HEAD 不进入分支列表"
+        );
+        assert_eq!(
+            choose_default_branch(&origin_main.branches, &origin_main.origin_head).as_deref(),
+            Some("main")
+        );
+
+        let release = parse_branches(
+            [
+                branch_line(["refs/remotes/origin/HEAD", "", "", " ", "abc", "origin/release"]),
+                branch_line(["refs/heads/main", "", "", "*", "abc", ""]),
+                branch_line(["refs/heads/release", "", "", " ", "abc", ""]),
+            ]
+            .join("\n")
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            choose_default_branch(&release.branches, &release.origin_head).as_deref(),
+            Some("release")
+        );
+
+        let missing_local = parse_branches(
+            [
+                branch_line(["refs/remotes/origin/HEAD", "", "", " ", "abc", "origin/release"]),
+                branch_line(["refs/heads/master", "", "", "*", "def", ""]),
+                branch_line(["refs/heads/develop", "", "", " ", "ghi", ""]),
+            ]
+            .join("\n")
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            choose_default_branch(&missing_local.branches, &missing_local.origin_head).as_deref(),
+            None
+        );
+
+        let unreadable = parse_branches(
+            [
+                branch_line(["refs/remotes/origin/HEAD", "", "", " ", "abc", ""]),
+                branch_line(["refs/heads/master", "", "", "*", "def", ""]),
+            ]
+            .join("\n")
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            choose_default_branch(&unreadable.branches, &unreadable.origin_head).as_deref(),
+            None
+        );
+
+        let fallback = parse_branches(
+            [
+                branch_line(["refs/heads/develop", "", "", " ", "ghi", ""]),
+                branch_line(["refs/heads/master", "", "", "*", "def", ""]),
+                branch_line(["refs/heads/topic", "", "", " ", "jkl", ""]),
+            ]
+            .join("\n")
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            choose_default_branch(&fallback.branches, &fallback.origin_head).as_deref(),
+            Some("master")
+        );
+
+        let none = parse_branches(
+            branch_line(["refs/heads/topic", "", "", "*", "jkl", ""]).as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            choose_default_branch(&none.branches, &none.origin_head).as_deref(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn branch_state_default_follows_origin_head_without_rewriting_commits() {
+        let fixture = crate::test_support::git_fixture("default-branch");
+        let backend = fixture.backend();
+        let (_origin, work) = seed_bare(&fixture);
+        let head = git_text(&work, &["rev-parse", "HEAD"]);
+        let file = fs::read(work.join("file.txt")).unwrap();
+        let opened = open_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        let mut generation = opened.generation;
+        let mut listed = branch_state(&backend, &opened.summary.path, generation, 2)
+            .await
+            .unwrap();
+        assert_eq!(listed.default_branch.as_deref(), Some("main"));
+        assert!(!listed.branches.iter().any(|branch| branch.name.ends_with("/HEAD")));
+
+        git(&work, &["branch", "master"]);
+        git(&work, &["branch", "develop"]);
+        git(&work, &["branch", "release"]);
+        git(&work, &["update-ref", "refs/remotes/origin/release", "HEAD"]);
+        git(
+            &work,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/release",
+            ],
+        );
+        generation = listed.generation;
+        listed = branch_state(&backend, &opened.summary.path, generation, 3)
+            .await
+            .unwrap();
+        assert_eq!(listed.default_branch.as_deref(), Some("release"));
+
+        git(&work, &["branch", "-D", "release"]);
+        generation = listed.generation;
+        listed = branch_state(&backend, &opened.summary.path, generation, 4)
+            .await
+            .unwrap();
+        assert_eq!(listed.default_branch.as_deref(), None);
+
+        git(&work, &["update-ref", "-d", "refs/remotes/origin/HEAD"]);
+        generation = listed.generation;
+        listed = branch_state(&backend, &opened.summary.path, generation, 5)
+            .await
+            .unwrap();
+        assert_eq!(listed.default_branch.as_deref(), Some("main"));
+
+        git(&work, &["switch", "develop"]);
+        git(&work, &["branch", "-D", "main"]);
+        generation = listed.generation;
+        listed = branch_state(&backend, &opened.summary.path, generation, 6)
+            .await
+            .unwrap();
+        assert_eq!(listed.default_branch.as_deref(), Some("master"));
+
+        git(&work, &["switch", "-c", "topic"]);
+        git(&work, &["branch", "-D", "master"]);
+        git(&work, &["branch", "-D", "develop"]);
+        generation = listed.generation;
+        listed = branch_state(&backend, &opened.summary.path, generation, 7)
+            .await
+            .unwrap();
+        assert_eq!(listed.default_branch.as_deref(), None);
+        assert_eq!(fs::read(work.join("file.txt")).unwrap(), file);
+        assert_eq!(git_text(&work, &["rev-parse", "topic"]), head);
+    }
+
+    #[tokio::test]
+    async fn opening_another_worktree_leaves_both_checkouts_unchanged() {
+        let fixture = crate::test_support::git_fixture("open-worktree");
+        let backend = fixture.backend();
+        let (_origin, work) = seed_bare(&fixture);
+        git(&work, &["branch", "occupied"]);
+        let linked = fixture.path().join("linked");
+        git(
+            &work,
+            &["worktree", "add", repo_key(&linked).as_str(), "occupied"],
+        );
+        let main_head = git_text(&work, &["rev-parse", "HEAD"]);
+        let linked_head = git_text(&linked, &["rev-parse", "HEAD"]);
+        let main_file = fs::read(work.join("file.txt")).unwrap();
+        let linked_file = fs::read(linked.join("file.txt")).unwrap();
+        let opened = open_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        let switched = open_repository(&backend, &repo_key(&linked), 2).await.unwrap();
+        assert_eq!(
+            switched.summary.path,
+            repo_key(&canonical_existing(&linked).unwrap())
+        );
+        assert_ne!(switched.summary.path, opened.summary.path);
+        assert_eq!(git_text(&work, &["rev-parse", "HEAD"]), main_head);
+        assert_eq!(git_text(&linked, &["rev-parse", "HEAD"]), linked_head);
+        assert_eq!(git_text(&work, &["branch", "--show-current"]), "main");
+        assert_eq!(git_text(&linked, &["branch", "--show-current"]), "occupied");
+        assert_eq!(fs::read(work.join("file.txt")).unwrap(), main_file);
+        assert_eq!(fs::read(linked.join("file.txt")).unwrap(), linked_file);
+        let listed = branch_state(&backend, &opened.summary.path, opened.generation, 3)
+            .await
+            .unwrap();
+        let occupied = listed
+            .branches
+            .iter()
+            .find(|branch| branch.name == "occupied")
+            .expect("occupied branch");
+        let worktree = occupied.worktree.as_deref().unwrap_or("");
+        assert_eq!(
+            canonical_existing(Path::new(worktree)).unwrap(),
+            canonical_existing(&linked).unwrap()
+        );
+
+        let missing = fixture.path().join("missing-worktree");
+        let missing_error = open_repository(&backend, &repo_key(&missing), 4)
+            .await
+            .unwrap_err();
+        assert!(
+            missing_error.code == "path_missing" || missing_error.code == "path_unreadable",
+            "{}",
+            missing_error.code
+        );
+        assert!(!missing.exists());
+        let plain = fixture.path().join("plain-dir");
+        fs::create_dir(&plain).unwrap();
+        let plain_error = open_repository(&backend, &repo_key(&plain), 5)
+            .await
+            .unwrap_err();
+        assert_eq!(plain_error.code, "not_repository");
+        assert_eq!(git_text(&work, &["rev-parse", "HEAD"]), main_head);
+        assert_eq!(fs::read(work.join("file.txt")).unwrap(), main_file);
+    }
 }
 
 #[cfg(test)]
@@ -2625,6 +2906,7 @@ mod start_point_tests {
                 branch: BranchInfo::default(),
                 files: Vec::new(),
             },
+            default_branch: None,
         }
     }
 

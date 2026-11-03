@@ -1153,9 +1153,11 @@ describe("应用外壳", () => {
     const trigger = screen.getByRole("button", { name: "当前分支 main" });
     await fireEvent.click(trigger);
     const popover = await screen.findByRole("dialog", { name: "切换分支" });
-    await waitFor(() => expect(within(popover).getAllByRole("option").length).toBe(4));
+    await waitFor(() => expect(within(popover).getAllByRole("option").length).toBe(3));
     const names = within(popover).getAllByRole("option").map((option) => option.querySelector(".branch-option-name")?.textContent);
-    expect(names, "当前分支最前、本地在远程之前、origin/HEAD 不列出").toEqual(["main", "develop", "shared", "origin/develop"]);
+    expect(names, "当前分支最前、本地在远程之前；含斜杠的远程分支先收起，origin/HEAD 不列出").toEqual(["main", "develop", "shared"]);
+    expect(popover.textContent).not.toContain("origin/HEAD");
+    expect(within(popover).getByRole("button", { name: "展开分组 origin" })).toBeTruthy();
     expect(mocks.branchState, "读分支列表不占写锁").toHaveBeenCalledTimes(1);
     expect(within(popover).getByRole("option", { name: /main/ }).getAttribute("aria-selected")).toBe("true");
 
@@ -1182,7 +1184,7 @@ describe("应用外壳", () => {
     const fileRows = document.querySelectorAll(".file-row").length;
     await fireEvent.click(screen.getByRole("button", { name: "当前分支 main" }));
     const popover = await screen.findByRole("dialog", { name: "切换分支" });
-    await waitFor(() => expect(within(popover).getAllByRole("option").length).toBe(4));
+    await waitFor(() => expect(within(popover).getAllByRole("option").length).toBe(3));
     await fireEvent.click(within(popover).getByRole("option", { name: /^develop/ }));
 
     const alert = await within(popover).findByRole("alert");
@@ -1232,7 +1234,7 @@ describe("应用外壳", () => {
     const trigger = screen.getByRole("button", { name: "当前分支 main" });
     await fireEvent.click(trigger);
     let popover = await screen.findByRole("dialog", { name: "切换分支" });
-    await waitFor(() => expect(within(popover).getAllByRole("option").length).toBe(4));
+    await waitFor(() => expect(within(popover).getAllByRole("option").length).toBe(3));
     expect(mocks.branchState.mock.calls[1].slice(0, 2)).toEqual([repoPath, 9]);
     expect(within(popover).queryByRole("alert")).toBeNull();
     await press("Escape");
@@ -1251,7 +1253,7 @@ describe("应用外壳", () => {
     await openRepo();
     await fireEvent.click(screen.getByRole("button", { name: "当前分支 main" }));
     const popover = await screen.findByRole("dialog", { name: "切换分支" });
-    await waitFor(() => expect(within(popover).getAllByRole("option").length).toBe(4));
+    await waitFor(() => expect(within(popover).getAllByRole("option").length).toBe(3));
     const search = within(popover).getByRole("combobox");
     await fireEvent.keyDown(search, { key: "Enter" });
     await tick();
@@ -1308,7 +1310,7 @@ describe("应用外壳", () => {
     const refreshes = mocks.refreshStatus.mock.calls.length;
     await fireEvent.click(screen.getByRole("button", { name: "当前分支 main" }));
     const popover = await screen.findByRole("dialog", { name: "切换分支" });
-    await waitFor(() => expect(within(popover).getAllByRole("option").length).toBe(4));
+    await waitFor(() => expect(within(popover).getAllByRole("option").length).toBe(3));
     await fireEvent.click(within(popover).getByRole("option", { name: /^develop/ }));
     expect((await within(popover).findByRole("alert")).textContent).toContain("仓库状态已变化，请重试。");
     expect(screen.getByRole("button", { name: "当前分支 main" }), "分支没变").toBeTruthy();

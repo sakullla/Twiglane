@@ -132,6 +132,7 @@
         <input
           type="checkbox"
           checked={branchGroups}
+          title={disabled ? BUSY_REASON : undefined}
           disabled={disabled}
           onchange={(event) => onBranchGroups((event.currentTarget as HTMLInputElement).checked)}
         />

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { fireEvent, render, screen } from "@testing-library/svelte";
+import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
+import { tick } from "svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createTextDiff } from "../src/lib/diff";
 import type { CommitDetail, DiffResponse, OpenedRepository } from "../src/lib/types";
@@ -154,5 +155,91 @@ describe("多文件差异", () => {
     expect(css).toContain(".history-multi .multi-file-diff { display: block; height: auto;");
     expect(css).toContain(".history-multi .multi-file-head { position: sticky;");
     expect(css).toContain(".side-row > .hunk-btn { grid-column: 3; grid-row: 1; }");
+  });
+
+  it("长差异在文件块内滚动后能看到 40 行之后，并排开关在缩窄后仍可恢复", async () => {
+    const lines = Array.from({ length: 80 }, (_, index) => ({
+      kind: "context" as const,
+      text: ` L${index}`,
+      oldNo: index + 1,
+      newNo: index + 1,
+      hunkIndex: 0,
+    }));
+    commitFileDiff.mockImplementation((_repo: string, _oid: string, _parent: string, path: string) =>
+      Promise.resolve({
+        ...diffFor(path, "+unused"),
+        additions: 0,
+        deletions: 0,
+        totalLines: lines.length,
+        lines,
+      }),
+    );
+    const callbacks: ResizeObserverCallback[] = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          callbacks.push(callback);
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    let width = 800;
+    const widthSpy = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(() => width);
+    try {
+      render(CommitDiffList, {
+        props: {
+          opened,
+          detail: {
+            ...detail,
+            files: [{ path: "src/a.ts", originalPath: null, status: "modified", additions: 0, deletions: 0 }],
+          },
+          parent: "parent0",
+          disabled: false,
+          nextId: () => 1,
+          onGeneration: () => {},
+          onFailure: () => {},
+          onFileHistory: () => {},
+        },
+      });
+      await screen.findByText(codeLine("L0"));
+      expect(screen.queryByText(codeLine("L60"))).toBeNull();
+      expect(document.querySelectorAll(".history-multi [data-diff-row]").length).toBeLessThanOrEqual(40);
+      const host = document.querySelector<HTMLElement>(".history-multi .multi-file-diff")!;
+      const scroller = host.querySelector<HTMLElement>(".diff-scroll")!;
+      const box = (top: number, height: number) =>
+        ({ top, height, left: 0, width: width, right: width, bottom: top + height, x: 0, y: top, toJSON() { return {}; } }) as DOMRect;
+      host.getBoundingClientRect = () => box(0, 180);
+      scroller.getBoundingClientRect = () => box(-60 * 18, 80 * 18);
+      await fireEvent.scroll(host);
+      await waitFor(() => expect(screen.getByText(codeLine("L60"))).toBeTruthy());
+      const space = host.querySelector<HTMLElement>(".virtual-space")!;
+      expect(space.style.height).toBe(`${80 * 18}px`);
+      expect(host.querySelector(".multi-file-head")?.textContent).toContain("+0");
+      expect(host.querySelector(".multi-file-head")?.textContent).toContain("−0");
+
+      const split = screen.getByRole("button", { name: "并排" });
+      expect(split.getAttribute("aria-pressed")).toBe("false");
+      await fireEvent.click(split);
+      expect(split.getAttribute("aria-pressed")).toBe("true");
+      expect(host.querySelector(".side-row")).not.toBeNull();
+      width = 80;
+      for (const callback of callbacks) callback([], callback as unknown as ResizeObserver);
+      await tick();
+      expect(host.querySelector(".side-row")).toBeNull();
+      expect(split.getAttribute("aria-pressed")).toBe("true");
+      expect(host.querySelector(".diff")?.getAttribute("title")).toContain("窗口太窄，暂时使用统一视图");
+      width = 800;
+      for (const callback of callbacks) callback([], callback as unknown as ResizeObserver);
+      await tick();
+      expect(host.querySelector(".side-row")).not.toBeNull();
+      expect(split.getAttribute("aria-pressed")).toBe("true");
+      expect(host.querySelector(".hunk-btn")).toBeNull();
+    } finally {
+      widthSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
   });
 });

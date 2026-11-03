@@ -44,6 +44,9 @@
   let loadedKey = $state("");
   let measured = $state<Record<string, number>>({});
   let maxDiff = $derived(Math.max(180, (viewport > 0 ? viewport : 520) - 8));
+  let diffLayout = $state<"unified" | "split">("unified");
+  let hostVersion = $state(0);
+  const fileHosts = new Map<string, HTMLDivElement>();
   const requested = new Set<string>();
   const cached: string[] = [];
   let running = 0;
@@ -179,6 +182,31 @@
     expandedPaths = expandedSet.has(path) ? expandedPaths.filter((item) => item !== path) : [...expandedPaths, path];
   }
 
+  function takeHost(node: HTMLDivElement, path: string) {
+    let current = path;
+    const publish = (next: string) => {
+      if (current !== next && fileHosts.get(current) === node) fileHosts.delete(current);
+      current = next;
+      if (fileHosts.get(current) === node) return;
+      fileHosts.set(current, node);
+      hostVersion += 1;
+    };
+    publish(path);
+    return {
+      update: publish,
+      destroy() {
+        if (fileHosts.get(current) !== node) return;
+        fileHosts.delete(current);
+        hostVersion += 1;
+      },
+    };
+  }
+
+  function hostFor(path: string): HTMLDivElement | null {
+    void hostVersion;
+    return fileHosts.get(path) ?? null;
+  }
+
   function selection(path: string): FileSelection {
     return { path, side: "unstaged" };
   }
@@ -232,6 +260,10 @@
   <div class="history-multi-head">
     <div><strong>全部文件</strong><span>已展开 {expandedPaths.length} / {detail.files.length} 个，已加载 {loadedCount} 个</span></div>
     <div class="row">
+      <div class="segmented" role="group" aria-label="差异布局">
+        <button type="button" aria-pressed={diffLayout === "unified"} title="统一视图" onclick={() => (diffLayout = "unified")}><Icon name="rows" size={12} />统一</button>
+        <button type="button" aria-pressed={diffLayout === "split"} title="并排视图" onclick={() => (diffLayout = "split")}><Icon name="split" size={12} />并排</button>
+      </div>
       <button type="button" class="btn btn-ghost btn-sm" title={expandedPaths.length === detail.files.length ? "已经全部展开" : undefined} disabled={expandedPaths.length === detail.files.length} onclick={() => (expandedPaths = detail.files.map((file) => file.path))}><Icon name="plus" size={12} />展开全部</button>
       <button type="button" class="btn btn-ghost btn-sm" title={expandedPaths.length === 0 ? "已经全部收起" : undefined} disabled={expandedPaths.length === 0} onclick={() => (expandedPaths = [])}><Icon name="minus" size={12} />全部收起</button>
     </div>
@@ -257,7 +289,7 @@
         {@const mark = statusMark(commitFileLabel(file.status))}
         {@const parts = splitPath(file.path)}
         <article class="multi-file" class:expanded data-path={file.path} class:focused={focusPath === file.path} use:watchSize={file.path}>
-          <div class="multi-file-diff" style={`max-height:${maxDiff}px;--history-diff-max:${maxDiff}px`}>
+          <div class="multi-file-diff" style={`max-height:${maxDiff}px;--history-diff-max:${maxDiff}px`} use:takeHost={file.path}>
             <div class="multi-file-head">
               <button type="button" class="multi-file-toggle" aria-label={`${expanded ? "收起" : "展开"} ${file.path}`} aria-expanded={expanded} onclick={() => toggle(file.path)}>
                 <span class={`st ${mark.tone}`}>{mark.letter}</span>
@@ -271,6 +303,8 @@
             {#if expanded}
               <DiffView
                 embedded
+                scrollHost={hostFor(file.path)}
+                layout={diffLayout}
                 selection={selection(file.path)}
                 diff={fileDiffs[file.path] ?? null}
                 error={fileErrors[file.path] ?? null}

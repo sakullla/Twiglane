@@ -125,6 +125,39 @@ describe("工作区状态", () => {
       [null, 14],
       [14, 15],
     ]);
+    const missingNewline = "\\ No newline at end of file";
+    // 标记插在没有结尾换行的删除行和后面的新增行之间时，左右仍要落在同一行。
+    const splitByMarker = toSideRows([
+      { kind: "del", text: "-old", oldNo: 1, newNo: null, hunkIndex: 0 },
+      { kind: "nonewline", text: missingNewline, oldNo: null, newNo: null, hunkIndex: 0 },
+      { kind: "add", text: "+new", oldNo: null, newNo: 1, hunkIndex: 0 },
+    ]);
+    expect(splitByMarker[0]?.left?.text).toBe("-old");
+    expect(splitByMarker[0]?.right?.text).toBe("+new");
+    expect(splitByMarker[1]?.left?.text).toBe(missingNewline);
+    expect(splitByMarker[1]?.right).toBeNull();
+    // 删除行本身有换行、标记出现在新增行之后时，配对保持，标记跟在新增侧。
+    const markerAfterAdd = toSideRows([
+      { kind: "del", text: "-old", oldNo: 1, newNo: null, hunkIndex: 0 },
+      { kind: "add", text: "+new", oldNo: null, newNo: 1, hunkIndex: 0 },
+      { kind: "nonewline", text: missingNewline, oldNo: null, newNo: null, hunkIndex: 0 },
+    ]);
+    expect(markerAfterAdd[0]?.left?.text).toBe("-old");
+    expect(markerAfterAdd[0]?.right?.text).toBe("+new");
+    expect(markerAfterAdd[1]?.left).toBeNull();
+    expect(markerAfterAdd[1]?.right?.text).toBe(missingNewline);
+    // 多出来的新增行仍排在配对行之后，标记不占用配对槽。
+    const markerBetweenExtra = toSideRows([
+      { kind: "del", text: "-old", oldNo: 13, newNo: null, hunkIndex: 0 },
+      { kind: "nonewline", text: missingNewline, oldNo: null, newNo: null, hunkIndex: 0 },
+      { kind: "add", text: "+new", oldNo: null, newNo: 13, hunkIndex: 0 },
+      { kind: "add", text: "+more", oldNo: null, newNo: 14, hunkIndex: 0 },
+    ]);
+    expect(markerBetweenExtra.map((row) => [row.left?.text ?? null, row.right?.text ?? null])).toEqual([
+      ["-old", "+new"],
+      [missingNewline, null],
+      [null, "+more"],
+    ]);
     expect(nextIndex(-1, "ArrowDown", 2)).toBe(0);
     expect(nextIndex(0, "ArrowUp", 2)).toBe(0);
     expect(nextIndex(1, "End", 2)).toBe(1);

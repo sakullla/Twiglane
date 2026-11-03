@@ -569,6 +569,7 @@ describe("合并面板", () => {
       onSnapshot: () => {},
       onGeneration: () => {},
       onFailure: () => {},
+      onNotice: () => {},
       onOpenStash: () => {},
     });
     expect(screen.queryByRole("button", { name: /跳过/ })).toBeNull();

@@ -336,7 +336,7 @@ pub async fn complete_merge(
         .actions
         .enter(action_key("merge", &repo_key(&root)))?;
     let mut guard = write_lock(backend, &root, generation, request_id).await?;
-    let outcome = complete_in_guard(&mut guard, backend, &git.path, &root, &message).await;
+    let outcome = complete_in_guard(&mut guard, backend, &git.path, &root, message).await;
     let generation = guard.finish();
     let prepared = outcome.map_err(|error| attach_generation(error, generation))?;
     let snapshot = settle_read!(backend, &root, generation, |current| read_status(
@@ -1202,25 +1202,38 @@ async fn resolve_in_guard(
         guard,
         git,
         root,
-        relative,
-        entry,
-        choice,
-        content,
-        abortable_operation(&operation),
+        ConflictResolution {
+            relative,
+            entry,
+            choice,
+            content,
+            sequencer: abortable_operation(&operation),
+        },
     )
     .await
+}
+
+struct ConflictResolution<'a> {
+    relative: &'a Path,
+    entry: &'a Stages,
+    choice: &'a str,
+    content: Option<&'a str>,
+    sequencer: bool,
 }
 
 async fn apply_choice(
     guard: &mut WriteGuard<'_, RealRunner>,
     git: &Path,
     root: &Path,
-    relative: &Path,
-    entry: &Stages,
-    choice: &str,
-    content: Option<&str>,
-    sequencer: bool,
+    request: ConflictResolution<'_>,
 ) -> Result<(), AppError> {
+    let ConflictResolution {
+        relative,
+        entry,
+        choice,
+        content,
+        sequencer,
+    } = request;
     let limit = DIFF_PREVIEW_BYTES;
     match choice {
         "text" => {

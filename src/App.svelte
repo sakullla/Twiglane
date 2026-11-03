@@ -1425,26 +1425,15 @@
     }
   }
 
-  /** .gitignore 规则：按文件（锚定到仓库根）、按扩展名、按所在目录三种。 */
-  function ignoreRules(relative: string): { label: string; pattern: string }[] {
-    const rules = [{ label: `忽略此文件（/${relative}）`, pattern: `/${relative}` }];
-    const name = relative.split("/").pop() ?? relative;
-    const dot = name.lastIndexOf(".");
-    if (dot > 0) rules.push({ label: `忽略所有 ${name.slice(dot)} 文件`, pattern: `*${name.slice(dot)}` });
-    const slash = relative.lastIndexOf("/");
-    if (slash > 0) rules.push({ label: `忽略目录 ${relative.slice(0, slash)}/`, pattern: `/${relative.slice(0, slash)}/` });
-    return rules;
-  }
-
-  async function ignore(pattern: string) {
+  async function ignore(relative: string, local: boolean) {
     const current = opened;
     if (!current || pending || reading) return;
     pending = "ignore";
     try {
-      const snapshot = await api.ignorePath(current.summary.path, pattern, current.generation, nextId());
+      const outcome = await api.ignorePath(current.summary.path, `/${relative}`, local, current.generation, nextId());
       if (opened?.summary.path !== current.summary.path) return;
-      applySnapshot(snapshot);
-      notice(`已把 ${pattern} 加入 .gitignore。已被跟踪的文件不受影响，需要先从索引移除。`);
+      applySnapshot(outcome.snapshot);
+      notice(outcome.note);
     } catch (error) {
       handleMutationError(error);
     } finally {
@@ -1520,12 +1509,21 @@
     entries.push({ id: "copy-rel", label: "复制相对路径", icon: "copy", run: () => void copyText(row.path, "相对路径") });
     entries.push({ id: "copy-abs", label: "复制完整路径", icon: "copy", run: () => void copyText(absolutePath(row.path), "完整路径") });
     entries.push({ id: "copy-name", label: "复制文件名", icon: "copy", run: () => void copyText(row.path.split("/").pop() ?? row.path, "文件名") });
-    if (row.untracked) {
-      entries.push({ separator: true }, { heading: "加入 .gitignore" });
-      for (const rule of ignoreRules(row.path)) {
-        entries.push({ id: `ignore:${rule.pattern}`, label: rule.label, icon: "eye", disabledReason: busy, run: () => void ignore(rule.pattern) });
-      }
-    }
+    entries.push({ separator: true });
+    entries.push({
+      id: "ignore-git",
+      label: "加入 .gitignore",
+      icon: "eye",
+      disabledReason: busy,
+      run: () => void ignore(row.path, false),
+    });
+    entries.push({
+      id: "ignore-local",
+      label: "加入 .git/info/exclude",
+      icon: "eye",
+      disabledReason: busy,
+      run: () => void ignore(row.path, true),
+    });
     contextMenu = { x: point.x, y: point.y, entries, label: `${row.path} 的操作` };
   }
 

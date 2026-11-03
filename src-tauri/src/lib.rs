@@ -33,7 +33,7 @@ use crate::model::{
     ConflictView, DiffResponse, DiscardResult, FileHistoryPage, GitInfo, HistoryPage,
     MergeComplete, MergePreview, MergeSession, OpenedRepository, PanelWidths, RecentRepo,
     RemoteState, RemoteTag, RepoChanged, StashApplyResult, StashSaveResult, StashState,
-    StatusSnapshot, TagState, Theme, UndoResult,
+    IgnoreOutcome, StatusSnapshot, TagState, Theme, UndoResult,
 };
 use crate::shutdown::Shutdown;
 use crate::state::{AppStore, PullIntegration};
@@ -701,19 +701,30 @@ async fn ignore_path(
     state: State<'_, Arc<Backend>>,
     path: String,
     pattern: String,
+    local: bool,
     generation: u64,
     request_id: u64,
-) -> Result<StatusSnapshot, AppError> {
-    let written =
-        crate::git::workspace::ignore_path(state.inner(), &path, &pattern, generation, request_id)
-            .await?;
-    ops::refresh_status(
+) -> Result<IgnoreOutcome, AppError> {
+    let written = crate::git::workspace::ignore_path(
         state.inner(),
         &path,
-        written,
+        &pattern,
+        local,
+        generation,
+        request_id,
+    )
+    .await?;
+    let snapshot = ops::refresh_status(
+        state.inner(),
+        &path,
+        written.generation,
         crate::git::schedule::internal_request_id(),
     )
-    .await
+    .await?;
+    Ok(IgnoreOutcome {
+        snapshot,
+        note: written.note,
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]

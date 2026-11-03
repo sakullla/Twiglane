@@ -104,6 +104,30 @@ export function filterRows<T extends { path: string; originalPath: string | null
   );
 }
 
+/** 文件所在目录。仓库根下的文件没有父目录，返回空字符串。 */
+export function parentDirectory(path: string): string {
+  const slash = path.lastIndexOf("/");
+  return slash < 0 ? "" : path.slice(0, slash);
+}
+
+/** 按父目录分桶。目录名排序，桶内保持调用方给出的顺序。 */
+export function bucketByDirectory<T extends { path: string }>(rows: T[]): { directory: string; rows: T[] }[] {
+  const order: string[] = [];
+  const groups = new Map<string, T[]>();
+  for (const row of rows) {
+    const directory = parentDirectory(row.path);
+    const existing = groups.get(directory);
+    if (existing) {
+      existing.push(row);
+    } else {
+      groups.set(directory, [row]);
+      order.push(directory);
+    }
+  }
+  order.sort((left, right) => left.localeCompare(right));
+  return order.map((directory) => ({ directory, rows: groups.get(directory) ?? [] }));
+}
+
 export function stagedFiles(files: FileChange[]): FileChange[] {
   return files.filter((file) => !file.unmerged && file.staged !== "none");
 }

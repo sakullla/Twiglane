@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { fireEvent, render, screen } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createTextDiff } from "../src/lib/diff";
@@ -116,5 +117,42 @@ describe("多文件差异", () => {
     await fireEvent.click(screen.getByRole("button", { name: "展开全部" }));
     expect(await screen.findByText(codeLine("a-content"))).toBeTruthy();
     expect(screen.getByText(codeLine("b-content"))).toBeTruthy();
+  });
+
+  it("文件块高度跟随内容，标题带行数，一个文件失败时另一个仍可阅读", async () => {
+    commitFileDiff.mockImplementation((_repo: string, _oid: string, _parent: string, path: string) => {
+      if (path.endsWith("b.ts")) return Promise.reject({ code: "diff_failed", message: "这个文件的差异没有读出来。" });
+      return Promise.resolve(diffFor(path, "+a-content"));
+    });
+    const counted: CommitDetail = {
+      ...detail,
+      files: [
+        { path: "src/a.ts", originalPath: null, status: "added", additions: 4, deletions: 0 },
+        { path: "src/b.ts", originalPath: null, status: "modified", binary: true },
+      ],
+    };
+    render(CommitDiffList, {
+      props: {
+        opened,
+        detail: counted,
+        parent: "parent0",
+        disabled: false,
+        nextId: () => 1,
+        onGeneration: () => {},
+        onFailure: () => {},
+        onFileHistory: () => {},
+      },
+    });
+    expect(await screen.findByText(codeLine("a-content"))).toBeTruthy();
+    expect(await screen.findByText("这个文件的差异没有读出来。")).toBeTruthy();
+    expect(screen.getByLabelText("新增 4 行，删除 0 行")).toBeTruthy();
+    expect(screen.getByText("二进制")).toBeTruthy();
+    const article = document.querySelector<HTMLElement>('.multi-file[data-path="src/a.ts"]');
+    expect(article?.getAttribute("style") ?? "").not.toContain("420");
+    expect(document.querySelector<HTMLElement>(".history-multi .multi-file-diff")?.style.maxHeight).not.toBe("");
+    const css = readFileSync("src/styles/components.css", "utf8");
+    expect(css).toContain(".history-multi .multi-file-diff { display: block; height: auto;");
+    expect(css).toContain(".history-multi .multi-file-head { position: sticky;");
+    expect(css).toContain(".side-row > .hunk-btn { grid-column: 3; grid-row: 1; }");
   });
 });

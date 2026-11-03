@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import { hunkCaption, toSideRows, visibleDiffLines, type ViewLine } from "../diff";
+  import { hunkCaption, splitColumnsFit, toSideRows, visibleDiffLines, type ViewLine } from "../diff";
   import { trackCodeScroll } from "../codeScroll.svelte";
   import { codeContentSize, codeRuler, rulerPadding, scrollByRows, visibleRange } from "../layout";
   import type { DiffHunk, DiffResponse, FileSelection } from "../types";
@@ -13,6 +13,7 @@
   import FileNav from "./FileNav.svelte";
   import LanguagePicker from "./LanguagePicker.svelte";
   import Icon from "./Icon.svelte";
+  import LineCounts from "./LineCounts.svelte";
 
   interface Props {
     selection: FileSelection | null;
@@ -70,7 +71,13 @@
   }: Props = $props();
   let menu = $state<ContextMenuRequest | null>(null);
   let ownMode = $state<"unified" | "split">("unified");
-  let mode = $derived(layout ?? ownMode);
+  /** 用户选的布局。窄到两列重叠时暂时画统一视图，加宽后若仍是并排则恢复。 */
+  let preferred = $derived<"unified" | "split">(layout ?? ownMode);
+  let paneWidth = $state(0);
+  let renderMode = $derived<"unified" | "split">(
+    preferred === "split" && !splitColumnsFit(paneWidth, !readOnly) ? "unified" : preferred,
+  );
+  let cramped = $derived(preferred === "split" && renderMode === "unified");
   let scrollTop = $state(0);
   let viewport = $state(0);
   /** embedded 时外层视口相对本块的位置与高度。 */
@@ -92,8 +99,8 @@
   let shown = $derived(visibleDiffLines(currentDiff?.lines ?? []));
   let lines = $derived<ViewLine[]>(shown.lines);
   let metaOnly = $derived(shown.lines.length === 0 && shown.meta.length > 0);
-  let sideRows = $derived(mode === "split" ? toSideRows(lines) : []);
-  let total = $derived(mode === "split" ? sideRows.length : lines.length);
+  let sideRows = $derived(renderMode === "split" ? toSideRows(lines) : []);
+  let total = $derived(renderMode === "split" ? sideRows.length : lines.length);
   /* 宽度取全量差异的最长行，只随内容变化，不随虚拟窗口或布局切换跳动。 */
   let codeTexts = $derived(lines.filter((line) => line.kind !== "hunk").map((line) => codeOf(line)));
   let ruler = $derived(codeRuler(codeTexts));
@@ -108,9 +115,20 @@
     return origin === undefined ? null : (currentDiff?.hunks.find((hunk) => hunk.startLine === origin) ?? null);
   });
   let parts = $derived(selection ? splitPath(selection.path) : null);
-  let showStats = $derived(
-    Boolean(currentDiff && !currentDiff.binary && (currentDiff.additions > 0 || currentDiff.deletions > 0)),
-  );
+  let showStats = $derived(Boolean(currentDiff));
+
+  $effect(() => {
+    const node = root;
+    if (!node) return;
+    const read = () => {
+      paneWidth = node.clientWidth;
+    };
+    read();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(read);
+    observer.observe(node);
+    return () => observer.disconnect();
+  });
 
   /* 语法高亮：旧侧（上下文 + 删除）与新侧（上下文 + 新增）各自整体分词，再按行映射回来；
      行内改动区间在配对的删除/新增行之间计算。结果逐块到达，未到的行先按纯文本显示。 */
@@ -309,7 +327,7 @@
   trackCodeScroll(
     () => scroller,
     () => ruler,
-    () => [selectionKey, mode, range.start, range.end],
+    () => [selectionKey, renderMode, range.start, range.end],
     () => codeSize,
   );
 
@@ -353,7 +371,7 @@
   }
 </script>
 
-<section class="diff dense" class:embedded aria-label="差异详情" tabindex="-1" bind:this={root}>
+<section class="diff dense" class:embedded aria-label="差异详情" tabindex="-1" bind:this={root} title={cramped ? "窗口太窄，暂时使用统一视图" : undefined}>
   {#if !embedded}
   <div class="diff-toolbar">
     {#if fileNav}<FileNav nav={fileNav} />{/if}
@@ -369,13 +387,14 @@
           </span>
         {/if}
         {#if showStats && currentDiff}
-          <span class="diff-stats" aria-label={`新增 ${currentDiff.additions} 行，删除 ${currentDiff.deletions} 行`}>
-            <span class="plus">+{currentDiff.additions}</span>
-            <span class="minus">−{currentDiff.deletions}</span>
-          </span>
+          <LineCounts
+            stat={currentDiff.binary
+              ? { additions: null, deletions: null }
+              : { additions: currentDiff.additions, deletions: currentDiff.deletions }}
+          />
         {/if}
-        {#if currentDiff && !showStats}
-          <span class="diff-summary" title={currentDiff.summary}>{currentDiff.summary}</span>
+        {#if cramped}
+          <span class="diff-summary" title="窗口太窄，暂时使用统一视图">窗口太窄，暂时使用统一视图</span>
         {/if}
       {:else}
         <span class="hint">差异</span>
@@ -408,8 +427,8 @@
       </button>
     {/if}
     <div class="segmented" role="group" aria-label="差异布局">
-      <button type="button" aria-pressed={mode === "unified"} title="统一视图" onclick={() => (ownMode = "unified")}><Icon name="rows" size={12} />统一</button>
-      <button type="button" aria-pressed={mode === "split"} title="并排视图" onclick={() => (ownMode = "split")}><Icon name="split" size={12} />并排</button>
+      <button type="button" aria-pressed={preferred === "unified"} title="统一视图" onclick={() => (ownMode = "unified")}><Icon name="rows" size={12} />统一</button>
+      <button type="button" aria-pressed={preferred === "split"} title="并排视图" onclick={() => (ownMode = "split")}><Icon name="split" size={12} />并排</button>
     </div>
   </div>
   {/if}
@@ -474,9 +493,9 @@
       bind:clientHeight={viewport}
     >
       <div class="virtual-space" style={`height:${total * ROW_HEIGHT}px`}>
-        <div class="code-ruler" class:half={mode === "split"} aria-hidden="true">{#each ruler as line, i (i)}<span data-text={line.text} style={rulerPadding(line)}></span>{/each}</div>
+        <div class="code-ruler" class:half={renderMode === "split"} aria-hidden="true">{#each ruler as line, i (i)}<span data-text={line.text} style={rulerPadding(line)}></span>{/each}</div>
         <div class="code-stage">
-        {#if mode === "unified"}
+        {#if renderMode === "unified"}
           {#each lines.slice(range.start, range.end) as line, index (`u-${range.start + index}`)}
             {@const absolute = range.start + index}
             <div class={lineClass(line.kind)} data-diff-row="" data-line={absolute} style={`top:${absolute * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}>

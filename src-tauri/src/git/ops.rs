@@ -1,20 +1,24 @@
+use std::collections::HashMap;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use serde::Serialize;
 
 use crate::error::AppError;
-use crate::git::command::{init_command, status_command, toplevel_command};
+use crate::git::command::{init_command, numstat_command, status_command, toplevel_command};
 use crate::git::gate::{remote_check_is_stale, ActionGate, RemoteChecks};
 use crate::git::locate::{detect_git_binary, validate_git, GitLocator, ResolvedGit};
 use crate::git::parse::parse_status;
+use crate::git::patch::{assign_worktree_numstat, numstat_map, parse_numstat_list};
 use crate::git::runner::{ProcessOutput, RealRunner};
-use crate::git::schedule::{GitJob, GitScheduler, JobKind, ScheduledOutput};
+use crate::git::schedule::{
+    internal_request_id, CommandSpec, GitJob, GitScheduler, JobKind, ScheduledOutput, WriteGuard,
+};
 use crate::model::{
-    GitInfo, OpenedRepository, PanelWidths, RecentRepo, RepoSummary, SettingsDto, StatusSnapshot,
-    Theme,
+    ChangeKind, FileChange, GitInfo, LineStat, OpenedRepository, PanelWidths, RecentRepo,
+    RepoSummary, SettingsDto, StatusSnapshot, Theme,
 };
 use crate::redact::redact_error_text;
 use crate::shutdown::Shutdown;
@@ -253,7 +257,7 @@ pub async fn refresh_status(
         Some(generation),
     )
     .await?;
-    status_from_output(backend, &repo_key(&root), &scheduled)
+    status_from_output(backend, &root, &scheduled).await
 }
 
 async fn open_root(
@@ -273,7 +277,7 @@ async fn open_root(
         None,
     )
     .await?;
-    let snapshot = status_from_output(backend, &repo_key(&root), &scheduled)?;
+    let snapshot = status_from_output(backend, &root, &scheduled).await?;
     let summary = RepoSummary {
         name: repo_name(&root),
         path: repo_key(&root),
@@ -292,9 +296,9 @@ async fn open_root(
     })
 }
 
-pub(crate) fn status_from_output(
+pub(crate) async fn status_from_output(
     backend: &Backend,
-    repo: &str,
+    root: &Path,
     scheduled: &ScheduledOutput,
 ) -> Result<StatusSnapshot, AppError> {
     if scheduled.output.exit_code != 0 {
@@ -306,12 +310,183 @@ pub(crate) fn status_from_output(
     }
     let mut snapshot = parse_status(&scheduled.output.stdout)?;
     snapshot.generation = scheduled.generation;
-    let checked_at = backend.remote_checks.get(repo);
+    let repo = repo_key(root);
+    let checked_at = backend.remote_checks.get(&repo);
     snapshot.branch.remote_checked_at_ms = checked_at;
     let stale = checked_at.is_some_and(|at| remote_check_is_stale(at, crate::state::now_ms()));
     snapshot.branch.remote_check_stale = stale;
     snapshot.branch.live_remote_checked = checked_at.is_some() && !stale;
+    decorate_status(backend, root, &mut snapshot).await;
     Ok(snapshot)
+}
+
+fn needs_staged_stats(files: &[FileChange]) -> bool {
+    files
+        .iter()
+        .any(|file| file.unmerged || file.staged != ChangeKind::None)
+}
+
+fn needs_unstaged_stats(files: &[FileChange]) -> bool {
+    files
+        .iter()
+        .any(|file| !file.untracked && (file.unmerged || file.unstaged != ChangeKind::None))
+}
+
+/// 行数读失败时保持未知，状态本身仍然返回。不在持有写锁时调用。
+async fn decorate_status(backend: &Backend, root: &Path, snapshot: &mut StatusSnapshot) {
+    if snapshot.files.is_empty() {
+        return;
+    }
+    let Ok(git) = require_git(backend).await else {
+        fill_untracked_lines(root, &mut snapshot.files);
+        return;
+    };
+    let staged = if needs_staged_stats(&snapshot.files) {
+        read_numstat_map(backend, root, &git.path, true, snapshot.generation).await
+    } else {
+        HashMap::new()
+    };
+    let unstaged = if needs_unstaged_stats(&snapshot.files) {
+        read_numstat_map(backend, root, &git.path, false, snapshot.generation).await
+    } else {
+        HashMap::new()
+    };
+    assign_worktree_numstat(&mut snapshot.files, &staged, &unstaged);
+    fill_untracked_lines(root, &mut snapshot.files);
+}
+
+/// 写锁内补行数。走 guard.run，避免再进调度器造成死锁。
+pub(crate) async fn decorate_guard_status(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+    snapshot: &mut StatusSnapshot,
+) {
+    if snapshot.files.is_empty() {
+        return;
+    }
+    let staged = if needs_staged_stats(&snapshot.files) {
+        read_numstat_guard(guard, git, root, true).await
+    } else {
+        HashMap::new()
+    };
+    let unstaged = if needs_unstaged_stats(&snapshot.files) {
+        read_numstat_guard(guard, git, root, false).await
+    } else {
+        HashMap::new()
+    };
+    assign_worktree_numstat(&mut snapshot.files, &staged, &unstaged);
+    fill_untracked_lines(root, &mut snapshot.files);
+}
+
+async fn read_numstat_map(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    staged: bool,
+    generation: u64,
+) -> HashMap<String, LineStat> {
+    let (program, args) = numstat_command(git, root, staged);
+    let Ok(scheduled) = run_git(
+        backend,
+        &repo_key(root),
+        JobKind::Read,
+        internal_request_id(),
+        program,
+        args,
+        Some(generation),
+    )
+    .await
+    else {
+        return HashMap::new();
+    };
+    if scheduled.output.exit_code != 0 {
+        return HashMap::new();
+    }
+    numstat_map(parse_numstat_list(&scheduled.output.stdout))
+}
+
+async fn read_numstat_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+    staged: bool,
+) -> HashMap<String, LineStat> {
+    let (program, args) = numstat_command(git, root, staged);
+    let Ok(output) = guard
+        .run(CommandSpec {
+            program,
+            args,
+            stdin: None,
+            truncate_stdout: false,
+            output_limit: None,
+            writes: false,
+        })
+        .await
+    else {
+        return HashMap::new();
+    };
+    if output.exit_code != 0 {
+        return HashMap::new();
+    }
+    numstat_map(parse_numstat_list(&output.stdout))
+}
+
+fn fill_untracked_lines(root: &Path, files: &mut [FileChange]) {
+    for file in files {
+        if file.untracked {
+            file.unstaged_lines = untracked_line_stat(root, &file.path);
+        }
+    }
+}
+
+fn untracked_line_stat(root: &Path, path: &str) -> Option<LineStat> {
+    let relative = safe_relative(path).ok()?;
+    let mut opened = fs::File::open(root.join(relative)).ok()?;
+    let mut probe = [0_u8; 8000];
+    let mut filled = 0;
+    while filled < probe.len() {
+        match opened.read(&mut probe[filled..]) {
+            Ok(0) => break,
+            Ok(count) => filled += count,
+            Err(_) => return None,
+        }
+    }
+    if probe[..filled].contains(&0) {
+        return Some(LineStat {
+            additions: None,
+            deletions: None,
+        });
+    }
+    let mut newlines = probe[..filled]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count() as u64;
+    let mut last = probe[..filled].last().copied();
+    let mut rest = [0_u8; 8192];
+    loop {
+        let count = match opened.read(&mut rest) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(_) => return None,
+        };
+        newlines += rest[..count]
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count() as u64;
+        last = rest[..count].last().copied();
+    }
+    let additions = if filled == 0 {
+        0
+    } else if last == Some(b'\n') {
+        newlines
+    } else {
+        newlines + 1
+    };
+    Some(LineStat {
+        additions: Some(additions),
+        deletions: Some(0),
+    })
 }
 
 #[derive(Debug)]

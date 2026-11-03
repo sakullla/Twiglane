@@ -2,11 +2,12 @@
   import { onDestroy, tick, untrack } from "svelte";
   import { api } from "../api";
   import { normalizeError } from "../errors";
-  import type { DiffHunk, DiffResponse, FileRow, FileSelection, OpenedRepository } from "../types";
+  import type { DiffHunk, DiffResponse, FileRow, FileSelection, LineStat, OpenedRepository } from "../types";
   import { appendDiffPage, BUSY_REASON, blockTops, blockWindow, rowMark, selectionKey, splitPath, type FileNavState } from "../ui";
   import DiffView from "./DiffView.svelte";
   import FileNav from "./FileNav.svelte";
   import Icon from "./Icon.svelte";
+  import LineCounts from "./LineCounts.svelte";
 
   interface Props {
     opened: OpenedRepository;
@@ -318,6 +319,13 @@
     }
   }
 
+  function titleStat(fromRow: LineStat | null | undefined, loaded: DiffResponse | null): LineStat | null {
+    if (fromRow) return fromRow;
+    if (!loaded) return null;
+    if (loaded.binary) return { additions: null, deletions: null };
+    return { additions: loaded.additions, deletions: loaded.deletions };
+  }
+
   function excluded(action: string): string {
     return conflictCount > 0 ? `${action}（已排除 ${conflictCount} 个冲突文件）` : action;
   }
@@ -377,19 +385,14 @@
         {@const parts = splitPath(row.path)}
         {@const mark = rowMark(row)}
         {@const loaded = diffs[key] ?? null}
-        {@const stats = loaded && !loaded.binary && (loaded.additions > 0 || loaded.deletions > 0)}
+        {@const stat = row.side === "staged" ? row.stagedLines : row.unstagedLines}
         <article class="multi-file" class:expanded class:focused={focus?.path === row.path && focus.side === row.side} data-key={key} data-path={row.path} use:measured>
           <div class="multi-file-head">
             <button type="button" class="multi-file-toggle" aria-label={`${expanded ? "收起" : "展开"} ${row.path}`} aria-expanded={expanded} title={row.path} onclick={() => toggle(key)}>
               <span class={`st ${mark.tone}`}>{mark.letter}</span>
               <span class="multi-file-name"><strong>{parts.name}</strong>{#if parts.dir}<small>{parts.dir}</small>{/if}</span>
               <span class="diff-side" class:staged={row.side === "staged"}>{row.unmerged ? "冲突" : row.side === "staged" ? "已暂存" : "未暂存"}</span>
-              {#if stats && loaded}
-                <span class="diff-stats" aria-label={`新增 ${loaded.additions} 行，删除 ${loaded.deletions} 行`}>
-                  <span class="plus">+{loaded.additions}</span>
-                  <span class="minus">−{loaded.deletions}</span>
-                </span>
-              {/if}
+              <LineCounts stat={titleStat(stat, loaded)} />
               <Icon name="chevron-down" size={13} class={expanded ? "flip" : ""} />
             </button>
             <button type="button" class="icon-btn sm" aria-label={`查看 ${row.path} 的文件历史`} title="查看此文件历史" onclick={() => onFileHistory(row.path)}><Icon name="history" size={13} /></button>

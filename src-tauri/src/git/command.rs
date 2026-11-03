@@ -43,7 +43,7 @@ pub fn status_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
             OsString::from("--porcelain=v2"),
             OsString::from("--branch"),
             OsString::from("-z"),
-            OsString::from("--untracked-files=normal"),
+            OsString::from("--untracked-files=all"),
         ],
     )
 }
@@ -831,6 +831,21 @@ pub fn stash_drop_command(git: &Path, root: &Path, stash_ref: &str) -> (PathBuf,
     (git.to_path_buf(), args)
 }
 
+/// 工作区或暂存区全部文件的 `--numstat -z`。重命名记录是 `added\tdeleted\t\0old\0new\0`。
+pub fn numstat_command(git: &Path, root: &Path, staged: bool) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.push(OsString::from("diff"));
+    if staged {
+        args.push(OsString::from("--cached"));
+    }
+    args.extend([
+        OsString::from("--numstat"),
+        OsString::from("-z"),
+        OsString::from("--find-renames"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
 pub fn rev_parse_command(git: &Path, root: &Path, revision: &str) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.extend([
@@ -1280,6 +1295,24 @@ mod tests {
         assert_structured(&program, &args);
         assert_eq!(args[1], "-C");
         assert_eq!(args[2], root.as_os_str());
+        assert!(args.iter().any(|arg| arg == "--untracked-files=all"));
+        assert!(!args.iter().any(|arg| arg == "--untracked-files=normal"));
+        let numstat_args = numstat_command(git, root, true).1;
+        assert!(numstat_args.iter().any(|arg| arg == "--cached"));
+        assert!(numstat_args.iter().any(|arg| arg == "--numstat"));
+        assert!(numstat_args.iter().any(|arg| arg == "-z"));
+        assert!(numstat_args
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == "core.quotePath=false"));
+        let git_path_args = git_path_command(git, root, "info/exclude").1;
+        assert!(git_path_args.iter().any(|arg| arg == "--git-path"));
+        assert_eq!(
+            git_path_args.last().map(OsString::as_os_str),
+            Some(std::ffi::OsStr::new("info/exclude"))
+        );
+        assert!(git_path_args
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == "core.quotePath=false"));
         let (_program, init_args) = init_command(git, root);
         assert_structured(git, &init_args);
         assert_eq!(init_args[1], root.as_os_str());

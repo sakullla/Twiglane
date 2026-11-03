@@ -9,6 +9,7 @@ import type {
   FileHistoryPage,
   GitInfo,
   HistoryPage,
+  IgnoreOutcome,
   OpenedRepository,
   PanelWidths,
   RecentRepo,
@@ -163,9 +164,9 @@ export const api = {
   revealPath: (path: string, relative: string) => invoke<void>("reveal_path", { path, relative }),
   /** 用系统默认程序打开仓库内的文件。 */
   openPath: (path: string, relative: string) => invoke<void>("open_path", { path, relative }),
-  /** 把一条规则追加到仓库根目录的 .gitignore，返回刷新后的状态。 */
-  ignorePath: (path: string, pattern: string, generation: number, requestId: number) =>
-    invoke<StatusSnapshot>("ignore_path", { path, pattern, generation, requestId }),
+  /** 把一条规则追加到 .gitignore，或只写入本地 info/exclude。local 为 true 时不进入提交。 */
+  ignorePath: (path: string, pattern: string, local: boolean, generation: number, requestId: number) =>
+    invoke<IgnoreOutcome>("ignore_path", { path, pattern, local, generation, requestId }),
   switchBranch: (path: string, name: string, generation: number, requestId: number) =>
     invoke<BranchState>("switch_branch", { path, name, generation, requestId }),
   deleteBranch: (

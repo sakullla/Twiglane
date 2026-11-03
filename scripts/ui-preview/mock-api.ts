@@ -444,11 +444,21 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   },
   revealPath: () => ok(undefined),
   openPath: () => ok(undefined),
-  ignorePath: (_repo: string, pattern: string) => {
+  ignorePath: (_repo: string, pattern: string, local = false) => {
     const needle = pattern.replace(/^\//, "").replace(/^\*/, "");
-    files = files.filter((item) => item.unmerged || !(item.untracked && item.path.endsWith(needle)));
+    const tracked = files.some((item) => !item.untracked && item.path === needle);
+    if (!tracked) {
+      files = files.filter((item) => item.unmerged || !(item.untracked && item.path.endsWith(needle)));
+    }
     generation += 1;
-    return ok(snapshot());
+    const note = tracked
+      ? local
+        ? "已把规则写入本地排除。规则只对未跟踪文件生效，该文件仍留在改动中，索引和文件内容未改。"
+        : "已把规则写入 .gitignore。规则只对未跟踪文件生效，该文件仍留在改动中，索引和文件内容未改。"
+      : local
+        ? "已把规则写入本地排除。该文件不再进入改动列表，这条规则也不会进入提交。"
+        : "已把规则写入 .gitignore。这次修改会出现在改动列表里。";
+    return ok({ snapshot: snapshot(), note });
   },
   switchBranch: async (_repo: string, name: string) => {
     if (previewParams.get("switch") === "fail") {

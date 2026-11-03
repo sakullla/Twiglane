@@ -1859,3 +1859,52 @@ describe("MultiFileDiff 逐块懒加载（R19）", () => {
     expect(screen.getByRole("button", { name: "暂存 4 个文件" }).title).toContain("已排除 1 个冲突文件");
   });
 });
+
+describe("文件列表的目录分组和行数", () => {
+  function listProps(files: FileChange[], query = "") {
+    return {
+      files,
+      selected: null as FileSelection | null,
+      query,
+      disabled: false,
+      onQuery: () => {},
+      onSelect: () => {},
+      onStage: vi.fn(),
+      onUnstage: vi.fn(),
+      onStageAll: vi.fn(),
+      onUnstageAll: vi.fn(),
+    };
+  }
+
+  it("默认每一项都是文件；目录分组只展开收起，暂存作用在文件上，搜索能展开到收起的文件", async () => {
+    const files = [
+      change("notes/todo.log", "none", "none", { untracked: true, unstagedLines: { additions: 3, deletions: 0 } }),
+      change("notes/other.log", "none", "none", { untracked: true }),
+      change("README.md", "none", "modified", { unstagedLines: { additions: 2, deletions: 1 } }),
+      change("blob.bin", "none", "modified", { unstagedLines: { additions: null, deletions: null } }),
+    ];
+    const props = listProps(files);
+    const view = render(FileList, { props });
+    const names = () => [...document.querySelectorAll(".file-row .fn")].map((node) => node.textContent);
+    expect(names()).toEqual(expect.arrayContaining(["todo.log", "other.log", "README.md", "blob.bin"]));
+    expect(names()).not.toContain("notes");
+    expect(screen.getByLabelText("新增 3 行，删除 0 行")).toBeTruthy();
+    expect(screen.getByLabelText("新增 2 行，删除 1 行")).toBeTruthy();
+    expect(screen.getByText("二进制")).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole("button", { name: "目录" }));
+    expect(screen.getByRole("button", { name: "目录" }).getAttribute("aria-pressed")).toBe("true");
+    expect(props.onStage).not.toHaveBeenCalled();
+    expect(props.onStageAll).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole("button", { name: "列表" }));
+    expect(props.onStage).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole("button", { name: "目录" }));
+    const folder = screen.getByRole("button", { name: /^notes/ });
+    await fireEvent.click(folder);
+    expect(screen.queryByRole("option", { name: /todo\.log/ })).toBeNull();
+    await view.rerender({ ...props, query: "todo" });
+    expect(await screen.findByRole("option", { name: /todo\.log/ })).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "暂存 notes" }));
+    expect(props.onStageAll).toHaveBeenCalledWith(["notes/todo.log"]);
+  });
+});

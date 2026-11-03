@@ -420,4 +420,52 @@ describe("并排差异", () => {
     expect(right).toEqual([...right].sort((x, y) => Number(x) - Number(y)));
     expect(document.querySelectorAll(".side-cell.blank")).toHaveLength(1);
   });
+
+  it("窄到两列重叠时暂时使用统一视图，加宽后恢复并排", async () => {
+    const callbacks: ResizeObserverCallback[] = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          callbacks.push(callback);
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    try {
+      const diff = createTextDiff("a.ts", "a\nold\n", "a\nnew\n", 1);
+      render(DiffView, {
+        props: {
+          selection: { path: "a.ts", side: "unstaged" },
+          diff,
+          error: null,
+          loading: false,
+          disabled: false,
+          onStageHunk: () => {},
+          onLoadMore: () => {},
+        },
+      });
+      const pane = document.querySelector<HTMLElement>(".diff")!;
+      let width = 0;
+      Object.defineProperty(pane, "clientWidth", { configurable: true, get: () => width });
+      await fireEvent.click(screen.getByRole("button", { name: /并排/ }));
+      expect(screen.getByRole("button", { name: /并排/ }).getAttribute("aria-pressed")).toBe("true");
+      expect(document.querySelector(".side-row")).not.toBeNull();
+      width = 80;
+      for (const callback of callbacks) callback([], callback as unknown as ResizeObserver);
+      await tick();
+      expect(document.querySelector(".side-row")).toBeNull();
+      expect(screen.getByRole("button", { name: /并排/ }).getAttribute("aria-pressed")).toBe("true");
+      expect(pane.getAttribute("title")).toContain("窗口太窄，暂时使用统一视图");
+      width = 800;
+      for (const callback of callbacks) callback([], callback as unknown as ResizeObserver);
+      await tick();
+      expect(document.querySelector(".side-row")).not.toBeNull();
+      expect(screen.getByRole("button", { name: /并排/ }).getAttribute("aria-pressed")).toBe("true");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

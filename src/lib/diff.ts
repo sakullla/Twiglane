@@ -93,6 +93,15 @@ export interface ViewLine {
   hunkIndex: number | null;
 }
 
+/** 并排一行左右各要放下行号。暂存按钮再占一列。宽度还没量到时先按放得下处理。 */
+export const SPLIT_LINE_NO = 48;
+export const SPLIT_STAGE_RESERVE = 88;
+
+export function splitColumnsFit(width: number, reserveStage: boolean): boolean {
+  if (width <= 0) return true;
+  return width >= SPLIT_LINE_NO * 2 + (reserveStage ? SPLIT_STAGE_RESERVE : 0);
+}
+
 export function toSideRows(lines: ViewLine[]): SideRow[] {
   const rows: SideRow[] = [];
   let pending: SideRow[] = [];

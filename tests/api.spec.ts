@@ -79,7 +79,7 @@ describe("Tauri 命令参数", () => {
     await api.renameBranch("/repo", "old", "new", 8, 42);
     await api.revealPath("/repo", "src/a.ts");
     await api.openPath("/repo", "src/a.ts");
-    await api.ignorePath("/repo", "*.log", 8, 43);
+    await api.ignorePath("/repo", "*.log", false, 8, 43);
 
     expect(invoke).toHaveBeenNthCalledWith(1, "load_diff", {
       path: "/repo",
@@ -103,7 +103,13 @@ describe("Tauri 命令参数", () => {
     expect(invoke).toHaveBeenNthCalledWith(3, "rename_branch", { path: "/repo", old: "old", new: "new", generation: 8, requestId: 42 });
     expect(invoke).toHaveBeenNthCalledWith(4, "reveal_path", { path: "/repo", relative: "src/a.ts" });
     expect(invoke).toHaveBeenNthCalledWith(5, "open_path", { path: "/repo", relative: "src/a.ts" });
-    expect(invoke).toHaveBeenNthCalledWith(6, "ignore_path", { path: "/repo", pattern: "*.log", generation: 8, requestId: 43 });
+    expect(invoke).toHaveBeenNthCalledWith(6, "ignore_path", {
+      path: "/repo",
+      pattern: "*.log",
+      local: false,
+      generation: 8,
+      requestId: 43,
+    });
   });
 
   it("远程标签查询不带 generation：它不受本地状态校验", async () => {

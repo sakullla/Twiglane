@@ -1,3 +1,5 @@
+import type { LineStat } from "./types";
+
 export function shortOid(oid: string): string {
   return oid.slice(0, 7);
 }
@@ -25,6 +27,17 @@ export function parentCaption(parents: string[], root = false): string {
 export function refLabel(kind: string, name: string, current: boolean): string {
   const prefix = kind === "remote" ? "远程" : kind === "tag" ? "标签" : kind === "head" ? "HEAD" : "分支";
   return current ? `${prefix} ${name} · 当前` : `${prefix} ${name}`;
+}
+
+/** 提交文件行上的行数。二进制显示「二进制」；两边都未知时不显示；纯新增也显示 0 删除。 */
+export function commitLineStat(file: {
+  additions?: number | null;
+  deletions?: number | null;
+  binary?: boolean;
+}): LineStat | null {
+  if (file.binary) return { additions: null, deletions: null };
+  if (file.additions == null && file.deletions == null) return null;
+  return { additions: file.additions ?? 0, deletions: file.deletions ?? 0 };
 }
 
 export function commitFileLabel(status: string): string {

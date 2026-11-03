@@ -99,7 +99,10 @@ beforeEach(() => {
   mocks.saveDraft.mockResolvedValue(undefined);
   mocks.revealPath.mockResolvedValue(undefined);
   mocks.openPath.mockResolvedValue(undefined);
-  mocks.ignorePath.mockResolvedValue({ ...snapshot, generation: 5, files: files.filter((file) => !file.untracked) });
+  mocks.ignorePath.mockResolvedValue({
+    snapshot: { ...snapshot, generation: 5, files: files.filter((file) => !file.untracked) },
+    note: "已把规则写入 .gitignore。这次修改会出现在改动列表里。",
+  });
   mocks.discardChanges.mockImplementation(async (_repo: string, paths: string[], confirm: boolean) => ({
     generation: 4,
     wrote: confirm,
@@ -169,13 +172,29 @@ describe("文件右键菜单", () => {
     expect(mocks.openPath).toHaveBeenCalledWith(repoPath, "src/App.svelte");
   });
 
-  it("未跟踪文件可以加入 .gitignore（按文件、扩展名或目录）", async () => {
+  it("工作区文件只提供加入 .gitignore 和本地排除，已跟踪文件仍留在改动里", async () => {
     await openRepo();
-    const menu = await rightClick(row("notes/todo.log"));
-    expect(within(menu).getByRole("menuitem", { name: "忽略所有 .log 文件" })).toBeTruthy();
-    expect(within(menu).getByRole("menuitem", { name: "忽略目录 notes/" })).toBeTruthy();
-    await fireEvent.click(within(menu).getByRole("menuitem", { name: "忽略此文件（/notes/todo.log）" }));
-    await waitFor(() => expect(mocks.ignorePath).toHaveBeenCalledWith(repoPath, "/notes/todo.log", 4, expect.any(Number)));
+    const untracked = await rightClick(row("notes/todo.log"));
+    const labels = within(untracked).getAllByRole("menuitem").map((item) => item.textContent?.trim());
+    expect(labels).toContain("加入 .gitignore");
+    expect(labels).toContain("加入 .git/info/exclude");
+    expect(labels.some((text) => text?.includes("扩展名") || text?.includes("忽略目录"))).toBe(false);
+    await fireEvent.click(within(untracked).getByRole("menuitem", { name: "加入 .gitignore" }));
+    await waitFor(() => expect(mocks.ignorePath).toHaveBeenCalledWith(repoPath, "/notes/todo.log", false, 4, expect.any(Number)));
+    expect(await screen.findAllByText("已把规则写入 .gitignore。这次修改会出现在改动列表里。")).not.toHaveLength(0);
+
+    mocks.ignorePath.mockResolvedValueOnce({
+      snapshot,
+      note: "已把规则写入本地排除。规则只对未跟踪文件生效，该文件仍留在改动中，索引和文件内容未改。",
+    });
+    const tracked = await rightClick(row("src/App.svelte"));
+    expect(within(tracked).queryByRole("menuitem", { name: /忽略所有/ })).toBeNull();
+    expect(within(tracked).queryByRole("menuitem", { name: /忽略目录/ })).toBeNull();
+    await fireEvent.click(within(tracked).getByRole("menuitem", { name: "加入 .git/info/exclude" }));
+    await waitFor(() =>
+      expect(mocks.ignorePath).toHaveBeenCalledWith(repoPath, "/src/App.svelte", true, 5, expect.any(Number)),
+    );
+    expect((await screen.findAllByText(/仍留在改动中/)).length).toBeGreaterThan(0);
   });
 
   it("冲突文件的菜单给出处理冲突而不是暂存或放弃；分组头可直接去处理", async () => {

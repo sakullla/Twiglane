@@ -101,6 +101,14 @@ impl ChangeKind {
     }
 }
 
+/// 文本差异的新增与删除行数。两个计数都是 `None` 时表示二进制，不能用 0 冒充。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LineStat {
+    pub additions: Option<u64>,
+    pub deletions: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FileChange {
@@ -110,6 +118,12 @@ pub struct FileChange {
     pub unstaged: ChangeKind,
     pub untracked: bool,
     pub unmerged: bool,
+    /// 已暂存一侧。没有这一侧的变化时不填。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_lines: Option<LineStat>,
+    /// 未暂存一侧。未跟踪文本文件的新增行数是文件当前行数，删除为 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unstaged_lines: Option<LineStat>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -342,6 +356,20 @@ pub struct CommitFileChange {
     pub path: String,
     pub original_path: Option<String>,
     pub status: String,
+    /// 文本文件的新增与删除行数。二进制不填计数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additions: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct IgnoreOutcome {
+    pub snapshot: StatusSnapshot,
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -2959,9 +2959,10 @@ async fn read_status(
     }
     status_from_output(
         backend,
-        &repo_key(root),
+        root,
         &crate::git::schedule::ScheduledOutput { output, generation },
     )
+    .await
 }
 
 async fn status_in_guard(
@@ -2976,6 +2977,7 @@ async fn status_in_guard(
     }
     let mut snapshot = parse_status(&output.stdout)?;
     snapshot.generation = backend.scheduler.current_generation(&repo_key(root));
+    crate::git::ops::decorate_guard_status(guard, git, root, &mut snapshot).await;
     Ok(snapshot)
 }
 
@@ -5173,6 +5175,8 @@ mod tests {
                 unstaged: ChangeKind::None,
                 untracked: false,
                 unmerged: false,
+                staged_lines: None,
+                unstaged_lines: None,
             });
         }
         let snapshot = StatusSnapshot {
@@ -5209,6 +5213,8 @@ mod tests {
                 unstaged: ChangeKind::Modified,
                 untracked: false,
                 unmerged: false,
+                staged_lines: None,
+                unstaged_lines: None,
             });
         }
         let dirty = StatusSnapshot {

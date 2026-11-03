@@ -697,7 +697,7 @@ async fn read_status(
         Some(generation),
     )
     .await?;
-    status_from_output(backend, &repo_key(root), &scheduled)
+    status_from_output(backend, root, &scheduled).await
 }
 
 fn validate_paths(paths: &[String]) -> Result<Vec<String>, AppError> {

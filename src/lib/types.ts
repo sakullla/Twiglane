@@ -37,6 +37,12 @@ export interface RepoSummary {
   path: string;
 }
 
+/** 文本文件的新增与删除行数。两个计数都是 null 时表示二进制，不能显示成 +0 −0。 */
+export interface LineStat {
+  additions: number | null;
+  deletions: number | null;
+}
+
 export interface FileChange {
   path: string;
   originalPath: string | null;
@@ -44,6 +50,10 @@ export interface FileChange {
   unstaged: ChangeKind;
   untracked: boolean;
   unmerged: boolean;
+  /** 已暂存一侧。没有这一侧的变化、或行数尚未读到时缺省。 */
+  stagedLines?: LineStat | null;
+  /** 未暂存一侧。未跟踪文本文件的新增行数是当前行数。 */
+  unstagedLines?: LineStat | null;
 }
 
 export interface BranchInfo {
@@ -251,6 +261,15 @@ export interface CommitFileChange {
   path: string;
   originalPath: string | null;
   status: string;
+  /** 文本文件的新增与删除行数。未知时缺省，二进制不填计数。 */
+  additions?: number | null;
+  deletions?: number | null;
+  binary?: boolean;
+}
+
+export interface IgnoreOutcome {
+  snapshot: StatusSnapshot;
+  note: string;
 }
 
 export interface CommitDetail {

@@ -1088,7 +1088,7 @@ async fn snapshot_at(
     let git = require_git(backend).await?;
     let (program, args) = status_command(&git.path, root);
     let scheduled = read_repo(backend, root, generation, request_id, program, args).await?;
-    status_from_output(backend, &repo_key(root), &scheduled)
+    status_from_output(backend, root, &scheduled).await
 }
 
 async fn read_repo(

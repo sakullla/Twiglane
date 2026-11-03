@@ -1,9 +1,10 @@
 <script lang="ts">
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
-  import { filterRows, groupFiles } from "../labels";
+  import { bucketByDirectory, filterRows, groupFiles } from "../labels";
   import type { DiffSide, FileChange, FileRow, FileSelection } from "../types";
   import { rangeSelection, rowMark, sameSelection, splitPath, toggleSelection } from "../ui";
   import Icon from "./Icon.svelte";
+  import LineCounts from "./LineCounts.svelte";
 
   interface Props {
     files: FileChange[];
@@ -29,9 +30,15 @@
     onContextMenu?: (row: FileRow, point: { x: number; y: number }) => void;
   }
 
+  type SectionSide = DiffSide | "conflicted";
   type Item =
-    | { kind: "header"; side: DiffSide | "conflicted"; count: number; paths: string[] }
+    | { kind: "header"; side: SectionSide; count: number; paths: string[] }
+    | { kind: "dir"; side: SectionSide; directory: string; label: string; count: number; paths: string[]; collapsed: boolean }
     | { kind: "row"; row: FileRow };
+
+  // 分组只改呈现，不写入设置，默认仍是列表。
+  let directoryMode = $state(false);
+  let collapsedDirs = $state<Set<string>>(new Set());
 
   /** 每行 40px：文件行实际画 36px、上下各留 2px 呼吸；分组表头用整行，文字贴底，与上一组拉开距离。 */
   const ROW_HEIGHT = 40;
@@ -58,35 +65,44 @@
   let conflictedRows = $derived(filterRows(groups.conflicted, query));
   let unstagedRows = $derived(filterRows(groups.unstaged, query));
   let stagedRows = $derived(filterRows(groups.staged, query));
+
+  function sectionItems(rows: FileRow[], side: SectionSide, paths: string[]): Item[] {
+    if (rows.length === 0) return [];
+    const header: Item = { kind: "header", side, count: rows.length, paths };
+    if (!directoryMode) return [header, ...rows.map((row) => ({ kind: "row" as const, row }))];
+    const needle = query.trim();
+    const items: Item[] = [header];
+    for (const bucket of bucketByDirectory(rows)) {
+      const key = `${side}:${bucket.directory}`;
+      const collapsed = collapsedDirs.has(key) && needle === "";
+      items.push({
+        kind: "dir",
+        side,
+        directory: bucket.directory,
+        label: bucket.directory || "仓库根目录",
+        count: bucket.rows.length,
+        paths: bucket.rows.filter((row) => !row.unmerged).map((row) => row.path),
+        collapsed,
+      });
+      if (!collapsed) {
+        for (const row of bucket.rows) items.push({ kind: "row", row });
+      }
+    }
+    return items;
+  }
+
   let items = $derived<Item[]>([
-    ...(conflictedRows.length > 0
-      ? [
-          { kind: "header" as const, side: "conflicted" as const, count: conflictedRows.length, paths: [] },
-          ...conflictedRows.map((row) => ({ kind: "row" as const, row })),
-        ]
-      : []),
-    ...(unstagedRows.length > 0
-      ? [
-          {
-            kind: "header" as const,
-            side: "unstaged" as const,
-            count: unstagedRows.length,
-            paths: unstagedRows.filter((row) => !row.unmerged).map((row) => row.path),
-          },
-          ...unstagedRows.map((row) => ({ kind: "row" as const, row })),
-        ]
-      : []),
-    ...(stagedRows.length > 0
-      ? [
-          {
-            kind: "header" as const,
-            side: "staged" as const,
-            count: stagedRows.length,
-            paths: stagedRows.filter((row) => !row.unmerged).map((row) => row.path),
-          },
-          ...stagedRows.map((row) => ({ kind: "row" as const, row })),
-        ]
-      : []),
+    ...sectionItems(conflictedRows, "conflicted", []),
+    ...sectionItems(
+      unstagedRows,
+      "unstaged",
+      unstagedRows.filter((row) => !row.unmerged).map((row) => row.path),
+    ),
+    ...sectionItems(
+      stagedRows,
+      "staged",
+      stagedRows.filter((row) => !row.unmerged).map((row) => row.path),
+    ),
   ]);
   let rows = $derived([...conflictedRows, ...unstagedRows, ...stagedRows]);
   let scrollTop = $state(0);
@@ -183,6 +199,33 @@
     if (list) list.scrollTop = next;
   }
 
+  function toggleDir(side: SectionSide, directory: string) {
+    const key = `${side}:${directory}`;
+    const next = new Set(collapsedDirs);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    collapsedDirs = next;
+  }
+
+  let revealedQuery = "";
+  $effect(() => {
+    const needle = query.trim();
+    const mode = directoryMode;
+    const first = rows[0];
+    if (!mode || !needle || !first) return;
+    const token = `${needle}:${first.path}:${first.side}`;
+    if (token === revealedQuery) return;
+    revealedQuery = token;
+    const next = new Set(collapsedDirs);
+    let changed = false;
+    for (const row of rows) {
+      const key = `${row.side}:${row.path.includes("/") ? row.path.slice(0, row.path.lastIndexOf("/")) : ""}`;
+      if (next.delete(key)) changed = true;
+    }
+    if (changed) collapsedDirs = next;
+    queueMicrotask(() => reveal(itemIndexOf(first)));
+  });
+
   function toggle(row: FileRow) {
     if (disabled) return;
     if (row.unmerged) {
@@ -226,6 +269,10 @@
 </script>
 
 <div class="file-tools">
+  <div class="segmented" role="group" aria-label="文件排列">
+    <button type="button" aria-pressed={!directoryMode} onclick={() => (directoryMode = false)}>列表</button>
+    <button type="button" aria-pressed={directoryMode} onclick={() => (directoryMode = true)}>目录</button>
+  </div>
   <div class="field sm">
     <Icon name="search" size={14} />
     <input
@@ -273,7 +320,7 @@
     </div>
   {:else}
     <div class="virtual-space" style={`height:${items.length * ROW_HEIGHT}px`}>
-      {#each visible as item, index (item.kind === "header" ? `h:${item.side}` : `${item.row.side}:${item.row.path}`)}
+      {#each visible as item, index (item.kind === "header" ? `h:${item.side}` : item.kind === "dir" ? `d:${item.side}:${item.directory}` : `${item.row.side}:${item.row.path}`)}
         {@const top = (range.start + index) * ROW_HEIGHT}
         {#if item.kind === "header"}
           <div class="file-group" role="presentation" style={`top:${top}px;height:${ROW_HEIGHT}px`}>
@@ -315,6 +362,43 @@
               </button>
             {/if}
           </div>
+        {:else if item.kind === "dir"}
+          <div class="file-dir" role="presentation" style={`top:${top}px;height:${ROW_HEIGHT}px`}>
+            <button
+              type="button"
+              class="dir-name"
+              aria-expanded={!item.collapsed}
+              onclick={() => toggleDir(item.side, item.directory)}
+            >
+              <Icon name="chevron-down" size={13} class={item.collapsed ? "" : "flip"} />
+              <span>{item.label}</span>
+              <span class="count">{item.count}</span>
+            </button>
+            <span class="spacer"></span>
+            {#if item.side === "unstaged" && onStageAll && item.paths.length > 0}
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm"
+                disabled={disabled}
+                aria-label={`暂存 ${item.label}`}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  onStageAll(item.paths);
+                }}
+              >暂存</button>
+            {:else if item.side === "staged" && onUnstageAll && item.paths.length > 0}
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm"
+                disabled={disabled}
+                aria-label={`取消暂存 ${item.label}`}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  onUnstageAll(item.paths);
+                }}
+              >取消暂存</button>
+            {/if}
+          </div>
         {:else}
           {@const row = item.row}
           {@const mark = rowMark(row)}
@@ -346,6 +430,7 @@
             }}
           >
             <span class={`st ${mark.tone}`} title={mark.label} aria-label={mark.label}>{mark.letter}</span>
+            <LineCounts stat={row.side === "staged" ? row.stagedLines : row.unstagedLines} />
             <span class="file-name">
               <span class="fn">{parts.name}</span>
               {#if row.originalPath}

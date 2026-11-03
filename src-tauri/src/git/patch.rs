@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use sha2::{Digest, Sha256};
 
 use crate::error::AppError;
-use crate::model::{DiffHunk, DiffLine};
+use crate::model::{ChangeKind, CommitFileChange, DiffHunk, DiffLine, FileChange, LineStat};
 
 pub const DIFF_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
 pub const DIFF_VIEW_LINE_LIMIT: u32 = 2_000;
@@ -414,6 +416,164 @@ fn split_keep(text: &str) -> Vec<&str> {
     lines
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumstatEntry {
+    pub additions: Option<u64>,
+    pub deletions: Option<u64>,
+    pub path: String,
+}
+
+/// 解析 `git diff --numstat -z`。普通记录是 `added\tdeleted\tpath\0`，
+/// 重命名是 `added\tdeleted\t\0old\0new\0`，计数记在新路径上。二进制两侧都是 `-`。
+pub fn parse_numstat_list(bytes: &[u8]) -> Vec<NumstatEntry> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == 0 {
+            parts.push(&bytes[start..index]);
+            start = index + 1;
+        }
+    }
+    if start < bytes.len() {
+        parts.push(&bytes[start..]);
+    }
+    let mut entries = Vec::new();
+    let mut index = 0;
+    while index < parts.len() {
+        let record = parts[index];
+        if record.is_empty() {
+            index += 1;
+            continue;
+        }
+        let text = String::from_utf8_lossy(record);
+        let mut fields = text.split('\t');
+        let (Some(added), Some(deleted)) = (fields.next(), fields.next()) else {
+            index += 1;
+            continue;
+        };
+        let mut path = fields.next().unwrap_or("").to_string();
+        for extra in fields {
+            path.push('\t');
+            path.push_str(extra);
+        }
+        let additions = parse_stat(added);
+        let deletions = parse_stat(deleted);
+        if path.is_empty() {
+            if index + 2 >= parts.len() {
+                break;
+            }
+            let new_path = String::from_utf8_lossy(parts[index + 2]).into_owned();
+            if !new_path.is_empty() {
+                entries.push(NumstatEntry {
+                    additions,
+                    deletions,
+                    path: new_path,
+                });
+            }
+            index += 3;
+        } else {
+            entries.push(NumstatEntry {
+                additions,
+                deletions,
+                path,
+            });
+            index += 1;
+        }
+    }
+    entries
+}
+
+pub fn numstat_map(entries: Vec<NumstatEntry>) -> HashMap<String, LineStat> {
+    let mut map = HashMap::new();
+    for entry in entries {
+        let stat = match (entry.additions, entry.deletions) {
+            (Some(additions), Some(deletions)) => LineStat {
+                additions: Some(additions),
+                deletions: Some(deletions),
+            },
+            _ => LineStat {
+                additions: None,
+                deletions: None,
+            },
+        };
+        map.insert(entry.path, stat);
+    }
+    map
+}
+
+/// 空文件 0 行；以换行结尾时换行数就是行数，否则还要算上最后一行。
+pub fn count_text_lines(bytes: &[u8]) -> u64 {
+    if bytes.is_empty() {
+        return 0;
+    }
+    let newlines = bytes.iter().filter(|byte| **byte == b'\n').count() as u64;
+    if bytes.last() == Some(&b'\n') {
+        newlines
+    } else {
+        newlines + 1
+    }
+}
+
+/// Git 把前 8000 字节里的 NUL 当成二进制。二进制两侧计数都空着，不能写成 0。
+pub fn line_stat_of_bytes(bytes: &[u8]) -> LineStat {
+    let window = &bytes[..bytes.len().min(8000)];
+    if window.contains(&0) {
+        LineStat {
+            additions: None,
+            deletions: None,
+        }
+    } else {
+        LineStat {
+            additions: Some(count_text_lines(bytes)),
+            deletions: Some(0),
+        }
+    }
+}
+
+pub fn assign_worktree_numstat(
+    files: &mut [FileChange],
+    staged: &HashMap<String, LineStat>,
+    unstaged: &HashMap<String, LineStat>,
+) {
+    for file in files {
+        if file.untracked {
+            continue;
+        }
+        if file.unmerged || file.staged != ChangeKind::None {
+            if let Some(stat) = staged.get(&file.path) {
+                file.staged_lines = Some(*stat);
+            }
+        }
+        if file.unmerged || file.unstaged != ChangeKind::None {
+            if let Some(stat) = unstaged.get(&file.path) {
+                file.unstaged_lines = Some(*stat);
+            }
+        }
+    }
+}
+
+pub fn apply_commit_numstat(files: &mut [CommitFileChange], stats: &HashMap<String, LineStat>) {
+    for file in files.iter_mut() {
+        match stats.get(&file.path) {
+            Some(stat) if stat.additions.is_none() || stat.deletions.is_none() => {
+                file.binary = true;
+                file.additions = None;
+                file.deletions = None;
+            }
+            Some(stat) => {
+                file.binary = false;
+                file.additions = stat.additions;
+                file.deletions = stat.deletions;
+            }
+            None => {
+                file.binary = false;
+                file.additions = None;
+                file.deletions = None;
+            }
+        }
+    }
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -571,5 +731,27 @@ index 1111111..2222222 100644
     fn numstat_distinguishes_binary() {
         assert_eq!(parse_numstat(b"3\t1\ta.txt\0"), Some((Some(3), Some(1))));
         assert_eq!(parse_numstat(b"-\t-\tdata.bin\0"), Some((None, None)));
+    }
+
+    #[test]
+    fn numstat_list_keeps_rename_on_the_new_path_and_binary_blank() {
+        let entries = parse_numstat_list(b"2\t1\tbase.txt\0-\t-\tdata.bin\00\t0\t\0a.txt\0b.txt\0");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].path, "base.txt");
+        assert_eq!(entries[0].additions, Some(2));
+        assert_eq!(entries[0].deletions, Some(1));
+        assert_eq!(entries[1].path, "data.bin");
+        assert_eq!(entries[1].additions, None);
+        assert_eq!(entries[2].path, "b.txt");
+        assert_eq!(entries[2].additions, Some(0));
+        assert_eq!(count_text_lines(b""), 0);
+        assert_eq!(count_text_lines(b"a\nb\nc"), 3);
+        assert_eq!(count_text_lines(b"a\nb\nc\n"), 3);
+        let text = line_stat_of_bytes(b"a\nb\n");
+        assert_eq!(text.additions, Some(2));
+        assert_eq!(text.deletions, Some(0));
+        let binary = line_stat_of_bytes(b"a\0b");
+        assert_eq!(binary.additions, None);
+        assert_eq!(binary.deletions, None);
     }
 }

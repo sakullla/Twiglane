@@ -632,7 +632,7 @@ describe("历史分栏", () => {
       root: false,
       merge: false,
       selectedParent: only.parents[0],
-      files: [{ path: "notes.txt", originalPath: null, status: "modified" }],
+      files: [{ path: "notes.txt", originalPath: null, status: "added", additions: 2, deletions: 0 }],
     });
     commitFileDiff.mockResolvedValue(diff);
     render(HistoryPanel, { props: panelProps() });
@@ -654,6 +654,14 @@ describe("历史分栏", () => {
     const byline = detail.querySelector<HTMLElement>(".commit-byline")!;
     expect(byline.querySelector(".commit-parents"), "父提交并入作者行，详情头不再堆成一列").toBeTruthy();
     expect(byline.querySelector(".hr-dot"), "折行时不留孤立的分隔点").toBeNull();
+    const fileRow = detail.querySelector<HTMLElement>(".history-files .file-row");
+    expect(fileRow).toBeTruthy();
+    expect(fileRow?.textContent).toContain("+2");
+    expect(fileRow?.textContent).toContain("−0");
+    expect(within(detail).getByRole("button", { name: "目录" }).getAttribute("aria-pressed")).toBe("false");
+    await fireEvent.contextMenu(fileRow!);
+    expect(screen.queryByRole("menuitem", { name: "加入 .gitignore" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "加入 .git/info/exclude" })).toBeNull();
   });
 
   describe("说明按实际溢出决定展开入口", () => {

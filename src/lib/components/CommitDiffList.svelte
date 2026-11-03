@@ -2,11 +2,12 @@
   import { onDestroy, tick, untrack } from "svelte";
   import { api } from "../api";
   import { normalizeError } from "../errors";
-  import { commitFileLabel } from "../history";
+  import { commitFileLabel, commitLineStat } from "../history";
   import type { CommitDetail, DiffHunk, DiffResponse, FileSelection, OpenedRepository } from "../types";
   import { blockTops, blockWindow, splitPath, statusMark } from "../ui";
   import DiffView from "./DiffView.svelte";
   import Icon from "./Icon.svelte";
+  import LineCounts from "./LineCounts.svelte";
 
   interface Props {
     opened: OpenedRepository;
@@ -28,7 +29,7 @@
   const MAX_CONCURRENT = 2;
   const MAX_CACHED = 24;
   const HEAD_HEIGHT = 42;
-  const DIFF_HEIGHT = 420;
+  const ESTIMATED_DIFF = 160;
   const GAP = 11;
   let scroller = $state<HTMLDivElement | null>(null);
   let scrollTop = $state(0);
@@ -41,11 +42,21 @@
   let fileErrors = $state<Record<string, string | null>>({});
   let fileLoading = $state<Record<string, boolean>>({});
   let loadedKey = $state("");
+  let measured = $state<Record<string, number>>({});
+  let maxDiff = $derived(Math.max(180, (viewport > 0 ? viewport : 520) - 8));
   const requested = new Set<string>();
   const cached: string[] = [];
   let running = 0;
   let destroyed = false;
-  let tops = $derived(blockTops(detail.files.map((file) => HEAD_HEIGHT + (expandedSet.has(file.path) ? DIFF_HEIGHT : 0)), GAP));
+  let tops = $derived(
+    blockTops(
+      detail.files.map((file) => {
+        if (!expandedSet.has(file.path)) return HEAD_HEIGHT;
+        return measured[file.path] ?? HEAD_HEIGHT + ESTIMATED_DIFF;
+      }),
+      GAP,
+    ),
+  );
   let span = $derived(blockWindow(tops, scrollTop, viewport || 600, 500));
   let shown = $derived(detail.files.slice(span.start, span.end));
   let loadedCount = $derived(Object.keys(fileDiffs).filter((path) => expandedSet.has(path)).length);
@@ -152,6 +163,18 @@
 
   onDestroy(() => { destroyed = true; });
 
+  function watchSize(node: HTMLElement, path: string) {
+    const apply = () => {
+      const next = node.offsetHeight;
+      if (next > 0 && measured[path] !== next) measured = { ...measured, [path]: next };
+    };
+    apply();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(apply);
+    observer.observe(node);
+    return { destroy: () => observer.disconnect() };
+  }
+
   function toggle(path: string) {
     expandedPaths = expandedSet.has(path) ? expandedPaths.filter((item) => item !== path) : [...expandedPaths, path];
   }
@@ -233,19 +256,21 @@
         {@const expanded = expandedSet.has(file.path)}
         {@const mark = statusMark(commitFileLabel(file.status))}
         {@const parts = splitPath(file.path)}
-        <article class="multi-file" style={`height:${HEAD_HEIGHT + (expanded ? DIFF_HEIGHT : 0)}px;flex:none`} class:expanded data-path={file.path} class:focused={focusPath === file.path}>
-          <div class="multi-file-head" style="height:40px;min-height:40px">
-            <button type="button" class="multi-file-toggle" aria-label={`${expanded ? "收起" : "展开"} ${file.path}`} aria-expanded={expanded} onclick={() => toggle(file.path)}>
-              <span class={`st ${mark.tone}`}>{mark.letter}</span>
-              <span class="multi-file-name"><strong>{parts.name}</strong>{#if parts.dir}<small>{parts.dir}</small>{/if}</span>
-              <span class="chip">{commitFileLabel(file.status)}</span>
-              <Icon name="chevron-down" size={13} class={expanded ? "flip" : ""} />
-            </button>
-            <button type="button" class="icon-btn sm" aria-label={`查看 ${file.path} 的文件历史`} title="查看此文件历史" onclick={() => onFileHistory(file.path)}><Icon name="history" size={13} /></button>
-          </div>
-          {#if expanded}
-            <div class="multi-file-diff">
+        <article class="multi-file" class:expanded data-path={file.path} class:focused={focusPath === file.path} use:watchSize={file.path}>
+          <div class="multi-file-diff" style={`max-height:${maxDiff}px;--history-diff-max:${maxDiff}px`}>
+            <div class="multi-file-head">
+              <button type="button" class="multi-file-toggle" aria-label={`${expanded ? "收起" : "展开"} ${file.path}`} aria-expanded={expanded} onclick={() => toggle(file.path)}>
+                <span class={`st ${mark.tone}`}>{mark.letter}</span>
+                <span class="multi-file-name"><strong>{parts.name}</strong>{#if parts.dir}<small>{parts.dir}</small>{/if}</span>
+                <LineCounts stat={commitLineStat(file)} />
+                <span class="chip">{commitFileLabel(file.status)}</span>
+                <Icon name="chevron-down" size={13} class={expanded ? "flip" : ""} />
+              </button>
+              <button type="button" class="icon-btn sm" aria-label={`查看 ${file.path} 的文件历史`} title="查看此文件历史" onclick={() => onFileHistory(file.path)}><Icon name="history" size={13} /></button>
+            </div>
+            {#if expanded}
               <DiffView
+                embedded
                 selection={selection(file.path)}
                 diff={fileDiffs[file.path] ?? null}
                 error={fileErrors[file.path] ?? null}
@@ -256,8 +281,8 @@
                 onLoadMore={() => loadMore(file.path)}
                 onFileHistory={onFileHistory}
               />
-            </div>
-          {/if}
+            {/if}
+          </div>
         </article>
       {/each}
     </div>

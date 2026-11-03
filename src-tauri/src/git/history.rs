@@ -18,7 +18,10 @@ use crate::git::ops::{
     status_from_output, validate_input_path, Backend,
 };
 use crate::git::parse::parse_status;
-use crate::git::patch::{first_file_diff, parse_diff, parse_numstat, DIFF_PREVIEW_BYTES};
+use crate::git::patch::{
+    apply_commit_numstat, first_file_diff, numstat_map, parse_diff, parse_numstat,
+    parse_numstat_list, DIFF_PREVIEW_BYTES,
+};
 use crate::git::runner::{ProcessOutput, RealRunner};
 use crate::git::schedule::{internal_request_id, CommandSpec, JobKind, WriteGuard};
 use crate::model::{
@@ -694,7 +697,7 @@ async fn load_commit_files(
             return Ok((entry.files.clone(), generation));
         }
     }
-    let (output, generation) = read_output(
+    let (output, mut generation) = read_output(
         backend,
         root,
         generation,
@@ -709,7 +712,23 @@ async fn load_commit_files(
             "无法读取提交中的文件，未修改仓库。",
         ));
     }
-    let files = Arc::new(parse_name_status(&output.stdout)?);
+    let mut parsed = parse_name_status(&output.stdout)?;
+    let parent_oid = parent.unwrap_or(EMPTY_TREE_OID);
+    if let Ok((stats, stats_generation)) = read_output(
+        backend,
+        root,
+        generation,
+        internal_request_id(),
+        commit_numstat_command(git, root, parent_oid, oid, &[]),
+    )
+    .await
+    {
+        if !diff_failed(&stats) {
+            apply_commit_numstat(&mut parsed, &numstat_map(parse_numstat_list(&stats.stdout)));
+            generation = stats_generation;
+        }
+    }
+    let files = Arc::new(parsed);
     *backend
         .history_files
         .0
@@ -1040,6 +1059,7 @@ async fn status_in_guard(
     }
     let mut snapshot = parse_status(&output.stdout)?;
     snapshot.generation = backend.scheduler.current_generation(&repo_key(root));
+    crate::git::ops::decorate_guard_status(guard, git, root, &mut snapshot).await;
     Ok(snapshot)
 }
 
@@ -1123,7 +1143,7 @@ async fn read_status(
     )
     .await
     .map_err(history_limit)?;
-    status_from_output(backend, &repo_key(root), &scheduled)
+    status_from_output(backend, root, &scheduled).await
 }
 
 async fn read_log(
@@ -1435,6 +1455,9 @@ pub(crate) fn parse_name_status(bytes: &[u8]) -> Result<Vec<CommitFileChange>, A
                 original_path: Some(utf8_piece(parts[index + 1])?),
                 path: utf8_piece(parts[index + 2])?,
                 status: status_name(kind),
+                additions: None,
+                deletions: None,
+                binary: false,
             });
             index += 3;
         } else {
@@ -1445,6 +1468,9 @@ pub(crate) fn parse_name_status(bytes: &[u8]) -> Result<Vec<CommitFileChange>, A
                 path: utf8_piece(parts[index + 1])?,
                 original_path: None,
                 status: status_name(kind),
+                additions: None,
+                deletions: None,
+                binary: false,
             });
             index += 2;
         }

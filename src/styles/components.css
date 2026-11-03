@@ -246,9 +246,10 @@
   .view-switcher button { padding: 0 var(--space-8); }
 }
 .inline-error { margin: 8px 10px 0; padding: 7px 10px; border-radius: var(--radius-sm); background: var(--danger-soft); color: var(--danger-text); font-size: var(--text-sm); }
-.file-tools { padding: 0 var(--space-8) var(--space-6); flex: none; }
+.file-tools { display: flex; align-items: center; gap: var(--space-8); padding: 0 var(--space-8) var(--space-6); flex: none; }
+.file-tools .segmented button { height: 26px; padding: 0 8px; font-size: var(--text-xs); }
 /* 左栏搜索框：比 --surface-2 的左栏暗一档，边界继承 .field 的 --control-border。 */
-.file-tools .field { background: var(--surface); }
+.file-tools .field { flex: 1; min-width: 0; background: var(--surface); }
 .history-tools .field { background: var(--surface); }
 .file-list { min-height: 0; flex: 1; overflow: auto; padding: 0 0 8px; position: relative; outline: none; container-type: inline-size; container-name: file-list; }
 /* 文件列表、差异面板、历史列表这三个可聚焦滚动容器同一判据：原来用 --accent-soft
@@ -282,6 +283,13 @@
 .pane-title { white-space: nowrap; }
 .file-group .count { font-size: var(--text-xs); height: 16px; min-width: 16px; background: transparent; }
 .file-group .btn { letter-spacing: 0; font-weight: var(--weight-medium); font-size: var(--text-xs); height: 25px; margin-bottom: -4px; }
+.file-dir { position: absolute; left: 8px; right: 8px; display: flex; align-items: center; gap: 7px; padding: 0 3px 0 6px; color: var(--fg-muted); }
+.file-dir .dir-name { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; height: 28px; padding: 0 6px; border-radius: 7px; font-size: var(--text-xs); font-weight: var(--weight-semibold); color: var(--fg-muted); text-align: left; }
+.file-dir .dir-name:hover { background: var(--hover); color: var(--fg); }
+.file-dir .dir-name > span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-dir .count { height: 16px; min-width: 16px; background: transparent; font-size: var(--text-xs); }
+.file-dir .btn { flex: none; height: 24px; font-size: var(--text-xs); padding: 0 7px; }
+.file-row .diff-stats { flex: none; }
 .file-row { position: absolute; left: 8px; right: 8px; display: flex; align-items: center; gap: 11px; padding: 0 6px 0 10px; border-radius: var(--radius-sm); cursor: default; text-align: left; border: 1px solid transparent; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease); }
 /* 关掉文字选择：Shift+点击选范围时不能把路径文字一起刷蓝。 */
 .file-row { user-select: none; -webkit-user-select: none; }
@@ -491,7 +499,8 @@
 .hunk-caption { display: flex; align-items: center; gap: var(--space-8); min-width: 0; font-family: var(--font); }
 .hunk-at { flex: none; font-weight: var(--weight-medium); color: var(--hunk-fg); }
 .hunk-context { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); color: var(--fg-muted); }
-.side-hunk { grid-column: 1 / 3; background: var(--hunk-bg); grid-template-columns: 48px minmax(0, 1fr); }
+.side-hunk { grid-column: 1 / 3; grid-row: 1; min-width: 0; overflow: hidden; background: var(--hunk-bg); grid-template-columns: 48px minmax(0, 1fr); }
+.side-row > .hunk-btn { grid-column: 3; grid-row: 1; }
 /* 按块暂存：块标题行右侧的一枚胶囊，与行同高，不压住代码。 */
 .hunk-btn { margin: 0 var(--space-8) 0 0; height: 20px !important; padding: 0 10px !important; border: 0 !important; font-family: var(--font); font-size: var(--text-xs) !important; font-weight: var(--weight-medium); border-radius: 999px !important; box-shadow: none !important; }
 .hunk-btn.btn-secondary { background: var(--accent-soft); color: var(--accent-text); }
@@ -777,6 +786,9 @@ label.list-row .checkbox { margin-top: 2px; }
 .history-multi-head > div:first-child > span { color: var(--fg-subtle); font-size: var(--text-xs); }
 .history-multi-head .row { flex-wrap: nowrap; }
 .history-multi-scroll { flex: 1; min-height: 0; overflow: auto; padding: var(--space-12); }
+.history-multi .multi-file { height: auto; }
+.history-multi .multi-file-diff { display: block; height: auto; min-height: 0; overflow: auto; max-height: var(--history-diff-max, 520px); }
+.history-multi .multi-file-head { position: sticky; top: 0; z-index: 2; background: var(--surface-2); }
 .history-multi-list { display: flex; flex-direction: column; gap: 11px; }
 .multi-file { overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-sm); }
 .multi-file.focused { border-color: var(--accent); }

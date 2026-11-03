@@ -50,6 +50,10 @@ pub fn parse_status(bytes: &[u8]) -> Result<StatusSnapshot, AppError> {
             continue;
         }
         if let Some(path) = record.strip_prefix("? ") {
+            // `--untracked-files=all` 下列出的是文件。目录行不能成为可暂存的变更。
+            if path.ends_with('/') {
+                continue;
+            }
             files.push(FileChange {
                 path: path.to_string(),
                 original_path: None,
@@ -57,6 +61,8 @@ pub fn parse_status(bytes: &[u8]) -> Result<StatusSnapshot, AppError> {
                 unstaged: ChangeKind::None,
                 untracked: true,
                 unmerged: false,
+                staged_lines: None,
+                unstaged_lines: None,
             });
             continue;
         }
@@ -137,6 +143,8 @@ fn parse_ordinary(record: &str) -> Result<FileChange, AppError> {
         unstaged,
         untracked: false,
         unmerged: staged == ChangeKind::Unmerged || unstaged == ChangeKind::Unmerged,
+        staged_lines: None,
+        unstaged_lines: None,
     })
 }
 
@@ -150,6 +158,8 @@ fn parse_rename(record: &str, original: &str) -> Result<FileChange, AppError> {
         unstaged,
         untracked: false,
         unmerged: false,
+        staged_lines: None,
+        unstaged_lines: None,
     })
 }
 
@@ -163,6 +173,8 @@ fn parse_unmerged(record: &str) -> Result<FileChange, AppError> {
         unstaged,
         untracked: false,
         unmerged: true,
+        staged_lines: None,
+        unstaged_lines: None,
     })
 }
 

@@ -5,6 +5,7 @@
   import { normalizeError } from "../errors";
   import {
     commitFileLabel,
+    commitLineStat,
     formatAuthoredAt,
     HISTORY_SEARCH_DEBOUNCE_MS,
     historyStatus,
@@ -14,6 +15,7 @@
     refPills,
     shortOid,
   } from "../history";
+  import { bucketByDirectory } from "../labels";
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
   import type {
     CommitDetail,
@@ -27,6 +29,7 @@
   } from "../types";
   import { BUSY_REASON, fileNavState, hueOf, initialOf, relativeTime, splitPath, statusMark, type FileNavState } from "../ui";
   import CommitDiffList from "./CommitDiffList.svelte";
+  import LineCounts from "./LineCounts.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest, isContextKey, pointFor } from "./ContextMenu.svelte";
   import DiffView from "./DiffView.svelte";
   import FileNav from "./FileNav.svelte";
@@ -172,6 +175,9 @@
   let visible = $derived(commits.slice(range.start, range.end));
   let activeFile = $derived(detail ? preferredCommitFile(detail.files, manualPath ?? filePath) : null);
   let fileFilter = $state("");
+  // 分组只改呈现，不写入设置，默认仍是列表。
+  let directoryMode = $state(false);
+  let collapsedDirs = $state<Set<string>>(new Set());
   let bodyOpen = $state(false);
   let bodyEl = $state<HTMLElement | null>(null);
   /** 折叠的说明是否真的被截断：只看实际溢出，所以随宽度变化重算，放得下时不给入口。 */
@@ -192,15 +198,37 @@
     deleted: (detail?.files ?? []).filter((file) => file.status === "deleted").length,
   });
   let bodyRest = $derived(detail ? commitBodyRest(detail.body, detail.commit.summary) : "");
+  type FileItem =
+    | { kind: "dir"; directory: string; label: string; count: number; collapsed: boolean }
+    | { kind: "file"; file: (typeof filteredFiles)[number] };
+  let fileItems = $derived.by(() => {
+    if (!directoryMode) return filteredFiles.map((file) => ({ kind: "file" as const, file }));
+    const needle = fileFilter.trim();
+    const items: FileItem[] = [];
+    for (const bucket of bucketByDirectory(filteredFiles)) {
+      const collapsed = collapsedDirs.has(bucket.directory) && needle === "";
+      items.push({
+        kind: "dir",
+        directory: bucket.directory,
+        label: bucket.directory || "仓库根目录",
+        count: bucket.rows.length,
+        collapsed,
+      });
+      if (!collapsed) {
+        for (const file of bucket.rows) items.push({ kind: "file", file });
+      }
+    }
+    return items;
+  });
   let fileRange = $derived(
     visibleRange(
-      filteredFiles.length,
+      fileItems.length,
       fileScroll,
       fileViewport > 0 ? fileViewport : fileScroll > 0 ? FILE_ROW_HEIGHT : 0,
       FILE_ROW_HEIGHT,
     ),
   );
-  let visibleFiles = $derived(filteredFiles.slice(fileRange.start, fileRange.end));
+  let visibleFiles = $derived(fileItems.slice(fileRange.start, fileRange.end));
   /* 按筛选后的列表走，与左侧看到的顺序一致；「全部文件」模式还没点选时算在第一个。 */
   let currentPath = $derived(viewMode === "single" ? activeFile?.path : (multiFocus ?? filteredFiles[0]?.path));
   let fileIndex = $derived(filteredFiles.findIndex((file) => file.path === currentPath));
@@ -419,14 +447,40 @@
     viewMode = next;
   }
 
+  function directoryOf(path: string): string {
+    return path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+  }
+
+  function openDirectory(path: string) {
+    if (!directoryMode) return;
+    const directory = directoryOf(path);
+    if (!collapsedDirs.has(directory)) return;
+    const next = new Set(collapsedDirs);
+    next.delete(directory);
+    collapsedDirs = next;
+  }
+
   function goToFile(path: string) {
     chooseFile(path);
-    const index = filteredFiles.findIndex((file) => file.path === path);
+    openDirectory(path);
+    const index = fileItems.findIndex((item) => item.kind === "file" && item.file.path === path);
     const height = fileViewport > 0 ? fileViewport : (fileListEl?.clientHeight ?? 0);
     const next = scrollIndexIntoView(index, fileScroll, height, FILE_ROW_HEIGHT);
     fileScroll = next;
     if (fileListEl) fileListEl.scrollTop = next;
   }
+
+  let revealedFileQuery = "";
+  $effect(() => {
+    const needle = fileFilter.trim();
+    const mode = directoryMode;
+    const first = filteredFiles[0]?.path ?? "";
+    const token = `${mode}:${needle}:${first}`;
+    if (!mode || !needle || !first || token === revealedFileQuery) return;
+    revealedFileQuery = token;
+    openDirectory(first);
+    queueMicrotask(() => goToFile(first));
+  });
 
   function reveal(index: number) {
     const height = viewport > 0 ? viewport : (list?.clientHeight ?? 0);
@@ -719,6 +773,10 @@
             <div class="commit-files-head">
               <span>变更文件</span>
               <span class="count">{detail.files.length}</span>
+              <div class="segmented" role="group" aria-label="文件排列">
+                <button type="button" aria-pressed={!directoryMode} onclick={() => (directoryMode = false)}>列表</button>
+                <button type="button" aria-pressed={directoryMode} onclick={() => (directoryMode = true)}>目录</button>
+              </div>
               <button
                 type="button"
                 class="icon-btn sm commit-files-toggle"
@@ -734,7 +792,7 @@
               {#if fileCounts.modified > 0}<span class="file-tally mod" title="修改">~{fileCounts.modified}</span>{/if}
               {#if fileCounts.deleted > 0}<span class="file-tally del" title="删除">−{fileCounts.deleted}</span>{/if}
             </div>
-            {#if detail.files.length > 8}
+            {#if detail.files.length > 8 || directoryMode}
               <div class="commit-files-filter">
                 <div class="field sm">
                   <Icon name="search" size={13} />
@@ -756,29 +814,51 @@
                 bind:clientHeight={fileViewport}
                 onscroll={(event) => (fileScroll = event.currentTarget.scrollTop)}
               >
-                <div class="virtual-space" style={`height:${filteredFiles.length * FILE_ROW_HEIGHT}px`}>
-                  {#each visibleFiles as file, index (`${file.status}:${file.path}`)}
-                    {@const mark = statusMark(commitFileLabel(file.status))}
-                    {@const parts = splitPath(file.path)}
-                    <button
-                      type="button"
-                      class="file-row"
-                      role="option"
-                      aria-selected={currentPath === file.path}
-                      style={`top:${(fileRange.start + index) * FILE_ROW_HEIGHT + 2}px;height:${FILE_ROW_HEIGHT - 4}px`}
-                      title={fileTitle(file)}
-                      onclick={() => chooseFile(file.path)}
-                    >
-                      <span class={`st ${mark.tone}`} title={commitFileLabel(file.status)}>{mark.letter}</span>
-                      <span class="file-name">
-                        <span class="fn">{parts.name}</span>
-                        {#if file.originalPath}
-                          <span class="fd from" title={`重命名自 ${file.originalPath}`}>← {file.originalPath}</span>
-                        {:else if parts.dir}
-                          <span class="fd"><bdi>{parts.dir}</bdi></span>
-                        {/if}
-                      </span>
-                    </button>
+                <div class="virtual-space" style={`height:${fileItems.length * FILE_ROW_HEIGHT}px`}>
+                  {#each visibleFiles as item, index (item.kind === "dir" ? `d:${item.directory}` : `${item.file.status}:${item.file.path}`)}
+                    {#if item.kind === "dir"}
+                      <div class="file-dir" role="presentation" style={`top:${(fileRange.start + index) * FILE_ROW_HEIGHT}px;height:${FILE_ROW_HEIGHT}px`}>
+                        <button
+                          type="button"
+                          class="dir-name"
+                          aria-expanded={!item.collapsed}
+                          onclick={() => {
+                            const next = new Set(collapsedDirs);
+                            if (next.has(item.directory)) next.delete(item.directory);
+                            else next.add(item.directory);
+                            collapsedDirs = next;
+                          }}
+                        >
+                          <Icon name="chevron-down" size={13} class={item.collapsed ? "" : "flip"} />
+                          <span>{item.label}</span>
+                          <span class="count">{item.count}</span>
+                        </button>
+                      </div>
+                    {:else}
+                      {@const file = item.file}
+                      {@const mark = statusMark(commitFileLabel(file.status))}
+                      {@const parts = splitPath(file.path)}
+                      <button
+                        type="button"
+                        class="file-row"
+                        role="option"
+                        aria-selected={currentPath === file.path}
+                        style={`top:${(fileRange.start + index) * FILE_ROW_HEIGHT + 2}px;height:${FILE_ROW_HEIGHT - 4}px`}
+                        title={fileTitle(file)}
+                        onclick={() => chooseFile(file.path)}
+                      >
+                        <span class={`st ${mark.tone}`} title={commitFileLabel(file.status)}>{mark.letter}</span>
+                        <span class="file-name">
+                          <span class="fn">{parts.name}</span>
+                          {#if file.originalPath}
+                            <span class="fd from" title={`重命名自 ${file.originalPath}`}>← {file.originalPath}</span>
+                          {:else if parts.dir}
+                            <span class="fd"><bdi>{parts.dir}</bdi></span>
+                          {/if}
+                        </span>
+                        <LineCounts stat={commitLineStat(file)} />
+                      </button>
+                    {/if}
                   {/each}
                 </div>
               </div>

@@ -210,7 +210,7 @@ async fn load_tags(
         Some(listed.generation),
     )
     .await?;
-    let snapshot = status_from_output(backend, &repo_key(root), &status)?;
+    let snapshot = status_from_output(backend, root, &status).await?;
     Ok(TagState {
         generation: snapshot.generation,
         tags,

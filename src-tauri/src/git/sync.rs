@@ -1799,6 +1799,13 @@ mod tests {
         );
         assert_eq!(pulled.branch.behind, Some(0));
         assert_eq!(pulled.branch.ahead, Some(0));
+        assert_eq!(
+            git_text(&work, &["log", "-1", "--format=%P"])
+                .split_whitespace()
+                .count(),
+            1,
+            "快进不创建合并提交"
+        );
         assert!(pulled.branch.live_remote_checked);
         backend.remote_checks.note(&opened.summary.path, 1);
         let stale = refresh_status(&backend, &opened.summary.path, pulled.generation, 4)
@@ -1836,6 +1843,8 @@ mod tests {
             .unwrap_err();
         assert_eq!(pulled.code, "diverged");
         assert!(pulled.message.contains("合并"));
+        assert!(pulled.message.contains("变基"));
+        assert!(pulled.message.contains("当前分支没有移动"));
         assert_eq!(fs::read(work.join("file.txt")).unwrap(), before);
         assert_eq!(git_text(&work, &["rev-parse", "HEAD"]), head);
         let pushed = push_branch(
@@ -1868,6 +1877,27 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(duplicate.code, "duplicate");
+    }
+
+    #[tokio::test]
+    async fn detached_pull_keeps_the_existing_explanation() {
+        let fixture = crate::test_support::git_fixture("detached-pull");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "base\n").unwrap();
+        git(&repo, &["add", "--", "file.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        git(&repo, &["checkout", "--detach"]);
+        let opened = add_repository(&backend, &repo_key(&repo), 1).await.unwrap();
+        let head = git_text(&repo, &["rev-parse", "HEAD"]);
+        let pulled = pull_fast_forward(&backend, &opened.summary.path, opened.generation, 2)
+            .await
+            .unwrap_err();
+        assert_eq!(pulled.code, "detached");
+        assert!(pulled.message.contains("游离"));
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(fs::read_to_string(repo.join("file.txt")).unwrap(), "base\n");
     }
 
     #[tokio::test]

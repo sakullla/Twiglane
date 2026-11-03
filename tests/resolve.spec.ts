@@ -107,16 +107,21 @@ function session(extra: Partial<MergeSession> = {}): MergeSession {
 describe("合并与恢复文案", () => {
   it("区分合并、外部状态、撤销和放弃", () => {
     expect(operationCaption("merge")).toBe("正在进行分支合并");
-    expect(operationCaption("rebase")).toContain("rebase");
-    expect(operationCaption("cherry-pick")).toContain("cherry-pick");
+    expect(operationCaption("rebase")).toBe("正在变基");
+    expect(operationCaption("cherry-pick")).toBe("正在拣选");
     expect(operationCaption("unmerged")).toContain("不是分支合并");
     expect(operationCaption("none")).toContain("没有进行中的合并");
     expect(conflictKindLabel("binary")).toBe("二进制冲突");
     expect(conflictKindLabel("modify_delete")).toBe("修改/删除冲突");
     expect(canCompleteMerge("merge", 1)).toBe(false);
     expect(canCompleteMerge("merge", 0)).toBe(true);
-    expect(canCompleteMerge("cherry-pick", 0)).toBe(false);
-    expect(showMergeAbort("rebase", true)).toBe(false);
+    expect(canCompleteMerge("rebase", 0)).toBe(true);
+    expect(canCompleteMerge("rebase", 1)).toBe(false);
+    expect(canCompleteMerge("cherry-pick", 0)).toBe(true);
+    expect(canCompleteMerge("cherry-pick", 1)).toBe(false);
+    expect(showMergeAbort("rebase", true)).toBe(true);
+    expect(showMergeAbort("cherry-pick", false)).toBe(false);
+    expect(showMergeAbort("unmerged", true)).toBe(false);
     expect(showMergeAbort("merge", true)).toBe(true);
     expect(undoActionLabel()).toContain("撤销最近提交");
     expect(undoActionLabel()).not.toBe(discardActionLabel());
@@ -137,11 +142,15 @@ describe("合并面板", () => {
     branchState.mockResolvedValue({ generation: 4, branches: [], snapshot: opened.snapshot });
   });
 
-  it("外部 rebase 不提供完成或中止", async () => {
+  it("进行中的变基和拣选可以继续或中止，没有跳过", async () => {
     mergeSession.mockResolvedValue(
       session({
         operation: "rebase",
-        note: "检测到 rebase 进行中。这里不会继续、跳过或中止 rebase。",
+        canAbort: true,
+        canContinue: false,
+        unresolved: 1,
+        conflicts: [{ path: "file.txt", kind: "text", summary: "文本" }],
+        note: "正在变基（rebase）。还有 1 个未解决冲突，不能完成。不能跳过。",
       }),
     );
     render(MergePanel, {
@@ -154,8 +163,13 @@ describe("合并面板", () => {
       onNotice: () => {},
       onOpenStash: () => {},
     });
-    expect(await screen.findByText(/不会继续、跳过或中止 rebase/)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "中止合并" })).toBeNull();
+    const continueRebase = await screen.findByRole("button", { name: "继续变基" });
+    expect(continueRebase.hasAttribute("disabled")).toBe(true);
+    expect(screen.getAllByText(/不能算完成/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/不能跳过/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/当前一侧是基底/).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "中止变基" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /跳过/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "完成合并" })).toBeNull();
   });
 
@@ -183,6 +197,7 @@ describe("合并面板", () => {
     expect(complete.hasAttribute("disabled")).toBe(true);
     expect(screen.getByText(/不能完成合并/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "中止合并" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /跳过/ })).toBeNull();
   });
 
   const twoBranches = {
@@ -448,6 +463,119 @@ describe("合并面板", () => {
     await vi.waitFor(() => expect(completeMerge).toHaveBeenCalledWith("/repo", "Merge branch 'feature' into main", 6, 1));
     expect(startMerge).toHaveBeenCalledWith("/repo", "feature", null, "merge", 5, 1);
     expect(await screen.findByText("已把 feature 合并到 main")).toBeTruthy();
+  });
+
+  it("变基先确认将改写当前分支，取消不开始", async () => {
+    mergeSession.mockResolvedValue(session());
+    branchState.mockResolvedValue(twoBranches);
+    mergePreview.mockResolvedValue(previewOf({ source: "origin/main", target: "main" }));
+    renderPanel({ initialMode: "rebase", initialSource: "origin/main", initialTarget: "main" });
+    const radio = await screen.findByRole("radio", { name: /变基/ });
+    expect(radio.getAttribute("aria-checked")).toBe("true");
+    expect(screen.getAllByText(/将改写当前分支/).length).toBeGreaterThan(0);
+    expect(startMerge).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole("button", { name: "变基并改写当前分支" }));
+    const confirm = await screen.findByRole("dialog", { name: "确认变基" });
+    expect(confirm.textContent).toContain("将改写当前分支");
+    await fireEvent.click(within(confirm).getByRole("button", { name: "取消" }));
+    expect(startMerge).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "确认变基" })).toBeNull();
+    startMerge.mockResolvedValue(session({ generation: 6, operation: "none", rebased: true, snapshot: opened.snapshot }));
+    await fireEvent.click(screen.getByRole("button", { name: "变基并改写当前分支" }));
+    await fireEvent.click(within(await screen.findByRole("dialog", { name: "确认变基" })).getByRole("button", { name: "确认变基" }));
+    await vi.waitFor(() => expect(startMerge).toHaveBeenCalledWith("/repo", "origin/main", null, "rebase", 5, 1));
+    expect(await screen.findByText(/远程不变，没有推送/)).toBeTruthy();
+  });
+
+  it("目标不是当前分支时不能开始变基", async () => {
+    mergeSession.mockResolvedValue(session());
+    branchState.mockResolvedValue(twoBranches);
+    mergePreview.mockImplementation(async (_repo: string, source: string, target: string | null) =>
+      previewOf({ source, target: target ?? "main", needsSwitch: target !== null }),
+    );
+    renderPanel({ initialMode: "rebase", initialSource: "main", initialTarget: "feature" });
+    const start = await screen.findByRole("button", { name: "变基并改写当前分支" });
+    await vi.waitFor(() => expect(start.getAttribute("title")).toContain("变基只会改写当前分支"));
+    expect(start.hasAttribute("disabled")).toBe(true);
+    expect(startMerge).not.toHaveBeenCalled();
+  });
+
+  it("继续变基遇到新冲突时重新读取，不算完成", async () => {
+    const paused = session({
+      generation: 8,
+      operation: "rebase",
+      canAbort: true,
+      canContinue: false,
+      unresolved: 1,
+      conflicts: [{ path: "b.txt", kind: "text", summary: "文本" }],
+      note: "这次继续又遇到冲突，不能算完成。不能跳过。",
+    });
+    mergeSession.mockResolvedValueOnce(
+      session({
+        operation: "rebase",
+        canAbort: true,
+        canContinue: true,
+        unresolved: 0,
+        source: "main",
+        note: "可以继续。不能跳过。",
+      }),
+    );
+    completeMerge.mockRejectedValue({ code: "sequencer_paused", message: "这次继续又遇到冲突，不能算完成。不能跳过。", generation: 8 });
+    mergeSession.mockResolvedValueOnce(paused);
+    const onFailure = vi.fn();
+    render(MergePanel, {
+      opened,
+      disabled: false,
+      nextId: () => 1,
+      onSnapshot: () => {},
+      onGeneration: () => {},
+      onFailure,
+      onNotice: () => {},
+      onOpenStash: () => {},
+    });
+    await fireEvent.click(await screen.findByRole("button", { name: "继续变基" }));
+    await vi.waitFor(() => expect(completeMerge).toHaveBeenCalledWith("/repo", expect.any(String), 4, 1));
+    await vi.waitFor(() => expect(onFailure).toHaveBeenCalled());
+    expect(await screen.findByRole("button", { name: "继续变基" })).toBeTruthy();
+    expect((await screen.findByRole("button", { name: "继续变基" })).hasAttribute("disabled")).toBe(true);
+    expect(screen.queryByText(/远程不变，没有推送/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /跳过/ })).toBeNull();
+  });
+
+  it("拣选可以继续，不提供跳过", async () => {
+    mergeSession.mockResolvedValue(
+      session({
+        operation: "cherry-pick",
+        canAbort: true,
+        canContinue: true,
+        unresolved: 0,
+        note: "正在拣选（cherry-pick）。可以继续。不能跳过。",
+      }),
+    );
+    completeMerge.mockResolvedValue({ oid: "d".repeat(40), generation: 7, summary: "已继续拣选。没有推送。", files: [], snapshot: opened.snapshot });
+    mergeSession.mockResolvedValueOnce(
+      session({
+        operation: "cherry-pick",
+        canAbort: true,
+        canContinue: true,
+        unresolved: 0,
+        note: "正在拣选（cherry-pick）。可以继续。不能跳过。",
+      }),
+    );
+    render(MergePanel, {
+      opened,
+      disabled: false,
+      nextId: () => 1,
+      onSnapshot: () => {},
+      onGeneration: () => {},
+      onFailure: () => {},
+      onOpenStash: () => {},
+    });
+    expect(screen.queryByRole("button", { name: /跳过/ })).toBeNull();
+    await fireEvent.click(await screen.findByRole("button", { name: "继续拣选" }));
+    await vi.waitFor(() => expect(completeMerge).toHaveBeenCalled());
+    expect(screen.queryByRole("textbox", { name: "合并说明" })).toBeNull();
+    expect(screen.getByRole("button", { name: "中止拣选" })).toBeTruthy();
   });
 
   it("把当前分支合并到另一个分支：目标可选，开始时由后端先切换", async () => {

@@ -961,6 +961,48 @@ pub fn merge_abort_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) 
     (git.to_path_buf(), args)
 }
 
+/// 沿用变基或拣选已经准备好的说明，不打开编辑器，也不改写说明。
+pub fn commit_no_edit_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([OsString::from("commit"), OsString::from("--no-edit")]);
+    (git.to_path_buf(), args)
+}
+
+/// 非交互变基。不传 `--interactive`，也不提供逐条挑选、压缩或跳过。
+pub fn rebase_command(git: &Path, root: &Path, base: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("rebase"),
+        OsString::from("--"),
+        OsString::from(base),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+pub fn rebase_continue_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([OsString::from("rebase"), OsString::from("--continue")]);
+    (git.to_path_buf(), args)
+}
+
+pub fn rebase_abort_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([OsString::from("rebase"), OsString::from("--abort")]);
+    (git.to_path_buf(), args)
+}
+
+pub fn cherry_pick_continue_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([OsString::from("cherry-pick"), OsString::from("--continue")]);
+    (git.to_path_buf(), args)
+}
+
+pub fn cherry_pick_abort_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([OsString::from("cherry-pick"), OsString::from("--abort")]);
+    (git.to_path_buf(), args)
+}
+
 pub fn unmerged_index_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.extend([
@@ -1281,6 +1323,34 @@ mod tests {
             merge_args.last().map(OsString::as_os_str),
             Some(std::ffi::OsStr::new("feature"))
         );
+        let rebase_args = rebase_command(git, root, "origin/main").1;
+        assert!(rebase_args.iter().any(|arg| arg == "rebase"));
+        assert_eq!(
+            rebase_args.last().map(OsString::as_os_str),
+            Some(std::ffi::OsStr::new("origin/main"))
+        );
+        assert!(rebase_continue_command(git, root).1.iter().any(|arg| arg == "--continue"));
+        assert!(rebase_abort_command(git, root).1.iter().any(|arg| arg == "--abort"));
+        assert!(cherry_pick_abort_command(git, root)
+            .1
+            .iter()
+            .any(|arg| arg == "--abort"));
+        for sequencer in [
+            rebase_args.clone(),
+            rebase_continue_command(git, root).1,
+            rebase_abort_command(git, root).1,
+            cherry_pick_continue_command(git, root).1,
+            cherry_pick_abort_command(git, root).1,
+        ] {
+            assert!(!sequencer.iter().any(|arg| {
+                let text = arg.to_string_lossy();
+                text == "--interactive"
+                    || text == "-i"
+                    || text == "--skip"
+                    || text == "--squash"
+                    || text == "squash"
+            }));
+        }
         let reset_args = reset_soft_command(git, root, "abc123").1;
         assert!(reset_args.iter().any(|arg| arg == "--soft"));
         assert!(!reset_args
@@ -1298,6 +1368,11 @@ mod tests {
         for builder in [
             merge_args,
             merge_abort_command(git, root).1,
+            rebase_args,
+            rebase_continue_command(git, root).1,
+            rebase_abort_command(git, root).1,
+            cherry_pick_continue_command(git, root).1,
+            cherry_pick_abort_command(git, root).1,
             reset_args,
             fetch_one_command(git, root, "origin").1,
             ls_remote_tags_command(git, root, "origin").1,

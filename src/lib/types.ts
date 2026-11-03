@@ -367,6 +367,8 @@ export interface MergeSession {
   switchedFrom?: string | null;
   /** 以快进方式完成，没有创建合并提交。 */
   fastForwarded?: boolean;
+  /** 变基已完成，没有推送。 */
+  rebased?: boolean;
 }
 
 export interface ConflictSide {

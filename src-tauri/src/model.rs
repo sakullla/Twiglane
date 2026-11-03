@@ -485,6 +485,9 @@ pub struct MergeSession {
     /// 以快进方式完成，没有创建合并提交。
     #[serde(default)]
     pub fast_forwarded: bool,
+    /// 变基已完成：当前分支上尚未进入基底的提交已接到基底顶端。没有推送。
+    #[serde(default)]
+    pub rebased: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

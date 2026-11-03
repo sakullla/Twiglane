@@ -75,6 +75,8 @@
     initialSource?: string | null;
     /** 预选的目标分支（从分支菜单「把当前分支合并到此分支」进入）。 */
     initialTarget?: string | null;
+    /** 打开时的方式。分叉拉取用设置里的预选；分支菜单「变基」固定为 rebase。 */
+    initialMode?: MergeMode | null;
     disabled: boolean;
     nextId: () => number;
     onSnapshot: (snapshot: StatusSnapshot) => void;
@@ -97,6 +99,7 @@
     focusPath = null,
     initialSource = null,
     initialTarget = null,
+    initialMode = null,
     disabled,
     nextId,
     onSnapshot,
@@ -115,6 +118,7 @@
     source: string;
     target: string;
     fastForwarded: boolean;
+    rebased: boolean;
     oid: string | null;
     commits: number;
     switchedFrom: string | null;
@@ -124,7 +128,8 @@
   let branches = $state<BranchRecord[]>([]);
   let source = $state(untrack(() => initialSource ?? ""));
   let target = $state(untrack(() => initialTarget ?? ""));
-  let mode = $state<MergeMode>("merge");
+  let mode = $state<MergeMode>(untrack(() => initialMode ?? "merge"));
+  let confirmingRebase = $state(false);
   let setupMessage = $state("");
   let messageTouched = $state(false);
   let preview = $state<MergePreview | null>(null);
@@ -158,7 +163,12 @@
 
   let blocked = $derived(disabled || busy);
   let current = $derived(opened.snapshot.branch.detached || opened.snapshot.branch.unborn ? null : opened.snapshot.branch.name);
-  let active = $derived(session?.operation === "merge" || session?.operation === "unmerged");
+  let active = $derived(
+    session?.operation === "merge" ||
+      session?.operation === "unmerged" ||
+      session?.operation === "rebase" ||
+      session?.operation === "cherry-pick",
+  );
   /** 合并进行中：头部和底部都收成一条细条，把高度让给冲突内容。 */
   let strip = $derived(Boolean(session && active));
   let external = $derived(Boolean(session && session.operation !== "none" && !active));
@@ -258,12 +268,13 @@
     }
     if (stay) return false;
     const left = state.unresolved;
+    const finish = state.operation === "rebase" ? "继续变基" : state.operation === "cherry-pick" ? "继续拣选" : "完成合并";
     onNotice(
       filePending(here.path)
-        ? "没有其他未处理的文件。明确标记这个文件后可以完成合并。"
+        ? `没有其他未处理的文件。明确标记这个文件后可以${finish}。`
         : left > 1
-          ? `全部冲突都已处理，把这 ${left} 个文件标记为已解决后可以完成合并。`
-          : "全部冲突都已处理，标记这个文件后可以完成合并。",
+          ? `全部冲突都已处理，把这 ${left} 个文件标记为已解决后可以${finish}。`
+          : `全部冲突都已处理，标记这个文件后可以${finish}。`,
     );
     return false;
   }
@@ -441,14 +452,33 @@
   }
 
   function confirmStart() {
+    if (!readyPreview?.canStart) return;
+    if (mode === "rebase") {
+      if (target !== current) return;
+      confirmingRebase = true;
+      return;
+    }
+    void beginIntegration();
+  }
+
+  function beginIntegration() {
     const checked = readyPreview;
     if (!checked?.canStart) return;
+    if (mode === "rebase" && target !== current) return;
+    confirmingRebase = false;
     const repo = opened.summary.path;
-    const chosenMode: MergeMode = mode === "ff-only" && checked.fastForward ? "ff-only" : "merge";
+    const chosenMode: MergeMode = mode === "rebase" ? "rebase" : mode === "ff-only" && checked.fastForward ? "ff-only" : "merge";
     const note = setupMessage.trim() || defaultMergeMessage(checked.source, checked.target, sourceRemote);
     void run(async () => {
       const started = await api
-        .startMerge(repo, checked.source, checked.needsSwitch ? checked.target : null, chosenMode, startGeneration(checked), nextId())
+        .startMerge(
+          repo,
+          checked.source,
+          chosenMode === "rebase" ? null : checked.needsSwitch ? checked.target : null,
+          chosenMode,
+          startGeneration(checked),
+          nextId(),
+        )
         .catch((error: unknown) => {
           // 写入前被 generation 校验拦下：结论已不可信，按最新状态重新检查。
           if (normalizeError(error).code === "stale") previewNonce += 1;
@@ -462,12 +492,27 @@
       resolvedPaths = [];
       view = null;
       preview = null;
+      if (started.rebased) {
+        session = started;
+        finished = {
+          source: checked.source,
+          target: checked.target,
+          fastForwarded: false,
+          rebased: true,
+          oid: started.snapshot.branch.headOid,
+          commits: checked.incoming,
+          switchedFrom: null,
+        };
+        onNotice("已把当前分支上尚未进入基底的提交接到基底顶端。没有推送。");
+        return;
+      }
       if (started.fastForwarded) {
         session = started;
         finished = {
           source: checked.source,
           target: checked.target,
           fastForwarded: true,
+          rebased: false,
           oid: started.snapshot.branch.headOid,
           commits: checked.incoming,
           switchedFrom: started.switchedFrom ?? null,
@@ -483,6 +528,7 @@
           source: checked.source,
           target: checked.target,
           fastForwarded: false,
+          rebased: false,
           oid: done.oid,
           commits: checked.incoming,
           switchedFrom: started.switchedFrom ?? null,
@@ -537,7 +583,7 @@
     const path = focusPath;
     const state = session;
     if (!path || !state) return;
-    if (state.operation !== "merge" && state.operation !== "unmerged") return;
+    if (state.operation !== "merge" && state.operation !== "unmerged" && state.operation !== "rebase" && state.operation !== "cherry-pick") return;
     const key = `${state.generation}:${path}`;
     if (openedFocus === key) return;
     if (!state.conflicts.some((entry) => entry.path === path)) return;
@@ -616,17 +662,49 @@
     const from = state.source ?? incomingLabel;
     const into = state.target ?? currentLabel;
     const count = conflictTotal;
+    const rebasing = state.operation === "rebase";
     void run(async () => {
-      const done = await api.completeMerge(repo, kept, state.generation, nextId());
-      message = "";
-      messageByRepo.delete(repo);
-      resolvedPaths = [];
-      onSnapshot(done.snapshot);
-      onNotice(done.summary);
-      session = await api.mergeSession(repo, done.generation, nextId());
-      view = null;
-      finished = { source: from, target: into, fastForwarded: false, oid: done.oid, commits: count, switchedFrom: switchedFromByRepo.get(repo) ?? null };
+      try {
+        const done = await api.completeMerge(repo, kept, state.generation, nextId());
+        message = "";
+        messageByRepo.delete(repo);
+        resolvedPaths = [];
+        onSnapshot(done.snapshot);
+        onNotice(done.summary);
+        session = await api.mergeSession(repo, done.generation, nextId());
+        view = null;
+        finished = {
+          source: from,
+          target: into,
+          fastForwarded: false,
+          rebased: rebasing,
+          oid: done.oid,
+          commits: count,
+          switchedFrom: switchedFromByRepo.get(repo) ?? null,
+        };
+      } catch (error) {
+        const failure = normalizeError(error);
+        if (failure.code === "sequencer_paused" || failure.code === "conflicts_open") {
+          const generation = failure.generation ?? state.generation;
+          if (failure.generation !== undefined) onGeneration(failure.generation);
+          session = await api.mergeSession(repo, generation, nextId());
+          view = null;
+        }
+        throw error;
+      }
     });
+  }
+
+  function abortLabel(operation: string): string {
+    if (operation === "rebase") return "中止变基";
+    if (operation === "cherry-pick") return "中止拣选";
+    return "中止合并";
+  }
+
+  function continueLabel(operation: string): string {
+    if (operation === "rebase") return "继续变基";
+    if (operation === "cherry-pick") return "继续拣选";
+    return "完成合并";
   }
 
   function askAbort() {
@@ -665,6 +743,7 @@
   }
 
   function primaryLabel(checked: MergePreview | null): string {
+    if (mode === "rebase") return "变基并改写当前分支";
     if (!checked) return "合并";
     if (!checked.canStart) return "合并";
     if (mode === "ff-only" && checked.fastForward) return `快进 ${checked.target}`;
@@ -686,10 +765,12 @@
         </span>
         {#if session.operation === "unmerged"}
           <span class="mp-note truncate" title={session.note}>{session.note}</span>
+        {:else if session.operation === "rebase"}
+          <span class="mp-note truncate" title="变基冲突中，当前一侧是基底，来源一侧是正在改写的提交。">变基冲突中，当前一侧是基底，来源一侧是正在改写的提交。</span>
         {/if}
         <span class="spacer"></span>
         {#if showMergeAbort(session.operation, session.canAbort)}
-          <button type="button" class="btn btn-danger-soft btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={askAbort}><Icon name="x" size={14} />中止合并</button>
+          <button type="button" class="btn btn-danger-soft btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={askAbort}><Icon name="x" size={14} />{abortLabel(session.operation)}</button>
         {/if}
       </div>
     {/if}
@@ -827,7 +908,20 @@
           <div class="empty conflict-picker-empty">
             <span class={`empty-icon ${session.unresolved === 0 ? "ok" : ""}`}><Icon name={session.unresolved === 0 ? "check-circle" : "file-diff"} size={23} /></span>
             <strong>{session.unresolved === 0 ? "所有冲突都已标记" : "选择一个冲突文件"}</strong>
-            <p>{session.unresolved === 0 ? "检查无误后，在下方填写说明并完成合并。完成只在本地提交，不会推送。" : "从左侧选择文件，逐处对照两边的版本，再决定最终结果。"}</p>
+            <p>
+              {#if session.unresolved === 0}
+                {#if session.operation === "rebase"}
+                  检查无误后，在下方继续变基。继续只改写当前分支，不会推送，也不能跳过。
+                {:else if session.operation === "cherry-pick"}
+                  检查无误后，在下方继续拣选。不会推送，也不能跳过。
+                {:else}
+                  检查无误后，在下方填写说明并完成合并。完成只在本地提交，不会推送。
+                {/if}
+              {:else}
+                从左侧选择文件，逐处对照两边的版本，再决定最终结果。
+                {#if session.operation === "rebase"}变基冲突中，当前一侧是基底，来源一侧是正在改写的提交。{/if}
+              {/if}
+            </p>
           </div>
         {/if}
       </div>
@@ -836,10 +930,12 @@
     <div class="panel-scroll mp-scroll">
       <div class="merge-done" role="status">
         <span class="merge-done-icon"><Icon name="check" size={28} stroke={2.4} /></span>
-        <h2>{finished.fastForwarded ? `已把 ${finished.target} 快进到 ${finished.source}` : `已把 ${finished.source} 合并到 ${finished.target}`}</h2>
+        <h2>{finished.rebased ? `已把 ${finished.target} 接到 ${finished.source} 顶端` : finished.fastForwarded ? `已把 ${finished.target} 快进到 ${finished.source}` : `已把 ${finished.source} 合并到 ${finished.target}`}</h2>
         <p>
-          {#if finished.fastForwarded}没有创建合并提交，{finished.target} 现在指向 {finished.oid ? shortOid(finished.oid) : "来源的最新提交"}。{:else}已创建合并提交{#if finished.oid}<code>{shortOid(finished.oid)}</code>{/if}。{/if}
-          结果只在本地，尚未推送。
+          {#if finished.rebased}
+            当前分支已被改写。远程不变，没有推送。
+          {:else if finished.fastForwarded}没有创建合并提交，{finished.target} 现在指向 {finished.oid ? shortOid(finished.oid) : "来源的最新提交"}。结果只在本地，尚未推送。
+          {:else}已创建合并提交{#if finished.oid}<code>{shortOid(finished.oid)}</code>{/if}。结果只在本地，尚未推送。{/if}
         </p>
         <div class="merge-done-actions">
           {#if finished.switchedFrom}
@@ -939,6 +1035,14 @@
         />
         <span class="mp-status ok" title={reason}><Icon name="check-circle" size={13} /><span class="truncate">{reason}</span></span>
       {/if}
+    {:else if session?.operation === "rebase" || session?.operation === "cherry-pick"}
+      {#if session.unresolved > 0}
+        {@const reason = `还有 ${session.unresolved} 个未解决冲突，不能算完成。不能跳过。`}
+        <span class="mp-status warn" title={reason}><Icon name="alert" size={13} /><span class="truncate">{reason}</span></span>
+      {:else}
+        {@const reason = session.operation === "rebase" ? "冲突已全部处理。继续变基不会推送，也不能跳过。" : "冲突已全部处理。继续拣选不会推送，也不能跳过。"}
+        <span class="mp-status ok" title={reason}><Icon name="check-circle" size={13} /><span class="truncate">{reason}</span></span>
+      {/if}
     {:else if session?.operation === "unmerged"}
       {@const reason = "标记后的文件可以在改动区提交，临时保存记录不会被删除。"}
       <span class="mp-status" title={reason}><Icon name="info" size={13} /><span class="truncate">{reason}</span></span>
@@ -946,21 +1050,23 @@
     {/if}
     <span class="spacer"></span>
     {#if onClose}<button type="button" class={`btn btn-secondary ${strip ? "btn-sm" : ""}`} onclick={onClose}>{finished ? "完成" : "关闭"}</button>{/if}
-    {#if session?.operation === "merge"}
+    {#if session?.operation === "merge" || session?.operation === "rebase" || session?.operation === "cherry-pick"}
       <button
         type="button"
         class="btn btn-primary btn-sm"
         title={blocked
           ? BUSY_REASON
           : !canCompleteMerge(session.operation, session.unresolved)
-            ? `还有 ${session.unresolved} 个未解决冲突，不能完成合并。`
-            : message.trim() === ""
+            ? session.operation === "merge"
+              ? `还有 ${session.unresolved} 个未解决冲突，不能完成合并。`
+              : "还有未解决冲突，不能算完成。不能跳过。"
+            : session.operation === "merge" && message.trim() === ""
               ? "填写合并说明后才能完成"
               : undefined}
-        disabled={blocked || !canCompleteMerge(session.operation, session.unresolved) || message.trim() === ""}
+        disabled={blocked || !canCompleteMerge(session.operation, session.unresolved) || (session.operation === "merge" && message.trim() === "")}
         onclick={complete}
       >
-        <Icon name="check" size={14} />完成合并
+        <Icon name="check" size={14} />{continueLabel(session.operation)}
       </button>
     {:else if session?.operation === "none" && !finished}
       <button
@@ -970,10 +1076,12 @@
           ? BUSY_REASON
           : !readyPreview?.canStart
             ? "先完成上方的合并检查"
-            : mode === "merge" && setupMessage.trim() === ""
-              ? "填写合并说明后才能开始"
-              : undefined}
-        disabled={blocked || !readyPreview?.canStart || (mode === "merge" && setupMessage.trim() === "")}
+            : mode === "rebase" && target !== current
+              ? "变基只会改写当前分支"
+              : mode === "merge" && setupMessage.trim() === ""
+                ? "填写合并说明后才能开始"
+                : undefined}
+        disabled={blocked || !readyPreview?.canStart || (mode === "rebase" && target !== current) || (mode === "merge" && setupMessage.trim() === "")}
         onclick={confirmStart}
       >
         {#if busy}<span class="spinner"></span>{:else}<Icon name="merge" size={14} />{/if}{primaryLabel(readyPreview)}
@@ -983,7 +1091,7 @@
 
   {#if aborting}
     <Modal
-      title="中止合并"
+      title={abortLabel(session?.operation ?? "merge")}
       titleId="abort-merge-title"
       icon="alert"
       tone="danger"
@@ -1003,6 +1111,24 @@
         <button type="button" class="btn btn-secondary" title={busy ? BUSY_REASON : undefined} disabled={busy} onclick={() => (aborting = false)}>取消</button>
         <span class="spacer"></span>
         <button type="button" class="btn btn-danger" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={confirmAbort}>确认中止</button>
+      {/snippet}
+    </Modal>
+  {/if}
+
+  {#if confirmingRebase}
+    <Modal
+      title="确认变基"
+      titleId="confirm-rebase-title"
+      icon="alert"
+      description="将改写当前分支。取消则不改写，当前分支保持不动。"
+      locked={busy}
+      onClose={() => (confirmingRebase = false)}
+    >
+      <p>将改写当前分支。当前分支上尚未进入 {source} 的提交会接到 {source} 顶端。远程不变，也不会推送。</p>
+      {#snippet footer()}
+        <button type="button" class="btn btn-secondary" title={busy ? BUSY_REASON : undefined} disabled={busy} onclick={() => (confirmingRebase = false)}>取消</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-primary" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={beginIntegration}>确认变基</button>
       {/snippet}
     </Modal>
   {/if}

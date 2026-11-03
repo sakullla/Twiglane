@@ -273,7 +273,7 @@
             </button>
             <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => runSync(onPull)}>
               <Icon name="arrow-down" />
-              <span>拉取{behind > 0 ? ` ${behind} 个提交` : ""}<small>快进拉取，不会自动合并分叉</small></span>
+              <span>拉取{behind > 0 ? ` ${behind} 个提交` : ""}<small>能快进就快进；分叉时再选择合并或变基</small></span>
             </button>
             <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => runSync(onPush)}>
               <Icon name="arrow-up" />

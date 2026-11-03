@@ -49,6 +49,7 @@
     type FileNavState,
   } from "./lib/ui";
   import BranchDialog from "./lib/components/BranchDialog.svelte";
+  import type { MergeMode } from "./lib/components/MergeSetup.svelte";
   import BranchSwitcher from "./lib/components/BranchSwitcher.svelte";
   import CommandPalette from "./lib/components/CommandPalette.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./lib/components/ContextMenu.svelte";
@@ -170,6 +171,8 @@
   /** 从分支菜单「合并到当前分支」进入时预选的来源分支。 */
   let mergeSource = $state<string | null>(null);
   let mergeTarget = $state<string | null>(null);
+  /** 分叉拉取用设置里的预选；从其他分支变基时固定为 rebase。普通合并不预选。 */
+  let mergeMode = $state<MergeMode | null>(null);
   let historyPath = $state<string | null>(null);
   let historyQuery = $state("");
   let taskModal = $state<TaskModal | null>(null);
@@ -437,6 +440,11 @@
   /** 七个任务入口共用单槽：任一时刻只有一个任务 modal。 */
   function openTask(task: TaskModal) {
     if (task !== "settings" && !opened) return;
+    if (task !== "merge") {
+      mergeSource = null;
+      mergeTarget = null;
+      mergeMode = null;
+    }
     closeSwitcher();
     cloneOpen = false;
     paletteOpen = false;
@@ -478,6 +486,7 @@
       conflictFocus = null;
       mergeSource = null;
       mergeTarget = null;
+      mergeMode = null;
       void probeMerge();
     }
   }
@@ -1193,10 +1202,29 @@
                 : "推送已完成，没有强行推送。";
       live = phaseNote;
     } catch (error) {
-      if (opened?.summary.path === current.summary.path) handleMutationError(error);
+      if (opened?.summary.path === current.summary.path) {
+        if (name === "pull" && openDivergedPull(current, error)) return;
+        handleMutationError(error);
+      }
     } finally {
       pending = null;
     }
+  }
+
+  /** 分叉时不把快进失败当成终点：打开现有合并界面选择方式，当前分支先不动。 */
+  function openDivergedPull(current: OpenedRepository, error: unknown): boolean {
+    const failure = normalizeError(error);
+    const branch = current.snapshot.branch;
+    if (failure.code !== "diverged" || branch.detached || branch.unborn || !branch.name || !branch.upstream) return false;
+    if (failure.generation !== undefined) adoptGeneration(failure.generation);
+    mergeSource = branch.upstream;
+    mergeTarget = branch.name;
+    mergeMode = pullIntegration;
+    banner = null;
+    phaseNote = "本地和上游都有新提交，当前分支还没有移动。请选择合并或变基。";
+    live = phaseNote;
+    openTask("merge");
+    return true;
   }
 
   async function addRepo() {
@@ -2409,6 +2437,7 @@
     focusPath={conflictFocus}
     initialSource={mergeSource}
     initialTarget={mergeTarget}
+    initialMode={mergeMode}
     disabled={writeLocked}
     {nextId}
     onClose={closeTask}
@@ -2443,6 +2472,7 @@
       closeTask();
       mergeSource = name;
       mergeTarget = null;
+      mergeMode = null;
       openTask("merge");
     }}
     onMergeInto={(name) => {
@@ -2450,6 +2480,15 @@
       closeTask();
       mergeSource = from;
       mergeTarget = name;
+      mergeMode = null;
+      openTask("merge");
+    }}
+    onRebaseBranch={(name) => {
+      const onto = opened?.snapshot.branch.name ?? null;
+      closeTask();
+      mergeSource = name;
+      mergeTarget = onto;
+      mergeMode = "rebase";
       openTask("merge");
     }}
     startCreating={branchCreateIntent}

@@ -119,6 +119,8 @@ const mocks = vi.hoisted(() => ({
   cloneRepository: vi.fn(),
   remoteState: vi.fn(),
   branchState: vi.fn(),
+  mergePreview: vi.fn(),
+  startMerge: vi.fn(),
   switchBranch: vi.fn(),
   tagState: vi.fn(),
   stashState: vi.fn(),
@@ -553,6 +555,29 @@ beforeEach(() => {
     };
   });
   mocks.measureProbe.mockResolvedValue({ enabled: false, elapsedMs: 0, script: null });
+  mocks.mergePreview.mockImplementation(async (_path: string, source: string, target: string | null) => ({
+    generation: 5,
+    source,
+    target: target ?? "main",
+    headOid: branch.headOid,
+    dirty: false,
+    localPaths: [],
+    canStart: true,
+    operation: "none",
+    note: "可以合并或变基。",
+    current: "main",
+    needsSwitch: Boolean(target),
+    incoming: 1,
+    outgoing: 1,
+    upToDate: false,
+    fastForward: false,
+    commits: [],
+    files: [],
+    filesTotal: 0,
+    conflictCheck: "clean",
+    conflictPaths: [],
+    blocker: null,
+  }));
 });
 
 afterEach(() => {
@@ -1712,5 +1737,116 @@ describe("应用外壳", () => {
       expect(card.title).toBe("正在读取，稍后再试");
     }
     finish(undefined);
+  });
+
+  it("分叉拉取按设置预选方式，取消确认不开始且当前分支不动", async () => {
+    mocks.getSettings.mockResolvedValue({
+      theme: "dark",
+      panelWidths: { sidebar: 256, files: 360 },
+      git: { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "Git 2.49.0 可用" },
+      recent: [{ name: "demo", path: repoPath, openedAtMs: 1 }],
+      settingsWarning: null,
+      pullIntegration: "rebase",
+    });
+    mocks.branchState.mockResolvedValue(branchFixture());
+    mocks.pullFastForward.mockRejectedValue({
+      code: "diverged",
+      message: "本地和远程都有新提交，不能快进。当前分支没有移动。",
+      generation: 4,
+    });
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: /^同步/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: /拉取/ }));
+    const dialog = await screen.findByRole("dialog", { name: "合并分支" });
+    const radio = await within(dialog).findByRole("radio", { name: /变基/ });
+    expect(radio.getAttribute("aria-checked")).toBe("true");
+    expect(dialog.textContent).toContain("将改写当前分支");
+    expect(document.querySelector(".branch-pill")?.textContent).toContain("main");
+    expect(mocks.startMerge).not.toHaveBeenCalled();
+    await fireEvent.click(within(dialog).getByRole("button", { name: "变基并改写当前分支" }));
+    const confirm = await screen.findByRole("dialog", { name: "确认变基" });
+    await fireEvent.click(within(confirm).getByRole("button", { name: "取消" }));
+    expect(mocks.startMerge).not.toHaveBeenCalled();
+    expect(document.querySelector(".branch-pill")?.textContent).toContain("main");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("没有拉取方式设置时分叉预选合并", async () => {
+    mocks.branchState.mockResolvedValue(branchFixture());
+    mocks.pullFastForward.mockRejectedValue({
+      code: "diverged",
+      message: "本地和远程都有新提交，不能快进。当前分支没有移动。",
+      generation: 4,
+    });
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: /^同步/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: /拉取/ }));
+    const dialog = await screen.findByRole("dialog", { name: "合并分支" });
+    const merge = await within(dialog).findByRole("radio", { name: /创建合并提交/ });
+    expect(merge.getAttribute("aria-checked")).toBe("true");
+    expect(within(dialog).getByRole("radio", { name: /变基/ }).getAttribute("aria-checked")).toBe("false");
+    expect(mocks.startMerge).not.toHaveBeenCalled();
+  });
+
+  it("没有上游或游离 HEAD 时不打开方式选择", async () => {
+    mocks.pullFastForward.mockRejectedValue({
+      code: "no_upstream",
+      message: "当前分支没有上游。请先发布，或只关联上游后再快进拉取。工作区没有改动。",
+      generation: 4,
+    });
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: /^同步/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: /拉取/ }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("没有上游");
+    expect(screen.queryByRole("dialog", { name: "合并分支" })).toBeNull();
+    cleanup();
+
+    const detached = { ...snapshot, branch: { ...branch, name: null, detached: true, upstream: null } };
+    mocks.openRepository.mockResolvedValue({
+      summary: { name: "demo", path: repoPath },
+      generation: 4,
+      snapshot: detached,
+      draft: "",
+      watchDegraded: false,
+    });
+    mocks.pullFastForward.mockRejectedValue({
+      code: "detached",
+      message: "当前是游离 HEAD，不能推送或发布。请先创建或切换到分支。没有改写远程。",
+      generation: 4,
+    });
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: /^同步/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: /拉取/ }));
+    const detachedAlert = await screen.findByRole("alert");
+    expect(detachedAlert.textContent).toContain("游离");
+    expect(screen.queryByRole("dialog", { name: "合并分支" })).toBeNull();
+  });
+
+  it("从其他分支变基时基底是所点分支，当前分支保持不动", async () => {
+    mocks.branchState.mockResolvedValue(branchFixture());
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: "当前分支 main" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "管理分支与标签" }));
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBeGreaterThan(0));
+    const develop = [...document.querySelectorAll<HTMLElement>(".branch-row")].find((row) => row.textContent?.includes("develop"));
+    expect(develop).toBeTruthy();
+    await fireEvent.contextMenu(develop!, { clientX: 40, clientY: 40 });
+    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "把当前分支变基到此分支…" }));
+    const dialog = await screen.findByRole("dialog", { name: "合并分支" });
+    const radio = await within(dialog).findByRole("radio", { name: /变基/ });
+    expect(radio.getAttribute("aria-checked")).toBe("true");
+    expect(dialog.textContent).toContain("将改写当前分支");
+    await vi.waitFor(() => expect(mocks.mergePreview).toHaveBeenCalledWith(repoPath, "develop", null, 4, expect.any(Number)));
+    expect(mocks.startMerge).not.toHaveBeenCalled();
+    await fireEvent.click(within(dialog).getByRole("button", { name: "变基并改写当前分支" }));
+    await fireEvent.click(within(await screen.findByRole("dialog", { name: "确认变基" })).getByRole("button", { name: "取消" }));
+    expect(mocks.startMerge).not.toHaveBeenCalled();
+    expect(document.querySelector(".branch-pill")?.textContent).toContain("main");
   });
 });

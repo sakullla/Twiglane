@@ -25,6 +25,8 @@
     onMergeBranch?: (name: string) => void;
     /** 把当前分支合并到某个本地分支：打开分支合并并预选目标。 */
     onMergeInto?: (name: string) => void;
+    /** 把当前分支变基到所点分支：所点分支是基底，当前分支会被改写。 */
+    onRebaseBranch?: (name: string) => void;
     /** 打开意图：入口本身就是「新建分支」时，打开即展开表单并聚焦名称，不必再点一次。 */
     startCreating?: boolean;
     /** 写锁来自后台克隆：它不碰当前仓库，读取照常，写入仍被拦住。 */
@@ -43,6 +45,7 @@
     onOpenHistory,
     onMergeBranch,
     onMergeInto,
+    onRebaseBranch,
     startCreating = false,
     backgroundClone = false,
     nextId,
@@ -360,6 +363,15 @@
         icon: "merge",
         disabledReason: currentReason ?? elsewhere ?? busy,
         run: () => onMergeInto?.(branch.name),
+      });
+    }
+    if (onRebaseBranch && current.name) {
+      entries.push({
+        id: "rebase",
+        label: "把当前分支变基到此分支…",
+        icon: "branch",
+        disabledReason: currentReason ?? elsewhere ?? busy,
+        run: () => onRebaseBranch?.(branch.name),
       });
     }
     entries.push({ separator: true });

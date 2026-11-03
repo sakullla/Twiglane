@@ -94,6 +94,57 @@ describe("分支右键菜单", () => {
     expect(onMergeBranch).toHaveBeenCalledWith("main");
   });
 
+  it("变基到所点分支；当前分支、其他工作区占用时不可用，远程分支可以当基底", async () => {
+    api.branchState.mockResolvedValue({
+      ...state,
+      branches: [
+        ...state.branches,
+        { name: "shared", remote: false, current: false, upstream: null, worktree: "D:/other" },
+      ],
+    });
+    const onRebaseBranch = vi.fn();
+    render(BranchDialog, {
+      props: {
+        opened,
+        disabled: false,
+        onBusy: vi.fn(),
+        onSnapshot: vi.fn(),
+        onFailure: vi.fn(),
+        onNotice: vi.fn(),
+        onClose: vi.fn(),
+        onMergeBranch: vi.fn(),
+        onRebaseBranch,
+        nextId: () => 7,
+      },
+    });
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(3));
+    await fireEvent.contextMenu(rowOf("main"), { clientX: 80, clientY: 80 });
+    const ontoMain = within(screen.getByRole("menu")).getByRole("menuitem", { name: "把当前分支变基到此分支…" });
+    expect(ontoMain.getAttribute("aria-disabled")).toBeNull();
+    await fireEvent.click(ontoMain);
+    expect(onRebaseBranch).toHaveBeenCalledWith("main");
+
+    await fireEvent.contextMenu(rowOf("feature/ui"), { clientX: 80, clientY: 120 });
+    const currentItem = within(screen.getByRole("menu")).getByRole("menuitem", { name: "把当前分支变基到此分支…" });
+    expect(currentItem.getAttribute("aria-disabled")).toBe("true");
+    expect(currentItem.getAttribute("title")).toBe("这就是当前分支");
+
+    await fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    await fireEvent.contextMenu(rowOf("shared"), { clientX: 80, clientY: 160 });
+    const occupied = within(screen.getByRole("menu")).getByRole("menuitem", { name: "把当前分支变基到此分支…" });
+    expect(occupied.getAttribute("aria-disabled")).toBe("true");
+    expect(occupied.getAttribute("title")).toContain("正被其他工作区使用");
+
+    await fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
+    await waitFor(() => expect(rowOf("origin/main")).toBeTruthy());
+    await fireEvent.contextMenu(rowOf("origin/main"), { clientX: 80, clientY: 200 });
+    const remote = within(screen.getByRole("menu")).getByRole("menuitem", { name: "把当前分支变基到此分支…" });
+    expect(remote.getAttribute("aria-disabled")).toBeNull();
+    await fireEvent.click(remote);
+    expect(onRebaseBranch).toHaveBeenLastCalledWith("origin/main");
+  });
+
   it("从选中分支新建并切换：起点与切换选项一起传给后端，成功后关闭", async () => {
     const { onClose } = setup();
     await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));

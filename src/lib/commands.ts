@@ -222,7 +222,7 @@ const SYNC_COMMANDS: CommandSpec[] = [
     id: "sync.pull",
     group: "同步",
     title: "拉取",
-    hint: "快进拉取，不自动合并分叉",
+    hint: "能快进就快进；分叉时再选择合并或变基",
     available: (state) => hasRepo(state) && idle(state),
     reason: repoBusyReason,
   },

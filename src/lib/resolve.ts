@@ -3,9 +3,9 @@ export function operationCaption(operation: string): string {
     case "merge":
       return "正在进行分支合并";
     case "rebase":
-      return "检测到 rebase 进行中";
+      return "正在变基";
     case "cherry-pick":
-      return "检测到 cherry-pick 进行中";
+      return "正在拣选";
     case "revert":
       return "检测到 revert 进行中";
     case "bisect":
@@ -37,11 +37,11 @@ export function conflictKindLabel(kind: string): string {
 }
 
 export function canCompleteMerge(operation: string, unresolved: number): boolean {
-  return operation === "merge" && unresolved === 0;
+  return (operation === "merge" || operation === "rebase" || operation === "cherry-pick") && unresolved === 0;
 }
 
 export function showMergeAbort(operation: string, canAbort: boolean): boolean {
-  return operation === "merge" && canAbort;
+  return (operation === "merge" || operation === "rebase" || operation === "cherry-pick") && canAbort;
 }
 
 export function discardBoundary(): string {

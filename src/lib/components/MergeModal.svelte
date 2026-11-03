@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { OpenedRepository, StatusSnapshot } from "../types";
   import MergePanel from "./MergePanel.svelte";
+  import type { MergeMode } from "./MergeSetup.svelte";
   import Modal from "./Modal.svelte";
 
   interface Props {
@@ -8,6 +9,7 @@
     focusPath?: string | null;
     initialSource?: string | null;
     initialTarget?: string | null;
+    initialMode?: MergeMode | null;
     disabled: boolean;
     nextId: () => number;
     onClose: () => void;
@@ -25,6 +27,7 @@
     focusPath = null,
     initialSource = null,
     initialTarget = null,
+    initialMode = null,
     disabled,
     nextId,
     onClose,
@@ -60,6 +63,7 @@
     {focusPath}
     {initialSource}
     {initialTarget}
+    {initialMode}
     {disabled}
     {nextId}
     {onSnapshot}

@@ -1,5 +1,5 @@
 <script module lang="ts">
-  export type MergeMode = "merge" | "ff-only";
+  export type MergeMode = "merge" | "ff-only" | "rebase";
 </script>
 
 <script lang="ts">
@@ -150,8 +150,10 @@
         disabled={blocked}
         onChange={onTarget}
       />
-      <small class:switch-note={target !== current}>
-        {#if target === current}当前分支，合并直接在这里进行{:else}<Icon name="info" size={12} />开始时会先切换到 {target}{/if}
+      <small class:switch-note={mode !== "rebase" && target !== current}>
+        {#if mode === "rebase"}
+          {#if target === current}变基只改写当前分支，不会切换{:else}<Icon name="info" size={12} />变基只会改写当前分支，请把目标留在当前分支{/if}
+        {:else if target === current}当前分支，合并直接在这里进行{:else}<Icon name="info" size={12} />开始时会先切换到 {target}{/if}
       </small>
     </div>
   </section>
@@ -259,8 +261,17 @@
               <span class="merge-mode-radio"></span>
               <span><strong>快进</strong><small>{preview.fastForward ? "直接把目标移到来源的最新提交，不产生合并提交" : "两边已经分叉，不能快进"}</small></span>
             </button>
+            <button type="button" role="radio" class="merge-mode-card" aria-checked={mode === "rebase"} title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={() => onMode("rebase")}>
+              <span class="merge-mode-radio"></span>
+              <span><strong>变基</strong><small>将改写当前分支，把尚未进入来源的提交接到来源顶端。不推送</small></span>
+            </button>
           </div>
-          {#if mode === "merge"}
+          {#if mode === "rebase"}
+            <p class="merge-dirty-note">将改写当前分支上尚未进入 {source} 的提交。取消则不改写。远程不会改变，也不会推送。</p>
+            {#if target !== current}
+              <p class="merge-dirty-note">变基只会改写当前分支。请把目标留在当前分支。</p>
+            {/if}
+          {:else if mode === "merge"}
             <label class="merge-message">
               <span>合并说明</span>
               <input class="input" aria-label="合并说明" value={message} title={blocked ? BUSY_REASON : undefined} disabled={blocked} oninput={(event) => onMessage((event.currentTarget as HTMLInputElement).value)} />

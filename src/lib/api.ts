@@ -262,12 +262,15 @@ export const api = {
   /** 只读预览：target 为空时合并到当前分支。 */
   mergePreview: (path: string, source: string, target: string | null, generation: number, requestId: number) =>
     invoke<MergePreview>("merge_preview", { path, source, target, generation, requestId }),
-  /** target 不是当前分支时后端先切换过去；mode 为 merge（创建合并提交）或 ff-only（快进）。 */
+  /**
+   * target 不是当前分支时，合并会先切换过去。
+   * mode 为 merge（创建合并提交）、ff-only（快进）或 rebase（把当前分支接到基底上，不推送）。
+   */
   startMerge: (
     path: string,
     source: string,
     target: string | null,
-    mode: "merge" | "ff-only",
+    mode: "merge" | "ff-only" | "rebase",
     generation: number,
     requestId: number,
   ) => invoke<MergeSession>("start_merge", { path, source, target, mode, generation, requestId }),

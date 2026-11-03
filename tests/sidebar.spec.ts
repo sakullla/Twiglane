@@ -400,7 +400,7 @@ describe("自绘标题栏", () => {
     await fireEvent.click(sync);
     expect(screen.getAllByRole("menuitem")).toHaveLength(4);
     expect(screen.getByRole("menuitem", { name: /获取更新/ })).toBeTruthy();
-    expect(screen.getByRole("menuitem", { name: /拉取 1 个提交/ })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /拉取 1 个提交/ }).textContent).toContain("分叉");
     expect(screen.getByRole("menuitem", { name: /推送 2 个提交/ })).toBeTruthy();
     await fireEvent.click(screen.getByRole("menuitem", { name: /获取更新/ }));
     expect(onFetch).toHaveBeenCalled();

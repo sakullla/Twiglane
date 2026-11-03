@@ -136,7 +136,7 @@ pub fn problem_error(problem: GitProblem, detail: &str) -> AppError {
         ),
         GitProblem::Diverged => (
             "diverged",
-            "本地和远程都有新提交，不能快进。没有合并，也没有覆盖工作区。请先走分支合并，再继续同步。",
+            "本地和远程都有新提交，不能快进。没有合并，也没有变基，工作区没有改动。请选择合并或变基。当前分支没有移动。",
         ),
         GitProblem::PushRejected => (
             "push_rejected",

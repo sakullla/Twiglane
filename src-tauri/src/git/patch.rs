@@ -502,6 +502,7 @@ pub fn numstat_map(entries: Vec<NumstatEntry>) -> HashMap<String, LineStat> {
 }
 
 /// 空文件 0 行；以换行结尾时换行数就是行数，否则还要算上最后一行。
+#[cfg(test)]
 pub fn count_text_lines(bytes: &[u8]) -> u64 {
     if bytes.is_empty() {
         return 0;
@@ -515,6 +516,7 @@ pub fn count_text_lines(bytes: &[u8]) -> u64 {
 }
 
 /// Git 把前 8000 字节里的 NUL 当成二进制。二进制两侧计数都空着，不能写成 0。
+#[cfg(test)]
 pub fn line_stat_of_bytes(bytes: &[u8]) -> LineStat {
     let window = &bytes[..bytes.len().min(8000)];
     if window.contains(&0) {
@@ -735,7 +737,7 @@ index 1111111..2222222 100644
 
     #[test]
     fn numstat_list_keeps_rename_on_the_new_path_and_binary_blank() {
-        let entries = parse_numstat_list(b"2\t1\tbase.txt\0-\t-\tdata.bin\00\t0\t\0a.txt\0b.txt\0");
+        let entries = parse_numstat_list(b"2\t1\tbase.txt\0-\t-\tdata.bin\x000\t0\t\0a.txt\0b.txt\0");
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].path, "base.txt");
         assert_eq!(entries[0].additions, Some(2));

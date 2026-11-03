@@ -2,7 +2,7 @@
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
   import { bucketByDirectory, filterRows, groupFiles } from "../labels";
   import type { DiffSide, FileChange, FileRow, FileSelection } from "../types";
-  import { rangeSelection, rowMark, sameSelection, splitPath, toggleSelection } from "../ui";
+  import { BUSY_REASON, rangeSelection, rowMark, sameSelection, splitPath, toggleSelection } from "../ui";
   import Icon from "./Icon.svelte";
   import LineCounts from "./LineCounts.svelte";
 
@@ -380,6 +380,7 @@
                 type="button"
                 class="btn btn-ghost btn-sm"
                 disabled={disabled}
+                title={disabled ? BUSY_REASON : undefined}
                 aria-label={`暂存 ${item.label}`}
                 onclick={(event) => {
                   event.stopPropagation();
@@ -391,6 +392,7 @@
                 type="button"
                 class="btn btn-ghost btn-sm"
                 disabled={disabled}
+                title={disabled ? BUSY_REASON : undefined}
                 aria-label={`取消暂存 ${item.label}`}
                 onclick={(event) => {
                   event.stopPropagation();

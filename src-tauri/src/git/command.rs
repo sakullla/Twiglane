@@ -561,7 +561,7 @@ fn history_format() -> OsString {
 }
 
 /// 历史读取范围。默认是当前 HEAD，不再带 `--all`。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct HistoryLog {
     pub scope_all: bool,
     pub revision: Option<String>,
@@ -574,23 +574,6 @@ pub struct HistoryLog {
     pub hits_only: bool,
     /// 与 `--follow` 一起用，列出该提交里当时的路径。调用方据此翻到下一页。
     pub name_status: bool,
-}
-
-impl Default for HistoryLog {
-    fn default() -> Self {
-        Self {
-            scope_all: false,
-            revision: None,
-            author: None,
-            grep: None,
-            path: None,
-            follow: false,
-            skip: None,
-            max_count: None,
-            hits_only: false,
-            name_status: false,
-        }
-    }
 }
 
 pub fn history_log_command(git: &Path, root: &Path, log: &HistoryLog) -> (PathBuf, Vec<OsString>) {
@@ -1378,13 +1361,15 @@ mod tests {
         assert!(plain.1.iter().any(|arg| arg == "log"));
         assert!(!plain.1.iter().any(|arg| arg == "--all"));
         assert!(!plain.1.iter().any(|arg| arg == "--author"));
-        let mut filtered = HistoryLog::default();
-        filtered.scope_all = true;
-        filtered.author = Some("Ada".to_string());
-        filtered.grep = Some("needle".to_string());
-        filtered.path = Some(PathBuf::from("docs/a.txt"));
-        filtered.skip = Some(10);
-        filtered.max_count = Some(5);
+        let filtered = HistoryLog {
+            scope_all: true,
+            author: Some("Ada".to_string()),
+            grep: Some("needle".to_string()),
+            path: Some(PathBuf::from("docs/a.txt")),
+            skip: Some(10),
+            max_count: Some(5),
+            ..Default::default()
+        };
         let args = history_log_command(git, root, &filtered).1;
         assert!(args.iter().any(|arg| arg == "--all"));
         assert!(args.iter().any(|arg| arg == "--author=Ada"));
@@ -1393,14 +1378,16 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair[0] == "--" && pair[1] == "docs/a.txt"));
         assert!(args.iter().any(|arg| arg == "--skip=10"));
         assert!(args.iter().any(|arg| arg == "--max-count=5"));
-        let mut branch = HistoryLog::default();
-        branch.revision = Some("feature".to_string());
-        branch.follow = true;
-        branch.skip = Some(100);
-        branch.max_count = Some(101);
-        branch.name_status = true;
-        branch.hits_only = true;
-        branch.path = Some(PathBuf::from("new.txt"));
+        let branch = HistoryLog {
+            revision: Some("feature".to_string()),
+            follow: true,
+            skip: Some(100),
+            max_count: Some(101),
+            name_status: true,
+            hits_only: true,
+            path: Some(PathBuf::from("new.txt")),
+            ..Default::default()
+        };
         let branch_args = history_log_command(git, root, &branch).1;
         assert!(branch_args.iter().any(|arg| arg == "feature"));
         assert!(branch_args.iter().any(|arg| arg == "--follow"));

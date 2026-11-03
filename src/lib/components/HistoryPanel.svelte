@@ -1064,6 +1064,7 @@
               spellcheck="false"
               value={filePath ?? pathFilter}
               disabled={Boolean(filePath)}
+              title={filePath ? "文件历史的路径不能改" : undefined}
               oninput={(event) => {
                 if (filePath) return;
                 pathFilter = event.currentTarget.value;
@@ -1168,7 +1169,7 @@
           {#if commits.length > 0}已加载最新 1–{commits.length} 条{page?.hasMore ? "，还有更早的提交" : ""}{:else}—{/if}
         </span>
         <span class="spacer"></span>
-        <button type="button" class="btn btn-ghost btn-sm" onclick={backToNewest} disabled={commits.length === 0}>回到最新</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick={backToNewest} disabled={commits.length === 0} title={commits.length === 0 ? "还没有提交" : undefined}>回到最新</button>
       </div>
     </aside>
     {@render paneResizer?.()}
@@ -1465,9 +1466,9 @@
       <p class="hint">取消不会检出。继续后当前不在任何分支上，之后的提交不会带动现有分支。</p>
       {#if checkoutError}<div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{checkoutError}</span></div>{/if}
       {#snippet footer()}
-        <button type="button" class="btn btn-secondary" disabled={checkoutBusy} onclick={() => (checkoutTarget = null)}>取消</button>
+        <button type="button" class="btn btn-secondary" disabled={checkoutBusy} title={checkoutBusy ? "正在检出" : undefined} onclick={() => (checkoutTarget = null)}>取消</button>
         <span class="spacer"></span>
-        <button type="button" class="btn btn-primary" disabled={checkoutBusy} onclick={() => void confirmCheckout()}>
+        <button type="button" class="btn btn-primary" disabled={checkoutBusy} title={checkoutBusy ? "正在检出" : undefined} onclick={() => void confirmCheckout()}>
           {#if checkoutBusy}<span class="spinner"></span>{/if}
           检出
         </button>

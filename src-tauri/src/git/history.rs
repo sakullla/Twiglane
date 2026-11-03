@@ -312,6 +312,14 @@ pub async fn file_history(
         generation,
     )
     .await?;
+    // 上一页已经报告还有更早提交时，调用方才会带 offset。空页是读取中断，不是历史结束。
+    if request.offset > 0 && commits.is_empty() {
+        return Err(AppError::new(
+            "history_incomplete",
+            "还有更早的提交，但这一页没有读到。未修改仓库。",
+        )
+        .with_generation(generation));
+    }
     let (generation, labels) =
         load_labels(backend, &root, &git.path, generation, internal_request_id()).await?;
     attach_labels(&mut commits, &labels);
@@ -596,8 +604,13 @@ fn history_log(resolved: &ResolvedHistory, follow: bool, skip: Option<u32>, max_
         skip,
         max_count,
         hits_only,
+        name_status: false,
     }
 }
+
+/// 一次 git log 最多取这么多条。日期和文件历史都按这个上限往更早的提交凑，
+/// 不把整段历史读进输出上限后再过滤。
+const HISTORY_SCAN_BATCH: u32 = HISTORY_PAGE_SIZE + 1;
 
 fn in_date(at: i64, since: Option<i64>, until: Option<i64>) -> bool {
     if since.is_some_and(|since| at < since) {
@@ -655,7 +668,9 @@ async fn load_history_page(
 ) -> Result<(Vec<HistoryCommit>, bool, u64), AppError> {
     let prefix = is_oid_prefix(&resolved.query);
     let dated = resolved.since.is_some() || resolved.until.is_some();
-    if !prefix && !dated {
+    // 无日期、非文件历史仍是一条带 --skip 和 --max-count 的日志。文件历史不能走这条，
+    // 因为 --follow 和 --skip 不能同时使用。
+    if !prefix && !dated && !follow {
         let limit = HISTORY_PAGE_SIZE.saturating_add(1);
         let grep = if resolved.query.is_empty() {
             None
@@ -671,7 +686,7 @@ async fn load_history_page(
             history_log_command(
                 git,
                 root,
-                &history_log(resolved, follow, Some(offset), Some(limit), false, grep),
+                &history_log(resolved, false, Some(offset), Some(limit), false, grep),
             ),
         )
         .await?;
@@ -680,44 +695,63 @@ async fn load_history_page(
         commits.truncate(HISTORY_PAGE_SIZE as usize);
         return Ok((commits, has_more, generation));
     }
-    let mut groups = Vec::new();
-    let mut generation = generation;
-    if !resolved.query.is_empty() {
-        let (bytes, next) = read_log(
-            backend,
-            root,
-            git,
-            generation,
-            internal_request_id(),
-            history_log_command(
-                git,
+    if prefix {
+        let mut groups = Vec::new();
+        let mut generation = generation;
+        if !resolved.query.is_empty() {
+            let (bytes, next) = read_log(
+                backend,
                 root,
-                &history_log(resolved, follow, None, None, true, Some(resolved.query.clone())),
-            ),
-        )
-        .await?;
-        generation = next;
-        groups.push(filter_hits(parse_hits(&bytes)?, resolved));
-    }
-    if prefix || resolved.query.is_empty() {
-        let (bytes, next) = read_log(
-            backend,
-            root,
-            git,
-            generation,
-            internal_request_id(),
-            history_log_command(git, root, &history_log(resolved, follow, None, None, true, None)),
-        )
-        .await?;
-        generation = next;
-        let mut hits = parse_hits(&bytes)?;
-        if prefix {
-            let needle = resolved.query.to_ascii_lowercase();
-            hits.retain(|hit| hit.oid.starts_with(&needle));
+                git,
+                generation,
+                internal_request_id(),
+                history_log_command(
+                    git,
+                    root,
+                    &history_log(resolved, follow, None, None, true, Some(resolved.query.clone())),
+                ),
+            )
+            .await?;
+            generation = next;
+            groups.push(filter_hits(parse_hits(&bytes)?, resolved));
         }
-        groups.push(filter_hits(hits, resolved));
+        if prefix || resolved.query.is_empty() {
+            let (bytes, next) = read_log(
+                backend,
+                root,
+                git,
+                generation,
+                internal_request_id(),
+                history_log_command(
+                    git,
+                    root,
+                    &history_log(resolved, follow, None, None, true, None),
+                ),
+            )
+            .await?;
+            generation = next;
+            let mut hits = parse_hits(&bytes)?;
+            if prefix {
+                let needle = resolved.query.to_ascii_lowercase();
+                hits.retain(|hit| hit.oid.starts_with(&needle));
+            }
+            groups.push(filter_hits(hits, resolved));
+        }
+        return page_from_hits(backend, root, git, merge_hits(&groups), offset, generation).await;
     }
-    let hits = merge_hits(&groups);
+    let (hits, generation) =
+        collect_bounded_hits(backend, root, git, resolved, offset, follow, generation).await?;
+    page_from_hits(backend, root, git, hits, offset, generation).await
+}
+
+async fn page_from_hits(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    hits: Vec<Hit>,
+    offset: u32,
+    generation: u64,
+) -> Result<(Vec<HistoryCommit>, bool, u64), AppError> {
     let offset_usize = offset as usize;
     let page_size = HISTORY_PAGE_SIZE as usize;
     let has_more = hits.len() > offset_usize.saturating_add(page_size);
@@ -741,6 +775,120 @@ async fn load_history_page(
     .await?;
     let commits = parse_history_records(&bytes)?;
     Ok((order_commits(&page, commits)?, has_more, generation))
+}
+
+/// 按有上限的 git log 向前扫描。命中在每一批里用作者时间 `%at` 过滤。
+/// 文件历史从上一条提交、以及该提交里当时的路径继续，不使用 `--skip`。
+async fn collect_bounded_hits(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    resolved: &ResolvedHistory,
+    offset: u32,
+    follow: bool,
+    generation: u64,
+) -> Result<(Vec<Hit>, u64), AppError> {
+    let want = offset as usize + HISTORY_PAGE_SIZE as usize + 1;
+    let grep = if resolved.query.is_empty() {
+        None
+    } else {
+        Some(resolved.query.clone())
+    };
+    let mut matched = Vec::new();
+    let mut generation = generation;
+    if follow {
+        let mut path = resolved.path.clone().ok_or_else(|| {
+            AppError::new("invalid_path", "文件历史缺少路径，未读取仓库。")
+        })?;
+        let mut anchor: Option<String> = None;
+        loop {
+            let batch = HISTORY_SCAN_BATCH.saturating_add(u32::from(anchor.is_some()));
+            let mut log = history_log(resolved, true, None, Some(batch), true, grep.clone());
+            log.name_status = true;
+            log.path = Some(path.clone());
+            if let Some(oid) = &anchor {
+                log.scope_all = false;
+                log.revision = Some(oid.clone());
+            }
+            let (bytes, next) = read_log(
+                backend,
+                root,
+                git,
+                generation,
+                internal_request_id(),
+                history_log_command(git, root, &log),
+            )
+            .await?;
+            generation = next;
+            let mut seen = parse_follow_records(&bytes)?;
+            let produced = seen.len();
+            if let Some(oid) = &anchor {
+                if seen.first().map(|record| record.oid.as_str()) == Some(oid.as_str()) {
+                    seen.remove(0);
+                }
+            }
+            let Some(last) = seen.last() else {
+                break;
+            };
+            let next_anchor = last.oid.clone();
+            let next_path = PathBuf::from(&last.path_in_commit);
+            for record in seen {
+                if in_date(record.at, resolved.since, resolved.until) {
+                    matched.push(Hit {
+                        oid: record.oid,
+                        at: record.at,
+                    });
+                }
+            }
+            if matched.len() >= want || produced < batch as usize {
+                break;
+            }
+            if anchor.as_deref() == Some(next_anchor.as_str()) {
+                break;
+            }
+            anchor = Some(next_anchor);
+            path = next_path;
+        }
+    } else {
+        let mut skip = 0_u32;
+        loop {
+            let log = history_log(
+                resolved,
+                false,
+                Some(skip),
+                Some(HISTORY_SCAN_BATCH),
+                true,
+                grep.clone(),
+            );
+            let (bytes, next) = read_log(
+                backend,
+                root,
+                git,
+                generation,
+                internal_request_id(),
+                history_log_command(git, root, &log),
+            )
+            .await?;
+            generation = next;
+            let hits = parse_hits(&bytes)?;
+            let produced = hits.len();
+            for hit in hits {
+                if in_date(hit.at, resolved.since, resolved.until) {
+                    matched.push(hit);
+                }
+            }
+            if matched.len() >= want || produced < HISTORY_SCAN_BATCH as usize {
+                break;
+            }
+            let next_skip = skip.saturating_add(produced as u32);
+            if next_skip == skip {
+                break;
+            }
+            skip = next_skip;
+        }
+    }
+    matched.truncate(want);
+    Ok((matched, generation))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1459,6 +1607,91 @@ struct Hit {
     at: i64,
 }
 
+struct FollowRecord {
+    oid: String,
+    at: i64,
+    /// 这个提交里文件的名字。下一页从这里继续 `--follow`。
+    path_in_commit: String,
+}
+
+fn parse_follow_records(bytes: &[u8]) -> Result<Vec<FollowRecord>, AppError> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
+        AppError::new(
+            "history_encoding",
+            "提交历史包含无法安全显示的内容，已停止读取且未修改仓库。",
+        )
+    })?;
+    let mut records = Vec::new();
+    for chunk in text.split('\u{1e}') {
+        let chunk = chunk.trim_start_matches(['\n', '\r', '\0']);
+        if chunk.is_empty() {
+            continue;
+        }
+        let header_end = chunk.find(['\n', '\0']).unwrap_or(chunk.len());
+        let header = chunk[..header_end].trim_end_matches('\r');
+        let body = if header_end < chunk.len() {
+            &chunk[header_end + 1..]
+        } else {
+            ""
+        };
+        let mut parts = header.split('\u{1f}');
+        let oid = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+        let at = parts.next().unwrap_or("").trim().parse().unwrap_or(0);
+        if oid.len() < 4 || !oid.chars().all(|character| character.is_ascii_hexdigit()) {
+            return Err(AppError::new(
+                "history_parse",
+                "无法解析提交标识，未修改仓库。",
+            ));
+        }
+        records.push(FollowRecord {
+            oid,
+            at,
+            path_in_commit: path_in_commit(body)?,
+        });
+    }
+    Ok(records)
+}
+
+fn path_in_commit(body: &str) -> Result<String, AppError> {
+    let fields: Vec<&str> = body
+        .split('\0')
+        .map(|field| field.trim_matches(['\n', '\r']))
+        .filter(|field| !field.is_empty())
+        .collect();
+    if fields.is_empty() {
+        return Err(follow_path_error());
+    }
+    let mut index = 0;
+    let mut path: Option<&str> = None;
+    while index < fields.len() {
+        let status = fields[index];
+        let renamed = status.starts_with('R') || status.starts_with('C');
+        if renamed {
+            if index + 2 >= fields.len() {
+                return Err(follow_path_error());
+            }
+            path = Some(fields[index + 2]);
+            index += 3;
+        } else if index + 1 >= fields.len() {
+            return Err(follow_path_error());
+        } else {
+            path = Some(fields[index + 1]);
+            index += 2;
+        }
+    }
+    path.map(ToString::to_string).ok_or_else(follow_path_error)
+}
+
+fn follow_path_error() -> AppError {
+    AppError::new(
+        "history_parse",
+        "无法确定文件在该提交中的路径，未修改仓库。",
+    )
+}
+
 fn parse_hits(bytes: &[u8]) -> Result<Vec<Hit>, AppError> {
     if bytes.is_empty() {
         return Ok(Vec::new());
@@ -2140,6 +2373,17 @@ mod tests {
         assert_eq!(files[1].status, "renamed");
         assert_eq!(files[1].original_path.as_deref(), Some("old name.txt"));
         assert_eq!(files[2].status, "deleted");
+        let followed = parse_follow_records(
+            b"\x1eaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\x1f1700000300\nM\0new name.txt\0\0\
+              \x1ebbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\x1f1700000200\nR100\0old.txt\0new name.txt\0\0\
+              \x1ecccccccccccccccccccccccccccccccccccccccc\x1f1700000100\nA\0old.txt\0",
+        )
+        .unwrap();
+        assert_eq!(followed.len(), 3);
+        assert_eq!(followed[0].path_in_commit, "new name.txt");
+        assert_eq!(followed[1].path_in_commit, "new name.txt");
+        assert_eq!(followed[1].at, 1_700_000_200);
+        assert_eq!(followed[2].path_in_commit, "old.txt");
         let (_can, summary) = scope_summary(1, 2, 3, false);
         assert!(summary.contains("已跟踪"));
         assert!(summary.contains("未跟踪文件 2 个这次不保存"));
@@ -2594,6 +2838,152 @@ mod tests {
         assert_eq!(empty.state, "empty_branch");
         assert_eq!(empty.head.as_deref(), Some("empty"));
         assert_eq!(empty.scope, "current");
+    }
+
+    #[tokio::test]
+    async fn file_history_page_follows_the_rename_instead_of_skipping_it() {
+        let fixture = crate::test_support::git_fixture("history-follow-page");
+        let trace = fixture.path().join("trace.log");
+        let backend = fixture.backend_with_extra_env(vec![(
+            "GIT_TRACE".into(),
+            trace.as_os_str().to_os_string(),
+        )]);
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("old.txt"), "v0\n").unwrap();
+        git(&repo, &["add", "--", "old.txt"]);
+        git(&repo, &["commit", "-m", "old-base"]);
+        let oldest = git_text(&repo, &["rev-parse", "HEAD"]);
+        for index in 1..30 {
+            fs::write(repo.join("old.txt"), format!("v{index}\n")).unwrap();
+            git(&repo, &["commit", "-am", &format!("old-{index}")]);
+        }
+        git(&repo, &["mv", "--", "old.txt", "new.txt"]);
+        git(&repo, &["commit", "-m", "rename-file"]);
+        for index in 0..80 {
+            fs::write(repo.join("new.txt"), format!("n{index}\n")).unwrap();
+            git(&repo, &["commit", "-am", &format!("new-{index}")]);
+        }
+        let root = canonical_existing(&repo).unwrap();
+        let generation = generation(&backend, &root);
+        let first = file_history(
+            &backend,
+            &repo_key(&root),
+            "new.txt",
+            &HistoryRequest::default(),
+            generation,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.commits.len(), HISTORY_PAGE_SIZE as usize);
+        assert!(first.has_more);
+        assert!(first.commits.iter().any(|commit| commit.summary == "rename-file"));
+        assert!(first
+            .commits
+            .iter()
+            .any(|commit| commit.summary.starts_with("old-")));
+        let second = file_history(
+            &backend,
+            &repo_key(&root),
+            "new.txt",
+            &HistoryRequest {
+                offset: HISTORY_PAGE_SIZE,
+                ..HistoryRequest::default()
+            },
+            first.generation,
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(!second.commits.is_empty());
+        assert!(second.commits.iter().any(|commit| commit.oid == oldest));
+        assert!(!second.has_more);
+        let stalled = file_history(
+            &backend,
+            &repo_key(&root),
+            "new.txt",
+            &HistoryRequest {
+                offset: 1_000,
+                ..HistoryRequest::default()
+            },
+            second.generation,
+            3,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(stalled.code, "history_incomplete");
+        let trace_text = fs::read_to_string(&trace).unwrap();
+        let followed: Vec<_> = trace_text
+            .lines()
+            .filter(|line| line.contains("--follow"))
+            .collect();
+        assert!(!followed.is_empty());
+        assert!(followed.iter().all(|line| !line.contains("--skip")));
+        assert!(followed.iter().any(|line| line.contains("--max-count=")));
+    }
+
+    #[tokio::test]
+    async fn dated_history_filters_author_time_inside_bounded_log_pages() {
+        let fixture = crate::test_support::git_fixture("history-date-page");
+        let trace = fixture.path().join("trace.log");
+        let backend = fixture.backend_with_limit(
+            8192,
+            vec![("GIT_TRACE".into(), trace.as_os_str().to_os_string())],
+        );
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        for index in 0..180 {
+            git_env(
+                &repo,
+                &[
+                    ("GIT_AUTHOR_DATE", "1600000000 +0000"),
+                    ("GIT_COMMITTER_DATE", "1600000000 +0000"),
+                ],
+                &["commit", "--allow-empty", "-m", &format!("filler-{index}")],
+            );
+        }
+        git_env(
+            &repo,
+            &[
+                ("GIT_AUTHOR_DATE", "1700000000 +0000"),
+                ("GIT_COMMITTER_DATE", "1900000000 +0000"),
+            ],
+            &["commit", "--allow-empty", "-m", "inside-day"],
+        );
+        let marker = git_text(&repo, &["rev-parse", "HEAD"]);
+        let root = canonical_existing(&repo).unwrap();
+        let generation = generation(&backend, &root);
+        let page = history_page(
+            &backend,
+            &repo_key(&root),
+            &HistoryRequest {
+                since: Some(1_700_000_000),
+                until: Some(1_700_000_000 + 86_399),
+                ..HistoryRequest::default()
+            },
+            generation,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.state, "ok");
+        assert_eq!(page.commits.len(), 1);
+        assert_eq!(page.commits[0].oid, marker);
+        assert_eq!(page.commits[0].authored_at, 1_700_000_000);
+        assert!(!page.has_more);
+        let trace_text = fs::read_to_string(&trace).unwrap();
+        let logs: Vec<_> = trace_text
+            .lines()
+            .filter(|line| line.contains(" git log ") || line.contains("git.exe log "))
+            .collect();
+        assert!(logs.len() >= 2, "{trace_text}");
+        assert!(logs.iter().all(|line| !line.contains("--since") && !line.contains("--until")));
+        assert!(logs.iter().any(|line| line.contains("--max-count=")));
+        assert!(logs
+            .iter()
+            .filter(|line| !line.contains("--no-walk"))
+            .all(|line| line.contains("--max-count=")));
     }
 
     #[tokio::test]

@@ -574,6 +574,8 @@ pub struct HistoryLog {
     pub skip: Option<u32>,
     pub max_count: Option<u32>,
     pub hits_only: bool,
+    /// 与 `--follow` 一起用，列出该提交里当时的路径。调用方据此翻到下一页。
+    pub name_status: bool,
 }
 
 impl Default for HistoryLog {
@@ -588,6 +590,7 @@ impl Default for HistoryLog {
             skip: None,
             max_count: None,
             hits_only: false,
+            name_status: false,
         }
     }
 }
@@ -596,7 +599,10 @@ pub fn history_log_command(git: &Path, root: &Path, log: &HistoryLog) -> (PathBu
     let mut args = repo_prefix(root, true);
     args.push(OsString::from("log"));
     args.push(OsString::from("--date=unix"));
-    if log.hits_only {
+    if log.hits_only && log.name_status {
+        // 记录分隔符放在提交前面，后面的 -z --name-status 才能跟在同一条记录上。
+        args.push(OsString::from("--pretty=format:%x1e%H%x1f%at"));
+    } else if log.hits_only {
         args.push(OsString::from("--pretty=format:%H%x1f%at%x1e"));
     } else {
         args.push(history_format());
@@ -614,12 +620,18 @@ pub fn history_log_command(git: &Path, root: &Path, log: &HistoryLog) -> (PathBu
     if log.follow {
         args.push(OsString::from("--follow"));
     }
+    if log.name_status {
+        args.push(OsString::from("-z"));
+        args.push(OsString::from("--name-status"));
+    }
     if log.scope_all {
         args.push(OsString::from("--all"));
     } else if let Some(revision) = &log.revision {
         args.push(OsString::from(revision));
     }
-    if let Some(skip) = log.skip {
+    // Git 先执行 --skip，再在真正显示提交时用 --follow 改路径。两者同时出现会跳过
+    // 重命名提交，旧路径上的更早提交就消失了。
+    if let Some(skip) = log.skip.filter(|_| !log.follow) {
         args.push(OsString::from(format!("--skip={skip}")));
     }
     if let Some(max_count) = log.max_count {
@@ -1386,10 +1398,21 @@ mod tests {
         let mut branch = HistoryLog::default();
         branch.revision = Some("feature".to_string());
         branch.follow = true;
+        branch.skip = Some(100);
+        branch.max_count = Some(101);
+        branch.name_status = true;
+        branch.hits_only = true;
+        branch.path = Some(PathBuf::from("new.txt"));
         let branch_args = history_log_command(git, root, &branch).1;
         assert!(branch_args.iter().any(|arg| arg == "feature"));
         assert!(branch_args.iter().any(|arg| arg == "--follow"));
+        assert!(branch_args.iter().any(|arg| arg == "--name-status"));
+        assert!(branch_args.iter().any(|arg| arg == "-z"));
+        assert!(branch_args.iter().any(|arg| arg == "--max-count=101"));
         assert!(!branch_args.iter().any(|arg| arg == "--all"));
+        assert!(!branch_args
+            .iter()
+            .any(|arg| arg.to_string_lossy().starts_with("--skip")));
         let pick = cherry_pick_range_command(git, root, &["aaa".to_string(), "bbb".to_string()]);
         assert_eq!(
             pick.1.iter().filter(|arg| *arg == "cherry-pick" || *arg == "aaa" || *arg == "bbb").count(),

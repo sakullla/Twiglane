@@ -776,8 +776,10 @@
       const seen = new Set(commits.map((commit) => commit.oid));
       const extra = result.commits.filter((commit) => !seen.has(commit.oid));
       if (extra.length === 0) {
-        page = { ...page, hasMore: false };
+        const message = "还有更早的提交，但这一页没有读到。";
+        appendError = message;
         appendStopped = true;
+        onFailure({ code: "history_incomplete", message });
       } else {
         commits = [...commits, ...extra];
         page = {
@@ -789,8 +791,8 @@
           branches: result.branches ?? page.branches,
           head: result.head ?? page.head,
         };
+        appendError = null;
       }
-      appendError = null;
       if (result.generation !== generation) onGeneration(result.generation);
     } catch (error) {
       if (serial !== loadSerial || opened.summary.path !== repo) return;

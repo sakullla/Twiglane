@@ -429,6 +429,32 @@ describe("历史面板", () => {
     expect(screen.queryByRole("option", { name: /commit-1/ })).toBeNull();
   });
 
+  it("首页已有更早提交时，空的追加不会被当成结束", async () => {
+    const first = commit(0);
+    historyPage
+      .mockResolvedValueOnce({
+        generation: 3, query: "", offset: 0, pageSize: 100, hasMore: true, state: "ok", commits: [first],
+        scope: "current", branches: ["main"], head: "main",
+      })
+      .mockResolvedValueOnce({
+        generation: 3, query: "", offset: 1, pageSize: 100, hasMore: false, state: "ok", commits: [],
+        scope: "current", branches: ["main"], head: "main",
+      });
+    render(HistoryPanel, { props: panelProps() });
+    expect(await screen.findByRole("option", { name: /commit-0/ })).toBeTruthy();
+    const list = screen.getByRole("listbox", { name: "提交历史" });
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 120 });
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 400 });
+    list.scrollTop = 300;
+    await fireEvent.scroll(list);
+    expect(await screen.findByText(/这一页没有读到。已显示的提交仍保留。/)).toBeTruthy();
+    expect(screen.getByRole("option", { name: /commit-0/ })).toBeTruthy();
+    expect(screen.getByText("已加载最新 1–1 条，还有更早的提交")).toBeTruthy();
+    expect(historyPage).toHaveBeenCalledTimes(2);
+    await fireEvent.scroll(list);
+    expect(historyPage).toHaveBeenCalledTimes(2);
+  });
+
   it("单条与多条提交的菜单不同，多条显示第一父提交的文件并集", async () => {
     const first = commit(0);
     const second = commit(1);

@@ -3,7 +3,7 @@
   import { filterRecent, repeatedNames, rowOffsets, rowWindow } from "../recent";
   import type { IconName } from "../icons";
   import type { RecentRepo } from "../types";
-  import { hueOf, initialOf } from "../ui";
+  import { hueOf, repoBadgeLetters } from "../ui";
   import Icon from "./Icon.svelte";
   import Popover from "./Popover.svelte";
 
@@ -50,6 +50,7 @@
   let query = $state("");
   let active = $state(0);
   let visible = $derived(filterRecent(repos, query));
+  let badgeLetters = $derived(repoBadgeLetters(visible.map((repo) => repo.name)));
   /** 同名仓库只能靠路径区分，这些行显示完整路径而不是截断（R6）。 */
   let sameNames = $derived(repeatedNames(repos));
 
@@ -267,7 +268,7 @@
             }}
             onkeydown={() => {}}
           >
-            <span class="repo-badge" style={`--hue:${hueOf(repo.path)}`} aria-hidden="true">{initialOf(repo.name)}</span>
+            <span class="repo-badge" style={`--hue:${hueOf(repo.path)}`} aria-hidden="true">{badgeLetters[index]}</span>
             <span class="repo-text">
               <span class="repo-name">{repo.name}</span>
               <span class={sameNames.has(repo.name) ? "repo-path-full" : "repo-path"}><bdi>{repo.path}</bdi></span>

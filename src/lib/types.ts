@@ -1,4 +1,6 @@
 export type Theme = "light" | "dark" | "system";
+/** 分叉拉取预选的方式。旧设置没有这项时按合并。 */
+export type PullIntegration = "merge" | "rebase";
 /** 主视图只有两个：改动与提交历史。临时保存、合并等低频任务进 modal 槽位。 */
 export type WorkspaceView = "changes" | "history";
 /** 单槽 modal 的七个任务入口（data-task-modal 的取值集合就由它决定）。 */
@@ -127,6 +129,10 @@ export interface SettingsDto {
   git: GitInfo;
   recent: RecentRepo[];
   settingsWarning: string | null;
+  /** 旧响应可能缺省；外壳按 merge 处理。 */
+  pullIntegration?: PullIntegration;
+  /** 旧响应可能缺省；外壳按开启处理。 */
+  branchGroups?: boolean;
 }
 
 export interface RepoChanged {

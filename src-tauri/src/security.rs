@@ -81,6 +81,8 @@ fn capabilities_do_not_grant_a_shell() {
         "allow-undo-commit",
         "allow-discard-changes",
         "allow-set-theme",
+        "allow-set-pull-integration",
+        "allow-set-branch-groups",
         "allow-set-panel-widths",
         "allow-save-draft",
         "allow-cancel-reads",

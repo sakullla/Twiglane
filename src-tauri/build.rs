@@ -75,6 +75,8 @@ fn main() {
             "undo_commit",
             "discard_changes",
             "set_theme",
+            "set_pull_integration",
+            "set_branch_groups",
             "set_panel_widths",
             "save_draft",
             "cancel_reads",

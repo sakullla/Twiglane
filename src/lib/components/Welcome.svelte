@@ -1,7 +1,7 @@
 <script lang="ts">
   import { filterRecent, repeatedNames } from "../recent";
   import type { RecentRepo } from "../types";
-  import { hueOf, initialOf } from "../ui";
+  import { hueOf, repoBadgeLetters } from "../ui";
   import BrandMark from "./BrandMark.svelte";
   import { isContextKey, pointFor } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
@@ -43,6 +43,7 @@
   let searching = $derived(searchable && query.trim().length > 0);
   let matches = $derived(searching ? filterRecent(recent, query) : recent);
   let shown = $derived(matches.slice(0, LIMIT));
+  let badgeLetters = $derived(repoBadgeLetters(shown.map((repo) => repo.name)));
   let sameNames = $derived(repeatedNames(recent));
   let actionTitle = $derived(disabled ? disabledReason || undefined : undefined);
 
@@ -126,7 +127,7 @@
           {#if shown.length === 0}
             <p class="hint welcome-no-match">没有匹配的仓库，试试名称或路径。</p>
           {/if}
-          {#each shown as repo (repo.path)}
+          {#each shown as repo, index (repo.path)}
             <button
               type="button"
               title={repo.path}
@@ -138,7 +139,7 @@
               }}
               onkeydown={(event) => onRowKey(event, repo)}
             >
-              <span class="repo-badge" style={`--hue:${hueOf(repo.path)}`} aria-hidden="true">{initialOf(repo.name)}</span>
+              <span class="repo-badge" style={`--hue:${hueOf(repo.path)}`} aria-hidden="true">{badgeLetters[index]}</span>
               <span class="repo-text">
                 <span class="repo-name">{repo.name}</span>
                 <span class={sameNames.has(repo.name) ? "repo-path-full" : "repo-path"}><bdi>{repo.path}</bdi></span>

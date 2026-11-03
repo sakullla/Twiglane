@@ -33,6 +33,7 @@
     RecentRepo,
     RepoChanged,
     StatusSnapshot,
+    PullIntegration,
     TaskModal,
     Theme,
     WorkspaceView,
@@ -91,6 +92,8 @@
 
   let systemDark = $state(systemPrefersDark());
   let theme = $state<Theme>("dark");
+  let pullIntegration = $state<PullIntegration>("merge");
+  let branchGroups = $state(true);
   let resolvedTheme = $derived(resolveTheme(theme, systemDark));
 
   $effect(() => {
@@ -106,6 +109,12 @@
   let banner = $state<string | null>(null);
   let live = $state("正在准备 Twiglane");
   let opened = $state.raw<OpenedRepository | null>(null);
+  let badgeNames = $derived.by(() => {
+    const names = recent.map((item) => item.name);
+    const current = opened?.summary.name;
+    if (current !== undefined && !names.includes(current)) names.push(current);
+    return names;
+  });
   let repositoryEpoch = 0;
   let refreshTask: { epoch: number; again: boolean; promise: Promise<boolean> } | null = null;
   let draggingRepository = $state(false);
@@ -490,6 +499,8 @@
     try {
       const settings = await api.getSettings();
       applyTheme(settings.theme);
+      pullIntegration = settings.pullIntegration === "rebase" ? "rebase" : "merge";
+      branchGroups = settings.branchGroups !== false;
       widths = {
         sidebar: clampWidth(settings.panelWidths.sidebar),
         files: clampWidth(settings.panelWidths.files),
@@ -1590,6 +1601,24 @@
     }
   }
 
+  async function changePullIntegration(next: PullIntegration) {
+    pullIntegration = next;
+    try {
+      await api.setPullIntegration(next);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function changeBranchGroups(next: boolean) {
+    branchGroups = next;
+    try {
+      await api.setBranchGroups(next);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
   async function persistWidths() {
     try {
       widths = await api.setPanelWidths({
@@ -2046,6 +2075,7 @@
     onRemote={() => runCommand("task.remote")}
     onTheme={(next) => runCommand(`theme.${next}`)}
     onSettings={() => runCommand("task.settings")}
+    repoNames={badgeNames}
   />
 
   {#if switcher?.kind === "repo"}
@@ -2425,6 +2455,10 @@
     section={settingsSection}
     onClose={closeTask}
     onTheme={(next) => runCommand(`theme.${next}`)}
+    {pullIntegration}
+    {branchGroups}
+    onPullIntegration={(next) => void changePullIntegration(next)}
+    onBranchGroups={(next) => void changeBranchGroups(next)}
     onRedetect={redetectGit}
     onChooseGit={chooseGit}
     onClearGit={clearGit}

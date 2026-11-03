@@ -3,6 +3,8 @@ use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
+use serde::Serialize;
+
 use crate::error::AppError;
 use crate::git::command::{init_command, status_command, toplevel_command};
 use crate::git::gate::{remote_check_is_stale, ActionGate, RemoteChecks};
@@ -16,7 +18,7 @@ use crate::model::{
 };
 use crate::redact::redact_error_text;
 use crate::shutdown::Shutdown;
-use crate::state::AppStore;
+use crate::state::{AppStore, PullIntegration};
 use crate::watch::WatchHub;
 
 pub struct Backend {
@@ -80,20 +82,45 @@ pub async fn clear_git_executable(backend: &Backend) -> Result<GitInfo, AppError
     detect_git(backend).await
 }
 
-pub async fn get_settings(backend: &Backend) -> Result<SettingsDto, AppError> {
+/// `get_settings` 的返回值。新字段摊平进原有设置，旧前端可以忽略它们。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    #[serde(flatten)]
+    pub settings: SettingsDto,
+    pub pull_integration: PullIntegration,
+    pub branch_groups: bool,
+}
+
+pub async fn get_settings(backend: &Backend) -> Result<AppSettings, AppError> {
     let git = detect_git(backend).await?;
     let snapshot = backend.store.snapshot();
-    Ok(SettingsDto {
-        theme: snapshot.theme,
-        panel_widths: snapshot.panel_widths,
-        git,
-        recent: snapshot.recent,
-        settings_warning: backend.store.settings_warning(),
+    Ok(AppSettings {
+        settings: SettingsDto {
+            theme: snapshot.theme,
+            panel_widths: snapshot.panel_widths,
+            git,
+            recent: snapshot.recent,
+            settings_warning: backend.store.settings_warning(),
+        },
+        pull_integration: snapshot.pull_integration,
+        branch_groups: snapshot.branch_groups,
     })
 }
 
 pub fn set_theme(backend: &Backend, theme: Theme) -> Result<(), AppError> {
     backend.store.set_theme(theme)
+}
+
+pub fn set_pull_integration(
+    backend: &Backend,
+    pull_integration: PullIntegration,
+) -> Result<(), AppError> {
+    backend.store.set_pull_integration(pull_integration)
+}
+
+pub fn set_branch_groups(backend: &Backend, branch_groups: bool) -> Result<(), AppError> {
+    backend.store.set_branch_groups(branch_groups)
 }
 
 pub fn set_panel_widths(backend: &Backend, widths: PanelWidths) -> Result<PanelWidths, AppError> {

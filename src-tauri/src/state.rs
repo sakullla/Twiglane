@@ -13,11 +13,28 @@ use crate::redact::reject_secret_draft;
 
 const STATE_VERSION: u32 = 1;
 
+/// 分叉拉取预选的方式。旧设置文件没有这一项时读成合并。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PullIntegration {
+    #[default]
+    Merge,
+    Rebase,
+}
+
+fn default_branch_groups() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Persisted {
     pub version: u32,
     pub theme: Theme,
+    #[serde(default)]
+    pub pull_integration: PullIntegration,
+    #[serde(default = "default_branch_groups")]
+    pub branch_groups: bool,
     pub panel_widths: PanelWidths,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_executable: Option<String>,
@@ -30,6 +47,8 @@ impl Default for Persisted {
         Self {
             version: STATE_VERSION,
             theme: Theme::Dark,
+            pull_integration: PullIntegration::Merge,
+            branch_groups: true,
             panel_widths: PanelWidths::default(),
             git_executable: None,
             recent: Vec::new(),
@@ -78,6 +97,20 @@ impl AppStore {
     pub fn set_theme(&self, theme: Theme) -> Result<(), AppError> {
         self.update(|data| {
             data.theme = theme;
+            Ok(())
+        })
+    }
+
+    pub fn set_pull_integration(&self, pull_integration: PullIntegration) -> Result<(), AppError> {
+        self.update(|data| {
+            data.pull_integration = pull_integration;
+            Ok(())
+        })
+    }
+
+    pub fn set_branch_groups(&self, branch_groups: bool) -> Result<(), AppError> {
+        self.update(|data| {
+            data.branch_groups = branch_groups;
             Ok(())
         })
     }
@@ -278,6 +311,47 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn old_file_defaults_pull_to_merge_and_branch_groups_on() {
+        let dir = crate::test_support::TempDir::new("state-pull-groups");
+        let path = dir.path().join("state.json");
+        fs::write(
+            &path,
+            r#"{"version":1,"theme":"light","panelWidths":{"sidebar":280,"files":340},"recent":[],"drafts":{}}"#,
+        )
+        .unwrap();
+        let store = AppStore::open(path.clone());
+        assert!(store.settings_warning().is_none());
+        assert_eq!(
+            Persisted::default().pull_integration,
+            PullIntegration::Merge
+        );
+        assert!(Persisted::default().branch_groups);
+        let snapshot = store.snapshot();
+        assert_eq!(snapshot.theme, Theme::Light);
+        assert_eq!(snapshot.pull_integration, PullIntegration::Merge);
+        assert!(snapshot.branch_groups);
+        let original = fs::read(&path).unwrap();
+
+        store.set_theme(Theme::Dark).unwrap();
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(store.path()).unwrap()).unwrap();
+        assert_eq!(written["pullIntegration"], "merge");
+        assert_eq!(written["branchGroups"], true);
+        assert_ne!(fs::read(&path).unwrap(), original);
+
+        store.set_pull_integration(PullIntegration::Rebase).unwrap();
+        store.set_branch_groups(false).unwrap();
+        let again = AppStore::open(path);
+        assert_eq!(again.snapshot().theme, Theme::Dark);
+        assert_eq!(again.snapshot().pull_integration, PullIntegration::Rebase);
+        assert!(!again.snapshot().branch_groups);
+        let saved: Value =
+            serde_json::from_str(&fs::read_to_string(again.path()).unwrap()).unwrap();
+        assert_eq!(saved["pullIntegration"], "rebase");
+        assert_eq!(saved["branchGroups"], false);
     }
 
     #[test]

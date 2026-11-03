@@ -2,7 +2,7 @@
   import { onMount, tick } from "svelte";
   import { BRAND } from "../brand";
   import type { RepoSummary, Theme } from "../types";
-  import { BUSY_REASON, hueOf, initialOf } from "../ui";
+  import { BUSY_REASON, hueOf, repoBadgeLetter } from "../ui";
   import {
     WINDOW_PLATFORM,
     closeWindow,
@@ -35,6 +35,8 @@
     disabled?: boolean;
     platform?: WindowPlatform;
     openSwitcher?: "repo" | "branch" | null;
+    /** 与当前徽标同时可见的仓库名。缺省时只看当前仓库。 */
+    repoNames?: string[];
     onBrand: () => void;
     onRepo: (anchor: HTMLElement) => void;
     onBranch: (anchor: HTMLElement) => void;
@@ -57,6 +59,7 @@
     disabled = false,
     platform = WINDOW_PLATFORM,
     openSwitcher = null,
+    repoNames = [],
     onBrand,
     onRepo,
     onBranch,
@@ -84,6 +87,8 @@
   let syncTrigger = $state<HTMLButtonElement | null>(null);
   let maximized = $state(false);
 
+  let badgeNames = $derived(repoNames.length > 0 ? repoNames : repo ? [repo.name] : []);
+  let badgeLetter = $derived(repo ? repoBadgeLetter(repo.name, badgeNames) : "");
   let currentTheme = $derived(THEMES.find((item) => item.id === theme) ?? THEMES[1]);
   let hasWindowControl = $derived(platform === "windows");
   let branchText = $derived(branch ?? "无分支");
@@ -207,7 +212,7 @@
       onclick={(event) => onRepo(event.currentTarget)}
     >
       {#if repo}
-        <span class="repo-badge" style={`--hue:${hueOf(repo.path)}`} aria-hidden="true">{initialOf(repo.name)}</span>
+        <span class="repo-badge" style={`--hue:${hueOf(repo.path)}`} aria-hidden="true">{badgeLetter}</span>
       {/if}
       <span class="repo-switch-text">
         <strong>{repo ? repo.name : "打开仓库"}</strong>

@@ -22,7 +22,7 @@ mod performance_tests;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime, State, WindowEvent};
 
 use crate::error::AppError;
@@ -32,11 +32,11 @@ use crate::model::{
     AbortImpact, BranchState, CloneResult, CommitDetail, CommitPushReport, CommitResult,
     ConflictView, DiffResponse, DiscardResult, FileHistoryPage, GitInfo, HistoryPage,
     MergeComplete, MergePreview, MergeSession, OpenedRepository, PanelWidths, RecentRepo,
-    RemoteState, RemoteTag, RepoChanged, SettingsDto, StashApplyResult, StashSaveResult,
-    StashState, StatusSnapshot, TagState, Theme, UndoResult,
+    RemoteState, RemoteTag, RepoChanged, StashApplyResult, StashSaveResult, StashState,
+    StatusSnapshot, TagState, Theme, UndoResult,
 };
 use crate::shutdown::Shutdown;
-use crate::state::AppStore;
+use crate::state::{AppStore, PullIntegration};
 
 pub fn run() {
     let shutdown = Shutdown::new();
@@ -118,6 +118,8 @@ pub fn run() {
             undo_commit,
             discard_changes,
             set_theme,
+            set_pull_integration,
+            set_branch_groups,
             set_panel_widths,
             save_draft,
             cancel_reads,
@@ -141,7 +143,7 @@ pub fn run() {
     });
 }
 
-fn install_menu(app: &tauri::App) -> tauri::Result<()> {
+fn install_menu<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     let search = MenuItem::with_id(app, "focus-search", "搜索仓库", true, Some("CmdOrCtrl+K"))?;
     let commit = MenuItem::with_id(
         app,
@@ -150,17 +152,38 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         true,
         Some("CmdOrCtrl+Enter"),
     )?;
-    let menu = Menu::with_items(app, &[&search, &commit])?;
+    // 系统编辑动作不进 menu_event_name，因此不会打开搜索，也不会提交。
+    let undo = PredefinedMenuItem::undo(app, Some("撤销"))?;
+    let redo = PredefinedMenuItem::redo(app, Some("重做"))?;
+    let cut = PredefinedMenuItem::cut(app, Some("剪切"))?;
+    let copy = PredefinedMenuItem::copy(app, Some("复制"))?;
+    let paste = PredefinedMenuItem::paste(app, Some("粘贴"))?;
+    let select_all = PredefinedMenuItem::select_all(app, Some("全选"))?;
+    let edit = Submenu::with_id_and_items(
+        app,
+        "app-edit",
+        "编辑",
+        true,
+        &[&undo, &redo, &cut, &copy, &paste, &select_all],
+    )?;
+    let menu = Menu::with_items(app, &[&search, &commit, &edit])?;
     app.set_menu(menu)?;
     app.on_menu_event(|app_handle, event| {
-        let name = match event.id().0.as_str() {
-            "focus-search" => "menu-search",
-            "commit-local" => "menu-commit",
-            _ => return,
+        let Some(name) = menu_event_name(event.id().0.as_str()) else {
+            return;
         };
         let _ = app_handle.emit(name, ());
     });
     Ok(())
+}
+
+/// 只有搜索和提交是应用命令。编辑项的 id 落在这里会得到 None。
+fn menu_event_name(id: &str) -> Option<&'static str> {
+    match id {
+        "focus-search" => Some("menu-search"),
+        "commit-local" => Some("menu-commit"),
+        _ => None,
+    }
 }
 
 fn focused(event: &RunEvent) -> bool {
@@ -181,6 +204,81 @@ fn blurred(event: &RunEvent) -> bool {
             ..
         }
     )
+}
+
+#[cfg(test)]
+mod menu_edit {
+    use super::{install_menu, menu_event_name};
+    use tauri::menu::MenuItemKind;
+    use tauri::Runtime;
+
+    fn walk<R: Runtime>(items: &[MenuItemKind<R>], found: &mut Vec<(String, String, bool)>) {
+        for item in items {
+            match item {
+                MenuItemKind::MenuItem(entry) => {
+                    found.push((entry.id().0.clone(), entry.text().unwrap(), false));
+                }
+                MenuItemKind::Predefined(entry) => {
+                    found.push((entry.id().0.clone(), entry.text().unwrap(), true));
+                }
+                MenuItemKind::Submenu(entry) => {
+                    found.push((entry.id().0.clone(), entry.text().unwrap(), false));
+                    walk(&entry.items().unwrap(), found);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn system_edit_items_do_not_open_search_or_commit() {
+        assert_eq!(menu_event_name("focus-search"), Some("menu-search"));
+        assert_eq!(menu_event_name("commit-local"), Some("menu-commit"));
+        for id in [
+            "app-edit",
+            "undo",
+            "redo",
+            "cut",
+            "copy",
+            "paste",
+            "select_all",
+        ] {
+            assert_eq!(menu_event_name(id), None, "{id}");
+        }
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("menu app");
+        install_menu(&app).expect("install menu");
+        let menu = app.menu().expect("app menu");
+        let mut found = Vec::new();
+        walk(&menu.items().expect("items"), &mut found);
+
+        assert!(found.iter().any(|(id, text, predefined)| {
+            id == "focus-search" && text == "搜索仓库" && !predefined
+        }));
+        assert!(found.iter().any(|(id, text, predefined)| {
+            id == "commit-local" && text == "提交到本地" && !predefined
+        }));
+        let edit: Vec<&str> = found
+            .iter()
+            .filter(|(_, text, _)| !text.is_empty())
+            .skip_while(|(_, text, _)| text != "撤销")
+            .take(6)
+            .map(|(_, text, _)| text.as_str())
+            .collect();
+        assert_eq!(edit, ["撤销", "重做", "剪切", "复制", "粘贴", "全选"]);
+        for label in ["撤销", "重做", "剪切", "复制", "粘贴", "全选"] {
+            let (id, _, predefined) = found
+                .iter()
+                .find(|(_, text, _)| text == label)
+                .unwrap_or_else(|| panic!("missing {label}"));
+            assert!(predefined, "{label}");
+            assert_ne!(id, "focus-search");
+            assert_ne!(id, "commit-local");
+            assert_eq!(menu_event_name(id), None);
+        }
+    }
 }
 
 fn should_stop(event: &RunEvent) -> bool {
@@ -262,7 +360,7 @@ async fn clear_git_executable(state: State<'_, Arc<Backend>>) -> Result<GitInfo,
 }
 
 #[tauri::command]
-async fn get_settings(state: State<'_, Arc<Backend>>) -> Result<SettingsDto, AppError> {
+async fn get_settings(state: State<'_, Arc<Backend>>) -> Result<ops::AppSettings, AppError> {
     ops::get_settings(state.inner()).await
 }
 
@@ -1030,6 +1128,19 @@ async fn delete_stash(
 #[tauri::command]
 fn set_theme(state: State<'_, Arc<Backend>>, theme: Theme) -> Result<(), AppError> {
     ops::set_theme(state.inner(), theme)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn set_pull_integration(
+    state: State<'_, Arc<Backend>>,
+    pull_integration: PullIntegration,
+) -> Result<(), AppError> {
+    ops::set_pull_integration(state.inner(), pull_integration)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn set_branch_groups(state: State<'_, Arc<Backend>>, branch_groups: bool) -> Result<(), AppError> {
+    ops::set_branch_groups(state.inner(), branch_groups)
 }
 
 #[tauri::command]

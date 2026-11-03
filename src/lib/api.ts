@@ -27,6 +27,7 @@ import type {
   StatusSnapshot,
   TagState,
   Theme,
+  PullIntegration,
   UndoResult,
 } from "./types";
 
@@ -299,6 +300,9 @@ export const api = {
   discardChanges: (path: string, paths: string[], confirm: boolean, generation: number, requestId: number) =>
     invoke<DiscardResult>("discard_changes", { path, paths, confirm, generation, requestId }),
   setTheme: (theme: Theme) => invoke<void>("set_theme", { theme }),
+  setPullIntegration: (pullIntegration: PullIntegration) =>
+    invoke<void>("set_pull_integration", { pullIntegration }),
+  setBranchGroups: (branchGroups: boolean) => invoke<void>("set_branch_groups", { branchGroups }),
   setPanelWidths: (widths: PanelWidths) => invoke<PanelWidths>("set_panel_widths", { widths }),
   saveDraft: (path: string, message: string) => invoke<void>("save_draft", { path, message }),
   cancelReads: () => invoke<void>("cancel_reads"),

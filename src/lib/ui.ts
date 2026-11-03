@@ -13,11 +13,53 @@ export function hueOf(value: string): number {
   return Math.abs(hash) % 360;
 }
 
-/** 取名称的首个可见字符作为徽标。 */
+/** 取名称的首个可见字符。作者头像用它；仓库徽标用 repoBadgeLetters。 */
 export function initialOf(value: string): string {
   const trimmed = value.trim().replace(/^[._\-\s]+/, "");
   const first = [...trimmed][0] ?? "?";
   return first.toUpperCase();
+}
+
+function repoBadgeChars(name: string): string[] {
+  return [...name.trim().replace(/^[._\-\s]+/, "")];
+}
+
+/**
+ * 同一处可见的仓库名各自的徽标文字。
+ * 多个名称时取第一个不完全相同的字符并大写；只有一个名称时取首字符；空名是 ?。
+ * 空名不参与比较，避免把别人的首字符当成区分点。
+ */
+export function repoBadgeLetters(names: readonly string[]): string[] {
+  const glyphs = names.map(repoBadgeChars);
+  const comparable = glyphs.filter((chars) => chars.length > 0);
+  const split = firstDivergentIndex(comparable);
+  return names.map((name, index) => {
+    const chars = glyphs[index];
+    if (chars.length === 0) return "?";
+    if (comparable.length < 2 || split < 0) return initialOf(name);
+    const glyph = chars[split];
+    if (glyph === undefined) return initialOf(name);
+    return glyph.toUpperCase();
+  });
+}
+
+/** 大小写视为相同，这样 Kite-web 与 kite-api 仍能在后缀上分开。 */
+function firstDivergentIndex(glyphs: string[][]): number {
+  if (glyphs.length < 2) return -1;
+  const limit = Math.max(...glyphs.map((chars) => chars.length));
+  for (let index = 0; index < limit; index += 1) {
+    const sample = glyphs[0][index]?.toUpperCase() ?? "";
+    const same = glyphs.every((chars) => (chars[index]?.toUpperCase() ?? "") === sample);
+    if (!same) return index;
+  }
+  return -1;
+}
+
+/** 在一组同时可见的名称里取这一个仓库的徽标文字。名称不在组里时按加入该组计算。 */
+export function repoBadgeLetter(name: string, names: readonly string[]): string {
+  const index = names.indexOf(name);
+  if (index >= 0) return repoBadgeLetters(names)[index] ?? "?";
+  return repoBadgeLetters([...names, name]).at(-1) ?? "?";
 }
 
 /** 把路径拆成目录与文件名，用于“文件名在前、目录弱化”的展示。 */

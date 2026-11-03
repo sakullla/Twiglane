@@ -1,7 +1,7 @@
 <script lang="ts">
   import { BUSY_REASON } from "../ui";
   import { dependencyNote } from "../labels";
-  import type { GitInfo, Theme } from "../types";
+  import type { GitInfo, PullIntegration, Theme } from "../types";
   import { LANGUAGE_OPTIONS } from "../syntax/languages";
   import { setSyntaxEnabled, syntaxPrefs } from "../syntax/prefs.svelte";
   import Icon from "./Icon.svelte";
@@ -14,6 +14,11 @@
     onClose: () => void;
     /** 选择外观；"system" 解析成浅色还是深色由外壳负责。 */
     onTheme: (theme: Theme) => void;
+    /** 分叉拉取的预选方式。缺省合并，与旧设置文件一致。 */
+    pullIntegration?: PullIntegration;
+    branchGroups?: boolean;
+    onPullIntegration?: (mode: PullIntegration) => void;
+    onBranchGroups?: (enabled: boolean) => void;
     onRedetect: () => void;
     onChooseGit: () => void;
     onClearGit: () => void;
@@ -30,6 +35,10 @@
     disabled,
     onClose,
     onTheme,
+    pullIntegration = "merge",
+    branchGroups = true,
+    onPullIntegration = () => {},
+    onBranchGroups = () => {},
     onRedetect,
     onChooseGit,
     onClearGit,
@@ -40,6 +49,10 @@
     { id: "light", label: "浅色" },
     { id: "dark", label: "深色" },
     { id: "system", label: "跟随系统" },
+  ];
+  const PULLS: { id: PullIntegration; label: string }[] = [
+    { id: "merge", label: "合并" },
+    { id: "rebase", label: "变基" },
   ];
 
   let runtimeSection = $state<HTMLElement | null>(null);
@@ -96,6 +109,31 @@
           type="checkbox"
           checked={syntaxPrefs.enabled}
           onchange={(event) => setSyntaxEnabled((event.currentTarget as HTMLInputElement).checked)}
+        />
+      </label>
+    </div>
+  </section>
+
+  <section class="settings-section" data-settings-section="repository">
+    <h2>仓库</h2>
+    <div class="settings-group">
+      <div class="settings-row">
+        <span class="settings-label">分叉时的拉取<small>重启后保持</small></span>
+        <div class="segmented" role="group" aria-label="分叉时的拉取">
+          {#each PULLS as option (option.id)}
+            <button type="button" aria-pressed={pullIntegration === option.id} title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => onPullIntegration(option.id)}>
+              {option.label}
+            </button>
+          {/each}
+        </div>
+      </div>
+      <label class="settings-row switch">
+        <span class="settings-label">按斜杠分组分支<small>重启后保持</small></span>
+        <input
+          type="checkbox"
+          checked={branchGroups}
+          disabled={disabled}
+          onchange={(event) => onBranchGroups((event.currentTarget as HTMLInputElement).checked)}
         />
       </label>
     </div>

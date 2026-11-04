@@ -107,6 +107,11 @@ impl ChangeKind {
 pub struct LineStat {
     pub additions: Option<u64>,
     pub deletions: Option<u64>,
+    /// 二进制改动前后的字节数（改动前不存在或读不到时为空）。文本文件不填。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,6 +197,11 @@ pub struct DiffResponse {
     pub lines: Vec<DiffLine>,
     pub offset: u32,
     pub total_lines: u32,
+    /// 二进制改动前后的字节数，与 LineStat 同义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -370,6 +380,11 @@ pub struct CommitFileChange {
     pub deletions: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub binary: bool,
+    /// 二进制改动前后的字节数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -546,6 +561,9 @@ pub struct ConflictSide {
     pub truncated: bool,
     pub text: Option<String>,
     pub summary: String,
+    /// 这一侧的字节数；读取被截断时为空（只知道超过了预览上限）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

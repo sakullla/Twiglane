@@ -41,6 +41,9 @@ export interface RepoSummary {
 export interface LineStat {
   additions: number | null;
   deletions: number | null;
+  /** 二进制改动前后的字节数：新增时没有 oldSize，删除时没有 newSize，读不到时都缺省。 */
+  oldSize?: number | null;
+  newSize?: number | null;
 }
 
 export interface FileChange {
@@ -108,6 +111,9 @@ export interface DiffResponse {
   lines: DiffLine[];
   offset: number;
   totalLines: number;
+  /** 二进制改动前后的字节数，与 LineStat 同义。 */
+  oldSize?: number | null;
+  newSize?: number | null;
 }
 
 export interface CommitResult {
@@ -272,6 +278,9 @@ export interface CommitFileChange {
   additions?: number | null;
   deletions?: number | null;
   binary?: boolean;
+  /** 二进制改动前后的字节数。 */
+  oldSize?: number | null;
+  newSize?: number | null;
 }
 
 export interface IgnoreOutcome {
@@ -415,6 +424,8 @@ export interface ConflictSide {
   truncated: boolean;
   text: string | null;
   summary: string;
+  /** 这一侧的字节数；读取被截断时缺省。 */
+  size?: number | null;
 }
 
 export interface ConflictView {

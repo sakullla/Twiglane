@@ -911,8 +911,8 @@ describe("差异与提交", () => {
     const list = screen.getByRole("listbox", { name: "改动文件" });
     await fireEvent.keyDown(list, { key: "End" });
     expect(selected.path).toBe("item-79.txt");
-    // 分组表头“未暂存的改动”占第 0 行，文件从第 1 行开始；每行 40px。
-    expect(list.scrollTop).toBe(80 * 40);
+    // 分组表头“未暂存的改动”占第 0 行，文件从第 1 行开始；单行文件行每行 30px。
+    expect(list.scrollTop).toBe(80 * 30);
     await view.rerender(props());
     expect(screen.getByRole("option", { selected: true }).textContent).toContain("item-79.txt");
     expect(screen.queryByText("item-0.txt")).toBeNull();
@@ -1890,7 +1890,9 @@ describe("文件列表的目录分组和行数", () => {
     expect(names()).not.toContain("notes");
     expect(screen.getByLabelText("新增 3 行，删除 0 行")).toBeTruthy();
     expect(screen.getByLabelText("新增 2 行，删除 1 行")).toBeTruthy();
-    expect(screen.getByText("二进制")).toBeTruthy();
+    // 文件清单行里二进制不占位：大小留给差异工具条。
+    expect(screen.queryByText("二进制")).toBeNull();
+    expect([...document.querySelectorAll(".file-row")].find((row) => row.textContent?.includes("blob.bin"))?.querySelector(".diff-stats")).toBeNull();
 
     await fireEvent.click(screen.getByRole("button", { name: "目录" }));
     expect(screen.getByRole("button", { name: "目录" }).getAttribute("aria-pressed")).toBe("true");

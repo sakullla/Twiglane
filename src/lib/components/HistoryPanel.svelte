@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onDestroy, untrack, type Snippet } from "svelte";
+  import { bucketNames } from "../branches";
   import { LatestReadQueue } from "../latest-read";
+  import { LatestBatchReadQueue } from "../latest-batch-read";
   import { api, type HistoryFilters } from "../api";
   import { normalizeError } from "../errors";
   import {
@@ -20,7 +22,7 @@
     shouldAppendHistory,
     toggleCommitSelection,
   } from "../history";
-  import { bucketByDirectory } from "../labels";
+  import { bucketByDirectory, filterRows } from "../labels";
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
   import type {
     CommitDetail,
@@ -42,6 +44,8 @@
   import Modal from "./Modal.svelte";
 
   interface Props {
+    /** 设置里的分支分组：范围下拉框按第一个 / 收成 <optgroup>，关闭时平铺。缺省开启。 */
+    branchGroups?: boolean;
     opened: OpenedRepository;
     active?: boolean;
     filePath: string | null;
@@ -65,10 +69,17 @@
   const pageReads = new LatestReadQueue();
   const detailReads = new LatestReadQueue();
   const diffReads = new LatestReadQueue();
-  onDestroy(() => { pageReads.close(); detailReads.close(); diffReads.close(); });
+  const multiDetailReads = new LatestBatchReadQueue();
+  const multiDiffReads = new LatestBatchReadQueue();
+  onDestroy(() => {
+    pageReads.close(); detailReads.close(); diffReads.close();
+    multiDetailReads.close(); multiDiffReads.close();
+  });
 
-  const ROW_HEIGHT = 60;
-  const FILE_ROW_HEIGHT = 44;
+  /** 提交行两行排布（摘要 / 引用·作者·时间），52px；提交里的文件行与改动列表同为单行 30px。 */
+  const ROW_HEIGHT = 52;
+  const FILE_ROW_HEIGHT = 30;
+  const UNION_ROW_HEIGHT = 44;
 
   let {
     opened,
@@ -86,6 +97,7 @@
     onFileNav,
     paneHead,
     paneResizer,
+    branchGroups = true,
   }: Props = $props();
 
   let menu = $state<ContextMenuRequest | null>(null);
@@ -235,6 +247,9 @@
   let pathFilter = $state("");
   let sinceDay = $state("");
   let untilDay = $state("");
+  /** 作者、日期、路径这几项低频筛选默认收起，左栏首屏留给提交列表；有生效条件时由计数提示。 */
+  let moreFilters = $state(false);
+  let advancedCount = $derived([author, pathFilter, sinceDay, untilDay].filter((value) => value.trim() !== "").length);
   let scope = $state("current");
   let viewMode = $state<"single" | "multi">("single");
   let activeQuery = $state("");
@@ -253,12 +268,12 @@
     branches: string[];
     head: string | null;
   } | null>(null);
-  let commits = $state<HistoryCommit[]>([]);
+  let commits = $state.raw<HistoryCommit[]>([]);
   let listError = $state<string | null>(null);
   let appendError = $state<string | null>(null);
   let appendStopped = $state(false);
   let loading = $state(false);
-  let selectedOids = $state<string[]>([]);
+  let selectedOids = $state.raw<string[]>([]);
   let anchorOid = $state<string | null>(null);
   let checkoutTarget = $state<HistoryCommit | null>(null);
   let checkoutBusy = $state(false);
@@ -301,16 +316,21 @@
   let filesCollapsed = $state(false);
   /** 「全部文件」模式下从左侧点选的文件：右侧滚动到它。 */
   let multiFocus = $state<string | null>(null);
-  let filteredFiles = $derived(
-    (detail?.files ?? []).filter((file) => {
-      const needle = fileFilter.trim().toLowerCase();
-      return !needle || file.path.toLowerCase().includes(needle) || (file.originalPath ?? "").toLowerCase().includes(needle);
-    }),
-  );
-  let fileCounts = $derived({
-    added: (detail?.files ?? []).filter((file) => file.status === "added").length,
-    modified: (detail?.files ?? []).filter((file) => file.status !== "added" && file.status !== "deleted").length,
-    deleted: (detail?.files ?? []).filter((file) => file.status === "deleted").length,
+  let filteredFiles = $derived(filterRows(detail?.files ?? [], fileFilter));
+  let fileBuckets = $derived(directoryMode ? bucketByDirectory(filteredFiles) : []);
+  /** 整次提交的增删行数：只加文本文件，二进制和没有统计的文件不计入，全都没有统计时不显示。 */
+  let lineTotals = $derived.by(() => {
+    let additions = 0;
+    let deletions = 0;
+    let counted = false;
+    for (const file of detail?.files ?? []) {
+      const stat = commitLineStat(file);
+      if (!stat || stat.additions == null || stat.deletions == null) continue;
+      additions += stat.additions;
+      deletions += stat.deletions;
+      counted = true;
+    }
+    return counted ? { additions, deletions } : null;
   });
   let bodyRest = $derived(detail ? commitBodyRest(detail.body, detail.commit.summary) : "");
   type FileItem =
@@ -320,7 +340,7 @@
     if (!directoryMode) return filteredFiles.map((file) => ({ kind: "file" as const, file }));
     const needle = fileFilter.trim();
     const items: FileItem[] = [];
-    for (const bucket of bucketByDirectory(filteredFiles)) {
+    for (const bucket of fileBuckets) {
       const collapsed = collapsedDirs.has(bucket.directory) && needle === "";
       items.push({
         kind: "dir",
@@ -387,9 +407,36 @@
     if (scope !== "current" && scope !== "all" && !names.includes(scope)) return [...names, scope];
     return names;
   });
-  let selectedCommits = $derived(commits.filter((commit) => selectedOids.includes(commit.oid)));
+  let selectedIds = $derived(new Set(selectedOids));
+  let selectedCommits = $derived(commits.filter((commit) => selectedIds.has(commit.oid)));
   let unionFiles = $derived(unionCommitFiles(multiDetails));
   let unionActive = $derived(unionFiles.find((file) => file.path === multiFocus) ?? unionFiles[0] ?? null);
+  let unionScroll = $state(0);
+  let unionViewport = $state(0);
+  let unionList = $state<HTMLDivElement | null>(null);
+  let unionRange = $derived(visibleRange(
+    unionFiles.length, unionScroll, unionViewport > 0 ? unionViewport : unionScroll > 0 ? UNION_ROW_HEIGHT : 0, UNION_ROW_HEIGHT,
+  ));
+  let visibleUnionFiles = $derived(unionFiles.slice(unionRange.start, unionRange.end));
+  $effect(() => {
+    void unionFiles;
+    unionScroll = 0;
+    if (unionList) unionList.scrollTop = 0;
+  });
+
+  function onUnionKey(event: KeyboardEvent) {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    const index = unionFiles.findIndex((file) => file.path === unionActive?.path);
+    const next = nextIndex(index, event.key, unionFiles.length);
+    if (next === null) return;
+    event.preventDefault();
+    multiFocus = unionFiles[next].path;
+    unionScroll = scrollIndexIntoView(next, unionScroll, unionViewport, UNION_ROW_HEIGHT);
+    if (unionList) {
+      unionList.scrollTop = unionScroll;
+      unionList.focus({ preventScroll: true });
+    }
+  }
   let diffSelection = $derived<FileSelection | null>(
     activeFile ? { path: activeFile.path, side: "unstaged" } : null,
   );
@@ -605,40 +652,41 @@
   });
 
   $effect(() => {
-    if (!active) return;
     const ids = selectedOids;
-    if (ids.length < 2) {
-      multiDetails = [];
-      multiError = null;
-      return;
-    }
+    multiDetails = [];
+    multiError = null;
+    if (!active || ids.length < 2) return;
     const repo = repoPath;
     const generation = readGeneration;
     let cancelled = false;
     void (async () => {
-      const rows: CommitDetail[] = [];
       const errors: string[] = [];
-      await Promise.all(ids.map(async (oid) => {
-        try {
-          rows.push(await api.commitDetail(repo, oid, null, generation, nextId()));
-        } catch (error) {
-          const failure = normalizeError(error);
-          if (failure.code !== "cancelled" && failure.code !== "stale") errors.push(failure.message);
-        }
-      }));
-      if (cancelled || opened.summary.path !== repo) return;
-      rows.sort((left, right) => ids.indexOf(left.commit.oid) - ids.indexOf(right.commit.oid));
-      multiDetails = rows;
-      multiError = errors[0] ?? null;
+      try {
+        const rows = await multiDetailReads.run(ids, async (oid) => {
+          try {
+            return await api.commitDetail(repo, oid, null, generation, nextId());
+          } catch (error) {
+            const failure = normalizeError(error);
+            if (failure.code !== "cancelled" && failure.code !== "stale") errors.push(failure.message);
+            return null;
+          }
+        });
+        if (cancelled || opened.summary.path !== repo) return;
+        multiDetails = rows.filter((row): row is CommitDetail => row !== null);
+        multiError = errors[0] ?? null;
+      } catch (error) {
+        if (!cancelled) multiError = normalizeError(error).message;
+      }
     })();
     return () => {
       cancelled = true;
+      multiDetailReads.cancel();
     };
   });
 
   $effect(() => {
+    multiDiffs = [];
     if (!active || selectedOids.length < 2) {
-      multiDiffs = [];
       return;
     }
     const file = unionActive?.path ?? null;
@@ -652,33 +700,38 @@
     const sources = details.filter((detail) => detail.files.some((item) => item.path === file));
     let cancelled = false;
     void (async () => {
-      const rows = await Promise.all(sources.map(async (detail) => {
-        try {
-          const diff = await api.commitFileDiff(
-            repo,
-            detail.commit.oid,
-            detail.selectedParent,
-            file,
-            generation,
-            nextId(),
-            0,
-            0,
-          );
-          return { oid: detail.commit.oid, summary: detail.commit.summary, diff, error: null as string | null };
-        } catch (error) {
-          return {
-            oid: detail.commit.oid,
-            summary: detail.commit.summary,
-            diff: null,
-            error: normalizeError(error).message,
-          };
-        }
-      }));
-      if (cancelled) return;
-      multiDiffs = rows;
+      try {
+        const rows = await multiDiffReads.run(sources, async (detail) => {
+          try {
+            const diff = await api.commitFileDiff(
+              repo,
+              detail.commit.oid,
+              detail.selectedParent,
+              file,
+              generation,
+              nextId(),
+              0,
+              0,
+            );
+            return { oid: detail.commit.oid, summary: detail.commit.summary, diff, error: null as string | null };
+          } catch (error) {
+            return {
+              oid: detail.commit.oid,
+              summary: detail.commit.summary,
+              diff: null,
+              error: normalizeError(error).message,
+            };
+          }
+        });
+        if (cancelled) return;
+        multiDiffs = rows;
+      } catch (error) {
+        if (!cancelled) multiError = normalizeError(error).message;
+      }
     })();
     return () => {
       cancelled = true;
+      multiDiffReads.cancel();
     };
   });
 
@@ -907,9 +960,12 @@
           continue;
         }
         if (file.binary || existing.binary) {
+          // 多个提交合起来看时，前后大小没有单一的「改动前」，只说是二进制。
           existing.binary = true;
           existing.additions = null;
           existing.deletions = null;
+          existing.oldSize = null;
+          existing.newSize = null;
         } else if (existing.additions != null && file.additions != null && existing.deletions != null && file.deletions != null) {
           existing.additions += file.additions;
           existing.deletions += file.deletions;
@@ -1006,28 +1062,55 @@
           <select id="history-scope" class="select" value={scope} onchange={(event) => setScope(event.currentTarget.value)}>
             <option value="current">当前分支{page?.head ? `（${page.head}）` : ""}</option>
             <option value="all">全部分支</option>
-            {#each scopeNames as name (name)}
-              <option value={name}>{name}</option>
-            {/each}
-          </select>
-          <div class="field sm history-search">
-            <Icon name="search" size={14} />
-            <input
-              aria-label="搜索说明或提交哈希"
-              placeholder="搜索说明或提交哈希"
-              autocomplete="off"
-              spellcheck="false"
-              value={query}
-              oninput={(event) => {
-                query = event.currentTarget.value;
-                scheduleText();
-              }}
-            />
-            {#if query}
-              <button type="button" class="field-clear" aria-label="清除说明或哈希" onclick={() => clearFilter("query")}><Icon name="x" size={12} /></button>
+            {#if branchGroups !== false}
+              {@const buckets = bucketNames(scopeNames)}
+              {#each buckets.top as name (name)}<option value={name}>{name}</option>{/each}
+              {#each buckets.groups as group (group.prefix)}
+                <optgroup label={`${group.prefix}/`}>
+                  {#each group.names as name (name)}<option value={name}>{name}</option>{/each}
+                </optgroup>
+              {/each}
+            {:else}
+              {#each scopeNames as name (name)}
+                <option value={name}>{name}</option>
+              {/each}
             {/if}
-            {#if loading}<span class="spinner"></span>{/if}
+          </select>
+          <div class="history-search-row">
+            <div class="field sm history-search">
+              <Icon name="search" size={14} />
+              <input
+                aria-label="搜索说明或提交哈希"
+                placeholder="搜索说明或提交哈希"
+                autocomplete="off"
+                spellcheck="false"
+                value={query}
+                oninput={(event) => {
+                  query = event.currentTarget.value;
+                  scheduleText();
+                }}
+              />
+              {#if query}
+                <button type="button" class="field-clear" aria-label="清除说明或哈希" onclick={() => clearFilter("query")}><Icon name="x" size={12} /></button>
+              {/if}
+              {#if loading}<span class="spinner"></span>{/if}
+            </div>
+            <button
+              type="button"
+              class="icon-btn history-filter-toggle"
+              class:active={advancedCount > 0}
+              aria-expanded={moreFilters}
+              aria-controls="history-more-filters"
+              aria-label={advancedCount > 0 ? `更多筛选（已生效 ${advancedCount} 项）` : "更多筛选"}
+              title="按作者、日期或路径筛选"
+              onclick={() => (moreFilters = !moreFilters)}
+            >
+              <Icon name="filter" size={15} />
+              {#if advancedCount > 0}<span class="filter-badge" aria-hidden="true">{advancedCount}</span>{/if}
+            </button>
           </div>
+          {#if moreFilters}
+          <div class="history-more-filters" id="history-more-filters">
           <div class="field sm">
             <Icon name="user" size={14} />
             <input
@@ -1075,6 +1158,8 @@
               <button type="button" class="field-clear" aria-label="清除路径" onclick={() => clearFilter("path")}><Icon name="x" size={12} /></button>
             {/if}
           </div>
+          </div>
+          {/if}
         </div>
       </div>
       {#if listError}
@@ -1115,9 +1200,9 @@
               <div
                 class="history-row"
                 role="option"
-                aria-selected={selectedOids.includes(commit.oid)}
+                aria-selected={selectedIds.has(commit.oid)}
                 tabindex="-1"
-                style={`top:${(range.start + index) * ROW_HEIGHT}px;height:${ROW_HEIGHT - 4}px`}
+                style={`top:${(range.start + index) * ROW_HEIGHT + 1}px;height:${ROW_HEIGHT - 2}px`}
                 title={`${commit.summary}\n${commit.authorName} · ${formatAuthoredAt(commit.authoredAt)}\n${commit.oid}`}
                 onclick={(event) => clickCommit(event, commit.oid)}
                 oncontextmenu={(event) => {
@@ -1198,27 +1283,44 @@
             {#if unionFiles.length === 0}
               <p class="commit-files-empty">这些提交没有文件变化。</p>
             {:else}
-              <div class="file-list history-files history-union-files" role="listbox" aria-label="提交中的文件列表">
-                {#each unionFiles as file (file.path)}
-                  {@const mark = statusMark(commitFileLabel(file.status))}
-                  {@const parts = splitPath(file.path)}
-                  <button
-                    type="button"
-                    class="file-row"
-                    role="option"
-                    aria-selected={unionActive?.path === file.path}
-                    title={fileTitle(file)}
-                    onclick={() => (multiFocus = file.path)}
-                    oncontextmenu={(event) => {
-                      event.preventDefault();
-                      fileMenu(file.path, { x: event.clientX, y: event.clientY });
-                    }}
-                  >
-                    <span class={`st ${mark.tone}`} title={commitFileLabel(file.status)}>{mark.letter}</span>
-                    <span class="file-name"><span class="fn">{parts.name}</span></span>
-                    <LineCounts stat={commitLineStat(file)} />
-                  </button>
-                {/each}
+              <div
+                class="file-list history-files history-union-files"
+                role="listbox"
+                aria-label="提交中的文件列表"
+                tabindex="0"
+                bind:this={unionList}
+                bind:clientHeight={unionViewport}
+                onscroll={(event) => (unionScroll = event.currentTarget.scrollTop)}
+                onkeydown={onUnionKey}
+              >
+                <div class="virtual-space" style={`height:${unionFiles.length * UNION_ROW_HEIGHT}px`}>
+                  {#each visibleUnionFiles as file, index (file.path)}
+                    {@const mark = statusMark(commitFileLabel(file.status))}
+                    {@const parts = splitPath(file.path)}
+                    <button
+                      type="button"
+                      class="file-row"
+                      role="option"
+                      aria-selected={unionActive?.path === file.path}
+                      aria-posinset={unionRange.start + index + 1}
+                      aria-setsize={unionFiles.length}
+                      style={`position:absolute;top:${(unionRange.start + index) * UNION_ROW_HEIGHT + 2}px;height:${UNION_ROW_HEIGHT - 4}px;margin:0`}
+                      title={fileTitle(file)}
+                      onclick={() => {
+                        multiFocus = file.path;
+                        unionList?.focus({ preventScroll: true });
+                      }}
+                      oncontextmenu={(event) => {
+                        event.preventDefault();
+                        fileMenu(file.path, { x: event.clientX, y: event.clientY });
+                      }}
+                    >
+                      <span class={`st ${mark.tone}`} title={commitFileLabel(file.status)}>{mark.letter}</span>
+                      <span class="file-name"><span class="fn">{parts.name}</span></span>
+                      <LineCounts stat={commitLineStat(file)} hideBinary />
+                    </button>
+                  {/each}
+                </div>
               </div>
             {/if}
           </aside>
@@ -1310,11 +1412,18 @@
         <div class="commit-split">
           <aside class="commit-files" class:collapsed={filesCollapsed} aria-label="提交中的文件">
             <div class="commit-files-head">
-              <span>变更文件</span>
+              <span class="commit-files-title">变更文件</span>
               <span class="count">{detail.files.length}</span>
-              <div class="segmented" role="group" aria-label="文件排列">
-                <button type="button" aria-pressed={!directoryMode} onclick={() => (directoryMode = false)}>列表</button>
-                <button type="button" aria-pressed={directoryMode} onclick={() => (directoryMode = true)}>目录</button>
+              <span class="spacer"></span>
+              {#if lineTotals}
+                <span class="diff-stats commit-line-total" title="这次提交共改动的行数" aria-label={`共新增 ${lineTotals.additions} 行，删除 ${lineTotals.deletions} 行`}>
+                  <span class="plus">+{lineTotals.additions}</span>
+                  <span class="minus">−{lineTotals.deletions}</span>
+                </span>
+              {/if}
+              <div class="segmented icon-segmented" role="group" aria-label="文件排列">
+                <button type="button" aria-pressed={!directoryMode} aria-label="列表" title="平铺列表" onclick={() => (directoryMode = false)}><Icon name="list" size={14} /></button>
+                <button type="button" aria-pressed={directoryMode} aria-label="目录" title="按目录分组" onclick={() => (directoryMode = true)}><Icon name="folder" size={14} /></button>
               </div>
               <button
                 type="button"
@@ -1326,10 +1435,6 @@
               >
                 <Icon name="chevron-down" size={13} class={filesCollapsed ? "" : "flip"} />
               </button>
-              <span class="spacer"></span>
-              {#if fileCounts.added > 0}<span class="file-tally add" title="新增">+{fileCounts.added}</span>{/if}
-              {#if fileCounts.modified > 0}<span class="file-tally mod" title="修改">~{fileCounts.modified}</span>{/if}
-              {#if fileCounts.deleted > 0}<span class="file-tally del" title="删除">−{fileCounts.deleted}</span>{/if}
             </div>
             {#if detail.files.length > 8 || directoryMode}
               <div class="commit-files-filter">
@@ -1382,7 +1487,7 @@
                         class="file-row"
                         role="option"
                         aria-selected={currentPath === file.path}
-                        style={`top:${(fileRange.start + index) * FILE_ROW_HEIGHT + 2}px;height:${FILE_ROW_HEIGHT - 4}px`}
+                        style={`top:${(fileRange.start + index) * FILE_ROW_HEIGHT + 1}px;height:${FILE_ROW_HEIGHT - 2}px`}
                         title={fileTitle(file)}
                         onclick={() => chooseFile(file.path)}
                         oncontextmenu={(event) => {
@@ -1399,7 +1504,7 @@
                             <span class="fd"><bdi>{parts.dir}</bdi></span>
                           {/if}
                         </span>
-                        <LineCounts stat={commitLineStat(file)} />
+                        <LineCounts stat={commitLineStat(file)} hideBinary />
                       </button>
                     {/if}
                   {/each}

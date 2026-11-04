@@ -13,9 +13,11 @@
     onFailure: (error: unknown) => void;
     onNotice: (message: string) => void;
     onOpenChanges: (path: string) => void;
+    /** 保存范围里的文件右键（或菜单键 / Shift+F10）：由外壳给出与改动列表一致的文件操作。 */
+    onFileContextMenu?: (path: string, kind: "tracked" | "untracked" | "ignored", point: { x: number; y: number }) => void;
   }
 
-  let { opened, disabled, nextId, onClose, onGeneration, onSnapshot, onFailure, onNotice, onOpenChanges }: Props =
+  let { opened, disabled, nextId, onClose, onGeneration, onSnapshot, onFailure, onNotice, onOpenChanges, onFileContextMenu }: Props =
     $props();
 </script>
 
@@ -36,6 +38,7 @@
     {onFailure}
     {onNotice}
     {onOpenChanges}
+    {onFileContextMenu}
     embedded
   />
   {#snippet footer()}

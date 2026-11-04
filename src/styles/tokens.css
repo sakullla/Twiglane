@@ -74,11 +74,13 @@
   --z-toast: 60;
 
   /* 圆角、字体栈 */
-  --radius-sm: 8px;
-  --radius: 11px;
-  --radius-lg: 16px;
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", sans-serif;
-  --mono: "Cascadia Code", "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 14px;
+  --font: "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --mono: "JetBrains Mono", "Cascadia Code", "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 /* 浅色主题配色 */
@@ -86,30 +88,30 @@
 [data-theme="light"] {
   color-scheme: light;
   /* 石墨中性灰：表面保持纯白，层级主要靠明度差，颜色只留给选中、差异与状态 */
-  --bg: #f7f7f8;
+  --bg: #f4f4f6;
   --surface: #ffffff;
-  --surface-2: #f3f3f5;
-  --surface-3: #eaeaed;
-  --hover: rgba(23, 24, 30, 0.05);
-  --active: rgba(23, 24, 30, 0.08);
-  --border: #e4e4e8;
-  --border-strong: #d6d6dc;
+  --surface-2: #f7f7f9;
+  --surface-3: #ebecf0;
+  --hover: rgba(20, 22, 34, 0.045);
+  --active: rgba(20, 22, 34, 0.075);
+  --border: #e5e6eb;
+  --border-strong: #d5d7de;
   /* 控件边界：表单控件、次级按钮与可点击的 bordered 行的自身边界。
      发丝线 --border/--border-strong 只做面板外框与分隔线，控件边界必须
      对 surface/bg/surface-2/surface-3 均 ≥ 3:1（R14 交互元素边界）。 */
-  --control-border: #80828c;
-  --control-border-hover: #6a6c76;
-  --fg: #17181c;
-  --fg-muted: #4a4c55;
-  --fg-subtle: #5b5d67;
+  --control-border: #81848f;
+  --control-border-hover: #6a6d78;
+  --fg: #15161b;
+  --fg-muted: #4a4d57;
+  --fg-subtle: #5b5e69;
   /* 弱化正文：已完成/已标记等非活动行的主文字（如冲突侧栏的已标记文件）。
      整行或文字 opacity 会把前景与所在表面按 α 混合，因此弱化不走 opacity，改用本令牌：
      取值已把余量算进来，即使再叠加元素级 0.75 淡化，对 --surface / --surface-2 仍 ≥4.5:1。 */
   --fg-dimmed: #3e4048;
   --accent: #4f56e0;
-  --accent-hover: #4148cb;
+  --accent-hover: #434ad2;
   --accent-soft: rgba(79, 86, 224, 0.1);
-  --accent-softer: rgba(79, 86, 224, 0.06);
+  --accent-softer: rgba(79, 86, 224, 0.055);
   --accent-fg: #ffffff;
   --accent-text: #3f46c8;
   --on-accent-soft: rgba(255, 255, 255, 0.16);
@@ -137,26 +139,26 @@
   /* 重命名行「来源路径」的弱化色：与 --fg-dimmed 同一口径，按 0.85 元素级淡化的
      合成结果标定，对 --surface / --surface-2 均 ≥4.5:1。 */
   --purple-dimmed: #76318c;
-  --add-bg: #e4f6e8;
-  --add-strong: #c9ecd1;
+  --add-bg: #e8f6ec;
+  --add-strong: #c6eacf;
   --add-fg: #14682c;
-  --del-bg: #fdecec;
-  --del-strong: #f7d7d9;
+  --del-bg: #fdeeee;
+  --del-strong: #f8d5d8;
   --del-fg: #a13239;
-  --hunk-bg: #eeeff4;
+  --hunk-bg: #f0f1f6;
   --hunk-fg: #555a70;
   --focus: #4f56e0;
-  --overlay: rgba(12, 13, 18, 0.42);
-  --shadow-sm: 0 1px 2px rgba(20, 21, 28, 0.05);
-  --shadow-md: 0 4px 16px rgba(20, 21, 28, 0.06), 0 1px 3px rgba(20, 21, 28, 0.05);
-  --shadow-lg: 0 24px 64px rgba(16, 17, 24, 0.16), 0 6px 16px rgba(16, 17, 24, 0.08);
-  --brand-grad: linear-gradient(150deg, #7c83f7 0%, #4f56e0 78%);
+  --overlay: rgba(15, 16, 24, 0.32);
+  --shadow-sm: 0 1px 2px rgba(18, 20, 30, 0.06);
+  --shadow-md: 0 0 0 1px rgba(18, 20, 30, 0.05), 0 4px 12px rgba(18, 20, 30, 0.07);
+  --shadow-lg: 0 0 0 1px rgba(18, 20, 30, 0.06), 0 16px 48px rgba(18, 20, 30, 0.16), 0 4px 12px rgba(18, 20, 30, 0.06);
+  --brand-grad: linear-gradient(145deg, #858cfa 0%, #4f56e0 80%);
   --brand-logo-fg: #ffffff;
   --brand-logo-highlight: rgba(255, 255, 255, 0.28);
   --avatar-fg: #ffffff;
   --switch-knob: #ffffff;
   --segmented-active-bg: #ffffff;
-  --segmented-active-shadow: 0 1px 4px rgba(20, 21, 28, 0.1);
+  --segmented-active-shadow: 0 0 0 1px rgba(18, 20, 30, 0.06), 0 1px 3px rgba(18, 20, 30, 0.1);
   /* --hue 由仓库路径 / 作者名逐实例提供（0–359）。派生色必须在使用它的元素上
      合成（hsl(var(--hue, 238) var(--<名>-sat) var(--<名>-light))），否则 var(--hue)
      会在 :root 上提前解析成缺省色相，所有徽标退化成同一颜色。
@@ -191,28 +193,28 @@
 /* 深色主题配色（键集合必须与上方浅色块一致） */
 [data-theme="dark"] {
   color-scheme: dark;
-  --bg: #111214;
-  --surface: #18191c;
-  --surface-2: #1e1f23;
-  --surface-3: #26272c;
-  --hover: rgba(232, 233, 236, 0.055);
-  --active: rgba(232, 233, 236, 0.085);
-  --border: #26282d;
-  --border-strong: #34363c;
+  --bg: #0d0e11;
+  --surface: #16171b;
+  --surface-2: #111215;
+  --surface-3: #24252b;
+  --hover: rgba(232, 234, 245, 0.055);
+  --active: rgba(232, 234, 245, 0.09);
+  --border: #23252b;
+  --border-strong: #30323a;
   /* 控件边界：与浅色主题同义，对深色四个表面均 ≥ 3:1。 */
-  --control-border: #6f727c;
-  --control-border-hover: #7e818b;
-  --fg: #e8e9ec;
-  --fg-muted: #9a9da6;
-  --fg-subtle: #93969f;
+  --control-border: #70737e;
+  --control-border-hover: #858893;
+  --fg: #ebecf0;
+  --fg-muted: #a2a5af;
+  --fg-subtle: #9295a0;
   /* 弱化正文：与浅色主题同义，取值按 0.75 元素级淡化的合成结果标定。 */
-  --fg-dimmed: #b3b6be;
-  --accent: #7c83f7;
-  --accent-hover: #959bfa;
-  --accent-soft: rgba(124, 131, 247, 0.13);
-  --accent-softer: rgba(124, 131, 247, 0.09);
+  --fg-dimmed: #b5b8c0;
+  --accent: #7e85fa;
+  --accent-hover: #979cfc;
+  --accent-soft: rgba(126, 133, 250, 0.14);
+  --accent-softer: rgba(126, 133, 250, 0.08);
   --accent-fg: #0d0f2b;
-  --accent-text: #a9aefb;
+  --accent-text: #acb1fd;
   --on-accent-soft: rgba(0, 0, 0, 0.14);
   --on-accent-line: rgba(0, 0, 0, 0.16);
   /* 成功语义：与浅色主题同义，按深色画布取值。 */
@@ -236,26 +238,26 @@
   --purple-soft: rgba(211, 155, 234, 0.13);
   /* 重命名行「来源路径」的弱化色：与浅色主题同义，按 0.85 淡化标定。 */
   --purple-dimmed: #dcaef0;
-  --add-bg: rgba(70, 190, 100, 0.13);
-  --add-strong: rgba(70, 190, 100, 0.17);
+  --add-bg: rgba(70, 190, 100, 0.11);
+  --add-strong: rgba(70, 190, 100, 0.2);
   --add-fg: #8ae3a2;
-  --del-bg: rgba(238, 111, 120, 0.11);
-  --del-strong: rgba(238, 111, 120, 0.18);
+  --del-bg: rgba(238, 111, 120, 0.1);
+  --del-strong: rgba(238, 111, 120, 0.19);
   --del-fg: #f2a4aa;
-  --hunk-bg: rgba(150, 155, 180, 0.09);
+  --hunk-bg: rgba(140, 148, 190, 0.08);
   --hunk-fg: #a9adc0;
   --focus: #959bfa;
-  --overlay: rgba(5, 6, 8, 0.66);
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.34), 0 1px 3px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 28px 80px rgba(0, 0, 0, 0.55), 0 8px 24px rgba(0, 0, 0, 0.35);
-  --brand-grad: linear-gradient(150deg, #a3a8fb 0%, #5d64e8 80%);
+  --overlay: rgba(4, 5, 8, 0.6);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 0 0 1px rgba(255, 255, 255, 0.04), 0 6px 18px rgba(0, 0, 0, 0.38);
+  --shadow-lg: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 24px 64px rgba(0, 0, 0, 0.6), 0 6px 18px rgba(0, 0, 0, 0.35);
+  --brand-grad: linear-gradient(145deg, #a6abfc 0%, #5d64e8 80%);
   --brand-logo-fg: #ffffff;
   --brand-logo-highlight: rgba(255, 255, 255, 0.28);
   --avatar-fg: #ffffff;
   --switch-knob: #ffffff;
-  --segmented-active-bg: #34363c;
-  --segmented-active-shadow: 0 1px 4px rgba(0, 0, 0, 0.28);
+  --segmented-active-bg: #2c2e35;
+  --segmented-active-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05), 0 1px 3px rgba(0, 0, 0, 0.4);
   /* --hue 派生配比：与浅色主题同义，亮度按深色画布重新取值。 */
   --avatar-bg-sat: 26%;
   --avatar-bg-light: 32%;

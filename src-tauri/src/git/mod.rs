@@ -34,6 +34,7 @@ pub mod patch;
 pub mod resolve;
 pub mod runner;
 pub mod schedule;
+pub mod sizes;
 pub mod sync;
 pub mod tags;
 pub mod workspace;

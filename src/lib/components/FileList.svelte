@@ -40,9 +40,10 @@
   let directoryMode = $state(false);
   let collapsedDirs = $state<Set<string>>(new Set());
 
-  /** 每行 40px：文件行实际画 36px、上下各留 2px 呼吸；分组表头用整行，文字贴底，与上一组拉开距离。 */
-  const ROW_HEIGHT = 40;
-  const ROW_GAP = 4;
+  /** 每行 30px：文件行单行排布（名字在前、目录弱化跟在后面），实际画 28px、上下各留 1px 呼吸；
+      分组表头用整行。单行比旧的两行行高几乎多放一倍文件，长列表扫一眼就能看全。 */
+  const ROW_HEIGHT = 30;
+  const ROW_GAP = 2;
 
   let {
     files,
@@ -269,9 +270,9 @@
 </script>
 
 <div class="file-tools">
-  <div class="segmented" role="group" aria-label="文件排列">
-    <button type="button" aria-pressed={!directoryMode} onclick={() => (directoryMode = false)}>列表</button>
-    <button type="button" aria-pressed={directoryMode} onclick={() => (directoryMode = true)}>目录</button>
+  <div class="segmented icon-segmented" role="group" aria-label="文件排列">
+    <button type="button" aria-pressed={!directoryMode} aria-label="列表" title="平铺列表" onclick={() => (directoryMode = false)}><Icon name="list" size={14} /></button>
+    <button type="button" aria-pressed={directoryMode} aria-label="目录" title="按目录分组" onclick={() => (directoryMode = true)}><Icon name="folder" size={14} /></button>
   </div>
   <div class="field sm">
     <Icon name="search" size={14} />
@@ -432,7 +433,6 @@
             }}
           >
             <span class={`st ${mark.tone}`} title={mark.label} aria-label={mark.label}>{mark.letter}</span>
-            <LineCounts stat={row.side === "staged" ? row.stagedLines : row.unstagedLines} />
             <span class="file-name">
               <span class="fn">{parts.name}</span>
               {#if row.originalPath}
@@ -441,44 +441,48 @@
                 <span class="fd"><bdi>{parts.dir}</bdi></span>
               {/if}
             </span>
+            <LineCounts stat={row.side === "staged" ? row.stagedLines : row.unstagedLines} hideBinary />
             {#if row.unmerged}
               <button
                 type="button"
-                class="btn btn-ghost btn-sm row-action"
+                class="row-action"
                 disabled={disabled || !onResolve}
+                aria-label="处理"
                 title="在分支合并里逐处处理这个文件（空格）"
                 onclick={(event) => {
                   event.stopPropagation();
                   onResolve?.(row.path);
                 }}
               >
-                <Icon name="merge" size={13} />处理
+                <Icon name="merge" size={14} />
               </button>
             {:else if row.side === "unstaged"}
               <button
                 type="button"
-                class="btn btn-ghost btn-sm row-action"
+                class="row-action"
                 disabled={disabled}
+                aria-label="暂存"
                 title="暂存（空格）"
                 onclick={(event) => {
                   event.stopPropagation();
                   toggle(row);
                 }}
               >
-                <Icon name="plus" size={13} />暂存
+                <Icon name="plus" size={14} />
               </button>
             {:else}
               <button
                 type="button"
-                class="btn btn-ghost btn-sm row-action"
+                class="row-action"
                 disabled={disabled}
+                aria-label="取消暂存"
                 title="取消暂存（空格）"
                 onclick={(event) => {
                   event.stopPropagation();
                   toggle(row);
                 }}
               >
-                <Icon name="minus" size={13} />取消暂存
+                <Icon name="minus" size={14} />
               </button>
             {/if}
           </div>

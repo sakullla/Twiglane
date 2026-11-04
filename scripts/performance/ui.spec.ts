@@ -3,22 +3,58 @@ import { tick } from "svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PerformanceFixture } from "./fixtures";
 import type { BranchRecord, DiffResponse } from "../../src/lib/types";
+import { toSideRows, type ViewLine } from "../../src/lib/diff";
 
 const api = vi.hoisted(() => ({
   commitFileDiff: vi.fn(), mergeSession: vi.fn(), branchState: vi.fn(),
-  historyPage: vi.fn(), conflictView: vi.fn(),
+  historyPage: vi.fn(), conflictView: vi.fn(), commitDetail: vi.fn(),
 }));
 vi.mock("../../src/lib/api", () => ({ api }));
 
 import BranchPicker from "../../src/lib/components/BranchPicker.svelte";
 import CommitDiffList from "../../src/lib/components/CommitDiffList.svelte";
 import MergePanel from "../../src/lib/components/MergePanel.svelte";
+import HistoryPanel from "../../src/lib/components/HistoryPanel.svelte";
 
 const { opened, detail, diff } = new PerformanceFixture();
 
 beforeEach(() => { Object.values(api).forEach((mock) => mock.mockReset()); });
 
 describe("大仓库的有界读取和渲染", () => {
+  it("两万行替换保持配对和行序，无结尾换行标记不占配对槽", () => {
+    const count = 20_000;
+    const lines: ViewLine[] = [
+      ...Array.from({ length: count }, (_, i) => ({ kind: "del", text: `-${i}`, oldNo: i + 1, newNo: null, hunkIndex: 0 })),
+      { kind: "nonewline", text: "no newline", oldNo: null, newNo: null, hunkIndex: 0 },
+      ...Array.from({ length: count + 1 }, (_, i) => ({ kind: "add", text: `+${i}`, oldNo: null, newNo: i + 1, hunkIndex: 0 })),
+    ];
+    const start = performance.now();
+    const rows = toSideRows(lines);
+    console.info(`20000-line replacement pairing: ${(performance.now() - start).toFixed(2)} ms`);
+    expect(rows).toHaveLength(count + 2);
+    for (let i = 0; i < count; i++) {
+      expect([rows[i].left?.no, rows[i].right?.no]).toEqual([i + 1, i + 1]);
+    }
+    expect(rows[count].left?.text).toBe("no newline");
+    expect(rows[count].right).toBeNull();
+    expect(rows[count + 1].right?.no).toBe(count + 1);
+  });
+
+  it("多提交并集的两万文件只挂载视口附近行，End 可以选到末尾", async () => {
+    const commits = [detail.commit, { ...detail.commit, oid: "c".repeat(40), summary: "second" }];
+    api.historyPage.mockResolvedValue({ generation: 1, commits, offset: 0, pageSize: 100, hasMore: false, state: "ok" });
+    api.commitDetail.mockImplementation(async (_repo, oid) => ({ ...detail, commit: commits.find((item) => item.oid === oid) }));
+    api.commitFileDiff.mockResolvedValue(diff);
+    render(HistoryPanel, { opened, filePath: null, disabled: false, nextId: () => 1, onGeneration: vi.fn(), onFailure: vi.fn(), onFilePath: vi.fn(), onClearFile: vi.fn() });
+    await fireEvent.click(await screen.findByRole("option", { name: /second/ }), { shiftKey: true });
+    await waitFor(() => expect(document.querySelector(".history-union-files")).toBeTruthy());
+    const list = document.querySelector(".history-union-files")!;
+    expect(list.querySelectorAll("[role=option]").length).toBeLessThanOrEqual(40);
+    await fireEvent.keyDown(list, { key: "End" });
+    await waitFor(() => expect(list.querySelector('[aria-posinset="20000"]')?.getAttribute("aria-selected")).toBe("true"));
+    expect(list.querySelectorAll("[role=option]").length).toBeLessThanOrEqual(40);
+  });
+
   it("5000 个分支只挂载视口附近的选项，键盘能直接选到最后一个，搜索覆盖全量", async () => {
     const branches: BranchRecord[] = Array.from({ length: 5000 }, (_, i) => ({ name: `topic-${i}`, remote: false, current: false, upstream: null, worktree: null }));
     const onChange = vi.fn();

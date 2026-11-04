@@ -1527,6 +1527,67 @@
     contextMenu = { x: point.x, y: point.y, entries, label: `${row.path} 的操作` };
   }
 
+  /**
+   * 临时保存清单里的文件：查看改动、定位、复制；未跟踪文件还能直接加入忽略，
+   * 写入后临时保存的范围随状态刷新，这些文件就从「未跟踪」移到「忽略」。
+   * 已跟踪文件不提供忽略：规则对已跟踪的文件不起作用，放在这里只会误导。
+   */
+  function stashFileMenu(path: string, kind: "tracked" | "untracked" | "ignored", point: { x: number; y: number }) {
+    const busy = writeLocked ? switchBlockedReason(commandState) : undefined;
+    const row = opened?.snapshot.files.find((file) => file.path === path) ?? null;
+    const deleted = row ? row.unstaged === "deleted" || (row.unstaged === "none" && row.staged === "deleted") : false;
+    const name = path.split("/").pop() ?? path;
+    const entries: ContextMenuEntry[] = [];
+    if (row && kind !== "ignored") {
+      entries.push({
+        id: "changes",
+        label: "查看改动",
+        icon: "file-diff",
+        run: () => {
+          closeTask();
+          showChanges();
+          selectFile({ path, side: row.untracked || row.unstaged !== "none" ? "unstaged" : "staged" });
+        },
+      });
+      if (kind === "tracked") {
+        entries.push({
+          id: "history",
+          label: "查看文件历史",
+          icon: "history",
+          run: () => {
+            closeTask();
+            openFileHistory(path);
+          },
+        });
+      }
+      entries.push({ separator: true });
+    }
+    entries.push({
+      id: "reveal",
+      label: navigator.platform?.toLowerCase().includes("mac") ? "在访达中显示" : "在资源管理器中显示",
+      icon: "folder-open",
+      run: () => void revealInFolder(path),
+    });
+    entries.push({
+      id: "open",
+      label: "用默认程序打开",
+      icon: "file",
+      disabledReason: deleted ? "文件已删除，工作区里没有它" : undefined,
+      run: () => void openWithDefault(path),
+    });
+    entries.push({ separator: true });
+    entries.push({ id: "copy-rel", label: "复制相对路径", icon: "copy", run: () => void copyText(path, "相对路径") });
+    entries.push({ id: "copy-abs", label: "复制完整路径", icon: "copy", run: () => void copyText(absolutePath(path), "完整路径") });
+    entries.push({ id: "copy-name", label: "复制文件名", icon: "copy", run: () => void copyText(name, "文件名") });
+    if (kind === "untracked") {
+      // 与改动列表的右键菜单同一组忽略入口：按这个文件写规则，写入后随状态刷新移到「忽略」。
+      entries.push({ separator: true });
+      entries.push({ id: "ignore-git", label: "加入 .gitignore", icon: "eye", disabledReason: busy, run: () => void ignore(path, false) });
+      entries.push({ id: "ignore-local", label: "加入 .git/info/exclude", icon: "eye", disabledReason: busy, run: () => void ignore(path, true) });
+    }
+    contextMenu = { x: point.x, y: point.y, entries, label: `${path} 的操作` };
+  }
+
   function repoContextMenu(repo: RecentRepo, point: { x: number; y: number }) {
     const current = repo.path === opened?.summary.path;
     const entries: ContextMenuEntry[] = [
@@ -2358,6 +2419,7 @@
                   onSnapshot={mergeSnapshot}
                   onNotice={notice}
                   onFileNav={(nav) => (historyNav = nav)}
+                  {branchGroups}
                   {paneHead}
                   {paneResizer}
                 />
@@ -2430,6 +2492,7 @@
     onFailure={handleMutationError}
     onNotice={notice}
     onOpenChanges={openConflict}
+    onFileContextMenu={stashFileMenu}
   />
 {:else if opened && taskModal === "merge"}
   <MergeModal
@@ -2438,6 +2501,7 @@
     initialSource={mergeSource}
     initialTarget={mergeTarget}
     initialMode={mergeMode}
+    {branchGroups}
     disabled={writeLocked}
     {nextId}
     onClose={closeTask}

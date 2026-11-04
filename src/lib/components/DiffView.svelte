@@ -4,7 +4,7 @@
   import { trackCodeScroll } from "../codeScroll.svelte";
   import { codeContentSize, codeRuler, rulerPadding, scrollByRows, visibleRange } from "../layout";
   import type { DiffHunk, DiffResponse, FileSelection } from "../types";
-  import { BUSY_REASON, splitPath, type FileNavState } from "../ui";
+  import { BUSY_REASON, binarySizeText, sizeDelta, splitPath, type FileNavState } from "../ui";
   import { buildDiffDocuments, codeOf, signOf } from "../syntax/diffSyntax";
   import { createHighlight } from "../syntax/highlight.svelte";
   import { effectiveLanguage } from "../syntax/prefs.svelte";
@@ -389,7 +389,7 @@
         {#if showStats && currentDiff}
           <LineCounts
             stat={currentDiff.binary
-              ? { additions: null, deletions: null }
+              ? { additions: null, deletions: null, oldSize: currentDiff.oldSize, newSize: currentDiff.newSize }
               : { additions: currentDiff.additions, deletions: currentDiff.deletions }}
           />
         {/if}
@@ -450,9 +450,11 @@
       <p>{selection.path}</p>
     </div>
   {:else if currentDiff?.binary}
+    {@const size = binarySizeText(currentDiff.oldSize, currentDiff.newSize)}
     <div class="empty" role="status">
       <span class="empty-icon"><Icon name="file" size={24} /></span>
       <strong>二进制文件有变动</strong>
+      {#if size}<p class="binary-size">{size.text}{#if currentDiff.oldSize != null && currentDiff.newSize != null}<span class="binary-delta">{sizeDelta(currentDiff.oldSize, currentDiff.newSize)}</span>{/if}</p>{/if}
       <p>{selection.path}</p>
     </div>
   {:else if metaOnly}

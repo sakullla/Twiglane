@@ -222,6 +222,76 @@ describe("文件右键菜单", () => {
   });
 });
 
+describe("临时保存清单的右键菜单", () => {
+  function stashFile(name: string): HTMLElement {
+    const found = [...document.querySelectorAll<HTMLElement>(".stash-file")].find((element) => element.textContent?.includes(name));
+    if (!found) throw new Error(`没有 ${name} 这一行`);
+    return found;
+  }
+
+  async function openStash() {
+    mocks.stashState.mockResolvedValue({
+      generation: 4,
+      preview: {
+        trackedCount: 2,
+        untrackedCount: 1,
+        ignoredCount: 0,
+        trackedPaths: ["src/App.svelte", "src/app.css"],
+        untrackedPaths: ["notes/todo.log"],
+        ignoredPaths: [],
+        includeUntracked: false,
+        canSave: true,
+        summary: "将保存已跟踪的暂存和未暂存改动 2 个。未跟踪文件 1 个这次不保存。",
+      },
+      records: [],
+      snapshot,
+    });
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: "临时保存" }));
+    await screen.findByRole("dialog", { name: "临时保存" });
+    await waitFor(() => expect(document.querySelector(".stash-file")).toBeTruthy());
+  }
+
+  it("已跟踪文件可以查看改动、复制和定位，不提供忽略", async () => {
+    await openStash();
+    const menu = await rightClick(stashFile("App.svelte"));
+    const labels = within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim());
+    for (const label of ["查看改动", "查看文件历史", "用默认程序打开", "复制相对路径", "复制完整路径", "复制文件名"]) {
+      expect(labels, label).toContain(label);
+    }
+    expect(labels.some((text) => text?.startsWith("加入"))).toBe(false);
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "复制相对路径" }));
+    expect(writeText).toHaveBeenLastCalledWith("src/App.svelte");
+    // 查看改动：关掉临时保存，回到改动视图并选中这个文件。
+    await fireEvent.click(within(await rightClick(stashFile("App.svelte"))).getByRole("menuitem", { name: "查看改动" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "临时保存" })).toBeNull());
+    await waitFor(() => expect(row("src/App.svelte").getAttribute("aria-selected")).toBe("true"));
+  });
+
+  it("未跟踪文件可以直接加入 .gitignore，写入后范围随状态刷新", async () => {
+    await openStash();
+    await fireEvent.click(screen.getByRole("tab", { name: /未跟踪文件/ }));
+    const menu = await rightClick(stashFile("todo.log"));
+    expect(within(menu).getByRole("menuitem", { name: "加入 .git/info/exclude" })).toBeTruthy();
+    const before = mocks.stashState.mock.calls.length;
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "加入 .gitignore" }));
+    await waitFor(() => expect(mocks.ignorePath).toHaveBeenCalledWith(repoPath, "/notes/todo.log", false, 4, expect.any(Number)));
+    // 状态刷新后临时保存按新 generation 重读范围。
+    await waitFor(() => expect(mocks.stashState.mock.calls.length).toBeGreaterThan(before));
+    expect(mocks.stashState).toHaveBeenLastCalledWith(repoPath, false, 5, expect.any(Number));
+  });
+
+  it("键盘：清单聚焦后 ↓ 移动，Shift+F10 打开当前行的菜单", async () => {
+    await openStash();
+    const list = screen.getByRole("list", { name: "保存范围" });
+    list.focus();
+    await fireEvent.keyDown(list, { key: "ArrowDown" });
+    await fireEvent.keyDown(list, { key: "F10", shiftKey: true });
+    const menu = screen.getByRole("menu");
+    expect(menu.getAttribute("aria-label")).toBe("src/app.css 的操作");
+  });
+});
+
 describe("多选文件的右键菜单", () => {
   const manyFiles: FileChange[] = [
     change("src/App.svelte", "none", "modified"),

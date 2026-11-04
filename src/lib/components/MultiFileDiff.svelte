@@ -322,7 +322,7 @@
   function titleStat(fromRow: LineStat | null | undefined, loaded: DiffResponse | null): LineStat | null {
     if (fromRow) return fromRow;
     if (!loaded) return null;
-    if (loaded.binary) return { additions: null, deletions: null };
+    if (loaded.binary) return { additions: null, deletions: null, oldSize: loaded.oldSize, newSize: loaded.newSize };
     return { additions: loaded.additions, deletions: loaded.deletions };
   }
 

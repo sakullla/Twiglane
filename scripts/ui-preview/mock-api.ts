@@ -58,7 +58,7 @@ let files: FileChange[] = [
   file("src/lib/legacy/old-panel.ts", "none", "deleted"),
   file("README.md", "modified", "none"),
   file("docs/guide/getting-started.md", "renamed", "none", { originalPath: "docs/start.md" }),
-  file("public/logo.png", "none", "modified"),
+  file("public/logo.png", "none", "modified", { unstagedLines: { additions: null, deletions: null, oldSize: 18_432, newSize: 21_870 } }),
   file("src-tauri/src/repo.rs", "none", "modified"),
   file("scripts/config.py", "none", "modified"),
   file("docs/fixtures/rows.txt", "none", "modified"),
@@ -159,7 +159,7 @@ function opened(path: string): OpenedRepository {
 
 function diffFor(path: string, staged: boolean): DiffResponse {
   if (path.endsWith(".png")) {
-    return { generation, path, staged, binary: true, text: null, summary: "二进制文件有变化。", additions: 0, deletions: 0, complete: true, truncated: false, snapshot: "s", hunks: [], lines: [], offset: 0, totalLines: 0 };
+    return { generation, path, staged, binary: true, text: null, summary: "二进制文件有变化：18 KB → 21 KB。", additions: 0, deletions: 0, complete: true, truncated: false, snapshot: "s", hunks: [], lines: [], offset: 0, totalLines: 0, oldSize: 18_432, newSize: 21_870 };
   }
   // 有多语言样本的文件用真实感代码，便于看语法高亮与行内改动标记；其余沿用 90 行的长夹具。
   const sample = sampleFor(path);
@@ -287,13 +287,17 @@ let stashRecords = [
 ];
 
 function stashData(include: boolean) {
-  const trackedPaths = files.filter((item) => !item.untracked && !item.unmerged).map((item) => item.path);
+  const many = previewParams.get("stash") === "many";
+  const allTracked = many
+    ? Array.from({ length: 3200 }, (_, index) => `src/generated/feature-${index % 40}/module-${index}.ts`)
+    : files.filter((item) => !item.untracked && !item.unmerged).map((item) => item.path);
+  const trackedPaths = allTracked.slice(0, 200);
   const untrackedPaths = files.filter((item) => item.untracked).map((item) => item.path);
   const canSave = trackedPaths.length > 0 || (include && untrackedPaths.length > 0);
   return {
     generation,
     preview: {
-      trackedCount: trackedPaths.length,
+      trackedCount: allTracked.length,
       untrackedCount: untrackedPaths.length,
       ignoredCount: 1,
       trackedPaths,
@@ -301,7 +305,7 @@ function stashData(include: boolean) {
       ignoredPaths: ["debug.log"],
       includeUntracked: include,
       canSave,
-      summary: `将保存已跟踪的暂存和未暂存改动 ${trackedPaths.length} 个。未跟踪文件 ${untrackedPaths.length} 个${include ? "会一并保存" : "这次不保存"}。忽略文件 1 个不会保存。`,
+      summary: `将保存已跟踪的暂存和未暂存改动 ${allTracked.length} 个。未跟踪文件 ${untrackedPaths.length} 个${include ? "会一并保存" : "这次不保存"}。忽略文件 1 个不会保存。`,
     },
     records: stashRecords.map((item) => ({ ...item })),
     snapshot: snapshot(),
@@ -561,11 +565,11 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       root: false,
       merge: commit.parents.length > 1,
       selectedParent: commit.parents[0],
-      files: previewParams.get("files") === "many" ? Array.from({ length: 24 }, (_, index) => ({ path: `src/generated/file-${index}.ts`, originalPath: null, status: "modified" })) : [
-        { path: "src/App.svelte", originalPath: null, status: "modified" },
-        { path: "src/app.css", originalPath: null, status: "modified" },
-        { path: "src/lib/components/Icon.svelte", originalPath: null, status: "added" },
-        { path: "src/lib/old.ts", originalPath: null, status: "deleted" },
+      files: previewParams.get("files") === "many" ? Array.from({ length: 24 }, (_, index) => ({ path: `src/generated/file-${index}.ts`, originalPath: null, status: "modified", additions: index + 1, deletions: index % 3 })) : [
+        { path: "src/App.svelte", originalPath: null, status: "modified", additions: 9, deletions: 7 },
+        { path: "src/app.css", originalPath: null, status: "modified", additions: 12, deletions: 4 },
+        { path: "src/lib/components/Icon.svelte", originalPath: null, status: "added", additions: 29, deletions: 0 },
+        { path: "src/lib/old.ts", originalPath: null, status: "deleted", additions: 0, deletions: 41 },
       ],
     });
   },
@@ -655,8 +659,8 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     if (path.endsWith(".png")) {
       return ok({
         generation, path, kind: "binary", editable: false,
-        ours: { present: true, binary: true, truncated: false, text: null, summary: "本地版本是二进制，不显示伪文本。" },
-        theirs: { present: true, binary: true, truncated: false, text: null, summary: "另一分支版本是二进制，不显示伪文本。" },
+        ours: { present: true, binary: true, truncated: false, text: null, summary: "本地版本是二进制，245 KB，不显示伪文本。", size: 250_880 },
+        theirs: { present: true, binary: true, truncated: false, text: null, summary: "另一分支版本是二进制，312 KB，不显示伪文本。", size: 319_488 },
         result: { present: true, binary: true, truncated: false, text: null, summary: "当前合并结果是二进制。" },
         note: "这是二进制冲突，不能按文本合并。请明确保留本地版本或另一分支版本。",
       });
@@ -715,6 +719,8 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     localStorage.setItem("preview-theme", next);
     return ok(undefined, 0);
   },
+  setPullIntegration: () => ok(undefined, 0),
+  setBranchGroups: () => ok(undefined, 0),
   setPanelWidths: (widths: unknown) => ok(widths, 0),
   measureProbe: () => ok({ enabled: false, elapsedMs: 0, script: null }, 0),
   measureSample: () => ok(undefined, 0),

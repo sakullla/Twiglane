@@ -353,6 +353,7 @@ async fn decorate_status(backend: &Backend, root: &Path, snapshot: &mut StatusSn
     };
     assign_worktree_numstat(&mut snapshot.files, &staged, &unstaged);
     fill_untracked_lines(root, &mut snapshot.files);
+    crate::git::sizes::decorate_status_sizes(backend, &git.path, root, snapshot.generation, &mut snapshot.files).await;
 }
 
 /// 写锁内补行数。走 guard.run，避免再进调度器造成死锁。
@@ -377,6 +378,7 @@ pub(crate) async fn decorate_guard_status(
     };
     assign_worktree_numstat(&mut snapshot.files, &staged, &unstaged);
     fill_untracked_lines(root, &mut snapshot.files);
+    crate::git::sizes::decorate_status_sizes_guard(guard, git, root, &mut snapshot.files).await;
 }
 
 async fn read_numstat_map(
@@ -456,6 +458,8 @@ fn untracked_line_stat(root: &Path, path: &str) -> Option<LineStat> {
         return Some(LineStat {
             additions: None,
             deletions: None,
+            old_size: None,
+            new_size: None,
         });
     }
     let mut newlines = probe[..filled]
@@ -486,6 +490,8 @@ fn untracked_line_stat(root: &Path, path: &str) -> Option<LineStat> {
     Some(LineStat {
         additions: Some(additions),
         deletions: Some(0),
+        old_size: None,
+        new_size: None,
     })
 }
 

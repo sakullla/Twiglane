@@ -119,6 +119,24 @@ pub async fn load_diff_with_context(
         internal_request_id(),
     )
     .await?;
+    // 二进制没有行数，改为给出改动前后的大小：已暂存看 HEAD 与索引，未暂存看索引与工作区文件。
+    let sizes = if diff_is_binary(&parsed, counts) {
+        use crate::git::sizes::{head_name, index_name, object_sizes, worktree_size};
+        let old_path = original.filter(|value| !value.is_empty()).unwrap_or(relative);
+        if staged {
+            let names = [head_name(old_path), index_name(relative)];
+            let found = object_sizes(backend, &git.path, &root, scheduled.generation, &names).await;
+            (found.get(&names[0]).copied(), found.get(&names[1]).copied())
+        } else if untracked {
+            (None, worktree_size(&root, relative))
+        } else {
+            let names = [index_name(relative)];
+            let found = object_sizes(backend, &git.path, &root, scheduled.generation, &names).await;
+            (found.get(&names[0]).copied(), worktree_size(&root, relative))
+        }
+    } else {
+        (None, None)
+    };
     response_from_diff(
         scheduled.generation,
         relative,
@@ -126,6 +144,7 @@ pub async fn load_diff_with_context(
         &parsed,
         raw,
         counts,
+        sizes,
         offset,
         limit,
     )
@@ -490,6 +509,11 @@ pub async fn commit_index(
     })
 }
 
+/// 差异是否按二进制处理：解析出二进制、无法解码，或 numstat 两侧都是 `-`。
+pub(crate) fn diff_is_binary(parsed: &crate::git::patch::ParsedDiff, counts: Option<(Option<u64>, Option<u64>)>) -> bool {
+    parsed.binary || parsed.undecodable || counts == Some((None, None))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn response_from_diff(
     generation: u64,
@@ -498,10 +522,11 @@ pub(crate) fn response_from_diff(
     parsed: &crate::git::patch::ParsedDiff,
     raw: &[u8],
     counts: Option<(Option<u64>, Option<u64>)>,
+    sizes: (Option<u64>, Option<u64>),
     offset: u32,
     limit: u32,
 ) -> Result<DiffResponse, AppError> {
-    let binary = parsed.binary || parsed.undecodable || counts == Some((None, None));
+    let binary = diff_is_binary(parsed, counts);
     let additions = counts
         .and_then(|(added, _)| added)
         .unwrap_or(parsed.additions);
@@ -513,7 +538,7 @@ pub(crate) fn response_from_diff(
         let summary = if parsed.undecodable {
             "差异无法按文本解码，没有文本预览。".to_string()
         } else {
-            "二进制文件有变化，但不能按文本预览。".to_string()
+            crate::git::sizes::binary_summary(sizes.0, sizes.1)
         };
         return Ok(DiffResponse {
             generation,
@@ -531,6 +556,8 @@ pub(crate) fn response_from_diff(
             lines: Vec::new(),
             offset: 0,
             total_lines: 0,
+            old_size: sizes.0,
+            new_size: sizes.1,
         });
     }
     let (lines, hunks, total_lines) = view_lines(parsed, offset, limit);
@@ -566,6 +593,8 @@ pub(crate) fn response_from_diff(
         lines,
         offset: offset.min(total_lines),
         total_lines,
+        old_size: None,
+        new_size: None,
     })
 }
 
@@ -1353,6 +1382,45 @@ mod tests {
         assert!(nl_blob.ends_with(b"n16"));
         assert!(!nl_blob.ends_with(b"\n"));
         assert!(fs::read(repo.join("n.txt")).unwrap().ends_with(b"N16"));
+    }
+
+    #[tokio::test]
+    async fn binary_changes_report_sizes_instead_of_line_counts() {
+        let fixture = crate::test_support::git_fixture("binary-sizes");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("logo.bin"), [0_u8; 100]).unwrap();
+        git(&repo, &["add", "--", "logo.bin"]);
+        git(&repo, &["commit", "-m", "init"]);
+        // 已暂存：100 → 150；随后工作区又改成 400 字节。另有一个新增并暂存的二进制。
+        fs::write(repo.join("logo.bin"), [0_u8; 150]).unwrap();
+        git(&repo, &["add", "--", "logo.bin"]);
+        fs::write(repo.join("logo.bin"), [0_u8; 400]).unwrap();
+        fs::write(repo.join("new.bin"), [1_u8, 0, 2]).unwrap();
+        git(&repo, &["add", "--", "new.bin"]);
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let status = read_status(&backend, &repo, generation, 2).await.unwrap();
+        let logo = status.files.iter().find(|file| file.path == "logo.bin").unwrap();
+        let staged = logo.staged_lines.unwrap();
+        assert_eq!((staged.additions, staged.deletions), (None, None));
+        assert_eq!((staged.old_size, staged.new_size), (Some(100), Some(150)));
+        let unstaged = logo.unstaged_lines.unwrap();
+        assert_eq!((unstaged.old_size, unstaged.new_size), (Some(150), Some(400)));
+        let added = status.files.iter().find(|file| file.path == "new.bin").unwrap();
+        let added = added.staged_lines.unwrap();
+        assert_eq!((added.old_size, added.new_size), (None, Some(3)));
+
+        let staged_diff = load_diff(&backend, &path, "logo.bin", None, true, status.generation, 3, 0, 0)
+            .await
+            .unwrap();
+        assert!(staged_diff.binary);
+        assert_eq!((staged_diff.old_size, staged_diff.new_size), (Some(100), Some(150)));
+        assert_eq!(staged_diff.summary, "二进制文件有变化：100 B → 150 B。");
+        let worktree_diff = load_diff(&backend, &path, "logo.bin", None, false, status.generation, 4, 0, 0)
+            .await
+            .unwrap();
+        assert_eq!((worktree_diff.old_size, worktree_diff.new_size), (Some(150), Some(400)));
     }
 
     #[tokio::test]

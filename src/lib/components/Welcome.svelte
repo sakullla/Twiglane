@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { MODIFIER_LABEL } from "../brand";
   import { filterRecent, repeatedNames } from "../recent";
   import type { RecentRepo } from "../types";
   import { hueOf, repoBadgeLetters } from "../ui";
@@ -149,5 +150,11 @@
         </div>
       {/if}
     </section>
+
+    <footer class="welcome-foot" aria-label="使用提示">
+      <span><kbd>{MODIFIER_LABEL} K</kbd>命令面板</span>
+      <span><Icon name="folder-open" size={13} />把仓库文件夹拖进窗口即可打开</span>
+      <span>右键最近仓库可复制路径或移出列表</span>
+    </footer>
   </div>
 </div>

@@ -55,6 +55,15 @@ export function bucketBranches(branches: BranchRecord[]): BranchBuckets {
   return { top, groups };
 }
 
+/** 只有名字的列表（原生下拉框）同样按第一个 / 分组，用于 <optgroup>。 */
+export function bucketNames(names: string[]): { top: string[]; groups: { prefix: string; names: string[] }[] } {
+  const buckets = bucketBranches(names.map((name) => ({ name }) as BranchRecord));
+  return {
+    top: buckets.top.map((branch) => branch.name),
+    groups: buckets.groups.map((group) => ({ prefix: group.prefix, names: group.branches.map((branch) => branch.name) })),
+  };
+}
+
 /**
  * 手动记录优先。没有记录时，只有包含当前分支的组展开。
  * key 要带上本地/远程，避免同名的另一侧被一起打开。

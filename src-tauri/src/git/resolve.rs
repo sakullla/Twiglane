@@ -937,6 +937,8 @@ fn view_from(
 }
 
 fn side_from(side: &SideBytes, label: &str) -> ConflictSide {
+    // 截断的读取只知道「超过上限」，不冒充真实大小。
+    let size = (!side.truncated).then_some(side.bytes.len() as u64);
     if !side.present {
         return ConflictSide {
             present: false,
@@ -944,6 +946,7 @@ fn side_from(side: &SideBytes, label: &str) -> ConflictSide {
             truncated: false,
             text: None,
             summary: format!("{label}不存在。"),
+            size: None,
         };
     }
     if side.bytes.contains(&0) || std::str::from_utf8(&side.bytes).is_err() {
@@ -952,7 +955,11 @@ fn side_from(side: &SideBytes, label: &str) -> ConflictSide {
             binary: true,
             truncated: side.truncated,
             text: None,
-            summary: format!("{label}是二进制，不显示伪文本。"),
+            summary: match size {
+                Some(bytes) => format!("{label}是二进制，{}，不显示伪文本。", crate::git::sizes::format_size(bytes)),
+                None => format!("{label}是二进制，不显示伪文本。"),
+            },
+            size,
         };
     }
     if side.truncated {
@@ -962,6 +969,7 @@ fn side_from(side: &SideBytes, label: &str) -> ConflictSide {
             truncated: true,
             text: None,
             summary: format!("{label}超过预览上限，未当作可编辑全文。"),
+            size,
         };
     }
     let text = String::from_utf8(side.bytes.clone()).unwrap_or_default();
@@ -971,6 +979,7 @@ fn side_from(side: &SideBytes, label: &str) -> ConflictSide {
         truncated: false,
         summary: format!("{label}，{} 个字符。", text.chars().count()),
         text: Some(text),
+        size,
     }
 }
 

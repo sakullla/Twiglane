@@ -106,6 +106,39 @@ async fn branches_files_and_merge_at_scale() {
     eprintln!("5002 branches: {:?}", started.elapsed());
 
     let oid = fixture.git(&["rev-parse", "topic"], None);
+    let git = ops::require_git(&fixture.backend).await.unwrap();
+    let mut names = vec![format!("{oid}:large.txt")];
+    names.extend((1..20_000).map(|i| format!("{oid}:files/file-{i}.txt")));
+    names.push(names[0].clone());
+    let batches = fixture.count("cat-file");
+    let tree_scans = fixture.count("ls-tree");
+    let started = Instant::now();
+    let sizes = crate::git::sizes::object_sizes(
+        &fixture.backend,
+        &git.path,
+        &fixture.root,
+        fixture.generation(),
+        &names,
+    )
+    .await;
+    assert_eq!(sizes.len(), 20_000);
+    assert_eq!(sizes[&names[1]], 2);
+    assert_eq!(
+        sizes[&names[0]],
+        (0..5_000)
+            .map(|i| format!("line {i}\n").len() as u64)
+            .sum::<u64>()
+    );
+    assert_eq!(
+        fixture.count("ls-tree"),
+        tree_scans + 1,
+        "large same-tree requests traverse the tree once"
+    );
+    assert_eq!(fixture.count("cat-file"), batches);
+    eprintln!(
+        "20000 object sizes (one tree scan): {:?}",
+        started.elapsed()
+    );
     let started = Instant::now();
     let detail = history::commit_detail(
         &fixture.backend,

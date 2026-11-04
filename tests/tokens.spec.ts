@@ -265,14 +265,15 @@ describe("石墨靛蓝配色（R1）", () => {
   it("目标色值按需求落地，且默认文档主题是深色", () => {
     const targets: Record<"dark" | "light", Record<string, string>> = {
       dark: {
-        "--bg": "#111214",
-        "--surface": "#18191c",
-        "--border": "#26282d",
-        "--fg": "#e8e9ec",
-        "--fg-muted": "#9a9da6",
-        "--accent": "#7c83f7",
+        "--bg": "#0d0e11",
+        "--surface": "#16171b",
+        "--surface-2": "#111215",
+        "--border": "#23252b",
+        "--fg": "#ebecf0",
+        "--fg-muted": "#a2a5af",
+        "--accent": "#7e85fa",
       },
-      light: { "--bg": "#f7f7f8", "--surface": "#ffffff", "--accent": "#4f56e0" },
+      light: { "--bg": "#f4f4f6", "--surface": "#ffffff", "--surface-2": "#f7f7f9", "--accent": "#4f56e0" },
     };
     for (const [name, expected] of Object.entries(targets.dark)) expect(dark.get(name), `dark ${name}`).toBe(expected);
     for (const [name, expected] of Object.entries(targets.light)) expect(light.get(name), `light ${name}`).toBe(expected);
@@ -327,7 +328,6 @@ describe("石墨靛蓝配色（R1）", () => {
       ".callout.ok",
       ".merge-verdict.ok",
       ".merge-verdict.ok .merge-verdict-icon",
-      ".merge-stat.ok strong",
       ".merge-done-icon",
       ".mp-status.ok",
       ".merge-progress > span",
@@ -707,8 +707,6 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".diff-more": "差异面板底部横向分隔线",
   ".full-value": "详情弹窗的只读展示框（readonly textarea），只区分文本块；可编辑态 textarea.full-value.editable 用控件边界",
   ".multi-file": "多文件卡外框，卡内文件行自带交互反馈",
-  ".toolbar-group": "标题栏按钮组外框；组内 .tb-btn 自带 hover 背景",
-  ".view-heading-status": "视图标题右侧状态胶囊，静态展示",
   ".chip.ignore": "忽略标记 chip 的虚线描边，是状态标记而非可点击控件",
 
   // --- components.css：表格/列分隔线与分区线 ---
@@ -724,9 +722,7 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   // --- components.css：语义色混合的容器描边（不是控件边界） ---
 
   // --- layout.css ---
-  ".topbar": "标题栏底部横向分区线",
   ".infobar": "通知条底部横向分区线",
-  ".view-title-line .count": "视图标题计数胶囊描边，纯装饰数字标记",
   ".statusbar": "状态栏顶部横向分区线",
 };
 

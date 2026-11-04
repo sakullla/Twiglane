@@ -92,6 +92,8 @@
     headTarget?: HTMLElement | null;
     /** 提供时在底部操作条放一个「关闭」，与主操作同一行。 */
     onClose?: () => void;
+    /** 设置里的分支分组，传给合并方向的分支选择器。 */
+    branchGroups?: boolean;
   }
 
   let {
@@ -112,6 +114,7 @@
     embedded = false,
     headTarget = null,
     onClose,
+    branchGroups = true,
   }: Props = $props();
 
   interface Finished {
@@ -451,9 +454,15 @@
     preview = null;
   }
 
+  /**
+   * 实际执行的方式。快进不是让用户挑的选项，而是仓库状态的结论：目标上没有来源缺少的提交时
+   * 只能快进（合并或变基都没有意义），分叉时快进不可能，只在合并与变基里选。
+   */
+  let effectiveMode = $derived<MergeMode>(readyPreview?.fastForward ? "ff-only" : mode === "ff-only" ? "merge" : mode);
+
   function confirmStart() {
     if (!readyPreview?.canStart) return;
-    if (mode === "rebase") {
+    if (effectiveMode === "rebase") {
       if (target !== current) return;
       confirmingRebase = true;
       return;
@@ -464,10 +473,10 @@
   function beginIntegration() {
     const checked = readyPreview;
     if (!checked?.canStart) return;
-    if (mode === "rebase" && target !== current) return;
+    const chosenMode: MergeMode = checked.fastForward ? "ff-only" : mode === "rebase" ? "rebase" : "merge";
+    if (chosenMode === "rebase" && target !== current) return;
     confirmingRebase = false;
     const repo = opened.summary.path;
-    const chosenMode: MergeMode = mode === "rebase" ? "rebase" : mode === "ff-only" && checked.fastForward ? "ff-only" : "merge";
     const note = setupMessage.trim() || defaultMergeMessage(checked.source, checked.target, sourceRemote);
     void run(async () => {
       const started = await api
@@ -743,10 +752,10 @@
   }
 
   function primaryLabel(checked: MergePreview | null): string {
-    if (mode === "rebase") return "变基并改写当前分支";
+    if (effectiveMode === "rebase") return "变基并改写当前分支";
     if (!checked) return "合并";
     if (!checked.canStart) return "合并";
-    if (mode === "ff-only" && checked.fastForward) return `快进 ${checked.target}`;
+    if (checked.fastForward) return `快进 ${checked.target}`;
     if (checked.conflictCheck === "conflicts") return "开始合并并解决冲突";
     return `合并到 ${checked.target}`;
   }
@@ -985,6 +994,7 @@
           onRecheck={() => (previewNonce += 1)}
           {onOpenStash}
           {onOpenChanges}
+          {branchGroups}
         />
       {:else}
         <div class="empty" role="status"><span class="empty-icon"><span class="spinner"></span></span><strong>正在读取合并状态</strong></div>
@@ -1076,12 +1086,12 @@
           ? BUSY_REASON
           : !readyPreview?.canStart
             ? "先完成上方的合并检查"
-            : mode === "rebase" && target !== current
+            : effectiveMode === "rebase" && target !== current
               ? "变基只会改写当前分支"
-              : mode === "merge" && setupMessage.trim() === ""
+              : effectiveMode === "merge" && setupMessage.trim() === ""
                 ? "填写合并说明后才能开始"
                 : undefined}
-        disabled={blocked || !readyPreview?.canStart || (mode === "rebase" && target !== current) || (mode === "merge" && setupMessage.trim() === "")}
+        disabled={blocked || !readyPreview?.canStart || (effectiveMode === "rebase" && target !== current) || (effectiveMode === "merge" && setupMessage.trim() === "")}
         onclick={confirmStart}
       >
         {#if busy}<span class="spinner"></span>{:else}<Icon name="merge" size={14} />{/if}{primaryLabel(readyPreview)}

@@ -313,6 +313,31 @@ describe("历史面板", () => {
     expect(historyPage).not.toHaveBeenCalled();
   });
 
+  it("范围下拉框按设置分组：开启时按前缀收成 optgroup，关闭时平铺", async () => {
+    historyPage.mockResolvedValue({
+      generation: 3,
+      query: "",
+      offset: 0,
+      pageSize: 100,
+      hasMore: false,
+      state: "ok",
+      commits: [commit(0)],
+      scope: "current",
+      branches: ["main", "feature/a", "feature/b", "fix/x"],
+      head: "main",
+    });
+    const view = render(HistoryPanel, { props: { ...panelProps(), branchGroups: true } });
+    const select = () => screen.getByLabelText("历史范围") as HTMLSelectElement;
+    await waitFor(() => expect(select().querySelectorAll("optgroup")).toHaveLength(2));
+    expect([...select().querySelectorAll("optgroup")].map((group) => [group.label, [...group.querySelectorAll("option")].map((option) => option.value)])).toEqual([
+      ["feature/", ["feature/a", "feature/b"]],
+      ["fix/", ["fix/x"]],
+    ]);
+    await view.rerender({ ...panelProps(), branchGroups: false });
+    await waitFor(() => expect(select().querySelector("optgroup")).toBeNull());
+    expect([...select().options].map((option) => option.value)).toEqual(["current", "all", "main", "feature/a", "feature/b", "fix/x"]);
+  });
+
   it("筛选取交集，清除路径时保留作者，当前分支没有提交时写明范围", async () => {
     vi.useFakeTimers();
     try {
@@ -331,6 +356,12 @@ describe("历史面板", () => {
       render(HistoryPanel, { props: panelProps() });
       await vi.runAllTimersAsync();
       historyPage.mockClear();
+      // 作者、日期、路径收在「更多筛选」里，默认不占左栏首屏。
+      expect(screen.queryByLabelText("作者")).toBeNull();
+      const toggle = screen.getByRole("button", { name: "更多筛选" });
+      expect(toggle.getAttribute("aria-expanded")).toBe("false");
+      await fireEvent.click(toggle);
+      expect(toggle.getAttribute("aria-expanded")).toBe("true");
       await fireEvent.input(screen.getByLabelText("作者"), { target: { value: "Ada" } });
       await fireEvent.input(screen.getByLabelText("路径"), { target: { value: "docs" } });
       await fireEvent.input(screen.getByLabelText("搜索说明或提交哈希"), { target: { value: "needle" } });
@@ -345,6 +376,8 @@ describe("历史面板", () => {
         since,
         until,
       });
+      // 收起后生效条件仍在，按钮上计数提示还有几项在生效。
+      expect(screen.getByRole("button", { name: "更多筛选（已生效 4 项）" })).toBeTruthy();
       historyPage.mockClear();
       await fireEvent.click(screen.getByRole("button", { name: "清除路径" }));
       await vi.advanceTimersByTimeAsync(0);
@@ -520,6 +553,55 @@ describe("历史面板", () => {
     expect(screen.queryByText("已选择 2 个提交")).toBeNull();
   });
 
+  it("多选详情限制在途读取，取消选择后不再读取旧批次剩余提交", async () => {
+    const commits = Array.from({ length: 8 }, (_, index) => commit(index));
+    historyPage.mockResolvedValue({ generation: 3, commits, offset: 0, pageSize: 100, hasMore: false, state: "ok" });
+    const view = render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    await waitFor(() => expect(commitDetail).toHaveBeenCalledTimes(1));
+    const finish: Array<(value: unknown) => void> = [];
+    commitDetail.mockClear();
+    commitDetail.mockImplementation(() => new Promise((resolve) => finish.push(resolve)));
+    await fireEvent.click(screen.getByRole("option", { name: /commit-7/ }), { shiftKey: true });
+    await waitFor(() => expect(commitDetail).toHaveBeenCalledTimes(2));
+    // 隐藏面板也取消尚未开始的读取，不仅丢弃显示结果。
+    await view.rerender({ ...panelProps(), active: false });
+    for (const resolve of finish) resolve({ generation: 3, commit: commits[0], files: [], body: "", selectedParent: null });
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(commitDetail).toHaveBeenCalledTimes(2);
+    expect(commitFileDiff).not.toHaveBeenCalled();
+  });
+
+  it("多选差异切换文件后不继续旧文件的排队请求", async () => {
+    const commits = Array.from({ length: 6 }, (_, index) => commit(index));
+    historyPage.mockResolvedValue({ generation: 3, commits, offset: 0, pageSize: 100, hasMore: false, state: "ok" });
+    commitDetail.mockImplementation(async (_repo: string, oid: string) => ({
+      generation: 3, commit: commits.find((item) => item.oid === oid), body: "", root: false, merge: false, selectedParent: "parent",
+      files: ["a.txt", "b.txt"].map((path) => ({ path, originalPath: null, status: "modified" })),
+    }));
+    const view = render(HistoryPanel, { props: panelProps() });
+    await waitFor(() => expect(commitFileDiff).toHaveBeenCalledTimes(1));
+    const pending: Array<{ path: string; resolve: (value: DiffResponse) => void }> = [];
+    commitFileDiff.mockClear();
+    commitFileDiff.mockImplementation((_repo, _oid, _parent, path: string) => new Promise((resolve) => pending.push({ path, resolve })));
+    await fireEvent.click(screen.getByRole("option", { name: /commit-5/ }), { shiftKey: true });
+    await waitFor(() => expect(pending).toHaveLength(2));
+    expect(pending.map((item) => item.path)).toEqual(["a.txt", "a.txt"]);
+    await fireEvent.click(screen.getByRole("option", { name: /b\.txt/ }));
+    expect(pending).toHaveLength(2);
+    pending[0].resolve({ ...diff, path: "a.txt", lines: [{ ...diff.lines[0], text: "+obsolete selection" }] });
+    await waitFor(() => expect(pending).toHaveLength(3));
+    expect(pending[2].path).toBe("b.txt");
+    expect(screen.queryByText("obsolete selection")).toBeNull();
+    view.unmount();
+    pending[1].resolve(diff);
+    pending[2].resolve(diff);
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(pending).toHaveLength(3);
+  });
+
   it("提交中的文件行只有历史、复制路径和文件管理器", async () => {
     const only = commit(0);
     const onFailure = vi.fn();
@@ -612,10 +694,55 @@ describe("临时保存", () => {
     expect(await screen.findByText(/将保存已跟踪/)).toBeTruthy();
     expect(screen.getByText(/未跟踪文件 1 个这次不保存/)).toBeTruthy();
     expect(screen.getByText(/忽略文件 1 个不会保存/)).toBeTruthy();
+    // 文件少时清单默认展开，按类切换：已跟踪、未跟踪（不保存）、忽略。
+    expect(screen.getByRole("button", { name: /收起文件清单/ }).getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByText("将保存 file.txt")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("tab", { name: /未跟踪文件（不保存）/ }));
     expect(screen.getByText("不保存 new.txt")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("tab", { name: /忽略文件/ }));
     expect(screen.getByText("忽略不保存 ignored.log")).toBeTruthy();
     expect(stashState).toHaveBeenCalledWith("/repo", false, 3, 2);
+  });
+
+  it("几千个文件时只给数量，清单收起；展开后可筛选并说明只列出了一部分", async () => {
+    const trackedPaths = Array.from({ length: 200 }, (_, index) => `src/generated/module-${index}.ts`);
+    stashState.mockResolvedValue({
+      ...preview,
+      preview: {
+        ...preview.preview,
+        trackedCount: 3200,
+        untrackedCount: 0,
+        ignoredCount: 0,
+        trackedPaths,
+        untrackedPaths: [],
+        ignoredPaths: [],
+        summary: "将保存已跟踪的暂存和未暂存改动 3200 个。",
+      },
+    });
+    renderStash();
+    const toggle = await screen.findByRole("button", { name: /查看文件清单/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByText(/将保存已跟踪的暂存和未暂存改动 3200 个/)).toBeTruthy();
+    expect(document.querySelectorAll(".stash-file")).toHaveLength(0);
+    expect(screen.getByRole("button", { name: /临时保存 3200 个文件/ })).toBeTruthy();
+
+    await fireEvent.click(toggle);
+    expect(document.querySelectorAll(".stash-file")).toHaveLength(200);
+    expect(screen.getByText(/共 3200 个，只列出前 200 个/)).toBeTruthy();
+    await fireEvent.input(screen.getByLabelText("筛选保存范围里的文件"), { target: { value: "module-19" } });
+    expect([...document.querySelectorAll(".stash-file")].map((row) => row.getAttribute("title"))).toEqual([
+      "src/generated/module-19.ts",
+      "src/generated/module-190.ts",
+      "src/generated/module-191.ts",
+      "src/generated/module-192.ts",
+      "src/generated/module-193.ts",
+      "src/generated/module-194.ts",
+      "src/generated/module-195.ts",
+      "src/generated/module-196.ts",
+      "src/generated/module-197.ts",
+      "src/generated/module-198.ts",
+      "src/generated/module-199.ts",
+    ]);
   });
 
   it("取消删除不会调用接口，确认后按标识删除", async () => {

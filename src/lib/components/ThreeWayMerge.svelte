@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import { BUSY_REASON } from "../ui";
+  import { BUSY_REASON, formatBytes } from "../ui";
   import { applyEol, detectEol, normalizeEol } from "../conflict";
   import {
     computeMarks,
@@ -237,7 +237,7 @@
   <div class="three-way-head">
     <div class="three-way-title ours">
       <span class="dot"></span>
-      <div><strong>当前分支</strong><span>{currentLabel || "Current"}</span></div>
+      <div><strong>当前分支</strong><span>{currentLabel || "Current"}{#if view.ours.binary && view.ours.size != null} · {formatBytes(view.ours.size)}{/if}</span></div>
       {#if view.ours.present && view.kind !== "delete_modify"}
         <button
           type="button"
@@ -274,7 +274,7 @@
     </div>
     <div class="three-way-title theirs">
       <span class="dot"></span>
-      <div><strong>来源分支</strong><span>{incomingLabel || "Incoming"}</span></div>
+      <div><strong>来源分支</strong><span>{incomingLabel || "Incoming"}{#if view.theirs.binary && view.theirs.size != null} · {formatBytes(view.theirs.size)}{/if}</span></div>
       {#if view.theirs.present && view.kind !== "modify_delete"}
         <button
           type="button"

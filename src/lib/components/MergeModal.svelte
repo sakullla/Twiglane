@@ -20,6 +20,8 @@
     onOpenStash: () => void;
     onOpenChanges?: () => void;
     onOpenHistory?: () => void;
+    /** 设置里的分支分组，传给来源与目标两个分支选择器。 */
+    branchGroups?: boolean;
   }
 
   let {
@@ -38,6 +40,7 @@
     onOpenStash,
     onOpenChanges,
     onOpenHistory,
+    branchGroups = true,
   }: Props = $props();
 
   /** 路由与中止的落点：在标题行里排在标题之后，宽度不依赖标题长度。 */
@@ -73,6 +76,7 @@
     {onOpenStash}
     {onOpenChanges}
     {onOpenHistory}
+    {branchGroups}
     {onClose}
     embedded
     {headTarget}

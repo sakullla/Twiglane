@@ -267,16 +267,29 @@ pub async fn commit_file_diff(
     let raw = first_file_diff(&scheduled.output.stdout);
     let truncated = scheduled.output.stdout_truncated || raw.len() != scheduled.output.stdout.len();
     let parsed = parse_diff(raw, truncated)?;
-    let counts = commit_numstat(
-        backend,
-        &git.path,
-        &root,
-        parent_oid,
-        &oid,
-        &paths,
-        scheduled.generation,
-    )
-    .await?;
+    // 文件目录已按仓库、提交、父提交和 generation 缓存完整统计。
+    // 切换文件或继续读取差异时直接复用；目录统计失败时仍可单独补读。
+    let counts = if file.binary {
+        Some((None, None))
+    } else if let (Some(additions), Some(deletions)) = (file.additions, file.deletions) {
+        Some((Some(additions), Some(deletions)))
+    } else {
+        commit_numstat(
+            backend,
+            &git.path,
+            &root,
+            parent_oid,
+            &oid,
+            &paths,
+            scheduled.generation,
+        )
+        .await?
+    };
+    let sizes = if crate::git::changes::diff_is_binary(&parsed, counts) {
+        (file.old_size, file.new_size)
+    } else {
+        (None, None)
+    };
     response_from_diff(
         scheduled.generation,
         relative,
@@ -284,6 +297,7 @@ pub async fn commit_file_diff(
         &parsed,
         raw,
         counts,
+        sizes,
         offset,
         limit,
     )
@@ -1044,6 +1058,7 @@ async fn load_commit_files(
             generation = stats_generation;
         }
     }
+    apply_commit_sizes(backend, git, root, parent_oid, oid, generation, &mut parsed).await;
     let files = Arc::new(parsed);
     *backend
         .history_files
@@ -1057,6 +1072,34 @@ async fn load_commit_files(
         files: files.clone(),
     });
     Ok((files, generation))
+}
+
+/// 提交里的二进制文件补上前后大小：父提交（重命名看原路径）与这次提交里的版本。
+async fn apply_commit_sizes(
+    backend: &Backend,
+    git: &Path,
+    root: &Path,
+    parent: &str,
+    commit: &str,
+    generation: u64,
+    files: &mut [CommitFileChange],
+) {
+    use crate::git::sizes::{object_sizes, tree_name};
+    let mut names = Vec::new();
+    for file in files.iter().filter(|file| file.binary) {
+        names.push(tree_name(parent, file.original_path.as_deref().unwrap_or(&file.path)));
+        names.push(tree_name(commit, &file.path));
+    }
+    if names.is_empty() {
+        return;
+    }
+    let found = object_sizes(backend, git, root, generation, &names).await;
+    for file in files.iter_mut().filter(|file| file.binary) {
+        file.old_size = found
+            .get(&tree_name(parent, file.original_path.as_deref().unwrap_or(&file.path)))
+            .copied();
+        file.new_size = found.get(&tree_name(commit, &file.path)).copied();
+    }
 }
 
 async fn commit_numstat(
@@ -1863,6 +1906,8 @@ pub(crate) fn parse_name_status(bytes: &[u8]) -> Result<Vec<CommitFileChange>, A
                 additions: None,
                 deletions: None,
                 binary: false,
+                old_size: None,
+                new_size: None,
             });
             index += 3;
         } else {
@@ -1876,6 +1921,8 @@ pub(crate) fn parse_name_status(bytes: &[u8]) -> Result<Vec<CommitFileChange>, A
                 additions: None,
                 deletions: None,
                 binary: false,
+                old_size: None,
+                new_size: None,
             });
             index += 2;
         }
@@ -2307,6 +2354,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(first.0[0].path, second.0[0].path);
+        for request_id in [301, 302] {
+            let diff = commit_file_diff(
+                &backend,
+                &repo_key(&repo),
+                &oid,
+                Some(&base),
+                "file.txt",
+                gen,
+                request_id,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+            assert_eq!(diff.additions, 1);
+            assert_eq!(diff.deletions, 1);
+        }
+        assert_eq!(
+            fs::read_to_string(&trace)
+                .unwrap()
+                .lines()
+                .filter(|line| line.contains("built-in: git diff --numstat "))
+                .count(),
+            1,
+            "file previews reuse the directory's complete line counts"
+        );
         assert_eq!(
             fs::read_to_string(&trace)
                 .unwrap()

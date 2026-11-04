@@ -3,7 +3,8 @@
   import { normalizeError } from "../errors";
   import { formatAuthoredAt, shortOid, stashPathBadge } from "../history";
   import type { OpenedRepository, StashApplyResult, StashRecord, StashState, StatusSnapshot } from "../types";
-  import { BUSY_REASON, relativeTime } from "../ui";
+  import { BUSY_REASON, relativeTime, splitPath } from "../ui";
+  import { isContextKey } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
 
@@ -18,6 +19,8 @@
     onOpenChanges: (path: string) => void;
     /** 作为任务 modal 的内容时不再自带整页面板外框与滚动容器。 */
     embedded?: boolean;
+    /** 保存范围里的文件右键（或菜单键 / Shift+F10）。 */
+    onFileContextMenu?: (path: string, kind: "tracked" | "untracked" | "ignored", point: { x: number; y: number }) => void;
   }
 
   let {
@@ -30,6 +33,7 @@
     onNotice,
     onOpenChanges,
     embedded = false,
+    onFileContextMenu,
   }: Props = $props();
 
   let includeUntracked = $state(false);
@@ -41,6 +45,70 @@
   let confirmRecord = $state<StashRecord | null>(null);
 
   let preview = $derived(stash?.preview ?? null);
+
+  type ScopeKind = "tracked" | "untracked" | "ignored";
+  /**
+   * 保存范围按三类分开列：已跟踪（一定保存）、未跟踪（看开关）、忽略（从不保存）。
+   * 几千个文件时不能把路径全铺成标签：默认只给数量，文件清单收起，展开后按类切换、可筛选，
+   * 列表在固定高度里滚动。后端每类最多给 200 个路径，超出时就地说明列出了多少。
+   */
+  let scopes = $derived.by(() => {
+    if (!preview) return [];
+    const list: { id: ScopeKind; label: string; tone: string; count: number; paths: string[] }[] = [
+      { id: "tracked", label: "已跟踪改动", tone: "save", count: preview.trackedCount, paths: preview.trackedPaths },
+      {
+        id: "untracked",
+        label: includeUntracked ? "未跟踪文件" : "未跟踪文件（不保存）",
+        tone: includeUntracked ? "save" : "skip",
+        count: preview.untrackedCount,
+        paths: preview.untrackedPaths,
+      },
+      { id: "ignored", label: "忽略文件（不保存）", tone: "ignore", count: preview.ignoredCount, paths: preview.ignoredPaths },
+    ];
+    return list.filter((scope) => scope.count > 0);
+  });
+  let totalPaths = $derived(scopes.reduce((sum, scope) => sum + scope.count, 0));
+  /** 文件清单展开状态：没手动切换时，文件少（不超过 8 个）才默认展开。 */
+  let filesOpenChoice = $state<boolean | null>(null);
+  let filesOpen = $derived(filesOpenChoice ?? totalPaths <= 8);
+  let scopeChoice = $state<ScopeKind>("tracked");
+  let activeScope = $derived(scopes.find((scope) => scope.id === scopeChoice) ?? scopes[0] ?? null);
+  let fileQuery = $state("");
+  /** 主按钮写明这次会收起多少个文件：几千个时一眼就知道不是只保存了列出来的那些。 */
+  let saveLabel = $derived(
+    preview?.canSave ? `临时保存 ${preview.trackedCount + (includeUntracked ? preview.untrackedCount : 0)} 个文件` : "临时保存",
+  );
+  /** 键盘游标：清单是一个可聚焦的列表，↑/↓ 移动，菜单键或 Shift+F10 打开这一行的操作。 */
+  let activeFile = $state(0);
+  let fileListEl = $state<HTMLUListElement | null>(null);
+
+  function fileMenu(path: string, point: { x: number; y: number }) {
+    if (!activeScope || !onFileContextMenu) return;
+    onFileContextMenu(path, activeScope.id, point);
+  }
+
+  function onFileKey(event: KeyboardEvent) {
+    if (shownPaths.length === 0) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      activeFile = Math.min(shownPaths.length - 1, Math.max(0, activeFile + step));
+      fileListEl?.querySelector<HTMLElement>(`[data-index="${activeFile}"]`)?.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    if (isContextKey(event)) {
+      event.preventDefault();
+      const row = fileListEl?.querySelector<HTMLElement>(`[data-index="${activeFile}"]`);
+      const rect = row?.getBoundingClientRect();
+      fileMenu(shownPaths[activeFile], rect ? { x: rect.left + 24, y: rect.bottom - 4 } : { x: 160, y: 160 });
+    }
+  }
+
+  let shownPaths = $derived.by(() => {
+    if (!activeScope) return [];
+    const needle = fileQuery.trim().toLowerCase();
+    return needle ? activeScope.paths.filter((path) => path.toLowerCase().includes(needle)) : activeScope.paths;
+  });
 
   $effect(() => {
     const repo = opened.summary.path;
@@ -188,11 +256,10 @@
 
 <section class={embedded ? "" : "span-main"} aria-label="临时保存" data-panel="stash">
   <div class="panel-scroll stash-body">
-    <div class="panel-inner">
-      <div class="card">
-        <div class="card-head">
-          <span class="ch-icon"><Icon name="archive" size={15} /></span>
-          <h2>新建临时保存</h2>
+    <div class="panel-inner stash-inner">
+      <section class="stash-section" aria-labelledby="stash-new-title">
+        <div class="stash-section-head">
+          <h2 id="stash-new-title">保存当前改动</h2>
           <span class="spacer"></span>
           <label class="switch">
             <input
@@ -205,26 +272,85 @@
             包含未跟踪文件
           </label>
         </div>
-        <div class="card-body">
-          <p>{preview?.summary ?? "正在确认将保存的范围。"}</p>
-          {#if preview}
-            <div class="path-chips" aria-label="保存范围">
-              {#each preview.trackedPaths as path (path)}
-                <span class="chip save" title={path}>{stashPathBadge("tracked", includeUntracked)} {path}</span>
-              {/each}
-              {#each preview.untrackedPaths as path (path)}
-                <span class={`chip ${includeUntracked ? "save" : "skip"}`} title={path}>{stashPathBadge("untracked", includeUntracked)} {path}</span>
-              {/each}
-              {#each preview.ignoredPaths as path (path)}
-                <span class="chip ignore" title={path}>{stashPathBadge("ignored", includeUntracked)} {path}</span>
-              {/each}
-            </div>
-            {#if preview.trackedCount > preview.trackedPaths.length || preview.untrackedCount > preview.untrackedPaths.length || preview.ignoredCount > preview.ignoredPaths.length}
-              <p class="hint">路径较多，这里只列出一部分。数量以上面的说明为准。</p>
+        <p class="stash-summary">{preview?.summary ?? "正在确认将保存的范围。"}</p>
+
+        {#if preview && scopes.length > 0}
+          <div class="stash-scope">
+            <button
+              type="button"
+              class="stash-scope-toggle"
+              aria-expanded={filesOpen}
+              aria-controls="stash-files"
+              onclick={() => (filesOpenChoice = !filesOpen)}
+            >
+              <Icon name="chevron-right" size={13} class={filesOpen ? "rot90" : ""} />
+              <span>{filesOpen ? "收起文件清单" : "查看文件清单"}</span>
+            </button>
+            {#if filesOpen && activeScope}
+              <div class="stash-files" id="stash-files">
+                <div class="stash-files-tools">
+                  {#if scopes.length > 1}
+                    <div class="segmented" role="tablist" aria-label="保存范围分类">
+                      {#each scopes as scope (scope.id)}
+                        <button type="button" role="tab" aria-selected={activeScope.id === scope.id} onclick={() => (scopeChoice = scope.id)}>
+                          {scope.label}<span class="count">{scope.count}</span>
+                        </button>
+                      {/each}
+                    </div>
+                  {/if}
+                  {#if activeScope.paths.length > 8}
+                    <div class="field sm stash-files-filter">
+                      <Icon name="search" size={13} />
+                      <input aria-label="筛选保存范围里的文件" placeholder="筛选文件" autocomplete="off" spellcheck="false" bind:value={fileQuery} />
+                      {#if fileQuery}
+                        <button type="button" class="field-clear" aria-label="清空筛选" onclick={() => (fileQuery = "")}><Icon name="x" size={12} /></button>
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
+                <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+                <ul
+                  class="stash-file-list"
+                  aria-label="保存范围"
+                  tabindex="0"
+                  bind:this={fileListEl}
+                  onkeydown={onFileKey}
+                  onfocus={() => (activeFile = Math.min(activeFile, Math.max(0, shownPaths.length - 1)))}
+                >
+                  {#each shownPaths as path, index (path)}
+                    {@const parts = splitPath(path)}
+                    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                    <li
+                      class="stash-file"
+                      class:active={index === activeFile}
+                      data-index={index}
+                      title={onFileContextMenu ? `${path}\n右键查看操作` : path}
+                      oncontextmenu={(event) => {
+                        if (!onFileContextMenu) return;
+                        event.preventDefault();
+                        activeFile = index;
+                        fileMenu(path, { x: event.clientX, y: event.clientY });
+                      }}
+                      onmousedown={() => (activeFile = index)}
+                    >
+                      <span class="sr-only">{stashPathBadge(activeScope.id, includeUntracked)} {path}</span>
+                      <span class="stash-file-name" aria-hidden="true">{parts.name}</span>
+                      {#if parts.dir}<span class="stash-file-dir" aria-hidden="true"><bdi>{parts.dir}</bdi></span>{/if}
+                    </li>
+                  {/each}
+                  {#if shownPaths.length === 0}
+                    <li class="stash-file-empty">没有匹配的文件{activeScope.count > activeScope.paths.length ? "（只在已列出的文件里筛选）" : ""}。</li>
+                  {/if}
+                </ul>
+                {#if activeScope.count > activeScope.paths.length}
+                  <p class="hint stash-files-more">共 {activeScope.count} 个，只列出前 {activeScope.paths.length} 个；数量以上面的说明为准，保存时全部处理。</p>
+                {/if}
+              </div>
             {/if}
-          {/if}
-        </div>
-        <div class="card-foot">
+          </div>
+        {/if}
+
+        <div class="stash-save-row">
           <input
             class="input"
             aria-label="临时保存说明"
@@ -239,10 +365,10 @@
           />
           <button type="button" class="btn btn-primary" title={disabled || busy ? BUSY_REASON : !preview?.canSave ? "没有可保存的改动" : undefined} disabled={disabled || busy || !preview?.canSave} onclick={save}>
             {#if busy}<span class="spinner"></span>{:else}<Icon name="archive" size={14} />{/if}
-            临时保存
+            {saveLabel}
           </button>
         </div>
-      </div>
+      </section>
 
       {#if errorText}
         <div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{errorText}</span></div>
@@ -264,36 +390,30 @@
         </div>
       {/if}
 
-      <div class="card">
-        <div class="card-head">
-          <span class="ch-icon info"><Icon name="layers" size={15} /></span>
-          <h2>已有记录</h2>
+      <section class="stash-section" aria-labelledby="stash-records-title">
+        <div class="stash-section-head">
+          <h2 id="stash-records-title">已有记录</h2>
           {#if stash}<span class="count">{stash.records.length}</span>{/if}
-          <span class="spacer"></span>
         </div>
         {#if stash && stash.records.length === 0}
-          <div class="empty compact" role="status">
-            <span class="empty-icon"><Icon name="archive" size={22} /></span>
-            <strong>还没有临时保存记录</strong>
-            <p>保存前会先说明已跟踪、未跟踪和忽略文件的范围。没有可保存的内容时不会创建记录。</p>
-          </div>
+          <p class="stash-records-empty">还没有临时保存记录。没有可保存的内容时不会创建记录。</p>
         {/if}
         <div class="stash-list">
           {#each stash?.records ?? [] as record (record.oid)}
             <div class="stash-record">
-              <span class="sr-icon"><Icon name="archive" size={15} /></span>
+              <span class="sr-icon"><Icon name="archive" size={14} /></span>
               <div class="sr-main">
                 <strong class:untitled={!record.message}>{record.message || "未填写说明"}</strong>
                 <span class="hint" title={`${record.oid}\n${formatAuthoredAt(record.committedAt)}`}>
                   <span class="mono">{shortOid(record.oid)}</span> · {relativeTime(record.committedAt)}
                 </span>
               </div>
-              <button type="button" class="btn btn-secondary btn-sm" title={disabled || busy ? BUSY_REASON : undefined} disabled={disabled || busy} onclick={() => restore(record.oid)}>恢复</button>
+              <button type="button" class="btn btn-secondary btn-sm" title={disabled || busy ? BUSY_REASON : "恢复到工作区，原记录仍保留"} disabled={disabled || busy} onclick={() => restore(record.oid)}>恢复</button>
               <button type="button" class="btn btn-danger-soft btn-sm" title={disabled || busy ? BUSY_REASON : undefined} disabled={disabled || busy} onclick={() => askDelete(record)}>删除</button>
             </div>
           {/each}
         </div>
-      </div>
+      </section>
     </div>
   </div>
   {#if confirmRecord}

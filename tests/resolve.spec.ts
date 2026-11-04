@@ -352,7 +352,8 @@ describe("合并面板", () => {
     const { bump } = mountForPreview({}, tips);
     const start = await screen.findByRole("button", { name: "合并到 main" });
     expect(historyPage).not.toHaveBeenCalled();
-    expect(screen.getByText("个提交将带入 main").previousElementSibling?.textContent).toBe("2");
+    const incoming = () => screen.getByRole("tab", { name: /^提交/ }).querySelector(".count")?.textContent;
+    expect(incoming()).toBe("2");
 
     let finish: (value: unknown) => void = () => {};
     mergePreview.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
@@ -360,11 +361,11 @@ describe("合并面板", () => {
     await bump(5);
     await vi.waitFor(() => expect(mergePreview).toHaveBeenCalledTimes(2));
     expect(previewBusy()).toBe("true");
-    expect(screen.getByText("个提交将带入 main").previousElementSibling?.textContent).toBe("2");
+    expect(incoming()).toBe("2");
     expect(start.hasAttribute("disabled")).toBe(false);
 
     finish(previewOf({ generation: 5, incoming: 3 }));
-    await vi.waitFor(() => expect(screen.getByText("个提交将带入 main").previousElementSibling?.textContent).toBe("3"));
+    await vi.waitFor(() => expect(incoming()).toBe("3"));
     expect(previewBusy()).toBe("false");
   });
 
@@ -456,6 +457,13 @@ describe("合并面板", () => {
     renderPanel();
     expect(await screen.findByText("可以合并，没有冲突")).toBeTruthy();
     expect(screen.getByRole("list", { name: "将带入的提交" }).textContent).toContain("加上登录页");
+    // 分叉时只在「创建合并提交」与「变基」里选，快进不作为选项出现。
+    expect(screen.getByRole("radio", { name: /创建合并提交/ }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.queryByRole("radio", { name: /快进/ })).toBeNull();
+    // 合并说明默认只显示一行摘要，要改时再展开成输入框。
+    expect(screen.queryByRole("textbox", { name: "合并说明" })).toBeNull();
+    expect(document.querySelector(".merge-message-preview")?.textContent).toBe("Merge branch 'feature' into main");
+    await fireEvent.click(screen.getByRole("button", { name: "编辑合并说明" }));
     const input = screen.getByRole("textbox", { name: "合并说明" }) as HTMLInputElement;
     expect(input.value).toBe("Merge branch 'feature' into main");
     expect(startMerge).not.toHaveBeenCalled();
@@ -592,7 +600,11 @@ describe("合并面板", () => {
     // 从「把当前分支合并到此分支」进入：来源默认是当前分支，目标是所选分支。
     await vi.waitFor(() => expect(mergePreview).toHaveBeenCalledWith("/repo", "main", "feature", 4, 1));
     expect(await screen.findByText(/开始时会先切换到 feature/)).toBeTruthy();
-    await fireEvent.click(screen.getByRole("radio", { name: /快进/ }));
+    // 目标没有自己的新提交：只能快进，方式选择和合并说明都不出现，主按钮直接就是快进。
+    expect(await screen.findByText("可以快进，没有冲突")).toBeTruthy();
+    expect(screen.queryByRole("radiogroup", { name: "合并方式" })).toBeNull();
+    expect(screen.queryByRole("radio")).toBeNull();
+    expect(document.querySelector(".merge-message-preview")).toBeNull();
     await fireEvent.click(screen.getByRole("button", { name: "快进 feature" }));
     await vi.waitFor(() => expect(startMerge).toHaveBeenCalledWith("/repo", "main", "feature", "ff-only", 5, 1));
     expect(await screen.findByText("已把 feature 快进到 main")).toBeTruthy();

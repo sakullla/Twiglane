@@ -2,7 +2,7 @@
   import { BUSY_REASON } from "../ui";
   import { tick, untrack } from "svelte";
   import { api } from "../api";
-  import { bucketBranches, filterBranches, groupIsOpen, isDefaultBranch } from "../branches";
+  import { bucketBranches, bucketNames, filterBranches, groupIsOpen, isDefaultBranch } from "../branches";
   import { normalizeError } from "../errors";
   import type { BranchRecord, BranchState, OpenedRepository, StatusSnapshot } from "../types";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest, isContextKey, pointFor } from "./ContextMenu.svelte";
@@ -666,9 +666,31 @@
             <span>起点</span>
             <select class="select" aria-label="新分支的起点" bind:value={createBase} title={blocked ? BUSY_REASON : undefined} disabled={blocked}>
               <option value="">当前分支（{current.name ?? "游离 HEAD"}）</option>
-              {#each branches.filter((branch) => !branch.current) as branch (branch.name)}
-                <option value={branch.name}>{branch.remote ? `远程 ${branch.name}` : branch.name}</option>
-              {/each}
+              {#if branchGroups !== false}
+                <!-- 分组开启时和分支列表一样按第一个 / 收成组；原生下拉框只能分一层，正好对应。 -->
+                {@const local = bucketNames(branches.filter((branch) => !branch.current && !branch.remote).map((branch) => branch.name))}
+                {@const remote = bucketNames(branches.filter((branch) => !branch.current && branch.remote).map((branch) => branch.name))}
+                {#each local.top as name (name)}<option value={name}>{name}</option>{/each}
+                {#each local.groups as group (group.prefix)}
+                  <optgroup label={`${group.prefix}/`}>
+                    {#each group.names as name (name)}<option value={name}>{name}</option>{/each}
+                  </optgroup>
+                {/each}
+                {#if remote.top.length > 0}
+                  <optgroup label="远程">
+                    {#each remote.top as name (name)}<option value={name}>{name}</option>{/each}
+                  </optgroup>
+                {/if}
+                {#each remote.groups as group (group.prefix)}
+                  <optgroup label={`远程 ${group.prefix}/`}>
+                    {#each group.names as name (name)}<option value={name}>{name}</option>{/each}
+                  </optgroup>
+                {/each}
+              {:else}
+                {#each branches.filter((branch) => !branch.current) as branch (branch.name)}
+                  <option value={branch.name}>{branch.remote ? `远程 ${branch.name}` : branch.name}</option>
+                {/each}
+              {/if}
             </select>
           </label>
           <label class="switch branch-checkout">

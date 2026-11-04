@@ -7,7 +7,7 @@
     stroke?: number;
     class?: string;
   }
-  let { name, size = 16, stroke = 2, class: extra = "" }: Props = $props();
+  let { name, size = 16, stroke = 1.75, class: extra = "" }: Props = $props();
 </script>
 
 <svg

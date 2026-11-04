@@ -490,10 +490,14 @@ pub fn numstat_map(entries: Vec<NumstatEntry>) -> HashMap<String, LineStat> {
             (Some(additions), Some(deletions)) => LineStat {
                 additions: Some(additions),
                 deletions: Some(deletions),
+                old_size: None,
+                new_size: None,
             },
             _ => LineStat {
                 additions: None,
                 deletions: None,
+                old_size: None,
+                new_size: None,
             },
         };
         map.insert(entry.path, stat);
@@ -523,11 +527,15 @@ pub fn line_stat_of_bytes(bytes: &[u8]) -> LineStat {
         LineStat {
             additions: None,
             deletions: None,
+            old_size: None,
+            new_size: None,
         }
     } else {
         LineStat {
             additions: Some(count_text_lines(bytes)),
             deletions: Some(0),
+            old_size: None,
+            new_size: None,
         }
     }
 }

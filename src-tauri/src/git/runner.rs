@@ -137,16 +137,20 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
     let mut child = command
         .spawn()
         .map_err(|error| RunnerError::Spawn(error.to_string()))?;
-    if let Some(bytes) = request.stdin {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| RunnerError::Io("缺少 stdin".into()))?;
-        stdin
-            .write_all(&bytes)
-            .await
-            .map_err(|error| RunnerError::Io(error.to_string()))?;
-    }
+    // batch-check 一边读对象名一边输出结果。输入和输出必须同时推进，
+    // 否则两边的管道填满后互相等待，且 stdin 写入也绕过了超时和取消。
+    let stdin = child.stdin.take();
+    let mut stdin_write = Box::pin(async move {
+        if let Some(bytes) = request.stdin {
+            let mut stdin = stdin.ok_or_else(|| RunnerError::Io("缺少 stdin".into()))?;
+            stdin
+                .write_all(&bytes)
+                .await
+                .map_err(|error| RunnerError::Io(error.to_string()))?;
+        }
+        Ok::<(), RunnerError>(())
+    });
+    let mut stdin_result = None;
     let stdout = child
         .stdout
         .take()
@@ -169,6 +173,9 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
     tokio::pin!(sleep);
     loop {
         tokio::select! {
+            result = &mut stdin_write, if stdin_result.is_none() => {
+                stdin_result = Some(result);
+            }
             result = &mut stdout_read, if stdout_buf.is_none() => {
                 let (buf, truncated) = result?;
                 if truncated {
@@ -204,9 +211,17 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
                 return Err(RunnerError::Cancelled);
             }
         }
-        if stdout_buf.is_some() && stderr_buf.is_some() && status.is_some() {
+        if stdout_buf.is_some()
+            && stderr_buf.is_some()
+            && status.is_some()
+            && stdin_result.is_some()
+        {
             break;
         }
+    }
+    // 主动截断输出时杀进程，可能同时中断 stdin；这不应把成功的预览变成 I/O 错误。
+    if !stdout_truncated {
+        stdin_result.expect("stdin checked")?;
     }
     let status = status.expect("status checked");
     Ok(ProcessOutput {
@@ -285,6 +300,73 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0 0");
         assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), "diagnostic");
         assert_eq!(output.exit_code, 7);
+    }
+
+    #[tokio::test]
+    async fn stdin_and_output_are_drained_together() {
+        let program = python().expect("需要 Python 来验证双向管道");
+        let bytes = vec![b'x'; 2 * 1024 * 1024];
+        let mut request = RealRunner::default().base_request(
+            program,
+            vec!["-c".into(), "import sys\nwhile True:\n data = sys.stdin.buffer.read1(8192)\n if not data: break\n sys.stdout.buffer.write(data)\n sys.stdout.buffer.flush()\n sys.stderr.buffer.write(data)\n sys.stderr.buffer.flush()".into()],
+            Arc::new(Shutdown::new()),
+        );
+        request.stdin = Some(bytes.clone());
+        let result = tokio::time::timeout(Duration::from_secs(5), run_process(request)).await;
+        let output = result.expect("stdin 写入和输出读取互相阻塞").unwrap();
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stdout, bytes);
+        assert_eq!(output.stderr, bytes);
+    }
+
+    #[tokio::test]
+    async fn timeout_covers_a_child_that_never_reads_stdin() {
+        let program = python().expect("需要 Python 来验证 stdin 超时");
+        let mut request = RealRunner::default().base_request(
+            program,
+            vec!["-c".into(), "import time; time.sleep(30)".into()],
+            Arc::new(Shutdown::new()),
+        );
+        request.stdin = Some(vec![b'x'; 2 * 1024 * 1024]);
+        request.timeout = Duration::from_millis(100);
+        let result = tokio::time::timeout(Duration::from_secs(3), run_process(request)).await;
+        assert_eq!(
+            result.expect("stdin 写入也必须受超时保护"),
+            Err(RunnerError::Timeout)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_and_truncating_also_work_during_stdin_write() {
+        let program = python().expect("需要 Python 来验证 stdin 期间的取消和截断");
+        let cancel = Arc::new(Shutdown::new());
+        let signal = cancel.clone();
+        let mut request = RealRunner::default().base_request(
+            program.clone(),
+            vec!["-c".into(), "import time; time.sleep(30)".into()],
+            Arc::new(Shutdown::new()),
+        );
+        request.stdin = Some(vec![b'x'; 2 * 1024 * 1024]);
+        request.cancel = Some(cancel);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            signal.cancel();
+        });
+        let result = tokio::time::timeout(Duration::from_secs(3), run_process(request)).await;
+        assert_eq!(result.unwrap(), Err(RunnerError::Cancelled));
+
+        let mut request = RealRunner::default().base_request(
+            program,
+            vec!["-c".into(), "import sys, time; sys.stdout.buffer.write(b'x'*2000000); sys.stdout.buffer.flush(); time.sleep(30)".into()],
+            Arc::new(Shutdown::new()),
+        );
+        request.stdin = Some(vec![b'x'; 2 * 1024 * 1024]);
+        request.output_limit = 1024;
+        request.truncate_stdout = true;
+        let result = tokio::time::timeout(Duration::from_secs(3), run_process(request)).await;
+        let output = result.unwrap().unwrap();
+        assert!(output.stdout_truncated);
+        assert_eq!(output.stdout.len(), 1024);
     }
 
     #[tokio::test]

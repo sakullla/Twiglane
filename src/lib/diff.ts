@@ -105,6 +105,8 @@ export function splitColumnsFit(width: number, reserveStage: boolean): boolean {
 export function toSideRows(lines: ViewLine[]): SideRow[] {
   const rows: SideRow[] = [];
   let pending: SideRow[] = [];
+  // 每个待配对位置只访问一次；大段替换不能为每个新增行从头扫描。
+  let nextPair = 0;
   // Git 把「\ No newline at end of file」插在没有结尾换行的那一行后面。删除行和随后的新增行之间
   // 也会出现它；若此时把尚未配对的删除行刷出去，左右就会落到不同行。标记挂在前一行对应侧，等这组配对完成再插入。
   const notes = new Map<SideRow, SideRow[]>();
@@ -117,6 +119,7 @@ export function toSideRows(lines: ViewLine[]): SideRow[] {
       if (attached) rows.push(...attached);
     }
     pending = [];
+    nextPair = 0;
     notes.clear();
   };
   const spanRow = (line: ViewLine, index: number, kind: DiffLineKind, showStage: boolean): SideRow => ({
@@ -172,9 +175,11 @@ export function toSideRows(lines: ViewLine[]): SideRow[] {
       return;
     }
     if (line.kind === "add") {
-      const slot = pending.find((row) => row.right === null);
+      while (nextPair < pending.length && pending[nextPair].right !== null) nextPair += 1;
+      const slot = pending[nextPair];
       if (slot) {
         slot.right = { text: line.text, kind: "add", no: line.newNo, index };
+        nextPair += 1;
         remember(slot, "right");
       } else {
         // 多出来的新增行必须排在已配对的删除/新增行之后：直接推进 rows 会跑到仍在 pending

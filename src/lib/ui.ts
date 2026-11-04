@@ -72,6 +72,39 @@ export function splitPath(path: string): { dir: string; name: string } {
   return { dir: normalized.slice(0, slash), name: normalized.slice(slash + 1) };
 }
 
+/** 字节数的人读写法：1023 B、1.5 KB、12 KB、3.4 MB。与后端 format_size 同一口径。 */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const text = value < 10 ? value.toFixed(1).replace(/\.0$/, "") : String(Math.round(value));
+  return `${text} ${units[unit]}`;
+}
+
+/** 二进制改动的大小说明：前后都有时写「A → B」，新增只写新大小，删除写原大小；都不知道时为空。 */
+export function binarySizeText(oldSize: number | null | undefined, newSize: number | null | undefined): { text: string; label: string } | null {
+  const before = oldSize ?? null;
+  const after = newSize ?? null;
+  if (before !== null && after !== null) {
+    return { text: `${formatBytes(before)} → ${formatBytes(after)}`, label: `二进制文件，大小由 ${formatBytes(before)} 变为 ${formatBytes(after)}` };
+  }
+  if (after !== null) return { text: formatBytes(after), label: `二进制文件，${formatBytes(after)}` };
+  if (before !== null) return { text: formatBytes(before), label: `二进制文件已删除，原为 ${formatBytes(before)}` };
+  return null;
+}
+
+/** 大小变化的一句补充：「增大 1.7 KB」「减小 300 B」「大小不变」。 */
+export function sizeDelta(oldSize: number, newSize: number): string {
+  if (newSize === oldSize) return "大小不变";
+  return newSize > oldSize ? `增大 ${formatBytes(newSize - oldSize)}` : `减小 ${formatBytes(oldSize - newSize)}`;
+}
+
 /** 相对时间（秒级时间戳）。超过 30 天显示日期。 */
 export function relativeTime(seconds: number, nowMs = Date.now()): string {
   if (!Number.isFinite(seconds) || seconds <= 0) return "未知时间";

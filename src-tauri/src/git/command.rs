@@ -1094,6 +1094,30 @@ pub fn unmerged_index_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString
     (git.to_path_buf(), args)
 }
 
+/// 批量查对象类型与大小：对象名逐行从 stdin 写入，输出与输入逐行对应。
+pub fn batch_check_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("cat-file"),
+        OsString::from("--batch-check=%(objecttype) %(objectsize)"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// 大批同一版本的大小一次遍历目录，避免逐个 `<tree>:<path>` 重复解压、查找树。
+pub fn tree_sizes_command(git: &Path, root: &Path, tree: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("ls-tree"),
+        OsString::from("-r"),
+        OsString::from("-z"),
+        OsString::from("--format=%(objecttype) %(objectsize)%x09%(path)"),
+        OsString::from(tree),
+        OsString::from("--"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
 pub fn cat_blob_command(git: &Path, root: &Path, oid: &str) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.extend([

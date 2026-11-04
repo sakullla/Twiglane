@@ -105,8 +105,10 @@ export function commitLineStat(file: {
   additions?: number | null;
   deletions?: number | null;
   binary?: boolean;
+  oldSize?: number | null;
+  newSize?: number | null;
 }): LineStat | null {
-  if (file.binary) return { additions: null, deletions: null };
+  if (file.binary) return { additions: null, deletions: null, oldSize: file.oldSize ?? null, newSize: file.newSize ?? null };
   if (file.additions == null && file.deletions == null) return null;
   return { additions: file.additions ?? 0, deletions: file.deletions ?? 0 };
 }

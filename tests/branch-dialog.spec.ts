@@ -40,6 +40,7 @@ vi.mock("../src/lib/api", () => ({
 
 import { pickDirectory } from "../src/lib/api";
 import BranchDialog from "../src/lib/components/BranchDialog.svelte";
+import BranchPicker from "../src/lib/components/BranchPicker.svelte";
 import BranchSwitcher from "../src/lib/components/BranchSwitcher.svelte";
 import { openModalCount } from "../src/lib/components/Modal.svelte";
 import RepoDialogs from "../src/lib/components/RepoDialogs.svelte";
@@ -1069,6 +1070,59 @@ describe("打开其他工作区、默认徽章与斜杠分组", () => {
     expect(switchBranch).not.toHaveBeenCalled();
     expect(document.querySelector("[data-branch-status]")?.textContent).toContain("feature/ui");
     expect(badgedRows()).toEqual(["main"]);
+  });
+
+  it("合并的分支选择器按设置分组：含当前或已选分支的组展开，关掉设置后平铺，搜索时也平铺", async () => {
+    const listed = [record("feature/a", true), record("feature/b"), record("bugfix/x"), record("main"), record("origin/main", false, null, true)];
+    const onChange = vi.fn();
+    const props = { label: "来源分支", branches: listed, value: "main", current: "feature/a", onChange, branchGroups: true };
+    const view = render(BranchPicker, { props });
+    await fireEvent.click(screen.getByRole("button", { name: "来源分支" }));
+    await waitFor(() => expect(optionNames()).toEqual(["main", "feature/a", "feature/b"]));
+    expect(screen.getByRole("button", { name: "收起分组 feature" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "展开分组 bugfix" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "展开分组 origin" })).toBeTruthy();
+
+    // 分组标题不是选项：展开只改列表，不触发选择。
+    await fireEvent.click(screen.getByRole("button", { name: "展开分组 bugfix" }));
+    expect(optionNames()).toEqual(["main", "feature/a", "feature/b", "bugfix/x"]);
+    expect(onChange).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole("button", { name: "收起分组 feature" }));
+    expect(optionNames()).toEqual(["main", "bugfix/x"]);
+
+    // 键盘只在看得见的分支之间移动，回车选中的就是高亮的那一个。
+    const search = screen.getByLabelText("搜索来源分支");
+    await fireEvent.keyDown(search, { key: "ArrowDown" });
+    await fireEvent.keyDown(search, { key: "Enter" });
+    expect(onChange).toHaveBeenLastCalledWith("bugfix/x");
+
+    await fireEvent.click(screen.getByRole("button", { name: "来源分支" }));
+    await fireEvent.input(screen.getByLabelText("搜索来源分支"), { target: { value: "b" } });
+    await waitFor(() => expect(optionNames()).toEqual(["feature/b", "bugfix/x"]));
+    expect(screen.queryByRole("button", { name: /分组/ })).toBeNull();
+
+    await view.rerender({ ...props, branchGroups: false });
+    await fireEvent.input(screen.getByLabelText("搜索来源分支"), { target: { value: "" } });
+    await waitFor(() => expect(optionNames()).toEqual(["feature/a", "feature/b", "bugfix/x", "main", "origin/main"]));
+    expect(screen.queryByRole("button", { name: /分组/ })).toBeNull();
+  });
+
+  it("新建分支的起点下拉框按设置分组：开启时按前缀成组，关闭时平铺", async () => {
+    const listed = [record("feature/ui", true), record("feature/extra"), record("bugfix/login"), record("main"), record("origin/main", false, null, true)];
+    const mounted = await showDialog(listed, "main");
+    await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
+    const base = () => screen.getByRole("combobox", { name: "新分支的起点" }) as HTMLSelectElement;
+    const groups = () => [...base().querySelectorAll("optgroup")].map((group) => [group.label, [...group.querySelectorAll("option")].map((option) => option.value)]);
+    expect(groups()).toEqual([
+      ["feature/", ["feature/extra"]],
+      ["bugfix/", ["bugfix/login"]],
+      ["远程 origin/", ["origin/main"]],
+    ]);
+    expect([...base().children].filter((node) => node.tagName === "OPTION").map((node) => (node as HTMLOptionElement).value)).toEqual(["", "main"]);
+
+    await mounted.view.rerender({ ...mounted.props, branchGroups: false });
+    await waitFor(() => expect(base().querySelector("optgroup")).toBeNull());
+    expect([...base().options].map((option) => option.value)).toEqual(["", "feature/extra", "bugfix/login", "main", "origin/main"]);
   });
 
   it("默认徽章不大于当前分支标记", () => {

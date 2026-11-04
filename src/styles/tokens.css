@@ -62,6 +62,11 @@
   --opacity-disabled: 0.45;
   /* 合并底部操作条的高度：通知抬到它上面时同用这个值。 */
   --mp-foot-height: 44px;
+  /* 外壳控件的统一度量：标题栏六个常驻交互项同高，状态栏按钮命中区同高。
+     两处都只有这一个取值来源，避免「同类控件差 2px」这种看不出来但会破坏节奏的偏差。 */
+  --titlebar-control: 30px;
+  --statusbar-height: 26px;
+  --statusbar-hit: 24px;
 
   /* 层级：resizer 5 / titlebar 20 / menu 30 / palette 40 / modal 50 / toast 60 */
   --z-sticky: 1;

@@ -510,6 +510,8 @@ describe("状态栏", () => {
     const onRefresh = vi.fn();
     const { container } = render(StatusBar, { props: { hasRepo: true, sync: "领先 2", onRefresh } as never });
     expect(screen.getByText("领先 2")).toBeTruthy();
+    // 同步结论是状态栏唯一的主读数：它挂在 .sb-sync 上，颜色比两侧按钮实一档。
+    expect(container.querySelector(".statusbar .sb-sync")?.textContent).toContain("领先 2");
     const text = container.textContent ?? "";
     expect(text).not.toContain("改动");
     expect(text).not.toContain("冲突");
@@ -1039,6 +1041,54 @@ describe("外壳样式契约", () => {
     expect(line).toMatch(/top:\s*var\(--titlebar-height\)/);
     expect(line).not.toMatch(/top:\s*\d+px/);
     expect(layoutCss).not.toMatch(/\.progress-line\s*\{\s*top:\s*\d+px/);
+  });
+
+  it("标题栏六个常驻交互项同高，高度只来自 --titlebar-control", () => {
+    const tokensCss = readLayer("tokens.css");
+    expect(tokensCss).toMatch(/--titlebar-control:\s*\d+px/);
+    for (const selector of [".titlebar-brand", ".repo-switch", ".branch-pill"]) {
+      const body = ruleBody(layoutCss, selector);
+      expect(body, selector).toMatch(/height:\s*var\(--titlebar-control\)/);
+      expect(body, selector).not.toMatch(/height:\s*\d+px/);
+    }
+    const iconBtn = layoutCss.match(/\.titlebar \.icon-btn\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(iconBtn, "标题栏图标按钮同高").toMatch(/height:\s*var\(--titlebar-control\)/);
+    expect(iconBtn, "标题栏图标按钮不再写死高度").not.toMatch(/height:\s*\d+px/);
+  });
+
+  it("状态栏按钮命中区按 --statusbar-hit 撑到 24px，26px 条高仍放得下", () => {
+    const tokensCss = readLayer("tokens.css");
+    const px = (name: string) => Number(tokensCss.match(new RegExp(name + ":\\s*(\\d+)px"))?.[1]);
+    const hit = px("--statusbar-hit");
+    const barHeight = px("--statusbar-height");
+    expect(hit, "命中区不小于 24px（R14 交互目标下限）").toBeGreaterThanOrEqual(24);
+    expect(hit, "按钮不能撑破状态栏").toBeLessThan(barHeight);
+    expect(ruleBody(layoutCss, ".statusbar")).toMatch(/height:\s*var\(--statusbar-height\)/);
+    const button = ruleBody(layoutCss, ".statusbar button.sb-item");
+    expect(button).toMatch(/height:\s*var\(--statusbar-hit\)/);
+    expect(button, "图标按钮也要有方形命中区").toMatch(/min-width:\s*var\(--statusbar-hit\)/);
+    expect(ruleBody(layoutCss, ".statusbar button.sb-item:focus-visible"), "焦点环收在条内，不被 26px 裁掉").toMatch(/outline-offset:\s*-2px/);
+  });
+
+  it("900×600 有独立的紧凑版式：只收间距与图标块，条目数量不变", () => {
+    const compact = layoutCss.match(/@media \(max-height: 660px\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(compact, "缺少 600 高档的紧凑版式").not.toBe("");
+    for (const selector of [".welcome", ".welcome-inner", ".welcome .action-card", ".welcome-recent", ".welcome-recent button"]) {
+      expect(compact, selector).toContain(selector);
+    }
+    // 搜索时的占位高度按紧凑行高重算，否则搜索框会把列表顶出可视区。
+    expect(compact).toMatch(/\.welcome-recent\.searchable\s*\{[^}]*min-height:\s*0/);
+    // 行式卡片的 padding 要盖过 @media (max-width: 960px)，否则 900 宽的窗口里紧凑档失效。
+    expect(compact).toMatch(/\.welcome \.action-card\s*\{/);
+  });
+
+  it("菜单宽度容得下同步项说明，菜单项不因折行高低不齐", () => {
+    expect(ruleBody(componentsCss, ".menu")).toMatch(/min-width:\s*268px/);
+  });
+
+  it("减少动效时卡片悬停不再位移", () => {
+    const reduced = layoutCss.match(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(reduced).toMatch(/\.action-card:hover:not\(:disabled\)\s*\{[^}]*transform:\s*none/);
   });
 
   it("命令面板 560px 宽并复用 modal 背板与卡片外壳", () => {

@@ -29,13 +29,13 @@
 .titlebar-actions { flex: none; gap: var(--space-4); }
 .titlebar-spacer { flex: 1; min-width: var(--space-12); }
 /* 品牌入口只留标志：名称由 aria-label 与 title 承载 */
-.titlebar-brand { display: grid; place-items: center; width: 30px; height: 30px; border-radius: var(--radius-sm); flex: none; transition: background var(--duration-fast) var(--ease); }
+.titlebar-brand { display: grid; place-items: center; width: var(--titlebar-control); height: var(--titlebar-control); border-radius: var(--radius-sm); flex: none; transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease); }
 .titlebar-brand:hover { background: var(--hover); }
 .titlebar-brand .brand { flex: none; gap: 0; }
 .titlebar-brand .brand-logo { width: 22px; height: 22px; border-radius: var(--radius-sm); }
 .titlebar-brand .brand-text { display: none; }
 /* 标题栏里的仓库只写名字，完整路径在悬停提示与仓库弹层里；面包屑保持一行。 */
-.repo-switch { display: flex; align-items: center; gap: var(--space-8); min-width: 0; max-width: 280px; height: 30px; padding: 0 var(--space-6) 0 var(--space-4); border-radius: var(--radius-sm); text-align: left; transition: background var(--duration-fast) var(--ease); }
+.repo-switch { display: flex; align-items: center; gap: var(--space-8); min-width: 0; max-width: 280px; height: var(--titlebar-control); padding: 0 var(--space-6) 0 var(--space-4); border-radius: var(--radius-sm); text-align: left; transition: background var(--duration-fast) var(--ease); }
 .repo-switch:hover { background: var(--hover); }
 .repo-switch[aria-expanded="true"] { background: var(--active); }
 .repo-switch > .icon { color: var(--fg-subtle); flex: none; }
@@ -47,13 +47,15 @@
 .titlebar .repo-badge { width: 22px; height: 22px; border-radius: var(--radius-sm); font-size: var(--text-xs); }
 .titlebar .repo-switch + .branch-pill { margin-left: var(--space-12); }
 .titlebar .repo-switch + .branch-pill::before { content: "/"; position: absolute; left: calc(var(--space-12) * -1 + 1px); color: var(--border-strong); font-size: var(--text-md); font-weight: var(--weight-normal); pointer-events: none; }
-.branch-pill { position: relative; display: inline-flex; align-items: center; gap: var(--space-6); height: 28px; max-width: 260px; padding: 0 var(--space-6) 0 var(--space-8); border-radius: var(--radius-sm); border: 1px solid var(--control-border); background: var(--surface); color: var(--fg); font-size: var(--text-sm); font-weight: var(--weight-medium); min-width: 0; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease); }
+.branch-pill { position: relative; display: inline-flex; align-items: center; gap: var(--space-6); height: var(--titlebar-control); max-width: 260px; padding: 0 var(--space-6) 0 var(--space-8); border-radius: var(--radius-sm); border: 1px solid var(--control-border); background: var(--surface); color: var(--fg); font-size: var(--text-sm); font-weight: var(--weight-medium); min-width: 0; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease); }
 .branch-pill:hover:not(:disabled) { border-color: var(--control-border-hover); background: var(--surface-3); }
 .branch-pill[aria-expanded="true"] { border-color: var(--accent); }
 .branch-pill > .icon:first-child { color: var(--accent-text); }
 .branch-pill > .icon:last-child { color: var(--fg-subtle); }
 .branch-pill:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
-.titlebar .icon-btn { width: 30px; height: 30px; border-radius: var(--radius-sm); }
+.titlebar .icon-btn { width: var(--titlebar-control); height: var(--titlebar-control); border-radius: var(--radius-sm); }
+/* 标题栏里的焦点环收在控件内：40px 条高上外扩 2px 会盖住相邻控件与分隔线。 */
+.titlebar [data-titlebar-control]:focus-visible { outline-offset: -2px; }
 /* macOS：原生交通灯保留（tauri.macos.conf.json 的 Overlay + hiddenTitle），
    左侧让出 78px，任何交互控件都不会压在按钮上（R1） */
 .titlebar-macos { padding-left: 78px; }
@@ -133,6 +135,8 @@
 .ac-copy { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
 .ac-copy strong { font-size: var(--text-base); font-weight: var(--weight-semibold); white-space: nowrap; }
 .ac-copy > span { font-size: var(--text-xs); line-height: var(--leading-normal); color: var(--fg-muted); }
+/* 组内节奏 24px，组间（入口 → 最近仓库）多一档 8px：两段任务读起来是两块，而不是一列。 */
+.welcome-section { margin-top: var(--space-8); }
 /* 主操作是实心 --accent，边界没有意义；说明文字是正文，必须取不透明的 --accent-fg。 */
 .action-card.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 28%, transparent), inset 0 1px 0 var(--on-accent-line); }
 .action-card.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: transparent; }
@@ -155,6 +159,8 @@
 .welcome-recent button:hover::after, .welcome-recent button:focus-visible::after { opacity: 1; transform: translate(0, -50%); }
 .welcome-recent button:focus-visible { outline-offset: -2px; }
 .welcome-recent .repo-badge { box-shadow: none; }
+/* 仓库名与其他列表同一字号（正文 13px），路径仍是 11px：一行的主次靠字阶而不是仅靠颜色。 */
+.welcome-recent .repo-name { font-size: var(--text-base); }
 /* 搜索时结果行数会变：留够五行的高度，搜索框不跟着上下跳。 */
 .welcome-recent.searchable { min-height: 257px; }
 .welcome-no-match { margin: 0; padding: var(--space-8); }
@@ -175,18 +181,51 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
   .welcome-brand .brand-text strong { font-size: var(--text-lg); }
   .action-card { flex-direction: row; align-items: center; padding: var(--space-12); }
   .welcome-foot { display: none; }
+  /* 这一档里可视高度最紧的是 661–720，组间那一档额外间距与列表行内边距让给内容。 */
+  .welcome-section { margin-top: 0; }
+  .welcome-recent button { padding-block: var(--space-6); }
+}
+/* 最小窗口 900×600 的可视高度只有 534px，上一档量出来是 583px：最后两行最近仓库
+   被压到状态栏下面，要靠滚动才看得见，「一屏放下」不成立。
+   这一档只收紧同一套版式的间距与图标块（不改结构、不减少条目），把内容收进 534px。 */
+@media (max-height: 660px) {
+  .welcome { padding-block: var(--space-8); }
+  .welcome-inner { gap: var(--space-12); }
+  .welcome-brand .brand-logo { width: 34px; height: 34px; border-radius: var(--radius); }
+  .welcome-brand .brand-text strong { font-size: var(--text-md); }
+  .welcome-brand .brand-text span { margin-top: var(--space-2); }
+  /* 要盖过下面 @media (max-width: 960px) 里同一套行式卡片的 padding，命中区不变，只收内边距。 */
+  .welcome .action-card { padding: var(--space-8) var(--space-12); gap: var(--space-8); }
+  .welcome .action-card > .icon { padding: var(--space-6); }
+  .welcome-section { margin-top: 0; }
+  .welcome-section-head { min-height: 24px; }
+  .welcome-recent { padding: var(--space-4); }
+  .welcome-recent button { padding-block: var(--space-4); }
+  /* 行数变化时的占位高度按紧凑行高算，搜索框不会把列表顶出可视区。 */
+  .welcome-recent.searchable { min-height: 0; }
+}
+/* 减少动效：卡片不再做 1px 抬升，悬停只留边界与底色（base.css 已关掉过渡）。 */
+@media (prefers-reduced-motion: reduce) {
+  .action-card:hover:not(:disabled) { transform: none; }
 }
 
 /* ---------- 状态栏 ---------- */
-.statusbar { display: flex; align-items: center; gap: var(--space-12); height: 26px; padding: 0 var(--space-8) 0 var(--space-6); border-top: 1px solid var(--border); background: var(--surface-2); color: var(--fg-subtle); font-size: var(--text-xs); flex: none; }
+.statusbar { display: flex; align-items: center; gap: var(--space-12); height: var(--statusbar-height); padding: 0 var(--space-8) 0 var(--space-6); border-top: 1px solid var(--border); background: var(--surface-2); color: var(--fg-subtle); font-size: var(--text-xs); flex: none; }
 .statusbar .sb-item { display: inline-flex; align-items: center; gap: 5px; min-width: 0; white-space: nowrap; }
 .statusbar .sb-live { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .statusbar .sb-busy { color: var(--accent-text); }
 .statusbar .sb-warn { color: var(--warning-text); }
 .statusbar .sb-merge { background: var(--warning-soft); color: var(--warning-text); font-weight: var(--weight-medium); }
+/* 合并提示是语义状态，悬停不能退化成一格中性灰（会读成「普通按钮」）。 */
+.statusbar button.sb-merge:hover:not(:disabled) { background: color-mix(in srgb, var(--warning) 17%, transparent); color: var(--warning-text); }
 .statusbar .spinner { width: 11px; height: 11px; border-width: 1.5px; }
-.statusbar button.sb-item { padding: 0 var(--space-6); height: 20px; border-radius: var(--radius-xs); }
-.statusbar button.sb-item:hover { background: var(--hover); color: var(--fg); }
+/* 按钮命中区按 --statusbar-hit 撑到 24×24（R14 交互目标下限），条高 26px 仍放得下；
+   图标按钮靠 min-width 保证正方，文字按钮保住左右内边距。 */
+.statusbar button.sb-item { padding: 0 var(--space-6); height: var(--statusbar-hit); min-width: var(--statusbar-hit); justify-content: center; border-radius: var(--radius-sm); transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease); }
+.statusbar button.sb-item:hover:not(:disabled) { background: var(--hover); color: var(--fg); }
+.statusbar button.sb-item:focus-visible { outline-offset: -2px; }
+/* 同步结论是状态栏唯一的主读数，用一档更实的正文色；两侧按钮仍是弱化色，优先级不打架。 */
+.statusbar .sb-sync { color: var(--fg-muted); }
 .sb-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); flex: none; box-shadow: 0 0 0 2px var(--success-soft); }
 .sb-dot.stale { background: var(--warning); box-shadow: 0 0 0 2px var(--warning-soft); }
 .sb-dot.off { background: var(--fg-subtle); box-shadow: none; }

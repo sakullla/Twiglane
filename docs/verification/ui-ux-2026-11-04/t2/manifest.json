@@ -1,0 +1,373 @@
+{
+  "base": "http://127.0.0.1:1430",
+  "generatedAt": "2026-11-04T15:50:59.884Z",
+  "summary": {
+    "shots": 20,
+    "targets": 4,
+    "consoleErrors": 0,
+    "exceptions": 0,
+    "networkFailures": 0
+  },
+  "shots": [
+    {
+      "file": "dark-1280x840-start.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "start",
+      "state": {
+        "dataTheme": "dark",
+        "bodyBackground": "rgb(13, 14, 17)",
+        "appBackground": "rgb(13, 14, 17)",
+        "dialogTitle": null,
+        "fileRows": 0,
+        "historyRows": 0,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "dark-1280x840-changes.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "changes",
+      "state": {
+        "dataTheme": "dark",
+        "bodyBackground": "rgb(13, 14, 17)",
+        "appBackground": "rgb(13, 14, 17)",
+        "dialogTitle": null,
+        "fileRows": 14,
+        "historyRows": 0,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "dark-1280x840-history.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "history",
+      "state": {
+        "dataTheme": "dark",
+        "bodyBackground": "rgb(13, 14, 17)",
+        "appBackground": "rgb(13, 14, 17)",
+        "dialogTitle": null,
+        "fileRows": 14,
+        "historyRows": 28,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "dark-1280x840-merge.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "merge",
+      "state": {
+        "dataTheme": "dark",
+        "bodyBackground": "rgb(13, 14, 17)",
+        "appBackground": "rgb(13, 14, 17)",
+        "dialogTitle": "合并分支",
+        "fileRows": 14,
+        "historyRows": 28,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "dark-1280x840-settings.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "settings",
+      "state": {
+        "dataTheme": "dark",
+        "bodyBackground": "rgb(13, 14, 17)",
+        "appBackground": "rgb(13, 14, 17)",
+        "dialogTitle": "设置",
+        "fileRows": 14,
+        "historyRows": 28,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "dark-900x600-start.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "start",
+      "state": {
+        "dataTheme": "dark",
+        "bodyBackground": "rgb(13, 14, 17)",
+        "appBackground": "rgb(13, 14, 17)",
+        "dialogTitle": null,
+        "fileRows": 0,
+        "historyRows": 0,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "dark-900x600-changes.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "changes",
+      "state": {
+        "dataTheme": "dark",
+        "bodyBackground": "rgb(13, 14, 17)",
+        "appBackground": "rgb(13, 14, 17)",
+        "dialogTitle": null,
+        "fileRows": 14,
+        "historyRows": 0,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "dark-900x600-history.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "history",
+      "state": {
+        "dataTheme": "dark",
+        "bodyBackground": "rgb(13, 14, 17)",
+        "appBackground": "rgb(13, 14, 17)",
+        "dialogTitle": null,
+        "fileRows": 14,
+        "historyRows": 23,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "dark-900x600-merge.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "merge",
+      "state": {
+        "dataTheme": "dark",
+        "bodyBackground": "rgb(13, 14, 17)",
+        "appBackground": "rgb(13, 14, 17)",
+        "dialogTitle": "合并分支",
+        "fileRows": 14,
+        "historyRows": 23,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "dark-900x600-settings.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "settings",
+      "state": {
+        "dataTheme": "dark",
+        "bodyBackground": "rgb(13, 14, 17)",
+        "appBackground": "rgb(13, 14, 17)",
+        "dialogTitle": "设置",
+        "fileRows": 14,
+        "historyRows": 23,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "light-1280x840-start.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "start",
+      "state": {
+        "dataTheme": "light",
+        "bodyBackground": "rgb(244, 244, 246)",
+        "appBackground": "rgb(244, 244, 246)",
+        "dialogTitle": null,
+        "fileRows": 0,
+        "historyRows": 0,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "light-1280x840-changes.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "changes",
+      "state": {
+        "dataTheme": "light",
+        "bodyBackground": "rgb(244, 244, 246)",
+        "appBackground": "rgb(244, 244, 246)",
+        "dialogTitle": null,
+        "fileRows": 14,
+        "historyRows": 0,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "light-1280x840-history.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "history",
+      "state": {
+        "dataTheme": "light",
+        "bodyBackground": "rgb(244, 244, 246)",
+        "appBackground": "rgb(244, 244, 246)",
+        "dialogTitle": null,
+        "fileRows": 14,
+        "historyRows": 28,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "light-1280x840-merge.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "merge",
+      "state": {
+        "dataTheme": "light",
+        "bodyBackground": "rgb(244, 244, 246)",
+        "appBackground": "rgb(244, 244, 246)",
+        "dialogTitle": "合并分支",
+        "fileRows": 14,
+        "historyRows": 28,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "light-1280x840-settings.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "settings",
+      "state": {
+        "dataTheme": "light",
+        "bodyBackground": "rgb(244, 244, 246)",
+        "appBackground": "rgb(244, 244, 246)",
+        "dialogTitle": "设置",
+        "fileRows": 14,
+        "historyRows": 28,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "light-900x600-start.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "start",
+      "state": {
+        "dataTheme": "light",
+        "bodyBackground": "rgb(244, 244, 246)",
+        "appBackground": "rgb(244, 244, 246)",
+        "dialogTitle": null,
+        "fileRows": 0,
+        "historyRows": 0,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "light-900x600-changes.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "changes",
+      "state": {
+        "dataTheme": "light",
+        "bodyBackground": "rgb(244, 244, 246)",
+        "appBackground": "rgb(244, 244, 246)",
+        "dialogTitle": null,
+        "fileRows": 14,
+        "historyRows": 0,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "light-900x600-history.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "history",
+      "state": {
+        "dataTheme": "light",
+        "bodyBackground": "rgb(244, 244, 246)",
+        "appBackground": "rgb(244, 244, 246)",
+        "dialogTitle": null,
+        "fileRows": 14,
+        "historyRows": 23,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "light-900x600-merge.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "merge",
+      "state": {
+        "dataTheme": "light",
+        "bodyBackground": "rgb(244, 244, 246)",
+        "appBackground": "rgb(244, 244, 246)",
+        "dialogTitle": "合并分支",
+        "fileRows": 14,
+        "historyRows": 23,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    },
+    {
+      "file": "light-900x600-settings.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "settings",
+      "state": {
+        "dataTheme": "light",
+        "bodyBackground": "rgb(244, 244, 246)",
+        "appBackground": "rgb(244, 244, 246)",
+        "dialogTitle": "设置",
+        "fileRows": 14,
+        "historyRows": 23,
+        "horizontalOverflow": false
+      },
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
+    }
+  ]
+}

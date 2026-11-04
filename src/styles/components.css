@@ -57,7 +57,9 @@
   box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 24%, transparent), inset 0 1px 0 var(--on-accent-line);
 }
 .btn-primary kbd { background: var(--on-accent-soft); border-color: var(--on-accent-line); color: inherit; box-shadow: none; margin-left: 3px; }
-.btn-secondary { background: var(--surface); border-color: var(--control-border); color: var(--fg); box-shadow: var(--shadow-sm); }
+/* 次级按钮与 .field / .branch-pill 同一套「一条控件边界 + 表面填充」，
+   不再额外加投影：带边界的控件在四个表面上都靠这条边界区分，阴影只是多一层噪声。 */
+.btn-secondary { background: var(--surface); border-color: var(--control-border); color: var(--fg); }
 .btn-secondary:hover:not(:disabled) { background-color: var(--surface); background-image: linear-gradient(var(--hover), var(--hover)); border-color: var(--control-border-hover); }
 .btn-ghost { color: var(--fg-muted); border-radius: var(--radius-sm); }
 .btn-ghost:hover:not(:disabled) { background: var(--hover); color: var(--fg); }
@@ -197,7 +199,7 @@
 
 /* ---------- 菜单（popover） ---------- */
 .menu-anchor { position: relative; }
-.menu { position: absolute; top: calc(100% + 6px); right: 0; min-width: 255px; padding: var(--space-4); border-radius: var(--radius-lg); background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow-lg); z-index: var(--z-menu); animation: pop var(--duration-fast) var(--ease-out); }
+.menu { position: absolute; top: calc(100% + 6px); right: 0; min-width: 268px; padding: var(--space-4); border-radius: var(--radius-lg); background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow-lg); z-index: var(--z-menu); animation: pop var(--duration-fast) var(--ease-out); }
 .menu.left { left: 0; right: auto; }
 .menu-item { display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: var(--space-8) 10px; border-radius: var(--radius); text-align: left; transition: background var(--duration-fast) var(--ease); }
 /* 菜单项聚焦：只用 hover 背景（4.5% 覆盖）看不出焦点，必须补可见焦点环。

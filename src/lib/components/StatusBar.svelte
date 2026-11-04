@@ -56,7 +56,7 @@
       <Icon name="sidebar" size={12} />
     </button>
   {/if}
-  <span class="sb-item" title={hasRepo ? "同步状态" : "还没有打开仓库"}>
+  <span class="sb-item sb-sync" title={hasRepo ? "同步状态" : "还没有打开仓库"}>
     <span class={`sb-dot ${dotClass}`} aria-hidden="true"></span>
     <span>{hasRepo ? sync : "无仓库"}</span>
   </span>

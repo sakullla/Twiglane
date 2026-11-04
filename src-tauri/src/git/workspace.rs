@@ -533,13 +533,15 @@ mod tests {
         let broken_backend = fixture.backend();
         git(&broken, &["init", "-b", "main"]);
         std::fs::write(broken.join(".gitignore"), "keep\n").unwrap();
-        let exclude = broken.join(".git/info/exclude");
-        let _ = std::fs::remove_file(&exclude);
-        std::fs::create_dir(&exclude).unwrap();
         let broken_path = broken.to_string_lossy().into_owned();
         let opened_broken = crate::git::ops::open_repository(&broken_backend, &broken_path, 21)
             .await
             .unwrap();
+        // 先成功打开，再模拟目标损坏。部分平台上的 Git status 会拒绝目录形式的
+        // exclude；本用例验证的是写入失败时不改文件，不依赖 Git 容忍这个损坏。
+        let exclude = broken.join(".git/info/exclude");
+        std::fs::remove_file(&exclude).unwrap();
+        std::fs::create_dir(&exclude).unwrap();
         let error = ignore_path(
             &broken_backend,
             &broken_path,

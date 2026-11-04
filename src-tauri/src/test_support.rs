@@ -24,6 +24,9 @@ impl TempDir {
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&path).unwrap();
+        // Windows 的 TEMP 可能使用不同大小写或短路径，macOS 的 /tmp 也可能是链接。
+        // 测试查询 generation 时必须使用和应用入口相同的规范路径。
+        let path = dunce::canonicalize(path).unwrap();
         Self { path }
     }
 

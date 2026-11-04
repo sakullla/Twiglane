@@ -379,6 +379,7 @@
           merged={branch.merged === true}
           mergedTitle={`已合入主干：已完整包含在 ${[...mainNames].join(" 和 ")} 中，删除不会丢失提交`}
           reason={reasonFor(branch)}
+          note={branch.worktree && !isCurrent(branch) ? "其他工作区" : null}
           check={false}
           onHover={() => (active = row.index)}
           onChoose={() => void choose(branch)}

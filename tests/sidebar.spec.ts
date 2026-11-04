@@ -636,6 +636,19 @@ describe("命令面板", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("命令面板用 aria-activedescendant 跟随键盘当前项，无匹配时给下一步", async () => {
+    render(CommandPalette, { props: { open: true, onClose: () => {}, commands } as never });
+    const input = screen.getByRole("combobox", { name: "搜索命令" });
+    const active = () => document.getElementById(input.getAttribute("aria-activedescendant") ?? "");
+    expect(active(), "当前项指向真实存在的条目").toBe(screen.getAllByRole("option")[0]);
+    await fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(active()).toBe(screen.getAllByRole("option")[1]);
+    await fireEvent.input(input, { target: { value: "没有这个" } });
+    expect(screen.getByText("没有匹配的命令")).toBeTruthy();
+    expect(screen.getByText("换个关键词试试，或按 Esc 关闭")).toBeTruthy();
+    expect(input.getAttribute("aria-activedescendant"), "没有条目时不再指向不存在的 id").toBeNull();
+  });
+
   it("keywords 参与过滤但不显示，没有 keywords 的命令仍只按标题与分组匹配", async () => {
     const withKeywords = [
       { id: "repo.one", group: "仓库", title: "切换到 demo", keywords: "C:/work/alpha/demo", run: vi.fn() },

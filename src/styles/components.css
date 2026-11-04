@@ -711,7 +711,10 @@
 .palette-body { padding: 0 var(--space-8) var(--space-8); gap: var(--space-2); }
 .palette-group { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
 .palette-group + .palette-group { margin-top: var(--space-8); }
-.palette-group-title { padding: var(--space-6) var(--space-8) var(--space-4); color: var(--fg-subtle); font-size: var(--text-xs); font-weight: var(--weight-semibold); letter-spacing: 0.06em; }
+/* 分组标题吸在列表区顶部：滚到中段也知道自己在哪一组（R1、R4）。 */
+.palette-group-title { position: sticky; top: 0; z-index: var(--z-sticky); padding: var(--space-6) var(--space-8) var(--space-4); background: var(--surface); color: var(--fg-subtle); font-size: var(--text-xs); font-weight: var(--weight-semibold); letter-spacing: 0.06em; }
+/* 长命令名省略、快捷键列对齐：两者的位置不随文字长度左右摇摆（R7）。 */
+.palette-item > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-item { align-items: center; gap: var(--space-8); padding: 7px var(--space-8); border-radius: var(--radius); color: var(--fg); cursor: pointer; }
 .palette-item:hover { background: var(--hover); }
 /* 键盘游标：背景 + 左沿竖条两重提示，可辨度不依赖颜色深浅 */
@@ -722,8 +725,10 @@
 /* 不可用动作就地给原因，不用整行淡化（会把文字压到 4.5:1 以下） */
 .palette-item[aria-disabled="true"] { cursor: not-allowed; }
 .palette-item[aria-disabled="true"] > span:first-child { color: var(--fg-subtle); }
-.palette-reason { color: var(--fg-subtle); font-size: var(--text-xs); white-space: nowrap; }
-.palette-empty { padding: var(--space-32) var(--space-16); text-align: center; color: var(--fg-muted); font-size: var(--text-sm); }
+.palette-reason { max-width: 46%; overflow: hidden; text-overflow: ellipsis; color: var(--fg-subtle); font-size: var(--text-xs); white-space: nowrap; }
+.palette-empty { padding: var(--space-32) var(--space-16) var(--space-8); text-align: center; color: var(--fg-muted); font-size: var(--text-sm); }
+/* 无匹配时给下一步，而不只是一个空白结论（R6）。 */
+.palette-empty-hint { padding: 0 var(--space-16) var(--space-32); text-align: center; color: var(--fg-subtle); font-size: var(--text-xs); }
 .full-value { width: 100%; min-height: 64px; padding: 11px 12px; font-family: var(--mono); font-size: var(--text-sm); line-height: var(--leading-relaxed); white-space: pre-wrap; word-break: break-all; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface-2); color: var(--fg); resize: vertical; margin: 0; }
 textarea.full-value.prose { font-family: var(--font); font-size: var(--text-sm); word-break: normal; min-height: 220px; }
 /* 可编辑态自己换成 --surface 填充，与 .modal-card 的 --surface 差 1.00:1，
@@ -823,6 +828,8 @@ label.list-row .checkbox { margin-top: 2px; }
 }
 .history-pager { min-height: 32px; padding: 0 var(--space-8); }
 .history-list:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+/* 键盘在列表里移动时，当前行自己也带焦点环：只靠选中底色，和鼠标选中的状态分不开（R4）。 */
+.history-list:focus-visible .history-row[aria-selected="true"] { outline: 2px solid var(--focus); outline-offset: -2px; }
 .history-detail { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--surface); container-type: inline-size; container-name: history-detail; }
 .history-file-scope { display: inline-flex; align-items: center; gap: var(--space-6); min-width: 0; max-width: 420px; height: 26px; padding: 0 10px; border-radius: var(--radius-sm); background: var(--info-soft); color: var(--info-text); font-family: var(--mono); font-size: var(--text-xs); }
 .pager-range { padding: 0 var(--space-6); color: var(--fg-muted); font-size: var(--text-sm); font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -873,6 +880,9 @@ label.list-row .checkbox { margin-top: 2px; }
 .commit-facts { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
 .commit-parents { color: var(--fg-muted); }
 .commit-compare { grid-column: 1 / -1; display: flex; align-items: center; gap: var(--space-12); color: var(--fg-muted); font-size: var(--text-sm); }
+/* 历史详情是只读的：这枚标记说明为什么这里没有暂存入口（R2、R6）。 */
+.read-only-chip { display: inline-flex; align-items: center; gap: 4px; flex: none; height: 22px; padding: 0 var(--space-8); border-radius: 999px; background: var(--surface-3); color: var(--fg-muted); font-size: var(--text-xs); font-weight: var(--weight-medium); white-space: nowrap; }
+.read-only-chip > .icon { color: var(--fg-subtle); }
 .oid-chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 4px 0 10px; border-radius: var(--radius-sm); background: var(--surface-3); font-family: var(--mono); font-size: var(--text-sm); color: var(--fg); }
 .oid-chip > .icon { color: var(--fg-subtle); }
 .oid-chip button { display: grid; place-items: center; width: 22px; height: 22px; border-radius: var(--radius-xs); color: var(--fg-muted); }

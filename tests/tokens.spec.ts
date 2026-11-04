@@ -546,6 +546,13 @@ describe("状态与动效统一（R2、R12）", () => {
     }
   });
 
+  it("历史列表的键盘当前项自带焦点环，命令面板分组标题吸顶", () => {
+    expect(ruleBody(components, '.history-list:focus-visible .history-row[aria-selected="true"]')).toMatch(/outline:\s*2px solid var\(--focus\)/);
+    const title = ruleBody(components, ".palette-group-title");
+    expect(title).toMatch(/position:\s*sticky/);
+    expect(title, "吸顶标题必须有实底，否则会透出下面的条目").toMatch(/background:\s*var\(--surface\)/);
+  });
+
   it("主工作区的面板不再是圆角描边卡片", () => {
     for (const selector of [".span-main", ".diff", ".card"]) {
       const body = ruleBody(components, selector);

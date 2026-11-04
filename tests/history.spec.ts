@@ -453,6 +453,61 @@ describe("历史面板", () => {
     expect(list.scrollTop).toBe(0);
   });
 
+  it("从其他视图切回历史保留滚动位置，读取条件变化才回到顶部", async () => {
+    const rows = Array.from({ length: 20 }, (_, index) => commit(index));
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: rows,
+      scope: "current", branches: ["main"], head: "main",
+    });
+    commitDetail.mockResolvedValue({
+      generation: 3, commit: rows[0], body: "", root: false, merge: false, selectedParent: "parent", files: [],
+    });
+    fileHistory.mockResolvedValue({ generation: 3, path: "notes.txt", offset: 0, pageSize: 100, hasMore: false, state: "no_file_history", commits: [] });
+    const view = render(HistoryPanel, { props: { ...panelProps(), active: true } });
+    await screen.findByRole("option", { name: /commit-0/ });
+    const list = screen.getByRole("listbox", { name: "提交历史" });
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 160 });
+    const newest = screen.getByRole<HTMLButtonElement>("button", { name: "回到最新" });
+    expect(newest.disabled, "已经在顶部时没有可做的事").toBe(true);
+    expect(newest.title).toBe("已经在最新一条提交");
+
+    list.scrollTop = 320;
+    await fireEvent.scroll(list);
+    expect(newest.disabled, "离开顶部后可以回到最新").toBe(false);
+
+    await view.rerender({ ...panelProps(), active: false });
+    await view.rerender({ ...panelProps(), active: true });
+    await waitFor(() => expect(historyPage).toHaveBeenCalledTimes(2));
+    expect(list.scrollTop, "切走再切回同一个浏览位置不回到顶部").toBe(320);
+
+    await view.rerender({ ...panelProps("notes.txt"), active: true });
+    await waitFor(() => expect(fileHistory).toHaveBeenCalledWith("/repo", "notes.txt", 0, 3, 1));
+    expect(list.scrollTop, "换了读取条件回到顶部").toBe(0);
+  });
+
+  it("提交列表用 aria-activedescendant 指出键盘当前项，行带稳定 id", async () => {
+    const rows = [commit(0), commit(1)];
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: rows,
+      scope: "current", branches: ["main"], head: "main",
+    });
+    commitDetail.mockResolvedValue({
+      generation: 3, commit: rows[0], body: "", root: false, merge: false, selectedParent: "parent", files: [],
+    });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    const list = screen.getByRole("listbox", { name: "提交历史" });
+    const first = screen.getByRole("option", { name: /commit-0/ });
+    const second = screen.getByRole("option", { name: /commit-1/ });
+    expect(first.id).toBe("history-commit-" + rows[0].oid);
+    expect(list.getAttribute("aria-activedescendant")).toBe(first.id);
+    expect(document.getElementById(list.getAttribute("aria-activedescendant") as string)).toBe(first);
+
+    await fireEvent.keyDown(list, { key: "ArrowDown" });
+    expect(list.getAttribute("aria-activedescendant")).toBe(second.id);
+    expect(document.getElementById(second.id), "指向的元素真实存在").toBe(second);
+  });
+
   it("追加失败时保留已加载提交并说明原因", async () => {
     const first = commit(0);
     historyPage
@@ -497,6 +552,31 @@ describe("历史面板", () => {
     expect(historyPage).toHaveBeenCalledTimes(2);
     await fireEvent.scroll(list);
     expect(historyPage).toHaveBeenCalledTimes(2);
+  });
+
+  it("PageDown/PageUp 按一屏移动提交选择，当前行保持可见", async () => {
+    const rows = Array.from({ length: 20 }, (_, index) => commit(index));
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: rows,
+      scope: "current", branches: ["main"], head: "main",
+    });
+    commitDetail.mockResolvedValue({
+      generation: 3, commit: rows[0], body: "", root: false, merge: false, selectedParent: "parent", files: [],
+    });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    const list = screen.getByRole("listbox", { name: "提交历史" });
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 160 });
+    const selectedIndex = () =>
+      [...list.querySelectorAll(".history-row")].findIndex((row) => row.getAttribute("aria-selected") === "true");
+
+    await fireEvent.keyDown(list, { key: "PageDown" });
+    expect(selectedIndex(), "一屏 160px 约三条，选择随翻页前进").toBe(3);
+    expect(list.scrollTop, "当前行滚进视口").toBeGreaterThan(0);
+
+    await fireEvent.keyDown(list, { key: "PageUp" });
+    expect(selectedIndex()).toBe(0);
+    expect(list.scrollTop).toBe(0);
   });
 
   it("单条与多条提交的菜单不同，多条显示第一父提交的文件并集", async () => {
@@ -1281,6 +1361,33 @@ describe("只读差异", () => {
     expect(screen.queryByRole("button", { name: "暂存此块" })).toBeNull();
     await fireEvent.click(screen.getByRole("button", { name: "此文件历史" }));
     expect(openedPath).toBe("notes.txt");
+  });
+
+  it("详情标明历史是只读的，复制完整标识有可读反馈", async () => {
+    const only = commit(0);
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [only],
+      scope: "current", branches: ["main"], head: "main",
+    });
+    commitDetail.mockResolvedValue({
+      generation: 3, commit: only, body: "", root: false, merge: false, selectedParent: only.parents[0],
+      files: [{ path: "notes.txt", originalPath: null, status: "modified", additions: 1, deletions: 0 }],
+    });
+    commitFileDiff.mockResolvedValue(diff);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    render(HistoryPanel, { props: panelProps() });
+    await waitFor(() => expect(document.querySelector(".commit-head")).toBeTruthy());
+
+    const chip = document.querySelector<HTMLElement>(".commit-byline .read-only-chip")!;
+    expect(chip.textContent?.trim()).toBe("只读");
+    expect(chip.title, "禁用/只读原因不用悬停也能读到").toContain("不切换分支");
+
+    const live = document.querySelector<HTMLElement>(".commit-facts [aria-live]")!;
+    expect(live.textContent, "还没复制时不播报").toBe("");
+    await fireEvent.click(screen.getByRole("button", { name: "复制完整提交标识" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(only.oid));
+    expect(live.textContent).toBe("已复制提交 " + shortOid(only.oid));
   });
 
   it("不显示 Git 文件头，块标题换成行号与所在函数，按块暂存仍对准原始块", async () => {

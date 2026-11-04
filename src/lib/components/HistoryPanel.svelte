@@ -318,6 +318,8 @@
   let diffError = $state<string | null>(null);
   let diffLoading = $state(false);
   let scrollTop = $state(0);
+  /** 上一次真正读取用的条件：条件没变（只是从改动切回来）时不再把列表拉回顶部。 */
+  let lastReadSignature: string | null = null;
   let viewport = $state(0);
   let list = $state<HTMLDivElement | null>(null);
   let fileScroll = $state(0);
@@ -332,6 +334,13 @@
     visibleRange(commits.length, scrollTop, viewport > 0 ? viewport : scrollTop > 0 ? ROW_HEIGHT : 0, ROW_HEIGHT),
   );
   let visible = $derived(commits.slice(range.start, range.end));
+  /** 键盘游标所在的提交：与选中锚点一致，用 aria-activedescendant 指给辅助技术。 */
+  let cursorOid = $derived(anchorOid ?? selectedOids[0] ?? null);
+  let activeDescendant = $derived(
+    cursorOid && visible.some((commit) => commit.oid === cursorOid) ? "history-commit-" + cursorOid : undefined,
+  );
+  /** 已经在最新提交：此时「回到最新」没有可做的事，禁用并说明原因（R6）。 */
+  let atNewest = $derived(commits.length > 0 && scrollTop <= 0);
   let activeFile = $derived(detail ? preferredCommitFile(detail.files, manualPath ?? filePath) : null);
   let fileFilter = $state("");
   // 分组只改呈现，不写入设置，默认仍是列表。
@@ -520,6 +529,7 @@
     const scopeName = activeScope;
     const problem = dateProblem();
     const filters = historyFilters(Boolean(relative));
+    const signature = [repo, generation, relative ?? "", q, scopeName, activeAuthor, activeSince, activeUntil, activePath].join("\u0000");
     const previousPage = untrack(() => page);
     const serial = ++loadSerial;
     appendStopped = false;
@@ -553,8 +563,14 @@
             ? api.historyPage(repo, q, 0, generation, nextId(), filters)
             : api.historyPage(repo, q, 0, generation, nextId())));
         if (cancelled || serial !== loadSerial || opened.summary.path !== repo) return;
-        scrollTop = 0;
-        if (list) list.scrollTop = 0;
+        // 只有读取条件真的变了才回到顶部；从改动切回历史属于同一次浏览，滚动位置保留（R3）。
+        if (signature !== lastReadSignature) {
+          lastReadSignature = signature;
+          scrollTop = 0;
+          if (list) list.scrollTop = 0;
+        } else if (list && list.scrollTop !== scrollTop) {
+          list.scrollTop = scrollTop;
+        }
         commits = result.commits;
         page = {
           generation: result.generation,
@@ -979,6 +995,21 @@
       if (commit) commitMenu(commit, row ? pointFor(row) : { x: 160, y: 160 });
       return;
     }
+    if (event.key === "PageDown" || event.key === "PageUp") {
+      // 翻页也移动选择：只滚内容不移动当前项，键盘浏览时看不出自己停在哪一条。
+      if (commits.length === 0) return;
+      event.preventDefault();
+      const height = viewport > 0 ? viewport : (list?.clientHeight ?? ROW_HEIGHT);
+      const step = Math.max(1, Math.floor(height / ROW_HEIGHT));
+      const from = current >= 0 ? current : 0;
+      const next = Math.max(0, Math.min(commits.length - 1, from + (event.key === "PageDown" ? step : -step)));
+      reveal(next);
+      const target = commits[next];
+      if (!target) return;
+      if (event.shiftKey) selectedOids = commitSelectionRange(commits.map((commit) => commit.oid), anchorOid, target.oid);
+      else singleSelect(target.oid);
+      return;
+    }
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     const move = nextIndex(current, event.key, commits.length);
     if (move === null) return;
@@ -1221,6 +1252,7 @@
         role="listbox"
         aria-label={filePath ? "文件历史" : "提交历史"}
         tabindex="0"
+        aria-activedescendant={activeDescendant}
         bind:this={list}
         bind:clientHeight={viewport}
         aria-multiselectable="true"
@@ -1245,6 +1277,7 @@
             {#each visible as commit, index (commit.oid)}
               {@const pills = refPills(commit.labels)}
               <div
+                id={"history-commit-" + commit.oid}
                 class="history-row"
                 role="option"
                 aria-selected={selectedIds.has(commit.oid)}
@@ -1301,7 +1334,13 @@
           {#if commits.length > 0}已加载最新 1–{commits.length} 条{page?.hasMore ? "，还有更早的提交" : ""}{:else}—{/if}
         </span>
         <span class="spacer"></span>
-        <button type="button" class="btn btn-ghost btn-sm" onclick={backToNewest} disabled={commits.length === 0} title={commits.length === 0 ? "还没有提交" : undefined}>回到最新</button>
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm"
+          onclick={backToNewest}
+          disabled={commits.length === 0 || atNewest}
+          title={commits.length === 0 ? "还没有提交" : atNewest ? "已经在最新一条提交" : "滚回最新一条提交"}
+        >回到最新</button>
       </div>
     </aside>
     {@render paneResizer?.()}
@@ -1467,6 +1506,9 @@
               <span class="commit-email">{detail.commit.authorEmail}</span>
               <span title={formatAuthoredAt(detail.commit.authoredAt)}>{relativeTime(detail.commit.authoredAt)} · {formatAuthoredAt(detail.commit.authoredAt)}</span>
               <span class="commit-parents">{parentCaption(detail.commit.parents, detail.root)}</span>
+              <span class="read-only-chip" title="历史浏览是只读的：不切换分支，也不改动暂存区或工作区">
+                <Icon name="eye" size={12} />只读
+              </span>
               {#each pills as pill (`${pill.kind}:${pill.name}`)}
                 <span class={`ref-pill ${pill.kind}`} class:current={pill.current} title={pill.label} aria-label={pill.label}>
                   <Icon name={pill.kind === "tag" ? "tag" : pill.kind === "remote" ? "cloud" : "branch"} size={11} />
@@ -1489,6 +1531,7 @@
                 <Icon name={copiedOid === detail.commit.oid ? "check" : "copy"} size={12} />
               </button>
             </span>
+            <span class="sr-only" aria-live="polite">{copiedOid ? "已复制提交 " + shortOid(copiedOid) : ""}</span>
           </div>
           {#if detail.merge}
             <div class="commit-compare">

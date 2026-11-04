@@ -178,6 +178,7 @@
             role="combobox"
             aria-expanded="true"
             aria-controls="palette-list"
+            aria-activedescendant={filtered.length > 0 ? "palette-option-" + active : undefined}
             aria-autocomplete="list"
             autocomplete="off"
             spellcheck="false"
@@ -188,13 +189,15 @@
       </div>
       <div class="modal-body palette-body" id="palette-list" role="listbox" aria-label="命令">
         {#if filtered.length === 0}
-          <p class="palette-empty">没有匹配的命令</p>
+          <p class="palette-empty" role="status">没有匹配的命令</p>
+          <p class="palette-empty-hint">换个关键词试试，或按 Esc 关闭</p>
         {:else}
           {#each groups as group (group.name)}
             <div class="palette-group" role="group" aria-label={group.name}>
               <div class="palette-group-title">{group.name}</div>
               {#each group.items as item (item.id)}
                 <div
+                  id={"palette-option-" + positionOf(item)}
                   class="menu-item palette-item"
                   class:active={filtered[active] === item}
                   role="option"

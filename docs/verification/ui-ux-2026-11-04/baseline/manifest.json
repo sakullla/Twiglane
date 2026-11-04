@@ -1,6 +1,13 @@
 {
   "base": "http://127.0.0.1:1430",
-  "generatedAt": "2026-11-04T14:32:30.850Z",
+  "generatedAt": "2026-11-04T15:15:46.150Z",
+  "summary": {
+    "shots": 20,
+    "targets": 4,
+    "consoleErrors": 0,
+    "exceptions": 0,
+    "networkFailures": 0
+  },
   "shots": [
     {
       "file": "dark-1280x840-start.png",
@@ -16,7 +23,9 @@
         "historyRows": 0,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "dark-1280x840-changes.png",
@@ -32,7 +41,9 @@
         "historyRows": 0,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "dark-1280x840-history.png",
@@ -48,7 +59,9 @@
         "historyRows": 28,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "dark-1280x840-merge.png",
@@ -64,7 +77,9 @@
         "historyRows": 28,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "dark-1280x840-settings.png",
@@ -80,7 +95,9 @@
         "historyRows": 28,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "dark-900x600-start.png",
@@ -96,7 +113,9 @@
         "historyRows": 0,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "dark-900x600-changes.png",
@@ -112,7 +131,9 @@
         "historyRows": 0,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "dark-900x600-history.png",
@@ -128,7 +149,9 @@
         "historyRows": 23,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "dark-900x600-merge.png",
@@ -144,7 +167,9 @@
         "historyRows": 23,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "dark-900x600-settings.png",
@@ -160,7 +185,9 @@
         "historyRows": 23,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "light-1280x840-start.png",
@@ -176,7 +203,9 @@
         "historyRows": 0,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "light-1280x840-changes.png",
@@ -192,7 +221,9 @@
         "historyRows": 0,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "light-1280x840-history.png",
@@ -208,7 +239,9 @@
         "historyRows": 28,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "light-1280x840-merge.png",
@@ -224,7 +257,9 @@
         "historyRows": 28,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "light-1280x840-settings.png",
@@ -240,7 +275,9 @@
         "historyRows": 28,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "light-900x600-start.png",
@@ -256,7 +293,9 @@
         "historyRows": 0,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "light-900x600-changes.png",
@@ -272,7 +311,9 @@
         "historyRows": 0,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "light-900x600-history.png",
@@ -288,7 +329,9 @@
         "historyRows": 23,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "light-900x600-merge.png",
@@ -304,7 +347,9 @@
         "historyRows": 23,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     },
     {
       "file": "light-900x600-settings.png",
@@ -320,7 +365,9 @@
         "historyRows": 23,
         "horizontalOverflow": false
       },
-      "errors": []
+      "errors": [],
+      "exceptions": [],
+      "networkFailures": []
     }
   ]
 }

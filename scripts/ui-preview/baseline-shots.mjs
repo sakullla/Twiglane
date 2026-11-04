@@ -1,5 +1,6 @@
 // 优化前的界面基线截图：用 Chrome DevTools Protocol 驱动真实浏览器打开 mock 预览，
-// 逐个流程截图并存下控制台错误。产物只证明浏览器 + mock 数据下的界面外观，
+// 逐个流程截图并存下控制台 error、未捕获运行时异常（Runtime.exceptionThrown）
+// 和网络失败（Network.loadingFailed / 4xx-5xx 响应）。产物只证明浏览器 + mock 数据下的界面外观，
 // 不代表真实 Git 行为、也不代表桌面端（Windows/macOS 实机）结果。
 //
 // 用法：node scripts/ui-preview/baseline-shots.mjs [--base http://127.0.0.1:1430] [--out docs/verification/ui-ux-2026-11-04/baseline]
@@ -184,10 +185,42 @@ async function openCommand(cdp, sessionId, text, readySelector) {
   await pause(500);
 }
 
-function consoleErrors(cdp) {
-  return cdp.events
+/** flatten 会话下每个 target 的事件都带 sessionId；只统计本次截图所属 target。 */
+function targetEvents(cdp, sessionId) {
+  return cdp.events.filter((event) => event.sessionId === sessionId);
+}
+
+function consoleErrors(cdp, sessionId) {
+  return targetEvents(cdp, sessionId)
     .filter((event) => event.method === "Runtime.consoleAPICalled" && event.params.type === "error")
     .map((event) => event.params.args.map((arg) => arg.value ?? arg.description ?? arg.type).join(" "));
+}
+
+/**
+ * 未捕获的运行时异常。只收集 console.error 会把「没有打印错误」误当成「没有运行时错误」，
+ * 而 Promise rejection、事件回调抛错往往只在这里出现。
+ */
+function runtimeExceptions(cdp, sessionId) {
+  return targetEvents(cdp, sessionId)
+    .filter((event) => event.method === "Runtime.exceptionThrown")
+    .map((event) => {
+      const details = event.params.exceptionDetails ?? {};
+      const description = details.exception?.description ?? details.text ?? "未描述的异常";
+      const where = details.url ? ` @ ${details.url}:${(details.lineNumber ?? 0) + 1}` : "";
+      return String(description).split("\n")[0] + where;
+    });
+}
+
+/** 网络失败：请求本身失败（取消的导航排除）与 4xx/5xx 响应分开记录。 */
+function networkFailures(cdp, sessionId) {
+  const events = targetEvents(cdp, sessionId);
+  const failed = events
+    .filter((event) => event.method === "Network.loadingFailed" && !event.params.canceled)
+    .map((event) => `${event.params.type ?? "请求"} ${event.params.errorText ?? "失败"}`);
+  const badStatus = events
+    .filter((event) => event.method === "Network.responseReceived" && event.params.response?.status >= 400)
+    .map((event) => `HTTP ${event.params.response.status} ${event.params.response.url}`);
+  return [...failed, ...badStatus];
 }
 
 async function main() {
@@ -210,7 +243,7 @@ async function main() {
     { stdio: "ignore" },
   );
 
-  const manifest = { base, generatedAt: new Date().toISOString(), shots: [] };
+  const manifest = { base, generatedAt: new Date().toISOString(), summary: null, shots: [] };
   let cdp;
   try {
     const version = await waitForJson(port, "/json/version");
@@ -222,6 +255,7 @@ async function main() {
         const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
         await cdp.send("Page.enable", {}, sessionId);
         await cdp.send("Runtime.enable", {}, sessionId);
+        await cdp.send("Network.enable", {}, sessionId);
         await cdp.send(
           "Emulation.setDeviceMetricsOverride",
           { width: size.width, height: size.height, deviceScaleFactor: 1, mobile: false },
@@ -257,7 +291,16 @@ async function main() {
               };
             })()`,
           );
-          manifest.shots.push({ file, theme, size: size.label, view, state, errors: consoleErrors(cdp) });
+          manifest.shots.push({
+            file,
+            theme,
+            size: size.label,
+            view,
+            state,
+            errors: consoleErrors(cdp, sessionId),
+            exceptions: runtimeExceptions(cdp, sessionId),
+            networkFailures: networkFailures(cdp, sessionId),
+          });
           console.log("captured", file);
         };
 
@@ -296,9 +339,19 @@ async function main() {
     }
   }
 
+  const count = (key) => manifest.shots.reduce((total, item) => total + (item[key]?.length ?? 0), 0);
+  manifest.summary = {
+    shots: manifest.shots.length,
+    targets: THEMES.length * SIZES.length,
+    consoleErrors: count("errors"),
+    exceptions: count("exceptions"),
+    networkFailures: count("networkFailures"),
+  };
   fs.writeFileSync(path.join(outDir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
-  const errorCount = manifest.shots.reduce((total, item) => total + item.errors.length, 0);
-  console.log(`完成：${manifest.shots.length} 张截图，控制台错误 ${errorCount} 条，输出目录 ${outDir}`);
+  console.log(
+    `完成：${manifest.summary.shots} 张截图，控制台错误 ${manifest.summary.consoleErrors} 条，` +
+      `未捕获异常 ${manifest.summary.exceptions} 条，网络失败 ${manifest.summary.networkFailures} 条，输出目录 ${outDir}`,
+  );
 }
 
 main().catch((error) => {

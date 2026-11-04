@@ -76,10 +76,19 @@ function mockApiPlugin() {
   };
 }
 
+/**
+ * 取出可用于 net.connect 的字符串地址。
+ * `vite --host` 会把 server.host 设成布尔 true（监听全部网卡），此时不能把它当地址用；
+ * 布尔或未指定时回落到 127.0.0.1——监听全部网卡包含回环地址，用它探测端口占用仍然有效。
+ */
+function probeHost(host) {
+  return typeof host === "string" && host.trim() !== "" ? host : HOST;
+}
+
 /** 端口是否已被别的进程监听。用于在 Vite 打印空错误之前给出可执行的提示。 */
 function portInUse(port = PORT, host = HOST) {
   return new Promise((resolve) => {
-    const socket = net.connect({ host, port });
+    const socket = net.connect({ host: probeHost(host), port });
     const done = (busy) => {
       socket.removeAllListeners();
       socket.destroy();
@@ -91,23 +100,35 @@ function portInUse(port = PORT, host = HOST) {
   });
 }
 
+/**
+ * 端口被占用时的诊断与退出决策。抽成独立函数，让「占用时报了什么、是否退出」
+ * 可以被自动判定，而不是只能靠人工看终端。
+ * 返回 true 表示已经请求退出进程。
+ */
+function reportPortInUse({ host, port, logger, fatal = true, exit = (code) => process.exit(code) }) {
+  logger.error(probeHost(host) + ":" + port + " 已被其他进程占用，本次预览没有启动。");
+  logger.error("浏览器仍会打开旧页面，而旧服务加载的是真实 src/lib/api.ts，会报 Tauri invoke/transformCallback 错误。");
+  logger.error("处理：关闭占用该端口的旧 Vite/预览进程后重试；先用 curl " + HEALTH_PATH + " 确认当前端口是不是 mock 预览。");
+  if (!fatal) return false;
+  exit(1);
+  return true;
+}
+
 function previewGuardPlugin() {
   return {
     name: "twiglane-preview-guard",
     apply: "serve",
     async configureServer(server) {
       const { logger, server: serverOptions } = server.config;
-      const host = serverOptions.host || HOST;
+      // 只有字符串才是可连接地址；--host 给的布尔 true 交给 probeHost 回落。
+      const host = probeHost(serverOptions.host);
       const port = serverOptions.port || PORT;
       // middlewareMode 不监听端口（测试与嵌入场景）；vitest 同在进程内，失败时交给测试报错而不是退出进程。
       const listens = !serverOptions.middlewareMode;
       const fatal = listens && !process.env.VITEST;
 
-      if (listens && process.env[BOUND_ENV] !== "1" && (await portInUse(port, host))) {
-        logger.error(host + ":" + port + " 已被其他进程占用，本次预览没有启动。");
-        logger.error("浏览器仍会打开旧页面，而旧服务加载的是真实 src/lib/api.ts，会报 Tauri invoke/transformCallback 错误。");
-        logger.error("处理：关闭占用该端口的旧 Vite/预览进程后重试；先用 curl " + HEALTH_PATH + " 确认当前端口是不是 mock 预览。");
-        if (fatal) process.exit(1);
+      if (listens && process.env[BOUND_ENV] !== "1" && (await portInUse(port, serverOptions.host))) {
+        if (reportPortInUse({ host, port, logger, fatal })) return;
       }
       if (listens) process.env[BOUND_ENV] = "1";
 
@@ -137,7 +158,17 @@ function previewGuardPlugin() {
   };
 }
 
-export { HEALTH_PATH, HOST, PORT, realApi as REAL_API_MODULE, mockApi as MOCK_API_MODULE, sameFile, portInUse };
+export {
+  HEALTH_PATH,
+  HOST,
+  PORT,
+  realApi as REAL_API_MODULE,
+  mockApi as MOCK_API_MODULE,
+  sameFile,
+  probeHost,
+  portInUse,
+  reportPortInUse,
+};
 
 export default defineConfig({
   root,

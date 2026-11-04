@@ -2,7 +2,7 @@
   "base": "http://127.0.0.1:1430",
   "tag": "after",
   "collectedAfter": "T5-A3",
-  "note": "2026-11-05 为 T5-A3 阻断重采：本文件所有 afterCloseFocus 都由当前代码（含远程/克隆关闭后焦点恢复）实测，2026-11-04T19:08:54Z 那版里的 BODY 读数已作废；弹窗清单新增 remote 与 clone 两条命令面板路径。",
+  "note": "2026-11-05 为 T5-A3 阻断重采：本文件所有 afterCloseFocus 都由当时的代码（含远程/克隆关闭后焦点恢复）实测，2026-11-04T19:08:54Z 那版里的 BODY 读数已作废；弹窗清单新增 remote 与 clone 两条命令面板路径。T5-A4 注记：这里的读数都取自脚本按 Esc 关闭弹窗那一路（closeDialog），不覆盖克隆成功自动关窗那一路（那条 T5-A3 时焦点落到 body，见 t5.md 十三）；publish 条目的 afterCloseFocus 是等待弹窗超时后留下的命令面板输入框，不是发布弹窗读数。",
   "generatedAt": "2026-11-04T20:25:04.218Z",
   "targets": [
     {

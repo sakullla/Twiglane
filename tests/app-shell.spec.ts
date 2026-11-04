@@ -1529,6 +1529,36 @@ describe("应用外壳", () => {
     expect(document.activeElement, "后备也不是 body").not.toBe(document.body);
   });
 
+  it("起始页命令面板打开克隆：克隆成功自动关窗后焦点不落在 body", async () => {
+    const cloned = { summary: { name: "fresh", path: "/parent/fresh" }, generation: 1, snapshot, draft: "", watchDegraded: false };
+    let finish: (value: unknown) => void = () => {};
+    mocks.cloneRepository.mockReset();
+    mocks.cloneRepository.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    mocks.pickDirectory.mockResolvedValue("/parent");
+    render(App);
+    await waitFor(() => expect(document.querySelector(".welcome")).toBeTruthy());
+    // 起点是起始页，焦点还在 body：面板只能落到主内容区这个明确后备。
+    expect(document.activeElement, "起始页没有可回的控件").toBe(document.body);
+    const main = document.querySelector<HTMLElement>("main.content")!;
+
+    const palette = await openPalette();
+    await fireEvent.click(within(palette).getByRole("option", { name: /^克隆仓库/ }));
+    const dialog = await screen.findByRole("dialog", { name: "克隆仓库" });
+    await fireEvent.input(within(dialog).getByLabelText("远程地址"), { target: { value: "https://e.com/fresh.git" } });
+    await fireEvent.click(within(dialog).getByRole("button", { name: /选择目录/ }));
+    const start = within(dialog).getByRole("button", { name: /开始克隆/ });
+    await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+    await fireEvent.click(start);
+    await within(dialog).findByRole("button", { name: "在后台继续" });
+
+    // 窗口还开着时克隆完成：外壳直接打开新仓库并自动关窗，这条收尾不走 onClose。
+    finish({ path: "/parent/fresh", opened: cloned });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "克隆仓库" })).toBeNull());
+    expect(screen.getByRole("button", { name: "当前仓库 fresh" }), "新仓库已打开").toBeTruthy();
+    await waitFor(() => expect(document.activeElement, "自动关窗后不落 body").not.toBe(document.body));
+    expect(document.activeElement, "回到面板打开前定下的落点：主内容区").toBe(main);
+  });
+
   it("Git 不可用：入口可关闭、指向设置运行环境分区，起始页也接上了诊断（R10、R13）", async () => {
     mocks.getSettings.mockResolvedValue({
       theme: "dark",

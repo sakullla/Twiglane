@@ -603,9 +603,14 @@
     queueMicrotask(() => setTimeout(apply, 0));
   }
 
-  /** RepoDialogs 的关闭收尾：远程与克隆共用，先把回来的目标定下来再关。 */
+  /**
+   * RepoDialogs 的关闭收尾：远程与克隆共用，先把回来的目标定下来再关。
+   *
+   * 目标在清空之前取，且两个槽位一起看：克隆成功自动关窗时 `rememberOpened()` 已经先把
+   * `cloneOpen` 置假，只看 `cloneOpen` 会取到远程槽位里的 `null`，焦点就落回 body。
+   */
   function closeRepoDialogs() {
-    const target = cloneOpen ? repoReturnFocus : taskReturnFocus;
+    const target = repoReturnFocus ?? taskReturnFocus;
     cloneOpen = false;
     if (taskModal === "remote") taskModal = null;
     repoReturnFocus = null;
@@ -652,6 +657,14 @@
   }
 
   function rememberOpened(next: OpenedRepository) {
+    /**
+     * 克隆成功时窗口还开着，用户在看结果：外壳在这里就把窗口关掉。
+     *
+     * 这条路径不走 RepoDialogs 的 onClose——`startClone()` 回到自己那行时 `mode` 已经是
+     * null（`cloneOpen` 被下面置假），`if (mode === "clone") onClose()` 不再成立。
+     * 所以先记下「窗口还开着」，等状态改完再由同一个关闭收尾交回焦点，否则焦点留在 body。
+     */
+    const closingClone = cloneOpen;
     repositoryEpoch += 1;
     if (draftTimer) clearTimeout(draftTimer);
     drafts.load(next.summary.path, next.draft);
@@ -684,6 +697,7 @@
     live = `已打开 ${next.summary.name}`;
     void probeMerge();
     void loadSelectedDiff();
+    if (closingClone) closeRepoDialogs();
   }
 
   /**

@@ -27,6 +27,8 @@
      * 其余入口不传（等价于现在的首屏：外观在运行环境之上）。不改任何按钮行为。
      */
     section?: "appearance" | "runtime" | null;
+    /** 关闭后焦点去处（命令面板打开时由外壳传入）。 */
+    returnFocus?: HTMLElement | null;
   }
 
   let {
@@ -43,6 +45,7 @@
     onChooseGit,
     onClearGit,
     section = null,
+    returnFocus = null,
   }: Props = $props();
 
   const THEMES: { id: Theme; label: string }[] = [
@@ -89,6 +92,7 @@
   titleId="settings-modal-title"
   icon="settings"
   task="settings"
+  {returnFocus}
   onClose={onClose}
 >
   <section class="settings-section" data-settings-section="appearance">

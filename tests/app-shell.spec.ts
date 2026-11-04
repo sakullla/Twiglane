@@ -1427,6 +1427,70 @@ describe("应用外壳", () => {
     expect(screen.queryByRole("dialog", { name: "切换分支" })).toBeNull();
   });
 
+  it("命令面板打开的任务弹窗：Esc 后焦点回到打开面板前的控件，不落到 body", async () => {
+    mocks.branchState.mockResolvedValue(branchFixture());
+    mocks.tagState.mockResolvedValue({ generation: 4, tags: [], snapshot });
+    mocks.stashState.mockResolvedValue({
+      generation: 4,
+      preview: {
+        trackedCount: 2,
+        untrackedCount: 0,
+        ignoredCount: 0,
+        trackedPaths: ["src/App.svelte", "src/app.css"],
+        untrackedPaths: [],
+        ignoredPaths: [],
+        includeUntracked: false,
+        canSave: true,
+        summary: "将保存已跟踪的暂存和未暂存改动 2 个。",
+      },
+      records: [],
+      snapshot,
+    });
+    render(App);
+    await openRepo();
+    const origin = document.querySelector<HTMLElement>(".file-list")!;
+    origin.focus();
+    expect(document.activeElement, "出发点是面板打开前的控件").toBe(origin);
+
+    const entries: [RegExp, string][] = [
+      [/^临时保存/, "stash"],
+      [/^分支与标签/, "branch"],
+      [/^本次提交范围/, "scope"],
+      [/^分支合并/, "merge"],
+      [/^设置/, "settings"],
+    ];
+    for (const [name, task] of entries) {
+      const palette = await openPalette();
+      await fireEvent.click(within(palette).getByRole("option", { name }));
+      const modal = await waitFor(() => {
+        const node = document.querySelector<HTMLElement>(`[data-task-modal="${task}"]`);
+        expect(node, `${task}：面板要打开对应任务弹窗`).toBeTruthy();
+        return node!;
+      });
+      expect(modal.contains(document.activeElement), `${task}：打开后焦点在弹窗内`).toBe(true);
+      await fireEvent.keyDown(modal, { key: "Escape" });
+      await waitFor(() => expect(document.querySelector("[data-task-modal]")).toBeNull());
+      expect(document.activeElement, `${task}：Esc 后不落在 body`).not.toBe(document.body);
+      expect(document.activeElement, `${task}：回到打开面板前的控件`).toBe(origin);
+      origin.focus();
+    }
+
+    // 面板打开前焦点不在任何控件（刚进界面就按 ⌘K）：走明确后备，同样不落回 body。
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(document.activeElement).toBe(document.body);
+    const palette = await openPalette();
+    await fireEvent.click(within(palette).getByRole("option", { name: /^设置/ }));
+    const modal = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>('[data-task-modal="settings"]');
+      expect(node).toBeTruthy();
+      return node!;
+    });
+    await fireEvent.keyDown(modal, { key: "Escape" });
+    await waitFor(() => expect(document.querySelector("[data-task-modal]")).toBeNull());
+    expect(document.activeElement, "焦点不可用时落到主内容区").toBe(document.querySelector("main.content"));
+    expect(document.activeElement, "后备也不是 body").not.toBe(document.body);
+  });
+
   it("Git 不可用：入口可关闭、指向设置运行环境分区，起始页也接上了诊断（R10、R13）", async () => {
     mocks.getSettings.mockResolvedValue({
       theme: "dark",

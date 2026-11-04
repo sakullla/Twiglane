@@ -7,10 +7,12 @@
     scopeLabel: string;
     /** 本次将提交的路径；重命名以「旧 → 新」形式传入。 */
     paths: string[];
+    /** 关闭后焦点去处（命令面板打开时由外壳传入）。 */
+    returnFocus?: HTMLElement | null;
     onClose: () => void;
   }
 
-  let { scopeLabel, paths, onClose }: Props = $props();
+  let { scopeLabel, paths, returnFocus = null, onClose }: Props = $props();
 </script>
 
 <Modal
@@ -20,6 +22,7 @@
   size="md"
   task="scope"
   description={scopeLabel}
+  {returnFocus}
   onClose={onClose}
 >
   {#if paths.length === 0}

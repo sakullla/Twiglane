@@ -13,12 +13,25 @@
     onFailure: (error: unknown) => void;
     onNotice: (message: string) => void;
     onOpenChanges: (path: string) => void;
+    /** 关闭后焦点去处（命令面板打开时由外壳传入）。 */
+    returnFocus?: HTMLElement | null;
     /** 保存范围里的文件右键（或菜单键 / Shift+F10）：由外壳给出与改动列表一致的文件操作。 */
     onFileContextMenu?: (path: string, kind: "tracked" | "untracked" | "ignored", point: { x: number; y: number }) => void;
   }
 
-  let { opened, disabled, nextId, onClose, onGeneration, onSnapshot, onFailure, onNotice, onOpenChanges, onFileContextMenu }: Props =
-    $props();
+  let {
+    opened,
+    disabled,
+    nextId,
+    onClose,
+    onGeneration,
+    onSnapshot,
+    onFailure,
+    onNotice,
+    onOpenChanges,
+    onFileContextMenu,
+    returnFocus = null,
+  }: Props = $props();
 </script>
 
 <Modal
@@ -27,6 +40,7 @@
   icon="archive"
   size="lg"
   task="stash"
+  {returnFocus}
   onClose={onClose}
 >
   <StashPanel

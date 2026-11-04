@@ -41,6 +41,8 @@
     blockedReason?: string | null;
     /** 打开其他工作区成功后交给外壳切换当前仓库。 */
     onOpened?: (repo: OpenedRepository) => void;
+    /** 关闭后焦点去处（命令面板打开时由外壳传入）。 */
+    returnFocus?: HTMLElement | null;
     nextId: () => number;
   }
 
@@ -62,6 +64,7 @@
     branchGroups = true,
     blockedReason = null,
     onOpened,
+    returnFocus = null,
     nextId,
   }: Props = $props();
 
@@ -659,6 +662,7 @@
   size="xl"
   task="branch"
   locked={writeInFlight}
+  {returnFocus}
   {onClose}
 >
   <div class="branch-status" data-branch-status>

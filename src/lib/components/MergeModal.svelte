@@ -24,6 +24,8 @@
     onOpenHistory?: () => void;
     /** 设置里的分支分组，传给来源与目标两个分支选择器。 */
     branchGroups?: boolean;
+    /** 关闭后焦点去处（命令面板打开时由外壳传入）。 */
+    returnFocus?: HTMLElement | null;
   }
 
   let {
@@ -44,6 +46,7 @@
     onOpenChanges,
     onOpenHistory,
     branchGroups = true,
+    returnFocus = null,
   }: Props = $props();
 
   /** 路由与中止的落点：在标题行里排在标题之后，宽度不依赖标题长度。 */
@@ -59,6 +62,7 @@
   width="min(1480px, calc(100vw - 32px))"
   fill
   task="merge"
+  {returnFocus}
   onClose={onClose}
 >
   {#snippet headExtra()}

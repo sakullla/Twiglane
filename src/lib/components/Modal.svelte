@@ -59,6 +59,15 @@
      * 为真时 Esc、点背板和右上角关闭都不生效，写入结束后恢复。
      */
     locked?: boolean;
+    /**
+     * 关闭后焦点去处：调用方在打开前记下的有效触发点。
+     *
+     * 需要它的场景是「弹窗不是由某个控件直接打开」：例如从命令面板执行任务命令时，
+     * 面板与弹窗在同一批更新里换位，onMount 抓到的 activeElement 是随即卸载的搜索框，
+     * 交回焦点就落到了 body，只能由调用方把面板打开前的焦点传进来。
+     * 不传时仍按原语义退回 onMount 抓到的元素。
+     */
+    returnFocus?: HTMLElement | null;
     onClose: () => void;
     children: Snippet;
     footer?: Snippet;
@@ -77,6 +86,7 @@
     task,
     description = "",
     locked = false,
+    returnFocus = null,
     onClose,
     children,
     footer,
@@ -153,7 +163,9 @@
   }
 
   onMount(() => {
-    previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // 调用方显式指定且仍在文档里时以它为准；否则退回打开瞬间的 activeElement。
+    const explicit = returnFocus instanceof HTMLElement && returnFocus.isConnected ? returnFocus : null;
+    previous = explicit ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     if (backdrop && topModalLayer() === layer) releaseBackground = inertBackground(backdrop);
     const body = card?.querySelector<HTMLElement>(".modal-body");
     const first =

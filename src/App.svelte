@@ -183,6 +183,16 @@
   /** 从分支弹层右键「从此分支新建」带来的起点；空串表示当前分支。 */
   let branchCreateBase = $state("");
   let paletteOpen = $state(false);
+  /**
+   * 命令面板打开前的有效焦点。
+   *
+   * 面板里执行任务命令时，面板与任务弹窗在同一批更新里换位：弹窗挂载那刻面板的搜索框已经
+   * 卸载，Modal 自己抓不到真正的触发点，关闭后焦点就落到 body。所以这里先记下打开面板前
+   * 的控件，再由 Modal 的 returnFocus 用它收尾。
+   */
+  let paletteFocusOrigin: HTMLElement | null = null;
+  /** 当前任务弹窗关闭后的焦点去处；为空表示按 Modal 原有语义（打开瞬间的 activeElement）。 */
+  let taskReturnFocus = $state<HTMLElement | null>(null);
   /** 当前打开的右键菜单（文件列表、最近仓库）；任务 modal 里的右键菜单由各自组件承载。 */
   let contextMenu = $state<ContextMenuRequest | null>(null);
   let recovery = $state<{ discard: (paths?: string[]) => Promise<void> } | null>(null);
@@ -478,6 +488,8 @@
     }
     closeSwitcher();
     cloneOpen = false;
+    // 面板在批内卸载：先在它关闭前定下关闭弹窗时该回到哪，再交给 Modal。
+    taskReturnFocus = paletteOpen ? paletteReturnFocus() : null;
     paletteOpen = false;
     branchCreateIntent = false;
     branchCreateBase = "";
@@ -545,7 +557,25 @@
   function openPalette() {
     if (taskModal || cloneOpen) return;
     closeSwitcher();
+    paletteFocusOrigin = focusableOrigin();
     paletteOpen = true;
+  }
+
+  /** 能把焦点交回的元素：有焦点、仍在文档里，且不是 body（body 没有位置，读屏会从头再来）。 */
+  function focusableOrigin(): HTMLElement | null {
+    const active = document.activeElement;
+    return active instanceof HTMLElement && active !== document.body && active.isConnected ? active : null;
+  }
+
+  /**
+   * 命令面板打开后焦点去处：优先回到打开面板前的控件；面板是刚进界面按 ⌘K 打开的
+   * （那时焦点还在 body）才落到主内容区这个明确后备，而不是任由焦点留在 body。
+   */
+  function paletteReturnFocus(): HTMLElement | null {
+    const origin = paletteFocusOrigin;
+    if (origin?.isConnected) return origin;
+    const main = document.querySelector<HTMLElement>("[data-app-main]");
+    return main instanceof HTMLElement ? main : null;
   }
 
   async function loadSettings() {
@@ -2299,7 +2329,9 @@
   {/if}
 
   <div class="workspace" data-sidebar={sidebarHidden ? "hidden" : "visible"} style={`--files:${paneWidth}px`}>
-    <main class="content">
+    <!-- 命令面板从 body 打开时，弹窗关闭后的焦点落到这里：主内容区本身可编程聚焦（不进 Tab 序），
+         比回到 body 更接近用户离开的地方。 -->
+    <main class="content" data-app-main tabindex="-1">
       {#snippet paneHead()}
         <div class="pane-head">
           <ViewSwitcher view={workspaceView} {changeCount} onView={(view) => runCommand(`view.${view}`)} />
@@ -2542,6 +2574,7 @@
 {#if opened && taskModal === "stash"}
   <StashModal
     {opened}
+    returnFocus={taskReturnFocus}
     disabled={writeLocked}
     {nextId}
     onClose={closeTask}
@@ -2555,6 +2588,7 @@
 {:else if opened && taskModal === "merge"}
   <MergeModal
     {opened}
+    returnFocus={taskReturnFocus}
     focusPath={conflictFocus}
     initialSource={mergeSource}
     initialTarget={mergeTarget}
@@ -2581,6 +2615,7 @@
 {:else if opened && taskModal === "branch"}
   <BranchDialog
     {opened}
+    returnFocus={taskReturnFocus}
     disabled={writeLocked}
     onClose={closeTask}
     onBusy={(name) => (pending = name)}
@@ -2606,6 +2641,7 @@
   <SettingsModal
     {theme}
     {git}
+    returnFocus={taskReturnFocus}
     disabled={writeLocked}
     section={settingsSection}
     onClose={closeTask}
@@ -2619,10 +2655,16 @@
     onClearGit={clearGit}
   />
 {:else if opened && taskModal === "scope"}
-  <ScopeModal scopeLabel={scope.label} paths={scope.paths} onClose={closeTask} />
+  <ScopeModal
+    scopeLabel={scope.label}
+    paths={scope.paths}
+    returnFocus={taskReturnFocus}
+    onClose={closeTask}
+  />
 {:else if opened && taskModal === "publish"}
   <PublishModal
     branch={branchText}
+    returnFocus={taskReturnFocus}
     upstream={opened.snapshot.branch.upstream}
     remote={remoteName ?? "origin"}
     {ahead}

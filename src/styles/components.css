@@ -304,6 +304,9 @@
 .diff.embedded .split-hbars { position: sticky; bottom: 0; z-index: 2; }
 .file-group { position: absolute; left: var(--space-8); right: var(--space-8); display: flex; align-items: center; gap: var(--space-6); padding: 0 var(--space-2) 0 var(--space-8); font-size: var(--text-xs); font-weight: var(--weight-semibold); letter-spacing: 0.02em; color: var(--fg-subtle); }
 /* 分组标题在最窄栏宽（160px）下不能逐字折行成竖排：标题单行省略，计数与按钮不收缩。 */
+/* 分区起点：1px 线，纯分区（不承担控件边界），占用表头自身高度，不改变行高与虚拟化。 */
+.file-group.first::before { display: none; }
+.file-group::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 1px; background: var(--border); }
 .file-group > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-group > .count, .file-group > .btn { flex: none; }
 .pane-title { white-space: nowrap; }
@@ -449,6 +452,9 @@
 .composer-meta .composer-ready { color: var(--fg-muted); }
 .composer-meta:has(.composer-ready) > .icon { color: var(--success-text); }
 /* 提交失败的行内原因（R5）：与 data-commit-blocker 同一行、同一块，只是换成危险语义。 */
+/* 暂存区为空是「还没做」而不是「做错了」：图标取警告语义，与右上角范围标签的 .empty-scope 同一档，
+   文字仍用弱化色，避免整行变成报警条。 */
+.composer-meta.warn > .icon { color: var(--warning-text); }
 .composer-meta .composer-error { color: var(--danger-text); }
 .composer-meta:has(.composer-error) > .icon { color: var(--danger-text); }
 .composer-inline-action {
@@ -464,6 +470,8 @@
   white-space: nowrap;
   transition: background var(--duration-fast) var(--ease);
 }
+/* 字数提示已经在右端吃掉自动外边距，按钮就紧跟在它后面，不再被推到另一侧。 */
+.composer-count + .composer-inline-action { margin-left: 0; }
 .composer-inline-action:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 20%, transparent); }
 .composer-inline-action:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
 .composer-actions { display: flex; gap: var(--space-6); min-width: 0; }
@@ -498,6 +506,17 @@
 /* 窄时路径放不下，省略号不能吃掉文件名：目录交给提示，只留文件名。 */
 @container diff (max-width: 640px) { .file-nav-pos, .diff-path .dir { display: none; } }
 .diff-toolbar { display: flex; align-items: center; gap: var(--space-8); min-height: 44px; padding: 0 var(--space-8) 0 var(--space-12); border-bottom: 1px solid var(--border); flex: none; min-width: 0; background: var(--surface); }
+/* 工具条分段（T3）：段内间距 = 工具条间距，段间多一条 1px 装饰竖线加一档内边距。
+   这样「文件位置/身份 | 它能做什么 | 怎么显示」在视觉上成组，和从左到右的操作顺序一致；
+   竖线只是分区，不承担控件边界，所以走 --border 而不是 --control-border。 */
+.diff-toolbar-group { display: flex; align-items: center; gap: var(--space-8); min-width: 0; flex: none; }
+.diff-toolbar-group.context { flex: 1 1 auto; }
+.diff-toolbar-group + .diff-toolbar-group { padding-left: var(--space-8); border-left: 1px solid var(--border); }
+/* 多文件工具条控件更多：段内间距收一档，窄窗口也能把「已选 N 个文件」和批量动作都放下。 */
+.multi-stack .diff-toolbar { gap: var(--space-6); }
+.multi-stack .diff-toolbar-group { gap: var(--space-6); }
+.multi-stack .diff-file { overflow: hidden; }
+.multi-stack-count { overflow: hidden; text-overflow: ellipsis; }
 .diff-file { display: flex; align-items: center; gap: var(--space-8); min-width: 0; flex: 1; }
 .diff-file > .icon { color: var(--fg-subtle); }
 .diff-path { font-family: var(--mono); font-size: var(--text-sm); min-width: 40px; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -620,6 +639,8 @@
 .empty-icon.err { background: var(--danger-soft); color: var(--danger); box-shadow: none; }
 .empty strong { color: var(--fg); font-size: var(--text-base); font-weight: var(--weight-semibold); letter-spacing: 0; }
 .empty p { max-width: 380px; font-size: var(--text-sm); line-height: var(--leading-relaxed); color: var(--fg-muted); word-break: break-word; }
+/* 空状态里的就地恢复入口（例如差异读取失败的「重新读取」）与说明拉开一档。 */
+.empty > .btn { margin-top: var(--space-8); }
 .empty.compact { padding: var(--space-24) 14px; flex: none; }
 
 /* ---------- toast ---------- */

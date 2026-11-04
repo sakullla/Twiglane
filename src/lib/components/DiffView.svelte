@@ -41,6 +41,10 @@
     /** embedded：块重新挂载时恢复的横向位置，以及位置变化的上报。 */
     scrollX?: number;
     onScrollX?: (left: number) => void;
+    /** 工作区的改动文件数。为 0 时右侧空状态说「没有改动」，不再让用户去找一个不存在的文件。 */
+    fileCount?: number;
+    /** 差异读取失败后的重试入口；单文件视图才传，多文件视图按块自己重读。 */
+    onRetry?: () => void;
   }
 
   /**
@@ -68,6 +72,8 @@
     layout,
     scrollX = 0,
     onScrollX,
+    fileCount,
+    onRetry,
   }: Props = $props();
   let menu = $state<ContextMenuRequest | null>(null);
   let ownMode = $state<"unified" | "split">("unified");
@@ -126,6 +132,10 @@
   });
   let parts = $derived(selection ? splitPath(selection.path) : null);
   let showStats = $derived(Boolean(currentDiff));
+  /** 中间那一段：只有真的有文件动作时才画，免得空段留下一条竖线和一段多余间距。 */
+  let hasFileTools = $derived(
+    Boolean(selection && (onFileHistory || onFullFile || (currentDiff && !currentDiff.binary))),
+  );
 
   $effect(() => {
     const node = root;
@@ -441,62 +451,72 @@
 
 <section class="diff dense" class:embedded aria-label="差异详情" tabindex="-1" bind:this={root} title={cramped ? "窗口太窄，暂时使用统一视图" : undefined}>
   {#if !embedded}
+  <!-- 工具条分三段：文件位置/身份 → 能对这个文件做什么 → 怎么显示。同段靠在一起，
+       段与段之间一条装饰竖线，扫视顺序与操作顺序一致（先认出文件，再选动作，最后是布局）。 -->
   <div class="diff-toolbar">
-    {#if fileNav}<FileNav nav={fileNav} />{/if}
-    <div class="diff-file">
-      {#if selection && parts}
-        <Icon name="file-diff" size={15} />
-        <span class="diff-path" title={selection.path}>
-          <bdi>{#if parts.dir}<span class="dir">{parts.dir}/</span>{/if}<strong>{parts.name}</strong></bdi>
-        </span>
-        {#if !readOnly}
-          <span class="diff-side" class:staged={selection.side === "staged"}>
-            {selection.side === "staged" ? "已暂存" : "未暂存"}
+    <div class="diff-toolbar-group context">
+      {#if fileNav}<FileNav nav={fileNav} />{/if}
+      <div class="diff-file">
+        {#if selection && parts}
+          <Icon name="file-diff" size={15} />
+          <span class="diff-path" title={selection.path}>
+            <bdi>{#if parts.dir}<span class="dir">{parts.dir}/</span>{/if}<strong>{parts.name}</strong></bdi>
           </span>
+          {#if !readOnly}
+            <span class="diff-side" class:staged={selection.side === "staged"}>
+              {selection.side === "staged" ? "已暂存" : "未暂存"}
+            </span>
+          {/if}
+          {#if showStats && currentDiff}
+            <LineCounts
+              stat={currentDiff.binary
+                ? { additions: null, deletions: null, oldSize: currentDiff.oldSize, newSize: currentDiff.newSize }
+                : { additions: currentDiff.additions, deletions: currentDiff.deletions }}
+            />
+          {/if}
+          {#if cramped}
+            <span class="diff-summary" title="窗口太窄，暂时使用统一视图">窗口太窄，暂时使用统一视图</span>
+          {/if}
+        {:else}
+          <span class="hint">差异</span>
         {/if}
-        {#if showStats && currentDiff}
-          <LineCounts
-            stat={currentDiff.binary
-              ? { additions: null, deletions: null, oldSize: currentDiff.oldSize, newSize: currentDiff.newSize }
-              : { additions: currentDiff.additions, deletions: currentDiff.deletions }}
-          />
-        {/if}
-        {#if cramped}
-          <span class="diff-summary" title="窗口太窄，暂时使用统一视图">窗口太窄，暂时使用统一视图</span>
-        {/if}
-      {:else}
-        <span class="hint">差异</span>
-      {/if}
+      </div>
+      {#if loading && currentDiff}<span class="spinner muted" aria-hidden="true"></span>{/if}
     </div>
-    {#if loading && currentDiff}<span class="spinner muted" aria-hidden="true"></span>{/if}
-    {#if currentDiff && !currentDiff.binary && selection}
-      <LanguagePicker path={selection.path} />
+    {#if hasFileTools}
+      <div class="diff-toolbar-group">
+        {#if currentDiff && !currentDiff.binary && selection}
+          <LanguagePicker path={selection.path} />
+        {/if}
+        {#if onFileHistory && selection}
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm"
+            aria-label="此文件历史"
+            title="查看这个文件的提交历史"
+            onclick={() => onFileHistory?.(selection.path)}
+          >
+            <Icon name="history" size={14} /><span class="diff-hist-label">此文件历史</span>
+          </button>
+        {/if}
+        {#if onFullFile && selection}
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm diff-full-toggle"
+            aria-pressed={fullFile}
+            title={fullFile ? "只显示改动附近的内容" : "把整份文件都显示出来（改动仍高亮）"}
+            onclick={() => onFullFile?.(!fullFile)}
+          >
+            <Icon name="rows" size={13} /><span class="diff-hist-label">{fullFile ? "完整文件" : "只看改动"}</span>
+          </button>
+        {/if}
+      </div>
     {/if}
-    {#if onFileHistory && selection}
-      <button
-        type="button"
-        class="btn btn-ghost btn-sm"
-        aria-label="此文件历史"
-        title="查看这个文件的提交历史"
-        onclick={() => onFileHistory?.(selection.path)}
-      >
-        <Icon name="history" size={14} /><span class="diff-hist-label">此文件历史</span>
-      </button>
-    {/if}
-    {#if onFullFile && selection}
-      <button
-        type="button"
-        class="btn btn-ghost btn-sm diff-full-toggle"
-        aria-pressed={fullFile}
-        title={fullFile ? "只显示改动附近的内容" : "把整份文件都显示出来（改动仍高亮）"}
-        onclick={() => onFullFile?.(!fullFile)}
-      >
-        <Icon name="rows" size={13} /><span class="diff-hist-label">{fullFile ? "完整文件" : "只看改动"}</span>
-      </button>
-    {/if}
-    <div class="segmented" role="group" aria-label="差异布局">
-      <button type="button" aria-pressed={preferred === "unified"} title="统一视图" onclick={() => (ownMode = "unified")}><Icon name="rows" size={12} />统一</button>
-      <button type="button" aria-pressed={preferred === "split"} title="并排视图" onclick={() => (ownMode = "split")}><Icon name="split" size={12} />并排</button>
+    <div class="diff-toolbar-group">
+      <div class="segmented" role="group" aria-label="差异布局">
+        <button type="button" aria-pressed={preferred === "unified"} title="统一视图" onclick={() => (ownMode = "unified")}><Icon name="rows" size={12} />统一</button>
+        <button type="button" aria-pressed={preferred === "split"} title="并排视图" onclick={() => (ownMode = "split")}><Icon name="split" size={12} />并排</button>
+      </div>
     </div>
   </div>
   {/if}
@@ -505,11 +525,16 @@
       <span class="empty-icon err"><Icon name="alert-circle" size={24} /></span>
       <strong>差异没有读取完成</strong>
       <p>{error}</p>
+      {#if onRetry}
+        <!-- R5：失败就地可恢复。走和选择文件同一条读取路径（token/generation 不变），不绕过防护。 -->
+        <button type="button" class="btn btn-secondary btn-sm" onclick={onRetry}>重新读取</button>
+      {/if}
     </div>
   {:else if !selection}
     <div class="empty">
       <span class="empty-icon"><Icon name="file-diff" size={24} /></span>
-      <strong>选择一个文件查看差异</strong>
+      <strong>{fileCount === 0 ? "工作区没有未提交的改动" : "选择一个文件查看差异"}</strong>
+      {#if fileCount === 0}<p>左栏为空时右侧没有可看的内容，可以刷新或切到历史。</p>{/if}
     </div>
   {:else if loading && !currentDiff}
     <div class="empty" role="status" aria-busy="true">

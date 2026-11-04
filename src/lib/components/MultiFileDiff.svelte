@@ -344,37 +344,46 @@
 </script>
 
 <section class="diff dense multi-stack" aria-label="多文件差异">
+  <!-- 三段：选中范围 → 对这批文件做什么 → 怎么看。控件顺序与 tab 顺序都不动（暂存、取消暂存、
+       放弃、折叠、完整文件、布局、退出），只是用竖线把「批量动作」和「显示方式」分开：
+       破坏性的「放弃」因此落在批量段的末尾，而不是孤零零地夹在两种动作中间。 -->
   <div class="diff-toolbar">
-    <FileNav {nav} />
-    <div class="diff-file">
-      <Icon name="layers" size={15} />
-      <strong class="multi-stack-count">已选 {rows.length} 个文件</strong>
+    <div class="diff-toolbar-group context">
+      <FileNav {nav} />
+      <div class="diff-file">
+        <Icon name="layers" size={15} />
+        <strong class="multi-stack-count">已选 {rows.length} 个文件</strong>
+      </div>
     </div>
-    <button type="button" class="btn btn-ghost btn-sm" aria-label={`暂存 ${stageCount} 个文件`} title={disabled ? BUSY_REASON : stageCount === 0 ? "选中的文件里没有可暂存的改动" : excluded("暂存选中文件")} disabled={disabled || stageCount === 0} onclick={onStage}>
-      <Icon name="plus" size={13} /><span class="diff-hist-label">暂存</span>
-    </button>
-    <button type="button" class="btn btn-ghost btn-sm" aria-label={`取消暂存 ${unstageCount} 个文件`} title={disabled ? BUSY_REASON : unstageCount === 0 ? "选中的文件里没有已暂存的改动" : excluded("取消暂存选中文件")} disabled={disabled || unstageCount === 0} onclick={onUnstage}>
-      <Icon name="minus" size={13} /><span class="diff-hist-label">取消暂存</span>
-    </button>
-    <button type="button" class="icon-btn sm danger" aria-label={`放弃 ${discardCount} 个文件的更改`} title={disabled ? BUSY_REASON : discardCount === 0 ? "选中的文件里没有可放弃的改动" : excluded("放弃选中文件的更改，会先列出全部影响")} disabled={disabled || discardCount === 0} onclick={onDiscard}>
-      <Icon name="trash" size={14} />
-    </button>
-    <button type="button" class="icon-btn sm" aria-label="全部收起" title={allCollapsed ? "已经全部收起" : "收起全部文件"} disabled={allCollapsed} onclick={() => (collapsed = new Set(keys))}>
-      <Icon name="chevron-down" size={14} class="flip" />
-    </button>
-    <button type="button" class="icon-btn sm" aria-label="全部展开" title={noneCollapsed ? "已经全部展开" : "展开全部文件"} disabled={noneCollapsed} onclick={() => (collapsed = new Set())}>
-      <Icon name="chevron-down" size={14} />
-    </button>
-    <button type="button" class="btn btn-ghost btn-sm diff-full-toggle" aria-pressed={fullFile} title={fullFile ? "只显示改动附近的内容" : "把整份文件都显示出来（改动仍高亮）"} onclick={() => onFullFile(!fullFile)}>
-      <Icon name="rows" size={13} /><span class="diff-hist-label">{fullFile ? "完整文件" : "只看改动"}</span>
-    </button>
-    <div class="segmented" role="group" aria-label="差异布局">
-      <button type="button" aria-pressed={mode === "unified"} title="统一视图" onclick={() => (mode = "unified")}><Icon name="rows" size={12} />统一</button>
-      <button type="button" aria-pressed={mode === "split"} title="并排视图" onclick={() => (mode = "split")}><Icon name="split" size={12} />并排</button>
+    <div class="diff-toolbar-group">
+      <button type="button" class="btn btn-ghost btn-sm" aria-label={`暂存 ${stageCount} 个文件`} title={disabled ? BUSY_REASON : stageCount === 0 ? "选中的文件里没有可暂存的改动" : excluded("暂存选中文件")} disabled={disabled || stageCount === 0} onclick={onStage}>
+        <Icon name="plus" size={13} /><span class="diff-hist-label">暂存</span>
+      </button>
+      <button type="button" class="btn btn-ghost btn-sm" aria-label={`取消暂存 ${unstageCount} 个文件`} title={disabled ? BUSY_REASON : unstageCount === 0 ? "选中的文件里没有已暂存的改动" : excluded("取消暂存选中文件")} disabled={disabled || unstageCount === 0} onclick={onUnstage}>
+        <Icon name="minus" size={13} /><span class="diff-hist-label">取消暂存</span>
+      </button>
+      <button type="button" class="icon-btn sm danger" aria-label={`放弃 ${discardCount} 个文件的更改`} title={disabled ? BUSY_REASON : discardCount === 0 ? "选中的文件里没有可放弃的改动" : excluded("放弃选中文件的更改，会先列出全部影响")} disabled={disabled || discardCount === 0} onclick={onDiscard}>
+        <Icon name="trash" size={14} />
+      </button>
     </div>
-    <button type="button" class="icon-btn sm" aria-label="退出多选" title="退出多选，回到当前文件（Esc）" onclick={onClear}>
-      <Icon name="x" size={14} />
-    </button>
+    <div class="diff-toolbar-group">
+      <button type="button" class="icon-btn sm" aria-label="全部收起" title={allCollapsed ? "已经全部收起" : "收起全部文件"} disabled={allCollapsed} onclick={() => (collapsed = new Set(keys))}>
+        <Icon name="chevron-down" size={14} class="flip" />
+      </button>
+      <button type="button" class="icon-btn sm" aria-label="全部展开" title={noneCollapsed ? "已经全部展开" : "展开全部文件"} disabled={noneCollapsed} onclick={() => (collapsed = new Set())}>
+        <Icon name="chevron-down" size={14} />
+      </button>
+      <button type="button" class="btn btn-ghost btn-sm diff-full-toggle" aria-pressed={fullFile} title={fullFile ? "只显示改动附近的内容" : "把整份文件都显示出来（改动仍高亮）"} onclick={() => onFullFile(!fullFile)}>
+        <Icon name="rows" size={13} /><span class="diff-hist-label">{fullFile ? "完整文件" : "只看改动"}</span>
+      </button>
+      <div class="segmented" role="group" aria-label="差异布局">
+        <button type="button" aria-pressed={mode === "unified"} title="统一视图" onclick={() => (mode = "unified")}><Icon name="rows" size={12} />统一</button>
+        <button type="button" aria-pressed={mode === "split"} title="并排视图" onclick={() => (mode = "split")}><Icon name="split" size={12} />并排</button>
+      </div>
+      <button type="button" class="icon-btn sm" aria-label="退出多选" title="退出多选，回到当前文件（Esc）" onclick={onClear}>
+        <Icon name="x" size={14} />
+      </button>
+    </div>
   </div>
   <div
     class="multi-stack-scroll"

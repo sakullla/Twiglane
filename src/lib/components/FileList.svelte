@@ -324,7 +324,14 @@
       {#each visible as item, index (item.kind === "header" ? `h:${item.side}` : item.kind === "dir" ? `d:${item.side}:${item.directory}` : `${item.row.side}:${item.row.path}`)}
         {@const top = (range.start + index) * ROW_HEIGHT}
         {#if item.kind === "header"}
-          <div class="file-group" role="presentation" style={`top:${top}px;height:${ROW_HEIGHT}px`}>
+          <!-- 分区之间一条细线：冲突/未暂存/已暂存三段在同一个列表里滚动，靠线而不是靠更多留白分区。
+               第一条上面就是搜索框，不画线。 -->
+          <div
+            class="file-group"
+            class:first={range.start + index === 0}
+            role="presentation"
+            style={`top:${top}px;height:${ROW_HEIGHT}px`}
+          >
             <span>{item.side === "conflicted" ? "冲突" : item.side === "unstaged" ? "未暂存的改动" : "已暂存"}</span>
             <span class="count" class:danger={item.side === "conflicted"}>{item.count}</span>
             <span class="spacer"></span>

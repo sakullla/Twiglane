@@ -710,6 +710,7 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".scope-list": "提交范围路径清单容器轮廓，清单项是只读文本",
   ".composer": "提交区与上方差异面板之间的顶部分区线",
   ".diff-toolbar": "差异工具条底部分隔线",
+  ".diff-toolbar-group + .diff-toolbar-group": "工具条内部的分段竖线，只把位置/动作/视图三类控件分区，本身不可交互",
   ".diff-more": "差异面板底部横向分隔线",
   ".full-value": "详情弹窗的只读展示框（readonly textarea），只区分文本块；可编辑态 textarea.full-value.editable 用控件边界",
   ".multi-file": "多文件卡外框，卡内文件行自带交互反馈",
@@ -961,5 +962,41 @@ describe("代码窗口横向滚动（R21）", () => {
     expect(ruler).toMatch(/visibility:\s*hidden/);
     expect(ruleBody(components, ".code-ruler::after")).toMatch(/width:\s*var\(--code-floor, 0\)/);
     expect(ruleBody(components, ".virtual-space, .cr-space")).toMatch(/width:\s*max-content/);
+  });
+});
+
+describe("改动链路的扫描顺序与状态语义（T3）", () => {
+  const components = read("src/styles/components.css");
+
+  it("差异工具条的分段竖线是装饰，段内段外间距分得开", () => {
+    expect(ruleBody(components, ".diff-toolbar-group")).toMatch(/gap:\s*var\(--space-8\)/);
+    // 只有「位置/身份」那一段吃掉剩余宽度：路径该收缩，动作与布局不该被挤扁。
+    expect(ruleBody(components, ".diff-toolbar-group.context")).toMatch(/flex:\s*1 1 auto/);
+    const separator = ruleBody(components, ".diff-toolbar-group + .diff-toolbar-group");
+    expect(separator, "竖线只做分区，走 --border").toMatch(/border-left:\s*1px solid var\(--border\)/);
+    expect(separator).toMatch(/padding-left:\s*var\(--space-8\)/);
+  });
+
+  it("多文件工具条控件更多：段内间距再收一档，计数可以省略但不能溢出", () => {
+    expect(ruleBody(components, ".multi-stack .diff-toolbar")).toMatch(/gap:\s*var\(--space-6\)/);
+    expect(ruleBody(components, ".multi-stack .diff-file")).toMatch(/overflow:\s*hidden/);
+    expect(ruleBody(components, ".multi-stack-count")).toMatch(/text-overflow:\s*ellipsis/);
+  });
+
+  it("文件列表的分区线画在表头上，不占行高、不改虚拟化", () => {
+    const line = ruleBody(components, ".file-group::before");
+    expect(line).toMatch(/position:\s*absolute/);
+    expect(line).toMatch(/height:\s*1px/);
+    expect(line).toMatch(/background:\s*var\(--border\)/);
+    expect(ruleBody(components, ".file-group.first::before")).toMatch(/display:\s*none/);
+  });
+
+  it("暂存区为空取警告语义，与范围标签同一档；字数提示不挤掉「全部暂存」", () => {
+    expect(ruleBody(components, ".composer-meta.warn > .icon")).toMatch(/color:\s*var\(--warning-text\)/);
+    expect(ruleBody(components, ".composer-count + .composer-inline-action")).toMatch(/margin-left:\s*0/);
+  });
+
+  it("空状态里的恢复按钮与说明文字拉开一档", () => {
+    expect(ruleBody(components, ".empty > .btn")).toMatch(/margin-top:\s*var\(--space-8\)/);
   });
 });

@@ -2443,6 +2443,8 @@
                   fullFile={diffFullFile}
                   onFullFile={setFullFile}
                   fileNav={changesNav}
+                  fileCount={opened.snapshot.files.length}
+                  onRetry={() => void loadSelectedDiff()}
                 />
               {/if}
             </div>

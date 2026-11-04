@@ -1036,6 +1036,81 @@ describe("差异与提交", () => {
   });
 });
 
+describe("差异工具条分段与空/失败状态（T3）", () => {
+  const base = () => ({
+    error: null as string | null,
+    loading: false,
+    disabled: false,
+    onStageHunk: () => {},
+    onLoadMore: () => {},
+  });
+  const nav = () => ({
+    index: 1,
+    total: 3,
+    prevReason: null as string | null,
+    nextReason: null as string | null,
+    onPrev: () => {},
+    onNext: () => {},
+  });
+
+  it("工具条按「位置与身份 → 文件动作 → 显示方式」三段排列", () => {
+    render(DiffView, {
+      props: {
+        ...base(),
+        selection,
+        diff,
+        fileNav: nav(),
+        onFileHistory: () => {},
+        onFullFile: () => {},
+      },
+    });
+    const toolbar = document.querySelector(".diff-toolbar") as HTMLElement;
+    const groups = [...toolbar.children] as HTMLElement[];
+    expect(groups).toHaveLength(3);
+    expect(groups[0].className).toContain("context");
+    // 第一段：上一个/下一个文件 + 路径与侧别，位置信息在前。
+    expect(groups[0].querySelector(".file-nav")).toBeTruthy();
+    expect(groups[0].querySelector(".diff-path")).toBeTruthy();
+    // 第二段：只放能对这个文件做的事。
+    expect(within(groups[1]).getByRole("button", { name: "此文件历史" })).toBeTruthy();
+    expect(within(groups[1]).getByRole("button", { name: /只看改动|完整文件/ })).toBeTruthy();
+    // 第三段：显示方式留在最右。
+    expect(within(groups[2]).getByRole("group", { name: "差异布局" })).toBeTruthy();
+  });
+
+  it("没有语言、历史、完整文件这些动作时只留两段，不画空段", () => {
+    render(DiffView, { props: { ...base(), selection, diff: null } });
+    const groups = [...(document.querySelector(".diff-toolbar") as HTMLElement).children] as HTMLElement[];
+    expect(groups).toHaveLength(2);
+    expect(groups[0].className).toContain("context");
+    expect(groups[1].querySelector(".segmented")).toBeTruthy();
+    expect(document.querySelectorAll(".diff-toolbar-group:empty")).toHaveLength(0);
+  });
+
+  it("读取失败时就地给出「重新读取」，走同一条读取回调", async () => {
+    const onRetry = vi.fn();
+    render(DiffView, { props: { ...base(), selection, diff: null, error: "索引被锁定", onRetry } });
+    expect(screen.getByText("差异没有读取完成")).toBeTruthy();
+    expect(screen.getByText("索引被锁定")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "重新读取" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    document.body.innerHTML = "";
+    // 多文件视图按块自己重读，不传 onRetry 时不能出现一个假的恢复入口。
+    render(DiffView, { props: { ...base(), selection, diff: null, error: "索引被锁定" } });
+    expect(screen.queryByRole("button", { name: "重新读取" })).toBeNull();
+  });
+
+  it("没有改动时右侧不再要求「选择一个文件」", () => {
+    render(DiffView, { props: { ...base(), selection: null, diff: null, fileCount: 0 } });
+    expect(screen.getByText("工作区没有未提交的改动")).toBeTruthy();
+    expect(screen.queryByText("选择一个文件查看差异")).toBeNull();
+    document.body.innerHTML = "";
+    render(DiffView, { props: { ...base(), selection: null, diff: null, fileCount: 3 } });
+    expect(screen.getByText("选择一个文件查看差异")).toBeTruthy();
+    expect(screen.queryByText("工作区没有未提交的改动")).toBeNull();
+  });
+});
+
 describe("差异横向滚动", () => {
   const longLine = `${"中文长行".repeat(40)}LINE-END`;
 
@@ -1969,5 +2044,25 @@ describe("文件列表的目录分组和行数", () => {
     expect(await screen.findByRole("option", { name: /todo\.log/ })).toBeTruthy();
     await fireEvent.click(screen.getByRole("button", { name: "暂存 notes" }));
     expect(props.onStageAll).toHaveBeenCalledWith(["notes/todo.log"]);
+  });
+
+  it("分区之间的分隔线只画在后面几个分区上，第一个表头不画", () => {
+    const files = [
+      change("a.ts", "none", "modified"),
+      change("b.ts", "modified", "none"),
+      change("c.ts", "unmerged", "unmerged", { unmerged: true }),
+    ];
+    const view = render(FileList, { props: listProps(files) });
+    const heads = () => [...document.querySelectorAll(".file-group")] as HTMLElement[];
+    expect(heads().map((head) => head.textContent?.trim().split(/\s/)[0])).toEqual(["冲突", "未暂存的改动", "已暂存"]);
+    expect(heads()[0].className, "第一个表头上面就是搜索框").toContain("first");
+    expect(heads()[1].className).not.toContain("first");
+    expect(heads()[2].className).not.toContain("first");
+    // 筛掉第一个分区后，新的第一个表头接手「不画线」，行高与虚拟化不受影响。
+    return view.rerender({ ...listProps(files, "a.ts") }).then(() => {
+      const filtered = heads();
+      expect(filtered.map((head) => head.textContent?.trim().split(/\s/)[0])).toEqual(["未暂存的改动"]);
+      expect(filtered[0].className).toContain("first");
+    });
   });
 });

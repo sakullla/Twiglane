@@ -352,16 +352,11 @@
     ></textarea>
   </div>
 
-  <div class="composer-meta">
+  <div class="composer-meta" class:warn={paths.length === 0}>
     {#if blocker}
       <!-- R5：主按钮不可用时就地给出可见的一行原因，不只挂在 title 上；.truncate 保持单行。 -->
       <Icon name="info" size={12} />
       <span class="truncate" data-commit-blocker title={blocker}>{blocker}</span>
-      {#if paths.length === 0 && stageableCount > 0 && onStageAll}
-        <button type="button" class="composer-inline-action" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={onStageAll}>
-          全部暂存 {stageableCount}
-        </button>
-      {/if}
     {:else if error}
       <!-- R5：提交失败（缺身份 / 钩子拒绝 / 索引锁 / 过期）同样在这块就地说明。
            优先级低于 blocker：按钮又变成灰的时候，「为什么点不动」更要紧。 -->
@@ -371,12 +366,19 @@
       <Icon name="check-circle" size={12} />
       <span class="truncate composer-ready" title="说明会自动保存为草稿">可以提交 · 草稿自动保存</span>
     {/if}
-    {#if summaryChars > 0 && !(paths.length === 0 && stageableCount > 0 && onStageAll)}
+    <!-- 摘要字数与「全部暂存」互不挤占：两者是不同的问题（写多长 / 暂存了没有），
+         任何一个都不该因为另一个出现而消失。 -->
+    {#if summaryChars > 0}
       <span
         class={`composer-count ${counterTone}`}
         title={`第一行是摘要：建议不超过 ${SUMMARY_SOFT} 个字符，最多 ${SUMMARY_HARD} 个`}
         aria-label={`摘要 ${summaryChars} 个字符`}
       >摘要 {summaryChars}/{SUMMARY_HARD}</span>
+    {/if}
+    {#if paths.length === 0 && stageableCount > 0 && onStageAll}
+      <button type="button" class="composer-inline-action" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={onStageAll}>
+        全部暂存 {stageableCount}
+      </button>
     {/if}
   </div>
 

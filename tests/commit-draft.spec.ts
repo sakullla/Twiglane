@@ -387,6 +387,29 @@ describe("提交区", () => {
     expect(screen.queryByRole("button", { name: /全部暂存/ })).toBeNull();
   });
 
+  it("暂存区为空时状态行取警告语义，与范围标签同一档，不与提交失败混为一谈", () => {
+    renderDraft({ paths: [], value: "", stageableCount: 10 });
+    expect(document.querySelector(".composer-meta")?.className).toContain("warn");
+    expect(document.querySelector(".composer-scope")?.className).toContain("empty-scope");
+    document.body.innerHTML = "";
+    // 有暂存文件、只是没写说明：不是警告，状态行保持中性。
+    renderDraft({ value: "" });
+    expect(document.querySelector(".composer-meta")?.className).not.toContain("warn");
+  });
+
+  it("字数提示和「全部暂存」同时成立时都在，互不顶掉", async () => {
+    renderDraft({ paths: [], value: "x".repeat(41), stageableCount: 10 });
+    expect(document.querySelector("[data-commit-blocker]")?.textContent?.trim()).toBe("先暂存要提交的文件");
+    expect(document.querySelector(".composer-count")?.textContent).toBe("摘要 41/72");
+    await fireEvent.click(screen.getByRole("button", { name: "全部暂存 10" }));
+    expect(document.querySelector(".composer-count")?.textContent, "点按钮不改写已显示的字数").toBe("摘要 41/72");
+    // 有暂存文件时不再提供「全部暂存」，计数照旧在。
+    document.body.innerHTML = "";
+    renderDraft({ value: "x".repeat(41) });
+    expect(document.querySelector(".composer-inline-action")).toBeNull();
+    expect(document.querySelector(".composer-count")?.textContent).toBe("摘要 41/72");
+  });
+
   it("可提交时显示目标分支与文件数，提交按钮可用", async () => {
     const { onCommit } = renderDraft({ value: "重做提交区" });
     expect(document.querySelector(".composer-branch")?.textContent).toContain("feature/ui");

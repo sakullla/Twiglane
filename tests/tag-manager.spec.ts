@@ -1,5 +1,5 @@
 import { tick } from "svelte";
-import { fireEvent, render, screen } from "@testing-library/svelte";
+import { fireEvent, render, screen, within } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenedRepository } from "../src/lib/types";
 
@@ -298,18 +298,21 @@ describe("标签管理", () => {
     await vi.waitFor(() => expect(screen.queryByLabelText("标签名称")).toBeNull());
   });
 
-  it("删除确认替换列表，焦点在取消上；Esc 和取消后回到触发按钮", async () => {
+  it("删除确认是对话框：列出标签和后果，焦点在取消上；Esc 和取消后回到触发按钮", async () => {
     renderTags();
     await screen.findByText("v1.0.0");
     const trigger = screen.getByRole("button", { name: "删除标签 v1.0.0" });
     const list = document.querySelector<HTMLElement>(".tag-list")!;
     trigger.focus();
     await fireEvent.click(trigger);
+    const dialog = await screen.findByRole("dialog", { name: "删除本地标签" });
     await vi.waitFor(() => expect(document.activeElement?.textContent).toBe("取消"));
-    expect(list.hidden).toBe(true);
+    expect(within(dialog).getByRole("list", { name: "要删除的标签" }).textContent).toContain("v1.0.0");
+    expect(dialog.textContent).toContain("远程上的同名标签不会删除");
+    expect(list.hidden, "列表留在原处").toBe(false);
     await fireEvent.click(document.activeElement!);
     await vi.waitFor(() => expect(document.activeElement).toBe(trigger));
-    expect(list.hidden).toBe(false);
+    expect(screen.queryByRole("dialog")).toBeNull();
 
     await fireEvent.click(trigger);
     await vi.waitFor(() => expect(document.activeElement?.textContent).toBe("取消"));
@@ -326,15 +329,13 @@ describe("标签管理", () => {
     trigger.focus();
     await fireEvent.click(trigger);
     await vi.waitFor(() => expect(document.activeElement?.textContent).toBe("取消"));
-    await fireEvent.click(screen.getByRole("button", { name: "确认删除标签" }));
+    await fireEvent.click(screen.getByRole("button", { name: /^删除标签$/ }));
     await vi.waitFor(() => expect(deleteTag).toHaveBeenCalled());
     await tick();
     expect((screen.getByRole("button", { name: "取消" }) as HTMLButtonElement).disabled).toBe(true);
-    const box = document.querySelector<HTMLElement>(".tag-manager [role='alert']")!;
-    expect(document.activeElement).toBe(box);
-    await fireEvent.keyDown(box, { key: "Escape" });
+    await fireEvent.keyDown(document.body, { key: "Escape" });
     await tick();
-    expect(document.querySelector(".tag-manager [role='alert'] .btn-danger")).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "删除本地标签" }), "写入在途不收起").toBeTruthy();
     fail({ code: "unknown", message: "删不掉" });
     await vi.waitFor(() => expect(document.activeElement).toBe(trigger));
   });
@@ -359,7 +360,7 @@ describe("标签管理", () => {
     await fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(deleteTag).not.toHaveBeenCalled();
     await fireEvent.click(screen.getByRole("button", { name: "删除标签 v1.0.0" }));
-    await fireEvent.click(screen.getByRole("button", { name: "确认删除标签" }));
+    await fireEvent.click(screen.getByRole("button", { name: /^删除标签$/ }));
     await vi.waitFor(() => expect(deleteTag).toHaveBeenCalledWith("/repo", "v1.0.0", true, 3, 7));
     await vi.waitFor(() => expect(screen.queryByText("v1.0.0")).toBeNull());
   });

@@ -3,10 +3,11 @@
   import { api } from "../api";
   import { normalizeError } from "../errors";
   import { changeLabel } from "../labels";
+  import { visibleRange } from "../layout";
   import { discardActionLabel, discardBoundary, undoActionLabel } from "../resolve";
   import type { DiscardFilePlan, OpenedRepository, StatusSnapshot, UndoResult } from "../types";
   import Icon from "./Icon.svelte";
-  import Modal from "./Modal.svelte";
+  import ConfirmDialog from "./ConfirmDialog.svelte";
 
   interface Props {
     opened: OpenedRepository;
@@ -37,6 +38,13 @@
   let blocked = $derived(disabled || busy);
   let conflicts = $derived(opened.snapshot.files.filter((file) => file.unmerged).length);
   let allChecked = $derived(plans.length > 0 && checked.length === plans.length);
+  /** 几千个文件时逐行 includes 会退化成平方级：勾选状态用集合查。 */
+  let checkedSet = $derived(new Set(checked));
+  /** 放弃清单的固定行高（标题、侧别、说明各一行）与视口窗口。 */
+  const PLAN_ROW = 72;
+  let planScroll = $state(0);
+  let planViewport = $state(0);
+  let planRange = $derived(visibleRange(plans.length, planScroll, planViewport, PLAN_ROW));
 
   let confirming = false;
   $effect(() => {
@@ -91,6 +99,7 @@
   }
 
   function toggle(path: string, value: boolean) {
+    if (value === checkedSet.has(path)) return;
     checked = value ? [...checked, path] : checked.filter((item) => item !== path);
   }
 
@@ -244,82 +253,77 @@
   <p class="sr-only" role="status">{errorText}</p>
 {/if}
 {#if mode === "discard"}
-  <Modal
+  <ConfirmDialog
     title="放弃文件修改"
     titleId="discard-title"
-    icon="trash"
-    tone="danger"
     size="lg"
-    description={`这不是撤销提交。${boundary}`}
-    locked={busy}
-    onClose={cancelDiscard}
+    message={`选择要放弃修改的文件。这不是撤销提交。${boundary}`}
+    notes={[
+      { tone: "warn", text: "放弃后 Git 不会保留这些未提交内容，这里也不能找回。" },
+      { tone: "info", text: "不确定时，可以先去「临时保存」把改动存起来。" },
+    ]}
+    confirmLabel={checked.length > 0 ? `放弃 ${checked.length} 个文件的修改` : "放弃所选"}
+    confirmIcon="trash"
+    busy={busy}
+    confirmBlocked={checked.length === 0 ? "至少选择一个文件" : disabled ? BUSY_REASON : null}
+    error={errorText}
+    focus="body"
+    onConfirm={() => void confirmDiscard()}
+    onCancel={cancelDiscard}
   >
-    <div class="list-box" style="max-height: 360px">
+    <div class="list-box confirm-list" role="group" aria-label="要放弃的文件">
       <div class="list-section">
         <span>{checked.length} / {plans.length} 个文件已选择</span>
         <span class="spacer"></span>
         <button type="button" class="btn btn-ghost btn-sm" onclick={toggleAll}>{allChecked ? "全不选" : "全选"}</button>
       </div>
-      {#each plans as plan, index (plan.path)}
-        <label class="list-row">
-          <input
-            type="checkbox"
-            class="checkbox"
-            data-autofocus={index === 0 ? "" : undefined}
-            checked={checked.includes(plan.path)}
-            onchange={(event) => toggle(plan.path, (event.currentTarget as HTMLInputElement).checked)}
-          />
-          <span class="lr-main">
-            <span class="lr-title mono"><span title={planTitle(plan)}>{planTitle(plan)}</span></span>
-            <span class="lr-sub">{sideText(plan)}</span>
-            <span class="lr-desc">{plan.impact} {plan.recovery}</span>
-          </span>
-        </label>
-      {/each}
+      <!-- 放弃整个工作区时可能有几千个文件：只渲染视口附近的行，行高固定，上下用占位撑出滚动高度。 -->
+      <div class="confirm-list-scroll" bind:clientHeight={planViewport} onscroll={(event) => {
+          planScroll = event.currentTarget.scrollTop;
+          planViewport = event.currentTarget.clientHeight;
+        }}>
+        {#if planRange.start > 0}<div aria-hidden="true" style={`height:${planRange.start * PLAN_ROW}px`}></div>{/if}
+        {#each plans.slice(planRange.start, planRange.end) as plan, offset (plan.path)}
+          {@const index = planRange.start + offset}
+          <label class="list-row" style={`height:${PLAN_ROW}px`}>
+            <input
+              type="checkbox"
+              class="checkbox"
+              data-autofocus={index === 0 ? "" : undefined}
+              checked={checkedSet.has(plan.path)}
+              onchange={(event) => toggle(plan.path, (event.currentTarget as HTMLInputElement).checked)}
+            />
+            <span class="lr-main">
+              <span class="lr-title mono"><span title={planTitle(plan)}>{planTitle(plan)}</span></span>
+              <span class="lr-sub">{sideText(plan)}</span>
+              <span class="lr-desc" title={`${plan.impact} ${plan.recovery}`}>{plan.impact} {plan.recovery}</span>
+            </span>
+          </label>
+        {/each}
+        {#if planRange.end < plans.length}<div aria-hidden="true" style={`height:${(plans.length - planRange.end) * PLAN_ROW}px`}></div>{/if}
+      </div>
     </div>
-    <div class="callout warn">
-      <Icon name="alert" size={15} />
-      <span>放弃后 Git 不会保留这些未提交内容，这里也不能找回。不确定时，可以先去「临时保存」。</span>
-    </div>
-    {#if errorText}<div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{errorText}</span></div>{/if}
-    {#snippet footer()}
-      <button type="button" class="btn btn-secondary" title={busy ? BUSY_REASON : undefined} disabled={busy} onclick={cancelDiscard}>取消</button>
-      <span class="spacer"></span>
-      <button type="button" class="btn btn-danger" title={blocked ? BUSY_REASON : checked.length === 0 ? "至少选择一个文件" : undefined} disabled={blocked || checked.length === 0} onclick={confirmDiscard}>
-        <Icon name="trash" size={14} />确认放弃所选
-      </button>
-    {/snippet}
-  </Modal>
+  </ConfirmDialog>
 {/if}
 {#if mode === "undo" && undo}
-  <Modal
+  <ConfirmDialog
     title="撤销最近提交并保留改动"
     titleId="undo-title"
     icon="undo"
     tone={undo.eligible ? "danger" : "warning"}
-    description="这不会放弃文件内容，改动会回到工作区。"
-    locked={busy}
-    onClose={cancelUndo}
-  >
-    <div class="list-box">
-      <div class="list-row">
-        <Icon name="commit" />
-        <span class="lr-main">
-          <span class="lr-title"><span>{undo.summary || "最近一次提交"}</span></span>
-          <span class="lr-sub mono">{undo.headOid.slice(0, 7)}</span>
-        </span>
-      </div>
-    </div>
-    <div class={`callout ${undo.eligible ? "ok" : "warn"}`}>
-      <Icon name={undo.eligible ? "check-circle" : "alert"} size={15} />
-      <span>{undo.reason}</span>
-    </div>
-    <p class="hint">已推送、合并提交、首个提交、脏暂存区、进行中的操作，或无法确认传播范围时都不会写入。</p>
-    {#if errorText}<div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{errorText}</span></div>{/if}
-    {#snippet footer()}
-      <button type="button" class="btn btn-secondary" title={busy ? BUSY_REASON : undefined} disabled={busy} onclick={cancelUndo}>取消</button>
-      <span class="spacer"></span>
-      <button type="button" class="btn btn-danger" title={blocked ? BUSY_REASON : !undo?.eligible ? undo?.reason : undefined} disabled={blocked || !undo?.eligible} onclick={confirmUndo}>确认撤销提交</button>
-    {/snippet}
-  </Modal>
+    message="撤销最近一次提交？改动会回到工作区，不会放弃文件内容。"
+    targets={[{ icon: "commit", name: undo.summary || "最近一次提交", detail: undo.headOid.slice(0, 7) }]}
+    targetsLabel="要撤销的提交"
+    notes={[
+      { tone: undo.eligible ? "ok" : "warn", text: undo.reason },
+      { tone: "info", text: "已推送、合并提交、首个提交、脏暂存区、进行中的操作，或无法确认传播范围时都不会写入。" },
+    ]}
+    confirmLabel="确认撤销提交"
+    confirmIcon="undo"
+    busy={busy}
+    confirmBlocked={!undo.eligible ? undo.reason : disabled ? BUSY_REASON : null}
+    error={errorText}
+    onConfirm={() => void confirmUndo()}
+    onCancel={cancelUndo}
+  />
 {/if}

@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api } from "../api";
-  import { bucketBranches, filterBranches, groupIsOpen, isDefaultBranch } from "../branches";
+  import { bucketBranches, filterBranches, groupIsOpen, isDefaultBranch, mainBranchNames } from "../branches";
   import { normalizeError } from "../errors";
   import type { IconName } from "../icons";
   import type { BranchRecord, BranchState, OpenedRepository, StatusSnapshot } from "../types";
+  import BranchOption from "./BranchOption.svelte";
+  import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
   import Popover from "./Popover.svelte";
 
@@ -12,6 +14,7 @@
    * 标题栏分支弹层：搜索本地和远程分支并直接切换，底部进入新建、合并与管理。
    * 切换与 BranchDialog 走同一个 api.switchBranch 和同一套写锁；失败时不应用任何快照，
    * 原因留在弹层里，工作区保持原样。
+   * 右键或菜单键打开分支操作（切换、新建、合并、变基、复制），菜单叠在弹层上，Esc 只关菜单。
    */
   interface Props {
     anchor: HTMLElement;
@@ -25,8 +28,14 @@
     onFailure: (error: unknown) => void;
     onNotice: (message: string) => void;
     onCommand: (id: string) => void;
-    /** 「新建分支」：打开分支 modal 并直接展开新建表单。 */
-    onCreateBranch: () => void;
+    /** 「新建分支」：打开分支 modal 并直接展开新建表单；base 是预选的起点。 */
+    onCreateBranch: (base?: string) => void;
+    /** 把所点分支合并到当前分支：打开分支合并并预选来源。 */
+    onMergeBranch?: (name: string) => void;
+    /** 把当前分支合并到所点本地分支：打开分支合并并预选目标。 */
+    onMergeInto?: (name: string) => void;
+    /** 把当前分支变基到所点分支。 */
+    onRebaseBranch?: (name: string) => void;
     /** 设置里的分支分组。缺省开启。 */
     branchGroups?: boolean;
     /** 打开其他工作区成功后交给外壳切换当前仓库。 */
@@ -34,7 +43,25 @@
     onClose: (refocus?: boolean) => void;
   }
 
-  let { anchor, opened, blockedReason, nextId, onBusy, onGeneration, onSnapshot, onFailure, onNotice, onCommand, onCreateBranch, branchGroups = true, onOpened, onClose }: Props = $props();
+  let {
+    anchor,
+    opened,
+    blockedReason,
+    nextId,
+    onBusy,
+    onGeneration,
+    onSnapshot,
+    onFailure,
+    onNotice,
+    onCommand,
+    onCreateBranch,
+    onMergeBranch,
+    onMergeInto,
+    onRebaseBranch,
+    branchGroups = true,
+    onOpened,
+    onClose,
+  }: Props = $props();
 
   const ACTIONS: { id: string; label: string; icon: IconName; create?: boolean }[] = [
     { id: "task.branch", label: "新建分支", icon: "plus", create: true },
@@ -45,12 +72,15 @@
 
   let branches = $state.raw<BranchRecord[]>([]);
   let defaultBranch = $state<string | null>(null);
+  let mergeBases = $state<string[]>([]);
+  let mainNames = $derived(mainBranchNames({ defaultBranch, mergeBases }));
   let groupOverrides = $state<Record<string, boolean>>({});
   let loading = $state(true);
   let query = $state("");
   let active = $state(0);
   let errorText = $state<string | null>(null);
   let openingWorktree = $state(false);
+  let menu = $state<ContextMenuRequest | null>(null);
   /** 切换在途时弹层可能已被收起，甚至换成了别的弹层；那时不能再替它们关闭。 */
   let mounted = true;
 
@@ -144,6 +174,7 @@
         if (opened.summary.path === path) {
         branches = result?.branches ?? [];
         defaultBranch = result?.defaultBranch ?? null;
+        mergeBases = result?.mergeBases ?? [];
       }
       })
       .catch((error) => {
@@ -187,6 +218,74 @@
     }
   }
 
+  async function copyName(name: string) {
+    try {
+      await navigator.clipboard.writeText(name);
+      onNotice(`已复制分支名 ${name}`);
+    } catch {
+      errorText = "无法写入剪贴板，请手动复制分支名。";
+    }
+  }
+
+  /** 分支行的操作菜单：和分支管理里的右键菜单是同一组动作，重命名与删除留在分支管理里确认。 */
+  function openMenu(branch: BranchRecord, point: { x: number; y: number }) {
+    const busy = blockedReason ?? (openingWorktree ? "正在打开工作区" : undefined);
+    const current = isCurrent(branch);
+    const currentReason = current ? "这就是当前分支" : undefined;
+    const occupied = elsewhere(branch) ?? undefined;
+    const entries: ContextMenuEntry[] = [
+      {
+        id: "switch",
+        label: branch.remote ? "检出为本地分支并切换" : "切换到此分支",
+        icon: "check-circle",
+        disabledReason: currentReason ?? occupied ?? busy,
+        run: () => void choose(branch),
+      },
+    ];
+    if (branch.worktree && !current) {
+      entries.push({ id: "open-worktree", label: "打开此工作区", icon: "folder-open", disabledReason: busy, run: () => void openWorktree(branch) });
+    }
+    entries.push({ separator: true });
+    entries.push({
+      id: "create",
+      label: "从此分支新建分支…",
+      icon: "plus",
+      disabledReason: busy,
+      run: () => onCreateBranch(current ? undefined : branch.name),
+    });
+    if (onMergeBranch) {
+      entries.push({
+        id: "merge",
+        label: `合并到当前分支（${currentName ?? "HEAD"}）…`,
+        icon: "merge",
+        disabledReason: currentReason ?? busy,
+        run: () => onMergeBranch?.(branch.name),
+      });
+    }
+    if (onMergeInto && !branch.remote && currentName) {
+      entries.push({
+        id: "merge-into",
+        label: `把 ${currentName} 合并到此分支…`,
+        icon: "merge",
+        disabledReason: currentReason ?? occupied ?? busy,
+        run: () => onMergeInto?.(branch.name),
+      });
+    }
+    if (onRebaseBranch && currentName) {
+      entries.push({
+        id: "rebase",
+        label: "把当前分支变基到此分支…",
+        icon: "branch",
+        disabledReason: currentReason ?? occupied ?? busy,
+        run: () => onRebaseBranch?.(branch.name),
+      });
+    }
+    entries.push({ separator: true });
+    entries.push({ id: "copy", label: "复制分支名", icon: "copy", run: () => void copyName(branch.name) });
+    entries.push({ id: "manage", label: "重命名或删除…", icon: "pencil", run: () => onCommand("task.branch") });
+    menu = { x: point.x, y: point.y, entries, label: `${branch.name} 的操作` };
+  }
+
   async function choose(branch: BranchRecord | undefined) {
     if (!branch || reasonFor(branch)) return;
     if (isCurrent(branch)) {
@@ -220,9 +319,19 @@
   bind:active
   count={matched.length}
   onChoose={(index) => void choose(matched[index])}
+  onItemContextMenu={(index, point) => {
+    const branch = matched[index];
+    if (branch) openMenu(branch, point);
+  }}
   {onClose}
 >
   {#snippet notice()}
+    {#if blockedReason && !errorText}
+      <p class="switcher-notice" role="status">
+        <Icon name="info" size={14} />
+        <span>{blockedReason}</span>
+      </p>
+    {/if}
     {#if errorText}
       <p class="switcher-error" role="alert">
         <Icon name="alert-circle" size={14} />
@@ -256,41 +365,42 @@
         </button>
       {:else}
         {@const branch = row.branch}
-        {@const reason = reasonFor(branch)}
-        <div
+        <BranchOption
           id={`${listId}-${row.index}`}
-          class="branch-option switcher-option"
-          class:active={row.index === active}
-          role="option"
-          aria-selected={isCurrent(branch)}
-          aria-disabled={reason ? "true" : undefined}
-          data-index={row.index}
-          title={reason ?? branch.name}
-          tabindex="-1"
-          onmousemove={() => (active = row.index)}
-          onclick={() => void choose(branch)}
-          onkeydown={() => {}}
+          index={row.index}
+          setsize={matched.length}
+          name={branch.name}
+          remote={branch.remote}
+          active={row.index === active}
+          selected={isCurrent(branch)}
+          current={isCurrent(branch)}
+          isDefault={isDefaultBranch(branch, defaultBranch)}
+          main={mainNames.has(branch.name)}
+          merged={branch.merged === true}
+          mergedTitle={`已合入主干：已完整包含在 ${[...mainNames].join(" 和 ")} 中，删除不会丢失提交`}
+          reason={reasonFor(branch)}
+          check={false}
+          onHover={() => (active = row.index)}
+          onChoose={() => void choose(branch)}
+          onContextMenu={(point) => openMenu(branch, point)}
         >
-          <Icon name={branch.remote ? "cloud" : "branch"} size={13} class="switcher-icon" />
-          <span class="branch-option-name">{branch.name}</span>
-          {#if isDefaultBranch(branch, defaultBranch)}<span class="branch-picker-tag default-branch" data-default-branch>默认</span>{/if}
-          {#if reason}<span class="switcher-reason">{reason}</span>{/if}
-          {#if branch.worktree && !isCurrent(branch)}
-            <button
-              type="button"
-              class="btn btn-ghost btn-sm branch-open-worktree"
-              data-open-worktree={branch.worktree}
-              disabled={blockedReason !== null || openingWorktree}
-              title={blockedReason ?? `打开工作区 ${branch.worktree}`}
-              onmousedown={(event) => event.stopPropagation()}
-              onclick={(event) => {
-                event.stopPropagation();
-                void openWorktree(branch);
-              }}
-            >打开此工作区</button>
-          {/if}
-          {#if isCurrent(branch)}<span class="branch-picker-tag">当前</span>{/if}
-        </div>
+          {#snippet trailing()}
+            {#if branch.worktree && !isCurrent(branch)}
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm branch-open-worktree"
+                data-open-worktree={branch.worktree}
+                disabled={blockedReason !== null || openingWorktree}
+                title={blockedReason ?? `打开工作区 ${branch.worktree}`}
+                onmousedown={(event) => event.stopPropagation()}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  void openWorktree(branch);
+                }}
+              ><Icon name="folder-open" size={13} />打开此工作区</button>
+            {/if}
+          {/snippet}
+        </BranchOption>
       {/if}
     {/each}
     {#if matched.length >= VISIBLE_LIMIT}
@@ -306,3 +416,7 @@
     {/each}
   {/snippet}
 </Popover>
+
+{#if menu}
+  <ContextMenu request={menu} onClose={() => (menu = null)} />
+{/if}

@@ -823,8 +823,52 @@ describe("放弃与撤销", () => {
     expect(discardChanges).toHaveBeenCalledWith("/repo", ["keep.txt", "drop.txt"], false, 4, 2);
     await fireEvent.click(screen.getByRole("button", { name: discardActionLabel() }));
     await screen.findByText(/取消不写入/);
-    await fireEvent.click(screen.getByRole("button", { name: "确认放弃所选" }));
+    await fireEvent.click(screen.getByRole("button", { name: /个文件的修改$/ }));
     expect(discardChanges).toHaveBeenLastCalledWith("/repo", ["keep.txt"], true, 4, 2);
+  });
+
+  it("几千个文件的放弃清单只渲染视口附近的行，全选后一次提交全部所选", async () => {
+    const paths = Array.from({ length: 3000 }, (_, index) => `src/generated/file-${index}.ts`);
+    const many = {
+      ...opened,
+      snapshot: {
+        ...opened.snapshot,
+        files: paths.map((path) => ({ path, originalPath: null, staged: "none" as const, unstaged: "modified" as const, untracked: false, unmerged: false })),
+      },
+    };
+    discardChanges.mockResolvedValueOnce({
+      generation: 4,
+      wrote: false,
+      boundary: "确认只影响所选文件。",
+      snapshot: many.snapshot,
+      files: paths.map((path) => ({
+        path,
+        originalPath: null,
+        staged: "none",
+        unstaged: "modified",
+        untracked: false,
+        impact: "未暂存的修改会回到当前提交。",
+        recovery: "放弃后 Git 不保留这份未提交内容。",
+      })),
+    });
+    discardChanges.mockResolvedValueOnce({ generation: 5, wrote: true, boundary: "", snapshot: opened.snapshot, files: paths.map((path) => ({ path })) });
+    render(RecoveryActions, {
+      opened: many,
+      disabled: false,
+      nextId: () => 2,
+      onSnapshot: () => {},
+      onFailure: () => {},
+      onNotice: () => {},
+      onMerge: () => {},
+    });
+    await fireEvent.click(screen.getByRole("button", { name: discardActionLabel() }));
+    const group = await screen.findByRole("group", { name: "要放弃的文件" });
+    expect(group.querySelectorAll("label.list-row").length).toBeLessThan(60);
+    expect(group.textContent).toContain("1 / 3000 个文件已选择");
+    await fireEvent.click(within(group).getByRole("button", { name: "全选" }));
+    expect(group.textContent).toContain("3000 / 3000 个文件已选择");
+    await fireEvent.click(screen.getByRole("button", { name: "放弃 3000 个文件的修改" }));
+    await vi.waitFor(() => expect(discardChanges).toHaveBeenLastCalledWith("/repo", paths, true, 4, 2));
   });
 
   it("放弃写入在途时不能取消：Esc、关闭和取消都不生效，结果落地后才收起", async () => {
@@ -849,7 +893,7 @@ describe("放弃与撤销", () => {
     });
     await fireEvent.click(screen.getByRole("button", { name: discardActionLabel() }));
     await screen.findByText(/取消不写入/);
-    await fireEvent.click(screen.getByRole("button", { name: "确认放弃所选" }));
+    await fireEvent.click(screen.getByRole("button", { name: /个文件的修改$/ }));
     await tick();
     expect(screen.getByRole("button", { name: "取消" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "关闭对话框" }).hasAttribute("disabled")).toBe(true);
@@ -954,7 +998,7 @@ describe("合并任务 modal", () => {
     renderMergeModal();
     await fireEvent.click(await screen.findByRole("button", { name: "中止合并" }));
     expect(document.querySelector(".mp-body")).toBeTruthy();
-    await fireEvent.click(await screen.findByRole("button", { name: "确认中止" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "中止合并" }));
     await vi.waitFor(() => expect(document.querySelector(".mp-body")).toBeNull());
     expect(document.querySelector(".mp-head"), "标题行里的路由也一起移除").toBeNull();
     expect(document.querySelector(".mp-head-host"), "常驻节点留在落点").toBeTruthy();
@@ -1283,7 +1327,7 @@ describe("合并任务 modal", () => {
     expect(impact).toContain("b.txt");
     // 确认层叠在合并任务 modal 之上，任务 modal 仍只有一个。
     expect(document.querySelectorAll("[data-task-modal]")).toHaveLength(1);
-    expect(screen.getByRole("button", { name: "确认中止" }).className).toContain("btn-danger");
+    expect(screen.getByRole("button", { name: "中止合并" }).className).toContain("btn-danger");
     expect(abortMerge).toHaveBeenCalledWith("/repo", false, 4, 1);
 
     await fireEvent.click(screen.getByRole("button", { name: "取消" }));
@@ -1292,7 +1336,7 @@ describe("合并任务 modal", () => {
 
     await fireEvent.click(screen.getByRole("button", { name: "中止合并" }));
     await screen.findByRole("list", { name: "受影响的路径" });
-    await fireEvent.click(screen.getByRole("button", { name: "确认中止" }));
+    await fireEvent.click(screen.getByRole("button", { name: "中止合并" }));
     await vi.waitFor(() => expect(abortMerge).toHaveBeenCalledWith("/repo", true, 4, 1));
   });
 });

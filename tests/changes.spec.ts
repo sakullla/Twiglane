@@ -1053,32 +1053,54 @@ describe("差异横向滚动", () => {
     });
   }
 
-  it("标尺取全量最长行，内容不进文本和选区，切换布局时不变", async () => {
+  it("标尺取全量最长行，内容不进文本和选区；并排时两栏各有一把只量本栏的标尺", async () => {
     renderDiff();
     const scroller = document.querySelector(".diff-scroll") as HTMLElement;
     const firstRuler = () => document.querySelector<HTMLElement>(".code-ruler span")?.dataset.text;
     expect(firstRuler()).toBe(longLine);
     expect(document.querySelector(".code-ruler")?.getAttribute("aria-hidden")).toBe("true");
     expect(document.querySelector(".code-ruler")?.textContent).toBe("");
-    expect(document.querySelector(".code-ruler.half")).toBeNull();
+    expect(document.querySelector(".split-hbars")).toBeNull();
     await fireEvent.click(screen.getByRole("button", { name: /并排/ }));
-    expect(firstRuler()).toBe(longLine);
-    expect(document.querySelector(".code-ruler.half")).not.toBeNull();
+    // 并排时滚动容器只管纵向，横向交给两栏各自的滚动条。
+    expect(document.querySelector(".code-ruler")).toBeNull();
+    expect(scroller.classList.contains("split-x")).toBe(true);
+    const rulers = [...document.querySelectorAll(".split-hbars .split-ruler")].map((ruler) =>
+      [...ruler.querySelectorAll<HTMLElement>("span")].map((span) => span.dataset.text),
+    );
+    expect(rulers).toEqual([["short"], [longLine, "short"]]);
+    expect(document.querySelector(".split-hbars")?.textContent?.trim()).toBe("");
     expect(scroller.isConnected).toBe(true);
   });
 
-  it("滚动时只改偏移：两栏共用一个 --code-x，文字在 .code-in 里，符号随代码走", async () => {
+  it("并排两栏各自横向滚动：每栏的滚动条只平移本栏的代码，横向滑动滚指针所在的栏", async () => {
     renderDiff();
     await fireEvent.click(screen.getByRole("button", { name: /并排/ }));
     const scroller = document.querySelector(".diff-scroll") as HTMLElement;
-    scroller.scrollLeft = 240;
-    await fireEvent.scroll(scroller);
-    expect(scroller.style.getPropertyValue("--code-x")).toBe("240px");
-    const inner = [...document.querySelectorAll(".side-cell .code-in")].find((node) => node.textContent === longLine);
+    const [left, right] = [...document.querySelectorAll<HTMLElement>(".split-hbar")];
+    right.scrollLeft = 240;
+    await fireEvent.scroll(right);
+    expect(scroller.style.getPropertyValue("--code-xr")).toBe("240px");
+    expect(scroller.style.getPropertyValue("--code-xl")).toBe("0px");
+    left.scrollLeft = 30;
+    await fireEvent.scroll(left);
+    expect(scroller.style.getPropertyValue("--code-xl")).toBe("30px");
+    expect(scroller.style.getPropertyValue("--code-xr")).toBe("240px");
+
+    const inner = [...document.querySelectorAll(".side-cell.side-r .code-in")].find((node) => node.textContent === longLine);
     expect(inner?.getAttribute("data-sign")).toBe("+");
     // 行号、块标题都在 .code-in 之外，不跟着平移。
     expect(document.querySelector(".ln .code-in, .hunk-caption .code-in")).toBeNull();
     expect(document.querySelector(".code-stage .side-row")).not.toBeNull();
+
+    // happy-dom 的 WheelEvent 不带 clientX / shiftKey：用触控板的横向滑动，指针不在左半栏时滚右栏。
+    const wheel = new WheelEvent("wheel", { deltaX: 50, bubbles: true, cancelable: true });
+    scroller.dispatchEvent(wheel);
+    expect(wheel.defaultPrevented).toBe(true);
+    expect(right.scrollLeft).toBe(290);
+    const vertical = new WheelEvent("wheel", { deltaY: 50, bubbles: true, cancelable: true });
+    scroller.dispatchEvent(vertical);
+    expect(vertical.defaultPrevented, "纵向滚动交给浏览器").toBe(false);
   });
 
   it("竖向滚动条增减时重读 clientWidth：内容变高和尺寸回调都会更新 --code-view", async () => {
@@ -1715,6 +1737,45 @@ describe("MultiFileDiff 逐块懒加载（R19）", () => {
     expect(failed?.textContent).toContain("差异没有读取完成");
     await waitFor(() => expect(document.querySelector('.multi-file[data-path="gen/file-0.ts"] [data-diff-row]')).toBeTruthy());
     expect(document.querySelector('.multi-file[data-path="gen/file-2.ts"] [data-diff-row]')).toBeTruthy();
+  });
+
+  it("滚出预读区后释放差异，返回时重新读取而不是累积全部选中文件", async () => {
+    const height = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(500);
+    mocks.loadDiff.mockImplementation(async (_repo: string, path: string) => diffFor(path, false));
+    const view = render(MultiFileDiff, { props: props() });
+    try {
+      await waitFor(() => expect(document.querySelector('[data-path="gen/file-0.ts"] [data-diff-row]')).toBeTruthy());
+      const host = document.querySelector<HTMLElement>(".multi-stack-scroll")!;
+      const initial = mocks.loadDiff.mock.calls.filter((call) => call[1] === "gen/file-0.ts").length;
+      await fireEvent.wheel(host);
+      host.scrollTop = 10_000;
+      await fireEvent.scroll(host);
+      await waitFor(() => expect(document.querySelector('[data-path="gen/file-0.ts"]')).toBeNull());
+      host.scrollTop = 0;
+      await fireEvent.scroll(host);
+      await waitFor(() => expect(mocks.loadDiff.mock.calls.filter((call) => call[1] === "gen/file-0.ts")).toHaveLength(initial + 1));
+      await waitFor(() => expect(document.querySelector('[data-path="gen/file-0.ts"] [data-diff-row]')).toBeTruthy());
+    } finally {
+      view.unmount();
+      height.mockRestore();
+    }
+  });
+
+  it("折叠时丢弃迟到内容，再展开重新读取；隐藏页面释放已读差异", async () => {
+    const view = render(MultiFileDiff, { props: props({ rows: rowsOf(1) }) });
+    await waitFor(() => expect(pendingReads).toHaveLength(1));
+    await fireEvent.click(screen.getByRole("button", { name: "收起 gen/file-0.ts" }));
+    pendingReads[0].resolve({ ...diffFor("gen/file-0.ts", false), additions: 111 });
+    await tick();
+    await fireEvent.click(screen.getByRole("button", { name: "展开 gen/file-0.ts" }));
+    await waitFor(() => expect(pendingReads).toHaveLength(2));
+    expect(document.body.textContent).not.toContain("+111");
+    pendingReads[1].resolve(diffFor("gen/file-0.ts", false));
+    await waitFor(() => expect(document.querySelector("[data-diff-row]")).toBeTruthy());
+    await view.rerender({ active: false });
+    expect(document.querySelector("[data-diff-row]")).toBeNull();
+    await view.rerender({ active: true });
+    await waitFor(() => expect(pendingReads).toHaveLength(3));
   });
 
   it("generation 变化后丢弃在途响应并重新读取；旧 generation 报 stale 时交给外壳刷新", async () => {

@@ -345,6 +345,21 @@ pub fn branch_list_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) 
     (git.to_path_buf(), args)
 }
 
+/// 列出已完整合入 `base`（完整引用名，例如 `refs/heads/main`）的本地和远程跟踪分支。
+pub fn merged_branches_command(git: &Path, root: &Path, base: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("for-each-ref"),
+        OsString::from("--format"),
+        OsString::from("%(refname)"),
+        OsString::from("--merged"),
+        OsString::from(base),
+        OsString::from("refs/heads"),
+        OsString::from("refs/remotes"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
 pub fn check_branch_command(git: &Path, root: &Path, name: &str) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.extend([

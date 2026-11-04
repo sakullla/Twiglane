@@ -264,6 +264,9 @@ const branches: BranchRecord[] = [
   { name: "fix/merge-refresh", remote: false, current: false, upstream: null, worktree: "C:/Users/dev/wt/fix" },
   { name: "origin/main", remote: true, current: false, upstream: null, worktree: null },
   { name: "origin/feature/modern-ui", remote: true, current: false, upstream: null, worktree: null },
+  // 已合入主干（main 与 origin/main 都包含），本地与远程同名：用来预览「已合入」标记和「同时删除远程分支」。
+  { name: "feature/login", remote: false, current: false, upstream: "origin/feature/login", worktree: null, merged: true },
+  { name: "origin/feature/login", remote: true, current: false, upstream: null, worktree: null, merged: true },
 ];
 
 const ok = async <T>(value: T, ms?: number) => {
@@ -278,7 +281,7 @@ const remoteTagOids = new Map([
 ]);
 
 function branchData() {
-  return { generation, branches: branches.map((item) => ({ ...item })), snapshot: snapshot() };
+  return { generation, branches: branches.map((item) => ({ ...item })), snapshot: snapshot(), defaultBranch: "main", mergeBases: ["main", "origin/main"] };
 }
 
 let stashRecords = [
@@ -490,8 +493,8 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     generation += 1;
     return ok(branchData());
   },
-  deleteRemoteBranch: (_repo: string, _remote: string, name: string) => {
-    const index = branches.findIndex((item) => item.remote && item.name === name);
+  deleteRemoteBranch: (_repo: string, remote: string, name: string) => {
+    const index = branches.findIndex((item) => item.remote && (item.name === name || item.name === `${remote}/${name}`));
     if (index >= 0) branches.splice(index, 1);
     generation += 1;
     return ok(branchData());

@@ -2,10 +2,12 @@
   import { BUSY_REASON } from "../ui";
   import { tick, untrack } from "svelte";
   import { api } from "../api";
-  import { bucketBranches, bucketNames, filterBranches, groupIsOpen, isDefaultBranch } from "../branches";
+  import { bucketBranches, filterBranches, groupIsOpen, isDefaultBranch, mainBranchNames } from "../branches";
   import { normalizeError } from "../errors";
   import type { BranchRecord, BranchState, OpenedRepository, StatusSnapshot } from "../types";
+  import ConfirmDialog, { type ConfirmNote, type ConfirmTarget } from "./ConfirmDialog.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest, isContextKey, pointFor } from "./ContextMenu.svelte";
+  import BranchPicker from "./BranchPicker.svelte";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
   import TagManager from "./TagManager.svelte";
@@ -29,6 +31,8 @@
     onRebaseBranch?: (name: string) => void;
     /** 打开意图：入口本身就是「新建分支」时，打开即展开表单并聚焦名称，不必再点一次。 */
     startCreating?: boolean;
+    /** 和 startCreating 一起给出的起点（例如分支弹层里右键「从此分支新建」）；空串表示当前分支。 */
+    startBase?: string;
     /** 写锁来自后台克隆：它不碰当前仓库，读取照常，写入仍被拦住。 */
     backgroundClone?: boolean;
     /** 设置里的分支分组。缺省开启，与持久化缺省一致。 */
@@ -53,6 +57,7 @@
     onMergeInto,
     onRebaseBranch,
     startCreating = false,
+    startBase = "",
     backgroundClone = false,
     branchGroups = true,
     blockedReason = null,
@@ -69,7 +74,7 @@
   let creating = $state(untrack(() => startCreating));
   let branchName = $state("");
   /** 新分支的起点：空串表示当前分支（或游离 HEAD 的当前提交）。 */
-  let createBase = $state("");
+  let createBase = $state(untrack(() => (startCreating ? startBase : "")));
   let createCheckout = $state(true);
   let renaming = $state<{ name: string; value: string } | null>(null);
   let menu = $state<ContextMenuRequest | null>(null);
@@ -77,8 +82,6 @@
   let searchInput = $state<HTMLInputElement | null>(null);
   let createToggle = $state<HTMLButtonElement | null>(null);
   let listBox = $state<HTMLDivElement | null>(null);
-  let confirmBox = $state<HTMLDivElement | null>(null);
-  let confirmCancel = $state<HTMLButtonElement | null>(null);
   let renameInput = $state<HTMLInputElement | null>(null);
   /** 写入在途：取消按钮禁用、Esc 不收起，结果未定时不能让界面看起来已经放弃。 */
   let writing = $state(false);
@@ -101,11 +104,19 @@
    * generation 过期不算失败：readBranches 内部跟上后重读一次，只有重读也失败才记 ok 为假。
    */
   let loaded = $state<{ key: string; ok: boolean } | null>(null);
+  /** 本地同名远程分支：remote 是远程名，name 是去掉远程名的分支名，full 是 remote/name。 */
+  type RemoteTwin = { remote: string; name: string; full: string };
   let confirmDelete = $state<
-    | { kind: "local"; name: string; body: string; force: boolean }
-    | { kind: "remote"; remote: string; name: string; body: string; force: false }
+    | { kind: "local"; name: string; force: boolean; twin: RemoteTwin | null; branch: BranchRecord }
+    | { kind: "remote"; remote: string; name: string; force: false; branch: BranchRecord }
     | null
   >(null);
+  /** 删除本地分支时是否同时删除同名远程分支。默认不勾：远程删除会影响别人，要用户明确选择。 */
+  let alsoRemote = $state(false);
+  /** 判定「已合入主干」的主干分支（后端给出），用在标记和提示里。 */
+  let mergeBases = $state<string[]>([]);
+  /** 主干分支：本地默认分支及其远程对应分支，列表里用星标。 */
+  let mainNames = $derived(mainBranchNames({ defaultBranch, mergeBases }));
 
   const TABS: { id: BranchTab; label: string; icon: "branch" | "cloud" | "tag" }[] = [
     { id: "local", label: "本地分支", icon: "branch" },
@@ -116,13 +127,51 @@
   let blocked = $derived(disabled || localBusy);
   let readBlocked = $derived(localBusy || (disabled && !backgroundClone));
   let writeInFlight = $derived(writing || tagWriting);
-  let deleteLabel = $derived(
-    confirmDelete?.kind === "remote"
-      ? `远程分支 ${confirmDelete.remote}/${confirmDelete.name}`
-      : `本地分支 ${confirmDelete?.name ?? ""}`,
-  );
   /** 确认区和重命名区替换搜索与列表，不用算高度，也不必滚动就能看全说明和按钮。 */
-  let prompting = $derived(confirmDelete !== null || renaming !== null);
+  let prompting = $derived(renaming !== null);
+  /** 删除确认框的内容：一句话、受影响的分支、后果和按钮文字都按这次要删的东西生成。 */
+  let deletePrompt = $derived.by(() => {
+    const target = confirmDelete;
+    if (!target) return null;
+    if (target.kind === "remote") {
+      const full = `${target.remote}/${target.name}`;
+      return {
+        title: "删除远程分支",
+        message: `从远程 ${target.remote} 删除分支 ${target.name}？`,
+        targets: [{ icon: "cloud", name: full, detail: "远程分支", tag: target.branch.merged ? "已合入主干" : undefined, tagTone: "ok" }] as ConfirmTarget[],
+        notes: [
+          ...(target.branch.merged ? [{ tone: "ok", text: mergedNote() } as ConfirmNote] : []),
+          { tone: "warn", text: "远程上的这个分支会被移除，其他协作者也将看不到它。" },
+          { tone: "info", text: "不会强行推送；本地分支不受影响。" },
+        ] as ConfirmNote[],
+        confirm: "从远程删除",
+      };
+    }
+    const twin = alsoRemote ? target.twin : null;
+    const local: ConfirmTarget = {
+      icon: "branch",
+      name: target.name,
+      detail: target.branch.upstream ? `本地分支 · 跟踪 ${target.branch.upstream}` : "本地分支 · 仅存在于本地",
+      tag: target.branch.merged ? "已合入主干" : undefined,
+      tagTone: "ok",
+    };
+    const notes: ConfirmNote[] = [];
+    if (target.force) notes.push({ tone: "warn", text: "它含有尚未合入当前分支的提交，删除后这些提交不能由这里自动恢复。" });
+    else if (target.branch.merged) notes.push({ tone: "ok", text: `${mergedNote()}。` });
+    else notes.push({ tone: "info", text: "如果它还有未合入当前分支的提交，会再请你确认一次。" });
+    if (twin) notes.push({ tone: "warn", text: `远程分支 ${twin.full} 会从远程移除，其他协作者也将看不到它。` });
+    return {
+      title: target.force ? "删除未合入的分支" : twin ? "删除本地和远程分支" : "删除本地分支",
+      message: target.force
+        ? `分支 ${target.name} 还有未合入的提交，仍要删除吗？`
+        : twin
+          ? `删除本地分支 ${target.name}，并从远程删除 ${twin.full}？`
+          : `删除本地分支 ${target.name}？`,
+      targets: twin ? [local, { icon: "cloud", name: twin.full, detail: "远程分支" } as ConfirmTarget] : [local],
+      notes,
+      confirm: target.force ? "仍然删除" : twin ? "删除本地和远程" : "删除分支",
+    };
+  });
   let localCount = $derived(branches.filter((branch) => !branch.remote).length);
   let remoteCount = $derived(branches.filter((branch) => branch.remote).length);
   let listScope = $derived(tab === "remote" ? "remote" : "local");
@@ -221,11 +270,35 @@
   function applyBranches(result: BranchState) {
     branches = result.branches;
     defaultBranch = result.defaultBranch ?? null;
+    mergeBases = result.mergeBases ?? [];
     onSnapshot(result.snapshot);
   }
 
   function isDefault(branch: BranchRecord): boolean {
     return isDefaultBranch(branch, defaultBranch);
+  }
+
+  /** 已合入主干的说明：标记的提示与删除确认里共用。 */
+  function mergedNote(): string {
+    return mergeBases.length > 0 ? `已完整包含在 ${mergeBases.join(" 和 ")} 中，删除不会丢失提交` : "已完整包含在主干中，删除不会丢失提交";
+  }
+
+  /**
+   * 与本地分支同名的远程分支：优先它跟踪的上游（名称相同时），否则 origin/同名。
+   * 名称不同的上游不算——删除本地时顺手删掉一个别名的远程分支太容易出意外。
+   */
+  function remoteTwin(branch: BranchRecord): RemoteTwin | null {
+    if (branch.remote) return null;
+    const exists = (full: string) => branches.some((item) => item.remote && item.name === full);
+    const candidates: string[] = [];
+    if (branch.upstream) candidates.push(branch.upstream);
+    candidates.push(`origin/${branch.name}`);
+    for (const full of candidates) {
+      const slash = full.indexOf("/");
+      if (slash <= 0 || full.slice(slash + 1) !== branch.name || !exists(full)) continue;
+      return { remote: full.slice(0, slash), name: full.slice(slash + 1), full };
+    }
+    return null;
   }
 
   /** 别的工作区正在用这个分支。这时只打开那个工作区，不在当前工作区检出。 */
@@ -276,6 +349,18 @@
     }, true);
     if (!result || opened.summary.path !== path) return;
     applyBranches(result);
+  }
+
+  /** 刷新：列表留在原处，只在按钮上转圈；读完替换成新列表（含「已合入主干」标记）。 */
+  let refreshing = $state(false);
+  async function refresh() {
+    if (refreshing || readBlocked) return;
+    refreshing = true;
+    try {
+      await loadBranches();
+    } finally {
+      refreshing = false;
+    }
   }
 
   /** 重试会把按钮换成加载态：先把焦点放到常驻的搜索框，否则焦点掉到 body，Esc 就到不了 Modal。 */
@@ -488,61 +573,59 @@
     onClose();
   }
 
-  async function askDelete(branch: BranchRecord) {
+  function askDelete(branch: BranchRecord) {
     let prompt: typeof confirmDelete;
     if (branch.remote) {
       const slash = branch.name.indexOf("/");
       if (slash <= 0) return;
-      prompt = {
-        kind: "remote",
-        remote: branch.name.slice(0, slash),
-        name: branch.name.slice(slash + 1),
-        body: `将从远程删除 ${branch.name}。这不会强行推送，但远程上的该分支会被移除。取消则不会执行。`,
-        force: false,
-      };
+      prompt = { kind: "remote", remote: branch.name.slice(0, slash), name: branch.name.slice(slash + 1), force: false, branch };
     } else {
-      prompt = {
-        kind: "local",
-        name: branch.name,
-        body: "将删除这个本地分支。如果它还有未合入当前分支的提交，需要再次确认。取消则不会执行。",
-        force: false,
-      };
+      prompt = { kind: "local", name: branch.name, force: false, twin: remoteTwin(branch), branch };
     }
+    alsoRemote = false;
     rememberOrigin();
+    // 确认框默认把焦点放在安全的「取消」上，破坏性操作必须多走一步。
     confirmDelete = prompt;
-    await tick();
-    // 默认落在安全的取消上，破坏性操作必须多走一步。
-    confirmCancel?.focus();
   }
 
   async function confirmRemoval() {
     const currentRepo = opened;
     const target = confirmDelete;
     if (!target || blocked) return;
-    // 确认按钮在途时会被禁用，先把焦点放到确认区容器，Esc 才还到得了键盘处理。
-    confirmBox?.focus();
-    const result = await write(() =>
-      target.kind === "remote"
-        ? api.deleteRemoteBranch(currentRepo.summary.path, target.remote, target.name, true, currentRepo.generation, nextId())
-        : api.deleteBranch(currentRepo.summary.path, target.name, target.force, currentRepo.generation, nextId()),
-    );
+    const twin = target.kind === "local" && alsoRemote ? target.twin : null;
+    let remoteFailure: string | null = null;
+    const result = await write(async () => {
+      if (target.kind === "remote") {
+        return api.deleteRemoteBranch(currentRepo.summary.path, target.remote, target.name, true, currentRepo.generation, nextId());
+      }
+      const local = await api.deleteBranch(currentRepo.summary.path, target.name, target.force, currentRepo.generation, nextId());
+      if (!twin) return local;
+      // 本地已经删掉：远程失败时不回滚，也不把整次操作算作失败，只如实说明哪一半没完成。
+      try {
+        return await api.deleteRemoteBranch(currentRepo.summary.path, twin.remote, twin.name, true, local.generation, nextId());
+      } catch (error) {
+        remoteFailure = normalizeError(error).message;
+        return local;
+      }
+    });
     // 只有「未合入」这一种失败才升级为强删确认；其它失败按普通错误处理并收起确认层。
     if (!result && target.kind === "local" && !target.force && lastFailureCode === "branch_unmerged") {
-      confirmDelete = {
-        kind: "local",
-        name: target.name,
-        body: "该分支含有尚未合入当前分支的提交。确认后才会删除，删除后这些提交不能由这里自动恢复。",
-        force: true,
-      };
-      await tick();
-      confirmCancel?.focus();
+      confirmDelete = { ...target, force: true };
       return;
     }
     confirmDelete = null;
     void restoreOrigin();
     if (!result) return;
     applyBranches(result);
-    onNotice(target.kind === "remote" ? `已删除远程分支 ${target.remote}/${target.name}` : `已删除本地分支 ${target.name}`);
+    if (target.kind === "remote") {
+      onNotice(`已删除远程分支 ${target.remote}/${target.name}`);
+    } else if (twin && remoteFailure) {
+      errorText = `本地分支 ${target.name} 已删除；远程分支 ${twin.full} 没有删除：${remoteFailure}`;
+    } else if (twin) {
+      onNotice(`已删除本地分支 ${target.name} 和远程分支 ${twin.full}`);
+    } else {
+      onNotice(`已删除本地分支 ${target.name}`);
+    }
   }
 
   /** 切分区统一放弃当前的表单和确认区，切回时不残留；写入在途时结果未定，先不让切。 */
@@ -662,37 +745,22 @@
           spellcheck="false"
         />
         <div class="branch-create-options">
-          <label class="branch-base">
-            <span>起点</span>
-            <select class="select" aria-label="新分支的起点" bind:value={createBase} title={blocked ? BUSY_REASON : undefined} disabled={blocked}>
-              <option value="">当前分支（{current.name ?? "游离 HEAD"}）</option>
-              {#if branchGroups !== false}
-                <!-- 分组开启时和分支列表一样按第一个 / 收成组；原生下拉框只能分一层，正好对应。 -->
-                {@const local = bucketNames(branches.filter((branch) => !branch.current && !branch.remote).map((branch) => branch.name))}
-                {@const remote = bucketNames(branches.filter((branch) => !branch.current && branch.remote).map((branch) => branch.name))}
-                {#each local.top as name (name)}<option value={name}>{name}</option>{/each}
-                {#each local.groups as group (group.prefix)}
-                  <optgroup label={`${group.prefix}/`}>
-                    {#each group.names as name (name)}<option value={name}>{name}</option>{/each}
-                  </optgroup>
-                {/each}
-                {#if remote.top.length > 0}
-                  <optgroup label="远程">
-                    {#each remote.top as name (name)}<option value={name}>{name}</option>{/each}
-                  </optgroup>
-                {/if}
-                {#each remote.groups as group (group.prefix)}
-                  <optgroup label={`远程 ${group.prefix}/`}>
-                    {#each group.names as name (name)}<option value={name}>{name}</option>{/each}
-                  </optgroup>
-                {/each}
-              {:else}
-                {#each branches.filter((branch) => !branch.current) as branch (branch.name)}
-                  <option value={branch.name}>{branch.remote ? `远程 ${branch.name}` : branch.name}</option>
-                {/each}
-              {/if}
-            </select>
-          </label>
+          <div class="branch-base">
+            <span id="branch-base-label">起点</span>
+            <BranchPicker
+              label="新分支的起点"
+              size="md"
+              branches={branches.filter((branch) => !branch.current)}
+              value={createBase}
+              current={null}
+              {defaultBranch}
+              mainBranches={[...mainNames]}
+              extras={[{ value: "", label: `当前${current.name ? "分支" : "提交"}（${current.name ?? "游离 HEAD"}）`, icon: "branch" }]}
+              disabled={blocked}
+              {branchGroups}
+              onChange={(name) => (createBase = name)}
+            />
+          </div>
           <label class="switch branch-checkout">
             <input type="checkbox" bind:checked={createCheckout} title={blocked ? BUSY_REASON : undefined} disabled={blocked} />
             <span>创建后切换过去</span>
@@ -724,6 +792,16 @@
             <button type="button" class="field-clear" aria-label="清空分支搜索" onclick={() => (branchQuery = "")}><Icon name="x" size={12} /></button>
           {/if}
         </div>
+        <button
+          type="button"
+          class="btn btn-secondary branch-refresh"
+          aria-label="刷新分支列表"
+          title={readBlocked ? BUSY_REASON : "重新读取本地和远程分支（远程分支以最近一次获取为准）"}
+          disabled={readBlocked || !listReady || refreshing}
+          onclick={refresh}
+        >
+          {#if refreshing || (!listReady && !listFailed)}<span class="spinner"></span>{:else}<Icon name="refresh" size={14} />{/if}
+        </button>
         <button
           type="button"
           class="btn btn-secondary"
@@ -789,13 +867,17 @@
                 }
               }}
             >
-              <span class="branch-row-icon"><Icon name={branch.current ? "check-circle" : branch.remote ? "cloud" : "branch"} size={16} /></span>
+              <span class="branch-row-icon" class:main={mainNames.has(branch.name)} title={mainNames.has(branch.name) ? "主干分支" : undefined}>
+                <Icon name={mainNames.has(branch.name) ? "star" : branch.current ? "check-circle" : branch.remote ? "cloud" : "branch"} size={16} />
+              </span>
               <div class="lr-main">
                 <span class="lr-title">
                   <span title={branch.name}>{branch.name}</span>
+                  {#if branch.merged}<span class="merged-badge" data-merged-branch role="img" aria-label="已合入主干" title={`已合入主干：${mergedNote()}`}><Icon name="check" size={10} /></span>{/if}
                   {#if isDefault(branch)}<span class="chip default-branch" data-default-branch>默认</span>{/if}
                   {#if branch.current}<span class="chip current">当前</span>{/if}
                   {#if branch.worktree && !branch.current}<span class="chip">其他工作区</span>{/if}
+
                 </span>
                 <span class="lr-sub">
                   {#if branch.upstream}上游 {branch.upstream}{:else if branch.worktree}工作区 {branch.worktree}{:else if branch.remote}远程跟踪分支{:else}仅存在于本地{/if}
@@ -901,26 +983,6 @@
         </div>
       {/if}
 
-      {#if confirmDelete}
-        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-        <div class="callout warn" role="alert" tabindex="-1" data-modal-impact="branch-delete" bind:this={confirmBox} onkeydown={onPromptKey}>
-          <Icon name="alert" size={15} />
-          <div class="callout-body">
-            <p>{confirmDelete.body}</p>
-            <ul class="scope-list">
-              <li title={deleteLabel}>{deleteLabel}</li>
-            </ul>
-            <div class="row">
-              <button type="button" class="btn btn-secondary btn-sm" title={writing ? BUSY_REASON : undefined} disabled={writing} bind:this={confirmCancel} onclick={cancelPrompt}>取消</button>
-              {#if confirmDelete.kind === "local" && confirmDelete.force}
-                <button type="button" class="btn btn-danger btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={confirmRemoval}>确认删除未合入分支</button>
-              {:else}
-                <button type="button" class="btn btn-danger btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={confirmRemoval}>确认删除</button>
-              {/if}
-            </div>
-          </div>
-        </div>
-      {/if}
     {/if}
     {#if errorText}
       <div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{errorText}</span></div>
@@ -928,6 +990,32 @@
   </div>
   {#if menu}
     <ContextMenu request={menu} onClose={() => (menu = null)} />
+  {/if}
+  {#if confirmDelete && deletePrompt}
+    {@const target = confirmDelete}
+    <ConfirmDialog
+      title={deletePrompt.title}
+      titleId="branch-delete-title"
+      message={deletePrompt.message}
+      targets={deletePrompt.targets}
+      targetsLabel="要删除的分支"
+      notes={deletePrompt.notes}
+      confirmLabel={deletePrompt.confirm}
+      confirmIcon="trash"
+      busy={writing}
+      confirmBlocked={blocked && !writing ? (blockedReason ?? BUSY_REASON) : null}
+      focusKey={target.force}
+      impact="branch-delete"
+      onConfirm={() => void confirmRemoval()}
+      onCancel={cancelPrompt}
+    >
+      {#if target.kind === "local" && target.twin}
+        <label class="confirm-option">
+          <input type="checkbox" class="checkbox" bind:checked={alsoRemote} title={writing ? BUSY_REASON : undefined} disabled={writing} />
+          <span>同时删除远程分支 <code>{target.twin.full}</code><small>本地和远程同名；勾选后也会从远程移除，其他协作者将看不到它</small></span>
+        </label>
+      {/if}
+    </ConfirmDialog>
   {/if}
   {#snippet footer()}
     <span class="spacer"></span>

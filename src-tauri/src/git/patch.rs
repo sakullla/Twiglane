@@ -59,13 +59,13 @@ pub fn parse_diff(bytes: &[u8], truncated_input: bool) -> Result<ParsedDiff, App
             truncated: truncated_input,
         });
     }
-    let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
+    let text = std::str::from_utf8(bytes).map_err(|_| {
         AppError::new(
             "diff_encoding",
             "差异包含无法安全显示的内容，已停止读取且未修改仓库。",
         )
     })?;
-    if is_binary_diff(&text) {
+    if is_binary_diff(text) {
         return Ok(ParsedDiff {
             binary: true,
             undecodable: false,
@@ -76,7 +76,7 @@ pub fn parse_diff(bytes: &[u8], truncated_input: bool) -> Result<ParsedDiff, App
             truncated: truncated_input,
         });
     }
-    let lines = split_keep(&text);
+    let lines = split_keep(text);
     let hunk_at = lines.iter().position(|line| line.starts_with("@@"));
     let (preamble_lines, hunk_lines) = match hunk_at {
         Some(index) => (&lines[..index], &lines[index..]),
@@ -177,34 +177,20 @@ pub fn view_lines(
     offset: u32,
     limit: u32,
 ) -> (Vec<DiffLine>, Vec<DiffHunk>, u32) {
-    let mut all = Vec::new();
-    for line in split_keep(&parsed.preamble) {
-        let text = line.trim_end_matches(['\n', '\r']).to_string();
-        if text.is_empty() {
-            continue;
-        }
-        all.push(DiffLine {
-            kind: "meta".to_string(),
-            text,
-            old_no: None,
-            new_no: None,
-            hunk_index: None,
-        });
-    }
-    let mut hunks = Vec::new();
-    for hunk in &parsed.hunks {
-        let start = all.len() as u32;
-        all.extend(hunk.lines.iter().cloned());
-        hunks.push(DiffHunk {
-            index: hunk.index,
-            header: hunk.header.clone(),
-            complete: hunk.complete,
-            stageable: hunk.complete && !parsed.binary,
-            start_line: start,
-            line_count: hunk.lines.len() as u32,
-        });
-    }
-    let total = all.len() as u32;
+    let meta = || {
+        parsed
+            .preamble
+            .split_inclusive('\n')
+            .map(|line| line.trim_end_matches(['\n', '\r']))
+            .filter(|line| !line.is_empty())
+    };
+    let meta_count = meta().count() as u32;
+    let total = meta_count
+        + parsed
+            .hunks
+            .iter()
+            .map(|hunk| hunk.lines.len() as u32)
+            .sum::<u32>();
     let limit = if limit == 0 {
         DIFF_VIEW_LINE_LIMIT
     } else {
@@ -212,18 +198,45 @@ pub fn view_lines(
     };
     let offset = offset.min(total);
     let end = offset.saturating_add(limit).min(total);
-    let window = all[offset as usize..end as usize].to_vec();
-    let visible = hunks
-        .into_iter()
-        .filter(|hunk| hunk.start_line + hunk.line_count > offset && hunk.start_line < end)
-        .map(|mut hunk| {
-            let visible_start = hunk.start_line.max(offset);
-            let visible_end = (hunk.start_line + hunk.line_count).min(end);
-            hunk.start_line = visible_start - offset;
-            hunk.line_count = visible_end.saturating_sub(visible_start);
-            hunk
-        })
-        .collect();
+    // 只克隆当前页：完整文件预览可能有数万行，不能每次续读都复制整份文本。
+    let mut window = Vec::with_capacity((end - offset) as usize);
+    if offset < meta_count {
+        for text in meta().skip(offset as usize).take((end - offset) as usize) {
+            window.push(DiffLine {
+                kind: "meta".to_string(),
+                text: text.to_string(),
+                old_no: None,
+                new_no: None,
+                hunk_index: None,
+            });
+        }
+    }
+    let mut visible = Vec::new();
+    let mut start = meta_count;
+    for hunk in &parsed.hunks {
+        if start >= end {
+            break;
+        }
+        let hunk_end = start + hunk.lines.len() as u32;
+        if hunk_end > offset {
+            let visible_start = start.max(offset);
+            let visible_end = hunk_end.min(end);
+            window.extend(
+                hunk.lines[(visible_start - start) as usize..(visible_end - start) as usize]
+                    .iter()
+                    .cloned(),
+            );
+            visible.push(DiffHunk {
+                index: hunk.index,
+                header: hunk.header.clone(),
+                complete: hunk.complete,
+                stageable: hunk.complete && !parsed.binary,
+                start_line: visible_start - offset,
+                line_count: visible_end - visible_start,
+            });
+        }
+        start = hunk_end;
+    }
     (window, visible, total)
 }
 
@@ -638,6 +651,42 @@ index c4352f8..8964c93 100644
     }
 
     #[test]
+    fn diff_pages_preserve_lines_and_hunk_boundaries() {
+        let parsed = parse_diff(sample().as_bytes(), false).unwrap();
+        let (all, hunks, total) = view_lines(&parsed, 0, 0);
+        for offset in 0..=total + 1 {
+            for limit in [1, 3, 8, 400] {
+                let (page, visible, count) = view_lines(&parsed, offset, limit);
+                let start = offset.min(total);
+                let end = (start + limit).min(total);
+                assert_eq!(count, total);
+                assert_eq!(page, all[start as usize..end as usize]);
+                let expected: Vec<_> = hunks
+                    .iter()
+                    .filter(|hunk| {
+                        hunk.start_line < end && hunk.start_line + hunk.line_count > start
+                    })
+                    .map(|hunk| {
+                        let mut visible = hunk.clone();
+                        let from = hunk.start_line.max(start);
+                        visible.start_line = from - start;
+                        visible.line_count = (hunk.start_line + hunk.line_count).min(end) - from;
+                        visible
+                    })
+                    .collect();
+                assert_eq!(visible, expected);
+            }
+        }
+        let empty = parse_diff(b"\n\r\n", false).unwrap();
+        assert_eq!(view_lines(&empty, u32::MAX, 1), (vec![], vec![], 0));
+        let cut_at = sample().find("+CHANGED B").unwrap() + 4;
+        let cut = parse_diff(&sample().as_bytes()[..cut_at], true).unwrap();
+        let (_, visible, _) = view_lines(&cut, 0, 400);
+        assert!(visible[0].stageable);
+        assert!(!visible[1].stageable);
+    }
+
+    #[test]
     fn truncated_hunk_cannot_be_patched() {
         let full = sample();
         let cut = &full[..full.find("+CHANGED B").unwrap() + 4];
@@ -745,7 +794,8 @@ index 1111111..2222222 100644
 
     #[test]
     fn numstat_list_keeps_rename_on_the_new_path_and_binary_blank() {
-        let entries = parse_numstat_list(b"2\t1\tbase.txt\0-\t-\tdata.bin\x000\t0\t\0a.txt\0b.txt\0");
+        let entries =
+            parse_numstat_list(b"2\t1\tbase.txt\0-\t-\tdata.bin\x000\t0\t\0a.txt\0b.txt\0");
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].path, "base.txt");
         assert_eq!(entries[0].additions, Some(2));

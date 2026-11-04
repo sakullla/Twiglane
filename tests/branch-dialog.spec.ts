@@ -323,7 +323,7 @@ describe("分支管理", () => {
     let fail: (reason: unknown) => void = () => {};
     createBranchFrom.mockReturnValueOnce(new Promise((_, reject) => (fail = reject)));
     render(BranchDialog, { props: { ...props(), startCreating: true } });
-    await waitFor(() => expect(document.querySelector("[data-branch-create] select option[value='main']")).toBeTruthy());
+    await waitFor(() => expect((screen.getByRole("button", { name: "新分支的起点" }) as HTMLButtonElement).disabled).toBe(false));
     const input = screen.getByLabelText("新建分支") as HTMLInputElement;
     await fireEvent.input(input, { target: { value: "spike" } });
     await fireEvent.click(screen.getByRole("button", { name: /创建并切换/ }));
@@ -363,7 +363,7 @@ describe("分支管理", () => {
     expect(screen.getByRole("tab", { name: /本地分支/ }).getAttribute("aria-selected")).toBe("true");
   });
 
-  it("删除确认替换列表，焦点在取消上；取消后回到触发按钮和原滚动位置", async () => {
+  it("删除确认是叠在列表上的对话框：焦点在取消上，列表原样留着；取消后回到触发按钮", async () => {
     render(BranchDialog, { props: props() });
     await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
     const list = document.querySelector<HTMLElement>(".branch-list")!;
@@ -371,13 +371,16 @@ describe("分支管理", () => {
     const trigger = screen.getByRole("button", { name: "删除 main" });
     trigger.focus();
     await fireEvent.click(trigger);
-    await waitFor(() => expect(document.activeElement).toBe(document.querySelector("[data-modal-impact] .btn-secondary")));
-    expect(document.activeElement?.textContent).toBe("取消");
-    expect(list.hidden).toBe(true);
-    expect(document.querySelector<HTMLElement>(".branch-manager-tools")!.hidden).toBe(true);
-    await fireEvent.click(document.activeElement!);
-    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    const dialog = await screen.findByRole("dialog", { name: "删除本地分支" });
+    const cancel = within(dialog).getByRole("button", { name: "取消" });
+    await waitFor(() => expect(document.activeElement).toBe(cancel));
+    expect(within(dialog).getByRole("list", { name: "要删除的分支" }).textContent).toContain("main");
+    expect(within(dialog).getByRole("button", { name: /删除分支/ })).toBeTruthy();
     expect(list.hidden).toBe(false);
+    expect(document.querySelector<HTMLElement>(".branch-manager-tools")!.hidden).toBe(false);
+    await fireEvent.click(cancel);
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(screen.queryByRole("dialog", { name: "删除本地分支" })).toBeNull();
     expect(list.scrollTop).toBe(40);
   });
 
@@ -494,33 +497,40 @@ describe("分支管理", () => {
     await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
     await fireEvent.click(screen.getByRole("tab", { name: /标签/ }));
     await fireEvent.click(await screen.findByRole("button", { name: "删除标签 v1" }));
-    await fireEvent.click(await screen.findByRole("button", { name: "确认删除标签" }));
+    await fireEvent.click(await screen.findByRole("button", { name: /^删除标签$/ }));
     await tick();
+    // 写入在途：确认框锁住（Esc、右上角关闭都不收起），背后的分区和外层对话框也都不能切走或关闭。
+    await fireEvent.keyDown(document.body, { key: "Escape" });
+    const confirm = screen.getByRole("dialog", { name: "删除本地标签" });
+    expect((within(confirm).getByRole("button", { name: "关闭对话框" }) as HTMLButtonElement).disabled).toBe(true);
 
-    const local = screen.getByRole("tab", { name: /本地分支/ });
+    const local = document.getElementById("branch-tab-local")!;
     expect(local.getAttribute("aria-disabled")).toBe("true");
     expect(local.getAttribute("title")).toContain("写入完成");
     await fireEvent.click(local);
     expect(document.querySelector('[data-branch-panel="tags"]'), "在途不切走").toBeTruthy();
-    await fireEvent.keyDown(document.body, { key: "Escape" });
-    await fireEvent.click(screen.getByRole("button", { name: "关闭对话框" }));
+    const outerClose = document.querySelector<HTMLButtonElement>('[data-task-modal="branch"] .modal-head .icon-btn')!;
+    expect(outerClose.disabled).toBe(true);
+    await fireEvent.click(outerClose);
     expect(base.onClose).not.toHaveBeenCalled();
 
     finish({ generation: 5, tags: [], snapshot: opened.snapshot });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "删除本地标签" })).toBeNull());
     await waitFor(() => expect(local.getAttribute("aria-disabled")).toBeNull());
     await fireEvent.click(local);
     expect(document.querySelector('[data-branch-panel="local"]')).toBeTruthy();
   });
 
-  it("切分区时收起删除确认，切回时列表正常显示", async () => {
+  it("删除确认打开时背后的分区不可操作，取消后分区照常可切", async () => {
     render(BranchDialog, { props: props() });
     await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
     await fireEvent.click(screen.getByRole("button", { name: "删除 main" }));
     await waitFor(() => expect(document.querySelector("[data-modal-impact]")).toBeTruthy());
-    await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
-    await fireEvent.click(screen.getByRole("tab", { name: /本地分支/ }));
+    expect(screen.queryByRole("tab", { name: /远程分支/ }), "背后的分区被确认框挡住").toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    await fireEvent.click(await screen.findByRole("tab", { name: /远程分支/ }));
+    expect(document.querySelector('[data-branch-panel="remote"]')).toBeTruthy();
     expect(document.querySelector("[data-modal-impact]")).toBeNull();
-    expect(document.querySelector<HTMLElement>(".branch-list")!.hidden).toBe(false);
   });
 
   it("切换成功后更新状态并自动关闭", async () => {
@@ -1111,18 +1121,161 @@ describe("打开其他工作区、默认徽章与斜杠分组", () => {
     const listed = [record("feature/ui", true), record("feature/extra"), record("bugfix/login"), record("main"), record("origin/main", false, null, true)];
     const mounted = await showDialog(listed, "main");
     await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
-    const base = () => screen.getByRole("combobox", { name: "新分支的起点" }) as HTMLSelectElement;
-    const groups = () => [...base().querySelectorAll("optgroup")].map((group) => [group.label, [...group.querySelectorAll("option")].map((option) => option.value)]);
-    expect(groups()).toEqual([
-      ["feature/", ["feature/extra"]],
-      ["bugfix/", ["bugfix/login"]],
-      ["远程 origin/", ["origin/main"]],
-    ]);
-    expect([...base().children].filter((node) => node.tagName === "OPTION").map((node) => (node as HTMLOptionElement).value)).toEqual(["", "main"]);
+    const base = () => screen.getByRole("button", { name: "新分支的起点" });
+    const groups = () => [...document.querySelectorAll<HTMLElement>("[data-branch-group]")].map((node) => node.dataset.branchGroup);
+    await waitFor(() => expect((base() as HTMLButtonElement).disabled).toBe(false));
+    await fireEvent.click(base());
+    // 当前分支由顶部的「当前分支」选项代表，列表里不重复出现。
+    expect(optionNames()).toEqual(["当前分支（feature/ui）", "main"]);
+    expect(groups()).toEqual(["feature", "bugfix", "origin"]);
+    expect(badgedOptions()).toEqual(["main"]);
+    await fireEvent.click(screen.getByRole("button", { name: "展开分组 origin" }));
+    expect(optionNames()).toEqual(["当前分支（feature/ui）", "main", "origin/main"]);
+    await fireEvent.click(screen.getByRole("option", { name: "origin/main" }));
+    expect(base().dataset.value).toBe("origin/main");
+    expect(screen.queryByRole("listbox")).toBeNull();
 
     await mounted.view.rerender({ ...mounted.props, branchGroups: false });
-    await waitFor(() => expect(base().querySelector("optgroup")).toBeNull());
-    expect([...base().options].map((option) => option.value)).toEqual(["", "feature/extra", "bugfix/login", "main", "origin/main"]);
+    await fireEvent.click(base());
+    expect(groups()).toEqual([]);
+    expect(optionNames()).toEqual(["当前分支（feature/ui）", "feature/extra", "bugfix/login", "main", "origin/main"]);
+    await fireEvent.click(screen.getByRole("option", { name: "当前分支（feature/ui）" }));
+    expect(base().dataset.value).toBe("");
+  });
+
+  it("切换器的分支行有右键菜单：新建、合并、变基带上所点分支，当前分支不能再切换", async () => {
+    const listed = [record("feature/ui", true), record("main"), record("shared", false, "D:/wt"), record("origin/main", false, null, true)];
+    const onMergeBranch = vi.fn();
+    const onMergeInto = vi.fn();
+    const onRebaseBranch = vi.fn();
+    const { props } = showSwitcher(listed, "main", "feature/ui", { onMergeBranch, onMergeInto, onRebaseBranch });
+    const popover = await screen.findByRole("dialog", { name: "切换分支" });
+    const main = await within(popover).findByRole("option", { name: /^main/ });
+
+    await fireEvent.contextMenu(main, { clientX: 40, clientY: 60 });
+    let menu = screen.getByRole("menu", { name: "main 的操作" });
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual([
+      "切换到此分支",
+      "从此分支新建分支…",
+      "合并到当前分支（feature/ui）…",
+      "把 feature/ui 合并到此分支…",
+      "把当前分支变基到此分支…",
+      "复制分支名",
+      "重命名或删除…",
+    ]);
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "从此分支新建分支…" }));
+    expect(props.onCreateBranch).toHaveBeenLastCalledWith("main");
+
+    await fireEvent.contextMenu(main, { clientX: 40, clientY: 60 });
+    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: /^合并到当前分支/ }));
+    expect(onMergeBranch).toHaveBeenLastCalledWith("main");
+    await fireEvent.contextMenu(main, { clientX: 40, clientY: 60 });
+    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "把 feature/ui 合并到此分支…" }));
+    expect(onMergeInto).toHaveBeenLastCalledWith("main");
+    await fireEvent.contextMenu(main, { clientX: 40, clientY: 60 });
+    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "把当前分支变基到此分支…" }));
+    expect(onRebaseBranch).toHaveBeenLastCalledWith("main");
+
+    // 当前分支：切换、合并、变基都给出原因；从当前分支新建时不带起点。
+    await fireEvent.contextMenu(within(popover).getByRole("option", { name: /^feature\/ui/ }), { clientX: 40, clientY: 60 });
+    menu = screen.getByRole("menu", { name: "feature/ui 的操作" });
+    const switchItem = within(menu).getByRole("menuitem", { name: "切换到此分支" });
+    expect(switchItem.getAttribute("aria-disabled")).toBe("true");
+    expect(switchItem.getAttribute("title")).toBe("这就是当前分支");
+    for (const name of [/^合并到当前分支/, /合并到此分支/, /变基到此分支/]) {
+      expect(within(menu).getByRole("menuitem", { name }).getAttribute("title")).toBe("这就是当前分支");
+    }
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "从此分支新建分支…" }));
+    expect(props.onCreateBranch).toHaveBeenLastCalledWith(undefined);
+
+    // 其他工作区占用的分支：可以打开那个工作区，不能在这里切换。
+    await fireEvent.contextMenu(within(popover).getByRole("option", { name: /^shared/ }), { clientX: 40, clientY: 60 });
+    menu = screen.getByRole("menu", { name: "shared 的操作" });
+    expect(within(menu).getByRole("menuitem", { name: "切换到此分支" }).getAttribute("title")).toBe("正被其他工作区使用：D:/wt");
+    expect(within(menu).getByRole("menuitem", { name: "打开此工作区" }).getAttribute("aria-disabled")).toBeNull();
+
+    // Esc 只关菜单，弹层还在；菜单键在键盘当前项上打开同一份菜单。
+    await fireEvent.keyDown(menu, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByRole("dialog", { name: "切换分支" })).toBe(popover);
+    await fireEvent.keyDown(within(popover).getByRole("combobox"), { key: "F10", shiftKey: true });
+    expect(screen.getByRole("menu")).toBeTruthy();
+    expect(switchBranch).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
+  it("写入中切换器在顶部说明一次原因，条目置灰并把原因放进提示", async () => {
+    showSwitcher([record("feature/ui", true), record("main")], null, "feature/ui", { blockedReason: "正在写入，稍后再试" });
+    const popover = await screen.findByRole("dialog", { name: "切换分支" });
+    expect(within(popover).getByRole("status").textContent).toContain("正在写入，稍后再试");
+    const main = await within(popover).findByRole("option", { name: "main" });
+    expect(main.getAttribute("aria-disabled")).toBe("true");
+    expect(main.getAttribute("title")).toBe("正在写入，稍后再试");
+    expect(main.textContent?.trim()).toBe("main");
+  });
+
+  it("分支对话框里的起点下拉：Esc 只收起下拉，不关闭对话框；从分支弹层带来的起点直接选好", async () => {
+    branchState.mockResolvedValue({ generation: 4, branches: [record("feature/ui", true), record("main")], snapshot: opened.snapshot, defaultBranch: "main" });
+    const props = { ...propsBase(), opened: onBranch("feature/ui"), startCreating: true, startBase: "main" };
+    render(BranchDialog, { props });
+    const base = () => screen.getByRole("button", { name: "新分支的起点" }) as HTMLButtonElement;
+    await waitFor(() => expect(base().disabled).toBe(false));
+    expect(base().dataset.value).toBe("main");
+    await fireEvent.click(base());
+    const search = screen.getByLabelText("搜索新分支的起点");
+    await waitFor(() => expect(document.activeElement).toBe(search));
+    await fireEvent.keyDown(search, { key: "Escape" });
+    expect(screen.queryByLabelText("搜索新分支的起点")).toBeNull();
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("新建分支")).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(base()));
+  });
+
+  it("主干分支（本地默认分支和它的远程对应分支）用星标；已合入主干的分支只是一枚小勾徽章", async () => {
+    const listed = [
+      record("feature/ui", true),
+      record("main"),
+      { ...record("done"), merged: true },
+      record("origin/main", false, null, true),
+      { ...record("origin/done", false, null, true), merged: true },
+    ];
+    branchState.mockResolvedValue({ generation: 4, branches: listed, snapshot: opened.snapshot, defaultBranch: "main", mergeBases: ["main", "origin/main"] });
+    const anchor = document.createElement("button");
+    document.body.append(anchor);
+    anchors.push(anchor);
+    render(BranchSwitcher, {
+      props: {
+        anchor,
+        opened: onBranch("feature/ui"),
+        blockedReason: null,
+        nextId: () => 9,
+        onBusy: vi.fn(),
+        onGeneration: vi.fn(),
+        onSnapshot: vi.fn(),
+        onFailure: vi.fn(),
+        onNotice: vi.fn(),
+        onCommand: vi.fn(),
+        onCreateBranch: vi.fn(),
+        onClose: vi.fn(),
+        branchGroups: false,
+      },
+    });
+    const popover = await screen.findByRole("dialog", { name: "切换分支" });
+    await waitFor(() => expect(within(popover).getAllByRole("option").length).toBe(5));
+    const starred = [...popover.querySelectorAll(".branch-option-icon.main")].map((icon) => icon.closest('[role="option"]')?.querySelector(".branch-option-name")?.textContent);
+    expect(starred).toEqual(["main", "origin/main"]);
+    const merged = [...popover.querySelectorAll<HTMLElement>("[data-merged-branch]")];
+    expect(merged.map((badge) => badge.closest('[role="option"]')?.querySelector(".branch-option-name")?.textContent)).toEqual(["done", "origin/done"]);
+    expect(merged[0].textContent?.trim(), "徽章不带文字").toBe("");
+    expect(merged[0].getAttribute("aria-label")).toBe("已合入主干");
+    expect(merged[0].title).toContain("main 和 origin/main");
+    cleanup();
+
+    render(BranchDialog, { props: { ...propsBase(), opened: onBranch("feature/ui"), branchGroups: false } });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    const mainRow = [...document.querySelectorAll<HTMLElement>(".branch-row")].find((row) => row.querySelector(".lr-title span")?.textContent === "main")!;
+    expect(mainRow.querySelector(".branch-row-icon.main")).toBeTruthy();
+    expect(mainRow.querySelector(".branch-row-icon")?.getAttribute("title")).toBe("主干分支");
   });
 
   it("默认徽章不大于当前分支标记", () => {

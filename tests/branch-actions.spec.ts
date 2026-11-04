@@ -168,7 +168,7 @@ describe("分支右键菜单", () => {
     await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
     await fireEvent.contextMenu(rowOf("main"), { clientX: 100, clientY: 100 });
     await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "从此分支新建分支…" }));
-    expect((screen.getByRole("combobox", { name: "新分支的起点" }) as HTMLSelectElement).value).toBe("main");
+    expect(screen.getByRole("button", { name: "新分支的起点" }).dataset.value).toBe("main");
     await fireEvent.input(screen.getByLabelText("新建分支"), { target: { value: "hotfix/login" } });
     await fireEvent.click(screen.getByRole("button", { name: /创建并切换/ }));
     await waitFor(() => expect(api.createBranchFrom).toHaveBeenCalledWith("/repo", "hotfix/login", "main", true, 4, 7));
@@ -191,9 +191,9 @@ describe("分支右键菜单", () => {
     await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
     await fireEvent.contextMenu(rowOf("feature/ui"), { clientX: 100, clientY: 100 });
     await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "从此分支新建分支…" }));
-    const base = screen.getByRole("combobox", { name: "新分支的起点" }) as HTMLSelectElement;
-    expect(base.value).toBe("");
-    expect(base.selectedIndex).toBe(0);
+    const base = screen.getByRole("button", { name: "新分支的起点" });
+    expect(base.dataset.value).toBe("");
+    expect(base.textContent).toContain("当前分支（feature/ui）");
   });
 
   it("从分支菜单新建：表单直接展开并聚焦名称，收起后起点不残留", async () => {
@@ -205,7 +205,7 @@ describe("分支右键菜单", () => {
     await fireEvent.click(screen.getByRole("button", { name: "取消" }));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "新建分支" })));
     await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
-    expect((screen.getByRole("combobox", { name: "新分支的起点" }) as HTMLSelectElement).value).toBe("");
+    expect(screen.getByRole("button", { name: "新分支的起点" }).dataset.value).toBe("");
   });
 
   it("未合入才升级强删确认：焦点落在取消，再次确认才带 force", async () => {
@@ -213,8 +213,8 @@ describe("分支右键菜单", () => {
     setup();
     await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
     await fireEvent.click(screen.getByRole("button", { name: "删除 main" }));
-    await fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
-    const force = await screen.findByRole("button", { name: "确认删除未合入分支" });
+    await fireEvent.click(await screen.findByRole("button", { name: "删除分支" }));
+    const force = await screen.findByRole("button", { name: "仍然删除" });
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "取消" })));
     expect(api.deleteBranch).toHaveBeenCalledTimes(1);
     expect(api.deleteBranch.mock.calls[0][2]).toBe(false);
@@ -231,7 +231,7 @@ describe("分支右键菜单", () => {
     const trigger = screen.getByRole("button", { name: "删除 main" });
     trigger.focus();
     await fireEvent.click(trigger);
-    await fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "删除分支" }));
     await waitFor(() => expect(document.querySelector("[data-modal-impact]")).toBeNull());
     await waitFor(() => expect(document.activeElement).toBe(trigger));
     expect(api.deleteBranch).toHaveBeenCalledTimes(1);
@@ -250,14 +250,14 @@ describe("分支右键菜单", () => {
     await fireEvent.click(screen.getByRole("button", { name: "展开分组 origin" }));
     await fireEvent.click(await screen.findByRole("button", { name: "删除远程 origin/old" }));
     expect(api.deleteRemoteBranch).not.toHaveBeenCalled();
-    await fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "从远程删除" }));
     await waitFor(() => expect(api.deleteRemoteBranch).toHaveBeenCalledTimes(1));
     expect(api.deleteRemoteBranch.mock.calls[0].slice(0, 4)).toEqual(["/repo", "origin", "old", true]);
     await waitFor(() => expect(document.querySelector("[data-modal-impact]")).toBeNull());
     expect(onNotice).not.toHaveBeenCalled();
 
     await fireEvent.click(await screen.findByRole("button", { name: "删除远程 origin/old" }));
-    await fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "从远程删除" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("已删除远程分支 origin/old"));
   });
 
@@ -529,4 +529,122 @@ describe("分支右键菜单", () => {
     await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
     return props;
   }
+});
+
+describe("删除本地分支时同时删除同名远程分支、已合入主干标记与刷新", () => {
+  const withTwins: BranchState = {
+    generation: 4,
+    branches: [
+      { name: "feature/ui", remote: false, current: true, upstream: null, worktree: null },
+      { name: "done", remote: false, current: false, upstream: "origin/done", worktree: null, merged: true },
+      { name: "topic", remote: false, current: false, upstream: "origin/renamed", worktree: null },
+      { name: "origin/done", remote: true, current: false, upstream: null, worktree: null, merged: true },
+      { name: "origin/renamed", remote: true, current: false, upstream: null, worktree: null },
+    ],
+    snapshot,
+    defaultBranch: "feature/ui",
+    mergeBases: ["main", "origin/main"],
+  };
+  const afterLocal: BranchState = { ...withTwins, generation: 5, branches: withTwins.branches.filter((branch) => branch.name !== "done") };
+  const afterBoth: BranchState = { ...afterLocal, generation: 6, branches: afterLocal.branches.filter((branch) => branch.name !== "origin/done") };
+
+  beforeEach(() => {
+    api.branchState.mockResolvedValue(withTwins);
+  });
+
+  async function askDeleteDone() {
+    const handlers = setup();
+    await waitFor(() => expect(rowNames()).toContain("done"));
+    await fireEvent.click(screen.getByRole("button", { name: "删除 done" }));
+    return handlers;
+  }
+
+  it("同名远程分支存在时给出选项，默认不勾，只删本地", async () => {
+    api.deleteBranch.mockResolvedValue(afterLocal);
+    const { onNotice } = await askDeleteDone();
+    const also = screen.getByRole("checkbox", { name: /同时删除远程分支 origin\/done/ }) as HTMLInputElement;
+    expect(also.checked).toBe(false);
+    await fireEvent.click(screen.getByRole("button", { name: "删除分支" }));
+    await waitFor(() => expect(api.deleteBranch).toHaveBeenCalledWith("/repo", "done", false, 4, 7));
+    expect(api.deleteRemoteBranch).not.toHaveBeenCalled();
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("已删除本地分支 done"));
+  });
+
+  it("勾选后先删本地，再用新的 generation 删远程；影响清单列出两者", async () => {
+    api.deleteBranch.mockResolvedValue(afterLocal);
+    api.deleteRemoteBranch.mockResolvedValue(afterBoth);
+    const { onNotice } = await askDeleteDone();
+    await fireEvent.click(screen.getByRole("checkbox", { name: /同时删除远程分支/ }));
+    expect(document.querySelector("[data-modal-impact]")?.textContent).toContain("远程分支 origin/done");
+    await fireEvent.click(screen.getByRole("button", { name: "删除本地和远程" }));
+    await waitFor(() => expect(api.deleteRemoteBranch).toHaveBeenCalledWith("/repo", "origin", "done", true, 5, 7));
+    expect(api.deleteBranch.mock.invocationCallOrder[0]).toBeLessThan(api.deleteRemoteBranch.mock.invocationCallOrder[0]);
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("已删除本地分支 done 和远程分支 origin/done"));
+  });
+
+  it("远程删除失败时本地删除照常生效，并如实说明远程没删", async () => {
+    api.deleteBranch.mockResolvedValue(afterLocal);
+    api.deleteRemoteBranch.mockRejectedValue({ code: "auth", message: "认证失败" });
+    const { onNotice } = await askDeleteDone();
+    await fireEvent.click(screen.getByRole("checkbox", { name: /同时删除远程分支/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "删除本地和远程" }));
+    await waitFor(() =>
+      expect(document.querySelector(".callout.error")?.textContent).toContain("本地分支 done 已删除；远程分支 origin/done 没有删除：认证失败"),
+    );
+    await waitFor(() => expect(rowNames()).not.toContain("done"));
+    expect(onNotice).not.toHaveBeenCalled();
+  });
+
+  it("未合入升级强删时保留「同时删除远程」的选择", async () => {
+    api.deleteBranch.mockRejectedValueOnce({ code: "branch_unmerged", message: "未合入" }).mockResolvedValueOnce(afterLocal);
+    api.deleteRemoteBranch.mockResolvedValue(afterBoth);
+    await askDeleteDone();
+    await fireEvent.click(screen.getByRole("checkbox", { name: /同时删除远程分支/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "删除本地和远程" }));
+    const force = await screen.findByRole("button", { name: "仍然删除" });
+    expect(api.deleteRemoteBranch, "本地没删成之前不碰远程").not.toHaveBeenCalled();
+    expect((screen.getByRole("checkbox", { name: /同时删除远程分支/ }) as HTMLInputElement).checked).toBe(true);
+    await fireEvent.click(force);
+    await waitFor(() => expect(api.deleteRemoteBranch).toHaveBeenCalledWith("/repo", "origin", "done", true, 5, 7));
+    expect(api.deleteBranch.mock.calls[1][2]).toBe(true);
+  });
+
+  it("上游名称不同的分支不提供同时删除远程", async () => {
+    setup();
+    await waitFor(() => expect(rowNames()).toContain("topic"));
+    await fireEvent.click(screen.getByRole("button", { name: "删除 topic" }));
+    expect(screen.queryByRole("checkbox", { name: /同时删除远程分支/ })).toBeNull();
+  });
+
+  it("已合入主干的分支标记出来，提示和删除说明写明主干", async () => {
+    setup();
+    await waitFor(() => expect(rowNames()).toContain("done"));
+    const chips = [...document.querySelectorAll<HTMLElement>("[data-merged-branch]")];
+    expect(chips.map((chip) => chip.closest(".branch-row")?.querySelector(".lr-title span")?.textContent)).toEqual(["done"]);
+    // 只是一枚小勾徽章：不占文字，说明放在提示和无障碍名称里。
+    expect(chips[0].textContent?.trim()).toBe("");
+    expect(chips[0].getAttribute("aria-label")).toBe("已合入主干");
+    expect(chips[0].title).toBe("已合入主干：已完整包含在 main 和 origin/main 中，删除不会丢失提交");
+    await fireEvent.click(screen.getByRole("button", { name: "删除 done" }));
+    expect(document.querySelector("[data-modal-impact]")?.textContent).toContain("已完整包含在 main 和 origin/main 中");
+    await fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "展开分组 origin" }));
+    expect([...document.querySelectorAll("[data-merged-branch]")].map((chip) => chip.closest(".branch-row")?.querySelector(".lr-title span")?.textContent)).toEqual(["origin/done"]);
+  });
+
+  it("刷新按钮重读分支，列表留在原处，读完换成新结果", async () => {
+    setup();
+    await waitFor(() => expect(rowNames()).toContain("done"));
+    let finish!: (value: BranchState) => void;
+    api.branchState.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
+    const refresh = screen.getByRole("button", { name: "刷新分支列表" }) as HTMLButtonElement;
+    await fireEvent.click(refresh);
+    expect(api.branchState).toHaveBeenCalledTimes(2);
+    expect(refresh.disabled).toBe(true);
+    expect(rowNames(), "读取期间列表不消失").toContain("done");
+    finish(afterLocal);
+    await waitFor(() => expect(rowNames()).not.toContain("done"));
+    await waitFor(() => expect(refresh.disabled).toBe(false));
+  });
 });

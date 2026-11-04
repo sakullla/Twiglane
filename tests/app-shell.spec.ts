@@ -1209,12 +1209,13 @@ describe("应用外壳", () => {
     await fireEvent.click(screen.getByRole("button", { name: /^同步/ }));
     await fireEvent.click(screen.getByRole("menuitem", { name: /获取更新/ }));
 
-    // 写入中分支按钮仍可打开：要在条目上看到原因，而不是一个灰按钮。
+    // 写入中分支按钮仍可打开：弹层顶部说明一次原因，条目置灰并在提示里带上原因，而不是一个灰按钮。
     await fireEvent.click(screen.getByRole("button", { name: "当前分支 main" }));
     const popover = await screen.findByRole("dialog", { name: "切换分支" });
     const develop = await within(popover).findByRole("option", { name: /^develop/ });
     expect(develop.getAttribute("aria-disabled")).toBe("true");
-    expect(develop.textContent).toContain("正在写入，稍后再试");
+    expect(develop.getAttribute("title")).toBe("正在写入，稍后再试");
+    expect(within(popover).getByRole("status").textContent).toContain("正在写入，稍后再试");
     await fireEvent.click(develop);
     expect(mocks.switchBranch).not.toHaveBeenCalled();
 
@@ -1222,7 +1223,8 @@ describe("应用外壳", () => {
     await waitFor(() => expect(develop.getAttribute("aria-disabled")).toBeNull());
     const shared = within(popover).getByRole("option", { name: /^shared/ });
     expect(shared.getAttribute("aria-disabled")).toBe("true");
-    expect(shared.textContent).toContain("正被其他工作区使用：D:/wt");
+    expect(shared.getAttribute("title")).toBe("正被其他工作区使用：D:/wt");
+    expect(within(shared).getByRole("button", { name: /打开此工作区/ })).toBeTruthy();
     await fireEvent.click(shared);
     expect(mocks.switchBranch).not.toHaveBeenCalled();
   });
@@ -1260,7 +1262,7 @@ describe("应用外壳", () => {
     await fireEvent.keyDown(search, { key: "Enter" });
     await fireEvent.click(within(popover).getByRole("option", { name: /^develop/ }));
     expect(mocks.switchBranch, "写锁挡住第二次").toHaveBeenCalledTimes(1);
-    expect(within(popover).getByRole("option", { name: /^develop/ }).textContent).toContain("正在写入，稍后再试");
+    expect(within(popover).getByRole("option", { name: /^develop/ }).getAttribute("title")).toBe("正在写入，稍后再试");
 
     await press("Escape");
     await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
@@ -1293,7 +1295,8 @@ describe("应用外壳", () => {
     const popover = await screen.findByRole("dialog", { name: "切换分支" });
     const develop = await within(popover).findByRole("option", { name: /^develop/ });
     expect(develop.getAttribute("aria-disabled")).toBe("true");
-    expect(develop.textContent).toContain("正在读取，稍后再试");
+    expect(develop.getAttribute("title")).toBe("正在读取，稍后再试");
+    expect(within(popover).getByRole("status").textContent).toContain("正在读取，稍后再试");
     await fireEvent.click(develop);
     await fireEvent.keyDown(within(popover).getByRole("combobox"), { key: "Enter" });
     expect(mocks.switchBranch).not.toHaveBeenCalled();
@@ -1827,6 +1830,43 @@ describe("应用外壳", () => {
     const detachedAlert = await screen.findByRole("alert");
     expect(detachedAlert.textContent).toContain("游离");
     expect(screen.queryByRole("dialog", { name: "合并分支" })).toBeNull();
+  });
+
+  it("从分支与标签进入合并：关闭合并回到分支与标签；从标题栏进入时关闭就回到工作区", async () => {
+    mocks.branchState.mockResolvedValue(branchFixture());
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: "当前分支 main" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "管理分支与标签" }));
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBeGreaterThan(0));
+    const develop = [...document.querySelectorAll<HTMLElement>(".branch-row")].find((row) => row.textContent?.includes("develop"));
+    await fireEvent.contextMenu(develop!, { clientX: 40, clientY: 40 });
+    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: /^合并到当前分支/ }));
+    let merge = await screen.findByRole("dialog", { name: "合并分支" });
+    await fireEvent.click(await within(merge).findByRole("button", { name: "返回分支与标签" }));
+    expect(await screen.findByRole("dialog", { name: "分支与标签" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "合并分支" })).toBeNull();
+
+    // 右上角关闭和 Esc 同样回到来源；回去之后再关就回到工作区，不会来回弹。
+    const again = [...document.querySelectorAll<HTMLElement>(".branch-row")].find((row) => row.textContent?.includes("develop"));
+    await waitFor(() => expect(again).toBeTruthy());
+    await fireEvent.contextMenu(again!, { clientX: 40, clientY: 40 });
+    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: /^合并到当前分支/ }));
+    merge = await screen.findByRole("dialog", { name: "合并分支" });
+    await fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    expect(await screen.findByRole("dialog", { name: "分支与标签" })).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "合并分支" })).toBeNull());
+    await fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "分支与标签" })).toBeNull());
+
+    // 标题栏分支弹层直接进入合并：没有来源 modal，按钮仍是「关闭」。
+    await fireEvent.click(screen.getByRole("button", { name: "当前分支 main" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "合并到当前分支" }));
+    merge = await screen.findByRole("dialog", { name: "合并分支" });
+    expect(within(merge).queryByRole("button", { name: "返回分支与标签" })).toBeNull();
+    await fireEvent.click(within(merge).getByRole("button", { name: "关闭" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "合并分支" })).toBeNull());
+    expect(screen.queryByRole("dialog", { name: "分支与标签" })).toBeNull();
   });
 
   it("从其他分支变基时基底是所点分支，当前分支保持不动", async () => {

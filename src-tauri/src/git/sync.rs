@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,7 +7,7 @@ use crate::error::AppError;
 use crate::git::advice::{classify_problem, problem_error, remote_timeout};
 use crate::git::changes::commit_index;
 use crate::git::command::{
-    branch_list_command, check_branch_command, clone_command, create_branch_at_command,
+    branch_list_command, check_branch_command, merged_branches_command, clone_command, create_branch_at_command,
     create_branch_command, delete_branch_command, delete_remote_branch_command,
     delete_remote_tracking_command, fetch_command, publish_command, pull_ff_command, push_command,
     remote_add_command, remote_set_url_command, remote_verbose_command, rename_branch_command,
@@ -1054,13 +1055,72 @@ async fn load_branch_state(
             .then(left.name.cmp(&right.name))
     });
     let default_branch = choose_default_branch(&branches, &parsed.origin_head);
-    let snapshot = snapshot_at(backend, root, listed.generation, internal_request_id()).await?;
+    let bases = merge_bases(&branches, default_branch.as_deref());
+    let mut generation = listed.generation;
+    let mut merged: Option<HashSet<String>> = None;
+    for (_, base) in &bases {
+        let (program, args) = merged_branches_command(&git.path, root, base);
+        let read = read_repo(backend, root, generation, internal_request_id(), program, args).await?;
+        generation = read.generation;
+        // 只是提示：读不出来就不标记，不让整份分支列表失败。
+        if read.output.exit_code != 0 {
+            merged = Some(HashSet::new());
+            break;
+        }
+        let refs: HashSet<String> = String::from_utf8_lossy(&read.output.stdout)
+            .lines()
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect();
+        merged = Some(match merged {
+            None => refs,
+            Some(previous) => previous.intersection(&refs).cloned().collect(),
+        });
+    }
+    if let Some(merged) = merged {
+        for branch in &mut branches {
+            let refname = branch_refname(branch);
+            branch.merged = merged.contains(&refname) && !bases.iter().any(|(_, base)| *base == refname);
+        }
+    }
+    let snapshot = snapshot_at(backend, root, generation, internal_request_id()).await?;
     Ok(BranchState {
         generation: snapshot.generation,
         branches,
         snapshot,
         default_branch,
+        merge_bases: bases.into_iter().map(|(name, _)| name).collect(),
     })
+}
+
+fn branch_refname(branch: &BranchRecord) -> String {
+    if branch.remote {
+        format!("refs/remotes/{}", branch.name)
+    } else {
+        format!("refs/heads/{}", branch.name)
+    }
+}
+
+/// 判定「已合入主干」的基准：本地默认分支，以及它的远程对应分支（优先上游，否则 origin/同名）。
+/// 返回（显示名，完整引用名）。
+fn merge_bases(branches: &[BranchRecord], default_branch: Option<&str>) -> Vec<(String, String)> {
+    let Some(name) = default_branch else {
+        return Vec::new();
+    };
+    let Some(local) = branches.iter().find(|branch| !branch.remote && branch.name == name) else {
+        return Vec::new();
+    };
+    let mut bases = vec![(local.name.clone(), branch_refname(local))];
+    let fallback = format!("origin/{name}");
+    let remote = local
+        .upstream
+        .as_deref()
+        .and_then(|upstream| branches.iter().find(|branch| branch.remote && branch.name == upstream))
+        .or_else(|| branches.iter().find(|branch| branch.remote && branch.name == fallback));
+    if let Some(remote) = remote {
+        bases.push((remote.name.clone(), branch_refname(remote)));
+    }
+    bases
 }
 
 async fn ensure_branch_format(
@@ -1566,6 +1626,7 @@ fn parse_branches(bytes: &[u8]) -> Result<ParsedBranchList, AppError> {
             continue;
         }
         branches.push(BranchRecord {
+            merged: false,
             target_oid,
             name: name.to_string(),
             remote,
@@ -2266,6 +2327,7 @@ mod tests {
             upstream: upstream.map(str::to_string),
             worktree: None,
             target_oid: None,
+            merged: false,
         }
     }
 
@@ -2820,6 +2882,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn branch_state_marks_branches_contained_in_local_and_remote_main() {
+        let fixture = crate::test_support::git_fixture("merged-branches");
+        let backend = fixture.backend();
+        let (_origin, work) = seed_bare(&fixture);
+        // done：主干本地和远程都包含；origin/done 同理。
+        git(&work, &["branch", "done"]);
+        git(&work, &["update-ref", "refs/remotes/origin/done", "HEAD"]);
+        // ahead：多一个主干没有的提交。
+        git(&work, &["switch", "-c", "ahead"]);
+        fs::write(work.join("file.txt"), "ahead\n").unwrap();
+        git(&work, &["commit", "-am", "ahead"]);
+        git(&work, &["switch", "main"]);
+        // local-only：只合进了本地 main，远程 main 还没有，不能算安全。
+        git(&work, &["switch", "-c", "local-only"]);
+        fs::write(work.join("file.txt"), "local\n").unwrap();
+        git(&work, &["commit", "-am", "local"]);
+        git(&work, &["switch", "main"]);
+        git(&work, &["merge", "--ff-only", "local-only"]);
+        let head = git_text(&work, &["rev-parse", "HEAD"]);
+
+        let opened = open_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        let listed = branch_state(&backend, &opened.summary.path, opened.generation, 2)
+            .await
+            .unwrap();
+        let merged = |name: &str| {
+            listed
+                .branches
+                .iter()
+                .find(|branch| branch.name == name)
+                .unwrap_or_else(|| panic!("没有 {name}"))
+                .merged
+        };
+        assert_eq!(listed.merge_bases, vec!["main".to_string(), "origin/main".to_string()]);
+        assert!(merged("done"));
+        assert!(merged("origin/done"));
+        assert!(!merged("ahead"));
+        assert!(!merged("local-only"));
+        assert!(!merged("main"), "主干自己不标记");
+        assert!(!merged("origin/main"), "主干的远程对应分支不标记");
+        assert_eq!(git_text(&work, &["rev-parse", "HEAD"]), head, "只读判断，不移动任何分支");
+    }
+
+    #[tokio::test]
     async fn opening_another_worktree_leaves_both_checkouts_unchanged() {
         let fixture = crate::test_support::git_fixture("open-worktree");
         let backend = fixture.backend();
@@ -2899,6 +3004,7 @@ mod start_point_tests {
                     upstream: None,
                     worktree: None,
                     target_oid: None,
+                    merged: false,
                 })
                 .collect(),
             snapshot: StatusSnapshot {
@@ -2907,6 +3013,7 @@ mod start_point_tests {
                 files: Vec::new(),
             },
             default_branch: None,
+            merge_bases: Vec::new(),
         }
     }
 

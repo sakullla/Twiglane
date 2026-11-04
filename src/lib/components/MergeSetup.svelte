@@ -11,6 +11,8 @@
 
   interface Props {
     branches: BranchRecord[];
+    /** 主干分支，两个分支下拉框里用星标。 */
+    mainBranches?: string[];
     current: string | null;
     source: string;
     target: string;
@@ -35,6 +37,7 @@
 
   let {
     branches,
+    mainBranches = [],
     current,
     source,
     target,
@@ -128,6 +131,7 @@
         excludeReason="它已经是合并目标"
         disabled={blocked}
         {branchGroups}
+        {mainBranches}
         onChange={onSource}
       />
       <small>{sourceRecord?.remote ? "远程跟踪分支：内容以最近一次获取为准" : source === current ? "你正在使用的分支" : "本地分支"}</small>
@@ -157,6 +161,7 @@
         excludeReason="它已经是合并来源"
         disabled={blocked}
         {branchGroups}
+        {mainBranches}
         onChange={onTarget}
       />
       <small class:switch-note={!(mode === "rebase" && !ffOnly) && target !== current}>

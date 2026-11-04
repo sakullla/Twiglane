@@ -8,17 +8,22 @@
    * 焦点留在搜索框，列表靠 aria-activedescendant 表达当前项，这样边输入边选不用来回切焦点；
    * 底部动作是普通按钮，Tab 在搜索框与它们之间循环。
    * 右键菜单叠在弹层上时不算「点外面」，它的 Esc 也由菜单自己消费，只关闭菜单这一层。
+   * 表单里的下拉框（BranchPicker）也用它：没有底部动作时 Tab 收起弹层，下方放不下时向上展开。
    */
   interface Props {
     /** 触发按钮：定位基准，也是关闭后焦点回去的地方。 */
     anchor: HTMLElement;
     label: string;
     placeholder: string;
+    /** 搜索框的可访问名称；缺省同 placeholder。 */
+    searchLabel?: string;
     query: string;
     active: number;
     /** 列表条目数；方向键在 0…count-1 之间循环。 */
     count: number;
     width?: number;
+    /** 至少和触发按钮一样宽（表单里的下拉框）。 */
+    matchAnchor?: boolean;
     onChoose: (index: number) => void;
     onItemContextMenu?: (index: number, point: { x: number; y: number }) => void;
     /** refocus：是否把焦点还给触发按钮。点外面关闭时焦点已经在用户点的地方。 */
@@ -26,17 +31,19 @@
     /** 列表内容；参数是 listbox 的 id，条目 id 为 `${id}-${index}`。 */
     list: Snippet<[string]>;
     notice?: Snippet;
-    foot: Snippet;
+    foot?: Snippet;
   }
 
   let {
     anchor,
     label,
     placeholder,
+    searchLabel,
     query = $bindable(),
     active = $bindable(),
     count,
     width = 400,
+    matchAnchor = false,
     onChoose,
     onItemContextMenu,
     onClose,
@@ -53,19 +60,30 @@
   let root = $state<HTMLDivElement | null>(null);
   let search = $state<HTMLInputElement | null>(null);
   let listEl = $state<HTMLDivElement | null>(null);
-  let place = $state({ top: 0, left: 0, width: 0, maxHeight: MAX_HEIGHT });
+  /** 向下展开时 top 有值；向上展开时贴住触发按钮上沿，用 bottom 定位，高度由内容决定。 */
+  let place = $state<{ top: number | null; bottom: number | null; left: number; width: number; maxHeight: number }>({
+    top: 0,
+    bottom: null,
+    left: 0,
+    width: 0,
+    maxHeight: MAX_HEIGHT,
+  });
+  let placeStyle = $derived(
+    `${place.top !== null ? `top:${place.top}px` : `bottom:${place.bottom}px`};left:${place.left}px;width:${place.width}px;max-height:${place.maxHeight}px`,
+  );
 
-  /** 贴着触发按钮向下展开，并收在窗口内：900×600 下也要完整可见（R14）。 */
+  /** 贴着触发按钮向下展开，并收在窗口内：900×600 下也要完整可见（R14）。下方太挤而上方更宽时向上展开。 */
   function measure() {
     const rect = anchor.getBoundingClientRect();
-    const fit = Math.min(width, window.innerWidth - MARGIN * 2);
-    const top = rect.bottom + GAP;
-    place = {
-      top,
-      left: Math.max(MARGIN, Math.min(rect.left, window.innerWidth - fit - MARGIN)),
-      width: fit,
-      maxHeight: Math.min(MAX_HEIGHT, window.innerHeight - top - MARGIN),
-    };
+    const fit = Math.min(matchAnchor ? Math.max(width, rect.width) : width, window.innerWidth - MARGIN * 2);
+    const left = Math.max(MARGIN, Math.min(rect.left, window.innerWidth - fit - MARGIN));
+    const below = window.innerHeight - rect.bottom - GAP - MARGIN;
+    const above = rect.top - GAP - MARGIN;
+    if (below < 280 && above > below) {
+      place = { top: null, bottom: window.innerHeight - rect.top + GAP, left, width: fit, maxHeight: Math.min(MAX_HEIGHT, above) };
+      return;
+    }
+    place = { top: rect.bottom + GAP, bottom: null, left, width: fit, maxHeight: Math.min(MAX_HEIGHT, below) };
   }
 
   function reveal() {
@@ -88,9 +106,17 @@
   function onKey(event: KeyboardEvent) {
     // 输入法选词时的方向键和回车属于输入法。
     if (event.isComposing) return;
+    // 在弹层内就把 Esc 消费掉：弹层开在 modal 里时，只收起弹层，不让 modal 跟着关闭。
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      onClose(true);
+      return;
+    }
     if (event.key === "Tab") {
       event.preventDefault();
-      cycleFocus(event.shiftKey ? -1 : 1);
+      if (!foot) onClose(true);
+      else cycleFocus(event.shiftKey ? -1 : 1);
       return;
     }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -152,7 +178,7 @@
   role="dialog"
   aria-label={label}
   tabindex="-1"
-  style={`top:${place.top}px;left:${place.left}px;width:${place.width}px;max-height:${place.maxHeight}px`}
+  style={placeStyle}
   bind:this={root}
   onkeydown={onKey}
   onmousedown={keepFocus}
@@ -162,7 +188,7 @@
       <Icon name="search" size={14} />
       <input
         role="combobox"
-        aria-label={placeholder}
+        aria-label={searchLabel ?? placeholder}
         aria-expanded="true"
         aria-autocomplete="list"
         aria-controls={listId}
@@ -184,7 +210,9 @@
   <div class="popover-list" id={listId} role="listbox" aria-label={label} bind:this={listEl}>
     {@render list(listId)}
   </div>
-  <div class="popover-foot">
-    {@render foot()}
-  </div>
+  {#if foot}
+    <div class="popover-foot">
+      {@render foot()}
+    </div>
+  {/if}
 </div>

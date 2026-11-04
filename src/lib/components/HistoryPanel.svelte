@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onDestroy, untrack, type Snippet } from "svelte";
-  import { bucketNames } from "../branches";
   import { LatestReadQueue } from "../latest-read";
   import { LatestBatchReadQueue } from "../latest-batch-read";
   import { api, type HistoryFilters } from "../api";
@@ -23,7 +22,7 @@
     toggleCommitSelection,
   } from "../history";
   import { bucketByDirectory, filterRows } from "../labels";
-  import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
+  import { clampWidth, MIN_PANEL_WIDTH, nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
   import type {
     CommitDetail,
     CommitFileChange,
@@ -31,17 +30,21 @@
     DiffResponse,
     FileSelection,
     HistoryCommit,
+    BranchRecord,
     OpenedRepository,
     StatusSnapshot,
   } from "../types";
   import { BUSY_REASON, fileNavState, hueOf, initialOf, relativeTime, splitPath, statusMark, type FileNavState } from "../ui";
+  import BranchPicker from "./BranchPicker.svelte";
   import CommitDiffList from "./CommitDiffList.svelte";
+  import ConfirmDialog from "./ConfirmDialog.svelte";
   import LineCounts from "./LineCounts.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest, isContextKey, pointFor } from "./ContextMenu.svelte";
   import DiffView from "./DiffView.svelte";
   import FileNav from "./FileNav.svelte";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
+  import PaneResizer from "./PaneResizer.svelte";
 
   interface Props {
     /** 设置里的分支分组：范围下拉框按第一个 / 收成 <optgroup>，关闭时平铺。缺省开启。 */
@@ -79,7 +82,33 @@
   /** 提交行两行排布（摘要 / 引用·作者·时间），52px；提交里的文件行与改动列表同为单行 30px。 */
   const ROW_HEIGHT = 52;
   const FILE_ROW_HEIGHT = 30;
-  const UNION_ROW_HEIGHT = 44;
+  const UNION_ROW_HEIGHT = 30;
+  const FILES_WIDTH_KEY = "twiglane.commitFilesWidth";
+  const DEFAULT_FILES_WIDTH = 248;
+  const MIN_DIFF_WIDTH = 360;
+
+  function readFilesWidth(): number {
+    try {
+      const stored = Number(globalThis.localStorage?.getItem(FILES_WIDTH_KEY));
+      return stored > 0 ? clampWidth(stored) : DEFAULT_FILES_WIDTH;
+    } catch {
+      return DEFAULT_FILES_WIDTH;
+    }
+  }
+
+  function saveFilesWidth() {
+    try {
+      globalThis.localStorage?.setItem(FILES_WIDTH_KEY, String(filesWidth));
+    } catch {
+      // 本机偏好写不进去时只影响下次打开的初始宽度。
+    }
+  }
+
+  /** 渲染宽度：容器窄时收紧，不改写已保存的宽度。 */
+  function fitFilesWidth(width: number, total: number): number {
+    if (total <= 0) return width;
+    return Math.max(MIN_PANEL_WIDTH, Math.min(width, total - MIN_DIFF_WIDTH));
+  }
 
   let {
     opened,
@@ -314,6 +343,10 @@
   let bodyClipped = $state(false);
   /** 窄详情里文件列表在差异上方，可以收起，把高度全给差异。宽详情里没有这个开关。 */
   let filesCollapsed = $state(false);
+  /** 变更文件栏的宽度：拖动中间的分隔条调整，存在本机偏好里；渲染时给差异区至少留 MIN_DIFF_WIDTH。 */
+  let filesWidth = $state(readFilesWidth());
+  let splitWidth = $state(0);
+  let filesShown = $derived(fitFilesWidth(filesWidth, splitWidth));
   /** 「全部文件」模式下从左侧点选的文件：右侧滚动到它。 */
   let multiFocus = $state<string | null>(null);
   let filteredFiles = $derived(filterRows(detail?.files ?? [], fileFilter));
@@ -407,6 +440,10 @@
     if (scope !== "current" && scope !== "all" && !names.includes(scope)) return [...names, scope];
     return names;
   });
+  /** 历史范围下拉框的分支行：后端只给本地分支名，这里补成分支记录。 */
+  let scopeBranches = $derived(
+    scopeNames.map((name): BranchRecord => ({ name, remote: false, current: name === page?.head, upstream: null, worktree: null })),
+  );
   let selectedIds = $derived(new Set(selectedOids));
   let selectedCommits = $derived(commits.filter((commit) => selectedIds.has(commit.oid)));
   let unionFiles = $derived(unionCommitFiles(multiDetails));
@@ -414,6 +451,9 @@
   let unionScroll = $state(0);
   let unionViewport = $state(0);
   let unionList = $state<HTMLDivElement | null>(null);
+  /** 多选差异区：各提交的差异连续堆叠在同一个纵向滚动里，块内只有横向滚动。 */
+  let unionHost = $state<HTMLDivElement | null>(null);
+  let unionLayout = $state<"unified" | "split">("unified");
   let unionRange = $derived(visibleRange(
     unionFiles.length, unionScroll, unionViewport > 0 ? unionViewport : unionScroll > 0 ? UNION_ROW_HEIGHT : 0, UNION_ROW_HEIGHT,
   ));
@@ -1046,6 +1086,17 @@
   }
 </script>
 
+{#snippet filesResizer()}
+  <PaneResizer
+    value={filesShown}
+    saved={filesWidth}
+    label="调整变更文件栏宽度"
+    fit={(width) => fitFilesWidth(width, splitWidth)}
+    onResize={(width) => (filesWidth = width)}
+    onCommit={saveFilesWidth}
+  />
+{/snippet}
+
 <section class="history-view" aria-label="提交历史" aria-busy={loading}>
   <div class="history-layout">
     <aside class="pane history-pane" aria-label="提交列表">
@@ -1058,24 +1109,20 @@
           <span class="history-file-scope" title={filePath}><Icon name="file" size={13} /><span class="truncate">{filePath}</span></span>
         {/if}
         <div class="history-filters">
-          <label class="sr-only" for="history-scope">历史范围</label>
-          <select id="history-scope" class="select" value={scope} onchange={(event) => setScope(event.currentTarget.value)}>
-            <option value="current">当前分支{page?.head ? `（${page.head}）` : ""}</option>
-            <option value="all">全部分支</option>
-            {#if branchGroups !== false}
-              {@const buckets = bucketNames(scopeNames)}
-              {#each buckets.top as name (name)}<option value={name}>{name}</option>{/each}
-              {#each buckets.groups as group (group.prefix)}
-                <optgroup label={`${group.prefix}/`}>
-                  {#each group.names as name (name)}<option value={name}>{name}</option>{/each}
-                </optgroup>
-              {/each}
-            {:else}
-              {#each scopeNames as name (name)}
-                <option value={name}>{name}</option>
-              {/each}
-            {/if}
-          </select>
+          <BranchPicker
+            label="历史范围"
+            size="md"
+            localOnly
+            branches={scopeBranches}
+            value={scope}
+            current={page?.head ?? null}
+            extras={[
+              { value: "current", label: `当前分支${page?.head ? `（${page.head}）` : ""}`, icon: "branch" },
+              { value: "all", label: "全部分支", icon: "layers" },
+            ]}
+            {branchGroups}
+            onChange={setScope}
+          />
           <div class="history-search-row">
             <div class="field sm history-search">
               <Icon name="search" size={14} />
@@ -1266,20 +1313,32 @@
         <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{multiError}</span></div>
       {/if}
       {#if selectedOids.length > 1}
-        <header class="commit-head">
+        <header class="commit-head union-head">
           <div class="commit-head-main">
             <h2 class="commit-title">已选择 {selectedOids.length} 个提交</h2>
-            <p class="hint">文件和差异是这些提交各自相对第一父提交的并集。</p>
+            <p class="hint">左侧是这些提交改动过的全部文件；右侧按提交依次列出所选文件的差异，各自相对第一父提交。</p>
+          </div>
+          <div class="commit-facts">
+            <button type="button" class="btn btn-secondary btn-sm" title="回到只看最新的一个提交" onclick={() => singleSelect(selectedCommits[0]?.oid ?? selectedOids[0])}>
+              <Icon name="x" size={13} />退出多选
+            </button>
           </div>
         </header>
-        <ul class="history-multi-list">
+        <ul class="union-commits" aria-label="已选择的提交">
           {#each selectedCommits as commit (commit.oid)}
-            <li><code>{shortOid(commit.oid)}</code><span class="truncate">{commit.summary}</span></li>
+            <li>
+              <button type="button" class="union-commit" title={`只看这个提交：${commit.summary}`} onclick={() => singleSelect(commit.oid)}>
+                <span class="avatar" style={`--hue:${hueOf(commit.authorName)}`} aria-hidden="true">{initialOf(commit.authorName)}</span>
+                <span class="union-commit-summary">{commit.summary}</span>
+                <span class="union-commit-meta">{commit.authorName} · {relativeTime(commit.authoredAt)}</span>
+                <code>{shortOid(commit.oid)}</code>
+              </button>
+            </li>
           {/each}
         </ul>
-        <div class="commit-split">
+        <div class="commit-split" style={`--commit-files:${filesShown}px`} bind:clientWidth={splitWidth}>
           <aside class="commit-files" aria-label="提交中的文件">
-            <div class="commit-files-head"><span>变更文件</span><span class="count">{unionFiles.length}</span></div>
+            <div class="commit-files-head"><span class="commit-files-title">变更文件</span><span class="count">{unionFiles.length}</span></div>
             {#if unionFiles.length === 0}
               <p class="commit-files-empty">这些提交没有文件变化。</p>
             {:else}
@@ -1304,7 +1363,7 @@
                       aria-selected={unionActive?.path === file.path}
                       aria-posinset={unionRange.start + index + 1}
                       aria-setsize={unionFiles.length}
-                      style={`position:absolute;top:${(unionRange.start + index) * UNION_ROW_HEIGHT + 2}px;height:${UNION_ROW_HEIGHT - 4}px;margin:0`}
+                      style={`position:absolute;top:${(unionRange.start + index) * UNION_ROW_HEIGHT + 1}px;height:${UNION_ROW_HEIGHT - 2}px;margin:0`}
                       title={fileTitle(file)}
                       onclick={() => {
                         multiFocus = file.path;
@@ -1316,7 +1375,10 @@
                       }}
                     >
                       <span class={`st ${mark.tone}`} title={commitFileLabel(file.status)}>{mark.letter}</span>
-                      <span class="file-name"><span class="fn">{parts.name}</span></span>
+                      <span class="file-name">
+                        <span class="fn">{parts.name}</span>
+                        {#if parts.dir}<span class="fd"><bdi>{parts.dir}</bdi></span>{/if}
+                      </span>
                       <LineCounts stat={commitLineStat(file)} hideBinary />
                     </button>
                   {/each}
@@ -1324,27 +1386,64 @@
               </div>
             {/if}
           </aside>
-          <div class="commit-diff history-multi-diffs">
-            {#each multiDiffs as item (item.oid)}
-              <section class="history-multi-diff">
-                <h3>{shortOid(item.oid)} {item.summary}</h3>
-                {#if item.error}
-                  <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{item.error}</span></div>
-                {:else}
-                  <DiffView
-                    selection={unionActive ? { path: unionActive.path, side: "unstaged" } : null}
-                    diff={item.diff}
-                    error={item.error}
-                    loading={item.diff === null && item.error === null}
-                    {disabled}
-                    readOnly={true}
-                    onStageHunk={() => {}}
-                    onLoadMore={() => {}}
-                    onFileHistory={onFilePath}
-                  />
-                {/if}
-              </section>
-            {/each}
+          {@render filesResizer()}
+          <div class="commit-diff union-diff">
+            {#if unionActive}
+              {@const focused = splitPath(unionActive.path)}
+              <div class="union-diff-head">
+                <Icon name="file-diff" size={15} />
+                <span class="diff-path" title={unionActive.path}>
+                  <bdi>{#if focused.dir}<span class="dir">{focused.dir}/</span>{/if}<span class="union-diff-name">{focused.name}</span></bdi>
+                </span>
+                {#if multiDiffs.length > 0}<span class="union-diff-count">{multiDiffs.length} 个提交改动了它</span>{/if}
+                <span class="spacer"></span>
+                <button type="button" class="btn btn-ghost btn-sm" aria-label="此文件历史" title="查看这个文件的提交历史" onclick={() => unionActive && onFilePath(unionActive.path)}>
+                  <Icon name="history" size={14} /><span class="diff-hist-label">此文件历史</span>
+                </button>
+                <div class="segmented" role="group" aria-label="差异布局">
+                  <button type="button" aria-pressed={unionLayout === "unified"} title="统一视图" onclick={() => (unionLayout = "unified")}><Icon name="rows" size={12} />统一</button>
+                  <button type="button" aria-pressed={unionLayout === "split"} title="并排视图" onclick={() => (unionLayout = "split")}><Icon name="split" size={12} />并排</button>
+                </div>
+              </div>
+            {/if}
+            <div class="union-scroll" bind:this={unionHost}>
+              {#if unionActive && multiDiffs.length === 0}
+                <div class="empty compact" role="status" aria-busy="true">
+                  <span class="empty-icon"><span class="spinner"></span></span>
+                  <strong>正在读取差异</strong>
+                </div>
+              {/if}
+              {#each multiDiffs as item (item.oid)}
+                {@const owner = selectedCommits.find((commit) => commit.oid === item.oid)}
+                {@const change = multiDetails.find((entry) => entry.commit.oid === item.oid)?.files.find((file) => file.path === unionActive?.path)}
+                <section class="union-block">
+                  <h3 class="union-block-head">
+                    <code class="union-block-oid">{shortOid(item.oid)}</code>
+                    <span class="union-block-summary" title={item.summary}>{item.summary}</span>
+                    {#if owner}<span class="union-block-meta">{owner.authorName} · {relativeTime(owner.authoredAt)}</span>{/if}
+                    {#if change}<LineCounts stat={commitLineStat(change)} hideBinary />{/if}
+                  </h3>
+                  {#if item.error}
+                    <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{item.error}</span></div>
+                  {:else}
+                    <DiffView
+                      embedded
+                      scrollHost={unionHost}
+                      layout={unionLayout}
+                      selection={unionActive ? { path: unionActive.path, side: "unstaged" } : null}
+                      diff={item.diff}
+                      error={item.error}
+                      loading={item.diff === null && item.error === null}
+                      {disabled}
+                      readOnly={true}
+                      onStageHunk={() => {}}
+                      onLoadMore={() => {}}
+                      onFileHistory={onFilePath}
+                    />
+                  {/if}
+                </section>
+              {/each}
+            </div>
           </div>
         </div>
       {:else if detail}
@@ -1409,7 +1508,7 @@
             </div>
           {/if}
         </header>
-        <div class="commit-split">
+        <div class="commit-split" style={`--commit-files:${filesShown}px`} bind:clientWidth={splitWidth}>
           <aside class="commit-files" class:collapsed={filesCollapsed} aria-label="提交中的文件">
             <div class="commit-files-head">
               <span class="commit-files-title">变更文件</span>
@@ -1512,6 +1611,7 @@
               </div>
             {/if}
           </aside>
+          {@render filesResizer()}
           <div class="commit-diff">
             {#if viewMode === "multi"}
               <CommitDiffList
@@ -1557,28 +1657,27 @@
   {/if}
 
   {#if checkoutTarget}
-    <Modal
+    <ConfirmDialog
       title="检出此提交"
       titleId="checkout-commit-title"
       icon="commit"
-      size="sm"
-      description={`检出 ${shortOid(checkoutTarget.oid)} 会进入游离 HEAD，当前分支不会移动。如果未提交的修改会被覆盖，则不会切换，仓库保持原样。`}
-      locked={checkoutBusy}
-      onClose={() => {
+      tone="default"
+      message="检出这个提交，进入游离 HEAD？"
+      targets={[{ icon: "commit", name: shortOid(checkoutTarget.oid), detail: commits.find((item) => item.oid === checkoutTarget?.oid)?.summary }]}
+      targetsLabel="要检出的提交"
+      notes={[
+        { tone: "info", text: "当前分支不会移动；之后的提交不会带动任何分支。" },
+        { tone: "ok", text: "如果未提交的修改会被覆盖，则不会切换，仓库保持原样。" },
+      ]}
+      confirmLabel="检出"
+      confirmIcon="commit"
+      busy={checkoutBusy}
+      error={checkoutError}
+      onConfirm={() => void confirmCheckout()}
+      onCancel={() => {
         if (!checkoutBusy) checkoutTarget = null;
       }}
-    >
-      <p class="hint">取消不会检出。继续后当前不在任何分支上，之后的提交不会带动现有分支。</p>
-      {#if checkoutError}<div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{checkoutError}</span></div>{/if}
-      {#snippet footer()}
-        <button type="button" class="btn btn-secondary" disabled={checkoutBusy} title={checkoutBusy ? "正在检出" : undefined} onclick={() => (checkoutTarget = null)}>取消</button>
-        <span class="spacer"></span>
-        <button type="button" class="btn btn-primary" disabled={checkoutBusy} title={checkoutBusy ? "正在检出" : undefined} onclick={() => void confirmCheckout()}>
-          {#if checkoutBusy}<span class="spinner"></span>{/if}
-          检出
-        </button>
-      {/snippet}
-    </Modal>
+    />
   {/if}
 
   {#if branchFrom}

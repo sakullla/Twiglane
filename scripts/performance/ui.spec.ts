@@ -2,12 +2,14 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PerformanceFixture } from "./fixtures";
-import type { BranchRecord, DiffResponse } from "../../src/lib/types";
+import type { BranchRecord, DiffResponse, FileChange, FileRow } from "../../src/lib/types";
 import { toSideRows, type ViewLine } from "../../src/lib/diff";
+import { createSelectionResolver } from "../../src/lib/labels";
+import { fileNavState } from "../../src/lib/ui";
 
 const api = vi.hoisted(() => ({
   commitFileDiff: vi.fn(), mergeSession: vi.fn(), branchState: vi.fn(),
-  historyPage: vi.fn(), conflictView: vi.fn(), commitDetail: vi.fn(),
+  historyPage: vi.fn(), conflictView: vi.fn(), commitDetail: vi.fn(), loadDiff: vi.fn(),
 }));
 vi.mock("../../src/lib/api", () => ({ api }));
 
@@ -15,12 +17,57 @@ import BranchPicker from "../../src/lib/components/BranchPicker.svelte";
 import CommitDiffList from "../../src/lib/components/CommitDiffList.svelte";
 import MergePanel from "../../src/lib/components/MergePanel.svelte";
 import HistoryPanel from "../../src/lib/components/HistoryPanel.svelte";
+import MultiFileDiff from "../../src/lib/components/MultiFileDiff.svelte";
 
 const { opened, detail, diff } = new PerformanceFixture();
 
 beforeEach(() => { Object.values(api).forEach((mock) => mock.mockReset()); });
 
 describe("大仓库的有界读取和渲染", () => {
+  it("两万未提交文件刷新选择只扫描一次文件列表", () => {
+    let pathReads = 0;
+    const files: FileChange[] = Array.from({ length: 20_000 }, (_, index) => ({
+      get path() { pathReads += 1; return `file-${index}.txt`; },
+      originalPath: null, staged: "modified", unstaged: "none", untracked: false, unmerged: false,
+    }));
+    const start = performance.now();
+    const resolve = createSelectionResolver(files, true);
+    const result = Array.from({ length: files.length }, (_, index) => resolve({ path: `file-${index}.txt`, side: "unstaged" }));
+    console.info(`20000 working tree selections: ${(performance.now() - start).toFixed(2)} ms`);
+    expect(result.every((item) => item?.side === "staged")).toBe(true);
+    expect(pathReads).toBe(files.length);
+  });
+
+  it("两万未提交文件跳到末尾仍只读取附近差异，隐藏时停止读取并释放内容", async () => {
+    const rows: FileRow[] = detail.files.map((file) => ({ ...file, staged: "none", unstaged: "modified", untracked: false, unmerged: false, side: "unstaged" }));
+    const pending: Array<{ path: string; resolve: (value: DiffResponse) => void }> = [];
+    api.loadDiff.mockImplementation((_repo, path) => new Promise((resolve) => pending.push({ path, resolve })));
+    const height = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
+    const component = render(MultiFileDiff, {
+      opened, rows, focus: rows[0], nav: fileNavState(rows, 0, vi.fn()), disabled: false, fullFile: false, fullContext: 1_000_000,
+      stageCount: rows.length, unstageCount: 0, discardCount: rows.length, conflictCount: 0, nextId: () => 1,
+      onFocus: vi.fn(), onStale: vi.fn(), onStageHunk: vi.fn(), onFullFile: vi.fn(), onFileHistory: vi.fn(),
+      onStage: vi.fn(), onUnstage: vi.fn(), onDiscard: vi.fn(), onClear: vi.fn(),
+    });
+    try {
+      await waitFor(() => expect(pending).toHaveLength(3));
+      await component.rerender({ focus: rows.at(-1)! });
+      await waitFor(() => expect(document.querySelector('[data-path="file-19999.txt"]')).toBeTruthy());
+      expect(document.querySelectorAll(".multi-file").length).toBeLessThan(10);
+      pending[0].resolve(diff);
+      await waitFor(() => expect(pending).toHaveLength(4));
+      expect(Number(pending[3].path.match(/\d+/)?.[0])).toBeGreaterThan(19995);
+      await component.rerender({ active: false });
+      pending.slice(1).forEach((item) => item.resolve({ ...diff, path: item.path }));
+      await tick();
+      expect(pending).toHaveLength(4);
+      expect(document.querySelector("[data-diff-row]")).toBeNull();
+    } finally {
+      component.unmount();
+      height.mockRestore();
+    }
+  });
+
   it("两万行替换保持配对和行序，无结尾换行标记不占配对槽", () => {
     const count = 20_000;
     const lines: ViewLine[] = [
@@ -60,7 +107,7 @@ describe("大仓库的有界读取和渲染", () => {
     const onChange = vi.fn();
     render(BranchPicker, { label: "来源分支", branches, value: "topic-0", current: "main", onChange });
     await fireEvent.click(screen.getByRole("button", { name: "来源分支" }));
-    const search = screen.getByRole("textbox", { name: "搜索来源分支" });
+    const search = screen.getByRole("combobox", { name: "搜索来源分支" });
     expect(screen.getAllByRole("option").length).toBeLessThan(40);
     await fireEvent.keyDown(search, { key: "ArrowUp" });
     await tick();
@@ -68,7 +115,7 @@ describe("大仓库的有界读取和渲染", () => {
     await fireEvent.keyDown(search, { key: "Enter" });
     expect(onChange).toHaveBeenLastCalledWith("topic-4999");
     await fireEvent.click(screen.getByRole("button", { name: "来源分支" }));
-    await fireEvent.input(screen.getByRole("textbox", { name: "搜索来源分支" }), { target: { value: "topic-4999" } });
+    await fireEvent.input(screen.getByRole("combobox", { name: "搜索来源分支" }), { target: { value: "topic-4999" } });
     expect(screen.getAllByRole("option")).toHaveLength(1);
   });
 

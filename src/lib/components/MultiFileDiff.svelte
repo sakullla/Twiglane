@@ -90,6 +90,8 @@
   let tops = $derived(blockTops(heightList, BLOCK_GAP));
   let span = $derived(blockWindow(tops, scrollTop, viewport, OVERSCAN));
   let shown = $derived(rows.slice(span.start, span.end));
+  // 只保留视口及预读区内展开的差异，浏览过的文件不随选中数量无限累积。
+  let retained = $derived(new Set(active ? shown.filter((row) => !collapsed.has(selectionKey(row))).map(selectionKey) : []));
   let allCollapsed = $derived(keys.every((key) => collapsed.has(key)));
   let noneCollapsed = $derived(collapsed.size === 0);
 
@@ -97,11 +99,14 @@
    * 仓库、状态快照、generation 或读取范围任何一个变了都算新的一轮：这个对象每轮都是新的，
    * 响应回来时和它比身份，旧轮次的结果直接丢弃。已显示的差异留到新结果到达，不闪空白。
    */
-  let round = $derived({
-    repo: opened.summary.path,
-    generation: opened.generation,
-    snapshot: opened.snapshot,
-    context: fullFile ? fullContext : undefined,
+  let round = $derived.by(() => {
+    // 追踪快照身份即可，完成记录和在途请求不应持有整份历史文件列表。
+    void opened.snapshot;
+    return {
+      repo: opened.summary.path,
+      generation: opened.generation,
+      context: fullFile ? fullContext : undefined,
+    };
   });
   type Round = typeof round;
 
@@ -129,7 +134,7 @@
   }
 
   function current(key: string, at: Round): boolean {
-    return !destroyed && at === round && keys.includes(key);
+    return !destroyed && at === round && retained.has(key);
   }
 
   async function load(row: FileRow, key: string, at: Round) {
@@ -177,25 +182,32 @@
     }
   }
 
-  let wantedKey = $derived(shown.map(selectionKey).join("\n") + `\n${[...collapsed].join("\n")}`);
-
   $effect(() => {
-    void active;
+    const keep = retained;
     void round;
-    void wantedKey;
-    untrack(pump);
+    untrack(() => {
+      for (const key of settled.keys()) if (!keep.has(key)) settled.delete(key);
+      if (Object.keys(diffs).some((key) => !keep.has(key))) {
+        diffs = Object.fromEntries(Object.entries(diffs).filter(([key]) => keep.has(key)));
+      }
+      if (Object.keys(errors).some((key) => !keep.has(key))) {
+        errors = Object.fromEntries(Object.entries(errors).filter(([key]) => keep.has(key)));
+      }
+      pump();
+    });
   });
 
-  /* 文件离开选中集合时释放它的差异；再次选中重新读取，不留过期内容。 */
+  /* 内容释放后仍保留高度与横向位置，返回文件时保持滚动；取消选择后再释放这些小记录。 */
   $effect(() => {
     const live = new Set(keys);
     untrack(() => {
-      const drop = Object.keys(diffs).filter((key) => !live.has(key));
-      for (const key of [...settled.keys()]) if (!live.has(key)) settled.delete(key);
-      for (const key of [...scrollXs.keys()]) if (!live.has(key)) scrollXs.delete(key);
-      if (drop.length === 0) return;
-      diffs = Object.fromEntries(Object.entries(diffs).filter(([key]) => live.has(key)));
-      errors = Object.fromEntries(Object.entries(errors).filter(([key]) => live.has(key)));
+      for (const key of scrollXs.keys()) if (!live.has(key)) scrollXs.delete(key);
+      if (Object.keys(heights).some((key) => !live.has(key))) {
+        heights = Object.fromEntries(Object.entries(heights).filter(([key]) => live.has(key)));
+      }
+      if ([...collapsed].some((key) => !live.has(key))) {
+        collapsed = new Set([...collapsed].filter((key) => live.has(key)));
+      }
     });
   });
 
@@ -386,7 +398,7 @@
         {@const mark = rowMark(row)}
         {@const loaded = diffs[key] ?? null}
         {@const stat = row.side === "staged" ? row.stagedLines : row.unstagedLines}
-        <article class="multi-file" class:expanded class:focused={focus?.path === row.path && focus.side === row.side} data-key={key} data-path={row.path} use:measured>
+        <article class="multi-file" class:expanded class:focused={focus?.path === row.path && focus.side === row.side} style:min-height={expanded && !loaded && !errors[key] && heights[key] ? `${heights[key]}px` : undefined} data-key={key} data-path={row.path} use:measured>
           <div class="multi-file-head">
             <button type="button" class="multi-file-toggle" aria-label={`${expanded ? "收起" : "展开"} ${row.path}`} aria-expanded={expanded} title={row.path} onclick={() => toggle(key)}>
               <span class={`st ${mark.tone}`}>{mark.letter}</span>

@@ -1,4 +1,4 @@
-import type { BranchInfo, ChangeKind, FileChange, FileRow } from "./types";
+import type { BranchInfo, ChangeKind, FileChange, FileRow, FileSelection } from "./types";
 
 export function changeLabel(kind: ChangeKind): string | null {
   switch (kind) {
@@ -162,9 +162,26 @@ export function retainSelection(
   selected: { path: string; side: FileRow["side"] } | null,
 ): { path: string; side: FileRow["side"] } | null {
   if (!selected) return null;
-  return flattenRows(files).some((row) => row.path === selected.path && row.side === selected.side)
+  return files.some((file) => file.path === selected.path && hasSide(file, selected.side))
     ? selected
     : null;
+}
+
+function hasSide(file: FileChange, side: FileRow["side"]): boolean {
+  if (file.unmerged) return side === "unstaged";
+  return side === "staged" ? file.staged !== "none" : file.untracked || file.unstaged !== "none";
+}
+
+/** 一次刷新只索引一次文件，多选校验为 O(文件数 + 选中数)，不逐项重建全量行。 */
+export function createSelectionResolver(files: FileChange[], afterEdit: boolean): (item: FileSelection) => FileSelection | null {
+  const byPath = new Map(files.map((file) => [file.path, file]));
+  return (item) => {
+    const file = byPath.get(item.path);
+    if (!file) return null;
+    if (hasSide(file, item.side)) return item;
+    const side = item.side === "staged" ? "unstaged" : "staged";
+    return afterEdit && hasSide(file, side) ? { path: item.path, side } : null;
+  };
 }
 
 export function rowLabel(row: FileRow): string {

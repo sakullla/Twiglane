@@ -18,7 +18,7 @@
   import { DraftBuffer } from "./lib/draft";
   import { normalizeError } from "./lib/errors";
   import { clampWidth, FALLBACK_POLL_MS, fitPaneWidth, shouldPoll } from "./lib/layout";
-  import { branchLabel, commitScope, dependencyNote, filterRows, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
+  import { branchLabel, commitScope, createSelectionResolver, dependencyNote, filterRows, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
   import { startDesktopMeasure } from "./lib/measure";
   import { isTextEntry, shortcutCommand } from "./lib/shortcuts";
   import type {
@@ -176,8 +176,12 @@
   let historyPath = $state<string | null>(null);
   let historyQuery = $state("");
   let taskModal = $state<TaskModal | null>(null);
+  /** 从哪个任务 modal 跳过来的：例如从「分支与标签」打开合并，关闭合并时回到那里。 */
+  let taskReturn = $state<TaskModal | null>(null);
   /** 本次打开分支 modal 是为了新建：直接展开表单。每次 openTask 都先清空。 */
   let branchCreateIntent = $state(false);
+  /** 从分支弹层右键「从此分支新建」带来的起点；空串表示当前分支。 */
+  let branchCreateBase = $state("");
   let paletteOpen = $state(false);
   /** 当前打开的右键菜单（文件列表、最近仓库）；任务 modal 里的右键菜单由各自组件承载。 */
   let contextMenu = $state<ContextMenuRequest | null>(null);
@@ -432,9 +436,36 @@
   }
 
   /** 分支弹层的「新建分支」：和其它入口走同一个命令，只多带一个打开意图。 */
-  function runBranchCreate() {
+  function runBranchCreate(base?: string) {
     runFromSwitcher("task.branch");
-    if (taskModal === "branch") branchCreateIntent = true;
+    if (taskModal === "branch") {
+      branchCreateIntent = true;
+      branchCreateBase = base ?? "";
+    }
+  }
+
+  /** 把某个分支合并到当前分支：打开分支合并并预选来源。分支弹层和分支管理共用。 */
+  function mergeBranchIntoCurrent(name: string) {
+    mergeSource = name;
+    mergeTarget = null;
+    mergeMode = null;
+    openTask("merge");
+  }
+
+  /** 把当前分支合并到某个本地分支：打开分支合并并预选目标。 */
+  function mergeCurrentInto(name: string) {
+    mergeSource = opened?.snapshot.branch.name ?? null;
+    mergeTarget = name;
+    mergeMode = null;
+    openTask("merge");
+  }
+
+  /** 把当前分支变基到所点分支：所点分支是基底，当前分支会被改写。 */
+  function rebaseCurrentOnto(name: string) {
+    mergeSource = name;
+    mergeTarget = opened?.snapshot.branch.name ?? null;
+    mergeMode = "rebase";
+    openTask("merge");
   }
 
   /** 七个任务入口共用单槽：任一时刻只有一个任务 modal。 */
@@ -449,6 +480,8 @@
     cloneOpen = false;
     paletteOpen = false;
     branchCreateIntent = false;
+    branchCreateBase = "";
+    taskReturn = null;
     taskModal = task;
     if (task === "merge") void probeMerge();
     if (task === "publish") void loadRemoteName();
@@ -478,8 +511,11 @@
     }
   }
 
-  function closeTask() {
+  /** back：用户自己关闭（关闭按钮、右上角、Esc）时回到来源 modal；跳去别的视图时不回。 */
+  function closeTask(back = false) {
     const closed = taskModal;
+    const origin = back === true ? taskReturn : null;
+    taskReturn = null;
     taskModal = null;
     settingsSection = null;
     if (closed === "merge") {
@@ -489,6 +525,14 @@
       mergeMode = null;
       void probeMerge();
     }
+    if (origin && origin !== closed) openTask(origin);
+  }
+
+  /** 从「分支与标签」进入合并：关闭合并时回到分支与标签，而不是直接回到工作区。 */
+  function mergeFromBranches(start: () => void) {
+    closeTask();
+    start();
+    taskReturn = "branch";
   }
 
   function openClone() {
@@ -661,7 +705,7 @@
         return false;
       }
       opened = { ...opened, snapshot, generation: snapshot.generation };
-      settleSelection((item) => (batchRunning ? selectionAfterEdit : retainSelection)(snapshot.files, item));
+      settleSelection(createSelectionResolver(snapshot.files, batchRunning));
       // 外部完成或开始合并时只有刷新能发现，提示不能停在旧状态。
       void probeMerge();
       await loadSelectedDiff();
@@ -840,7 +884,7 @@
   function applySnapshot(snapshot: StatusSnapshot) {
     if (!opened) return;
     opened = { ...opened, snapshot, generation: snapshot.generation };
-    settleSelection((item) => selectionAfterEdit(snapshot.files, item));
+    settleSelection(createSelectionResolver(snapshot.files, true));
     void loadSelectedDiff();
   }
 
@@ -935,7 +979,7 @@
             if (opened?.summary.path !== current.summary.path) return;
             // 响应在路上时监视器可能已经推高 generation，不能退回去，否则下一个文件必然 stale。
             opened = { ...opened, snapshot, generation: Math.max(opened.generation, snapshot.generation) };
-            settleSelection((item) => selectionAfterEdit(snapshot.files, item));
+            settleSelection(createSelectionResolver(snapshot.files, true));
             done += 1;
           } catch (error) {
             if (opened?.summary.path !== current.summary.path) return;
@@ -2205,6 +2249,18 @@
       onNotice={notice}
       onCommand={runFromSwitcher}
       onCreateBranch={runBranchCreate}
+      onMergeBranch={(name) => {
+        closeSwitcher();
+        mergeBranchIntoCurrent(name);
+      }}
+      onMergeInto={(name) => {
+        closeSwitcher();
+        mergeCurrentInto(name);
+      }}
+      onRebaseBranch={(name) => {
+        closeSwitcher();
+        rebaseCurrentOnto(name);
+      }}
       onOpened={rememberOpened}
       onClose={closeSwitcher}
     />
@@ -2504,7 +2560,8 @@
     {branchGroups}
     disabled={writeLocked}
     {nextId}
-    onClose={closeTask}
+    onClose={() => closeTask(true)}
+    closeLabel={taskReturn === "branch" ? "返回分支与标签" : undefined}
     onSnapshot={mergeSnapshot}
     onGeneration={adoptGeneration}
     onFailure={handleMutationError}
@@ -2532,30 +2589,11 @@
       closeTask();
       openCommitSearch(next);
     }}
-    onMergeBranch={(name) => {
-      closeTask();
-      mergeSource = name;
-      mergeTarget = null;
-      mergeMode = null;
-      openTask("merge");
-    }}
-    onMergeInto={(name) => {
-      const from = opened?.snapshot.branch.name ?? null;
-      closeTask();
-      mergeSource = from;
-      mergeTarget = name;
-      mergeMode = null;
-      openTask("merge");
-    }}
-    onRebaseBranch={(name) => {
-      const onto = opened?.snapshot.branch.name ?? null;
-      closeTask();
-      mergeSource = name;
-      mergeTarget = onto;
-      mergeMode = "rebase";
-      openTask("merge");
-    }}
+    onMergeBranch={(name) => mergeFromBranches(() => mergeBranchIntoCurrent(name))}
+    onMergeInto={(name) => mergeFromBranches(() => mergeCurrentInto(name))}
+    onRebaseBranch={(name) => mergeFromBranches(() => rebaseCurrentOnto(name))}
     startCreating={branchCreateIntent}
+    startBase={branchCreateBase}
     backgroundClone={pending === "clone"}
     {branchGroups}
     blockedReason={writeLocked ? switchBlockedReason(commandState) : null}

@@ -13,6 +13,8 @@
     disabled: boolean;
     nextId: () => number;
     onClose: () => void;
+    /** 关闭按钮的文字：从别的 modal 跳过来时写明会回到哪里，例如「返回分支与标签」。 */
+    closeLabel?: string;
     onSnapshot: (snapshot: StatusSnapshot) => void;
     onGeneration: (generation: number) => void;
     onFailure: (error: unknown) => void;
@@ -33,6 +35,7 @@
     disabled,
     nextId,
     onClose,
+    closeLabel,
     onSnapshot,
     onGeneration,
     onFailure,
@@ -78,6 +81,7 @@
     {onOpenHistory}
     {branchGroups}
     {onClose}
+    {closeLabel}
     embedded
     {headTarget}
   />

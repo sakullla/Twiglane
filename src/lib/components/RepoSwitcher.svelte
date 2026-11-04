@@ -39,11 +39,12 @@
     { id: "repo.create", label: "新建仓库", icon: "folder-plus" },
   ];
 
+  const WIDTH = 440;
   /** 单行仓库的高度与每多一行的增量，只是实测之前的估算。 */
-  const ROW = 39;
-  const EXTRA_LINE = 15;
-  /** 弹层宽 400 时一行完整路径大约放得下的字符数。 */
-  const PATH_CHARS = 60;
+  const ROW = 49;
+  const EXTRA_LINE = 16;
+  /** 弹层宽 440 时一行完整路径大约放得下的字符数。 */
+  const PATH_CHARS = 64;
   const OVERSCAN = 6;
   const FALLBACK_VIEWPORT = 480;
 
@@ -217,6 +218,7 @@
 <Popover
   {anchor}
   label="切换仓库"
+  width={WIDTH}
   placeholder="搜索仓库名称或路径"
   bind:query
   bind:active={

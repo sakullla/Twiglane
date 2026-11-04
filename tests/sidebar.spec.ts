@@ -67,6 +67,9 @@ describe("仓库弹层", () => {
 });
 
 describe("大量最近仓库", () => {
+  /** RepoSwitcher 里单行与多一行原因文字的估算高度。 */
+  const ROW = 49;
+  const LINE = 16;
   const many: RecentRepo[] = Array.from({ length: 500 }, (_, index) => {
     const name = index === 300 || index === 450 ? "demo" : `repo-${index}`;
     return { name, path: `/work/group-${index}/${name}`, openedAtMs: index };
@@ -115,13 +118,13 @@ describe("大量最近仓库", () => {
   it("滚动后渲染窗口跟着走，定位按全量下标", async () => {
     render(RepoSwitcher, { props: props() as never });
     const list = document.querySelector(".popover-list") as HTMLElement;
-    list.scrollTop = 39 * 200;
+    list.scrollTop = ROW * 200;
     await fireEvent.scroll(list);
     const indexes = options().map((option) => Number(option.dataset.index));
     expect(indexes).toContain(200);
     expect(indexes.filter((index) => index > 1).every((index) => index > 150 && index < 240)).toBe(true);
     const row = options().find((option) => option.dataset.index === "200")?.parentElement as HTMLElement;
-    expect(row.style.top).toBe(`${39 * 200}px`);
+    expect(row.style.top).toBe(`${ROW * 200}px`);
   });
 
   it("过滤对全量生效，不区分大小写，能搜路径片段", async () => {
@@ -164,7 +167,7 @@ describe("大量最近仓库", () => {
     const onContextMenu = vi.fn();
     render(RepoSwitcher, { props: props({ onContextMenu }) as never });
     const list = document.querySelector(".popover-list") as HTMLElement;
-    list.scrollTop = 39 * 300;
+    list.scrollTop = ROW * 300;
     await fireEvent.scroll(list);
     await fireEvent.keyDown(input(), { key: "F10", shiftKey: true });
     expect(onContextMenu).toHaveBeenCalledWith(many[1], expect.anything());
@@ -174,7 +177,7 @@ describe("大量最近仓库", () => {
     const onContextMenu = vi.fn();
     render(RepoSwitcher, { props: props({ onContextMenu }) as never });
     const list = document.querySelector(".popover-list") as HTMLElement;
-    list.scrollTop = 39 * 300;
+    list.scrollTop = ROW * 300;
     await fireEvent.scroll(list);
     const row = options().find((option) => option.dataset.index === "300") as HTMLElement;
     expect(row.querySelector(".repo-path-full")?.textContent).toBe(many[300].path);
@@ -186,18 +189,18 @@ describe("大量最近仓库", () => {
 
   it("实测行高修正定位；视口上方的行变高时滚动位置同步推开", async () => {
     const offsetHeight = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
-      return this.dataset.repoRow === "300" ? 69 : this.dataset.repoRow ? 39 : 0;
+      return this.dataset.repoRow === "300" ? ROW + 30 : this.dataset.repoRow ? ROW : 0;
     });
     try {
       render(RepoSwitcher, { props: props() as never });
       const list = document.querySelector(".popover-list") as HTMLElement;
-      list.scrollTop = 39 * 305;
+      list.scrollTop = ROW * 305;
       await fireEvent.scroll(list);
       await tick();
       await tick();
       const after = options().find((option) => option.dataset.index === "301")?.parentElement as HTMLElement;
-      expect(after.style.top).toBe(`${39 * 301 + 30}px`);
-      expect(list.scrollTop).toBe(39 * 305 + 30);
+      expect(after.style.top).toBe(`${ROW * 301 + 30}px`);
+      expect(list.scrollTop).toBe(ROW * 305 + 30);
     } finally {
       offsetHeight.mockRestore();
     }
@@ -206,12 +209,12 @@ describe("大量最近仓库", () => {
   it("阻塞解除时行高整体变化，视口顶部的行不跳", async () => {
     const view = render(RepoSwitcher, { props: props({ blockedReason: "操作进行中" }) as never });
     const list = document.querySelector(".popover-list") as HTMLElement;
-    const blockedTop = 39 + 54 * 299;
+    const blockedTop = ROW + (ROW + LINE) * 299;
     list.scrollTop = blockedTop + 10;
     await fireEvent.scroll(list);
     await view.rerender({ blockedReason: null });
     await tick();
-    expect(list.scrollTop, "第 300 行留在视口顶，行内偏移不变").toBe(39 * 300 + 10);
+    expect(list.scrollTop, "第 300 行留在视口顶，行内偏移不变").toBe(ROW * 300 + 10);
     expect(options().some((option) => option.dataset.index === "300")).toBe(true);
     await view.rerender({ blockedReason: "又忙了" });
     await tick();
@@ -228,7 +231,7 @@ describe("大量最近仓库", () => {
       await tick();
       await tick();
       const row = () => options().find((option) => option.dataset.index === "20")?.parentElement as HTMLElement;
-      list.scrollTop = 39 * 20;
+      list.scrollTop = ROW * 20;
       await fireEvent.scroll(list);
       await tick();
       await tick();
@@ -260,7 +263,7 @@ describe("大量最近仓库", () => {
     const row = options().find((option) => option.dataset.index === "2") as HTMLElement;
     expect(row.getAttribute("aria-disabled")).toBe("true");
     expect(row.textContent).toContain("操作进行中");
-    expect((row.parentElement as HTMLElement).style.top).toBe(`${39 + (39 + 15)}px`);
+    expect((row.parentElement as HTMLElement).style.top).toBe(`${ROW + (ROW + LINE)}px`);
   });
 });
 

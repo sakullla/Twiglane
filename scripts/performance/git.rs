@@ -8,6 +8,29 @@ use std::time::Instant;
 use crate::git::{history, ops, resolve, sync};
 use crate::test_support::{git_fixture, isolated_gitconfig, system_git, GitFixture};
 
+#[test]
+fn uncommitted_diff_paging_at_scale() {
+    use crate::git::patch::{parse_diff, view_lines};
+    let mut raw = String::from("diff --git a/large.txt b/large.txt\n--- a/large.txt\n+++ b/large.txt\n@@ -0,0 +1,50000 @@\n");
+    for i in 0..50_000 {
+        raw.push_str(&format!("+generated working tree line {i}\n"));
+    }
+    let parsed = parse_diff(raw.as_bytes(), false).unwrap();
+    let start = Instant::now();
+    for _ in 0..100 {
+        for offset in [0, 25_000, 49_604] {
+            let (lines, hunks, total) = std::hint::black_box(view_lines(&parsed, offset, 400));
+            assert_eq!(lines.len(), 400);
+            assert_eq!(hunks.len(), 1);
+            assert_eq!(total, 50_004);
+        }
+    }
+    eprintln!(
+        "50000-line diff, 300 pages of 400 lines: {:?}",
+        start.elapsed()
+    );
+}
+
 struct PerformanceFixture {
     _fixture: GitFixture,
     root: PathBuf,

@@ -47,6 +47,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { api } from "../api";
+  import { mainBranchNames } from "../branches";
   import { normalizeError } from "../errors";
   import { portal } from "../portal";
   import { visibleRange, scrollIndexIntoView } from "../layout";
@@ -64,7 +65,7 @@
   import ConflictResolver from "./ConflictResolver.svelte";
   import Icon from "./Icon.svelte";
   import MergeSetup, { type MergeMode } from "./MergeSetup.svelte";
-  import Modal from "./Modal.svelte";
+  import ConfirmDialog from "./ConfirmDialog.svelte";
   import ThreeWayMerge from "./ThreeWayMerge.svelte";
   import { detectEol, keepBothSides } from "../conflict";
 
@@ -92,6 +93,8 @@
     headTarget?: HTMLElement | null;
     /** 提供时在底部操作条放一个「关闭」，与主操作同一行。 */
     onClose?: () => void;
+    /** 关闭按钮的文字；缺省为「关闭」，完成后为「完成」。 */
+    closeLabel?: string;
     /** 设置里的分支分组，传给合并方向的分支选择器。 */
     branchGroups?: boolean;
   }
@@ -114,6 +117,7 @@
     embedded = false,
     headTarget = null,
     onClose,
+    closeLabel,
     branchGroups = true,
   }: Props = $props();
 
@@ -129,6 +133,8 @@
 
   let session = $state.raw<MergeSession | null>(null);
   let branches = $state<BranchRecord[]>([]);
+  /** 主干分支（本地默认分支及其远程对应分支），分支下拉框里用星标。 */
+  let mainBranches = $state<string[]>([]);
   let source = $state(untrack(() => initialSource ?? ""));
   let target = $state(untrack(() => initialTarget ?? ""));
   let mode = $state<MergeMode>(untrack(() => initialMode ?? "merge"));
@@ -324,6 +330,7 @@
       if (loadedKey !== key || opened.summary.path !== repo) return;
       session = next;
       branches = listed.branches;
+      mainBranches = [...mainBranchNames(listed)];
       branchTips = Object.fromEntries(listed.branches.filter((branch) => branch.targetOid).map((branch) => [branch.name, branch.targetOid!]));
       factsGeneration = listed.generation === next.generation ? next.generation : 0;
       onGeneration(next.generation);
@@ -973,6 +980,7 @@
         {/if}
         <MergeSetup
           {branches}
+          {mainBranches}
           {current}
           {source}
           {target}
@@ -1059,7 +1067,7 @@
       <button type="button" class="btn btn-ghost btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={onOpenStash}>查看临时保存</button>
     {/if}
     <span class="spacer"></span>
-    {#if onClose}<button type="button" class={`btn btn-secondary ${strip ? "btn-sm" : ""}`} onclick={onClose}>{finished ? "完成" : "关闭"}</button>{/if}
+    {#if onClose}<button type="button" class={`btn btn-secondary ${strip ? "btn-sm" : ""}`} onclick={() => onClose?.()}>{#if closeLabel && !finished}<Icon name="arrow-left" size={14} />{closeLabel}{:else}{finished ? "完成" : "关闭"}{/if}</button>{/if}
     {#if session?.operation === "merge" || session?.operation === "rebase" || session?.operation === "cherry-pick"}
       <button
         type="button"
@@ -1100,46 +1108,45 @@
   </div>
 
   {#if aborting}
-    <Modal
+    <ConfirmDialog
       title={abortLabel(session?.operation ?? "merge")}
       titleId="abort-merge-title"
       icon="alert"
-      tone="danger"
-      description={abortNote}
-      locked={busy}
-      onClose={() => (aborting = false)}
-    >
-      <p class="hint">中止后这次合并的解决结果（包括这里尚未写入的逐处选择）会被撤销，不能由这里找回。取消则保持当前合并状态。</p>
-      {#if abortPaths.length > 0}
-        <ul class="scope-list" aria-label="受影响的路径">
-          {#each abortPaths as path (path)}<li title={path}>{path}</li>{/each}
-        </ul>
-      {:else}
-        <p>没有需要撤销的合并编辑。</p>
-      {/if}
-      {#snippet footer()}
-        <button type="button" class="btn btn-secondary" title={busy ? BUSY_REASON : undefined} disabled={busy} onclick={() => (aborting = false)}>取消</button>
-        <span class="spacer"></span>
-        <button type="button" class="btn btn-danger" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={confirmAbort}>确认中止</button>
-      {/snippet}
-    </Modal>
+      size="md"
+      message={abortNote}
+      targets={abortPaths.map((path) => ({ icon: "file", name: path }))}
+      targetsLabel="受影响的路径"
+      notes={[
+        abortPaths.length > 0
+          ? { tone: "warn", text: `这 ${abortPaths.length} 个文件里的解决结果（包括这里尚未写入的逐处选择）会被撤销，不能由这里找回。` }
+          : { tone: "ok", text: "没有需要撤销的合并编辑。" },
+        { tone: "info", text: "仓库回到开始之前的状态；取消则保持当前进度，可以继续处理。" },
+      ]}
+      confirmLabel={abortLabel(session?.operation ?? "merge")}
+      confirmIcon="x"
+      busy={busy}
+      confirmBlocked={blocked && !busy ? BUSY_REASON : null}
+      onConfirm={confirmAbort}
+      onCancel={() => (aborting = false)}
+    />
   {/if}
 
   {#if confirmingRebase}
-    <Modal
+    <ConfirmDialog
       title="确认变基"
       titleId="confirm-rebase-title"
       icon="alert"
-      description="将改写当前分支。取消则不改写，当前分支保持不动。"
-      locked={busy}
-      onClose={() => (confirmingRebase = false)}
-    >
-      <p>将改写当前分支。当前分支上尚未进入 {source} 的提交会接到 {source} 顶端。远程不变，也不会推送。</p>
-      {#snippet footer()}
-        <button type="button" class="btn btn-secondary" title={busy ? BUSY_REASON : undefined} disabled={busy} onclick={() => (confirmingRebase = false)}>取消</button>
-        <span class="spacer"></span>
-        <button type="button" class="btn btn-primary" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={beginIntegration}>确认变基</button>
-      {/snippet}
-    </Modal>
+      tone="warning"
+      message={`把当前分支上尚未进入 ${source} 的提交接到 ${source} 顶端？`}
+      notes={[
+        { tone: "warn", text: "将改写当前分支的提交历史（提交标识会变化）。" },
+        { tone: "info", text: "远程不会改变，也不会推送；取消则当前分支保持不动。" },
+      ]}
+      confirmLabel="确认变基"
+      busy={busy}
+      confirmBlocked={blocked && !busy ? BUSY_REASON : null}
+      onConfirm={beginIntegration}
+      onCancel={() => (confirmingRebase = false)}
+    />
   {/if}
 </section>

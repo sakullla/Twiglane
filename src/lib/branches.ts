@@ -77,3 +77,13 @@ export function groupIsOpen(
   if (Object.hasOwn(overrides, key)) return overrides[key] === true;
   return branches.some((branch) => branch.current || (currentName !== null && !branch.remote && branch.name === currentName));
 }
+
+/**
+ * 主干分支：本地默认分支和它的远程对应分支（后端给出的 mergeBases，例如 main 与 origin/main）。
+ * 后端没给时只认本地默认分支。列表里用星标代替普通的分支图标。
+ */
+export function mainBranchNames(state: { defaultBranch?: string | null; mergeBases?: string[] } | null | undefined): Set<string> {
+  if (!state) return new Set();
+  if (state.mergeBases && state.mergeBases.length > 0) return new Set(state.mergeBases);
+  return state.defaultBranch ? new Set([state.defaultBranch]) : new Set();
+}

@@ -5,6 +5,7 @@
   import { normalizeError } from "../errors";
   import { formatAuthoredAt, shortOid } from "../history";
   import type { OpenedRepository, StatusSnapshot, TagRecord, TagState } from "../types";
+  import ConfirmDialog from "./ConfirmDialog.svelte";
   import Icon from "./Icon.svelte";
 
   interface Props {
@@ -42,8 +43,6 @@
   let searchInput = $state<HTMLInputElement | null>(null);
   let createToggle = $state<HTMLButtonElement | null>(null);
   let listBox = $state<HTMLDivElement | null>(null);
-  let confirmBox = $state<HTMLDivElement | null>(null);
-  let confirmCancel = $state<HTMLButtonElement | null>(null);
   /** 确认区打开前的焦点和列表滚动位置，收起时原样还回去。 */
   let promptOrigin: { focus: HTMLElement | null; scrollTop: number } | null = null;
   let query = $state("");
@@ -237,16 +236,14 @@
     void loadRemoteTags();
   }
 
-  /** 确认区替换搜索与列表，不用算高度，也不必滚动就能看全说明和按钮。 */
+  /** 删除确认用对话框：列表留在原处，关闭后焦点回到触发按钮。 */
   async function askRemove(tag: TagRecord) {
     promptOrigin = {
       focus: document.activeElement instanceof HTMLElement ? document.activeElement : null,
       scrollTop: listBox?.scrollTop ?? 0,
     };
+    // 确认框默认把焦点放在安全的「取消」上，破坏性操作必须多走一步。
     confirmTag = tag;
-    await tick();
-    // 默认落在安全的取消上，破坏性操作必须多走一步。
-    confirmCancel?.focus();
   }
 
   /** 列表显示回来后还原滚动，焦点回到触发按钮；它已不存在时落在搜索框。 */
@@ -265,8 +262,6 @@
     const tag = confirmTag;
     if (!tag || blocked) return;
     const current = opened;
-    // 确认按钮在途时会被禁用，先把焦点放到确认区容器，Esc 才还到得了键盘处理。
-    confirmBox?.focus();
     const result = await write(() => api.deleteTag(current.summary.path, tag.name, true, current.generation, nextId()));
     if (opened.summary.path !== current.summary.path) return;
     if (result) apply(result);
@@ -324,7 +319,7 @@
       </div>
     </form>
   {:else}
-    <div class="tag-list-tools" hidden={confirmTag !== null}>
+    <div class="tag-list-tools">
       <div class="field"><Icon name="search" size={14} /><input aria-label="搜索标签" bind:this={searchInput} bind:value={query} placeholder="搜索标签、Hash 或附注" autocomplete="off" spellcheck="false" /></div>
       {#if loaded?.ok}<span class="count">{tags.length}</span>{/if}
       <!-- 检查中不禁用：禁用会把焦点弄丢，Esc 就到不了 Modal。 -->
@@ -334,7 +329,7 @@
       <button type="button" class="btn btn-secondary" aria-expanded="false" aria-controls="tag-create-form" bind:this={createToggle} onclick={openCreate}><Icon name="plus" size={14} />新建标签</button>
     </div>
 
-    <div class="list-box tag-list" bind:this={listBox} hidden={confirmTag !== null}>
+    <div class="list-box tag-list" bind:this={listBox}>
       {#if !loaded?.ok}
         <div class="empty compact" data-tag-loading>
           {#if loaded}
@@ -376,28 +371,25 @@
   {/if}
 
   {#if confirmTag}
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div
-      class="callout warn"
-      role="alert"
-      tabindex="-1"
-      bind:this={confirmBox}
-      onkeydown={(event) => {
-        if (event.key !== "Escape") return;
-        event.preventDefault();
-        event.stopPropagation();
+    <ConfirmDialog
+      title="删除本地标签"
+      titleId="tag-delete-title"
+      message={`删除本地标签 ${confirmTag.name}？`}
+      targets={[{ icon: "tag", name: confirmTag.name, detail: `指向 ${shortOid(confirmTag.targetOid)}${confirmTag.message ? ` · ${confirmTag.message}` : ""}` }]}
+      targetsLabel="要删除的标签"
+      notes={[
+        { tone: "ok", text: "目标提交不会删除，之后可以重新打同名标签。" },
+        { tone: "info", text: "远程上的同名标签不会删除。" },
+      ]}
+      confirmLabel="删除标签"
+      confirmIcon="trash"
+      busy={writing}
+      confirmBlocked={blocked && !writing ? BUSY_REASON : null}
+      onConfirm={() => void remove()}
+      onCancel={() => {
         if (!writing) void closeConfirm();
       }}
-    >
-      <Icon name="alert" size={15} />
-      <div class="callout-body">
-        <p>删除本地标签 <strong>{confirmTag.name}</strong>？远程上的同名标签不会删除，目标提交也不会删除。</p>
-        <div class="row">
-          <button type="button" class="btn btn-secondary btn-sm" title={writing ? BUSY_REASON : undefined} disabled={writing} bind:this={confirmCancel} onclick={closeConfirm}>取消</button>
-          <button type="button" class="btn btn-danger btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={remove}>确认删除标签</button>
-        </div>
-      </div>
-    </div>
+    />
   {/if}
   {#if errorText}<div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{errorText}</span></div>{/if}
 </div>

@@ -176,6 +176,8 @@ export interface BranchRecord {
   upstream: string | null;
   worktree: string | null;
   targetOid?: string | null;
+  /** 已完整包含在主干里（本地默认分支和它的远程对应分支都包含），删除不会丢提交。主干自己不标记。 */
+  merged?: boolean;
 }
 
 export interface BranchState {
@@ -184,6 +186,8 @@ export interface BranchState {
   snapshot: StatusSnapshot;
   /** 分支刷新时算好的默认分支。没有符合判定的分支时缺省或为 null。 */
   defaultBranch?: string | null;
+  /** 判定 merged 用到的主干分支，例如 ["master", "origin/master"]。 */
+  mergeBases?: string[];
 }
 
 export interface TagRecord {

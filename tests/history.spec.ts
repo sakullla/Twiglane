@@ -313,7 +313,7 @@ describe("历史面板", () => {
     expect(historyPage).not.toHaveBeenCalled();
   });
 
-  it("范围下拉框按设置分组：开启时按前缀收成 optgroup，关闭时平铺", async () => {
+  it("范围下拉框按设置分组：开启时按前缀成组，关闭时平铺；选中分支后按它读取", async () => {
     historyPage.mockResolvedValue({
       generation: 3,
       query: "",
@@ -327,15 +327,26 @@ describe("历史面板", () => {
       head: "main",
     });
     const view = render(HistoryPanel, { props: { ...panelProps(), branchGroups: true } });
-    const select = () => screen.getByLabelText("历史范围") as HTMLSelectElement;
-    await waitFor(() => expect(select().querySelectorAll("optgroup")).toHaveLength(2));
-    expect([...select().querySelectorAll("optgroup")].map((group) => [group.label, [...group.querySelectorAll("option")].map((option) => option.value)])).toEqual([
-      ["feature/", ["feature/a", "feature/b"]],
-      ["fix/", ["fix/x"]],
-    ]);
+    const trigger = () => screen.getByRole("button", { name: "历史范围" });
+    const names = () => [...document.querySelectorAll<HTMLElement>('[role="option"] .branch-option-name')].map((node) => node.textContent);
+    const groups = () => [...document.querySelectorAll<HTMLElement>("[data-branch-group]")].map((node) => node.dataset.branchGroup);
+    await waitFor(() => expect(trigger().textContent).toContain("当前分支（main）"));
+    await fireEvent.click(trigger());
+    expect(names()).toEqual(["当前分支（main）", "全部分支", "main"]);
+    expect(groups()).toEqual(["feature", "fix"]);
+    await fireEvent.click(screen.getByRole("button", { name: "展开分组 feature" }));
+    expect(names()).toEqual(["当前分支（main）", "全部分支", "main", "feature/a", "feature/b"]);
+    await fireEvent.keyDown(screen.getByLabelText("搜索历史范围"), { key: "Escape" });
+
     await view.rerender({ ...panelProps(), branchGroups: false });
-    await waitFor(() => expect(select().querySelector("optgroup")).toBeNull());
-    expect([...select().options].map((option) => option.value)).toEqual(["current", "all", "main", "feature/a", "feature/b", "fix/x"]);
+    await fireEvent.click(trigger());
+    expect(groups()).toEqual([]);
+    expect(names()).toEqual(["当前分支（main）", "全部分支", "main", "feature/a", "feature/b", "fix/x"]);
+    historyPage.mockClear();
+    await fireEvent.click(screen.getByRole("option", { name: "fix/x" }));
+    expect(trigger().dataset.value).toBe("fix/x");
+    await waitFor(() => expect(historyPage).toHaveBeenCalled());
+    expect(JSON.stringify(historyPage.mock.calls.at(-1))).toContain("fix/x");
   });
 
   it("筛选取交集，清除路径时保留作者，当前分支没有提交时写明范围", async () => {
@@ -539,9 +550,11 @@ describe("历史面板", () => {
     });
     await fireEvent.click(screen.getByRole("option", { name: /commit-1/ }), { shiftKey: true });
     expect(await screen.findByText("已选择 2 个提交")).toBeTruthy();
-    expect(await screen.findByText("a.txt")).toBeTruthy();
-    expect(screen.getByText("b.txt")).toBeTruthy();
-    expect(screen.getByText("c.txt")).toBeTruthy();
+    // 文件名同时出现在左侧并集清单和右侧差异标题里；这里核对的是并集清单。
+    const union = await screen.findByRole("listbox", { name: "提交中的文件列表" });
+    expect(await within(union).findByText("a.txt")).toBeTruthy();
+    expect(within(union).getByText("b.txt")).toBeTruthy();
+    expect(within(union).getByText("c.txt")).toBeTruthy();
     expect(commitDetail).toHaveBeenCalledWith("/repo", first.oid, null, 3, 1);
     expect(commitDetail).toHaveBeenCalledWith("/repo", second.oid, null, 3, 1);
     await fireEvent.contextMenu(screen.getByRole("option", { name: /commit-1/ }));
@@ -571,6 +584,64 @@ describe("历史面板", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(commitDetail).toHaveBeenCalledTimes(2);
     expect(commitFileDiff).not.toHaveBeenCalled();
+  });
+
+  it("多选：提交清单点一行只看那个提交，退出多选回到最新的一个；差异按提交堆叠，可切并排", async () => {
+    const commits = Array.from({ length: 4 }, (_, index) => commit(index));
+    historyPage.mockResolvedValue({ generation: 3, commits, offset: 0, pageSize: 100, hasMore: false, state: "ok" });
+    commitDetail.mockImplementation(async (_repo: string, oid: string) => ({
+      generation: 3, commit: commits.find((item) => item.oid === oid), body: "", root: false, merge: false, selectedParent: "parent",
+      files: [{ path: "src/a.txt", originalPath: null, status: "modified", additions: 2, deletions: 1 }],
+    }));
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    await fireEvent.click(screen.getByRole("option", { name: /commit-2/ }), { shiftKey: true });
+    expect(await screen.findByText("已选择 3 个提交")).toBeTruthy();
+    const chosen = screen.getByRole("list", { name: "已选择的提交" });
+    expect(within(chosen).getAllByRole("button").map((button) => button.textContent)).toEqual(
+      commits.slice(0, 3).map((item) => expect.stringContaining(item.summary)),
+    );
+    // 右侧按提交堆叠同一个文件的差异：每块一个吸顶标题，块里是嵌入式差异，没有各自的工具条。
+    await waitFor(() => expect(document.querySelectorAll(".union-block")).toHaveLength(3));
+    expect([...document.querySelectorAll(".union-block-summary")].map((node) => node.textContent)).toEqual(["commit-0", "commit-1", "commit-2"]);
+    expect(document.querySelectorAll(".union-block .diff.embedded")).toHaveLength(3);
+    expect(document.querySelector(".union-block .diff-toolbar")).toBeNull();
+    expect(document.querySelector(".union-diff-head")?.textContent).toContain("3 个提交改动了它");
+    const layout = within(document.querySelector(".union-diff-head") as HTMLElement).getByRole("group", { name: "差异布局" });
+    await fireEvent.click(within(layout).getByRole("button", { name: /并排/ }));
+    expect(within(layout).getByRole("button", { name: /并排/ }).getAttribute("aria-pressed")).toBe("true");
+
+    await fireEvent.click(within(chosen).getByRole("button", { name: /commit-1/ }));
+    expect(screen.queryByText("已选择 3 个提交")).toBeNull();
+    expect(screen.getByRole("option", { name: /commit-1/ }).getAttribute("aria-selected")).toBe("true");
+
+    await fireEvent.click(screen.getByRole("option", { name: /commit-3/ }), { shiftKey: true });
+    expect(await screen.findByText("已选择 3 个提交")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: /退出多选/ }));
+    expect(screen.queryByText("已选择 3 个提交")).toBeNull();
+    expect(screen.getByRole("option", { name: /commit-1/ }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("变更文件栏和差异之间的分隔条可以拖动或用方向键调整，宽度记在本机", async () => {
+    globalThis.localStorage?.removeItem("twiglane.commitFilesWidth");
+    commitDetail.mockResolvedValue({
+      generation: 3, commit: commit(0), body: "", root: false, merge: false, selectedParent: "parent0",
+      files: [{ path: "a.txt", originalPath: null, status: "modified" }],
+    });
+    historyPage.mockResolvedValue({ generation: 3, commits: [commit(0)], offset: 0, pageSize: 100, hasMore: false, state: "ok" });
+    render(HistoryPanel, { props: panelProps() });
+    const handle = await screen.findByRole("slider", { name: "调整变更文件栏宽度" });
+    const split = () => document.querySelector<HTMLElement>(".commit-split")!;
+    expect(split().style.getPropertyValue("--commit-files")).toBe("248px");
+    await fireEvent.keyDown(handle, { key: "ArrowRight" });
+    expect(split().style.getPropertyValue("--commit-files")).toBe("264px");
+    expect(globalThis.localStorage?.getItem("twiglane.commitFilesWidth")).toBe("264");
+    await fireEvent.pointerDown(handle, { clientX: 300, pointerId: 1 });
+    await fireEvent.pointerMove(handle, { clientX: 200, pointerId: 1 });
+    await fireEvent.pointerUp(handle, { clientX: 200, pointerId: 1 });
+    expect(split().style.getPropertyValue("--commit-files")).toBe("164px");
+    expect(globalThis.localStorage?.getItem("twiglane.commitFilesWidth")).toBe("164");
+    globalThis.localStorage?.removeItem("twiglane.commitFilesWidth");
   });
 
   it("多选差异切换文件后不继续旧文件的排队请求", async () => {
@@ -753,7 +824,7 @@ describe("临时保存", () => {
     await fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(deleteStash).not.toHaveBeenCalled();
     await fireEvent.click(screen.getByRole("button", { name: "删除" }));
-    await fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    await fireEvent.click(screen.getByRole("button", { name: "删除记录" }));
     expect(deleteStash).toHaveBeenCalledWith("/repo", "cccccccccccccccccccccccccccccccccccccccc", true, 3, 2);
   });
 
@@ -842,7 +913,7 @@ describe("临时保存 modal", () => {
     expect(impact).toContain("ccccccc");
     expect(impact).toContain("wip");
     expect(screen.getByText(/本应用不能恢复/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "确认删除" }).className).toContain("btn-danger");
+    expect(screen.getByRole("button", { name: "删除记录" }).className).toContain("btn-danger");
 
     await fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(deleteStash).not.toHaveBeenCalled();
@@ -851,7 +922,7 @@ describe("临时保存 modal", () => {
 
     await fireEvent.click(screen.getByRole("button", { name: "删除" }));
     await screen.findByRole("dialog", { name: /删除临时保存/ });
-    await fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    await fireEvent.click(screen.getByRole("button", { name: "删除记录" }));
     await vi.waitFor(() =>
       expect(deleteStash).toHaveBeenCalledWith("/repo", "cccccccccccccccccccccccccccccccccccccccc", true, 3, 2),
     );

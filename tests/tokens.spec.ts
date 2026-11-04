@@ -513,7 +513,7 @@ describe("状态与动效统一（R2、R12）", () => {
   const base = read(path.join(stylesDir, "base.css"));
 
   it("弹窗、弹层和菜单使用同一组入场动画", () => {
-    for (const selector of [".modal-card", ".popover", ".branch-popover", ".menu"]) {
+    for (const selector of [".modal-card", ".popover", ".menu"]) {
       expect(ruleBody(components, selector), selector).toMatch(/animation:\s*pop\s/);
     }
     expect(stripComments(base), "没有第二套弹窗入场动画").not.toMatch(/@keyframes (modal-in|rise)\b/);
@@ -567,6 +567,12 @@ describe("状态与动效统一（R2、R12）", () => {
     const wide = components.match(/@media \(max-width: 1240px\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
     expect(wide).toMatch(/\.cr-toggle-wide/);
     expect(wide).toMatch(/\.cr-seg-label/);
+  });
+
+  it("全屏弹窗的紧凑样式只管自己的头和正文，叠在合并面板里的确认框不被改掉内边距", () => {
+    expect(stripComments(components), "不能用后代选择器：嵌套的 .modal-card 会被一起匹配").not.toMatch(/\.modal-fill\s+\.modal-(head|body|icon|titles)/);
+    expect(ruleBody(components, ".modal-card.modal-fill > .modal-body")).toMatch(/padding:\s*0/);
+    expect(ruleBody(components, ".modal-card.modal-fill > .modal-head > .modal-titles")).toMatch(/flex:\s*none/);
   });
 
   it("弹窗打开时通知不盖住底部操作条", () => {
@@ -718,6 +724,11 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".stash-record": "临时保存记录底部横向分隔线",
   ".diff-line .ln + .ln": "差异视图行号列的表格竖线",
   ".side-cell + .side-cell": "双栏差异的列分隔竖线",
+  ".split-hbar-cell + .split-hbar-cell": "双栏差异底部两条横向滚动条之间的列分隔竖线，与上方 .side-cell 竖线对齐",
+  ".union-commits": "多选提交清单底部横向分区线，清单行自带 hover 反馈",
+  ".union-diff-head": "多选差异区文件标题条底部横向分隔线",
+  ".union-block": "多选差异里每个提交块的卡片外框，块内是只读差异",
+  ".union-block-head": "提交块吸顶标题底部横向分隔线",
 
   // --- components.css：语义色混合的容器描边（不是控件边界） ---
 

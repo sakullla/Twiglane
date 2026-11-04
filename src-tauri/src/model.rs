@@ -271,6 +271,10 @@ pub struct BranchRecord {
     pub worktree: Option<String>,
     #[serde(default)]
     pub target_oid: Option<String>,
+    /// 已经完整包含在主干里：本地默认分支和它的远程对应分支（两者都存在时都要包含）。
+    /// 主干分支自己不标记。用来提示「可以安全删除」，不影响任何写入判断。
+    #[serde(default)]
+    pub merged: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -282,6 +286,9 @@ pub struct BranchState {
     /// 默认分支：`origin/HEAD` 指向的本地分支；否则依次取存在的 main、master、develop。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_branch: Option<String>,
+    /// 判定 `merged` 用到的主干分支（例如 `master`、`origin/master`）；没有默认分支时为空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merge_bases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

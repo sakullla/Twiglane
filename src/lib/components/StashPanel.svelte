@@ -6,7 +6,7 @@
   import { BUSY_REASON, relativeTime, splitPath } from "../ui";
   import { isContextKey } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
-  import Modal from "./Modal.svelte";
+  import ConfirmDialog from "./ConfirmDialog.svelte";
 
   interface Props {
     opened: OpenedRepository;
@@ -417,25 +417,20 @@
     </div>
   </div>
   {#if confirmRecord}
-    <Modal
+    <ConfirmDialog
       title="删除临时保存"
       titleId="stash-delete-title"
-      icon="trash"
-      tone="danger"
-      size="sm"
-      description="删除后 Git 不再保留这条记录，本应用不能恢复。取消不会删除，工作区也不会改变。"
-      onClose={cancelDelete}
-    >
-      <ul class="scope-list" aria-label="受影响的临时保存记录">
-        <li title={confirmRecord.oid}>
-          {shortOid(confirmRecord.oid)} · {confirmRecord.message || "未填写说明"} · {formatAuthoredAt(confirmRecord.committedAt)}
-        </li>
-      </ul>
-      {#snippet footer()}
-        <button type="button" class="btn btn-secondary" onclick={cancelDelete}>取消</button>
-        <span class="spacer"></span>
-        <button type="button" class="btn btn-danger" onclick={confirmDelete}>确认删除</button>
-      {/snippet}
-    </Modal>
+      message="删除这条临时保存记录？"
+      targets={[{ icon: "archive", name: confirmRecord.message || "未填写说明", detail: `${shortOid(confirmRecord.oid)} · ${formatAuthoredAt(confirmRecord.committedAt)}` }]}
+      targetsLabel="受影响的临时保存记录"
+      notes={[
+        { tone: "warn", text: "删除后 Git 不再保留这条记录，本应用不能恢复。" },
+        { tone: "ok", text: "工作区和当前分支不会改变。" },
+      ]}
+      confirmLabel="删除记录"
+      confirmIcon="trash"
+      onConfirm={confirmDelete}
+      onCancel={cancelDelete}
+    />
   {/if}
 </section>

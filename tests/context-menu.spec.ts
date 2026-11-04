@@ -156,7 +156,7 @@ describe("文件右键菜单", () => {
     await fireEvent.click(within(menu).getByRole("menuitem", { name: /放弃更改/ }));
     await screen.findByRole("dialog", { name: "放弃文件修改" });
     expect(mocks.discardChanges).toHaveBeenLastCalledWith(repoPath, ["src/App.svelte"], false, 4, expect.any(Number));
-    await fireEvent.click(screen.getByRole("button", { name: "确认放弃所选" }));
+    await fireEvent.click(screen.getByRole("button", { name: /个文件的修改$/ }));
     await waitFor(() => expect(mocks.discardChanges).toHaveBeenLastCalledWith(repoPath, ["src/App.svelte"], true, 4, expect.any(Number)));
   });
 

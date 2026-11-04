@@ -105,6 +105,16 @@
   let codeTexts = $derived(lines.filter((line) => line.kind !== "hunk").map((line) => codeOf(line)));
   let ruler = $derived(codeRuler(codeTexts));
   let codeSize = $derived(codeContentSize(codeTexts));
+  /* 并排视图两栏各自横向滚动：每栏的滚动行程按本栏最长的一行算，旧侧是上下文 + 删除，新侧是上下文 + 新增。 */
+  let split = $derived(renderMode === "split");
+  let leftRuler = $derived(split ? codeRuler(lines.filter((line) => line.kind === "context" || line.kind === "del").map((line) => codeOf(line))) : []);
+  let rightRuler = $derived(split ? codeRuler(lines.filter((line) => line.kind === "context" || line.kind === "add").map((line) => codeOf(line))) : []);
+  let leftBar = $state<HTMLDivElement | null>(null);
+  let rightBar = $state<HTMLDivElement | null>(null);
+  /** 竖向滚动条占的宽度：两栏滚动条按代码栏对齐，要让出这一段。 */
+  let gutter = $state(0);
+  /** 哪一栏放不下：都放得下时不画滚动条那一行。 */
+  let overflow = $state({ left: false, right: false });
   let range = $derived(
     embedded
       ? visibleRange(total, hostTop, hostHeight, ROW_HEIGHT)
@@ -280,6 +290,64 @@
       node.removeEventListener("scroll", fromCode);
       bar?.removeEventListener("scroll", fromBar);
     };
+  });
+
+  /* 并排视图：两栏的横向位置写在滚动容器上（--code-xl / --code-xr），两条滚动条各管一栏。 */
+  function setSideX(side: "l" | "r", left: number) {
+    scroller?.style.setProperty(`--code-x${side}`, `${left}px`);
+  }
+
+  $effect(() => {
+    const node = scroller;
+    const bars = [leftBar, rightBar];
+    if (!split || !node) return;
+    const measure = () => {
+      gutter = Math.max(0, node.offsetWidth - node.clientWidth);
+      const next = { left: (leftBar?.scrollWidth ?? 0) > (leftBar?.clientWidth ?? 0) + 1, right: (rightBar?.scrollWidth ?? 0) > (rightBar?.clientWidth ?? 0) + 1 };
+      if (next.left !== overflow.left || next.right !== overflow.right) overflow = next;
+      setSideX("l", leftBar?.scrollLeft ?? 0);
+      setSideX("r", rightBar?.scrollLeft ?? 0);
+    };
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(node);
+    for (const bar of bars) {
+      if (!bar) continue;
+      observer?.observe(bar);
+      if (bar.firstElementChild) observer?.observe(bar.firstElementChild);
+    }
+    return () => observer?.disconnect();
+  });
+
+  /* 换文件时两栏都回到行首。 */
+  $effect(() => {
+    selectionKey;
+    split;
+    untrack(() => {
+      for (const bar of [leftBar, rightBar]) if (bar) bar.scrollLeft = 0;
+      setSideX("l", 0);
+      setSideX("r", 0);
+    });
+  });
+
+  /** 触控板横向滑动或 Shift+滚轮：指针在哪一栏就滚哪一栏，纵向滚动照常交给浏览器。 */
+  function onSplitWheel(event: WheelEvent) {
+    if (!split || !scroller) return;
+    const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.shiftKey ? event.deltaY : 0;
+    if (delta === 0) return;
+    const rect = scroller.getBoundingClientRect();
+    const bar = event.clientX < rect.left + scroller.clientWidth / 2 ? leftBar : rightBar;
+    if (!bar) return;
+    event.preventDefault();
+    bar.scrollLeft += delta;
+  }
+
+  // Svelte 把 onwheel 挂成 passive，preventDefault 不生效；这里手动挂非 passive 的监听。
+  $effect(() => {
+    const node = scroller;
+    if (!node) return;
+    node.addEventListener("wheel", onSplitWheel, { passive: false });
+    return () => node.removeEventListener("wheel", onSplitWheel);
   });
 
   $effect(() => {
@@ -472,6 +540,7 @@
   {:else}
     <div
       class="diff-scroll"
+      class:split-x={split}
       role="textbox"
       aria-readonly="true"
       aria-multiline="true"
@@ -495,7 +564,9 @@
       bind:clientHeight={viewport}
     >
       <div class="virtual-space" style={`height:${total * ROW_HEIGHT}px`}>
-        <div class="code-ruler" class:half={renderMode === "split"} aria-hidden="true">{#each ruler as line, i (i)}<span data-text={line.text} style={rulerPadding(line)}></span>{/each}</div>
+        {#if !split}
+          <div class="code-ruler" aria-hidden="true">{#each ruler as line, i (i)}<span data-text={line.text} style={rulerPadding(line)}></span>{/each}</div>
+        {/if}
         <div class="code-stage">
         {#if renderMode === "unified"}
           {#each lines.slice(range.start, range.end) as line, index (`u-${range.start + index}`)}
@@ -541,10 +612,10 @@
                 {@const caption = hunkCaption(row.left.text)}
                 <span class="side-cell hunk side-hunk"><span class="ln"></span><span class="code hunk-caption"><span class="hunk-at">{caption.at}</span>{#if caption.context}<span class="hunk-context" title={caption.context}>{caption.context}</span>{/if}</span></span>
               {:else}
-              <span class={`side-cell ${row.left?.kind ?? "blank"}`}>
+              <span class={`side-cell side-l ${row.left?.kind ?? "blank"}`}>
                 {#if row.left}<span class="ln">{row.left.no ?? ""}</span>{#if row.left.index !== undefined && !row.span}<span class="code"><span class="code-in" data-sign={sign(row.left.text)} data-len={codeOf(row.left).length}>{#each segmentsAt(row.left.index) as seg, i (i)}{#if !seg.k && !seg.m}{seg.t}{:else}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/if}{/each}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.left.text.length}>{row.left.text}</span></span>{/if}{/if}
               </span>
-              <span class={`side-cell ${row.right?.kind ?? "blank"}`}>
+              <span class={`side-cell side-r ${row.right?.kind ?? "blank"}`}>
                 {#if row.right}<span class="ln">{row.right.no ?? ""}</span>{#if row.right.index !== undefined && !row.span}<span class="code"><span class="code-in" data-sign={sign(row.right.text)} data-len={codeOf(row.right).length}>{#each segmentsAt(row.right.index) as seg, i (i)}{#if !seg.k && !seg.m}{seg.t}{:else}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/if}{/each}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.right.text.length}>{row.right.text}</span></span>{/if}{/if}
               </span>
               {/if}
@@ -566,7 +637,22 @@
         </div>
       </div>
     </div>
-    {#if embedded && trackWidth > trackView}
+    {#if split}
+      <!-- 两栏各一条横向滚动条，按代码栏（行号之后）对齐；内容是本栏的隐藏标尺，宽度由浏览器实测。 -->
+      <div class="split-hbars" class:collapsed={!overflow.left && !overflow.right} style={`padding-right:${gutter}px`} aria-hidden="true">
+        <div class="split-hbar-cell">
+          <div class="split-hbar" tabindex="-1" bind:this={leftBar} onscroll={(event) => setSideX("l", event.currentTarget.scrollLeft)}>
+            <div class="split-ruler">{#each leftRuler as line, i (i)}<span data-text={line.text} style={rulerPadding(line)}></span>{/each}</div>
+          </div>
+        </div>
+        <div class="split-hbar-cell">
+          <div class="split-hbar" tabindex="-1" bind:this={rightBar} onscroll={(event) => setSideX("r", event.currentTarget.scrollLeft)}>
+            <div class="split-ruler">{#each rightRuler as line, i (i)}<span data-text={line.text} style={rulerPadding(line)}></span>{/each}</div>
+          </div>
+        </div>
+      </div>
+    {/if}
+    {#if embedded && !split && trackWidth > trackView}
       <div class="diff-hbar" aria-hidden="true" tabindex="-1" bind:this={hbar}><div style={`width:${trackWidth}px`}></div></div>
     {/if}
     {#if currentDiff.offset + currentDiff.lines.length < currentDiff.totalLines}

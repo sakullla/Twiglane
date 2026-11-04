@@ -213,7 +213,7 @@
 /* ---------- 新建 / 重命名分支 ---------- */
 .branch-create-options { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-12); }
 .branch-base { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; flex: 1; color: var(--fg-muted); font-size: var(--text-sm); }
-.branch-base .select { flex: 1; min-width: 0; max-width: 320px; }
+.branch-base .branch-picker { flex: 1; min-width: 0; max-width: 360px; }
 .branch-checkout { flex: none; color: var(--fg); }
 .branch-rename .row { align-items: center; }
 .branch-rename .input { flex: 1; min-width: 0; }
@@ -284,6 +284,22 @@
 /* 实测兜底：已渲染行比标尺宽时由 --code-floor 撑开（codeScroll 只增不减）。 */
 .code-ruler::after { content: ""; display: block; width: var(--code-floor, 0); }
 .code-in { display: block; width: max-content; transform: translateX(calc(var(--code-x, 0px) * -1)); }
+/* 并排视图两栏各自横向滚动：滚动容器只管纵向，两栏的偏移 --code-xl / --code-xr 由各自的滚动条写入（DiffView）。
+   滚动条按代码栏对齐（让出 48px 行号），内容是本栏最长几行的隐藏标尺，所以行程按本栏自己的宽度算。 */
+.diff-scroll.split-x { overflow-x: hidden; }
+.side-cell.side-l .code-in { transform: translateX(calc(var(--code-xl, 0px) * -1)); }
+.side-cell.side-r .code-in { transform: translateX(calc(var(--code-xr, 0px) * -1)); }
+.split-hbars { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); background: var(--surface-2); box-shadow: inset 0 1px 0 var(--border); }
+.split-hbars.collapsed { height: 0; overflow: hidden; box-shadow: none; }
+.split-hbar-cell { min-width: 0; padding-left: 48px; }
+.split-hbar-cell + .split-hbar-cell { border-left: 1px solid var(--border-strong); }
+.split-hbar { height: 12px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: auto; scrollbar-color: auto; }
+.split-hbar::-webkit-scrollbar { width: 12px; height: 12px; }
+.split-hbar::-webkit-scrollbar-thumb { background-color: var(--fg-subtle); }
+.split-ruler { width: max-content; height: 1px; overflow: hidden; visibility: hidden; padding-right: calc(22px + 1.6ch); font-family: var(--mono); font-size: var(--text-sm); white-space: pre; }
+.split-ruler > span { display: block; height: 0; }
+.split-ruler > span::before { content: attr(data-text); }
+.diff.embedded .split-hbars { position: sticky; bottom: 0; z-index: 2; }
 .file-group { position: absolute; left: var(--space-8); right: var(--space-8); display: flex; align-items: center; gap: var(--space-6); padding: 0 var(--space-2) 0 var(--space-8); font-size: var(--text-xs); font-weight: var(--weight-semibold); letter-spacing: 0.02em; color: var(--fg-subtle); }
 /* 分组标题在最窄栏宽（160px）下不能逐字折行成竖排：标题单行省略，计数与按钮不收缩。 */
 .file-group > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -633,6 +649,34 @@
 .modal-body { padding: var(--space-4) 18px 18px; overflow: auto; display: flex; flex-direction: column; gap: var(--space-12); min-height: 0; }
 .modal-body > p { color: var(--fg-muted); line-height: var(--leading-relaxed); }
 .modal-foot { display: flex; align-items: center; gap: var(--space-8); padding: var(--space-12) 18px; border-top: 1px solid var(--border); background: var(--surface-2); }
+/* 确认框（ConfirmDialog）：一句话 → 受影响的对象 → 后果 → 右下角「取消 / 具体动作」。 */
+.confirm-body { display: flex; flex-direction: column; gap: var(--space-12); min-width: 0; }
+.confirm-message { margin: 0; color: var(--fg); font-size: var(--text-sm); line-height: var(--leading-relaxed); overflow-wrap: anywhere; }
+.confirm-targets { margin: 0; padding: var(--space-4); list-style: none; display: flex; flex-direction: column; gap: 0; max-height: 220px; overflow: auto; border-radius: var(--radius); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--border); }
+.confirm-targets li { display: flex; align-items: center; gap: 10px; height: var(--confirm-row, 32px); padding: 0 var(--space-8); border-radius: var(--radius-sm); min-width: 0; flex: none; }
+.confirm-targets li.confirm-spacer { padding: 0; }
+.confirm-targets-caption { display: flex; align-items: center; gap: var(--space-6); margin-bottom: calc(var(--space-8) * -1); color: var(--fg-subtle); font-size: var(--text-xs); font-weight: var(--weight-semibold); }
+.confirm-target-icon { display: grid; place-items: center; width: 26px; height: 26px; flex: none; border-radius: var(--radius-sm); background: var(--surface); color: var(--fg-muted); box-shadow: inset 0 0 0 1px var(--border); }
+.confirm-target-main { display: flex; flex-direction: column; flex: 1; min-width: 0; line-height: 1.35; }
+.confirm-target-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--fg); }
+.confirm-target-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-xs); color: var(--fg-subtle); }
+.confirm-target-tag { flex: none; height: 18px; padding: 0 6px; border-radius: 999px; font-size: var(--text-xs); line-height: 18px; background: var(--surface-3); color: var(--fg-muted); }
+.confirm-target-tag.ok { background: var(--success-soft); color: var(--success-text); }
+.confirm-notes { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--space-6); }
+.confirm-notes li { display: flex; align-items: flex-start; gap: var(--space-8); color: var(--fg-muted); font-size: var(--text-sm); line-height: 1.55; overflow-wrap: anywhere; }
+.confirm-notes li > .icon { flex: none; margin-top: 3px; color: var(--fg-subtle); }
+.confirm-notes li.ok > .icon { color: var(--success-text); }
+.confirm-notes li.warn { color: var(--fg); }
+.confirm-notes li.warn > .icon { color: var(--warning-text); }
+.confirm-option { display: flex; align-items: flex-start; gap: 10px; padding: 10px var(--space-12); border-radius: var(--radius); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--border); color: var(--fg); font-size: var(--text-sm); line-height: 1.5; cursor: pointer; }
+.confirm-option:has(input:checked) { background: var(--danger-soft); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 35%, transparent); }
+.confirm-option .checkbox { margin-top: 2px; }
+.confirm-list { max-height: 360px; overflow: hidden; }
+.confirm-list-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.confirm-list .list-row { box-sizing: border-box; overflow: hidden; }
+.confirm-list .list-row .lr-desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.confirm-option code { font-family: var(--mono); font-size: var(--text-xs); }
+.confirm-option small { display: block; color: var(--fg-muted); font-size: var(--text-xs); }
 
 /* ---------- 命令面板 ---------- */
 /* 复用 modal 的背板与卡片外壳（遮罩、外框、动效一致），只覆盖面板自己的尺寸与列表区。
@@ -707,7 +751,7 @@ label.list-row .checkbox { margin-top: 2px; }
 .history-tools .btn { align-self: flex-start; }
 .history-tools .history-file-scope { max-width: 100%; }
 .history-filters { display: flex; flex-direction: column; gap: var(--space-6); min-width: 0; }
-.history-filters .select { height: 30px; font-size: var(--text-sm); }
+.history-filters .branch-picker-trigger.md { height: 30px; }
 /* 搜索与「更多筛选」同一行：作者、日期、路径默认收起，生效时在按钮角上计数。 */
 .history-search-row { display: flex; align-items: center; gap: var(--space-4); min-width: 0; }
 .history-search-row .field { flex: 1; min-width: 0; }
@@ -722,9 +766,33 @@ label.list-row .checkbox { margin-top: 2px; }
 .history-multi-list { margin: 0; padding: 0 var(--space-12) var(--space-8); list-style: none; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .history-multi-list li { display: flex; gap: var(--space-6); min-width: 0; color: var(--fg-muted); font-size: var(--text-sm); }
 .history-multi-list code { flex: none; }
-.history-multi-diffs { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: var(--space-8); padding-bottom: var(--space-8); }
-.history-union-files .file-row { position: relative; top: auto; height: 40px; margin: 2px 0; }
-.history-multi-diff h3 { margin: 0; padding: var(--space-8) var(--space-12) 0; font-size: var(--text-sm); font-weight: var(--weight-semibold); }
+/* 多选提交：顶部是所选提交的紧凑清单（限高可滚，点一行只看那个提交），下面左文件右差异；
+   右侧按提交把所选文件的差异连续堆叠在一个纵向滚动里，块标题吸顶，块内只有横向滚动。 */
+.union-head { border-bottom: 0; padding-bottom: var(--space-8); }
+.union-commits { flex: none; max-height: 152px; overflow: auto; margin: 0; padding: 0 var(--space-12) var(--space-8); list-style: none; display: flex; flex-direction: column; gap: 2px; border-bottom: 1px solid var(--border); }
+.union-commit { display: flex; align-items: center; gap: var(--space-8); width: 100%; min-height: 30px; padding: 0 var(--space-8); border-radius: var(--radius-sm); text-align: left; font-size: var(--text-sm); color: var(--fg); transition: background var(--duration-fast) var(--ease); }
+.union-commit:hover { background: var(--hover); }
+.union-commit .avatar { width: 20px; height: 20px; font-size: 10px; flex: none; }
+.union-commit-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.union-commit-meta { flex: none; color: var(--fg-subtle); font-size: var(--text-xs); }
+.union-commit code { flex: none; font-family: var(--mono); font-size: var(--text-xs); color: var(--fg-muted); }
+.union-diff { background: var(--surface-2); }
+.union-diff-head { flex: none; display: flex; align-items: center; gap: var(--space-8); min-height: 40px; padding: 0 var(--space-8) 0 var(--space-12); border-bottom: 1px solid var(--border); background: var(--surface); }
+.union-diff-head > .icon { flex: none; color: var(--fg-subtle); }
+.union-diff-name { font-weight: var(--weight-semibold); }
+.union-diff-count { flex: none; color: var(--fg-subtle); font-size: var(--text-xs); white-space: nowrap; }
+.union-diff-head .btn, .union-diff-head .segmented { flex: none; }
+.union-diff-head .segmented { padding: 2px; border-radius: var(--radius); }
+.union-diff-head .segmented button { height: 22px; padding: 0 var(--space-8); font-size: var(--text-xs); }
+.union-scroll { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; overflow-anchor: none; padding: 0 var(--space-12) var(--space-12); display: flex; flex-direction: column; gap: var(--space-12); }
+.union-scroll > :first-child { margin-top: var(--space-12); }
+.union-block { flex: none; min-width: 0; overflow: clip; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.union-block-head { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; gap: var(--space-8); min-height: 36px; margin: 0; padding: 0 var(--space-12); border-bottom: 1px solid var(--border); background: var(--surface-2); font-size: var(--text-sm); font-weight: var(--weight-normal); }
+.union-block-oid { flex: none; padding: 1px 6px; border-radius: var(--radius-xs); background: var(--surface-3); color: var(--fg-muted); font-family: var(--mono); font-size: var(--text-xs); }
+.union-block-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--weight-semibold); }
+.union-block-meta { flex: none; color: var(--fg-subtle); font-size: var(--text-xs); white-space: nowrap; }
+.union-block-head .diff-stats { flex: none; }
+.union-block > .infobar { margin: var(--space-8); }
 .history-list { flex: 1; min-width: 0; min-height: 0; overflow: auto; position: relative; padding: 0 0 var(--space-6); outline: none; container-type: inline-size; container-name: history-list; }
 /* 窄栏里把宽度留给摘要、作者和时间；Hash 仍在悬停提示和详情里。 */
 @container history-list (max-width: 240px) {
@@ -787,8 +855,9 @@ label.list-row .checkbox { margin-top: 2px; }
 .oid-chip button { display: grid; place-items: center; width: 22px; height: 22px; border-radius: var(--radius-xs); color: var(--fg-muted); }
 .oid-chip button:hover { background: var(--hover); color: var(--fg); }
 
-.commit-split { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(180px, 26%) minmax(0, 1fr); }
-.commit-files { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--border); background: var(--surface-2); }
+/* 变更文件栏与差异区之间是可拖动的分隔条（PaneResizer），栏宽由 --commit-files 给出。 */
+.commit-split { flex: 1; min-height: 0; display: grid; grid-template-columns: var(--commit-files, 248px) 1px minmax(0, 1fr); }
+.commit-files { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--surface-2); }
 .commit-files-toggle { display: none; }
 .commit-files-head { display: flex; align-items: center; gap: var(--space-6); min-height: 40px; padding: 0 var(--space-8) 0 var(--space-12); font-size: var(--text-sm); font-weight: var(--weight-semibold); color: var(--fg); flex: none; min-width: 0; white-space: nowrap; }
 .commit-files-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -812,7 +881,8 @@ label.list-row .checkbox { margin-top: 2px; }
      展开长说明后拆分区可能很矮，这时 3 行让位，差异区至少留 140px（工具条加五六行）。 */
   .commit-split { grid-template-columns: minmax(0, 1fr); grid-template-rows: fit-content(min(max(50%, 182px), calc(100% - 140px))) minmax(0, 1fr); }
   .commit-split:has(.commit-files-filter) { grid-template-rows: fit-content(min(max(50%, 222px), calc(100% - 140px))) minmax(0, 1fr); }
-  .commit-files { border-right: 0; border-bottom: 1px solid var(--border); }
+  .commit-files { border-bottom: 1px solid var(--border); }
+  .commit-split > .resizer { display: none; }
   .commit-files-toggle { display: inline-grid; }
   .commit-files.collapsed .commit-files-filter, .commit-files.collapsed .history-files, .commit-files.collapsed .commit-files-empty { display: none; }
 }
@@ -936,6 +1006,7 @@ label.list-row .checkbox { margin-top: 2px; }
 .branch-panel { display: flex; flex-direction: column; gap: var(--space-12); min-width: 0; }
 .branch-panel [hidden], .tag-manager [hidden] { display: none; }
 .branch-manager-tools { display: flex; align-items: center; gap: 10px; }
+.branch-refresh { flex: none; width: 34px; padding: 0; }
 .branch-search { flex: 1; min-width: 180px; }
 .branch-list, .tag-list { max-height: min(calc(86vh - 290px), 440px); min-height: 170px; border: 0; background: var(--surface-2); }
 .branch-list .list-section { font-weight: var(--weight-medium); border-bottom: 0; }
@@ -996,29 +1067,38 @@ label.list-row .checkbox { margin-top: 2px; }
 .merge-swap:hover:not(:disabled) { border-color: var(--control-border-hover); color: var(--fg); transform: rotate(180deg); }
 .merge-swap:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
 
-/* 分支选择器：触发按钮 + 带搜索的浮层（固定定位，避免被滚动容器裁掉）。 */
 /* 标题栏可搜索弹层：外壳在 Popover，条目沿用 .branch-option 的 hover、键盘当前项与选中态。 */
 .popover { position: fixed; z-index: var(--z-menu); display: flex; flex-direction: column; overflow: hidden; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-lg), 0 0 0 1px var(--border); outline: none; animation: pop var(--duration-fast) var(--ease-out); }
-.popover-search { flex: none; padding: var(--space-8); }
+.popover-search { flex: none; padding: 10px 10px var(--space-8); }
+.popover-search .field.sm { height: 34px; }
 .popover-list { flex: 1; min-height: 0; overflow: auto; padding: 0 var(--space-6) var(--space-6); }
-.popover-foot { flex: none; padding: var(--space-4) var(--space-6) var(--space-6); box-shadow: inset 0 1px 0 var(--border); }
-.popover-foot .menu-item { align-items: center; gap: var(--space-8); padding: var(--space-6) var(--space-8); }
+.popover-foot { flex: none; padding: var(--space-6); box-shadow: inset 0 1px 0 var(--border); }
+.popover-foot .menu-item { align-items: center; gap: 10px; padding: var(--space-8) 10px; }
 .popover-foot .menu-item > .icon { color: var(--fg-muted); margin-top: 0; }
 .switcher-space { position: relative; }
-.switcher-row { position: absolute; left: 0; right: 0; }
+.switcher-row { position: absolute; left: 0; right: 0; padding-block: 1px; }
 .popover .switcher-option { padding-block: var(--space-4); }
-.switcher-option .repo-text { flex: 1; }
+/* 仓库行：两行文字配徽标，留足内边距和行间距，避免挤在一起。 */
+.popover .switcher-row .switcher-option { gap: 10px; padding: 7px 10px; border-radius: var(--radius); }
+.switcher-row .repo-badge { width: 28px; height: 28px; border-radius: var(--radius-sm); }
+.switcher-option .repo-text { flex: 1; gap: 2px; }
 .switcher-option[aria-disabled="true"] .repo-name { color: var(--fg-subtle); }
-.switcher-actions { position: absolute; top: var(--space-4); right: var(--space-4); display: flex; opacity: 0; border-radius: var(--radius-sm); background: var(--surface); transition: opacity var(--duration-fast) var(--ease); }
-.switcher-row:hover .switcher-actions { opacity: 1; }
+.switcher-actions { position: absolute; top: 50%; right: var(--space-8); display: flex; gap: var(--space-2); padding-left: var(--space-6); opacity: 0; pointer-events: none; transform: translateY(-50%); background: linear-gradient(var(--hover), var(--hover)), var(--surface); transition: opacity var(--duration-fast) var(--ease); }
+/* 底色与悬停行一致，盖住下面的路径与勾选标记。 */
+.switcher-option[aria-selected="true"] + .switcher-actions { background: linear-gradient(var(--accent-softer), var(--accent-softer)), var(--surface); }
+.switcher-row:hover .switcher-actions { opacity: 1; pointer-events: auto; }
 .switcher-reason { flex: none; max-width: 60%; color: var(--fg-subtle); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .repo-text .switcher-reason { max-width: 100%; }
 .repo-path-full { color: var(--fg-subtle); font-size: var(--text-xs); overflow-wrap: anywhere; }
 .switcher-error { flex: none; display: flex; align-items: flex-start; gap: var(--space-6); margin: 0 var(--space-8) var(--space-8); color: var(--danger-text); font-size: var(--text-sm); line-height: var(--leading-normal); }
 .switcher-error > .icon { flex: none; margin-top: 2px; }
+.switcher-notice { flex: none; display: flex; align-items: flex-start; gap: var(--space-6); margin: 0 10px var(--space-8); padding: var(--space-6) var(--space-8); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--fg-muted); font-size: var(--text-xs); line-height: var(--leading-normal); }
+.switcher-notice > .icon { flex: none; margin-top: 1px; color: var(--info-text); }
+.branch-open-worktree { gap: var(--space-4); height: 24px; padding: 0 var(--space-8); font-size: var(--text-xs); }
 .switcher-icon { flex: none; color: var(--fg-subtle); }
 .switcher-check { flex: none; color: var(--accent-text); }
 
+/* 分支下拉框：触发按钮 + Popover 弹层（固定定位，避免被滚动容器裁掉）。 */
 .branch-picker { min-width: 0; }
 .branch-picker-trigger { display: flex; align-items: center; gap: var(--space-8); width: 100%; height: 44px; padding: 0 var(--space-12) 0 var(--space-8); border-radius: var(--radius); border: 1px solid var(--control-border); background: var(--surface); color: var(--fg); text-align: left; box-shadow: var(--shadow-sm); transition: border-color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease); }
 .branch-picker-trigger:hover:not(:disabled) { border-color: var(--control-border-hover); }
@@ -1027,26 +1107,47 @@ label.list-row .checkbox { margin-top: 2px; }
 .branch-picker-trigger > .icon:last-child { color: var(--fg-subtle); transition: transform var(--duration-fast) var(--ease); }
 .branch-picker-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-sm); background: var(--accent-soft); color: var(--accent-text); flex: none; }
 .branch-picker-icon.remote { background: var(--info-soft); color: var(--info-text); }
+.branch-picker-icon.main { background: var(--warning-soft); color: var(--warning-text); }
 .branch-picker-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: var(--text-base); font-weight: var(--weight-medium); }
 .branch-picker-tag { flex: none; height: 20px; padding: 0 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-size: var(--text-xs); font-weight: var(--weight-medium); line-height: 20px; }
 .branch-picker-tag.remote { background: var(--info-soft); color: var(--info-text); }
-.branch-popover { position: fixed; z-index: var(--z-toast); display: flex; flex-direction: column; overflow: hidden; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-lg), 0 0 0 1px var(--border); animation: pop var(--duration-fast) var(--ease-out); }
-.branch-popover-search { display: flex; align-items: center; gap: var(--space-8); height: 44px; padding: 0 var(--space-12); color: var(--fg-subtle); box-shadow: inset 0 -1px 0 var(--border); flex: none; }
-.branch-popover-search input { flex: 1; min-width: 0; height: 100%; border: 0; outline: none; background: transparent; color: var(--fg); font-size: var(--text-base); }
-.branch-popover-search input::placeholder { color: var(--fg-subtle); }
-.branch-popover-list { flex: 1; min-height: 0; overflow: auto; padding: var(--space-4) var(--space-6) var(--space-8); }
-.branch-popover-group { padding: var(--space-8) var(--space-8) var(--space-4); color: var(--fg-subtle); font-size: var(--text-xs); font-weight: var(--weight-semibold); }
+.branch-picker-trigger.md { height: 32px; gap: var(--space-6); padding: 0 10px 0 var(--space-6); border-radius: var(--radius-sm); box-shadow: none; }
+.branch-picker-trigger.md[aria-expanded="true"] { box-shadow: 0 0 0 2px var(--focus); }
+.branch-picker-trigger.md .branch-picker-icon { width: 20px; height: 20px; border-radius: var(--radius-xs); }
+.branch-picker-trigger.md .branch-picker-name { font-size: var(--text-sm); }
+.branch-picker-trigger.md .branch-picker-tag { height: 18px; line-height: 18px; padding: 0 6px; }
+.branch-picker-icon.special { background: var(--surface-3); color: var(--fg-muted); }
+.branch-picker-name.special { font-family: inherit; }
+.branch-picker-name.empty { color: var(--fg-subtle); font-family: inherit; font-weight: var(--weight-normal); }
+/* 弹层里的分组标题、分组与分支：标题栏分支弹层和表单下拉框共用。 */
+.branch-popover-group { padding: var(--space-8) 10px var(--space-4); color: var(--fg-subtle); font-size: var(--text-xs); font-weight: var(--weight-semibold); }
 .branch-popover-empty { padding: var(--space-16); color: var(--fg-muted); font-size: var(--text-sm); text-align: center; }
-.branch-option { display: flex; align-items: center; gap: var(--space-8); min-height: 34px; padding: 0 var(--space-8); border-radius: var(--radius-sm); cursor: pointer; }
+.branch-option { display: flex; align-items: center; gap: var(--space-8); min-height: 36px; padding: 0 10px; border-radius: var(--radius-sm); cursor: pointer; }
 .branch-option.active { background: var(--hover); box-shadow: inset 0 0 0 1px var(--focus); }
 .branch-option[aria-selected="true"] { background: var(--accent-softer); }
 .branch-option[aria-disabled="true"] { cursor: not-allowed; }
 .branch-option[aria-disabled="true"] .branch-option-name { color: var(--fg-subtle); }
+.branch-option[aria-disabled="true"] .branch-option-icon { opacity: var(--opacity-disabled); }
 .branch-option-icon { display: grid; place-items: center; color: var(--accent-text); flex: none; }
 .branch-option-icon.remote { color: var(--info-text); }
+.branch-option.special .branch-option-icon { color: var(--fg-muted); }
 .branch-option-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: var(--text-sm); color: var(--fg); }
+.branch-option.special .branch-option-name { font-family: inherit; }
+.branch-option-label { flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--space-6); }
+.branch-option-label > .branch-option-name { flex: 0 1 auto; }
+/* 主干分支（本地默认分支及其远程对应分支）用星标，一眼和普通分支区分开。 */
+.branch-option-icon.main, .branch-row-icon.main { color: var(--warning-text); }
+/* 已合入主干：一枚小勾徽章，不占文字；说明放在提示里。 */
+.merged-badge { display: inline-grid; place-items: center; flex: none; width: 15px; height: 15px; border-radius: 50%; background: var(--success-soft); color: var(--success-text); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--success) 35%, transparent); cursor: help; }
+.merged-badge > .icon { stroke-width: 3; }
 .branch-option-note { flex: none; color: var(--fg-subtle); font-size: var(--text-xs); }
-.branch-option .branch-option-check { color: var(--accent-text); }
+.branch-option-check { display: grid; place-items: center; width: 14px; flex: none; color: var(--accent-text); }
+/* 表单下拉框的列表按视口渲染：行绝对定位，高度与 BranchPicker 里的 HEIGHTS 一致。 */
+.branch-picker-space { position: relative; }
+.branch-picker-space > * { position: absolute; left: 0; right: 0; }
+.branch-picker-space > .branch-popover-group { height: 30px; padding-top: 10px; }
+.branch-picker-space > .branch-group { height: 30px; min-height: 0; }
+.branch-picker-space > .branch-option { height: 36px; }
 
 .merge-suggest { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); margin-top: calc(var(--space-4) * -1); }
 .merge-suggest-label { color: var(--fg-subtle); font-size: var(--text-sm); }
@@ -1133,11 +1234,12 @@ label.list-row .checkbox { margin-top: 2px; }
 /* ---------- 合并 modal：整屏工作区 ---------- */
 /* fill 形态：卡片占满视口高度，正文不整体滚动，由文件列表 / 冲突流各自滚动。 */
 .modal-card.modal-fill { position: relative; height: calc(100vh - 32px); max-height: none; }
-.modal-card.modal-fill .modal-head { align-items: center; gap: var(--space-8); min-height: 44px; padding: var(--space-6) var(--space-8) var(--space-6) var(--space-12); flex: none; }
-.modal-card.modal-fill .modal-icon { width: 26px; height: 26px; border-radius: var(--radius-sm); }
-.modal-card.modal-fill .modal-titles { flex: none; padding-top: 0; }
-.modal-card.modal-fill .modal-titles h2 { font-size: var(--text-base); }
-.modal-card.modal-fill .modal-body { flex: 1; padding: 0; gap: 0; overflow: hidden; }
+/* 只作用于全屏卡片自己的头和正文（子选择器）：叠在合并面板里的确认框也是 .modal-card，不能被这里改掉内边距和标题布局。 */
+.modal-card.modal-fill > .modal-head { align-items: center; gap: var(--space-8); min-height: 44px; padding: var(--space-6) var(--space-8) var(--space-6) var(--space-12); flex: none; }
+.modal-card.modal-fill > .modal-head > .modal-icon { width: 26px; height: 26px; border-radius: var(--radius-sm); }
+.modal-card.modal-fill > .modal-head > .modal-titles { flex: none; padding-top: 0; }
+.modal-card.modal-fill > .modal-head > .modal-titles h2 { font-size: var(--text-base); }
+.modal-card.modal-fill > .modal-body { flex: 1; padding: 0; gap: 0; overflow: hidden; }
 .modal-backdrop:has(> .modal-fill) { padding: var(--space-16); }
 
 .merge-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; }

@@ -6,7 +6,7 @@ import { classifyDiffLine } from "../src/lib/diff";
 import { DraftBuffer } from "../src/lib/draft";
 import { normalizeError } from "../src/lib/errors";
 import { toSideRows } from "../src/lib/diff";
-import { branchLabel, commitScope, dependencyNote, filterRows, gitInstallHint, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "../src/lib/labels";
+import { branchLabel, commitScope, createSelectionResolver, dependencyNote, filterRows, gitInstallHint, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "../src/lib/labels";
 import { finishDiffAttempt } from "../src/lib/diff";
 import {
   clampWidth,
@@ -55,6 +55,26 @@ describe("最近仓库", () => {
 });
 
 describe("工作区状态", () => {
+  it("批量选择索引与单选规则一致，冲突只保留未暂存侧", () => {
+    const files: FileChange[] = [
+      { path: "both", staged: "modified", unstaged: "modified", untracked: false, unmerged: false, originalPath: null },
+      { path: "staged", staged: "added", unstaged: "none", untracked: false, unmerged: false, originalPath: null },
+      { path: "new", staged: "none", unstaged: "none", untracked: true, unmerged: false, originalPath: null },
+      { path: "conflict", staged: "unmerged", unstaged: "unmerged", untracked: false, unmerged: true, originalPath: null },
+      { path: "clean", staged: "none", unstaged: "none", untracked: false, unmerged: false, originalPath: null },
+    ];
+    for (const afterEdit of [false, true]) {
+      const resolve = createSelectionResolver(files, afterEdit);
+      for (const path of [...files.map((file) => file.path), "missing"]) {
+        for (const side of ["staged", "unstaged"] as const) {
+          const item = { path, side };
+          expect(resolve(item)).toEqual((afterEdit ? selectionAfterEdit : retainSelection)(files, item));
+        }
+      }
+    }
+    expect(createSelectionResolver(files, false)({ path: "conflict", side: "staged" })).toBeNull();
+  });
+
   it("同步标签明确未检查远程", () => {
     expect(syncLabel(branch)).toBe("相对已记录上游 +1 −1 · 未检查远程");
     expect(syncLabel(branch)).not.toContain("−-");

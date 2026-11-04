@@ -87,6 +87,7 @@
 <Modal
   title="设置"
   titleId="settings-modal-title"
+  icon="settings"
   task="settings"
   onClose={onClose}
 >

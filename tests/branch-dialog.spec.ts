@@ -1214,6 +1214,15 @@ describe("打开其他工作区、默认徽章与斜杠分组", () => {
     expect(main.textContent?.trim()).toBe("main");
   });
 
+  it("占用中的分支在弹层里就地写明原因，不用悬停", async () => {
+    showSwitcher([record("feature/ui", true), record("shared", false, "D:/wt")], null, "feature/ui");
+    const popover = await screen.findByRole("dialog", { name: "切换分支" });
+    const shared = await within(popover).findByRole("option", { name: /shared/ });
+    expect(shared.getAttribute("aria-disabled")).toBe("true");
+    expect(shared.querySelector(".branch-option-note")?.textContent).toBe("其他工作区");
+    expect(shared.getAttribute("title")).toBe("正被其他工作区使用：D:/wt");
+  });
+
   it("分支对话框里的起点下拉：Esc 只收起下拉，不关闭对话框；从分支弹层带来的起点直接选好", async () => {
     branchState.mockResolvedValue({ generation: 4, branches: [record("feature/ui", true), record("main")], snapshot: opened.snapshot, defaultBranch: "main" });
     const props = { ...propsBase(), opened: onBranch("feature/ui"), startCreating: true, startBase: "main" };

@@ -165,7 +165,10 @@
 .settings-section { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
 .settings-section:focus-visible { outline-offset: var(--space-4); }
 .settings-section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-height: 21px; }
-.settings-section h2 { color: var(--fg-muted); font-size: var(--text-sm); font-weight: var(--weight-medium); letter-spacing: 0; }
+/* 分区标题读作「分区」而不是「更小的标签」：13px/600 与临时保存、冲突侧栏的分区标题同级。 */
+.settings-section h2 { color: var(--fg); font-size: var(--text-base); font-weight: var(--weight-semibold); letter-spacing: 0; }
+/* 分区之间一条分区线：设置在小窗口里会滚动，滚到中段时只靠间距分不清上下两个分区。 */
+.settings-section + .settings-section { padding-top: var(--space-12); box-shadow: inset 0 1px 0 var(--border); }
 .settings-group { display: flex; flex-direction: column; gap: var(--space-12); padding: var(--space-12); border-radius: var(--radius); background: var(--surface-2); }
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); min-width: 0; }
 .settings-label { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; color: var(--fg); font-size: var(--text-base); font-weight: var(--weight-medium); }

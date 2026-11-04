@@ -582,6 +582,17 @@ describe("状态与动效统一（R2、R12）", () => {
     expect(ruleBody(components, ".modal-card.modal-fill > .modal-head > .modal-titles")).toMatch(/flex:\s*none/);
   });
 
+  it("任务弹窗的分区标题同一档字号与字重，设置分区之间用分区线分开", () => {
+    for (const selector of [".settings-section h2", ".stash-section-head h2"]) {
+      const body = ruleBody(components, selector);
+      expect(body, selector).toMatch(/font-size:\s*var\(--text-base\)/);
+      expect(body, selector).toMatch(/font-weight:\s*var\(--weight-semibold\)/);
+    }
+    // 设置在小窗口里要滚动，分区线只在两个分区之间出现（第一段不画），风格上与 .commit-head 同类。
+    expect(ruleBody(components, ".settings-section + .settings-section")).toMatch(/box-shadow:\s*inset 0 1px 0 var\(--border\)/);
+    expect(ruleBody(components, ".settings-section + .settings-section")).toMatch(/padding-top:\s*var\(--space-12\)/);
+  });
+
   it("弹窗打开时通知不盖住底部操作条", () => {
     expect(ruleBody(components, ":root:has(.modal-fill) .toasts")).toMatch(/bottom:\s*calc\(var\(--space-16\) \* 2 \+ var\(--mp-foot-height\)\)/);
     expect(ruleBody(components, ":root:has([data-modal-backdrop]) .toasts")).toMatch(/top:\s*var\(--space-8\)/);

@@ -2,6 +2,8 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import { createRawSnippet, tick } from "svelte";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import Modal, { openModalCount } from "../src/lib/components/Modal.svelte";
+import PublishModal from "../src/lib/components/PublishModal.svelte";
+import SettingsModal from "../src/lib/components/SettingsModal.svelte";
 
 const body = (html: string) => createRawSnippet(() => ({ render: () => `<div>${html}</div>` }));
 
@@ -105,5 +107,59 @@ describe("Modal 键盘处理不依赖焦点位置", () => {
     open("甲窗", { headExtra: createRawSnippet(() => ({ render: () => `<div id="extra"></div>` })) });
     const head = document.querySelector(".modal-head")!;
     expect(head.querySelector(".modal-titles + #extra + button")).toBeTruthy();
+  });
+});
+
+/**
+ * 任务弹窗共用同一个 Modal 外壳：头部（图标 + 标题 + 关闭）与底部（次要动作 → 取消 → 主操作）
+ * 的层级对所有弹窗一致。这里用两个真实任务弹窗把 T5 的两处统一钉住：
+ * 设置弹窗原来没有头部图标，标题比其他弹窗左移 46px；发布弹窗原来把「取消」放在最左。
+ */
+describe("任务弹窗共用外壳", () => {
+  afterEach(() => {
+    cleanup();
+    expect(openModalCount()).toBe(0);
+  });
+
+  it("设置弹窗有头部图标，标题与其他任务弹窗同一列", async () => {
+    render(SettingsModal, {
+      props: {
+        theme: "dark" as const,
+        git: { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "Git 2.49.0 可用" },
+        disabled: false,
+        onClose: vi.fn(),
+        onTheme: vi.fn(),
+        onRedetect: vi.fn(),
+        onChooseGit: vi.fn(),
+        onClearGit: vi.fn(),
+      },
+    });
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.getAttribute("data-task-modal")).toBe("settings");
+    expect(dialog.getAttribute("aria-labelledby")).toBe("settings-modal-title");
+    const head = dialog.querySelector(".modal-head")!;
+    expect(head.children[0].classList.contains("modal-icon"), "图标位在标题之前").toBe(true);
+    expect(head.querySelector(".modal-icon + .modal-titles h2")?.textContent).toBe("设置");
+  });
+
+  it("发布弹窗底部：次要动作 → 取消 → 主操作，取消不再单独占最左", async () => {
+    render(PublishModal, {
+      props: {
+        branch: "feature/ui",
+        upstream: null,
+        remote: "origin",
+        ahead: 3,
+        disabled: false,
+        onClose: vi.fn(),
+        onPublish: vi.fn(),
+        onAssociate: vi.fn(),
+      },
+    });
+    const dialog = await screen.findByRole("dialog");
+    const foot = dialog.querySelector(".modal-foot")!;
+    const order = [...foot.children].map((element) => (element.classList.contains("spacer") ? "spacer" : (element.textContent ?? "").trim()));
+    expect(order).toEqual(["spacer", "只关联上游", "取消", "发布分支"]);
+    expect(foot.lastElementChild?.classList.contains("btn-primary"), "主操作在最右").toBe(true);
+    expect(foot.firstElementChild?.classList.contains("spacer"), "左侧留给说明，动作靠右对齐").toBe(true);
   });
 });

@@ -46,13 +46,14 @@
     <span>推送使用系统凭据助手或 SSH agent，不保存凭据；远程已存在同名分支时不会覆盖。</span>
   </div>
   {#snippet footer()}
-    <button type="button" class="btn btn-secondary" onclick={onClose}>取消</button>
+    <!-- 与其它任务弹窗同一顺序：左侧让空，右侧「次要动作 → 取消 → 主操作」。 -->
+    <span class="spacer"></span>
     {#if onAssociate}
       <button type="button" class="btn btn-ghost" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={() => onAssociate?.()}>
         <Icon name="link" size={14} />只关联上游
       </button>
     {/if}
-    <span class="spacer"></span>
+    <button type="button" class="btn btn-secondary" onclick={onClose}>取消</button>
     <button type="button" class="btn btn-primary" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={() => onPublish()}>
       {#if busy === "publish"}<span class="spinner"></span>{:else}<Icon name="upload" size={14} />{/if}
       发布分支

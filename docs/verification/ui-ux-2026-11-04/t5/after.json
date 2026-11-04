@@ -1,7 +1,9 @@
 {
   "base": "http://127.0.0.1:1430",
   "tag": "after",
-  "generatedAt": "2026-11-04T19:08:54.943Z",
+  "collectedAfter": "T5-A3",
+  "note": "2026-11-05 为 T5-A3 阻断重采：本文件所有 afterCloseFocus 都由当前代码（含远程/克隆关闭后焦点恢复）实测，2026-11-04T19:08:54Z 那版里的 BODY 读数已作废；弹窗清单新增 remote 与 clone 两条命令面板路径。",
+  "generatedAt": "2026-11-04T20:25:04.218Z",
   "targets": [
     {
       "theme": "dark",
@@ -88,8 +90,8 @@
           "bodyHorizontalOverflow": false,
           "merge": null,
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -199,8 +201,8 @@
           "bodyHorizontalOverflow": false,
           "merge": null,
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -301,8 +303,8 @@
           "bodyHorizontalOverflow": false,
           "merge": null,
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -403,8 +405,8 @@
           "bodyHorizontalOverflow": false,
           "merge": null,
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -510,8 +512,228 @@
             "crFoot": null
           },
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
+          }
+        },
+        {
+          "label": "remote",
+          "task": "remote",
+          "title": "远程",
+          "description": "名称和地址来自 Git 配置。凭据不会保存，展示时也会隐藏。",
+          "card": {
+            "x": 270,
+            "y": 264.4,
+            "w": 740,
+            "h": 311.2,
+            "right": 1010,
+            "bottom": 575.6,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "13px"
+          },
+          "head": {
+            "x": 271,
+            "y": 265.4,
+            "w": 738,
+            "h": 75.2,
+            "right": 1009,
+            "bottom": 340.6,
+            "padding": "18px 12px 12px 18px",
+            "fontSize": "13px"
+          },
+          "body": {
+            "x": 271,
+            "y": 340.6,
+            "w": 738,
+            "h": 177,
+            "right": 1009,
+            "bottom": 517.6,
+            "padding": "4px 18px 18px 18px",
+            "fontSize": "13px",
+            "overflowY": "auto",
+            "scrollHeight": 177,
+            "clientHeight": 177,
+            "scrollable": false
+          },
+          "foot": {
+            "x": 271,
+            "y": 517.6,
+            "w": 738,
+            "h": 57,
+            "right": 1009,
+            "bottom": 574.6,
+            "padding": "12px 18px 12px 18px",
+            "fontSize": "13px"
+          },
+          "footNodes": [
+            {
+              "node": "spacer",
+              "text": null,
+              "w": 536,
+              "fromRight": 185,
+              "disabled": false,
+              "title": null
+            },
+            {
+              "node": "btn btn-secondary",
+              "text": "关闭",
+              "w": 52,
+              "fromRight": 125,
+              "disabled": false,
+              "title": null
+            },
+            {
+              "node": "btn btn-primary",
+              "text": "保存远程",
+              "w": 98,
+              "fromRight": 19,
+              "disabled": false,
+              "title": null
+            }
+          ],
+          "close": {
+            "x": 967,
+            "y": 283.4,
+            "w": 30,
+            "h": 30,
+            "right": 997,
+            "bottom": 313.4,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "13px",
+            "label": "关闭对话框",
+            "title": "关闭（Esc）",
+            "disabled": false
+          },
+          "clippedButtons": [],
+          "focusInside": true,
+          "focusNode": "INPUT.input",
+          "modalTitleBox": {
+            "x": 335,
+            "y": 284.4,
+            "w": 620,
+            "h": 21,
+            "right": 955,
+            "bottom": 305.4,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "15px"
+          },
+          "sectionHeading": null,
+          "horizontalOverflow": false,
+          "bodyHorizontalOverflow": false,
+          "merge": null,
+          "afterCloseFocus": {
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
+          }
+        },
+        {
+          "label": "clone",
+          "task": null,
+          "title": "克隆仓库",
+          "description": "克隆到新目录后会直接打开。目标里已有文件时不会覆盖。",
+          "card": {
+            "x": 370,
+            "y": 204.6,
+            "w": 540,
+            "h": 430.7,
+            "right": 910,
+            "bottom": 635.4,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "13px"
+          },
+          "head": {
+            "x": 371,
+            "y": 205.6,
+            "w": 538,
+            "h": 75.2,
+            "right": 909,
+            "bottom": 280.8,
+            "padding": "18px 12px 12px 18px",
+            "fontSize": "13px"
+          },
+          "body": {
+            "x": 371,
+            "y": 280.8,
+            "w": 538,
+            "h": 296.5,
+            "right": 909,
+            "bottom": 577.4,
+            "padding": "4px 18px 18px 18px",
+            "fontSize": "13px",
+            "overflowY": "auto",
+            "scrollHeight": 297,
+            "clientHeight": 297,
+            "scrollable": false
+          },
+          "foot": {
+            "x": 371,
+            "y": 577.4,
+            "w": 538,
+            "h": 57,
+            "right": 909,
+            "bottom": 634.4,
+            "padding": "12px 18px 12px 18px",
+            "fontSize": "13px"
+          },
+          "footNodes": [
+            {
+              "node": "spacer",
+              "text": null,
+              "w": 336,
+              "fromRight": 185,
+              "disabled": false,
+              "title": null
+            },
+            {
+              "node": "btn btn-secondary",
+              "text": "取消",
+              "w": 52,
+              "fromRight": 125,
+              "disabled": false,
+              "title": null
+            },
+            {
+              "node": "btn btn-primary",
+              "text": "开始克隆",
+              "w": 98,
+              "fromRight": 19,
+              "disabled": true,
+              "title": "先填写远程地址"
+            }
+          ],
+          "close": {
+            "x": 867,
+            "y": 223.6,
+            "w": 30,
+            "h": 30,
+            "right": 897,
+            "bottom": 253.6,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "13px",
+            "label": "关闭对话框",
+            "title": "关闭（Esc）",
+            "disabled": false
+          },
+          "clippedButtons": [],
+          "focusInside": true,
+          "focusNode": "INPUT.input",
+          "modalTitleBox": {
+            "x": 435,
+            "y": 224.6,
+            "w": 420,
+            "h": 21,
+            "right": 855,
+            "bottom": 245.6,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "15px"
+          },
+          "sectionHeading": null,
+          "horizontalOverflow": false,
+          "bodyHorizontalOverflow": false,
+          "merge": null,
+          "afterCloseFocus": {
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -1261,8 +1483,8 @@
           "bodyHorizontalOverflow": false,
           "merge": null,
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -1372,8 +1594,8 @@
           "bodyHorizontalOverflow": false,
           "merge": null,
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -1474,8 +1696,8 @@
           "bodyHorizontalOverflow": false,
           "merge": null,
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -1576,8 +1798,8 @@
           "bodyHorizontalOverflow": false,
           "merge": null,
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -1683,8 +1905,228 @@
             "crFoot": null
           },
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
+          }
+        },
+        {
+          "label": "remote",
+          "task": "remote",
+          "title": "远程",
+          "description": "名称和地址来自 Git 配置。凭据不会保存，展示时也会隐藏。",
+          "card": {
+            "x": 80,
+            "y": 144.4,
+            "w": 740,
+            "h": 311.2,
+            "right": 820,
+            "bottom": 455.6,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "13px"
+          },
+          "head": {
+            "x": 81,
+            "y": 145.4,
+            "w": 738,
+            "h": 75.2,
+            "right": 819,
+            "bottom": 220.6,
+            "padding": "18px 12px 12px 18px",
+            "fontSize": "13px"
+          },
+          "body": {
+            "x": 81,
+            "y": 220.6,
+            "w": 738,
+            "h": 177,
+            "right": 819,
+            "bottom": 397.6,
+            "padding": "4px 18px 18px 18px",
+            "fontSize": "13px",
+            "overflowY": "auto",
+            "scrollHeight": 177,
+            "clientHeight": 177,
+            "scrollable": false
+          },
+          "foot": {
+            "x": 81,
+            "y": 397.6,
+            "w": 738,
+            "h": 57,
+            "right": 819,
+            "bottom": 454.6,
+            "padding": "12px 18px 12px 18px",
+            "fontSize": "13px"
+          },
+          "footNodes": [
+            {
+              "node": "spacer",
+              "text": null,
+              "w": 536,
+              "fromRight": 185,
+              "disabled": false,
+              "title": null
+            },
+            {
+              "node": "btn btn-secondary",
+              "text": "关闭",
+              "w": 52,
+              "fromRight": 125,
+              "disabled": false,
+              "title": null
+            },
+            {
+              "node": "btn btn-primary",
+              "text": "保存远程",
+              "w": 98,
+              "fromRight": 19,
+              "disabled": false,
+              "title": null
+            }
+          ],
+          "close": {
+            "x": 777,
+            "y": 163.4,
+            "w": 30,
+            "h": 30,
+            "right": 807,
+            "bottom": 193.4,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "13px",
+            "label": "关闭对话框",
+            "title": "关闭（Esc）",
+            "disabled": false
+          },
+          "clippedButtons": [],
+          "focusInside": true,
+          "focusNode": "INPUT.input",
+          "modalTitleBox": {
+            "x": 145,
+            "y": 164.4,
+            "w": 620,
+            "h": 21,
+            "right": 765,
+            "bottom": 185.4,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "15px"
+          },
+          "sectionHeading": null,
+          "horizontalOverflow": false,
+          "bodyHorizontalOverflow": false,
+          "merge": null,
+          "afterCloseFocus": {
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
+          }
+        },
+        {
+          "label": "clone",
+          "task": null,
+          "title": "克隆仓库",
+          "description": "克隆到新目录后会直接打开。目标里已有文件时不会覆盖。",
+          "card": {
+            "x": 180,
+            "y": 84.6,
+            "w": 540,
+            "h": 430.7,
+            "right": 720,
+            "bottom": 515.4,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "13px"
+          },
+          "head": {
+            "x": 181,
+            "y": 85.6,
+            "w": 538,
+            "h": 75.2,
+            "right": 719,
+            "bottom": 160.8,
+            "padding": "18px 12px 12px 18px",
+            "fontSize": "13px"
+          },
+          "body": {
+            "x": 181,
+            "y": 160.8,
+            "w": 538,
+            "h": 296.5,
+            "right": 719,
+            "bottom": 457.4,
+            "padding": "4px 18px 18px 18px",
+            "fontSize": "13px",
+            "overflowY": "auto",
+            "scrollHeight": 297,
+            "clientHeight": 297,
+            "scrollable": false
+          },
+          "foot": {
+            "x": 181,
+            "y": 457.4,
+            "w": 538,
+            "h": 57,
+            "right": 719,
+            "bottom": 514.4,
+            "padding": "12px 18px 12px 18px",
+            "fontSize": "13px"
+          },
+          "footNodes": [
+            {
+              "node": "spacer",
+              "text": null,
+              "w": 336,
+              "fromRight": 185,
+              "disabled": false,
+              "title": null
+            },
+            {
+              "node": "btn btn-secondary",
+              "text": "取消",
+              "w": 52,
+              "fromRight": 125,
+              "disabled": false,
+              "title": null
+            },
+            {
+              "node": "btn btn-primary",
+              "text": "开始克隆",
+              "w": 98,
+              "fromRight": 19,
+              "disabled": true,
+              "title": "先填写远程地址"
+            }
+          ],
+          "close": {
+            "x": 677,
+            "y": 103.6,
+            "w": 30,
+            "h": 30,
+            "right": 707,
+            "bottom": 133.6,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "13px",
+            "label": "关闭对话框",
+            "title": "关闭（Esc）",
+            "disabled": false
+          },
+          "clippedButtons": [],
+          "focusInside": true,
+          "focusNode": "INPUT.input",
+          "modalTitleBox": {
+            "x": 245,
+            "y": 104.6,
+            "w": 420,
+            "h": 21,
+            "right": 665,
+            "bottom": 125.6,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "15px"
+          },
+          "sectionHeading": null,
+          "horizontalOverflow": false,
+          "bodyHorizontalOverflow": false,
+          "merge": null,
+          "afterCloseFocus": {
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -2424,8 +2866,8 @@
           "bodyHorizontalOverflow": false,
           "merge": null,
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -2535,8 +2977,8 @@
           "bodyHorizontalOverflow": false,
           "merge": null,
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -2637,8 +3079,8 @@
           "bodyHorizontalOverflow": false,
           "merge": null,
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -2739,8 +3181,8 @@
           "bodyHorizontalOverflow": false,
           "merge": null,
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -2846,8 +3288,228 @@
             "crFoot": null
           },
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
+          }
+        },
+        {
+          "label": "remote",
+          "task": "remote",
+          "title": "远程",
+          "description": "名称和地址来自 Git 配置。凭据不会保存，展示时也会隐藏。",
+          "card": {
+            "x": 270,
+            "y": 264.4,
+            "w": 740,
+            "h": 311.2,
+            "right": 1010,
+            "bottom": 575.6,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "13px"
+          },
+          "head": {
+            "x": 271,
+            "y": 265.4,
+            "w": 738,
+            "h": 75.2,
+            "right": 1009,
+            "bottom": 340.6,
+            "padding": "18px 12px 12px 18px",
+            "fontSize": "13px"
+          },
+          "body": {
+            "x": 271,
+            "y": 340.6,
+            "w": 738,
+            "h": 177,
+            "right": 1009,
+            "bottom": 517.6,
+            "padding": "4px 18px 18px 18px",
+            "fontSize": "13px",
+            "overflowY": "auto",
+            "scrollHeight": 177,
+            "clientHeight": 177,
+            "scrollable": false
+          },
+          "foot": {
+            "x": 271,
+            "y": 517.6,
+            "w": 738,
+            "h": 57,
+            "right": 1009,
+            "bottom": 574.6,
+            "padding": "12px 18px 12px 18px",
+            "fontSize": "13px"
+          },
+          "footNodes": [
+            {
+              "node": "spacer",
+              "text": null,
+              "w": 536,
+              "fromRight": 185,
+              "disabled": false,
+              "title": null
+            },
+            {
+              "node": "btn btn-secondary",
+              "text": "关闭",
+              "w": 52,
+              "fromRight": 125,
+              "disabled": false,
+              "title": null
+            },
+            {
+              "node": "btn btn-primary",
+              "text": "保存远程",
+              "w": 98,
+              "fromRight": 19,
+              "disabled": false,
+              "title": null
+            }
+          ],
+          "close": {
+            "x": 967,
+            "y": 283.4,
+            "w": 30,
+            "h": 30,
+            "right": 997,
+            "bottom": 313.4,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "13px",
+            "label": "关闭对话框",
+            "title": "关闭（Esc）",
+            "disabled": false
+          },
+          "clippedButtons": [],
+          "focusInside": true,
+          "focusNode": "INPUT.input",
+          "modalTitleBox": {
+            "x": 335,
+            "y": 284.4,
+            "w": 620,
+            "h": 21,
+            "right": 955,
+            "bottom": 305.4,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "15px"
+          },
+          "sectionHeading": null,
+          "horizontalOverflow": false,
+          "bodyHorizontalOverflow": false,
+          "merge": null,
+          "afterCloseFocus": {
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
+          }
+        },
+        {
+          "label": "clone",
+          "task": null,
+          "title": "克隆仓库",
+          "description": "克隆到新目录后会直接打开。目标里已有文件时不会覆盖。",
+          "card": {
+            "x": 370,
+            "y": 204.6,
+            "w": 540,
+            "h": 430.7,
+            "right": 910,
+            "bottom": 635.4,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "13px"
+          },
+          "head": {
+            "x": 371,
+            "y": 205.6,
+            "w": 538,
+            "h": 75.2,
+            "right": 909,
+            "bottom": 280.8,
+            "padding": "18px 12px 12px 18px",
+            "fontSize": "13px"
+          },
+          "body": {
+            "x": 371,
+            "y": 280.8,
+            "w": 538,
+            "h": 296.5,
+            "right": 909,
+            "bottom": 577.4,
+            "padding": "4px 18px 18px 18px",
+            "fontSize": "13px",
+            "overflowY": "auto",
+            "scrollHeight": 297,
+            "clientHeight": 297,
+            "scrollable": false
+          },
+          "foot": {
+            "x": 371,
+            "y": 577.4,
+            "w": 538,
+            "h": 57,
+            "right": 909,
+            "bottom": 634.4,
+            "padding": "12px 18px 12px 18px",
+            "fontSize": "13px"
+          },
+          "footNodes": [
+            {
+              "node": "spacer",
+              "text": null,
+              "w": 336,
+              "fromRight": 185,
+              "disabled": false,
+              "title": null
+            },
+            {
+              "node": "btn btn-secondary",
+              "text": "取消",
+              "w": 52,
+              "fromRight": 125,
+              "disabled": false,
+              "title": null
+            },
+            {
+              "node": "btn btn-primary",
+              "text": "开始克隆",
+              "w": 98,
+              "fromRight": 19,
+              "disabled": true,
+              "title": "先填写远程地址"
+            }
+          ],
+          "close": {
+            "x": 867,
+            "y": 223.6,
+            "w": 30,
+            "h": 30,
+            "right": 897,
+            "bottom": 253.6,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "13px",
+            "label": "关闭对话框",
+            "title": "关闭（Esc）",
+            "disabled": false
+          },
+          "clippedButtons": [],
+          "focusInside": true,
+          "focusNode": "INPUT.input",
+          "modalTitleBox": {
+            "x": 435,
+            "y": 224.6,
+            "w": 420,
+            "h": 21,
+            "right": 855,
+            "bottom": 245.6,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "15px"
+          },
+          "sectionHeading": null,
+          "horizontalOverflow": false,
+          "bodyHorizontalOverflow": false,
+          "merge": null,
+          "afterCloseFocus": {
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -3597,8 +4259,8 @@
           "bodyHorizontalOverflow": false,
           "merge": null,
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -3708,8 +4370,8 @@
           "bodyHorizontalOverflow": false,
           "merge": null,
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -3810,8 +4472,8 @@
           "bodyHorizontalOverflow": false,
           "merge": null,
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -3912,8 +4574,8 @@
           "bodyHorizontalOverflow": false,
           "merge": null,
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -4019,8 +4681,228 @@
             "crFoot": null
           },
           "afterCloseFocus": {
-            "node": "BODY",
-            "label": "已打开 twiglane   T"
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
+          }
+        },
+        {
+          "label": "remote",
+          "task": "remote",
+          "title": "远程",
+          "description": "名称和地址来自 Git 配置。凭据不会保存，展示时也会隐藏。",
+          "card": {
+            "x": 80,
+            "y": 144.4,
+            "w": 740,
+            "h": 311.2,
+            "right": 820,
+            "bottom": 455.6,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "13px"
+          },
+          "head": {
+            "x": 81,
+            "y": 145.4,
+            "w": 738,
+            "h": 75.2,
+            "right": 819,
+            "bottom": 220.6,
+            "padding": "18px 12px 12px 18px",
+            "fontSize": "13px"
+          },
+          "body": {
+            "x": 81,
+            "y": 220.6,
+            "w": 738,
+            "h": 177,
+            "right": 819,
+            "bottom": 397.6,
+            "padding": "4px 18px 18px 18px",
+            "fontSize": "13px",
+            "overflowY": "auto",
+            "scrollHeight": 177,
+            "clientHeight": 177,
+            "scrollable": false
+          },
+          "foot": {
+            "x": 81,
+            "y": 397.6,
+            "w": 738,
+            "h": 57,
+            "right": 819,
+            "bottom": 454.6,
+            "padding": "12px 18px 12px 18px",
+            "fontSize": "13px"
+          },
+          "footNodes": [
+            {
+              "node": "spacer",
+              "text": null,
+              "w": 536,
+              "fromRight": 185,
+              "disabled": false,
+              "title": null
+            },
+            {
+              "node": "btn btn-secondary",
+              "text": "关闭",
+              "w": 52,
+              "fromRight": 125,
+              "disabled": false,
+              "title": null
+            },
+            {
+              "node": "btn btn-primary",
+              "text": "保存远程",
+              "w": 98,
+              "fromRight": 19,
+              "disabled": false,
+              "title": null
+            }
+          ],
+          "close": {
+            "x": 777,
+            "y": 163.4,
+            "w": 30,
+            "h": 30,
+            "right": 807,
+            "bottom": 193.4,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "13px",
+            "label": "关闭对话框",
+            "title": "关闭（Esc）",
+            "disabled": false
+          },
+          "clippedButtons": [],
+          "focusInside": true,
+          "focusNode": "INPUT.input",
+          "modalTitleBox": {
+            "x": 145,
+            "y": 164.4,
+            "w": 620,
+            "h": 21,
+            "right": 765,
+            "bottom": 185.4,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "15px"
+          },
+          "sectionHeading": null,
+          "horizontalOverflow": false,
+          "bodyHorizontalOverflow": false,
+          "merge": null,
+          "afterCloseFocus": {
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
+          }
+        },
+        {
+          "label": "clone",
+          "task": null,
+          "title": "克隆仓库",
+          "description": "克隆到新目录后会直接打开。目标里已有文件时不会覆盖。",
+          "card": {
+            "x": 180,
+            "y": 84.6,
+            "w": 540,
+            "h": 430.7,
+            "right": 720,
+            "bottom": 515.4,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "13px"
+          },
+          "head": {
+            "x": 181,
+            "y": 85.6,
+            "w": 538,
+            "h": 75.2,
+            "right": 719,
+            "bottom": 160.8,
+            "padding": "18px 12px 12px 18px",
+            "fontSize": "13px"
+          },
+          "body": {
+            "x": 181,
+            "y": 160.8,
+            "w": 538,
+            "h": 296.5,
+            "right": 719,
+            "bottom": 457.4,
+            "padding": "4px 18px 18px 18px",
+            "fontSize": "13px",
+            "overflowY": "auto",
+            "scrollHeight": 297,
+            "clientHeight": 297,
+            "scrollable": false
+          },
+          "foot": {
+            "x": 181,
+            "y": 457.4,
+            "w": 538,
+            "h": 57,
+            "right": 719,
+            "bottom": 514.4,
+            "padding": "12px 18px 12px 18px",
+            "fontSize": "13px"
+          },
+          "footNodes": [
+            {
+              "node": "spacer",
+              "text": null,
+              "w": 336,
+              "fromRight": 185,
+              "disabled": false,
+              "title": null
+            },
+            {
+              "node": "btn btn-secondary",
+              "text": "取消",
+              "w": 52,
+              "fromRight": 125,
+              "disabled": false,
+              "title": null
+            },
+            {
+              "node": "btn btn-primary",
+              "text": "开始克隆",
+              "w": 98,
+              "fromRight": 19,
+              "disabled": true,
+              "title": "先填写远程地址"
+            }
+          ],
+          "close": {
+            "x": 677,
+            "y": 103.6,
+            "w": 30,
+            "h": 30,
+            "right": 707,
+            "bottom": 133.6,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "13px",
+            "label": "关闭对话框",
+            "title": "关闭（Esc）",
+            "disabled": false
+          },
+          "clippedButtons": [],
+          "focusInside": true,
+          "focusNode": "INPUT.input",
+          "modalTitleBox": {
+            "x": 245,
+            "y": 104.6,
+            "w": 420,
+            "h": 21,
+            "right": 665,
+            "bottom": 125.6,
+            "padding": "0px 0px 0px 0px",
+            "fontSize": "15px"
+          },
+          "sectionHeading": null,
+          "horizontalOverflow": false,
+          "bodyHorizontalOverflow": false,
+          "merge": null,
+          "afterCloseFocus": {
+            "node": "MAIN.content",
+            "label": "改动 13 历史     3 个"
           }
         },
         {
@@ -4682,6 +5564,8 @@
     "after-dark-1280x840-branch.png",
     "after-dark-1280x840-scope.png",
     "after-dark-1280x840-merge.png",
+    "after-dark-1280x840-remote.png",
+    "after-dark-1280x840-clone.png",
     "after-dark-1280x840-confirm-delete-stash.png",
     "after-dark-1280x840-detail-dependencies.png",
     "after-dark-1280x840-merge-conflict.png",
@@ -4692,6 +5576,8 @@
     "after-dark-900x600-branch.png",
     "after-dark-900x600-scope.png",
     "after-dark-900x600-merge.png",
+    "after-dark-900x600-remote.png",
+    "after-dark-900x600-clone.png",
     "after-dark-900x600-confirm-delete-stash.png",
     "after-dark-900x600-detail-dependencies.png",
     "after-dark-900x600-merge-conflict.png",
@@ -4702,6 +5588,8 @@
     "after-light-1280x840-branch.png",
     "after-light-1280x840-scope.png",
     "after-light-1280x840-merge.png",
+    "after-light-1280x840-remote.png",
+    "after-light-1280x840-clone.png",
     "after-light-1280x840-confirm-delete-stash.png",
     "after-light-1280x840-detail-dependencies.png",
     "after-light-1280x840-merge-conflict.png",
@@ -4712,6 +5600,8 @@
     "after-light-900x600-branch.png",
     "after-light-900x600-scope.png",
     "after-light-900x600-merge.png",
+    "after-light-900x600-remote.png",
+    "after-light-900x600-clone.png",
     "after-light-900x600-confirm-delete-stash.png",
     "after-light-900x600-detail-dependencies.png",
     "after-light-900x600-merge-conflict.png",

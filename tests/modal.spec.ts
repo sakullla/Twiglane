@@ -111,6 +111,81 @@ describe("Modal 键盘处理不依赖焦点位置", () => {
 });
 
 /**
+ * 关闭后的焦点去处（T5 返工）。
+ *
+ * 从命令面板执行任务命令时，面板与弹窗在同一批更新里换位：Modal 打开瞬间的 activeElement
+ * 是随即卸载的搜索框。这时如果只把它记成「回来的地方」，关闭后焦点就落到 body。
+ * 这里直接验 Modal 的判断：传入的 returnFocus 优先，且不接管调用方自己的收尾顺序。
+ */
+describe("关闭后的焦点去处", () => {
+  afterEach(() => {
+    cleanup();
+    expect(openModalCount()).toBe(0);
+  });
+
+  /** 面板打开前的控件：和弹窗不在一棵树里，弹窗卸载不会带走它。 */
+  function attachOrigin() {
+    const origin = document.createElement("button");
+    origin.id = "palette-origin";
+    document.body.appendChild(origin);
+    return origin;
+  }
+
+  /** 面板里的搜索框：与弹窗同一批更新卸载，Modal 打开那一刻它还是 activeElement。 */
+  function attachSearch() {
+    const search = document.createElement("input");
+    document.body.appendChild(search);
+    search.focus();
+    return search;
+  }
+
+  it("打开瞬间的焦点已卸载：Esc 后回到 returnFocus，不落 body", async () => {
+    const origin = attachOrigin();
+    origin.focus();
+    const search = attachSearch();
+    const { onClose } = open("甲窗", { returnFocus: origin });
+    search.remove();
+    expect(search.isConnected, "搜索框已随面板卸载").toBe(false);
+
+    await press("Escape");
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(document.activeElement, "关闭后回到打开面板前的控件").toBe(origin);
+    expect(document.activeElement, "不是 body").not.toBe(document.body);
+    origin.remove();
+  });
+
+  it("宿主自己收槽位（直接卸载）时同样回到 returnFocus", async () => {
+    const origin = attachOrigin();
+    origin.focus();
+    const search = attachSearch();
+    const { view } = open("甲窗", { returnFocus: origin });
+    search.remove();
+    view.unmount();
+    expect(document.activeElement).toBe(origin);
+    origin.remove();
+  });
+
+  it("不传 returnFocus 时按原语义：不把焦点交给已卸载的节点", async () => {
+    const search = attachSearch();
+    const { view } = open("甲窗");
+    search.remove();
+    view.unmount();
+    expect(document.activeElement, "已卸载的搜索框拿不到焦点").not.toBe(search);
+    expect(search.isConnected).toBe(false);
+  });
+
+  it("传入的 returnFocus 在关闭前被卸载：不把焦点交给已卸载节点", async () => {
+    const origin = attachOrigin();
+    origin.focus();
+    const { view } = open("甲窗", { returnFocus: origin });
+    origin.remove();
+    view.unmount();
+    expect(document.activeElement, "已卸载的 returnFocus 拿不到焦点").not.toBe(origin);
+    expect(document.activeElement).toBe(document.body);
+  });
+});
+
+/**
  * 任务弹窗共用同一个 Modal 外壳：头部（图标 + 标题 + 关闭）与底部（次要动作 → 取消 → 主操作）
  * 的层级对所有弹窗一致。这里用两个真实任务弹窗把 T5 的两处统一钉住：
  * 设置弹窗原来没有头部图标，标题比其他弹窗左移 46px；发布弹窗原来把「取消」放在最左。

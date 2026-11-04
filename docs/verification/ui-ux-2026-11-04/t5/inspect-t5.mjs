@@ -226,6 +226,9 @@ const DIALOGS = [
   { key: "scope", command: "本次提交范围", ready: '[data-task-modal="scope"]' },
   { key: "publish", command: "发布分支", ready: '[data-task-modal="publish"]' },
   { key: "merge", command: "分支合并", ready: '[data-task-modal="merge"]' },
+  // 远程与克隆由 RepoDialogs 自己挂 Modal（不在任务槽位里），关闭后的焦点单独量一次。
+  { key: "remote", command: "远程", ready: '[data-task-modal="remote"]' },
+  { key: "clone", command: "克隆仓库", ready: "#clone-url" },
 ];
 
 const report = { base, tag, generatedAt: new Date().toISOString(), targets: [], shots: [] };

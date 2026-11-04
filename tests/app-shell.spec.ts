@@ -1475,6 +1475,44 @@ describe("应用外壳", () => {
       origin.focus();
     }
 
+    // 远程与克隆由 RepoDialogs 自己挂 Modal，不占任务槽位：Esc 之后同样不落 body。
+    mocks.remoteState.mockResolvedValue({ generation: 4, remotes: [], snapshot });
+    const fromPalette = async (name: RegExp, find: () => HTMLElement | null) => {
+      const palette = await openPalette();
+      await fireEvent.click(within(palette).getByRole("option", { name }));
+      return waitFor(() => {
+        const node = find();
+        expect(node, `${name}：打开对应弹窗`).toBeTruthy();
+        return node!;
+      });
+    };
+    const remoteModal = () => document.querySelector<HTMLElement>('[data-task-modal="remote"]');
+    const cloneModal = () => screen.queryByRole("dialog", { name: "克隆仓库" }) as HTMLElement | null;
+
+    for (const [name, find, closed] of [
+      [/^远程/, remoteModal, () => document.querySelector('[data-task-modal="remote"]')],
+      [/^克隆仓库/, cloneModal, () => screen.queryByRole("dialog", { name: "克隆仓库" })],
+    ] as [RegExp, () => HTMLElement | null, () => unknown][]) {
+      // 一、面板打开前焦点在控件上：关闭后回到它。
+      origin.focus();
+      const modal = await fromPalette(name, find);
+      expect(modal.contains(document.activeElement), `${name}：打开后焦点在弹窗内`).toBe(true);
+      await fireEvent.keyDown(modal, { key: "Escape" });
+      await waitFor(() => expect(closed(), `${name}：Esc 关闭弹窗`).toBeNull());
+      await waitFor(() => expect(document.activeElement, `${name}：回到打开面板前的控件`).toBe(origin));
+
+      // 二、面板之前焦点在 body（刚进界面就按 ⌘K）：落回主内容区，而不是留在 body。
+      // 只靠命令面板自己还焦点时这里会停在 body，所以这一条能单独判别修复是否接上。
+      (document.activeElement as HTMLElement | null)?.blur();
+      expect(document.activeElement, `${name}：出发点是 body`).toBe(document.body);
+      const second = await fromPalette(name, find);
+      await fireEvent.keyDown(second, { key: "Escape" });
+      await waitFor(() => expect(closed(), `${name}：第二次 Esc 关闭弹窗`).toBeNull());
+      await waitFor(() => expect(document.activeElement, `${name}：焦点不可用时落到主内容区`).toBe(document.querySelector("main.content")));
+      expect(document.activeElement, `${name}：后备也不是 body`).not.toBe(document.body);
+    }
+    origin.focus();
+
     // 面板打开前焦点不在任何控件（刚进界面就按 ⌘K）：走明确后备，同样不落回 body。
     (document.activeElement as HTMLElement | null)?.blur();
     expect(document.activeElement).toBe(document.body);

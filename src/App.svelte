@@ -193,6 +193,13 @@
   let paletteFocusOrigin: HTMLElement | null = null;
   /** 当前任务弹窗关闭后的焦点去处；为空表示按 Modal 原有语义（打开瞬间的 activeElement）。 */
   let taskReturnFocus = $state<HTMLElement | null>(null);
+  /**
+   * 克隆弹窗关闭后的焦点去处。
+   *
+   * 克隆不占任务槽位（在后台继续时窗口收起、写入仍在跑），所以和任务弹窗分开记；
+   * 远程弹窗本来就走 openTask，用 taskReturnFocus 就够了。
+   */
+  let repoReturnFocus = $state<HTMLElement | null>(null);
   /** 当前打开的右键菜单（文件列表、最近仓库）；任务 modal 里的右键菜单由各自组件承载。 */
   let contextMenu = $state<ContextMenuRequest | null>(null);
   let recovery = $state<{ discard: (paths?: string[]) => Promise<void> } | null>(null);
@@ -549,6 +556,8 @@
 
   function openClone() {
     if (writeLocked) return;
+    // 从命令面板执行时，面板与弹窗在同一批更新里换位：先定下关闭后该回到的控件，再关面板。
+    repoReturnFocus = paletteOpen ? paletteReturnFocus() : null;
     taskModal = null;
     paletteOpen = false;
     cloneOpen = true;
@@ -576,6 +585,32 @@
     if (origin?.isConnected) return origin;
     const main = document.querySelector<HTMLElement>("[data-app-main]");
     return main instanceof HTMLElement ? main : null;
+  }
+
+  /**
+   * 等 Modal 卸完再交回焦点。
+   *
+   * RepoDialogs 的 Modal 在 onDestroy 里会把焦点还给「打开瞬间的 activeElement」；从命令面板
+   * 打开时那已经是卸载中的搜索框，于是焦点落到 body。这里先让 Svelte 完成这一批更新与销毁，
+   * 再把焦点交给真正该回的控件（都不在时退回主内容区）。
+   */
+  function restoreRepoFocus(target: HTMLElement) {
+    const apply = () => {
+      const next = target.isConnected ? target : document.querySelector<HTMLElement>("[data-app-main]");
+      if (next instanceof HTMLElement) next.focus({ preventScroll: true });
+    };
+    // 定时器而不是 requestAnimationFrame：窗口收起到后台时 rAF 不排帧，焦点会一直留在 body。
+    queueMicrotask(() => setTimeout(apply, 0));
+  }
+
+  /** RepoDialogs 的关闭收尾：远程与克隆共用，先把回来的目标定下来再关。 */
+  function closeRepoDialogs() {
+    const target = cloneOpen ? repoReturnFocus : taskReturnFocus;
+    cloneOpen = false;
+    if (taskModal === "remote") taskModal = null;
+    repoReturnFocus = null;
+    taskReturnFocus = null;
+    if (target) restoreRepoFocus(target);
   }
 
   async function loadSettings() {
@@ -2686,10 +2721,7 @@
   mode={cloneOpen ? "clone" : taskModal === "remote" ? "remote" : null}
   {opened}
   disabled={writeLocked}
-  onClose={() => {
-    cloneOpen = false;
-    if (taskModal === "remote") taskModal = null;
-  }}
+  onClose={closeRepoDialogs}
   onBusy={(name) => (pending = name)}
   onSnapshot={applySnapshot}
   onOpened={cloneFinished}

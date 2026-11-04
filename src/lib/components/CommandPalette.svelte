@@ -14,6 +14,8 @@
     shortcut?: string;
     /** 只参与过滤、不显示：例如切换仓库时带上的仓库路径，让同名仓库也能按路径筛出。 */
     keywords?: string;
+    /** 选项上的弱化补充，例如同名仓库的路径；只用于区分，不参与过滤以外的判断。 */
+    detail?: string;
     enabled?: boolean;
     reason?: string;
     run: () => void;
@@ -40,13 +42,15 @@
   /**
    * 过滤串 = 标题 + 分组 + 可选的关键词。
    * 关键词只参与匹配、不进 DOM 文案：切换仓库的路径因此可搜，但选项上仍只显示仓库名。
+   * 空格分隔的多个词须全部命中（顺序不限）：「提交 推送」能找到「提交并推送」。
    */
   let filtered = $derived.by(() => {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return commands;
-    return commands.filter((item) =>
-      `${item.title} ${item.group} ${item.keywords ?? ""}`.toLowerCase().includes(needle),
-    );
+    const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) return commands;
+    return commands.filter((item) => {
+      const haystack = `${item.title} ${item.group} ${item.keywords ?? ""}`.toLowerCase();
+      return tokens.every((token) => haystack.includes(token));
+    });
   });
 
   let groups = $derived.by(() => {
@@ -219,6 +223,7 @@
                   }}
                 >
                   <span>{item.title}</span>
+                  {#if item.detail}<small class="palette-detail"><bdi>{item.detail}</bdi></small>{/if}
                   <span class="spacer"></span>
                   {#if !enabled(item)}<small class="palette-reason">{item.reason ?? "当前不可用"}</small>{/if}
                   {#if item.shortcut}<kbd>{item.shortcut}</kbd>{/if}

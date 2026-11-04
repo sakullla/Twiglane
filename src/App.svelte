@@ -288,6 +288,7 @@
     draft,
     theme,
     recentRepos: recent,
+    currentRepoPath: opened?.summary.path ?? null,
   });
   let paletteCommands = $derived(
     paletteItems(commandState).map((item) => ({
@@ -296,6 +297,7 @@
       title: item.title,
       shortcut: item.shortcut,
       keywords: item.keywords,
+      detail: item.detail,
       enabled: item.enabled,
       reason: item.reason,
       run: () => runCommand(item.id),
@@ -2587,6 +2589,7 @@
     hasRepo={opened !== null}
     sync={syncText}
     busy={writeLocked}
+    busyLabel={commandState.writing ? "写入中" : "读取中"}
     refreshing={pending !== null || reading}
     {degraded}
     warning={warning}

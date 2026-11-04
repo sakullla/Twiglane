@@ -2,7 +2,7 @@
   import { MODIFIER_LABEL } from "../brand";
   import { filterRecent, repeatedNames } from "../recent";
   import type { RecentRepo } from "../types";
-  import { hueOf, repoBadgeLetters } from "../ui";
+  import { hueOf, relativeTime, repoBadgeLetters } from "../ui";
   import BrandMark from "./BrandMark.svelte";
   import { isContextKey, pointFor } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
@@ -65,6 +65,12 @@
     if (!isContextKey(event) || !onContextMenu) return;
     event.preventDefault();
     onContextMenu(repo, pointFor(event.currentTarget as Element));
+  }
+
+  /** 上次打开的相对时间：同名或相近的仓库多一条可区分的线索。没有可信时间戳时不显示。 */
+  function openedLabel(repo: RecentRepo): string | null {
+    if (!Number.isFinite(repo.openedAtMs) || repo.openedAtMs < 1_000_000_000_000) return null;
+    return relativeTime(repo.openedAtMs / 1000);
   }
 </script>
 
@@ -145,6 +151,7 @@
                 <span class="repo-name">{repo.name}</span>
                 <span class={sameNames.has(repo.name) ? "repo-path-full" : "repo-path"}><bdi>{repo.path}</bdi></span>
               </span>
+              {#if openedLabel(repo)}<span class="repo-when" data-repo-when>{openedLabel(repo)}</span>{/if}
             </button>
           {/each}
         </div>

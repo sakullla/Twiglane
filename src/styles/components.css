@@ -718,6 +718,8 @@
 .palette-group-title { position: sticky; top: 0; z-index: var(--z-sticky); padding: var(--space-6) var(--space-8) var(--space-4); background: var(--surface); color: var(--fg-subtle); font-size: var(--text-xs); font-weight: var(--weight-semibold); letter-spacing: 0.06em; }
 /* 长命令名省略、快捷键列对齐：两者的位置不随文字长度左右摇摆（R7）。 */
 .palette-item > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 标题按内容取宽（盖过 .menu-item > span 的 flex:1）：补充说明紧跟标题，剩余空间只给 .spacer，快捷键列仍靠右对齐。 */
+.menu-item.palette-item > span:first-child { flex: 0 1 auto; }
 .palette-item { align-items: center; gap: var(--space-8); padding: 7px var(--space-8); border-radius: var(--radius); color: var(--fg); cursor: pointer; }
 .palette-item:hover { background: var(--hover); }
 /* 键盘游标：背景 + 左沿竖条两重提示，可辨度不依赖颜色深浅 */
@@ -729,6 +731,8 @@
 .palette-item[aria-disabled="true"] { cursor: not-allowed; }
 .palette-item[aria-disabled="true"] > span:first-child { color: var(--fg-subtle); }
 .palette-reason { max-width: 46%; overflow: hidden; text-overflow: ellipsis; color: var(--fg-subtle); font-size: var(--text-xs); white-space: nowrap; }
+/* 区分用的补充（同名仓库路径、当前仓库）：紧跟标题，空间不够时先省略它，标题与快捷键列不动。 */
+.palette-detail { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg-subtle); font-size: var(--text-xs); white-space: nowrap; }
 .palette-empty { padding: var(--space-32) var(--space-16) var(--space-8); text-align: center; color: var(--fg-muted); font-size: var(--text-sm); }
 /* 无匹配时给下一步，而不只是一个空白结论（R6）。 */
 .palette-empty-hint { padding: 0 var(--space-16) var(--space-32); text-align: center; color: var(--fg-subtle); font-size: var(--text-xs); }

@@ -539,6 +539,20 @@ describe("状态栏", () => {
     expect((screen.getByRole("button", { name: "刷新工作区" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("只读的忙碌说读取中，不把读取说成写入", () => {
+    render(StatusBar, { props: { hasRepo: true, sync: "领先 2", busy: true, busyLabel: "读取中", onRefresh: () => {} } as never });
+    expect(screen.getByText("读取中")).toBeTruthy();
+    expect(screen.queryByText("写入中")).toBeNull();
+  });
+
+  it("没有仓库时不显示刷新入口，打开仓库后出现", async () => {
+    const onRefresh = vi.fn();
+    const { rerender } = render(StatusBar, { props: { hasRepo: false, sync: "", onRefresh } as never });
+    expect(screen.queryByRole("button", { name: "刷新工作区" })).toBeNull();
+    await rerender({ hasRepo: true, sync: "领先 2", onRefresh } as never);
+    expect(screen.getByRole("button", { name: "刷新工作区" })).toBeTruthy();
+  });
+
   it("合并提示只在左栏隐藏时出现，文案与左栏一致，点击打开合并", async () => {
     const onOpenMerge = vi.fn();
     const base = { hasRepo: true, sync: "", conflictCount: 2, mergeInProgress: true, onOpenMerge };
@@ -682,6 +696,34 @@ describe("命令面板", () => {
     expect(screen.getByText("没有匹配的命令")).toBeTruthy();
   });
 
+  it("空格分隔的多个词须全部命中，顺序不限；任一词不中则不出现", async () => {
+    const items = [
+      { id: "commit.local", group: "提交", title: "提交到本地", run: vi.fn() },
+      { id: "commit.push", group: "提交", title: "提交并推送", run: vi.fn() },
+      { id: "sync.push", group: "同步", title: "推送", run: vi.fn() },
+    ];
+    render(CommandPalette, { props: { open: true, onClose: () => {}, commands: items } as never });
+    const input = screen.getByRole("combobox", { name: "搜索命令" });
+    await fireEvent.input(input, { target: { value: "推送  提交" } });
+    expect(screen.getAllByRole("option").map((option) => option.textContent?.trim())).toEqual(["提交并推送"]);
+    // 分组名也算命中范围：「同步 推送」只剩同步组那一条
+    await fireEvent.input(input, { target: { value: "同步 推送" } });
+    expect(screen.getAllByRole("option").map((option) => option.textContent?.trim())).toEqual(["推送"]);
+    await fireEvent.input(input, { target: { value: "提交 拉取" } });
+    expect(screen.getByText("没有匹配的命令")).toBeTruthy();
+  });
+
+  it("detail 作为弱化补充显示在标题后，没有 detail 的选项不多出节点", () => {
+    const items = [
+      { id: "repo.one", group: "仓库", title: "切换到 demo", detail: "/work/alpha/demo", run: vi.fn() },
+      { id: "repo.two", group: "仓库", title: "切换到 solo", run: vi.fn() },
+    ];
+    render(CommandPalette, { props: { open: true, onClose: () => {}, commands: items } as never });
+    const [one, two] = screen.getAllByRole("option");
+    expect(one.querySelector(".palette-detail")?.textContent).toBe("/work/alpha/demo");
+    expect(two.querySelector(".palette-detail")).toBeNull();
+  });
+
   it("焦点在选项上时 Esc 关掉面板并把焦点还给触发元素", async () => {
     const trigger = document.createElement("button");
     trigger.textContent = "打开命令面板";
@@ -795,6 +837,20 @@ describe("起始页", () => {
     });
     expect(container.querySelectorAll(".welcome-recent button")).toHaveLength(5);
     expect(screen.getByText("共 7 个")).toBeTruthy();
+  });
+
+  it("最近仓库行尾显示上次打开的相对时间，时间戳不可信时不显示", () => {
+    const now = Date.now();
+    const recent = [
+      { name: "fresh", path: "/work/fresh", openedAtMs: now - 3 * 3600 * 1000 },
+      { name: "legacy", path: "/work/legacy", openedAtMs: 1 },
+    ];
+    const { container } = render(Welcome, {
+      props: { recent, disabled: false, onAdd: () => {}, onClone: () => {}, onCreate: () => {}, onOpen: () => {} },
+    });
+    const rows = [...container.querySelectorAll(".welcome-recent button")];
+    expect(rows[0].querySelector("[data-repo-when]")?.textContent).toBe("3 小时前");
+    expect(rows[1].querySelector("[data-repo-when]"), "1970 年的占位时间戳不当作真实打开时间").toBeNull();
   });
 
   describe("多于 5 个时搜索", () => {
@@ -1132,6 +1188,17 @@ describe("外壳样式契约", () => {
 
   it("菜单宽度容得下同步项说明，菜单项不因折行高低不齐", () => {
     expect(ruleBody(componentsCss, ".menu")).toMatch(/min-width:\s*268px/);
+  });
+
+  it("窄窗口三个入口仍是一排三列，只改成行式卡片；矮窗口不再隐藏使用提示", () => {
+    const narrow = layoutCss.match(/@media \(max-width: 960px\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(narrow, "缺少 960 宽档").not.toBe("");
+    expect(narrow, "不再把入口堆成单列").not.toMatch(/\.welcome-actions\s*\{[^}]*grid-template-columns/);
+    expect(narrow).toMatch(/\.action-card\s*\{[^}]*flex-direction:\s*row/);
+    expect(ruleBody(layoutCss, ".welcome-actions")).toMatch(/repeat\(3, minmax\(0, 1fr\)\)/);
+    const short = layoutCss.match(/@media \(max-height: 720px\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(short, "缺少 720 高档").not.toBe("");
+    expect(short).not.toMatch(/\.welcome-foot\s*\{[^}]*display:\s*none/);
   });
 
   /**

@@ -12,6 +12,8 @@
     hasRepo: boolean;
     sync: string;
     busy?: boolean;
+    /** 忙碌时的文字：读取仓库或续读差异时说「读取中」，不把只读操作说成写入（R3）。 */
+    busyLabel?: string;
     refreshing?: boolean;
     degraded?: boolean;
     warning?: string | null;
@@ -27,6 +29,7 @@
     hasRepo,
     sync,
     busy = false,
+    busyLabel = "写入中",
     refreshing = false,
     degraded = false,
     warning = null,
@@ -73,12 +76,13 @@
       <span>{notice.text}</span>
     </button>
   {/if}
-  {#if busy}<span class="sb-item sb-busy"><span class="spinner"></span>写入中</span>{/if}
+  {#if busy}<span class="sb-item sb-busy"><span class="spinner"></span>{busyLabel}</span>{/if}
   {#if warning}
     <span class="sb-item sb-warn" title={warning}>{warning}</span>
   {/if}
   <span class="sb-live" aria-hidden="true"></span>
-  {#if onRefresh}
+  <!-- 没有仓库时没有工作区可刷新：按钮不占位，避免起始页出现一个无效动作。 -->
+  {#if hasRepo && onRefresh}
     <button
       type="button"
       class="sb-item"

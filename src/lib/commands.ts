@@ -47,6 +47,8 @@ export interface CommandState {
   draft: string;
   theme: Theme;
   recentRepos: RecentRepo[];
+  /** 当前打开的仓库路径：命令面板里标出「当前仓库」，切换命令仍可用于重新读取。 */
+  currentRepoPath?: string | null;
 }
 
 export interface CommandSpec {
@@ -60,6 +62,11 @@ export interface CommandSpec {
    * 面板的过滤串是 title + group + keywords，界面文案仍只看 title 与 hint。
    */
   keywords?: string;
+  /**
+   * 命令面板选项上的一行弱化补充（不进可访问名称的主体判断）。
+   * 只给需要区分的条目：同名仓库带路径，当前仓库带「当前仓库」。
+   */
+  detail?: string;
   shortcut?: string;
   available: (state: CommandState) => boolean;
   reason?: (state: CommandState) => string;
@@ -404,16 +411,24 @@ export function repoSwitchCommands(state: CommandState): CommandSpec[] {
     seen.add(repo.path);
     return true;
   });
-  return repos.map((repo) => ({
-    id: `${REPO_SWITCH_PREFIX}${repo.path}`,
-    group: "仓库" as const,
-    title: `切换到 ${repo.name}`,
-    hint: repo.path,
-    // 面板过滤要认路径：同名仓库靠路径区分，只按名称搜会分不出是哪一个（R11）。
-    keywords: repo.path,
-    available: (current: CommandState) => !switchBlocked(current),
-    reason: switchBlockedReason,
-  }));
+  // 同名仓库只看标题分不出是哪一个：给它们带上路径；其余仓库保持只显示名称。
+  const nameCount = new Map<string, number>();
+  for (const repo of repos) nameCount.set(repo.name, (nameCount.get(repo.name) ?? 0) + 1);
+  return repos.map((repo) => {
+    const isCurrent = state.currentRepoPath === repo.path;
+    const parts = [isCurrent ? "当前仓库 · 重新读取" : "", (nameCount.get(repo.name) ?? 0) > 1 ? repo.path : ""].filter(Boolean);
+    return {
+      id: `${REPO_SWITCH_PREFIX}${repo.path}`,
+      group: "仓库" as const,
+      title: `切换到 ${repo.name}`,
+      hint: repo.path,
+      // 面板过滤要认路径：同名仓库靠路径区分，只按名称搜会分不出是哪一个（R11）。
+      keywords: repo.path,
+      detail: parts.length > 0 ? parts.join(" · ") : undefined,
+      available: (current: CommandState) => !switchBlocked(current),
+      reason: switchBlockedReason,
+    };
+  });
 }
 
 /** 仓库组在静态表里的结束位置：动态仓库切换命令插在这里，保持同组连续。 */
@@ -454,6 +469,8 @@ export interface PaletteItem {
   shortcut?: string;
   /** 只参与过滤、不显示：仓库路径等不能进标题的检索词。 */
   keywords?: string;
+  /** 选项上的弱化补充：同名仓库的路径、当前仓库标记。 */
+  detail?: string;
   enabled: boolean;
   reason?: string;
 }
@@ -467,6 +484,7 @@ export function paletteItems(state: CommandState): PaletteItem[] {
       title: command.title,
       shortcut: command.shortcut,
       keywords: command.keywords,
+      detail: command.detail,
       enabled,
       reason: enabled ? undefined : commandReason(command, state),
     };

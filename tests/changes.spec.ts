@@ -497,6 +497,25 @@ describe("主工作台", () => {
     }
   });
 
+  it("切库命令只给需要区分的条目带 detail：同名仓库带路径，当前仓库带标记", () => {
+    const recentRepos = [
+      { name: "demo", path: "/work/alpha/demo", openedAtMs: 3 },
+      { name: "demo", path: "/work/beta/demo", openedAtMs: 2 },
+      { name: "solo", path: "/work/solo", openedAtMs: 1 },
+    ];
+    const detailOf = (state: CommandState, path: string) =>
+      paletteItems(state).find((item) => item.id === `${REPO_SWITCH_PREFIX}${path}`)?.detail;
+    const plain = commandState({ recentRepos, currentRepoPath: null });
+    expect(detailOf(plain, "/work/alpha/demo")).toBe("/work/alpha/demo");
+    expect(detailOf(plain, "/work/beta/demo")).toBe("/work/beta/demo");
+    expect(detailOf(plain, "/work/solo"), "名称唯一时不加路径").toBeUndefined();
+    const current = commandState({ recentRepos, currentRepoPath: "/work/solo" });
+    expect(detailOf(current, "/work/solo")).toBe("当前仓库 · 重新读取");
+    expect(detailOf(current, "/work/alpha/demo")).toBe("/work/alpha/demo");
+    // 只是补充说明：可用性仍与切换 guard 同源，当前仓库也能重新读取
+    expect(paletteItems(current).find((item) => item.id === `${REPO_SWITCH_PREFIX}/work/solo`)?.enabled).toBe(true);
+  });
+
   it("命令面板按仓库路径片段能筛出对应仓库，没有关键词的命令行为不变", async () => {
     // 注册表一侧：切库命令单独带路径关键词，其它命令没有关键词
     const items = paletteItems(commandState());

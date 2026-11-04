@@ -10,6 +10,9 @@ import type {
   Theme,
 } from "../../src/lib/types";
 import { createTextDiff } from "../../src/lib/diff";
+
+/** 预览 mock 的自我标识：健康端点和回归测试靠它确认浏览器拿到的是 mock，而不是真实 Tauri api。 */
+export const UI_PREVIEW_MOCK = true;
 import { sampleFor } from "./samples";
 
 const wait = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms));

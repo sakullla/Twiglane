@@ -201,8 +201,10 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
   .welcome-section-head { min-height: 24px; }
   .welcome-recent { padding: var(--space-4); }
   .welcome-recent button { padding-block: var(--space-4); }
-  /* 行数变化时的占位高度按紧凑行高算，搜索框不会把列表顶出可视区。 */
-  .welcome-recent.searchable { min-height: 0; }
+  /* 搜索时结果行数会变，占位高度必须按这一档的紧凑行高重算，而不是清零：
+     紧凑行高 40.390625px × 5 + 间隙 2px × 4 + 内边距 4px × 2 ≈ 218px（900×600 实测 217.95px）。
+     占位一旦小于五行，.welcome-inner 的 margin:auto 就会把整块重新居中，搜索框在 900×600 下从 304 跳到 392。 */
+  .welcome-recent.searchable { min-height: 218px; }
 }
 /* 减少动效：卡片不再做 1px 抬升，悬停只留边界与底色（base.css 已关掉过渡）。 */
 @media (prefers-reduced-motion: reduce) {

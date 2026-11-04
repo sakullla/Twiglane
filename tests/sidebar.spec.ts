@@ -1043,17 +1043,33 @@ describe("外壳样式契约", () => {
     expect(layoutCss).not.toMatch(/\.progress-line\s*\{\s*top:\s*\d+px/);
   });
 
-  it("标题栏六个常驻交互项同高，高度只来自 --titlebar-control", () => {
+  /**
+   * 六个常驻项的样式归属：
+   * 1 品牌 .titlebar-brand、2 仓库 .repo-switch、3 分支 .branch-pill、
+   * 4 同步 .branch-pill.sync-pill（复用分支 pill 的规则）、5 主题 .icon-btn、
+   * 6 设置 .icon-btn.titlebar-settings（复用图标按钮的规则）。
+   * 后三项必须在各自追加规则里不写 height，否则六个项又会分叉。
+   */
+  it("标题栏六个常驻项（品牌/仓库/分支/同步/主题/设置）同高，高度只来自 --titlebar-control", () => {
     const tokensCss = readLayer("tokens.css");
-    expect(tokensCss).toMatch(/--titlebar-control:\s*\d+px/);
-    for (const selector of [".titlebar-brand", ".repo-switch", ".branch-pill"]) {
+    const control = Number(tokensCss.match(/--titlebar-control:\s*(\d+)px/)?.[1]);
+    expect(control, "标题栏控件高度令牌必须是一个实际像素值").toBeGreaterThan(0);
+    const owned: [string, string][] = [
+      [".titlebar-brand", "品牌"],
+      [".repo-switch", "仓库"],
+      [".branch-pill", "分支（同步 .sync-pill 复用同一规则）"],
+    ];
+    for (const [selector, label] of owned) {
       const body = ruleBody(layoutCss, selector);
-      expect(body, selector).toMatch(/height:\s*var\(--titlebar-control\)/);
-      expect(body, selector).not.toMatch(/height:\s*\d+px/);
+      expect(body, `${label}取 --titlebar-control`).toMatch(/height:\s*var\(--titlebar-control\)/);
+      expect(body, `${label}不再写死高度`).not.toMatch(/height:\s*\d+px/);
     }
     const iconBtn = layoutCss.match(/\.titlebar \.icon-btn\s*\{([^}]*)\}/)?.[1] ?? "";
-    expect(iconBtn, "标题栏图标按钮同高").toMatch(/height:\s*var\(--titlebar-control\)/);
+    expect(iconBtn, "主题与设置两个图标按钮同高").toMatch(/height:\s*var\(--titlebar-control\)/);
     expect(iconBtn, "标题栏图标按钮不再写死高度").not.toMatch(/height:\s*\d+px/);
+    // 同步与设置只追加不涉及高度的声明（.sync-pill 宽度/内边距、.titlebar-settings 颜色）。
+    expect(ruleBody(layoutCss, ".sync-pill"), "同步项不另写高度").not.toMatch(/height:/);
+    expect(ruleBody(layoutCss, ".titlebar-settings"), "设置项不另写高度").not.toMatch(/height:/);
   });
 
   it("状态栏按钮命中区按 --statusbar-hit 撑到 24px，26px 条高仍放得下", () => {
@@ -1070,25 +1086,52 @@ describe("外壳样式契约", () => {
     expect(ruleBody(layoutCss, ".statusbar button.sb-item:focus-visible"), "焦点环收在条内，不被 26px 裁掉").toMatch(/outline-offset:\s*-2px/);
   });
 
-  it("900×600 有独立的紧凑版式：只收间距与图标块，条目数量不变", () => {
+  it("900×600 有独立的紧凑版式：只收间距与图标块，条目与占位高度都按紧凑行高", () => {
     const compact = layoutCss.match(/@media \(max-height: 660px\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
     expect(compact, "缺少 600 高档的紧凑版式").not.toBe("");
-    for (const selector of [".welcome", ".welcome-inner", ".welcome .action-card", ".welcome-recent", ".welcome-recent button"]) {
-      expect(compact, selector).toContain(selector);
-    }
-    // 搜索时的占位高度按紧凑行高重算，否则搜索框会把列表顶出可视区。
-    expect(compact).toMatch(/\.welcome-recent\.searchable\s*\{[^}]*min-height:\s*0/);
-    // 行式卡片的 padding 要盖过 @media (max-width: 960px)，否则 900 宽的窗口里紧凑档失效。
-    expect(compact).toMatch(/\.welcome \.action-card\s*\{/);
+    const compactRule = (selector: string) => {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return compact.match(new RegExp(escaped + "\\s*\\{([^}]*)\\}"))?.[1] ?? "";
+    };
+    // 取值断言：只检查选择器存在拦不住「紧凑档没生效」或「占位被清零」这类回归。
+    expect(compactRule(".welcome"), "外面距收到 8px").toMatch(/padding-block:\s*var\(--space-8\)/);
+    expect(compactRule(".welcome-inner"), "组间距收到 12px").toMatch(/gap:\s*var\(--space-12\)/);
+    expect(compactRule(".welcome .action-card"), "行式卡片内边距盖过 max-width:960px 那档").toMatch(
+      /padding:\s*var\(--space-8\) var\(--space-12\)/,
+    );
+    expect(compactRule(".welcome-recent"), "列表内边距收到 4px").toMatch(/padding:\s*var\(--space-4\)/);
+    expect(compactRule(".welcome-recent button"), "行内边距收到 4px").toMatch(/padding-block:\s*var\(--space-4\)/);
+    expect(compactRule(".welcome-section-head"), "标题行收到 24px").toMatch(/min-height:\s*24px/);
+
+    // 搜索占位：必须是按紧凑行高算出的实际高度，不能是 0。
+    // 900×600 实测五行 217.95px（行高 40.390625 × 5 + 间隙 2 × 4 + 内边距 4 × 2），占位取 218px；
+    // 清零时 .welcome-inner 的 margin:auto 会重新居中，搜索框从 304 跳到 392（88px）。
+    const reserved = Number(compactRule(".welcome-recent.searchable").match(/min-height:\s*(\d+)px/)?.[1] ?? NaN);
+    expect(reserved, "搜索占位必须是实际像素值，不能继续锁死 min-height: 0").toBe(218);
+    expect(compact).not.toMatch(/\.welcome-recent\.searchable\s*\{[^}]*min-height:\s*0\b/);
+    // 宽档的占位仍要更高，否则两个断点的五行高度会互相顶。
+    expect(layoutCss, "宽档占位保持 257px").toMatch(/\.welcome-recent\.searchable\s*\{[^}]*min-height:\s*257px/);
   });
 
   it("菜单宽度容得下同步项说明，菜单项不因折行高低不齐", () => {
     expect(ruleBody(componentsCss, ".menu")).toMatch(/min-width:\s*268px/);
   });
 
-  it("减少动效时卡片悬停不再位移", () => {
+  /**
+   * 减少动效的可执行事实：普通档确实有位移（否则取消位移是空断言），
+   * 减少动效档把它改成 none，并且过渡被 base.css 关掉。
+   * 静态截图分不出 :hover 状态，所以这里用样式文本断言补上那部分判别力。
+   */
+  it("减少动效时卡片悬停不再位移（普通档确实有位移，不是空断言）", () => {
+    const normal = ruleBody(layoutCss, ".action-card:hover:not(:disabled)");
+    expect(normal, "普通档悬停有 1px 抬升").toMatch(/transform:\s*translateY\(-1px\)/);
     const reduced = layoutCss.match(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(reduced, "缺少减少动效覆盖").not.toBe("");
     expect(reduced).toMatch(/\.action-card:hover:not\(:disabled\)\s*\{[^}]*transform:\s*none/);
+    const baseCss = readLayer("base.css");
+    expect(baseCss, "减少动效下全局过渡关闭").toMatch(
+      /@media \(prefers-reduced-motion: reduce\)\s*\{[^}]*transition:\s*none\s*!important/,
+    );
   });
 
   it("命令面板 560px 宽并复用 modal 背板与卡片外壳", () => {

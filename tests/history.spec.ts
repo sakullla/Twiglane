@@ -453,6 +453,25 @@ describe("历史面板", () => {
     expect(list.scrollTop).toBe(0);
   });
 
+  it("分页按钮把「已在最新」写成可见文案，不只在 title 里", async () => {
+    const rows = [commit(0), commit(1)];
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: rows,
+      scope: "current", branches: ["main"], head: "main",
+    });
+    commitDetail.mockResolvedValue({
+      generation: 3, commit: rows[0], body: "", root: false, merge: false, selectedParent: "parent", files: [],
+    });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    const newest = screen.getByRole<HTMLButtonElement>("button", { name: "已在最新" });
+    // 禁用按钮不进 Tab，所以原因必须是可见文案；title 只作补充。
+    expect(newest.textContent?.trim()).toBe("已在最新");
+    expect(newest.disabled, "已经在最新一条提交").toBe(true);
+    expect(newest.title).toBe("已经在最新一条提交");
+    expect(screen.queryByRole("button", { name: "回到最新" })).toBeNull();
+  });
+
   it("从其他视图切回历史保留滚动位置，读取条件变化才回到顶部", async () => {
     const rows = Array.from({ length: 20 }, (_, index) => commit(index));
     historyPage.mockResolvedValue({
@@ -467,22 +486,38 @@ describe("历史面板", () => {
     await screen.findByRole("option", { name: /commit-0/ });
     const list = screen.getByRole("listbox", { name: "提交历史" });
     Object.defineProperty(list, "clientHeight", { configurable: true, value: 160 });
-    const newest = screen.getByRole<HTMLButtonElement>("button", { name: "回到最新" });
-    expect(newest.disabled, "已经在顶部时没有可做的事").toBe(true);
-    expect(newest.title).toBe("已经在最新一条提交");
+    // 状态写进可见文案：不是可执行的「回到最新」，而是「已在最新」，禁用原因不用悬停就能读到。
+    const atNewest = () => screen.getByRole<HTMLButtonElement>("button", { name: "已在最新" });
+    const backToNewest = () => screen.getByRole<HTMLButtonElement>("button", { name: "回到最新" });
+    expect(screen.queryByRole("button", { name: "回到最新" }), "已经在最新时不摆出可执行的动作").toBeNull();
+    expect(atNewest().disabled, "已经在顶部时没有可做的事").toBe(true);
+    expect(atNewest().textContent?.trim()).toBe("已在最新");
+    expect(atNewest().title).toBe("已经在最新一条提交");
 
     list.scrollTop = 320;
     await fireEvent.scroll(list);
-    expect(newest.disabled, "离开顶部后可以回到最新").toBe(false);
+    expect(backToNewest().disabled, "离开顶部后可以回到最新").toBe(false);
+    expect(backToNewest().textContent?.trim()).toBe("回到最新");
 
     await view.rerender({ ...panelProps(), active: false });
     await view.rerender({ ...panelProps(), active: true });
     await waitFor(() => expect(historyPage).toHaveBeenCalledTimes(2));
-    expect(list.scrollTop, "切走再切回同一个浏览位置不回到顶部").toBe(320);
+    // 等实际状态，而不是等调用次数：读取队列把结果应用回容器需要一次渲染。
+    await waitFor(() => expect(list.scrollTop, "切走再切回同一个浏览位置不回到顶部").toBe(320));
+    expect(backToNewest().disabled, "回到浏览位置后按钮仍是可执行的「回到最新」").toBe(false);
 
+    // 内容 generation 变了（暂存、外部写入）就属于另一批数据，回到顶部是有意的。
+    const bumped = { ...opened, generation: 4, snapshot: { ...opened.snapshot, generation: 4 } };
+    await view.rerender({ ...panelProps(), opened: bumped, active: true });
+    await waitFor(() => expect(historyPage).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(list.scrollTop, "内容 generation 变化后回到顶部").toBe(0));
+
+    list.scrollTop = 160;
+    await fireEvent.scroll(list);
+    await waitFor(() => expect(list.scrollTop).toBe(160));
     await view.rerender({ ...panelProps("notes.txt"), active: true });
     await waitFor(() => expect(fileHistory).toHaveBeenCalledWith("/repo", "notes.txt", 0, 3, 1));
-    expect(list.scrollTop, "换了读取条件回到顶部").toBe(0);
+    await waitFor(() => expect(list.scrollTop, "换了读取条件回到顶部").toBe(0));
   });
 
   it("提交列表用 aria-activedescendant 指出键盘当前项，行带稳定 id", async () => {
@@ -1211,7 +1246,7 @@ describe("历史分栏", () => {
     const detail = document.querySelector<HTMLElement>(".history-layout > .history-detail")!;
     expect(within(pane).getByRole("textbox", { name: "搜索说明或提交哈希" })).toBeTruthy();
     expect(within(pane).getByRole("listbox", { name: "提交历史" })).toBeTruthy();
-    expect(within(pane).getByRole("button", { name: "回到最新" })).toBeTruthy();
+    expect(within(pane).getByRole("button", { name: "已在最新" })).toBeTruthy();
     expect(within(pane).getByText(/已加载最新 1–1 条/)).toBeTruthy();
     expect(pane.contains(document.querySelector(".commit-head")), "详情不进左栏").toBe(false);
     expect(within(detail).getByRole("group", { name: "历史差异模式" })).toBeTruthy();

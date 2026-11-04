@@ -646,6 +646,10 @@ describe("命令面板", () => {
     await fireEvent.input(input, { target: { value: "没有这个" } });
     expect(screen.getByText("没有匹配的命令")).toBeTruthy();
     expect(screen.getByText("换个关键词试试，或按 Esc 关闭")).toBeTruthy();
+    // 结论和下一步在同一个 status 里：读屏一次播报两句，不会只念到结论。
+    const status = screen.getByRole("status");
+    expect(status.textContent).toContain("没有匹配的命令");
+    expect(status.textContent).toContain("换个关键词试试，或按 Esc 关闭");
     expect(input.getAttribute("aria-activedescendant"), "没有条目时不再指向不存在的 id").toBeNull();
   });
 

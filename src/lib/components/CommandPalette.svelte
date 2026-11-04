@@ -189,8 +189,11 @@
       </div>
       <div class="modal-body palette-body" id="palette-list" role="listbox" aria-label="命令">
         {#if filtered.length === 0}
-          <p class="palette-empty" role="status">没有匹配的命令</p>
-          <p class="palette-empty-hint">换个关键词试试，或按 Esc 关闭</p>
+          <!-- 结论和下一步放进同一个 status：读屏一次把两句都播报，不会只念前半句。 -->
+          <div role="status">
+            <p class="palette-empty">没有匹配的命令</p>
+            <p class="palette-empty-hint">换个关键词试试，或按 Esc 关闭</p>
+          </div>
         {:else}
           {#each groups as group (group.name)}
             <div class="palette-group" role="group" aria-label={group.name}>

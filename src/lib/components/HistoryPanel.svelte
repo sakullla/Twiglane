@@ -341,6 +341,14 @@
   );
   /** 已经在最新提交：此时「回到最新」没有可做的事，禁用并说明原因（R6）。 */
   let atNewest = $derived(commits.length > 0 && scrollTop <= 0);
+  /**
+   * 分页按钮的文案随状态走：已在最新时按钮直接写「已在最新」，禁用原因不必悬停就能读到（R4）。
+   * 两种文案都是四个字，位置、宽度和小窗口下的折行不变。
+   */
+  let newestLabel = $derived(atNewest ? "已在最新" : "回到最新");
+  let newestHint = $derived(
+    commits.length === 0 ? "还没有提交" : atNewest ? "已经在最新一条提交" : "滚回最新一条提交",
+  );
   let activeFile = $derived(detail ? preferredCommitFile(detail.files, manualPath ?? filePath) : null);
   let fileFilter = $state("");
   // 分组只改呈现，不写入设置，默认仍是列表。
@@ -1339,8 +1347,8 @@
           class="btn btn-ghost btn-sm"
           onclick={backToNewest}
           disabled={commits.length === 0 || atNewest}
-          title={commits.length === 0 ? "还没有提交" : atNewest ? "已经在最新一条提交" : "滚回最新一条提交"}
-        >回到最新</button>
+          title={newestHint}
+        >{newestLabel}</button>
       </div>
     </aside>
     {@render paneResizer?.()}

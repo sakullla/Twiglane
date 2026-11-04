@@ -25,8 +25,8 @@ const KEYBOARD = "const list = one(\".history-list\"); const selected = one('.hi
 const PAGE_DOWN = "const list = document.querySelector(\".history-list\"); const before = list.getAttribute(\"aria-activedescendant\"); list.dispatchEvent(new KeyboardEvent(\"keydown\", { key: \"PageDown\", bubbles: true })); return { before: before };";
 const PAGE_UP = "const list = document.querySelector(\".history-list\"); list.dispatchEvent(new KeyboardEvent(\"keydown\", { key: \"PageUp\", bubbles: true })); return true;";
 const LIST_STATE = "const list = document.querySelector(\".history-list\"); const selected = document.querySelector('.history-row[aria-selected=\"true\"]'); return { active: list.getAttribute(\"aria-activedescendant\"), selected: selected ? selected.id : null, scrollTop: Math.round(list.scrollTop) };";
-const ROUND = "const list = one(\".history-list\"); const selected = one('.history-row[aria-selected=\"true\"]'); return { scrollTop: Math.round(list.scrollTop), selected: selected ? selected.id : null, rows: all(\".history-row\").length, newestDisabled: one(\".history-pager button\").disabled };";
-const MENU = "const menu = one(\".context-menu\"); return { open: Boolean(menu), box: box(menu), role: menu ? menu.getAttribute(\"role\") : null, inViewport: menu ? (menu.getBoundingClientRect().bottom <= innerHeight + 1 && menu.getBoundingClientRect().right <= innerWidth + 1) : null, focusInside: Boolean(menu && menu.contains(document.activeElement)), items: menu ? all(\".context-menu .context-item\").map((item) => ({ text: text(item), disabled: item.getAttribute(\"aria-disabled\"), title: item.title || null })) : [] };";
+const ROUND = "const list = one(\".history-list\"); const selected = one('.history-row[aria-selected=\"true\"]'); return { scrollTop: Math.round(list.scrollTop), selected: selected ? selected.id : null, rows: all(\".history-row\").length, newestDisabled: one(\".history-pager button\").disabled, newestLabel: text(one(\".history-pager button\")) };";
+const MENU = "const menu = one(\".context-menu\"); const rect = menu ? menu.getBoundingClientRect() : null; return { open: Boolean(menu), box: box(menu), role: menu ? menu.getAttribute(\"role\") : null, inViewport: rect ? (rect.top >= -1 && rect.left >= -1 && rect.bottom <= innerHeight + 1 && rect.right <= innerWidth + 1) : null, overflow: rect ? { top: round(Math.min(0, rect.top)), left: round(Math.min(0, rect.left)), bottom: round(Math.max(0, rect.bottom - innerHeight)), right: round(Math.max(0, rect.right - innerWidth)) } : null, focusInside: Boolean(menu && menu.contains(document.activeElement)), items: menu ? all(\".context-menu .context-item\").map((item) => ({ text: text(item), disabled: item.getAttribute(\"aria-disabled\"), title: item.title || null })) : [] };";
 const BRANCH = "const popover = one(\".popover\"); const options = all(\".branch-option\"); const input = one(\".popover-search input\"); return { open: Boolean(popover), box: box(popover), headings: all(\".branch-popover-group\").map(text), groups: all(\".branch-group\").map((group) => ({ text: text(group), expanded: group.getAttribute(\"aria-expanded\") })), rendered: options.length, rowHeight: options[0] ? round(options[0].getBoundingClientRect().height) : null, selected: text(one('.branch-option[aria-selected=\"true\"]')), notes: all(\".branch-option-note\").map(text), disabled: all('.branch-option[aria-disabled=\"true\"]').length, activedescendant: input ? input.getAttribute(\"aria-activedescendant\") : null, empty: text(one(\".branch-popover-empty\")), foot: all(\".popover-foot .menu-item\").map((item) => ({ text: text(item), disabled: item.disabled, title: item.title || null })), horizontalOverflow: popover ? popover.scrollWidth > popover.clientWidth + 1 : null };";
 const PALETTE = "const input = one(\"#palette-input\"); const active = input.getAttribute(\"aria-activedescendant\"); const body = one(\".palette-body\"); body.scrollTop = 300; const titles = all(\".palette-group-title\"); return { box: box(one(\".palette-card\")), groups: titles.map(text), stickyTitles: titles.filter((title) => getComputedStyle(title).position === \"sticky\").length, items: all(\".palette-item\").length, activedescendant: active, pointsAtItem: Boolean(active && document.getElementById(active)), activeText: text(document.getElementById(active || \"\")), kbdRightEdges: [...new Set(all(\".palette-item kbd\").map((kbd) => Math.round(kbd.getBoundingClientRect().right)))], reasons: all(\".palette-reason\").map(text), bodyScrolls: body.scrollHeight > body.clientHeight + 1, pinnedTitleTop: titles.map((title) => Math.round(title.getBoundingClientRect().top)).filter((top) => Math.abs(top - Math.round(body.getBoundingClientRect().top)) <= 1).length, bodyTop: Math.round(body.getBoundingClientRect().top) };";
 const PALETTE_EMPTY = "const card = one(\".palette-card\"); return { empty: text(one(\".palette-empty\")), hint: text(one(\".palette-empty-hint\")), activedescendant: one(\"#palette-input\").getAttribute(\"aria-activedescendant\"), cardHeight: card ? box(card).h : null };";
@@ -39,7 +39,8 @@ const click = (selector) => "(() => { const element = document.querySelector(" +
 const pressEscapeOn = (selector) => "(() => { const element = document.querySelector(" + JSON.stringify(selector) + "); if (element) element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return Boolean(element); })()";
 const focusList = "(() => { const list = document.querySelector('.history-list'); list.focus(); return document.activeElement === list; })()";
 const keyOnList = (key) => "(() => { const list = document.querySelector('.history-list'); list.dispatchEvent(new KeyboardEvent('keydown', { key: '" + key + "', bubbles: true })); return true; })()";
-const contextOnFirstRow = "(() => { const row = document.querySelector('.history-row'); if (!row) return false; const rect = row.getBoundingClientRect(); row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: rect.left + 40, clientY: rect.top + 10 })); return true; })()";
+const contextOnVisibleRow = "(() => { const rows = [...document.querySelectorAll('.history-row')]; const row = rows.find((candidate) => { const rect = candidate.getBoundingClientRect(); return rect.top >= 0 && rect.bottom <= innerHeight; }) || rows[0]; if (!row) return false; const rect = row.getBoundingClientRect(); row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: rect.left + 40, clientY: Math.min(rect.top + 10, innerHeight - 12) })); return true; })()";
+const contextAtCorner = "(() => { const rows = [...document.querySelectorAll('.history-row')]; const row = rows.find((candidate) => { const rect = candidate.getBoundingClientRect(); return rect.top >= 0 && rect.bottom <= innerHeight; }) || rows[0]; if (!row) return false; row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: innerWidth - 4, clientY: innerHeight - 4 })); return true; })()";
 const scrollListTo = (top) => "(() => { const list = document.querySelector('.history-list'); list.scrollTop = " + top + "; list.dispatchEvent(new Event('scroll')); return list.scrollTop; })()";
 
 async function screenshot(cdp, sessionId, name) {
@@ -76,6 +77,7 @@ async function main() {
         await evaluate(cdp, sessionId, click('[data-view="history"]'));
         await pause(1300);
         record.history = await evaluate(cdp, sessionId, probe(HISTORY));
+        record.history.newestLabel = await evaluate(cdp, sessionId, "document.querySelector('.history-pager button').textContent.trim()");
         record.shots.push(await screenshot(cdp, sessionId, name("history")));
 
         // 2. 键盘：焦点所在、aria-activedescendant、翻页
@@ -104,7 +106,7 @@ async function main() {
         record.roundTrip = { before, after, preserved: before.scrollTop === after.scrollTop && before.selected === after.selected };
 
         // 4. 提交右键菜单：定位、焦点与关闭后焦点
-        await evaluate(cdp, sessionId, contextOnFirstRow);
+        await evaluate(cdp, sessionId, contextOnVisibleRow);
         await pause(400);
         record.menu = await evaluate(cdp, sessionId, probe(MENU));
         record.shots.push(await screenshot(cdp, sessionId, name("menu")));
@@ -112,6 +114,14 @@ async function main() {
         await pause(300);
         record.menu.closedAfterEscape = await evaluate(cdp, sessionId, "!document.querySelector('.context-menu')");
         record.menu.focusAfterEscape = await evaluate(cdp, sessionId, "document.activeElement ? (document.activeElement.className || document.activeElement.tagName) : null");
+
+        // 4b. 贴右下角打开：四条边都应钳制在视口内，菜单不能越界
+        await evaluate(cdp, sessionId, contextAtCorner);
+        await pause(400);
+        record.menu.corner = await evaluate(cdp, sessionId, probe(MENU));
+        record.shots.push(await screenshot(cdp, sessionId, name("menu-corner")));
+        await evaluate(cdp, sessionId, pressEscapeOn(".context-menu"));
+        await pause(300);
 
         // 5. 分支弹层：分组、当前项、禁用原因、键盘当前项
         await evaluate(cdp, sessionId, click(".branch-pill"));

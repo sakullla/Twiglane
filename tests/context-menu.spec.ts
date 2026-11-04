@@ -76,6 +76,7 @@ vi.mock("../src/lib/api", () => ({
 }));
 
 import App from "../src/App.svelte";
+import ContextMenu from "../src/lib/components/ContextMenu.svelte";
 
 const writeText = vi.fn(async () => {});
 
@@ -561,5 +562,46 @@ describe("差异区", () => {
     mocks.stageHunks.mockResolvedValue(snapshot);
     await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "暂存此块" }));
     await waitFor(() => expect(mocks.stageHunks).toHaveBeenCalledTimes(1));
+  });
+});
+describe("右键菜单定位", () => {
+  function stubMenuBox(width: number, height: number) {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, left: 0, top: 0, right: width, bottom: height, width, height,
+      toJSON: () => ({}),
+    } as DOMRect);
+  }
+  const menuAt = (x: number, y: number) => ({
+    x,
+    y,
+    label: "测试菜单",
+    entries: [{ id: "only", label: "唯一操作", run: () => {} }],
+  });
+  const placed = () => {
+    const menu = document.querySelector<HTMLElement>(".context-menu");
+    return { left: Number.parseFloat(menu?.style.left ?? ""), top: Number.parseFloat(menu?.style.top ?? "") };
+  };
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("右下越界时向内收到边距内", async () => {
+    stubMenuBox(240, 180);
+    render(ContextMenu, { props: { request: menuAt(window.innerWidth - 10, window.innerHeight - 10), onClose: () => {} } });
+    await waitFor(() => expect(placed().left).toBe(window.innerWidth - 240 - 8));
+    expect(placed().top).toBe(window.innerHeight - 180 - 8);
+  });
+
+  it("顶部和左侧越界时也不出视口（键盘唤起、行在视口上方时会出现负坐标）", async () => {
+    stubMenuBox(240, 180);
+    render(ContextMenu, { props: { request: menuAt(-20, -91), onClose: () => {} } });
+    await waitFor(() => expect(placed().left).toBe(8));
+    expect(placed().top).toBe(8);
+  });
+
+  it("放得下时仍在唤起点，不被钳制移位", async () => {
+    stubMenuBox(240, 180);
+    render(ContextMenu, { props: { request: menuAt(120, 140), onClose: () => {} } });
+    await waitFor(() => expect(placed().left).toBe(120));
+    expect(placed().top).toBe(140);
   });
 });

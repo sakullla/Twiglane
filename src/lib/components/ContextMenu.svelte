@@ -43,7 +43,7 @@
   import Icon from "./Icon.svelte";
 
   /**
-   * 右键菜单：跟随指针定位，靠近窗口边缘时向内翻转；方向键 / Home / End 移动，回车执行，
+   * 右键菜单：跟随指针定位，四条边靠近窗口边缘时都向内收，菜单始终完整留在视口内；方向键 / Home / End 移动，回车执行，
    * Esc、点外面、滚动或窗口失焦时关闭，关闭后把焦点还给唤起它的元素。
    * 不可用的条目不隐藏，而是灰显并在提示里说明原因——动作在哪里、为什么点不动都看得见。
    */
@@ -127,11 +127,12 @@
   onMount(() => {
     const rect = menu?.getBoundingClientRect();
     if (rect && typeof window !== "undefined") {
+      // 四条边都要钳制：键盘唤起或指针落在贴边/贴底的行上时，坐标可能越界甚至为负。
       const margin = 8;
-      let left = request.x;
-      let top = request.y;
-      if (left + rect.width > window.innerWidth - margin) left = Math.max(margin, request.x - rect.width);
-      if (top + rect.height > window.innerHeight - margin) top = Math.max(margin, window.innerHeight - rect.height - margin);
+      const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
+      const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
+      const left = Math.min(Math.max(request.x, margin), maxLeft);
+      const top = Math.min(Math.max(request.y, margin), maxTop);
       position = { left, top };
     }
     const enabled = enabledIndexes();

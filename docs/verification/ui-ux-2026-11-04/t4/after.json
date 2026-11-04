@@ -1,6 +1,6 @@
 {
   "base": "http://127.0.0.1:1430",
-  "generatedAt": "2026-11-04T17:51:41.156Z",
+  "generatedAt": "2026-11-04T18:28:59.409Z",
   "boundary": "浏览器 + mock 数据；不代表真实 Git 行为或桌面端观感",
   "targets": [
     {
@@ -10,6 +10,7 @@
         "after-light-1280x840-history.png",
         "after-light-1280x840-history-keyboard.png",
         "after-light-1280x840-menu.png",
+        "after-light-1280x840-menu-corner.png",
         "after-light-1280x840-branch.png",
         "after-light-1280x840-palette.png",
         "after-light-1280x840-palette-empty.png",
@@ -68,7 +69,7 @@
           "resolves": true
         },
         "pager": {
-          "text": "已加载最新 1–60 条 回到最新",
+          "text": "已加载最新 1–60 条 已在最新",
           "newestDisabled": true,
           "newestTitle": "已经在最新一条提交"
         },
@@ -86,13 +87,13 @@
             "h": 20.3
           },
           "titleText": "重做界面：现代化布局与深色模式",
-          "byline": "林 林知远 dev@example.com 5 分钟前 · 2026/11/5 01:46:41 父提交 0000001 只读 feature/modern-ui"
+          "byline": "林 林知远 dev@example.com 5 分钟前 · 2026/11/5 02:24:00 父提交 0000001 只读 feature/modern-ui"
         },
         "readOnly": {
           "text": "只读",
           "title": "历史浏览是只读的：不切换分支，也不改动暂存区或工作区",
           "box": {
-            "x": 774.7,
+            "x": 778.2,
             "y": 97.6,
             "w": 54,
             "h": 22
@@ -118,7 +119,8 @@
           "并排视图"
         ],
         "hashCopy": true,
-        "liveRegion": true
+        "liveRegion": true,
+        "newestLabel": "已在最新"
       },
       "keyboard": {
         "focus": "history-list",
@@ -146,13 +148,15 @@
           "scrollTop": 300,
           "selected": "history-commit-0001a9c3e1f2b4d6a9c3e1f2b4d6a9c3e1f2b4d6",
           "rows": 28,
-          "newestDisabled": false
+          "newestDisabled": false,
+          "newestLabel": "回到最新"
         },
         "after": {
           "scrollTop": 300,
           "selected": "history-commit-0001a9c3e1f2b4d6a9c3e1f2b4d6a9c3e1f2b4d6",
           "rows": 28,
-          "newestDisabled": false
+          "newestDisabled": false,
+          "newestLabel": "回到最新"
         },
         "preserved": true
       },
@@ -160,12 +164,18 @@
         "open": true,
         "box": {
           "x": 48,
-          "y": -91,
+          "y": 13,
           "w": 232,
           "h": 130
         },
         "role": "menu",
         "inViewport": true,
+        "overflow": {
+          "top": 0,
+          "left": 0,
+          "bottom": 0,
+          "right": 0
+        },
         "focusInside": true,
         "items": [
           {
@@ -190,7 +200,47 @@
           }
         ],
         "closedAfterEscape": true,
-        "focusAfterEscape": "BODY"
+        "focusAfterEscape": "BODY",
+        "corner": {
+          "open": true,
+          "box": {
+            "x": 1043.5,
+            "y": 703.9,
+            "w": 232,
+            "h": 130
+          },
+          "role": "menu",
+          "inViewport": true,
+          "overflow": {
+            "top": 0,
+            "left": 0,
+            "bottom": 0,
+            "right": 0
+          },
+          "focusInside": true,
+          "items": [
+            {
+              "text": "拣选到当前分支",
+              "disabled": null,
+              "title": null
+            },
+            {
+              "text": "检出此提交",
+              "disabled": null,
+              "title": null
+            },
+            {
+              "text": "从此提交新建分支",
+              "disabled": null,
+              "title": null
+            },
+            {
+              "text": "复制提交哈希",
+              "disabled": null,
+              "title": null
+            }
+          ]
+        }
       },
       "branch": {
         "open": true,
@@ -223,7 +273,7 @@
         "selected": "feature/modern-ui 当前",
         "notes": [],
         "disabled": 0,
-        "activedescendant": "popover-e8h68y8-0",
+        "activedescendant": "popover-n2u6zx5-0",
         "empty": null,
         "foot": [
           {
@@ -282,7 +332,7 @@
           "empty": "没有匹配的命令",
           "hint": "换个关键词试试，或按 Esc 关闭",
           "activedescendant": null,
-          "cardHeight": 173.9
+          "cardHeight": 167.3
         }
       },
       "repo": {
@@ -307,7 +357,7 @@
           47,
           47
         ],
-        "activedescendant": "popover-xug74xh-1",
+        "activedescendant": "popover-atcvgoi-1",
         "pointsAtRow": true,
         "current": "T twiglane C:/Users/dev/project/twiglane",
         "reasons": [],
@@ -318,7 +368,7 @@
         ],
         "horizontalOverflow": false,
         "keyboard": {
-          "activedescendant": "popover-xug74xh-6",
+          "activedescendant": "popover-atcvgoi-6",
           "resolved": true,
           "text": "6 repo-006 /work/group-6/repo-006"
         }
@@ -333,6 +383,7 @@
         "after-light-900x600-history.png",
         "after-light-900x600-history-keyboard.png",
         "after-light-900x600-menu.png",
+        "after-light-900x600-menu-corner.png",
         "after-light-900x600-branch.png",
         "after-light-900x600-palette.png",
         "after-light-900x600-palette-empty.png",
@@ -391,7 +442,7 @@
           "resolves": true
         },
         "pager": {
-          "text": "已加载最新 1–60 条 回到最新",
+          "text": "已加载最新 1–60 条 已在最新",
           "newestDisabled": true,
           "newestTitle": "已经在最新一条提交"
         },
@@ -409,7 +460,7 @@
             "h": 20.3
           },
           "titleText": "重做界面：现代化布局与深色模式",
-          "byline": "林 林知远 dev@example.com 5 分钟前 · 2026/11/5 01:46:57 父提交 0000001 只读 feature/modern-ui"
+          "byline": "林 林知远 dev@example.com 5 分钟前 · 2026/11/5 02:24:16 父提交 0000001 只读 feature/modern-ui"
         },
         "readOnly": {
           "text": "只读",
@@ -441,7 +492,8 @@
           "并排视图"
         ],
         "hashCopy": true,
-        "liveRegion": true
+        "liveRegion": true,
+        "newestLabel": "已在最新"
       },
       "keyboard": {
         "focus": "history-list",
@@ -469,13 +521,15 @@
           "scrollTop": 300,
           "selected": "history-commit-0001a9c3e1f2b4d6a9c3e1f2b4d6a9c3e1f2b4d6",
           "rows": 23,
-          "newestDisabled": false
+          "newestDisabled": false,
+          "newestLabel": "回到最新"
         },
         "after": {
           "scrollTop": 300,
           "selected": "history-commit-0001a9c3e1f2b4d6a9c3e1f2b4d6a9c3e1f2b4d6",
           "rows": 23,
-          "newestDisabled": false
+          "newestDisabled": false,
+          "newestLabel": "回到最新"
         },
         "preserved": true
       },
@@ -483,12 +537,18 @@
         "open": true,
         "box": {
           "x": 48,
-          "y": -91,
+          "y": 13,
           "w": 232,
           "h": 130
         },
         "role": "menu",
         "inViewport": true,
+        "overflow": {
+          "top": 0,
+          "left": 0,
+          "bottom": 0,
+          "right": 0
+        },
         "focusInside": true,
         "items": [
           {
@@ -513,7 +573,47 @@
           }
         ],
         "closedAfterEscape": true,
-        "focusAfterEscape": "BODY"
+        "focusAfterEscape": "BODY",
+        "corner": {
+          "open": true,
+          "box": {
+            "x": 663.5,
+            "y": 463.9,
+            "w": 232,
+            "h": 130
+          },
+          "role": "menu",
+          "inViewport": true,
+          "overflow": {
+            "top": 0,
+            "left": 0,
+            "bottom": 0,
+            "right": 0
+          },
+          "focusInside": true,
+          "items": [
+            {
+              "text": "拣选到当前分支",
+              "disabled": null,
+              "title": null
+            },
+            {
+              "text": "检出此提交",
+              "disabled": null,
+              "title": null
+            },
+            {
+              "text": "从此提交新建分支",
+              "disabled": null,
+              "title": null
+            },
+            {
+              "text": "复制提交哈希",
+              "disabled": null,
+              "title": null
+            }
+          ]
+        }
       },
       "branch": {
         "open": true,
@@ -546,7 +646,7 @@
         "selected": "feature/modern-ui 当前",
         "notes": [],
         "disabled": 0,
-        "activedescendant": "popover-mr2f3jq-0",
+        "activedescendant": "popover-3w02p7p-0",
         "empty": null,
         "foot": [
           {
@@ -605,7 +705,7 @@
           "empty": "没有匹配的命令",
           "hint": "换个关键词试试，或按 Esc 关闭",
           "activedescendant": null,
-          "cardHeight": 173.9
+          "cardHeight": 167.3
         }
       },
       "repo": {
@@ -630,7 +730,7 @@
           47,
           47
         ],
-        "activedescendant": "popover-48chk5p-1",
+        "activedescendant": "popover-p93c0nv-1",
         "pointsAtRow": true,
         "current": "T twiglane C:/Users/dev/project/twiglane",
         "reasons": [],
@@ -641,7 +741,7 @@
         ],
         "horizontalOverflow": false,
         "keyboard": {
-          "activedescendant": "popover-48chk5p-6",
+          "activedescendant": "popover-p93c0nv-6",
           "resolved": true,
           "text": "6 repo-006 /work/group-6/repo-006"
         }
@@ -656,6 +756,7 @@
         "after-dark-1280x840-history.png",
         "after-dark-1280x840-history-keyboard.png",
         "after-dark-1280x840-menu.png",
+        "after-dark-1280x840-menu-corner.png",
         "after-dark-1280x840-branch.png",
         "after-dark-1280x840-palette.png",
         "after-dark-1280x840-palette-empty.png",
@@ -714,7 +815,7 @@
           "resolves": true
         },
         "pager": {
-          "text": "已加载最新 1–60 条 回到最新",
+          "text": "已加载最新 1–60 条 已在最新",
           "newestDisabled": true,
           "newestTitle": "已经在最新一条提交"
         },
@@ -732,13 +833,13 @@
             "h": 20.3
           },
           "titleText": "重做界面：现代化布局与深色模式",
-          "byline": "林 林知远 dev@example.com 5 分钟前 · 2026/11/5 01:47:13 父提交 0000001 只读 feature/modern-ui"
+          "byline": "林 林知远 dev@example.com 5 分钟前 · 2026/11/5 02:24:33 父提交 0000001 只读 feature/modern-ui"
         },
         "readOnly": {
           "text": "只读",
           "title": "历史浏览是只读的：不切换分支，也不改动暂存区或工作区",
           "box": {
-            "x": 774.7,
+            "x": 778.2,
             "y": 97.6,
             "w": 54,
             "h": 22
@@ -764,7 +865,8 @@
           "并排视图"
         ],
         "hashCopy": true,
-        "liveRegion": true
+        "liveRegion": true,
+        "newestLabel": "已在最新"
       },
       "keyboard": {
         "focus": "history-list",
@@ -792,13 +894,15 @@
           "scrollTop": 300,
           "selected": "history-commit-0001a9c3e1f2b4d6a9c3e1f2b4d6a9c3e1f2b4d6",
           "rows": 28,
-          "newestDisabled": false
+          "newestDisabled": false,
+          "newestLabel": "回到最新"
         },
         "after": {
           "scrollTop": 300,
           "selected": "history-commit-0001a9c3e1f2b4d6a9c3e1f2b4d6a9c3e1f2b4d6",
           "rows": 28,
-          "newestDisabled": false
+          "newestDisabled": false,
+          "newestLabel": "回到最新"
         },
         "preserved": true
       },
@@ -806,12 +910,18 @@
         "open": true,
         "box": {
           "x": 48,
-          "y": -91,
+          "y": 13,
           "w": 232,
           "h": 130
         },
         "role": "menu",
         "inViewport": true,
+        "overflow": {
+          "top": 0,
+          "left": 0,
+          "bottom": 0,
+          "right": 0
+        },
         "focusInside": true,
         "items": [
           {
@@ -836,7 +946,47 @@
           }
         ],
         "closedAfterEscape": true,
-        "focusAfterEscape": "BODY"
+        "focusAfterEscape": "BODY",
+        "corner": {
+          "open": true,
+          "box": {
+            "x": 1043.5,
+            "y": 703.9,
+            "w": 232,
+            "h": 130
+          },
+          "role": "menu",
+          "inViewport": true,
+          "overflow": {
+            "top": 0,
+            "left": 0,
+            "bottom": 0,
+            "right": 0
+          },
+          "focusInside": true,
+          "items": [
+            {
+              "text": "拣选到当前分支",
+              "disabled": null,
+              "title": null
+            },
+            {
+              "text": "检出此提交",
+              "disabled": null,
+              "title": null
+            },
+            {
+              "text": "从此提交新建分支",
+              "disabled": null,
+              "title": null
+            },
+            {
+              "text": "复制提交哈希",
+              "disabled": null,
+              "title": null
+            }
+          ]
+        }
       },
       "branch": {
         "open": true,
@@ -869,7 +1019,7 @@
         "selected": "feature/modern-ui 当前",
         "notes": [],
         "disabled": 0,
-        "activedescendant": "popover-wv9zzqj-0",
+        "activedescendant": "popover-mhh0c34-0",
         "empty": null,
         "foot": [
           {
@@ -928,7 +1078,7 @@
           "empty": "没有匹配的命令",
           "hint": "换个关键词试试，或按 Esc 关闭",
           "activedescendant": null,
-          "cardHeight": 173.9
+          "cardHeight": 167.3
         }
       },
       "repo": {
@@ -953,7 +1103,7 @@
           47,
           47
         ],
-        "activedescendant": "popover-s1nbinc-1",
+        "activedescendant": "popover-j9192aa-1",
         "pointsAtRow": true,
         "current": "T twiglane C:/Users/dev/project/twiglane",
         "reasons": [],
@@ -964,7 +1114,7 @@
         ],
         "horizontalOverflow": false,
         "keyboard": {
-          "activedescendant": "popover-s1nbinc-6",
+          "activedescendant": "popover-j9192aa-6",
           "resolved": true,
           "text": "6 repo-006 /work/group-6/repo-006"
         }
@@ -979,6 +1129,7 @@
         "after-dark-900x600-history.png",
         "after-dark-900x600-history-keyboard.png",
         "after-dark-900x600-menu.png",
+        "after-dark-900x600-menu-corner.png",
         "after-dark-900x600-branch.png",
         "after-dark-900x600-palette.png",
         "after-dark-900x600-palette-empty.png",
@@ -1037,7 +1188,7 @@
           "resolves": true
         },
         "pager": {
-          "text": "已加载最新 1–60 条 回到最新",
+          "text": "已加载最新 1–60 条 已在最新",
           "newestDisabled": true,
           "newestTitle": "已经在最新一条提交"
         },
@@ -1055,7 +1206,7 @@
             "h": 20.3
           },
           "titleText": "重做界面：现代化布局与深色模式",
-          "byline": "林 林知远 dev@example.com 5 分钟前 · 2026/11/5 01:47:30 父提交 0000001 只读 feature/modern-ui"
+          "byline": "林 林知远 dev@example.com 5 分钟前 · 2026/11/5 02:24:51 父提交 0000001 只读 feature/modern-ui"
         },
         "readOnly": {
           "text": "只读",
@@ -1087,7 +1238,8 @@
           "并排视图"
         ],
         "hashCopy": true,
-        "liveRegion": true
+        "liveRegion": true,
+        "newestLabel": "已在最新"
       },
       "keyboard": {
         "focus": "history-list",
@@ -1115,13 +1267,15 @@
           "scrollTop": 300,
           "selected": "history-commit-0001a9c3e1f2b4d6a9c3e1f2b4d6a9c3e1f2b4d6",
           "rows": 23,
-          "newestDisabled": false
+          "newestDisabled": false,
+          "newestLabel": "回到最新"
         },
         "after": {
           "scrollTop": 300,
           "selected": "history-commit-0001a9c3e1f2b4d6a9c3e1f2b4d6a9c3e1f2b4d6",
           "rows": 23,
-          "newestDisabled": false
+          "newestDisabled": false,
+          "newestLabel": "回到最新"
         },
         "preserved": true
       },
@@ -1129,12 +1283,18 @@
         "open": true,
         "box": {
           "x": 48,
-          "y": -91,
+          "y": 13,
           "w": 232,
           "h": 130
         },
         "role": "menu",
         "inViewport": true,
+        "overflow": {
+          "top": 0,
+          "left": 0,
+          "bottom": 0,
+          "right": 0
+        },
         "focusInside": true,
         "items": [
           {
@@ -1159,7 +1319,47 @@
           }
         ],
         "closedAfterEscape": true,
-        "focusAfterEscape": "BODY"
+        "focusAfterEscape": "BODY",
+        "corner": {
+          "open": true,
+          "box": {
+            "x": 663.5,
+            "y": 463.9,
+            "w": 232,
+            "h": 130
+          },
+          "role": "menu",
+          "inViewport": true,
+          "overflow": {
+            "top": 0,
+            "left": 0,
+            "bottom": 0,
+            "right": 0
+          },
+          "focusInside": true,
+          "items": [
+            {
+              "text": "拣选到当前分支",
+              "disabled": null,
+              "title": null
+            },
+            {
+              "text": "检出此提交",
+              "disabled": null,
+              "title": null
+            },
+            {
+              "text": "从此提交新建分支",
+              "disabled": null,
+              "title": null
+            },
+            {
+              "text": "复制提交哈希",
+              "disabled": null,
+              "title": null
+            }
+          ]
+        }
       },
       "branch": {
         "open": true,
@@ -1192,7 +1392,7 @@
         "selected": "feature/modern-ui 当前",
         "notes": [],
         "disabled": 0,
-        "activedescendant": "popover-50ikzpx-0",
+        "activedescendant": "popover-scewrev-0",
         "empty": null,
         "foot": [
           {
@@ -1251,7 +1451,7 @@
           "empty": "没有匹配的命令",
           "hint": "换个关键词试试，或按 Esc 关闭",
           "activedescendant": null,
-          "cardHeight": 173.9
+          "cardHeight": 167.3
         }
       },
       "repo": {
@@ -1276,7 +1476,7 @@
           47,
           47
         ],
-        "activedescendant": "popover-od1jwav-1",
+        "activedescendant": "popover-7l6sybr-1",
         "pointsAtRow": true,
         "current": "T twiglane C:/Users/dev/project/twiglane",
         "reasons": [],
@@ -1287,7 +1487,7 @@
         ],
         "horizontalOverflow": false,
         "keyboard": {
-          "activedescendant": "popover-od1jwav-6",
+          "activedescendant": "popover-7l6sybr-6",
           "resolved": true,
           "text": "6 repo-006 /work/group-6/repo-006"
         }
@@ -1298,7 +1498,7 @@
   ],
   "summary": {
     "targets": 4,
-    "shots": 28,
+    "shots": 32,
     "consoleErrors": 0,
     "exceptions": 0,
     "roundTripPreserved": [

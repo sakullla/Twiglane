@@ -224,6 +224,9 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
 .statusbar .sb-merge { background: var(--warning-soft); color: var(--warning-text); font-weight: var(--weight-medium); }
 /* 合并提示是语义状态，悬停不能退化成一格中性灰（会读成「普通按钮」）。 */
 .statusbar button.sb-merge:hover:not(:disabled) { background: color-mix(in srgb, var(--warning) 17%, transparent); color: var(--warning-text); }
+/* 新版本入口同为语义状态，循 sb-merge 惯例但走 accent 一档：可期待的好消息，不与合并警示混淆。 */
+.statusbar .sb-update { background: var(--accent-soft); color: var(--accent-text); font-weight: var(--weight-medium); }
+.statusbar button.sb-update:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 17%, transparent); color: var(--accent-text); }
 .statusbar .spinner { width: 11px; height: 11px; border-width: 1.5px; }
 /* 按钮命中区按 --statusbar-hit 撑到 24×24（R14 交互目标下限），条高 26px 仍放得下；
    图标按钮靠 min-width 保证正方，文字按钮保住左右内边距。 */

@@ -20,7 +20,7 @@
   import { clampWidth, FALLBACK_POLL_MS, fitPaneWidth, shouldPoll } from "./lib/layout";
   import { branchLabel, commitScope, createSelectionResolver, dependencyNote, filterRows, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
   import { startDesktopMeasure } from "./lib/measure";
-  import { watchUpdateAvailable } from "./lib/update.svelte";
+  import { updateState, watchUpdateAvailable } from "./lib/update.svelte";
   import { isTextEntry, shortcutCommand } from "./lib/shortcuts";
   import type {
     AppFailure,
@@ -2302,7 +2302,10 @@
         void refresh();
       });
       // 启动自动检查发现新版本时后端 emit twiglane:update-available；非原生环境内部不注册。
-      stopUpdate = await watchUpdateAvailable();
+      // 一次性提醒只挂在事件路径（手动检查写 offer 不经过这里），同版本重复到达也不会再打扰（T3）。
+      stopUpdate = await watchUpdateAvailable((offer) => {
+        notice(`发现新版本 ${offer.version}，可从状态栏入口或设置安装。`);
+      });
     })();
     const poll = window.setInterval(() => {
       if (shouldPoll(degraded, windowFocused, opened !== null)) void refresh();
@@ -2691,6 +2694,8 @@
     {conflictCount}
     {mergeInProgress}
     onOpenMerge={() => runCommand("task.merge")}
+    updateVersion={updateState.offer?.version ?? null}
+    onOpenUpdate={() => openSettings("update")}
   />
 </div>
 

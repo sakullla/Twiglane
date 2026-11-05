@@ -46,6 +46,17 @@ vi.mock("../src/lib/api", () => ({
 }));
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: mocks.check }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: mocks.relaunch }));
+/* 原生桩加上 App 渲染会让 TitleBar 走进 src/lib/window.ts 的原生分支，进而拉起真实的
+   @tauri-apps/api/window；这里整体 mock 窗口模块，标题栏的窗口操作与最大化监听全部空操作。 */
+vi.mock("../src/lib/window", () => ({
+  WINDOW_PLATFORM: "other",
+  startWindowDrag: async () => {},
+  minimizeWindow: async () => {},
+  toggleMaximizeWindow: async () => {},
+  isWindowMaximized: async () => false,
+  closeWindow: async () => {},
+  watchWindowMaximized: async () => () => {},
+}));
 
 import App from "../src/App.svelte";
 import * as updateModule from "../src/lib/update.svelte";
@@ -324,6 +335,86 @@ describe("installSupported 与非原生模式", () => {
     expect(within(section).getByText("更新功能仅在桌面应用中可用。")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "检查更新" })).toBeNull();
     expect(screen.queryByRole("button", { name: "下载并安装" })).toBeNull();
+  });
+});
+
+describe("发现新版本的提示载体（StatusBar 入口 + toast）", () => {
+  /** 捕获事件处理器：App 与 watchUpdateAvailable 的监听都落进这张表。 */
+  function captureHandlers() {
+    const handlers = new Map<string, (payload: unknown) => void>();
+    mocks.listenEvent.mockImplementation(async (name: string, handler: (payload: unknown) => void) => {
+      handlers.set(name, handler);
+      return () => {};
+    });
+    return handlers;
+  }
+
+  it("事件写入 offer 后状态栏出现「新版本」入口，点击打开设置并定位 update 分区；offer 清空后消失", async () => {
+    stubNative();
+    const handlers = captureHandlers();
+    const scrolled: HTMLElement[] = [];
+    const originalScroll = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function (this: HTMLElement) {
+      scrolled.push(this);
+    };
+    try {
+      render(App);
+      await waitFor(() => expect(mocks.getSettings).toHaveBeenCalled());
+      expect(screen.queryByRole("button", { name: /新版本/ }), "没有 offer 时没有入口").toBeNull();
+
+      await waitFor(() => expect(handlers.get("twiglane:update-available")).toBeTypeOf("function"));
+      handlers.get("twiglane:update-available")!({ version: "0.3.0", notes: "修复若干问题", installSupported: true });
+      await tick();
+      const entry = screen.getByRole("button", { name: /新版本 0\.3\.0/ });
+      expect(entry.closest(".statusbar"), "入口常驻在状态栏").toBeTruthy();
+
+      await fireEvent.click(entry);
+      const section = await waitFor(() => document.querySelector<HTMLElement>('[data-settings-section="update"]')!);
+      expect(section, "点击入口打开设置弹窗").toBeTruthy();
+      await waitFor(() => expect(scrolled, "定位滚动到应用更新分区").toContain(section));
+
+      setUpdateOffer(null);
+      await tick();
+      expect(screen.queryByRole("button", { name: /新版本/ }), "offer 清空后入口消失").toBeNull();
+    } finally {
+      Element.prototype.scrollIntoView = originalScroll;
+    }
+  });
+
+  it("自动检查事件出现一次 toast.ok 提醒；手动检查路径写 offer 不触发该 toast", async () => {
+    stubNative();
+    const handlers = captureHandlers();
+    render(App);
+    await waitFor(() => expect(mocks.getSettings).toHaveBeenCalled());
+    expect(document.querySelector(".toast.ok"), "提醒前没有 toast").toBeNull();
+
+    await waitFor(() => expect(handlers.get("twiglane:update-available")).toBeTypeOf("function"));
+    handlers.get("twiglane:update-available")!({ version: "0.3.0", notes: "修复若干问题", installSupported: true });
+    await waitFor(() => {
+      const toast = document.querySelector(".toast.ok .toast-text");
+      expect(toast?.textContent).toMatch(/新版本 0\.3\.0/);
+    });
+
+    // 手动检查路径与 fetchUpdate 写 store 的方式一致（不经事件回调），不应再出更新提醒。
+    setUpdateOffer({ version: "0.4.0", notes: "手动检查发现" });
+    await tick();
+    expect(screen.getByRole("button", { name: /新版本 0\.4\.0/ }), "入口跟随手动检查的结果").toBeTruthy();
+    expect(document.querySelector(".toast.ok .toast-text")?.textContent, "手动检查不触发更新提醒 toast").not.toMatch(/0\.4\.0/);
+  });
+
+  it("onDiscovered 只在事件路径触发一次：同版本重复到达不再回调，新版本才再次提醒", async () => {
+    stubNative();
+    const handlers = captureHandlers();
+    const discovered: string[] = [];
+    await watchUpdateAvailable((offer) => discovered.push(offer.version));
+    const handler = handlers.get("twiglane:update-available")!;
+    handler({ version: "0.3.0", notes: "修复", installSupported: true });
+    handler({ version: "0.3.0", notes: "修复", installSupported: true });
+    await tick();
+    expect(discovered).toEqual(["0.3.0"]);
+    handler({ version: "0.4.0", notes: "再次发现", installSupported: true });
+    await tick();
+    expect(discovered).toEqual(["0.3.0", "0.4.0"]);
   });
 });
 

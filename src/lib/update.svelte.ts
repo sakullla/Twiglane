@@ -66,14 +66,21 @@ export function isNativeRuntime(): boolean {
 /**
  * 注册 `twiglane:update-available` 监听。非原生环境不注册（返回空退订）；
  * 注册失败静默，不影响其余功能（R1：自动检查失败不打扰用户）。
+ *
+ * onDiscovered 只在事件路径触发（手动检查写 offer 不经过这里），供调用方做
+ * 一次性提醒；同一版本重复到达不再回调，手动检查已写入同版本时事件也不会重复提醒。
  */
-export async function watchUpdateAvailable(): Promise<() => void> {
+export async function watchUpdateAvailable(onDiscovered?: (offer: UpdateOffer) => void): Promise<() => void> {
   if (!isNativeRuntime()) return () => {};
   try {
     return await listenEvent<UpdateOffer & { installSupported: boolean }>(
       "twiglane:update-available",
       (payload) => {
+        const previous = updateState.offer;
         setEventOffer(payload);
+        if (previous?.version !== payload.version) {
+          onDiscovered?.({ version: payload.version, notes: payload.notes });
+        }
       },
     );
   } catch {

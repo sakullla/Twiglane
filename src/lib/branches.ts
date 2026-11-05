@@ -85,3 +85,20 @@ export function mainBranchNames(state: { defaultBranch?: string | null; mergeBas
   if (state.mergeBases && state.mergeBases.length > 0) return new Set(state.mergeBases);
   return state.defaultBranch ? new Set([state.defaultBranch]) : new Set();
 }
+
+/**
+ * 远程分支的短名已被另一个本地分支占用（例如 upstream/main 与跟踪 origin/main 的 main）时，
+ * 给它一个不冲突的本地名：`upstream-main`，再冲突就加序号。
+ */
+export function trackNameFor(remoteBranch: string, branches: BranchRecord[]): string {
+  const slash = remoteBranch.indexOf("/");
+  const remote = slash > 0 ? remoteBranch.slice(0, slash) : "remote";
+  const short = slash > 0 ? remoteBranch.slice(slash + 1) : remoteBranch;
+  const taken = new Set(branches.filter((branch) => !branch.remote).map((branch) => branch.name));
+  const base = `${remote}-${short}`;
+  if (!taken.has(base)) return base;
+  for (let index = 2; ; index += 1) {
+    const candidate = `${base}-${index}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}

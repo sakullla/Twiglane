@@ -1,5 +1,13 @@
+<script module lang="ts">
+  import type { RepoHead } from "../types";
+
+  /** 各仓库当前检出的分支：弹层再次打开时先显示上次读到的，后台再刷新。 */
+  const knownHeads = new Map<string, RepoHead>();
+</script>
+
 <script lang="ts">
-  import { tick, untrack } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
+  import { api } from "../api";
   import { filterRecent, repeatedNames, rowOffsets, rowWindow } from "../recent";
   import type { IconName } from "../icons";
   import type { RecentRepo } from "../types";
@@ -39,7 +47,7 @@
     { id: "repo.create", label: "新建仓库", icon: "folder-plus" },
   ];
 
-  const WIDTH = 440;
+  const WIDTH = 480;
   /** 单行仓库的高度与每多一行的增量，只是实测之前的估算。 */
   const ROW = 49;
   const EXTRA_LINE = 16;
@@ -50,6 +58,45 @@
 
   let query = $state("");
   let active = $state(0);
+  /** 读到的 HEAD 版本号：Map 本身不是响应式的，换号让行重新取值。 */
+  let headsVersion = $state(0);
+
+  onMount(() => {
+    const paths = repos.map((repo) => repo.path);
+    if (paths.length === 0) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const heads = await api.repoHeads(paths);
+        if (!alive) return;
+        for (const head of heads ?? []) knownHeads.set(head.path, head);
+        headsVersion += 1;
+      } catch {
+        // 读不到分支只是少一条提示，不影响切换。
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  });
+
+  function headOf(path: string): RepoHead | null {
+    void headsVersion;
+    return knownHeads.get(path) ?? null;
+  }
+
+  /** 名称里命中关键词的部分加粗，扫一眼就知道为什么匹配。 */
+  function nameParts(name: string, needle: string): { text: string; hit: boolean }[] {
+    const term = needle.trim().toLocaleLowerCase();
+    if (!term) return [{ text: name, hit: false }];
+    const at = name.toLocaleLowerCase().indexOf(term);
+    if (at < 0) return [{ text: name, hit: false }];
+    return [
+      { text: name.slice(0, at), hit: false },
+      { text: name.slice(at, at + term.length), hit: true },
+      { text: name.slice(at + term.length), hit: false },
+    ].filter((part) => part.text);
+  }
   let visible = $derived(filterRecent(repos, query));
   let badgeLetters = $derived(repoBadgeLetters(visible.map((repo) => repo.name)));
   /** 同名仓库只能靠路径区分，这些行显示完整路径而不是截断（R6）。 */
@@ -244,6 +291,7 @@
       {#each rendered as { repo, index } (repo.path)}
         {@const reason = reasonFor(repo)}
         {@const current = repo.path === currentPath}
+        {@const head = headOf(repo.path)}
         <div class="switcher-row" role="presentation" data-repo-row={index} style={`top:${offsets[index]}px`}>
           <div
             id={`${listId}-${index}`}
@@ -272,11 +320,20 @@
           >
             <span class="repo-badge" style={`--hue:${hueOf(repo.path)}`} aria-hidden="true">{badgeLetters[index]}</span>
             <span class="repo-text">
-              <span class="repo-name">{repo.name}</span>
+              <span class="repo-line">
+                <span class="repo-name">{#each nameParts(repo.name, query) as part, partIndex (partIndex)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
+                {#if head?.missing}
+                  <span class="repo-head missing" title="目录已不存在或不再是 Git 仓库">目录不存在</span>
+                {:else if head?.branch}
+                  <span class="repo-head" title={`当前检出的分支：${head.branch}`}><Icon name="branch" size={11} /><span class="repo-head-name">{head.branch}</span></span>
+                {:else if head?.detached}
+                  <span class="repo-head detached" title={`游离 HEAD：${head.detached}`}><Icon name="commit" size={11} /><span class="repo-head-name">{head.detached}</span></span>
+                {/if}
+              </span>
               <span class={sameNames.has(repo.name) ? "repo-path-full" : "repo-path"}><bdi>{repo.path}</bdi></span>
               {#if reason}<span class="switcher-reason">{reason}</span>{/if}
             </span>
-            {#if current}<Icon name="check" size={14} class="switcher-check" />{/if}
+            {#if current}<span class="switcher-current" aria-hidden="true"><Icon name="check" size={12} class="switcher-check" />当前</span>{/if}
           </div>
           <span class="switcher-actions">
             <button type="button" class="icon-btn sm" tabindex="-1" aria-label={`复制 ${repo.name} 的完整路径`} title="复制完整路径" onclick={() => onCopyPath(repo.path)}>
@@ -292,11 +349,18 @@
     {/if}
   {/snippet}
   {#snippet foot()}
-    {#each ACTIONS as action (action.id)}
-      <button type="button" class="menu-item" disabled={actionReason !== null} title={actionReason ?? undefined} onclick={() => onCommand(action.id)}>
-        <Icon name={action.icon} size={14} />
-        <span>{action.label}</span>
-      </button>
-    {/each}
+    <div class="switcher-foot">
+      {#each ACTIONS as action (action.id)}
+        <button type="button" class="menu-item switcher-foot-action" disabled={actionReason !== null} title={actionReason ?? action.label} onclick={() => onCommand(action.id)}>
+          <Icon name={action.icon} size={14} />
+          <span>{action.label}</span>
+        </button>
+      {/each}
+    </div>
+    <p class="switcher-hint" aria-hidden="true">
+      <span><span class="key">↑</span><span class="key">↓</span>选择</span>
+      <span><span class="key">Enter</span>打开</span>
+      <span>右键：复制路径、在文件管理器中显示、移出列表</span>
+    </p>
   {/snippet}
 </Popover>

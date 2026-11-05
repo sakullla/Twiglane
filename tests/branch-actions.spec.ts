@@ -11,6 +11,7 @@ const api = vi.hoisted(() => ({
   renameBranch: vi.fn(),
   deleteBranch: vi.fn(),
   deleteRemoteBranch: vi.fn(),
+  cancelRemote: vi.fn(),
   tagState: vi.fn(),
   openRepository: vi.fn(),
 }));
@@ -236,6 +237,34 @@ describe("分支右键菜单", () => {
     await waitFor(() => expect(document.activeElement).toBe(trigger));
     expect(api.deleteBranch).toHaveBeenCalledTimes(1);
     expect(onNotice).not.toHaveBeenCalled();
+  });
+
+  it("远程删除卡住时可以取消：停止远程命令、收起确认框、刷新列表，不当作失败", async () => {
+    api.branchState.mockResolvedValue({
+      ...state,
+      branches: [...state.branches, { name: "origin/old", remote: true, current: false, upstream: null, worktree: null }],
+    });
+    let reject!: (error: unknown) => void;
+    api.deleteRemoteBranch.mockImplementationOnce(() => new Promise((_, fail) => { reject = fail; }));
+    api.cancelRemote.mockImplementation(async () => {
+      reject({ code: "cancelled", generation: 5, message: "已取消远程操作。" });
+    });
+    const { onNotice, onFailure } = setup();
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+    await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "展开分组 origin" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "删除远程 origin/old" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "从远程删除" }));
+    await waitFor(() => expect(api.deleteRemoteBranch).toHaveBeenCalledTimes(1));
+    const loads = api.branchState.mock.calls.length;
+    const cancel = within(document.querySelector<HTMLElement>("[data-modal-impact]")!.closest("[role=dialog]")!).getByRole("button", { name: "取消" });
+    expect((cancel as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.click(cancel);
+    expect(api.cancelRemote).toHaveBeenCalledWith("/repo");
+    await waitFor(() => expect(document.querySelector("[data-modal-impact]")).toBeNull());
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith(expect.stringContaining("已取消删除远程分支 origin/old")));
+    expect(onFailure).not.toHaveBeenCalled();
+    await waitFor(() => expect(api.branchState.mock.calls.length).toBeGreaterThan(loads));
   });
 
   it("远程删除：确认后才调用，失败时不报成功", async () => {

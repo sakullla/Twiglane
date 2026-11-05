@@ -338,21 +338,27 @@ async fn decorate_status(backend: &Backend, root: &Path, snapshot: &mut StatusSn
         return;
     }
     let Ok(git) = require_git(backend).await else {
-        fill_untracked_lines(root, &mut snapshot.files);
+        fill_untracked_lines(root, &mut snapshot.files).await;
         return;
     };
-    let staged = if needs_staged_stats(&snapshot.files) {
-        read_numstat_map(backend, root, &git.path, true, snapshot.generation).await
-    } else {
-        HashMap::new()
-    };
-    let unstaged = if needs_unstaged_stats(&snapshot.files) {
-        read_numstat_map(backend, root, &git.path, false, snapshot.generation).await
-    } else {
-        HashMap::new()
-    };
+    let (staged, unstaged) = tokio::join!(
+        async {
+            if needs_staged_stats(&snapshot.files) {
+                read_numstat_map(backend, root, &git.path, true, snapshot.generation).await
+            } else {
+                HashMap::new()
+            }
+        },
+        async {
+            if needs_unstaged_stats(&snapshot.files) {
+                read_numstat_map(backend, root, &git.path, false, snapshot.generation).await
+            } else {
+                HashMap::new()
+            }
+        }
+    );
     assign_worktree_numstat(&mut snapshot.files, &staged, &unstaged);
-    fill_untracked_lines(root, &mut snapshot.files);
+    fill_untracked_lines(root, &mut snapshot.files).await;
     crate::git::sizes::decorate_status_sizes(backend, &git.path, root, snapshot.generation, &mut snapshot.files).await;
 }
 
@@ -377,7 +383,7 @@ pub(crate) async fn decorate_guard_status(
         HashMap::new()
     };
     assign_worktree_numstat(&mut snapshot.files, &staged, &unstaged);
-    fill_untracked_lines(root, &mut snapshot.files);
+    fill_untracked_lines(root, &mut snapshot.files).await;
     crate::git::sizes::decorate_status_sizes_guard(guard, git, root, &mut snapshot.files).await;
 }
 
@@ -434,23 +440,58 @@ async fn read_numstat_guard(
     numstat_map(parse_numstat_list(&output.stdout))
 }
 
-fn fill_untracked_lines(root: &Path, files: &mut [FileChange]) {
-    for file in files {
-        if file.untracked {
-            file.unstaged_lines = untracked_line_stat(root, &file.path);
+// 状态列表的可选统计不能随导出文件大小无限增长；超预算保持未知，打开差异时再读。
+const UNTRACKED_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const UNTRACKED_STATUS_BYTES: u64 = 16 * 1024 * 1024;
+
+async fn fill_untracked_lines(root: &Path, files: &mut [FileChange]) {
+    let paths: Vec<_> = files
+        .iter()
+        .enumerate()
+        .filter(|(_, file)| file.untracked)
+        .map(|(index, file)| (index, file.path.clone()))
+        .collect();
+    if paths.is_empty() {
+        return;
+    }
+    let root = root.to_path_buf();
+    // 文件 I/O 和数行在阻塞线程执行，避免占用异步 Git 调度线程。
+    let result = tokio::task::spawn_blocking(move || {
+        let mut budget = UNTRACKED_STATUS_BYTES;
+        paths
+            .into_iter()
+            .map(|(index, path)| (index, untracked_line_stat(&root, &path, &mut budget)))
+            .collect::<Vec<_>>()
+    })
+    .await;
+    if let Ok(stats) = result {
+        for (index, stat) in stats {
+            files[index].unstaged_lines = stat;
         }
     }
 }
 
-fn untracked_line_stat(root: &Path, path: &str) -> Option<LineStat> {
+fn untracked_line_stat(root: &Path, path: &str, budget: &mut u64) -> Option<LineStat> {
+    if *budget == 0 {
+        return None;
+    }
     let relative = safe_relative(path).ok()?;
-    let mut opened = fs::File::open(root.join(relative)).ok()?;
+    let path = root.join(relative);
+    let meta = path.symlink_metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let mut opened = fs::File::open(path).ok()?;
     let mut probe = [0_u8; 8000];
     let mut filled = 0;
-    while filled < probe.len() {
-        match opened.read(&mut probe[filled..]) {
+    let probe_limit = probe.len().min(*budget as usize);
+    while filled < probe_limit {
+        match opened.read(&mut probe[filled..probe_limit]) {
             Ok(0) => break,
-            Ok(count) => filled += count,
+            Ok(count) => {
+                filled += count;
+                *budget -= count as u64;
+            }
             Err(_) => return None,
         }
     }
@@ -462,25 +503,39 @@ fn untracked_line_stat(root: &Path, path: &str) -> Option<LineStat> {
             new_size: None,
         });
     }
+    if meta.len() > UNTRACKED_FILE_BYTES || meta.len().saturating_sub(filled as u64) > *budget {
+        return None;
+    }
     let mut newlines = probe[..filled]
         .iter()
         .filter(|byte| **byte == b'\n')
         .count() as u64;
     let mut last = probe[..filled].last().copied();
     let mut rest = [0_u8; 8192];
+    let mut read_bytes = filled as u64;
     loop {
-        let count = match opened.read(&mut rest) {
+        // 多读一字节检测读取期间增长的文件；不返回被截断的行数。
+        let limit = rest
+            .len()
+            .min((UNTRACKED_FILE_BYTES - read_bytes).min(*budget) as usize + 1);
+        let count = match opened.read(&mut rest[..limit]) {
             Ok(0) => break,
             Ok(count) => count,
             Err(_) => return None,
         };
+        if count as u64 > *budget || read_bytes + count as u64 > UNTRACKED_FILE_BYTES {
+            *budget = budget.saturating_sub(count as u64);
+            return None;
+        }
+        *budget -= count as u64;
+        read_bytes += count as u64;
         newlines += rest[..count]
             .iter()
             .filter(|byte| **byte == b'\n')
             .count() as u64;
         last = rest[..count].last().copied();
     }
-    let additions = if filled == 0 {
+    let additions = if read_bytes == 0 {
         0
     } else if last == Some(b'\n') {
         newlines
@@ -636,23 +691,52 @@ pub(crate) async fn run_git(
     args: Vec<std::ffi::OsString>,
     generation: Option<u64>,
 ) -> Result<ScheduledOutput, AppError> {
+    run_git_job(backend, repo_key, kind, request_id, program, args, generation, false).await
+}
+
+/// 访问远程的命令：用户可以通过 cancel_remote 中途取消。
+pub(crate) async fn run_remote_git(
+    backend: &Backend,
+    repo_key: &str,
+    kind: JobKind,
+    request_id: u64,
+    program: PathBuf,
+    args: Vec<std::ffi::OsString>,
+    generation: Option<u64>,
+) -> Result<ScheduledOutput, AppError> {
+    run_git_job(backend, repo_key, kind, request_id, program, args, generation, true).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_git_job(
+    backend: &Backend,
+    repo_key: &str,
+    kind: JobKind,
+    request_id: u64,
+    program: PathBuf,
+    args: Vec<std::ffi::OsString>,
+    generation: Option<u64>,
+    remote: bool,
+) -> Result<ScheduledOutput, AppError> {
     let mut attempt = 0_u64;
     let mut current = generation.unwrap_or_else(|| backend.scheduler.current_generation(repo_key));
     loop {
-        let result = backend
-            .scheduler
-            .execute(GitJob {
-                repo_key: repo_key.to_string(),
-                kind,
-                request_id: request_id.wrapping_add(attempt),
-                generation: current,
-                program: program.clone(),
-                args: args.clone(),
-                stdin: None,
-                truncate_stdout: false,
-                output_limit: None,
-            })
-            .await;
+        let job = GitJob {
+            repo_key: repo_key.to_string(),
+            kind,
+            request_id: request_id.wrapping_add(attempt),
+            generation: current,
+            program: program.clone(),
+            args: args.clone(),
+            stdin: None,
+            truncate_stdout: false,
+            output_limit: None,
+        };
+        let result = if remote {
+            backend.scheduler.execute_remote(job).await
+        } else {
+            backend.scheduler.execute(job).await
+        };
         match result {
             Err(error) if error.code == "stale" && generation.is_none() && attempt < 2 => {
                 current = error
@@ -793,6 +877,43 @@ mod tests {
 
     use crate::git::runner::ProcessOutput;
     use crate::state::AppStore;
+
+    #[test]
+    fn untracked_stats_are_exact_within_budget_and_unknown_beyond_it() {
+        let dir = crate::test_support::TempDir::new("untracked-stats-budget");
+        for (name, bytes, expected) in [
+            ("empty", &b""[..], 0),
+            ("lines", &b"one\r\ntwo\n"[..], 2),
+            ("no-newline", &b"one\ntwo"[..], 2),
+        ] {
+            fs::write(dir.path().join(name), bytes).unwrap();
+            let mut budget = bytes.len() as u64 + 1;
+            let stats = untracked_line_stat(dir.path(), name, &mut budget).unwrap();
+            assert_eq!(stats.additions, Some(expected));
+            assert_eq!(stats.deletions, Some(0));
+            assert_eq!(budget, 1);
+        }
+        fs::write(dir.path().join("binary"), b"a\0b").unwrap();
+        let mut budget = 3;
+        assert_eq!(untracked_line_stat(dir.path(), "binary", &mut budget).unwrap().additions, None);
+        assert_eq!(budget, 0);
+        assert!(untracked_line_stat(dir.path(), "lines", &mut budget).is_none());
+
+        let large = vec![b'x'; UNTRACKED_FILE_BYTES as usize + 1];
+        fs::write(dir.path().join("large"), &large).unwrap();
+        let mut budget = UNTRACKED_STATUS_BYTES;
+        assert!(untracked_line_stat(dir.path(), "large", &mut budget).is_none());
+        assert_eq!(UNTRACKED_STATUS_BYTES - budget, 8000);
+        fs::write(dir.path().join("boundary"), &large[..UNTRACKED_FILE_BYTES as usize]).unwrap();
+        let mut budget = UNTRACKED_FILE_BYTES;
+        assert_eq!(untracked_line_stat(dir.path(), "boundary", &mut budget).unwrap().additions, Some(1));
+        assert_eq!(budget, 0);
+        let mut budget = 2;
+        assert!(untracked_line_stat(dir.path(), "lines", &mut budget).is_none());
+        assert_eq!(budget, 0);
+        assert!(untracked_line_stat(dir.path(), ".", &mut 100).is_none());
+        assert!(untracked_line_stat(dir.path(), "../outside", &mut 100).is_none());
+    }
 
     #[tokio::test]
     async fn add_does_not_modify_invalid_paths_and_create_is_explicit() {

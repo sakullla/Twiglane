@@ -1,5 +1,18 @@
 import type { DiffLine, DiffResponse } from "./types";
 
+/** 刷新仍读取 Git；补丁与分页未变时复用行数组，避免重复排版和语法分词。 */
+export function reuseDiffContent(previous: DiffResponse | null | undefined, next: DiffResponse): DiffResponse {
+  if (
+    previous && next.snapshot && previous.snapshot === next.snapshot &&
+    previous.path === next.path && previous.staged === next.staged &&
+    !previous.binary && !next.binary && previous.offset === next.offset &&
+    previous.totalLines === next.totalLines && previous.lines.length === next.lines.length
+  ) {
+    return { ...next, lines: previous.lines, hunks: previous.hunks };
+  }
+  return next;
+}
+
 export interface DiffAttempt {
   token: number;
   repo: string;

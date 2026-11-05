@@ -12,6 +12,9 @@ export type { SyntaxLine, SyntaxToken } from "./engine";
 
 /** 单次请求的行数上限：超过时只高亮前这么多行，其余按纯文本显示。 */
 export const MAX_HIGHLIGHT_LINES = 60_000;
+/** 高亮是可选装饰：超出预算的行仍显示原文，不向 Worker 复制整份大文件。 */
+export const MAX_HIGHLIGHT_CHARS = 2 * 1024 * 1024;
+const MAX_CONCURRENT = 2;
 
 type Listener = (start: number, tokens: SyntaxLine[]) => void;
 
@@ -29,6 +32,8 @@ let cacheBytes = 0;
 let idleTimer: ReturnType<typeof setTimeout> | undefined;
 const inflight = new Map<string, { id: number; pending: Pending }>();
 const byId = new Map<number, Pending>();
+const queued = new Map<number, () => void>();
+const running = new Set<number>();
 let worker: Worker | null | undefined;
 let nextId = 1;
 
@@ -77,6 +82,7 @@ function releaseWhenIdle() {
     idleTimer = undefined;
     if (worker !== target || byId.size > 0) return;
     target.terminate();
+    running.clear();
     worker = undefined;
   }, HIGHLIGHT_WORKER_IDLE_MS);
 }
@@ -92,15 +98,16 @@ function getWorker(): Worker | null {
     worker.onmessage = (event: MessageEvent<{ id: number; start?: number; tokens?: SyntaxLine[]; done?: boolean; ok?: boolean }>) => {
       const data = event.data;
       const pending = byId.get(data.id);
-      if (!pending) return;
-      if (data.tokens && data.start !== undefined) deliver(pending, data.start, data.tokens);
-      if (data.done) finish(data.id, pending, data.ok === true);
+      if (pending && data.tokens && data.start !== undefined) deliver(pending, data.start, data.tokens);
+      if (data.done) complete(data.id, data.ok === true);
     };
     worker.onerror = () => {
       // worker 起不来（例如被宿主策略拦下）：退回主线程，进行中的请求按失败结束。
-      for (const [id, pending] of byId) finish(id, pending, false);
       worker?.terminate();
       worker = null;
+      queued.clear();
+      running.clear();
+      for (const [id, pending] of byId) finish(id, pending, false);
     };
   } catch {
     worker = null;
@@ -118,6 +125,25 @@ function finish(id: number, pending: Pending, ok: boolean) {
   inflight.delete(pending.key);
   if (ok) remember(pending.key, pending.lines);
   for (const listener of pending.listeners) listener.onDone(ok);
+  pending.listeners.clear();
+  pending.lines = [];
+  releaseWhenIdle();
+}
+
+function pump() {
+  while (running.size < MAX_CONCURRENT && queued.size > 0) {
+    const [id, start] = queued.entries().next().value!;
+    queued.delete(id);
+    running.add(id);
+    start();
+  }
+}
+
+function complete(id: number, ok: boolean) {
+  running.delete(id);
+  const pending = byId.get(id);
+  if (pending) finish(id, pending, ok);
+  pump();
   releaseWhenIdle();
 }
 
@@ -128,7 +154,7 @@ async function runInThread(id: number, lang: string, lines: string[], pending: P
     cancelled: () => !byId.has(id),
     yieldBetween: () => new Promise((resolve) => setTimeout(resolve, 0)),
   }).catch(() => false);
-  if (byId.has(id)) finish(id, pending, ok);
+  complete(id, ok);
 }
 
 /**
@@ -141,7 +167,15 @@ export function highlightLines(
   onChunk: Listener,
   onDone: (ok: boolean) => void = () => {},
 ): () => void {
-  const input = lines.length > MAX_HIGHLIGHT_LINES ? lines.slice(0, MAX_HIGHLIGHT_LINES) : lines;
+  let count = 0;
+  let chars = 0;
+  while (count < Math.min(lines.length, MAX_HIGHLIGHT_LINES)) {
+    const next = lines[count].length + 1;
+    if (chars + next > MAX_HIGHLIGHT_CHARS) break;
+    chars += next;
+    count++;
+  }
+  const input = count < lines.length ? lines.slice(0, count) : lines;
   if (input.length === 0) {
     onDone(true);
     return () => {};
@@ -180,9 +214,12 @@ export function highlightLines(
     entry = { id, pending };
     inflight.set(key, entry);
     byId.set(id, pending);
-    const target = getWorker();
-    if (target) target.postMessage({ id, lang, lines: input });
-    else void runInThread(id, lang, input, pending);
+    queued.set(id, () => {
+      const target = getWorker();
+      if (target) target.postMessage({ id, lang, lines: input });
+      else void runInThread(id, lang, input, pending);
+    });
+    pump();
   }
   const current = entry;
   return () => {
@@ -190,7 +227,9 @@ export function highlightLines(
     if (current.pending.listeners.size === 0 && byId.has(current.id)) {
       byId.delete(current.id);
       inflight.delete(current.pending.key);
-      worker?.postMessage({ cancel: current.id });
+      current.pending.lines = [];
+      queued.delete(current.id);
+      if (running.has(current.id)) worker?.postMessage({ cancel: current.id });
       releaseWhenIdle();
     }
   };
@@ -202,6 +241,8 @@ export function resetHighlightCache(): void {
   cacheBytes = 0;
   inflight.clear();
   byId.clear();
+  queued.clear();
+  running.clear();
   if (idleTimer !== undefined) clearTimeout(idleTimer);
   idleTimer = undefined;
   worker?.terminate();

@@ -14,7 +14,7 @@ use crate::git::command::{
     fetch_one_command, git_path_command, git_paths_command, hash_object_command, head_command,
     history_details_command,
     head_match_command, head_record_command, ls_remote_tags_command, merge_abort_command,
-    merge_divergence_command, merge_ff_only_command, merge_incoming_files_command,
+    merge_base_command, merge_divergence_command, merge_ff_only_command, merge_incoming_files_command,
     merge_incoming_log_command, merge_no_commit_command, merge_tree_command, push_reflog_command,
     rebase_abort_command, rebase_command, rebase_continue_command, remote_names_command,
     remote_tracking_command, remove_path_command, reset_soft_command, restore_worktree_command,
@@ -594,6 +594,8 @@ fn preview_from(
         conflict_check: "unknown".to_string(),
         conflict_paths: Vec::new(),
         blocker: blocker.map(str::to_string),
+        base_oid: None,
+        source_oid: None,
     }
 }
 
@@ -612,6 +614,8 @@ struct MergeFacts {
     files_total: u32,
     conflict_check: String,
     conflict_paths: Vec<String>,
+    base_oid: Option<String>,
+    source_oid: Option<String>,
 }
 
 fn apply_facts(preview: &mut MergePreview, facts: MergeFacts) {
@@ -625,6 +629,8 @@ fn apply_facts(preview: &mut MergePreview, facts: MergeFacts) {
     preview.files_total = facts.files_total;
     preview.conflict_check = facts.conflict_check;
     preview.conflict_paths = facts.conflict_paths;
+    preview.base_oid = facts.base_oid;
+    preview.source_oid = facts.source_oid;
     // 目标已经包含全部提交比「工作区有改动」更根本：什么都不用做。
     if preview.up_to_date && preview.operation == "none" {
         let note = format!(
@@ -690,8 +696,29 @@ async fn read_merge_facts(
             files_total: 0,
             conflict_check: "clean".to_string(),
             conflict_paths: Vec::new(),
+            base_oid: None,
+            source_oid: None,
         });
     }
+    // 预览里点开文件看差异要用到两端的确切提交：共同祖先 → 来源顶端。读不到时只是不能点开，不影响结论。
+    let (tip, generation) = run_read(
+        backend,
+        root,
+        generation,
+        internal_request_id(),
+        rev_parse_command(git, root, &format!("{source}^{{commit}}")),
+    )
+    .await?;
+    let source_oid = (tip.exit_code == 0).then(|| first_line_oid(&tip.stdout)).flatten();
+    let (base, generation) = run_read(
+        backend,
+        root,
+        generation,
+        internal_request_id(),
+        merge_base_command(git, root, target, source),
+    )
+    .await?;
+    let base_oid = (base.exit_code == 0).then(|| first_line_oid(&base.stdout)).flatten();
     let (log, generation) = run_read(
         backend,
         root,
@@ -750,7 +777,15 @@ async fn read_merge_facts(
         files_total,
         conflict_check,
         conflict_paths,
+        base_oid,
+        source_oid,
     })
+}
+
+fn first_line_oid(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let line = text.lines().next()?.trim().to_ascii_lowercase();
+    ((line.len() == 40 || line.len() == 64) && line.chars().all(|c| c.is_ascii_hexdigit())).then_some(line)
 }
 
 fn parse_divergence(bytes: &[u8]) -> Result<(u32, u32), AppError> {

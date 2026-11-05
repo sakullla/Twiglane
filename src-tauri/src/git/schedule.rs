@@ -58,6 +58,8 @@ pub struct ScheduledOutput {
 struct RepoLane {
     write: Arc<Mutex<()>>,
     generation: AtomicU64,
+    /// 远程操作（推送、获取、删除远程分支）的取消令牌：用户主动取消时只停这个仓库的网络命令。
+    remote_cancel: StdMutex<Arc<Shutdown>>,
 }
 
 pub struct GitScheduler<R> {
@@ -109,6 +111,24 @@ impl<R: ProcessRunner> GitScheduler<R> {
             .clone()
     }
 
+    /// 停止这个仓库正在运行或排队中的远程命令。之后启动的远程命令拿到新令牌，不受影响。
+    pub fn cancel_remote(&self, repo_key: &str) {
+        let lane = self.lane(repo_key);
+        let mut slot = lane
+            .remote_cancel
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        slot.cancel();
+        *slot = Arc::new(Shutdown::new());
+    }
+
+    fn remote_cancel_token(lane: &RepoLane) -> Arc<Shutdown> {
+        lane.remote_cancel
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
     pub fn current_generation(&self, repo_key: &str) -> u64 {
         self.lane(repo_key).generation.load(Ordering::SeqCst)
     }
@@ -121,6 +141,15 @@ impl<R: ProcessRunner> GitScheduler<R> {
     }
 
     pub async fn execute(&self, job: GitJob) -> Result<ScheduledOutput, AppError> {
+        self.run_job(job, false).await
+    }
+
+    /// 与 execute 相同，但这条命令会访问远程：可由 cancel_remote 中途停止（排队中或运行中）。
+    pub async fn execute_remote(&self, job: GitJob) -> Result<ScheduledOutput, AppError> {
+        self.run_job(job, true).await
+    }
+
+    async fn run_job(&self, job: GitJob, remote: bool) -> Result<ScheduledOutput, AppError> {
         if self.shutdown.is_cancelled() {
             return Err(AppError::new("cancelled", "操作已取消。"));
         }
@@ -128,7 +157,9 @@ impl<R: ProcessRunner> GitScheduler<R> {
         let lane = self.lane(&job.repo_key);
         // 取消令牌必须在入队前取得，否则旧队列会在取消后拿到新令牌，继续启动 Git。
         let cancel = match job.kind {
+            JobKind::Read if remote => Some(Self::remote_cancel_token(&lane)),
             JobKind::Read => Some(self.read_cancel_token()),
+            JobKind::Write if remote => Some(Self::remote_cancel_token(&lane)),
             JobKind::Write => None,
         };
         let _read_permit;
@@ -145,7 +176,14 @@ impl<R: ProcessRunner> GitScheduler<R> {
                 };
             }
             JobKind::Write => {
-                _write_guard = lane.write.lock().await;
+                _write_guard = match cancel.as_ref() {
+                    Some(token) => tokio::select! {
+                        biased;
+                        _ = token.cancelled() => return Err(AppError::new("cancelled", "操作已取消。")),
+                        guard = lane.write.lock() => guard,
+                    },
+                    None => lane.write.lock().await,
+                };
             }
         }
         let generation = lane.generation.load(Ordering::SeqCst);
@@ -159,7 +197,7 @@ impl<R: ProcessRunner> GitScheduler<R> {
             return Err(AppError::new("cancelled", "操作已取消。"));
         }
         if cancel.as_ref().is_some_and(|token| token.is_cancelled()) {
-            return Err(AppError::new("cancelled", "读取已取消。"));
+            return Err(AppError::new("cancelled", "操作已取消。"));
         }
         let result = self
             .runner
@@ -200,6 +238,7 @@ impl<R: ProcessRunner> GitScheduler<R> {
                 Arc::new(RepoLane {
                     write: Arc::new(Mutex::new(())),
                     generation: AtomicU64::new(1),
+                    remote_cancel: StdMutex::new(Arc::new(Shutdown::new())),
                 })
             })
             .clone()
@@ -505,6 +544,41 @@ mod tests {
         left.await.unwrap();
         right.await.unwrap();
         assert_eq!(max.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cancel_remote_stops_a_queued_remote_write_of_that_repo_only() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let scheduler = gated(GateRunner {
+            current: Arc::new(AtomicUsize::new(0)),
+            max: Arc::new(AtomicUsize::new(0)),
+            delay: Duration::from_secs(5),
+            started: StdMutex::new(Some(started_tx)),
+            release: Some(release.clone()),
+        });
+        let holder = {
+            let scheduler = scheduler.clone();
+            tokio::spawn(async move { scheduler.execute(job("repo", JobKind::Write, 1, 1)).await })
+        };
+        started_rx.await.unwrap();
+        let queued = {
+            let scheduler = scheduler.clone();
+            tokio::spawn(async move { scheduler.execute_remote(job("repo", JobKind::Write, 2, 2)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        scheduler.cancel_remote("other");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!queued.is_finished());
+        scheduler.cancel_remote("repo");
+        let cancelled = tokio::time::timeout(Duration::from_secs(2), queued).await.unwrap().unwrap();
+        assert_eq!(cancelled.unwrap_err().code, "cancelled");
+        release.notify_one();
+        assert!(holder.await.unwrap().is_ok());
+        // 取消只作用于当时已排队的命令：之后的远程写入照常执行。
+        release.notify_one();
+        let generation = scheduler.current_generation("repo");
+        assert!(scheduler.execute_remote(job("repo", JobKind::Write, 3, generation)).await.is_ok());
     }
 
     #[tokio::test]

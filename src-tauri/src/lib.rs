@@ -83,6 +83,10 @@ pub fn run() {
             fetch_remote,
             pull_fast_forward,
             push_branch,
+            push_to_remote,
+            track_remote_as,
+            cancel_remote,
+            repo_heads,
             publish_branch,
             associate_upstream,
             commit_and_push,
@@ -105,6 +109,8 @@ pub fn run() {
             history_page,
             commit_detail,
             commit_file_diff,
+            compare_file_diff,
+            commit_branches,
             file_history,
             cherry_pick_commits,
             checkout_commit,
@@ -601,6 +607,41 @@ async fn push_branch(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+async fn push_to_remote(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    remote: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    crate::git::sync::push_to_remote(state.inner(), &path, &remote, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn track_remote_as(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    remote_branch: String,
+    local: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    crate::git::sync::track_remote_as(state.inner(), &path, &remote_branch, &local, generation, request_id).await
+}
+
+#[tauri::command]
+fn cancel_remote(state: State<'_, Arc<Backend>>, path: String) -> Result<(), AppError> {
+    crate::git::sync::cancel_remote(state.inner(), &path)
+}
+
+#[tauri::command]
+async fn repo_heads(paths: Vec<String>) -> Result<Vec<crate::git::heads::RepoHead>, AppError> {
+    tauri::async_runtime::spawn_blocking(move || crate::git::heads::repo_heads(&paths))
+        .await
+        .map_err(|_| AppError::new("cancelled", "读取仓库分支已中断。"))
+}
+
+#[tauri::command(rename_all = "camelCase")]
 async fn publish_branch(
     state: State<'_, Arc<Backend>>,
     path: String,
@@ -936,6 +977,44 @@ async fn commit_file_diff(
         limit.unwrap_or(0),
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+async fn compare_file_diff(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    base: String,
+    head: String,
+    relative: String,
+    generation: u64,
+    request_id: u64,
+    offset: Option<u32>,
+    limit: Option<u32>,
+) -> Result<DiffResponse, AppError> {
+    crate::git::history::compare_file_diff(
+        state.inner(),
+        &path,
+        &base,
+        &head,
+        &relative,
+        generation,
+        request_id,
+        offset.unwrap_or(0),
+        limit.unwrap_or(0),
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn commit_branches(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    oid: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<crate::model::CommitBranches, AppError> {
+    crate::git::history::commit_branches(state.inner(), &path, &oid, generation, request_id).await
 }
 
 #[allow(clippy::too_many_arguments)]

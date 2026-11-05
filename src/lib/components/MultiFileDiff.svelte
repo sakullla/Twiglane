@@ -2,6 +2,7 @@
   import { onDestroy, tick, untrack } from "svelte";
   import { api } from "../api";
   import { normalizeError } from "../errors";
+  import { reuseDiffContent } from "../diff";
   import type { DiffHunk, DiffResponse, FileRow, FileSelection, LineStat, OpenedRepository } from "../types";
   import { appendDiffPage, BUSY_REASON, blockTops, blockWindow, rowMark, selectionKey, splitPath, type FileNavState } from "../ui";
   import DiffView from "./DiffView.svelte";
@@ -144,7 +145,7 @@
       const result = await api.loadDiff(at.repo, row.path, row.side === "staged", at.generation, nextId(), row.originalPath ?? null, 0, 0, at.context);
       if (!current(key, at)) return;
       settled.set(key, at);
-      diffs = { ...diffs, [key]: result };
+      diffs = { ...diffs, [key]: reuseDiffContent(diffs[key], result) };
       if (errors[key]) {
         const { [key]: _resolved, ...rest } = errors;
         errors = rest;

@@ -59,6 +59,13 @@
     impact?: string;
     onConfirm: () => void;
     onCancel: () => void;
+    /**
+     * 写入进行中也允许取消（远程操作卡在网络或凭据上时）：提供时「取消」、Esc 和右上角关闭
+     * 在 busy 时调用它，而不是被锁住。调用方负责真正停下操作并在结束后收起对话框。
+     */
+    onAbort?: () => void;
+    /** 已请求取消、正在等待操作停下。 */
+    aborting?: boolean;
     children?: Snippet;
   }
 
@@ -83,8 +90,20 @@
     impact,
     onConfirm,
     onCancel,
+    onAbort,
+    aborting = false,
     children,
   }: Props = $props();
+
+  let abortable = $derived(busy && Boolean(onAbort));
+
+  function dismiss() {
+    if (busy) {
+      if (onAbort && !aborting) onAbort();
+      return;
+    }
+    onCancel();
+  }
 
   let cancelButton = $state<HTMLButtonElement | null>(null);
   let confirmButton = $state<HTMLButtonElement | null>(null);
@@ -124,7 +143,7 @@
   }
 </script>
 
-<Modal {title} {titleId} {icon} tone={tone === "default" ? "default" : tone} {size} locked={busy} onClose={onCancel}>
+<Modal {title} {titleId} {icon} tone={tone === "default" ? "default" : tone} {size} locked={busy && !abortable} onClose={dismiss}>
   <div class="confirm-body" data-modal-impact={impact}>
     {#if message}<p class="confirm-message">{message}</p>{/if}
     {#if targets.length > 0}
@@ -166,15 +185,20 @@
     {/if}
   </div>
   {#snippet footer()}
+    {#if abortable}
+      <span class="confirm-progress" role="status">
+        {#if aborting}正在停止，等待 Git 退出…{:else}正在执行，可以随时取消{/if}
+      </span>
+    {/if}
     <span class="spacer"></span>
     <button
       type="button"
       class="btn btn-secondary"
-      title={busy ? "写入完成后才能取消" : undefined}
-      disabled={busy}
+      title={busy ? (abortable ? (aborting ? "正在停止" : "停止这次操作") : "写入完成后才能取消") : undefined}
+      disabled={busy && (!abortable || aborting)}
       bind:this={cancelButton}
-      onclick={onCancel}
-    >{cancelLabel}</button>
+      onclick={dismiss}
+    >{#if aborting}<span class="spinner"></span>正在取消{:else}{cancelLabel}{/if}</button>
     <button
       type="button"
       class={`btn ${tone === "danger" ? "btn-danger" : "btn-primary"}`}

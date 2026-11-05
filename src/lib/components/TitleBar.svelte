@@ -43,6 +43,17 @@
     onFetch: () => void;
     onPull: () => void;
     onPush: () => void;
+    /** 仓库配置的全部远程名；多于一个时菜单提供「推送到其他远程」。 */
+    remotes?: string[];
+    /** 当前分支的上游（如 origin/main），用来区分默认推送目标。 */
+    upstream?: string | null;
+    /** 正在进行可取消的远程操作（获取、拉取、推送、发布）。 */
+    remoteBusy?: boolean;
+    cancelling?: boolean;
+    onSyncOpen?: () => void;
+    onPushTo?: (remote: string) => void;
+    onPushAll?: () => void;
+    onCancelSync?: () => void;
     onRemote: () => void;
     onTheme: (theme: Theme) => void;
     onSettings: () => void;
@@ -66,6 +77,14 @@
     onFetch,
     onPull,
     onPush,
+    remotes = [],
+    upstream = null,
+    remoteBusy = false,
+    cancelling = false,
+    onSyncOpen,
+    onPushTo,
+    onPushAll,
+    onCancelSync,
     onRemote,
     onTheme,
     onSettings,
@@ -95,6 +114,9 @@
   let branchTitle = $derived(
     `当前分支：${branchText}${upstreamMissing ? "（未关联上游）" : ""}\n点击切换分支`,
   );
+  let upstreamRemote = $derived(upstream ? upstream.slice(0, Math.max(0, upstream.indexOf("/"))) || null : null);
+  let pushTarget = $derived(upstream ?? (remotes[0] ? `${remotes[0]}（发布）` : null));
+  let otherRemotes = $derived(remotes.filter((name) => name !== upstreamRemote));
   let syncSummary = $derived(
     pending !== null
       ? "进行中"
@@ -151,6 +173,7 @@
 
   function toggleMenu(which: "theme" | "sync") {
     openMenu = openMenu === which ? null : which;
+    if (openMenu === "sync") onSyncOpen?.();
     if (openMenu) void tick().then(() => menuItems(which)[0]?.focus());
   }
 
@@ -266,7 +289,7 @@
           <Icon name="chevron-down" size={13} />
         </button>
         {#if syncMenu}
-          <div class="menu" role="menu" aria-label="同步" tabindex="-1" onkeydown={(event) => onMenuKey(event, "sync")}>
+          <div class="menu sync-menu" role="menu" aria-label="同步" tabindex="-1" onkeydown={(event) => onMenuKey(event, "sync")}>
             <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => runSync(onFetch)}>
               <Icon name="download" />
               <span>获取更新<small>下载远程分支与提交信息，不修改本地文件</small></span>
@@ -277,8 +300,43 @@
             </button>
             <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => runSync(onPush)}>
               <Icon name="arrow-up" />
-              <span>推送{ahead > 0 ? ` ${ahead} 个提交` : ""}<small>不会强行推送</small></span>
+              <span>推送{ahead > 0 ? ` ${ahead} 个提交` : ""}<small>{pushTarget ? `到 ${pushTarget}，` : ""}不会强行推送</small></span>
             </button>
+            {#if remotes.length > 1 && branch && otherRemotes.length > 0}
+              <div class="menu-sep" role="separator"></div>
+              <div class="menu-label" aria-hidden="true">推送到其他远程</div>
+              {#each otherRemotes as remote (remote)}
+                <button
+                  type="button"
+                  class="menu-item"
+                  role="menuitem"
+                  title={disabled ? BUSY_REASON : `把 ${branch} 推送到 ${remote}/${branch}，不改变上游`}
+                  disabled={disabled}
+                  onclick={() => runSync(() => onPushTo?.(remote))}
+                >
+                  <Icon name="cloud" />
+                  <span>推送到 {remote}<small>{remote}/{branch}，上游保持不变</small></span>
+                </button>
+              {/each}
+              <button
+                type="button"
+                class="menu-item"
+                role="menuitem"
+                title={disabled ? BUSY_REASON : `依次推送到 ${remotes.join("、")}`}
+                disabled={disabled}
+                onclick={() => runSync(() => onPushAll?.())}
+              >
+                <Icon name="layers" />
+                <span>推送到全部 {remotes.length} 个远程<small>{remotes.join("、")}；任一失败即停下</small></span>
+              </button>
+            {/if}
+            {#if remoteBusy && onCancelSync}
+              <div class="menu-sep" role="separator"></div>
+              <button type="button" class="menu-item danger" role="menuitem" disabled={cancelling} title={cancelling ? "已请求取消，正在等待 Git 退出" : undefined} onclick={() => runSync(onCancelSync)}>
+                <Icon name="x" />
+                <span>{cancelling ? "正在取消…" : "取消正在进行的同步"}<small>网络或凭据卡住时停下；远程可能已收到部分请求</small></span>
+              </button>
+            {/if}
             <div class="menu-sep" role="separator"></div>
             <button type="button" class="menu-item" role="menuitem" onclick={() => runSync(onRemote)}>
               <Icon name="globe" />

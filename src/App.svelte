@@ -14,7 +14,7 @@
     type CommandState,
   } from "./lib/commands";
   import { LatestReadQueue } from "./lib/latest-read";
-  import { finishDiffAttempt } from "./lib/diff";
+  import { finishDiffAttempt, reuseDiffContent } from "./lib/diff";
   import { DraftBuffer } from "./lib/draft";
   import { normalizeError } from "./lib/errors";
   import { clampWidth, FALLBACK_POLL_MS, fitPaneWidth, shouldPoll } from "./lib/layout";
@@ -209,6 +209,13 @@
   let mergeInProgress = $state(false);
   let mergeProbeSerial = 0;
   let remoteName = $state<string | null>(null);
+  /** 仓库配置的全部远程名（同步菜单用）。 */
+  let remoteNames = $state<string[]>([]);
+  /** remoteNames 属于哪个仓库：同一仓库只读一次，远程弹窗读到或改动时直接更新。 */
+  let remoteNamesFor: string | null = null;
+  let syncCancelling = $state(false);
+  /** 会访问远程、可以取消的同步动作。 */
+  const REMOTE_PENDING = new Set(["fetch", "pull", "push", "publish", "associate"]);
   const drafts = new DraftBuffer();
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -691,6 +698,8 @@
     closeSwitcher(false);
     conflictFocus = null;
     remoteName = null;
+    remoteNames = [];
+    remoteNamesFor = null;
     mergeInProgress = false;
     recent = [
       { name: next.summary.name, path: next.summary.path, openedAtMs: Date.now() },
@@ -850,7 +859,7 @@
         diff = null;
         return;
       }
-      diff = outcome.value;
+      diff = reuseDiffContent(diff, outcome.value);
       diffError = null;
     } finally {
       if (token === diffToken && opened?.summary.path === current.summary.path) diffLoading = false;
@@ -933,6 +942,7 @@
     if (view === "history") {
       diffToken += 1;
       diffLoading = false;
+      diff = null;
       historyPanel ??= import("./lib/components/HistoryPanel.svelte");
     } else {
       void loadSelectedDiff();
@@ -1295,11 +1305,16 @@
     }
   }
 
-  async function runSync(name: string, action: (path: string, generation: number) => Promise<StatusSnapshot>) {
+  async function runSync(
+    name: string,
+    action: (path: string, generation: number) => Promise<StatusSnapshot>,
+    labels?: { live: string; done: string },
+  ) {
     const current = opened;
     if (!current || pending || reading) return;
     pending = name;
-    live =
+    syncCancelling = false;
+    live = labels?.live ?? (
       name === "fetch"
         ? "正在检查远程"
         : name === "pull"
@@ -1308,14 +1323,14 @@
             ? "正在发布分支"
             : name === "associate"
               ? "正在关联上游，不会推送"
-              : "正在推送";
+                : "正在推送");
     try {
       const snapshot = await action(current.summary.path, current.generation);
       if (opened?.summary.path !== current.summary.path) return;
       applySnapshot(snapshot);
       banner = null;
       if (name === "push" || name === "publish") pushRetry = false;
-      phaseNote =
+      phaseNote = labels?.done ?? (
         name === "fetch"
           ? "远程检查已完成，工作区文件没有因为检查而改变。"
           : name === "pull"
@@ -1324,16 +1339,80 @@
               ? "分支已发布并关联上游。"
               : name === "associate"
                 ? "已关联上游。这一步没有推送。"
-                : "推送已完成，没有强行推送。";
+                : "推送已完成，没有强行推送。");
       live = phaseNote;
     } catch (error) {
       if (opened?.summary.path === current.summary.path) {
         if (name === "pull" && openDivergedPull(current, error)) return;
-        handleMutationError(error);
+        const failure = normalizeError(error);
+        if (failure.code === "cancelled" && syncCancelling) {
+          if (failure.generation !== undefined) adoptGeneration(failure.generation);
+          notice(failure.message);
+          void refresh();
+          return;
+        }
+        handleMutationError(failure);
       }
     } finally {
       pending = null;
+      syncCancelling = false;
     }
+  }
+
+  /** 远程操作卡在网络或凭据上时由用户停下：只停这个仓库的远程命令，结果按刷新后的实际状态显示。 */
+  function cancelSync() {
+    const current = opened;
+    if (!current || !pending || !REMOTE_PENDING.has(pending) || syncCancelling) return;
+    syncCancelling = true;
+    live = "正在取消远程操作";
+    void api.cancelRemote(current.summary.path).catch((error: unknown) => {
+      syncCancelling = false;
+      showError(error);
+    });
+  }
+
+  /** 同步菜单打开时读一次远程列表：有多个远程时提供「推送到其他远程」。 */
+  async function loadRemoteNames() {
+    const current = opened;
+    // 写入或读取进行中不额外发读取：菜单此时也不可操作，锁释放后再打开会读到最新列表。
+    if (!current || pending || reading || remoteNamesFor === current.summary.path) return;
+    try {
+      const result = await api.remoteState(current.summary.path, current.generation, nextId());
+      if (opened?.summary.path !== current.summary.path) return;
+      remoteNames = result.remotes.map((remote) => remote.name);
+      remoteNamesFor = current.summary.path;
+    } catch {
+      // 读不到远程不影响常规推送；菜单只是不显示额外的远程。
+    }
+  }
+
+  /** 推送到指定远程的同名分支；不改上游。 */
+  function pushTo(remote: string) {
+    void runSync("push", (path, generation) => api.pushToRemote(path, remote, generation, nextId()), {
+      live: `正在推送到 ${remote}`,
+      done: `已推送到 ${remote}，没有强行推送，上游保持不变。`,
+    });
+  }
+
+  /** 依次推送到全部远程：先推上游（没有上游时发布到默认远程），再推其他远程；任一失败即停下并说明。 */
+  function pushToAll() {
+    const names = [...remoteNames];
+    const upstreamRemote = opened?.snapshot.branch.upstream?.split("/")[0] ?? null;
+    const others = names.filter((name) => name !== upstreamRemote);
+    void runSync(
+      "push",
+      async (path, generation) => {
+        let snapshot = upstreamRemote
+          ? await api.pushBranch(path, generation, nextId())
+          : await api.pushToRemote(path, others.shift() ?? names[0], generation, nextId());
+        for (const remote of others) {
+          live = `正在推送到 ${remote}`;
+          snapshot = await api.pushToRemote(path, remote, snapshot.generation, nextId());
+        }
+        return snapshot;
+      },
+      { live: `正在推送到全部 ${names.length} 个远程`, done: `已推送到 ${names.join("、")}，没有强行推送。` },
+    );
   }
 
   /** 分叉时不把快进失败当成终点：打开现有合并界面选择方式，当前分支先不动。 */
@@ -2284,6 +2363,7 @@
     {ahead}
     {behind}
     pending={syncPending}
+    remoteBusy={pending !== null && REMOTE_PENDING.has(pending)}
     {theme}
     disabled={writeLocked}
     onBrand={() => runCommand("palette.open")}
@@ -2293,6 +2373,13 @@
     onFetch={() => runCommand("sync.fetch")}
     onPull={() => runCommand("sync.pull")}
     onPush={() => runCommand("sync.push")}
+    remotes={remoteNames}
+    upstream={opened?.snapshot.branch.upstream ?? null}
+    cancelling={syncCancelling}
+    onSyncOpen={() => void loadRemoteNames()}
+    onPushTo={pushTo}
+    onPushAll={pushToAll}
+    onCancelSync={cancelSync}
     onRemote={() => runCommand("task.remote")}
     onTheme={(next) => runCommand(`theme.${next}`)}
     onSettings={() => runCommand("task.settings")}
@@ -2748,6 +2835,12 @@
   {branchGroups}
   onOpenWorktree={rememberOpened}
   {nextId}
+  onPushTo={pushTo}
+  onRemotes={(path, names) => {
+    if (opened?.summary.path !== path) return;
+    remoteNames = names;
+    remoteNamesFor = path;
+  }}
 />
 
 {#if dependencyOpen}

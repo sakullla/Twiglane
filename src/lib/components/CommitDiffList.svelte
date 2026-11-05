@@ -22,12 +22,12 @@
     nextId: () => number;
     onGeneration: (generation: number) => void;
     onFailure: (error: unknown) => void;
-    onFileHistory: (path: string) => void;
+    /** 不提供时不显示文件历史入口（例如在合并预览里）。 */
+    onFileHistory?: (path: string) => void;
   }
 
   let { opened, active = true, detail, parent, focusPath = null, onFocusPath, disabled, nextId, onGeneration, onFailure, onFileHistory }: Props = $props();
   const MAX_CONCURRENT = 2;
-  const MAX_CACHED = 24;
   const HEAD_HEIGHT = 42;
   const ESTIMATED_DIFF = 160;
   const GAP = 11;
@@ -48,7 +48,8 @@
   let hostVersion = $state(0);
   const fileHosts = new Map<string, HTMLDivElement>();
   const requested = new Set<string>();
-  const cached: string[] = [];
+  let round = 0;
+  let measuredKey = "";
   let running = 0;
   let destroyed = false;
   let tops = $derived(
@@ -62,13 +63,14 @@
   );
   let span = $derived(blockWindow(tops, scrollTop, viewport || 600, 500));
   let shown = $derived(detail.files.slice(span.start, span.end));
+  let retained = $derived(new Set(active ? shown.filter((file) => expandedSet.has(file.path)).map((file) => file.path) : []));
   let loadedCount = $derived(Object.keys(fileDiffs).filter((path) => expandedSet.has(path)).length);
 
   $effect(() => {
     if (!active) {
+      round++;
       loadedKey = "";
       requested.clear();
-      cached.length = 0;
       fileDiffs = {};
       fileErrors = {};
       fileLoading = {};
@@ -76,9 +78,14 @@
     }
     const key = `${opened.summary.path}:${detail.commit.oid}:${parent ?? ""}:${opened.generation}`;
     if (key === loadedKey) return;
+    round++;
     loadedKey = key;
+    const scope = `${opened.summary.path}:${detail.commit.oid}:${parent ?? ""}`;
+    if (scope !== measuredKey) {
+      measuredKey = scope;
+      measured = {};
+    }
     requested.clear();
-    cached.length = 0;
     expandedPaths = detail.files.map((file) => file.path);
     fileDiffs = {};
     fileErrors = {};
@@ -123,7 +130,7 @@
 
   function pump() {
     if (destroyed || !active || !loadedKey) return;
-    const base = loadedKey;
+    const base = round;
     for (const file of shown) {
       if (running >= MAX_CONCURRENT) return;
       if (!expandedSet.has(file.path) || requested.has(file.path)) continue;
@@ -137,37 +144,47 @@
     void loadedKey;
     void shown;
     void expandedSet;
-    untrack(pump);
+    const keep = retained;
+    untrack(() => {
+      if (Object.keys(fileDiffs).some((path) => !keep.has(path))) {
+        fileDiffs = Object.fromEntries(Object.entries(fileDiffs).filter(([path]) => keep.has(path)));
+      }
+      for (const path of requested) {
+        if (!keep.has(path) && !fileLoading[path]) requested.delete(path);
+      }
+      for (const path of Object.keys(fileErrors)) if (!keep.has(path)) delete fileErrors[path];
+      for (const path of Object.keys(fileLoading)) {
+        if (!keep.has(path) && !fileLoading[path]) delete fileLoading[path];
+      }
+      pump();
+    });
   });
 
-  async function loadDiff(path: string, base: string) {
+  async function loadDiff(path: string, base: number) {
     const generation = opened.generation;
     running += 1;
     fileLoading[path] = true;
     fileErrors[path] = null;
     try {
       const result = await api.commitFileDiff(opened.summary.path, detail.commit.oid, parent, path, generation, nextId(), 0, 0);
-      if (destroyed || loadedKey !== base) return;
+      if (destroyed || round !== base || !retained.has(path)) return;
       fileDiffs = { ...fileDiffs, [path]: result };
-      cached.push(path);
-      // 只保留最近查看的差异，避免滚完几万个文件后全部留在内存里。
-      while (cached.length > MAX_CACHED) {
-        const oldest = cached.shift()!;
-        const { [oldest]: removed, ...rest } = fileDiffs;
-        fileDiffs = rest;
-        requested.delete(oldest);
-        delete fileErrors[oldest];
-        delete fileLoading[oldest];
-      }
       if (result.generation !== generation) onGeneration(result.generation);
     } catch (error) {
-      if (destroyed || loadedKey !== base) return;
+      if (destroyed || round !== base || !retained.has(path)) return;
       const failure = normalizeError(error);
       fileErrors[path] = failure.message;
       onFailure(failure);
     } finally {
       running -= 1;
-      if (!destroyed && loadedKey === base) fileLoading[path] = false;
+      if (!destroyed && round === base) {
+        if (retained.has(path)) fileLoading[path] = false;
+        else {
+          requested.delete(path);
+          delete fileLoading[path];
+          delete fileErrors[path];
+        }
+      }
       pump();
     }
   }
@@ -222,7 +239,7 @@
   async function loadMore(path: string) {
     const current = fileDiffs[path];
     if (!current || fileLoading[path] || disabled || current.offset + current.lines.length >= current.totalLines) return;
-    const base = loadedKey;
+    const base = round;
     const generation = opened.generation;
     fileLoading[path] = true;
     try {
@@ -236,7 +253,7 @@
         current.offset + current.lines.length,
         400,
       );
-      if (destroyed || loadedKey !== base) return;
+      if (destroyed || round !== base || !retained.has(path)) return;
       const baseLines = current.lines.length;
       fileDiffs = { ...fileDiffs, [path]: {
         ...result,
@@ -246,12 +263,19 @@
         totalLines: result.totalLines,
       } };
     } catch (error) {
-      if (destroyed || loadedKey !== base) return;
+      if (destroyed || round !== base || !retained.has(path)) return;
       const failure = normalizeError(error);
       fileErrors[path] = failure.message;
       onFailure(failure);
     } finally {
-      if (!destroyed && loadedKey === base) fileLoading[path] = false;
+      if (!destroyed && round === base) {
+        if (retained.has(path)) fileLoading[path] = false;
+        else {
+          requested.delete(path);
+          delete fileLoading[path];
+          delete fileErrors[path];
+        }
+      }
     }
   }
 
@@ -306,7 +330,7 @@
                 <span class="chip">{commitFileLabel(file.status)}</span>
                 <Icon name="chevron-down" size={13} class={expanded ? "flip" : ""} />
               </button>
-              <button type="button" class="icon-btn sm" aria-label={`查看 ${file.path} 的文件历史`} title="查看此文件历史" onclick={() => onFileHistory(file.path)}><Icon name="history" size={13} /></button>
+              {#if onFileHistory}<button type="button" class="icon-btn sm" aria-label={`查看 ${file.path} 的文件历史`} title="查看此文件历史" onclick={() => onFileHistory(file.path)}><Icon name="history" size={13} /></button>{/if}
             </div>
             {#if expanded}
               <DiffView {onGeneration}

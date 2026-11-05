@@ -416,6 +416,33 @@ export interface MergePreview {
   conflictPaths: string[];
   /** dirty / operation / detached / same / remote_target / up_to_date */
   blocker: string | null;
+  /** 目标与来源的共同祖先；查看单个文件带入了什么时作为比较起点。 */
+  baseOid?: string | null;
+  /** 来源分支顶端提交。 */
+  sourceOid?: string | null;
+}
+
+export interface ContainingBranch {
+  name: string;
+  remote: boolean;
+  current: boolean;
+}
+
+/** 包含某个提交的分支：这次提交在哪些分支上生效。 */
+export interface CommitBranches {
+  generation: number;
+  oid: string;
+  branches: ContainingBranch[];
+  total: number;
+  current: string | null;
+}
+
+/** 仓库当前检出的分支（直接读 HEAD 文件）。 */
+export interface RepoHead {
+  path: string;
+  branch: string | null;
+  detached: string | null;
+  missing: boolean;
 }
 
 export interface ConflictEntry {

@@ -39,6 +39,34 @@ struct PerformanceFixture {
     trace: PathBuf,
 }
 
+#[tokio::test]
+async fn uncommitted_reads_at_scale() {
+    let fixture = PerformanceFixture::new(1, 0, 5_000);
+    fixture.git(&["checkout", "-f", "topic"], None);
+    fs::write(fixture.root.join("large.txt"), "changed\n").unwrap();
+    ops::require_git(&fixture.backend).await.unwrap();
+    let start = Instant::now();
+    for id in 1..=10 {
+        let diff = crate::git::changes::load_diff(
+            &fixture.backend, &fixture.path, "large.txt", None, false,
+            fixture.generation(), id, 0, 0,
+        ).await.unwrap();
+        assert_eq!((diff.additions, diff.deletions), (1, 5_000));
+    }
+    eprintln!("10 uncommitted diffs: {:?}, {} diff processes", start.elapsed(), fixture.count("diff"));
+    assert_eq!(fixture.count("diff"), 10, "complete patches must not run a second diff for numstat");
+
+    // 大型导出文件不应让状态刷新遍历全部内容。
+    fs::write(fixture.root.join("export.txt"), "exported row\n".repeat(8_000_000)).unwrap();
+    let start = Instant::now();
+    for id in 11..=13 {
+        let status = ops::refresh_status(&fixture.backend, &fixture.path, fixture.generation(), id).await.unwrap();
+        assert!(status.files.iter().any(|file| file.path == "export.txt" && file.untracked));
+        assert!(status.files.iter().find(|file| file.path == "export.txt").unwrap().unstaged_lines.is_none());
+    }
+    eprintln!("3 status refreshes with 104 MB untracked export: {:?}", start.elapsed());
+}
+
 impl PerformanceFixture {
     fn new(files: usize, branches: usize, lines: usize) -> Self {
         let fixture = git_fixture("performance");

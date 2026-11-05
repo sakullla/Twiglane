@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { highlightLines, HIGHLIGHT_CACHE_BYTES, HIGHLIGHT_WORKER_IDLE_MS, resetHighlightCache } from "../src/lib/syntax/client";
+import { highlightLines, HIGHLIGHT_CACHE_BYTES, HIGHLIGHT_WORKER_IDLE_MS, MAX_HIGHLIGHT_CHARS, resetHighlightCache } from "../src/lib/syntax/client";
+import { lineSegments } from "../src/lib/syntax/segments";
 
 class HighlightWorker {
   static instances: HighlightWorker[] = [];
@@ -45,14 +46,65 @@ describe("高亮缓存内存与后台线程", () => {
   });
 
   it("超过预算的单个文档仍会显示，但不会永久缓存", () => {
-    const lines = ["x".repeat(HIGHLIGHT_CACHE_BYTES / 2 + 1)];
+    const lines = ["x"];
     const rendered = vi.fn();
     highlightLines("typescript", lines, rendered);
     const worker = HighlightWorker.instances[0];
-    worker.complete();
+    const { id } = worker.postMessage.mock.calls[0][0];
+    worker.onmessage?.({ data: { id, start: 0, tokens: [[{ t: "x".repeat(HIGHLIGHT_CACHE_BYTES / 2 + 1), k: "" }]] } } as MessageEvent);
+    worker.onmessage?.({ data: { id, done: true, ok: true } } as MessageEvent);
     expect(rendered).toHaveBeenCalledOnce();
     highlightLines("typescript", lines, () => {});
     expect(worker.postMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("只向 Worker 发送预算内的完整行，超长行仍按原文显示", () => {
+    const huge = "x".repeat(MAX_HIGHLIGHT_CHARS);
+    const chunk = vi.fn();
+    highlightLines("typescript", ["const x = 1;", huge, "tail"], chunk);
+    const worker = HighlightWorker.instances[0];
+    expect(worker.postMessage.mock.calls[0][0].lines).toEqual(["const x = 1;"]);
+    worker.complete();
+    expect(chunk.mock.calls[0][1]).toHaveLength(1);
+    expect(lineSegments(huge, undefined)[0].t).toBe(huge);
+    const done = vi.fn();
+    highlightLines("typescript", [huge], chunk, done);
+    expect(worker.postMessage).toHaveBeenCalledTimes(1);
+    expect(done).toHaveBeenCalledOnce();
+  });
+
+  it("快速切换只复制两个在途文档，取消的排队文档不发送，等待 Worker 确认才复用槽位", () => {
+    const cancels = Array.from({ length: 50 }, (_, i) => highlightLines("typescript", [`doc-${i}`], vi.fn()));
+    const worker = HighlightWorker.instances[0];
+    expect(worker.postMessage).toHaveBeenCalledTimes(2);
+    cancels.forEach((cancel) => cancel());
+    // 只给正在运行的两个任务发送取消消息。
+    expect(worker.postMessage).toHaveBeenCalledTimes(4);
+    const fresh = vi.fn();
+    highlightLines("typescript", ["fresh"], fresh);
+    expect(worker.postMessage).toHaveBeenCalledTimes(4);
+    worker.complete(0);
+    expect(worker.postMessage).toHaveBeenCalledTimes(5);
+    expect(worker.postMessage.mock.calls[4][0].lines).toEqual(["fresh"]);
+    worker.complete(1);
+    worker.complete(4);
+    expect(fresh).toHaveBeenCalledOnce();
+    expect(worker.postMessage).toHaveBeenCalledTimes(5);
+  });
+
+  it("同内容共享排队任务，取消一个订阅不会移除另一个", () => {
+    highlightLines("typescript", ["first"], vi.fn());
+    highlightLines("typescript", ["second"], vi.fn());
+    const removed = vi.fn();
+    const kept = vi.fn();
+    const cancel = highlightLines("typescript", ["shared"], removed);
+    highlightLines("typescript", ["shared"], kept);
+    cancel();
+    const worker = HighlightWorker.instances[0];
+    worker.complete(0);
+    worker.complete(2);
+    expect(removed).not.toHaveBeenCalled();
+    expect(kept).toHaveBeenCalledOnce();
   });
 
   it("缓存命中提升 LRU 顺序，常看的文档不会先被淘汰", () => {

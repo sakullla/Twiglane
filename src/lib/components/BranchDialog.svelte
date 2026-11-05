@@ -2,7 +2,7 @@
   import { BUSY_REASON } from "../ui";
   import { tick, untrack } from "svelte";
   import { api } from "../api";
-  import { bucketBranches, filterBranches, groupIsOpen, isDefaultBranch, mainBranchNames } from "../branches";
+  import { bucketBranches, filterBranches, groupIsOpen, isDefaultBranch, mainBranchNames, trackNameFor } from "../branches";
   import { normalizeError } from "../errors";
   import type { BranchRecord, BranchState, OpenedRepository, StatusSnapshot } from "../types";
   import ConfirmDialog, { type ConfirmNote, type ConfirmTarget } from "./ConfirmDialog.svelte";
@@ -218,6 +218,8 @@
     } catch (error) {
       const failure = normalizeError(error);
       lastFailureCode = failure.code;
+      // 用户主动取消的远程删除不算失败：结果在确认框关闭后用提示说明，不弹错误。
+      if (failure.code === "cancelled" && abortingRemoval) return undefined;
       errorText = failure.message;
       onFailure(failure);
       return undefined;
@@ -567,12 +569,31 @@
     }
   }
 
+  /** 远程分支的短名已被跟踪别处的本地分支占用时，提供以新名称检出。 */
+  let mismatch = $state<{ remote: string; local: string; suggested: string } | null>(null);
+
   async function switchTo(name: string) {
     const currentRepo = opened;
+    mismatch = null;
     const result = await write(() => api.switchBranch(currentRepo.summary.path, name, currentRepo.generation, nextId()));
+    if (!result && lastFailureCode === "branch_upstream_mismatch" && opened.summary.path === currentRepo.summary.path) {
+      const short = name.slice(name.indexOf("/") + 1);
+      mismatch = { remote: name, local: short, suggested: trackNameFor(name, branches) };
+      return;
+    }
     if (!result || opened.summary.path !== currentRepo.summary.path) return;
     applyBranches(result);
     onNotice(`已切换到 ${result.snapshot.branch.name ?? name}`);
+    onClose();
+  }
+
+  async function trackAs(remote: string, local: string) {
+    const currentRepo = opened;
+    const result = await write(() => api.trackRemoteAs(currentRepo.summary.path, remote, local, currentRepo.generation, nextId()));
+    if (!result || opened.summary.path !== currentRepo.summary.path) return;
+    mismatch = null;
+    applyBranches(result);
+    onNotice(`已检出 ${remote} 为本地分支 ${local} 并切换过去。`);
     onClose();
   }
 
@@ -591,12 +612,27 @@
     confirmDelete = prompt;
   }
 
+  /** 这次删除会访问远程：网络或凭据卡住时允许取消。 */
+  let removalRemote = $state(false);
+  let abortingRemoval = $state(false);
+
+  function abortRemoval() {
+    if (!removalRemote || abortingRemoval) return;
+    abortingRemoval = true;
+    void api.cancelRemote(opened.summary.path).catch((error: unknown) => {
+      abortingRemoval = false;
+      onFailure(error);
+    });
+  }
+
   async function confirmRemoval() {
     const currentRepo = opened;
     const target = confirmDelete;
     if (!target || blocked) return;
     const twin = target.kind === "local" && alsoRemote ? target.twin : null;
     let remoteFailure: string | null = null;
+    removalRemote = target.kind === "remote" || Boolean(twin);
+    abortingRemoval = false;
     const result = await write(async () => {
       if (target.kind === "remote") {
         return api.deleteRemoteBranch(currentRepo.summary.path, target.remote, target.name, true, currentRepo.generation, nextId());
@@ -607,10 +643,25 @@
       try {
         return await api.deleteRemoteBranch(currentRepo.summary.path, twin.remote, twin.name, true, local.generation, nextId());
       } catch (error) {
-        remoteFailure = normalizeError(error).message;
+        const failure = normalizeError(error);
+        remoteFailure = failure.code === "cancelled" ? "已取消。远程可能已经收到请求，请刷新后确认。" : failure.message;
         return local;
       }
     });
+    const cancelled = abortingRemoval && (lastFailureCode === "cancelled" || remoteFailure !== null);
+    removalRemote = false;
+    abortingRemoval = false;
+    if (cancelled && !result) {
+      confirmDelete = null;
+      void restoreOrigin();
+      onNotice(
+        target.kind === "remote"
+          ? `已取消删除远程分支 ${target.remote}/${target.name}。远程可能已经收到请求，列表已刷新为实际状态。`
+          : `已取消删除。列表已刷新为实际状态。`,
+      );
+      void loadBranches();
+      return;
+    }
     // 只有「未合入」这一种失败才升级为强删确认；其它失败按普通错误处理并收起确认层。
     if (!result && target.kind === "local" && !target.force && lastFailureCode === "branch_unmerged") {
       confirmDelete = { ...target, force: true };
@@ -991,6 +1042,13 @@
     {#if errorText}
       <div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{errorText}</span></div>
     {/if}
+    {#if mismatch && errorText}
+      {@const info = mismatch}
+      <div class="branch-mismatch-actions">
+        <span>可以用新的本地名检出 <code>{info.remote}</code>，原来的 <code>{info.local}</code> 不受影响。</span>
+        <button type="button" class="btn btn-primary btn-sm" disabled={blocked} title={blocked ? (blockedReason ?? BUSY_REASON) : `新建本地分支 ${info.suggested} 并跟踪 ${info.remote}`} onclick={() => void trackAs(info.remote, info.suggested)}><Icon name="branch" size={13} />检出为 {info.suggested}</button>
+      </div>
+    {/if}
   </div>
   {#if menu}
     <ContextMenu request={menu} onClose={() => (menu = null)} />
@@ -1012,6 +1070,8 @@
       impact="branch-delete"
       onConfirm={() => void confirmRemoval()}
       onCancel={cancelPrompt}
+      onAbort={removalRemote ? abortRemoval : undefined}
+      aborting={abortingRemoval}
     >
       {#if target.kind === "local" && target.twin}
         <label class="confirm-option">

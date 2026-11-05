@@ -37,6 +37,7 @@
   import { BUSY_REASON, fileNavState, hueOf, initialOf, relativeTime, splitPath, statusMark, type FileNavState } from "../ui";
   import BranchPicker from "./BranchPicker.svelte";
   import CommitDiffList from "./CommitDiffList.svelte";
+  import CommitBranches from "./CommitBranches.svelte";
   import ConfirmDialog from "./ConfirmDialog.svelte";
   import LineCounts from "./LineCounts.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest, isContextKey, pointFor } from "./ContextMenu.svelte";
@@ -1540,6 +1541,7 @@
                 </span>
               {/each}
             </div>
+            <CommitBranches {active} repo={opened.summary.path} oid={detail.commit.oid} generation={opened.generation} {nextId} {onGeneration} />
           </div>
           <div class="commit-facts">
             {#if viewMode === "multi" && fileNav}<FileNav nav={fileNav} />{/if}

@@ -441,6 +441,24 @@ pub fn switch_track_command(
     (git.to_path_buf(), args)
 }
 
+/// 以指定名称新建跟踪远程分支的本地分支并切换：`git switch -c <local> --track <remote/branch>`。
+pub fn switch_track_as_command(
+    git: &Path,
+    root: &Path,
+    local: &str,
+    remote_branch: &str,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("switch"),
+        OsString::from("--track"),
+        OsString::from("-c"),
+        OsString::from(local),
+        OsString::from(remote_branch),
+    ]);
+    (git.to_path_buf(), args)
+}
+
 pub fn delete_branch_command(
     git: &Path,
     root: &Path,
@@ -1008,6 +1026,42 @@ pub fn merge_divergence_command(
         OsString::from("--count"),
         OsString::from(format!("{target}...{source}")),
         OsString::from("--"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// 两个分支的共同祖先（只取一个）。
+pub fn merge_base_command(git: &Path, root: &Path, target: &str, source: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("merge-base"),
+        OsString::from(target),
+        OsString::from(source),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// 包含某个提交的本地与远程分支。
+pub fn branches_containing_command(git: &Path, root: &Path, oid: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("for-each-ref"),
+        OsString::from(format!("--contains={oid}")),
+        OsString::from("--format=%(refname)"),
+        OsString::from("refs/heads"),
+        OsString::from("refs/remotes"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// 把当前分支推送到指定远程的同名分支；不强推，不改上游。
+pub fn push_to_remote_command(git: &Path, root: &Path, remote: &str, branch: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("push"),
+        OsString::from("--"),
+        OsString::from(remote),
+        OsString::from(format!("refs/heads/{branch}:refs/heads/{branch}")),
     ]);
     (git.to_path_buf(), args)
 }

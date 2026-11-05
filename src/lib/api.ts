@@ -5,6 +5,7 @@ import type {
   PreviewSource,
   FilePreview,
   CloneResult,
+  CommitBranches,
   CommitDetail,
   CommitPushReport,
   CommitResult,
@@ -17,6 +18,7 @@ import type {
   OpenedRepository,
   PanelWidths,
   RecentRepo,
+  RepoHead,
   RemoteState,
   RemoteTag,
   SettingsDto,
@@ -100,6 +102,8 @@ export const api = {
     invoke<OpenedRepository>("open_repository", { path, requestId }),
   closeRepository: () => invoke<void>("close_repository"),
   forgetRecent: (path: string) => invoke<RecentRepo[]>("forget_recent", { path }),
+  /** 直接读各仓库 HEAD 文件得到当前检出的分支，不启动 Git。 */
+  repoHeads: (paths: string[]) => invoke<RepoHead[]>("repo_heads", { paths }),
   refreshStatus: (path: string, generation: number, requestId: number) =>
     invoke<StatusSnapshot>("refresh_status", { path, generation, requestId }),
   loadDiff: (
@@ -165,6 +169,11 @@ export const api = {
     invoke<StatusSnapshot>("pull_fast_forward", { path, generation, requestId }),
   pushBranch: (path: string, generation: number, requestId: number) =>
     invoke<StatusSnapshot>("push_branch", { path, generation, requestId }),
+  /** 推送当前分支到指定远程的同名分支：不强推，不改上游。 */
+  pushToRemote: (path: string, remote: string, generation: number, requestId: number) =>
+    invoke<StatusSnapshot>("push_to_remote", { path, remote, generation, requestId }),
+  /** 停止这个仓库正在进行的远程操作（推送、获取、删除远程分支）。 */
+  cancelRemote: (path: string) => invoke<void>("cancel_remote", { path }),
   publishBranch: (path: string, remote: string, generation: number, requestId: number) =>
     invoke<StatusSnapshot>("publish_branch", { path, remote, generation, requestId }),
   associateUpstream: (path: string, remote: string, generation: number, requestId: number) =>
@@ -199,6 +208,9 @@ export const api = {
     invoke<IgnoreOutcome>("ignore_path", { path, pattern, local, generation, requestId }),
   switchBranch: (path: string, name: string, generation: number, requestId: number) =>
     invoke<BranchState>("switch_branch", { path, name, generation, requestId }),
+  /** 远程分支的短名已被占用时，以新名称检出并跟踪它。 */
+  trackRemoteAs: (path: string, remoteBranch: string, local: string, generation: number, requestId: number) =>
+    invoke<BranchState>("track_remote_as", { path, remoteBranch, local, generation, requestId }),
   deleteBranch: (
     path: string,
     name: string,
@@ -282,6 +294,20 @@ export const api = {
       offset,
       limit,
     }),
+  /** 任意两个提交之间某个文件的差异（合并预览：共同祖先 → 来源顶端）。 */
+  compareFileDiff: (
+    path: string,
+    base: string,
+    head: string,
+    relative: string,
+    generation: number,
+    requestId: number,
+    offset = 0,
+    limit = 0,
+  ) => invoke<DiffResponse>("compare_file_diff", { path, base, head, relative, generation, requestId, offset, limit }),
+  /** 包含这个提交的本地与远程分支。 */
+  commitBranches: (path: string, oid: string, generation: number, requestId: number) =>
+    invoke<CommitBranches>("commit_branches", { path, oid, generation, requestId }),
   fileHistory: (
     path: string,
     relative: string,

@@ -536,6 +536,34 @@ pub struct MergePreview {
     pub conflict_paths: Vec<String>,
     /// 阻止开始的原因代码：dirty / operation / detached / same / remote_target / up_to_date / worktree。
     pub blocker: Option<String>,
+    /// 目标与来源的共同祖先；预览里查看单个文件会带入什么时作为比较起点。
+    #[serde(default)]
+    pub base_oid: Option<String>,
+    /// 来源分支顶端提交。
+    #[serde(default)]
+    pub source_oid: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainingBranch {
+    pub name: String,
+    pub remote: bool,
+    /// 当前检出的分支。
+    pub current: bool,
+}
+
+/// 包含某个提交的分支：回答「这个提交在哪些分支上生效」。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitBranches {
+    pub generation: u64,
+    pub oid: String,
+    pub branches: Vec<ContainingBranch>,
+    /// 截断前的总数。
+    pub total: u32,
+    /// 当前检出的分支；游离 HEAD 时为空。
+    pub current: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

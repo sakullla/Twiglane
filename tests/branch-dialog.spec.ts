@@ -3,10 +3,11 @@ import path from "node:path";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { OpenedRepository } from "../src/lib/types";
+import type { BranchRecord, OpenedRepository } from "../src/lib/types";
 
 const branchState = vi.hoisted(() => vi.fn());
 const switchBranch = vi.hoisted(() => vi.fn());
+const trackRemoteAs = vi.hoisted(() => vi.fn());
 const tagState = vi.hoisted(() => vi.fn());
 const remoteState = vi.hoisted(() => vi.fn());
 const addRemote = vi.hoisted(() => vi.fn());
@@ -21,6 +22,7 @@ vi.mock("../src/lib/api", () => ({
     branchState,
     branchList: branchState,
     switchBranch,
+    trackRemoteAs,
     createBranch: vi.fn(),
     createBranchFrom,
     renameBranch,
@@ -875,7 +877,7 @@ describe("打开其他工作区、默认徽章与斜杠分组", () => {
   }
 
   function showSwitcher(
-    branches: ReturnType<typeof record>[],
+    branches: BranchRecord[],
     defaultBranch: string | null,
     current = "feature/ui",
     extra: Record<string, unknown> = {},
@@ -921,6 +923,26 @@ describe("打开其他工作区、默认徽章与斜杠分组", () => {
     switchBranch.mockResolvedValueOnce({ snapshot: opened.snapshot });
     await fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
     await waitFor(() => expect(switchBranch).toHaveBeenCalledWith("/repo", "feature/item-5999", props.opened.generation, 9));
+  });
+
+  it("远程分支的短名被跟踪别处的本地分支占用：不报错了事，可以用新名称检出", async () => {
+    const listed = [
+      { ...record("main", true), upstream: "origin/main" },
+      record("origin/main", false, null, true),
+      record("upstream/main", false, null, true),
+    ];
+    const { props } = showSwitcher(listed, "main", "main");
+    switchBranch.mockRejectedValueOnce({ code: "branch_upstream_mismatch", generation: 5, message: "本地分支 main 已占用这个短名" });
+    await fireEvent.input(screen.getByRole("combobox"), { target: { value: "upstream/main" } });
+    await fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
+    const choice = await screen.findByRole("alert");
+    expect(choice.textContent).toContain("本地已有 main");
+    expect(choice.textContent).toContain("origin/main");
+    expect(props.onFailure).not.toHaveBeenCalled();
+    trackRemoteAs.mockResolvedValueOnce({ generation: 6, branches: [], snapshot: onBranch("upstream-main").snapshot });
+    await fireEvent.click(within(choice).getByRole("button", { name: /检出为 upstream-main/ }));
+    await waitFor(() => expect(trackRemoteAs).toHaveBeenCalledWith("/repo", "upstream/main", "upstream-main", props.opened.generation, 9));
+    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith(expect.stringContaining("upstream-main")));
   });
 
   it("分支菜单打开其他工作区；路径无效或正在写入时留在原仓库", async () => {

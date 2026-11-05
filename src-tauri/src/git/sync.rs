@@ -10,13 +10,15 @@ use crate::git::command::{
     branch_list_command, check_branch_command, merged_branches_command, clone_command, create_branch_at_command,
     create_branch_command, delete_branch_command, delete_remote_branch_command,
     delete_remote_tracking_command, fetch_command, publish_command, pull_ff_command, push_command,
+    push_to_remote_command,
     remote_add_command, remote_set_url_command, remote_verbose_command, rename_branch_command,
-    set_upstream_to_command, status_command, switch_command, switch_track_command,
+    set_upstream_to_command, status_command, switch_command, switch_track_as_command,
+    switch_track_command,
 };
 use crate::git::gate::action_key;
 use crate::git::ops::{
     canonical_existing, ensure_directory, git_failure, open_repository, repo_key, require_git,
-    run_git, status_from_output, validate_input_path, Backend,
+    run_git, run_remote_git, status_from_output, validate_input_path, Backend,
 };
 use crate::git::runner::ProcessOutput;
 use crate::git::schedule::{internal_request_id, JobKind, ScheduledOutput};
@@ -221,7 +223,7 @@ pub async fn fetch_remote(
         ));
     }
     let (program, args) = fetch_command(&git.path, &root);
-    let scheduled = write_repo(
+    let scheduled = remote_write_repo(
         backend,
         &root,
         generation,
@@ -269,7 +271,7 @@ pub async fn pull_fast_forward(
         .with_generation(before.generation));
     }
     let (program, args) = pull_ff_command(&git.path, &root);
-    let scheduled = write_repo(
+    let scheduled = remote_write_repo(
         backend,
         &root,
         before.generation,
@@ -349,7 +351,7 @@ pub async fn associate_upstream(
     let upstream = format!("{remote}/{branch}");
     let (program, args) = fetch_command(&git.path, &root);
     reject_force(&args)?;
-    let fetched = write_repo(
+    let fetched = remote_write_repo(
         backend,
         &root,
         before.generation,
@@ -682,6 +684,62 @@ pub async fn rename_branch(
     })
 }
 
+/// 远程分支的短名已被另一个跟踪别处的本地分支占用（例如 upstream/main 与跟踪 origin/main 的 main）：
+/// 用新的本地名检出并跟踪它。名称已存在时由 Git 拒绝，不覆盖任何分支。
+pub async fn track_remote_as(
+    backend: &Backend,
+    path: &str,
+    remote_branch: &str,
+    local: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    let root = repo_root(path)?;
+    let _guard = backend
+        .actions
+        .enter(action_key("branch", &repo_key(&root)))?;
+    validate_branch_input(remote_branch)?;
+    validate_branch_input(local)?;
+    let git = require_git(backend).await?;
+    ensure_branch_format(backend, &root, &git.path, local, generation, request_id).await?;
+    let current = load_branch_state(backend, &root, generation, internal_request_id()).await?;
+    if !current
+        .branches
+        .iter()
+        .any(|branch| branch.remote && branch.name == remote_branch)
+    {
+        return Err(AppError::new("branch_missing", "没有这个远程分支，未切换。")
+            .with_generation(current.generation));
+    }
+    if current
+        .branches
+        .iter()
+        .any(|branch| !branch.remote && branch.name == local)
+    {
+        return Err(duplicate_branch().with_generation(current.generation));
+    }
+    let (program, args) = switch_track_as_command(&git.path, &root, local, remote_branch);
+    let scheduled = write_repo(
+        backend,
+        &root,
+        current.generation,
+        internal_request_id(),
+        program,
+        args,
+    )
+    .await?;
+    if scheduled.output.exit_code != 0 {
+        return Err(finish_remote(
+            "switch_failed",
+            &scheduled,
+            "没有切换，HEAD 和工作区保持原样。",
+        ));
+    }
+    settle_read!(backend, &root, scheduled.generation, |current| {
+        load_branch_state(backend, &root, current, internal_request_id()).await
+    })
+}
+
 pub async fn switch_branch(
     backend: &Backend,
     path: &str,
@@ -811,7 +869,7 @@ pub async fn delete_remote_branch(
     validate_branch_input(name)?;
     let git = require_git(backend).await?;
     let (program, args) = delete_remote_branch_command(&git.path, &root, remote, name);
-    let scheduled = write_repo(backend, &root, generation, request_id, program, args).await?;
+    let scheduled = remote_write_repo(backend, &root, generation, request_id, program, args).await?;
     if scheduled.output.exit_code != 0 {
         return Err(finish_remote(
             "delete_failed",
@@ -862,7 +920,7 @@ async fn push_with_upstream(
     }
     let git = require_git(backend).await?;
     let (program, args) = push_command(&git.path, root);
-    let scheduled = write_repo(
+    let scheduled = remote_write_repo(
         backend,
         root,
         before.generation,
@@ -908,7 +966,7 @@ async fn publish_to(
     };
     let remote = resolve_remote(backend, root, &git.path, remote, before.generation).await?;
     let (program, args) = publish_command(&git.path, root, &remote, &branch);
-    let scheduled = write_repo(
+    let scheduled = remote_write_repo(
         backend,
         root,
         before.generation,
@@ -1214,6 +1272,100 @@ async fn write_repo(
         Err(error) => Err(attach_generation(backend, root, remote_timeout(error))),
         Ok(scheduled) => Ok(scheduled),
     }
+}
+
+/// 访问远程的写入：用户可以在设备卡住（网络、凭据）时取消。取消后远程可能已经收到请求，
+/// 本地只按刷新后的实际状态显示，不假设成功或失败。
+async fn remote_write_repo(
+    backend: &Backend,
+    root: &Path,
+    generation: u64,
+    request_id: u64,
+    program: PathBuf,
+    args: Vec<std::ffi::OsString>,
+) -> Result<ScheduledOutput, AppError> {
+    match run_remote_git(
+        backend,
+        &repo_key(root),
+        JobKind::Write,
+        request_id,
+        program,
+        args,
+        Some(generation),
+    )
+    .await
+    {
+        Err(error) if error.code == "cancelled" => Err(attach_generation(
+            backend,
+            root,
+            AppError::new(
+                "cancelled",
+                "已取消远程操作。远程可能已经收到部分请求，请以刷新后的状态为准。",
+            ),
+        )),
+        Err(error) => Err(attach_generation(backend, root, remote_timeout(error))),
+        Ok(scheduled) => Ok(scheduled),
+    }
+}
+
+/// 停止这个仓库正在进行的远程操作。
+pub fn cancel_remote(backend: &Backend, path: &str) -> Result<(), AppError> {
+    let root = repo_root(path)?;
+    backend.scheduler.cancel_remote(&repo_key(&root));
+    Ok(())
+}
+
+/// 把当前分支推送到指定远程的同名分支。用于有多个远程时推送到上游以外的远程；
+/// 不强推，也不改变当前分支的上游。
+pub async fn push_to_remote(
+    backend: &Backend,
+    path: &str,
+    remote: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    let root = repo_root(path)?;
+    let key = repo_key(&root);
+    let _guard = backend.actions.enter(action_key("sync", &key))?;
+    let git = require_git(backend).await?;
+    let before = snapshot_at(backend, &root, generation, request_id).await?;
+    if before.branch.unborn {
+        return Err(AppError::new("no_commit", "还没有提交，不能推送。"));
+    }
+    if before.branch.detached {
+        return Err(detached_error());
+    }
+    let Some(branch) = before.branch.name.clone() else {
+        return Err(detached_error());
+    };
+    validate_branch_input(&branch)?;
+    let remote = resolve_remote(backend, &root, &git.path, remote, before.generation).await?;
+    let (program, args) = push_to_remote_command(&git.path, &root, &remote, &branch);
+    reject_force(&args)?;
+    let scheduled = remote_write_repo(
+        backend,
+        &root,
+        before.generation,
+        internal_request_id(),
+        program,
+        args,
+    )
+    .await?;
+    if scheduled.output.exit_code != 0 {
+        return Err(finish_remote(
+            "push_failed",
+            &scheduled,
+            &format!("没有推送到 {remote}，也没有强行推送。"),
+        ));
+    }
+    backend.remote_checks.note(&key, now_ms());
+    settle_read!(backend, &root, scheduled.generation, |current| snapshot_at(
+        backend,
+        &root,
+        current,
+        internal_request_id()
+    )
+    .await)
 }
 
 fn attach_generation(backend: &Backend, root: &Path, error: AppError) -> AppError {
@@ -2335,6 +2487,76 @@ mod tests {
             .branches
             .iter()
             .any(|branch| branch.remote && branch.name == "origin/topic"));
+    }
+
+    #[tokio::test]
+    async fn push_to_named_remote_reaches_the_second_remote_without_moving_upstream() {
+        let fixture = crate::test_support::git_fixture("push-second-remote");
+        let backend = fixture.backend();
+        let (_origin, work) = seed_bare(&fixture);
+        git(
+            fixture.path(),
+            &["clone", "--bare", repo_key(&work).as_str(), "mirror.git"],
+        );
+        let mirror = fixture.path().join("mirror.git");
+        git(&work, &["remote", "add", "mirror", repo_key(&mirror).as_str()]);
+        fs::write(work.join("file.txt"), "next\n").unwrap();
+        git(&work, &["commit", "-am", "next"]);
+        let head = git_text(&work, &["rev-parse", "HEAD"]);
+        let opened = add_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        let missing = push_to_remote(&backend, &opened.summary.path, "nowhere", opened.generation, 2)
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code, "remote_missing");
+        let generation = backend.scheduler.current_generation(&repo_key(&work));
+        let pushed = push_to_remote(&backend, &opened.summary.path, "mirror", generation, 3)
+            .await
+            .unwrap();
+        assert_eq!(
+            git_text(fixture.path(), &["--git-dir", "mirror.git", "rev-parse", "main"]).trim(),
+            head.trim()
+        );
+        // 上游仍是 origin/main，origin 没有收到这次推送。
+        assert_eq!(pushed.branch.upstream.as_deref(), Some("origin/main"));
+        assert_ne!(
+            git_text(fixture.path(), &["--git-dir", "origin.git", "rev-parse", "main"]).trim(),
+            head.trim()
+        );
+        // 没有进行中的远程操作时取消不报错，也不影响随后的推送。
+        cancel_remote(&backend, &opened.summary.path).unwrap();
+        let generation = backend.scheduler.current_generation(&repo_key(&work));
+        push_branch(&backend, &opened.summary.path, generation, 4).await.unwrap();
+        assert_eq!(
+            git_text(fixture.path(), &["--git-dir", "origin.git", "rev-parse", "main"]).trim(),
+            head.trim()
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_short_name_taken_can_be_checked_out_under_a_new_name() {
+        let fixture = crate::test_support::git_fixture("track-as");
+        let backend = fixture.backend();
+        let (origin, work) = seed_bare(&fixture);
+        git(&work, &["remote", "add", "upstream", repo_key(&origin).as_str()]);
+        git(&work, &["fetch", "upstream"]);
+        let opened = add_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        let held = switch_branch(&backend, &opened.summary.path, "upstream/main", opened.generation, 2)
+            .await
+            .unwrap_err();
+        assert_eq!(held.code, "branch_upstream_mismatch");
+        let generation = backend.scheduler.current_generation(&repo_key(&work));
+        let taken = track_remote_as(&backend, &opened.summary.path, "upstream/main", "main", generation, 3)
+            .await
+            .unwrap_err();
+        assert_eq!(taken.code, "branch_duplicate");
+        let generation = backend.scheduler.current_generation(&repo_key(&work));
+        let state = track_remote_as(&backend, &opened.summary.path, "upstream/main", "upstream-main", generation, 4)
+            .await
+            .unwrap();
+        assert_eq!(state.snapshot.branch.name.as_deref(), Some("upstream-main"));
+        assert_eq!(state.snapshot.branch.upstream.as_deref(), Some("upstream/main"));
+        let main = state.branches.iter().find(|branch| !branch.remote && branch.name == "main").unwrap();
+        assert_eq!(main.upstream.as_deref(), Some("origin/main"));
     }
 
     fn record(name: &str, remote: bool, upstream: Option<&str>) -> BranchRecord {

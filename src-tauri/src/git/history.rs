@@ -37,6 +37,7 @@ const MAX_BODY_CHARS: usize = 16 * 1024;
 const MAX_PREVIEW_PATHS: usize = 200;
 const MAX_IGNORED_NAMES: usize = 20;
 const MAX_LABELS: usize = 32;
+const MAX_CONTAINING_BRANCHES: usize = 300;
 
 // 同一提交的每个文件都需要重命名信息。仅缓存最近一份文件目录，避免每点一次文件
 // 都重新 diff-tree 整个提交；generation 变化后失效，Git replace 等变化也不会复用。
@@ -224,10 +225,142 @@ pub async fn commit_file_diff(
         ));
     };
     let selected = choose_parent(&commit, parent)?;
-    let (files, generation) = load_commit_files(
+    diff_file_between(
+        backend, &root, &git.path, oid, selected, relative, &requested, generation, offset, limit,
+    )
+    .await
+}
+
+/// 任意两个提交之间某个文件的差异：合并预览里查看「来源相对共同祖先带入了什么」。
+#[allow(clippy::too_many_arguments)]
+pub async fn compare_file_diff(
+    backend: &Backend,
+    path: &str,
+    base: &str,
+    head: &str,
+    relative: &str,
+    generation: u64,
+    request_id: u64,
+    offset: u32,
+    limit: u32,
+) -> Result<crate::model::DiffResponse, AppError> {
+    let root = repo_root(path)?;
+    let base = validate_oid(base)?;
+    let head = validate_oid(head)?;
+    let requested = safe_relative(relative)?;
+    let git = require_git(backend).await?;
+    // 先确认两个提交都存在：同时作为本次读取的 generation 校验。
+    let (header, generation) = read_log(
         backend,
         &root,
         &git.path,
+        generation,
+        request_id,
+        commit_header_command(&git.path, &root, &head),
+    )
+    .await?;
+    if parse_history_records(&header)?.is_empty() {
+        return Err(AppError::new(
+            "commit_missing",
+            "找不到来源分支的提交，可能已被移动。请重新检查。",
+        ));
+    }
+    diff_file_between(
+        backend, &root, &git.path, head, Some(base), relative, &requested, generation, offset, limit,
+    )
+    .await
+}
+
+/// 包含这个提交的本地与远程分支；当前检出的分支排在最前。
+pub async fn commit_branches(
+    backend: &Backend,
+    path: &str,
+    oid: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<crate::model::CommitBranches, AppError> {
+    let root = repo_root(path)?;
+    let oid = validate_oid(oid)?;
+    let git = require_git(backend).await?;
+    let (output, generation) = read_output(
+        backend,
+        &root,
+        generation,
+        request_id,
+        crate::git::command::branches_containing_command(&git.path, &root, &oid),
+    )
+    .await?;
+    if output.exit_code != 0 {
+        return Err(git_failure(
+            "history_failed",
+            &output,
+            "无法读取包含这个提交的分支，未修改仓库。",
+        ));
+    }
+    let (head, generation) = read_output(
+        backend,
+        &root,
+        generation,
+        internal_request_id(),
+        show_current_branch_command(&git.path, &root),
+    )
+    .await?;
+    let current = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    let current = (head.exit_code == 0 && !current.is_empty()).then_some(current);
+    let mut branches = parse_containing_refs(&output.stdout, current.as_deref());
+    let total = u32::try_from(branches.len()).unwrap_or(u32::MAX);
+    branches.truncate(MAX_CONTAINING_BRANCHES);
+    Ok(crate::model::CommitBranches {
+        generation,
+        oid,
+        branches,
+        total,
+        current,
+    })
+}
+
+fn parse_containing_refs(bytes: &[u8], current: Option<&str>) -> Vec<crate::model::ContainingBranch> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut branches: Vec<crate::model::ContainingBranch> = text
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if let Some(name) = line.strip_prefix("refs/heads/") {
+                return Some(crate::model::ContainingBranch {
+                    name: name.to_string(),
+                    remote: false,
+                    current: Some(name) == current,
+                });
+            }
+            let name = line.strip_prefix("refs/remotes/")?;
+            // origin/HEAD 只是指向默认分支的别名，列出来是重复的。
+            if name.ends_with("/HEAD") {
+                return None;
+            }
+            Some(crate::model::ContainingBranch { name: name.to_string(), remote: true, current: false })
+        })
+        .collect();
+    branches.sort_by(|a, b| b.current.cmp(&a.current).then(a.remote.cmp(&b.remote)).then(a.name.cmp(&b.name)));
+    branches
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn diff_file_between(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    oid: String,
+    selected: Option<String>,
+    relative: &str,
+    requested: &Path,
+    generation: u64,
+    offset: u32,
+    limit: u32,
+) -> Result<crate::model::DiffResponse, AppError> {
+    let (files, generation) = load_commit_files(
+        backend,
+        root,
+        git,
         &oid,
         selected.as_deref(),
         generation,
@@ -240,12 +373,12 @@ pub async fn commit_file_diff(
         ));
     };
     let parent_oid = selected.as_deref().unwrap_or(EMPTY_TREE_OID);
-    let paths = diff_paths(file, &requested)?;
-    let (program, args) = commit_diff_command(&git.path, &root, parent_oid, &oid, &paths);
+    let paths = diff_paths(file, requested)?;
+    let (program, args) = commit_diff_command(git, root, parent_oid, &oid, &paths);
     let scheduled = backend
         .scheduler
         .execute(crate::git::schedule::GitJob {
-            repo_key: repo_key(&root),
+            repo_key: repo_key(root),
             kind: JobKind::Read,
             request_id: internal_request_id(),
             generation,
@@ -276,8 +409,8 @@ pub async fn commit_file_diff(
     } else {
         commit_numstat(
             backend,
-            &git.path,
-            &root,
+            git,
+            root,
             parent_oid,
             &oid,
             &paths,
@@ -2464,6 +2597,49 @@ mod tests {
         assert!(!args
             .iter()
             .any(|arg| arg == "--all" || arg == "-a" || arg == "--include-ignored"));
+    }
+
+    #[tokio::test]
+    async fn containing_branches_and_range_diffs_answer_where_a_commit_lives() {
+        let fixture = crate::test_support::git_fixture("history-contains");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "base\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
+        let base = git_text(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        git(&repo, &["switch", "-c", "topic"]);
+        fs::write(repo.join("file.txt"), "one\n").unwrap();
+        git(&repo, &["commit", "-am", "one"]);
+        fs::write(repo.join("file.txt"), "two\n").unwrap();
+        git(&repo, &["commit", "-am", "two"]);
+        let tip = git_text(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        git(&repo, &["switch", "main"]);
+        git(&repo, &["update-ref", "refs/remotes/origin/main", &base]);
+        git(&repo, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+
+        let gen = generation(&backend, &repo);
+        let found = commit_branches(&backend, &repo_key(&repo), &base, gen, 401).await.unwrap();
+        let names: Vec<_> = found.branches.iter().map(|branch| (branch.name.as_str(), branch.remote, branch.current)).collect();
+        assert_eq!(names, vec![("main", false, true), ("topic", false, false), ("origin/main", true, false)]);
+        assert_eq!(found.current.as_deref(), Some("main"));
+        assert_eq!(found.total, 3);
+        let only_topic = commit_branches(&backend, &repo_key(&repo), &tip, found.generation, 402).await.unwrap();
+        assert_eq!(only_topic.branches.len(), 1);
+        assert!(!only_topic.branches[0].current);
+
+        // 合并预览里的文件差异：共同祖先 → 来源顶端，跨越两个提交。
+        let diff = compare_file_diff(&backend, &repo_key(&repo), &base, &tip, "file.txt", only_topic.generation, 403, 0, 0)
+            .await
+            .unwrap();
+        assert_eq!((diff.additions, diff.deletions), (1, 1));
+        assert!(diff.lines.iter().any(|line| line.text.contains("two")));
+        assert!(!diff.lines.iter().any(|line| line.text == "+one"));
+        let invalid = compare_file_diff(&backend, &repo_key(&repo), "HEAD", &tip, "file.txt", diff.generation, 404, 0, 0)
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.code, "invalid_revision");
     }
 
     #[tokio::test]

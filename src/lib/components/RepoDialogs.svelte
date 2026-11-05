@@ -23,6 +23,10 @@
     /** 从被占用的分支打开另一个工作区。 */
     onOpenWorktree?: (repo: OpenedRepository) => void;
     nextId: () => number;
+    /** 读到或改动了远程列表：外壳据此更新同步菜单里的「推送到其他远程」。 */
+    onRemotes?: (path: string, names: string[]) => void;
+    /** 把当前分支推送到指定远程（不改上游）；有多个远程时在列表里提供入口。 */
+    onPushTo?: (remote: string) => void;
   }
 
   let {
@@ -39,6 +43,8 @@
     branchGroups = true,
     onOpenWorktree,
     nextId,
+    onRemotes,
+    onPushTo,
   }: Props = $props();
 
   let cloneUrl = $state("");
@@ -173,6 +179,7 @@
     const result = await (cloning ? readWhileCloning(read) : run("remote", read));
     if (!result || opened?.summary.path !== key) return;
     remotes = result.remotes;
+    onRemotes?.(key, result.remotes.map((remote) => remote.name));
     onSnapshot(result.snapshot);
     if (!remoteName && result.remotes[0]) remoteName = result.remotes[0].name;
   }
@@ -204,6 +211,7 @@
     );
     if (!result) return;
     remotes = result.remotes;
+    onRemotes?.(current.summary.path, result.remotes.map((remote) => remote.name));
     onSnapshot(result.snapshot);
     onNotice(exists ? `已更新远程 ${name}` : `已添加远程 ${name}`);
   }
@@ -282,17 +290,31 @@
       {:else if remotes.length === 0}
         <div class="list-empty">还没有远程。在下面添加一个。</div>
       {:else}
+        {@const upstreamRemote = opened?.snapshot.branch.upstream?.split("/")[0] ?? null}
+        {@const branchName = opened?.snapshot.branch.detached ? null : (opened?.snapshot.branch.name ?? null)}
         {#each remotes as remote (remote.name)}
-          <div class="list-row">
+          <div class="list-row remote-row" class:editing={remote.name === remoteName.trim()}>
             <Icon name="cloud" />
             <div class="lr-main">
-              <span class="lr-title"><span>{remote.name}</span></span>
+              <span class="lr-title">
+                <span>{remote.name}</span>
+                {#if remote.name === upstreamRemote}<span class="chip current" title={`当前分支跟踪 ${opened?.snapshot.branch.upstream}，「推送」默认推到这里`}>当前上游</span>{/if}
+              </span>
               <span class="lr-sub mono" title={remote.fetchUrl}>{remote.fetchUrl}</span>
               {#if remote.pushUrl}
                 <span class="lr-sub mono" title={remote.pushUrl}>推送地址 {remote.pushUrl}</span>
               {/if}
             </div>
-            <button type="button" class="btn btn-ghost btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={() => editRemote(remote)}>
+            {#if onPushTo && branchName && remotes.length > 1 && remote.name !== upstreamRemote}
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm"
+                title={blocked ? BUSY_REASON : `把 ${branchName} 推送到 ${remote.name}/${branchName}，不改变上游，不强推`}
+                disabled={blocked}
+                onclick={() => onPushTo?.(remote.name)}
+              ><Icon name="arrow-up" size={13} />推送到此远程</button>
+            {/if}
+            <button type="button" class="btn btn-ghost btn-sm" title={blocked ? BUSY_REASON : `修改 ${remote.name} 的地址`} disabled={blocked} onclick={() => editRemote(remote)}>
               <Icon name="pencil" size={13} />修改
             </button>
           </div>

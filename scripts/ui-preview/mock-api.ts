@@ -277,6 +277,22 @@ const ok = async <T>(value: T, ms?: number) => {
   return value;
 };
 
+/** 远程操作：可以被 cancelRemote 中途停下，用来预览「取消」。 */
+let remoteAbort: (() => void) | null = null;
+function slowRemote<T>(finish: () => T, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      remoteAbort = null;
+      resolve(finish());
+    }, ms);
+    remoteAbort = () => {
+      clearTimeout(timer);
+      remoteAbort = null;
+      reject({ code: "cancelled", generation, message: `已取消${label}。远程可能已经收到部分请求，请以刷新后的状态为准。` });
+    };
+  });
+}
+
 // 默认覆盖已推送、未推送、远程不同三种状态；?tags=offline 模拟读不到远程。
 const remoteTagOids = new Map([
   ["v0.1.0", commits[3].oid],
@@ -376,6 +392,17 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     return ok(recent);
   },
   cancelReads: () => ok(undefined),
+  repoHeads: (paths: string[]) =>
+    ok(paths.map((path, index) => ({
+      path,
+      branch: index % 4 === 3 ? null : ["feature/modern-ui", "main", "develop", ""][index % 4] || "main",
+      detached: index % 4 === 3 ? "1a2b3c4" : null,
+      missing: index === 2,
+    })), 60),
+  cancelRemote: () => {
+    remoteAbort?.();
+    return ok(undefined, 0);
+  },
   refreshStatus: () => ok(snapshot()),
   loadDiff: (_repo: string, path: string, staged: boolean, _generation: number, _request: number, _original: string | null, offset = 0) => {
     const result = withHeaders(diffFor(path, staged));
@@ -409,7 +436,11 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   },
   commitAndPush: () => ok({ committed: true, pushed: false, retryPush: true, oid: "abc", branch: branch.name, summary: "本地提交已完成，推送失败。", pushError: "网络不可用：无法连接到远程。可以稍后只重试推送。", generation, snapshot: snapshot() }, 500),
   cloneRepository: (_url: string, parent: string, name: string) => ok({ path: `${parent}/${name || "clone"}`, opened: opened(`${parent}/${name || "clone"}`) }, 800),
-  remoteState: () => ok({ generation, remotes: [{ name: "origin", fetchUrl: "https://github.com/example/twiglane.git", pushUrl: null }], snapshot: snapshot() }),
+  remoteState: () => ok({ generation, remotes: [
+    { name: "origin", fetchUrl: "https://github.com/example/twiglane.git", pushUrl: null },
+    ...(previewParams.get("remotes") === "1" ? [] : [{ name: "upstream", fetchUrl: "https://github.com/upstream/twiglane.git", pushUrl: null }]),
+  ], snapshot: snapshot() }),
+  pushToRemote: (_repo: string, remote: string) => slowRemote(() => snapshot(), 900, `推送到 ${remote}`),
   addRemote: () => ok({ generation, remotes: [], snapshot: snapshot() }),
   setRemoteUrl: () => ok({ generation, remotes: [], snapshot: snapshot() }),
   fetchRemote: () => ok(snapshot(), 900),
@@ -417,10 +448,11 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     branch.behind = 0;
     return ok(snapshot(), 700);
   },
-  pushBranch: () => {
-    branch.ahead = 0;
-    return ok(snapshot(), 700);
-  },
+  pushBranch: () =>
+    slowRemote(() => {
+      branch.ahead = 0;
+      return snapshot();
+    }, previewParams.get("remote") === "slow" ? 30_000 : 700, "推送"),
   publishBranch: () => ok(snapshot()),
   associateUpstream: () => ok(snapshot()),
   branchList: () => ok(branchData()),
@@ -497,11 +529,23 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     generation += 1;
     return ok(branchData());
   },
-  deleteRemoteBranch: (_repo: string, remote: string, name: string) => {
-    const index = branches.findIndex((item) => item.remote && (item.name === name || item.name === `${remote}/${name}`));
-    if (index >= 0) branches.splice(index, 1);
+  deleteRemoteBranch: (_repo: string, remote: string, name: string) =>
+    slowRemote(() => {
+      const index = branches.findIndex((item) => item.remote && (item.name === name || item.name === `${remote}/${name}`));
+      if (index >= 0) branches.splice(index, 1);
+      generation += 1;
+      return branchData();
+    }, previewParams.get("remote") === "slow" ? 30_000 : 400, "删除远程分支"),
+  trackRemoteAs: (_repo: string, remoteBranch: string, local: string) => {
+    if (branches.some((item) => !item.remote && item.name === local)) {
+      return Promise.reject({ code: "branch_duplicate", generation, message: "已有同名分支，未再创建一个。" });
+    }
+    branches.push({ name: local, remote: false, current: false, upstream: remoteBranch, worktree: null });
+    for (const item of branches) item.current = !item.remote && item.name === local;
+    branch.name = local;
+    branch.upstream = remoteBranch;
     generation += 1;
-    return ok(branchData());
+    return ok(branchData(), 250);
   },
   tagState: () => ok({ generation, tags: mockTags.map((item) => ({ ...item })), snapshot: snapshot() }),
   createTag: (_repo: string, name: string, target: string, message: string) => {
@@ -561,6 +605,17 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       branches: ["main"],
       head: "main",
     }),
+  commitBranches: (_repo: string, oid: string) => {
+    const index = Math.max(0, commits.findIndex((item) => item.oid === oid));
+    const list = [
+      ...(index < 40 ? [{ name: branch.name, remote: false, current: true }] : []),
+      ...(index > 2 ? [{ name: "main", remote: false, current: false }, { name: "origin/main", remote: true, current: false }] : []),
+      ...(index % 2 === 0 ? [{ name: "origin/feature/modern-ui", remote: true, current: false }, { name: "upstream/feature/modern-ui", remote: true, current: false }] : []),
+      ...(index > 6 ? Array.from({ length: 14 }, (_, n) => ({ name: `release/2026.${n + 1}`, remote: false, current: false })) : []),
+    ];
+    return ok({ generation, oid, branches: list, total: list.length, current: branch.name }, 350);
+  },
+  compareFileDiff: (_repo: string, _base: string, _head: string, path: string) => ok(withHeaders(diffFor(path, false)), 200),
   cherryPickCommits: () => ok({ generation, conflicted: false, skipped: [], note: "已按从旧到新拣选到当前分支。没有推送。", snapshot: snapshot() }),
   checkoutCommit: () => ok({ ...snapshot(), branch: { ...snapshot().branch, detached: true, name: null } }),
   commitDetail: (_repo: string, oid: string) => {
@@ -637,6 +692,8 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       conflictCheck: upToDate || fastForward ? "clean" : conflictPaths.length ? "conflicts" : "clean",
       conflictPaths,
       blocker,
+      baseOid: upToDate ? null : commits[20].oid,
+      sourceOid: upToDate ? null : commits[1].oid,
     }, 260);
   },
   startMerge: (_repo: string, source: string, target: string | null, mode: string) => {

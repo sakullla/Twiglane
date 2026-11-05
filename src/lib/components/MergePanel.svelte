@@ -979,6 +979,10 @@
           </div>
         {/if}
         <MergeSetup
+          {opened}
+          {nextId}
+          {onGeneration}
+          {onFailure}
           {branches}
           {mainBranches}
           {current}

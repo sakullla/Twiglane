@@ -44,6 +44,27 @@ describe("确认框", () => {
     expect(props.onConfirm).toHaveBeenCalledTimes(1);
   });
 
+  it("远程操作在途且可取消：取消、Esc、右上角关闭都转为停止操作，停止中不重复请求", async () => {
+    const onAbort = vi.fn();
+    const props = base({ busy: true, onAbort });
+    const view = render(ConfirmDialog, { props: props as never });
+    const cancel = screen.getByRole("button", { name: "取消" }) as HTMLButtonElement;
+    expect(cancel.disabled).toBe(false);
+    expect(screen.getByRole("status").textContent).toContain("可以随时取消");
+    await fireEvent.click(cancel);
+    expect(onAbort).toHaveBeenCalledTimes(1);
+    await fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(onAbort).toHaveBeenCalledTimes(2);
+    expect(props.onCancel).not.toHaveBeenCalled();
+
+    await view.rerender({ ...props, aborting: true } as never);
+    const stopping = screen.getByRole("button", { name: /正在取消/ }) as HTMLButtonElement;
+    expect(stopping.disabled).toBe(true);
+    await fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(onAbort).toHaveBeenCalledTimes(2);
+    expect((screen.getByRole("button", { name: "删除分支" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("写入在途：确认按钮转圈，取消、Esc 和右上角关闭都不生效；不可用时写明原因", async () => {
     const props = base({ busy: true });
     const view = render(ConfirmDialog, { props: props as never });

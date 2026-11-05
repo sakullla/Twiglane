@@ -732,6 +732,10 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".diff-more": "差异面板底部横向分隔线",
   ".full-value": "详情弹窗的只读展示框（readonly textarea），只区分文本块；可编辑态 textarea.full-value.editable 用控件边界",
   ".multi-file": "多文件卡外框，卡内文件行自带交互反馈",
+  ".switcher-hint": "仓库弹层底部键位提示的虚线分隔，纯说明文字",
+  ".merge-review-side": "合并审阅左栏与明细之间的竖向分栏线；条目行自带 hover/选中反馈",
+  ".merge-review-keys": "合并审阅左栏底部键位提示的分隔线，纯说明文字",
+  ".merge-detail-head": "合并明细头部底部横向分隔线，纯分区",
   ".chip.ignore": "忽略标记 chip 的虚线描边，是状态标记而非可点击控件",
 
   // --- components.css：表格/列分隔线与分区线 ---

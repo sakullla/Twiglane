@@ -100,6 +100,7 @@ const mocks = vi.hoisted(() => ({
   fetchRemote: vi.fn(),
   pullFastForward: vi.fn(),
   pushBranch: vi.fn(),
+  pushToRemote: vi.fn(),
   publishBranch: vi.fn(),
   associateUpstream: vi.fn(),
   mergeSession: vi.fn(),
@@ -1365,6 +1366,8 @@ describe("应用外壳", () => {
     await waitFor(() => expect(document.querySelector("[data-task-modal]")).toBeNull());
 
     await startFetch();
+    // 打开同步菜单时（尚未锁定）会读一次远程列表，用来提供「推送到其他远程」；锁定之后不再读。
+    mocks.remoteState.mockClear();
     await fireEvent.click(sync);
     await fireEvent.click(screen.getByRole("menuitem", { name: /^远程/ }));
     const remote = await waitFor(() => {
@@ -1386,6 +1389,23 @@ describe("应用外壳", () => {
     await fireEvent.click(sync);
     await fireEvent.click(screen.getByRole("menuitem", { name: /^远程/ }));
     await waitFor(() => expect(mocks.remoteState).toHaveBeenCalledTimes(2));
+  });
+
+  it("推送到指定远程时播报目标，不误报成正在检查远程", async () => {
+    mocks.remoteState.mockResolvedValue({ generation: 4, snapshot, remotes: [
+      { name: "origin", fetchUrl: "https://example.com/demo.git", pushUrl: null },
+      { name: "mirror", fetchUrl: "https://example.com/mirror.git", pushUrl: null },
+    ] });
+    let finish: (value: StatusSnapshot) => void = () => {};
+    mocks.pushToRemote.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: /^同步/ }));
+    await fireEvent.click(await screen.findByRole("menuitem", { name: /^推送到 mirror/ }));
+    await waitFor(() => expect(mocks.pushToRemote).toHaveBeenCalledWith(repoPath, "mirror", 4, expect.any(Number)));
+    expect(screen.getByText("正在推送到 mirror")).toBeTruthy();
+    finish(snapshot);
+    await waitFor(() => expect(document.querySelector(".toast-text")?.textContent).toBe("已推送到 mirror，没有强行推送，上游保持不变。"));
   });
 
   it("低频入口：分支弹层进入新建、合并和管理，同步菜单进入远程，命令面板的分支与标签仍是管理界面", async () => {

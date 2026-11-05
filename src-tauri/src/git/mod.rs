@@ -26,6 +26,7 @@ pub mod advice;
 pub mod changes;
 pub mod command;
 pub mod gate;
+pub mod heads;
 pub mod history;
 pub mod locate;
 pub mod ops;

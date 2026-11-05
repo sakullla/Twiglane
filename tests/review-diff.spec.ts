@@ -120,6 +120,40 @@ describe("多文件差异", () => {
     expect(screen.getByText(codeLine("b-content"))).toBeTruthy();
   });
 
+  it("离开视口后释放差异，返回时重新读取，不累计最近 24 个文件", async () => {
+    const many = { ...detail, files: Array.from({ length: 100 }, (_, i) => ({ ...detail.files[0], path: `file-${i}.txt` })) };
+    const view = render(CommitDiffList, {
+      opened, detail: many, parent: "parent0", focusPath: "file-0.txt", disabled: false,
+      nextId: () => 1, onGeneration: vi.fn(), onFailure: vi.fn(),
+    });
+    const callsFor = (path: string) => commitFileDiff.mock.calls.filter((call) => call[3] === path).length;
+    await waitFor(() => expect(callsFor("file-0.txt")).toBe(1));
+    await view.rerender({ focusPath: "file-99.txt" });
+    await waitFor(() => expect(callsFor("file-99.txt")).toBe(1));
+    await view.rerender({ focusPath: "file-0.txt" });
+    await waitFor(() => expect(callsFor("file-0.txt")).toBe(2));
+    await fireEvent.click(screen.getByRole("button", { name: "全部收起" }));
+    await waitFor(() => expect(screen.getByText(/已展开 0 \/ 100 个，已加载 0 个/)).toBeTruthy());
+  });
+
+  it("隐藏后立即重开相同提交也丢弃旧轮次响应", async () => {
+    const requests: Array<(value: DiffResponse) => void> = [];
+    commitFileDiff.mockImplementation(() => new Promise((resolve) => requests.push(resolve)));
+    const view = render(CommitDiffList, {
+      opened, detail: { ...detail, files: detail.files.slice(0, 1) }, parent: "parent0", disabled: false,
+      nextId: () => 1, onGeneration: vi.fn(), onFailure: vi.fn(),
+    });
+    await waitFor(() => expect(requests).toHaveLength(1));
+    await view.rerender({ active: false });
+    await view.rerender({ active: true });
+    await waitFor(() => expect(requests).toHaveLength(2));
+    requests[0](diffFor("src/a.ts", "+OLD RESPONSE"));
+    await tick();
+    expect(screen.queryByText(codeLine("OLD RESPONSE"))).toBeNull();
+    requests[1](diffFor("src/a.ts", "+NEW RESPONSE"));
+    expect(await screen.findByText(codeLine("NEW RESPONSE"))).toBeTruthy();
+  });
+
   it("文件块高度跟随内容，标题带行数，一个文件失败时另一个仍可阅读", async () => {
     commitFileDiff.mockImplementation((_repo: string, _oid: string, _parent: string, path: string) => {
       if (path.endsWith("b.ts")) return Promise.reject({ code: "diff_failed", message: "这个文件的差异没有读出来。" });

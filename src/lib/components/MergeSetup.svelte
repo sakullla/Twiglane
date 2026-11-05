@@ -3,13 +3,17 @@
 </script>
 
 <script lang="ts">
-  import { commitFileLabel, formatAuthoredAt, shortOid } from "../history";
-  import type { BranchRecord, MergePreview } from "../types";
-  import { BUSY_REASON, hueOf, initialOf, relativeTime, splitPath, statusMark } from "../ui";
+  import type { BranchRecord, MergePreview, OpenedRepository } from "../types";
+  import { BUSY_REASON } from "../ui";
   import BranchPicker from "./BranchPicker.svelte";
   import Icon from "./Icon.svelte";
+  import MergeReview from "./MergeReview.svelte";
 
   interface Props {
+    opened: OpenedRepository;
+    nextId: () => number;
+    onGeneration: (generation: number) => void;
+    onFailure: (error: unknown) => void;
     branches: BranchRecord[];
     /** 主干分支，两个分支下拉框里用星标。 */
     mainBranches?: string[];
@@ -36,6 +40,10 @@
   }
 
   let {
+    opened,
+    nextId,
+    onGeneration,
+    onFailure,
     branches,
     mainBranches = [],
     current,
@@ -59,7 +67,6 @@
     branchGroups = true,
   }: Props = $props();
 
-  let tab = $state<"commits" | "files" | "conflicts">("commits");
   /** 合并说明默认收成一行摘要：多数人用默认说明就好，需要时再展开改。 */
   let editingMessage = $state(false);
 
@@ -90,13 +97,8 @@
   let ready = $derived(Boolean(preview && preview.source === source && preview.target === target));
   /** 目标上没有来源缺少的提交：只能快进，合并与变基都没有意义，方式选择整块不出现。 */
   let ffOnly = $derived(Boolean(ready && preview?.fastForward));
-  let shownConflicts = $derived(ready && preview ? preview.conflictPaths : []);
-
-  $effect(() => {
-    if (!ready || !preview) return;
-    if (tab === "conflicts" && preview.conflictPaths.length === 0) tab = "commits";
-    if (tab === "commits" && preview.commits.length === 0 && preview.files.length > 0) tab = "files";
-  });
+  /** 有内容可审阅时下半部分整块交给审阅区，配置区收紧。 */
+  let reviewing = $derived(Boolean(ready && preview && preview.incoming > 0));
 
   function blockerTitle(code: string | null): string {
     switch (code) {
@@ -118,10 +120,14 @@
   }
 </script>
 
-<div class="merge-setup">
+<div class="merge-setup" class:reviewing>
+  <div class="merge-config">
   <section class="merge-route-card" aria-label="合并方向">
     <div class="merge-endpoint">
-      <span class="merge-endpoint-label"><span class="merge-endpoint-dot source"></span>从这个分支带来改动</span>
+      <div class="merge-endpoint-head">
+        <span class="merge-endpoint-label"><span class="merge-endpoint-dot source"></span>从这个分支带来改动</span>
+        <small>{sourceRecord?.remote ? "远程跟踪分支：以最近一次获取为准" : source === current ? "你正在使用的分支" : "本地分支"}</small>
+      </div>
       <BranchPicker
         label="来源分支"
         {branches}
@@ -134,7 +140,6 @@
         {mainBranches}
         onChange={onSource}
       />
-      <small>{sourceRecord?.remote ? "远程跟踪分支：内容以最近一次获取为准" : source === current ? "你正在使用的分支" : "本地分支"}</small>
     </div>
 
     <div class="merge-flow" aria-hidden="false">
@@ -150,7 +155,14 @@
     </div>
 
     <div class="merge-endpoint target">
-      <span class="merge-endpoint-label"><span class="merge-endpoint-dot target"></span>合并结果留在这个分支</span>
+      <div class="merge-endpoint-head">
+        <span class="merge-endpoint-label"><span class="merge-endpoint-dot target"></span>合并结果留在这个分支</span>
+        <small class:switch-note={!(mode === "rebase" && !ffOnly) && target !== current}>
+          {#if mode === "rebase" && !ffOnly}
+            {#if target === current}变基只改写当前分支，不会切换{:else}<Icon name="info" size={12} />变基只会改写当前分支，请把目标留在当前分支{/if}
+          {:else if target === current}当前分支，合并直接在这里进行{:else}<Icon name="info" size={12} />开始时会先切换到 {target}{/if}
+        </small>
+      </div>
       <BranchPicker
         label="目标分支"
         {branches}
@@ -164,11 +176,6 @@
         {mainBranches}
         onChange={onTarget}
       />
-      <small class:switch-note={!(mode === "rebase" && !ffOnly) && target !== current}>
-        {#if mode === "rebase" && !ffOnly}
-          {#if target === current}变基只改写当前分支，不会切换{:else}<Icon name="info" size={12} />变基只会改写当前分支，请把目标留在当前分支{/if}
-        {:else if target === current}当前分支，合并直接在这里进行{:else}<Icon name="info" size={12} />开始时会先切换到 {target}{/if}
-      </small>
     </div>
   </section>
 
@@ -227,6 +234,13 @@
           <p>{preview.note}{#if preview.canStart && conflicts} 开始后逐处解决，可随时中止。{/if}{#if preview.canStart && ffOnly} {preview.target} 没有自己的新提交，会直接前移到 {source} 的最新提交，不产生合并记录。{/if}</p>
         </div>
         {#if previewing}<span class="spinner muted"></span>{/if}
+        {#if preview.incoming > 0}
+          <span class="merge-verdict-stats" aria-label={`将带入 ${preview.incoming} 个提交、${preview.filesTotal} 个文件`}>
+            <span><strong>{preview.incoming}</strong>个提交</span>
+            <span><strong>{preview.filesTotal}</strong>个文件</span>
+            {#if preview.conflictPaths.length > 0}<span class="warn"><strong>{preview.conflictPaths.length}</strong>处可能冲突</span>{/if}
+          </span>
+        {/if}
       </div>
 
       {#if preview.blocker === "dirty"}
@@ -244,94 +258,44 @@
         </div>
       {/if}
 
-      {#if preview.incoming > 0}
-      {#if ready && preview?.canStart && !ffOnly}
+      {#if preview.incoming > 0 && preview.canStart && !ffOnly}
         <section class="merge-options" aria-label="合并方式">
-          {#if !ffOnly}
-            <div class="merge-mode-row">
-              <span class="merge-mode-label" id="merge-mode-label">合并方式</span>
-              <div class="segmented merge-mode" role="radiogroup" aria-labelledby="merge-mode-label">
-                <button type="button" role="radio" aria-checked={mode !== "rebase"} title={blocked ? BUSY_REASON : "保留两边的历史，多一条合并记录"} disabled={blocked} onclick={() => onMode("merge")}>创建合并提交<span class="merge-mode-tag">推荐</span></button>
-                <button type="button" role="radio" aria-checked={mode === "rebase"} title={blocked ? BUSY_REASON : "把当前分支的提交接到来源之后，会改写历史"} disabled={blocked} onclick={() => onMode("rebase")}>变基</button>
-              </div>
+          <div class="merge-options-row">
+            <span class="merge-mode-label" id="merge-mode-label">方式</span>
+            <div class="segmented merge-mode" role="radiogroup" aria-labelledby="merge-mode-label">
+              <button type="button" role="radio" aria-checked={mode !== "rebase"} title={blocked ? BUSY_REASON : "保留两边的历史，多一条合并记录"} disabled={blocked} onclick={() => onMode("merge")}>创建合并提交<span class="merge-mode-tag">推荐</span></button>
+              <button type="button" role="radio" aria-checked={mode === "rebase"} title={blocked ? BUSY_REASON : "把当前分支的提交接到来源之后，会改写历史"} disabled={blocked} onclick={() => onMode("rebase")}>变基</button>
             </div>
-            {#if mode === "rebase"}
-              <p class="merge-mode-note warn">
-                <Icon name="alert" size={13} />
-                <span>将改写当前分支上尚未进入 {source} 的提交，适合熟悉 Git 的用户。远程不会改变，也不会推送。{#if target !== current}变基只会改写当前分支，请把目标留在当前分支。{/if}</span>
-              </p>
-            {:else}
-              <div class="merge-message-row">
-                {#if editingMessage}
-                  <label class="merge-message">
-                    <span>合并说明</span>
-                    <input class="input" aria-label="合并说明" value={message} title={blocked ? BUSY_REASON : undefined} disabled={blocked} oninput={(event) => onMessage((event.currentTarget as HTMLInputElement).value)} />
-                  </label>
-                {:else}
-                  <span class="merge-message-label">合并说明</span>
-                  <code class="merge-message-preview" title={message}>{message || "（空）"}</code>
-                  <button type="button" class="btn btn-ghost btn-sm" disabled={blocked} title={blocked ? BUSY_REASON : undefined} onclick={() => (editingMessage = true)}><Icon name="pencil" size={13} />编辑合并说明</button>
-                {/if}
-              </div>
+            {#if mode !== "rebase"}
+              <span class="merge-options-sep" aria-hidden="true"></span>
+              {#if editingMessage}
+                <label class="merge-message">
+                  <span class="merge-message-label">说明</span>
+                  <!-- svelte-ignore a11y_autofocus -->
+                  <input class="input" aria-label="合并说明" value={message} autofocus title={blocked ? BUSY_REASON : undefined} disabled={blocked} oninput={(event) => onMessage((event.currentTarget as HTMLInputElement).value)} onkeydown={(event) => { if (event.key === "Enter") editingMessage = false; }} onblur={() => (editingMessage = false)} />
+                </label>
+              {:else}
+                <span class="merge-message-label">说明</span>
+                <button type="button" class="merge-message-preview" aria-label="编辑合并说明" disabled={blocked} title={blocked ? BUSY_REASON : `${message}
+点击编辑合并说明`} onclick={() => (editingMessage = true)}>
+                  <code>{message || "（空）"}</code><Icon name="pencil" size={12} />
+                </button>
+              {/if}
             {/if}
+          </div>
+          {#if mode === "rebase"}
+            <p class="merge-mode-note warn">
+              <Icon name="alert" size={13} />
+              <span>将改写当前分支上尚未进入 {source} 的提交，适合熟悉 Git 的用户。远程不会改变，也不会推送。{#if target !== current}变基只会改写当前分支，请把目标留在当前分支。{/if}</span>
+            </p>
           {/if}
         </section>
       {/if}
-
-        <div class="merge-tabs" role="tablist" aria-label="合并内容">
-          <button type="button" role="tab" aria-selected={tab === "commits"} onclick={() => (tab = "commits")}>提交<span class="count">{preview.incoming}</span></button>
-          <button type="button" role="tab" aria-selected={tab === "files"} onclick={() => (tab = "files")}>文件<span class="count">{preview.filesTotal}</span></button>
-          {#if shownConflicts.length > 0}
-            <button type="button" role="tab" aria-selected={tab === "conflicts"} onclick={() => (tab = "conflicts")}>预计冲突<span class="count warning">{shownConflicts.length}</span></button>
-          {/if}
-        </div>
-        <div class="merge-tab-body" role="tabpanel">
-          {#if tab === "commits"}
-            <ul class="merge-commit-list" aria-label="将带入的提交">
-              {#each preview.commits as commit (commit.oid)}
-                <li title={`${commit.summary}\n${commit.authorName} · ${formatAuthoredAt(commit.authoredAt)}`}>
-                  <span class="avatar" style={`--hue:${hueOf(commit.authorName)}`} aria-hidden="true">{initialOf(commit.authorName)}</span>
-                  <span class="merge-commit-summary">{commit.summary}</span>
-                  <span class="merge-commit-meta">{commit.authorName} · {relativeTime(commit.authoredAt)}</span>
-                  <code>{shortOid(commit.oid)}</code>
-                </li>
-              {/each}
-              {#if preview.incoming > preview.commits.length}
-                <li class="merge-list-more">还有 {preview.incoming - preview.commits.length} 个更早的提交没有列出</li>
-              {/if}
-            </ul>
-          {:else if tab === "files"}
-            <ul class="merge-file-list" aria-label="将带入的文件">
-              {#each preview.files as file (`${file.status}:${file.path}`)}
-                {@const mark = statusMark(commitFileLabel(file.status))}
-                {@const parts = splitPath(file.path)}
-                {@const hot = preview.conflictPaths.includes(file.path)}
-                <li title={file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}>
-                  <span class={`st ${mark.tone}`}>{mark.letter}</span>
-                  <span class="merge-file-name">{parts.name}</span>
-                  {#if parts.dir}<span class="merge-file-dir">{parts.dir}</span>{/if}
-                  {#if hot}<span class="merge-hot">可能冲突</span>{/if}
-                </li>
-              {/each}
-              {#if preview.filesTotal > preview.files.length}
-                <li class="merge-list-more">还有 {preview.filesTotal - preview.files.length} 个文件没有列出</li>
-              {/if}
-            </ul>
-          {:else}
-            <ul class="merge-file-list" aria-label="预计冲突的文件">
-              {#each shownConflicts as path (path)}
-                {@const parts = splitPath(path)}
-                <li title={path}>
-                  <span class="st st-con">!</span>
-                  <span class="merge-file-name">{parts.name}</span>
-                  {#if parts.dir}<span class="merge-file-dir">{parts.dir}</span>{/if}
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        </div>
-      {/if}
     {/if}
   </section>
+  </div>
 
+  {#if reviewing && preview}
+    <MergeReview {opened} {preview} disabled={blocked} {nextId} {onGeneration} {onFailure} />
+  {/if}
 </div>

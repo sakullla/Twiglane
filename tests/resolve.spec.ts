@@ -456,7 +456,8 @@ describe("合并面板", () => {
     completeMerge.mockResolvedValue({ oid: "d".repeat(40), generation: 7, summary: "已完成合并提交，包含 1 个路径。", files: [], snapshot: opened.snapshot });
     renderPanel();
     expect(await screen.findByText("可以合并，没有冲突")).toBeTruthy();
-    expect(screen.getByRole("list", { name: "将带入的提交" }).textContent).toContain("加上登录页");
+    // 审阅区的提交列表可逐条点开查看明细。
+    expect(screen.getByRole("listbox", { name: "将带入的提交" }).textContent).toContain("加上登录页");
     // 分叉时只在「创建合并提交」与「变基」里选，快进不作为选项出现。
     expect(screen.getByRole("radio", { name: /创建合并提交/ }).getAttribute("aria-checked")).toBe("true");
     expect(screen.queryByRole("radio", { name: /快进/ })).toBeNull();

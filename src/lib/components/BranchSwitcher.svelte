@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { blockTops, blockWindow } from "../ui";
   import { api } from "../api";
-  import { bucketBranches, filterBranches, groupIsOpen, isDefaultBranch, mainBranchNames } from "../branches";
+  import { bucketBranches, filterBranches, groupIsOpen, isDefaultBranch, mainBranchNames, trackNameFor } from "../branches";
   import { normalizeError } from "../errors";
   import type { IconName } from "../icons";
   import type { BranchRecord, BranchListing, OpenedRepository, StatusSnapshot } from "../types";
@@ -85,6 +85,8 @@
   let errorText = $state<string | null>(null);
   let openingWorktree = $state(false);
   let menu = $state<ContextMenuRequest | null>(null);
+  /** 远程分支的短名被跟踪别处的本地分支占用：给出「切到本地同名分支」或「以新名称检出」两条路。 */
+  let mismatch = $state<{ remote: string; local: string; suggested: string } | null>(null);
   /** 切换在途时弹层可能已被收起，甚至换成了别的弹层；那时不能再替它们关闭。 */
   let mounted = true;
 
@@ -321,12 +323,39 @@
     }
     const repo = opened;
     errorText = null;
+    mismatch = null;
     onBusy("branch");
     try {
       const result = await api.switchBranch(repo.summary.path, branch.name, repo.generation, nextId());
       if (opened.summary.path !== repo.summary.path) return;
       onSnapshot(result.snapshot);
       onNotice(`已切换到 ${result.snapshot.branch.name ?? branch.name}`);
+      if (mounted) onClose();
+    } catch (error) {
+      const failure = normalizeError(error);
+      if (failure.code === "branch_upstream_mismatch" && branch.remote) {
+        if (failure.generation !== undefined) onGeneration(failure.generation);
+        const short = branch.name.slice(branch.name.indexOf("/") + 1);
+        mismatch = { remote: branch.name, local: short, suggested: trackNameFor(branch.name, branches) };
+        return;
+      }
+      errorText = failure.message;
+      onFailure(failure);
+    } finally {
+      onBusy(null);
+    }
+  }
+
+  async function trackAs(remote: string, local: string) {
+    const repo = opened;
+    errorText = null;
+    onBusy("branch");
+    try {
+      const result = await api.trackRemoteAs(repo.summary.path, remote, local, opened.generation, nextId());
+      if (opened.summary.path !== repo.summary.path) return;
+      mismatch = null;
+      onSnapshot(result.snapshot);
+      onNotice(`已检出 ${remote} 为本地分支 ${local} 并切换过去。`);
       if (mounted) onClose();
     } catch (error) {
       const failure = normalizeError(error);
@@ -358,6 +387,25 @@
         <Icon name="info" size={14} />
         <span>{blockedReason}</span>
       </p>
+    {/if}
+    {#if mismatch}
+      {@const info = mismatch}
+      {@const localRecord = branches.find((item) => !item.remote && item.name === info.local)}
+      <div class="switcher-choice" role="alert">
+        <p>
+          <Icon name="info" size={14} />
+          <span>本地已有 <code>{info.local}</code>{#if localRecord?.upstream}（跟踪 <code>{localRecord.upstream}</code>）{/if}，不能直接用这个名字检出 <code>{info.remote}</code>。</span>
+        </p>
+        <div class="switcher-choice-actions">
+          <button type="button" class="btn btn-primary btn-sm" disabled={blockedReason !== null} title={blockedReason ?? `新建本地分支 ${info.suggested} 并跟踪 ${info.remote}`} onclick={() => void trackAs(info.remote, info.suggested)}>
+            <Icon name="branch" size={13} />检出为 {info.suggested}
+          </button>
+          {#if localRecord && !isCurrent(localRecord)}
+            <button type="button" class="btn btn-secondary btn-sm" disabled={blockedReason !== null} title={blockedReason ?? `切换到本地分支 ${info.local}`} onclick={() => void choose(localRecord)}>切到本地 {info.local}</button>
+          {/if}
+          <button type="button" class="btn btn-ghost btn-sm" onclick={() => onCreateBranch(info.remote)}>自定义名称…</button>
+        </div>
+      </div>
     {/if}
     {#if errorText}
       <p class="switcher-error" role="alert">

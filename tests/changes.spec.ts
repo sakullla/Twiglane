@@ -6,6 +6,7 @@ import DiffView from "../src/lib/components/DiffView.svelte";
 import FileList from "../src/lib/components/FileList.svelte";
 import MultiFileDiff from "../src/lib/components/MultiFileDiff.svelte";
 import { shortcutCommand, isTextEntry } from "../src/lib/shortcuts";
+import { reuseDiffContent } from "../src/lib/diff";
 import {
   batchSummary,
   batchTargets,
@@ -355,6 +356,28 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   Reflect.deleteProperty(window, "innerWidth");
+});
+
+describe("刷新差异内容复用", () => {
+  it("相同补丁保留行和代码块，同时采用新的 generation", () => {
+    const previous = diffFor("file.txt", false);
+    const incoming = { ...diffFor("file.txt", false), generation: previous.generation + 1 };
+    const result = reuseDiffContent(previous, incoming);
+    expect(result.lines).toBe(previous.lines);
+    expect(result.hunks).toBe(previous.hunks);
+    expect(result.generation).toBe(incoming.generation);
+  });
+
+  it("内容、路径、暂存侧、分页变化和二进制预览都采用新结果", () => {
+    const previous = diffFor("file.txt", false);
+    for (const update of [
+      { snapshot: "changed" }, { snapshot: "" }, { path: "other.txt" },
+      { staged: true }, { offset: 1 }, { totalLines: 100 }, { lines: [] }, { binary: true },
+    ]) {
+      const incoming = { ...diffFor("file.txt", false), ...update };
+      expect(reuseDiffContent(previous, incoming)).toBe(incoming);
+    }
+  });
 });
 
 describe("主工作台", () => {

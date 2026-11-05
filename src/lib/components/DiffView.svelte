@@ -105,7 +105,8 @@
   /* Git 的文件头（diff --git / index / --- / +++ / new file mode …）对读差异的人是噪音：
      文件路径、状态和增删统计都已经在工具条里。这里只保留代码行与块标题，
      并记下每一行在原始列表里的位置，按块暂存仍按原始下标找块。 */
-  let shown = $derived(visibleDiffLines(currentDiff?.lines ?? []));
+  let sourceLines = $derived(currentDiff?.lines);
+  let shown = $derived(visibleDiffLines(sourceLines ?? []));
   let lines = $derived<ViewLine[]>(shown.lines);
   let metaOnly = $derived(shown.lines.length === 0 && shown.meta.length > 0);
   let sideRows = $derived(renderMode === "split" ? toSideRows(lines) : []);

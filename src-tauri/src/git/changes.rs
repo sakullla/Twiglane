@@ -108,17 +108,23 @@ pub async fn load_diff_with_context(
     let raw = first_file_diff(&scheduled.output.stdout);
     let truncated = scheduled.output.stdout_truncated || raw.len() != scheduled.output.stdout.len();
     let parsed = parse_diff(raw, truncated)?;
-    let counts = numstat_counts(
-        backend,
-        &git.path,
-        &root,
-        &paths,
-        staged,
-        untracked,
-        generation,
-        internal_request_id(),
-    )
-    .await?;
+    // 完整补丁已经包含精确行数和二进制标记，避免再启动 Git 重算同一份差异。
+    // 截断时仍需 numstat，不能把预览中的部分行数当作整个文件的统计。
+    let counts = if parsed.truncated {
+        numstat_counts(
+            backend,
+            &git.path,
+            &root,
+            &paths,
+            staged,
+            untracked,
+            generation,
+            internal_request_id(),
+        )
+        .await?
+    } else {
+        None
+    };
     // 二进制没有行数，改为给出改动前后的大小：已暂存看 HEAD 与索引，未暂存看索引与工作区文件。
     let sizes = if diff_is_binary(&parsed, counts) {
         use crate::git::sizes::{head_name, index_name, object_sizes, worktree_size};
@@ -1560,6 +1566,7 @@ mod tests {
         .await
         .unwrap();
         assert!(diff.truncated || !diff.complete);
+        assert_eq!((diff.additions, diff.deletions), (2, 2), "truncated previews still use full numstat counts");
         assert!(diff.text.is_none() || diff.truncated);
         let incomplete = diff.hunks.iter().find(|hunk| !hunk.stageable);
         if let Some(hunk) = incomplete {

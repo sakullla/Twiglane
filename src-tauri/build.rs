@@ -94,6 +94,7 @@ fn main() {
             "measure_sample",
             "measure_finish",
             "measure_wait",
+            "update_install_supported",
         ])),
     )
     .expect("failed to run tauri-build");

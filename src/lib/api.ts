@@ -411,4 +411,6 @@ export const api = {
     invoke<void>("measure_sample", { name, detail }),
   measureFinish: () => invoke<void>("measure_finish"),
   measureWait: (ms: number) => invoke<void>("measure_wait", { ms }),
+  /** 当前安装方式是否支持应用内安装（仅 Linux 非 AppImage 为 false）。 */
+  updateInstallSupported: () => invoke<boolean>("update_install_supported"),
 };

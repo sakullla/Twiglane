@@ -5,12 +5,14 @@
  * （payload 为 camelCase 的 {version, notes, installSupported}），这里统一接收：
  * 设置弹窗的应用更新分区与后续的提示入口共享同一份 offer。
  *
- * 手动检查（plugin-updater 的 check）只带回版本与说明；installSupported 是
- * 后端对安装方式的判定（仅 Linux 非 AppImage 为 false），只有事件携带，
- * 手动检查不覆盖它，事件未到时按可安装渲染，安装失败仍走 failed 态。
+ * installSupported 是后端对安装方式的判定（仅 Linux 非 AppImage 为 false）。
+ * 自动检查的事件只在发现新版本时发出（离线/端点不可用的会话收不到），所以
+ * 手动检查路径同时经 `update_install_supported` 命令查询同一判定（同源
+ * install_supported()），先到先用，保证事件未到的会话（例如 deb 上启动时
+ * 离线）也能正确显示「不支持应用内安装」。
  */
 
-import { listenEvent } from "./api";
+import { api, listenEvent } from "./api";
 
 /** 后端事件与共享 store 里的新版本信息。 */
 export interface UpdateOffer {
@@ -42,11 +44,11 @@ type DownloadEventLike =
 export const updateState = $state({
   /** 当前可用的新版本；null 表示没有（尚未发现或最近一次检查为最新）。 */
   offer: null as UpdateOffer | null,
-  /** 后端事件判定的安装支持；null 表示事件还没到，按可安装渲染。 */
+  /** 安装支持判定：事件与手动检查的命令查询同源；null 表示两处都还没到，按可安装渲染。 */
   installSupported: null as boolean | null,
 });
 
-/** 事件或测试写入共享 offer；installSupported 仅由事件路径更新。 */
+/** 事件或测试写入共享 offer；installSupported 由事件路径或命令查询更新。 */
 export function setUpdateOffer(offer: UpdateOffer | null): void {
   updateState.offer = offer;
 }
@@ -89,8 +91,18 @@ export function resetUpdateState(): void {
 /** 手动检查得到的安装句柄；模块内持有，不进 $state（插件对象不参与渲染）。 */
 let pendingUpdate: UpdateHandle | null = null;
 
-/** 手动检查：取回句柄并同步共享 offer；无更新返回 null。 */
+/** 经命令查询安装支持并与事件同源写入；查询失败保持现状（事件或上次值仍可用）。 */
+async function refreshInstallSupport(): Promise<void> {
+  try {
+    updateState.installSupported = await api.updateInstallSupported();
+  } catch {
+    // 命令不可用（旧后端/异常）时不阻塞检查流程。
+  }
+}
+
+/** 手动检查：取回句柄并同步共享 offer 与安装支持判定；无更新返回 null。 */
 async function fetchUpdate(): Promise<UpdateHandle | null> {
+  void refreshInstallSupport();
   const { check } = await import("@tauri-apps/plugin-updater");
   const update = (await check()) as UpdateHandle | null;
   pendingUpdate = update;

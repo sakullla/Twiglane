@@ -396,6 +396,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     return ok(recent);
   },
   cancelReads: () => ok(undefined),
+  updateInstallSupported: () => ok(true),
   repoHeads: (paths: string[]) =>
     ok(paths.map((path, index) => ({
       path,

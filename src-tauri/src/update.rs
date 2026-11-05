@@ -16,11 +16,19 @@ fn install_supported_on(linux: bool, has_appimage: bool) -> bool {
 }
 
 /// 当前进程的安装支持判定。AppImage 运行时才有 APPIMAGE 环境变量。
-fn install_supported() -> bool {
+/// 同时暴露给 `update_install_supported` 命令：启动自动检查的事件只在发现新版本时
+/// 发出（离线/端点不可用的会话收不到），手动检查路径靠命令补同一判定。
+pub(crate) fn install_supported() -> bool {
     install_supported_on(
         cfg!(target_os = "linux"),
         std::env::var_os("APPIMAGE").is_some(),
     )
+}
+
+/// 查询当前安装方式是否支持应用内安装（前端手动检查路径使用）。
+#[tauri::command]
+pub(crate) fn update_install_supported() -> bool {
+    install_supported()
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -65,7 +73,7 @@ mod tests {
     use tauri::Listener;
 
     use super::{auto_check_update, emit_update_available, install_supported,
-                install_supported_on, UPDATE_AVAILABLE_EVENT};
+                install_supported_on, update_install_supported, UPDATE_AVAILABLE_EVENT};
 
     /// 注册 updater 插件的 mock app：插件配置只给最小必填 pubkey、无端点，
     /// `updater()` 会因端点缺失返回 Err，即真实“updater 不可用”路径，
@@ -138,5 +146,11 @@ mod tests {
             value.get("install_supported").is_none(),
             "字段应为 camelCase"
         );
+    }
+
+    /// 命令与事件负载同源：手动检查路径靠它补上同一判定。
+    #[test]
+    fn update_install_supported_command_matches_event_source() {
+        assert_eq!(update_install_supported(), install_supported());
     }
 }

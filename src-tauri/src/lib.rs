@@ -11,6 +11,8 @@ mod watch;
 
 pub use measure::mark_process_start;
 
+use update::update_install_supported;
+
 #[cfg(test)]
 mod security;
 #[cfg(test)]
@@ -145,7 +147,8 @@ pub fn run() {
             measure_probe,
             measure_sample,
             measure_finish,
-            measure_wait
+            measure_wait,
+            update_install_supported
         ])
         .build(tauri::generate_context!())
         .expect("启动 Twiglane 失败");

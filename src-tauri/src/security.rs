@@ -102,6 +102,7 @@ fn capabilities_do_not_grant_a_shell() {
         "allow-measure-sample",
         "allow-measure-finish",
         "allow-measure-wait",
+        "allow-update-install-supported",
     ];
     assert_eq!(permissions, expected);
     assert!(permissions.iter().all(|permission| {

@@ -168,7 +168,7 @@
   }
 
   let updateOffer = $derived(updateState.offer);
-  /** installSupported 只有后端事件携带；事件未到按可安装渲染，安装失败仍会走 failed 态。 */
+  /** installSupported 由事件或手动检查的命令查询同源写入；null（两处都未到）按可安装渲染。 */
   let updateInstallSupported = $derived(updateState.installSupported !== false);
   let updatePercent = $derived(
     updateProgress.total ? Math.min(100, Math.round((updateProgress.downloaded / updateProgress.total) * 100)) : null,

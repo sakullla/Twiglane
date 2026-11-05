@@ -91,6 +91,7 @@
     "allow-measure-probe",
     "allow-measure-sample",
     "allow-measure-finish",
-    "allow-measure-wait"
+    "allow-measure-wait",
+    "allow-update-install-supported"
   ]
 }

@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => {
     pickDirectory: vi.fn(async () => null),
     pickFile: vi.fn(async () => null),
     appVersion: vi.fn(async () => "0.2.17"),
+    updateInstallSupported: vi.fn(async () => true),
   };
   const extra = new Map<string, ReturnType<typeof vi.fn>>();
   const api = new Proxy(explicit as Record<string, unknown>, {
@@ -303,6 +304,19 @@ describe("installSupported 与非原生模式", () => {
     expect(screen.queryByRole("button", { name: "下载并安装" }), "deb 安装不渲染安装动作").toBeNull();
     expect(within(section).getByText(/不支持应用内安装/)).toBeTruthy();
     expect(within(section).getByRole("button", { name: "检查更新" }), "手动检查仍可用").toBeTruthy();
+  });
+
+  it("事件未到（离线启动）且命令判定不支持：手动检查后仍无安装动作并显示不支持说明", async () => {
+    stubNative();
+    mocks.updateInstallSupported.mockResolvedValue(false);
+    mocks.check.mockResolvedValue(fakeUpdate());
+    const { section } = renderSettings();
+    expect(updateState.installSupported, "事件未到时判定为空").toBeNull();
+    await fireEvent.click(within(section).getByRole("button", { name: "检查更新" }));
+    await waitFor(() => expect(within(section).getByText("发现新版本 0.3.0。")).toBeTruthy());
+    await waitFor(() => expect(updateState.installSupported, "手动检查经命令补上判定").toBe(false));
+    expect(screen.queryByRole("button", { name: "下载并安装" }), "deb 上即使事件未到也不给安装动作").toBeNull();
+    expect(within(section).getByText(/不支持应用内安装/)).toBeTruthy();
   });
 
   it("非原生（浏览器/预览 mock）模式：更新分区不可用", async () => {

@@ -364,6 +364,10 @@ function mergeData() {
 export async function listenEvent() {
   return () => {};
 }
+/** 预览没有 Tauri 运行时：版本号未知，设置里的应用更新分区按不可用展示。 */
+export async function appVersion() {
+  return null;
+}
 export async function pickDirectory() {
   return "C:/Users/dev/project/new-repo";
 }

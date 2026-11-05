@@ -20,6 +20,7 @@
   import { clampWidth, FALLBACK_POLL_MS, fitPaneWidth, shouldPoll } from "./lib/layout";
   import { branchLabel, commitScope, createSelectionResolver, dependencyNote, filterRows, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
   import { startDesktopMeasure } from "./lib/measure";
+  import { watchUpdateAvailable } from "./lib/update.svelte";
   import { isTextEntry, shortcutCommand } from "./lib/shortcuts";
   import type {
     AppFailure,
@@ -153,8 +154,8 @@
   let windowWidth = $state(currentWindowWidth());
   let sidebarHidden = $state(false);
   let paneWidth = $derived(fitPaneWidth(widths.files, windowWidth));
-  /** 设置 modal 打开时要定位的分区；由 Git 诊断入口置为 runtime，其余入口为空。 */
-  let settingsSection = $state<"appearance" | "runtime" | null>(null);
+  /** 设置 modal 打开时要定位的分区；由 Git 诊断入口置为 runtime、更新入口置为 update，其余入口为空。 */
+  let settingsSection = $state<"appearance" | "runtime" | "update" | null>(null);
   /** 当前打开的标题栏弹层；anchor 是触发按钮，关闭后焦点回到这里。 */
   let switcher = $state.raw<{ kind: "repo" | "branch"; anchor: HTMLElement } | null>(null);
   let confirmPath = $state<string | null>(null);
@@ -515,8 +516,8 @@
     if (task === "publish") void loadRemoteName();
   }
 
-  /** 设置 modal：默认落在外观首屏，Git 诊断入口另行指定运行环境分区（R10）。 */
-  function openSettings(section: "appearance" | "runtime" | null = null) {
+  /** 设置 modal：默认落在外观首屏，Git 诊断/更新入口另行指定分区（R10、R1）。 */
+  function openSettings(section: "appearance" | "runtime" | "update" | null = null) {
     settingsSection = section;
     openTask("settings");
   }
@@ -2258,6 +2259,7 @@
     let stopCommit = () => {};
     let stopSearch = () => {};
     let stopMedia = () => {};
+    let stopUpdate = () => {};
     const keyListener = (event: KeyboardEvent) => onWindowKeydown(event);
     const layerListener = () => {
       layerAtKey = anyLayerOpen();
@@ -2299,6 +2301,8 @@
         degraded = degraded || event.degraded;
         void refresh();
       });
+      // 启动自动检查发现新版本时后端 emit twiglane:update-available；非原生环境内部不注册。
+      stopUpdate = await watchUpdateAvailable();
     })();
     const poll = window.setInterval(() => {
       if (shouldPoll(degraded, windowFocused, opened !== null)) void refresh();
@@ -2343,6 +2347,7 @@
       stopCommit();
       stopSearch();
       stopMedia();
+      stopUpdate();
     };
   });
 </script>

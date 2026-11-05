@@ -77,6 +77,13 @@ export async function listenEvent<T>(
   return listen<T>(name, (event) => handler(event.payload));
 }
 
+/** 当前应用版本号（tauri.conf.json 的 version）；浏览器/预览环境没有 Tauri 运行时，返回 null。 */
+export async function appVersion(): Promise<string | null> {
+  if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return null;
+  const { getVersion } = await import("@tauri-apps/api/app");
+  return getVersion();
+}
+
 export async function pickDirectory(title: string): Promise<string | null> {
   const { open } = await import("@tauri-apps/plugin-dialog");
   const selected = await open({ directory: true, multiple: false, title });

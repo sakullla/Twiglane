@@ -82,7 +82,7 @@ Pull request 和 main 分支的 push 运行 `ci`：参考 cliora，前端检查�
 
 通过检查后先创建草稿，再构建 Windows x64 NSIS、macOS arm64 DMG、Linux x64 deb/AppImage。三端构建都成功、四种安装包非空且标签没有移动时才正式发布。失败时保留草稿供重试，已发布版本不会被覆盖。发布使用 workflow 的 `GITHUB_TOKEN`。macOS 必须配置 `APPLE_CERTIFICATE`（P12 的 base64）、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY` 三个 repository secrets，所有版本复用同一证书；缺失时发布失败，不降级为 ad-hoc。请保管证书及密码备份，不要在每次发布时重新生成证书。固定签名身份不等于 Apple 公证。
 
-应用内更新使用独立的 updater minisign 密钥对：由维护者生成，经 gh 配置 `TAURI_SIGNING_PRIVATE_KEY` 与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 两个 repository secrets，公钥写入 `src-tauri/tauri.conf.json`（当前为占位，待密钥对生成后填入）。密钥缺失时发布在校验更新资产阶段失败，不产出无签名的更新资产。
+应用内更新使用独立的 updater minisign 密钥对：由维护者生成，经 gh 配置 `TAURI_SIGNING_PRIVATE_KEY` 与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 两个 repository secrets，公钥写入 `src-tauri/tauri.conf.json`。密钥缺失时发布在校验更新资产阶段失败，不产出无签名的更新资产。请备份私钥与密码；丢失后无法再为已发布版本签发更新。
 
 Twiglane 已接入应用内更新：启动后静默检查一次新版本，也可以在设置的「应用更新」分区手动检查、下载安装并重启。发布流程在三平台安装包构建成功、各平台签名资产校验通过后，统一生成并上传 `latest.json`，再正式发布。Linux 只有 AppImage 支持应用内安装，从 deb 安装运行时只提示新版本，升级需要手动下载新版安装包。Linux 是新增构建目标，尚待实际安装验收；GitHub Release 的安装包构建成功不等同于 `verify:delivery` 的安装与运行验收通过。
 

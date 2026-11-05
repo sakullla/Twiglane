@@ -146,12 +146,15 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           releaseId: ${{ needs.prepare.outputs.release-id }}
           tagName: ${{ github.ref_name }}
           releaseDraft: true
           prerelease: false
           retryAttempts: 3
+          # latest.json 由 verify-release 在三平台产物齐全后统一生成，避免并行任务互相覆盖。
           uploadUpdaterJson: false
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} -- --locked
       - name: Build, sign and verify macOS disk image
@@ -160,9 +163,11 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           TARGET: ${{ matrix.target }}
         run: bash .github/scripts/sign-macos.sh
-      - name: Upload verified macOS disk image
+      - name: Upload verified macOS release artifacts
         if: runner.os == 'macOS'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -173,7 +178,9 @@ jobs:
           version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
           arch="${TARGET%%-*}"
           gh release upload "$RELEASE_TAG" \
-            "src-tauri/target/$TARGET/release/bundle/dmg/Twiglane_${version}_${arch}.dmg" --clobber
+            "src-tauri/target/$TARGET/release/bundle/dmg/Twiglane_${version}_${arch}.dmg" \
+            "src-tauri/target/$TARGET/release/bundle/macos/Twiglane_${version}_${arch}.app.tar.gz" \
+            "src-tauri/target/$TARGET/release/bundle/macos/Twiglane_${version}_${arch}.app.tar.gz.sig" --clobber
 
   verify-release:
     name: Verify installers and publish release
@@ -206,5 +213,71 @@ jobs:
                 throw new Error(`Missing installer: ${name}`);
               }
             }
-            await github.rest.repos.updateRelease({ ...context.repo, release_id, draft: false });
+            // 应用内更新依赖各平台更新包及签名；缺失时发布出去会导致客户端检查更新失败。
+            for (const name of [
+              `Twiglane_${version}_x64-setup.exe.sig`, `Twiglane_${version}_amd64.AppImage.sig`,
+              `Twiglane_${version}_amd64.deb.sig`, `Twiglane_${version}_aarch64.app.tar.gz`,
+              `Twiglane_${version}_aarch64.app.tar.gz.sig`,
+            ]) {
+              if (!assets.some(asset => asset.name === name && asset.state === 'uploaded' && asset.size > 0)) {
+                throw new Error(`Missing updater artifact: ${name}; check TAURI_SIGNING_PRIVATE_KEY secrets`);
+              }
+            }
+      - name: Generate and upload updater manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 本 job 不 checkout 仓库，gh 必须显式指定 -R。
+          repo=(-R "$GITHUB_REPOSITORY")
+          version="${GITHUB_REF_NAME#v}"
+          work="$RUNNER_TEMP/updater-manifest"
+          mkdir -p "$work"
+          gh release download "$GITHUB_REF_NAME" "${repo[@]}" --pattern "*.sig" --dir "$work" --clobber
+
+          win_sig="$work/Twiglane_${version}_x64-setup.exe.sig"
+          linux_sig="$work/Twiglane_${version}_amd64.AppImage.sig"
+          deb_sig="$work/Twiglane_${version}_amd64.deb.sig"
+          mac_sig="$work/Twiglane_${version}_aarch64.app.tar.gz.sig"
+          for file in "$win_sig" "$linux_sig" "$deb_sig" "$mac_sig"; do
+            test -f "$file"
+          done
+
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          notes="$(gh release view "$GITHUB_REF_NAME" "${repo[@]}" --json body --jq '.body')"
+          jq -n \
+            --arg version "$version" \
+            --arg notes "$notes" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg win_sig "$(cat "$win_sig")" \
+            --arg win_url "$base/Twiglane_${version}_x64-setup.exe" \
+            --arg linux_sig "$(cat "$linux_sig")" \
+            --arg linux_url "$base/Twiglane_${version}_amd64.AppImage" \
+            --arg deb_sig "$(cat "$deb_sig")" \
+            --arg deb_url "$base/Twiglane_${version}_amd64.deb" \
+            --arg mac_sig "$(cat "$mac_sig")" \
+            --arg mac_url "$base/Twiglane_${version}_aarch64.app.tar.gz" \
+            '{
+              version: $version,
+              notes: $notes,
+              pub_date: $pub_date,
+              platforms: {
+                "windows-x86_64": { signature: $win_sig, url: $win_url },
+                "windows-x86_64-nsis": { signature: $win_sig, url: $win_url },
+                "linux-x86_64": { signature: $linux_sig, url: $linux_url },
+                "linux-x86_64-appimage": { signature: $linux_sig, url: $linux_url },
+                "linux-x86_64-deb": { signature: $deb_sig, url: $deb_url },
+                "darwin-aarch64": { signature: $mac_sig, url: $mac_url },
+                "darwin-aarch64-app": { signature: $mac_sig, url: $mac_url }
+              }
+            }' > "$work/latest.json"
+          gh release upload "$GITHUB_REF_NAME" "${repo[@]}" "$work/latest.json" --clobber
+      - name: Publish verified release
+        uses: actions/github-script@v9
+        env:
+          RELEASE_ID: ${{ needs.prepare.outputs.release-id }}
+        with:
+          script: |
+            const release_id = Number(process.env.RELEASE_ID);
+            const { data: release } = await github.rest.repos.updateRelease({ ...context.repo, release_id, draft: false });
             core.info(`Published ${release.html_url}`);

@@ -6,6 +6,7 @@ set -euo pipefail
 : "${APPLE_CERTIFICATE:?Missing APPLE_CERTIFICATE secret}"
 : "${APPLE_CERTIFICATE_PASSWORD:?Missing APPLE_CERTIFICATE_PASSWORD secret}"
 : "${APPLE_SIGNING_IDENTITY:?Missing APPLE_SIGNING_IDENTITY secret}"
+: "${TAURI_SIGNING_PRIVATE_KEY:?Missing TAURI_SIGNING_PRIVATE_KEY secret}"
 : "${TARGET:?Missing Rust target}"
 
 version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
@@ -100,3 +101,11 @@ grep -F -x -q "Identifier=$identifier" <<< "$signature"
 codesign --verify --deep --strict --verbose=2 "$mount/Twiglane.app"
 hdiutil detach "$mount"
 mounted=false
+
+# 应用内更新归档：内容必须是从 DMG 里取出、已完成重签名的 .app（即上面保留的
+# $work/Twiglane.app），打包与签名格式需符合 tauri updater 期望的 .app.tar.gz。
+updater_tgz="src-tauri/target/$TARGET/release/bundle/macos/Twiglane_${version}_${arch}.app.tar.gz"
+mkdir -p "$(dirname "$updater_tgz")"
+tar -czf "$updater_tgz" -C "$work" Twiglane.app
+npm run tauri -- signer sign "$updater_tgz" --app-version "$version"
+test -f "$updater_tgz.sig"

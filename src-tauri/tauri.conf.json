@@ -29,6 +29,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["app", "dmg", "nsis", "deb", "appimage"],
     "publisher": "Twiglane",
     "category": "DeveloperTool",
@@ -65,6 +66,12 @@
           "English": "./windows/English.nsh"
         }
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "TODO-REPLACE-WITH-MINISIGN-PUBKEY-PENDING-USER-KEYPAIR",
+      "endpoints": ["https://github.com/sakullla/Twiglane/releases/latest/download/latest.json"]
     }
   }
 }

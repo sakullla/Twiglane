@@ -23,6 +23,8 @@ fn capabilities_do_not_grant_a_shell() {
         "core:window:allow-is-maximized",
         "core:window:allow-internal-toggle-maximize",
         "dialog:allow-open",
+        "updater:default",
+        "process:allow-restart",
         "allow-detect-git",
         "allow-set-git-executable",
         "allow-clear-git-executable",

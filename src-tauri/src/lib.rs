@@ -6,6 +6,7 @@ mod model;
 mod redact;
 mod shutdown;
 mod state;
+mod update;
 mod watch;
 
 pub use measure::mark_process_start;
@@ -43,6 +44,8 @@ pub fn run() {
     let shutdown_for_run = shutdown.clone();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             install_menu(app)?;
             let dir = app
@@ -57,6 +60,12 @@ pub fn run() {
                 Arc::new(shutdown),
             ));
             app.manage(backend);
+            // 启动 20 秒后静默检查一次更新：失败不打断当前版本使用。
+            let update_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                update::auto_check_update(&update_handle).await;
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

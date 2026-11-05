@@ -420,7 +420,7 @@
           </div>
           {#if expanded}
             <div class="multi-file-diff">
-              <DiffView
+              <DiffView onGeneration={onStale}
                 embedded
                 scrollHost={scroller}
                 layout={mode}

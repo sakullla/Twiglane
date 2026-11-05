@@ -10,12 +10,14 @@
   import { effectiveLanguage } from "../syntax/prefs.svelte";
   import { lineSegments } from "../syntax/segments";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
+  import BinaryPreview from "./BinaryPreview.svelte";
   import FileNav from "./FileNav.svelte";
   import LanguagePicker from "./LanguagePicker.svelte";
   import Icon from "./Icon.svelte";
   import LineCounts from "./LineCounts.svelte";
 
   interface Props {
+    onGeneration?: (generation: number) => void;
     selection: FileSelection | null;
     diff: DiffResponse | null;
     error: string | null;
@@ -55,6 +57,7 @@
   const ROW_HEIGHT = 18;
 
   let {
+    onGeneration,
     selection,
     diff,
     error,
@@ -542,6 +545,8 @@
       <strong>正在读取差异</strong>
       <p>{selection.path}</p>
     </div>
+  {:else if currentDiff?.preview}
+    <BinaryPreview sources={currentDiff.preview} generation={currentDiff.generation} {disabled} {onGeneration} />
   {:else if currentDiff?.binary}
     {@const size = binarySizeText(currentDiff.oldSize, currentDiff.newSize)}
     <div class="empty" role="status">

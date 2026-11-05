@@ -423,6 +423,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   },
   publishBranch: () => ok(snapshot()),
   associateUpstream: () => ok(snapshot()),
+  branchList: () => ok(branchData()),
   branchState: () => ok(branchData()),
   createBranch: (_repo: string, name: string) => {
     if (!branches.some((item) => item.name === name)) {
@@ -571,7 +572,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       root: false,
       merge: commit.parents.length > 1,
       selectedParent: commit.parents[0],
-      files: previewParams.get("files") === "many" ? Array.from({ length: 24 }, (_, index) => ({ path: `src/generated/file-${index}.ts`, originalPath: null, status: "modified", additions: index + 1, deletions: index % 3 })) : [
+      files: previewParams.has("preview") ? [{ path: previewParams.get("preview") === "archive" ? "assets/images.zip" : "assets/logo.png", originalPath: null, status: "modified", additions: null, deletions: null, binary: true, oldSize: 81920, newSize: 146752 }] : previewParams.get("files") === "many" ? Array.from({ length: 24 }, (_, index) => ({ path: `src/generated/file-${index}.ts`, originalPath: null, status: "modified", additions: index + 1, deletions: index % 3 })) : [
         { path: "src/App.svelte", originalPath: null, status: "modified", additions: 9, deletions: 7 },
         { path: "src/app.css", originalPath: null, status: "modified", additions: 12, deletions: 4 },
         { path: "src/lib/components/Icon.svelte", originalPath: null, status: "added", additions: 29, deletions: 0 },
@@ -579,7 +580,17 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       ],
     });
   },
-  commitFileDiff: (_repo: string, _oid: string, _parent: string, path: string) => ok(withHeaders(diffFor(path, false))),
+  commitFileDiff: (_repo: string, _oid: string, _parent: string, path: string) => ok(previewParams.has("preview") ? {
+    ...withHeaders(diffFor(path, false)), binary: true, lines: [], hunks: [], oldSize: 81920, newSize: 146752,
+    preview: { repository: _repo, old: { revision: _parent, path }, new: { revision: _oid, path } },
+  } : withHeaders(diffFor(path, false))),
+  filePreview: (_repo: string, _source: unknown, _generation: number, download = false) => ok({
+    generation, kind: previewParams.get("preview") === "archive" ? "archive" : previewParams.get("preview") === "lfs" && !download ? "lfs" : "image",
+    size: 146752, dataUrl: "/brand-icon.png", entries: Array.from({ length: 2000 }, (_, index) => ({ name: `assets/images/photo-${String(index).padStart(4, "0")}.png`, size: 2048 + index, directory: false })),
+    message: previewParams.get("preview") === "lfs" && !download ? "LFS 内容尚未下载。" : "", truncated: false,
+    lfsOid: previewParams.get("preview") === "lfs" ? "a".repeat(64) : null,
+    canDownload: previewParams.get("preview") === "lfs" && !download,
+  }),
   stashState: (_repo: string, include: boolean) => ok(stashData(include)),
   saveStash: (_repo: string, include: boolean, message: string) => {
     const oid = "12345678abcdef12345678abcdef12345678abcd";

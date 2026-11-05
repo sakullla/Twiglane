@@ -153,6 +153,11 @@ describe("大仓库的有界读取和渲染", () => {
     finish({ ...diff, lines: [{ ...diff.lines[0], text: "+OLD RESPONSE" }] });
     await tick();
     expect(screen.queryByText("OLD RESPONSE")).toBeNull();
+    await component.rerender({ active: false });
+    expect(document.querySelectorAll(".diff [data-line]")).toHaveLength(0);
+    await component.rerender({ active: true });
+    await waitFor(() => expect(document.querySelectorAll(".diff [data-line]").length).toBeGreaterThan(0));
+
   });
 
   it("两万冲突文件只渲染可见行，过滤仍能找到末尾文件", async () => {

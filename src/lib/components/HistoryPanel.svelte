@@ -45,6 +45,7 @@
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
   import PaneResizer from "./PaneResizer.svelte";
+  import RecoveryActions from "./RecoveryActions.svelte";
 
   interface Props {
     /** 设置里的分支分组：范围下拉框按第一个 / 收成 <optgroup>，关闭时平铺。缺省开启。 */
@@ -130,6 +131,7 @@
   }: Props = $props();
 
   let menu = $state<ContextMenuRequest | null>(null);
+  let recovery: RecoveryActions;
   /** 「从此提交新建分支」的输入层。 */
   let branchFrom = $state<{ oid: string; summary: string; name: string; checkout: boolean; busy: boolean; error: string | null } | null>(null);
 
@@ -186,6 +188,15 @@
               checkoutError = null;
               checkoutTarget = commit;
             },
+          },
+          {
+            id: "undo",
+            label: "撤销最近提交并保留改动",
+            icon: "undo",
+            disabledReason: writeReason() ?? (commit.oid !== opened.snapshot.branch.headOid
+              ? "只能撤销当前分支的最近一次提交"
+              : opened.snapshot.branch.detached ? "请先切换到本地分支" : undefined),
+            run: () => void recovery.undoLatest(commit.oid),
           },
           {
             id: "branch",
@@ -672,7 +683,11 @@
   });
 
   $effect(() => {
-    if (!active) return;
+    if (!active) {
+      commitDiff = null;
+      diffLoading = false;
+      return;
+    }
     const repo = repoPath;
     const generation = readGeneration;
     const current = detail;
@@ -1473,7 +1488,7 @@
                   {#if item.error}
                     <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{item.error}</span></div>
                   {:else}
-                    <DiffView
+                    <DiffView {onGeneration}
                       embedded
                       scrollHost={unionHost}
                       layout={unionLayout}
@@ -1679,7 +1694,7 @@
                 onFileHistory={onFilePath}
               />
             {:else}
-              <DiffView
+              <DiffView {onGeneration}
                 selection={diffSelection}
                 diff={commitDiff}
                 error={diffError}
@@ -1786,3 +1801,12 @@
     </Modal>
   {/if}
 </section>
+
+<RecoveryActions
+  bind:this={recovery}
+  {opened} {disabled} {nextId} {onFailure}
+  variant="headless"
+  onSnapshot={(snapshot) => { onGeneration(snapshot.generation); onSnapshot?.(snapshot); }}
+  onNotice={(message) => onNotice?.(message)}
+  onMerge={() => {}}
+/>

@@ -290,7 +290,7 @@ pub async fn commit_file_diff(
     } else {
         (None, None)
     };
-    response_from_diff(
+    let mut response = response_from_diff(
         scheduled.generation,
         relative,
         false,
@@ -300,7 +300,17 @@ pub async fn commit_file_diff(
         sizes,
         offset,
         limit,
-    )
+    )?;
+    if crate::git::preview::wants_preview(relative, raw) {
+        response.preview = Some(crate::git::preview::PreviewSources {
+            repository: root.to_string_lossy().into_owned(),
+            old: selected.map(|revision| crate::git::preview::PreviewSource {
+                revision, path: file.original_path.as_deref().unwrap_or(relative).into(),
+            }),
+            new: Some(crate::git::preview::PreviewSource { revision: oid, path: relative.into() }),
+        });
+    }
+    Ok(response)
 }
 
 pub async fn file_history(

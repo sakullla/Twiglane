@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { blockTops, blockWindow } from "../ui";
   import { api } from "../api";
   import { bucketBranches, filterBranches, groupIsOpen, isDefaultBranch, mainBranchNames } from "../branches";
   import { normalizeError } from "../errors";
   import type { IconName } from "../icons";
-  import type { BranchRecord, BranchState, OpenedRepository, StatusSnapshot } from "../types";
+  import type { BranchRecord, BranchListing, OpenedRepository, StatusSnapshot } from "../types";
   import BranchOption from "./BranchOption.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
@@ -68,7 +69,10 @@
     { id: "task.merge", label: "合并到当前分支", icon: "merge" },
     { id: "task.branch", label: "管理分支与标签", icon: "tag" },
   ];
-  const VISIBLE_LIMIT = 200;
+  const HEIGHTS = { label: 30, group: 30, branch: 36 };
+  let scrollTop = $state(0);
+  let viewport = $state(0);
+  let listHost: HTMLElement | null = null;
 
   let branches = $state.raw<BranchRecord[]>([]);
   let defaultBranch = $state<string | null>(null);
@@ -85,15 +89,11 @@
   let mounted = true;
 
   let currentName = $derived(opened.snapshot.branch.name);
-  let filtered = $derived(
-    filterBranches(
-      branches
+  let sorted = $derived(branches
         .filter((branch) => !(branch.remote && branch.name.endsWith("/HEAD")))
         // 本地在前、当前分支最前；数量截断时留下的也是这些。
-        .sort((a, b) => Number(a.remote) - Number(b.remote) || Number(isCurrent(b)) - Number(isCurrent(a))),
-      query,
-    ),
-  );
+        .sort((a, b) => Number(a.remote) - Number(b.remote) || Number(isCurrent(b)) - Number(isCurrent(a))));
+  let filtered = $derived(filterBranches(sorted, query));
 
   interface SwitchLabel { kind: "label"; key: string; text: string }
   interface SwitchGroup { kind: "group"; key: string; scope: string; prefix: string; open: boolean; count: number }
@@ -104,12 +104,14 @@
     const grouping = branchGroups !== false && query.trim() === "";
     const options: BranchRecord[] = [];
     const rows: SwitchRow[] = [];
+    const rowOf: number[] = [];
     const pushSection = (sectionBranches: BranchRecord[], label: string, scope: string) => {
       if (sectionBranches.length === 0) return;
       rows.push({ kind: "label", key: `label:${scope}`, text: label });
       const buckets = grouping ? bucketBranches(sectionBranches) : { top: sectionBranches, groups: [] };
       const pushBranch = (branch: BranchRecord) => {
         const index = options.length;
+        rowOf.push(rows.length);
         options.push(branch);
         rows.push({ kind: "branch", key: `${scope}:${branch.name}`, branch, index });
       };
@@ -123,9 +125,33 @@
     };
     pushSection(filtered.filter((branch) => !branch.remote), "本地分支", "local");
     pushSection(filtered.filter((branch) => branch.remote), "远程分支", "remote");
-    return { options, rows };
+    return { options, rows, rowOf };
   });
   let matched = $derived(view.options);
+  let tops = $derived(blockTops(view.rows.map((row) => HEIGHTS[row.kind]), 0));
+  let span = $derived(blockWindow(tops, scrollTop, viewport || 360, 180, 24));
+  let shown = $derived.by(() => {
+    const rows = [];
+    for (let at = span.start; at < span.end; at++) rows.push({ row: view.rows[at], at });
+    const at = view.rowOf[active];
+    if (at !== undefined && (at < span.start || at >= span.end)) rows.push({ row: view.rows[at], at });
+    return rows;
+  });
+  $effect(() => {
+    query;
+    scrollTop = 0;
+    if (listHost) listHost.scrollTop = 0;
+  });
+  function trackList(node: HTMLElement) {
+    const host = node.parentElement!;
+    listHost = host;
+    const read = () => { scrollTop = host.scrollTop; viewport = host.clientHeight; };
+    read();
+    host.addEventListener("scroll", read, { passive: true });
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(read);
+    observer?.observe(host);
+    return { destroy() { host.removeEventListener("scroll", read); observer?.disconnect(); listHost = null; } };
+  }
   let layoutKey = "";
 
   $effect(() => {
@@ -155,15 +181,16 @@
   }
 
   /** 列表是只读取：不占写锁，也不改外壳状态，只有 generation 过期时跟上一次。 */
-  async function readBranches(): Promise<BranchState> {
+  async function readBranches(): Promise<BranchListing> {
     const path = opened.summary.path;
     try {
-      return await api.branchState(path, opened.generation, nextId());
+      return await api.branchList(path, opened.generation, nextId());
     } catch (error) {
       const failure = normalizeError(error);
       if (failure.code !== "stale" || failure.generation === undefined) throw failure;
+      if (!mounted || opened.summary.path !== path) throw failure;
       onGeneration(failure.generation);
-      return api.branchState(path, failure.generation, nextId());
+      return api.branchList(path, failure.generation, nextId());
     }
   }
 
@@ -171,11 +198,11 @@
     const path = opened.summary.path;
     void readBranches()
       .then((result) => {
-        if (opened.summary.path === path) {
-        branches = result?.branches ?? [];
-        defaultBranch = result?.defaultBranch ?? null;
-        mergeBases = result?.mergeBases ?? [];
-      }
+        if (mounted && opened.summary.path === path) {
+          branches = result?.branches ?? [];
+          defaultBranch = result?.defaultBranch ?? null;
+          mergeBases = result?.mergeBases ?? [];
+        }
       })
       .catch((error) => {
         if (opened.summary.path === path) errorText = normalizeError(error).message;
@@ -342,16 +369,18 @@
   {#snippet list(listId)}
     {#if loading}
       <p class="branch-popover-empty"><span class="spinner"></span> 正在读取分支</p>
-    {:else if matched.length === 0}
+    {:else if filtered.length === 0}
       <p class="branch-popover-empty">没有匹配的分支</p>
     {/if}
-    {#each view.rows as row (row.key)}
+    <div class="branch-picker-space" role="presentation" style={`height:${tops[view.rows.length]}px`} use:trackList>
+    {#each shown as { row, at } (row.key)}
       {#if row.kind === "label"}
-        <div class="branch-popover-group">{row.text}</div>
+        <div class="branch-popover-group" style={`top:${tops[at]}px`}>{row.text}</div>
       {:else if row.kind === "group"}
         <button
           type="button"
           class="branch-group"
+          style={`top:${tops[at]}px`}
           data-branch-group={row.prefix}
           aria-expanded={row.open}
           aria-label={`${row.open ? "收起" : "展开"}分组 ${row.prefix}`}
@@ -367,6 +396,7 @@
         {@const branch = row.branch}
         <BranchOption
           id={`${listId}-${row.index}`}
+          style={`top:${tops[at]}px`}
           index={row.index}
           setsize={matched.length}
           name={branch.name}
@@ -404,9 +434,7 @@
         </BranchOption>
       {/if}
     {/each}
-    {#if matched.length >= VISIBLE_LIMIT}
-      <p class="branch-popover-empty">只显示前 {VISIBLE_LIMIT} 个，输入关键词缩小范围。</p>
-    {/if}
+    </div>
   {/snippet}
   {#snippet foot()}
     {#each ACTIONS as action (action.label)}

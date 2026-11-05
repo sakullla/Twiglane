@@ -1,6 +1,9 @@
 import { normalizeError } from "./errors";
 import type {
   BranchState,
+  BranchListing,
+  PreviewSource,
+  FilePreview,
   CloneResult,
   CommitDetail,
   CommitPushReport,
@@ -168,6 +171,10 @@ export const api = {
     invoke<StatusSnapshot>("associate_upstream", { path, remote, generation, requestId }),
   commitAndPush: (path: string, message: string, generation: number, requestId: number) =>
     invoke<CommitPushReport>("commit_and_push", { path, message, generation, requestId }),
+  filePreview: (path: string, source: PreviewSource, generation: number, download = false) =>
+    invoke<FilePreview>("file_preview", { path, source, generation, download }),
+  branchList: (path: string, generation: number, requestId: number) =>
+    invoke<BranchListing>("branch_list", { path, generation, requestId }),
   branchState: (path: string, generation: number, requestId: number) =>
     invoke<BranchState>("branch_state", { path, generation, requestId }),
   createBranch: (path: string, name: string, generation: number, requestId: number) =>

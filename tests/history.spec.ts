@@ -30,6 +30,7 @@ const saveStash = vi.hoisted(() => vi.fn());
 const applyStash = vi.hoisted(() => vi.fn());
 const deleteStash = vi.hoisted(() => vi.fn());
 const cherryPickCommits = vi.hoisted(() => vi.fn());
+const undoCommit = vi.hoisted(() => vi.fn());
 const checkoutCommit = vi.hoisted(() => vi.fn());
 const revealPath = vi.hoisted(() => vi.fn());
 const createBranchFrom = vi.hoisted(() => vi.fn());
@@ -46,6 +47,7 @@ vi.mock("../src/lib/api", () => ({
     deleteStash,
     cherryPickCommits,
     checkoutCommit,
+    undoCommit,
     revealPath,
     createBranchFrom,
   },
@@ -226,6 +228,26 @@ describe("历史面板", () => {
       files: [],
     });
     commitFileDiff.mockResolvedValue(diff);
+  });
+
+  it("历史右键撤销只针对 HEAD，先预览再确认且保留改动", async () => {
+    const head = commit(0, { oid: opened.snapshot.branch.headOid! });
+    historyPage.mockResolvedValue({ generation: 3, commits: [head, commit(1)], hasMore: false, offset: 0, pageSize: 100, state: "ok" });
+    undoCommit.mockResolvedValueOnce({ generation: 3, eligible: true, headOid: head.oid, summary: head.summary, reason: "尚未推送", snapshot: opened.snapshot });
+    undoCommit.mockResolvedValueOnce({ generation: 4, eligible: true, reason: "改动保留在暂存区", snapshot: { ...opened.snapshot, generation: 4 } });
+    const onSnapshot = vi.fn();
+    render(HistoryPanel, { ...panelProps(), onSnapshot });
+    await fireEvent.contextMenu(await screen.findByRole("option", { name: /commit-1/ }));
+    expect(screen.getByRole("menuitem", { name: "撤销最近提交并保留改动" }).getAttribute("aria-disabled")).toBe("true");
+    await fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    await fireEvent.contextMenu(screen.getByRole("option", { name: /commit-0/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: "撤销最近提交并保留改动" }));
+    await screen.findByRole("button", { name: "确认撤销提交" });
+    expect(undoCommit).toHaveBeenCalledWith("/repo", head.oid, false, 3, 1);
+    expect(onSnapshot).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole("button", { name: "确认撤销提交" }));
+    await waitFor(() => expect(undoCommit).toHaveBeenCalledWith("/repo", head.oid, true, 3, 1));
+    expect(onSnapshot).toHaveBeenCalledWith(expect.objectContaining({ generation: 4 }));
   });
 
   it("长列表只渲染可见提交，并显示父提交和分支", async () => {
@@ -640,6 +662,7 @@ describe("历史面板", () => {
     expect(screen.getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual([
       "拣选到当前分支",
       "检出此提交",
+      "撤销最近提交并保留改动",
       "从此提交新建分支",
       "复制提交哈希",
     ]);

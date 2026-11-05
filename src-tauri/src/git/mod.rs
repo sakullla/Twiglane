@@ -31,6 +31,7 @@ pub mod locate;
 pub mod ops;
 pub mod parse;
 pub mod patch;
+pub mod preview;
 pub mod resolve;
 pub mod runner;
 pub mod schedule;

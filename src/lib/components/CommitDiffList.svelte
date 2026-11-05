@@ -65,7 +65,15 @@
   let loadedCount = $derived(Object.keys(fileDiffs).filter((path) => expandedSet.has(path)).length);
 
   $effect(() => {
-    if (!active) return;
+    if (!active) {
+      loadedKey = "";
+      requested.clear();
+      cached.length = 0;
+      fileDiffs = {};
+      fileErrors = {};
+      fileLoading = {};
+      return;
+    }
     const key = `${opened.summary.path}:${detail.commit.oid}:${parent ?? ""}:${opened.generation}`;
     if (key === loadedKey) return;
     loadedKey = key;
@@ -301,7 +309,7 @@
               <button type="button" class="icon-btn sm" aria-label={`查看 ${file.path} 的文件历史`} title="查看此文件历史" onclick={() => onFileHistory(file.path)}><Icon name="history" size={13} /></button>
             </div>
             {#if expanded}
-              <DiffView
+              <DiffView {onGeneration}
                 embedded
                 scrollHost={hostFor(file.path)}
                 layout={diffLayout}

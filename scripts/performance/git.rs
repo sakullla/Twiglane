@@ -128,6 +128,15 @@ async fn branches_files_and_merge_at_scale() {
     assert_eq!(branches.branches.len(), 5_002);
     eprintln!("5002 branches: {:?}", started.elapsed());
 
+    let lists = fixture.count("for-each-ref");
+    let statuses = fixture.count("status");
+    let started = Instant::now();
+    let listing = sync::branch_list(&fixture.backend, &fixture.path, fixture.generation(), 999).await.unwrap();
+    assert_eq!(listing.branches.len(), 5_002);
+    assert_eq!(fixture.count("for-each-ref"), lists + 1);
+    assert_eq!(fixture.count("status"), statuses);
+    eprintln!("5002 branches lightweight (one Git process): {:?}", started.elapsed());
+
     let oid = fixture.git(&["rev-parse", "topic"], None);
     let git = ops::require_git(&fixture.backend).await.unwrap();
     let mut names = vec![format!("{oid}:large.txt")];

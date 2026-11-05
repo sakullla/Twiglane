@@ -71,6 +71,7 @@ pub fn run() {
             forget_recent,
             refresh_status,
             load_diff,
+            file_preview,
             stage_files,
             unstage_files,
             stage_hunks,
@@ -86,6 +87,7 @@ pub fn run() {
             associate_upstream,
             commit_and_push,
             branch_state,
+            branch_list,
             create_branch,
             create_branch_from,
             rename_branch,
@@ -630,6 +632,21 @@ async fn commit_and_push(
     request_id: u64,
 ) -> Result<CommitPushReport, AppError> {
     crate::git::sync::commit_and_push(state.inner(), &path, &message, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn file_preview(
+    state: State<'_, Arc<Backend>>, path: String,
+    source: crate::git::preview::PreviewSource, generation: u64, download: bool,
+) -> Result<crate::git::preview::FilePreview, AppError> {
+    crate::git::preview::file_preview(state.inner(), &path, &source, generation, download).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn branch_list(
+    state: State<'_, Arc<Backend>>, path: String, generation: u64, request_id: u64,
+) -> Result<crate::model::BranchListing, AppError> {
+    crate::git::sync::branch_list(state.inner(), &path, generation, request_id).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -10,7 +10,7 @@ const branches: BranchRecord[] = [
 ];
 
 describe("分支搜索", () => {
-  it("同时覆盖本地和远程，并限制可见数量", () => {
+  it("同时覆盖本地和远程，保留完整搜索结果", () => {
     expect(filterBranches(branches, "feature").map((branch) => branch.name)).toEqual([
       "feature/ui",
       "origin/feature/ui",
@@ -19,13 +19,13 @@ describe("分支搜索", () => {
     const lists = branchLists(filterBranches(branches, ""));
     expect(lists.local.map((branch) => branch.name)).toEqual(["main", "feature/ui"]);
     expect(lists.remote.map((branch) => branch.name)).toEqual(["origin/main", "origin/feature/ui"]);
-    const many = Array.from({ length: 240 }, (_, index) => ({
+    const many = Array.from({ length: 6000 }, (_, index) => ({
       name: `branch-${index}`,
       remote: false,
       current: false,
       upstream: null,
       worktree: null,
     }));
-    expect(filterBranches(many, "").length).toBe(200);
+    expect(filterBranches(many, "").length).toBe(6000);
   });
 });

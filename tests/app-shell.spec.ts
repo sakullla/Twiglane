@@ -134,7 +134,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../src/lib/api", () => ({
-  api: { ...mocks },
+  api: { ...mocks, branchList: mocks.branchState },
   listenEvent: mocks.listenEvent,
   pickDirectory: mocks.pickDirectory,
   pickFile: mocks.pickFile,

@@ -182,6 +182,8 @@ pub struct DiffHunk {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<crate::git::preview::PreviewSources>,
     pub generation: u64,
     pub path: String,
     pub staged: bool,
@@ -278,6 +280,15 @@ pub struct BranchRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchListing {
+    pub generation: u64,
+    pub branches: Vec<BranchRecord>,
+    pub default_branch: Option<String>,
+    pub merge_bases: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchState {
     pub generation: u64,

@@ -137,7 +137,7 @@ pub async fn load_diff_with_context(
     } else {
         (None, None)
     };
-    response_from_diff(
+    let mut response = response_from_diff(
         scheduled.generation,
         relative,
         staged,
@@ -147,7 +147,20 @@ pub async fn load_diff_with_context(
         sizes,
         offset,
         limit,
-    )
+    )?;
+    if crate::git::preview::wants_preview(relative, raw) {
+        response.preview = Some(crate::git::preview::PreviewSources {
+            repository: root.to_string_lossy().into_owned(),
+            old: Some(crate::git::preview::PreviewSource {
+                revision: if staged { "HEAD" } else { "index" }.into(),
+                path: original.filter(|s| !s.is_empty()).unwrap_or(relative).into(),
+            }),
+            new: Some(crate::git::preview::PreviewSource {
+                revision: if staged { "index" } else { "worktree" }.into(), path: relative.into(),
+            }),
+        });
+    }
+    Ok(response)
 }
 
 pub async fn stage_files(
@@ -541,6 +554,7 @@ pub(crate) fn response_from_diff(
             crate::git::sizes::binary_summary(sizes.0, sizes.1)
         };
         return Ok(DiffResponse {
+            preview: None,
             generation,
             path: relative.to_string(),
             staged,
@@ -578,6 +592,7 @@ pub(crate) fn response_from_diff(
         None
     };
     Ok(DiffResponse {
+        preview: None,
         generation,
         path: relative.to_string(),
         staged,

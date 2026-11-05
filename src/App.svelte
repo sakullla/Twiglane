@@ -2514,7 +2514,7 @@
                   onClear={() => selected && selectFile(selected)}
                 />
               {:else}
-                <DiffView
+                <DiffView onGeneration={adoptGeneration}
                   selection={selected}
                   {diff}
                   error={diffError}

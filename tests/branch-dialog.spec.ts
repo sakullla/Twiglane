@@ -19,6 +19,7 @@ const openRepository = vi.hoisted(() => vi.fn());
 vi.mock("../src/lib/api", () => ({
   api: {
     branchState,
+    branchList: branchState,
     switchBranch,
     createBranch: vi.fn(),
     createBranchFrom,
@@ -903,6 +904,24 @@ describe("打开其他工作区、默认徽章与斜杠分组", () => {
     const view = render(BranchSwitcher, { props });
     return { view, props };
   }
+
+  it("6000 个分支完整分组并虚拟滚动，末尾分支仍可搜索和切换", async () => {
+    const branches = Array.from({ length: 6000 }, (_, index) => record(`feature/item-${String(index).padStart(4, "0")}`));
+    const { props } = showSwitcher(branches, null, "feature/item-0000");
+    await screen.findByRole("button", { name: "收起分组 feature" });
+    expect(screen.getByText("6000")).toBeTruthy();
+    expect(screen.getAllByRole("option").length).toBeLessThan(30);
+    const list = screen.getByRole("listbox");
+    list.scrollTop = 36 * 5990;
+    await fireEvent.scroll(list);
+    expect(await screen.findByRole("option", { name: /feature\/item-5999/ })).toBeTruthy();
+    expect(screen.getAllByRole("option").length).toBeLessThan(30);
+    await fireEvent.input(screen.getByRole("combobox"), { target: { value: "item-5999" } });
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    switchBranch.mockResolvedValueOnce({ snapshot: opened.snapshot });
+    await fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
+    await waitFor(() => expect(switchBranch).toHaveBeenCalledWith("/repo", "feature/item-5999", props.opened.generation, 9));
+  });
 
   it("分支菜单打开其他工作区；路径无效或正在写入时留在原仓库", async () => {
     const listed = [record("feature/ui", true), record("shared", false, "D:/wt")];

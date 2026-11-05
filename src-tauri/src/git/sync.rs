@@ -1030,12 +1030,12 @@ async fn remote_pairs(
     Ok((pairs, scheduled.generation))
 }
 
-async fn load_branch_state(
-    backend: &Backend,
-    root: &Path,
-    generation: u64,
-    request_id: u64,
-) -> Result<BranchState, AppError> {
+pub async fn branch_list(backend: &Backend, path: &str, generation: u64, request_id: u64) -> Result<crate::model::BranchListing, AppError> {
+    let root = repo_root(path)?;
+    load_branch_list(backend, &root, generation, request_id).await
+}
+
+async fn load_branch_list(backend: &Backend, root: &Path, generation: u64, request_id: u64) -> Result<crate::model::BranchListing, AppError> {
     let git = require_git(backend).await?;
     let (program, args) = branch_list_command(&git.path, root);
     let listed = read_repo(backend, root, generation, request_id, program, args).await?;
@@ -1055,6 +1055,24 @@ async fn load_branch_state(
             .then(left.name.cmp(&right.name))
     });
     let default_branch = choose_default_branch(&branches, &parsed.origin_head);
+    let bases = merge_bases(&branches, default_branch.as_deref());
+    Ok(crate::model::BranchListing {
+        generation: listed.generation,
+        branches, default_branch,
+        merge_bases: bases.into_iter().map(|(name, _)| name).collect(),
+    })
+}
+
+async fn load_branch_state(
+    backend: &Backend,
+    root: &Path,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    let git = require_git(backend).await?;
+    let listed = load_branch_list(backend, root, generation, request_id).await?;
+    let mut branches = listed.branches;
+    let default_branch = listed.default_branch;
     let bases = merge_bases(&branches, default_branch.as_deref());
     let mut generation = listed.generation;
     let mut merged: Option<HashSet<String>> = None;

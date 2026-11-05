@@ -33,6 +33,7 @@
   let checked = $state<string[]>([]);
   let boundary = $state(discardBoundary());
   let undo = $state<UndoResult | null>(null);
+  let undoRepository = "";
   let busy = $state(false);
   let errorText = $state<string | null>(null);
   let blocked = $derived(disabled || busy);
@@ -132,8 +133,14 @@
     }
   }
 
-  async function openUndo() {
-    const head = opened.snapshot.branch.headOid;
+  export async function undoLatest(expectedHead?: string) {
+    if (blocked) return;
+    await openUndo(expectedHead);
+  }
+
+  async function openUndo(expectedHead?: string) {
+    const repository = opened.summary.path;
+    const head = expectedHead ?? opened.snapshot.branch.headOid;
     if (!head) {
       errorText = "没有可撤销的提交。";
       onFailure({ code: "nothing_to_undo", message: errorText });
@@ -142,7 +149,10 @@
     busy = true;
     errorText = null;
     try {
-      undo = await api.undoCommit(opened.summary.path, head, false, opened.generation, nextId());
+      const preview = await api.undoCommit(repository, head, false, opened.generation, nextId());
+      if (opened.summary.path !== repository) return;
+      undoRepository = repository;
+      undo = preview;
       mode = "undo";
     } catch (error) {
       const failure = normalizeError(error);
@@ -160,18 +170,19 @@
 
   async function confirmUndo() {
     const current = undo;
-    if (!current?.eligible) return;
+    if (!current?.eligible || undoRepository !== opened.summary.path) return;
     busy = true;
     errorText = null;
     try {
       const result = await api.undoCommit(
-        opened.summary.path,
+        undoRepository,
         current.headOid,
         true,
         current.generation,
         nextId(),
       );
       mode = null;
+      if (undoRepository !== opened.summary.path) return;
       onSnapshot(result.snapshot);
       onNotice(result.reason);
     } catch (error) {
@@ -205,7 +216,7 @@
       <span class="count warning">{conflicts}</span>
     </button>
   {/if}
-  <button type="button" class="menu-item" role="menuitem" aria-label={undoActionLabel()} title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={openUndo}>
+  <button type="button" class="menu-item" role="menuitem" aria-label={undoActionLabel()} title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={() => void openUndo()}>
     <Icon name="undo" />
     <span>撤销最近提交<small>仅限未推送的普通提交，文件改动保留</small></span>
   </button>
@@ -234,7 +245,7 @@
     aria-label={undoActionLabel()}
     title={`${undoActionLabel()}（仅限未推送的普通提交）`}
     disabled={blocked}
-    onclick={openUndo}
+    onclick={() => void openUndo()}
   >
     <Icon name="undo" />
   </button>
@@ -311,7 +322,7 @@
     titleId="undo-title"
     icon="undo"
     tone={undo.eligible ? "danger" : "warning"}
-    message="撤销最近一次提交？改动会回到工作区，不会放弃文件内容。"
+    message="撤销最近一次提交？文件改动会保留在暂存区，不会放弃文件内容。"
     targets={[{ icon: "commit", name: undo.summary || "最近一次提交", detail: undo.headOid.slice(0, 7) }]}
     targetsLabel="要撤销的提交"
     notes={[

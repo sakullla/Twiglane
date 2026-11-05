@@ -95,7 +95,22 @@ export interface DiffHunk {
   lineCount: number;
 }
 
+export interface PreviewSource { revision: string; path: string }
+export interface PreviewSources { repository: string; old: PreviewSource | null; new: PreviewSource | null }
+export interface FilePreview {
+  generation: number;
+  kind: "missing" | "unsupported" | "error" | "image" | "archive" | "lfs";
+  size: number | null;
+  dataUrl: string | null;
+  entries: { name: string; size: number; directory: boolean }[];
+  truncated: boolean;
+  message: string;
+  lfsOid: string | null;
+  canDownload: boolean;
+}
+
 export interface DiffResponse {
+  preview?: PreviewSources;
   generation: number;
   path: string;
   staged: boolean;
@@ -178,6 +193,13 @@ export interface BranchRecord {
   targetOid?: string | null;
   /** 已完整包含在主干里（本地默认分支和它的远程对应分支都包含），删除不会丢提交。主干自己不标记。 */
   merged?: boolean;
+}
+
+export interface BranchListing {
+  generation: number;
+  branches: BranchRecord[];
+  defaultBranch?: string | null;
+  mergeBases?: string[];
 }
 
 export interface BranchState {

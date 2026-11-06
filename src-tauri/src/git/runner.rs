@@ -140,7 +140,7 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
     // batch-check 一边读对象名一边输出结果。输入和输出必须同时推进，
     // 否则两边的管道填满后互相等待，且 stdin 写入也绕过了超时和取消。
     let stdin = child.stdin.take();
-    let mut stdin_write = Box::pin(async move {
+    let mut stdin_write = Some(Box::pin(async move {
         if let Some(bytes) = request.stdin {
             let mut stdin = stdin.ok_or_else(|| RunnerError::Io("缺少 stdin".into()))?;
             stdin
@@ -149,7 +149,7 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
                 .map_err(|error| RunnerError::Io(error.to_string()))?;
         }
         Ok::<(), RunnerError>(())
-    });
+    }));
     let mut stdin_result = None;
     let stdout = child
         .stdout
@@ -169,19 +169,22 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
     let mut stderr_buf = None;
     let mut stdout_truncated = false;
     let mut status = None;
+    let mut stop: Option<RunnerError> = None;
     let sleep = tokio::time::sleep(request.timeout);
     tokio::pin!(sleep);
     loop {
         tokio::select! {
-            result = &mut stdin_write, if stdin_result.is_none() => {
+            result = async {
+                match stdin_write.as_mut() {
+                    Some(write) => write.await,
+                    None => std::future::pending().await,
+                }
+            }, if stdin_result.is_none() => {
                 stdin_result = Some(result);
             }
             result = &mut stdout_read, if stdout_buf.is_none() => {
                 let (buf, truncated) = result?;
-                if truncated {
-                    stdout_truncated = true;
-                    let _ = child.kill().await;
-                }
+                stdout_truncated = truncated;
                 stdout_buf = Some(buf);
             }
             result = &mut stderr_read, if stderr_buf.is_none() => {
@@ -191,14 +194,10 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
                 status = Some(result.map_err(|error| RunnerError::Io(error.to_string()))?);
             }
             _ = &mut sleep => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Err(RunnerError::Timeout);
+                stop = Some(RunnerError::Timeout);
             }
             _ = request.shutdown.cancelled() => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Err(RunnerError::Cancelled);
+                stop = Some(RunnerError::Cancelled);
             }
             _ = async {
                 match &request.cancel {
@@ -206,10 +205,21 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
                     None => std::future::pending::<()>().await,
                 }
             } => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Err(RunnerError::Cancelled);
+                stop = Some(RunnerError::Cancelled);
             }
+        }
+        if let Some(error) = stop.take() {
+            // 先丢掉写端，Windows 上写满的管道不会因为子进程退出而结束这次写入。
+            drop(stdin_write.take());
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(error);
+        }
+        if stdout_truncated && stdin_write.take().is_some() {
+            if stdin_result.is_none() {
+                stdin_result = Some(Ok(()));
+            }
+            let _ = child.kill().await;
         }
         if stdout_buf.is_some()
             && stderr_buf.is_some()

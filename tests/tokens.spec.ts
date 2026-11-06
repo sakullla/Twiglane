@@ -683,10 +683,14 @@ describe("共享控件状态语义（T3）", () => {
 
   it("选中/开启态至少有两重线索，不只靠细微明度差", () => {
     const flat = components.replace(/\r\n/g, "\n");
-    const pressed = ruleBody(flat, '.btn-ghost[aria-pressed="true"],\n.btn-secondary[aria-pressed="true"]');
+    const pressed = ruleBody(
+      flat,
+      '.btn-ghost[aria-pressed="true"]:not(:disabled),\n.btn-secondary[aria-pressed="true"]:not(:disabled),\n.diff-toolbar .diff-ws-btn[aria-pressed="true"]:not(:disabled)',
+    );
     expect(pressed).toMatch(/background:\s*var\(--accent-soft\)/);
     expect(pressed).toMatch(/border-color:\s*var\(--accent\)/);
     expect(pressed).toMatch(/color:\s*var\(--accent-text\)/);
+    expect(pressed, "空白开关不再单用 segmented 选中底色").not.toMatch(/--segmented-active/);
     const icon = ruleBody(components, '.icon-btn[aria-expanded="true"], .icon-btn[aria-pressed="true"]');
     expect(icon).toMatch(/background:\s*var\(--accent-soft\)/);
     expect(icon).toMatch(/color:\s*var\(--accent-text\)/);
@@ -704,6 +708,42 @@ describe("共享控件状态语义（T3）", () => {
     expect(disabled).toMatch(/color:\s*var\(--fg-muted\)/);
     expect(disabled).not.toMatch(/background/);
     expect(ruleBody(components, '.file-row[aria-selected="true"]::before')).toMatch(/background:\s*var\(--accent\)/);
+  });
+
+  it("禁用态除文字色外还有中性填充或控件边界，且不改变尺寸", () => {
+    expect(ruleBody(components, ".btn:disabled"), "常规按钮").toMatch(/border-color:\s*var\(--control-border\)/);
+    const ghost = ruleBody(components, ".btn-ghost:disabled, .btn-danger-soft:disabled");
+    expect(ghost, "ghost 禁用也要有中性填充").toMatch(/background:\s*var\(--surface-3\)/);
+    expect(ghost, "ghost 禁用不能把 .btn:disabled 的边界改回透明").not.toMatch(/border(-color)?:\s*[^;]*transparent/);
+    for (const selector of [
+      ".icon-btn:disabled",
+      ".menu-item:disabled",
+      '.context-item[aria-disabled="true"]',
+      '.palette-item[aria-disabled="true"]',
+      '.segmented button:disabled, .segmented button[aria-disabled="true"]',
+      ".composer-inline-action:disabled",
+      ".switch input:disabled",
+    ]) {
+      const body = ruleBody(components, selector);
+      expect(body, `${selector} 需要中性填充或内描边`).toMatch(
+        /background:\s*var\(--surface-2\)|background:\s*var\(--surface-3\)|box-shadow:\s*inset 0 0 0 1px var\(--control-border\)/,
+      );
+    }
+    expect(ruleBody(components, ".checkbox:disabled")).toMatch(/border-color:\s*var\(--control-border\)/);
+    // 边界令牌本身已由对比度门禁按四个表面断言 ≥ 3:1（见上方「控件边界令牌…」用例）。
+    for (const selector of [
+      ".icon-btn:disabled",
+      ".menu-item:disabled",
+      '.context-item[aria-disabled="true"]',
+      '.palette-item[aria-disabled="true"]',
+      '.segmented button:disabled, .segmented button[aria-disabled="true"]',
+      ".composer-inline-action:disabled",
+    ]) {
+      const body = ruleBody(components, selector);
+      for (const property of ["width", "height", "padding", "font-size", "gap", "border-width"]) {
+        expect(body, `${selector} 不应改动 ${property}`).not.toMatch(new RegExp(`(?:^|;)\\s*${property}\\s*:`));
+      }
+    }
   });
 
   it("紧边距控件与菜单容器都有可见焦点环", () => {

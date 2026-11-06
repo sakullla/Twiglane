@@ -73,26 +73,30 @@
 .btn-accent-soft:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 17%, transparent); }
 /* 开启/按下态（aria-pressed）：与列表选中、分段选中共用同一套强调色语言——浅底 +
    强调文字 + 强调边界。只靠 hover 那点灰度差不构成选中态；边界本来就有 1px 透明
-   占位，换色不会改变按钮尺寸。 */
-.btn-ghost[aria-pressed="true"],
-.btn-secondary[aria-pressed="true"] {
+   占位，换色不会改变按钮尺寸。差异工具条的空白开关也走同一套，不另立一种选中底色。 */
+.btn-ghost[aria-pressed="true"]:not(:disabled),
+.btn-secondary[aria-pressed="true"]:not(:disabled),
+.diff-toolbar .diff-ws-btn[aria-pressed="true"]:not(:disabled) {
   background: var(--accent-soft);
   background-image: none;
   border-color: var(--accent);
   color: var(--accent-text);
 }
 .btn-ghost[aria-pressed="true"]:hover:not(:disabled),
-.btn-secondary[aria-pressed="true"]:hover:not(:disabled) {
+.btn-secondary[aria-pressed="true"]:hover:not(:disabled),
+.diff-toolbar .diff-ws-btn[aria-pressed="true"]:hover:not(:disabled) {
   background: var(--accent-soft);
   background-image: none;
   border-color: var(--accent-hover);
   color: var(--accent-text);
 }
 /* 不可用态不用整体 opacity：淡化后的强调色底文字对比度过低，看起来像「坏掉的主按钮」。
-   改成中性填充 + 弱化文字，既能一眼看出不可点，文字也仍可读。 */
-.btn:disabled { cursor: not-allowed; box-shadow: none; transform: none; background: var(--surface-3); background-image: none; color: var(--fg-subtle); }
+   改成中性填充 + 弱化文字 + 3:1 的控件边界：文字之外还有形状线索，且边界占的是
+   .btn 本来预留的 1px 透明位，尺寸不变。 */
+.btn:disabled { cursor: not-allowed; box-shadow: none; transform: none; background: var(--surface-3); background-image: none; border-color: var(--control-border); color: var(--fg-subtle); }
 .btn-secondary:disabled { background: var(--surface-2); border-color: var(--control-border); }
-.btn-ghost:disabled, .btn-danger-soft:disabled { background: transparent; }
+/* ghost/软色按钮禁用后也回到中性填充，不再只剩文字色差；边界由 .btn:disabled 统一提供。 */
+.btn-ghost:disabled, .btn-danger-soft:disabled { background: var(--surface-3); }
 .btn-primary:disabled kbd { background: var(--surface-2); border-color: var(--control-border); color: var(--fg-subtle); }
 .icon-btn {
   display: inline-grid;
@@ -112,8 +116,9 @@
 .icon-btn.danger:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger-text); }
 /* 展开/按下态统一用强调色浅底 + 强调文字：与 hover（中性灰）区分得开，不靠细微明度差。 */
 .icon-btn[aria-expanded="true"], .icon-btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-text); }
-/* 禁用态走弱化文字而不是整体 opacity；尺寸不变，所以状态切换不会推动相邻控件。 */
-.icon-btn:disabled { cursor: not-allowed; background: transparent; color: var(--fg-subtle); box-shadow: none; transform: none; }
+/* 禁用态走弱化文字 + 内描边而不是整体 opacity；描边占的是控件自身像素，尺寸不变，
+   所以状态切换不会推动相邻控件。 */
+.icon-btn:disabled { cursor: not-allowed; background: transparent; color: var(--fg-subtle); box-shadow: inset 0 0 0 1px var(--control-border); transform: none; }
 .icon-btn[aria-expanded="true"]:disabled, .icon-btn[aria-pressed="true"]:disabled { background: var(--surface-3); color: var(--fg-subtle); }
 
 /* ---------- 计数、分段控件 ---------- */
@@ -139,8 +144,9 @@
 .segmented button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: 24px; padding: 0 10px; border-radius: var(--radius-sm); font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--fg-muted); transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease); }
 .segmented button:hover:not(:disabled):not([aria-disabled="true"]) { color: var(--fg); }
 .segmented button:focus-visible { outline-offset: -2px; }
-/* aria-disabled 与原生 disabled 走同一套不可用外观；aria 形式仍可聚焦，原因由 title 承担。 */
-.segmented button:disabled, .segmented button[aria-disabled="true"] { cursor: not-allowed; color: var(--fg-subtle); }
+/* aria-disabled 与原生 disabled 走同一套不可用外观：弱化文字 + 中性填充 + 内描边，
+   除颜色外还有可辨的形状；aria 形式仍可聚焦，原因由 title 承担。 */
+.segmented button:disabled, .segmented button[aria-disabled="true"] { cursor: not-allowed; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--control-border); color: var(--fg-subtle); }
 .segmented button[aria-pressed="true"], .segmented button[aria-selected="true"], .view-switcher button[aria-current="page"] { background: var(--segmented-active-bg); color: var(--fg); box-shadow: var(--segmented-active-shadow); }
 /* 选中但当前不可用：保留选中底与阴影，文字回到可读的弱化档，选中含义不丢。 */
 .segmented button[aria-pressed="true"]:disabled,
@@ -267,8 +273,9 @@
    写法和合并结果编辑框一致：2px --focus，负偏移保证环画在菜单项自身范围内。 */
 .menu-item:hover:not(:disabled) { background: var(--hover); }
 .menu-item:focus-visible { background: var(--hover); outline: 2px solid var(--focus); outline-offset: -2px; }
-/* 不可用菜单项不用整体 opacity：凡是要读的禁用原因都在条目里，文字必须保持可读。 */
-.menu-item:disabled { cursor: not-allowed; color: var(--fg-subtle); }
+/* 不可用菜单项不用整体 opacity：凡是要读的禁用原因都在条目里，文字必须保持可读；
+   中性填充 + 内描边给出文字之外的形状线索。 */
+.menu-item:disabled { cursor: not-allowed; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--control-border); color: var(--fg-subtle); }
 .menu-item > .icon { color: var(--accent-text); margin-top: 2px; }
 .menu-item:disabled > .icon { color: var(--fg-subtle); }
 .menu-item span { display: flex; flex-direction: column; line-height: 1.4; font-size: var(--text-sm); font-weight: var(--weight-medium); }
@@ -301,7 +308,7 @@
 .context-item.active { background: var(--hover); }
 /* 键盘焦点与 hover 当前项同一底色，但补可见焦点环；环画在条目内部，不被菜单滚动容器裁掉。 */
 .context-item:focus-visible { background: var(--hover); outline: 2px solid var(--focus); outline-offset: -2px; }
-.context-item[aria-disabled="true"] { cursor: not-allowed; }
+.context-item[aria-disabled="true"] { cursor: not-allowed; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--control-border); }
 .context-item[aria-disabled="true"] .context-label, .context-item[aria-disabled="true"] > .icon { color: var(--fg-subtle); }
 .context-item.danger .context-label, .context-item.danger > .icon { color: var(--danger-text); }
 .context-item.danger.active { background: var(--danger-soft); }
@@ -545,7 +552,7 @@
 /* 字数提示已经在右端吃掉自动外边距，按钮就紧跟在它后面，不再被推到另一侧。 */
 .composer-count + .composer-inline-action { margin-left: 0; }
 .composer-inline-action:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 20%, transparent); }
-.composer-inline-action:disabled { cursor: not-allowed; background: var(--surface-3); color: var(--fg-subtle); }
+.composer-inline-action:disabled { cursor: not-allowed; background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--control-border); color: var(--fg-subtle); }
 .composer-actions { display: flex; gap: var(--space-6); min-width: 0; }
 .composer-actions .btn { height: 32px; font-size: var(--text-sm); }
 .composer-commit { flex: 1; min-width: 0; padding: 0 var(--space-12); }
@@ -620,9 +627,9 @@
   background-position: 0 92%, 100% 50%;
   background-repeat: no-repeat, no-repeat;
 }
-/* 工具条上的两个显示开关：按下态沿用分段控件的选中底色；「已隐藏 N 处」说明过滤正在生效。 */
+/* 工具条上的两个显示开关：「已隐藏 N 处」说明过滤正在生效；按下态与 .btn-ghost 的
+   accent 选中语义共用同一组选择器（见按钮区），不在这里另写一套底色。 */
 .diff-toolbar .diff-ws-btn { height: 22px; padding: 0 var(--space-8); font-size: var(--text-xs); gap: 5px; }
-.diff-toolbar .diff-ws-btn[aria-pressed="true"] { background: var(--segmented-active-bg); color: var(--fg); box-shadow: var(--segmented-active-shadow); }
 .diff-ws-note { flex: none; font-size: var(--text-xs); color: var(--fg-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .diff-scroll { min-height: 0; flex: 1; overflow: auto; outline: none; background: var(--surface); }
 /* 可聚焦滚动容器（与 .file-list / .history-list 同一判据）：焦点环用 --focus 画在内容之上。 */
@@ -819,8 +826,9 @@
 .palette-item.active:hover { background: var(--accent-soft); }
 .palette-item.active > span:first-child { color: var(--accent-text); }
 .palette-item:focus-visible { background: var(--hover); outline: 2px solid var(--focus); outline-offset: -2px; }
-/* 不可用动作就地给原因，不用整行淡化（会把文字压到 4.5:1 以下） */
-.palette-item[aria-disabled="true"] { cursor: not-allowed; }
+/* 不可用动作就地给原因，不用整行淡化（会把文字压到 4.5:1 以下）；
+   中性填充 + 内描边提供文字之外的形状线索。 */
+.palette-item[aria-disabled="true"] { cursor: not-allowed; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--control-border); }
 .palette-item[aria-disabled="true"] > span:first-child { color: var(--fg-subtle); }
 .palette-reason { max-width: 46%; overflow: hidden; text-overflow: ellipsis; color: var(--fg-subtle); font-size: var(--text-xs); white-space: nowrap; }
 /* 区分用的补充（同名仓库路径、当前仓库）：紧跟标题，空间不够时先省略它，标题与快捷键列不动。 */

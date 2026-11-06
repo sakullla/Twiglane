@@ -148,11 +148,12 @@
    除颜色外还有可辨的形状；aria 形式仍可聚焦，原因由 title 承担。 */
 .segmented button:disabled, .segmented button[aria-disabled="true"] { cursor: not-allowed; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--control-border); color: var(--fg-subtle); }
 .segmented button[aria-pressed="true"], .segmented button[aria-selected="true"], .view-switcher button[aria-current="page"] { background: var(--segmented-active-bg); color: var(--fg); box-shadow: var(--segmented-active-shadow); }
-/* 选中但当前不可用：保留选中底与阴影，文字回到可读的弱化档，选中含义不丢。 */
+/* 选中但当前不可用：保留选中底，文字回到可读的弱化档，再补一圈 3:1 内描边；
+   选中的形状与禁用线索同时存在，也不把白色 pill 换成别的底色。 */
 .segmented button[aria-pressed="true"]:disabled,
 .segmented button[aria-selected="true"]:disabled,
 .segmented button[aria-pressed="true"][aria-disabled="true"],
-.segmented button[aria-selected="true"][aria-disabled="true"] { color: var(--fg-muted); cursor: not-allowed; }
+.segmented button[aria-selected="true"][aria-disabled="true"] { color: var(--fg-muted); cursor: not-allowed; box-shadow: inset 0 0 0 1px var(--control-border); }
 
 /* ---------- 输入与表单 ---------- */
 .field {
@@ -830,6 +831,9 @@
    中性填充 + 内描边提供文字之外的形状线索。 */
 .palette-item[aria-disabled="true"] { cursor: not-allowed; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--control-border); }
 .palette-item[aria-disabled="true"] > span:first-child { color: var(--fg-subtle); }
+/* 禁用项恰好是键盘当前项：active 底色与左沿游标必须保留，再叠禁用内描边。
+   特异性高于上面两条单独状态，避免「当前项与非当前禁用项同貌」而丢失键盘焦点。 */
+.palette-item[aria-disabled="true"].active { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent), inset 0 0 0 1px var(--control-border); }
 .palette-reason { max-width: 46%; overflow: hidden; text-overflow: ellipsis; color: var(--fg-subtle); font-size: var(--text-xs); white-space: nowrap; }
 /* 区分用的补充（同名仓库路径、当前仓库）：紧跟标题，空间不够时先省略它，标题与快捷键列不动。 */
 .palette-detail { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg-subtle); font-size: var(--text-xs); white-space: nowrap; }

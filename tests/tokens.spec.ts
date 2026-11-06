@@ -706,8 +706,16 @@ describe("共享控件状态语义（T3）", () => {
       '.segmented button[aria-pressed="true"]:disabled,\n.segmented button[aria-selected="true"]:disabled,\n.segmented button[aria-pressed="true"][aria-disabled="true"],\n.segmented button[aria-selected="true"][aria-disabled="true"]',
     );
     expect(disabled).toMatch(/color:\s*var\(--fg-muted\)/);
+    expect(disabled, "选中禁用也要有非颜色边界").toMatch(/box-shadow:\s*inset 0 0 0 1px var\(--control-border\)/);
     expect(disabled).not.toMatch(/background/);
     expect(ruleBody(components, '.file-row[aria-selected="true"]::before')).toMatch(/background:\s*var\(--accent\)/);
+  });
+
+  it("命令面板的禁用项仍是键盘当前项时保留游标", () => {
+    const rule = ruleBody(components, '.palette-item[aria-disabled="true"].active');
+    expect(rule, "当前项保留 accent 底色").toMatch(/background:\s*var\(--accent-soft\)/);
+    expect(rule, "左沿游标与禁用描边同时存在").toMatch(/box-shadow:\s*inset 2px 0 0 var\(--accent\), inset 0 0 0 1px var\(--control-border\)/);
+    expect(rule, "禁用描边不能覆盖游标").not.toMatch(/background:\s*var\(--surface-2\)/);
   });
 
   it("禁用态除文字色外还有中性填充或控件边界，且不改变尺寸", () => {

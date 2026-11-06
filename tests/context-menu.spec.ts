@@ -77,6 +77,7 @@ vi.mock("../src/lib/api", () => ({
 }));
 
 import App from "../src/App.svelte";
+import CommandPalette from "../src/lib/components/CommandPalette.svelte";
 import ContextMenu from "../src/lib/components/ContextMenu.svelte";
 import Popover from "../src/lib/components/Popover.svelte";
 import StatusBar from "../src/lib/components/StatusBar.svelte";
@@ -510,6 +511,29 @@ describe("共用组件状态反馈", () => {
     expect(refresh.hasAttribute("disabled")).toBe(false);
     expect(refresh.getAttribute("title")).toBe("重新读取工作区与当前差异");
     expect(document.getElementById(describedby)?.textContent).toBe("重新读取工作区与当前差异");
+  });
+});
+
+describe("命令面板的禁用项游标", () => {
+  it("方向键移到禁用命令时，当前项同时保留 active 与 aria-disabled", async () => {
+    render(CommandPalette, {
+      props: {
+        open: true,
+        commands: [
+          { id: "stage", group: "改动", title: "暂存全部", run: vi.fn() },
+          { id: "discard", group: "改动", title: "放弃全部", enabled: false, reason: "当前写入进行中", run: vi.fn() },
+        ],
+        onClose: vi.fn(),
+      },
+    });
+    const input = await screen.findByRole("combobox");
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    await fireEvent.keyDown(input, { key: "ArrowDown" });
+    const options = screen.getAllByRole("option");
+    expect(options).toHaveLength(2);
+    expect(options[1].classList.contains("active"), "禁用项成为键盘当前项时必须保留游标").toBe(true);
+    expect(options[1].getAttribute("aria-disabled")).toBe("true");
+    expect(options[1].textContent).toContain("当前写入进行中");
   });
 });
 

@@ -228,6 +228,8 @@ describe("提交行数合计", () => {
     expect(label).toContain("这次提交新增 5 行，删除 1 行");
     expect(label).toContain("3 个文件未计入合计");
     expect(commitLineTotalLabel(totals!, "所选提交合计")).toContain("所选提交合计新增 5 行");
+    const incomplete = commitLineTotalLabel(totals!, "所选提交合计", 1);
+    expect(incomplete).toContain("1 个提交的详情未读取，合计不完整");
   });
 
   it("全部文件都不可统计时不给合计，不伪造 +0 −0", () => {
@@ -1010,6 +1012,74 @@ describe("历史面板", () => {
     expect(screen.getByRole("option", { name: /commit-0/ }).getAttribute("aria-selected")).toBe("true");
   });
 
+  it("多选读取期间显示加载，不把空并集当没有文件变化；部分失败标注合计不完整", async () => {
+    const rows = [commit(0), commit(1), commit(2)];
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: rows,
+      scope: "current", branches: ["main"], head: "main",
+    });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    await waitFor(() => expect(commitDetail).toHaveBeenCalledTimes(1));
+    const pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason?: unknown) => void }>();
+    commitDetail.mockImplementation((_repo: string, oid: string) => new Promise((resolve, reject) => {
+      pending.set(oid, { resolve, reject });
+    }));
+
+    await fireEvent.click(screen.getByRole("option", { name: /commit-2/ }), { shiftKey: true });
+    expect(await screen.findByText("已选择 3 个提交")).toBeTruthy();
+    expect(await screen.findByText("正在读取提交中的文件")).toBeTruthy();
+    expect(screen.getByText("正在读取所选提交的详情")).toBeTruthy();
+    expect(screen.queryByText("这些提交没有文件变化。"), "读取期间不是终态空结果").toBeNull();
+    expect(document.querySelector(".commit-line-total"), "读取期间不显示不完整合计").toBeNull();
+    expect(document.querySelector(".commit-files-head .count"), "读取期间不摆出 0 个文件").toBeNull();
+
+    const detailOf = (index: number, path: string, additions: number, deletions: number) => ({
+      generation: 3, commit: rows[index], body: "", root: false, merge: false, selectedParent: "parent",
+      files: [{ path, originalPath: null, status: "modified", additions, deletions }],
+    });
+    pending.get(rows[0].oid)!.resolve(detailOf(0, "a.txt", 2, 1));
+    pending.get(rows[1].oid)!.reject({ code: "detail_failed", message: "提交详情读取失败。" });
+    await waitFor(() => expect(pending.has(rows[2].oid)).toBe(true));
+    pending.get(rows[2].oid)!.resolve(detailOf(2, "b.txt", 1, 0));
+
+    await waitFor(() => expect(screen.queryByText("正在读取提交中的文件")).toBeNull());
+    expect(screen.queryByText("这些提交没有文件变化。")).toBeNull();
+    expect(screen.getByText(/提交详情读取失败。/)).toBeTruthy();
+    expect(screen.getByText(/未读取的提交没有计入文件范围和合计/)).toBeTruthy();
+    const total = () => document.querySelector<HTMLElement>(".commit-files-head .commit-line-total");
+    await waitFor(() => expect(total()).toBeTruthy());
+    expect(total()!.textContent?.replace(/\s+/g, "")).toBe("+3−1");
+    expect(total()!.getAttribute("aria-label")).toContain("1 个提交的详情未读取，合计不完整");
+    expect([...document.querySelectorAll(".history-union-files .file-row")].map((node) => node.textContent))
+      .toEqual([expect.stringContaining("a.txt"), expect.stringContaining("b.txt")]);
+  });
+
+  it("多选详情全部读取失败时不冒充没有文件变化", async () => {
+    const rows = [commit(0), commit(1)];
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: rows,
+      scope: "current", branches: ["main"], head: "main",
+    });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    await waitFor(() => expect(commitDetail).toHaveBeenCalledTimes(1));
+    const pending = new Map<string, { reject: (reason?: unknown) => void }>();
+    commitDetail.mockImplementation((_repo: string, oid: string) => new Promise((_resolve, reject) => {
+      pending.set(oid, { reject });
+    }));
+
+    await fireEvent.click(screen.getByRole("option", { name: /commit-1/ }), { shiftKey: true });
+    expect(await screen.findByText("已选择 2 个提交")).toBeTruthy();
+    await waitFor(() => expect(pending.size).toBe(2));
+    for (const item of pending.values()) item.reject({ code: "detail_failed", message: "读取失败。" });
+
+    expect(await screen.findByText("有提交详情没读取成功，无法确认文件范围。")).toBeTruthy();
+    expect(screen.queryByText("这些提交没有文件变化。")).toBeNull();
+    expect(document.querySelector(".commit-line-total")).toBeNull();
+    expect(screen.getByText(/读取失败。/)).toBeTruthy();
+  });
+
   it("首次读取历史时只显示加载状态，不先报未选择或空历史", async () => {
     let finish: (value: unknown) => void = () => {};
     historyPage.mockImplementation(() => new Promise((resolve) => (finish = resolve)));
@@ -1099,6 +1169,29 @@ describe("历史面板", () => {
     expect(await screen.findByRole("option", { name: /commit-0/ })).toBeTruthy();
     expect(screen.getByRole("option", { name: /commit-0/ }).getAttribute("aria-selected")).toBe("true");
     expect(screen.queryByText("历史没有读取成功。")).toBeNull();
+  });
+
+  it("无效日期归为筛选条件问题，不提供必然失败的重试", async () => {
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok",
+      commits: [commit(0)], scope: "current", branches: ["main"], head: "main",
+    });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    await fireEvent.click(screen.getByRole("button", { name: "更多筛选" }));
+    await fireEvent.input(screen.getByLabelText("开始日期"), { target: { value: "2024-01-03" } });
+    await fireEvent.input(screen.getByLabelText("结束日期"), { target: { value: "2024-01-02" } });
+
+    expect(await screen.findByText("筛选条件无效，未读取历史。")).toBeTruthy();
+    expect(screen.getByText("开始日期晚于结束日期，未读取历史，仓库没有改动。")).toBeTruthy();
+    expect(screen.queryByText("历史没有读取成功。"), "本地校验不是读取失败").toBeNull();
+    expect(screen.queryByRole("button", { name: "重新读取" }), "条件没变时重试是死路").toBeNull();
+    expect(screen.queryByRole("option", { name: /commit-0/ })).toBeNull();
+
+    await fireEvent.click(screen.getByRole("button", { name: "清除筛选条件" }));
+    await waitFor(() => expect(screen.queryByText("筛选条件无效，未读取历史。")).toBeNull());
+    expect(await screen.findByRole("option", { name: /commit-0/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /commit-0/ }).getAttribute("aria-selected")).toBe("true");
   });
 });
 

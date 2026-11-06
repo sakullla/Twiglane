@@ -343,6 +343,8 @@
   } | null>(null);
   let commits = $state.raw<HistoryCommit[]>([]);
   let listError = $state<string | null>(null);
+  /** 本地筛选条件问题（例如日期无效）：不是读取失败，不给必然失败的重试。 */
+  let listProblem = $state<string | null>(null);
   let appendError = $state<string | null>(null);
   let appendStopped = $state(false);
   let loading = $state(false);
@@ -361,6 +363,10 @@
   let checkoutError = $state<string | null>(null);
   let multiDetails = $state.raw<CommitDetail[]>([]);
   let multiError = $state<string | null>(null);
+  /** 多提交详情读取中：读完前不把空并集当成「没有文件变化」。 */
+  let multiLoading = $state(false);
+  /** 多提交详情读取失败的提交数：合计与文件范围只覆盖读到的部分。 */
+  let multiFailed = $state(0);
   let multiDiffs = $state.raw<{ oid: string; summary: string; diff: DiffResponse | null; error: string | null }[]>([]);
   let parentChoice = $state<string | null>(null);
   let manualPath = $state<string | null>(null);
@@ -628,6 +634,7 @@
     const serial = ++loadSerial;
     appendStopped = false;
     appendError = null;
+    listProblem = null;
     loading = true;
     refreshing = true;
     let cancelled = false;
@@ -645,6 +652,7 @@
             branches: previousPage?.branches ?? [],
             head: previousPage?.head ?? null,
           };
+          listProblem = problem;
           listError = problem;
           selectedOids = [];
           anchorOid = null;
@@ -824,10 +832,13 @@
     const ids = selectedOids;
     multiDetails = [];
     multiError = null;
+    multiFailed = 0;
+    multiLoading = false;
     if (!active || ids.length < 2) return;
     const repo = repoPath;
     const generation = readGeneration;
     let cancelled = false;
+    multiLoading = true;
     void (async () => {
       const errors: string[] = [];
       try {
@@ -842,13 +853,17 @@
         });
         if (cancelled || opened.summary.path !== repo) return;
         multiDetails = rows.filter((row): row is CommitDetail => row !== null);
+        multiFailed = rows.length - multiDetails.length;
         multiError = errors[0] ?? null;
       } catch (error) {
         if (!cancelled) multiError = normalizeError(error).message;
+      } finally {
+        if (!cancelled) multiLoading = false;
       }
     })();
     return () => {
       cancelled = true;
+      multiLoading = false;
       multiDetailReads.cancel();
     };
   });
@@ -1299,8 +1314,8 @@
   />
 {/snippet}
 
-{#snippet lineTotal(totals: CommitLineTotals, subject: string)}
-  {@const label = commitLineTotalLabel(totals, subject)}
+{#snippet lineTotal(totals: CommitLineTotals, subject: string, failed = 0)}
+  {@const label = commitLineTotalLabel(totals, subject, failed)}
   <span class="diff-stats commit-line-total" title={label} aria-label={label}>
     <span class="plus">+{totals.additions}</span>
     <span class="minus">−{totals.deletions}</span>
@@ -1466,6 +1481,14 @@
       >
         {#if (loading && !page) || (refreshing && commits.length === 0)}
           <div class="empty" role="status" aria-busy="true"><span class="empty-icon"><span class="spinner"></span></span><strong>{page ? "正在重新读取历史" : "正在读取历史"}</strong></div>
+        {:else if listError && !refreshing && commits.length === 0 && listProblem}
+          <div class="empty" role="status" data-history-problem>
+            <span class="empty-icon warn"><Icon name="filter" size={22} /></span>
+            <strong>筛选条件无效，未读取历史。</strong>
+            <p>{listProblem}</p>
+            {#if showConditions}<p class="history-conditions">{conditionText}</p>{/if}
+            <button type="button" class="btn btn-secondary btn-sm" onclick={clearAllFilters}>清除筛选条件</button>
+          </div>
         {:else if listError && !refreshing && commits.length === 0}
           <div class="empty" role="status" data-history-error>
             <span class="empty-icon err"><Icon name="alert-circle" size={22} /></span>
@@ -1618,7 +1641,12 @@
         </div>
       {/if}
       {#if multiError}
-        <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{multiError}</span></div>
+        <div class="infobar error" role="alert">
+          <Icon name="alert-circle" size={15} />
+          <span class="infobar-text">
+            {multiError}{#if multiFailed > 0}未读取的提交没有计入文件范围和合计。{/if}
+          </span>
+        </div>
       {/if}
       {#if detailLoading && detail}
         <div class="infobar info" role="status" aria-live="polite">
@@ -1654,13 +1682,20 @@
           <aside class="commit-files" aria-label="提交中的文件">
             <div class="commit-files-head">
               <span class="commit-files-title">变更文件</span>
-              <span class="count">{unionFiles.length}</span>
+              {#if !multiLoading}<span class="count">{unionFiles.length}</span>{/if}
               {#if unionLineTotals}
                 <span class="spacer"></span>
-                {@render lineTotal(unionLineTotals, "所选提交合计")}
+                {@render lineTotal(unionLineTotals, "所选提交合计", multiFailed)}
               {/if}
             </div>
-            {#if unionFiles.length === 0}
+            {#if multiLoading}
+              <div class="empty compact" role="status" aria-busy="true">
+                <span class="empty-icon"><span class="spinner"></span></span>
+                <strong>正在读取提交中的文件</strong>
+              </div>
+            {:else if unionFiles.length === 0 && multiFailed > 0}
+              <p class="commit-files-empty" role="status">有提交详情没读取成功，无法确认文件范围。</p>
+            {:else if unionFiles.length === 0}
               <p class="commit-files-empty">这些提交没有文件变化。</p>
             {:else}
               <div
@@ -1728,7 +1763,12 @@
               </div>
             {/if}
             <div class="union-scroll" bind:this={unionHost}>
-              {#if unionActive && multiDiffs.length === 0}
+              {#if multiLoading}
+                <div class="empty compact" role="status" aria-busy="true">
+                  <span class="empty-icon"><span class="spinner"></span></span>
+                  <strong>正在读取所选提交的详情</strong>
+                </div>
+              {:else if unionActive && multiDiffs.length === 0}
                 <div class="empty compact" role="status" aria-busy="true">
                   <span class="empty-icon"><span class="spinner"></span></span>
                   <strong>正在读取差异</strong>

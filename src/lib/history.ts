@@ -150,11 +150,13 @@ export function commitLineTotals(
   return counted > 0 ? { additions, deletions, counted, skipped } : null;
 }
 
-/** 合计的可访问名称：写明统计范围和未计入的文件，不只靠视觉上的 +/−。 */
-export function commitLineTotalLabel(totals: CommitLineTotals, subject = "这次提交"): string {
+/** 合计的可访问名称：写明统计范围、未计入的文件，以及详情未读取的提交。 */
+export function commitLineTotalLabel(totals: CommitLineTotals, subject = "这次提交", failed = 0): string {
   const base = `${subject}新增 ${totals.additions} 行，删除 ${totals.deletions} 行`;
-  if (totals.skipped === 0) return base;
-  return `${base}；另有 ${totals.skipped} 个文件未计入合计（二进制或没有行数统计）`;
+  const notes: string[] = [];
+  if (totals.skipped > 0) notes.push(`${totals.skipped} 个文件未计入合计（二进制或没有行数统计）`);
+  if (failed > 0) notes.push(`${failed} 个提交的详情未读取，合计不完整`);
+  return notes.length > 0 ? `${base}；另有 ${notes.join("；")}` : base;
 }
 
 export function commitFileLabel(status: string): string {

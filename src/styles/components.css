@@ -148,12 +148,18 @@
    除颜色外还有可辨的形状；aria 形式仍可聚焦，原因由 title 承担。 */
 .segmented button:disabled, .segmented button[aria-disabled="true"] { cursor: not-allowed; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--control-border); color: var(--fg-subtle); }
 .segmented button[aria-pressed="true"], .segmented button[aria-selected="true"], .view-switcher button[aria-current="page"] { background: var(--segmented-active-bg); color: var(--fg); box-shadow: var(--segmented-active-shadow); }
-/* 选中但当前不可用：保留选中底，文字回到可读的弱化档，再补一圈 3:1 内描边；
-   选中的形状与禁用线索同时存在，也不把白色 pill 换成别的底色。 */
+/* 选中但当前不可用：保留分段选中底色与 active 阴影，文字回到可读的弱化档，
+   再叠加一圈在 active 底上仍 ≥3:1 的内描边（--control-border 在深色 active 底上
+   只有 2.87:1，不能用）。合并方式的 radio 与 segmented 同属分段选择，一并用这条规则。 */
 .segmented button[aria-pressed="true"]:disabled,
 .segmented button[aria-selected="true"]:disabled,
 .segmented button[aria-pressed="true"][aria-disabled="true"],
-.segmented button[aria-selected="true"][aria-disabled="true"] { color: var(--fg-muted); cursor: not-allowed; box-shadow: inset 0 0 0 1px var(--control-border); }
+.segmented button[aria-selected="true"][aria-disabled="true"],
+.merge-mode button[aria-checked="true"]:disabled {
+  color: var(--fg-muted);
+  cursor: not-allowed;
+  box-shadow: var(--segmented-active-shadow), inset 0 0 0 1px var(--fg-muted);
+}
 
 /* ---------- 输入与表单 ---------- */
 .field {

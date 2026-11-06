@@ -645,6 +645,13 @@ describe("状态与动效统一（R2、R12）", () => {
 describe("共享控件状态语义（T3）", () => {
   const components = read(path.join(stylesDir, "components.css"));
   const base = read(path.join(stylesDir, "base.css"));
+  const selectedDisabled = [
+    '.segmented button[aria-pressed="true"]:disabled',
+    '.segmented button[aria-selected="true"]:disabled',
+    '.segmented button[aria-pressed="true"][aria-disabled="true"]',
+    '.segmented button[aria-selected="true"][aria-disabled="true"]',
+    '.merge-mode button[aria-checked="true"]:disabled',
+  ].join(",\n");
 
   it("禁用态走弱化令牌而不是整体 opacity，且不改变控件尺寸", () => {
     for (const [selector, expected] of [
@@ -700,15 +707,50 @@ describe("共享控件状态语义（T3）", () => {
     );
     expect(segmented).toMatch(/background:\s*var\(--segmented-active-bg\)/);
     expect(segmented).toMatch(/box-shadow:\s*var\(--segmented-active-shadow\)/);
-    // 选中底由基础规则提供；禁用规则只换文字与光标，不能把选中态一起抹掉。
-    const disabled = ruleBody(
-      flat,
-      '.segmented button[aria-pressed="true"]:disabled,\n.segmented button[aria-selected="true"]:disabled,\n.segmented button[aria-pressed="true"][aria-disabled="true"],\n.segmented button[aria-selected="true"][aria-disabled="true"]',
-    );
+    // 选中底由基础规则提供；禁用规则不覆盖 background，只换文字、光标并叠加边界。
+    const disabled = ruleBody(flat, selectedDisabled);
     expect(disabled).toMatch(/color:\s*var\(--fg-muted\)/);
-    expect(disabled, "选中禁用也要有非颜色边界").toMatch(/box-shadow:\s*inset 0 0 0 1px var\(--control-border\)/);
+    expect(disabled, "选中禁用保留 active 阴影并叠加可辨边界").toMatch(
+      /box-shadow:\s*var\(--segmented-active-shadow\), inset 0 0 0 1px var\(--fg-muted\)/,
+    );
     expect(disabled).not.toMatch(/background/);
     expect(ruleBody(components, '.file-row[aria-selected="true"]::before')).toMatch(/background:\s*var\(--accent\)/);
+  });
+
+  it("选中禁用边界在深浅两主题都达到 3:1，且合并方式使用同一条规则", () => {
+    const rule = ruleBody(components.replace(/\r\n/g, "\n"), selectedDisabled);
+    expect(rule, "保留 segmented 的 active 阴影").toMatch(/var\(--segmented-active-shadow\)/);
+    expect(rule, "边界取 --fg-muted，而不是深色下不足 3:1 的 --control-border").toMatch(
+      /inset 0 0 0 1px var\(--fg-muted\)/,
+    );
+    expect(rule, "选中禁用不能覆盖选中底色").not.toMatch(/background/);
+
+    const parse = (value: string): number[] => {
+      const hex = value.match(/^#([0-9a-fA-F]{6})$/);
+      if (!hex) throw new Error(`不是 6 位十六进制色：${value}`);
+      return [0, 2, 4].map((offset) => Number.parseInt(hex[1].slice(offset, offset + 2), 16));
+    };
+    const luminance = (rgb: number[]): number => {
+      const channel = (c: number) => {
+        const scaled = c / 255;
+        return scaled <= 0.03928 ? scaled / 12.92 : ((scaled + 0.055) / 1.055) ** 2.4;
+      };
+      return 0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2]);
+    };
+    const contrast = (a: number[], b: number[]): number => {
+      const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+      return (hi + 0.05) / (lo + 0.05);
+    };
+    for (const [theme, tokens] of [
+      ["light", light],
+      ["dark", dark],
+    ] as const) {
+      const boundary = tokens.get("--fg-muted");
+      const activeBg = tokens.get("--segmented-active-bg");
+      expect(boundary, `${theme} --fg-muted`).toBeTruthy();
+      expect(activeBg, `${theme} --segmented-active-bg`).toBeTruthy();
+      expect(contrast(parse(boundary as string), parse(activeBg as string)), `${theme} 选中禁用边界`).toBeGreaterThanOrEqual(3);
+    }
   });
 
   it("命令面板的禁用项仍是键盘当前项时保留游标", () => {

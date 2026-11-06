@@ -54,23 +54,31 @@
     pane.query = "";
     pane.scroll = 0;
     if (!source) return () => { serials[side]++; controller.abort(); };
-    // 读取一被作废（切换版本或卸载）就让 task 立刻落地，把 previewReads 的槽位让给新选择，
-    // 而不是等已经没人要的后端响应返回；否则两个在途读取会把新读取一直挡在队列里。
-    const abandoned = new Promise<never>((_, reject) => {
-      controller.signal.addEventListener("abort", () => reject({ code: "cancelled", message: "预览已切换。" }), { once: true });
-    });
     void previewReads.run(async () => {
-      const read = (async () => {
-        try {
-          return await api.filePreview(sources.repository, source, current);
-        } catch (failure) {
-          const normalized = normalizeError(failure);
-          if (normalized.code !== "stale" || normalized.generation === undefined || controller.signal.aborted) throw failure;
-          return api.filePreview(sources.repository, source, normalized.generation);
-        }
-      })();
-      abandoned;
-      return await read;
+      // 读取一被作废（切换版本或卸载）就让 task 立刻落地，把 previewReads 的槽位让给新选择，
+      // 而不是等已经没人要的后端响应返回；否则两个在途读取会把新读取一直挡在队列里。
+      // 取消信号只在 task 真正开始后创建：排队期间被 abort 时 task 不执行，也就不会留下无人接管的 rejection。
+      if (controller.signal.aborted) throw { code: "cancelled", message: "预览已切换。" };
+      let detach = () => {};
+      const abandoned = new Promise<never>((_, reject) => {
+        const cancel = () => reject({ code: "cancelled", message: "预览已切换。" });
+        controller.signal.addEventListener("abort", cancel, { once: true });
+        detach = () => controller.signal.removeEventListener("abort", cancel);
+      });
+      try {
+        const read = (async () => {
+          try {
+            return await api.filePreview(sources.repository, source, current);
+          } catch (failure) {
+            const normalized = normalizeError(failure);
+            if (normalized.code !== "stale" || normalized.generation === undefined || controller.signal.aborted) throw failure;
+            return api.filePreview(sources.repository, source, normalized.generation);
+          }
+        })();
+        return await Promise.race([read, abandoned]);
+      } finally {
+        detach();
+      }
     }, controller.signal).then((value) => {
       if (serials[side] !== token) return;
       pane.result = value;

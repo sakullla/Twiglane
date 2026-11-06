@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { MergePreview, OpenedRepository } from "../src/lib/types";
+import type { BranchRecord, MergePreview, OpenedRepository } from "../src/lib/types";
 
 const commitDetail = vi.hoisted(() => vi.fn());
 const commitFileDiff = vi.hoisted(() => vi.fn());
@@ -15,6 +15,7 @@ import { trackNameFor } from "../src/lib/branches";
 import CommitBranches from "../src/lib/components/CommitBranches.svelte";
 import { tick } from "svelte";
 import MergeReview from "../src/lib/components/MergeReview.svelte";
+import MergeSetup from "../src/lib/components/MergeSetup.svelte";
 import TitleBar from "../src/lib/components/TitleBar.svelte";
 
 const opened: OpenedRepository = {
@@ -152,6 +153,116 @@ describe("合并审阅", () => {
     await fireEvent.click(screen.getByRole("tab", { name: /文件/ }));
     expect(await screen.findByText("暂时无法比较这个文件")).toBeTruthy();
     expect(compareFileDiff).not.toHaveBeenCalled();
+  });
+});
+
+describe("合并准备", () => {
+  const branches: BranchRecord[] = [
+    { name: "main", remote: false, current: true, upstream: "origin/main", worktree: null },
+    { name: "feature", remote: false, current: false, upstream: null, worktree: null },
+    { name: "release", remote: false, current: false, upstream: null, worktree: null },
+    { name: "origin/main", remote: true, current: false, upstream: null, worktree: null },
+  ];
+
+  function renderSetup(options: {
+    preview?: MergePreview | null;
+    previewing?: boolean;
+    previewError?: string | null;
+    source?: string;
+    target?: string;
+    current?: string;
+    mode?: "merge" | "rebase" | "ff-only";
+  } = {}) {
+    const utils = render(MergeSetup, {
+      props: {
+        opened,
+        nextId: () => 1,
+        onGeneration: vi.fn(),
+        onFailure: vi.fn(),
+        branches,
+        mainBranches: ["main"],
+        current: options.current ?? "main",
+        source: options.source ?? "feature",
+        target: options.target ?? "main",
+        mode: options.mode ?? "merge",
+        message: "Merge branch 'feature' into main",
+        preview: options.preview === undefined ? preview() : options.preview,
+        previewing: options.previewing ?? false,
+        previewError: options.previewError ?? null,
+        blocked: false,
+        onSource: vi.fn(),
+        onTarget: vi.fn(),
+        onSwap: vi.fn(),
+        onPick: vi.fn(),
+        onMode: vi.fn(),
+        onMessage: vi.fn(),
+        onRecheck: vi.fn(),
+        onOpenStash: vi.fn(),
+        onOpenChanges: vi.fn(),
+      },
+    });
+    return utils;
+  }
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("快进只说明会直接前移，不要求选择合并方式", () => {
+    renderSetup({
+      preview: preview({ fastForward: true, outgoing: 0, incoming: 3, conflictCheck: "clean", conflictPaths: [] }),
+    });
+    expect(screen.getByText("可以快进，没有冲突")).toBeTruthy();
+    expect(screen.queryByRole("radiogroup", { name: "合并方式" })).toBeNull();
+    const next = document.querySelector(".merge-next")?.textContent ?? "";
+    expect(next).toContain("直接快进");
+    expect(next).toContain("不产生合并记录");
+  });
+
+  it("分叉且无冲突时合并与变基都可选，选中状态仍是 aria-checked", () => {
+    renderSetup({ preview: preview({ conflictCheck: "clean", conflictPaths: [] }), mode: "rebase" });
+    const group = screen.getByRole("radiogroup", { name: "方式" });
+    const merge = within(group).getByRole("radio", { name: /创建合并提交/ });
+    const rebase = within(group).getByRole("radio", { name: "变基" });
+    expect(merge.getAttribute("aria-checked")).toBe("false");
+    expect(rebase.getAttribute("aria-checked")).toBe("true");
+    expect(rebase.hasAttribute("disabled")).toBe(false);
+  });
+
+  it("预计冲突时给出冲突审查页和逐处处理说明", () => {
+    renderSetup();
+    expect(screen.getByText("预计 1 个文件有冲突")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: /冲突/ })).toBeTruthy();
+    expect(document.querySelector(".merge-next")?.textContent).toContain("逐处解决 1 个文件");
+  });
+
+  it("预检失败只给重试和检查说明，不展示合并方式", () => {
+    renderSetup({ preview: null, previewError: "读取失败，请重试。" });
+    expect(screen.getByText("没有完成检查")).toBeTruthy();
+    expect(screen.getByText("读取失败，请重试。")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
+    expect(screen.queryByRole("radiogroup", { name: "合并方式" })).toBeNull();
+    expect(document.querySelector(".merge-next")?.textContent).toContain("检查通过前");
+  });
+
+  it("目标不是当前分支时变基不可选，合并方式仍然可用", () => {
+    renderSetup({
+      target: "release",
+      preview: preview({ target: "release", needsSwitch: true, conflictCheck: "clean", conflictPaths: [] }),
+    });
+    const group = screen.getByRole("radiogroup", { name: "方式" });
+    const rebase = within(group).getByRole("radio", { name: "变基" });
+    expect(rebase.hasAttribute("disabled")).toBe(true);
+    expect(rebase.getAttribute("title")).toContain("目标设为当前分支");
+    expect(within(group).getByRole("radio", { name: /创建合并提交/ }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByText(/变基只改写当前分支/)).toBeTruthy();
+  });
+
+  it("重新检查时保留上次结论并标明进行中", () => {
+    renderSetup({ previewing: true });
+    expect(screen.getByText("预计 1 个文件有冲突")).toBeTruthy();
+    expect(screen.getByText(/正在按最新状态重新检查/)).toBeTruthy();
+    expect(document.querySelector(".merge-next")?.textContent).toContain("逐处解决");
   });
 });
 

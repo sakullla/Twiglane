@@ -344,6 +344,8 @@ describe("逐处处理冲突", () => {
 
     renderResolver(`${TWO}extra\n`, { draft });
     expect(head(0).querySelector('[data-hunk-state="pending"]')).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain("之前的逐处选择已作废");
+    expect(document.querySelector(".cr-draft-note")).toBeTruthy();
   });
 
   it("整文件编辑里仍有冲突标记时，需要再确认一次才写入", async () => {

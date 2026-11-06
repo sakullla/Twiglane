@@ -97,8 +97,26 @@
   let ready = $derived(Boolean(preview && preview.source === source && preview.target === target));
   /** 目标上没有来源缺少的提交：只能快进，合并与变基都没有意义，方式选择整块不出现。 */
   let ffOnly = $derived(Boolean(ready && preview?.fastForward));
+  /** 变基只改写当前分支：目标不是当前分支时这个选择不成立，不作为可选项。 */
+  let rebaseReady = $derived(Boolean(current) && target === current);
   /** 有内容可审阅时下半部分整块交给审阅区，配置区收紧。 */
   let reviewing = $derived(Boolean(ready && preview && preview.incoming > 0));
+  /** 每种结论只给一句“下一步”，底部主操作和当前选择才是同一件事。 */
+  let nextStep = $derived.by(() => {
+    if (previewError) return "重试检查不会修改任何文件；检查通过前，底部主操作保持不可用。";
+    if (!source || !target || !ready || !preview) return null;
+    if (!preview.canStart) {
+      return preview.blocker === "dirty"
+        ? null
+        : "按上面的原因调整选择；修正后会自动重新检查。";
+    }
+    if (ffOnly) return `底部主操作会把 ${preview.target} 直接快进到 ${preview.source}：目标没有自己的新提交，不产生合并记录，也不会推送。`;
+    if (preview.conflictCheck === "conflicts") {
+      return `开始后逐处解决 ${preview.conflictPaths.length} 个文件里的冲突，全部标记为已解决后才能完成。`;
+    }
+    if (preview.conflictCheck === "unknown") return "无法提前预测冲突；开始后如果出现冲突，仍可逐处处理或中止。";
+    return "确认摘要和方式后，在底部开始合并；合并只写本地，不会推送。";
+  });
 
   function blockerTitle(code: string | null): string {
     switch (code) {
@@ -117,6 +135,22 @@
       default:
         return "暂时不能合并";
     }
+  }
+
+  // 目标被换成别的分支时，变基选择不再适用：退回合并方式，而不是留下一个点不动的选项。
+  function chooseTarget(value: string) {
+    if (mode === "rebase" && value !== current) onMode("merge");
+    onTarget(value);
+  }
+
+  function choosePair(from: string, into: string) {
+    if (mode === "rebase" && into !== current) onMode("merge");
+    onPick(from, into);
+  }
+
+  function swapDirection() {
+    if (mode === "rebase" && source !== current) onMode("merge");
+    onSwap();
   }
 </script>
 
@@ -150,7 +184,7 @@
         aria-label="交换来源和目标"
         title={swapReason ?? "交换方向：把目标合并到来源"}
         disabled={blocked || Boolean(swapReason)}
-        onclick={onSwap}
+        onclick={swapDirection}
       ><Icon name="swap" size={14} /></button>
     </div>
 
@@ -159,7 +193,7 @@
         <span class="merge-endpoint-label"><span class="merge-endpoint-dot target"></span>合并结果留在这个分支</span>
         <small class:switch-note={!(mode === "rebase" && !ffOnly) && target !== current}>
           {#if mode === "rebase" && !ffOnly}
-            {#if target === current}变基只改写当前分支，不会切换{:else}<Icon name="info" size={12} />变基只会改写当前分支，请把目标留在当前分支{/if}
+            变基只改写当前分支，不会切换
           {:else if target === current}当前分支，合并直接在这里进行{:else}<Icon name="info" size={12} />开始时会先切换到 {target}{/if}
         </small>
       </div>
@@ -174,7 +208,7 @@
         disabled={blocked}
         {branchGroups}
         {mainBranches}
-        onChange={onTarget}
+        onChange={chooseTarget}
       />
     </div>
   </section>
@@ -189,7 +223,7 @@
           aria-pressed={item.source === source && item.target === target}
           title={item.hint}
           disabled={blocked}
-          onclick={() => onPick(item.source, item.target)}
+          onclick={() => choosePair(item.source, item.target)}
         >{item.title}</button>
       {/each}
     </div>
@@ -231,7 +265,7 @@
           {:else}
             <strong>可以合并，没有冲突</strong>
           {/if}
-          <p>{preview.note}{#if preview.canStart && conflicts} 开始后逐处解决，可随时中止。{/if}{#if preview.canStart && ffOnly} {preview.target} 没有自己的新提交，会直接前移到 {source} 的最新提交，不产生合并记录。{/if}</p>
+          <p>{preview.note}{#if previewing}<span class="hint"> 正在按最新状态重新检查…</span>{/if}</p>
         </div>
         {#if previewing}<span class="spinner muted"></span>{/if}
         {#if preview.incoming > 0}
@@ -264,7 +298,7 @@
             <span class="merge-mode-label" id="merge-mode-label">方式</span>
             <div class="segmented merge-mode" role="radiogroup" aria-labelledby="merge-mode-label">
               <button type="button" role="radio" aria-checked={mode !== "rebase"} title={blocked ? BUSY_REASON : "保留两边的历史，多一条合并记录"} disabled={blocked} onclick={() => onMode("merge")}>创建合并提交<span class="merge-mode-tag">推荐</span></button>
-              <button type="button" role="radio" aria-checked={mode === "rebase"} title={blocked ? BUSY_REASON : "把当前分支的提交接到来源之后，会改写历史"} disabled={blocked} onclick={() => onMode("rebase")}>变基</button>
+              <button type="button" role="radio" aria-checked={mode === "rebase"} title={blocked ? BUSY_REASON : rebaseReady ? "把当前分支的提交接到来源之后，会改写历史" : "变基只改写当前分支，请先把目标设为当前分支"} disabled={blocked || !rebaseReady} onclick={() => onMode("rebase")}>变基</button>
             </div>
             {#if mode !== "rebase"}
               <span class="merge-options-sep" aria-hidden="true"></span>
@@ -286,11 +320,19 @@
           {#if mode === "rebase"}
             <p class="merge-mode-note warn">
               <Icon name="alert" size={13} />
-              <span>将改写当前分支上尚未进入 {source} 的提交，适合熟悉 Git 的用户。远程不会改变，也不会推送。{#if target !== current}变基只会改写当前分支，请把目标留在当前分支。{/if}</span>
+              <span>将改写当前分支上尚未进入 {source} 的提交，适合熟悉 Git 的用户。远程不会改变，也不会推送。</span>
+            </p>
+          {:else if !rebaseReady}
+            <p class="merge-mode-note">
+              <Icon name="info" size={13} />
+              <span>变基只改写当前分支；把目标设为{current ? ` ${current} ` : "当前分支"}后才能选。</span>
             </p>
           {/if}
         </section>
       {/if}
+    {/if}
+    {#if nextStep}
+      <p class="merge-mode-note merge-next"><Icon name="arrow-right" size={13} /><span>{nextStep}</span></p>
     {/if}
   </section>
   </div>

@@ -103,6 +103,12 @@
   // 初始状态只读一次：同一文件的后续刷新由宿主用 {#key} 重建组件。
   const original = untrack(() => view.result.text ?? "");
   const restored = untrack(() => (draft && draft.original === original ? draft : null));
+  /** 草稿有实际处理内容时才值得提示；空草稿（只是打开过文件）不打扰。 */
+  function draftHasWork(value: ConflictDraft): boolean {
+    return Object.keys(value.resolutions).length > 0 || value.whole !== null || value.base !== value.original;
+  }
+  /** 工作区内容变了：旧草稿没有写入，明确作废；恢复的草稿由界面里的选择本身说明。 */
+  const draftDiscarded = untrack(() => Boolean(draft && draft.original !== original && draftHasWork(draft)));
   let base = $state(restored?.base ?? original);
   let resolutions = $state<ConflictResolutions>(restored ? { ...restored.resolutions } : {});
   let whole = $state<string | null>(restored?.whole ?? null);
@@ -981,6 +987,13 @@
       {/if}
     </div>
   </div>
+
+  {#if draftDiscarded}
+    <div class="callout warn cr-draft-note" role="status">
+      <Icon name="alert" size={15} />
+      <span>工作区内容已变化，之前的逐处选择已作废，没有写入。请重新处理这个文件。</span>
+    </div>
+  {/if}
 
   {#if effectiveMode === "hunks" || effectiveMode === "preview"}
     <div class="cr-main">

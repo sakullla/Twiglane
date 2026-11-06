@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick, type Snippet } from "svelte";
+  import { onMount, tick, untrack, type Snippet } from "svelte";
   import { isContextKey, pointFor } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
 
@@ -56,6 +56,8 @@
   const GAP = 6;
   const MAX_HEIGHT = 480;
   const listId = `popover-${Math.random().toString(36).slice(2, 9)}`;
+  /** 触发按钮在打开期间不会换人；先抓成普通常量，卸载后异步续体不再读父组件的响应式 prop。 */
+  const anchorEl = untrack(() => anchor);
 
   let root = $state<HTMLDivElement | null>(null);
   let search = $state<HTMLInputElement | null>(null);
@@ -74,7 +76,7 @@
 
   /** 贴着触发按钮向下展开，并收在窗口内：900×600 下也要完整可见（R14）。下方太挤而上方更宽时向上展开。 */
   function measure() {
-    const rect = anchor.getBoundingClientRect();
+    const rect = anchorEl.getBoundingClientRect();
     const fit = Math.min(matchAnchor ? Math.max(width, rect.width) : width, window.innerWidth - MARGIN * 2);
     const left = Math.max(MARGIN, Math.min(rect.left, window.innerWidth - fit - MARGIN));
     const below = window.innerHeight - rect.bottom - GAP - MARGIN;
@@ -100,7 +102,24 @@
     const items = tabbable();
     if (items.length === 0) return;
     const at = items.indexOf(document.activeElement as HTMLElement);
-    items[(at + step + items.length) % items.length].focus();
+    const next = at === -1 ? (step === 1 ? 0 : items.length - 1) : (at + step + items.length) % items.length;
+    items[next]?.focus();
+  }
+
+  /**
+   * 关闭弹层：是否归还焦点由调用方语义决定（点外面关闭时不抢焦点）。
+   * 归还时等这次更新落定后再兜底：调用方通常自己聚焦触发按钮；若它没有处理、
+   * 焦点已经掉到 body，就由外壳保证回到 anchor——命令面板、菜单和弹窗的
+   * 「关闭后焦点返回」因此是同一套保证，而不是每个调用点各写一遍。
+   */
+  function close(refocus: boolean) {
+    onClose(refocus);
+    if (!refocus) return;
+    void tick().then(() => {
+      if (!anchorEl.isConnected) return;
+      const focused = document.activeElement;
+      if (focused === null || focused === document.body) anchorEl.focus({ preventScroll: true });
+    });
   }
 
   function onKey(event: KeyboardEvent) {
@@ -110,12 +129,12 @@
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
-      onClose(true);
+      close(true);
       return;
     }
     if (event.key === "Tab") {
       event.preventDefault();
-      if (!foot) onClose(true);
+      if (!foot) close(true);
       else cycleFocus(event.shiftKey ? -1 : 1);
       return;
     }
@@ -153,14 +172,14 @@
     reveal();
     const outside = (event: MouseEvent) => {
       const target = event.target as Element | null;
-      if (!target || root?.contains(target) || anchor.contains(target)) return;
+      if (!target || root?.contains(target) || anchorEl.contains(target)) return;
       if (target.closest?.(".context-menu")) return;
-      onClose(false);
+      close(false);
     };
     const key = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.isComposing) return;
       event.preventDefault();
-      onClose(true);
+      close(true);
     };
     window.addEventListener("mousedown", outside, true);
     window.addEventListener("keydown", key);

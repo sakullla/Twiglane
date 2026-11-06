@@ -642,6 +642,133 @@ describe("状态与动效统一（R2、R12）", () => {
   });
 });
 
+describe("共享控件状态语义（T3）", () => {
+  const components = read(path.join(stylesDir, "components.css"));
+  const base = read(path.join(stylesDir, "base.css"));
+
+  it("禁用态走弱化令牌而不是整体 opacity，且不改变控件尺寸", () => {
+    for (const [selector, expected] of [
+      [".btn:disabled", /background:\s*var\(--surface-3\)/],
+      [".icon-btn:disabled", /color:\s*var\(--fg-subtle\)/],
+      [".menu-item:disabled", /color:\s*var\(--fg-subtle\)/],
+      [".composer-inline-action:disabled", /color:\s*var\(--fg-subtle\)/],
+      ['.segmented button:disabled, .segmented button[aria-disabled="true"]', /color:\s*var\(--fg-subtle\)/],
+    ] as const) {
+      const body = ruleBody(components, selector);
+      expect(body, selector).not.toMatch(/(?:^|;)\s*opacity\s*:/);
+      expect(body, selector).toMatch(expected);
+    }
+    for (const selector of [
+      ".icon-btn:disabled",
+      ".menu-item:disabled",
+      ".composer-inline-action:disabled",
+      '.segmented button:disabled, .segmented button[aria-disabled="true"]',
+    ]) {
+      const body = ruleBody(components, selector);
+      for (const property of ["width", "height", "padding", "font-size", "gap", "border-width"]) {
+        expect(body, `${selector} 不应改动 ${property}`).not.toMatch(new RegExp(`(?:^|;)\\s*${property}\\s*:`));
+      }
+    }
+  });
+
+  it("勾选框与开关禁用时保留可辨状态，不靠整体淡化", () => {
+    expect(ruleBody(components, ".checkbox:disabled")).toMatch(/border-color:\s*var\(--control-border\)/);
+    expect(ruleBody(components, ".checkbox:checked:disabled")).toMatch(/background:\s*var\(--control-border\)/);
+    const toggle = ruleBody(components, ".switch input:disabled");
+    expect(toggle).not.toMatch(/(?:^|;)\s*opacity\s*:/);
+    expect(toggle).toMatch(/box-shadow:\s*inset 0 0 0 1px var\(--control-border\)/);
+    expect(ruleBody(components, ".switch input:checked:disabled")).toMatch(/background:\s*var\(--control-border\)/);
+    expect(ruleBody(components, ".switch:has(input:disabled)")).toMatch(/cursor:\s*not-allowed/);
+  });
+
+  it("选中/开启态至少有两重线索，不只靠细微明度差", () => {
+    const flat = components.replace(/\r\n/g, "\n");
+    const pressed = ruleBody(flat, '.btn-ghost[aria-pressed="true"],\n.btn-secondary[aria-pressed="true"]');
+    expect(pressed).toMatch(/background:\s*var\(--accent-soft\)/);
+    expect(pressed).toMatch(/border-color:\s*var\(--accent\)/);
+    expect(pressed).toMatch(/color:\s*var\(--accent-text\)/);
+    const icon = ruleBody(components, '.icon-btn[aria-expanded="true"], .icon-btn[aria-pressed="true"]');
+    expect(icon).toMatch(/background:\s*var\(--accent-soft\)/);
+    expect(icon).toMatch(/color:\s*var\(--accent-text\)/);
+    const segmented = ruleBody(
+      components,
+      '.segmented button[aria-pressed="true"], .segmented button[aria-selected="true"], .view-switcher button[aria-current="page"]',
+    );
+    expect(segmented).toMatch(/background:\s*var\(--segmented-active-bg\)/);
+    expect(segmented).toMatch(/box-shadow:\s*var\(--segmented-active-shadow\)/);
+    // 选中底由基础规则提供；禁用规则只换文字与光标，不能把选中态一起抹掉。
+    const disabled = ruleBody(
+      flat,
+      '.segmented button[aria-pressed="true"]:disabled,\n.segmented button[aria-selected="true"]:disabled,\n.segmented button[aria-pressed="true"][aria-disabled="true"],\n.segmented button[aria-selected="true"][aria-disabled="true"]',
+    );
+    expect(disabled).toMatch(/color:\s*var\(--fg-muted\)/);
+    expect(disabled).not.toMatch(/background/);
+    expect(ruleBody(components, '.file-row[aria-selected="true"]::before')).toMatch(/background:\s*var\(--accent\)/);
+  });
+
+  it("紧边距控件与菜单容器都有可见焦点环", () => {
+    expect(ruleBody(base, ":focus-visible"), "全局焦点环是共同底座").toMatch(/outline:\s*2px solid var\(--focus\)/);
+    for (const selector of [".icon-btn:focus-visible", ".segmented button:focus-visible"]) {
+      expect(ruleBody(components, selector), selector).toMatch(/outline-offset:\s*-2px/);
+    }
+    for (const selector of [".context-menu:focus-visible", ".context-item:focus-visible"]) {
+      const body = ruleBody(components, selector);
+      expect(body, selector).toMatch(/outline:\s*2px solid var\(--focus\)/);
+      expect(body, selector).not.toMatch(/var\(--accent-soft/);
+    }
+  });
+
+  it("加载态有固定尺寸与进行中光标，减少动效后仍保留静态加载形状", () => {
+    const spinner = ruleBody(components, ".spinner");
+    expect(spinner).toMatch(/width:\s*14px/);
+    expect(spinner).toMatch(/height:\s*14px/);
+    expect(spinner).toMatch(/flex:\s*none/);
+    expect(spinner).toMatch(/border-top-color:\s*currentColor/);
+    expect(spinner).toMatch(/animation:\s*spin/);
+    expect(
+      ruleBody(
+        components,
+        '.btn:has(> .spinner), .icon-btn:has(> .spinner), .segmented button:has(> .spinner), .btn[aria-busy="true"]',
+      ),
+    ).toMatch(/cursor:\s*progress/);
+    const reduced = components.match(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(reduced, "加载环停转后仍有两道高亮弧").toMatch(/\.spinner \{[^}]*border-right-color:\s*currentColor/);
+    expect(reduced, "减少动效不能把加载指示藏起来").not.toMatch(/display:\s*none|visibility:\s*hidden/);
+    expect(reduced, "按压反馈不再位移或缩放").toMatch(
+      /\.btn:active:not\(:disabled\), \.icon-btn:active:not\(:disabled\) \{ transform: none; \}/,
+    );
+    expect(reduced, "交换按钮的悬停旋转是装饰").toMatch(/\.merge-swap:hover:not\(:disabled\) \{ transform: none; \}/);
+  });
+
+  it("错误状态在行内提示、提示框与通知里共用危险语义", () => {
+    for (const selector of [".inline-error", ".callout.error"]) {
+      const body = ruleBody(components, selector);
+      expect(body, selector).toMatch(/var\(--danger-soft\)/);
+      expect(body, selector).toMatch(/var\(--danger-text\)/);
+    }
+    expect(ruleBody(components, ".toast.error .toast-icon")).toMatch(/var\(--danger\)/);
+    expect(ruleBody(components, ".composer-meta .composer-error")).toMatch(/var\(--danger-text\)/);
+  });
+
+  it("减少动效只关闭动效，不覆盖任何状态外观", () => {
+    const reduced = base.match(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(reduced).toMatch(/animation:\s*none !important/);
+    expect(reduced).toMatch(/transition:\s*none !important/);
+    expect(reduced).toMatch(/scroll-behavior:\s*auto !important/);
+    expect(reduced, "状态外观由静态形状、语义色和文字承担，不能靠隐藏或淡化").not.toMatch(
+      /display\s*:|visibility\s*:|opacity\s*:|color\s*:/,
+    );
+  });
+
+  it("写入锁定原因留在标题行，不占主操作位置", () => {
+    const lock = ruleBody(components, ".modal-lock");
+    expect(lock).toMatch(/color:\s*var\(--fg-muted\)/);
+    expect(lock).toMatch(/font-size:\s*var\(--text-xs\)/);
+    expect(lock, "状态标记只占标题行，不能改变底部操作条布局").toMatch(/flex:\s*none/);
+    expect(ruleBody(components, ".modal-lock .spinner")).toMatch(/width:\s*11px/);
+  });
+});
+
 describe("样式分层结构", () => {
   it("四层文件齐备", () => {
     for (const file of layerFiles) {

@@ -68,7 +68,8 @@ kbd {
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px) scale(0.985); } to { opacity: 1; transform: none; } }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 
-/* 减少动效：只保留状态切换，去掉位移与淡入 */
+/* 减少动效：只保留状态切换，去掉位移与淡入；加载、错误、选中与完成状态由静态形状、
+   语义色和状态文字承担（加载环的静态形态见 components.css 的 .spinner）。 */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }

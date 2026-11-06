@@ -183,6 +183,7 @@
   class="menu context-menu"
   role="menu"
   aria-label={request.label}
+  aria-orientation="vertical"
   tabindex="-1"
   style={`left:${position.left}px;top:${position.top}px`}
   bind:this={menu}

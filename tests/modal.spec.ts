@@ -1,6 +1,7 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/svelte";
 import { createRawSnippet, tick } from "svelte";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import CommandPalette from "../src/lib/components/CommandPalette.svelte";
 import Modal, { openModalCount } from "../src/lib/components/Modal.svelte";
 import PublishModal from "../src/lib/components/PublishModal.svelte";
 import SettingsModal from "../src/lib/components/SettingsModal.svelte";
@@ -84,6 +85,13 @@ describe("Modal 键盘处理不依赖焦点位置", () => {
 
   it("写入在途锁定：Esc、背板和右上角都不关闭，结束后恢复", async () => {
     const { onClose, view } = open("甲窗", { locked: true });
+    const dialog = screen.getByRole("dialog");
+    const lock = dialog.querySelector<HTMLElement>("#甲窗-title-lock");
+    expect(lock?.textContent).toContain("写入中");
+    expect(lock?.textContent, "对话框描述要读全原因，不能只有可见的两个字").toContain("完成后才能关闭");
+    expect(lock?.getAttribute("role"), "锁定原因通过状态区播报").toBe("status");
+    expect(lock?.getAttribute("title")).toContain("完成后才能关闭");
+    expect(dialog.getAttribute("aria-describedby"), "不可聚焦的关闭按钮由对话框描述兜住原因").toBe("甲窗-title-lock");
     await press("Escape");
     await fireEvent.mouseDown(document.querySelector("[data-modal-backdrop]")!);
     const close = screen.getByRole("button", { name: "关闭对话框" });
@@ -92,8 +100,18 @@ describe("Modal 键盘处理不依赖焦点位置", () => {
     expect(onClose).not.toHaveBeenCalled();
     await view.rerender({ locked: false });
     await tick();
+    expect(dialog.querySelector(".modal-lock"), "锁定结束后状态标记一起收起").toBeNull();
+    expect(dialog.getAttribute("aria-describedby")).toBeNull();
     await press("Escape");
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("说明与写入锁定原因同时进入对话框描述", () => {
+    const description = "取消不会修改仓库，已输入的内容仍保留在当前窗口。";
+    open("甲窗", { description, locked: true });
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.getAttribute("aria-describedby")).toBe("甲窗-title-description 甲窗-title-lock");
+    expect(document.getElementById("甲窗-title-lock")?.getAttribute("title")).toContain("写入进行中");
   });
 
   it("关闭后不再监听", async () => {
@@ -173,6 +191,16 @@ describe("关闭后的焦点去处", () => {
     origin.remove();
   });
 
+  it("点右上角关闭与 Esc 走同一条焦点返回路径", async () => {
+    const origin = attachOrigin();
+    origin.focus();
+    const { onClose } = open("甲窗", { returnFocus: origin });
+    await fireEvent.click(screen.getByRole("button", { name: "关闭对话框" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(document.activeElement, "关闭按钮和 Esc 不能一个回焦点、一个落 body").toBe(origin);
+    origin.remove();
+  });
+
   it("不传 returnFocus 时按原语义：不把焦点交给已卸载的节点", async () => {
     const search = attachSearch();
     const { view } = open("甲窗");
@@ -198,6 +226,26 @@ describe("关闭后的焦点去处", () => {
  * 的层级对所有弹窗一致。这里用两个真实任务弹窗把 T5 的两处统一钉住：
  * 设置弹窗原来没有头部图标，标题比其他弹窗左移 46px；发布弹窗原来把「取消」放在最左。
  */
+describe("命令面板与任务弹层的键盘关闭", () => {
+  afterEach(() => cleanup());
+
+  it("命令面板 Esc 关闭后，焦点回到打开面板前的控件", async () => {
+    const origin = document.createElement("button");
+    origin.id = "palette-origin";
+    document.body.appendChild(origin);
+    origin.focus();
+    const onClose = vi.fn();
+    const view = render(CommandPalette, { props: { open: false, commands: [], onClose } });
+    await view.rerender({ open: true });
+    await waitFor(() => expect(document.activeElement?.id).toBe("palette-input"));
+    await fireEvent.keyDown(document.getElementById("palette-input")!, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await view.rerender({ open: false });
+    await waitFor(() => expect(document.activeElement, "面板关闭后不能把焦点留在 body").toBe(origin));
+    origin.remove();
+  });
+});
+
 describe("任务弹窗共用外壳", () => {
   afterEach(() => {
     cleanup();

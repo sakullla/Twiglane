@@ -71,13 +71,29 @@
 .btn-warning-soft:hover:not(:disabled) { background: color-mix(in srgb, var(--warning) 17%, transparent); }
 .btn-accent-soft { background: var(--accent-soft); color: var(--accent-text); }
 .btn-accent-soft:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 17%, transparent); }
+/* 开启/按下态（aria-pressed）：与列表选中、分段选中共用同一套强调色语言——浅底 +
+   强调文字 + 强调边界。只靠 hover 那点灰度差不构成选中态；边界本来就有 1px 透明
+   占位，换色不会改变按钮尺寸。 */
+.btn-ghost[aria-pressed="true"],
+.btn-secondary[aria-pressed="true"] {
+  background: var(--accent-soft);
+  background-image: none;
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+.btn-ghost[aria-pressed="true"]:hover:not(:disabled),
+.btn-secondary[aria-pressed="true"]:hover:not(:disabled) {
+  background: var(--accent-soft);
+  background-image: none;
+  border-color: var(--accent-hover);
+  color: var(--accent-text);
+}
 /* 不可用态不用整体 opacity：淡化后的强调色底文字对比度过低，看起来像「坏掉的主按钮」。
    改成中性填充 + 弱化文字，既能一眼看出不可点，文字也仍可读。 */
 .btn:disabled { cursor: not-allowed; box-shadow: none; transform: none; background: var(--surface-3); background-image: none; color: var(--fg-subtle); }
 .btn-secondary:disabled { background: var(--surface-2); border-color: var(--control-border); }
 .btn-ghost:disabled, .btn-danger-soft:disabled { background: transparent; }
 .btn-primary:disabled kbd { background: var(--surface-2); border-color: var(--control-border); color: var(--fg-subtle); }
-.icon-btn:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; box-shadow: none; transform: none; }
 .icon-btn {
   display: inline-grid;
   place-items: center;
@@ -89,10 +105,16 @@
   transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease);
 }
 .icon-btn.sm { width: 24px; height: 24px; border-radius: var(--radius-sm); }
+/* 图标按钮多在工具条和标题栏的紧边距里，焦点环画在自身范围内，不被容器裁掉。 */
+.icon-btn:focus-visible { outline-offset: -2px; }
 .icon-btn:hover:not(:disabled) { background: var(--hover); color: var(--fg); }
 .icon-btn:active:not(:disabled) { transform: scale(0.94); }
 .icon-btn.danger:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger-text); }
-.icon-btn[aria-expanded="true"], .icon-btn[aria-pressed="true"] { background: var(--active); color: var(--fg); }
+/* 展开/按下态统一用强调色浅底 + 强调文字：与 hover（中性灰）区分得开，不靠细微明度差。 */
+.icon-btn[aria-expanded="true"], .icon-btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-text); }
+/* 禁用态走弱化文字而不是整体 opacity；尺寸不变，所以状态切换不会推动相邻控件。 */
+.icon-btn:disabled { cursor: not-allowed; background: transparent; color: var(--fg-subtle); box-shadow: none; transform: none; }
+.icon-btn[aria-expanded="true"]:disabled, .icon-btn[aria-pressed="true"]:disabled { background: var(--surface-3); color: var(--fg-subtle); }
 
 /* ---------- 计数、分段控件 ---------- */
 .count {
@@ -115,8 +137,16 @@
 .count.warning { background: var(--warning-soft); color: var(--warning-text); }
 .segmented { display: inline-flex; padding: 2px; gap: var(--space-2); border-radius: var(--radius); background: var(--surface-3); flex: none; }
 .segmented button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: 24px; padding: 0 10px; border-radius: var(--radius-sm); font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--fg-muted); transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease); }
-.segmented button:hover { color: var(--fg); }
+.segmented button:hover:not(:disabled):not([aria-disabled="true"]) { color: var(--fg); }
+.segmented button:focus-visible { outline-offset: -2px; }
+/* aria-disabled 与原生 disabled 走同一套不可用外观；aria 形式仍可聚焦，原因由 title 承担。 */
+.segmented button:disabled, .segmented button[aria-disabled="true"] { cursor: not-allowed; color: var(--fg-subtle); }
 .segmented button[aria-pressed="true"], .segmented button[aria-selected="true"], .view-switcher button[aria-current="page"] { background: var(--segmented-active-bg); color: var(--fg); box-shadow: var(--segmented-active-shadow); }
+/* 选中但当前不可用：保留选中底与阴影，文字回到可读的弱化档，选中含义不丢。 */
+.segmented button[aria-pressed="true"]:disabled,
+.segmented button[aria-selected="true"]:disabled,
+.segmented button[aria-pressed="true"][aria-disabled="true"],
+.segmented button[aria-selected="true"][aria-disabled="true"] { color: var(--fg-muted); cursor: not-allowed; }
 
 /* ---------- 输入与表单 ---------- */
 .field {
@@ -151,16 +181,24 @@
 .form-group { display: flex; flex-direction: column; }
 .form-grid { display: flex; flex-direction: column; gap: 15px; }
 .checkbox { appearance: none; width: 16px; height: 16px; border-radius: 5px; border: 1.5px solid var(--control-border); background: var(--surface); display: inline-grid; place-items: center; flex: none; cursor: pointer; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease); margin: 0; }
-.checkbox:hover { border-color: var(--control-border-hover); }
+.checkbox:hover:not(:disabled) { border-color: var(--control-border-hover); }
 .checkbox:checked { background: var(--accent); border-color: var(--accent); }
 .checkbox:checked::after { content: ""; width: 9px; height: 5px; border: 2px solid var(--accent-fg); border-top: 0; border-right: 0; transform: rotate(-45deg) translate(1px, -1px); }
 .checkbox:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+/* 勾选框不可用时保留「勾选/未勾选」两种可辨形态，只把强调色换成中性控件边界。 */
+.checkbox:disabled { cursor: not-allowed; border-color: var(--control-border); background: var(--surface-2); }
+.checkbox:checked:disabled { border-color: var(--control-border); background: var(--control-border); }
 .switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; font-size: var(--text-sm); color: var(--fg-muted); }
 .switch input { appearance: none; width: 34px; height: 19px; border-radius: 999px; background: var(--control-border); position: relative; cursor: pointer; transition: background var(--duration-base) var(--ease); flex: none; margin: 0; }
 .switch input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%; background: var(--switch-knob); box-shadow: var(--shadow-sm); transition: transform var(--duration-base) var(--ease); }
 .switch input:checked { background: var(--accent); }
 .switch input:checked::after { transform: translateX(15px); }
-.switch input:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
+/* 开关不可用时不用整体 opacity：轨道换成中性控件边界，滑块加一圈边界，
+   开/关仍由滑块位置表达，禁用原因由所在行的标签和 title 说明。 */
+.switch:has(input:disabled) { cursor: not-allowed; color: var(--fg-subtle); }
+.switch input:disabled { cursor: not-allowed; background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--control-border); }
+.switch input:checked:disabled { background: var(--control-border); }
+.switch input:disabled::after { background: var(--surface); box-shadow: inset 0 0 0 1px var(--control-border); }
 /* 设置：外观和运行环境各一组，组是 --surface 上的一块 --surface-2，不再叠圆角描边卡片（R2、R11）。 */
 .settings-section { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
 .settings-section:focus-visible { outline-offset: var(--space-4); }
@@ -210,6 +248,15 @@
 .st-new { background: var(--info-soft); color: var(--info-text); }
 .avatar { display: inline-grid; place-items: center; width: 27px; height: 27px; border-radius: 50%; font-size: var(--text-xs); font-weight: var(--weight-bold); color: var(--avatar-fg); flex: none; background: hsl(var(--hue, 238) var(--avatar-bg-sat) var(--avatar-bg-light)); box-shadow: inset 0 0 0 1px var(--on-accent-soft); }
 .spinner { width: 14px; height: 14px; flex: none; border-radius: 50%; border: 2px solid color-mix(in srgb, currentColor 23%, transparent); border-top-color: currentColor; animation: spin 0.7s linear infinite; }
+/* 进行中：按钮、图标按钮和分段项里有加载环时光标也读作「进行中」，与静态禁用区分。 */
+.btn:has(> .spinner), .icon-btn:has(> .spinner), .segmented button:has(> .spinner), .btn[aria-busy="true"] { cursor: progress; }
+/* 减少动态效果：加载环不转后保留两道高亮弧，加载含义由静态形状与相邻状态文字承担，
+   不靠旋转，也不会被隐藏。按压与悬停反馈只保留底色/边界，不再位移或缩放。 */
+@media (prefers-reduced-motion: reduce) {
+  .spinner { border-right-color: currentColor; }
+  .btn:active:not(:disabled), .icon-btn:active:not(:disabled) { transform: none; }
+  .merge-swap:hover:not(:disabled) { transform: none; }
+}
 
 /* ---------- 菜单（popover） ---------- */
 .menu-anchor { position: relative; }
@@ -220,8 +267,10 @@
    写法和合并结果编辑框一致：2px --focus，负偏移保证环画在菜单项自身范围内。 */
 .menu-item:hover:not(:disabled) { background: var(--hover); }
 .menu-item:focus-visible { background: var(--hover); outline: 2px solid var(--focus); outline-offset: -2px; }
-.menu-item:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
+/* 不可用菜单项不用整体 opacity：凡是要读的禁用原因都在条目里，文字必须保持可读。 */
+.menu-item:disabled { cursor: not-allowed; color: var(--fg-subtle); }
 .menu-item > .icon { color: var(--accent-text); margin-top: 2px; }
+.menu-item:disabled > .icon { color: var(--fg-subtle); }
 .menu-item span { display: flex; flex-direction: column; line-height: 1.4; font-size: var(--text-sm); font-weight: var(--weight-medium); }
 .menu-item small { display: block; color: var(--fg-subtle); font-size: var(--text-xs); font-weight: var(--weight-normal); line-height: var(--leading-normal); margin-top: 2px; }
 .menu-sep { height: 1px; margin: var(--space-4) var(--space-6); background: var(--border); }
@@ -241,6 +290,8 @@
 /* ---------- 右键菜单 ---------- */
 /* 固定定位到指针处（由组件按窗口边缘翻转），条目单行、紧凑；不可用条目灰显并在提示里给原因。 */
 .context-menu { position: fixed; right: auto; min-width: 232px; max-width: 400px; max-height: calc(100vh - 16px); overflow: auto; padding: var(--space-4); outline: none; z-index: var(--z-toast); }
+/* 菜单内没有任何可执行项时焦点落在菜单容器本身；容器也必须有可见焦点，不能只剩一条 outline:none。 */
+.context-menu:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .context-item { align-items: center; gap: var(--space-8); min-height: 30px; padding: var(--space-4) var(--space-8); }
 .context-item > .icon { margin-top: 0; color: var(--fg-muted); flex: none; }
 .context-item .context-copy { flex: 1; min-width: 0; }
@@ -248,6 +299,8 @@
 .context-item .context-copy small { overflow-wrap: anywhere; }
 .context-item kbd { margin-left: var(--space-12); font-size: var(--text-xs); }
 .context-item.active { background: var(--hover); }
+/* 键盘焦点与 hover 当前项同一底色，但补可见焦点环；环画在条目内部，不被菜单滚动容器裁掉。 */
+.context-item:focus-visible { background: var(--hover); outline: 2px solid var(--focus); outline-offset: -2px; }
 .context-item[aria-disabled="true"] { cursor: not-allowed; }
 .context-item[aria-disabled="true"] .context-label, .context-item[aria-disabled="true"] > .icon { color: var(--fg-subtle); }
 .context-item.danger .context-label, .context-item.danger > .icon { color: var(--danger-text); }
@@ -492,7 +545,7 @@
 /* 字数提示已经在右端吃掉自动外边距，按钮就紧跟在它后面，不再被推到另一侧。 */
 .composer-count + .composer-inline-action { margin-left: 0; }
 .composer-inline-action:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 20%, transparent); }
-.composer-inline-action:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
+.composer-inline-action:disabled { cursor: not-allowed; background: var(--surface-3); color: var(--fg-subtle); }
 .composer-actions { display: flex; gap: var(--space-6); min-width: 0; }
 .composer-actions .btn { height: 32px; font-size: var(--text-sm); }
 .composer-commit { flex: 1; min-width: 0; padding: 0 var(--space-12); }
@@ -699,6 +752,10 @@
 .modal-card.modal-sm { width: min(450px, 100%); }
 .modal-card.modal-lg { width: min(740px, 100%); }
 .modal-head { display: flex; align-items: flex-start; gap: var(--space-12); padding: 18px var(--space-12) var(--space-12) 18px; }
+/* 写入在途：关闭按钮被禁用后，原因必须就地可见，而不是只藏在不可聚焦按钮的 tooltip 里。
+   这枚状态标记只占标题行的弹性余量，出现/消失不改变底部主操作的位置。 */
+.modal-lock { display: inline-flex; align-items: center; gap: var(--space-6); flex: none; color: var(--fg-muted); font-size: var(--text-xs); white-space: nowrap; }
+.modal-lock .spinner { width: 11px; height: 11px; border-width: 1.5px; }
 .modal-icon { display: grid; place-items: center; width: 34px; height: 34px; border-radius: var(--radius); background: var(--accent-soft); color: var(--accent-text); flex: none; }
 .modal-icon.tone-danger { background: var(--danger-soft); color: var(--danger); }
 .modal-icon.tone-warning { background: var(--warning-soft); color: var(--warning); }

@@ -96,6 +96,11 @@
   let card = $state<HTMLDivElement | null>(null);
   let backdrop = $state<HTMLDivElement | null>(null);
 
+  /**
+   * 对话框描述由「说明」与「写入锁定原因」组成：锁定时关闭按钮不可聚焦，
+   * 原因不能只挂在它的 title 上，必须随对话框一起被读到。
+   */
+
   const FOCUSABLE =
     'button:not([disabled]), [href], input:not([disabled]):not([readonly]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -239,7 +244,11 @@
     role="dialog"
     aria-modal="true"
     aria-labelledby={titleId}
-    aria-describedby={description ? `${titleId}-description` : undefined}
+    aria-describedby={description
+      ? `${titleId}-description${locked ? ` ${titleId}-lock` : ""}`
+      : locked
+        ? `${titleId}-lock`
+        : undefined}
     tabindex="-1"
     data-task-modal={task}
     data-modal-tone={tone}
@@ -255,6 +264,11 @@
         {#if description}<p class="modal-desc" id={`${titleId}-description`}>{description}</p>{/if}
       </div>
       {#if headExtra}{@render headExtra()}{/if}
+      {#if locked}
+        <span class="modal-lock" id={`${titleId}-lock`} role="status" title="写入进行中，完成后才能关闭">
+          <span class="spinner" aria-hidden="true"></span>写入中<span class="sr-only">，完成后才能关闭</span>
+        </span>
+      {/if}
       <button
         type="button"
         class="icon-btn"

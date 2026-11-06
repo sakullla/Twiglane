@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
+import { createRawSnippet } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DiffLine, DiffResponse, FileChange, StatusSnapshot } from "../src/lib/types";
 import { commitScope, groupFiles } from "../src/lib/labels";
@@ -77,6 +78,7 @@ vi.mock("../src/lib/api", () => ({
 
 import App from "../src/App.svelte";
 import ContextMenu from "../src/lib/components/ContextMenu.svelte";
+import Popover from "../src/lib/components/Popover.svelte";
 import StatusBar from "../src/lib/components/StatusBar.svelte";
 
 const writeText = vi.fn(async () => {});
@@ -508,6 +510,89 @@ describe("共用组件状态反馈", () => {
     expect(refresh.hasAttribute("disabled")).toBe(false);
     expect(refresh.getAttribute("title")).toBe("重新读取工作区与当前差异");
     expect(document.getElementById(describedby)?.textContent).toBe("重新读取工作区与当前差异");
+  });
+});
+
+describe("弹层与菜单的焦点返回", () => {
+  function mountTrigger() {
+    const trigger = document.createElement("button");
+    trigger.id = "menu-trigger";
+    trigger.textContent = "打开";
+    document.body.appendChild(trigger);
+    trigger.focus();
+    return trigger;
+  }
+
+  it("菜单没有可执行项时焦点落在菜单本身，Esc 关闭后回到触发控件", async () => {
+    const trigger = mountTrigger();
+    let view: { unmount: () => void } | null = null;
+    const onClose = vi.fn(() => view?.unmount());
+    view = render(ContextMenu, {
+      props: {
+        request: {
+          x: 20,
+          y: 20,
+          label: "差异操作",
+          entries: [{ id: "stage", label: "暂存此块", disabledReason: "完整文件视图不支持按块暂存", run: vi.fn() }],
+        },
+        onClose,
+      },
+    });
+    const menu = await screen.findByRole("menu");
+    expect(menu.getAttribute("aria-orientation")).toBe("vertical");
+    await waitFor(() => expect(document.activeElement, "没有可聚焦条目时由菜单容器接住焦点").toBe(menu));
+    await fireEvent.keyDown(menu, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+    trigger.remove();
+  });
+
+  it("Tab 关闭菜单与 Esc 一样归还焦点，不把焦点留在背后", async () => {
+    const trigger = mountTrigger();
+    let view: { unmount: () => void } | null = null;
+    const onClose = vi.fn(() => view?.unmount());
+    view = render(ContextMenu, {
+      props: {
+        request: { x: 20, y: 20, label: "提交操作", entries: [{ id: "copy", label: "复制哈希", run: vi.fn() }] },
+        onClose,
+      },
+    });
+    const menu = await screen.findByRole("menu");
+    await waitFor(() => expect(document.activeElement).not.toBe(trigger));
+    await fireEvent.keyDown(menu, { key: "Tab" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+    trigger.remove();
+  });
+
+  it("弹层 Esc 关闭后调用方没接焦点时，外壳自己把焦点还给触发按钮", async () => {
+    const anchor = mountTrigger();
+    let view: { unmount: () => void } | null = null;
+    const onClose = vi.fn((refocus: boolean) => {
+      if (refocus) view?.unmount();
+    });
+    view = render(Popover, {
+      props: {
+        anchor,
+        label: "切换分支",
+        placeholder: "搜索分支",
+        query: "",
+        active: 0,
+        count: 0,
+        onChoose: vi.fn(),
+        onClose,
+        list: createRawSnippet(() => ({ render: () => "<p>没有匹配的分支</p>" })),
+      },
+    });
+    const search = await screen.findByRole("combobox");
+    await waitFor(() => expect(document.activeElement).toBe(search));
+    await fireEvent.keyDown(search, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledWith(true);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "切换分支" })).toBeNull());
+    await waitFor(() => expect(document.activeElement, "焦点不能掉到 body").toBe(anchor));
+    anchor.remove();
   });
 });
 

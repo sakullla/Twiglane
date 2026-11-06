@@ -1529,3 +1529,196 @@ describe("只读差异", () => {
     expect(staged).toEqual([0]);
   });
 });
+
+describe("历史拓扑面板", () => {
+  const headOid = opened.snapshot.branch.headOid!;
+  const midOid = commit(1).oid;
+  const rootOid = commit(2).oid;
+
+  function rowOf(oid: string): HTMLElement {
+    return document.getElementById("history-commit-" + oid) as HTMLElement;
+  }
+  function pathsOf(oid: string): number {
+    return rowOf(oid).querySelectorAll(".hr-graph path").length;
+  }
+  function detailCalls(oid: string): number {
+    return commitDetail.mock.calls.filter((call) => call[1] === oid).length;
+  }
+
+  beforeEach(() => {
+    historyPage.mockReset();
+    commitDetail.mockReset();
+    commitFileDiff.mockReset();
+    fileHistory.mockReset();
+    globalThis.localStorage?.removeItem("twiglane.historyGraph");
+    commitDetail.mockResolvedValue({
+      generation: 3,
+      commit: commit(0),
+      body: "",
+      root: false,
+      merge: false,
+      selectedParent: null,
+      files: [],
+    });
+    commitFileDiff.mockResolvedValue(diff);
+  });
+
+  it("线性历史每行只有自己的片段，HEAD 用实心节点区分", async () => {
+    const head = commit(0, { oid: headOid, parents: [midOid] });
+    const mid = commit(1, { parents: [rootOid] });
+    const root = commit(2, { parents: [] });
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok",
+      commits: [head, mid, root], scope: "current", branches: ["main"], head: "main",
+    });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    expect(document.querySelectorAll(".hr-graph").length).toBe(3);
+    // 每行只画自己的竖线：首行只有下半段，末行只有上半段。
+    expect(pathsOf(headOid)).toBe(1);
+    expect(pathsOf(midOid)).toBe(1);
+    expect(pathsOf(rootOid)).toBe(1);
+    expect(document.querySelectorAll(".hr-graph .node").length).toBe(3);
+    const headNode = document.querySelector(`#history-commit-${headOid} .hr-graph .node`);
+    expect(headNode?.classList.contains("head")).toBe(true);
+    expect(document.querySelectorAll(".hr-graph .node.head").length).toBe(1);
+    // 所有行宽度一致，提交说明不会逐行左右跳。
+    const widths = [...document.querySelectorAll<HTMLElement>(".hr-graph")].map(
+      (node) => node.style.getPropertyValue("--graph-width"),
+    );
+    expect(new Set(widths).size).toBe(1);
+  });
+
+  it("结果外父提交写明真实 Hash，不连到后面的无关提交", async () => {
+    const tip = commit(0, { oid: headOid, parents: ["ffffffffffffffffffffffffffffffffffffffff"] });
+    const other = commit(1, { parents: [] });
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok",
+      commits: [tip, other], scope: "current", branches: ["main"], head: "main",
+    });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    expect(rowOf(headOid).textContent).toContain("ffffffffffffffffffffffffffffffffffffffff");
+    expect(rowOf(headOid).textContent).toContain("不在当前结果中");
+    // 终止标记只在本行：第二行不出现这条 lane 的连线。
+    expect(rowOf(other.oid).querySelectorAll(".hr-graph path").length).toBe(0);
+  });
+
+  it("分叉的两个提交接到同一个父提交，各自只画行内斜线", async () => {
+    const baseOid = commit(5).oid;
+    const left = commit(0, { oid: headOid, parents: [baseOid] });
+    const right = commit(1, { parents: [baseOid] });
+    const base = commit(2, { oid: baseOid, parents: [] });
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok",
+      commits: [left, right, base], scope: "current", branches: ["main"], head: "main",
+    });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-1/ });
+    // 第二行：父提交那条竖线继续穿过，外加一条从自己 lane 下来的斜线。
+    expect(pathsOf(right.oid)).toBe(2);
+    // 父提交行只有 lane 0，第二行的 lane 1 没有延续到下面。
+    expect(pathsOf(baseOid)).toBe(1);
+    expect(rowOf(right.oid).textContent).toContain(baseOid);
+  });
+
+  it("追加页后页边界重新配对，先把上一页的父提交标成结果外", async () => {
+    historyPage
+      .mockResolvedValueOnce({
+        generation: 3, query: "", offset: 0, pageSize: 2, hasMore: true, state: "ok",
+        commits: [commit(0, { oid: headOid, parents: [midOid] }), commit(1, { parents: [rootOid] })],
+        scope: "current", branches: ["main"], head: "main",
+      })
+      .mockResolvedValueOnce({
+        generation: 3, query: "", offset: 2, pageSize: 2, hasMore: false, state: "ok",
+        commits: [commit(2, { parents: [] })],
+        scope: "current", branches: ["main"], head: "main",
+      });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    expect(rowOf(midOid).textContent).toContain("不在当前结果中");
+    const list = screen.getByRole("listbox", { name: "提交历史" });
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 120 });
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 400 });
+    list.scrollTop = 300;
+    await fireEvent.scroll(list);
+    await screen.findByRole("option", { name: /commit-2/ });
+    // 追加后同一条 lane 继续：父提交不再是结果外，也不再新起一条 lane。
+    expect(rowOf(midOid).textContent).not.toContain("不在当前结果中");
+    expect(rowOf(rootOid).querySelectorAll(".hr-graph path").length).toBe(1);
+    expect(pathsOf(midOid)).toBe(1);
+  });
+
+  it("搜索或筛选换掉结果集时按新结果重建拓扑", async () => {
+    historyPage
+      .mockResolvedValueOnce({
+        generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok",
+        commits: [commit(0, { oid: headOid, parents: [midOid] }), commit(1, { parents: [rootOid] }), commit(2, { parents: [] })],
+        scope: "current", branches: ["main"], head: "main",
+      })
+      .mockResolvedValueOnce({
+        generation: 3, query: "commit-0", offset: 0, pageSize: 100, hasMore: false, state: "ok",
+        commits: [commit(0, { oid: headOid, parents: [midOid] }), commit(2, { parents: [] })],
+        scope: "current", branches: ["main"], head: "main",
+      });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    expect(rowOf(rootOid).querySelectorAll(".hr-graph path").length).toBe(1);
+    await fireEvent.input(screen.getByLabelText("搜索说明或提交哈希"), { target: { value: "commit-0" } });
+    await waitFor(() => expect(historyPage).toHaveBeenLastCalledWith("/repo", "commit-0", 0, 3, 1));
+    await waitFor(() => expect(document.querySelectorAll(".hr-graph").length).toBe(2));
+    // 被搜索过滤掉的父提交变成结果外，后面的行也重新从 lane 0 开始。
+    expect(rowOf(headOid).textContent).toContain("不在当前结果中");
+    expect(rowOf(rootOid).querySelectorAll(".hr-graph path").length).toBe(0);
+  });
+
+  it("lane 超出紧凑宽度时给出溢出标记，父提交仍留在数据里", async () => {
+    const parents = Array.from({ length: 7 }, (_, index) => `p${index}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`);
+    const merge = commit(0, { oid: headOid, parents });
+    const rest = [...parents].reverse().map((oid, index) => commit(index + 1, { oid, parents: [] }));
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok",
+      commits: [merge, ...rest], scope: "current", branches: ["main"], head: "main",
+    });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    const graphNode = rowOf(headOid).querySelector(".hr-graph")!;
+    expect(graphNode.classList.contains("overflow")).toBe(true);
+    expect(graphNode.querySelector(".hr-graph-more")?.textContent).toBe("+1");
+    expect(rowOf(headOid).textContent).toContain("另有 1 条分支线未画出");
+    // 溢出只影响绘制：七条父提交都在可访问文本里。
+    for (const oid of parents) expect(rowOf(headOid).textContent).toContain(oid);
+  });
+
+  it("收起拓扑不影响选择、滚动和详情，展开后恢复同样的连线", async () => {
+    const head = commit(0, { oid: headOid, parents: [midOid] });
+    const mid = commit(1, { parents: [] });
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok",
+      commits: [head, mid], scope: "current", branches: ["main"], head: "main",
+    });
+    commitDetail.mockResolvedValue({
+      generation: 3, commit: commit(1), body: "", root: false, merge: false, selectedParent: null, files: [],
+    });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-1/ });
+    await fireEvent.click(screen.getByRole("option", { name: /commit-1/ }));
+    const list = screen.getByRole("listbox", { name: "提交历史" });
+    list.scrollTop = 40;
+    await fireEvent.scroll(list);
+    const before = rowOf(headOid).querySelectorAll(".hr-graph path").length;
+    expect(before).toBe(1);
+    const toggle = screen.getByRole("button", { name: "收起提交拓扑" });
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    await fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "展开提交拓扑" }).getAttribute("aria-pressed")).toBe("false");
+    expect(document.querySelectorAll(".hr-graph").length).toBe(0);
+    expect(rowOf(midOid).getAttribute("aria-selected")).toBe("true");
+    expect(list.scrollTop).toBe(40);
+    expect(detailCalls(midOid)).toBeGreaterThan(0);
+    expect(globalThis.localStorage?.getItem("twiglane.historyGraph")).toBe("0");
+    await fireEvent.click(screen.getByRole("button", { name: "展开提交拓扑" }));
+    expect(rowOf(headOid).querySelectorAll(".hr-graph path").length).toBe(before);
+    expect(rowOf(midOid).getAttribute("aria-selected")).toBe("true");
+  });
+});

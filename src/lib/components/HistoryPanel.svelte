@@ -35,6 +35,14 @@
     StatusSnapshot,
   } from "../types";
   import type { HunkNavReport } from "../diff";
+  import {
+    buildHistoryGraph,
+    drawableLanes,
+    graphRowLabel,
+    GRAPH_LANE_WIDTH,
+    GRAPH_MAX_LANES,
+    type GraphSegment,
+  } from "../history-graph";
   import { BUSY_REASON, fileNavState, hueOf, initialOf, relativeTime, splitPath, statusMark, type FileNavState } from "../ui";
   import BranchPicker from "./BranchPicker.svelte";
   import CommitDiffList from "./CommitDiffList.svelte";
@@ -91,6 +99,21 @@
   const FILES_WIDTH_KEY = "twiglane.commitFilesWidth";
   const DEFAULT_FILES_WIDTH = 248;
   const MIN_DIFF_WIDTH = 360;
+  /** 拓扑的收起状态：本机偏好，读写失败只用默认值，不阻塞历史。 */
+  const GRAPH_KEY = "twiglane.historyGraph";
+  /** 紧凑宽度内最多画几条 lane，再多只留溢出标记，不挤压提交说明。 */
+  const GRAPH_LANES = GRAPH_MAX_LANES;
+  const GRAPH_HEIGHT = ROW_HEIGHT - 2;
+  /** 线条颜色只按 lane 序号取主题令牌，深浅两套主题都不用字面色。 */
+  const LANE_TOKENS = ["--accent", "--info", "--purple", "--success", "--warning", "--danger"];
+
+  function readGraphOn(): boolean {
+    try {
+      return globalThis.localStorage?.getItem(GRAPH_KEY) !== "0";
+    } catch {
+      return true;
+    }
+  }
 
   function readFilesWidth(): number {
     try {
@@ -350,6 +373,46 @@
     visibleRange(commits.length, scrollTop, viewport > 0 ? viewport : scrollTop > 0 ? ROW_HEIGHT : 0, ROW_HEIGHT),
   );
   let visible = $derived(commits.slice(range.start, range.end));
+  /** 拓扑按已加载的全部提交推导：搜索、筛选、范围、文件和 generation 变化都重算，追加页也整体重算。 */
+  let graph = $derived(buildHistoryGraph(commits, { headOid: opened.snapshot.branch.headOid }));
+  let graphLanes = $derived(drawableLanes(graph.lanes, GRAPH_LANES));
+  /** 每行宽度一致（按整份结果的 lane 数），行与行之间的提交说明不会左右跳。 */
+  let graphWidth = $derived(graphLanes * GRAPH_LANE_WIDTH + 3);
+  let graphOn = $state(readGraphOn());
+
+  function saveGraphOn() {
+    try {
+      globalThis.localStorage?.setItem(GRAPH_KEY, graphOn ? "1" : "0");
+    } catch {
+      // 存储不可用时只在本次会话里生效。
+    }
+  }
+
+  function toggleGraph() {
+    graphOn = !graphOn;
+    saveGraphOn();
+  }
+
+  function laneX(lane: number): number {
+    return Math.min(lane, graphLanes - 1) * GRAPH_LANE_WIDTH + GRAPH_LANE_WIDTH / 2 + 1;
+  }
+
+  /** 每行只画自己的片段：竖线、汇入和分叉都在行内闭合，悬停/选择不改变线条。 */
+  function segmentPath(segment: GraphSegment, height: number): string {
+    const x0 = laneX(segment.from);
+    const x1 = laneX(segment.to);
+    const mid = height / 2;
+    if (segment.kind === "merge") return `M ${x0} 0 L ${x1} ${mid}`;
+    if (segment.kind === "branch") return `M ${x0} ${mid} L ${x1} ${height}`;
+    if (segment.span === "top") return `M ${x0} 0 L ${x0} ${mid}`;
+    if (segment.span === "bottom") return `M ${x0} ${mid} L ${x0} ${height}`;
+    return `M ${x0} 0 L ${x0} ${height}`;
+  }
+
+  function laneStyle(color: number): string {
+    return `--lane: var(${LANE_TOKENS[Math.abs(color) % LANE_TOKENS.length]})`;
+  }
+
   /** 键盘游标所在的提交：与选中锚点一致，用 aria-activedescendant 指给辅助技术。 */
   let cursorOid = $derived(anchorOid ?? selectedOids[0] ?? null);
   let activeDescendant = $derived(
@@ -1246,6 +1309,17 @@
               <Icon name="filter" size={15} />
               {#if advancedCount > 0}<span class="filter-badge" aria-hidden="true">{advancedCount}</span>{/if}
             </button>
+            <button
+              type="button"
+              class="icon-btn history-graph-toggle"
+              class:active={graphOn}
+              aria-pressed={graphOn}
+              aria-label={graphOn ? "收起提交拓扑" : "展开提交拓扑"}
+              title={graphOn ? "收起提交拓扑" : "展开提交拓扑"}
+              onclick={toggleGraph}
+            >
+              <Icon name="branch" size={15} />
+            </button>
           </div>
           {#if moreFilters}
           <div class="history-more-filters" id="history-more-filters">
@@ -1336,6 +1410,7 @@
           <div class="virtual-space" style={`height:${commits.length * ROW_HEIGHT}px`}>
             {#each visible as commit, index (commit.oid)}
               {@const pills = refPills(commit.labels)}
+              {@const row = graphOn ? graph.rows[range.start + index] : null}
               <div
                 id={"history-commit-" + commit.oid}
                 class="history-row"
@@ -1361,6 +1436,38 @@
                   }
                 }}
               >
+                {#if row}
+                  <span
+                    class="hr-graph"
+                    class:overflow={row.overflow}
+                    style={`--graph-width:${graphWidth}px`}
+                    aria-hidden="true"
+                  >
+                    <svg
+                      width={graphWidth}
+                      height={GRAPH_HEIGHT}
+                      viewBox={`0 0 ${graphWidth} ${GRAPH_HEIGHT}`}
+                      aria-hidden="true"
+                      focusable="false"
+                    >
+                      {#each row.segments as segment, segmentIndex (segmentIndex)}
+                        <path class="graph-line" style={laneStyle(segment.color)} d={segmentPath(segment, GRAPH_HEIGHT)} />
+                      {/each}
+                      <circle
+                        class="node"
+                        class:head={row.head}
+                        style={laneStyle(row.color)}
+                        cx={laneX(row.lane)}
+                        cy={GRAPH_HEIGHT / 2}
+                        r={row.head ? 4.5 : 3}
+                      />
+                    </svg>
+                    {#if row.overflow}
+                      <span class="hr-graph-more" title={`还有 ${row.hiddenLanes} 条分支线未画出`}>+{row.hiddenLanes}</span>
+                    {/if}
+                  </span>
+                  <span class="sr-only">{graphRowLabel(row)}{row.overflow ? ` 另有 ${row.hiddenLanes} 条分支线未画出。` : ""}</span>
+                {/if}
                 <span class="avatar" style={`--hue:${hueOf(commit.authorName)}`} aria-hidden="true">{initialOf(commit.authorName)}</span>
                 <span class="hr-main">
                   <span class="hr-line">
@@ -1849,3 +1956,38 @@
   onNotice={(message) => onNotice?.(message)}
   onMerge={() => {}}
 />
+<style>
+  /* 拓扑只是一条紧凑的竖条：每行只画自己的竖线、节点和行内斜线，没有全尺寸历史 SVG。 */
+  .hr-graph {
+    position: relative;
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--graph-width);
+    height: 100%;
+    margin-top: 1px;
+    overflow: hidden;
+  }
+  .hr-graph > svg { display: block; overflow: visible; }
+  .hr-graph .graph-line { fill: none; stroke: var(--lane); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .hr-graph .node { fill: var(--surface); stroke: var(--lane); stroke-width: 2; }
+  /* HEAD 用实心节点区分当前上下文，和选中底色、引用胶囊互不替代。 */
+  .hr-graph .node.head { fill: var(--lane); }
+  .hr-graph-more {
+    position: absolute;
+    right: 0;
+    bottom: 3px;
+    padding: 0 2px;
+    border-radius: var(--radius-xs);
+    background: var(--surface-3);
+    color: var(--fg-muted);
+    font-size: 10px;
+    line-height: 12px;
+  }
+  .history-graph-toggle.active { color: var(--accent-text); }
+  /* 左栏收到很窄时先让出拓扑宽度，把横向空间留给提交说明。 */
+  @container history-list (max-width: 260px) {
+    .hr-graph { display: none; }
+  }
+</style>

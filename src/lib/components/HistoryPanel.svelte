@@ -1541,7 +1541,7 @@
                 </span>
               {/each}
             </div>
-            <CommitBranches {active} repo={opened.summary.path} oid={detail.commit.oid} generation={opened.generation} {nextId} {onGeneration} />
+            <CommitBranches {active} repo={opened.summary.path} oid={detail.commit.oid} generation={opened.generation} currentBranch={opened.snapshot.branch.name} {nextId} {onGeneration} />
           </div>
           <div class="commit-facts">
             {#if viewMode === "multi" && fileNav}<FileNav nav={fileNav} />{/if}

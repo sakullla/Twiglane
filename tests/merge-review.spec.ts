@@ -213,6 +213,43 @@ describe("提交所在分支", () => {
     expect(document.querySelectorAll(".cb-chip")).toHaveLength(10);
   });
 
+  it("已显示所在分支后，generation 再变也不重新查询，转圈停住", async () => {
+    commitBranches.mockResolvedValue({
+      generation: 4, oid: "a", total: 1, current: "main",
+      branches: [{ name: "topic", remote: false, current: false }],
+    });
+    const props = { repo: "/no-spin", oid: "a", generation: 4, nextId: () => 1, onGeneration: vi.fn() };
+    const view = render(CommitBranches, props);
+    expect(await screen.findByText(/不在当前分支 main/)).toBeTruthy();
+    expect(commitBranches).toHaveBeenCalledTimes(1);
+    await view.rerender({ ...props, generation: 5 });
+    await view.rerender({ ...props, generation: 6 });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(commitBranches).toHaveBeenCalledTimes(1);
+    expect(document.querySelector(".commit-branches .spinner")).toBeNull();
+  });
+
+  it("检出分支变化时只改标记，不重新查询", async () => {
+    commitBranches.mockResolvedValue({
+      generation: 4, oid: "a", total: 2, current: "main",
+      branches: [
+        { name: "topic", remote: false, current: false },
+        { name: "origin/topic", remote: true, current: false },
+      ],
+    });
+    const props = {
+      repo: "/current-overlay", oid: "a", generation: 4, currentBranch: "main", nextId: () => 1, onGeneration: vi.fn(),
+    };
+    const view = render(CommitBranches, props);
+    expect(await screen.findByText(/不在当前分支 main/)).toBeTruthy();
+    await view.rerender({ ...props, generation: 9, currentBranch: "topic" });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(commitBranches).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/不在当前分支/)).toBeNull();
+    expect(document.querySelector(".cb-chip.current")?.textContent).toContain("topic");
+    expect(document.querySelector(".commit-branches .spinner")).toBeNull();
+  });
+
   it("当前分支不包含这次提交时明确提示；读取失败可以重试", async () => {
     commitBranches.mockRejectedValueOnce({ code: "history_failed", message: "读不到" });
     commitBranches.mockResolvedValueOnce({

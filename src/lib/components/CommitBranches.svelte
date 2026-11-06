@@ -1,7 +1,10 @@
 <script module lang="ts">
   import type { CommitBranches as CommitBranchesResult } from "../types";
 
-  /** 同一仓库、同一提交、同一 generation 的结果直接复用：来回点提交不重复跑 for-each-ref。 */
+  /**
+   * 同一仓库、同一提交的结果直接复用。
+   * 键里不能带 generation：工作区每次改动都会抬高它，慢的 for-each-ref 会被反复取消，转圈停不下来。
+   */
   const cache = new Map<string, CommitBranchesResult>();
   const MAX_CACHED = 64;
 
@@ -13,7 +16,7 @@
 </script>
 
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, untrack } from "svelte";
   import { api } from "../api";
   import { LatestReadQueue } from "../latest-read";
   import { normalizeError } from "../errors";
@@ -28,11 +31,13 @@
     repo: string;
     oid: string;
     generation: number;
+    /** 当前检出的分支。传入后用它标「当前 / 不在当前分支」，检出变化不必重查。 */
+    currentBranch?: string | null;
     nextId: () => number;
     onGeneration: (generation: number) => void;
   }
 
-  let { active = true, repo, oid, generation, nextId, onGeneration }: Props = $props();
+  let { active = true, repo, oid, generation, currentBranch, nextId, onGeneration }: Props = $props();
   const reads = new LatestReadQueue();
   onDestroy(() => { token++; reads.close(); });
 
@@ -51,8 +56,9 @@
       loading = false;
       return;
     }
-    const key = `${repo}\u0000${oid}\u0000${generation}`;
-    const target = { repo, oid, generation };
+    const key = `${repo}\u0000${oid}`;
+    // generation 只在发起这次查询时读取。随后的工作区刷新不能取消或重开这次查询。
+    const target = { repo, oid, generation: untrack(() => generation) };
     void retry;
     expanded = false;
     const hit = cache.get(key);
@@ -65,8 +71,8 @@
     }
     loading = true;
     errorText = null;
-    // 切到下一个提交时先留着上一个的结果会误导：立刻清掉。
-    if (result?.oid !== oid) result = null;
+    // 切到下一个提交时先留着上一个的结果会误导：立刻清掉。不订阅 result，避免写回结果时重跑本效果。
+    if (untrack(() => result?.oid) !== oid) result = null;
     const timer = setTimeout(() => void load(target, mine), 120);
     return () => { token++; clearTimeout(timer); };
   });
@@ -88,7 +94,7 @@
         next = await ask(failure.generation);
       }
       if (mine !== token) return;
-      remember(`${target.repo}\u0000${target.oid}\u0000${next.generation}`, next);
+      remember(`${target.repo}\u0000${target.oid}`, next);
       result = next;
     } catch (error) {
       if (mine !== token) return;
@@ -98,8 +104,21 @@
     }
   }
 
-  let branches = $derived(result?.branches ?? []);
-  let current = $derived(result?.current ?? null);
+  let branches = $derived.by(() => {
+    const list = result?.branches ?? [];
+    if (currentBranch === undefined) return list;
+    const marked = list.map((branch) => ({
+      ...branch,
+      current: !branch.remote && branch.name === currentBranch,
+    }));
+    marked.sort((left, right) =>
+      Number(right.current) - Number(left.current)
+      || Number(left.remote) - Number(right.remote)
+      || left.name.localeCompare(right.name),
+    );
+    return marked;
+  });
+  let current = $derived(currentBranch !== undefined ? currentBranch : (result?.current ?? null));
   let onCurrent = $derived(branches.some((branch) => branch.current));
   let localCount = $derived(branches.filter((branch) => !branch.remote).length);
   let remoteCount = $derived(branches.length - localCount);

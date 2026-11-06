@@ -139,8 +139,21 @@ pub fn save_draft(backend: &Backend, path: &str, message: &str) -> Result<(), Ap
 }
 
 pub fn forget_recent(backend: &Backend, path: &str) -> Result<Vec<RecentRepo>, AppError> {
-    let root = canonical_existing(&validate_input_path(path)?)?;
-    backend.store.forget_recent(&repo_key(&root))
+    let input = validate_input_path(path)?;
+    // 列表里存的是打开时的路径。目录还在时按规范路径删，避免同一仓库留两条；
+    // 目录已经不在时解析会失败，这时按用户点到的那条路径删，不能因此拒绝移出列表。
+    let mut keys = vec![repo_key(&input)];
+    if let Ok(root) = canonical_existing(&input) {
+        let canonical = repo_key(&root);
+        if !keys.contains(&canonical) {
+            keys.push(canonical);
+        }
+    }
+    let mut recent = Vec::new();
+    for key in keys {
+        recent = backend.store.forget_recent(&key)?;
+    }
+    Ok(recent)
 }
 
 pub fn close_repository(backend: &Backend) {
@@ -1363,5 +1376,34 @@ mod tests {
         assert_eq!(opened.snapshot.branch.ahead, Some(1));
         assert_eq!(opened.snapshot.branch.behind, Some(1));
         assert!(!opened.snapshot.branch.live_remote_checked);
+    }
+
+    #[test]
+    fn forget_recent_removes_a_deleted_directory_without_touching_others() {
+        let fixture = crate::test_support::git_fixture("forget-missing");
+        let backend = fixture.backend();
+        let gone_dir = fixture.path().join("gone-repo");
+        fs::create_dir(&gone_dir).unwrap();
+        let gone = repo_key(&canonical_existing(&gone_dir).unwrap());
+        fs::remove_dir(&gone_dir).unwrap();
+        assert!(!gone_dir.exists());
+        let kept_dir = fixture.path().join("kept-repo");
+        fs::create_dir(&kept_dir).unwrap();
+        let kept = repo_key(&canonical_existing(&kept_dir).unwrap());
+        backend.store.touch_recent("gone".into(), gone.clone()).unwrap();
+        backend.store.touch_recent("kept".into(), kept.clone()).unwrap();
+
+        let left = forget_recent(&backend, &gone).unwrap();
+        assert!(left.iter().all(|repo| repo.path != gone));
+        assert!(left.iter().any(|repo| repo.path == kept));
+        assert!(kept_dir.exists());
+
+        let messy = format!("{}/.", kept_dir.display());
+        let after = forget_recent(&backend, &messy).unwrap();
+        assert!(after.iter().all(|repo| repo.path != kept));
+        assert!(kept_dir.exists());
+
+        let invalid = forget_recent(&backend, "relative/nope").unwrap_err();
+        assert_eq!(invalid.code, "invalid_path");
     }
 }

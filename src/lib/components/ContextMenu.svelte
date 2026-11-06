@@ -36,6 +36,28 @@
   export function isContextKey(event: KeyboardEvent): boolean {
     return event.key === "ContextMenu" || (event.shiftKey && event.key === "F10");
   }
+
+  /** 界面上的快捷键提示是给人看的符号（⌘ ⇧ Z），aria-keyshortcuts 只认键名，这里按位换成标准写法。 */
+  const KEY_NAMES: Record<string, string> = {
+    "⌘": "Meta", Cmd: "Meta", Command: "Meta", Meta: "Meta",
+    "⌃": "Control", Ctrl: "Control", Control: "Control",
+    "⇧": "Shift", Shift: "Shift",
+    "⌥": "Alt", Alt: "Alt", Option: "Alt",
+    "↵": "Enter", Enter: "Enter", Return: "Enter",
+    "⌫": "Backspace", Backspace: "Backspace",
+    "⎋": "Escape", Esc: "Escape", Escape: "Escape",
+    "←": "ArrowLeft", "→": "ArrowRight", "↑": "ArrowUp", "↓": "ArrowDown",
+    Tab: "Tab", Del: "Delete", Delete: "Delete",
+  };
+
+  /** 把「⌘ ⇧ Z」这类提示换成「Meta+Shift+Z」；认不出的单位原样保留，至少不丢顺序。 */
+  export function shortcutKeys(shortcut: string): string {
+    const parts = shortcut
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((part) => KEY_NAMES[part] ?? (part.length === 1 ? part.toUpperCase() : part));
+    return [...new Set(parts)].join("+");
+  }
 </script>
 
 <script lang="ts">
@@ -184,6 +206,7 @@
         aria-disabled={entry.disabledReason ? "true" : undefined}
         aria-describedby={entry.disabledReason ? `context-reason-${index}` : undefined}
         aria-label={entry.label}
+        aria-keyshortcuts={entry.shortcut ? shortcutKeys(entry.shortcut) : undefined}
         title={entry.disabledReason ?? undefined}
         onmousemove={() => {
           if (!entry.disabledReason && active !== index) focusIndex(index);

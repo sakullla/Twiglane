@@ -236,7 +236,8 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
 /* 同步结论是状态栏唯一的主读数，用一档更实的正文色；两侧按钮仍是弱化色，优先级不打架。 */
 .statusbar .sb-sync { color: var(--fg-muted); max-width: min(36vw, 360px); overflow: hidden; text-overflow: ellipsis; }
 /* 文字在子节点里才画得出省略号；容器自身的 overflow 只负责兜底裁切。 */
-.statusbar .sb-sync > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.statusbar .sb-sync > span:last-child,
+.statusbar .sb-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .statusbar .sb-busy, .statusbar .sb-warn { max-width: min(32vw, 320px); overflow: hidden; text-overflow: ellipsis; }
 .statusbar .sb-update { max-width: min(30vw, 240px); }
 .statusbar .sb-update > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

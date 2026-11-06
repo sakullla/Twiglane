@@ -529,7 +529,11 @@ describe("状态与动效统一（R2、R12）", () => {
     const sync = ruleBody(layout, ".statusbar .sb-sync");
     expect(sync, "同步结论不许把刷新挤掉").toMatch(/max-width:\s*min\([^)]*vw/);
     expect(sync).toMatch(/overflow:\s*hidden/);
-    expect(ruleBody(layout, ".statusbar .sb-sync > span:last-child")).toMatch(/text-overflow:\s*ellipsis/);
+    // 同步结论、忙碌和警告的文字都收在可收缩的节点里，省略号才真画在文字上。
+    const shrink = ruleBody(layout, ".statusbar .sb-sync > span:last-child,\n.statusbar .sb-text");
+    expect(shrink).toMatch(/text-overflow:\s*ellipsis/);
+    expect(shrink).toMatch(/min-width:\s*0/);
+    expect(ruleBody(layout, ".statusbar .sb-busy, .statusbar .sb-warn")).toMatch(/max-width:\s*min\([^)]*vw[^)]*\)/);
     // sb-update 有两条规则（配色、上限），直接按整段规则匹配带上限的那条。
     expect(stripComments(layout), "忙碌与警告").toMatch(/\.statusbar \.sb-busy, \.statusbar \.sb-warn \{[^}]*max-width: min\([^)]*vw[^)]*\)/);
     expect(stripComments(layout), "新版本入口").toMatch(/\.statusbar \.sb-update \{[^}]*max-width: min\([^)]*vw[^)]*\)/);

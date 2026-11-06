@@ -695,13 +695,19 @@ describe("历史面板", () => {
     render(HistoryPanel, { props: { ...panelProps(), onNotice, onSnapshot } });
     const row = await screen.findByRole("option", { name: /commit-0/ });
     await fireEvent.contextMenu(row);
-    expect(screen.getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual([
+    // 禁用项把原因写在条目里，整条 textContent 不再是名称；顺序按 .context-label 读。
+    expect(screen.getAllByRole("menuitem").map((item) => item.querySelector(".context-label")?.textContent)).toEqual([
       "拣选到当前分支",
       "检出此提交",
       "撤销最近提交并保留改动",
       "从此提交新建分支",
       "复制提交哈希",
     ]);
+    // 原因本身仍然可见，并且和条目通过 aria-describedby 关联。
+    const disabled = screen.getByRole("menuitem", { name: "撤销最近提交并保留改动" });
+    const reason = disabled.querySelector(".context-copy small");
+    expect(reason?.textContent).toBe("只能撤销当前分支的最近一次提交");
+    expect(disabled.getAttribute("aria-describedby")).toBe(reason?.id);
     expect(screen.queryByRole("menuitem", { name: /还原/ })).toBeNull();
     expect(screen.queryByRole("menuitem", { name: /重置/ })).toBeNull();
     expect(screen.queryByRole("menuitem", { name: /复制作者/ })).toBeNull();
@@ -867,7 +873,7 @@ describe("历史面板", () => {
     await waitFor(() => expect(document.querySelector(".history-files .file-row")).toBeTruthy());
     const fileRow = document.querySelector<HTMLElement>(".history-files .file-row")!;
     await fireEvent.contextMenu(fileRow);
-    expect(screen.getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual([
+    expect(screen.getAllByRole("menuitem").map((item) => item.querySelector(".context-label")?.textContent)).toEqual([
       "查看此文件历史",
       "复制相对路径",
       "在系统文件管理器中显示",

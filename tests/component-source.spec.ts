@@ -54,8 +54,12 @@ describe("组件源码约束", () => {
     const status = sources.find(({ name }) => name === "StatusBar.svelte")!.text;
     expect(menu).toContain("aria-describedby={entry.disabledReason");
     expect(menu).toContain("context-reason-");
+    expect(menu, "快捷键提示不能只有视觉一层").toContain("aria-keyshortcuts={entry.shortcut");
     expect(modal).toContain("aria-describedby={description");
-    expect(status.match(/role="status" aria-live="polite"/g)).toHaveLength(2);
+    // 只有忙碌是实时状态；警告再播一遍会和已有的 toast 重复。
+    expect(status.match(/role="status" aria-live="polite"/g)).toHaveLength(1);
+    expect(status, "刷新原因要能被不可聚焦的按钮问到").toContain("aria-describedby=\"statusbar-refresh-reason\"");
+    expect(status).toContain('id="statusbar-refresh-reason"');
   });
 
   /**

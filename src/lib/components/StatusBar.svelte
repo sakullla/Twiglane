@@ -65,7 +65,8 @@
       <Icon name="sidebar" size={12} />
     </button>
   {/if}
-  <span class="sb-item sb-sync" title={hasRepo ? "同步状态" : "还没有打开仓库"}>
+  <!-- 同步结论被裁切时，title 给出完整读法；不再固定成「同步状态」这种没有信息量的提示。 -->
+  <span class="sb-item sb-sync" title={hasRepo ? sync : "还没有打开仓库"}>
     <span class={`sb-dot ${dotClass}`} aria-hidden="true"></span>
     <span>{hasRepo ? sync : "无仓库"}</span>
   </span>
@@ -96,23 +97,32 @@
       <span>{notice.text}</span>
     </button>
   {/if}
-  {#if busy}<span class="sb-item sb-busy" role="status" aria-live="polite" aria-label={busyLabel}><span class="spinner" aria-hidden="true"></span>{busyLabel}</span>{/if}
+  <!-- 忙碌是唯一的实时状态：写入结论本身已由弹窗与 toast 播报，这里再播一次只会重复。 -->
+  {#if busy}
+    <span class="sb-item sb-busy" role="status" aria-live="polite" aria-label={busyLabel} title={busyLabel}>
+      <span class="spinner" aria-hidden="true"></span><span class="sb-text">{busyLabel}</span>
+    </span>
+  {/if}
   {#if warning}
-    <span class="sb-item sb-warn" role="status" aria-live="polite" aria-label={warning} title={warning}>{warning}</span>
+    <span class="sb-item sb-warn" title={warning}><span class="sb-text">{warning}</span></span>
   {/if}
   <span class="sb-live" aria-hidden="true"></span>
   <!-- 没有仓库时没有工作区可刷新：按钮不占位，避免起始页出现一个无效动作。 -->
   {#if hasRepo && onRefresh}
+    {@const refreshReason = busy ? "当前操作完成后才能刷新" : refreshing ? "正在重新读取工作区与当前差异" : "重新读取工作区与当前差异"}
     <button
       type="button"
       class="sb-item"
       aria-label="刷新工作区"
-      title={busy ? "当前操作完成后才能刷新" : refreshing ? "正在重新读取工作区与当前差异" : "重新读取工作区与当前差异"}
+      aria-describedby="statusbar-refresh-reason"
+      title={refreshReason}
       disabled={busy}
       onclick={onRefresh}
     >
       {#if refreshing}<span class="spinner" aria-hidden="true"></span>{:else}<Icon name="refresh" size={11} />{/if}
       刷新
     </button>
+    <!-- 不可聚焦的按钮也要能问到原因：描述节点常驻，随状态改文字，鼠标的 title 只是同内容的一层。 -->
+    <span class="sr-only" id="statusbar-refresh-reason">{refreshReason}</span>
   {/if}
 </footer>

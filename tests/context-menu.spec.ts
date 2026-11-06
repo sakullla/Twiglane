@@ -459,18 +459,55 @@ describe("共用组件状态反馈", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("菜单项的快捷键进入 aria-keyshortcuts，可访问名称仍是 label", async () => {
+    render(ContextMenu, {
+      props: {
+        request: {
+          x: 20,
+          y: 20,
+          label: "提交操作",
+          entries: [
+            { id: "copy", label: "复制提交哈希", shortcut: "⌘ ⇧ C", run: vi.fn() },
+            { id: "amend", label: "撤销最近提交并保留改动", shortcut: "Ctrl 1", run: vi.fn() },
+          ],
+        },
+        onClose: vi.fn(),
+      },
+    });
+    const copy = await screen.findByRole("menuitem", { name: "复制提交哈希" });
+    expect(copy.getAttribute("aria-keyshortcuts")).toBe("Meta+Shift+C");
+    expect(screen.getByText("⌘ ⇧ C")).toBeTruthy();
+    const amend = screen.getByRole("menuitem", { name: "撤销最近提交并保留改动" });
+    expect(amend.getAttribute("aria-keyshortcuts")).toBe("Control+1");
+  });
+
   it("状态栏暴露忙碌和警告，禁用刷新给出当前原因", async () => {
     const view = render(StatusBar, {
       props: { hasRepo: true, sync: "已同步", busy: true, busyLabel: "提交中", warning: "远程暂不可达，本地提交仍有效", onRefresh: vi.fn() },
     });
-    expect(screen.getByRole("status", { name: "提交中" }).getAttribute("aria-live")).toBe("polite");
-    expect(screen.getByRole("status", { name: "远程暂不可达，本地提交仍有效" })).toBeTruthy();
+    const busy = screen.getByRole("status", { name: "提交中" });
+    expect(busy.getAttribute("aria-live")).toBe("polite");
+    expect(busy.getAttribute("title")).toBe("提交中");
+    expect(busy.querySelector(".sb-text")?.textContent).toBe("提交中");
+    // 警告只是常驻文本：播报交给已有的 toast，这里不再做第二个 live region。
+    const warning = document.querySelector(".sb-warn")!;
+    expect(warning.getAttribute("role")).toBeNull();
+    expect(warning.getAttribute("aria-live")).toBeNull();
+    expect(warning.getAttribute("title")).toBe("远程暂不可达，本地提交仍有效");
+    expect(warning.querySelector(".sb-text")?.textContent).toBe("远程暂不可达，本地提交仍有效");
+    // 同步结论被裁切时 title 是完整结论，不是「同步状态」这种空提示。
+    expect(document.querySelector(".sb-sync")?.getAttribute("title")).toBe("已同步");
     const refresh = screen.getByRole("button", { name: "刷新工作区" });
     expect(refresh.hasAttribute("disabled")).toBe(true);
     expect(refresh.getAttribute("title")).toContain("当前操作完成后");
+    const describedby = refresh.getAttribute("aria-describedby")!;
+    const reason = document.getElementById(describedby)!;
+    expect(reason.className).toBe("sr-only");
+    expect(reason.textContent).toBe("当前操作完成后才能刷新");
     await view.rerender({ busy: false, warning: null });
     expect(refresh.hasAttribute("disabled")).toBe(false);
     expect(refresh.getAttribute("title")).toBe("重新读取工作区与当前差异");
+    expect(document.getElementById(describedby)?.textContent).toBe("重新读取工作区与当前差异");
   });
 });
 

@@ -417,6 +417,41 @@ describe("提交区", () => {
     await fireEvent.click(screen.getByRole("button", { name: "提交到本地" }));
     expect(onCommit).toHaveBeenCalledTimes(1);
   });
+
+  it("本地提交已完成而推送失败时，提交区说明阶段并提供只重试推送的入口", async () => {
+    const onRetryPush = vi.fn();
+    const pushError = "推送失败：远程不可达。 本地提交 abcdef1 已完成，重试只推送，不会再次提交。";
+    renderDraft({ value: "", paths: [], pushError, onRetryPush });
+    const row = document.querySelector<HTMLElement>("[data-push-error]");
+    expect(row, "推送失败要留在提交区，而不是只靠会消失的通知").toBeTruthy();
+    expect(row?.textContent).toContain("推送失败");
+    expect(row?.textContent).toContain("本地提交 abcdef1 已完成");
+    expect(row?.textContent).toContain("不会再次提交");
+    // 阶段说明同时进入状态语义；鼠标悬停给出完整文本。
+    const status = row?.querySelector('[role="status"]');
+    expect(status?.textContent).toContain("推送失败");
+    expect(status?.getAttribute("title")).toBe(pushError);
+    const retry = screen.getByRole("button", { name: "重试推送" }) as HTMLButtonElement;
+    expect(retry.disabled).toBe(false);
+    expect(retry.title).toContain("只重试推送");
+    await fireEvent.click(retry);
+    expect(onRetryPush).toHaveBeenCalledTimes(1);
+  });
+
+  it("重试推送在途时按钮禁用并显示进度，不混成提交失败", () => {
+    renderDraft({
+      value: "",
+      paths: [],
+      pushError: "推送失败：远程不可达。 本地提交 abcdef1 已完成，重试只推送，不会再次提交。",
+      busy: "push",
+      onRetryPush: vi.fn(),
+    });
+    const retry = screen.getByRole("button", { name: "正在重试推送…" }) as HTMLButtonElement;
+    expect(retry.disabled).toBe(true);
+    expect(retry.title).toBe("正在读取或写入，稍后再试");
+    expect(document.querySelector("[data-commit-error]"), "推送失败不改写成提交失败").toBeNull();
+    expect(document.querySelector("[data-push-error]")).toBeTruthy();
+  });
 });
 
 describe("并排差异", () => {

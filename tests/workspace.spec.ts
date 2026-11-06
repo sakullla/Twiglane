@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BRAND } from "../src/lib/brand";
 import { classifyDiffLine } from "../src/lib/diff";
 import { DraftBuffer } from "../src/lib/draft";
@@ -24,6 +25,7 @@ import {
 } from "../src/lib/layout";
 import { baseName, filterRecent } from "../src/lib/recent";
 import type { BranchInfo, FileChange, RecentRepo, RepoHead } from "../src/lib/types";
+import StatusBar from "../src/lib/components/StatusBar.svelte";
 
 const branch: BranchInfo = {
   name: "feature/very-long-name",
@@ -283,6 +285,49 @@ describe("工作区状态", () => {
     expect(gitInstallHint("windows")).toContain("WebView2");
     expect(dependencyNote("windows")).toContain("不计入");
     expect(dependencyNote("macos")).toContain("未");
+  });
+});
+
+describe("重新验证状态", () => {
+  afterEach(() => cleanup());
+
+  it("已有内容刷新时保留同步结论并显示刷新中，刷新入口不可重复触发", async () => {
+    const onRefresh = vi.fn();
+    render(StatusBar, {
+      props: { hasRepo: true, sync: "领先 2", refreshing: true, onRefresh } as never,
+    });
+    // 旧结论仍在原处，用户不用等刷新完成才能读到上一次结果。
+    expect(screen.getByText("领先 2")).toBeTruthy();
+    const status = screen.getByRole("status");
+    expect(status.textContent).toContain("刷新中");
+    expect(status.getAttribute("aria-label")).toBe("正在刷新工作区");
+    expect(status.getAttribute("data-refreshing")).toBe("true");
+
+    const refresh = screen.getByRole("button", { name: "刷新工作区" }) as HTMLButtonElement;
+    expect(refresh.disabled).toBe(true);
+    expect(refresh.title).toBe("正在重新读取工作区与当前差异");
+    expect(document.getElementById(refresh.getAttribute("aria-describedby")!)?.textContent).toBe(
+      "正在重新读取工作区与当前差异",
+    );
+    await fireEvent.click(refresh);
+    expect(onRefresh).not.toHaveBeenCalled();
+  });
+
+  it("首次读取与重新验证状态分开，同时成立时先说读取", () => {
+    render(StatusBar, {
+      props: {
+        hasRepo: true,
+        sync: "",
+        busy: true,
+        busyLabel: "读取中",
+        refreshing: true,
+        onRefresh: () => {},
+      } as never,
+    });
+    const status = screen.getByRole("status");
+    expect(status.textContent).toContain("读取中");
+    expect(status.textContent).not.toContain("刷新中");
+    expect(status.getAttribute("data-refreshing")).toBe("true");
   });
 });
 

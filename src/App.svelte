@@ -122,6 +122,13 @@
   });
   let repositoryEpoch = 0;
   let refreshTask: { epoch: number; again: boolean; promise: Promise<boolean> } | null = null;
+  /** 当前后台/手动重新验证是否在途：与写入、首次读取分开，状态栏据此显示「刷新中」而不是写入中。 */
+  let refreshActive = $state(false);
+  let refreshSerial = 0;
+  let refreshShowTimer: ReturnType<typeof setTimeout> | undefined;
+  onDestroy(() => {
+    if (refreshShowTimer) clearTimeout(refreshShowTimer);
+  });
   let draggingRepository = $state(false);
   let draft = $state("");
   /**
@@ -164,6 +171,8 @@
   let confirmPath = $state<string | null>(null);
   let cloneOpen = $state(false);
   let pushRetry = $state(false);
+  /** 本地提交成功后推送失败的原因：提交区把两个阶段分开显示，并提供只重试推送的入口。 */
+  let pushFailure = $state<string | null>(null);
   let phaseNote = $state<string | null>(null);
   let degraded = $state(false);
   let windowFocused = $state(true);
@@ -225,6 +234,17 @@
   let syncCancelling = $state(false);
   /** 会访问远程、可以取消的同步动作。 */
   const REMOTE_PENDING = new Set(["fetch", "pull", "push", "publish", "associate"]);
+  /**
+   * 同步失败的阶段与重试范围。远程未知不能与成功共用一句话；
+   * 推送失败时本地提交已经落地，重试只重试推送。
+   */
+  const SYNC_FAILURE: Record<string, { stage: string; next: string }> = {
+    fetch: { stage: "获取更新", next: "本地文件和当前分支都没有变化；可以重试获取更新。" },
+    pull: { stage: "快进拉取", next: "当前分支没有前进，工作区保持原样；可以重试拉取。" },
+    push: { stage: "推送", next: "本地提交已保留；重试只推送，不会再次提交。" },
+    publish: { stage: "发布分支", next: "本地提交已保留；重试只推送，不会再次提交。" },
+    associate: { stage: "关联上游", next: "这次没有推送；可以重试关联。" },
+  };
   const drafts = new DraftBuffer();
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -324,6 +344,28 @@
     recentRepos: recent,
     currentRepoPath: opened?.summary.path ?? null,
   });
+  /** 状态栏只给一句正在进行的动作：本地读取、远程网络与写入不共用「加载中」这种笼统说法（R6）。 */
+  let pendingLabel = $derived.by(() => {
+    switch (pending) {
+      case "fetch":
+        return "正在检查远程";
+      case "pull":
+        return "正在拉取";
+      case "push":
+        return "正在推送";
+      case "publish":
+        return "正在发布";
+      case "associate":
+        return "正在关联上游";
+      case "add":
+      case "open":
+        return "正在读取仓库";
+      case "clone":
+        return "正在克隆";
+      default:
+        return commandState.writing ? "写入中" : "读取中";
+    }
+  });
   let paletteCommands = $derived(
     paletteItems(commandState).map((item) => ({
       id: item.id,
@@ -393,8 +435,19 @@
   function showError(error: unknown) {
     const failure = error as AppFailure;
     const normalized = failure?.message ? failure : normalizeError(error);
+    // 失败结论与上一次的成功提示不能同时挂着：error toast 出现时把旧成功 toast 收起。
+    phaseNote = null;
     banner = normalized.message;
     live = normalized.message;
+  }
+
+  /**
+   * 写操作失败的就地说明：保留归一化后的 code/generation，消息里补上失败阶段与重试范围。
+   * 阶段文字只描述本次动作，不把本地已完成的结果说成回退。
+   */
+  function describeFailure(failure: AppFailure, stage?: string, next?: string): string {
+    if (!stage) return failure.message;
+    return `${stage}失败：${failure.message}${next ? ` ${next}` : ""}`;
   }
 
   function applyTheme(next: Theme) {
@@ -741,6 +794,8 @@
     diffError = null;
     commitError = null;
     pushRetry = false;
+    pushFailure = null;
+    stopRefreshIndicator();
     phaseNote = null;
     workspaceView = "changes";
     historyPath = null;
@@ -807,14 +862,28 @@
     }
   }
 
+  /** 重新验证很快结束时不必闪一下就消失；超过这个时间才把「刷新中」挂到状态栏。 */
+  const REFRESH_STATUS_DELAY_MS = 160;
+
+  function stopRefreshIndicator() {
+    if (refreshShowTimer) clearTimeout(refreshShowTimer);
+    refreshShowTimer = undefined;
+    refreshActive = false;
+  }
+
   function refresh(): Promise<boolean> {
     if (!opened) return Promise.resolve(false);
     if (refreshTask?.epoch === repositoryEpoch) {
       refreshTask.again = true;
       return refreshTask.promise;
     }
+    const serial = ++refreshSerial;
     const task = { epoch: repositoryEpoch, again: false, promise: Promise.resolve(false) };
     refreshTask = task;
+    if (refreshShowTimer) clearTimeout(refreshShowTimer);
+    refreshShowTimer = setTimeout(() => {
+      if (refreshSerial === serial) refreshActive = true;
+    }, REFRESH_STATUS_DELAY_MS);
     task.promise = (async () => {
       let ok = false;
       do {
@@ -824,6 +893,8 @@
       return ok;
     })().finally(() => {
       if (refreshTask === task) refreshTask = null;
+      // 仓库切换后可能已经开始了新一轮刷新：旧一轮收尾不能把新一轮的进行中状态提前关掉。
+      if (refreshSerial === serial) stopRefreshIndicator();
     });
     return task.promise;
   }
@@ -904,7 +975,7 @@
       if (outcome.state === "failed") {
         const failure = normalizeError(outcome.error);
         if (failure.code === "stale" && failure.generation !== undefined && opened?.summary.path === current.summary.path) {
-          opened = { ...opened, generation: failure.generation };
+          opened = { ...opened, generation: Math.max(opened.generation, failure.generation) };
           void refresh();
           return;
         }
@@ -976,7 +1047,7 @@
   /** 多文件视图读到旧 generation：与单文件读取同样处理，收下新值并刷新。 */
   function adoptStaleDiff(generation: number) {
     if (!opened) return;
-    opened = { ...opened, generation };
+    opened = { ...opened, generation: Math.max(opened.generation, generation) };
     void refresh();
   }
 
@@ -1027,6 +1098,8 @@
 
   function applySnapshot(snapshot: StatusSnapshot) {
     if (!opened) return;
+    // 迟到的旧快照不能把 generation 退回去，也不能覆盖较新的文件与选中状态。
+    if (snapshot.generation < opened.generation) return;
     opened = { ...opened, snapshot, generation: snapshot.generation };
     settleSelection(createSelectionResolver(snapshot.files, true));
     void loadSelectedDiff();
@@ -1038,14 +1111,15 @@
   }
 
   /** 写操作的失败出口：通知条统一在这里落，调用方还能拿到归一化后的失败去就地说明。 */
-  function handleMutationError(error: unknown): AppFailure {
+  function handleMutationError(error: unknown, stage?: string, next?: string): AppFailure {
     const failure = normalizeError(error);
-    if (failure.generation !== undefined && opened && failure.generation !== opened.generation) {
+    if (failure.generation !== undefined && opened && failure.generation > opened.generation) {
       opened = { ...opened, generation: failure.generation };
-      if (failure.code === "stale" || failure.code === "stale_patch") void refresh();
     }
-    showError(failure);
-    return failure;
+    if ((failure.code === "stale" || failure.code === "stale_patch") && opened) void refresh();
+    const described: AppFailure = { ...failure, message: describeFailure(failure, stage, next) };
+    showError(described);
+    return described;
   }
 
   async function stagePath(relative: string) {
@@ -1291,6 +1365,8 @@
     live = "正在创建本地提交";
     // 新一次尝试开始：上一次失败的原因不再代表当前状态。
     commitError = null;
+    pushFailure = null;
+    pushRetry = false;
     try {
       await flushDraft(current.summary.path);
       const result = await api.commitChanges(current.summary.path, message, current.generation, nextId());
@@ -1312,7 +1388,11 @@
       if (opened?.summary.path === current.summary.path) {
         // R5：失败原因要留在提交区里（缺身份、钩子拒绝、索引锁、过期各自可辨），
         // 草稿与仍然有效的暂存都不动，通知条只是第二条渠道。
-        commitError = handleMutationError(error).message;
+        commitError = handleMutationError(
+          error,
+          "本地提交",
+          "草稿和已暂存内容都已保留，可以修改后重试。",
+        ).message;
       }
     } finally {
       pending = null;
@@ -1338,6 +1418,7 @@
     live = phaseNote;
     // 与「提交到本地」同源：新一次尝试开始就清掉上一次的行内原因。
     commitError = null;
+    pushFailure = null;
     try {
       await flushDraft(current.summary.path);
       const result = await api.commitAndPush(current.summary.path, message, current.generation, nextId());
@@ -1348,16 +1429,33 @@
       selected = selectionAfterEdit(result.snapshot.files, selected);
       selectedSet = [];
       pushRetry = result.retryPush;
-      phaseNote = result.summary;
-      banner = result.pushed ? null : result.pushError;
-      live = result.summary;
+      if (result.pushed) {
+        pushFailure = null;
+        phaseNote = result.summary;
+        banner = null;
+        live = result.summary;
+      } else {
+        // 本地提交已经落地，失败只在推送：两个阶段分开说明，重试入口只推送（R6）。
+        pushFailure = describeFailure(
+          { code: "push_failed", message: result.pushError ?? "推送没有完成。" },
+          "推送",
+          `本地提交 ${result.oid.slice(0, 7)} 已完成，重试只推送，不会再次提交。`,
+        );
+        phaseNote = null;
+        banner = pushFailure;
+        live = pushFailure;
+      }
       void probeMerge();
       await loadSelectedDiff();
     } catch (error) {
       if (opened?.summary.path === current.summary.path) {
         // 这里失败的是「先完成本地提交」那一段（推送失败走 pushError，不抛）。
         // 两条提交路径因此给出同一份就地原因，而不是只有「提交到本地」这一条。
-        commitError = handleMutationError(error).message;
+        commitError = handleMutationError(
+          error,
+          "本地提交",
+          "推送还没有开始；草稿和已暂存内容都已保留，可以重试。",
+        ).message;
       }
     } finally {
       pending = null;
@@ -1377,13 +1475,19 @@
       if (opened?.summary.path !== current.summary.path) return;
       applySnapshot(snapshot);
       pushRetry = false;
+      pushFailure = null;
       phaseNote = "推送已完成。没有再次创建提交。";
       banner = null;
       live = phaseNote;
     } catch (error) {
       if (opened?.summary.path === current.summary.path) {
         pushRetry = true;
-        handleMutationError(error);
+        pushFailure = handleMutationError(
+          error,
+          "推送",
+          "本地提交已保留；可以继续重试推送，不会再次提交。",
+        ).message;
+        banner = pushFailure;
       }
     } finally {
       pending = null;
@@ -1414,7 +1518,10 @@
       if (opened?.summary.path !== current.summary.path) return;
       applySnapshot(snapshot);
       banner = null;
-      if (name === "push" || name === "publish") pushRetry = false;
+      if (name === "push" || name === "publish") {
+        pushRetry = false;
+        pushFailure = null;
+      }
       phaseNote = labels?.done ?? (
         name === "fetch"
           ? "远程检查已完成，工作区文件没有因为检查而改变。"
@@ -1436,7 +1543,8 @@
           void refresh();
           return;
         }
-        handleMutationError(failure);
+        const context = SYNC_FAILURE[name];
+        handleMutationError(failure, context?.stage, context?.next);
       }
     } finally {
       pending = null;
@@ -1589,6 +1697,7 @@
     const serial = ++readSerial;
     reading = true;
     readPhase = "idle";
+    stopRefreshIndicator();
     live = "正在读取仓库状态";
     try {
       await api.cancelReads();
@@ -1638,6 +1747,10 @@
         selectedSet = [];
         diff = null;
         draft = "";
+        commitError = null;
+        pushFailure = null;
+        pushRetry = false;
+        stopRefreshIndicator();
         degraded = false;
         workspaceView = "changes";
         historyPath = null;
@@ -2662,6 +2775,8 @@
                   disabled={writeLocked}
                   busy={pending}
                   error={commitError}
+                  pushError={pushFailure}
+                  onRetryPush={retryPush}
                   stageableCount={stageTargets.length}
                   onStageAll={() => runCommand("stage.all")}
                   onInput={onDraftInput}
@@ -2814,8 +2929,8 @@
     hasRepo={opened !== null}
     sync={syncText}
     busy={writeLocked}
-    busyLabel={commandState.writing ? "写入中" : "读取中"}
-    refreshing={pending !== null || reading}
+    busyLabel={pendingLabel}
+    refreshing={refreshActive}
     {degraded}
     warning={warning}
     onRefresh={() => runCommand("view.refresh")}

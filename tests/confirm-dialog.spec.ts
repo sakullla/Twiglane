@@ -1,6 +1,16 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ConfirmDialog from "../src/lib/components/ConfirmDialog.svelte";
+import { discardActionLabel } from "../src/lib/resolve";
+import type { OpenedRepository } from "../src/lib/types";
+
+const discardChanges = vi.hoisted(() => vi.fn());
+
+vi.mock("../src/lib/api", () => ({
+  api: { discardChanges, undoCommit: vi.fn() },
+}));
+
+import RecoveryActions from "../src/lib/components/RecoveryActions.svelte";
 
 /**
  * 删除、中止、放弃共用的确认框：固定版式、安全的初始焦点、写入在途锁住，
@@ -100,5 +110,132 @@ describe("确认框", () => {
     await waitFor(() => expect(rows().some((row) => row.textContent?.includes("module-3000/"))).toBe(true));
     expect(rows().length).toBeLessThan(60);
     expect(rows().some((row) => row.textContent?.includes("module-0/"))).toBe(false);
+  });
+});
+
+describe("恢复动作的写入边界", () => {
+  const opened: OpenedRepository = {
+    summary: { name: "demo", path: "/repo" },
+    generation: 4,
+    snapshot: {
+      generation: 4,
+      branch: {
+        name: "main",
+        detached: false,
+        unborn: false,
+        headOid: "a".repeat(40),
+        upstream: "origin/main",
+        ahead: 0,
+        behind: 0,
+        liveRemoteChecked: true,
+        remoteCheckedAtMs: 1,
+        remoteCheckStale: false,
+      },
+      files: [
+        {
+          path: "keep.txt",
+          originalPath: null,
+          staged: "none",
+          unstaged: "modified",
+          untracked: false,
+          unmerged: false,
+        },
+      ],
+    },
+    draft: "",
+    watchDegraded: false,
+  };
+
+  const preview = {
+    generation: 4,
+    wrote: false,
+    boundary: "取消不写入。",
+    snapshot: opened.snapshot,
+    files: [
+      {
+        path: "keep.txt",
+        originalPath: null,
+        staged: "none" as const,
+        unstaged: "modified" as const,
+        untracked: false,
+        impact: "未暂存的修改会回到当前提交。",
+        recovery: "放弃后 Git 不保留这份未提交内容。",
+      },
+    ],
+  };
+
+  function mount(extra: Record<string, unknown> = {}) {
+    return render(RecoveryActions, {
+      props: {
+        opened,
+        disabled: false,
+        nextId: () => 2,
+        onSnapshot: () => {},
+        onFailure: () => {},
+        onNotice: () => {},
+        onMerge: () => {},
+        ...extra,
+      } as never,
+    });
+  }
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  it("取消放弃只收起确认层，不写入也不改变选中", async () => {
+    discardChanges.mockResolvedValueOnce(preview);
+    const onSnapshot = vi.fn();
+    const onNotice = vi.fn();
+    mount({ onSnapshot, onNotice });
+    await fireEvent.click(screen.getByRole("button", { name: discardActionLabel() }));
+    await screen.findByText(/取消不写入/);
+    await fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(discardChanges).toHaveBeenCalledTimes(1);
+    expect(onSnapshot).not.toHaveBeenCalled();
+    expect(onNotice).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("放弃写入重复确认只发一次；切换仓库后的迟到结果不应用", async () => {
+    discardChanges.mockResolvedValueOnce(preview);
+    let finish: (value: unknown) => void = () => {};
+    discardChanges.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    const onSnapshot = vi.fn();
+    const onNotice = vi.fn();
+    const view = mount({ onSnapshot, onNotice });
+
+    await fireEvent.click(screen.getByRole("button", { name: discardActionLabel() }));
+    await screen.findByText(/取消不写入/);
+    const confirm = screen.getByRole("button", { name: /个文件的修改$/ });
+    const first = fireEvent.click(confirm);
+    const second = fireEvent.click(confirm);
+    await Promise.all([first, second]);
+    // 预览一次 + 确认写入一次：第二次确认被 busy 挡在 API 之前。
+    expect(discardChanges).toHaveBeenCalledTimes(2);
+    expect(discardChanges.mock.calls.filter((call) => call[2] === true)).toHaveLength(1);
+    expect(discardChanges).toHaveBeenLastCalledWith("/repo", ["keep.txt"], true, 4, 2);
+
+    const other = { ...opened, summary: { name: "other", path: "/other" }, generation: 5 };
+    await view.rerender({
+      opened: other,
+      disabled: false,
+      nextId: () => 2,
+      onSnapshot,
+      onFailure: () => {},
+      onNotice,
+      onMerge: () => {},
+    } as never);
+    finish({
+      generation: 5,
+      wrote: true,
+      boundary: "",
+      files: [{ path: "keep.txt" }],
+      snapshot: { ...opened.snapshot, generation: 5 },
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(onSnapshot, "旧仓库的快照不覆盖新仓库").not.toHaveBeenCalled();
+    expect(onNotice).not.toHaveBeenCalled();
   });
 });

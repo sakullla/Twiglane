@@ -57,6 +57,13 @@
      * 与右下角通知条同源，但提交区里必须也留一份可见文本，通知条不能是唯一渠道。
      */
     error?: string | null;
+    /**
+     * 本地提交已经完成、但后续推送失败时的原因（R6）。提交区把两个阶段分开说明，
+     * 并提供一个只重试推送的入口；重试不会再次创建本地提交。
+     */
+    pushError?: string | null;
+    /** 只重试推送；由外壳复用同一条推送路径，不重跑本地提交。 */
+    onRetryPush?: () => void;
     /** 可以一键暂存的文件数（未暂存且非冲突）。暂存区为空时提供「全部暂存」。 */
     stageableCount?: number;
     onStageAll?: () => void;
@@ -78,6 +85,8 @@
     disabled,
     busy = null,
     error = null,
+    pushError = null,
+    onRetryPush,
     stageableCount = 0,
     onStageAll,
     onInput,
@@ -110,6 +119,7 @@
   let active = $state(false);
   let shownHeight = $derived(dragHeight ?? (active || value.length > 0 ? height : MESSAGE_HEIGHT_COMPACT));
   let committing = $derived(busy === "commit" || busy === "commit-push");
+  let retryingPush = $derived(busy === "push");
   let ready = $derived(hasCommitSummary(value) && paths.length > 0 && !disabled);
   let blocker = $derived(
     paths.length === 0 ? "先暂存要提交的文件" : !hasCommitSummary(value) ? "填写提交说明后即可提交" : "",
@@ -381,6 +391,26 @@
       </button>
     {/if}
   </div>
+
+  {#if pushError}
+    <!-- 两个阶段分开说明：本地提交已完成，失败只在推送；重试入口只推送，不会再次提交（R6）。 -->
+    <div class="composer-meta" data-push-error>
+      <Icon name="alert-circle" size={12} />
+      <span class="truncate composer-error" role="status" title={pushError}>{pushError}</span>
+      {#if onRetryPush}
+        <button
+          type="button"
+          class="composer-inline-action"
+          title={disabled || retryingPush ? BUSY_REASON : "只重试推送，不会再次创建本地提交"}
+          disabled={disabled || retryingPush}
+          onclick={onRetryPush}
+        >
+          {#if retryingPush}<span class="spinner" aria-hidden="true"></span>{/if}
+          {retryingPush ? "正在重试推送…" : "重试推送"}
+        </button>
+      {/if}
+    </div>
+  {/if}
 
   <div class="composer-actions">
     <button

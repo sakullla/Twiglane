@@ -69,6 +69,10 @@
   }
 
   async function openDiscard(only?: string[]) {
+    // 入口可能在确认层还在收尾时被再次触发：这里挡在读取影响清单之前，避免重复请求和重复写入。
+    if (busy || disabled) return;
+    const repository = opened.summary.path;
+    const generation = opened.generation;
     const changed = changedPaths();
     const paths = only ? only.filter((path) => changed.includes(path)) : changed;
     if (paths.length === 0) {
@@ -79,12 +83,15 @@
     busy = true;
     errorText = null;
     try {
-      const preview = await api.discardChanges(opened.summary.path, paths, false, opened.generation, nextId());
+      const preview = await api.discardChanges(repository, paths, false, generation, nextId());
+      // 预览返回时仓库已切换：这是旧仓库的结果，不能在当前界面打开确认层。
+      if (opened.summary.path !== repository) return;
       plans = preview.files;
       boundary = preview.boundary;
       checked = only ? [...paths] : paths.slice(0, 1);
       mode = "discard";
     } catch (error) {
+      if (opened.summary.path !== repository) return;
       const failure = normalizeError(error);
       errorText = failure.message;
       onFailure(failure);
@@ -109,22 +116,27 @@
   }
 
   async function confirmDiscard() {
-    if (checked.length === 0) return;
+    if (busy || checked.length === 0) return;
+    const repository = opened.summary.path;
+    const generation = opened.generation;
     const selected = [...checked];
     busy = true;
     errorText = null;
     try {
       const result = await api.discardChanges(
-        opened.summary.path,
+        repository,
         selected,
         true,
-        opened.generation,
+        generation,
         nextId(),
       );
       mode = null;
+      // 写入期间切了仓库：旧仓库的迟到结果不应用到新仓库，也不占用新仓库的通知。
+      if (opened.summary.path !== repository) return;
       onSnapshot(result.snapshot);
       onNotice(`已放弃 ${result.files.length} 个所选文件的修改，其他文件保持原内容。`);
     } catch (error) {
+      if (opened.summary.path !== repository) return;
       const failure = normalizeError(error);
       errorText = failure.message;
       onFailure(failure);
@@ -139,7 +151,9 @@
   }
 
   async function openUndo(expectedHead?: string) {
+    if (busy || disabled) return;
     const repository = opened.summary.path;
+    const generation = opened.generation;
     const head = expectedHead ?? opened.snapshot.branch.headOid;
     if (!head) {
       errorText = "没有可撤销的提交。";
@@ -149,12 +163,13 @@
     busy = true;
     errorText = null;
     try {
-      const preview = await api.undoCommit(repository, head, false, opened.generation, nextId());
+      const preview = await api.undoCommit(repository, head, false, generation, nextId());
       if (opened.summary.path !== repository) return;
       undoRepository = repository;
       undo = preview;
       mode = "undo";
     } catch (error) {
+      if (opened.summary.path !== repository) return;
       const failure = normalizeError(error);
       errorText = failure.message;
       onFailure(failure);
@@ -170,22 +185,24 @@
 
   async function confirmUndo() {
     const current = undo;
-    if (!current?.eligible || undoRepository !== opened.summary.path) return;
+    if (busy || !current?.eligible || undoRepository !== opened.summary.path) return;
+    const repository = undoRepository;
     busy = true;
     errorText = null;
     try {
       const result = await api.undoCommit(
-        undoRepository,
+        repository,
         current.headOid,
         true,
         current.generation,
         nextId(),
       );
       mode = null;
-      if (undoRepository !== opened.summary.path) return;
+      if (opened.summary.path !== repository) return;
       onSnapshot(result.snapshot);
       onNotice(result.reason);
     } catch (error) {
+      if (opened.summary.path !== repository) return;
       const failure = normalizeError(error);
       errorText = failure.message;
       onFailure(failure);

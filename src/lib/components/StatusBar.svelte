@@ -97,10 +97,17 @@
       <span>{notice.text}</span>
     </button>
   {/if}
-  <!-- 忙碌是唯一的实时状态：写入结论本身已由弹窗与 toast 播报，这里再播一次只会重复。 -->
-  {#if busy}
-    <span class="sb-item sb-busy" role="status" aria-live="polite" aria-label={busyLabel} title={busyLabel}>
-      <span class="spinner" aria-hidden="true"></span><span class="sb-text">{busyLabel}</span>
+  <!-- 写入/读取与重新验证共用同一条实时状态：写入结论本身已由弹窗与 toast 播报，这里再播一次只会重复。
+       重新验证已有内容不是写入，但同样要有进行中状态：旧内容继续可读，这一条说明刷新还没结束（R6）。 -->
+  {#if busy || refreshing}
+    <span
+      class="sb-item sb-busy"
+      role="status" aria-live="polite"
+      aria-label={busy ? busyLabel : "正在刷新工作区"}
+      title={busy ? busyLabel : "正在重新读取工作区与当前差异"}
+      data-refreshing={refreshing ? "true" : undefined}
+    >
+      <span class="spinner" aria-hidden="true"></span><span class="sb-text">{busy ? busyLabel : "刷新中"}</span>
     </span>
   {/if}
   {#if warning}
@@ -116,7 +123,7 @@
       aria-label="刷新工作区"
       aria-describedby="statusbar-refresh-reason"
       title={refreshReason}
-      disabled={busy}
+      disabled={busy || refreshing}
       onclick={onRefresh}
     >
       {#if refreshing}<span class="spinner" aria-hidden="true"></span>{:else}<Icon name="refresh" size={11} />{/if}

@@ -53,6 +53,12 @@
      * 多文件和嵌入块不传，避免背后那一份把命令面板的可用性盖掉。
      */
     onHunkNav?: (nav: HunkNavReport | null) => void;
+    /**
+     * 选中的是未解决的冲突文件。Git 给的是三方合并差异，这里不硬画成普通差异（会是空白），
+     * 而是说明原因并给出处理入口。
+     */
+    conflicted?: boolean;
+    onResolve?: () => void;
   }
 
   /**
@@ -84,6 +90,8 @@
     fileCount,
     onRetry,
     onHunkNav,
+    conflicted = false,
+    onResolve,
   }: Props = $props();
   let menu = $state<ContextMenuRequest | null>(null);
   let ownMode = $state<"unified" | "split">("unified");
@@ -601,7 +609,16 @@
     </div>
   </div>
   {/if}
-  {#if error}
+  {#if conflicted && selection && !embedded}
+    <div class="empty" role="status" data-diff-conflict>
+      <span class="empty-icon warn"><Icon name="merge" size={24} /></span>
+      <strong>这个文件有未解决的冲突</strong>
+      <p>两边都改了同一处内容，需要在三栏合并里选择保留哪一边，处理完再暂存提交。</p>
+      {#if onResolve}
+        <button type="button" class="btn btn-primary btn-sm" onclick={onResolve}><Icon name="merge" size={13} />去处理冲突</button>
+      {/if}
+    </div>
+  {:else if error}
     <div class="empty" role="status">
       <span class="empty-icon err"><Icon name="alert-circle" size={24} /></span>
       <strong>差异没有读取完成</strong>

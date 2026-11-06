@@ -48,6 +48,7 @@ describe("Tauri 命令参数", () => {
       url: "https://example.com/app.git",
       parent: "/parent",
       name: "app",
+      credential: null,
       requestId: 10,
     });
     expect(invoke).toHaveBeenNthCalledWith(7, "fetch_remote", {

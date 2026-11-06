@@ -169,9 +169,9 @@ describe("仓库徽标文字", () => {
     });
     expect(badgeText(container)).toEqual(["W", "A"]);
     expect(badges(container)[0].getAttribute("style")).toContain(String(hueOf(webPath)));
-    await fireEvent.input(screen.getByRole("combobox", { name: "搜索仓库名称或路径" }), { target: { value: "kite-web" } });
+    await fireEvent.input(screen.getByRole("combobox", { name: "搜索仓库名称、路径、分支或 worktree" }), { target: { value: "kite-web" } });
     expect(badgeText(container)).toEqual(["K"]);
-    await fireEvent.input(screen.getByRole("combobox", { name: "搜索仓库名称或路径" }), { target: { value: "" } });
+    await fireEvent.input(screen.getByRole("combobox", { name: "搜索仓库名称、路径、分支或 worktree" }), { target: { value: "" } });
     const withDocs = render(RepoSwitcher, {
       props: {
         anchor,

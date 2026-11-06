@@ -234,6 +234,16 @@ export interface TagState {
 export interface CloneResult {
   path: string;
   opened: OpenedRepository;
+  /** 用用户名密码克隆时，凭据是否已交给凭据助手保存的说明。 */
+  credentialNote?: string | null;
+}
+
+/** HTTP(S) 克隆用的一次性凭据；不进入应用数据。 */
+export interface HttpCredential {
+  username: string;
+  password: string;
+  /** 克隆成功后交给系统凭据助手保存。 */
+  remember: boolean;
 }
 
 export interface CommitPushReport {
@@ -443,6 +453,10 @@ export interface RepoHead {
   branch: string | null;
   detached: string | null;
   missing: boolean;
+  /** 是 `git worktree add` 建出来的附属工作区。 */
+  worktree: boolean;
+  /** 附属工作区所属主仓库的工作目录。 */
+  mainPath: string | null;
 }
 
 export interface ConflictEntry {

@@ -2,7 +2,7 @@
   import { BUSY_REASON } from "../ui";
   import { api, pickDirectory } from "../api";
   import { normalizeError } from "../errors";
-  import type { OpenedRepository, RemoteInfo, StatusSnapshot } from "../types";
+  import type { HttpCredential, OpenedRepository, RemoteInfo, StatusSnapshot } from "../types";
   import BranchDialog from "./BranchDialog.svelte";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
@@ -50,6 +50,24 @@
   let cloneUrl = $state("");
   let cloneParent = $state("");
   let cloneName = $state("");
+  /**
+   * HTTP(S) 克隆被要求登录：就地展开用户名和密码（或访问令牌），用这组凭据重试。
+   * 只对出错时的那个地址生效；改了地址就回到普通克隆。密码只留在内存里，关窗或成功后清掉。
+   */
+  let authPrompt = $state<{ url: string; message: string; retried: boolean } | null>(null);
+  let authUser = $state("");
+  let authPassword = $state("");
+  let authRemember = $state(true);
+  let authActive = $derived(authPrompt !== null && authPrompt.url === cloneUrl.trim());
+  let authMissing = $derived(authActive && (!authUser.trim() || !authPassword));
+
+  $effect(() => {
+    if (mode !== "clone") authPassword = "";
+  });
+
+  function isHttpUrl(url: string): boolean {
+    return /^https?:\/\//i.test(url);
+  }
   let remotes = $state<RemoteInfo[]>([]);
   let remoteName = $state("origin");
   let remoteUrl = $state("");
@@ -140,10 +158,35 @@
       onNotice("请填写远程地址，并选择一个已存在的父目录。");
       return;
     }
-    const result = await runClone(() => api.cloneRepository(url, cloneParent, cloneName.trim(), nextId()));
+    const credential: HttpCredential | null = authActive
+      ? { username: authUser.trim(), password: authPassword, remember: authRemember }
+      : null;
+    const result = await runClone(async () => {
+      try {
+        return await api.cloneRepository(url, cloneParent, cloneName.trim(), nextId(), credential);
+      } catch (error) {
+        const failure = normalizeError(error);
+        // 窗口还开着、是 HTTP(S) 地址：不弹通知，就地引导输入凭据；收起窗口后照常走失败通知。
+        if (failure.code === "auth" && isHttpUrl(url) && mode === "clone") {
+          authPrompt = {
+            url,
+            retried: credential !== null,
+            message: credential
+              ? failure.message
+              : "这个地址需要登录。输入用户名和密码（或访问令牌）后重新克隆。",
+          };
+          authPassword = "";
+          return undefined;
+        }
+        throw failure;
+      }
+    });
     if (!result) return;
+    authPrompt = null;
+    authPassword = "";
     // 打开还是只通知由外壳决定：看用户是否已经收起窗口。
     onOpened(result.opened);
+    if (result.credentialNote) onNotice(result.credentialNote);
     // 收起后再次打开的可能是别的对话框，只关自己。
     if (mode === "clone") onClose();
   }
@@ -251,10 +294,47 @@
         <label class="label" for="clone-name">目录名</label>
         <input id="clone-name" class="input" bind:value={cloneName} placeholder="可留空，从地址推断" autocomplete="off" spellcheck="false" />
       </div>
-      <div class="callout info">
-        <Icon name="info" size={15} />
-        <span>认证使用系统凭据助手或 SSH agent，不要把令牌写进地址。需要交互输入时会停止，而不是一直等待。</span>
-      </div>
+      {#if authActive && authPrompt}
+        <div class="clone-auth" data-clone-auth>
+          <div class={`callout ${authPrompt.retried ? "error" : "warn"}`} role="alert">
+            <Icon name="user" size={15} />
+            <span>{authPrompt.message}</span>
+          </div>
+          <div class="form-group">
+            <label class="label" for="clone-user">用户名</label>
+            <!-- svelte-ignore a11y_autofocus -->
+            <input id="clone-user" class="input" bind:value={authUser} autocomplete="username" spellcheck="false" autofocus={!authUser} />
+          </div>
+          <div class="form-group">
+            <label class="label" for="clone-password">密码或访问令牌</label>
+            <!-- svelte-ignore a11y_autofocus -->
+            <input
+              id="clone-password"
+              class="input"
+              type="password"
+              bind:value={authPassword}
+              autocomplete="current-password"
+              autofocus={Boolean(authUser)}
+              onkeydown={(event) => {
+                if (event.key === "Enter" && !event.isComposing && !blocked && !authMissing && cloneParent) {
+                  event.preventDefault();
+                  void startClone();
+                }
+              }}
+            />
+          </div>
+          <label class="confirm-option">
+            <input type="checkbox" class="checkbox" bind:checked={authRemember} title={blocked ? BUSY_REASON : undefined} disabled={blocked} />
+            <span>克隆成功后保存到系统凭据助手<small>之后拉取、推送不再询问；没有配置凭据助手时不会保存，并会提示</small></span>
+          </label>
+          <p class="hint">凭据只作为这次克隆的认证头发给该主机，不写进地址、Git 配置或 Twiglane 的数据。启用了双重验证的平台请使用访问令牌。</p>
+        </div>
+      {:else}
+        <div class="callout info">
+          <Icon name="info" size={15} />
+          <span>HTTP(S) 地址需要登录时会在这里提示输入用户名和密码；SSH 地址使用 SSH agent。不要把令牌写进地址。</span>
+        </div>
+      {/if}
       {#if cloning}
         <p class="hint" role="status" data-clone-running>克隆无法中途取消。留在这里，完成后自动打开仓库；点“在后台继续”后不会打断手上的工作，完成时只通知，可从仓库弹层打开。失败时通知里说明原因。</p>
       {/if}
@@ -262,9 +342,9 @@
     {#snippet footer()}
       <span class="spacer"></span>
       <button type="button" class="btn btn-secondary" onclick={onClose}>{cloning ? "在后台继续" : "取消"}</button>
-      <button type="button" class="btn btn-primary" title={blocked ? BUSY_REASON : !cloneUrl.trim() ? "先填写远程地址" : !cloneParent ? "先选择父目录" : undefined} disabled={blocked || !cloneUrl.trim() || !cloneParent} onclick={startClone}>
+      <button type="button" class="btn btn-primary" title={blocked ? BUSY_REASON : !cloneUrl.trim() ? "先填写远程地址" : !cloneParent ? "先选择父目录" : authMissing ? "先填写用户名和密码" : undefined} disabled={blocked || !cloneUrl.trim() || !cloneParent || authMissing} onclick={startClone}>
         {#if cloning}<span class="spinner"></span>{:else}<Icon name="download" size={14} />{/if}
-        开始克隆
+        {authActive ? "登录并克隆" : "开始克隆"}
       </button>
     {/snippet}
   </Modal>

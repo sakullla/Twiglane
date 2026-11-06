@@ -38,6 +38,8 @@ pub struct GitJob {
     pub stdin: Option<Vec<u8>>,
     pub truncate_stdout: bool,
     pub output_limit: Option<usize>,
+    /// 只给这一个进程的环境变量（例如一次性的认证头）；不写入配置，也不出现在命令行参数里。
+    pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 }
 
 pub struct CommandSpec {
@@ -204,7 +206,7 @@ impl<R: ProcessRunner> GitScheduler<R> {
             .run(RunRequest {
                 program: job.program,
                 args: job.args,
-                extra_env: self.extra_env.clone(),
+                extra_env: self.extra_env.iter().cloned().chain(job.env).collect(),
                 timeout: self.timeout,
                 output_limit: job.output_limit.unwrap_or(self.output_limit),
                 shutdown: self.shutdown.clone(),
@@ -445,6 +447,7 @@ mod tests {
             stdin: None,
             truncate_stdout: false,
             output_limit: None,
+            env: Vec::new(),
         }
     }
 

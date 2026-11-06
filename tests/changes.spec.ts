@@ -1002,6 +1002,27 @@ describe("差异与提交", () => {
     expect(screen.queryByText(codeLine("row-79"))).toBeNull();
   });
 
+  it("冲突文件不画空白差异，说明原因并给出处理入口", async () => {
+    const onResolve = vi.fn();
+    render(DiffView, {
+      props: {
+        selection,
+        diff,
+        error: null,
+        loading: false,
+        disabled: false,
+        onStageHunk: () => {},
+        onLoadMore: () => {},
+        conflicted: true,
+        onResolve,
+      },
+    });
+    expect(screen.getByText("这个文件有未解决的冲突")).toBeTruthy();
+    expect(document.querySelector("[data-diff-row]"), "不渲染三方合并的原始差异").toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "去处理冲突" }));
+    expect(onResolve).toHaveBeenCalledTimes(1);
+  });
+
   it("上一处、下一处把视口顶对齐到改动块头，走到头时焦点交给另一侧", async () => {
     render(DiffView, {
       props: {

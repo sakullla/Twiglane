@@ -98,6 +98,7 @@ pub fn run() {
             track_remote_as,
             cancel_remote,
             repo_heads,
+            remove_worktree,
             publish_branch,
             associate_upstream,
             commit_and_push,
@@ -544,11 +545,19 @@ async fn clone_repository<R: Runtime>(
     url: String,
     parent: String,
     name: String,
+    credential: Option<crate::git::credential::HttpCredential>,
     request_id: u64,
 ) -> Result<CloneResult, AppError> {
     let backend = Arc::clone(state.inner());
-    let mut cloned =
-        crate::git::sync::clone_repository(&backend, &url, &parent, &name, request_id).await?;
+    let mut cloned = crate::git::sync::clone_repository(
+        &backend,
+        &url,
+        &parent,
+        &name,
+        credential.as_ref(),
+        request_id,
+    )
+    .await?;
     cloned.opened.watch_degraded = start_watch(&app, &backend, &cloned.opened.summary.path);
     Ok(cloned)
 }
@@ -651,6 +660,16 @@ async fn repo_heads(paths: Vec<String>) -> Result<Vec<crate::git::heads::RepoHea
     tauri::async_runtime::spawn_blocking(move || crate::git::heads::repo_heads(&paths))
         .await
         .map_err(|_| AppError::new("cancelled", "读取仓库分支已中断。"))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn remove_worktree(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    force: bool,
+    request_id: u64,
+) -> Result<Vec<RecentRepo>, AppError> {
+    crate::git::worktree::remove_worktree(state.inner(), &path, force, request_id).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -22,8 +22,8 @@ import {
   shouldPoll,
   visibleRange,
 } from "../src/lib/layout";
-import { filterRecent } from "../src/lib/recent";
-import type { BranchInfo, FileChange, RecentRepo } from "../src/lib/types";
+import { baseName, filterRecent } from "../src/lib/recent";
+import type { BranchInfo, FileChange, RecentRepo, RepoHead } from "../src/lib/types";
 
 const branch: BranchInfo = {
   name: "feature/very-long-name",
@@ -51,6 +51,33 @@ describe("最近仓库", () => {
     ]);
     expect(filterRecent(repos, "beta")).toEqual([repos[1]]);
     expect(filterRecent(repos, "missing")).toEqual([]);
+  });
+
+  it("关键字也命中当前分支、worktree 与所属主仓库", () => {
+    const list: RecentRepo[] = [
+      { name: "app", path: "/work/app", openedAtMs: 3 },
+      { name: "app-feature", path: "/work/worktrees/app-feature", openedAtMs: 2 },
+      { name: "lib", path: "/work/lib", openedAtMs: 1 },
+    ];
+    const heads: Record<string, RepoHead> = {
+      "/work/app": { path: "/work/app", branch: "develop", detached: null, missing: false, worktree: false, mainPath: null },
+      "/work/worktrees/app-feature": {
+        path: "/work/worktrees/app-feature", branch: "feature/Carrier-Assessment", detached: null, missing: false, worktree: true, mainPath: "/work/app",
+      },
+      "/work/lib": { path: "/work/lib", branch: null, detached: "abc1234", missing: false, worktree: false, mainPath: null },
+    };
+    const headOf = (path: string) => heads[path] ?? null;
+    const names = (query: string) => filterRecent(list, query, headOf).map((repo) => repo.name);
+    expect(names("carrier-assess")).toEqual(["app-feature"]);
+    expect(names("develop")).toEqual(["app"]);
+    expect(names("abc12")).toEqual(["lib"]);
+    expect(names("worktree")).toEqual(["app-feature"]);
+    expect(names("工作区")).toEqual(["app-feature"]);
+    expect(names("WORK")).toEqual(["app", "app-feature", "lib"]);
+    // 分支还没读到时只按名称与路径匹配，不报错。
+    expect(filterRecent(list, "develop")).toEqual([]);
+    expect(baseName("/work/app/")).toBe("app");
+    expect(baseName("C:\\work\\app")).toBe("app");
   });
 });
 

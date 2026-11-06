@@ -25,6 +25,7 @@ macro_rules! settle_read {
 pub mod advice;
 pub mod changes;
 pub mod command;
+pub mod credential;
 pub mod gate;
 pub mod heads;
 pub mod history;
@@ -40,3 +41,4 @@ pub mod sizes;
 pub mod sync;
 pub mod tags;
 pub mod workspace;
+pub mod worktree;

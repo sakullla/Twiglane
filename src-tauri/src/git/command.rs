@@ -215,6 +215,24 @@ pub fn clone_command(git: &Path, url: &str, destination: &Path) -> (PathBuf, Vec
     )
 }
 
+/// 读取生效的凭据助手配置（全局与仓库级）。
+pub fn credential_helper_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("config"),
+        OsString::from("--get-all"),
+        OsString::from("credential.helper"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// 把标准输入里的一组凭据交给凭据助手保存。
+pub fn credential_approve_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([OsString::from("credential"), OsString::from("approve")]);
+    (git.to_path_buf(), args)
+}
+
 pub fn remote_verbose_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.extend([OsString::from("remote"), OsString::from("-v")]);
@@ -1204,6 +1222,18 @@ pub fn git_path_command(git: &Path, root: &Path, name: &str) -> (PathBuf, Vec<Os
         OsString::from("--git-path"),
         OsString::from(name),
     ]);
+    (git.to_path_buf(), args)
+}
+
+/// 在主仓库里删除一个附属工作区。路径是规范化后的绝对路径，不会被当成选项。
+/// `force` 时加一个 `--force`：丢弃其中未提交的改动；锁定的工作区仍然拒绝。
+pub fn worktree_remove_command(git: &Path, main: &Path, target: &Path, force: bool) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(main, false);
+    args.extend([OsString::from("worktree"), OsString::from("remove")]);
+    if force {
+        args.push(OsString::from("--force"));
+    }
+    args.push(target.as_os_str().to_os_string());
     (git.to_path_buf(), args)
 }
 

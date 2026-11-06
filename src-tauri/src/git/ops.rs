@@ -744,6 +744,7 @@ async fn run_git_job(
             stdin: None,
             truncate_stdout: false,
             output_limit: None,
+            env: Vec::new(),
         };
         let result = if remote {
             backend.scheduler.execute_remote(job).await

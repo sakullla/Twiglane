@@ -170,6 +170,7 @@ pub async fn object_sizes(
                 stdin: None,
                 truncate_stdout: false,
                 output_limit: None,
+                env: Vec::new(),
             })
             .await;
         if let Ok(output) = output {
@@ -198,6 +199,7 @@ pub async fn object_sizes(
             stdin: Some(batch_input(&names)),
             truncate_stdout: false,
             output_limit: None,
+            env: Vec::new(),
         })
         .await
     else {

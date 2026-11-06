@@ -1,14 +1,34 @@
-import type { RecentRepo } from "./types";
+import type { RecentRepo, RepoHead } from "./types";
 
-export function filterRecent(repos: RecentRepo[], query: string): RecentRepo[] {
+/** 搜「worktree」或「工作区」时列出所有附属工作区。 */
+const WORKTREE_WORDS = ["worktree", "工作区"];
+
+/**
+ * 关键字搜索最近仓库：命中名称、路径、当前分支（或游离提交）、附属工作区所属的主仓库，
+ * 关键字是 worktree / 工作区时还命中所有附属工作区。分支信息还没读到时只按名称和路径匹配。
+ */
+export function filterRecent(
+  repos: RecentRepo[],
+  query: string,
+  headOf: (path: string) => RepoHead | null = () => null,
+): RecentRepo[] {
   const needle = query.trim().toLocaleLowerCase();
   if (!needle) return repos;
+  const asksWorktree = needle.length >= 2 && WORKTREE_WORDS.some((word) => word.startsWith(needle));
   return repos.filter((repo) => {
-    return (
-      repo.name.toLocaleLowerCase().includes(needle) ||
-      repo.path.toLocaleLowerCase().includes(needle)
-    );
+    if (repo.name.toLocaleLowerCase().includes(needle) || repo.path.toLocaleLowerCase().includes(needle)) return true;
+    const head = headOf(repo.path);
+    if (!head) return false;
+    if (head.worktree && asksWorktree) return true;
+    return [head.branch, head.detached, head.mainPath].some((text) => text?.toLocaleLowerCase().includes(needle));
   });
+}
+
+/** 路径的最后一段，用来显示附属工作区来自哪个主仓库。 */
+export function baseName(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, "");
+  const at = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  return at >= 0 ? trimmed.slice(at + 1) : trimmed;
 }
 
 /** 出现不止一次的仓库名：这些仓库只能靠路径区分，界面要显示完整路径而不是截断。 */

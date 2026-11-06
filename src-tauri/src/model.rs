@@ -332,6 +332,8 @@ pub struct TagState {
 pub struct CloneResult {
     pub path: String,
     pub opened: OpenedRepository,
+    /// 用用户名密码克隆时，凭据是否已交给凭据助手保存的说明；不含凭据本身。
+    pub credential_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

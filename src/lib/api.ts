@@ -5,6 +5,7 @@ import type {
   PreviewSource,
   FilePreview,
   CloneResult,
+  HttpCredential,
   CommitBranches,
   CommitDetail,
   CommitPushReport,
@@ -111,6 +112,9 @@ export const api = {
   forgetRecent: (path: string) => invoke<RecentRepo[]>("forget_recent", { path }),
   /** 直接读各仓库 HEAD 文件得到当前检出的分支，不启动 Git。 */
   repoHeads: (paths: string[]) => invoke<RepoHead[]>("repo_heads", { paths }),
+  /** 删除附属工作区（git worktree remove），成功后返回移出该项的最近列表；分支保留。 */
+  removeWorktree: (path: string, force: boolean, requestId: number) =>
+    invoke<RecentRepo[]>("remove_worktree", { path, force, requestId }),
   refreshStatus: (path: string, generation: number, requestId: number) =>
     invoke<StatusSnapshot>("refresh_status", { path, generation, requestId }),
   loadDiff: (
@@ -162,8 +166,12 @@ export const api = {
     }),
   commitChanges: (path: string, message: string, generation: number, requestId: number) =>
     invoke<CommitResult>("commit_changes", { path, message, generation, requestId }),
-  cloneRepository: (url: string, parent: string, name: string, requestId: number) =>
-    invoke<CloneResult>("clone_repository", { url, parent, name, requestId }),
+  /**
+   * 克隆。HTTP(S) 地址认证失败后可带上用户名和密码（或访问令牌）重试：
+   * 后端只把它作为这一次 Git 进程的认证头，remember 为真时成功后交给系统凭据助手保存。
+   */
+  cloneRepository: (url: string, parent: string, name: string, requestId: number, credential: HttpCredential | null = null) =>
+    invoke<CloneResult>("clone_repository", { url, parent, name, credential, requestId }),
   remoteState: (path: string, generation: number, requestId: number) =>
     invoke<RemoteState>("remote_state", { path, generation, requestId }),
   addRemote: (path: string, name: string, url: string, generation: number, requestId: number) =>

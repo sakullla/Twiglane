@@ -33,6 +33,7 @@
     PanelWidths,
     RecentRepo,
     RepoChanged,
+    RepoHead,
     StatusSnapshot,
     PullIntegration,
     TaskModal,
@@ -53,6 +54,7 @@
   import type { MergeMode } from "./lib/components/MergeSetup.svelte";
   import BranchSwitcher from "./lib/components/BranchSwitcher.svelte";
   import CommandPalette from "./lib/components/CommandPalette.svelte";
+  import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./lib/components/ContextMenu.svelte";
   import { openModalCount } from "./lib/components/Modal.svelte";
   import CommitDraft from "./lib/components/CommitDraft.svelte";
@@ -203,6 +205,11 @@
   let repoReturnFocus = $state<HTMLElement | null>(null);
   /** 当前打开的右键菜单（文件列表、最近仓库）；任务 modal 里的右键菜单由各自组件承载。 */
   let contextMenu = $state<ContextMenuRequest | null>(null);
+  /**
+   * 删除附属工作区的确认：第一次不带 force；Git 因未提交改动拒绝时升级成强制删除确认，
+   * 用户再点一次才丢弃改动。当前打开的工作区不在这里删（入口直接禁用）。
+   */
+  let worktreeRemoval = $state<{ repo: RecentRepo; head: RepoHead; force: boolean; busy: boolean; error: string | null } | null>(null);
   let recovery = $state<{ discard: (paths?: string[]) => Promise<void> } | null>(null);
   /** 差异是否展开为完整文件（记在本机）：开启时按整份文件加上下文读取，暂存代码块暂不可用。 */
   const FULL_FILE_CONTEXT = 1_000_000;
@@ -1837,7 +1844,32 @@
     contextMenu = { x: point.x, y: point.y, entries, label: `${path} 的操作` };
   }
 
-  function repoContextMenu(repo: RecentRepo, point: { x: number; y: number }) {
+  function askRemoveWorktree(repo: RecentRepo, head: RepoHead) {
+    if (repo.path === opened?.summary.path) return;
+    closeSwitcher();
+    worktreeRemoval = { repo, head, force: false, busy: false, error: null };
+  }
+
+  async function confirmRemoveWorktree() {
+    const pending = worktreeRemoval;
+    if (!pending || pending.busy) return;
+    worktreeRemoval = { ...pending, busy: true, error: null };
+    try {
+      recent = await api.removeWorktree(pending.repo.path, pending.force, nextId());
+      worktreeRemoval = null;
+      notice(`已删除工作区 ${pending.repo.name}，分支${pending.head.branch ? ` ${pending.head.branch} ` : ""}和提交都保留在主仓库。`);
+    } catch (error) {
+      const failure = normalizeError(error);
+      if (worktreeRemoval?.repo.path !== pending.repo.path) return;
+      if (failure.code === "worktree_dirty" && !pending.force) {
+        worktreeRemoval = { ...pending, force: true, busy: false, error: null };
+      } else {
+        worktreeRemoval = { ...pending, busy: false, error: failure.message };
+      }
+    }
+  }
+
+  function repoContextMenu(repo: RecentRepo, point: { x: number; y: number }, head: RepoHead | null = null) {
     const current = repo.path === opened?.summary.path;
     const entries: ContextMenuEntry[] = [
       {
@@ -1866,6 +1898,16 @@
       { separator: true },
       { id: "forget", label: "从最近列表移除", icon: "x", danger: true, run: () => void forget(repo.path) },
     ];
+    if (head?.worktree && !head.missing) {
+      entries.push({
+        id: "remove-worktree",
+        label: "删除工作区…",
+        icon: "trash",
+        danger: true,
+        disabledReason: current ? "当前打开的工作区不能删除，先切到其他仓库" : undefined,
+        run: () => askRemoveWorktree(repo, head),
+      });
+    }
     contextMenu = { x: point.x, y: point.y, entries, label: `${repo.name} 的操作` };
   }
 
@@ -2452,6 +2494,7 @@
       }}
       onForget={forget}
       onCopyPath={copyPath}
+      onRemoveWorktree={askRemoveWorktree}
       onContextMenu={repoContextMenu}
       onCommand={runFromSwitcher}
       onClose={closeSwitcher}
@@ -2669,6 +2712,10 @@
                   fileCount={opened.snapshot.files.length}
                   onRetry={() => void loadSelectedDiff()}
                   onHunkNav={reportChangesHunk}
+                  conflicted={selected ? (opened.snapshot.files.find((file) => file.path === selected?.path)?.unmerged ?? false) : false}
+                  onResolve={() => {
+                    if (selected) openConflict(selected.path);
+                  }}
                 />
               {/if}
             </div>
@@ -2750,6 +2797,38 @@
 
 {#if contextMenu}
   <ContextMenu request={contextMenu} onClose={() => (contextMenu = null)} />
+{/if}
+
+{#if worktreeRemoval}
+  {@const removal = worktreeRemoval}
+  <ConfirmDialog
+    title={removal.force ? "强制删除工作区" : "删除工作区"}
+    titleId="worktree-remove-title"
+    message={removal.force
+      ? "这个工作区里有未提交的改动或未跟踪文件。强制删除会把它们一起删掉。"
+      : "删除这个 worktree 的目录，并从最近列表移除？"}
+    targets={[{
+      icon: "folder",
+      name: removal.repo.name,
+      detail: removal.repo.path,
+      tag: removal.head.branch ?? removal.head.detached ?? undefined,
+      tagTone: "info",
+    }]}
+    targetsLabel="要删除的工作区"
+    notes={[
+      ...(removal.force ? [{ tone: "warn" as const, text: "未提交的改动和未跟踪文件会被永久删除，本应用不能恢复。" }] : []),
+      { tone: "ok" as const, text: `分支${removal.head.branch ? ` ${removal.head.branch}` : ""}和已有提交都保留在主仓库里，可以随时重新检出。` },
+      ...(removal.head.mainPath ? [{ tone: "info" as const, text: `由主仓库执行 git worktree remove：${removal.head.mainPath}` }] : []),
+    ]}
+    confirmLabel={removal.force ? "强制删除" : "删除工作区"}
+    confirmIcon="trash"
+    busy={removal.busy}
+    error={removal.error}
+    focusKey={removal.force}
+    impact="worktree-remove"
+    onConfirm={() => void confirmRemoveWorktree()}
+    onCancel={() => (worktreeRemoval = null)}
+  />
 {/if}
 
 {#if opened}

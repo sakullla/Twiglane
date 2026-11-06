@@ -96,6 +96,7 @@ pub async fn load_diff_with_context(
             stdin: None,
             truncate_stdout: true,
             output_limit: Some(capture_limit(backend)),
+            env: Vec::new(),
         })
         .await?;
     if fatal_git(&scheduled.output) {

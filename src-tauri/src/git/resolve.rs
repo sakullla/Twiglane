@@ -3305,6 +3305,7 @@ async fn read_blob(
             stdin: None,
             truncate_stdout: true,
             output_limit: Some(limit),
+            env: Vec::new(),
         })
         .await?;
     if scheduled.output.exit_code != 0 {

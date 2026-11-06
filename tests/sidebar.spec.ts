@@ -170,7 +170,7 @@ describe("大量最近仓库", () => {
     list.scrollTop = ROW * 300;
     await fireEvent.scroll(list);
     await fireEvent.keyDown(input(), { key: "F10", shiftKey: true });
-    expect(onContextMenu).toHaveBeenCalledWith(many[1], expect.anything());
+    expect(onContextMenu).toHaveBeenCalledWith(many[1], expect.anything(), null);
   });
 
   it("窗口里的行右键给到对应仓库，同名行显示完整路径", async () => {
@@ -183,7 +183,7 @@ describe("大量最近仓库", () => {
     expect(row.querySelector(".repo-path-full")?.textContent).toBe(many[300].path);
     expect(options().find((option) => option.dataset.index === "301")?.querySelector(".repo-path")).toBeTruthy();
     await fireEvent.contextMenu(row, { clientX: 5, clientY: 6 });
-    expect(onContextMenu).toHaveBeenCalledWith(many[300], { x: 5, y: 6 });
+    expect(onContextMenu).toHaveBeenCalledWith(many[300], { x: 5, y: 6 }, null);
     expect(active()?.dataset.index).toBe("300");
   });
 

@@ -8,7 +8,7 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
   import { api } from "../api";
-  import { filterRecent, repeatedNames, rowOffsets, rowWindow } from "../recent";
+  import { baseName, filterRecent, repeatedNames, rowOffsets, rowWindow } from "../recent";
   import type { IconName } from "../icons";
   import type { RecentRepo } from "../types";
   import { hueOf, repoBadgeLetters } from "../ui";
@@ -34,12 +34,14 @@
     onSelect: (path: string) => void;
     onForget: (path: string) => void;
     onCopyPath: (path: string) => void;
-    onContextMenu: (repo: RecentRepo, point: { x: number; y: number }) => void;
+    /** 删除附属工作区（确认后执行）；只对已识别为 worktree 的行出现。 */
+    onRemoveWorktree: (repo: RecentRepo, head: RepoHead) => void;
+    onContextMenu: (repo: RecentRepo, point: { x: number; y: number }, head: RepoHead | null) => void;
     onCommand: (id: string) => void;
     onClose: (refocus?: boolean) => void;
   }
 
-  let { anchor, repos, currentPath, blockedReason, actionReason, onSelect, onForget, onCopyPath, onContextMenu, onCommand, onClose }: Props = $props();
+  let { anchor, repos, currentPath, blockedReason, actionReason, onSelect, onForget, onCopyPath, onRemoveWorktree, onContextMenu, onCommand, onClose }: Props = $props();
 
   const ACTIONS: { id: string; label: string; icon: IconName }[] = [
     { id: "repo.add", label: "打开本地仓库", icon: "folder-open" },
@@ -97,7 +99,8 @@
       { text: name.slice(at + term.length), hit: false },
     ].filter((part) => part.text);
   }
-  let visible = $derived(filterRecent(repos, query));
+  /** 关键字同时匹配名称、路径、当前分支和所属主仓库；分支读到后（headsVersion 变化）重新过滤。 */
+  let visible = $derived(filterRecent(repos, query, headOf));
   let badgeLetters = $derived(repoBadgeLetters(visible.map((repo) => repo.name)));
   /** 同名仓库只能靠路径区分，这些行显示完整路径而不是截断（R6）。 */
   let sameNames = $derived(repeatedNames(repos));
@@ -266,7 +269,7 @@
   {anchor}
   label="切换仓库"
   width={WIDTH}
-  placeholder="搜索仓库名称或路径"
+  placeholder="搜索仓库名称、路径、分支或 worktree"
   bind:query
   bind:active={
     () => active,
@@ -277,14 +280,14 @@
   }
   count={visible.length}
   onChoose={(index) => choose(visible[index])}
-  onItemContextMenu={(index, point) => onContextMenu(visible[index], point)}
+  onItemContextMenu={(index, point) => onContextMenu(visible[index], point, headOf(visible[index].path))}
   {onClose}
 >
   {#snippet list(listId)}
     {#if repos.length === 0}
       <p class="branch-popover-empty">还没有最近仓库，从下面打开或克隆一个。</p>
     {:else if visible.length === 0}
-      <p class="branch-popover-empty">没有匹配的仓库，试试名称或路径。</p>
+      <p class="branch-popover-empty">没有匹配的仓库，试试名称、路径或分支名。</p>
     {/if}
     {#if visible.length > 0}
       <div class="switcher-space" role="presentation" style={`height:${offsets[visible.length]}px`} use:trackList>
@@ -314,7 +317,7 @@
               event.preventDefault();
               following = false;
               active = index;
-              onContextMenu(repo, { x: event.clientX, y: event.clientY });
+              onContextMenu(repo, { x: event.clientX, y: event.clientY }, head);
             }}
             onkeydown={() => {}}
           >
@@ -325,9 +328,14 @@
                 {#if head?.missing}
                   <span class="repo-head missing" title="目录已不存在或不再是 Git 仓库">目录不存在</span>
                 {:else if head?.branch}
-                  <span class="repo-head" title={`当前检出的分支：${head.branch}`}><Icon name="branch" size={11} /><span class="repo-head-name">{head.branch}</span></span>
+                  <span class="repo-head" title={`当前检出的分支：${head.branch}`}><Icon name="branch" size={11} /><span class="repo-head-name">{#each nameParts(head.branch, query) as part, partIndex (partIndex)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span></span>
                 {:else if head?.detached}
                   <span class="repo-head detached" title={`游离 HEAD：${head.detached}`}><Icon name="commit" size={11} /><span class="repo-head-name">{head.detached}</span></span>
+                {/if}
+                {#if head?.worktree && !head.missing}
+                  <span class="repo-worktree" title={head.mainPath ? `附属工作区（git worktree），主仓库：${head.mainPath}` : "附属工作区（git worktree）"}>
+                    <Icon name="layers" size={11} />worktree{#if head.mainPath}<span class="repo-worktree-main">· {baseName(head.mainPath)}</span>{/if}
+                  </span>
                 {/if}
               </span>
               <span class={sameNames.has(repo.name) ? "repo-path-full" : "repo-path"}><bdi>{repo.path}</bdi></span>
@@ -339,6 +347,19 @@
             <button type="button" class="icon-btn sm" tabindex="-1" aria-label={`复制 ${repo.name} 的完整路径`} title="复制完整路径" onclick={() => onCopyPath(repo.path)}>
               <Icon name="copy" size={13} />
             </button>
+            {#if head?.worktree && !head.missing}
+              <button
+                type="button"
+                class="icon-btn sm danger"
+                tabindex="-1"
+                aria-label={`删除工作区 ${repo.name}`}
+                title={current ? "当前打开的工作区不能删除，先切到其他仓库" : "删除这个 worktree（分支和提交保留）"}
+                disabled={current}
+                onclick={() => onRemoveWorktree(repo, head)}
+              >
+                <Icon name="trash" size={13} />
+              </button>
+            {/if}
             <button type="button" class="icon-btn sm danger" tabindex="-1" aria-label={`从列表移除 ${repo.name}`} title="从列表移除（不删除文件）" onclick={() => onForget(repo.path)}>
               <Icon name="x" size={13} />
             </button>
@@ -360,7 +381,8 @@
     <p class="switcher-hint" aria-hidden="true">
       <span><span class="key">↑</span><span class="key">↓</span>选择</span>
       <span><span class="key">Enter</span>打开</span>
-      <span>右键：复制路径、在文件管理器中显示、移出列表</span>
+      <span>可搜分支名；输入 worktree 列出所有工作区</span>
+      <span>右键更多操作</span>
     </p>
   {/snippet}
 </Popover>

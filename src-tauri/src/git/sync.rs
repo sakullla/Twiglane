@@ -7,7 +7,7 @@ use crate::error::AppError;
 use crate::git::advice::{classify_problem, problem_error, remote_timeout};
 use crate::git::changes::commit_index;
 use crate::git::command::{
-    branch_list_command, check_branch_command, merged_branches_command, clone_command, create_branch_at_command,
+    branch_list_command, check_branch_command, credential_approve_command, credential_helper_command, merged_branches_command, clone_command, create_branch_at_command,
     create_branch_command, delete_branch_command, delete_remote_branch_command,
     delete_remote_tracking_command, fetch_command, publish_command, pull_ff_command, push_command,
     push_to_remote_command,
@@ -15,13 +15,14 @@ use crate::git::command::{
     set_upstream_to_command, status_command, switch_command, switch_track_as_command,
     switch_track_command,
 };
+use crate::git::credential::{approve_input, auth_env, HttpCredential};
 use crate::git::gate::action_key;
 use crate::git::ops::{
     canonical_existing, ensure_directory, git_failure, open_repository, repo_key, require_git,
     run_git, run_remote_git, status_from_output, validate_input_path, Backend,
 };
 use crate::git::runner::ProcessOutput;
-use crate::git::schedule::{internal_request_id, JobKind, ScheduledOutput};
+use crate::git::schedule::{internal_request_id, GitJob, JobKind, ScheduledOutput};
 use crate::model::{
     BranchRecord, BranchState, CloneResult, CommitPushReport, RemoteInfo, RemoteState,
     StatusSnapshot,
@@ -34,9 +35,14 @@ pub async fn clone_repository(
     url: &str,
     parent: &str,
     name: &str,
+    credential: Option<&HttpCredential>,
     request_id: u64,
 ) -> Result<CloneResult, AppError> {
     validate_remote_url(url)?;
+    let auth = match credential {
+        Some(credential) => auth_env(url, credential)?,
+        None => Vec::new(),
+    };
     let parent = canonical_existing(&validate_input_path(parent)?)?;
     ensure_directory(&parent)?;
     let directory = if name.trim().is_empty() {
@@ -60,25 +66,38 @@ pub async fn clone_repository(
         .enter(action_key("clone", &destination.to_string_lossy()))?;
     let git = require_git(backend).await?;
     let (program, args) = clone_command(&git.path, url, &destination);
-    let scheduled = match run_git(
-        backend,
-        &destination.to_string_lossy(),
-        JobKind::Write,
-        request_id,
-        program,
-        args,
-        None,
-    )
-    .await
+    let key = destination.to_string_lossy().into_owned();
+    let scheduled = match backend
+        .scheduler
+        .execute(GitJob {
+            repo_key: key.clone(),
+            kind: JobKind::Write,
+            request_id,
+            generation: backend.scheduler.current_generation(&key),
+            program,
+            args,
+            stdin: None,
+            truncate_stdout: false,
+            output_limit: None,
+            env: auth,
+        })
+        .await
     {
         Err(error) => return Err(clone_failure(&destination, remote_timeout(error))),
         Ok(scheduled) => scheduled,
     };
     if scheduled.output.exit_code != 0 {
-        return Err(clone_failure(
-            &destination,
-            finish_remote("clone_failed", &scheduled, "克隆没有完成。"),
-        ));
+        let error = finish_remote("clone_failed", &scheduled, "克隆没有完成。");
+        // 带了用户名密码仍被拒绝：说清楚是这组凭据不被接受，而不是让用户去配凭据助手。
+        let error = if credential.is_some() && matches!(error.code.as_str(), "auth" | "permission") {
+            AppError::new(
+                "auth",
+                "服务器没有接受这组用户名和密码（或访问令牌）。请核对后重试；启用了双重验证的平台需要使用访问令牌代替密码。",
+            )
+        } else {
+            error
+        };
+        return Err(clone_failure(&destination, error));
     }
     let opened = open_repository(
         backend,
@@ -96,10 +115,62 @@ pub async fn clone_repository(
             ),
         )
     })?;
+    let credential_note = match credential {
+        Some(credential) if credential.remember => {
+            Some(remember_credential(backend, &git.path, &destination, url, credential).await)
+        }
+        Some(_) => Some(
+            "这次输入的凭据没有保存；之后拉取或推送时如需认证，会再次提示。".to_string(),
+        ),
+        None => None,
+    };
     Ok(CloneResult {
         path: opened.summary.path.clone(),
         opened,
+        credential_note,
     })
+}
+
+/// 交给用户已配置的凭据助手保存；没有配置时不保存。返回给用户看的一句说明，不含凭据本身。
+async fn remember_credential(
+    backend: &Backend,
+    git: &Path,
+    root: &Path,
+    url: &str,
+    credential: &HttpCredential,
+) -> String {
+    let key = repo_key(root);
+    let (program, args) = credential_helper_command(git, root);
+    let helper = run_git(backend, &key, JobKind::Read, internal_request_id(), program, args, None).await;
+    let configured = matches!(&helper, Ok(found) if found.output.exit_code == 0 && !String::from_utf8_lossy(&found.output.stdout).trim().is_empty());
+    if !configured {
+        return "没有检测到 Git 凭据助手（credential.helper），凭据未保存；之后拉取或推送时需要再次输入。可在 Git 中配置凭据助手后再克隆或推送。".to_string();
+    }
+    let Some(stdin) = approve_input(url, credential) else {
+        return "凭据格式不支持保存，未保存。".to_string();
+    };
+    let (program, args) = credential_approve_command(git, root);
+    let result = backend
+        .scheduler
+        .execute(GitJob {
+            repo_key: key.clone(),
+            kind: JobKind::Read,
+            request_id: internal_request_id(),
+            generation: backend.scheduler.current_generation(&key),
+            program,
+            args,
+            stdin: Some(stdin),
+            truncate_stdout: false,
+            output_limit: None,
+            env: Vec::new(),
+        })
+        .await;
+    match result {
+        Ok(done) if done.output.exit_code == 0 => {
+            "凭据已交给系统凭据助手保存，之后拉取和推送会自动使用。".to_string()
+        }
+        _ => "凭据助手没有保存这组凭据；之后拉取或推送时可能需要再次输入。".to_string(),
+    }
 }
 
 pub async fn remote_state(
@@ -1884,6 +1955,68 @@ mod tests {
         (origin, work)
     }
 
+    /// 本机监听一个端口，记下 Git 发来的第一份 HTTP 请求头并回 401。
+    fn capture_http_once() -> (u16, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&buffer[..read]),
+                }
+            }
+            let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"t\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            String::from_utf8_lossy(&request).into_owned()
+        });
+        (port, handle)
+    }
+
+    #[tokio::test]
+    async fn http_clone_sends_credential_only_as_scoped_header_and_explains_rejection() {
+        use base64::Engine;
+        let fixture = crate::test_support::git_fixture("clone-http-auth");
+        let backend = fixture.backend();
+        let parent = fixture.repo("parent");
+
+        let (port, server) = capture_http_once();
+        let url = format!("http://127.0.0.1:{port}/group/app.git");
+        let plain = clone_repository(&backend, &url, &repo_key(&parent), "plain", None, 1)
+            .await
+            .unwrap_err();
+        let request = server.join().unwrap();
+        assert!(!request.to_ascii_lowercase().contains("authorization:"), "{request}");
+        assert_eq!(plain.code, "auth", "{}", plain.message);
+
+        let (port, server) = capture_http_once();
+        let url = format!("http://127.0.0.1:{port}/group/app.git");
+        let credential = HttpCredential { username: "alice".into(), password: "s3cret-token".into(), remember: true };
+        let rejected = clone_repository(&backend, &url, &repo_key(&parent), "with-auth", Some(&credential), 2)
+            .await
+            .unwrap_err();
+        let request = server.join().unwrap();
+        let expected = base64::engine::general_purpose::STANDARD.encode("alice:s3cret-token");
+        assert!(request.contains(&format!("Authorization: Basic {expected}")), "{request}");
+        assert_eq!(rejected.code, "auth");
+        assert!(rejected.message.contains("用户名和密码"), "{}", rejected.message);
+        assert!(!rejected.message.contains("s3cret-token"));
+        assert!(!parent.join("with-auth").exists(), "失败的克隆不留下目录");
+        let state = std::fs::read_to_string(fixture.path().join("state.json")).unwrap_or_default();
+        assert!(!state.contains("s3cret-token"), "凭据不进应用数据");
+
+        // SSH / 本机地址不接受用户名密码，直接拒绝，不启动克隆。
+        let local = fixture.repo("local");
+        let refused = clone_repository(&backend, &repo_key(&local), &repo_key(&parent), "x", Some(&credential), 3)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, "credential_scheme");
+    }
+
     #[tokio::test]
     async fn clone_opens_new_directory_and_refuses_to_overwrite() {
         let fixture = crate::test_support::git_fixture("clone-safe");
@@ -1899,6 +2032,7 @@ mod tests {
             &repo_key(&origin),
             &repo_key(&parent),
             "occupied",
+            None,
             1,
         )
         .await
@@ -1912,6 +2046,7 @@ mod tests {
             "https://user:ghp_abcdefghijklmnopqrstuvwxyz1234@github.com/acme/app.git",
             &repo_key(&parent),
             "secret-dest",
+            None,
             2,
         )
         .await
@@ -1927,6 +2062,7 @@ mod tests {
             &repo_key(&origin),
             &repo_key(&parent),
             "copied",
+            None,
             3,
         )
         .await
@@ -1960,6 +2096,7 @@ mod tests {
             "https://127.0.0.1:9/nope.git",
             &repo_key(&parent),
             "residual",
+            None,
             1,
         )
         .await
@@ -1982,6 +2119,7 @@ mod tests {
             &repo_key(&missing),
             &repo_key(&parent),
             "no-residual",
+            None,
             2,
         )
         .await

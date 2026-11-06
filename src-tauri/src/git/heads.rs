@@ -23,6 +23,10 @@ pub struct RepoHead {
     pub detached: Option<String>,
     /// 目录已不存在或不再是 Git 仓库。
     pub missing: bool,
+    /// 是 `git worktree add` 建出来的附属工作区（不是主工作区，也不是子模块）。
+    pub worktree: bool,
+    /// 附属工作区所属主仓库的工作目录；主仓库是裸仓库时为仓库目录本身。
+    pub main_path: Option<String>,
 }
 
 pub fn repo_heads(paths: &[String]) -> Vec<RepoHead> {
@@ -30,7 +34,14 @@ pub fn repo_heads(paths: &[String]) -> Vec<RepoHead> {
 }
 
 fn read_head(path: &str) -> RepoHead {
-    let mut head = RepoHead { path: path.to_string(), branch: None, detached: None, missing: false };
+    let mut head = RepoHead {
+        path: path.to_string(),
+        branch: None,
+        detached: None,
+        missing: false,
+        worktree: false,
+        main_path: None,
+    };
     let Ok(root) = validate_input_path(path) else {
         head.missing = true;
         return head;
@@ -39,6 +50,10 @@ fn read_head(path: &str) -> RepoHead {
         head.missing = true;
         return head;
     };
+    if let Some(main) = linked_main(&root, &git_dir) {
+        head.worktree = true;
+        head.main_path = Some(main.to_string_lossy().into_owned());
+    }
     let Some(text) = read_small(&git_dir.join("HEAD")) else {
         return head;
     };
@@ -67,6 +82,31 @@ fn git_dir(root: &Path) -> Option<PathBuf> {
     let target = PathBuf::from(target);
     let resolved = if target.is_absolute() { target } else { root.join(target) };
     resolved.is_dir().then_some(resolved)
+}
+
+/// 附属工作区的管理目录里有 `commondir`，指向主仓库的 `.git`；子模块没有这个文件。
+/// 返回主仓库的工作目录（`.git` 的上一级），主仓库是裸仓库时返回仓库目录本身。
+pub(crate) fn linked_main(root: &Path, git_dir: &Path) -> Option<PathBuf> {
+    if fs::metadata(root.join(".git")).ok()?.is_dir() {
+        return None;
+    }
+    let text = read_small(&git_dir.join("commondir"))?;
+    let target = PathBuf::from(text.trim());
+    if target.as_os_str().is_empty() {
+        return None;
+    }
+    let common = if target.is_absolute() { target } else { git_dir.join(target) };
+    let common = dunce::canonicalize(&common).ok()?;
+    if common.file_name().is_some_and(|name| name == ".git") {
+        common.parent().map(Path::to_path_buf)
+    } else {
+        Some(common)
+    }
+}
+
+/// 仓库根目录对应的 Git 目录；公开给删除工作区时判定目标类型。
+pub(crate) fn resolve_git_dir(root: &Path) -> Option<PathBuf> {
+    git_dir(root)
 }
 
 fn read_small(path: &Path) -> Option<String> {
@@ -107,7 +147,16 @@ mod tests {
         fs::create_dir_all(&admin).unwrap();
         fs::write(admin.join("HEAD"), "ref: refs/heads/wt-branch\n").unwrap();
         fs::write(worktree.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
-        assert_eq!(read_head(worktree.to_str().unwrap()).branch.as_deref(), Some("wt-branch"));
+        let linked = read_head(worktree.to_str().unwrap());
+        assert_eq!(linked.branch.as_deref(), Some("wt-branch"));
+        // 没有 commondir 的 gitdir 文件是子模块那种形态，不算附属工作区。
+        assert!(!linked.worktree);
+        fs::write(admin.join("commondir"), "../..\n").unwrap();
+        let linked = read_head(worktree.to_str().unwrap());
+        assert!(linked.worktree);
+        let main = dunce::canonicalize(&repo).unwrap();
+        assert_eq!(linked.main_path.as_deref(), Some(main.to_str().unwrap()));
+        assert!(!read_head(repo.to_str().unwrap()).worktree);
 
         let gone = repo.join("does-not-exist");
         assert!(read_head(gone.to_str().unwrap()).missing);

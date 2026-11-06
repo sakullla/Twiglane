@@ -90,6 +90,8 @@ const mocks = vi.hoisted(() => ({
   createRepository: vi.fn(),
   closeRepository: vi.fn(),
   forgetRecent: vi.fn(),
+  repoHeads: vi.fn(),
+  removeWorktree: vi.fn(),
   refreshStatus: vi.fn(),
   loadDiff: vi.fn(),
   stageFiles: vi.fn(),
@@ -1869,6 +1871,119 @@ describe("应用外壳", () => {
       clone.fail({ code: "clone_failed", message: "认证失败" });
       await waitFor(() => expect(document.querySelector(".toast.error")?.textContent).toContain("认证失败"));
       expect(screen.getByRole("button", { name: "当前仓库 demo" })).toBeTruthy();
+    });
+  });
+
+  describe("HTTP 克隆认证引导", () => {
+    it("认证失败时就地要用户名和密码，带凭据重试，成功后说明凭据去向", async () => {
+      render(App);
+      await openRepo();
+      let fail: (reason: unknown) => void = () => {};
+      let finish: (value: unknown) => void = () => {};
+      mocks.cloneRepository.mockReset();
+      mocks.cloneRepository.mockReturnValueOnce(new Promise((_, reject) => (fail = reject)));
+      mocks.pickDirectory.mockResolvedValue("/parent");
+      await fireEvent.click(screen.getByRole("button", { name: /^当前仓库/ }));
+      await fireEvent.click(await screen.findByRole("button", { name: "克隆远程仓库" }));
+      const dialog = await screen.findByRole("dialog", { name: "克隆仓库" });
+      await fireEvent.input(within(dialog).getByLabelText("远程地址"), { target: { value: "http://git.example.com/app.git" } });
+      await fireEvent.click(within(dialog).getByRole("button", { name: /选择目录/ }));
+      const start = within(dialog).getByRole("button", { name: /开始克隆/ });
+      await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+      await fireEvent.click(start);
+      fail({ code: "auth", message: "认证失败。" });
+
+      const user = await within(dialog).findByLabelText("用户名");
+      expect(document.querySelector(".toast.error"), "窗口开着时不弹失败通知").toBeNull();
+      const retry = within(dialog).getByRole("button", { name: "登录并克隆" });
+      expect(retry.hasAttribute("disabled"), "没填凭据时不能重试").toBe(true);
+      await fireEvent.input(user, { target: { value: "alice" } });
+      await fireEvent.input(within(dialog).getByLabelText("密码或访问令牌"), { target: { value: "tok-123" } });
+      mocks.cloneRepository.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+      await waitFor(() => expect(retry.hasAttribute("disabled")).toBe(false));
+      await fireEvent.click(retry);
+      expect(mocks.cloneRepository).toHaveBeenLastCalledWith(
+        "http://git.example.com/app.git", "/parent", "", expect.any(Number),
+        { username: "alice", password: "tok-123", remember: true },
+      );
+      finish({
+        path: "/parent/fresh",
+        opened: { summary: { name: "fresh", path: "/parent/fresh" }, generation: 1, snapshot, draft: "", watchDegraded: false },
+        credentialNote: "凭据已交给系统凭据助手保存。",
+      });
+      await waitFor(() => expect(screen.getByRole("button", { name: "当前仓库 fresh" })).toBeTruthy());
+      await waitFor(() => expect(document.body.textContent).toContain("凭据已交给系统凭据助手保存。"));
+    });
+
+    it("SSH 地址认证失败照常通知，不出现用户名密码表单", async () => {
+      render(App);
+      await openRepo();
+      mocks.cloneRepository.mockReset();
+      mocks.cloneRepository.mockRejectedValueOnce({ code: "auth", message: "认证失败，请检查 SSH agent。" });
+      mocks.pickDirectory.mockResolvedValue("/parent");
+      await fireEvent.click(screen.getByRole("button", { name: /^当前仓库/ }));
+      await fireEvent.click(await screen.findByRole("button", { name: "克隆远程仓库" }));
+      const dialog = await screen.findByRole("dialog", { name: "克隆仓库" });
+      await fireEvent.input(within(dialog).getByLabelText("远程地址"), { target: { value: "git@example.com:app.git" } });
+      await fireEvent.click(within(dialog).getByRole("button", { name: /选择目录/ }));
+      const start = within(dialog).getByRole("button", { name: /开始克隆/ });
+      await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+      await fireEvent.click(start);
+      await waitFor(() => expect(document.body.textContent).toContain("认证失败，请检查 SSH agent。"));
+      expect(within(dialog).queryByLabelText("用户名")).toBeNull();
+    });
+  });
+
+  describe("删除 worktree", () => {
+    const linked = "/work/app-feature";
+    function useWorktreeHeads() {
+      useRecent([
+        { name: "demo", path: repoPath, openedAtMs: 2 },
+        { name: "app-feature", path: linked, openedAtMs: 1 },
+      ]);
+      mocks.repoHeads.mockResolvedValue([
+        { path: repoPath, branch: "main", detached: null, missing: false, worktree: false, mainPath: null },
+        { path: linked, branch: "feature/x", detached: null, missing: false, worktree: true, mainPath: "/work/app" },
+      ]);
+    }
+
+    it("可按分支搜到 worktree；有改动时升级为强制删除确认，删除后移出列表", async () => {
+      useWorktreeHeads();
+      render(App);
+      await openRepo();
+      await fireEvent.click(screen.getByRole("button", { name: /^当前仓库/ }));
+      const search = await screen.findByRole("combobox", { name: "搜索仓库名称、路径、分支或 worktree" });
+      await waitFor(() => expect(document.querySelector(".repo-worktree")).toBeTruthy());
+      await fireEvent.input(search, { target: { value: "feature/x" } });
+      await waitFor(() => expect(document.querySelectorAll("[data-repo-row]")).toHaveLength(1));
+      expect(document.querySelector("[data-repo-row] .repo-name")?.textContent).toBe("app-feature");
+      expect(document.querySelector(".repo-worktree")?.textContent).toContain("app");
+
+      mocks.removeWorktree.mockRejectedValueOnce({ code: "worktree_dirty", message: "有未提交改动" });
+      await fireEvent.click(screen.getByRole("button", { name: "删除工作区 app-feature" }));
+      const confirm = await screen.findByRole("dialog", { name: "删除工作区" });
+      await fireEvent.click(within(confirm).getByRole("button", { name: "删除工作区" }));
+      expect(mocks.removeWorktree).toHaveBeenLastCalledWith(linked, false, expect.any(Number));
+      const forced = await screen.findByRole("dialog", { name: "强制删除工作区" });
+      mocks.removeWorktree.mockResolvedValueOnce([{ name: "demo", path: repoPath, openedAtMs: 2 }]);
+      await fireEvent.click(within(forced).getByRole("button", { name: "强制删除" }));
+      expect(mocks.removeWorktree).toHaveBeenLastCalledWith(linked, true, expect.any(Number));
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "强制删除工作区" })).toBeNull());
+      expect(document.body.textContent).toContain("已删除工作区 app-feature");
+    });
+
+    it("当前打开的 worktree 不能删除，主仓库没有删除入口", async () => {
+      useWorktreeHeads();
+      mocks.repoHeads.mockResolvedValue([
+        { path: repoPath, branch: "feature/x", detached: null, missing: false, worktree: true, mainPath: "/work/app" },
+        { path: linked, branch: "main", detached: null, missing: false, worktree: false, mainPath: null },
+      ]);
+      render(App);
+      await openRepo();
+      await fireEvent.click(screen.getByRole("button", { name: /^当前仓库/ }));
+      const remove = await screen.findByRole("button", { name: "删除工作区 demo" });
+      expect(remove.hasAttribute("disabled")).toBe(true);
+      expect(screen.queryByRole("button", { name: "删除工作区 app-feature" })).toBeNull();
     });
   });
 

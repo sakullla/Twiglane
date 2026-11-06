@@ -134,6 +134,7 @@ async fn read_git(
             stdin: None,
             truncate_stdout: true,
             output_limit: Some(MAX_BYTES + 1),
+            env: Vec::new(),
         })
         .await?
         .output)

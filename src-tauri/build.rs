@@ -88,6 +88,7 @@ fn main() {
             "track_remote_as",
             "cancel_remote",
             "repo_heads",
+            "remove_worktree",
             "compare_file_diff",
             "commit_branches",
             "measure_probe",

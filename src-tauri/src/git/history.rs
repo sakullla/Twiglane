@@ -387,6 +387,7 @@ async fn diff_file_between(
             stdin: None,
             truncate_stdout: true,
             output_limit: Some(capture_limit(backend)),
+            env: Vec::new(),
         })
         .await
         .map_err(history_limit)?;

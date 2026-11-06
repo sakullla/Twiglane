@@ -679,7 +679,8 @@
   }
 
   function openPalette() {
-    if (taskModal || cloneOpen) return;
+    // 任何 modal（含放弃/撤销确认层）打开时都不能从快捷键再叠一层；任务弹窗之外也适用。
+    if (taskModal || cloneOpen || openModalCount() > 0) return;
     closeSwitcher();
     paletteFocusOrigin = focusableOrigin();
     paletteOpen = true;
@@ -1634,7 +1635,7 @@
       notice(switchBlockedReason(commandState));
       return;
     }
-    if (taskModal || cloneOpen || dependencyOpen || confirmPath || paletteOpen) {
+    if (taskModal || cloneOpen || dependencyOpen || confirmPath || paletteOpen || openModalCount() > 0) {
       notice("请先关闭当前对话框，再拖入仓库文件夹。");
       return;
     }
@@ -1688,6 +1689,11 @@
   }
 
   async function openRecent(path: string) {
+    // 任何确认层/任务弹窗打开时都不切换仓库：旧确认层不能留在新仓库上继续生效。
+    if (openModalCount() > 0) {
+      notice("请先关闭当前对话框，再切换仓库。");
+      return;
+    }
     if (switchBlocked(commandState)) {
       // R11：仓库弹层与命令面板已按同一条判定禁用，但快捷入口和测量钩子仍会走到这里，
       // 所以不能静默返回——把同一个原因说出来，各入口的结论才一致。

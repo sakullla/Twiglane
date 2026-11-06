@@ -1,13 +1,14 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ConfirmDialog from "../src/lib/components/ConfirmDialog.svelte";
-import { discardActionLabel } from "../src/lib/resolve";
-import type { OpenedRepository } from "../src/lib/types";
+import { discardActionLabel, undoActionLabel } from "../src/lib/resolve";
+import type { OpenedRepository, UndoResult } from "../src/lib/types";
 
 const discardChanges = vi.hoisted(() => vi.fn());
+const undoCommit = vi.hoisted(() => vi.fn());
 
 vi.mock("../src/lib/api", () => ({
-  api: { discardChanges, undoCommit: vi.fn() },
+  api: { discardChanges, undoCommit },
 }));
 
 import RecoveryActions from "../src/lib/components/RecoveryActions.svelte";
@@ -164,6 +165,20 @@ describe("恢复动作的写入边界", () => {
     ],
   };
 
+  const otherOpened = { ...opened, summary: { name: "other", path: "/other" }, generation: 5 };
+
+  const undoPreview: UndoResult = {
+    generation: 4,
+    code: "undo_ready",
+    eligible: true,
+    wrote: false,
+    headOid: "a".repeat(40),
+    parentOid: "b".repeat(40),
+    summary: "准备撤销的提交",
+    reason: "这个提交还没有推送，可以撤销。",
+    snapshot: opened.snapshot,
+  };
+
   function mount(extra: Record<string, unknown> = {}) {
     return render(RecoveryActions, {
       props: {
@@ -236,6 +251,64 @@ describe("恢复动作的写入边界", () => {
     });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(onSnapshot, "旧仓库的快照不覆盖新仓库").not.toHaveBeenCalled();
-    expect(onNotice).not.toHaveBeenCalled();
+    expect(onNotice, "写入在途时只说明原仓库结果不会落到当前仓库").toHaveBeenCalledTimes(1);
+    expect(onNotice.mock.calls[0][0]).toContain("结果不会应用到当前仓库");
+  });
+
+  it("确认前切换仓库会作废旧清单，不以新仓库路径发起确认写入", async () => {
+    discardChanges.mockResolvedValueOnce(preview);
+    const onSnapshot = vi.fn();
+    const onNotice = vi.fn();
+    const view = mount({ onSnapshot, onNotice });
+
+    await fireEvent.click(screen.getByRole("button", { name: discardActionLabel() }));
+    await screen.findByText(/取消不写入/);
+    expect(screen.getByRole("button", { name: /个文件的修改$/ })).toBeTruthy();
+
+    await view.rerender({
+      opened: otherOpened,
+      disabled: false,
+      nextId: () => 2,
+      onSnapshot,
+      onFailure: () => {},
+      onNotice,
+      onMerge: () => {},
+    } as never);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(onNotice).toHaveBeenCalledTimes(1);
+    expect(onNotice.mock.calls[0][0]).toContain("确认已作废");
+    expect(onNotice.mock.calls[0][0]).toContain("没有写入任何内容");
+    // 只有预览；没有用 /other 或旧清单发起确认写入。
+    expect(discardChanges).toHaveBeenCalledTimes(1);
+    expect(discardChanges.mock.calls.some((call) => call[2] === true)).toBe(false);
+    expect(discardChanges.mock.calls.some((call) => call[0] === "/other")).toBe(false);
+    expect(onSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("撤销确认层在仓库切换后关闭，不把旧提交写到新仓库", async () => {
+    undoCommit.mockResolvedValueOnce(undoPreview);
+    const onSnapshot = vi.fn();
+    const onNotice = vi.fn();
+    const view = mount({ onSnapshot, onNotice });
+
+    await fireEvent.click(screen.getByRole("button", { name: undoActionLabel() }));
+    await screen.findByText(/还没有推送/);
+    expect(screen.getByRole("button", { name: "确认撤销提交" })).toBeTruthy();
+
+    await view.rerender({
+      opened: otherOpened,
+      disabled: false,
+      nextId: () => 2,
+      onSnapshot,
+      onFailure: () => {},
+      onNotice,
+      onMerge: () => {},
+    } as never);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(onNotice).toHaveBeenCalledTimes(1);
+    expect(onNotice.mock.calls[0][0]).toContain("撤销提交的确认已作废");
+    expect(undoCommit.mock.calls.filter((call) => call[2] === true)).toHaveLength(0);
+    expect(undoCommit.mock.calls.some((call) => call[0] === "/other")).toBe(false);
+    expect(onSnapshot).not.toHaveBeenCalled();
   });
 });

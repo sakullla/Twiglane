@@ -33,7 +33,11 @@
   let checked = $state<string[]>([]);
   let boundary = $state(discardBoundary());
   let undo = $state<UndoResult | null>(null);
+  /** 撤销预览所属仓库：确认写入前必须与当前仓库一致。 */
   let undoRepository = "";
+  /** 放弃预览所属仓库与 generation：确认写入只使用这份预览对应的仓库和状态。 */
+  let discardRepository = "";
+  let discardGeneration = 0;
   let busy = $state(false);
   let errorText = $state<string | null>(null);
   let blocked = $derived(disabled || busy);
@@ -54,6 +58,52 @@
       confirming = false;
       onSettled?.();
     }
+  });
+
+  /** 收起并清空放弃确认：清单和仓库绑定一起丢弃，下一次确认必须重新预览。 */
+  function resetDiscard() {
+    mode = null;
+    plans = [];
+    checked = [];
+    discardRepository = "";
+    discardGeneration = 0;
+    errorText = null;
+  }
+
+  /** 收起并清空撤销确认：旧预览的提交和仓库绑定一起丢弃。 */
+  function resetUndo() {
+    mode = null;
+    undo = null;
+    undoRepository = "";
+    errorText = null;
+  }
+
+  /**
+   * 仓库切换时，确认层里的清单属于旧仓库，必须作废。
+   * 写入已经开始时结果仍可能落在原仓库，提示要如实说明，且本组件不再应用它。
+   */
+  function invalidateStaleConfirmation(path: string) {
+    if (mode === "discard" && discardRepository && discardRepository !== path) {
+      resetDiscard();
+      onNotice(
+        busy
+          ? "仓库已切换，原仓库的放弃修改仍在处理中；结果不会应用到当前仓库。"
+          : "仓库已切换，放弃修改的确认已作废，没有写入任何内容。",
+      );
+    } else if (mode === "undo" && undoRepository && undoRepository !== path) {
+      resetUndo();
+      onNotice(
+        busy
+          ? "仓库已切换，原仓库的撤销提交仍在处理中；结果不会应用到当前仓库。"
+          : "仓库已切换，撤销提交的确认已作废，没有写入任何内容。",
+      );
+    }
+  }
+
+  // opened 只会因切换仓库而变化：确认层不在新仓库上继续展示旧仓库的清单（R6、R10）。
+  $effect(() => {
+    const path = opened.summary.path;
+    invalidateStaleConfirmation(path);
   });
 
   function changedPaths(): string[] {
@@ -86,6 +136,8 @@
       const preview = await api.discardChanges(repository, paths, false, generation, nextId());
       // 预览返回时仓库已切换：这是旧仓库的结果，不能在当前界面打开确认层。
       if (opened.summary.path !== repository) return;
+      discardRepository = repository;
+      discardGeneration = preview.generation;
       plans = preview.files;
       boundary = preview.boundary;
       checked = only ? [...paths] : paths.slice(0, 1);
@@ -102,8 +154,7 @@
 
   function cancelDiscard() {
     if (busy) return;
-    mode = null;
-    errorText = null;
+    resetDiscard();
   }
 
   function toggle(path: string, value: boolean) {
@@ -117,8 +168,13 @@
 
   async function confirmDiscard() {
     if (busy || checked.length === 0) return;
-    const repository = opened.summary.path;
-    const generation = opened.generation;
+    // 确认只对预览所属仓库有效：仓库已切换时绝不能用新路径 + 旧清单写入。
+    if (mode !== "discard" || !discardRepository || opened.summary.path !== discardRepository) {
+      if (mode === "discard") invalidateStaleConfirmation(opened.summary.path);
+      return;
+    }
+    const repository = discardRepository;
+    const generation = discardGeneration;
     const selected = [...checked];
     busy = true;
     errorText = null;
@@ -130,13 +186,18 @@
         generation,
         nextId(),
       );
-      mode = null;
-      // 写入期间切了仓库：旧仓库的迟到结果不应用到新仓库，也不占用新仓库的通知。
-      if (opened.summary.path !== repository) return;
+      if (opened.summary.path !== repository) {
+        resetDiscard();
+        return;
+      }
       onSnapshot(result.snapshot);
       onNotice(`已放弃 ${result.files.length} 个所选文件的修改，其他文件保持原内容。`);
+      resetDiscard();
     } catch (error) {
-      if (opened.summary.path !== repository) return;
+      if (opened.summary.path !== repository) {
+        resetDiscard();
+        return;
+      }
       const failure = normalizeError(error);
       errorText = failure.message;
       onFailure(failure);
@@ -180,12 +241,15 @@
 
   function cancelUndo() {
     if (busy) return;
-    mode = null;
+    resetUndo();
   }
 
   async function confirmUndo() {
     const current = undo;
-    if (busy || !current?.eligible || undoRepository !== opened.summary.path) return;
+    if (busy || !current?.eligible || !undoRepository || undoRepository !== opened.summary.path) {
+      if (mode === "undo" && undoRepository !== opened.summary.path) invalidateStaleConfirmation(opened.summary.path);
+      return;
+    }
     const repository = undoRepository;
     busy = true;
     errorText = null;
@@ -197,12 +261,18 @@
         current.generation,
         nextId(),
       );
-      mode = null;
-      if (opened.summary.path !== repository) return;
+      if (opened.summary.path !== repository) {
+        resetUndo();
+        return;
+      }
       onSnapshot(result.snapshot);
       onNotice(result.reason);
+      resetUndo();
     } catch (error) {
-      if (opened.summary.path !== repository) return;
+      if (opened.summary.path !== repository) {
+        resetUndo();
+        return;
+      }
       const failure = normalizeError(error);
       errorText = failure.message;
       onFailure(failure);

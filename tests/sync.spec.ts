@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/svelte";
+import { tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { branchLists, filterBranches } from "../src/lib/branches";
 import type { BranchRecord, DiffLine, DiffResponse, FileChange, StatusSnapshot } from "../src/lib/types";
@@ -25,6 +26,24 @@ function change(path: string, staged: FileChange["staged"], unstaged: FileChange
 
 const changes: FileChange[] = [change("src/App.svelte", "modified", "none")];
 const snapshot: StatusSnapshot = { generation: 4, branch, files: changes };
+
+const discardPreview = {
+  generation: 4,
+  wrote: false,
+  boundary: "取消不写入。",
+  snapshot,
+  files: [
+    {
+      path: "src/App.svelte",
+      originalPath: null,
+      staged: "modified" as const,
+      unstaged: "none" as const,
+      untracked: false,
+      impact: "已暂存的修改会回到当前提交。",
+      recovery: "放弃后 Git 不保留这份未提交内容。",
+    },
+  ],
+};
 
 function diffFor(path: string, staged: boolean): DiffResponse {
   const lines: DiffLine[] = Array.from({ length: 6 }, (_, index) => ({
@@ -62,6 +81,8 @@ const mocks = vi.hoisted(() => ({
   commitAndPush: vi.fn(),
   fetchRemote: vi.fn(),
   pushBranch: vi.fn(),
+  discardChanges: vi.fn(),
+  addRepository: vi.fn(),
   mergeSession: vi.fn(),
   remoteState: vi.fn(),
   saveDraft: vi.fn(),
@@ -301,5 +322,31 @@ describe("重新验证与同步的原地反馈", () => {
     expect(mocks.commitChanges).toHaveBeenCalledTimes(1);
     // 暂存范围没有因为失败被清掉，按钮仍可重试。
     expect(screen.getByRole("button", { name: "提交到本地" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  it("放弃确认层打开时，拖放与命令面板都不能切换仓库", async () => {
+    mocks.discardChanges.mockResolvedValueOnce(discardPreview);
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: "更多提交操作" }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: "放弃所选文件修改" }));
+    await screen.findByRole("dialog", { name: "放弃文件修改" });
+
+    await waitFor(() =>
+      expect(mocks.listenEvent.mock.calls.some(([name]) => name === "tauri://drag-drop")).toBe(true),
+    );
+    const drop = mocks.listenEvent.mock.calls.find(([name]) => name === "tauri://drag-drop")![1] as (
+      payload: { paths: string[] },
+    ) => void;
+    drop({ paths: ["C:/other"] });
+    await waitFor(() =>
+      expect(document.querySelector(".toast.ok .toast-text")?.textContent).toContain("请先关闭当前对话框"),
+    );
+    expect(mocks.addRepository, "确认层打开时不通过拖放切换仓库").not.toHaveBeenCalled();
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, metaKey: true, bubbles: true }));
+    await tick();
+    expect(screen.queryByRole("dialog", { name: "命令面板" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "放弃文件修改" }), "确认层保持打开").toBeTruthy();
   });
 });

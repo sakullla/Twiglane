@@ -1538,8 +1538,11 @@ describe("历史拓扑面板", () => {
   function rowOf(oid: string): HTMLElement {
     return document.getElementById("history-commit-" + oid) as HTMLElement;
   }
-  function pathsOf(oid: string): number {
-    return rowOf(oid).querySelectorAll(".hr-graph path").length;
+  function labelOf(oid: string): string {
+    return document.getElementById("history-graph-" + oid)?.textContent ?? "";
+  }
+  function pathsOf(oid: string): string[] {
+    return [...rowOf(oid).querySelectorAll(".hr-graph path")].map((path) => path.getAttribute("d") ?? "");
   }
   function detailCalls(oid: string): number {
     return commitDetail.mock.calls.filter((call) => call[1] === oid).length;
@@ -1563,7 +1566,7 @@ describe("历史拓扑面板", () => {
     commitFileDiff.mockResolvedValue(diff);
   });
 
-  it("线性历史每行只有自己的片段，HEAD 用实心节点区分", async () => {
+  it("线性历史每行只有自己的片段，绘图盒与行等高且上下接到行边界", async () => {
     const head = commit(0, { oid: headOid, parents: [midOid] });
     const mid = commit(1, { parents: [rootOid] });
     const root = commit(2, { parents: [] });
@@ -1574,19 +1577,49 @@ describe("历史拓扑面板", () => {
     render(HistoryPanel, { props: panelProps() });
     await screen.findByRole("option", { name: /commit-0/ });
     expect(document.querySelectorAll(".hr-graph").length).toBe(3);
-    // 每行只画自己的竖线：首行只有下半段，末行只有上半段。
-    expect(pathsOf(headOid)).toBe(1);
-    expect(pathsOf(midOid)).toBe(1);
-    expect(pathsOf(rootOid)).toBe(1);
-    expect(document.querySelectorAll(".hr-graph .node").length).toBe(3);
-    const headNode = document.querySelector(`#history-commit-${headOid} .hr-graph .node`);
-    expect(headNode?.classList.contains("head")).toBe(true);
+    expect(pathsOf(headOid)).toHaveLength(1);
+    expect(pathsOf(midOid)).toHaveLength(1);
+    expect(pathsOf(rootOid)).toHaveLength(1);
+
+    // 几何：SVG 高度与行高一致（50px 边框盒），节点落在行中线，首尾行各接到上/下边界。
+    const svg = rowOf(headOid).querySelector(".hr-graph svg")!;
+    const height = Number(svg.getAttribute("height"));
+    const rowHeight = Number.parseFloat(rowOf(headOid).style.height);
+    expect(rowHeight).toBe(50);
+    expect(height).toBe(rowHeight);
+    expect(svg.getAttribute("viewBox")).toBe(`0 0 ${svg.getAttribute("width")} ${height}`);
+    const node = rowOf(headOid).querySelector(".hr-graph .node")!;
+    expect(node.getAttribute("cy")).toBe(String(height / 2));
+    expect(node.classList.contains("head")).toBe(true);
     expect(document.querySelectorAll(".hr-graph .node.head").length).toBe(1);
+    // 同一 lane：上一行的下半段到底边结束，下一行从顶边开始，坐标在行边界上相接。
+    expect(pathsOf(headOid)[0]).toBe(`M 7 ${height / 2} L 7 ${height}`);
+    expect(pathsOf(midOid)[0]).toBe(`M 7 0 L 7 ${height}`);
+    expect(pathsOf(rootOid)[0]).toBe(`M 7 0 L 7 ${height / 2}`);
+
     // 所有行宽度一致，提交说明不会逐行左右跳。
     const widths = [...document.querySelectorAll<HTMLElement>(".hr-graph")].map(
-      (node) => node.style.getPropertyValue("--graph-width"),
+      (item) => item.style.getPropertyValue("--graph-width"),
     );
     expect(new Set(widths).size).toBe(1);
+  });
+
+  it("父提交说明走 aria-describedby，读屏名称仍以提交说明开头", async () => {
+    const head = commit(0, { oid: headOid, parents: [midOid] });
+    const mid = commit(1, { parents: [] });
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok",
+      commits: [head, mid], scope: "current", branches: ["main"], head: "main",
+    });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    expect(rowOf(headOid).getAttribute("aria-describedby")).toBe("history-graph-" + headOid);
+    expect(labelOf(headOid)).toBe(`父提交 ${midOid}。`);
+    // 完整父 Hash 只在说明里，不再挤进名称主体。
+    expect(rowOf(headOid).textContent).not.toContain(midOid);
+    expect(screen.getByRole("option", { name: /^commit-0/ })).toBe(rowOf(headOid));
+    expect(labelOf(midOid)).toBe("根提交：没有父提交。");
+    expect(document.querySelectorAll("[id^=\"history-graph-\"]").length).toBe(2);
   });
 
   it("结果外父提交写明真实 Hash，不连到后面的无关提交", async () => {
@@ -1598,10 +1631,11 @@ describe("历史拓扑面板", () => {
     });
     render(HistoryPanel, { props: panelProps() });
     await screen.findByRole("option", { name: /commit-0/ });
-    expect(rowOf(headOid).textContent).toContain("ffffffffffffffffffffffffffffffffffffffff");
-    expect(rowOf(headOid).textContent).toContain("不在当前结果中");
-    // 终止标记只在本行：第二行不出现这条 lane 的连线。
-    expect(rowOf(other.oid).querySelectorAll(".hr-graph path").length).toBe(0);
+    expect(labelOf(headOid)).toContain("ffffffffffffffffffffffffffffffffffffffff");
+    expect(labelOf(headOid)).toContain("不在当前结果中");
+    // 终止标记只在本行：第二行不出现这条 lane 的连线，也不出现节点以外的线。
+    expect(pathsOf(other.oid)).toHaveLength(0);
+    expect(rowOf(other.oid).querySelector(".hr-graph .node")).toBeTruthy();
   });
 
   it("分叉的两个提交接到同一个父提交，各自只画行内斜线", async () => {
@@ -1616,10 +1650,12 @@ describe("历史拓扑面板", () => {
     render(HistoryPanel, { props: panelProps() });
     await screen.findByRole("option", { name: /commit-1/ });
     // 第二行：父提交那条竖线继续穿过，外加一条从自己 lane 下来的斜线。
-    expect(pathsOf(right.oid)).toBe(2);
-    // 父提交行只有 lane 0，第二行的 lane 1 没有延续到下面。
-    expect(pathsOf(baseOid)).toBe(1);
-    expect(rowOf(right.oid).textContent).toContain(baseOid);
+    expect(pathsOf(right.oid)).toEqual([
+      "M 7 0 L 7 50",
+      "M 19 25 L 7 50",
+    ]);
+    expect(pathsOf(baseOid)).toEqual(["M 7 0 L 7 25"]);
+    expect(labelOf(right.oid)).toBe(`父提交 ${baseOid}。`);
   });
 
   it("追加页后页边界重新配对，先把上一页的父提交标成结果外", async () => {
@@ -1636,7 +1672,7 @@ describe("历史拓扑面板", () => {
       });
     render(HistoryPanel, { props: panelProps() });
     await screen.findByRole("option", { name: /commit-0/ });
-    expect(rowOf(midOid).textContent).toContain("不在当前结果中");
+    expect(labelOf(midOid)).toContain("不在当前结果中");
     const list = screen.getByRole("listbox", { name: "提交历史" });
     Object.defineProperty(list, "clientHeight", { configurable: true, value: 120 });
     Object.defineProperty(list, "scrollHeight", { configurable: true, value: 400 });
@@ -1644,9 +1680,9 @@ describe("历史拓扑面板", () => {
     await fireEvent.scroll(list);
     await screen.findByRole("option", { name: /commit-2/ });
     // 追加后同一条 lane 继续：父提交不再是结果外，也不再新起一条 lane。
-    expect(rowOf(midOid).textContent).not.toContain("不在当前结果中");
-    expect(rowOf(rootOid).querySelectorAll(".hr-graph path").length).toBe(1);
-    expect(pathsOf(midOid)).toBe(1);
+    expect(labelOf(midOid)).toBe(`父提交 ${rootOid}。`);
+    expect(pathsOf(midOid)).toEqual(["M 7 0 L 7 50"]);
+    expect(pathsOf(rootOid)).toEqual(["M 7 0 L 7 25"]);
   });
 
   it("搜索或筛选换掉结果集时按新结果重建拓扑", async () => {
@@ -1663,16 +1699,17 @@ describe("历史拓扑面板", () => {
       });
     render(HistoryPanel, { props: panelProps() });
     await screen.findByRole("option", { name: /commit-0/ });
-    expect(rowOf(rootOid).querySelectorAll(".hr-graph path").length).toBe(1);
+    expect(pathsOf(rootOid)).toEqual(["M 7 0 L 7 25"]);
     await fireEvent.input(screen.getByLabelText("搜索说明或提交哈希"), { target: { value: "commit-0" } });
     await waitFor(() => expect(historyPage).toHaveBeenLastCalledWith("/repo", "commit-0", 0, 3, 1));
     await waitFor(() => expect(document.querySelectorAll(".hr-graph").length).toBe(2));
     // 被搜索过滤掉的父提交变成结果外，后面的行也重新从 lane 0 开始。
-    expect(rowOf(headOid).textContent).toContain("不在当前结果中");
-    expect(rowOf(rootOid).querySelectorAll(".hr-graph path").length).toBe(0);
+    expect(labelOf(headOid)).toContain("不在当前结果中");
+    expect(pathsOf(rootOid)).toHaveLength(0);
+    expect(document.querySelectorAll("[id^=\"history-graph-\"]").length).toBe(2);
   });
 
-  it("lane 超出紧凑宽度时给出溢出标记，父提交仍留在数据里", async () => {
+  it("lane 超出紧凑宽度时丢弃越界线段，不让两条源线叠成一条", async () => {
     const parents = Array.from({ length: 7 }, (_, index) => `p${index}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`);
     const merge = commit(0, { oid: headOid, parents });
     const rest = [...parents].reverse().map((oid, index) => commit(index + 1, { oid, parents: [] }));
@@ -1685,9 +1722,15 @@ describe("历史拓扑面板", () => {
     const graphNode = rowOf(headOid).querySelector(".hr-graph")!;
     expect(graphNode.classList.contains("overflow")).toBe(true);
     expect(graphNode.querySelector(".hr-graph-more")?.textContent).toBe("+1");
-    expect(rowOf(headOid).textContent).toContain("另有 1 条分支线未画出");
-    // 溢出只影响绘制：七条父提交都在可访问文本里。
-    for (const oid of parents) expect(rowOf(headOid).textContent).toContain(oid);
+    expect(labelOf(headOid)).toContain("另有 1 条分支线未画出");
+    for (const oid of parents) expect(labelOf(headOid)).toContain(oid);
+    // 只画 6 条 lane：一条竖线加五条分叉，第 7 条整条丢弃，坐标不越出绘图盒。
+    const drawn = pathsOf(headOid);
+    expect(drawn).toHaveLength(6);
+    expect(new Set(drawn).size).toBe(6);
+    const width = Number(graphNode.querySelector("svg")!.getAttribute("width"));
+    const coordinates = drawn.flatMap((data) => data.slice(1).split(/[^0-9.]+/).filter(Boolean).map(Number));
+    expect(Math.max(...coordinates)).toBeLessThanOrEqual(width - 2);
   });
 
   it("收起拓扑不影响选择、滚动和详情，展开后恢复同样的连线", async () => {
@@ -1706,19 +1749,24 @@ describe("历史拓扑面板", () => {
     const list = screen.getByRole("listbox", { name: "提交历史" });
     list.scrollTop = 40;
     await fireEvent.scroll(list);
-    const before = rowOf(headOid).querySelectorAll(".hr-graph path").length;
-    expect(before).toBe(1);
+    const before = pathsOf(headOid);
+    expect(before).toHaveLength(1);
     const toggle = screen.getByRole("button", { name: "收起提交拓扑" });
     expect(toggle.getAttribute("aria-pressed")).toBe("true");
     await fireEvent.click(toggle);
     expect(screen.getByRole("button", { name: "展开提交拓扑" }).getAttribute("aria-pressed")).toBe("false");
     expect(document.querySelectorAll(".hr-graph").length).toBe(0);
+    // 收起时连父提交说明一起收起，行上不再挂着指不到的 describedby。
+    expect(document.getElementById("history-graph-" + headOid)).toBeNull();
+    expect(rowOf(headOid).hasAttribute("aria-describedby")).toBe(false);
     expect(rowOf(midOid).getAttribute("aria-selected")).toBe("true");
     expect(list.scrollTop).toBe(40);
     expect(detailCalls(midOid)).toBeGreaterThan(0);
     expect(globalThis.localStorage?.getItem("twiglane.historyGraph")).toBe("0");
     await fireEvent.click(screen.getByRole("button", { name: "展开提交拓扑" }));
-    expect(rowOf(headOid).querySelectorAll(".hr-graph path").length).toBe(before);
+    expect(pathsOf(headOid)).toEqual(before);
+    expect(rowOf(headOid).getAttribute("aria-describedby")).toBe("history-graph-" + headOid);
     expect(rowOf(midOid).getAttribute("aria-selected")).toBe("true");
   });
 });
+

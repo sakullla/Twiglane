@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildHistoryGraph,
+  clipSegments,
   drawableLanes,
   graphRowLabel,
+  visibleNodeLane,
   GRAPH_MAX_LANES,
   type GraphCommit,
   type GraphSegment,
@@ -228,5 +230,36 @@ describe("历史拓扑", () => {
     expect(graph.rows[0].lane).toBe(0);
     expect(graph.rows[1].lane).toBe(0);
     expect(graph.rows[1].segments).toEqual([]);
+  });
+});
+
+describe("拓扑绘制裁剪", () => {
+  const commits: GraphCommit[] = [
+    { oid: "root", parents: ["p1", "p2", "p3"] },
+    { oid: "p3", parents: [] },
+    { oid: "p2", parents: [] },
+    { oid: "p1", parents: [] },
+  ];
+
+  it("越界 lane 的线段整条丢弃，不夹到最后一格", () => {
+    const graph = buildHistoryGraph(commits, { maxLanes: 2 });
+    const lanes = drawableLanes(graph.lanes, 2);
+    expect(lanes).toBe(2);
+    const kept = clipSegments(graph.rows[0].segments, lanes);
+    expect(kept.every((segment) => segment.from < lanes && segment.to < lanes)).toBe(true);
+    // 两条源线不会被读成一条：留下的分叉各自落在不同的 lane 上。
+    const targets = kept.filter((segment) => segment.kind === "branch").map((segment) => segment.to);
+    expect(targets.length).toBeGreaterThan(0);
+    expect(new Set(targets).size).toBe(targets.length);
+    // 越界线段仍在数据里，只是不画。
+    expect(graph.rows[0].segments.length).toBeGreaterThan(kept.length);
+    expect(graph.rows[0].segments.some((segment) => segment.to >= lanes)).toBe(true);
+  });
+
+  it("提交自己在可见区外时不画节点", () => {
+    const graph = buildHistoryGraph(commits, { maxLanes: 2 });
+    expect(visibleNodeLane(graph.rows[0], 2)).toBe(0);
+    expect(visibleNodeLane(graph.rows[0], 1)).toBe(0);
+    expect(visibleNodeLane({ ...graph.rows[0], lane: 3 }, 2)).toBeNull();
   });
 });

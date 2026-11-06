@@ -37,8 +37,10 @@
   import type { HunkNavReport } from "../diff";
   import {
     buildHistoryGraph,
+    clipSegments,
     drawableLanes,
     graphRowLabel,
+    visibleNodeLane,
     GRAPH_LANE_WIDTH,
     GRAPH_MAX_LANES,
     type GraphSegment,
@@ -393,8 +395,9 @@
     saveGraphOn();
   }
 
+  /** 越界 lane 在绘制前就被 clipSegments 丢掉，这里不再夹取：夹取会把两条线叠成一条。 */
   function laneX(lane: number): number {
-    return Math.min(lane, graphLanes - 1) * GRAPH_LANE_WIDTH + GRAPH_LANE_WIDTH / 2 + 1;
+    return lane * GRAPH_LANE_WIDTH + GRAPH_LANE_WIDTH / 2 + 1;
   }
 
   /** 每行只画自己的片段：竖线、汇入和分叉都在行内闭合，悬停/选择不改变线条。 */
@@ -1408,6 +1411,18 @@
           <div class="empty" role="status"><span class="empty-icon"><Icon name="history" size={22} /></span><strong>这一页没有提交。</strong></div>
         {:else}
           <div class="virtual-space" style={`height:${commits.length * ROW_HEIGHT}px`}>
+            {#if graphOn}
+              <!-- 父提交说明放在提交行之外，用 aria-describedby 关联：读屏名称仍以提交说明开头，
+                   完整的父 Hash 和结果外原因仍可读到。 -->
+              <div class="sr-only">
+                {#each visible as commit, index (commit.oid)}
+                  {@const described = graph.rows[range.start + index]}
+                  {#if described}
+                    <span id={`history-graph-${commit.oid}`}>{graphRowLabel(described)}{described.overflow ? ` 另有 ${described.hiddenLanes} 条分支线未画出。` : ""}</span>
+                  {/if}
+                {/each}
+              </div>
+            {/if}
             {#each visible as commit, index (commit.oid)}
               {@const pills = refPills(commit.labels)}
               {@const row = graphOn ? graph.rows[range.start + index] : null}
@@ -1416,6 +1431,7 @@
                 class="history-row"
                 role="option"
                 aria-selected={selectedIds.has(commit.oid)}
+                aria-describedby={row ? `history-graph-${commit.oid}` : undefined}
                 tabindex="-1"
                 style={`top:${(range.start + index) * ROW_HEIGHT + 1}px;height:${ROW_HEIGHT - 2}px`}
                 title={`${commit.summary}\n${commit.authorName} · ${formatAuthoredAt(commit.authoredAt)}\n${commit.oid}`}
@@ -1437,10 +1453,12 @@
                 }}
               >
                 {#if row}
+                  {@const drawn = clipSegments(row.segments, graphLanes)}
+                  {@const nodeLane = visibleNodeLane(row, graphLanes)}
                   <span
                     class="hr-graph"
                     class:overflow={row.overflow}
-                    style={`--graph-width:${graphWidth}px`}
+                    style={`--graph-width:${graphWidth}px;height:${GRAPH_HEIGHT}px`}
                     aria-hidden="true"
                   >
                     <svg
@@ -1450,23 +1468,24 @@
                       aria-hidden="true"
                       focusable="false"
                     >
-                      {#each row.segments as segment, segmentIndex (segmentIndex)}
+                      {#each drawn as segment, segmentIndex (segmentIndex)}
                         <path class="graph-line" style={laneStyle(segment.color)} d={segmentPath(segment, GRAPH_HEIGHT)} />
                       {/each}
-                      <circle
-                        class="node"
-                        class:head={row.head}
-                        style={laneStyle(row.color)}
-                        cx={laneX(row.lane)}
-                        cy={GRAPH_HEIGHT / 2}
-                        r={row.head ? 4.5 : 3}
-                      />
+                      {#if nodeLane !== null}
+                        <circle
+                          class="node"
+                          class:head={row.head}
+                          style={laneStyle(row.color)}
+                          cx={laneX(nodeLane)}
+                          cy={GRAPH_HEIGHT / 2}
+                          r={row.head ? 4.5 : 3}
+                        />
+                      {/if}
                     </svg>
                     {#if row.overflow}
                       <span class="hr-graph-more" title={`还有 ${row.hiddenLanes} 条分支线未画出`}>+{row.hiddenLanes}</span>
                     {/if}
                   </span>
-                  <span class="sr-only">{graphRowLabel(row)}{row.overflow ? ` 另有 ${row.hiddenLanes} 条分支线未画出。` : ""}</span>
                 {/if}
                 <span class="avatar" style={`--hue:${hueOf(commit.authorName)}`} aria-hidden="true">{initialOf(commit.authorName)}</span>
                 <span class="hr-main">
@@ -1957,17 +1976,18 @@
   onMerge={() => {}}
 />
 <style>
-  /* 拓扑只是一条紧凑的竖条：每行只画自己的竖线、节点和行内斜线，没有全尺寸历史 SVG。 */
+  /* 拓扑只是一条紧凑的竖条：每行只画自己的竖线、节点和行内斜线，没有全尺寸历史 SVG。
+     行是 50px 的边框盒（上下各 1px 边框 + 7px 内边距），内容盒只有 34px。
+     -8px 的上下负外边距把 50px 绘图盒对到行的边框盒上，节点正落在行中线，
+     竖线靠圆头线帽各伸出 1px，正好补满相邻行之间的 2px 行距。 */
+  .history-row { overflow-x: clip; overflow-y: visible; }
   .hr-graph {
     position: relative;
     flex: none;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+    display: block;
     width: var(--graph-width);
-    height: 100%;
-    margin-top: 1px;
-    overflow: hidden;
+    margin-block: -8px;
+    pointer-events: none;
   }
   .hr-graph > svg { display: block; overflow: visible; }
   .hr-graph .graph-line { fill: none; stroke: var(--lane); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }

@@ -229,3 +229,20 @@ export function graphRowLabel(row: GraphRow): string {
 export function drawableLanes(lanes: number, maxLanes: number = GRAPH_MAX_LANES): number {
   return Math.max(1, Math.min(Math.max(1, Math.floor(maxLanes)), Math.max(1, Math.floor(lanes))));
 }
+
+/**
+ * 绘制前按可见 lane 裁掉越界线段。
+ *
+ * 越界线段不能用 min 夹到最后一格：那样两条源线会叠成同一条竖线，看起来像真的连在一起。
+ * 这里整条丢弃，超出部分由行上的 +N 标记和可访问说明交代。
+ */
+export function clipSegments(segments: readonly GraphSegment[], lanes: number): GraphSegment[] {
+  const limit = Math.max(1, Math.floor(lanes));
+  return segments.filter((segment) => segment.from < limit && segment.to < limit);
+}
+
+/** 提交自己落在可见 lane 之外时不画节点：只留溢出标记，不在最后一格伪造一个节点。 */
+export function visibleNodeLane(row: GraphRow, lanes: number): number | null {
+  const limit = Math.max(1, Math.floor(lanes));
+  return row.lane < limit ? row.lane : null;
+}

@@ -2,6 +2,7 @@ import { normalizeError } from "./errors";
 import type {
   BranchState,
   BranchListing,
+  DiffLineSelection,
   PreviewSource,
   FilePreview,
   CloneResult,
@@ -160,6 +161,27 @@ export const api = {
       original,
       staged,
       hunks,
+      snapshot,
+      generation,
+      requestId,
+    }),
+  /** 逐行暂存 / 取消暂存：参数保持 camelCase，与 Rust 侧 stage_lines 一致。 */
+  stageLines: (
+    path: string,
+    relative: string,
+    staged: boolean,
+    lines: DiffLineSelection[],
+    snapshot: string,
+    generation: number,
+    requestId: number,
+    original: string | null = null,
+  ) =>
+    invoke<StatusSnapshot>("stage_lines", {
+      path,
+      relative,
+      original,
+      staged,
+      lines,
       snapshot,
       generation,
       requestId,

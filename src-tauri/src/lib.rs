@@ -86,6 +86,7 @@ pub fn run() {
             stage_files,
             unstage_files,
             stage_hunks,
+            stage_lines,
             commit_changes,
             clone_repository,
             remote_state,
@@ -520,6 +521,33 @@ async fn stage_hunks(
         original.as_deref(),
         staged,
         &hunks,
+        &snapshot,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+async fn stage_lines(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    relative: String,
+    original: Option<String>,
+    staged: bool,
+    lines: Vec<crate::model::DiffLineSelection>,
+    snapshot: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    crate::git::changes::stage_lines(
+        state.inner(),
+        &path,
+        &relative,
+        original.as_deref(),
+        staged,
+        &lines,
         &snapshot,
         generation,
         request_id,
@@ -1537,6 +1565,7 @@ mod ipc_contract {
             "stage_files",
             "unstage_files",
             "stage_hunks",
+            "stage_lines",
             "commit_changes",
             "clone_repository",
             "remote_state",
@@ -1604,6 +1633,7 @@ mod ipc_contract {
                 super::stage_files,
                 super::unstage_files,
                 super::stage_hunks,
+                super::stage_lines,
                 super::commit_changes,
                 super::clone_repository,
                 super::fetch_remote,
@@ -1674,6 +1704,18 @@ mod ipc_contract {
                     "relative": "a",
                     "staged": false,
                     "hunks": [0],
+                    "snapshot": "abc",
+                    "generation": 1,
+                    "request_id": 1
+                }),
+            ),
+            (
+                "stage_lines",
+                serde_json::json!({
+                    "path": "/tmp/unused",
+                    "relative": "a",
+                    "staged": false,
+                    "lines": [{"hunkIndex": 0, "kind": "add", "oldNo": null, "newNo": 3}],
                     "snapshot": "abc",
                     "generation": 1,
                     "request_id": 1

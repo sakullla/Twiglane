@@ -86,6 +86,17 @@ export interface DiffLine {
   hunkIndex: number | null;
 }
 
+/**
+ * 选中的差异行身份：hunkIndex + kind + oldNo + newNo。统一与并排视图共用同一份，
+ * 上下文行、块标题、meta 与「没有换行」标记不可选。
+ */
+export interface DiffLineSelection {
+  hunkIndex: number;
+  kind: "add" | "del";
+  oldNo: number | null;
+  newNo: number | null;
+}
+
 export interface DiffHunk {
   index: number;
   header: string;

@@ -12,12 +12,14 @@ use crate::git::ops::{
     status_from_output, validate_input_path,
 };
 use crate::git::patch::{
-    build_patch, first_file_diff, parse_diff, parse_numstat, snapshot_token, view_lines,
-    DIFF_PREVIEW_BYTES,
+    build_line_patch, build_patch, first_file_diff, parse_diff, parse_numstat, snapshot_token,
+    view_lines, DIFF_PREVIEW_BYTES,
 };
 use crate::git::runner::ProcessOutput;
 use crate::git::schedule::{internal_request_id, CommandSpec, JobKind, WriteGuard};
-use crate::model::{CommitResult, DiffResponse, FileChange, StatusSnapshot, MAX_DRAFT_CHARS};
+use crate::model::{
+    CommitResult, DiffLineSelection, DiffResponse, FileChange, StatusSnapshot, MAX_DRAFT_CHARS,
+};
 use crate::redact::{redact_error_text, reject_secret_draft};
 
 const MAX_PATHS: usize = 500;
@@ -272,6 +274,40 @@ pub async fn unstage_files(
     .await)
 }
 
+/// 逐行暂存与取消暂存。行身份来自前端读取的 canonical diff，后端只把它当作定位信息：
+/// 写锁内重新读取未过滤差异、校验 snapshot 与行身份，再构造逐行补丁。
+#[allow(clippy::too_many_arguments)]
+pub async fn stage_lines(
+    backend: &crate::git::ops::Backend,
+    path: &str,
+    relative: &str,
+    original: Option<&str>,
+    staged: bool,
+    lines: &[DiffLineSelection],
+    snapshot: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    if lines.is_empty() {
+        return Err(AppError::new(
+            "empty_lines",
+            "没有选中的行，未修改暂存区。",
+        ));
+    }
+    stage_patch(
+        backend,
+        path,
+        relative,
+        original,
+        staged,
+        snapshot,
+        generation,
+        request_id,
+        |parsed| build_line_patch(parsed, lines, staged),
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn stage_hunks(
     backend: &crate::git::ops::Backend,
@@ -284,6 +320,46 @@ pub async fn stage_hunks(
     generation: u64,
     request_id: u64,
 ) -> Result<StatusSnapshot, AppError> {
+    stage_patch(
+        backend,
+        path,
+        relative,
+        original,
+        staged,
+        snapshot,
+        generation,
+        request_id,
+        |parsed| {
+            if parsed.binary || parsed.undecodable {
+                return Err(AppError::new(
+                    "not_text",
+                    "二进制或无法解码的文件不能按代码块暂存。可以暂存整个文件。",
+                ));
+            }
+            build_patch(parsed, hunks)
+        },
+    )
+    .await
+}
+
+/// 按块与按行共用的写入顺序：写锁 → index.lock → 重新读取未过滤差异 → snapshot 校验 →
+/// 构造补丁 → apply --cached --check → 实际 apply → 刷新 generation。
+/// 补丁构造（含行身份校验）由调用方传入，失败时什么都不写。
+#[allow(clippy::too_many_arguments)]
+async fn stage_patch<F>(
+    backend: &crate::git::ops::Backend,
+    path: &str,
+    relative: &str,
+    original: Option<&str>,
+    staged: bool,
+    snapshot: &str,
+    generation: u64,
+    request_id: u64,
+    build: F,
+) -> Result<StatusSnapshot, AppError>
+where
+    F: FnOnce(&crate::git::patch::ParsedDiff) -> Result<Vec<u8>, AppError>,
+{
     if snapshot.is_empty() {
         return Err(AppError::new(
             "invalid_snapshot",
@@ -359,7 +435,7 @@ pub async fn stage_hunks(
             ),
         ));
     }
-    let patch = match build_patch(&parsed, hunks) {
+    let patch = match build(&parsed) {
         Ok(patch) => patch,
         Err(error) => return Err(finish_error(guard, error)),
     };
@@ -1676,6 +1752,520 @@ mod tests {
         assert!(!head.contains("CHANGED B"));
         assert!(work.contains("++ plus\n"));
         assert!(work.contains("CHANGED B\n"));
+    }
+
+    /// 与前端同一份行身份：从 canonical diff 的某一行取 hunkIndex/kind/oldNo/newNo。
+    fn pick_of(diff: &DiffResponse, kind: &str, text: &str) -> DiffLineSelection {
+        let line = diff
+            .lines
+            .iter()
+            .find(|line| line.kind == kind && line.text == text)
+            .unwrap_or_else(|| panic!("missing {kind} {text}"));
+        DiffLineSelection {
+            hunk_index: line.hunk_index.expect("hunk index"),
+            kind: kind.to_string(),
+            old_no: line.old_no,
+            new_no: line.new_no,
+        }
+    }
+
+    fn index_text(repo: &Path) -> String {
+        String::from_utf8(git_bytes(repo, &["show", ":demo.txt"])).unwrap()
+    }
+
+    #[tokio::test]
+    async fn line_stage_writes_only_the_selected_line() {
+        let fixture = crate::test_support::git_fixture("line-stage");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Twiglane Test"]);
+        git(
+            &repo,
+            &["config", "user.email", "twiglane-test@example.com"],
+        );
+        let base: Vec<String> = (1..=20).map(|index| format!("line {index}")).collect();
+        fs::write(repo.join("demo.txt"), base.join("\n") + "\n").unwrap();
+        git(&repo, &["add", "--", "demo.txt"]);
+        git(&repo, &["commit", "-m", "init"]);
+        let mut changed = base.clone();
+        changed[2] = "LINE 3".to_string();
+        changed[17] = "LINE 18".to_string();
+        fs::write(repo.join("demo.txt"), changed.join("\n") + "\n").unwrap();
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let diff = load_diff(
+            &backend, &path, "demo.txt", None, false, generation, 2, 0, 0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(diff.hunks.len(), 2, "hunks {:?}", diff.hunks);
+        let staged = stage_lines(
+            &backend,
+            &path,
+            "demo.txt",
+            None,
+            false,
+            &[pick_of(&diff, "add", "+LINE 3")],
+            &diff.snapshot,
+            diff.generation,
+            3,
+        )
+        .await
+        .unwrap();
+        assert!(staged
+            .files
+            .iter()
+            .any(|file| file.path == "demo.txt" && file.staged != crate::model::ChangeKind::None));
+        let cached = String::from_utf8(git_bytes(&repo, &["diff", "--cached", "--", "demo.txt"])).unwrap();
+        assert!(cached.contains("+LINE 3"), "{cached}");
+        assert!(!cached.contains("-line 3"), "{cached}");
+        assert!(!cached.contains("LINE 18"), "{cached}");
+        // 未选中的删除行留在索引里：索引是「原 line 3 + 新增 LINE 3」，其余行一个都没动。
+        let mut expected = base.clone();
+        expected.insert(3, "LINE 3".to_string());
+        assert_eq!(index_text(&repo), expected.join("\n") + "\n");
+        // 工作区没有被写入，未暂存侧仍然是两处改动。
+        assert_eq!(
+            String::from_utf8(fs::read(repo.join("demo.txt")).unwrap()).unwrap(),
+            changed.join("\n") + "\n"
+        );
+        let unstaged = String::from_utf8(git_bytes(&repo, &["diff", "--", "demo.txt"])).unwrap();
+        assert!(unstaged.contains("-line 3"), "{unstaged}");
+        assert!(unstaged.contains("+LINE 18"), "{unstaged}");
+    }
+
+    #[tokio::test]
+    async fn line_stage_spans_hunks_without_touching_the_other_lines() {
+        let fixture = crate::test_support::git_fixture("line-multi-hunk");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Twiglane Test"]);
+        git(
+            &repo,
+            &["config", "user.email", "twiglane-test@example.com"],
+        );
+        let base: Vec<String> = (1..=20).map(|index| format!("line {index}")).collect();
+        fs::write(repo.join("demo.txt"), base.join("\n") + "\n").unwrap();
+        git(&repo, &["add", "--", "demo.txt"]);
+        git(&repo, &["commit", "-m", "init"]);
+        let mut changed = base.clone();
+        changed[2] = "LINE 3".to_string();
+        changed[17] = "LINE 18".to_string();
+        fs::write(repo.join("demo.txt"), changed.join("\n") + "\n").unwrap();
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let diff = load_diff(
+            &backend, &path, "demo.txt", None, false, generation, 2, 0, 0,
+        )
+        .await
+        .unwrap();
+        // 跨 hunk：一处只写删除，另一处只写新增。
+        let picks = [
+            pick_of(&diff, "del", "-line 3"),
+            pick_of(&diff, "add", "+LINE 18"),
+        ];
+        stage_lines(
+            &backend,
+            &path,
+            "demo.txt",
+            None,
+            false,
+            &picks,
+            &diff.snapshot,
+            diff.generation,
+            3,
+        )
+        .await
+        .unwrap();
+        let mut expected: Vec<String> = base.clone();
+        expected.remove(2);
+        expected.insert(17, "LINE 18".to_string());
+        assert_eq!(index_text(&repo), expected.join("\n") + "\n");
+        let cached = String::from_utf8(git_bytes(&repo, &["diff", "--cached", "--", "demo.txt"])).unwrap();
+        assert!(cached.contains("-line 3"), "{cached}");
+        assert!(cached.contains("+LINE 18"), "{cached}");
+        assert!(!cached.contains("+LINE 3"), "{cached}");
+        assert!(!cached.contains("-line 18"), "{cached}");
+    }
+
+    #[tokio::test]
+    async fn line_stage_keeps_adjacent_lines_independent() {
+        let fixture = crate::test_support::git_fixture("line-adjacent");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Twiglane Test"]);
+        git(
+            &repo,
+            &["config", "user.email", "twiglane-test@example.com"],
+        );
+        let base: Vec<String> = (1..=8).map(|index| format!("line {index}")).collect();
+        fs::write(repo.join("demo.txt"), base.join("\n") + "\n").unwrap();
+        git(&repo, &["add", "--", "demo.txt"]);
+        git(&repo, &["commit", "-m", "init"]);
+        let mut changed = base.clone();
+        changed[2] = "LINE 3".to_string();
+        changed[3] = "LINE 4".to_string();
+        fs::write(repo.join("demo.txt"), changed.join("\n") + "\n").unwrap();
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let diff = load_diff(
+            &backend, &path, "demo.txt", None, false, generation, 2, 0, 0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(diff.hunks.len(), 1);
+        let picks = [
+            pick_of(&diff, "del", "-line 3"),
+            pick_of(&diff, "del", "-line 4"),
+        ];
+        stage_lines(
+            &backend,
+            &path,
+            "demo.txt",
+            None,
+            false,
+            &picks,
+            &diff.snapshot,
+            diff.generation,
+            3,
+        )
+        .await
+        .unwrap();
+        let mut expected = base.clone();
+        expected.remove(3);
+        expected.remove(2);
+        assert_eq!(index_text(&repo), expected.join("\n") + "\n");
+        let cached = String::from_utf8(git_bytes(&repo, &["diff", "--cached", "--", "demo.txt"])).unwrap();
+        assert!(!cached.contains("LINE 3"), "{cached}");
+        assert!(!cached.contains("LINE 4"), "{cached}");
+    }
+
+    #[tokio::test]
+    async fn line_unstage_reverses_only_the_selected_addition() {
+        let fixture = crate::test_support::git_fixture("line-unstage");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Twiglane Test"]);
+        git(
+            &repo,
+            &["config", "user.email", "twiglane-test@example.com"],
+        );
+        let base: Vec<String> = (1..=10).map(|index| format!("line {index}")).collect();
+        fs::write(repo.join("demo.txt"), base.join("\n") + "\n").unwrap();
+        git(&repo, &["add", "--", "demo.txt"]);
+        git(&repo, &["commit", "-m", "init"]);
+        let mut changed = base.clone();
+        changed[4] = "NEW 5".to_string();
+        fs::write(repo.join("demo.txt"), changed.join("\n") + "\n").unwrap();
+        git(&repo, &["add", "--", "demo.txt"]);
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let staged_diff = load_diff(
+            &backend, &path, "demo.txt", None, true, generation, 2, 0, 0,
+        )
+        .await
+        .unwrap();
+        assert!(staged_diff.staged);
+        // 只取消暂存「新增」那一行：索引里只少了 NEW 5，原来被删的 line 5 不会被塞回去。
+        stage_lines(
+            &backend,
+            &path,
+            "demo.txt",
+            None,
+            true,
+            &[pick_of(&staged_diff, "add", "+NEW 5")],
+            &staged_diff.snapshot,
+            staged_diff.generation,
+            3,
+        )
+        .await
+        .unwrap();
+        let mut expected = base.clone();
+        expected.remove(4);
+        assert_eq!(index_text(&repo), expected.join("\n") + "\n");
+        let cached = String::from_utf8(git_bytes(&repo, &["diff", "--cached", "--", "demo.txt"])).unwrap();
+        assert!(cached.contains("-line 5"), "{cached}");
+        assert!(!cached.contains("NEW 5"), "{cached}");
+        assert_eq!(
+            String::from_utf8(fs::read(repo.join("demo.txt")).unwrap()).unwrap(),
+            changed.join("\n") + "\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn line_stage_keeps_crlf_bytes() {
+        let fixture = crate::test_support::git_fixture("line-crlf");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Twiglane Test"]);
+        git(
+            &repo,
+            &["config", "user.email", "twiglane-test@example.com"],
+        );
+        let base: Vec<String> = (1..=8).map(|index| format!("line {index}")).collect();
+        fs::write(repo.join("demo.txt"), base.join("\r\n") + "\r\n").unwrap();
+        git(&repo, &["add", "--", "demo.txt"]);
+        git(&repo, &["commit", "-m", "init"]);
+        let mut changed = base.clone();
+        changed[4] = "NEW 5".to_string();
+        fs::write(repo.join("demo.txt"), changed.join("\r\n") + "\r\n").unwrap();
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let diff = load_diff(
+            &backend, &path, "demo.txt", None, false, generation, 2, 0, 0,
+        )
+        .await
+        .unwrap();
+        stage_lines(
+            &backend,
+            &path,
+            "demo.txt",
+            None,
+            false,
+            &[pick_of(&diff, "add", "+NEW 5")],
+            &diff.snapshot,
+            diff.generation,
+            3,
+        )
+        .await
+        .unwrap();
+        let index = git_bytes(&repo, &["show", ":demo.txt"]);
+        let newlines = index.iter().filter(|byte| **byte == b'\n').count();
+        let crlf = index.windows(2).filter(|pair| pair == b"\r\n").count();
+        assert_eq!(newlines, 9, "每一行都必须仍是 CRLF: {:?}", String::from_utf8_lossy(&index));
+        assert_eq!(crlf, 9, "{:?}", String::from_utf8_lossy(&index));
+        let text = String::from_utf8(index).unwrap();
+        let mut expected = base.clone();
+        expected.insert(5, "NEW 5".to_string());
+        assert_eq!(text, expected.join("\r\n") + "\r\n");
+    }
+
+    #[tokio::test]
+    async fn line_stage_rejects_stale_binary_and_whole_file_changes() {
+        let fixture = crate::test_support::git_fixture("line-reject");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Twiglane Test"]);
+        git(
+            &repo,
+            &["config", "user.email", "twiglane-test@example.com"],
+        );
+        fs::write(repo.join("demo.txt"), "one\ntwo\nthree\n").unwrap();
+        git(&repo, &["add", "--", "demo.txt"]);
+        git(&repo, &["commit", "-m", "init"]);
+
+        // 过期快照：读取之后文件又变了，一行都不写。
+        fs::write(repo.join("demo.txt"), "ONE\ntwo\nthree\n").unwrap();
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let diff = load_diff(
+            &backend, &path, "demo.txt", None, false, generation, 2, 0, 0,
+        )
+        .await
+        .unwrap();
+        let stale_pick = pick_of(&diff, "add", "+ONE");
+        fs::write(repo.join("demo.txt"), "ONE\nTWO\nthree\n").unwrap();
+        let error = stage_lines(
+            &backend,
+            &path,
+            "demo.txt",
+            None,
+            false,
+            &[stale_pick],
+            &diff.snapshot,
+            diff.generation,
+            3,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "stale_patch");
+        assert!(git_bytes(&repo, &["diff", "--cached"]).is_empty());
+
+        // 索引锁：一个字都不写，锁也不会被删掉。
+        fs::write(repo.join(".git").join("index.lock"), b"locked").unwrap();
+        let locked = stage_lines(
+            &backend,
+            &path,
+            "demo.txt",
+            None,
+            false,
+            &[pick_of(&diff, "del", "-one")],
+            &diff.snapshot,
+            diff.generation,
+            4,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(locked.code, "index_lock");
+        assert_eq!(
+            fs::read(repo.join(".git").join("index.lock")).unwrap(),
+            b"locked"
+        );
+        fs::remove_file(repo.join(".git").join("index.lock")).unwrap();
+        assert!(git_bytes(&repo, &["diff", "--cached"]).is_empty());
+
+        // 新增文件（未跟踪）：文件头语义是整份文件，逐行写入不安全。
+        fs::write(repo.join("fresh.txt"), "a\nb\n").unwrap();
+        let fresh = load_diff(
+            &backend, &path, "fresh.txt", None, false, generation, 5, 0, 0,
+        )
+        .await
+        .unwrap();
+        assert!(fresh.lines.iter().any(|line| line.kind == "meta" && line.text.contains("new file mode")));
+        let add = fresh
+            .lines
+            .iter()
+            .find(|line| line.kind == "add")
+            .expect("added line");
+        let whole = DiffLineSelection {
+            hunk_index: add.hunk_index.expect("hunk"),
+            kind: "add".to_string(),
+            old_no: add.old_no,
+            new_no: add.new_no,
+        };
+        let error = stage_lines(
+            &backend,
+            &path,
+            "fresh.txt",
+            None,
+            false,
+            &[whole],
+            &fresh.snapshot,
+            fresh.generation,
+            6,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "line_patch_unsupported");
+        assert!(git_bytes(&repo, &["diff", "--cached"]).is_empty());
+
+        // 二进制：没有可逐行写入的内容。
+        fs::write(repo.join("data.bin"), b"a\0b\n").unwrap();
+        let binary = load_diff(
+            &backend, &path, "data.bin", None, false, generation, 7, 0, 0,
+        )
+        .await
+        .unwrap();
+        assert!(binary.binary);
+        let error = stage_lines(
+            &backend,
+            &path,
+            "data.bin",
+            None,
+            false,
+            &[DiffLineSelection {
+                hunk_index: 0,
+                kind: "add".to_string(),
+                old_no: None,
+                new_no: Some(1),
+            }],
+            &binary.snapshot,
+            binary.generation,
+            8,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "not_text");
+    }
+
+    #[tokio::test]
+    async fn line_stage_rejects_no_newline_and_truncated_hunks() {
+        let fixture = crate::test_support::git_fixture("line-tail");
+        let backend = fixture.backend_with_limit(700, Vec::new());
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Twiglane Test"]);
+        git(
+            &repo,
+            &["config", "user.email", "twiglane-test@example.com"],
+        );
+        // 末尾没有换行：行尾语义无法逐行表达。
+        fs::write(repo.join("tail.txt"), "one\ntwo").unwrap();
+        git(&repo, &["add", "--", "tail.txt"]);
+        git(&repo, &["commit", "-m", "tail"]);
+        fs::write(repo.join("tail.txt"), "one\nTWO").unwrap();
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let tail = load_diff(
+            &backend, &path, "tail.txt", None, false, generation, 2, 0, 0,
+        )
+        .await
+        .unwrap();
+        assert!(tail.lines.iter().any(|line| line.kind == "nonewline"));
+        let add = tail
+            .lines
+            .iter()
+            .find(|line| line.kind == "add")
+            .expect("added line");
+        let pick = DiffLineSelection {
+            hunk_index: add.hunk_index.expect("hunk"),
+            kind: "add".to_string(),
+            old_no: add.old_no,
+            new_no: add.new_no,
+        };
+        let error = stage_lines(
+            &backend,
+            &path,
+            "tail.txt",
+            None,
+            false,
+            &[pick],
+            &tail.snapshot,
+            tail.generation,
+            3,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "line_patch_no_newline");
+        assert!(git_bytes(&repo, &["diff", "--cached"]).is_empty());
+
+        // 截断的差异：不完整的块里没有可靠的坐标。
+        let original = format!("{}\nsecond\n", "a".repeat(40));
+        fs::write(repo.join("wide.txt"), &original).unwrap();
+        git(&repo, &["add", "--", "wide.txt"]);
+        git(&repo, &["commit", "-m", "wide"]);
+        let changed = format!("{}\n{}", "B".repeat(40), "C".repeat(4000));
+        fs::write(repo.join("wide.txt"), &changed).unwrap();
+        let wide = load_diff(
+            &backend, &path, "wide.txt", None, false, generation, 4, 0, 400,
+        )
+        .await
+        .unwrap();
+        assert!(wide.truncated || !wide.complete);
+        let incomplete: Vec<u32> = wide
+            .hunks
+            .iter()
+            .filter(|hunk| !hunk.complete)
+            .map(|hunk| hunk.index)
+            .collect();
+        assert!(!incomplete.is_empty(), "hunks {:?}", wide.hunks);
+        let line = wide
+            .lines
+            .iter()
+            .find(|line| {
+                line.hunk_index.is_some_and(|index| incomplete.contains(&index))
+                    && (line.kind == "add" || line.kind == "del")
+            })
+            .expect("line in the truncated hunk");
+        let error = stage_lines(
+            &backend,
+            &path,
+            "wide.txt",
+            None,
+            false,
+            &[DiffLineSelection {
+                hunk_index: line.hunk_index.unwrap(),
+                kind: line.kind.clone(),
+                old_no: line.old_no,
+                new_no: line.new_no,
+            }],
+            &wide.snapshot,
+            wide.generation,
+            5,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "truncated_hunk");
+        assert!(git_bytes(&repo, &["diff", "--cached"]).is_empty());
     }
 
     #[cfg(unix)]

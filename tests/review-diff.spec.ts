@@ -408,3 +408,29 @@ describe("多文件差异", () => {
     }
   });
 });
+describe("历史只读差异的行选边界（R6）", () => {
+  beforeEach(() => {
+    commitFileDiff.mockReset();
+    commitFileDiff.mockImplementation((_repo: string, _oid: string, _parent: string, path: string) =>
+      Promise.resolve(diffFor(path, "+readonly-content")),
+    );
+  });
+
+  it("只读差异没有选行入口，也不会出现暂存选中行", async () => {
+    render(CommitDiffList, {
+      props: {
+        opened,
+        detail: { ...detail, files: [detail.files[0]] },
+        parent: "parent0",
+        disabled: false,
+        nextId: () => 1,
+        onGeneration: () => {},
+        onFailure: () => {},
+        onFileHistory: () => {},
+      },
+    });
+    expect(await screen.findByText(codeLine("readonly-content"))).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "选择行" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "暂存选中行" })).toBeNull();
+  });
+});

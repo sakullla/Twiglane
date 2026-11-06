@@ -305,3 +305,38 @@ describe("Tauri 命令参数", () => {
     });
   });
 });
+describe("逐行暂存命令", () => {
+  beforeEach(() => {
+    invoke.mockClear();
+  });
+
+  it("行身份与参数都用 camelCase，和 Rust 侧 stage_lines 一致", async () => {
+    const lines = [
+      { hunkIndex: 0, kind: "add" as const, oldNo: null, newNo: 3 },
+      { hunkIndex: 1, kind: "del" as const, oldNo: 9, newNo: null },
+    ];
+    await api.stageLines("/repo", "src/a.ts", false, lines, "snap", 8, 50, "old a.ts");
+    expect(invoke).toHaveBeenCalledWith("stage_lines", {
+      path: "/repo",
+      relative: "src/a.ts",
+      original: "old a.ts",
+      staged: false,
+      lines,
+      snapshot: "snap",
+      generation: 8,
+      requestId: 50,
+    });
+    await api.stageLines("/repo", "src/a.ts", true, lines, "snap", 8, 51);
+    expect(invoke).toHaveBeenLastCalledWith("stage_lines", {
+      path: "/repo",
+      relative: "src/a.ts",
+      original: null,
+      staged: true,
+      lines,
+      snapshot: "snap",
+      generation: 8,
+      requestId: 51,
+    });
+    for (const call of invoke.mock.calls) expect(call[1]).not.toHaveProperty("request_id");
+  });
+});

@@ -5,7 +5,7 @@
   import { diffPrefs, setHideWhitespaceOnly, toggleHideWhitespaceOnly, toggleShowWhitespace } from "../diff-prefs.svelte";
   import { trackCodeScroll } from "../codeScroll.svelte";
   import { codeContentSize, codeRuler, rulerPadding, scrollByRows, visibleRange } from "../layout";
-  import type { DiffHunk, DiffResponse, FileSelection } from "../types";
+  import type { DiffHunk, DiffLineSelection, DiffResponse, FileSelection } from "../types";
   import { BUSY_REASON, binarySizeText, sizeDelta, splitPath, type FileNavState } from "../ui";
   import { buildDiffDocuments, codeOf, signOf } from "../syntax/diffSyntax";
   import { createHighlight } from "../syntax/highlight.svelte";
@@ -27,6 +27,11 @@
     disabled: boolean;
     readOnly?: boolean;
     onStageHunk: (hunk: DiffHunk) => void;
+    /**
+     * 逐行暂存 / 取消暂存。传了它才出现「选行」模式；历史、审查与多文件块不传，
+     * 那些位置只保留文件级与块级入口。
+     */
+    onStageLines?: (lines: DiffLineSelection[]) => void;
     onLoadMore: () => void;
     onFileHistory?: (path: string) => void;
     /** 是否展开为完整文件（整份文件作上下文）；展开时不提供按块暂存。 */
@@ -78,6 +83,7 @@
     disabled,
     readOnly = false,
     onStageHunk,
+    onStageLines,
     onLoadMore,
     onFileHistory,
     fullFile = false,
@@ -228,11 +234,101 @@
   const sign = signOf;
 
   /**
-   * 行选清理入口：换文件、generation、布局、完整文件或空白过滤之后，之前选中的行可能
-   * 已经不在屏幕上，必须清掉，否则不可见的行会被写进暂存。T3 还没有行选状态，这里先把
-   * 调用点立好，T4 接上选择集合即可，不用再散着找每个触发点。
+   * 行选（T4）：只保存行身份（hunkIndex + kind + oldNo + newNo），统一与并排视图共用同一份，
+   * 换文件、generation、布局、完整文件、空白显示或过滤之后旧选择会失效。上下文、块标题、
+   * meta 与「没有换行」标记永远不会进入选择集合。
    */
-  function clearLineSelection(): void {}
+  let pickMode = $state(false);
+  let picked = $state<DiffLineSelection[]>([]);
+  /** 文件头里会改变文件本身的语义：新增、删除、改名、拷贝、权限或类型变化，逐行写入不安全。 */
+  const PICK_HEADER = /^(new file mode|deleted file mode|old mode|new mode|rename from|rename to|copy from|copy to|similarity index)/;
+
+  function pickKey(line: { hunkIndex: number | null; kind: string; oldNo: number | null; newNo: number | null }): string {
+    return [line.hunkIndex ?? "-", line.kind, line.oldNo ?? "", line.newNo ?? ""].join(":");
+  }
+
+  /** 行选为什么不能用：文件级、视图级的原因都要明说，不能只是把按钮灰着。 */
+  let pickBlocker = $derived.by<string | null>(() => {
+    if (!currentDiff) return "还没有读到差异";
+    if (readOnly) return "历史与审查视图是只读的，不会写入暂存区";
+    if (conflicted) return "冲突文件要在三栏合并里处理";
+    if (currentDiff.binary) return "二进制文件不能按行暂存";
+    if (currentDiff.preview) return "图片预览没有可选的代码行";
+    if (fullFile) return "完整文件视图不能按行暂存，先切回「只看改动部分」";
+    if (currentDiff.truncated) return "差异被截断，按行写入会落到错误的位置";
+    if (currentDiff.lines.some((line) => line.kind === "meta" && PICK_HEADER.test(line.text))) {
+      return "文件本身新增、删除、改名或权限变化，不能逐行暂存";
+    }
+    if (!currentDiff.hunks.some((hunk) => hunk.complete)) return "没有可逐行暂存的完整代码块";
+    return null;
+  });
+  let canPickLines = $derived(Boolean(onStageLines && currentDiff && pickBlocker === null));
+  /** 只有完整代码块里的行能写：截断块的坐标不可靠。 */
+  let pickableHunks = $derived(
+    new Set((currentDiff?.hunks ?? []).filter((hunk) => hunk.complete).map((hunk) => hunk.index)),
+  );
+
+  function canPick(line: { kind: string; hunkIndex: number | null } | null | undefined): boolean {
+    if (!pickMode || !canPickLines || !line) return false;
+    if (line.kind !== "add" && line.kind !== "del") return false;
+    return line.hunkIndex !== null && pickableHunks.has(line.hunkIndex);
+  }
+
+  /** 并排视图的单元格指回 lines 里的原始行：两栏共用同一份行身份，不另造一套坐标。 */
+  function pickLineOf(cell: { index?: number } | null): ViewLine | null {
+    if (!cell || cell.index === undefined) return null;
+    return lines[cell.index] ?? null;
+  }
+
+  function pickRowSide(cell: { index?: number } | null): void {
+    const line = pickLineOf(cell);
+    if (line) toggleLine(line);
+  }
+
+  type PickableLine = { hunkIndex: number | null; kind: string; oldNo: number | null; newNo: number | null };
+
+  function isPicked(line: PickableLine): boolean {
+    const key = pickKey(line);
+    return picked.some((item) => pickKey(item) === key);
+  }
+
+  function pickLabel(line: PickableLine): string {
+    const no = line.kind === "del" ? line.oldNo : line.newNo;
+    const what = line.kind === "del" ? "删除" : "新增";
+    return (isPicked(line) ? "取消选择" : "选择") + what + "第 " + (no ?? "?") + " 行";
+  }
+
+  function toggleLine(line: PickableLine): void {
+    if (!canPick(line)) return;
+    const key = pickKey(line);
+    if (picked.some((item) => pickKey(item) === key)) {
+      picked = picked.filter((item) => pickKey(item) !== key);
+      return;
+    }
+    picked = [...picked, { hunkIndex: line.hunkIndex as number, kind: line.kind as "add" | "del", oldNo: line.oldNo, newNo: line.newNo }];
+  }
+
+  /** 进入或退出选行模式都清空选择，避免看不见的选择被写入。 */
+  function setPickMode(next: boolean): void {
+    if (next && !canPickLines) return;
+    if (pickMode === next) return;
+    pickMode = next;
+    picked = [];
+  }
+
+  function commitPickedLines(): void {
+    if (!onStageLines || picked.length === 0 || disabled) return;
+    onStageLines(picked.slice());
+  }
+
+  /**
+   * 行选清理入口：换文件、generation、布局、完整文件、空白显示或过滤之后，之前选中的行可能
+   * 已经不在屏幕上，必须清掉，否则不可见的行会被写进暂存。
+   */
+  function clearLineSelection(): void {
+    if (picked.length > 0) picked = [];
+    if (pickMode) pickMode = false;
+  }
 
   let lineScope = $derived(
     lineSelectionScope({
@@ -245,9 +341,15 @@
     }),
   );
 
+  /** 行选失效的全部触发条件：lineSelectionScope（文件、侧别、generation、布局、完整文件、过滤）
+      之外，再算上「显示空白」偏好，两者任何一个变了都清空选择。 */
+  let pickScope = $derived(
+    lineScope + "|" + (currentDiff?.snapshot ?? "-") + (diffPrefs.showWhitespace ? "|ws" : "|plain"),
+  );
+
   $effect(() => {
     // 读一次 key：上下文变了才清，没变不重复清。
-    lineScope;
+    pickScope;
     untrack(clearLineSelection);
   });
 
@@ -656,6 +758,42 @@
         {/if}
       </div>
     {/if}
+    {#if onStageLines && currentDiff && !readOnly}
+      <!-- 行选（T4）：只在能安全逐行写入的 canonical 差异里出现；不能用时把原因写在 title 上。
+           数量、清除与写入入口都在同一个分组里，和块级按钮一样受 disabled 保护。 -->
+      <div class="diff-toolbar-group diff-pick-bar">
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm diff-ws-btn diff-pick-btn"
+          aria-pressed={pickMode}
+          aria-label="选择行"
+          title={pickBlocker ?? (pickMode ? "退出按行选择，保留文件与块级入口" : "按行选择新增或删除行，再单独暂存")}
+          disabled={!canPickLines && !pickMode}
+          onclick={() => setPickMode(!pickMode)}
+        >
+          <Icon name="check" size={13} /><span class="diff-hist-label">选行</span>
+        </button>
+        {#if pickMode}
+          <span class="badge" data-line-count aria-label={"已选择 " + picked.length + " 行"}>{picked.length} 行</span>
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm"
+            aria-label="清除选中的行"
+            title={picked.length === 0 ? "还没有选中任何行" : "清空当前的行选择"}
+            disabled={picked.length === 0}
+            onclick={() => (picked = [])}
+          >清除</button>
+          <button
+            type="button"
+            class="btn btn-secondary btn-sm"
+            aria-label={selection?.side === "staged" ? "取消暂存选中行" : "暂存选中行"}
+            title={disabled ? BUSY_REASON : picked.length === 0 ? "先在差异里选中新增或删除行" : undefined}
+            disabled={disabled || picked.length === 0}
+            onclick={commitPickedLines}
+          >{selection?.side === "staged" ? "取消暂存选中行" : "暂存选中行"}</button>
+        {/if}
+      </div>
+    {/if}
     <div class="diff-toolbar-group">
       <div class="segmented" role="group" aria-label="差异布局">
         <button type="button" aria-pressed={preferred === "unified"} title="统一视图" onclick={() => (ownMode = "unified")}><Icon name="rows" size={12} />统一</button>
@@ -816,6 +954,22 @@
                   >{hunkLabel(hunk)}</button>
                 {/if}
               {/if}
+              {#if canPick(line)}
+                <!-- 行选：加删行各自一枚，落在与「暂存此块」同一列，不挤动代码列。 -->
+                <button
+                  type="button"
+                  class="btn btn-sm hunk-btn line-pick"
+                  class:btn-secondary={isPicked(line)}
+                  class:btn-ghost={!isPicked(line)}
+                  aria-pressed={isPicked(line)}
+                  aria-label={pickLabel(line)}
+                  title={pickLabel(line)}
+                  data-line-pick={absolute}
+                  onclick={() => toggleLine(line)}
+                >
+                  <Icon name={isPicked(line) ? "check" : line.kind === "del" ? "minus" : "plus"} size={11} />
+                </button>
+              {/if}
             </div>
           {/each}
         {:else}
@@ -851,6 +1005,41 @@
                     onclick={() => onStageHunk(hunk)}
                   >{hunkLabel(hunk)}</button>
                 {/if}
+              {/if}
+              {#if canPick(pickLineOf(row.left)) || canPick(pickLineOf(row.right))}
+                <!-- 并排视图：左右两侧各自独立选择，身份与统一视图完全一致。 -->
+                <span class="side-picks">
+                  {#if canPick(pickLineOf(row.left))}
+                    <button
+                      type="button"
+                      class="btn btn-sm hunk-btn line-pick"
+                      class:btn-secondary={isPicked(pickLineOf(row.left)!)}
+                      class:btn-ghost={!isPicked(pickLineOf(row.left)!)}
+                      aria-pressed={isPicked(pickLineOf(row.left)!)}
+                      aria-label={pickLabel(pickLineOf(row.left)!)}
+                      title={pickLabel(pickLineOf(row.left)!)}
+                      data-line-pick={row.left?.index}
+                      onclick={() => pickRowSide(row.left)}
+                    >
+                      <Icon name={isPicked(pickLineOf(row.left)!) ? "check" : "minus"} size={11} />
+                    </button>
+                  {/if}
+                  {#if canPick(pickLineOf(row.right))}
+                    <button
+                      type="button"
+                      class="btn btn-sm hunk-btn line-pick"
+                      class:btn-secondary={isPicked(pickLineOf(row.right)!)}
+                      class:btn-ghost={!isPicked(pickLineOf(row.right)!)}
+                      aria-pressed={isPicked(pickLineOf(row.right)!)}
+                      aria-label={pickLabel(pickLineOf(row.right)!)}
+                      title={pickLabel(pickLineOf(row.right)!)}
+                      data-line-pick={row.right?.index}
+                      onclick={() => pickRowSide(row.right)}
+                    >
+                      <Icon name={isPicked(pickLineOf(row.right)!) ? "check" : "plus"} size={11} />
+                    </button>
+                  {/if}
+                </span>
               {/if}
             </div>
           {/each}

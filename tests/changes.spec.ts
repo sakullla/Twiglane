@@ -117,6 +117,7 @@ const mocks = vi.hoisted(() => ({
   stageFiles: vi.fn(),
   unstageFiles: vi.fn(),
   stageHunks: vi.fn(),
+  stageLines: vi.fn(),
   commitChanges: vi.fn(),
   commitAndPush: vi.fn(),
   fetchRemote: vi.fn(),
@@ -2408,5 +2409,234 @@ describe("文件列表的目录分组和行数", () => {
       expect(filtered.map((head) => head.textContent?.trim().split(/\s/)[0])).toEqual(["未暂存的改动"]);
       expect(filtered[0].className).toContain("first");
     });
+  });
+});
+/* ------------------------------------------------------------------ *
+ * 行选暂存（R6）：统一/并排共用同一份行身份，过滤与偏好变化清空选择。
+ * ------------------------------------------------------------------ */
+
+/** 一个完整代码块：context、del、add 各就位；只用于行选断言，不经过真实 Git。 */
+function pickableDiff(extra: Partial<DiffResponse> = {}): DiffResponse {
+  const lines: DiffLine[] = [
+    { kind: "hunk", text: "@@ -1,4 +1,4 @@", oldNo: null, newNo: null, hunkIndex: 0 },
+    { kind: "context", text: " line 1", oldNo: 1, newNo: 1, hunkIndex: 0 },
+    { kind: "del", text: "-old 2", oldNo: 2, newNo: null, hunkIndex: 0 },
+    { kind: "add", text: "+new 2", oldNo: null, newNo: 2, hunkIndex: 0 },
+    { kind: "context", text: " line 3", oldNo: 3, newNo: 3, hunkIndex: 0 },
+  ];
+  return {
+    generation: 4,
+    path: "demo.txt",
+    staged: false,
+    binary: false,
+    text: null,
+    summary: "新增 1 行，删除 1 行。",
+    additions: 1,
+    deletions: 1,
+    complete: true,
+    truncated: false,
+    snapshot: "snap",
+    hunks: [{ index: 0, header: "@@ -1,4 +1,4 @@", complete: true, stageable: true, startLine: 0, lineCount: 5 }],
+    lines,
+    offset: 0,
+    totalLines: lines.length,
+    ...extra,
+  };
+}
+
+describe("行选暂存（R6）", () => {
+  beforeEach(() => resetDiffPrefs());
+
+  it("统一视图只交出选中的新增/删除行身份，并支持清除", async () => {
+    const onStageLines = vi.fn();
+    render(DiffView, {
+      props: {
+        selection,
+        diff: pickableDiff(),
+        error: null,
+        loading: false,
+        disabled: false,
+        onStageHunk: () => {},
+        onLoadMore: () => {},
+        onStageLines,
+      },
+    });
+    const toggle = screen.getByRole("button", { name: "选择行" });
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    await fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    // 上下文行、块标题没有可选控件：只有新增/删除行能选。
+    expect(screen.queryByRole("button", { name: /第 1 行/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /第 3 行/ })).toBeNull();
+
+    const add = screen.getByRole("button", { name: "选择新增第 2 行" });
+    const del = screen.getByRole("button", { name: "选择删除第 2 行" });
+    // 每个可选控件都是真的 button：Tab 能到，Enter/Space 走原生按钮语义。
+    expect(add.tagName).toBe("BUTTON");
+    add.focus();
+    expect(document.activeElement).toBe(add);
+    await fireEvent.click(add);
+    expect(add.getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelector("[data-line-count]")?.textContent).toContain("1");
+    await fireEvent.click(del);
+    expect(document.querySelector("[data-line-count]")?.textContent).toContain("2");
+
+    await fireEvent.click(screen.getByRole("button", { name: "暂存选中行" }));
+    expect(onStageLines).toHaveBeenCalledTimes(1);
+    expect(onStageLines.mock.calls[0][0]).toEqual([
+      { hunkIndex: 0, kind: "add", oldNo: null, newNo: 2 },
+      { hunkIndex: 0, kind: "del", oldNo: 2, newNo: null },
+    ]);
+
+    await fireEvent.click(screen.getByRole("button", { name: "清除选中的行" }));
+    expect(document.querySelector("[data-line-count]")?.textContent).toContain("0");
+    expect(screen.getByRole("button", { name: "暂存选中行" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("并排视图左右两侧用的是同一份行身份", async () => {
+    const onStageLines = vi.fn();
+    render(DiffView, {
+      props: {
+        selection,
+        diff: pickableDiff(),
+        error: null,
+        loading: false,
+        disabled: false,
+        onStageHunk: () => {},
+        onLoadMore: () => {},
+        onStageLines,
+      },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "并排" }));
+    await fireEvent.click(screen.getByRole("button", { name: "选择行" }));
+    expect(document.querySelectorAll(".side-row").length).toBeGreaterThan(0);
+    await fireEvent.click(screen.getByRole("button", { name: "选择删除第 2 行" }));
+    await fireEvent.click(screen.getByRole("button", { name: "暂存选中行" }));
+    expect(onStageLines.mock.calls[0][0]).toEqual([{ hunkIndex: 0, kind: "del", oldNo: 2, newNo: null }]);
+  });
+
+  it("不能逐行写入的位置给出禁用原因，历史只读视图没有入口", async () => {
+    const base = {
+      selection,
+      error: null,
+      loading: false,
+      disabled: false,
+      onStageHunk: () => {},
+      onLoadMore: () => {},
+      onStageLines: () => {},
+    };
+    const view = render(DiffView, { props: { ...base, diff: pickableDiff(), fullFile: true } });
+    const toggle = () => screen.getByRole("button", { name: "选择行" }) as HTMLButtonElement;
+    expect(toggle().disabled).toBe(true);
+    expect(toggle().title).toContain("完整文件");
+
+    await view.rerender({ ...base, diff: pickableDiff({ binary: true }), fullFile: false });
+    expect(toggle().title).toContain("二进制");
+
+    await view.rerender({ ...base, diff: pickableDiff({ truncated: true, complete: false }), fullFile: false });
+    expect(toggle().title).toContain("截断");
+
+    const whole: DiffLine[] = [
+      { kind: "meta", text: "new file mode 100644", oldNo: null, newNo: null, hunkIndex: null },
+      { kind: "hunk", text: "@@ -0,0 +1,1 @@", oldNo: null, newNo: null, hunkIndex: 0 },
+      { kind: "add", text: "+only", oldNo: null, newNo: 1, hunkIndex: 0 },
+    ];
+    await view.rerender({ ...base, diff: pickableDiff({ lines: whole }), fullFile: false });
+    expect(toggle().title).toContain("文件本身");
+
+    await view.rerender({ ...base, diff: pickableDiff(), fullFile: false, readOnly: true });
+    expect(screen.queryByRole("button", { name: "选择行" })).toBeNull();
+  });
+
+  it("空白过滤打开时清空行选，隐藏的块不会被写进暂存", async () => {
+    render(DiffView, {
+      props: {
+        selection,
+        diff: pickableDiff(),
+        error: null,
+        loading: false,
+        disabled: false,
+        onStageHunk: () => {},
+        onLoadMore: () => {},
+        onStageLines: () => {},
+      },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "选择行" }));
+    await fireEvent.click(screen.getByRole("button", { name: "选择新增第 2 行" }));
+    expect(document.querySelector("[data-line-count]")?.textContent).toContain("1");
+
+    await fireEvent.click(screen.getByRole("button", { name: "忽略纯空白改动" }));
+    await tick();
+    // 可见行集合变了：选择与选行模式一起失效，看不见的行不会被写入。
+    expect(document.querySelector("[data-line-count]")).toBeNull();
+    expect(screen.getByRole("button", { name: "选择行" }).getAttribute("aria-pressed")).toBe("false");
+  });
+});
+describe("改动视图的按行暂存（R6）", () => {
+  it("选行后只把选中的行身份交给后端，并采用返回的快照", async () => {
+    mocks.stageLines.mockResolvedValue({ ...snapshot, generation: 5 });
+    renderApp();
+    await openRepo();
+    const toggle = await screen.findByRole("button", { name: "选择行" });
+    expect(toggle.hasAttribute("disabled")).toBe(false);
+    await fireEvent.click(toggle);
+    const picks = [...document.querySelectorAll<HTMLButtonElement>("[data-line-pick]")];
+    expect(picks.length).toBeGreaterThan(0);
+    await fireEvent.click(picks[0]);
+    await fireEvent.click(screen.getByRole("button", { name: "暂存选中行" }));
+    await waitFor(() => expect(mocks.stageLines).toHaveBeenCalledTimes(1));
+    const [repo, relative, staged, lines, snap, , requestId, original] = mocks.stageLines.mock.calls[0];
+    expect(repo).toBe(repoPath);
+    expect(relative).toBe("src/App.svelte");
+    expect(staged).toBe(false);
+    expect(snap).toBe("snap");
+    expect(original).toBeNull();
+    expect(requestId).toBeGreaterThan(0);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ hunkIndex: 0 });
+    // 文件级与块级入口都还在：行级只是多一条路。
+    expect(document.querySelector(".hunk-btn")).toBeTruthy();
+  });
+
+  it("行选失败只说明原因：草稿保留，暂存区不动", async () => {
+    mocks.stageLines.mockRejectedValue({
+      code: "stale_patch",
+      message: "差异已变化，未应用过期的行。",
+      generation: 5,
+    });
+    renderApp();
+    await openRepo();
+    const composer = () => document.querySelector<HTMLTextAreaElement>(".composer textarea")!;
+    await fireEvent.input(composer(), { target: { value: "保留的说明" } });
+    await fireEvent.click(await screen.findByRole("button", { name: "选择行" }));
+    await fireEvent.click(document.querySelector<HTMLButtonElement>("[data-line-pick]")!);
+    await fireEvent.click(screen.getByRole("button", { name: "暂存选中行" }));
+    expect((await screen.findAllByText(/差异已变化/)).length).toBeGreaterThan(0);
+    expect(composer().value).toBe("保留的说明");
+    expect(mocks.stageFiles).not.toHaveBeenCalled();
+    expect(mocks.unstageFiles).not.toHaveBeenCalled();
+  });
+
+  it("写入进行中时暂存选中行按钮禁用，返回后按新快照刷新", async () => {
+    const pending: { resolve: ((value: unknown) => void) | null } = { resolve: null };
+    mocks.stageLines.mockImplementation(
+      () =>
+        new Promise<unknown>((done) => {
+          pending.resolve = done;
+        }),
+    );
+    renderApp();
+    await openRepo();
+    await fireEvent.click(await screen.findByRole("button", { name: "选择行" }));
+    await fireEvent.click(document.querySelector<HTMLButtonElement>("[data-line-pick]")!);
+    await fireEvent.click(screen.getByRole("button", { name: "暂存选中行" }));
+    await waitFor(() => expect(mocks.stageLines).toHaveBeenCalledTimes(1));
+    await tick();
+    const commitButton = () => screen.getByRole<HTMLButtonElement>("button", { name: "暂存选中行" });
+    // 写入没有回来之前，按钮必须是禁用的，不能重复提交同一次选择。
+    expect(commitButton().disabled).toBe(true);
+    pending.resolve?.({ ...snapshot, generation: 6 });
+    // 写入回来后解除忙碌，可以继续调整选择。
+    await waitFor(() => expect(commitButton().disabled).toBe(false));
   });
 });

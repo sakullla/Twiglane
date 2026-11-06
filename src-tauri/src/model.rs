@@ -168,6 +168,17 @@ pub struct DiffLine {
     pub hunk_index: Option<u32>,
 }
 
+/// 选中的差异行身份。kind 只允许 add / del；上下文、块标题、meta 与「没有换行」标记
+/// 不可选，也不参与逐行补丁。oldNo/newNo 与 DiffLine 完全一致，前后端用同一份身份。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffLineSelection {
+    pub hunk_index: u32,
+    pub kind: String,
+    pub old_no: Option<u32>,
+    pub new_no: Option<u32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffHunk {

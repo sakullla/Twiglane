@@ -41,6 +41,7 @@ fn capabilities_do_not_grant_a_shell() {
         "allow-stage-files",
         "allow-unstage-files",
         "allow-stage-hunks",
+        "allow-stage-lines",
         "allow-commit-changes",
         "allow-clone-repository",
         "allow-remote-state",

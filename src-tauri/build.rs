@@ -32,6 +32,7 @@ fn main() {
             "stage_files",
             "unstage_files",
             "stage_hunks",
+            "stage_lines",
             "commit_changes",
             "clone_repository",
             "remote_state",

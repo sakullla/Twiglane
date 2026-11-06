@@ -97,6 +97,7 @@ const mocks = vi.hoisted(() => ({
   stageFiles: vi.fn(),
   unstageFiles: vi.fn(),
   stageHunks: vi.fn(),
+  stageLines: vi.fn(),
   commitChanges: vi.fn(),
   commitAndPush: vi.fn(),
   fetchRemote: vi.fn(),

@@ -25,6 +25,7 @@
   import type {
     AppFailure,
     DiffHunk,
+    DiffLineSelection,
     DiffResponse,
     FileRow,
     FileSelection,
@@ -1186,6 +1187,38 @@
       banner = null;
       applySnapshot(snapshot);
       live = choice.side === "staged" ? "已取消暂存所选代码块" : "已暂存所选代码块";
+    } catch (error) {
+      if (opened?.summary.path === current.summary.path) handleMutationError(error);
+    } finally {
+      pending = null;
+    }
+  }
+
+  /**
+   * 逐行暂存 / 取消暂存：与按块走同一条写锁与 snapshot 校验，只是补丁由后端按行身份构造。
+   * 失败时只说明原因并刷新可见状态，不扩大暂存范围，也不清掉提交说明草稿。
+   */
+  async function stageLinesOf(choice: FileSelection, currentDiff: DiffResponse, lines: DiffLineSelection[]) {
+    const current = opened;
+    if (!current || pending || reading || lines.length === 0) return;
+    pending = "line";
+    live = choice.side === "staged" ? "正在取消暂存选中的行" : "正在暂存选中的行";
+    try {
+      const file = current.snapshot.files.find((item) => item.path === choice.path);
+      const snapshot = await api.stageLines(
+        current.summary.path,
+        choice.path,
+        choice.side === "staged",
+        lines,
+        currentDiff.snapshot,
+        current.generation,
+        nextId(),
+        file?.originalPath ?? null,
+      );
+      if (opened?.summary.path !== current.summary.path) return;
+      banner = null;
+      applySnapshot(snapshot);
+      live = choice.side === "staged" ? "已取消暂存选中的行" : "已暂存选中的行";
     } catch (error) {
       if (opened?.summary.path === current.summary.path) handleMutationError(error);
     } finally {
@@ -2704,6 +2737,9 @@
                   loading={diffLoading}
                   disabled={writeLocked}
                   onStageHunk={stageHunk}
+                  onStageLines={(lines) => {
+                    if (selected && diff) void stageLinesOf(selected, diff, lines);
+                  }}
                   onLoadMore={loadMoreDiff}
                   onFileHistory={openFileHistory}
                   fullFile={diffFullFile}

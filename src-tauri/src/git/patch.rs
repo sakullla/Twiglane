@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sha2::{Digest, Sha256};
 
 use crate::error::AppError;
-use crate::model::{ChangeKind, CommitFileChange, DiffHunk, DiffLine, FileChange, LineStat};
+use crate::model::{
+    ChangeKind, CommitFileChange, DiffHunk, DiffLine, DiffLineSelection, FileChange, LineStat,
+};
 
 pub const DIFF_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
 pub const DIFF_VIEW_LINE_LIMIT: u32 = 2_000;
@@ -168,6 +170,265 @@ pub fn build_patch(parsed: &ParsedDiff, indexes: &[u32]) -> Result<Vec<u8>, AppE
         if !patch.ends_with('\n') {
             patch.push('\n');
         }
+    }
+    Ok(patch.into_bytes())
+}
+
+/// 一次行级操作最多 500 行，与按块暂存的限制一致。
+pub const MAX_LINE_PICKS: usize = 500;
+
+/// 让「逐行写入」不再等于「只写选中的行」的文件头语义：文件的新增/删除、重命名、拷贝、
+/// 权限或类型变化。遇到这些必须拒绝行级操作，保留整文件与按块入口。
+const HEADER_BLOCKERS: [&str; 9] = [
+    "new file mode",
+    "deleted file mode",
+    "old mode",
+    "new mode",
+    "rename from",
+    "rename to",
+    "copy from",
+    "copy to",
+    "similarity index",
+];
+
+fn unsupported_line_patch(reason: &str) -> AppError {
+    AppError::new(
+        "line_patch_unsupported",
+        format!(
+            "这个改动里有{reason}，逐行写入会改变文件本身的语义，已拒绝。可以按块或整个文件暂存。"
+        ),
+    )
+}
+
+fn header_blocker(preamble: &str) -> Option<&'static str> {
+    for line in preamble.lines() {
+        let text = line.trim_end_matches('\r');
+        for marker in HEADER_BLOCKERS {
+            if text.starts_with(marker) {
+                return Some(marker);
+            }
+        }
+    }
+    None
+}
+
+/// 块内出现两行完全相同的身份时无法确定要写哪一行：宁可拒绝，也不猜。
+fn hunk_has_duplicate_identity(hunk: &ParsedHunk) -> bool {
+    let mut seen = HashSet::new();
+    for line in &hunk.lines {
+        if line.kind != "add" && line.kind != "del" {
+            continue;
+        }
+        if !seen.insert((line.kind.as_str(), line.old_no, line.new_no)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 找出命中这一行的选择。行身份由 kind + oldNo + newNo 组成，前端统一与并排视图共用同一份。
+fn take_pick(
+    picks: &[DiffLineSelection],
+    matched: &mut [bool],
+    hunk_index: u32,
+    line: &DiffLine,
+) -> Option<usize> {
+    let mut found = None;
+    for (index, pick) in picks.iter().enumerate() {
+        if pick.hunk_index != hunk_index || pick.kind != line.kind {
+            continue;
+        }
+        if pick.old_no == line.old_no && pick.new_no == line.new_no {
+            found = Some(index);
+            break;
+        }
+    }
+    if let Some(index) = found {
+        matched[index] = true;
+    }
+    found
+}
+
+/// 逐行补丁：只写选中的新增/删除行，其余行保持原样。
+///
+/// 暂存（reverse=false）时未选的删除行转为上下文、未选的新增行省略；取消暂存
+/// （reverse=true，输入是 staged 侧差异）时镜像处理：未选的新增行是上下文，未选的删除行省略。
+/// 每个块重算 old/new 的起点与行数，行内字节与上下文一律沿用原始差异。
+pub fn build_line_patch(
+    parsed: &ParsedDiff,
+    picks: &[DiffLineSelection],
+    reverse: bool,
+) -> Result<Vec<u8>, AppError> {
+    if parsed.binary || parsed.undecodable {
+        return Err(AppError::new(
+            "not_text",
+            "二进制或无法解码的文件不能按行暂存。可以暂存整个文件。",
+        ));
+    }
+    if picks.is_empty() {
+        return Err(AppError::new(
+            "empty_lines",
+            "没有选中的行，未修改暂存区。",
+        ));
+    }
+    if picks.len() > MAX_LINE_PICKS {
+        return Err(AppError::new(
+            "too_many_lines",
+            "一次选择的行过多，未修改暂存区。",
+        ));
+    }
+    if parsed.preamble.trim().is_empty() || !parsed.preamble.contains("diff --git ") {
+        return Err(unsupported_line_patch("缺失的文件头"));
+    }
+    if let Some(marker) = header_blocker(&parsed.preamble) {
+        return Err(unsupported_line_patch(marker));
+    }
+    let mut seen = HashSet::new();
+    for pick in picks {
+        if pick.kind != "add" && pick.kind != "del" {
+            return Err(AppError::new(
+                "line_not_selectable",
+                "只有新增行和删除行能单独暂存。上下文行、块标题和「没有换行」标记不可选。",
+            ));
+        }
+        if !seen.insert((pick.hunk_index, pick.kind.clone(), pick.old_no, pick.new_no)) {
+            return Err(AppError::new(
+                "duplicate_line",
+                "同一行被选择了多次，未修改暂存区。",
+            ));
+        }
+    }
+    let mut patch = parsed.preamble.clone();
+    if !patch.ends_with('\n') {
+        patch.push('\n');
+    }
+    let mut matched = vec![false; picks.len()];
+    // 结果文件相对索引的位移：只有真正写进补丁的块才改变后面的行号。
+    let mut delta: i64 = 0;
+    for hunk in &parsed.hunks {
+        if !picks.iter().any(|pick| pick.hunk_index == hunk.index) {
+            continue;
+        }
+        if !hunk.complete {
+            return Err(AppError::new(
+                "truncated_hunk",
+                "这个代码块不完整，不能按行暂存。请暂存整个文件，或加载完整差异后再试。",
+            ));
+        }
+        if hunk_has_duplicate_identity(hunk) {
+            return Err(AppError::new(
+                "ambiguous_line",
+                "这个代码块里有两行身份完全相同，无法确定要写哪一行。请改用按块暂存。",
+            ));
+        }
+        let Some((old_start, _, new_start, _)) = parse_hunk_header(&hunk.header) else {
+            return Err(unsupported_line_patch("无法解析的代码块标题"));
+        };
+        let raw_lines = split_keep(&hunk.raw);
+        if raw_lines.len() != hunk.lines.len() {
+            return Err(unsupported_line_patch("无法解析的代码块内容"));
+        }
+        if hunk
+            .lines
+            .iter()
+            .skip(1)
+            .any(|line| line.kind == "nonewline")
+        {
+            return Err(AppError::new(
+                "line_patch_no_newline",
+                "这个代码块里有「没有换行」标记，逐行写入会改变文件末尾的语义。请按块或整个文件暂存。",
+            ));
+        }
+        // 索引侧的行号：暂存看旧侧（索引 → 工作区），取消暂存看新侧（HEAD → 索引）。
+        let mut cursor = if reverse {
+            new_start.max(1)
+        } else {
+            old_start.max(1)
+        };
+        let mut body: Vec<(char, &str, u32)> = Vec::new();
+        for (line, raw) in hunk.lines.iter().skip(1).zip(raw_lines.iter().skip(1)) {
+            let raw: &str = raw;
+            let first = raw.as_bytes().first().copied().unwrap_or(0);
+            if !matches!(first, b' ' | b'+' | b'-') || !raw.ends_with('\n') {
+                return Err(unsupported_line_patch("无法逐行表达的行尾"));
+            }
+            match line.kind.as_str() {
+                "context" => {
+                    body.push((' ', raw, cursor));
+                    cursor = cursor.saturating_add(1);
+                }
+                "add" => {
+                    let picked = take_pick(picks, &mut matched, hunk.index, line).is_some();
+                    if reverse {
+                        // 取消暂存：新增行本来就在索引里，未选的必须留成上下文。
+                        body.push((if picked { '+' } else { ' ' }, raw, cursor));
+                        cursor = cursor.saturating_add(1);
+                    } else if picked {
+                        body.push(('+', raw, cursor));
+                    }
+                    // 未选的新增行：省略，索引里本来也没有这一行。
+                }
+                "del" => {
+                    let picked = take_pick(picks, &mut matched, hunk.index, line).is_some();
+                    if reverse {
+                        if picked {
+                            body.push(('-', raw, cursor));
+                        }
+                        // 未选的删除行：省略，不能把 HEAD 的内容塞回索引。
+                    } else {
+                        // 未选的删除行：索引里还在，转成上下文。
+                        body.push((if picked { '-' } else { ' ' }, raw, cursor));
+                        cursor = cursor.saturating_add(1);
+                    }
+                }
+                _ => return Err(unsupported_line_patch("无法逐行表达的行类型")),
+            }
+        }
+        if body.is_empty() {
+            continue;
+        }
+        let consumes_index = |marker: char| match marker {
+            ' ' => true,
+            '-' => !reverse,
+            '+' => reverse,
+            _ => false,
+        };
+        let base = body
+            .iter()
+            .find(|(marker, _, _)| consumes_index(*marker))
+            .map(|(_, _, position)| *position)
+            .unwrap_or_else(|| body[0].2);
+        let old_count = body.iter().filter(|(marker, _, _)| *marker != '+').count() as u32;
+        let new_count = body.iter().filter(|(marker, _, _)| *marker != '-').count() as u32;
+        // 旧侧没有行时 Git 的写法是「在第 base-1 行之后插入」，例如空文件新增块 @@ -0,0 +1,N @@。
+        let old_start_out = if old_count == 0 {
+            base.saturating_sub(1)
+        } else {
+            base
+        };
+        let new_start_out = (i64::from(base) + delta).max(0) as u32;
+        patch.push_str(&format!(
+            "@@ -{old_start_out},{old_count} +{new_start_out},{new_count} @@"
+        ));
+        if let Some((at, _)) = hunk.header.match_indices("@@").nth(1) {
+            let suffix = hunk.header[at + 2..].trim();
+            if !suffix.is_empty() {
+                patch.push(' ');
+                patch.push_str(suffix);
+            }
+        }
+        patch.push('\n');
+        for (marker, raw, _) in &body {
+            patch.push(*marker);
+            patch.push_str(&raw[1..]);
+        }
+        delta += i64::from(new_count) - i64::from(old_count);
+    }
+    if matched.iter().any(|flag| !flag) {
+        return Err(AppError::new(
+            "line_missing",
+            "所选行已不在当前差异中，未修改暂存区。",
+        ));
     }
     Ok(patch.into_bytes())
 }
@@ -636,6 +897,202 @@ index c4352f8..8964c93 100644
  line 17
  line 18
 "
+    }
+
+    fn pick_add(hunk_index: u32, new_no: u32) -> DiffLineSelection {
+        DiffLineSelection {
+            hunk_index,
+            kind: "add".to_string(),
+            old_no: None,
+            new_no: Some(new_no),
+        }
+    }
+
+    fn pick_del(hunk_index: u32, old_no: u32) -> DiffLineSelection {
+        DiffLineSelection {
+            hunk_index,
+            kind: "del".to_string(),
+            old_no: Some(old_no),
+            new_no: None,
+        }
+    }
+
+    /// 与前端同一份身份：从 canonical diff 的某一行取 hunkIndex/kind/oldNo/newNo。
+    fn pick_of(parsed: &ParsedDiff, kind: &str, text: &str) -> DiffLineSelection {
+        let line = parsed
+            .hunks
+            .iter()
+            .flat_map(|hunk| hunk.lines.iter())
+            .find(|line| line.kind == kind && line.text == text)
+            .unwrap_or_else(|| panic!("missing {kind} {text}"));
+        DiffLineSelection {
+            hunk_index: line.hunk_index.unwrap(),
+            kind: kind.to_string(),
+            old_no: line.old_no,
+            new_no: line.new_no,
+        }
+    }
+
+    fn patch_text(parsed: &ParsedDiff, picks: &[DiffLineSelection], reverse: bool) -> String {
+        String::from_utf8(build_line_patch(parsed, picks, reverse).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn line_patch_stages_one_added_line_and_keeps_the_deletion_unstaged() {
+        let parsed = parse_diff(sample().as_bytes(), false).unwrap();
+        let patch = patch_text(&parsed, &[pick_add(0, 4)], false);
+        assert!(patch.contains("+CHANGED A\n"), "{patch}");
+        // 未选的删除行转成上下文：索引里的原行必须还在。
+        assert!(patch.contains("\n line 4\n"), "{patch}");
+        assert!(!patch.contains("-line 4"), "{patch}");
+        // 未选的删除行转成上下文后，新侧多出一行：索引最终同时保留原行与新增行。
+        assert!(patch.contains("@@ -1,7 +1,8 @@"), "{patch}");
+        assert!(!patch.contains("CHANGED B"), "{patch}");
+        assert!(!patch.contains("@@ -12"), "{patch}");
+    }
+
+    #[test]
+    fn line_patch_deletes_one_line_without_adding_the_paired_one() {
+        let parsed = parse_diff(sample().as_bytes(), false).unwrap();
+        let patch = patch_text(&parsed, &[pick_del(0, 4)], false);
+        assert!(patch.contains("-line 4\n"), "{patch}");
+        assert!(!patch.contains("CHANGED A"), "{patch}");
+        assert!(patch.contains("@@ -1,7 +1,6 @@"), "{patch}");
+    }
+
+    #[test]
+    fn line_patch_spans_hunks_and_recounts_each_header() {
+        let parsed = parse_diff(sample().as_bytes(), false).unwrap();
+        let patch = patch_text(&parsed, &[pick_add(0, 4), pick_del(1, 15)], false);
+        assert!(patch.contains("+CHANGED A\n"), "{patch}");
+        assert!(patch.contains("-line 15\n"), "{patch}");
+        assert!(!patch.contains("CHANGED B"), "{patch}");
+        // 第一块多一行，第二块少一行；第二块的起点跟着位移，块头的函数上下文保留。
+        assert!(patch.contains("@@ -1,7 +1,8 @@"), "{patch}");
+        assert!(patch.contains("@@ -12,7 +13,6 @@ line 11"), "{patch}");
+    }
+
+    #[test]
+    fn reverse_line_patch_unstages_one_line_and_keeps_the_other_addition() {
+        let raw = "\
+diff --git a/demo.txt b/demo.txt
+index 1111111..2222222 100644
+--- a/demo.txt
++++ b/demo.txt
+@@ -1,3 +1,4 @@
+ keep
+-old
++new A
++new B
+ tail
+";
+        let parsed = parse_diff(raw.as_bytes(), false).unwrap();
+        let patch = patch_text(&parsed, &[pick_add(0, 2)], true);
+        // 只把选中的新增行写成删除方向，未选的新增行留在索引里，必须是上下文。
+        assert!(patch.contains("\n+new A\n"), "{patch}");
+        assert!(patch.contains("\n new B\n"), "{patch}");
+        assert!(!patch.contains("-old"), "{patch}");
+        assert!(patch.contains("@@ -1,3 +1,4 @@"), "{patch}");
+    }
+
+    #[test]
+    fn line_patch_rejects_headers_that_change_the_whole_file() {
+        let new_file = "\
+diff --git a/n.txt b/n.txt
+new file mode 100644
+index 0000000..abc
+--- /dev/null
++++ b/n.txt
+@@ -0,0 +1,2 @@
++a
++b
+";
+        let parsed = parse_diff(new_file.as_bytes(), false).unwrap();
+        let error = build_line_patch(&parsed, &[pick_add(0, 1)], false).unwrap_err();
+        assert_eq!(error.code, "line_patch_unsupported");
+
+        let mode = "\
+diff --git a/m.sh b/m.sh
+old mode 100644
+new mode 100755
+index 1111111..2222222
+--- a/m.sh
++++ b/m.sh
+@@ -1,2 +1,2 @@
+ keep
+-old
++new
+";
+        let parsed = parse_diff(mode.as_bytes(), false).unwrap();
+        let error = build_line_patch(&parsed, &[pick_add(0, 2)], false).unwrap_err();
+        assert_eq!(error.code, "line_patch_unsupported");
+
+        let renamed = "\
+diff --git a/old.txt b/new.txt
+similarity index 90%
+rename from old.txt
+rename to new.txt
+index 1111111..2222222 100644
+--- a/old.txt
++++ b/new.txt
+@@ -1,2 +1,2 @@
+ keep
+-old
++new
+";
+        let parsed = parse_diff(renamed.as_bytes(), false).unwrap();
+        let error = build_line_patch(&parsed, &[pick_add(0, 2)], false).unwrap_err();
+        assert_eq!(error.code, "line_patch_unsupported");
+    }
+
+    #[test]
+    fn line_patch_rejects_no_newline_hunks() {
+        let raw = "\
+diff --git a/n.txt b/n.txt
+--- a/n.txt
++++ b/n.txt
+@@ -1,2 +1,2 @@
+-a
++A
+-h
+\\ No newline at end of file
++H
+\\ No newline at end of file
+";
+        let parsed = parse_diff(raw.as_bytes(), false).unwrap();
+        assert!(parsed.hunks[0].complete);
+        let pick = pick_of(&parsed, "add", "+A");
+        let error = build_line_patch(&parsed, &[pick], false).unwrap_err();
+        assert_eq!(error.code, "line_patch_no_newline");
+    }
+
+    #[test]
+    fn line_patch_rejects_unselectable_missing_and_duplicate_picks() {
+        let parsed = parse_diff(sample().as_bytes(), false).unwrap();
+        let context = DiffLineSelection {
+            hunk_index: 0,
+            kind: "context".to_string(),
+            old_no: Some(2),
+            new_no: Some(2),
+        };
+        assert_eq!(
+            build_line_patch(&parsed, &[context], false).unwrap_err().code,
+            "line_not_selectable"
+        );
+        let missing = pick_add(0, 99);
+        assert_eq!(
+            build_line_patch(&parsed, &[missing], false).unwrap_err().code,
+            "line_missing"
+        );
+        let duplicated = [pick_add(0, 4), pick_add(0, 4)];
+        assert_eq!(
+            build_line_patch(&parsed, &duplicated, false).unwrap_err().code,
+            "duplicate_line"
+        );
+        assert_eq!(
+            build_line_patch(&parsed, &[], false).unwrap_err().code,
+            "empty_lines"
+        );
     }
 
     #[test]

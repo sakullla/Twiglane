@@ -1618,6 +1618,7 @@ describe("应用外壳", () => {
     expect(runtime, "设置 modal 要有运行环境分区锚点").toBeTruthy();
     expect(runtime!.contains(document.activeElement), "打开后焦点落在运行环境分区").toBe(true);
     expect(within(runtime!).getByRole("list", { name: "Git 诊断" }).textContent, "直接看到问题说明").toContain("没有找到 Git");
+    expect(runtime!.querySelector("[data-git-next-step]")?.textContent, "下一步就在当前入口").toContain("安装 Git");
     expect(within(runtime!).getByRole("button", { name: "重新检测" })).toBeTruthy();
     expect(within(runtime!).getByRole("button", { name: "选择 Git" })).toBeTruthy();
     expect(runtime!.querySelector("details")?.open, "Git 缺失时说明默认展开").toBe(true);
@@ -1871,6 +1872,7 @@ describe("应用外壳", () => {
       const clone = await startBackgroundClone();
       clone.fail({ code: "clone_failed", message: "认证失败" });
       await waitFor(() => expect(document.querySelector(".toast.error")?.textContent).toContain("认证失败"));
+      expect(document.querySelector(".toast.error")?.textContent, "后台失败的通知也带下一步").toContain("下一步：");
       expect(screen.getByRole("button", { name: "当前仓库 demo" })).toBeTruthy();
     });
   });
@@ -2010,6 +2012,174 @@ describe("应用外壳", () => {
       expect(card.title).toBe("正在读取，稍后再试");
     }
     finish(undefined);
+  });
+
+  it("起始页空状态保留三个入口，并说明打开只检查仓库身份", async () => {
+    useRecent([]);
+    render(App);
+    await waitFor(() => expect(document.querySelector("[data-welcome-empty]")).toBeTruthy());
+    expect(document.querySelectorAll(".action-card")).toHaveLength(3);
+    expect(screen.queryByRole("textbox", { name: "搜索最近仓库" }), "没有仓库时不出现搜索").toBeNull();
+    expect(document.querySelector("[data-welcome-empty]")?.textContent).toContain("还没有最近仓库");
+    expect(document.querySelector("[data-welcome-empty-note]")?.textContent).toContain("不会初始化");
+    mocks.pickDirectory.mockResolvedValue(null);
+    await fireEvent.click(screen.getByRole("button", { name: /打开本地仓库/ }));
+    await waitFor(() => expect(mocks.pickDirectory).toHaveBeenCalledWith("添加已有仓库"));
+  });
+
+  it("起始页五个最近仓库全部列出且不显示搜索，点击即可继续", async () => {
+    useRecent(
+      Array.from({ length: 5 }, (_, index) => ({
+        name: `repo-${index}`,
+        path: `C:/work/repo-${index}`,
+        openedAtMs: 1_700_000_000_000 + index,
+      })),
+    );
+    render(App);
+    await waitFor(() => expect(document.querySelectorAll(".welcome-recent > button")).toHaveLength(5));
+    expect(screen.queryByRole("textbox", { name: "搜索最近仓库" }), "不超过五行时不用搜索也都在眼前").toBeNull();
+    expect(document.querySelector("[data-welcome-count]")).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: /repo-1/ }));
+    await waitFor(() => expect(mocks.openRepository).toHaveBeenCalledWith("C:/work/repo-1", expect.any(Number)));
+  });
+
+  it("起始页数百个最近仓库默认显示前五个，搜索能发现列表外项目并区分同名路径", async () => {
+    const many = Array.from({ length: 240 }, (_, index) => ({
+      name: `repo-${index}`,
+      path: `C:/work/repo-${index}`,
+      openedAtMs: 1_700_000_000_000 + index,
+    }));
+    many[0] = { name: "demo", path: "C:/work/demo", openedAtMs: 1_700_000_000_001 };
+    many[3] = { name: "demo", path: "D:/archive/2019/demo", openedAtMs: 1_700_000_000_002 };
+    many[237] = { name: "needle-project", path: "E:/far/needle-project", openedAtMs: 1_700_000_000_003 };
+    useRecent(many);
+    render(App);
+
+    const search = await screen.findByRole("textbox", { name: "搜索最近仓库" });
+    expect(document.querySelectorAll(".welcome-recent > button")).toHaveLength(5);
+    expect(document.querySelector("[data-welcome-count]")?.textContent).toContain("共 240 个");
+    expect(document.querySelector("[data-welcome-limit]")?.textContent).toContain("显示前 5 个");
+
+    await fireEvent.input(search, { target: { value: "needle" } });
+    await waitFor(() => expect(document.querySelectorAll(".welcome-recent > button")).toHaveLength(1));
+    expect(screen.getByRole("button", { name: /needle-project/ })).toBeTruthy();
+    expect(document.querySelector("[data-welcome-count]")?.textContent).toContain("匹配 1 个");
+
+    await fireEvent.input(search, { target: { value: "demo" } });
+    await waitFor(() => expect(document.querySelectorAll(".welcome-recent > button")).toHaveLength(2));
+    const shownPaths = [...document.querySelectorAll(".welcome-recent .repo-path-full bdi")].map((node) => node.textContent);
+    expect(shownPaths, "同名仓库用完整路径区分").toEqual(["C:/work/demo", "D:/archive/2019/demo"]);
+    expect(document.querySelector("[data-welcome-count]")?.textContent).toContain("匹配 2 个");
+
+    await fireEvent.input(search, { target: { value: "没有这个仓库" } });
+    await waitFor(() => expect(document.querySelector("[data-welcome-no-match]")).toBeTruthy());
+    expect(document.querySelectorAll(".welcome-recent > button")).toHaveLength(0);
+
+    await fireEvent.input(search, { target: { value: "needle" } });
+    await waitFor(() => expect(document.querySelectorAll(".welcome-recent > button")).toHaveLength(1));
+    await fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() => expect(mocks.openRepository).toHaveBeenCalledWith("E:/far/needle-project", expect.any(Number)));
+  });
+
+  it("克隆目标已有内容时就地给出原因和下一步，不弹重复通知也不覆盖", async () => {
+    render(App);
+    await waitFor(() => expect(document.querySelector(".welcome")).toBeTruthy());
+    await fireEvent.click(screen.getByRole("button", { name: /克隆远程仓库/ }));
+    const dialog = await screen.findByRole("dialog", { name: "克隆仓库" });
+    await fireEvent.input(within(dialog).getByLabelText("远程地址"), { target: { value: "https://e.com/demo.git" } });
+    mocks.pickDirectory.mockResolvedValue("C:/work");
+    await fireEvent.click(within(dialog).getByRole("button", { name: /选择目录/ }));
+    await waitFor(() => expect((within(dialog).getByLabelText("父目录") as HTMLInputElement).value).toBe("C:/work"));
+
+    mocks.cloneRepository.mockRejectedValueOnce({
+      code: "clone_destination",
+      message: "目标目录已有文件，未覆盖任何内容。C:/work/demo",
+    });
+    await fireEvent.click(within(dialog).getByRole("button", { name: /开始克隆/ }));
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert.textContent).toContain("目标目录已有文件，未覆盖任何内容。");
+    expect(alert.querySelector("[data-clone-next]")?.textContent, "下一步就在当前入口").toContain("换一个目录名");
+    expect(document.querySelector(".toast.error"), "同一原因不再弹一条通知").toBeNull();
+    expect(mocks.createRepository).not.toHaveBeenCalled();
+
+    await fireEvent.input(within(dialog).getByLabelText("目录名"), { target: { value: "demo-copy" } });
+    await waitFor(() => expect(within(dialog).queryByRole("alert")).toBeNull());
+
+    mocks.cloneRepository.mockResolvedValueOnce({
+      path: "C:/work/demo-copy",
+      opened: { summary: { name: "demo-copy", path: "C:/work/demo-copy" }, generation: 4, snapshot, draft: "", watchDegraded: false },
+      credentialNote: null,
+    });
+    await fireEvent.click(within(dialog).getByRole("button", { name: /开始克隆/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "当前仓库 demo-copy" })).toBeTruthy());
+    expect(mocks.cloneRepository).toHaveBeenLastCalledWith("https://e.com/demo.git", "C:/work", "demo-copy", expect.any(Number), null);
+    expect(screen.queryByRole("dialog", { name: "克隆仓库" })).toBeNull();
+  });
+
+  it("添加仓库：拖放与命令入口对无效路径给出同一原因，不初始化也不改写", async () => {
+    const message = "该目录不是 Git 仓库，未做任何修改。";
+    mocks.addRepository.mockRejectedValue({ code: "not_repository", message });
+    mocks.pickDirectory.mockResolvedValue("C:/plain-folder");
+    render(App);
+    await waitFor(() => expect(document.querySelector(".welcome")).toBeTruthy());
+
+    const palette = await openPalette();
+    await fireEvent.click(within(palette).getByRole("option", { name: /^添加仓库/ }));
+    await waitFor(() => expect(mocks.addRepository).toHaveBeenCalledWith("C:/plain-folder", expect.any(Number)));
+    await waitFor(() => expect(document.querySelector(".toast-text")?.textContent).toBe(message));
+
+    await dragEvent("drop", ["C:/plain-folder"]);
+    await waitFor(() => expect(mocks.addRepository).toHaveBeenCalledTimes(2));
+    expect(document.querySelector(".toast-text")?.textContent, "两个入口给出同一原因").toBe(message);
+    expect(mocks.createRepository).not.toHaveBeenCalled();
+    expect(document.querySelector(".welcome"), "仍在起始页，没有被打开成仓库").toBeTruthy();
+    expect(screen.getByRole("button", { name: /新建仓库/ }), "下一步入口就在起始页").toBeTruthy();
+  });
+
+  it("添加仓库：路径不存在时只说明原因，不创建目录也不改写文件", async () => {
+    const message = "路径不存在，未创建或修改任何文件。";
+    mocks.addRepository.mockRejectedValue({ code: "path_missing", message });
+    mocks.pickDirectory.mockResolvedValue("C:/missing");
+    render(App);
+    await waitFor(() => expect(document.querySelector(".welcome")).toBeTruthy());
+
+    const palette = await openPalette();
+    await fireEvent.click(within(palette).getByRole("option", { name: /^添加仓库/ }));
+    await waitFor(() => expect(mocks.addRepository).toHaveBeenCalledWith("C:/missing", expect.any(Number)));
+    await waitFor(() => expect(document.querySelector(".toast-text")?.textContent).toBe(message));
+    expect(mocks.createRepository, "只检查身份，不会为无效路径初始化仓库").not.toHaveBeenCalled();
+    expect(document.querySelector(".welcome")).toBeTruthy();
+  });
+
+  it("Git 版本过低：起始页提示与设置运行环境给出同一原因和下一步", async () => {
+    const message = "已检测到 Git 2.20.0，低于建议基线 2.48，仍会继续使用。";
+    mocks.getSettings.mockResolvedValue({
+      theme: "dark",
+      panelWidths: { sidebar: 256, files: 360 },
+      git: { available: true, path: "C:/Git/bin/git.exe", version: "2.20.0", overridden: false, belowBaseline: true, message },
+      recent: [{ name: "demo", path: repoPath, openedAtMs: 1 }],
+      settingsWarning: null,
+    });
+    render(App);
+    const warn = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>(".infobar.warn");
+      expect(node, "起始页也要看到版本过低的提示").toBeTruthy();
+      return node!;
+    });
+    expect(warn.textContent).toContain("低于建议基线 2.48");
+
+    await fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    const settings = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>('[data-task-modal="settings"]');
+      expect(node).toBeTruthy();
+      return node!;
+    });
+    const runtime = settings.querySelector<HTMLElement>('[data-settings-section="runtime"]');
+    expect(runtime).toBeTruthy();
+    expect(runtime!.textContent).toContain("版本过低");
+    expect(runtime!.textContent).toContain("低于建议基线 2.48");
+    expect(runtime!.querySelector("[data-git-next-step]")?.textContent).toContain("2.48");
+    expect(runtime!.querySelector("details")?.open, "版本过低时说明默认展开").toBe(true);
   });
 
   it("分叉拉取按设置预选方式，取消确认不开始且当前分支不动", async () => {

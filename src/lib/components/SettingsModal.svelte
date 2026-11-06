@@ -89,6 +89,19 @@
     if (git.belowBaseline) return { tone: "warn", label: "版本过低" };
     return { tone: "ok", label: "Git 可用" };
   });
+  /** 诊断不只说哪里出错，还要给出当前入口能执行的下一步。 */
+  let gitNextStep = $derived.by(() => {
+    if (git === null) return "点「重新检测」读取本机 Git 状态。";
+    if (!git.available) {
+      return git.overridden
+        ? "下一步：重新选择可执行的 Git，或「恢复自动检测」后再点「重新检测」。"
+        : "下一步：安装 Git 后点「重新检测」，或用「选择 Git」指定已安装的可执行文件。";
+    }
+    if (git.belowBaseline) {
+      return "下一步：建议升级到 2.48 或更新版本；当前版本仍会继续使用，也可以用「选择 Git」指定其他版本。";
+    }
+    return null;
+  });
 
   /* ---- 应用更新分区（R1/R2）：七态状态机对齐 cliora，共享 offer 来自 update.svelte.ts ---- */
 
@@ -280,6 +293,9 @@
           <li>{git.message}</li>
         {/if}
       </ul>
+      {#if gitNextStep}
+        <p class="settings-note" data-git-next-step>{gitNextStep}</p>
+      {/if}
       <div class="settings-actions">
         <button type="button" class="btn btn-secondary btn-sm" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={onRedetect}>重新检测</button>
         <button type="button" class="btn btn-secondary btn-sm" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={onChooseGit}>选择 Git</button>

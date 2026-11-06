@@ -103,15 +103,15 @@
     <section class="welcome-actions" aria-label="开始使用">
       <button type="button" class="action-card primary" {disabled} title={actionTitle} onclick={onAdd}>
         <Icon name="folder-open" size={18} />
-        <span class="ac-copy"><strong>打开本地仓库</strong><span>选择目录或拖入文件夹</span></span>
+        <span class="ac-copy"><strong>打开本地仓库</strong><span>选择目录或拖入文件夹；只检查仓库身份，不会初始化</span></span>
       </button>
       <button type="button" class="action-card" {disabled} title={actionTitle} onclick={onClone}>
         <Icon name="download" size={18} />
-        <span class="ac-copy"><strong>克隆远程仓库</strong><span>HTTPS、SSH 或本机路径</span></span>
+        <span class="ac-copy"><strong>克隆远程仓库</strong><span>HTTPS、SSH 或本机路径；目标已有文件时不会覆盖</span></span>
       </button>
       <button type="button" class="action-card" {disabled} title={actionTitle} onclick={onCreate}>
         <Icon name="folder-plus" size={18} />
-        <span class="ac-copy"><strong>新建仓库</strong><span>在空目录初始化 Git</span></span>
+        <span class="ac-copy"><strong>新建仓库</strong><span>在空目录初始化 Git；已有内容不覆盖</span></span>
       </button>
     </section>
 
@@ -144,17 +144,21 @@
               </button>
             {/if}
           </div>
-          <span class="hint" role="status">
+          <span class="hint" role="status" data-welcome-count>
             {#if !searching}共 {recent.length} 个{:else if matches.length > shown.length}匹配 {matches.length} 个，显示前 {shown.length} 个{:else}匹配 {matches.length} 个{/if}
           </span>
+          {#if !searching && recent.length > shown.length}
+            <span class="hint" data-welcome-limit>显示前 {shown.length} 个</span>
+          {/if}
         {/if}
       </div>
       {#if recent.length === 0}
-        <p class="hint welcome-empty">还没有最近仓库，先打开或克隆一个。</p>
+        <p class="hint welcome-empty" data-welcome-empty>还没有最近仓库，先打开或克隆一个。</p>
+        <p class="hint" data-welcome-empty-note>打开只会检查仓库身份，不会初始化目录；需要初始化请用「新建仓库」。</p>
       {:else}
         <div class="welcome-recent" class:searchable>
           {#if shown.length === 0}
-            <p class="hint welcome-no-match">没有匹配的仓库，试试名称或路径。</p>
+            <p class="hint welcome-no-match" data-welcome-no-match>没有匹配的仓库，试试名称或路径。</p>
           {/if}
           {#each shown as repo, index (repo.path)}
             <button

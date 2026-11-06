@@ -60,9 +60,14 @@
   let authRemember = $state(true);
   let authActive = $derived(authPrompt !== null && authPrompt.url === cloneUrl.trim());
   let authMissing = $derived(authActive && (!authUser.trim() || !authPassword));
+  /** 克隆失败留在窗口里的原因：目标已有内容、目录名无效、Git 不可用等都在这里说明。 */
+  let cloneError = $state<{ code: string; message: string } | null>(null);
 
   $effect(() => {
-    if (mode !== "clone") authPassword = "";
+    if (mode !== "clone") {
+      authPassword = "";
+      cloneError = null;
+    }
   });
 
   function isHttpUrl(url: string): boolean {
@@ -149,7 +154,32 @@
 
   async function chooseParent() {
     const path = await pickDirectory("选择克隆的父目录");
-    if (path) cloneParent = path;
+    if (path) {
+      cloneParent = path;
+      cloneError = null;
+    }
+  }
+
+  /** 克隆失败时的下一步：原因已经在错误里，这里只补用户现在能做什么。 */
+  function cloneNextStep(code: string): string {
+    switch (code) {
+      case "clone_destination":
+        return "下一步：换一个目录名，或选择其他父目录后重试；已有文件不会被覆盖。";
+      case "clone_name":
+        return "下一步：修改目录名，不能为空、不能包含 / 或 \\，也不能以 - 开头。";
+      case "invalid_path":
+      case "path_missing":
+      case "not_directory":
+      case "path_unreadable":
+      case "permission":
+        return "下一步：检查父目录是否仍然存在、是可读文件夹，必要时重新选择父目录。";
+      case "git_missing":
+        return "下一步：在「设置 → 运行环境」重新检测，或选择可用的 Git 后重试。";
+      case "auth":
+        return "下一步：检查 SSH agent 或凭据是否可用；需要登录的 HTTP(S) 地址重新打开克隆窗口后可输入用户名和密码。";
+      default:
+        return "下一步：核对远程地址、父目录和目录名后重试；失败不会覆盖已有文件。";
+    }
   }
 
   async function startClone() {
@@ -158,6 +188,7 @@
       onNotice("请填写远程地址，并选择一个已存在的父目录。");
       return;
     }
+    cloneError = null;
     const credential: HttpCredential | null = authActive
       ? { username: authUser.trim(), password: authPassword, remember: authRemember }
       : null;
@@ -178,10 +209,17 @@
           authPassword = "";
           return undefined;
         }
-        throw failure;
+        // 窗口还开着：原因和下一步就留在当前入口，不额外弹一条容易错过的通知。
+        if (mode === "clone") {
+          cloneError = { code: failure.code, message: failure.message };
+          return undefined;
+        }
+        // 收到后台继续：通知是唯一还能看到的入口，把下一步一并带上。
+        throw { ...failure, message: `${failure.message} ${cloneNextStep(failure.code)}` };
       }
     });
     if (!result) return;
+    cloneError = null;
     authPrompt = null;
     authPassword = "";
     // 打开还是只通知由外壳决定：看用户是否已经收起窗口。
@@ -276,6 +314,7 @@
           class="input code"
           data-autofocus
           bind:value={cloneUrl}
+          oninput={() => (cloneError = null)}
           placeholder="https://…、git@… 或本机绝对路径"
           autocomplete="off"
           spellcheck="false"
@@ -292,7 +331,7 @@
       </div>
       <div class="form-group">
         <label class="label" for="clone-name">目录名</label>
-        <input id="clone-name" class="input" bind:value={cloneName} placeholder="可留空，从地址推断" autocomplete="off" spellcheck="false" />
+        <input id="clone-name" class="input" bind:value={cloneName} oninput={() => (cloneError = null)} placeholder="可留空，从地址推断" autocomplete="off" spellcheck="false" />
       </div>
       {#if authActive && authPrompt}
         <div class="clone-auth" data-clone-auth>
@@ -333,6 +372,15 @@
         <div class="callout info">
           <Icon name="info" size={15} />
           <span>HTTP(S) 地址需要登录时会在这里提示输入用户名和密码；SSH 地址使用 SSH agent。不要把令牌写进地址。</span>
+        </div>
+      {/if}
+      {#if cloneError}
+        <div class="callout error" role="alert" data-clone-error>
+          <Icon name="alert-circle" size={15} />
+          <div class="callout-body">
+            <span>{cloneError.message}</span>
+            <small data-clone-next>{cloneNextStep(cloneError.code)}</small>
+          </div>
         </div>
       {/if}
       {#if cloning}

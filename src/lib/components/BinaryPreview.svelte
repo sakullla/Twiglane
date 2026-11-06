@@ -7,129 +7,224 @@
   import { visibleRange } from "../layout";
   import Icon from "./Icon.svelte";
 
+  type Side = "old" | "new";
+  type Mode = Side | "compare";
+  type Pane = {
+    result: FilePreview | null;
+    error: string | null;
+    loading: boolean;
+    downloading: boolean;
+    version: number;
+    width: number | null;
+    height: number | null;
+    query: string;
+    scroll: number;
+    viewport: number;
+    listHost?: HTMLDivElement;
+  };
+
   let { sources, generation, disabled, onGeneration }: {
     sources: PreviewSources; generation: number; disabled: boolean;
     onGeneration?: (generation: number) => void;
   } = $props();
-  let side = $state<"old" | "new">("new");
-  let result = $state.raw<FilePreview | null>(null);
-  let error = $state<string | null>(null);
-  let loading = $state(false);
-  let downloading = $state(false);
+  const emptyPane = (version: number): Pane => ({
+    result: null, error: null, loading: false, downloading: false, version,
+    width: null, height: null, query: "", scroll: 0, viewport: 0,
+  });
+  let mode = $state<Mode>("new");
+  let panes = $state<Record<Side, Pane>>({ old: emptyPane(0), new: emptyPane(0) });
+  let retries = $state<Record<Side, number>>({ old: 0, new: 0 });
   let zoom = $state(false);
-  let query = $state("");
-  let scroll = $state(0);
-  let viewport = $state(0);
-  let listHost = $state<HTMLDivElement>();
-  let retry = $state(0);
-  let version = 0;
-  let serial = 0;
-  let selected = $derived(sources[side]);
-  let entries = $derived((result?.entries ?? []).filter((entry) => entry.name.toLowerCase().includes(query.trim().toLowerCase())));
-  let range = $derived(visibleRange(entries.length, scroll, viewport || 400, 30));
+  let serials: Record<Side, number> = { old: 0, new: 0 };
+  let previousKey = "";
+  let visibleSides = $derived<Side[]>(mode === "compare" ? ["old", "new"] : [mode]);
+  let comparing = $derived(mode === "compare" && !!sources.old && !!sources.new);
 
-  $effect(() => {
-    const source = selected;
-    const path = sources.repository;
-    const current = generation;
-    retry;
-    const token = ++serial;
+  function loadSide(side: Side, source: PreviewSources[Side], current: number) {
+    const token = ++serials[side];
     const controller = new AbortController();
-    version = current;
-    result = null; error = null; zoom = false; query = ""; scroll = 0;
-    loading = !!source;
-    if (source) {
-      void previewReads.run(async () => {
-        try {
-          return await api.filePreview(path, source, current);
-        } catch (failure) {
-          const normalized = normalizeError(failure);
-          if (normalized.code !== "stale" || normalized.generation === undefined || controller.signal.aborted) throw failure;
-          return api.filePreview(path, source, normalized.generation);
-        }
-      }, controller.signal).then((value) => {
-        if (serial !== token) return;
-        result = value;
-        version = value.generation;
-        if (value.generation !== current) onGeneration?.(value.generation);
-        // Deleted files open on their previous version automatically.
-        if (value.kind === "missing" && side === "new" && sources.old) side = "old";
-      }).catch((failure) => {
-        if (serial === token) error = normalizeError(failure).message;
-      }).finally(() => { if (serial === token) loading = false; });
+    const pane = panes[side];
+    pane.result = null;
+    pane.error = null;
+    pane.loading = !!source;
+    pane.downloading = false;
+    pane.version = current;
+    pane.width = null;
+    pane.height = null;
+    pane.query = "";
+    pane.scroll = 0;
+    if (!source) return () => { controller.abort(); };
+    void previewReads.run(async () => {
+      try {
+        return await api.filePreview(sources.repository, source, current);
+      } catch (failure) {
+        const normalized = normalizeError(failure);
+        if (normalized.code !== "stale" || normalized.generation === undefined || controller.signal.aborted) throw failure;
+        return api.filePreview(sources.repository, source, normalized.generation);
+      }
+    }, controller.signal).then((value) => {
+      if (serials[side] !== token) return;
+      pane.result = value;
+      pane.version = value.generation;
+      if (value.generation !== current) onGeneration?.(value.generation);
+      // Deleted files open on their previous version automatically.
+      if (value.kind === "missing" && side === "new" && sources.old) mode = "old";
+    }).catch((failure) => {
+      if (serials[side] === token) pane.error = normalizeError(failure).message;
+    }).finally(() => {
+      if (serials[side] === token) pane.loading = false;
+    });
+    return () => { serials[side]++; controller.abort(); };
+  }
+
+  // retries 只用于让“重试”按钮重新发起读取，值本身不参与请求参数。
+  $effect(() => {
+    void retries.old;
+    loadSide("old", sources.old, generation);
+  });
+  $effect(() => {
+    void retries.new;
+    loadSide("new", sources.new, generation);
+  });
+  $effect(() => {
+    const key = JSON.stringify([sources.repository, sources.old, sources.new, generation]);
+    if (key !== previousKey) {
+      previousKey = key;
+      zoom = false;
+      mode = sources.old && sources.new ? "compare" : sources.old ? "old" : "new";
     }
-    return () => { serial++; controller.abort(); };
   });
 
-  async function download() {
-    if (!selected || downloading || disabled || !result?.canDownload) return;
-    const token = serial;
-    const source = selected;
-    const path = sources.repository;
-    downloading = true; error = null;
+  async function download(side: Side) {
+    const source = sources[side];
+    const pane = panes[side];
+    if (!source || pane.downloading || disabled || !pane.result?.canDownload) return;
+    const token = serials[side];
+    pane.downloading = true;
+    pane.error = null;
     try {
-      const value = await api.filePreview(path, source, version, true);
-      if (token !== serial) return;
-      version = value.generation;
-      result = value;
+      const value = await api.filePreview(sources.repository, source, pane.version, true);
+      if (token !== serials[side]) return;
+      pane.version = value.generation;
+      pane.result = value;
+      pane.width = null;
+      pane.height = null;
       onGeneration?.(value.generation);
     } catch (failure) {
-      if (token !== serial) return;
+      if (token !== serials[side]) return;
       const normalized = normalizeError(failure);
-      error = normalized.message;
+      pane.error = normalized.message;
       if (normalized.generation !== undefined) {
-        version = normalized.generation;
+        pane.version = normalized.generation;
         onGeneration?.(normalized.generation);
       }
-    } finally { downloading = false; }
+    } finally {
+      if (token === serials[side]) pane.downloading = false;
+    }
+  }
+
+  function entries(pane: Pane) {
+    return (pane.result?.entries ?? []).filter((entry) => entry.name.toLowerCase().includes(pane.query.trim().toLowerCase()));
+  }
+
+  function imageLoaded(side: Side, event: Event) {
+    const image = event.currentTarget as HTMLImageElement;
+    panes[side].width = image.naturalWidth;
+    panes[side].height = image.naturalHeight;
+  }
+
+  function imageError(side: Side) {
+    panes[side].error = "图片损坏或当前系统不支持此图片格式。";
+  }
+
+  function keyboard(event: KeyboardEvent) {
+    if (event.altKey || event.ctrlKey || event.metaKey || (event.target as HTMLElement)?.matches("input, textarea, select")) return;
+    const next: Record<string, Mode | undefined> = { "1": sources.old ? "old" : undefined, "2": sources.new ? "new" : undefined, "3": sources.old && sources.new ? "compare" : undefined };
+    if (event.key in next) {
+      const value = next[event.key];
+      if (value) { mode = value; event.preventDefault(); }
+    } else if (event.key === "0" && visibleSides.some((side) => panes[side].result?.kind === "image")) {
+      zoom = !zoom;
+      event.preventDefault();
+    }
   }
 </script>
 
-<section class="binary-preview" aria-label="文件内容预览">
+<!-- 这里只监听 1/2/3/0 冒泡来切换比较方式与缩放，容器本身不是可交互控件。 -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+<section class="binary-preview" aria-label="文件内容预览" tabindex="0" onkeydown={keyboard}>
   <div class="preview-toolbar">
     <div class="segmented" role="group" aria-label="预览版本">
-      <button type="button" aria-pressed={side === "old"} title={downloading ? "正在下载" : !sources.old ? "此版本不存在" : "预览改动前的文件"} disabled={downloading || !sources.old} onclick={() => (side = "old")}>改动前</button>
-      <button type="button" aria-pressed={side === "new"} title={downloading ? "正在下载" : !sources.new ? "此版本不存在" : "预览改动后的文件"} disabled={downloading || !sources.new} onclick={() => (side = "new")}>改动后</button>
+      <button type="button" aria-pressed={mode === "old"} title={!sources.old ? "此版本不存在" : "仅预览改动前（1）"} disabled={!sources.old} onclick={() => (mode = "old")}>改动前</button>
+      <button type="button" aria-pressed={mode === "new"} title={!sources.new ? "此版本不存在" : "仅预览改动后（2）"} disabled={!sources.new} onclick={() => (mode = "new")}>改动后</button>
+      {#if sources.old && sources.new}
+        <button type="button" aria-pressed={mode === "compare"} title="并排比较（3）" onclick={() => (mode = "compare")}>并排比较</button>
+      {/if}
     </div>
-    {#if result?.size != null}<span>{formatBytes(result.size)}</span>{/if}
-    {#if result?.lfsOid}<span class="badge" title={result.lfsOid}>Git LFS</span>{/if}
     <span class="spacer"></span>
-    {#if result?.kind === "image"}
-      <button type="button" class="btn btn-ghost btn-sm" onclick={() => (zoom = !zoom)}>{zoom ? "适应窗口" : "原始大小"}</button>
+    {#if visibleSides.some((side) => panes[side].result?.kind === "image")}
+      <button type="button" class="btn btn-ghost btn-sm" aria-pressed={zoom} title="切换所有图片缩放（0）" onclick={() => (zoom = !zoom)}>{zoom ? "适应窗口" : "原始大小"}</button>
     {/if}
   </div>
-  {#if error}
-    <p class="preview-message" role="alert">{error} <button type="button" class="btn btn-sm" title={downloading ? "正在下载" : "重新读取预览"} disabled={downloading} onclick={() => retry++}>重试</button></p>
-  {/if}
-  {#if loading}
-    <p class="preview-message" role="status"><span class="spinner"></span> 正在读取预览</p>
-  {:else if result?.kind === "image" && result.dataUrl}
-    <div class="image-preview" class:original={zoom}>
-      <img src={result.dataUrl} alt={`${side === "old" ? "改动前" : "改动后"}：${selected?.path}`} onerror={() => (error = "图片损坏或当前系统不支持此图片格式。")} />
-    </div>
-  {:else if result?.kind === "archive"}
-    <div class="preview-toolbar"><Icon name="folder" size={14} /><span>压缩包目录 · {result.entries.length}{result.truncated ? "+" : ""} 项</span><div class="field sm archive-search"><Icon name="search" size={13} /><input aria-label="筛选压缩包文件" placeholder="筛选文件路径" bind:value={query} oninput={() => { scroll = 0; if (listHost) listHost.scrollTop = 0; }} /></div></div>
-    <div class="archive-list" role="list" aria-label="压缩包文件" bind:this={listHost} bind:clientHeight={viewport} onscroll={(event) => (scroll = event.currentTarget.scrollTop)}>
-      <div style={`height:${range.start * 30}px`} aria-hidden="true"></div>
-      {#each entries.slice(range.start, range.end) as entry, i (`${range.start + i}:${entry.name}`)}
-        <div class="archive-entry" role="listitem" title={entry.name}><Icon name={entry.directory ? "folder" : "file"} size={14} /><span>{entry.name}</span><small>{entry.directory ? "目录" : formatBytes(entry.size)}</small></div>
-      {/each}
-      <div style={`height:${(entries.length - range.end) * 30}px`} aria-hidden="true"></div>
-      {#if !entries.length}<p class="preview-message">没有匹配的文件</p>{/if}
-    </div>
-    {#if result.message}<p class="preview-message">{result.message}</p>{/if}
-  {:else}
-    <div class="preview-message" role="status">
-      <Icon name="file" size={28} />
-      <p>{result?.message ?? "此版本中没有文件。"}</p>
-      {#if result?.canDownload}<button type="button" class="btn btn-primary" title={disabled || downloading ? "正在读取或写入，请稍后" : "下载当前文件到本地 LFS 缓存"} disabled={disabled || downloading} onclick={() => void download()}>{downloading ? "正在下载 LFS 内容…" : "下载 LFS 内容并预览"}</button>{/if}
-    </div>
-  {/if}
+  <div class="preview-panes" class:comparing>
+    {#each visibleSides as side (side)}
+      {@const pane = panes[side]}
+      {@const source = sources[side]}
+      {@const filtered = entries(pane)}
+      {@const range = visibleRange(filtered.length, pane.scroll, pane.viewport || 400, 30)}
+      <section class="preview-pane" aria-label={side === "old" ? "改动前预览" : "改动后预览"}>
+        {#if comparing}
+          <header class="pane-heading"><strong>{side === "old" ? "改动前" : "改动后"}</strong><span title={source?.path}>{source?.path ?? "此版本不存在"}</span></header>
+        {/if}
+        {#if pane.result?.size != null || pane.result?.lfsOid}
+          <div class="pane-meta">
+            {#if pane.result.size != null}<span>{formatBytes(pane.result.size)}</span>{/if}
+            {#if pane.width != null && pane.height != null}<span>{pane.width} × {pane.height}</span>{/if}
+            {#if pane.result.lfsOid}<span class="badge" title={pane.result.lfsOid}>Git LFS</span>{/if}
+          </div>
+        {/if}
+        {#if pane.error}
+          <p class="preview-message" role="alert">{pane.error} <button type="button" class="btn btn-sm" title={pane.downloading ? "正在下载" : "重新读取预览"} disabled={pane.downloading} onclick={() => retries[side]++}>重试</button></p>
+        {/if}
+        {#if pane.loading}
+          <p class="preview-message" role="status"><span class="spinner"></span> 正在读取预览</p>
+        {:else if pane.result?.kind === "image" && pane.result.dataUrl && !pane.error}
+          <div class="image-preview" class:original={zoom}>
+            <img src={pane.result.dataUrl} alt={(side === "old" ? "改动前" : "改动后") + "：" + source?.path} onload={(event) => imageLoaded(side, event)} onerror={() => imageError(side)} />
+          </div>
+        {:else if pane.result?.kind === "archive"}
+          <div class="preview-toolbar"><Icon name="folder" size={14} /><span>压缩包目录 · {pane.result.entries.length}{pane.result.truncated ? "+" : ""} 项</span><div class="field sm archive-search"><Icon name="search" size={13} /><input aria-label={"筛选" + (side === "old" ? "改动前" : "改动后") + "压缩包文件"} placeholder="筛选文件路径" bind:value={pane.query} oninput={() => { pane.scroll = 0; if (pane.listHost) pane.listHost.scrollTop = 0; }} /></div></div>
+          <div class="archive-list" role="list" aria-label={(side === "old" ? "改动前" : "改动后") + "压缩包文件"} bind:this={pane.listHost} bind:clientHeight={pane.viewport} onscroll={(event) => (pane.scroll = event.currentTarget.scrollTop)}>
+            <div style={"height:" + range.start * 30 + "px"} aria-hidden="true"></div>
+            {#each filtered.slice(range.start, range.end) as entry, i (range.start + i + ":" + entry.name)}
+              <div class="archive-entry" role="listitem" title={entry.name}><Icon name={entry.directory ? "folder" : "file"} size={14} /><span>{entry.name}</span><small>{entry.directory ? "目录" : formatBytes(entry.size)}</small></div>
+            {/each}
+            <div style={"height:" + (filtered.length - range.end) * 30 + "px"} aria-hidden="true"></div>
+            {#if !filtered.length}<p class="preview-message">没有匹配的文件</p>{/if}
+          </div>
+          {#if pane.result.message}<p class="preview-message">{pane.result.message}</p>{/if}
+        {:else if !pane.error}
+          <div class="preview-message" role="status">
+            <Icon name="file" size={28} />
+            <p>{pane.result?.message ?? "此版本中没有文件。"}</p>
+            {#if pane.result?.canDownload}<button type="button" class="btn btn-primary" title={disabled || pane.downloading ? "正在读取或写入，请稍后" : "下载当前文件到本地 LFS 缓存"} disabled={disabled || pane.downloading} onclick={() => void download(side)}>{pane.downloading ? "正在下载 LFS 内容…" : "下载 LFS 内容并预览"}</button>{/if}
+          </div>
+        {/if}
+      </section>
+    {/each}
+  </div>
 </section>
 
 <style>
-  .binary-preview { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  .binary-preview { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; outline-offset: -2px; }
+  .preview-panes { display: grid; grid-template-columns: minmax(0, 1fr); flex: 1; min-height: 0; }
+  .preview-panes.comparing { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .preview-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+  .preview-pane + .preview-pane { border-left: 1px solid var(--border); }
   .preview-toolbar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; flex-shrink: 0; font-size: 12px; border-bottom: 1px solid var(--border); }
+  .pane-heading { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .pane-heading span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-muted); }
+  .pane-meta { display: flex; gap: 10px; padding: 6px 12px; border-bottom: 1px solid var(--border); color: var(--fg-muted); font-size: 12px; }
   .archive-search { min-width: 100px; max-width: 220px; margin-left: auto; flex: 1; }
   .preview-message { padding: 24px; text-align: center; color: var(--fg-muted); }
   .image-preview { flex: 1; min-height: 120px; overflow: auto; padding: 20px; text-align: center; background: repeating-conic-gradient(var(--surface-3) 0% 25%, var(--surface) 0% 50%) 0 / 20px 20px; }
@@ -139,4 +234,5 @@
   .archive-entry { display: flex; gap: 8px; align-items: center; height: 30px; padding: 0 14px; font-size: 12px; }
   .archive-entry span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .archive-entry small { flex-shrink: 0; color: var(--fg-muted); }
+  @media (max-width: 700px) { .preview-panes.comparing { grid-template-columns: minmax(0, 1fr); overflow: auto; } .preview-pane { min-height: 280px; } .preview-pane + .preview-pane { border-left: 0; border-top: 1px solid var(--border); } }
 </style>

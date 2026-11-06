@@ -376,6 +376,86 @@ export function visibleDiffLines<T extends { kind: string; text: string }>(all: 
   return { lines, origin, meta };
 }
 
+/**
+ * 纯空白改动块：删除行与新增行去掉空白后序列完全一致。
+ *
+ * 只做只读判定——据此隐藏整块，不重排、不改行号、不伪造补丁；混合块（序列不完全一致）
+ * 一律保留，宁可多显示也不让读者对不上原文件。块身份用 canonical 的 hunk.index。
+ */
+export interface WhitespaceFilter {
+  /** 只改了空白的块 index。 */
+  hunks: Set<number>;
+  /** 这些块里被一并隐藏的代码行数（新增 + 删除），用于工具条持续状态。 */
+  lines: number;
+}
+
+/** 差异行文本前的 +/-/空格 是显示符号，不属于比较内容。 */
+function contentOf(text: string): string {
+  const first = text[0];
+  if (first === "+" || first === "-" || first === " ") return text.slice(1);
+  return text;
+}
+
+function squeeze(text: string): string {
+  return contentOf(text).replace(/[ \t\r\n\f\v]+/g, "");
+}
+
+export function whitespaceOnlyHunks(
+  lines: readonly { kind: string; text: string; hunkIndex: number | null }[],
+): WhitespaceFilter {
+  const order: number[] = [];
+  const dels = new Map<number, string[]>();
+  const adds = new Map<number, string[]>();
+  for (const line of lines) {
+    if (line.hunkIndex === null) continue;
+    if (line.kind !== "add" && line.kind !== "del") continue;
+    if (!dels.has(line.hunkIndex)) {
+      dels.set(line.hunkIndex, []);
+      adds.set(line.hunkIndex, []);
+      order.push(line.hunkIndex);
+    }
+    const bucket = line.kind === "del" ? dels : adds;
+    bucket.get(line.hunkIndex)?.push(squeeze(line.text));
+  }
+  const hunks = new Set<number>();
+  let count = 0;
+  for (const index of order) {
+    const left = dels.get(index) ?? [];
+    const right = adds.get(index) ?? [];
+    if (left.length === 0 || right.length === 0) continue;
+    // 序列长度与每一项都要一致：多一行少一行都属于真实改动。
+    if (left.length !== right.length) continue;
+    if (!left.every((text, at) => text === right[at])) continue;
+    hunks.add(index);
+    count += left.length + right.length;
+  }
+  return { hunks, lines: count };
+}
+
+/**
+ * 会让行选失效的显示上下文：换文件、generation、布局、完整文件或空白过滤之后，
+ * 之前选中的行可能已经不在屏幕上，必须清掉，否则不可见的行会被写进暂存。
+ */
+export interface LineSelectionScope {
+  path: string;
+  side: string;
+  generation: number | null;
+  mode: "unified" | "split";
+  fullFile: boolean;
+  hideWhitespaceOnly: boolean;
+}
+
+export function lineSelectionScope(scope: LineSelectionScope): string {
+  return [
+    scope.path,
+    scope.side,
+    scope.generation === null ? "-" : String(scope.generation),
+    scope.mode,
+    scope.fullFile ? "full" : "hunks",
+    scope.hideWhitespaceOnly ? "hide-ws" : "all-ws",
+  ].join("\u0000");
+}
+
 /** 已经贴在块头上的容差（行）。差一两个像素时「上一处」不应来回跳。 */
 const HUNK_ALIGN = 0.35;
 

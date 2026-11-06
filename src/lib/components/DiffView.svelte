@@ -1,7 +1,8 @@
 <script lang="ts">
   import { tick, untrack } from "svelte";
   import { MODIFIER_LABEL } from "../brand";
-  import { hunkCaption, hunkJump, hunkRowIndexes, splitColumnsFit, toSideRows, visibleDiffLines, type HunkNavReport, type ViewLine } from "../diff";
+  import { hunkCaption, hunkJump, hunkRowIndexes, lineSelectionScope, splitColumnsFit, toSideRows, visibleDiffLines, whitespaceOnlyHunks, type HunkNavReport, type ViewLine, type WhitespaceFilter } from "../diff";
+  import { diffPrefs, setHideWhitespaceOnly, toggleHideWhitespaceOnly, toggleShowWhitespace } from "../diff-prefs.svelte";
   import { trackCodeScroll } from "../codeScroll.svelte";
   import { codeContentSize, codeRuler, rulerPadding, scrollByRows, visibleRange } from "../layout";
   import type { DiffHunk, DiffResponse, FileSelection } from "../types";
@@ -122,7 +123,35 @@
      并记下每一行在原始列表里的位置，按块暂存仍按原始下标找块。 */
   let sourceLines = $derived(currentDiff?.lines);
   let shown = $derived(visibleDiffLines(sourceLines ?? []));
-  let lines = $derived<ViewLine[]>(shown.lines);
+  /* 纯空白过滤只是读的时候少画几块：判定按 canonical hunk.index 做，原始行、块号、
+     snapshot 与暂存补丁都不动。二进制、图片预览、冲突专用视图和截断内容看不到整块，
+     判定会错，因此这些情况一律不启用。 */
+  const EMPTY_FILTER: WhitespaceFilter = { hunks: new Set<number>(), lines: 0 };
+  let canFilterWhitespace = $derived(
+    Boolean(
+      currentDiff && !currentDiff.binary && !currentDiff.preview && !conflicted &&
+        !currentDiff.truncated && currentDiff.lines.length > 0,
+    ),
+  );
+  let whitespaceFilter = $derived<WhitespaceFilter>(
+    diffPrefs.hideWhitespaceOnly && canFilterWhitespace ? whitespaceOnlyHunks(shown.lines) : EMPTY_FILTER,
+  );
+  /* 过滤后仍然保持 origin 与行一一对应：右键按块操作还要按原始下标找块。 */
+  let view = $derived.by(() => {
+    if (whitespaceFilter.hunks.size === 0) return { lines: shown.lines as ViewLine[], origin: shown.origin };
+    const kept: ViewLine[] = [];
+    const origin: number[] = [];
+    shown.lines.forEach((line, index) => {
+      const hunk = line.hunkIndex;
+      if (hunk !== null && whitespaceFilter.hunks.has(hunk)) return;
+      kept.push(line);
+      origin.push(shown.origin[index]);
+    });
+    return { lines: kept, origin };
+  });
+  let lines = $derived<ViewLine[]>(view.lines);
+  /** 所有代码块都被过滤掉：不能报成「没有文本差异」。 */
+  let filteredAll = $derived(whitespaceFilter.hunks.size > 0 && lines.length === 0);
   let metaOnly = $derived(shown.lines.length === 0 && shown.meta.length > 0);
   let sideRows = $derived(renderMode === "split" ? toSideRows(lines) : []);
   let total = $derived(renderMode === "split" ? sideRows.length : lines.length);
@@ -155,7 +184,7 @@
       : visibleRange(total, scrollTop, viewport > 0 ? viewport : scrollTop > 0 ? ROW_HEIGHT : 0, ROW_HEIGHT),
   );
   let hunkForLine = $derived((index: number) => {
-    const origin = shown.origin[index];
+    const origin = view.origin[index];
     return origin === undefined ? null : (currentDiff?.hunks.find((hunk) => hunk.startLine === origin) ?? null);
   });
   let parts = $derived(selection ? splitPath(selection.path) : null);
@@ -181,6 +210,8 @@
   /* 语法高亮：旧侧（上下文 + 删除）与新侧（上下文 + 新增）各自整体分词，再按行映射回来；
      行内改动区间在配对的删除/新增行之间计算。结果逐块到达，未到的行先按纯文本显示。 */
   let language = $derived(currentDiff && !currentDiff.binary ? effectiveLanguage(currentDiff.path) : null);
+  /* 显示空白：只在有文本差异时把空格、制表符画出来；代码文本本身不变。 */
+  let markWhitespace = $derived(diffPrefs.showWhitespace && Boolean(currentDiff && !currentDiff.binary));
   let documents = $derived(buildDiffDocuments(lines));
   const oldSyntax = createHighlight(() => ({ lang: language, lines: documents.oldLines }));
   const newSyntax = createHighlight(() => ({ lang: language, lines: documents.newLines }));
@@ -191,10 +222,34 @@
     const code = codeOf(line);
     const side = documents.side[index];
     const tokens = side === 0 ? oldSyntax.at(documents.at[index]) : side === 1 ? newSyntax.at(documents.at[index]) : undefined;
-    return lineSegments(code, tokens, documents.ranges.get(index) ?? null);
+    return lineSegments(code, tokens, documents.ranges.get(index) ?? null, markWhitespace);
   }
 
   const sign = signOf;
+
+  /**
+   * 行选清理入口：换文件、generation、布局、完整文件或空白过滤之后，之前选中的行可能
+   * 已经不在屏幕上，必须清掉，否则不可见的行会被写进暂存。T3 还没有行选状态，这里先把
+   * 调用点立好，T4 接上选择集合即可，不用再散着找每个触发点。
+   */
+  function clearLineSelection(): void {}
+
+  let lineScope = $derived(
+    lineSelectionScope({
+      path: selection?.path ?? "",
+      side: selection?.side ?? "unstaged",
+      generation: currentDiff?.generation ?? null,
+      mode: renderMode,
+      fullFile,
+      hideWhitespaceOnly: diffPrefs.hideWhitespaceOnly,
+    }),
+  );
+
+  $effect(() => {
+    // 读一次 key：上下文变了才清，没变不重复清。
+    lineScope;
+    untrack(clearLineSelection);
+  });
 
   async function copy(text: string) {
     try {
@@ -606,6 +661,40 @@
         <button type="button" aria-pressed={preferred === "unified"} title="统一视图" onclick={() => (ownMode = "unified")}><Icon name="rows" size={12} />统一</button>
         <button type="button" aria-pressed={preferred === "split"} title="并排视图" onclick={() => (ownMode = "split")}><Icon name="split" size={12} />并排</button>
       </div>
+      <!-- 只有真正的文本差异才有可标记的空白：二进制、图片预览、冲突专用视图和截断内容上不出现这两个开关。 -->
+      {#if canFilterWhitespace}
+        <!-- 两个开关都只影响显示：代码文本、复制内容和暂存补丁仍用原始差异。 -->
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm diff-ws-btn"
+          aria-pressed={diffPrefs.showWhitespace}
+          aria-label="显示空白字符"
+          title={diffPrefs.showWhitespace ? "不再标出空格与制表符" : "把空格和制表符标出来；复制与暂存仍是原文"}
+          onclick={toggleShowWhitespace}
+        >
+          <Icon name="eye" size={13} /><span class="diff-hist-label">空白</span>
+        </button>
+      {/if}
+      {#if canFilterWhitespace}
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm diff-ws-btn"
+          aria-pressed={diffPrefs.hideWhitespaceOnly}
+          aria-label="忽略纯空白改动"
+          title={diffPrefs.hideWhitespaceOnly ? "重新显示只改了空白的改动块" : "隐藏只改了空白字符的改动块；混合改动仍然完整显示"}
+          onclick={toggleHideWhitespaceOnly}
+        >
+          <Icon name="filter" size={13} /><span class="diff-hist-label">略过空白</span>
+        </button>
+        {#if whitespaceFilter.hunks.size > 0}
+          <span
+            class="diff-ws-note"
+            role="status"
+            data-diff-trimmed
+            title={whitespaceFilter.lines + " 行只改了空白，按当前设置没有显示；点「略过空白」可以恢复"}
+          >已隐藏 {whitespaceFilter.hunks.size} 处</span>
+        {/if}
+      {/if}
     </div>
   </div>
   {/if}
@@ -656,6 +745,13 @@
       <strong>只有文件属性变化</strong>
       <p>{shown.meta.join("；")}</p>
     </div>
+  {:else if filteredAll}
+    <div class="empty" role="status" data-diff-filtered>
+      <span class="empty-icon"><Icon name="filter" size={24} /></span>
+      <strong>差异已被当前过滤条件隐藏</strong>
+      <p>{whitespaceFilter.hunks.size} 个改动块只改了空白字符，按「略过纯空白改动」没有显示。</p>
+      <button type="button" class="btn btn-secondary btn-sm" onclick={() => setHideWhitespaceOnly(false)}>显示空白改动</button>
+    </div>
   {:else if !currentDiff || (currentDiff.lines.length === 0 && currentDiff.totalLines === 0)}
     <div class="empty" role="status">
       <span class="empty-icon"><Icon name="file" size={24} /></span>
@@ -701,7 +797,7 @@
               <span class="ln">{line.newNo ?? ""}</span>
               {#if line.kind === "add" || line.kind === "del" || line.kind === "context"}
                 {@const segs = segmentsAt(absolute)}
-                <span class="code"><span class="code-in" data-sign={sign(line.text)} data-len={codeOf(line).length}>{#if segs.length === 1 && !segs[0].k && !segs[0].m}{segs[0].t}{:else}{#each segs as seg, i (i)}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/each}{/if}</span></span>
+                <span class="code"><span class="code-in" data-sign={sign(line.text)} data-len={codeOf(line).length}>{#if segs.length === 1 && !segs[0].k && !segs[0].m && !segs[0].ws}{segs[0].t}{:else}{#each segs as seg, i (i)}<span class={seg.k} class:wd={seg.m} class:ws-space={seg.ws === "space"} class:ws-tab={seg.ws === "tab"}>{seg.t}</span>{/each}{/if}</span></span>
               {:else if line.kind === "hunk"}
                 {@const caption = hunkCaption(line.text)}
                 <span class="code hunk-caption"><span class="hunk-at">{caption.at}</span>{#if caption.context}<span class="hunk-context" title={caption.context}>{caption.context}</span>{/if}</span>
@@ -738,10 +834,10 @@
                 <span class="side-cell hunk side-hunk"><span class="ln"></span><span class="code hunk-caption"><span class="hunk-at">{caption.at}</span>{#if caption.context}<span class="hunk-context" title={caption.context}>{caption.context}</span>{/if}</span></span>
               {:else}
               <span class={`side-cell side-l ${row.left?.kind ?? "blank"}`}>
-                {#if row.left}<span class="ln">{row.left.no ?? ""}</span>{#if row.left.index !== undefined && !row.span}<span class="code"><span class="code-in" data-sign={sign(row.left.text)} data-len={codeOf(row.left).length}>{#each segmentsAt(row.left.index) as seg, i (i)}{#if !seg.k && !seg.m}{seg.t}{:else}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/if}{/each}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.left.text.length}>{row.left.text}</span></span>{/if}{/if}
+                {#if row.left}<span class="ln">{row.left.no ?? ""}</span>{#if row.left.index !== undefined && !row.span}<span class="code"><span class="code-in" data-sign={sign(row.left.text)} data-len={codeOf(row.left).length}>{#each segmentsAt(row.left.index) as seg, i (i)}{#if !seg.k && !seg.m && !seg.ws}{seg.t}{:else}<span class={seg.k} class:wd={seg.m} class:ws-space={seg.ws === "space"} class:ws-tab={seg.ws === "tab"}>{seg.t}</span>{/if}{/each}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.left.text.length}>{row.left.text}</span></span>{/if}{/if}
               </span>
               <span class={`side-cell side-r ${row.right?.kind ?? "blank"}`}>
-                {#if row.right}<span class="ln">{row.right.no ?? ""}</span>{#if row.right.index !== undefined && !row.span}<span class="code"><span class="code-in" data-sign={sign(row.right.text)} data-len={codeOf(row.right).length}>{#each segmentsAt(row.right.index) as seg, i (i)}{#if !seg.k && !seg.m}{seg.t}{:else}<span class={seg.k} class:wd={seg.m}>{seg.t}</span>{/if}{/each}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.right.text.length}>{row.right.text}</span></span>{/if}{/if}
+                {#if row.right}<span class="ln">{row.right.no ?? ""}</span>{#if row.right.index !== undefined && !row.span}<span class="code"><span class="code-in" data-sign={sign(row.right.text)} data-len={codeOf(row.right).length}>{#each segmentsAt(row.right.index) as seg, i (i)}{#if !seg.k && !seg.m && !seg.ws}{seg.t}{:else}<span class={seg.k} class:wd={seg.m} class:ws-space={seg.ws === "space"} class:ws-tab={seg.ws === "tab"}>{seg.t}</span>{/if}{/each}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.right.text.length}>{row.right.text}</span></span>{/if}{/if}
               </span>
               {/if}
               {#if !readOnly && !fullFile && row.showStage && row.hunkIndex !== null}

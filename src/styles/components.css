@@ -517,7 +517,7 @@
 
 /* ---------- 差异视图 ---------- */
 .diff { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--surface); overflow: hidden; flex: 1; container-type: inline-size; container-name: diff; }
-@container diff (max-width: 640px) { .diff-hist-label, .diff-summary { display: none; } }
+@container diff (max-width: 640px) { .diff-hist-label, .diff-summary, .diff-ws-note { display: none; } }
 @container diff (max-width: 480px) { .diff-side, .diff-stats { display: none; } .diff-line { grid-template-columns: 36px 36px minmax(0, 1fr) auto; } }
 .diff:focus { outline: none; }
 .file-nav { display: inline-flex; align-items: center; gap: var(--space-4); flex: none; }
@@ -554,6 +554,23 @@
 .diff-summary { font-size: var(--text-xs); color: var(--fg-subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 230px; }
 .diff-toolbar .segmented { padding: 2px; border-radius: var(--radius); }
 .diff-toolbar .segmented button { height: 22px; padding: 0 var(--space-8); font-size: var(--text-xs); }
+/* 显示空白（T3）：空格画点、制表符画折角线。标记只用背景绘制，不插入任何字符，
+   所以可复制文本、语法分词输入与 DiffLine.text 都还是原文；它只是视觉层。 */
+.diff .ws-space {
+  background-image: radial-gradient(circle at 50% 68%, color-mix(in srgb, var(--fg-subtle) 58%, transparent) 0 0.9px, transparent 1.1px);
+  background-size: 1ch 100%;
+  background-repeat: repeat-x;
+}
+.diff .ws-tab {
+  background-image: linear-gradient(to right, color-mix(in srgb, var(--fg-subtle) 58%, transparent) 0 100%), linear-gradient(to bottom, color-mix(in srgb, var(--fg-subtle) 58%, transparent) 0 100%);
+  background-size: 100% 1px, 1px 46%;
+  background-position: 0 92%, 100% 50%;
+  background-repeat: no-repeat, no-repeat;
+}
+/* 工具条上的两个显示开关：按下态沿用分段控件的选中底色；「已隐藏 N 处」说明过滤正在生效。 */
+.diff-toolbar .diff-ws-btn { height: 22px; padding: 0 var(--space-8); font-size: var(--text-xs); gap: 5px; }
+.diff-toolbar .diff-ws-btn[aria-pressed="true"] { background: var(--segmented-active-bg); color: var(--fg); box-shadow: var(--segmented-active-shadow); }
+.diff-ws-note { flex: none; font-size: var(--text-xs); color: var(--fg-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .diff-scroll { min-height: 0; flex: 1; overflow: auto; outline: none; background: var(--surface); }
 /* 可聚焦滚动容器（与 .file-list / .history-list 同一判据）：焦点环用 --focus 画在内容之上。 */
 .diff-scroll:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }

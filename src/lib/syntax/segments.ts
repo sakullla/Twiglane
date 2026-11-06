@@ -10,9 +10,48 @@ export interface Segment {
   k: string;
   /** 是否落在行内改动区间里。 */
   m: boolean;
+  /**
+   * 显示空白时才有的字段：这一段是不可见字符（空格 / 制表符），由视觉层画标记。
+   * 文本一字不改，因此可复制内容、语法分词输入和 DiffLine.text 都还是原文。
+   */
+  ws?: "space" | "tab";
 }
 
-export function lineSegments(text: string, tokens: SyntaxLine | null | undefined, range: [number, number] | null = null): Segment[] {
+/** 连续的空格或制表符各成一段；混在一起时按字符类型分开，标记才能画对。 */
+const WHITESPACE_RUN = /[ ]+|\t+/g;
+
+/**
+ * 把片段里的连续空白切成独立片段，标上 ws。
+ * 只在用户打开「显示空白」时走这条路；默认路径的片断结构与原来完全一致。
+ */
+function markWhitespace(segment: Segment): Segment[] {
+  if (!/[ \t]/.test(segment.t)) return [segment];
+  const out: Segment[] = [];
+  let offset = 0;
+  for (const match of segment.t.matchAll(WHITESPACE_RUN)) {
+    const start = match.index;
+    if (start > offset) out.push({ ...segment, t: segment.t.slice(offset, start) });
+    out.push({ ...segment, t: match[0], ws: match[0][0] === "\t" ? "tab" : "space" });
+    offset = start + match[0].length;
+  }
+  if (offset < segment.t.length) out.push({ ...segment, t: segment.t.slice(offset) });
+  return out;
+}
+
+/**
+ * @param showWhitespace 显示不可见字符时再切一层空白片段；文本本身不变。
+ */
+export function lineSegments(
+  text: string,
+  tokens: SyntaxLine | null | undefined,
+  range: [number, number] | null = null,
+  showWhitespace = false,
+): Segment[] {
+  const segments = splitSegments(text, tokens, range);
+  return showWhitespace ? segments.flatMap(markWhitespace) : segments;
+}
+
+function splitSegments(text: string, tokens: SyntaxLine | null | undefined, range: [number, number] | null): Segment[] {
   const source = tokens && tokens.length > 0 && tokens.reduce((sum, token) => sum + token.t.length, 0) === text.length
     ? tokens
     : [{ t: text, k: "" }];

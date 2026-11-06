@@ -164,6 +164,7 @@ import { paletteItems, REPO_SWITCH_PREFIX, type CommandState } from "../src/lib/
 import { createTextDiff } from "../src/lib/diff";
 import { RULER_LINES, RULER_SAMPLE_CHARS } from "../src/lib/layout";
 import { codeLine } from "./helpers/code";
+import { resetDiffPrefs } from "../src/lib/diff-prefs.svelte";
 
 /* ------------------------------------------------------------------ *
  * 组件级夹具：只关心差异密度与提交区形状。
@@ -1236,6 +1237,145 @@ describe("差异工具条分段与空/失败状态（T3）", () => {
     render(DiffView, { props: { ...base(), selection: null, diff: null, fileCount: 3 } });
     expect(screen.getByText("选择一个文件查看差异")).toBeTruthy();
     expect(screen.queryByText("工作区没有未提交的改动")).toBeNull();
+  });
+});
+
+describe("差异空白显示与纯空白过滤（T3）", () => {
+  /* 第一个块只改了缩进（空格 ↔ 制表符），第二个块是真的改了内容。 */
+  const wsLines: DiffLine[] = [
+    { kind: "hunk", text: "@@ -1 +1 @@", oldNo: null, newNo: null, hunkIndex: 0 },
+    { kind: "del", text: "-  const indent = 1;", oldNo: 1, newNo: null, hunkIndex: 0 },
+    { kind: "add", text: "+\tconst indent = 1;", oldNo: null, newNo: 1, hunkIndex: 0 },
+    { kind: "hunk", text: "@@ -9 +9 @@", oldNo: null, newNo: null, hunkIndex: 1 },
+    { kind: "del", text: "-const value = 1;", oldNo: 9, newNo: null, hunkIndex: 1 },
+    { kind: "add", text: "+const value = 2;", oldNo: null, newNo: 9, hunkIndex: 1 },
+  ];
+  const wsDiff: DiffResponse = {
+    generation: 9,
+    path: "demo.txt",
+    staged: false,
+    binary: false,
+    text: null,
+    summary: "新增 2 行，删除 2 行。",
+    additions: 2,
+    deletions: 2,
+    complete: true,
+    truncated: false,
+    snapshot: "ws-snap",
+    offset: 0,
+    totalLines: wsLines.length,
+    hunks: [
+      { index: 0, header: "@@ -1 +1 @@", complete: true, stageable: true, startLine: 0, lineCount: 3 },
+      { index: 1, header: "@@ -9 +9 @@", complete: true, stageable: true, startLine: 3, lineCount: 3 },
+    ],
+    lines: wsLines,
+  };
+  const base = (path = "demo.txt") => ({
+    selection: { path, side: "unstaged" as const },
+    diff: wsDiff,
+    error: null,
+    loading: false,
+    disabled: false,
+    onStageHunk: () => {},
+    onLoadMore: () => {},
+  });
+  const button = (name: string) => screen.getByRole("button", { name });
+
+  beforeEach(() => resetDiffPrefs());
+
+  it("打开「显示空白」标出空格与制表符，代码文本仍是原文", async () => {
+    render(DiffView, { props: base() });
+    expect(document.querySelector(".diff .ws-space")).toBeNull();
+    expect(button("显示空白字符").getAttribute("aria-pressed")).toBe("false");
+
+    await fireEvent.click(button("显示空白字符"));
+    expect(button("显示空白字符").getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelectorAll(".diff .ws-space").length).toBeGreaterThan(0);
+    expect(document.querySelectorAll(".diff .ws-tab").length).toBeGreaterThan(0);
+    // 标记是纯视觉的：DOM 文本还是原始行，没有插入「·」「→」这类字符。
+    expect(screen.getByText(codeLine("  const indent = 1;"))).toBeTruthy();
+    expect(screen.getByText(codeLine("\tconst indent = 1;"))).toBeTruthy();
+    // 偏好写进本机，再点一次回到原文。
+    expect(JSON.parse(localStorage.getItem("twiglane.diffPrefs") ?? "{}").showWhitespace).toBe(true);
+    await fireEvent.click(button("显示空白字符"));
+    expect(button("显示空白字符").getAttribute("aria-pressed")).toBe("false");
+    expect(document.querySelector(".diff .ws-space")).toBeNull();
+  });
+
+  it("「忽略纯空白改动」只隐藏纯空白块，混合块与行号保持原样", async () => {
+    render(DiffView, { props: base() });
+    await fireEvent.click(button("忽略纯空白改动"));
+
+    // 只改了缩进的块整块隐藏（块头一起走），混合块两行都留着。
+    expect(screen.queryByText(codeLine("  const indent = 1;"))).toBeNull();
+    expect(screen.queryByText(codeLine("\tconst indent = 1;"))).toBeNull();
+    expect(screen.getByText(codeLine("const value = 1;"))).toBeTruthy();
+    expect(screen.getByText(codeLine("const value = 2;"))).toBeTruthy();
+    // 不重排、不伪造行号：剩下的块还是原来的标题和 Git 行号。
+    expect(screen.getByText("第 9 行")).toBeTruthy();
+    const numbers = [...document.querySelectorAll<HTMLElement>(".diff-line .ln")].map((node) => node.textContent);
+    expect(numbers).toContain("9");
+    expect(numbers).not.toContain("1");
+    // 持续状态 + 落盘。
+    expect(document.querySelector("[data-diff-trimmed]")?.textContent).toContain("已隐藏 1 处");
+    expect(JSON.parse(localStorage.getItem("twiglane.diffPrefs") ?? "{}").hideWhitespaceOnly).toBe(true);
+  });
+
+  it("全部被过滤时说明是被当前条件隐藏了，并给一键恢复", async () => {
+    const indentOnly: DiffResponse = {
+      ...wsDiff,
+      additions: 1,
+      deletions: 1,
+      totalLines: 3,
+      hunks: [wsDiff.hunks[0]],
+      lines: wsLines.slice(0, 3),
+    };
+    render(DiffView, { props: { ...base(), diff: indentOnly } });
+    await fireEvent.click(button("忽略纯空白改动"));
+
+    expect(screen.getByText("差异已被当前过滤条件隐藏")).toBeTruthy();
+    expect(screen.queryByText("没有文本差异")).toBeNull();
+    expect(screen.queryByText("工作区没有未提交的改动")).toBeNull();
+
+    await fireEvent.click(button("显示空白改动"));
+    expect(screen.queryByText("差异已被当前过滤条件隐藏")).toBeNull();
+    expect(screen.getByText(codeLine("  const indent = 1;"))).toBeTruthy();
+    expect(button("忽略纯空白改动").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("显示空白时右键复制仍然是原始文本", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render(DiffView, { props: base() });
+    await fireEvent.click(button("显示空白字符"));
+
+    const row = document.querySelector<HTMLElement>('.diff-line[data-line="1"]')!;
+    await fireEvent.contextMenu(row);
+    await fireEvent.click(screen.getByRole("menuitem", { name: "复制此行代码" }));
+    expect(writeText).toHaveBeenCalledWith("  const indent = 1;");
+  });
+
+  it("并排视图同样标出空白，过滤对两栏一起生效", async () => {
+    render(DiffView, { props: base() });
+    await fireEvent.click(button("并排"));
+    await fireEvent.click(button("显示空白字符"));
+    expect(document.querySelector(".side-cell .ws-space")).toBeTruthy();
+
+    await fireEvent.click(button("忽略纯空白改动"));
+    expect(screen.queryByText(codeLine("  const indent = 1;"))).toBeNull();
+    expect(screen.getByText(codeLine("const value = 2;"))).toBeTruthy();
+    expect(document.querySelector(".side-row")).toBeTruthy();
+  });
+
+  it("二进制、图片、截断与冲突内容不出现这两个开关", () => {
+    for (const extra of [{ binary: true }, { truncated: true }]) {
+      document.body.innerHTML = "";
+      render(DiffView, { props: { ...base(), diff: { ...wsDiff, ...extra } } });
+      expect(document.querySelectorAll(".diff-toolbar .diff-ws-btn")).toHaveLength(0);
+    }
+    document.body.innerHTML = "";
+    render(DiffView, { props: { ...base(), conflicted: true, onResolve: () => {} } });
+    expect(document.querySelectorAll(".diff-toolbar .diff-ws-btn")).toHaveLength(0);
   });
 });
 

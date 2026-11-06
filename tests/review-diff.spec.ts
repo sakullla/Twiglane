@@ -2,7 +2,17 @@ import { readFileSync } from "node:fs";
 import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createTextDiff, HUNK_FIRST, HUNK_LAST, HUNK_NONE, hunkJump, hunkRowIndexes } from "../src/lib/diff";
+import {
+  createTextDiff,
+  HUNK_FIRST,
+  HUNK_LAST,
+  HUNK_NONE,
+  hunkJump,
+  hunkRowIndexes,
+  lineSelectionScope,
+  whitespaceOnlyHunks,
+} from "../src/lib/diff";
+import { lineSegments } from "../src/lib/syntax/segments";
 import type { CommitDetail, DiffResponse, OpenedRepository } from "../src/lib/types";
 
 const commitFileDiff = vi.hoisted(() => vi.fn());
@@ -119,6 +129,92 @@ describe("文本差异计算", () => {
     expect(result.deletions).toBe(1);
     expect(result.lines.map((line) => line.text)).toEqual(expect.arrayContaining(["-const b = 2;", "+const b = 3;", "+const c = 4;", " const a = 1;"]));
     expect(result.lines.some((line) => line.kind === "hunk")).toBe(true);
+  });
+});
+
+describe("纯空白改动过滤（R5）", () => {
+  it("只差空白的块被隐藏，混合块与单侧改动整体保留", () => {
+    const lines = [
+      { kind: "hunk", text: "@@ -1,2 +1,2 @@", hunkIndex: 0 },
+      { kind: "del", text: "-  const a = 1;  ", hunkIndex: 0 },
+      { kind: "add", text: "+\tconst a = 1;", hunkIndex: 0 },
+      { kind: "hunk", text: "@@ -9,3 +9,2 @@", hunkIndex: 1 },
+      { kind: "del", text: "-const b = 2;", hunkIndex: 1 },
+      { kind: "del", text: "-const c = 3;", hunkIndex: 1 },
+      { kind: "add", text: "+const b = 2;", hunkIndex: 1 },
+      { kind: "hunk", text: "@@ -20 +20 @@", hunkIndex: 2 },
+      { kind: "add", text: "+   ", hunkIndex: 2 },
+      { kind: "add", text: "+   ", hunkIndex: null },
+    ];
+    const filter = whitespaceOnlyHunks(lines);
+    expect([...filter.hunks]).toEqual([0]);
+    // 被隐藏的只有第一块的两行代码，块头不算。
+    expect(filter.lines).toBe(2);
+  });
+
+  it("缩进或行尾空白变更才算纯空白；内容变动、行数不同都保留", () => {
+    expect([...whitespaceOnlyHunks([
+      { kind: "del", text: "-return x;", hunkIndex: 0 },
+      { kind: "add", text: "+return y;", hunkIndex: 0 },
+    ]).hunks]).toEqual([]);
+    expect([...whitespaceOnlyHunks([
+      { kind: "del", text: "-    if (a) {", hunkIndex: 0 },
+      { kind: "add", text: "+  if (a) {", hunkIndex: 0 },
+    ]).hunks]).toEqual([0]);
+    // 只新增空白行：另一侧没有对应行，属于真实改动，不隐藏。
+    expect([...whitespaceOnlyHunks([{ kind: "add", text: "+   ", hunkIndex: 0 }]).hunks]).toEqual([]);
+    // 只有上下文行的块不是改动块。
+    const keep = whitespaceOnlyHunks([{ kind: "context", text: " keep", hunkIndex: 0 }]);
+    expect(keep.hunks.size).toBe(0);
+    expect(keep.lines).toBe(0);
+  });
+});
+
+describe("行选清理的触发条件（T3 建立入口，T4 接行选）", () => {
+  const base = {
+    path: "src/a.ts",
+    side: "unstaged",
+    generation: 3,
+    mode: "unified" as const,
+    fullFile: false,
+    hideWhitespaceOnly: false,
+  };
+
+  it("什么都没变时 key 不变，同一份行选可以留着", () => {
+    expect(lineSelectionScope({ ...base })).toBe(lineSelectionScope(base));
+  });
+
+  it("换文件、侧别、generation、布局、完整文件或空白过滤都会让旧行选失效", () => {
+    const key = lineSelectionScope(base);
+    const changes = [
+      { ...base, path: "src/b.ts" },
+      { ...base, side: "staged" },
+      { ...base, generation: 4 },
+      { ...base, generation: null },
+      { ...base, mode: "split" as const },
+      { ...base, fullFile: true },
+      { ...base, hideWhitespaceOnly: true },
+    ];
+    for (const next of changes) expect(lineSelectionScope(next)).not.toBe(key);
+  });
+});
+
+describe("显示空白的视觉层（R5）", () => {
+  it("切出的空白片段拼回去仍是原文，不插入标记字符", () => {
+    const text = "  \tconst  a = ";
+    const segments = lineSegments(text, null, null, true);
+    expect(segments.map((seg) => seg.t).join("")).toBe(text);
+    expect(segments.filter((seg) => seg.ws === "space").map((seg) => seg.t)).toEqual(["  ", "  ", " ", " "]);
+    expect(segments.filter((seg) => seg.ws === "tab").map((seg) => seg.t)).toEqual(["\t"]);
+    // 不开显示空白时片段结构完全不变，分词与既有断言不受影响。
+    expect(lineSegments("other", null)).toEqual([{ t: "other", k: "", m: false }]);
+  });
+
+  it("标记由样式表画出来，样式里没有往代码里插字符", () => {
+    const css = readFileSync("src/styles/components.css", "utf8");
+    expect(css).toContain(".diff .ws-space {");
+    expect(css).toContain(".diff .ws-tab {");
+    expect(css).toContain('.diff-toolbar .diff-ws-btn[aria-pressed="true"]');
   });
 });
 

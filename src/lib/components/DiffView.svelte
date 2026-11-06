@@ -3,6 +3,7 @@
   import { MODIFIER_LABEL } from "../brand";
   import { hunkCaption, hunkJump, hunkRowIndexes, lineSelectionScope, splitColumnsFit, toSideRows, visibleDiffLines, whitespaceOnlyHunks, type HunkNavReport, type ViewLine, type WhitespaceFilter } from "../diff";
   import { diffPrefs, setHideWhitespaceOnly, toggleHideWhitespaceOnly, toggleShowWhitespace } from "../diff-prefs.svelte";
+  import type { IconName } from "../icons";
   import { trackCodeScroll } from "../codeScroll.svelte";
   import { codeContentSize, codeRuler, rulerPadding, scrollByRows, visibleRange } from "../layout";
   import type { DiffHunk, DiffLineSelection, DiffResponse, FileSelection } from "../types";
@@ -17,6 +18,7 @@
   import LanguagePicker from "./LanguagePicker.svelte";
   import Icon from "./Icon.svelte";
   import LineCounts from "./LineCounts.svelte";
+  import Popover from "./Popover.svelte";
 
   interface Props {
     onGeneration?: (generation: number) => void;
@@ -195,10 +197,6 @@
   });
   let parts = $derived(selection ? splitPath(selection.path) : null);
   let showStats = $derived(Boolean(currentDiff));
-  /** 中间那一段：只有真的有文件动作时才画，免得空段留下一条竖线和一段多余间距。 */
-  let hasFileTools = $derived(
-    Boolean(selection && (onFileHistory || onFullFile || (currentDiff && !currentDiff.binary))),
-  );
 
   $effect(() => {
     const node = root;
@@ -351,6 +349,215 @@
     // 读一次 key：上下文变了才清，没变不重复清。
     pickScope;
     untrack(clearLineSelection);
+  });
+
+  /* ------------------------------------------------------------------ *
+   * 工具条随差异面板宽度收敛（R2）。
+   * 当前文件、文件/改动块导航与主写入动作始终留在原位；空间不足时，低频文件工具与
+   * 查看偏好收进同一个溢出入口。溢出项和直接入口读同一份状态，因此生效值、禁用原因
+   * 与执行结果只有一套事实来源；宽度未知（首帧或测试环境）时按完整工具条渲染。
+   * ------------------------------------------------------------------ */
+  type ToolTier = "full" | "compact" | "narrow";
+  /** 面板宽到这里为止时全部工具直接可见；再窄就依次收敛一档。 */
+  const FULL_MIN = 1160;
+  const COMPACT_MIN = 860;
+  let toolbar = $state<HTMLDivElement | null>(null);
+  let toolbarWidth = $state(0);
+  /** 实际渲染后仍溢出时追加收敛的档数：0 按宽度，1 至少 compact，2 至少 narrow。 */
+  let escalated = $state(0);
+  let moreOpen = $state(false);
+  let moreQuery = $state("");
+  let moreActive = $state(0);
+  let moreAnchor = $state<HTMLButtonElement | null>(null);
+  let baseTier = $derived<ToolTier>(
+    toolbarWidth <= 0 ? "full" : toolbarWidth >= FULL_MIN ? "full" : toolbarWidth >= COMPACT_MIN ? "compact" : "narrow",
+  );
+  let tier = $derived<ToolTier>(
+    escalated === 0 ? baseTier : escalated === 1 ? (baseTier === "full" ? "compact" : "narrow") : "narrow",
+  );
+  let showLayoutInline = $derived(tier !== "narrow");
+  /* 行选进行中优先保住选择与写入的可达性：中间宽度再让出显示偏好这一档；完整宽度放得下，不搬动。 */
+  let showDisplayPrefsInline = $derived(
+    tier !== "narrow" && canFilterWhitespace && !(tier === "compact" && pickMode),
+  );
+  let showOverflow = $derived(tier !== "full");
+  /* 文件工具里语言标签很窄，任何一档都留在工具条上；历史与完整文件在完整档才直接露出。 */
+  let inlineLanguage = $derived(Boolean(currentDiff && !currentDiff.binary && selection));
+  let inlineFileHistory = $derived(tier === "full" && Boolean(onFileHistory && selection));
+  let inlineFullFile = $derived(tier === "full" && Boolean(onFullFile && selection));
+  let hasInlineFileTools = $derived(inlineLanguage || inlineFileHistory || inlineFullFile);
+
+  interface DiffTool {
+    id: string;
+    label: string;
+    icon: IconName;
+    /** 当前生效状态文字（已开启 / 当前 / 已选 N 行）。 */
+    state?: string;
+    /** 是否处于选中态：驱动 aria-selected 与勾选。 */
+    selected?: boolean;
+    /** 会影响视图的偏好是否生效：只用于溢出触发按钮上的计数。 */
+    pressed?: boolean;
+    /** 不可用原因；有值时条目仍可见，但不执行。 */
+    reason?: string;
+    /** 补充说明（例如已隐藏几处），不阻止执行。 */
+    note?: string;
+    run: () => void;
+  }
+
+  let overflowTools = $derived.by<DiffTool[]>(() => {
+    const tools: DiffTool[] = [];
+    if (tier === "narrow") {
+      tools.push(
+        {
+          id: "layout-unified",
+          label: "统一视图",
+          icon: "rows",
+          selected: preferred === "unified",
+          state: preferred === "unified" ? "当前" : undefined,
+          run: () => (ownMode = "unified"),
+        },
+        {
+          id: "layout-split",
+          label: "并排视图",
+          icon: "split",
+          selected: preferred === "split",
+          state: preferred === "split" ? "当前" : undefined,
+          run: () => (ownMode = "split"),
+        },
+      );
+    }
+    if (canFilterWhitespace && !showDisplayPrefsInline) {
+      tools.push(
+        {
+          id: "show-whitespace",
+          label: "显示空白字符",
+          icon: "eye",
+          selected: diffPrefs.showWhitespace,
+          pressed: diffPrefs.showWhitespace,
+          state: diffPrefs.showWhitespace ? "已开启" : "已关闭",
+          run: toggleShowWhitespace,
+        },
+        {
+          id: "hide-whitespace",
+          label: "忽略纯空白改动",
+          icon: "filter",
+          selected: diffPrefs.hideWhitespaceOnly,
+          pressed: diffPrefs.hideWhitespaceOnly,
+          state: diffPrefs.hideWhitespaceOnly ? "已开启" : "已关闭",
+          note: whitespaceFilter.hunks.size > 0 ? `已隐藏 ${whitespaceFilter.hunks.size} 处只改了空白的改动` : undefined,
+          run: toggleHideWhitespaceOnly,
+        },
+      );
+    }
+    if (onFullFile && selection) {
+      tools.push({
+        id: "full-file",
+        label: fullFile ? "只看改动部分" : "查看完整文件",
+        icon: "rows",
+        selected: fullFile,
+        pressed: fullFile,
+        state: fullFile ? "已开启" : undefined,
+        run: () => onFullFile?.(!fullFile),
+      });
+    }
+    if (onFileHistory && selection) {
+      tools.push({ id: "file-history", label: "此文件历史", icon: "history", run: () => onFileHistory?.(selection.path) });
+    }
+    if (tier === "narrow" && pickMode) {
+      tools.push({
+        id: "clear-picks",
+        label: "清除选中的行",
+        icon: "x",
+        state: picked.length > 0 ? `已选 ${picked.length} 行` : undefined,
+        reason: picked.length === 0 ? "还没有选中任何行" : undefined,
+        run: () => (picked = []),
+      });
+    }
+    return tools;
+  });
+  let visibleTools = $derived.by(() => {
+    const needle = moreQuery.trim().toLowerCase();
+    if (!needle) return overflowTools;
+    return overflowTools.filter((tool) =>
+      [tool.label, tool.state, tool.note, tool.reason].some((part) => part?.toLowerCase().includes(needle)),
+    );
+  });
+  let pressedToolCount = $derived(overflowTools.filter((tool) => tool.pressed).length);
+  let moreLabel = $derived(
+    pressedToolCount > 0 ? `更多差异工具（${pressedToolCount} 项已开启）` : "更多差异工具",
+  );
+  /** 工具条内容变化（含选中行数、过滤状态）后重新量一次；宽度没变时 ResizeObserver 不会回调。 */
+  let toolbarSignature = $derived(
+    [
+      tier,
+      pickMode,
+      picked.length,
+      canFilterWhitespace,
+      Boolean(onFullFile),
+      Boolean(onFileHistory),
+      loading,
+      fullFile,
+    ].join("|"),
+  );
+
+  $effect(() => {
+    toolbarSignature;
+    const node = toolbar;
+    if (!node) return;
+    const read = () => {
+      const width = node.clientWidth;
+      if (width !== toolbarWidth) {
+        toolbarWidth = width;
+        escalated = 0;
+      }
+      // 估算阈值之外的字体或缩放差异由实际溢出兜底；最多升到 narrow，避免来回抖动。
+      if (width > 0 && tier !== "narrow" && node.scrollWidth > width + 1) escalated += 1;
+    };
+    read();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(read);
+    observer.observe(node);
+    return () => observer.disconnect();
+  });
+
+  /** 搜索词变化时回到第一项；过滤让条目变少时当前项不越界。 */
+  let seenToolQuery = "";
+  $effect(() => {
+    const query = moreQuery;
+    untrack(() => {
+      if (query === seenToolQuery) return;
+      seenToolQuery = query;
+      moreActive = 0;
+    });
+  });
+  $effect(() => {
+    const count = visibleTools.length;
+    if (moreActive > Math.max(0, count - 1)) moreActive = Math.max(0, count - 1);
+  });
+
+  function openMore(): void {
+    if (!moreAnchor) return;
+    moreQuery = "";
+    seenToolQuery = "";
+    const first = overflowTools.findIndex((tool) => !tool.reason);
+    moreActive = first >= 0 ? first : 0;
+    moreOpen = true;
+  }
+
+  function closeMore(refocus = true): void {
+    moreOpen = false;
+    if (refocus) moreAnchor?.focus({ preventScroll: true });
+  }
+
+  function runTool(tool: DiffTool | undefined): void {
+    if (!tool || tool.reason) return;
+    closeMore(true);
+    tool.run();
+  }
+
+  /** 窗口放宽到溢出入口消失时，别把打开状态带到下一次变窄。 */
+  $effect(() => {
+    if (!showOverflow && moreOpen) moreOpen = false;
   });
 
   async function copy(text: string) {
@@ -671,8 +878,9 @@
 <section class="diff dense" class:embedded aria-label="差异详情" tabindex="-1" bind:this={root} title={cramped ? "窗口太窄，暂时使用统一视图" : undefined}>
   {#if !embedded}
   <!-- 工具条分三段：文件位置/身份 → 能对这个文件做什么 → 怎么显示。同段靠在一起，
-       段与段之间一条装饰竖线，扫视顺序与操作顺序一致（先认出文件，再选动作，最后是布局）。 -->
-  <div class="diff-toolbar">
+       段与段之间一条装饰竖线，扫视顺序与操作顺序一致（先认出文件，再选动作，最后是布局）。
+       窄窗口只把低频项收进末尾的溢出入口，本行三段的主操作不搬家。 -->
+  <div class="diff-toolbar" bind:this={toolbar}>
     <div class="diff-toolbar-group context">
       {#if fileNav}<FileNav nav={fileNav} />{/if}
       {#if hunkState.total > 0}
@@ -705,7 +913,8 @@
       <div class="diff-file">
         {#if selection && parts}
           <Icon name="file-diff" size={15} />
-          <span class="diff-path" title={selection.path}>
+          <!-- 侧别在窄工具条里让位给路径；完整上下文仍在提示里可读。 -->
+          <span class="diff-path" title={selection.side === "staged" ? `${selection.path}（已暂存）` : `${selection.path}（未暂存）`}>
             <bdi>{#if parts.dir}<span class="dir">{parts.dir}/</span>{/if}<strong>{parts.name}</strong></bdi>
           </span>
           {#if !readOnly}
@@ -729,12 +938,12 @@
       </div>
       {#if loading && currentDiff}<span class="spinner muted" aria-hidden="true"></span>{/if}
     </div>
-    {#if hasFileTools}
+    {#if hasInlineFileTools}
       <div class="diff-toolbar-group">
-        {#if currentDiff && !currentDiff.binary && selection}
+        {#if inlineLanguage && selection}
           <LanguagePicker path={selection.path} />
         {/if}
-        {#if onFileHistory && selection}
+        {#if inlineFileHistory && selection}
           <button
             type="button"
             class="btn btn-ghost btn-sm"
@@ -745,7 +954,7 @@
             <Icon name="history" size={14} /><span class="diff-hist-label">此文件历史</span>
           </button>
         {/if}
-        {#if onFullFile && selection}
+        {#if inlineFullFile && selection}
           <button
             type="button"
             class="btn btn-ghost btn-sm diff-full-toggle"
@@ -760,7 +969,8 @@
     {/if}
     {#if onStageLines && currentDiff && !readOnly}
       <!-- 行选（T4）：只在能安全逐行写入的 canonical 差异里出现；不能用时把原因写在 title 上。
-           数量、清除与写入入口都在同一个分组里，和块级按钮一样受 disabled 保护。 -->
+           数量、清除与写入入口都在同一个分组里，和块级按钮一样受 disabled 保护。
+           窄工具条把「清除」收进溢出，写入入口与已选行数始终留在原位。 -->
       <div class="diff-toolbar-group diff-pick-bar">
         <button
           type="button"
@@ -775,14 +985,16 @@
         </button>
         {#if pickMode}
           <span class="badge" data-line-count aria-label={"已选择 " + picked.length + " 行"}>{picked.length} 行</span>
-          <button
-            type="button"
-            class="btn btn-ghost btn-sm"
-            aria-label="清除选中的行"
-            title={picked.length === 0 ? "还没有选中任何行" : "清空当前的行选择"}
-            disabled={picked.length === 0}
-            onclick={() => (picked = [])}
-          >清除</button>
+          {#if tier !== "narrow"}
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              aria-label="清除选中的行"
+              title={picked.length === 0 ? "还没有选中任何行" : "清空当前的行选择"}
+              disabled={picked.length === 0}
+              onclick={() => (picked = [])}
+            >清除</button>
+          {/if}
           <button
             type="button"
             class="btn btn-secondary btn-sm"
@@ -794,46 +1006,112 @@
         {/if}
       </div>
     {/if}
-    <div class="diff-toolbar-group">
-      <div class="segmented" role="group" aria-label="差异布局">
-        <button type="button" aria-pressed={preferred === "unified"} title="统一视图" onclick={() => (ownMode = "unified")}><Icon name="rows" size={12} />统一</button>
-        <button type="button" aria-pressed={preferred === "split"} title="并排视图" onclick={() => (ownMode = "split")}><Icon name="split" size={12} />并排</button>
-      </div>
-      <!-- 只有真正的文本差异才有可标记的空白：二进制、图片预览、冲突专用视图和截断内容上不出现这两个开关。 -->
-      {#if canFilterWhitespace}
-        <!-- 两个开关都只影响显示：代码文本、复制内容和暂存补丁仍用原始差异。 -->
-        <button
-          type="button"
-          class="btn btn-ghost btn-sm diff-ws-btn"
-          aria-pressed={diffPrefs.showWhitespace}
-          aria-label="显示空白字符"
-          title={diffPrefs.showWhitespace ? "不再标出空格与制表符" : "把空格和制表符标出来；复制与暂存仍是原文"}
-          onclick={toggleShowWhitespace}
-        >
-          <Icon name="eye" size={13} /><span class="diff-hist-label">空白</span>
-        </button>
-      {/if}
-      {#if canFilterWhitespace}
-        <button
-          type="button"
-          class="btn btn-ghost btn-sm diff-ws-btn"
-          aria-pressed={diffPrefs.hideWhitespaceOnly}
-          aria-label="忽略纯空白改动"
-          title={diffPrefs.hideWhitespaceOnly ? "重新显示只改了空白的改动块" : "隐藏只改了空白字符的改动块；混合改动仍然完整显示"}
-          onclick={toggleHideWhitespaceOnly}
-        >
-          <Icon name="filter" size={13} /><span class="diff-hist-label">略过空白</span>
-        </button>
-        {#if whitespaceFilter.hunks.size > 0}
-          <span
-            class="diff-ws-note"
-            role="status"
-            data-diff-trimmed
-            title={whitespaceFilter.lines + " 行只改了空白，按当前设置没有显示；点「略过空白」可以恢复"}
-          >已隐藏 {whitespaceFilter.hunks.size} 处</span>
+    {#if showLayoutInline || showDisplayPrefsInline}
+      <div class="diff-toolbar-group">
+        {#if showLayoutInline}
+          <div class="segmented" role="group" aria-label="差异布局">
+            <button type="button" aria-pressed={preferred === "unified"} title="统一视图" onclick={() => (ownMode = "unified")}><Icon name="rows" size={12} />统一</button>
+            <button type="button" aria-pressed={preferred === "split"} title="并排视图" onclick={() => (ownMode = "split")}><Icon name="split" size={12} />并排</button>
+          </div>
         {/if}
-      {/if}
-    </div>
+        <!-- 只有真正的文本差异才有可标记的空白：二进制、图片预览、冲突专用视图和截断内容上不出现这两个开关。 -->
+        {#if showDisplayPrefsInline && canFilterWhitespace}
+          <!-- 两个开关都只影响显示：代码文本、复制内容和暂存补丁仍用原始差异。 -->
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm diff-ws-btn"
+            aria-pressed={diffPrefs.showWhitespace}
+            aria-label="显示空白字符"
+            title={diffPrefs.showWhitespace ? "不再标出空格与制表符" : "把空格和制表符标出来；复制与暂存仍是原文"}
+            onclick={toggleShowWhitespace}
+          >
+            <Icon name="eye" size={13} /><span class="diff-hist-label">空白</span>
+          </button>
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm diff-ws-btn"
+            aria-pressed={diffPrefs.hideWhitespaceOnly}
+            aria-label="忽略纯空白改动"
+            title={diffPrefs.hideWhitespaceOnly ? "重新显示只改了空白的改动块" : "隐藏只改了空白字符的改动块；混合改动仍然完整显示"}
+            onclick={toggleHideWhitespaceOnly}
+          >
+            <Icon name="filter" size={13} /><span class="diff-hist-label">略过空白</span>
+          </button>
+          {#if whitespaceFilter.hunks.size > 0}
+            <span
+              class="diff-ws-note"
+              role="status"
+              data-diff-trimmed
+              title={whitespaceFilter.lines + " 行只改了空白，按当前设置没有显示；点「略过空白」可以恢复"}
+            >已隐藏 {whitespaceFilter.hunks.size} 处</span>
+          {/if}
+        {/if}
+      </div>
+    {/if}
+    {#if showOverflow}
+      <!-- 溢出入口（R2）：与直接入口共用同一份 diffPrefs / fullFile / renderMode 状态，
+           生效状态写在条目右侧，禁用原因就地说明；关闭后焦点回到触发按钮。 -->
+      <div class="diff-toolbar-group diff-overflow">
+        <button
+          type="button"
+          class="icon-btn sm diff-more-btn"
+          aria-label={moreLabel}
+          aria-haspopup="listbox"
+          aria-expanded={moreOpen}
+          title={moreLabel}
+          bind:this={moreAnchor}
+          onclick={() => (moreOpen ? closeMore() : openMore())}
+        >
+          <Icon name="more" size={15} />
+          {#if pressedToolCount > 0}<span class="diff-more-dot" aria-hidden="true"></span>{/if}
+        </button>
+        {#if moreOpen && moreAnchor}
+          <Popover
+            anchor={moreAnchor}
+            label="差异工具"
+            placeholder="搜索差异工具…"
+            searchLabel="搜索差异工具"
+            width={320}
+            bind:query={moreQuery}
+            bind:active={moreActive}
+            count={visibleTools.length}
+            onChoose={(index) => runTool(visibleTools[index])}
+            onClose={closeMore}
+          >
+            {#snippet list(listId)}
+              {#if visibleTools.length === 0}
+                <p class="diff-tool-empty">没有匹配的差异工具</p>
+              {:else}
+                {#each visibleTools as tool, index (tool.id)}
+                  <button
+                    type="button"
+                    class="diff-tool-option"
+                    class:active={index === moreActive}
+                    role="option"
+                    id={`${listId}-${index}`}
+                    data-index={index}
+                    tabindex="-1"
+                    aria-selected={tool.selected ? "true" : "false"}
+                    aria-disabled={tool.reason ? "true" : undefined}
+                    title={tool.reason ?? tool.note}
+                    onmousemove={() => (moreActive = index)}
+                    onclick={() => runTool(tool)}
+                  >
+                    <Icon name={tool.icon} size={14} />
+                    <span class="diff-tool-copy">
+                      <span class="diff-tool-name">{tool.label}</span>
+                      {#if tool.reason}<small class="diff-tool-reason">{tool.reason}</small>{:else if tool.note}<small>{tool.note}</small>{/if}
+                    </span>
+                    {#if tool.state}<span class="diff-tool-state">{tool.state}</span>{/if}
+                    {#if tool.selected}<Icon name="check" size={13} />{/if}
+                  </button>
+                {/each}
+              {/if}
+            {/snippet}
+          </Popover>
+        {/if}
+      </div>
+    {/if}
   </div>
   {/if}
   {#if conflicted && selection && !embedded}

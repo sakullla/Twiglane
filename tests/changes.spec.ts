@@ -2640,3 +2640,237 @@ describe("改动视图的按行暂存（R6）", () => {
     await waitFor(() => expect(commitButton().disabled).toBe(false));
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * R2：差异工具条随面板宽度有序收敛。
+ * happy-dom 没有布局，这里用 clientWidth 夹具决定落在哪一档；真实浏览器里由
+ * ResizeObserver 读同一份宽度，并对估算阈值兜底。
+ * ------------------------------------------------------------------ */
+describe("差异工具条随面板宽度收敛（R2）", () => {
+  const nav = () => ({
+    index: 1,
+    total: 3,
+    prevReason: null as string | null,
+    nextReason: null as string | null,
+    onPrev: () => {},
+    onNext: () => {},
+  });
+  const baseProps = () => ({
+    selection,
+    diff,
+    error: null,
+    loading: false,
+    disabled: false,
+    onStageHunk: () => {},
+    onLoadMore: () => {},
+    fileNav: nav(),
+    onFileHistory: () => {},
+    onFullFile: () => {},
+  });
+
+  /** 只让 .diff-toolbar 有宽度，其它元素保持 happy-dom 的 0，避免影响差异本身的布局判断。 */
+  function stubToolbarWidth(initial: number) {
+    let width = initial;
+    const spy = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains("diff-toolbar") ? width : 0;
+    });
+    return {
+      set(next: number) {
+        width = next;
+      },
+      restore() {
+        spy.mockRestore();
+      },
+    };
+  }
+
+  function stubObservers() {
+    const callbacks: ResizeObserverCallback[] = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          callbacks.push(callback);
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    return {
+      flush() {
+        for (const callback of [...callbacks]) callback([], {} as ResizeObserver);
+      },
+      restore() {
+        vi.unstubAllGlobals();
+      },
+    };
+  }
+
+  it("1200 宽直接露出全部工具，900 宽只把文件工具收进溢出，560 再收布局与显示偏好", async () => {
+    resetDiffPrefs();
+    const width = stubToolbarWidth(1200);
+    try {
+      render(DiffView, { props: baseProps() });
+      await tick();
+      expect(screen.getByRole("button", { name: "显示空白字符" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: /更多差异工具/ })).toBeNull();
+      expect((document.querySelector(".diff-toolbar") as HTMLElement).children).toHaveLength(3);
+
+      cleanup();
+      width.set(900);
+      render(DiffView, { props: baseProps() });
+      await tick();
+      // 中间档：显示偏好与布局仍直接可见，只有文件历史、完整文件进溢出。
+      expect(screen.getByRole("button", { name: "显示空白字符" })).toBeTruthy();
+      expect(screen.getByRole("group", { name: "差异布局" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "此文件历史" })).toBeNull();
+      expect(screen.getByRole("button", { name: /更多差异工具/ })).toBeTruthy();
+
+      cleanup();
+      width.set(560);
+      render(DiffView, { props: baseProps() });
+      await tick();
+      // 最小窗口：只留文件/改动块导航、当前路径与溢出入口；长路径靠完整提示辨认。
+      expect(screen.queryByRole("group", { name: "差异布局" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "显示空白字符" })).toBeNull();
+      expect(screen.getByRole("button", { name: "上一个文件" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "上一处改动" })).toBeTruthy();
+      expect(document.querySelector(".diff-path")?.getAttribute("title")).toBe("demo.txt（未暂存）");
+      expect(screen.getByRole("button", { name: /更多差异工具/ })).toBeTruthy();
+    } finally {
+      width.restore();
+    }
+  });
+
+  it("溢出条目的生效状态、执行结果与键盘焦点和直接入口一致", async () => {
+    resetDiffPrefs();
+    const width = stubToolbarWidth(560);
+    try {
+      render(DiffView, { props: baseProps() });
+      await tick();
+      const trigger = () => screen.getByRole("button", { name: /更多差异工具/ });
+      expect(trigger().getAttribute("aria-label")).toBe("更多差异工具");
+
+      await fireEvent.click(trigger());
+      const dialog = screen.getByRole("dialog", { name: "差异工具" });
+      const search = within(dialog).getByRole("combobox", { name: "搜索差异工具" });
+      expect(document.activeElement).toBe(search);
+      expect(search.getAttribute("aria-activedescendant")).toMatch(/-0$/);
+      await fireEvent.keyDown(search, { key: "ArrowDown" });
+      expect(search.getAttribute("aria-activedescendant")).toMatch(/-1$/);
+      const closed = within(dialog).getByRole("option", { name: /显示空白字符/ });
+      expect(closed.getAttribute("aria-selected")).toBe("false");
+      expect(closed.textContent).toContain("已关闭");
+      await fireEvent.click(closed);
+
+      expect(screen.queryByRole("dialog", { name: "差异工具" })).toBeNull();
+      expect(JSON.parse(localStorage.getItem("twiglane.diffPrefs") ?? "{}").showWhitespace).toBe(true);
+      expect(document.activeElement).toBe(trigger());
+      expect(trigger().getAttribute("aria-label")).toContain("1 项已开启");
+
+      await fireEvent.click(trigger());
+      const open = within(screen.getByRole("dialog", { name: "差异工具" })).getByRole("option", { name: /显示空白字符/ });
+      expect(open.getAttribute("aria-selected")).toBe("true");
+      expect(open.textContent).toContain("已开启");
+      await fireEvent.keyDown(screen.getByRole("dialog", { name: "差异工具" }), { key: "Escape" });
+      expect(screen.queryByRole("dialog", { name: "差异工具" })).toBeNull();
+      expect(document.activeElement).toBe(trigger());
+    } finally {
+      width.restore();
+    }
+  });
+
+  it("溢出入口可搜索，回车执行同一动作并交回焦点", async () => {
+    const onFullFile = vi.fn();
+    const width = stubToolbarWidth(560);
+    try {
+      render(DiffView, { props: { ...baseProps(), onFullFile } });
+      await tick();
+      const trigger = screen.getByRole("button", { name: /更多差异工具/ });
+      await fireEvent.click(trigger);
+      const dialog = screen.getByRole("dialog", { name: "差异工具" });
+      const search = within(dialog).getByRole("combobox", { name: "搜索差异工具" });
+      await fireEvent.input(search, { target: { value: "完整文件" } });
+      await tick();
+      expect(within(dialog).getAllByRole("option")).toHaveLength(1);
+      await fireEvent.keyDown(search, { key: "Enter" });
+      expect(onFullFile).toHaveBeenCalledWith(true);
+      expect(screen.queryByRole("dialog", { name: "差异工具" })).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+    } finally {
+      width.restore();
+    }
+  });
+
+  it("窄工具条把「清除」收进溢出，未选中时说明原因，选中后显示行数", async () => {
+    const width = stubToolbarWidth(560);
+    try {
+      render(DiffView, { props: { ...baseProps(), onStageLines: () => {} } });
+      await tick();
+      await fireEvent.click(screen.getByRole("button", { name: "选择行" }));
+      // 写入入口留在原位，只有「清除」进了溢出。
+      expect(screen.queryByRole("button", { name: "清除选中的行" })).toBeNull();
+      expect(screen.getByRole("button", { name: "暂存选中行" }).hasAttribute("disabled")).toBe(true);
+
+      const trigger = screen.getByRole("button", { name: /更多差异工具/ });
+      await fireEvent.click(trigger);
+      const dialog = () => screen.getByRole("dialog", { name: "差异工具" });
+      let clear = within(dialog()).getByRole("option", { name: /清除选中的行/ });
+      expect(clear.getAttribute("aria-disabled")).toBe("true");
+      expect(clear.textContent).toContain("还没有选中任何行");
+      // 禁用条目不执行，也不把弹层关掉让用户以为已经清空。
+      await fireEvent.click(clear);
+      expect(dialog()).toBeTruthy();
+      await fireEvent.keyDown(dialog(), { key: "Escape" });
+
+      await fireEvent.click(document.querySelector<HTMLButtonElement>("[data-line-pick]")!);
+      expect(document.querySelector("[data-line-count]")?.textContent).toBe("1 行");
+      await fireEvent.click(trigger);
+      clear = within(dialog()).getByRole("option", { name: /清除选中的行/ });
+      expect(clear.getAttribute("aria-disabled")).toBeNull();
+      expect(clear.textContent).toContain("已选 1 行");
+      await fireEvent.click(clear);
+      expect(document.querySelector("[data-line-count]")?.textContent).toBe("0 行");
+    } finally {
+      width.restore();
+    }
+  });
+
+  it("窗口缩放只改显示档位，显示偏好与差异布局不被重置", async () => {
+    resetDiffPrefs();
+    const width = stubToolbarWidth(560);
+    const observers = stubObservers();
+    try {
+      render(DiffView, { props: baseProps() });
+      await tick();
+      const trigger = () => screen.getByRole("button", { name: /更多差异工具/ });
+      await fireEvent.click(trigger());
+      await fireEvent.click(within(screen.getByRole("dialog", { name: "差异工具" })).getByRole("option", { name: /并排视图/ }));
+      await fireEvent.click(trigger());
+      await fireEvent.click(within(screen.getByRole("dialog", { name: "差异工具" })).getByRole("option", { name: /显示空白字符/ }));
+
+      width.set(900);
+      observers.flush();
+      await tick();
+      expect(screen.getByRole("button", { name: "并排" }).getAttribute("aria-pressed")).toBe("true");
+      expect(screen.getByRole("button", { name: "显示空白字符" }).getAttribute("aria-pressed")).toBe("true");
+      // 900 属于中间档：文件工具仍在溢出里，显示偏好与布局已经回到直接可见。
+      expect(screen.getByRole("button", { name: /更多差异工具/ })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "此文件历史" })).toBeNull();
+
+      width.set(560);
+      observers.flush();
+      await tick();
+      expect(screen.queryByRole("button", { name: "显示空白字符" })).toBeNull();
+      await fireEvent.click(trigger());
+      const dialog = screen.getByRole("dialog", { name: "差异工具" });
+      // 收进溢出后仍读到同一份偏好，缩放没有把用户选择重置回默认。
+      expect(within(dialog).getByRole("option", { name: /并排视图/ }).getAttribute("aria-selected")).toBe("true");
+      expect(within(dialog).getByRole("option", { name: /显示空白字符/ }).getAttribute("aria-selected")).toBe("true");
+    } finally {
+      observers.restore();
+      width.restore();
+    }
+  });
+});

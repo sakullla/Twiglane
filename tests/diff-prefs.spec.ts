@@ -47,6 +47,17 @@ describe("差异显示偏好（本机）", () => {
     expect(diffPrefs).toMatchObject({ showWhitespace: false, hideWhitespaceOnly: true });
   });
 
+  it("工具条溢出入口复用同一份偏好，不另写存储键", () => {
+    setShowWhitespace(true);
+    setHideWhitespaceOnly(true);
+    expect(Object.keys(stored() as Record<string, unknown>).sort()).toEqual(["hideWhitespaceOnly", "showWhitespace"]);
+    // 收进溢出区域后读到的仍是这份状态，不会出现第二套开关。
+    expect(parseStoredDiffPrefs(localStorage.getItem(KEY))).toEqual({ showWhitespace: true, hideWhitespaceOnly: true });
+    resetDiffPrefs();
+    expect(diffPrefs).toMatchObject({ showWhitespace: false, hideWhitespaceOnly: false });
+    expect(stored()).toEqual({ showWhitespace: false, hideWhitespaceOnly: false });
+  });
+
   it("存储写不进去时只在本次会话生效，不抛错也不回滚", () => {
     vi.stubGlobal("localStorage", {
       getItem: () => null,

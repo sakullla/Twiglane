@@ -40,5 +40,11 @@
   >
     <Icon name="chevron-right" size={15} />
   </button>
-  {#if nav.index >= 0}<span class="file-nav-pos">{nav.index + 1}/{nav.total}</span>{/if}
+  {#if nav.index >= 0}
+    <span
+      class="file-nav-pos"
+      aria-live="polite"
+      aria-label={`第 ${nav.index + 1} / ${nav.total} 个文件`}
+    >{nav.index + 1}/{nav.total}</span>
+  {/if}
 </div>

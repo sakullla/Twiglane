@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -20,6 +20,7 @@ const commitFileDiff = vi.hoisted(() => vi.fn());
 vi.mock("../src/lib/api", () => ({ api: { commitFileDiff } }));
 
 import CommitDiffList from "../src/lib/components/CommitDiffList.svelte";
+import DiffView from "../src/lib/components/DiffView.svelte";
 import { codeLine } from "./helpers/code";
 
 const opened: OpenedRepository = {
@@ -432,5 +433,61 @@ describe("历史只读差异的行选边界（R6）", () => {
     expect(await screen.findByText(codeLine("readonly-content"))).toBeTruthy();
     expect(screen.queryByRole("button", { name: "选择行" })).toBeNull();
     expect(screen.queryByRole("button", { name: "暂存选中行" })).toBeNull();
+  });
+});
+
+describe("只读差异的窄工具条（R2）", () => {
+  function stubToolbarWidth(width: number) {
+    const spy = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains("diff-toolbar") ? width : 0;
+    });
+    return () => spy.mockRestore();
+  }
+
+  const base = () => ({
+    selection: { path: "src/a.ts", side: "unstaged" as const },
+    diff: diffFor("src/a.ts", "+readonly-content"),
+    error: null,
+    loading: false,
+    disabled: false,
+    readOnly: true,
+    onStageHunk: () => {},
+    onLoadMore: () => {},
+    onFileHistory: () => {},
+  });
+
+  it("只读差异的溢出只保留查看工具，没有行选与写入入口", async () => {
+    const restore = stubToolbarWidth(560);
+    try {
+      render(DiffView, { props: base() });
+      await tick();
+      expect(screen.queryByRole("button", { name: "选择行" })).toBeNull();
+      expect(screen.queryByRole("button", { name: /暂存选中行/ })).toBeNull();
+      expect(screen.queryByRole("group", { name: "差异布局" })).toBeNull();
+
+      await fireEvent.click(screen.getByRole("button", { name: /更多差异工具/ }));
+      const dialog = screen.getByRole("dialog", { name: "差异工具" });
+      // 低频查看工具仍可到达；写入动作不在只读视图里出现。
+      expect(within(dialog).getByRole("option", { name: /此文件历史/ })).toBeTruthy();
+      expect(within(dialog).getByRole("option", { name: /并排视图/ })).toBeTruthy();
+      expect(within(dialog).queryByRole("option", { name: /清除选中的行/ })).toBeNull();
+      expect(within(dialog).queryByRole("option", { name: /暂存/ })).toBeNull();
+      await fireEvent.keyDown(dialog, { key: "Escape" });
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: /更多差异工具/ }));
+    } finally {
+      restore();
+    }
+  });
+
+  it("embedded 差异块不画工具条，也不留悬空的溢出入口", async () => {
+    const restore = stubToolbarWidth(420);
+    try {
+      render(DiffView, { props: { ...base(), embedded: true } });
+      await tick();
+      expect(document.querySelector(".diff-toolbar")).toBeNull();
+      expect(screen.queryByRole("button", { name: /更多差异工具/ })).toBeNull();
+    } finally {
+      restore();
+    }
   });
 });

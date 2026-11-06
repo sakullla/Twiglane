@@ -24,6 +24,7 @@ fn capabilities_do_not_grant_a_shell() {
         "core:window:allow-internal-toggle-maximize",
         "dialog:allow-open",
         "updater:default",
+        "core:app:allow-version",
         "process:allow-restart",
         "allow-detect-git",
         "allow-set-git-executable",

@@ -7,6 +7,8 @@
   import {
     commitFileLabel,
     commitLineStat,
+    commitLineTotalLabel,
+    commitLineTotals,
     commitSelectionRange,
     formatAuthoredAt,
     HISTORY_SEARCH_DEBOUNCE_MS,
@@ -21,6 +23,7 @@
     shouldAppendHistory,
     toggleCommitSelection,
   } from "../history";
+  import type { CommitLineTotals } from "../history";
   import { bucketByDirectory, filterRows } from "../labels";
   import { clampWidth, MIN_PANEL_WIDTH, nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
   import type {
@@ -343,6 +346,14 @@
   let appendError = $state<string | null>(null);
   let appendStopped = $state(false);
   let loading = $state(false);
+  /** 列表读取中（区别于追加分页）：重新读取时保留旧结果并显示进行中状态。 */
+  let refreshing = $state(false);
+  /** 详情读取中：首次加载与保留旧详情重新读取都据此显示状态，不落成「未选择」。 */
+  let detailLoading = $state(false);
+  /** 失败后「重新读取」：条件未变时也强制再读一次。 */
+  let retryTick = $state(0);
+  /** 详情读取失败后的重读：同一条提交也要能原地重试。 */
+  let detailRetryTick = $state(0);
   let selectedOids = $state.raw<string[]>([]);
   let anchorOid = $state<string | null>(null);
   let checkoutTarget = $state<HistoryCommit | null>(null);
@@ -451,19 +462,7 @@
   let filteredFiles = $derived(filterRows(detail?.files ?? [], fileFilter));
   let fileBuckets = $derived(directoryMode ? bucketByDirectory(filteredFiles) : []);
   /** 整次提交的增删行数：只加文本文件，二进制和没有统计的文件不计入，全都没有统计时不显示。 */
-  let lineTotals = $derived.by(() => {
-    let additions = 0;
-    let deletions = 0;
-    let counted = false;
-    for (const file of detail?.files ?? []) {
-      const stat = commitLineStat(file);
-      if (!stat || stat.additions == null || stat.deletions == null) continue;
-      additions += stat.additions;
-      deletions += stat.deletions;
-      counted = true;
-    }
-    return counted ? { additions, deletions } : null;
-  });
+  let lineTotals = $derived(commitLineTotals(detail?.files ?? []));
   let bodyRest = $derived(detail ? commitBodyRest(detail.body, detail.commit.summary) : "");
   type FileItem =
     | { kind: "dir"; directory: string; label: string; count: number; collapsed: boolean }
@@ -522,6 +521,9 @@
   });
 
   let statusText = $derived(!listError && page && commits.length === 0 ? historyStatus(page.state) : null);
+  let hasActiveFilters = $derived(
+    Boolean(activeQuery || activeAuthor || activePath || activeSince || activeUntil || activeScope !== "current"),
+  );
   let showConditions = $derived(
     Boolean(page && commits.length === 0 && (page.state === "no_match" || page.state === "empty_branch" || page.state === "no_file_history" || listError)),
   );
@@ -546,6 +548,8 @@
   let selectedIds = $derived(new Set(selectedOids));
   let selectedCommits = $derived(commits.filter((commit) => selectedIds.has(commit.oid)));
   let unionFiles = $derived(unionCommitFiles(multiDetails));
+  /** 多提交的合计直接汇总并集文件：与逐文件累计一致，滚动只影响虚拟行，不收缩统计范围。 */
+  let unionLineTotals = $derived(commitLineTotals(unionFiles));
   let unionActive = $derived(unionFiles.find((file) => file.path === multiFocus) ?? unionFiles[0] ?? null);
   let unionScroll = $state(0);
   let unionViewport = $state(0);
@@ -619,12 +623,13 @@
     const scopeName = activeScope;
     const problem = dateProblem();
     const filters = historyFilters(Boolean(relative));
-    const signature = [repo, generation, relative ?? "", q, scopeName, activeAuthor, activeSince, activeUntil, activePath].join("\u0000");
+    const signature = [repo, generation, relative ?? "", q, scopeName, activeAuthor, activeSince, activeUntil, activePath, retryTick].join("\u0000");
     const previousPage = untrack(() => page);
     const serial = ++loadSerial;
     appendStopped = false;
     appendError = null;
     loading = true;
+    refreshing = true;
     let cancelled = false;
     void (async () => {
       try {
@@ -696,11 +701,15 @@
         listError = failure.message;
         onFailure(failure);
       } finally {
-        if (!cancelled && serial === loadSerial) loading = false;
+        if (!cancelled && serial === loadSerial) {
+          loading = false;
+          refreshing = false;
+        }
       }
     })();
     return () => {
       cancelled = true;
+      if (serial === loadSerial) refreshing = false;
     };
   });
 
@@ -718,17 +727,24 @@
   });
 
   $effect(() => {
-    if (!active) return;
+    if (!active) {
+      detailLoading = false;
+      return;
+    }
     const repo = repoPath;
     const generation = readGeneration;
     const oid = selectedOid;
     const parent = parentChoice;
+    void detailRetryTick;
     if (!oid) {
       detail = null;
       commitDiff = null;
+      detailLoading = false;
       return;
     }
     let cancelled = false;
+    detailError = null;
+    detailLoading = true;
     void (async () => {
       try {
         const result = await detailReads.run(() => api.commitDetail(repo, oid, parent, generation, nextId()));
@@ -746,10 +762,13 @@
         detail = null;
         detailError = failure.message;
         onFailure(failure);
+      } finally {
+        if (!cancelled) detailLoading = false;
       }
     })();
     return () => {
       cancelled = true;
+      detailLoading = false;
     };
   });
 
@@ -920,6 +939,34 @@
     activePath = pathFilter.trim();
     activeSince = sinceDay;
     activeUntil = untilDay;
+  }
+
+  /** 无匹配时一次清掉全部筛选，回到可读的当前范围。 */
+  function clearAllFilters() {
+    query = "";
+    author = "";
+    pathFilter = "";
+    sinceDay = "";
+    untilDay = "";
+    activeQuery = "";
+    activeAuthor = "";
+    activePath = "";
+    activeSince = "";
+    activeUntil = "";
+    scope = "current";
+    activeScope = "current";
+  }
+
+  /** 读取失败后的重试：条件不变时用 retryTick 强制重跑同一次读取，不重复写入。 */
+  function retryHistory() {
+    if (loading) return;
+    retryTick += 1;
+  }
+
+  /** 详情读取失败时重读当前选中提交，不改变选择。 */
+  function retryDetail() {
+    if (detailLoading) return;
+    detailRetryTick += 1;
   }
 
   function singleSelect(oid: string) {
@@ -1252,6 +1299,14 @@
   />
 {/snippet}
 
+{#snippet lineTotal(totals: CommitLineTotals, subject: string)}
+  {@const label = commitLineTotalLabel(totals, subject)}
+  <span class="diff-stats commit-line-total" title={label} aria-label={label}>
+    <span class="plus">+{totals.additions}</span>
+    <span class="minus">−{totals.deletions}</span>
+  </span>
+{/snippet}
+
 <section class="history-view" aria-label="提交历史" aria-busy={loading}>
   <div class="history-layout">
     <aside class="pane history-pane" aria-label="提交列表">
@@ -1377,8 +1432,18 @@
           {/if}
         </div>
       </div>
-      {#if listError}
-        <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{listError}</span></div>
+      {#if refreshing && commits.length > 0}
+        <div class="infobar info" role="status" aria-live="polite">
+          <span class="spinner"></span>
+          <span class="infobar-text">正在重新读取历史，旧提交暂时保留。</span>
+        </div>
+      {/if}
+      {#if listError && !refreshing && commits.length > 0}
+        <div class="infobar error" role="alert">
+          <Icon name="alert-circle" size={15} />
+          <span class="infobar-text">{listError}</span>
+          <button type="button" class="btn btn-ghost btn-sm" onclick={retryHistory}>重新读取</button>
+        </div>
         {#if showConditions}<p class="history-conditions">{conditionText}</p>{/if}
       {/if}
       {#if appendError}
@@ -1399,13 +1464,27 @@
         }}
         onkeydown={onListKey}
       >
-        {#if loading && !page}
-          <div class="empty" role="status"><span class="empty-icon"><span class="spinner"></span></span><strong>正在读取历史</strong></div>
+        {#if (loading && !page) || (refreshing && commits.length === 0)}
+          <div class="empty" role="status" aria-busy="true"><span class="empty-icon"><span class="spinner"></span></span><strong>{page ? "正在重新读取历史" : "正在读取历史"}</strong></div>
+        {:else if listError && !refreshing && commits.length === 0}
+          <div class="empty" role="status" data-history-error>
+            <span class="empty-icon err"><Icon name="alert-circle" size={22} /></span>
+            <strong>历史没有读取成功。</strong>
+            <p>{listError}</p>
+            {#if showConditions}<p class="history-conditions">{conditionText}</p>{/if}
+            <button type="button" class="btn btn-secondary btn-sm" onclick={retryHistory}>重新读取</button>
+            {#if hasActiveFilters}<button type="button" class="btn btn-ghost btn-sm" onclick={clearAllFilters}>清除筛选条件</button>{/if}
+          </div>
         {:else if statusText}
           <div class="empty" role="status">
             <span class="empty-icon"><Icon name={page?.state === "no_match" ? "search" : page?.state === "no_file_history" ? "file" : page?.state === "empty_branch" ? "branch" : "commit"} size={22} /></span>
             <strong>{statusText}</strong>
             {#if showConditions}<p class="history-conditions">{conditionText}</p>{/if}
+            {#if filePath && page?.state === "no_file_history"}
+              <button type="button" class="btn btn-ghost btn-sm" onclick={onClearFile}>返回全部历史</button>
+            {:else if page?.state === "no_match" && hasActiveFilters}
+              <button type="button" class="btn btn-ghost btn-sm" onclick={clearAllFilters}>清除筛选条件</button>
+            {/if}
           </div>
         {:else if commits.length === 0}
           <div class="empty" role="status"><span class="empty-icon"><Icon name="history" size={22} /></span><strong>这一页没有提交。</strong></div>
@@ -1532,10 +1611,20 @@
     {@render paneResizer?.()}
     <div class="history-detail">
       {#if detailError}
-        <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{detailError}</span></div>
+        <div class="infobar error" role="alert">
+          <Icon name="alert-circle" size={15} />
+          <span class="infobar-text">{detailError}</span>
+          <button type="button" class="btn btn-ghost btn-sm" onclick={retryDetail}>重新读取</button>
+        </div>
       {/if}
       {#if multiError}
         <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{multiError}</span></div>
+      {/if}
+      {#if detailLoading && detail}
+        <div class="infobar info" role="status" aria-live="polite">
+          <span class="spinner"></span>
+          <span class="infobar-text">正在读取提交详情，当前内容暂时保留。</span>
+        </div>
       {/if}
       {#if selectedOids.length > 1}
         <header class="commit-head union-head">
@@ -1563,7 +1652,14 @@
         </ul>
         <div class="commit-split" style={`--commit-files:${filesShown}px`} bind:clientWidth={splitWidth}>
           <aside class="commit-files" aria-label="提交中的文件">
-            <div class="commit-files-head"><span class="commit-files-title">变更文件</span><span class="count">{unionFiles.length}</span></div>
+            <div class="commit-files-head">
+              <span class="commit-files-title">变更文件</span>
+              <span class="count">{unionFiles.length}</span>
+              {#if unionLineTotals}
+                <span class="spacer"></span>
+                {@render lineTotal(unionLineTotals, "所选提交合计")}
+              {/if}
+            </div>
             {#if unionFiles.length === 0}
               <p class="commit-files-empty">这些提交没有文件变化。</p>
             {:else}
@@ -1745,10 +1841,7 @@
               <span class="count">{detail.files.length}</span>
               <span class="spacer"></span>
               {#if lineTotals}
-                <span class="diff-stats commit-line-total" title="这次提交共改动的行数" aria-label={`共新增 ${lineTotals.additions} 行，删除 ${lineTotals.deletions} 行`}>
-                  <span class="plus">+{lineTotals.additions}</span>
-                  <span class="minus">−{lineTotals.deletions}</span>
-                </span>
+                {@render lineTotal(lineTotals, "这次提交")}
               {/if}
               <div class="segmented icon-segmented" role="group" aria-label="文件排列">
                 <button type="button" aria-pressed={!directoryMode} aria-label="列表" title="平铺列表" onclick={() => (directoryMode = false)}><Icon name="list" size={14} /></button>
@@ -1874,7 +1967,9 @@
             {/if}
           </div>
         </div>
-      {:else if !loading}
+      {:else if detailLoading}
+        <div class="empty" role="status" aria-busy="true"><span class="empty-icon"><span class="spinner"></span></span><strong>正在读取提交详情</strong></div>
+      {:else if !loading && !detailError && commits.length > 0}
         <div class="empty" role="status">
           <span class="empty-icon"><Icon name="commit" size={24} /></span>
           <strong>未选择提交</strong>

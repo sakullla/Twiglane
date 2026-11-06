@@ -113,6 +113,50 @@ export function commitLineStat(file: {
   return { additions: file.additions ?? 0, deletions: file.deletions ?? 0 };
 }
 
+export interface CommitLineTotals {
+  additions: number;
+  deletions: number;
+  /** 有完整增删行数、实际参与合计的文件数。 */
+  counted: number;
+  /** 未计入合计的文件数：二进制或缺任一侧行数统计。 */
+  skipped: number;
+}
+
+/**
+ * 「变更文件」标题的增删行合计。输入是完整文件清单（不是虚拟列表的可见行），
+ * 单提交用 detail.files，多提交用按路径累计后的并集，因此合计与逐文件数字同口径。
+ * 二进制和缺失统计不当作零：只计入 skipped，全部不可统计时返回 null，不渲染 +0 −0。
+ */
+export function commitLineTotals(
+  files: readonly {
+    additions?: number | null;
+    deletions?: number | null;
+    binary?: boolean;
+  }[],
+): CommitLineTotals | null {
+  let additions = 0;
+  let deletions = 0;
+  let counted = 0;
+  let skipped = 0;
+  for (const file of files) {
+    if (file.binary || file.additions == null || file.deletions == null) {
+      skipped += 1;
+      continue;
+    }
+    additions += file.additions;
+    deletions += file.deletions;
+    counted += 1;
+  }
+  return counted > 0 ? { additions, deletions, counted, skipped } : null;
+}
+
+/** 合计的可访问名称：写明统计范围和未计入的文件，不只靠视觉上的 +/−。 */
+export function commitLineTotalLabel(totals: CommitLineTotals, subject = "这次提交"): string {
+  const base = `${subject}新增 ${totals.additions} 行，删除 ${totals.deletions} 行`;
+  if (totals.skipped === 0) return base;
+  return `${base}；另有 ${totals.skipped} 个文件未计入合计（二进制或没有行数统计）`;
+}
+
 export function commitFileLabel(status: string): string {
   switch (status) {
     case "added":

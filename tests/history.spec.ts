@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import DiffView from "../src/lib/components/DiffView.svelte";
 import {
   commitFileLabel,
+  commitLineTotalLabel,
+  commitLineTotals,
   commitSelectionRange,
   historyConditions,
   historyDayBound,
@@ -209,6 +211,30 @@ describe("历史文案", () => {
     expect(commitBodyRest("修复登录\n\n- 第一条\n- 第二条\n", "修复登录")).toBe("- 第一条\n- 第二条");
     expect(commitBodyRest("1\n", "1")).toBe("");
     expect(commitBodyRest("别的说明", "标题")).toBe("别的说明");
+  });
+});
+
+describe("提交行数合计", () => {
+  it("只累计有完整行数的文本文件，二进制与缺失统计记为未计入", () => {
+    const totals = commitLineTotals([
+      { additions: 2, deletions: 1 },
+      { additions: 3, deletions: 0 },
+      { additions: null, deletions: null, binary: true },
+      { additions: 4, deletions: null },
+      { additions: null, deletions: null },
+    ]);
+    expect(totals).toMatchObject({ additions: 5, deletions: 1, counted: 2, skipped: 3 });
+    const label = commitLineTotalLabel(totals!);
+    expect(label).toContain("这次提交新增 5 行，删除 1 行");
+    expect(label).toContain("3 个文件未计入合计");
+    expect(commitLineTotalLabel(totals!, "所选提交合计")).toContain("所选提交合计新增 5 行");
+  });
+
+  it("全部文件都不可统计时不给合计，不伪造 +0 −0", () => {
+    expect(commitLineTotals([])).toBeNull();
+    expect(commitLineTotals([{ additions: null, deletions: null, binary: true }])).toBeNull();
+    expect(commitLineTotals([{ additions: 1, deletions: null }])).toBeNull();
+    expect(commitLineTotals([{ additions: 0, deletions: 0 }])).toMatchObject({ counted: 1, skipped: 0 });
   });
 });
 
@@ -890,6 +916,189 @@ describe("历史面板", () => {
     expect(onSnapshot).not.toHaveBeenCalled();
     expect(checkoutCommit).not.toHaveBeenCalled();
     expect(cherryPickCommits).not.toHaveBeenCalled();
+  });
+
+  it("单提交标题合计只统计文本文件，并说明未计入的文件", async () => {
+    const only = commit(0);
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [only],
+      scope: "current", branches: ["main"], head: "main",
+    });
+    commitDetail.mockResolvedValue({
+      generation: 3, commit: only, body: "", root: false, merge: false, selectedParent: only.parents[0],
+      files: [
+        { path: "a.txt", originalPath: null, status: "modified", additions: 3, deletions: 1 },
+        { path: "b.txt", originalPath: null, status: "added", additions: 2, deletions: 0 },
+        { path: "logo.png", originalPath: null, status: "modified", binary: true, additions: null, deletions: null },
+        { path: "missing.txt", originalPath: null, status: "modified", additions: null, deletions: null },
+      ],
+    });
+    render(HistoryPanel, { props: panelProps() });
+    await waitFor(() => expect(document.querySelector(".commit-files-head .commit-line-total")).toBeTruthy());
+    const total = document.querySelector<HTMLElement>(".commit-files-head .commit-line-total")!;
+    expect(total.textContent?.replace(/\s+/g, "")).toBe("+5−1");
+    expect(total.getAttribute("aria-label")).toBe("这次提交新增 5 行，删除 1 行；另有 2 个文件未计入合计（二进制或没有行数统计）");
+  });
+
+  it("单提交全部文件都不可统计时不显示合计", async () => {
+    const only = commit(0);
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [only],
+      scope: "current", branches: ["main"], head: "main",
+    });
+    commitDetail.mockResolvedValue({
+      generation: 3, commit: only, body: "", root: false, merge: false, selectedParent: only.parents[0],
+      files: [
+        { path: "logo.png", originalPath: null, status: "modified", binary: true },
+        { path: "size.txt", originalPath: null, status: "modified", additions: null, deletions: null },
+      ],
+    });
+    render(HistoryPanel, { props: panelProps() });
+    await waitFor(() => expect(document.querySelector(".commit-head")).toBeTruthy());
+    expect(document.querySelector(".commit-line-total"), "全部不可统计时不留 +0 −0").toBeNull();
+  });
+
+  it("多提交标题合计按逐文件累计口径计算，滚动只改渲染行、选择变化同步更新", async () => {
+    const rows = [commit(0), commit(1), commit(2)];
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: rows,
+      scope: "current", branches: ["main"], head: "main",
+    });
+    const filesByOid: Record<string, unknown[]> = {
+      [rows[0].oid]: [
+        { path: "src/a.txt", originalPath: null, status: "modified", additions: 2, deletions: 1 },
+        { path: "b.txt", originalPath: null, status: "added", additions: 1, deletions: 0 },
+      ],
+      [rows[1].oid]: [
+        { path: "src/a.txt", originalPath: null, status: "modified", additions: 3, deletions: 2 },
+        { path: "logo.png", originalPath: null, status: "modified", binary: true },
+      ],
+      [rows[2].oid]: [
+        { path: "missing.txt", originalPath: null, status: "modified", additions: null, deletions: null },
+      ],
+    };
+    commitDetail.mockImplementation(async (_repo: string, oid: string) => ({
+      generation: 3,
+      commit: rows.find((item) => item.oid === oid),
+      body: "",
+      root: false,
+      merge: false,
+      selectedParent: "parent",
+      files: filesByOid[oid] ?? [],
+    }));
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    await fireEvent.click(screen.getByRole("option", { name: /commit-2/ }), { shiftKey: true });
+    expect(await screen.findByText("已选择 3 个提交")).toBeTruthy();
+    const total = () => document.querySelector<HTMLElement>(".commit-files-head .commit-line-total");
+    await waitFor(() => expect(total()).toBeTruthy());
+    expect(total()!.textContent?.replace(/\s+/g, "")).toBe("+6−3");
+    expect(total()!.getAttribute("aria-label")).toBe(
+      "所选提交合计新增 6 行，删除 3 行；另有 2 个文件未计入合计（二进制或没有行数统计）",
+    );
+
+    // 滚到虚拟窗口之外（没有可见行）时，合计仍取完整并集，不随渲染范围收缩。
+    const files = await screen.findByRole("listbox", { name: "提交中的文件列表" });
+    Object.defineProperty(files, "clientHeight", { configurable: true, value: 30 });
+    files.scrollTop = 900;
+    await fireEvent.scroll(files);
+    expect(document.querySelectorAll(".history-union-files .file-row").length).toBe(0);
+    expect(total()!.textContent?.replace(/\s+/g, "")).toBe("+6−3");
+
+    await fireEvent.click(screen.getByRole("button", { name: /退出多选/ }));
+    await waitFor(() => expect(total()?.getAttribute("aria-label")).toContain("这次提交新增 3 行，删除 1 行"));
+    expect(screen.getByRole("option", { name: /commit-0/ }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("首次读取历史时只显示加载状态，不先报未选择或空历史", async () => {
+    let finish: (value: unknown) => void = () => {};
+    historyPage.mockImplementation(() => new Promise((resolve) => (finish = resolve)));
+    render(HistoryPanel, { props: panelProps() });
+    expect(await screen.findByText("正在读取历史")).toBeTruthy();
+    expect(screen.queryByText("未选择提交")).toBeNull();
+    expect(screen.queryByText("这一页没有提交。")).toBeNull();
+    expect(screen.queryByText("历史没有读取成功。")).toBeNull();
+
+    finish({ generation: 3, commits: [commit(0)], offset: 0, pageSize: 100, hasMore: false, state: "ok" });
+    expect(await screen.findByRole("option", { name: /commit-0/ })).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText("正在读取历史")).toBeNull());
+  });
+
+  it("重新读取时保留旧提交并显示进行中状态，完成后换成新结果", async () => {
+    const first = commit(0);
+    historyPage.mockResolvedValueOnce({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [first],
+      scope: "current", branches: ["main"], head: "main",
+    });
+    let finish: (value: unknown) => void = () => {};
+    const view = render(HistoryPanel, { props: panelProps() });
+    expect(await screen.findByRole("option", { name: /commit-0/ })).toBeTruthy();
+
+    historyPage.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
+    const bumped = { ...opened, generation: 4, snapshot: { ...opened.snapshot, generation: 4 } };
+    await view.rerender({ ...panelProps(), opened: bumped });
+    expect(await screen.findByText(/正在重新读取历史，旧提交暂时保留/)).toBeTruthy();
+    expect(screen.getByRole("option", { name: /commit-0/ }), "旧提交在等待期间仍可读").toBeTruthy();
+
+    finish({ generation: 4, commits: [commit(1)], offset: 0, pageSize: 100, hasMore: false, state: "ok" });
+    expect(await screen.findByRole("option", { name: /commit-1/ })).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText(/正在重新读取历史，旧提交暂时保留/)).toBeNull());
+  });
+
+  it("重新读取失败保留旧提交并说明原因，重新读取可恢复", async () => {
+    historyPage.mockResolvedValueOnce({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [commit(0)],
+      scope: "current", branches: ["main"], head: "main",
+    });
+    historyPage.mockRejectedValueOnce({ code: "history_failed", message: "读取历史失败。" });
+    const view = render(HistoryPanel, { props: panelProps() });
+    expect(await screen.findByRole("option", { name: /commit-0/ })).toBeTruthy();
+
+    const bumped = { ...opened, generation: 4, snapshot: { ...opened.snapshot, generation: 4 } };
+    await view.rerender({ ...panelProps(), opened: bumped });
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByText("读取历史失败。")).toBeTruthy();
+    expect(screen.getByRole("option", { name: /commit-0/ }), "失败不清空仍可用于判断的旧内容").toBeTruthy();
+
+    historyPage.mockResolvedValueOnce({
+      generation: 4, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [commit(1)],
+      scope: "current", branches: ["main"], head: "main",
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "重新读取" }));
+    expect(await screen.findByRole("option", { name: /commit-1/ })).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText("读取历史失败。")).toBeNull());
+  });
+
+  it("详情读取失败不冒充未选择，并可原地重试", async () => {
+    const only = commit(0);
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [only],
+      scope: "current", branches: ["main"], head: "main",
+    });
+    commitDetail.mockRejectedValueOnce({ code: "detail_failed", message: "提交详情读取失败。" });
+    render(HistoryPanel, { props: panelProps() });
+    expect(await screen.findByText("提交详情读取失败。")).toBeTruthy();
+    expect(screen.queryByText("未选择提交"), "失败不是未选择").toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "重新读取" }));
+    await waitFor(() => expect(document.querySelector(".commit-head")).toBeTruthy());
+    expect(screen.queryByText("提交详情读取失败。")).toBeNull();
+  });
+
+  it("首次读取失败与空结果区分，并提供重试", async () => {
+    historyPage.mockRejectedValue({ code: "history_failed", message: "读取历史失败。" });
+    render(HistoryPanel, { props: panelProps() });
+    expect(await screen.findByText("历史没有读取成功。")).toBeTruthy();
+    expect(screen.getByText("读取历史失败。")).toBeTruthy();
+    expect(screen.queryByText("这一页没有提交。")).toBeNull();
+    expect(screen.queryByText("未选择提交")).toBeNull();
+    historyPage.mockResolvedValueOnce({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [commit(0)],
+      scope: "current", branches: ["main"], head: "main",
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "重新读取" }));
+    expect(await screen.findByRole("option", { name: /commit-0/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /commit-0/ }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.queryByText("历史没有读取成功。")).toBeNull();
   });
 });
 

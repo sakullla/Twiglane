@@ -1002,6 +1002,71 @@ describe("差异与提交", () => {
     expect(screen.queryByText(codeLine("row-79"))).toBeNull();
   });
 
+  it("上一处、下一处把视口顶对齐到改动块头，走到头时焦点交给另一侧", async () => {
+    render(DiffView, {
+      props: {
+        selection,
+        diff,
+        error: null,
+        loading: false,
+        disabled: false,
+        onStageHunk: () => {},
+        onLoadMore: () => {},
+      },
+    });
+    const region = screen.getByRole("textbox", { name: "差异文本" });
+    const prev = screen.getByRole("button", { name: "上一处改动" }) as HTMLButtonElement;
+    const next = screen.getByRole("button", { name: "下一处改动" }) as HTMLButtonElement;
+    expect(prev.disabled).toBe(true);
+    expect(prev.title).toBe("已经是第一处改动");
+    expect(screen.getByText("1/2")).toBeTruthy();
+    await fireEvent.click(next);
+    await tick();
+    expect(region.scrollTop).toBe(2 * ROW_HEIGHT);
+    expect(next.disabled).toBe(true);
+    expect(next.title).toBe("已经是最后一处改动");
+    expect(document.activeElement).toBe(prev);
+    await fireEvent.click(prev);
+    expect(region.scrollTop).toBe(0);
+  });
+
+  it("搜索框向下和回车进入文件列表，第一条向上回到搜索框", async () => {
+    const files = [changedFile("a.ts"), changedFile("b.ts")];
+    const picked: { current: FileSelection | null } = { current: null };
+    const props = () => ({
+      files,
+      selected: picked.current,
+      query: "",
+      disabled: false,
+      onQuery: () => {},
+      onSelect: (next: FileSelection) => {
+        picked.current = next;
+      },
+      onStage: () => {},
+      onUnstage: () => {},
+    });
+    const view = render(FileList, { props: props() });
+    const search = document.getElementById("file-search") as HTMLInputElement;
+    const list = screen.getByRole("listbox", { name: "改动文件" });
+    search.focus();
+    await fireEvent.keyDown(search, { key: "ArrowDown" });
+    expect(picked.current?.path).toBe("a.ts");
+    await view.rerender(props());
+    expect(document.activeElement).toBe(list);
+    await fireEvent.keyDown(list, { key: "ArrowDown" });
+    expect(picked.current?.path).toBe("b.ts");
+    await view.rerender(props());
+    await fireEvent.keyDown(list, { key: "ArrowUp" });
+    expect(picked.current?.path).toBe("a.ts");
+    await view.rerender(props());
+    await fireEvent.keyDown(list, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(search);
+    search.focus();
+    await fireEvent.keyDown(search, { key: "Enter" });
+    expect(picked.current?.path).toBe("a.ts");
+    expect(document.activeElement).toBe(list);
+  });
+
   it("切换并排时保留文件，并拒绝截断代码块", async () => {
     render(DiffView, {
       props: {
@@ -1496,7 +1561,14 @@ describe("上一个、下一个文件（R20）", () => {
     await altKey("ArrowLeft");
     await waitFor(() => expect(selectedNames()).toEqual(["App.svelte"]));
 
+    await press("f");
     const input = document.getElementById("file-search") as HTMLInputElement;
+    expect(document.activeElement).toBe(input);
+    const message = document.querySelector("textarea") as HTMLTextAreaElement;
+    message.focus();
+    message.dispatchEvent(new KeyboardEvent("keydown", { key: "f", ctrlKey: true, bubbles: true }));
+    await tick();
+    expect(document.activeElement, "说明框里的查找留给输入").toBe(message);
     input.focus();
     await altKey("ArrowRight", input);
     await tick();
@@ -1507,14 +1579,83 @@ describe("上一个、下一个文件（R20）", () => {
     await waitFor(() => expect(document.querySelector(".toast.ok")?.textContent).toContain("已经是第一个文件"));
   });
 
+  it("Alt+↑/↓ 在单文件差异里跳到改动块头，输入框和多选不跳", async () => {
+    const lines: DiffLine[] = [
+      { kind: "hunk", text: "@@ -1 +1 @@ first", oldNo: null, newNo: null, hunkIndex: 0 },
+      ...Array.from({ length: 30 }, (_, index) => ({
+        kind: "context" as const,
+        text: ` a${index}`,
+        oldNo: index + 1,
+        newNo: index + 1,
+        hunkIndex: 0,
+      })),
+      { kind: "hunk", text: "@@ -40 +40 @@ second", oldNo: null, newNo: null, hunkIndex: 1 },
+      ...Array.from({ length: 10 }, (_, index) => ({
+        kind: "add" as const,
+        text: `+b${index}`,
+        oldNo: null,
+        newNo: 40 + index,
+        hunkIndex: 1,
+      })),
+    ];
+    mocks.loadDiff.mockImplementation(async (_repo: string, path: string, staged: boolean) => ({
+      ...diffFor(path, staged),
+      lines,
+      totalLines: lines.length,
+      hunks: [
+        { index: 0, header: lines[0].text, complete: true, stageable: true, startLine: 0, lineCount: 31 },
+        { index: 1, header: lines[31].text, complete: true, stageable: true, startLine: 31, lineCount: 11 },
+      ],
+    }));
+    renderApp();
+    await openRepo();
+    const scroller = () => document.querySelector<HTMLElement>(".diff-scroll")!;
+    const next = screen.getByRole("button", { name: "下一处改动" }) as HTMLButtonElement;
+    const prev = screen.getByRole("button", { name: "上一处改动" }) as HTMLButtonElement;
+    expect(prev.disabled).toBe(true);
+    expect(prev.title).toBe("已经是第一处改动");
+    await altKey("ArrowDown");
+    expect(scroller().scrollTop).toBe(31 * ROW_HEIGHT);
+    await altKey("ArrowUp");
+    expect(scroller().scrollTop).toBe(0);
+
+    const message = document.querySelector("textarea") as HTMLTextAreaElement;
+    message.focus();
+    await altKey("ArrowDown", message);
+    expect(scroller().scrollTop).toBe(0);
+
+    message.blur();
+    await fireEvent.click(fileRows()[1], { ctrlKey: true });
+    await waitFor(() => expect(document.querySelector(".multi-stack")).toBeTruthy());
+    await altKey("ArrowDown");
+    await waitFor(() => expect(document.querySelector(".toast.ok")?.textContent).toContain("回到单个文件后可以逐块跳转"));
+    expect(next.isConnected).toBe(false);
+  });
+
   it("命令面板能找到 file.prev、file.next，到头时给原因，快捷键映射不影响原有组合", () => {
     const items = paletteItems(commandState({ fileNav: { prevReason: "已经是第一个文件", nextReason: null } }));
     expect(items.find((item) => item.id === "file.prev")).toMatchObject({ enabled: false, reason: "已经是第一个文件" });
     expect(items.find((item) => item.id === "file.next")).toMatchObject({ enabled: true });
     expect(paletteItems(commandState()).find((item) => item.id === "file.next")).toMatchObject({ enabled: false, reason: "先选择一个文件" });
+    expect(paletteItems(commandState()).find((item) => item.id === "diff.hunk.next")).toMatchObject({
+      enabled: false,
+      reason: "当前没有可跳转的改动块",
+    });
+    expect(paletteItems(commandState({ multiFile: true, hunkNav: { prevReason: null, nextReason: null } })).find((item) => item.id === "diff.hunk.next")).toMatchObject({
+      enabled: false,
+      reason: "多选时在文件之间切换，回到单个文件后可以逐块跳转",
+    });
+    expect(paletteItems(commandState({ hunkNav: { prevReason: null, nextReason: "已经是最后一处改动" } })).find((item) => item.id === "diff.hunk.prev")).toMatchObject({
+      enabled: true,
+    });
 
     expect(shortcutCommand({ key: "ArrowLeft", altKey: true })).toBe("file.prev");
     expect(shortcutCommand({ key: "ArrowRight", altKey: true })).toBe("file.next");
+    expect(shortcutCommand({ key: "ArrowUp", altKey: true })).toBe("diff.hunk.prev");
+    expect(shortcutCommand({ key: "ArrowDown", altKey: true })).toBe("diff.hunk.next");
+    expect(shortcutCommand({ key: "f", ctrlKey: true })).toBe("view.find");
+    expect(shortcutCommand({ key: "f", metaKey: true, shiftKey: true })).toBeNull();
+    expect(shortcutCommand({ key: "ArrowDown", altKey: true, shiftKey: true })).toBeNull();
     expect(shortcutCommand({ key: "ArrowRight", altKey: true, shiftKey: true })).toBeNull();
     expect(shortcutCommand({ key: "ArrowRight", altKey: true, ctrlKey: true })).toBeNull();
     expect(shortcutCommand({ key: "ArrowRight" })).toBeNull();

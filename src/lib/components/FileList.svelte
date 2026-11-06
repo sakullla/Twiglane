@@ -238,6 +238,31 @@
     else onUnstage(row.path);
   }
 
+  /** 搜索框和列表是同一套选择：回车确认当前或第一条，向下把焦点交进列表。 */
+  function onSearchKey(event: KeyboardEvent) {
+    if (event.isComposing) return;
+    if (event.key === "Escape" && query) {
+      event.preventDefault();
+      onQuery("");
+      return;
+    }
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (event.key !== "ArrowDown" && event.key !== "Enter") return;
+    if (rows.length === 0) return;
+    event.preventDefault();
+    const current = rows.findIndex((row) => sameSelection(selected, row));
+    const next = event.key === "Enter" || current < 0
+      ? rows[current >= 0 ? current : 0]
+      : current < rows.length - 1
+        ? rows[current + 1]
+        : null;
+    if (next) {
+      reveal(itemIndexOf(next));
+      single(next);
+    }
+    list?.focus({ preventScroll: true });
+  }
+
   function onKey(event: KeyboardEvent) {
     const current = rows.findIndex((row) => row.path === selected?.path && row.side === selected.side);
     if ((event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) && current >= 0 && onContextMenu) {
@@ -253,6 +278,11 @@
       return;
     }
     if (event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.key === "ArrowUp" && !event.shiftKey && current === 0) {
+      event.preventDefault();
+      document.getElementById("file-search")?.focus();
+      return;
+    }
     if (event.key === " " && current >= 0) {
       event.preventDefault();
       toggle(rows[current]);
@@ -284,12 +314,7 @@
       spellcheck="false"
       value={query}
       oninput={(event) => onQuery((event.currentTarget as HTMLInputElement).value)}
-      onkeydown={(event) => {
-        if (event.key === "Escape" && query) {
-          event.preventDefault();
-          onQuery("");
-        }
-      }}
+      onkeydown={onSearchKey}
     />
     {#if query}
       <button type="button" class="field-clear" aria-label="清空筛选" onclick={() => onQuery("")}>

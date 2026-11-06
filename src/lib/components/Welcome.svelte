@@ -48,7 +48,7 @@
   let sameNames = $derived(repeatedNames(recent));
   let actionTitle = $derived(disabled ? disabledReason || undefined : undefined);
 
-  /** 回车打开第一条结果；Esc 只清空关键词。 */
+  /** 回车打开第一条结果；Esc 只清空关键词；向下进入结果列表。 */
   function onSearchKey(event: KeyboardEvent) {
     if (event.isComposing) return;
     if (event.key === "Enter" && searching && shown.length > 0) {
@@ -58,13 +58,35 @@
       event.preventDefault();
       event.stopPropagation();
       query = "";
+    } else if (event.key === "ArrowDown" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+      const first = document.querySelector<HTMLButtonElement>(".welcome-recent > button");
+      if (!first) return;
+      event.preventDefault();
+      first.focus();
     }
   }
 
   function onRowKey(event: KeyboardEvent, repo: RecentRepo) {
-    if (!isContextKey(event) || !onContextMenu) return;
+    if (isContextKey(event) && onContextMenu) {
+      event.preventDefault();
+      onContextMenu(repo, pointFor(event.currentTarget as Element));
+      return;
+    }
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const buttons = [...(event.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLButtonElement>(":scope > button") ?? []];
+    const index = buttons.indexOf(event.currentTarget as HTMLButtonElement);
+    if (index < 0) return;
+    if (event.key === "ArrowUp" && index === 0) {
+      const search = document.getElementById("welcome-search");
+      if (!search) return;
+      event.preventDefault();
+      search.focus();
+      return;
+    }
     event.preventDefault();
-    onContextMenu(repo, pointFor(event.currentTarget as Element));
+    const next = event.key === "ArrowDown" ? Math.min(buttons.length - 1, index + 1) : Math.max(0, index - 1);
+    buttons[next]?.focus();
   }
 
   /** 上次打开的相对时间：同名或相近的仓库多一条可区分的线索。没有可信时间戳时不显示。 */
@@ -115,7 +137,7 @@
         {#if searchable}
           <div class="field sm welcome-search">
             <Icon name="search" size={14} />
-            <input aria-label="搜索最近仓库" placeholder="搜索名称或路径" autocomplete="off" spellcheck="false" bind:value={query} onkeydown={onSearchKey} />
+            <input id="welcome-search" aria-label="搜索最近仓库" placeholder="搜索名称或路径" autocomplete="off" spellcheck="false" bind:value={query} onkeydown={onSearchKey} />
             {#if query}
               <button type="button" class="field-clear" aria-label="清空搜索" onclick={() => (query = "")}>
                 <Icon name="x" size={12} />

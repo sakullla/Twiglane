@@ -54,6 +54,7 @@ export const ICONS = {
   x: ["M18 6 6 18", "m6 6 12 12"],
   check: ["M20 6 9 17l-5-5"],
   "chevron-down": ["m6 9 6 6 6-6"],
+  "chevron-up": ["m6 15 6-6 6 6"],
   "chevron-right": ["m9 18 6-6-6-6"],
   "chevron-left": ["m15 18-6-6 6-6"],
   file: ["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z", "M14 2v4a2 2 0 0 0 2 2h4"],

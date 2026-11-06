@@ -44,6 +44,10 @@ export interface CommandState {
   unstageTargets: string[];
   /** 当前视图的上一个/下一个文件：null 表示这里没有文件可切，原因字段非空表示到头了。 */
   fileNav?: { prevReason: string | null; nextReason: string | null } | null;
+  /** 单文件差异里的上一处/下一处改动。null 表示当前视图不是可跳转的单文件差异。 */
+  hunkNav?: { prevReason: string | null; nextReason: string | null } | null;
+  /** 改动视图正在多选：逐块跳转让位给文件之间的切换。 */
+  multiFile?: boolean;
   draft: string;
   theme: Theme;
   recentRepos: RecentRepo[];
@@ -115,6 +119,17 @@ const commitReason = (state: CommandState) => {
 const NO_FILE_REASON = "先选择一个文件";
 /** Alt 在 macOS 键帽上是 ⌥。 */
 const ALT_LABEL = MODIFIER_LABEL === "⌘" ? "⌥" : "Alt";
+const HUNK_MULTI = "多选时在文件之间切换，回到单个文件后可以逐块跳转";
+const HUNK_ABSENT = "当前没有可跳转的改动块";
+
+function hunkSide(state: CommandState, side: "prev" | "next"): { ok: boolean; reason: string } {
+  if (!state.hasRepo) return { ok: false, reason: "先打开一个仓库" };
+  if (state.multiFile) return { ok: false, reason: HUNK_MULTI };
+  const nav = state.hunkNav;
+  if (!nav) return { ok: false, reason: HUNK_ABSENT };
+  const reason = side === "prev" ? nav.prevReason : nav.nextReason;
+  return { ok: reason === null, reason: reason ?? HUNK_ABSENT };
+}
 
 /** 视图与提交：主工作台的两个视图、提交范围、全部暂存/全部取消暂存与两种提交。 */
 const VIEW_COMMANDS: CommandSpec[] = [
@@ -153,6 +168,32 @@ const VIEW_COMMANDS: CommandSpec[] = [
     shortcut: `${ALT_LABEL} →`,
     available: (state) => hasRepo(state) && Boolean(state.fileNav) && !state.fileNav?.nextReason,
     reason: (state) => (state.hasRepo ? (state.fileNav?.nextReason ?? NO_FILE_REASON) : "先打开一个仓库"),
+  },
+  {
+    id: "diff.hunk.prev",
+    group: "视图",
+    title: "上一处改动",
+    hint: "滚到当前差异里上一处改动块的开头",
+    shortcut: `${ALT_LABEL} ↑`,
+    available: (state) => hunkSide(state, "prev").ok,
+    reason: (state) => hunkSide(state, "prev").reason,
+  },
+  {
+    id: "diff.hunk.next",
+    group: "视图",
+    title: "下一处改动",
+    hint: "滚到当前差异里下一处改动块的开头",
+    shortcut: `${ALT_LABEL} ↓`,
+    available: (state) => hunkSide(state, "next").ok,
+    reason: (state) => hunkSide(state, "next").reason,
+  },
+  {
+    id: "view.find",
+    group: "视图",
+    title: "聚焦搜索",
+    hint: "把焦点放到当前视图的搜索框",
+    shortcut: `${MODIFIER_LABEL} F`,
+    available: () => true,
   },
 ];
 

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createTextDiff } from "../src/lib/diff";
+import { createTextDiff, HUNK_FIRST, HUNK_LAST, HUNK_NONE, hunkJump, hunkRowIndexes } from "../src/lib/diff";
 import type { CommitDetail, DiffResponse, OpenedRepository } from "../src/lib/types";
 
 const commitFileDiff = vi.hoisted(() => vi.fn());
@@ -75,6 +75,41 @@ function diffFor(path: string, text: string): DiffResponse {
     lines: [{ kind: "add", text, oldNo: null, newNo: 1, hunkIndex: null }],
   };
 }
+
+describe("改动块跳转", () => {
+  it("贴住块头时上一处去上一块，没贴住时先回到块头", () => {
+    const indexes = hunkRowIndexes(["hunk", "add", "context", "hunk", "del"]);
+    expect(indexes).toEqual([0, 3]);
+    expect(hunkJump(indexes, 0, 18)).toMatchObject({
+      current: 0,
+      total: 2,
+      prevRow: null,
+      nextRow: 3,
+      prevReason: HUNK_FIRST,
+      nextReason: null,
+    });
+    const mid = hunkJump(indexes, 18, 18);
+    expect(mid.current).toBe(0);
+    expect(mid.prevRow).toBe(0);
+    expect(mid.nextRow).toBe(3);
+    const atSecond = hunkJump(indexes, 3 * 18, 18);
+    expect(atSecond).toMatchObject({ current: 1, prevRow: 0, nextRow: null, nextReason: HUNK_LAST });
+  });
+
+  it("视口已经滚到底时，后面的块不再算作可跳", () => {
+    expect(hunkJump([0, 40], 0, 18, 0)).toMatchObject({
+      prevRow: null,
+      nextRow: null,
+      prevReason: HUNK_FIRST,
+      nextReason: HUNK_LAST,
+    });
+  });
+
+  it("没有块头时两侧都说明", () => {
+    expect(hunkJump([], 0, 18)).toMatchObject({ total: 0, prevReason: HUNK_NONE, nextReason: HUNK_NONE });
+    expect(hunkJump([0], 0, 0)).toMatchObject({ prevReason: HUNK_NONE, nextReason: HUNK_NONE });
+  });
+});
 
 describe("文本差异计算", () => {
   it("标记真实增删行并保留上下文", () => {

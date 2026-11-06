@@ -14,7 +14,7 @@
     type CommandState,
   } from "./lib/commands";
   import { LatestReadQueue } from "./lib/latest-read";
-  import { finishDiffAttempt, reuseDiffContent } from "./lib/diff";
+  import { finishDiffAttempt, reuseDiffContent, type HunkNavReport } from "./lib/diff";
   import { DraftBuffer } from "./lib/draft";
   import { normalizeError } from "./lib/errors";
   import { clampWidth, FALLBACK_POLL_MS, fitPaneWidth, shouldPoll } from "./lib/layout";
@@ -274,6 +274,22 @@
     return fileNavState(items, index, goToFile, multiActive ? "选中文件" : "文件");
   });
   let activeNav = $derived(workspaceView === "history" ? historyNav : changesNav);
+  /** 两份差异都可能挂着：只采用当前视图那一份，多选时单文件差异已经卸掉。 */
+  let changesHunk = $state<HunkNavReport | null>(null);
+  let historyHunk = $state<HunkNavReport | null>(null);
+  let activeHunk = $derived<HunkNavReport | null>(workspaceView === "history" ? historyHunk : multiActive ? null : changesHunk);
+  /** 回调身份必须稳定：内联函数每次渲染都是新的，差异视图会在上报和清空之间打转。 */
+  function assignHunk(current: HunkNavReport | null, nav: HunkNavReport | null): HunkNavReport | null {
+    if (nav === null) return current === null ? current : null;
+    if (current && current.prevReason === nav.prevReason && current.nextReason === nav.nextReason) return current;
+    return nav;
+  }
+  function reportChangesHunk(nav: HunkNavReport | null) {
+    changesHunk = assignHunk(changesHunk, nav);
+  }
+  function reportHistoryHunk(nav: HunkNavReport | null) {
+    historyHunk = assignHunk(historyHunk, nav);
+  }
 
   /* 命令注册表的唯一状态输入：标题栏、左栏、溢出菜单与命令面板都读这一份。 */
   let commandState = $derived<CommandState>({
@@ -293,6 +309,8 @@
     stageTargets,
     unstageTargets,
     fileNav: activeNav,
+    hunkNav: activeHunk ? { prevReason: activeHunk.prevReason, nextReason: activeHunk.nextReason } : null,
+    multiFile: multiActive,
     draft,
     theme,
     recentRepos: recent,
@@ -341,6 +359,23 @@
     return requestSerial;
   }
 
+  /**
+   * 把焦点放进当前视图的搜索框。命令面板关闭时会把焦点还给打开前的控件，
+   * 所以从面板执行时要等这一轮收尾后再聚焦。
+   */
+  function focusFinder() {
+    const pick = () => {
+      const target = workspaceView === "history"
+        ? document.getElementById("history-search")
+        : opened
+          ? document.getElementById("file-search")
+          : document.getElementById("welcome-search") ?? document.querySelector<HTMLElement>(".welcome-actions button");
+      target?.focus();
+    };
+    if (paletteOpen) setTimeout(pick, 0);
+    else pick();
+  }
+
   function notice(message: string) {
     phaseNote = message;
     live = message;
@@ -374,6 +409,15 @@
         return;
       case "file.next":
         activeNav?.onNext();
+        return;
+      case "diff.hunk.prev":
+        activeHunk?.jump(-1);
+        return;
+      case "diff.hunk.next":
+        activeHunk?.jump(1);
+        return;
+      case "view.find":
+        focusFinder();
         return;
       case "view.refresh":
         void refresh();
@@ -1948,10 +1992,11 @@
     }
     const id = shortcutCommand(event);
     if (!id) return;
-    // 只看这次按键的目标。非 file.* 与 file.* 一样，目标是文本框才让路；file.* 在弹层打开时也让路。
+    // 只看这次按键的目标。文本框里的组合键留给光标；文件切换、改动块和聚焦搜索在弹层打开时也让路。
     const editing = isTextEntry(event.target);
-    if (editing && !id.startsWith("file.")) return;
-    if (id.startsWith("file.") && (layerAtKey || editing)) return;
+    const yieldsToLayer = id.startsWith("file.") || id.startsWith("diff.hunk.") || id === "view.find";
+    if (yieldsToLayer && (layerAtKey || editing)) return;
+    if (editing) return;
     event.preventDefault();
     const command = commandById(id);
     if (!command) return;
@@ -2623,6 +2668,7 @@
                   fileNav={changesNav}
                   fileCount={opened.snapshot.files.length}
                   onRetry={() => void loadSelectedDiff()}
+                  onHunkNav={reportChangesHunk}
                 />
               {/if}
             </div>
@@ -2655,6 +2701,7 @@
                   onSnapshot={mergeSnapshot}
                   onNotice={notice}
                   onFileNav={(nav) => (historyNav = nav)}
+                  onHunkNav={reportHistoryHunk}
                   {branchGroups}
                   {paneHead}
                   {paneResizer}

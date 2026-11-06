@@ -900,6 +900,20 @@ describe("起始页", () => {
       expect(screen.getByText("共 500 个")).toBeTruthy();
     });
 
+    it("方向键在最近仓库之间移动，到顶回到搜索框", async () => {
+      renderMany();
+      const buttons = () => [...document.querySelectorAll<HTMLButtonElement>(".welcome-recent > button")];
+      box().focus();
+      await fireEvent.keyDown(box(), { key: "ArrowDown" });
+      expect(document.activeElement).toBe(buttons()[0]);
+      await fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
+      expect(document.activeElement).toBe(buttons()[1]);
+      await fireEvent.keyDown(document.activeElement!, { key: "ArrowUp" });
+      expect(document.activeElement).toBe(buttons()[0]);
+      await fireEvent.keyDown(document.activeElement!, { key: "ArrowUp" });
+      expect(document.activeElement).toBe(box());
+    });
+
     it("没有匹配时说明，清空按钮恢复列表", async () => {
       renderMany();
       await fireEvent.input(box(), { target: { value: "没有这个" } });

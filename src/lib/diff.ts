@@ -376,6 +376,85 @@ export function visibleDiffLines<T extends { kind: string; text: string }>(all: 
   return { lines, origin, meta };
 }
 
+/** 已经贴在块头上的容差（行）。差一两个像素时「上一处」不应来回跳。 */
+const HUNK_ALIGN = 0.35;
+
+export const HUNK_NONE = "这里没有可跳转的改动块";
+export const HUNK_FIRST = "已经是第一处改动";
+export const HUNK_LAST = "已经是最后一处改动";
+
+export interface HunkJump {
+  /** 视口顶所在的块序号；还没到第一块时为 -1。 */
+  current: number;
+  total: number;
+  prevReason: string | null;
+  nextReason: string | null;
+  /** 按下后应滚到的行；null 表示这一侧没有还能滚到的块。 */
+  prevRow: number | null;
+  nextRow: number | null;
+}
+
+/** 外壳与差异视图共用的跳转句柄：原因给命令面板，jump 在按下时再按当前滚动位置算。 */
+export interface HunkNavReport {
+  prevReason: string | null;
+  nextReason: string | null;
+  jump: (direction: -1 | 1) => void;
+}
+
+/** 视图行序列里每个改动块头的下标。统一视图传行 kind，并排视图传该行左侧（或右侧）单元格的 kind。 */
+export function hunkRowIndexes(kinds: readonly (string | null | undefined)[]): number[] {
+  const indexes: number[] = [];
+  for (let index = 0; index < kinds.length; index += 1) {
+    if (kinds[index] === "hunk") indexes.push(index);
+  }
+  return indexes;
+}
+
+/**
+ * 以视口顶为准决定上一处、下一处。
+ *
+ * 还没贴住当前块头时，「上一处」先回到这块的开头，而不是跳过它。
+ * maxScroll 是内容超出视口的部分：再往下滚不动时，后面的块算已经到头，
+ * 避免按钮一直可点、滚动位置却不变。还没量到视口高度时传 Infinity。
+ */
+export function hunkJump(
+  indexes: readonly number[],
+  scrollTop: number,
+  rowHeight: number,
+  maxScroll = Number.POSITIVE_INFINITY,
+): HunkJump {
+  if (indexes.length === 0 || !(rowHeight > 0)) {
+    return { current: -1, total: 0, prevReason: HUNK_NONE, nextReason: HUNK_NONE, prevRow: null, nextRow: null };
+  }
+  const top = scrollTop / rowHeight;
+  const limit = Number.isFinite(maxScroll) ? Math.max(0, maxScroll) / rowHeight : Number.POSITIVE_INFINITY;
+  const canReach = (row: number) => Math.abs(Math.min(row, limit) - top) > HUNK_ALIGN;
+  let current = -1;
+  for (let index = 0; index < indexes.length; index += 1) {
+    if (indexes[index] <= top + HUNK_ALIGN) current = index;
+    else break;
+  }
+  const aligned = current >= 0 && indexes[current] >= top - HUNK_ALIGN;
+  let prevRow: number | null = current < 0 ? null : aligned ? (current > 0 ? indexes[current - 1] : null) : indexes[current];
+  let nextRow: number | null = null;
+  for (const row of indexes) {
+    if (row > top + HUNK_ALIGN) {
+      nextRow = row;
+      break;
+    }
+  }
+  if (prevRow !== null && !canReach(prevRow)) prevRow = null;
+  if (nextRow !== null && !canReach(nextRow)) nextRow = null;
+  return {
+    current,
+    total: indexes.length,
+    prevReason: prevRow === null ? HUNK_FIRST : null,
+    nextReason: nextRow === null ? HUNK_LAST : null,
+    prevRow,
+    nextRow,
+  };
+}
+
 /** 把 `@@ -68,6 +68,7 @@ fn name` 变成人能读的块标题：「第 68 行」+ 所在函数。 */
 export function hunkCaption(text: string): { at: string; context: string } {
   const match = /^@@+ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@+ ?(.*)$/.exec(text);

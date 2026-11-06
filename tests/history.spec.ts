@@ -565,6 +565,42 @@ describe("历史面板", () => {
     expect(document.getElementById(second.id), "指向的元素真实存在").toBe(second);
   });
 
+  it("搜索框向下和回车进入提交列表，第一条向上回到搜索框", async () => {
+    const rows = [commit(0), commit(1)];
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: rows,
+      scope: "current", branches: ["main"], head: "main",
+    });
+    commitDetail.mockResolvedValue({
+      generation: 3, commit: rows[0], body: "", root: false, merge: false, selectedParent: "parent", files: [],
+    });
+    render(HistoryPanel, { props: panelProps() });
+    const search = await screen.findByRole("textbox", { name: "搜索说明或提交哈希" });
+    const list = screen.getByRole("listbox", { name: "提交历史" });
+    await screen.findByRole("option", { name: /commit-0/ });
+    expect(screen.getByRole("option", { name: /commit-0/ }).getAttribute("aria-selected")).toBe("true");
+
+    search.focus();
+    await fireEvent.keyDown(search, { key: "ArrowDown" });
+    expect(screen.getByRole("option", { name: /commit-1/ }).getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(list);
+
+    await fireEvent.keyDown(list, { key: "ArrowUp" });
+    expect(screen.getByRole("option", { name: /commit-0/ }).getAttribute("aria-selected")).toBe("true");
+    await fireEvent.keyDown(list, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(search);
+    expect(screen.getByRole("option", { name: /commit-0/ }).getAttribute("aria-selected")).toBe("true");
+
+    await fireEvent.keyDown(search, { key: "Enter" });
+    expect(document.activeElement).toBe(list);
+    expect(screen.getByRole("option", { name: /commit-0/ }).getAttribute("aria-selected")).toBe("true");
+
+    await fireEvent.input(search, { target: { value: "fix" } });
+    expect(search).toHaveProperty("value", "fix");
+    await fireEvent.keyDown(search, { key: "Escape" });
+    expect(search).toHaveProperty("value", "");
+  });
+
   it("追加失败时保留已加载提交并说明原因", async () => {
     const first = commit(0);
     historyPage

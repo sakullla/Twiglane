@@ -386,9 +386,9 @@ const R11_ACTIONS: { id: string; title: string }[] = [
   { id: "dialog.dependencies", title: "运行依赖" },
 ];
 
-/** R20 在原有清单之外新增的命令。 */
-const ADDED_COMMAND_IDS = ["file.prev", "file.next"];
-const ADDED_COMMAND_TITLES = ["上一个文件", "下一个文件"];
+/** 原清单之外后加的视图命令：文件切换、改动块跳转、聚焦搜索。 */
+const ADDED_COMMAND_IDS = ["file.prev", "file.next", "diff.hunk.prev", "diff.hunk.next", "view.find"];
+const ADDED_COMMAND_TITLES = ["上一个文件", "下一个文件", "上一处改动", "下一处改动", "聚焦搜索"];
 
 /** 注册表状态夹具：暂存区有 2 个文件、草稿已填，是「看起来都能用」的那一侧。 */
 function commandState(overrides: Partial<CommandState> = {}): CommandState {
@@ -844,7 +844,7 @@ describe("应用外壳", () => {
   });
 
   it("命令面板按 R11 的 id 清单逐项列出动作，草稿为空时两项提交都带原因", async () => {
-    // 注册表一侧：原 27 条都在且顺序稳定（仓库切换插在仓库组的末尾），新增的只有文件切换两条。
+    // 注册表一侧：原 27 条都在且顺序稳定（仓库切换插在仓库组的末尾），后加的视图命令跟在文件切换后面。
     const ids = paletteItems(commandState()).map((item) => item.id);
     expect(ids.filter((id) => !ADDED_COMMAND_IDS.includes(id))).toEqual(R11_ACTIONS.map((action) => action.id));
     expect(ids.filter((id) => ADDED_COMMAND_IDS.includes(id))).toEqual(ADDED_COMMAND_IDS);

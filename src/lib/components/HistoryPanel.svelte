@@ -34,6 +34,7 @@
     OpenedRepository,
     StatusSnapshot,
   } from "../types";
+  import type { HunkNavReport } from "../diff";
   import { BUSY_REASON, fileNavState, hueOf, initialOf, relativeTime, splitPath, statusMark, type FileNavState } from "../ui";
   import BranchPicker from "./BranchPicker.svelte";
   import CommitDiffList from "./CommitDiffList.svelte";
@@ -66,6 +67,8 @@
     onNotice?: (message: string) => void;
     /** 变更文件的上一个/下一个状态：外壳据此响应 file.prev、file.next。 */
     onFileNav?: (nav: FileNavState | null) => void;
+    /** 单文件差异的上一处/下一处改动。全部文件视图不报，那里没有一条可滚的差异。 */
+    onHunkNav?: (nav: HunkNavReport | null) => void;
     /** 左栏头部（视图切换与合并提示）和右沿拖动条：由外壳提供，与改动视图是同一份。 */
     paneHead?: Snippet;
     paneResizer?: Snippet;
@@ -126,6 +129,7 @@
     onSnapshot,
     onNotice,
     onFileNav,
+    onHunkNav,
     paneHead,
     paneResizer,
     branchGroups = true,
@@ -1002,6 +1006,31 @@
     if (list) list.scrollTop = next;
   }
 
+  /** 搜索框和提交列表是同一套选择：回车确认当前或第一条，向下把焦点交进列表。 */
+  function onSearchKey(event: KeyboardEvent) {
+    if (event.isComposing) return;
+    if (event.key === "Escape" && query) {
+      event.preventDefault();
+      clearFilter("query");
+      return;
+    }
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (event.key !== "ArrowDown" && event.key !== "Enter") return;
+    if (commits.length === 0) return;
+    event.preventDefault();
+    const current = commits.findIndex((commit) => commit.oid === (anchorOid ?? selectedOids[0] ?? null));
+    const next = event.key === "Enter" || current < 0
+      ? commits[current >= 0 ? current : 0]
+      : current < commits.length - 1
+        ? commits[current + 1]
+        : null;
+    if (next) {
+      reveal(commits.indexOf(next));
+      singleSelect(next.oid);
+    }
+    list?.focus({ preventScroll: true });
+  }
+
   function onListKey(event: KeyboardEvent) {
     const anchor = anchorOid ?? selectedOids[0] ?? null;
     const current = commits.findIndex((commit) => commit.oid === anchor);
@@ -1035,6 +1064,11 @@
       return;
     }
     if (event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.key === "ArrowUp" && !event.shiftKey && current === 0) {
+      event.preventDefault();
+      document.getElementById("history-search")?.focus();
+      return;
+    }
     const move = nextIndex(current, event.key, commits.length);
     if (move === null) return;
     event.preventDefault();
@@ -1182,11 +1216,13 @@
             <div class="field sm history-search">
               <Icon name="search" size={14} />
               <input
+                id="history-search"
                 aria-label="搜索说明或提交哈希"
                 placeholder="搜索说明或提交哈希"
                 autocomplete="off"
                 spellcheck="false"
                 value={query}
+                onkeydown={onSearchKey}
                 oninput={(event) => {
                   query = event.currentTarget.value;
                   scheduleText();
@@ -1707,6 +1743,7 @@
                 onLoadMore={loadMoreDiff}
                 onFileHistory={onFilePath}
                 {fileNav}
+                {onHunkNav}
               />
             {/if}
           </div>

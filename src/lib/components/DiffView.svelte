@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { untrack } from "svelte";
-  import { hunkCaption, splitColumnsFit, toSideRows, visibleDiffLines, type ViewLine } from "../diff";
+  import { tick, untrack } from "svelte";
+  import { MODIFIER_LABEL } from "../brand";
+  import { hunkCaption, hunkJump, hunkRowIndexes, splitColumnsFit, toSideRows, visibleDiffLines, type HunkNavReport, type ViewLine } from "../diff";
   import { trackCodeScroll } from "../codeScroll.svelte";
   import { codeContentSize, codeRuler, rulerPadding, scrollByRows, visibleRange } from "../layout";
   import type { DiffHunk, DiffResponse, FileSelection } from "../types";
@@ -47,6 +48,11 @@
     fileCount?: number;
     /** 差异读取失败后的重试入口；单文件视图才传，多文件视图按块自己重读。 */
     onRetry?: () => void;
+    /**
+     * 上报上一处/下一处改动。只给当前可见的单文件差异传；
+     * 多文件和嵌入块不传，避免背后那一份把命令面板的可用性盖掉。
+     */
+    onHunkNav?: (nav: HunkNavReport | null) => void;
   }
 
   /**
@@ -77,6 +83,7 @@
     onScrollX,
     fileCount,
     onRetry,
+    onHunkNav,
   }: Props = $props();
   let menu = $state<ContextMenuRequest | null>(null);
   let ownMode = $state<"unified" | "split">("unified");
@@ -117,6 +124,15 @@
   let codeSize = $derived(codeContentSize(codeTexts));
   /* 并排视图两栏各自横向滚动：每栏的滚动行程按本栏最长的一行算，旧侧是上下文 + 删除，新侧是上下文 + 新增。 */
   let split = $derived(renderMode === "split");
+  /** 块头在当前布局里的行号。并排时删除和新增挤在同一行，所以不能沿用统一视图的下标。 */
+  let hunkIndexes = $derived(
+    hunkRowIndexes(split ? sideRows.map((row) => row.left?.kind ?? row.right?.kind) : lines.map((line) => line.kind)),
+  );
+  let hunkMax = $derived(viewport > 0 ? Math.max(0, total * ROW_HEIGHT - viewport) : Number.POSITIVE_INFINITY);
+  let hunkState = $derived(hunkJump(hunkIndexes, scrollTop, ROW_HEIGHT, hunkMax));
+  const altLabel = MODIFIER_LABEL === "⌘" ? "⌥" : "Alt";
+  let hunkPrev = $state<HTMLButtonElement | null>(null);
+  let hunkNext = $state<HTMLButtonElement | null>(null);
   let leftRuler = $derived(split ? codeRuler(lines.filter((line) => line.kind === "context" || line.kind === "del").map((line) => codeOf(line))) : []);
   let rightRuler = $derived(split ? codeRuler(lines.filter((line) => line.kind === "context" || line.kind === "add").map((line) => codeOf(line))) : []);
   let leftBar = $state<HTMLDivElement | null>(null);
@@ -418,6 +434,40 @@
     if (scroller) scroller.scrollTop = next;
   }
 
+  /** 按下时再算一次：滚动可能刚发生，不能用上报那一刻的行号。 */
+  function jump(direction: -1 | 1) {
+    const state = hunkJump(hunkIndexes, scrollTop, ROW_HEIGHT, hunkMax);
+    const row = direction < 0 ? state.prevRow : state.nextRow;
+    if (row === null) return;
+    const max = viewport > 0 ? Math.max(0, total * ROW_HEIGHT - viewport) : Number.POSITIVE_INFINITY;
+    applyScroll(Math.min(row * ROW_HEIGHT, max));
+  }
+
+  /** 走到头时焦点交给另一侧，键盘用户还能接着往回跳。 */
+  async function runHunk(direction: -1 | 1, self: HTMLButtonElement | null, other: HTMLButtonElement | null) {
+    jump(direction);
+    await tick();
+    if (self?.disabled && !other?.disabled) other?.focus({ preventScroll: true });
+  }
+
+  /**
+   * 只在可用性变化时上报。滚动会改 hunkState，但原因经常不变；
+   * 每次滚动都写外层状态会让整个窗口跟着重绘。
+   */
+  let hunkPublished = "";
+  $effect(() => {
+    const report = onHunkNav;
+    if (!report) return;
+    const key = `${hunkState.prevReason ?? ""}\0${hunkState.nextReason ?? ""}`;
+    if (key === hunkPublished) return;
+    hunkPublished = key;
+    report({ prevReason: hunkState.prevReason, nextReason: hunkState.nextReason, jump });
+  });
+  $effect(() => {
+    const report = onHunkNav;
+    return () => report?.(null);
+  });
+
   function onDiffKey(event: KeyboardEvent) {
     if (embedded || event.target !== event.currentTarget) return;
     if (event.altKey || event.ctrlKey || event.metaKey) return;
@@ -460,6 +510,33 @@
   <div class="diff-toolbar">
     <div class="diff-toolbar-group context">
       {#if fileNav}<FileNav nav={fileNav} />{/if}
+      {#if hunkState.total > 0}
+        <div class="file-nav" role="group" aria-label="切换改动块">
+          <button
+            type="button"
+            class="icon-btn sm"
+            aria-label="上一处改动"
+            title={hunkState.prevReason ?? `上一处改动（${altLabel} ↑）`}
+            disabled={hunkState.prevReason !== null}
+            bind:this={hunkPrev}
+            onclick={() => runHunk(-1, hunkPrev, hunkNext)}
+          >
+            <Icon name="chevron-up" size={15} />
+          </button>
+          <button
+            type="button"
+            class="icon-btn sm"
+            aria-label="下一处改动"
+            title={hunkState.nextReason ?? `下一处改动（${altLabel} ↓）`}
+            disabled={hunkState.nextReason !== null}
+            bind:this={hunkNext}
+            onclick={() => runHunk(1, hunkNext, hunkPrev)}
+          >
+            <Icon name="chevron-down" size={15} />
+          </button>
+          {#if hunkState.current >= 0}<span class="file-nav-pos">{hunkState.current + 1}/{hunkState.total}</span>{/if}
+        </div>
+      {/if}
       <div class="diff-file">
         {#if selection && parts}
           <Icon name="file-diff" size={15} />

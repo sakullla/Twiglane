@@ -239,6 +239,7 @@
     role="dialog"
     aria-modal="true"
     aria-labelledby={titleId}
+    aria-describedby={description ? `${titleId}-description` : undefined}
     tabindex="-1"
     data-task-modal={task}
     data-modal-tone={tone}
@@ -251,7 +252,7 @@
       {/if}
       <div class="modal-titles">
         <h2 id={titleId}>{title}</h2>
-        {#if description}<p class="modal-desc">{description}</p>{/if}
+        {#if description}<p class="modal-desc" id={`${titleId}-description`}>{description}</p>{/if}
       </div>
       {#if headExtra}{@render headExtra()}{/if}
       <button

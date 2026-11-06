@@ -77,6 +77,7 @@ vi.mock("../src/lib/api", () => ({
 
 import App from "../src/App.svelte";
 import ContextMenu from "../src/lib/components/ContextMenu.svelte";
+import StatusBar from "../src/lib/components/StatusBar.svelte";
 
 const writeText = vi.fn(async () => {});
 
@@ -433,6 +434,43 @@ describe("多选文件的右键菜单", () => {
     expect(item.getAttribute("aria-disabled")).toBe("true");
     expect(item.title).toContain("稍后再试");
     finish({ ...snapshot, generation: 5, files: manyFiles });
+  });
+});
+
+describe("共用组件状态反馈", () => {
+  it("禁用菜单项直接显示原因、关联描述且不会执行", async () => {
+    const run = vi.fn();
+    render(ContextMenu, {
+      props: {
+        request: {
+          x: 20,
+          y: 20,
+          label: "差异操作",
+          entries: [{ id: "stage", label: "暂存此块", disabledReason: "完整文件视图不支持按块暂存", run }],
+        },
+        onClose: vi.fn(),
+      },
+    });
+    const item = await screen.findByRole("menuitem", { name: "暂存此块" });
+    const reason = screen.getByText("完整文件视图不支持按块暂存");
+    expect(reason.id).not.toBe("");
+    expect(item.getAttribute("aria-describedby")).toBe(reason.id);
+    await fireEvent.click(item);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("状态栏暴露忙碌和警告，禁用刷新给出当前原因", async () => {
+    const view = render(StatusBar, {
+      props: { hasRepo: true, sync: "已同步", busy: true, busyLabel: "提交中", warning: "远程暂不可达，本地提交仍有效", onRefresh: vi.fn() },
+    });
+    expect(screen.getByRole("status", { name: "提交中" }).getAttribute("aria-live")).toBe("polite");
+    expect(screen.getByRole("status", { name: "远程暂不可达，本地提交仍有效" })).toBeTruthy();
+    const refresh = screen.getByRole("button", { name: "刷新工作区" });
+    expect(refresh.hasAttribute("disabled")).toBe(true);
+    expect(refresh.getAttribute("title")).toContain("当前操作完成后");
+    await view.rerender({ busy: false, warning: null });
+    expect(refresh.hasAttribute("disabled")).toBe(false);
+    expect(refresh.getAttribute("title")).toBe("重新读取工作区与当前差异");
   });
 });
 

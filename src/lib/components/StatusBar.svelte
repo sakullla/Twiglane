@@ -96,9 +96,9 @@
       <span>{notice.text}</span>
     </button>
   {/if}
-  {#if busy}<span class="sb-item sb-busy"><span class="spinner"></span>{busyLabel}</span>{/if}
+  {#if busy}<span class="sb-item sb-busy" role="status" aria-live="polite" aria-label={busyLabel}><span class="spinner" aria-hidden="true"></span>{busyLabel}</span>{/if}
   {#if warning}
-    <span class="sb-item sb-warn" title={warning}>{warning}</span>
+    <span class="sb-item sb-warn" role="status" aria-live="polite" aria-label={warning} title={warning}>{warning}</span>
   {/if}
   <span class="sb-live" aria-hidden="true"></span>
   <!-- 没有仓库时没有工作区可刷新：按钮不占位，避免起始页出现一个无效动作。 -->
@@ -107,11 +107,11 @@
       type="button"
       class="sb-item"
       aria-label="刷新工作区"
-      title="重新读取工作区与当前差异"
+      title={busy ? "当前操作完成后才能刷新" : refreshing ? "正在重新读取工作区与当前差异" : "重新读取工作区与当前差异"}
       disabled={busy}
       onclick={onRefresh}
     >
-      {#if refreshing}<span class="spinner"></span>{:else}<Icon name="refresh" size={11} />{/if}
+      {#if refreshing}<span class="spinner" aria-hidden="true"></span>{:else}<Icon name="refresh" size={11} />{/if}
       刷新
     </button>
   {/if}

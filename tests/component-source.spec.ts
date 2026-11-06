@@ -48,6 +48,16 @@ describe("组件源码约束", () => {
     expect(missing).toEqual([]);
   });
 
+  it("共用组件把关键原因和状态接入可访问语义", () => {
+    const menu = sources.find(({ name }) => name === "ContextMenu.svelte")!.text;
+    const modal = sources.find(({ name }) => name === "Modal.svelte")!.text;
+    const status = sources.find(({ name }) => name === "StatusBar.svelte")!.text;
+    expect(menu).toContain("aria-describedby={entry.disabledReason");
+    expect(menu).toContain("context-reason-");
+    expect(modal).toContain("aria-describedby={description");
+    expect(status.match(/role="status" aria-live="polite"/g)).toHaveLength(2);
+  });
+
   /**
    * Svelte 销毁 {#if}/{#each} 分支时从分支首节点沿 nextSibling 走到末节点，
    * 首尾节点被 portal 搬走后遍历中断，分支里其余节点残留在页面上。

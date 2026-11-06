@@ -243,7 +243,9 @@
 .context-menu { position: fixed; right: auto; min-width: 232px; max-width: 400px; max-height: calc(100vh - 16px); overflow: auto; padding: var(--space-4); outline: none; z-index: var(--z-toast); }
 .context-item { align-items: center; gap: var(--space-8); min-height: 30px; padding: var(--space-4) var(--space-8); }
 .context-item > .icon { margin-top: 0; color: var(--fg-muted); flex: none; }
-.context-item .context-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); font-weight: var(--weight-normal); color: var(--fg); }
+.context-item .context-copy { flex: 1; min-width: 0; }
+.context-item .context-label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); font-weight: var(--weight-normal); color: var(--fg); }
+.context-item .context-copy small { overflow-wrap: anywhere; }
 .context-item kbd { margin-left: var(--space-12); font-size: var(--text-xs); }
 .context-item.active { background: var(--hover); }
 .context-item[aria-disabled="true"] { cursor: not-allowed; }
@@ -685,6 +687,7 @@
 .modal-icon.tone-warning { background: var(--warning-soft); color: var(--warning); }
 .modal-titles { flex: 1; min-width: 0; padding-top: 1px; }
 .modal-titles h2 { font-size: var(--text-md); font-weight: var(--weight-semibold); line-height: 1.4; letter-spacing: -0.01em; }
+.modal-titles h2, .modal-desc { overflow-wrap: anywhere; }
 .modal-desc { margin-top: 4px; color: var(--fg-muted); font-size: var(--text-sm); line-height: 1.6; }
 .modal-body { padding: var(--space-4) 18px 18px; overflow: auto; display: flex; flex-direction: column; gap: var(--space-12); min-height: 0; }
 .modal-body > p { color: var(--fg-muted); line-height: var(--leading-relaxed); }

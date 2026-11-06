@@ -108,6 +108,14 @@ describe("Modal 键盘处理不依赖焦点位置", () => {
     const head = document.querySelector(".modal-head")!;
     expect(head.querySelector(".modal-titles + #extra + button")).toBeTruthy();
   });
+
+  it("说明同时提供可见文本和对话框描述关系", () => {
+    const description = "取消不会修改仓库，已输入的内容仍保留在当前窗口。";
+    open("甲窗", { description });
+    const dialog = screen.getByRole("dialog", { name: "甲窗", description });
+    expect(dialog.getAttribute("aria-describedby")).toBe("甲窗-title-description");
+    expect(document.getElementById("甲窗-title-description")?.textContent).toBe(description);
+  });
 });
 
 /**

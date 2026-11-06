@@ -182,6 +182,8 @@
         tabindex="-1"
         data-entry={index}
         aria-disabled={entry.disabledReason ? "true" : undefined}
+        aria-describedby={entry.disabledReason ? `context-reason-${index}` : undefined}
+        aria-label={entry.label}
         title={entry.disabledReason ?? undefined}
         onmousemove={() => {
           if (!entry.disabledReason && active !== index) focusIndex(index);
@@ -189,7 +191,10 @@
         onclick={() => run(entry)}
       >
         {#if entry.icon}<Icon name={entry.icon} size={14} />{:else}<span class="context-icon-gap"></span>{/if}
-        <span class="context-label">{entry.label}</span>
+        <span class="context-copy">
+          <span class="context-label">{entry.label}</span>
+          {#if entry.disabledReason}<small id={`context-reason-${index}`}>{entry.disabledReason}</small>{/if}
+        </span>
         {#if entry.shortcut}<kbd>{entry.shortcut}</kbd>{/if}
       </button>
     {/if}

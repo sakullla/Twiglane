@@ -525,6 +525,21 @@ describe("状态与动效统一（R2、R12）", () => {
     expect(reduced).toMatch(/transition:\s*none !important/);
   });
 
+  it("状态栏长文本收缩到上限，菜单禁用原因在文字区内折行", () => {
+    const sync = ruleBody(layout, ".statusbar .sb-sync");
+    expect(sync, "同步结论不许把刷新挤掉").toMatch(/max-width:\s*min\([^)]*vw/);
+    expect(sync).toMatch(/overflow:\s*hidden/);
+    expect(ruleBody(layout, ".statusbar .sb-sync > span:last-child")).toMatch(/text-overflow:\s*ellipsis/);
+    // sb-update 有两条规则（配色、上限），直接按整段规则匹配带上限的那条。
+    expect(stripComments(layout), "忙碌与警告").toMatch(/\.statusbar \.sb-busy, \.statusbar \.sb-warn \{[^}]*max-width: min\([^)]*vw[^)]*\)/);
+    expect(stripComments(layout), "新版本入口").toMatch(/\.statusbar \.sb-update \{[^}]*max-width: min\([^)]*vw[^)]*\)/);
+    expect(stripComments(layout), "新版本文字自己省略").toMatch(/\.statusbar \.sb-update > span \{[^}]*text-overflow: ellipsis/);
+    const label = ruleBody(components, ".context-item .context-label");
+    expect(label).toMatch(/min-width:\s*0/);
+    expect(label).toMatch(/text-overflow:\s*ellipsis/);
+    expect(ruleBody(components, ".context-item .context-copy small")).toMatch(/overflow-wrap:\s*anywhere/);
+  });
+
   it("不可用控件的淡化比例只有一个来源", () => {
     expect(shared.get("--opacity-disabled")).toBe("0.45");
     for (const [file, css] of [["components.css", components], ["layout.css", layout]] as const) {

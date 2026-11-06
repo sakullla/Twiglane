@@ -53,15 +53,24 @@
     pane.height = null;
     pane.query = "";
     pane.scroll = 0;
-    if (!source) return () => { controller.abort(); };
+    if (!source) return () => { serials[side]++; controller.abort(); };
+    // 读取一被作废（切换版本或卸载）就让 task 立刻落地，把 previewReads 的槽位让给新选择，
+    // 而不是等已经没人要的后端响应返回；否则两个在途读取会把新读取一直挡在队列里。
+    const abandoned = new Promise<never>((_, reject) => {
+      controller.signal.addEventListener("abort", () => reject({ code: "cancelled", message: "预览已切换。" }), { once: true });
+    });
     void previewReads.run(async () => {
-      try {
-        return await api.filePreview(sources.repository, source, current);
-      } catch (failure) {
-        const normalized = normalizeError(failure);
-        if (normalized.code !== "stale" || normalized.generation === undefined || controller.signal.aborted) throw failure;
-        return api.filePreview(sources.repository, source, normalized.generation);
-      }
+      const read = (async () => {
+        try {
+          return await api.filePreview(sources.repository, source, current);
+        } catch (failure) {
+          const normalized = normalizeError(failure);
+          if (normalized.code !== "stale" || normalized.generation === undefined || controller.signal.aborted) throw failure;
+          return api.filePreview(sources.repository, source, normalized.generation);
+        }
+      })();
+      abandoned;
+      return await read;
     }, controller.signal).then((value) => {
       if (serials[side] !== token) return;
       pane.result = value;
@@ -78,13 +87,15 @@
   }
 
   // retries 只用于让“重试”按钮重新发起读取，值本身不参与请求参数。
+  // 直接把 loadSide 的 cleanup 交还给 effect：依赖变化重跑和组件卸载都会执行 serial++/abort，
+  // 否则被取代或已卸载的读取会一直占着 previewReads 的两个槽位。
   $effect(() => {
     void retries.old;
-    loadSide("old", sources.old, generation);
+    return loadSide("old", sources.old, generation);
   });
   $effect(() => {
     void retries.new;
-    loadSide("new", sources.new, generation);
+    return loadSide("new", sources.new, generation);
   });
   $effect(() => {
     const key = JSON.stringify([sources.repository, sources.old, sources.new, generation]);
@@ -166,6 +177,18 @@
       <button type="button" class="btn btn-ghost btn-sm" aria-pressed={zoom} title="切换所有图片缩放（0）" onclick={() => (zoom = !zoom)}>{zoom ? "适应窗口" : "原始大小"}</button>
     {/if}
   </div>
+  {#if !sources.old || !sources.new}
+    <!-- 单版本视图要说清另一侧为什么不在，不能只靠按钮上的 disabled title。 -->
+    <p class="preview-note">
+      {#if !sources.old && !sources.new}
+        没有可预览的版本
+      {:else if !sources.old}
+        没有改动前版本，无法并排比较
+      {:else}
+        没有改动后版本，无法并排比较
+      {/if}
+    </p>
+  {/if}
   <div class="preview-panes" class:comparing>
     {#each visibleSides as side (side)}
       {@const pane = panes[side]}
@@ -222,6 +245,7 @@
   .preview-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
   .preview-pane + .preview-pane { border-left: 1px solid var(--border); }
   .preview-toolbar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; flex-shrink: 0; font-size: 12px; border-bottom: 1px solid var(--border); }
+  .preview-note { margin: 0; padding: 8px 14px; flex-shrink: 0; color: var(--fg-muted); font-size: 12px; border-bottom: 1px solid var(--border); }
   .pane-heading { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
   .pane-heading span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-muted); }
   .pane-meta { display: flex; gap: 10px; padding: 6px 12px; border-bottom: 1px solid var(--border); color: var(--fg-muted); font-size: 12px; }

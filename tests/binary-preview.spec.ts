@@ -46,8 +46,8 @@ describe("文件内容预览", () => {
     expect(screen.getByRole("button", { name: "原始大小" })).toBeTruthy();
   });
 
-  it("generation 变化会丢弃两侧迟到响应", async () => {
-    const requests: { source: unknown; generation: number; pending: ReturnType<typeof deferred<FilePreview>> }[] = [];
+  it("generation 变化后立刻发出新的两侧读取并丢弃迟到响应", async () => {
+    const requests: { source: { path: string }; generation: number; pending: ReturnType<typeof deferred<FilePreview>> }[] = [];
     filePreview.mockImplementation((_path, source, generation) => {
       const pending = deferred<FilePreview>();
       requests.push({ source, generation, pending });
@@ -57,13 +57,62 @@ describe("文件内容预览", () => {
     await waitFor(() => expect(requests).toHaveLength(2));
     const nextSources = { ...sources, new: { revision: "c".repeat(40), path: "next.png" } };
     await view.rerender({ sources: nextSources, generation: 2, disabled: false });
-    // 旧的两侧读取仍占用共享读取槽位；先结算它们，排队中的替代读取才会真正发出。
-    for (const request of requests.filter((item) => item.generation === 1)) request.pending.resolve(image("old"));
+
+    // 不结算 generation 1：旧读取一旦作废就要立刻让出 previewReads 槽位，新的两侧读取必须马上发出。
     await waitFor(() => expect(requests).toHaveLength(4));
-    for (const request of requests.filter((item) => item.generation === 2)) request.pending.resolve(image(request.source === nextSources.old ? "old" : "new", { generation: 2 }));
+    expect(requests.slice(2).map((item) => item.generation)).toEqual([2, 2]);
+    expect(requests.slice(2).map((item) => item.source.path)).toEqual(["old.png", "next.png"]);
+
+    // 迟到的 generation 1 结果不许覆盖新选择。
+    for (const request of requests.filter((item) => item.generation === 1)) request.pending.resolve(image("old"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.queryByAltText("改动后：new.png")).toBeNull();
+    expect(screen.queryByAltText("改动后：next.png")).toBeNull();
+
+    for (const request of requests.slice(2)) request.pending.resolve(image(request.source === nextSources.old ? "old" : "new", { generation: 2 }));
     const nextImage = await screen.findByAltText("改动后：next.png");
     expect(nextImage.getAttribute("src")).toContain("new");
     expect(screen.queryByAltText("改动后：new.png")).toBeNull();
+  });
+
+  it("卸载会取消排队中的读取，不再占用共享读取槽位", async () => {
+    const requests: { source: { path: string }; generation: number; pending: ReturnType<typeof deferred<FilePreview>> }[] = [];
+    filePreview.mockImplementation((_path, source, generation) => {
+      const pending = deferred<FilePreview>();
+      requests.push({ source, generation, pending });
+      return pending.promise;
+    });
+    const view = render(BinaryPreview, { sources, generation: 1, disabled: false });
+    await waitFor(() => expect(requests).toHaveLength(2));
+    await view.rerender({ sources: { ...sources, new: { revision: "c".repeat(40), path: "next.png" } }, generation: 2, disabled: false });
+    view.unmount();
+    for (const request of requests) request.pending.resolve(image("old"));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // 被卸载组件的排队读取已随 cleanup 取消，槽位空出后不会再发出。
+    expect(requests).toHaveLength(2);
+  });
+
+  it("旧实例释放槽位后，后挂载的预览不会被排队读取挡住", async () => {
+    const requests: { source: { path: string }; generation: number; pending: ReturnType<typeof deferred<FilePreview>> }[] = [];
+    filePreview.mockImplementation((_path, source, generation) => {
+      const pending = deferred<FilePreview>();
+      requests.push({ source, generation, pending });
+      return pending.promise;
+    });
+    const first = render(BinaryPreview, { sources, generation: 1, disabled: false });
+    await waitFor(() => expect(requests).toHaveLength(2));
+    await first.rerender({ sources: { ...sources, new: { revision: "c".repeat(40), path: "next.png" } }, generation: 2, disabled: false });
+    first.unmount();
+
+    render(BinaryPreview, { sources, generation: 1, disabled: false });
+    for (const request of requests.slice(0, 2)) request.pending.resolve(image("new", { generation: 1 }));
+    await waitFor(() => expect(requests).toHaveLength(4));
+    expect(requests.slice(2).map((item) => item.generation)).toEqual([1, 1]);
+    expect(requests.slice(2).map((item) => item.source.path)).toEqual(["old.png", "new.png"]);
+
+    for (const request of requests.slice(2)) request.pending.resolve(image(request.source.path === "old.png" ? "old" : "new"));
+    expect(await screen.findByAltText("改动后：new.png")).toBeTruthy();
+    expect(screen.queryByAltText("改动后：next.png")).toBeNull();
   });
 
   it("单侧读取失败不影响另一侧", async () => {
@@ -115,5 +164,17 @@ describe("文件内容预览", () => {
     expect(screen.getAllByRole("listitem")).toHaveLength(1);
     expect((screen.getByRole("button", { name: "改动前" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByRole("button", { name: "并排比较" })).toBeNull();
+  });
+  it("缺一侧时给出可见的不可比较说明", async () => {
+    filePreview.mockResolvedValue(image("old"));
+    const single = render(BinaryPreview, { sources: { ...sources, old: null }, generation: 1, disabled: false });
+    expect((await screen.findByText("没有改动前版本，无法并排比较")).textContent).toContain("没有改动前版本，无法并排比较");
+    expect(screen.queryByText(/没有改动后版本/)).toBeNull();
+    single.unmount();
+
+    filePreview.mockResolvedValue(image("new"));
+    render(BinaryPreview, { sources: { ...sources, new: null }, generation: 1, disabled: false });
+    expect(await screen.findByText("没有改动后版本，无法并排比较")).toBeTruthy();
+    expect(screen.queryByText(/没有改动前版本/)).toBeNull();
   });
 });

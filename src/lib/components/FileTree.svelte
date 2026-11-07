@@ -22,6 +22,8 @@
     filterError?: string | null;
     /** 补齐结果被后端截断：匹配没有显示全。 */
     filterTruncated?: boolean;
+    /** 全仓库补齐还在飞行中：这时的空结果不是「没有匹配」。 */
+    filterBusy?: boolean;
     /** 补齐行被截到显示上限：还有匹配没列出来。 */
     filterLimited?: boolean;
     /** 有写入或读取在飞行中：只锁树里的动作，不阻止选择。 */
@@ -50,6 +52,7 @@
     changedOnly = false,
     filterError = null,
     filterTruncated = false,
+    filterBusy = false,
     filterLimited = false,
     disabled,
     onQuery,
@@ -323,6 +326,8 @@
   <p class="file-tree-status" class:danger={Boolean(filterError)} role={filterError ? "alert" : "status"}>
     {#if filterError}
       全仓库补齐失败：{filterError}只显示已展开范围内的匹配。
+    {:else if filterBusy}
+      正在全仓库补齐匹配……
     {:else if filterTruncated}
       全仓库匹配过多，补齐结果不完整（后端已截断）。
     {:else if filterLimited}
@@ -361,6 +366,11 @@
           <span class="empty-icon err"><Icon name="alert-circle" size={22} /></span>
           <strong>全仓库补齐失败</strong>
           <p>{filterError}已展开的目录里也没有匹配——这不代表仓库里没有匹配的路径。</p>
+        </div>
+      {:else if filterBusy}
+        <div class="empty compact" role="status" aria-busy="true">
+          <span class="spinner"></span>
+          <p>正在全仓库补齐匹配</p>
         </div>
       {:else if filterTruncated || filterLimited}
         <div class="empty compact">

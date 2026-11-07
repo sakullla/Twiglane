@@ -192,6 +192,7 @@
         changedOnly={store.changedOnly}
         filterError={store.filterError}
         filterTruncated={store.filterTruncated}
+        filterBusy={store.filterBusy}
         filterLimited={filterLimited}
         {disabled}
         onQuery={(value) => store.setQuery(value)}

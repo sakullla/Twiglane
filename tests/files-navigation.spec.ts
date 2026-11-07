@@ -11,6 +11,7 @@ vi.mock("../src/lib/api", () => ({
 }));
 
 import RepositoryFiles from "../src/lib/components/RepositoryFiles.svelte";
+import { buildChangedTree, changedFilesMatching, flattenTree } from "../src/lib/files.svelte";
 import type { FileChange, OpenedRepository, RepositoryDirectory } from "../src/lib/types";
 
 const repoPath = "C:/work/demo";
@@ -343,3 +344,134 @@ describe("改动与文件的双向导航", () => {
     expect(within(after).getByRole("button", { name: "展开 src" })).toBeTruthy();
   });
 });
+
+/** 组件实例上的定位入口：改动列表、最近打开与搜索都经过它。 */
+type RevealHost = { reveal: (path: string, line?: number | null) => Promise<boolean> };
+
+function revealHost(view: { component: unknown }): RevealHost {
+  return view.component as RevealHost;
+}
+
+
+describe("仅改动树的匹配与展开规则", () => {
+  const files = [
+    change("README.md", "none", "modified"),
+    change("src/app.ts", "none", "modified"),
+    change("src/lib/util.ts", "none", "modified"),
+  ];
+
+  it("在全部改动路径上匹配，与当前展开到哪些行无关", () => {
+    // 祖先目录的路径是前缀：命中 src/lib 就等于命中它下面的改动文件。
+    expect(changedFilesMatching(files, "src/lib").map((file) => file.path)).toEqual(["src/lib/util.ts"]);
+    expect(changedFilesMatching(files, "util").map((file) => file.path)).toEqual(["src/lib/util.ts"]);
+    // 空集才允许界面说「没有匹配」。
+    expect(changedFilesMatching(files, "zzz-nothing")).toEqual([]);
+  });
+
+  it("forceExpanded 只影响这一次构建，不改写折叠集合", () => {
+    const collapsed = new Set(["src"]);
+    expect(flattenTree(buildChangedTree(files, collapsed)).map((row) => row.path)).not.toContain("src/lib/util.ts");
+    const forced = flattenTree(buildChangedTree(files, collapsed, true)).map((row) => row.path);
+    expect(forced).toContain("src/lib/util.ts");
+    expect([...collapsed]).toEqual(["src"]);
+  });
+});
+
+describe("仅改动树的定位与过滤", () => {
+  const changes = [
+    change("README.md", "none", "modified"),
+    change("src/app.ts", "none", "modified"),
+    change("src/lib/util.ts", "none", "modified"),
+  ];
+
+  it("折叠父目录后定位子改动文件：父目录展开、目标可见并选中", async () => {
+    repositoryDirectory.mockResolvedValue(dir("", [entry("README.md"), entry("src", "directory")]));
+    const view = render(RepositoryFiles, { props: viewProps({ opened: opened(changes) }) as never });
+    await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+
+    const tree = await screen.findByRole("tree", { name: "仓库文件" });
+    expect(within(tree).getByRole("treeitem", { name: /app\.ts/ })).toBeTruthy();
+    await fireEvent.click(within(tree).getByRole("button", { name: "折叠 src" }));
+    expect(within(screen.getByRole("tree", { name: "仓库文件" })).queryByRole("treeitem", { name: /app\.ts/ })).toBeNull();
+    expect(within(screen.getByRole("tree", { name: "仓库文件" })).queryByRole("treeitem", { name: /util\.ts/ })).toBeNull();
+
+    // 从外部定位（改动列表 / 最近打开 / 搜索共用这个入口）到折叠分支里的改动文件。
+    await revealHost(view).reveal("src/lib/util.ts", 3);
+
+    const after = screen.getByRole("tree", { name: "仓库文件" }) as HTMLElement;
+    const target = await within(after).findByRole("treeitem", { name: /util\.ts/ });
+    expect(target.getAttribute("aria-selected")).toBe("true");
+    // 兄弟改动文件一起出现，说明 src 这一级是真的解除了折叠，而不是只读了完整树节点。
+    expect(within(after).getByRole("treeitem", { name: /app\.ts/ })).toBeTruthy();
+    // 目标行被滚动到可见位置。
+    expect(after.scrollTop).toBe(Number.parseFloat(target.style.top || "0"));
+    // 目标在改动树里：不能被静默关掉仅改动模式。
+    expect(screen.getByRole("button", { name: "只看有改动的文件" }).getAttribute("aria-pressed")).toBe("true");
+    // 定位到行号后内容区确实按这个路径读取。
+    await waitFor(() =>
+      expect(repositoryFileContent).toHaveBeenLastCalledWith(repoPath, "src/lib/util.ts", expect.any(Number), undefined, 4, expect.any(Number)),
+    );
+  });
+
+  it("不在改动树里的路径仍然切回完整树", async () => {
+    repositoryDirectory.mockResolvedValue(dir("", [entry("README.md"), entry("other.md")]));
+    const view = render(RepositoryFiles, { props: viewProps({ opened: opened(changes) }) as never });
+    await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "折叠 src" }));
+    await revealHost(view).reveal("other.md", null);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "只看有改动的文件" }).getAttribute("aria-pressed")).toBe("false"),
+    );
+    expect(within(screen.getByRole("tree", { name: "仓库文件" })).getByRole("treeitem", { name: /other\.md/ })).toBeTruthy();
+  });
+
+  it("改动树过滤基于全部改动路径：折叠目录里的命中照样显示对应分支", async () => {
+    repositoryDirectory.mockResolvedValue(dir("", [entry("README.md"), entry("src", "directory")]));
+    render(RepositoryFiles, { props: viewProps({ opened: opened(changes) }) as never });
+    await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "折叠 src" }));
+
+    const filter = screen.getByRole("textbox", { name: "过滤文件树" });
+    await fireEvent.input(filter, { target: { value: "util" } });
+    const changed = screen.getByRole("tree", { name: "仓库文件" });
+    // 命中在被折叠的 src/lib 里：仍然显示这一支，未命中的兄弟不显示。
+    expect(within(changed).getByRole("treeitem", { name: /util\.ts/ })).toBeTruthy();
+    expect(within(changed).queryByRole("treeitem", { name: /app\.ts/ })).toBeNull();
+    expect(within(changed).queryByRole("treeitem", { name: /README\.md/ })).toBeNull();
+    expect(repositoryPathSearch).not.toHaveBeenCalled();
+
+    // 清掉过滤：命中分支的展开只是显示行为，折叠状态照旧保留。
+    await fireEvent.input(filter, { target: { value: "" } });
+    const restored = screen.getByRole("tree", { name: "仓库文件" });
+    expect(within(restored).queryByRole("treeitem", { name: /util\.ts/ })).toBeNull();
+    expect(within(restored).getByRole("button", { name: "展开 src" })).toBeTruthy();
+
+    // 无命中文案只在确实没有任何改动路径命中时出现。
+    await fireEvent.input(filter, { target: { value: "zzz-nothing" } });
+    expect(within(screen.getByRole("tree", { name: "仓库文件" })).queryAllByRole("treeitem")).toHaveLength(0);
+    expect(screen.getByText("改动列表里没有匹配的路径")).toBeTruthy();
+  });
+
+  it("全仓库补齐还在飞行中时显示正在补齐，而不是没有匹配", async () => {
+    repositoryDirectory.mockResolvedValue(dir("", []));
+    let finish: (value: unknown) => void = () => {};
+    repositoryPathSearch.mockImplementation(
+      () => new Promise((resolve) => { finish = resolve; }),
+    );
+    render(RepositoryFiles, { props: viewProps() as never });
+    await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.input(screen.getByRole("textbox", { name: "过滤文件树" }), { target: { value: "zzz" } });
+
+    await waitFor(() => expect(repositoryPathSearch).toHaveBeenCalled());
+    expect(await screen.findByText("正在全仓库补齐匹配")).toBeTruthy();
+    expect(screen.queryByText("没有匹配的路径")).toBeNull();
+
+    finish({ generation: 4, query: "zzz", directory: null, includeIgnored: false, scanned: 2, entries: [], truncated: false, message: null });
+    await waitFor(() => expect(screen.queryByText("正在全仓库补齐匹配")).toBeNull());
+    expect(screen.getByText("没有匹配的路径")).toBeTruthy();
+  });
+});
+

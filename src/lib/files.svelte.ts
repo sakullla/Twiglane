@@ -226,8 +226,15 @@ export function filterRows(rows: readonly FileTreeRow[], query: string): FileTre
 /**
  * 仅看改动时的树：直接由 StatusSnapshot 的路径派生，不读目录。
  * 祖先目录由路径合成；删除的文件保留为墓碑行，只提供改动与历史。
+ *
+ * forceExpanded 用于「过滤命中」与「定位目标」：这两种情况下分支必须看得见，
+ * 折叠状态仍然原样留在 collapsed 里，清掉过滤后照旧折叠。
  */
-export function buildChangedTree(files: readonly FileChange[], collapsed?: ReadonlySet<string>): FileNode[] {
+export function buildChangedTree(
+  files: readonly FileChange[],
+  collapsed?: ReadonlySet<string>,
+  forceExpanded = false,
+): FileNode[] {
   const roots: FileNode[] = [];
   const dirs = new Map<string, FileNode>();
   for (const file of files) {
@@ -240,7 +247,7 @@ export function buildChangedTree(files: readonly FileChange[], collapsed?: Reado
       if (!dir) {
         dir = makeNode({ name: parts[index], path: prefix, kind: "directory", ignored: false, size: null, error: null });
         // 仅改动树的节点每次都由快照重建：折叠状态只能靠路径集合记住，否则折叠后立刻弹回展开。
-        dir.expanded = !collapsed?.has(prefix);
+        dir.expanded = forceExpanded || !collapsed?.has(prefix);
         dir.children = [];
         dirs.set(prefix, dir);
         list.push(dir);
@@ -272,6 +279,16 @@ function sortNodes(list: FileNode[]): void {
         : 1,
   );
   for (const node of list) if (node.children) sortNodes(node.children);
+}
+
+/**
+ * 仅改动模式的过滤：在全部改动路径上匹配，不局限于当前展开出来的可见行。
+ * 祖先目录的路径是改动路径的前缀，所以命中目录就等于命中它下面的改动文件。
+ */
+export function changedFilesMatching(files: readonly FileChange[], query: string): FileChange[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return files as FileChange[];
+  return files.filter((file) => file.path.toLowerCase().includes(needle));
 }
 
 /** 工作区里已经没有这个文件：未暂存删除，或只剩已暂存删除而工作区无内容。 */
@@ -411,6 +428,8 @@ export function createFilesStore(deps: FilesStoreDeps) {
   let filterError = $state<string | null>(null);
   /** 补齐结果被后端截断：匹配没有显示全，界面不能说「没有更多匹配」。 */
   let filterTruncated = $state(false);
+  /** 全仓库补齐还在飞行中：这时候没有行不等于「没有匹配」，界面必须显示正在补齐。 */
+  let filterBusy = $state(false);
   let changedOnly = $state(false);
   /** 仅改动树里被折叠的目录路径：节点每次重建，折叠状态必须按路径记。 */
   let changedCollapsed = $state<ReadonlySet<string>>(new Set());
@@ -457,6 +476,7 @@ export function createFilesStore(deps: FilesStoreDeps) {
     filterEntries = [];
     filterError = null;
     filterTruncated = false;
+    filterBusy = false;
   }
 
   function findNode(list: FileNode[], path: string): FileNode | null {
@@ -609,19 +629,39 @@ export function createFilesStore(deps: FilesStoreDeps) {
     return files.some((file) => file.path === path || file.path.startsWith(`${path}/`));
   }
 
+  /**
+   * 仅改动树里的定位：目标自己和它的每一级祖先目录都要展开，否则这一行根本不在行列表里。
+   * 只清掉这些路径的折叠记录，别的目录保持折叠。
+   */
+  function revealChangedBranch(path: string): void {
+    const parts = path.split("/");
+    let prefix = "";
+    let changed = false;
+    const next = new Set(changedCollapsed);
+    for (let index = 0; index < parts.length; index += 1) {
+      prefix = prefix ? `${prefix}/${parts[index]}` : parts[index];
+      if (next.delete(prefix)) changed = true;
+    }
+    if (changed) changedCollapsed = next;
+  }
+
   /** 树内定位：展开祖先、选中并（可选）记下要跳转的行。不改动工作区，也不读文件内容。 */
   async function locate(path: string, line: number | null = null): Promise<boolean> {
     if (!repo || !deps.active()) return false;
     // 仅改动树里有这个路径就留在改动模式；只有目标确实不在改动里时才切回完整树。
-    if (changedOnly && !changedTreeContains(path)) changedOnly = false;
+    const staysChanged = changedOnly && changedTreeContains(path);
+    if (changedOnly && !staysChanged) changedOnly = false;
     if (query) {
       query = "";
       filterSerial += 1;
       filterEntries = [];
       filterError = null;
       filterTruncated = false;
+      filterBusy = false;
     }
-    const ok = await ensureChain(path);
+    // 改动树不读目录：直接解除目标祖先的折叠，行立即出现；完整树才需要逐级读取。
+    if (staysChanged) revealChangedBranch(path);
+    const ok = staysChanged ? true : await ensureChain(path);
     if (!ok) return false;
     const previousDirectory = currentDirectory();
     selectedPath = path;
@@ -663,9 +703,11 @@ export function createFilesStore(deps: FilesStoreDeps) {
       filterEntries = [];
       filterError = null;
       filterTruncated = false;
+      filterBusy = false;
       return;
     }
     const owns = () => repo === current && filterSerial === token;
+    filterBusy = true;
     try {
       const result = await api.repositoryPathSearch(
         current,
@@ -699,6 +741,9 @@ export function createFilesStore(deps: FilesStoreDeps) {
       filterEntries = [];
       filterError = normalized.message || "无法在仓库里查找路径。";
       filterTruncated = false;
+    } finally {
+      // 只有还是当前这次请求才复位：被新请求取代时，新的那次已经自己置真。
+      if (owns()) filterBusy = false;
     }
   }
 
@@ -782,6 +827,7 @@ export function createFilesStore(deps: FilesStoreDeps) {
       filterEntries = [];
       filterError = null;
       filterTruncated = false;
+      filterBusy = false;
     } else if (query.trim()) {
       void completeFilter();
     }
@@ -976,12 +1022,20 @@ export function createFilesStore(deps: FilesStoreDeps) {
     await revalidate();
   }
 
+  /**
+   * 仅改动模式的行：过滤在全部改动路径上完成，命中分支强制展开。
+   * 折叠目录里的命中仍然显示对应分支，但折叠状态本身不改——清掉过滤后照旧折叠。
+   */
+  function changedRows(): FileTreeRow[] {
+    const files = deps.files?.() ?? [];
+    const needle = query.trim();
+    if (!needle) return flattenTree(buildChangedTree(files, changedCollapsed));
+    return flattenTree(buildChangedTree(changedFilesMatching(files, needle), changedCollapsed, true));
+  }
+
   /** 当前树的可见行：仅改动时来自 StatusSnapshot，否则来自按需读到的目录。 */
   function visibleRows(): FileTreeRow[] {
-    const base = changedOnly
-      ? flattenTree(buildChangedTree(deps.files?.() ?? [], changedCollapsed))
-      : flattenTree(nodes);
-    return filterRows(base, query);
+    return changedOnly ? changedRows() : filterRows(flattenTree(nodes), query);
   }
 
   /**
@@ -1094,6 +1148,10 @@ export function createFilesStore(deps: FilesStoreDeps) {
     /** 补齐结果被后端截断：匹配没有显示全。 */
     get filterTruncated() {
       return filterTruncated;
+    },
+    /** 全仓库补齐正在飞行中：界面显示「正在补齐」而不是「没有匹配」。 */
+    get filterBusy() {
+      return filterBusy;
     },
     get lineTarget() {
       return lineTarget;

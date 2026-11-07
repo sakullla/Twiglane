@@ -547,7 +547,10 @@ fn read_text_page(
         .read(&mut probe)
         .map_err(|error| AppError::new("path_unreadable", format!("无法读取文件：{error}")))?;
     let probe = &probe[..count];
-    if wants_preview(&display, probe) {
+    // SVG 是文本源码（XML）：wants_preview 只按扩展名把它归入资源，但 R3 要求全文搜索
+    // 命中后能打开源码并定位到行。这里让 SVG 走文本分页，图片与压缩包仍是 Resource，
+    // 未下载的 LFS 指针仍是 Resource；真正的二进制与非法编码由下方的 NUL/UTF-8 判定拦下。
+    if wants_preview(&display, probe) && !svg_source_text(&display, probe) {
         return Ok(empty_content(
             &display,
             RepositoryFileKind::Resource,
@@ -1185,12 +1188,13 @@ fn open_search_file(
     Some((file, meta.len()))
 }
 
-/// SVG 是文本源码（XML），必须参与内容搜索；图片、压缩包与 LFS 指针不是可搜索文本。
+/// SVG 是文本源码（XML），内容搜索与内容读取都必须按文本处理；图片、压缩包与 LFS 指针不是文本。
 ///
-/// `wants_preview` 只看扩展名与 LFS 指纹，把 .svg 一并当成资源会让 R3 的全文搜索
-/// 整体跳过 SVG 源码。这里只对 SVG 放行：真正的二进制仍由 NUL 与非 UTF-8 判定拦下，
-/// 已下载与否未知的 LFS 指针仍然按 Unsupported 跳过，不伪造成文本。
-fn searchable_svg(relative: &str, probe: &[u8]) -> bool {
+/// `wants_preview` 只看扩展名与 LFS 指纹，把 .svg 一并当成资源会让 R3 的全文搜索跳过
+/// SVG 源码，也会让搜索命中后的源码定位只能拿到 Resource。这里只对 SVG 放行：真正的
+/// 二进制仍由 NUL 与非 UTF-8 判定拦下，已下载与否未知的 LFS 指针仍然按资源处理，
+/// 不伪造成文本。`file_preview` 仍按原逻辑把 .svg 当图片资源预览。
+fn svg_source_text(relative: &str, probe: &[u8]) -> bool {
     const LFS_MARKER: &[u8] = b"https://git-lfs.github.com/spec/v1";
     relative.to_ascii_lowercase().ends_with(".svg")
         && !probe
@@ -1222,7 +1226,7 @@ fn search_file(
         }
     };
     let probe = &probe[..count];
-    if wants_preview(relative, probe) && !searchable_svg(relative, probe) {
+    if wants_preview(relative, probe) && !svg_source_text(relative, probe) {
         record_skip(outcome, relative, RepositorySkipReason::Unsupported);
         return Ok(());
     }
@@ -2048,6 +2052,111 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// R3：SVG 既要在内容搜索里可命中，也要能在命中后用 `line` 打开源码并读回同一行。
+    /// 扩展名不能让真实二进制、非法 UTF-8 或未下载的 LFS 指针伪装成文本，
+    /// 图片与压缩包仍走资源预览，超高行仍按行预算截断。
+    #[tokio::test]
+    async fn svg_source_pages_as_text_and_search_hits_open_their_line() {
+        let fixture = crate::test_support::git_fixture("repository-files-svg-content");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(
+            root.join("icon.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\">\n  <title>needle in svg</title>\n  <circle r=\"1\"/>\n</svg>\n",
+        )
+        .unwrap();
+        fs::write(root.join("photo.png"), b"\x89PNG\r\n\x1a\nneedle").unwrap();
+        fs::write(root.join("bundle.zip"), b"PK\x03\x04needle").unwrap();
+        // 未下载的 LFS 指针即使扩展名是 .svg 也仍然是资源，不是可读文本。
+        fs::write(
+            root.join("vector.svg"),
+            "version https://git-lfs.github.com/spec/v1\noid sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nsize 12\n",
+        )
+        .unwrap();
+        fs::write(root.join("broken.svg"), b"<svg>\x00</svg>").unwrap();
+        fs::write(
+            root.join("legacy.svg"),
+            [b"<svg>".as_slice(), &[0xff, 0xfe], b"</svg>"].concat(),
+        )
+        .unwrap();
+        let wide = "中".repeat(30_000);
+        fs::write(root.join("wide.svg"), format!("<svg>\n{wide}\n</svg>\n")).unwrap();
+        let path = root.to_str().unwrap();
+
+        let page = repository_file_content(&backend, path, "icon.svg", 0, Some(2), 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(page.kind, RepositoryFileKind::Text);
+        assert_eq!(
+            page.lines,
+            [
+                "<svg xmlns=\"http://www.w3.org/2000/svg\">",
+                "  <title>needle in svg</title>"
+            ]
+        );
+        assert_eq!(page.next_offset, 2);
+        assert!(page.has_more);
+        assert!(!page.truncated);
+
+        // 搜索命中后的源码定位：`line` 是 1 起算，`offset` 是 0 起算。
+        let found = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::Repository,
+            false,
+            None,
+            1,
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(match_keys(&found), [("icon.svg", 2, 10)]);
+        let hit = &found.matches[0];
+        let located =
+            repository_file_content(&backend, path, &hit.path, hit.line - 1, Some(1), 1, 3)
+                .await
+                .unwrap();
+        assert_eq!(located.kind, RepositoryFileKind::Text);
+        assert_eq!(located.lines, [hit.text.as_str()]);
+        assert!(located.has_more);
+
+        // 真实资源与 LFS 指针在内容页仍是资源，只有预览层负责它们。
+        for relative in ["photo.png", "bundle.zip", "vector.svg"] {
+            let resource = repository_file_content(&backend, path, relative, 0, None, 1, 4)
+                .await
+                .unwrap();
+            assert_eq!(resource.kind, RepositoryFileKind::Resource, "{relative}");
+            assert!(resource.lines.is_empty(), "{relative}");
+        }
+        // 扩展名不掩盖真实内容：NUL 与非法 UTF-8 仍是各自类型。
+        assert_eq!(
+            repository_file_content(&backend, path, "broken.svg", 0, None, 1, 5)
+                .await
+                .unwrap()
+                .kind,
+            RepositoryFileKind::Binary
+        );
+        assert_eq!(
+            repository_file_content(&backend, path, "legacy.svg", 0, None, 1, 6)
+                .await
+                .unwrap()
+                .kind,
+            RepositoryFileKind::InvalidUtf8
+        );
+        // 超高行仍按行预算截断，SVG 不走特例绕过限制。
+        let wide_page = repository_file_content(&backend, path, "wide.svg", 1, Some(1), 1, 7)
+            .await
+            .unwrap();
+        assert_eq!(wide_page.kind, RepositoryFileKind::Text);
+        assert!(wide_page.truncated);
+        assert!(wide_page.lines[0].len() <= MAX_LINE_BYTES);
+        assert!(wide_page.lines[0]
+            .chars()
+            .all(|character| character == '中'));
     }
 
     #[cfg(unix)]

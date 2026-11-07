@@ -97,6 +97,9 @@ fn main() {
             "measure_finish",
             "measure_wait",
             "update_install_supported",
+            "cliora_review_request",
+            "cliora_review_receipt",
+            "cliora_review_return",
         ])),
     )
     .expect("failed to run tauri-build");

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import { api, listenEvent, pickDirectory, pickFile } from "./lib/api";
+  import { api, listenEvent, pickDirectory, pickFile, type ClioraReviewRequest } from "./lib/api";
   import {
     commandAvailable,
     commandById,
@@ -16,6 +16,13 @@
   import { LatestReadQueue } from "./lib/latest-read";
   import { finishDiffAttempt, reuseDiffContent, type HunkNavReport } from "./lib/diff";
   import { DraftBuffer } from "./lib/draft";
+  import {
+    beginClioraReview,
+    clioraReview,
+    clioraReturnOutcome,
+    forgetClioraSourceUnless,
+    watchClioraReviewLinks,
+  } from "./lib/cliora-review.svelte";
   import { normalizeError } from "./lib/errors";
   import { clampWidth, FALLBACK_POLL_MS, fitPaneWidth, shouldPoll } from "./lib/layout";
   import { branchLabel, commitScope, createSelectionResolver, dependencyNote, filterRows, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
@@ -781,6 +788,8 @@
      * 所以先记下「窗口还开着」，等状态改完再由同一个关闭收尾交回焦点，否则焦点留在 body。
      */
     const closingClone = cloneOpen;
+    // 独立打开别的仓库会清掉 cliora 来源展示；同一 worktree 的重新打开保留来源。
+    forgetClioraSourceUnless(next.summary.path);
     repositoryEpoch += 1;
     if (draftTimer) clearTimeout(draftTimer);
     drafts.load(next.summary.path, next.draft);
@@ -1688,6 +1697,115 @@
     }
   }
 
+  /** 审查链接的到达序号：后到的新链接优先，旧的打开结果不再抢来源。 */
+  let clioraLinkSerial = 0;
+
+  /**
+   * 本实例已处理过的 reviewId。冷启动的 getCurrent 与运行中的 onOpenUrl 可能对同一条
+   * 链接各派发一次，协议要求同一 reviewId 只处理一次。Set 是组件实例变量，不跨实例保留。
+   */
+  const handledReviews = new Set<string>();
+
+  /**
+   * 打开失败时回执里的稳定错误码。只做码的映射：不回传原始 Git 文本，未知错误统一
+   * open_failed，避免把内部细节带进链接。
+   */
+  function clioraRejectReason(code: string): string {
+    if (code === "not_repository" || code === "not_worktree") return "not_a_worktree";
+    // 协议里 invalid_path 覆盖“相对、越界或无法 canonicalize”，所以路径不存在与
+    // 无法解析也归到这一类，而不是笼统的 open_failed。
+    if (code === "invalid_path" || code === "not_directory" || code === "path_missing" || code === "path_unreadable") {
+      return "invalid_path";
+    }
+    if (code === "unsupported_version" || code === "malformed_request") return code;
+    return "open_failed";
+  }
+
+  /** 回送拒绝。回执自身失败只写 live，不再抛出：本地错误才是用户要看的原因。 */
+  async function rejectCliora(request: ClioraReviewRequest, reason: string) {
+    try {
+      await api.clioraReviewReceipt(request.reviewId, request.sessionId, false, reason);
+    } catch (error) {
+      live = normalizeError(error).message + "（" + reason + "）";
+    }
+  }
+
+  /**
+   * 处理 v1 审查链接（冷启动与运行中都走这里）。
+   *
+   * 解析在 Rust 侧完成；这里只按解析出的 worktreePath 调既有 openRepository：打开的是
+   * 链接指定的那个工作树，子目录/父仓库都不会被替代，失败也不回退主检出。成功后建立
+   * 来源上下文并回送 accepted，失败回送 rejected 并显示本地错误。整个过程不写 Git。
+   */
+  async function handleClioraLink(url: string) {
+    const serial = ++clioraLinkSerial;
+    let request: ClioraReviewRequest;
+    try {
+      request = await api.clioraReviewRequest(url);
+    } catch (error) {
+      // 解析失败时没有可信的 reviewId/sessionId，不能伪造回执，只能在本地说明。
+      live = "cliora 审查链接无效，未打开任何仓库，仓库没有改动。";
+      showError(error);
+      return;
+    }
+    if (serial !== clioraLinkSerial) return;
+    // 同一条链接被冷启动与热启动各派发一次时，第二次在打开之前就结束：不重复打开、不重复回执。
+    if (handledReviews.has(request.reviewId)) return;
+    handledReviews.add(request.reviewId);
+    if (openModalCount() > 0 || switchBlocked(commandState)) {
+      await rejectCliora(request, "open_failed");
+      notice("请先关闭当前对话框并等待操作完成，再从 cliora 重新发起审查。");
+      return;
+    }
+    try {
+      await api.cancelReads();
+      if (serial !== clioraLinkSerial) return;
+      const openedRepo = await api.openRepository(request.worktreePath, nextId());
+      if (serial !== clioraLinkSerial) return;
+      rememberOpened(openedRepo);
+      beginClioraReview({
+        reviewId: request.reviewId,
+        sessionId: request.sessionId,
+        worktreePath: openedRepo.summary.path,
+        baseline: request.baseline,
+      });
+      live = "已按 cliora 审查链接打开 " + openedRepo.summary.name;
+      await api.clioraReviewReceipt(request.reviewId, request.sessionId, true, null);
+    } catch (error) {
+      const failure = normalizeError(error);
+      const reason = clioraRejectReason(failure.code);
+      await rejectCliora(request, reason);
+      // 这条链接已经被更晚的链接取代：回执仍按它自己的 reviewId 回送，但不再改写界面
+      // 提示，免得旧链接的失败盖住新链接刚打开的结果。
+      if (serial !== clioraLinkSerial) return;
+      if (failure.code === "cancelled") {
+        live = "已取消读取，没有写入仓库。";
+        return;
+      }
+      showError(error);
+    }
+  }
+
+  /**
+   * 返回发起这次审查的 cliora 会话：只回送最新结果，不执行任何 Git 写入，也不关闭仓库、
+   * 不清空草稿。没有来源时按钮不显示，这里再挡一次。
+   */
+  async function returnToCliora() {
+    const source = clioraReview.source;
+    if (!source) return;
+    const { outcome, headOid } = clioraReturnOutcome();
+    try {
+      await api.clioraReviewReturn(source.reviewId, source.sessionId, outcome, headOid);
+      notice(
+        outcome === "reviewed"
+          ? "已返回 cliora：本次只做了浏览，没有提交或合入。"
+          : "已返回 cliora，提交或合入结果以待复核声明发送。",
+      );
+    } catch (error) {
+      showError(error);
+    }
+  }
+
   async function openRecent(path: string) {
     // 任何确认层/任务弹窗打开时都不切换仓库：旧确认层不能留在新仓库上继续生效。
     if (openModalCount() > 0) {
@@ -2499,6 +2617,7 @@
     let stopSearch = () => {};
     let stopMedia = () => {};
     let stopUpdate = () => {};
+    let stopClioraLink = () => {};
     const keyListener = (event: KeyboardEvent) => onWindowKeydown(event);
     const layerListener = () => {
       layerAtKey = anyLayerOpen();
@@ -2545,6 +2664,10 @@
       stopUpdate = await watchUpdateAvailable((offer) => {
         notice(`发现新版本 ${offer.version}，可从状态栏入口或设置安装。`);
       });
+      // v1 审查链接：冷启动先于运行中派发，App 侧用到达序号丢弃迟到的旧链接。
+      stopClioraLink = await watchClioraReviewLinks((url) => {
+        void handleClioraLink(url);
+      });
     })();
     const poll = window.setInterval(() => {
       if (shouldPoll(degraded, windowFocused, opened !== null)) void refresh();
@@ -2590,6 +2713,7 @@
       stopSearch();
       stopMedia();
       stopUpdate();
+      stopClioraLink();
     };
   });
 </script>
@@ -2631,6 +2755,14 @@
     onTheme={(next) => runCommand(`theme.${next}`)}
     onSettings={() => runCommand("task.settings")}
     repoNames={badgeNames}
+    cliora={clioraReview.source
+      ? {
+          reviewId: clioraReview.source.reviewId,
+          outcome: clioraReturnOutcome().outcome,
+          headOid: clioraReview.result?.headOid ?? null,
+        }
+      : null}
+    onClioraReturn={returnToCliora}
   />
 
   {#if switcher?.kind === "repo"}

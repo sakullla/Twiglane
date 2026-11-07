@@ -106,6 +106,12 @@ fn capabilities_do_not_grant_a_shell() {
         "allow-measure-finish",
         "allow-measure-wait",
         "allow-update-install-supported",
+        // cliora 审查联动只加固定 scheme 的 deep link 读取与三个协议命令：没有 shell、
+        // 没有文件系统或 HTTP 权限，链接本身只能请求打开仓库。
+        "deep-link:default",
+        "allow-cliora-review-request",
+        "allow-cliora-review-receipt",
+        "allow-cliora-review-return",
     ];
     assert_eq!(permissions, expected);
     assert!(permissions.iter().all(|permission| {

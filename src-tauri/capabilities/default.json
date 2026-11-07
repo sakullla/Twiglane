@@ -95,6 +95,10 @@
     "allow-measure-sample",
     "allow-measure-finish",
     "allow-measure-wait",
-    "allow-update-install-supported"
+    "allow-update-install-supported",
+    "deep-link:default",
+    "allow-cliora-review-request",
+    "allow-cliora-review-receipt",
+    "allow-cliora-review-return"
   ]
 }

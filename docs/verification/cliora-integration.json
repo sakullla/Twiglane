@@ -1,0 +1,98 @@
+{
+  "format": "cliora-integration-evidence",
+  "version": 1,
+  "generatedAt": "2026-11-07T00:00:00.000Z",
+  "host": {
+    "platform": "windows",
+    "osVersion": "",
+    "arch": ""
+  },
+  "builds": {
+    "twiglane": {
+      "version": "",
+      "bundle": "nsis",
+      "installed": false,
+      "installerSha256": ""
+    },
+    "cliora": {
+      "version": "",
+      "bundle": "nsis",
+      "installed": false,
+      "installerSha256": ""
+    }
+  },
+  "scenarios": [
+    {
+      "id": "cold-start-review",
+      "title": "cliora 冷启动唤起 Twiglane 并打开指定 worktree",
+      "status": "not_run",
+      "executedAt": null,
+      "realApp": false,
+      "realGit": false,
+      "steps": [],
+      "observations": {},
+      "notes": "本轮只完成协议、接收端代码与自动化测试；实机联动尚未执行。"
+    },
+    {
+      "id": "commit-and-return",
+      "title": "Twiglane 提交后返回原 cliora 会话并复核提交",
+      "status": "not_run",
+      "executedAt": null,
+      "realApp": false,
+      "realGit": false,
+      "steps": [],
+      "observations": {},
+      "notes": "未执行。"
+    },
+    {
+      "id": "merge-and-stale-head",
+      "title": "合入复核，以及返回后 HEAD 变化显示未确认",
+      "status": "not_run",
+      "executedAt": null,
+      "realApp": false,
+      "realGit": false,
+      "steps": [],
+      "observations": {},
+      "notes": "未执行。"
+    },
+    {
+      "id": "invalid-links",
+      "title": "路径失效、无效协议、旧 reviewId、原会话失效、未注册 handler",
+      "status": "not_run",
+      "executedAt": null,
+      "realApp": false,
+      "realGit": false,
+      "steps": [],
+      "observations": {},
+      "notes": "未执行；协议层拒绝规则由 tests/cliora-integration.spec.ts 与 cliora.rs 单测覆盖，但那不是实机证据。"
+    },
+    {
+      "id": "standalone-repository",
+      "title": "无来源仓库的现有提交与取消行为",
+      "status": "not_run",
+      "executedAt": null,
+      "realApp": false,
+      "realGit": false,
+      "steps": [],
+      "observations": {},
+      "notes": "未执行。"
+    }
+  ],
+  "limitations": [
+    {
+      "platform": "macos",
+      "verified": false,
+      "note": "未在 macOS 安装 bundled app 验证；macOS 只能以安装到 /Applications 的应用验证 scheme。"
+    },
+    {
+      "platform": "linux",
+      "verified": false,
+      "note": "未在 Linux 实机验证；AppImage 的系统集成依赖 launcher 或运行期注册，构建成功不算联动。"
+    },
+    {
+      "platform": "windows",
+      "verified": false,
+      "note": "Windows 11 x64 当前主机尚未安装两端本次构建的 NSIS 包并完成五个场景。"
+    }
+  ]
+}

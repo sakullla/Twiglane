@@ -1,4 +1,5 @@
 mod atomic;
+mod cliora;
 mod error;
 mod git;
 mod measure;
@@ -45,11 +46,21 @@ pub fn run() {
     let shutdown = Shutdown::new();
     let shutdown_for_run = shutdown.clone();
     let app = tauri::Builder::default()
+        // single-instance 必须最先注册：第二次启动只负责把链接转给正在跑的实例。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             install_menu(app)?;
+            register_deep_link(app);
             let dir = app
                 .path()
                 .app_data_dir()
@@ -150,7 +161,10 @@ pub fn run() {
             measure_sample,
             measure_finish,
             measure_wait,
-            update_install_supported
+            update_install_supported,
+            cliora_review_request,
+            cliora_review_receipt,
+            cliora_review_return
         ])
         .build(tauri::generate_context!())
         .expect("启动 Twiglane 失败");
@@ -167,6 +181,87 @@ pub fn run() {
     });
 }
 
+
+/// 已校验的 v1 审查请求。前端只按 worktree_path 打开，不再自己解析一次链接。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClioraReviewRequest {
+    review_id: String,
+    session_id: String,
+    worktree_path: String,
+    baseline: Option<String>,
+}
+
+/// 解析并校验 cliora 的 v1 审查链接。纯解析：不打开仓库、不读 Git、不写任何状态。
+#[tauri::command]
+fn cliora_review_request(url: String) -> Result<ClioraReviewRequest, AppError> {
+    let request = cliora::parse_review_url(&url)?;
+    Ok(ClioraReviewRequest {
+        review_id: request.review_id,
+        session_id: request.session_id,
+        worktree_path: request.worktree_path,
+        baseline: request.baseline,
+    })
+}
+
+/// 回送接收结果。accepted 为假时必须带协议里的稳定错误码。
+#[tauri::command(rename_all = "camelCase")]
+fn cliora_review_receipt<R: Runtime>(
+    app: AppHandle<R>,
+    review_id: String,
+    session_id: String,
+    accepted: bool,
+    reason: Option<String>,
+) -> Result<(), AppError> {
+    let url = if accepted {
+        cliora::accepted_url(&review_id, &session_id)?
+    } else {
+        let reason = reason.unwrap_or_else(|| "open_failed".to_string());
+        cliora::rejected_url(&review_id, &session_id, &reason)?
+    };
+    cliora::open_in_cliora(&app, &url)
+}
+
+/// 回送返回事件：只声明结果，不带原始 Git 输出；返回本身不写仓库。
+#[tauri::command(rename_all = "camelCase")]
+fn cliora_review_return<R: Runtime>(
+    app: AppHandle<R>,
+    review_id: String,
+    session_id: String,
+    outcome: String,
+    head_oid: Option<String>,
+) -> Result<(), AppError> {
+    let outcome = match outcome.as_str() {
+        "reviewed" => cliora::Outcome::Reviewed,
+        "committed" => cliora::Outcome::Committed,
+        "merged" => cliora::Outcome::Merged,
+        _ => {
+            return Err(AppError::new(
+                cliora::INVALID_RECEIPT,
+                "返回结果只能是 reviewed、committed 或 merged，未回送任何结果。",
+            ))
+        }
+    };
+    let url = cliora::returned_url(&review_id, &session_id, outcome, head_oid.as_deref())?;
+    cliora::open_in_cliora(&app, &url)
+}
+
+/// 登记 scheme。安装包由 deep-link 插件的安装脚本写入，所以 Windows 只有 debug 构建
+/// （开发模式）才运行期登记，release 不再覆盖安装器写好的登记；Linux 没有安装器负责登记，
+/// 任何构建都注册。失败只影响链接入口，不影响仓库编辑，所以不中断启动。
+fn register_deep_link<R: Runtime>(app: &tauri::App<R>) {
+    #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
+    {
+        use tauri_plugin_deep_link::DeepLinkExt;
+        if let Err(error) = app.deep_link().register_all() {
+            eprintln!("cliora 审查 scheme 登记失败：{error}");
+        }
+    }
+    #[cfg(not(any(target_os = "linux", all(debug_assertions, windows))))]
+    {
+        let _ = app;
+    }
+}
 fn install_menu<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     let search = MenuItem::with_id(app, "focus-search", "搜索仓库", true, Some("CmdOrCtrl+K"))?;
     let commit = MenuItem::with_id(
@@ -1482,6 +1577,35 @@ mod ipc_contract {
             }
         }
         assert!(missing.is_empty(), "命令未放行：{missing:#?}");
+    }
+
+
+    /// 联动入口的静态注册：scheme 写在 tauri.conf.json，出/入站命令必须在 handler、
+    /// app manifest 与 capability 三处齐全，否则运行时会被 ACL 拒绝或系统不会转交链接。
+    #[test]
+    fn cliora_review_entry_is_registered() {
+        let config = include_str!("../tauri.conf.json");
+        assert!(config.contains("\"deep-link\""), "tauri.conf.json 缺少 deep-link 配置");
+        assert!(
+            config.contains(&format!("\"{}\"", crate::cliora::SCHEME)),
+            "tauri.conf.json 缺少 {} scheme",
+            crate::cliora::SCHEME
+        );
+        assert!(
+            CAPABILITIES.contains("\"deep-link:default\""),
+            "capabilities 缺少 deep-link:default",
+        );
+        let commands = handler_commands();
+        for command in [
+            "cliora_review_request",
+            "cliora_review_receipt",
+            "cliora_review_return",
+        ] {
+            assert!(
+                commands.iter().any(|name| name == command),
+                "{command} 没有注册到 invoke handler",
+            );
+        }
     }
 
     fn git(dir: &Path, args: &[&str]) {

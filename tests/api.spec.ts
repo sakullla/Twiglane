@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// 返回类型放宽成 unknown：新增的 cliora 用例会按真实命令的返回值准备一次性响应。
 const invoke = vi.hoisted(() =>
-  vi.fn(async (_command: string, _args?: Record<string, unknown>) => ({ ok: true })),
+  vi.fn(async (_command: string, _args?: Record<string, unknown>): Promise<unknown> => ({ ok: true })),
 );
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -9,6 +10,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { api } from "../src/lib/api";
+import { beginClioraReview, clioraReview, resetClioraReview } from "../src/lib/cliora-review.svelte";
 
 describe("Tauri 命令参数", () => {
   beforeEach(() => {
@@ -338,5 +340,138 @@ describe("逐行暂存命令", () => {
       requestId: 51,
     });
     for (const call of invoke.mock.calls) expect(call[1]).not.toHaveProperty("request_id");
+  });
+});
+describe("cliora 审查接线", () => {
+  const REVIEW = "6f1a2b3c-4d5e-4f60-8172-93a4b5c6d7e8";
+  const SESSION = "0b1c2d3e-4f50-4172-8394-a5b6c7d8e9f0";
+  const OID = "b".repeat(40);
+
+  beforeEach(() => {
+    invoke.mockClear();
+    resetClioraReview();
+    beginClioraReview({ reviewId: REVIEW, sessionId: SESSION, worktreePath: "/repo", baseline: null });
+  });
+
+  afterEach(() => resetClioraReview());
+
+  it("链接解析、回执与返回事件按 camelCase 传参", async () => {
+    await api.clioraReviewRequest("twiglane://review?v=1");
+    await api.clioraReviewReceipt(REVIEW, SESSION, true);
+    await api.clioraReviewReceipt(REVIEW, SESSION, false, "not_a_worktree");
+    await api.clioraReviewReturn(REVIEW, SESSION, "committed", OID);
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "cliora_review_request", { url: "twiglane://review?v=1" });
+    expect(invoke).toHaveBeenNthCalledWith(2, "cliora_review_receipt", {
+      reviewId: REVIEW,
+      sessionId: SESSION,
+      accepted: true,
+      reason: null,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "cliora_review_receipt", {
+      reviewId: REVIEW,
+      sessionId: SESSION,
+      accepted: false,
+      reason: "not_a_worktree",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(4, "cliora_review_return", {
+      reviewId: REVIEW,
+      sessionId: SESSION,
+      outcome: "committed",
+      headOid: OID,
+    });
+    for (const call of invoke.mock.calls) {
+      expect(call[1]).not.toHaveProperty("request_id");
+    }
+  });
+
+  it("提交成功记录结果，失败和推送失败阶段都不声称成功", async () => {
+    invoke.mockResolvedValueOnce({ oid: OID, generation: 5, branch: "main", summary: "s", files: [], pushed: false, snapshot: {} });
+    await api.commitChanges("/repo", "note", 4, 1);
+    expect(clioraReview.result).toMatchObject({ outcome: "committed", headOid: OID });
+
+    resetClioraReview();
+    beginClioraReview({ reviewId: REVIEW, sessionId: SESSION, worktreePath: "/repo", baseline: null });
+    invoke.mockRejectedValueOnce({ code: "commit_failed", message: "提交失败。" });
+    await expect(api.commitChanges("/repo", "note", 4, 2)).rejects.toMatchObject({ code: "commit_failed" });
+    expect(clioraReview.result).toBeNull();
+
+    // 推送失败：提交阶段已成功，仍然记录提交，但不额外声明推送。
+    invoke.mockResolvedValueOnce({
+      committed: true,
+      pushed: false,
+      retryPush: true,
+      oid: OID,
+      branch: "main",
+      summary: "s",
+      pushError: "网络中断",
+      generation: 5,
+      snapshot: {},
+    });
+    await api.commitAndPush("/repo", "note", 4, 3);
+    expect(clioraReview.result).toMatchObject({ outcome: "committed", headOid: OID });
+
+    // 没提交成功的报告不记录。
+    resetClioraReview();
+    beginClioraReview({ reviewId: REVIEW, sessionId: SESSION, worktreePath: "/repo", baseline: null });
+    invoke.mockResolvedValueOnce({
+      committed: false,
+      pushed: false,
+      retryPush: false,
+      oid: "",
+      branch: "main",
+      summary: "s",
+      pushError: "凭据无效",
+      generation: 5,
+      snapshot: {},
+    });
+    await api.commitAndPush("/repo", "note", 4, 4);
+    expect(clioraReview.result).toBeNull();
+  });
+
+  it("只有快进、变基或合并提交完成才记录合入", async () => {
+    const session = (extra: Record<string, unknown> = {}) => ({
+      generation: 5,
+      operation: "merge",
+      canContinue: false,
+      canAbort: true,
+      source: "feature",
+      target: "main",
+      headOid: OID,
+      conflicts: [],
+      unresolved: 0,
+      note: "",
+      snapshot: {},
+      ...extra,
+    });
+
+    invoke.mockResolvedValueOnce(session({ operation: "none", fastForwarded: true, canAbort: false }));
+    await api.startMerge("/repo", "feature", null, "ff-only", 4, 1);
+    expect(clioraReview.result).toMatchObject({ outcome: "merged", headOid: OID });
+
+    resetClioraReview();
+    beginClioraReview({ reviewId: REVIEW, sessionId: SESSION, worktreePath: "/repo", baseline: null });
+    invoke.mockResolvedValueOnce(session({ rebased: true }));
+    await api.startMerge("/repo", "feature", null, "rebase", 4, 2);
+    expect(clioraReview.result).toMatchObject({ outcome: "merged", headOid: OID });
+
+    // 停在冲突里不是合入完成。
+    resetClioraReview();
+    beginClioraReview({ reviewId: REVIEW, sessionId: SESSION, worktreePath: "/repo", baseline: null });
+    invoke.mockResolvedValueOnce(session({ unresolved: 2 }));
+    await api.startMerge("/repo", "feature", null, "merge", 4, 3);
+    expect(clioraReview.result).toBeNull();
+
+    invoke.mockResolvedValueOnce({ oid: OID, generation: 6, summary: "合并", files: [], snapshot: {} });
+    await api.completeMerge("/repo", "合并", 5, 4);
+    expect(clioraReview.result).toMatchObject({ outcome: "merged", headOid: OID });
+  });
+
+  it("没有 cliora 来源时独立仓库不记录任何结果", async () => {
+    resetClioraReview();
+    invoke.mockResolvedValue({ oid: OID, generation: 5, branch: "main", summary: "s", files: [], pushed: false, snapshot: {} });
+    await api.commitChanges("/repo", "note", 4, 1);
+    expect(clioraReview.result).toBeNull();
+    expect(clioraReview.source).toBeNull();
   });
 });

@@ -1,3 +1,4 @@
+import { recordClioraCommit, recordClioraMerge } from "./cliora-review.svelte";
 import { normalizeError } from "./errors";
 import type {
   BranchState,
@@ -98,6 +99,17 @@ export async function pickFile(title: string): Promise<string | null> {
   return typeof selected === "string" ? selected : null;
 }
 
+/**
+ * cliora v1 审查链接解析结果。协议校验在 Rust 侧完成，前端只按它打开准确的 worktree。
+ * `worktreePath` 是后端校验过的绝对路径，不含任何凭据。
+ */
+export interface ClioraReviewRequest {
+  reviewId: string;
+  sessionId: string;
+  worktreePath: string;
+  baseline: string | null;
+}
+
 export const api = {
   detectGit: () => invoke<GitInfo>("detect_git"),
   setGitExecutable: (path: string) => invoke<GitInfo>("set_git_executable", { path }),
@@ -186,8 +198,15 @@ export const api = {
       generation,
       requestId,
     }),
-  commitChanges: (path: string, message: string, generation: number, requestId: number) =>
-    invoke<CommitResult>("commit_changes", { path, message, generation, requestId }),
+  /**
+   * 提交成功后记录 cliora 审查结果：只有当前来源就是这条路径的工作树时才记录，
+   * 独立仓库与失败、取消都不写结果。记录只是待复核声明，cliora 会重新读取 HEAD。
+   */
+  commitChanges: async (path: string, message: string, generation: number, requestId: number) => {
+    const result = await invoke<CommitResult>("commit_changes", { path, message, generation, requestId });
+    recordClioraCommit(path, result.oid);
+    return result;
+  },
   /**
    * 克隆。HTTP(S) 地址认证失败后可带上用户名和密码（或访问令牌）重试：
    * 后端只把它作为这一次 Git 进程的认证头，remember 为真时成功后交给系统凭据助手保存。
@@ -215,8 +234,15 @@ export const api = {
     invoke<StatusSnapshot>("publish_branch", { path, remote, generation, requestId }),
   associateUpstream: (path: string, remote: string, generation: number, requestId: number) =>
     invoke<StatusSnapshot>("associate_upstream", { path, remote, generation, requestId }),
-  commitAndPush: (path: string, message: string, generation: number, requestId: number) =>
-    invoke<CommitPushReport>("commit_and_push", { path, message, generation, requestId }),
+  /**
+   * 提交并推送：只在 committed 为真时记录提交阶段的结果。推送失败不抹掉已完成的提交，
+   * 也不声称推送成功。
+   */
+  commitAndPush: async (path: string, message: string, generation: number, requestId: number) => {
+    const report = await invoke<CommitPushReport>("commit_and_push", { path, message, generation, requestId });
+    if (report.committed && report.oid) recordClioraCommit(path, report.oid);
+    return report;
+  },
   filePreview: (path: string, source: PreviewSource, generation: number, download = false) =>
     invoke<FilePreview>("file_preview", { path, source, generation, download }),
   branchList: (path: string, generation: number, requestId: number) =>
@@ -392,14 +418,21 @@ export const api = {
    * target 不是当前分支时，合并会先切换过去。
    * mode 为 merge（创建合并提交）、ff-only（快进）或 rebase（把当前分支接到基底上，不推送）。
    */
-  startMerge: (
+  startMerge: async (
     path: string,
     source: string,
     target: string | null,
     mode: "merge" | "ff-only" | "rebase",
     generation: number,
     requestId: number,
-  ) => invoke<MergeSession>("start_merge", { path, source, target, mode, generation, requestId }),
+  ) => {
+    const session = await invoke<MergeSession>("start_merge", { path, source, target, mode, generation, requestId });
+    // 只有快进或变基真正完成才算合入；留在冲突状态的结果不记录。
+    if ((session.fastForwarded || session.rebased) && session.headOid) {
+      recordClioraMerge(path, session.headOid);
+    }
+    return session;
+  },
   mergeSession: (path: string, generation: number, requestId: number) =>
     invoke<MergeSession>("merge_session", { path, generation, requestId }),
   conflictView: (path: string, relative: string, generation: number, requestId: number) =>
@@ -420,8 +453,11 @@ export const api = {
       generation,
       requestId,
     }),
-  completeMerge: (path: string, message: string, generation: number, requestId: number) =>
-    invoke<MergeComplete>("complete_merge", { path, message, generation, requestId }),
+  completeMerge: async (path: string, message: string, generation: number, requestId: number) => {
+    const done = await invoke<MergeComplete>("complete_merge", { path, message, generation, requestId });
+    recordClioraMerge(path, done.oid);
+    return done;
+  },
   abortMerge: (path: string, confirm: boolean, generation: number, requestId: number) =>
     invoke<AbortImpact>("abort_merge", { path, confirm, generation, requestId }),
   undoCommit: (path: string, expectedHead: string, confirm: boolean, generation: number, requestId: number) =>
@@ -443,4 +479,23 @@ export const api = {
   measureWait: (ms: number) => invoke<void>("measure_wait", { ms }),
   /** 当前安装方式是否支持应用内安装（仅 Linux 非 AppImage 为 false）。 */
   updateInstallSupported: () => invoke<boolean>("update_install_supported"),
+  /** 解析并校验 cliora 的 v1 审查链接；失败时返回协议错误码，不做任何仓库操作。 */
+  clioraReviewRequest: (url: string) => invoke<ClioraReviewRequest>("cliora_review_request", { url }),
+  /** 回送接收结果。accepted 为假时 reason 必须是协议里的稳定错误码。 */
+  clioraReviewReceipt: (
+    reviewId: string,
+    sessionId: string,
+    accepted: boolean,
+    reason: string | null = null,
+  ) => invoke<void>("cliora_review_receipt", { reviewId, sessionId, accepted, reason }),
+  /**
+   * 回送返回事件。committed/merged 必须带完整 headOid；reviewed 不带。
+   * 返回本身不执行任何 Git 写入。
+   */
+  clioraReviewReturn: (
+    reviewId: string,
+    sessionId: string,
+    outcome: "reviewed" | "committed" | "merged",
+    headOid: string | null = null,
+  ) => invoke<void>("cliora_review_return", { reviewId, sessionId, outcome, headOid }),
 };

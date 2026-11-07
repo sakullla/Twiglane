@@ -69,6 +69,11 @@
     }
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["twiglane"]
+      }
+    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI0MjhEMzlDMDM4OUNENkMKUldSc3pZa0RuTk1vSkNoTGV5MGMvQjA0WG03bmp1WDRrUTkzcmpFUjM1cTA1ZkhXQTN6aVZOSUcK",
       "endpoints": ["https://github.com/sakullla/Twiglane/releases/latest/download/latest.json"]

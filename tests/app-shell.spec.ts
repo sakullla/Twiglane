@@ -2,6 +2,11 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BRAND } from "../src/lib/brand";
+import {
+  beginClioraReview,
+  recordClioraMerge,
+  resetClioraReview,
+} from "../src/lib/cliora-review.svelte";
 import type { DiffLine, DiffResponse, FileChange, HistoryCommit, StatusSnapshot } from "../src/lib/types";
 
 /* ------------------------------------------------------------------ *
@@ -2328,5 +2333,48 @@ describe("应用外壳", () => {
     await fireEvent.click(within(await screen.findByRole("dialog", { name: "确认变基" })).getByRole("button", { name: "取消" }));
     expect(mocks.startMerge).not.toHaveBeenCalled();
     expect(document.querySelector(".branch-pill")?.textContent).toContain("main");
+  });
+});
+
+describe("cliora 来源展示", () => {
+  const reviewId = "6f1a2b3c-4d5e-4f60-8172-93a4b5c6d7e8";
+  const sessionId = "0b1c2d3e-4f50-4172-8394-a5b6c7d8e9f0";
+  const mergedOid = "c".repeat(40);
+
+  beforeEach(() => {
+    resetClioraReview();
+    mocks.openRepository.mockResolvedValue({
+      summary: { name: "demo", path: repoPath },
+      generation: 4,
+      snapshot,
+      draft: "",
+      watchDegraded: false,
+    });
+  });
+
+  afterEach(() => resetClioraReview());
+
+  it("独立打开别的仓库后清掉 cliora 来源，返回入口消失", async () => {
+    beginClioraReview({
+      reviewId,
+      sessionId,
+      worktreePath: "C:/work/other",
+      baseline: null,
+    });
+    render(App);
+    await openRepo();
+    expect(screen.queryByRole("button", { name: /返回 cliora/ })).toBeNull();
+    expect(screen.queryByText("cliora")).toBeNull();
+  });
+
+  it("同一 worktree 重新打开时保留来源与最新合入结果", async () => {
+    beginClioraReview({ reviewId, sessionId, worktreePath: repoPath, baseline: null });
+    recordClioraMerge(repoPath, mergedOid);
+    render(App);
+    await openRepo();
+    await waitFor(() =>
+      expect(screen.getByText("已合入 " + mergedOid.slice(0, 7))).toBeTruthy(),
+    );
+    expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy();
   });
 });

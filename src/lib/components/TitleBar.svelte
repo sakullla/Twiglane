@@ -24,6 +24,14 @@
    * 刷新、发布分支、只关联上游都不在这里，远程管理收在同步菜单底部。
    * 仓库与分支弹层由外壳挂载，这里只把触发按钮交出去，并显示展开状态。
    */
+  /** 来自 cliora 的审查来源；有来源时标题栏给出「返回 cliora」入口。 */
+  interface ClioraBadge {
+    reviewId: string;
+    outcome: "reviewed" | "committed" | "merged";
+    /** 仅 committed/merged 有值；只是待复核声明，cliora 会重新读取真实 HEAD。 */
+    headOid: string | null;
+  }
+
   interface Props {
     repo: RepoSummary | null;
     branch: string | null;
@@ -37,6 +45,10 @@
     openSwitcher?: "repo" | "branch" | null;
     /** 与当前徽标同时可见的仓库名。缺省时只看当前仓库。 */
     repoNames?: string[];
+    /** 当前仓库由 cliora 审查链接打开时的来源与最新结果；独立仓库为 null。 */
+    cliora?: ClioraBadge | null;
+    /** 返回 cliora 原会话。只回送结果，不执行 Git 写入。 */
+    onClioraReturn?: () => void;
     onBrand: () => void;
     onRepo: (anchor: HTMLElement) => void;
     onBranch: (anchor: HTMLElement) => void;
@@ -71,6 +83,8 @@
     platform = WINDOW_PLATFORM,
     openSwitcher = null,
     repoNames = [],
+    cliora = null,
+    onClioraReturn,
     onBrand,
     onRepo,
     onBranch,
@@ -117,6 +131,14 @@
   let upstreamRemote = $derived(upstream ? upstream.slice(0, Math.max(0, upstream.indexOf("/"))) || null : null);
   let pushTarget = $derived(upstream ?? (remotes[0] ? `${remotes[0]}（发布）` : null));
   let otherRemotes = $derived(remotes.filter((name) => name !== upstreamRemote));
+  let clioraSummary = $derived(
+    cliora === null
+      ? ""
+      : cliora.outcome === "reviewed"
+        ? "仅浏览"
+        : (cliora.outcome === "committed" ? "已提交 " : "已合入 ") +
+          (cliora.headOid ? cliora.headOid.slice(0, 7) : ""),
+  );
   let syncSummary = $derived(
     pending !== null
       ? "进行中"
@@ -347,6 +369,24 @@
       </div>
     {/if}
 
+    {#if cliora}
+      <div class="cliora-source" role="group" aria-label="cliora 审查来源">
+        <span class="cliora-chip" title={`来源 cliora 审查 ${cliora.reviewId}`}>cliora</span>
+        <span class="cliora-result" title={cliora.outcome === "reviewed" ? "本次只做了浏览" : "提交或合入结果以待复核声明发送，cliora 会重新读取真实 HEAD"}>{clioraSummary}</span>
+        <button
+          type="button"
+          class="branch-pill cliora-return"
+          data-titlebar-control
+          aria-label={`返回 cliora（${clioraSummary}）`}
+          title="返回发起这次审查的 cliora 会话；不修改仓库、不关闭当前仓库"
+          onclick={() => onClioraReturn?.()}
+        >
+          <span>返回 cliora</span>
+          <Icon name="arrow-right" size={13} />
+        </button>
+      </div>
+    {/if}
+
     <div class="menu-anchor" bind:this={themeAnchor}>
       <button
         type="button"
@@ -413,3 +453,33 @@
     {/if}
   </div>
 </header>
+<style>
+  /* cliora 来源徽标：与仓库/分支徽标同高，常驻交互项仍是品牌、仓库、分支、
+     同步、主题、设置六项，来源只在有 cliora 上下文时出现。 */
+  .cliora-source {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    height: var(--titlebar-control);
+    padding-left: var(--space-6);
+  }
+
+  .cliora-chip {
+    padding: 0 var(--space-6);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+    line-height: 18px;
+  }
+
+  .cliora-result {
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+  }
+
+  .cliora-return {
+    gap: var(--space-4);
+  }
+</style>

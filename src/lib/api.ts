@@ -21,6 +21,8 @@ import type {
   OpenedRepository,
   PanelWidths,
   RecentRepo,
+  RepositoryDirectory,
+  RepositoryFileContent,
   RepoHead,
   RemoteState,
   RemoteTag,
@@ -245,6 +247,36 @@ export const api = {
   },
   filePreview: (path: string, source: PreviewSource, generation: number, download = false) =>
     invoke<FilePreview>("file_preview", { path, source, generation, download }),
+  repositoryDirectory: (
+    path: string,
+    relative: string,
+    includeIgnored: boolean,
+    generation: number,
+    requestId: number,
+  ) =>
+    invoke<RepositoryDirectory>("repository_directory", {
+      path,
+      relative,
+      includeIgnored,
+      generation,
+      requestId,
+    }),
+  repositoryFileContent: (
+    path: string,
+    relative: string,
+    offset: number,
+    limit: number | undefined,
+    generation: number,
+    requestId: number,
+  ) =>
+    invoke<RepositoryFileContent>("repository_file_content", {
+      path,
+      relative,
+      offset,
+      limit,
+      generation,
+      requestId,
+    }),
   branchList: (path: string, generation: number, requestId: number) =>
     invoke<BranchListing>("branch_list", { path, generation, requestId }),
   branchState: (path: string, generation: number, requestId: number) =>

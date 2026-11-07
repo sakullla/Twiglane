@@ -35,9 +35,9 @@ use crate::git::runner::RealRunner;
 use crate::model::{
     AbortImpact, BranchState, CherryPickOutcome, CloneResult, CommitDetail, CommitPushReport,
     CommitResult, ConflictView, DiffResponse, DiscardResult, FileHistoryPage, GitInfo, HistoryPage,
-    MergeComplete, MergePreview, MergeSession, OpenedRepository, PanelWidths, RecentRepo,
-    RemoteState, RemoteTag, RepoChanged, StashApplyResult, StashSaveResult, StashState,
-    IgnoreOutcome, StatusSnapshot, TagState, Theme, UndoResult,
+    IgnoreOutcome, MergeComplete, MergePreview, MergeSession, OpenedRepository, PanelWidths,
+    RecentRepo, RemoteState, RemoteTag, RepoChanged, RepositoryDirectory, RepositoryFileContent,
+    StashApplyResult, StashSaveResult, StashState, StatusSnapshot, TagState, Theme, UndoResult,
 };
 use crate::shutdown::Shutdown;
 use crate::state::{AppStore, PullIntegration};
@@ -94,6 +94,8 @@ pub fn run() {
             refresh_status,
             load_diff,
             file_preview,
+            repository_directory,
+            repository_file_content,
             stage_files,
             unstage_files,
             stage_hunks,
@@ -180,7 +182,6 @@ pub fn run() {
         }
     });
 }
-
 
 /// 已校验的 v1 审查请求。前端只按 worktree_path 打开，不再自己解析一次链接。
 #[derive(serde::Serialize)]
@@ -770,7 +771,15 @@ async fn track_remote_as(
     generation: u64,
     request_id: u64,
 ) -> Result<BranchState, AppError> {
-    crate::git::sync::track_remote_as(state.inner(), &path, &remote_branch, &local, generation, request_id).await
+    crate::git::sync::track_remote_as(
+        state.inner(),
+        &path,
+        &remote_branch,
+        &local,
+        generation,
+        request_id,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -831,15 +840,63 @@ async fn commit_and_push(
 
 #[tauri::command(rename_all = "camelCase")]
 async fn file_preview(
-    state: State<'_, Arc<Backend>>, path: String,
-    source: crate::git::preview::PreviewSource, generation: u64, download: bool,
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    source: crate::git::preview::PreviewSource,
+    generation: u64,
+    download: bool,
 ) -> Result<crate::git::preview::FilePreview, AppError> {
     crate::git::preview::file_preview(state.inner(), &path, &source, generation, download).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
+async fn repository_directory(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    relative: String,
+    include_ignored: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<RepositoryDirectory, AppError> {
+    crate::git::files::repository_directory(
+        state.inner(),
+        &path,
+        &relative,
+        include_ignored,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn repository_file_content(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    relative: String,
+    offset: u64,
+    limit: Option<usize>,
+    generation: u64,
+    request_id: u64,
+) -> Result<RepositoryFileContent, AppError> {
+    crate::git::files::repository_file_content(
+        state.inner(),
+        &path,
+        &relative,
+        offset,
+        limit,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
 async fn branch_list(
-    state: State<'_, Arc<Backend>>, path: String, generation: u64, request_id: u64,
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    generation: u64,
+    request_id: u64,
 ) -> Result<crate::model::BranchListing, AppError> {
     crate::git::sync::branch_list(state.inner(), &path, generation, request_id).await
 }
@@ -1579,13 +1636,15 @@ mod ipc_contract {
         assert!(missing.is_empty(), "命令未放行：{missing:#?}");
     }
 
-
     /// 联动入口的静态注册：scheme 写在 tauri.conf.json，出/入站命令必须在 handler、
     /// app manifest 与 capability 三处齐全，否则运行时会被 ACL 拒绝或系统不会转交链接。
     #[test]
     fn cliora_review_entry_is_registered() {
         let config = include_str!("../tauri.conf.json");
-        assert!(config.contains("\"deep-link\""), "tauri.conf.json 缺少 deep-link 配置");
+        assert!(
+            config.contains("\"deep-link\""),
+            "tauri.conf.json 缺少 deep-link 配置"
+        );
         assert!(
             config.contains(&format!("\"{}\"", crate::cliora::SCHEME)),
             "tauri.conf.json 缺少 {} scheme",

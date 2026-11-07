@@ -31,6 +31,52 @@ pub fn init_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     )
 }
 
+/// 用 `git check-ignore -z --stdin` 判定目录直接子项的忽略状态。
+///
+/// 待判定路径只从 stdin 以 NUL 分隔传入，Git 仅把每个路径本身与忽略规则匹配，不会枚举其后代，
+/// 所以列出父目录时不会读取未展开的子目录内容。只读，不改写任何忽略规则。
+/// 不能用 `repo_prefix`：`--literal-pathspecs` 会给 check-ignore 注入 pathspec magic，直接致命失败。
+///
+/// `--no-index`：这里只问"路径本身是否匹配排除规则"。Git 默认还会自己跳过索引里已有的路径，
+/// 但那个隐式行为不该成为"已跟踪文件不会被隐藏"的唯一依据；是否已跟踪由调用方按索引快照显式复核。
+pub fn ignore_check_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    (
+        git.to_path_buf(),
+        vec![
+            OsString::from("-c"),
+            OsString::from("core.quotePath=false"),
+            OsString::from("-C"),
+            root.as_os_str().to_os_string(),
+            OsString::from("--no-optional-locks"),
+            OsString::from("check-ignore"),
+            OsString::from("-z"),
+            OsString::from("--no-index"),
+            OsString::from("--stdin"),
+        ],
+    )
+}
+
+/// 用 `git ls-files -z --cached` 一次读出索引里的全部已跟踪路径。
+///
+/// 只读、不带 pathspec、不访问工作区：调用方按 repo_key + generation 缓存一份，
+/// 目录展开时只在内存里查表判断"这个直接子项是否已被跟踪"，
+/// 不会每展开一层就重跑一次全仓 Git 命令。
+pub fn index_paths_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    (
+        git.to_path_buf(),
+        vec![
+            OsString::from("-c"),
+            OsString::from("core.quotePath=false"),
+            OsString::from("-C"),
+            root.as_os_str().to_os_string(),
+            OsString::from("--no-optional-locks"),
+            OsString::from("ls-files"),
+            OsString::from("-z"),
+            OsString::from("--cached"),
+        ],
+    )
+}
+
 pub fn status_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     (
         git.to_path_buf(),
@@ -1063,7 +1109,12 @@ pub fn merge_divergence_command(
 }
 
 /// 两个分支的共同祖先（只取一个）。
-pub fn merge_base_command(git: &Path, root: &Path, target: &str, source: &str) -> (PathBuf, Vec<OsString>) {
+pub fn merge_base_command(
+    git: &Path,
+    root: &Path,
+    target: &str,
+    source: &str,
+) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.extend([
         OsString::from("merge-base"),
@@ -1087,7 +1138,12 @@ pub fn branches_containing_command(git: &Path, root: &Path, oid: &str) -> (PathB
 }
 
 /// 把当前分支推送到指定远程的同名分支；不强推，不改上游。
-pub fn push_to_remote_command(git: &Path, root: &Path, remote: &str, branch: &str) -> (PathBuf, Vec<OsString>) {
+pub fn push_to_remote_command(
+    git: &Path,
+    root: &Path,
+    remote: &str,
+    branch: &str,
+) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, false);
     args.extend([
         OsString::from("push"),
@@ -1241,7 +1297,12 @@ pub fn git_path_command(git: &Path, root: &Path, name: &str) -> (PathBuf, Vec<Os
 
 /// 在主仓库里删除一个附属工作区。路径是规范化后的绝对路径，不会被当成选项。
 /// `force` 时加一个 `--force`：丢弃其中未提交的改动；锁定的工作区仍然拒绝。
-pub fn worktree_remove_command(git: &Path, main: &Path, target: &Path, force: bool) -> (PathBuf, Vec<OsString>) {
+pub fn worktree_remove_command(
+    git: &Path,
+    main: &Path,
+    target: &Path,
+    force: bool,
+) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(main, false);
     args.extend([OsString::from("worktree"), OsString::from("remove")]);
     if force {
@@ -1512,7 +1573,9 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--author=Ada"));
         assert!(args.iter().any(|arg| arg == "--grep=needle"));
         assert!(args.iter().any(|arg| arg == "--fixed-strings"));
-        assert!(args.windows(2).any(|pair| pair[0] == "--" && pair[1] == "docs/a.txt"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--" && pair[1] == "docs/a.txt"));
         assert!(args.iter().any(|arg| arg == "--skip=10"));
         assert!(args.iter().any(|arg| arg == "--max-count=5"));
         let branch = HistoryLog {
@@ -1537,12 +1600,21 @@ mod tests {
             .any(|arg| arg.to_string_lossy().starts_with("--skip")));
         let pick = cherry_pick_range_command(git, root, &["aaa".to_string(), "bbb".to_string()]);
         assert_eq!(
-            pick.1.iter().filter(|arg| *arg == "cherry-pick" || *arg == "aaa" || *arg == "bbb").count(),
+            pick.1
+                .iter()
+                .filter(|arg| *arg == "cherry-pick" || *arg == "aaa" || *arg == "bbb")
+                .count(),
             3
         );
-        assert!(!pick.1.iter().any(|arg| arg == "--all" || arg == "-n" || arg == "--no-commit"));
+        assert!(!pick
+            .1
+            .iter()
+            .any(|arg| arg == "--all" || arg == "-n" || arg == "--no-commit"));
         let detach = detach_at_command(git, root, "abc");
-        assert!(detach.1.windows(2).any(|pair| pair[0] == "--detach" && pair[1] == "--"));
+        assert!(detach
+            .1
+            .windows(2)
+            .any(|pair| pair[0] == "--detach" && pair[1] == "--"));
         assert!(detach.1.iter().any(|arg| arg == "abc"));
         assert!(!detach.1.iter().any(|arg| arg == "--force" || arg == "-f"));
     }
@@ -1622,8 +1694,14 @@ mod tests {
             rebase_args.last().map(OsString::as_os_str),
             Some(std::ffi::OsStr::new("origin/main"))
         );
-        assert!(rebase_continue_command(git, root).1.iter().any(|arg| arg == "--continue"));
-        assert!(rebase_abort_command(git, root).1.iter().any(|arg| arg == "--abort"));
+        assert!(rebase_continue_command(git, root)
+            .1
+            .iter()
+            .any(|arg| arg == "--continue"));
+        assert!(rebase_abort_command(git, root)
+            .1
+            .iter()
+            .any(|arg| arg == "--abort"));
         assert!(cherry_pick_abort_command(git, root)
             .1
             .iter()

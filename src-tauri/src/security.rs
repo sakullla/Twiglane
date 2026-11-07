@@ -38,6 +38,8 @@ fn capabilities_do_not_grant_a_shell() {
         "allow-refresh-status",
         "allow-load-diff",
         "allow-file-preview",
+        "allow-repository-directory",
+        "allow-repository-file-content",
         "allow-stage-files",
         "allow-unstage-files",
         "allow-stage-hunks",

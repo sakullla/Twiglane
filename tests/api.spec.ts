@@ -115,6 +115,27 @@ describe("Tauri 命令参数", () => {
     });
   });
 
+  it("目录与文本页命令按 camelCase 传参，和 Rust 侧参数名一致", async () => {
+    await api.repositoryDirectory("/repo", "src/lib", true, 8, 60);
+    await api.repositoryFileContent("/repo", "src/main.ts", 500, 200, 8, 61);
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "repository_directory", {
+      path: "/repo",
+      relative: "src/lib",
+      includeIgnored: true,
+      generation: 8,
+      requestId: 60,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "repository_file_content", {
+      path: "/repo",
+      relative: "src/main.ts",
+      offset: 500,
+      limit: 200,
+      generation: 8,
+      requestId: 61,
+    });
+  });
+
   it("远程标签查询不带 generation：它不受本地状态校验", async () => {
     await api.tagRemoteState("/repo", "origin");
     expect(invoke).toHaveBeenCalledWith("tag_remote_state", { path: "/repo", remote: "origin" });

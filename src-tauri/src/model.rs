@@ -705,3 +705,60 @@ pub struct DiscardResult {
     pub boundary: String,
     pub snapshot: StatusSnapshot,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RepositoryEntryKind {
+    File,
+    Directory,
+    Symlink,
+    Special,
+    NestedRepository,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryDirectoryEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: RepositoryEntryKind,
+    pub ignored: bool,
+    pub size: Option<u64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryDirectory {
+    pub generation: u64,
+    pub path: String,
+    pub entries: Vec<RepositoryDirectoryEntry>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RepositoryFileKind {
+    Text,
+    Resource,
+    Binary,
+    InvalidUtf8,
+    Missing,
+    Special,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryFileContent {
+    pub generation: u64,
+    pub path: String,
+    pub kind: RepositoryFileKind,
+    pub size: u64,
+    pub offset: u64,
+    pub lines: Vec<String>,
+    pub next_offset: u64,
+    pub has_more: bool,
+    pub truncated: bool,
+    pub message: Option<String>,
+}

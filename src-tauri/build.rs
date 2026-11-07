@@ -29,6 +29,8 @@ fn main() {
             "refresh_status",
             "load_diff",
             "file_preview",
+            "repository_directory",
+            "repository_file_content",
             "stage_files",
             "unstage_files",
             "stage_hunks",

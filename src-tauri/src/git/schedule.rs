@@ -151,6 +151,55 @@ impl<R: ProcessRunner> GitScheduler<R> {
         self.run_job(job, true).await
     }
 
+    /// 文件系统阻塞读取与 Git 读取共用请求 id、并发许可、取消域和代次检查。
+    pub async fn execute_blocking_read<T, F>(
+        &self,
+        repo_key: &str,
+        request_id: u64,
+        generation: u64,
+        work: F,
+    ) -> Result<T, AppError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<Shutdown>) -> Result<T, AppError> + Send + 'static,
+    {
+        if self.shutdown.is_cancelled() {
+            return Err(AppError::new("cancelled", "读取已取消。"));
+        }
+        let _request = RequestGuard::enter(&self.inflight, request_id)?;
+        let lane = self.lane(repo_key);
+        let cancel = self.read_cancel_token();
+        let _permit = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(AppError::new("cancelled", "读取已取消。")),
+            _ = self.shutdown.cancelled() => return Err(AppError::new("cancelled", "读取调度已关闭。")),
+            permit = self.read_limit.clone().acquire_owned() => permit
+                .map_err(|_| AppError::new("cancelled", "读取调度已关闭。"))?,
+        };
+        let current = lane.generation.load(Ordering::SeqCst);
+        if current != generation {
+            return Err(
+                AppError::new("stale", "仓库状态已变化，请查看刷新后的结果。")
+                    .with_generation(current),
+            );
+        }
+        if cancel.is_cancelled() {
+            return Err(AppError::new("cancelled", "读取已取消。"));
+        }
+        let task = tokio::task::spawn_blocking(move || work(cancel));
+        let result = task
+            .await
+            .map_err(|_| AppError::new("file_read", "文件读取已中断。"))??;
+        let after = lane.generation.load(Ordering::SeqCst);
+        if after != generation {
+            return Err(
+                AppError::new("stale", "仓库状态已变化，请查看刷新后的结果。")
+                    .with_generation(after),
+            );
+        }
+        Ok(result)
+    }
+
     async fn run_job(&self, job: GitJob, remote: bool) -> Result<ScheduledOutput, AppError> {
         if self.shutdown.is_cancelled() {
             return Err(AppError::new("cancelled", "操作已取消。"));
@@ -567,21 +616,31 @@ mod tests {
         started_rx.await.unwrap();
         let queued = {
             let scheduler = scheduler.clone();
-            tokio::spawn(async move { scheduler.execute_remote(job("repo", JobKind::Write, 2, 2)).await })
+            tokio::spawn(async move {
+                scheduler
+                    .execute_remote(job("repo", JobKind::Write, 2, 2))
+                    .await
+            })
         };
         tokio::time::sleep(Duration::from_millis(30)).await;
         scheduler.cancel_remote("other");
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(!queued.is_finished());
         scheduler.cancel_remote("repo");
-        let cancelled = tokio::time::timeout(Duration::from_secs(2), queued).await.unwrap().unwrap();
+        let cancelled = tokio::time::timeout(Duration::from_secs(2), queued)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(cancelled.unwrap_err().code, "cancelled");
         release.notify_one();
         assert!(holder.await.unwrap().is_ok());
         // 取消只作用于当时已排队的命令：之后的远程写入照常执行。
         release.notify_one();
         let generation = scheduler.current_generation("repo");
-        assert!(scheduler.execute_remote(job("repo", JobKind::Write, 3, generation)).await.is_ok());
+        assert!(scheduler
+            .execute_remote(job("repo", JobKind::Write, 3, generation))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
@@ -729,5 +788,77 @@ mod tests {
         assert_eq!(read.await.unwrap_err().code, "cancelled");
         drop(permits);
         assert_eq!(started.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn blocking_file_reads_share_the_read_limit() {
+        let current = Arc::new(AtomicUsize::new(0));
+        let max = Arc::new(AtomicUsize::new(0));
+        let scheduler = gated(GateRunner {
+            current: Arc::new(AtomicUsize::new(0)),
+            max: Arc::new(AtomicUsize::new(0)),
+            delay: Duration::from_secs(1),
+            started: StdMutex::new(None),
+            release: None,
+        });
+        let mut tasks = Vec::new();
+        for id in 1..=6 {
+            let scheduler = scheduler.clone();
+            let current = current.clone();
+            let max = max.clone();
+            tasks.push(tokio::spawn(async move {
+                scheduler
+                    .execute_blocking_read("repo", id, 1, move |_| {
+                        let now = current.fetch_add(1, Ordering::SeqCst) + 1;
+                        max.fetch_max(now, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(40));
+                        current.fetch_sub(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(max.load(Ordering::SeqCst), MAX_CONCURRENT_READS);
+    }
+
+    #[tokio::test]
+    async fn blocking_file_read_observes_cancel_and_stale_generation() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let scheduler = Arc::new(GitScheduler::new(
+            RefuseRunner,
+            Arc::new(Shutdown::new()),
+            Duration::from_secs(2),
+            1024,
+            Vec::new(),
+        ));
+        let running = scheduler.clone();
+        let running_started = started.clone();
+        let task = tokio::spawn(async move {
+            running
+                .execute_blocking_read("repo", 20, 1, move |cancel| -> Result<(), AppError> {
+                    running_started.fetch_add(1, Ordering::SeqCst);
+                    while !cancel.is_cancelled() {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(AppError::new("cancelled", "读取已取消。"))
+                })
+                .await
+        });
+        until_started(&started, 1).await;
+        scheduler.cancel_reads();
+        assert_eq!(task.await.unwrap().unwrap_err().code, "cancelled");
+        scheduler.bump_generation("repo");
+        let error = scheduler
+            .execute_blocking_read("repo", 21, 1, |_| -> Result<(), AppError> {
+                panic!("stale filesystem read must not start")
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "stale");
+        assert_eq!(error.generation, Some(2));
     }
 }

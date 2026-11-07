@@ -172,20 +172,30 @@ async fn source_bytes(
     generation: u64,
 ) -> Result<Option<Vec<u8>>, AppError> {
     if source.revision == "worktree" {
-        let path = root.join(safe_relative(&source.path)?);
-        let Ok(meta) = path.symlink_metadata() else {
-            return Ok(None);
-        };
-        let resolved = canonical_existing(&path)?;
-        if !meta.is_file() || !resolved.starts_with(root) {
-            return Err(AppError::new(
-                "preview_path",
-                "预览文件必须位于当前仓库内且不是符号链接。",
-            ));
-        }
-        return tokio::task::spawn_blocking(move || read_file(&resolved).map(Some))
-            .await
-            .map_err(|_| AppError::new("preview_read", "预览读取已中断。"))?;
+        let relative = safe_relative(&source.path)?;
+        let root = root.to_path_buf();
+        return backend
+            .scheduler
+            .execute_blocking_read(
+                &repo_key(&root),
+                internal_request_id(),
+                generation,
+                move |_| {
+                    let path = root.join(relative);
+                    let Ok(meta) = path.symlink_metadata() else {
+                        return Ok(None);
+                    };
+                    let resolved = canonical_existing(&path)?;
+                    if !meta.is_file() || !resolved.starts_with(&root) {
+                        return Err(AppError::new(
+                            "preview_path",
+                            "预览文件必须位于当前仓库内且不是符号链接。",
+                        ));
+                    }
+                    read_file(&resolved).map(Some)
+                },
+            )
+            .await;
     }
     let rev = if source.revision == "index" {
         ""

@@ -120,6 +120,51 @@ export interface FilePreview {
   canDownload: boolean;
 }
 
+export type RepositoryEntryKind =
+  | "file"
+  | "directory"
+  | "symlink"
+  | "special"
+  | "nestedRepository"
+  | "error";
+
+export interface RepositoryDirectoryEntry {
+  name: string;
+  path: string;
+  kind: RepositoryEntryKind;
+  ignored: boolean;
+  size: number | null;
+  error: string | null;
+}
+
+export interface RepositoryDirectory {
+  generation: number;
+  path: string;
+  entries: RepositoryDirectoryEntry[];
+  errors: string[];
+}
+
+export type RepositoryFileKind =
+  | "text"
+  | "resource"
+  | "binary"
+  | "invalidUtf8"
+  | "missing"
+  | "special";
+
+export interface RepositoryFileContent {
+  generation: number;
+  path: string;
+  kind: RepositoryFileKind;
+  size: number;
+  offset: number;
+  lines: string[];
+  nextOffset: number;
+  hasMore: boolean;
+  truncated: boolean;
+  message: string | null;
+}
+
 export interface DiffResponse {
   preview?: PreviewSources;
   generation: number;

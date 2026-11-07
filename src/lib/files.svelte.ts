@@ -646,13 +646,27 @@ export function createFilesStore(deps: FilesStoreDeps) {
   }
 
   /**
+   * 退出仅改动树的唯一入口：树覆盖的范围变回完整树，已有查询必须按完整树重跑补齐。
+   *
+   * 进入仅改动时补齐结果被清空（改动树自己覆盖全部改动路径，不补全仓）。
+   * 退出时如果只是把 changedOnly 置假，界面上那个 query 还在、本地行里又没有命中，
+   * 补齐既没有结果也不在飞行中——树会确定地说「没有匹配的路径」，直到下一次输入才恢复。
+   * 所以这里立即重跑补齐：飞行期间 filterBusy 为真，界面显示「正在全仓库补齐匹配」，
+   * 结果回来后与当前 query 一致；用户输入的关键词一律保留，不静默清空。
+   */
+  function leaveChangedOnly(): void {
+    changedOnly = false;
+    if (query.trim()) void completeFilter();
+  }
+
+  /**
    * 让 path 这一行真的出现在树里，定位与后退/前进共用这一份规则：
    * 目标在仅改动树里就地解除必要祖先的折叠（不读目录），否则按完整树逐级读取。
    * 目标不在改动树里时按 locate 的既有语义退出仅改动——改动树里根本没有这一行。
    */
   async function revealTarget(path: string): Promise<boolean> {
     const staysChanged = changedOnly && changedTreeContains(path);
-    if (changedOnly && !staysChanged) changedOnly = false;
+    if (changedOnly && !staysChanged) leaveChangedOnly();
     if (staysChanged) {
       revealChangedBranch(path);
       return true;
@@ -830,17 +844,17 @@ export function createFilesStore(deps: FilesStoreDeps) {
 
   function setChangedOnly(next: boolean): void {
     if (changedOnly === next) return;
-    changedOnly = next;
-    // 两种树覆盖的范围不同：补齐结果要么作废，要么按新模式重新查一次。
     if (next) {
+      changedOnly = true;
+      // 两种树覆盖的范围不同：补齐结果要么作废，要么按新模式重新查一次。
       filterSerial += 1;
       filterEntries = [];
       filterError = null;
       filterTruncated = false;
       filterBusy = false;
-    } else if (query.trim()) {
-      void completeFilter();
+      return;
     }
+    leaveChangedOnly();
   }
 
   /** 当前目录 scope 的目录：选中的目录本身，或选中文件所在的目录。 */

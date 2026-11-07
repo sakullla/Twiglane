@@ -536,6 +536,75 @@ describe("仅改动树的定位与过滤", () => {
     expect(screen.getByText("改动列表里没有匹配的路径")).toBeTruthy();
   });
 
+  it("后退退出仅改动树时按原查询重跑完整树补齐，飞行中不说没有匹配", async () => {
+    repositoryDirectory.mockImplementation((_repo: string, path: string) => {
+      if (path === "") return Promise.resolve(dir("", [entry("a.txt"), entry("docs", "directory")]));
+      if (path === "docs") return Promise.resolve(dir("docs", [entry("docs/notes.md")]));
+      return Promise.resolve(dir(path, []));
+    });
+    // 查询命中的路径只有全仓库补齐知道：本地已读范围内一条都不匹配。
+    let finish: (value: unknown) => void = () => {};
+    repositoryPathSearch.mockImplementation(
+      () => new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const onNav = vi.fn();
+    render(
+      RepositoryFiles,
+      { props: viewProps({ opened: opened([change("src/app.ts", "none", "modified")]), onNav }) as never },
+    );
+
+    // 先在完整树里打开改动树外的文件，作为后退目标。
+    const tree = await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(await within(tree).findByRole("button", { name: "展开 docs" }));
+    await fireEvent.click(
+      await within(screen.getByRole("tree", { name: "仓库文件" })).findByRole("treeitem", { name: /notes\.md/ }),
+    );
+
+    // 打开仅改动，再点一个改动文件：后退目标就是改动树外的那个文件。
+    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+    await fireEvent.click(
+      await within(screen.getByRole("tree", { name: "仓库文件" })).findByRole("treeitem", { name: /app\.ts/ }),
+    );
+
+    // 后退按钮的回调先取出来：过滤后行数为零时 nav 是 null，但回调本身仍然指向同一个 store。
+    await waitFor(() => expect(onNav.mock.calls.at(-1)?.[0]?.history).toBeTruthy());
+    const nav = onNav.mock.calls.at(-1)?.[0];
+
+    // 仅改动 + 过滤：改动文件里没有命中，这时「改动列表里没有匹配」是准确的。
+    const filter = screen.getByRole("textbox", { name: "过滤文件树" }) as HTMLInputElement;
+    await fireEvent.input(filter, { target: { value: "cfg" } });
+    expect(screen.getByText("改动列表里没有匹配的路径")).toBeTruthy();
+    expect(repositoryPathSearch).not.toHaveBeenCalled();
+
+    nav.history.onBack();
+
+    // 退出仅改动后补齐必须立刻在飞行中：不能说「没有匹配」，也不能丢掉用户的查询。
+    await waitFor(() => expect(screen.getAllByText(/正在全仓库补齐匹配/).length).toBeGreaterThan(0));
+    expect(screen.queryByText("没有匹配的路径")).toBeNull();
+    expect(screen.getByRole("button", { name: "只看有改动的文件" }).getAttribute("aria-pressed")).toBe("false");
+    expect(filter.value).toBe("cfg");
+
+    finish({
+      generation: 4,
+      query: "cfg",
+      directory: null,
+      includeIgnored: false,
+      scanned: 5,
+      entries: [{ path: "lib/cfg/app.toml", kind: "file", ignored: false }],
+      truncated: false,
+      message: null,
+    });
+    await waitFor(() => expect(screen.queryAllByText(/正在全仓库补齐匹配/)).toHaveLength(0));
+    // 结果回来后按同一个查询显示完整树的命中，且覆盖范围只到当前这次补齐。
+    const done = screen.getByRole("tree", { name: "仓库文件" });
+    const hit = within(done).getByRole("treeitem", { name: /lib\/cfg\/app\.toml/ });
+    expect(hit.textContent).toContain("全仓库");
+    expect(screen.queryByText("没有匹配的路径")).toBeNull();
+    expect(filter.value).toBe("cfg");
+  });
+
   it("全仓库补齐还在飞行中时显示正在补齐，而不是没有匹配", async () => {
     repositoryDirectory.mockResolvedValue(dir("", []));
     let finish: (value: unknown) => void = () => {};

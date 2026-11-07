@@ -15,6 +15,7 @@ use crate::git::ops::{
 };
 use crate::git::parse::parse_status;
 use crate::git::preview::wants_preview;
+use crate::git::runner::ProcessOutput;
 use crate::git::schedule::{internal_request_id, GitJob, JobKind};
 use crate::model::{
     ChangeKind, RepositoryContentMatch, RepositoryContentSearch, RepositoryDirectory,
@@ -291,19 +292,29 @@ async fn tracked_index(
             env: Vec::new(),
         })
         .await?;
-    if output.output.exit_code != 0 {
+    let index = Arc::new(tracked_index_result(&output.output)?);
+    store_tracked_index(root, generation, &index);
+    Ok(index)
+}
+
+/// 索引读取的结果判定：截断优先于退出码。
+///
+/// runner 达到 `output_limit` 时会 kill 子进程，所以"输出被截断"必然伴随非零退出码
+/// （通常是 -1 或信号退出）。如果先判退出码，大仓库里一次 `ls-files` 超过上限就会让
+/// 每一次目录展开都变成硬错误，正好丢掉 ADR-3 要求的降级状态。
+/// 截断时退化为降级索引：把每个路径都当成"可能已被跟踪"，只会少隐藏，绝不让目录展开失败。
+fn tracked_index_result(output: &ProcessOutput) -> Result<TrackedIndex, AppError> {
+    if output.stdout_truncated {
+        return Ok(TrackedIndex::degraded());
+    }
+    if output.exit_code != 0 {
         return Err(git_failure(
             "index_check",
-            &output.output,
+            output,
             "无法读取 Git 索引，不能判断文件是否已被跟踪。",
         ));
     }
-    let index = Arc::new(TrackedIndex::parse(
-        &output.output.stdout,
-        output.output.stdout_truncated,
-    ));
-    store_tracked_index(root, generation, &index);
-    Ok(index)
+    Ok(TrackedIndex::parse(&output.stdout, false))
 }
 
 /// 只把本目录直接子项交给 Git 与忽略规则匹配：不枚举、也不读取任何未展开的后代。
@@ -750,12 +761,43 @@ async fn run_path_list(
             env: Vec::new(),
         })
         .await?;
-    if output.output.exit_code != 0 {
-        return Err(git_failure("path_list", &output.output, failure));
+    path_list_result(&output.output, ignored, failure)
+}
+
+/// 丢掉截断切在路径中间时留下的残片：`git ls-files -z` 的每条路径都以 NUL 结尾，
+/// 输出末尾没有 NUL 说明最后一段是不完整的路径，保留它会伪造一个不存在的条目。
+fn strip_partial_tail(stdout: &[u8]) -> &[u8] {
+    if stdout.last() == Some(&0) {
+        return stdout;
     }
+    match stdout.iter().rposition(|byte| *byte == 0) {
+        Some(index) => &stdout[..=index],
+        None => &[],
+    }
+}
+
+/// 路径枚举的结果判定：截断优先于退出码。
+///
+/// runner 达到 `output_limit` 时会 kill 子进程，所以"输出被截断"必然伴随非零退出码；
+/// 先判退出码会让大仓库的路径搜索与目录 scope 全文搜索直接硬失败，
+/// ADR-3 的 truncated/缩小范围状态永远不可达。只有未截断时的非零退出码才是真的失败。
+/// 截断时返回已经读到的部分并标记 truncated，由调用方给出缩小范围的提示。
+fn path_list_result(
+    output: &ProcessOutput,
+    ignored: bool,
+    failure: &str,
+) -> Result<(Vec<EnumeratedPath>, bool), AppError> {
+    if !output.stdout_truncated && output.exit_code != 0 {
+        return Err(git_failure("path_list", output, failure));
+    }
+    let stdout = if output.stdout_truncated {
+        strip_partial_tail(&output.stdout)
+    } else {
+        output.stdout.as_slice()
+    };
     let mut paths = Vec::new();
-    parse_list_output(&output.output.stdout, ignored, &mut paths);
-    Ok((paths, output.output.stdout_truncated))
+    parse_list_output(stdout, ignored, &mut paths);
+    Ok((paths, output.stdout_truncated))
 }
 
 /// 枚举仓库路径（已跟踪 + 未跟踪非忽略，可选合并忽略文件）。
@@ -1143,6 +1185,19 @@ fn open_search_file(
     Some((file, meta.len()))
 }
 
+/// SVG 是文本源码（XML），必须参与内容搜索；图片、压缩包与 LFS 指针不是可搜索文本。
+///
+/// `wants_preview` 只看扩展名与 LFS 指纹，把 .svg 一并当成资源会让 R3 的全文搜索
+/// 整体跳过 SVG 源码。这里只对 SVG 放行：真正的二进制仍由 NUL 与非 UTF-8 判定拦下，
+/// 已下载与否未知的 LFS 指针仍然按 Unsupported 跳过，不伪造成文本。
+fn searchable_svg(relative: &str, probe: &[u8]) -> bool {
+    const LFS_MARKER: &[u8] = b"https://git-lfs.github.com/spec/v1";
+    relative.to_ascii_lowercase().ends_with(".svg")
+        && !probe
+            .windows(LFS_MARKER.len())
+            .any(|window| window == LFS_MARKER)
+}
+
 /// 搜索单个文件的可读文本。取消是唯一向上传播的错误：其余失败都变成局部跳过原因。
 ///
 /// 一个文件的匹配先在本地积累，只有整份文本都被完整解码后才提交；
@@ -1167,7 +1222,7 @@ fn search_file(
         }
     };
     let probe = &probe[..count];
-    if wants_preview(relative, probe) {
+    if wants_preview(relative, probe) && !searchable_svg(relative, probe) {
         record_skip(outcome, relative, RepositorySkipReason::Unsupported);
         return Ok(());
     }
@@ -1212,7 +1267,9 @@ fn search_file(
         if let Some((found, cut)) = line_match(relative, line_no, line, query) {
             text_truncated |= cut;
             file_matches.push(found);
-            if outcome.matches.len() + file_matches.len() >= limit {
+            // 多保留一条匹配（limit + 1）才能区分"还有结果"和"恰好 limit 条且已搜完"：
+            // 只有真的多出匹配时才截断；调用方在收尾时再裁回 limit。
+            if outcome.matches.len() + file_matches.len() > limit {
                 outcome.truncated = true;
                 break;
             }
@@ -1235,17 +1292,23 @@ fn search_paths(
     let mut outcome = SearchOutcome::default();
     for relative in paths {
         check_cancel(cancel)?;
-        if outcome.matches.len() >= limit {
-            outcome.truncated = true;
+        // 只有真的多出一条匹配才算截断；正好 limit 条时继续把剩余候选搜完，
+        // 否则"恰好 limit 且已完整搜索"会被误报成结果不完整。
+        if outcome.matches.len() > limit {
             break;
         }
         if outcome.files_scanned >= MAX_SEARCH_FILES
             || outcome.scanned_bytes >= MAX_SEARCH_SCAN_BYTES
         {
+            // 文件数/字节上限触发时确实还有未搜索的内容，仍按截断处理。
             outcome.truncated = true;
             break;
         }
         search_file(root, relative, query, limit, &mut outcome, cancel)?;
+    }
+    if outcome.matches.len() > limit {
+        outcome.matches.truncate(limit);
+        outcome.truncated = true;
     }
     Ok(outcome)
 }
@@ -1781,6 +1844,73 @@ mod tests {
         // 代次或仓库根不同都必须重新读取，不能把旧索引套到新状态上。
         assert!(cached_tracked_index(root, 8).is_none());
         assert!(cached_tracked_index(Path::new("twiglane-index-cache-other"), 7).is_none());
+    }
+
+    /// 构造一条真实的 runner 输出，用于验证"截断 + 非零退出码"这一组合的结果判定。
+    fn process_output(
+        exit_code: i32,
+        stdout: &[u8],
+        stderr: &[u8],
+        stdout_truncated: bool,
+    ) -> ProcessOutput {
+        ProcessOutput {
+            exit_code,
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+            stdout_truncated,
+        }
+    }
+
+    #[test]
+    fn path_list_truncation_is_a_partial_result_not_a_hard_failure() {
+        // runner 达到输出上限会 kill 子进程，所以截断输出必然带非零退出码。
+        // 这个组合必须变成"已读部分 + truncated"，否则大仓库的路径搜索与目录 scope 搜索直接硬失败。
+        let killed = process_output(-1, b"src/a.rs\0src/b", b"killed", true);
+        let (paths, truncated) = path_list_result(&killed, false, "无法枚举仓库路径。").unwrap();
+        assert!(truncated);
+        assert_eq!(
+            paths
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            ["src/a.rs"],
+        );
+
+        // 未截断时的非零退出码才是真的失败。
+        let failed = process_output(128, &[], b"fatal: not a git repository", false);
+        let error = path_list_result(&failed, false, "无法枚举仓库路径。").unwrap_err();
+        assert_eq!(error.code, "path_list");
+
+        // 未截断且正常退出：完整结果，不标记截断，忽略标记照旧生效。
+        let complete = process_output(0, b"src/a.rs\0", &[], false);
+        let (paths, truncated) = path_list_result(&complete, true, "无法枚举仓库路径。").unwrap();
+        assert!(!truncated);
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].ignored);
+    }
+
+    #[test]
+    fn tracked_index_truncation_degrades_instead_of_failing() {
+        // 索引输出被截断时无法判断哪些路径已被跟踪：退化为降级索引（宁可少隐藏），
+        // 而不是让大仓库的目录展开失败。
+        let killed = process_output(-1, b"src/a.rs\0", b"killed", true);
+        let index = tracked_index_result(&killed).unwrap();
+        assert!(index.degraded);
+        assert!(index.is_tracked("anything.log"));
+
+        // 未截断的非零退出码仍然是硬失败。
+        let failed = process_output(128, &[], b"fatal: not a git repository", false);
+        let error = tracked_index_result(&failed)
+            .err()
+            .expect("未截断的非零退出码必须失败");
+        assert_eq!(error.code, "index_check");
+
+        // 未截断且正常退出：按真实索引判定。
+        let complete = process_output(0, b"src/a.rs\0", &[], false);
+        let index = tracked_index_result(&complete).unwrap();
+        assert!(!index.degraded);
+        assert!(index.is_tracked("src"));
+        assert!(!index.is_tracked("other.rs"));
     }
 
     #[tokio::test]
@@ -2637,6 +2767,111 @@ mod tests {
         assert!(!none.truncated);
         assert!(none.message.is_none());
         assert_eq!(none.files_scanned, 5);
+    }
+
+    #[tokio::test]
+    async fn content_search_limit_is_exact_when_the_scope_is_exhausted() {
+        let fixture = crate::test_support::git_fixture("repository-content-search-exact-limit");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        // 命中数正好等于 limit，后面还有可读但没有额外匹配的文件。
+        for index in 1..=3 {
+            fs::write(root.join(format!("hit{index}.txt")), "needle\n").unwrap();
+        }
+        fs::write(root.join("clean-a.txt"), "no match here\n").unwrap();
+        fs::write(root.join("clean-b.txt"), "still nothing\n").unwrap();
+        let path = root.to_str().unwrap();
+
+        let exact = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::Repository,
+            false,
+            Some(3),
+            1,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(exact.matches.len(), 3);
+        // 恰好 limit 条且剩余候选已全部搜完：不能声称"结果不完整"。
+        assert!(!exact.truncated);
+        assert!(exact.message.is_none(), "{:?}", exact.message);
+        assert_eq!(exact.files_scanned, 5);
+
+        // 多出一条匹配就说明还有结果：必须截断并保留 limit 条。
+        let overflow = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::Repository,
+            false,
+            Some(2),
+            1,
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(overflow.matches.len(), 2);
+        assert!(overflow.truncated);
+        let message = overflow.message.clone().unwrap();
+        assert!(message.contains("未完整"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn content_search_reads_svg_source_but_still_skips_real_resources() {
+        let fixture = crate::test_support::git_fixture("repository-content-search-svg");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(
+            root.join("icon.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\">\n  <title>needle in svg</title>\n</svg>\n",
+        )
+        .unwrap();
+        // 真正的二进制资源仍然按资源跳过，不生成伪文本匹配。
+        fs::write(root.join("photo.png"), b"\x89PNG\r\n\x1a\nneedle").unwrap();
+        fs::write(root.join("bundle.zip"), b"PK\x03\x04needle").unwrap();
+        // 未下载的 LFS 指针即使扩展名是 .svg 也不当作文本源码。
+        fs::write(
+            root.join("vector.svg"),
+            "version https://git-lfs.github.com/spec/v1\noid sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nsize 12\n",
+        )
+        .unwrap();
+        let path = root.to_str().unwrap();
+
+        let found = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::Repository,
+            false,
+            None,
+            1,
+            1,
+        )
+        .await
+        .unwrap();
+        // SVG 源码参与全文搜索：不再是 Unsupported。
+        assert_eq!(match_keys(&found), [("icon.svg", 2, 10)]);
+        assert_eq!(found.matches[0].text, "  <title>needle in svg</title>");
+        assert_eq!(
+            skip_reason(&found, "photo.png"),
+            Some(RepositorySkipReason::Unsupported)
+        );
+        assert_eq!(
+            skip_reason(&found, "bundle.zip"),
+            Some(RepositorySkipReason::Unsupported)
+        );
+        assert_eq!(
+            skip_reason(&found, "vector.svg"),
+            Some(RepositorySkipReason::Unsupported)
+        );
+        assert_eq!(found.files_scanned, 1);
+        assert_eq!(found.skipped_files, 3);
+        assert!(!found.truncated);
     }
 
     #[tokio::test]

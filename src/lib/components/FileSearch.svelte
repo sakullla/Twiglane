@@ -127,6 +127,9 @@
     if (!result) return "在整个仓库里查找固定字符串";
     const parts: string[] = [];
     parts.push(result.matches.length === 0 ? (result.filesScanned === 0 ? "没有可读的文本文件" : "没有匹配") : `${result.matches.length} 处匹配`);
+    // 目录范围由结果自己带回：界面显示的路径和结果集必须说的是同一个目录。
+    if (result.scope === "directory") parts.push(`范围 ${result.scopePath || "仓库根目录"}`);
+    if (store.contentScopeStale) parts.push("选中目录已变化，正在按新目录重查");
     if (result.truncated) parts.push("已截断，请缩小范围");
     if (result.textTruncated) parts.push("片段被截短");
     if (result.skippedFiles > 0) parts.push(`跳过 ${result.skippedFiles} 个文件`);
@@ -237,7 +240,13 @@
         class="btn btn-ghost btn-sm"
         aria-pressed={store.scopeKind === "directory"}
         disabled={store.currentDirectory === null}
-        title={store.currentDirectory === null ? "先在文件树里选中一个目录或文件" : `只在 ${store.currentDirectory || "仓库根目录"} 里搜索`}
+        title={
+          store.currentDirectory === null
+            ? "先在文件树里选中一个目录或文件"
+            : store.scopeKind === "directory" && store.contentResult?.scope === "directory"
+              ? `只在 ${store.contentScopePath || "仓库根目录"} 里搜索`
+              : `只在 ${store.currentDirectory || "仓库根目录"} 里搜索`
+        }
         onclick={() => store.setScopeKind("directory")}
       >当前目录</button>
       <button

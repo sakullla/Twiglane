@@ -1978,6 +1978,11 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .file-tree-row:hover .tree-split, .tree-split:focus-visible { opacity: 1; }
 .tree-split:hover { background: var(--surface-3); color: var(--fg); }
 .file-tree-note { flex: none; margin: 0; padding: 6px var(--space-12); border-top: 1px solid var(--border); color: var(--fg-subtle); font-size: var(--text-xs); }
+/* 树过滤的补齐状态：失败、截断与显示上限各说各的，不混进「没有更多匹配」。 */
+.file-tree-status { flex: none; margin: 0; padding: 4px var(--space-12); border-bottom: 1px solid var(--border); background: var(--surface-2); color: var(--fg-muted); font-size: var(--text-xs); }
+.file-tree-status.danger { color: var(--danger-text); }
+/* 没有打开文件时，后退/前进与最近打开仍然要有可点、可 Tab 的入口。 */
+.file-navbar { flex: none; display: flex; align-items: center; justify-content: flex-end; padding: 6px var(--space-12); border-bottom: 1px solid var(--border); background: var(--surface-2); }
 @container file-tree (max-width: 240px) {
   .tree-size { display: none; }
 }

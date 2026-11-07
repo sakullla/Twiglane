@@ -681,7 +681,21 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     includeIgnored: boolean,
     _limit: number | undefined,
     generation: number,
-  ) => ok(mockPathSearch(query, directory, includeIgnored, generation), 60),
+  ) => {
+    // ?filter=truncated 演示树过滤的全仓补齐被截断：界面必须说结果不完整，而不是「没有更多匹配」。
+    if (previewParams.get("filter") === "truncated") {
+      const entries = Array.from({ length: 70 }, (_item, index) => ({
+        path: `vendor/generated/part-${String(index).padStart(2, "0")}.ts`,
+        kind: "file" as const,
+        ignored: false,
+      }));
+      return ok(
+        { generation, query, directory, includeIgnored, scanned: 320, entries, truncated: true, message: "路径结果达到上限。" },
+        60,
+      );
+    }
+    return ok(mockPathSearch(query, directory, includeIgnored, generation), 60);
+  },
   filePreview: (_repo: string, _source: unknown, _generation: number, download = false) => ok({
     generation, kind: previewParams.get("preview") === "archive" ? "archive" : previewParams.get("preview") === "lfs" && !download ? "lfs" : "image",
     size: 146752, dataUrl: "/brand-icon.png", entries: Array.from({ length: 2000 }, (_, index) => ({ name: `assets/images/photo-${String(index).padStart(4, "0")}.png`, size: 2048 + index, directory: false })),

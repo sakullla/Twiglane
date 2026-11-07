@@ -396,6 +396,10 @@
 </script>
 
 <div class="file-content">
+  {#if !(path && parts) && nav?.history && nav.history.recent.length > 0}
+    <!-- 还没打开文件时也要有后退/前进/最近打开的入口，否则只能靠命令面板回去。 -->
+    <div class="file-navbar"><FileNav {nav} /></div>
+  {/if}
   {#if path && parts}
     <div class="diff-toolbar file-toolbar">
       <div class="diff-file">
@@ -602,6 +606,10 @@
         <p>{content.message ?? "这个文件没有可显示的文本内容。"}</p>
       </div>
     {:else if content}
+      {#if !change}
+        <!-- 没有改动是这个文件的真实状态：就地说明，历史入口仍在工具条上。 -->
+        <p class="file-note" role="status">该文件当前没有未暂存或已暂存的改动；仍可查看文件历史。</p>
+      {/if}
       {#if content.truncated && content.message}
         <p class="file-note" role="status">{content.message}</p>
       {/if}

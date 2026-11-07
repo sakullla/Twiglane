@@ -991,6 +991,8 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".file-search-results": "文件内匹配结果与代码区之间的分区线，命中行自带 hover/选中背景",
   ".file-note": "文件顶部的续读/截断说明条，纯状态文字分区",
   ".file-more": "续读按钮区与代码区之间的分区线，按钮自身带控件边界",
+  ".file-tree-status": "树过滤补齐状态（失败/截断/显示上限）与树之间的只读说明分区线，说明文字不可交互",
+  ".file-navbar": "没有打开文件时后退/前进/最近打开条与空状态之间的分区线，按钮自身带控件边界",
 
   // --- components.css：表格/列分隔线与分区线 ---
   ".panel-toolbar": "面板工具条底部横向分隔线",

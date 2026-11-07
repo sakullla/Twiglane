@@ -1,14 +1,8 @@
 <script lang="ts">
   import { tick, untrack } from "svelte";
   import type { Snippet } from "svelte";
-  import {
-    createFilesStore,
-    extraRow,
-    isDeletedChange,
-    isDirectoryKind,
-    type FileTreeRow,
-  } from "../files.svelte";
-  import type { DiffSide, OpenedRepository, RepositoryPathEntry } from "../types";
+  import { createFilesStore, isDeletedChange, isDirectoryKind, type FileTreeRow } from "../files.svelte";
+  import type { DiffSide, OpenedRepository } from "../types";
   import { fileNavState, type FileNavState } from "../ui";
   import FileContent from "./FileContent.svelte";
   import FileSearch from "./FileSearch.svelte";
@@ -156,19 +150,10 @@
   let lineTarget = $derived(store.lineTarget);
   let line = $derived(lineTarget && lineTarget.path === openPath ? lineTarget.line : null);
 
-  /* 树过滤的全局补齐：已加载节点本地过滤，未展开的匹配由路径搜索补在下面。 */
-  let treeRows = $derived.by(() => {
-    const base = store.rows;
-    if (!store.query.trim() || store.filterEntries.length === 0) return base;
-    const seen = new Set(base.map((row) => row.path));
-    const extra: FileTreeRow[] = [];
-    for (const entry of store.filterEntries as RepositoryPathEntry[]) {
-      if (seen.has(entry.path)) continue;
-      extra.push(extraRow(entry));
-      if (extra.length >= 60) break;
-    }
-    return extra.length === 0 ? base : [...base, ...extra];
-  });
+  /* 树过滤的全局补齐由状态模块算：已加载节点本地过滤，未展开的匹配补在下面并带上限。
+     仅改动模式下没有补齐行，改动树本身就已经包含全部改动路径。 */
+  let treeRows = $derived(store.treeRows);
+  let filterLimited = $derived(store.filterLimited);
 
   function selectRow(row: FileTreeRow): void {
     if (row.segment) return;
@@ -205,6 +190,9 @@
         query={store.query}
         includeIgnored={store.includeIgnored}
         changedOnly={store.changedOnly}
+        filterError={store.filterError}
+        filterTruncated={store.filterTruncated}
+        filterLimited={filterLimited}
         {disabled}
         onQuery={(value) => store.setQuery(value)}
         onIncludeIgnored={(next) => store.setIncludeIgnored(next)}
@@ -247,6 +235,7 @@
     missingPath={missingPath}
     {line}
     lineSerial={lineTarget?.serial ?? 0}
+    {nav}
     generation={opened.generation}
     reloadKey={store.revision}
     {nextId}

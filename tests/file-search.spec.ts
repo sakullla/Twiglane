@@ -423,6 +423,121 @@ describe("目录树全局过滤", () => {
   });
 });
 
+describe("目录树全局过滤的状态", () => {
+  function pathEntries(count: number) {
+    return Array.from({ length: count }, (_item, index) => ({
+      path: `vendor/generated/part-${String(index).padStart(2, "0")}.ts`,
+      kind: "file" as const,
+      ignored: false,
+    }));
+  }
+
+  it("补齐被截断时说结果不完整，不显示「没有匹配的路径」", async () => {
+    treeDirs();
+    repositoryPathSearch.mockResolvedValue({
+      generation: 4,
+      query: "part",
+      directory: null,
+      includeIgnored: false,
+      scanned: 400,
+      entries: pathEntries(70),
+      truncated: true,
+      message: "路径结果达到上限。",
+    });
+    render(RepositoryFiles, { props: viewProps() as never });
+    await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
+    await fireEvent.input(screen.getByRole("textbox", { name: "过滤文件树" }), { target: { value: "part" } });
+
+    await waitFor(() => expect(screen.getByText(/补齐结果不完整/)).toBeTruthy());
+    expect(screen.queryByText("没有匹配的路径")).toBeNull();
+    expect(screen.queryByText(/补齐也没有找到更多路径/)).toBeNull();
+  });
+
+  it("补齐超过显示上限时说明只列了前 60 条，行数也确实有上限", async () => {
+    treeDirs();
+    repositoryPathSearch.mockResolvedValue({
+      generation: 4,
+      query: "part",
+      directory: null,
+      includeIgnored: false,
+      scanned: 400,
+      entries: pathEntries(70),
+      truncated: false,
+      message: null,
+    });
+    render(RepositoryFiles, { props: viewProps() as never });
+    await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
+    await fireEvent.input(screen.getByRole("textbox", { name: "过滤文件树" }), { target: { value: "part" } });
+
+    await waitFor(() => expect(screen.getByText(/只显示前 60 条/)).toBeTruthy());
+    // 行数受虚拟化窗口影响，但绝不会超过上限。
+    expect(screen.getAllByRole("treeitem").length).toBeLessThanOrEqual(60);
+    expect(screen.queryByText("没有匹配的路径")).toBeNull();
+  });
+
+  it("补齐失败时显示失败原因，不把失败说成没有匹配", async () => {
+    treeDirs();
+    repositoryPathSearch.mockRejectedValue({ code: "io", message: "无法遍历 src 目录。" });
+    render(RepositoryFiles, { props: viewProps() as never });
+    await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
+    await fireEvent.input(screen.getByRole("textbox", { name: "过滤文件树" }), { target: { value: "nothing-here" } });
+
+    await waitFor(() => expect(screen.getAllByText(/全仓库补齐失败/).length).toBeGreaterThan(0));
+    expect(screen.getAllByText(/无法遍历 src 目录。/).length).toBeGreaterThan(0);
+    expect(screen.queryByText("没有匹配的路径")).toBeNull();
+    expect(screen.queryByText(/补齐也没有找到更多路径/)).toBeNull();
+  });
+
+  it("选中目录变化后按新目录重查，结果范围与界面一致", async () => {
+    treeDirs();
+    repositoryContentSearch.mockResolvedValue(contentSearch());
+    render(RepositoryFiles, { props: viewProps() as never });
+    const treeEl = await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(within(treeEl).getByRole("treeitem", { name: /src/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    await fireEvent.input(screen.getByRole("textbox", { name: "全仓库文本搜索" }), { target: { value: "panel" } });
+    await fireEvent.click(screen.getByRole("button", { name: "当前目录" }));
+    await waitFor(() =>
+      expect(repositoryContentSearch).toHaveBeenLastCalledWith(
+        repoPath,
+        "panel",
+        { kind: "directory", path: "src" },
+        false,
+        200,
+        4,
+        expect.any(Number),
+      ),
+    );
+    // 结果里带回的范围就是界面显示的那一个。
+    repositoryContentSearch.mockResolvedValue({
+      ...contentSearch(),
+      scope: "directory",
+      scopePath: "src",
+      matches: [{ path: "src/a.ts", line: 1, column: 1, text: "panel" }],
+    });
+    await fireEvent.input(screen.getByRole("textbox", { name: "全仓库文本搜索" }), { target: { value: "panel " } });
+    await waitFor(() => expect(screen.getByText(/范围 src/)).toBeTruthy());
+
+    // 关掉面板、改选更深一层的目录：目录范围必须跟着改，不能留着旧目录的结果。
+    await fireEvent.click(screen.getByRole("button", { name: "关闭搜索" }));
+    const freshTree = await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(within(freshTree).getByRole("button", { name: "展开 src" }));
+    const nested = await within(screen.getByRole("tree", { name: "仓库文件" })).findByRole("treeitem", { name: /components/ });
+    await fireEvent.click(nested);
+    await waitFor(() =>
+      expect(repositoryContentSearch).toHaveBeenLastCalledWith(
+        repoPath,
+        "panel",
+        { kind: "directory", path: "src/components" },
+        false,
+        200,
+        4,
+        expect.any(Number),
+      ),
+    );
+  });
+});
+
 describe("文件内搜索的代次边界", () => {
   it("显示匹配后代次前进：撤下结果与旧行号，不跳到新内容的错误位置", async () => {
     repositoryFileContent.mockImplementation((_repo: string, path: string, offset: number, _limit: number | undefined, generation: number) =>

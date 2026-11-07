@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { FILE_ROW_HEIGHT, rowIndex, type FileTreeRow } from "../files.svelte";
+  import { FILTER_EXTRA_LIMIT, FILE_ROW_HEIGHT, rowIndex, type FileTreeRow } from "../files.svelte";
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
   import { BUSY_REASON, formatBytes } from "../ui";
   import ContextMenu, { isContextKey, pointFor, type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
@@ -18,6 +18,12 @@
     includeIgnored: boolean;
     /** 仅看有改动的文件：行来自 StatusSnapshot，删除的文件是墓碑。 */
     changedOnly?: boolean;
+    /** 树过滤的全仓库补齐失败原因：失败时不能说「没有更多匹配」。 */
+    filterError?: string | null;
+    /** 补齐结果被后端截断：匹配没有显示全。 */
+    filterTruncated?: boolean;
+    /** 补齐行被截到显示上限：还有匹配没列出来。 */
+    filterLimited?: boolean;
     /** 有写入或读取在飞行中：只锁树里的动作，不阻止选择。 */
     disabled: boolean;
     onQuery: (value: string) => void;
@@ -42,6 +48,9 @@
     query,
     includeIgnored,
     changedOnly = false,
+    filterError = null,
+    filterTruncated = false,
+    filterLimited = false,
     disabled,
     onQuery,
     onIncludeIgnored,
@@ -310,6 +319,22 @@
   </button>
 </div>
 
+{#if query}
+  <p class="file-tree-status" class:danger={Boolean(filterError)} role={filterError ? "alert" : "status"}>
+    {#if filterError}
+      全仓库补齐失败：{filterError}只显示已展开范围内的匹配。
+    {:else if filterTruncated}
+      全仓库匹配过多，补齐结果不完整（后端已截断）。
+    {:else if filterLimited}
+      全仓库补齐只显示前 {FILTER_EXTRA_LIMIT} 条，还有匹配没有列出。
+    {:else if changedOnly}
+      仅在改动文件里匹配；改动树不需要全仓库补齐。
+    {:else}
+      已展开的目录本地过滤，其余由全仓库补齐。
+    {/if}
+  </p>
+{/if}
+
 <div
   class="file-tree"
   role="tree"
@@ -331,11 +356,34 @@
     {:else if loading}
       <div class="empty compact" role="status"><span class="spinner"></span><p>正在读取目录</p></div>
     {:else if query}
-      <div class="empty compact">
-        <span class="empty-icon"><Icon name="folder" size={22} /></span>
-        <strong>没有匹配的路径</strong>
-        <p>已展开的目录里没有匹配；全仓库的补齐也没有找到更多路径。</p>
-      </div>
+      {#if filterError}
+        <div class="empty compact" role="alert">
+          <span class="empty-icon err"><Icon name="alert-circle" size={22} /></span>
+          <strong>全仓库补齐失败</strong>
+          <p>{filterError}已展开的目录里也没有匹配——这不代表仓库里没有匹配的路径。</p>
+        </div>
+      {:else if filterTruncated || filterLimited}
+        <div class="empty compact">
+          <span class="empty-icon"><Icon name="search" size={22} /></span>
+          <strong>结果不完整</strong>
+          <p>
+            全仓库补齐{filterTruncated ? "已被后端截断" : `只列出了前 ${FILTER_EXTRA_LIMIT} 条`}，没有可显示的匹配行；
+            收窄过滤条件可以看出准确结果。
+          </p>
+        </div>
+      {:else if changedOnly}
+        <div class="empty compact">
+          <span class="empty-icon"><Icon name="folder" size={22} /></span>
+          <strong>改动列表里没有匹配的路径</strong>
+          <p>仅改动模式只在当前有改动的文件里匹配；关掉它才是全仓库范围。</p>
+        </div>
+      {:else}
+        <div class="empty compact">
+          <span class="empty-icon"><Icon name="folder" size={22} /></span>
+          <strong>没有匹配的路径</strong>
+          <p>已展开的目录里没有匹配；全仓库的补齐也没有找到更多路径。</p>
+        </div>
+      {/if}
     {:else if changedOnly}
       <div class="empty compact">
         <span class="empty-icon"><Icon name="folder" size={22} /></span>

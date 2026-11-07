@@ -124,6 +124,33 @@ const SCENARIOS = [
     detail: "document.querySelector('.file-search-note.danger')?.textContent?.trim() || ''",
   },
   {
+    name: "文件视图：仅改动与树过滤叠加只留改动路径",
+    url: "/",
+    ready:
+      '(() => { if (!window.__filesOpened) { const recent = document.querySelector(".welcome-recent button"); if (recent) { window.__filesOpened = true; recent.click(); return false; } } ' +
+      'if (!document.querySelector(\'.workbench-view[data-active="true"] .files-view\')) { const sw = document.querySelector(\'.workbench-view[data-active="true"] [data-view="files"]\'); if (sw) { sw.click(); return false; } return false; } ' +
+      'if (!window.__changedOnly) { const toggle = document.querySelector(\'.files-view [aria-label="只看有改动的文件"]\'); if (toggle) { window.__changedOnly = true; toggle.click(); return false; } return false; } ' +
+      'const input = document.querySelector(\'.files-view [aria-label="过滤文件树"]\'); if (!input) return false; ' +
+      'if (input.value !== "old") { input.value = "old"; input.dispatchEvent(new Event("input", { bubbles: true })); return false; } ' +
+      'return [...document.querySelectorAll(".file-tree-row")].some((row) => row.textContent.includes("old-panel.ts")); })()',
+    check:
+      '![...document.querySelectorAll(".file-tree-row")].some((row) => row.textContent.includes("全仓库")) && [...document.querySelectorAll(".file-tree-row")].some((row) => row.textContent.includes("old-panel.ts")) && document.body.textContent.includes("仅在改动文件里匹配")',
+    detail: '[...document.querySelectorAll(".file-tree-row")].map((row) => row.textContent.trim()).join(" | ")',
+  },
+  {
+    name: "文件视图：树过滤补齐被截断时说明不完整",
+    url: "/?filter=truncated",
+    ready:
+      '(() => { if (!window.__filesOpened) { const recent = document.querySelector(".welcome-recent button"); if (recent) { window.__filesOpened = true; recent.click(); return false; } } ' +
+      'if (!document.querySelector(\'.workbench-view[data-active="true"] .files-view\')) { const sw = document.querySelector(\'.workbench-view[data-active="true"] [data-view="files"]\'); if (sw) { sw.click(); return false; } return false; } ' +
+      'const input = document.querySelector(\'.files-view [aria-label="过滤文件树"]\'); if (!input) return false; ' +
+      'if (input.value !== "part") { input.value = "part"; input.dispatchEvent(new Event("input", { bubbles: true })); return false; } ' +
+      'return Boolean(document.querySelector(".files-view .file-tree-status")); })()',
+    check:
+      '(document.querySelector(".files-view .file-tree-status")?.textContent || "").includes("补齐结果不完整") && !document.body.textContent.includes("没有匹配的路径")',
+    detail: 'document.querySelector(".files-view .file-tree-status")?.textContent?.trim() || ""',
+  },
+  {
     name: "默认起始页",
     url: "/",
     ready: "Boolean(document.querySelector('.welcome-recent button'))",

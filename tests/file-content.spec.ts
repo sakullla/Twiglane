@@ -223,6 +223,16 @@ describe("代码页", () => {
 });
 
 describe("真实状态与读取边界", () => {
+  it("没有改动的文件就地说明当前无改动，历史入口仍然可用", async () => {
+    repositoryFileContent.mockResolvedValue(text({ path: "README.md" }));
+    const onFileHistory = vi.fn();
+    render(FileContent, { props: props({ path: "README.md", onFileHistory }) as never });
+    await waitFor(() => expect(screen.getByText(/该文件当前没有未暂存或已暂存的改动/)).toBeTruthy());
+    // 说明只是状态，不是禁用：历史入口还在工具条上，点了就带上这个路径。
+    await fireEvent.click(screen.getByRole("button", { name: "此文件历史" }));
+    expect(onFileHistory).toHaveBeenCalledWith("README.md");
+  });
+
   it("二进制、非法编码与缺失文件显示真实类型，不生成伪文本", async () => {
     repositoryFileContent.mockResolvedValueOnce(text());
     const view = render(FileContent, { props: props() as never });

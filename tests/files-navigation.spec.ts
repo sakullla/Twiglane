@@ -216,4 +216,130 @@ describe("改动与文件的双向导航", () => {
     expect(await screen.findByRole("treeitem", { name: /other\.ts/ })).toBeTruthy();
     expect(screen.queryByRole("treeitem", { name: /a\.ts/ })).toBeNull();
   });
+
+  it("内容区工具栏真的渲染后退/前进/最近打开，最近打开能点回先前文件", async () => {
+    repositoryDirectory.mockResolvedValue(dir("", [entry("a.ts"), entry("b.ts")]));
+    render(RepositoryFiles, { props: viewProps() as never });
+    const treeEl = await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(await within(treeEl).findByRole("treeitem", { name: /a\.ts/ }));
+    await waitFor(() => expect(repositoryFileContent).toHaveBeenLastCalledWith(repoPath, "a.ts", 0, undefined, 4, expect.any(Number)));
+
+    // 这三个按钮由 FileNav 自己渲染：不是只把状态交给 onNav。
+    const back = screen.getByRole("button", { name: "后退" }) as HTMLButtonElement;
+    expect(back.disabled).toBe(true);
+    const recentButton = screen.getByRole("button", { name: "最近打开" });
+    expect(recentButton.tagName).toBe("BUTTON");
+
+    await fireEvent.click(within(treeEl).getByRole("treeitem", { name: /b\.ts/ }));
+    await waitFor(() => expect(repositoryFileContent).toHaveBeenLastCalledWith(repoPath, "b.ts", 0, undefined, 4, expect.any(Number)));
+    // 有了第二个文件，后退才真的可点；前进在历史末尾是禁用的。
+    expect((screen.getByRole("button", { name: "后退" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "前进" }) as HTMLButtonElement).disabled).toBe(true);
+
+    await fireEvent.click(recentButton);
+    const menu = await screen.findByRole("menu", { name: "最近打开的文件" });
+    const items = within(menu).getAllByRole("menuitem");
+    expect(items.map((item) => item.textContent)).toEqual([expect.stringContaining("b.ts"), expect.stringContaining("a.ts"), "收起"]);
+
+    await fireEvent.click(items[1]);
+    await waitFor(() => expect(screen.queryByRole("menu", { name: "最近打开的文件" })).toBeNull());
+    await waitFor(() => expect(repositoryFileContent).toHaveBeenLastCalledWith(repoPath, "a.ts", 0, undefined, 4, expect.any(Number)));
+    expect(within(screen.getByRole("tree", { name: "仓库文件" })).getByRole("treeitem", { name: /a\.ts/ }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("先过滤再开仅改动：非改动文件与补齐行都消失，点击行不偷改模式", async () => {
+    repositoryDirectory.mockResolvedValue(dir("", [entry("README.md"), entry("src", "directory")]));
+    repositoryPathSearch.mockResolvedValue({
+      generation: 4,
+      query: "app",
+      directory: null,
+      includeIgnored: false,
+      scanned: 4,
+      entries: [{ path: "src/app.ts", kind: "file", ignored: false }],
+      truncated: false,
+      message: null,
+    });
+    render(
+      RepositoryFiles,
+      { props: viewProps({ opened: opened([change("src/app.ts", "none", "modified")]) }) as never },
+    );
+    const treeEl = await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.input(screen.getByRole("textbox", { name: "过滤文件树" }), { target: { value: "app" } });
+
+    // 完整树模式：未展开的匹配由全仓库补齐补进来，并带「全仓库」标记。
+    const extra = await within(treeEl).findByRole("treeitem", { name: /app\.ts/ });
+    expect(extra.textContent).toContain("全仓库");
+
+    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+    const changedOnlyButton = screen.getByRole("button", { name: "只看有改动的文件" });
+    expect(changedOnlyButton.getAttribute("aria-pressed")).toBe("true");
+
+    const changedTree = screen.getByRole("tree", { name: "仓库文件" });
+    const rows = within(changedTree).getAllByRole("treeitem");
+    // 只剩改动文件与它的祖先目录：README.md 这种非改动路径不能混进来。
+    expect(rows.every((row) => row.textContent?.includes("全仓库") !== true)).toBe(true);
+    expect(within(changedTree).queryByRole("treeitem", { name: /README\.md/ })).toBeNull();
+    const appRow = within(changedTree).getByRole("treeitem", { name: /app\.ts/ });
+
+    await fireEvent.click(appRow);
+    // 点击改动文件行不能把「只看有改动」悄悄关掉。
+    expect(screen.getByRole("button", { name: "只看有改动的文件" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("先开仅改动再过滤：只在改动文件里匹配，不请求全仓补齐", async () => {
+    repositoryDirectory.mockResolvedValue(dir("", [entry("README.md"), entry("src", "directory")]));
+    repositoryPathSearch.mockResolvedValue({
+      generation: 4,
+      query: "app",
+      directory: null,
+      includeIgnored: false,
+      scanned: 4,
+      entries: [{ path: "ignored/app.ts", kind: "file", ignored: false }],
+      truncated: false,
+      message: null,
+    });
+    render(
+      RepositoryFiles,
+      { props: viewProps({ opened: opened([change("src/app.ts", "none", "modified")]) }) as never },
+    );
+    const treeEl = await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+    await fireEvent.input(screen.getByRole("textbox", { name: "过滤文件树" }), { target: { value: "app" } });
+
+    const changedTree = await screen.findByRole("tree", { name: "仓库文件" });
+    expect(within(changedTree).getByRole("treeitem", { name: /app\.ts/ })).toBeTruthy();
+    expect(within(changedTree).queryByRole("treeitem", { name: /ignored/ })).toBeNull();
+    expect(within(changedTree).queryByRole("treeitem", { name: /README\.md/ })).toBeNull();
+    // 改动树已经覆盖全部改动路径：不需要、也不应该再请求全仓库补齐。
+    expect(repositoryPathSearch).not.toHaveBeenCalled();
+    expect(screen.getByText(/仅在改动文件里匹配/)).toBeTruthy();
+    expect(treeEl).toBeTruthy();
+  });
+
+  it("仅改动树的折叠按路径保持，不被每次重建弹回展开", async () => {
+    repositoryDirectory.mockResolvedValue(dir("", []));
+    render(
+      RepositoryFiles,
+      {
+        props: viewProps({
+          opened: opened([change("src/app.ts", "none", "modified"), change("src/lib/util.ts", "none", "modified")]),
+        }) as never,
+      },
+    );
+    await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+    const tree = await screen.findByRole("tree", { name: "仓库文件" });
+    expect(within(tree).getByRole("treeitem", { name: /app\.ts/ })).toBeTruthy();
+
+    await fireEvent.click(within(tree).getByRole("button", { name: "折叠 src" }));
+    expect(within(screen.getByRole("tree", { name: "仓库文件" })).queryByRole("treeitem", { name: /app\.ts/ })).toBeNull();
+
+    // 触发一次行重建（过滤输入再清空）：折叠状态必须还在。
+    const filter = screen.getByRole("textbox", { name: "过滤文件树" });
+    await fireEvent.input(filter, { target: { value: "app" } });
+    await fireEvent.input(filter, { target: { value: "" } });
+    const after = screen.getByRole("tree", { name: "仓库文件" });
+    expect(within(after).queryByRole("treeitem", { name: /app\.ts/ })).toBeNull();
+    expect(within(after).getByRole("button", { name: "展开 src" })).toBeTruthy();
+  });
 });

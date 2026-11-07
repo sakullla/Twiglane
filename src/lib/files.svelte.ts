@@ -29,6 +29,8 @@ export const SEARCH_ROW_HEIGHT = 26;
 export const SEARCH_LIMIT = 200;
 /** 单链合并的上限：再多就不是「一个目录」而是层级本身，逐级展开更好读。 */
 export const MAX_CHAIN = 12;
+/** 树过滤里全仓库补齐行的显示上限：再多也没法在树里读，界面必须说明只列了前这些。 */
+export const FILTER_EXTRA_LIMIT = 60;
 
 export interface FileNode {
   path: string;
@@ -225,7 +227,7 @@ export function filterRows(rows: readonly FileTreeRow[], query: string): FileTre
  * 仅看改动时的树：直接由 StatusSnapshot 的路径派生，不读目录。
  * 祖先目录由路径合成；删除的文件保留为墓碑行，只提供改动与历史。
  */
-export function buildChangedTree(files: readonly FileChange[]): FileNode[] {
+export function buildChangedTree(files: readonly FileChange[], collapsed?: ReadonlySet<string>): FileNode[] {
   const roots: FileNode[] = [];
   const dirs = new Map<string, FileNode>();
   for (const file of files) {
@@ -237,7 +239,8 @@ export function buildChangedTree(files: readonly FileChange[]): FileNode[] {
       let dir = dirs.get(prefix);
       if (!dir) {
         dir = makeNode({ name: parts[index], path: prefix, kind: "directory", ignored: false, size: null, error: null });
-        dir.expanded = true;
+        // 仅改动树的节点每次都由快照重建：折叠状态只能靠路径集合记住，否则折叠后立刻弹回展开。
+        dir.expanded = !collapsed?.has(prefix);
         dir.children = [];
         dirs.set(prefix, dir);
         list.push(dir);
@@ -406,7 +409,11 @@ export function createFilesStore(deps: FilesStoreDeps) {
   /** 树过滤的全局补齐：已加载节点在本地过滤，未展开的匹配靠路径搜索补上。 */
   let filterEntries = $state<RepositoryPathEntry[]>([]);
   let filterError = $state<string | null>(null);
+  /** 补齐结果被后端截断：匹配没有显示全，界面不能说「没有更多匹配」。 */
+  let filterTruncated = $state(false);
   let changedOnly = $state(false);
+  /** 仅改动树里被折叠的目录路径：节点每次重建，折叠状态必须按路径记。 */
+  let changedCollapsed = $state<ReadonlySet<string>>(new Set());
   /** 定位目标行：路径 + 行号 + 序号，内容区据此读取目标页并滚动。 */
   let lineTarget = $state<{ path: string; line: number; serial: number } | null>(null);
   let locateSerial = 0;
@@ -428,6 +435,7 @@ export function createFilesStore(deps: FilesStoreDeps) {
     serials.clear();
     resetSearches();
     changedOnly = false;
+    changedCollapsed = new Set();
     lineTarget = null;
     visits = [];
     cursor = -1;
@@ -448,6 +456,7 @@ export function createFilesStore(deps: FilesStoreDeps) {
     contentBusy = false;
     filterEntries = [];
     filterError = null;
+    filterTruncated = false;
   }
 
   function findNode(list: FileNode[], path: string): FileNode | null {
@@ -557,6 +566,14 @@ export function createFilesStore(deps: FilesStoreDeps) {
 
   async function toggle(node: FileNode): Promise<void> {
     if (!isDirectoryKind(node.kind)) return;
+    // 仅改动树的节点每次重建：折叠按路径记住，否则下一次重算就弹回展开。
+    if (changedOnly) {
+      const next = new Set(changedCollapsed);
+      if (next.has(node.path)) next.delete(node.path);
+      else next.add(node.path);
+      changedCollapsed = next;
+      return;
+    }
     if (node.expanded) {
       node.expanded = false;
       return;
@@ -586,21 +603,30 @@ export function createFilesStore(deps: FilesStoreDeps) {
     return true;
   }
 
+  /** path 是否落在仅改动树里：改动文件本身或它的祖先目录。 */
+  function changedTreeContains(path: string): boolean {
+    const files = deps.files?.() ?? [];
+    return files.some((file) => file.path === path || file.path.startsWith(`${path}/`));
+  }
+
   /** 树内定位：展开祖先、选中并（可选）记下要跳转的行。不改动工作区，也不读文件内容。 */
   async function locate(path: string, line: number | null = null): Promise<boolean> {
     if (!repo || !deps.active()) return false;
-    // 仅改动树里可能没有这个路径：定位先在完整树里做，否则目标行永远打不开。
-    if (changedOnly) changedOnly = false;
+    // 仅改动树里有这个路径就留在改动模式；只有目标确实不在改动里时才切回完整树。
+    if (changedOnly && !changedTreeContains(path)) changedOnly = false;
     if (query) {
       query = "";
       filterSerial += 1;
       filterEntries = [];
       filterError = null;
+      filterTruncated = false;
     }
     const ok = await ensureChain(path);
     if (!ok) return false;
+    const previousDirectory = currentDirectory();
     selectedPath = path;
     remember(path, line);
+    retargetDirectoryScope(previousDirectory);
     if (line !== null && line > 0) lineTarget = { path, line, serial: ++locateSerial };
     return true;
   }
@@ -614,8 +640,10 @@ export function createFilesStore(deps: FilesStoreDeps) {
   }
 
   function select(path: string): void {
+    const previousDirectory = currentDirectory();
     selectedPath = path;
     remember(path, null);
+    retargetDirectoryScope(previousDirectory);
   }
 
   function setQuery(next: string): void {
@@ -623,14 +651,18 @@ export function createFilesStore(deps: FilesStoreDeps) {
     void completeFilter();
   }
 
-  /** 树过滤的全局补齐：已加载部分本地过滤，其余靠路径搜索补齐未展开的匹配。 */
+  /**
+   * 树过滤的全局补齐：已加载部分本地过滤，其余靠路径搜索补齐未展开的匹配。
+   * 仅改动模式不补齐全仓：改动树本身就列出全部改动文件，补全仓只会混进非改动的路径。
+   */
   async function completeFilter(retries = 1): Promise<void> {
     const queryNow = query.trim();
     const current = repo;
     const token = ++filterSerial;
-    if (!current || !queryNow || !deps.active()) {
+    if (!current || !queryNow || !deps.active() || changedOnly) {
       filterEntries = [];
       filterError = null;
+      filterTruncated = false;
       return;
     }
     const owns = () => repo === current && filterSerial === token;
@@ -654,6 +686,8 @@ export function createFilesStore(deps: FilesStoreDeps) {
       if (result.generation < deps.generation()) return;
       filterEntries = result.entries;
       filterError = null;
+      // 截断必须一路传到界面：否则「没有更多匹配」会把未显示的结果说成不存在。
+      filterTruncated = result.truncated;
     } catch (error) {
       if (!owns()) return;
       const normalized = normalizeError(error);
@@ -664,6 +698,7 @@ export function createFilesStore(deps: FilesStoreDeps) {
       }
       filterEntries = [];
       filterError = normalized.message || "无法在仓库里查找路径。";
+      filterTruncated = false;
     }
   }
 
@@ -739,7 +774,17 @@ export function createFilesStore(deps: FilesStoreDeps) {
   }
 
   function setChangedOnly(next: boolean): void {
+    if (changedOnly === next) return;
     changedOnly = next;
+    // 两种树覆盖的范围不同：补齐结果要么作废，要么按新模式重新查一次。
+    if (next) {
+      filterSerial += 1;
+      filterEntries = [];
+      filterError = null;
+      filterTruncated = false;
+    } else if (query.trim()) {
+      void completeFilter();
+    }
   }
 
   /** 当前目录 scope 的目录：选中的目录本身，或选中文件所在的目录。 */
@@ -754,6 +799,16 @@ export function createFilesStore(deps: FilesStoreDeps) {
     if (kind === "directory") return { kind: "directory", path: currentDirectory() ?? "" };
     if (kind === "changed") return { kind: "changed" };
     return { kind: "repository" };
+  }
+
+  /**
+   * 当前目录范围跟着选中项走：选中变化后旧的目录结果不再属于界面显示的范围，
+   * 按新目录重查一次，避免结果集与「当前目录」标签各说各话。
+   */
+  function retargetDirectoryScope(previousDirectory: string | null): void {
+    if (scopeKind !== "directory" || !contentQuery.trim()) return;
+    if (currentDirectory() === previousDirectory) return;
+    void searchContent();
   }
 
   /**
@@ -812,8 +867,10 @@ export function createFilesStore(deps: FilesStoreDeps) {
     const visit = visits[cursor + delta];
     if (!visit || !repo || !deps.active()) return false;
     cursor += delta;
+    const previousDirectory = currentDirectory();
     await ensureChain(visit.path);
     selectedPath = visit.path;
+    retargetDirectoryScope(previousDirectory);
     if (visit.line !== null && visit.line > 0) {
       lineTarget = { path: visit.path, line: visit.line, serial: ++locateSerial };
     }
@@ -919,6 +976,28 @@ export function createFilesStore(deps: FilesStoreDeps) {
     await revalidate();
   }
 
+  /** 当前树的可见行：仅改动时来自 StatusSnapshot，否则来自按需读到的目录。 */
+  function visibleRows(): FileTreeRow[] {
+    const base = changedOnly
+      ? flattenTree(buildChangedTree(deps.files?.() ?? [], changedCollapsed))
+      : flattenTree(nodes);
+    return filterRows(base, query);
+  }
+
+  /**
+   * 树过滤的全仓补齐：只补当前树里还没有的路径，最多显示 FILTER_EXTRA_LIMIT 条。
+   * 仅改动模式不补全仓——那会往改动树里塞进非改动文件。
+   */
+  function completion(base: readonly FileTreeRow[]): { rows: FileTreeRow[]; limited: boolean } {
+    if (changedOnly || !query.trim()) return { rows: [], limited: false };
+    const seen = new Set(base.map((row) => row.path));
+    const entries = filterEntries.filter((entry) => !seen.has(entry.path));
+    return {
+      rows: entries.slice(0, FILTER_EXTRA_LIMIT).map(extraRow),
+      limited: entries.length > FILTER_EXTRA_LIMIT,
+    };
+  }
+
   return {
     get repo() {
       return repo;
@@ -949,8 +1028,17 @@ export function createFilesStore(deps: FilesStoreDeps) {
     },
     get rows() {
       // 仅看改动时行来自 StatusSnapshot：目录没有被读过，但改动文件与墓碑照样能显示。
-      const base = changedOnly ? flattenTree(buildChangedTree(deps.files?.() ?? [])) : flattenTree(nodes);
-      return filterRows(base, query);
+      return visibleRows();
+    },
+    /** 树实际渲染的行：已加载范围内的本地匹配 + 全仓库补齐（有上限）。 */
+    get treeRows() {
+      const base = visibleRows();
+      const extras = completion(base);
+      return extras.rows.length === 0 ? base : [...base, ...extras.rows];
+    },
+    /** 补齐结果超过上限：界面必须说明只列了前 FILTER_EXTRA_LIMIT 条。 */
+    get filterLimited() {
+      return completion(visibleRows()).limited;
     },
     get selectedNode() {
       return selectedPath ? findNode(nodes, selectedPath) : null;
@@ -982,6 +1070,15 @@ export function createFilesStore(deps: FilesStoreDeps) {
     get contentBusy() {
       return contentBusy;
     },
+    /** 当前全文结果实际使用的范围路径：界面据此显示，而不是另算一份。 */
+    get contentScopePath() {
+      return contentResult?.scopePath ?? null;
+    },
+    /** 结果范围与现在选中的目录已经不一致（选中变了但结果还没回来）。 */
+    get contentScopeStale() {
+      if (scopeKind !== "directory" || contentResult === null) return false;
+      return (contentResult.scopePath ?? "") !== (currentDirectory() ?? "");
+    },
     get scopeKind() {
       return scopeKind;
     },
@@ -993,6 +1090,10 @@ export function createFilesStore(deps: FilesStoreDeps) {
     },
     get filterError() {
       return filterError;
+    },
+    /** 补齐结果被后端截断：匹配没有显示全。 */
+    get filterTruncated() {
+      return filterTruncated;
     },
     get lineTarget() {
       return lineTarget;

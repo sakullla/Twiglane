@@ -153,26 +153,30 @@ describe("文件内容预览", () => {
     expect(screen.getByAltText("改动前：old.png")).toBeTruthy();
   });
 
-  it("压缩包单版本目录保持虚拟化并能筛选末尾文件", async () => {
+  it("单当前文件压缩包目录保持虚拟化并能筛选末尾文件，不出现版本比较", async () => {
     const single = { ...sources, old: null };
     filePreview.mockResolvedValueOnce({ ...preview, kind: "archive", dataUrl: null, entries: Array.from({ length: 2000 }, (_, i) => ({ name: "dir/file-" + i + ".txt", size: i, directory: false })) });
     render(BinaryPreview, { sources: single, generation: 1, disabled: false });
-    await screen.findByRole("list", { name: "改动后压缩包文件" });
+    await screen.findByRole("list", { name: "当前文件压缩包文件" });
     expect(screen.getAllByRole("listitem").length).toBeLessThan(40);
-    await fireEvent.input(screen.getByRole("textbox", { name: "筛选改动后压缩包文件" }), { target: { value: "file-1999" } });
+    await fireEvent.input(screen.getByRole("textbox", { name: "筛选当前文件压缩包文件" }), { target: { value: "file-1999" } });
     expect(await screen.findByText("dir/file-1999.txt")).toBeTruthy();
     expect(screen.getAllByRole("listitem")).toHaveLength(1);
-    expect((screen.getByRole("button", { name: "改动前" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: "改动前" }), "没有改动前版本时不提供版本切换").toBeNull();
     expect(screen.queryByRole("button", { name: "并排比较" })).toBeNull();
+    expect(screen.getByText("当前文件")).toBeTruthy();
   });
-  it("缺一侧时给出可见的不可比较说明", async () => {
-    filePreview.mockResolvedValue(image("old"));
-    const single = render(BinaryPreview, { sources: { ...sources, old: null }, generation: 1, disabled: false });
-    expect((await screen.findByText("没有改动前版本，无法并排比较")).textContent).toContain("没有改动前版本，无法并排比较");
-    expect(screen.queryByText(/没有改动后版本/)).toBeNull();
-    single.unmount();
 
+  it("只有当前文件时给出单文件语境，删除侧仍说明不可比较", async () => {
     filePreview.mockResolvedValue(image("new"));
+    render(BinaryPreview, { sources: { ...sources, old: null }, generation: 1, disabled: false });
+    expect(await screen.findByAltText("当前文件：new.png")).toBeTruthy();
+    expect(screen.getByRole("region", { name: "当前文件预览" })).toBeTruthy();
+    // 没有旧版本时不再提示「无法并排比较」这种对当前文件语境无意义的说明。
+    expect(screen.queryByText(/无法并排比较/)).toBeNull();
+    expect(screen.queryByRole("group", { name: "预览版本" })).toBeNull();
+
+    filePreview.mockResolvedValue(image("old"));
     render(BinaryPreview, { sources: { ...sources, new: null }, generation: 1, disabled: false });
     expect(await screen.findByText("没有改动后版本，无法并排比较")).toBeTruthy();
     expect(screen.queryByText(/没有改动前版本/)).toBeNull();

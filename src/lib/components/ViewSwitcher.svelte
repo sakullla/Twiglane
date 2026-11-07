@@ -4,8 +4,11 @@
   import Icon from "./Icon.svelte";
 
   /**
-   * 左栏顶部的视图切换：改动与提交历史。两个视图各自挂载左栏，这个组件由它们共用，
+   * 左栏顶部的视图切换：改动、文件与提交历史。三个视图各自挂载左栏，这个组件由它们共用，
    * 所以切换时位置、宽度都不动，看上去始终是同一个侧栏。
+   *
+   * 顺序与数字键不一一对应：文件排在中间，但沿用「原快捷键不变」的约束，
+   * 它拿到的是 3，历史仍是 2。
    */
   interface Props {
     view: WorkspaceView;
@@ -17,6 +20,7 @@
 
   const items = [
     { id: "changes", text: "改动", label: "改动", shortcut: "1", icon: "file-diff" },
+    { id: "files", text: "文件", label: "文件", shortcut: "3", icon: "folder-open" },
     { id: "history", text: "历史", label: "提交历史", shortcut: "2", icon: "history" },
   ] as const;
 </script>

@@ -39,6 +39,15 @@
   let previousKey = "";
   let visibleSides = $derived<Side[]>(mode === "compare" ? ["old", "new"] : [mode]);
   let comparing = $derived(mode === "compare" && !!sources.old && !!sources.new);
+  /**
+   * 单当前文件语境：只有工作区版本（文件视图的资源页就是这种）。
+   * 这时版本选择与「没有改动前版本」都没有意义，隐藏它们，标签改成「当前文件」。
+   */
+  let single = $derived(!sources.old && !!sources.new);
+  /** 视图（标题、列表与图片替代文本）用的版本名称。 */
+  function sideLabel(side: Side): string {
+    return single ? "当前文件" : side === "old" ? "改动前" : "改动后";
+  }
 
   function loadSide(side: Side, source: PreviewSources[Side], current: number) {
     const token = ++serials[side];
@@ -111,6 +120,7 @@
       previousKey = key;
       zoom = false;
       mode = sources.old && sources.new ? "compare" : sources.old ? "old" : "new";
+      // 单当前文件只有一侧，不给版本切换留下可点的入口。
     }
   });
 
@@ -173,19 +183,23 @@
 <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
 <section class="binary-preview" aria-label="文件内容预览" tabindex="0" onkeydown={keyboard}>
   <div class="preview-toolbar">
-    <div class="segmented" role="group" aria-label="预览版本">
-      <button type="button" aria-pressed={mode === "old"} title={!sources.old ? "此版本不存在" : "仅预览改动前（1）"} disabled={!sources.old} onclick={() => (mode = "old")}>改动前</button>
-      <button type="button" aria-pressed={mode === "new"} title={!sources.new ? "此版本不存在" : "仅预览改动后（2）"} disabled={!sources.new} onclick={() => (mode = "new")}>改动后</button>
-      {#if sources.old && sources.new}
-        <button type="button" aria-pressed={mode === "compare"} title="并排比较（3）" onclick={() => (mode = "compare")}>并排比较</button>
-      {/if}
-    </div>
+    {#if !single}
+      <div class="segmented" role="group" aria-label="预览版本">
+        <button type="button" aria-pressed={mode === "old"} title={!sources.old ? "此版本不存在" : "仅预览改动前（1）"} disabled={!sources.old} onclick={() => (mode = "old")}>改动前</button>
+        <button type="button" aria-pressed={mode === "new"} title={!sources.new ? "此版本不存在" : "仅预览改动后（2）"} disabled={!sources.new} onclick={() => (mode = "new")}>改动后</button>
+        {#if sources.old && sources.new}
+          <button type="button" aria-pressed={mode === "compare"} title="并排比较（3）" onclick={() => (mode = "compare")}>并排比较</button>
+        {/if}
+      </div>
+    {:else}
+      <span class="preview-current" title={sources.new?.path ?? ""}>当前文件</span>
+    {/if}
     <span class="spacer"></span>
     {#if visibleSides.some((side) => panes[side].result?.kind === "image")}
       <button type="button" class="btn btn-ghost btn-sm" aria-pressed={zoom} title="切换所有图片缩放（0）" onclick={() => (zoom = !zoom)}>{zoom ? "适应窗口" : "原始大小"}</button>
     {/if}
   </div>
-  {#if !sources.old || !sources.new}
+  {#if (!sources.old || !sources.new) && !single}
     <!-- 单版本视图要说清另一侧为什么不在，不能只靠按钮上的 disabled title。 -->
     <p class="preview-note">
       {#if !sources.old && !sources.new}
@@ -203,9 +217,9 @@
       {@const source = sources[side]}
       {@const filtered = entries(pane)}
       {@const range = visibleRange(filtered.length, pane.scroll, pane.viewport || 400, 30)}
-      <section class="preview-pane" aria-label={side === "old" ? "改动前预览" : "改动后预览"}>
+      <section class="preview-pane" aria-label={`${sideLabel(side)}预览`}>
         {#if comparing}
-          <header class="pane-heading"><strong>{side === "old" ? "改动前" : "改动后"}</strong><span title={source?.path}>{source?.path ?? "此版本不存在"}</span></header>
+          <header class="pane-heading"><strong>{sideLabel(side)}</strong><span title={source?.path}>{source?.path ?? "此版本不存在"}</span></header>
         {/if}
         {#if pane.result?.size != null || pane.result?.lfsOid}
           <div class="pane-meta">
@@ -221,11 +235,11 @@
           <p class="preview-message" role="status"><span class="spinner"></span> 正在读取预览</p>
         {:else if pane.result?.kind === "image" && pane.result.dataUrl && !pane.error}
           <div class="image-preview" class:original={zoom}>
-            <img src={pane.result.dataUrl} alt={(side === "old" ? "改动前" : "改动后") + "：" + source?.path} onload={(event) => imageLoaded(side, event)} onerror={() => imageError(side)} />
+            <img src={pane.result.dataUrl} alt={sideLabel(side) + "：" + source?.path} onload={(event) => imageLoaded(side, event)} onerror={() => imageError(side)} />
           </div>
         {:else if pane.result?.kind === "archive"}
-          <div class="preview-toolbar"><Icon name="folder" size={14} /><span>压缩包目录 · {pane.result.entries.length}{pane.result.truncated ? "+" : ""} 项</span><div class="field sm archive-search"><Icon name="search" size={13} /><input aria-label={"筛选" + (side === "old" ? "改动前" : "改动后") + "压缩包文件"} placeholder="筛选文件路径" bind:value={pane.query} oninput={() => { pane.scroll = 0; if (pane.listHost) pane.listHost.scrollTop = 0; }} /></div></div>
-          <div class="archive-list" role="list" aria-label={(side === "old" ? "改动前" : "改动后") + "压缩包文件"} bind:this={pane.listHost} bind:clientHeight={pane.viewport} onscroll={(event) => (pane.scroll = event.currentTarget.scrollTop)}>
+          <div class="preview-toolbar"><Icon name="folder" size={14} /><span>压缩包目录 · {pane.result.entries.length}{pane.result.truncated ? "+" : ""} 项</span><div class="field sm archive-search"><Icon name="search" size={13} /><input aria-label={"筛选" + sideLabel(side) + "压缩包文件"} placeholder="筛选文件路径" bind:value={pane.query} oninput={() => { pane.scroll = 0; if (pane.listHost) pane.listHost.scrollTop = 0; }} /></div></div>
+          <div class="archive-list" role="list" aria-label={sideLabel(side) + "压缩包文件"} bind:this={pane.listHost} bind:clientHeight={pane.viewport} onscroll={(event) => (pane.scroll = event.currentTarget.scrollTop)}>
             <div style={"height:" + range.start * 30 + "px"} aria-hidden="true"></div>
             {#each filtered.slice(range.start, range.end) as entry, i (range.start + i + ":" + entry.name)}
               <div class="archive-entry" role="listitem" title={entry.name}><Icon name={entry.directory ? "folder" : "file"} size={14} /><span>{entry.name}</span><small>{entry.directory ? "目录" : formatBytes(entry.size)}</small></div>

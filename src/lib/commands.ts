@@ -143,6 +143,19 @@ const VIEW_COMMANDS: CommandSpec[] = [
     reason: hasRepoReason,
   },
   {
+    /**
+     * 文件是第三个保活视图，但在切换条里排在改动与历史之间（改动 / 文件 / 历史）。
+     * 数字键仍按原有序列追加：1 改动、2 历史保持不变，文件用 3。
+     */
+    id: "view.files",
+    group: "视图",
+    title: "文件",
+    hint: "按目录浏览仓库中的文件，只读预览内容",
+    shortcut: `${MODIFIER_LABEL} 3`,
+    available: hasRepo,
+    reason: hasRepoReason,
+  },
+  {
     id: "view.history",
     group: "视图",
     title: "提交历史",

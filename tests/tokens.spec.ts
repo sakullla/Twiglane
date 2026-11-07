@@ -985,6 +985,12 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".merge-review-keys": "合并审阅左栏底部键位提示的分隔线，纯说明文字",
   ".merge-detail-head": "合并明细头部底部横向分隔线，纯分区",
   ".chip.ignore": "忽略标记 chip 的虚线描边，是状态标记而非可点击控件",
+  // --- components.css：文件视图的分区线 ---
+  ".file-tree-note": "目录树下方的只读说明与树之间的分区线，说明文字不可交互",
+  ".file-searchbar": "文件内搜索条与代码区之间的分区线，内部输入框自带控件边界",
+  ".file-search-results": "文件内匹配结果与代码区之间的分区线，命中行自带 hover/选中背景",
+  ".file-note": "文件顶部的续读/截断说明条，纯状态文字分区",
+  ".file-more": "续读按钮区与代码区之间的分区线，按钮自身带控件边界",
 
   // --- components.css：表格/列分隔线与分区线 ---
   ".panel-toolbar": "面板工具条底部横向分隔线",

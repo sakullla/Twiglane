@@ -1,8 +1,11 @@
 export type Theme = "light" | "dark" | "system";
 /** 分叉拉取预选的方式。旧设置没有这项时按合并。 */
 export type PullIntegration = "merge" | "rebase";
-/** 主视图只有两个：改动与提交历史。临时保存、合并等低频任务进 modal 槽位。 */
-export type WorkspaceView = "changes" | "history";
+/**
+ * 主视图三个：改动、文件、提交历史。三者同时保活，切换不重挂组件；
+ * 临时保存、合并等低频任务进 modal 槽位。
+ */
+export type WorkspaceView = "changes" | "files" | "history";
 /** 单槽 modal 的七个任务入口（data-task-modal 的取值集合就由它决定）。 */
 export type TaskModal = "stash" | "merge" | "branch" | "remote" | "settings" | "scope" | "publish";
 

@@ -140,6 +140,10 @@ const mocks = vi.hoisted(() => ({
   listenEvent: vi.fn(),
   pickDirectory: vi.fn(),
   pickFile: vi.fn(),
+  repositoryDirectory: vi.fn(),
+  repositoryFileContent: vi.fn(),
+  repositoryContentSearch: vi.fn(),
+  filePreview: vi.fn(),
 }));
 
 vi.mock("../src/lib/api", () => ({
@@ -365,6 +369,7 @@ describe("原生文件夹拖放", () => {
  */
 const R11_ACTIONS: { id: string; title: string }[] = [
   { id: "view.changes", title: "改动" },
+  { id: "view.files", title: "文件" },
   { id: "view.history", title: "提交历史" },
   { id: "task.scope", title: "本次提交范围" },
   { id: "stage.all", title: "全部暂存" },
@@ -516,6 +521,28 @@ beforeEach(() => {
   mocks.listenEvent.mockResolvedValue(() => {});
   mocks.pickDirectory.mockResolvedValue(null);
   mocks.pickFile.mockResolvedValue(null);
+  // 文件视图的目录与内容：外壳测试只用来看视图是否保活、是否按需读取。
+  mocks.repositoryDirectory.mockResolvedValue({
+    generation: 4,
+    path: "",
+    entries: [
+      { name: "README.md", path: "README.md", kind: "file", ignored: false, size: 20, error: null },
+      { name: "src", path: "src", kind: "directory", ignored: false, size: null, error: null },
+    ],
+    errors: [],
+  });
+  mocks.repositoryFileContent.mockResolvedValue({
+    generation: 4,
+    path: "README.md",
+    kind: "text",
+    size: 20,
+    offset: 0,
+    lines: ["# demo"],
+    nextOffset: 1,
+    hasMore: false,
+    truncated: false,
+    message: null,
+  });
   mocks.openRepository.mockResolvedValue({
     summary: { name: "demo", path: repoPath },
     generation: 4,
@@ -661,7 +688,7 @@ describe("应用外壳", () => {
     expect(document.querySelector(".pane .composer"), "提交区在左栏").toBeTruthy();
   });
 
-  it("左栏头部切换视图，隐藏后仍能进入，导航恰好是改动与提交历史", async () => {
+  it("左栏头部切换视图，隐藏后仍能进入，导航恰好是改动、文件与提交历史", async () => {
     render(App);
     await openRepo();
 
@@ -671,7 +698,7 @@ describe("应用外壳", () => {
       [...nav.querySelectorAll<HTMLElement>("button")].map((item) => (item.getAttribute("aria-label") ?? "").replace(/\s+\d+$/, ""));
     const current = () => activeNav().querySelector<HTMLElement>('[aria-current="page"]')?.getAttribute("aria-label");
 
-    expect(labelsOf(activeNav())).toEqual(["改动", "提交历史"]);
+    expect(labelsOf(activeNav())).toEqual(["改动", "文件", "提交历史"]);
     expect(current()).toMatch(/^改动/);
     // 点第二项真的换成历史，而不是只换高亮；历史懒加载期间左栏头部也不消失。
     await fireEvent.click(within(activeNav()).getByRole("button", { name: "提交历史" }));
@@ -686,7 +713,33 @@ describe("应用外壳", () => {
     await waitFor(() => expect(current()).toMatch(/^改动/));
     await press("2");
     await waitFor(() => expect(current()).toBe("提交历史"));
-    expect(labelsOf(activeNav())).toEqual(["改动", "提交历史"]);
+    expect(labelsOf(activeNav())).toEqual(["改动", "文件", "提交历史"]);
+  });
+
+  it("三个视图同时保活：⌘3 进入文件视图，隐藏视图 inert，切回改动恢复差异", async () => {
+    render(App);
+    await openRepo();
+    const view = () =>
+      document.querySelector('.workbench-view[data-active="true"] [aria-current="page"]')?.getAttribute("data-view");
+    expect(view()).toBe("changes");
+
+    await press("3");
+    await waitFor(() => expect(view()).toBe("files"));
+    const views = [...document.querySelectorAll<HTMLElement>(".workbench-view")];
+    expect(views, "三个视图都在 DOM 里，切换不重挂").toHaveLength(3);
+    expect(views.filter((item) => item.getAttribute("aria-hidden") === "true")).toHaveLength(2);
+    expect(views.find((item) => item.dataset.active === "true")?.hasAttribute("inert")).toBe(false);
+    await waitFor(() => expect(mocks.repositoryDirectory).toHaveBeenCalled());
+
+    // ⌘F 落在当前视图的搜索框：文件视图是树过滤，不是改动的文件搜索。
+    await press("f");
+    await tick();
+    expect(document.activeElement?.id).toBe("files-search");
+
+    mocks.loadDiff.mockClear();
+    await press("1");
+    await waitFor(() => expect(view()).toBe("changes"));
+    await waitFor(() => expect(mocks.loadDiff).toHaveBeenCalled());
   });
 
   it("隐藏的页面不继续读取，回到页面才读取最新状态", async () => {

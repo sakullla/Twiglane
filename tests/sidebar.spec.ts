@@ -272,7 +272,7 @@ describe("视图切换", () => {
     const onView = vi.fn();
     const { container } = render(ViewSwitcher, { props: { view: "changes", changeCount: 8, onView } });
     const nav = screen.getByRole("navigation", { name: "视图" });
-    expect([...nav.querySelectorAll("button")].map((item) => item.getAttribute("aria-label"))).toEqual(["改动 8", "提交历史"]);
+    expect([...nav.querySelectorAll("button")].map((item) => item.getAttribute("aria-label"))).toEqual(["改动 8", "文件", "提交历史"]);
     expect(screen.getByRole("button", { name: /^改动 8/ }).getAttribute("aria-current")).toBe("page");
     expect(container.querySelector(".count")?.textContent).toBe("8");
     await fireEvent.click(screen.getByRole("button", { name: /^提交历史/ }));

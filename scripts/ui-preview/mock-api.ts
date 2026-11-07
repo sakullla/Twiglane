@@ -14,6 +14,7 @@ import { createTextDiff } from "../../src/lib/diff";
 /** 预览 mock 的自我标识：健康端点和回归测试靠它确认浏览器拿到的是 mock，而不是真实 Tauri api。 */
 export const UI_PREVIEW_MOCK = true;
 import { sampleFor } from "./samples";
+import { mockContentSearch, mockDirectory, mockFilePage, mockPathSearch } from "./mock-files";
 
 const wait = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms));
 const now = Math.floor(Date.now() / 1000);
@@ -647,6 +648,34 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     ...withHeaders(diffFor(path, false)), binary: true, lines: [], hunks: [], oldSize: 81920, newSize: 146752,
     preview: { repository: _repo, old: { revision: _parent, path }, new: { revision: _oid, path } },
   } : withHeaders(diffFor(path, false))),
+  repositoryDirectory: (_repo: string, relative: string, includeIgnored: boolean, generation: number) => {
+    if (relative === "broken") {
+      return Promise.reject({ code: "path_unreadable", message: "无法读取这个目录：权限不足。" });
+    }
+    return ok(mockDirectory(relative, includeIgnored, generation), 40);
+  },
+  repositoryFileContent: (_repo: string, relative: string, offset: number, limit: number | undefined, generation: number) => {
+    if (relative === "assets/permission.txt") {
+      return Promise.reject({ code: "path_unreadable", message: "无法读取这个文件：权限不足。" });
+    }
+    return ok(mockFilePage(relative, offset, limit, generation), 40);
+  },
+  repositoryContentSearch: (
+    _repo: string,
+    query: string,
+    scope: { kind?: string; path?: string } | undefined,
+    _includeIgnored: boolean,
+    limit: number | undefined,
+    generation: number,
+  ) => ok(mockContentSearch(query, scope, limit, generation), 60),
+  repositoryPathSearch: (
+    _repo: string,
+    query: string,
+    directory: string | null,
+    includeIgnored: boolean,
+    _limit: number | undefined,
+    generation: number,
+  ) => ok(mockPathSearch(query, directory, includeIgnored, generation), 60),
   filePreview: (_repo: string, _source: unknown, _generation: number, download = false) => ok({
     generation, kind: previewParams.get("preview") === "archive" ? "archive" : previewParams.get("preview") === "lfs" && !download ? "lfs" : "image",
     size: 146752, dataUrl: "/brand-icon.png", entries: Array.from({ length: 2000 }, (_, index) => ({ name: `assets/images/photo-${String(index).padStart(4, "0")}.png`, size: 2048 + index, directory: false })),

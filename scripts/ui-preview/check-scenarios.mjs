@@ -43,6 +43,30 @@ const SCENARIOS = [
     detail: "document.querySelector('.welcome-diagnostic')?.textContent?.trim().slice(0, 60) || ''",
   },
   {
+    name: "文件视图：目录树与文件内容",
+    url: "/",
+    ready:
+      "(() => { if (!window.__filesOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__filesOpened = true; recent.click(); return false; } } " +
+      "if (!document.querySelector('.workbench-view[data-active=\"true\"] .files-view')) { const sw = document.querySelector('.workbench-view[data-active=\"true\"] [data-view=\"files\"]'); if (sw) { sw.click(); return false; } return false; } " +
+      "const rows = [...document.querySelectorAll('.file-tree-row')]; if (rows.length > 0 && !document.querySelector('[data-file-line]')) { const readme = rows.find((row) => row.textContent.includes('README.md')); if (readme) { readme.click(); return false; } } " +
+      "return Boolean(document.querySelector('[data-file-line]')); })()",
+    check:
+      "document.querySelectorAll('.file-tree-row').length >= 5 && document.body.textContent.includes('目录按需读取') && Boolean(document.querySelector('.file-tree-row[title]'))",
+    detail:
+      "document.querySelectorAll('.file-tree-row').length + ' 行；' + (document.querySelector('.file-tree-row[title]')?.getAttribute('title') ?? '')",
+  },
+  {
+    name: "文件视图：资源预览是当前文件",
+    url: "/",
+    ready:
+      "(() => { if (!window.__filesOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__filesOpened = true; recent.click(); return false; } } " +
+      "if (!document.querySelector('.workbench-view[data-active=\"true\"] .files-view')) { const sw = document.querySelector('.workbench-view[data-active=\"true\"] [data-view=\"files\"]'); if (sw) { sw.click(); return false; } return false; } " +
+      "if (!document.querySelector('.files-view .binary-preview')) { const row = [...document.querySelectorAll('.file-tree-row')].find((item) => item.textContent.includes('logo.png')); if (row) { row.click(); return false; } } " +
+      "return Boolean(document.querySelector('.files-view .binary-preview img')); })()",
+    check: "Boolean(document.querySelector('.files-view .binary-preview img')) && !document.querySelector('.files-view .binary-preview [aria-label=\"预览版本\"]')",
+    detail: "document.querySelector('.files-view .preview-current')?.textContent?.trim() || ''",
+  },
+  {
     name: "默认起始页",
     url: "/",
     ready: "Boolean(document.querySelector('.welcome-recent button'))",

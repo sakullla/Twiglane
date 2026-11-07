@@ -76,6 +76,7 @@
   import MultiFileDiff from "./lib/components/MultiFileDiff.svelte";
   import PaneResizer from "./lib/components/PaneResizer.svelte";
   import PublishModal from "./lib/components/PublishModal.svelte";
+  import RepositoryFiles from "./lib/components/RepositoryFiles.svelte";
   import RecoveryActions from "./lib/components/RecoveryActions.svelte";
   import RepoDialogs from "./lib/components/RepoDialogs.svelte";
   import RepoSwitcher from "./lib/components/RepoSwitcher.svelte";
@@ -171,6 +172,8 @@
   let batchRunning = false;
   /** 历史视图的上一个/下一个状态，由 HistoryPanel 上报。 */
   let historyNav = $state.raw<FileNavState | null>(null);
+  /** 文件视图自己的上一个/下一个文件：目录树里可见的文件行顺序。 */
+  let filesNav = $state.raw<FileNavState | null>(null);
   let diff = $state.raw<DiffResponse | null>(null);
   let diffError = $state<string | null>(null);
   let diffLoading = $state(false);
@@ -323,11 +326,16 @@
     const index = items.findIndex((row) => sameSelection(row, selected));
     return fileNavState(items, index, goToFile, multiActive ? "选中文件" : "文件");
   });
-  let activeNav = $derived(workspaceView === "history" ? historyNav : changesNav);
+  /* 三个视图各有自己的文件顺序：改动列表、文件树、提交内的文件。 */
+  let activeNav = $derived(
+    workspaceView === "changes" ? changesNav : workspaceView === "files" ? filesNav : historyNav,
+  );
   /** 两份差异都可能挂着：只采用当前视图那一份，多选时单文件差异已经卸掉。 */
   let changesHunk = $state<HunkNavReport | null>(null);
   let historyHunk = $state<HunkNavReport | null>(null);
-  let activeHunk = $derived<HunkNavReport | null>(workspaceView === "history" ? historyHunk : multiActive ? null : changesHunk);
+  let activeHunk = $derived<HunkNavReport | null>(
+    workspaceView === "changes" ? (multiActive ? null : changesHunk) : workspaceView === "history" ? historyHunk : null,
+  );
   /** 回调身份必须稳定：内联函数每次渲染都是新的，差异视图会在上报和清空之间打转。 */
   function assignHunk(current: HunkNavReport | null, nav: HunkNavReport | null): HunkNavReport | null {
     if (nav === null) return current === null ? current : null;
@@ -439,9 +447,11 @@
     const pick = () => {
       const target = workspaceView === "history"
         ? document.getElementById("history-search")
-        : opened
-          ? document.getElementById("file-search")
-          : document.getElementById("welcome-search") ?? document.querySelector<HTMLElement>(".welcome-actions button");
+        : workspaceView === "files"
+          ? document.getElementById("files-search")
+          : opened
+            ? document.getElementById("file-search")
+            : document.getElementById("welcome-search") ?? document.querySelector<HTMLElement>(".welcome-actions button");
       target?.focus();
     };
     if (paletteOpen) setTimeout(pick, 0);
@@ -483,6 +493,9 @@
     switch (id) {
       case "view.changes":
         showChanges();
+        return;
+      case "view.files":
+        showFiles();
         return;
       case "view.history":
         showHistory();
@@ -826,6 +839,7 @@
     workspaceView = "changes";
     historyPath = null;
     historyQuery = "";
+    filesNav = null;
     taskModal = null;
     paletteOpen = false;
     cloneOpen = false;
@@ -1085,6 +1099,12 @@
     historyPath = null;
   }
 
+  /** 文件视图：只切换视图，不改动工作区、也不重新读取改动差异。 */
+  function showFiles() {
+    useView("files");
+    historyPath = null;
+  }
+
   function useView(view: WorkspaceView) {
     workspaceView = view;
     if (view === "history") {
@@ -1092,9 +1112,15 @@
       diffLoading = false;
       diff = null;
       historyPanel ??= import("./lib/components/HistoryPanel.svelte");
-    } else {
-      void loadSelectedDiff();
+      return;
     }
+    if (view === "files") {
+      // 文件视图不画改动差异：在途响应作废，回到改动视图时再按当前选择重读。
+      diffToken += 1;
+      diffLoading = false;
+      return;
+    }
+    void loadSelectedDiff();
   }
 
   function showHistory() {
@@ -1892,6 +1918,7 @@
         degraded = false;
         workspaceView = "changes";
         historyPath = null;
+        filesNav = null;
         taskModal = null;
         cloneOpen = false;
         paletteOpen = false;
@@ -3022,6 +3049,27 @@
                 />
               {/if}
             </div>
+          </div>
+          <div
+            class="workbench-view"
+            data-active={workspaceView === "files"}
+            aria-hidden={workspaceView !== "files"}
+            inert={workspaceView !== "files"}
+          >
+            <RepositoryFiles
+              active={workspaceView === "files"}
+              {opened}
+              disabled={writeLocked}
+              {nextId}
+              {paneWidth}
+              {windowWidth}
+              onResize={(width) => (widths = { ...widths, files: width })}
+              onResizeCommit={persistWidths}
+              onGeneration={adoptGeneration}
+              onFileHistory={openFileHistory}
+              onNav={(nav) => (filesNav = nav)}
+              {paneHead}
+            />
           </div>
           <div
             class="workbench-view"

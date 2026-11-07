@@ -10,6 +10,7 @@ import { fileNavState } from "../../src/lib/ui";
 const api = vi.hoisted(() => ({
   commitFileDiff: vi.fn(), mergeSession: vi.fn(), branchState: vi.fn(),
   historyPage: vi.fn(), conflictView: vi.fn(), commitDetail: vi.fn(), loadDiff: vi.fn(),
+  repositoryFileContent: vi.fn(), repositoryContentSearch: vi.fn(),
 }));
 vi.mock("../../src/lib/api", () => ({ api }));
 
@@ -18,6 +19,9 @@ import CommitDiffList from "../../src/lib/components/CommitDiffList.svelte";
 import MergePanel from "../../src/lib/components/MergePanel.svelte";
 import HistoryPanel from "../../src/lib/components/HistoryPanel.svelte";
 import MultiFileDiff from "../../src/lib/components/MultiFileDiff.svelte";
+import FileContent from "../../src/lib/components/FileContent.svelte";
+import FileTree from "../../src/lib/components/FileTree.svelte";
+import { flattenTree, makeNode, type FileNode } from "../../src/lib/files.svelte";
 
 const { opened, detail, diff } = new PerformanceFixture();
 
@@ -171,5 +175,72 @@ describe("大仓库的有界读取和渲染", () => {
     await fireEvent.input(search, { target: { value: "file-19999.txt" } });
     expect(document.querySelectorAll(".conflict-file")).toHaveLength(1);
     expect(document.querySelector(".conflict-file")?.getAttribute("title")).toBe("file-19999.txt");
+  });
+
+  it("两万文件目录只渲染可见行，长文件按页读取也只画可见行", async () => {
+    const entries: FileNode[] = Array.from({ length: 20_000 }, (_, index) => ({
+      ...makeNode({ name: "file-" + index + ".ts", path: "src/gen/file-" + index + ".ts", kind: "file", ignored: false, size: 12, error: null }),
+    }));
+    const rootNode = { ...makeNode({ name: "gen", path: "src/gen", kind: "directory", ignored: false, size: null, error: null }), children: entries, expanded: true };
+    const rows = flattenTree([rootNode]);
+    const height = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
+    try {
+      const start = performance.now();
+      render(FileTree, {
+        props: {
+          rows,
+          selectedPath: "src/gen/file-19999.ts",
+          loading: false,
+          failure: null,
+          query: "",
+          includeIgnored: false,
+          disabled: false,
+          onQuery: vi.fn(),
+          onIncludeIgnored: vi.fn(),
+          onToggle: vi.fn(),
+          onSelect: vi.fn(),
+          onSplit: vi.fn(),
+          onRefresh: vi.fn(),
+        } as never,
+      });
+      await tick();
+      console.info("20000-row file tree render: " + (performance.now() - start).toFixed(2) + " ms");
+      expect(document.querySelectorAll(".file-tree-row").length).toBeLessThan(100);
+
+      const lines = Array.from({ length: 1000 }, (_, index) => "const row" + index + " = compute(" + index + ");");
+      api.repositoryFileContent.mockImplementation((_repo: string, path: string, offset: number, _limit: number | undefined, generation: number) =>
+        Promise.resolve({
+          generation,
+          path,
+          kind: "text",
+          size: 200_000,
+          offset,
+          lines: offset === 0 ? lines : ["tail-row"],
+          nextOffset: offset === 0 ? lines.length : offset + 1,
+          hasMore: offset === 0,
+          truncated: false,
+          message: null,
+        }),
+      );
+      const { container } = render(FileContent, {
+        props: {
+          active: true,
+          opened,
+          path: "src/gen/long.ts",
+          generation: opened.generation,
+          disabled: false,
+          nextId: () => 1,
+          onGeneration: vi.fn(),
+        } as never,
+      });
+      await waitFor(() => expect(api.repositoryFileContent).toHaveBeenCalledTimes(1));
+      await tick();
+      expect(container.querySelectorAll("[data-file-line]").length).toBeLessThan(60);
+      const more = await screen.findByRole("button", { name: /继续读取后续内容/ });
+      await fireEvent.click(more);
+      await waitFor(() => expect(api.repositoryFileContent).toHaveBeenLastCalledWith(opened.summary.path, "src/gen/long.ts", 1000, undefined, opened.generation, 1));
+    } finally {
+      height.mockRestore();
+    }
   });
 });

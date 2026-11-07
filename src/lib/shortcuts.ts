@@ -13,9 +13,11 @@ export interface KeyLike {
   shiftKey?: boolean;
 }
 
+/** 数字键沿用原有序列：1 改动、2 历史不变，文件视图追加在 3。 */
 const DIGIT_VIEWS: Record<string, string> = {
   "1": "view.changes",
   "2": "view.history",
+  "3": "view.files",
 };
 
 const KEY_COMMANDS: Record<string, string> = {

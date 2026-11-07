@@ -158,6 +158,8 @@ export interface OpenedRepository {
   snapshot: StatusSnapshot;
   draft: string;
   watchDegraded: boolean;
+  /** 提交缩写长度（Git 的 core.abbrev / 自动长度）。旧响应可能缺省，按 7 位处理。 */
+  abbrevLength?: number;
 }
 
 export interface PanelWidths {

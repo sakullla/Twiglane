@@ -973,6 +973,20 @@ pub fn rev_parse_command(git: &Path, root: &Path, revision: &str) -> (PathBuf, V
     (git.to_path_buf(), args)
 }
 
+/// 仓库的提交缩写长度：`rev-parse --short` 按 core.abbrev 取值，未设置时由 Git 按对象数自动放长（最少 7 位），
+/// 与 `git log --oneline` 的显示一致。只读，不写入仓库。
+pub fn abbrev_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("rev-parse"),
+        OsString::from("--short"),
+        OsString::from("--verify"),
+        OsString::from("--quiet"),
+        OsString::from("HEAD"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
 pub fn ignored_files_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.extend([

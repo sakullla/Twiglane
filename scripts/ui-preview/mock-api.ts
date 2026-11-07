@@ -240,9 +240,12 @@ const summaries = [
   "Merge branch 'feature/history' into main",
   "文档：补充安装与运行说明",
 ];
+const commitOid = (i: number) => (i.toString(16).padStart(4, "0") + "a9c3e1f2b4d6".repeat(4)).slice(0, 40);
+/* 父提交指向真实存在的下一条提交，拓扑才是连起来的一条主线；第 5 条是合并提交，
+   第二父提交落在后面第 8 条，画出一段并行分支后汇回主线。最后一条超出一页的父提交按结果外处理。 */
 const commits: HistoryCommit[] = Array.from({ length: 60 }, (_, i) => ({
-  oid: (i.toString(16).padStart(4, "0") + "a9c3e1f2b4d6".repeat(4)).slice(0, 40),
-  parents: i === 5 ? ["1111111aaaaaaa", "2222222bbbbbbb"] : [`${(i + 1).toString(16).padStart(7, "0")}`],
+  oid: commitOid(i),
+  parents: i === 5 ? [commitOid(6), commitOid(8)] : [commitOid(i + 1)],
   summary: summaries[i % summaries.length],
   authorName: authors[i % authors.length],
   authorEmail: "dev@example.com",

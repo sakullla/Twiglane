@@ -161,6 +161,14 @@ export function buildHistoryGraph(
         continue;
       }
       const existing = slots.findIndex((slot) => slot?.oid === parent);
+      // 第一父提交沿本行的 lane 继续往下：即使它已在右侧某条 lane 里等着（合并的另一侧），也不把主线
+      // 拐过去——右侧那条在父提交所在行汇回来，主线始终是一条直线（与 git log --graph 一致）。
+      if (existing > lane && !reused && slots[lane]?.oid === oid) {
+        slots[lane] = { oid: parent, color };
+        reused = true;
+        parentOut.push({ oid: parent, lane, state: "visible" });
+        continue;
+      }
       if (existing >= 0) {
         parentOut.push({ oid: parent, lane: existing, state: "visible" });
         if (existing !== lane) {

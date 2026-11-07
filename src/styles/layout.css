@@ -233,6 +233,9 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
 .statusbar button.sb-item { padding: 0 var(--space-6); height: var(--statusbar-hit); min-width: var(--statusbar-hit); justify-content: center; border-radius: var(--radius-sm); transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease); }
 .statusbar button.sb-item:hover:not(:disabled) { background: var(--hover); color: var(--fg); }
 .statusbar button.sb-item:focus-visible { outline-offset: -2px; }
+/* 右下角的刷新入口兆份「后台刷新中」：宽度按「刷新中」预留，进出不挤动左侧；进行中不是「不可用」，不用禁用光标。 */
+.statusbar .sb-refresh { min-width: 5.2em; justify-content: flex-start; }
+.statusbar .sb-refresh.active { cursor: default; color: var(--fg-muted); }
 /* 同步结论是状态栏唯一的主读数，用一档更实的正文色；两侧按钮仍是弱化色，优先级不打架。 */
 .statusbar .sb-sync { color: var(--fg-muted); max-width: min(36vw, 360px); overflow: hidden; text-overflow: ellipsis; }
 /* 文字在子节点里才画得出省略号；容器自身的 overflow 只负责兜底裁切。 */

@@ -1,3 +1,4 @@
+import { shortOid } from "./history";
 import type { BranchInfo, ChangeKind, FileChange, FileRow, FileSelection } from "./types";
 
 export function changeLabel(kind: ChangeKind): string | null {
@@ -25,7 +26,7 @@ export function changeLabel(kind: ChangeKind): string | null {
 
 export function branchLabel(branch: BranchInfo): string {
   if (branch.detached) {
-    const short = branch.headOid ? branch.headOid.slice(0, 7) : "";
+    const short = branch.headOid ? shortOid(branch.headOid) : "";
     return short ? `游离 HEAD ${short}` : "游离 HEAD";
   }
   if (branch.unborn) {

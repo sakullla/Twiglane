@@ -238,6 +238,16 @@ pub struct OpenedRepository {
     pub snapshot: StatusSnapshot,
     pub draft: String,
     pub watch_degraded: bool,
+    /// 提交缩写长度（Git 的 core.abbrev / 自动长度）。旧数据缺省时按 Git 的最小默认 7 位。
+    #[serde(default = "default_abbrev_length")]
+    pub abbrev_length: u8,
+}
+
+/// Git 自动缩写的下限，也是读不到仓库缩写长度（空仓库、命令失败）时的退路。
+pub const DEFAULT_ABBREV_LENGTH: u8 = 7;
+
+fn default_abbrev_length() -> u8 {
+    DEFAULT_ABBREV_LENGTH
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

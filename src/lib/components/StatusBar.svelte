@@ -97,37 +97,42 @@
       <span>{notice.text}</span>
     </button>
   {/if}
-  <!-- 写入/读取与重新验证共用同一条实时状态：写入结论本身已由弹窗与 toast 播报，这里再播一次只会重复。
-       重新验证已有内容不是写入，但同样要有进行中状态：旧内容继续可读，这一条说明刷新还没结束（R6）。 -->
-  {#if busy || refreshing}
+  <!-- 写入/读取是用户等着的结果，放在左侧醒目处；写入结论本身已由弹窗与 toast 播报，这里再播一次只会重复。
+       后台重新验证不在这里插一条：它不阻塞任何操作，只在右下角的刷新入口上安静地转（见下）。 -->
+  {#if busy}
     <span
       class="sb-item sb-busy"
       role="status" aria-live="polite"
-      aria-label={busy ? busyLabel : "正在刷新工作区"}
-      title={busy ? busyLabel : "正在重新读取工作区与当前差异"}
-      data-refreshing={refreshing ? "true" : undefined}
+      aria-label={busyLabel}
+      title={busyLabel}
     >
-      <span class="spinner" aria-hidden="true"></span><span class="sb-text">{busy ? busyLabel : "刷新中"}</span>
+      <span class="spinner" aria-hidden="true"></span><span class="sb-text">{busyLabel}</span>
     </span>
   {/if}
   {#if warning}
     <span class="sb-item sb-warn" title={warning}><span class="sb-text">{warning}</span></span>
   {/if}
   <span class="sb-live" aria-hidden="true"></span>
-  <!-- 没有仓库时没有工作区可刷新：按钮不占位，避免起始页出现一个无效动作。 -->
+  <!-- 没有仓库时没有工作区可刷新：按钮不占位，避免起始页出现一个无效动作。
+       重新验证（文件监听、窗口聚焦、手动刷新、历史重读）只把这个入口换成进行中：位置固定在右下角，
+       宽度按「刷新中」预留，进出都不挤动状态栏的其它内容；旧内容在各自面板里照常可读（R6）。
+       它不是实时播报区：监听刷新可能几秒一次，每次都播会淹没真正的结论；进行中状态由按钮的描述可问到。 -->
   {#if hasRepo && onRefresh}
+    {@const quietRefresh = refreshing && !busy}
     {@const refreshReason = busy ? "当前操作完成后才能刷新" : refreshing ? "正在重新读取工作区与当前差异" : "重新读取工作区与当前差异"}
     <button
       type="button"
-      class="sb-item"
+      class="sb-item sb-refresh"
+      class:active={quietRefresh}
       aria-label="刷新工作区"
       aria-describedby="statusbar-refresh-reason"
       title={refreshReason}
       disabled={busy || refreshing}
+      data-refreshing={quietRefresh ? "true" : undefined}
       onclick={onRefresh}
     >
-      {#if refreshing}<span class="spinner" aria-hidden="true"></span>{:else}<Icon name="refresh" size={11} />{/if}
-      刷新
+      {#if quietRefresh}<span class="spinner" aria-hidden="true"></span>{:else}<Icon name="refresh" size={11} />{/if}
+      <span class="sb-text">{quietRefresh ? "刷新中" : "刷新"}</span>
     </button>
     <!-- 不可聚焦的按钮也要能问到原因：描述节点常驻，随状态改文字，鼠标的 title 只是同内容的一层。 -->
     <span class="sr-only" id="statusbar-refresh-reason">{refreshReason}</span>

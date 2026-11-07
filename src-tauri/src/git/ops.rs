@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use serde::Serialize;
 
 use crate::error::AppError;
-use crate::git::command::{init_command, numstat_command, status_command, toplevel_command};
+use crate::git::command::{
+    abbrev_command, init_command, numstat_command, status_command, toplevel_command,
+};
 use crate::git::gate::{remote_check_is_stale, ActionGate, RemoteChecks};
 use crate::git::locate::{detect_git_binary, validate_git, GitLocator, ResolvedGit};
 use crate::git::parse::parse_status;
@@ -18,7 +20,7 @@ use crate::git::schedule::{
 };
 use crate::model::{
     ChangeKind, FileChange, GitInfo, LineStat, OpenedRepository, PanelWidths, RecentRepo,
-    RepoSummary, SettingsDto, StatusSnapshot, Theme,
+    RepoSummary, SettingsDto, StatusSnapshot, Theme, DEFAULT_ABBREV_LENGTH,
 };
 use crate::redact::redact_error_text;
 use crate::shutdown::Shutdown;
@@ -291,6 +293,7 @@ async fn open_root(
     )
     .await?;
     let snapshot = status_from_output(backend, &root, &scheduled).await?;
+    let abbrev_length = read_abbrev_length(backend, &git.path, &root).await;
     let summary = RepoSummary {
         name: repo_name(&root),
         path: repo_key(&root),
@@ -306,7 +309,40 @@ async fn open_root(
         snapshot,
         draft,
         watch_degraded: false,
+        abbrev_length,
     })
+}
+
+/// 读取仓库的提交缩写长度。只是显示偏好：空仓库、命令失败或输出异常都退回 7 位，不阻塞打开仓库。
+async fn read_abbrev_length(backend: &Backend, git: &Path, root: &Path) -> u8 {
+    let (program, args) = abbrev_command(git, root);
+    match run_git(
+        backend,
+        &repo_key(root),
+        JobKind::Read,
+        internal_request_id(),
+        program,
+        args,
+        None,
+    )
+    .await
+    {
+        Ok(scheduled) if scheduled.output.exit_code == 0 => {
+            parse_abbrev_length(&scheduled.output.stdout)
+        }
+        _ => DEFAULT_ABBREV_LENGTH,
+    }
+}
+
+/// `rev-parse --short` 的输出就是缩写本身：长度落在 Git 允许的范围（4–64，含 SHA-256）且全是十六进制才采用。
+pub(crate) fn parse_abbrev_length(stdout: &[u8]) -> u8 {
+    let text = String::from_utf8_lossy(stdout);
+    let abbrev = text.trim();
+    if (4..=64).contains(&abbrev.len()) && abbrev.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        abbrev.len() as u8
+    } else {
+        DEFAULT_ABBREV_LENGTH
+    }
 }
 
 pub(crate) async fn status_from_output(
@@ -1043,6 +1079,14 @@ mod tests {
             .unwrap();
         assert_ne!(opened.summary.path, other.summary.path);
         assert_eq!(opened.summary.name, other.summary.name);
+        // 缩写长度跟 Git 一致：有提交的仓库按 core.abbrev（小仓库自动长度为 7），空仓库退回 7。
+        assert_eq!(opened.abbrev_length, 7);
+        assert_eq!(other.abbrev_length, DEFAULT_ABBREV_LENGTH);
+        run_git_ok(&first, &["config", "core.abbrev", "12"]);
+        let longer = add_repository(&backend, &repo_key(&first), 4)
+            .await
+            .unwrap();
+        assert_eq!(longer.abbrev_length, 12);
         let recent = backend.store.snapshot().recent;
         assert_eq!(recent.len(), 2);
         assert_eq!(fs::read(second.join("keep.txt")).unwrap(), b"untouched");
@@ -1058,6 +1102,19 @@ mod tests {
         let reloaded = AppStore::open(backend.store.path().to_path_buf());
         assert_eq!(reloaded.draft(&opened.summary.path), "第一份草稿");
         assert_eq!(reloaded.draft(&other.summary.path), "第二份草稿");
+    }
+
+    #[test]
+    fn abbrev_length_accepts_only_hex_abbreviations_in_git_range() {
+        assert_eq!(parse_abbrev_length(b"1a2b3c4
+"), 7);
+        assert_eq!(parse_abbrev_length(b"1a2b3c4d5e6f
+"), 12);
+        assert_eq!(parse_abbrev_length(&[b'a'; 64]), 64);
+        assert_eq!(parse_abbrev_length(b""), DEFAULT_ABBREV_LENGTH);
+        assert_eq!(parse_abbrev_length(b"abc"), DEFAULT_ABBREV_LENGTH);
+        assert_eq!(parse_abbrev_length(b"fatal: bad"), DEFAULT_ABBREV_LENGTH);
+        assert_eq!(parse_abbrev_length(&[b'a'; 65]), DEFAULT_ABBREV_LENGTH);
     }
 
     fn run_git_ok(dir: &Path, args: &[&str]) {

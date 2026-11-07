@@ -656,7 +656,6 @@ describe("共享控件状态语义（T3）", () => {
   it("禁用态走弱化令牌而不是整体 opacity，且不改变控件尺寸", () => {
     for (const [selector, expected] of [
       [".btn:disabled", /background:\s*var\(--surface-3\)/],
-      [".icon-btn:disabled", /color:\s*var\(--fg-subtle\)/],
       [".menu-item:disabled", /color:\s*var\(--fg-subtle\)/],
       [".composer-inline-action:disabled", /color:\s*var\(--fg-subtle\)/],
       ['.segmented button:disabled, .segmented button[aria-disabled="true"]', /color:\s*var\(--fg-subtle\)/],
@@ -760,13 +759,27 @@ describe("共享控件状态语义（T3）", () => {
     expect(rule, "禁用描边不能覆盖游标").not.toMatch(/background:\s*var\(--surface-2\)/);
   });
 
+  it("幽灵按钮禁用时保持无框无底的同一形状，只用共享比例淡化", () => {
+    // 静止时没有框和底色的按钮，禁用后补上框/底会比可用的那个更像按钮，可用性读反。
+    for (const selector of [".icon-btn:disabled", ".btn-ghost:disabled"]) {
+      const body = ruleBody(components, selector);
+      expect(body, `${selector} 只用共享淡化比例`).toMatch(/opacity:\s*var\(--opacity-disabled\)/);
+      expect(body, `${selector} 不加底色`).toMatch(/background:\s*transparent/);
+      expect(body, `${selector} 不加内描边`).not.toMatch(/box-shadow:\s*inset/);
+      for (const property of ["width", "height", "padding", "font-size", "gap", "border-width"]) {
+        expect(body, `${selector} 不应改动 ${property}`).not.toMatch(new RegExp(`(?:^|;)\\s*${property}\\s*:`));
+      }
+    }
+    expect(ruleBody(components, ".btn-ghost:disabled"), "ghost 的 1px 透明边界位保持透明").toMatch(/border-color:\s*transparent/);
+    expect(ruleBody(components, ".icon-btn:disabled")).toMatch(/box-shadow:\s*none/);
+  });
+
   it("禁用态除文字色外还有中性填充或控件边界，且不改变尺寸", () => {
     expect(ruleBody(components, ".btn:disabled"), "常规按钮").toMatch(/border-color:\s*var\(--control-border\)/);
-    const ghost = ruleBody(components, ".btn-ghost:disabled, .btn-danger-soft:disabled");
-    expect(ghost, "ghost 禁用也要有中性填充").toMatch(/background:\s*var\(--surface-3\)/);
-    expect(ghost, "ghost 禁用不能把 .btn:disabled 的边界改回透明").not.toMatch(/border(-color)?:\s*[^;]*transparent/);
+    const soft = ruleBody(components, ".btn-danger-soft:disabled");
+    expect(soft, "软色按钮禁用回到中性填充").toMatch(/background:\s*var\(--surface-3\)/);
+    expect(soft, "软色按钮禁用不能把 .btn:disabled 的边界改回透明").not.toMatch(/border(-color)?:\s*[^;]*transparent/);
     for (const selector of [
-      ".icon-btn:disabled",
       ".menu-item:disabled",
       '.context-item[aria-disabled="true"]',
       '.palette-item[aria-disabled="true"]',
@@ -782,7 +795,6 @@ describe("共享控件状态语义（T3）", () => {
     expect(ruleBody(components, ".checkbox:disabled")).toMatch(/border-color:\s*var\(--control-border\)/);
     // 边界令牌本身已由对比度门禁按四个表面断言 ≥ 3:1（见上方「控件边界令牌…」用例）。
     for (const selector of [
-      ".icon-btn:disabled",
       ".menu-item:disabled",
       '.context-item[aria-disabled="true"]',
       '.palette-item[aria-disabled="true"]',

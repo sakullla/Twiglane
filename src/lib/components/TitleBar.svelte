@@ -12,6 +12,7 @@
     watchWindowMaximized,
     type WindowPlatform,
   } from "../window";
+  import { shortOid } from "../history";
   import BrandMark from "./BrandMark.svelte";
   import Icon from "./Icon.svelte";
   import type { IconName } from "../icons";
@@ -137,7 +138,7 @@
       : cliora.outcome === "reviewed"
         ? "仅浏览"
         : (cliora.outcome === "committed" ? "已提交 " : "已合入 ") +
-          (cliora.headOid ? cliora.headOid.slice(0, 7) : ""),
+          (cliora.headOid ? shortOid(cliora.headOid) : ""),
   );
   let syncSummary = $derived(
     pending !== null

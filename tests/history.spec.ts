@@ -1094,25 +1094,33 @@ describe("历史面板", () => {
     await waitFor(() => expect(screen.queryByText("正在读取历史")).toBeNull());
   });
 
-  it("重新读取时保留旧提交并显示进行中状态，完成后换成新结果", async () => {
+  it("重新读取时保留旧提交并安静上报进行中，不在面板里插横条，完成后换成新结果", async () => {
     const first = commit(0);
     historyPage.mockResolvedValueOnce({
       generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [first],
       scope: "current", branches: ["main"], head: "main",
     });
     let finish: (value: unknown) => void = () => {};
-    const view = render(HistoryPanel, { props: panelProps() });
+    const onActivity = vi.fn();
+    const view = render(HistoryPanel, { props: { ...panelProps(), onActivity } });
     expect(await screen.findByRole("option", { name: /commit-0/ })).toBeTruthy();
+    // 首次读取有自己的空状态，不算后台活动。
+    await waitFor(() => expect(onActivity).toHaveBeenLastCalledWith(false));
+    const infobars = () => document.querySelectorAll(".history-view .infobar").length;
+    const before = infobars();
 
     historyPage.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
     const bumped = { ...opened, generation: 4, snapshot: { ...opened.snapshot, generation: 4 } };
-    await view.rerender({ ...panelProps(), opened: bumped });
-    expect(await screen.findByText(/正在重新读取历史，旧提交暂时保留/)).toBeTruthy();
+    await view.rerender({ ...panelProps(), onActivity, opened: bumped });
+    await waitFor(() => expect(onActivity).toHaveBeenLastCalledWith(true));
+    // 刷新不在列表上方插横条，列表和详情不会被上下挤动。
+    expect(infobars()).toBe(before);
+    expect(screen.queryByText(/正在重新读取历史/)).toBeNull();
     expect(screen.getByRole("option", { name: /commit-0/ }), "旧提交在等待期间仍可读").toBeTruthy();
 
     finish({ generation: 4, commits: [commit(1)], offset: 0, pageSize: 100, hasMore: false, state: "ok" });
     expect(await screen.findByRole("option", { name: /commit-1/ })).toBeTruthy();
-    await waitFor(() => expect(screen.queryByText(/正在重新读取历史，旧提交暂时保留/)).toBeNull());
+    await waitFor(() => expect(onActivity).toHaveBeenLastCalledWith(false));
   });
 
   it("重新读取失败保留旧提交并说明原因，重新读取可恢复", async () => {
@@ -1843,8 +1851,12 @@ describe("历史拓扑面板", () => {
   function labelOf(oid: string): string {
     return document.getElementById("history-graph-" + oid)?.textContent ?? "";
   }
+  /** 拓扑画在行外的绘图层里，按提交 Hash 找到本行那一段。 */
+  function graphOf(oid: string): HTMLElement {
+    return document.querySelector(`.hr-graph[data-graph-oid="${oid}"]`) as HTMLElement;
+  }
   function pathsOf(oid: string): string[] {
-    return [...rowOf(oid).querySelectorAll(".hr-graph path")].map((path) => path.getAttribute("d") ?? "");
+    return [...graphOf(oid).querySelectorAll("path")].map((path) => path.getAttribute("d") ?? "");
   }
   function detailCalls(oid: string): number {
     return commitDetail.mock.calls.filter((call) => call[1] === oid).length;
@@ -1868,7 +1880,7 @@ describe("历史拓扑面板", () => {
     commitFileDiff.mockResolvedValue(diff);
   });
 
-  it("线性历史每行只有自己的片段，绘图盒与行等高且上下接到行边界", async () => {
+  it("线性历史每行只有自己的片段，绘图段占满行槽并与上下段首尾相接", async () => {
     const head = commit(0, { oid: headOid, parents: [midOid] });
     const mid = commit(1, { parents: [rootOid] });
     const root = commit(2, { parents: [] });
@@ -1883,14 +1895,22 @@ describe("历史拓扑面板", () => {
     expect(pathsOf(midOid)).toHaveLength(1);
     expect(pathsOf(rootOid)).toHaveLength(1);
 
-    // 几何：SVG 高度与行高一致（50px 边框盒），节点落在行中线，首尾行各接到上/下边界。
-    const svg = rowOf(headOid).querySelector(".hr-graph svg")!;
+    // 几何：绘图段不在行里（行有圆角裁切），而是与行槽等高（50px 行 + 2px 行距 = 52px），
+    // 顶边对齐行槽顶边，节点落在行中线；上一段的底边就是下一段的顶边，线不会在行与行之间断开。
+    const svg = graphOf(headOid).querySelector("svg")!;
     const height = Number(svg.getAttribute("height"));
-    const rowHeight = Number.parseFloat(rowOf(headOid).style.height);
+    const row = rowOf(headOid);
+    const rowTop = Number.parseFloat(row.style.top);
+    const rowHeight = Number.parseFloat(row.style.height);
     expect(rowHeight).toBe(50);
-    expect(height).toBe(rowHeight);
+    expect(height).toBe(rowHeight + 2);
+    expect(Number.parseFloat(graphOf(headOid).style.top)).toBe(rowTop - 1);
+    expect(Number.parseFloat(graphOf(midOid).style.top)).toBe(Number.parseFloat(graphOf(headOid).style.top) + height);
+    expect(rowTop - 1 + height / 2).toBe(rowTop + rowHeight / 2);
+    expect(row.querySelector(".hr-graph"), "行内只留等宽占位").toBeNull();
+    expect(row.querySelector(".hr-graph-slot")).toBeTruthy();
     expect(svg.getAttribute("viewBox")).toBe(`0 0 ${svg.getAttribute("width")} ${height}`);
-    const node = rowOf(headOid).querySelector(".hr-graph .node")!;
+    const node = graphOf(headOid).querySelector(".node")!;
     expect(node.getAttribute("cy")).toBe(String(height / 2));
     expect(node.classList.contains("head")).toBe(true);
     expect(document.querySelectorAll(".hr-graph .node.head").length).toBe(1);
@@ -1937,7 +1957,7 @@ describe("历史拓扑面板", () => {
     expect(labelOf(headOid)).toContain("不在当前结果中");
     // 终止标记只在本行：第二行不出现这条 lane 的连线，也不出现节点以外的线。
     expect(pathsOf(other.oid)).toHaveLength(0);
-    expect(rowOf(other.oid).querySelector(".hr-graph .node")).toBeTruthy();
+    expect(graphOf(other.oid).querySelector(".node")).toBeTruthy();
   });
 
   it("分叉的两个提交接到同一个父提交，各自只画行内斜线", async () => {
@@ -1953,10 +1973,10 @@ describe("历史拓扑面板", () => {
     await screen.findByRole("option", { name: /commit-1/ });
     // 第二行：父提交那条竖线继续穿过，外加一条从自己 lane 下来的斜线。
     expect(pathsOf(right.oid)).toEqual([
-      "M 7 0 L 7 50",
-      "M 19 25 L 7 50",
+      "M 7 0 L 7 52",
+      "M 19 26 L 7 52",
     ]);
-    expect(pathsOf(baseOid)).toEqual(["M 7 0 L 7 25"]);
+    expect(pathsOf(baseOid)).toEqual(["M 7 0 L 7 26"]);
     expect(labelOf(right.oid)).toBe(`父提交 ${baseOid}。`);
   });
 
@@ -1983,8 +2003,8 @@ describe("历史拓扑面板", () => {
     await screen.findByRole("option", { name: /commit-2/ });
     // 追加后同一条 lane 继续：父提交不再是结果外，也不再新起一条 lane。
     expect(labelOf(midOid)).toBe(`父提交 ${rootOid}。`);
-    expect(pathsOf(midOid)).toEqual(["M 7 0 L 7 50"]);
-    expect(pathsOf(rootOid)).toEqual(["M 7 0 L 7 25"]);
+    expect(pathsOf(midOid)).toEqual(["M 7 0 L 7 52"]);
+    expect(pathsOf(rootOid)).toEqual(["M 7 0 L 7 26"]);
   });
 
   it("搜索或筛选换掉结果集时按新结果重建拓扑", async () => {
@@ -2001,7 +2021,7 @@ describe("历史拓扑面板", () => {
       });
     render(HistoryPanel, { props: panelProps() });
     await screen.findByRole("option", { name: /commit-0/ });
-    expect(pathsOf(rootOid)).toEqual(["M 7 0 L 7 25"]);
+    expect(pathsOf(rootOid)).toEqual(["M 7 0 L 7 26"]);
     await fireEvent.input(screen.getByLabelText("搜索说明或提交哈希"), { target: { value: "commit-0" } });
     await waitFor(() => expect(historyPage).toHaveBeenLastCalledWith("/repo", "commit-0", 0, 3, 1));
     await waitFor(() => expect(document.querySelectorAll(".hr-graph").length).toBe(2));
@@ -2021,7 +2041,7 @@ describe("历史拓扑面板", () => {
     });
     render(HistoryPanel, { props: panelProps() });
     await screen.findByRole("option", { name: /commit-0/ });
-    const graphNode = rowOf(headOid).querySelector(".hr-graph")!;
+    const graphNode = graphOf(headOid);
     expect(graphNode.classList.contains("overflow")).toBe(true);
     expect(graphNode.querySelector(".hr-graph-more")?.textContent).toBe("+1");
     expect(labelOf(headOid)).toContain("另有 1 条分支线未画出");

@@ -107,6 +107,29 @@ describe("历史拓扑", () => {
     expect(graphRowLabel(graph.rows[0])).toBe("合并提交：父提交 main1；父提交 side1。");
   });
 
+  it("第二父提交就是主线的祖先时，主线保持在左侧一条直线，右侧在父提交所在行汇回", () => {
+    // merge 的第二父提交 base 同时也是 a 的父提交（常见的「分支合并回主线」形状）。
+    const commits: GraphCommit[] = [
+      { oid: "merge", parents: ["a", "base"] },
+      { oid: "a", parents: ["base"] },
+      { oid: "base", parents: ["root"] },
+      { oid: "root", parents: [] },
+    ];
+    const graph = buildHistoryGraph(commits);
+    expectConsistent(commits, graph);
+    // a 不拐到右侧那条 lane：继续在 lane 0 往下，没有从自己出发的斜线。
+    expect(graph.rows[1].lane).toBe(0);
+    expect(segmentsOf("branch", graph.rows[1].segments)).toEqual([]);
+    expect(graph.rows[1].parents).toEqual([{ oid: "base", lane: 0, state: "visible" }]);
+    // base 仍在 lane 0，右侧的第二父提交线在这一行汇入，之后只剩一条 lane。
+    expect(graph.rows[2].lane).toBe(0);
+    expect(segmentsOf("merge", graph.rows[2].segments)).toEqual([
+      { from: 1, to: 0, color: 0, kind: "merge", span: "top" },
+    ]);
+    expect(graph.rows[3].lane).toBe(0);
+    expect(graph.rows[3].lanes).toBe(1);
+  });
+
   it("三个及以上的父提交同样逐条分叉", () => {
     const commits: GraphCommit[] = [
       { oid: "octopus", parents: ["p1", "p2", "p3"] },

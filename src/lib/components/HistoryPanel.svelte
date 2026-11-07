@@ -82,6 +82,12 @@
     onFileNav?: (nav: FileNavState | null) => void;
     /** 单文件差异的上一处/下一处改动。全部文件视图不报，那里没有一条可滚的差异。 */
     onHunkNav?: (nav: HunkNavReport | null) => void;
+    /**
+     * 后台重新读取（已有内容保留可读）是否在途：历史列表或提交详情在原内容上重读。
+     * 差异自己的标题栏已有轻量的进行中标记，不重复上报。
+     * 面板里不再插横条（插横条会把列表和详情上下挤动），由外壳在状态栏右下角安静地显示。
+     */
+    onActivity?: (active: boolean) => void;
     /** 左栏头部（视图切换与合并提示）和右沿拖动条：由外壳提供，与改动视图是同一份。 */
     paneHead?: Snippet;
     paneResizer?: Snippet;
@@ -108,7 +114,8 @@
   const GRAPH_KEY = "twiglane.historyGraph";
   /** 紧凑宽度内最多画几条 lane，再多只留溢出标记，不挤压提交说明。 */
   const GRAPH_LANES = GRAPH_MAX_LANES;
-  const GRAPH_HEIGHT = ROW_HEIGHT - 2;
+  /** 绘图段占满整个行槽（含行与行之间的 2px 行距），上下段因此首尾相接。 */
+  const GRAPH_HEIGHT = ROW_HEIGHT;
   /** 线条颜色只按 lane 序号取主题令牌，深浅两套主题都不用字面色。 */
   const LANE_TOKENS = ["--accent", "--info", "--purple", "--success", "--warning", "--danger"];
 
@@ -158,6 +165,7 @@
     onNotice,
     onFileNav,
     onHunkNav,
+    onActivity,
     paneHead,
     paneResizer,
     branchGroups = true,
@@ -398,6 +406,16 @@
   /** 每行宽度一致（按整份结果的 lane 数），行与行之间的提交说明不会左右跳。 */
   let graphWidth = $derived(graphLanes * GRAPH_LANE_WIDTH + 3);
   let graphOn = $state(readGraphOn());
+
+  /** 已有内容上的重读：首次读取有自己的空状态，不算后台活动。 */
+  let backgroundActivity = $derived(
+    active && ((refreshing && commits.length > 0) || (detailLoading && detail !== null)),
+  );
+  $effect(() => {
+    const busy = backgroundActivity;
+    untrack(() => onActivity?.(busy));
+  });
+  onDestroy(() => onActivity?.(false));
 
   function saveGraphOn() {
     try {
@@ -1447,12 +1465,6 @@
           {/if}
         </div>
       </div>
-      {#if refreshing && commits.length > 0}
-        <div class="infobar info" role="status" aria-live="polite">
-          <span class="spinner"></span>
-          <span class="infobar-text">正在重新读取历史，旧提交暂时保留。</span>
-        </div>
-      {/if}
       {#if listError && !refreshing && commits.length > 0}
         <div class="infobar error" role="alert">
           <Icon name="alert-circle" size={15} />
@@ -1555,39 +1567,8 @@
                 }}
               >
                 {#if row}
-                  {@const drawn = clipSegments(row.segments, graphLanes)}
-                  {@const nodeLane = visibleNodeLane(row, graphLanes)}
-                  <span
-                    class="hr-graph"
-                    class:overflow={row.overflow}
-                    style={`--graph-width:${graphWidth}px;height:${GRAPH_HEIGHT}px`}
-                    aria-hidden="true"
-                  >
-                    <svg
-                      width={graphWidth}
-                      height={GRAPH_HEIGHT}
-                      viewBox={`0 0 ${graphWidth} ${GRAPH_HEIGHT}`}
-                      aria-hidden="true"
-                      focusable="false"
-                    >
-                      {#each drawn as segment, segmentIndex (segmentIndex)}
-                        <path class="graph-line" style={laneStyle(segment.color)} d={segmentPath(segment, GRAPH_HEIGHT)} />
-                      {/each}
-                      {#if nodeLane !== null}
-                        <circle
-                          class="node"
-                          class:head={row.head}
-                          style={laneStyle(row.color)}
-                          cx={laneX(nodeLane)}
-                          cy={GRAPH_HEIGHT / 2}
-                          r={row.head ? 4.5 : 3}
-                        />
-                      {/if}
-                    </svg>
-                    {#if row.overflow}
-                      <span class="hr-graph-more" title={`还有 ${row.hiddenLanes} 条分支线未画出`}>+{row.hiddenLanes}</span>
-                    {/if}
-                  </span>
+                  <!-- 行内只留等宽占位，拓扑画在行外的绘图层里：行有圆角裁切，线画在行里会在行与行之间断开。 -->
+                  <span class="hr-graph-slot" style={`width:${graphWidth}px`} aria-hidden="true"></span>
                 {/if}
                 <span class="avatar" style={`--hue:${hueOf(commit.authorName)}`} aria-hidden="true">{initialOf(commit.authorName)}</span>
                 <span class="hr-main">
@@ -1614,6 +1595,50 @@
                 </span>
               </div>
             {/each}
+            {#if graphOn}
+              <!-- 拓扑绘图层：每段与行槽（ROW_HEIGHT）等高、首尾相接，不受行的裁切和行距影响；
+                   不接收指针，悬停、点击与右键仍落在下面的提交行上。 -->
+              <div class="hr-graph-layer" aria-hidden="true">
+                {#each visible as commit, index (commit.oid)}
+                  {@const row = graph.rows[range.start + index]}
+                  {#if row}
+                    {@const drawn = clipSegments(row.segments, graphLanes)}
+                    {@const nodeLane = visibleNodeLane(row, graphLanes)}
+                    <span
+                      class="hr-graph"
+                      class:overflow={row.overflow}
+                      data-graph-oid={commit.oid}
+                      style={`--graph-width:${graphWidth}px;top:${(range.start + index) * ROW_HEIGHT}px;height:${GRAPH_HEIGHT}px`}
+                    >
+                      <svg
+                        width={graphWidth}
+                        height={GRAPH_HEIGHT}
+                        viewBox={`0 0 ${graphWidth} ${GRAPH_HEIGHT}`}
+                        aria-hidden="true"
+                        focusable="false"
+                      >
+                        {#each drawn as segment, segmentIndex (segmentIndex)}
+                          <path class="graph-line" style={laneStyle(segment.color)} d={segmentPath(segment, GRAPH_HEIGHT)} />
+                        {/each}
+                        {#if nodeLane !== null}
+                          <circle
+                            class="node"
+                            class:head={row.head}
+                            style={laneStyle(row.color)}
+                            cx={laneX(nodeLane)}
+                            cy={GRAPH_HEIGHT / 2}
+                            r={row.head ? 4.5 : 3}
+                          />
+                        {/if}
+                      </svg>
+                      {#if row.overflow}
+                        <span class="hr-graph-more" title={`还有 ${row.hiddenLanes} 条分支线未画出`}>+{row.hiddenLanes}</span>
+                      {/if}
+                    </span>
+                  {/if}
+                {/each}
+              </div>
+            {/if}
           </div>
         {/if}
       </div>
@@ -1646,12 +1671,6 @@
           <span class="infobar-text">
             {multiError}{#if multiFailed > 0}未读取的提交没有计入文件范围和合计。{/if}
           </span>
-        </div>
-      {/if}
-      {#if detailLoading && detail}
-        <div class="infobar info" role="status" aria-live="polite">
-          <span class="spinner"></span>
-          <span class="infobar-text">正在读取提交详情，当前内容暂时保留。</span>
         </div>
       {/if}
       {#if selectedOids.length > 1}
@@ -2112,16 +2131,16 @@
 />
 <style>
   /* 拓扑只是一条紧凑的竖条：每行只画自己的竖线、节点和行内斜线，没有全尺寸历史 SVG。
-     行是 50px 的边框盒（上下各 1px 边框 + 7px 内边距），内容盒只有 34px。
-     -8px 的上下负外边距把 50px 绘图盒对到行的边框盒上，节点正落在行中线，
-     竖线靠圆头线帽各伸出 1px，正好补满相邻行之间的 2px 行距。 */
-  .history-row { overflow-x: clip; overflow-y: visible; }
+     绘图段不放在行里：行有圆角与溢出裁切（不同 WebView 对 overflow-x: clip 的支持也不一致），
+     线画在行里会在行与行之间断开。绘图层与行同处虚拟空间，每段占满 ROW_HEIGHT 的行槽，
+     上一段的底边就是下一段的顶边；横向位置对齐行内的等宽占位（行左缩进 + 1px 边框 + 左内边距）。 */
+  .hr-graph-slot { flex: none; display: block; height: 1px; }
+  .hr-graph-layer { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
   .hr-graph {
-    position: relative;
-    flex: none;
+    position: absolute;
+    left: calc(var(--space-8) * 2 + 1px);
     display: block;
     width: var(--graph-width);
-    margin-block: -8px;
     pointer-events: none;
   }
   .hr-graph > svg { display: block; overflow: visible; }
@@ -2143,6 +2162,6 @@
   .history-graph-toggle.active { color: var(--accent-text); }
   /* 左栏收到很窄时先让出拓扑宽度，把横向空间留给提交说明。 */
   @container history-list (max-width: 260px) {
-    .hr-graph { display: none; }
+    .hr-graph, .hr-graph-slot { display: none; }
   }
 </style>

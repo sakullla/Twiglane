@@ -291,19 +291,23 @@ describe("工作区状态", () => {
 describe("重新验证状态", () => {
   afterEach(() => cleanup());
 
-  it("已有内容刷新时保留同步结论并显示刷新中，刷新入口不可重复触发", async () => {
+  it("已有内容刷新时保留同步结论，只在右下角刷新入口上安静显示刷新中，入口不可重复触发", async () => {
     const onRefresh = vi.fn();
     render(StatusBar, {
       props: { hasRepo: true, sync: "领先 2", refreshing: true, onRefresh } as never,
     });
     // 旧结论仍在原处，用户不用等刷新完成才能读到上一次结果。
     expect(screen.getByText("领先 2")).toBeTruthy();
-    const status = screen.getByRole("status");
-    expect(status.textContent).toContain("刷新中");
-    expect(status.getAttribute("aria-label")).toBe("正在刷新工作区");
-    expect(status.getAttribute("data-refreshing")).toBe("true");
+    // 后台刷新不在左侧插一条忙碌状态，也不当实时播报区反复播报。
+    expect(document.querySelector(".statusbar .sb-busy")).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
 
     const refresh = screen.getByRole("button", { name: "刷新工作区" }) as HTMLButtonElement;
+    expect(refresh.textContent).toContain("刷新中");
+    expect(refresh.getAttribute("data-refreshing")).toBe("true");
+    expect(refresh.querySelector(".spinner")).toBeTruthy();
+    // 入口是状态栏最后一项：固定在右下角，进出不挤动左侧内容。
+    expect(document.querySelector(".statusbar")!.lastElementChild?.previousElementSibling).toBe(refresh);
     expect(refresh.disabled).toBe(true);
     expect(refresh.title).toBe("正在重新读取工作区与当前差异");
     expect(document.getElementById(refresh.getAttribute("aria-describedby")!)?.textContent).toBe(
@@ -313,7 +317,7 @@ describe("重新验证状态", () => {
     expect(onRefresh).not.toHaveBeenCalled();
   });
 
-  it("首次读取与重新验证状态分开，同时成立时先说读取", () => {
+  it("首次读取与重新验证状态分开，同时成立时只说读取", () => {
     render(StatusBar, {
       props: {
         hasRepo: true,
@@ -327,7 +331,10 @@ describe("重新验证状态", () => {
     const status = screen.getByRole("status");
     expect(status.textContent).toContain("读取中");
     expect(status.textContent).not.toContain("刷新中");
-    expect(status.getAttribute("data-refreshing")).toBe("true");
+    const refresh = screen.getByRole("button", { name: "刷新工作区" });
+    expect(refresh.textContent).not.toContain("刷新中");
+    expect(refresh.hasAttribute("data-refreshing")).toBe(false);
+    expect(refresh.title).toBe("当前操作完成后才能刷新");
   });
 });
 

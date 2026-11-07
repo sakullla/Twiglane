@@ -3,6 +3,7 @@
   import { api } from "../api";
   import { normalizeError } from "../errors";
   import { changeLabel } from "../labels";
+  import { shortOid } from "../history";
   import { visibleRange } from "../layout";
   import { discardActionLabel, discardBoundary, undoActionLabel } from "../resolve";
   import type { DiscardFilePlan, OpenedRepository, StatusSnapshot, UndoResult } from "../types";
@@ -410,7 +411,7 @@
     icon="undo"
     tone={undo.eligible ? "danger" : "warning"}
     message="撤销最近一次提交？文件改动会保留在暂存区，不会放弃文件内容。"
-    targets={[{ icon: "commit", name: undo.summary || "最近一次提交", detail: undo.headOid.slice(0, 7) }]}
+    targets={[{ icon: "commit", name: undo.summary || "最近一次提交", detail: shortOid(undo.headOid) }]}
     targetsLabel="要撤销的提交"
     notes={[
       { tone: undo.eligible ? "ok" : "warn", text: undo.reason },

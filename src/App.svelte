@@ -14,6 +14,7 @@
     type CommandState,
   } from "./lib/commands";
   import { LatestReadQueue } from "./lib/latest-read";
+  import { shortOid } from "./lib/history";
   import { finishDiffAttempt, reuseDiffContent, type HunkNavReport } from "./lib/diff";
   import { DraftBuffer } from "./lib/draft";
   import {
@@ -85,6 +86,8 @@
   import TitleBar from "./lib/components/TitleBar.svelte";
   import ViewSwitcher from "./lib/components/ViewSwitcher.svelte";
   import Welcome from "./lib/components/Welcome.svelte";
+  import { createQuietActivity } from "./lib/quiet-activity";
+  import { setAbbrevLength } from "./lib/abbrev.svelte";
 
   /* 外观：三态选择 + 系统解析。documentElement 上只写 light / dark，
      "system" 由 matchMedia 解析，并跟随系统变化（R14/T2 的 Theme 收口在这里）。 */
@@ -129,13 +132,25 @@
   });
   let repositoryEpoch = 0;
   let refreshTask: { epoch: number; again: boolean; promise: Promise<boolean> } | null = null;
-  /** 当前后台/手动重新验证是否在途：与写入、首次读取分开，状态栏据此显示「刷新中」而不是写入中。 */
+  /**
+   * 状态栏右下角的「刷新中」：工作区重新验证与历史面板的后台重读合并成一条安静的指示。
+   * 与写入、首次读取分开；很快结束的不闪，出现后至少停留一小段，连续的监听刷新不会让它一闪一闪。
+   */
   let refreshActive = $state(false);
   let refreshSerial = 0;
-  let refreshShowTimer: ReturnType<typeof setTimeout> | undefined;
-  onDestroy(() => {
-    if (refreshShowTimer) clearTimeout(refreshShowTimer);
-  });
+  let workspaceRefreshing = false;
+  let historyRefreshing = false;
+  const refreshIndicator = createQuietActivity((visible) => (refreshActive = visible));
+  onDestroy(() => refreshIndicator.reset());
+
+  function syncRefreshIndicator() {
+    refreshIndicator.set(workspaceRefreshing || historyRefreshing);
+  }
+
+  function reportHistoryActivity(active: boolean) {
+    historyRefreshing = active;
+    syncRefreshIndicator();
+  }
   let draggingRepository = $state(false);
   let draft = $state("");
   /**
@@ -795,6 +810,7 @@
     drafts.load(next.summary.path, next.draft);
     draft = next.draft;
     opened = next;
+    setAbbrevLength(next.abbrevLength);
     selectedSet = [];
     degraded = next.watchDegraded;
     const groups = groupFiles(next.snapshot.files);
@@ -872,13 +888,10 @@
     }
   }
 
-  /** 重新验证很快结束时不必闪一下就消失；超过这个时间才把「刷新中」挂到状态栏。 */
-  const REFRESH_STATUS_DELAY_MS = 160;
-
   function stopRefreshIndicator() {
-    if (refreshShowTimer) clearTimeout(refreshShowTimer);
-    refreshShowTimer = undefined;
-    refreshActive = false;
+    workspaceRefreshing = false;
+    historyRefreshing = false;
+    refreshIndicator.reset();
   }
 
   function refresh(): Promise<boolean> {
@@ -890,10 +903,8 @@
     const serial = ++refreshSerial;
     const task = { epoch: repositoryEpoch, again: false, promise: Promise.resolve(false) };
     refreshTask = task;
-    if (refreshShowTimer) clearTimeout(refreshShowTimer);
-    refreshShowTimer = setTimeout(() => {
-      if (refreshSerial === serial) refreshActive = true;
-    }, REFRESH_STATUS_DELAY_MS);
+    workspaceRefreshing = true;
+    syncRefreshIndicator();
     task.promise = (async () => {
       let ok = false;
       do {
@@ -904,7 +915,10 @@
     })().finally(() => {
       if (refreshTask === task) refreshTask = null;
       // 仓库切换后可能已经开始了新一轮刷新：旧一轮收尾不能把新一轮的进行中状态提前关掉。
-      if (refreshSerial === serial) stopRefreshIndicator();
+      if (refreshSerial === serial) {
+        workspaceRefreshing = false;
+        syncRefreshIndicator();
+      }
     });
     return task.promise;
   }
@@ -1449,7 +1463,7 @@
         pushFailure = describeFailure(
           { code: "push_failed", message: result.pushError ?? "推送没有完成。" },
           "推送",
-          `本地提交 ${result.oid.slice(0, 7)} 已完成，重试只推送，不会再次提交。`,
+          `本地提交 ${shortOid(result.oid)} 已完成，重试只推送，不会再次提交。`,
         );
         phaseNote = null;
         banner = pushFailure;
@@ -2556,7 +2570,7 @@
     if (opened?.summary.path !== current.summary.path) return;
     draft = "";
     applySnapshot(result.snapshot);
-    live = `已提交 ${result.oid.slice(0, 7)}`;
+    live = `已提交 ${shortOid(result.oid)}`;
   }
 
   async function pushMeasured() {
@@ -2589,7 +2603,7 @@
     );
     const done = await api.completeMerge(current.summary.path, "合并分支", resolved.generation, nextId());
     applySnapshot(done.snapshot);
-    live = `已完成合并 ${done.oid.slice(0, 7)}`;
+    live = `已完成合并 ${shortOid(done.oid)}`;
     return done.oid;
   }
 
@@ -3038,6 +3052,7 @@
                   onNotice={notice}
                   onFileNav={(nav) => (historyNav = nav)}
                   onHunkNav={reportHistoryHunk}
+                  onActivity={reportHistoryActivity}
                   {branchGroups}
                   {paneHead}
                   {paneResizer}

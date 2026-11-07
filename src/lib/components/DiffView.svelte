@@ -801,6 +801,105 @@
     () => codeSize,
   );
 
+  /**
+   * 视野外的行内改动：长行只改了行尾（或横向滚过了头），可见部分的删除/新增两行看起来一模一样。
+   * 量的是已渲染行里的 .wd 标记与本行代码窗口（.code 的内容盒）的相对位置，所以中文全角、
+   * 制表符、语法分段和并排两栏的各自偏移都按浏览器实际排版算；一行只要还有一处改动看得见就不算。
+   * 结果只用来显示一个右下角的小入口，点一下把最上面那处改动横向滚进视野；不改任何差异内容。
+   */
+  interface HiddenChange {
+    count: number;
+    direction: "left" | "right";
+    side: "u" | "l" | "r";
+    delta: number;
+  }
+  let hiddenChange = $state<HiddenChange | null>(null);
+  let hiddenFrame = 0;
+  /** 改动标记左侧留出的余量：滚过去后前面还能看到几个字的上下文。 */
+  const REVEAL_CONTEXT_PX = 48;
+
+  function scanHiddenChanges(): HiddenChange | null {
+    const node = scroller;
+    if (!node || embedded) return null;
+    const view = node.getBoundingClientRect();
+    if (view.width <= 0 || view.height <= 0) return null;
+    const cells = new Map<Element, { visible: boolean; first: DOMRect | null; padLeft: number; box: DOMRect }>();
+    for (const mark of node.querySelectorAll<HTMLElement>(".code-in .wd")) {
+      const code = mark.closest<HTMLElement>(".code");
+      if (!code) continue;
+      const rect = mark.getBoundingClientRect();
+      if (rect.width <= 0 || rect.bottom <= view.top || rect.top >= view.bottom) continue;
+      let cell = cells.get(code);
+      if (!cell) {
+        const style = getComputedStyle(code);
+        cell = { visible: false, first: null, padLeft: Number.parseFloat(style.paddingLeft) || 0, box: code.getBoundingClientRect() };
+        cells.set(code, cell);
+      }
+      if (cell.visible) continue;
+      const left = cell.box.left + cell.padLeft;
+      const right = Math.min(cell.box.right, view.right);
+      if (rect.right > left + 1 && rect.left < right - 1) {
+        cell.visible = true;
+        continue;
+      }
+      if (!cell.first || rect.left < cell.first.left) cell.first = rect;
+    }
+    let found: HiddenChange | null = null;
+    let topmost = Number.POSITIVE_INFINITY;
+    let count = 0;
+    for (const [code, cell] of cells) {
+      if (cell.visible || !cell.first) continue;
+      count += 1;
+      if (cell.first.top >= topmost) continue;
+      topmost = cell.first.top;
+      const side = code.closest(".side-l") ? "l" : code.closest(".side-r") ? "r" : "u";
+      const delta = cell.first.left - (cell.box.left + cell.padLeft) - REVEAL_CONTEXT_PX;
+      found = { count: 0, side, delta, direction: delta > 0 ? "right" : "left" };
+    }
+    return found ? { ...found, count } : null;
+  }
+
+  function queueHiddenScan() {
+    if (typeof requestAnimationFrame === "undefined") return;
+    if (hiddenFrame) return;
+    hiddenFrame = requestAnimationFrame(() => {
+      hiddenFrame = 0;
+      const next = scanHiddenChanges();
+      const same = next === hiddenChange || (next && hiddenChange && next.count === hiddenChange.count
+        && next.direction === hiddenChange.direction && next.side === hiddenChange.side && next.delta === hiddenChange.delta);
+      if (!same) hiddenChange = next;
+    });
+  }
+
+  $effect(() => {
+    void [selectionKey, renderMode, range.start, range.end, lines, paneWidth, markWhitespace];
+    const node = scroller;
+    const bars = [leftBar, rightBar].filter((bar): bar is HTMLDivElement => bar !== null);
+    if (!node || embedded) {
+      hiddenChange = null;
+      return;
+    }
+    queueHiddenScan();
+    node.addEventListener("scroll", queueHiddenScan, { passive: true });
+    for (const bar of bars) bar.addEventListener("scroll", queueHiddenScan, { passive: true });
+    return () => {
+      node.removeEventListener("scroll", queueHiddenScan);
+      for (const bar of bars) bar.removeEventListener("scroll", queueHiddenScan);
+      if (hiddenFrame && typeof cancelAnimationFrame !== "undefined") cancelAnimationFrame(hiddenFrame);
+      hiddenFrame = 0;
+    };
+  });
+
+  function revealHiddenChange() {
+    const target = hiddenChange;
+    if (!target) return;
+    const bar = target.side === "l" ? leftBar : target.side === "r" ? rightBar : scroller;
+    if (!bar) return;
+    bar.scrollLeft = Math.max(0, bar.scrollLeft + target.delta);
+    if (target.side !== "u") setSideX(target.side, bar.scrollLeft);
+    queueHiddenScan();
+  }
+
   function applyScroll(next: number) {
     scrollTop = next;
     if (scroller) scroller.scrollTop = next;
@@ -1324,6 +1423,22 @@
         {/if}
         </div>
       </div>
+      {#if hiddenChange}
+        <!-- 0 高的粘性锚点钉在视口右下角，入口浮在代码上方，不占行、不挤动任何内容。 -->
+        <div class="hidden-change-anchor">
+          <button
+            type="button"
+            class="hidden-change"
+            data-hidden-change={hiddenChange.direction}
+            title={`有 ${hiddenChange.count} 行的改动在${hiddenChange.direction === "right" ? "右" : "左"}侧视野外，点击横向滚动到最上面那处`}
+            onclick={revealHiddenChange}
+          >
+            {#if hiddenChange.direction === "left"}<Icon name="arrow-left" size={12} />{/if}
+            <span>{hiddenChange.count} 行改动在{hiddenChange.direction === "right" ? "右" : "左"}侧</span>
+            {#if hiddenChange.direction === "right"}<Icon name="arrow-right" size={12} />{/if}
+          </button>
+        </div>
+      {/if}
     </div>
     {#if split}
       <!-- 两栏各一条横向滚动条，按代码栏（行号之后）对齐；内容是本栏的隐藏标尺，宽度由浏览器实测。 -->

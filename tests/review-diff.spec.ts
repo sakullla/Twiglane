@@ -491,3 +491,67 @@ describe("只读差异的窄工具条（R2）", () => {
     }
   });
 });
+
+describe("视野外的行内改动", () => {
+  function rect(left: number, right: number, top: number, bottom: number): DOMRect {
+    return { left, right, top, bottom, width: right - left, height: bottom - top, x: left, y: top, toJSON: () => ({}) } as DOMRect;
+  }
+
+  /** happy-dom 不排版：按类名给出几何，模拟「代码窗口 100–400px，改动落在 900px」的长行。 */
+  function stubGeometry(markLeft: () => number) {
+    const spy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains("diff-scroll")) return rect(0, 400, 0, 300);
+      if (this.classList.contains("code")) return rect(100, 400, 20, 38);
+      if (this.classList.contains("wd")) return rect(markLeft(), markLeft() + 10, 20, 38);
+      return rect(0, 0, 0, 0);
+    });
+    return () => spy.mockRestore();
+  }
+
+  function renderLongLine() {
+    const prefix = "const description = \"" + "x".repeat(120);
+    const diff = createTextDiff("src/a.ts", `${prefix}a";\n`, `${prefix}b";\n`, 1);
+    return render(DiffView, {
+      props: {
+        selection: { path: "src/a.ts", side: "unstaged" as const },
+        diff,
+        error: null,
+        loading: false,
+        disabled: false,
+        onStageHunk: () => {},
+        onLoadMore: () => {},
+      },
+    });
+  }
+
+  it("改动在可见窗口右侧时给出入口，点击横向滚到改动处；看得见后入口收起", async () => {
+    let markLeft = 900;
+    const restore = stubGeometry(() => markLeft);
+    try {
+      renderLongLine();
+      const hint = await screen.findByRole("button", { name: /2 行改动在右侧/ });
+      expect(hint.getAttribute("data-hidden-change")).toBe("right");
+      const scroller = document.querySelector<HTMLElement>(".diff-scroll")!;
+      scroller.scrollLeft = 0;
+      await fireEvent.click(hint);
+      // 滚到改动左侧还留出一点上下文。
+      expect(scroller.scrollLeft).toBe(900 - 100 - 48);
+      markLeft = 148;
+      await fireEvent.scroll(scroller);
+      await waitFor(() => expect(screen.queryByRole("button", { name: /行改动在/ })).toBeNull());
+    } finally {
+      restore();
+    }
+  });
+
+  it("改动已在可见窗口里时不显示入口", async () => {
+    const restore = stubGeometry(() => 200);
+    try {
+      renderLongLine();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(document.querySelector("[data-hidden-change]")).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+});

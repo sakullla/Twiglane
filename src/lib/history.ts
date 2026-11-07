@@ -1,7 +1,9 @@
+import { abbrevLength } from "./abbrev.svelte";
 import type { LineStat } from "./types";
 
+/** 提交缩写：长度跟随当前仓库的 Git 缩写设置（见 abbrev.svelte.ts），不写死 7 位。 */
 export function shortOid(oid: string): string {
-  return oid.slice(0, 7);
+  return oid.slice(0, abbrevLength());
 }
 
 export function formatAuthoredAt(seconds: number): string {

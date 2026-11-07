@@ -84,7 +84,7 @@ pub fn parse_review_url(url: &str) -> Result<ReviewRequest, AppError> {
         Some((host, query)) => (host, query),
         None => return Err(malformed("链接缺少查询参数")),
     };
-    if host != HOST {
+    if !is_host(host) {
         return Err(malformed("链接目标不是 review"));
     }
     let params = parse_query(query)?;
@@ -283,6 +283,14 @@ fn encode(value: &str) -> String {
     out
 }
 
+/// 固定 host：`review`，或系统对无路径 URL 规范化出的 `review/`（恰好一个尾斜杠）。
+///
+/// Windows 把 `twiglane://review?...` 交给应用时会变成 `twiglane://review/?...`，
+/// 两者是同一个 host，两端都必须接受；再多的斜杠或任何路径段都不是本协议。
+fn is_host(authority: &str) -> bool {
+    authority.strip_suffix('/').unwrap_or(authority) == HOST
+}
+
 /// RFC 4122 连字符形式：8-4-4-4-12，十六进制。
 fn is_id(value: &str) -> bool {
     let bytes = value.as_bytes();
@@ -342,7 +350,7 @@ pub fn validate_inbound(url: &str) -> Result<(), AppError> {
         Some((host, query)) => (host, query),
         None => return Err(malformed("回执缺少查询参数")),
     };
-    if host != HOST {
+    if !is_host(host) {
         return Err(malformed("回执目标不是 review"));
     }
     let params = parse_inbound_query(query)?;
@@ -530,6 +538,33 @@ mod tests {
     }
 
     #[test]
+    fn accepts_only_a_single_trailing_slash_after_the_host() {
+        let plain = url_of(&good_fields());
+        assert_eq!(plain.matches("twiglane://review?").count(), 1);
+        assert_eq!(parse_review_url(&plain).expect("无斜杠形式").review_id, REVIEW);
+
+        // 真实 Windows deep link 把无路径 URL 规范化成 host 后跟一个斜杠。
+        let slashed = plain.replacen("twiglane://review?", "twiglane://review/?", 1);
+        let request = parse_review_url(&slashed).expect("单个尾斜杠是系统等价规范化");
+        assert_eq!(request.review_id, REVIEW);
+        assert_eq!(request.session_id, SESSION);
+        assert_eq!(request.worktree_path, temp_worktree());
+
+        for hostile in [
+            plain.replacen("twiglane://review?", "twiglane://review//?", 1),
+            plain.replacen("twiglane://review?", "twiglane://review/review?", 1),
+            plain.replacen("twiglane://review?", "twiglane://review/a/b?", 1),
+            plain.replacen("twiglane://review?", "twiglane://review/x?", 1),
+            plain.replacen("twiglane://review?", "twiglane://review:80?", 1),
+            plain.replacen("twiglane://review?", "twiglane://me@review?", 1),
+            plain.replacen("twiglane://review", "twiglane://Review", 1),
+            plain.replacen("twiglane://review?", "twiglane://review/%2F?", 1),
+        ] {
+            assert_eq!(code_of(&hostile), MALFORMED_REQUEST, "{hostile}");
+        }
+    }
+
+    #[test]
     fn rejects_duplicate_and_unknown_params() {
         let mut duplicated = good_fields();
         duplicated.push(("sessionId", SESSION.to_string()));
@@ -627,6 +662,31 @@ mod tests {
             accepted_url("nope", SESSION).expect_err("坏 id").code,
             INVALID_RECEIPT
         );
+    }
+
+    #[test]
+    fn inbound_events_accept_a_single_trailing_slash_only() {
+        let accepted = accepted_url(REVIEW, SESSION).expect("accepted");
+        // 生成端继续输出零斜杠形式；接收端两种都认。
+        assert!(accepted.starts_with("cliora://review?"));
+        validate_inbound(&accepted).expect("无斜杠形式");
+
+        let slashed = accepted.replacen("cliora://review?", "cliora://review/?", 1);
+        validate_inbound(&slashed).expect("单个尾斜杠是系统等价规范化");
+
+        for hostile in [
+            accepted.replacen("cliora://review?", "cliora://review//?", 1),
+            accepted.replacen("cliora://review?", "cliora://review/x?", 1),
+            accepted.replacen("cliora://review?", "cliora://review/a/b?", 1),
+            accepted.replacen("cliora://review?", "cliora://review/%2F?", 1),
+        ] {
+            assert!(validate_inbound(&hostile).is_err(), "{hostile}");
+        }
+
+        // 带尾斜杠的 returned 同样通过完整事件校验。
+        let returned = returned_url(REVIEW, SESSION, Outcome::Reviewed, None).expect("reviewed");
+        let slashed_returned = returned.replacen("cliora://review?", "cliora://review/?", 1);
+        validate_inbound(&slashed_returned).expect("带尾斜杠的 returned");
     }
 
     #[test]

@@ -36,8 +36,9 @@ use crate::model::{
     AbortImpact, BranchState, CherryPickOutcome, CloneResult, CommitDetail, CommitPushReport,
     CommitResult, ConflictView, DiffResponse, DiscardResult, FileHistoryPage, GitInfo, HistoryPage,
     IgnoreOutcome, MergeComplete, MergePreview, MergeSession, OpenedRepository, PanelWidths,
-    RecentRepo, RemoteState, RemoteTag, RepoChanged, RepositoryDirectory, RepositoryFileContent,
-    StashApplyResult, StashSaveResult, StashState, StatusSnapshot, TagState, Theme, UndoResult,
+    RecentRepo, RemoteState, RemoteTag, RepoChanged, RepositoryContentSearch, RepositoryDirectory,
+    RepositoryFileContent, RepositoryPathSearch, RepositorySearchScope, StashApplyResult,
+    StashSaveResult, StashState, StatusSnapshot, TagState, Theme, UndoResult,
 };
 use crate::shutdown::Shutdown;
 use crate::state::{AppStore, PullIntegration};
@@ -96,6 +97,8 @@ pub fn run() {
             file_preview,
             repository_directory,
             repository_file_content,
+            repository_path_search,
+            repository_content_search,
             stage_files,
             unstage_files,
             stage_hunks,
@@ -884,6 +887,56 @@ async fn repository_file_content(
         &path,
         &relative,
         offset,
+        limit,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+async fn repository_path_search(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    query: String,
+    directory: Option<String>,
+    include_ignored: bool,
+    limit: Option<usize>,
+    generation: u64,
+    request_id: u64,
+) -> Result<RepositoryPathSearch, AppError> {
+    crate::git::files::repository_path_search(
+        state.inner(),
+        &path,
+        &query,
+        directory.as_deref(),
+        include_ignored,
+        limit,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+async fn repository_content_search(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    query: String,
+    scope: RepositorySearchScope,
+    include_ignored: bool,
+    limit: Option<usize>,
+    generation: u64,
+    request_id: u64,
+) -> Result<RepositoryContentSearch, AppError> {
+    crate::git::files::repository_content_search(
+        state.inner(),
+        &path,
+        &query,
+        scope,
+        include_ignored,
         limit,
         generation,
         request_id,
@@ -1773,6 +1826,8 @@ mod ipc_contract {
             "commit_detail",
             "commit_file_diff",
             "file_history",
+            "repository_path_search",
+            "repository_content_search",
             "stash_state",
             "save_stash",
             "apply_stash",

@@ -77,6 +77,65 @@ pub fn index_paths_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) 
     )
 }
 
+/// 路径枚举：已跟踪 + 未跟踪但未被忽略的路径（--cached --others --exclude-standard）。
+///
+/// 只读：不写索引、不改忽略规则、不进入 .git 内部。目录范围交给 Git 的 pathspec 前缀判断，
+/// 而不是先枚举全仓再在内存里过滤，保证目录 scope 不会隐式扫描其他目录。
+pub fn list_paths_command(
+    git: &Path,
+    root: &Path,
+    directory: Option<&Path>,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = vec![
+        OsString::from("--literal-pathspecs"),
+        OsString::from("-c"),
+        OsString::from("core.quotePath=false"),
+        OsString::from("-C"),
+        root.as_os_str().to_os_string(),
+        OsString::from("--no-optional-locks"),
+        OsString::from("ls-files"),
+        OsString::from("-z"),
+        OsString::from("--cached"),
+        OsString::from("--others"),
+        OsString::from("--exclude-standard"),
+    ];
+    push_directory_pathspec(&mut args, directory);
+    (git.to_path_buf(), args)
+}
+
+/// 只列被忽略的未跟踪路径（--others --ignored --exclude-standard）。
+///
+/// 与上面的枚举分开执行、由调用方合并去重：--ignored 只过滤 --others，
+/// 混在一条命令里会让「已跟踪且匹配忽略规则」的路径来源不清。
+pub fn list_ignored_paths_command(
+    git: &Path,
+    root: &Path,
+    directory: Option<&Path>,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = vec![
+        OsString::from("--literal-pathspecs"),
+        OsString::from("-c"),
+        OsString::from("core.quotePath=false"),
+        OsString::from("-C"),
+        root.as_os_str().to_os_string(),
+        OsString::from("--no-optional-locks"),
+        OsString::from("ls-files"),
+        OsString::from("-z"),
+        OsString::from("--others"),
+        OsString::from("--ignored"),
+        OsString::from("--exclude-standard"),
+    ];
+    push_directory_pathspec(&mut args, directory);
+    (git.to_path_buf(), args)
+}
+
+fn push_directory_pathspec(args: &mut Vec<OsString>, directory: Option<&Path>) {
+    if let Some(directory) = directory.filter(|path| !path.as_os_str().is_empty()) {
+        args.push(OsString::from("--"));
+        args.push(directory.as_os_str().to_os_string());
+    }
+}
+
 pub fn status_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     (
         git.to_path_buf(),

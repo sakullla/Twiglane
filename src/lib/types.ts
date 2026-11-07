@@ -165,6 +165,78 @@ export interface RepositoryFileContent {
   message: string | null;
 }
 
+/** 路径搜索的结果类型：文件来自 Git 路径集合，目录由文件祖先派生。 */
+export type RepositoryPathKind = "file" | "directory";
+
+export interface RepositoryPathEntry {
+  path: string;
+  kind: RepositoryPathKind;
+  ignored: boolean;
+}
+
+export interface RepositoryPathSearch {
+  generation: number;
+  query: string;
+  directory: string | null;
+  includeIgnored: boolean;
+  /** 参与匹配的路径条数（含派生目录）：用来区分"没有匹配"与"没有枚举到路径"。 */
+  scanned: number;
+  entries: RepositoryPathEntry[];
+  /** 枚举被输出上限截断，或匹配数超过本次 limit。 */
+  truncated: boolean;
+  message: string | null;
+}
+
+/** 内容搜索范围：全仓、某个目录、单个文件，或当前改动的路径集合。 */
+export type RepositorySearchScope =
+  | { kind: "repository" }
+  | { kind: "directory"; path: string }
+  | { kind: "file"; path: string }
+  | { kind: "changed" };
+
+export type RepositorySkipReason =
+  | "binary"
+  | "invalidUtf8"
+  | "unsupported"
+  | "symlink"
+  | "special"
+  | "nestedRepository"
+  | "tooLarge"
+  | "missing"
+  | "unreadable";
+
+export interface RepositorySearchSkip {
+  path: string;
+  reason: RepositorySkipReason;
+}
+
+export interface RepositoryContentMatch {
+  path: string;
+  /** 1 起算的行号。 */
+  line: number;
+  /** 1 起算的列号，按 Unicode 字符计数。 */
+  column: number;
+  text: string;
+}
+
+export interface RepositoryContentSearch {
+  generation: number;
+  query: string;
+  scope: "repository" | "directory" | "file" | "changed";
+  scopePath: string | null;
+  matches: RepositoryContentMatch[];
+  /** 真正读到并完整解码的文件数，不含被跳过的文件。 */
+  filesScanned: number;
+  /** 被跳过文件的原因明细（有界）；完整数量见 skippedFiles。 */
+  skipped: RepositorySearchSkip[];
+  skippedFiles: number;
+  /** 达到结果数/文件数/读取上限，或路径枚举被截断：不能当作完整结果。 */
+  truncated: boolean;
+  /** 匹配行的展示文本被截短过；行号与列号仍然准确。 */
+  textTruncated: boolean;
+  message: string | null;
+}
+
 export interface DiffResponse {
   preview?: PreviewSources;
   generation: number;

@@ -762,3 +762,110 @@ pub struct RepositoryFileContent {
     pub truncated: bool,
     pub message: Option<String>,
 }
+
+/// 路径搜索的结果类型：文件来自 Git 路径集合，目录由文件祖先派生。
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RepositoryPathKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryPathEntry {
+    pub path: String,
+    pub kind: RepositoryPathKind,
+    pub ignored: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryPathSearch {
+    pub generation: u64,
+    pub query: String,
+    pub directory: Option<String>,
+    pub include_ignored: bool,
+    /// 实际参与匹配的路径条数（含派生目录），用来区分"没有匹配"与"没有枚举到任何路径"。
+    pub scanned: u64,
+    pub entries: Vec<RepositoryPathEntry>,
+    /// 路径枚举被 Git 输出上限或本地条数上限截断，或匹配数超过本次 limit。
+    pub truncated: bool,
+    pub message: Option<String>,
+}
+
+/// 内容搜索范围：全仓、某个目录、单个文件，或当前改动的路径集合。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum RepositorySearchScope {
+    Repository,
+    Directory { path: String },
+    File { path: String },
+    Changed,
+}
+
+impl RepositorySearchScope {
+    /// 稳定的小写名称：前端只用它区分显示，不据此改变范围语义。
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Repository => "repository",
+            Self::Directory { .. } => "directory",
+            Self::File { .. } => "file",
+            Self::Changed => "changed",
+        }
+    }
+}
+
+/// 单个文件为什么没有参与搜索。每一种都要真实出现，不能用"无匹配"掩盖。
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RepositorySkipReason {
+    Binary,
+    InvalidUtf8,
+    /// 图片、压缩包等走资源预览的类型：它们不是文本，也不生成伪文本匹配。
+    Unsupported,
+    Symlink,
+    Special,
+    NestedRepository,
+    TooLarge,
+    Missing,
+    Unreadable,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositorySearchSkip {
+    pub path: String,
+    pub reason: RepositorySkipReason,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryContentMatch {
+    pub path: String,
+    /// 1 起算的行号。
+    pub line: u64,
+    /// 1 起算的列号，按 Unicode 标量计数，前端可直接据此定位字符。
+    pub column: u64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryContentSearch {
+    pub generation: u64,
+    pub query: String,
+    pub scope: String,
+    pub scope_path: Option<String>,
+    pub matches: Vec<RepositoryContentMatch>,
+    /// 真正读到并完整解码的文件数，不含被跳过的文件。
+    pub files_scanned: u64,
+    /// 被跳过文件的原因明细（有界）；完整数量见 skipped_files。
+    pub skipped: Vec<RepositorySearchSkip>,
+    pub skipped_files: u64,
+    /// 结果达到 limit，或文件数/读取字节数达到上限，或路径枚举本身被截断。
+    pub truncated: bool,
+    /// 匹配行的展示文本被截短过；行号与列号仍然准确。
+    pub text_truncated: bool,
+    pub message: Option<String>,
+}

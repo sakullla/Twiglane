@@ -136,6 +136,48 @@ describe("Tauri 命令参数", () => {
     });
   });
 
+  it("路径与内容搜索命令按 camelCase 传参，scope 用 kind 判别", async () => {
+    await api.repositoryPathSearch("/repo", "main", "src", true, 50, 8, 70);
+    await api.repositoryContentSearch(
+      "/repo",
+      "needle",
+      { kind: "directory", path: "src/lib" },
+      false,
+      undefined,
+      8,
+      71,
+    );
+    await api.repositoryContentSearch("/repo", "needle", { kind: "changed" }, false, 20, 8, 72);
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "repository_path_search", {
+      path: "/repo",
+      query: "main",
+      directory: "src",
+      includeIgnored: true,
+      limit: 50,
+      generation: 8,
+      requestId: 70,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "repository_content_search", {
+      path: "/repo",
+      query: "needle",
+      scope: { kind: "directory", path: "src/lib" },
+      includeIgnored: false,
+      limit: undefined,
+      generation: 8,
+      requestId: 71,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "repository_content_search", {
+      path: "/repo",
+      query: "needle",
+      scope: { kind: "changed" },
+      includeIgnored: false,
+      limit: 20,
+      generation: 8,
+      requestId: 72,
+    });
+  });
+
   it("远程标签查询不带 generation：它不受本地状态校验", async () => {
     await api.tagRemoteState("/repo", "origin");
     expect(invoke).toHaveBeenCalledWith("tag_remote_state", { path: "/repo", remote: "origin" });

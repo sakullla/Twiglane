@@ -1,20 +1,26 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::error::AppError;
-use crate::git::command::{ignore_check_command, index_paths_command};
+use crate::git::command::{
+    ignore_check_command, index_paths_command, list_ignored_paths_command, list_paths_command,
+    status_command,
+};
 use crate::git::ops::{
     canonical_existing, git_failure, repo_key, require_git, safe_relative, validate_input_path,
     Backend,
 };
+use crate::git::parse::parse_status;
 use crate::git::preview::wants_preview;
 use crate::git::schedule::{internal_request_id, GitJob, JobKind};
 use crate::model::{
-    RepositoryDirectory, RepositoryDirectoryEntry, RepositoryEntryKind, RepositoryFileContent,
-    RepositoryFileKind,
+    ChangeKind, RepositoryContentMatch, RepositoryContentSearch, RepositoryDirectory,
+    RepositoryDirectoryEntry, RepositoryEntryKind, RepositoryFileContent, RepositoryFileKind,
+    RepositoryPathEntry, RepositoryPathKind, RepositoryPathSearch, RepositorySearchScope,
+    RepositorySearchSkip, RepositorySkipReason,
 };
 use crate::shutdown::Shutdown;
 
@@ -671,6 +677,693 @@ pub async fn repository_file_content(
     Ok(result)
 }
 
+/// 路径搜索一次最多返回多少条：前端只展示有限条，更多结果靠更精确的关键词缩小。
+const DEFAULT_PATH_LIMIT: usize = 200;
+const MAX_PATH_LIMIT: usize = 1000;
+/// 一次路径枚举最多处理多少条路径；超过即标记截断，而不是继续堆内存。
+const MAX_ENUMERATED_PATHS: usize = 200_000;
+const DEFAULT_MATCH_LIMIT: usize = 200;
+const MAX_MATCH_LIMIT: usize = 2_000;
+/// 单个文件参与内容搜索的字节上限：超过按 tooLarge 跳过并说明，不做部分匹配冒充完整。
+const MAX_SEARCH_FILE_BYTES: u64 = 2 * 1024 * 1024;
+/// 一次内容搜索最多读取多少个文件 / 多少字节；达到即截断。
+const MAX_SEARCH_FILES: u64 = 20_000;
+const MAX_SEARCH_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+/// 单条匹配结果保留的展示文本上限（字节，切在字符边界）。
+const MAX_MATCH_TEXT_BYTES: usize = 400;
+/// 跳过原因明细条数上限：真实数量仍在 skippedFiles 里。
+const MAX_SKIP_RECORDS: usize = 64;
+const MAX_QUERY_CHARS: usize = 200;
+
+/// 一条被枚举到的仓库路径。ignored 只表示"来自忽略枚举"，不改变本次请求之外的任何状态。
+#[derive(Debug, Clone)]
+struct EnumeratedPath {
+    path: String,
+    directory: bool,
+    ignored: bool,
+}
+
+/// 解析 git ls-files -z 的输出：目录与被忽略目录都以尾部 "/" 出现，去掉尾部分隔符后交给去重。
+fn parse_list_output(stdout: &[u8], ignored: bool, out: &mut Vec<EnumeratedPath>) {
+    for raw in stdout.split(|byte| *byte == 0) {
+        if raw.is_empty() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(raw).replace('\\', "/");
+        let (path, directory) = match text.strip_suffix('/') {
+            Some(stripped) => (stripped.to_string(), true),
+            None => (text, false),
+        };
+        if path.is_empty() {
+            continue;
+        }
+        out.push(EnumeratedPath {
+            path,
+            directory,
+            ignored,
+        });
+    }
+}
+
+/// 执行一条路径枚举命令。输出超限时保留已读到的部分并标记截断，由调用方如实返回。
+async fn run_path_list(
+    backend: &Backend,
+    key: &str,
+    generation: u64,
+    command: (PathBuf, Vec<std::ffi::OsString>),
+    ignored: bool,
+    failure: &str,
+) -> Result<(Vec<EnumeratedPath>, bool), AppError> {
+    let (program, args) = command;
+    let output = backend
+        .scheduler
+        .execute(GitJob {
+            repo_key: key.to_string(),
+            kind: JobKind::Read,
+            request_id: internal_request_id(),
+            generation,
+            program,
+            args,
+            stdin: None,
+            truncate_stdout: true,
+            output_limit: Some(MAX_INDEX_BYTES),
+            env: Vec::new(),
+        })
+        .await?;
+    if output.output.exit_code != 0 {
+        return Err(git_failure("path_list", &output.output, failure));
+    }
+    let mut paths = Vec::new();
+    parse_list_output(&output.output.stdout, ignored, &mut paths);
+    Ok((paths, output.output.stdout_truncated))
+}
+
+/// 枚举仓库路径（已跟踪 + 未跟踪非忽略，可选合并忽略文件）。
+///
+/// 只读、幂等：不写索引、不改忽略规则。目录范围用 Git pathspec 前缀限制，
+/// 因此"目录 scope"不会隐式枚举其他目录。
+async fn list_repository_paths(
+    backend: &Backend,
+    root: &Path,
+    key: &str,
+    generation: u64,
+    directory: Option<&Path>,
+    include_ignored: bool,
+) -> Result<(Vec<EnumeratedPath>, bool), AppError> {
+    let git = require_git(backend).await?;
+    let (mut paths, mut truncated) = run_path_list(
+        backend,
+        key,
+        generation,
+        list_paths_command(&git.path, root, directory),
+        false,
+        "无法枚举仓库路径。",
+    )
+    .await?;
+    if include_ignored {
+        let (ignored, ignored_truncated) = run_path_list(
+            backend,
+            key,
+            generation,
+            list_ignored_paths_command(&git.path, root, directory),
+            true,
+            "无法枚举被忽略的路径。",
+        )
+        .await?;
+        truncated |= ignored_truncated;
+        paths.extend(ignored);
+    }
+    // 去重：同一路径可能同时来自 --cached 与 --ignored（已跟踪但匹配忽略规则），
+    // 保留先出现的那条（未标记 ignored），忽略合并只影响本次请求。
+    let mut seen = HashSet::new();
+    paths.retain(|entry| seen.insert(entry.path.clone()));
+    if paths.len() > MAX_ENUMERATED_PATHS {
+        paths.truncate(MAX_ENUMERATED_PATHS);
+        truncated = true;
+    }
+    Ok((paths, truncated))
+}
+
+/// 关键词的匹配质量：文件名前缀优先，其次文件名包含，最后是路径其他部分包含。
+fn path_match_rank(path: &str, query: &str) -> Option<u32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let lower = path.to_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    if name.starts_with(query) {
+        Some(0)
+    } else if name.contains(query) {
+        Some(1)
+    } else if lower.contains(query) {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// 在已枚举的路径上做有界匹配：文件来自 Git，目录由文件祖先与 Git 给出的目录合并派生。
+///
+/// 排序完全确定（质量、路径长度、字典序），同样输入必得同样顺序，方便前端做键盘导航。
+fn rank_path_entries(
+    paths: &[EnumeratedPath],
+    query: &str,
+    limit: usize,
+) -> (Vec<RepositoryPathEntry>, u64, bool) {
+    let query = query.to_lowercase();
+    let mut directories: HashMap<&str, bool> = HashMap::new();
+    for entry in paths {
+        if entry.directory {
+            let slot = directories.entry(entry.path.as_str()).or_insert(true);
+            *slot &= entry.ignored;
+        }
+        for (offset, _) in entry.path.match_indices('/') {
+            let slot = directories.entry(&entry.path[..offset]).or_insert(true);
+            *slot &= entry.ignored;
+        }
+    }
+    let mut candidates: Vec<(u32, &str, bool, bool)> = Vec::new();
+    for entry in paths {
+        if entry.directory {
+            // 目录统一由派生集合给出，避免同一个目录既是条目又被派生一次。
+            continue;
+        }
+        if let Some(rank) = path_match_rank(&entry.path, &query) {
+            candidates.push((rank, entry.path.as_str(), false, entry.ignored));
+        }
+    }
+    for (path, ignored) in &directories {
+        if let Some(rank) = path_match_rank(path, &query) {
+            candidates.push((rank, path, true, *ignored));
+        }
+    }
+    let scanned = (paths.len() + directories.len()) as u64;
+    candidates.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.len().cmp(&right.1.len()))
+            .then_with(|| left.1.cmp(right.1))
+    });
+    let truncated = candidates.len() > limit;
+    candidates.truncate(limit);
+    let entries = candidates
+        .into_iter()
+        .map(|(_, path, directory, ignored)| RepositoryPathEntry {
+            path: path.to_string(),
+            kind: if directory {
+                RepositoryPathKind::Directory
+            } else {
+                RepositoryPathKind::File
+            },
+            ignored,
+        })
+        .collect();
+    (entries, scanned, truncated)
+}
+
+fn validate_query(query: &str) -> Result<(), AppError> {
+    if query.contains('\0') || query.contains('\n') || query.contains('\r') {
+        return Err(AppError::new("query", "搜索关键词不能包含换行或空字符。"));
+    }
+    if query.chars().count() > MAX_QUERY_CHARS {
+        return Err(AppError::new(
+            "query",
+            format!("搜索关键词过长，请缩短到 {MAX_QUERY_CHARS} 个字符以内。"),
+        ));
+    }
+    Ok(())
+}
+
+/// 按仓库相对路径查找文件与派生目录，可限定到某个目录并显式包含忽略文件。
+///
+/// 结果有界（limit）、排序稳定；枚举本身被 Git 输出上限或本地条数上限截断时，
+/// 返回 truncated 而不是把部分结果当成完整结果。
+#[allow(clippy::too_many_arguments)]
+pub async fn repository_path_search(
+    backend: &Backend,
+    path: &str,
+    query: &str,
+    directory: Option<&str>,
+    include_ignored: bool,
+    limit: Option<usize>,
+    generation: u64,
+    request_id: u64,
+) -> Result<RepositoryPathSearch, AppError> {
+    let root = canonical_existing(&validate_input_path(path)?)?;
+    let directory_path = match directory {
+        Some(directory) => Some(relative_directory(directory)?),
+        None => None,
+    };
+    validate_query(query)?;
+    let limit = limit.unwrap_or(DEFAULT_PATH_LIMIT).clamp(1, MAX_PATH_LIMIT);
+    let key = repo_key(&root);
+    let (paths, enumeration_truncated) = list_repository_paths(
+        backend,
+        &root,
+        &key,
+        generation,
+        directory_path.as_deref(),
+        include_ignored,
+    )
+    .await?;
+    let directory_label = directory_path.as_deref().map(display_path);
+    let query_for_search = query.to_string();
+    let (entries, scanned, hit_limit) = backend
+        .scheduler
+        .execute_blocking_read(&key, request_id, generation, move |cancel| {
+            check_cancel(&cancel)?;
+            Ok(rank_path_entries(&paths, &query_for_search, limit))
+        })
+        .await?;
+    let truncated = enumeration_truncated || hit_limit;
+    Ok(RepositoryPathSearch {
+        generation,
+        query: query.to_string(),
+        directory: directory_label,
+        include_ignored,
+        scanned,
+        entries,
+        truncated,
+        message: truncated.then(|| "结果已截断：请缩小目录范围或细化关键词。".to_string()),
+    })
+}
+
+/// 只保留文件路径（目录由树自己展开），并给出确定的顺序。
+fn collect_file_paths(paths: &[EnumeratedPath]) -> Vec<String> {
+    let mut files: Vec<String> = paths
+        .iter()
+        .filter(|entry| !entry.directory)
+        .map(|entry| entry.path.clone())
+        .collect();
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// changed-only 范围：直接用当前 git status 的路径集合，不做全仓枚举。
+///
+/// 已删除路径（任一侧为 D）不参与搜索；其余路径是否可读由逐文件读取时再确认，
+/// 单个文件失败只影响自己。
+async fn changed_paths(
+    backend: &Backend,
+    root: &Path,
+    key: &str,
+    generation: u64,
+) -> Result<Vec<String>, AppError> {
+    let git = require_git(backend).await?;
+    let (program, args) = status_command(&git.path, root);
+    let output = backend
+        .scheduler
+        .execute(GitJob {
+            repo_key: key.to_string(),
+            kind: JobKind::Read,
+            request_id: internal_request_id(),
+            generation,
+            program,
+            args,
+            stdin: None,
+            truncate_stdout: false,
+            output_limit: None,
+            env: Vec::new(),
+        })
+        .await?;
+    if output.output.exit_code != 0 {
+        return Err(git_failure(
+            "status_failed",
+            &output.output,
+            "无法读取仓库状态。",
+        ));
+    }
+    let snapshot = parse_status(&output.output.stdout)?;
+    let mut paths: Vec<String> = snapshot
+        .files
+        .into_iter()
+        .filter(|file| {
+            !matches!(file.staged, ChangeKind::Deleted)
+                && !matches!(file.unstaged, ChangeKind::Deleted)
+        })
+        .map(|file| file.path)
+        .collect();
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+#[derive(Debug, Default)]
+struct SearchOutcome {
+    matches: Vec<RepositoryContentMatch>,
+    skipped: Vec<RepositorySearchSkip>,
+    skipped_files: u64,
+    files_scanned: u64,
+    scanned_bytes: u64,
+    truncated: bool,
+    text_truncated: bool,
+}
+
+fn record_skip(outcome: &mut SearchOutcome, path: &str, reason: RepositorySkipReason) {
+    outcome.skipped_files += 1;
+    if outcome.skipped.len() < MAX_SKIP_RECORDS {
+        outcome.skipped.push(RepositorySearchSkip {
+            path: path.to_string(),
+            reason,
+        });
+    }
+}
+
+/// 一行里的第一条匹配；列号按字符计数，展示文本有界（超长时截短并单独标记）。
+fn line_match(
+    relative: &str,
+    line_no: u64,
+    line: &str,
+    query: &str,
+) -> Option<(RepositoryContentMatch, bool)> {
+    let byte_index = line.find(query)?;
+    let column = line[..byte_index].chars().count() as u64 + 1;
+    let mut text = line.to_string();
+    let mut text_truncated = false;
+    if text.len() > MAX_MATCH_TEXT_BYTES {
+        let mut end = MAX_MATCH_TEXT_BYTES;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text_truncated = true;
+    }
+    Some((
+        RepositoryContentMatch {
+            path: relative.to_string(),
+            line: line_no,
+            column,
+            text,
+        },
+        text_truncated,
+    ))
+}
+
+/// 打开一个可供搜索的普通文件：逐级拒绝符号链接，canonicalize 后确认仍在仓库内。
+///
+/// 枚举路径（Git 给出的文件、changed-only 路径）与单文件 scope 走同一个入口：
+/// 路径本身来自 Git 不代表工作区仍与索引一致，中间父目录被换成指向仓库外的符号链接时
+/// 必须在这里被拦住，否则 `File::open` 会读到仓库外的内容。
+/// 返回 None 表示该路径不作为可搜索文件（已记录跳过原因）。
+fn open_search_file(
+    root: &Path,
+    relative: &str,
+    outcome: &mut SearchOutcome,
+) -> Option<(fs::File, u64)> {
+    let relative_path = match safe_relative(relative) {
+        Ok(path) => path,
+        Err(_) => {
+            record_skip(outcome, relative, RepositorySkipReason::Special);
+            return None;
+        }
+    };
+    let full = root.join(&relative_path);
+    let meta = match full.symlink_metadata() {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            record_skip(outcome, relative, RepositorySkipReason::Missing);
+            return None;
+        }
+        Err(_) => {
+            record_skip(outcome, relative, RepositorySkipReason::Unreadable);
+            return None;
+        }
+    };
+    if meta.file_type().is_symlink() {
+        record_skip(outcome, relative, RepositorySkipReason::Symlink);
+        return None;
+    }
+    if meta.is_dir() {
+        // 嵌套仓库（含 gitlink 与未跟踪的子仓库）与普通目录都不进入内部。
+        let reason = if full.join(".git").symlink_metadata().is_ok() {
+            RepositorySkipReason::NestedRepository
+        } else {
+            RepositorySkipReason::Special
+        };
+        record_skip(outcome, relative, reason);
+        return None;
+    }
+    if !meta.is_file() {
+        record_skip(outcome, relative, RepositorySkipReason::Special);
+        return None;
+    }
+    if meta.len() > MAX_SEARCH_FILE_BYTES {
+        record_skip(outcome, relative, RepositorySkipReason::TooLarge);
+        return None;
+    }
+    // 末级不是符号链接仍不够：中间的父目录可能是。逐级复查分量，再解析真实路径。
+    if let Err(error) = reject_symlink_components(root, &relative_path) {
+        let reason = match error.code.as_str() {
+            "file_path" => RepositorySkipReason::Symlink,
+            "path_missing" => RepositorySkipReason::Missing,
+            _ => RepositorySkipReason::Unreadable,
+        };
+        record_skip(outcome, relative, reason);
+        return None;
+    }
+    let resolved = match canonical_existing(&full) {
+        Ok(resolved) => resolved,
+        Err(_) => {
+            record_skip(outcome, relative, RepositorySkipReason::Unreadable);
+            return None;
+        }
+    };
+    if !resolved.starts_with(root) {
+        record_skip(outcome, relative, RepositorySkipReason::Symlink);
+        return None;
+    }
+    let file = match fs::File::open(&resolved) {
+        Ok(file) => file,
+        Err(_) => {
+            record_skip(outcome, relative, RepositorySkipReason::Unreadable);
+            return None;
+        }
+    };
+    Some((file, meta.len()))
+}
+
+/// 搜索单个文件的可读文本。取消是唯一向上传播的错误：其余失败都变成局部跳过原因。
+///
+/// 一个文件的匹配先在本地积累，只有整份文本都被完整解码后才提交；
+/// 中途发现二进制或非法 UTF-8 时丢弃该文件的匹配，避免"半个文件的匹配"冒充真实结果。
+fn search_file(
+    root: &Path,
+    relative: &str,
+    query: &str,
+    limit: usize,
+    outcome: &mut SearchOutcome,
+    cancel: &Shutdown,
+) -> Result<(), AppError> {
+    let Some((mut file, size)) = open_search_file(root, relative, outcome) else {
+        return Ok(());
+    };
+    let mut probe = [0_u8; PROBE_BYTES];
+    let count = match file.read(&mut probe) {
+        Ok(count) => count,
+        Err(_) => {
+            record_skip(outcome, relative, RepositorySkipReason::Unreadable);
+            return Ok(());
+        }
+    };
+    let probe = &probe[..count];
+    if wants_preview(relative, probe) {
+        record_skip(outcome, relative, RepositorySkipReason::Unsupported);
+        return Ok(());
+    }
+    if probe.contains(&0) {
+        record_skip(outcome, relative, RepositorySkipReason::Binary);
+        return Ok(());
+    }
+    outcome.scanned_bytes += size;
+    let chain = std::io::Cursor::new(probe.to_vec()).chain(file);
+    let mut reader = BufReader::new(chain);
+    let mut buffer = Vec::new();
+    let mut line_no = 0_u64;
+    let mut file_matches = Vec::new();
+    let mut text_truncated = false;
+    loop {
+        check_cancel(cancel)?;
+        let chunk = read_line_chunk(&mut reader, &mut buffer, MAX_LINE_BYTES, cancel)?;
+        if !chunk.any {
+            break;
+        }
+        if chunk.binary {
+            record_skip(outcome, relative, RepositorySkipReason::Binary);
+            return Ok(());
+        }
+        line_no += 1;
+        if chunk.truncated {
+            // 单行超过 64 KiB：只搜索保留的前缀，并把"结果可能不完整"如实标记。
+            outcome.truncated = true;
+        } else {
+            strip_line_end(&mut buffer);
+        }
+        let mut end = buffer.len();
+        if chunk.truncated {
+            while end > 0 && std::str::from_utf8(&buffer[..end]).is_err() {
+                end -= 1;
+            }
+        }
+        let Ok(line) = std::str::from_utf8(&buffer[..end]) else {
+            record_skip(outcome, relative, RepositorySkipReason::InvalidUtf8);
+            return Ok(());
+        };
+        if let Some((found, cut)) = line_match(relative, line_no, line, query) {
+            text_truncated |= cut;
+            file_matches.push(found);
+            if outcome.matches.len() + file_matches.len() >= limit {
+                outcome.truncated = true;
+                break;
+            }
+        }
+    }
+    outcome.matches.extend(file_matches);
+    outcome.files_scanned += 1;
+    outcome.text_truncated |= text_truncated;
+    Ok(())
+}
+
+/// 按已排序的显式路径逐文件搜索：文件数、读取字节数与取消都在文件之间复查。
+fn search_paths(
+    root: &Path,
+    query: &str,
+    paths: &[String],
+    limit: usize,
+    cancel: &Shutdown,
+) -> Result<SearchOutcome, AppError> {
+    let mut outcome = SearchOutcome::default();
+    for relative in paths {
+        check_cancel(cancel)?;
+        if outcome.matches.len() >= limit {
+            outcome.truncated = true;
+            break;
+        }
+        if outcome.files_scanned >= MAX_SEARCH_FILES
+            || outcome.scanned_bytes >= MAX_SEARCH_SCAN_BYTES
+        {
+            outcome.truncated = true;
+            break;
+        }
+        search_file(root, relative, query, limit, &mut outcome, cancel)?;
+    }
+    Ok(outcome)
+}
+
+fn content_search_message(
+    outcome: &SearchOutcome,
+    empty_scope: bool,
+    truncated: bool,
+) -> Option<String> {
+    if truncated {
+        return Some(
+            "结果未完整：已达到结果数、文件数或读取上限，请缩小范围或细化关键词。".to_string(),
+        );
+    }
+    if empty_scope {
+        return Some("当前范围内没有可搜索的文件。".to_string());
+    }
+    if outcome.files_scanned == 0 && outcome.skipped_files > 0 {
+        return Some("范围内的文件都无法作为文本搜索，已按原因标记。".to_string());
+    }
+    if outcome.skipped_files > 0 {
+        return Some("部分文件被跳过，其余文件已完整搜索。".to_string());
+    }
+    None
+}
+
+/// 在工作区文本里逐行搜索固定字符串，支持全仓 / 目录 / 单文件 / 仅改动四种范围。
+///
+/// 只读：不写工作区、索引或忽略规则；二进制、非法 UTF-8、符号链接、特殊文件与嵌套仓库
+/// 各自返回跳过原因，达到上限时返回 truncated，绝不把提前停止说成"没有匹配"。
+/// 空关键词在这里是错误：全文搜索没有"列出全部"的语义（路径搜索才有）。
+#[allow(clippy::too_many_arguments)]
+pub async fn repository_content_search(
+    backend: &Backend,
+    path: &str,
+    query: &str,
+    scope: RepositorySearchScope,
+    include_ignored: bool,
+    limit: Option<usize>,
+    generation: u64,
+    request_id: u64,
+) -> Result<RepositoryContentSearch, AppError> {
+    let root = canonical_existing(&validate_input_path(path)?)?;
+    validate_query(query)?;
+    // 路径搜索用空关键词表示"列出当前可见路径"，全文搜索则不同：空关键词会让
+    // 每一行都算一次匹配，结果量爆炸且没有意义，所以这里单独拒绝，错误码仍是 query。
+    if query.is_empty() {
+        return Err(AppError::new(
+            "query",
+            "全文搜索关键词不能为空，请先输入要查找的内容。",
+        ));
+    }
+    let limit = limit
+        .unwrap_or(DEFAULT_MATCH_LIMIT)
+        .clamp(1, MAX_MATCH_LIMIT);
+    let key = repo_key(&root);
+    let scope_label = scope.label().to_string();
+    let (candidates, enumeration_truncated, scope_path) = match &scope {
+        RepositorySearchScope::File { path: relative } => {
+            let relative = safe_relative(relative)?;
+            let label = display_path(&relative);
+            (vec![label.clone()], false, Some(label))
+        }
+        RepositorySearchScope::Directory { path: relative } => {
+            let directory = relative_directory(relative)?;
+            let (paths, truncated) = list_repository_paths(
+                backend,
+                &root,
+                &key,
+                generation,
+                Some(directory.as_path()),
+                include_ignored,
+            )
+            .await?;
+            (
+                collect_file_paths(&paths),
+                truncated,
+                Some(display_path(&directory)),
+            )
+        }
+        RepositorySearchScope::Repository => {
+            let (paths, truncated) =
+                list_repository_paths(backend, &root, &key, generation, None, include_ignored)
+                    .await?;
+            (collect_file_paths(&paths), truncated, None)
+        }
+        RepositorySearchScope::Changed => (
+            changed_paths(backend, &root, &key, generation).await?,
+            false,
+            None,
+        ),
+    };
+    let scope_path = scope_path.filter(|value| !value.is_empty());
+    let empty_scope = candidates.is_empty();
+    let query_for_search = query.to_string();
+    let outcome = backend
+        .scheduler
+        .execute_blocking_read(&key, request_id, generation, move |cancel| {
+            search_paths(&root, &query_for_search, &candidates, limit, &cancel)
+        })
+        .await?;
+    let truncated = enumeration_truncated || outcome.truncated;
+    let message = content_search_message(&outcome, empty_scope, truncated);
+    Ok(RepositoryContentSearch {
+        generation,
+        query: query.to_string(),
+        scope: scope_label,
+        scope_path,
+        matches: outcome.matches,
+        files_scanned: outcome.files_scanned,
+        skipped: outcome.skipped,
+        skipped_files: outcome.skipped_files,
+        truncated,
+        text_truncated: outcome.text_truncated,
+        message,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,6 +1378,11 @@ mod tests {
                 "GIT_CONFIG_GLOBAL",
                 crate::test_support::isolated_gitconfig(),
             )
+            // changed-only 用例需要真实提交作为"改动前的快照"，所以测试 Git 自带身份。
+            .env("GIT_AUTHOR_NAME", "Twiglane Test")
+            .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Twiglane Test")
+            .env("GIT_COMMITTER_EMAIL", "twiglane-test@example.com")
             .output()
             .unwrap();
         assert!(
@@ -1414,5 +2112,858 @@ mod tests {
                 .unwrap_err();
         assert_eq!(error.code, "stale");
         assert_eq!(error.generation, Some(2));
+    }
+
+    fn git_stdout(root: &Path, args: &[&str]) -> String {
+        let output = Command::new(crate::test_support::system_git())
+            .current_dir(root)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                crate::test_support::isolated_gitconfig(),
+            )
+            // changed-only 用例需要真实提交作为"改动前的快照"，所以测试 Git 自带身份。
+            .env("GIT_AUTHOR_NAME", "Twiglane Test")
+            .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Twiglane Test")
+            .env("GIT_COMMITTER_EMAIL", "twiglane-test@example.com")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    fn entry_paths(search: &RepositoryPathSearch) -> Vec<&str> {
+        search
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect()
+    }
+
+    fn match_keys(search: &RepositoryContentSearch) -> Vec<(&str, u64, u64)> {
+        search
+            .matches
+            .iter()
+            .map(|found| (found.path.as_str(), found.line, found.column))
+            .collect()
+    }
+
+    fn skip_reason(search: &RepositoryContentSearch, path: &str) -> Option<RepositorySkipReason> {
+        search
+            .skipped
+            .iter()
+            .find(|skip| skip.path == path)
+            .map(|skip| skip.reason)
+    }
+
+    #[tokio::test]
+    async fn path_search_returns_tracked_untracked_and_derived_directories() {
+        let fixture = crate::test_support::git_fixture("repository-path-search");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::create_dir_all(root.join("src/lib")).unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::write(root.join(".gitignore"), "target/\n*.log\n").unwrap();
+        fs::write(root.join("src/lib/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("src/lib/util.rs"), "pub fn util() {}\n").unwrap();
+        fs::write(root.join("notes.txt"), "untracked\n").unwrap();
+        fs::write(root.join("debug.log"), "ignored\n").unwrap();
+        fs::write(root.join("target/build.bin"), "ignored\n").unwrap();
+        git(
+            &root,
+            &["add", ".gitignore", "src/lib/main.rs", "src/lib/util.rs"],
+        );
+        let path = root.to_str().unwrap();
+
+        let searched = repository_path_search(&backend, path, "src", None, false, None, 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(searched.generation, 1);
+        assert!(!searched.truncated);
+        assert!(searched.scanned > 0);
+        let paths = entry_paths(&searched);
+        // 已跟踪文件。
+        assert!(paths.contains(&"src/lib/main.rs"), "{paths:?}");
+        // 派生目录：src/lib 从没单独出现在索引里，但含匹配文件时必须作为目录结果出现。
+        assert!(paths.contains(&"src/lib"), "{paths:?}");
+        assert!(paths.contains(&"src"), "{paths:?}");
+        assert_eq!(
+            searched.entries[0].kind,
+            RepositoryPathKind::Directory,
+            "{paths:?}"
+        );
+        // 未跟踪但未被忽略的文件同样从路径搜索可见。
+        let untracked = repository_path_search(&backend, path, "notes", None, false, None, 1, 2)
+            .await
+            .unwrap();
+        assert_eq!(entry_paths(&untracked), ["notes.txt"]);
+        assert_eq!(untracked.entries[0].kind, RepositoryPathKind::File);
+    }
+
+    #[tokio::test]
+    async fn path_search_ignored_switch_merges_ignored_paths_and_dedupes() {
+        let fixture = crate::test_support::git_fixture("repository-path-search-ignore");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::create_dir_all(root.join("ignored")).unwrap();
+        let ignore_rules = "*.log\nignored/\n";
+        fs::write(root.join(".gitignore"), ignore_rules).unwrap();
+        fs::write(root.join("tracked.log"), "tracked\n").unwrap();
+        fs::write(root.join("untracked.log"), "ignored\n").unwrap();
+        fs::write(root.join("ignored/deep.log"), "ignored\n").unwrap();
+        git(&root, &["add", "-f", ".gitignore", "tracked.log"]);
+        let path = root.to_str().unwrap();
+
+        let visible = repository_path_search(&backend, path, "log", None, false, None, 1, 1)
+            .await
+            .unwrap();
+        // 已跟踪且匹配忽略规则的文件不是忽略项，关闭开关时仍然可见。
+        assert_eq!(entry_paths(&visible), ["tracked.log"]);
+
+        let all = repository_path_search(&backend, path, "log", None, true, None, 1, 2)
+            .await
+            .unwrap();
+        let paths = entry_paths(&all);
+        assert!(paths.contains(&"untracked.log"), "{paths:?}");
+        assert!(paths.contains(&"ignored/deep.log"), "{paths:?}");
+        // 两个来源合并后必须去重：tracked.log 只出现一次，且不会被误标成忽略项。
+        assert_eq!(
+            paths.iter().filter(|path| **path == "tracked.log").count(),
+            1,
+            "{paths:?}"
+        );
+        let tracked = all
+            .entries
+            .iter()
+            .find(|entry| entry.path == "tracked.log")
+            .unwrap();
+        assert!(!tracked.ignored);
+        assert!(
+            all.entries
+                .iter()
+                .find(|entry| entry.path == "untracked.log")
+                .unwrap()
+                .ignored
+        );
+        // 包含忽略文件只影响本次请求：规则文件本身没有变化。
+        assert_eq!(
+            fs::read_to_string(root.join(".gitignore")).unwrap(),
+            ignore_rules
+        );
+    }
+
+    #[tokio::test]
+    async fn path_search_is_bounded_and_orders_stably() {
+        let fixture = crate::test_support::git_fixture("repository-path-search-limit");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        for index in 1..=12 {
+            fs::write(root.join(format!("f{index:02}.txt")), "x\n").unwrap();
+        }
+        git(&root, &["add", "."]);
+        let path = root.to_str().unwrap();
+
+        let first = repository_path_search(&backend, path, "f", None, false, Some(3), 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(first.entries.len(), 3);
+        assert!(first.truncated);
+        // 截断必须被明确标记，不能只靠空结果让调用方猜测。
+        assert!(first.message.is_some());
+        assert_eq!(entry_paths(&first), ["f01.txt", "f02.txt", "f03.txt"]);
+        let second = repository_path_search(&backend, path, "f", None, false, Some(3), 1, 2)
+            .await
+            .unwrap();
+        assert_eq!(entry_paths(&first), entry_paths(&second));
+        // limit 只是上限：不截断时不宣称截断。
+        let full = repository_path_search(&backend, path, "f", None, false, Some(100), 1, 3)
+            .await
+            .unwrap();
+        assert_eq!(full.entries.len(), 12);
+        assert_eq!(full.scanned, 12);
+        assert!(!full.truncated);
+        assert!(full.message.is_none());
+    }
+
+    #[tokio::test]
+    async fn path_search_scope_stays_inside_the_requested_directory() {
+        let fixture = crate::test_support::git_fixture("repository-path-search-scope");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("sub/inner.txt"), "x\n").unwrap();
+        fs::write(root.join("top.txt"), "x\n").unwrap();
+        git(&root, &["add", "."]);
+        let path = root.to_str().unwrap();
+
+        let scoped = repository_path_search(&backend, path, "txt", Some("sub"), false, None, 1, 1)
+            .await
+            .unwrap();
+        let paths = entry_paths(&scoped);
+        assert!(scoped
+            .entries
+            .iter()
+            .all(|entry| entry.path.starts_with("sub")));
+        assert!(paths.contains(&"sub/inner.txt"), "{paths:?}");
+        assert!(
+            !paths.iter().any(|path| path.starts_with("top")),
+            "{paths:?}"
+        );
+        assert_eq!(scoped.directory.as_deref(), Some("sub"));
+
+        let error = repository_path_search(&backend, path, "txt", Some("../"), false, None, 1, 2)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_path");
+        let empty = repository_path_search(&backend, path, "txt", Some(""), false, None, 1, 3)
+            .await
+            .unwrap();
+        assert!(entry_paths(&empty).contains(&"top.txt"));
+    }
+
+    #[tokio::test]
+    async fn content_search_reports_line_column_and_special_characters() {
+        let fixture = crate::test_support::git_fixture("repository-content-search-lines");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::create_dir_all(root.join("src/lib")).unwrap();
+        // 固定字符串：正则元字符与括号都按字面量匹配。
+        let needle = "a+b*c(d)[e]";
+        let lines = [
+            "fn first() {}".to_string(),
+            format!("  let needle = \"{needle}\";"),
+            "fn second() {}".to_string(),
+            format!("    {needle} again"),
+            format!("中文中文 {needle}"),
+        ];
+        fs::write(root.join("src/lib/parse.rs"), lines.join("\n") + "\n").unwrap();
+        git(&root, &["add", "."]);
+        let path = root.to_str().unwrap();
+
+        let found = repository_content_search(
+            &backend,
+            path,
+            needle,
+            RepositorySearchScope::Repository,
+            false,
+            None,
+            1,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            match_keys(&found),
+            [
+                ("src/lib/parse.rs", 2, 17),
+                ("src/lib/parse.rs", 4, 5),
+                // 多字节字符按字符计数：中文中文(4) + 空格 = 第 5 个字符后开始匹配。
+                ("src/lib/parse.rs", 5, 6),
+            ]
+        );
+        assert_eq!(found.matches[1].text, lines[3]);
+        assert_eq!(found.files_scanned, 1);
+        assert!(!found.truncated);
+        assert!(found.skipped.is_empty());
+
+        let single = repository_content_search(
+            &backend,
+            path,
+            needle,
+            RepositorySearchScope::File {
+                path: "src/lib/parse.rs".to_string(),
+            },
+            false,
+            None,
+            1,
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(match_keys(&single), match_keys(&found));
+        assert_eq!(found.scope, "repository");
+        assert!(found.scope_path.is_none());
+        assert_eq!(single.scope, "file");
+        assert_eq!(single.scope_path.as_deref(), Some("src/lib/parse.rs"));
+
+        // 真的没有匹配：不截断、没有跳过，才算"无匹配"。
+        let empty = repository_content_search(
+            &backend,
+            path,
+            "no-such-needle",
+            RepositorySearchScope::Repository,
+            false,
+            None,
+            1,
+            3,
+        )
+        .await
+        .unwrap();
+        assert!(empty.matches.is_empty());
+        assert!(!empty.truncated);
+        assert!(empty.message.is_none());
+    }
+
+    #[tokio::test]
+    async fn content_search_scopes_directory_and_changed_only() {
+        let fixture = crate::test_support::git_fixture("repository-content-search-scope");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::create_dir_all(root.join("legacy")).unwrap();
+        fs::write(root.join("src/app.rs"), "needle one\n").unwrap();
+        fs::write(root.join("docs/other.rs"), "needle two\n").unwrap();
+        fs::write(root.join("legacy/gone.rs"), "needle three\n").unwrap();
+        git(&root, &["add", "."]);
+        // 真实提交作为改动前的基线：否则未提交仓库里所有文件都会是"新增改动"。
+        git(&root, &["commit", "-q", "-m", "init"]);
+        // 改动：改一个已跟踪文件、删除一个、再新增一个未跟踪文件。
+        fs::write(root.join("src/app.rs"), "needle one changed\n").unwrap();
+        fs::remove_file(root.join("legacy/gone.rs")).unwrap();
+        fs::write(root.join("new.txt"), "needle four\n").unwrap();
+        let path = root.to_str().unwrap();
+
+        let whole = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::Repository,
+            false,
+            None,
+            1,
+            1,
+        )
+        .await
+        .unwrap();
+        let mut whole_paths: Vec<&str> = whole.matches.iter().map(|m| m.path.as_str()).collect();
+        whole_paths.sort();
+        assert_eq!(whole_paths, ["docs/other.rs", "new.txt", "src/app.rs"]);
+        // 已删除的路径仍被 Git 跟踪，但磁盘上已不存在：如实标成 missing，不伪造匹配。
+        assert_eq!(
+            skip_reason(&whole, "legacy/gone.rs"),
+            Some(RepositorySkipReason::Missing)
+        );
+
+        let docs = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::Directory {
+                path: "docs".to_string(),
+            },
+            false,
+            None,
+            1,
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(docs.scope, "directory");
+        assert_eq!(docs.scope_path.as_deref(), Some("docs"));
+        assert_eq!(match_keys(&docs), [("docs/other.rs", 1, 1)]);
+
+        let changed = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::Changed,
+            false,
+            None,
+            1,
+            3,
+        )
+        .await
+        .unwrap();
+        let mut changed_paths: Vec<&str> =
+            changed.matches.iter().map(|m| m.path.as_str()).collect();
+        changed_paths.sort();
+        assert_eq!(changed_paths, ["new.txt", "src/app.rs"]);
+        assert!(changed.skipped.is_empty());
+    }
+
+    #[tokio::test]
+    async fn content_search_honours_ignore_switch_for_the_current_request() {
+        let fixture = crate::test_support::git_fixture("repository-content-search-ignore");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        let rules = "*.log\n";
+        fs::write(root.join(".gitignore"), rules).unwrap();
+        fs::write(root.join("app.rs"), "needle\n").unwrap();
+        fs::write(root.join("debug.log"), "needle\n").unwrap();
+        git(&root, &["add", ".gitignore", "app.rs"]);
+        let path = root.to_str().unwrap();
+
+        let visible = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::Repository,
+            false,
+            None,
+            1,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(match_keys(&visible), [("app.rs", 1, 1)]);
+        let all = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::Repository,
+            true,
+            None,
+            1,
+            2,
+        )
+        .await
+        .unwrap();
+        let mut paths: Vec<&str> = all.matches.iter().map(|m| m.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, ["app.rs", "debug.log"]);
+        assert_eq!(fs::read_to_string(root.join(".gitignore")).unwrap(), rules);
+    }
+
+    #[tokio::test]
+    async fn content_search_marks_binary_invalid_utf8_and_unsupported_files() {
+        let fixture = crate::test_support::git_fixture("repository-content-search-skips");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("text.txt"), "needle\n").unwrap();
+        fs::write(root.join("binary.dat"), b"needle\x00more").unwrap();
+        fs::write(root.join("invalid.txt"), [b'n', 0xff, 0xfe]).unwrap();
+        fs::write(root.join("image.png"), b"\x89PNG\r\n\x1a\nneedle").unwrap();
+        // 超过单文件读取上限：按体积跳过，而不是静默返回"没有匹配"。
+        fs::write(root.join("oversized.txt"), b"needle\n".repeat(300_000)).unwrap();
+        let path = root.to_str().unwrap();
+
+        let found = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::Repository,
+            false,
+            None,
+            1,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(match_keys(&found), [("text.txt", 1, 1)]);
+        assert_eq!(
+            skip_reason(&found, "binary.dat"),
+            Some(RepositorySkipReason::Binary)
+        );
+        assert_eq!(
+            skip_reason(&found, "invalid.txt"),
+            Some(RepositorySkipReason::InvalidUtf8)
+        );
+        // 资源类型走只读预览，不生成伪文本匹配。
+        assert_eq!(
+            skip_reason(&found, "image.png"),
+            Some(RepositorySkipReason::Unsupported)
+        );
+        assert_eq!(
+            skip_reason(&found, "oversized.txt"),
+            Some(RepositorySkipReason::TooLarge)
+        );
+        assert_eq!(found.skipped_files, 4);
+        // 只有 text.txt 真正被逐行搜索，其余都是按原因标记的跳过。
+        assert_eq!(found.files_scanned, 1);
+        assert!(!found.truncated);
+        // 有跳过时不能说"已完整搜索"。
+        assert!(found.message.is_some());
+    }
+
+    #[tokio::test]
+    async fn content_search_truncates_at_limit_instead_of_claiming_no_match() {
+        let fixture = crate::test_support::git_fixture("repository-content-search-limit");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        for index in 1..=5 {
+            fs::write(root.join(format!("f{index}.txt")), "needle\n").unwrap();
+        }
+        let path = root.to_str().unwrap();
+
+        let limited = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::Repository,
+            false,
+            Some(2),
+            1,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(limited.matches.len(), 2);
+        assert!(limited.truncated);
+        let message = limited.message.clone().unwrap();
+        assert!(message.contains("未完整"), "{message}");
+        // 提前停止不等于没有匹配：结果非空。
+        assert!(!limited.matches.is_empty());
+
+        // 反面基线：真的扫完所有文件也没有命中，才允许显示"无匹配"（无截断、无提示）。
+        let none = repository_content_search(
+            &backend,
+            path,
+            "absent-string",
+            RepositorySearchScope::Repository,
+            false,
+            None,
+            1,
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(none.matches.is_empty());
+        assert!(!none.truncated);
+        assert!(none.message.is_none());
+        assert_eq!(none.files_scanned, 5);
+    }
+
+    #[tokio::test]
+    async fn content_search_single_file_covers_lines_beyond_the_loaded_page() {
+        let fixture = crate::test_support::git_fixture("repository-content-search-page");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        let mut lines: Vec<String> = (1..=1200).map(|line| format!("line {line}")).collect();
+        lines[1099] = "needle is far below the first page".to_string();
+        fs::write(root.join("long.txt"), lines.join("\n") + "\n").unwrap();
+        let path = root.to_str().unwrap();
+
+        let page = repository_file_content(&backend, path, "long.txt", 0, Some(100), 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(page.lines.len(), 100);
+        assert!(page.lines.iter().all(|line| !line.contains("needle")));
+
+        let found = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::File {
+                path: "long.txt".to_string(),
+            },
+            false,
+            None,
+            1,
+            2,
+        )
+        .await
+        .unwrap();
+        // 文件内搜索必须覆盖未加载的后续文本页。
+        assert_eq!(match_keys(&found), [("long.txt", 1100, 1)]);
+        assert_eq!(found.matches[0].text, "needle is far below the first page");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn content_search_skips_symlinks_without_reading_outside_content() {
+        use std::os::unix::fs::symlink;
+        let fixture = crate::test_support::git_fixture("repository-content-search-links");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        let outside = fixture.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "needle outside\n").unwrap();
+        symlink(outside.join("secret.txt"), root.join("link.txt")).unwrap();
+        symlink("link.txt", root.join("loop.txt")).unwrap();
+        fs::write(root.join("inside.txt"), "needle inside\n").unwrap();
+        let path = root.to_str().unwrap();
+
+        let found = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::Repository,
+            false,
+            None,
+            1,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(match_keys(&found), [("inside.txt", 1, 1)]);
+        assert_eq!(
+            skip_reason(&found, "link.txt"),
+            Some(RepositorySkipReason::Symlink)
+        );
+        assert_eq!(
+            skip_reason(&found, "loop.txt"),
+            Some(RepositorySkipReason::Symlink)
+        );
+    }
+
+    /// 目录符号链接：Unix 一直可用；Windows 需要开发者模式或管理员权限，
+    /// 拿不到权限时用例按平台限制跳过，而不是失败。
+    #[cfg(unix)]
+    fn directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
+    }
+
+    #[tokio::test]
+    async fn content_search_refuses_a_symlinked_parent_directory_instead_of_reading_outside() {
+        let fixture = crate::test_support::git_fixture("repository-content-search-parent-link");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        // 先以真实目录入库，让 Git 枚举里确实留下 src/link/secret.txt 这条路径。
+        fs::create_dir_all(root.join("src/link")).unwrap();
+        fs::write(root.join("src/link/secret.txt"), "needle tracked inside\n").unwrap();
+        git(&root, &["add", "src"]);
+        let outside = fixture.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "needle outside secret\n").unwrap();
+        // 入库后把父目录换成指向仓库外的符号链接：索引仍列出旧路径，工作区已经越界。
+        fs::remove_dir_all(root.join("src/link")).unwrap();
+        if directory_symlink(&outside, &root.join("src/link")).is_err() {
+            // Windows 上创建目录符号链接需要额外权限：无权限时按平台限制跳过。
+            return;
+        }
+        let path = root.to_str().unwrap();
+
+        let found = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::Repository,
+            false,
+            None,
+            1,
+            1,
+        )
+        .await
+        .unwrap();
+        // 来自 Git 枚举的路径同样要复查父级：不能因为“在 ls-files 里”就相信它。
+        assert!(found.matches.is_empty(), "{:?}", match_keys(&found));
+        assert_eq!(
+            skip_reason(&found, "src/link/secret.txt"),
+            Some(RepositorySkipReason::Symlink)
+        );
+
+        // 单文件 scope 直接指向这条越界路径，也只能被拒绝，不能读出仓库外的内容。
+        let single = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::File {
+                path: "src/link/secret.txt".to_string(),
+            },
+            false,
+            None,
+            1,
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(single.matches.is_empty(), "{:?}", match_keys(&single));
+        assert!(
+            !single
+                .matches
+                .iter()
+                .any(|found| found.text.contains("outside")),
+            "{:?}",
+            match_keys(&single)
+        );
+        assert_eq!(
+            skip_reason(&single, "src/link/secret.txt"),
+            Some(RepositorySkipReason::Symlink)
+        );
+    }
+
+    #[tokio::test]
+    async fn content_search_rejects_an_empty_query_while_path_search_lists_paths() {
+        let fixture = crate::test_support::git_fixture("repository-search-empty-query");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("a.txt"), "alpha\n").unwrap();
+        fs::create_dir_all(root.join("dir")).unwrap();
+        fs::write(root.join("dir/b.txt"), "beta\n").unwrap();
+        let path = root.to_str().unwrap();
+
+        // 全文搜索的空关键词会让每一行都匹配，结果无意义，因此返回稳定的 query 错误。
+        let empty_content = repository_content_search(
+            &backend,
+            path,
+            "",
+            RepositorySearchScope::Repository,
+            false,
+            None,
+            1,
+            1,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(empty_content.code, "query");
+        assert!(
+            empty_content.message.contains("不能为空"),
+            "{}",
+            empty_content.message
+        );
+
+        // 路径搜索的空关键词保留“列出当前可见路径”的语义，不是错误。
+        let listed = repository_path_search(&backend, path, "", None, false, None, 1, 2)
+            .await
+            .unwrap();
+        let paths = entry_paths(&listed);
+        assert!(paths.contains(&"a.txt"), "{paths:?}");
+        assert!(paths.contains(&"dir"), "{paths:?}");
+        assert!(paths.contains(&"dir/b.txt"), "{paths:?}");
+        assert!(!listed.truncated);
+    }
+
+    #[tokio::test]
+    async fn content_search_does_not_enter_nested_repositories() {
+        let fixture = crate::test_support::git_fixture("repository-content-search-nested");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::create_dir_all(root.join("child")).unwrap();
+        fs::write(root.join("child/secret.txt"), "needle nested\n").unwrap();
+        let child = root.join("child");
+        git(&child, &["init", "-b", "main"]);
+        // 子仓库要有自己的提交，父仓库才肯把它登记成 gitlink（未出生分支无法 add）。
+        git(&child, &["add", "secret.txt"]);
+        git(&child, &["commit", "-q", "-m", "child init"]);
+        // 把子仓库登记成 gitlink：父仓库确实知道这个路径，只是不能进入它的内部。
+        git(&root, &["add", "child"]);
+        let path = root.to_str().unwrap();
+
+        let found = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::Repository,
+            false,
+            None,
+            1,
+            1,
+        )
+        .await
+        .unwrap();
+        // 嵌套仓库只作为边界出现，不递归进入它的内容。
+        assert!(found.matches.is_empty(), "{:?}", match_keys(&found));
+        assert_eq!(
+            skip_reason(&found, "child"),
+            Some(RepositorySkipReason::NestedRepository)
+        );
+    }
+
+    #[tokio::test]
+    async fn content_search_rejects_cancelled_and_stale_requests() {
+        let fixture = crate::test_support::git_fixture("repository-content-search-cancel");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("a.txt"), "needle\n").unwrap();
+        let path = root.to_str().unwrap();
+
+        // 代次变化（例如工作区刷新）：旧代次的结果一律不接纳。
+        backend.scheduler.bump_generation(&repo_key(&root));
+        let stale = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::Repository,
+            false,
+            None,
+            1,
+            1,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(stale.code, "stale");
+        assert_eq!(stale.generation, Some(2));
+
+        let current = backend.scheduler.current_generation(&repo_key(&root));
+        backend.shutdown.cancel();
+        let cancelled = repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::Repository,
+            false,
+            None,
+            current,
+            2,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(cancelled.code, "cancelled");
+    }
+
+    #[test]
+    fn content_search_stops_between_files_when_the_read_is_cancelled() {
+        let fixture = crate::test_support::git_fixture("repository-content-search-token");
+        let root = fixture.repo("repo");
+        fs::write(root.join("a.txt"), "needle\n").unwrap();
+        fs::write(root.join("b.txt"), "needle\n").unwrap();
+        let cancel = Arc::new(Shutdown::new());
+        cancel.cancel();
+        let paths = vec!["a.txt".to_string(), "b.txt".to_string()];
+        let error = search_paths(&root, "needle", &paths, 10, &cancel).unwrap_err();
+        assert_eq!(error.code, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn searches_do_not_modify_the_worktree_or_ignore_rules() {
+        let fixture = crate::test_support::git_fixture("repository-search-readonly");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        let rules = "*.log\n";
+        fs::write(root.join(".gitignore"), rules).unwrap();
+        fs::write(root.join("app.rs"), "needle\n").unwrap();
+        fs::write(root.join("debug.log"), "needle\n").unwrap();
+        git(&root, &["add", ".gitignore", "app.rs"]);
+        fs::write(root.join("app.rs"), "needle changed\n").unwrap();
+        let path = root.to_str().unwrap();
+        let before = git_stdout(&root, &["status", "--porcelain"]);
+
+        repository_path_search(&backend, path, "app", None, true, None, 1, 1)
+            .await
+            .unwrap();
+        repository_content_search(
+            &backend,
+            path,
+            "needle",
+            RepositorySearchScope::Changed,
+            true,
+            None,
+            1,
+            2,
+        )
+        .await
+        .unwrap();
+
+        // 只读：工作区状态与忽略规则都必须保持原样。
+        assert_eq!(fs::read_to_string(root.join(".gitignore")).unwrap(), rules);
+        assert_eq!(git_stdout(&root, &["status", "--porcelain"]), before);
     }
 }

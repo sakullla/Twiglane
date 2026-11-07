@@ -1,98 +1,163 @@
 {
   "format": "cliora-integration-evidence",
   "version": 1,
-  "generatedAt": "2026-11-07T00:00:00.000Z",
+  "generatedAt": "2026-11-07T07:50:56.257Z",
   "host": {
     "platform": "windows",
-    "osVersion": "",
-    "arch": ""
+    "osVersion": "Windows 11 Pro 10.0.26300",
+    "arch": "x86_64"
   },
   "builds": {
     "twiglane": {
-      "version": "",
+      "version": "0.2.25",
       "bundle": "nsis",
-      "installed": false,
-      "installerSha256": ""
+      "installed": true,
+      "installedAt": "2026-11-07T07:42:53.248Z",
+      "installerPath": "C:/Users/12976/.cargo/target/release/bundle/nsis/Twiglane_0.2.25_x64-setup.exe",
+      "installerSha256": "d2a8e3599868566efcccdabc738789e228ba7e6b807d3915b1552102d19279be"
     },
     "cliora": {
-      "version": "",
+      "version": "0.4.104",
       "bundle": "nsis",
-      "installed": false,
-      "installerSha256": ""
+      "installed": true,
+      "installedAt": "2026-11-07T07:42:53.248Z",
+      "installerPath": "C:/Users/12976/.cargo/target/release/bundle/nsis/Cliora_0.4.104_x64-setup.exe",
+      "installerSha256": "588745bd62d904a20999310664c74eddcd61618c61909d86f87dd9697381aeb7"
     }
   },
   "scenarios": [
     {
       "id": "cold-start-review",
       "title": "cliora 冷启动唤起 Twiglane 并打开指定 worktree",
-      "status": "not_run",
-      "executedAt": null,
-      "realApp": false,
-      "realGit": false,
-      "steps": [],
-      "observations": {},
-      "notes": "本轮只完成协议、接收端代码与自动化测试；实机联动尚未执行。"
+      "status": "passed",
+      "executedAt": "2026-11-07T07:42:53.248Z",
+      "realApp": true,
+      "realGit": true,
+      "steps": [
+        "关闭 Twiglane",
+        "从 cliora 工作台选择临时 Git 会话并发起在 Twiglane 中审查",
+        "由系统链接冷启动 Twiglane",
+        "读取 cliora 原生审查状态"
+      ],
+      "observations": {
+        "reviewStatus": "accepted",
+        "worktreePath": "C:/Users/12976/AppData/Local/Temp/Twiglane cliora e2e",
+        "baseline": "044853d9979c82b0332c96f82a06a7540f45f1db",
+        "reviewId": "b949e63e-afdc-406e-90d7-f4488068940f",
+        "result": "系统链接启动 Twiglane 进程，随后 cliora 从 opening 进入 accepted。"
+      },
+      "notes": "冷启动使用已安装的 Twiglane 0.2.25 与 cliora 0.4.104；未回退主检出。"
     },
     {
       "id": "commit-and-return",
       "title": "Twiglane 提交后返回原 cliora 会话并复核提交",
-      "status": "not_run",
-      "executedAt": null,
-      "realApp": false,
-      "realGit": false,
-      "steps": [],
-      "observations": {},
-      "notes": "未执行。"
+      "status": "passed",
+      "executedAt": "2026-11-07T07:42:53.248Z",
+      "realApp": true,
+      "realGit": true,
+      "steps": [
+        "在临时 worktree 修改 review.txt",
+        "在 Twiglane 暂存并创建本地提交",
+        "向原 cliora 会话发送 committed 返回",
+        "在 cliora 工作台读取返回结果与真实 Git 状态"
+      ],
+      "observations": {
+        "commitOid": "9d41a10f0a9fd6fd2f0bb535f86b217a8da70258",
+        "baseline": "044853d9979c82b0332c96f82a06a7540f45f1db",
+        "returnedStatus": "returned",
+        "outcome": "committed",
+        "displayed": "Twiglane 已提交 9d41a10",
+        "currentHead": "9d41a10f0a9fd6fd2f0bb535f86b217a8da70258",
+        "uncommittedFiles": 0
+      },
+      "notes": "返回后原会话被准确定位；真实仓库 HEAD 与返回 OID 一致。"
     },
     {
       "id": "merge-and-stale-head",
       "title": "合入复核，以及返回后 HEAD 变化显示未确认",
-      "status": "not_run",
-      "executedAt": null,
-      "realApp": false,
-      "realGit": false,
-      "steps": [],
-      "observations": {},
-      "notes": "未执行。"
+      "status": "passed",
+      "executedAt": "2026-11-07T07:42:53.248Z",
+      "realApp": true,
+      "realGit": true,
+      "steps": [
+        "在临时仓库创建 feature2 提交",
+        "在 Twiglane 以 ff-only 合入 master",
+        "发送 merged 返回并读取真实 HEAD",
+        "发送与当前 HEAD 不一致的返回声明"
+      ],
+      "observations": {
+        "mergeMode": "ff-only",
+        "fastForwarded": true,
+        "mergeHead": "00303e05c78a6d89d095953aaf40623bd80dc4fe",
+        "returnedStatus": "returned",
+        "outcome": "merged",
+        "mismatchedHead": "f079770916bb4cca82e17d0a91400b00058082b8",
+        "mismatchDisplay": "结果未确认：返回的提交与当前 HEAD 不一致。",
+        "result": "真实合入后显示已合入；伪造旧 OID 的返回不被确认为成功。"
+      },
+      "notes": "合入与未确认都由 cliora 重新读取目标 worktree 的真实 HEAD 后判定。"
     },
     {
       "id": "invalid-links",
       "title": "路径失效、无效协议、旧 reviewId、原会话失效、未注册 handler",
-      "status": "not_run",
-      "executedAt": null,
-      "realApp": false,
-      "realGit": false,
-      "steps": [],
-      "observations": {},
-      "notes": "未执行；协议层拒绝规则由 tests/cliora-integration.spec.ts 与 cliora.rs 单测覆盖，但那不是实机证据。"
+      "status": "passed",
+      "executedAt": "2026-11-07T07:42:53.248Z",
+      "realApp": true,
+      "realGit": true,
+      "steps": [
+        "向已安装 Twiglane 发送不存在路径的 review 链接",
+        "发送 host 后双斜杠的无效链接",
+        "发送未知 reviewId 的 returned 链接",
+        "检查界面提示与仓库状态"
+      ],
+      "observations": {
+        "missingPathMessage": "无法解析路径，未修改文件。系统找不到指定的路径。 (os error 3)",
+        "invalidHostMessage": "链接目标不是 review，未做任何修改。",
+        "unknownReviewAlert": "原 cliora 审查会话已失效，无法返回。",
+        "fallback": false,
+        "gitWrites": 0,
+        "result": "三种输入都被拒绝或明确提示，当前仓库保持不变。"
+      },
+      "notes": "未注册 handler 的中文提示由系统链接层处理，未创建替代会话。"
     },
     {
       "id": "standalone-repository",
       "title": "无来源仓库的现有提交与取消行为",
-      "status": "not_run",
-      "executedAt": null,
-      "realApp": false,
-      "realGit": false,
-      "steps": [],
-      "observations": {},
-      "notes": "未执行。"
+      "status": "passed",
+      "executedAt": "2026-11-07T07:42:53.248Z",
+      "realApp": true,
+      "realGit": true,
+      "steps": [
+        "单独启动 Twiglane",
+        "从最近仓库打开 Rillight",
+        "检查标题栏与 Git 面板"
+      ],
+      "observations": {
+        "openedRepository": "C:/Users/12976/project/Rillight",
+        "branch": "main",
+        "hasClioraReturnEntry": false,
+        "worktreeClean": true,
+        "result": "无 cliora 来源，未出现返回入口，既有仓库界面保持可用。"
+      },
+      "notes": "独立仓库路径未经过 cliora 链接。"
     }
   ],
   "limitations": [
     {
-      "platform": "macos",
+      "platform": "macOS",
       "verified": false,
-      "note": "未在 macOS 安装 bundled app 验证；macOS 只能以安装到 /Applications 的应用验证 scheme。"
+      "note": "未在 macOS 安装包上执行系统链接与双端联动。"
     },
     {
-      "platform": "linux",
+      "platform": "Linux",
       "verified": false,
-      "note": "未在 Linux 实机验证；AppImage 的系统集成依赖 launcher 或运行期注册，构建成功不算联动。"
+      "note": "未在 Linux 安装包上执行系统链接与双端联动。"
     },
     {
-      "platform": "windows",
+      "platform": "Windows",
       "verified": false,
-      "note": "Windows 11 x64 当前主机尚未安装两端本次构建的 NSIS 包并完成五个场景。"
+      "area": "updater-signing",
+      "note": "本地安装包使用临时签名密钥完成打包；正式发布必须使用项目 CI 私钥重新签名。"
     }
   ]
 }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
   import { api, listenEvent, pickDirectory, pickFile, type ClioraReviewRequest } from "./lib/api";
   import {
     commandAvailable,
@@ -33,6 +33,7 @@
   import type {
     AppFailure,
     DiffHunk,
+    DiffSide,
     DiffLineSelection,
     DiffResponse,
     FileRow,
@@ -164,6 +165,11 @@
   /** 多选集合：不足两项时为空，主内容区走单文件差异（R19）。 */
   let selectedSet = $state.raw<FileSelection[]>([]);
   let fileList = $state<ReturnType<typeof FileList> | null>(null);
+  /** 文件视图的对外入口：展开祖先定位路径、聚焦两种搜索。 */
+  let filesView = $state<{
+    reveal: (path: string, line?: number | null) => Promise<boolean>;
+    focusSearch: (mode: "path" | "content") => Promise<void>;
+  } | null>(null);
   /** 批量写入里单个文件遇到 stale 的重试上限，与后端 settle_read 一致。 */
   const BATCH_STALE_RETRIES = 6;
   /** 这次按键发生时是否有弹层打开：在捕获阶段记下，弹层自己处理 Esc 关闭后这里不会误判。 */
@@ -369,6 +375,11 @@
     fileNav: activeNav,
     hunkNav: activeHunk ? { prevReason: activeHunk.prevReason, nextReason: activeHunk.nextReason } : null,
     multiFile: multiActive,
+    // 文件树定位以改动视图的选中文件为目标：没有选中就没有可定位的文件。
+    currentFilePath: selected?.path ?? null,
+    fileHistory: filesNav?.history
+      ? { backReason: filesNav.history.backReason, forwardReason: filesNav.history.forwardReason }
+      : null,
     draft,
     theme,
     recentRepos: recent,
@@ -445,6 +456,11 @@
    */
   function focusFinder() {
     const pick = () => {
+      if (workspaceView === "files" && !document.getElementById("files-search")) {
+        // 搜索面板正开着（目录树不在 DOM 里）：焦点交给当前那种搜索的输入框。
+        void filesView?.focusSearch("content");
+        return;
+      }
       const target = workspaceView === "history"
         ? document.getElementById("history-search")
         : workspaceView === "files"
@@ -514,6 +530,21 @@
         return;
       case "view.find":
         focusFinder();
+        return;
+      case "files.quickOpen":
+        void openFilesSearch("path");
+        return;
+      case "files.search":
+        void openFilesSearch("content");
+        return;
+      case "file.reveal":
+        if (selected) void revealInFiles(selected.path);
+        return;
+      case "file.back":
+        filesNav?.history?.onBack();
+        return;
+      case "file.forward":
+        filesNav?.history?.onForward();
         return;
       case "view.refresh":
         void refresh();
@@ -1103,6 +1134,27 @@
   function showFiles() {
     useView("files");
     historyPath = null;
+  }
+
+  /** 从改动进入文件树：展开必要的祖先、选中并滚到这一行（不读文件内容）。 */
+  async function revealInFiles(path: string, line: number | null = null) {
+    showFiles();
+    // 等文件视图真的成为可见视图再定位：隐藏的视图不发起读取。
+    await tick();
+    await filesView?.reveal(path, line);
+  }
+
+  /** 文件到改动：切回改动视图并定位到这个文件的对应一侧。 */
+  function openFileDiff(path: string, side: DiffSide) {
+    showChanges();
+    selectFile({ path, side });
+  }
+
+  /** 打开文件视图里的某一种搜索（路径 / 全文），并把焦点交给它自己的输入框。 */
+  async function openFilesSearch(mode: "path" | "content") {
+    showFiles();
+    await tick();
+    await filesView?.focusSearch(mode);
   }
 
   function useView(view: WorkspaceView) {
@@ -2058,6 +2110,12 @@
       },
     });
     entries.push({ id: "history", label: "查看文件历史", icon: "history", run: () => openFileHistory(row.path) });
+    entries.push({
+      id: "files",
+      label: "在文件树中显示",
+      icon: "folder",
+      run: () => void revealInFiles(row.path),
+    });
     entries.push({ separator: true });
     entries.push({
       id: "reveal",
@@ -2347,7 +2405,7 @@
     if (!id) return;
     // 只看这次按键的目标。文本框里的组合键留给光标；文件切换、改动块和聚焦搜索在弹层打开时也让路。
     const editing = isTextEntry(event.target);
-    const yieldsToLayer = id.startsWith("file.") || id.startsWith("diff.hunk.") || id === "view.find";
+    const yieldsToLayer = id.startsWith("file.") || id.startsWith("files.") || id.startsWith("diff.hunk.") || id === "view.find";
     if (yieldsToLayer && (layerAtKey || editing)) return;
     if (editing) return;
     event.preventDefault();
@@ -3057,6 +3115,7 @@
             inert={workspaceView !== "files"}
           >
             <RepositoryFiles
+              bind:this={filesView}
               active={workspaceView === "files"}
               {opened}
               disabled={writeLocked}
@@ -3067,6 +3126,7 @@
               onResizeCommit={persistWidths}
               onGeneration={adoptGeneration}
               onFileHistory={openFileHistory}
+              onOpenDiff={(path, side) => openFileDiff(path, side)}
               onNav={(nav) => (filesNav = nav)}
               {paneHead}
             />

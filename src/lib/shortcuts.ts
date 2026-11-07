@@ -25,7 +25,17 @@ const KEY_COMMANDS: Record<string, string> = {
   b: "rail.toggle",
   r: "view.refresh",
   f: "view.find",
+  p: "files.quickOpen",
   enter: "commit.local",
+};
+
+/**
+ * ⌘/Ctrl+Shift 组合：文件视图的搜索与返回/前进。
+ * 这些键位此前没有含义，因此不覆盖 Alt+←/→、Alt+↑/↓ 与 ⌘/Ctrl+F。
+ */
+const SHIFT_KEY_COMMANDS: Record<string, string> = {
+  arrowleft: "file.back",
+  arrowright: "file.forward",
 };
 
 const ALT_COMMANDS: Record<string, string> = {
@@ -54,7 +64,8 @@ export function shortcutCommand(event: KeyLike): string | null {
   if (event.altKey && !mod && !event.shiftKey) return ALT_COMMANDS[event.key] ?? null;
   if (!mod || event.altKey) return null;
   const key = event.key.toLowerCase();
-  if (event.shiftKey && key !== "enter") return null;
+  // ⌘⇧ 组合只认注册表里显式登记的几项，其余一律不匹配（⌘⇧K 仍然不是 ⌘K）。
+  if (event.shiftKey && key !== "enter") return SHIFT_KEY_COMMANDS[key] ?? null;
   const digit = DIGIT_VIEWS[event.key];
   if (digit) return digit;
   return KEY_COMMANDS[key] ?? null;

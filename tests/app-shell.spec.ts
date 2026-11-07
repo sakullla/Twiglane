@@ -142,8 +142,12 @@ const mocks = vi.hoisted(() => ({
   pickFile: vi.fn(),
   repositoryDirectory: vi.fn(),
   repositoryFileContent: vi.fn(),
+  repositoryPathSearch: vi.fn(),
   repositoryContentSearch: vi.fn(),
   filePreview: vi.fn(),
+  clioraReviewRequest: vi.fn(),
+  clioraReviewReceipt: vi.fn(),
+  clioraReviewReturn: vi.fn(),
 }));
 
 vi.mock("../src/lib/api", () => ({
@@ -400,8 +404,30 @@ const R11_ACTIONS: { id: string; title: string }[] = [
 ];
 
 /** 原清单之外后加的视图命令：文件切换、改动块跳转、聚焦搜索。 */
-const ADDED_COMMAND_IDS = ["file.prev", "file.next", "diff.hunk.prev", "diff.hunk.next", "view.find"];
-const ADDED_COMMAND_TITLES = ["上一个文件", "下一个文件", "上一处改动", "下一处改动", "聚焦搜索"];
+const ADDED_COMMAND_IDS = [
+  "file.prev",
+  "file.next",
+  "diff.hunk.prev",
+  "diff.hunk.next",
+  "view.find",
+  "files.quickOpen",
+  "files.search",
+  "file.reveal",
+  "file.back",
+  "file.forward",
+];
+const ADDED_COMMAND_TITLES = [
+  "上一个文件",
+  "下一个文件",
+  "上一处改动",
+  "下一处改动",
+  "聚焦搜索",
+  "按路径打开文件",
+  "全仓库搜索",
+  "在文件树中显示",
+  "后退",
+  "前进",
+];
 
 /** 注册表状态夹具：暂存区有 2 个文件、草稿已填，是「看起来都能用」的那一侧。 */
 function commandState(overrides: Partial<CommandState> = {}): CommandState {
@@ -2389,6 +2415,59 @@ describe("应用外壳", () => {
   });
 });
 
+describe("从改动进入文件树", () => {
+  it("右键「在文件树中显示」切到文件视图并逐级读取目标路径", async () => {
+    const dirEntry = (path: string, kind: "file" | "directory") => ({
+      name: path.split("/").pop() ?? path,
+      path,
+      kind,
+      ignored: false,
+      size: kind === "file" ? 10 : null,
+      error: null,
+    });
+    mocks.repositoryDirectory.mockImplementation((_repo: string, relative: string, _ignored: boolean, generation: number) =>
+      Promise.resolve({
+        generation,
+        path: relative,
+        entries: relative === "" ? [dirEntry("src", "directory")] : [dirEntry("src/App.svelte", "file")],
+        errors: [],
+      }),
+    );
+    mocks.repositoryFileContent.mockResolvedValue({
+      generation: 4,
+      path: "src/App.svelte",
+      kind: "text",
+      size: 10,
+      offset: 0,
+      lines: ["content"],
+      nextOffset: 1,
+      hasMore: false,
+      truncated: false,
+      message: null,
+    });
+    render(App);
+    await openRepo();
+
+    const row = [...document.querySelectorAll<HTMLElement>(".file-list .file-row")].find((item) =>
+      item.getAttribute("title")?.includes("src/App.svelte"),
+    );
+    expect(row).toBeTruthy();
+    await fireEvent.contextMenu(row!);
+    const item = await screen.findByRole("menuitem", { name: "在文件树中显示" });
+    await fireEvent.click(item);
+
+    await waitFor(() =>
+      expect(document.querySelector('.workbench-view[data-active="true"] [aria-current="page"]')?.getAttribute("data-view")).toBe("files"),
+    );
+    await waitFor(() =>
+      expect(mocks.repositoryDirectory.mock.calls.map((call) => call[1])).toEqual(expect.arrayContaining(["", "src"])),
+    );
+    await waitFor(() =>
+      expect(mocks.repositoryFileContent).toHaveBeenCalledWith(repoPath, "src/App.svelte", 0, undefined, 4, expect.any(Number)),
+    );
+  });
+});
+
 describe("cliora 来源展示", () => {
   const reviewId = "6f1a2b3c-4d5e-4f60-8172-93a4b5c6d7e8";
   const sessionId = "0b1c2d3e-4f50-4172-8394-a5b6c7d8e9f0";
@@ -2418,6 +2497,47 @@ describe("cliora 来源展示", () => {
     await openRepo();
     expect(screen.queryByRole("button", { name: /返回 cliora/ })).toBeNull();
     expect(screen.queryByText("cliora")).toBeNull();
+  });
+
+  it("进入文件视图浏览文件后来源仍在，返回 cliora 仍是 reviewed 且没有 Git 写入", async () => {
+    beginClioraReview({ reviewId, sessionId, worktreePath: repoPath, baseline: null });
+    mocks.repositoryDirectory.mockResolvedValue({
+      generation: 4,
+      path: "",
+      entries: [{ name: "App.svelte", path: "App.svelte", kind: "file", ignored: false, size: 10, error: null }],
+      errors: [],
+    });
+    mocks.repositoryFileContent.mockResolvedValue({
+      generation: 4,
+      path: "App.svelte",
+      kind: "text",
+      size: 10,
+      offset: 0,
+      lines: ["content"],
+      nextOffset: 1,
+      hasMore: false,
+      truncated: false,
+      message: null,
+    });
+    render(App);
+    await openRepo();
+    expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy();
+
+    await press("3");
+    await waitFor(() =>
+      expect(document.querySelector('.workbench-view[data-active="true"] [aria-current="page"]')?.getAttribute("data-view")).toBe("files"),
+    );
+    // 切换视图不清来源。
+    expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy();
+
+    const tree = await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(await within(tree).findByRole("treeitem", { name: /App\.svelte/ }));
+    await waitFor(() => expect(mocks.repositoryFileContent).toHaveBeenCalled());
+
+    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await waitFor(() => expect(mocks.clioraReviewReturn).toHaveBeenCalledWith(reviewId, sessionId, "reviewed", null));
+    expect(mocks.stageFiles).not.toHaveBeenCalled();
+    expect(mocks.commitChanges).not.toHaveBeenCalled();
   });
 
   it("同一 worktree 重新打开时保留来源与最新合入结果", async () => {

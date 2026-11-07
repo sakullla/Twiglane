@@ -14,8 +14,10 @@
     RepositoryFileContent,
     RepositorySearchScope,
   } from "../types";
-  import { BUSY_REASON, formatBytes, rowMark, splitPath } from "../ui";
+  import { BUSY_REASON, formatBytes, rowMark, splitPath, type FileNavState } from "../ui";
+  import type { DiffSide } from "../types";
   import BinaryPreview from "./BinaryPreview.svelte";
+  import FileNav from "./FileNav.svelte";
   import Icon from "./Icon.svelte";
   import LanguagePicker from "./LanguagePicker.svelte";
 
@@ -28,6 +30,11 @@
     active: boolean;
     opened: OpenedRepository;
     path: string | null;
+    /** 选中但已从工作区删除的文件：不读当前内容，只提供改动与历史。 */
+    missingPath?: string | null;
+    /** 统一文件定位的目标行与序号：序号变化时读取目标附近页并滚动过去。 */
+    line?: number | null;
+    lineSerial?: number;
     generation: number;
     /** 目录重验、手动刷新等无代次变化的重读信号。 */
     reloadKey?: number;
@@ -35,18 +42,27 @@
     nextId: () => number;
     onGeneration: (generation: number) => void;
     onFileHistory?: (path: string) => void;
+    /** 进入这个文件的 staged / unstaged 改动（由外壳切换视图）。 */
+    onOpenDiff?: (path: string, side: DiffSide) => void;
+    /** 文件切换条：上一个/下一个、后退/前进与最近打开。 */
+    nav?: FileNavState | null;
   }
 
   let {
     active,
     opened,
     path,
+    missingPath = null,
+    line = null,
+    lineSerial = 0,
     generation,
     reloadKey = 0,
     disabled,
     nextId,
     onGeneration,
     onFileHistory,
+    onOpenDiff,
+    nav = null,
   }: Props = $props();
 
   /** 与 .diff.dense 的行高一致：虚拟窗口按它算，行号与代码同高。 */
@@ -70,6 +86,9 @@
   let searchQuery = $state("");
   let searchResult = $state<RepositoryContentSearch | null>(null);
   let searchError = $state<string | null>(null);
+  /** 这份匹配是按哪个代次与重读信号算出来的：任一漂移就必须撤下结果。 */
+  let resultGeneration = $state(-1);
+  let resultKey = $state(-1);
   let searching = $state(false);
   let searchInput = $state<HTMLInputElement | null>(null);
 
@@ -85,6 +104,10 @@
   let language = $derived(path ? effectiveLanguage(path) : null);
   let languageLabel = $derived(languageName(language));
   let change = $derived(path ? opened.snapshot.files.find((file) => file.path === path) ?? null : null);
+  /** 删除墓碑的改动来源：只用于给「查看改动」判断两侧是否存在。 */
+  let deletedChange = $derived(
+    missingPath ? opened.snapshot.files.find((file) => file.path === missingPath) ?? null : null,
+  );
   let mark = $derived.by(() => {
     if (!change) return null;
     const side = change.unstaged !== "none" || change.untracked ? "unstaged" : "staged";
@@ -188,7 +211,11 @@
     }
   }
 
-  /* 只在（可见、路径、代次、重读信号）变化时读取：隐藏期间不发起新请求。 */
+  /**
+   * 只在路径、代次或重读信号变化时读取；隐藏期间不发起新请求。
+   * 同一代次的隐藏再显示不算变化：已读内容与滚动位置都属于这次会话，重读会把它们冲掉。
+   */
+  let lastRead = "";
   $effect(() => {
     const target = path;
     const generationNow = generation;
@@ -196,11 +223,15 @@
     const visible = active;
     untrack(() => {
       if (!target) {
+        lastRead = "";
         resetContent();
         return;
       }
       if (!visible) return;
-      if (key >= 0) void read(target, 0, false, generationNow);
+      const signature = `${target}:${generationNow}:${key}`;
+      if (signature === lastRead && content?.path === target) return;
+      lastRead = signature;
+      void read(target, 0, false, generationNow);
     });
   });
 
@@ -215,6 +246,38 @@
       searchSerial += 1;
       searching = false;
       resetContent();
+    });
+  });
+
+  /*
+   * 代次或重读信号前进：文件内容可能已经换过，旧命中的行号不再可信。
+   * 这里必须把结果显示一起撤下——只收起行号、留着旧匹配列表，
+   * 会让使用者按旧行号跳到新内容的错误位置。
+   */
+  $effect(() => {
+    const gen = generation;
+    const key = reloadKey;
+    if (searchResult === null) return;
+    if (resultGeneration >= gen && resultKey === key) return;
+    untrack(() => {
+      searchSerial += 1;
+      searching = false;
+      searchResult = null;
+      searchError = null;
+      hitLine = null;
+    });
+  });
+
+  /** 统一文件定位的目标行：序号变化即按偏移读取并滚过去，不改动其它状态。 */
+  let lastLineSerial = 0;
+  $effect(() => {
+    const serial = lineSerial;
+    const target = line;
+    if (serial === lastLineSerial) return;
+    lastLineSerial = serial;
+    untrack(() => {
+      if (target === null || target <= 0 || !path) return;
+      void jumpTo(target);
     });
   });
 
@@ -286,6 +349,8 @@
         return;
       }
       if (result.generation > generation) onGeneration(result.generation);
+      resultGeneration = result.generation;
+      resultKey = reloadKey;
       searchResult = result;
     } catch (failure) {
       if (token !== searchSerial) return;
@@ -344,6 +409,9 @@
         {#if mark}
           <span class={`st ${mark.tone}`} title={mark.label} aria-label={`Git 状态：${mark.label}`}>{mark.letter}</span>
         {/if}
+      </div>
+      <div class="diff-toolbar-group">
+        {#if nav}<FileNav {nav} />{/if}
       </div>
       <div class="diff-toolbar-group">
         {#if content?.kind === "text"}
@@ -406,6 +474,24 @@
             title="查看这个文件的提交历史"
             onclick={() => onFileHistory?.(path)}
           ><Icon name="history" size={13} /><span class="diff-hist-label">历史</span></button>
+        {/if}
+        {#if onOpenDiff && change && (change.unstaged !== "none" || change.untracked)}
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm"
+            aria-label="查看未暂存的改动"
+            title="回到改动视图，并定位到这个文件未暂存的一侧"
+            onclick={() => onOpenDiff?.(path, "unstaged")}
+          ><Icon name="file-diff" size={13} /><span class="diff-hist-label">改动</span></button>
+        {/if}
+        {#if onOpenDiff && change && change.staged !== "none"}
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm"
+            aria-label="查看已暂存的改动"
+            title="回到改动视图，并定位到这个文件已暂存的一侧"
+            onclick={() => onOpenDiff?.(path, "staged")}
+          ><Icon name="file-diff" size={13} /><span class="diff-hist-label">已暂存</span></button>
         {/if}
         <button
           type="button"
@@ -578,6 +664,29 @@
     {:else}
       <div class="file-state"><strong>选择左侧的一个文件</strong><p>文件内容只读显示，不会改动工作区。</p></div>
     {/if}
+  {:else if missingPath}
+    <div class="file-state" role="status">
+      <span class="empty-icon"><Icon name="alert-circle" size={22} /></span>
+      <strong>文件已删除</strong>
+      <p>{missingPath} 已经不在工作区里，这里不把它当作可读取的当前文件。可以从改动或历史查看旧版本。</p>
+      <div class="file-state-actions">
+        {#if onOpenDiff && deletedChange && deletedChange.unstaged !== "none"}
+          <button type="button" class="btn btn-secondary btn-sm" onclick={() => onOpenDiff?.(missingPath, "unstaged")}>
+            查看未暂存的改动
+          </button>
+        {/if}
+        {#if onOpenDiff && deletedChange && deletedChange.staged !== "none"}
+          <button type="button" class="btn btn-secondary btn-sm" onclick={() => onOpenDiff?.(missingPath, "staged")}>
+            查看已暂存的改动
+          </button>
+        {/if}
+        {#if onFileHistory}
+          <button type="button" class="btn btn-secondary btn-sm" onclick={() => onFileHistory?.(missingPath)}>
+            查看文件历史
+          </button>
+        {/if}
+      </div>
+    </div>
   {:else}
     <div class="file-state">
       <span class="empty-icon"><Icon name="folder-open" size={22} /></span>

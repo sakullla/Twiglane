@@ -10,7 +10,7 @@ import { fileNavState } from "../../src/lib/ui";
 const api = vi.hoisted(() => ({
   commitFileDiff: vi.fn(), mergeSession: vi.fn(), branchState: vi.fn(),
   historyPage: vi.fn(), conflictView: vi.fn(), commitDetail: vi.fn(), loadDiff: vi.fn(),
-  repositoryFileContent: vi.fn(), repositoryContentSearch: vi.fn(),
+  repositoryFileContent: vi.fn(), repositoryContentSearch: vi.fn(), repositoryPathSearch: vi.fn(), repositoryDirectory: vi.fn(),
 }));
 vi.mock("../../src/lib/api", () => ({ api }));
 
@@ -20,8 +20,9 @@ import MergePanel from "../../src/lib/components/MergePanel.svelte";
 import HistoryPanel from "../../src/lib/components/HistoryPanel.svelte";
 import MultiFileDiff from "../../src/lib/components/MultiFileDiff.svelte";
 import FileContent from "../../src/lib/components/FileContent.svelte";
+import FileSearch from "../../src/lib/components/FileSearch.svelte";
 import FileTree from "../../src/lib/components/FileTree.svelte";
-import { flattenTree, makeNode, type FileNode } from "../../src/lib/files.svelte";
+import { createFilesStore, flattenTree, makeNode, type FileNode } from "../../src/lib/files.svelte";
 
 const { opened, detail, diff } = new PerformanceFixture();
 
@@ -244,3 +245,97 @@ describe("大仓库的有界读取和渲染", () => {
     }
   });
 });
+
+
+describe("文件搜索的规模入口", () => {
+  it("两万条路径结果只挂载视口附近的行，远距离定位按偏移读取目标页", async () => {
+    const entries = Array.from({ length: 20_000 }, (_, index) => ({
+      path: "src/gen/file-" + index + ".ts",
+      kind: "file" as const,
+      ignored: false,
+    }));
+    api.repositoryPathSearch.mockResolvedValue({
+      generation: 4,
+      query: "file-",
+      directory: null,
+      includeIgnored: false,
+      scanned: entries.length,
+      entries,
+      truncated: true,
+      message: "结果达到上限。",
+    });
+    api.repositoryDirectory.mockResolvedValue({ generation: 4, path: "", entries: [], errors: [] });
+    const store = createFilesStore({
+      repo: () => "C:/work/demo",
+      generation: () => 4,
+      active: () => true,
+      nextId: () => 1,
+      onGeneration: vi.fn(),
+      files: () => [],
+    });
+    await store.sync("C:/work/demo");
+    const height = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
+    try {
+      const start = performance.now();
+      render(FileSearch, {
+        store,
+        disabled: false,
+        mode: "path",
+        onMode: vi.fn(),
+        onClose: vi.fn(),
+        onOpen: vi.fn(),
+      } as never);
+      store.setPathQuery("file-");
+      await waitFor(() => expect(store.pathResult?.entries.length).toBe(20_000));
+      await tick();
+      console.info("20000 path results render: " + (performance.now() - start).toFixed(2) + " ms");
+      expect(document.querySelectorAll(".file-search-row").length).toBeLessThan(100);
+      expect(document.querySelector(".file-search-note")?.textContent).toContain("已截断");
+    } finally {
+      height.mockRestore();
+    }
+  });
+
+  it("远距离目标行不在已加载页时按偏移读取，而不是只滚动 DOM", async () => {
+    api.repositoryFileContent.mockImplementation(
+      (_repo: string, path: string, offset: number, _limit: number | undefined, generation: number) =>
+        Promise.resolve({
+          generation,
+          path,
+          kind: "text",
+          size: 2_000_000,
+          offset,
+          lines: ["target-row"],
+          nextOffset: offset + 1,
+          hasMore: false,
+          truncated: false,
+          message: null,
+        }),
+    );
+    const { container } = render(FileContent, {
+      props: {
+        active: true,
+        opened,
+        path: "src/gen/long.ts",
+        line: 17500,
+        lineSerial: 1,
+        generation: opened.generation,
+        disabled: false,
+        nextId: () => 1,
+        onGeneration: vi.fn(),
+      } as never,
+    });
+    await waitFor(() =>
+      expect(api.repositoryFileContent).toHaveBeenLastCalledWith(
+        opened.summary.path,
+        "src/gen/long.ts",
+        17499,
+        undefined,
+        opened.generation,
+        1,
+      ),
+    );
+    await waitFor(() => expect(container.querySelector('[data-file-line="17500"]')).toBeTruthy());
+  });
+});
+

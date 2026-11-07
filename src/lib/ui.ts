@@ -230,6 +230,22 @@ export function batchSummary(
   return `${parts.join("。")}。`;
 }
 
+/** 本次会话的打开历史：路径 + 行，供后退/前进与最近打开使用。 */
+export interface FileVisit {
+  path: string;
+  line: number | null;
+}
+
+/** 文件视图的返回/前进：只有文件视图提供，其它视图的 nav 不带这个字段。 */
+export interface FileHistoryNav {
+  backReason: string | null;
+  forwardReason: string | null;
+  onBack: () => void;
+  onForward: () => void;
+  recent: FileVisit[];
+  onOpen: (path: string, line: number | null) => void;
+}
+
 /** 上一个/下一个文件：工具栏按钮与 file.prev、file.next 命令共用的状态。 */
 export interface FileNavState {
   index: number;
@@ -239,6 +255,8 @@ export interface FileNavState {
   nextReason: string | null;
   onPrev: () => void;
   onNext: () => void;
+  /** 文件视图额外提供：最近打开与后退/前进；其它视图不设置。 */
+  history?: FileHistoryNav;
 }
 
 export function fileNavState<T>(items: T[], index: number, go: (item: T) => void, noun = "文件"): FileNavState {

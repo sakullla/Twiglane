@@ -9,10 +9,24 @@
  */
 import { api } from "./api";
 import { normalizeError } from "./errors";
-import type { RepositoryDirectory, RepositoryDirectoryEntry, RepositoryEntryKind } from "./types";
+import type {
+  FileChange,
+  RepositoryContentMatch,
+  RepositoryContentSearch,
+  RepositoryDirectory,
+  RepositoryDirectoryEntry,
+  RepositoryEntryKind,
+  RepositoryPathEntry,
+  RepositoryPathSearch,
+  RepositorySearchScope,
+} from "./types";
 
 /** 目录行高（像素）：与 components.css 的 .file-tree-row 一致，虚拟化按它算窗口。 */
 export const FILE_ROW_HEIGHT = 26;
+/** 搜索结果行高（像素）：路径结果与全文结果的每一行都固定这么高，虚拟化按它算窗口。 */
+export const SEARCH_ROW_HEIGHT = 26;
+/** 一次路径 / 全文搜索的请求上限：后端另有自己的上限，这里只是给界面的显示边界。 */
+export const SEARCH_LIMIT = 200;
 /** 单链合并的上限：再多就不是「一个目录」而是层级本身，逐级展开更好读。 */
 export const MAX_CHAIN = 12;
 
@@ -31,6 +45,8 @@ export interface FileNode {
   failure: string | null;
   /** 用户要求把单链目录拆成逐级显示。 */
   split: boolean;
+  /** 仅改动树里的删除墓碑：工作区没有这个文件，不能当当前文件读取。 */
+  deleted?: boolean;
 }
 
 export interface FileTreeRow {
@@ -57,6 +73,10 @@ export interface FileTreeRow {
   splittable: boolean;
   /** 链中间层：只占位显示层级，不能再展开或打开。 */
   segment: boolean;
+  /** 仅改动树里的删除墓碑：只提供改动与历史，不读取当前文件。 */
+  deleted?: boolean;
+  /** 树过滤补齐的未展开匹配：不在当前已加载树里，点开时先展开必要的祖先。 */
+  extra?: boolean;
 }
 
 export function makeNode(entry: RepositoryDirectoryEntry): FileNode {
@@ -122,6 +142,7 @@ function rowOf(node: FileNode, depth: number, chain: FileNode[], segment = false
     chain: chain.length,
     splittable,
     segment,
+    deleted: Boolean(last.deleted),
   };
 }
 
@@ -149,6 +170,7 @@ function flattenInto(list: FileNode[], depth: number, out: FileTreeRow[]): void 
           chain: 1,
           splittable: false,
           segment: true,
+          deleted: Boolean(segment.deleted),
         });
       }
       const last = chain[chain.length - 1];
@@ -199,6 +221,139 @@ export function filterRows(rows: readonly FileTreeRow[], query: string): FileTre
   return rows.filter((_row, index) => keep.has(index));
 }
 
+/**
+ * 仅看改动时的树：直接由 StatusSnapshot 的路径派生，不读目录。
+ * 祖先目录由路径合成；删除的文件保留为墓碑行，只提供改动与历史。
+ */
+export function buildChangedTree(files: readonly FileChange[]): FileNode[] {
+  const roots: FileNode[] = [];
+  const dirs = new Map<string, FileNode>();
+  for (const file of files) {
+    const parts = file.path.split("/");
+    let list = roots;
+    let prefix = "";
+    for (let index = 0; index < parts.length - 1; index += 1) {
+      prefix = prefix ? `${prefix}/${parts[index]}` : parts[index];
+      let dir = dirs.get(prefix);
+      if (!dir) {
+        dir = makeNode({ name: parts[index], path: prefix, kind: "directory", ignored: false, size: null, error: null });
+        dir.expanded = true;
+        dir.children = [];
+        dirs.set(prefix, dir);
+        list.push(dir);
+      }
+      list = dir.children as FileNode[];
+    }
+    const node = makeNode({
+      name: parts[parts.length - 1],
+      path: file.path,
+      kind: "file",
+      ignored: false,
+      size: null,
+      error: null,
+    });
+    node.deleted = isDeletedChange(file);
+    list.push(node);
+  }
+  sortNodes(roots);
+  return roots;
+}
+
+/** 目录优先、再按名称排序：改动树是从路径合成的，顺序不能靠快照的偶然次序。 */
+function sortNodes(list: FileNode[]): void {
+  list.sort((left, right) =>
+    isDirectoryKind(left.kind) === isDirectoryKind(right.kind)
+      ? left.name.localeCompare(right.name)
+      : isDirectoryKind(left.kind)
+        ? -1
+        : 1,
+  );
+  for (const node of list) if (node.children) sortNodes(node.children);
+}
+
+/** 工作区里已经没有这个文件：未暂存删除，或只剩已暂存删除而工作区无内容。 */
+export function isDeletedChange(file: FileChange): boolean {
+  return file.unstaged === "deleted" || (file.staged === "deleted" && file.unstaged === "none");
+}
+
+/** 全文结果按文件分组：界面按文件分块显示，不把一条扁平的匹配列表丢给使用者。 */
+export interface ContentGroup {
+  path: string;
+  matches: RepositoryContentMatch[];
+}
+
+export function groupContentMatches(matches: readonly RepositoryContentMatch[]): ContentGroup[] {
+  const groups: ContentGroup[] = [];
+  const byPath = new Map<string, ContentGroup>();
+  for (const match of matches) {
+    let group = byPath.get(match.path);
+    if (!group) {
+      group = { path: match.path, matches: [] };
+      byPath.set(match.path, group);
+      groups.push(group);
+    }
+    group.matches.push(match);
+  }
+  return groups;
+}
+
+/** 搜索结果虚拟化用的固定行高行：分组标题与匹配行同高，方向键只在可选中的行之间移动。 */
+export type SearchRow =
+  | { kind: "group"; path: string; count: number }
+  | { kind: "match"; path: string; line: number; column: number; text: string };
+
+export function contentSearchRows(result: RepositoryContentSearch | null): SearchRow[] {
+  if (!result) return [];
+  const rows: SearchRow[] = [];
+  for (const group of groupContentMatches(result.matches)) {
+    rows.push({ kind: "group", path: group.path, count: group.matches.length });
+    for (const match of group.matches) {
+      rows.push({ kind: "match", path: match.path, line: match.line, column: match.column, text: match.text });
+    }
+  }
+  return rows;
+}
+
+/** 路径结果的展示行：文件与派生目录各自带类型，不把目录伪装成可打开的文件。 */
+export interface PathRow {
+  kind: "file" | "directory";
+  path: string;
+  ignored: boolean;
+}
+
+export function pathSearchRows(result: RepositoryPathSearch | null): PathRow[] {
+  if (!result) return [];
+  return result.entries.map((entry: RepositoryPathEntry) => ({
+    kind: entry.kind,
+    path: entry.path,
+    ignored: entry.ignored,
+  }));
+}
+
+/** 树过滤补齐出来的一行：不在当前树里，点开时先展开必要的祖先。 */
+export function extraRow(entry: RepositoryPathEntry): FileTreeRow {
+  const name = entry.path.split("/").pop() ?? entry.path;
+  return {
+    node: makeNode({ name, path: entry.path, kind: entry.kind, ignored: entry.ignored, size: null, error: null }),
+    path: entry.path,
+    label: entry.path,
+    depth: 0,
+    kind: entry.kind,
+    ignored: entry.ignored,
+    size: null,
+    error: null,
+    expanded: false,
+    expandable: entry.kind === "directory",
+    loading: false,
+    failure: null,
+    empty: false,
+    chain: 1,
+    splittable: false,
+    segment: false,
+    extra: true,
+  };
+}
+
 /** 树过滤之外的行内定位：返回 row 在可见行里的下标，用于滚动到目标。 */
 export function rowIndex(rows: readonly FileTreeRow[], path: string): number {
   return rows.findIndex((row) => row.path === path);
@@ -210,6 +365,8 @@ export interface FilesStoreDeps {
   active: () => boolean;
   nextId: () => number;
   onGeneration: (generation: number) => void;
+  /** 当前 StatusSnapshot 的改动路径：仅改动树与 changed-only 搜索都以它为准。 */
+  files?: () => readonly FileChange[];
 }
 
 /** 当前会话的文件树状态。一个仓库一份，由文件视图组件持有。 */
@@ -234,6 +391,32 @@ export function createFilesStore(deps: FilesStoreDeps) {
 
   const serials = new Map<string, number>();
 
+  /* ---- 搜索：路径快速打开、全文搜索与树过滤补齐各有一份请求身份 ---- */
+  let pathQuery = $state("");
+  let pathResult = $state<RepositoryPathSearch | null>(null);
+  let pathError = $state<string | null>(null);
+  let pathBusy = $state(false);
+  let contentQuery = $state("");
+  let contentResult = $state<RepositoryContentSearch | null>(null);
+  let contentError = $state<string | null>(null);
+  let contentBusy = $state(false);
+  let scopeKind = $state<RepositorySearchScope["kind"]>("repository");
+  /** 搜索是否包含被忽略的文件：只影响本次请求，不写 .gitignore。 */
+  let searchIgnored = $state(false);
+  /** 树过滤的全局补齐：已加载节点在本地过滤，未展开的匹配靠路径搜索补上。 */
+  let filterEntries = $state<RepositoryPathEntry[]>([]);
+  let filterError = $state<string | null>(null);
+  let changedOnly = $state(false);
+  /** 定位目标行：路径 + 行号 + 序号，内容区据此读取目标页并滚动。 */
+  let lineTarget = $state<{ path: string; line: number; serial: number } | null>(null);
+  let locateSerial = 0;
+  let pathSerial = 0;
+  let contentSerial = 0;
+  let filterSerial = 0;
+  /** 当前会话的打开历史（路径 + 行）：后退/前进按它走，不写任何持久状态。 */
+  let visits = $state<{ path: string; line: number | null }[]>([]);
+  let cursor = $state(-1);
+
   function reset(next: string | null): void {
     repo = next;
     nodes = [];
@@ -243,6 +426,28 @@ export function createFilesStore(deps: FilesStoreDeps) {
     failure = null;
     loaded = false;
     serials.clear();
+    resetSearches();
+    changedOnly = false;
+    lineTarget = null;
+    visits = [];
+    cursor = -1;
+  }
+
+  /** 切仓库或清空视图时撤下全部搜索状态：旧仓库的结果一律不留在界面上。 */
+  function resetSearches(): void {
+    pathSerial += 1;
+    contentSerial += 1;
+    filterSerial += 1;
+    pathQuery = "";
+    pathResult = null;
+    pathError = null;
+    pathBusy = false;
+    contentQuery = "";
+    contentResult = null;
+    contentError = null;
+    contentBusy = false;
+    filterEntries = [];
+    filterError = null;
   }
 
   function findNode(list: FileNode[], path: string): FileNode | null {
@@ -359,27 +564,272 @@ export function createFilesStore(deps: FilesStoreDeps) {
     await expand(node);
   }
 
-  /** 展开到 path 的所有祖先并选中它（这里只做树内定位，不新增读取未展开目录）。 */
-  async function reveal(path: string): Promise<void> {
+  /** 逐级加载 path 的祖先目录，让这一行真的出现在树里（未读过的目录按需读取）。 */
+  async function ensureChain(path: string): Promise<boolean> {
     const parts = path.split("/");
-    let list = nodes;
     let prefix = "";
     for (let index = 0; index < parts.length - 1; index += 1) {
       prefix = prefix ? `${prefix}/${parts[index]}` : parts[index];
-      let node = list.find((item) => item.path === prefix) ?? null;
-      if (!node) break;
-      if (!node.expanded) await expand(node);
-      list = node.children ?? [];
+      let node = findNode(nodes, prefix);
+      // 这一级还没读到（从未展开、或树被过滤/重读过）：重读根目录再找一次。
+      if (!node || !isDirectoryKind(node.kind)) {
+        await loadDirectory("", null);
+        node = findNode(nodes, prefix);
+      }
+      if (!node || !isDirectoryKind(node.kind)) return false;
+      if (node.children === null) {
+        const ok = await loadDirectory(node.path, node);
+        if (!ok) return false;
+      }
+      node.expanded = true;
     }
+    return true;
+  }
+
+  /** 树内定位：展开祖先、选中并（可选）记下要跳转的行。不改动工作区，也不读文件内容。 */
+  async function locate(path: string, line: number | null = null): Promise<boolean> {
+    if (!repo || !deps.active()) return false;
+    // 仅改动树里可能没有这个路径：定位先在完整树里做，否则目标行永远打不开。
+    if (changedOnly) changedOnly = false;
+    if (query) {
+      query = "";
+      filterSerial += 1;
+      filterEntries = [];
+      filterError = null;
+    }
+    const ok = await ensureChain(path);
+    if (!ok) return false;
     selectedPath = path;
+    remember(path, line);
+    if (line !== null && line > 0) lineTarget = { path, line, serial: ++locateSerial };
+    return true;
+  }
+
+  /** 打开过的文件（路径 + 行）：同一路径连续打开不重复占位，最多保留最近 50 条。 */
+  function remember(path: string, line: number | null): void {
+    const current = visits[cursor];
+    if (current && current.path === path && current.line === line) return;
+    visits = [...visits.slice(0, cursor + 1), { path, line }].slice(-50);
+    cursor = visits.length - 1;
   }
 
   function select(path: string): void {
     selectedPath = path;
+    remember(path, null);
   }
 
   function setQuery(next: string): void {
     query = next;
+    void completeFilter();
+  }
+
+  /** 树过滤的全局补齐：已加载部分本地过滤，其余靠路径搜索补齐未展开的匹配。 */
+  async function completeFilter(retries = 1): Promise<void> {
+    const queryNow = query.trim();
+    const current = repo;
+    const token = ++filterSerial;
+    if (!current || !queryNow || !deps.active()) {
+      filterEntries = [];
+      filterError = null;
+      return;
+    }
+    const owns = () => repo === current && filterSerial === token;
+    try {
+      const result = await api.repositoryPathSearch(
+        current,
+        queryNow,
+        null,
+        includeIgnored,
+        SEARCH_LIMIT,
+        deps.generation(),
+        deps.nextId(),
+      );
+      if (!owns()) return;
+      if (result.generation > deps.generation()) deps.onGeneration(result.generation);
+      // 旧代次的结果不补进树：宁可少显示，也不把过期路径当成当前仓库的。
+      if (result.generation < deps.generation() && retries > 0) {
+        void completeFilter(retries - 1);
+        return;
+      }
+      if (result.generation < deps.generation()) return;
+      filterEntries = result.entries;
+      filterError = null;
+    } catch (error) {
+      if (!owns()) return;
+      const normalized = normalizeError(error);
+      if (normalized.code === "stale" && normalized.generation !== undefined && retries > 0) {
+        deps.onGeneration(normalized.generation);
+        void completeFilter(retries - 1);
+        return;
+      }
+      filterEntries = [];
+      filterError = normalized.message || "无法在仓库里查找路径。";
+    }
+  }
+
+  function setPathQuery(next: string): void {
+    pathQuery = next;
+    void searchPaths();
+  }
+
+  /** 路径快速打开：只查路径（文件与派生目录），不读任何文件内容。 */
+  async function searchPaths(retries = 1): Promise<void> {
+    const queryNow = pathQuery.trim();
+    const current = repo;
+    const token = ++pathSerial;
+    if (!current || !queryNow || !deps.active()) {
+      pathResult = null;
+      pathError = null;
+      pathBusy = false;
+      return;
+    }
+    const owns = () => repo === current && pathSerial === token;
+    pathBusy = true;
+    pathError = null;
+    try {
+      const result = await api.repositoryPathSearch(
+        current,
+        queryNow,
+        null,
+        searchIgnored,
+        SEARCH_LIMIT,
+        deps.generation(),
+        deps.nextId(),
+      );
+      if (!owns()) return;
+      if (result.generation > deps.generation()) deps.onGeneration(result.generation);
+      if (result.generation < deps.generation() && retries > 0) {
+        void searchPaths(retries - 1);
+        return;
+      }
+      if (result.generation < deps.generation()) return;
+      pathResult = result;
+    } catch (error) {
+      if (!owns()) return;
+      const normalized = normalizeError(error);
+      if (normalized.code === "stale" && normalized.generation !== undefined && retries > 0) {
+        deps.onGeneration(normalized.generation);
+        void searchPaths(retries - 1);
+        return;
+      }
+      pathResult = null;
+      pathError = normalized.message || "无法按路径搜索。";
+    } finally {
+      if (owns()) pathBusy = false;
+    }
+  }
+
+  function setContentQuery(next: string): void {
+    contentQuery = next;
+    void searchContent();
+  }
+
+  function setScopeKind(next: RepositorySearchScope["kind"]): void {
+    if (scopeKind === next) return;
+    scopeKind = next;
+    void searchContent();
+  }
+
+  function setSearchIgnored(next: boolean): void {
+    if (searchIgnored === next) return;
+    searchIgnored = next;
+    void searchContent();
+    void searchPaths();
+    if (query.trim()) void completeFilter();
+  }
+
+  function setChangedOnly(next: boolean): void {
+    changedOnly = next;
+  }
+
+  /** 当前目录 scope 的目录：选中的目录本身，或选中文件所在的目录。 */
+  function currentDirectory(): string | null {
+    if (!selectedPath) return null;
+    const node = findNode(nodes, selectedPath);
+    if (node && isDirectoryKind(node.kind)) return selectedPath;
+    return selectedPath.includes("/") ? selectedPath.slice(0, selectedPath.lastIndexOf("/")) : "";
+  }
+
+  function scopeFor(kind: RepositorySearchScope["kind"]): RepositorySearchScope {
+    if (kind === "directory") return { kind: "directory", path: currentDirectory() ?? "" };
+    if (kind === "changed") return { kind: "changed" };
+    return { kind: "repository" };
+  }
+
+  /**
+   * 全文搜索：固定字符串，范围由 scope 决定（全仓 / 当前目录 / 仅改动 / 单文件）。
+   * 结果只有在仓库、代次和请求身份都仍是当前值时才写入；旧查询与旧仓库不会覆盖新结果。
+   */
+  async function searchContent(retries = 1): Promise<void> {
+    const queryNow = contentQuery.trim();
+    const current = repo;
+    const token = ++contentSerial;
+    if (!current || !queryNow || !deps.active()) {
+      contentResult = null;
+      contentError = null;
+      contentBusy = false;
+      return;
+    }
+    const owns = () => repo === current && contentSerial === token;
+    contentBusy = true;
+    contentError = null;
+    const scope = scopeFor(scopeKind);
+    try {
+      const result = await api.repositoryContentSearch(
+        current,
+        queryNow,
+        scope,
+        searchIgnored,
+        SEARCH_LIMIT,
+        deps.generation(),
+        deps.nextId(),
+      );
+      if (!owns()) return;
+      if (result.generation > deps.generation()) deps.onGeneration(result.generation);
+      if (result.generation < deps.generation() && retries > 0) {
+        void searchContent(retries - 1);
+        return;
+      }
+      if (result.generation < deps.generation()) return;
+      contentResult = result;
+    } catch (error) {
+      if (!owns()) return;
+      const normalized = normalizeError(error);
+      if (normalized.code === "stale" && normalized.generation !== undefined && retries > 0) {
+        deps.onGeneration(normalized.generation);
+        void searchContent(retries - 1);
+        return;
+      }
+      contentResult = null;
+      contentError = normalized.message || "无法完成这次搜索。";
+    } finally {
+      if (owns()) contentBusy = false;
+    }
+  }
+
+  /** 后退 / 前进：回到本次会话打开过的路径与行；不重新搜索、不重读其它视图。 */
+  async function go(delta: number): Promise<boolean> {
+    const visit = visits[cursor + delta];
+    if (!visit || !repo || !deps.active()) return false;
+    cursor += delta;
+    await ensureChain(visit.path);
+    selectedPath = visit.path;
+    if (visit.line !== null && visit.line > 0) {
+      lineTarget = { path: visit.path, line: visit.line, serial: ++locateSerial };
+    }
+    return true;
+  }
+
+  function clearLineTarget(): void {
+    lineTarget = null;
+  }
+
+  function back(): void {
+    void go(-1);
+  }
+
+  function forward(): void {
+    void go(1);
   }
 
   function setIncludeIgnored(next: boolean): void {
@@ -387,7 +837,10 @@ export function createFilesStore(deps: FilesStoreDeps) {
     includeIgnored = next;
     nodes = [];
     loaded = false;
+    filterSerial += 1;
+    filterEntries = [];
     void reload();
+    if (query.trim()) void completeFilter();
   }
 
   /** 手动或代次变化后的重验：重读根目录和所有已经读过的目录，保持展开与选择。 */
@@ -408,6 +861,10 @@ export function createFilesStore(deps: FilesStoreDeps) {
     const results = await Promise.all(targets.map((node) => loadDirectory(node.path, node)));
     if (!results.every(Boolean) || !deps.active()) return false;
     verifiedGeneration = deps.generation();
+    // 树重验完再按当前代次重跑还在显示的搜索：隐藏期间的结果一律不再当作当前。
+    if (query.trim()) void completeFilter();
+    if (pathQuery.trim()) void searchPaths();
+    if (contentQuery.trim()) void searchContent();
     return true;
   }
 
@@ -491,21 +948,94 @@ export function createFilesStore(deps: FilesStoreDeps) {
       return revision;
     },
     get rows() {
-      return filterRows(flattenTree(nodes), query);
+      // 仅看改动时行来自 StatusSnapshot：目录没有被读过，但改动文件与墓碑照样能显示。
+      const base = changedOnly ? flattenTree(buildChangedTree(deps.files?.() ?? [])) : flattenTree(nodes);
+      return filterRows(base, query);
     },
     get selectedNode() {
       return selectedPath ? findNode(nodes, selectedPath) : null;
     },
+    get changedOnly() {
+      return changedOnly;
+    },
+    get pathQuery() {
+      return pathQuery;
+    },
+    get pathResult() {
+      return pathResult;
+    },
+    get pathError() {
+      return pathError;
+    },
+    get pathBusy() {
+      return pathBusy;
+    },
+    get contentQuery() {
+      return contentQuery;
+    },
+    get contentResult() {
+      return contentResult;
+    },
+    get contentError() {
+      return contentError;
+    },
+    get contentBusy() {
+      return contentBusy;
+    },
+    get scopeKind() {
+      return scopeKind;
+    },
+    get searchIgnored() {
+      return searchIgnored;
+    },
+    get filterEntries() {
+      return filterEntries;
+    },
+    get filterError() {
+      return filterError;
+    },
+    get lineTarget() {
+      return lineTarget;
+    },
+    get recent() {
+      return visits;
+    },
+    get canBack() {
+      return cursor > 0;
+    },
+    get canForward() {
+      return cursor >= 0 && cursor < visits.length - 1;
+    },
+    get backReason() {
+      if (visits.length === 0) return "还没有打开过文件";
+      return cursor > 0 ? null : "已经是本次会话的第一个文件";
+    },
+    get forwardReason() {
+      if (visits.length === 0) return "还没有打开过文件";
+      return cursor >= 0 && cursor < visits.length - 1 ? null : "已经是最新打开的文件";
+    },
+    get currentDirectory() {
+      return currentDirectory();
+    },
+    locate,
+    setQuery,
+    setIncludeIgnored,
+    setPathQuery,
+    setContentQuery,
+    setScopeKind,
+    setSearchIgnored,
+    setChangedOnly,
+    clearLineTarget,
+    clearSearches: resetSearches,
+    back,
+    forward,
     sync,
     activate,
     setVisible,
     revalidate,
     toggle,
     expand,
-    reveal,
     select,
-    setQuery,
-    setIncludeIgnored,
   };
 }
 

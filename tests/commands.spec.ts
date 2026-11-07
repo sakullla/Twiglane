@@ -67,3 +67,63 @@ describe("视图命令", () => {
     expect(commandAvailable(prev, state({ workspaceView: "files", fileNav: null }))).toBe(false);
   });
 });
+describe("文件导航命令", () => {
+  it("路径打开、全文搜索、在文件树中显示与新快捷键都登记在注册表里", () => {
+    const ids = COMMANDS.filter((command) => command.group === "视图").map((command) => command.id);
+    expect(ids).toEqual([
+      "view.changes",
+      "view.files",
+      "view.history",
+      "file.prev",
+      "file.next",
+      "diff.hunk.prev",
+      "diff.hunk.next",
+      "view.find",
+      "files.quickOpen",
+      "files.search",
+      "file.reveal",
+      "file.back",
+      "file.forward",
+    ]);
+    expect(commandById("files.quickOpen")!.shortcut).toBe(`${MODIFIER_LABEL} P`);
+    expect(commandById("file.back")!.shortcut).toBe(`${MODIFIER_LABEL} ⇧ ←`);
+    expect(commandById("file.forward")!.shortcut).toBe(`${MODIFIER_LABEL} ⇧ →`);
+  });
+
+  it("没有选中文件时「在文件树中显示」给出原因，有选中时可执行", () => {
+    const reveal = commandById("file.reveal")!;
+    expect(commandAvailable(reveal, state({ currentFilePath: null }))).toBe(false);
+    expect(commandReason(reveal, state({ currentFilePath: null }))).toBe("先在改动里选择一个文件");
+    expect(commandReason(reveal, state({ hasRepo: false }))).toBe("先打开一个仓库");
+    expect(commandAvailable(reveal, state({ currentFilePath: "src/App.svelte" }))).toBe(true);
+  });
+
+  it("后退/前进只有文件视图提供历史，到头时原因来自同一份状态", () => {
+    const back = commandById("file.back")!;
+    const forward = commandById("file.forward")!;
+    expect(commandAvailable(back, state())).toBe(false);
+    expect(commandReason(back, state())).toBe("文件视图里才有打开历史");
+
+    const atStart = state({ workspaceView: "files", fileHistory: { backReason: "已经是本次会话的第一个文件", forwardReason: null } });
+    expect(commandAvailable(back, atStart)).toBe(false);
+    expect(commandReason(back, atStart)).toBe("已经是本次会话的第一个文件");
+    expect(commandAvailable(forward, atStart)).toBe(true);
+
+    const atEnd = state({ workspaceView: "files", fileHistory: { backReason: null, forwardReason: "已经是最新打开的文件" } });
+    expect(commandAvailable(forward, atEnd)).toBe(false);
+    expect(commandReason(forward, atEnd)).toBe("已经是最新打开的文件");
+  });
+
+  it("新快捷键不覆盖原有的文件、改动块与聚焦搜索组合", () => {
+    expect(shortcutCommand({ key: "p", ctrlKey: true })).toBe("files.quickOpen");
+    expect(shortcutCommand({ key: "ArrowLeft", ctrlKey: true, shiftKey: true })).toBe("file.back");
+    expect(shortcutCommand({ key: "ArrowRight", metaKey: true, shiftKey: true })).toBe("file.forward");
+    // 原有组合原样保留。
+    expect(shortcutCommand({ key: "ArrowLeft", altKey: true })).toBe("file.prev");
+    expect(shortcutCommand({ key: "ArrowUp", altKey: true })).toBe("diff.hunk.prev");
+    expect(shortcutCommand({ key: "f", ctrlKey: true })).toBe("view.find");
+    // 未登记的 ⌘⇧ 组合仍不匹配。
+    expect(shortcutCommand({ key: "k", metaKey: true, shiftKey: true })).toBeNull();
+    expect(shortcutCommand({ key: "ArrowRight", altKey: true, shiftKey: true })).toBeNull();
+  });
+});

@@ -53,6 +53,10 @@ export interface CommandState {
   recentRepos: RecentRepo[];
   /** 当前打开的仓库路径：命令面板里标出「当前仓库」，切换命令仍可用于重新读取。 */
   currentRepoPath?: string | null;
+  /** 改动视图当前选中的文件：「在文件树中显示」以它为目标。 */
+  currentFilePath?: string | null;
+  /** 文件视图的本次会话返回/前进：其它视图为 null。 */
+  fileHistory?: { backReason: string | null; forwardReason: string | null } | null;
 }
 
 export interface CommandSpec {
@@ -207,6 +211,50 @@ const VIEW_COMMANDS: CommandSpec[] = [
     hint: "把焦点放到当前视图的搜索框",
     shortcut: `${MODIFIER_LABEL} F`,
     available: () => true,
+  },
+  {
+    /** 路径快速打开与全文搜索是两个入口：一个只查路径，一个查工作区文本。 */
+    id: "files.quickOpen",
+    group: "视图",
+    title: "按路径打开文件",
+    hint: "输入路径片段，在文件视图里直接打开这个文件",
+    shortcut: `${MODIFIER_LABEL} P`,
+    available: hasRepo,
+    reason: hasRepoReason,
+  },
+  {
+    id: "files.search",
+    group: "视图",
+    title: "全仓库搜索",
+    hint: "在工作区文本里查找固定字符串，结果按文件分组",
+    available: hasRepo,
+    reason: hasRepoReason,
+  },
+  {
+    id: "file.reveal",
+    group: "视图",
+    title: "在文件树中显示",
+    hint: "展开目录并定位到改动列表里选中的文件",
+    available: (state) => hasRepo(state) && Boolean(state.currentFilePath),
+    reason: (state) => (state.hasRepo ? "先在改动里选择一个文件" : "先打开一个仓库"),
+  },
+  {
+    id: "file.back",
+    group: "视图",
+    title: "后退",
+    hint: "回到本次会话上一个打开的文件",
+    shortcut: `${MODIFIER_LABEL} ⇧ ←`,
+    available: (state) => Boolean(state.fileHistory) && !state.fileHistory?.backReason,
+    reason: (state) => state.fileHistory?.backReason ?? "文件视图里才有打开历史",
+  },
+  {
+    id: "file.forward",
+    group: "视图",
+    title: "前进",
+    hint: "回到本次会话下一个打开的文件",
+    shortcut: `${MODIFIER_LABEL} ⇧ →`,
+    available: (state) => Boolean(state.fileHistory) && !state.fileHistory?.forwardReason,
+    reason: (state) => state.fileHistory?.forwardReason ?? "文件视图里才有打开历史",
   },
 ];
 

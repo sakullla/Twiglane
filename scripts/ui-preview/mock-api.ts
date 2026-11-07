@@ -667,7 +667,13 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     _includeIgnored: boolean,
     limit: number | undefined,
     generation: number,
-  ) => ok(mockContentSearch(query, scope, limit, generation), 60),
+  ) => {
+    // ?search=error 用来演示搜索的局部失败：界面必须显示原因，而不是「没有匹配」。
+    if (previewParams.get("search") === "error") {
+      return Promise.reject({ code: "io", message: "搜索时有一个目录读取失败。" });
+    }
+    return ok(mockContentSearch(query, scope, limit, generation), 60);
+  },
   repositoryPathSearch: (
     _repo: string,
     query: string,

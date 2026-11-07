@@ -171,7 +171,7 @@ describe("文件右键菜单", () => {
     expect(writeText).toHaveBeenLastCalledWith("src/App.svelte");
     await fireEvent.click(within(await rightClick(row("src/App.svelte"))).getByRole("menuitem", { name: "复制完整路径" }));
     expect(writeText).toHaveBeenLastCalledWith("C:/work/demo/src/App.svelte");
-    await fireEvent.click(within(await rightClick(row("src/App.svelte"))).getByRole("menuitem", { name: /中显示/ }));
+    await fireEvent.click(within(await rightClick(row("src/App.svelte"))).getByRole("menuitem", { name: /资源管理器|访达/ }));
     expect(mocks.revealPath).toHaveBeenCalledWith(repoPath, "src/App.svelte");
     await fireEvent.click(within(await rightClick(row("src/App.svelte"))).getByRole("menuitem", { name: "用默认程序打开" }));
     expect(mocks.openPath).toHaveBeenCalledWith(repoPath, "src/App.svelte");

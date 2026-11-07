@@ -16,10 +16,17 @@
     failure: string | null;
     query: string;
     includeIgnored: boolean;
+    /** 仅看有改动的文件：行来自 StatusSnapshot，删除的文件是墓碑。 */
+    changedOnly?: boolean;
     /** 有写入或读取在飞行中：只锁树里的动作，不阻止选择。 */
     disabled: boolean;
     onQuery: (value: string) => void;
     onIncludeIgnored: (next: boolean) => void;
+    onChangedOnly?: (next: boolean) => void;
+    /** 打开按路径搜索或全仓库文本搜索：两种搜索各有自己的输入。 */
+    onSearch?: (mode: "path" | "content") => void;
+    /** 定位一个树过滤补齐出来的路径（它不在当前已加载的树里）。 */
+    onLocate?: (path: string) => void;
     onToggle: (row: FileTreeRow) => void;
     onSelect: (row: FileTreeRow) => void;
     onSplit: (row: FileTreeRow) => void;
@@ -34,9 +41,13 @@
     failure,
     query,
     includeIgnored,
+    changedOnly = false,
     disabled,
     onQuery,
     onIncludeIgnored,
+    onChangedOnly,
+    onSearch,
+    onLocate,
     onToggle,
     onSelect,
     onSplit,
@@ -245,6 +256,38 @@
       </button>
     {/if}
   </div>
+  {#if onSearch}
+    <button
+      type="button"
+      class="icon-btn sm"
+      aria-label="按路径打开"
+      title="按仓库相对路径查找文件（只查路径，不读内容）"
+      onclick={() => onSearch?.("path")}
+    >
+      <Icon name="file" size={14} />
+    </button>
+    <button
+      type="button"
+      class="icon-btn sm"
+      aria-label="全仓库搜索"
+      title="在工作区文本里查找固定字符串，结果按文件分组"
+      onclick={() => onSearch?.("content")}
+    >
+      <Icon name="search" size={14} />
+    </button>
+  {/if}
+  {#if onChangedOnly}
+    <button
+      type="button"
+      class="icon-btn sm"
+      aria-pressed={changedOnly}
+      aria-label="只看有改动的文件"
+      title={changedOnly ? "显示完整仓库树" : "只显示当前有未提交改动的文件；删除的文件保留为墓碑"}
+      onclick={() => onChangedOnly?.(!changedOnly)}
+    >
+      <Icon name="file-diff" size={14} />
+    </button>
+  {/if}
   <button
     type="button"
     class="btn btn-ghost btn-sm"
@@ -291,7 +334,13 @@
       <div class="empty compact">
         <span class="empty-icon"><Icon name="folder" size={22} /></span>
         <strong>没有匹配的路径</strong>
-        <p>过滤只作用于已经展开的目录。</p>
+        <p>已展开的目录里没有匹配；全仓库的补齐也没有找到更多路径。</p>
+      </div>
+    {:else if changedOnly}
+      <div class="empty compact">
+        <span class="empty-icon"><Icon name="folder" size={22} /></span>
+        <strong>当前没有改动的文件</strong>
+        <p>关掉「只看有改动的文件」即可浏览完整仓库。</p>
       </div>
     {:else if includeIgnored}
       <div class="empty compact">
@@ -333,7 +382,8 @@
           style={`top:${top}px;height:${FILE_ROW_HEIGHT}px;padding-left:${8 + row.depth * 14}px`}
           title={rowHint(row)}
           onclick={() => {
-            onSelect(row);
+            if (row.extra) onLocate?.(row.path);
+            else onSelect(row);
             focusList();
           }}
           ondblclick={() => open(row)}
@@ -384,6 +434,8 @@
               <Icon name="list" size={12} />
             </button>
           {/if}
+          {#if row.deleted}<span class="tree-tag danger" title="工作区里没有这个文件，只能看改动或历史">已删除</span>{/if}
+          {#if row.extra}<span class="tree-tag" title="匹配路径还没展开：点开时逐级读取">全仓库</span>{/if}
           {#if row.ignored}<span class="tree-tag" title="被 .gitignore 忽略">忽略</span>{/if}
           {#if row.loading}<span class="spinner muted" aria-hidden="true"></span>{/if}
           {#if row.error}<span class="tree-note danger">{row.error}</span>{/if}

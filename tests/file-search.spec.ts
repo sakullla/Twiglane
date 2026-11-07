@@ -1,0 +1,476 @@
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const repositoryDirectory = vi.hoisted(() => vi.fn());
+const repositoryFileContent = vi.hoisted(() => vi.fn());
+const repositoryPathSearch = vi.hoisted(() => vi.fn());
+const repositoryContentSearch = vi.hoisted(() => vi.fn());
+const filePreview = vi.hoisted(() => vi.fn());
+vi.mock("../src/lib/api", () => ({
+  api: { repositoryDirectory, repositoryFileContent, repositoryPathSearch, repositoryContentSearch, filePreview },
+}));
+
+import RepositoryFiles from "../src/lib/components/RepositoryFiles.svelte";
+import FileContent from "../src/lib/components/FileContent.svelte";
+import FileTree from "../src/lib/components/FileTree.svelte";
+import {
+  contentSearchRows,
+  extraRow,
+  flattenTree,
+  groupContentMatches,
+  makeNode,
+  SEARCH_ROW_HEIGHT,
+} from "../src/lib/files.svelte";
+import type {
+  OpenedRepository,
+  RepositoryContentSearch,
+  RepositoryDirectory,
+  RepositoryDirectoryEntry,
+} from "../src/lib/types";
+
+const repoPath = "C:/work/demo";
+
+function opened(path = repoPath, generation = 4): OpenedRepository {
+  return {
+    summary: { name: "demo", path },
+    generation,
+    snapshot: {
+      generation,
+      branch: {
+        name: "main",
+        detached: false,
+        unborn: false,
+        headOid: "a".repeat(40),
+        upstream: "origin/main",
+        ahead: 0,
+        behind: 0,
+        liveRemoteChecked: true,
+        remoteCheckedAtMs: 1,
+        remoteCheckStale: false,
+      },
+      files: [],
+    },
+    draft: "",
+    watchDegraded: false,
+  };
+}
+
+function entry(path: string, kind: RepositoryDirectoryEntry["kind"] = "file"): RepositoryDirectoryEntry {
+  return { name: path.split("/").pop() ?? path, path, kind, ignored: false, size: kind === "file" ? 8 : null, error: null };
+}
+
+function dir(relative: string, entries: RepositoryDirectoryEntry[], generation = 4): RepositoryDirectory {
+  return { generation, path: relative, entries, errors: [] };
+}
+
+/** 三层目录：src/components/Button.svelte 只有逐级读目录才看得见。 */
+function treeDirs() {
+  repositoryDirectory.mockImplementation((_repo: string, relative: string, _ignored: boolean, generation: number) => {
+    if (relative === "") return Promise.resolve(dir("", [entry("src", "directory"), entry("README.md")], generation));
+    if (relative === "src") {
+      return Promise.resolve(
+        dir("src", [entry("src/components", "directory"), entry("src/a.ts"), entry("src/b.ts")], generation),
+      );
+    }
+    if (relative === "src/components") {
+      return Promise.resolve(dir("src/components", [entry("src/components/Button.svelte")], generation));
+    }
+    return Promise.resolve(dir(relative, [], generation));
+  });
+}
+
+function contentSearch(overrides: Partial<RepositoryContentSearch> = {}): RepositoryContentSearch {
+  return {
+    generation: 4,
+    query: "panel",
+    scope: "repository",
+    scopePath: null,
+    matches: [],
+    filesScanned: 1,
+    skipped: [],
+    skippedFiles: 0,
+    truncated: false,
+    textTruncated: false,
+    message: null,
+    ...overrides,
+  };
+}
+
+function viewProps(overrides: Record<string, unknown> = {}) {
+  return {
+    active: true,
+    opened: opened(),
+    disabled: false,
+    nextId: () => 1,
+    paneWidth: 280,
+    windowWidth: 1280,
+    onResize: vi.fn(),
+    onResizeCommit: vi.fn(),
+    onGeneration: vi.fn(),
+    onFileHistory: vi.fn(),
+    onOpenDiff: vi.fn(),
+    onNav: vi.fn(),
+    ...overrides,
+  };
+}
+
+beforeEach(() => {
+  repositoryDirectory.mockReset();
+  repositoryFileContent.mockReset();
+  repositoryPathSearch.mockReset();
+  repositoryContentSearch.mockReset();
+  filePreview.mockReset();
+});
+
+describe("搜索结果的形状", () => {
+  it("全文匹配按文件分组，行与列保持后端给出的 1 起算值", () => {
+    const groups = groupContentMatches([
+      { path: "src/a.ts", line: 2, column: 3, text: "const panel = 1;" },
+      { path: "src/a.ts", line: 9, column: 1, text: "panel" },
+      { path: "src/b.ts", line: 40, column: 5, text: "x panel" },
+    ]);
+    expect(groups.map((group) => [group.path, group.matches.length])).toEqual([
+      ["src/a.ts", 2],
+      ["src/b.ts", 1],
+    ]);
+    const rows = contentSearchRows(contentSearch({ matches: groups.flatMap((group) => group.matches) }));
+    expect(rows.filter((row) => row.kind === "group").map((row) => row.kind === "group" && row.path)).toEqual([
+      "src/a.ts",
+      "src/b.ts",
+    ]);
+    const hit = rows.find((row) => row.kind === "match" && row.line === 40);
+    expect(hit).toMatchObject({ kind: "match", path: "src/b.ts", line: 40, column: 5 });
+    expect(SEARCH_ROW_HEIGHT).toBeGreaterThan(0);
+  });
+
+  it("树过滤补齐出来的路径是独立的一行，带全仓库标记", () => {
+    const row = extraRow({ path: "src/components/Button.svelte", kind: "file", ignored: false });
+    expect(row.extra).toBe(true);
+    expect(row.label).toBe("src/components/Button.svelte");
+    expect(flattenTree([makeNode({ name: "x", path: "x", kind: "file", ignored: false, size: 1, error: null })])).toHaveLength(1);
+  });
+});
+
+describe("路径快速打开", () => {
+  it("按路径查到文件后逐级读取祖先目录，并打开这个文件", async () => {
+    treeDirs();
+    repositoryPathSearch.mockResolvedValue({
+      generation: 4,
+      query: "Button",
+      directory: null,
+      includeIgnored: false,
+      scanned: 4,
+      entries: [{ path: "src/components/Button.svelte", kind: "file", ignored: false }],
+      truncated: false,
+      message: null,
+    });
+    repositoryFileContent.mockResolvedValue({
+      generation: 4,
+      path: "src/components/Button.svelte",
+      kind: "text",
+      size: 10,
+      offset: 0,
+      lines: ["button"],
+      nextOffset: 1,
+      hasMore: false,
+      truncated: false,
+      message: null,
+    });
+
+    render(RepositoryFiles, { props: viewProps() as never });
+    await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
+
+    await fireEvent.click(screen.getByRole("button", { name: "按路径打开" }));
+    const input = screen.getByRole("textbox", { name: "按路径打开文件" });
+    await fireEvent.input(input, { target: { value: "Button" } });
+    await waitFor(() => expect(repositoryPathSearch).toHaveBeenCalled());
+    expect(repositoryPathSearch.mock.calls[0].slice(0, 4)).toEqual([repoPath, "Button", null, false]);
+
+    const option = await screen.findByRole("option", { name: /Button\.svelte/ });
+    await fireEvent.click(option);
+
+    await waitFor(() =>
+      expect(repositoryDirectory.mock.calls.map((call) => call[1])).toEqual(expect.arrayContaining(["", "src", "src/components"])),
+    );
+    await waitFor(() =>
+      expect(repositoryFileContent).toHaveBeenCalledWith(
+        repoPath,
+        "src/components/Button.svelte",
+        0,
+        undefined,
+        4,
+        expect.any(Number),
+      ),
+    );
+    // 打开后回到目录树，选中这一行。
+    expect(await screen.findByRole("treeitem", { name: /Button\.svelte/ })).toBeTruthy();
+  });
+
+  it("旧查询的结果不覆盖新查询，切换仓库后也不留旧路径", async () => {
+    treeDirs();
+    let finishOld!: (value: unknown) => void;
+    repositoryPathSearch.mockImplementationOnce(() => new Promise((resolve) => (finishOld = resolve)));
+    repositoryPathSearch.mockResolvedValue({
+      generation: 4,
+      query: "app",
+      directory: null,
+      includeIgnored: false,
+      scanned: 2,
+      entries: [{ path: "src/app.ts", kind: "file", ignored: false }],
+      truncated: false,
+      message: null,
+    });
+
+    const view = render(RepositoryFiles, { props: viewProps() as never });
+    await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
+    await fireEvent.click(screen.getByRole("button", { name: "按路径打开" }));
+    const input = screen.getByRole("textbox", { name: "按路径打开文件" });
+    await fireEvent.input(input, { target: { value: "old" } });
+    await fireEvent.input(input, { target: { value: "app" } });
+    expect(await screen.findByRole("option", { name: /app\.ts/ })).toBeTruthy();
+
+    // 旧查询这时才回来：它的路径不能出现在结果里。
+    finishOld({
+      generation: 4,
+      query: "old",
+      directory: null,
+      includeIgnored: false,
+      scanned: 1,
+      entries: [{ path: "docs/old.md", kind: "file", ignored: false }],
+      truncated: false,
+      message: null,
+    });
+    await waitFor(() => expect(screen.queryByRole("option", { name: /old\.md/ })).toBeNull());
+
+    repositoryDirectory.mockResolvedValue(dir("", [entry("other.ts")], 9));
+    repositoryPathSearch.mockResolvedValue({
+      generation: 9,
+      query: "app",
+      directory: null,
+      includeIgnored: false,
+      scanned: 1,
+      entries: [{ path: "other.ts", kind: "file", ignored: false }],
+      truncated: false,
+      message: null,
+    });
+    await view.rerender(viewProps({ opened: opened("C:/work/other", 9) }) as never);
+    // 切仓库即清空旧结果与查询：旧仓库的路径不会出现在新仓库的搜索里。
+    await waitFor(() => expect(screen.queryByRole("option", { name: /app\.ts/ })).toBeNull());
+    const fresh = (await screen.findByRole("textbox", { name: "按路径打开文件" })) as HTMLInputElement;
+    expect(fresh.value).toBe("");
+    await fireEvent.input(fresh, { target: { value: "app" } });
+    await waitFor(() =>
+      expect(repositoryPathSearch).toHaveBeenLastCalledWith("C:/work/other", "app", null, false, 200, 9, expect.any(Number)),
+    );
+    expect(await screen.findByRole("option", { name: /other\.ts/ })).toBeTruthy();
+  });
+});
+
+describe("全仓库文本搜索", () => {
+  it("结果按文件分组，方向键加 Enter 打开未加载的远距离目标行", async () => {
+    treeDirs();
+    repositoryContentSearch.mockResolvedValue(
+      contentSearch({
+        matches: [
+          { path: "src/a.ts", line: 2, column: 3, text: "const panel = 1;" },
+          { path: "src/a.ts", line: 9, column: 1, text: "panel" },
+          { path: "src/b.ts", line: 40, column: 5, text: "x panel" },
+        ],
+      }),
+    );
+    repositoryFileContent.mockImplementation((_repo: string, path: string, offset: number, _limit: number | undefined, generation: number) =>
+      Promise.resolve({
+        generation,
+        path,
+        kind: "text",
+        size: 200,
+        offset,
+        lines: ["row"],
+        nextOffset: offset + 1,
+        hasMore: false,
+        truncated: false,
+        message: null,
+      }),
+    );
+
+    render(RepositoryFiles, { props: viewProps() as never });
+    await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
+    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    const input = screen.getByRole("textbox", { name: "全仓库文本搜索" });
+    await fireEvent.input(input, { target: { value: "panel" } });
+
+    await waitFor(() => expect(repositoryContentSearch).toHaveBeenCalled());
+    expect(repositoryContentSearch.mock.calls[0][2]).toEqual({ kind: "repository" });
+    expect(await screen.findByText("3 处匹配", { exact: false })).toBeTruthy();
+    const hits = screen.getAllByRole("option").filter((item) => item.className.includes("hit"));
+    expect(hits).toHaveLength(3);
+    expect(hits[0].textContent).toContain("2:3");
+    expect(within(hits[2]).getByText(/x panel/)).toBeTruthy();
+
+    // 方向键在可选行之间移动，Enter 打开第三条（src/b.ts 第 40 行）。
+    await fireEvent.keyDown(input, { key: "ArrowDown" });
+    await fireEvent.keyDown(input, { key: "ArrowDown" });
+    await fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() =>
+      expect(repositoryFileContent).toHaveBeenCalledWith(repoPath, "src/b.ts", 39, undefined, 4, expect.any(Number)),
+    );
+  });
+
+  it("范围、忽略开关、截断、跳过与局部错误分别可辨", async () => {
+    treeDirs();
+    repositoryContentSearch.mockResolvedValue(contentSearch());
+    render(RepositoryFiles, { props: viewProps() as never });
+    await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
+
+    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    const input = screen.getByRole("textbox", { name: "全仓库文本搜索" });
+    await fireEvent.input(input, { target: { value: "panel" } });
+    await waitFor(() => expect(repositoryContentSearch).toHaveBeenCalled());
+    expect(await screen.findByText("没有匹配")).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole("button", { name: "仅改动" }));
+    await waitFor(() => expect(repositoryContentSearch).toHaveBeenLastCalledWith(repoPath, "panel", { kind: "changed" }, false, 200, 4, expect.any(Number)));
+
+    await fireEvent.click(screen.getByRole("checkbox", { name: /包含忽略/ }));
+    await waitFor(() => expect(repositoryContentSearch).toHaveBeenLastCalledWith(repoPath, "panel", { kind: "changed" }, true, 200, 4, expect.any(Number)));
+
+    repositoryContentSearch.mockResolvedValue(
+      contentSearch({ matches: [{ path: "src/a.ts", line: 3, column: 1, text: "panel" }], truncated: true, skippedFiles: 3, textTruncated: true, message: "结果达到上限。" }),
+    );
+    await fireEvent.input(input, { target: { value: "panel " } });
+    await waitFor(() => expect(screen.getByText(/已截断/)).toBeTruthy());
+    expect(screen.getByText(/跳过 3 个文件/)).toBeTruthy();
+
+    repositoryContentSearch.mockRejectedValue({ code: "io", message: "无法读取 src/b.ts。" });
+    await fireEvent.input(input, { target: { value: "pane" } });
+    await waitFor(() => expect(screen.getByText("无法读取 src/b.ts。")).toBeTruthy());
+    expect(screen.queryByRole("option", { name: /panel/ })).toBeNull();
+  });
+
+  it("当前目录范围只在选中目录时可用，并把该目录交给后端", async () => {
+    treeDirs();
+    repositoryContentSearch.mockResolvedValue(contentSearch());
+    render(RepositoryFiles, { props: viewProps() as never });
+    const treeEl = await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    const input = screen.getByRole("textbox", { name: "全仓库文本搜索" });
+
+    // 还没选中任何东西：当前目录不可用，并给出原因。
+    const directoryScope = screen.getByRole("button", { name: "当前目录" }) as HTMLButtonElement;
+    expect(directoryScope.disabled).toBe(true);
+    expect(directoryScope.title).toContain("先在文件树里选中");
+
+    await fireEvent.click(screen.getByRole("button", { name: "关闭搜索" }));
+    const freshTree = await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(within(freshTree).getByRole("treeitem", { name: /src/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    await fireEvent.input(screen.getByRole("textbox", { name: "全仓库文本搜索" }), { target: { value: "panel" } });
+    await fireEvent.click(screen.getByRole("button", { name: "当前目录" }));
+    await waitFor(() =>
+      expect(repositoryContentSearch).toHaveBeenLastCalledWith(repoPath, "panel", { kind: "directory", path: "src" }, false, 200, 4, expect.any(Number)),
+    );
+    expect(input).toBeTruthy();
+  });
+});
+
+describe("目录树全局过滤", () => {
+  it("已展开部分本地过滤，未展开的匹配由路径搜索补齐并可定位", async () => {
+    treeDirs();
+    repositoryPathSearch.mockResolvedValue({
+      generation: 4,
+      query: "Button",
+      directory: null,
+      includeIgnored: false,
+      scanned: 4,
+      entries: [{ path: "src/components/Button.svelte", kind: "file", ignored: false }],
+      truncated: false,
+      message: null,
+    });
+    repositoryFileContent.mockResolvedValue({
+      generation: 4,
+      path: "src/components/Button.svelte",
+      kind: "text",
+      size: 10,
+      offset: 0,
+      lines: ["button"],
+      nextOffset: 1,
+      hasMore: false,
+      truncated: false,
+      message: null,
+    });
+
+    render(RepositoryFiles, { props: viewProps() as never });
+    await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
+    await fireEvent.input(screen.getByRole("textbox", { name: "过滤文件树" }), { target: { value: "Button" } });
+
+    const extra = await screen.findByRole("treeitem", { name: /Button\.svelte/ });
+    expect(extra.textContent).toContain("全仓库");
+    expect(extra.getAttribute("title")).toBe("src/components/Button.svelte");
+
+    await fireEvent.click(extra);
+    await waitFor(() =>
+      expect(repositoryFileContent).toHaveBeenCalledWith(
+        repoPath,
+        "src/components/Button.svelte",
+        0,
+        undefined,
+        4,
+        expect.any(Number),
+      ),
+    );
+    // 定位后过滤被清空，目标所在分支已经展开。
+    expect(await screen.findByRole("treeitem", { name: /src/ })).toBeTruthy();
+  });
+});
+
+describe("文件内搜索的代次边界", () => {
+  it("显示匹配后代次前进：撤下结果与旧行号，不跳到新内容的错误位置", async () => {
+    repositoryFileContent.mockImplementation((_repo: string, path: string, offset: number, _limit: number | undefined, generation: number) =>
+      Promise.resolve({
+        generation,
+        path,
+        kind: "text",
+        size: 40,
+        offset,
+        lines: ["alpha", "beta panel", "gamma"],
+        nextOffset: 3,
+        hasMore: false,
+        truncated: false,
+        message: null,
+      }),
+    );
+    repositoryContentSearch.mockResolvedValue(
+      contentSearch({ scope: "file", scopePath: "src/a.ts", matches: [{ path: "src/a.ts", line: 2, column: 6, text: "beta panel" }] }),
+    );
+
+    const view = render(FileContent, {
+      props: {
+        active: true,
+        opened: opened(),
+        path: "src/a.ts",
+        generation: 4,
+        disabled: false,
+        nextId: () => 1,
+        onGeneration: vi.fn(),
+      } as never,
+    });
+    await waitFor(() => expect(repositoryFileContent).toHaveBeenCalled());
+
+    await fireEvent.click(screen.getByRole("button", { name: "在文件内搜索" }));
+    await fireEvent.input(screen.getByRole("textbox", { name: "文件内搜索关键词" }), { target: { value: "panel" } });
+    expect(await screen.findByRole("option", { name: /beta panel/ })).toBeTruthy();
+
+    // 代次前进：旧匹配的行号不再可信，结果与高亮都要消失。
+    await view.rerender({
+      active: true,
+      opened: opened(repoPath, 5),
+      path: "src/a.ts",
+      generation: 5,
+      disabled: false,
+      nextId: () => 1,
+      onGeneration: vi.fn(),
+    } as never);
+    await waitFor(() => expect(screen.queryByRole("option", { name: /beta panel/ })).toBeNull());
+    expect(document.querySelector(".file-line.hit")).toBeNull();
+  });
+});

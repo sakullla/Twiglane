@@ -67,6 +67,63 @@ const SCENARIOS = [
     detail: "document.querySelector('.files-view .preview-current')?.textContent?.trim() || ''",
   },
   {
+    name: "文件视图：按路径打开未展开的文件",
+    url: "/",
+    ready:
+      "(() => { if (!window.__filesOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__filesOpened = true; recent.click(); return false; } } " +
+      "if (!document.querySelector('.workbench-view[data-active=\"true\"] .files-view')) { const sw = document.querySelector('.workbench-view[data-active=\"true\"] [data-view=\"files\"]'); if (sw) { sw.click(); return false; } return false; } " +
+      "if (window.__quickPicked) return Boolean(document.querySelector('.files-view [data-file-line]')); " +
+      "if (!window.__quickOpen) { const open = document.querySelector('.files-view [aria-label=\"按路径打开\"]'); if (open) { window.__quickOpen = true; open.click(); return false; } return false; } " +
+      "const input = document.querySelector('#file-quick-open'); if (!input) return false; " +
+      "if (input.value !== 'util') { input.value = 'util'; input.dispatchEvent(new Event('input', { bubbles: true })); return false; } " +
+      "const option = [...document.querySelectorAll('.file-search-row.path')].find((item) => item.textContent.includes('util.rs')); if (!option) return false; " +
+      "window.__quickPicked = true; option.click(); return false; })()",
+    check:
+      "(document.querySelector('.file-tree-row.active')?.textContent || '').includes('util.rs') && Boolean(document.querySelector('.files-view [data-file-line]'))",
+    detail: "document.querySelector('.file-tree-row.active')?.getAttribute('title') || ''",
+  },
+  {
+    name: "文件视图：全文搜索按文件分组",
+    url: "/",
+    ready:
+      "(() => { if (!window.__filesOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__filesOpened = true; recent.click(); return false; } } " +
+      "if (!document.querySelector('.workbench-view[data-active=\"true\"] .files-view')) { const sw = document.querySelector('.workbench-view[data-active=\"true\"] [data-view=\"files\"]'); if (sw) { sw.click(); return false; } return false; } " +
+      "if (!window.__contentOpen) { const open = document.querySelector('.files-view [aria-label=\"全仓库搜索\"]'); if (open) { window.__contentOpen = true; open.click(); return false; } return false; } " +
+      "const input = document.querySelector('#file-content-search'); if (!input) return false; " +
+      "if (input.value !== 'import') { input.value = 'import'; input.dispatchEvent(new Event('input', { bubbles: true })); return false; } " +
+      "return document.querySelectorAll('.file-search-group').length > 0; })()",
+    check: "document.querySelectorAll('.file-search-group').length >= 1 && document.querySelectorAll('.file-search-row.hit').length >= 2",
+    detail:
+      "document.querySelectorAll('.file-search-group').length + ' 个文件 / ' + document.querySelectorAll('.file-search-row.hit').length + ' 处匹配'",
+  },
+  {
+    name: "文件视图：仅改动树保留删除墓碑",
+    url: "/",
+    ready:
+      "(() => { if (!window.__filesOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__filesOpened = true; recent.click(); return false; } } " +
+      "if (!document.querySelector('.workbench-view[data-active=\"true\"] .files-view')) { const sw = document.querySelector('.workbench-view[data-active=\"true\"] [data-view=\"files\"]'); if (sw) { sw.click(); return false; } return false; } " +
+      "if (!window.__changedOnly) { const toggle = document.querySelector('.files-view [aria-label=\"只看有改动的文件\"]'); if (toggle) { window.__changedOnly = true; toggle.click(); return false; } return false; } " +
+      "return [...document.querySelectorAll('.file-tree-row')].some((row) => row.textContent.includes('old-panel.ts')); })()",
+    check:
+      "[...document.querySelectorAll('.file-tree-row')].some((row) => row.textContent.includes('old-panel.ts') && row.textContent.includes('已删除'))",
+    detail:
+      "[...document.querySelectorAll('.file-tree-row')].filter((row) => row.textContent.includes('已删除')).map((row) => row.textContent.trim()).join(' | ')",
+  },
+  {
+    name: "文件视图：搜索局部失败给出原因",
+    url: "/?search=error",
+    ready:
+      "(() => { if (!window.__filesOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__filesOpened = true; recent.click(); return false; } } " +
+      "if (!document.querySelector('.workbench-view[data-active=\"true\"] .files-view')) { const sw = document.querySelector('.workbench-view[data-active=\"true\"] [data-view=\"files\"]'); if (sw) { sw.click(); return false; } return false; } " +
+      "if (!window.__contentOpen) { const open = document.querySelector('.files-view [aria-label=\"全仓库搜索\"]'); if (open) { window.__contentOpen = true; open.click(); return false; } return false; } " +
+      "const input = document.querySelector('#file-content-search'); if (!input) return false; " +
+      "if (input.value !== 'import') { input.value = 'import'; input.dispatchEvent(new Event('input', { bubbles: true })); return false; } " +
+      "return Boolean(document.querySelector('.file-search-note.danger')); })()",
+    check:
+      "(document.querySelector('.file-search-note.danger')?.textContent || '').includes('搜索时有一个目录读取失败') && document.querySelectorAll('.file-search-row').length === 0",
+    detail: "document.querySelector('.file-search-note.danger')?.textContent?.trim() || ''",
+  },
+  {
     name: "默认起始页",
     url: "/",
     ready: "Boolean(document.querySelector('.welcome-recent button'))",

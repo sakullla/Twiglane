@@ -167,6 +167,9 @@ export function mockFilePage(relative: string, offset: number, limit: number | u
   };
 }
 
+/** mock 里算作「有未提交改动」的路径：changed-only 搜索与仅改动树都以它为准。 */
+export const MOCK_CHANGED = ["src/app.ts", "README.md", "src/lib/legacy/old-panel.ts"];
+
 export function mockContentSearch(
   query: string,
   scope: { kind?: string; path?: string } | undefined,
@@ -175,7 +178,15 @@ export function mockContentSearch(
 ) {
   const needle = query.trim();
   const cap = Math.max(1, Math.min(limit ?? 200, 200));
-  const paths = scope?.kind === "file" && scope.path ? [scope.path] : Object.keys(FILES);
+  const all = Object.keys(FILES);
+  const paths =
+    scope?.kind === "file" && scope.path
+      ? [scope.path]
+      : scope?.kind === "directory"
+        ? all.filter((path) => (scope.path ? path.startsWith(scope.path + "/") || path === scope.path : true))
+        : scope?.kind === "changed"
+          ? all.filter((path) => MOCK_CHANGED.includes(path))
+          : all;
   const matches: { path: string; line: number; column: number; text: string }[] = [];
   let truncated = false;
   for (const path of paths) {

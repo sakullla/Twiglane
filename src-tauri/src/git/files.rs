@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
+
+use sha2::{Digest, Sha256};
 
 use crate::error::AppError;
 use crate::git::command::{
@@ -20,8 +23,8 @@ use crate::git::schedule::{internal_request_id, GitJob, JobKind};
 use crate::model::{
     ChangeKind, RepositoryContentMatch, RepositoryContentSearch, RepositoryDirectory,
     RepositoryDirectoryEntry, RepositoryEntryKind, RepositoryFileContent, RepositoryFileKind,
-    RepositoryPathEntry, RepositoryPathKind, RepositoryPathSearch, RepositorySearchScope,
-    RepositorySearchSkip, RepositorySkipReason,
+    RepositoryPathEntry, RepositoryPathKind, RepositoryPathSearch, RepositoryReviewState,
+    RepositoryReviewToken, RepositorySearchScope, RepositorySearchSkip, RepositorySkipReason,
 };
 use crate::shutdown::Shutdown;
 
@@ -1429,6 +1432,352 @@ pub async fn repository_content_search(
         text_truncated: outcome.text_truncated,
         message,
     })
+}
+
+/// 审阅确认只读这一条路径：状态、索引与工作区内容。
+///
+/// 全部命令都带 pathspec，不枚举其他改动、不做全仓 diff；工作区内容用 git hash-object
+/// 读取 Git 自己的对象摘要，既流式读到文件末尾，也与既有 snapshot/hash 语义一致。
+const MAX_REVIEW_BYTES: usize = 1024 * 1024;
+
+/// 审阅路径必须是仓库内的普通相对路径：绝对路径、..、.git 都拒绝。
+fn review_path(path: &str) -> Result<PathBuf, AppError> {
+    let relative = safe_relative(path)?;
+    if relative
+        .components()
+        .any(|component| component.as_os_str() == ".git")
+    {
+        return Err(AppError::new(
+            "invalid_path",
+            "不能把 .git 当作普通文件确认。",
+        ));
+    }
+    Ok(relative)
+}
+
+fn review_prefix(root: &Path) -> Vec<OsString> {
+    vec![
+        OsString::from("--literal-pathspecs"),
+        OsString::from("-C"),
+        root.as_os_str().to_os_string(),
+        OsString::from("--no-optional-locks"),
+    ]
+}
+
+fn review_status_command(git: &Path, root: &Path, relative: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = review_prefix(root);
+    args.extend([
+        OsString::from("status"),
+        OsString::from("--porcelain=v2"),
+        OsString::from("-z"),
+        OsString::from("--untracked-files=all"),
+        OsString::from("--"),
+        relative.as_os_str().to_os_string(),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+fn review_index_command(git: &Path, root: &Path, relative: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = review_prefix(root);
+    args.extend([
+        OsString::from("ls-files"),
+        OsString::from("-z"),
+        OsString::from("--stage"),
+        OsString::from("--"),
+        relative.as_os_str().to_os_string(),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+fn review_hash_command(git: &Path, root: &Path, relative: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = review_prefix(root);
+    args.extend([
+        OsString::from("hash-object"),
+        OsString::from("--"),
+        relative.as_os_str().to_os_string(),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// 一条只读 Git 命令：沿用读取通道的请求 id、并发许可、取消域与代次检查。
+async fn run_review_git(
+    backend: &Backend,
+    key: &str,
+    generation: u64,
+    request_id: u64,
+    command: (PathBuf, Vec<OsString>),
+) -> Result<ProcessOutput, AppError> {
+    let (program, args) = command;
+    let output = backend
+        .scheduler
+        .execute(GitJob {
+            repo_key: key.to_string(),
+            kind: JobKind::Read,
+            request_id,
+            generation,
+            program,
+            args,
+            stdin: None,
+            truncate_stdout: false,
+            output_limit: Some(MAX_REVIEW_BYTES),
+            env: Vec::new(),
+        })
+        .await?;
+    Ok(output.output)
+}
+
+/// 工作区内容探测：不跟随符号链接，也不把目录当文件。
+enum ReviewProbe {
+    File,
+    Missing,
+    Blocked(String),
+}
+
+async fn review_probe(
+    backend: &Backend,
+    key: &str,
+    generation: u64,
+    request_id: u64,
+    root: &Path,
+    relative: &Path,
+) -> Result<ReviewProbe, AppError> {
+    let task_root = root.to_path_buf();
+    let task_relative = relative.to_path_buf();
+    backend
+        .scheduler
+        .execute_blocking_read(key, request_id, generation, move |cancel| {
+            check_cancel(&cancel)?;
+            let target = task_root.join(&task_relative);
+            Ok(match fs::symlink_metadata(&target) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    ReviewProbe::Blocked("符号链接不作为普通文件确认。".to_string())
+                }
+                Ok(meta) if !meta.is_file() => {
+                    ReviewProbe::Blocked("这不是一个普通文件。".to_string())
+                }
+                Ok(_) => ReviewProbe::File,
+                Err(error) if error.kind() == ErrorKind::NotFound => ReviewProbe::Missing,
+                Err(error) => {
+                    ReviewProbe::Blocked(crate::redact::redact_error_text(&error.to_string()))
+                }
+            })
+        })
+        .await
+}
+
+enum ReviewContent {
+    File(String),
+    Missing,
+    Unreadable(String),
+}
+
+async fn review_content(
+    backend: &Backend,
+    key: &str,
+    generation: u64,
+    request_id: u64,
+    root: &Path,
+    relative: &Path,
+) -> Result<ReviewContent, AppError> {
+    let git = require_git(backend).await?;
+    match review_probe(backend, key, generation, request_id, root, relative).await? {
+        ReviewProbe::Blocked(reason) => Ok(ReviewContent::Unreadable(reason)),
+        ReviewProbe::Missing => Ok(ReviewContent::Missing),
+        ReviewProbe::File => {
+            let output = run_review_git(
+                backend,
+                key,
+                generation,
+                request_id,
+                review_hash_command(&git.path, root, relative),
+            )
+            .await?;
+            if output.exit_code != 0 {
+                let detail = crate::redact::redact_error_text(
+                    String::from_utf8_lossy(&output.stderr).trim(),
+                );
+                let reason = if detail.is_empty() {
+                    "无法读取当前文件内容。".to_string()
+                } else {
+                    detail
+                };
+                return Ok(ReviewContent::Unreadable(reason));
+            }
+            let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if oid.is_empty() {
+                return Ok(ReviewContent::Unreadable(
+                    "Git 没有返回这个文件的内容版本。".to_string(),
+                ));
+            }
+            Ok(ReviewContent::File(oid))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn review_result(
+    generation: u64,
+    path: &str,
+    state: RepositoryReviewState,
+    token: Option<String>,
+    staged: ChangeKind,
+    unstaged: ChangeKind,
+    untracked: bool,
+    unmerged: bool,
+    content_version: Option<String>,
+    message: String,
+) -> RepositoryReviewToken {
+    RepositoryReviewToken {
+        generation,
+        path: path.to_string(),
+        state,
+        token,
+        staged,
+        unstaged,
+        untracked,
+        unmerged,
+        content_version,
+        message,
+    }
+}
+
+fn expect_worktree_missing(change: &crate::model::FileChange) -> bool {
+    matches!(change.unstaged, ChangeKind::Deleted)
+        || (matches!(change.staged, ChangeKind::Deleted)
+            && matches!(change.unstaged, ChangeKind::None))
+}
+
+/// 单个改动路径的整文件审阅快照。
+///
+/// 只读：状态用带 pathspec 的 git status，索引读这一条路径的 ls-files --stage，
+/// 内容用 git hash-object。token 覆盖路径、两侧状态、索引项与工作区内容版本，
+/// 因此暂存、改内容、删除或变成冲突都会换一个新 token，而其他文件的改动不影响它。
+pub async fn repository_review_token(
+    backend: &Backend,
+    path: &str,
+    relative: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<RepositoryReviewToken, AppError> {
+    let root = canonical_existing(&validate_input_path(path)?)?;
+    let relative_path = review_path(relative)?;
+    let relative_text = display_path(&relative_path);
+    let git = require_git(backend).await?;
+    let key = repo_key(&root);
+
+    let status_output = run_review_git(
+        backend,
+        &key,
+        generation,
+        request_id,
+        review_status_command(&git.path, &root, &relative_path),
+    )
+    .await?;
+    if status_output.exit_code != 0 {
+        return Err(git_failure(
+            "review_status",
+            &status_output,
+            "无法读取这个文件的状态。",
+        ));
+    }
+    let snapshot = parse_status(&status_output.stdout)?;
+    let change = snapshot
+        .files
+        .into_iter()
+        .find(|file| file.path == relative_text);
+    let Some(change) = change else {
+        return Ok(review_result(
+            generation,
+            &relative_text,
+            RepositoryReviewState::Unchanged,
+            None,
+            ChangeKind::None,
+            ChangeKind::None,
+            false,
+            false,
+            None,
+            "这条路径当前没有未提交的改动，不能标记已审阅。".to_string(),
+        ));
+    };
+
+    let index_output = run_review_git(
+        backend,
+        &key,
+        generation,
+        request_id,
+        review_index_command(&git.path, &root, &relative_path),
+    )
+    .await?;
+    if index_output.exit_code != 0 {
+        return Err(git_failure(
+            "review_index",
+            &index_output,
+            "无法确认这个文件的暂存状态。",
+        ));
+    }
+    let index_version = String::from_utf8_lossy(&index_output.stdout).into_owned();
+
+    let missing_expected = expect_worktree_missing(&change);
+    let (content_version, state, message) =
+        match review_content(backend, &key, generation, request_id, &root, &relative_path).await? {
+            ReviewContent::File(oid) => (
+                Some(format!("worktree:{oid}")),
+                RepositoryReviewState::Current,
+                "已确认这个文件当前的整份内容与改动。".to_string(),
+            ),
+            ReviewContent::Missing if missing_expected => (
+                Some("missing".to_string()),
+                RepositoryReviewState::Current,
+                "这个文件在工作区已被删除，快照就是删除本身。".to_string(),
+            ),
+            ReviewContent::Missing => (
+                None,
+                RepositoryReviewState::Missing,
+                "工作区里已经没有这个文件，无法确认快照，保持未审阅。".to_string(),
+            ),
+            ReviewContent::Unreadable(reason) => (
+                None,
+                RepositoryReviewState::Unconfirmed,
+                format!("无法确认这个文件的内容，保持未审阅：{reason}"),
+            ),
+        };
+
+    let token = if state == RepositoryReviewState::Current {
+        let mut hasher = Sha256::new();
+        hasher.update(relative_text.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(
+            format!(
+                "{:?}|{:?}|{}|{}|{:?}",
+                change.staged,
+                change.unstaged,
+                change.untracked,
+                change.unmerged,
+                change.original_path
+            )
+            .as_bytes(),
+        );
+        hasher.update([0u8]);
+        hasher.update(index_version.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(content_version.as_deref().unwrap_or("none").as_bytes());
+        Some(format!("{:x}", hasher.finalize()))
+    } else {
+        None
+    };
+
+    Ok(review_result(
+        generation,
+        &relative_text,
+        state,
+        token,
+        change.staged,
+        change.unstaged,
+        change.untracked,
+        change.unmerged,
+        content_version,
+        message,
+    ))
 }
 
 #[cfg(test)]
@@ -3309,5 +3658,177 @@ mod tests {
         // 只读：工作区状态与忽略规则都必须保持原样。
         assert_eq!(fs::read_to_string(root.join(".gitignore")).unwrap(), rules);
         assert_eq!(git_stdout(&root, &["status", "--porcelain"]), before);
+    }
+
+    #[tokio::test]
+    async fn review_token_follows_content_and_both_diff_sides() {
+        let fixture = crate::test_support::git_fixture("repository-review-token");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("app.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("other.rs"), "fn other() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        fs::write(root.join("app.rs"), "fn main() {\n    changed();\n}\n").unwrap();
+        let path = root.to_str().unwrap();
+
+        let first = repository_review_token(&backend, path, "app.rs", 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(first.state, RepositoryReviewState::Current);
+        assert_eq!(first.staged, ChangeKind::None);
+        assert_eq!(first.unstaged, ChangeKind::Modified);
+        assert!(first.token.is_some());
+        assert!(first.content_version.unwrap().starts_with("worktree:"));
+        // 未变化时重复确认拿到同一个 token：刷新后才能保留标记。
+        let again = repository_review_token(&backend, path, "app.rs", 1, 2)
+            .await
+            .unwrap();
+        assert_eq!(again.token, first.token);
+
+        // 其他文件的改动不改变这个路径的 token。
+        fs::write(root.join("other.rs"), "fn other() {}\n// tail\n").unwrap();
+        let unrelated = repository_review_token(&backend, path, "app.rs", 1, 3)
+            .await
+            .unwrap();
+        assert_eq!(unrelated.token, first.token);
+
+        // 内容变化：新 token。
+        fs::write(root.join("app.rs"), "fn main() {\n    changed_twice();\n}\n").unwrap();
+        let content = repository_review_token(&backend, path, "app.rs", 1, 4)
+            .await
+            .unwrap();
+        assert_ne!(content.token, first.token);
+
+        // 部分暂存：同一路径的两侧状态与内容一起进快照。
+        git(&root, &["add", "--", "app.rs"]);
+        fs::write(root.join("app.rs"), "fn main() {\n    changed_thrice();\n}\n").unwrap();
+        let partial = repository_review_token(&backend, path, "app.rs", 1, 5)
+            .await
+            .unwrap();
+        assert_eq!(partial.state, RepositoryReviewState::Current);
+        assert_eq!(partial.staged, ChangeKind::Modified);
+        assert_eq!(partial.unstaged, ChangeKind::Modified);
+        assert_ne!(partial.token, content.token);
+
+        // 只剩已暂存：即使工作区内容没动，状态变化也要换 token。
+        git(&root, &["add", "--", "app.rs"]);
+        let staged_only = repository_review_token(&backend, path, "app.rs", 1, 6)
+            .await
+            .unwrap();
+        assert_eq!(staged_only.unstaged, ChangeKind::None);
+        assert_ne!(staged_only.token, partial.token);
+    }
+
+    #[tokio::test]
+    async fn review_token_separates_unchanged_deleted_and_untracked_paths() {
+        let fixture = crate::test_support::git_fixture("repository-review-token-states");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("kept.rs"), "fn kept() {}\n").unwrap();
+        fs::write(root.join("gone.rs"), "fn gone() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let path = root.to_str().unwrap();
+
+        // 没有改动的路径不能标记。
+        let unchanged = repository_review_token(&backend, path, "kept.rs", 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(unchanged.state, RepositoryReviewState::Unchanged);
+        assert!(unchanged.token.is_none());
+
+        // 工作区删除：快照就是删除本身，内容版本是 missing。
+        fs::remove_file(root.join("gone.rs")).unwrap();
+        let deleted = repository_review_token(&backend, path, "gone.rs", 1, 2)
+            .await
+            .unwrap();
+        assert_eq!(deleted.state, RepositoryReviewState::Current);
+        assert_eq!(deleted.unstaged, ChangeKind::Deleted);
+        assert_eq!(deleted.content_version.as_deref(), Some("missing"));
+        assert!(deleted.token.is_some());
+
+        // 未跟踪文件同样能确认；内容变化后 token 改变。
+        fs::write(root.join("fresh.rs"), "fn fresh() {}\n").unwrap();
+        let fresh = repository_review_token(&backend, path, "fresh.rs", 1, 3)
+            .await
+            .unwrap();
+        assert!(fresh.untracked);
+        assert_eq!(fresh.state, RepositoryReviewState::Current);
+        fs::write(root.join("fresh.rs"), "fn fresh() {}\n// more\n").unwrap();
+        let fresh_changed = repository_review_token(&backend, path, "fresh.rs", 1, 4)
+            .await
+            .unwrap();
+        assert_ne!(fresh_changed.token, fresh.token);
+
+        // 恢复删除后旧 token 不再成立：同一路径回到未改动。
+        fs::write(root.join("gone.rs"), "fn gone() {}\n").unwrap();
+        let restored = repository_review_token(&backend, path, "gone.rs", 1, 5)
+            .await
+            .unwrap();
+        assert_eq!(restored.state, RepositoryReviewState::Unchanged);
+        assert!(restored.token.is_none());
+    }
+
+    #[tokio::test]
+    async fn review_token_rejects_unsafe_paths_and_stale_generations() {
+        let fixture = crate::test_support::git_fixture("repository-review-token-paths");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("app.rs"), "fn main() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        fs::write(root.join("app.rs"), "fn main() {}\n// edit\n").unwrap();
+        let path = root.to_str().unwrap();
+
+        for unsafe_path in [
+            "../outside.rs",
+            ".git/config",
+            "",
+            std::env::temp_dir().join("outside.rs").to_str().unwrap(),
+        ] {
+            let error = repository_review_token(&backend, path, unsafe_path, 1, 9)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "invalid_path", "{unsafe_path}");
+        }
+
+        let stale = repository_review_token(&backend, path, "app.rs", 9, 10)
+            .await
+            .unwrap_err();
+        assert_eq!(stale.code, "stale");
+
+        backend.shutdown.cancel();
+        let cancelled = repository_review_token(&backend, path, "app.rs", 9, 11)
+            .await
+            .unwrap_err();
+        assert_eq!(cancelled.code, "cancelled");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn review_token_does_not_confirm_symlinked_content() {
+        let fixture = crate::test_support::git_fixture("repository-review-token-symlink");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("target.rs"), "fn main() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let link = root.join("link.rs");
+        directory_symlink(&root.join("target.rs"), &link);
+        let path = root.to_str().unwrap();
+        // 符号链接本身不是可确认的普通文件：给出明确状态而不是伪造内容。
+        let result = repository_review_token(&backend, path, "link.rs", 1, 3)
+            .await
+            .unwrap();
+        assert!(result.token.is_none());
+        assert!(matches!(
+            result.state,
+            RepositoryReviewState::Unconfirmed | RepositoryReviewState::Unchanged
+        ));
     }
 }

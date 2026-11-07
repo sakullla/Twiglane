@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick, untrack } from "svelte";
   import type { Snippet } from "svelte";
-  import { createFilesStore, isDeletedChange, isDirectoryKind, type FileTreeRow } from "../files.svelte";
+  import { changeDecorations, createFilesStore, isDeletedChange, isDirectoryKind, type FileTreeRow } from "../files.svelte";
   import type { DiffSide, OpenedRepository } from "../types";
   import { fileNavState, type FileNavState } from "../ui";
   import FileContent from "./FileContent.svelte";
@@ -96,6 +96,9 @@
     searchMode = "none";
     await store.locate(path, line);
   }
+
+  /* 文件树与仅改动树共用同一份 Git 装饰：文件自身状态 + 祖先目录聚合，只影响显示。 */
+  let decorations = $derived(changeDecorations(opened.snapshot.files));
 
   let deletedPaths = $derived(
     new Set(opened.snapshot.files.filter((file) => isDeletedChange(file)).map((file) => file.path)),
@@ -192,6 +195,7 @@
         query={store.query}
         includeIgnored={store.includeIgnored}
         changedOnly={store.changedOnly}
+        {decorations}
         filterError={store.filterError}
         filterTruncated={store.filterTruncated}
         filterBusy={store.filterBusy}

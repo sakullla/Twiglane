@@ -42,6 +42,7 @@ fn capabilities_do_not_grant_a_shell() {
         "allow-repository-file-content",
         "allow-repository-path-search",
         "allow-repository-content-search",
+        "allow-repository-review-token",
         "allow-stage-files",
         "allow-unstage-files",
         "allow-stage-hunks",

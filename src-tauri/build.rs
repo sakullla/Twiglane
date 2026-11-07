@@ -33,6 +33,7 @@ fn main() {
             "repository_file_content",
             "repository_path_search",
             "repository_content_search",
+            "repository_review_token",
             "stage_files",
             "unstage_files",
             "stage_hunks",

@@ -240,6 +240,27 @@ export interface RepositoryContentSearch {
   message: string | null;
 }
 
+/**
+ * 单个改动路径的整文件快照状态。只有 current 带 token：其余状态表示这条路径现在没有改动、
+ * 工作区里已经没有它，或内容无法确认，界面不能据此标记已审阅。
+ */
+export type RepositoryReviewState = "current" | "unchanged" | "missing" | "unconfirmed";
+
+export interface RepositoryReviewToken {
+  generation: number;
+  path: string;
+  state: RepositoryReviewState;
+  /** 仅 state 为 current 时有值。 */
+  token: string | null;
+  staged: ChangeKind;
+  unstaged: ChangeKind;
+  untracked: boolean;
+  unmerged: boolean;
+  /** 工作区内容版本（Git 对象 id 或 missing），用来说明 token 依据了哪份内容。 */
+  contentVersion: string | null;
+  message: string;
+}
+
 export interface DiffResponse {
   preview?: PreviewSources;
   generation: number;

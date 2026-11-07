@@ -67,6 +67,12 @@
      */
     conflicted?: boolean;
     onResolve?: () => void;
+    /** 当前文件的整文件快照已标记为已审阅（本地进度，不代表批准）。 */
+    reviewed?: boolean;
+    /** 正在确认这个文件的快照。 */
+    reviewBusy?: boolean;
+    /** 标记或撤销整个文件的已审阅状态；不传时不显示入口。 */
+    onToggleReview?: () => void;
   }
 
   /**
@@ -101,6 +107,9 @@
     onHunkNav,
     conflicted = false,
     onResolve,
+    reviewed = false,
+    reviewBusy = false,
+    onToggleReview,
   }: Props = $props();
   let menu = $state<ContextMenuRequest | null>(null);
   let ownMode = $state<"unified" | "split">("unified");
@@ -1064,6 +1073,31 @@
             <Icon name="rows" size={13} /><span class="diff-hist-label">{fullFile ? "完整文件" : "只看改动"}</span>
           </button>
         {/if}
+      </div>
+    {/if}
+    {#if onToggleReview && selection}
+      <div class="diff-toolbar-group">
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm review-toggle"
+          class:on={reviewed}
+          aria-pressed={reviewed}
+          aria-label={reviewed ? "撤销当前文件的已审阅标记" : "标记当前文件已审阅"}
+          title={reviewBusy
+            ? "正在确认整份文件快照……"
+            : reviewed
+              ? "撤销这个文件的已审阅标记"
+              : "标记整个文件已审阅；内容、暂存状态或删除变化后自动失效"}
+          disabled={reviewBusy}
+          onclick={() => onToggleReview?.()}
+        >
+          {#if reviewBusy}
+            <span class="spinner" aria-hidden="true"></span>
+          {:else}
+            <Icon name="check-circle" size={13} />
+          {/if}
+          <span class="diff-hist-label">{reviewed ? "已审阅" : "标记已审阅"}</span>
+        </button>
       </div>
     {/if}
     {#if onStageLines && currentDiff && !readOnly}

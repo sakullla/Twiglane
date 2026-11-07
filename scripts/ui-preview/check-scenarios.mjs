@@ -151,6 +151,19 @@ const SCENARIOS = [
     detail: 'document.querySelector(".files-view .file-tree-status")?.textContent?.trim() || ""',
   },
   {
+    name: "改动视图：标记已审阅并隐藏已审阅",
+    url: "/",
+    ready:
+      "(function () { if (!window.__reviewOpened) { const recent = document.querySelector('.welcome-recent button'); if (!recent) return false; window.__reviewOpened = true; recent.click(); return false; } " +
+      "const list = document.querySelector('.file-list'); if (!list) return false; " +
+      "if (!window.__reviewMarked) { const toggle = list.querySelector('.review-toggle'); if (!toggle) return false; window.__reviewMarked = true; toggle.click(); return false; } " +
+      "if (!window.__reviewHidden) { const hide = document.querySelector('.review-hide'); if (!hide) return false; window.__reviewHidden = true; hide.click(); return false; } " +
+      "return document.querySelectorAll('.review-toggle.on').length === 0; })()",
+    check:
+      "(function () { const count = document.querySelector('.review-count'); if (!count) return false; const shown = count.textContent.trim(); return shown.indexOf('1/') === 0 && document.querySelectorAll('.review-toggle.on').length === 0 && document.querySelectorAll('.file-row').length > 0; })()",
+    detail: "document.querySelector('.review-count')?.textContent?.trim() || ''",
+  },
+  {
     name: "默认起始页",
     url: "/",
     ready: "Boolean(document.querySelector('.welcome-recent button'))",

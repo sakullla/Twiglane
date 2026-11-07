@@ -5,9 +5,10 @@
  * 只打开链接指定的 worktree、accepted/rejected 的时机、返回时携带的结果、独立仓库
  * 没有来源。deep-link 插件用模块 mock 顶替，冷启动取 getCurrent，运行中走 onOpenUrl。
  */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/svelte";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { recordClioraCommit, resetClioraReview } from "../src/lib/cliora-review.svelte";
+import { resetReviewProgress } from "../src/lib/review-progress.svelte";
 import type { DiffLine, DiffResponse, FileChange, StatusSnapshot } from "../src/lib/types";
 
 const WORKTREE = "C:/work/代码 demo";
@@ -152,11 +153,25 @@ function resetMocks() {
   });
   mocks.api.clioraReviewReceipt.mockResolvedValue(undefined);
   mocks.api.clioraReviewReturn.mockResolvedValue(undefined);
+  // 审阅进度只影响本地标记，不参与协议结果。
+  mocks.api.repositoryReviewToken.mockResolvedValue({
+    generation: 4,
+    path: "src/a.ts",
+    state: "current",
+    token: "token-src-a",
+    staged: "none",
+    unstaged: "modified",
+    untracked: false,
+    unmerged: false,
+    contentVersion: "worktree:abc",
+    message: "已确认这个文件当前的整份内容与改动。",
+  });
 }
 
 beforeEach(() => {
   resetMocks();
   resetClioraReview();
+  resetReviewProgress();
 });
 
 afterEach(() => {
@@ -319,6 +334,26 @@ describe("cliora v1 审查链接", () => {
     mocks.api.commitChanges.mockClear();
     await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
     await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(REVIEW_A, SESSION_A, "committed", COMMITTED));
+    expect(mocks.api.commitChanges).not.toHaveBeenCalled();
+    expect(mocks.api.startMerge).not.toHaveBeenCalled();
+    expect(mocks.api.completeMerge).not.toHaveBeenCalled();
+  });
+
+  it("全部文件标记已审阅后仍返回 reviewed，不出现批准", async () => {
+    deepLink.getCurrent.mockResolvedValue([URL_A]);
+    mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE));
+    await mountShell();
+    await waitFor(() => expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy());
+
+    const list = document.querySelector<HTMLElement>(".file-list");
+    expect(list).toBeTruthy();
+    await fireEvent.click(await within(list!).findByRole("button", { name: "标记 src/a.ts 已审阅" }));
+    await waitFor(() => expect(screen.getByLabelText("已审阅 1 个，共 1 个改动文件")).toBeTruthy());
+
+    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(REVIEW_A, SESSION_A, "reviewed", null));
+    expect(document.body.textContent).not.toContain("已批准");
+    expect(document.body.textContent).not.toContain("approved");
     expect(mocks.api.commitChanges).not.toHaveBeenCalled();
     expect(mocks.api.startMerge).not.toHaveBeenCalled();
     expect(mocks.api.completeMerge).not.toHaveBeenCalled();

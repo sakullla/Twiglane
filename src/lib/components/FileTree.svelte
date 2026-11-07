@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { FILTER_EXTRA_LIMIT, FILE_ROW_HEIGHT, rowIndex, type FileTreeRow } from "../files.svelte";
+  import { FILTER_EXTRA_LIMIT, FILE_ROW_HEIGHT, rowIndex, type ChangeDecorations, type FileTreeRow } from "../files.svelte";
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
   import { BUSY_REASON, formatBytes } from "../ui";
   import ContextMenu, { isContextKey, pointFor, type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
@@ -18,6 +18,8 @@
     includeIgnored: boolean;
     /** 仅看有改动的文件：行来自 StatusSnapshot，删除的文件是墓碑。 */
     changedOnly?: boolean;
+    /** 当前 StatusSnapshot 的文件与祖先目录装饰：只影响显示，不改暂存与提交范围。 */
+    decorations?: ChangeDecorations;
     /** 树过滤的全仓库补齐失败原因：失败时不能说「没有更多匹配」。 */
     filterError?: string | null;
     /** 补齐结果被后端截断：匹配没有显示全。 */
@@ -50,6 +52,7 @@
     query,
     includeIgnored,
     changedOnly = false,
+    decorations = { files: {}, dirs: {} },
     filterError = null,
     filterTruncated = false,
     filterBusy = false,
@@ -226,6 +229,12 @@
     if (row.kind === "nestedRepository") return "package";
     if (row.expandable) return row.expanded ? "folder-open" : "folder";
     return "file";
+  }
+
+  /** 这一行的 Git 装饰：文件用自身状态，目录用其后代改动的聚合。 */
+  function rowStatus(row: FileTreeRow): { letter: string; tone: string; label: string; count?: number } | null {
+    if (row.expandable) return decorations.dirs[row.path] ?? null;
+    return decorations.files[row.path] ?? null;
   }
 
   function rowHint(row: FileTreeRow): string {
@@ -427,6 +436,7 @@
     <div class="virtual-space" style={`height:${rows.length * FILE_ROW_HEIGHT}px`}>
       {#each visible as row, index (row.path)}
         {@const top = (range.start + index) * FILE_ROW_HEIGHT}
+        {@const status = rowStatus(row)}
         <div
           class="file-tree-row"
           class:segment={row.segment}
@@ -476,6 +486,13 @@
             <span class="tree-chevron" aria-hidden="true"></span>
           {/if}
           <Icon name={rowIcon(row)} size={14} />
+          {#if status}
+            <span
+              class={`st ${status.tone}`}
+              title={status.count ? `${status.label} · 目录下 ${status.count} 个改动文件` : status.label}
+              aria-label={status.count ? `${status.label}，目录下 ${status.count} 个改动文件` : status.label}
+            >{status.letter}</span>
+          {/if}
           <span class="tree-name">{row.label}</span>
           {#if row.splittable}
             <button

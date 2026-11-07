@@ -28,6 +28,21 @@
     onResolve?: (path: string | null) => void;
     /** 右键或 Shift+F10 / 菜单键：在 (x, y) 为这一行打开上下文菜单。 */
     onContextMenu?: (row: FileRow, point: { x: number; y: number }) => void;
+    /** 已标记已审阅的路径；同一路径的 staged / unstaged 两侧共用同一个标记。 */
+    reviewed?: ReadonlySet<string>;
+    /** 当前改动文件总数（按路径去重）。 */
+    reviewTotal?: number;
+    /** 仍然有效的已审阅数。 */
+    reviewReviewed?: number;
+    /** 隐藏已审阅文件：只改变显示，不改冲突/未暂存/已暂存分组数量与提交范围。 */
+    hideReviewed?: boolean;
+    onHideReviewed?: (next: boolean) => void;
+    /** 标记或撤销整文件已审阅：路径作为参数，两侧行等价。 */
+    onToggleReview?: (path: string) => void;
+    /** 正在确认快照的路径：这一行的按钮显示进行中。 */
+    reviewBusy?: string | null;
+    /** 上一次标记失败的原因：就地说明，不弹全局错误。 */
+    reviewNote?: string | null;
   }
 
   type SectionSide = DiffSide | "conflicted";
@@ -61,19 +76,36 @@
     onUnstageAll,
     onResolve,
     onContextMenu,
+    reviewed = new Set<string>(),
+    reviewTotal = 0,
+    reviewReviewed = 0,
+    hideReviewed = false,
+    onHideReviewed,
+    onToggleReview,
+    reviewBusy = null,
+    reviewNote = null,
   }: Props = $props();
   let groups = $derived(groupFiles(files));
   let conflictedRows = $derived(filterRows(groups.conflicted, query));
   let unstagedRows = $derived(filterRows(groups.unstaged, query));
   let stagedRows = $derived(filterRows(groups.staged, query));
 
-  function sectionItems(rows: FileRow[], side: SectionSide, paths: string[]): Item[] {
+  /**
+   * 分组只由全部行决定：隐藏已审阅只影响显示出来的行，
+   * 表头数量与「全部暂存 / 全部取消暂存」的路径范围仍是完整分组。
+   */
+  function sectionItems(
+    rows: FileRow[],
+    shown: FileRow[],
+    side: SectionSide,
+    paths: string[],
+  ): Item[] {
     if (rows.length === 0) return [];
     const header: Item = { kind: "header", side, count: rows.length, paths };
-    if (!directoryMode) return [header, ...rows.map((row) => ({ kind: "row" as const, row }))];
+    if (!directoryMode) return [header, ...shown.map((row) => ({ kind: "row" as const, row }))];
     const needle = query.trim();
     const items: Item[] = [header];
-    for (const bucket of bucketByDirectory(rows)) {
+    for (const bucket of bucketByDirectory(shown)) {
       const key = `${side}:${bucket.directory}`;
       const collapsed = collapsedDirs.has(key) && needle === "";
       items.push({
@@ -92,20 +124,31 @@
     return items;
   }
 
+  function shownRows(list: FileRow[]): FileRow[] {
+    if (!hideReviewed) return list;
+    return list.filter((row) => !reviewed.has(row.path));
+  }
+
+  let conflictedShown = $derived(shownRows(conflictedRows));
+  let unstagedShown = $derived(shownRows(unstagedRows));
+  let stagedShown = $derived(shownRows(stagedRows));
+
   let items = $derived<Item[]>([
-    ...sectionItems(conflictedRows, "conflicted", []),
+    ...sectionItems(conflictedRows, conflictedShown, "conflicted", []),
     ...sectionItems(
       unstagedRows,
+      unstagedShown,
       "unstaged",
       unstagedRows.filter((row) => !row.unmerged).map((row) => row.path),
     ),
     ...sectionItems(
       stagedRows,
+      stagedShown,
       "staged",
       stagedRows.filter((row) => !row.unmerged).map((row) => row.path),
     ),
   ]);
-  let rows = $derived([...conflictedRows, ...unstagedRows, ...stagedRows]);
+  let rows = $derived([...conflictedShown, ...unstagedShown, ...stagedShown]);
   let scrollTop = $state(0);
   let viewport = $state(0);
   let list = $state<HTMLDivElement | null>(null);
@@ -322,7 +365,32 @@
       </button>
     {/if}
   </div>
+  {#if onToggleReview || reviewTotal > 0}
+    <span
+      class="review-count"
+      role="status"
+      aria-label={`已审阅 ${reviewReviewed} 个，共 ${reviewTotal} 个改动文件`}
+      title="已审阅数是本地人工进度，不代表批准、提交或 Cliora 结果"
+    >
+      <Icon name="check-circle" size={13} />{reviewReviewed}/{reviewTotal}
+    </span>
+  {/if}
+  {#if onHideReviewed}
+    <button
+      type="button"
+      class="btn btn-ghost btn-sm review-hide"
+      aria-pressed={hideReviewed}
+      aria-label="隐藏已审阅"
+      title={hideReviewed ? "重新显示已审阅的文件；分组数量与提交范围不受影响" : "折叠已审阅的文件；只改显示，不改提交范围"}
+      onclick={() => onHideReviewed?.(!hideReviewed)}
+    >
+      <Icon name="eye" size={13} /><span class="file-group-action">已审阅</span>
+    </button>
+  {/if}
 </div>
+{#if reviewNote}
+  <p class="file-tree-status danger" role="alert">{reviewNote}</p>
+{/if}
 <div
   class="file-list"
   role="listbox"
@@ -338,6 +406,15 @@
     <div class="empty">
       <span class="empty-icon ok"><Icon name="check-circle" size={24} /></span>
       <strong>工作区很干净</strong>
+    </div>
+  {:else if rows.length === 0 && hideReviewed}
+    <div class="empty">
+      <span class="empty-icon ok"><Icon name="check-circle" size={22} /></span>
+      <strong>已审阅的文件都隐藏了</strong>
+      <p>隐藏只影响显示，分组数量与提交范围没有变化。</p>
+      {#if onHideReviewed}
+        <button type="button" class="btn btn-secondary btn-sm" onclick={() => onHideReviewed?.(false)}>显示已审阅</button>
+      {/if}
     </div>
   {:else if rows.length === 0}
     <div class="empty">
@@ -474,6 +551,31 @@
               {/if}
             </span>
             <LineCounts stat={row.side === "staged" ? row.stagedLines : row.unstagedLines} hideBinary />
+            {#if onToggleReview}
+              <button
+                type="button"
+                class="icon-btn sm review-toggle"
+                class:on={reviewed.has(row.path)}
+                aria-pressed={reviewed.has(row.path)}
+                aria-label={reviewed.has(row.path) ? `撤销 ${row.path} 的已审阅标记` : `标记 ${row.path} 已审阅`}
+                title={reviewBusy === row.path
+                  ? "正在确认整份文件快照……"
+                  : reviewed.has(row.path)
+                    ? "撤销这个文件的已审阅标记"
+                    : "标记整个文件已审阅；内容、暂存状态或删除变化后自动失效"}
+                disabled={reviewBusy === row.path}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  onToggleReview?.(row.path);
+                }}
+              >
+                {#if reviewBusy === row.path}
+                  <span class="spinner" aria-hidden="true"></span>
+                {:else}
+                  <Icon name="check" size={13} />
+                {/if}
+              </button>
+            {/if}
             {#if row.unmerged}
               <button
                 type="button"

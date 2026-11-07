@@ -674,6 +674,50 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     }
     return ok(mockContentSearch(query, scope, limit, generation), 60);
   },
+  /**
+   * 审阅确认：token 由这条路径当前的两侧状态与行数摘要决定。
+   * 内容或状态一变就换 token，界面因此自动撤销旧标记，其他文件不受影响。
+   */
+  repositoryReviewToken: (_repo: string, relative: string, generation: number) => {
+    const entry = files.find((item) => item.path === relative);
+    if (!entry) {
+      return ok({
+        generation,
+        path: relative,
+        state: "unchanged",
+        token: null,
+        staged: "none",
+        unstaged: "none",
+        untracked: false,
+        unmerged: false,
+        contentVersion: null,
+        message: "这条路径当前没有未提交的改动，不能标记已审阅。",
+      });
+    }
+    const digest = [
+      entry.staged,
+      entry.unstaged,
+      entry.untracked,
+      entry.unmerged,
+      entry.stagedLines?.additions ?? "",
+      entry.unstagedLines?.additions ?? "",
+    ].join("|");
+    return ok(
+      {
+        generation,
+        path: relative,
+        state: "current",
+        token: `mock-${relative}-${digest}`,
+        staged: entry.staged,
+        unstaged: entry.unstaged,
+        untracked: entry.untracked,
+        unmerged: entry.unmerged,
+        contentVersion: "worktree:mock",
+        message: "已确认这个文件当前的整份内容与改动。",
+      },
+      30,
+    );
+  },
   repositoryPathSearch: (
     _repo: string,
     query: string,

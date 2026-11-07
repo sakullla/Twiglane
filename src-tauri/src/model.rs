@@ -763,6 +763,38 @@ pub struct RepositoryFileContent {
     pub message: Option<String>,
 }
 
+/// 单个改动路径的整文件快照状态。
+///
+/// 只有 `Current` 会带 token：其余状态说明这条路径现在没有改动、工作区里已经没有它，
+/// 或内容无法确认，界面不能据此标记已审阅。
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RepositoryReviewState {
+    Current,
+    Unchanged,
+    Missing,
+    Unconfirmed,
+}
+
+/// 一次 `repository_review_token` 的结果：汇总这一条路径的暂存/未暂存/未跟踪/冲突状态
+/// 与它当前的内容版本。token 只随内容或状态变化，由前端在当前会话内保存。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryReviewToken {
+    pub generation: u64,
+    pub path: String,
+    pub state: RepositoryReviewState,
+    /// 仅 `Current` 有值；其余状态为 null，前端保持未审阅。
+    pub token: Option<String>,
+    pub staged: ChangeKind,
+    pub unstaged: ChangeKind,
+    pub untracked: bool,
+    pub unmerged: bool,
+    /// 工作区内容版本（Git 对象 id 或 `missing`），用于解释 token 依据了哪一份内容。
+    pub content_version: Option<String>,
+    pub message: String,
+}
+
 /// 路径搜索的结果类型：文件来自 Git 路径集合，目录由文件祖先派生。
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

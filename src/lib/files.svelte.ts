@@ -9,6 +9,8 @@
  */
 import { api } from "./api";
 import { normalizeError } from "./errors";
+import { changeLabel } from "./labels";
+import { statusMark } from "./ui";
 import type {
   FileChange,
   RepositoryContentMatch,
@@ -289,6 +291,77 @@ export function changedFilesMatching(files: readonly FileChange[], query: string
   const needle = query.trim().toLowerCase();
   if (!needle) return files as FileChange[];
   return files.filter((file) => file.path.toLowerCase().includes(needle));
+}
+
+/** 文件树装饰用的单字母标记：与改动列表共用同一套 statusMark 色阶，不新增颜色语义。 */
+export interface ChangeMark {
+  letter: string;
+  tone: string;
+  label: string;
+}
+
+/** 文件与祖先目录的 Git 装饰：files 按路径给出这一行自己的状态，dirs 是其后代改动的聚合。 */
+export interface ChangeDecorations {
+  files: Record<string, ChangeMark>;
+  dirs: Record<string, ChangeMark & { count: number }>;
+}
+
+/** 聚合时的显示优先级：冲突最需要看见，其次是消失的文件，再到普通改动。 */
+const MARK_RANK: Record<string, number> = {
+  冲突: 0,
+  删除: 1,
+  修改: 2,
+  类型变化: 3,
+  重命名: 4,
+  复制: 5,
+  新增: 6,
+  未跟踪: 7,
+};
+
+function rankOf(label: string): number {
+  return MARK_RANK[label] ?? 99;
+}
+
+function markOf(label: string): ChangeMark {
+  const mark = statusMark(label);
+  return { letter: mark.letter, tone: mark.tone, label };
+}
+
+/**
+ * 一个改动文件的装饰：与改动列表同一套状态文字与颜色。
+ * 两侧都有改动时先看未暂存一侧（工作区此刻的样子），再看已暂存一侧。
+ */
+export function changeMarkOf(file: FileChange): ChangeMark {
+  if (file.unmerged) return markOf("冲突");
+  if (file.untracked) return markOf("未跟踪");
+  const side = file.unstaged !== "none" ? file.unstaged : file.staged;
+  return markOf(changeLabel(side) ?? "变化");
+}
+
+/**
+ * 当前 StatusSnapshot 的文件与祖先目录装饰。
+ * 只根据快照算，不读目录、不改变任何暂存或提交范围；仅改动的树和完整树共用同一份结果。
+ */
+export function changeDecorations(files: readonly FileChange[]): ChangeDecorations {
+  const out: ChangeDecorations = { files: {}, dirs: {} };
+  for (const file of files) {
+    if (!file.path) continue;
+    const mark = changeMarkOf(file);
+    const existing = out.files[file.path];
+    if (!existing || rankOf(mark.label) < rankOf(existing.label)) out.files[file.path] = mark;
+    const parts = file.path.split("/");
+    for (let index = 1; index < parts.length; index += 1) {
+      const directory = parts.slice(0, index).join("/");
+      const current = out.dirs[directory];
+      if (!current) {
+        out.dirs[directory] = { ...mark, count: 1 };
+        continue;
+      }
+      const keep = rankOf(mark.label) < rankOf(current.label) ? mark : current;
+      out.dirs[directory] = { letter: keep.letter, tone: keep.tone, label: keep.label, count: current.count + 1 };
+    }
+  }
+  return out;
 }
 
 /** 工作区里已经没有这个文件：未暂存删除，或只剩已暂存删除而工作区无内容。 */

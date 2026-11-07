@@ -99,6 +99,7 @@ pub fn run() {
             repository_file_content,
             repository_path_search,
             repository_content_search,
+            repository_review_token,
             stage_files,
             unstage_files,
             stage_hunks,
@@ -938,6 +939,24 @@ async fn repository_content_search(
         scope,
         include_ignored,
         limit,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn repository_review_token(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    relative: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<crate::model::RepositoryReviewToken, AppError> {
+    crate::git::files::repository_review_token(
+        state.inner(),
+        &path,
+        &relative,
         generation,
         request_id,
     )
@@ -1828,6 +1847,7 @@ mod ipc_contract {
             "file_history",
             "repository_path_search",
             "repository_content_search",
+            "repository_review_token",
             "stash_state",
             "save_stash",
             "apply_stash",

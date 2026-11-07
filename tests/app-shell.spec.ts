@@ -7,6 +7,7 @@ import {
   recordClioraMerge,
   resetClioraReview,
 } from "../src/lib/cliora-review.svelte";
+import { resetReviewProgress } from "../src/lib/review-progress.svelte";
 import type { DiffLine, DiffResponse, FileChange, HistoryCommit, StatusSnapshot } from "../src/lib/types";
 
 /* ------------------------------------------------------------------ *
@@ -144,6 +145,7 @@ const mocks = vi.hoisted(() => ({
   repositoryFileContent: vi.fn(),
   repositoryPathSearch: vi.fn(),
   repositoryContentSearch: vi.fn(),
+  repositoryReviewToken: vi.fn(),
   filePreview: vi.fn(),
   clioraReviewRequest: vi.fn(),
   clioraReviewReceipt: vi.fn(),
@@ -537,6 +539,8 @@ function stubSystemDark(matches: boolean) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // 审阅进度是模块级会话状态：用例之间必须清空，否则上一个用例的标记会带进来。
+  resetReviewProgress();
   mocks.getSettings.mockResolvedValue({
     theme: "dark",
     panelWidths: { sidebar: 256, files: 360 },
@@ -646,6 +650,122 @@ afterEach(() => {
   cleanup();
   delete document.documentElement.dataset.theme;
   if (originalMatchMedia) Object.defineProperty(window, "matchMedia", originalMatchMedia);
+});
+
+describe("审阅进度（R5）", () => {
+  /** 审阅入口有两处（改动列表行与当前差异工具条）：列表断言只看左栏。 */
+  function fileList(): HTMLElement {
+    const node = document.querySelector<HTMLElement>(".file-list");
+    if (!node) throw new Error("改动列表没有渲染");
+    return node;
+  }
+
+  /** 同一路径可能同时出现在未暂存与已暂存两组：同一路径的按钮重复，取第一行即可。 */
+  async function reviewButton(name: string): Promise<HTMLElement> {
+    await waitFor(() => expect(within(fileList()).queryAllByRole("button", { name }).length).toBeGreaterThan(0));
+    return within(fileList()).getAllByRole("button", { name })[0];
+  }
+
+  function tokenFor(path: string, token: string) {
+    return {
+      generation: 4,
+      path,
+      state: "current" as const,
+      token,
+      staged: "none" as const,
+      unstaged: "modified" as const,
+      untracked: false,
+      unmerged: false,
+      contentVersion: "worktree:abc",
+      message: "已确认这个文件当前的整份内容与改动。",
+    };
+  }
+
+  it("标记与撤销同步计数，隐藏已审阅只改显示", async () => {
+    mocks.repositoryReviewToken.mockImplementation(async (_repo: string, path: string) => tokenFor(path, `tok:${path}`));
+    render(App);
+    await openRepo();
+
+    await fireEvent.click(await reviewButton("标记 src/App.svelte 已审阅"));
+    await waitFor(() => expect(screen.getByLabelText("已审阅 1 个，共 6 个改动文件")).toBeTruthy());
+    expect(mocks.repositoryReviewToken).toHaveBeenCalledWith(repoPath, "src/App.svelte", 4, expect.any(Number));
+
+    // 隐藏只折叠已审阅的行：分组数量与提交范围不变，计数仍然可读。
+    await fireEvent.click(screen.getByRole("button", { name: "隐藏已审阅" }));
+    await tick();
+    expect(within(fileList()).queryAllByRole("button", { name: /撤销 src\/App\.svelte 的已审阅标记/ })).toHaveLength(0);
+    expect(within(fileList()).queryAllByRole("button", { name: /标记 src\/App\.svelte 已审阅/ })).toHaveLength(0);
+    expect(within(fileList()).getAllByRole("button", { name: "标记 src/app.css 已审阅" }).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("已审阅 1 个，共 6 个改动文件")).toBeTruthy();
+
+    // 撤销仍然可用：隐藏状态下重新显示后能撤销标记。
+    await fireEvent.click(screen.getByRole("button", { name: "隐藏已审阅" }));
+    await tick();
+    await fireEvent.click(await reviewButton("撤销 src/App.svelte 的已审阅标记"));
+    await waitFor(() => expect(screen.getByLabelText("已审阅 0 个，共 6 个改动文件")).toBeTruthy());
+    expect(within(fileList()).getAllByRole("button", { name: "标记 src/App.svelte 已审阅" }).length).toBeGreaterThan(0);
+  });
+
+  it("刷新后只重验已标记路径：变化的失效，其他标记保留", async () => {
+    let round = 0;
+    mocks.repositoryReviewToken.mockImplementation(async (_repo: string, path: string) =>
+      tokenFor(path, path === "src/App.svelte" && round > 0 ? `tok:${path}:changed` : `tok:${path}`),
+    );
+    render(App);
+    await openRepo();
+    await fireEvent.click(await reviewButton("标记 src/App.svelte 已审阅"));
+    await fireEvent.click(await reviewButton("标记 src/app.css 已审阅"));
+    await waitFor(() => expect(screen.getByLabelText("已审阅 2 个，共 6 个改动文件")).toBeTruthy());
+    mocks.repositoryReviewToken.mockClear();
+
+    // 外部变化：App.svelte 的内容换了，app.css 没有。
+    round = 1;
+    const focus = mocks.listenEvent.mock.calls.find(([name]) => name === "window-focused")![1];
+    focus();
+    await waitFor(() => expect(mocks.repositoryReviewToken).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByLabelText("已审阅 1 个，共 6 个改动文件")).toBeTruthy());
+    expect(within(fileList()).getAllByRole("button", { name: "标记 src/App.svelte 已审阅" }).length).toBeGreaterThan(0);
+    expect(within(fileList()).getAllByRole("button", { name: "撤销 src/app.css 的已审阅标记" }).length).toBeGreaterThan(0);
+    // 只为已标记的两条路径请求，未标记的文件不计算 token。
+    const queried = mocks.repositoryReviewToken.mock.calls.map((call) => call[1]).sort();
+    expect(queried).toEqual(["src/App.svelte", "src/app.css"]);
+    expect(screen.getByRole("alert").textContent).toContain("快照已变化");
+  });
+
+  it("独立打开另一个仓库清空进度", async () => {
+    mocks.repositoryReviewToken.mockImplementation(async (_repo: string, path: string) => tokenFor(path, `tok:${path}`));
+    useRecent([{ name: "demo", path: repoPath, openedAtMs: 1 }, { name: "other", path: "C:/work/other", openedAtMs: 2 }]);
+    mocks.openRepository.mockImplementation(async (path: string) => ({
+      summary: { name: path.split("/").pop() ?? path, path },
+      generation: 4,
+      snapshot,
+      draft: "",
+      watchDegraded: false,
+    }));
+    render(App);
+    await openRepo();
+    await fireEvent.click(await reviewButton("标记 src/App.svelte 已审阅"));
+    await waitFor(() => expect(screen.getByLabelText("已审阅 1 个，共 6 个改动文件")).toBeTruthy());
+
+    await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
+    const popover = await screen.findByRole("dialog", { name: "切换仓库" });
+    await fireEvent.click(within(popover).getByRole("option", { name: /other/ }));
+    await waitFor(() => expect(mocks.openRepository).toHaveBeenLastCalledWith("C:/work/other", expect.any(Number)));
+    await waitFor(() => expect(screen.getByLabelText("已审阅 0 个，共 6 个改动文件")).toBeTruthy());
+    expect(within(fileList()).getAllByRole("button", { name: /标记 .* 已审阅/ }).length).toBeGreaterThan(0);
+  });
+
+  it("文件视图与审阅入口不提供新建、删除、保存、运行或 LSP 能力", async () => {
+    render(App);
+    await openRepo();
+    // 文件视图、改动列表与差异工具条：只读浏览与审阅，不含文件管理、编辑或 IDE 语义入口。
+    const texts = [
+      ...document.querySelectorAll<HTMLElement>(".workbench-view button, .workbench-view [role=menuitem]"),
+    ].map((node) => (node.getAttribute("aria-label") ?? "") + (node.textContent ?? ""));
+    for (const banned of ["新建文件", "新建目录", "移动文件", "重命名文件", "删除文件", "保存文件", "另存", "运行", "调试", "定义", "引用", "重构", "评论", "批准"]) {
+      expect(texts.some((text) => text.includes(banned)), `${banned} 不该出现在文件与审阅入口`).toBe(false);
+    }
+  });
 });
 
 describe("应用外壳", () => {

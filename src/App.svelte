@@ -26,6 +26,17 @@
   } from "./lib/cliora-review.svelte";
   import { normalizeError } from "./lib/errors";
   import { clampWidth, FALLBACK_POLL_MS, fitPaneWidth, shouldPoll } from "./lib/layout";
+  import {
+    applyReviewReverification,
+    beginReviewProgress,
+    isReviewed,
+    markReviewed,
+    pruneReviewProgress,
+    reviewPaths,
+    reviewProgress,
+    reviewSummary,
+    unmarkReviewed,
+  } from "./lib/review-progress.svelte";
   import { branchLabel, commitScope, createSelectionResolver, dependencyNote, filterRows, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
   import { startDesktopMeasure } from "./lib/measure";
   import { updateState, watchUpdateAvailable } from "./lib/update.svelte";
@@ -293,6 +304,14 @@
   let scope = $derived(opened ? commitScope(branchText, opened.snapshot.files) : { label: "", paths: [] as string[] });
   let ahead = $derived(opened?.snapshot.branch.ahead ?? 0);
   let behind = $derived(opened?.snapshot.branch.behind ?? 0);
+  /* 审阅进度（R5）：本地人工记录，不写 state.json，不参与提交范围与 Cliora 结果。 */
+  let hideReviewed = $state(false);
+  let reviewBusy = $state<string | null>(null);
+  let reviewNote = $state<string | null>(null);
+  let reviewSerial = 0;
+  let reviewedSet = $derived(new Set(Object.keys(reviewProgress.tokens)));
+  let reviewCounts = $derived(reviewSummary(opened ? reviewPaths(opened.snapshot.files) : []));
+
   let changeCount = $derived(opened?.snapshot.files.length ?? 0);
   let conflictCount = $derived(opened?.snapshot.files.filter((file) => file.unmerged).length ?? 0);
   let upstreamMissing = $derived(opened ? !opened.snapshot.branch.upstream : false);
@@ -855,6 +874,9 @@
     draft = next.draft;
     opened = next;
     setAbbrevLength(next.abbrevLength);
+    // 换仓库清空审阅进度；同一个 worktree 重新打开保留。进度只在本会话内有效。
+    beginReviewProgress(next.summary.path);
+    reviewNote = null;
     selectedSet = [];
     degraded = next.watchDegraded;
     const groups = groupFiles(next.snapshot.files);
@@ -887,6 +909,7 @@
     live = `已打开 ${next.summary.name}`;
     void probeMerge();
     void loadSelectedDiff();
+    void reverifyReviewed();
     if (closingClone) closeRepoDialogs();
   }
 
@@ -992,6 +1015,7 @@
       // 外部完成或开始合并时只有刷新能发现，提示不能停在旧状态。
       void probeMerge();
       await loadSelectedDiff();
+      void reverifyReviewed();
       return true;
     } catch (error) {
       if (epoch === repositoryEpoch && opened?.summary.path === current.summary.path) showError(error);
@@ -1205,6 +1229,75 @@
     opened = { ...opened, snapshot, generation: snapshot.generation };
     settleSelection(createSelectionResolver(snapshot.files, true));
     void loadSelectedDiff();
+    void reverifyReviewed();
+  }
+
+  /**
+   * 刷新后只重验已标记的路径：token 相同保留，内容或状态变化、文件消失、
+   * 无法确认时取消对应标记，其他文件不受影响。没有标记时不发任何请求。
+   */
+  async function reverifyReviewed(): Promise<void> {
+    const current = opened;
+    if (!current) return;
+    const marked = Object.keys(reviewProgress.tokens);
+    if (marked.length === 0) return;
+    const alive = reviewPaths(current.snapshot.files);
+    const dropped = pruneReviewProgress(alive);
+    if (dropped.length > 0) {
+      reviewNote = `${dropped.length} 个文件已不在改动列表里，已撤销对应的已审阅标记。`;
+    }
+    const aliveSet = new Set(alive);
+    const targets = marked.filter((path) => aliveSet.has(path));
+    if (targets.length === 0) return;
+    const serial = ++reviewSerial;
+    const repo = current.summary.path;
+    const results: { path: string; token: string | null; reason?: string }[] = [];
+    for (const path of targets) {
+      try {
+        const result = await api.repositoryReviewToken(repo, path, current.generation, nextId());
+        results.push({
+          path,
+          token: result.state === "current" ? result.token : null,
+          reason: result.message,
+        });
+      } catch (error) {
+        const failure = normalizeError(error);
+        // stale 说明已经有新一代：下一次刷新会重验，不在这里重复请求。
+        if (failure.code === "stale") return;
+        results.push({ path, token: null, reason: `无法确认快照：${failure.message}` });
+      }
+      if (serial !== reviewSerial || opened?.summary.path !== repo) return;
+    }
+    const invalidations = applyReviewReverification(results);
+    if (invalidations.length > 0) {
+      reviewNote = `${invalidations.length} 个文件的快照已变化，已撤销对应的已审阅标记。`;
+    }
+  }
+
+  /** 标记 / 撤销整文件已审阅：只读确认快照，不暂存、不提交、不写 state.json。 */
+  async function toggleReviewed(path: string): Promise<void> {
+    const current = opened;
+    if (!current) return;
+    if (isReviewed(path)) {
+      unmarkReviewed(path);
+      reviewNote = null;
+      return;
+    }
+    reviewBusy = path;
+    reviewNote = null;
+    try {
+      const result = await api.repositoryReviewToken(current.summary.path, path, current.generation, nextId());
+      if (opened?.summary.path !== current.summary.path) return;
+      if (result.state !== "current" || !result.token) {
+        reviewNote = result.message;
+        return;
+      }
+      markReviewed(path, result.token);
+    } catch (error) {
+      reviewNote = `无法标记已审阅：${normalizeError(error).message}`;
+    } finally {
+      if (reviewBusy === path) reviewBusy = null;
+    }
   }
 
   function mergeSnapshot(snapshot: StatusSnapshot) {
@@ -3003,6 +3096,14 @@
                   onUnstageAll={unstagePaths}
                   onResolve={(path) => (path ? openConflict(path) : runCommand("task.merge"))}
                   onContextMenu={fileContextMenu}
+                  reviewed={reviewedSet}
+                  reviewTotal={reviewCounts.total}
+                  reviewReviewed={reviewCounts.reviewed}
+                  {hideReviewed}
+                  onHideReviewed={(next) => (hideReviewed = next)}
+                  onToggleReview={(path) => void toggleReviewed(path)}
+                  {reviewBusy}
+                  {reviewNote}
                 />
                 <CommitDraft
                   branch={branchText}
@@ -3104,6 +3205,9 @@
                   onResolve={() => {
                     if (selected) openConflict(selected.path);
                   }}
+                  reviewed={selected ? reviewedSet.has(selected.path) : false}
+                  reviewBusy={selected ? reviewBusy === selected.path : false}
+                  onToggleReview={selected ? () => void toggleReviewed(selected!.path) : undefined}
                 />
               {/if}
             </div>

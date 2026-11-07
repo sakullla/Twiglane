@@ -245,6 +245,55 @@ describe("文件视图容器", () => {
     expect(await screen.findByRole("treeitem", { name: /src/ })).toBeTruthy();
   });
 
+  it("文件与祖先目录显示当前 StatusSnapshot 的 Git 装饰", async () => {
+    const repo = opened();
+    repo.snapshot.files = [
+      { path: "src/lib/app.ts", originalPath: null, staged: "none", unstaged: "modified", untracked: false, unmerged: false },
+      { path: "src/main.rs", originalPath: null, staged: "none", unstaged: "deleted", untracked: false, unmerged: false },
+      { path: "notes.txt", originalPath: null, staged: "none", unstaged: "none", untracked: true, unmerged: false },
+    ];
+    repositoryDirectory.mockResolvedValue(
+      dir("", [
+        { name: "src", path: "src", kind: "directory", ignored: false, size: null, error: null },
+        { name: "notes.txt", path: "notes.txt", kind: "file", ignored: false, size: 3, error: null },
+        { name: "README.md", path: "README.md", kind: "file", ignored: false, size: 9, error: null },
+      ]),
+    );
+    render(RepositoryFiles, { props: { ...viewProps(true), opened: repo } as never });
+    const tree = await screen.findByRole("tree", { name: "仓库文件" });
+
+    await waitFor(() => expect(tree.querySelector('.file-tree-row[title="src"]')).toBeTruthy());
+    // 文件行用与改动列表同一套状态字母与颜色。
+    const notes = tree.querySelector<HTMLElement>('.file-tree-row[title="notes.txt"]')!;
+    expect(within(notes).getByLabelText("未跟踪")).toBeTruthy();
+    // 祖先目录聚合后代改动，并说明有多少个改动文件。
+    const src = tree.querySelector<HTMLElement>('.file-tree-row[title="src"]')!;
+    expect(within(src).getByLabelText("删除，目录下 2 个改动文件")).toBeTruthy();
+    // 没有改动的文件不伪造装饰。
+    const readme = tree.querySelector<HTMLElement>('.file-tree-row[title="README.md"]')!;
+    expect(readme.querySelector(".st")).toBeNull();
+  });
+
+  it("仅改动树沿用删除墓碑并显示状态装饰，不读取目录", async () => {
+    const repo = opened();
+    repo.snapshot.files = [
+      { path: "src/gone.rs", originalPath: null, staged: "none", unstaged: "deleted", untracked: false, unmerged: false },
+      { path: "src/kept.rs", originalPath: null, staged: "modified", unstaged: "modified", untracked: false, unmerged: false },
+    ];
+    repositoryDirectory.mockResolvedValue(dir("", []));
+    render(RepositoryFiles, { props: { ...viewProps(true), opened: repo } as never });
+    await screen.findByRole("tree", { name: "仓库文件" });
+    await waitFor(() => expect(repositoryDirectory).toHaveBeenCalledTimes(1));
+    // 「只看有改动的文件」在树上方的工具条里，不在树内部。
+    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+    const kept = await screen.findByRole("treeitem", { name: /kept\.rs/ });
+    expect(within(kept).getByLabelText("修改")).toBeTruthy();
+    const gone = await screen.findByRole("treeitem", { name: /gone\.rs/ });
+    expect(within(gone).getByText("已删除")).toBeTruthy();
+    // 仅改动树由快照派生，切换后不再读取目录。
+    expect(repositoryDirectory).toHaveBeenCalledTimes(1);
+  });
+
   it("切换仓库清空旧树与选择，旧响应不再显示", async () => {
     let finishOld!: (value: RepositoryDirectory) => void;
     repositoryDirectory.mockImplementationOnce(() => new Promise<RepositoryDirectory>((resolve) => (finishOld = resolve)));

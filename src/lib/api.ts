@@ -25,6 +25,7 @@ import type {
   RepositoryDirectory,
   RepositoryFileContent,
   RepositoryPathSearch,
+  RepositoryReviewToken,
   RepositorySearchScope,
   RepoHead,
   RemoteState,
@@ -296,6 +297,22 @@ export const api = {
       directory,
       includeIgnored,
       limit,
+      generation,
+      requestId,
+    }),
+  /**
+   * 单个改动路径的整文件审阅快照：只查这一条路径的状态、索引与内容版本，不做全仓 diff。
+   * token 只在内容或状态变化时改变；state 不是 current 时前端保持未审阅。
+   */
+  repositoryReviewToken: (
+    path: string,
+    relative: string,
+    generation: number,
+    requestId: number,
+  ) =>
+    invoke<RepositoryReviewToken>("repository_review_token", {
+      path,
+      relative,
       generation,
       requestId,
     }),

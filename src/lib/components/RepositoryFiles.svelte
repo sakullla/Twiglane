@@ -58,14 +58,11 @@
     untrack(() => void store.sync(repoPath));
   });
 
-  /* 可见性变化：隐藏只记代次，激活时再按当时代次重验。 */
+  /* 可见性变化：隐藏只在隐藏瞬间记一次代次快照，隐藏期间的变化留到激活时重验。 */
   $effect(() => {
     const visible = active;
     const generation = opened.generation;
-    untrack(() => {
-      if (visible) void store.activate();
-      else store.markGeneration();
-    });
+    untrack(() => store.setVisible(visible, generation));
   });
 
   let fileRows = $derived(store.rows.filter((row) => !row.segment && !isDirectoryKind(row.kind)));

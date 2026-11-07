@@ -287,11 +287,33 @@
       </div>
     {:else if loading}
       <div class="empty compact" role="status"><span class="spinner"></span><p>正在读取目录</p></div>
+    {:else if query}
+      <div class="empty compact">
+        <span class="empty-icon"><Icon name="folder" size={22} /></span>
+        <strong>没有匹配的路径</strong>
+        <p>过滤只作用于已经展开的目录。</p>
+      </div>
+    {:else if includeIgnored}
+      <div class="empty compact">
+        <span class="empty-icon"><Icon name="folder" size={22} /></span>
+        <strong>这个仓库里没有可显示的文件</strong>
+        <p>被忽略的文件已经一起显示，仍然没有可读条目。</p>
+      </div>
     {:else}
       <div class="empty compact">
         <span class="empty-icon"><Icon name="folder" size={22} /></span>
-        <strong>{query ? "没有匹配的路径" : "这个目录是空的"}</strong>
-        {#if query}<p>过滤只作用于已经展开的目录。</p>{/if}
+        <strong>这里没有可显示的文件</strong>
+        <p>可能是空仓库或空目录，也可能只剩被 .gitignore 忽略的文件——它们默认不列出。</p>
+        <button
+          type="button"
+          class="btn btn-secondary btn-sm"
+          disabled={disabled}
+          title={disabled ? BUSY_REASON : "显示被 .gitignore 忽略的文件；不会改动忽略规则"}
+          onclick={() => onIncludeIgnored(true)}
+        >
+          显示忽略文件
+        </button>
+        <p class="file-tree-note">只影响本次浏览，不会改动仓库的忽略规则。</p>
       </div>
     {/if}
   {:else}

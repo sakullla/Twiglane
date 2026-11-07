@@ -211,6 +211,9 @@
     if (target === lastPath) return;
     lastPath = target;
     untrack(() => {
+      // 换文件即取消旧搜索：迟到的匹配属于上一个文件，不能显示、也不能跳行。
+      searchSerial += 1;
+      searching = false;
       resetContent();
     });
   });
@@ -255,6 +258,10 @@
     void jumpTo(value);
   }
 
+  /**
+   * 文件内搜索：发起时记下路径、代次与 serial，结果只有在三者都仍是当前值时才写入。
+   * 换文件就递增 searchSerial 取消旧搜索；否则旧文件的匹配会按错误行号跳到当前文件。
+   */
   async function runSearch(): Promise<void> {
     const query = searchQuery.trim();
     if (!path || !query) {
@@ -264,16 +271,25 @@
     }
     const token = ++searchSerial;
     const repoPath = opened.summary.path;
-    const scope: RepositorySearchScope = { kind: "file", path };
+    const targetPath = path;
+    const targetGeneration = generation;
+    const scope: RepositorySearchScope = { kind: "file", path: targetPath };
     searching = true;
     searchError = null;
     try {
-      const result = await api.repositoryContentSearch(repoPath, query, scope, false, 200, generation, nextId());
-      if (token !== searchSerial || path === null) return;
+      const result = await api.repositoryContentSearch(repoPath, query, scope, false, 200, targetGeneration, nextId());
+      if (token !== searchSerial) return;
+      if (path !== targetPath || opened.summary.path !== repoPath) return;
+      // 代次前进说明文件内容已经换过：旧行号不再可信，撤下结果等下一次搜索。
+      if (targetGeneration !== generation || result.generation < targetGeneration) {
+        searchResult = null;
+        return;
+      }
       if (result.generation > generation) onGeneration(result.generation);
       searchResult = result;
     } catch (failure) {
       if (token !== searchSerial) return;
+      if (path !== targetPath || opened.summary.path !== repoPath) return;
       const normalized = normalizeError(failure);
       searchResult = null;
       searchError = normalized.message || "无法在这个文件里搜索。";

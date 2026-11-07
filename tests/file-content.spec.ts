@@ -145,6 +145,74 @@ describe("代码页", () => {
     await view.rerender(props() as never);
   });
 
+  it("A 文件搜索未返回就切到 B：旧匹配不显示、也不按旧行号跳行", async () => {
+    repositoryFileContent.mockResolvedValue(text());
+    let finishSearch!: (value: RepositoryContentSearch) => void;
+    repositoryContentSearch.mockImplementationOnce(() => new Promise<RepositoryContentSearch>((resolve) => (finishSearch = resolve)));
+    const view = render(FileContent, { props: props() as never });
+    await fireEvent.click(await screen.findByRole("button", { name: "在文件内搜索" }));
+    const input = await screen.findByLabelText("文件内搜索关键词");
+    await fireEvent.input(input, { target: { value: "needle" } });
+    await waitFor(() => expect(repositoryContentSearch).toHaveBeenCalledTimes(1));
+    expect(repositoryContentSearch.mock.calls[0][2]).toEqual({ kind: "file", path: "src/App.ts" });
+
+    repositoryFileContent.mockResolvedValue(text({ path: "src/other.ts", lines: ["const other = true;"] }));
+    await view.rerender(props({ path: "src/other.ts" }) as never);
+    await waitFor(() => expect(screen.getByText("const other = true;")).toBeTruthy());
+    repositoryFileContent.mockClear();
+
+    // 旧文件的匹配这时才回来：既不能写进当前文件，也不能成为跳行目标。
+    finishSearch({
+      generation: 4,
+      query: "needle",
+      scope: "file",
+      scopePath: "src/App.ts",
+      matches: [{ path: "src/App.ts", line: 90, column: 3, text: "  const needle = 1;" }],
+      filesScanned: 1,
+      skipped: [],
+      skippedFiles: 0,
+      truncated: false,
+      textTruncated: false,
+      message: null,
+    } satisfies RepositoryContentSearch);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await fireEvent.click(await screen.findByRole("button", { name: "在文件内搜索" }));
+    expect(screen.queryByText(/处匹配/)).toBeNull();
+    expect(screen.queryByRole("option")).toBeNull();
+    expect(repositoryFileContent.mock.calls.every((call) => call[2] !== 89)).toBe(true);
+  });
+
+  it("代次前进后旧代次的搜索响应不再显示", async () => {
+    repositoryFileContent.mockResolvedValue(text());
+    let finishSearch!: (value: RepositoryContentSearch) => void;
+    repositoryContentSearch.mockImplementationOnce(() => new Promise<RepositoryContentSearch>((resolve) => (finishSearch = resolve)));
+    const view = render(FileContent, { props: props() as never });
+    await fireEvent.click(await screen.findByRole("button", { name: "在文件内搜索" }));
+    const input = await screen.findByLabelText("文件内搜索关键词");
+    await fireEvent.input(input, { target: { value: "needle" } });
+    await waitFor(() => expect(repositoryContentSearch).toHaveBeenCalledTimes(1));
+
+    await view.rerender(props({ generation: 5 }) as never);
+    finishSearch({
+      generation: 4,
+      query: "needle",
+      scope: "file",
+      scopePath: "src/App.ts",
+      matches: [{ path: "src/App.ts", line: 2, column: 3, text: "const needle = 1;" }],
+      filesScanned: 1,
+      skipped: [],
+      skippedFiles: 0,
+      truncated: false,
+      textTruncated: false,
+      message: null,
+    } satisfies RepositoryContentSearch);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.queryByText(/处匹配/)).toBeNull();
+    expect(screen.queryByRole("option")).toBeNull();
+  });
+
   it("未知扩展名按纯文本显示，原文仍然可读", async () => {
     repositoryFileContent.mockResolvedValue(text({ path: "Makefile", lines: ["all:", "\tgo build ./..."] }));
     const { container } = render(FileContent, { props: props({ path: "Makefile" }) as never });

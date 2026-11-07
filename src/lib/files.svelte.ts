@@ -9,7 +9,7 @@
  */
 import { api } from "./api";
 import { normalizeError } from "./errors";
-import type { RepositoryDirectoryEntry, RepositoryEntryKind } from "./types";
+import type { RepositoryDirectory, RepositoryDirectoryEntry, RepositoryEntryKind } from "./types";
 
 /** 目录行高（像素）：与 components.css 的 .file-tree-row 一致，虚拟化按它算窗口。 */
 export const FILE_ROW_HEIGHT = 26;
@@ -224,6 +224,13 @@ export function createFilesStore(deps: FilesStoreDeps) {
   let loaded = $state(false);
   /** 文件内容的重新读取凭据：重新激活、代次变化与手动刷新时递增。 */
   let revision = $state(0);
+  /** 最近一次按它验证过整棵树的代次；与当前代次不同就说明树可能已经过期。 */
+  let verifiedGeneration = deps.generation();
+  /**
+   * 非 null 表示视图正隐藏，值是隐藏那一刻的代次。
+   * 隐藏期间的代次变化只记在仓库状态里，绝不在这里「追上」——否则激活时永远看不出差异。
+   */
+  let hiddenAt: number | null = null;
 
   const serials = new Map<string, number>();
 
@@ -249,9 +256,12 @@ export function createFilesStore(deps: FilesStoreDeps) {
     return null;
   }
 
-  /** 用新读到的子项更新节点：同路径的旧节点保留展开状态与已读子项。 */
+  /**
+   * 用新读到的子项更新节点：同路径的旧节点保留展开状态与已读子项。
+   * 根目录那一层用当前 nodes 作已有项，否则重读根目录会把整棵树的展开与缓存丢掉。
+   */
   function applyEntries(node: FileNode | null, entries: RepositoryDirectoryEntry[]): void {
-    const existing = node?.children ?? [];
+    const existing = node ? (node.children ?? []) : nodes;
     const byPath = new Map(existing.map((child) => [child.path, child]));
     const children = entries.map((entry) => {
       const previous = byPath.get(entry.path);
@@ -266,57 +276,71 @@ export function createFilesStore(deps: FilesStoreDeps) {
     else nodes = children;
   }
 
-  async function loadDirectory(path: string, node: FileNode | null, attempt = 0): Promise<void> {
+  /**
+   * 读取一个目录的直接子项。返回值表示这次读取是否按当前代次走到了终点：
+   * 隐藏视图、切仓库或新请求取代时返回 false，交给 activate / 刷新再重验。
+   *
+   * 代次重读在同一个调用里循环，不另起一次调用：这样 loading 始终由本次调用持有，
+   * 任何返回路径（含隐藏时短路）都会清理目标路径与节点的 loading，不会锁死视图。
+   */
+  async function loadDirectory(path: string, node: FileNode | null, retries = 1): Promise<boolean> {
     const current = repo;
-    if (!current || !deps.active()) return;
+    if (!current) return false;
     const token = (serials.get(path) ?? 0) + 1;
     serials.set(path, token);
-    if (node) {
-      node.loading = true;
-      node.failure = null;
-    } else {
-      loading = true;
-      failure = null;
+    const owns = () => repo === current && serials.get(path) === token;
+    const busy = (value: boolean) => {
+      if (node) node.loading = value;
+      else loading = value;
+    };
+    if (!deps.active()) {
+      // 隐藏视图不读取：只释放可能残留的 loading，代次变化留给 activate 重验。
+      if (owns()) busy(false);
+      return false;
     }
+    busy(true);
+    if (node) node.failure = null;
+    else failure = null;
     try {
-      const directory = await api.repositoryDirectory(current, path, includeIgnored, deps.generation(), deps.nextId());
-      if (repo !== current || serials.get(path) !== token) return;
-      if (directory.generation < deps.generation() && attempt === 0) {
-        // 树比仓库旧：按当前代次重读一次，读到的仍是旧代次就如实标出来。
-        void loadDirectory(path, node, attempt + 1);
-        return;
-      }
-      if (directory.generation > deps.generation()) deps.onGeneration(directory.generation);
-      applyEntries(node, directory.entries);
-      if (directory.errors.length > 0) {
-        const message = directory.errors.join("；");
-        if (node) node.failure = message;
-        else failure = message;
-      }
-      loaded = true;
-    } catch (error) {
-      if (repo !== current || serials.get(path) !== token) return;
-      const normalized = normalizeError(error);
-      if (normalized.code === "stale" && normalized.generation !== undefined) {
-        deps.onGeneration(normalized.generation);
-        if (attempt === 0) {
-          void loadDirectory(path, node, attempt + 1);
-          return;
+      for (let attempt = 0; attempt <= retries; attempt += 1) {
+        if (!owns() || !deps.active()) return false;
+        let directory: RepositoryDirectory;
+        try {
+          directory = await api.repositoryDirectory(current, path, includeIgnored, deps.generation(), deps.nextId());
+        } catch (error) {
+          if (!owns()) return false;
+          const normalized = normalizeError(error);
+          const stale = normalized.code === "stale" && normalized.generation !== undefined;
+          if (stale) deps.onGeneration(normalized.generation as number);
+          // 树比仓库旧：按当前代次再读一次；第二次仍是 stale 就如实报错。
+          if (stale && attempt < retries) continue;
+          const message = normalized.message || "无法读取这个目录。";
+          if (node) {
+            node.children = node.children ?? [];
+            node.failure = message;
+          } else {
+            nodes = [];
+            failure = message;
+          }
+          return true;
         }
+        if (!owns()) return false;
+        // 隐藏期间返回的结果不算数：不把旧结构写进当前树，等 activate 重验。
+        if (!deps.active()) return false;
+        if (directory.generation > deps.generation()) deps.onGeneration(directory.generation);
+        if (directory.generation < deps.generation() && attempt < retries) continue;
+        applyEntries(node, directory.entries);
+        if (directory.errors.length > 0) {
+          const message = directory.errors.join("；");
+          if (node) node.failure = message;
+          else failure = message;
+        }
+        loaded = true;
+        return true;
       }
-      const message = normalized.message || "无法读取这个目录。";
-      if (node) {
-        node.children = node.children ?? [];
-        node.failure = message;
-      } else {
-        nodes = [];
-        failure = message;
-      }
+      return false;
     } finally {
-      if (serials.get(path) === token) {
-        if (node) node.loading = false;
-        else loading = false;
-      }
+      if (owns()) busy(false);
     }
   }
 
@@ -366,10 +390,13 @@ export function createFilesStore(deps: FilesStoreDeps) {
     void reload();
   }
 
-  /** 手动或代次变化后的重验：只重读已经读过的目录，保持展开与选择。 */
-  async function revalidate(): Promise<void> {
+  /** 手动或代次变化后的重验：重读根目录和所有已经读过的目录，保持展开与选择。 */
+  async function revalidate(): Promise<boolean> {
     revision += 1;
-    if (!repo || !deps.active()) return;
+    if (!repo || !deps.active()) return false;
+    // 根目录本身也是"已加载的目录"：顶层的新增与删除只能靠它发现。
+    if (!(await loadDirectory("", null))) return false;
+    if (!deps.active()) return false;
     const targets: FileNode[] = [];
     const walk = (list: FileNode[]) => {
       for (const node of list) {
@@ -378,11 +405,10 @@ export function createFilesStore(deps: FilesStoreDeps) {
       }
     };
     walk(nodes);
-    if (nodes.length === 0 || targets.length === 0) {
-      await loadDirectory("", null);
-      return;
-    }
-    await Promise.all(targets.map((node) => loadDirectory(node.path, node)));
+    const results = await Promise.all(targets.map((node) => loadDirectory(node.path, node)));
+    if (!results.every(Boolean) || !deps.active()) return false;
+    verifiedGeneration = deps.generation();
+    return true;
   }
 
   async function reload(): Promise<void> {
@@ -396,30 +422,44 @@ export function createFilesStore(deps: FilesStoreDeps) {
 
   /** 仓库身份变化：清空一切再按当前仓库读根目录；隐藏视图不发起读取。 */
   async function sync(next: string | null): Promise<void> {
-    if (next !== repo) reset(next);
+    if (next !== repo) {
+      reset(next);
+      verifiedGeneration = deps.generation();
+    }
     if (!next || !deps.active()) return;
-    if (!loaded && !loading) await loadDirectory("", null);
+    if (!loaded && !loading) {
+      const done = await loadDirectory("", null);
+      if (done && deps.active()) verifiedGeneration = deps.generation();
+    }
   }
 
-  let lastGeneration = deps.generation();
-
-  /** 视图重新激活：代次变了才重验，隐藏期间不读取。 */
-  async function activate(): Promise<void> {
-    if (!repo || loading) return;
-    if (!loaded) {
-      await loadDirectory("", null);
-      lastGeneration = deps.generation();
+  /**
+   * 视图可见性变化。可见 → 隐藏时只记一次快照；隐藏期间的每次变化都留到激活时重验。
+   */
+  function setVisible(next: boolean, generation = deps.generation()): void {
+    if (!next) {
+      if (hiddenAt === null) hiddenAt = generation;
       return;
     }
-    if (deps.generation() !== lastGeneration) {
-      lastGeneration = deps.generation();
-      await revalidate();
-    }
-    // 同一代次重新激活不重读：滚动位置与已加载内容都属于当前会话，不该被一次切视图冲掉。
+    hiddenAt = null;
+    void activate();
   }
 
-  function markGeneration(): void {
-    lastGeneration = deps.generation();
+  /**
+   * 视图重新激活：按当前代次重验已加载的目录与当前文件；隐藏期间不读取。
+   * 同一代次重新激活不重读：滚动位置与已加载内容属于当前会话，不该被一次切视图冲掉。
+   */
+  async function activate(): Promise<void> {
+    if (!repo) return;
+    if (!loaded) {
+      // 根目录已经在读：那次读取自己会按当前代次重读，这里不重复发起。
+      if (loading) return;
+      const done = await loadDirectory("", null);
+      if (done && deps.active()) verifiedGeneration = deps.generation();
+      return;
+    }
+    if (deps.generation() === verifiedGeneration) return;
+    await revalidate();
   }
 
   return {
@@ -458,7 +498,7 @@ export function createFilesStore(deps: FilesStoreDeps) {
     },
     sync,
     activate,
-    markGeneration,
+    setVisible,
     revalidate,
     toggle,
     expand,

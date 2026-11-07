@@ -187,6 +187,21 @@ describe("目录树交互", () => {
     expect(FILE_ROW_HEIGHT).toBeGreaterThan(0);
   });
 
+  it("空状态区分空仓库、过滤无匹配与可能有被忽略的文件", async () => {
+    const props = { ...baseProps(), rows: [] };
+    const view = render(FileTree, { props: props as never });
+    expect(screen.getByText("这里没有可显示的文件")).toBeTruthy();
+    expect(screen.getByText(/被 \.gitignore 忽略的文件/)).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "显示忽略文件" }));
+    expect(props.onIncludeIgnored).toHaveBeenCalledWith(true);
+
+    await view.rerender({ ...props, includeIgnored: true } as never);
+    expect(screen.getByText("这个仓库里没有可显示的文件")).toBeTruthy();
+
+    await view.rerender({ ...props, query: "abc" } as never);
+    expect(screen.getByText("没有匹配的路径")).toBeTruthy();
+  });
+
   it("空目录与读取失败分别给出行内状态", () => {
     const empty = node("docs", "directory", []);
     empty.expanded = true;
@@ -265,5 +280,74 @@ describe("文件视图容器", () => {
     const view = render(RepositoryFiles, { props: viewProps(true, { generation: 6 }) as never });
     await waitFor(() => expect(screen.getAllByText("无法读取这个目录。").length).toBeGreaterThan(0));
     view.unmount();
+  });
+
+  it("隐藏期间代次前进：重新激活重验已展开目录，删掉的项消失、新增的项出现", async () => {
+    const entry = (path: string, kind: "file" | "directory" = "file") => ({
+      name: path.split("/").pop() ?? path,
+      path,
+      kind,
+      ignored: false,
+      size: kind === "file" ? 4 : null,
+      error: null,
+    });
+    repositoryDirectory.mockImplementation((_repo: string, relative: string, _ignored: boolean, generation: number) => {
+      if (relative === "") {
+        return Promise.resolve(dir("", [entry("src", "directory"), entry("README.md")], generation));
+      }
+      if (relative === "src") {
+        return Promise.resolve(
+          dir("src", generation >= 7 ? [entry("src/app.ts"), entry("src/added.ts")] : [entry("src/app.ts"), entry("src/old.ts")], generation),
+        );
+      }
+      return Promise.resolve(dir(relative, [], generation));
+    });
+
+    const view = render(RepositoryFiles, { props: viewProps(true, { generation: 4 }) as never });
+    const treeEl = await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(await within(treeEl).findByRole("button", { name: "展开 src" }));
+    await waitFor(() => expect(screen.getByText("old.ts")).toBeTruthy());
+
+    // 隐藏时只记隐藏瞬间的代次；隐藏期间代次前进必须留到激活时重验，不能被吸收。
+    await view.rerender(viewProps(false, { generation: 4 }) as never);
+    await view.rerender(viewProps(false, { generation: 7 }) as never);
+    repositoryDirectory.mockClear();
+
+    await view.rerender(viewProps(true, { generation: 7 }) as never);
+    await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
+    const asked = repositoryDirectory.mock.calls.map((call) => call[1]);
+    expect(asked).toContain("");
+    expect(asked).toContain("src");
+    expect(repositoryDirectory.mock.calls.every((call) => call[3] === 7)).toBe(true);
+    await waitFor(() => expect(screen.queryByText("old.ts")).toBeNull());
+    expect(screen.getByText("added.ts")).toBeTruthy();
+    expect(screen.getByText("app.ts")).toBeTruthy();
+  });
+
+  it("隐藏期间到达的旧代次根目录响应不写入，回到视图后仍能读取", async () => {
+    let finishRoot!: (value: RepositoryDirectory) => void;
+    repositoryDirectory.mockImplementationOnce(() => new Promise<RepositoryDirectory>((resolve) => (finishRoot = resolve)));
+    const view = render(RepositoryFiles, { props: viewProps(true, { generation: 4 }) as never });
+    await waitFor(() => expect(repositoryDirectory).toHaveBeenCalledTimes(1));
+
+    // 根目录读取还在飞行中切走，隐藏期间代次前进。
+    await view.rerender(viewProps(false, { generation: 4 }) as never);
+    await view.rerender(viewProps(false, { generation: 7 }) as never);
+
+    repositoryDirectory.mockResolvedValue(
+      dir("", [{ name: "later.ts", path: "later.ts", kind: "file", ignored: false, size: 2, error: null }], 7),
+    );
+    // 旧代次响应这时才回来：隐藏视图不接纳，也不能把 loading 留在飞行状态。
+    finishRoot(dir("", [{ name: "stale.ts", path: "stale.ts", kind: "file", ignored: false, size: 1, error: null }], 4));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText("stale.ts")).toBeNull();
+
+    await view.rerender(viewProps(true, { generation: 7 }) as never);
+    await waitFor(() => expect(screen.getByText("later.ts")).toBeTruthy());
+    expect(screen.queryByText("stale.ts")).toBeNull();
+    expect(repositoryDirectory).toHaveBeenLastCalledWith(repoPath, "", false, 7, expect.any(Number));
+    // 刷新入口没有被残留的 loading 锁死。
+    const refresh = screen.getByRole("button", { name: "重新读取目录" }) as HTMLButtonElement;
+    expect(refresh.disabled).toBe(false);
   });
 });

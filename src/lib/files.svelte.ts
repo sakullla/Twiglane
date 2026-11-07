@@ -645,12 +645,24 @@ export function createFilesStore(deps: FilesStoreDeps) {
     if (changed) changedCollapsed = next;
   }
 
+  /**
+   * 让 path 这一行真的出现在树里，定位与后退/前进共用这一份规则：
+   * 目标在仅改动树里就地解除必要祖先的折叠（不读目录），否则按完整树逐级读取。
+   * 目标不在改动树里时按 locate 的既有语义退出仅改动——改动树里根本没有这一行。
+   */
+  async function revealTarget(path: string): Promise<boolean> {
+    const staysChanged = changedOnly && changedTreeContains(path);
+    if (changedOnly && !staysChanged) changedOnly = false;
+    if (staysChanged) {
+      revealChangedBranch(path);
+      return true;
+    }
+    return ensureChain(path);
+  }
+
   /** 树内定位：展开祖先、选中并（可选）记下要跳转的行。不改动工作区，也不读文件内容。 */
   async function locate(path: string, line: number | null = null): Promise<boolean> {
     if (!repo || !deps.active()) return false;
-    // 仅改动树里有这个路径就留在改动模式；只有目标确实不在改动里时才切回完整树。
-    const staysChanged = changedOnly && changedTreeContains(path);
-    if (changedOnly && !staysChanged) changedOnly = false;
     if (query) {
       query = "";
       filterSerial += 1;
@@ -659,10 +671,8 @@ export function createFilesStore(deps: FilesStoreDeps) {
       filterTruncated = false;
       filterBusy = false;
     }
-    // 改动树不读目录：直接解除目标祖先的折叠，行立即出现；完整树才需要逐级读取。
-    if (staysChanged) revealChangedBranch(path);
-    const ok = staysChanged ? true : await ensureChain(path);
-    if (!ok) return false;
+    // 与后退/前进共用同一份揭示规则：改动树就地解除折叠，完整树逐级读取。
+    if (!(await revealTarget(path))) return false;
     const previousDirectory = currentDirectory();
     selectedPath = path;
     remember(path, line);
@@ -908,13 +918,17 @@ export function createFilesStore(deps: FilesStoreDeps) {
     }
   }
 
-  /** 后退 / 前进：回到本次会话打开过的路径与行；不重新搜索、不重读其它视图。 */
+  /**
+   * 后退 / 前进：回到本次会话打开过的路径与行；不重新搜索、不重读其它视图。
+   * 树里的揭示规则与定位完全一致：仅改动模式就地解除祖先折叠，行立即出现并选中，
+   * 这样回到折叠分支里的文件时树不会停在折叠状态、右侧也不会只剩下空选择。
+   */
   async function go(delta: number): Promise<boolean> {
     const visit = visits[cursor + delta];
     if (!visit || !repo || !deps.active()) return false;
     cursor += delta;
     const previousDirectory = currentDirectory();
-    await ensureChain(visit.path);
+    await revealTarget(visit.path);
     selectedPath = visit.path;
     retargetDirectoryScope(previousDirectory);
     if (visit.line !== null && visit.line > 0) {
@@ -1039,6 +1053,22 @@ export function createFilesStore(deps: FilesStoreDeps) {
   }
 
   /**
+   * 选中路径的类型与真实路径：先看当前可见行，再看已读到的树节点，最后看改动集合。
+   * 解析不要求这一行此刻出现在可见行里——折叠与过滤只改变树的显示方式，
+   * 不该让正在阅读的文件失去类型，否则右侧内容会被一次折叠清空。
+   */
+  function resolvePath(path: string): { path: string; kind: RepositoryEntryKind; segment: boolean } | null {
+    const row = visibleRows().find((item) => item.path === path);
+    if (row) return { path: row.path, kind: row.kind, segment: row.segment };
+    const node = findNode(nodes, path);
+    if (node) return { path: node.path, kind: node.kind, segment: false };
+    // 仅改动树的节点每次重建，折叠后这一行可能既不在可见行里也不在 nodes 里：
+    // 改动集合本身仍然证明它是工作区里的一个文件。
+    const change = (deps.files?.() ?? []).find((file) => file.path === path);
+    return change ? { path: change.path, kind: "file", segment: false } : null;
+  }
+
+  /**
    * 树过滤的全仓补齐：只补当前树里还没有的路径，最多显示 FILTER_EXTRA_LIMIT 条。
    * 仅改动模式不补全仓——那会往改动树里塞进非改动文件。
    */
@@ -1097,6 +1127,8 @@ export function createFilesStore(deps: FilesStoreDeps) {
     get selectedNode() {
       return selectedPath ? findNode(nodes, selectedPath) : null;
     },
+    /** 选中路径的类型解析：折叠或过滤把它藏起来也仍然能解析出真实类型。 */
+    resolve: resolvePath,
     get changedOnly() {
       return changedOnly;
     },

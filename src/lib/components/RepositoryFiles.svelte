@@ -136,15 +136,17 @@
 
   let filesTree = $state<{ revealRow?: (path: string) => void } | null>(null);
 
-  let selectedRow = $derived(store.selectedPath ? store.rows.find((row) => row.path === store.selectedPath) ?? null : null);
+  /* 选中路径的类型按路径解析，不要求这一行仍在可见行里：折叠父目录或过滤只改变树的显示，
+     正在阅读的文件不该因此被清空。 */
+  let selectedEntry = $derived(store.selectedPath ? store.resolve(store.selectedPath) : null);
   /* 删除的文件不读取当前内容：只提供改动与历史（旧版本）。 */
   let missingPath = $derived(
     store.selectedPath && deletedPaths.has(store.selectedPath) ? store.selectedPath : null,
   );
   /* 目录与嵌套仓库只选中，不打开内容；符号链接与特殊文件仍让内容区显示真实状态。 */
   let openPath = $derived(
-    selectedRow && !isDirectoryKind(selectedRow.kind) && selectedRow.kind !== "nestedRepository" && !selectedRow.segment && !missingPath
-      ? selectedRow.path
+    selectedEntry && !isDirectoryKind(selectedEntry.kind) && selectedEntry.kind !== "nestedRepository" && !selectedEntry.segment && !missingPath
+      ? selectedEntry.path
       : null,
   );
   let lineTarget = $derived(store.lineTarget);

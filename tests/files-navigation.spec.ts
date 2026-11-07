@@ -181,6 +181,40 @@ describe("改动与文件的双向导航", () => {
     await view.rerender(props as never);
   });
 
+  it("折叠当前选中文件的父目录不清空预览，重新展开后照常选中", async () => {
+    repositoryDirectory.mockImplementation((_repo: string, path: string) =>
+      Promise.resolve(path === "" ? dir("", [entry("src", "directory")]) : dir(path, [entry(`${path}/other.ts`), entry(`${path}/util.ts`)])),
+    );
+    const props = viewProps();
+    const view = render(RepositoryFiles, { props: props as never });
+    const tree = await screen.findByRole("tree", { name: "仓库文件" });
+    // 完整树按需读取：先展开 src 才能看到它的文件。
+    await fireEvent.click(await within(tree).findByRole("button", { name: "展开 src" }));
+    await fireEvent.click(await within(tree).findByRole("treeitem", { name: /util\.ts/ }));
+    await waitFor(() =>
+      expect(repositoryFileContent).toHaveBeenLastCalledWith(repoPath, "src/util.ts", 0, undefined, 4, expect.any(Number)),
+    );
+    expect(await screen.findByText("line-1")).toBeTruthy();
+    repositoryFileContent.mockClear();
+
+    // 折叠父目录只是把这一行从树里收起来：右侧仍在读同一份内容，不会被清空或改读别的文件。
+    await fireEvent.click(screen.getByRole("button", { name: "折叠 src" }));
+    const collapsed = screen.getByRole("tree", { name: "仓库文件" });
+    expect(within(collapsed).queryByRole("treeitem", { name: /util\.ts/ })).toBeNull();
+    expect(screen.getByText("line-1")).toBeTruthy();
+    expect(repositoryFileContent).not.toHaveBeenCalled();
+
+    // 重新展开：选中仍在同一行上，之后再点别的文件照常切换。
+    await fireEvent.click(screen.getByRole("button", { name: "展开 src" }));
+    const expanded = await screen.findByRole("tree", { name: "仓库文件" });
+    expect(within(expanded).getByRole("treeitem", { name: /util\.ts/ }).getAttribute("aria-selected")).toBe("true");
+    await fireEvent.click(within(expanded).getByRole("treeitem", { name: /other\.ts/ }));
+    await waitFor(() =>
+      expect(repositoryFileContent).toHaveBeenLastCalledWith(repoPath, "src/other.ts", 0, undefined, 4, expect.any(Number)),
+    );
+    await view.rerender(props as never);
+  });
+
   it("同一代次隐藏再显示：选择、已读内容与滚动位置都保留，不重复读取", async () => {
     repositoryDirectory.mockResolvedValue(dir("", [entry("src/a.ts"), entry("src/b.ts")]));
     const props = viewProps();
@@ -412,6 +446,53 @@ describe("仅改动树的定位与过滤", () => {
     await waitFor(() =>
       expect(repositoryFileContent).toHaveBeenLastCalledWith(repoPath, "src/lib/util.ts", expect.any(Number), undefined, 4, expect.any(Number)),
     );
+  });
+
+  it("仅改动模式的后退与前进到折叠分支里的文件：树解除折叠并选中，内容照旧读取", async () => {
+    repositoryDirectory.mockResolvedValue(dir("", []));
+    const onNav = vi.fn();
+    render(RepositoryFiles, { props: viewProps({ opened: opened(changes), onNav }) as never });
+    await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+
+    // 打开折叠分支里的文件，形成一条打开历史。
+    const opened1 = await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(await within(opened1).findByRole("treeitem", { name: /util\.ts/ }));
+    await waitFor(() =>
+      expect(repositoryFileContent).toHaveBeenLastCalledWith(repoPath, "src/lib/util.ts", 0, undefined, 4, expect.any(Number)),
+    );
+
+    // 折叠 src：这一支从树里消失，但仍在打开历史里。
+    await fireEvent.click(screen.getByRole("button", { name: "折叠 src" }));
+    expect(within(screen.getByRole("tree", { name: "仓库文件" })).queryByRole("treeitem", { name: /util\.ts/ })).toBeNull();
+    await fireEvent.click(within(screen.getByRole("tree", { name: "仓库文件" })).getByRole("treeitem", { name: /README\.md/ }));
+    await waitFor(() =>
+      expect(repositoryFileContent).toHaveBeenLastCalledWith(repoPath, "README.md", 0, undefined, 4, expect.any(Number)),
+    );
+
+    const nav = () => onNav.mock.calls.at(-1)?.[0];
+    // 后退到折叠分支里的文件：树必须真的展开这一支、选中目标，右侧继续读这个文件。
+    nav().history.onBack();
+    await waitFor(() =>
+      expect(repositoryFileContent).toHaveBeenLastCalledWith(repoPath, "src/lib/util.ts", 0, undefined, 4, expect.any(Number)),
+    );
+    const backTree = screen.getByRole("tree", { name: "仓库文件" }) as HTMLElement;
+    const target = await within(backTree).findByRole("treeitem", { name: /util\.ts/ });
+    expect(target.getAttribute("aria-selected")).toBe("true");
+    expect(within(backTree).getByRole("button", { name: "折叠 src" })).toBeTruthy();
+    expect(backTree.scrollTop).toBe(Number.parseFloat(target.style.top || "0"));
+    // 目标在改动树里：后退不能顺带关掉仅改动模式。
+    expect(screen.getByRole("button", { name: "只看有改动的文件" }).getAttribute("aria-pressed")).toBe("true");
+
+    // 前进回改动树根部的文件：选中随之移动。
+    nav().history.onForward();
+    await waitFor(() =>
+      expect(repositoryFileContent).toHaveBeenLastCalledWith(repoPath, "README.md", 0, undefined, 4, expect.any(Number)),
+    );
+    const forwardTree = screen.getByRole("tree", { name: "仓库文件" });
+    expect(within(forwardTree).getByRole("treeitem", { name: /README\.md/ }).getAttribute("aria-selected")).toBe("true");
+    // 后退时解除的折叠不会被前进重新折叠：揭示只影响显示，不写回折叠记录。
+    expect(within(forwardTree).getByRole("treeitem", { name: /util\.ts/ })).toBeTruthy();
   });
 
   it("不在改动树里的路径仍然切回完整树", async () => {

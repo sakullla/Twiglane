@@ -175,7 +175,9 @@ export function highlightLines(
     chars += next;
     count++;
   }
-  const input = count < lines.length ? lines.slice(0, count) : lines;
+  // 始终拷成普通数组：调用方可能传来 Svelte 的响应式代理（$state 数组），
+  // 代理不能被结构化克隆，postMessage 会抛 DataCloneError。只拷贝字符串引用，代价很小。
+  const input = Array.prototype.slice.call(lines, 0, count) as string[];
   if (input.length === 0) {
     onDone(true);
     return () => {};
@@ -216,8 +218,16 @@ export function highlightLines(
     byId.set(id, pending);
     queued.set(id, () => {
       const target = getWorker();
-      if (target) target.postMessage({ id, lang, lines: input });
-      else void runInThread(id, lang, input, pending);
+      if (target) {
+        try {
+          target.postMessage({ id, lang, lines: input });
+          return;
+        } catch {
+          // 发不出去时改在主线程分词：不能让这个请求一直占着并发名额，
+          // 否则后面所有文件的高亮都会排队等下去。
+        }
+      }
+      void runInThread(id, lang, input, pending);
     });
     pump();
   }

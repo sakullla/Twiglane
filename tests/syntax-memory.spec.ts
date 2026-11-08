@@ -73,6 +73,31 @@ describe("高亮缓存内存与后台线程", () => {
     expect(done).toHaveBeenCalledOnce();
   });
 
+  it("响应式代理数组先拷成普通数组再发给 Worker，代理不能被结构化克隆", () => {
+    // 文件视图把 $state 数组直接交给高亮：原样 postMessage 会抛 DataCloneError。
+    const lines = new Proxy(["fn main() {}", "let x = 1;"], {});
+    highlightLines("rust", lines, () => {});
+    const sent = HighlightWorker.instances[0].postMessage.mock.calls[0][0].lines;
+    expect(sent).not.toBe(lines);
+    expect(() => structuredClone(sent)).not.toThrow();
+    expect(sent).toEqual(["fn main() {}", "let x = 1;"]);
+  });
+
+  it("发送失败时改在主线程分词，不占着并发名额堵住后续文件", async () => {
+    vi.useRealTimers();
+    const failing = [vi.fn(), vi.fn()];
+    highlightLines("typescript", ["const a = 1;"], () => {}, failing[0]);
+    const worker = HighlightWorker.instances[0];
+    worker.postMessage.mockImplementation(() => {
+      throw new DOMException("could not be cloned", "DataCloneError");
+    });
+    highlightLines("typescript", ["const b = 2;"], () => {}, failing[1]);
+    await vi.waitFor(() => expect(failing[1]).toHaveBeenCalledWith(true));
+    worker.postMessage.mockReset();
+    highlightLines("typescript", ["const c = 3;"], () => {});
+    expect(worker.postMessage, "名额已释放，后续请求照常发送").toHaveBeenCalledOnce();
+  });
+
   it("快速切换只复制两个在途文档，取消的排队文档不发送，等待 Worker 确认才复用槽位", () => {
     const cancels = Array.from({ length: 50 }, (_, i) => highlightLines("typescript", [`doc-${i}`], vi.fn()));
     const worker = HighlightWorker.instances[0];

@@ -1,5 +1,8 @@
 import type { DiffLine, DiffResponse } from "./types";
 
+/** 「查看完整文件」请求的上下文行数：足够覆盖整份文件，与后端 FULL_FILE_CONTEXT 一致。 */
+export const FULL_FILE_CONTEXT = 1_000_000;
+
 /** 刷新仍读取 Git；补丁与分页未变时复用行数组，避免重复排版和语法分词。 */
 export function reuseDiffContent(previous: DiffResponse | null | undefined, next: DiffResponse): DiffResponse {
   if (

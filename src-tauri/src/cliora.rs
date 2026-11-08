@@ -403,6 +403,44 @@ pub fn open_in_cliora<R: tauri::Runtime>(
         .map_err(|error| AppError::new("cliora_unavailable", format!("无法唤起 cliora：{error}")))
 }
 
+/// 后台回送：只把回执交给 cliora，不让它抢走 Twiglane 的前台。
+/// macOS 用 `open -g`（参数数组，不经过 shell）在后台打开链接；其他平台照常打开，
+/// 随后再把 Twiglane 窗口拉回前台，抵消 cliora 收到链接时的自我聚焦。
+pub fn notify_cliora<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    url: &str,
+) -> Result<(), AppError> {
+    validate_inbound(url)?;
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        let status = std::process::Command::new("/usr/bin/open")
+            .arg("-g")
+            .arg(url)
+            .status()
+            .map_err(|error| AppError::new("cliora_unavailable", format!("无法唤起 cliora：{error}")))?;
+        if !status.success() {
+            return Err(AppError::new(
+                "cliora_unavailable",
+                "无法唤起 cliora：系统没有找到处理 cliora 链接的应用。",
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        open_in_cliora(app, url)?;
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            for delay in [250u64, 750] {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                crate::bring_to_front(&handle);
+            }
+        });
+        Ok(())
+    }
+}
+
 fn parse_inbound_query(query: &str) -> Result<Vec<(String, String)>, AppError> {
     let mut params: Vec<(String, String)> = Vec::new();
     for pair in query.split('&') {

@@ -1025,6 +1025,68 @@ describe("差异与提交", () => {
     expect(onResolve).toHaveBeenCalledTimes(1);
   });
 
+  it("Git 判成二进制的文件可以按文本查看，按文本显示时说明只读并可恢复", async () => {
+    const onViewAsText = vi.fn();
+    const binary: DiffResponse = { ...diff, binary: true, lines: [], hunks: [], totalLines: 0, newSize: 19_938 };
+    const view = render(DiffView, {
+      props: {
+        selection,
+        diff: binary,
+        error: null,
+        loading: false,
+        disabled: false,
+        onStageHunk: () => {},
+        onLoadMore: () => {},
+        onViewAsText,
+      },
+    });
+    expect(screen.getByText("二进制文件有变动")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "按文本查看" }));
+    expect(onViewAsText).toHaveBeenCalledWith(true);
+    await view.rerender({
+      selection,
+      diff,
+      error: null,
+      loading: false,
+      disabled: false,
+      onStageHunk: () => {},
+      onLoadMore: () => {},
+      onViewAsText,
+      asText: true,
+    });
+    expect(document.querySelector("[data-diff-as-text]")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "恢复" }));
+    expect(onViewAsText).toHaveBeenLastCalledWith(false);
+  });
+
+  it("已有差异上的后台重读很快结束时，工具条不闪加载环", async () => {
+    vi.useFakeTimers();
+    try {
+      const props = (loading: boolean) => ({
+        selection,
+        diff,
+        error: null,
+        loading,
+        disabled: false,
+        onStageHunk: () => {},
+        onLoadMore: () => {},
+      });
+      const view = render(DiffView, { props: props(false) });
+      const spinner = () => document.querySelector(".diff-toolbar .spinner");
+      await view.rerender(props(true));
+      await vi.advanceTimersByTimeAsync(300);
+      expect(spinner(), "快速重读不显示").toBeNull();
+      await view.rerender(props(false));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(spinner()).toBeNull();
+      await view.rerender(props(true));
+      await vi.advanceTimersByTimeAsync(800);
+      expect(spinner(), "明显变慢时才显示").toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("上一处、下一处把视口顶对齐到改动块头，走到头时焦点交给另一侧", async () => {
     render(DiffView, {
       props: {

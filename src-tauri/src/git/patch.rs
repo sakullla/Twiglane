@@ -121,6 +121,17 @@ pub fn parse_diff(bytes: &[u8], truncated_input: bool) -> Result<ParsedDiff, App
     })
 }
 
+/// 「按文本查看」：把 `git diff --text` 的输出当作只读文本解析。NUL 显示成 ␀，
+/// 无法解码的字节按 UTF-8 替换字符显示。显示文本已经不是原始字节，所有代码块都不可暂存。
+pub fn parse_diff_as_text(bytes: &[u8], truncated_input: bool) -> Result<ParsedDiff, AppError> {
+    let text = String::from_utf8_lossy(bytes).replace('\0', "\u{2400}");
+    let mut parsed = parse_diff(text.as_bytes(), truncated_input)?;
+    for hunk in &mut parsed.hunks {
+        hunk.complete = false;
+    }
+    Ok(parsed)
+}
+
 pub fn build_patch(parsed: &ParsedDiff, indexes: &[u32]) -> Result<Vec<u8>, AppError> {
     if parsed.binary || parsed.undecodable {
         return Err(AppError::new(

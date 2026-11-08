@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, tick, untrack } from "svelte";
   import { api } from "../api";
+  import { FULL_FILE_CONTEXT } from "../diff";
   import { normalizeError } from "../errors";
   import { commitFileLabel, commitLineStat } from "../history";
   import type { CommitDetail, DiffHunk, DiffResponse, FileSelection, OpenedRepository } from "../types";
@@ -24,9 +25,16 @@
     onFailure: (error: unknown) => void;
     /** 不提供时不显示文件历史入口（例如在合并预览里）。 */
     onFileHistory?: (path: string) => void;
+    /** 每个文件块是否展开为完整文件；不传 onFullFile 时不显示切换。 */
+    fullFile?: boolean;
+    onFullFile?: (next: boolean) => void;
   }
 
-  let { opened, active = true, detail, parent, focusPath = null, onFocusPath, disabled, nextId, onGeneration, onFailure, onFileHistory }: Props = $props();
+  let { opened, active = true, detail, parent, focusPath = null, onFocusPath, disabled, nextId, onGeneration, onFailure, onFileHistory, fullFile = false, onFullFile }: Props = $props();
+  /** 完整文件时追加上下文参数；只看改动时保持后端默认的 3 行。 */
+  function contextArgs(): [] | [number] {
+    return fullFile ? [FULL_FILE_CONTEXT] : [];
+  }
   const MAX_CONCURRENT = 2;
   const HEAD_HEIGHT = 42;
   const ESTIMATED_DIFF = 160;
@@ -76,7 +84,7 @@
       fileLoading = {};
       return;
     }
-    const key = `${opened.summary.path}:${detail.commit.oid}:${parent ?? ""}:${opened.generation}`;
+    const key = `${opened.summary.path}:${detail.commit.oid}:${parent ?? ""}:${opened.generation}:${fullFile ? "full" : "hunks"}`;
     if (key === loadedKey) return;
     round++;
     loadedKey = key;
@@ -166,7 +174,7 @@
     fileLoading[path] = true;
     fileErrors[path] = null;
     try {
-      const result = await api.commitFileDiff(opened.summary.path, detail.commit.oid, parent, path, generation, nextId(), 0, 0);
+      const result = await api.commitFileDiff(opened.summary.path, detail.commit.oid, parent, path, generation, nextId(), 0, 0, ...contextArgs());
       if (destroyed || round !== base || !retained.has(path)) return;
       fileDiffs = { ...fileDiffs, [path]: result };
       if (result.generation !== generation) onGeneration(result.generation);
@@ -252,6 +260,7 @@
         nextId(),
         current.offset + current.lines.length,
         400,
+        ...contextArgs(),
       );
       if (destroyed || round !== base || !retained.has(path)) return;
       const baseLines = current.lines.length;
@@ -296,6 +305,11 @@
         <button type="button" aria-pressed={diffLayout === "unified"} title="统一视图" onclick={() => (diffLayout = "unified")}><Icon name="rows" size={12} />统一</button>
         <button type="button" aria-pressed={diffLayout === "split"} title="并排视图" onclick={() => (diffLayout = "split")}><Icon name="split" size={12} />并排</button>
       </div>
+      {#if onFullFile}
+        <button type="button" class="btn btn-ghost btn-sm diff-full-toggle" aria-pressed={fullFile} title={fullFile ? "只显示改动附近的内容" : "把整份文件都显示出来（改动仍高亮）"} onclick={() => onFullFile?.(!fullFile)}>
+          <Icon name="rows" size={13} /><span class="diff-hist-label">{fullFile ? "完整文件" : "只看改动"}</span>
+        </button>
+      {/if}
       <button type="button" class="btn btn-ghost btn-sm" title={expandedPaths.length === detail.files.length ? "已经全部展开" : undefined} disabled={expandedPaths.length === detail.files.length} onclick={() => (expandedPaths = detail.files.map((file) => file.path))}><Icon name="plus" size={12} />展开全部</button>
       <button type="button" class="btn btn-ghost btn-sm" title={expandedPaths.length === 0 ? "已经全部收起" : undefined} disabled={expandedPaths.length === 0} onclick={() => (expandedPaths = [])}><Icon name="minus" size={12} />全部收起</button>
     </div>
@@ -346,6 +360,7 @@
                 onStageHunk={() => {}}
                 onLoadMore={() => loadMore(file.path)}
                 onFileHistory={onFileHistory}
+                {fullFile}
               />
             {/if}
           </div>

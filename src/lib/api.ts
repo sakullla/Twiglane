@@ -147,6 +147,8 @@ export const api = {
     limit = 0,
     /** 上下文行数；不传时后端用 3 行。「查看完整文件」传 FULL_FILE_CONTEXT。 */
     context?: number,
+    /** 「按文本查看」：Git 判成二进制的文件也按文本读出，只读、不能按块暂存。 */
+    asText?: boolean,
   ) =>
     invoke<DiffResponse>("load_diff", {
       path,
@@ -158,6 +160,7 @@ export const api = {
       offset,
       limit,
       ...(context === undefined ? {} : { context }),
+      ...(asText ? { asText } : {}),
     }),
   stageFiles: (path: string, paths: string[], generation: number, requestId: number) =>
     invoke<StatusSnapshot>("stage_files", { path, paths, generation, requestId }),
@@ -436,6 +439,9 @@ export const api = {
     requestId: number,
     offset = 0,
     limit = 0,
+    /** 上下文行数；不传时后端用 3 行。「查看完整文件」传 FULL_FILE_CONTEXT。 */
+    context?: number,
+    asText?: boolean,
   ) =>
     invoke<DiffResponse>("commit_file_diff", {
       path,
@@ -446,6 +452,8 @@ export const api = {
       requestId,
       offset,
       limit,
+      ...(context === undefined ? {} : { context }),
+      ...(asText ? { asText } : {}),
     }),
   /** 任意两个提交之间某个文件的差异（合并预览：共同祖先 → 来源顶端）。 */
   compareFileDiff: (
@@ -457,7 +465,19 @@ export const api = {
     requestId: number,
     offset = 0,
     limit = 0,
-  ) => invoke<DiffResponse>("compare_file_diff", { path, base, head, relative, generation, requestId, offset, limit }),
+    context?: number,
+  ) =>
+    invoke<DiffResponse>("compare_file_diff", {
+      path,
+      base,
+      head,
+      relative,
+      generation,
+      requestId,
+      offset,
+      limit,
+      ...(context === undefined ? {} : { context }),
+    }),
   /** 包含这个提交的本地与远程分支。 */
   commitBranches: (path: string, oid: string, generation: number, requestId: number) =>
     invoke<CommitBranches>("commit_branches", { path, oid, generation, requestId }),

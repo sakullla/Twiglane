@@ -3819,7 +3819,7 @@ mod tests {
         git(&root, &["add", "."]);
         git(&root, &["commit", "-q", "-m", "init"]);
         let link = root.join("link.rs");
-        directory_symlink(&root.join("target.rs"), &link);
+        directory_symlink(&root.join("target.rs"), &link).unwrap();
         let path = root.to_str().unwrap();
         // 符号链接本身不是可确认的普通文件：给出明确状态而不是伪造内容。
         let result = repository_review_token(&backend, path, "link.rs", 1, 3)

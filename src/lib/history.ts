@@ -31,6 +31,7 @@ export interface HistoryConditionInput {
 
 export function historyScopeLabel(scope: string, head: string | null): string {
   if (scope === "all") return "全部分支";
+  if (scope === "unpushed") return head ? `未推送的提交（${head}）` : "未推送的提交";
   if (!scope || scope === "current") return head ? `当前分支 ${head}` : "当前分支";
   return `分支 ${scope}`;
 }

@@ -49,10 +49,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         // single-instance 必须最先注册：第二次启动只负责把链接转给正在跑的实例。
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
+            bring_to_front(app);
         }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
@@ -62,6 +59,13 @@ pub fn run() {
         .setup(move |app| {
             install_menu(app)?;
             register_deep_link(app);
+            // macOS 不经过 single-instance：运行中的实例直接从系统收到链接事件，在这里把窗口带到前台。
+            // 其他平台两条路径都会触发，重复聚焦无副作用。
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |_event| bring_to_front(&handle));
+            }
             let dir = app
                 .path()
                 .app_data_dir()
@@ -224,7 +228,8 @@ fn cliora_review_receipt<R: Runtime>(
         let reason = reason.unwrap_or_else(|| "open_failed".to_string());
         cliora::rejected_url(&review_id, &session_id, &reason)?
     };
-    cliora::open_in_cliora(&app, &url)
+    // 回执只是告诉 cliora 结果，用户此刻要在 Twiglane 里审查：不把 cliora 切到前台。
+    cliora::notify_cliora(&app, &url)
 }
 
 /// 回送返回事件：只声明结果，不带原始 Git 输出；返回本身不写仓库。
@@ -249,6 +254,15 @@ fn cliora_review_return<R: Runtime>(
     };
     let url = cliora::returned_url(&review_id, &session_id, outcome, head_oid.as_deref())?;
     cliora::open_in_cliora(&app, &url)
+}
+
+/// 通过链接唤起时把主窗口带到前台：先显示、取消最小化，再请求焦点。
+pub(crate) fn bring_to_front<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
 }
 
 /// 登记 scheme。安装包由 deep-link 插件的安装脚本写入，所以 Windows 只有 debug 构建
@@ -563,6 +577,7 @@ async fn load_diff(
     offset: Option<u32>,
     limit: Option<u32>,
     context: Option<u32>,
+    as_text: Option<bool>,
 ) -> Result<DiffResponse, AppError> {
     crate::git::changes::load_diff_with_context(
         state.inner(),
@@ -575,6 +590,7 @@ async fn load_diff(
         offset.unwrap_or(0),
         limit.unwrap_or(0),
         context.unwrap_or(3),
+        as_text.unwrap_or(false),
     )
     .await
 }
@@ -1247,6 +1263,8 @@ async fn commit_file_diff(
     request_id: u64,
     offset: Option<u32>,
     limit: Option<u32>,
+    context: Option<u32>,
+    as_text: Option<bool>,
 ) -> Result<DiffResponse, AppError> {
     crate::git::history::commit_file_diff(
         state.inner(),
@@ -1258,6 +1276,8 @@ async fn commit_file_diff(
         request_id,
         offset.unwrap_or(0),
         limit.unwrap_or(0),
+        context.unwrap_or(3),
+        as_text.unwrap_or(false),
     )
     .await
 }
@@ -1274,6 +1294,7 @@ async fn compare_file_diff(
     request_id: u64,
     offset: Option<u32>,
     limit: Option<u32>,
+    context: Option<u32>,
 ) -> Result<DiffResponse, AppError> {
     crate::git::history::compare_file_diff(
         state.inner(),
@@ -1285,6 +1306,7 @@ async fn compare_file_diff(
         request_id,
         offset.unwrap_or(0),
         limit.unwrap_or(0),
+        context.unwrap_or(3),
     )
     .await
 }

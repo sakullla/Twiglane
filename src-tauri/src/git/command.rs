@@ -161,11 +161,12 @@ pub fn file_diff_command(
     numstat: bool,
     untracked: bool,
 ) -> (PathBuf, Vec<OsString>) {
-    file_diff_command_with_context(git, root, paths, staged, numstat, untracked, 3)
+    file_diff_command_with_context(git, root, paths, staged, numstat, untracked, 3, false)
 }
 
 /// 与 `file_diff_command` 相同，但上下文行数可调：「查看完整文件」用一个很大的值让 Git 输出整份文件。
 /// 暂存代码块始终走 3 行上下文的版本，补丁格式不受影响。
+#[allow(clippy::too_many_arguments)]
 pub fn file_diff_command_with_context(
     git: &Path,
     root: &Path,
@@ -174,9 +175,14 @@ pub fn file_diff_command_with_context(
     numstat: bool,
     untracked: bool,
     context: u32,
+    as_text: bool,
 ) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.push(OsString::from("diff"));
+    if as_text {
+        // 「按文本查看」：Git 判成二进制的文件（例如夹了一个 NUL 字节的源码）也逐行输出。
+        args.push(OsString::from("--text"));
+    }
     if untracked {
         args.push(OsString::from("--no-index"));
     } else if staged {
@@ -730,6 +736,8 @@ pub struct HistoryLog {
     pub hits_only: bool,
     /// 与 `--follow` 一起用，列出该提交里当时的路径。调用方据此翻到下一页。
     pub name_status: bool,
+    /// 「未推送」范围在没有上游时用：排除所有远程跟踪分支上已有的提交（`--not --remotes`）。
+    pub exclude_remotes: bool,
 }
 
 pub fn history_log_command(git: &Path, root: &Path, log: &HistoryLog) -> (PathBuf, Vec<OsString>) {
@@ -765,6 +773,10 @@ pub fn history_log_command(git: &Path, root: &Path, log: &HistoryLog) -> (PathBu
         args.push(OsString::from("--all"));
     } else if let Some(revision) = &log.revision {
         args.push(OsString::from(revision));
+    }
+    if log.exclude_remotes && !log.scope_all {
+        args.push(OsString::from("--not"));
+        args.push(OsString::from("--remotes"));
     }
     // Git 先执行 --skip，再在真正显示提交时用 --follow 改路径。两者同时出现会跳过
     // 重命名提交，旧路径上的更早提交就消失了。
@@ -808,6 +820,18 @@ pub fn verify_local_branch_command(
         OsString::from("--verify"),
         OsString::from("--quiet"),
         OsString::from(format!("refs/heads/{name}")),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// 当前分支是否设置了上游：`@{upstream}` 解析成功即有。
+pub fn verify_upstream_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("rev-parse"),
+        OsString::from("--verify"),
+        OsString::from("--quiet"),
+        OsString::from("@{upstream}"),
     ]);
     (git.to_path_buf(), args)
 }
@@ -953,15 +977,20 @@ pub fn commit_diff_command(
     parent: &str,
     commit: &str,
     paths: &[PathBuf],
+    context: u32,
+    as_text: bool,
 ) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
+    args.push(OsString::from("diff"));
+    if as_text {
+        args.push(OsString::from("--text"));
+    }
     args.extend([
-        OsString::from("diff"),
         OsString::from("--no-color"),
         OsString::from("--no-ext-diff"),
         OsString::from("--no-textconv"),
         OsString::from("--find-renames"),
-        OsString::from("--unified=3"),
+        OsString::from(format!("--unified={context}")),
         OsString::from(parent),
         OsString::from(commit),
         OsString::from("--"),

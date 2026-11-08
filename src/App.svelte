@@ -15,7 +15,7 @@
   } from "./lib/commands";
   import { LatestReadQueue } from "./lib/latest-read";
   import { shortOid } from "./lib/history";
-  import { finishDiffAttempt, reuseDiffContent, type HunkNavReport } from "./lib/diff";
+  import { FULL_FILE_CONTEXT, finishDiffAttempt, reuseDiffContent, type HunkNavReport } from "./lib/diff";
   import { DraftBuffer } from "./lib/draft";
   import {
     beginClioraReview,
@@ -263,9 +263,20 @@
    */
   let worktreeRemoval = $state<{ repo: RecentRepo; head: RepoHead; force: boolean; busy: boolean; error: string | null } | null>(null);
   let recovery = $state<{ discard: (paths?: string[]) => Promise<void> } | null>(null);
-  /** 差异是否展开为完整文件（记在本机）：开启时按整份文件加上下文读取，暂存代码块暂不可用。 */
-  const FULL_FILE_CONTEXT = 1_000_000;
+  /**
+   * 差异是否展开为完整文件（记在本机）：开启时按整份文件加上下文读取，暂存代码块暂不可用。
+   * 改动与历史提交共用这一个偏好。
+   */
   let diffFullFile = $state(readFullFilePreference());
+  /** 按文本查看的那个文件（侧别:路径）。只对当前选中的文件生效，换文件后自动回到默认读取。 */
+  let diffAsText = $state<string | null>(null);
+  function asTextKey(choice: { side: string; path: string } | null): string | null {
+    return choice ? `${choice.side}:${choice.path}` : null;
+  }
+  function setDiffAsText(next: boolean) {
+    diffAsText = next ? asTextKey(selected) : null;
+    void loadSelectedDiff();
+  }
   let mergeInProgress = $state(false);
   let mergeProbeSerial = 0;
   let remoteName = $state<string | null>(null);
@@ -1042,6 +1053,7 @@
     diffError = null;
     const file = current.snapshot.files.find((item) => item.path === choice.path);
     const context = diffFullFile ? FULL_FILE_CONTEXT : undefined;
+    const textArgs: [] | [boolean] = diffAsText !== null && diffAsText === asTextKey(choice) ? [true] : [];
     try {
       const outcome = await finishDiffAttempt(
         { token, repo: current.summary.path, path: choice.path, side: choice.side },
@@ -1062,6 +1074,7 @@
             0,
             0,
             context,
+            ...textArgs,
           )),
       );
       if (outcome.state === "discarded") return;
@@ -1514,6 +1527,7 @@
         currentDiff.offset + currentDiff.lines.length,
         400,
         diffFullFile ? FULL_FILE_CONTEXT : undefined,
+        ...(diffAsText !== null && diffAsText === asTextKey(choice) ? [true] : []),
       );
       if (opened?.summary.path !== current.summary.path) return;
       if (selected?.path !== choice.path || selected.side !== choice.side) return;
@@ -3197,6 +3211,8 @@
                   onFileHistory={openFileHistory}
                   fullFile={diffFullFile}
                   onFullFile={setFullFile}
+                  asText={diffAsText !== null && diffAsText === asTextKey(selected)}
+                  onViewAsText={setDiffAsText}
                   fileNav={changesNav}
                   fileCount={opened.snapshot.files.length}
                   onRetry={() => void loadSelectedDiff()}
@@ -3265,6 +3281,8 @@
                   onFileNav={(nav) => (historyNav = nav)}
                   onHunkNav={reportHistoryHunk}
                   onActivity={reportHistoryActivity}
+                  fullFile={diffFullFile}
+                  onFullFile={setFullFile}
                   {branchGroups}
                   {paneHead}
                   {paneResizer}

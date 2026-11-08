@@ -9,7 +9,8 @@ use crate::git::command::{
     commit_numstat_command, diff_tree_command, history_details_command, history_log_command,
     ignored_files_command, local_branch_names_command, ref_labels_command, rev_parse_command,
     show_current_branch_command, stash_apply_command, stash_drop_command, stash_list_command,
-    stash_push_command, status_command, verify_local_branch_command, HistoryLog, EMPTY_TREE_OID,
+    stash_push_command, status_command, verify_local_branch_command, verify_upstream_command,
+    HistoryLog, EMPTY_TREE_OID,
     HISTORY_PAGE_SIZE,
 };
 use crate::git::gate::action_key;
@@ -85,9 +86,9 @@ pub async fn history_page(
     request_id: u64,
 ) -> Result<HistoryPage, AppError> {
     let root = repo_root(path)?;
-    let resolved = resolve_history(request, None)?;
+    let mut resolved = resolve_history(request, None)?;
     let git = require_git(backend).await?;
-    let generation = ensure_scope(backend, &root, &git.path, &resolved, generation, request_id).await?;
+    let generation = ensure_scope(backend, &root, &git.path, &mut resolved, generation, request_id).await?;
     let refs = load_labels(backend, &root, &git.path, generation, request_id).await?;
     let generation = refs.0;
     let (mut commits, has_more, generation) = load_history_page(
@@ -203,6 +204,8 @@ pub async fn commit_file_diff(
     request_id: u64,
     offset: u32,
     limit: u32,
+    context: u32,
+    as_text: bool,
 ) -> Result<crate::model::DiffResponse, AppError> {
     let root = repo_root(path)?;
     let oid = validate_oid(oid)?;
@@ -226,7 +229,8 @@ pub async fn commit_file_diff(
     };
     let selected = choose_parent(&commit, parent)?;
     diff_file_between(
-        backend, &root, &git.path, oid, selected, relative, &requested, generation, offset, limit,
+        backend, &root, &git.path, oid, selected, relative, &requested, generation, offset, limit, context,
+        as_text,
     )
     .await
 }
@@ -243,6 +247,7 @@ pub async fn compare_file_diff(
     request_id: u64,
     offset: u32,
     limit: u32,
+    context: u32,
 ) -> Result<crate::model::DiffResponse, AppError> {
     let root = repo_root(path)?;
     let base = validate_oid(base)?;
@@ -266,7 +271,8 @@ pub async fn compare_file_diff(
         ));
     }
     diff_file_between(
-        backend, &root, &git.path, head, Some(base), relative, &requested, generation, offset, limit,
+        backend, &root, &git.path, head, Some(base), relative, &requested, generation, offset, limit, context,
+        false,
     )
     .await
 }
@@ -356,7 +362,10 @@ async fn diff_file_between(
     generation: u64,
     offset: u32,
     limit: u32,
+    context: u32,
+    as_text: bool,
 ) -> Result<crate::model::DiffResponse, AppError> {
+    let context = context.min(crate::git::changes::FULL_FILE_CONTEXT);
     let (files, generation) = load_commit_files(
         backend,
         root,
@@ -374,7 +383,7 @@ async fn diff_file_between(
     };
     let parent_oid = selected.as_deref().unwrap_or(EMPTY_TREE_OID);
     let paths = diff_paths(file, requested)?;
-    let (program, args) = commit_diff_command(git, root, parent_oid, &oid, &paths);
+    let (program, args) = commit_diff_command(git, root, parent_oid, &oid, &paths, context, as_text);
     let scheduled = backend
         .scheduler
         .execute(crate::git::schedule::GitJob {
@@ -400,10 +409,17 @@ async fn diff_file_between(
     }
     let raw = first_file_diff(&scheduled.output.stdout);
     let truncated = scheduled.output.stdout_truncated || raw.len() != scheduled.output.stdout.len();
-    let parsed = parse_diff(raw, truncated)?;
+    let parsed = if as_text {
+        crate::git::patch::parse_diff_as_text(raw, truncated)?
+    } else {
+        parse_diff(raw, truncated)?
+    };
     // 文件目录已按仓库、提交、父提交和 generation 缓存完整统计。
     // 切换文件或继续读取差异时直接复用；目录统计失败时仍可单独补读。
-    let counts = if file.binary {
+    // 按文本查看时目录把它记成二进制，只用这份文本差异里数到的行数。
+    let counts = if as_text {
+        None
+    } else if file.binary {
         Some((None, None))
     } else if let (Some(additions), Some(deletions)) = (file.additions, file.deletions) {
         Some((Some(additions), Some(deletions)))
@@ -435,7 +451,7 @@ async fn diff_file_between(
         offset,
         limit,
     )?;
-    if crate::git::preview::wants_preview(relative, raw) {
+    if !as_text && crate::git::preview::wants_preview(relative, raw) {
         response.preview = Some(crate::git::preview::PreviewSources {
             repository: root.to_string_lossy().into_owned(),
             old: selected.map(|revision| crate::git::preview::PreviewSource {
@@ -457,9 +473,9 @@ pub async fn file_history(
 ) -> Result<FileHistoryPage, AppError> {
     let root = repo_root(path)?;
     let relative_path = safe_relative(relative)?;
-    let resolved = resolve_history(request, Some(relative_path))?;
+    let mut resolved = resolve_history(request, Some(relative_path))?;
     let git = require_git(backend).await?;
-    let generation = ensure_scope(backend, &root, &git.path, &resolved, generation, request_id).await?;
+    let generation = ensure_scope(backend, &root, &git.path, &mut resolved, generation, request_id).await?;
     let (mut commits, has_more, generation) = load_history_page(
         backend,
         &root,
@@ -691,6 +707,10 @@ struct ResolvedHistory {
     revision: Option<String>,
     scope_label: String,
     head_scope: bool,
+    /// 「未推送」：当前分支上还没到远程的提交。有上游时是 `@{upstream}..HEAD`，
+    /// 没有上游时是 `HEAD --not --remotes`；由 ensure_scope 在读取前确定。
+    unpushed: bool,
+    exclude_remotes: bool,
     author: Option<String>,
     path: Option<PathBuf>,
     since: Option<i64>,
@@ -702,8 +722,11 @@ fn resolve_history(request: &HistoryRequest, file_path: Option<PathBuf>) -> Resu
     let query = normalize_query(&request.query)?;
     let author = normalize_query(&request.author)?;
     let raw = request.scope.trim();
+    let unpushed = raw == "unpushed";
     let (scope_all, revision, scope_label, head_scope) = if raw.is_empty() || raw == "current" {
         (false, None, "current".to_string(), true)
+    } else if unpushed {
+        (false, None, "unpushed".to_string(), false)
     } else if raw == "all" {
         (true, None, "all".to_string(), false)
     } else {
@@ -723,6 +746,8 @@ fn resolve_history(request: &HistoryRequest, file_path: Option<PathBuf>) -> Resu
         revision,
         scope_label,
         head_scope,
+        unpushed,
+        exclude_remotes: false,
         author: if author.is_empty() { None } else { Some(author) },
         path,
         since: request.since,
@@ -763,6 +788,7 @@ fn history_log(resolved: &ResolvedHistory, follow: bool, skip: Option<u32>, max_
         max_count,
         hits_only,
         name_status: false,
+        exclude_remotes: resolved.exclude_remotes,
     }
 }
 
@@ -790,10 +816,39 @@ async fn ensure_scope(
     backend: &Backend,
     root: &Path,
     git: &Path,
-    resolved: &ResolvedHistory,
+    resolved: &mut ResolvedHistory,
     generation: u64,
     request_id: u64,
 ) -> Result<u64, AppError> {
+    if resolved.unpushed {
+        let (output, generation) = read_output(
+            backend,
+            root,
+            generation,
+            request_id,
+            verify_upstream_command(git, root),
+        )
+        .await?;
+        if output.exit_code == 0 {
+            resolved.revision = Some("@{upstream}..HEAD".to_string());
+            resolved.exclude_remotes = false;
+            return Ok(generation);
+        }
+        // 没有上游：只留任何远程跟踪分支都还没有的提交。还没有提交的分支不写 HEAD，
+        // 交给 `git log` 自己报「没有提交」，得到空列表而不是「找不到提交」。
+        let (head, generation) = read_output(
+            backend,
+            root,
+            generation,
+            internal_request_id(),
+            rev_parse_command(git, root, "HEAD"),
+        )
+        .await?;
+        let born = head.exit_code == 0;
+        resolved.revision = born.then(|| "HEAD".to_string());
+        resolved.exclude_remotes = born;
+        return Ok(generation);
+    }
     let Some(revision) = &resolved.revision else {
         return Ok(generation);
     };
@@ -2509,6 +2564,8 @@ mod tests {
                 request_id,
                 0,
                 0,
+                3,
+                false,
             )
             .await
             .unwrap();
@@ -2558,6 +2615,106 @@ mod tests {
 
     fn generation(backend: &Backend, root: &Path) -> u64 {
         backend.scheduler.current_generation(&repo_key(root))
+    }
+
+    #[tokio::test]
+    async fn unpushed_scope_follows_upstream_and_falls_back_to_remotes() {
+        let fixture = crate::test_support::git_fixture("history-unpushed");
+        let backend = fixture.backend();
+        let unborn = fixture.repo("unborn");
+        git(&unborn, &["init", "-b", "main"]);
+        let unborn_root = canonical_existing(&unborn).unwrap();
+        let request = HistoryRequest { scope: "unpushed".to_string(), ..HistoryRequest::default() };
+        let empty = history_page(&backend, &repo_key(&unborn_root), &request, generation(&backend, &unborn_root), 1)
+            .await
+            .unwrap();
+        assert!(empty.commits.is_empty(), "还没有提交的分支不报错");
+
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        let commit = |message: &str| {
+            fs::write(repo.join("file.txt"), message).unwrap();
+            git(&repo, &["add", "."]);
+            git(&repo, &["commit", "-m", message]);
+            git_text(&repo, &["rev-parse", "HEAD"])
+        };
+        let a = commit("a");
+        let b = commit("b");
+        let c = commit("c");
+        git(&repo, &["remote", "add", "origin", "../nowhere"]);
+        git(&repo, &["update-ref", "refs/remotes/origin/main", &a]);
+        let root = canonical_existing(&repo).unwrap();
+        let oids = |page: &HistoryPage| page.commits.iter().map(|commit| commit.oid.clone()).collect::<Vec<_>>();
+
+        // 没有上游：任何远程分支上都还没有的提交。
+        let page = history_page(&backend, &repo_key(&root), &request, generation(&backend, &root), 2)
+            .await
+            .unwrap();
+        assert_eq!(page.scope, "unpushed");
+        assert_eq!(oids(&page), vec![c.clone(), b.clone()]);
+
+        // 有上游：按上游计算，与状态栏的领先数一致；别的远程分支上有也不算推送到了上游。
+        git(&repo, &["update-ref", "refs/remotes/origin/main", &b]);
+        git(&repo, &["branch", "--set-upstream-to=origin/main", "main"]);
+        git(&repo, &["update-ref", "refs/remotes/origin/other", &c]);
+        let page = history_page(&backend, &repo_key(&root), &request, generation(&backend, &root), 3)
+            .await
+            .unwrap();
+        assert_eq!(oids(&page), vec![c.clone()]);
+
+        git(&repo, &["update-ref", "refs/remotes/origin/main", &c]);
+        let page = history_page(&backend, &repo_key(&root), &request, generation(&backend, &root), 4)
+            .await
+            .unwrap();
+        assert!(page.commits.is_empty());
+        assert_eq!(page.state, "no_match");
+    }
+
+    #[tokio::test]
+    async fn commit_diff_reads_full_file_and_binary_text_on_request() {
+        let fixture = crate::test_support::git_fixture("history-full-text");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        let body: String = (1..=40).map(|line| format!("line {line}\n")).collect();
+        fs::write(repo.join("file.txt"), &body).unwrap();
+        fs::write(repo.join("zero.rs"), b"fn a() {}\nlet raw = b\"abc\x00def\";\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
+        let base = git_text(&repo, &["rev-parse", "HEAD"]);
+        fs::write(repo.join("file.txt"), body.replace("line 20\n", "line twenty\n")).unwrap();
+        fs::write(repo.join("zero.rs"), b"fn b() {}\nlet raw = b\"abc\x00def\";\n").unwrap();
+        git(&repo, &["commit", "-am", "edit"]);
+        let oid = git_text(&repo, &["rev-parse", "HEAD"]);
+        let root = canonical_existing(&repo).unwrap();
+        let key = repo_key(&root);
+        let gen = generation(&backend, &root);
+
+        let hunks = commit_file_diff(&backend, &key, &oid, Some(&base), "file.txt", gen, 1, 0, 0, 3, false)
+            .await
+            .unwrap();
+        let full = commit_file_diff(
+            &backend, &key, &oid, Some(&base), "file.txt", hunks.generation, 2, 0, 0,
+            crate::git::changes::FULL_FILE_CONTEXT, false,
+        )
+        .await
+        .unwrap();
+        let has = |diff: &crate::model::DiffResponse, text: &str| diff.lines.iter().any(|line| line.text.trim_end() == text);
+        assert!(!has(&hunks, " line 1"));
+        assert!(has(&full, " line 1"));
+        assert!(has(&full, " line 40"));
+
+        let binary = commit_file_diff(&backend, &key, &oid, Some(&base), "zero.rs", full.generation, 3, 0, 0, 3, false)
+            .await
+            .unwrap();
+        assert!(binary.binary);
+        let text = commit_file_diff(&backend, &key, &oid, Some(&base), "zero.rs", binary.generation, 4, 0, 0, 3, true)
+            .await
+            .unwrap();
+        assert!(!text.binary);
+        assert_eq!((text.additions, text.deletions), (1, 1));
+        assert!(text.lines.iter().any(|line| line.text.contains("abc\u{2400}def")));
+        assert!(text.hunks.iter().all(|hunk| !hunk.stageable));
     }
 
     #[test]
@@ -2631,13 +2788,13 @@ mod tests {
         assert!(!only_topic.branches[0].current);
 
         // 合并预览里的文件差异：共同祖先 → 来源顶端，跨越两个提交。
-        let diff = compare_file_diff(&backend, &repo_key(&repo), &base, &tip, "file.txt", only_topic.generation, 403, 0, 0)
+        let diff = compare_file_diff(&backend, &repo_key(&repo), &base, &tip, "file.txt", only_topic.generation, 403, 0, 0, 3)
             .await
             .unwrap();
         assert_eq!((diff.additions, diff.deletions), (1, 1));
         assert!(diff.lines.iter().any(|line| line.text.contains("two")));
         assert!(!diff.lines.iter().any(|line| line.text == "+one"));
-        let invalid = compare_file_diff(&backend, &repo_key(&repo), "HEAD", &tip, "file.txt", diff.generation, 404, 0, 0)
+        let invalid = compare_file_diff(&backend, &repo_key(&repo), "HEAD", &tip, "file.txt", diff.generation, 404, 0, 0, 3)
             .await
             .unwrap_err();
         assert_eq!(invalid.code, "invalid_revision");
@@ -2827,6 +2984,8 @@ mod tests {
             2,
             0,
             0,
+            3,
+            false,
         )
         .await
         .unwrap();
@@ -2899,6 +3058,8 @@ mod tests {
             7,
             0,
             0,
+            3,
+            false,
         )
         .await
         .unwrap();
@@ -2928,6 +3089,8 @@ mod tests {
             9,
             0,
             0,
+            3,
+            false,
         )
         .await
         .unwrap();

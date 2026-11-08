@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { tick, untrack } from "svelte";
+  import { onDestroy, tick, untrack } from "svelte";
+  import { createQuietActivity } from "../quiet-activity";
   import { MODIFIER_LABEL } from "../brand";
   import { hunkCaption, hunkJump, hunkRowIndexes, lineSelectionScope, splitColumnsFit, toSideRows, visibleDiffLines, whitespaceOnlyHunks, type HunkNavReport, type ViewLine, type WhitespaceFilter } from "../diff";
   import { diffPrefs, setHideWhitespaceOnly, toggleHideWhitespaceOnly, toggleShowWhitespace } from "../diff-prefs.svelte";
@@ -73,6 +74,10 @@
     reviewBusy?: boolean;
     /** 标记或撤销整个文件的已审阅状态；不传时不显示入口。 */
     onToggleReview?: () => void;
+    /** 当前差异是按文本强制读出的（Git 原本判成二进制）。 */
+    asText?: boolean;
+    /** Git 判成二进制、又没有图片预览时，提供「按文本查看」；不传时不显示。 */
+    onViewAsText?: (next: boolean) => void;
   }
 
   /**
@@ -110,8 +115,17 @@
     reviewed = false,
     reviewBusy = false,
     onToggleReview,
+    asText = false,
+    onViewAsText,
   }: Props = $props();
   let menu = $state<ContextMenuRequest | null>(null);
+  /**
+   * 已有内容上的后台重读（文件监听触发的刷新）：多数几百毫秒内结束，直接画出在途状态会让
+   * 工具条里的加载环一闪一闪，还会挤动后面的按钮。只有重读明显变慢时才安静地显示，出现后至少停留一会儿。
+   */
+  let refreshVisible = $state(false);
+  const refreshActivity = createQuietActivity((visible) => (refreshVisible = visible), { showDelay: 700, minVisible: 700 });
+  onDestroy(() => refreshActivity.reset());
   let ownMode = $state<"unified" | "split">("unified");
   /** 用户选的布局。窄到两列重叠时暂时画统一视图，加宽后若仍是并排则恢复。 */
   let preferred = $derived<"unified" | "split">(layout ?? ownMode);
@@ -135,6 +149,9 @@
   let currentDiff = $derived(
     selection && diff?.path === selection.path && diff.staged === (selection.side === "staged") ? diff : null,
   );
+  $effect(() => {
+    refreshActivity.set(Boolean(loading && currentDiff));
+  });
   /* Git 的文件头（diff --git / index / --- / +++ / new file mode …）对读差异的人是噪音：
      文件路径、状态和增删统计都已经在工具条里。这里只保留代码行与块标题，
      并记下每一行在原始列表里的位置，按块暂存仍按原始下标找块。 */
@@ -504,7 +521,7 @@
       canFilterWhitespace,
       Boolean(onFullFile),
       Boolean(onFileHistory),
-      loading,
+      refreshVisible,
       fullFile,
     ].join("|"),
   );
@@ -1044,7 +1061,7 @@
           <span class="hint">差异</span>
         {/if}
       </div>
-      {#if loading && currentDiff}<span class="spinner muted" aria-hidden="true"></span>{/if}
+      {#if refreshVisible && currentDiff}<span class="spinner muted" aria-hidden="true" title="正在刷新差异"></span>{/if}
     </div>
     {#if hasInlineFileTools}
       <div class="diff-toolbar-group">
@@ -1287,6 +1304,12 @@
       <strong>二进制文件有变动</strong>
       {#if size}<p class="binary-size">{size.text}{#if currentDiff.oldSize != null && currentDiff.newSize != null}<span class="binary-delta">{sizeDelta(currentDiff.oldSize, currentDiff.newSize)}</span>{/if}</p>{/if}
       <p>{selection.path}</p>
+      {#if onViewAsText}
+        <!-- Git 只要在开头看到 NUL 字节就按二进制处理；源码里混进一个也会这样。按文本读出来仍可查看。 -->
+        <button type="button" class="btn btn-secondary btn-sm" title="让 Git 按文本输出差异；不可显示的字符用 ␀ 或 � 代替，只读" onclick={() => onViewAsText?.(true)}>
+          <Icon name="code" size={13} />按文本查看
+        </button>
+      {/if}
     </div>
   {:else if metaOnly}
     <div class="empty" role="status">
@@ -1308,6 +1331,13 @@
       <p>{selection.path}</p>
     </div>
   {:else}
+    {#if asText && onViewAsText}
+      <div class="infobar info" role="status" data-diff-as-text>
+        <Icon name="info" size={14} />
+        <span class="infobar-text">Git 把这个文件当作二进制，这里按文本显示：不可显示的字符用 ␀ 或 � 代替，不能按块或按行暂存。</span>
+        <button type="button" class="btn btn-ghost btn-sm" onclick={() => onViewAsText?.(false)}>恢复</button>
+      </div>
+    {/if}
     <div
       class="diff-scroll"
       class:split-x={split}

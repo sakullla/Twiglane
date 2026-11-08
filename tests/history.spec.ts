@@ -382,21 +382,58 @@ describe("历史面板", () => {
     const groups = () => [...document.querySelectorAll<HTMLElement>("[data-branch-group]")].map((node) => node.dataset.branchGroup);
     await waitFor(() => expect(trigger().textContent).toContain("当前分支（main）"));
     await fireEvent.click(trigger());
-    expect(names()).toEqual(["当前分支（main）", "全部分支", "main"]);
+    expect(names()).toEqual(["当前分支（main）", "未推送的提交", "全部分支", "main"]);
     expect(groups()).toEqual(["feature", "fix"]);
     await fireEvent.click(screen.getByRole("button", { name: "展开分组 feature" }));
-    expect(names()).toEqual(["当前分支（main）", "全部分支", "main", "feature/a", "feature/b"]);
+    expect(names()).toEqual(["当前分支（main）", "未推送的提交", "全部分支", "main", "feature/a", "feature/b"]);
     await fireEvent.keyDown(screen.getByLabelText("搜索历史范围"), { key: "Escape" });
 
     await view.rerender({ ...panelProps(), branchGroups: false });
     await fireEvent.click(trigger());
     expect(groups()).toEqual([]);
-    expect(names()).toEqual(["当前分支（main）", "全部分支", "main", "feature/a", "feature/b", "fix/x"]);
+    expect(names()).toEqual(["当前分支（main）", "未推送的提交", "全部分支", "main", "feature/a", "feature/b", "fix/x"]);
     historyPage.mockClear();
     await fireEvent.click(screen.getByRole("option", { name: "fix/x" }));
     expect(trigger().dataset.value).toBe("fix/x");
     await waitFor(() => expect(historyPage).toHaveBeenCalled());
     expect(JSON.stringify(historyPage.mock.calls.at(-1))).toContain("fix/x");
+  });
+
+  it("范围可选「未推送的提交」：按 unpushed 读取，没有结果时说明都已推送", async () => {
+    historyPage.mockResolvedValue({
+      generation: 3,
+      query: "",
+      offset: 0,
+      pageSize: 100,
+      hasMore: false,
+      state: "ok",
+      commits: [commit(0)],
+      scope: "current",
+      branches: ["main"],
+      head: "main",
+    });
+    render(HistoryPanel, { props: panelProps() });
+    const trigger = () => screen.getByRole("button", { name: "历史范围" });
+    await waitFor(() => expect(trigger().textContent).toContain("当前分支（main）"));
+    historyPage.mockClear();
+    historyPage.mockResolvedValue({
+      generation: 3,
+      query: "",
+      offset: 0,
+      pageSize: 100,
+      hasMore: false,
+      state: "no_match",
+      commits: [],
+      scope: "unpushed",
+      branches: ["main"],
+      head: "main",
+    });
+    await fireEvent.click(trigger());
+    await fireEvent.click(screen.getByRole("option", { name: "未推送的提交" }));
+    expect(trigger().dataset.value).toBe("unpushed");
+    await waitFor(() => expect(historyPage).toHaveBeenCalled());
+    expect(JSON.stringify(historyPage.mock.calls.at(-1))).toContain("unpushed");
+    expect(await screen.findByText("当前分支没有未推送的提交。")).toBeTruthy();
   });
 
   it("筛选取交集，清除路径时保留作者，当前分支没有提交时写明范围", async () => {
@@ -1642,6 +1679,37 @@ describe("历史分栏", () => {
     await fireEvent.contextMenu(fileRow!);
     expect(screen.queryByRole("menuitem", { name: "加入 .gitignore" })).toBeNull();
     expect(screen.queryByRole("menuitem", { name: "加入 .git/info/exclude" })).toBeNull();
+  });
+
+  it("提交差异可以查看完整文件：切换交给外壳，开启后按整份文件重新读取", async () => {
+    const only = commit(0);
+    historyPage.mockResolvedValue({ generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [only] });
+    commitDetail.mockResolvedValue({
+      generation: 3,
+      commit: only,
+      body: "",
+      root: false,
+      merge: false,
+      selectedParent: only.parents[0],
+      files: [{ path: "notes.txt", originalPath: null, status: "modified", additions: 2, deletions: 0 }],
+    });
+    commitFileDiff.mockResolvedValue(diff);
+    const onFullFile = vi.fn();
+    const view = render(HistoryPanel, { props: { ...panelProps(), fullFile: false, onFullFile } });
+    await waitFor(() => expect(commitFileDiff).toHaveBeenCalled());
+    expect(commitFileDiff.mock.calls.at(-1)?.length, "默认读取不追加上下文参数").toBe(8);
+    // 宽工具条直接给入口，窄时收进「更多差异工具」；两处共用同一个切换。
+    const inline = await waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>(".diff-toolbar .diff-full-toggle");
+      if (button) return button;
+      throw new Error("没有完整文件入口");
+    });
+    await fireEvent.click(inline);
+    expect(onFullFile).toHaveBeenCalledWith(true);
+    commitFileDiff.mockClear();
+    await view.rerender({ ...panelProps(), fullFile: true, onFullFile });
+    await waitFor(() => expect(commitFileDiff).toHaveBeenCalled());
+    expect(commitFileDiff.mock.calls.at(-1)?.[8]).toBe(1_000_000);
   });
 
   describe("说明按实际溢出决定展开入口", () => {

@@ -37,7 +37,8 @@
     OpenedRepository,
     StatusSnapshot,
   } from "../types";
-  import type { HunkNavReport } from "../diff";
+  import { FULL_FILE_CONTEXT, type HunkNavReport } from "../diff";
+  import { createQuietActivity } from "../quiet-activity";
   import {
     buildHistoryGraph,
     clipSegments,
@@ -91,6 +92,9 @@
     /** 左栏头部（视图切换与合并提示）和右沿拖动条：由外壳提供，与改动视图是同一份。 */
     paneHead?: Snippet;
     paneResizer?: Snippet;
+    /** 提交差异是否展开为完整文件；与改动视图共用同一个偏好，不传时不提供切换。 */
+    fullFile?: boolean;
+    onFullFile?: (next: boolean) => void;
   }
 
   const pageReads = new LatestReadQueue();
@@ -108,6 +112,8 @@
   const FILE_ROW_HEIGHT = 30;
   const UNION_ROW_HEIGHT = 30;
   const FILES_WIDTH_KEY = "twiglane.commitFilesWidth";
+  /** 范围下拉框里不是分支名的固定项。 */
+  const SCOPE_EXTRAS = new Set(["current", "all", "unpushed"]);
   const DEFAULT_FILES_WIDTH = 248;
   const MIN_DIFF_WIDTH = 360;
   /** 拓扑的收起状态：本机偏好，读写失败只用默认值，不阻塞历史。 */
@@ -169,7 +175,33 @@
     paneHead,
     paneResizer,
     branchGroups = true,
+    fullFile = false,
+    onFullFile,
   }: Props = $props();
+  /** 提交差异读取的上下文：完整文件时整份读出，否则用后端默认的 3 行。只在需要时追加参数。 */
+  function contextArgs(full: boolean): [] | [number] {
+    return full ? [FULL_FILE_CONTEXT] : [];
+  }
+  /**
+   * 搜索框里的读取标记：文件监听触发的重读通常很快，直接跟着 loading 画会一闪一闪，
+   * 只有读取明显变慢时才出现，出现后至少停留一会儿。
+   */
+  let searchBusy = $state(false);
+  const searchActivity = createQuietActivity((visible) => (searchBusy = visible), { showDelay: 500, minVisible: 600 });
+  onDestroy(() => searchActivity.reset());
+  $effect(() => {
+    searchActivity.set(loading);
+  });
+  /** 按文本查看的提交文件（提交:路径）；换提交或文件后自动回到默认读取。 */
+  let commitAsText = $state<string | null>(null);
+  /** 读一个提交文件的差异：只在需要时追加上下文与按文本参数，默认调用保持原样。 */
+  function readCommitDiff(
+    repo: string, oid: string, parent: string | null, relative: string, generation: number,
+    offset: number, limit: number, full: boolean, text: boolean,
+  ) {
+    if (text) return api.commitFileDiff(repo, oid, parent, relative, generation, nextId(), offset, limit, full ? FULL_FILE_CONTEXT : undefined, true);
+    return api.commitFileDiff(repo, oid, parent, relative, generation, nextId(), offset, limit, ...contextArgs(full));
+  }
 
   let menu = $state<ContextMenuRequest | null>(null);
   let recovery: RecoveryActions;
@@ -544,7 +576,15 @@
     return () => observer?.disconnect();
   });
 
-  let statusText = $derived(!listError && page && commits.length === 0 ? historyStatus(page.state) : null);
+  /** 除范围以外的筛选条件：「未推送」为空时据此区分「全推送了」和「被筛掉了」。 */
+  let hasNarrowing = $derived(Boolean(activeQuery || activeAuthor || activePath || activeSince || activeUntil));
+  let statusText = $derived(
+    !listError && page && commits.length === 0
+      ? activeScope === "unpushed" && page.state === "no_match" && !hasNarrowing
+        ? "当前分支没有未推送的提交。"
+        : historyStatus(page.state)
+      : null,
+  );
   let hasActiveFilters = $derived(
     Boolean(activeQuery || activeAuthor || activePath || activeSince || activeUntil || activeScope !== "current"),
   );
@@ -562,7 +602,7 @@
   }));
   let scopeNames = $derived.by(() => {
     const names = page?.branches ?? [];
-    if (scope !== "current" && scope !== "all" && !names.includes(scope)) return [...names, scope];
+    if (!SCOPE_EXTRAS.has(scope) && !names.includes(scope)) return [...names, scope];
     return names;
   });
   /** 历史范围下拉框的分支行：后端只给本地分支名，这里补成分支记录。 */
@@ -818,12 +858,14 @@
     }
     const oid = current.commit.oid;
     const relative = file.path;
+    const text = commitAsText === `${oid}:${relative}`;
+    const full = fullFile;
     let cancelled = false;
     diffLoading = true;
     diffError = null;
     void (async () => {
       try {
-        const result = await diffReads.run(() => api.commitFileDiff(repo, oid, parent, relative, generation, nextId(), 0, 0));
+        const result = await diffReads.run(() => readCommitDiff(repo, oid, parent, relative, generation, 0, 0, full, text));
         if (cancelled || opened.summary.path !== repo || detail?.commit.oid !== oid || activeFile?.path !== relative) return;
         commitDiff = result;
         if (result.generation !== generation) onGeneration(result.generation);
@@ -1263,15 +1305,16 @@
     const repo = opened.summary.path;
     const parent = parentChoice ?? currentDetail.selectedParent;
     try {
-      const result = await api.commitFileDiff(
+      const result = await readCommitDiff(
         repo,
         currentDetail.commit.oid,
         parent,
         file.path,
         opened.generation,
-        nextId(),
         current.offset + current.lines.length,
         400,
+        fullFile,
+        commitAsText === `${currentDetail.commit.oid}:${file.path}`,
       );
       if (opened.summary.path !== repo || activeFile?.path !== file.path) return;
       const base = current.lines.length;
@@ -1361,6 +1404,7 @@
             current={page?.head ?? null}
             extras={[
               { value: "current", label: `当前分支${page?.head ? `（${page.head}）` : ""}`, icon: "branch" },
+              { value: "unpushed", label: "未推送的提交", icon: "upload" },
               { value: "all", label: "全部分支", icon: "layers" },
             ]}
             {branchGroups}
@@ -1385,7 +1429,7 @@
               {#if query}
                 <button type="button" class="field-clear" aria-label="清除说明或哈希" onclick={() => clearFilter("query")}><Icon name="x" size={12} /></button>
               {/if}
-              {#if loading}<span class="spinner"></span>{/if}
+              {#if searchBusy}<span class="spinner"></span>{/if}
             </div>
             <button
               type="button"
@@ -2008,6 +2052,8 @@
                 {onGeneration}
                 onFailure={onFailure}
                 onFileHistory={onFilePath}
+                {fullFile}
+                {onFullFile}
               />
             {:else}
               <DiffView {onGeneration}
@@ -2020,6 +2066,12 @@
                 onStageHunk={() => {}}
                 onLoadMore={loadMoreDiff}
                 onFileHistory={onFilePath}
+                {fullFile}
+                {onFullFile}
+                asText={Boolean(detail && activeFile && commitAsText === `${detail.commit.oid}:${activeFile.path}`)}
+                onViewAsText={(next) => {
+                  commitAsText = next && detail && activeFile ? `${detail.commit.oid}:${activeFile.path}` : null;
+                }}
                 {fileNav}
                 {onHunkNav}
               />

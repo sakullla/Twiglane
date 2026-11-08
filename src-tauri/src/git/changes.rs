@@ -39,7 +39,7 @@ pub async fn load_diff(
     limit: u32,
 ) -> Result<DiffResponse, AppError> {
     load_diff_with_context(
-        backend, path, relative, original, staged, generation, request_id, offset, limit, 3,
+        backend, path, relative, original, staged, generation, request_id, offset, limit, 3, false,
     )
     .await
 }
@@ -59,6 +59,7 @@ pub async fn load_diff_with_context(
     offset: u32,
     limit: u32,
     context: u32,
+    as_text: bool,
 ) -> Result<DiffResponse, AppError> {
     let context = context.clamp(0, FULL_FILE_CONTEXT);
     let root = canonical_existing(&validate_input_path(path)?)?;
@@ -84,7 +85,7 @@ pub async fn load_diff_with_context(
     };
     let paths = diff_paths(&relative_path, original_path.as_ref());
     let (program, args) = crate::git::command::file_diff_command_with_context(
-        &git.path, &root, &paths, staged, false, untracked, context,
+        &git.path, &root, &paths, staged, false, untracked, context, as_text,
     );
     let scheduled = backend
         .scheduler
@@ -110,10 +111,15 @@ pub async fn load_diff_with_context(
     }
     let raw = first_file_diff(&scheduled.output.stdout);
     let truncated = scheduled.output.stdout_truncated || raw.len() != scheduled.output.stdout.len();
-    let parsed = parse_diff(raw, truncated)?;
+    let parsed = if as_text {
+        crate::git::patch::parse_diff_as_text(raw, truncated)?
+    } else {
+        parse_diff(raw, truncated)?
+    };
     // 完整补丁已经包含精确行数和二进制标记，避免再启动 Git 重算同一份差异。
     // 截断时仍需 numstat，不能把预览中的部分行数当作整个文件的统计。
-    let counts = if parsed.truncated {
+    // 按文本查看时 numstat 会把文件报成二进制，只用预览里数到的行数。
+    let counts = if parsed.truncated && !as_text {
         numstat_counts(
             backend,
             &git.path,
@@ -157,7 +163,7 @@ pub async fn load_diff_with_context(
         offset,
         limit,
     )?;
-    if crate::git::preview::wants_preview(relative, raw) {
+    if !as_text && crate::git::preview::wants_preview(relative, raw) {
         response.preview = Some(crate::git::preview::PreviewSources {
             repository: root.to_string_lossy().into_owned(),
             old: Some(crate::git::preview::PreviewSource {
@@ -1480,6 +1486,33 @@ mod tests {
         assert!(nl_blob.ends_with(b"n16"));
         assert!(!nl_blob.ends_with(b"\n"));
         assert!(fs::read(repo.join("n.txt")).unwrap().ends_with(b"N16"));
+    }
+
+    #[tokio::test]
+    async fn untracked_source_with_nul_can_be_read_as_text() {
+        let fixture = crate::test_support::git_fixture("diff-as-text");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("keep.txt"), "keep\n").unwrap();
+        git(&repo, &["add", "--", "keep.txt"]);
+        git(&repo, &["commit", "-m", "init"]);
+        // 源码里混进一个 NUL 字节：Git 按二进制处理，按文本查看仍能逐行读出。
+        fs::write(repo.join("files.rs"), b"fn main() {}\nlet raw = b\"abc\x00def\";\n").unwrap();
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let binary = load_diff(&backend, &path, "files.rs", None, false, generation, 2, 0, 0)
+            .await
+            .unwrap();
+        assert!(binary.binary);
+        let text = load_diff_with_context(
+            &backend, &path, "files.rs", None, false, binary.generation, 3, 0, 0, 3, true,
+        )
+        .await
+        .unwrap();
+        assert!(!text.binary);
+        assert_eq!(text.additions, 2);
+        assert!(text.lines.iter().any(|line| line.text.contains("abc\u{2400}def")));
+        assert!(text.hunks.iter().all(|hunk| !hunk.stageable), "替换过的文本不能拼补丁");
     }
 
     #[tokio::test]

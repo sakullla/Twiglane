@@ -988,6 +988,40 @@ describe("应用外壳", () => {
     expect(view()).toBe("changes");
   });
 
+  // 三视图同时保活，离开的视图会被设成 inert：⌘1/2/3 或点视图切换时焦点原本停在离开视图的
+  // paneHead，必须接住到新激活视图的「当前视图」切换按钮，不能掉到页面根部（R4 焦点不丢到根部）。
+  it("键盘切换视图后焦点落到新视图的切换按钮，不掉到页面根部（R4）", async () => {
+    render(App);
+    await openRepo();
+    const currentNav = () =>
+      document.querySelector<HTMLElement>('.workbench-view[data-active="true"] nav[aria-label="视图"] [aria-current="page"]');
+    const activeView = () => currentNav()?.getAttribute("data-view");
+    expect(activeView()).toBe("changes");
+
+    // 焦点先停在离开视图（改动）的视图切换按钮上，模拟用户正操作视图切换。
+    const changesNavButton = document.querySelector<HTMLElement>(
+      '.workbench-view[data-view-scope="changes"] nav[aria-label="视图"] [aria-current="page"]',
+    )!;
+    changesNavButton.focus();
+    expect(document.activeElement).toBe(changesNavButton);
+
+    // ⌘3 切到文件视图：改动视图变 inert，焦点被接到文件视图的「文件」切换按钮，而不是 body。
+    await press("3");
+    await waitFor(() => expect(activeView()).toBe("files"));
+    await waitFor(() => expect(document.activeElement).toBe(currentNav()));
+    expect(document.activeElement, "焦点没有掉到页面根部").not.toBe(document.body);
+    expect(
+      document.activeElement?.closest('.workbench-view[data-active="true"]'),
+      "落点在当前激活视图内，而不是被 inert 的旧视图",
+    ).toBeTruthy();
+
+    // ⌘2 再切到历史视图，焦点同样接到历史视图的切换按钮。
+    await press("2");
+    await waitFor(() => expect(activeView()).toBe("history"));
+    await waitFor(() => expect(document.activeElement).toBe(currentNav()));
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
   it("合并提示：无合并不显示，有冲突显示数量，冲突解决但未完成时仍在，点击进入合并，两个视图都有", async () => {
     const banner = () => document.querySelector<HTMLElement>('.workbench-view[data-active="true"] [data-merge-banner]');
     render(App);

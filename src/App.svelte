@@ -1264,8 +1264,42 @@
     await filesView?.focusSearch(mode);
   }
 
+  /**
+   * 切视图后把焦点从离开的视图救回来（R4）：三个视图同时保活，离开的那个会被设成 inert，
+   * 浏览器会把 inert 子树里的焦点弹出去——键盘按 ⌘1/2/3 或点视图切换按钮时，焦点原本就在
+   * 离开视图的 paneHead 上，不接住就会掉到页面根部（document.body）。接住的落点是新激活视图里
+   * 同一个「当前视图」切换按钮：视觉顺序没变，键盘流继续停在视图切换上；兜底退到可编程聚焦的主内容区。
+   */
+  function focusActiveViewSwitch(): boolean {
+    const active = document.activeElement as HTMLElement | null;
+    // 焦点已经落在新激活视图里的可聚焦元素：浏览器或组件已自行安置，不覆盖。
+    if (active && active !== document.body && active.closest('.workbench-view[data-active="true"]')) return true;
+    const target =
+      document.querySelector<HTMLElement>(
+        `.workbench-view[data-active="true"] nav[aria-label="视图"] [aria-current="page"]`,
+      ) ?? document.querySelector<HTMLElement>("[data-app-main]");
+    target?.focus();
+    return target !== null && target !== undefined;
+  }
+
+  async function keepViewFocus(previous: WorkspaceView) {
+    if (previous === workspaceView) return;
+    const before = document.activeElement as HTMLElement | null;
+    const leaving = before?.closest<HTMLElement>(`.workbench-view[data-view-scope="${previous}"]`);
+    // 焦点不在离开的视图里（例如停在标题栏或弹层触发点），说明不会被 inert 弹出，不去抢它。
+    if (!leaving) return;
+    await tick();
+    focusActiveViewSwitch();
+    // 历史视图首次进入会异步加载面板并重挂 paneHead，接住的那个按钮可能被替换导致焦点再次掉到
+    // body；再等一帧用同一判据补接一次，稳态后不再改动已经落在当前视图里的焦点。
+    await tick();
+    focusActiveViewSwitch();
+  }
+
   function useView(view: WorkspaceView) {
+    const previous = workspaceView;
     workspaceView = view;
+    void keepViewFocus(previous);
     if (view === "history") {
       diffToken += 1;
       diffLoading = false;
@@ -3178,6 +3212,7 @@
         <div class="workbench-views">
           <div
             class="workbench-view"
+            data-view-scope="changes"
             data-active={workspaceView === "changes"}
             aria-hidden={workspaceView !== "changes"}
             inert={workspaceView !== "changes"}
@@ -3325,6 +3360,7 @@
           {#if filesViewEnabled}
           <div
             class="workbench-view"
+            data-view-scope="files"
             data-active={workspaceView === "files"}
             aria-hidden={workspaceView !== "files"}
             inert={workspaceView !== "files"}
@@ -3353,6 +3389,7 @@
           {/if}
           <div
             class="workbench-view"
+            data-view-scope="history"
             data-active={workspaceView === "history"}
             aria-hidden={workspaceView !== "history"}
             inert={workspaceView !== "history"}

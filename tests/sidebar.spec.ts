@@ -1271,5 +1271,54 @@ describe("外壳样式契约", () => {
     expect(ruleBody(componentsCss, ".palette-card")).toMatch(/560px/);
     expect(componentsCss).toMatch(/\.palette-backdrop[^{]*\{[^}]*var\(--z-palette\)/);
   });
+
+  /**
+   * R1 控件尺寸收敛：分段按钮与小 pill 的主导高度不再散写字面像素，而是引用 tokens.css
+   * 的三个共享档位。只断言「同类控件引用同一 token」而不是数值，改一处 token 即可同时校准。
+   */
+  it("同类分段按钮与小 pill 高度引用共享 token，而不是各处散写像素（R1）", () => {
+    const tokensCss = readLayer("tokens.css");
+    const px = (name: string) => Number(tokensCss.match(new RegExp(name + ":\\s*(\\d+)px"))?.[1]);
+    // 三个档位都是实际像素值，且沿用既有主导取值，收敛不改变现有外观。
+    expect(px("--control-segmented"), "分段主体档存在").toBe(24);
+    expect(px("--control-pill"), "常规小 pill 档存在").toBe(20);
+    expect(px("--control-pill-sm"), "紧凑小 pill 档存在").toBe(17);
+
+    // 真同类才并到 token：分段主体与两处 24px 上下文、chip、ref-pill 各读对应档，不再写死像素。
+    for (const selector of [".segmented button", ".file-tools .segmented button", ".stash-files-tools .segmented button"]) {
+      const body = ruleBody(componentsCss, selector);
+      expect(body, `${selector} 读分段 token`).toMatch(/height:\s*var\(--control-segmented\)/);
+      expect(body, `${selector} 不再写死分段高度`).not.toMatch(/height:\s*\d+px/);
+    }
+    const chip = ruleBody(componentsCss, ".chip");
+    expect(chip, "chip 读常规小 pill token").toMatch(/height:\s*var\(--control-pill\)/);
+    expect(chip).not.toMatch(/height:\s*\d+px/);
+    const refPill = ruleBody(componentsCss, ".ref-pill");
+    expect(refPill, "ref-pill 读紧凑小 pill token").toMatch(/height:\s*var\(--control-pill-sm\)/);
+    expect(refPill).not.toMatch(/height:\s*\d+px/);
+
+    // 不同上下文意图刻意保留各自取值，不被误并进 token：工具条分段 22px、视图切换 26px。
+    expect(ruleBody(componentsCss, ".diff-toolbar .segmented button"), "差异工具条分段保持 22px").toMatch(/height:\s*22px/);
+    expect(ruleBody(componentsCss, ".union-diff-head .segmented button"), "并集工具条分段保持 22px").toMatch(/height:\s*22px/);
+    expect(ruleBody(componentsCss, ".view-switcher button"), "视图切换保持 26px").toMatch(/height:\s*26px/);
+  });
+
+  /**
+   * R1 关闭颜色辨识后的类别区分：ref-pill 可见文字只有引用名、branch 与 head 还共用分支图标，
+   * 仅靠语义色不足以区分，所以 head（虚/实描边）与当前分支（实描边）各带一圈非颜色形状线索，
+   * 普通 branch 不带。去掉描边只损失该线索而非装饰（R9）。chip 则靠始终可见的类别文字区分，
+   * 不额外加形状——此处断言 chip 规则没有被塞进纯装饰描边。
+   */
+  it("ref-pill 的分支/HEAD/当前分支除颜色外还有形状线索，chip 靠文字不加装饰（R1/R9）", () => {
+    const branch = ruleBody(componentsCss, ".ref-pill.branch");
+    const current = ruleBody(componentsCss, ".ref-pill.branch.current");
+    const head = ruleBody(componentsCss, ".ref-pill.head");
+    // 普通分支不带描边；HEAD 与当前分支各带一圈 inset 描边作为形状线索。
+    expect(branch, "普通分支不加形状线索").not.toMatch(/box-shadow/);
+    expect(head, "HEAD 带非颜色形状线索").toMatch(/box-shadow:\s*inset/);
+    expect(current, "当前分支带非颜色形状线索").toMatch(/box-shadow:\s*inset/);
+    // chip 分类不塞纯装饰描边：类别由始终可见的文字承担。
+    expect(ruleBody(componentsCss, ".chip"), "chip 主体不加装饰描边").not.toMatch(/box-shadow/);
+  });
 });
 

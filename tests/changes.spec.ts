@@ -753,6 +753,47 @@ describe("主工作台", () => {
     expect(mocks.refreshStatus).not.toHaveBeenCalled();
   });
 
+  // 切视图时把焦点从被 inert 的旧视图救回来是 R4 的要求，但不能顺带丢掉 R2 的选择保留，
+  // 也不能触发多余的差异重读（R3 只呈现当前目标）。这里把两者一起钉住，防回归。
+  it("键盘切视图接住焦点时，选择保留且不额外重读差异（R2/R3/R4）", async () => {
+    renderApp();
+    await openRepo();
+
+    const fileRow = document.querySelector<HTMLElement>('.file-row[title="README.md"]');
+    expect(fileRow).toBeTruthy();
+    await fireEvent.click(fileRow!);
+    await waitFor(() => expect(document.querySelector('.file-row[title="README.md"]')?.getAttribute("aria-selected")).toBe("true"));
+
+    // 焦点停在改动视图的视图切换按钮上，模拟用户正用键盘操作视图切换。
+    const changesNav = document.querySelector<HTMLElement>(
+      '.workbench-view[data-view-scope="changes"] nav[aria-label="视图"] [aria-current="page"]',
+    )!;
+    changesNav.focus();
+
+    // ⌘3 切到文件视图：焦点接到文件视图的切换按钮，不掉到页面根部。
+    mocks.loadDiff.mockClear();
+    await press("3");
+    await waitFor(() =>
+      expect(document.querySelector('.workbench-view[data-active="true"] [aria-current="page"]')?.getAttribute("data-view")).toBe("files"),
+    );
+    await tick();
+    expect(document.activeElement, "焦点没有掉到页面根部").not.toBe(document.body);
+    expect(document.activeElement?.closest('.workbench-view[data-active="true"]'), "焦点在当前激活视图里").toBeTruthy();
+    // 文件视图不画改动差异：切过去不应再读 loadDiff。
+    expect(mocks.loadDiff, "切到文件视图不重读改动差异").not.toHaveBeenCalled();
+
+    // ⌘1 切回改动：原选择仍在，差异按当前选择重读一次。
+    await press("1");
+    await waitFor(() =>
+      expect(document.querySelector('.workbench-view[data-active="true"] [aria-current="page"]')?.getAttribute("data-view")).toBe("changes"),
+    );
+    expect(document.querySelector('.file-row[title="README.md"]')?.getAttribute("aria-selected")).toBe("true");
+    await waitFor(() => expect(mocks.loadDiff).toHaveBeenCalled());
+    // 来回切不写入工作区。
+    expect(mocks.stageFiles).not.toHaveBeenCalled();
+    expect(mocks.commitChanges).not.toHaveBeenCalled();
+  });
+
   it("⌘Enter 走同一条提交命令，⌘R 刷新", async () => {
     mocks.commitChanges.mockResolvedValue({
       oid: "abcdef1234567",

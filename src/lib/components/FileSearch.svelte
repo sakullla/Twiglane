@@ -153,6 +153,22 @@
 
   let status = $derived(mode === "path" ? pathStatus() : contentStatus());
   let statusDanger = $derived(Boolean(mode === "path" ? store.pathError : store.contentError));
+  /* 正在飞的请求不该被第二个重试挤掉：按钮只在空闲时可点。 */
+  let statusBusy = $derived(mode === "path" ? store.pathBusy : store.contentBusy);
+
+  /**
+   * 读取失败的恢复入口就地放在原因旁边：同一个查询重发一次。
+   * 目录读取失败与输入的关键词无关，所以全文这边另给「重新读取目录」，
+   * 它按当前代次重读已展开的目录并自动重跑搜索，不需要用户先关掉搜索去别处找。
+   */
+  function retry(): void {
+    if (mode === "path") store.retryPathSearch();
+    else store.retryContentSearch();
+  }
+
+  function reloadDirectories(): void {
+    void store.revalidate(true);
+  }
 </script>
 
 {#snippet marked(text: string, needle: string)}
@@ -261,7 +277,30 @@
   {/if}
 
   {#if status}
-    <p class="file-search-note" class:danger={statusDanger} role="status">{status}</p>
+    <div class="file-search-note" class:danger={statusDanger} role={statusDanger ? "alert" : "status"}>
+      <span class="file-search-note-text">{status}</span>
+      {#if statusDanger}
+        <span class="file-search-note-actions">
+          <button
+            type="button"
+            class="link-btn"
+            data-search-retry={mode}
+            title={mode === "path" ? "用同一个查询重新查找一次路径" : "用同一个查询、同一个范围重新搜索一次"}
+            disabled={statusBusy}
+            onclick={retry}
+          >重试搜索</button>
+          {#if mode === "content"}
+            <button
+              type="button"
+              class="link-btn"
+              data-search-reload="directory"
+              title="按当前代次重读已展开的目录，读完后自动重跑这次搜索"
+              onclick={reloadDirectories}
+            >重新读取目录</button>
+          {/if}
+        </span>
+      {/if}
+    </div>
   {/if}
 
   {#if mode === "path" && pathRows.length > 0}

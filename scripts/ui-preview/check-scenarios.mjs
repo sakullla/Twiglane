@@ -22,16 +22,23 @@ const CHROME_CANDIDATES = [
 
 /**
  * 进入文件视图并打开 README.md 的公共前缀（Markdown 阅读场景共用）。
- * 普通打开 Markdown 默认进排版预览，所以这里等的是 .document-reader，不是 [data-file-line]。
- * OPEN_README 在这个前缀之后还要求预览已渲染；只关心「文件打开了」的场景用前缀本身。
+ * 普通打开 Markdown 默认进排版预览，所以这里等的是 .document-reader。
+ * 但「README 已打开」有两种形态：排版预览（.document-reader）与源码（[data-file-line]）——
+ * 预览/源码往返之后只剩源码形态，只认 .document-reader 会把已打开当成没打开（ready 永远不成立）。
  */
 const OPEN_README_VIEW =
   "(function () { " +
   'if (!window.__filesOpened) { const recent = document.querySelector(".welcome-recent button"); if (recent) { window.__filesOpened = true; recent.click(); return false; } } ' +
   'if (!document.querySelector(\'.workbench-view[data-active="true"] .files-view\')) { const sw = document.querySelector(\'.workbench-view[data-active="true"] [data-view="files"]\'); if (sw) { sw.click(); return false; } return false; } ' +
-  'if (!document.querySelector(".files-view .document-reader")) { const row = [...document.querySelectorAll(".file-tree-row")].find((item) => item.textContent.includes("README.md")); if (row) { row.click(); return false; } return false; } ' +
-  "return true; })()";
-const OPEN_README = "(" + OPEN_README_VIEW + " && Boolean(document.querySelector('.files-view .markdown-preview')))";
+  'if (window.__readmeOpened) return true; ' +
+  'if (document.querySelector(".files-view .document-reader") || document.querySelectorAll(".files-view [data-file-line]").length > 0) { window.__readmeOpened = true; return true; } ' +
+  'if (!window.__readmeClicked) { const row = [...document.querySelectorAll(".file-tree-row")].find((item) => item.textContent.includes("README.md")); if (row) { window.__readmeClicked = true; row.click(); } return false; } ' +
+  "return false; })()";
+/** 前缀 + 「排版预览已经解析出正文」：只看预览形态的场景用它（解析在工作线程里，元素出现不等于正文已经上屏）。 */
+const OPEN_README =
+  "(" +
+  OPEN_README_VIEW +
+  " && Boolean(document.querySelector('.files-view .markdown-preview .md-body [data-markdown-anchor]')))";
 
 const SCENARIOS = [
   {
@@ -58,13 +65,15 @@ const SCENARIOS = [
   {
     name: "文件视图：目录树与文件内容",
     url: "/",
+    // 目录树按需读取：根目录先出现，再打开 README，右侧是阅读器（默认排版预览）或源码，两种都算打开。
     ready:
       "(() => { if (!window.__filesOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__filesOpened = true; recent.click(); return false; } } " +
       "if (!document.querySelector('.workbench-view[data-active=\"true\"] .files-view')) { const sw = document.querySelector('.workbench-view[data-active=\"true\"] [data-view=\"files\"]'); if (sw) { sw.click(); return false; } return false; } " +
-      "const rows = [...document.querySelectorAll('.file-tree-row')]; if (rows.length > 0 && !document.querySelector('[data-file-line]')) { const readme = rows.find((row) => row.textContent.includes('README.md')); if (readme) { readme.click(); return false; } } " +
-      "return Boolean(document.querySelector('[data-file-line]')); })()",
+      "if (document.querySelectorAll('.file-tree-row').length === 0) return false; " +
+      "if (!window.__treeFile) { const row = [...document.querySelectorAll('.file-tree-row')].find((item) => item.textContent.includes('README.md')); if (row) { window.__treeFile = true; row.click(); } return false; } " +
+      "return Boolean(document.querySelector('.files-view .document-reader, .files-view [data-file-line], .files-view .markdown-preview')); })()",
     check:
-      "document.querySelectorAll('.file-tree-row').length >= 5 && document.body.textContent.includes('目录按需读取') && Boolean(document.querySelector('.file-tree-row[title]'))",
+      "document.querySelectorAll('.file-tree-row').length >= 5 && Boolean(document.querySelector('.file-tree-row[title]')) && Boolean(document.querySelector('.files-view .doc-path, .files-view .markdown-preview, .files-view [data-file-line]'))",
     detail:
       "document.querySelectorAll('.file-tree-row').length + ' 行；' + (document.querySelector('.file-tree-row[title]')?.getAttribute('title') ?? '')",
   },
@@ -86,7 +95,9 @@ const SCENARIOS = [
       "(() => { if (!window.__filesOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__filesOpened = true; recent.click(); return false; } } " +
       "if (!document.querySelector('.workbench-view[data-active=\"true\"] .files-view')) { const sw = document.querySelector('.workbench-view[data-active=\"true\"] [data-view=\"files\"]'); if (sw) { sw.click(); return false; } return false; } " +
       "if (window.__quickPicked) return Boolean(document.querySelector('.files-view [data-file-line]')); " +
-      "if (!window.__quickOpen) { const open = document.querySelector('.files-view [aria-label=\"按路径打开\"]'); if (open) { window.__quickOpen = true; open.click(); return false; } return false; } " +
+      // 按路径打开是低频入口，收在文件树的「更多」菜单里（工具条只常驻筛选/全仓库搜索/只看改动）。
+      "if (!window.__quickOpen) { const more = document.querySelector('.files-view [aria-label=\"更多文件树选项\"]'); if (!more) return false; more.click(); window.__quickOpen = true; return false; } " +
+      "if (!document.querySelector('#file-quick-open')) { const item = [...document.querySelectorAll('[role=\"menuitem\"]')].find((node) => node.textContent.includes('按路径打开')); if (!item) return false; item.click(); return false; } " +
       "const input = document.querySelector('#file-quick-open'); if (!input) return false; " +
       "if (input.value !== 'util') { input.value = 'util'; input.dispatchEvent(new Event('input', { bubbles: true })); return false; } " +
       "const option = [...document.querySelectorAll('.file-search-row.path')].find((item) => item.textContent.includes('util.rs')); if (!option) return false; " +
@@ -123,7 +134,7 @@ const SCENARIOS = [
       "[...document.querySelectorAll('.file-tree-row')].filter((row) => row.textContent.includes('已删除')).map((row) => row.textContent.trim()).join(' | ')",
   },
   {
-    name: "文件视图：搜索局部失败给出原因",
+    name: "文件视图：搜索局部失败给出原因与就地恢复入口",
     url: "/?search=error",
     ready:
       "(() => { if (!window.__filesOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__filesOpened = true; recent.click(); return false; } } " +
@@ -132,9 +143,23 @@ const SCENARIOS = [
       "const input = document.querySelector('#file-content-search'); if (!input) return false; " +
       "if (input.value !== 'import') { input.value = 'import'; input.dispatchEvent(new Event('input', { bubbles: true })); return false; } " +
       "return Boolean(document.querySelector('.file-search-note.danger')); })()",
+    // 失败块里必须同时有原因和可执行的恢复动作；再真的点一次「重试搜索」，
+    // 核对按钮确实重发了请求（同一条失败原因重新出现），而不是只是画了一个按钮。
     check:
-      "(document.querySelector('.file-search-note.danger')?.textContent || '').includes('搜索时有一个目录读取失败') && document.querySelectorAll('.file-search-row').length === 0",
-    detail: "document.querySelector('.file-search-note.danger')?.textContent?.trim() || ''",
+      "(async () => { " +
+      "const note = () => document.querySelector('.file-search-note.danger'); " +
+      "const area = note(); if (!area) return false; " +
+      "if (!(area.textContent || '').includes('搜索时有一个目录读取失败')) return false; " +
+      "if (document.querySelectorAll('.file-search-row').length !== 0) return false; " +
+      "const labels = [...area.querySelectorAll('button')].map((button) => button.textContent.trim()); " +
+      "if (!labels.includes('重试搜索') || !labels.includes('重新读取目录')) return false; " +
+      "const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); " +
+      "const retry = [...area.querySelectorAll('button')].find((button) => button.textContent.trim() === '重试搜索'); " +
+      "retry.click(); await wait(900); " +
+      "const again = note(); " +
+      "return Boolean(again) && (again.textContent || '').includes('目录读取失败'); })()",
+    detail:
+      "(() => { const area = document.querySelector('.file-search-note.danger'); if (!area) return ''; return (area.textContent || '').trim().slice(0, 60) + ' ｜ 按钮：' + [...area.querySelectorAll('button')].map((button) => button.textContent.trim()).join(' / '); })()",
   },
   {
     name: "文件视图：仅改动与树过滤叠加只留改动路径",
@@ -162,6 +187,60 @@ const SCENARIOS = [
     check:
       '(document.querySelector(".files-view .file-tree-status")?.textContent || "").includes("补齐结果不完整") && !document.body.textContent.includes("没有匹配的路径")',
     detail: 'document.querySelector(".files-view .file-tree-status")?.textContent?.trim() || ""',
+  },
+  {
+    name: "文件视图：树过滤补齐失败就地重试",
+    url: "/?filter=error",
+    ready:
+      '(() => { if (!window.__filesOpened) { const recent = document.querySelector(".welcome-recent button"); if (recent) { window.__filesOpened = true; recent.click(); return false; } } ' +
+      'if (!document.querySelector(\'.workbench-view[data-active="true"] .files-view\')) { const sw = document.querySelector(\'.workbench-view[data-active="true"] [data-view="files"]\'); if (sw) { sw.click(); return false; } return false; } ' +
+      'const input = document.querySelector(\'.files-view [aria-label="过滤文件树"]\'); if (!input) return false; ' +
+      'if (input.value !== "part") { input.value = "part"; input.dispatchEvent(new Event("input", { bubbles: true })); return false; } ' +
+      // 没有可显示的行时失败说明与「重试补齐」由树体空态承担（状态行不重复一遍）；有行时在状态行上。
+      'return Boolean(document.querySelector(\'.files-view .empty.compact[role="alert"] [data-search-retry="tree"], .files-view .file-tree-status.danger [data-search-retry="tree"]\')); })()',
+    // 补齐失败的说明里要带可点的「重试补齐」；点下去必须真的重发一次（同一条失败原因再出现）。
+    // 空态标题必须是「全仓库补齐失败」，不能落回「没有匹配的路径」——失败不能说成没匹配。
+    check:
+      "(async () => { " +
+      'const status = () => document.querySelector(".files-view .empty.compact[role=\\"alert\\"], .files-view .file-tree-status.danger"); ' +
+      "const area = status(); if (!area) return false; " +
+      "if (!(area.textContent || '').includes('无法遍历 vendor 目录')) return false; " +
+      "const heading = document.querySelector('.files-view .empty.compact strong')?.textContent.trim() || ''; " +
+      "if (heading === '没有匹配的路径') return false; " +
+      "const retry = area.querySelector('[data-search-retry=\"tree\"]'); if (!retry) return false; " +
+      "const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); " +
+      "retry.click(); await wait(900); " +
+      "const again = status(); " +
+      "return Boolean(again) && (again.textContent || '').includes('无法遍历 vendor 目录'); })()",
+    detail:
+      "(() => { const area = document.querySelector('.files-view .empty.compact[role=\"alert\"], .files-view .file-tree-status.danger'); return area ? (area.textContent || '').trim().slice(0, 60) : ''; })()",
+  },
+  {
+    name: "文件视图：文件内查找失败给出重试与重读入口",
+    url: "/?search=error",
+    // 打开文件内查找会从排版预览切到源码；源码渲染出来之前输入框会被重建，所以先等源码行出现再输入。
+    ready:
+      "(() => { if (!window.__filesOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__filesOpened = true; recent.click(); return false; } } " +
+      "if (!document.querySelector('.workbench-view[data-active=\"true\"] .files-view')) { const sw = document.querySelector('.workbench-view[data-active=\"true\"] [data-view=\"files\"]'); if (sw) { sw.click(); return false; } return false; } " +
+      "if (!window.__findOpen) { if (!document.querySelector('.files-view .markdown-preview .md-body')) { const row = [...document.querySelectorAll('.file-tree-row')].find((item) => item.textContent.includes('README.md')); if (row) { row.click(); return false; } return false; } const open = document.querySelector('.files-view [aria-label=\"在文件内搜索\"]'); if (!open) return false; window.__findOpen = true; open.click(); return false; } " +
+      "if (document.querySelectorAll('.files-view [data-file-line]').length === 0) return false; " +
+      "const input = document.querySelector('.files-view [data-search-scope=\"file\"]'); if (!input) return false; " +
+      "if (input.value !== 'import') { const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; setter.call(input, 'import'); input.dispatchEvent(new Event('input', { bubbles: true })); return false; } " +
+      "return Boolean(document.querySelector('.files-view .file-note.danger [data-search-retry=\"file\"]')); })()",
+    check:
+      "(async () => { " +
+      'const note = () => document.querySelector(".files-view .file-note.danger"); ' +
+      "const area = note(); if (!area) return false; " +
+      "if (!(area.textContent || '').includes('目录读取失败')) return false; " +
+      "const labels = [...area.querySelectorAll('button')].map((button) => button.textContent.trim()); " +
+      "if (!labels.includes('重试查找') || !labels.includes('重新读取文件')) return false; " +
+      "const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); " +
+      "const retry = [...area.querySelectorAll('button')].find((button) => button.textContent.trim() === '重试查找'); " +
+      "retry.click(); await wait(900); " +
+      "const again = note(); " +
+      "return Boolean(again) && (again.textContent || '').includes('目录读取失败'); })()",
+    detail:
+      "(() => { const area = document.querySelector('.files-view .file-note.danger'); if (!area) return ''; return (area.textContent || '').trim().slice(0, 60) + ' ｜ 按钮：' + [...area.querySelectorAll('button')].map((button) => button.textContent.trim()).join(' / '); })()",
   },
   {
     name: "改动视图：标记已审阅并隐藏已审阅",
@@ -235,16 +314,19 @@ const SCENARIOS = [
   {
     name: "文档阅读：预览与源码往返不离开这个文件",
     url: "/",
+    // 切到源码后 markdown-preview 就没了，所以「已打开过一次预览」要记在标志上，
+    // 不能每次重算 OPEN_README：否则切完源码那一步永远不成立。
     ready:
-      "(() => { if (!" +
+      "(() => { if (!window.__readerReady) { if (!" +
       OPEN_README +
-      ") return false; " +
+      ") return false; window.__readerReady = true; } " +
       "if (!window.__toSource) { const button = document.querySelector('.files-view [aria-label=\"查看这个 Markdown 的源码\"]'); if (!button) return false; window.__toSource = true; button.click(); return false; } " +
       // 源码可能是文档阅读器里的分页源码（.doc-source-scroll），也可能是文件视图自己的分页源码（[data-file-line]）。
       "return Boolean(document.querySelector('.files-view .doc-source-scroll')) || document.querySelectorAll('.files-view [data-file-line]').length > 0; })()",
     check:
-      "(() => { const path = document.querySelector('.files-view .doc-path')?.getAttribute('title') || ''; const back = document.querySelector('.files-view [aria-label=\"预览这个 Markdown 文档\"]'); if (!back) return false; back.click(); return path.endsWith('README.md'); })()",
-    detail: "document.querySelector('.files-view .doc-path')?.getAttribute('title') || ''",
+      // 源码形态下阅读器不在，路径要从文件视图自己的标题里读；点「预览」后再看它是否还是同一个文件。
+      "(() => { const title = document.querySelector('.files-view .file-title')?.getAttribute('title') || ''; const back = document.querySelector('.files-view [aria-label=\"预览这个 Markdown 文档\"]'); if (!back) return false; back.click(); return title.endsWith('README.md'); })()",
+    detail: "document.querySelector('.files-view .file-title')?.getAttribute('title') || document.querySelector('.files-view .doc-path')?.getAttribute('title') || ''",
   },
   {
     name: "文档阅读：相对链接留在同一阅读器里打开目标",
@@ -256,7 +338,12 @@ const SCENARIOS = [
       "if (!window.__linkClicked) { const link = [...document.querySelectorAll('.files-view .md-body a')].find((item) => item.textContent.includes('快速开始')); if (!link) return false; window.__linkClicked = true; link.click(); return false; } " +
       "return (document.querySelector('.files-view .doc-path')?.getAttribute('title') || '').includes('getting-started.md'); })()",
     check:
-      "(() => { const body = document.querySelector('.files-view .markdown-preview .md-body'); const reader = document.querySelector('.files-view .document-reader'); return Boolean(body) && (body.textContent || '').includes('快速开始') && Boolean(reader); })()",
+      // 目标文档同样要等工作线程解析完：阅读器与路径先到位，正文才逐段上屏。
+      "(async () => { const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); " +
+      "for (let attempt = 0; attempt < 40; attempt += 1) { " +
+      "const body = document.querySelector('.files-view .markdown-preview .md-body'); const reader = document.querySelector('.files-view .document-reader'); " +
+      "if (body && (body.textContent || '').includes('快速开始') && reader) return true; " +
+      "await wait(150); } return false; })()",
     detail: "document.querySelector('.files-view .doc-path')?.getAttribute('title') || ''",
   },
   {

@@ -833,6 +833,11 @@ export function createFilesStore(deps: FilesStoreDeps) {
     void completeFilter();
   }
 
+  /** 树过滤补齐失败后的就地重试：不要求用户改过滤词或重开视图。 */
+  function retryFilter(): void {
+    void completeFilter();
+  }
+
   /**
    * 树过滤的全局补齐：已加载部分本地过滤，其余靠路径搜索补齐未展开的匹配。
    * 仅改动模式不补齐全仓：改动树本身就列出全部改动文件，补全仓只会混进非改动的路径。
@@ -894,6 +899,14 @@ export function createFilesStore(deps: FilesStoreDeps) {
     void searchPaths();
   }
 
+  /**
+   * 失败后的就地重试：原因只说明「这一次没读到」，不是「永远读不到」。
+   * 用户不必先改关键词、关掉搜索或去「更多」菜单里另找入口，才能重发同一个请求。
+   */
+  function retryPathSearch(): void {
+    void searchPaths();
+  }
+
   /** 路径快速打开：只查路径（文件与派生目录），不读任何文件内容。 */
   async function searchPaths(retries = 1): Promise<void> {
     const queryNow = pathQuery.trim();
@@ -943,6 +956,11 @@ export function createFilesStore(deps: FilesStoreDeps) {
 
   function setContentQuery(next: string): void {
     contentQuery = next;
+    void searchContent();
+  }
+
+  /** 全文搜索失败后的就地重试：同一个查询、同一个范围，只重发这一次。 */
+  function retryContentSearch(): void {
     void searchContent();
   }
 
@@ -1369,6 +1387,9 @@ export function createFilesStore(deps: FilesStoreDeps) {
     setScopeKind,
     setSearchIgnored,
     setChangedOnly,
+    retryPathSearch,
+    retryContentSearch,
+    retryFilter,
     clearLineTarget,
     clearSearches: resetSearches,
     back,

@@ -314,6 +314,18 @@ const ok = async <T>(value: T, ms?: number) => {
   return value;
 };
 
+/**
+ * 本地提交在 mock 里的落地效果：已提交的暂存项离开改动列表，领先计数前进一位，代次递增。
+ * 「提交到本地」和「提交并推送」的本地那一步共用它，两条路径提交后的界面状态才会一致。
+ */
+function applyLocalCommit(): void {
+  files = files
+    .filter((item) => item.unstaged !== "none" || item.untracked || item.unmerged)
+    .map((item) => ({ ...item, staged: item.unmerged ? item.staged : "none" }));
+  generation += 1;
+  branch.ahead += 1;
+}
+
 /** 远程操作：可以被 cancelRemote 中途停下，用来预览「取消」。 */
 let remoteAbort: (() => void) | null = null;
 function slowRemote<T>(finish: () => T, ms: number, label: string): Promise<T> {
@@ -477,15 +489,16 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     if (previewParams.get("commit") === "error") {
       return Promise.reject({ code: "commit_hook", generation, message: COMMIT_FAILURE });
     }
-    files = files.filter((item) => item.unstaged !== "none" || item.untracked || item.unmerged).map((item) => ({ ...item, staged: item.unmerged ? item.staged : "none" }));
-    generation += 1;
-    branch.ahead += 1;
+    applyLocalCommit();
     return ok({ oid: "abcdef1234567", generation, branch: branch.name, summary: `已提交 abcdef1：${message.split("\n")[0]}`, files: [], pushed: false, snapshot: snapshot() }, 400);
   },
   commitAndPush: () => {
     if (previewParams.get("commit") === "error") {
       return Promise.reject({ code: "commit_hook", generation, message: COMMIT_FAILURE });
     }
+    // 「先提交再推送」和「只提交」在本地那一步是同一件事：不落地这一步，推送失败的界面
+    // 就会一边说「本地提交 abc 已完成」、一边留着 3 个文件与旧的领先计数。
+    applyLocalCommit();
     return ok({
       committed: true,
       pushed: false,
@@ -848,6 +861,10 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     generation: number,
   ) => {
     // ?filter=truncated 演示树过滤的全仓补齐被截断：界面必须说结果不完整，而不是「没有更多匹配」。
+    // ?filter=error 演示补齐整体失败：界面要给原因和就地重试，而不是只说「没有匹配的路径」。
+    if (previewParams.get("filter") === "error") {
+      return Promise.reject({ code: "io", message: "无法遍历 vendor 目录。" });
+    }
     if (previewParams.get("filter") === "truncated") {
       const entries = Array.from({ length: 70 }, (_item, index) => ({
         path: `vendor/generated/part-${String(index).padStart(2, "0")}.ts`,

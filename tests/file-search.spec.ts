@@ -519,6 +519,32 @@ describe("目录树全局过滤的状态", () => {
     expect(screen.queryByText(/补齐也没有找到更多路径/)).toBeNull();
   });
 
+  it("补齐失败时就地重试同一个过滤词，不用改词或重开视图", async () => {
+    treeDirs();
+    repositoryPathSearch.mockRejectedValue({ code: "io", message: "无法遍历 src 目录。" });
+    render(RepositoryFiles, { props: viewProps() as never });
+    await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
+    await fireEvent.input(screen.getByRole("textbox", { name: "过滤文件树" }), { target: { value: "part" } });
+    await waitFor(() => expect(screen.getAllByText(/全仓库补齐失败/).length).toBeGreaterThan(0));
+
+    repositoryPathSearch.mockResolvedValue({
+      generation: 4,
+      query: "part",
+      directory: null,
+      includeIgnored: false,
+      scanned: 3,
+      entries: pathEntries(2),
+      truncated: false,
+      message: null,
+    });
+    const calls = repositoryPathSearch.mock.calls.length;
+    await fireEvent.click(screen.getAllByRole("button", { name: "重试补齐" })[0]);
+    // 同一个过滤词原样重发：不是让用户先改词，也不是靠换视图触发。
+    await waitFor(() => expect(repositoryPathSearch).toHaveBeenLastCalledWith(repoPath, "part", null, false, 200, 4, expect.any(Number)));
+    expect(repositoryPathSearch.mock.calls.length).toBeGreaterThan(calls);
+    await waitFor(() => expect(screen.queryByText(/全仓库补齐失败/)).toBeNull());
+  });
+
   it("选中目录变化后按新目录重查，结果范围与界面一致", async () => {
     treeDirs();
     repositoryContentSearch.mockResolvedValue(contentSearch());
@@ -567,6 +593,59 @@ describe("目录树全局过滤的状态", () => {
         expect.any(Number),
       ),
     );
+  });
+});
+
+/**
+ * 失败状态不能只有一句原因：R2 要求「失败时给出可执行的恢复方式」，R6 要求
+ * 需要用户处理的错误在相关位置能找到恢复入口，所以恢复动作必须和原因在同一处。
+ */
+describe("查找失败到就地恢复的路径（R2/R6）", () => {
+  function alertContaining(needle: string): HTMLElement | undefined {
+    return screen.getAllByRole("alert").find((node) => (node.textContent ?? "").includes(needle));
+  }
+
+  it("全文搜索失败时原因旁就能重发同一个查询", async () => {
+    treeDirs();
+    repositoryContentSearch.mockRejectedValue({ code: "io", message: "无法读取 src/b.ts。" });
+    render(RepositoryFiles, { props: viewProps() as never });
+    await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
+
+    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    await fireEvent.input(screen.getByRole("textbox", { name: "全仓库文本搜索" }), { target: { value: "panel" } });
+    await waitFor(() => expect(alertContaining("无法读取 src/b.ts。")).toBeTruthy());
+    const alert = alertContaining("无法读取 src/b.ts。")!;
+    // 恢复入口与原因在同一个失败块里：不需要先关闭搜索再去别处找。
+    expect(within(alert).getByRole("button", { name: "重试搜索" })).toBeTruthy();
+
+    repositoryContentSearch.mockResolvedValue(
+      contentSearch({ matches: [{ path: "src/a.ts", line: 2, column: 1, text: "panel" }] }),
+    );
+    await fireEvent.click(within(alert).getByRole("button", { name: "重试搜索" }));
+    await waitFor(() => expect(repositoryContentSearch).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("option", { name: /panel/ })).toBeTruthy();
+    expect(screen.queryByText("无法读取 src/b.ts。")).toBeNull();
+  });
+
+  it("全文搜索失败时可重新读取目录，读完后自动重跑这次搜索", async () => {
+    treeDirs();
+    repositoryContentSearch.mockRejectedValue({ code: "io", message: "搜索时有一个目录读取失败。" });
+    render(RepositoryFiles, { props: viewProps() as never });
+    await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
+
+    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    await fireEvent.input(screen.getByRole("textbox", { name: "全仓库文本搜索" }), { target: { value: "panel" } });
+    await waitFor(() => expect(alertContaining("搜索时有一个目录读取失败。")).toBeTruthy());
+    const alert = alertContaining("搜索时有一个目录读取失败。")!;
+
+    const readsBefore = repositoryDirectory.mock.calls.length;
+    repositoryContentSearch.mockResolvedValue(
+      contentSearch({ matches: [{ path: "src/a.ts", line: 2, column: 1, text: "panel" }] }),
+    );
+    await fireEvent.click(within(alert).getByRole("button", { name: "重新读取目录" }));
+    await waitFor(() => expect(repositoryDirectory.mock.calls.length).toBeGreaterThan(readsBefore));
+    await waitFor(() => expect(repositoryContentSearch).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("option", { name: /panel/ })).toBeTruthy();
   });
 });
 

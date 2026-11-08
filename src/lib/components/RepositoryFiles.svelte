@@ -206,6 +206,7 @@
         onChangedOnly={(next) => store.setChangedOnly(next)}
         onSearch={openSearch}
         onLocate={(path) => void store.locate(path, null)}
+        onRetryFilter={() => store.retryFilter()}
         onToggle={toggleRow}
         onSelect={selectRow}
         onSplit={splitRow}

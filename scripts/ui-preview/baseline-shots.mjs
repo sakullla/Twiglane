@@ -7,7 +7,7 @@
 // manifest.json 默认写到 --out 的上一级（可用 --manifest 覆盖），逐张记录 bytes 与 sha256，
 // 因此提交后的证据可以由这个脚本原样重建与校验。
 //
-// 用法：node scripts/ui-preview/baseline-shots.mjs [--base http://127.0.0.1:1430] [--out docs/verification/ui-ux-markdown-2026-11-08/after] [--manifest <path>]
+// 用法：node scripts/ui-preview/baseline-shots.mjs [--base http://127.0.0.1:1430] [--out docs/verification/ui-ux-markdown-2026-11-08/after] [--manifest <path>] [--failure-targets dark:1280x840,light:1280x840,dark:900x600,light:900x600]
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -314,7 +314,7 @@ const FAILURE_STATES = [
   {
     view: "search-error",
     query: "search=error",
-    state: "搜索局部失败：显示失败原因而不是「没有匹配」，结果区不伪造命中",
+    state: "搜索局部失败：显示失败原因而不是「没有匹配」，原因旁就地给出「重试搜索 / 重新读取目录」",
     run: async (cdp, sessionId) => {
       await openRepository(cdp, sessionId, "Boolean(document.querySelector('.view-switcher'))", "工作区");
       await evaluate(cdp, sessionId, click('[data-view="files"]'));
@@ -324,16 +324,74 @@ const FAILURE_STATES = [
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('#file-content-search'))", "全文搜索输入");
       await evaluate(cdp, sessionId, typeInto("#file-content-search", "import"));
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('.file-search-note.danger'))", "搜索失败原因");
+      await waitFor(
+        cdp,
+        sessionId,
+        "Boolean(document.querySelector('.file-search-note.danger [data-search-retry=\"content\"]'))",
+        "搜索失败的就地重试入口",
+      );
+      await pause(350);
+    },
+  },
+  {
+    view: "filter-error",
+    query: "filter=error",
+    state: "树过滤补齐失败：说明补齐失败而不是「没有匹配」，并给「重试补齐」",
+    run: async (cdp, sessionId) => {
+      await openRepository(cdp, sessionId, "Boolean(document.querySelector('.view-switcher'))", "工作区");
+      await evaluate(cdp, sessionId, click('[data-view="files"]'));
+      await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view'))", "文件视图");
+      await pause(600);
+      await evaluate(cdp, sessionId, typeInto('.files-view [aria-label="过滤文件树"]', "part"));
+      // 没有可显示的行时，失败说明与「重试补齐」在树体空态里（状态行不重复一遍）。
+      await waitFor(
+        cdp,
+        sessionId,
+        "Boolean(document.querySelector('.files-view .empty.compact[role=\"alert\"] [data-search-retry=\"tree\"]'))",
+        "补齐失败的就地重试入口",
+      );
+      await pause(350);
+    },
+  },
+  {
+    view: "find-error",
+    query: "search=error",
+    state: "文件内查找失败：原因旁就地给出「重试查找 / 重新读取文件」",
+    run: async (cdp, sessionId) => {
+      await openRepository(cdp, sessionId, "Boolean(document.querySelector('.view-switcher'))", "工作区");
+      await evaluate(cdp, sessionId, click('[data-view="files"]'));
+      await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view'))", "文件视图");
+      await pause(600);
+      await openReadme(cdp, sessionId, "Boolean(document.querySelector('.files-view .markdown-preview .md-body'))", "README 打开");
+      await evaluate(cdp, sessionId, click('.files-view [aria-label="在文件内搜索"]'));
+      await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view [data-search-scope=\"file\"]'))", "文件内查找输入");
+      await evaluate(cdp, sessionId, typeInto('.files-view [data-search-scope="file"]', "import"));
+      await waitFor(cdp, sessionId, "Boolean(document.querySelector('.file-note.danger [data-search-retry=\"file\"]'))", "文件内查找的失败原因与重试入口");
       await pause(350);
     },
   },
 ];
 
 /**
- * 失败态采集组合：与已提交证据一致（两主题 1280×840 + 深色 900×600）。
+ * 失败态采集组合：默认与已提交证据一致（两主题 1280×840 + 深色 900×600）。
+ * 用 --failure-targets 显式指定（逗号分隔的 `<theme>:<size>`），四种组合都采是：
+ * --failure-targets dark:1280x840,light:1280x840,dark:900x600,light:900x600
  * 正常视图仍覆盖两主题 × 两尺寸；失败态在 README 里逐张对应需求，不混进同数据对照。
  */
-const FAILURE_TARGETS = new Set(["dark:1280x840", "light:1280x840", "dark:900x600"]);
+const DEFAULT_FAILURE_TARGETS = ["dark:1280x840", "light:1280x840", "dark:900x600"];
+const failureTargets = new Set(
+  readArg("--failure-targets", DEFAULT_FAILURE_TARGETS.join(","))
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean),
+);
+/** 拼错的组合不能安静地少采：明确列出可选值，避免「跑完了但少了一组」被当成脚本行为。 */
+const KNOWN_TARGETS = new Set(THEMES.flatMap((theme) => SIZES.map((size) => `${theme}:${size.label}`)));
+for (const target of failureTargets) {
+  if (!KNOWN_TARGETS.has(target)) {
+    console.warn(`忽略未知的失败态组合 ${target}；可选：${[...KNOWN_TARGETS].join(", ")}`);
+  }
+}
 
 /** flatten 会话下每个 target 的事件都带 sessionId；只统计本次截图所属 target。 */
 function targetEvents(cdp, sessionId) {
@@ -398,7 +456,7 @@ async function main() {
     groups: {
       baseline: "start/changes/history/settings/merge：与 01 基线同数据、同主题、同尺寸",
       markdown: "files-markdown/files-markdown-toc：本轮新增能力样例，单独成组，不参与优化前后对照",
-      failure: "关键失败/未知状态：sync-unchecked/sync-stale/commit-error/commit-push-error/doc-error/doc-large/search-error，逐张对应需求",
+      failure: "关键失败/未知状态：sync-unchecked/sync-stale/commit-error/commit-push-error/doc-error/doc-large/search-error/filter-error/find-error，逐张对应需求",
     },
     shots: [],
   };
@@ -441,6 +499,9 @@ async function main() {
             theme,
             size: size.label,
             view,
+            // group 逐张写进 manifest：尾部的 counts() 与文档的「对照 / Markdown / 失败态」都按它统计，
+            // 只写 state 文字时分组无法逐条校验。
+            group,
             state,
             bytes: buffer.length,
             sha256: crypto.createHash("sha256").update(buffer).digest("hex"),
@@ -476,6 +537,13 @@ async function main() {
         await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view'))", "文件视图");
         await pause(600);
         await openReadme(cdp, sessionId, "Boolean(document.querySelector('.files-view .markdown-preview .md-body'))", "Markdown 预览");
+        // 解析在工作线程里：预览容器出现不等于正文已经上屏，截图要等标题锚点渲染出来。
+        await waitFor(
+          cdp,
+          sessionId,
+          "Boolean(document.querySelector('.files-view .markdown-preview .md-body [data-markdown-anchor]'))",
+          "Markdown 正文",
+        );
         await pause(400);
         await shot("files-markdown", "markdown", "Markdown 默认排版预览");
         await evaluate(
@@ -495,7 +563,7 @@ async function main() {
 
         // 关键失败/未知状态：同一 mock 数据上的参数化场景，逐项对应 R3/R4/R6。
         // 组合固定为两主题 1280×840 + 深色 900×600，与 README 的证据表一致。
-        if (FAILURE_TARGETS.has(`${theme}:${size.label}`)) {
+        if (failureTargets.has(`${theme}:${size.label}`)) {
           for (const failure of FAILURE_STATES) {
             await cdp.send("Page.navigate", { url: `${base}/?${failure.query}` }, sessionId);
             await waitFor(cdp, sessionId, "Boolean(document.querySelector('.welcome-recent button'))", `${failure.view} 起始页`);

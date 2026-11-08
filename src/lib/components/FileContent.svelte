@@ -622,6 +622,16 @@
     }
   }
 
+  /**
+   * 文件内查找失败的第二个恢复入口：先按当前内容重读这个文件，再按新内容重找一次。
+   * 只重读不重找会把搜索框留在手里却什么都不显示，等于又让用户自己再点一次。
+   */
+  async function reloadAndSearch(): Promise<void> {
+    if (!path) return;
+    await read(path, 0, false, generation);
+    if (searchQuery.trim()) await runSearch();
+  }
+
   function openSearch(): void {
     // 文件内查找只在源码上有意义：从预览发起时先切到源码，搜索框才不会被预览盖住。
     if (isMarkdown) setDocumentMode("source");
@@ -889,7 +899,24 @@
         </button>
       </div>
       {#if searchError}
-        <p class="file-note danger" role="alert">{searchError}</p>
+        <p class="file-note danger" role="alert">
+          <span>{searchError}</span>
+          <button
+            type="button"
+            class="link-btn"
+            data-search-retry="file"
+            title="用同一个关键词在这个文件的当前内容里重新查找一次"
+            disabled={searching}
+            onclick={() => void runSearch()}
+          >重试查找</button>
+          <button
+            type="button"
+            class="link-btn"
+            data-search-reload="file"
+            title="重新读取当前文件内容，读完后按当前内容重新查找"
+            onclick={() => void reloadAndSearch()}
+          >重新读取文件</button>
+        </p>
       {/if}
       {#if searchResult && searchResult.matches.length > 0}
         <div class="file-search-results" role="listbox" aria-label="文件内匹配">

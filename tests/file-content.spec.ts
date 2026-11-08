@@ -168,6 +168,48 @@ describe("代码页", () => {
     await view.rerender(props() as never);
   });
 
+  it("文件内搜索失败时就地重试，或重读文件后重找", async () => {
+    repositoryFileContent.mockResolvedValue(text());
+    render(FileContent, { props: props() as never });
+    await fireEvent.click(await screen.findByRole("button", { name: "在文件内搜索" }));
+    const input = await screen.findByLabelText("文件内搜索关键词");
+
+    repositoryContentSearch.mockRejectedValue({ code: "io", message: "无法在这个文件里搜索。" });
+    await fireEvent.input(input, { target: { value: "value" } });
+    await waitFor(() => expect(screen.getByText("无法在这个文件里搜索。")).toBeTruthy());
+    // 原因旁边就是两个恢复动作：重发同一个关键词，或先重读文件再重找。
+    expect(screen.getByRole("button", { name: "重试查找" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "重新读取文件" })).toBeTruthy();
+
+    repositoryContentSearch.mockResolvedValue({
+      generation: 4,
+      query: "value",
+      scope: "file",
+      scopePath: "src/App.ts",
+      matches: [{ path: "src/App.ts", line: 3, column: 7, text: "const value = 1;" }],
+      filesScanned: 1,
+      skipped: [],
+      skippedFiles: 0,
+      truncated: false,
+      textTruncated: false,
+      message: null,
+    } satisfies RepositoryContentSearch);
+    await fireEvent.click(screen.getByRole("button", { name: "重试查找" }));
+    expect(await screen.findByText(/1 处匹配/)).toBeTruthy();
+    expect(screen.queryByText("无法在这个文件里搜索。")).toBeNull();
+
+    // 第二个入口：重读文件本身，读完后自动按当前内容重找一次，不停在「只重读不重找」。
+    repositoryContentSearch.mockRejectedValueOnce({ code: "io", message: "无法在这个文件里搜索。" });
+    await fireEvent.input(input, { target: { value: "value " } });
+    await waitFor(() => expect(screen.getByText("无法在这个文件里搜索。")).toBeTruthy());
+    const readsBefore = repositoryFileContent.mock.calls.length;
+    const searchesBefore = repositoryContentSearch.mock.calls.length;
+    await fireEvent.click(screen.getByRole("button", { name: "重新读取文件" }));
+    await waitFor(() => expect(repositoryFileContent.mock.calls.length).toBeGreaterThan(readsBefore));
+    await waitFor(() => expect(repositoryContentSearch.mock.calls.length).toBeGreaterThan(searchesBefore));
+    expect(await screen.findByText(/1 处匹配/)).toBeTruthy();
+  });
+
   it("A 文件搜索未返回就切到 B：旧匹配不显示、也不按旧行号跳行", async () => {
     repositoryFileContent.mockResolvedValue(text());
     let finishSearch!: (value: RepositoryContentSearch) => void;

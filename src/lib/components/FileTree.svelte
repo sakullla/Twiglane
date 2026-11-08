@@ -42,6 +42,8 @@
     onSearch?: (mode: "path" | "content") => void;
     /** 定位一个树过滤补齐出来的路径（它不在当前已加载的树里）。 */
     onLocate?: (path: string) => void;
+    /** 补齐失败后的就地重试：同一个过滤词重发一次全仓库补齐。 */
+    onRetryFilter?: () => void;
     onToggle: (row: FileTreeRow) => void;
     onSelect: (row: FileTreeRow) => void;
     onSplit: (row: FileTreeRow) => void;
@@ -70,6 +72,7 @@
     onChangedOnly,
     onSearch,
     onLocate,
+    onRetryFilter,
     onToggle,
     onSelect,
     onSplit,
@@ -413,9 +416,21 @@
   </div>
 </div>
 
-{#if filterNote}
-  <p class="file-tree-status" class:danger={filterNote.danger} role={filterNote.danger ? "alert" : "status"}>{filterNote.text}</p>
-{:else if includeIgnored}
+{#if filterNote && !(filterError && rows.length === 0)}
+  <p class="file-tree-status" class:danger={filterNote.danger} role={filterNote.danger ? "alert" : "status"}>
+    <span>{filterNote.text}</span>
+    {#if filterNote.danger && onRetryFilter}
+      <button
+        type="button"
+        class="link-btn"
+        data-search-retry="tree"
+        title="用同一个过滤词重跑一次全仓库补齐"
+        disabled={filterBusy}
+        onclick={onRetryFilter}
+      >重试补齐</button>
+    {/if}
+  </p>
+{:else if includeIgnored && !query}
   <p class="file-tree-status" role="status">
     <Icon name="eye" size={12} /><span>正在显示被忽略的文件</span>
     <button type="button" class="link-btn" onclick={() => onIncludeIgnored(false)}>隐藏</button>
@@ -453,6 +468,9 @@
           <span class="empty-icon err"><Icon name="alert-circle" size={22} /></span>
           <strong>全仓库补齐失败</strong>
           <p>{filterError}已展开的目录里也没有匹配——这不代表仓库里没有匹配的路径。</p>
+          {#if onRetryFilter}
+            <button type="button" class="btn btn-secondary btn-sm" data-search-retry="tree" onclick={onRetryFilter}>重试补齐</button>
+          {/if}
         </div>
       {:else if filterBusy}
         <div class="empty compact" role="status" aria-busy="true">

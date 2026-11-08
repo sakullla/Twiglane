@@ -632,6 +632,21 @@
     if (searchQuery.trim()) await runSearch();
   }
 
+  /**
+   * 恢复入口点击后失败块会先被撤下、失败返回后再重建，焦点不能掉到 body。
+   * 重试期间把焦点留在查找框：键盘用户不必从页面开头重新 Tab，失败再次出现时
+   * role="alert" 会播报原因，「重试查找 / 重新读取文件」也仍可 Tab 回去。
+   */
+  async function retrySearch(): Promise<void> {
+    await runSearch();
+    searchInput?.focus();
+  }
+
+  async function retryReloadAndSearch(): Promise<void> {
+    await reloadAndSearch();
+    searchInput?.focus();
+  }
+
   function openSearch(): void {
     // 文件内查找只在源码上有意义：从预览发起时先切到源码，搜索框才不会被预览盖住。
     if (isMarkdown) setDocumentMode("source");
@@ -907,14 +922,14 @@
             data-search-retry="file"
             title="用同一个关键词在这个文件的当前内容里重新查找一次"
             disabled={searching}
-            onclick={() => void runSearch()}
+            onclick={() => void retrySearch()}
           >重试查找</button>
           <button
             type="button"
             class="link-btn"
             data-search-reload="file"
             title="重新读取当前文件内容，读完后按当前内容重新查找"
-            onclick={() => void reloadAndSearch()}
+            onclick={() => void retryReloadAndSearch()}
           >重新读取文件</button>
         </p>
       {/if}

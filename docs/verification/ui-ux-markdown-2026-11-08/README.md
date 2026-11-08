@@ -14,7 +14,7 @@
 3. 左栏视图顺序按需求改为「改动、历史、文件」，三个视图各自保留选择与位置；基线为「改动、文件、历史」。两张同尺寸截图可在同一行按钮上直接对比。
 4. Markdown 在文件视图里的默认形态从「带行号源码」变为「排版预览 + 可收起目录」。基线 `evidence/ui-baseline-files/dark-900x600-files-markdown.png` 只有源码；候选 `after/dark-900x600-files-markdown.png`、`after/dark-900x600-files-markdown-toc.png` 为同一文件（mock `README.md`）的预览与目录。
 5. 提交区失败原因在长文本时可就地展开换行读全（键盘可达），草稿与暂存不动：`after/<theme>-1280x840-commit-error.png`、`after/dark-900x600-commit-error.png` 已展开显示钩子拒绝全文；「提交并推送」失败时两个阶段分开说明、长推送错误可展开且保留「重试推送」入口，见 `after/<theme>-1280x840-commit-push-error.png`、`after/dark-900x600-commit-push-error.png`（R3 验收 2/4、R6）。
-6. 文档读取失败、超过排版预览上限与四处查找的失败状态都有界面证据，且都给出可执行的恢复入口：文档侧是「重新读取 / 查看源码」（`after/*-doc-error.png`、`after/*-doc-large.png`，R4 验收 5），查找侧是原因旁就地放的动作——全仓库文本搜索「重试搜索 / 重新读取目录」（`after/*-search-error.png`）、树过滤补齐「重试补齐」（`after/*-filter-error.png`）、文件内查找「重试查找 / 重新读取文件」（`after/*-find-error.png`）（R2 失败边界、R6）。三种查找失败都不会把失败说成「没有匹配」；`check-scenarios.mjs` 会真的点一次恢复按钮，核对同一条失败重新出现（即请求确实重发了），而不只是检查按钮画出来了。
+6. 文档读取失败、超过排版预览上限与三处查找的失败状态有界面证据，且都给出可执行的恢复入口：文档侧是「重新读取 / 查看源码」（`after/*-doc-error.png`、`after/*-doc-large.png`，R4 验收 5），查找侧是原因旁就地放的动作——全仓库文本搜索「重试搜索 / 重新读取目录」（`after/*-search-error.png`）、树过滤补齐「重试补齐」（`after/*-filter-error.png`）、文件内查找「重试查找 / 重新读取文件」（`after/*-find-error.png`）（R2 失败边界、R6）。三种查找失败都不会把失败说成「没有匹配」。四处查找里**「按路径打开」的失败恢复没有界面证据**：它复用同一个恢复动作与 `?search=error` 之外的分支，mock 也没有单独的路径搜索失败参数，因此只由 `tests/file-search.spec.ts` 的用例覆盖（见「未覆盖与限制」）。恢复动作能真正重发请求由单元测试的调用计数证明；`check-scenarios.mjs` 另有 DOM 侧核对，范围见「可复跑入口」。
 7. 起始页、设置、任务弹窗与命令面板的标题层级改为共用 `--text-eyebrow`、`--tracking-eyebrow`、`--text-section-title` 三枚令牌，`tests/tokens.spec.ts` 断言这些选择器只引用令牌、不写死字号字距。
 
 ## 操作路径对照（R2 验收 4）
@@ -58,7 +58,7 @@
 | 树过滤补齐失败 `?filter=error` | `after/<theme>-<size>-filter-error.png` | R2 失败边界 / R6：补齐失败时说「全仓库补齐失败」而不是「没有匹配的路径」，空态里就地给「重试补齐」 |
 | 文件内查找失败 `?search=error` + 打开 README + 文件内查找 | `after/<theme>-<size>-find-error.png` | R2 失败边界 / R6：文件内查找失败时原因旁就地给「重试查找 / 重新读取文件」，重读文件后会按新内容重找 |
 
-失败态没有混入「同数据前后对照」：`manifest.json` 以 `group` 逐张分成 `baseline` / `markdown` / `failure`，`state` 写清进入参数与画面重点；对照表只统计 `group: "baseline"`。前三行查找失败证据同时是四处查找语义（R2）的失败侧证据：三种查找各有自己的范围，也各有自己的失败恢复入口。
+失败态没有混入「同数据前后对照」：`manifest.json` 以 `group` 逐张分成 `baseline` / `markdown` / `failure`，`state` 写清进入参数与画面重点；对照表只统计 `group: "baseline"`。上表**最后三行**（第 7–9 行，`search-error` / `filter-error` / `find-error`）是查找失败证据，也是四处查找语义（R2）的失败侧证据：每种查找各有自己的范围与失败恢复入口；按路径打开没有失败态截图，原因见第 6 条。
 
 ## Markdown 新样例（单独成组，不参与前后对照）
 
@@ -98,14 +98,14 @@ node scripts/performance/run.mjs --ui
 
 本轮已提交的 64 张就是上面第 2 条命令的输出（exit 0，manifest 由该次运行写出）；27 个场景是第 3 条命令的输出（27/27，exit 0），命令与结果见下节。
 
-`check-scenarios.mjs` 里的失败态场景不只断言「原因文字在」：它们会真的点一次恢复按钮（`重试搜索` / `重新读取目录` / `重试补齐` / `重试查找`），再核对同一条失败重新出现，确认恢复入口是可执行的而不是摆设；`?search=error` 场景同时断言结果区没有伪造命中。
+`check-scenarios.mjs` 的失败态场景会真的点一次恢复按钮再核对同一条失败重新出现：点击的是 `重试搜索`、`重试补齐`、`重试查找` 三个按钮；`重新读取目录` 与 `重新读取文件` 只断言按钮存在且带 label，**脚本没有点击它们**。另外该脚本点击后只等固定时间看失败是否还在，无法区分「真的重发」与「空 handler」，所以「恢复动作确实重发了请求」由单元测试的调用计数证明（`tests/file-search.spec.ts` 的 `repositoryDirectory` / `repositoryContentSearch` 调用次数、`tests/file-content.spec.ts` 的重试与重读用例），脚本只承担 DOM 侧的可点性与文案一致性。`?search=error` 场景同时断言结果区没有伪造命中。
 
 ## 自动化检查（本次实际结果）
 
 | 检查 | 实际结果 |
 | --- | --- |
 | `npm run check`（`svelte-check`） | 通过（exit 0）：0 error / 0 warning |
-| `npm test -- --maxWorkers=2` | 通过（exit 0）：48 个文件、1162 项全部通过 |
+| `npm test -- --maxWorkers=2` | 通过（exit 0）：48 个文件、1163 项全部通过（含恢复入口点击后焦点留在搜索区的回归） |
 | `npm run build` | 通过（exit 0）：`vite build` 完成（仅既有的 chunk 体积提示） |
 | `node scripts/check-contrast.mjs` | 通过（exit 0）：1454 对（正文 1356 / 交互 90 / 含 opacity 合成 8），正文最低 4.59:1，交互边界最低 3.16:1，合成最低 4.77:1 |
 | `node scripts/ui-preview/baseline-shots.mjs --failure-targets dark:1280x840,light:1280x840,dark:900x600,light:900x600` | 通过（exit 0）：64 张截图（对照 20 / Markdown 8 / 失败态 36），manifest 由该次运行写出 |
@@ -123,3 +123,5 @@ node scripts/performance/run.mjs --ui
 - **像素与性能口径**：截图只做同尺寸同主题的定性对照（如「差异区上移约 20px」），不构成像素预算或帧率结论；性能数字来自 happy-dom 下的规模用例，不是桌面进程实测。
 - **`verify:delivery`**：仍缺 `docs/verification/report.json`（跨平台安装与运行证据），该项失败如实保留。
 - **失败态组合**：36 张失败态覆盖「深色/浅色 × 1280×840/900×600」四种组合 × 9 个状态，组合已齐；但每个状态仍是同一条 mock 故障（例如目录读取失败只有一种原因），没有覆盖多种失败原因叠加的情形。
+- **按路径打开的失败态**：`FilesStore.retryPathSearch` 的恢复动作有实现与单元测试，但 mock 没有路径搜索失败的进入参数，因此没有界面证据；四处查找里只有它的失败侧没有截图。
+- **恢复入口的键盘焦点**：重试期间焦点回到本次搜索的输入框（`FileSearch`）或文件内查找框（`FileContent`），不再掉到 body；失败再次出现时由 `role="alert"` 播报，重试按钮可 Tab 回去。该行为由 `tests/file-search.spec.ts`、`tests/file-content.spec.ts` 断言，未在真实 WebView 实机复核。

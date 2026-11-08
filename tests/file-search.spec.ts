@@ -647,6 +647,33 @@ describe("查找失败到就地恢复的路径（R2/R6）", () => {
     await waitFor(() => expect(repositoryContentSearch).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole("option", { name: /panel/ })).toBeTruthy();
   });
+
+  /**
+   * 失败块会随请求开始被撤下再重建：恢复动作点完焦点若掉到 body，键盘用户每次重试
+   * 都要从页面开头重新 Tab。R2 要求只用键盘也能连续操作，所以焦点必须留在搜索区。
+   */
+  it("点恢复动作后焦点留在搜索框，不掉到 body", async () => {
+    treeDirs();
+    repositoryContentSearch.mockRejectedValue({ code: "io", message: "搜索时有一个目录读取失败。" });
+    render(RepositoryFiles, { props: viewProps() as never });
+    await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
+
+    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    const input = screen.getByRole("textbox", { name: "全仓库文本搜索" });
+    await fireEvent.input(input, { target: { value: "panel" } });
+    await waitFor(() => expect(alertContaining("搜索时有一个目录读取失败。")).toBeTruthy());
+
+    const alert = alertContaining("搜索时有一个目录读取失败。")!;
+    await fireEvent.click(within(alert).getByRole("button", { name: "重试搜索" }));
+    await waitFor(() => expect(document.activeElement).toBe(input));
+
+    repositoryContentSearch.mockRejectedValue({ code: "io", message: "搜索时有一个目录读取失败。" });
+    await fireEvent.input(input, { target: { value: "panel " } });
+    await waitFor(() => expect(alertContaining("搜索时有一个目录读取失败。")).toBeTruthy());
+    const again = alertContaining("搜索时有一个目录读取失败。")!;
+    await fireEvent.click(within(again).getByRole("button", { name: "重新读取目录" }));
+    await waitFor(() => expect(document.activeElement).toBe(input));
+  });
 });
 
 describe("文件内搜索的代次边界", () => {

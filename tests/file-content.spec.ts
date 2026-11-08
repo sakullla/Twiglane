@@ -197,6 +197,8 @@ describe("代码页", () => {
     await fireEvent.click(screen.getByRole("button", { name: "重试查找" }));
     expect(await screen.findByText(/1 处匹配/)).toBeTruthy();
     expect(screen.queryByText("无法在这个文件里搜索。")).toBeNull();
+    // 失败块随请求撤下又重建，焦点不能掉到 body：键盘用户要能接着在查找框里操作。
+    expect(document.activeElement).toBe(screen.getByLabelText("文件内搜索关键词"));
 
     // 第二个入口：重读文件本身，读完后自动按当前内容重找一次，不停在「只重读不重找」。
     repositoryContentSearch.mockRejectedValueOnce({ code: "io", message: "无法在这个文件里搜索。" });

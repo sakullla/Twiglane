@@ -161,13 +161,26 @@
    * 目录读取失败与输入的关键词无关，所以全文这边另给「重新读取目录」，
    * 它按当前代次重读已展开的目录并自动重跑搜索，不需要用户先关掉搜索去别处找。
    */
-  function retry(): void {
+  async function retry(): Promise<void> {
     if (mode === "path") store.retryPathSearch();
     else store.retryContentSearch();
+    await restoreSearchFocus();
   }
 
-  function reloadDirectories(): void {
+  async function reloadDirectories(): Promise<void> {
     void store.revalidate(true);
+    await restoreSearchFocus();
+  }
+
+  /**
+   * 恢复入口点击后，失败块会随请求开始被撤下、失败返回后再重建；焦点不能掉到 body。
+   * 否则键盘用户每次重试都要从页面开头重新 Tab。重试期间把焦点放回本次搜索的输入框，
+   * 失败再次出现时 role="alert" 会播报原因，重试按钮也仍可 Tab 回去。
+   */
+  async function restoreSearchFocus(): Promise<void> {
+    await tick();
+    const id = mode === "path" ? "file-quick-open" : "file-content-search";
+    document.getElementById(id)?.focus();
   }
 </script>
 

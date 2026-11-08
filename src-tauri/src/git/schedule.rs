@@ -146,9 +146,69 @@ impl<R: ProcessRunner> GitScheduler<R> {
         self.run_job(job, false).await
     }
 
+    /// A multi-step read keeps one caller identity/cancellation epoch. Each inner
+    /// Git/filesystem step takes its own read permit, so no nested permit is held.
+    pub async fn read_session<T, F, Fut>(
+        &self,
+        repo_key: &str,
+        request_id: u64,
+        generation: u64,
+        work: F,
+    ) -> Result<T, AppError>
+    where
+        F: FnOnce(Arc<Shutdown>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, AppError>>,
+    {
+        let _request = RequestGuard::enter(&self.inflight, request_id)?;
+        let cancel = self.read_cancel_token();
+        let check = || {
+            let current = self.current_generation(repo_key);
+            if current != generation {
+                Err(AppError::new("stale", "仓库状态已变化，请重新读取文档。")
+                    .with_generation(current))
+            } else {
+                Ok(())
+            }
+        };
+        check()?;
+        let result = tokio::select! {
+            biased;
+            _ = self.shutdown.cancelled() => return Err(AppError::new("cancelled", "读取已关闭。")),
+            _ = cancel.cancelled() => return Err(AppError::new("cancelled", "读取已取消。")),
+            result = work(cancel.clone()) => result?,
+        };
+        check()?;
+        Ok(result)
+    }
+
     /// 与 execute 相同，但这条命令会访问远程：可由 cancel_remote 中途停止（排队中或运行中）。
     pub async fn execute_remote(&self, job: GitJob) -> Result<ScheduledOutput, AppError> {
         self.run_job(job, true).await
+    }
+
+    /// Bounded streaming consumers share the same permits, cancellation and timeout.
+    pub async fn execute_streaming_read<T, F, Fut>(
+        &self,
+        repo_key: &str,
+        request_id: u64,
+        generation: u64,
+        work: F,
+    ) -> Result<T, AppError>
+    where
+        F: FnOnce(Arc<Shutdown>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, AppError>>,
+    {
+        self.read_session(repo_key, request_id, generation, |cancel| async move {
+            let _permit = self
+                .read_limit
+                .acquire()
+                .await
+                .map_err(|_| AppError::new("cancelled", "读取调度已关闭。"))?;
+            tokio::time::timeout(self.timeout, work(cancel))
+                .await
+                .map_err(|_| AppError::new("timeout", "文档读取超时。"))?
+        })
+        .await
     }
 
     /// 文件系统阻塞读取与 Git 读取共用请求 id、并发许可、取消域和代次检查。

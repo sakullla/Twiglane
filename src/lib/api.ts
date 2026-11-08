@@ -256,10 +256,14 @@ export const api = {
   },
   filePreview: (path: string, source: PreviewSource, generation: number, download = false) =>
     invoke<FilePreview>("file_preview", { path, source, generation, download }),
+  /** 只读文档正文：`source.repository` 必须与 `path` 指向同一个仓库，否则后端返回
+   * `document_repository`，不会把新仓库里的同名文件按旧来源标注版本。首次读取时后端会把
+   * 仓库根写回 `source.repository`，后续分页/资源读取应原样复用返回的来源。 */
   repositoryDocument: (
     path: string, source: DocumentSource, generation: number, requestId: number,
     mode: "document" | "source" = "document", offset = 0, limit?: number, expectedVersion: string | null = null,
   ) => invoke<RepositoryDocument>("repository_document", { path, source, generation, requestId, mode, offset, limit, expectedVersion }),
+  /** 只读资源：与 `repositoryDocument` 相同的来源仓库校验，越仓来源返回 `document_repository`。 */
   documentResource: (path: string, source: DocumentSource, generation: number, requestId: number) =>
     invoke<FilePreview>("document_resource", { path, source, generation, requestId }),
   openDocumentUrl: (url: string) => invoke<void>("open_document_url", { url }),

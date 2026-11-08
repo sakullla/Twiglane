@@ -37,6 +37,12 @@ pub struct DocumentSource {
     /// Index-file digest, reused for every linked document and resource in this session.
     #[serde(default)]
     pub snapshot: Option<String>,
+    /// Repository root this source was read from. Optional so sources built from a diff side
+    /// (revision + path only) stay valid, but when present it is bound to the repository root
+    /// passed to the read entry points: a source from another repository is rejected instead of
+    /// silently reading a same-named file out of the newly opened repository.
+    #[serde(default)]
+    pub repository: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +105,58 @@ fn document_path(path: &str) -> Result<PathBuf, AppError> {
         return Err(AppError::new("document_path", "文档不能读取 Git 元数据。"));
     }
     Ok(relative)
+}
+
+/// Git normalizes `./` out of both pathspecs and the paths it prints back, so identity
+/// checks have to compare the same spelling. `document_path` deliberately accepts CurDir
+/// components (relative links such as `./a.md` are legal), which are dropped here before a
+/// path becomes a pathspec or is compared with `git ls-tree`/`git ls-files` output.
+fn normalized_path(path: &str) -> Result<String, AppError> {
+    let relative = document_path(path)?;
+    let mut normalized = String::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                if !normalized.is_empty() {
+                    normalized.push('/');
+                }
+                normalized.push_str(&part.to_string_lossy());
+            }
+            std::path::Component::CurDir => {}
+            _ => return Err(AppError::new("document_path", "文档路径必须是仓库相对路径。")),
+        }
+    }
+    if normalized.is_empty() {
+        return Err(AppError::new("document_path", "文档路径必须是仓库内的文件。"));
+    }
+    Ok(normalized)
+}
+
+/// Bind an optional source repository to the root this read is about to touch. A caller that
+/// switched repositories cannot reuse the previous repository's source to relabel a same-named
+/// file in the new one; the mismatch is reported instead of silently read.
+fn bind_repository(source: &DocumentSource, root: &Path) -> Result<DocumentSource, AppError> {
+    let canonical = root.to_string_lossy().into_owned();
+    let Some(expected) = source.repository.as_deref() else {
+        let mut bound = source.clone();
+        bound.repository = Some(canonical);
+        return Ok(bound);
+    };
+    let given = validate_input_path(expected)
+        .and_then(|path| canonical_existing(&path))
+        .map_err(|_| {
+            AppError::new(
+                "document_repository",
+                "文档来源所在的仓库已无法访问，请重新打开文档。",
+            )
+        })?;
+    if given != root {
+        return Err(AppError::new(
+            "document_repository",
+            "该文档来源属于另一个仓库，未读取当前仓库中的同名文件。",
+        ));
+    }
+    Ok(source.clone())
 }
 
 fn validate_source(source: &DocumentSource) -> Result<(), AppError> {
@@ -430,12 +488,13 @@ async fn blob_identity(
     source: &DocumentSource,
     generation: u64,
 ) -> Result<Option<(String, u64)>, AppError> {
+    let path = normalized_path(&source.path)?;
     let output = if source.revision == "index" {
         git_read(
             backend,
             root,
             git,
-            &["ls-files", "--stage", "-z", "--", &source.path],
+            &["ls-files", "--stage", "-z", "--", &path],
             generation,
             64 * 1024,
         )
@@ -445,7 +504,7 @@ async fn blob_identity(
             backend,
             root,
             git,
-            &["ls-tree", "-z", &source.revision, "--", &source.path],
+            &["ls-tree", "-z", &source.revision, "--", &path],
             generation,
             64 * 1024,
         )
@@ -454,11 +513,14 @@ async fn blob_identity(
     if output.exit_code != 0 || output.stdout_truncated {
         return Err(AppError::new("document_read", "无法读取版本中的文件身份。"));
     }
-    let record = output.stdout.split(|b| *b == 0).find(|entry| {
-        entry
-            .split_once_byte(b'\t')
-            .is_some_and(|(_, path)| path == source.path.as_bytes())
-    });
+    let record = output
+        .stdout
+        .split(|b| *b == 0)
+        .find(|entry| {
+            entry
+                .split_once_byte(b'\t')
+                .is_some_and(|(_, found)| found == path.as_bytes())
+        });
     let Some(record) = record else {
         return Ok(None);
     };
@@ -784,6 +846,7 @@ pub async fn repository_document(
         return Err(AppError::new("document_mode", "文档读取模式无效。"));
     }
     let root = canonical_existing(&validate_input_path(path)?)?;
+    let source = bind_repository(source, &root)?;
     backend
         .scheduler
         .read_session(
@@ -793,7 +856,7 @@ pub async fn repository_document(
             |cancel| async move {
                 cancelled(&cancel)?;
                 let git = require_git(backend).await?;
-                let bound = bind_source(backend, &root, &git.path, source, generation).await?;
+                let bound = bind_source(backend, &root, &git.path, &source, generation).await?;
                 if mode == "source" {
                     return source_page(
                         backend,
@@ -872,11 +935,12 @@ pub async fn document_resource(
 ) -> Result<FilePreview, AppError> {
     validate_source(source)?;
     let root = canonical_existing(&validate_input_path(path)?)?;
+    let source = bind_repository(source, &root)?;
     backend
         .scheduler
         .read_session(&repo_key(&root), request_id, generation, |_| async {
             let git = require_git(backend).await?;
-            let bound = bind_source(backend, &root, &git.path, source, generation).await?;
+            let bound = bind_source(backend, &root, &git.path, &source, generation).await?;
             let loaded = load(backend, &root, &git.path, &bound, generation, IMAGE_BYTES).await?;
             verify_snapshot(backend, &root, &git.path, &bound, generation).await?;
             let Some(loaded) = loaded else {
@@ -1114,6 +1178,7 @@ mod tests {
             revision: revision.into(),
             path: path.into(),
             snapshot: None,
+            repository: None,
         }
     }
     /// Diff 侧只带 `revision`+`path`；快照由第一次 index 读取返回并复用。
@@ -1122,15 +1187,25 @@ mod tests {
             revision: source.revision.clone(),
             path: source.path.clone(),
             snapshot: None,
+            repository: None,
         }
     }
     async fn read(backend: &Backend, root: &Path, source: &DocumentSource) -> RepositoryDocument {
+        read_request(backend, root, source, 1101).await
+    }
+    /// 并行测试共用 1101 会撞上请求去重；需要独立请求的用例自带 request id。
+    async fn read_request(
+        backend: &Backend,
+        root: &Path,
+        source: &DocumentSource,
+        request_id: u64,
+    ) -> RepositoryDocument {
         repository_document(
             backend,
             root.to_str().unwrap(),
             source,
             1,
-            1101,
+            request_id,
             "document",
             0,
             None,
@@ -1171,6 +1246,176 @@ mod tests {
         assert_eq!(git(&root, &["status", "--porcelain"]), status);
         git(&root, &["commit", "-m", "next"]);
         assert_eq!(read(&backend, &root, &old.source).await.text, old.text);
+    }
+
+    #[tokio::test]
+    async fn document_curdir_spelling_reads_the_same_version_on_all_three_sides() {
+        let fixture = crate::test_support::git_fixture("document-curdir");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init"]);
+        git(&root, &["config", "core.autocrlf", "false"]);
+        fs::create_dir(root.join("docs")).unwrap();
+        fs::write(root.join("docs/a.md"), "# 历史\n").unwrap();
+        fs::write(root.join("docs/图.svg"), "<svg>old</svg>").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-m", "old"]);
+        let oid = git(&root, &["rev-parse", "HEAD"]);
+        fs::write(root.join("docs/a.md"), "# 暂存\n").unwrap();
+        git(&root, &["add", "."]);
+        fs::write(root.join("docs/a.md"), "# 工作区\n").unwrap();
+        // `document_path`/`safe_relative` 允许 CurDir 组件，Git 却把 pathspec 与输出路径都
+        // 归一化掉 `./`；身份比较必须归一化，否则真实存在的正文会被报成 missing。
+        for (revision, expected, plain_id, dotted_id) in [
+            ("worktree", "# 工作区\n", 1310, 1311),
+            ("index", "# 暂存\n", 1312, 1313),
+            (oid.as_str(), "# 历史\n", 1314, 1315),
+        ] {
+            let plain = read_request(&backend, &root, &source(revision, "docs/a.md"), plain_id).await;
+            let dotted =
+                read_request(&backend, &root, &source(revision, "docs/./a.md"), dotted_id).await;
+            assert_eq!(plain.kind, "text", "{revision}");
+            assert_eq!(
+                dotted.kind, "text",
+                "{revision}: `./` 拼写必须命中版本中的同一文件"
+            );
+            assert_eq!(dotted.text.as_deref(), Some(expected), "{revision}");
+            assert_eq!(plain.text, dotted.text, "{revision}");
+            if revision != "worktree" {
+                assert_eq!(plain.version, dotted.version, "{revision}");
+            }
+        }
+        // 资源读取走同一条身份比较：`./` 资源不能退化成 missing。
+        let plain = document_resource(
+            &backend,
+            root.to_str().unwrap(),
+            &source(oid.as_str(), "docs/图.svg"),
+            1,
+            1301,
+        )
+        .await
+        .unwrap();
+        let dotted = document_resource(
+            &backend,
+            root.to_str().unwrap(),
+            &source(oid.as_str(), "docs/./图.svg"),
+            1,
+            1302,
+        )
+        .await
+        .unwrap();
+        assert_eq!(plain.kind, "image");
+        assert_eq!(dotted.kind, "image");
+        assert_eq!(plain.data_url, dotted.data_url);
+    }
+
+    #[tokio::test]
+    async fn document_source_from_another_repository_is_rejected() {
+        let fixture = crate::test_support::git_fixture("document-cross-repository");
+        let first = fixture.repo("first");
+        let second = fixture.repo("second");
+        let backend = fixture.backend();
+        for root in [&first, &second] {
+            git(root, &["init"]);
+            fs::write(root.join("a.md"), "# 各自仓库\n").unwrap();
+            git(root, &["add", "."]);
+            git(root, &["commit", "-m", "doc"]);
+        }
+        let doc = read_request(&backend, &first, &source("HEAD", "a.md"), 1330).await;
+        let first_root = canonical_existing(&first)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(doc.source.repository.as_deref(), Some(first_root.as_str()));
+        // 切仓后旧来源 + 新仓库根：必须报真实错误，不能把新仓库同名文件按旧来源标注版本。
+        let error = repository_document(
+            &backend,
+            second.to_str().unwrap(),
+            &doc.source,
+            1,
+            1303,
+            "document",
+            0,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "document_repository");
+        assert!(error.generation.is_none());
+        assert_eq!(
+            document_resource(&backend, second.to_str().unwrap(), &doc.source, 1, 1304)
+                .await
+                .unwrap_err()
+                .code,
+            "document_repository"
+        );
+        let mut reversed = doc.source.clone();
+        reversed.repository = Some(
+            canonical_existing(&second)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        );
+        assert_eq!(
+            repository_document(
+                &backend,
+                first.to_str().unwrap(),
+                &reversed,
+                1,
+                1305,
+                "document",
+                0,
+                None,
+                None
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "document_repository"
+        );
+        // 同仓库继续读取（含分页）不受影响，返回的来源仍绑定该仓库。
+        let again = repository_document(
+            &backend,
+            first.to_str().unwrap(),
+            &doc.source,
+            1,
+            1306,
+            "source",
+            0,
+            Some(1),
+            doc.version.as_deref(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(again.source.repository, doc.source.repository);
+        assert_eq!(again.lines, ["# 各自仓库"]);
+        // 来源仓库已不存在时同样是真实错误码，而不是悄悄读当前仓库。
+        let mut gone = doc.source.clone();
+        gone.repository = Some(first.join("missing").to_string_lossy().into_owned());
+        assert_eq!(
+            repository_document(
+                &backend,
+                first.to_str().unwrap(),
+                &gone,
+                1,
+                1307,
+                "document",
+                0,
+                None,
+                None
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "document_repository"
+        );
+        // Diff 侧来源（没有 repository 字段）保持向后兼容：由入口绑定当前仓库。
+        let legacy = source("HEAD", "a.md");
+        assert_eq!(legacy.repository, None);
+        let legacy = read_request(&backend, &second, &legacy, 1331).await;
+        assert_eq!(legacy.text.as_deref(), Some("# 各自仓库\n"));
+        assert!(legacy.source.repository.is_some());
     }
 
     #[tokio::test]

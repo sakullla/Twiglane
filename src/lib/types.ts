@@ -112,8 +112,12 @@ export interface DiffHunk {
 export interface PreviewSource { revision: string; path: string }
 export interface PreviewSources { repository: string; old: PreviewSource | null; new: PreviewSource | null }
 /** HEAD is returned as a fixed commit OID. Reuse index snapshot for all linked reads;
- * a changed index rejects the session as stale instead of silently switching versions. */
-export interface DocumentSource extends PreviewSource { snapshot?: string | null }
+ * a changed index rejects the session as stale instead of silently switching versions.
+ * `repository` is the root the source was read from: the backend rejects a source whose
+ * repository differs from the root passed to `repositoryDocument`/`documentResource`, so a
+ * source left over from a previous repository cannot relabel a same-named file in the new one.
+ * It stays optional because diff/history sides only carry `revision` + `path`; reads bind it. */
+export interface DocumentSource extends PreviewSource { snapshot?: string | null; repository?: string | null }
 export interface RepositoryDocument {
   generation: number;
   source: DocumentSource;

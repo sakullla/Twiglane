@@ -39,6 +39,35 @@ describe("Tauri 命令参数", () => {
     expect(invoke).toHaveBeenLastCalledWith("cancel_document_resources", { requestId: 504 });
   });
 
+  it("文档来源绑定仓库根，越仓来源必须报错而不是静默改读", async () => {
+    const source = { revision: "index", path: "docs/a.md", snapshot: "a".repeat(64), repository: "C:/repo/one" };
+    await api.repositoryDocument("C:/repo/one", source, 3, 601);
+    expect(invoke).toHaveBeenLastCalledWith("repository_document", {
+      path: "C:/repo/one", source, generation: 3, requestId: 601,
+      mode: "document", offset: 0, limit: undefined, expectedVersion: null,
+    });
+    // 切仓后旧来源 + 新仓库根：后端返回 document_repository，前端不得吞掉错误再读别处。
+    invoke.mockRejectedValueOnce({
+      code: "document_repository",
+      message: "该文档来源属于另一个仓库，未读取当前仓库中的同名文件。",
+    });
+    await expect(api.repositoryDocument("C:/repo/two", source, 3, 602)).rejects.toMatchObject({
+      code: "document_repository",
+    });
+    expect(invoke).toHaveBeenCalledTimes(2);
+    // 后端会把仓库根写回来源；后续分页与资源读取原样复用该来源时参数不变。
+    const rebound = { ...source, repository: "C:/repo/two" };
+    await api.repositoryDocument("C:/repo/two", rebound, 3, 603, "source", 20, 5, "blob-tip");
+    expect(invoke).toHaveBeenLastCalledWith("repository_document", {
+      path: "C:/repo/two", source: rebound, generation: 3, requestId: 603,
+      mode: "source", offset: 20, limit: 5, expectedVersion: "blob-tip",
+    });
+    await api.documentResource("C:/repo/two", rebound, 3, 604);
+    expect(invoke).toHaveBeenLastCalledWith("document_resource", {
+      path: "C:/repo/two", source: rebound, generation: 3, requestId: 604,
+    });
+  });
+
   it("仓库操作使用 requestId，匹配 command 的 camelCase", async () => {
     await api.addRepository("/repo", 4);
     await api.createRepository("/repo", 5);

@@ -2,7 +2,6 @@
   import { untrack } from "svelte";
   import {
     createDocumentSession,
-    initialDocumentMode,
     type DocumentMode,
     type DocumentSession,
   } from "../document-session.svelte";
@@ -12,13 +11,21 @@
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
 
+  type Side = "old" | "new";
+
   /**
-   * 只读阅读窗口：接受明确的来源（工作区 / 暂存区 / 某个提交），显示该版本正文与源码，
-   * 相对链接留在同一版本里。差异与历史消费者只传来源，不用当前工作区正文冒充历史内容。
+   * 只读阅读窗口：接受明确的来源（工作区 / 暂存区 / 父提交 / 某个固定提交），
+   * 显示该版本正文与源码，相对链接留在同一版本里。
+   *
+   * 差异与历史消费者只传两侧真实来源：缺失的一侧不提供入口，也不用另一版本冒充。
+   * 两侧都存在时可以在这个窗口里切换「改动前 / 改动后」，位置仍按各自版本分别保存。
    */
   interface Props {
     repository: string;
-    source: DocumentSource;
+    old: DocumentSource | null;
+    new: DocumentSource | null;
+    /** 打开时先看哪一侧；该侧不存在时自动退到存在的一侧。 */
+    side?: Side;
     generation: number;
     nextId: () => number;
     onGeneration: (generation: number) => void;
@@ -32,7 +39,9 @@
 
   let {
     repository,
-    source,
+    old,
+    new: next,
+    side = "new",
     generation,
     nextId,
     onGeneration,
@@ -45,50 +54,102 @@
   const ownSession = createDocumentSession({ repository: () => repository });
   const reading = $derived<DocumentSession>(session ?? ownSession);
   const titleId = $props.id();
-  const label = $derived(documentSourceLabel(source, abbrevLength));
 
-  // 初始模式取自这个身份的阅读会话；来源变化时由下面的 effect 重新取。
+  const both = $derived(Boolean(old) && Boolean(next));
+
+  function sourceOf(which: Side): DocumentSource | null {
+    return which === "old" ? old : next;
+  }
+
+  /** 首帧就落到真实存在的一侧：删掉的文件只剩改动前版本，新增的文件只剩改动后版本。 */
   // svelte-ignore state_referenced_locally
-  let mode = $state<DocumentMode>(reading.recall(source)?.reading.mode ?? "preview");
+  let chosen = $state<Side>(side === "old" ? (old ? "old" : "new") : next ? "new" : "old");
+  let active = $derived<DocumentSource | null>(sourceOf(chosen));
+  let label = $derived(active ? documentSourceLabel(active, abbrevLength) : "");
+  let sideName = $derived(chosen === "old" ? "改动前" : "改动后");
 
-  // 同一个窗口换来源（例如差异两侧切换）时按新身份恢复模式，不沿用上一份的。
+  // 同一个窗口换来源时按新身份恢复阅读模式，不沿用上一份的。
   let lastKey = "";
+  let mode = $state<DocumentMode>("preview");
   $effect(() => {
-    const key = JSON.stringify([source.revision, source.path, source.snapshot ?? "", source.repository ?? ""]);
+    const current = active;
+    if (!current) return;
+    const key = JSON.stringify([current.revision, current.path, current.repository ?? ""]);
     if (key === lastKey) return;
     lastKey = key;
     untrack(() => {
-      mode = reading.recall(source)?.reading.mode ?? "preview";
+      mode = reading.recall(current)?.reading.mode ?? "preview";
     });
   });
 
-  function setMode(next: DocumentMode): void {
-    mode = next;
-    reading.remember(source, { mode: next });
+  function setMode(nextMode: DocumentMode): void {
+    mode = nextMode;
+    if (active) reading.remember(active, { mode: nextMode });
+  }
+
+  function choose(which: Side): void {
+    if (which === chosen || !sourceOf(which)) return;
+    chosen = which;
   }
 </script>
 
 <Modal title="阅读文档" {titleId} icon="file" size="xl" fill task="document" {returnFocus} {onClose}>
   {#snippet headExtra()}
-    <span class="doc-dialog-source" title={`来源：${label}`}>{label}</span>
+    {#if both}
+      <div class="segmented doc-dialog-side" role="group" aria-label="文档版本">
+        <button
+          type="button"
+          aria-pressed={chosen === "old"}
+          title={`改动前：${documentSourceLabel(old!, abbrevLength)}`}
+          onclick={() => choose("old")}
+        >改动前</button>
+        <button
+          type="button"
+          aria-pressed={chosen === "new"}
+          title={`改动后：${documentSourceLabel(next!, abbrevLength)}`}
+          onclick={() => choose("new")}
+        >改动后</button>
+      </div>
+    {/if}
+    {#if active}
+      <span class="doc-dialog-source" title={`来源：${label}`}>{sideName} · {label}</span>
+    {/if}
     <div class="segmented doc-dialog-mode" role="group" aria-label="文档显示方式">
       <button type="button" aria-pressed={mode === "preview"} aria-label="阅读排版预览" title="排版预览（只读）" onclick={() => setMode("preview")}>预览</button>
       <button type="button" aria-pressed={mode === "source"} aria-label="阅读文档源码" title="这个版本的源码" onclick={() => setMode("source")}>源码</button>
     </div>
   {/snippet}
   <div class="document-dialog">
-    <DocumentReader
-      active
-      {repository}
-      {source}
-      {generation}
-      {nextId}
-      {onGeneration}
-      session={reading}
-      {mode}
-      onMode={setMode}
-      {abbrevLength}
-    />
+    {#if active}
+      {#if !both}
+        <!-- 只剩一侧时说明另一侧为什么不在，而不是让用户以为可以切换。 -->
+        <p class="doc-notice" role="status">
+          {#if old}
+            这个文件在改动后已经不存在，只保留改动前的版本。
+          {:else}
+            这个文件是新出现的，改动前没有可阅读的版本。
+          {/if}
+        </p>
+      {/if}
+      <DocumentReader
+        active
+        {repository}
+        source={active}
+        {generation}
+        {nextId}
+        {onGeneration}
+        session={reading}
+        {mode}
+        onMode={setMode}
+        {abbrevLength}
+      />
+    {:else}
+      <div class="doc-state" role="status">
+        <span class="empty-icon"><Icon name="file" size={22} /></span>
+        <strong>这个文件没有可阅读的版本</strong>
+        <p>两侧都不存在，可能是路径已经变化。</p>
+      </div>
+    {/if}
   </div>
   {#snippet footer()}
     <span class="doc-dialog-note"><Icon name="eye" size={12} />只读阅读：不会修改文件、索引或提交范围</span>

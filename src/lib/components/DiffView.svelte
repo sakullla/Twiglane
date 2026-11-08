@@ -7,7 +7,7 @@
   import type { IconName } from "../icons";
   import { trackCodeScroll } from "../codeScroll.svelte";
   import { codeContentSize, codeRuler, rulerPadding, scrollByRows, visibleRange } from "../layout";
-  import type { DiffHunk, DiffLineSelection, DiffResponse, FileSelection } from "../types";
+  import type { DiffHunk, DiffLineSelection, DiffResponse, FileSelection, PreviewSources } from "../types";
   import { BUSY_REASON, binarySizeText, sizeDelta, splitPath, type FileNavState } from "../ui";
   import { buildDiffDocuments, codeOf, signOf } from "../syntax/diffSyntax";
   import { createHighlight } from "../syntax/highlight.svelte";
@@ -78,6 +78,11 @@
     asText?: boolean;
     /** Git 判成二进制、又没有图片预览时，提供「按文本查看」；不传时不显示。 */
     onViewAsText?: (next: boolean) => void;
+    /**
+     * 打开只读文档阅读窗口。只有差异本身带 `document` 来源（Markdown 差异）时才出现入口；
+     * 前后版本按真实来源与重命名路径传递，缺失的一侧由阅读窗口自己说明。
+     */
+    onReadDocument?: (sources: PreviewSources, side: "old" | "new", trigger: HTMLElement | null) => void;
   }
 
   /**
@@ -117,6 +122,7 @@
     onToggleReview,
     asText = false,
     onViewAsText,
+    onReadDocument,
   }: Props = $props();
   let menu = $state<ContextMenuRequest | null>(null);
   /**
@@ -435,11 +441,24 @@
     tier !== "narrow" && canFilterWhitespace && !(tier === "compact" && pickMode),
   );
   let showOverflow = $derived(tier !== "full");
+  /* Markdown 差异才有文档来源：前后版本的正文都在对应版本里读，不从这份 diff 拼。 */
+  let documentSides = $derived(onReadDocument ? currentDiff?.document ?? null : null);
+  /* 默认看这个差异的「后」侧：改动对比里它就是当前工作区/暂存区/这次提交的正文。 */
+  let documentSide = $derived<"old" | "new">(documentSides?.new ? "new" : "old");
+  let documentLabel = $derived(
+    documentSides?.new ? "按版本阅读这个文档的正文（改动后）" : "按版本阅读这个文档的正文（改动前）",
+  );
+  function readDocument(trigger: HTMLElement | null): void {
+    const sources = documentSides;
+    if (!sources || !onReadDocument) return;
+    onReadDocument(sources, documentSide, trigger);
+  }
   /* 文件工具里语言标签很窄，任何一档都留在工具条上；历史与完整文件在完整档才直接露出。 */
   let inlineLanguage = $derived(Boolean(currentDiff && !currentDiff.binary && selection));
   let inlineFileHistory = $derived(tier === "full" && Boolean(onFileHistory && selection));
   let inlineFullFile = $derived(tier === "full" && Boolean(onFullFile && selection));
-  let hasInlineFileTools = $derived(inlineLanguage || inlineFileHistory || inlineFullFile);
+  let inlineReadDocument = $derived(tier === "full" && Boolean(documentSides && selection));
+  let hasInlineFileTools = $derived(inlineLanguage || inlineFileHistory || inlineFullFile || inlineReadDocument);
 
   interface DiffTool {
     id: string;
@@ -516,6 +535,15 @@
     }
     if (onFileHistory && selection) {
       tools.push({ id: "file-history", label: "此文件历史", icon: "history", run: () => onFileHistory?.(selection.path) });
+    }
+    if (documentSides && selection && !inlineReadDocument) {
+      tools.push({
+        id: "read-document",
+        label: "阅读文档",
+        icon: "eye",
+        note: documentSides.new && documentSides.old ? "改动前 / 改动后两个版本" : documentSides.new ? "改动后的版本" : "改动前的版本",
+        run: () => readDocument(moreAnchor),
+      });
     }
     if (tier === "narrow" && pickMode) {
       tools.push({
@@ -1155,6 +1183,18 @@
             onclick={() => onFullFile?.(!fullFile)}
           >
             <Icon name="rows" size={13} /><span class="diff-hist-label">{fullFile ? "完整文件" : "只看改动"}</span>
+          </button>
+        {/if}
+        {#if inlineReadDocument && selection}
+          <!-- 文件身份之后的第一个阅读动作：按版本读正文，和差异视图本身互不影响。 -->
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm doc-read-btn"
+            aria-label="阅读文档"
+            title={documentLabel}
+            onclick={(event) => readDocument(event.currentTarget as HTMLElement)}
+          >
+            <Icon name="eye" size={13} /><span class="diff-hist-label">阅读文档</span>
           </button>
         {/if}
       </div>

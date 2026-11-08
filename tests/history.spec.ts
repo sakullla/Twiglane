@@ -2207,3 +2207,112 @@ describe("历史拓扑面板", () => {
   });
 });
 
+
+/* ------------------------------------------------------------------ *
+ * R5：提交里的文档阅读入口与引用收起。
+ * 单文件、全部文件、多提交对照三种差异都要能按真实来源读正文；
+ * 引用收起只在引用多时出现，切换提交后仍是用户选的状态。
+ * ------------------------------------------------------------------ */
+describe("提交里的文档阅读与引用收起（R5）", () => {
+  const mdPath = "docs/readme.md";
+  const mdSides = {
+    repository: "/repo",
+    old: { revision: "parent0", path: mdPath },
+    new: { revision: "abcdef0000abcdef0000abcdef0000abcdef0000abcd", path: mdPath },
+  };
+
+  function mdCommit(index = 0) {
+    return commit(index, { oid: mdSides.new.revision });
+  }
+
+  it("单文件提交差异给出阅读入口，交给阅读窗口的是这次提交的正文来源", async () => {
+    const only = mdCommit();
+    historyPage.mockResolvedValue({ generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [only] });
+    commitDetail.mockResolvedValue({
+      generation: 3, commit: only, body: "", root: false, merge: false, selectedParent: only.parents[0],
+      files: [{ path: mdPath, originalPath: null, status: "modified", additions: 2, deletions: 1 }],
+    });
+    commitFileDiff.mockResolvedValue({ ...diff, path: mdPath, document: mdSides });
+    const onReadDocument = vi.fn();
+    render(HistoryPanel, { props: { ...panelProps(), onReadDocument } });
+    const entry = await screen.findByRole("button", { name: "阅读文档" });
+    await fireEvent.click(entry);
+    expect(onReadDocument).toHaveBeenCalledWith(mdSides, "new", entry);
+  });
+
+  it("全部文件模式下每个 Markdown 文件块有入口，其它文件没有", async () => {
+    const only = mdCommit();
+    historyPage.mockResolvedValue({ generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [only] });
+    commitDetail.mockResolvedValue({
+      generation: 3, commit: only, body: "", root: false, merge: false, selectedParent: only.parents[0],
+      files: [
+        { path: mdPath, originalPath: null, status: "modified", additions: 2, deletions: 1 },
+        { path: "notes.txt", originalPath: null, status: "modified", additions: 1, deletions: 0 },
+      ],
+    });
+    commitFileDiff.mockImplementation(async (_repo, _oid, _parent, path: string) =>
+      path === mdPath ? { ...diff, path, document: mdSides } : { ...diff, path });
+    const onReadDocument = vi.fn();
+    render(HistoryPanel, { props: { ...panelProps(), onReadDocument } });
+    await screen.findByRole("option", { name: /commit-0/ });
+    await waitFor(() => expect(document.querySelector(".commit-head")).toBeTruthy());
+    await fireEvent.click(screen.getByRole("button", { name: /全部文件/ }));
+    const entry = await screen.findByRole("button", { name: `阅读 ${mdPath} 的文档` });
+    expect(screen.queryByRole("button", { name: "阅读 notes.txt 的文档" })).toBeNull();
+    await fireEvent.click(entry);
+    expect(onReadDocument).toHaveBeenCalledWith(mdSides, "new", entry);
+  });
+
+  it("多提交对照的每个提交块也从自己的差异取来源", async () => {
+    const rows = [mdCommit(0), commit(1)];
+    historyPage.mockResolvedValue({ generation: 3, commits: rows, offset: 0, pageSize: 100, hasMore: false, state: "ok" });
+    commitDetail.mockImplementation(async (_repo: string, oid: string) => ({
+      generation: 3, commit: rows.find((row) => row.oid === oid) ?? rows[0], body: "", root: false, merge: false,
+      selectedParent: "parent", files: [{ path: mdPath, originalPath: null, status: "modified", additions: 1, deletions: 1 }],
+    }));
+    commitFileDiff.mockResolvedValue({ ...diff, path: mdPath, document: mdSides });
+    const onReadDocument = vi.fn();
+    render(HistoryPanel, { props: { ...panelProps(), onReadDocument } });
+    await screen.findByRole("option", { name: /commit-0/ });
+    await fireEvent.click(screen.getByRole("option", { name: /commit-1/ }), { shiftKey: true });
+    // 多提交对照先选中一个文件路径，每个提交块才有这个文件的差异可读。
+    const files = await screen.findByRole("listbox", { name: "提交中的文件列表" });
+    await waitFor(() => expect(within(files).getAllByRole("option").length).toBeGreaterThan(0));
+    await fireEvent.click(within(files).getAllByRole("option")[0]);
+    // 每个提交块各有一个入口，来源取自该提交自己的差异。
+    const entries = await screen.findAllByRole("button", { name: `阅读 ${mdPath} 在这一提交的文档` });
+    expect(entries).toHaveLength(2);
+    await fireEvent.click(entries[0]);
+    expect(onReadDocument).toHaveBeenCalledWith(mdSides, "new", entries[0]);
+    expect(onReadDocument.mock.calls[0][0].repository).toBe("/repo");
+  });
+
+  it("引用多时可收起并只留计数，切换提交后仍是收起状态", async () => {
+    const labels = [
+      { name: "main", kind: "branch" as const, current: true },
+      { name: "origin/main", kind: "remote" as const, current: false },
+      { name: "v1.0", kind: "tag" as const, current: false },
+    ];
+    const rows = [commit(0, { labels }), commit(1, { labels })];
+    historyPage.mockResolvedValue({ generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: rows });
+    commitDetail.mockImplementation(async (_repo: string, oid: string) => ({
+      generation: 3, commit: rows.find((row) => row.oid === oid) ?? rows[0], body: "", root: false, merge: false,
+      selectedParent: "parent", files: [{ path: "notes.txt", originalPath: null, status: "modified", additions: 1, deletions: 0 }],
+    }));
+    commitFileDiff.mockResolvedValue({ ...diff, path: "notes.txt" });
+    render(HistoryPanel, { props: panelProps() });
+    const toggle = await screen.findByRole("button", { name: "收起提交引用" });
+    expect(document.querySelectorAll(".commit-byline .ref-pill").length).toBeGreaterThan(1);
+    await fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: /展开提交引用/ }).textContent).toContain("引用 2");
+    expect(document.querySelectorAll(".commit-byline .ref-pill").length).toBe(0);
+
+    // 换一个提交：收起状态跟过来，不会突然又把引用铺开。
+    await fireEvent.click(screen.getByRole("option", { name: /commit-1/ }));
+    await waitFor(() => expect(document.querySelector(".commit-head")).toBeTruthy());
+    expect(screen.getByRole("button", { name: /展开提交引用/ }).textContent).toContain("引用 2");
+    expect(document.querySelectorAll(".commit-byline .ref-pill").length).toBe(0);
+    await fireEvent.click(screen.getByRole("button", { name: /展开提交引用/ }));
+    expect(document.querySelectorAll(".commit-byline .ref-pill").length).toBeGreaterThan(1);
+  });
+});

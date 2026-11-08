@@ -6,6 +6,7 @@ import type {
   FileChange,
   HistoryCommit,
   OpenedRepository,
+  PreviewSources,
   StatusSnapshot,
   Theme,
 } from "../../src/lib/types";
@@ -159,6 +160,16 @@ function snapshot(): StatusSnapshot {
 function opened(path: string): OpenedRepository {
   const name = path.split(/[\\/]/).pop() ?? path;
   return { summary: { name, path }, generation, snapshot: snapshot(), draft: "", watchDegraded: false };
+}
+
+/** 与原生 changes/history 同一形状的 Markdown 前后版本来源：非 Markdown 不给。 */
+function markdownSides(repo: string, path: string, oldPath: string, staged: boolean, oldRevision = ""): PreviewSources | undefined {
+  if (!/\.(md|markdown|mdown|rmd)$/i.test(path)) return undefined;
+  return {
+    repository: repo,
+    old: { revision: oldRevision || (staged ? "HEAD" : "index"), path: oldPath },
+    new: { revision: staged ? "index" : "worktree", path },
+  };
 }
 
 function diffFor(path: string, staged: boolean): DiffResponse {
@@ -415,6 +426,9 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   refreshStatus: () => ok(snapshot()),
   loadDiff: (_repo: string, path: string, staged: boolean, _generation: number, _request: number, _original: string | null, offset = 0) => {
     const result = withHeaders(diffFor(path, staged));
+    // Markdown 差异带上前后版本来源，界面才有「阅读文档」入口；重命名用旧路径读改动前。
+    const document = markdownSides(_repo, path, _original || path, staged);
+    if (document) result.document = document;
     if (previewParams.get("diff") !== "paged") return ok(result);
     if (offset === 0) return ok({ ...result, totalLines: result.lines.length + 400 });
     return ok({ ...result, lines: [], hunks: [], offset }, 8000);
@@ -644,10 +658,19 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       ],
     });
   },
-  commitFileDiff: (_repo: string, _oid: string, _parent: string, path: string) => ok(previewParams.has("preview") ? {
-    ...withHeaders(diffFor(path, false)), binary: true, lines: [], hunks: [], oldSize: 81920, newSize: 146752,
-    preview: { repository: _repo, old: { revision: _parent, path }, new: { revision: _oid, path } },
-  } : withHeaders(diffFor(path, false))),
+  commitFileDiff: (_repo: string, _oid: string, _parent: string, path: string) => {
+    const base = withHeaders(diffFor(path, false));
+    // 提交差异同样给出两个固定提交的来源：改动前是父提交，改动后是这次提交。
+    const document = markdownSides(_repo, path, path, false, _parent);
+    if (document) {
+      document.new = { revision: _oid, path };
+      base.document = document;
+    }
+    return ok(previewParams.has("preview") ? {
+      ...base, binary: true, lines: [], hunks: [], oldSize: 81920, newSize: 146752,
+      preview: { repository: _repo, old: { revision: _parent, path }, new: { revision: _oid, path } },
+    } : base);
+  },
   repositoryDirectory: (_repo: string, relative: string, includeIgnored: boolean, generation: number) => {
     if (relative === "broken") {
       return Promise.reject({ code: "path_unreadable", message: "无法读取这个目录：权限不足。" });
@@ -685,7 +708,17 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
         message: "文档超过 2 MiB 排版预览上限，请查看源码。",
       });
     }
-    return ok(mockDocument(source, mode, offset, limit, generation), 40);
+    const document = mockDocument(source, mode, offset, limit, generation);
+    // 改动前一侧（暂存区）在预览里也要和改动后不同，否则看不出「读的是哪个版本」。
+    if (document.kind === "text" && source.revision === "index") {
+      if (document.text !== null) {
+        document.text = `> 预览 mock：这是暂存区（改动前）版本，正文与工作区可能不同。\n\n${document.text}`;
+      }
+      if (document.lines.length > 0) {
+        document.lines = ["> 预览 mock：这是暂存区（改动前）版本。", "", ...document.lines];
+      }
+    }
+    return ok(document, 40);
   },
   documentResource: (_repo: string, source: { revision: string; path: string }, generation: number) =>
     ok(mockDocumentResource(source, generation), 40),

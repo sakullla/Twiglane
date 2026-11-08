@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const repositoryDocument = vi.hoisted(() => vi.fn());
@@ -343,22 +343,27 @@ describe("文档阅读：链接与资源", () => {
   });
 
 describe("阅读窗口", () => {
+  function dialogProps(overrides: Record<string, unknown> = {}) {
+    return {
+      repository: repoPath,
+      old: null,
+      new: { revision: "index", path: "docs/a.md" } satisfies DocumentSource,
+      generation: 4,
+      nextId: () => 1,
+      onGeneration: vi.fn(),
+      onClose: vi.fn(),
+      ...overrides,
+    };
+  }
+
   it("显示来源版本、模式切换与只读说明，关闭交回触发控件", async () => {
     repositoryDocument.mockImplementation((_repo: string, source: DocumentSource, _gen: number, _id: number, mode = "document", offset = 0) =>
       Promise.resolve(mode === "source" ? page({ source, offset }) : doc({ source })),
     );
     const onClose = vi.fn();
-    const session = createDocumentSession({ repository: () => repoPath });
+    const reading = session();
     const { container } = render(DocumentDialog, {
-      props: {
-        repository: repoPath,
-        source: { revision: "index", path: "docs/a.md" },
-        generation: 4,
-        nextId: () => 1,
-        onGeneration: vi.fn(),
-        session,
-        onClose,
-      },
+      props: dialogProps({ session: reading, onClose }),
     });
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toBeTruthy();
@@ -366,14 +371,48 @@ describe("阅读窗口", () => {
     expect(screen.getAllByTitle("来源：暂存区").length).toBeGreaterThan(0);
     expect(container.textContent).toContain("只读阅读：不会修改文件、索引或提交范围");
     expect(await screen.findByRole("heading", { name: "标题" })).toBeTruthy();
+    // 只有改动后一侧时说明另一侧为什么不在，不提供假的版本切换。
+    expect(screen.getByText("这个文件是新出现的，改动前没有可阅读的版本。")).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "文档版本" })).toBeNull();
 
     await fireEvent.click(screen.getByRole("button", { name: "阅读文档源码" }));
     await waitFor(() => expect(repositoryDocument.mock.calls.some((call) => call[4] === "source")).toBe(true));
     expect(await screen.findByRole("region", { name: "文档源码" })).toBeTruthy();
-    expect(session.recall({ revision: "index", path: "docs/a.md" })?.reading.mode).toBe("source");
+    expect(reading.recall({ revision: "index", path: "docs/a.md" })?.reading.mode).toBe("source");
 
     await fireEvent.click(screen.getByRole("button", { name: "关闭" }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("前后两侧都在时在同一个窗口切换版本，各自读取自己的来源并按身份保存模式", async () => {
+    repositoryDocument.mockImplementation((_repo: string, source: DocumentSource, _gen: number, _id: number, mode = "document") =>
+      Promise.resolve(mode === "source" ? page({ source }) : doc({ source, text: source.revision === "HEAD" ? "# 旧版标题" : "# 新版标题" })),
+    );
+    const reading = session();
+    render(DocumentDialog, {
+      props: dialogProps({ old: { revision: "HEAD", path: "docs/a.md" }, session: reading }),
+    });
+    expect(await screen.findByRole("heading", { name: "新版标题" })).toBeTruthy();
+    const group = screen.getByRole("group", { name: "文档版本" });
+    expect(within(group).getByRole("button", { name: "改动后" }).getAttribute("aria-pressed")).toBe("true");
+
+    await fireEvent.click(within(group).getByRole("button", { name: "改动前" }));
+    expect(await screen.findByRole("heading", { name: "旧版标题" })).toBeTruthy();
+    expect(repositoryDocument.mock.calls.some((call) => call[1].revision === "HEAD" && call[4] === "document")).toBe(true);
+    expect(screen.getAllByTitle("来源：当前提交").length).toBeGreaterThan(0);
+    // 同一窗口换来源时不把上一份的模式套过来：每个身份各自有一条阅读记录。
+    expect(reading.keyOf({ revision: "HEAD", path: "docs/a.md" })).not.toBe(reading.keyOf({ revision: "index", path: "docs/a.md" }));
+  });
+
+  it("只剩改动前一侧时说明文件已不存在，不伪造改动后正文", async () => {
+    repositoryDocument.mockResolvedValue(doc({ source: { revision: "HEAD", path: "docs/a.md" }, text: "# 已删除的文档" }));
+    render(DocumentDialog, {
+      props: dialogProps({ old: { revision: "HEAD", path: "docs/a.md" }, new: null }),
+    });
+    expect(await screen.findByRole("heading", { name: "已删除的文档" })).toBeTruthy();
+    expect(screen.getByText("这个文件在改动后已经不存在，只保留改动前的版本。")).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "文档版本" })).toBeNull();
+    expect(repositoryDocument.mock.calls.every((call) => call[1].revision === "HEAD")).toBe(true);
   });
 });
 

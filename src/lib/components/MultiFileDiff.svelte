@@ -3,7 +3,7 @@
   import { api } from "../api";
   import { normalizeError } from "../errors";
   import { reuseDiffContent } from "../diff";
-  import type { DiffHunk, DiffResponse, FileRow, FileSelection, LineStat, OpenedRepository } from "../types";
+  import type { DiffHunk, DiffResponse, FileRow, FileSelection, LineStat, OpenedRepository, PreviewSources } from "../types";
   import { appendDiffPage, BUSY_REASON, blockTops, blockWindow, rowMark, selectionKey, splitPath, type FileNavState } from "../ui";
   import DiffView from "./DiffView.svelte";
   import FileNav from "./FileNav.svelte";
@@ -34,6 +34,8 @@
     onStageHunk: (item: FileSelection, diff: DiffResponse, hunk: DiffHunk) => void;
     onFullFile: (next: boolean) => void;
     onFileHistory: (path: string) => void;
+    /** 从块标题进入只读文档阅读；不传时不显示入口。 */
+    onReadDocument?: (sources: PreviewSources, side: "old" | "new", trigger: HTMLElement | null) => void;
     onStage: () => void;
     onUnstage: () => void;
     onDiscard: () => void;
@@ -69,6 +71,7 @@
     onStageHunk,
     onFullFile,
     onFileHistory,
+    onReadDocument,
     onStage,
     onUnstage,
     onDiscard,
@@ -342,6 +345,13 @@
   function excluded(action: string): string {
     return conflictCount > 0 ? `${action}（已排除 ${conflictCount} 个冲突文件）` : action;
   }
+
+  /** 块标题的阅读入口：只对带文档来源的差异（Markdown）执行，来源原样交给阅读窗口。 */
+  function readDocument(diff: DiffResponse, trigger: HTMLElement | null): void {
+    const sources = diff.document;
+    if (!sources || !onReadDocument) return;
+    onReadDocument(sources, sources.new ? "new" : "old", trigger);
+  }
 </script>
 
 <section class="diff dense multi-stack" aria-label="多文件差异">
@@ -418,6 +428,16 @@
               <Icon name="chevron-down" size={13} class={expanded ? "flip" : ""} />
             </button>
             <button type="button" class="icon-btn sm" aria-label={`查看 ${row.path} 的文件历史`} title="查看此文件历史" onclick={() => onFileHistory(row.path)}><Icon name="history" size={13} /></button>
+            {#if onReadDocument && loaded?.document}
+              <!-- 嵌入块不画工具条：阅读入口就放在块标题这一行，长文档不必先切回单文件视图。 -->
+              <button
+                type="button"
+                class="icon-btn sm"
+                aria-label={`阅读 ${row.path} 的文档`}
+                title={loaded.document?.new ? "按版本阅读这个文档（改动后）" : "按版本阅读这个文档（改动前）"}
+                onclick={(event) => readDocument(loaded, event.currentTarget as HTMLElement)}
+              ><Icon name="eye" size={13} /></button>
+            {/if}
           </div>
           {#if expanded}
             <div class="multi-file-diff">

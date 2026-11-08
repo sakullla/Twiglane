@@ -3015,3 +3015,141 @@ describe("差异工具条随面板宽度收敛（R2）", () => {
     }
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * R5：差异里的 Markdown 阅读入口。
+ * 入口只在差异真的带 `document` 来源时出现，交给阅读窗口的是这一侧的真实版本；
+ * 与「此文件历史」「完整文件」一样按面板宽度收敛，窄窗口从溢出入口进。
+ * ------------------------------------------------------------------ */
+describe("差异里的文档阅读入口（R5）", () => {
+  const selection = { path: "docs/readme.md", side: "unstaged" as const };
+  const documentSides = {
+    repository: repoPath,
+    old: { revision: "index", path: "docs/readme.md" },
+    new: { revision: "worktree", path: "docs/readme.md" },
+  };
+
+  function markdownDiff(extra: Partial<DiffResponse> = {}): DiffResponse {
+    return { ...diffFor("docs/readme.md", false), document: documentSides, ...extra };
+  }
+
+  function widthStub(initial: number) {
+    let width = initial;
+    const spy = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains("diff-toolbar") ? width : 0;
+    });
+    return {
+      set(next: number) {
+        width = next;
+      },
+      restore() {
+        spy.mockRestore();
+      },
+    };
+  }
+
+  function viewProps(overrides: Record<string, unknown> = {}) {
+    return {
+      selection,
+      diff: markdownDiff(),
+      error: null,
+      loading: false,
+      disabled: false,
+      onStageHunk: () => {},
+      onLoadMore: () => {},
+      ...overrides,
+    };
+  }
+
+  it("Markdown 差异给出版本明确的阅读入口，普通文本差异不出现", async () => {
+    const onReadDocument = vi.fn();
+    const view = render(DiffView, { props: viewProps({ onReadDocument }) });
+    const button = await screen.findByRole("button", { name: "阅读文档" });
+    expect(button.getAttribute("title")).toContain("改动后");
+    await fireEvent.click(button);
+    expect(onReadDocument).toHaveBeenCalledTimes(1);
+    expect(onReadDocument.mock.calls[0][0]).toEqual(documentSides);
+    expect(onReadDocument.mock.calls[0][1]).toBe("new");
+    expect(onReadDocument.mock.calls[0][2]).toBe(button);
+
+    // 同一个组件换成没有文档来源的差异：入口整体消失，不留一个点了没反应的按钮。
+    await view.rerender(viewProps({ onReadDocument, diff: { ...diffFor("docs/readme.md", false), document: undefined } }));
+    expect(screen.queryByRole("button", { name: "阅读文档" })).toBeNull();
+
+    // 删除侧只剩改动前：默认落在真实存在的那一侧，不伪造改动后正文。
+    await view.rerender(viewProps({ onReadDocument, diff: markdownDiff({ document: { ...documentSides, new: null } }) }));
+    const onlyOld = await screen.findByRole("button", { name: "阅读文档" });
+    expect(onlyOld.getAttribute("title")).toContain("改动前");
+    await fireEvent.click(onlyOld);
+    expect(onReadDocument.mock.calls.at(-1)?.[1]).toBe("old");
+  });
+
+  it("窄工具条把入口收进溢出，仍然带着真实来源与触发控件", async () => {
+    const width = widthStub(560);
+    try {
+      const onReadDocument = vi.fn();
+      render(DiffView, { props: viewProps({ onReadDocument }) });
+      await tick();
+      expect(screen.queryByRole("button", { name: "阅读文档" })).toBeNull();
+      const trigger = screen.getByRole("button", { name: /更多差异工具/ });
+      await fireEvent.click(trigger);
+      const item = within(screen.getByRole("dialog", { name: "差异工具" })).getByRole("option", { name: /阅读文档/ });
+      expect(item.textContent).toContain("改动前 / 改动后两个版本");
+      await fireEvent.click(item);
+      expect(onReadDocument).toHaveBeenCalledTimes(1);
+      expect(onReadDocument.mock.calls[0][0]).toEqual(documentSides);
+      // 关闭阅读窗口后焦点回到仍然存在的溢出触发按钮，而不是已经卸掉的菜单项。
+      expect(onReadDocument.mock.calls[0][2]).toBe(trigger);
+    } finally {
+      width.restore();
+    }
+  });
+
+  it("堆叠多文件在块标题给阅读入口，非 Markdown 块不出现", async () => {
+    const rows = [
+      { ...change("docs/readme.md", "none", "modified"), side: "unstaged" as const },
+      { ...change("gen/plain.ts", "none", "modified"), side: "unstaged" as const },
+    ];
+    const openOnce = {
+      summary: { name: "demo", path: repoPath },
+      generation: 4,
+      snapshot: { ...snapshot, generation: 4, files: rows },
+      draft: "",
+      watchDegraded: false,
+    } as OpenedRepository;
+    mocks.loadDiff.mockImplementation(async (_repo: string, path: string) =>
+      path === "docs/readme.md" ? { ...diffFor(path, false), document: documentSides } : diffFor(path, false),
+    );
+    const onReadDocument = vi.fn();
+    render(MultiFileDiff, {
+      props: {
+        opened: openOnce,
+        rows,
+        focus: { path: rows[0].path, side: rows[0].side },
+        nav: fileNavState(rows, 0, () => {}, "选中文件"),
+        disabled: false,
+        fullFile: false,
+        fullContext: 1_000_000,
+        stageCount: 2,
+        unstageCount: 0,
+        discardCount: 2,
+        conflictCount: 0,
+        nextId: () => 1,
+        onFocus: vi.fn(),
+        onStale: vi.fn(),
+        onStageHunk: vi.fn(),
+        onFullFile: vi.fn(),
+        onFileHistory: vi.fn(),
+        onReadDocument,
+        onStage: vi.fn(),
+        onUnstage: vi.fn(),
+        onDiscard: vi.fn(),
+        onClear: vi.fn(),
+      },
+    });
+    const entry = await screen.findByRole("button", { name: "阅读 docs/readme.md 的文档" });
+    expect(screen.queryByRole("button", { name: "阅读 gen/plain.ts 的文档" })).toBeNull();
+    await fireEvent.click(entry);
+    expect(onReadDocument).toHaveBeenCalledWith(documentSides, "new", entry);
+  });
+});

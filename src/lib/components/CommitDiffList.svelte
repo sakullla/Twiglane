@@ -4,7 +4,7 @@
   import { FULL_FILE_CONTEXT } from "../diff";
   import { normalizeError } from "../errors";
   import { commitFileLabel, commitLineStat } from "../history";
-  import type { CommitDetail, DiffHunk, DiffResponse, FileSelection, OpenedRepository } from "../types";
+  import type { CommitDetail, DiffHunk, DiffResponse, FileSelection, OpenedRepository, PreviewSources } from "../types";
   import { blockTops, blockWindow, splitPath, statusMark } from "../ui";
   import DiffView from "./DiffView.svelte";
   import Icon from "./Icon.svelte";
@@ -28,9 +28,11 @@
     /** 每个文件块是否展开为完整文件；不传 onFullFile 时不显示切换。 */
     fullFile?: boolean;
     onFullFile?: (next: boolean) => void;
+    /** 从块标题进入只读文档阅读；不传时不显示入口。 */
+    onReadDocument?: (sources: PreviewSources, side: "old" | "new", trigger: HTMLElement | null) => void;
   }
 
-  let { opened, active = true, detail, parent, focusPath = null, onFocusPath, disabled, nextId, onGeneration, onFailure, onFileHistory, fullFile = false, onFullFile }: Props = $props();
+  let { opened, active = true, detail, parent, focusPath = null, onFocusPath, disabled, nextId, onGeneration, onFailure, onFileHistory, fullFile = false, onFullFile, onReadDocument }: Props = $props();
   /** 完整文件时追加上下文参数；只看改动时保持后端默认的 3 行。 */
   function contextArgs(): [] | [number] {
     return fullFile ? [FULL_FILE_CONTEXT] : [];
@@ -244,6 +246,13 @@
     return { path, side: "unstaged" };
   }
 
+  /** 块标题的阅读入口：只有这一块的真实差异带了文档来源（Markdown）才执行。 */
+  function readDocument(path: string, trigger: HTMLElement | null): void {
+    const sources = fileDiffs[path]?.document;
+    if (!sources || !onReadDocument) return;
+    onReadDocument(sources, sources.new ? "new" : "old", trigger);
+  }
+
   async function loadMore(path: string) {
     const current = fileDiffs[path];
     if (!current || fileLoading[path] || disabled || current.offset + current.lines.length >= current.totalLines) return;
@@ -345,6 +354,15 @@
                 <Icon name="chevron-down" size={13} class={expanded ? "flip" : ""} />
               </button>
               {#if onFileHistory}<button type="button" class="icon-btn sm" aria-label={`查看 ${file.path} 的文件历史`} title="查看此文件历史" onclick={() => onFileHistory(file.path)}><Icon name="history" size={13} /></button>{/if}
+              {#if onReadDocument && fileDiffs[file.path]?.document}
+                <button
+                  type="button"
+                  class="icon-btn sm"
+                  aria-label={`阅读 ${file.path} 的文档`}
+                  title={fileDiffs[file.path].document?.new ? "按版本阅读这个文档（改动后）" : "按版本阅读这个文档（改动前）"}
+                  onclick={(event) => readDocument(file.path, event.currentTarget as HTMLElement)}
+                ><Icon name="eye" size={13} /></button>
+              {/if}
             </div>
             {#if expanded}
               <DiffView {onGeneration}

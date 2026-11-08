@@ -182,3 +182,94 @@ describe("文件内容预览", () => {
     expect(screen.queryByText(/没有改动前版本/)).toBeNull();
   });
 });
+/* ------------------------------------------------------------------ *
+ * R6：图片预览在刷新、缩放与视图切换时尺寸稳定。
+ * 关键事实：同一版本的后台重读保留已解码的图片与已知尺寸，只有换了内容才重排；
+ * 采纳新代次后不再多发一次请求，也就不存在「读 → 提版本 → 再读」的自激。
+ * ------------------------------------------------------------------ */
+describe("图片预览的刷新稳定性", () => {
+  beforeEach(() => { filePreview.mockReset(); });
+
+  it("同一版本的刷新保留图片节点、已知尺寸与缩放选择，只在不占布局的位置提示刷新", async () => {
+    filePreview.mockImplementation((_path, source, generation) => Promise.resolve(image(source === sources.old ? "old" : "new", { generation })));
+    const view = render(BinaryPreview, { sources, generation: 1, disabled: false });
+    const newImage = await screen.findByAltText("改动后：new.png");
+    Object.defineProperties(newImage, { naturalWidth: { value: 320 }, naturalHeight: { value: 200 } });
+    await fireEvent.load(newImage);
+    expect(screen.getByText("320 × 200")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "原始大小" }));
+    expect(newImage.parentElement?.classList.contains("original")).toBe(true);
+
+    // 后台刷新：同一份来源、新的代次，响应还没回来。
+    const pending = deferred<FilePreview>();
+    filePreview.mockImplementation((_path, source) => (source === sources.old ? Promise.resolve(image("old", { generation: 2 })) : pending.promise));
+    await view.rerender({ sources, generation: 2, disabled: false });
+
+    // 刷新期间：图片还在原位、尺寸没被清掉、缩放没被重置，状态提示不改变内容区高度。
+    expect(screen.getByAltText("改动后：new.png")).toBe(newImage);
+    expect(screen.getByText("320 × 200")).toBeTruthy();
+    expect(newImage.parentElement?.classList.contains("original")).toBe(true);
+    expect(screen.getAllByText(/正在刷新这个版本/).length).toBe(2);
+    expect(document.querySelectorAll(".preview-message.inline")).toHaveLength(2);
+
+    pending.resolve(image("new", { generation: 2 }));
+    await waitFor(() => expect(screen.queryByText(/正在刷新这个版本/)).toBeNull());
+    // 同一张图：节点没有重建，也就没有「闪一下再排回来」。
+    expect(screen.getByAltText("改动后：new.png")).toBe(newImage);
+    expect(screen.getByText("20 B")).toBeTruthy();
+  });
+
+  it("刷新失败保留上一次可读内容，并说明它不是刚验证过的结果", async () => {
+    filePreview.mockResolvedValue(image("new", { generation: 1 }));
+    const view = render(BinaryPreview, { sources, generation: 1, disabled: false });
+    const first = await screen.findByAltText("改动后：new.png");
+    filePreview.mockImplementation((_path, source) => (source === sources.old ? Promise.resolve(image("old", { generation: 2 })) : Promise.reject(new Error("网络读取失败"))));
+    await view.rerender({ sources, generation: 2, disabled: false });
+    expect((await screen.findByRole("alert")).textContent).toContain("刷新没有完成");
+    // 旧图仍在：能继续读，但说明它已经不是刚核对过的版本。
+    expect(screen.getByAltText("改动后：new.png")).toBe(first);
+  });
+
+  it("采纳新代次后不再重复读取同一代次，没有「读 → 提版本 → 再读」的自激", async () => {
+    const calls: { side: string; generation: number }[] = [];
+    let generation = 1;
+    filePreview.mockImplementation((_path, source, current) => {
+      calls.push({ side: source === sources.old ? "old" : "new", generation: current });
+      // 后端在读取期间发现状态已推进：返回更高的代次，与真实 git 行为一致。
+      return Promise.resolve(image(source === sources.old ? "old" : "new", { generation: current + 1 }));
+    });
+    const view = render(BinaryPreview, {
+      sources, generation, disabled: false,
+      onGeneration: (next: number) => { generation = Math.max(generation, next); },
+    });
+    await waitFor(() => expect(calls.length).toBeGreaterThan(0));
+    // 宿主提升代次后重新渲染，组件不该为了同一个代次再发一次请求。
+    await view.rerender({ sources: sources, generation, disabled: false });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await view.rerender({ sources, generation, disabled: false });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(generation).toBe(2);
+    // 每侧最多两次：原本那一次，加上代次真的变化后的一次；没有继续增长。
+    expect(calls.filter((call) => call.side === "old").length).toBeLessThanOrEqual(2);
+    expect(calls.filter((call) => call.side === "new").length).toBeLessThanOrEqual(2);
+    expect(calls.every((call) => call.generation <= 2)).toBe(true);
+  });
+
+  it("换了一份内容才重置缩放与比较方式", async () => {
+    filePreview.mockResolvedValue(image("new", { generation: 1 }));
+    const view = render(BinaryPreview, { sources, generation: 1, disabled: false });
+    const newImage = await screen.findByAltText("改动后：new.png");
+    await fireEvent.click(screen.getByRole("button", { name: "原始大小" }));
+    expect(newImage.parentElement?.classList.contains("original")).toBe(true);
+
+    // 只换代次：保留用户选择。
+    await view.rerender({ sources, generation: 2, disabled: false });
+    expect(screen.getByAltText("改动后：new.png").parentElement?.classList.contains("original")).toBe(true);
+
+    // 换成另一份内容：回到适应窗口，并重新在两侧之间比较。
+    const nextSources = { ...sources, new: { revision: "c".repeat(40), path: "next.png" } };
+    await view.rerender({ sources: nextSources, generation: 2, disabled: false });
+    const nextImage = await screen.findByAltText("改动后：next.png");
+    expect(nextImage.parentElement?.classList.contains("original")).toBe(false);
+  });
+});

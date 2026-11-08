@@ -35,6 +35,7 @@
     HistoryCommit,
     BranchRecord,
     OpenedRepository,
+    PreviewSources,
     StatusSnapshot,
   } from "../types";
   import { FULL_FILE_CONTEXT, type HunkNavReport } from "../diff";
@@ -95,6 +96,8 @@
     /** 提交差异是否展开为完整文件；与改动视图共用同一个偏好，不传时不提供切换。 */
     fullFile?: boolean;
     onFullFile?: (next: boolean) => void;
+    /** 从提交差异进入只读文档阅读；不传时不显示入口。 */
+    onReadDocument?: (sources: PreviewSources, side: "old" | "new", trigger: HTMLElement | null) => void;
   }
 
   const pageReads = new LatestReadQueue();
@@ -180,6 +183,7 @@
     branchGroups = true,
     fullFile = false,
     onFullFile,
+    onReadDocument,
   }: Props = $props();
   /** 提交差异读取的上下文：完整文件时整份读出，否则用后端默认的 3 行。只在需要时追加参数。 */
   function contextArgs(full: boolean): [] | [number] {
@@ -512,6 +516,11 @@
   let bodyClipped = $state(false);
   /** 窄详情里文件列表在差异上方，可以收起，把高度全给差异。宽详情里没有这个开关。 */
   let filesCollapsed = $state(false);
+  /**
+   * 引用胶囊是否收起：切换提交不重置，收起状态一直跟着用户的选择，
+   * 只在有多个引用时出现开关（单个引用没有可省的空间）。
+   */
+  let refsCollapsed = $state(false);
   /** 变更文件栏的宽度：拖动中间的分隔条调整，存在本机偏好里；渲染时给差异区至少留 MIN_DIFF_WIDTH。 */
   let filesWidth = $state(readFilesWidth());
   let splitWidth = $state(0);
@@ -1201,6 +1210,13 @@
     if (next === "multi") multiFocus = activeFile?.path ?? null;
     else if (multiFocus) manualPath = multiFocus;
     viewMode = next;
+  }
+
+  /** 多提交对照块标题的阅读入口：来源就是这一提交的那份差异，缺失侧由阅读窗口说明。 */
+  function readUnionDocument(diff: DiffResponse | null, trigger: HTMLElement | null): void {
+    const sources = diff?.document;
+    if (!sources || !onReadDocument) return;
+    onReadDocument(sources, sources.new ? "new" : "old", trigger);
   }
 
   function directoryOf(path: string): string {
@@ -1898,6 +1914,15 @@
                     <span class="union-block-summary" title={item.summary}>{item.summary}</span>
                     {#if owner}<span class="union-block-meta">{owner.authorName} · {relativeTime(owner.authoredAt)}</span>{/if}
                     {#if change}<LineCounts stat={commitLineStat(change)} hideBinary />{/if}
+                    {#if onReadDocument && item.diff?.document}
+                      <button
+                        type="button"
+                        class="icon-btn sm union-block-read"
+                        aria-label={`阅读 ${unionActive?.path ?? "这个文件"} 在这一提交的文档`}
+                        title={item.diff.document?.new ? "按版本阅读这个文档（这次提交）" : "按版本阅读这个文档（父提交）"}
+                        onclick={(event) => readUnionDocument(item.diff, event.currentTarget as HTMLElement)}
+                      ><Icon name="eye" size={13} /></button>
+                    {/if}
                   </h3>
                   {#if item.error}
                     <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{item.error}</span></div>
@@ -1946,13 +1971,29 @@
               <span class="read-only-chip" title="历史浏览是只读的：不切换分支，也不改动暂存区或工作区">
                 <Icon name="eye" size={12} />只读
               </span>
-              {#each pills as pill (`${pill.kind}:${pill.name}`)}
-                <span class={`ref-pill ${pill.kind}`} class:current={pill.current} title={pill.label} aria-label={pill.label}>
-                  <Icon name={pill.kind === "tag" ? "tag" : pill.kind === "remote" ? "cloud" : "branch"} size={11} />
-                  <span>{pill.name}</span>
-                  {#if pill.remote}<Icon name="cloud" size={10} />{/if}
-                </span>
-              {/each}
+              {#if pills.length > 1}
+                <!-- 引用多时才给收起入口：收起后只留计数，窄窗口把这一行让给差异。 -->
+                <button
+                  type="button"
+                  class="refs-toggle"
+                  aria-expanded={!refsCollapsed}
+                  aria-label={refsCollapsed ? `展开提交引用（${pills.length}）` : "收起提交引用"}
+                  title={refsCollapsed ? `展开 ${pills.length} 个引用` : "收起引用，给差异腾出空间"}
+                  onclick={() => (refsCollapsed = !refsCollapsed)}
+                >
+                  <Icon name="chevron-down" size={11} class={refsCollapsed ? "" : "flip"} />
+                  {refsCollapsed ? `引用 ${pills.length}` : "收起引用"}
+                </button>
+              {/if}
+              {#if !refsCollapsed}
+                {#each pills as pill (`${pill.kind}:${pill.name}`)}
+                  <span class={`ref-pill ${pill.kind}`} class:current={pill.current} title={pill.label} aria-label={pill.label}>
+                    <Icon name={pill.kind === "tag" ? "tag" : pill.kind === "remote" ? "cloud" : "branch"} size={11} />
+                    <span>{pill.name}</span>
+                    {#if pill.remote}<Icon name="cloud" size={10} />{/if}
+                  </span>
+                {/each}
+              {/if}
             </div>
             <CommitBranches {active} repo={opened.summary.path} oid={detail.commit.oid} generation={opened.generation} currentBranch={opened.snapshot.branch.name} {nextId} {onGeneration} />
           </div>
@@ -2106,6 +2147,7 @@
                 onFileHistory={onFilePath}
                 {fullFile}
                 {onFullFile}
+                {onReadDocument}
               />
             {:else}
               <DiffView {onGeneration}
@@ -2120,6 +2162,7 @@
                 onFileHistory={onFilePath}
                 {fullFile}
                 {onFullFile}
+                {onReadDocument}
                 asText={Boolean(detail && activeFile && commitAsText === `${detail.commit.oid}:${activeFile.path}`)}
                 onViewAsText={(next) => {
                   commitAsText = next && detail && activeFile ? `${detail.commit.oid}:${activeFile.path}` : null;
@@ -2264,6 +2307,22 @@
     line-height: 12px;
   }
   .history-graph-toggle.active { color: var(--accent-text); }
+  /* 引用收起入口与胶囊同高，收起后仍能看出有几个引用。 */
+  .refs-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex: none;
+    height: 18px;
+    padding: 0 var(--space-6);
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-xs);
+    background: transparent;
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+  }
+  .refs-toggle:hover { border-color: var(--control-border-hover); background: var(--hover); color: var(--fg); }
+
   /* 左栏收到很窄时先让出拓扑宽度，把横向空间留给提交说明。 */
   @container history-list (max-width: 260px) {
     .hr-graph, .hr-graph-slot { display: none; }

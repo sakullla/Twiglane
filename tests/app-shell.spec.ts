@@ -147,6 +147,11 @@ const mocks = vi.hoisted(() => ({
   repositoryContentSearch: vi.fn(),
   repositoryReviewToken: vi.fn(),
   filePreview: vi.fn(),
+  repositoryDocument: vi.fn(),
+  documentResource: vi.fn(),
+  documentRemoteImage: vi.fn(),
+  openDocumentUrl: vi.fn(),
+  cancelDocumentResources: vi.fn(),
   clioraReviewRequest: vi.fn(),
   clioraReviewReceipt: vi.fn(),
   clioraReviewReturn: vi.fn(),
@@ -582,6 +587,22 @@ beforeEach(() => {
   });
   mocks.refreshStatus.mockResolvedValue(snapshot);
   mocks.loadDiff.mockImplementation(async (_repo: string, path: string, staged: boolean) => diffFor(path, staged));
+  // 只读文档正文：按请求的来源回正文，来源标签与版本由外壳与阅读窗口显示。
+  mocks.repositoryDocument.mockImplementation(async (_repo: string, source: { revision: string; path: string }, generation: number, _id: number, mode = "document", offset = 0) => ({
+    generation,
+    source,
+    kind: "text",
+    size: 32,
+    version: `${source.revision}:${offset}`,
+    text: mode === "source" ? null : `# ${source.revision} 版本\n\n正文`,
+    complete: mode === "document",
+    offset,
+    lines: mode === "source" ? [`# ${source.revision} 版本`, "", "正文"] : [],
+    nextOffset: offset + 3,
+    hasMore: false,
+    truncated: false,
+    message: null,
+  }));
   mocks.mergeSession.mockResolvedValue({
     generation: 4,
     operation: "none",
@@ -2669,5 +2690,124 @@ describe("cliora 来源展示", () => {
       expect(screen.getByText("已合入 " + mergedOid.slice(0, 7))).toBeTruthy(),
     );
     expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy();
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * R5：外壳里的 Markdown 版本阅读。
+ * 改动视图、堆叠多文件与历史都把真实来源交给同一个阅读窗口；
+ * 阅读窗口与任务弹窗共用一个槽位，关闭后焦点回到触发控件，底下的差异选择不丢。
+ * ------------------------------------------------------------------ */
+describe("外壳里的 Markdown 版本阅读（R5）", () => {
+  const mdPath = "README.md";
+  const mdSides = {
+    repository: repoPath,
+    old: { revision: "index", path: mdPath },
+    new: { revision: "worktree", path: mdPath },
+  };
+
+  function withMarkdownDiff() {
+    const base = mocks.loadDiff.getMockImplementation();
+    mocks.loadDiff.mockImplementation(async (repo: string, path: string, staged: boolean, ...rest: unknown[]) =>
+      path === mdPath
+        ? { ...diffFor(path, staged), document: mdSides }
+        : base!(repo, path, staged, ...rest as []));
+  }
+
+  async function selectMarkdownDiff() {
+    await waitFor(() => expect(document.querySelector(".file-list")).toBeTruthy());
+    const row = [...document.querySelectorAll<HTMLElement>(".file-row")].find((item) => item.getAttribute("title") === mdPath);
+    expect(row, "夹具里要有 README.md 的改动行").toBeTruthy();
+    await fireEvent.click(row!);
+    await waitFor(() => expect(document.querySelector(".diff-toolbar")).toBeTruthy());
+  }
+
+  it("从改动打开阅读窗口，显示真实来源与正文，关闭后回到触发控件且差异选择不变", async () => {
+    withMarkdownDiff();
+    render(App);
+    await openRepo();
+    await selectMarkdownDiff();
+    const before = document.querySelectorAll("[data-diff-row]").length;
+
+    const trigger = await screen.findByRole("button", { name: "阅读文档" });
+    await fireEvent.click(trigger);
+    const dialog = await screen.findByRole("dialog", { name: "阅读文档" });
+    expect(within(dialog).getAllByTitle("来源：工作区").length).toBeGreaterThan(0);
+    expect(await within(dialog).findByRole("heading", { name: "worktree 版本" })).toBeTruthy();
+    expect(mocks.repositoryDocument).toHaveBeenCalledWith(repoPath, { revision: "worktree", path: mdPath }, 4, expect.any(Number), "document");
+    // 单槽：阅读窗口是当前唯一打开的任务弹窗。
+    expect(document.querySelectorAll("[data-task-modal]")).toHaveLength(1);
+    expect(document.querySelector("[data-task-modal]")?.getAttribute("data-task-modal")).toBe("document");
+    expect(mocks.stageFiles).not.toHaveBeenCalled();
+    expect(mocks.commitChanges).not.toHaveBeenCalled();
+
+    await fireEvent.click(within(dialog).getByRole("button", { name: "关闭" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "阅读文档" })).toBeNull());
+    expect(document.activeElement, "焦点回到打开它的按钮").toBe(trigger);
+    // 底下的差异还挂在那里：选择、内容与工具栏都没被阅读窗口带走。
+    expect(document.querySelectorAll("[data-diff-row]").length).toBe(before);
+    expect(document.querySelector('.file-row[title="README.md"]')?.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("删除侧只剩改动前版本时说明缘由，不伪造改动后正文", async () => {
+    const base = mocks.loadDiff.getMockImplementation();
+    mocks.loadDiff.mockImplementation(async (repo: string, path: string, staged: boolean, ...rest: unknown[]) =>
+      path === "docs/start.md"
+        ? { ...diffFor(path, staged), document: { repository: repoPath, old: { revision: "HEAD", path }, new: null } }
+        : base!(repo, path, staged, ...rest as []));
+    render(App);
+    await openRepo();
+    const row = [...document.querySelectorAll<HTMLElement>(".file-row")].find((item) => item.getAttribute("title") === "docs/start.md");
+    await fireEvent.click(row!);
+    const trigger = await screen.findByRole("button", { name: "阅读文档" });
+    expect(trigger.getAttribute("title")).toContain("改动前");
+    await fireEvent.click(trigger);
+    const dialog = await screen.findByRole("dialog", { name: "阅读文档" });
+    expect(within(dialog).getByText("这个文件在改动后已经不存在，只保留改动前的版本。")).toBeTruthy();
+    expect(within(dialog).queryByRole("group", { name: "文档版本" })).toBeNull();
+    expect(mocks.repositoryDocument).not.toHaveBeenCalledWith(repoPath, expect.objectContaining({ revision: "worktree" }), expect.anything(), expect.anything(), expect.anything());
+  });
+
+  it("堆叠多文件的块标题也能读文档，非 Markdown 文件块没有入口", async () => {
+    withMarkdownDiff();
+    render(App);
+    await openRepo();
+    await waitFor(() => expect(document.querySelectorAll(".file-row").length).toBeGreaterThan(1));
+    const rows = [...document.querySelectorAll<HTMLElement>(".file-row")];
+    const mdRow = rows.find((item) => item.getAttribute("title") === mdPath)!;
+    const otherRow = rows.find((item) => item.getAttribute("title") === "src/App.svelte")!;
+    // 只选这两个文件：Cmd/Ctrl 点击逐个加入，不把整段范围都选上。
+    await fireEvent.click(mdRow);
+    await fireEvent.click(otherRow, { ctrlKey: true });
+    await waitFor(() => expect(document.querySelector(".multi-stack")).toBeTruthy());
+    // 差异要读完那一块才有 document 来源可交给阅读窗口。
+    await waitFor(() => expect(document.querySelector('.multi-file[data-path="README.md"] [data-diff-row]')).toBeTruthy());
+
+    const entry = await screen.findByRole("button", { name: `阅读 ${mdPath} 的文档` });    expect(screen.queryByRole("button", { name: "阅读 src/App.svelte 的文档" })).toBeNull();
+    await fireEvent.click(entry);
+    const dialog = await screen.findByRole("dialog", { name: "阅读文档" });
+    expect(within(dialog).getAllByTitle("来源：工作区").length).toBeGreaterThan(0);
+    await fireEvent.click(within(dialog).getByRole("button", { name: "关闭" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "阅读文档" })).toBeNull());
+    // 阅读窗口不改变多选范围：两个文件仍然堆叠在同一份选择里。
+    expect(document.querySelector(".multi-stack"), "多选状态没被阅读窗口改变").toBeTruthy();
+    expect(document.querySelectorAll(".multi-file").length).toBe(2);
+  });
+
+  it("任务弹窗打开时不叠一层阅读窗口，Esc 只关最上面那一层", async () => {
+    withMarkdownDiff();
+    render(App);
+    await openRepo();
+    await selectMarkdownDiff();
+    await press("k");
+    const palette = await screen.findByRole("dialog", { name: "命令面板" });
+    await fireEvent.input(within(palette).getByRole("combobox"), { target: { value: "设置" } });
+    await tick();
+    const option = within(palette).getAllByRole("option")[0];
+    await fireEvent.click(option);
+    await waitFor(() => expect(document.querySelector('[data-task-modal="settings"]')).toBeTruthy());
+    // 任务弹窗之下不会再叠一层阅读窗口。
+    expect(document.querySelectorAll("[data-task-modal]")).toHaveLength(1);
+    expect(screen.queryByRole("dialog", { name: "阅读文档" })).toBeNull();
   });
 });

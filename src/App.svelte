@@ -14,6 +14,7 @@
     type CommandState,
   } from "./lib/commands";
   import { LatestReadQueue } from "./lib/latest-read";
+  import { createDocumentSession } from "./lib/document-session.svelte";
   import { shortOid } from "./lib/history";
   import { FULL_FILE_CONTEXT, finishDiffAttempt, reuseDiffContent, type HunkNavReport } from "./lib/diff";
   import { DraftBuffer } from "./lib/draft";
@@ -52,6 +53,7 @@
     GitInfo,
     OpenedRepository,
     PanelWidths,
+    PreviewSources,
     RecentRepo,
     RepoChanged,
     RepoHead,
@@ -81,6 +83,7 @@
   import CommitDraft from "./lib/components/CommitDraft.svelte";
   import DetailDialog from "./lib/components/DetailDialog.svelte";
   import DiffView from "./lib/components/DiffView.svelte";
+  import DocumentDialog from "./lib/components/DocumentDialog.svelte";
   import FileList from "./lib/components/FileList.svelte";
   import Icon from "./lib/components/Icon.svelte";
   import MergeBanner from "./lib/components/MergeBanner.svelte";
@@ -233,6 +236,16 @@
   let historyPath = $state<string | null>(null);
   let historyQuery = $state("");
   let taskModal = $state<TaskModal | null>(null);
+  /**
+   * 只读文档阅读窗口的请求。
+   *
+   * 它和任务弹窗共用同一个单槽：任一时刻只有一个任务级 modal，打开阅读窗口会收起任务弹窗，
+   * 打开任务弹窗也会收起阅读窗口；底下的差异/历史视图不卸载，选择与位置因此保持原样。
+   * trigger 是打开它的控件（差异工具条按钮、块标题按钮或溢出入口），关闭后焦点回到那里。
+   */
+  let documentRequest = $state<{ sources: PreviewSources; side: "old" | "new"; trigger: HTMLElement | null } | null>(null);
+  /** 阅读位置按「仓库 + 版本 + 路径」保存在这里，关闭再打开仍能接着读。 */
+  const documentSession = createDocumentSession({ repository: () => opened?.summary.path ?? null });
   /** 从哪个任务 modal 跳过来的：例如从「分支与标签」打开合并，关闭合并时回到那里。 */
   let taskReturn = $state<TaskModal | null>(null);
   /** 本次打开分支 modal 是为了新建：直接展开表单。每次 openTask 都先清空。 */
@@ -707,6 +720,8 @@
       mergeTarget = null;
       mergeMode = null;
     }
+    // 单槽：从差异/历史进任务弹窗时先收起阅读窗口，两层任务弹窗不并存。
+    documentRequest = null;
     closeSwitcher();
     cloneOpen = false;
     // 面板在批内卸载：先在它关闭前定下关闭弹窗时该回到哪，再交给 Modal。
@@ -718,6 +733,25 @@
     taskModal = task;
     if (task === "merge") void probeMerge();
     if (task === "publish") void loadRemoteName();
+  }
+
+  /**
+   * 从差异或历史的「阅读文档」入口打开只读阅读窗口。
+   * 来源是消费者给的真实前后版本（工作区 / 暂存区 / 父提交 / 提交），阅读窗口自己决定先看哪一侧。
+   */
+  function openDocument(sources: PreviewSources, side: "old" | "new", trigger: HTMLElement | null) {
+    if (!opened) return;
+    if (!sources.old && !sources.new) return;
+    // 同一个单槽：阅读窗口打开时不再留着任务弹窗，避免两层任务 modal 叠在一起。
+    taskModal = null;
+    taskReturn = null;
+    closeSwitcher();
+    paletteOpen = false;
+    documentRequest = { sources, side, trigger };
+  }
+
+  function closeDocument() {
+    documentRequest = null;
   }
 
   /** 设置 modal：默认落在外观首屏，Git 诊断/更新入口另行指定分区（R10、R1）。 */
@@ -3210,6 +3244,7 @@
                   onStageHunk={stageHunkOf}
                   onFullFile={setFullFile}
                   onFileHistory={openFileHistory}
+                  onReadDocument={openDocument}
                   onStage={() => void runBatch("stage", batch.stage)}
                   onUnstage={() => void runBatch("unstage", batch.unstage)}
                   onDiscard={() => void recovery?.discard(batch.discard)}
@@ -3228,6 +3263,7 @@
                   }}
                   onLoadMore={loadMoreDiff}
                   onFileHistory={openFileHistory}
+                  onReadDocument={openDocument}
                   fullFile={diffFullFile}
                   onFullFile={setFullFile}
                   asText={diffAsText !== null && diffAsText === asTextKey(selected)}
@@ -3296,6 +3332,7 @@
                   onGeneration={adoptGeneration}
                   onFailure={handleMutationError}
                   onFilePath={openFileHistory}
+                  onReadDocument={openDocument}
                   onClearFile={() => (historyPath = null)}
                   onSnapshot={mergeSnapshot}
                   onNotice={notice}
@@ -3401,7 +3438,21 @@
   />
 {/if}
 
-{#if opened && taskModal === "stash"}
+{#if opened && documentRequest}
+  <DocumentDialog
+    repository={opened.summary.path}
+    old={documentRequest.sources.old}
+    new={documentRequest.sources.new}
+    side={documentRequest.side}
+    generation={opened.generation}
+    {nextId}
+    onGeneration={adoptGeneration}
+    session={documentSession}
+    returnFocus={documentRequest.trigger}
+    abbrevLength={opened.abbrevLength ?? 0}
+    onClose={closeDocument}
+  />
+{:else if opened && taskModal === "stash"}
   <StashModal
     {opened}
     returnFocus={taskReturnFocus}

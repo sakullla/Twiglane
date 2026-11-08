@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { api } from "../api";
   import { previewReads } from "../preview-reads";
   import { normalizeError } from "../errors";
@@ -13,8 +14,14 @@
     result: FilePreview | null;
     error: string | null;
     loading: boolean;
+    /** 同一版本的后台重读：旧图片留在原处，只在不改布局的位置提示正在刷新。 */
+    refreshing: boolean;
     downloading: boolean;
     version: number;
+    /** 这一侧内容身份（仓库 + 版本 + 路径）：身份不变的重读才保留已显示的图片。 */
+    identity: string;
+    /** 已生效的重试序号：重试即便落在同一个代次也要真的重读一次。 */
+    retry: number;
     width: number | null;
     height: number | null;
     query: string;
@@ -28,8 +35,8 @@
     onGeneration?: (generation: number) => void;
   } = $props();
   const emptyPane = (version: number): Pane => ({
-    result: null, error: null, loading: false, downloading: false, version,
-    width: null, height: null, query: "", scroll: 0, viewport: 0,
+    result: null, error: null, loading: false, refreshing: false, downloading: false, version,
+    identity: "", retry: 0, width: null, height: null, query: "", scroll: 0, viewport: 0,
   });
   let mode = $state<Mode>("new");
   let panes = $state<Record<Side, Pane>>({ old: emptyPane(0), new: emptyPane(0) });
@@ -37,6 +44,12 @@
   let zoom = $state(false);
   let serials: Record<Side, number> = { old: 0, new: 0 };
   let previousKey = "";
+
+  /** 一侧的内容身份：仓库 + 版本 + 路径三样都不同才是「换了内容」。 */
+  function sideIdentity(side: Side): string {
+    const source = sources[side];
+    return source ? `${sources.repository}\u0000${source.revision}\u0000${source.path}` : "";
+  }
   let visibleSides = $derived<Side[]>(mode === "compare" ? ["old", "new"] : [mode]);
   let comparing = $derived(mode === "compare" && !!sources.old && !!sources.new);
   /**
@@ -49,20 +62,50 @@
     return single ? "当前文件" : side === "old" ? "改动前" : "改动后";
   }
 
-  function loadSide(side: Side, source: PreviewSources[Side], current: number) {
+  /**
+   * 读取一侧：身份变了才清空已显示内容；同一身份的后台重读保留上一份结果，
+   * 新数据到达后原地替换，因此刷新、窗口缩放和视图切换都不会先塌陷再排回来。
+   */
+  function loadSide(side: Side, source: PreviewSources[Side], current: number, retry: number) {
     const token = ++serials[side];
     const controller = new AbortController();
     const pane = panes[side];
-    pane.result = null;
-    pane.error = null;
-    pane.loading = !!source;
-    pane.downloading = false;
-    pane.version = current;
-    pane.width = null;
-    pane.height = null;
-    pane.query = "";
-    pane.scroll = 0;
-    if (!source) return () => { serials[side]++; controller.abort(); };
+    const identity = sideIdentity(side);
+    // 这里的读只用来判断「要不要重读」：不能被当成 effect 依赖，
+    // 否则图片解码失败这类与本侧内容无关的状态变化都会反过来再发一次请求。
+    const before = untrack(() => ({ result: pane.result, identity: pane.identity, retry: pane.retry }));
+    // 已经有这个代次的结果、也没有新的重试：不再发一次多余的请求。
+    // 采纳新代次后宿主会把 generation 提上来，这一步避免「读 → 提版本 → 再读」的往复。
+    if (source && before.result && before.identity === identity && before.result.generation === current && before.retry === retry) {
+      return () => { serials[side]++; controller.abort(); };
+    }
+    const keeping = before.result !== null && before.identity === identity;
+    pane.retry = retry;
+    if (keeping) {
+      // 旧图片继续显示：只标记正在刷新，尺寸、滚动与缩放都不动。
+      pane.refreshing = true;
+      pane.loading = false;
+      pane.error = null;
+      pane.downloading = false;
+      pane.identity = identity;
+      pane.version = current;
+    } else {
+      pane.result = null;
+      pane.error = null;
+      pane.loading = !!source;
+      pane.refreshing = false;
+      pane.downloading = false;
+      pane.version = current;
+      pane.identity = identity;
+      pane.width = null;
+      pane.height = null;
+      pane.query = "";
+      pane.scroll = 0;
+    }
+    if (!source) {
+      pane.refreshing = false;
+      return () => { serials[side]++; controller.abort(); };
+    }
     void previewReads.run(async () => {
       // 读取一被作废（切换版本或卸载）就让 task 立刻落地，把 previewReads 的槽位让给新选择，
       // 而不是等已经没人要的后端响应返回；否则两个在途读取会把新读取一直挡在队列里。
@@ -96,9 +139,14 @@
       // Deleted files open on their previous version automatically.
       if (value.kind === "missing" && side === "new" && sources.old) mode = "old";
     }).catch((failure) => {
-      if (serials[side] === token) pane.error = normalizeError(failure).message;
+      if (serials[side] !== token) return;
+      const message = normalizeError(failure).message;
+      // 后台重读失败时保留上一份可读内容，并明确它已经不是刚验证过的结果。
+      pane.error = keeping ? `刷新没有完成：${message} 仍在显示上一次读取的内容。` : message;
     }).finally(() => {
-      if (serials[side] === token) pane.loading = false;
+      if (serials[side] !== token) return;
+      pane.loading = false;
+      pane.refreshing = false;
     });
     return () => { serials[side]++; controller.abort(); };
   }
@@ -107,15 +155,17 @@
   // 直接把 loadSide 的 cleanup 交还给 effect：依赖变化重跑和组件卸载都会执行 serial++/abort，
   // 否则被取代或已卸载的读取会一直占着 previewReads 的两个槽位。
   $effect(() => {
-    void retries.old;
-    return loadSide("old", sources.old, generation);
+    const retry = retries.old;
+    return loadSide("old", sources.old, generation, retry);
   });
   $effect(() => {
-    void retries.new;
-    return loadSide("new", sources.new, generation);
+    const retry = retries.new;
+    return loadSide("new", sources.new, generation, retry);
   });
+  // 只有「换了一份内容」才重置缩放与比较方式；后台刷新与代次变化保持用户当前的选择，
+  // 否则并排/统一视图、原始大小会在刷新时被悄悄改回去，看起来像尺寸在跳动。
   $effect(() => {
-    const key = JSON.stringify([sources.repository, sources.old, sources.new, generation]);
+    const key = JSON.stringify([sources.repository, sources.old, sources.new]);
     if (key !== previousKey) {
       previousKey = key;
       zoom = false;
@@ -163,7 +213,11 @@
   }
 
   function imageError(side: Side) {
+    // 解码失败就不再保留这张图：留着会是一个永远画不出来的空框。
     panes[side].error = "图片损坏或当前系统不支持此图片格式。";
+    panes[side].result = null;
+    panes[side].width = null;
+    panes[side].height = null;
   }
 
   function keyboard(event: KeyboardEvent) {
@@ -231,10 +285,13 @@
         {#if pane.error}
           <p class="preview-message" role="alert">{pane.error} <button type="button" class="btn btn-sm" title={pane.downloading ? "正在下载" : "重新读取预览"} disabled={pane.downloading} onclick={() => retries[side]++}>重试</button></p>
         {/if}
-        {#if pane.loading}
-          <p class="preview-message" role="status"><span class="spinner"></span> 正在读取预览</p>
-        {:else if pane.result?.kind === "image" && pane.result.dataUrl && !pane.error}
-          <div class="image-preview" class:original={zoom}>
+        {#if pane.refreshing}
+          <!-- 后台刷新：图片留在原位，状态挂在不占布局的位置，内容区尺寸不变。 -->
+          <p class="preview-message inline" role="status"><span class="spinner"></span> 正在刷新这个版本…</p>
+        {/if}
+        {#if pane.result?.kind === "image" && pane.result.dataUrl}
+          <!-- 已解码图片一直挂在原处：刷新、缩放与视图切换只改尺寸，不卸载再重排。 -->
+          <div class="image-preview" class:original={zoom} data-side={side}>
             <img src={pane.result.dataUrl} alt={sideLabel(side) + "：" + source?.path} onload={(event) => imageLoaded(side, event)} onerror={() => imageError(side)} />
           </div>
         {:else if pane.result?.kind === "archive"}
@@ -248,6 +305,12 @@
             {#if !filtered.length}<p class="preview-message">没有匹配的文件</p>{/if}
           </div>
           {#if pane.result.message}<p class="preview-message">{pane.result.message}</p>{/if}
+        {:else if pane.loading || pane.refreshing}
+          <!-- 首帧占位与图片区同形同高：读完换成图片时不改变内容区尺寸，不是空框闪一下再撑开。 -->
+          <div class="image-preview placeholder" role="status">
+            <span class="spinner" aria-hidden="true"></span>
+            <p>{pane.refreshing ? "正在刷新这个版本…" : "正在读取预览"}</p>
+          </div>
         {:else if !pane.error}
           <div class="preview-message" role="status">
             <Icon name="file" size={28} />
@@ -264,7 +327,7 @@
   .binary-preview { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; outline-offset: -2px; }
   .preview-panes { display: grid; grid-template-columns: minmax(0, 1fr); flex: 1; min-height: 0; }
   .preview-panes.comparing { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .preview-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+  .preview-pane { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
   .preview-pane + .preview-pane { border-left: 1px solid var(--border); }
   .preview-toolbar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; flex-shrink: 0; font-size: 12px; border-bottom: 1px solid var(--border); }
   .preview-note { margin: 0; padding: 8px 14px; flex-shrink: 0; color: var(--fg-muted); font-size: 12px; border-bottom: 1px solid var(--border); }
@@ -273,7 +336,11 @@
   .pane-meta { display: flex; gap: 10px; padding: 6px 12px; border-bottom: 1px solid var(--border); color: var(--fg-muted); font-size: 12px; }
   .archive-search { min-width: 100px; max-width: 220px; margin-left: auto; flex: 1; }
   .preview-message { padding: 24px; text-align: center; color: var(--fg-muted); }
+  /* 读取/刷新状态浮在内容之上：出现与消失都不改变内容区尺寸。 */
+  .preview-message.inline { position: absolute; top: 8px; right: 10px; z-index: 2; display: flex; align-items: center; gap: 6px; margin: 0; padding: 3px 9px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); font-size: var(--text-xs); }
   .image-preview { flex: 1; min-height: 120px; overflow: auto; padding: 20px; text-align: center; background: repeating-conic-gradient(var(--surface-3) 0% 25%, var(--surface) 0% 50%) 0 / 20px 20px; }
+  .image-preview.placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; font-size: var(--text-xs); color: var(--fg-muted); }
+  .image-preview.placeholder p { margin: 0; }
   .image-preview img { max-width: 100%; max-height: 60vh; object-fit: contain; }
   .image-preview.original img { max-width: none; max-height: none; }
   .archive-list { flex: 1; min-height: 120px; overflow: auto; }

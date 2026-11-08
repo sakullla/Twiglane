@@ -352,7 +352,7 @@
   let syncPending = $derived<"fetch" | "pull" | "push" | null>(
     pending === "fetch" || pending === "pull" || pending === "push" ? pending : null,
   );
-  let remoteState = $derived(
+  let remoteState = $derived<"live" | "stale" | "off">(
     !opened
       ? "off"
       : opened.snapshot.branch.liveRemoteChecked
@@ -3029,6 +3029,8 @@
     {upstreamMissing}
     {ahead}
     {behind}
+    remoteState={remoteState}
+    remoteCheckedAtMs={opened?.snapshot.branch.remoteCheckedAtMs ?? null}
     pending={syncPending}
     remoteBusy={pending !== null && REMOTE_PENDING.has(pending)}
     {theme}

@@ -347,8 +347,10 @@
     <Icon name="filter" size={13} />
     <input
       id="files-search"
+      data-search-scope="tree"
       aria-label="过滤文件树"
       placeholder={changedOnly ? "筛选改动文件" : "筛选文件"}
+      title="只在已读取的目录树里按路径筛选，不读文件内容；全仓库正文查找在右侧搜索里"
       autocomplete="off"
       spellcheck="false"
       value={query}

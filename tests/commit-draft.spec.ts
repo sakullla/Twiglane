@@ -452,6 +452,62 @@ describe("提交区", () => {
     expect(document.querySelector("[data-commit-error]"), "推送失败不改写成提交失败").toBeNull();
     expect(document.querySelector("[data-push-error]")).toBeTruthy();
   });
+
+  it("长提交失败原因默认一行，可用键盘展开换行读全，草稿与暂存输入不动", async () => {
+    const longError =
+      "提交被 pre-commit 钩子拒绝：src/lib/components/CommitDraft.svelte 的格式检查失败，请运行格式化后重试。 草稿和已暂存内容都已保留，可以修改后重试。";
+    renderDraft({ value: "重做提交区", error: longError });
+    const error = document.querySelector<HTMLElement>("[data-commit-error]")!;
+    expect(error.textContent).toBe(longError);
+    expect(error.getAttribute("title"), "完整文本不只挂在 title 上").toBe(longError);
+    expect(error.className, "默认不展开，仍是一行").not.toContain("expanded");
+    // 失败不动草稿：说明框里的内容原样保留。
+    expect(message().value).toBe("重做提交区");
+
+    const toggle = screen.getByRole("button", { name: "展开完整提交失败原因" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.tagName, "展开入口是原生按钮，Enter/Space 就能操作").toBe("BUTTON");
+    await fireEvent.click(toggle);
+    const expanded = document.querySelector<HTMLElement>("[data-commit-error]")!;
+    expect(expanded.className).toContain("expanded");
+    expect(expanded.textContent).toBe(longError);
+    expect(screen.getByRole("button", { name: "收起提交失败原因" }).getAttribute("aria-expanded")).toBe("true");
+
+    await fireEvent.click(screen.getByRole("button", { name: "收起提交失败原因" }));
+    expect(document.querySelector<HTMLElement>("[data-commit-error]")!.className).not.toContain("expanded");
+  });
+
+  it("短原因不出现展开入口；新的失败原因到达时旧展开状态不再生效", async () => {
+    renderDraft({ value: "说明", error: "index.lock 已存在" });
+    expect(screen.queryByRole("button", { name: /展开完整提交失败原因/ })).toBeNull();
+    document.body.innerHTML = "";
+
+    const first = "提交被拒绝：pre-commit 钩子报告了 src/lib/components/CommitDraft.svelte 的格式检查失败，请先运行格式化再重试这次提交。";
+    const { rerender } = renderDraft({ value: "说明", error: first });
+    await fireEvent.click(screen.getByRole("button", { name: "展开完整提交失败原因" }));
+    expect(document.querySelector<HTMLElement>("[data-commit-error]")!.className).toContain("expanded");
+
+    const second = "提交失败：索引被另一个 Git 进程锁定，解锁后再重试。";
+    await rerender({ error: second, paths: ["a.ts", "b.ts"], value: "说明" });
+    const updated = document.querySelector<HTMLElement>("[data-commit-error]")!;
+    expect(updated.textContent).toBe(second);
+    expect(updated.className, "新原因不沿用上一条的展开状态").not.toContain("expanded");
+  });
+
+  it("长推送失败原因同样可展开，重试推送入口仍在且只推送", async () => {
+    const onRetryPush = vi.fn();
+    const pushError =
+      "推送失败：无法连接到 origin（远程主机不可达）。 本地提交 abcdef1 已完成，重试只推送，不会再次提交；远程恢复后可以直接重试。";
+    renderDraft({ value: "", paths: [], pushError, onRetryPush });
+    const row = document.querySelector<HTMLElement>("[data-push-error]")!;
+    const toggle = screen.getByRole("button", { name: "展开完整推送失败原因" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await fireEvent.click(toggle);
+    expect(document.querySelector<HTMLElement>("[data-push-error] [role=status]")!.className).toContain("expanded");
+    expect(row.textContent).toContain("不会再次提交");
+    await fireEvent.click(screen.getByRole("button", { name: "重试推送" }));
+    expect(onRetryPush).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("并排差异", () => {

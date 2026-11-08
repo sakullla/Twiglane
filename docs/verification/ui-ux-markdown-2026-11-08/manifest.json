@@ -1,0 +1,248 @@
+{
+  "workflow": "2026-11-08-ui-ux-markdown",
+  "task": "T5",
+  "capturedAt": "2026-11-08T17:53:40+08:00",
+  "environment": {
+    "browser": "Chrome 157.0.0.0（DevTools 协议驱动）",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36",
+    "devicePixelRatio": 1,
+    "platform": "Windows",
+    "node": "v26.4.0"
+  },
+  "page": {
+    "url": "file:///<临时目录>/twiglane-ui-static-inline.html",
+    "build": "vite build（scripts/ui-preview/vite.config.mjs，mock API，单文件内联）",
+    "data": "scripts/ui-preview/mock-api.ts + mock-files.ts + samples.ts（与 01 基线同一组数据）",
+    "worker": "静态单文件证据页把 window.Worker 置空：Markdown 解析走内联退路，排版结果来自同一份 parser"
+  },
+  "groups": {
+    "baseline": "start/changes/history/settings/merge：与 01 基线同数据、同主题、同尺寸",
+    "markdown": "files-markdown/files-markdown-toc：本轮新增能力样例，单独成组，不参与优化前后对照"
+  },
+  "shots": [
+    {
+      "file": "after/dark-1280x840-changes.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "changes",
+      "bytes": 178186,
+      "sha256": "a1f143a76989e1b6ce120015898adee103a74ad6bb9a8e35f70e6db0cd380a27"
+    },
+    {
+      "file": "after/dark-1280x840-files-markdown-toc.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "files-markdown-toc",
+      "bytes": 99630,
+      "sha256": "946178fee4da7da2274957b761176b7a7dec5e814b844da44f7036a2af028333"
+    },
+    {
+      "file": "after/dark-1280x840-files-markdown.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "files-markdown",
+      "bytes": 95365,
+      "sha256": "bdc9043e9c73fb968a489996469b79b3c4c3b01d1d6d7c2bac882129ea7ed43e"
+    },
+    {
+      "file": "after/dark-1280x840-history.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "history",
+      "bytes": 239219,
+      "sha256": "6a8c15424c64b48f29c7c54095ac4cfaba9e54be014bf7ce37f35c933659b585"
+    },
+    {
+      "file": "after/dark-1280x840-merge.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "merge",
+      "bytes": 179636,
+      "sha256": "4c1ad28854f4c3c4642e8cef45325eddfd4ac6f180fc0e81c7803b59ac3b3a58"
+    },
+    {
+      "file": "after/dark-1280x840-settings.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "settings",
+      "bytes": 157978,
+      "sha256": "1865ec0a21a8695473c902e17ad79556f8b356b40f5a4a772af795899b9355a8"
+    },
+    {
+      "file": "after/dark-1280x840-start.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "start",
+      "bytes": 79708,
+      "sha256": "4ff6ccfc94bd304aee7c878d21f634eb203c74ff34bdf654c4651a6be1109731"
+    },
+    {
+      "file": "after/dark-900x600-changes.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "changes",
+      "bytes": 140253,
+      "sha256": "15723360e1238e0e60812b3f61a9a2fc59f14ec3afdcb97f8120dc64963c5aaf"
+    },
+    {
+      "file": "after/dark-900x600-files-markdown-toc.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "files-markdown-toc",
+      "bytes": 69774,
+      "sha256": "fa52c96532d912d1b08c89f09f0fe077fc3f84808f70d9e48f39d20b06e8af20"
+    },
+    {
+      "file": "after/dark-900x600-files-markdown.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "files-markdown",
+      "bytes": 72306,
+      "sha256": "8678d9c932106cf9e142e1661df514b8ff5fb80ea15db8e14409ebcc84614a57"
+    },
+    {
+      "file": "after/dark-900x600-history.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "history",
+      "bytes": 144218,
+      "sha256": "88e71922e7e357d7e2c66835b1556ab81f9baf15e82c93b3760afa2bcc1860e3"
+    },
+    {
+      "file": "after/dark-900x600-merge.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "merge",
+      "bytes": 90213,
+      "sha256": "62702aac6a39ef1168c6b8469ddd63d75b0e93937de6728a20887ac85c291451"
+    },
+    {
+      "file": "after/dark-900x600-settings.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "settings",
+      "bytes": 114270,
+      "sha256": "daf9c6a60ac346bbf7236f70b5cb49c52bcdfc0370e6bb913692e787e36476a6"
+    },
+    {
+      "file": "after/dark-900x600-start.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "start",
+      "bytes": 67384,
+      "sha256": "2593b1ef3f016ebbf04cba18b97677473eb57e86ba97de7e03835e099ebed5fd"
+    },
+    {
+      "file": "after/light-1280x840-changes.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "changes",
+      "bytes": 178097,
+      "sha256": "addd40aeb1133f05eb464e7f72bc3532ee7f501000f1eccebef17af2bf113770"
+    },
+    {
+      "file": "after/light-1280x840-files-markdown-toc.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "files-markdown-toc",
+      "bytes": 100027,
+      "sha256": "77ce37ea381863e081bb4bc02b8cabc6494cc703707ab19999849ef300495e8d"
+    },
+    {
+      "file": "after/light-1280x840-files-markdown.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "files-markdown",
+      "bytes": 95905,
+      "sha256": "3b69192b37c25967d20c75950e935175bed16dc8a979d9e6071180e93db2f2c4"
+    },
+    {
+      "file": "after/light-1280x840-history.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "history",
+      "bytes": 239596,
+      "sha256": "671c5c0a1df08ea4c465fdee27c7ef8cc9542af6959b78a3f8fedef79c0f9b56"
+    },
+    {
+      "file": "after/light-1280x840-merge.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "merge",
+      "bytes": 183762,
+      "sha256": "3171c02eab60eedfa493a3d2e883de25ddcb450d0ad125d2b6bd602edbbe3dc1"
+    },
+    {
+      "file": "after/light-1280x840-settings.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "settings",
+      "bytes": 166110,
+      "sha256": "bee17eafcedddcebcf8708370001916b725e5904d0f78bbcee5bd200c4d0d9a6"
+    },
+    {
+      "file": "after/light-1280x840-start.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "start",
+      "bytes": 79800,
+      "sha256": "f445e5907510b43052486a797def67e7e6ad7fb0bbdd9b339bbd6b043a3ad6aa"
+    },
+    {
+      "file": "after/light-900x600-changes.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "changes",
+      "bytes": 139284,
+      "sha256": "c4e9f848317663493094030a651b44e05cde90f351333716fa56456f67e6dd24"
+    },
+    {
+      "file": "after/light-900x600-files-markdown-toc.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "files-markdown-toc",
+      "bytes": 70115,
+      "sha256": "6ac6497001470cd1f5c80b427c1cd75957ea88c6ef2f7dc1c3b5120675de3a4d"
+    },
+    {
+      "file": "after/light-900x600-files-markdown.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "files-markdown",
+      "bytes": 72701,
+      "sha256": "a0e9f8ee2f943c79227fcc2d636b985976bcfabf639d533a5fba36d2053635be"
+    },
+    {
+      "file": "after/light-900x600-history.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "history",
+      "bytes": 144063,
+      "sha256": "e3cb1cc90176335c0d1cb8d614cac53f3f38221647b9c9ddf6a260bebcd8aecf"
+    },
+    {
+      "file": "after/light-900x600-merge.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "merge",
+      "bytes": 93994,
+      "sha256": "b2886d589192f41bf3930318590613917a91a0d22c1cd5cb3caaf646e8fa51ba"
+    },
+    {
+      "file": "after/light-900x600-settings.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "settings",
+      "bytes": 117680,
+      "sha256": "e1f9e7b8db2044dbd0c4b390a88cee54af587cb42ef5fc7098483b18c86d2274"
+    },
+    {
+      "file": "after/light-900x600-start.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "start",
+      "bytes": 67423,
+      "sha256": "5c8dbfda4f6cd581bd48b2191fca1b1f029325bc4d9ee3c816777bd7566327b9"
+    }
+  ]
+}

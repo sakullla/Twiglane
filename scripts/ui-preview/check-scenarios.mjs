@@ -20,6 +20,19 @@ const CHROME_CANDIDATES = [
   "/usr/bin/google-chrome",
 ];
 
+/**
+ * 进入文件视图并打开 README.md 的公共前缀（Markdown 阅读场景共用）。
+ * 普通打开 Markdown 默认进排版预览，所以这里等的是 .document-reader，不是 [data-file-line]。
+ * OPEN_README 在这个前缀之后还要求预览已渲染；只关心「文件打开了」的场景用前缀本身。
+ */
+const OPEN_README_VIEW =
+  "(function () { " +
+  'if (!window.__filesOpened) { const recent = document.querySelector(".welcome-recent button"); if (recent) { window.__filesOpened = true; recent.click(); return false; } } ' +
+  'if (!document.querySelector(\'.workbench-view[data-active="true"] .files-view\')) { const sw = document.querySelector(\'.workbench-view[data-active="true"] [data-view="files"]\'); if (sw) { sw.click(); return false; } return false; } ' +
+  'if (!document.querySelector(".files-view .document-reader")) { const row = [...document.querySelectorAll(".file-tree-row")].find((item) => item.textContent.includes("README.md")); if (row) { row.click(); return false; } return false; } ' +
+  "return true; })()";
+const OPEN_README = "(" + OPEN_README_VIEW + " && Boolean(document.querySelector('.files-view .markdown-preview')))";
+
 const SCENARIOS = [
   {
     name: "大规模最近仓库",
@@ -162,6 +175,117 @@ const SCENARIOS = [
     check:
       "(function () { const count = document.querySelector('.review-count'); if (!count) return false; const shown = count.textContent.trim(); return shown.indexOf('1/') === 0 && document.querySelectorAll('.review-toggle.on').length === 0 && document.querySelectorAll('.file-row').length > 0; })()",
     detail: "document.querySelector('.review-count')?.textContent?.trim() || ''",
+  },
+  {
+    name: "文档阅读：Markdown 默认排版预览",
+    url: "/",
+    ready: OPEN_README,
+    check:
+      "(() => { const body = document.querySelector('.files-view .markdown-preview .md-body'); return Boolean(body) && (body.textContent || '').includes('目录与版本') && Boolean(document.querySelector('.files-view .doc-source, .files-view .doc-path')); })()",
+    detail:
+      "(document.querySelector('.files-view .doc-source')?.textContent || '') + ' · ' + (document.querySelector('.files-view .md-note')?.textContent || '')",
+  },
+  {
+    name: "文档阅读：目录列出中文重复标题且各自可辨",
+    url: "/",
+    ready:
+      "(() => { if (!" +
+      OPEN_README +
+      ") return false; " +
+      "if (!window.__outlineOpened) { const toggle = [...document.querySelectorAll('.files-view .md-small-button')].find((item) => item.textContent.includes('目录')); if (!toggle) return false; window.__outlineOpened = true; toggle.click(); return false; } " +
+      "const nav = document.querySelector('.files-view .md-outline'); if (!nav) return false; " +
+      "const items = [...nav.querySelectorAll('button, a')]; if (items.length < 3) return false; " +
+      "window.__outlineLabels = items.map((item) => item.textContent.trim()); " +
+      "window.__outlineTitles = items.map((item) => item.getAttribute('title')); return true; })()",
+    check:
+      "(() => { const labels = window.__outlineLabels || []; const titles = window.__outlineTitles || []; const duplicated = labels.filter((label) => label.includes('中文重复标题')); return duplicated.length >= 2 && titles.every((title) => title && title.length > 0); })()",
+    detail: "(window.__outlineLabels || []).join(' / ').slice(0, 120)",
+  },
+  {
+    name: "文档阅读：目录收起后正文仍可读",
+    url: "/",
+    ready:
+      "(() => { if (!" +
+      OPEN_README +
+      ") return false; " +
+      "const open = [...document.querySelectorAll('.files-view .md-small-button')].find((item) => item.textContent.includes('收起目录')); " +
+      "if (open) { if (!window.__outlineClosing) { window.__outlineClosing = true; open.click(); } return false; } " +
+      "return Boolean(document.querySelector('.files-view .markdown-preview .md-body')); })()",
+    check:
+      "!document.querySelector('.files-view .md-outline') && Boolean(document.querySelector('.files-view .markdown-preview .md-body'))",
+    detail:
+      "[...document.querySelectorAll('.files-view .md-small-button')].map((item) => item.textContent.trim()).join(' / ')",
+  },
+  {
+    name: "文档阅读：预览与源码往返不离开这个文件",
+    url: "/",
+    ready:
+      "(() => { if (!" +
+      OPEN_README +
+      ") return false; " +
+      "if (!window.__toSource) { const button = document.querySelector('.files-view [aria-label=\"查看这个 Markdown 的源码\"]'); if (!button) return false; window.__toSource = true; button.click(); return false; } " +
+      // 源码可能是文档阅读器里的分页源码（.doc-source-scroll），也可能是文件视图自己的分页源码（[data-file-line]）。
+      "return Boolean(document.querySelector('.files-view .doc-source-scroll')) || document.querySelectorAll('.files-view [data-file-line]').length > 0; })()",
+    check:
+      "(() => { const path = document.querySelector('.files-view .doc-path')?.getAttribute('title') || ''; const back = document.querySelector('.files-view [aria-label=\"预览这个 Markdown 文档\"]'); if (!back) return false; back.click(); return path.endsWith('README.md'); })()",
+    detail: "document.querySelector('.files-view .doc-path')?.getAttribute('title') || ''",
+  },
+  {
+    name: "文档阅读：相对链接留在同一阅读器里打开目标",
+    url: "/",
+    ready:
+      "(() => { if (!" +
+      OPEN_README +
+      ") return false; " +
+      "if (!window.__linkClicked) { const link = [...document.querySelectorAll('.files-view .md-body a')].find((item) => item.textContent.includes('快速开始')); if (!link) return false; window.__linkClicked = true; link.click(); return false; } " +
+      "return (document.querySelector('.files-view .doc-path')?.getAttribute('title') || '').includes('getting-started.md'); })()",
+    check:
+      "(() => { const body = document.querySelector('.files-view .markdown-preview .md-body'); const reader = document.querySelector('.files-view .document-reader'); return Boolean(body) && (body.textContent || '').includes('快速开始') && Boolean(reader); })()",
+    detail: "document.querySelector('.files-view .doc-path')?.getAttribute('title') || ''",
+  },
+  {
+    name: "文档阅读：超出排版预算时说明并给出源码",
+    url: "/?doc=large",
+    ready:
+      "(() => { if (!" +
+      OPEN_README_VIEW +
+      ") return false; " +
+      "if (!window.__limitSeen) { window.__limitSeen = document.querySelector('.files-view .doc-state, .files-view .doc-notice')?.textContent?.trim() || ''; } " +
+      "if (!window.__limitSeen) return false; " +
+      "if (document.querySelector('.files-view .doc-source-scroll') || document.querySelectorAll('.files-view [data-file-line]').length > 0) return true; " +
+      "if (!window.__limitClicked) { const button = [...document.querySelectorAll('.files-view button')].find((item) => item.textContent.trim() === '查看源码'); if (!button) return false; window.__limitClicked = true; button.click(); } " +
+      "return false; })()",
+    check:
+      "(() => { const seen = window.__limitSeen || ''; const readable = Boolean(document.querySelector('.files-view .doc-source-scroll')) || document.querySelectorAll('.files-view [data-file-line]').length > 0; return seen.includes('排版预览上限') && readable; })()",
+    detail: "(window.__limitSeen || '').slice(0, 80)",
+  },
+  {
+    name: "文档阅读：读取失败就地说明，仍能看源码",
+    url: "/?doc=error",
+    ready:
+      "(() => { if (!window.__filesOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__filesOpened = true; recent.click(); return false; } } " +
+      "if (!document.querySelector('.workbench-view[data-active=\"true\"] .files-view')) { const sw = document.querySelector('.workbench-view[data-active=\"true\"] [data-view=\"files\"]'); if (sw) { sw.click(); return false; } return false; } " +
+      "if (!window.__errorFile) { const row = [...document.querySelectorAll('.file-tree-row')].find((item) => item.textContent.includes('README.md')); if (row) { window.__errorFile = true; row.click(); } return false; } " +
+      "return Boolean(document.querySelector('.files-view .doc-state[role=\"alert\"]')); })()",
+    check:
+      "(() => { const state = document.querySelector('.files-view .doc-state[role=\"alert\"]'); if (!state) return false; const labels = [...state.querySelectorAll('button')].map((item) => item.textContent.trim()); return labels.includes('重新读取') && labels.includes('查看源码'); })()",
+    detail: "document.querySelector('.files-view .doc-state[role=\"alert\"]')?.textContent?.trim().slice(0, 80) || ''",
+  },
+  {
+    name: "历史：提交里的 Markdown 按这个提交的版本显示差异",
+    url: "/?commitdoc=1",
+    ready:
+      "(() => { if (!window.__historyOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__historyOpened = true; recent.click(); return false; } } " +
+      "const view = document.querySelector('.workbench-view[data-active=\"true\"] .history-view'); if (!view) { const sw = document.querySelector('.workbench-view[data-active=\"true\"] [data-view=\"history\"]'); if (sw) { sw.click(); return false; } return false; } " +
+      "const rows = [...view.querySelectorAll('.history-row')]; if (!rows.length) return false; " +
+      "if (!window.__commitPicked) { window.__commitPicked = true; rows[0].click(); return false; } " +
+      "const file = [...view.querySelectorAll('.commit-files .file-row')].find((item) => item.textContent.includes('README.md')); if (!file) return false; " +
+      "if (!window.__filePicked) { window.__filePicked = true; file.click(); return false; } " +
+      "const path = view.querySelector('.diff-path')?.textContent?.trim() || ''; " +
+      "return path === 'README.md' && view.querySelectorAll('.diff [data-line]').length > 0; })()",
+    check:
+      "(() => { const view = document.querySelector('.workbench-view[data-active=\"true\"] .history-view'); if (!view) return false; const selected = [...view.querySelectorAll('.commit-files .file-row')].filter((row) => row.getAttribute('aria-selected') === 'true'); const path = view.querySelector('.diff-path')?.textContent?.trim() || ''; return path === 'README.md' && selected.length === 1 && selected[0].textContent.includes('README.md'); })()",
+    detail: "document.querySelector('.workbench-view[data-active=\"true\"] .history-view .diff-path')?.textContent?.trim() || ''",
   },
   {
     name: "默认起始页",

@@ -159,6 +159,34 @@ describe("设计令牌", () => {
     }
   });
 
+  it("起始页、命令面板、设置与任务弹窗的标题层级共用同一份字号与字距令牌", () => {
+    expect(shared.get("--text-eyebrow"), "眉标字号只有一份").toBe("var(--text-xs)");
+    expect(shared.get("--tracking-eyebrow"), "眉标字距只有一份").toBe("0.06em");
+    expect(shared.get("--text-section-title"), "分区标题字号只有一份").toBe("var(--text-base)");
+    const layout = read(path.join(stylesDir, "layout.css"));
+    const components = read(path.join(stylesDir, "components.css"));
+    for (const [css, selector] of [
+      [layout, ".welcome-section-head h2"],
+      [components, ".palette-group-title"],
+    ] as const) {
+      const body = ruleBody(css, selector);
+      expect(body, `${selector} 用眉标字号`).toMatch(/font-size:\s*var\(--text-eyebrow\)/);
+      expect(body, `${selector} 用眉标字距`).toMatch(/letter-spacing:\s*var\(--tracking-eyebrow\)/);
+      expect(body, `${selector} 不再写死字距`).not.toMatch(/letter-spacing:\s*0\.06em/);
+    }
+    for (const selector of [
+      ".settings-section h2",
+      ".stash-section-head h2",
+      ".card-head h2, .card-head h3",
+      ".conflict-editor-titles h2",
+    ]) {
+      const body = ruleBody(components, selector);
+      expect(body, `${selector} 用分区标题字号`).toMatch(/font-size:\s*var\(--text-section-title\)/);
+    }
+    // 任务弹窗标题是更高一档的面板标题，也要来自字阶令牌而不是字面值。
+    expect(ruleBody(components, ".modal-titles h2")).toMatch(/font-size:\s*var\(--text-md\)/);
+  });
+
   it("层级令牌按 resizer < 标题栏 < 菜单 < 面板 < modal < toast 递增", () => {
     const order = ["--z-resizer", "--z-titlebar", "--z-menu", "--z-palette", "--z-modal", "--z-toast"];
     const values = order.map((key) => Number.parseInt(shared.get(key) ?? "", 10));
@@ -604,7 +632,7 @@ describe("状态与动效统一（R2、R12）", () => {
   it("任务弹窗的分区标题同一档字号与字重，设置分区之间用分区线分开", () => {
     for (const selector of [".settings-section h2", ".stash-section-head h2"]) {
       const body = ruleBody(components, selector);
-      expect(body, selector).toMatch(/font-size:\s*var\(--text-base\)/);
+      expect(body, `${selector} 用共用分区标题字号`).toMatch(/font-size:\s*var\(--text-section-title\)/);
       expect(body, selector).toMatch(/font-weight:\s*var\(--weight-semibold\)/);
     }
     // 设置在小窗口里要滚动，分区线只在两个分区之间出现（第一段不画），风格上与 .commit-head 同类。

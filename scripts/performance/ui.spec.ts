@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PerformanceFixture } from "./fixtures";
-import type { BranchRecord, DiffResponse, FileChange, FileRow } from "../../src/lib/types";
+import type { BranchRecord, DiffResponse, FileChange, FileRow, RepositoryDocument } from "../../src/lib/types";
 import { toSideRows, type ViewLine } from "../../src/lib/diff";
 import { createSelectionResolver } from "../../src/lib/labels";
 import { fileNavState } from "../../src/lib/ui";
@@ -11,6 +11,7 @@ const api = vi.hoisted(() => ({
   commitFileDiff: vi.fn(), mergeSession: vi.fn(), branchState: vi.fn(),
   historyPage: vi.fn(), conflictView: vi.fn(), commitDetail: vi.fn(), loadDiff: vi.fn(),
   repositoryFileContent: vi.fn(), repositoryContentSearch: vi.fn(), repositoryPathSearch: vi.fn(), repositoryDirectory: vi.fn(),
+  repositoryDocument: vi.fn(),
 }));
 vi.mock("../../src/lib/api", () => ({ api }));
 
@@ -246,6 +247,115 @@ describe("大仓库的有界读取和渲染", () => {
   });
 });
 
+
+describe("Markdown 阅读的规模与旧响应", () => {
+  function markdownDoc(path: string, text: string, generation = 4): RepositoryDocument {
+    return {
+      generation,
+      source: { revision: "worktree", path },
+      kind: "text",
+      size: text.length,
+      version: "v1",
+      text,
+      complete: true,
+      offset: 0,
+      lines: text.split("\n"),
+      nextOffset: 0,
+      hasMore: false,
+      truncated: false,
+      message: null,
+    };
+  }
+
+  it("长文档按批上屏，DOM 不随段落数一起增长", async () => {
+    const text = Array.from({ length: 400 }, (_, index) => `## 标题 ${index}\n\n第 ${index} 段正文。`).join("\n\n");
+    api.repositoryDocument.mockResolvedValue(markdownDoc("docs/long.md", text));
+    const start = performance.now();
+    render(FileContent, {
+      props: {
+        active: true,
+        opened,
+        path: "docs/long.md",
+        generation: opened.generation,
+        disabled: false,
+        nextId: () => 1,
+        onGeneration: vi.fn(),
+      } as never,
+    });
+    await waitFor(() => expect(document.querySelectorAll(".md-block").length).toBeGreaterThan(0));
+    console.info("800-paragraph markdown first paint: " + (performance.now() - start).toFixed(2) + " ms");
+    // 首屏只挂一档（48 段），其余由「继续阅读」补齐：段落再多也不会一次排进 DOM。
+    expect(document.querySelectorAll(".md-block").length).toBeLessThanOrEqual(48);
+    expect(screen.getByRole("button", { name: "继续阅读" })).toBeTruthy();
+  });
+
+  it("超出排版预算的文档明确退回源码，不留在永久加载态", async () => {
+    // 无 Worker 的宿主只内联解析小文档；这份超出上限，必须给出可读的退路。
+    const text = "# 超长文档\n\n" + "正文段落。".repeat(20_000);
+    api.repositoryDocument.mockImplementation((_path: string, _source: unknown, generation: number, _id: number, mode: string) =>
+      Promise.resolve({ ...markdownDoc("docs/huge.md", text, generation), text: mode === "document" ? text : null }),
+    );
+    render(FileContent, {
+      props: {
+        active: true,
+        opened,
+        path: "docs/huge.md",
+        generation: opened.generation,
+        disabled: false,
+        nextId: () => 1,
+        onGeneration: vi.fn(),
+      } as never,
+    });
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("源码");
+    expect(api.repositoryDocument).toHaveBeenLastCalledWith(
+      opened.summary.path,
+      expect.anything(),
+      opened.generation,
+      expect.any(Number),
+      "document",
+    );
+    // 源码退路走同一文件的源码视图（FileContent 的分页读取），不是停在预览的失败态。
+    api.repositoryFileContent.mockResolvedValue({
+      generation: opened.generation,
+      path: "docs/huge.md",
+      kind: "text",
+      size: text.length,
+      offset: 0,
+      lines: ["# 超长文档"],
+      nextOffset: 1,
+      hasMore: false,
+      truncated: false,
+      message: null,
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "查看这个 Markdown 的源码" }));
+    await waitFor(() => expect(api.repositoryFileContent).toHaveBeenCalled());
+  });
+
+  it("切换文件后旧文档响应晚到不覆盖新文件", async () => {
+    let finishOld: (value: RepositoryDocument) => void = () => {};
+    api.repositoryDocument.mockImplementationOnce(() => new Promise((resolve) => (finishOld = resolve)));
+    api.repositoryDocument.mockImplementation((path: string, _source: unknown, generation: number) =>
+      Promise.resolve(markdownDoc(path, "# 新文档\n\n新正文", generation)),
+    );
+    const props = {
+      active: true,
+      opened,
+      path: "docs/old.md",
+      generation: opened.generation,
+      disabled: false,
+      nextId: () => 1,
+      onGeneration: vi.fn(),
+    };
+    const component = render(FileContent, { props: props as never });
+    await waitFor(() => expect(api.repositoryDocument).toHaveBeenCalledTimes(1));
+    await component.rerender({ ...props, path: "docs/new.md" } as never);
+    await waitFor(() => expect(document.body.textContent).toContain("新文档"));
+    finishOld(markdownDoc("docs/old.md", "# 旧文档\n\n旧正文"));
+    await tick();
+    expect(document.body.textContent, "旧响应不得覆盖当前文件").not.toContain("旧文档");
+  });
+});
 
 describe("文件搜索的规模入口", () => {
   it("两万条路径结果只挂载视口附近的行，远距离定位按偏移读取目标页", async () => {

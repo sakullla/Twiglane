@@ -51,6 +51,11 @@
   --leading-tight: 1.25;
   --leading-normal: 1.45;
   --leading-relaxed: 1.65;
+  /* 层级文字：眉标（起始页分区、命令面板分组）与分区标题各只有一份取值。
+     起始页、设置、任务弹窗和命令面板都引用这两档，不再各自写字号与字距（R1）。 */
+  --text-eyebrow: var(--text-xs);
+  --tracking-eyebrow: 0.06em;
+  --text-section-title: var(--text-base);
 
   /* 动效时长与缓动 */
   --duration-fast: 120ms;

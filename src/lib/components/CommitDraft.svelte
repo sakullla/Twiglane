@@ -103,6 +103,11 @@
   /** 按下后移动不到这个距离算点击，手抖不改写记住的高度。 */
   const DRAG_SLOP = 3;
   const FILE_LIST_RESERVE = 300;
+  /**
+   * 超过这个长度（或带换行）的失败原因单行一定读不全：钩子输出、索引锁路径和
+   * 远程错误经常这么长。这类原因默认仍占一行，但提供可键盘操作的展开入口（R3）。
+   */
+  const ERROR_EXPAND_CHARS = 56;
 
   let summaryChars = $derived(summaryLength(value));
   let moreOpen = $state(false);
@@ -125,6 +130,24 @@
     paths.length === 0 ? "先暂存要提交的文件" : !hasCommitSummary(value) ? "填写提交说明后即可提交" : "",
   );
   let counterTone = $derived(summaryChars > SUMMARY_HARD ? "over" : summaryChars > SUMMARY_SOFT ? "near" : "");
+  /**
+   * 展开的是哪一条原因（提交失败 / 推送失败）。用原因文本本身做键：新的失败原因到达时
+   * 旧展开状态自动失效，不会把上一条错误的展开结果套到这一条上。
+   */
+  let expandedError = $state<string | null>(null);
+  let errorOpen = $derived(error !== null && expandedError !== null && expandedError === error);
+  let pushOpen = $derived(pushError !== null && expandedError !== null && expandedError === pushError);
+  let errorLong = $derived(error !== null && needsExpansion(error));
+  let pushLong = $derived(pushError !== null && needsExpansion(pushError));
+
+  function needsExpansion(text: string): boolean {
+    return text.length > ERROR_EXPAND_CHARS || text.includes("\n");
+  }
+
+  function toggleError(text: string | null) {
+    if (text === null) return;
+    expandedError = expandedError === text ? null : text;
+  }
 
   $effect(() => {
     if (!moreOpen) return;
@@ -362,16 +385,29 @@
     ></textarea>
   </div>
 
-  <div class="composer-meta" class:warn={paths.length === 0}>
+  <div class="composer-meta" class:warn={paths.length === 0} class:expanded={errorOpen}>
     {#if blocker}
       <!-- R5：主按钮不可用时就地给出可见的一行原因，不只挂在 title 上；.truncate 保持单行。 -->
       <Icon name="info" size={12} />
       <span class="truncate" data-commit-blocker title={blocker}>{blocker}</span>
     {:else if error}
       <!-- R5：提交失败（缺身份 / 钩子拒绝 / 索引锁 / 过期）同样在这块就地说明。
-           优先级低于 blocker：按钮又变成灰的时候，「为什么点不动」更要紧。 -->
+           优先级低于 blocker：按钮又变成灰的时候，「为什么点不动」更要紧。
+           R3：长原因默认仍是一行，但给出可见、可键盘访问的展开/收起，不再只有 title 能读全。 -->
       <Icon name="alert-circle" size={12} />
-      <span class="truncate composer-error" data-commit-error title={error}>{error}</span>
+      <span class="composer-error" class:expanded={errorOpen} data-commit-error title={error}>{error}</span>
+      {#if errorLong}
+        <button
+          type="button"
+          class="composer-inline-action composer-expand"
+          aria-expanded={errorOpen}
+          aria-label={errorOpen ? "收起提交失败原因" : "展开完整提交失败原因"}
+          title={errorOpen ? "收起失败原因" : "展开完整失败原因（可换行读全）"}
+          onclick={() => toggleError(error)}
+        >
+          {errorOpen ? "收起" : "展开"}
+        </button>
+      {/if}
     {:else}
       <Icon name="check-circle" size={12} />
       <span class="truncate composer-ready" title="说明会自动保存为草稿">可以提交 · 草稿自动保存</span>
@@ -393,10 +429,23 @@
   </div>
 
   {#if pushError}
-    <!-- 两个阶段分开说明：本地提交已完成，失败只在推送；重试入口只推送，不会再次提交（R6）。 -->
-    <div class="composer-meta" data-push-error>
+    <!-- 两个阶段分开说明：本地提交已完成，失败只在推送；重试入口只推送，不会再次提交（R6）。
+         R3：远程错误常见长文本，这里同样可以展开换行读全。 -->
+    <div class="composer-meta" data-push-error class:expanded={pushOpen}>
       <Icon name="alert-circle" size={12} />
-      <span class="truncate composer-error" role="status" title={pushError}>{pushError}</span>
+      <span class="composer-error" class:expanded={pushOpen} role="status" title={pushError}>{pushError}</span>
+      {#if pushLong}
+        <button
+          type="button"
+          class="composer-inline-action composer-expand"
+          aria-expanded={pushOpen}
+          aria-label={pushOpen ? "收起推送失败原因" : "展开完整推送失败原因"}
+          title={pushOpen ? "收起失败原因" : "展开完整失败原因（可换行读全）"}
+          onclick={() => toggleError(pushError)}
+        >
+          {pushOpen ? "收起" : "展开"}
+        </button>
+      {/if}
       {#if onRetryPush}
         <button
           type="button"

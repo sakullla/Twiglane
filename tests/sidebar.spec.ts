@@ -404,7 +404,7 @@ describe("自绘标题栏", () => {
     const onPull = vi.fn();
     const onPush = vi.fn();
     render(TitleBar, { props: titleProps({ ahead: 2, behind: 1, onFetch, onPull, onPush }) as never });
-    const sync = screen.getByRole("button", { name: "同步 领先 2，落后 1" });
+    const sync = screen.getByRole("button", { name: "同步 领先 2，落后 1，未核对远程" });
     await fireEvent.click(sync);
     expect(screen.getAllByRole("menuitem")).toHaveLength(4);
     expect(screen.getByRole("menuitem", { name: /获取更新/ })).toBeTruthy();
@@ -413,6 +413,36 @@ describe("自绘标题栏", () => {
     await fireEvent.click(screen.getByRole("menuitem", { name: /获取更新/ }));
     expect(onFetch).toHaveBeenCalled();
     expect(onPull).not.toHaveBeenCalled();
+  });
+
+  it("折叠状态下用箭头区分待推送与待拉取，未核对/过期的远程状态直接写在按钮里", () => {
+    const pending = render(TitleBar, { props: titleProps({ ahead: 2, behind: 1 }) as never });
+    const push = pending.container.querySelector('[data-sync-count="push"]');
+    const pull = pending.container.querySelector('[data-sync-count="pull"]');
+    expect(push?.textContent?.trim(), "待推送带向上箭头").toBe("2");
+    expect(push?.querySelector(".icon"), "方向是图标，不只是两个数字").toBeTruthy();
+    expect(pull?.textContent?.trim()).toBe("1");
+    expect(pull?.querySelector(".icon")).toBeTruthy();
+    expect(pending.container.querySelector('[data-sync-remote="off"]')?.textContent?.trim()).toBe("未核");
+    pending.unmount();
+
+    const stale = render(TitleBar, {
+      props: titleProps({ ahead: 2, behind: 1, remoteState: "stale", remoteCheckedAtMs: Date.UTC(2026, 10, 8, 1, 2) }) as never,
+    });
+    const marker = stale.container.querySelector('[data-sync-remote="stale"]');
+    expect(marker?.textContent?.trim()).toBe("过期");
+    expect(marker?.getAttribute("title"), "过期要说清上次检查时间").toContain("上次检查");
+    const button = screen.getByRole("button", { name: /^同步/ });
+    expect(button.getAttribute("aria-label")).toContain("远程状态已过期");
+    expect(button.getAttribute("title")).toContain("计数不代表最新");
+    stale.unmount();
+
+    const live = render(TitleBar, {
+      props: titleProps({ ahead: 0, behind: 0, remoteState: "live", remoteCheckedAtMs: Date.UTC(2026, 10, 8, 1, 2) }) as never,
+    });
+    expect(live.container.querySelector("[data-sync-remote]"), "刚核对过就不再挂「未核/过期」").toBeNull();
+    expect(screen.getByRole("button", { name: /^同步/ }).getAttribute("aria-label")).toContain("已于");
+    live.unmount();
   });
 
   it("同步菜单底部进入远程；写入中菜单仍能打开，同步动作禁用而远程可用", async () => {

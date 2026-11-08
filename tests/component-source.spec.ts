@@ -63,6 +63,30 @@ describe("组件源码约束", () => {
   });
 
   /**
+   * 目录树筛选、按路径打开、全仓库全文搜索、文件内查找是四种范围（R2）。
+   * 判据不是「有四个输入框」，而是每个输入自己写明作用范围，且四处互不相同。
+   */
+  it("四处查找各自标明范围，不靠上下文猜是哪种搜索", () => {
+    const sourceOf = (name: string) => sources.find((source) => source.name === name)!.text;
+    const tree = sourceOf("FileTree.svelte");
+    const search = sourceOf("FileSearch.svelte");
+    const content = sourceOf("FileContent.svelte");
+
+    expect(tree, "目录树筛选").toContain('data-search-scope="tree"');
+    expect(tree).toMatch(/不读文件内容/);
+    expect(search, "按路径打开").toContain('data-search-scope="path"');
+    expect(search).toMatch(/只查路径/);
+    expect(search, "全仓库全文搜索").toContain('data-search-scope="content"');
+    expect(search).toMatch(/工作区文本/);
+    expect(content, "文件内查找").toContain('data-search-scope="file"');
+    expect(content).toMatch(/只在这个文件的当前内容里查找/);
+
+    const markers = [...`${tree}${search}${content}`.matchAll(/data-search-scope="(\w+)"/g)].map((match) => match[1]);
+    // 四种范围四个键：一个输入框不能兼任两种搜索。
+    expect(new Set(markers).size).toBeGreaterThanOrEqual(4);
+  });
+
+  /**
    * Svelte 销毁 {#if}/{#each} 分支时从分支首节点沿 nextSibling 走到末节点，
    * 首尾节点被 portal 搬走后遍历中断，分支里其余节点残留在页面上。
    */

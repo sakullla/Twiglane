@@ -17,7 +17,7 @@ const readArg = (name, fallback) => {
   return index >= 0 && args[index + 1] ? args[index + 1] : fallback;
 };
 const base = readArg("--base", "http://127.0.0.1:1430");
-const outDir = path.resolve(readArg("--out", "docs/verification/ui-ux-2026-11-04/baseline"));
+const outDir = path.resolve(readArg("--out", "docs/verification/ui-ux-markdown-2026-11-08/baseline"));
 
 const CHROME_CANDIDATES = [
   process.env.CHROME_PATH,
@@ -270,7 +270,7 @@ async function main() {
         await waitFor(cdp, sessionId, "Boolean(document.querySelector('.welcome-recent button, .action-card'))", "起始页");
         await pause(600);
 
-        const shot = async (view) => {
+        const shot = async (view, group = "baseline") => {
           const image = await cdp.send("Page.captureScreenshot", { format: "png" }, sessionId);
           const file = `${theme}-${size.label}-${view}.png`;
           fs.writeFileSync(path.join(outDir, file), Buffer.from(image.data, "base64"));
@@ -288,6 +288,8 @@ async function main() {
                 fileRows: document.querySelectorAll(".pane.files .file-row, .pane.files li").length,
                 historyRows: document.querySelectorAll(".history-row, .commit-row").length,
                 horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+                documentSource: document.querySelector(".document-reader .doc-source")?.textContent?.trim() ?? null,
+                outlineItems: document.querySelectorAll(".md-outline a").length,
               };
             })()`,
           );
@@ -296,6 +298,7 @@ async function main() {
             theme,
             size: size.label,
             view,
+            group,
             state,
             errors: consoleErrors(cdp, sessionId),
             exceptions: runtimeExceptions(cdp, sessionId),
@@ -323,6 +326,47 @@ async function main() {
         await openCommand(cdp, sessionId, "设置", '[role="dialog"]');
         await shot("settings");
         await evaluate(cdp, sessionId, pressEscape);
+        await waitFor(cdp, sessionId, "!document.querySelector('[role=dialog]')", "关闭设置弹窗");
+
+        // Markdown 阅读是这一轮新增的样例，单独成组（group: "markdown"）：
+        // 它与「同一数据前后对照」不是一回事，manifest 里分开记录，统计时不能混在一起。
+        await evaluate(cdp, sessionId, click('[data-view="files"]'));
+        await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view'))", "文件视图");
+        await pause(600);
+        // 目录树刚渲染完时点行会被随后的刷新覆盖，这里按「行还在就再点一次」重试。
+        const openReadme = `(() => {
+          const row = [...document.querySelectorAll(".files-view .file-tree-row")]
+            .find((item) => item.textContent.includes("README.md"));
+          if (!row) return false;
+          row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+          return true;
+        })()`;
+        for (let attempt = 0; attempt < 6; attempt += 1) {
+          await evaluate(cdp, sessionId, openReadme);
+          try {
+            await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view .markdown-preview .md-body'))", "Markdown 预览", 4_000);
+            break;
+          } catch {
+            await pause(400);
+          }
+        }
+        await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view .markdown-preview .md-body'))", "Markdown 预览");
+        await pause(400);
+        await shot("markdown-readme", "markdown");
+        await evaluate(
+          cdp,
+          sessionId,
+          `(() => {
+            const toggle = [...document.querySelectorAll(".files-view .md-small-button")]
+              .find((item) => item.textContent.includes("目录"));
+            if (!toggle) return false;
+            toggle.click();
+            return true;
+          })()`,
+        );
+        await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view .md-outline button'))", "文档目录");
+        await pause(300);
+        await shot("markdown-toc", "markdown");
 
         await cdp.send("Target.closeTarget", { targetId });
       }
@@ -342,6 +386,8 @@ async function main() {
   const count = (key) => manifest.shots.reduce((total, item) => total + (item[key]?.length ?? 0), 0);
   manifest.summary = {
     shots: manifest.shots.length,
+    baselineShots: manifest.shots.filter((item) => (item.group ?? "baseline") === "baseline").length,
+    markdownShots: manifest.shots.filter((item) => item.group === "markdown").length,
     targets: THEMES.length * SIZES.length,
     consoleErrors: count("errors"),
     exceptions: count("exceptions"),

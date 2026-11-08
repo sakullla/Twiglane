@@ -165,16 +165,18 @@
     <div class="segmented file-search-tabs" role="group" aria-label="搜索方式">
       <button
         type="button"
+        data-search-scope="path"
         aria-pressed={mode === "path"}
         aria-label="按路径打开"
-        title={`按仓库相对路径查找文件（${MODIFIER_LABEL} P）`}
+        title={`按仓库相对路径查找文件（${MODIFIER_LABEL} P）；只查路径，不读取文件内容`}
         onclick={() => onMode("path")}
       ><Icon name="file" size={13} /><span>文件名</span></button>
       <button
         type="button"
+        data-search-scope="content"
         aria-pressed={mode === "content"}
         aria-label="全仓库文本搜索"
-        title="在工作区文本里查找固定字符串；结果按文件分组"
+        title="在工作区文本里查找固定字符串；结果是文件内容命中，不是目录树筛选"
         onclick={() => onMode("content")}
       ><Icon name="search" size={13} /><span>全文</span></button>
     </div>
@@ -189,8 +191,10 @@
       <Icon name="search" size={13} />
       <input
         id="file-quick-open"
+        data-search-scope="path"
         aria-label="按路径打开文件"
         placeholder="输入文件名或路径片段"
+        title="范围：仓库路径（文件名与目录）；只查路径，不读取文件内容，也不筛目录树"
         autocomplete="off"
         spellcheck="false"
         value={store.pathQuery}
@@ -205,8 +209,10 @@
       <Icon name="search" size={13} />
       <input
         id="file-content-search"
+        data-search-scope="content"
         aria-label="全仓库文本搜索"
         placeholder="查找文本"
+        title="范围：工作区文本；打开结果会定位到命中行，与目录树筛选、文件内查找不同"
         autocomplete="off"
         spellcheck="false"
         value={store.contentQuery}

@@ -13,6 +13,7 @@
     type WindowPlatform,
   } from "../window";
   import { shortOid } from "../history";
+  import { formatCheckedAt } from "../labels";
   import BrandMark from "./BrandMark.svelte";
   import Icon from "./Icon.svelte";
   import type { IconName } from "../icons";
@@ -39,6 +40,13 @@
     upstreamMissing?: boolean;
     ahead?: number;
     behind?: number;
+    /**
+     * 远程核对状态（R3）：live 是刚读到的远程状态，stale 是缓存已过期，off 是从未核对。
+     * 折叠状态下的同步按钮必须自己说明这件事，不能只把缓存数字当成刚刚验证过的结论。
+     */
+    remoteState?: "live" | "stale" | "off";
+    /** 上次核对远程的时间（毫秒）；没有可信时间时不显示。 */
+    remoteCheckedAtMs?: number | null;
     pending?: "fetch" | "pull" | "push" | null;
     theme: Theme;
     disabled?: boolean;
@@ -78,6 +86,8 @@
     upstreamMissing = false,
     ahead = 0,
     behind = 0,
+    remoteState = "off",
+    remoteCheckedAtMs = null,
     pending = null,
     theme,
     disabled = false,
@@ -140,12 +150,33 @@
         : (cliora.outcome === "committed" ? "已提交 " : "已合入 ") +
           (cliora.headOid ? shortOid(cliora.headOid) : ""),
   );
+  /** 上次核对远程的时间；没有可信时间戳时不编造时间。 */
+  let checkedText = $derived(
+    remoteState !== "off" && remoteCheckedAtMs ? formatCheckedAt(remoteCheckedAtMs) : "",
+  );
+  /** 计数只代表「相对已记录上游」的对比，核对的时效必须跟着一起说（R3）。 */
+  let remoteNote = $derived(
+    remoteState === "live"
+      ? checkedText
+        ? `，已于 ${checkedText} 检查`
+        : "，已检查远程"
+      : remoteState === "stale"
+        ? `，远程状态已过期${checkedText ? `（上次检查 ${checkedText}）` : ""}`
+        : "，未核对远程",
+  );
+  let remoteHint = $derived(
+    remoteState === "live"
+      ? `远程状态：${checkedText ? `已于 ${checkedText} 检查` : "已检查"}`
+      : remoteState === "stale"
+        ? `远程状态：已过期${checkedText ? `，上次检查 ${checkedText}` : ""}；计数不代表最新`
+        : "远程状态：未核对；计数只反映记录的对比",
+  );
   let syncSummary = $derived(
     pending !== null
       ? "进行中"
       : ahead > 0 || behind > 0
-        ? `领先 ${ahead}，落后 ${behind}`
-        : "与上游一致",
+        ? `领先 ${ahead}，落后 ${behind}${remoteNote}`
+        : `${upstreamMissing ? "未关联上游" : "与上游一致"}${remoteNote}`,
   );
 
   $effect(() => {
@@ -299,15 +330,30 @@
             aria-label={`同步 ${syncSummary}`}
           aria-haspopup="menu"
           aria-expanded={syncMenu}
-          title={`同步状态：${syncSummary}\n获取、拉取与推送都在这里`}
+          title={`同步状态：${syncSummary}\n${remoteHint}\n获取、拉取与推送都在这里`}
           bind:this={syncTrigger}
           onclick={() => toggleMenu("sync")}
           onkeydown={(event) => onTriggerKey(event, "sync")}
         >
           <Icon name="cloud" size={15} />
           <span class="truncate">同步</span>
-          {#if ahead > 0}<span class="count">{ahead}</span>{/if}
-          {#if behind > 0}<span class="count subtle-count">{behind}</span>{/if}
+          <!-- 方向由箭头 + 计数一起表达（R3）：只看数字时分不清是待推送还是待拉取。 -->
+          {#if ahead > 0}
+            <span class="count" data-sync-count="push" title={`待推送 ${ahead} 个提交`} aria-hidden="true">
+              <Icon name="arrow-up" size={11} />{ahead}
+            </span>
+          {/if}
+          {#if behind > 0}
+            <span class="count subtle-count" data-sync-count="pull" title={`待拉取 ${behind} 个提交`} aria-hidden="true">
+              <Icon name="arrow-down" size={11} />{behind}
+            </span>
+          {/if}
+          <!-- 未核对/过期是文字标记，不靠颜色或数字差表达。 -->
+          {#if remoteState !== "live"}
+            <span class="sync-remote" class:stale={remoteState === "stale"} data-sync-remote={remoteState} title={remoteHint} aria-hidden="true">
+              {remoteState === "stale" ? "过期" : "未核"}
+            </span>
+          {/if}
           {#if pending !== null}<span class="spinner"></span>{/if}
           <Icon name="chevron-down" size={13} />
         </button>

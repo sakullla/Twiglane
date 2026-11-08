@@ -16,12 +16,28 @@ curl -s http://127.0.0.1:1430/__ui-preview/health
 ## 文件
 
 - `vite.config.mjs`：mock 替换（按真实文件判断，不靠字符串猜测）、端口占用提示、启动自检、健康端点。
-- `mock-api.ts`：mock 数据与异常/大规模参数（`?recent=many`、`?recent=empty`、`?git=missing`、`?merge=conflict` 等，见文件顶部注释）。
-- `samples.ts`：差异样例文本。
-- `baseline-shots.mjs`：用 Chrome DevTools Protocol 截取「起始页/改动/历史/合并/设置」× 深色/浅色 × 1280×840/900×600 的图，
-  并记录页面状态与控制台错误。`--base` 换地址，`--out` 换输出目录，`CHROME_PATH` 指定浏览器。
-- `check-scenarios.mjs`：异常与大规模参数的可复跑自检。
+- `mock-api.ts`：mock 数据与异常/大规模参数（见文件顶部注释）。与本文相关的几组：
+  - `?doc=error` / `?doc=large` / `?doc=stale`：只读文档读取的失败、超过 2 MiB 排版预算、过期重读分支；
+  - `?commitdoc=1`：给提交详情补一个 `README.md`，用来走「历史差异 → 阅读文档」入口（默认数据不变，不影响既有对照截图）；
+  - `?recent=many`、`?recent=empty`、`?git=missing`、`?merge=conflict`、`?filter=truncated`、`?search=error` 等按异常状态展开。
+- `mock-files.ts` / `samples.ts`：目录、文档与差异样例。`README.md` 覆盖中文标题、同名重复标题、GFM 表格、只读任务列表、相对/缺失/外链、本地图片与远程图片占位。
+- `baseline-shots.mjs`：用 Chrome DevTools Protocol 驱动真实浏览器，按「起始页/改动/历史/合并/设置」× 深色/浅色 × 1280×840/900×600 截图，并记录页面状态、控制台错误、未捕获异常与网络失败；随后把 Markdown 阅读样例另存为 `markdown-readme`、`markdown-toc` 两张，manifest 里以 `group: "markdown"` 与对照图分开统计（新样例不能混进优化前后对照）。`--base` 换地址，`--out` 换输出目录，`CHROME_PATH` 指定浏览器。
+- `check-scenarios.mjs`：异常、大规模与 Markdown 阅读场景的可复跑自检（21 个场景，含文档预览、目录、源码往返、相对链接、超限退路、读取失败与历史提交里的 Markdown 差异）。
+
+## 静态单文件页（没有常驻服务器时）
+
+有些环境不允许长期驻留的开发服务器，也不允许从子进程启动浏览器。这时可以把同一份预览构建成单文件页再用浏览器打开，数据与配置完全一致：
+
+```bash
+# 1) 构建（mock 替换仍由 preview 配置完成）
+node node_modules/vite/bin/vite.js build --config scripts/ui-preview/vite.config.mjs --configLoader native --base ./ --outDir /tmp/twiglane-ui
+
+# 2) 把入口 JS 与 CSS 内联进 index.html，得到可以直接用 file:// 打开的单文件页
+#    需要把异步分块一起合进来时，用 Vite 的 JS API 构建并设置 output.codeSplitting: false
+```
+
+`file://` 下无法创建工作线程，页面需要把 `window.Worker` 置空，Markdown 解析会走 `client.ts` 的内联退路——解析器与排版结果相同，只影响解析线程。截图与自检仍应按上面的脚本在正常环境中重跑，不要把静态页结果当作 `preview:ui` 的替代。
 
 ## 边界
 
-截图与自检只证明浏览器 + mock 数据下的外观和可达性，不能替代真实 Git 行为、桌面 WebView 或平台验证。
+截图与自检只证明浏览器 + mock 数据下的外观和可达性，不能替代真实 Git 行为、桌面 WebView 或平台验证。`npm test` 里的 `tests/ui-preview.spec.ts` 会真起一次 dev server 校验 mock 替换与端口守卫。

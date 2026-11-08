@@ -25,6 +25,8 @@ const now = Math.floor(Date.now() / 1000);
  * ?git=missing / ?git=old 模拟 Git 缺失或低于基线，?recent=empty 清空最近仓库，?recent=many 模拟 500 个最近仓库。
  * ?conflict=modify-delete 把 .css 冲突换成 200 行的修改/删除冲突，?eol=crlf 把冲突文本换成 CRLF，
  * 写回的内容记在 window.__resolved，用来在真实 textarea 上核对字节；window.__mergePreviews 记预检次数。
+ * ?doc=error / ?doc=large / ?doc=stale 切换只读文档读取的失败、超限与过期分支；
+ * ?commitdoc=1 给提交详情补一个 README.md，用来走「历史差异 → 阅读文档」入口（默认数据不变）。
  */
 const previewParams = new URLSearchParams(location.search);
 const healthyGit = { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "Git 2.49.0 可用" };
@@ -651,6 +653,11 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       merge: commit.parents.length > 1,
       selectedParent: commit.parents[0],
       files: previewParams.has("preview") ? [{ path: previewParams.get("preview") === "archive" ? "assets/images.zip" : "assets/logo.png", originalPath: null, status: "modified", additions: null, deletions: null, binary: true, oldSize: 81920, newSize: 146752 }] : previewParams.get("files") === "many" ? Array.from({ length: 24 }, (_, index) => ({ path: `src/generated/file-${index}.ts`, originalPath: null, status: "modified", additions: index + 1, deletions: index % 3 })) : [
+        // ?commitdoc=1 给这次提交加一个 Markdown 文件：历史/提交差异里的「阅读文档」入口
+        // 需要一份真实存在的 Markdown 版本才能验证，默认数据保持不变（不影响既有对照截图）。
+        ...(previewParams.get("commitdoc") === "1"
+          ? [{ path: "README.md", originalPath: null, status: "modified" as const, additions: 6, deletions: 2 }]
+          : []),
         { path: "src/App.svelte", originalPath: null, status: "modified", additions: 9, deletions: 7 },
         { path: "src/app.css", originalPath: null, status: "modified", additions: 12, deletions: 4 },
         { path: "src/lib/components/Icon.svelte", originalPath: null, status: "added", additions: 29, deletions: 0 },

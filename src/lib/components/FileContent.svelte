@@ -817,7 +817,7 @@
             class="icon-btn sm"
             aria-pressed={searchOpen}
             aria-label="在文件内搜索"
-            title={`在文件内搜索（${MODIFIER_LABEL} F）`}
+            title={`在文件内搜索（${MODIFIER_LABEL} F）；只查当前文件，不是全仓库搜索`}
             onclick={() => (searchOpen ? closeSearch() : openSearch())}
           ><Icon name="search" size={14} /></button>
           {#if !(isMarkdown && documentMode === "preview")}
@@ -851,8 +851,10 @@
           <Icon name="search" size={13} />
           <input
             bind:this={searchInput}
+            data-search-scope="file"
             aria-label="文件内搜索关键词"
             placeholder="在文件中查找"
+            title="范围：只在这个文件的当前内容里查找，不搜其他文件，也不筛目录树"
             autocomplete="off"
             spellcheck="false"
             bind:value={searchQuery}

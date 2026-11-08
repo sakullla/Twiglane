@@ -378,6 +378,32 @@ describe("全仓库文本搜索", () => {
   });
 });
 
+describe("四处查找各自说明范围", () => {
+  it("目录树筛选只说路径、全仓库搜索说工作区文本，读法不混用", async () => {
+    treeDirs();
+    repositoryContentSearch.mockResolvedValue(contentSearch());
+    render(RepositoryFiles, { props: viewProps() as never });
+
+    const filter = await screen.findByRole("textbox", { name: "过滤文件树" });
+    expect(filter.getAttribute("data-search-scope")).toBe("tree");
+    expect(filter.getAttribute("title")).toContain("不读文件内容");
+
+    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    const content = screen.getByRole("textbox", { name: "全仓库文本搜索" });
+    expect(content.getAttribute("data-search-scope")).toBe("content");
+    expect(content.getAttribute("title")).toContain("工作区文本");
+    expect(content.getAttribute("data-search-scope")).not.toBe(filter.getAttribute("data-search-scope"));
+
+    await fireEvent.click(screen.getByRole("button", { name: "按路径打开" }));
+    const path = screen.getByRole("textbox", { name: "按路径打开文件" });
+    expect(path.getAttribute("data-search-scope")).toBe("path");
+    expect(path.getAttribute("title")).toContain("只查路径");
+    expect(path.getAttribute("title")).toContain("不读取文件内容");
+    // 同一个面板里换的是范围不同的两个输入，不是同一个输入换措辞。
+    expect(screen.queryByRole("textbox", { name: "全仓库文本搜索" })).toBeNull();
+  });
+});
+
 describe("目录树全局过滤", () => {
   it("已展开部分本地过滤，未展开的匹配由路径搜索补齐并可定位", async () => {
     treeDirs();

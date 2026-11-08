@@ -808,8 +808,13 @@ export function createFilesStore(deps: FilesStoreDeps) {
     return true;
   }
 
-  /** 打开过的文件（路径 + 行）：同一路径连续打开不重复占位，最多保留最近 50 条。 */
+  /**
+   * 打开过的文件（路径 + 行）：同一路径连续打开不重复占位，最多保留最近 50 条。
+   * 目录不是「打开的文件」：选中目录只改变树与搜索范围，目录仍通过目录树浏览。
+   */
   function remember(path: string, line: number | null): void {
+    const resolved = resolvePath(path);
+    if (resolved && resolved.kind !== "file") return;
     const current = visits[cursor];
     if (current && current.path === path && current.line === line) return;
     visits = [...visits.slice(0, cursor + 1), { path, line }].slice(-50);
@@ -1208,7 +1213,11 @@ export function createFilesStore(deps: FilesStoreDeps) {
     // 仅改动树的节点每次重建，折叠后这一行可能既不在可见行里也不在 nodes 里：
     // 改动集合本身仍然证明它是工作区里的一个文件。
     const change = (deps.files?.() ?? []).find((file) => file.path === path);
-    return change ? { path: change.path, kind: "file", segment: false } : null;
+    if (change) return { path: change.path, kind: "file", segment: false };
+    // 从路径搜索直接打开的未展开路径：结果本身带着类型，目录不能当成打开过的文件。
+    const entry = pathResult?.entries.find((item) => item.path === path);
+    if (entry) return { path: entry.path, kind: entry.kind === "directory" ? "directory" : "file", segment: false };
+    return null;
   }
 
   /**

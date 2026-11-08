@@ -993,6 +993,9 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".file-note": "文件顶部的续读/截断说明条，纯状态文字分区",
   ".file-more": "续读按钮区与代码区之间的分区线，按钮自身带控件边界",
   ".file-tree-status": "树过滤补齐状态（失败/截断/显示上限）与树之间的只读说明分区线，说明文字不可交互",
+  ".doc-reader-head": "文档阅读头部与正文之间的分区线，来源与路径是只读文字，内部按钮自带控件边界",
+  ".doc-notice": "文档阅读的就地说明条（位置调整/截断）与正文的分区线，纯状态文字",
+  ".doc-more": "文档源码续读按钮区与源码之间的分区线，按钮自身带控件边界",
 
   // --- components.css：表格/列分隔线与分区线 ---
   ".panel-toolbar": "面板工具条底部横向分隔线",

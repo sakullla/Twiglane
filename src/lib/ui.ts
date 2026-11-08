@@ -87,6 +87,21 @@ export function formatBytes(bytes: number): string {
   return `${text} ${units[unit]}`;
 }
 
+/**
+ * 文档来源的展示名：工作区、暂存区或某个固定提交。
+ * 消费方按实际读取来源显示，不用当前工作区冒充历史内容。
+ */
+export function documentSourceLabel(source: { revision: string }, abbrevLength = 0): string {
+  if (source.revision === "worktree") return "工作区";
+  if (source.revision === "index") return "暂存区";
+  if (/^[0-9a-f]{40}$/i.test(source.revision) || /^[0-9a-f]{64}$/i.test(source.revision)) {
+    const length = abbrevLength >= 4 && abbrevLength <= source.revision.length ? abbrevLength : 7;
+    return `提交 ${source.revision.slice(0, length)}`;
+  }
+  if (source.revision === "HEAD") return "当前提交";
+  return "未知版本";
+}
+
 /** 二进制改动的大小说明：前后都有时写「A → B」，新增只写新大小，删除写原大小；都不知道时为空。 */
 export function binarySizeText(oldSize: number | null | undefined, newSize: number | null | undefined): { text: string; label: string } | null {
   const before = oldSize ?? null;

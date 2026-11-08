@@ -268,15 +268,20 @@ describe("大量最近仓库", () => {
 });
 
 describe("视图切换", () => {
-  it("展示改动数量，标出当前视图，并切换视图", async () => {
+  it("展示改动数量，按改动、历史、文件排列并标出当前视图", async () => {
     const onView = vi.fn();
     const { container } = render(ViewSwitcher, { props: { view: "changes", changeCount: 8, onView } });
     const nav = screen.getByRole("navigation", { name: "视图" });
-    expect([...nav.querySelectorAll("button")].map((item) => item.getAttribute("aria-label"))).toEqual(["改动 8", "文件", "提交历史"]);
+    // 顺序就是数字快捷键的顺序：改动 1、历史 2、文件 3。
+    expect([...nav.querySelectorAll("button")].map((item) => item.getAttribute("aria-label"))).toEqual(["改动 8", "提交历史", "文件"]);
     expect(screen.getByRole("button", { name: /^改动 8/ }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("button", { name: "提交历史" }).getAttribute("title")).toContain("+2");
+    expect(screen.getByRole("button", { name: "文件" }).getAttribute("title")).toContain("+3");
     expect(container.querySelector(".count")?.textContent).toBe("8");
     await fireEvent.click(screen.getByRole("button", { name: /^提交历史/ }));
     expect(onView).toHaveBeenCalledWith("history");
+    await fireEvent.click(screen.getByRole("button", { name: /^文件/ }));
+    expect(onView).toHaveBeenCalledWith("files");
   });
 
   it("名称和快捷键由标签与提示承载，没有改动时不显示 0", () => {

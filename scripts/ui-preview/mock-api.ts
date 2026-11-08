@@ -14,7 +14,7 @@ import { createTextDiff } from "../../src/lib/diff";
 /** 预览 mock 的自我标识：健康端点和回归测试靠它确认浏览器拿到的是 mock，而不是真实 Tauri api。 */
 export const UI_PREVIEW_MOCK = true;
 import { sampleFor } from "./samples";
-import { mockContentSearch, mockDirectory, mockFilePage, mockPathSearch } from "./mock-files";
+import { mockContentSearch, mockDirectory, mockDocument, mockDocumentResource, mockFilePage, mockPathSearch } from "./mock-files";
 
 const wait = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms));
 const now = Math.floor(Date.now() / 1000);
@@ -660,6 +660,49 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     }
     return ok(mockFilePage(relative, offset, limit, generation), 40);
   },
+  /**
+   * 只读文档正文：?doc=error 演示读取失败，?doc=large 演示超过排版预览上限时仍可读源码，
+   * ?doc=stale 让第一次请求报 stale，用来核对按新代次重读。
+   */
+  repositoryDocument: (
+    _repo: string,
+    source: { revision: string; path: string },
+    generation: number,
+    _request: number,
+    mode: "document" | "source" = "document",
+    offset = 0,
+    limit: number | undefined,
+  ) => {
+    if (previewParams.get("doc") === "error") {
+      return Promise.reject({ code: "document_read", message: "无法读取这个版本的正文。" });
+    }
+    if (previewParams.get("doc") === "large" && mode === "document") {
+      return ok({
+        ...mockDocument(source, "document", 0, limit, generation),
+        kind: "tooLarge",
+        text: null,
+        truncated: true,
+        message: "文档超过 2 MiB 排版预览上限，请查看源码。",
+      });
+    }
+    return ok(mockDocument(source, mode, offset, limit, generation), 40);
+  },
+  documentResource: (_repo: string, source: { revision: string; path: string }, generation: number) =>
+    ok(mockDocumentResource(source, generation), 40),
+  documentRemoteImage: () =>
+    ok({
+      generation: 0,
+      kind: "image",
+      size: 68,
+      dataUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      entries: [],
+      truncated: false,
+      message: "",
+      lfsOid: null,
+      canDownload: false,
+    }, 300),
+  openDocumentUrl: () => ok(undefined, 0),
+  cancelDocumentResources: () => ok(undefined, 0),
   repositoryContentSearch: (
     _repo: string,
     query: string,

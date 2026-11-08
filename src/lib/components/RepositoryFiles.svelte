@@ -248,5 +248,6 @@
     {onGeneration}
     onFileHistory={onFileHistory}
     onOpenDiff={onOpenDiff}
+    onRevealPath={(path) => store.locate(path, null)}
   />
 </div>

@@ -2163,3 +2163,45 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
   .file-tree-skeleton > span, .file-skeleton .sk-code, .file-skeleton .sk-ln { animation: none; }
 }
 
+/* ==========================================================================
+   文档阅读（Markdown 预览 / 同版本源码）
+   阅读区只在内容区滚动：宽表格、长代码由内容自己的滚动区域承担，
+   头部固定显示来源、路径和返回入口，位置与模式由阅读会话按身份保存。
+   ========================================================================== */
+.document-reader { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--surface); }
+.doc-reader-head { display: flex; align-items: center; gap: var(--space-8); flex: none; min-height: 32px; padding: 0 var(--space-12); border-bottom: 1px solid var(--border); background: var(--surface-2); font-size: var(--text-xs); color: var(--fg-muted); }
+.doc-source { display: inline-flex; align-items: center; gap: 5px; flex: none; height: 20px; padding: 0 var(--space-6); border-radius: var(--radius-xs); background: var(--accent-soft); color: var(--accent-text); font-weight: var(--weight-medium); white-space: nowrap; }
+.doc-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; font-family: var(--mono); }
+.doc-nav { display: inline-flex; align-items: center; gap: 2px; flex: none; }
+.doc-meta { flex: none; color: var(--fg-subtle); font-variant-numeric: tabular-nums; }
+.doc-notice { display: flex; align-items: center; gap: var(--space-6); flex: none; margin: 0; padding: 6px var(--space-12); border-bottom: 1px solid var(--border); background: var(--surface-2); color: var(--fg-muted); font-size: var(--text-xs); }
+.doc-notice.danger { color: var(--danger-text); }
+/* 相对链接指向图片时的同版本资源预览：尺寸稳定，不撑开阅读区。 */
+.doc-resource { display: flex; justify-content: center; max-width: min(100%, 720px); max-height: 46vh; margin-top: var(--space-12); overflow: auto; border-radius: var(--radius); background: var(--surface-2); }
+.doc-resource img { max-width: 100%; max-height: 46vh; object-fit: contain; }
+.doc-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; padding: var(--space-32) var(--space-24); text-align: center; color: var(--fg-muted); min-height: 0; }
+.doc-state strong { color: var(--fg); font-size: var(--text-base); font-weight: var(--weight-semibold); }
+.doc-state p { max-width: 460px; font-size: var(--text-sm); line-height: var(--leading-relaxed); word-break: break-word; }
+.doc-state-actions { display: flex; flex-wrap: wrap; gap: var(--space-8); justify-content: center; margin-top: var(--space-8); }
+.doc-skeleton { flex: 1; display: flex; flex-direction: column; gap: 12px; padding: var(--space-12) var(--space-12) 0 0; overflow: hidden; }
+.doc-skeleton .sk-line { display: flex; align-items: center; gap: var(--space-12); height: 8px; }
+.doc-skeleton .sk-ln { width: 22px; margin-left: 26px; flex: none; opacity: 0.6; }
+/* 源码页：行号固定宽度，长行只在内容区横向滚动。 */
+.doc-source-scroll { flex: 1; min-height: 0; overflow: auto; padding: 6px 0 var(--space-12); background: var(--surface); font-family: var(--mono); font-size: var(--text-sm); line-height: 20px; tab-size: 4; outline: none; }
+.doc-source-scroll:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.doc-source-line { display: flex; gap: var(--space-12); padding-right: var(--space-12); white-space: pre; }
+.doc-source-line .ln { flex: none; width: 56px; padding-right: var(--space-8); text-align: right; color: var(--fg-subtle); font-size: var(--text-xs); user-select: none; font-variant-numeric: tabular-nums; }
+.doc-source-line .code { min-width: 0; }
+.doc-source-line.hit { background: var(--warning-soft); box-shadow: inset 2px 0 var(--warning); }
+.doc-source-line.hit .ln { color: var(--warning-text); }
+.doc-more { display: flex; align-items: center; justify-content: center; gap: var(--space-8); flex: none; padding: 6px var(--space-12); border-top: 1px solid var(--border); font-size: var(--text-xs); color: var(--fg-muted); }
+
+/* 阅读窗口：模态正文交给阅读区自己分区滚动，头部保留来源与模式切换。 */
+.document-dialog { display: flex; flex: 1; min-height: 0; overflow: hidden; margin: 0 calc(var(--space-4) * -1); }
+.doc-dialog-source { flex: none; height: 20px; padding: 0 var(--space-8); border-radius: var(--radius-xs); background: var(--accent-soft); color: var(--accent-text); font-size: var(--text-xs); font-weight: var(--weight-medium); white-space: nowrap; }
+.doc-dialog-mode button { height: 22px; padding: 0 var(--space-8); font-size: var(--text-xs); }
+.doc-dialog-note { display: inline-flex; align-items: center; gap: 5px; color: var(--fg-muted); font-size: var(--text-xs); }
+@media (prefers-reduced-motion: reduce) {
+  .doc-notice, .doc-source-line { transition: none; }
+}
+

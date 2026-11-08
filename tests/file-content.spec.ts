@@ -4,10 +4,28 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const repositoryFileContent = vi.hoisted(() => vi.fn());
 const repositoryContentSearch = vi.hoisted(() => vi.fn());
 const filePreview = vi.hoisted(() => vi.fn());
-vi.mock("../src/lib/api", () => ({ api: { repositoryFileContent, repositoryContentSearch, filePreview } }));
+const repositoryDocument = vi.hoisted(() => vi.fn());
+const documentResource = vi.hoisted(() => vi.fn());
+const openDocumentUrl = vi.hoisted(() => vi.fn());
+const cancelDocumentResources = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock("../src/lib/api", () => ({
+  api: {
+    repositoryFileContent,
+    repositoryContentSearch,
+    filePreview,
+    repositoryDocument,
+    documentResource,
+    documentRemoteImage: vi.fn(),
+    openDocumentUrl,
+    cancelDocumentResources,
+  },
+}));
+// 沙箱禁止管道子进程，Vite 无法转换 Worker URL：这里只验证文本与定位，分词不作为被测行为。
+const cancelHighlight = vi.hoisted(() => vi.fn());
+vi.mock("../src/lib/syntax/client", () => ({ highlightLines: vi.fn(() => cancelHighlight) }));
 import FileContent from "../src/lib/components/FileContent.svelte";
 import { resetSyntaxPrefs } from "../src/lib/syntax/prefs.svelte";
-import type { OpenedRepository, RepositoryContentSearch, RepositoryFileContent } from "../src/lib/types";
+import type { OpenedRepository, RepositoryContentSearch, RepositoryDocument, RepositoryFileContent } from "../src/lib/types";
 
 const repoPath = "C:/work/demo";
 
@@ -70,6 +88,10 @@ beforeEach(() => {
   repositoryFileContent.mockReset();
   repositoryContentSearch.mockReset();
   filePreview.mockReset();
+  repositoryDocument.mockReset();
+  documentResource.mockReset();
+  openDocumentUrl.mockReset();
+  cancelDocumentResources.mockClear();
   resetSyntaxPrefs();
 });
 
@@ -414,3 +436,123 @@ describe("资源文件", () => {
     expect(await screen.findByRole("button", { name: "查看这个 SVG 的源码" })).toBeTruthy();
   });
 });
+
+function markdownDoc(overrides: Partial<RepositoryDocument> = {}): RepositoryDocument {
+  return {
+    generation: 4,
+    source: { revision: "worktree", path: "docs/a.md", repository: repoPath },
+    kind: "text",
+    size: 64,
+    version: "v1",
+    text: "# 标题\n\n正文段落",
+    complete: true,
+    offset: 0,
+    lines: [],
+    nextOffset: 0,
+    hasMore: false,
+    truncated: false,
+    message: null,
+    ...overrides,
+  };
+}
+
+describe("Markdown 阅读接入", () => {
+  it("普通打开默认排版预览，可在同一个文件里切回源码", async () => {
+    repositoryFileContent.mockResolvedValue(text({ path: "docs/a.md", lines: ["# 标题", "", "正文段落"] }));
+    repositoryDocument.mockResolvedValue(markdownDoc());
+    const { container } = render(FileContent, { props: props({ path: "docs/a.md", contentVersion: "v1" }) as never });
+
+    expect(await screen.findByRole("heading", { name: "标题" })).toBeTruthy();
+    expect(repositoryDocument).toHaveBeenCalledWith(repoPath, { revision: "worktree", path: "docs/a.md", repository: repoPath }, 4, 1, "document");
+    // 预览优先：源码行不占正文，但状态条仍显示来源与只读。
+    expect(container.querySelector("[data-file-line]")).toBeNull();
+    expect(screen.getByTitle("这篇正文来自这个文件的工作区版本")).toBeTruthy();
+    expect(screen.getByTitle("来源：工作区")).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole("button", { name: "查看这个 Markdown 的源码" }));
+    await waitFor(() => expect(container.querySelector('[data-file-line="1"]')).toBeTruthy());
+    expect(screen.getByRole("button", { name: "查看这个 Markdown 的源码" }).getAttribute("aria-pressed")).toBe("true");
+    expect(repositoryFileContent).toHaveBeenCalledWith(repoPath, "docs/a.md", 0, undefined, 4, expect.any(Number));
+
+    await fireEvent.click(screen.getByRole("button", { name: "预览这个 Markdown 文档" }));
+    expect(await screen.findByRole("heading", { name: "标题" })).toBeTruthy();
+  });
+
+  it("搜索命中或跳到行进入源码并按目标行读取，不留在预览", async () => {
+    repositoryFileContent.mockResolvedValue(text({ path: "docs/a.md", offset: 39, lines: ["第 40 行"], nextOffset: 40 }));
+    repositoryDocument.mockResolvedValue(markdownDoc());
+    render(FileContent, {
+      props: props({ path: "docs/a.md", contentVersion: "v1", line: 40, lineSerial: 1 }) as never,
+    });
+    await waitFor(() => expect(repositoryFileContent).toHaveBeenLastCalledWith(repoPath, "docs/a.md", 39, undefined, 4, expect.any(Number)));
+    await waitFor(() => expect(screen.getByRole("button", { name: "查看这个 Markdown 的源码" }).getAttribute("aria-pressed")).toBe("true"));
+    expect(screen.queryByRole("heading", { name: "标题" })).toBeNull();
+  });
+
+  it("文件内搜索从预览发起时先切到源码", async () => {
+    repositoryFileContent.mockResolvedValue(text({ path: "docs/a.md", lines: ["# 标题"] }));
+    repositoryDocument.mockResolvedValue(markdownDoc());
+    render(FileContent, { props: props({ path: "docs/a.md", contentVersion: "v1" }) as never });
+    await screen.findByRole("heading", { name: "标题" });
+    await fireEvent.click(screen.getByRole("button", { name: "在文件内搜索" }));
+    expect(screen.getByRole("button", { name: "查看这个 Markdown 的源码" }).getAttribute("aria-pressed")).toBe("true");
+    expect(await screen.findByLabelText("文件内搜索关键词")).toBeTruthy();
+  });
+
+  it("预览与源码位置按文件身份保存：换文件再回来接着读", async () => {
+    repositoryFileContent.mockResolvedValue(text({ path: "docs/a.md", lines: ["# 标题", "", "正文段落"] }));
+    repositoryDocument.mockImplementation((_repo: string, source: { path: string }) => Promise.resolve(markdownDoc({ source: { revision: "worktree", path: source.path, repository: repoPath } })));
+    const markdownProps = props({ path: "docs/a.md", contentVersion: "v1" });
+    const view = render(FileContent, { props: markdownProps as never });
+    await screen.findByRole("heading", { name: "标题" });
+    const scroller = view.container.querySelector<HTMLDivElement>(".md-scroll")!;
+    scroller.scrollTop = 60;
+    await fireEvent.scroll(scroller);
+
+    repositoryFileContent.mockResolvedValue(text({ lines: ["const value = 1;"] }));
+    await view.rerender(props({ path: "src/App.ts", contentVersion: "v2" }) as never);
+    await screen.findByText("const value = 1;");
+
+    await view.rerender(markdownProps as never);
+    await screen.findByRole("heading", { name: "标题" });
+    const restored = view.container.querySelector<HTMLDivElement>(".md-scroll")!;
+    await waitFor(() => expect(restored.scrollTop).toBe(60));
+  });
+
+  it("工作区相对链接同步文件树并带上目标锚点，目标不存在时就地说明", async () => {
+    repositoryDocument.mockResolvedValue(markdownDoc({ text: "[说明](guide.md#安装)" }));
+    const onRevealPath = vi.fn(async () => true);
+    render(FileContent, { props: props({ path: "docs/a.md", contentVersion: "v1", onRevealPath }) as never });
+    await fireEvent.click(await screen.findByRole("link", { name: "说明" }));
+    await waitFor(() => expect(onRevealPath).toHaveBeenCalledWith("docs/guide.md", null));
+
+    repositoryDocument.mockResolvedValue(markdownDoc({ text: "[缺失](gone.md)", source: { revision: "worktree", path: "docs/b.md", repository: repoPath } }));
+    const missing = vi.fn(async () => false);
+    const view = render(FileContent, { props: props({ path: "docs/b.md", contentVersion: "v1", onRevealPath: missing }) as never });
+    await fireEvent.click(await screen.findByRole("link", { name: "缺失" }));
+    expect(await screen.findByText("这个版本里没有 docs/gone.md。")).toBeTruthy();
+    expect(view.container.querySelector(".file-content")).toBeTruthy();
+  });
+});
+
+  it("源码位置按身份保存：切到预览再回到源码仍回到原处", async () => {
+    const many = Array.from({ length: 100 }, (_, index) => `line ${index + 1}`);
+    repositoryFileContent.mockResolvedValue(text({ path: "docs/a.md", lines: many, nextOffset: 100 }));
+    repositoryDocument.mockResolvedValue(markdownDoc());
+    const view = render(FileContent, { props: props({ path: "docs/a.md", contentVersion: "v1" }) as never });
+    await screen.findByRole("heading", { name: "标题" });
+
+    await fireEvent.click(screen.getByRole("button", { name: "查看这个 Markdown 的源码" }));
+    const scroller = view.container.querySelector<HTMLDivElement>(".file-code")!;
+    scroller.scrollTop = 220;
+    await fireEvent.scroll(scroller);
+    // 位置写入按短延迟合并，先等它落地。
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    await fireEvent.click(screen.getByRole("button", { name: "预览这个 Markdown 文档" }));
+    await screen.findByRole("heading", { name: "标题" });
+    await fireEvent.click(screen.getByRole("button", { name: "查看这个 Markdown 的源码" }));
+    const restored = view.container.querySelector<HTMLDivElement>(".file-code")!;
+    await waitFor(() => expect(restored.scrollTop).toBe(20));
+    expect(view.container.querySelector('[data-file-line="12"]')).toBeTruthy();
+  });

@@ -5,6 +5,14 @@
   import { fileTone, matchSnippet } from "../file-kind";
   import { trackCodeScroll } from "../codeScroll.svelte";
   import { normalizeError } from "../errors";
+  import {
+    createDocumentSession,
+    initialDocumentMode,
+    isMarkdownPath,
+    type DocumentLinkTarget,
+    type DocumentMode,
+    type DocumentSession,
+  } from "../document-session.svelte";
   import { codeContentSize, codeRuler, rulerPadding, visibleRange } from "../layout";
   import { languageName } from "../syntax/languages";
   import { createHighlight } from "../syntax/highlight.svelte";
@@ -15,11 +23,13 @@
     RepositoryContentSearch,
     RepositoryFileContent,
     RepositorySearchScope,
+    DocumentSource,
   } from "../types";
-  import { BUSY_REASON, formatBytes, rowMark, splitPath, type FileNavState } from "../ui";
+  import { BUSY_REASON, documentSourceLabel, formatBytes, rowMark, splitPath, type FileNavState } from "../ui";
   import type { DiffSide } from "../types";
   import BinaryPreview from "./BinaryPreview.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
+  import DocumentReader from "./DocumentReader.svelte";
   import FileNav from "./FileNav.svelte";
   import Icon from "./Icon.svelte";
   import LanguagePicker from "./LanguagePicker.svelte";
@@ -51,6 +61,8 @@
     onOpenDiff?: (path: string, side: DiffSide) => void;
     /** 文件切换条：上一个/下一个、后退/前进与最近打开。 */
     nav?: FileNavState | null;
+    /** 文档内相对链接：在工作区里同步文件树并选中目标（历史/暂存区阅读不使用）。 */
+    onRevealPath?: (path: string, line: number | null) => boolean | Promise<boolean>;
   }
 
   let {
@@ -69,6 +81,7 @@
     onFileHistory,
     onOpenDiff,
     nav = null,
+    onRevealPath,
   }: Props = $props();
 
   /** 与 components.css 的 .file-line 行高一致：虚拟窗口按它算，行号与代码同高。 */
@@ -138,6 +151,20 @@
   let previewSources = $derived(
     path ? { repository: opened.summary.path, old: null, new: { revision: "worktree", path } } : null,
   );
+
+  /*
+   * Markdown 阅读：普通打开默认排版预览，搜索命中或指定行进入源码。
+   * 模式与两个视图的位置都按「仓库 + 版本 + 路径」存在会话里，切走再回来接着读。
+   */
+  let isMarkdown = $derived(Boolean(path && isMarkdownPath(path)));
+  let documentMode = $state<DocumentMode>("preview");
+  let documentNotice = $state<string | null>(null);
+  const documentSession: DocumentSession = createDocumentSession({ repository: () => opened.summary.path });
+  let documentSource = $derived<DocumentSource>({
+    revision: "worktree",
+    path: path ?? "",
+    repository: opened.summary.path,
+  });
 
   const syntax = createHighlight(() => ({ lang: active && !showImage ? language : null, lines }));
   const codeTexts = $derived(lines);
@@ -274,6 +301,11 @@
       searchSerial += 1;
       searching = false;
       resetContent();
+      documentNotice = null;
+      // Markdown 沿用同身份上一次的阅读模式；其它文件只有源码一种显示方式。
+      documentMode = target && isMarkdownPath(target)
+        ? initialDocumentMode(null, documentSession.recall({ revision: "worktree", path: target }))
+        : "source";
     });
   });
 
@@ -305,7 +337,87 @@
     lastLineSerial = serial;
     untrack(() => {
       if (target === null || target <= 0 || !path) return;
+      // 搜索命中、跳到行都要落在源码上：显式行定位优先于保存的阅读模式。
+      if (isMarkdownPath(path)) setDocumentMode("source");
       void jumpTo(target);
+    });
+  });
+
+  /* ---- Markdown 阅读：模式切换、位置保存与恢复 ---- */
+
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  let restoreSignature = "";
+
+  function saveSourcePosition(): void {
+    if (!isMarkdown || !path || !content || content.kind !== "text") return;
+    const line = pageOffset + Math.floor(scrollTop / ROW_HEIGHT) + 1;
+    documentSession.remember(documentSource, {
+      mode: "source",
+      source: { line, top: scrollTop },
+      version: content.version ?? null,
+    });
+  }
+
+  function queueSaveSourcePosition(): void {
+    if (saveTimer !== undefined) clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveSourcePosition, 120);
+  }
+
+  // 卸载前把最后一处源码位置落进会话。
+  $effect(() => () => {
+    if (saveTimer !== undefined) clearTimeout(saveTimer);
+    saveSourcePosition();
+  });
+
+  function setDocumentMode(next: DocumentMode): void {
+    if (documentMode === next) return;
+    if (next === "source") saveSourcePosition();
+    // 离开源码时清掉恢复签名：再切回源码要重新按保存的位置定位。
+    if (next === "preview") restoreSignature = "";
+    documentMode = next;
+    documentNotice = null;
+    if (path && isMarkdownPath(path)) {
+      documentSession.remember(documentSource, { mode: next, version: content?.version ?? null });
+    }
+  }
+
+  /**
+   * 回到这个版本上次的源码位置：目标不在已读页时按偏移读取，读到更短的内容就夹到有效范围。
+   * 显式行定位（line 已给）不做恢复：新的搜索意图优先。
+   */
+  async function restoreSourcePosition(target: string): Promise<void> {
+    const stored = documentSession.recall({ revision: "worktree", path: target }, content?.version ?? null);
+    if (!stored) return;
+    const line = Math.max(1, Math.trunc(stored.reading.source.line));
+    if (!Number.isFinite(line) || line <= 1) return;
+    if (line - 1 < pageOffset || line - 1 >= pageOffset + lines.length) {
+      await read(target, line - 1, false, generation);
+      if (path !== target) return;
+      // 等这一页真的挂进 DOM 再滚：否则 scrollTop 会被旧高度夹住。
+      await tick();
+    }
+    revealLine(line);
+    if (stored.moved) documentNotice = "文件内容已变化，阅读位置按新内容重新定位。";
+    else if (line > pageOffset + lines.length) documentNotice = "这个版本比上次短，阅读位置已调整到有效范围。";
+  }
+
+  /*
+   * 恢复时机：源码正文已经就绪、当前是源码模式、且没有新的行定位。
+   * 版本变化或重新切换到源码都会重新走一次，签名相同则不重复恢复。
+   */
+  $effect(() => {
+    const loaded = content;
+    const target = path;
+    const mode = documentMode;
+    const explicit = line;
+    const serial = lineSerial;
+    if (!loaded || loaded.kind !== "text" || !target || !isMarkdownPath(target)) return;
+    const signature = JSON.stringify([opened.summary.path, target, mode, loaded.version ?? "", serial, explicit]);
+    if (mode !== "source" || signature === restoreSignature) return;
+    untrack(() => {
+      restoreSignature = signature;
+      if (explicit !== null && explicit > 0) return;
+      void restoreSourcePosition(target);
     });
   });
 
@@ -318,6 +430,7 @@
   function onCodeScroll(event: Event): void {
     const target = event.currentTarget as HTMLElement;
     scrollTop = target.scrollTop;
+    if (isMarkdown) queueSaveSourcePosition();
     if (!hasMore || loading || loadingMore || error || viewport <= 0) return;
     if (scrollTop + viewport >= (lines.length - PREFETCH_ROWS) * ROW_HEIGHT) void loadMore();
   }
@@ -358,6 +471,8 @@
   }
 
   async function openGoto(): Promise<void> {
+    // 跳行同样只在源码上有意义：从预览发起时先切到源码。
+    if (isMarkdown) setDocumentMode("source");
     gotoOpen = true;
     await tick();
     gotoInput?.focus();
@@ -431,12 +546,29 @@
   }
 
   function openSearch(): void {
+    // 文件内查找只在源码上有意义：从预览发起时先切到源码，搜索框才不会被预览盖住。
+    if (isMarkdown) setDocumentMode("source");
     searchOpen = true;
     gotoOpen = false;
     queueMicrotask(() => {
       searchInput?.focus();
       searchInput?.select();
     });
+  }
+
+  /**
+   * 工作区文档里的相对链接：同步文件树并选中目标（同版本工作区内容）。
+   * 目标是另一篇 Markdown 时把锚点写进目标身份的会话，选中后由预览恢复到那个标题。
+   */
+  async function followWorktreeLink(target: DocumentLinkTarget): Promise<boolean> {
+    if (target.kind !== "local" || !target.path || !onRevealPath) return false;
+    if (target.anchor && isMarkdownPath(target.path)) {
+      documentSession.remember(
+        { revision: "worktree", path: target.path },
+        { mode: "preview", preview: { top: 0, anchor: target.anchor } },
+      );
+    }
+    return onRevealPath(target.path, null);
   }
 
   function closeSearch(): void {
@@ -557,6 +689,24 @@
         {/if}
       </div>
       <div class="file-actions">
+        {#if isMarkdown && !showImage}
+          <div class="segmented file-view-mode" role="group" aria-label="Markdown 显示方式">
+            <button
+              type="button"
+              aria-pressed={documentMode === "preview"}
+              aria-label="预览这个 Markdown 文档"
+              title="排版预览（只读）"
+              onclick={() => setDocumentMode("preview")}
+            >预览</button>
+            <button
+              type="button"
+              aria-pressed={documentMode === "source"}
+              aria-label="查看这个 Markdown 的源码"
+              title="显示源码文本"
+              onclick={() => setDocumentMode("source")}
+            >源码</button>
+          </div>
+        {/if}
         {#if isSvg && content?.kind === "text"}
           <div class="segmented file-view-mode" role="group" aria-label="SVG 显示方式">
             <button
@@ -593,15 +743,17 @@
             title={`在文件内搜索（${MODIFIER_LABEL} F）`}
             onclick={() => (searchOpen ? closeSearch() : openSearch())}
           ><Icon name="search" size={14} /></button>
-          <button
-            type="button"
-            class="icon-btn sm"
-            aria-pressed={wrap}
-            aria-label="自动换行"
-            title={canWrap ? (wrap ? "关闭自动换行" : "自动换行") : `超过 ${WRAP_LIMIT} 行时不自动换行，避免整份文件排进 DOM`}
-            disabled={!canWrap && !wrap}
-            onclick={() => (wrap = !wrap)}
-          ><Icon name="rows" size={14} /></button>
+          {#if !(isMarkdown && documentMode === "preview")}
+            <button
+              type="button"
+              class="icon-btn sm"
+              aria-pressed={wrap}
+              aria-label="自动换行"
+              title={canWrap ? (wrap ? "关闭自动换行" : "自动换行") : `超过 ${WRAP_LIMIT} 行时不自动换行，避免整份文件排进 DOM`}
+              disabled={!canWrap && !wrap}
+              onclick={() => (wrap = !wrap)}
+            ><Icon name="rows" size={14} /></button>
+          {/if}
         {/if}
         <button
           type="button"
@@ -711,7 +863,25 @@
       </div>
     {/if}
 
-    {#if error}
+    {#if documentNotice}
+      <p class="file-note" role="status"><Icon name="info" size={13} />{documentNotice}</p>
+    {/if}
+
+    {#if isMarkdown && documentMode === "preview" && path}
+      <!-- 普通打开 Markdown 默认进排版预览；源码仍是同一个工作区版本，切换不离开这个文件。 -->
+      <DocumentReader
+        {active}
+        repository={opened.summary.path}
+        source={documentSource}
+        {generation}
+        {nextId}
+        {onGeneration}
+        session={documentSession}
+        contentVersion={contentVersion}
+        onMode={setDocumentMode}
+        onFollow={followWorktreeLink}
+      />
+    {:else if error}
       <div class="file-state" role="alert">
         <span class="empty-icon err"><Icon name="alert-circle" size={22} /></span>
         <strong>{stateTitle()}</strong>
@@ -802,7 +972,20 @@
       <div class="file-state"><strong>选择左侧的一个文件</strong><p>文件内容只读显示，不会改动工作区。</p></div>
     {/if}
 
-    {#if content && !error && !loading}
+    {#if isMarkdown && documentMode === "preview"}
+      <footer class="file-status" aria-label="文件信息">
+        <span class="file-status-item" class:changed={Boolean(mark)}>
+          {#if mark}
+            <span class={`tree-dot ${mark.tone}`} aria-hidden="true"></span>{mark.label}{hasStaged && hasUnstaged ? " · 部分已暂存" : hasStaged ? " · 已暂存" : ""}
+          {:else}
+            无本地改动
+          {/if}
+        </span>
+        <span class="file-status-item" title="这篇正文来自这个文件的工作区版本">{documentSourceLabel(documentSource)}</span>
+        <span class="spacer"></span>
+        <span class="file-status-item" title="文件视图只读，不会改动工作区"><Icon name="eye" size={12} />只读</span>
+      </footer>
+    {:else if content && !error && !loading}
       <footer class="file-status" aria-label="文件信息">
         <span class="file-status-item" class:changed={Boolean(mark)}>
           {#if copied}

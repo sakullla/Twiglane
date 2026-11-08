@@ -6,9 +6,24 @@ const repositoryFileContent = vi.hoisted(() => vi.fn());
 const repositoryPathSearch = vi.hoisted(() => vi.fn());
 const repositoryContentSearch = vi.hoisted(() => vi.fn());
 const filePreview = vi.hoisted(() => vi.fn());
+const repositoryDocument = vi.hoisted(() => vi.fn());
 vi.mock("../src/lib/api", () => ({
-  api: { repositoryDirectory, repositoryFileContent, repositoryPathSearch, repositoryContentSearch, filePreview },
+  api: {
+    repositoryDirectory,
+    repositoryFileContent,
+    repositoryPathSearch,
+    repositoryContentSearch,
+    filePreview,
+    repositoryDocument,
+    documentResource: vi.fn(),
+    documentRemoteImage: vi.fn(),
+    openDocumentUrl: vi.fn(),
+    cancelDocumentResources: vi.fn(async () => {}),
+  },
 }));
+// 沙箱禁止管道子进程，Vite 无法转换 Worker URL：这里验证导航与读取行为，分词不是被测对象。
+const cancelHighlight = vi.hoisted(() => vi.fn());
+vi.mock("../src/lib/syntax/client", () => ({ highlightLines: vi.fn(() => cancelHighlight) }));
 
 import RepositoryFiles from "../src/lib/components/RepositoryFiles.svelte";
 import { buildChangedTree, changedFilesMatching, flattenTree } from "../src/lib/files.svelte";
@@ -92,6 +107,24 @@ beforeEach(() => {
   repositoryPathSearch.mockReset();
   repositoryContentSearch.mockReset();
   filePreview.mockReset();
+  repositoryDocument.mockReset();
+  repositoryDocument.mockImplementation((_repo: string, source: { path: string; revision: string }, generation: number) =>
+    Promise.resolve({
+      generation,
+      source: { ...source, repository: repoPath },
+      kind: "text",
+      size: 12,
+      version: "v1",
+      text: "# 文档",
+      complete: true,
+      offset: 0,
+      lines: [],
+      nextOffset: 0,
+      hasMore: false,
+      truncated: false,
+      message: null,
+    }),
+  );
   repositoryFileContent.mockImplementation((_repo: string, path: string, offset: number, _limit: number | undefined, generation: number) =>
     Promise.resolve(page(path, offset, generation)),
   );
@@ -627,3 +660,41 @@ describe("仅改动树的定位与过滤", () => {
   });
 });
 
+
+describe("Markdown 阅读与最近打开", () => {
+  it("最近打开只列文件，目录条目只通过目录树浏览", async () => {
+    repositoryDirectory.mockImplementation((_repo: string, path: string) =>
+      Promise.resolve(path === "" ? dir("", [entry("src", "directory"), entry("README.md")]) : dir(path, [entry("src/a.ts")])),
+    );
+    const onNav = vi.fn();
+    const view = render(RepositoryFiles, { props: viewProps({ onNav }) as never });
+    await screen.findByRole("tree", { name: "仓库文件" });
+    await revealHost(view).reveal("src", null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onNav.mock.calls.at(-1)?.[0]?.history.recent ?? []).toEqual([]);
+
+    await revealHost(view).reveal("src/a.ts", null);
+    await waitFor(() => expect(onNav.mock.calls.at(-1)?.[0]?.history.recent.map((visit: { path: string }) => visit.path)).toEqual(["src/a.ts"]));
+    expect(screen.queryByText("src", { selector: ".file-recent-item" })).toBeNull();
+  });
+
+  it("最近打开的条目回到对应文件与保存的阅读位置", async () => {
+    repositoryDirectory.mockResolvedValue(dir("", [entry("README.md"), entry("src/a.ts")]));
+    const onNav = vi.fn();
+    render(RepositoryFiles, { props: viewProps({ onNav }) as never });
+    const tree = await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(await within(tree).findByRole("treeitem", { name: /README\.md/ }));
+    await screen.findByRole("heading", { name: "文档" });
+    const preview = document.querySelector<HTMLDivElement>(".md-scroll")!;
+    preview.scrollTop = 50;
+    await fireEvent.scroll(preview);
+
+    await fireEvent.click(within(screen.getByRole("tree", { name: "仓库文件" })).getByRole("treeitem", { name: /a\.ts/ }));
+    await waitFor(() => expect(repositoryFileContent).toHaveBeenLastCalledWith(repoPath, "src/a.ts", 0, undefined, 4, expect.any(Number)));
+
+    const nav = onNav.mock.calls.at(-1)?.[0];
+    nav.history.onOpen("README.md", null);
+    await screen.findByRole("heading", { name: "文档" });
+    await waitFor(() => expect(document.querySelector<HTMLDivElement>(".md-scroll")?.scrollTop).toBe(50));
+  });
+});

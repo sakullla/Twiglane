@@ -844,7 +844,7 @@ describe("应用外壳", () => {
       [...nav.querySelectorAll<HTMLElement>("button")].map((item) => (item.getAttribute("aria-label") ?? "").replace(/\s+\d+$/, ""));
     const current = () => activeNav().querySelector<HTMLElement>('[aria-current="page"]')?.getAttribute("aria-label");
 
-    expect(labelsOf(activeNav())).toEqual(["改动", "文件", "提交历史"]);
+    expect(labelsOf(activeNav())).toEqual(["改动", "提交历史", "文件"]);
     expect(current()).toMatch(/^改动/);
     // 点第二项真的换成历史，而不是只换高亮；历史懒加载期间左栏头部也不消失。
     await fireEvent.click(within(activeNav()).getByRole("button", { name: "提交历史" }));
@@ -859,7 +859,7 @@ describe("应用外壳", () => {
     await waitFor(() => expect(current()).toMatch(/^改动/));
     await press("2");
     await waitFor(() => expect(current()).toBe("提交历史"));
-    expect(labelsOf(activeNav())).toEqual(["改动", "文件", "提交历史"]);
+    expect(labelsOf(activeNav())).toEqual(["改动", "提交历史", "文件"]);
   });
 
   it("三个视图同时保活：⌘3 进入文件视图，隐藏视图 inert，切回改动恢复差异", async () => {

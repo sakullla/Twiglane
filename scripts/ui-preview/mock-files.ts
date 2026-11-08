@@ -80,8 +80,45 @@ for (let index = 0; index < 5000; index += 1) {
 }
 
 const FILES: Record<string, string> = {
-  "README.md": ["# Twiglane", "", "只读文件视图的预览数据。", "", "- 目录按需读取", "- 资源文件不自动下载", ""].join("\n"),
-  "docs/README.md": ["# 文档", "", "这里是 docs 下的说明文件。", ""].join("\n"),
+  "README.md": [
+    "# Twiglane",
+    "",
+    "只读文件视图的预览数据。**这一段**用来检查排版、目录与链接。",
+    "",
+    "## 目录与版本",
+    "",
+    "- 目录按需读取",
+    "- 资源文件不自动下载",
+    "- 链接与图片跟随同一版本",
+    "",
+    "### 中文重复标题",
+    "",
+    "### 中文重复标题",
+    "",
+    "| 元素 | 状态 |",
+    "| --- | --- |",
+    "| 表格 | 独立横向滚动 |",
+    "| 任务列表 | 只读 |",
+    "",
+    "- [x] 预览默认打开",
+    "- [ ] 保存位置",
+    "",
+    "> 引用：历史版本里的链接不能静默替换成当前工作区内容。",
+    "",
+    "[快速开始](docs/guide/getting-started.md) · [缺失链接](docs/missing.md) · [外部网页](https://example.com)",
+    "",
+    "![本地图片](assets/logo.png)",
+    "",
+    "![远程图片](https://example.com/remote.png)",
+    "",
+    "```ts",
+    "export function openPanel(id: string): Panel {",
+    "  return { id, title: id };",
+    "}",
+    "```",
+    "",
+  ].join("\n"),
+  "docs/README.md": ["# 文档", "", "这里是 docs 下的说明文件。", "", "[回到根目录](../README.md)", ""].join("\n"),
   "docs/guide/getting-started.md": ["# 快速开始", "", "1. 打开仓库", "2. 切到文件视图", "3. 展开目录", ""].join("\n"),
   "docs/guide/config.yaml": ["name: twiglane", "files:", "  includeIgnored: false", "  pageLines: 500", ""].join("\n"),
   "docs/notes.txt": "这条笔记被忽略规则排除，打开「忽略」后才看得到。\n",
@@ -236,3 +273,65 @@ export function mockPathSearch(query: string, directory: string | null, includeI
   }
   return { generation, query, directory, includeIgnored, scanned: entries.length, entries: entries.slice(0, 200), truncated: entries.length > 200, message: null };
 }
+
+/** 预览用的最小 PNG：远程/本地资源占位都返回它，界面仍走同样的类型校验。 */
+const PIXEL_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".svg"];
+
+/**
+ * 版本明确的文档正文：document 模式返回未拆分的完整 UTF-8 正文，
+ * source 模式按页返回源码，与原生接口的两条路径一一对应。
+ */
+export function mockDocument(
+  source: { revision: string; path: string },
+  mode: "document" | "source",
+  offset: number,
+  limit: number | undefined,
+  generation: number,
+) {
+  const base = {
+    generation,
+    source: { ...source, repository: "C:/Users/dev/project/twiglane" },
+    size: 0,
+    text: null as string | null,
+    complete: false,
+    offset,
+    nextOffset: offset,
+    hasMore: false,
+    truncated: false,
+    message: null as string | null,
+  };
+  const text = FILES[source.path];
+  if (text === undefined) {
+    return { ...base, kind: "missing", message: "该版本中没有这个文件。" };
+  }
+  if (RESOURCES.has(source.path)) {
+    return { ...base, kind: "resource", size: 21870, message: "此文件使用只读资源预览。" };
+  }
+  if (mode === "source") {
+    const all = text.split("\n");
+    const pageSize = Math.min(limit ?? 500, 1000);
+    const lines = all.slice(offset, offset + pageSize);
+    return {
+      ...base,
+      kind: "text",
+      size: text.length,
+      lines,
+      nextOffset: offset + lines.length,
+      hasMore: offset + lines.length < all.length,
+      complete: offset === 0 && offset + lines.length >= all.length,
+    };
+  }
+  return { ...base, kind: "text", size: text.length, text, complete: true };
+}
+
+/** 文档内图片资源：只按图片扩展名与已知资源返回图片，其余如实说明缺失。 */
+export function mockDocumentResource(source: { revision: string; path: string }, generation: number) {
+  const lower = source.path.toLowerCase();
+  const resource = RESOURCES.has(source.path) || IMAGE_EXTENSIONS.some((extension) => lower.endsWith(extension));
+  if (!resource) {
+    return { generation, kind: "missing", size: null, dataUrl: null, entries: [], truncated: false, message: "该版本中没有这个资源。", lfsOid: null, canDownload: false };
+  }
+  return { generation, kind: "image", size: 68, dataUrl: PIXEL_PNG, entries: [], truncated: false, message: "", lfsOid: null, canDownload: false };
+}
+

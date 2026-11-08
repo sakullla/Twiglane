@@ -192,14 +192,30 @@ const SCENARIOS = [
       "(() => { if (!" +
       OPEN_README +
       ") return false; " +
-      "if (!window.__outlineOpened) { const toggle = [...document.querySelectorAll('.files-view .md-small-button')].find((item) => item.textContent.includes('目录')); if (!toggle) return false; window.__outlineOpened = true; toggle.click(); return false; } " +
-      "const nav = document.querySelector('.files-view .md-outline'); if (!nav) return false; " +
-      "const items = [...nav.querySelectorAll('button, a')]; if (items.length < 3) return false; " +
-      "window.__outlineLabels = items.map((item) => item.textContent.trim()); " +
-      "window.__outlineTitles = items.map((item) => item.getAttribute('title')); return true; })()",
+      "const nav = document.querySelector('.files-view .md-outline'); " +
+      "if (!nav) { const toggle = [...document.querySelectorAll('.files-view .md-small-button')].find((item) => item.textContent.includes('目录')); if (toggle) toggle.click(); return false; } " +
+      "const duplicated = [...nav.querySelectorAll('button')].filter((item) => item.textContent.includes('中文重复标题')); return duplicated.length >= 2; })()",
+    // 不只数条目：真的点击两个同名项，核对锚点 id 不同、aria-current 落在各自条目上、滚动位置也不同。
+    // 若回归把两个重复标题合并到同一 heading id，这里会失败，而不是靠顺序蒙混过关。
     check:
-      "(() => { const labels = window.__outlineLabels || []; const titles = window.__outlineTitles || []; const duplicated = labels.filter((label) => label.includes('中文重复标题')); return duplicated.length >= 2 && titles.every((title) => title && title.length > 0); })()",
-    detail: "(window.__outlineLabels || []).join(' / ').slice(0, 120)",
+      "(async () => { " +
+      "const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); " +
+      "const nav = document.querySelector('.files-view .md-outline'); " +
+      "const scroller = document.querySelector('.files-view .md-scroll'); " +
+      "if (!nav || !scroller) return false; " +
+      "const buttons = [...nav.querySelectorAll('button')]; " +
+      "const duplicated = buttons.map((button, index) => (button.textContent.includes('中文重复标题') ? index : -1)).filter((index) => index >= 0); " +
+      "if (duplicated.length < 2) return false; " +
+      "const read = () => ({ scrollTop: scroller.scrollTop, current: buttons.findIndex((button) => button.getAttribute('aria-current') === 'location') }); " +
+      "buttons[duplicated[0]].click(); await wait(700); const first = read(); " +
+      "buttons[duplicated[1]].click(); await wait(700); const second = read(); " +
+      "const anchors = [...document.querySelectorAll('.files-view .md-body [data-markdown-anchor]')] " +
+      ".map((node) => node.dataset.markdownAnchor).filter((value) => value.includes('中文重复标题')); " +
+      "window.__dupHrefs = { duplicated, first, second, anchors }; " +
+      "return anchors.length >= 2 && new Set(anchors).size === anchors.length && " +
+      "first.current === duplicated[0] && second.current === duplicated[1] && first.scrollTop !== second.scrollTop; })()",
+    detail:
+      "(() => { const result = window.__dupHrefs; if (!result) return '(未记录)'; return JSON.stringify({ anchors: result.anchors, first: Math.round(result.first.scrollTop), second: Math.round(result.second.scrollTop) }); })()",
   },
   {
     name: "文档阅读：目录收起后正文仍可读",
@@ -286,6 +302,48 @@ const SCENARIOS = [
     check:
       "(() => { const view = document.querySelector('.workbench-view[data-active=\"true\"] .history-view'); if (!view) return false; const selected = [...view.querySelectorAll('.commit-files .file-row')].filter((row) => row.getAttribute('aria-selected') === 'true'); const path = view.querySelector('.diff-path')?.textContent?.trim() || ''; return path === 'README.md' && selected.length === 1 && selected[0].textContent.includes('README.md'); })()",
     detail: "document.querySelector('.workbench-view[data-active=\"true\"] .history-view .diff-path')?.textContent?.trim() || ''",
+  },
+  {
+    name: "同步：远程未核对时按钮自述，不把缓存计数当刚验证",
+    url: "/?remote=unchecked",
+    ready:
+      "(() => { if (!window.__syncOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__syncOpened = true; recent.click(); return false; } return false; } return Boolean(document.querySelector('.sync-pill')); })()",
+    check:
+      "(() => { const marker = document.querySelector('.sync-pill [data-sync-remote]'); const label = document.querySelector('.sync-pill')?.getAttribute('aria-label') || ''; return Boolean(marker) && marker.getAttribute('data-sync-remote') === 'off' && (marker.textContent || '').includes('未核') && label.includes('未核对远程'); })()",
+    detail: "document.querySelector('.sync-pill')?.getAttribute('title') || ''",
+  },
+  {
+    name: "同步：远程过期时按钮直接标出过期与上次核对",
+    url: "/?remote=stale",
+    ready:
+      "(() => { if (!window.__staleOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__staleOpened = true; recent.click(); return false; } return false; } return Boolean(document.querySelector('.sync-pill')); })()",
+    check:
+      "(() => { const marker = document.querySelector('.sync-pill [data-sync-remote]'); const label = document.querySelector('.sync-pill')?.getAttribute('aria-label') || ''; return Boolean(marker) && marker.getAttribute('data-sync-remote') === 'stale' && (marker.textContent || '').includes('过期') && label.includes('远程状态已过期'); })()",
+    detail: "document.querySelector('.sync-pill')?.getAttribute('aria-label') || ''",
+  },
+  {
+    name: "提交：钩子拒绝的长原因可展开读全，草稿保留",
+    url: "/?commit=error",
+    ready:
+      "(() => { if (!window.__commitOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__commitOpened = true; recent.click(); return false; } return false; } " +
+      "if (!window.__commitTyped) { const area = document.querySelector('.composer textarea'); if (!area) return false; const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; setter.call(area, '修复同步标记与提交失败说明'); area.dispatchEvent(new Event('input', { bubbles: true })); window.__commitTyped = true; return false; } " +
+      "if (!window.__commitClicked) { const button = document.querySelector('.composer-commit'); if (!button || button.disabled) return false; window.__commitClicked = true; button.click(); return false; } " +
+      "return Boolean(document.querySelector('[data-commit-error]')); })()",
+    check:
+      "(async () => { const error = document.querySelector('[data-commit-error]'); if (!error) return false; const toggle = document.querySelector('.composer-meta .composer-expand'); if (!toggle) return false; toggle.click(); await new Promise((resolve) => setTimeout(resolve, 500)); const expanded = document.querySelector('[data-commit-error].expanded'); const draft = document.querySelector('.composer textarea')?.value || ''; return Boolean(expanded) && (expanded.textContent || '').includes('pre-commit') && draft.length > 0; })()",
+    detail: "(document.querySelector('[data-commit-error]')?.textContent || '').trim().slice(0, 80)",
+  },
+  {
+    name: "提交：本地成功、推送失败分开说明，长原因可展开且只重试推送",
+    url: "/?commit=push",
+    ready:
+      "(() => { if (!window.__pushOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__pushOpened = true; recent.click(); return false; } return false; } " +
+      "if (!window.__pushTyped) { const area = document.querySelector('.composer textarea'); if (!area) return false; const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; setter.call(area, '修复同步标记与提交失败说明'); area.dispatchEvent(new Event('input', { bubbles: true })); window.__pushTyped = true; return false; } " +
+      "if (!window.__pushClicked) { const button = document.querySelector('.composer-push'); if (!button || button.disabled) return false; window.__pushClicked = true; button.click(); return false; } " +
+      "return Boolean(document.querySelector('[data-push-error]')); })()",
+    check:
+      "(async () => { const area = document.querySelector('[data-push-error]'); if (!area) return false; const toggle = area.querySelector('.composer-expand'); if (!toggle) return false; toggle.click(); await new Promise((resolve) => setTimeout(resolve, 500)); const status = area.querySelector('[role=status]'); const retry = [...area.querySelectorAll('button')].some((button) => button.textContent.includes('重试推送')); return Boolean(status) && status.className.includes('expanded') && (status.textContent || '').includes('本地提交') && retry; })()",
+    detail: "(document.querySelector('[data-push-error] [role=status]')?.textContent || '').trim().slice(0, 80)",
   },
   {
     name: "默认起始页",

@@ -843,6 +843,42 @@ describe("应用外壳", () => {
     await waitFor(() => expect(mocks.refreshStatus.mock.calls.length).toBe(before + 1));
   });
 
+  it("远程未核对/过期时同步按钮自己说明状态，不把缓存计数当成刚刚验证", async () => {
+    mocks.openRepository.mockResolvedValueOnce({
+      summary: { name: "demo", path: repoPath },
+      generation: 4,
+      snapshot: { ...snapshot, branch: { ...branch, liveRemoteChecked: false, remoteCheckedAtMs: null, remoteCheckStale: false } },
+      draft: "",
+      watchDegraded: false,
+    });
+    render(App);
+    await openRepo();
+    const unchecked = document.querySelector<HTMLElement>(".sync-pill")!;
+    expect(unchecked.querySelector('[data-sync-remote="off"]')?.textContent?.trim()).toBe("未核");
+    expect(unchecked.getAttribute("aria-label")).toContain("未核对远程");
+    expect(unchecked.getAttribute("title")).toContain("远程状态：未核对");
+    // 计数仍在（ahead=1），但按钮与提示都写明它只是记录的对比，不是刚验证过的远程状态。
+    expect(unchecked.querySelector('[data-sync-count="push"]')?.textContent?.trim()).toBe("1");
+    cleanup();
+
+    mocks.openRepository.mockResolvedValueOnce({
+      summary: { name: "demo", path: repoPath },
+      generation: 4,
+      snapshot: {
+        ...snapshot,
+        branch: { ...branch, liveRemoteChecked: false, remoteCheckedAtMs: Date.UTC(2026, 10, 8, 1, 2), remoteCheckStale: true },
+      },
+      draft: "",
+      watchDegraded: false,
+    });
+    render(App);
+    await openRepo();
+    const stale = document.querySelector<HTMLElement>(".sync-pill")!;
+    expect(stale.querySelector('[data-sync-remote="stale"]')?.textContent?.trim()).toBe("过期");
+    expect(stale.getAttribute("aria-label")).toContain("远程状态已过期");
+    expect(stale.getAttribute("title")).toContain("计数不代表最新");
+  });
+
   it("主界面只有标题栏、左栏、主内容和状态栏，没有常驻仓库列表", async () => {
     useRecent([{ name: "demo", path: repoPath, openedAtMs: 1 }, { name: "other", path: "C:/work/other", openedAtMs: 2 }]);
     render(App);

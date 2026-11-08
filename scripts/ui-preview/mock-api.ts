@@ -27,6 +27,10 @@ const now = Math.floor(Date.now() / 1000);
  * 写回的内容记在 window.__resolved，用来在真实 textarea 上核对字节；window.__mergePreviews 记预检次数。
  * ?doc=error / ?doc=large / ?doc=stale 切换只读文档读取的失败、超限与过期分支；
  * ?commitdoc=1 给提交详情补一个 README.md，用来走「历史差异 → 阅读文档」入口（默认数据不变）。
+ * ?remote=unchecked / ?remote=stale 让远程核对状态停在「从未核对」或「缓存已过期」：
+ * 折叠状态的同步按钮必须自己写明这件事，不能把缓存计数当成刚刚验证过的远程状态（R3）。
+ * ?commit=error 让本地提交被钩子拒绝，?commit=push 让本地提交成功、推送失败；
+ * 两者的失败文本都足够长，用来核对提交区的「展开」换行读全与「只重试推送」（R3/R6）。
  */
 const previewParams = new URLSearchParams(location.search);
 const healthyGit = { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "Git 2.49.0 可用" };
@@ -142,6 +146,11 @@ function bigConflict(): { ours: string; theirs: string; result: string } {
 }
 const BIG_CONFLICT = bigConflict();
 
+/*
+ * 默认数据是「刚核对过远程」；?remote=unchecked 表示从未核对（没有可信时间），
+ * ?remote=stale 表示上一次核对已经过期。两者都必须保留原来的计数，界面要说明计数只是记录的对比。
+ */
+const remoteMode = previewParams.get("remote");
 const branch = {
   name: "feature/modern-ui",
   detached: false,
@@ -150,10 +159,21 @@ const branch = {
   upstream: "origin/feature/modern-ui",
   ahead: 2,
   behind: 1,
-  liveRemoteChecked: true,
-  remoteCheckedAtMs: Date.now() - 60_000,
-  remoteCheckStale: false,
+  liveRemoteChecked: remoteMode !== "unchecked" && remoteMode !== "stale",
+  remoteCheckedAtMs: remoteMode === "unchecked"
+    ? null
+    : remoteMode === "stale"
+      ? Date.now() - 3 * 60 * 60_000
+      : Date.now() - 60_000,
+  remoteCheckStale: remoteMode === "stale",
 };
+
+/** ?commit=error / ?commit=push 共用的长失败说明：超过提交区单行阈值，必须能展开读全。 */
+const COMMIT_FAILURE = "pre-commit 钩子拒绝提交：scripts/check-commit-msg.mjs 报告提交说明首行超过 72 个字符（实际 96 个），"
+  + "并且 tools/lint 与 src/styles/tokens.css 的检查没有通过。请修改说明或修复上述检查后重试；草稿与已暂存内容都还在。";
+const PUSH_FAILURE = "无法连接到远程 origin：fatal: unable to access 'https://github.com/example/twiglane.git/': "
+  + "Failed to connect to github.com port 443 after 21008 ms: Couldn't connect to server。"
+  + "远程可能不可达或需要代理；本地提交已经完成，重试只会再次推送，不会创建第二个提交。";
 
 function snapshot(): StatusSnapshot {
   return { generation, branch: { ...branch }, files: files.map((item) => ({ ...item })) };
@@ -454,12 +474,30 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   stageHunks: () => ok(snapshot()),
   saveDraft: () => ok(undefined),
   commitChanges: (_repo: string, message: string) => {
+    if (previewParams.get("commit") === "error") {
+      return Promise.reject({ code: "commit_hook", generation, message: COMMIT_FAILURE });
+    }
     files = files.filter((item) => item.unstaged !== "none" || item.untracked || item.unmerged).map((item) => ({ ...item, staged: item.unmerged ? item.staged : "none" }));
     generation += 1;
     branch.ahead += 1;
     return ok({ oid: "abcdef1234567", generation, branch: branch.name, summary: `已提交 abcdef1：${message.split("\n")[0]}`, files: [], pushed: false, snapshot: snapshot() }, 400);
   },
-  commitAndPush: () => ok({ committed: true, pushed: false, retryPush: true, oid: "abc", branch: branch.name, summary: "本地提交已完成，推送失败。", pushError: "网络不可用：无法连接到远程。可以稍后只重试推送。", generation, snapshot: snapshot() }, 500),
+  commitAndPush: () => {
+    if (previewParams.get("commit") === "error") {
+      return Promise.reject({ code: "commit_hook", generation, message: COMMIT_FAILURE });
+    }
+    return ok({
+      committed: true,
+      pushed: false,
+      retryPush: true,
+      oid: "abc",
+      branch: branch.name,
+      summary: "本地提交已完成，推送失败。",
+      pushError: previewParams.get("commit") === "push" ? PUSH_FAILURE : "网络不可用：无法连接到远程。可以稍后只重试推送。",
+      generation,
+      snapshot: snapshot(),
+    }, 500);
+  },
   cloneRepository: (_url: string, parent: string, name: string) => ok({ path: `${parent}/${name || "clone"}`, opened: opened(`${parent}/${name || "clone"}`) }, 800),
   remoteState: () => ok({ generation, remotes: [
     { name: "origin", fetchUrl: "https://github.com/example/twiglane.git", pushUrl: null },

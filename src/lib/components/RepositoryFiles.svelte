@@ -26,6 +26,14 @@
     onFileHistory: (path: string) => void;
     /** 从文件进入它的 staged / unstaged 改动：切换视图由外壳负责。 */
     onOpenDiff?: (path: string, side: DiffSide) => void;
+    /** 在系统文件管理器中定位：经 App 的 reveal_path 后端（守仓库边界、无 shell）。 */
+    onReveal?: (path: string) => void;
+    /** 用系统默认程序打开文件：经 App 的 open_path 后端，已删除文件由菜单灰显拦下。 */
+    onOpenDefault?: (path: string) => void;
+    /** 复制文本到剪贴板：由 App 的 copyText 给出成功提示与失败可见错误。 */
+    onCopyPath?: (text: string, what: string) => void;
+    /** 仓库相对路径拼成完整路径（仅用于「复制完整路径」文本）。 */
+    toAbsolute?: (relative: string) => string;
     onNav: (nav: FileNavState | null) => void;
     /** 三个视图共用的左栏头部（视图切换 + 临时保存），保持位置与宽度一致。 */
     paneHead?: Snippet;
@@ -43,6 +51,10 @@
     onGeneration,
     onFileHistory,
     onOpenDiff,
+    onReveal,
+    onOpenDefault,
+    onCopyPath,
+    toAbsolute,
     onNav,
     paneHead,
   }: Props = $props();
@@ -180,6 +192,19 @@
   function refresh(): void {
     void store.revalidate(true);
   }
+
+  /** 文件是否在当前改动集：文件装饰存在即有改动（删除墓碑也算），决定是否显示「查看改动」。 */
+  function hasChange(path: string): boolean {
+    return Boolean(decorations.files[path]);
+  }
+
+  /** 查看文件改动：按快照判断该走未暂存还是已暂存一侧，复用外壳既有的差异入口。 */
+  function viewDiff(path: string): void {
+    if (!onOpenDiff) return;
+    const file = opened.snapshot.files.find((entry) => entry.path === path);
+    const side: DiffSide = file && file.untracked === false && file.unstaged === "none" ? "staged" : "unstaged";
+    onOpenDiff(path, side);
+  }
 </script>
 
 <div class="changes files-view">
@@ -213,6 +238,12 @@
         onHistory={onFileHistory}
         onRefresh={refresh}
         onCollapseAll={() => store.collapseAll()}
+        {onReveal}
+        {onOpenDefault}
+        {onCopyPath}
+        {toAbsolute}
+        {hasChange}
+        onViewDiff={viewDiff}
       />
     {:else}
       <FileSearch

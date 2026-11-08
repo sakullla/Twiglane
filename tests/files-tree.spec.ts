@@ -132,6 +132,12 @@ describe("目录树交互", () => {
     onSplit: vi.fn(),
     onHistory: vi.fn(),
     onRefresh: vi.fn(),
+    onReveal: vi.fn(),
+    onOpenDefault: vi.fn(),
+    onCopyPath: vi.fn(),
+    toAbsolute: (relative: string) => `C:/work/demo/${relative.split("/").join("\\")}`,
+    hasChange: vi.fn(() => false),
+    onViewDiff: vi.fn(),
   });
 
   it("长路径放在 title 上，忽略项与目录尺寸都有标记，且不截断 aria 名称", () => {
@@ -213,6 +219,191 @@ describe("目录树交互", () => {
     broken.failure = "无法读取这个目录";
     render(FileTree, { props: { ...baseProps(), rows: flattenTree([broken]) } as never });
     expect(screen.getByText("读取失败")).toBeTruthy();
+  });
+});
+
+describe("目录树右键菜单", () => {
+  const baseProps = () => ({
+    rows: flattenTree(tree()),
+    selectedPath: "src/lib/components/Button.svelte",
+    loading: false,
+    failure: null,
+    query: "",
+    includeIgnored: false,
+    disabled: false,
+    onQuery: vi.fn(),
+    onIncludeIgnored: vi.fn(),
+    onToggle: vi.fn(),
+    onSelect: vi.fn(),
+    onSplit: vi.fn(),
+    onHistory: vi.fn(),
+    onRefresh: vi.fn(),
+    onReveal: vi.fn(),
+    onOpenDefault: vi.fn(),
+    onCopyPath: vi.fn(),
+    toAbsolute: (relative: string) => `C:/work/demo/${relative.split("/").join("\\")}`,
+    hasChange: vi.fn(() => false),
+    onViewDiff: vi.fn(),
+  });
+
+  function rowEl(path: string): HTMLElement {
+    const treeEl = screen.getByRole("tree", { name: "仓库文件" });
+    const found = treeEl.querySelector<HTMLElement>(`.file-tree-row[title="${path}"]`);
+    if (!found) throw new Error(`没有 ${path} 这一行`);
+    return found;
+  }
+
+  async function openMenu(path: string) {
+    await fireEvent.contextMenu(rowEl(path), { clientX: 60, clientY: 80 });
+    return screen.getByRole("menu");
+  }
+
+  function labels(menu: HTMLElement): string[] {
+    return within(menu)
+      .getAllByRole("menuitem")
+      .map((item) => item.textContent?.trim() ?? "");
+  }
+
+  it("目录菜单分组：展开/折叠、系统打开该目录、三种路径复制；右键目录不改变展开态", async () => {
+    const props = baseProps();
+    render(FileTree, { props: props as never });
+    const menu = await openMenu("src/lib/components");
+    const names = labels(menu);
+    for (const label of ["折叠", "在系统文件管理器中打开该目录", "复制相对路径", "复制完整路径", "复制目录名"]) {
+      expect(names.some((text) => text.startsWith(label)), label).toBe(true);
+    }
+    // 目录没有「用默认程序打开」「查看改动」「查看文件历史」。
+    expect(names.some((text) => text.startsWith("用默认程序打开"))).toBe(false);
+    expect(names.some((text) => text.startsWith("查看改动"))).toBe(false);
+    // 分组之间有分隔线。
+    expect(menu.querySelectorAll('[role="separator"]').length).toBeGreaterThanOrEqual(2);
+    // 右键只选中目标，不切换展开。
+    expect(props.onSelect).toHaveBeenCalledWith(expect.objectContaining({ path: "src/lib/components" }));
+    expect(props.onToggle).not.toHaveBeenCalled();
+  });
+
+  it("文件菜单分组：打开、文件历史、系统定位、用默认程序打开、三种路径复制", async () => {
+    render(FileTree, { props: baseProps() as never });
+    const menu = await openMenu("src/lib/components/Button.svelte");
+    const names = labels(menu);
+    for (const label of ["打开", "查看文件历史", "用默认程序打开", "复制相对路径", "复制完整路径", "复制文件名"]) {
+      expect(names.some((text) => text.startsWith(label)), label).toBe(true);
+    }
+    // 系统定位按平台切换文案（测试环境非 mac，故为资源管理器）。
+    expect(names.some((text) => /资源管理器|访达/.test(text))).toBe(true);
+    // 没有改动时不显示「查看改动」。
+    expect(names.some((text) => text.startsWith("查看改动"))).toBe(false);
+  });
+
+  it("有改动的文件才显示「查看改动」，并路由到差异入口", async () => {
+    const props = { ...baseProps(), hasChange: vi.fn((path: string) => path === "src/lib/components/Button.svelte") };
+    render(FileTree, { props: props as never });
+    const menu = await openMenu("src/lib/components/Button.svelte");
+    const diff = within(menu).getByRole("menuitem", { name: "查看改动" });
+    await fireEvent.click(diff);
+    expect(props.onViewDiff).toHaveBeenCalledWith("src/lib/components/Button.svelte");
+
+    // 另一个没有改动的文件不显示该项。
+    const second = await openMenu("src/lib/components/Icon.svelte");
+    expect(labels(second).some((text) => text.startsWith("查看改动"))).toBe(false);
+  });
+
+  it("已删除文件的「用默认程序打开」灰显，菜单内可读原因，历史与复制仍在", async () => {
+    const rows = flattenTree(tree());
+    const target = rows.find((row) => row.path === "src/lib/components/Button.svelte")!;
+    rows[rows.indexOf(target)] = { ...target, deleted: true };
+    render(FileTree, { props: { ...baseProps(), rows } as never });
+    const menu = await openMenu("src/lib/components/Button.svelte");
+    const open = within(menu).getByRole("menuitem", { name: "用默认程序打开" });
+    expect(open.getAttribute("aria-disabled")).toBe("true");
+    const reason = within(menu).getByText("文件已删除，工作区里没有它");
+    expect(open.getAttribute("aria-describedby")).toBe(reason.id);
+    // 历史与路径复制不受影响。
+    expect(within(menu).getByRole("menuitem", { name: "查看文件历史" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: "复制相对路径" })).toBeTruthy();
+  });
+
+  it("复制相对/完整/文件名分别得到对应文本，不再静默吞错", async () => {
+    const props = baseProps();
+    render(FileTree, { props: props as never });
+    await fireEvent.click(within(await openMenu("src/lib/components/Button.svelte")).getByRole("menuitem", { name: "复制相对路径" }));
+    expect(props.onCopyPath).toHaveBeenLastCalledWith("src/lib/components/Button.svelte", "相对路径");
+    await fireEvent.click(within(await openMenu("src/lib/components/Button.svelte")).getByRole("menuitem", { name: "复制完整路径" }));
+    expect(props.onCopyPath).toHaveBeenLastCalledWith("C:/work/demo/src\\lib\\components\\Button.svelte", "完整路径");
+    await fireEvent.click(within(await openMenu("src/lib/components/Button.svelte")).getByRole("menuitem", { name: "复制文件名" }));
+    expect(props.onCopyPath).toHaveBeenLastCalledWith("Button.svelte", "文件名");
+  });
+
+  it("目录复制目录名取末段，系统打开该目录经回调", async () => {
+    const props = baseProps();
+    render(FileTree, { props: props as never });
+    const menu = await openMenu("src/lib/components");
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "在系统文件管理器中打开该目录" }));
+    expect(props.onReveal).toHaveBeenCalledWith("src/lib/components");
+    await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitem", { name: "复制目录名" }));
+    expect(props.onCopyPath).toHaveBeenLastCalledWith("components", "目录名");
+  });
+
+  it("系统定位与用默认程序打开作用在右键目标，经既有后端回调", async () => {
+    const props = baseProps();
+    render(FileTree, { props: props as never });
+    await fireEvent.click(within(await openMenu("src/lib/components/Button.svelte")).getByRole("menuitem", { name: /资源管理器|访达/ }));
+    expect(props.onReveal).toHaveBeenCalledWith("src/lib/components/Button.svelte");
+    await fireEvent.click(within(await openMenu("src/lib/components/Button.svelte")).getByRole("menuitem", { name: "用默认程序打开" }));
+    expect(props.onOpenDefault).toHaveBeenCalledWith("src/lib/components/Button.svelte");
+  });
+
+  it("先选中 A 再右键 B，动作只作用于 B", async () => {
+    const props = { ...baseProps(), selectedPath: "src/lib/components/Icon.svelte" };
+    render(FileTree, { props: props as never });
+    // 右键 Button（A 是 Icon）：先把选中切到 Button，再对 Button 执行。
+    await fireEvent.click(within(await openMenu("src/lib/components/Button.svelte")).getByRole("menuitem", { name: "复制相对路径" }));
+    expect(props.onSelect).toHaveBeenLastCalledWith(expect.objectContaining({ path: "src/lib/components/Button.svelte" }));
+    expect(props.onCopyPath).toHaveBeenLastCalledWith("src/lib/components/Button.svelte", "相对路径");
+  });
+
+  it("菜单键与 Shift+F10 对当前选中项打开同一份菜单与动作", async () => {
+    const props = { ...baseProps(), selectedPath: "src/lib/components/Button.svelte" };
+    render(FileTree, { props: props as never });
+    const treeEl = screen.getByRole("tree", { name: "仓库文件" });
+    treeEl.focus();
+    await fireEvent.keyDown(treeEl, { key: "ContextMenu" });
+    let menu = screen.getByRole("menu");
+    expect(menu.getAttribute("aria-label")).toBe("src/lib/components/Button.svelte 的操作");
+    const keyboardLabels = labels(menu);
+    await fireEvent.keyDown(menu, { key: "Escape" });
+
+    // Shift+F10 得到等价的一份菜单。
+    await fireEvent.keyDown(screen.getByRole("tree", { name: "仓库文件" }), { key: "F10", shiftKey: true });
+    menu = screen.getByRole("menu");
+    expect(labels(menu)).toEqual(keyboardLabels);
+    // 动作走同一回调。
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "复制相对路径" }));
+    expect(props.onCopyPath).toHaveBeenLastCalledWith("src/lib/components/Button.svelte", "相对路径");
+  });
+
+  it("条目较多的文件菜单在自身区域滚动，末尾条目仍可到达", async () => {
+    const props = { ...baseProps(), hasChange: vi.fn(() => true) };
+    render(FileTree, { props: props as never });
+    const menu = await openMenu("src/lib/components/Button.svelte");
+    // .context-menu 固定定位并带 max-height + overflow，超长菜单在自身滚动而不是撑爆视口。
+    expect(menu.classList.contains("context-menu")).toBe(true);
+    // 末尾分组的条目（复制文件名）仍然渲染、可被键盘与指针到达。
+    const last = within(menu).getByRole("menuitem", { name: "复制文件名" });
+    expect(last).toBeTruthy();
+    await fireEvent.click(last);
+    expect(props.onCopyPath).toHaveBeenLastCalledWith("Button.svelte", "文件名");
+  });
+
+  it("右键菜单不含任何文件写入、Git 写入或编辑器入口（R8/R9 边界）", async () => {
+    render(FileTree, { props: { ...baseProps(), hasChange: vi.fn(() => true) } as never });
+    const fileMenu = labels(await openMenu("src/lib/components/Button.svelte")).join(" ");
+    await fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    const dirMenu = labels(await openMenu("src/lib/components")).join(" ");
+    for (const forbidden of ["暂存", "提交", "放弃", "删除", "重命名", "新建", "移动", "保存", ".gitignore", "忽略", "加入"]) {
+      expect(fileMenu.includes(forbidden), `文件菜单不应含「${forbidden}」`).toBe(false);
+      expect(dirMenu.includes(forbidden), `目录菜单不应含「${forbidden}」`).toBe(false);
+    }
   });
 });
 

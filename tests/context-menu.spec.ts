@@ -65,6 +65,7 @@ const mocks = vi.hoisted(() => {
     "fileHistory", "discardChanges", "undoCommit", "detectGit", "setGitExecutable", "clearGitExecutable",
     "cloneRepository", "remoteState", "branchState", "tagState", "stashState", "measureProbe", "measureSample",
     "measureFinish", "measureWait", "revealPath", "openPath", "ignorePath", "listenEvent", "pickDirectory", "pickFile",
+    "repositoryDirectory", "repositoryFileContent", "repositoryContentSearch", "filePreview",
   ];
   return Object.fromEntries(names.map((name) => [name, vi.fn()])) as Record<string, ReturnType<typeof vi.fn>>;
 });
@@ -104,6 +105,21 @@ beforeEach(() => {
   mocks.saveDraft.mockResolvedValue(undefined);
   mocks.revealPath.mockResolvedValue(undefined);
   mocks.openPath.mockResolvedValue(undefined);
+  mocks.repositoryDirectory.mockImplementation(async (_repo: string, relative: string, _ignored: boolean, generation: number) => {
+    const entry = (path: string, kind: "file" | "directory") => ({
+      name: path.split("/").pop() ?? path,
+      path,
+      kind,
+      ignored: false,
+      size: kind === "file" ? 12 : null,
+      error: null,
+    });
+    if (relative === "") return { generation, path: "", entries: [entry("src", "directory"), entry("notes", "directory")], errors: [] };
+    if (relative === "src") return { generation, path: "src", entries: [entry("src/App.svelte", "file"), entry("src/app.css", "file"), entry("src/merge.ts", "file")], errors: [] };
+    if (relative === "notes") return { generation, path: "notes", entries: [entry("notes/todo.log", "file")], errors: [] };
+    return { generation, path: relative, entries: [], errors: [] };
+  });
+  mocks.repositoryFileContent.mockResolvedValue({ generation: 4, path: "src/App.svelte", size: 12, truncated: false, binary: false, encoding: "utf-8", text: "x", lines: 1 });
   mocks.ignorePath.mockResolvedValue({
     snapshot: { ...snapshot, generation: 5, files: files.filter((file) => !file.untracked) },
     note: "已把规则写入 .gitignore。这次修改会出现在改动列表里。",
@@ -224,6 +240,86 @@ describe("文件右键菜单", () => {
     await fireEvent.keyDown(menu, { key: "Escape" });
     expect(screen.queryByRole("menu")).toBeNull();
     expect(document.activeElement).toBe(list);
+  });
+});
+
+describe("文件树右键菜单（文件视图整合）", () => {
+  async function openFilesView() {
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: "文件" }));
+    return screen.findByRole("tree", { name: "仓库文件" });
+  }
+
+  function treeRow(treeEl: HTMLElement, path: string): HTMLElement {
+    const found = treeEl.querySelector<HTMLElement>(`.file-tree-row[title="${path}"]`);
+    if (!found) throw new Error(`没有 ${path} 这一行`);
+    return found;
+  }
+
+  async function expandSrc(treeEl: HTMLElement) {
+    await fireEvent.click(await within(treeEl).findByRole("button", { name: "展开 src" }));
+    await waitFor(() => expect(treeEl.querySelector('.file-tree-row[title="src/App.svelte"]')).toBeTruthy());
+  }
+
+  async function menuFor(treeEl: HTMLElement, path: string) {
+    await fireEvent.contextMenu(treeRow(treeEl, path), { clientX: 80, clientY: 120 });
+    return screen.getByRole("menu");
+  }
+
+  it("文件树的系统定位、用默认程序打开经既有后端，作用在右键目标", async () => {
+    const treeEl = await openFilesView();
+    await expandSrc(treeEl);
+    await fireEvent.click(within(await menuFor(treeEl, "src/App.svelte")).getByRole("menuitem", { name: /资源管理器|访达/ }));
+    expect(mocks.revealPath).toHaveBeenCalledWith(repoPath, "src/App.svelte");
+    await fireEvent.click(within(await menuFor(treeEl, "src/App.svelte")).getByRole("menuitem", { name: "用默认程序打开" }));
+    expect(mocks.openPath).toHaveBeenCalledWith(repoPath, "src/App.svelte");
+  });
+
+  it("文件树复制相对/完整/文件名写入剪贴板，成功给出不打断浏览的提示", async () => {
+    const treeEl = await openFilesView();
+    await expandSrc(treeEl);
+    await fireEvent.click(within(await menuFor(treeEl, "src/App.svelte")).getByRole("menuitem", { name: "复制相对路径" }));
+    expect(writeText).toHaveBeenLastCalledWith("src/App.svelte");
+    await fireEvent.click(within(await menuFor(treeEl, "src/App.svelte")).getByRole("menuitem", { name: "复制完整路径" }));
+    expect(writeText).toHaveBeenLastCalledWith("C:/work/demo/src/App.svelte");
+    await fireEvent.click(within(await menuFor(treeEl, "src/App.svelte")).getByRole("menuitem", { name: "复制文件名" }));
+    expect(writeText).toHaveBeenLastCalledWith("App.svelte");
+    // 成功提示走 role=status 通知，不是错误。
+    await waitFor(() => expect(document.querySelector(".toast:not(.error)")).toBeTruthy());
+  });
+
+  it("剪贴板失败时文件树复制给出可见错误，不再静默吞错", async () => {
+    const treeEl = await openFilesView();
+    await expandSrc(treeEl);
+    writeText.mockRejectedValueOnce(new Error("clipboard blocked"));
+    await fireEvent.click(within(await menuFor(treeEl, "src/App.svelte")).getByRole("menuitem", { name: "复制相对路径" }));
+    const toast = await waitFor(() => {
+      const element = document.querySelector(".toast.error");
+      expect(element).toBeTruthy();
+      return element as HTMLElement;
+    });
+    expect(toast.textContent).toContain("无法写入剪贴板");
+  });
+
+  it("有改动的文件显示「查看改动」并切回改动视图定位该文件", async () => {
+    const treeEl = await openFilesView();
+    await expandSrc(treeEl);
+    const menu = await menuFor(treeEl, "src/App.svelte");
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "查看改动" }));
+    // 回到改动视图并选中该文件的未暂存一侧。
+    await waitFor(() => expect(row("src/App.svelte").getAttribute("aria-selected")).toBe("true"));
+  });
+
+  it("文件树右键菜单不含文件写入、Git 写入或编辑器入口（R8/R9）", async () => {
+    const treeEl = await openFilesView();
+    await expandSrc(treeEl);
+    const menu = await menuFor(treeEl, "src/App.svelte");
+    const text = within(menu).getAllByRole("menuitem").map((item) => item.textContent ?? "").join(" ");
+    for (const forbidden of ["暂存", "提交", "放弃", "删除", "重命名", "新建", "保存", ".gitignore", "加入", "忽略"]) {
+      expect(text.includes(forbidden), `不应含「${forbidden}」`).toBe(false);
+    }
+    expect(mocks.stageFiles).not.toHaveBeenCalled();
+    expect(mocks.ignorePath).not.toHaveBeenCalled();
   });
 });
 

@@ -3342,6 +3342,10 @@
               onGeneration={adoptGeneration}
               onFileHistory={openFileHistory}
               onOpenDiff={(path, side) => openFileDiff(path, side)}
+              onReveal={(path) => void revealInFolder(path)}
+              onOpenDefault={(path) => void openWithDefault(path)}
+              onCopyPath={(text, what) => void copyText(text, what)}
+              toAbsolute={absolutePath}
               onNav={(nav) => (filesNav = nav)}
               {paneHead}
             />

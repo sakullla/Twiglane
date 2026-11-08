@@ -51,6 +51,21 @@
     onRefresh: () => void;
     /** 全部折叠：只改展开状态，不丢已读子项。 */
     onCollapseAll?: () => void;
+    /**
+     * 系统文件管理器中定位：文件选中、目录直接打开。经 App 的 reveal_path 后端，
+     * 组件内不拼路径、不碰 api——保持与全应用一致的仓库边界与错误提示。
+     */
+    onReveal?: (path: string) => void;
+    /** 用系统默认程序打开文件：已删除文件不可用（在菜单内灰显说明）。 */
+    onOpenDefault?: (path: string) => void;
+    /** 复制一段文本到剪贴板：由 App 的 copyText 给出成功提示与失败可见错误，不再静默吞错。 */
+    onCopyPath?: (text: string, what: string) => void;
+    /** 把仓库相对路径拼成完整路径（仅供「复制完整路径」文本用，不用于系统打开）。 */
+    toAbsolute?: (relative: string) => string;
+    /** 一个文件是否在当前改动集：有改动才显示「查看改动」。 */
+    hasChange?: (path: string) => boolean;
+    /** 查看这个文件的改动：路由到既有的差异视图入口。 */
+    onViewDiff?: (path: string) => void;
   }
 
   let {
@@ -79,6 +94,12 @@
     onHistory,
     onRefresh,
     onCollapseAll,
+    onReveal,
+    onOpenDefault,
+    onCopyPath,
+    toAbsolute,
+    hasChange,
+    onViewDiff,
   }: Props = $props();
 
   /** 缩进宽度：与 components.css 的缩进引导线周期一致。 */
@@ -217,9 +238,31 @@
     onSelect(target);
   }
 
+  /** 系统定位文案按平台切换：与全应用菜单一致（文案是显示，不是动作，仍由 App 执行 reveal）。 */
+  const revealLabel = typeof navigator !== "undefined" && navigator.platform?.toLowerCase().includes("mac")
+    ? "在访达中显示"
+    : "在资源管理器中显示";
+
+  /** 路径复制三件套：相对路径、完整路径、名称（目录名或文件名）；都经 App 的 copyText 反馈。 */
+  function copyEntries(row: FileTreeRow, nameLabel: string): ContextMenuEntry[] {
+    if (!onCopyPath) return [];
+    const name = row.path.split("/").pop() ?? row.path;
+    return [
+      { id: "copy-rel", label: "复制相对路径", icon: "copy", run: () => onCopyPath?.(row.path, "相对路径") },
+      {
+        id: "copy-abs",
+        label: "复制完整路径",
+        icon: "copy",
+        run: () => onCopyPath?.(toAbsolute ? toAbsolute(row.path) : row.path, "完整路径"),
+      },
+      { id: "copy-name", label: nameLabel, icon: "copy", run: () => onCopyPath?.(name, nameLabel.replace("复制", "")) },
+    ];
+  }
+
   function menuEntries(row: FileTreeRow): ContextMenuEntry[] {
     const entries: ContextMenuEntry[] = [];
     if (row.expandable) {
+      // 目录：展开/折叠 → 系统定位该目录 → 路径复制。
       entries.push({
         id: "toggle",
         label: row.expanded ? "折叠" : "展开",
@@ -227,27 +270,56 @@
         disabledReason: disabled ? BUSY_REASON : undefined,
         run: () => onToggle(row),
       });
-    } else {
-      entries.push({ id: "open", label: "打开", icon: "file", run: () => onSelect(row) });
+      if (row.splittable) {
+        entries.push({ id: "split", label: "拆成逐级目录", icon: "list", run: () => onSplit(row) });
+      }
+      if (onReveal) {
+        entries.push({ separator: true });
+        entries.push({
+          id: "reveal",
+          label: "在系统文件管理器中打开该目录",
+          icon: "folder-open",
+          run: () => onReveal?.(row.path),
+        });
+      }
+      const copies = copyEntries(row, "复制目录名");
+      if (copies.length > 0) {
+        entries.push({ separator: true });
+        entries.push(...copies);
+      }
+      return entries;
+    }
+
+    // 文件：应用内查看（打开 / 有改动时查看改动 / 文件历史） → 系统操作（定位 / 默认程序打开） → 路径复制。
+    entries.push({ id: "open", label: "打开", icon: "file", run: () => onSelect(row) });
+    if (onViewDiff && hasChange?.(row.path)) {
+      entries.push({ id: "diff", label: "查看改动", icon: "file-diff", run: () => onViewDiff?.(row.path) });
+    }
+    if (onHistory) {
+      entries.push({ id: "history", label: "查看文件历史", icon: "history", run: () => onHistory?.(row.path) });
     }
     if (row.splittable) {
-      entries.push({
-        id: "split",
-        label: "拆成逐级目录",
-        icon: "list",
-        run: () => onSplit(row),
-      });
+      entries.push({ id: "split", label: "拆成逐级目录", icon: "list", run: () => onSplit(row) });
     }
-    entries.push({
-      id: "copy",
-      label: "复制路径",
-      icon: "copy",
-      run: () => {
-        void navigator.clipboard?.writeText(row.path).catch(() => {});
-      },
-    });
-    if (!row.expandable && onHistory) {
-      entries.push({ id: "history", label: "查看文件历史", icon: "history", run: () => onHistory?.(row.path) });
+    if (onReveal || onOpenDefault) {
+      entries.push({ separator: true });
+      if (onReveal) {
+        entries.push({ id: "reveal", label: revealLabel, icon: "folder-open", run: () => onReveal?.(row.path) });
+      }
+      if (onOpenDefault) {
+        entries.push({
+          id: "open-default",
+          label: "用默认程序打开",
+          icon: "file",
+          disabledReason: row.deleted ? "文件已删除，工作区里没有它" : undefined,
+          run: () => onOpenDefault?.(row.path),
+        });
+      }
+    }
+    const copies = copyEntries(row, "复制文件名");
+    if (copies.length > 0) {
+      entries.push({ separator: true });
+      entries.push(...copies);
     }
     return entries;
   }

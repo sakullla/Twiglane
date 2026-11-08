@@ -230,8 +230,9 @@
   const altLabel = MODIFIER_LABEL === "⌘" ? "⌥" : "Alt";
   let hunkPrev = $state<HTMLButtonElement | null>(null);
   let hunkNext = $state<HTMLButtonElement | null>(null);
-  let leftRuler = $derived(split ? codeRuler(lines.filter((line) => line.kind === "context" || line.kind === "del").map((line) => codeOf(line))) : []);
-  let rightRuler = $derived(split ? codeRuler(lines.filter((line) => line.kind === "context" || line.kind === "add").map((line) => codeOf(line))) : []);
+  let documents = $derived(buildDiffDocuments(lines));
+  let leftRuler = $derived(split ? codeRuler(documents.oldLines) : []);
+  let rightRuler = $derived(split ? codeRuler(documents.newLines) : []);
   let leftBar = $state<HTMLDivElement | null>(null);
   let rightBar = $state<HTMLDivElement | null>(null);
   /** 竖向滚动条占的宽度：两栏滚动条按代码栏对齐，要让出这一段。 */
@@ -243,10 +244,11 @@
       ? visibleRange(total, hostTop, hostHeight, ROW_HEIGHT)
       : visibleRange(total, scrollTop, viewport > 0 ? viewport : scrollTop > 0 ? ROW_HEIGHT : 0, ROW_HEIGHT),
   );
-  let hunkForLine = $derived((index: number) => {
+  let hunksByStart = $derived(new Map(currentDiff?.hunks.map((hunk) => [hunk.startLine, hunk])));
+  function hunkForLine(index: number) {
     const origin = view.origin[index];
-    return origin === undefined ? null : (currentDiff?.hunks.find((hunk) => hunk.startLine === origin) ?? null);
-  });
+    return origin === undefined ? null : (hunksByStart.get(origin) ?? null);
+  }
   let parts = $derived(selection ? splitPath(selection.path) : null);
   let showStats = $derived(Boolean(currentDiff));
 
@@ -268,8 +270,8 @@
   let language = $derived(currentDiff && !currentDiff.binary ? effectiveLanguage(currentDiff.path) : null);
   /* 显示空白：只在有文本差异时把空格、制表符画出来；代码文本本身不变。 */
   let markWhitespace = $derived(diffPrefs.showWhitespace && Boolean(currentDiff && !currentDiff.binary));
-  let documents = $derived(buildDiffDocuments(lines));
-  const oldSyntax = createHighlight(() => ({ lang: language, lines: documents.oldLines }));
+  let hasDeletions = $derived(lines.some((line) => line.kind === "del"));
+  const oldSyntax = createHighlight(() => ({ lang: hasDeletions ? language : null, lines: documents.oldLines }));
   const newSyntax = createHighlight(() => ({ lang: language, lines: documents.newLines }));
 
   function segmentsAt(index: number) {
@@ -1261,7 +1263,7 @@
       <div class="diff-toolbar-group diff-overflow">
         <button
           type="button"
-          class="icon-btn sm diff-more-btn"
+          class="icon-btn sm"
           aria-label={moreLabel}
           aria-haspopup="listbox"
           aria-expanded={moreOpen}
@@ -1270,7 +1272,6 @@
           onclick={() => (moreOpen ? closeMore() : openMore())}
         >
           <Icon name="more" size={15} />
-          {#if pressedToolCount > 0}<span class="diff-more-dot" aria-hidden="true"></span>{/if}
         </button>
         {#if moreOpen && moreAnchor}
           <Popover

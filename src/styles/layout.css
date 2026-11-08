@@ -288,8 +288,6 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
 .diff-toolbar-group.context > .diff-file { min-width: 0; }
 
 .diff-overflow { position: relative; flex: none; }
-.diff-more-btn { position: relative; }
-.diff-more-dot { position: absolute; top: 3px; right: 3px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--surface); }
 
 .diff-tool-option { display: flex; align-items: center; gap: var(--space-8); width: 100%; min-height: 32px; padding: var(--space-4) var(--space-8); border-radius: var(--radius-sm); color: var(--fg); font-size: var(--text-sm); text-align: left; }
 .diff-tool-option > .icon { flex: none; color: var(--fg-subtle); }

@@ -21,6 +21,14 @@ const THEME = "twiglane";
 const PREFIX = "--syn-";
 /** 单行超过这个长度就不分词（压缩后的单行 JS/JSON 会把正则引擎拖得很慢），按纯文本显示。 */
 export const MAX_LINE_LENGTH = 2000;
+/** 单份文档的分词结果预算；超过后剩余行按原文显示。 */
+export const MAX_HIGHLIGHT_TOKEN_BYTES = 8 * 1024 * 1024;
+
+export function syntaxLineBytes(line: SyntaxLine): number {
+  let bytes = 48;
+  for (const token of line) bytes += 64 + 2 * (token.t.length + token.k.length);
+  return bytes;
+}
 
 let highlighter: Promise<HighlighterCore> | null = null;
 const loaded = new Map<string, Promise<boolean>>();
@@ -94,11 +102,13 @@ export async function tokenizeInChunks(
   lang: string,
   lines: string[],
   onChunk: (start: number, tokens: SyntaxLine[]) => void,
-  options: { chunkLines?: number; cancelled?: () => boolean; yieldBetween?: () => Promise<void> } = {},
+  options: { chunkLines?: number; cancelled?: () => boolean; yieldBetween?: () => Promise<void>; maxTokenBytes?: number } = {},
 ): Promise<boolean> {
   if (!(await ensureLanguage(lang))) return false;
   const instance = await core();
   const size = options.chunkLines ?? 400;
+  const budget = options.maxTokenBytes ?? MAX_HIGHLIGHT_TOKEN_BYTES;
+  let retainedBytes = 0;
   let state: ReturnType<HighlighterCore["getLastGrammarState"]> | undefined;
   for (let start = 0; start < lines.length; start += size) {
     if (options.cancelled?.()) return false;
@@ -114,7 +124,16 @@ export async function tokenizeInChunks(
     } catch {
       return false;
     }
-    const chunk = slice.map((line, index) => (long[index] ? [{ t: line, k: "" }] : compact(tokens[index] ?? [])));
+    const chunk: SyntaxLine[] = [];
+    for (let index = 0; index < slice.length; index += 1) {
+      const line = long[index] ? [{ t: slice[index], k: "" }] : compact(tokens[index] ?? []);
+      retainedBytes += syntaxLineBytes(line);
+      if (retainedBytes > budget) {
+        if (chunk.length > 0) onChunk(start, chunk);
+        return false;
+      }
+      chunk.push(line);
+    }
     onChunk(start, chunk);
     if (options.yieldBetween) await options.yieldBetween();
   }

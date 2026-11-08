@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createTextDiff } from "../src/lib/diff";
 import { highlightLines, resetHighlightCache } from "../src/lib/syntax/client";
 import { buildDiffDocuments } from "../src/lib/syntax/diffSyntax";
-import { tokenizeInChunks, type SyntaxLine } from "../src/lib/syntax/engine";
+import { syntaxLineBytes, tokenizeInChunks, type SyntaxLine } from "../src/lib/syntax/engine";
 import { canonicalLanguage, detectLanguage, LANGUAGE_OPTIONS } from "../src/lib/syntax/languages";
 import {
   effectiveLanguage,
@@ -111,6 +111,21 @@ describe("分词引擎", () => {
     let sync = false;
     highlightLines("typescript", lines, () => (sync = true));
     expect(sync).toBe(true);
+  });
+
+  it("分词结果按字节预算停止，已完成行保留，后续行仍显示原文", async () => {
+    const source = "const value = 123;";
+    let sample: SyntaxLine = [];
+    await tokenizeInChunks("typescript", [source], (_start, chunk) => { sample = chunk[0]; });
+    const budget = syntaxLineBytes(sample) * 3;
+    const result: SyntaxLine[] = [];
+    const ok = await tokenizeInChunks("typescript", Array(20).fill(source), (start, chunk) => {
+      chunk.forEach((line, index) => { result[start + index] = line; });
+    }, { chunkLines: 2, maxTokenBytes: budget });
+    expect(ok).toBe(false);
+    expect(result).toHaveLength(3);
+    expect(result.reduce((sum, line) => sum + syntaxLineBytes(line), 0)).toBeLessThanOrEqual(budget);
+    expect(lineSegments(source, result[3]).map((segment) => segment.t).join("")).toBe(source);
   });
 });
 

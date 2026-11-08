@@ -178,7 +178,7 @@
   }
 
   function refresh(): void {
-    void store.revalidate();
+    void store.revalidate(true);
   }
 </script>
 
@@ -242,6 +242,7 @@
     lineSerial={lineTarget?.serial ?? 0}
     {nav}
     generation={opened.generation}
+    contentVersion={store.selectedVersion}
     reloadKey={store.revision}
     {nextId}
     {onGeneration}

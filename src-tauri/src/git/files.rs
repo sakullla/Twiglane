@@ -79,6 +79,21 @@ fn reject_symlink_components(root: &Path, relative: &Path) -> Result<(), AppErro
     Ok(())
 }
 
+fn file_version(meta: &fs::Metadata) -> Option<String> {
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    let created = meta
+        .created()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |time| time.as_nanos());
+    Some(format!("{:x}:{modified:x}:{created:x}", meta.len()))
+}
+
 /// 读取一个目录的直接子项。后代目录只在被展开时单独读取。
 fn read_directory(
     root: PathBuf,
@@ -126,6 +141,7 @@ fn read_directory(
             kind: RepositoryEntryKind::Error,
             ignored: false,
             size: None,
+            version: None,
             error: None,
         };
         match item.path().symlink_metadata() {
@@ -142,6 +158,7 @@ fn read_directory(
             Ok(meta) if meta.is_file() => {
                 entry.kind = RepositoryEntryKind::File;
                 entry.size = Some(meta.len());
+                entry.version = file_version(&meta);
             }
             Ok(_) => entry.kind = RepositoryEntryKind::Special,
             Err(error) => entry.error = Some(format!("无法读取目录项类型：{error}")),
@@ -421,6 +438,7 @@ fn empty_content(
         path: path.into(),
         kind,
         size,
+        version: None,
         offset,
         lines: Vec::new(),
         next_offset: offset,
@@ -577,7 +595,7 @@ fn read_text_page(
     let mut buffer = Vec::new();
     while skipped < offset {
         check_cancel(&cancel)?;
-        let chunk = read_line_chunk(&mut reader, &mut buffer, MAX_LINE_BYTES, &cancel)?;
+        let chunk = read_line_chunk(&mut reader, &mut buffer, 0, &cancel)?;
         if !chunk.any {
             return Ok(empty_content(
                 &display,
@@ -622,8 +640,12 @@ fn read_text_page(
         }
         let mut end = buffer.len();
         if chunk.truncated {
-            while end > 0 && std::str::from_utf8(&buffer[..end]).is_err() {
-                end -= 1;
+            // 只裁掉预算边界处不完整的字符；非法编码交给下方报告。
+            // 逐字节缩短并反复验证会让长行退化成平方复杂度。
+            if let Err(error) = std::str::from_utf8(&buffer) {
+                if error.error_len().is_none() {
+                    end = error.valid_up_to();
+                }
             }
         }
         if !lines.is_empty() && bytes + end > MAX_PAGE_BYTES {
@@ -663,6 +685,7 @@ fn read_text_page(
         path: display,
         kind: RepositoryFileKind::Text,
         size: meta.len(),
+        version: file_version(&meta),
         offset,
         next_offset: offset + lines.len() as u64,
         lines,
@@ -1808,6 +1831,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn directory_versions_follow_only_the_file_metadata() {
+        let fixture = crate::test_support::git_fixture("repository-file-versions");
+        let root = fixture.repo("repo");
+        fs::write(root.join("read.txt"), "before").unwrap();
+        let version = || {
+            read_directory(root.clone(), PathBuf::new(), Arc::new(Shutdown::new()))
+                .unwrap().0.into_iter()
+                .find(|entry| entry.name == "read.txt")
+                .unwrap().version.unwrap()
+        };
+        let initial = version();
+        let content = read_text_page(
+            root.clone(), PathBuf::from("read.txt"), 0, 1, Arc::new(Shutdown::new()),
+        ).unwrap();
+        assert_eq!(content.version.as_ref(), Some(&initial));
+        fs::write(root.join("unrelated.txt"), "other").unwrap();
+        assert_eq!(version(), initial);
+        let file = fs::OpenOptions::new().write(true).open(root.join("read.txt")).unwrap();
+        let modified = file.metadata().unwrap().modified().unwrap();
+        fs::write(root.join("read.txt"), "after!").unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(modified + std::time::Duration::from_secs(2))).unwrap();
+        assert_ne!(version(), initial);
+    }
+
     #[tokio::test]
     async fn directory_is_direct_sorted_and_honours_ignore_switch() {
         let fixture = crate::test_support::git_fixture("repository-files-directory");
@@ -2605,6 +2653,38 @@ mod tests {
         .unwrap();
         assert!(!rest.has_more);
         assert_eq!(first.lines.len() + rest.lines.len(), 400);
+    }
+
+    #[tokio::test]
+    async fn truncated_text_preserves_utf8_validation() {
+        let fixture = crate::test_support::git_fixture("repository-files-long-encoding");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        // 错误在预算内：不能反复缩短到错误之前，把非法文件伪装成有效文本。
+        let mut invalid = vec![b'a'; MAX_LINE_BYTES * 2];
+        invalid[MAX_LINE_BYTES / 2] = 0xff;
+        fs::write(root.join("invalid.txt"), invalid).unwrap();
+        let page = repository_file_content(
+            &backend,
+            root.to_str().unwrap(),
+            "invalid.txt",
+            0,
+            Some(1),
+            1,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.kind, RepositoryFileKind::InvalidUtf8);
+        assert!(page.lines.is_empty());
+        // 跳行仍须检查 NUL，但无需为跳过的行分配或复制文本。
+        let mut reader = std::io::Cursor::new(b"skipped\0line\nnext\n");
+        let mut buffer = Vec::new();
+        let chunk = read_line_chunk(&mut reader, &mut buffer, 0, &Shutdown::new()).unwrap();
+        assert!(chunk.binary);
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.capacity(), 0);
     }
 
     #[tokio::test]

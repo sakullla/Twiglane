@@ -40,6 +40,7 @@ export interface FileNode {
   kind: RepositoryEntryKind;
   ignored: boolean;
   size: number | null;
+  version?: string | null;
   error: string | null;
   /** 直接子项；null 表示还没读过（按需读取），[] 表示读过且为空。 */
   children: FileNode[] | null;
@@ -90,6 +91,7 @@ export function makeNode(entry: RepositoryDirectoryEntry): FileNode {
     kind: entry.kind,
     ignored: entry.ignored,
     size: entry.size,
+    version: entry.version,
     error: entry.error,
     // 子项按需读取：任何类型在读到目录内容之前都是 null。
     children: null,
@@ -209,18 +211,23 @@ export function filterRows(rows: readonly FileTreeRow[], query: string): FileTre
   const needle = query.trim().toLowerCase();
   if (!needle) return rows as FileTreeRow[];
   const keep = new Set<number>();
-  const matched: string[] = [];
+  const ancestors = new Set<string>();
   rows.forEach((row, index) => {
     const hit = row.path.toLowerCase().includes(needle) || row.label.toLowerCase().includes(needle);
     if (!hit) return;
     keep.add(index);
-    matched.push(row.path);
+    let slash = row.path.lastIndexOf("/");
+    while (slash >= 0) {
+      const parent = row.path.slice(0, slash);
+      if (ancestors.has(parent)) break;
+      ancestors.add(parent);
+      slash = parent.lastIndexOf("/");
+    }
   });
   // 匹配项的一切祖先目录都要留下，否则命中的文件挂在看不见的目录下面。
   rows.forEach((row, index) => {
     if (keep.has(index) || !isDirectoryKind(row.kind)) return;
-    const prefix = `${row.path}/`;
-    if (matched.some((path) => path.startsWith(prefix))) keep.add(index);
+    if (ancestors.has(row.path)) keep.add(index);
   });
   return rows.filter((_row, index) => keep.has(index));
 }
@@ -472,7 +479,7 @@ export function createFilesStore(deps: FilesStoreDeps) {
   let loading = $state(false);
   let failure = $state<string | null>(null);
   let loaded = $state(false);
-  /** 文件内容的重新读取凭据：重新激活、代次变化与手动刷新时递增。 */
+  /** 文件内容的强制重读凭据：仅手动刷新递增。 */
   let revision = $state(0);
   /** 最近一次按它验证过整棵树的代次；与当前代次不同就说明树可能已经过期。 */
   let verifiedGeneration = deps.generation();
@@ -483,6 +490,8 @@ export function createFilesStore(deps: FilesStoreDeps) {
   let hiddenAt: number | null = null;
 
   const serials = new Map<string, number>();
+  let directorySerial = 0;
+  let refreshSerial = 0;
 
   /* ---- 搜索：路径快速打开、全文搜索与树过滤补齐各有一份请求身份 ---- */
   let pathQuery = $state("");
@@ -517,6 +526,7 @@ export function createFilesStore(deps: FilesStoreDeps) {
   let cursor = $state(-1);
 
   function reset(next: string | null): void {
+    refreshSerial += 1;
     repo = next;
     nodes = [];
     selectedPath = null;
@@ -576,9 +586,12 @@ export function createFilesStore(deps: FilesStoreDeps) {
       previous.kind = entry.kind;
       previous.ignored = entry.ignored;
       previous.size = entry.size;
+      previous.version = entry.version;
       previous.error = entry.error;
       return previous;
     });
+    // 条目和顺序未变时保留数组身份；元数据字段自身仍会通知订阅者。
+    if ((!node || node.children !== null) && existing.length === children.length && existing.every((child, index) => child === children[index])) return;
     if (node) node.children = children;
     else nodes = children;
   }
@@ -593,7 +606,7 @@ export function createFilesStore(deps: FilesStoreDeps) {
   async function loadDirectory(path: string, node: FileNode | null, retries = 1): Promise<boolean> {
     const current = repo;
     if (!current) return false;
-    const token = (serials.get(path) ?? 0) + 1;
+    const token = ++directorySerial;
     serials.set(path, token);
     const owns = () => repo === current && serials.get(path) === token;
     const busy = (value: boolean) => {
@@ -1075,22 +1088,32 @@ export function createFilesStore(deps: FilesStoreDeps) {
   }
 
   /** 手动或代次变化后的重验：重读根目录和所有已经读过的目录，保持展开与选择。 */
-  async function revalidate(): Promise<boolean> {
-    revision += 1;
+  async function revalidate(forceContent = false): Promise<boolean> {
+    const refresh = ++refreshSerial;
+    const current = repo;
+    const owns = () => refresh === refreshSerial && repo === current && deps.active();
+    if (forceContent) revision += 1;
     if (!repo || !deps.active()) return false;
     // 根目录本身也是"已加载的目录"：顶层的新增与删除只能靠它发现。
     if (!(await loadDirectory("", null))) return false;
-    if (!deps.active()) return false;
+    if (!owns()) return false;
     const targets: FileNode[] = [];
-    const walk = (list: FileNode[]) => {
+    const enqueue = (list: FileNode[]) => {
       for (const node of list) {
         if (isDirectoryKind(node.kind) && node.children !== null) targets.push(node);
-        if (node.children) walk(node.children);
       }
     };
-    walk(nodes);
-    const results = await Promise.all(targets.map((node) => loadDirectory(node.path, node)));
-    if (!results.every(Boolean) || !deps.active()) return false;
+    enqueue(nodes);
+    // 每批最多三个读取，父目录刷新后才排入仍存在的子目录。
+    // 隐藏或切仓库后，不再把旧树上的路径排进读取通道。
+    for (let start = 0; start < targets.length;) {
+      if (!owns()) return false;
+      const batch = targets.slice(start, start + 3);
+      start += batch.length;
+      const results = await Promise.all(batch.map((node) => loadDirectory(node.path, node)));
+      if (!owns() || !results.every(Boolean)) return false;
+      for (const node of batch) if (node.children) enqueue(node.children);
+    }
     verifiedGeneration = deps.generation();
     // 树重验完再按当前代次重跑还在显示的搜索：隐藏期间的结果一律不再当作当前。
     if (query.trim()) void completeFilter();
@@ -1163,8 +1186,14 @@ export function createFilesStore(deps: FilesStoreDeps) {
 
   /** 当前树的可见行：仅改动时来自 StatusSnapshot，否则来自按需读到的目录。 */
   function visibleRows(): FileTreeRow[] {
-    return changedOnly ? changedRows() : filterRows(flattenTree(nodes), query);
+    return cachedRows;
   }
+
+  // 导航、类型解析和树渲染共享结果；选择文件不应重新展开整棵树。
+  const flatRows = $derived(flattenTree(nodes));
+  const cachedRows = $derived(changedOnly ? changedRows() : filterRows(flatRows, query));
+  const completedRows = $derived(completion(cachedRows));
+  const treeRows = $derived(completedRows.rows.length === 0 ? cachedRows : [...cachedRows, ...completedRows.rows]);
 
   /**
    * 选中路径的类型与真实路径：先看当前可见行，再看已读到的树节点，最后看改动集合。
@@ -1230,16 +1259,17 @@ export function createFilesStore(deps: FilesStoreDeps) {
     },
     /** 树实际渲染的行：已加载范围内的本地匹配 + 全仓库补齐（有上限）。 */
     get treeRows() {
-      const base = visibleRows();
-      const extras = completion(base);
-      return extras.rows.length === 0 ? base : [...base, ...extras.rows];
+      return treeRows;
     },
     /** 补齐结果超过上限：界面必须说明只列了前 FILTER_EXTRA_LIMIT 条。 */
     get filterLimited() {
-      return completion(visibleRows()).limited;
+      return completedRows.limited;
     },
     get selectedNode() {
       return selectedPath ? findNode(nodes, selectedPath) : null;
+    },
+    get selectedVersion() {
+      return selectedPath ? findNode(nodes, selectedPath)?.version ?? null : null;
     },
     /** 选中路径的类型解析：折叠或过滤把它藏起来也仍然能解析出真实类型。 */
     resolve: resolvePath,

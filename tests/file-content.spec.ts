@@ -224,6 +224,83 @@ describe("代码页", () => {
 });
 
 describe("真实状态与读取边界", () => {
+  it("无关文件的代次变化保留已加载分页、DOM 与阅读位置", async () => {
+    repositoryFileContent.mockResolvedValueOnce(text({ hasMore: true }));
+    const view = render(FileContent, { props: props({ contentVersion: "unchanged" }) as never });
+    const more = await screen.findByRole("button", { name: /继续读取后续内容/ });
+    repositoryFileContent.mockResolvedValueOnce(text({ offset: 3, lines: ["last loaded line"], nextOffset: 4 }));
+    await fireEvent.click(more);
+    await screen.findByText("last loaded line");
+    const scroller = view.container.querySelector<HTMLElement>(".file-code")!;
+    const row = view.container.querySelector('[data-file-line="1"]');
+    scroller.scrollTop = 40;
+    await fireEvent.scroll(scroller);
+    for (let generation = 5; generation < 9; generation++) {
+      await view.rerender(props({ generation, contentVersion: "unchanged" }) as never);
+    }
+    expect(repositoryFileContent).toHaveBeenCalledTimes(2);
+    expect(view.container.querySelector('[data-file-line="1"]')).toBe(row);
+    expect(scroller.scrollTop).toBe(40);
+    expect(screen.getByText("last loaded line")).toBeTruthy();
+    expect(screen.queryByLabelText("正在读取文件")).toBeNull();
+  });
+
+  it("当前文件版本变化和手动刷新仍读取最新内容", async () => {
+    repositoryFileContent.mockResolvedValueOnce(text());
+    const view = render(FileContent, { props: props({ contentVersion: "before" }) as never });
+    await screen.findByText("const value = 1;");
+    repositoryFileContent.mockResolvedValueOnce(text({ lines: ["changed file"] }));
+    await view.rerender(props({ contentVersion: "after" }) as never);
+    await screen.findByText("changed file");
+    repositoryFileContent.mockResolvedValueOnce(text({ lines: ["manual refresh"] }));
+    await view.rerender(props({ contentVersion: "after", reloadKey: 1 }) as never);
+    await screen.findByText("manual refresh");
+    expect(repositoryFileContent).toHaveBeenCalledTimes(3);
+  });
+
+  it("续读遇到文件已变时重新读取，不把两份版本拼在一起", async () => {
+    repositoryFileContent.mockResolvedValueOnce(text({ version: "old", hasMore: true }));
+    render(FileContent, { props: props({ contentVersion: "old" }) as never });
+    const more = await screen.findByRole("button", { name: /继续读取后续内容/ });
+    repositoryFileContent.mockResolvedValueOnce(text({ version: "new", offset: 3, lines: ["new tail"] }));
+    repositoryFileContent.mockResolvedValueOnce(text({ version: "new", lines: ["new complete page"] }));
+    await fireEvent.click(more);
+    await screen.findByText("new complete page");
+    expect(screen.queryByText("const value = 1;")).toBeNull();
+    expect(screen.queryByText("new tail")).toBeNull();
+    expect(repositoryFileContent.mock.calls.map((call) => call[2])).toEqual([0, 3, 0]);
+  });
+
+  it("无关文件变化保留文件内搜索命中，当前文件变化才撤下", async () => {
+    repositoryFileContent.mockResolvedValue(text());
+    repositoryContentSearch.mockResolvedValue({
+      generation: 4, query: "value", scope: "file", scopePath: "src/App.ts",
+      matches: [{ path: "src/App.ts", line: 3, column: 7, text: "const value = 1;" }],
+      filesScanned: 1, skipped: [], skippedFiles: 0, truncated: false, textTruncated: false, message: null,
+    } satisfies RepositoryContentSearch);
+    const view = render(FileContent, { props: props({ contentVersion: "before" }) as never });
+    await fireEvent.click(await screen.findByRole("button", { name: "在文件内搜索" }));
+    await fireEvent.input(await screen.findByLabelText("文件内搜索关键词"), { target: { value: "value" } });
+    await screen.findByRole("option");
+    await view.rerender(props({ generation: 5, contentVersion: "before" }) as never);
+    expect(screen.getByRole("option")).toBeTruthy();
+    expect(repositoryContentSearch).toHaveBeenCalledOnce();
+    expect(repositoryFileContent).toHaveBeenCalledOnce();
+    await view.rerender(props({ generation: 5, contentVersion: "after" }) as never);
+    expect(screen.queryByRole("option")).toBeNull();
+  });
+
+  it("无关代次变化不重复发送仍在途的文件读取", async () => {
+    let finish!: (value: RepositoryFileContent) => void;
+    repositoryFileContent.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const view = render(FileContent, { props: props({ contentVersion: "same" }) as never });
+    await waitFor(() => expect(repositoryFileContent).toHaveBeenCalledOnce());
+    await view.rerender(props({ generation: 5, contentVersion: "same" }) as never);
+    expect(repositoryFileContent).toHaveBeenCalledOnce();
+    finish(text({ generation: 5 }));
+    await screen.findByText("const value = 1;");
+  });
+
   it("没有改动的文件就地说明当前无改动，历史入口仍然可用", async () => {
     repositoryFileContent.mockResolvedValue(text({ path: "README.md" }));
     const onFileHistory = vi.fn();

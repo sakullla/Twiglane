@@ -39,7 +39,9 @@
     line?: number | null;
     lineSerial?: number;
     generation: number;
-    /** 目录重验、手动刷新等无代次变化的重读信号。 */
+    /** 文件本身的元数据版本；有版本时，无关仓库变化不重读。 */
+    contentVersion?: string | null;
+    /** 手动刷新等无代次变化的强制重读信号。 */
     reloadKey?: number;
     disabled: boolean;
     nextId: () => number;
@@ -59,6 +61,7 @@
     line = null,
     lineSerial = 0,
     generation,
+    contentVersion = null,
     reloadKey = 0,
     disabled,
     nextId,
@@ -75,8 +78,8 @@
   /** 换行模式下不做虚拟化：超过这个行数只提示，不把整份文件排进 DOM。 */
   const WRAP_LIMIT = 2000;
 
-  let content = $state<RepositoryFileContent | null>(null);
-  let lines = $state<string[]>([]);
+  let content = $state.raw<RepositoryFileContent | null>(null);
+  let lines = $state.raw<string[]>([]);
   let pageOffset = $state(0);
   let hasMore = $state(false);
   let loading = $state(false);
@@ -91,8 +94,8 @@
   let searchQuery = $state("");
   let searchResult = $state<RepositoryContentSearch | null>(null);
   let searchError = $state<string | null>(null);
-  /** 这份匹配是按哪个代次与重读信号算出来的：任一漂移就必须撤下结果。 */
-  let resultGeneration = $state(-1);
+  /** 这份匹配对应的文件版本与强制重读信号。 */
+  let resultVersion = $state<string | number | null>(null);
   let resultKey = $state(-1);
   let searching = $state(false);
   let searchInput = $state<HTMLInputElement | null>(null);
@@ -110,6 +113,7 @@
   let viewport = $state(0);
   let scroller = $state<HTMLDivElement | null>(null);
   let searchSerial = 0;
+  let fileVersion = $derived(contentVersion ?? generation);
 
   let parts = $derived(path ? splitPath(path) : null);
   let language = $derived(path ? effectiveLanguage(path) : null);
@@ -135,7 +139,7 @@
     path ? { repository: opened.summary.path, old: null, new: { revision: "worktree", path } } : null,
   );
 
-  const syntax = createHighlight(() => ({ lang: language, lines }));
+  const syntax = createHighlight(() => ({ lang: active && !showImage ? language : null, lines }));
   const codeTexts = $derived(lines);
   const ruler = $derived(codeRuler(codeTexts));
   const codeSize = $derived(codeContentSize(codeTexts));
@@ -180,7 +184,7 @@
     if (append) loadingMore = true;
     else {
       loading = true;
-      // 代次或路径变化后立刻撤下旧内容：旧内容不能继续被当作当前文件。
+      // 文件变化或主动重读时撤下旧正文，防止把旧版本当成当前文件。
       content = null;
       lines = [];
       error = null;
@@ -191,6 +195,11 @@
       if (page.generation > generationAtStart) onGeneration(page.generation);
       if (page.generation < opened.generation && attempt === 0) {
         void read(target, offset, append, page.generation, attempt + 1);
+        return;
+      }
+      // 目录监听尚未更新时文件也可能已变；不能把新版本的下一页接到旧正文上。
+      if (append && content?.version && page.version && content.version !== page.version) {
+        void read(target, 0, false, page.generation);
         return;
       }
       content = page;
@@ -229,12 +238,14 @@
   }
 
   /**
-   * 只在路径、代次或重读信号变化时读取；隐藏期间不发起新请求。
-   * 同一代次的隐藏再显示不算变化：已读内容与滚动位置都属于这次会话，重读会把它们冲掉。
+   * 有元数据版本时只跟随当前文件变化；没有版本则按仓库代次保守重读。
+   * 无关文件变化不清空分页、滚动位置、选择或高亮，也不重发正在读取的请求。
    */
   let lastRead = "";
   $effect(() => {
     const target = path;
+    const repoPath = opened.summary.path;
+    const version = fileVersion;
     const generationNow = generation;
     const key = reloadKey;
     const visible = active;
@@ -245,8 +256,8 @@
         return;
       }
       if (!visible) return;
-      const signature = `${target}:${generationNow}:${key}`;
-      if (signature === lastRead && content?.path === target) return;
+      const signature = JSON.stringify([repoPath, target, version, key]);
+      if (signature === lastRead && (content?.path === target || loading)) return;
       lastRead = signature;
       void read(target, 0, false, generationNow);
     });
@@ -267,15 +278,15 @@
   });
 
   /*
-   * 代次或重读信号前进：文件内容可能已经换过，旧命中的行号不再可信。
+   * 文件版本或重读信号前进：旧命中的行号不再可信。
    * 这里必须把结果显示一起撤下——只收起行号、留着旧匹配列表，
    * 会让使用者按旧行号跳到新内容的错误位置。
    */
   $effect(() => {
-    const gen = generation;
+    const version = fileVersion;
     const key = reloadKey;
     if (searchResult === null) return;
-    if (resultGeneration >= gen && resultKey === key) return;
+    if (resultVersion === version && resultKey === key) return;
     untrack(() => {
       searchSerial += 1;
       searching = false;
@@ -389,6 +400,8 @@
     const repoPath = opened.summary.path;
     const targetPath = path;
     const targetGeneration = generation;
+    const targetVersion = fileVersion;
+    const targetKey = reloadKey;
     const scope: RepositorySearchScope = { kind: "file", path: targetPath };
     searching = true;
     searchError = null;
@@ -396,14 +409,14 @@
       const result = await api.repositoryContentSearch(repoPath, query, scope, false, 200, targetGeneration, nextId());
       if (token !== searchSerial) return;
       if (path !== targetPath || opened.summary.path !== repoPath) return;
-      // 代次前进说明文件内容已经换过：旧行号不再可信，撤下结果等下一次搜索。
-      if (targetGeneration !== generation || result.generation < targetGeneration) {
+      // 当前文件变化才撤下命中；无关文件的代次变化不打断搜索阅读。
+      if (targetVersion !== fileVersion || targetKey !== reloadKey || result.generation < targetGeneration) {
         searchResult = null;
         return;
       }
       if (result.generation > generation) onGeneration(result.generation);
-      resultGeneration = result.generation;
-      resultKey = reloadKey;
+      resultVersion = targetVersion;
+      resultKey = targetKey;
       searchResult = result;
       matchCursor = -1;
     } catch (failure) {

@@ -137,6 +137,8 @@ export interface RepositoryDirectoryEntry {
   kind: RepositoryEntryKind;
   ignored: boolean;
   size: number | null;
+  /** 元数据版本；旧后端或无法读取修改时间时为空。 */
+  version?: string | null;
   error: string | null;
 }
 
@@ -160,6 +162,7 @@ export interface RepositoryFileContent {
   path: string;
   kind: RepositoryFileKind;
   size: number;
+  version?: string | null;
   offset: number;
   lines: string[];
   nextOffset: number;

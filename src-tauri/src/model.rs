@@ -725,6 +725,8 @@ pub struct RepositoryDirectoryEntry {
     pub kind: RepositoryEntryKind,
     pub ignored: bool,
     pub size: Option<u64>,
+    /// 文件元数据版本；仅用于只读内容刷新，不作为 Git 写入凭据。
+    pub version: Option<String>,
     pub error: Option<String>,
 }
 
@@ -755,6 +757,7 @@ pub struct RepositoryFileContent {
     pub path: String,
     pub kind: RepositoryFileKind,
     pub size: u64,
+    pub version: Option<String>,
     pub offset: u64,
     pub lines: Vec<String>,
     pub next_offset: u64,

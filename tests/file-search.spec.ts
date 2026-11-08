@@ -180,7 +180,9 @@ describe("路径快速打开", () => {
     render(RepositoryFiles, { props: viewProps() as never });
     await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
 
-    await fireEvent.click(screen.getByRole("button", { name: "按路径打开" }));
+    // 按路径打开收在文件树的「更多」里（也可以用 ⌘/Ctrl P）。
+    await fireEvent.click(screen.getByRole("button", { name: "更多文件树选项" }));
+    await fireEvent.click(await screen.findByRole("menuitem", { name: "按路径打开" }));
     const input = screen.getByRole("textbox", { name: "按路径打开文件" });
     await fireEvent.input(input, { target: { value: "Button" } });
     await waitFor(() => expect(repositoryPathSearch).toHaveBeenCalled());
@@ -223,7 +225,8 @@ describe("路径快速打开", () => {
 
     const view = render(RepositoryFiles, { props: viewProps() as never });
     await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
-    await fireEvent.click(screen.getByRole("button", { name: "按路径打开" }));
+    await fireEvent.click(screen.getByRole("button", { name: "更多文件树选项" }));
+    await fireEvent.click(await screen.findByRole("menuitem", { name: "按路径打开" }));
     const input = screen.getByRole("textbox", { name: "按路径打开文件" });
     await fireEvent.input(input, { target: { value: "old" } });
     await fireEvent.input(input, { target: { value: "app" } });
@@ -305,7 +308,9 @@ describe("全仓库文本搜索", () => {
     const hits = screen.getAllByRole("option").filter((item) => item.className.includes("hit"));
     expect(hits).toHaveLength(3);
     expect(hits[0].textContent).toContain("2:3");
-    expect(within(hits[2]).getByText(/x panel/)).toBeTruthy();
+    expect(hits[2].textContent).toContain("x panel");
+    // 命中部分单独加亮。
+    expect(hits[2].querySelector("mark")?.textContent).toBe("panel");
 
     // 方向键在可选行之间移动，Enter 打开第三条（src/b.ts 第 40 行）。
     await fireEvent.keyDown(input, { key: "ArrowDown" });
@@ -521,7 +526,8 @@ describe("目录树全局过滤的状态", () => {
     // 关掉面板、改选更深一层的目录：目录范围必须跟着改，不能留着旧目录的结果。
     await fireEvent.click(screen.getByRole("button", { name: "关闭搜索" }));
     const freshTree = await screen.findByRole("tree", { name: "仓库文件" });
-    await fireEvent.click(within(freshTree).getByRole("button", { name: "展开 src" }));
+    // 先前单击 src 时已经展开了它（单击目录即展开）：这里直接选更深一层。
+    expect(within(freshTree).getByRole("button", { name: "折叠 src" })).toBeTruthy();
     const nested = await within(screen.getByRole("tree", { name: "仓库文件" })).findByRole("treeitem", { name: /components/ });
     await fireEvent.click(nested);
     await waitFor(() =>

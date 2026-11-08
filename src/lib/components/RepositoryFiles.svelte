@@ -211,6 +211,7 @@
         onSplit={splitRow}
         onHistory={onFileHistory}
         onRefresh={refresh}
+        onCollapseAll={() => store.collapseAll()}
       />
     {:else}
       <FileSearch
@@ -222,9 +223,6 @@
         onOpen={(path, hitLine) => void openTarget(path, hitLine)}
       />
     {/if}
-    <p class="file-tree-note">
-      只读浏览：目录按需读取{store.includeIgnored ? "，当前包含被忽略的文件" : ""}。
-    </p>
   </section>
   <PaneResizer
     value={paneWidth}

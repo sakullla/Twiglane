@@ -674,6 +674,33 @@ export function createFilesStore(deps: FilesStoreDeps) {
     await expand(node);
   }
 
+  /**
+   * 全部折叠：只改展开状态，不丢已读子项（再展开不用重读）。
+   * 仅改动树按路径记折叠，所以把所有合成目录都记进折叠集合。
+   */
+  function collapseAll(): void {
+    if (changedOnly) {
+      const next = new Set<string>();
+      for (const file of deps.files?.() ?? []) {
+        const parts = file.path.split("/");
+        let prefix = "";
+        for (let index = 0; index < parts.length - 1; index += 1) {
+          prefix = prefix ? `${prefix}/${parts[index]}` : parts[index];
+          next.add(prefix);
+        }
+      }
+      changedCollapsed = next;
+      return;
+    }
+    const walk = (list: FileNode[]) => {
+      for (const node of list) {
+        if (node.expanded) node.expanded = false;
+        if (node.children) walk(node.children);
+      }
+    };
+    walk(nodes);
+  }
+
   /** 逐级加载 path 的祖先目录，让这一行真的出现在树里（未读过的目录按需读取）。 */
   async function ensureChain(path: string): Promise<boolean> {
     const parts = path.split("/");
@@ -1313,6 +1340,7 @@ export function createFilesStore(deps: FilesStoreDeps) {
     revalidate,
     toggle,
     expand,
+    collapseAll,
     select,
   };
 }

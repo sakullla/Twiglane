@@ -322,7 +322,10 @@ describe("文件视图容器", () => {
     expect(within(ignoredRow).getByText("忽略")).toBeTruthy();
 
     repositoryDirectory.mockResolvedValue(dir("", [], 5));
-    await fireEvent.click(screen.getByRole("button", { name: "显示忽略的文件" }));
+    await fireEvent.click(screen.getByRole("button", { name: "更多文件树选项" }));
+    const ignoredToggle = await screen.findByRole("menuitemcheckbox", { name: "显示忽略的文件" });
+    expect(ignoredToggle.getAttribute("aria-checked")).toBe("false");
+    await fireEvent.click(ignoredToggle);
     await waitFor(() => expect(repositoryDirectory).toHaveBeenLastCalledWith(repoPath, "", true, 5, expect.any(Number)));
 
     repositoryDirectory.mockRejectedValue({ code: "path_unreadable", message: "无法读取这个目录。" });
@@ -396,7 +399,8 @@ describe("文件视图容器", () => {
     expect(screen.queryByText("stale.ts")).toBeNull();
     expect(repositoryDirectory).toHaveBeenLastCalledWith(repoPath, "", false, 7, expect.any(Number));
     // 刷新入口没有被残留的 loading 锁死。
-    const refresh = screen.getByRole("button", { name: "重新读取目录" }) as HTMLButtonElement;
-    expect(refresh.disabled).toBe(false);
+    await fireEvent.click(screen.getByRole("button", { name: "更多文件树选项" }));
+    const refresh = await screen.findByRole("menuitem", { name: "重新读取目录" });
+    expect(refresh.getAttribute("aria-disabled")).toBeNull();
   });
 });

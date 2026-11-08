@@ -1,13 +1,18 @@
 <script lang="ts">
+  import { MODIFIER_LABEL } from "../brand";
+  import { fileTone } from "../file-kind";
   import { FILTER_EXTRA_LIMIT, FILE_ROW_HEIGHT, rowIndex, type ChangeDecorations, type FileTreeRow } from "../files.svelte";
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
-  import { BUSY_REASON, formatBytes } from "../ui";
+  import { BUSY_REASON } from "../ui";
   import ContextMenu, { isContextKey, pointFor, type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
 
   /**
    * 按需目录树：只渲染后端已读到的直接子项，长列表用固定行高虚拟化。
    * 行本身不发起请求，展开、拆分、选择都由文件视图的状态模块决定，组件只上报动作。
+   *
+   * 工具条只常驻三件事：筛选、全仓库搜索、只看改动；按路径打开、显示忽略、全部折叠与重新读取收进「更多」。
+   * 单击目录即展开/折叠（同时选中它，供「当前目录」搜索范围使用），单击文件即打开。
    */
   interface Props {
     rows: FileTreeRow[];
@@ -42,6 +47,8 @@
     onSplit: (row: FileTreeRow) => void;
     onHistory?: (path: string) => void;
     onRefresh: () => void;
+    /** 全部折叠：只改展开状态，不丢已读子项。 */
+    onCollapseAll?: () => void;
   }
 
   let {
@@ -68,15 +75,24 @@
     onSplit,
     onHistory,
     onRefresh,
+    onCollapseAll,
   }: Props = $props();
+
+  /** 缩进宽度：与 components.css 的缩进引导线周期一致。 */
+  const INDENT = 14;
 
   let scrollTop = $state(0);
   let viewport = $state(0);
   let list = $state<HTMLDivElement | null>(null);
   let menu = $state<ContextMenuRequest | null>(null);
+  let moreButton = $state<HTMLButtonElement | null>(null);
+  /** 「更多」菜单是否由更多按钮唤起：按钮据此显示展开态，再点一次即收起。 */
+  let moreOpen = $state(false);
+  let moreClosedAt = 0;
 
   let range = $derived(visibleRange(rows.length, scrollTop, viewport > 0 ? viewport : 0, FILE_ROW_HEIGHT));
   let visible = $derived(rows.slice(range.start, range.end));
+  let hasExpanded = $derived(rows.some((row) => row.expandable && row.expanded));
 
   function reveal(index: number) {
     const next = scrollIndexIntoView(index, scrollTop, viewport > 0 ? viewport : (list?.clientHeight ?? 0), FILE_ROW_HEIGHT);
@@ -115,6 +131,16 @@
     }
     if (disabled) return;
     onToggle(row);
+  }
+
+  /** 单击：目录选中并切换展开，文件选中即打开；补齐行先展开祖先再定位。 */
+  function activate(row: FileTreeRow) {
+    if (row.extra) {
+      onLocate?.(row.path);
+      return;
+    }
+    onSelect(row);
+    if (row.expandable && !disabled) onToggle(row);
   }
 
   function expand(row: FileTreeRow) {
@@ -223,11 +249,68 @@
     return entries;
   }
 
+  function moreEntries(): ContextMenuEntry[] {
+    const entries: ContextMenuEntry[] = [];
+    if (onSearch) {
+      entries.push({
+        id: "quick-open",
+        label: "按路径打开",
+        icon: "file",
+        shortcut: `${MODIFIER_LABEL} P`,
+        run: () => onSearch?.("path"),
+      });
+      entries.push({ separator: true });
+    }
+    entries.push({
+      id: "ignored",
+      label: "显示忽略的文件",
+      icon: "eye",
+      checked: includeIgnored,
+      run: () => onIncludeIgnored(!includeIgnored),
+    });
+    if (onCollapseAll) {
+      entries.push({
+        id: "collapse",
+        label: "全部折叠",
+        icon: "chevron-up",
+        disabledReason: hasExpanded ? undefined : "没有展开的目录",
+        run: () => onCollapseAll?.(),
+      });
+    }
+    entries.push({
+      id: "refresh",
+      label: "重新读取目录",
+      icon: "refresh",
+      disabledReason: loading ? "正在读取目录" : undefined,
+      run: onRefresh,
+    });
+    return entries;
+  }
+
+  function toggleMore(): void {
+    // 菜单在按下时已因「点到外面」关闭：同一次点击不再把它打开。
+    if (moreOpen || performance.now() - moreClosedAt < 250) return;
+    const rect = moreButton?.getBoundingClientRect();
+    moreOpen = true;
+    menu = {
+      x: rect ? rect.right - 232 : 120,
+      y: rect ? rect.bottom + 4 : 120,
+      entries: moreEntries(),
+      label: "文件树选项",
+    };
+  }
+
+  function closeMenu(): void {
+    if (moreOpen) moreClosedAt = performance.now();
+    moreOpen = false;
+    menu = null;
+  }
+
   function rowIcon(row: FileTreeRow): "folder" | "folder-open" | "file" | "link" | "alert-circle" | "package" {
     if (row.kind === "symlink") return "link";
     if (row.kind === "special" || row.kind === "error") return "alert-circle";
     if (row.kind === "nestedRepository") return "package";
-    if (row.expandable) return row.expanded ? "folder-open" : "folder";
+    if (row.expandable || row.segment) return row.expanded ? "folder-open" : "folder";
     return "file";
   }
 
@@ -246,15 +329,26 @@
     if (row.kind === "error") return "这个条目读取失败";
     return row.path;
   }
+
+  /** 补齐的状态说明：只在结果可能不完整或范围特殊时出现，正常过滤不打扰。 */
+  let filterNote = $derived.by((): { text: string; danger: boolean } | null => {
+    if (!query) return null;
+    if (filterError) return { text: `全仓库补齐失败：${filterError}只显示已展开范围内的匹配。`, danger: true };
+    if (filterBusy) return { text: "正在全仓库补齐匹配……", danger: false };
+    if (filterTruncated) return { text: "全仓库匹配过多，补齐结果不完整（后端已截断）。", danger: false };
+    if (filterLimited) return { text: `全仓库补齐只显示前 ${FILTER_EXTRA_LIMIT} 条，还有匹配没有列出。`, danger: false };
+    if (changedOnly) return { text: "仅在改动文件里匹配；改动树不需要全仓库补齐。", danger: false };
+    return null;
+  });
 </script>
 
 <div class="file-tools">
-  <div class="field sm">
-    <Icon name="search" size={14} />
+  <div class="field sm file-filter">
+    <Icon name="filter" size={13} />
     <input
       id="files-search"
       aria-label="过滤文件树"
-      placeholder="过滤已展开的文件"
+      placeholder={changedOnly ? "筛选改动文件" : "筛选文件"}
       autocomplete="off"
       spellcheck="false"
       value={query}
@@ -277,75 +371,52 @@
       </button>
     {/if}
   </div>
-  {#if onSearch}
+  <div class="file-tools-actions">
+    {#if onSearch}
+      <button
+        type="button"
+        class="icon-btn sm"
+        aria-label="全仓库搜索"
+        title="全仓库搜索：在工作区文本里查找固定字符串"
+        onclick={() => onSearch?.("content")}
+      >
+        <Icon name="search" size={14} />
+      </button>
+    {/if}
+    {#if onChangedOnly}
+      <button
+        type="button"
+        class="icon-btn sm"
+        aria-pressed={changedOnly}
+        aria-label="只看有改动的文件"
+        title={changedOnly ? "显示完整仓库树" : "只看有改动的文件"}
+        onclick={() => onChangedOnly?.(!changedOnly)}
+      >
+        <Icon name="file-diff" size={14} />
+      </button>
+    {/if}
     <button
       type="button"
       class="icon-btn sm"
-      aria-label="按路径打开"
-      title="按仓库相对路径查找文件（只查路径，不读内容）"
-      onclick={() => onSearch?.("path")}
+      aria-label="更多文件树选项"
+      aria-haspopup="menu"
+      aria-expanded={moreOpen}
+      title="更多：按路径打开、显示忽略的文件、全部折叠、重新读取"
+      bind:this={moreButton}
+      onclick={toggleMore}
     >
-      <Icon name="file" size={14} />
+      <Icon name="more" size={14} />
+      {#if includeIgnored}<span class="tool-dot" aria-hidden="true"></span>{/if}
     </button>
-    <button
-      type="button"
-      class="icon-btn sm"
-      aria-label="全仓库搜索"
-      title="在工作区文本里查找固定字符串，结果按文件分组"
-      onclick={() => onSearch?.("content")}
-    >
-      <Icon name="search" size={14} />
-    </button>
-  {/if}
-  {#if onChangedOnly}
-    <button
-      type="button"
-      class="icon-btn sm"
-      aria-pressed={changedOnly}
-      aria-label="只看有改动的文件"
-      title={changedOnly ? "显示完整仓库树" : "只显示当前有未提交改动的文件；删除的文件保留为墓碑"}
-      onclick={() => onChangedOnly?.(!changedOnly)}
-    >
-      <Icon name="file-diff" size={14} />
-    </button>
-  {/if}
-  <button
-    type="button"
-    class="btn btn-ghost btn-sm"
-    aria-pressed={includeIgnored}
-    aria-label="显示忽略的文件"
-    title={includeIgnored ? "不再显示被 .gitignore 忽略的文件" : "同时显示被忽略的文件；不会改动忽略规则"}
-    onclick={() => onIncludeIgnored(!includeIgnored)}
-  >
-    <Icon name="eye" size={13} /><span class="file-group-action">忽略</span>
-  </button>
-  <button
-    type="button"
-    class="icon-btn sm"
-    aria-label="重新读取目录"
-    title="按当前代次重新读取已展开的目录"
-    disabled={loading}
-    onclick={onRefresh}
-  >
-    <Icon name="refresh" size={14} />
-  </button>
+  </div>
 </div>
 
-{#if query}
-  <p class="file-tree-status" class:danger={Boolean(filterError)} role={filterError ? "alert" : "status"}>
-    {#if filterError}
-      全仓库补齐失败：{filterError}只显示已展开范围内的匹配。
-    {:else if filterBusy}
-      正在全仓库补齐匹配……
-    {:else if filterTruncated}
-      全仓库匹配过多，补齐结果不完整（后端已截断）。
-    {:else if filterLimited}
-      全仓库补齐只显示前 {FILTER_EXTRA_LIMIT} 条，还有匹配没有列出。
-    {:else if changedOnly}
-      仅在改动文件里匹配；改动树不需要全仓库补齐。
-    {:else}
-      已展开的目录本地过滤，其余由全仓库补齐。
-    {/if}
+{#if filterNote}
+  <p class="file-tree-status" class:danger={filterNote.danger} role={filterNote.danger ? "alert" : "status"}>{filterNote.text}</p>
+{:else if includeIgnored}
+  <p class="file-tree-status" role="status">
+    <Icon name="eye" size={12} /><span>正在显示被忽略的文件</span>
+    <button type="button" class="link-btn" onclick={() => onIncludeIgnored(false)}>隐藏</button>
   </p>
 {/if}
 
@@ -366,9 +437,14 @@
         <span class="empty-icon err"><Icon name="alert-circle" size={22} /></span>
         <strong>无法读取这个目录</strong>
         <p>{failure}</p>
+        <button type="button" class="btn btn-secondary btn-sm" onclick={onRefresh}>重新读取</button>
       </div>
     {:else if loading}
-      <div class="empty compact" role="status"><span class="spinner"></span><p>正在读取目录</p></div>
+      <div class="file-tree-skeleton" role="status" aria-label="正在读取目录">
+        {#each [62, 48, 70, 40, 56, 66] as width, index (index)}
+          <span style={`width:${width}%`}></span>
+        {/each}
+      </div>
     {:else if query}
       {#if filterError}
         <div class="empty compact" role="alert">
@@ -392,22 +468,24 @@
         </div>
       {:else if changedOnly}
         <div class="empty compact">
-          <span class="empty-icon"><Icon name="folder" size={22} /></span>
+          <span class="empty-icon"><Icon name="filter" size={22} /></span>
           <strong>改动列表里没有匹配的路径</strong>
           <p>仅改动模式只在当前有改动的文件里匹配；关掉它才是全仓库范围。</p>
         </div>
       {:else}
         <div class="empty compact">
-          <span class="empty-icon"><Icon name="folder" size={22} /></span>
+          <span class="empty-icon"><Icon name="filter" size={22} /></span>
           <strong>没有匹配的路径</strong>
-          <p>已展开的目录里没有匹配；全仓库的补齐也没有找到更多路径。</p>
+          <p>已展开的目录与全仓库补齐都没有找到匹配。</p>
+          <button type="button" class="btn btn-secondary btn-sm" onclick={() => onQuery("")}>清空筛选</button>
         </div>
       {/if}
     {:else if changedOnly}
       <div class="empty compact">
-        <span class="empty-icon"><Icon name="folder" size={22} /></span>
+        <span class="empty-icon ok"><Icon name="check" size={22} /></span>
         <strong>当前没有改动的文件</strong>
-        <p>关掉「只看有改动的文件」即可浏览完整仓库。</p>
+        <p>工作区是干净的。</p>
+        <button type="button" class="btn btn-secondary btn-sm" onclick={() => onChangedOnly?.(false)}>浏览完整仓库</button>
       </div>
     {:else if includeIgnored}
       <div class="empty compact">
@@ -419,17 +497,16 @@
       <div class="empty compact">
         <span class="empty-icon"><Icon name="folder" size={22} /></span>
         <strong>这里没有可显示的文件</strong>
-        <p>可能是空仓库或空目录，也可能只剩被 .gitignore 忽略的文件——它们默认不列出。</p>
+        <p>可能是空仓库，也可能只剩被 .gitignore 忽略的文件——它们默认不列出。</p>
         <button
           type="button"
           class="btn btn-secondary btn-sm"
           disabled={disabled}
-          title={disabled ? BUSY_REASON : "显示被 .gitignore 忽略的文件；不会改动忽略规则"}
+          title={disabled ? BUSY_REASON : "只影响本次浏览，不会改动忽略规则"}
           onclick={() => onIncludeIgnored(true)}
         >
           显示忽略文件
         </button>
-        <p class="file-tree-note">只影响本次浏览，不会改动仓库的忽略规则。</p>
       </div>
     {/if}
   {:else}
@@ -437,24 +514,25 @@
       {#each visible as row, index (row.path)}
         {@const top = (range.start + index) * FILE_ROW_HEIGHT}
         {@const status = rowStatus(row)}
+        {@const isFile = !row.expandable && !row.segment && row.kind === "file"}
         <div
           class="file-tree-row"
           class:segment={row.segment}
           class:ignored={row.ignored}
+          class:deleted={row.deleted}
           class:active={row.path === selectedPath}
+          data-tone={status?.tone}
           role="treeitem"
           aria-selected={row.path === selectedPath}
           aria-level={row.depth + 1}
           aria-expanded={row.expandable ? row.expanded : undefined}
           tabindex="-1"
-          style={`top:${top}px;height:${FILE_ROW_HEIGHT}px;padding-left:${8 + row.depth * 14}px`}
+          style={`top:${top}px;height:${FILE_ROW_HEIGHT}px`}
           title={rowHint(row)}
           onclick={() => {
-            if (row.extra) onLocate?.(row.path);
-            else onSelect(row);
+            activate(row);
             focusList();
           }}
-          ondblclick={() => open(row)}
           onkeydown={(event) => {
             // 行不进入 Tab 序（焦点在树上），这里只满足可聚焦行件的键盘语义，避免与树的键盘重复处理。
             if (event.key === "Enter") {
@@ -466,13 +544,16 @@
           oncontextmenu={(event) => {
             event.preventDefault();
             onSelect(row);
+            moreOpen = false;
             menu = { x: event.clientX, y: event.clientY, entries: menuEntries(row), label: `${row.path} 的操作` };
           }}
         >
+          {#if row.depth > 0}<span class="tree-indent" style={`width:${row.depth * INDENT}px`} aria-hidden="true"></span>{/if}
           {#if row.expandable}
             <button
               type="button"
               class="tree-chevron"
+              class:open={row.expanded}
               aria-label={row.expanded ? `折叠 ${row.label}` : `展开 ${row.label}`}
               tabindex="-1"
               onclick={(event) => {
@@ -480,19 +561,14 @@
                 onToggle(row);
               }}
             >
-              <Icon name={row.expanded ? "chevron-down" : "chevron-right"} size={12} />
+              <Icon name="chevron-right" size={12} />
             </button>
           {:else}
             <span class="tree-chevron" aria-hidden="true"></span>
           {/if}
-          <Icon name={rowIcon(row)} size={14} />
-          {#if status}
-            <span
-              class={`st ${status.tone}`}
-              title={status.count ? `${status.label} · 目录下 ${status.count} 个改动文件` : status.label}
-              aria-label={status.count ? `${status.label}，目录下 ${status.count} 个改动文件` : status.label}
-            >{status.letter}</span>
-          {/if}
+          <span class={`tree-icon ${isFile ? `ft-${fileTone(row.path)}` : row.expandable || row.segment ? "ft-dir" : "ft-plain"}`}>
+            <Icon name={rowIcon(row)} size={14} />
+          </span>
           <span class="tree-name">{row.label}</span>
           {#if row.splittable}
             <button
@@ -509,14 +585,24 @@
               <Icon name="list" size={12} />
             </button>
           {/if}
-          {#if row.deleted}<span class="tree-tag danger" title="工作区里没有这个文件，只能看改动或历史">已删除</span>{/if}
-          {#if row.extra}<span class="tree-tag" title="匹配路径还没展开：点开时逐级读取">全仓库</span>{/if}
-          {#if row.ignored}<span class="tree-tag" title="被 .gitignore 忽略">忽略</span>{/if}
-          {#if row.loading}<span class="spinner muted" aria-hidden="true"></span>{/if}
-          {#if row.error}<span class="tree-note danger">{row.error}</span>{/if}
-          {#if row.failure}<span class="tree-note danger" title={row.failure}>读取失败</span>{/if}
-          {#if row.empty}<span class="tree-note">空目录</span>{/if}
-          {#if !row.expandable && row.size !== null}<span class="tree-size">{formatBytes(row.size)}</span>{/if}
+          <span class="tree-trail">
+            {#if row.loading && row.node.children === null}<span class="spinner muted" aria-hidden="true" title="正在读取目录"></span>{/if}
+            {#if row.deleted}<span class="tree-tag danger" title="工作区里没有这个文件，只能看改动或历史">已删除</span>{/if}
+            {#if row.extra}<span class="tree-tag" title="匹配路径还没展开：点开时逐级读取">全仓库</span>{/if}
+            {#if row.ignored}<span class="tree-tag" title="被 .gitignore 忽略">忽略</span>{/if}
+            {#if row.error}<span class="tree-note danger">{row.error}</span>{/if}
+            {#if row.failure}<span class="tree-note danger" title={row.failure}>读取失败</span>{/if}
+            {#if row.empty}<span class="tree-note">空目录</span>{/if}
+            {#if status && row.expandable}
+              <span
+                class={`tree-dot ${status.tone}`}
+                title={`${status.label} · 目录下 ${status.count ?? 0} 个改动文件`}
+                aria-label={`${status.label}，目录下 ${status.count ?? 0} 个改动文件`}
+              ></span>
+            {:else if status}
+              <span class={`st ${status.tone}`} title={status.label} aria-label={status.label}>{status.letter}</span>
+            {/if}
+          </span>
         </div>
       {/each}
     </div>
@@ -524,5 +610,5 @@
 </div>
 
 {#if menu}
-  <ContextMenu request={menu} onClose={() => (menu = null)} />
+  <ContextMenu request={menu} onClose={closeMenu} />
 {/if}

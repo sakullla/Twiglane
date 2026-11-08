@@ -107,7 +107,8 @@ describe("代码页", () => {
     const { container } = render(FileContent, { props: props() as never });
     await waitFor(() => expect(container.querySelector('[data-file-line="1"]')).toBeTruthy());
     repositoryFileContent.mockResolvedValueOnce(text({ offset: 119, lines: ["const target = 1;"], nextOffset: 120 }));
-    await fireEvent.click(screen.getByRole("button", { name: "跳到行" }));
+    await fireEvent.click(screen.getByRole("button", { name: "更多文件操作" }));
+    await fireEvent.click(await screen.findByRole("menuitem", { name: "跳到行" }));
     const input = await screen.findByLabelText("跳到行号");
     await fireEvent.input(input, { target: { value: "120" } });
     await fireEvent.keyDown(input, { key: "Enter" });
@@ -227,9 +228,13 @@ describe("真实状态与读取边界", () => {
     repositoryFileContent.mockResolvedValue(text({ path: "README.md" }));
     const onFileHistory = vi.fn();
     render(FileContent, { props: props({ path: "README.md", onFileHistory }) as never });
-    await waitFor(() => expect(screen.getByText(/该文件当前没有未暂存或已暂存的改动/)).toBeTruthy());
-    // 说明只是状态，不是禁用：历史入口还在工具条上，点了就带上这个路径。
-    await fireEvent.click(screen.getByRole("button", { name: "此文件历史" }));
+    // 无改动是这个文件的真实状态：在底部状态条就地说明，不另起一条提示占正文。
+    await waitFor(() => expect(screen.getByText(/无本地改动/)).toBeTruthy());
+    expect(screen.queryByLabelText(/Git 状态/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /查看(未|已)暂存的改动/ })).toBeNull();
+    // 说明只是状态，不是禁用：历史入口在「更多」里，点了就带上这个路径。
+    await fireEvent.click(screen.getByRole("button", { name: "更多文件操作" }));
+    await fireEvent.click(await screen.findByRole("menuitem", { name: "查看文件历史" }));
     expect(onFileHistory).toHaveBeenCalledWith("README.md");
   });
 

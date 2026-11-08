@@ -146,7 +146,9 @@ describe("改动与文件的双向导航", () => {
 
     await fireEvent.click(screen.getByRole("button", { name: "查看未暂存的改动" }));
     expect(onOpenDiff).toHaveBeenLastCalledWith("src/app.ts", "unstaged");
-    await fireEvent.click(screen.getByRole("button", { name: "查看已暂存的改动" }));
+    // 两侧都有改动时，主按钮去未暂存一侧，已暂存一侧在「更多」里。
+    await fireEvent.click(screen.getByRole("button", { name: "更多文件操作" }));
+    await fireEvent.click(await screen.findByRole("menuitem", { name: "查看已暂存的改动" }));
     expect(onOpenDiff).toHaveBeenLastCalledWith("src/app.ts", "staged");
   });
 

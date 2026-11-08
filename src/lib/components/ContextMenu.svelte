@@ -10,6 +10,8 @@
     /** 不可用时的原因：作为条目提示显示，条目本身不可点。 */
     disabledReason?: string;
     danger?: boolean;
+    /** 开关类条目：给出时按 menuitemcheckbox 渲染，右侧显示勾选状态。 */
+    checked?: boolean;
     run: () => void;
   }
 
@@ -201,7 +203,8 @@
         class="menu-item context-item"
         class:danger={entry.danger}
         class:active={index === active}
-        role="menuitem"
+        role={entry.checked === undefined ? "menuitem" : "menuitemcheckbox"}
+        aria-checked={entry.checked === undefined ? undefined : entry.checked}
         tabindex="-1"
         data-entry={index}
         aria-disabled={entry.disabledReason ? "true" : undefined}
@@ -220,6 +223,9 @@
           {#if entry.disabledReason}<small id={`context-reason-${index}`}>{entry.disabledReason}</small>{/if}
         </span>
         {#if entry.shortcut}<kbd>{entry.shortcut}</kbd>{/if}
+        {#if entry.checked !== undefined}
+          <span class="context-check" class:on={entry.checked} aria-hidden="true"><Icon name="check" size={13} /></span>
+        {/if}
       </button>
     {/if}
   {/each}

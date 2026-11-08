@@ -10,7 +10,8 @@
    * 这里的按钮和 file.prev / file.next / file.back / file.forward 读同一份状态，
    * 所以禁用原因不会在按钮与命令面板之间分叉。
    */
-  let { nav }: { nav: FileNavState } = $props();
+  /** steps=false 时只保留后退/前进/最近打开：文件视图里「上一个/下一个」按树序走，用快捷键即可。 */
+  let { nav, steps = true }: { nav: FileNavState; steps?: boolean } = $props();
   let prev = $state<HTMLButtonElement | null>(null);
   let next = $state<HTMLButtonElement | null>(null);
   let recentOpen = $state(false);
@@ -97,6 +98,7 @@
       </div>
     {/if}
   {/if}
+  {#if steps}
   <button
     type="button"
     class="icon-btn sm"
@@ -125,5 +127,6 @@
       aria-live="polite"
       aria-label={`第 ${nav.index + 1} / ${nav.total} 个文件`}
     >{nav.index + 1}/{nav.total}</span>
+  {/if}
   {/if}
 </div>

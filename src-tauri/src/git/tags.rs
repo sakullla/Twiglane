@@ -370,6 +370,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tag_list_orders_versions_numerically_highest_first() {
+        let fixture = crate::test_support::git_fixture("tag-version-order");
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["commit", "--allow-empty", "-m", "initial"]);
+        // 混合轻量与附注标签；指向同一提交，排序不能依赖提交时间。
+        for name in [
+            "v0.2.0",
+            "v0.2.1",
+            "v0.2.2",
+            "v0.2.9",
+            "v0.10.0",
+            "release-2",
+        ] {
+            git(&repo, &["tag", name]);
+        }
+        for name in [
+            "v0.2.10",
+            "v0.2.11",
+            "v0.2.14",
+            "v0.2.15",
+            "v1.0.0",
+            "release-10",
+        ] {
+            git(&repo, &["tag", "-a", name, "-m", "release"]);
+        }
+        // 显式版本排序不被仓库原先的默认字符串排序覆盖。
+        git(&repo, &["config", "tag.sort", "refname"]);
+        let backend = std::sync::Arc::new(fixture.backend());
+        let path = repo.to_string_lossy();
+        let opened = open_repository(&backend, &path, 1).await.unwrap();
+        let state = tag_state(&backend, &path, opened.generation, 2)
+            .await
+            .unwrap();
+        let names: Vec<&str> = state.tags.iter().map(|tag| tag.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "v1.0.0",
+                "v0.10.0",
+                "v0.2.15",
+                "v0.2.14",
+                "v0.2.11",
+                "v0.2.10",
+                "v0.2.9",
+                "v0.2.2",
+                "v0.2.1",
+                "v0.2.0",
+                "release-10",
+                "release-2",
+            ]
+        );
+        assert_eq!(state.generation, opened.generation);
+        backend.watches.stop();
+    }
+
+    #[tokio::test]
     async fn remote_tag_state_reads_without_touching_generation() {
         let fixture = crate::test_support::git_fixture("tag-remote");
         let repo = fixture.repo("demo");

@@ -625,7 +625,7 @@ pub fn tag_list_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     let format = "%(refname:short)\u{1f}%(objectname)\u{1f}%(*objectname)\u{1f}%(creatordate:unix)\u{1f}%(subject)".to_string();
     args.extend([
         OsString::from("for-each-ref"),
-        OsString::from("--sort=refname"),
+        OsString::from("--sort=-version:refname"),
         OsString::from("--format"),
         OsString::from(format),
         OsString::from("refs/tags"),

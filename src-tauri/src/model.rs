@@ -195,6 +195,8 @@ pub struct DiffHunk {
 pub struct DiffResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<crate::git::preview::PreviewSources>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<crate::git::preview::PreviewSources>,
     pub generation: u64,
     pub path: String,
     pub staged: bool,

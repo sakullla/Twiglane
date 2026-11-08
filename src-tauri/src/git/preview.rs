@@ -57,7 +57,7 @@ pub struct FilePreview {
 }
 
 impl FilePreview {
-    fn message(kind: &str, message: &str, generation: u64) -> Self {
+    pub(super) fn message(kind: &str, message: &str, generation: u64) -> Self {
         Self {
             generation,
             kind: kind.into(),
@@ -332,7 +332,7 @@ pub async fn file_preview(
     Ok(preview)
 }
 
-fn decode(name: &str, bytes: &[u8], generation: u64) -> FilePreview {
+pub(super) fn decode(name: &str, bytes: &[u8], generation: u64) -> FilePreview {
     let mut result = FilePreview::message("unsupported", "此格式暂不支持内容预览。", generation);
     result.size = Some(bytes.len() as u64);
     if bytes.len() > MAX_BYTES {

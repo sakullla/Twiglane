@@ -175,6 +175,19 @@ pub async fn load_diff_with_context(
             }),
         });
     }
+    if crate::git::document::is_markdown(relative) || original.is_some_and(crate::git::document::is_markdown) {
+        let patch = String::from_utf8_lossy(raw);
+        response.document = Some(crate::git::preview::PreviewSources {
+            repository: root.to_string_lossy().into_owned(),
+            old: (!untracked && !patch.lines().any(|line| line == "--- /dev/null" || line.starts_with("new file mode "))).then(|| crate::git::preview::PreviewSource {
+                revision: if staged { "HEAD" } else { "index" }.into(),
+                path: original.filter(|value| !value.is_empty()).unwrap_or(relative).into(),
+            }),
+            new: (!patch.lines().any(|line| line == "+++ /dev/null" || line.starts_with("deleted file mode "))).then(|| crate::git::preview::PreviewSource {
+                revision: if staged { "index" } else { "worktree" }.into(), path: relative.into(),
+            }),
+        });
+    }
     Ok(response)
 }
 
@@ -644,6 +657,7 @@ pub(crate) fn response_from_diff(
         };
         return Ok(DiffResponse {
             preview: None,
+            document: None,
             generation,
             path: relative.to_string(),
             staged,
@@ -682,6 +696,7 @@ pub(crate) fn response_from_diff(
     };
     Ok(DiffResponse {
         preview: None,
+        document: None,
         generation,
         path: relative.to_string(),
         staged,

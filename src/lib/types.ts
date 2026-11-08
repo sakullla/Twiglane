@@ -111,6 +111,26 @@ export interface DiffHunk {
 
 export interface PreviewSource { revision: string; path: string }
 export interface PreviewSources { repository: string; old: PreviewSource | null; new: PreviewSource | null }
+/** HEAD is returned as a fixed commit OID. Reuse index snapshot for all linked reads;
+ * a changed index rejects the session as stale instead of silently switching versions. */
+export interface DocumentSource extends PreviewSource { snapshot?: string | null }
+export interface RepositoryDocument {
+  generation: number;
+  source: DocumentSource;
+  kind: RepositoryFileKind | "tooLarge";
+  size: number;
+  /** Pass this as expectedVersion for subsequent pages; a mismatch rejects as stale. */
+  version: string | null;
+  /** Original UTF-8 document, including line endings; only complete=true is renderable. */
+  text: string | null;
+  complete: boolean;
+  offset: number;
+  lines: string[];
+  nextOffset: number;
+  hasMore: boolean;
+  truncated: boolean;
+  message: string | null;
+}
 export interface FilePreview {
   generation: number;
   kind: "missing" | "unsupported" | "error" | "image" | "archive" | "lfs";
@@ -266,6 +286,8 @@ export interface RepositoryReviewToken {
 
 export interface DiffResponse {
   preview?: PreviewSources;
+  /** Explicit Markdown sides; independent of binary resource preview rendering. */
+  document?: PreviewSources;
   generation: number;
   path: string;
   staged: boolean;

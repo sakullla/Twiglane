@@ -79,7 +79,7 @@ fn reject_symlink_components(root: &Path, relative: &Path) -> Result<(), AppErro
     Ok(())
 }
 
-fn file_version(meta: &fs::Metadata) -> Option<String> {
+pub(super) fn file_version(meta: &fs::Metadata) -> Option<String> {
     let modified = meta
         .modified()
         .ok()?
@@ -513,7 +513,7 @@ fn strip_line_end(buffer: &mut Vec<u8>) {
 }
 
 /// 按行偏移读取一页文本；非 UTF-8、二进制、缺失与资源各自返回真实类型。
-fn read_text_page(
+pub(super) fn read_text_page(
     root: PathBuf,
     relative: PathBuf,
     offset: u64,

@@ -5,6 +5,8 @@ import type {
   BranchListing,
   DiffLineSelection,
   PreviewSource,
+  DocumentSource,
+  RepositoryDocument,
   FilePreview,
   CloneResult,
   HttpCredential,
@@ -254,6 +256,18 @@ export const api = {
   },
   filePreview: (path: string, source: PreviewSource, generation: number, download = false) =>
     invoke<FilePreview>("file_preview", { path, source, generation, download }),
+  repositoryDocument: (
+    path: string, source: DocumentSource, generation: number, requestId: number,
+    mode: "document" | "source" = "document", offset = 0, limit?: number, expectedVersion: string | null = null,
+  ) => invoke<RepositoryDocument>("repository_document", { path, source, generation, requestId, mode, offset, limit, expectedVersion }),
+  documentResource: (path: string, source: DocumentSource, generation: number, requestId: number) =>
+    invoke<FilePreview>("document_resource", { path, source, generation, requestId }),
+  openDocumentUrl: (url: string) => invoke<void>("open_document_url", { url }),
+  /** Explicit opt-in only; callers own requestId and cancel only their own image.
+   * Remote images are not repository versions: the returned FilePreview.generation is
+   * always 0, so accept/drop these results by requestId instead of generation. */
+  documentRemoteImage: (url: string, requestId: number) => invoke<FilePreview>("document_remote_image", { url, requestId }),
+  cancelDocumentResources: (requestId: number) => invoke<void>("cancel_document_resources", { requestId }),
   repositoryDirectory: (
     path: string,
     relative: string,

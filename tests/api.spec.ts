@@ -17,6 +17,28 @@ describe("Tauri 命令参数", () => {
     invoke.mockClear();
   });
 
+  it("文档读取保留来源快照、分页版本与逐请求资源取消", async () => {
+    const source = { revision: "index", path: "docs/中文 guide.md", snapshot: "a".repeat(64) };
+    await api.repositoryDocument("/repo", source, 8, 501);
+    expect(invoke).toHaveBeenLastCalledWith("repository_document", {
+      path: "/repo", source, generation: 8, requestId: 501,
+      mode: "document", offset: 0, limit: undefined, expectedVersion: null,
+    });
+    await api.repositoryDocument("/repo", source, 8, 502, "source", 400, 100, "blob-version");
+    expect(invoke).toHaveBeenLastCalledWith("repository_document", {
+      path: "/repo", source, generation: 8, requestId: 502,
+      mode: "source", offset: 400, limit: 100, expectedVersion: "blob-version",
+    });
+    await api.documentResource("/repo", source, 8, 503);
+    expect(invoke).toHaveBeenLastCalledWith("document_resource", { path: "/repo", source, generation: 8, requestId: 503 });
+    await api.openDocumentUrl("https://example.com/doc#标题");
+    expect(invoke).toHaveBeenLastCalledWith("open_document_url", { url: "https://example.com/doc#标题" });
+    await api.documentRemoteImage("https://example.com/image.png", 504);
+    expect(invoke).toHaveBeenLastCalledWith("document_remote_image", { url: "https://example.com/image.png", requestId: 504 });
+    await api.cancelDocumentResources(504);
+    expect(invoke).toHaveBeenLastCalledWith("cancel_document_resources", { requestId: 504 });
+  });
+
   it("仓库操作使用 requestId，匹配 command 的 camelCase", async () => {
     await api.addRepository("/repo", 4);
     await api.createRepository("/repo", 5);

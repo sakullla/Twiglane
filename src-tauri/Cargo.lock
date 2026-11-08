@@ -4589,6 +4589,8 @@ dependencies = [
  "imagesize",
  "notify",
  "regex",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

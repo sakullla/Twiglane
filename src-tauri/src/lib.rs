@@ -99,6 +99,11 @@ pub fn run() {
             refresh_status,
             load_diff,
             file_preview,
+            repository_document,
+            document_resource,
+            open_document_url,
+            document_remote_image,
+            cancel_document_resources,
             repository_directory,
             repository_file_content,
             repository_path_search,
@@ -888,6 +893,68 @@ async fn repository_directory(
         request_id,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+async fn repository_document(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    source: crate::git::document::DocumentSource,
+    generation: u64,
+    request_id: u64,
+    mode: String,
+    offset: u64,
+    limit: Option<usize>,
+    expected_version: Option<String>,
+) -> Result<crate::git::document::RepositoryDocument, AppError> {
+    crate::git::document::repository_document(
+        state.inner(),
+        &path,
+        &source,
+        generation,
+        request_id,
+        &mode,
+        offset,
+        limit,
+        expected_version.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn document_resource(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    source: crate::git::document::DocumentSource,
+    generation: u64,
+    request_id: u64,
+) -> Result<crate::git::preview::FilePreview, AppError> {
+    crate::git::document::document_resource(state.inner(), &path, &source, generation, request_id)
+        .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn open_document_url(app: AppHandle, url: String) -> Result<(), AppError> {
+    use tauri_plugin_opener::OpenerExt;
+    let url = crate::git::document::validate_web_url(&url)?;
+    app.opener()
+        .open_url(url.as_str(), None::<&str>)
+        .map_err(|_| AppError::new("document_url", "无法打开系统浏览器。"))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn document_remote_image(
+    state: State<'_, Arc<Backend>>,
+    url: String,
+    request_id: u64,
+) -> Result<crate::git::preview::FilePreview, AppError> {
+    crate::git::document::document_remote_image(state.inner(), &url, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn cancel_document_resources(request_id: u64) {
+    crate::git::document::cancel_document_resources(request_id);
 }
 
 #[tauri::command(rename_all = "camelCase")]

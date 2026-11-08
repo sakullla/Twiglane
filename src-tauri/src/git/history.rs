@@ -452,10 +452,23 @@ async fn diff_file_between(
     if !as_text && crate::git::preview::wants_preview(relative, raw) {
         response.preview = Some(crate::git::preview::PreviewSources {
             repository: root.to_string_lossy().into_owned(),
-            old: selected.map(|revision| crate::git::preview::PreviewSource {
-                revision, path: file.original_path.as_deref().unwrap_or(relative).into(),
+            old: selected.as_ref().map(|revision| crate::git::preview::PreviewSource {
+                revision: revision.clone(), path: file.original_path.as_deref().unwrap_or(relative).into(),
             }),
-            new: Some(crate::git::preview::PreviewSource { revision: oid, path: relative.into() }),
+            new: Some(crate::git::preview::PreviewSource { revision: oid.clone(), path: relative.into() }),
+        });
+    }
+    if crate::git::document::is_markdown(relative) || file.original_path.as_deref().is_some_and(crate::git::document::is_markdown) {
+        // 提交文件状态是 "added"/"deleted"/"renamed" 这样的名称（见 parse_name_status），
+        // 不是 diff 首字母；新增没有父提交侧，删除没有提交侧，都不提供正文来源。
+        let old = if file.status == "added" { None } else { selected.map(|revision| crate::git::preview::PreviewSource {
+            revision, path: file.original_path.as_deref().unwrap_or(relative).into(),
+        }) };
+        let new = (file.status != "deleted").then(|| crate::git::preview::PreviewSource { revision: oid, path: relative.into() });
+        response.document = Some(crate::git::preview::PreviewSources {
+            repository: root.to_string_lossy().into_owned(),
+            old,
+            new,
         });
     }
     Ok(response)

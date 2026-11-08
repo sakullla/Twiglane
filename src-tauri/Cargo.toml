@@ -28,6 +28,8 @@ notify = "8.2.1"
 regex = "1.13.1"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10.9"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde_json = "1"
 tauri = { version = "2.12.5", features = [] }
 tauri-plugin-dialog = "2.8.4"

@@ -1082,7 +1082,7 @@ describe("历史面板", () => {
 
     await waitFor(() => expect(screen.queryByText("正在读取提交中的文件")).toBeNull());
     expect(screen.queryByText("这些提交没有文件变化。")).toBeNull();
-    expect(screen.getByText(/提交详情读取失败。/)).toBeTruthy();
+    expect(await screen.findByText(/提交详情读取失败。/)).toBeTruthy();
     expect(screen.getByText(/未读取的提交没有计入文件范围和合计/)).toBeTruthy();
     const total = () => document.querySelector<HTMLElement>(".commit-files-head .commit-line-total");
     await waitFor(() => expect(total()).toBeTruthy());
@@ -1115,6 +1115,53 @@ describe("历史面板", () => {
     expect(screen.queryByText("这些提交没有文件变化。")).toBeNull();
     expect(document.querySelector(".commit-line-total")).toBeNull();
     expect(screen.getByText(/读取失败。/)).toBeTruthy();
+  });
+
+  it("多选边读边显示首份文件和差异，补齐详情不会重复读取已有差异", async () => {
+    const rows = [commit(0), commit(1), commit(2)];
+    commitFileDiff.mockResolvedValue({ ...diff, path: "demo.txt" });
+    historyPage.mockResolvedValue({ generation: 3, commits: rows, offset: 0, pageSize: 100, hasMore: false, state: "ok" });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    await waitFor(() => expect(commitDetail).toHaveBeenCalledOnce());
+    const pending = new Map<string, (value: unknown) => void>();
+    commitDetail.mockImplementation((_repo, oid) => new Promise((resolve) => pending.set(oid, resolve)));
+    await fireEvent.click(screen.getByRole("option", { name: /commit-2/ }), { shiftKey: true });
+    await waitFor(() => expect(pending.size).toBe(2));
+    const detailOf = (index: number) => ({
+      generation: 3, commit: rows[index], body: "", root: false, merge: false, selectedParent: "parent",
+      files: [{ path: "demo.txt", originalPath: null, status: "modified", additions: 2, deletions: 1 }],
+    });
+    pending.get(rows[1].oid)!(detailOf(1));
+    await screen.findByRole("listbox", { name: "提交中的文件列表" });
+    await waitFor(() => expect(document.querySelector(".union-block [data-diff-row]")).toBeTruthy());
+    expect(screen.getByText("已读取 1/3 个提交")).toBeTruthy();
+    expect(document.querySelector(".commit-line-total")).toBeNull();
+    expect(commitFileDiff.mock.calls.filter((call) => call[1] === rows[1].oid)).toHaveLength(1);
+    await waitFor(() => expect(pending.size).toBe(3));
+    const earlier = detailOf(0);
+    earlier.files.unshift({ ...earlier.files[0], path: "aaa.txt" });
+    pending.get(rows[0].oid)!(earlier);
+    pending.get(rows[2].oid)!(detailOf(2));
+    await waitFor(() => expect(document.querySelectorAll(".union-block")).toHaveLength(3));
+    expect(commitFileDiff.mock.calls.filter((call) => call[1] === rows[1].oid)).toHaveLength(1);
+    expect(commitFileDiff.mock.calls.every((call) => call[3] === "demo.txt")).toBe(true);
+  });
+
+  it("切换仓库时不拿旧选择向新仓库查询提交", async () => {
+    historyPage.mockResolvedValue({ generation: 3, commits: [commit(0)], offset: 0, pageSize: 100, hasMore: false, state: "ok" });
+    const onFailure = vi.fn();
+    const view = render(HistoryPanel, { props: { ...panelProps(), onFailure } });
+    await screen.findByRole("option", { name: /commit-0/ });
+    await waitFor(() => expect(commitDetail).toHaveBeenCalledOnce());
+    let finish!: (value: unknown) => void;
+    historyPage.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    commitDetail.mockClear();
+    await view.rerender({ ...panelProps(), onFailure, opened: { ...opened, summary: { name: "other", path: "/other" } } });
+    expect(commitDetail).not.toHaveBeenCalled();
+    finish({ generation: 3, commits: [commit(8)], offset: 0, pageSize: 100, hasMore: false, state: "ok" });
+    await waitFor(() => expect(commitDetail).toHaveBeenCalledWith("/other", commit(8).oid, null, 3, 1));
+    expect(onFailure).not.toHaveBeenCalled();
   });
 
   it("首次读取历史时只显示加载状态，不先报未选择或空历史", async () => {

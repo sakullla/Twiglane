@@ -102,9 +102,12 @@
   const diffReads = new LatestReadQueue();
   const multiDetailReads = new LatestBatchReadQueue();
   const multiDiffReads = new LatestBatchReadQueue();
+  let multiDiffScope = "";
+  let multiDiffCache = new Map<string, Promise<DiffResponse>>();
   onDestroy(() => {
     pageReads.close(); detailReads.close(); diffReads.close();
     multiDetailReads.close(); multiDiffReads.close();
+    multiDiffCache.clear();
   });
 
   /** 提交行两行排布（摘要 / 引用·作者·时间），52px；提交里的文件行与改动列表同为单行 30px。 */
@@ -613,7 +616,7 @@
   let selectedCommits = $derived(commits.filter((commit) => selectedIds.has(commit.oid)));
   let unionFiles = $derived(unionCommitFiles(multiDetails));
   /** 多提交的合计直接汇总并集文件：与逐文件累计一致，滚动只影响虚拟行，不收缩统计范围。 */
-  let unionLineTotals = $derived(commitLineTotals(unionFiles));
+  let unionLineTotals = $derived(multiLoading ? null : commitLineTotals(unionFiles));
   let unionActive = $derived(unionFiles.find((file) => file.path === multiFocus) ?? unionFiles[0] ?? null);
   let unionScroll = $state(0);
   let unionViewport = $state(0);
@@ -678,9 +681,24 @@
     activeQuery = seed;
   });
 
+  let loadedRepo: string | null = null;
   $effect(() => {
     if (!active) return;
     const repo = repoPath;
+    // 选择只属于产生它的仓库；先清空，不能等新列表返回后才换掉旧 oid。
+    untrack(() => {
+      if (loadedRepo === repo) return;
+      loadedRepo = repo;
+      selectedOids = [];
+      commits = [];
+      page = null;
+      detail = null;
+      detailError = null;
+      parentChoice = null;
+      manualPath = null;
+      multiFocus = null;
+      anchorOid = null;
+    });
     const generation = readGeneration;
     const relative = filePath;
     const q = activeQuery;
@@ -804,6 +822,7 @@
     void detailRetryTick;
     if (!oid) {
       detail = null;
+      detailError = null;
       commitDiff = null;
       detailLoading = false;
       return;
@@ -901,6 +920,7 @@
     multiLoading = true;
     void (async () => {
       const errors: string[] = [];
+      const completed: (CommitDetail | null)[] = [];
       try {
         const rows = await multiDetailReads.run(ids, async (oid) => {
           try {
@@ -910,9 +930,15 @@
             if (failure.code !== "cancelled" && failure.code !== "stale") errors.push(failure.message);
             return null;
           }
+        }, (row, index) => {
+          if (cancelled || opened.summary.path !== repo) return;
+          completed[index] = row;
+          multiDetails = completed.filter((item): item is CommitDetail => item != null);
+          // 后续提交补入新路径时，保持已经开始阅读的文件。
+          if (multiFocus === null) multiFocus = multiDetails[0]?.files[0]?.path ?? null;
+          if (row === null) multiFailed += 1;
         });
         if (cancelled || opened.summary.path !== repo) return;
-        multiDetails = rows.filter((row): row is CommitDetail => row !== null);
         multiFailed = rows.length - multiDetails.length;
         multiError = errors[0] ?? null;
       } catch (error) {
@@ -929,34 +955,55 @@
   });
 
   $effect(() => {
-    multiDiffs = [];
     if (!active || selectedOids.length < 2) {
+      multiDiffs = [];
+      multiDiffCache.clear();
+      multiDiffScope = "";
       return;
     }
     const file = unionActive?.path ?? null;
     const details = multiDetails;
     const repo = repoPath;
     const generation = readGeneration;
+    const scope = JSON.stringify([repo, generation, file]);
+    if (scope !== multiDiffScope) {
+      multiDiffs = [];
+      multiDiffScope = scope;
+      multiDiffCache = new Map();
+    }
+    const cache = multiDiffCache;
     if (!file) {
       multiDiffs = [];
       return;
     }
     const sources = details.filter((detail) => detail.files.some((item) => item.path === file));
+    const keys = new Set(sources.map((item) => JSON.stringify([item.commit.oid, item.selectedParent])));
+    for (const key of cache.keys()) if (!keys.has(key)) cache.delete(key);
     let cancelled = false;
+    const previous = untrack(() => new Map(multiDiffs.map((item) => [item.oid, item])));
+    const completed = sources.map((item) => previous.get(item.commit.oid));
+    const available = () => completed.filter((item): item is NonNullable<typeof item> => item !== undefined);
+    multiDiffs = available();
     void (async () => {
       try {
         const rows = await multiDiffReads.run(sources, async (detail) => {
           try {
-            const diff = await api.commitFileDiff(
-              repo,
-              detail.commit.oid,
-              detail.selectedParent,
-              file,
-              generation,
-              nextId(),
-              0,
-              0,
-            );
+            const key = JSON.stringify([detail.commit.oid, detail.selectedParent]);
+            let pending = cache.get(key);
+            if (!pending) {
+              pending = api.commitFileDiff(
+                repo,
+                detail.commit.oid,
+                detail.selectedParent,
+                file,
+                generation,
+                nextId(),
+                0,
+                0,
+              );
+              cache.set(key, pending);
+            }
+            const diff = await pending;
             return { oid: detail.commit.oid, summary: detail.commit.summary, diff, error: null as string | null };
           } catch (error) {
             return {
@@ -966,6 +1013,10 @@
               error: normalizeError(error).message,
             };
           }
+        }, (row, index) => {
+          if (cancelled) return;
+          completed[index] = row;
+          multiDiffs = available();
         });
         if (cancelled) return;
         multiDiffs = rows;
@@ -1746,12 +1797,13 @@
             <div class="commit-files-head">
               <span class="commit-files-title">变更文件</span>
               {#if !multiLoading}<span class="count">{unionFiles.length}</span>{/if}
+              {#if multiLoading}<span class="hint" role="status">已读取 {multiDetails.length + multiFailed}/{selectedOids.length} 个提交</span>{/if}
               {#if unionLineTotals}
                 <span class="spacer"></span>
                 {@render lineTotal(unionLineTotals, "所选提交合计", multiFailed)}
               {/if}
             </div>
-            {#if multiLoading}
+            {#if multiLoading && unionFiles.length === 0}
               <div class="empty compact" role="status" aria-busy="true">
                 <span class="empty-icon"><span class="spinner"></span></span>
                 <strong>正在读取提交中的文件</strong>
@@ -1826,7 +1878,7 @@
               </div>
             {/if}
             <div class="union-scroll" bind:this={unionHost}>
-              {#if multiLoading}
+              {#if multiLoading && !unionActive}
                 <div class="empty compact" role="status" aria-busy="true">
                   <span class="empty-icon"><span class="spinner"></span></span>
                   <strong>正在读取所选提交的详情</strong>

@@ -6,7 +6,7 @@ export class LatestBatchReadQueue {
   private closed = false;
   private current: { pump: () => void; cancel: () => void } | null = null;
 
-  run<T, R>(items: readonly T[], task: (item: T) => Promise<R>): Promise<R[]> {
+  run<T, R>(items: readonly T[], task: (item: T) => Promise<R>, onResult?: (result: R, index: number) => void): Promise<R[]> {
     this.cancel();
     return new Promise<R[]>((resolve, reject) => {
       const results: R[] = [];
@@ -31,11 +31,13 @@ export class LatestBatchReadQueue {
               if (this.current !== batch) return;
               results[index] = result;
               completed += 1;
+              onResult?.(result, index);
+              if (this.current !== batch) return;
               if (completed === items.length) {
                 this.current = null;
                 resolve(results);
               }
-            }, (error) => {
+            }).catch((error) => {
               if (this.current !== batch) return;
               this.current = null;
               results.length = 0;

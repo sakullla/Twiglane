@@ -9,6 +9,21 @@ function deferred<T>() {
 }
 
 describe("历史批量读取", () => {
+  it("逐项交付已完成结果，取消后迟到结果不再上报", async () => {
+    const queue = new LatestBatchReadQueue();
+    const pending = [deferred<number>(), deferred<number>()];
+    const progress = vi.fn();
+    const result = queue.run([0, 1], (index) => pending[index].promise, progress).catch((error) => error.code);
+    await Promise.resolve();
+    pending[1].resolve(10);
+    await vi.waitFor(() => expect(progress).toHaveBeenCalledWith(10, 1));
+    queue.cancel();
+    pending[0].resolve(0);
+    expect(await result).toBe("cancelled");
+    await Promise.resolve();
+    expect(progress).toHaveBeenCalledOnce();
+  });
+
   it("大选择最多并发两项，乱序完成仍按输入顺序返回", async () => {
     const queue = new LatestBatchReadQueue();
     const pending = Array.from({ length: 5 }, () => deferred<number>());

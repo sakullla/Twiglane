@@ -908,12 +908,12 @@ pub fn commit_header_command(git: &Path, root: &Path, oid: &str) -> (PathBuf, Ve
     (git.to_path_buf(), args)
 }
 
-pub fn commit_body_command(git: &Path, root: &Path, oid: &str) -> (PathBuf, Vec<OsString>) {
+pub fn commit_detail_command(git: &Path, root: &Path, oid: &str) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.extend([
         OsString::from("log"),
         OsString::from("-1"),
-        OsString::from("--format=%B"),
+        OsString::from("--pretty=format:%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1e%x00%B"),
         OsString::from(oid),
         OsString::from("--"),
     ]);

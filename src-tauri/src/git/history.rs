@@ -1,11 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::error::AppError;
 use crate::git::changes::response_from_diff;
 use crate::git::command::{
-    any_commit_command, commit_body_command, commit_diff_command, commit_header_command,
+    any_commit_command, commit_detail_command, commit_diff_command, commit_header_command,
     commit_numstat_command, diff_tree_command, history_details_command, history_log_command,
     ignored_files_command, local_branch_names_command, ref_labels_command, rev_parse_command,
     show_current_branch_command, stash_apply_command, stash_drop_command, stash_list_command,
@@ -40,10 +40,10 @@ const MAX_IGNORED_NAMES: usize = 20;
 const MAX_LABELS: usize = 32;
 const MAX_CONTAINING_BRANCHES: usize = 300;
 
-// 同一提交的每个文件都需要重命名信息。仅缓存最近一份文件目录，避免每点一次文件
-// 都重新 diff-tree 整个提交；generation 变化后失效，Git replace 等变化也不会复用。
+// 多提交浏览复用文件目录；按条目数和估算字节数淘汰，generation 变化后失效。
+const COMMIT_FILES_CACHE_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Default)]
-pub(crate) struct CommitFilesCache(Mutex<Option<CachedCommitFiles>>);
+pub(crate) struct CommitFilesCache(Mutex<VecDeque<CachedCommitFiles>>);
 
 struct CachedCommitFiles {
     root: PathBuf,
@@ -51,6 +51,7 @@ struct CachedCommitFiles {
     parent: Option<String>,
     generation: u64,
     files: Arc<Vec<CommitFileChange>>,
+    bytes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -139,16 +140,21 @@ pub async fn commit_detail(
     let root = repo_root(path)?;
     let oid = validate_oid(oid)?;
     let git = require_git(backend).await?;
-    let (header, generation) = read_log(
+    let (record, generation) = read_log(
         backend,
         &root,
         &git.path,
         generation,
         request_id,
-        commit_header_command(&git.path, &root, &oid),
+        commit_detail_command(&git.path, &root, &oid),
     )
     .await?;
-    let mut commits = parse_history_records(&header)?;
+    let separator = record
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or_else(|| AppError::new("history_failed", "提交详情不完整，未修改仓库。"))?;
+    let mut commits = parse_history_records(&record[..separator])?;
+    let body = bounded_body(&record[separator + 1..])?;
     let Some(mut commit) = commits.pop() else {
         return Err(AppError::new(
             "commit_missing",
@@ -164,14 +170,6 @@ pub async fn commit_detail(
     let (generation, labels) =
         load_labels(backend, &root, &git.path, generation, internal_request_id()).await?;
     attach_labels(std::slice::from_mut(&mut commit), &labels);
-    let (body_bytes, generation) = read_bytes(
-        backend,
-        &root,
-        generation,
-        internal_request_id(),
-        commit_body_command(&git.path, &root, &oid),
-    )
-    .await?;
     let selected = choose_parent(&commit, parent)?;
     let (files, generation) = load_commit_files(
         backend,
@@ -187,7 +185,7 @@ pub async fn commit_detail(
         root: commit.parents.is_empty(),
         merge: commit.parents.len() > 1,
         selected_parent: selected,
-        body: bounded_body(&body_bytes)?,
+        body,
         commit,
         files: files.as_ref().clone(),
     })
@@ -1212,18 +1210,21 @@ async fn load_commit_files(
         );
     }
     {
-        let cache = backend
+        let mut cache = backend
             .history_files
             .0
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(entry) = cache.as_ref().filter(|entry| {
+        if let Some(index) = cache.iter().position(|entry| {
             entry.root == root
                 && entry.oid == oid
                 && entry.parent.as_deref() == parent
                 && entry.generation == generation
         }) {
-            return Ok((entry.files.clone(), generation));
+            let entry = cache.remove(index).expect("cache index exists");
+            let files = entry.files.clone();
+            cache.push_back(entry);
+            return Ok((files, generation));
         }
     }
     let (output, mut generation) = read_output(
@@ -1259,17 +1260,43 @@ async fn load_commit_files(
     }
     apply_commit_sizes(backend, git, root, parent_oid, oid, generation, &mut parsed).await;
     let files = Arc::new(parsed);
-    *backend
+    let bytes = files
+        .iter()
+        .map(|file| {
+            std::mem::size_of::<CommitFileChange>()
+                + file.path.len()
+                + file.original_path.as_ref().map_or(0, String::len)
+        })
+        .sum::<usize>()
+        + root.as_os_str().len() * 2
+        + oid.len()
+        + parent.map_or(0, str::len);
+    let mut cache = backend
         .history_files
         .0
         .lock()
-        .unwrap_or_else(|error| error.into_inner()) = Some(CachedCommitFiles {
-        root: root.to_path_buf(),
-        oid: oid.to_string(),
-        parent: parent.map(str::to_string),
-        generation,
-        files: files.clone(),
+        .unwrap_or_else(|error| error.into_inner());
+    cache.retain(|entry| {
+        entry.root == root
+            && entry.generation == generation
+            && !(entry.oid == oid && entry.parent.as_deref() == parent)
     });
+    if bytes <= COMMIT_FILES_CACHE_BYTES {
+        while cache.len() >= 32
+            || cache.iter().map(|entry| entry.bytes).sum::<usize>() + bytes
+                > COMMIT_FILES_CACHE_BYTES
+        {
+            cache.pop_front();
+        }
+        cache.push_back(CachedCommitFiles {
+            root: root.to_path_buf(),
+            oid: oid.to_string(),
+            parent: parent.map(str::to_string),
+            generation,
+            files: files.clone(),
+            bytes,
+        });
+    }
     Ok((files, generation))
 }
 
@@ -2527,6 +2554,86 @@ mod tests {
             git_text(dir, &["status", "--porcelain=v2", "-z"]),
             git_text(dir, &["write-tree"])
         )
+    }
+
+    #[tokio::test]
+    async fn sixteen_commit_details_share_metadata_reads_and_keep_file_directories() {
+        let fixture = crate::test_support::git_fixture("history-multi-read");
+        let trace = fixture.path().join("git-trace.log");
+        let backend = fixture
+            .backend_with_extra_env(vec![("GIT_TRACE".into(), trace.as_os_str().to_os_string())]);
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        let mut ids = Vec::new();
+        for index in 0..16 {
+            fs::write(repo.join("file.txt"), format!("line {index}\n")).unwrap();
+            git(&repo, &["add", "."]);
+            git(
+                &repo,
+                &[
+                    "commit",
+                    "-m",
+                    &format!("commit-{index}"),
+                    "-m",
+                    &format!("正文 {index}"),
+                ],
+            );
+            ids.push(git_text(&repo, &["rev-parse", "HEAD"]));
+        }
+        let gen = generation(&backend, &repo);
+        let start = std::time::Instant::now();
+        for (index, oid) in ids.iter().enumerate() {
+            let detail =
+                commit_detail(&backend, &repo_key(&repo), oid, None, gen, index as u64 + 1)
+                    .await
+                    .unwrap();
+            assert_eq!(detail.commit.oid, *oid);
+            assert!(detail.body.contains(&format!("正文 {index}")));
+            assert_eq!(detail.files[0].path, "file.txt");
+        }
+        let metadata = fs::read_to_string(&trace).unwrap();
+        assert_eq!(
+            metadata
+                .lines()
+                .filter(|line| line.contains("built-in: git log "))
+                .count(),
+            16,
+            "每份详情用一次 log 同时读取头信息和正文"
+        );
+        for (index, oid) in ids.iter().enumerate() {
+            commit_file_diff(
+                &backend,
+                &repo_key(&repo),
+                oid,
+                None,
+                "file.txt",
+                gen,
+                100 + index as u64,
+                0,
+                0,
+                3,
+                false,
+            )
+            .await
+            .unwrap();
+        }
+        let trace = fs::read_to_string(&trace).unwrap();
+        assert_eq!(
+            trace
+                .lines()
+                .filter(|line| line.contains("built-in: git diff-tree "))
+                .count(),
+            16,
+            "逐提交读取差异时不重复扫描已读取的文件目录"
+        );
+        assert_eq!(
+            trace
+                .lines()
+                .filter(|line| line.contains("built-in: git diff --numstat "))
+                .count(),
+            16
+        );
+        eprintln!("16 commit details and diffs: {:?}", start.elapsed());
     }
 
     #[tokio::test]

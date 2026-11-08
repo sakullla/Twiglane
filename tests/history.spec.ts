@@ -305,6 +305,72 @@ describe("历史面板", () => {
     expect(historyPage).toHaveBeenCalledWith("/repo", "", 0, 3, 1);
   });
 
+  it("刷新（generation 变化但浏览条件不变）不把历史列表拉回顶部（R3）", async () => {
+    const commits = Array.from({ length: 100 }, (_, index) => commit(index));
+    historyPage.mockResolvedValue({
+      generation: 3,
+      query: "",
+      offset: 0,
+      pageSize: 100,
+      hasMore: false,
+      state: "ok",
+      commits,
+    });
+    const view = render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    const list = document.querySelector<HTMLElement>(".history-list")!;
+    expect(list).toBeTruthy();
+    // 给出视口高度并滚到列表中部，模拟用户已经向下浏览。
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 520 });
+    list.scrollTop = 1300;
+    await fireEvent.scroll(list);
+    expect(list.scrollTop).toBe(1300);
+
+    // 刷新：同一仓库、同样的搜索/筛选，只有 generation 从 3 变成 4（refreshStatus 后 App 会 bump）。
+    historyPage.mockResolvedValue({
+      generation: 4,
+      query: "",
+      offset: 0,
+      pageSize: 100,
+      hasMore: false,
+      state: "ok",
+      commits,
+    });
+    await view.rerender({ ...panelProps(), opened: { ...opened, generation: 4, snapshot: { ...opened.snapshot, generation: 4 } } });
+    await waitFor(() => expect(historyPage).toHaveBeenCalledWith("/repo", "", 0, 4, 1));
+    await tick();
+
+    // 同一个列表节点，滚动位置保留，没有被刷新拉回顶部。
+    expect(document.querySelector(".history-list")).toBe(list);
+    expect(list.scrollTop).toBe(1300);
+  });
+
+  it("切换搜索条件时历史列表回到顶部（与刷新区分）", async () => {
+    vi.useFakeTimers();
+    try {
+      const commits = Array.from({ length: 100 }, (_, index) => commit(index));
+      historyPage.mockResolvedValue({ generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits });
+      render(HistoryPanel, { props: panelProps() });
+      await vi.runAllTimersAsync();
+      const list = document.querySelector<HTMLElement>(".history-list")!;
+      Object.defineProperty(list, "clientHeight", { configurable: true, value: 520 });
+      list.scrollTop = 1300;
+      await fireEvent.scroll(list);
+      expect(list.scrollTop).toBe(1300);
+
+      // 真正改变浏览条件（搜索关键词）后应回到顶部。
+      historyPage.mockResolvedValue({ generation: 3, query: "needle", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits });
+      await fireEvent.input(screen.getByLabelText("搜索说明或提交哈希"), { target: { value: "needle" } });
+      await vi.advanceTimersByTimeAsync(300);
+      await vi.runAllTimersAsync();
+      expect(historyPage).toHaveBeenCalledWith("/repo", "needle", 0, 3, 1);
+      expect(list.scrollTop).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+
   it("搜索在停顿后把关键词交给全部历史，而不是立刻过滤", async () => {
     vi.useFakeTimers();
     try {
@@ -593,17 +659,17 @@ describe("历史面板", () => {
     await waitFor(() => expect(list.scrollTop, "切走再切回同一个浏览位置不回到顶部").toBe(320));
     expect(backToNewest().disabled, "回到浏览位置后按钮仍是可执行的「回到最新」").toBe(false);
 
-    // 内容 generation 变了（暂存、外部写入）就属于另一批数据，回到顶部是有意的。
+    // generation 变了（暂存、外部写入、刷新）但浏览条件没变：这是同一批浏览，刷新不该把列表拉回顶部（R3）。
     const bumped = { ...opened, generation: 4, snapshot: { ...opened.snapshot, generation: 4 } };
     await view.rerender({ ...panelProps(), opened: bumped, active: true });
     await waitFor(() => expect(historyPage).toHaveBeenCalledTimes(3));
-    await waitFor(() => expect(list.scrollTop, "内容 generation 变化后回到顶部").toBe(0));
+    await waitFor(() => expect(list.scrollTop, "generation 变化（刷新）不回到顶部").toBe(320));
 
     list.scrollTop = 160;
     await fireEvent.scroll(list);
     await waitFor(() => expect(list.scrollTop).toBe(160));
-    await view.rerender({ ...panelProps("notes.txt"), active: true });
-    await waitFor(() => expect(fileHistory).toHaveBeenCalledWith("/repo", "notes.txt", 0, 3, 1));
+    await view.rerender({ ...panelProps("notes.txt"), opened: bumped, active: true });
+    await waitFor(() => expect(fileHistory).toHaveBeenCalledWith("/repo", "notes.txt", 0, 4, 1));
     await waitFor(() => expect(list.scrollTop, "换了读取条件回到顶部").toBe(0));
   });
 

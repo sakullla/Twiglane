@@ -632,9 +632,11 @@
 .multi-stack .diff-toolbar-group { gap: var(--space-6); }
 .multi-stack .diff-file { overflow: hidden; }
 .multi-stack-count { overflow: hidden; text-overflow: ellipsis; }
-.diff-file { display: flex; align-items: center; gap: var(--space-8); min-width: 0; flex: 1; }
-.diff-file > .icon { color: var(--fg-subtle); }
-.diff-path { font-family: var(--mono); font-size: var(--text-sm); min-width: 40px; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 身份簇在本段内先裁切再让位：路径、侧别徽标、行数都收进这里，窄带里不许越过相邻分段
+   （语言标签在下一段）。overflow:hidden 让收缩后的内容在本段内截断，而不是压到隔壁段上。 */
+.diff-file { display: flex; align-items: center; gap: var(--space-8); min-width: 0; flex: 1 1 0; overflow: hidden; }
+.diff-file > .icon { color: var(--fg-subtle); flex: none; }
+.diff-path { font-family: var(--mono); font-size: var(--text-sm); min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .diff-path > bdi { unicode-bidi: isolate; }
 .diff-path .dir { color: var(--fg-subtle); }
 .diff-path strong { font-weight: var(--weight-semibold); color: var(--fg); }

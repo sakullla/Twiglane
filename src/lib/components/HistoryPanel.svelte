@@ -715,7 +715,9 @@
     const scopeName = activeScope;
     const problem = dateProblem();
     const filters = historyFilters(Boolean(relative));
-    const signature = [repo, generation, relative ?? "", q, scopeName, activeAuthor, activeSince, activeUntil, activePath, retryTick].join("\u0000");
+    // 回到顶部只看「浏览条件」是否变化（仓库、文件、搜索、范围、筛选、重试）；generation 只是
+    // 新鲜度令牌，刷新会改它但不改浏览条件，不能把它算进来，否则每次刷新都把列表拉回顶部（R3）。
+    const signature = [repo, relative ?? "", q, scopeName, activeAuthor, activeSince, activeUntil, activePath, retryTick].join("\u0000");
     const previousPage = untrack(() => page);
     const serial = ++loadSerial;
     appendStopped = false;

@@ -818,6 +818,27 @@ describe("主工作台", () => {
     expect(mocks.refreshStatus).toHaveBeenCalledTimes(1);
   });
 
+  it("刷新改动列表不把滚动位置拉回顶部（R3）", async () => {
+    renderApp();
+    await openRepo();
+    const list = document.querySelector<HTMLElement>(".file-list")!;
+    expect(list).toBeTruthy();
+    // 给出视口并滚到非零位置，模拟用户已经向下看过改动列表。
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 90 });
+    list.scrollTop = 60;
+    await fireEvent.scroll(list);
+    expect(list.scrollTop).toBe(60);
+
+    // ⌘R 刷新：refreshStatus 返回同一批文件（generation 会在 App 里变化）。
+    await press("r");
+    await waitFor(() => expect(mocks.refreshStatus).toHaveBeenCalled());
+    await tick();
+
+    // 同一个列表节点，滚动位置保留，刷新没有把它拉回顶部。
+    expect(document.querySelector(".file-list")).toBe(list);
+    expect(list.scrollTop).toBe(60);
+  });
+
   it("⌘B 隐藏左栏、⌘R 刷新、Esc 关闭命令面板", async () => {
     renderApp();
     await openRepo();

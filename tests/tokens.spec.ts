@@ -1338,6 +1338,32 @@ describe("改动链路的扫描顺序与状态语义（T3）", () => {
     expect(ruleBody(components, ".multi-stack-count")).toMatch(/text-overflow:\s*ellipsis/);
   });
 
+  it("单文件身份簇也先在本段内裁切再让位，路径可收缩到 0，不越过语言标签所在的下一段", () => {
+    // overflow:hidden 让路径/侧别/行数收缩后在本段内截断，而不是压到相邻分段上（语言标签在下一段）。
+    const file = ruleBody(components, ".diff-file");
+    expect(file).toMatch(/overflow:\s*hidden/);
+    expect(file).toMatch(/min-width:\s*0/);
+    // 路径是本段唯一可收缩的子项：下限必须是 0，不能再留 40px 地板，否则窄带里挤出相邻段。
+    const path = ruleBody(components, ".diff-path");
+    expect(path).toMatch(/min-width:\s*0/);
+    expect(path).toMatch(/flex:\s*0 1 auto/);
+    expect(path).toMatch(/text-overflow:\s*ellipsis/);
+    // 文件图标不参与收缩，避免被挤没。
+    expect(ruleBody(components, ".diff-file > .icon")).toMatch(/flex:\s*none/);
+  });
+
+  it("中间宽度先收语言文字再收侧别徽标，收缩阈值早于内容相撞", () => {
+    const layout = stripComments(read("src/styles/layout.css"));
+    // 语言标签在 760px 处收成纯图标（名称仍在 aria/title 里），早于 +N -N 计数与标签相撞。
+    const langCollapse = layout.match(/@container diff \(max-width:\s*(\d+)px\)\s*\{[^}]*\.lang-chip \.truncate[^}]*display:\s*none/);
+    expect(langCollapse, "语言文字应在中间宽度收起").toBeTruthy();
+    expect(Number(langCollapse![1])).toBeGreaterThanOrEqual(720);
+    // 侧别徽标（未暂存/已暂存）在 680px 处让位，颜色与行数仍保留语义。
+    const sideHide = layout.match(/@container diff \(max-width:\s*(\d+)px\)\s*\{[^}]*\.diff-side\s*\{\s*display:\s*none/);
+    expect(sideHide, "侧别徽标应在更窄时隐藏").toBeTruthy();
+    expect(Number(sideHide![1])).toBeGreaterThanOrEqual(640);
+  });
+
   it("文件列表的分区线画在表头上，不占行高、不改虚拟化", () => {
     const line = ruleBody(components, ".file-group::before");
     expect(line).toMatch(/position:\s*absolute/);

@@ -316,10 +316,10 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
 .diff-tool-empty { padding: var(--space-8); color: var(--fg-subtle); font-size: var(--text-sm); }
 
 /* 语言标签在窄工具条只留图标：名称仍在 aria-label 与悬停提示里；侧别让位给路径与统计。 */
-@container diff (max-width: 720px) {
+@container diff (max-width: 760px) {
   .diff-toolbar .lang-chip .truncate { display: none; }
   .diff-toolbar .lang-chip { padding: 0 var(--space-6); }
 }
-@container diff (max-width: 620px) {
+@container diff (max-width: 680px) {
   .diff-toolbar .diff-side { display: none; }
 }

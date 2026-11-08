@@ -2794,20 +2794,74 @@ describe("外壳里的 Markdown 版本阅读（R5）", () => {
     expect(document.querySelectorAll(".multi-file").length).toBe(2);
   });
 
-  it("任务弹窗打开时不叠一层阅读窗口，Esc 只关最上面那一层", async () => {
+  it("阅读窗口占层时 Ctrl/⌘+Enter 与 Alt+箭头都不落到背景，关闭后原选择与位置不变", async () => {
     withMarkdownDiff();
     render(App);
     await openRepo();
     await selectMarkdownDiff();
-    await press("k");
-    const palette = await screen.findByRole("dialog", { name: "命令面板" });
-    await fireEvent.input(within(palette).getByRole("combobox"), { target: { value: "设置" } });
-    await tick();
-    const option = within(palette).getAllByRole("option")[0];
-    await fireEvent.click(option);
-    await waitFor(() => expect(document.querySelector('[data-task-modal="settings"]')).toBeTruthy());
-    // 任务弹窗之下不会再叠一层阅读窗口。
+    // 先让「提交到本地」在按键前是真正可用的：README.md 已暂存，再把草稿填上。
+    const draftBox = screen.getByRole("textbox", { name: "提交说明草稿" }) as HTMLTextAreaElement;
+    await fireEvent.input(draftBox, { target: { value: "阅读窗口里按下的快捷键不该提交" } });
+    await waitFor(() => expect(draftBox.value).toContain("不该提交"));
+    const rowsBefore = document.querySelectorAll("[data-diff-row]").length;
+    // 位置：差异滚动位置也是「原样恢复」的一部分。
+    const scroller = document.querySelector<HTMLElement>(".diff-scroll")!;
+    scroller.scrollTop = 96;
+
+    const trigger = await screen.findByRole("button", { name: "阅读文档" });
+    await fireEvent.click(trigger);
+    const dialog = await screen.findByRole("dialog", { name: "阅读文档" });
     expect(document.querySelectorAll("[data-task-modal]")).toHaveLength(1);
+
+    // 阅读窗口是任务级 modal 层：Ctrl/⌘+Enter 不能再经外壳创建一次本地提交。
+    await press("Enter");
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    await tick();
+    expect(mocks.commitChanges, "阅读窗口写着只读，Ctrl+Enter 不能真的提交").not.toHaveBeenCalled();
+    // Alt+←/→ 也不能改掉 inert 底下的差异选中文件。
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", altKey: true, bubbles: true }));
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", altKey: true, bubbles: true }));
+    await tick();
+    expect(document.querySelector('.file-row[title="README.md"]')?.getAttribute("aria-selected")).toBe("true");
+    expect(dialog.isConnected, "快捷键没有把这一层换掉").toBe(true);
+    expect(mocks.stageFiles).not.toHaveBeenCalled();
+
+    // 关闭后焦点回到触发控件，底下的差异选择与内容位置都没有被这一层改过。
+    await fireEvent.click(within(dialog).getByRole("button", { name: "关闭" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "阅读文档" })).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+    expect(document.querySelector('.file-row[title="README.md"]')?.getAttribute("aria-selected")).toBe("true");
+    expect(document.querySelectorAll("[data-diff-row]").length).toBe(rowsBefore);
+    expect(document.querySelector<HTMLElement>(".diff-scroll")!.scrollTop).toBe(96);
+  });
+
+  it("阅读窗口打开后再打开任务弹窗：单槽只留一层，Esc 关闭后焦点回到阅读入口", async () => {
+    withMarkdownDiff();
+    render(App);
+    await openRepo();
+    await selectMarkdownDiff();
+    const trigger = await screen.findByRole("button", { name: "阅读文档" });
+    await fireEvent.click(trigger);
+    const reader = await screen.findByRole("dialog", { name: "阅读文档" });
+    expect(document.querySelectorAll("[data-task-modal]")).toHaveLength(1);
+
+    // 从标题栏进设置：openTask 先把阅读窗口从单槽收起，两层任务 modal 不会叠在一起。
+    // 背景已被 Modal 设为 inert/aria-hidden，这里直接派发点击来验证槽位行为（真实点击被 inert 挡住）。
+    const settingsEntry = document.querySelector<HTMLButtonElement>(".titlebar-settings")!;
+    expect(settingsEntry, "标题栏的设置入口仍在文档里").toBeTruthy();
+    await fireEvent.click(settingsEntry);
+    await waitFor(() => expect(document.querySelector('[data-task-modal="settings"]')).toBeTruthy());
+    expect(document.querySelectorAll("[data-task-modal]")).toHaveLength(1);
+    expect(document.querySelector("[data-task-modal]")?.getAttribute("data-task-modal")).toBe("settings");
+    expect(reader.isConnected, "阅读窗口已从单槽收起").toBe(false);
     expect(screen.queryByRole("dialog", { name: "阅读文档" })).toBeNull();
+
+    const modal = document.querySelector<HTMLElement>('[data-task-modal="settings"]')!;
+    // 收起阅读窗口不能把焦点丢在背景上：焦点要在新一层的卡片里。
+    expect(modal.contains(document.activeElement), "焦点进入设置弹窗").toBe(true);
+    await fireEvent.keyDown(modal, { key: "Escape" });
+    await waitFor(() => expect(document.querySelector("[data-task-modal]")).toBeNull());
+    // 被收起的那一层留下的来处就是归还目标：焦点回到「阅读文档」，不落到 body。
+    expect(document.activeElement).toBe(trigger);
   });
 });

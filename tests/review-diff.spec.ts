@@ -14,7 +14,7 @@ import {
   whitespaceOnlyHunks,
 } from "../src/lib/diff";
 import { lineSegments } from "../src/lib/syntax/segments";
-import type { CommitDetail, DiffResponse, OpenedRepository } from "../src/lib/types";
+import type { CommitDetail, DiffResponse, OpenedRepository, PreviewSources } from "../src/lib/types";
 
 const commitFileDiff = vi.hoisted(() => vi.fn());
 
@@ -496,6 +496,53 @@ describe("只读差异的窄工具条（R2）", () => {
       expect(screen.queryByRole("button", { name: /更多差异工具/ })).toBeNull();
     } finally {
       restore();
+    }
+  });
+
+  /**
+   * 宽度不变时 ResizeObserver 不会回调，靠 toolbarSignature 触发重测。
+   * 这里让「文本差异」刚好放得下（scrollWidth = clientWidth = FULL_MIN），
+   * 再把同一个差异换成带文档来源的 Markdown 差异并让内容实际变宽（多一个按钮）：
+   * 只有签名包含「阅读文档」这一项，才会重新测量并收敛到溢出菜单。
+   */
+  it("同宽度从文本差异切到 Markdown 差异时重新测量并收进溢出菜单", async () => {
+    const mdSides: PreviewSources = {
+      repository: "/repo",
+      old: { revision: "parent0", path: "src/a.ts" },
+      new: { revision: "abc123", path: "src/a.ts" },
+    };
+    // happy-dom 没有排版：工具条宽度固定在 FULL_MIN，内容宽度代表「多一个按钮会不会折行」。
+    let contentWidth = 1160;
+    const widthSpy = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains("diff-toolbar") ? 1160 : 0;
+    });
+    const scrollSpy = vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains("diff-toolbar") ? contentWidth : 0;
+    });
+    const onReadDocument = vi.fn();
+    try {
+      const view = render(DiffView, { props: { ...base(), onReadDocument } });
+      await tick();
+      // 起点：普通文本差异放得下，完整档没有溢出入口。
+      expect(screen.queryByRole("button", { name: "阅读文档" })).toBeNull();
+      expect(screen.queryByRole("button", { name: /更多差异工具/ })).toBeNull();
+
+      // 同宽度换成 Markdown 差异：多出的「阅读文档」把内容挤宽，ResizeObserver 收不到通知。
+      contentWidth = 1200;
+      await view.rerender({
+        ...base(),
+        diff: { ...base().diff, document: mdSides },
+        onReadDocument,
+      });
+      // 重测后按溢出自愈收敛：按钮不再直接露出，低频工具统一进溢出菜单。
+      await waitFor(() => expect(screen.queryByRole("button", { name: /更多差异工具/ })).toBeTruthy());
+      expect(screen.queryByRole("button", { name: "阅读文档" })).toBeNull();
+      await fireEvent.click(screen.getByRole("button", { name: /更多差异工具/ }));
+      const dialog = screen.getByRole("dialog", { name: "差异工具" });
+      expect(within(dialog).getByRole("option", { name: /阅读文档/ })).toBeTruthy();
+    } finally {
+      widthSpy.mockRestore();
+      scrollSpy.mockRestore();
     }
   });
 });

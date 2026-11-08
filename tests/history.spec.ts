@@ -2315,4 +2315,40 @@ describe("提交里的文档阅读与引用收起（R5）", () => {
     await fireEvent.click(screen.getByRole("button", { name: /展开提交引用/ }));
     expect(document.querySelectorAll(".commit-byline .ref-pill").length).toBeGreaterThan(1);
   });
+
+  it("收起引用后切到单引用提交，那个引用仍然可见，回到多引用提交仍可再展开", async () => {
+    const many = [
+      { name: "main", kind: "branch" as const, current: true },
+      { name: "origin/main", kind: "remote" as const, current: false },
+      { name: "v1.0", kind: "tag" as const, current: false },
+    ];
+    // 只有 1 个引用：最常见的就是「当前分支或单个 tag 指向该提交」。
+    const single = [{ name: "v2.0", kind: "tag" as const, current: false }];
+    const rows = [commit(0, { labels: many }), commit(1, { labels: single })];
+    historyPage.mockResolvedValue({ generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: rows });
+    commitDetail.mockImplementation(async (_repo: string, oid: string) => ({
+      generation: 3, commit: rows.find((row) => row.oid === oid) ?? rows[0], body: "", root: false, merge: false,
+      selectedParent: "parent", files: [{ path: "notes.txt", originalPath: null, status: "modified", additions: 1, deletions: 0 }],
+    }));
+    commitFileDiff.mockResolvedValue({ ...diff, path: "notes.txt" });
+    render(HistoryPanel, { props: panelProps() });
+    await fireEvent.click(await screen.findByRole("button", { name: "收起提交引用" }));
+    expect(document.querySelectorAll(".commit-byline .ref-pill").length).toBe(0);
+
+    // 单引用提交上收起状态不生效：标签照常显示，公开信息不会因为上一条提交的选择而消失。
+    await fireEvent.click(screen.getByRole("option", { name: /commit-1/ }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "commit-1" })).toBeTruthy());
+    const pills = document.querySelectorAll<HTMLElement>(".commit-byline .ref-pill");
+    expect(pills).toHaveLength(1);
+    expect(pills[0].textContent).toContain("v2.0");
+    // 单引用没有可收起的内容，因此不渲染开关；也没有「藏起来却点不出来」的状态。
+    expect(screen.queryByRole("button", { name: /提交引用/ })).toBeNull();
+
+    // 回到多引用提交：用户之前的收起状态仍在，开关能把引用重新展开。
+    await fireEvent.click(screen.getByRole("option", { name: /commit-0/ }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "commit-0" })).toBeTruthy());
+    expect(document.querySelectorAll(".commit-byline .ref-pill").length).toBe(0);
+    await fireEvent.click(screen.getByRole("button", { name: /展开提交引用/ }));
+    expect(document.querySelectorAll(".commit-byline .ref-pill").length).toBeGreaterThan(1);
+  });
 });

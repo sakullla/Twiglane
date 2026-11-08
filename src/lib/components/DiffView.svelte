@@ -568,7 +568,11 @@
   let moreLabel = $derived(
     pressedToolCount > 0 ? `更多差异工具（${pressedToolCount} 项已开启）` : "更多差异工具",
   );
-  /** 工具条内容变化（含选中行数、过滤状态）后重新量一次；宽度没变时 ResizeObserver 不会回调。 */
+  /**
+   * 工具条内容变化（含选中行数、过滤状态）后重新量一次；宽度没变时 ResizeObserver 不会回调。
+   * 「阅读文档」只在 Markdown 差异上有：从文本差异切到同宽度的 Markdown 差异会多一个按钮，
+   * 不重测就不会收敛，`.diff-toolbar` 的 flex-wrap 会多折一行而不是收进溢出菜单（R2）。
+   */
   let toolbarSignature = $derived(
     [
       tier,
@@ -579,6 +583,8 @@
       Boolean(onFileHistory),
       refreshVisible,
       fullFile,
+      inlineReadDocument,
+      Boolean(documentSides),
     ].join("|"),
   );
 

@@ -517,8 +517,9 @@
   /** 窄详情里文件列表在差异上方，可以收起，把高度全给差异。宽详情里没有这个开关。 */
   let filesCollapsed = $state(false);
   /**
-   * 引用胶囊是否收起：切换提交不重置，收起状态一直跟着用户的选择，
-   * 只在有多个引用时出现开关（单个引用没有可省的空间）。
+   * 引用胶囊是否收起：切换提交不重置，收起状态一直跟着用户的选择。
+   * 收起只在多引用时有意义：单引用的提交忽略收起状态，否则「当前分支指向它」这类
+   * 唯一标签会被永久藏掉且没有展开入口（开关在单引用时不渲染）。
    */
   let refsCollapsed = $state(false);
   /** 变更文件栏的宽度：拖动中间的分隔条调整，存在本机偏好里；渲染时给差异区至少留 MIN_DIFF_WIDTH。 */
@@ -1985,7 +1986,8 @@
                   {refsCollapsed ? `引用 ${pills.length}` : "收起引用"}
                 </button>
               {/if}
-              {#if !refsCollapsed}
+              <!-- 单引用提交不受收起状态影响：这里没有展开入口，藏起来就再也点不出来了。 -->
+              {#if !refsCollapsed || pills.length <= 1}
                 {#each pills as pill (`${pill.kind}:${pill.name}`)}
                   <span class={`ref-pill ${pill.kind}`} class:current={pill.current} title={pill.label} aria-label={pill.label}>
                     <Icon name={pill.kind === "tag" ? "tag" : pill.kind === "remote" ? "cloud" : "branch"} size={11} />

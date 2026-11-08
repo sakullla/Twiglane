@@ -244,6 +244,14 @@
    * trigger 是打开它的控件（差异工具条按钮、块标题按钮或溢出入口），关闭后焦点回到那里。
    */
   let documentRequest = $state<{ sources: PreviewSources; side: "old" | "new"; trigger: HTMLElement | null } | null>(null);
+  /**
+   * 任务级 modal 层是否占着单槽：任务弹窗与只读阅读窗口二选一。
+   *
+   * 阅读窗口和七个任务弹窗一样由 Modal 占层并把背景设为 inert，所以外壳也要把它当成一层：
+   * 键盘、命令分发与写入入口都用这一份判定，不逐个列举 documentRequest（漏一处就会让
+   * Ctrl+Enter 真的提交、Alt+箭头改掉底下的差异选择）。
+   */
+  let taskLayerOpen = $derived(taskModal !== null || documentRequest !== null);
   /** 阅读位置按「仓库 + 版本 + 路径」保存在这里，关闭再打开仍能接着读。 */
   const documentSession = createDocumentSession({ repository: () => opened?.summary.path ?? null });
   /** 从哪个任务 modal 跳过来的：例如从「分支与标签」打开合并，关闭合并时回到那里。 */
@@ -406,7 +414,9 @@
     workspaceView,
     taskModal,
     sidebarHidden,
-    writeLocked,
+    // 任务级 modal 层占着单槽时写动作同样不可用：命令可用性与执行 guard 读同一份判定，
+    // 否则面板/菜单里的「可用」会在阅读窗口下面成为一句不成立的话（R11）。
+    writeLocked: writeLocked || documentRequest !== null,
     // 只把写动作算作「正在写入」：pending 也承载差异续读（"diff"），
     // 把它算成写入会让读取期间的不可用原因失真（R11）。
     writing: pending !== null && pending !== "diff",
@@ -550,8 +560,25 @@
     if (typeof document !== "undefined") document.documentElement.dataset.theme = resolveTheme(next, systemDark);
   }
 
+  /**
+   * 会写 Git 的命令 id：任务级 modal 层（任务弹窗或只读阅读窗口）占着单槽时不执行。
+   * 只列真正写入的；查看、导航与主题命令仍可在弹窗自己的界面里用。
+   */
+  const WRITE_COMMANDS = new Set([
+    "commit.local",
+    "commit.push",
+    "stage.all",
+    "unstage.all",
+    "sync.fetch",
+    "sync.pull",
+    "sync.push",
+  ]);
+
   /** 命令执行的唯一入口：四个入口都调它，结果因此一致（R11）。 */
   function runCommand(id: string) {
+    // 任务级 modal 层（任务弹窗或只读阅读窗口）占着单槽时，写入类命令不落到背景：
+    // 键盘与 inert 已经挡住主要入口，这里兜住原生菜单与程序化调用（R3/R6）。
+    if (taskLayerOpen && WRITE_COMMANDS.has(id)) return;
     switch (id) {
       case "view.changes":
         showChanges();
@@ -721,11 +748,14 @@
       mergeMode = null;
     }
     // 单槽：从差异/历史进任务弹窗时先收起阅读窗口，两层任务弹窗不并存。
+    // 阅读窗口的触发控件就是这次弹窗的来处：它自己的 Modal 会随单槽一起卸载，
+    // 所以先把焦点归还目标定下来，关掉任务弹窗后回到「阅读文档」，而不是落到 body。
+    const fromDocument = documentRequest?.trigger ?? null;
     documentRequest = null;
     closeSwitcher();
     cloneOpen = false;
     // 面板在批内卸载：先在它关闭前定下关闭弹窗时该回到哪，再交给 Modal。
-    taskReturnFocus = paletteOpen ? paletteReturnFocus() : null;
+    taskReturnFocus = paletteOpen ? paletteReturnFocus() : fromDocument;
     paletteOpen = false;
     branchCreateIntent = false;
     branchCreateBase = "";
@@ -812,8 +842,8 @@
   }
 
   function openPalette() {
-    // 任何 modal（含放弃/撤销确认层）打开时都不能从快捷键再叠一层；任务弹窗之外也适用。
-    if (taskModal || cloneOpen || openModalCount() > 0) return;
+    // 任何 modal（含放弃/撤销确认层）打开时都不能从快捷键再叠一层；阅读窗口也算一层。
+    if (taskLayerOpen || cloneOpen || openModalCount() > 0) return;
     closeSwitcher();
     paletteFocusOrigin = focusableOrigin();
     paletteOpen = true;
@@ -1597,6 +1627,9 @@
   }
 
   async function commitLocal() {
+    // 写入入口自己也认这一层：原生菜单「提交」不经键盘层，阅读窗口写着只读，
+    // 就不能让一次菜单点击在它底下创建提交（R3/R6）。
+    if (taskLayerOpen) return;
     const current = opened;
     if (!current || pending || reading) return;
     const message = draft;
@@ -1649,6 +1682,8 @@
   }
 
   async function commitAndPush() {
+    // 与「提交到本地」同一条界面层边界：任务弹窗或阅读窗口占层期间不落到背景（R3/R6）。
+    if (taskLayerOpen) return;
     const current = opened;
     if (!current || pending || reading) return;
     const message = draft;
@@ -2553,7 +2588,9 @@
   /** 键盘层：把按键翻成命令 id，再走与四个入口相同的 runCommand。 */
   function onWindowKeydown(event: KeyboardEvent) {
     if (paletteOpen) return;
-    if (taskModal !== null || cloneOpen || dependencyOpen || confirmPath !== null) return;
+    // 任务级 modal 层占着单槽（任务弹窗或只读阅读窗口）时按键全部让位：
+    // 阅读窗口同样由 Modal 占层并让背景 inert，外壳键盘不能落到 inert 底下（R3/R6）。
+    if (taskLayerOpen || cloneOpen || dependencyOpen || confirmPath !== null) return;
     if (event.key === "Escape") {
       // 上面还有弹层时 Esc 只关那一层；输入框里的 Esc 归输入框。
       if (multiActive && workspaceView === "changes" && selected && !layerAtKey && !event.defaultPrevented && !isTextEntry(event.target)) {

@@ -43,6 +43,18 @@ describe("视图命令", () => {
     expect(commandAvailable(files, state())).toBe(true);
   });
 
+  it("设置里关闭文件视图后，文件视图的入口都不可用并说明原因；其它视图不受影响", () => {
+    const off = state({ filesViewEnabled: false, currentFilePath: "src/a.ts" });
+    for (const id of ["view.files", "files.quickOpen", "files.search", "file.reveal"]) {
+      const command = commandById(id)!;
+      expect(commandAvailable(command, off), id).toBe(false);
+      expect(commandReason(command, off), id).toBe("文件视图已在设置里关闭");
+    }
+    expect(commandAvailable(commandById("view.changes")!, off)).toBe(true);
+    expect(commandAvailable(commandById("view.history")!, off)).toBe(true);
+    expect(commandAvailable(commandById("file.reveal")!, state({ currentFilePath: "src/a.ts" }))).toBe(true);
+  });
+
   it("数字键映射保持原意并把 3 交给文件视图", () => {
     expect(shortcutCommand({ key: "1", ctrlKey: true })).toBe("view.changes");
     expect(shortcutCommand({ key: "2", ctrlKey: true })).toBe("view.history");

@@ -122,6 +122,8 @@
   let theme = $state<Theme>("dark");
   let pullIntegration = $state<PullIntegration>("merge");
   let branchGroups = $state(true);
+  /** 设置里的「显示文件视图」：关闭后左栏只有改动与历史，文件视图不挂载。 */
+  let filesViewEnabled = $state(true);
   let resolvedTheme = $derived(resolveTheme(theme, systemDark));
 
   $effect(() => {
@@ -407,6 +409,7 @@
     multiFile: multiActive,
     // 文件树定位以改动视图的选中文件为目标：没有选中就没有可定位的文件。
     currentFilePath: selected?.path ?? null,
+    filesViewEnabled,
     fileHistory: filesNav?.history
       ? { backReason: filesNav.history.backReason, forwardReason: filesNav.history.forwardReason }
       : null,
@@ -836,6 +839,8 @@
       applyTheme(settings.theme);
       pullIntegration = settings.pullIntegration === "rebase" ? "rebase" : "merge";
       branchGroups = settings.branchGroups !== false;
+      filesViewEnabled = settings.filesView !== false;
+      if (!filesViewEnabled && workspaceView === "files") showChanges();
       widths = {
         sidebar: clampWidth(settings.panelWidths.sidebar),
         files: clampWidth(settings.panelWidths.files),
@@ -1169,6 +1174,7 @@
 
   /** 文件视图：只切换视图，不改动工作区、也不重新读取改动差异。 */
   function showFiles() {
+    if (!filesViewEnabled) return;
     useView("files");
     historyPath = null;
   }
@@ -2217,12 +2223,14 @@
       },
     });
     entries.push({ id: "history", label: "查看文件历史", icon: "history", run: () => openFileHistory(row.path) });
-    entries.push({
-      id: "files",
-      label: "在文件树中显示",
-      icon: "folder",
-      run: () => void revealInFiles(row.path),
-    });
+    if (filesViewEnabled) {
+      entries.push({
+        id: "files",
+        label: "在文件树中显示",
+        icon: "folder",
+        run: () => void revealInFiles(row.path),
+      });
+    }
     entries.push({ separator: true });
     entries.push({
       id: "reveal",
@@ -2459,6 +2467,17 @@
     pullIntegration = next;
     try {
       await api.setPullIntegration(next);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function changeFilesView(next: boolean) {
+    filesViewEnabled = next;
+    // 正在看文件时关掉：回到改动视图，不留一个看不见的当前视图。
+    if (!next && workspaceView === "files") showChanges();
+    try {
+      await api.setFilesView(next);
     } catch (error) {
       showError(error);
     }
@@ -3058,7 +3077,7 @@
     <main class="content" data-app-main tabindex="-1">
       {#snippet paneHead()}
         <div class="pane-head">
-          <ViewSwitcher view={workspaceView} {changeCount} onView={(view) => runCommand(`view.${view}`)} />
+          <ViewSwitcher view={workspaceView} {changeCount} showFiles={filesViewEnabled} onView={(view) => runCommand(`view.${view}`)} />
           <span class="spacer"></span>
           <button
             type="button"
@@ -3228,6 +3247,7 @@
               {/if}
             </div>
           </div>
+          {#if filesViewEnabled}
           <div
             class="workbench-view"
             data-active={workspaceView === "files"}
@@ -3251,6 +3271,7 @@
               {paneHead}
             />
           </div>
+          {/if}
           <div
             class="workbench-view"
             data-active={workspaceView === "history"}
@@ -3457,8 +3478,10 @@
     onTheme={(next) => runCommand(`theme.${next}`)}
     {pullIntegration}
     {branchGroups}
+    filesView={filesViewEnabled}
     onPullIntegration={(next) => void changePullIntegration(next)}
     onBranchGroups={(next) => void changeBranchGroups(next)}
+    onFilesView={(next) => void changeFilesView(next)}
     onRedetect={redetectGit}
     onChooseGit={chooseGit}
     onClearGit={clearGit}

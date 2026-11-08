@@ -318,6 +318,8 @@ export interface SettingsDto {
   pullIntegration?: PullIntegration;
   /** 旧响应可能缺省；外壳按开启处理。 */
   branchGroups?: boolean;
+  /** 左栏是否显示「文件」视图；旧响应缺省时按显示处理。 */
+  filesView?: boolean;
 }
 
 export interface RepoChanged {

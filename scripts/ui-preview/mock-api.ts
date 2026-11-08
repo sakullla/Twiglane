@@ -896,6 +896,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   },
   setPullIntegration: () => ok(undefined, 0),
   setBranchGroups: () => ok(undefined, 0),
+  setFilesView: () => ok(undefined, 0),
   setPanelWidths: (widths: unknown) => ok(widths, 0),
   measureProbe: () => ok({ enabled: false, elapsedMs: 0, script: null }, 0),
   measureSample: () => ok(undefined, 0),

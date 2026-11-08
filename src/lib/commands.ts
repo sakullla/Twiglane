@@ -55,6 +55,8 @@ export interface CommandState {
   currentRepoPath?: string | null;
   /** 改动视图当前选中的文件：「在文件树中显示」以它为目标。 */
   currentFilePath?: string | null;
+  /** 设置里是否显示文件视图；缺省为显示。关闭时文件视图的入口都不可用。 */
+  filesViewEnabled?: boolean;
   /** 文件视图的本次会话返回/前进：其它视图为 null。 */
   fileHistory?: { backReason: string | null; forwardReason: string | null } | null;
 }
@@ -82,6 +84,10 @@ export interface CommandSpec {
 
 const hasRepo = (state: CommandState) => state.hasRepo;
 const hasRepoReason = () => "先打开一个仓库";
+/** 文件视图的入口：要有仓库，并且没在设置里关闭文件视图。 */
+export const FILES_VIEW_OFF = "文件视图已在设置里关闭";
+const filesAvailable = (state: CommandState) => state.hasRepo && state.filesViewEnabled !== false;
+const filesReason = (state: CommandState) => (state.hasRepo ? FILES_VIEW_OFF : "先打开一个仓库");
 const idle = (state: CommandState) => !state.writeLocked;
 
 /**
@@ -156,8 +162,8 @@ const VIEW_COMMANDS: CommandSpec[] = [
     title: "文件",
     hint: "按目录浏览仓库中的文件，只读预览内容",
     shortcut: `${MODIFIER_LABEL} 3`,
-    available: hasRepo,
-    reason: hasRepoReason,
+    available: filesAvailable,
+    reason: filesReason,
   },
   {
     id: "view.history",
@@ -219,24 +225,24 @@ const VIEW_COMMANDS: CommandSpec[] = [
     title: "按路径打开文件",
     hint: "输入路径片段，在文件视图里直接打开这个文件",
     shortcut: `${MODIFIER_LABEL} P`,
-    available: hasRepo,
-    reason: hasRepoReason,
+    available: filesAvailable,
+    reason: filesReason,
   },
   {
     id: "files.search",
     group: "视图",
     title: "全仓库搜索",
     hint: "在工作区文本里查找固定字符串，结果按文件分组",
-    available: hasRepo,
-    reason: hasRepoReason,
+    available: filesAvailable,
+    reason: filesReason,
   },
   {
     id: "file.reveal",
     group: "视图",
     title: "在文件树中显示",
     hint: "展开目录并定位到改动列表里选中的文件",
-    available: (state) => hasRepo(state) && Boolean(state.currentFilePath),
-    reason: (state) => (state.hasRepo ? "先在改动里选择一个文件" : "先打开一个仓库"),
+    available: (state) => filesAvailable(state) && Boolean(state.currentFilePath),
+    reason: (state) => (filesAvailable(state) ? "先在改动里选择一个文件" : filesReason(state)),
   },
   {
     id: "file.back",

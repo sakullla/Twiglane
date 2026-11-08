@@ -96,6 +96,7 @@ pub struct AppSettings {
     pub settings: SettingsDto,
     pub pull_integration: PullIntegration,
     pub branch_groups: bool,
+    pub files_view: bool,
 }
 
 pub async fn get_settings(backend: &Backend) -> Result<AppSettings, AppError> {
@@ -111,6 +112,7 @@ pub async fn get_settings(backend: &Backend) -> Result<AppSettings, AppError> {
         },
         pull_integration: snapshot.pull_integration,
         branch_groups: snapshot.branch_groups,
+        files_view: snapshot.files_view,
     })
 }
 
@@ -127,6 +129,10 @@ pub fn set_pull_integration(
 
 pub fn set_branch_groups(backend: &Backend, branch_groups: bool) -> Result<(), AppError> {
     backend.store.set_branch_groups(branch_groups)
+}
+
+pub fn set_files_view(backend: &Backend, files_view: bool) -> Result<(), AppError> {
+    backend.store.set_files_view(files_view)
 }
 
 pub fn set_panel_widths(backend: &Backend, widths: PanelWidths) -> Result<PanelWidths, AppError> {

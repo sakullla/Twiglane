@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   getSettings: vi.fn(),
   setPullIntegration: vi.fn(),
   setBranchGroups: vi.fn(),
+  setFilesView: vi.fn(),
   setTheme: vi.fn(),
   setPanelWidths: vi.fn(),
   openRepository: vi.fn(),
@@ -421,6 +422,26 @@ describe("外壳接线", () => {
     const apiSource = readFileSync("src/lib/api.ts", "utf8");
     expect(apiSource).toContain('invoke<void>("set_pull_integration", { pullIntegration })');
     expect(apiSource).toContain('invoke<void>("set_branch_groups", { branchGroups })');
+  });
+
+  it("设置里关闭文件视图后左栏没有「文件」，快捷键也不切过去；重新打开会写回", async () => {
+    mocks.getSettings.mockResolvedValue({ ...savedSettings, filesView: false });
+    mocks.setFilesView.mockResolvedValue(undefined);
+    render(App);
+    await screen.findByText("kite-api");
+    await fireEvent.click(screen.getByText(webPath));
+    await waitFor(() => expect(document.querySelector('.view-switcher [data-view="changes"]')).toBeTruthy());
+    expect(document.querySelector('.view-switcher [data-view="files"]')).toBeNull();
+    await fireEvent.keyDown(window, { key: "3", ctrlKey: true });
+    expect(document.querySelector('.view-switcher [data-view="changes"]')?.getAttribute("aria-current")).toBe("page");
+
+    await fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    const toggle = (await screen.findByRole("checkbox", { name: /显示文件视图/ })) as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    await fireEvent.click(toggle);
+    expect(mocks.setFilesView).toHaveBeenCalledWith(true);
+    await waitFor(() => expect(document.querySelector('.view-switcher [data-view="files"]')).toBeTruthy());
+    expect(readFileSync("src/lib/api.ts", "utf8")).toContain('invoke<void>("set_files_view", { filesView })');
   });
 
   it("旧设置响应没有这两项时仍按合并和开启分组显示", async () => {

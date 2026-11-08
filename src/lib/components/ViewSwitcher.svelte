@@ -13,20 +13,23 @@
   interface Props {
     view: WorkspaceView;
     changeCount?: number;
+    /** 设置里关闭文件视图时不显示这一项。 */
+    showFiles?: boolean;
     onView: (view: WorkspaceView) => void;
   }
 
-  let { view, changeCount = 0, onView }: Props = $props();
+  let { view, changeCount = 0, showFiles = true, onView }: Props = $props();
 
   const items = [
     { id: "changes", text: "改动", label: "改动", shortcut: "1", icon: "file-diff" },
     { id: "files", text: "文件", label: "文件", shortcut: "3", icon: "folder-open" },
     { id: "history", text: "历史", label: "提交历史", shortcut: "2", icon: "history" },
   ] as const;
+  let visible = $derived(items.filter((item) => showFiles || item.id !== "files"));
 </script>
 
 <nav class="segmented view-switcher" aria-label="视图">
-  {#each items as item (item.id)}
+  {#each visible as item (item.id)}
     {@const count = item.id === "changes" ? changeCount : 0}
     <button
       type="button"

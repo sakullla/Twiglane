@@ -35,6 +35,9 @@ pub struct Persisted {
     pub pull_integration: PullIntegration,
     #[serde(default = "default_branch_groups")]
     pub branch_groups: bool,
+    /// 左栏是否显示「文件」视图；旧设置文件缺省为显示。
+    #[serde(default = "default_branch_groups")]
+    pub files_view: bool,
     pub panel_widths: PanelWidths,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_executable: Option<String>,
@@ -49,6 +52,7 @@ impl Default for Persisted {
             theme: Theme::Dark,
             pull_integration: PullIntegration::Merge,
             branch_groups: true,
+            files_view: true,
             panel_widths: PanelWidths::default(),
             git_executable: None,
             recent: Vec::new(),
@@ -111,6 +115,13 @@ impl AppStore {
     pub fn set_branch_groups(&self, branch_groups: bool) -> Result<(), AppError> {
         self.update(|data| {
             data.branch_groups = branch_groups;
+            Ok(())
+        })
+    }
+
+    pub fn set_files_view(&self, files_view: bool) -> Result<(), AppError> {
+        self.update(|data| {
+            data.files_view = files_view;
             Ok(())
         })
     }
@@ -333,6 +344,7 @@ mod tests {
         assert_eq!(snapshot.theme, Theme::Light);
         assert_eq!(snapshot.pull_integration, PullIntegration::Merge);
         assert!(snapshot.branch_groups);
+        assert!(snapshot.files_view, "旧设置文件默认显示文件视图");
         let original = fs::read(&path).unwrap();
 
         store.set_theme(Theme::Dark).unwrap();
@@ -344,7 +356,9 @@ mod tests {
 
         store.set_pull_integration(PullIntegration::Rebase).unwrap();
         store.set_branch_groups(false).unwrap();
+        store.set_files_view(false).unwrap();
         let again = AppStore::open(path);
+        assert!(!again.snapshot().files_view);
         assert_eq!(again.snapshot().theme, Theme::Dark);
         assert_eq!(again.snapshot().pull_integration, PullIntegration::Rebase);
         assert!(!again.snapshot().branch_groups);

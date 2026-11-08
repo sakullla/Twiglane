@@ -164,6 +164,7 @@ pub fn run() {
             set_theme,
             set_pull_integration,
             set_branch_groups,
+            set_files_view,
             set_panel_widths,
             save_draft,
             cancel_reads,
@@ -1607,6 +1608,11 @@ fn set_pull_integration(
 #[tauri::command(rename_all = "camelCase")]
 fn set_branch_groups(state: State<'_, Arc<Backend>>, branch_groups: bool) -> Result<(), AppError> {
     ops::set_branch_groups(state.inner(), branch_groups)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn set_files_view(state: State<'_, Arc<Backend>>, files_view: bool) -> Result<(), AppError> {
+    ops::set_files_view(state.inner(), files_view)
 }
 
 #[tauri::command]

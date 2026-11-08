@@ -87,6 +87,7 @@ fn main() {
             "set_theme",
             "set_pull_integration",
             "set_branch_groups",
+            "set_files_view",
             "set_panel_widths",
             "save_draft",
             "cancel_reads",

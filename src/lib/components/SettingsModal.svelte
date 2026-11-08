@@ -22,6 +22,9 @@
     branchGroups?: boolean;
     onPullIntegration?: (mode: PullIntegration) => void;
     onBranchGroups?: (enabled: boolean) => void;
+    /** 左栏是否显示「文件」视图。 */
+    filesView?: boolean;
+    onFilesView?: (enabled: boolean) => void;
     onRedetect: () => void;
     onChooseGit: () => void;
     onClearGit: () => void;
@@ -44,6 +47,8 @@
     branchGroups = true,
     onPullIntegration = () => {},
     onBranchGroups = () => {},
+    filesView = true,
+    onFilesView = () => {},
     onRedetect,
     onChooseGit,
     onClearGit,
@@ -270,6 +275,14 @@
           title={disabled ? BUSY_REASON : undefined}
           disabled={disabled}
           onchange={(event) => onBranchGroups((event.currentTarget as HTMLInputElement).checked)}
+        />
+      </label>
+      <label class="settings-row switch">
+        <span class="settings-label">显示文件视图<small>关闭后左栏只保留改动与历史；重启后保持</small></span>
+        <input
+          type="checkbox"
+          checked={filesView}
+          onchange={(event) => onFilesView((event.currentTarget as HTMLInputElement).checked)}
         />
       </label>
     </div>

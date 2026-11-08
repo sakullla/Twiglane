@@ -1024,6 +1024,14 @@
     return () => report?.(null);
   });
 
+  function onDiffClick(event: MouseEvent): void {
+    if (!pickMode || !(event.target instanceof Element) || event.target.closest("button")) return;
+    const target = event.target.closest<HTMLElement>("[data-line]");
+    const index = Number(target?.dataset.line);
+    const line = Number.isInteger(index) ? lines[index] : null;
+    if (line) toggleLine(line);
+  }
+
   function onDiffKey(event: KeyboardEvent) {
     if (embedded || event.target !== event.currentTarget) return;
     if (event.altKey || event.ctrlKey || event.metaKey) return;
@@ -1186,7 +1194,7 @@
           class="btn btn-ghost btn-sm diff-ws-btn diff-pick-btn"
           aria-pressed={pickMode}
           aria-label="选择行"
-          title={pickBlocker ?? (pickMode ? "退出按行选择，保留文件与块级入口" : "按行选择新增或删除行，再单独暂存")}
+          title={pickBlocker ?? (pickMode ? "点击已选行可取消；再次点「选行」退出" : "开启后直接点击新增或删除行，再单独暂存")}
           disabled={!canPickLines && !pickMode}
           onclick={() => setPickMode(!pickMode)}
         >
@@ -1405,6 +1413,7 @@
       tabindex="0"
       aria-label="差异文本"
       bind:this={scroller}
+      onclick={onDiffClick}
       onkeydown={(event) => {
         if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
           event.preventDefault();
@@ -1429,7 +1438,15 @@
         {#if renderMode === "unified"}
           {#each lines.slice(range.start, range.end) as line, index (`u-${range.start + index}`)}
             {@const absolute = range.start + index}
-            <div class={lineClass(line.kind)} data-diff-row="" data-line={absolute} style={`top:${absolute * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}>
+            <div
+              class={lineClass(line.kind)}
+              class:pickable={canPick(line)}
+              class:picked={canPick(line) && isPicked(line)}
+              data-diff-row=""
+              data-line={absolute}
+              style={`top:${absolute * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}
+              title={canPick(line) ? pickLabel(line) : undefined}
+            >
               <span class="ln">{line.oldNo ?? ""}</span>
               <span class="ln">{line.newNo ?? ""}</span>
               {#if line.kind === "add" || line.kind === "del" || line.kind === "context"}
@@ -1486,10 +1503,22 @@
                 {@const caption = hunkCaption(row.left.text)}
                 <span class="side-cell hunk side-hunk"><span class="ln"></span><span class="code hunk-caption"><span class="hunk-at">{caption.at}</span>{#if caption.context}<span class="hunk-context" title={caption.context}>{caption.context}</span>{/if}</span></span>
               {:else}
-              <span class={`side-cell side-l ${row.left?.kind ?? "blank"}`}>
+              <span
+                class={`side-cell side-l ${row.left?.kind ?? "blank"}`}
+                class:pickable={canPick(pickLineOf(row.left))}
+                class:picked={canPick(pickLineOf(row.left)) && isPicked(pickLineOf(row.left)!)}
+                title={canPick(pickLineOf(row.left)) ? pickLabel(pickLineOf(row.left)!) : undefined}
+                data-line={row.left?.index}
+              >
                 {#if row.left}<span class="ln">{row.left.no ?? ""}</span>{#if row.left.index !== undefined && !row.span}<span class="code"><span class="code-in" data-sign={sign(row.left.text)} data-len={codeOf(row.left).length}>{#each segmentsAt(row.left.index) as seg, i (i)}{#if !seg.k && !seg.m && !seg.ws}{seg.t}{:else}<span class={seg.k} class:wd={seg.m} class:ws-space={seg.ws === "space"} class:ws-tab={seg.ws === "tab"}>{seg.t}</span>{/if}{/each}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.left.text.length}>{row.left.text}</span></span>{/if}{/if}
               </span>
-              <span class={`side-cell side-r ${row.right?.kind ?? "blank"}`}>
+              <span
+                class={`side-cell side-r ${row.right?.kind ?? "blank"}`}
+                class:pickable={canPick(pickLineOf(row.right))}
+                class:picked={canPick(pickLineOf(row.right)) && isPicked(pickLineOf(row.right)!)}
+                title={canPick(pickLineOf(row.right)) ? pickLabel(pickLineOf(row.right)!) : undefined}
+                data-line={row.right?.index}
+              >
                 {#if row.right}<span class="ln">{row.right.no ?? ""}</span>{#if row.right.index !== undefined && !row.span}<span class="code"><span class="code-in" data-sign={sign(row.right.text)} data-len={codeOf(row.right).length}>{#each segmentsAt(row.right.index) as seg, i (i)}{#if !seg.k && !seg.m && !seg.ws}{seg.t}{:else}<span class={seg.k} class:wd={seg.m} class:ws-space={seg.ws === "space"} class:ws-tab={seg.ws === "tab"}>{seg.t}</span>{/if}{/each}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.right.text.length}>{row.right.text}</span></span>{/if}{/if}
               </span>
               {/if}

@@ -660,6 +660,9 @@
 .diff-line.del { background: var(--del-bg); }
 .diff-line.del .code { color: var(--fg); box-shadow: inset 2px 0 color-mix(in srgb, var(--del-fg) 65%, transparent); }
 .diff-line.del .ln { background: var(--del-strong); color: var(--del-fg); }
+.diff-line.pickable, .side-cell.pickable { cursor: pointer; }
+.diff-line.picked, .side-cell.picked { box-shadow: inset 0 0 0 1px var(--accent); }
+.diff-line.picked .ln, .side-cell.picked .ln { color: var(--accent-text); }
 .diff-line.hunk { background: var(--hunk-bg); color: var(--hunk-fg); }
 .diff-line.hunk .ln { border-right-color: transparent; background: transparent; }
 /* 块标题：「第 68–74 行」+ 所在函数，用界面字体而不是 Git 的 @@ 原文。 */

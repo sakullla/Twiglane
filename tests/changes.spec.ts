@@ -2589,6 +2589,30 @@ describe("行选暂存（R6）", () => {
     expect(screen.getByRole("button", { name: "暂存选中行" }).hasAttribute("disabled")).toBe(true);
   });
 
+  it("选行模式可直接点击新增或删除行，再次点击取消", async () => {
+    render(DiffView, {
+      props: {
+        selection,
+        diff: pickableDiff(),
+        error: null,
+        loading: false,
+        disabled: false,
+        onStageHunk: () => {},
+        onLoadMore: () => {},
+        onStageLines: () => {},
+      },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "选择行" }));
+    const row = document.querySelector<HTMLElement>(".diff-line.add")!;
+    expect(row.classList.contains("pickable")).toBe(true);
+    await fireEvent.click(row);
+    expect(row.classList.contains("picked")).toBe(true);
+    expect(document.querySelector("[data-line-count]")?.textContent).toContain("1");
+    await fireEvent.click(row);
+    expect(row.classList.contains("picked")).toBe(false);
+    expect(document.querySelector("[data-line-count]")?.textContent).toContain("0");
+  });
+
   it("并排视图左右两侧用的是同一份行身份", async () => {
     const onStageLines = vi.fn();
     render(DiffView, {
@@ -2609,6 +2633,27 @@ describe("行选暂存（R6）", () => {
     await fireEvent.click(screen.getByRole("button", { name: "选择删除第 2 行" }));
     await fireEvent.click(screen.getByRole("button", { name: "暂存选中行" }));
     expect(onStageLines.mock.calls[0][0]).toEqual([{ hunkIndex: 0, kind: "del", oldNo: 2, newNo: null }]);
+  });
+
+  it("并排视图可直接点击左右两侧的代码行", async () => {
+    render(DiffView, {
+      props: {
+        selection,
+        diff: pickableDiff(),
+        error: null,
+        loading: false,
+        disabled: false,
+        onStageHunk: () => {},
+        onLoadMore: () => {},
+        onStageLines: () => {},
+      },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "并排" }));
+    await fireEvent.click(screen.getByRole("button", { name: "选择行" }));
+    await fireEvent.click(document.querySelector<HTMLElement>(".side-cell.del")!);
+    await fireEvent.click(document.querySelector<HTMLElement>(".side-cell.add")!);
+    expect(document.querySelectorAll(".side-cell.picked")).toHaveLength(2);
+    expect(document.querySelector("[data-line-count]")?.textContent).toContain("2");
   });
 
   it("不能逐行写入的位置给出禁用原因，历史只读视图没有入口", async () => {

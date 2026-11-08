@@ -73,6 +73,21 @@
   --statusbar-height: 26px;
   --statusbar-hit: 24px;
 
+  /* 同类控件高度的单一事实源（R1 控件语言收敛）。
+     分段按钮与小 pill 原先在各视图各写各的像素值（分段默认 24px、视图切换 26px；
+     小 pill 有 17 / 20 / 22 / 26 等多套近似值），导致「同类控件差 2px」这种看不出
+     却破坏节奏的分歧。这里按既有主导取值收敛成三档，供 tokens 层以外的控件引用；
+     纯尺寸、与主题无关，只声明在共享 :root。改一处值即可同时校准全部引用点，
+     不再散写字面像素。
+     - --control-segmented：分段/视图切换按钮主体高度（既有主导值 24px）。
+     - --control-pill-sm：标题栏上下文提示这一档小 pill（既有 17px：
+       .branch-hint、.sync-pill 的计数与远端状态）。
+     - --control-pill：改动/历史等区域的常规小 pill（既有 20px，如 .chip；
+       components.css 内的同类规则不在本任务写入范围，保留此 token 供其引用）。 */
+  --control-segmented: 24px;
+  --control-pill-sm: 17px;
+  --control-pill: 20px;
+
   /* 层级：resizer 5 / titlebar 20 / menu 30 / palette 40 / modal 50 / toast 60 */
   --z-sticky: 1;
   --z-resizer: 5;

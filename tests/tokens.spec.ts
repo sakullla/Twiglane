@@ -899,6 +899,52 @@ describe("共享控件状态语义（T3）", () => {
   });
 });
 
+describe("同类控件尺寸收敛到共享 token（R1）", () => {
+  const layout = read(path.join(stylesDir, "layout.css"));
+
+  it("分段按钮与小 pill 高度令牌是纯尺寸、只在共享 :root 声明一份", () => {
+    const sizeTokens = ["--control-segmented", "--control-pill-sm", "--control-pill"];
+    for (const token of sizeTokens) {
+      const value = shared.get(token);
+      expect(value, `${token} 应在共享 :root 定义`).toBeTruthy();
+      // 纯尺寸：像素值，与主题无关。
+      expect(value, `${token} 是像素尺寸`).toMatch(/^\d+px$/);
+      // 与主题无关的尺寸 token 不应重复声明进任一主题色块。
+      expect(light.has(token), `${token} 不应进浅色主题块`).toBe(false);
+      expect(dark.has(token), `${token} 不应进深色主题块`).toBe(false);
+    }
+    // 按既有主导取值收敛，避免视觉回归。
+    expect(shared.get("--control-segmented"), "分段按钮沿用既有主导 24px").toBe("24px");
+    expect(shared.get("--control-pill-sm"), "上下文提示小 pill 沿用既有 17px").toBe("17px");
+    expect(shared.get("--control-pill"), "常规小 pill 沿用既有 20px").toBe("20px");
+  });
+
+  it("layout.css 的小 pill 高度改引用共享 token，不再散写同一档像素", () => {
+    for (const selector of [".branch-hint", ".sync-pill .count", ".sync-pill .sync-remote"]) {
+      const body = ruleBody(layout, selector);
+      expect(body, `${selector} 高度引用 --control-pill-sm`).toMatch(/height:\s*var\(--control-pill-sm\)/);
+      // 不再把这一档高度写成字面 17px。
+      expect(body, `${selector} 不再写死 17px 高度`).not.toMatch(/height:\s*17px/);
+    }
+    // 整个 layout.css 里这一档小 pill 不应再残留字面 17px 高度。
+    expect(stripComments(layout), "layout.css 不再散写 17px 小 pill 高度").not.toMatch(/height:\s*17px/);
+  });
+
+  it("状态点除语义色外有形状线索，关闭颜色辨识后 live/stale/off 仍可分辨（R1）", () => {
+    // 常态仍走语义绿（与「表示成功的位置走语义绿」用例一致），且相邻 .sb-sync 文本承载语义。
+    expect(ruleBody(layout, ".sb-dot"), ".sb-dot 常态").toMatch(/background:\s*var\(--success\)/);
+    // stale 补一个透出底色的空心中心，读成环形，与实心 live 不同形。
+    expect(ruleBody(layout, ".sb-dot.stale::after"), "stale 空心中心").toMatch(/border-radius:\s*50%/);
+    // off 不填充、不加环，只留一圈描边的空心圆，形状上明显区别于 live/stale 的实心块。
+    const off = ruleBody(layout, ".sb-dot.off");
+    expect(off, "off 不填充语义色").toMatch(/background:\s*transparent/);
+    expect(off, "off 留一圈描边").toMatch(/box-shadow:\s*inset 0 0 0 1px/);
+    // 同步结论旁的文本始终存在，状态点是冗余视觉线索而非唯一渠道。
+    const syncText = read(path.join(root, "src", "lib", "components", "StatusBar.svelte"));
+    expect(syncText, "状态点与同步结论文本并存").toMatch(/sb-sync[\s\S]*?sb-dot/);
+  });
+});
+
 describe("样式分层结构", () => {
   it("四层文件齐备", () => {
     for (const file of layerFiles) {

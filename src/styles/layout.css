@@ -67,17 +67,17 @@
 .titlebar-win-btn.close:hover { background: var(--danger); color: var(--on-danger); }
 .titlebar-settings { color: var(--fg-muted); }
 /* 上游未关联只在分支上给状态提示，不加常驻按钮（R2） */
-.branch-hint { display: inline-flex; align-items: center; height: 17px; padding: 0 var(--space-6); border-radius: 999px; background: var(--warning-soft); color: var(--warning-text); font-size: var(--text-xs); font-weight: var(--weight-medium); flex: none; }
+.branch-hint { display: inline-flex; align-items: center; height: var(--control-pill-sm); padding: 0 var(--space-6); border-radius: 999px; background: var(--warning-soft); color: var(--warning-text); font-size: var(--text-xs); font-weight: var(--weight-medium); flex: none; }
 /* 同步组：一处承载获取/拉取/推送，领先与落后用两种强度计数区分 */
 .sync-pill { max-width: 190px; padding-left: var(--space-8); }
 /* 计数里带方向箭头：只看数字时分不清待推送还是待拉取（R3）。箭头与数字同排，
-   高度仍是上下文提示那一档 17px，不额外抬高标题栏控件。 */
-.sync-pill .count { display: inline-flex; align-items: center; gap: 2px; height: 17px; min-width: 17px; padding: 0 5px; background: var(--accent-soft); color: var(--accent-text); }
+   高度仍是上下文提示那一档（--control-pill-sm），不额外抬高标题栏控件。 */
+.sync-pill .count { display: inline-flex; align-items: center; gap: 2px; height: var(--control-pill-sm); min-width: var(--control-pill-sm); padding: 0 5px; background: var(--accent-soft); color: var(--accent-text); }
 .sync-pill .count .icon { width: 11px; height: 11px; }
 .sync-pill .subtle-count { background: var(--surface-3); color: var(--fg-muted); }
 /* 未核/过期标记与「未关联上游」同属标题栏的上下文提示：同一份高度、圆角与字号，
    只有语义色不同；文字本身就把状态说清楚，不靠颜色单独表达（R1、R3）。 */
-.sync-pill .sync-remote { display: inline-flex; align-items: center; height: 17px; padding: 0 var(--space-6); border-radius: 999px; background: var(--surface-3); color: var(--fg-muted); font-size: var(--text-xs); font-weight: var(--weight-medium); flex: none; }
+.sync-pill .sync-remote { display: inline-flex; align-items: center; height: var(--control-pill-sm); padding: 0 var(--space-6); border-radius: 999px; background: var(--surface-3); color: var(--fg-muted); font-size: var(--text-xs); font-weight: var(--weight-medium); flex: none; }
 .sync-pill .sync-remote.stale { background: var(--warning-soft); color: var(--warning-text); }
 .sync-pill.busy { color: var(--accent-text); }
 .sync-pill .spinner { width: 11px; height: 11px; border-width: 1.5px; }
@@ -251,9 +251,15 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
 .statusbar .sb-busy, .statusbar .sb-warn { max-width: min(32vw, 320px); overflow: hidden; text-overflow: ellipsis; }
 .statusbar .sb-update { max-width: min(30vw, 240px); }
 .statusbar .sb-update > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.sb-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); flex: none; box-shadow: 0 0 0 2px var(--success-soft); }
+/* 状态点除语义色外补形状线索：关闭颜色辨识后仍能分辨 live / stale / off（R1）。
+   dot 本身 aria-hidden，同步结论由相邻 .sb-sync 文本完整表达；形状差异是给看得见
+   但难辨色的用户的冗余线索——live 实心、stale 空心环、off 仅描边。 */
+.sb-dot { position: relative; width: 6px; height: 6px; border-radius: 50%; background: var(--success); flex: none; box-shadow: 0 0 0 2px var(--success-soft); }
+/* stale：中心留一个透出底色的空心点，连同环读成「待核对」的环形，与实心 live 不同形。 */
 .sb-dot.stale { background: var(--warning); box-shadow: 0 0 0 2px var(--warning-soft); }
-.sb-dot.off { background: var(--fg-subtle); box-shadow: none; }
+.sb-dot.stale::after { content: ""; position: absolute; inset: 2px; border-radius: 50%; background: var(--surface-2); }
+/* off：无填充无环，只留一圈描边的空心圆，形状上明显区别于 live/stale 的实心块。 */
+.sb-dot.off { background: transparent; box-shadow: inset 0 0 0 1px var(--fg-subtle); }
 
 /* ---------- 响应式 ---------- */
 @media (max-width: 1120px) {

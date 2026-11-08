@@ -494,6 +494,20 @@ export function hunkRowIndexes(kinds: readonly (string | null | undefined)[]): n
 }
 
 /**
+ * 完整文件视图里整份文件只有一个块，按块跳转只会回到开头。这里改按「连续的新增/删除行」分段：
+ * 每段的起点往上留 lead 行上下文作为跳转目标，升序、去重。changed[i] 表示第 i 行是改动行。
+ */
+export function changeRunIndexes(changed: readonly boolean[], lead = 0): number[] {
+  const indexes: number[] = [];
+  for (let index = 0; index < changed.length; index += 1) {
+    if (!changed[index] || (index > 0 && changed[index - 1])) continue;
+    const target = Math.max(0, index - lead);
+    if (indexes.length === 0 || target > indexes[indexes.length - 1]) indexes.push(target);
+  }
+  return indexes;
+}
+
+/**
  * 以视口顶为准决定上一处、下一处。
  *
  * 还没贴住当前块头时，「上一处」先回到这块的开头，而不是跳过它。

@@ -2,7 +2,7 @@
   import { onDestroy, tick, untrack } from "svelte";
   import { createQuietActivity } from "../quiet-activity";
   import { MODIFIER_LABEL } from "../brand";
-  import { hunkCaption, hunkJump, hunkRowIndexes, lineSelectionScope, splitColumnsFit, toSideRows, visibleDiffLines, whitespaceOnlyHunks, type HunkNavReport, type ViewLine, type WhitespaceFilter } from "../diff";
+  import { HUNK_LAST, changeRunIndexes, hunkCaption, hunkJump, hunkRowIndexes, lineSelectionScope, splitColumnsFit, toSideRows, visibleDiffLines, whitespaceOnlyHunks, type HunkNavReport, type ViewLine, type WhitespaceFilter } from "../diff";
   import { diffPrefs, setHideWhitespaceOnly, toggleHideWhitespaceOnly, toggleShowWhitespace } from "../diff-prefs.svelte";
   import type { IconName } from "../icons";
   import { trackCodeScroll } from "../codeScroll.svelte";
@@ -196,11 +196,37 @@
   /* 并排视图两栏各自横向滚动：每栏的滚动行程按本栏最长的一行算，旧侧是上下文 + 删除，新侧是上下文 + 新增。 */
   let split = $derived(renderMode === "split");
   /** 块头在当前布局里的行号。并排时删除和新增挤在同一行，所以不能沿用统一视图的下标。 */
+  /**
+   * 完整文件只有一个块，按块跳只会回到开头：这时改按连续的改动段落跳，段落前留几行上下文。
+   * 平时仍按块头跳，块标题就是落点。
+   */
+  const RUN_LEAD = 3;
   let hunkIndexes = $derived(
-    hunkRowIndexes(split ? sideRows.map((row) => row.left?.kind ?? row.right?.kind) : lines.map((line) => line.kind)),
+    fullFile
+      ? changeRunIndexes(
+          split
+            ? sideRows.map((row) => row.left?.kind === "del" || row.right?.kind === "add")
+            : lines.map((line) => line.kind === "add" || line.kind === "del"),
+          RUN_LEAD,
+        )
+      : hunkRowIndexes(split ? sideRows.map((row) => row.left?.kind ?? row.right?.kind) : lines.map((line) => line.kind)),
   );
   let hunkMax = $derived(viewport > 0 ? Math.max(0, total * ROW_HEIGHT - viewport) : Number.POSITIVE_INFINITY);
-  let hunkState = $derived(hunkJump(hunkIndexes, scrollTop, ROW_HEIGHT, hunkMax));
+  /** 完整文件按页读取：后面还有没读到的行时，「下一处」先续读再跳，不能停在已读部分的末尾。 */
+  let moreToRead = $derived(
+    Boolean(fullFile && currentDiff && currentDiff.offset + currentDiff.lines.length < currentDiff.totalLines),
+  );
+  let hunkState = $derived.by(() => {
+    const state = hunkJump(hunkIndexes, scrollTop, ROW_HEIGHT, hunkMax);
+    if (moreToRead && state.nextRow === null && (state.nextReason === HUNK_LAST || state.total === 0)) {
+      return { ...state, nextReason: loading ? "正在读取后续内容" : null };
+    }
+    return state;
+  });
+  /** 续读之后要接着跳到下一处：等新的行到了再算落点。 */
+  let pendingNext = $state(false);
+  let pendingTimer: ReturnType<typeof setTimeout> | undefined;
+  onDestroy(() => clearTimeout(pendingTimer));
   const altLabel = MODIFIER_LABEL === "⌘" ? "⌥" : "Alt";
   let hunkPrev = $state<HTMLButtonElement | null>(null);
   let hunkNext = $state<HTMLButtonElement | null>(null);
@@ -935,10 +961,41 @@
   function jump(direction: -1 | 1) {
     const state = hunkJump(hunkIndexes, scrollTop, ROW_HEIGHT, hunkMax);
     const row = direction < 0 ? state.prevRow : state.nextRow;
-    if (row === null) return;
+    if (row === null) {
+      if (direction > 0 && moreToRead && !loading && !pendingNext) {
+        pendingNext = true;
+        // 续读失败时不会有新行到达：过一会儿放开，按钮还能再按。
+        clearTimeout(pendingTimer);
+        pendingTimer = setTimeout(() => (pendingNext = false), 15_000);
+        onLoadMore();
+      }
+      return;
+    }
     const max = viewport > 0 ? Math.max(0, total * ROW_HEIGHT - viewport) : Number.POSITIVE_INFINITY;
     applyScroll(Math.min(row * ROW_HEIGHT, max));
   }
+
+  /** 续读到了新的行（或读取结束）后，接着完成那一次「下一处」；仍没有就再读下一页。 */
+  let pendingLength = -1;
+  $effect(() => {
+    const length = currentDiff?.lines.length ?? -1;
+    const busy = loading;
+    untrack(() => {
+      if (!pendingNext) {
+        pendingLength = length;
+        return;
+      }
+      if (busy || length === pendingLength) return;
+      pendingLength = length;
+      pendingNext = false;
+      void tick().then(() => jump(1));
+    });
+  });
+  $effect(() => {
+    void selectionKey;
+    void fullFile;
+    pendingNext = false;
+  });
 
   /** 走到头时焦点交给另一侧，键盘用户还能接着往回跳。 */
   async function runHunk(direction: -1 | 1, self: HTMLButtonElement | null, other: HTMLButtonElement | null) {
@@ -1008,7 +1065,7 @@
   <div class="diff-toolbar" bind:this={toolbar}>
     <div class="diff-toolbar-group context">
       {#if fileNav}<FileNav nav={fileNav} />{/if}
-      {#if hunkState.total > 0}
+      {#if hunkState.total > 0 || moreToRead}
         <div class="file-nav" role="group" aria-label="切换改动块">
           <button
             type="button"
@@ -1032,7 +1089,7 @@
           >
             <Icon name="chevron-down" size={15} />
           </button>
-          {#if hunkState.current >= 0}<span class="file-nav-pos">{hunkState.current + 1}/{hunkState.total}</span>{/if}
+          {#if hunkState.current >= 0}<span class="file-nav-pos" title={moreToRead ? "后面还有没读到的内容，按「下一处」会继续读取" : undefined}>{hunkState.current + 1}/{hunkState.total}{moreToRead ? "+" : ""}</span>{/if}
         </div>
       {/if}
       <div class="diff-file">

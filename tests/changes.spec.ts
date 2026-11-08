@@ -1087,6 +1087,40 @@ describe("差异与提交", () => {
     }
   });
 
+  it("完整文件按改动段落跳转；已读部分没有下一处时先续读再跳", async () => {
+    const context = (from: number, count: number) =>
+      Array.from({ length: count }, (_, i) => ({ kind: "context", text: ` line-${from + i}`, oldNo: from + i, newNo: from + i, hunkIndex: 0 }));
+    const lines: DiffLine[] = [
+      { kind: "hunk", text: "@@ -1,80 +1,80 @@", oldNo: null, newNo: null, hunkIndex: 0 },
+      ...context(1, 30),
+      { kind: "add", text: "+first", oldNo: null, newNo: 31, hunkIndex: 0 },
+      ...context(32, 30),
+      { kind: "del", text: "-second", oldNo: 62, newNo: null, hunkIndex: 0 },
+      ...context(63, 30),
+    ];
+    const full: DiffResponse = { ...diff, lines, totalLines: lines.length + 500, hunks: [{ ...diff.hunks[0], lineCount: lines.length }] };
+    const onLoadMore = vi.fn();
+    const props = (value: DiffResponse) => ({ selection, diff: value, error: null, loading: false, disabled: false, fullFile: true, onFullFile: () => {}, onStageHunk: () => {}, onLoadMore });
+    const view = render(DiffView, { props: props(full) });
+    const region = screen.getByRole("textbox", { name: "差异文本" });
+    const next = screen.getByRole("button", { name: "下一处改动" }) as HTMLButtonElement;
+    await fireEvent.click(next);
+    await tick();
+    // 第一段改动在第 31 行（下标 31），落点往上留 3 行。
+    expect(region.scrollTop).toBe(28 * ROW_HEIGHT);
+    await fireEvent.click(next);
+    await tick();
+    expect(region.scrollTop).toBe(59 * ROW_HEIGHT);
+    expect(next.disabled, "后面还有没读到的行，下一处仍可按").toBe(false);
+    expect(onLoadMore).not.toHaveBeenCalled();
+    await fireEvent.click(next);
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+    // 续读到的下一页里有第三段改动：到达后自动跳过去。
+    const more = [...context(93, 20), { kind: "add", text: "+third", oldNo: null, newNo: 113, hunkIndex: 0 }, ...context(114, 10)];
+    await view.rerender(props({ ...full, lines: [...lines, ...more], totalLines: lines.length + more.length }));
+    await waitFor(() => expect(region.scrollTop).toBe((lines.length + 20 - 3) * ROW_HEIGHT));
+  });
+
   it("上一处、下一处把视口顶对齐到改动块头，走到头时焦点交给另一侧", async () => {
     render(DiffView, {
       props: {

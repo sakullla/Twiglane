@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/sve
 import { tick } from "svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  changeRunIndexes,
   createTextDiff,
   HUNK_FIRST,
   HUNK_LAST,
@@ -88,6 +89,13 @@ function diffFor(path: string, text: string): DiffResponse {
 }
 
 describe("改动块跳转", () => {
+  it("完整文件按连续改动段落跳转，落点前留上下文，相邻太近的段落合并", () => {
+    const changed = (pattern: string) => [...pattern].map((char) => char === "x");
+    expect(changeRunIndexes(changed("....xx......x...x"), 3)).toEqual([1, 9, 13]);
+    expect(changeRunIndexes(changed("x..xx"), 3)).toEqual([0]);
+    expect(changeRunIndexes(changed("......"), 3)).toEqual([]);
+  });
+
   it("贴住块头时上一处去上一块，没贴住时先回到块头", () => {
     const indexes = hunkRowIndexes(["hunk", "add", "context", "hunk", "del"]);
     expect(indexes).toEqual([0, 3]);

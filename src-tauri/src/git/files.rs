@@ -350,7 +350,7 @@ async fn ignore_rule_matches(
 ) -> Result<HashSet<Vec<u8>>, AppError> {
     let git = require_git(backend).await?;
     let (program, args) = ignore_check_command(&git.path, root);
-    let output = backend
+    let output = match backend
         .scheduler
         .execute(GitJob {
             repo_key: key,
@@ -364,7 +364,22 @@ async fn ignore_rule_matches(
             output_limit: None,
             env: Vec::new(),
         })
-        .await?;
+        .await
+    {
+        Ok(output) => output,
+        // `git check-ignore` 一启动就失败（例如仓库已经不是 Git 仓库）时，Git 会在读完
+        // stdin 之前退出，而写 stdin 拿到的是 EPIPE。谁先发生取决于管道时序：同样的失败
+        // 在 Windows 上常拿到退出码 128、在 Linux 上常拿到读写的 IO 错误。两者都表示
+        // 「无法判断忽略状态」，必须同样按 ignore_check 报告，否则同一契约会在平台间摇摆，
+        // 而吞掉这种失败就等于把子项当成未被忽略。
+        Err(error) if error.code == "git_io" => {
+            return Err(AppError::new(
+                "ignore_check",
+                format!("无法判断目录忽略状态。{}", error.message),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
     // 0 表示有子项被忽略，1 表示一个都没有；其他退出码才是真的失败。
     if !matches!(output.output.exit_code, 0 | 1) {
         return Err(git_failure(
@@ -2314,6 +2329,11 @@ mod tests {
         assert!(!index.is_tracked("other.rs"));
     }
 
+    /// 忽略检查失败时必须报告，而不是把子项当成「未被忽略」照常返回。
+    ///
+    /// 为了让这条契约跨平台稳定，`git_io`（写 stdin 时 Git 已经退出的 EPIPE）与
+    /// 非 0/1 退出码都归到 `ignore_check`：前者在 Linux 上比 Windows 更容易出现，
+    /// 只断言其中一种会让同一语义随管道时序摇摆（见 `ignore_rule_matches`）。
     #[tokio::test]
     async fn ignore_check_failure_is_reported_instead_of_hiding_entries() {
         let fixture = crate::test_support::git_fixture("repository-files-ignore-failure");

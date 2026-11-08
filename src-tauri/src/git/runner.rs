@@ -322,7 +322,9 @@ mod tests {
             Arc::new(Shutdown::new()),
         );
         request.stdin = Some(bytes.clone());
-        let result = tokio::time::timeout(Duration::from_secs(5), run_process(request)).await;
+        // 挂起保护：正常回显一瞬间就结束；真卡死才会耗到上限。放宽到 15s 吸收 CI（尤其 Windows）
+        // 进程启动与 2MB 管道的抖动，又远低于子进程里的 sleep，死锁仍会被判失败。
+        let result = tokio::time::timeout(Duration::from_secs(15), run_process(request)).await;
         let output = result.expect("stdin 写入和输出读取互相阻塞").unwrap();
         assert_eq!(output.exit_code, 0);
         assert_eq!(output.stdout, bytes);
@@ -339,7 +341,9 @@ mod tests {
         );
         request.stdin = Some(vec![b'x'; 2 * 1024 * 1024]);
         request.timeout = Duration::from_millis(100);
-        let result = tokio::time::timeout(Duration::from_secs(3), run_process(request)).await;
+        // 挂起保护：超时生效应在 100ms 量级返回；子进程 sleep(30) 只在超时失效时才会撑满。
+        // 15s 远高于 CI 启动抖动、远低于 30s，超时被破坏仍能判失败。
+        let result = tokio::time::timeout(Duration::from_secs(15), run_process(request)).await;
         assert_eq!(
             result.expect("stdin 写入也必须受超时保护"),
             Err(RunnerError::Timeout)
@@ -362,7 +366,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(80)).await;
             signal.cancel();
         });
-        let result = tokio::time::timeout(Duration::from_secs(3), run_process(request)).await;
+        // 挂起保护：取消在 80ms 后触发，正常应随即返回；取消失效会拖到子进程 sleep(30)。
+        // 15s 吸收 CI 抖动且远低于 30s，取消被破坏仍判失败。
+        let result = tokio::time::timeout(Duration::from_secs(15), run_process(request)).await;
         assert_eq!(result.unwrap(), Err(RunnerError::Cancelled));
 
         let mut request = RealRunner::default().base_request(
@@ -373,7 +379,9 @@ mod tests {
         request.stdin = Some(vec![b'x'; 2 * 1024 * 1024]);
         request.output_limit = 1024;
         request.truncate_stdout = true;
-        let result = tokio::time::timeout(Duration::from_secs(3), run_process(request)).await;
+        // 挂起保护：截断命中上限后应立即收尾；截断失效会读完 2MB 再卡在 sleep(30)。
+        // 15s 吸收 CI 抖动且远低于 30s，截断被破坏仍判失败。
+        let result = tokio::time::timeout(Duration::from_secs(15), run_process(request)).await;
         let output = result.unwrap().unwrap();
         assert!(output.stdout_truncated);
         assert_eq!(output.stdout.len(), 1024);

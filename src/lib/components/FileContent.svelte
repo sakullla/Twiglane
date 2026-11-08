@@ -159,6 +159,10 @@
   let isMarkdown = $derived(Boolean(path && isMarkdownPath(path)));
   let documentMode = $state<DocumentMode>("preview");
   let documentNotice = $state<string | null>(null);
+  /** 上一次恢复用的签名：同一个签名不重复恢复。 */
+  let restoreSignature = "";
+  /** 本次打开已经落地的显式行定位序号：同一序号再回到源码时应当按会话位置恢复。 */
+  let appliedLineSerial: number | null = null;
   const documentSession: DocumentSession = createDocumentSession({ repository: () => opened.summary.path });
   let documentSource = $derived<DocumentSource>({
     revision: "worktree",
@@ -302,6 +306,11 @@
       searching = false;
       resetContent();
       documentNotice = null;
+      // 排队中的位置属于上一个文件：按排队时的身份落定，不能写进新文件的会话条目。
+      commitQueuedSourceSave();
+      // 上一个文件的位置恢复签名与已落地的行定位都不再适用于这个文件。
+      restoreSignature = "";
+      appliedLineSerial = null;
       // Markdown 沿用同身份上一次的阅读模式；其它文件只有源码一种显示方式。
       documentMode = target && isMarkdownPath(target)
         ? initialDocumentMode(null, documentSession.recall({ revision: "worktree", path: target }))
@@ -337,6 +346,9 @@
     lastLineSerial = serial;
     untrack(() => {
       if (target === null || target <= 0 || !path) return;
+      // 这次打开的位置恢复要让位给新的显式定位；序号被记下后，
+      // 同一序号在往返/再访问时不再代表「新的定位」。
+      appliedLineSerial = serial;
       // 搜索命中、跳到行都要落在源码上：显式行定位优先于保存的阅读模式。
       if (isMarkdownPath(path)) setDocumentMode("source");
       void jumpTo(target);
@@ -346,7 +358,21 @@
   /* ---- Markdown 阅读：模式切换、位置保存与恢复 ---- */
 
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
-  let restoreSignature = "";
+  /** 排队中的源码位置写入：身份与位置在排队时快照，延迟触发不会读到别的文件。 */
+  let queuedSourceCommit: (() => void) | undefined;
+
+  function cancelQueuedSourceSave(): void {
+    if (saveTimer !== undefined) clearTimeout(saveTimer);
+    saveTimer = undefined;
+    queuedSourceCommit = undefined;
+  }
+
+  /** 立即落定排队中的位置写入（换文件、离开源码时），不再按触发时的实时状态写。 */
+  function commitQueuedSourceSave(): void {
+    const commit = queuedSourceCommit;
+    cancelQueuedSourceSave();
+    commit?.();
+  }
 
   function saveSourcePosition(): void {
     if (!isMarkdown || !path || !content || content.kind !== "text") return;
@@ -360,20 +386,44 @@
 
   function queueSaveSourcePosition(): void {
     if (saveTimer !== undefined) clearTimeout(saveTimer);
-    saveTimer = setTimeout(saveSourcePosition, 120);
+    saveTimer = undefined;
+    if (!path || !isMarkdown || !content || content.kind !== "text") return;
+    // 排队时把目标和位置一起快照：定时器触发时可能已经换了文件或版本，
+    // 读实时状态会把上一次滚动写成新文件的源码位置、清掉它的预览行。
+    const repository = opened.summary.path;
+    const source = { revision: "worktree", path };
+    const version = content.version ?? null;
+    const line = pageOffset + Math.floor(scrollTop / ROW_HEIGHT) + 1;
+    const top = scrollTop;
+    const commit = () => {
+      // 仓库换了就不再写：会话按「仓库 + 版本 + 路径」分条目，旧仓库的位置不能落到新仓库。
+      if (opened.summary.path !== repository) return;
+      documentSession.remember(source, { mode: "source", source: { line, top }, version });
+    };
+    queuedSourceCommit = commit;
+    saveTimer = setTimeout(() => {
+      saveTimer = undefined;
+      queuedSourceCommit = undefined;
+      commit();
+    }, 120);
   }
 
   // 卸载前把最后一处源码位置落进会话。
   $effect(() => () => {
-    if (saveTimer !== undefined) clearTimeout(saveTimer);
+    cancelQueuedSourceSave();
     saveSourcePosition();
   });
 
   function setDocumentMode(next: DocumentMode): void {
     if (documentMode === next) return;
     if (next === "source") saveSourcePosition();
-    // 离开源码时清掉恢复签名：再切回源码要重新按保存的位置定位。
-    if (next === "preview") restoreSignature = "";
+    // 离开源码：先落定排队中的位置，再清恢复签名与已落地的行定位——
+    // 再切回源码要按会话里的位置重新定位，不能一直被上一次行定位挡住。
+    if (next === "preview") {
+      commitQueuedSourceSave();
+      restoreSignature = "";
+      appliedLineSerial = null;
+    }
     documentMode = next;
     documentNotice = null;
     if (path && isMarkdownPath(path)) {
@@ -383,22 +433,34 @@
 
   /**
    * 回到这个版本上次的源码位置：目标不在已读页时按偏移读取，读到更短的内容就夹到有效范围。
-   * 显式行定位（line 已给）不做恢复：新的搜索意图优先。
+   * 分页起点没变时按保存的精确偏移写回，避免只按行居中把位置挪走。
    */
   async function restoreSourcePosition(target: string): Promise<void> {
     const stored = documentSession.recall({ revision: "worktree", path: target }, content?.version ?? null);
     if (!stored) return;
     const line = Math.max(1, Math.trunc(stored.reading.source.line));
     if (!Number.isFinite(line) || line <= 1) return;
+    const top = Math.max(0, Math.trunc(stored.reading.source.top));
     if (line - 1 < pageOffset || line - 1 >= pageOffset + lines.length) {
       await read(target, line - 1, false, generation);
       if (path !== target) return;
       // 等这一页真的挂进 DOM 再滚：否则 scrollTop 会被旧高度夹住。
       await tick();
     }
-    revealLine(line);
+    if (alignedSourceTop(line, top)) {
+      scrollTop = top;
+      if (scroller) scroller.scrollTop = top;
+    } else {
+      revealLine(line);
+    }
     if (stored.moved) documentNotice = "文件内容已变化，阅读位置按新内容重新定位。";
     else if (line > pageOffset + lines.length) documentNotice = "这个版本比上次短，阅读位置已调整到有效范围。";
+  }
+
+  /** 保存的 top 与行号是否还落在同一分页坐标里：页面起点变了就只按行恢复。 */
+  function alignedSourceTop(line: number, top: number): boolean {
+    if (top <= 0 || wrap) return false;
+    return pageOffset + Math.floor(top / ROW_HEIGHT) + 1 === line;
   }
 
   /*
@@ -416,8 +478,23 @@
     if (mode !== "source" || signature === restoreSignature) return;
     untrack(() => {
       restoreSignature = signature;
-      if (explicit !== null && explicit > 0) return;
+      // 只有这次打开尚未落地的新行定位才优先于恢复；同一序号在往返/换文件回来后
+      // 已是「上一次的定位」，必须恢复会话位置，否则会一直回到文件开头。
+      if (explicit !== null && explicit > 0 && appliedLineSerial === serial) return;
       void restoreSourcePosition(target);
+    });
+  });
+
+  /*
+   * 源码分支按条件渲染：从预览切回来或换行模式切回时，滚动容器是新挂载的，
+   * 它的 scrollTop 从 0 开始，而虚拟窗口仍按同一份状态取行。挂载即写回，
+   * 避免正文回到首页并出现顶部空白/行缺失的窗口错位。
+   */
+  $effect(() => {
+    const node = scroller;
+    if (!node) return;
+    untrack(() => {
+      if (scrollTop > 0 && node.scrollTop !== scrollTop) node.scrollTop = scrollTop;
     });
   });
 

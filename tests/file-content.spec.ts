@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
 const repositoryFileContent = vi.hoisted(() => vi.fn());
 const repositoryContentSearch = vi.hoisted(() => vi.fn());
@@ -553,6 +553,127 @@ describe("Markdown 阅读接入", () => {
     await screen.findByRole("heading", { name: "标题" });
     await fireEvent.click(screen.getByRole("button", { name: "查看这个 Markdown 的源码" }));
     const restored = view.container.querySelector<HTMLDivElement>(".file-code")!;
-    await waitFor(() => expect(restored.scrollTop).toBe(20));
+    // 分页起点没变时按保存的精确偏移写回，而不是只按行居中。
+    await waitFor(() => expect(restored.scrollTop).toBe(220));
     expect(view.container.querySelector('[data-file-line="12"]')).toBeTruthy();
   });
+
+  describe("Markdown 源码位置恢复", () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    /**
+     * happy-dom 没有布局，clientHeight 恒为 0 时虚拟窗口总是从第一行算起，
+     * 「窗口按旧 scrollTop 取行、容器却停在顶部」的错位看不出来。
+     * 这里只给源码滚动容器一个真实视口，其它元素仍按 0 处理。
+     */
+    function mockCodeViewport(height = 400): void {
+      vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+        return this.classList.contains("file-code") ? height : 0;
+      });
+    }
+
+    it("命中行后预览与源码往返仍回到原处，虚拟窗口不错位", async () => {
+      const viewport = 400;
+      mockCodeViewport(viewport);
+      const many = Array.from({ length: 200 }, (_, index) => `line ${index + 1}`);
+      repositoryFileContent.mockResolvedValue(text({ path: "docs/a.md", lines: many, nextOffset: many.length }));
+      repositoryDocument.mockResolvedValue(markdownDoc());
+      const view = render(FileContent, {
+        props: props({ path: "docs/a.md", contentVersion: "v1", line: 40, lineSerial: 1 }) as never,
+      });
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "查看这个 Markdown 的源码" }).getAttribute("aria-pressed")).toBe("true"),
+      );
+      const scroller = view.container.querySelector<HTMLDivElement>(".file-code")!;
+      await waitFor(() => expect(scroller.querySelector("[data-file-line]")).toBeTruthy());
+      scroller.scrollTop = 400;
+      await fireEvent.scroll(scroller);
+
+      // 立刻切到预览再切回源码：源码分支的滚动容器是新挂载的，位置必须写回去。
+      await fireEvent.click(screen.getByRole("button", { name: "预览这个 Markdown 文档" }));
+      await screen.findByRole("heading", { name: "标题" });
+      await fireEvent.click(screen.getByRole("button", { name: "查看这个 Markdown 的源码" }));
+
+      const restored = view.container.querySelector<HTMLDivElement>(".file-code")!;
+      await waitFor(() => expect(restored.scrollTop).toBe(400));
+      // 虚拟窗口必须按容器当前的 scrollTop 取行：起点在视口上方的预取行内，
+      // 末尾仍盖住视口底部，才不会出现顶部空白或行缺失。
+      const rows = [...restored.querySelectorAll<HTMLElement>("[data-file-line]")];
+      const firstTop = Number.parseFloat(rows[0].style.top);
+      const lastTop = Number.parseFloat(rows[rows.length - 1].style.top);
+      expect(firstTop).toBeLessThanOrEqual(restored.scrollTop);
+      expect(restored.scrollTop - firstTop).toBeLessThanOrEqual(240);
+      expect(lastTop + 20).toBeGreaterThanOrEqual(restored.scrollTop + viewport);
+    });
+
+    it("命中行的文件切到另一个文件再回来仍恢复源码位置，不回到开头", async () => {
+      mockCodeViewport();
+      const many = Array.from({ length: 200 }, (_, index) => `line ${index + 1}`);
+      repositoryFileContent.mockImplementation((_repo: string, target: string) =>
+        Promise.resolve(
+          text({ path: target, lines: target === "docs/a.md" ? many : ["const other = true;"], nextOffset: many.length }),
+        ),
+      );
+      repositoryDocument.mockResolvedValue(markdownDoc());
+      const markdownProps = props({ path: "docs/a.md", contentVersion: "v1", line: 40, lineSerial: 1 });
+      const view = render(FileContent, { props: markdownProps as never });
+      await waitFor(() => expect(view.container.querySelector(".file-code [data-file-line]")).toBeTruthy());
+      const scroller = view.container.querySelector<HTMLDivElement>(".file-code")!;
+      scroller.scrollTop = 400;
+      await fireEvent.scroll(scroller);
+      // 等位置写入落地，再切到别的文件。
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      await view.rerender(props({ path: "src/App.ts", contentVersion: "v2" }) as never);
+      await screen.findByText("const other = true;");
+      await view.rerender(markdownProps as never);
+
+      const restored = await waitFor(() => {
+        const node = view.container.querySelector<HTMLDivElement>(".file-code");
+        expect(node).toBeTruthy();
+        return node!;
+      });
+      // 恢复而非回到顶部：保存的行仍在窗口里，第一行不在。
+      await waitFor(() => expect(restored.querySelector('[data-file-line="60"]')).toBeTruthy());
+      expect(restored.scrollTop).toBeGreaterThan(0);
+      expect(restored.querySelector('[data-file-line="1"]')).toBeNull();
+    });
+
+    it("滚动后立刻切到另一个 Markdown 文件，旧位置写入不污染新文件的阅读模式", async () => {
+      const many = Array.from({ length: 200 }, (_, index) => `line ${index + 1}`);
+      repositoryFileContent.mockImplementation((_repo: string, target: string) =>
+        Promise.resolve(
+          text({ path: target, lines: target === "docs/a.md" ? many : ["# 标题 B"], nextOffset: many.length }),
+        ),
+      );
+      repositoryDocument.mockImplementation((_repo: string, source: { path: string }) =>
+        Promise.resolve(
+          markdownDoc({
+            text: source.path === "docs/a.md" ? "# 标题 A" : "# 标题 B",
+            source: { revision: "worktree", path: source.path, repository: repoPath },
+          }),
+        ),
+      );
+      const view = render(FileContent, { props: props({ path: "docs/a.md", contentVersion: "v1" }) as never });
+      await screen.findByRole("heading", { name: "标题 A" });
+
+      await fireEvent.click(screen.getByRole("button", { name: "查看这个 Markdown 的源码" }));
+      const scroller = view.container.querySelector<HTMLDivElement>(".file-code")!;
+      scroller.scrollTop = 400;
+      await fireEvent.scroll(scroller);
+      // 定时器还没触发就切到另一个 Markdown 文件：这次写入属于上一个文件。
+      await view.rerender(props({ path: "docs/b.md", contentVersion: "v1" }) as never);
+      expect(await screen.findByRole("heading", { name: "标题 B" })).toBeTruthy();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      // 回到 B 时仍按它自己保存的预览模式进入，而不是被旧写入改成源码。
+      await view.rerender(props({ path: "docs/a.md", contentVersion: "v1" }) as never);
+      await waitFor(() => expect(view.container.querySelector(".file-code [data-file-line]")).toBeTruthy());
+      // 排队中的位置按 A 自己的身份落定：切回来仍回到原处，A 的阅读位置没有丢。
+      await waitFor(() => expect(view.container.querySelector<HTMLDivElement>(".file-code")!.scrollTop).toBe(400));
+      await view.rerender(props({ path: "docs/b.md", contentVersion: "v1" }) as never);
+      expect(await screen.findByRole("heading", { name: "标题 B" })).toBeTruthy();
+      expect(view.container.querySelector(".file-code")).toBeNull();
+    });
+  });
+

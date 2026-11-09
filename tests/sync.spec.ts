@@ -78,6 +78,7 @@ const mocks = vi.hoisted(() => ({
   refreshStatus: vi.fn(),
   loadDiff: vi.fn(),
   commitChanges: vi.fn(),
+  repositoryReviewToken: vi.fn(),
   commitAndPush: vi.fn(),
   fetchRemote: vi.fn(),
   pushBranch: vi.fn(),
@@ -245,6 +246,43 @@ describe("重新验证与同步的原地反馈", () => {
     expect(message).toContain("可以重试获取更新");
     expect(diffRows()).toBe(before);
     expect(document.querySelector('[data-refreshing="true"]')).toBeNull();
+  });
+
+
+  it("标记已审阅不改变提交范围：提交只读真实暂存区，也不额外暂存", async () => {
+    mocks.repositoryReviewToken.mockResolvedValue({
+      generation: 4,
+      path: "src/App.svelte",
+      state: "current" as const,
+      token: "tok:src/App.svelte",
+      staged: "modified" as const,
+      unstaged: "none" as const,
+      untracked: false,
+      unmerged: false,
+      contentVersion: "worktree:abc",
+      message: "已确认这个文件当前的整份内容与改动。",
+    });
+    mocks.commitChanges.mockResolvedValue({
+      oid: "abcdef1234567",
+      branch: "main",
+      summary: "已提交 abcdef1",
+      generation: 5,
+      snapshot: { ...snapshot, generation: 5, files: [] },
+    });
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: "标记 src/App.svelte 已审阅" }));
+    await waitFor(() => expect(screen.getByLabelText("已审阅 1 个，共 1 个改动文件")).toBeTruthy());
+
+    const textarea = document.querySelector<HTMLTextAreaElement>(".composer textarea")!;
+    await fireEvent.input(textarea, { target: { value: "只提交真实暂存内容" } });
+    await fireEvent.click(screen.getByRole("button", { name: "提交到本地" }));
+
+    await waitFor(() =>
+      expect(mocks.commitChanges).toHaveBeenCalledWith(repoPath, "只提交真实暂存内容", 4, expect.any(Number)),
+    );
+    // 审阅只是本地记录：不暂存、不取消暂存，也不扩大提交范围。
+    expect(mocks.commitChanges).toHaveBeenCalledTimes(1);
   });
 
   it("推送失败保留本地提交结果，重试只推送且不会再次提交", async () => {

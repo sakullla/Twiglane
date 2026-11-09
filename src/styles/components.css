@@ -2412,3 +2412,47 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
   line-height: 1.5;
 }
 
+
+/* ---------- 连续审阅队列与真实暂存范围（R2、R4、R6） ----------
+   任务与改动共用同一套未审阅导航与状态；任务页另外把「任务范围」和「本次提交」分成两块，
+   形状靠细线和小标签，不加卡片与阴影。 */
+.file-tools .file-nav { flex: none; }
+.file-tag.rebuilt { background: var(--info-soft); color: var(--info-text); }
+.diff-side.task { background: var(--info-soft); color: var(--info-text); }
+.task-context-actions { gap: var(--space-4); flex-wrap: wrap; }
+.task-context-actions .btn { height: 22px; }
+.task-action-label { font-size: var(--text-xs); }
+.task-stage-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: none;
+  padding: var(--space-6) var(--space-8);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.task-stage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: var(--space-4) 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+}
+.task-stage-list li { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.task-stage-list li.more { font-family: inherit; color: var(--fg-subtle); }
+.task-diff-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  flex: none;
+  padding: var(--space-4) var(--space-8);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+@media (max-width: 1120px) {
+  .task-stage-list { max-height: 56px; overflow: auto; }
+}

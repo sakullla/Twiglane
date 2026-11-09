@@ -15,7 +15,12 @@ import {
   fileNavState,
   orderedRows,
   rangeSelection,
+  reviewQueue,
   toggleSelection,
+  ALL_REVIEWED,
+  NO_MORE_UNREVIEWED,
+  NO_REVIEW_FILES,
+  FIRST_UNREVIEWED,
 } from "../src/lib/ui";
 import type {
   DiffLine,
@@ -1997,7 +2002,9 @@ describe("上一个、下一个文件（R20）", () => {
     expect(shortcutCommand({ key: "f", ctrlKey: true })).toBe("view.find");
     expect(shortcutCommand({ key: "f", metaKey: true, shiftKey: true })).toBeNull();
     expect(shortcutCommand({ key: "ArrowDown", altKey: true, shiftKey: true })).toBeNull();
-    expect(shortcutCommand({ key: "ArrowRight", altKey: true, shiftKey: true })).toBeNull();
+    expect(shortcutCommand({ key: "ArrowLeft", altKey: true, shiftKey: true })).toBe("review.prev");
+    expect(shortcutCommand({ key: "ArrowRight", altKey: true, shiftKey: true })).toBe("review.next");
+    expect(shortcutCommand({ key: "m", altKey: true })).toBe("review.toggle");
     expect(shortcutCommand({ key: "ArrowRight", altKey: true, ctrlKey: true })).toBeNull();
     expect(shortcutCommand({ key: "ArrowRight" })).toBeNull();
     expect(shortcutCommand({ key: "k", altKey: true })).toBeNull();
@@ -2570,7 +2577,44 @@ describe("文件列表的目录分组和行数", () => {
     expect(props.onStageAll).toHaveBeenCalledWith(["notes/todo.log"]);
   });
 
-  it("分区之间的分隔线只画在后面几个分区上，第一个表头不画", () => {
+  
+  it("三类空状态各自给出下一步：隐藏已审阅、清筛选、全部完成", async () => {
+    const files = [change("a.ts", "none", "modified"), change("b.ts", "modified", "none")];
+    const reviewed = new Set(["a.ts", "b.ts"]);
+    const rows = orderedRows(files);
+    const queue = reviewQueue(rows, reviewed, { path: "a.ts", side: "unstaged" }, () => {});
+    const onQuery = vi.fn();
+    const onHideReviewed = vi.fn();
+    const props = {
+      ...listProps(files),
+      onQuery,
+      reviewed,
+      reviewTotal: 2,
+      reviewReviewed: 2,
+      hideReviewed: true,
+      onHideReviewed,
+      onToggleReview: vi.fn(),
+      reviewNav: queue,
+    };
+    const view = render(FileList, { props });
+    // 一：已审阅被隐藏。
+    expect(await screen.findByText("已审阅的文件都隐藏了")).toBeTruthy();
+    expect(document.body.textContent).toContain("分组数量、任务范围与提交范围没有变化");
+    await fireEvent.click(screen.getByRole("button", { name: "显示已审阅" }));
+    expect(onHideReviewed).toHaveBeenCalledWith(false);
+
+    // 二：全部已审阅但不隐藏，给出下一步而不是空白。
+    await view.rerender({ ...props, hideReviewed: false });
+    expect(document.body.textContent).toContain("所有文件都已审阅");
+    expect(document.body.textContent).toContain("可以隐藏已审阅，或按真实暂存范围提交");
+
+    // 三：筛选没有结果，下一步是清掉筛选。
+    await view.rerender({ ...props, hideReviewed: false, query: "zzz" });
+    expect(await screen.findByText("没有匹配的文件")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "清除筛选" }));
+    expect(onQuery).toHaveBeenCalledWith("");
+  });
+it("分区之间的分隔线只画在后面几个分区上，第一个表头不画", () => {
     const files = [
       change("a.ts", "none", "modified"),
       change("b.ts", "modified", "none"),
@@ -3303,5 +3347,67 @@ describe("差异里的文档阅读入口（R5）", () => {
     expect(screen.queryByRole("button", { name: "阅读 gen/plain.ts 的文档" })).toBeNull();
     await fireEvent.click(entry);
     expect(onReadDocument).toHaveBeenCalledWith(documentSides, "new", entry);
+  });
+});
+/* ------------------------------------------------------------------ *
+ * T3：任务与改动共用的连续审阅队列。
+ * 队列语义是纯函数，这里盯去重、只走未审阅、队尾不循环与三类原因文案。
+ * ------------------------------------------------------------------ */
+describe("连续审阅队列（R2）", () => {
+  const rows: FileRow[] = [
+    { ...change("a.ts", "none", "modified"), side: "unstaged" },
+    { ...change("b.ts", "modified", "modified"), side: "unstaged" },
+    { ...change("b.ts", "modified", "modified"), side: "staged" },
+    { ...change("c.ts", "modified", "none"), side: "staged" },
+  ];
+
+  it("同一路径在两侧只算一个文件，队列按给定顺序", () => {
+    const nav = reviewQueue(rows, new Set<string>(), null, () => {});
+    expect(nav.total).toBe(3);
+    expect(nav.remaining).toBe(3);
+    expect(nav.index).toBe(-1);
+    expect(nav.nextReason).toBeNull();
+    // 当前不在队列里：上一个从队尾开始，下一个从队首开始。
+    const go = vi.fn();
+    const fromNone = reviewQueue(rows, new Set<string>(), null, go);
+    fromNone.onPrev();
+    expect(go).toHaveBeenLastCalledWith(expect.objectContaining({ path: "c.ts" }));
+    fromNone.onNext();
+    expect(go).toHaveBeenLastCalledWith(expect.objectContaining({ path: "a.ts" }));
+  });
+
+  it("只访问未审阅文件，到队尾不回到开头", () => {
+    const reviewed = new Set(["a.ts"]);
+    const go = vi.fn();
+    const middle = reviewQueue(rows, reviewed, { path: "b.ts", side: "unstaged" }, go);
+    expect(middle.remaining).toBe(2);
+    expect(middle.index).toBe(0);
+    expect(middle.prevReason).toBe(FIRST_UNREVIEWED);
+    expect(middle.nextReason).toBeNull();
+    middle.onNext();
+    expect(go).toHaveBeenLastCalledWith(expect.objectContaining({ path: "c.ts" }));
+
+    const tail = reviewQueue(rows, reviewed, { path: "c.ts", side: "staged" }, go);
+    expect(tail.nextReason).toBe(NO_MORE_UNREVIEWED);
+    expect(tail.prevReason).toBeNull();
+    expect(tail.index).toBe(1);
+    // 队尾不循环：下一个没有目标，回调不会被调用。
+    go.mockClear();
+    tail.onNext();
+    expect(go).not.toHaveBeenCalled();
+    tail.onPrev();
+    expect(go).toHaveBeenLastCalledWith(expect.objectContaining({ path: "b.ts" }));
+  });
+
+  it("三类情况各自给出明确原因", () => {
+    const empty = reviewQueue([], new Set<string>(), null, () => {});
+    expect(empty.prevReason).toBe(NO_REVIEW_FILES);
+    expect(empty.nextReason).toBe(NO_REVIEW_FILES);
+
+    const done = reviewQueue(rows, new Set(["a.ts", "b.ts", "c.ts"]), { path: "a.ts", side: "unstaged" }, () => {});
+    expect(done.remaining).toBe(0);
+    expect(done.reviewed).toBe(3);
+    expect(done.prevReason).toBe(ALL_REVIEWED);
+    expect(done.nextReason).toBe(ALL_REVIEWED);
   });
 });

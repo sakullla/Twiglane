@@ -29,6 +29,11 @@
     loading: boolean;
     disabled: boolean;
     readOnly?: boolean;
+    /**
+     * 只读差异的身份标签（例如「任务净差异」）。给了它就不再按改动侧别显示「未暂存」，
+     * 标题与正文都说明这是哪个只读范围的结果。
+     */
+    readOnlyLabel?: string;
     onStageHunk: (hunk: DiffHunk) => void;
     /**
      * 逐行暂存 / 取消暂存。传了它才出现「选行」模式；历史、审查与多文件块不传，
@@ -100,6 +105,7 @@
     loading,
     disabled,
     readOnly = false,
+    readOnlyLabel,
     onStageHunk,
     onStageLines,
     onLoadMore,
@@ -308,7 +314,7 @@
   /** 行选为什么不能用：文件级、视图级的原因都要明说，不能只是把按钮灰着。 */
   let pickBlocker = $derived.by<string | null>(() => {
     if (!currentDiff) return "还没有读到差异";
-    if (readOnly) return "历史与审查视图是只读的，不会写入暂存区";
+    if (readOnly) return `${readOnlyLabel ?? "历史与审查视图"}只读，不会写入暂存区`;
     if (conflicted) return "冲突文件要在三栏合并里处理";
     if (currentDiff.binary) return "二进制文件不能按行暂存";
     if (currentDiff.preview) return "图片预览没有可选的代码行";
@@ -1209,7 +1215,7 @@
       <div class="diff-file">
         {#if selection && parts}
           <!-- 文件名是这一段的主角：目录先省略，文件名最后才截断；完整路径在提示里。 -->
-          <span class="diff-path" title={selection.side === "staged" ? `${selection.path}（已暂存）` : `${selection.path}（未暂存）`}>
+          <span class="diff-path" title={readOnly && readOnlyLabel ? `${selection.path}（${readOnlyLabel}）` : selection.side === "staged" ? `${selection.path}（已暂存）` : `${selection.path}（未暂存）`}>
             <bdi>{#if parts.dir}<span class="dir">{parts.dir}/</span>{/if}<strong>{parts.name}</strong></bdi>
           </span>
           {#if !embedded}
@@ -1226,7 +1232,9 @@
           {/if}
           <!-- 未暂存是改动视图的默认侧，不再单独标出；只有已暂存会把按块动作变成「取消暂存」，
                这时才需要提醒。 -->
-          {#if !readOnly && selection.side === "staged"}
+          {#if readOnly && readOnlyLabel}
+            <span class="diff-side task">{readOnlyLabel}</span>
+          {:else if !readOnly && selection.side === "staged"}
             <span class="diff-side staged">已暂存</span>
           {/if}
           {#if showStats && currentDiff}

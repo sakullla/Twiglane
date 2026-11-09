@@ -29,17 +29,20 @@
   import { normalizeError } from "./lib/errors";
   import { clampWidth, FALLBACK_POLL_MS, fitPaneWidth, shouldPoll } from "./lib/layout";
   import {
-    applyReviewReverification,
+    CHANGES_SCOPE,
+    applyReviewReverificationIn,
     beginReviewProgress,
-    isReviewed,
-    markReviewed,
-    pruneReviewProgress,
+    isReviewedIn,
+    markReviewedIn,
+    pruneReviewProgressIn,
     reviewPaths,
-    reviewProgress,
-    reviewSummary,
-    unmarkReviewed,
+    reviewSummaryIn,
+    reviewTokens,
+    taskReviewScope,
+    unmarkReviewedIn,
+    type ReviewTarget,
   } from "./lib/review-progress.svelte";
-  import { branchLabel, commitScope, createSelectionResolver, dependencyNote, filterRows, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
+  import { branchLabel, commitScope, createSelectionResolver, dependencyNote, filterRows, groupFiles, retainSelection, selectionAfterEdit, stagedFiles, syncLabel } from "./lib/labels";
   import { startDesktopMeasure } from "./lib/measure";
   import { updateState, watchUpdateAvailable } from "./lib/update.svelte";
   import { isTextEntry, shortcutCommand } from "./lib/shortcuts";
@@ -71,9 +74,11 @@
     fileNavState,
     hasCommitSummary,
     orderedRows,
+    reviewQueue,
     rowsInSelection,
     sameSelection,
     type FileNavState,
+    type ReviewQueueState,
   } from "./lib/ui";
   import BranchDialog from "./lib/components/BranchDialog.svelte";
   import type { MergeMode } from "./lib/components/MergeSetup.svelte";
@@ -351,14 +356,48 @@
   let scope = $derived(opened ? commitScope(branchText, opened.snapshot.files) : { label: "", paths: [] as string[] });
   let ahead = $derived(opened?.snapshot.branch.ahead ?? 0);
   let behind = $derived(opened?.snapshot.branch.behind ?? 0);
-  /* 审阅进度（R5）：本地人工记录，不写 state.json，不参与提交范围与 Cliora 结果。 */
+  /*
+   * 审阅进度（R2）：会话内本地人工记录，按 canonical worktree 与范围隔离，不写 state.json，
+   * 也不参与提交范围与 Cliora 结果。「改动」与「任务」各自保留自己的标记、隐藏与提示。
+   */
   let hideReviewed = $state(false);
+  let taskHideReviewed = $state(false);
   let reviewBusy = $state<string | null>(null);
   let reviewNote = $state<string | null>(null);
+  let taskReviewNote = $state<string | null>(null);
   let reviewSerial = 0;
-  let reviewedSet = $derived(new Set(Object.keys(reviewProgress.tokens)));
-  let reviewCounts = $derived(reviewSummary(opened ? reviewPaths(opened.snapshot.files) : []));
+  let taskReviewSerial = 0;
+  /** 任务页报告的已解析范围：只有后端校验过的起点与 HEAD 才能作为任务快照 token 的依据。 */
+  let taskScope = $state.raw<{ worktree: string; baselineOid: string; headOid: string } | null>(null);
+  let taskSelectedPath = $state<string | null>(null);
+  let taskReviewNav = $state.raw<ReviewQueueState | null>(null);
+  let changesTarget = $derived<ReviewTarget | null>(
+    opened ? { worktree: opened.summary.path, scope: CHANGES_SCOPE } : null,
+  );
+  let taskTarget = $derived<ReviewTarget | null>(
+    taskScope ? { worktree: taskScope.worktree, scope: taskReviewScope(taskScope.baselineOid) } : null,
+  );
+  let reviewedSet = $derived(new Set(changesTarget ? Object.keys(reviewTokens(changesTarget)) : []));
+  let taskReviewedSet = $derived(new Set(taskTarget ? Object.keys(reviewTokens(taskTarget)) : []));
+  let reviewCounts = $derived(
+    reviewSummaryIn(changesTarget ?? { worktree: "", scope: CHANGES_SCOPE }, opened ? reviewPaths(opened.snapshot.files) : []),
+  );
+  let activeReviewedSet = $derived(workspaceView === "task" ? taskReviewedSet : reviewedSet);
+  /** 命令与按钮作用的文件：任务视图用任务页自己的选择，改动视图用改动列表的选择。 */
+  let activeSelectedPath = $derived(workspaceView === "task" ? taskSelectedPath : (selected?.path ?? null));
+  let changesReviewNav = $derived.by<ReviewQueueState | null>(() => {
+    if (!opened) return null;
+    return reviewQueue(orderedRows(opened.snapshot.files, fileQuery), reviewedSet, selected, goToFile);
+  });
+  let activeReviewNav = $derived(
+    workspaceView === "task" ? taskReviewNav : workspaceView === "changes" ? changesReviewNav : null,
+  );
 
+  /** 真实暂存范围（与提交区同源）：任务页用它把「任务文件」和「本次提交」分开。 */
+  let stagedScopeFiles = $derived(stagedFiles(opened?.snapshot.files ?? []));
+  let stagedScopePaths = $derived(
+    stagedScopeFiles.map((file) => (file.originalPath ? `${file.originalPath} → ${file.path}` : file.path)),
+  );
   let changeCount = $derived(opened?.snapshot.files.length ?? 0);
   let conflictCount = $derived(opened?.snapshot.files.filter((file) => file.unmerged).length ?? 0);
   let upstreamMissing = $derived(opened ? !opened.snapshot.branch.upstream : false);
@@ -438,6 +477,20 @@
     taskHunk = assignHunk(taskHunk, nav);
   }
 
+  /**
+   * 当前文件在真实 Git 状态里属于哪一侧：整文件暂存/取消暂存都以它为唯一依据。
+   * 任务净差异来自提交时（真实状态里没有未提交改动）这里是 none，命令就地说明原因。
+   */
+  let activeFileStage = $derived.by<{ path: string | null; side: "staged" | "unstaged" | "none" }>(() => {
+    // 只有改动与任务视图把选择作用在真实 Git 状态上；文件/历史视图没有可写的这一侧。
+    const path = workspaceView === "changes" || workspaceView === "task" ? activeSelectedPath : null;
+    const file = path ? opened?.snapshot.files.find((item) => item.path === path) : undefined;
+    if (!path || !file || file.unmerged) return { path: path ?? null, side: "none" };
+    if (file.untracked || file.unstaged !== "none") return { path, side: "unstaged" };
+    if (file.staged !== "none") return { path, side: "staged" };
+    return { path, side: "none" };
+  });
+
   /* 命令注册表的唯一状态输入：标题栏、左栏、溢出菜单与命令面板都读这一份。 */
   let commandState = $derived<CommandState>({
     hasRepo: opened !== null,
@@ -458,6 +511,20 @@
     stageTargets,
     unstageTargets,
     fileNav: activeNav,
+    review: activeReviewNav
+      ? {
+          prevReason: activeReviewNav.prevReason,
+          nextReason: activeReviewNav.nextReason,
+          toggleReason: activeSelectedPath ? (reviewBusy === activeSelectedPath ? "正在确认这个文件的快照" : null) : "先选择一个文件",
+          reviewed: activeSelectedPath ? activeReviewedSet.has(activeSelectedPath) : false,
+          hideReason: null,
+          hidden: workspaceView === "task" ? taskHideReviewed : hideReviewed,
+          remaining: activeReviewNav.remaining,
+          total: activeReviewNav.total,
+          scope: workspaceView === "task" ? "task" : "changes",
+        }
+      : null,
+    fileStage: { path: activeFileStage.path, side: activeFileStage.side, reason: null },
     hunkNav: activeHunk ? { prevReason: activeHunk.prevReason, nextReason: activeHunk.nextReason } : null,
     multiFile: multiActive,
     // 文件树定位以改动视图的选中文件为目标：没有选中就没有可定位的文件。
@@ -609,6 +676,8 @@
     "commit.push",
     "stage.all",
     "unstage.all",
+    "stage.file",
+    "unstage.file",
     "sync.fetch",
     "sync.pull",
     "sync.push",
@@ -637,6 +706,25 @@
         return;
       case "file.next":
         activeNav?.onNext();
+        return;
+      case "review.prev":
+        activeReviewNav?.onPrev();
+        return;
+      case "review.next":
+        activeReviewNav?.onNext();
+        return;
+      case "review.toggle":
+        if (activeSelectedPath) void toggleReviewed(activeSelectedPath);
+        return;
+      case "review.hide":
+        if (workspaceView === "task") taskHideReviewed = !taskHideReviewed;
+        else hideReviewed = !hideReviewed;
+        return;
+      case "stage.file":
+        if (activeSelectedPath) void stagePath(activeSelectedPath);
+        return;
+      case "unstage.file":
+        if (activeSelectedPath) void unstagePath(activeSelectedPath);
         return;
       case "diff.hunk.prev":
         activeHunk?.jump(-1);
@@ -1016,11 +1104,15 @@
     historyPath = null;
     historyQuery = "";
     filesNav = null;
-    // 换仓库清掉任务起点与导航：旧仓库的起点对新仓库不成立。
+    // 换仓库清掉任务起点、导航与已解析范围：旧仓库的起点对新仓库不成立。
     taskRequest = null;
     taskRequestNonce += 1;
     taskNav = null;
     taskHunk = null;
+    taskScope = null;
+    taskSelectedPath = null;
+    taskReviewNav = null;
+    taskReviewNote = null;
     taskModal = null;
     paletteOpen = false;
     cloneOpen = false;
@@ -1305,6 +1397,40 @@
     selectFile({ path, side });
   }
 
+  /**
+   * 任务净差异的按块/按行入口：聚合补丁含已提交内容，不能直接应用；
+   * 这里转到同一文件的真实未提交差异，部分暂存仍走写锁内重读与过期保护。
+   */
+  function openUnstagedDiff(path: string): void {
+    const file = opened?.snapshot.files.find((item) => item.path === path);
+    if (!file || file.unmerged) {
+      notice("这个文件当前没有可部分暂存的未提交差异：任务净差异不能直接做块/行补丁。");
+      return;
+    }
+    const side: DiffSide = file.untracked || file.unstaged !== "none" ? "unstaged" : "staged";
+    showChanges();
+    selectFile({ path, side });
+    notice(
+      side === "unstaged"
+        ? "已切到真实未提交差异：按块/行暂存仍会重读并拒绝过期补丁。"
+        : "这个文件当前只有已暂存内容：按块操作会取消暂存对应块，不会改动任务范围。",
+    );
+  }
+
+  /** 在真实状态下把这个任务文件整文件暂存/取消暂存；任务净差异本身不被写入。 */
+  function stageTaskFile(path: string): void {
+    const file = opened?.snapshot.files.find((item) => item.path === path);
+    if (!file || file.unmerged) {
+      notice("这个文件没有可暂存的真实改动：任务净差异来自提交，不能在这里写入索引。");
+      return;
+    }
+    if (file.staged !== "none" && file.unstaged === "none" && !file.untracked) {
+      void unstagePath(path);
+      return;
+    }
+    void stagePath(path);
+  }
+
   /** 打开文件视图里的某一种搜索（路径 / 全文），并把焦点交给它自己的输入框。 */
   async function openFilesSearch(mode: "path" | "content") {
     showFiles();
@@ -1433,14 +1559,16 @@
   /**
    * 刷新后只重验已标记的路径：token 相同保留，内容或状态变化、文件消失、
    * 无法确认时取消对应标记，其他文件不受影响。没有标记时不发任何请求。
+   * 改动范围只重验改动快照；任务范围由任务页读取后再重验，两条范围互不作证。
    */
   async function reverifyReviewed(): Promise<void> {
     const current = opened;
     if (!current) return;
-    const marked = Object.keys(reviewProgress.tokens);
+    const target: ReviewTarget = { worktree: current.summary.path, scope: CHANGES_SCOPE };
+    const marked = Object.keys(reviewTokens(target));
     if (marked.length === 0) return;
     const alive = reviewPaths(current.snapshot.files);
-    const dropped = pruneReviewProgress(alive);
+    const dropped = pruneReviewProgressIn(target, alive);
     if (dropped.length > 0) {
       reviewNote = `${dropped.length} 个文件已不在改动列表里，已撤销对应的已审阅标记。`;
     }
@@ -1466,33 +1594,113 @@
       }
       if (serial !== reviewSerial || opened?.summary.path !== repo) return;
     }
-    const invalidations = applyReviewReverification(results);
+    const invalidations = applyReviewReverificationIn(target, results);
     if (invalidations.length > 0) {
       reviewNote = `${invalidations.length} 个文件的快照已变化，已撤销对应的已审阅标记。`;
     }
   }
 
-  /** 标记 / 撤销整文件已审阅：只读确认快照，不暂存、不提交、不写 state.json。 */
-  async function toggleReviewed(path: string): Promise<void> {
-    const current = opened;
-    if (!current) return;
-    if (isReviewed(path)) {
-      unmarkReviewed(path);
-      reviewNote = null;
-      return;
-    }
-    reviewBusy = path;
-    reviewNote = null;
-    try {
-      const result = await api.repositoryReviewToken(current.summary.path, path, current.generation, nextId());
-      if (opened?.summary.path !== current.summary.path) return;
-      if (result.state !== "current" || !result.token) {
-        reviewNote = result.message;
+  /**
+   * 任务页每次成功读取后报告它解析出的范围。任务快照 token 绑定这个范围，
+   * 所以范围一变，进度立刻按新身份显示，旧标记不会被当成这次任务的结果。
+   */
+  function adoptTaskScope(scope: { worktree: string; baselineOid: string; headOid: string } | null): void {
+    taskScope = scope;
+    taskSelectedPath = scope ? taskSelectedPath : null;
+    if (scope) void reverifyTaskReviewed();
+    else taskReviewNav = null;
+  }
+
+  /**
+   * 任务范围的重验：只重验已标记路径，token 相同保留；内容、暂存、未跟踪、冲突或
+   * 删除状态变化只撤销受影响的那条，其他进度、草稿与真实暂存都不动。
+   */
+  async function reverifyTaskReviewed(): Promise<void> {
+    const scope = taskScope;
+    const target = taskTarget;
+    if (!scope || !target) return;
+    const marked = Object.keys(reviewTokens(target));
+    if (marked.length === 0) return;
+    const serial = ++taskReviewSerial;
+    const results: { path: string; token: string | null; reason?: string }[] = [];
+    for (const path of marked) {
+      try {
+        const result = await api.taskReviewToken(
+          scope.worktree,
+          scope.baselineOid,
+          scope.headOid,
+          path,
+          opened?.generation ?? 0,
+          nextId(),
+        );
+        results.push({
+          path,
+          token: result.state === "current" ? result.token : null,
+          reason: result.message,
+        });
+      } catch (error) {
+        const failure = normalizeError(error);
+        if (failure.code === "stale") return;
+        results.push({ path, token: null, reason: `无法确认快照：${failure.message}` });
+      }
+      if (
+        serial !== taskReviewSerial ||
+        taskScope?.worktree !== scope.worktree ||
+        taskScope?.baselineOid !== scope.baselineOid ||
+        taskScope?.headOid !== scope.headOid
+      ) {
         return;
       }
-      markReviewed(path, result.token);
+    }
+    const invalidations = applyReviewReverificationIn(target, results);
+    if (invalidations.length > 0) {
+      taskReviewNote = `${invalidations.length} 个文件的快照已变化，已撤销对应的已审阅标记。`;
+    }
+  }
+
+  /** 当前视图的审阅范围：任务视图用任务页解析出的范围，改动视图固定为当前未提交改动。 */
+  function activeReviewTarget(): ReviewTarget | null {
+    if (workspaceView === "task") return taskTarget;
+    return changesTarget;
+  }
+
+  /**
+   * 标记 / 撤销整文件已审阅：只读确认快照，不暂存、不提交、不写 state.json。
+   * 任务范围用 task_review_token（绑定 worktree、起点与这条路径的最终净内容），
+   * 改动范围沿用 repository_review_token。
+   */
+  async function toggleReviewed(path: string): Promise<void> {
+    const current = opened;
+    const target = activeReviewTarget();
+    if (!current || !target) return;
+    const scope = target.scope === CHANGES_SCOPE ? null : taskScope;
+    const note = (message: string | null) => {
+      if (scope) taskReviewNote = message;
+      else reviewNote = message;
+    };
+    if (isReviewedIn(target, path)) {
+      unmarkReviewedIn(target, path);
+      note(null);
+      return;
+    }
+    if (target.scope !== CHANGES_SCOPE && !scope) return;
+    reviewBusy = path;
+    note(null);
+    try {
+      const result = scope
+        ? await api.taskReviewToken(scope.worktree, scope.baselineOid, scope.headOid, path, current.generation, nextId())
+        : await api.repositoryReviewToken(current.summary.path, path, current.generation, nextId());
+      // 确认期间换了范围或仓库：这次结果不属于当前范围，不能拿来标记。
+      const after = activeReviewTarget();
+      if (!after || after.worktree !== target.worktree || after.scope !== target.scope) return;
+      if (opened?.summary.path !== current.summary.path) return;
+      if (result.state !== "current" || !result.token) {
+        note(result.message);
+        return;
+      }
+      markReviewedIn(target, path, result.token);
     } catch (error) {
-      reviewNote = `无法标记已审阅：${normalizeError(error).message}`;
+      note(`无法标记已审阅：${normalizeError(error).message}`);
     } finally {
       if (reviewBusy === path) reviewBusy = null;
     }
@@ -2278,6 +2486,10 @@
         taskRequest = null;
         taskNav = null;
         taskHunk = null;
+        taskScope = null;
+        taskSelectedPath = null;
+        taskReviewNav = null;
+        taskReviewNote = null;
         taskModal = null;
         cloneOpen = false;
         paletteOpen = false;
@@ -2727,7 +2939,7 @@
     if (!id) return;
     // 只看这次按键的目标。文本框里的组合键留给光标；文件切换、改动块和聚焦搜索在弹层打开时也让路。
     const editing = isTextEntry(event.target);
-    const yieldsToLayer = id.startsWith("file.") || id.startsWith("files.") || id.startsWith("diff.hunk.") || id === "view.find";
+    const yieldsToLayer = id.startsWith("file.") || id.startsWith("files.") || id.startsWith("diff.hunk.") || id.startsWith("review.") || id === "view.find";
     if (yieldsToLayer && (layerAtKey || editing)) return;
     if (editing) return;
     event.preventDefault();
@@ -3339,6 +3551,7 @@
                   onToggleReview={(path) => void toggleReviewed(path)}
                   {reviewBusy}
                   {reviewNote}
+                  reviewNav={changesReviewNav}
                 />
                 <CommitDraft
                   branch={branchText}
@@ -3475,6 +3688,19 @@
               onHunkNav={reportTaskHunk}
               onPickBaseline={pickTaskBaseline}
               onClearBaseline={clearTaskBaseline}
+              reviewed={taskReviewedSet}
+              {reviewBusy}
+              reviewNote={taskReviewNote}
+              hideReviewed={taskHideReviewed}
+              onToggleReview={(path) => void toggleReviewed(path)}
+              onHideReviewed={(next) => (taskHideReviewed = next)}
+              onStageFile={stageTaskFile}
+              onOpenUnstaged={openUnstagedDiff}
+              onOpenChanges={showChanges}
+              stagedPaths={stagedScopePaths}
+              onSnapshot={adoptTaskScope}
+              onSelection={(path) => (taskSelectedPath = path)}
+              onReviewNav={(nav) => (taskReviewNav = nav)}
               {paneHead}
               {paneResizer}
             />

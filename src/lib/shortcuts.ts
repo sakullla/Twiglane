@@ -44,6 +44,17 @@ const ALT_COMMANDS: Record<string, string> = {
   ArrowRight: "file.next",
   ArrowUp: "diff.hunk.prev",
   ArrowDown: "diff.hunk.next",
+  /** Alt+M：标记/撤销当前文件的已审阅，和工具条按钮、命令面板是同一条命令。 */
+  m: "review.toggle",
+};
+
+/**
+ * Alt+Shift：只在未审阅文件之间走。没有占用已有的 Alt+←/→（按列表顺序切文件）与
+ * ⌘/Ctrl+Shift+←/→（文件视图后退/前进），因此不会覆盖任何既有键位。
+ */
+const ALT_SHIFT_COMMANDS: Record<string, string> = {
+  ArrowLeft: "review.prev",
+  ArrowRight: "review.next",
 };
 
 /** 文字输入控件：Alt+←/→ 在这里按单词移动光标，也不能拿 Esc 去清多选。差异区是只读 textbox，不算。 */
@@ -55,13 +66,16 @@ export function isTextEntry(target: EventTarget | null): boolean {
 /**
  * 返回命令 id；不是注册表里的组合键时返回 null。
  *
- * - 单独的 Alt+←/→ 切换上一个、下一个文件，Alt+↑/↓ 跳到上一处、下一处改动；是否让位给输入框由外壳按焦点判断。
+ * - 单独的 Alt+←/→ 切换上一个、下一个文件，Alt+↑/↓ 跳到上一处、下一处改动；
+ *   Alt+Shift+←/→ 只在未审阅文件之间走，Alt+M 标记/撤销当前文件的已审阅；
+ *   是否让位给输入框由外壳按焦点判断。
  * - 其余都是 ⌘/Ctrl 起手；此时 Alt 一律不认，避免和输入法的组合键抢键。
  * - Shift 只放行 ⌘⇧Enter（部分键盘布局里回车需要 Shift），其余一律不匹配，
  *   这样 ⌘⇧K 不会被当成 ⌘K。
  */
 export function shortcutCommand(event: KeyLike): string | null {
   const mod = event.metaKey || event.ctrlKey;
+  if (event.altKey && !mod && event.shiftKey) return ALT_SHIFT_COMMANDS[event.key] ?? null;
   if (event.altKey && !mod && !event.shiftKey) return ALT_COMMANDS[event.key] ?? null;
   if (!mod || event.altKey) return null;
   const key = event.key.toLowerCase();

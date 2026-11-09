@@ -826,6 +826,10 @@ pub struct TaskFileChange {
     pub untracked: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unmerged: bool,
+    /// 起点里有这条路径，工作区里却是未跟踪的同名文件（删除后重建）。行数只统计重建后
+    /// 的内容，界面据此标为「工作区重建」，不暗示为纯新增。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rebuilt: bool,
 }
 
 /// 一次只读任务读取的结果。只有完整读取成功才返回：空任务用 `empty` 表示，

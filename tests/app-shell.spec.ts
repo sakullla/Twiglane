@@ -146,6 +146,9 @@ const mocks = vi.hoisted(() => ({
   repositoryPathSearch: vi.fn(),
   repositoryContentSearch: vi.fn(),
   repositoryReviewToken: vi.fn(),
+  taskReview: vi.fn(),
+  taskReviewToken: vi.fn(),
+  loadTaskDiff: vi.fn(),
   filePreview: vi.fn(),
   repositoryDocument: vi.fn(),
   documentResource: vi.fn(),
@@ -415,6 +418,10 @@ const ADDED_COMMAND_IDS = [
   "view.task",
   "file.prev",
   "file.next",
+  "review.prev",
+  "review.next",
+  "review.toggle",
+  "review.hide",
   "diff.hunk.prev",
   "diff.hunk.next",
   "view.find",
@@ -423,11 +430,17 @@ const ADDED_COMMAND_IDS = [
   "file.reveal",
   "file.back",
   "file.forward",
+  "stage.file",
+  "unstage.file",
 ];
 const ADDED_COMMAND_TITLES = [
   "任务",
   "上一个文件",
   "下一个文件",
+  "上一个未审阅文件",
+  "下一个未审阅文件",
+  "标记/撤销已审阅",
+  "隐藏/显示已审阅",
   "上一处改动",
   "下一处改动",
   "聚焦搜索",
@@ -436,6 +449,8 @@ const ADDED_COMMAND_TITLES = [
   "在文件树中显示",
   "后退",
   "前进",
+  "暂存当前文件",
+  "取消暂存当前文件",
 ];
 
 /** 注册表状态夹具：暂存区有 2 个文件、草稿已填，是「看起来都能用」的那一侧。 */
@@ -788,6 +803,202 @@ describe("审阅进度（R5）", () => {
     for (const banned of ["新建文件", "新建目录", "移动文件", "重命名文件", "删除文件", "保存文件", "另存", "运行", "调试", "定义", "引用", "重构", "评论", "批准"]) {
       expect(texts.some((text) => text.includes(banned)), `${banned} 不该出现在文件与审阅入口`).toBe(false);
     }
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * T3：连续审阅队列、会话范围进度与真实写入边界。
+ * 任务净差异不能直接做块/行补丁；标记只接受后端确认过的完整快照。
+ * ------------------------------------------------------------------ */
+describe("连续审阅队列与真实写入边界（R2、R4、R6）", () => {
+  const TASK_BASE = "b".repeat(40);
+  const TASK_HEAD = "c".repeat(40);
+
+  const activeFile = () =>
+    document.querySelector<HTMLElement>('.workbench-view[data-active="true"] .file-row[aria-selected="true"]');
+  const selectedPath = () => activeFile()?.getAttribute("title") ?? null;
+  const activeView = () =>
+    document
+      .querySelector('.workbench-view[data-active="true"] [aria-current="page"]')
+      ?.getAttribute("data-view") ?? null;
+
+  async function alt(key: string, extra: KeyboardEventInit = {}) {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key, altKey: true, bubbles: true, ...extra }));
+    await tick();
+  }
+
+  function tokenFor(path: string, token: string) {
+    return {
+      generation: 4,
+      path,
+      state: "current" as const,
+      token,
+      staged: "none" as const,
+      unstaged: "modified" as const,
+      untracked: false,
+      unmerged: false,
+      contentVersion: "worktree:abc",
+      message: "已确认这个文件当前的整份内容与改动。",
+    };
+  }
+
+  function taskFixture() {
+    return {
+      generation: 4,
+      worktree: repoPath,
+      baselineRef: "main~2",
+      baselineOid: TASK_BASE,
+      headOid: TASK_HEAD,
+      branch,
+      commits: [],
+      commitCount: 0,
+      commitsTruncated: false,
+      files: [
+        { path: "src/App.svelte", originalPath: null, status: "modified", additions: 4, deletions: 1, binary: false, oldSize: null, newSize: null, untracked: false, unmerged: false, rebuilt: false },
+        { path: "src/new.ts", originalPath: null, status: "added", additions: 6, deletions: 0, binary: false, oldSize: null, newSize: null, untracked: true, unmerged: false, rebuilt: false },
+      ],
+      filesTotal: 2,
+      filesTruncated: false,
+      additions: 10,
+      deletions: 1,
+      dirty: true,
+      untrackedFiles: 1,
+      conflicted: false,
+      empty: false,
+      rangeVersion: "range-1",
+      message: "读取成功：最终净改动 2 个文件。",
+    };
+  }
+
+  it("队尾不循环：最后一个未审阅文件按「下一个」只说明没有更多", async () => {
+    render(App);
+    await openRepo();
+    const list = document.querySelector<HTMLElement>(".file-list")!;
+    const rows = [...list.querySelectorAll<HTMLElement>(".file-row")];
+    await fireEvent.click(rows[rows.length - 1]);
+    const last = selectedPath();
+    expect(last).toBeTruthy();
+
+    await alt("ArrowRight", { shiftKey: true });
+    expect(document.body.textContent).toContain("没有更多未审阅文件");
+    expect(selectedPath(), "到队尾不能回到开头").toBe(last);
+  });
+
+  it("键盘：Alt+Shift+→ 只访问未审阅文件，Alt+M 标记与撤销", async () => {
+    mocks.repositoryReviewToken.mockImplementation(async (_repo: string, path: string) => tokenFor(path, `tok:${path}`));
+    render(App);
+    await openRepo();
+    expect(selectedPath()).toBe("src/App.svelte");
+
+    await alt("ArrowRight", { shiftKey: true });
+    await waitFor(() => expect(selectedPath()).toBe("src/app.css"));
+    // 全部未审阅时「上一个未审阅」在第一个文件上就会停下。
+    await alt("ArrowLeft", { shiftKey: true });
+    await waitFor(() => expect(selectedPath()).toBe("src/App.svelte"));
+
+    await alt("m");
+    await waitFor(() => expect(screen.getByLabelText("已审阅 1 个，共 6 个改动文件")).toBeTruthy());
+    await alt("m");
+    await waitFor(() => expect(screen.getByLabelText("已审阅 0 个，共 6 个改动文件")).toBeTruthy());
+  });
+
+  it("标记只接受当前完整快照：未确认的 token 不产生标记并就地说明", async () => {
+    mocks.repositoryReviewToken.mockResolvedValue({
+      ...tokenFor("src/App.svelte", "x"),
+      state: "unconfirmed",
+      token: null,
+      message: "差异超过预览上限，只读到一部分，无法确认完整快照。",
+    });
+    render(App);
+    await openRepo();
+    const list = document.querySelector<HTMLElement>(".file-list")!;
+    await fireEvent.click(within(list).getAllByRole("button", { name: "标记 src/App.svelte 已审阅" })[0]);
+    await waitFor(() => expect(document.body.textContent).toContain("差异超过预览上限"));
+    expect(screen.getByLabelText("已审阅 0 个，共 6 个改动文件")).toBeTruthy();
+    expect(within(list).getAllByRole("button", { name: "标记 src/App.svelte 已审阅" }).length).toBeGreaterThan(0);
+  });
+
+  it("隐藏已审阅在命令面板与工具条是同一个开关，计数与分组不受影响", async () => {
+    mocks.repositoryReviewToken.mockImplementation(async (_repo: string, path: string) => tokenFor(path, `tok:${path}`));
+    render(App);
+    await openRepo();
+    const list = document.querySelector<HTMLElement>(".file-list")!;
+    await fireEvent.click(within(list).getAllByRole("button", { name: "标记 src/App.svelte 已审阅" })[0]);
+    await waitFor(() => expect(screen.getByLabelText("已审阅 1 个，共 6 个改动文件")).toBeTruthy());
+
+    const palette = await openPalette();
+    const option = within(palette).getByRole("option", { name: /隐藏\/显示已审阅/ });
+    expect(option.getAttribute("aria-disabled")).not.toBe("true");
+    await fireEvent.click(option);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "隐藏已审阅" }).getAttribute("aria-pressed")).toBe("true"),
+    );
+    // 只改显示：已审阅计数与冲突/未暂存/已暂存分组数量都不变。
+    expect(screen.getByLabelText("已审阅 1 个，共 6 个改动文件")).toBeTruthy();
+    expect(within(list).queryAllByRole("button", { name: "标记 src/App.svelte 已审阅" })).toHaveLength(0);
+  });
+
+  it("任务范围与真实暂存范围分开；任务标记走 task_review_token，暂存只写真实索引", async () => {
+    mocks.taskReview.mockResolvedValue(taskFixture());
+    mocks.taskReviewToken.mockImplementation(async (_worktree: string, _baseline: string, _head: string, path: string) => ({
+      generation: 4,
+      path,
+      baselineOid: TASK_BASE,
+      state: "current" as const,
+      token: `task:${path}`,
+      status: "modified",
+      untracked: false,
+      unmerged: false,
+      baselineVersion: "tree:abc",
+      contentVersion: "worktree:def",
+      truncated: false,
+      message: "已确认这条路径的当前快照。",
+    }));
+    mocks.loadTaskDiff.mockImplementation(async (_worktree: string, _base: string, _head: string, relative: string) =>
+      diffFor(relative, false),
+    );
+    mocks.stageFiles.mockResolvedValue(snapshot);
+    render(App);
+    await openRepo();
+    await press("4");
+    const picker = await screen.findByLabelText("选择任务起点");
+    const input = within(picker).getByLabelText("按提交或分支指定任务起点");
+    await fireEvent.input(input, { target: { value: "main~2" } });
+    await fireEvent.click(within(picker).getByRole("button", { name: "用这个起点" }));
+    await waitFor(() => expect(mocks.taskReview).toHaveBeenCalledWith(repoPath, "main~2", 4, expect.any(Number)));
+
+    const taskView = document.querySelector<HTMLElement>('.workbench-view[data-view-scope="task"]')!;
+    const scope = await within(taskView).findByLabelText("本次提交暂存范围");
+    await waitFor(() => expect(scope.textContent).toContain("2 个已暂存文件"));
+    expect(scope.textContent).toContain("与任务范围分开");
+    expect(scope.textContent).toContain("不会自动进入这次提交");
+
+    // 任务标记用任务范围的快照确认，改动范围的接口不参与。
+    await fireEvent.click(within(taskView).getAllByRole("button", { name: "标记 src/App.svelte 已审阅" })[0]);
+    await waitFor(() =>
+      expect(mocks.taskReviewToken).toHaveBeenCalledWith(repoPath, TASK_BASE, TASK_HEAD, "src/App.svelte", 4, expect.any(Number)),
+    );
+    expect(mocks.repositoryReviewToken).not.toHaveBeenCalled();
+    await waitFor(() => expect(within(taskView).getAllByRole("button", { name: "撤销 src/App.svelte 的已审阅标记" }).length).toBeGreaterThan(0));
+
+    // 按块/行入口转到真实未提交差异：本身不写 Git，也不扩大暂存范围。
+    await fireEvent.click(within(taskView).getByRole("button", { name: "在未提交差异里按块/行暂存 src/App.svelte" }));
+    await waitFor(() => expect(activeView()).toBe("changes"));
+    expect(selectedPath()).toBe("src/App.svelte");
+    expect(mocks.stageFiles).not.toHaveBeenCalled();
+    expect(mocks.stageHunks).not.toHaveBeenCalled();
+    expect(mocks.stageLines).not.toHaveBeenCalled();
+
+    // 回到任务页：整文件暂存只写真实索引，任务净差异本身不被应用。
+    await press("4");
+    await waitFor(() => expect(activeView()).toBe("task"));
+    await fireEvent.click(within(taskView).getByRole("button", { name: "暂存 src/App.svelte 到索引" }));
+    await waitFor(() => expect(mocks.stageFiles).toHaveBeenCalledWith(repoPath, ["src/App.svelte"], 4, expect.any(Number)));
+    expect(mocks.stageHunks).not.toHaveBeenCalled();
+
+    // ready 状态也能换起点：回到明确的选择状态，不偷偷沿用旧起点。
+    await fireEvent.click(within(taskView).getByRole("button", { name: "换起点" }));
+    await waitFor(() => expect(within(taskView).getByLabelText("选择任务起点")).toBeTruthy());
   });
 });
 
@@ -2755,6 +2966,48 @@ describe("cliora 来源展示", () => {
     expect(mocks.commitChanges).not.toHaveBeenCalled();
   });
 
+  it("全部标记已审阅后返回 cliora 仍只声明 reviewed，不把审阅数当批准，也不写 Git", async () => {
+    beginClioraReview({ reviewId, sessionId, worktreePath: repoPath, baseline: null });
+    mocks.repositoryReviewToken.mockImplementation(async (_repo: string, path: string) => ({
+      generation: 4,
+      path,
+      state: "current" as const,
+      token: `tok:${path}`,
+      staged: "none" as const,
+      unstaged: "modified" as const,
+      untracked: false,
+      unmerged: false,
+      contentVersion: "worktree:abc",
+      message: "已确认这个文件当前的整份内容与改动。",
+    }));
+    render(App);
+    await openRepo();
+    const list = document.querySelector<HTMLElement>(".file-list")!;
+    const paths = ["src/App.svelte", "src/app.css", "README.md", "docs/start.md", "public/logo.png", "src/lib/icon.ts"];
+    for (const path of paths) {
+      await fireEvent.click(within(list).getAllByRole("button", { name: `标记 ${path} 已审阅` })[0]);
+      await waitFor(() =>
+        expect(within(list).queryAllByRole("button", { name: `标记 ${path} 已审阅` })).toHaveLength(0),
+      );
+    }
+    expect(screen.getByLabelText("已审阅 6 个，共 6 个改动文件")).toBeTruthy();
+    // 全部审阅完成只是本地记录：返回来源仍声明 reviewed，没有任何 Git 写入。
+    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await waitFor(() => expect(mocks.clioraReviewReturn).toHaveBeenCalledWith(reviewId, sessionId, "reviewed", null));
+    for (const name of [
+      "stageFiles",
+      "unstageFiles",
+      "stageHunks",
+      "stageLines",
+      "commitChanges",
+      "commitAndPush",
+      "pushBranch",
+      "startMerge",
+    ]) {
+      expect(mocks[name as keyof typeof mocks].mock.calls.length, name).toBe(0);
+    }
+  });
+
   it("同一 worktree 重新打开时保留来源与最新合入结果", async () => {
     beginClioraReview({ reviewId, sessionId, worktreePath: repoPath, baseline: null });
     recordClioraMerge(repoPath, mergedOid);
@@ -2937,5 +3190,101 @@ describe("外壳里的 Markdown 版本阅读（R5）", () => {
     await waitFor(() => expect(document.querySelector("[data-task-modal]")).toBeNull());
     // 被收起的那一层留下的来处就是归还目标：焦点回到「阅读文档」，不落到 body。
     expect(document.activeElement).toBe(trigger);
+  });
+});
+/* ------------------------------------------------------------------ *
+ * T3：任务范围的外部变化只撤销受影响路径，其他进度/草稿/真实暂存不变。
+ * ------------------------------------------------------------------ */
+describe("任务范围的外部变化与进度隔离（T3）", () => {
+  const TASK_BASE = "b".repeat(40);
+  const TASK_HEAD = "c".repeat(40);
+
+  function taskFixture(generation = 4) {
+    return {
+      generation,
+      worktree: repoPath,
+      baselineRef: "main~2",
+      baselineOid: TASK_BASE,
+      headOid: TASK_HEAD,
+      branch,
+      commits: [],
+      commitCount: 0,
+      commitsTruncated: false,
+      files: [
+        { path: "src/App.svelte", originalPath: null, status: "modified", additions: 4, deletions: 1, binary: false, oldSize: null, newSize: null, untracked: false, unmerged: false, rebuilt: false },
+        { path: "src/new.ts", originalPath: null, status: "added", additions: 6, deletions: 0, binary: false, oldSize: null, newSize: null, untracked: true, unmerged: false, rebuilt: false },
+      ],
+      filesTotal: 2,
+      filesTruncated: false,
+      additions: 10,
+      deletions: 1,
+      dirty: true,
+      untrackedFiles: 1,
+      conflicted: false,
+      empty: false,
+      rangeVersion: generation > 4 ? "range-2" : "range-1",
+      message: "读取成功：最终净改动 2 个文件。",
+    };
+  }
+
+  it("外部内容变化只撤销受影响路径的标记，其他进度、草稿与真实暂存不变", async () => {
+    mocks.taskReview.mockImplementation(async () => taskFixture());
+    let changedPath = "";
+    mocks.taskReviewToken.mockImplementation(async (_worktree: string, _baseline: string, _head: string, path: string) => ({
+      generation: 4,
+      path,
+      baselineOid: TASK_BASE,
+      state: "current" as const,
+      token: path === changedPath ? `tok:${path}:changed` : `tok:${path}`,
+      status: "modified",
+      untracked: false,
+      unmerged: false,
+      baselineVersion: "tree:abc",
+      contentVersion: "worktree:def",
+      truncated: false,
+      message: "已确认这条路径的当前快照。",
+    }));
+    mocks.loadTaskDiff.mockImplementation(async (_worktree: string, _base: string, _head: string, relative: string) =>
+      diffFor(relative, false),
+    );
+    render(App);
+    await openRepo();
+
+    // 当前提交草稿：外部刷新与审阅失效都不能清掉它。
+    const textarea = document.querySelector<HTMLTextAreaElement>(".composer textarea")!;
+    await fireEvent.input(textarea, { target: { value: "保留的提交草稿" } });
+
+    await press("4");
+    const picker = await screen.findByLabelText("选择任务起点");
+    const input = within(picker).getByLabelText("按提交或分支指定任务起点");
+    await fireEvent.input(input, { target: { value: "main~2" } });
+    await fireEvent.click(within(picker).getByRole("button", { name: "用这个起点" }));
+    const taskView = document.querySelector<HTMLElement>('.workbench-view[data-view-scope="task"]')!;
+    await within(taskView).findByRole("listbox", { name: "任务文件" });
+
+    for (const path of ["src/App.svelte", "src/new.ts"]) {
+      await fireEvent.click(within(taskView).getAllByRole("button", { name: `标记 ${path} 已审阅` })[0]);
+      await waitFor(() =>
+        expect(within(taskView).getAllByRole("button", { name: `撤销 ${path} 的已审阅标记` }).length).toBeGreaterThan(0),
+      );
+    }
+
+    // 外部变化：只有 src/App.svelte 的内容换了，状态代次前进让任务页重读。
+    changedPath = "src/App.svelte";
+    mocks.refreshStatus.mockResolvedValue({ ...snapshot, generation: 5 });
+    const focus = mocks.listenEvent.mock.calls.find(([name]) => name === "window-focused")![1];
+    focus();
+    await waitFor(() =>
+      expect(within(taskView).getAllByRole("button", { name: "标记 src/App.svelte 已审阅" }).length).toBeGreaterThan(0),
+    );
+    // 另一条标记保留，理由是就地说明的。
+    expect(within(taskView).getAllByRole("button", { name: "撤销 src/new.ts 的已审阅标记" }).length).toBeGreaterThan(0);
+    expect(within(taskView).getByRole("alert").textContent).toContain("快照已变化");
+    // 草稿、真实暂存范围与写入都没有被审阅失效波及。
+    expect(document.querySelector<HTMLTextAreaElement>(".composer textarea")?.value).toBe("保留的提交草稿");
+    expect(within(taskView).getByLabelText("本次提交暂存范围").textContent).toContain("2 个已暂存文件");
+    expect(mocks.stageFiles).not.toHaveBeenCalled();
+    expect(mocks.unstageFiles).not.toHaveBeenCalled();
+    expect(mocks.commitChanges).not.toHaveBeenCalled();
   });
 });

@@ -351,6 +351,14 @@ async fn net_files(
         .map(|file| file.path.as_str())
         .collect();
 
+    // 起点里本来有、只是索引里没有的路径：如果工作区里同名文件现在是未跟踪，说明这是
+    // 删除后从工作区重建，而不是一个纯新增文件。行数只能统计重建后的内容，界面必须标出。
+    let removed_in_range: HashSet<String> = tracked
+        .iter()
+        .filter(|file| file.status == "deleted")
+        .map(|file| file.path.clone())
+        .collect();
+
     let mut files = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut truncated = false;
@@ -383,6 +391,7 @@ async fn net_files(
             new_size: file.new_size,
             untracked: false,
             unmerged: conflicted,
+            rebuilt: false,
         });
     }
     for file in range.snapshot.files.iter().filter(|file| file.untracked) {
@@ -405,6 +414,7 @@ async fn net_files(
             new_size: stat.and_then(|value| value.new_size),
             untracked: true,
             unmerged: false,
+            rebuilt: removed_in_range.contains(&file.path),
         });
     }
     apply_binary_sizes(reads, root, git, &range.baseline_oid, &mut files).await;
@@ -1264,6 +1274,7 @@ mod tests {
         assert_eq!(same.status, "modified");
         let new = file(&task.files, "new.txt");
         assert!(new.untracked);
+        assert!(!new.rebuilt, "起点里没有这条路径时是普通新增");
         assert_eq!(new.status, "added");
         assert_eq!((new.additions, new.deletions), (Some(2), Some(0)));
 
@@ -1725,6 +1736,8 @@ mod tests {
         assert_eq!(task.files_total, 1, "{:?}", task.files.iter().map(|file| (&file.path, &file.status, file.untracked)).collect::<Vec<_>>());
         let rebuilt = file(&task.files, "rebuilt.txt");
         assert!(rebuilt.untracked, "工作区未跟踪重建必须留在净结果里");
+        // 起点里本来有这条路径：界面必须标出「工作区重建」，不能暗示成纯新增。
+        assert!(rebuilt.rebuilt, "删除后重建必须标记 rebuilt");
         assert_eq!(rebuilt.status, "added");
         assert_eq!((rebuilt.additions, rebuilt.deletions), (Some(3), Some(0)));
         // 与 untrackedFiles 计数、单文件差异同一份事实：不能还报成删除。

@@ -91,6 +91,10 @@ describe("文件导航命令", () => {
       "view.task",
       "file.prev",
       "file.next",
+      "review.prev",
+      "review.next",
+      "review.toggle",
+      "review.hide",
       "diff.hunk.prev",
       "diff.hunk.next",
       "view.find",
@@ -139,6 +143,49 @@ describe("文件导航命令", () => {
     expect(shortcutCommand({ key: "f", ctrlKey: true })).toBe("view.find");
     // 未登记的 ⌘⇧ 组合仍不匹配。
     expect(shortcutCommand({ key: "k", metaKey: true, shiftKey: true })).toBeNull();
-    expect(shortcutCommand({ key: "ArrowRight", altKey: true, shiftKey: true })).toBeNull();
+    // 未审阅队列占用 Alt+Shift+←/→ 与 Alt+M；⌘/Ctrl+Alt 组合仍然不匹配。
+    expect(shortcutCommand({ key: "ArrowLeft", altKey: true, shiftKey: true })).toBe("review.prev");
+    expect(shortcutCommand({ key: "ArrowRight", altKey: true, shiftKey: true })).toBe("review.next");
+    expect(shortcutCommand({ key: "m", altKey: true })).toBe("review.toggle");
+    expect(shortcutCommand({ key: "ArrowRight", altKey: true, ctrlKey: true })).toBeNull();
+  });
+
+  it("未审阅队列的四个命令读同一份状态，原因与队尾语义一致", () => {
+    const queue = {
+      prevReason: "已经是第一个未审阅文件",
+      nextReason: "没有更多未审阅文件",
+      toggleReason: null,
+      reviewed: false,
+      hideReason: null,
+      hidden: false,
+      remaining: 2,
+      total: 4,
+      scope: "changes" as const,
+    };
+    const at = state({ review: queue });
+    expect(commandAvailable(commandById("review.prev")!, at)).toBe(false);
+    expect(commandReason(commandById("review.prev")!, at)).toBe("已经是第一个未审阅文件");
+    expect(commandAvailable(commandById("review.next")!, at)).toBe(false);
+    expect(commandReason(commandById("review.next")!, at)).toBe("没有更多未审阅文件");
+    expect(commandAvailable(commandById("review.toggle")!, at)).toBe(true);
+    expect(commandAvailable(commandById("review.hide")!, at)).toBe(true);
+    // 没有选中文件时标记就地说明原因。
+    const noFile = state({ review: { ...queue, toggleReason: "先选择一个文件" } });
+    expect(commandAvailable(commandById("review.toggle")!, noFile)).toBe(false);
+    expect(commandReason(commandById("review.toggle")!, noFile)).toBe("先选择一个文件");
+    // 没有审阅范围（例如没有打开仓库）时四个命令都不可用。
+    expect(commandAvailable(commandById("review.next")!, state({ review: null }))).toBe(false);
+    expect(commandReason(commandById("review.next")!, state({ review: null }))).toBe("当前视图没有审阅队列");
+    expect(commandReason(commandById("review.next")!, state({ review: null, hasRepo: false }))).toBe("先打开一个仓库");
+
+    // 整文件暂存只在真实状态有可写一侧时可用。
+    expect(commandAvailable(commandById("stage.file")!, state({ fileStage: { path: "a.ts", side: "unstaged", reason: null } }))).toBe(true);
+    expect(commandAvailable(commandById("stage.file")!, state({ fileStage: { path: "a.ts", side: "staged", reason: null } }))).toBe(false);
+    expect(commandReason(commandById("stage.file")!, state({ fileStage: { path: "a.ts", side: "staged", reason: null } }))).toBe(
+      "当前文件没有可暂存的真实改动",
+    );
+    expect(commandReason(commandById("unstage.file")!, state({ fileStage: { path: null, side: "none", reason: null } }))).toBe(
+      "先选择一个文件",
+    );
   });
 });

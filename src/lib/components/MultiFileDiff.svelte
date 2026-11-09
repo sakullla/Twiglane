@@ -53,6 +53,11 @@
     scopeKey?: string;
     /** 只读范围：净差异不能暂存，工具条只保留阅读相关入口。 */
     readOnly?: boolean;
+    /**
+     * 任务净差异的按块/按行入口：聚合补丁含已提交内容，不能直接应用，
+     * 这里转到同一文件的真实未提交差异，由那边的写锁与过期保护接管。
+     */
+    onOpenUnstaged?: (path: string) => void;
   }
 
   /** 同时在途的差异读取数：选 100 个文件也不会一次把读取通道占满。 */
@@ -91,6 +96,7 @@
     loadDiff,
     scopeKey = "",
     readOnly = false,
+    onOpenUnstaged,
   }: Props = $props();
 
   let scroller = $state<HTMLDivElement | null>(null);
@@ -391,7 +397,7 @@
     {#if readOnly}
       <!-- 任务净差异同时含已提交与未提交内容，按块或整文件暂存都会落到错误范围：这里只读。 -->
       <div class="diff-toolbar-group">
-        <span class="diff-note" role="note">任务净差异只读，不写入暂存区</span>
+        <span class="diff-note" role="note">任务净差异只读，不写入暂存区；按块/行暂存请用每个文件上的入口转到真实未提交差异</span>
       </div>
     {:else}
     <div class="diff-toolbar-group">
@@ -452,11 +458,20 @@
             <button type="button" class="multi-file-toggle" aria-label={`${expanded ? "收起" : "展开"} ${row.path}`} aria-expanded={expanded} title={row.path} onclick={() => toggle(key)}>
               <span class={`st ${mark.tone}`}>{mark.letter}</span>
               <span class="multi-file-name"><strong>{parts.name}</strong>{#if parts.dir}<small>{parts.dir}</small>{/if}</span>
-              <span class="diff-side" class:staged={row.side === "staged"}>{row.unmerged ? "冲突" : readOnly ? "任务净改动" : row.side === "staged" ? "已暂存" : "未暂存"}</span>
+              <span class="diff-side task" class:staged={row.side === "staged"}>{row.unmerged ? "冲突" : readOnly ? "任务净差异" : row.side === "staged" ? "已暂存" : "未暂存"}</span>
               <LineCounts stat={titleStat(stat, loaded)} />
               <Icon name="chevron-down" size={13} class={expanded ? "flip" : ""} />
             </button>
             <button type="button" class="icon-btn sm" aria-label={`查看 ${row.path} 的文件历史`} title="查看此文件历史" onclick={() => onFileHistory(row.path)}><Icon name="history" size={13} /></button>
+            {#if readOnly && onOpenUnstaged && !row.unmerged}
+              <button
+                type="button"
+                class="icon-btn sm"
+                aria-label={`在未提交差异里按块/行暂存 ${row.path}`}
+                title="任务净差异不能直接做块/行补丁；转到这个文件的真实未提交差异再按块/行暂存"
+                onclick={() => onOpenUnstaged?.(row.path)}
+              ><Icon name="file-diff" size={13} /></button>
+            {/if}
             {#if onReadDocument && loaded?.document}
               <!-- 嵌入块不画工具条：阅读入口就放在块标题这一行，长文档不必先切回单文件视图。 -->
               <button

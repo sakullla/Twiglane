@@ -60,6 +60,11 @@ export interface FileChange {
   stagedLines?: LineStat | null;
   /** 未暂存一侧。未跟踪文本文件的新增行数是当前行数。 */
   unstagedLines?: LineStat | null;
+  /**
+   * 任务净结果里这一行是「工作区重建」：起点里本来有这条路径，现在工作区里是未跟踪的同名文件。
+   * 行数只统计重建后的文件，不能当作纯新增，界面必须标出这层语义。
+   */
+  rebuilt?: boolean;
 }
 
 export interface BranchInfo {
@@ -306,6 +311,11 @@ export interface TaskFileChange {
   /** 起点里没有这条路径：来自未跟踪文件。 */
   untracked?: boolean;
   unmerged?: boolean;
+  /**
+   * 起点里有这条路径、但工作区里现在是未跟踪的同名文件（删除后重建）。
+   * 行数只统计重建后的内容，界面上标为「工作区重建」而不是纯新增。
+   */
+  rebuilt?: boolean;
 }
 
 /** 一次只读任务读取的结果：只有完整读取成功才返回，空任务用 empty 表示。 */

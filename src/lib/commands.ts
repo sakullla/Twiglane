@@ -44,6 +44,28 @@ export interface CommandState {
   unstageTargets: string[];
   /** 当前视图的上一个/下一个文件：null 表示这里没有文件可切，原因字段非空表示到头了。 */
   fileNav?: { prevReason: string | null; nextReason: string | null } | null;
+  /**
+   * 连续审阅队列：任务与改动共用同一套未审阅导航、标记与隐藏状态。
+   * 命令面板、工具条按钮与快捷键都读这一份，禁用原因因此不会分叉。
+   */
+  review?: {
+    prevReason: string | null;
+    nextReason: string | null;
+    /** 标记/撤销为什么不可用：没有选中文件、正在确认快照，或没有审阅范围。 */
+    toggleReason: string | null;
+    /** 当前文件已审阅与否，决定命令标题是「标记」还是「撤销」。 */
+    reviewed: boolean;
+    hideReason: string | null;
+    hidden: boolean;
+    remaining: number;
+    total: number;
+    scope: "changes" | "task";
+  } | null;
+  /**
+   * 整文件真实写入：改动视图作用于索引，任务视图暂存的是这个路径的真实工作区内容。
+   * `side` 说明当前选中文件在真实状态里属于哪一侧，`none` 表示没有可写的真实改动。
+   */
+  fileStage?: { path: string | null; side: "staged" | "unstaged" | "none"; reason: string | null } | null;
   /** 单文件差异里的上一处/下一处改动。null 表示当前视图不是可跳转的单文件差异。 */
   hunkNav?: { prevReason: string | null; nextReason: string | null } | null;
   /** 改动视图正在多选：逐块跳转让位给文件之间的切换。 */
@@ -127,6 +149,20 @@ const commitReason = (state: CommandState) => {
 };
 
 const NO_FILE_REASON = "先选择一个文件";
+/** 只有改动与任务视图有审阅队列；文件与历史视图里说明原因，而不是说「先选文件」。 */
+const NO_REVIEW_QUEUE = "当前视图没有审阅队列";
+/** 整文件写入不可用的原因：没有选中、正在读写、或这一侧本来就没有可写的真实改动。 */
+function fileStageReason(state: CommandState, action: "stage" | "unstage"): string {
+  if (!state.hasRepo) return "先打开一个仓库";
+  if (state.writeLocked) return busyReason(state);
+  if (!state.fileStage?.path) {
+    return state.workspaceView === "changes" || state.workspaceView === "task"
+      ? NO_FILE_REASON
+      : "改动与任务视图里才能写入索引";
+  }
+  if (action === "stage") return "当前文件没有可暂存的真实改动";
+  return "当前文件没有已暂存的改动";
+}
 /** Alt 在 macOS 键帽上是 ⌥。 */
 const ALT_LABEL = MODIFIER_LABEL === "⌘" ? "⌥" : "Alt";
 const HUNK_MULTI = "多选时在文件之间切换，回到单个文件后可以逐块跳转";
@@ -204,6 +240,49 @@ const VIEW_COMMANDS: CommandSpec[] = [
     shortcut: `${ALT_LABEL} →`,
     available: (state) => hasRepo(state) && Boolean(state.fileNav) && !state.fileNav?.nextReason,
     reason: (state) => (state.hasRepo ? (state.fileNav?.nextReason ?? NO_FILE_REASON) : "先打开一个仓库"),
+  },
+  {
+    id: "review.prev",
+    group: "视图",
+    title: "上一个未审阅文件",
+    hint: "只在未审阅文件之间往回走；到队首停下，不循环",
+    shortcut: `${ALT_LABEL} ⇧ ←`,
+    available: (state) => hasRepo(state) && Boolean(state.review) && !state.review?.prevReason,
+    reason: (state) =>
+      state.hasRepo ? (state.review ? (state.review.prevReason ?? NO_FILE_REASON) : NO_REVIEW_QUEUE) : "先打开一个仓库",
+  },
+  {
+    id: "review.next",
+    group: "视图",
+    title: "下一个未审阅文件",
+    hint: "只在未审阅文件之间往前走；到队尾说明没有更多，不循环",
+    shortcut: `${ALT_LABEL} ⇧ →`,
+    available: (state) => hasRepo(state) && Boolean(state.review) && !state.review?.nextReason,
+    reason: (state) =>
+      state.hasRepo ? (state.review ? (state.review.nextReason ?? NO_FILE_REASON) : NO_REVIEW_QUEUE) : "先打开一个仓库",
+  },
+  {
+    id: "review.toggle",
+    group: "视图",
+    title: "标记/撤销已审阅",
+    hint: "标记前先确认这个文件的当前完整快照；只改变本地审阅记录，不暂存、不提交",
+    shortcut: `${ALT_LABEL} M`,
+    available: (state) => hasRepo(state) && Boolean(state.review) && !state.review?.toggleReason,
+    reason: (state) =>
+      state.hasRepo ? (state.review ? (state.review.toggleReason ?? NO_FILE_REASON) : NO_REVIEW_QUEUE) : "先打开一个仓库",
+  },
+  {
+    id: "review.hide",
+    group: "视图",
+    title: "隐藏/显示已审阅",
+    hint: "只改显示，分组数量、任务范围与提交范围都不变",
+    available: (state) => hasRepo(state) && Boolean(state.review) && !state.review?.hideReason,
+    reason: (state) =>
+      state.hasRepo
+        ? state.review
+          ? (state.review.hideReason ?? "当前范围没有已审阅文件")
+          : NO_REVIEW_QUEUE
+        : "先打开一个仓库",
   },
   {
     id: "diff.hunk.prev",
@@ -309,6 +388,24 @@ const COMMIT_COMMANDS: CommandSpec[] = [
       if (state.writeLocked) return busyReason(state);
       return "暂存区是空的";
     },
+  },
+  {
+    id: "stage.file",
+    group: "提交",
+    title: "暂存当前文件",
+    hint: "按这个文件的真实工作区内容写入索引；任务净差异本身不被暂存",
+    available: (state) =>
+      hasRepo(state) && idle(state) && state.fileStage?.side === "unstaged" && Boolean(state.fileStage?.path),
+    reason: (state) => fileStageReason(state, "stage"),
+  },
+  {
+    id: "unstage.file",
+    group: "提交",
+    title: "取消暂存当前文件",
+    hint: "把这个文件移回未暂存，改动内容保留在工作区",
+    available: (state) =>
+      hasRepo(state) && idle(state) && state.fileStage?.side === "staged" && Boolean(state.fileStage?.path),
+    reason: (state) => fileStageReason(state, "unstage"),
   },
   {
     id: "commit.local",

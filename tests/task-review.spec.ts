@@ -265,6 +265,19 @@ function reviewProps(overrides: Record<string, unknown> = {}) {
     onClearBaseline: vi.fn(),
     onFileNav: vi.fn(),
     onHunkNav: vi.fn(),
+    reviewed: new Set<string>(),
+    reviewBusy: null,
+    reviewNote: null,
+    hideReviewed: false,
+    onToggleReview: vi.fn(),
+    onHideReviewed: vi.fn(),
+    onStageFile: vi.fn(),
+    onOpenUnstaged: vi.fn(),
+    onOpenChanges: vi.fn(),
+    stagedPaths: [] as string[],
+    onSnapshot: vi.fn(),
+    onSelection: vi.fn(),
+    onReviewNav: vi.fn(),
     ...overrides,
   };
 }
@@ -292,8 +305,10 @@ describe("任务审阅组件", () => {
     // 文件队列仍是同一套列表：表头改称任务文件，并且没有暂存入口。
     const list = await screen.findByRole("listbox", { name: "任务文件" });
     expect(within(list).getByText("任务文件")).toBeTruthy();
+    // 没有泛化的「暂存」入口：整文件暂存必须指名这条真实路径。
     expect(within(list).queryByRole("button", { name: "暂存" })).toBeNull();
-    expect(within(list).queryByRole("button", { name: /标记 .* 已审阅/ })).toBeNull();
+    // 任务队列与改动队列共用标记：这里是同一条命令的另一个入口。
+    expect(within(list).getAllByRole("button", { name: /标记 .* 已审阅/ }).length).toBeGreaterThan(0);
   });
 
   it("首个文件自动选中并读取只读净差异，工具栏没有暂存动作", async () => {
@@ -307,6 +322,10 @@ describe("任务审阅组件", () => {
     const toolbar = document.querySelector(".diff-toolbar")!;
     expect(toolbar.querySelector('[aria-label="暂存"]')).toBeNull();
     expect(document.body.textContent).toContain("只读");
+    // 任务净差异不再借用改动视图的侧别文案：标题与标签都说明这是任务范围。
+    expect(document.querySelector(".diff-path")?.getAttribute("title")).toContain("任务净差异");
+    expect(document.querySelector(".diff-path")?.getAttribute("title")).not.toContain("未暂存");
+    expect(document.querySelector(".diff-side.task")?.textContent).toBe("任务净差异");
   });
 
   it("空任务只在完整读取成功后出现", async () => {
@@ -389,6 +408,12 @@ describe("任务审阅组件", () => {
     expect(toolbar.querySelector('[aria-label^="暂存 "]')).toBeNull();
     expect(toolbar.querySelector('[aria-label^="放弃 "]')).toBeNull();
     expect(document.body.textContent).toContain("任务净差异只读");
+    // 每个文件的块标题都提供「转到真实未提交差异」，聚合补丁本身不能做块/行补丁。
+    expect(
+      within(document.querySelector<HTMLElement>(".multi-stack")!).getAllByRole("button", {
+        name: /在未提交差异里按块\/行暂存/,
+      }).length,
+    ).toBeGreaterThan(0);
   });
 
   it("单文件读取失败就地说明并可按同一读取路径重试", async () => {
@@ -523,5 +548,124 @@ describe("任务视图接线", () => {
     await waitFor(() => expect(activeView()).toBe("changes"));
     await waitFor(() => expect(mocks.api.loadDiff).toHaveBeenCalled());
     expect(mocks.created.get("stageFiles")?.mock.calls.length ?? 0).toBe(0);
+  });
+});
+/* ------------------------------------------------------------------ *
+ * T3：任务页的连续审阅队列、范围分离与真实写入入口。
+ * 组件级用例只验自己的状态与回调；真实 Git 语义仍由 Rust 夹具覆盖。
+ * ------------------------------------------------------------------ */
+describe("任务审阅的队列与写入边界（T3）", () => {
+  it("ready 状态提供常驻「换起点」，复用 clearTaskBaseline", async () => {
+    const onClearBaseline = vi.fn();
+    render(TaskReview, { props: reviewProps({ onClearBaseline }) });
+    await screen.findByRole("listbox", { name: "任务文件" });
+    await fireEvent.click(screen.getByRole("button", { name: "换起点" }));
+    expect(onClearBaseline).toHaveBeenCalledTimes(1);
+  });
+
+  it("空任务同样能换起点，不需要先清掉空状态", async () => {
+    mocks.api.taskReview.mockResolvedValue(
+      taskFixture({ files: [], filesTotal: 0, additions: 0, deletions: 0, empty: true, dirty: false, untrackedFiles: 0, commitCount: 0, commits: [], message: "读取成功：起点之后没有提交，也没有未提交改动。" }),
+    );
+    const onClearBaseline = vi.fn();
+    render(TaskReview, { props: reviewProps({ onClearBaseline }) });
+    await screen.findByText("这个任务没有净改动");
+    await fireEvent.click(screen.getByRole("button", { name: "换起点" }));
+    expect(onClearBaseline).toHaveBeenCalledTimes(1);
+  });
+
+  it("真实暂存范围与任务范围分开显示，空暂存区说清这次提交不含任务文件", async () => {
+    const { rerender } = render(TaskReview, { props: reviewProps({ stagedPaths: ["src/app.css", "README.md"] }) });
+    const scope = await screen.findByLabelText("本次提交暂存范围");
+    expect(scope.textContent).toContain("2 个已暂存文件");
+    expect(scope.textContent).toContain("与任务范围分开");
+    expect(scope.textContent).toContain("这里的 3 个任务文件不会自动进入这次提交");
+    expect(document.body.textContent).toContain("任务净差异只读");
+
+    await rerender(reviewProps({ stagedPaths: [] }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("本次提交暂存范围").textContent).toContain("暂存区是空的"),
+    );
+  });
+
+  it("工作区重建在文件行与单文件差异里说明同一语义", async () => {
+    mocks.api.taskReview.mockResolvedValue(
+      taskFixture({
+        files: [taskFile("src/fresh.ts", "added", { untracked: true, rebuilt: true, additions: 5, deletions: 0 })],
+        filesTotal: 1,
+        untrackedFiles: 1,
+      }),
+    );
+    render(TaskReview, { props: reviewProps() });
+    const list = await screen.findByRole("listbox", { name: "任务文件" });
+    expect(within(list).getByText("工作区重建")).toBeTruthy();
+    await waitFor(() => expect(document.body.textContent).toContain("当前是工作区重建"));
+    expect(document.body.textContent).toContain("行数只统计重建后的文件");
+  });
+
+  it("任务文件可整文件暂存，按块/行入口转到真实未提交差异", async () => {
+    const onStageFile = vi.fn();
+    const onOpenUnstaged = vi.fn();
+    render(TaskReview, { props: reviewProps({ onStageFile, onOpenUnstaged }) });
+    const list = await screen.findByRole("listbox", { name: "任务文件" });
+    await fireEvent.click(within(list).getByRole("button", { name: "暂存 src/app.ts 到索引" }));
+    expect(onStageFile).toHaveBeenCalledWith("src/app.ts");
+
+    await fireEvent.click(screen.getByRole("button", { name: "在未提交差异里按块/行暂存 src/app.ts" }));
+    expect(onOpenUnstaged).toHaveBeenCalledWith("src/app.ts");
+    // 任务页自己不做任何部分补丁：组件内没有按块/按行写入接口。
+    for (const name of ["stageFiles", "stageHunks", "stageLines", "commitChanges"]) {
+      expect(mocks.created.get(name)?.mock.calls.length ?? 0, name).toBe(0);
+    }
+  });
+
+  it("已审阅来自传入集合，标记与撤销共用同一个回调", async () => {
+    const onToggleReview = vi.fn();
+    const reviewed = new Set(["src/app.ts"]);
+    render(TaskReview, { props: reviewProps({ reviewed, onToggleReview }) });
+    const list = await screen.findByRole("listbox", { name: "任务文件" });
+    expect(screen.getByLabelText("已审阅 1 个，共 3 个任务文件")).toBeTruthy();
+    await fireEvent.click(within(list).getAllByRole("button", { name: "撤销 src/app.ts 的已审阅标记" })[0]);
+    expect(onToggleReview).toHaveBeenCalledWith("src/app.ts");
+  });
+
+  it("队列状态与选择交给外壳：下一个未审阅只在未审阅文件里走", async () => {
+    const onReviewNav = vi.fn();
+    const onSelection = vi.fn();
+    render(TaskReview, { props: reviewProps({ reviewed: new Set(["src/app.ts"]), onReviewNav, onSelection }) });
+    const list = await screen.findByRole("listbox", { name: "任务文件" });
+    await waitFor(() => expect(onReviewNav).toHaveBeenCalled());
+    const nav = onReviewNav.mock.calls.at(-1)?.[0];
+    expect(nav).toMatchObject({ total: 3, remaining: 2 });
+    await waitFor(() => expect(onSelection).toHaveBeenCalledWith("src/app.ts"));
+
+    // 队列按钮在工具条里（列表之外），与命令面板读同一份状态。
+    await fireEvent.click(screen.getByRole("button", { name: "下一个未审阅文件" }));
+    await waitFor(() => expect(onSelection).toHaveBeenLastCalledWith("docs/gone.md"));
+  });
+});
+/* ------------------------------------------------------------------ *
+ * T3：任务队列的键盘写入与隐藏语义。
+ * 空格在这里只写真实索引；隐藏已审阅不改任务统计。
+ * ------------------------------------------------------------------ */
+describe("任务列表的键盘写入与隐藏（T3）", () => {
+  it("空格整文件暂存到真实索引，隐藏已审阅不改任务统计", async () => {
+    const onStageFile = vi.fn();
+    const onHideReviewed = vi.fn();
+    render(TaskReview, {
+      props: reviewProps({ onStageFile, onHideReviewed, reviewed: new Set(["docs/gone.md"]), hideReviewed: true }),
+    });
+    const list = await screen.findByRole("listbox", { name: "任务文件" });
+    // 隐藏只影响显示：任务文件总数与已审阅数不变。
+    expect(screen.getByLabelText("已审阅 1 个，共 3 个任务文件")).toBeTruthy();
+    expect(document.querySelector(".file-group .count")?.textContent).toBe("3");
+
+    list.focus();
+    await fireEvent.keyDown(list, { key: " " });
+    expect(onStageFile).toHaveBeenCalledWith("src/app.ts");
+    expect(onStageFile).toHaveBeenCalledTimes(1);
+
+    await fireEvent.click(screen.getByRole("button", { name: "隐藏已审阅" }));
+    expect(onHideReviewed).toHaveBeenCalledWith(false);
   });
 });

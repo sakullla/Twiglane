@@ -18,7 +18,14 @@
     TaskRequest,
     TaskReview,
   } from "../types";
-  import { fileNavState, orderedRows, sameSelection, type FileNavState } from "../ui";
+  import {
+    fileNavState,
+    orderedRows,
+    reviewQueue,
+    sameSelection,
+    type FileNavState,
+    type ReviewQueueState,
+  } from "../ui";
   import DiffView from "./DiffView.svelte";
   import FileList from "./FileList.svelte";
   import Icon from "./Icon.svelte";
@@ -59,6 +66,27 @@
     onPickBaseline: (baseline: string) => void;
     /** 放弃当前起点，回到选择状态。 */
     onClearBaseline: () => void;
+    /** 任务范围的已审阅路径：与改动范围各自独立，互不作证。 */
+    reviewed?: ReadonlySet<string>;
+    reviewBusy?: string | null;
+    reviewNote?: string | null;
+    hideReviewed?: boolean;
+    onToggleReview?: (path: string) => void;
+    onHideReviewed?: (next: boolean) => void;
+    /** 整文件暂存：写入真实索引，任务净差异本身不被应用。 */
+    onStageFile?: (path: string) => void;
+    /** 转到同一文件的真实未提交差异：按块/按行暂存只能在那里发生。 */
+    onOpenUnstaged?: (path: string) => void;
+    /** 回到改动视图的提交区：提交只按真实暂存范围执行。 */
+    onOpenChanges?: () => void;
+    /** 真实暂存范围（仓库相对路径）：与任务范围分开显示。 */
+    stagedPaths?: string[];
+    /** 任务范围解析成功/撤下：外壳据此绑定快照 token 与进度记录。 */
+    onSnapshot?: (scope: { worktree: string; baselineOid: string; headOid: string } | null) => void;
+    /** 当前任务文件：命令面板的标记/暂存动作作用在这里。 */
+    onSelection?: (path: string | null) => void;
+    /** 未审阅队列状态：与改动视图共用同一套命令与按钮。 */
+    onReviewNav?: (nav: ReviewQueueState | null) => void;
     paneHead?: Snippet;
     paneResizer?: Snippet;
   }
@@ -80,6 +108,19 @@
     onHunkNav,
     onPickBaseline,
     onClearBaseline,
+    reviewed = new Set<string>(),
+    reviewBusy = null,
+    reviewNote = null,
+    hideReviewed = false,
+    onToggleReview,
+    onHideReviewed,
+    onStageFile,
+    onOpenUnstaged,
+    onOpenChanges,
+    stagedPaths = [],
+    onSnapshot,
+    onSelection,
+    onReviewNav,
     paneHead,
     paneResizer,
   }: Props = $props();
@@ -143,6 +184,7 @@
       unstaged: toKind(file),
       untracked: file.untracked ?? false,
       unmerged: file.unmerged ?? false,
+      rebuilt: file.rebuilt ?? false,
       // 任务只有一条最终结果：行数挂在未暂存一侧，列表才画得出 +/−。
       unstagedLines: {
         additions: file.additions ?? null,
@@ -167,6 +209,17 @@
     task ? `${task.worktree}|${task.baselineOid}|${task.headOid}|${task.rangeVersion}` : "",
   );
 
+  /** 任务范围的进度：文件数来自任务本身，隐藏已审阅不改变它。 */
+  let reviewTotal = $derived(files.length);
+  let reviewReviewed = $derived(files.filter((file) => reviewed.has(file.path)).length);
+  let reviewNav: ReviewQueueState | null = $derived(
+    files.length > 0 ? reviewQueue(rows, reviewed, selected, goToRow) : null,
+  );
+  /** 选中的这条路径是不是「工作区重建」：行数与单文件差异都按重建后的内容给。 */
+  let selectedRebuilt = $derived(
+    selected ? (rows.find((row) => row.path === selected?.path)?.rebuilt ?? false) : false,
+  );
+
   let nav: FileNavState = $derived.by(() => {
     const items: FileRow[] = multiActive ? selectedRows : rows;
     const index = items.findIndex((row) => sameSelection(row, selected));
@@ -175,6 +228,14 @@
 
   $effect(() => {
     onFileNav?.(nav);
+  });
+
+  $effect(() => {
+    onReviewNav?.(reviewNav);
+  });
+
+  $effect(() => {
+    onSelection?.(selected?.path ?? null);
   });
 
   function rowOf(path: string): FileRow | null {
@@ -227,6 +288,7 @@
       diffError = null;
       selected = null;
       selectedSet = [];
+      onSnapshot?.(null);
       return;
     }
     reading = true;
@@ -252,6 +314,8 @@
       phase = "ready";
       failure = null;
       invalidRange = false;
+      // 范围身份交给外壳：任务快照 token 与已审阅记录都绑定这份解析结果。
+      onSnapshot?.({ worktree: result.worktree, baselineOid: result.baselineOid, headOid: result.headOid });
       // 刷新后按路径保留仍然存在的选择；消失的文件让位给列表第一个。
       const keptFocus = keep(selected);
       const keptSet = selectedSet.flatMap((item) => {
@@ -273,6 +337,7 @@
       diffError = null;
       selected = null;
       selectedSet = [];
+      onSnapshot?.(null);
       onFailure?.(error);
     } finally {
       if (at === readSerial) reading = false;
@@ -284,8 +349,9 @@
   $effect(() => {
     const isActive = active;
     const baseline = request?.baseline ?? null;
-    // 仓库、起点请求与改动快照身份一起决定这一轮：外部变化也重读，旧响应不覆盖新选择。
-    const key = `${opened.summary.path}|${request?.nonce ?? 0}|${baseline ?? ""}|${opened.snapshot}`;
+    // 仓库、起点请求与状态代次一起决定这一轮：外部变化（generation 前进）也重读，
+    // 旧响应不覆盖新选择。对象本身不能当键——插值永远是 "[object Object]"。
+    const key = `${opened.summary.path}|${request?.nonce ?? 0}|${baseline ?? ""}|${opened.generation}`;
     // 四个视图同时保活：隐藏的任务视图不发起仓库读取，回到任务页时按最新状态重读。
     if (!isActive) {
       wasActive = false;
@@ -336,6 +402,7 @@
         invalidRange = true;
         selected = null;
         selectedSet = [];
+        onSnapshot?.(null);
       }
       diff = null;
       diffError = normalized.message;
@@ -477,11 +544,58 @@
       {#if task?.filesTruncated}
         <p class="task-context-note" role="alert">{task.message}</p>
       {/if}
+      {#if task}
+        <!-- ready / empty 都要能换起点：起点是任务范围的一部分，选错了必须能当场改。 -->
+        <div class="task-context-row task-context-actions">
+          <button type="button" class="btn btn-ghost btn-sm" aria-label="换起点" title="放弃当前起点，回到起点选择状态" onclick={reselect}>
+            <Icon name="swap" size={13} /><span class="task-action-label">换起点</span>
+          </button>
+          {#if onOpenChanges}
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              aria-label="回到改动视图提交"
+              title="提交只按真实暂存范围执行；任务净差异不会自动进入提交"
+              onclick={onOpenChanges}
+            >
+              <Icon name="commit" size={13} /><span class="task-action-label">回到提交区</span>
+            </button>
+          {/if}
+        </div>
+      {/if}
       {#if task && !task.empty}
         <!-- 任务净差异是只读的：这里说明它和「本次提交的暂存范围」不是同一件事（R4）。 -->
         <p class="task-context-note">任务净差异只读：不会写入暂存区，也不改变提交范围。</p>
       {/if}
     </div>
+
+    {#if task && !task.empty}
+      <!-- 真实暂存范围与任务范围分开：提交只读这一份，任务页的文件数不代表提交范围。 -->
+      <div class="task-stage-scope" aria-label="本次提交暂存范围">
+        <div class="task-context-row">
+          <span class="task-kicker">本次提交</span>
+          {#if stagedPaths.length === 0}
+            <span class="task-value">暂存区是空的：这次提交不会包含任何任务文件</span>
+          {:else}
+            <span class="task-value">{stagedPaths.length} 个已暂存文件</span>
+            <span class="task-tag">与任务范围分开</span>
+          {/if}
+        </div>
+        <p class="task-context-note">
+          提交只读取真实暂存范围；这里的 {reviewTotal} 个任务文件不会自动进入这次提交。
+        </p>
+        {#if stagedPaths.length > 0}
+          <ul class="task-stage-list">
+            {#each stagedPaths.slice(0, 6) as path (path)}
+              <li title={path}>{path}</li>
+            {/each}
+            {#if stagedPaths.length > 6}
+              <li class="more">另有 {stagedPaths.length - 6} 个已暂存文件</li>
+            {/if}
+          </ul>
+        {/if}
+      </div>
+    {/if}
 
     {#if phase === "no-baseline"}
       {#if active}
@@ -527,6 +641,16 @@
           onMultiSelect={selectMany}
           onStage={() => {}}
           onUnstage={() => {}}
+          {reviewed}
+          {reviewTotal}
+          {reviewReviewed}
+          {hideReviewed}
+          {onHideReviewed}
+          {onToggleReview}
+          {reviewBusy}
+          {reviewNote}
+          {reviewNav}
+          {onStageFile}
         />
         <div class="task-commits" aria-label="范围内提交">
           <div class="task-commits-head">
@@ -564,6 +688,27 @@
   {@render paneResizer?.()}
   {#if task && rows.length > 0}
     <div class="task-diff">
+    {#if selected && onOpenUnstaged && !multiActive}
+      <!-- 聚合净差异不能直接应用：按块/行暂存要回到同一文件的真实未提交差异。 -->
+      <div class="task-diff-actions">
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm"
+          aria-label={`在未提交差异里按块/行暂存 ${selected.path}`}
+          title="任务净差异同时含已提交内容，不能直接做块/行补丁；转到这个文件的真实未提交差异再按块/行暂存"
+          onclick={() => selected && onOpenUnstaged?.(selected.path)}
+        >
+          <Icon name="file-diff" size={13} /><span>在未提交差异里按块/行暂存</span>
+        </button>
+      </div>
+    {/if}
+    {#if selectedRebuilt}
+      <!-- 工作区重建：起点里有旧版本，工作区里是未跟踪的同名文件。行数只统计重建后的内容，
+           不暗示为纯新增；files 列表与这条单文件差异用的是同一份口径。 -->
+      <p class="task-diff-note" role="note">
+        这个路径在起点里有旧版本，当前是工作区重建：行数只统计重建后的文件，单文件差异按新增文件显示。
+      </p>
+    {/if}
     {#if !multiActive && diff?.truncated}
       <!-- 截断就如实说截断：不把只读到的一部分当成完整净差异（R7）。 -->
       <p class="task-diff-note" role="alert">{diff.summary || "这条净差异超过预览上限，只读到一部分。"}</p>
@@ -585,6 +730,7 @@
         unstageCount={0}
         discardCount={0}
         conflictCount={0}
+        {onOpenUnstaged}
         {nextId}
         onFocus={focusBlock}
         onStale={onGeneration}
@@ -605,6 +751,10 @@
         loading={diffLoading}
         disabled={false}
         readOnly
+        readOnlyLabel="任务净差异"
+        reviewed={selected ? reviewed.has(selected.path) : false}
+        reviewBusy={selected ? reviewBusy === selected.path : false}
+        onToggleReview={selected && onToggleReview ? () => onToggleReview(selected!.path) : undefined}
         onStageHunk={() => {}}
         onLoadMore={() => void loadMoreDiff()}
         onFileHistory={onFileHistory}

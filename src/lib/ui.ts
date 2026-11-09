@@ -330,3 +330,77 @@ export function appendDiffPage(current: DiffResponse, page: DiffResponse): DiffR
   }
   return { ...page, offset: current.offset, lines: [...current.lines, ...page.lines], hunks: [...hunks.values()], totalLines: page.totalLines };
 }
+/** 连续审阅队列的三种空状态：文案由命令、按钮与空状态共用，四处不会各说一句。 */
+export const NO_MORE_UNREVIEWED = "没有更多未审阅文件";
+export const ALL_REVIEWED = "所有文件都已审阅";
+export const NO_REVIEW_FILES = "没有可审阅的文件";
+export const FIRST_UNREVIEWED = "已经是第一个未审阅文件";
+
+/**
+ * 上一/下一未审阅文件：任务与改动共用同一套队列语义。
+ *
+ * - 队列按给定顺序（冲突、未暂存、已暂存）去重：同一路径的 staged / unstaged 只算一个文件；
+ * - 只有未审阅路径进入队列，到队尾不回到开头，避免误操作跳过没看过的文件；
+ * - 当前文件不在队列里（已审阅或未选中）时，next 从第一个开始、prev 从最后一个开始。
+ */
+export interface ReviewQueueState {
+  /** 去重后的范围文件总数。 */
+  total: number;
+  reviewed: number;
+  remaining: number;
+  /** 当前文件在未审阅队列里的下标；-1 表示当前文件不用再看。 */
+  index: number;
+  prevReason: string | null;
+  nextReason: string | null;
+  onPrev: () => void;
+  onNext: () => void;
+}
+
+export function reviewQueue<T extends FileSelection>(
+  rows: readonly T[],
+  reviewed: ReadonlySet<string>,
+  current: FileSelection | null,
+  go: (row: T) => void,
+): ReviewQueueState {
+  const unique: T[] = [];
+  const known = new Set<string>();
+  for (const row of rows) {
+    if (known.has(row.path)) continue;
+    known.add(row.path);
+    unique.push(row);
+  }
+  const total = unique.length;
+  const queue = unique.filter((row) => !reviewed.has(row.path));
+  const remaining = queue.length;
+  const index = current ? queue.findIndex((row) => row.path === current.path) : -1;
+  const prev = index > 0 ? queue[index - 1] : index < 0 ? queue[remaining - 1] : undefined;
+  const next = index < 0 ? queue[0] : queue[index + 1];
+  return {
+    total,
+    reviewed: total - remaining,
+    remaining,
+    index,
+    prevReason:
+      total === 0
+        ? NO_REVIEW_FILES
+        : remaining === 0
+          ? ALL_REVIEWED
+          : index === 0
+            ? FIRST_UNREVIEWED
+            : null,
+    nextReason:
+      total === 0
+        ? NO_REVIEW_FILES
+        : remaining === 0
+          ? ALL_REVIEWED
+          : index >= remaining - 1
+            ? NO_MORE_UNREVIEWED
+            : null,
+    onPrev: () => {
+      if (prev) go(prev);
+    },
+    onNext: () => {
+      if (next) go(next);
+    },
+  };
+}

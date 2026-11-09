@@ -2,7 +2,18 @@
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
   import { bucketByDirectory, filterRows, groupFiles } from "../labels";
   import type { DiffSide, FileChange, FileRow, FileSelection } from "../types";
-  import { BUSY_REASON, rangeSelection, rowMark, sameSelection, splitPath, toggleSelection } from "../ui";
+  import {
+    ALL_REVIEWED,
+    BUSY_REASON,
+    NO_MORE_UNREVIEWED,
+    NO_REVIEW_FILES,
+    rangeSelection,
+    rowMark,
+    sameSelection,
+    splitPath,
+    toggleSelection,
+    type ReviewQueueState,
+  } from "../ui";
   import Icon from "./Icon.svelte";
   import LineCounts from "./LineCounts.svelte";
 
@@ -43,6 +54,13 @@
     reviewBusy?: string | null;
     /** 上一次标记失败的原因：就地说明，不弹全局错误。 */
     reviewNote?: string | null;
+    /**
+     * 上一/下一未审阅与队尾状态：与 review.prev / review.next 命令读同一份，
+     * 因此按钮、命令面板和快捷键不会给出不同结论。
+     */
+    reviewNav?: ReviewQueueState | null;
+    /** 任务队列的整文件真实写入：把这条路径按真实工作区内容暂存到索引。 */
+    onStageFile?: (path: string) => void;
     /**
      * 任务队列：同一套虚拟化、目录分组、搜索与键盘导航，但分组表头改称「任务文件」，
      * 并且不提供整文件暂存、空格暂存与取消暂存——任务净差异是只读的。
@@ -91,6 +109,8 @@
     onToggleReview,
     reviewBusy = null,
     reviewNote = null,
+    reviewNav = null,
+    onStageFile,
     variant = "changes",
     searchId = "file-search",
   }: Props = $props();
@@ -282,8 +302,13 @@
   });
 
   function toggle(row: FileRow) {
-    // 任务队列是只读净差异：双击与空格在这里不触发任何写入。
-    if (taskMode) return;
+    // 任务队列本身是只读净差异；空格与双击在这里只做「整文件暂存」这一条真实写入，
+    // 作用在真实工作区内容上，聚合净差异不会被当成补丁应用。
+    if (taskMode) {
+      if (disabled) return;
+      onStageFile?.(row.path);
+      return;
+    }
     if (disabled) return;
     if (row.unmerged) {
       onResolve?.(row.path);
@@ -378,11 +403,36 @@
       </button>
     {/if}
   </div>
+  {#if reviewNav}
+    <!-- 连续审阅：只在未审阅文件之间走，到队尾停下，不回到开头。按钮与 review.prev/next 同源。 -->
+    <div class="file-nav" role="group" aria-label="未审阅文件">
+      <button
+        type="button"
+        class="icon-btn sm"
+        aria-label="上一个未审阅文件"
+        title={reviewNav.prevReason ?? "上一个未审阅文件（Alt+Shift+←）"}
+        disabled={reviewNav.prevReason !== null}
+        onclick={reviewNav.onPrev}
+      >
+        <Icon name="chevron-left" size={14} />
+      </button>
+      <button
+        type="button"
+        class="icon-btn sm"
+        aria-label="下一个未审阅文件"
+        title={reviewNav.nextReason ?? "下一个未审阅文件（Alt+Shift+→）"}
+        disabled={reviewNav.nextReason !== null}
+        onclick={reviewNav.onNext}
+      >
+        <Icon name="chevron-right" size={14} />
+      </button>
+    </div>
+  {/if}
   {#if onToggleReview || reviewTotal > 0}
     <span
       class="review-count"
       role="status"
-      aria-label={`已审阅 ${reviewReviewed} 个，共 ${reviewTotal} 个改动文件`}
+      aria-label={`已审阅 ${reviewReviewed} 个，共 ${reviewTotal} 个${taskMode ? "任务文件" : "改动文件"}`}
       title="已审阅数是本地人工进度，不代表批准、提交或 Cliora 结果"
     >
       <Icon name="check-circle" size={13} />{reviewReviewed}/{reviewTotal}
@@ -404,6 +454,18 @@
 {#if reviewNote}
   <p class="file-tree-status danger" role="alert">{reviewNote}</p>
 {/if}
+{#if reviewNav && reviewNav.total > 0 && reviewNav.remaining === 0 && rows.length > 0}
+  <!-- 队尾/全部完成的下一步：隐藏已审阅，或按真实暂存范围提交；都不改任务范围。 -->
+  <p class="file-tree-status" role="status">
+    <span>{ALL_REVIEWED}：可以隐藏已审阅，或按真实暂存范围提交。</span>
+  </p>
+{:else if reviewNav && reviewNav.nextReason === NO_MORE_UNREVIEWED}
+  <p class="file-tree-status" role="status">
+    <span>{NO_MORE_UNREVIEWED}（已到队尾，不循环回开头）。</span>
+  </p>
+{:else if reviewNav && reviewNav.total === 0 && query.trim() === ""}
+  <p class="file-tree-status" role="status"><span>{NO_REVIEW_FILES}。</span></p>
+{/if}
 <div
   class="file-list"
   role="listbox"
@@ -421,18 +483,33 @@
       <strong>工作区很干净</strong>
     </div>
   {:else if rows.length === 0 && hideReviewed}
+    <!-- 空状态一：已审阅的文件被隐藏。 -->
     <div class="empty">
       <span class="empty-icon ok"><Icon name="check-circle" size={22} /></span>
       <strong>已审阅的文件都隐藏了</strong>
-      <p>隐藏只影响显示，分组数量与提交范围没有变化。</p>
+      <p>隐藏只影响显示，分组数量、任务范围与提交范围没有变化。</p>
       {#if onHideReviewed}
         <button type="button" class="btn btn-secondary btn-sm" onclick={() => onHideReviewed?.(false)}>显示已审阅</button>
       {/if}
     </div>
-  {:else if rows.length === 0}
+  {:else if rows.length === 0 && query.trim() !== ""}
+    <!-- 空状态二：筛选没有结果。下一步是清掉筛选，而不是换一个范围。 -->
     <div class="empty">
       <span class="empty-icon"><Icon name="search" size={22} /></span>
       <strong>没有匹配的文件</strong>
+      <p>当前搜索词没有匹配到{taskMode ? "任务" : "改动"}文件；清掉搜索可以回到完整队列。</p>
+      <button type="button" class="btn btn-secondary btn-sm" onclick={() => onQuery("")}>清除筛选</button>
+    </div>
+  {:else if rows.length === 0}
+    <!-- 空状态三：范围内没有未审阅文件可继续，或本来就没有文件。 -->
+    <div class="empty">
+      <span class="empty-icon ok"><Icon name="check-circle" size={22} /></span>
+      <strong>{reviewNav?.total ? ALL_REVIEWED : NO_REVIEW_FILES}</strong>
+      <p>
+        {reviewNav?.total
+          ? "全部文件都已审阅；可以隐藏已审阅，或到提交区按真实暂存范围提交。"
+          : "这个范围里没有可审阅的文件。"}
+      </p>
     </div>
   {:else}
     <div class="virtual-space" style={`height:${items.length * ROW_HEIGHT}px`}>
@@ -563,6 +640,9 @@
                 <span class="fd"><bdi>{parts.dir}</bdi></span>
               {/if}
             </span>
+            {#if row.rebuilt}
+              <span class="file-tag rebuilt" title="起点里有这个路径，工作区里现在是重建后的未跟踪文件；行数只统计重建后的内容，不是纯新增">工作区重建</span>
+            {/if}
             <LineCounts stat={row.side === "staged" ? row.stagedLines : row.unstagedLines} hideBinary />
             {#if onToggleReview}
               <button
@@ -590,7 +670,22 @@
               </button>
             {/if}
             {#if taskMode}
-              <!-- 任务队列是只读净差异：行内只有审阅标记，没有暂存/取消暂存。 -->
+              <!-- 任务净差异只读；行内唯一写入是「整文件暂存」，作用在真实工作区内容上。 -->
+              {#if onStageFile && !row.unmerged}
+                <button
+                  type="button"
+                  class="row-action"
+                  disabled={disabled}
+                  aria-label={`暂存 ${row.path} 到索引`}
+                  title={disabled ? BUSY_REASON : "把这个文件按真实工作区内容暂存到索引（空格）；任务净差异本身不被暂存"}
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    onStageFile?.(row.path);
+                  }}
+                >
+                  <Icon name="plus" size={14} />
+                </button>
+              {/if}
             {:else if row.unmerged}
               <button
                 type="button"

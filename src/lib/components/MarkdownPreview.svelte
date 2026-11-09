@@ -19,9 +19,32 @@
     onPosition?: (position: MarkdownPosition) => void;
     onSource?: () => void;
     onError?: (message: string | null) => void;
+    /** 目录是否展开；宿主把切换放进自己的工具条时双向绑定。 */
+    outlineOpen?: boolean;
+    /**
+     * 是否在正文上方画自己的阅读工具行（目录切换）。宿主已有工具条时传 false，
+     * 由宿主根据 onHeadings 上报的标题数决定是否给出目录入口，避免多叠一行。
+     */
+    showTools?: boolean;
+    onHeadings?: (count: number) => void;
   }
 
-  let { text, documentKey, active = true, anchor = null, navigationSerial = 0, scrollTop = 0, onPosition, onLink, onLoadImage, onSource, onError }: Props = $props();
+  let {
+    text,
+    documentKey,
+    active = true,
+    anchor = null,
+    navigationSerial = 0,
+    scrollTop = 0,
+    onPosition,
+    onLink,
+    onLoadImage,
+    onSource,
+    onError,
+    outlineOpen = $bindable(false),
+    showTools = true,
+    onHeadings,
+  }: Props = $props();
   const prefix = $props.id();
   const BATCH = 48;
   let document = $state.raw<MarkdownDocument | null>(null);
@@ -29,7 +52,17 @@
   let loading = $state(false);
   let error = $state<string | null>(null);
   let note = $state("");
-  let outlineOpen = $state(false);
+  let headingCount = $derived(document?.headings.length ?? 0);
+  $effect(() => {
+    const count = headingCount;
+    untrack(() => onHeadings?.(count));
+  });
+  /* 卸载（切到源码、换成状态页）时标题数归零，宿主工具条上的目录入口随之消失。 */
+  $effect(() => () => untrack(() => onHeadings?.(0)));
+  /* 没有标题的文档没有目录可开：别让一个空的侧栏留在那里。 */
+  $effect(() => {
+    if (document && headingCount === 0 && outlineOpen) outlineOpen = false;
+  });
   let rendered = $state(BATCH);
   let currentAnchor = $state<string | null>(null);
   let scroller = $state<HTMLDivElement | null>(null);
@@ -204,12 +237,12 @@
   {:else if error}
     <div class="md-empty" role="alert"><Icon name="alert-circle" size={24} /><p>{error}</p>{#if onSource}<button type="button" class="btn btn-secondary" onclick={onSource}>查看源码</button>{/if}</div>
   {:else if document}
-    <div class="md-reading-tools">
-      <span class="md-note">{document.headings.length > 0 ? `${document.headings.length} 个标题` : "文档预览"}</span>
-      {#if document.headings.length > 0}
-        <button type="button" class="md-small-button" aria-expanded={outlineOpen} aria-controls={`${prefix}-outline`} onclick={() => (outlineOpen = !outlineOpen)}><Icon name="list" size={14} />{outlineOpen ? "收起目录" : "目录"}</button>
-      {/if}
-    </div>
+    {#if showTools && document.headings.length > 0}
+      <!-- 只有带标题的文档才有目录可看；没有标题时不占一整行。 -->
+      <div class="md-reading-tools">
+        <button type="button" class="md-small-button" aria-expanded={outlineOpen} aria-controls={`${prefix}-outline`} title={`${document.headings.length} 个标题`} onclick={() => (outlineOpen = !outlineOpen)}><Icon name="list" size={14} />{outlineOpen ? "收起目录" : "目录"}</button>
+      </div>
+    {/if}
     {#if note}<div class="md-message" role="status">{note}</div>{/if}
     <div class="md-reading-layout" class:with-outline={outlineOpen}>
       {#if outlineOpen}

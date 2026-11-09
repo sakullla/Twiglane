@@ -45,6 +45,16 @@
     onFollow?: (target: DocumentLinkTarget) => boolean | Promise<boolean>;
     /** 提交缩写的位数；不传按 7 位。 */
     abbrevLength?: number;
+    /**
+     * 是否画来源/路径头部。文件视图的工具条已经有文件名、复制与前进后退，来源也固定是工作区，
+     * 传 false 去掉这一行；独立的阅读窗口仍需要它说明版本。
+     */
+    header?: boolean;
+    /** 目录展开状态与标题数；宿主把目录入口放进自己的工具条时使用。 */
+    outlineOpen?: boolean;
+    onHeadings?: (count: number) => void;
+    /** 正文大小（字节）；不画头部时交给宿主的状态条显示。 */
+    onSize?: (size: number | null) => void;
   }
 
   let {
@@ -62,6 +72,10 @@
     lineSerial = 0,
     onFollow,
     abbrevLength = 0,
+    header = true,
+    outlineOpen = $bindable(false),
+    onHeadings,
+    onSize,
   }: Props = $props();
 
   /** 与 components.css 的 .doc-source-line 行高一致。 */
@@ -120,6 +134,11 @@
   let sourceLabel = $derived(documentSourceLabel(boundSource, abbrevLength));
   let hasTrail = $derived(trail.length > 0);
   let hasAhead = $derived(ahead.length > 0);
+  let documentSize = $derived(documentResult?.size ?? null);
+  $effect(() => {
+    const size = documentSize;
+    untrack(() => onSize?.(size));
+  });
 
   function resetTransient(): void {
     documentSerial += 1;
@@ -609,6 +628,8 @@
 </script>
 
 <section class="document-reader" aria-label="文档阅读" aria-busy={documentLoading || sourceLoading}>
+  <!-- 宿主不要头部时，只有「文档内链接跳转」产生了前进后退记录才把它画出来，否则无法返回。 -->
+  {#if header || hasTrail || hasAhead}
   <header class="doc-reader-head">
     <span class="doc-source" title={`来源：${sourceLabel}`}><Icon name="eye" size={13} />{sourceLabel}</span>
     <span class="doc-path" title={boundSource.path}>{boundSource.path}</span>
@@ -635,6 +656,7 @@
     <span class="spacer"></span>
     {#if documentResult?.size != null}<span class="doc-meta">{formatBytes(documentResult.size)}</span>{/if}
   </header>
+  {/if}
 
   {#if documentNotice}
     <p class="doc-notice" role="status"><Icon name="info" size={13} />{documentNotice}</p>
@@ -671,6 +693,9 @@
         onLink={follow}
         onLoadImage={loadImage}
         onSource={onMode ? () => requestMode("source") : undefined}
+        bind:outlineOpen
+        showTools={header}
+        {onHeadings}
       />
     {:else if documentResult && documentResult.kind === "tooLarge"}
       <div class="doc-state" role="status">

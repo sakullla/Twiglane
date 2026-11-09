@@ -26,6 +26,7 @@ vi.mock("../src/lib/syntax/client", () => ({ highlightLines: vi.fn(() => cancelH
 import FileContent from "../src/lib/components/FileContent.svelte";
 import { resetSyntaxPrefs } from "../src/lib/syntax/prefs.svelte";
 import type { OpenedRepository, RepositoryContentSearch, RepositoryDocument, RepositoryFileContent } from "../src/lib/types";
+import { formatBytes } from "../src/lib/ui";
 
 const repoPath = "C:/work/demo";
 
@@ -516,14 +517,25 @@ describe("Markdown 阅读接入", () => {
 
     expect(await screen.findByRole("heading", { name: "标题" })).toBeTruthy();
     expect(repositoryDocument).toHaveBeenCalledWith(repoPath, { revision: "worktree", path: "docs/a.md", repository: repoPath }, 4, 1, "document");
-    // 预览优先：源码行不占正文，但状态条仍显示来源与只读。
+    // 预览优先：源码行不占正文。文件名、复制与目录都在文件工具条上，阅读器不再叠一行重复的来源/路径头，
+    // 也不再为「N 个标题」单独占一行；大小与只读收进底部状态条。
     expect(container.querySelector("[data-file-line]")).toBeNull();
-    expect(screen.getByTitle("这篇正文来自这个文件的工作区版本")).toBeTruthy();
-    expect(screen.getByTitle("来源：工作区")).toBeTruthy();
+    expect(container.querySelector(".doc-reader-head")).toBeNull();
+    expect(container.querySelector(".md-reading-tools")).toBeNull();
+    expect(screen.getAllByRole("button", { name: /复制文件路径|复制文档路径/ })).toHaveLength(1);
+    expect(screen.getByTitle("64 字节").textContent).toBe(formatBytes(64));
+    expect(screen.getByTitle("文件视图只读，不会改动工作区")).toBeTruthy();
+    const outline = screen.getByRole("button", { name: "文档目录" });
+    expect(outline.getAttribute("aria-pressed")).toBe("false");
+    await fireEvent.click(outline);
+    expect(outline.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("navigation", { name: "文档目录" })).toBeTruthy();
 
     await fireEvent.click(screen.getByRole("button", { name: "查看这个 Markdown 的源码" }));
     await waitFor(() => expect(container.querySelector('[data-file-line="1"]')).toBeTruthy());
     expect(screen.getByRole("button", { name: "查看这个 Markdown 的源码" }).getAttribute("aria-pressed")).toBe("true");
+    // 源码没有目录可看：入口随预览一起退场。
+    expect(screen.queryByRole("button", { name: "文档目录" })).toBeNull();
     expect(repositoryFileContent).toHaveBeenCalledWith(repoPath, "docs/a.md", 0, undefined, 4, expect.any(Number));
 
     await fireEvent.click(screen.getByRole("button", { name: "预览这个 Markdown 文档" }));

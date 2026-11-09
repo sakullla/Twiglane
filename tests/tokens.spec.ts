@@ -1348,8 +1348,9 @@ describe("改动链路的扫描顺序与状态语义（T3）", () => {
     expect(path).toMatch(/min-width:\s*0/);
     expect(path).toMatch(/flex:\s*0 1 auto/);
     expect(path).toMatch(/text-overflow:\s*ellipsis/);
-    // 文件图标不参与收缩，避免被挤没。
-    expect(ruleBody(components, ".diff-file > .icon")).toMatch(/flex:\s*none/);
+    // 目录先于文件名收缩：省略号落在目录上，文件名最后才截断。
+    expect(ruleBody(components, ".diff-path .dir")).toMatch(/flex:\s*0 1000 auto/);
+    expect(ruleBody(components, ".diff-path strong")).toMatch(/flex:\s*0 1 auto/);
   });
 
   it("中间宽度先收语言文字再收侧别徽标，收缩阈值早于内容相撞", () => {

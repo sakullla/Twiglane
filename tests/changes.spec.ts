@@ -165,7 +165,7 @@ import { paletteItems, REPO_SWITCH_PREFIX, type CommandState } from "../src/lib/
 import { createTextDiff } from "../src/lib/diff";
 import { RULER_LINES, RULER_SAMPLE_CHARS } from "../src/lib/layout";
 import { codeLine } from "./helpers/code";
-import { resetDiffPrefs } from "../src/lib/diff-prefs.svelte";
+import { diffPrefs, resetDiffPrefs, setHideWhitespaceOnly } from "../src/lib/diff-prefs.svelte";
 
 /* ------------------------------------------------------------------ *
  * 组件级夹具：只关心差异密度与提交区形状。
@@ -1478,6 +1478,27 @@ describe("差异空白显示与纯空白过滤（T3）", () => {
     // 持续状态 + 落盘。
     expect(document.querySelector("[data-diff-trimmed]")?.textContent).toContain("已隐藏 1 处");
     expect(JSON.parse(localStorage.getItem("twiglane.diffPrefs") ?? "{}").hideWhitespaceOnly).toBe(true);
+  });
+
+  it("显示偏好收进溢出时，「已隐藏 N 处」仍留在工具条上并可一键恢复", async () => {
+    const spy = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains("diff-toolbar") ? 900 : 0;
+    });
+    try {
+      setHideWhitespaceOnly(true);
+      render(DiffView, { props: base() });
+      await tick();
+      expect(screen.queryByRole("button", { name: "忽略纯空白改动" })).toBeNull();
+      const note = document.querySelector<HTMLButtonElement>("button[data-diff-trimmed]");
+      expect(note?.textContent).toContain("已隐藏 1 处");
+      expect(screen.getByRole("button", { name: /更多差异工具/ }).getAttribute("data-active")).toBe("true");
+      await fireEvent.click(note!);
+      expect(diffPrefs.hideWhitespaceOnly).toBe(false);
+      expect(screen.getByText(codeLine("  const indent = 1;"))).toBeTruthy();
+      expect(document.querySelector("[data-diff-trimmed]")).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("全部被过滤时说明是被当前条件隐藏了，并给一键恢复", async () => {
@@ -2918,7 +2939,7 @@ describe("差异工具条随面板宽度收敛（R2）", () => {
     };
   }
 
-  it("1200 宽直接露出全部工具，900 宽只把文件工具收进溢出，560 再收布局与显示偏好", async () => {
+  it("1200 宽直接露出全部工具，900 宽把文件工具与显示偏好收进溢出，560 再收布局", async () => {
     resetDiffPrefs();
     const width = stubToolbarWidth(1200);
     try {
@@ -2932,8 +2953,8 @@ describe("差异工具条随面板宽度收敛（R2）", () => {
       width.set(900);
       render(DiffView, { props: baseProps() });
       await tick();
-      // 中间档：显示偏好与布局仍直接可见，只有文件历史、完整文件进溢出。
-      expect(screen.getByRole("button", { name: "显示空白字符" })).toBeTruthy();
+      // 中间档：布局仍直接可见；很少切换的显示偏好和文件历史、完整文件一起进溢出，把宽度留给文件名。
+      expect(screen.queryByRole("button", { name: "显示空白字符" })).toBeNull();
       expect(screen.getByRole("group", { name: "差异布局" })).toBeTruthy();
       expect(screen.queryByRole("button", { name: "此文件历史" })).toBeNull();
       expect(screen.getByRole("button", { name: /更多差异工具/ })).toBeTruthy();
@@ -3048,6 +3069,65 @@ describe("差异工具条随面板宽度收敛（R2）", () => {
     }
   });
 
+  it("文件身份只留有信息量的部分：不画装饰图标，未暂存不再标出，已暂存仍提醒", async () => {
+    const width = stubToolbarWidth(1200);
+    try {
+      render(DiffView, { props: baseProps() });
+      await tick();
+      const file = document.querySelector(".diff-toolbar .diff-file") as HTMLElement;
+      expect(file.querySelector(":scope > .icon"), "文件名前不再放一个没有含义的文件图标").toBeNull();
+      expect(file.querySelector(".diff-side")).toBeNull();
+      expect(file.textContent).not.toContain("未暂存");
+      // 侧别仍在路径提示里可读。
+      expect(file.querySelector(".diff-path")?.getAttribute("title")).toBe("demo.txt（未暂存）");
+
+      cleanup();
+      render(DiffView, {
+        props: { ...baseProps(), selection: { path: "demo.txt", side: "staged" as const }, diff: { ...diff, staged: true } },
+      });
+      await tick();
+      expect(document.querySelector(".diff-toolbar .diff-side.staged")?.textContent).toBe("已暂存");
+    } finally {
+      width.restore();
+    }
+  });
+
+  it("文件名被挤到截断时继续收缩工具，而不是让文件名消失", async () => {
+    resetDiffPrefs();
+    const width = stubToolbarWidth(1200);
+    const observers = stubObservers();
+    // happy-dom 没有排版：文字自然宽度 120，实际只分到 40，即文件名被省略。
+    const rangeRect = vi.spyOn(Range.prototype, "getBoundingClientRect").mockReturnValue({ width: 120 } as DOMRect);
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.matches(".diff-path strong")) return { width: 40 } as DOMRect;
+      return original.call(this);
+    });
+    try {
+      render(DiffView, { props: baseProps() });
+      await tick();
+      await tick();
+      await tick();
+      // 宽度本该是完整档，但文件名放不下：布局与显示偏好都收进溢出。
+      await waitFor(() => expect(screen.queryByRole("group", { name: "差异布局" })).toBeNull());
+      expect(screen.queryByRole("button", { name: "显示空白字符" })).toBeNull();
+      expect(screen.getByRole("button", { name: /更多差异工具/ })).toBeTruthy();
+
+      // 文件名放得下之后，宽度变化会从完整档重新量。
+      rangeRect.mockReturnValue({ width: 40 } as DOMRect);
+      width.set(1260);
+      observers.flush();
+      await tick();
+      await waitFor(() => expect(screen.getByRole("group", { name: "差异布局" })).toBeTruthy());
+      expect(screen.getByRole("button", { name: "显示空白字符" })).toBeTruthy();
+    } finally {
+      rect.mockRestore();
+      rangeRect.mockRestore();
+      observers.restore();
+      width.restore();
+    }
+  });
+
   it("窗口缩放只改显示档位，显示偏好与差异布局不被重置", async () => {
     resetDiffPrefs();
     const width = stubToolbarWidth(560);
@@ -3065,9 +3145,11 @@ describe("差异工具条随面板宽度收敛（R2）", () => {
       observers.flush();
       await tick();
       expect(screen.getByRole("button", { name: "并排" }).getAttribute("aria-pressed")).toBe("true");
-      expect(screen.getByRole("button", { name: "显示空白字符" }).getAttribute("aria-pressed")).toBe("true");
-      // 900 属于中间档：文件工具仍在溢出里，显示偏好与布局已经回到直接可见。
-      expect(screen.getByRole("button", { name: /更多差异工具/ })).toBeTruthy();
+      // 900 属于中间档：布局回到直接可见；显示偏好与文件工具仍在溢出里，
+      // 溢出入口用圆点和标签说明里面有开关在生效。
+      expect(screen.queryByRole("button", { name: "显示空白字符" })).toBeNull();
+      expect(trigger().getAttribute("data-active")).toBe("true");
+      expect(trigger().getAttribute("aria-label")).toContain("1 项已开启");
       expect(screen.queryByRole("button", { name: "此文件历史" })).toBeNull();
 
       width.set(560);

@@ -436,10 +436,9 @@
     escalated === 0 ? baseTier : escalated === 1 ? (baseTier === "full" ? "compact" : "narrow") : "narrow",
   );
   let showLayoutInline = $derived(tier !== "narrow");
-  /* 行选进行中优先保住选择与写入的可达性：中间宽度再让出显示偏好这一档；完整宽度放得下，不搬动。 */
-  let showDisplayPrefsInline = $derived(
-    tier !== "narrow" && canFilterWhitespace && !(tier === "compact" && pickMode),
-  );
+  /* 显示偏好（空白标记、略过纯空白）是设一次就很少再动的开关，中间宽度先把它们收进溢出；
+     布局切换更常用，留到最窄一档才收。开启状态仍在溢出按钮的计数与「已隐藏 N 处」提示里。 */
+  let showDisplayPrefsInline = $derived(tier === "full" && canFilterWhitespace);
   let showOverflow = $derived(tier !== "full");
   /* Markdown 差异才有文档来源：前后版本的正文都在对应版本里读，不从这份 diff 拼。 */
   let documentSides = $derived(onReadDocument ? currentDiff?.document ?? null : null);
@@ -607,21 +606,53 @@
       fullFile,
       inlineReadDocument,
       Boolean(documentSides),
+      onToggleReview ? (reviewed ? "reviewed" : "review") : "",
+      currentDiff ? `${currentDiff.additions ?? ""}:${currentDiff.deletions ?? ""}` : "",
     ].join("|"),
   );
+  /** 换文件后文件名长度变了：从完整档重新量，短名字不必继续收着工具。 */
+  let measuredPath = "";
+
+  /**
+   * 工具条是否太挤：整条换了行，或者文件名本身已经被截断。上下文段的基础宽度是 0，
+   * 工具多时它会被压到只剩复制按钮和徽标——文件名看不见，工具条就没有主语了。
+   * 这时把低频工具再收一档，而不是让文件名消失。
+   */
+  function toolbarCrowded(node: HTMLElement): boolean {
+    if (node.scrollWidth > node.clientWidth + 1) return true;
+    const groups = node.children;
+    if (groups.length > 1) {
+      const top = (groups[0] as HTMLElement).offsetTop;
+      for (const group of groups) if ((group as HTMLElement).offsetTop > top + 8) return true;
+    }
+    const name = node.querySelector<HTMLElement>(".diff-path strong");
+    if (!name || typeof document === "undefined" || typeof document.createRange !== "function") return false;
+    // scrollWidth 会取整：差零点几像素也会画出省略号，所以按文字实际排版宽度比。
+    const range = document.createRange();
+    range.selectNodeContents(name);
+    const natural = range.getBoundingClientRect().width;
+    const shown = name.getBoundingClientRect().width;
+    return natural > 0 && natural > shown + 0.01;
+  }
 
   $effect(() => {
     toolbarSignature;
     const node = toolbar;
     if (!node) return;
+    const path = selection?.path ?? "";
     const read = () => {
       const width = node.clientWidth;
-      if (width !== toolbarWidth) {
+      if (width !== toolbarWidth || path !== measuredPath) {
         toolbarWidth = width;
-        escalated = 0;
+        measuredPath = path;
+        if (escalated !== 0) {
+          // 先回到按宽度估算的档位，等它渲染后由下一轮再量，不拿旧档位的布局做判断。
+          escalated = 0;
+          return;
+        }
       }
-      // 估算阈值之外的字体或缩放差异由实际溢出兜底；最多升到 narrow，避免来回抖动。
-      if (width > 0 && tier !== "narrow" && node.scrollWidth > width + 1) escalated += 1;
+      // 估算阈值之外的字体、缩放或长文件名由实际排版兜底；最多升到 narrow，避免来回抖动。
+      if (width > 0 && tier !== "narrow" && toolbarCrowded(node)) escalated += 1;
     };
     read();
     if (typeof ResizeObserver === "undefined") return;
@@ -1177,8 +1208,7 @@
       {/if}
       <div class="diff-file">
         {#if selection && parts}
-          <Icon name="file-diff" size={15} />
-          <!-- 侧别在窄工具条里让位给路径；完整上下文仍在提示里可读。 -->
+          <!-- 文件名是这一段的主角：目录先省略，文件名最后才截断；完整路径在提示里。 -->
           <span class="diff-path" title={selection.side === "staged" ? `${selection.path}（已暂存）` : `${selection.path}（未暂存）`}>
             <bdi>{#if parts.dir}<span class="dir">{parts.dir}/</span>{/if}<strong>{parts.name}</strong></bdi>
           </span>
@@ -1194,10 +1224,10 @@
               <Icon name={copiedPath ? "check" : "copy"} size={12} />
             </button>
           {/if}
-          {#if !readOnly}
-            <span class="diff-side" class:staged={selection.side === "staged"}>
-              {selection.side === "staged" ? "已暂存" : "未暂存"}
-            </span>
+          <!-- 未暂存是改动视图的默认侧，不再单独标出；只有已暂存会把按块动作变成「取消暂存」，
+               这时才需要提醒。 -->
+          {#if !readOnly && selection.side === "staged"}
+            <span class="diff-side staged">已暂存</span>
           {/if}
           {#if showStats && currentDiff}
             <LineCounts
@@ -1379,9 +1409,20 @@
       <!-- 溢出入口（R2）：与直接入口共用同一份 diffPrefs / fullFile / renderMode 状态，
            生效状态写在条目右侧，禁用原因就地说明；关闭后焦点回到触发按钮。 -->
       <div class="diff-toolbar-group diff-overflow">
+        {#if !showDisplayPrefsInline && whitespaceFilter.hunks.size > 0}
+          <!-- 开关收进了溢出，但「有改动没显示」这件事不能跟着藏起来。 -->
+          <button
+            type="button"
+            class="diff-ws-note diff-ws-note-btn"
+            data-diff-trimmed
+            title={whitespaceFilter.lines + " 行只改了空白，按当前设置没有显示；点击重新显示"}
+            onclick={() => setHideWhitespaceOnly(false)}
+          >已隐藏 {whitespaceFilter.hunks.size} 处</button>
+        {/if}
         <button
           type="button"
-          class="icon-btn sm"
+          class="icon-btn sm diff-more-btn"
+          data-active={pressedToolCount > 0 ? "true" : undefined}
           aria-label={moreLabel}
           aria-haspopup="listbox"
           aria-expanded={moreOpen}

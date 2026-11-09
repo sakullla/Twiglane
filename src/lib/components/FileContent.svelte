@@ -25,7 +25,7 @@
     RepositorySearchScope,
     DocumentSource,
   } from "../types";
-  import { BUSY_REASON, documentSourceLabel, formatBytes, rowMark, splitPath, type FileNavState } from "../ui";
+  import { BUSY_REASON, formatBytes, rowMark, splitPath, type FileNavState } from "../ui";
   import type { DiffSide } from "../types";
   import BinaryPreview from "./BinaryPreview.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
@@ -158,6 +158,11 @@
    */
   let isMarkdown = $derived(Boolean(path && isMarkdownPath(path)));
   let documentMode = $state<DocumentMode>("preview");
+  /* 预览的目录入口放在文件工具条上（不另占一行）；展开状态跨文档保留，按阅读习惯来。 */
+  let outlineOpen = $state(false);
+  let headingCount = $state(0);
+  /** 预览正文的大小：预览不走代码读取，由阅读器上报给状态条。 */
+  let documentSize = $state<number | null>(null);
   let documentNotice = $state<string | null>(null);
   /** 上一次恢复用的签名：同一个签名不重复恢复。 */
   let restoreSignature = "";
@@ -779,7 +784,6 @@
     <header class="diff-toolbar file-head">
       {#if nav}<FileNav {nav} steps={false} />{/if}
       <div class="file-title" title={path}>
-        <span class={`tree-icon ft-${fileTone(path)}`}><Icon name="file" size={15} /></span>
         <span class="breadcrumb">
           {#each (parts.dir ? parts.dir.split("/") : []) as segment, index (index)}
             <span class="crumb">{segment}</span><span class="crumb-sep" aria-hidden="true">/</span>
@@ -818,6 +822,16 @@
               onclick={() => setDocumentMode("source")}
             >源码</button>
           </div>
+          {#if documentMode === "preview" && headingCount > 0}
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm file-outline-btn"
+              aria-pressed={outlineOpen}
+              aria-label="文档目录"
+              title={outlineOpen ? "收起目录" : `显示目录（${headingCount} 个标题）`}
+              onclick={() => (outlineOpen = !outlineOpen)}
+            ><Icon name="list" size={13} /><span>目录</span></button>
+          {/if}
         {/if}
         {#if isSvg && content?.kind === "text"}
           <div class="segmented file-view-mode" role="group" aria-label="SVG 显示方式">
@@ -1011,6 +1025,10 @@
         contentVersion={contentVersion}
         onMode={setDocumentMode}
         onFollow={followWorktreeLink}
+        header={false}
+        bind:outlineOpen
+        onHeadings={(count) => (headingCount = count)}
+        onSize={(size) => (documentSize = size)}
       />
     {:else if error}
       <div class="file-state" role="alert">
@@ -1112,8 +1130,8 @@
             无本地改动
           {/if}
         </span>
-        <span class="file-status-item" title="这篇正文来自这个文件的工作区版本">{documentSourceLabel(documentSource)}</span>
         <span class="spacer"></span>
+        {#if documentSize != null}<span class="file-status-item" title={`${documentSize} 字节`}>{formatBytes(documentSize)}</span>{/if}
         <span class="file-status-item" title="文件视图只读，不会改动工作区"><Icon name="eye" size={12} />只读</span>
       </footer>
     {:else if content && !error && !loading}

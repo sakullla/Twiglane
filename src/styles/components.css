@@ -637,9 +637,10 @@
 .diff-file { display: flex; align-items: center; gap: var(--space-8); min-width: 0; flex: 1 1 0; overflow: hidden; }
 .diff-file > .icon { color: var(--fg-subtle); flex: none; }
 .diff-path { font-family: var(--mono); font-size: var(--text-sm); min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.diff-path > bdi { unicode-bidi: isolate; }
-.diff-path .dir { color: var(--fg-subtle); }
-.diff-path strong { font-weight: var(--weight-semibold); color: var(--fg); }
+/* 目录先收、文件名最后收：窄带里省略号落在目录上，文件名保持完整可读。 */
+.diff-path > bdi { unicode-bidi: isolate; display: flex; min-width: 0; }
+.diff-path .dir { color: var(--fg-subtle); flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.diff-path strong { font-weight: var(--weight-semibold); color: var(--fg); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .diff-side { font-size: var(--text-xs); font-weight: var(--weight-medium); padding: 2px 7px; border-radius: var(--radius-sm); background: var(--surface-3); color: var(--fg-muted); white-space: nowrap; flex: none; }
 .diff-side.staged { background: var(--accent-soft); color: var(--accent-text); }
 .diff-stats { display: inline-flex; gap: 5px; font-family: var(--mono); font-size: var(--text-xs); font-weight: var(--weight-semibold); flex: none; }
@@ -671,6 +672,13 @@
    accent 选中语义共用同一组选择器（见按钮区），不在这里另写一套底色。 */
 .diff-toolbar .diff-ws-btn { height: 22px; padding: 0 var(--space-8); font-size: var(--text-xs); gap: 5px; }
 .diff-ws-note { flex: none; font-size: var(--text-xs); color: var(--fg-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* 显示偏好收进溢出时，「已隐藏 N 处」仍留在工具条上，点一下就把它们放回来。 */
+.diff-ws-note-btn { height: 22px; padding: 0 var(--space-6); border-radius: var(--radius-sm); color: var(--warning-text); }
+.diff-ws-note-btn:hover { background: var(--hover); text-decoration: underline; text-underline-offset: 3px; }
+.diff-ws-note-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+/* 溢出里有开关生效时，入口右上角一个小圆点：不展开菜单也知道视图被调过。 */
+.diff-more-btn { position: relative; }
+.diff-more-btn[data-active="true"]::after { content: ""; position: absolute; top: 3px; right: 3px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 1.5px var(--surface); pointer-events: none; }
 .diff-scroll { min-height: 0; flex: 1; overflow: auto; outline: none; background: var(--surface); }
 /* 可聚焦滚动容器（与 .file-list / .history-list 同一判据）：焦点环用 --focus 画在内容之上。 */
 .diff-scroll:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }

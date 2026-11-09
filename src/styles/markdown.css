@@ -1,5 +1,5 @@
 .markdown-preview { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; background: var(--surface); color: var(--fg); }
-.md-reading-tools { display: flex; align-items: center; justify-content: space-between; flex: none; min-height: 36px; padding: var(--space-4) var(--space-16); border-bottom: 1px solid var(--border); gap: var(--space-8); }
+.md-reading-tools { display: flex; align-items: center; justify-content: flex-end; flex: none; min-height: 36px; padding: var(--space-4) var(--space-16); border-bottom: 1px solid var(--border); gap: var(--space-8); }
 .md-reading-layout { display: flex; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .md-scroll { flex: 1; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; overscroll-behavior: contain; }
 .md-body { width: 100%; max-width: 860px; box-sizing: border-box; margin: 0 auto; padding: var(--space-24) clamp(16px, 4vw, 48px) 64px; font-size: var(--text-md); line-height: 1.75; overflow-wrap: anywhere; }

@@ -288,6 +288,78 @@ export interface RepositoryReviewToken {
   message: string;
 }
 
+/**
+ * 任务范围内一条路径的最终净状态：起点到工作区的净差异，后端已合并后续提交、暂存、
+ * 未暂存改动与未跟踪文件。status 与 CommitFileChange 用同一套名称。
+ */
+export interface TaskFileChange {
+  path: string;
+  originalPath: string | null;
+  /** added / modified / deleted / renamed / copied / typeChanged / unmerged / unknown */
+  status: string;
+  additions?: number | null;
+  deletions?: number | null;
+  binary?: boolean;
+  /** 二进制改动前后的字节数：改动前取自起点里的版本，改动后取自工作区。 */
+  oldSize?: number | null;
+  newSize?: number | null;
+  /** 起点里没有这条路径：来自未跟踪文件。 */
+  untracked?: boolean;
+  unmerged?: boolean;
+}
+
+/** 一次只读任务读取的结果：只有完整读取成功才返回，空任务用 empty 表示。 */
+export interface TaskReview {
+  generation: number;
+  /** canonical worktree 路径：范围身份的一部分。 */
+  worktree: string;
+  /** 用户给出的起点写法，只用于显示。 */
+  baselineRef: string;
+  /** 校验过的完整起点提交标识；后续读取原样带回。 */
+  baselineOid: string;
+  /** 读取时的 HEAD 完整提交标识；后续读取原样带回。 */
+  headOid: string;
+  branch: BranchInfo;
+  /** 范围内提交的第一页，新的在前。 */
+  commits: HistoryCommit[];
+  commitCount: number;
+  commitsTruncated: boolean;
+  files: TaskFileChange[];
+  filesTotal: number;
+  filesTruncated: boolean;
+  additions: number;
+  deletions: number;
+  /** 索引、工作区或未跟踪文件里还有未提交改动。 */
+  dirty: boolean;
+  untrackedFiles: number;
+  conflicted: boolean;
+  /** 起点之后没有任何提交，也没有净改动；读取失败不会走到这里。 */
+  empty: boolean;
+  /** 范围版本：绑定 worktree、起点、HEAD 与未提交状态的形状。 */
+  rangeVersion: string;
+  message: string;
+}
+
+/** 单条任务路径的快照确认：只有 current 带 token，其余状态保持未审阅。 */
+export interface TaskReviewToken {
+  generation: number;
+  path: string;
+  baselineOid: string;
+  state: RepositoryReviewState;
+  /** 仅 state 为 current 时有值。 */
+  token: string | null;
+  status: string;
+  untracked: boolean;
+  unmerged: boolean;
+  /** 起点里这条路径的版本；起点没有它时为 absent。 */
+  baselineVersion: string | null;
+  /** 工作区内容版本（worktree:<oid> 或 missing）。 */
+  contentVersion: string | null;
+  /** 这条路径的净差异超过预览上限：只读到一部分，不能标记。 */
+  truncated: boolean;
+  message: string;
+}
+
 export interface DiffResponse {
   preview?: PreviewSources;
   /** Explicit Markdown sides; independent of binary resource preview rendering. */

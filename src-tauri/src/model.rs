@@ -800,6 +800,95 @@ pub struct RepositoryReviewToken {
     pub message: String,
 }
 
+/// 任务范围内一条路径的最终净状态：起点到工作区的净差异，由后端合并提交、暂存、
+/// 未暂存改动与未跟踪文件后给出。`status` 与提交文件列表用同一套名称。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskFileChange {
+    pub path: String,
+    pub original_path: Option<String>,
+    /// added / modified / deleted / renamed / copied / typeChanged / unmerged / unknown
+    pub status: String,
+    /// 文本文件的新增与删除行数。二进制或行数无法确认时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additions: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary: bool,
+    /// 二进制改动前后的字节数：改动前取自起点里的版本，改动后取自工作区。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_size: Option<u64>,
+    /// 起点里没有这条路径：来自未跟踪文件。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub untracked: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unmerged: bool,
+}
+
+/// 一次只读任务读取的结果。只有完整读取成功才返回：空任务用 `empty` 表示，
+/// 不用错误或空列表冒充。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskReview {
+    pub generation: u64,
+    /// canonical worktree 路径：范围身份的一部分，必须就是前端打开的那个目录。
+    pub worktree: String,
+    /// 用户给出的起点写法（分支名、简称或完整提交），只用于显示。
+    pub baseline_ref: String,
+    /// 校验过的完整起点提交标识。
+    pub baseline_oid: String,
+    /// 读取时的 HEAD 完整提交标识。空分支是单独的错误，不会走到这里。
+    pub head_oid: String,
+    pub branch: BranchInfo,
+    /// 范围内提交的第一页，新的在前。
+    pub commits: Vec<HistoryCommit>,
+    /// 范围内提交总数；`commits` 只是第一页。
+    pub commit_count: u64,
+    pub commits_truncated: bool,
+    pub files: Vec<TaskFileChange>,
+    /// 实际合并进来的文件数；达到上限时 `files_truncated` 为真。
+    pub files_total: u32,
+    pub files_truncated: bool,
+    pub additions: u64,
+    pub deletions: u64,
+    /// 索引、工作区或未跟踪文件里还有未提交改动。
+    pub dirty: bool,
+    pub untracked_files: u32,
+    pub conflicted: bool,
+    /// 起点之后没有任何提交，也没有净改动。
+    pub empty: bool,
+    /// 范围版本：绑定 worktree、起点、HEAD 与当前未提交状态，供后续失效判断。
+    pub range_version: String,
+    pub message: String,
+}
+
+/// 任务范围内单条路径的快照确认。token 绑定 worktree、起点、这条路径的最终净内容
+/// 与两侧状态；无法确认或差异被截断时不产生 token。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskReviewToken {
+    pub generation: u64,
+    pub path: String,
+    pub baseline_oid: String,
+    pub state: RepositoryReviewState,
+    /// 仅 `Current` 有值；其余状态为 null，前端保持未审阅。
+    pub token: Option<String>,
+    /// 这条路径相对起点的净状态名称（added / modified / deleted / renamed …）。
+    pub status: String,
+    pub untracked: bool,
+    pub unmerged: bool,
+    /// 起点里这一条路径的版本；起点没有它时为 `absent`。
+    pub baseline_version: Option<String>,
+    /// 工作区内容版本（`worktree:<oid>` 或 `missing`）。
+    pub content_version: Option<String>,
+    /// 这条路径的净差异超过预览上限：只读到一部分，不能确认整份内容。
+    pub truncated: bool,
+    pub message: String,
+}
+
 /// 路径搜索的结果类型：文件来自 Git 路径集合，目录由文件祖先派生。
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

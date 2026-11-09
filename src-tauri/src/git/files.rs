@@ -1479,7 +1479,7 @@ pub async fn repository_content_search(
 const MAX_REVIEW_BYTES: usize = 1024 * 1024;
 
 /// 审阅路径必须是仓库内的普通相对路径：绝对路径、..、.git 都拒绝。
-fn review_path(path: &str) -> Result<PathBuf, AppError> {
+pub(crate) fn review_path(path: &str) -> Result<PathBuf, AppError> {
     let relative = safe_relative(path)?;
     if relative
         .components()

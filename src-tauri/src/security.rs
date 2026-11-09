@@ -48,6 +48,10 @@ fn capabilities_do_not_grant_a_shell() {
         "allow-repository-path-search",
         "allow-repository-content-search",
         "allow-repository-review-token",
+        // 任务审阅只有三个只读命令：聚合范围、单文件净差异与单路径快照确认。
+        "allow-task-review",
+        "allow-load-task-diff",
+        "allow-task-review-token",
         "allow-stage-files",
         "allow-unstage-files",
         "allow-stage-hunks",

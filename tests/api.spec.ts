@@ -421,6 +421,99 @@ describe("Tauri 命令参数", () => {
     });
   });
 });
+describe("任务审阅命令", () => {
+  beforeEach(() => {
+    invoke.mockClear();
+  });
+
+  it("任务读取、单文件净差异与快照 token 都按 camelCase 传参", async () => {
+    const baseline = "a".repeat(40);
+    const head = "b".repeat(40);
+    await api.taskReview("/repo", baseline, 8, 80);
+    await api.loadTaskDiff("/repo", baseline, head, "src/a.ts", 8, 81);
+    await api.loadTaskDiff("/repo", baseline, head, "new name.ts", 8, 82, null, 400, 200, 1_000_000, true);
+    await api.taskReviewToken("/repo", baseline, head, "src/a.ts", 8, 83);
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "task_review", {
+      path: "/repo",
+      baseline,
+      generation: 8,
+      requestId: 80,
+    });
+    // 单文件读取必须带完整起点与 HEAD：旧响应无法贴到新范围上。
+    expect(invoke).toHaveBeenNthCalledWith(2, "load_task_diff", {
+      path: "/repo",
+      baseline,
+      head,
+      relative: "src/a.ts",
+      original: null,
+      generation: 8,
+      requestId: 81,
+      offset: 0,
+      limit: 0,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "load_task_diff", {
+      path: "/repo",
+      baseline,
+      head,
+      relative: "new name.ts",
+      original: null,
+      generation: 8,
+      requestId: 82,
+      offset: 400,
+      limit: 200,
+      context: 1_000_000,
+      asText: true,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(4, "task_review_token", {
+      path: "/repo",
+      baseline,
+      head,
+      relative: "src/a.ts",
+      generation: 8,
+      requestId: 83,
+    });
+    for (const call of invoke.mock.calls) expect(call[1]).not.toHaveProperty("request_id");
+  });
+
+  it("读取失败与空任务分开：错误原样抛出，空任务只来自完整成功响应", async () => {
+    invoke.mockRejectedValueOnce({ code: "task_baseline_not_ancestor", message: "起点不是祖先。" });
+    await expect(api.taskReview("/repo", "deadbeef", 8, 90)).rejects.toMatchObject({
+      code: "task_baseline_not_ancestor",
+    });
+    invoke.mockResolvedValueOnce({
+      generation: 9,
+      worktree: "/repo",
+      baselineRef: "main~2",
+      baselineOid: "a".repeat(40),
+      headOid: "b".repeat(40),
+      branch: { name: "main", detached: false },
+      commits: [],
+      commitCount: 0,
+      commitsTruncated: false,
+      files: [],
+      filesTotal: 0,
+      filesTruncated: false,
+      additions: 0,
+      deletions: 0,
+      dirty: false,
+      untrackedFiles: 0,
+      conflicted: false,
+      empty: true,
+      rangeVersion: "v",
+      message: "读取成功：起点之后没有提交，也没有未提交改动。",
+    });
+    const task = await api.taskReview("/repo", "main~2", 9, 91);
+    expect(task.empty).toBe(true);
+    expect(invoke).toHaveBeenLastCalledWith("task_review", {
+      path: "/repo",
+      baseline: "main~2",
+      generation: 9,
+      requestId: 91,
+    });
+  });
+});
+
 describe("逐行暂存命令", () => {
   beforeEach(() => {
     invoke.mockClear();

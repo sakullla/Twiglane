@@ -42,5 +42,6 @@ pub mod schedule;
 pub mod sizes;
 pub mod sync;
 pub mod tags;
+pub mod task;
 pub mod workspace;
 pub mod worktree;

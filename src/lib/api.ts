@@ -44,6 +44,8 @@ import type {
   StashState,
   StatusSnapshot,
   TagState,
+  TaskReview,
+  TaskReviewToken,
   Theme,
   PullIntegration,
   UndoResult,
@@ -333,6 +335,64 @@ export const api = {
   ) =>
     invoke<RepositoryReviewToken>("repository_review_token", {
       path,
+      relative,
+      generation,
+      requestId,
+    }),
+  /**
+   * 只读任务范围：显式起点经完整 OID 与 ancestry 校验后，返回起点..HEAD、索引、工作区
+   * 与未跟踪文件合并后的最终净结果，同时给出范围内提交、HEAD、统计与范围版本。
+   * 起点缺失、非祖先、worktree 缺失与读取失败各自是不同的错误，不返回空任务。
+   */
+  taskReview: (path: string, baseline: string, generation: number, requestId: number) =>
+    invoke<TaskReview>("task_review", { path, baseline, generation, requestId }),
+  /**
+   * 单文件任务净差异：baseline 与 head 必须是任务快照返回的完整 OID，
+   * 因此旧响应不会被贴到新仓库、新起点或新 HEAD 上。
+   */
+  loadTaskDiff: (
+    path: string,
+    baseline: string,
+    head: string,
+    relative: string,
+    generation: number,
+    requestId: number,
+    original: string | null = null,
+    offset = 0,
+    limit = 0,
+    /** 上下文行数；不传时后端用 3 行。 */
+    context?: number,
+    asText?: boolean,
+  ) =>
+    invoke<DiffResponse>("load_task_diff", {
+      path,
+      baseline,
+      head,
+      relative,
+      original,
+      generation,
+      requestId,
+      offset,
+      limit,
+      ...(context === undefined ? {} : { context }),
+      ...(asText ? { asText } : {}),
+    }),
+  /**
+   * 单条任务路径的整文件快照确认：token 绑定 worktree、起点与这条路径的最终净内容。
+   * 差异被截断或内容无法确认时后端不给 token，前端保持未审阅。
+   */
+  taskReviewToken: (
+    path: string,
+    baseline: string,
+    head: string,
+    relative: string,
+    generation: number,
+    requestId: number,
+  ) =>
+    invoke<TaskReviewToken>("task_review_token", {
+      path,
+      baseline,
+      head,
       relative,
       generation,
       requestId,

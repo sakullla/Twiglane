@@ -177,6 +177,52 @@ pub fn file_diff_command_with_context(
     context: u32,
     as_text: bool,
 ) -> (PathBuf, Vec<OsString>) {
+    diff_command(git, root, None, paths, staged, numstat, untracked, context, as_text)
+}
+
+/// 任务净差异：起点提交直接对工作区，因此同时含后续提交、暂存与未暂存改动的结果。
+/// 参数与 `file_diff_command_with_context` 一致，只多一个起点提交。
+#[allow(clippy::too_many_arguments)]
+pub fn task_diff_command(
+    git: &Path,
+    root: &Path,
+    baseline: &str,
+    paths: &[PathBuf],
+    untracked: bool,
+    context: u32,
+    as_text: bool,
+) -> (PathBuf, Vec<OsString>) {
+    if untracked {
+        // 未跟踪文件在起点里根本没有版本：只能和空文件比，不带起点提交。
+        return file_diff_command_with_context(
+            git, root, paths, false, false, true, context, as_text,
+        );
+    }
+    diff_command(
+        git,
+        root,
+        Some(baseline),
+        paths,
+        false,
+        false,
+        false,
+        context,
+        as_text,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn diff_command(
+    git: &Path,
+    root: &Path,
+    revision: Option<&str>,
+    paths: &[PathBuf],
+    staged: bool,
+    numstat: bool,
+    untracked: bool,
+    context: u32,
+    as_text: bool,
+) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.push(OsString::from("diff"));
     if as_text {
@@ -199,6 +245,10 @@ pub fn file_diff_command_with_context(
         args.push(OsString::from("-z"));
     } else {
         args.push(OsString::from(format!("--unified={context}")));
+    }
+    // 起点提交必须放在 pathspec 之前：diff <commit> -- <path> 才是「起点对工作区」。
+    if let Some(revision) = revision {
+        args.push(OsString::from(revision));
     }
     if untracked {
         args.push(OsString::from(null_device()));
@@ -1093,6 +1143,115 @@ pub fn numstat_command(git: &Path, root: &Path, staged: bool) -> (PathBuf, Vec<O
         OsString::from("--numstat"),
         OsString::from("-z"),
         OsString::from("--find-renames"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// 任务净状态的文件队列：起点提交对工作区的名称与状态（含重命名检测）。
+pub fn task_name_status_command(
+    git: &Path,
+    root: &Path,
+    baseline: &str,
+    paths: &[PathBuf],
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("diff"),
+        OsString::from("-z"),
+        OsString::from("--name-status"),
+        OsString::from("--find-renames"),
+        OsString::from(baseline),
+        OsString::from("--"),
+    ]);
+    for path in paths {
+        args.push(path.as_os_str().to_os_string());
+    }
+    (git.to_path_buf(), args)
+}
+
+/// 与 `task_name_status_command` 同一范围的增删行数：二进制记作两个 `-`。
+pub fn task_numstat_command(
+    git: &Path,
+    root: &Path,
+    baseline: &str,
+    paths: &[PathBuf],
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("diff"),
+        OsString::from("--numstat"),
+        OsString::from("-z"),
+        OsString::from("--find-renames"),
+        OsString::from(baseline),
+        OsString::from("--"),
+    ]);
+    for path in paths {
+        args.push(path.as_os_str().to_os_string());
+    }
+    (git.to_path_buf(), args)
+}
+
+/// 单条路径的状态：任务快照只关心这一条路径的两侧状态、未跟踪与冲突。
+pub fn path_status_command(git: &Path, root: &Path, relative: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = vec![
+        OsString::from("--literal-pathspecs"),
+        OsString::from("-C"),
+        root.as_os_str().to_os_string(),
+        OsString::from("--no-optional-locks"),
+        OsString::from("status"),
+        OsString::from("--porcelain=v2"),
+        OsString::from("-z"),
+        OsString::from("--untracked-files=all"),
+        OsString::from("--"),
+    ];
+    args.push(relative.as_os_str().to_os_string());
+    (git.to_path_buf(), args)
+}
+
+/// 某个提交（或树）里一条路径的条目：任务快照用它给出起点侧的内容版本。
+pub fn ls_tree_entry_command(
+    git: &Path,
+    root: &Path,
+    tree: &str,
+    relative: &Path,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("ls-tree"),
+        OsString::from("-z"),
+        OsString::from("--full-tree"),
+        OsString::from(tree),
+        OsString::from("--"),
+    ]);
+    args.push(relative.as_os_str().to_os_string());
+    (git.to_path_buf(), args)
+}
+
+/// 工作区文件的内容版本：只算对象 id，不加 `-w`，因此不写对象库。只读通道用。
+pub fn read_object_hash_command(
+    git: &Path,
+    root: &Path,
+    relative: &Path,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = vec![
+        OsString::from("--literal-pathspecs"),
+        OsString::from("-C"),
+        root.as_os_str().to_os_string(),
+        OsString::from("--no-optional-locks"),
+        OsString::from("hash-object"),
+        OsString::from("--"),
+    ];
+    args.push(relative.as_os_str().to_os_string());
+    (git.to_path_buf(), args)
+}
+
+/// 范围内提交数（`rev-list --count`）：只读，不为此翻页。
+pub fn rev_list_count_command(git: &Path, root: &Path, revision: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("rev-list"),
+        OsString::from("--count"),
+        OsString::from(revision),
     ]);
     (git.to_path_buf(), args)
 }

@@ -109,6 +109,9 @@ pub fn run() {
             repository_path_search,
             repository_content_search,
             repository_review_token,
+            task_review,
+            load_task_diff,
+            task_review_token,
             stage_files,
             unstage_files,
             stage_hunks,
@@ -1047,6 +1050,75 @@ async fn repository_review_token(
     .await
 }
 
+/// 只读任务范围：起点提交 → HEAD → 索引 → 工作区（含未跟踪文件）的最终净差异。
+#[tauri::command(rename_all = "camelCase")]
+async fn task_review(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    baseline: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<crate::model::TaskReview, AppError> {
+    crate::git::task::task_review(state.inner(), &path, &baseline, generation, request_id).await
+}
+
+/// 只读单文件任务差异：必须带上任务快照的完整起点与 HEAD。
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+async fn load_task_diff(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    baseline: String,
+    head: String,
+    relative: String,
+    original: Option<String>,
+    generation: u64,
+    request_id: u64,
+    offset: Option<u32>,
+    limit: Option<u32>,
+    context: Option<u32>,
+    as_text: Option<bool>,
+) -> Result<DiffResponse, AppError> {
+    crate::git::task::load_task_diff(
+        state.inner(),
+        &path,
+        &baseline,
+        &head,
+        &relative,
+        original.as_deref(),
+        generation,
+        request_id,
+        offset.unwrap_or(0),
+        limit.unwrap_or(0),
+        context.unwrap_or(3),
+        as_text.unwrap_or(false),
+    )
+    .await
+}
+
+/// 单条任务路径的只读快照确认：token 只在完整确认这条路径的净内容时产生。
+#[tauri::command(rename_all = "camelCase")]
+async fn task_review_token(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    baseline: String,
+    head: String,
+    relative: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<crate::model::TaskReviewToken, AppError> {
+    crate::git::task::task_review_token(
+        state.inner(),
+        &path,
+        &baseline,
+        &head,
+        &relative,
+        generation,
+        request_id,
+    )
+    .await
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn branch_list(
     state: State<'_, Arc<Backend>>,
@@ -1943,6 +2015,9 @@ mod ipc_contract {
             "repository_path_search",
             "repository_content_search",
             "repository_review_token",
+            "task_review",
+            "load_task_diff",
+            "task_review_token",
             "stash_state",
             "save_stash",
             "apply_stash",

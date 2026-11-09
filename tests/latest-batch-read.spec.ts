@@ -41,7 +41,7 @@ describe("历史批量读取", () => {
     expect(await result).toEqual([0, 10, 20, 30, 40]);
   });
 
-  it("连续替换也共享运行位置，旧批次剩余项不发出，旧结果不混入新结果", async () => {
+  it("连续替换时新批次立刻开始，旧批次剩余项不发出、旧结果不混入新结果", async () => {
     const queue = new LatestBatchReadQueue();
     const pending = [deferred<number>(), deferred<number>()];
     const oldTask = vi.fn((index: number) => pending[index].promise);
@@ -51,14 +51,16 @@ describe("历史批量读取", () => {
     const middle = queue.run([99], skipped).catch((error) => error.code);
     const newest = vi.fn(async (id: number) => id);
     const result = queue.run([5, 6, 7], newest);
+    // 旧批次的两个在途读取还挂着，新批次也必须立刻读完。
+    expect(await result).toEqual([5, 6, 7]);
     expect(await old).toBe("cancelled");
     expect(await middle).toBe("cancelled");
-    expect(newest).not.toHaveBeenCalled();
-    pending[1].resolve(1);
-    expect(await result).toEqual([5, 6, 7]);
     pending[0].resolve(0);
+    pending[1].resolve(1);
+    await Promise.resolve();
     expect(skipped).not.toHaveBeenCalled();
     expect(oldTask).toHaveBeenCalledTimes(2);
+    expect(newest).toHaveBeenCalledTimes(3);
   });
 
   it("失败释放位置，取消和关闭清除尚未开始的读取", async () => {
@@ -80,5 +82,50 @@ describe("历史批量读取", () => {
     expect(await closed).toBe("cancelled");
     await expect(queue.run([7], skipped)).rejects.toMatchObject({ code: "cancelled" });
     expect(skipped).not.toHaveBeenCalled();
+  });
+
+  it("旧批次在途请求永不结束也不会占住新批次的并发位置", async () => {
+    const queue = new LatestBatchReadQueue();
+    const stuck = vi.fn(() => new Promise<number>(() => {}));
+    const old = queue.run([1, 2, 3], stuck).catch((error) => error.code);
+    await vi.waitFor(() => expect(stuck).toHaveBeenCalledTimes(2));
+    // 两个在途请求永不 settle：新批次必须仍然开始并完成，而不是无限排队。
+    const fresh = vi.fn(async (id: number) => id * 10);
+    const result = queue.run([4, 5, 6], fresh);
+    expect(await result).toEqual([40, 50, 60]);
+    expect(await old).toBe("cancelled");
+    expect(stuck).toHaveBeenCalledTimes(2);
+    // 旧批次的迟到结果永不落地。
+    expect(fresh).toHaveBeenCalledTimes(3);
+  });
+
+  it("被新批次替代的旧批次只以 cancelled 结束，从不解析成空结果", async () => {
+    const queue = new LatestBatchReadQueue();
+    const first = deferred<number>();
+    const progress = vi.fn();
+    const stale = queue.run([1], () => first.promise, progress);
+    const settled = vi.fn();
+    void stale.then(settled, settled);
+    await Promise.resolve();
+    const newest = await queue.run([9], async (id) => id);
+    expect(newest).toEqual([9]);
+    first.resolve(1);
+    await vi.waitFor(() => expect(settled).toHaveBeenCalledOnce());
+    await expect(stale).rejects.toMatchObject({ code: "cancelled" });
+    expect(progress).not.toHaveBeenCalled();
+  });
+
+  it("取消与关闭后立即结算，不等旧的在途请求", async () => {
+    const queue = new LatestBatchReadQueue();
+    const stuck = vi.fn(() => new Promise<number>(() => {}));
+    const running = queue.run([1, 2], stuck).catch((error) => error.code);
+    await vi.waitFor(() => expect(stuck).toHaveBeenCalledTimes(2));
+    queue.cancel();
+    expect(await running).toBe("cancelled");
+    const again = queue.run([3], stuck).catch((error) => error.code);
+    await Promise.resolve();
+    queue.close();
+    expect(await again).toBe("cancelled");
+    await expect(queue.run([4], stuck)).rejects.toMatchObject({ code: "cancelled" });
   });
 });

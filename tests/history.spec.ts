@@ -955,7 +955,7 @@ describe("历史面板", () => {
     globalThis.localStorage?.removeItem("twiglane.commitFilesWidth");
   });
 
-  it("多选差异切换文件后不继续旧文件的排队请求", async () => {
+  it("多选差异切换文件后立刻读取新文件，旧文件还在途的请求不再落地", async () => {
     const commits = Array.from({ length: 6 }, (_, index) => commit(index));
     historyPage.mockResolvedValue({ generation: 3, commits, offset: 0, pageSize: 100, hasMore: false, state: "ok" });
     commitDetail.mockImplementation(async (_repo: string, oid: string) => ({
@@ -971,17 +971,18 @@ describe("历史面板", () => {
     await waitFor(() => expect(pending).toHaveLength(2));
     expect(pending.map((item) => item.path)).toEqual(["a.txt", "a.txt"]);
     await fireEvent.click(screen.getByRole("option", { name: /b\.txt/ }));
-    expect(pending).toHaveLength(2);
+    // 旧文件的两项在途读取不占住新文件的读取位置：b.txt 的两项立刻开始。
+    await waitFor(() => expect(pending).toHaveLength(4));
+    expect(pending.map((item) => item.path)).toEqual(["a.txt", "a.txt", "b.txt", "b.txt"]);
     pending[0].resolve({ ...diff, path: "a.txt", lines: [{ ...diff.lines[0], text: "+obsolete selection" }] });
-    await waitFor(() => expect(pending).toHaveLength(3));
-    expect(pending[2].path).toBe("b.txt");
+    await tick();
+    expect(pending).toHaveLength(4);
     expect(screen.queryByText("obsolete selection")).toBeNull();
     view.unmount();
-    pending[1].resolve(diff);
-    pending[2].resolve(diff);
+    for (const item of pending) item.resolve(diff);
     await tick();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(pending).toHaveLength(3);
+    expect(pending).toHaveLength(4);
   });
 
   it("提交中的文件行只有历史、复制路径和文件管理器", async () => {
@@ -1181,6 +1182,83 @@ describe("历史面板", () => {
     expect(screen.queryByText("这些提交没有文件变化。")).toBeNull();
     expect(document.querySelector(".commit-line-total")).toBeNull();
     expect(screen.getByText(/读取失败。/)).toBeTruthy();
+  });
+
+  it("旧批次在途详情永不返回时，新选的一批仍会开始读取并结束加载", async () => {
+    const rows = Array.from({ length: 8 }, (_, index) => commit(index));
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: rows,
+      scope: "current", branches: ["main"], head: "main",
+    });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    await waitFor(() => expect(commitDetail).toHaveBeenCalledTimes(1));
+
+    // 旧批次的两个在途详情永不返回：并发位置不能因此被永久占住。
+    commitDetail.mockImplementation(() => new Promise(() => {}));
+    await fireEvent.click(screen.getByRole("option", { name: /commit-3/ }), { shiftKey: true });
+    expect(await screen.findByText("已选择 4 个提交")).toBeTruthy();
+    await waitFor(() => expect(commitDetail).toHaveBeenCalledTimes(3));
+    expect(screen.getByText("正在读取所选提交的详情")).toBeTruthy();
+
+    commitDetail.mockImplementation(async (_repo: string, oid: string) => ({
+      generation: 3, commit: rows.find((item) => item.oid === oid), body: "", root: false, merge: false, selectedParent: "parent",
+      files: [{ path: "late.txt", originalPath: null, status: "modified", additions: 1, deletions: 1 }],
+    }));
+    await fireEvent.click(screen.getByRole("option", { name: /commit-7/ }), { ctrlKey: true });
+    expect(await screen.findByText("已选择 5 个提交")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText("正在读取所选提交的详情")).toBeNull(), { timeout: 4_000 });
+    const union = screen.getByRole("listbox", { name: "提交中的文件列表" });
+    expect(await within(union).findByText("late.txt")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText("正在读取差异")).toBeNull(), { timeout: 4_000 });
+    await waitFor(() => expect(document.querySelectorAll(".union-block").length).toBe(5), { timeout: 4_000 });
+  });
+
+  it("多选详情读取失败后可以在原地重新读取，不必退出多选", async () => {
+    const rows = [commit(0), commit(1), commit(2)];
+    historyPage.mockResolvedValue({ generation: 3, commits: rows, offset: 0, pageSize: 100, hasMore: false, state: "ok" });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    await waitFor(() => expect(commitDetail).toHaveBeenCalledTimes(1));
+    commitDetail.mockRejectedValue({ code: "detail_failed", message: "提交详情读取失败。" });
+    await fireEvent.click(screen.getByRole("option", { name: /commit-2/ }), { shiftKey: true });
+    expect(await screen.findByText("有提交详情没读取成功，无法确认文件范围。")).toBeTruthy();
+    expect(screen.queryByText("正在读取所选提交的详情")).toBeNull();
+    expect(screen.queryByText("这些提交没有文件变化。")).toBeNull();
+
+    commitDetail.mockImplementation(async (_repo: string, oid: string) => ({
+      generation: 3, commit: rows.find((item) => item.oid === oid), body: "", root: false, merge: false, selectedParent: "parent",
+      files: [{ path: "again.txt", originalPath: null, status: "modified", additions: 1, deletions: 0 }],
+    }));
+    await fireEvent.click(screen.getByRole("button", { name: "重新读取所选提交" }));
+    const union = await screen.findByRole("listbox", { name: "提交中的文件列表" });
+    expect(await within(union).findByText("again.txt")).toBeTruthy();
+    expect(screen.queryByText(/提交详情读取失败/)).toBeNull();
+    expect(screen.queryByText("正在读取所选提交的详情")).toBeNull();
+  });
+
+  it("多选读取期间切走再回来会重新读取，不残留上一个边界的转圈", async () => {
+    const rows = Array.from({ length: 4 }, (_, index) => commit(index));
+    historyPage.mockResolvedValue({ generation: 3, commits: rows, offset: 0, pageSize: 100, hasMore: false, state: "ok" });
+    const view = render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    await waitFor(() => expect(commitDetail).toHaveBeenCalledTimes(1));
+    commitDetail.mockImplementation(() => new Promise(() => {}));
+    await fireEvent.click(screen.getByRole("option", { name: /commit-3/ }), { shiftKey: true });
+    expect(await screen.findByText("已选择 4 个提交")).toBeTruthy();
+    expect(screen.getByText("正在读取提交中的文件")).toBeTruthy();
+    await view.rerender({ ...panelProps(), active: false });
+    expect(screen.queryByText("正在读取提交中的文件")).toBeNull();
+    expect(screen.queryByText("正在读取所选提交的详情")).toBeNull();
+
+    commitDetail.mockImplementation(async (_repo: string, oid: string) => ({
+      generation: 3, commit: rows.find((item) => item.oid === oid), body: "", root: false, merge: false, selectedParent: "parent",
+      files: [{ path: "back.txt", originalPath: null, status: "modified", additions: 1, deletions: 0 }],
+    }));
+    await view.rerender({ ...panelProps(), active: true });
+    const union = await screen.findByRole("listbox", { name: "提交中的文件列表" });
+    expect(await within(union).findByText("back.txt")).toBeTruthy();
+    expect(screen.queryByText("正在读取所选提交的详情")).toBeNull();
   });
 
   it("多选边读边显示首份文件和差异，补齐详情不会重复读取已有差异", async () => {

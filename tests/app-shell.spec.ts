@@ -1019,7 +1019,8 @@ describe("连续审阅队列与真实写入边界（R2、R4、R6）", () => {
     expect(within(palette).getByRole("option", { name: /^取消暂存当前文件/ }).getAttribute("aria-disabled")).toBe("false");
     const stageOption = within(palette).getByRole("option", { name: /^暂存当前文件/ });
     expect(stageOption.getAttribute("aria-disabled")).toBe("true");
-    expect(stageOption.textContent).toContain("当前文件没有可暂存的真实改动");
+    // 另一侧确实有未暂存改动，原因要指向用户选中的已暂存侧，而不是说「没有改动」。
+    expect(stageOption.textContent).toContain("选中的是已暂存侧，要暂存请先选未暂存侧");
     await fireEvent.keyDown(palette, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "命令面板" })).toBeNull());
 
@@ -1173,6 +1174,52 @@ describe("应用外壳", () => {
     expect(document.body.textContent, "其他仓库只在弹层里出现").not.toContain("other");
     expect(document.querySelector(".pane .file-list"), "文件列表在左栏").toBeTruthy();
     expect(document.querySelector(".pane .composer"), "提交区在左栏").toBeTruthy();
+  });
+
+  it("工具条更多菜单的禁用原因就地可见，与命令面板同一判定", async () => {
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: "更多提交操作" }));
+    const menu = await screen.findByRole("menu", { name: "更多提交操作" });
+    const items = within(menu).getAllByRole("menuitem");
+    const disabled = items.filter((item) => item.hasAttribute("disabled"));
+    expect(disabled.length, "夹具里至少有同步类动作不可用").toBeGreaterThan(0);
+    for (const item of disabled) {
+      const reason = item.querySelector("small")?.textContent?.trim() ?? "";
+      expect(reason, item.textContent ?? "").not.toBe("");
+      // 原因既可见又和悬停提示一致；键盘与触屏都不依赖 title。
+      expect(item.getAttribute("title")).toBe(reason);
+      expect(item.getAttribute("aria-describedby")).toBe(item.querySelector("small")?.id);
+    }
+
+    // 与命令面板同一份判定：面板里同一条命令的原因与菜单里的小字相同。
+    const sample = disabled[0];
+    const title = (sample.querySelector("span")?.firstChild?.textContent ?? "").trim();
+    const reason = sample.querySelector("small")?.textContent?.trim();
+    await fireEvent.keyDown(menu, { key: "Escape" });
+    const palette = await openPalette();
+    const option = within(palette).getByRole("option", { name: new RegExp("^" + title) });
+    expect(option.getAttribute("aria-disabled")).toBe("true");
+    expect(option.textContent).toContain(reason);
+  });
+
+  it("普通进入历史保留上次筛选与阅读位置，显式文件历史才换条件", async () => {
+    render(App);
+    await openRepo();
+    const nav = () => document.querySelector<HTMLElement>('.workbench-view[data-active="true"] nav[aria-label="视图"]')!;
+    await fireEvent.click(within(nav()).getByRole("button", { name: "提交历史" }));
+    const search = await screen.findByLabelText("搜索说明或提交哈希");
+    await fireEvent.input(search, { target: { value: "abc" } });
+    await waitFor(() => expect(mocks.historyPage.mock.calls.some((call) => call[1] === "abc")).toBe(true));
+
+    // 切到改动再按导航回到历史：筛选还在，不会退回空条件重新读一遍。
+    await fireEvent.click(within(nav()).getByRole("button", { name: /^改动/ }));
+    const before = mocks.historyPage.mock.calls.length;
+    await fireEvent.click(within(nav()).getByRole("button", { name: "提交历史" }));
+    await waitFor(() => expect(document.querySelector(".history-list")).toBeTruthy());
+    expect((screen.getByLabelText("搜索说明或提交哈希") as HTMLInputElement).value).toBe("abc");
+    await tick();
+    expect(mocks.historyPage.mock.calls.slice(before).every((call) => call[1] === "abc")).toBe(true);
   });
 
   it("左栏头部切换视图，隐藏后仍能进入，导航恰好是改动、历史、文件与任务", async () => {

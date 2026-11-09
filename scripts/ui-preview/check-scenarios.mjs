@@ -433,6 +433,146 @@ const SCENARIOS = [
     detail: "(document.querySelector('[data-push-error] [role=status]')?.textContent || '').trim().slice(0, 80)",
   },
   {
+    // T5 键鼠闭环（真实 DOM 键鼠，不是 element.click()）：打开任务 → 连续审阅 → 空格暂存 → 提交 → 回到来源。
+    name: "任务：键盘打开任务、连续审阅与空格整文件暂存",
+    url: "/",
+    steps: async (drv) => {
+      await drv.until("Boolean(document.querySelector('.welcome-recent button'))", "起始页");
+      await drv.click(".welcome-recent button");
+      await drv.until("Boolean(document.querySelector('.view-switcher'))", "工作区");
+      // Ctrl+4 切到任务视图（快捷键与导航同源），起点必须由用户显式选择。
+      await drv.press("4", ["Ctrl"]);
+      await drv.until("Boolean(document.querySelector('.task-baseline-item'))", "任务起点候选");
+      // 候选项在读取分支/提交期间是 disabled 的：点它之前先等它真的可以点。
+      await drv.until("Boolean(document.querySelector('.task-baseline-item:not([disabled])'))", "起点可点击");
+      await drv.clickUntil(".task-baseline-item:not([disabled])", "!document.querySelector('.task-baseline')", "任务范围开始读取");
+      await drv.until("document.querySelectorAll('.workbench-view[data-active=true] .file-list .file-row').length > 0", "任务文件队列");
+      await drv.click('.workbench-view[data-active="true"] .file-list .file-row');
+      // Alt+M 标记已审阅；Alt+Shift+→ 走下一个未审阅（与工具条、命令面板同一份判定）。
+      await drv.press("m", ["Alt"]);
+      await drv.until("document.querySelectorAll('.review-toggle.on').length >= 1", "已审阅标记");
+      await drv.press("ArrowRight", ["Alt", "Shift"]);
+      // 空格只写真实索引：任务净差异本身不被暂存。
+      await drv.press(" ", []);
+      await drv.until("document.querySelectorAll('.workbench-view[data-active=true] .file-list .file-row').length > 0", "暂存后任务队列仍在");
+    },
+    check:
+      "document.querySelectorAll('.review-toggle.on').length >= 1 && Boolean(document.querySelector('.task-context')) && !document.querySelector('.task-context [role=alert]')",
+    detail:
+      "(document.querySelector('.task-context')?.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80)",
+  },
+  {
+    name: "任务：键盘提交真实暂存并回到提交区",
+    url: "/",
+    steps: async (drv) => {
+      await drv.until("Boolean(document.querySelector('.welcome-recent button'))", "起始页");
+      await drv.click(".welcome-recent button");
+      await drv.until("Boolean(document.querySelector('.view-switcher'))", "工作区");
+      await drv.press("4", ["Ctrl"]);
+      await drv.until("Boolean(document.querySelector('.task-baseline-item'))", "任务起点候选");
+      // 候选项在读取分支/提交期间是 disabled 的：点它之前先等它真的可以点。
+      await drv.until("Boolean(document.querySelector('.task-baseline-item:not([disabled])'))", "起点可点击");
+      await drv.clickUntil(".task-baseline-item:not([disabled])", "!document.querySelector('.task-baseline')", "任务范围开始读取");
+      await drv.until("document.querySelectorAll('.workbench-view[data-active=true] .file-list .file-row').length > 0", "任务文件队列");
+      await drv.click('.workbench-view[data-active="true"] .file-list .file-row');
+      await drv.press(" ", []);
+      // 暂存后任务范围会按新 generation 重读，入口在重读期间可能暂时不在，等它回来再点。
+      await drv.until("Boolean(document.querySelector('[aria-label=\"回到改动视图提交\"]'))", "回到提交区入口");
+      await drv.click("[aria-label=\"回到改动视图提交\"]");
+      await drv.until("Boolean(document.querySelector('.composer textarea'))", "提交区");
+      await drv.typeInto(".composer textarea", "审阅任务范围并提交");
+      await drv.until("(document.querySelector('.composer textarea')?.value || '').length > 0", "提交说明草稿");
+      // 焦点在文本框里时快捷键不抢输入（isTextEntry），提交走真实鼠标点击提交按钮。
+      await drv.click(".composer-commit");
+      await drv.until("(document.querySelector('.composer textarea')?.value || '') === ''", "提交完成后草稿清空");
+    },
+    check:
+      "(document.querySelector('.composer textarea')?.value || '') === '' && /暂存区为空|0 个文件/.test(document.querySelector('.composer-scope')?.textContent || '')",
+    detail:
+      "document.querySelector('.composer-scope')?.textContent?.trim() || ''",
+  },
+  {
+    // 用户报告的缺陷：旧批次的两个在途详情永不返回时，换一批选择也必须立刻读到并结束加载。
+    name: "历史：旧批次请求挂住时换选择仍能读到文件并结束加载",
+    url: "/?history=hang",
+    steps: async (drv) => {
+      await drv.until("Boolean(document.querySelector('.welcome-recent button'))", "起始页");
+      await drv.click(".welcome-recent button");
+      await drv.until("Boolean(document.querySelector('.view-switcher'))", "工作区");
+      await drv.click('[data-view="history"]');
+      await drv.until("document.querySelectorAll('.history-list [role=option]').length > 0", "提交列表");
+      // 第一笔：选中最新的 4 个提交，其中两个详情永不返回。
+      await drv.clickNth(".history-list [role=option]", 0);
+      await drv.clickNth(".history-list [role=option]", 3, ["Shift"]);
+      await drv.until("Boolean(document.body.textContent.includes('已选择 4 个提交'))", "第一批多选");
+      // 换到更早的 4 个提交：新批次必须开始读取，不能排在被挂住的旧请求后面。
+      await drv.clickNth(".history-list [role=option]", 4);
+      await drv.clickNth(".history-list [role=option]", 7, ["Shift"]);
+      await drv.until("Boolean(document.body.textContent.includes('已选择 4 个提交'))", "第二批多选");
+      await drv.until("!document.body.textContent.includes('正在读取所选提交的详情')", "第二批加载结束");
+      await drv.until("document.querySelectorAll('.commit-files .file-row').length > 0", "第二批文件队列");
+      await drv.until("document.querySelectorAll('.union-block').length > 0", "第二批差异块");
+    },
+    check:
+      "!document.body.textContent.includes('正在读取所选提交的详情') && document.querySelectorAll('.commit-files .file-row').length > 0 && document.querySelectorAll('.union-block').length > 0",
+    detail:
+      "document.querySelectorAll('.commit-files .file-row').length + ' 个文件；' + document.querySelectorAll('.union-block').length + ' 块差异'",
+  },
+  {
+    name: "历史：多选详情全部失败时说明原因并给出重新读取",
+    url: "/?history=detail-error",
+    steps: async (drv) => {
+      await drv.until("Boolean(document.querySelector('.welcome-recent button'))", "起始页");
+      await drv.click(".welcome-recent button");
+      await drv.until("Boolean(document.querySelector('.view-switcher'))", "工作区");
+      await drv.click('[data-view="history"]');
+      await drv.until("document.querySelectorAll('.history-list [role=option]').length > 0", "提交列表");
+      await drv.clickNth(".history-list [role=option]", 0);
+      await drv.clickNth(".history-list [role=option]", 2, ["Shift"]);
+      await drv.until("Boolean(document.body.textContent.includes('已选择 3 个提交'))", "多选");
+      await drv.until("!document.body.textContent.includes('正在读取所选提交的详情')", "加载结束");
+      await drv.until("Boolean([...document.querySelectorAll('button')].find((b) => b.textContent.includes('重新读取所选提交')))", "重新读取入口");
+    },
+    check:
+      "Boolean(document.querySelector('.infobar.error')) && Boolean([...document.querySelectorAll('button')].find((b) => b.textContent.includes('重新读取所选提交'))) && !document.body.textContent.includes('这些提交没有文件变化')",
+    detail:
+      "(document.querySelector('.infobar.error')?.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80)",
+  },
+  {
+    name: "任务：起点不可用时就地说明，仍能换起点",
+    url: "/?task=error",
+    steps: async (drv) => {
+      await drv.until("Boolean(document.querySelector('.welcome-recent button'))", "起始页");
+      await drv.click(".welcome-recent button");
+      await drv.until("Boolean(document.querySelector('.view-switcher'))", "工作区");
+      await drv.press("4", ["Ctrl"]);
+      await drv.until("Boolean(document.querySelector('.task-baseline-item'))", "任务起点候选");
+      // 候选项在读取分支/提交期间是 disabled 的：点它之前先等它真的可以点。
+      await drv.until("Boolean(document.querySelector('.task-baseline-item:not([disabled])'))", "起点可点击");
+      await drv.clickUntil(".task-baseline-item:not([disabled])", "!document.querySelector('.task-baseline')", "任务范围开始读取");
+      await drv.until("Boolean(document.querySelector('.task-failure[role=alert]'))", "任务读取失败说明");
+    },
+    check:
+      "(document.querySelector('.task-failure[role=alert]')?.innerText || '').includes('读取任务范围失败') && Boolean([...document.querySelectorAll('.task-failure button')].find((b) => b.textContent.includes('重选起点')))",
+    detail:
+      "(document.querySelector('.task-failure')?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 120)",
+  },
+  {
+    name: "工作区总览：分组、未知、缺失与过期逐项登记",
+    url: "/?worktree=stale",
+    steps: async (drv) => {
+      await drv.until("Boolean(document.querySelector('.welcome-recent button'))", "起始页");
+      await drv.click(".welcome-recent button");
+      await drv.until("Boolean(document.querySelector('.view-switcher'))", "工作区");
+      await drv.click('[aria-label^="当前仓库"]');
+      await drv.until("Boolean(document.querySelector('.switcher-status[data-worktree-status=\"ready\"]'))", "总览读取完成");
+    },
+    check:
+      "document.querySelectorAll('.switcher-group-name').length >= 1 && Boolean(document.querySelector('[data-worktree-state=unknown]')) && Boolean(document.querySelector('[data-worktree-state=missing]')) && Boolean(document.querySelector('[data-worktree-remote=stale]')) && Boolean(document.querySelector('.switcher-filter'))",
+    detail:
+      "document.querySelectorAll('.switcher-group-name').length + ' 个分组；未知 ' + document.querySelectorAll('[data-worktree-state=unknown]').length + ' 项；缺失 ' + document.querySelectorAll('[data-worktree-state=missing]').length + ' 项；过期 ' + document.querySelectorAll('[data-worktree-remote=stale]').length + ' 项'",
+    },
+  {
     name: "默认起始页",
     url: "/",
     ready: "Boolean(document.querySelector('.welcome-recent button'))",
@@ -527,8 +667,133 @@ async function main() {
       return reply.result.result.value;
     };
 
+    /**
+     * 真实键盘/鼠标输入（CDP Input.*）：新场景要求「操作必须是真实 DOM 键鼠」，
+     * 因此不用 element.click() 或直接改 value，而是发真实的按键与鼠标事件。
+     */
+    const MODIFIERS = { Alt: 1, Ctrl: 2, Meta: 4, Shift: 8 };
+    const NAMED_KEYS = {
+      Enter: [13, "Enter"], Tab: [9, "Tab"], Escape: [27, "Escape"],
+      ArrowDown: [40, "ArrowDown"], ArrowUp: [38, "ArrowUp"], ArrowLeft: [37, "ArrowLeft"], ArrowRight: [39, "ArrowRight"],
+      " ": [32, "Space"],
+    };
+    const mods = (list = []) => list.reduce((sum, name) => sum + (MODIFIERS[name] ?? 0), 0);
+    const makeDriver = (sessionId) => {
+      const press = async (name, list = []) => {
+        const modifiers = mods(list);
+        const [vk, code] = NAMED_KEYS[name]
+          ?? (/^[0-9]$/.test(name)
+            ? [48 + Number(name), "Digit" + name]
+            : [name.toUpperCase().charCodeAt(0), "Key" + name.toUpperCase()]);
+        const key = name === " " ? " " : name;
+        const text = name === "Enter" ? "\r" : name === " " ? " " : null;
+        await send("Input.dispatchKeyEvent", {
+          type: text ? "keyDown" : "rawKeyDown", key, code, modifiers,
+          windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk,
+          ...(text ? { text } : {}),
+        }, sessionId);
+        await send("Input.dispatchKeyEvent", {
+          type: "keyUp", key, code, modifiers, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk,
+        }, sessionId);
+        await pause(140);
+      };
+      /**
+       * 滚动并取点击坐标。界面开了平滑滚动：直接 scrollIntoView 后立刻量会量到滚动途中的位置，
+       * 点下去就落到邻居身上（曾经点到分组标题）。所以先关掉平滑滚动、滚完再量，最后核对命中。
+       */
+      const pointOf = async (selector, index = 0) => {
+        const scrolled = await evaluate(
+          `(() => {
+            document.documentElement.style.scrollBehavior = "auto";
+            const el = [...document.querySelectorAll(${JSON.stringify(selector)})][${index}];
+            if (!el) return false;
+            el.scrollIntoView({ block: "center", behavior: "instant" });
+            return true;
+          })()`,
+          sessionId,
+        );
+        if (!scrolled) return null;
+        await pause(180);
+        return evaluate(
+          `(() => {
+            const el = [...document.querySelectorAll(${JSON.stringify(selector)})][${index}];
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            // 中心点可能被吸顶标题盖住：逐个候选点做命中测试，取第一个真的落在元素上的点。
+            const spots = [[0.5, 0.5], [0.5, 0.8], [0.5, 0.2], [0.2, 0.5], [0.8, 0.5]];
+            for (const [fx, fy] of spots) {
+              const x = Math.round(r.left + r.width * fx);
+              const y = Math.round(r.top + r.height * fy);
+              const hit = document.elementFromPoint(x, y);
+              if (hit && (hit === el || el.contains(hit))) return { x, y, ok: true };
+            }
+            return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), ok: false };
+          })()`,
+          sessionId,
+        );
+      };
+      const rectOf = async (selector, index = 0) => {
+        let last = null;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          last = await pointOf(selector, index);
+          if (!last) return null;
+          if (last.ok) return last;
+          await pause(220);
+        }
+        return last ? { x: last.x, y: last.y } : null;
+      };
+      const pressAt = async (point, list) => {
+        const modifiers = mods(list);
+        for (const type of ["mousePressed", "mouseReleased"]) {
+          await send("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: "left", clickCount: 1, modifiers }, sessionId);
+        }
+        await pause(160);
+      };
+      const click = async (selector, list = []) => {
+        const point = await rectOf(selector, 0);
+        if (!point) throw new Error("找不到可点击的元素： " + selector);
+        await pressAt(point, list);
+      };
+      /** 第 index 个匹配元素的真实鼠标点击（虚拟列表里没有稳定的 nth-of-type）。 */
+      const clickNth = async (selector, index, list = []) => {
+        const point = await rectOf(selector, index);
+        if (!point) throw new Error("找不到可点击的第 " + index + " 个元素： " + selector);
+        await pressAt(point, list);
+      };
+      const typeInto = async (selector, value) => {
+        await click(selector);
+        await evaluate(`document.querySelector(${JSON.stringify(selector)})?.focus()`, sessionId);
+        await send("Input.insertText", { text: value }, sessionId);
+        await pause(180);
+      };
+      /** 点一次再等条件成立；没成立就再点（真鼠标重复点击，不是直接改状态）。 */
+      const clickUntil = async (selector, expression, label, tries = 4) => {
+        for (let attempt = 0; attempt < tries; attempt += 1) {
+          await click(selector);
+          for (let wait = 0; wait < 12; wait += 1) {
+            if (await evaluate(expression, sessionId)) return true;
+            await pause(120);
+          }
+        }
+        const tail = await evaluate("(document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 160)", sessionId);
+        throw new Error("点击没有生效：" + label + "｜当前界面：" + tail);
+      };
+      const until = async (expression, label, attempts = 90) => {
+        for (let attempt = 0; attempt < attempts; attempt += 1) {
+          if (await evaluate(expression, sessionId)) return true;
+          await pause(120);
+        }
+        const tail = await evaluate("(document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 160)", sessionId);
+        throw new Error("等待超时：" + label + "｜当前界面：" + tail);
+      };
+      return { press, click, clickNth, clickUntil, typeInto, until, evaluate: (expression) => evaluate(expression, sessionId), pause };
+    };
+
+    const onlyIndex = args.indexOf("--only");
+    const only = onlyIndex >= 0 && args[onlyIndex + 1] ? args[onlyIndex + 1] : null;
     const results = [];
     for (const scenario of SCENARIOS) {
+      if (only && !scenario.name.includes(only)) continue;
       const { result: created } = await send("Target.createTarget", { url: "about:blank" });
       const { result: attached } = await send("Target.attachToTarget", { targetId: created.targetId, flatten: true });
       const sessionId = attached.sessionId;
@@ -537,16 +802,38 @@ async function main() {
       await send("Page.navigate", { url: base + scenario.url }, sessionId);
 
       let ready = false;
-      for (let attempt = 0; attempt < 100 && !ready; attempt += 1) {
+      let stepError = null;
+      if (scenario.steps) {
+        // 键鼠场景自己把流程走完；任何一步等不到条件就停在那一层并写明，不吞成「未就绪」。
         try {
-          ready = await evaluate(scenario.ready, sessionId);
-        } catch {
-          ready = false;
+          await scenario.steps(makeDriver(sessionId));
+          ready = true;
+        } catch (error) {
+          stepError = error.message;
         }
-        if (!ready) await pause(120);
+      } else {
+        for (let attempt = 0; attempt < 100 && !ready; attempt += 1) {
+          try {
+            ready = await evaluate(scenario.ready, sessionId);
+          } catch {
+            ready = false;
+          }
+          if (!ready) await pause(120);
+        }
       }
       const passed = ready ? Boolean(await evaluate(scenario.check, sessionId)) : false;
-      const detail = ready ? await evaluate(scenario.detail, sessionId) : "(未就绪)";
+      let detail = stepError
+        ? "(未就绪：" + stepError + ")"
+        : ready
+          ? await evaluate(scenario.detail, sessionId)
+          : "(未就绪)";
+      if (!passed) {
+        // 渲染期异常会让整页变空：把它写进 detail，别让失败只剩一句「未就绪」。
+        const thrown = events
+          .filter((event) => event.method === "Runtime.exceptionThrown")
+          .map((event) => String(event.params.exceptionDetails?.exception?.description ?? event.params.exceptionDetails?.text ?? ""));
+        if (thrown.length > 0) detail = String(detail) + " ｜异常： " + thrown.join(" ").replace(/\s+/g, " ").slice(0, 220);
+      }
       const errors = events
         .filter((event) => event.method === "Runtime.consoleAPICalled" && event.params.type === "error")
         .map((event) => event.params.args.map((arg) => arg.value ?? arg.description ?? "").join(" "));

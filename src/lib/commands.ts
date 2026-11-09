@@ -65,7 +65,8 @@ export interface CommandState {
    * 整文件真实写入：改动视图作用于索引，任务视图暂存的是这个路径的真实工作区内容。
    * `side` 说明当前选中文件在真实状态里属于哪一侧，`none` 表示没有可写的真实改动。
    */
-  fileStage?: { path: string | null; side: "staged" | "unstaged" | "none"; reason: string | null } | null;
+  /** otherSide：这个路径的另一侧是否也有真实改动，禁用原因据此指向用户选中的那一侧。 */
+  fileStage?: { path: string | null; side: "staged" | "unstaged" | "none"; reason: string | null; otherSide?: boolean } | null;
   /** 单文件差异里的上一处/下一处改动。null 表示当前视图不是可跳转的单文件差异。 */
   hunkNav?: { prevReason: string | null; nextReason: string | null } | null;
   /** 改动视图正在多选：逐块跳转让位给文件之间的切换。 */
@@ -160,8 +161,14 @@ function fileStageReason(state: CommandState, action: "stage" | "unstage"): stri
       ? NO_FILE_REASON
       : "改动与任务视图里才能写入索引";
   }
-  if (action === "stage") return "当前文件没有可暂存的真实改动";
-  return "当前文件没有已暂存的改动";
+  // 同一路径两侧都有改动时，原因必须指向用户选中的那一侧，否则另一侧明明有改动却被说成「没有改动」。
+  const { side, otherSide } = state.fileStage;
+  if (action === "stage") {
+    if (side !== "staged") return "当前文件没有可暂存的真实改动";
+    return otherSide ? "选中的是已暂存侧，要暂存请先选未暂存侧" : "当前文件没有可暂存的真实改动";
+  }
+  if (side !== "unstaged") return "当前文件没有已暂存的改动";
+  return otherSide ? "选中的是未暂存侧，要取消暂存请先选已暂存侧" : "当前文件没有已暂存的改动";
 }
 /** Alt 在 macOS 键帽上是 ⌥。 */
 const ALT_LABEL = MODIFIER_LABEL === "⌘" ? "⌥" : "Alt";

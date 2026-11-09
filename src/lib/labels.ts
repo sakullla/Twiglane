@@ -168,7 +168,7 @@ export function retainSelection(
     : null;
 }
 
-function hasSide(file: FileChange, side: FileRow["side"]): boolean {
+export function hasSide(file: FileChange, side: FileRow["side"]): boolean {
   if (file.unmerged) return side === "unstaged";
   return side === "staged" ? file.staged !== "none" : file.untracked || file.unstaged !== "none";
 }

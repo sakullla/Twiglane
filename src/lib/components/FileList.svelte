@@ -128,6 +128,8 @@
     return stageSideFor?.(row.path) ?? "unstaged";
   }
   let taskMode = $derived(variant === "task");
+  /** 任务行空格/双击没有执行时的就地说明：纯键盘操作不能静默无反应。 */
+  let stageNote = $state<string | null>(null);
   let groups = $derived(groupFiles(files));
   let conflictedRows = $derived(filterRows(groups.conflicted, query));
   let unstagedRows = $derived(filterRows(groups.unstaged, query));
@@ -231,6 +233,7 @@
   /** 普通点击、方向键：回到单选，这一行成为新的扩展起点。 */
   function single(row: FileSelection) {
     anchor = plain(row);
+    stageNote = null;
     onSelect(plain(row));
   }
 
@@ -317,8 +320,18 @@
     // 任务净差异本身只读；空格与双击在这里只做整文件暂存/取消暂存这一条真实写入，
     // 方向按真实 Git 状态走，和行内按钮的 aria-label/title 是同一份判定。
     if (taskMode) {
-      if (disabled) return;
+      if (disabled) {
+        stageNote = BUSY_REASON;
+        return;
+      }
       const side = taskSide(row);
+      // 真实 Git 状态里两侧都没有改动（任务净差异来自提交）：按钮已禁用，
+      // 空格与双击也必须就地说明，不能静默什么都不发生。
+      if (side === "none") {
+        stageNote = `${row.path} 在真实 Git 状态里没有未提交或已暂存的改动，空格不能把它写进索引。`;
+        return;
+      }
+      stageNote = null;
       if (side === "staged") {
         if (onUnstageFile) onUnstageFile(row.path);
         else onStageFile?.(row.path);
@@ -471,6 +484,9 @@
 </div>
 {#if reviewNote}
   <p class="file-tree-status danger" role="alert">{reviewNote}</p>
+{/if}
+{#if stageNote}
+  <p class="file-tree-status" role="status">{stageNote}</p>
 {/if}
 {#if reviewNav && reviewNav.total > 0 && reviewNav.remaining === 0 && rows.length > 0}
   <!-- 队尾/全部完成的下一步：隐藏已审阅，或按真实暂存范围提交；都不改任务范围。 -->

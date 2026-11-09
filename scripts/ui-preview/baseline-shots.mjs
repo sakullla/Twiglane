@@ -370,6 +370,48 @@ const FAILURE_STATES = [
       await pause(350);
     },
   },
+  {
+    // T5：任务起点不可用时的失败态（就地说明 + 重新读取/重选起点，不摆出旧结果）。
+    view: "task-error",
+    query: "task=error",
+    state: "任务起点不可用：就地说明并给出重新读取与重选起点",
+    run: async (cdp, sessionId) => {
+      await openRepository(cdp, sessionId, "Boolean(document.querySelector('.view-switcher'))", "工作区");
+      await evaluate(cdp, sessionId, click('[data-view="task"]'));
+      await waitFor(cdp, sessionId, "Boolean(document.querySelector('.task-baseline-item:not([disabled])'))", "任务起点候选");
+      await evaluate(cdp, sessionId, click(".task-baseline-item:not([disabled])"));
+      await waitFor(cdp, sessionId, "Boolean(document.querySelector('.task-failure'))", "任务读取失败");
+      await pause(500);
+    },
+  },
+  {
+    // 用户报告的挂起/取消路径：旧批次的两个详情永不返回，换一批选择后界面必须恢复成可读结果。
+    view: "history-cancel-recovered",
+    query: "history=hang",
+    state: "历史多选：旧批次请求挂住后换选择，加载结束并列出文件与差异",
+    run: async (cdp, sessionId) => {
+      await openRepository(cdp, sessionId, "Boolean(document.querySelector('.view-switcher'))", "工作区");
+      await evaluate(cdp, sessionId, click('[data-view="history"]'));
+      await waitFor(cdp, sessionId, "document.querySelectorAll('.history-list [role=option]').length > 0", "提交列表");
+      const pick = (index, shift) => `(() => {
+        const rows = [...document.querySelectorAll(".history-list [role=option]")];
+        const row = rows[${index}];
+        if (!row) return false;
+        row.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: ${shift} }));
+        return true;
+      })()`;
+      await evaluate(cdp, sessionId, pick(0, false));
+      await evaluate(cdp, sessionId, pick(3, true));
+      await waitFor(cdp, sessionId, "document.body.textContent.includes('已选择 4 个提交')", "第一批多选");
+      // 换到更早的 4 个提交：新批次必须自己开始读，并结束加载。
+      await evaluate(cdp, sessionId, pick(4, false));
+      await evaluate(cdp, sessionId, pick(7, true));
+      await waitFor(cdp, sessionId, "!document.body.textContent.includes('正在读取所选提交的详情')", "加载结束");
+      await waitFor(cdp, sessionId, "document.querySelectorAll('.commit-files .file-row').length > 0", "文件队列");
+      await waitFor(cdp, sessionId, "document.querySelectorAll('.union-block').length > 0", "差异块");
+      await pause(600);
+    },
+  },
 ];
 
 /**
@@ -459,6 +501,8 @@ async function main() {
       failure: "关键失败/未知状态：sync-unchecked/sync-stale/commit-error/commit-push-error/doc-error/doc-large/search-error/filter-error/find-error，逐张对应需求",
     },
     shots: [],
+    // 没有采集到的视图与原因：证据清单必须能解释「为什么少了一张」，不能安静跳过。
+    skipped: [],
   };
   let cdp;
   try {
@@ -489,6 +533,7 @@ async function main() {
         await waitFor(cdp, sessionId, "Boolean(document.querySelector('.welcome-recent button, .action-card'))", "起始页");
         await pause(600);
 
+        const skipped = manifest.skipped;
         const shot = async (view, group = "baseline", state = "normal") => {
           const image = await cdp.send("Page.captureScreenshot", { format: "png" }, sessionId);
           const buffer = Buffer.from(image.data, "base64");
@@ -521,6 +566,27 @@ async function main() {
         await pause(900);
         await shot("history", "baseline", "历史视图（同数据对照）");
 
+        // T5：任务视图、工作区总览与提交区各留一张同数据对照（同一 mock 数据、同一主题与尺寸）。
+        await evaluate(cdp, sessionId, click('[data-view="task"]'));
+        await waitFor(cdp, sessionId, "Boolean(document.querySelector('.task-baseline-item:not([disabled])'))", "任务起点候选");
+        await evaluate(cdp, sessionId, click(".task-baseline-item:not([disabled])"));
+        await waitFor(cdp, sessionId, "document.querySelectorAll('.file-list .file-row').length > 0", "任务文件队列");
+        await pause(800);
+        await shot("task", "baseline", "任务视图：起点、范围内提交与净文件队列");
+
+        await evaluate(cdp, sessionId, click('[aria-label^="当前仓库"]'));
+        await waitFor(cdp, sessionId, "Boolean(document.querySelector('.switcher-group-name'))", "工作区总览");
+        await pause(700);
+        await shot("worktree", "baseline", "工作区总览：按主仓库分组与逐项状态");
+        await evaluate(cdp, sessionId, pressEscape);
+        await waitFor(cdp, sessionId, "!document.querySelector('[role=dialog]')", "关闭工作区总览");
+
+        await evaluate(cdp, sessionId, click('[data-view="changes"]'));
+        await waitFor(cdp, sessionId, "Boolean(document.querySelector('.composer textarea'))", "提交区");
+        await evaluate(cdp, sessionId, typeIntoArea(".composer textarea", "审阅任务范围并提交\n\n- 起点 main~2\n- 净差异只读，提交只按真实暂存范围"));
+        await pause(500);
+        await shot("composer", "baseline", "提交区：真实暂存范围与提交草稿");
+
         await openCommand(cdp, sessionId, "分支合并", "#merge-modal-title");
         await shot("merge", "baseline", "合并弹窗（同数据对照）");
         await evaluate(cdp, sessionId, pressEscape);
@@ -546,7 +612,9 @@ async function main() {
         );
         await pause(400);
         await shot("files-markdown", "markdown", "Markdown 默认排版预览");
-        await evaluate(
+        // 目录开关只在「有标题且这一处显示工具行」时出现；当前文件视图的预览不给这一行，
+        // 所以按下开关存在与否决定是否截图，并把跳过原因写进 manifest，不伪造一张目录图。
+        const toggled = await evaluate(
           cdp,
           sessionId,
           `(() => {
@@ -557,9 +625,23 @@ async function main() {
             return true;
           })()`,
         );
-        await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view .md-outline button'))", "文档目录");
-        await pause(300);
-        await shot("files-markdown-toc", "markdown", "Markdown 标题目录展开");
+        if (toggled) {
+          try {
+            await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view .md-outline button'))", "文档目录");
+            await pause(300);
+            await shot("files-markdown-toc", "markdown", "Markdown 标题目录展开");
+          } catch (error) {
+            skipped.push({ view: "files-markdown-toc", group: "markdown", reason: error.message });
+            console.log("跳过 files-markdown-toc：", error.message);
+          }
+        } else {
+          skipped.push({
+            view: "files-markdown-toc",
+            group: "markdown",
+            reason: "文件视图的 Markdown 预览没有目录开关（showTools=false）；这条已知差异记在 report.json 与 README 里。",
+          });
+          console.log("跳过 files-markdown-toc：文件视图的预览没有目录开关");
+        }
 
         // 关键失败/未知状态：同一 mock 数据上的参数化场景，逐项对应 R3/R4/R6。
         // 组合固定为两主题 1280×840 + 深色 900×600，与 README 的证据表一致。

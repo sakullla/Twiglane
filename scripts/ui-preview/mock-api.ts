@@ -31,6 +31,9 @@ const now = Math.floor(Date.now() / 1000);
  * 折叠状态的同步按钮必须自己写明这件事，不能把缓存计数当成刚刚验证过的远程状态（R3）。
  * ?commit=error 让本地提交被钩子拒绝，?commit=push 让本地提交成功、推送失败；
  * 两者的失败文本都足够长，用来核对提交区的「展开」换行读全与「只重试推送」（R3/R6）。
+ * ?task=error / ?task=empty 让任务范围读取失败或成功但为空；?worktree=stale / ?worktree=error
+ * 让工作区总览出现「远程过期」的一项或整批失败；?history=hang 让最新的两条提交详情永不返回
+ * （复现「旧批次挂住、换选择还要能读」），?history=detail-error 让多选详情全部失败。
  */
 const previewParams = new URLSearchParams(location.search);
 const healthyGit = { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "Git 2.49.0 可用" };
@@ -456,6 +459,70 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       worktree: path.includes("/wt/"),
       mainPath: path.includes("/wt/") ? "C:/Users/dev/project/twiglane" : null,
     })), 60),
+  /**
+   * 逐项 worktree 状态总览（R3）。默认数据里就带三类真实状态：正常、未知（读不到未提交状态）、
+   * 缺失（目录已经不在）；?worktree=stale 让主仓库落成「远程未核对且已过期」，
+   * ?worktree=error 让整批读取失败（界面应说明整批失败而不是把旧数字当新鲜结果）。
+   */
+  worktreeOverview: (paths: string[]) => {
+    const mode = previewParams.get("worktree") ?? "";
+    if (mode === "error") return Promise.reject({ code: "overview_failed", message: "读取工作区状态失败：git 命令超时。" });
+    const linked = (path: string) => path.includes("/wt/");
+    const items = paths.map((path, index) => {
+      const main = index === 0;
+      const missing = index === 2 && !linked(path);
+      const stale = mode === "stale" && main;
+      return {
+        path,
+        mainPath: linked(path) ? "C:/Users/dev/project/twiglane" : null,
+        branch: index % 4 === 3 ? null : ["feature/modern-ui", "main", "develop", "main"][index % 4],
+        detached: index % 4 === 3 ? "1a2b3c4" : null,
+        missing,
+        linked: linked(path),
+        locked: false,
+        recent: true,
+        dirty: missing ? null : main ? true : index % 3 === 0 ? null : false,
+        changed: missing ? null : main ? 13 : index % 3 === 0 ? null : 2,
+        staged: missing ? null : main ? 1 : 0,
+        unstaged: missing ? null : main ? 9 : index % 3 === 0 ? null : 2,
+        untracked: missing ? null : main ? 3 : 0,
+        conflicted: missing ? null : 0,
+        upstream: index % 4 === 3 ? null : "origin/feature/modern-ui",
+        ahead: missing ? null : main ? 2 : 0,
+        behind: missing ? null : main ? 1 : 0,
+        liveRemoteChecked: main ? !stale : false,
+        remoteCheckedAtMs: main ? (stale ? Date.now() - 3 * 60 * 60_000 : Date.now() - 60_000) : null,
+        remoteCheckStale: main ? stale : false,
+        status: missing ? "missing" : index % 3 === 0 && !main ? "unknown" : "ready",
+        note: missing
+          ? "目录已经不在了；这一项只保留最近记录。"
+          : index % 3 === 0 && !main
+            ? "读取未提交状态失败：索引被另一个进程占用。"
+            : "",
+        checkedAtMs: missing || (index % 3 === 0 && !main) ? null : Date.now() - 60_000,
+      };
+    });
+    // 枚举出来的附属工作区不一定在最近列表里：这两项只由总览返回，用来核对分组与缺失项。
+    items.push(
+      {
+        path: "C:/Users/dev/project/twiglane/wt/review", mainPath: "C:/Users/dev/project/twiglane",
+        branch: "feature/task-review", detached: null, missing: false, linked: true, locked: false, recent: false,
+        dirty: true, changed: 4, staged: 0, unstaged: 4, untracked: 1, conflicted: 0,
+        upstream: "origin/feature/task-review", ahead: 1, behind: 0,
+        liveRemoteChecked: false, remoteCheckedAtMs: null, remoteCheckStale: false,
+        status: "ready", note: "未核对远程：领先/落后只反映本地记录。", checkedAtMs: Date.now() - 90_000,
+      },
+      {
+        path: "C:/Users/dev/project/twiglane/wt/locked", mainPath: "C:/Users/dev/project/twiglane",
+        branch: "release/2026.11", detached: null, missing: false, linked: true, locked: true, recent: false,
+        dirty: null, changed: null, staged: null, unstaged: null, untracked: null, conflicted: null,
+        upstream: null, ahead: null, behind: null,
+        liveRemoteChecked: false, remoteCheckedAtMs: null, remoteCheckStale: false,
+        status: "unknown", note: "这个工作区被锁定，未提交状态没有读取。", checkedAtMs: null,
+      },
+    );
+    return ok({ items, checkedAtMs: Date.now() }, 80);
+  },
   removeWorktree: (path: string) => {
     for (const branch of branches) if (branch.worktree === path) branch.worktree = null;
     recent = recent.filter((item) => item.path !== path);
@@ -704,6 +771,13 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   cherryPickCommits: () => ok({ generation, conflicted: false, skipped: [], note: "已按从旧到新拣选到当前分支。没有推送。", snapshot: snapshot() }),
   checkoutCommit: () => ok({ ...snapshot(), branch: { ...snapshot().branch, detached: true, name: null } }),
   commitDetail: (_repo: string, oid: string) => {
+    // ?history=hang：最新的两条提交详情永不返回，用来复现「旧批次在途请求不结束、新选择还要能读」。
+    // ?history=detail-error：所有详情都失败，用来核对失败说明与「重新读取」恢复入口。
+    const historyMode = previewParams.get("history") ?? "";
+    if (historyMode === "hang" && commits.slice(0, 2).some((item) => item.oid === oid)) return new Promise(() => {});
+    if (historyMode === "detail-error") {
+      return Promise.reject({ code: "detail_failed", message: "提交详情读取失败： git 命令返回非零状态。" });
+    }
     const commit = commits.find((item) => item.oid === oid) ?? commits[0];
     return ok({
       generation,
@@ -725,6 +799,70 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       ],
     });
   },
+  /**
+   * 任务只读范围（R1）。?task=error 让起点校验失败，?task=empty 返回成功但空的任务，
+   * 默认返回「提交 + 未提交改动」都有的净结果：起点、提交数、文件队列与净差异一次给全。
+   */
+  taskReview: (_repo: string, baseline: string, generation: number) => {
+    const mode = previewParams.get("task") ?? "";
+    if (mode === "error") {
+      return Promise.reject({
+        code: "baseline_missing",
+        message: `起点 ${baseline} 不是当前分支的祖先，任务范围没有建立。`,
+      });
+    }
+    const empty = mode === "empty";
+    const files = [
+      { path: "src/App.svelte", originalPath: null, status: "modified", additions: 18, deletions: 6 },
+      { path: "src/lib/components/FileList.svelte", originalPath: null, status: "modified", additions: 42, deletions: 11 },
+      { path: "src/lib/components/TaskReview.svelte", originalPath: null, status: "added", additions: 96, deletions: 0 },
+      { path: "src/lib/review-progress.svelte.ts", originalPath: null, status: "modified", additions: 7, deletions: 3 },
+      { path: "docs/guide/task-review.md", originalPath: "docs/task-review.md", status: "renamed", additions: 12, deletions: 4 },
+      { path: "src/lib/legacy-panel.ts", originalPath: null, status: "deleted", additions: 0, deletions: 58 },
+      { path: "assets/screenshot.png", originalPath: null, status: "modified", additions: null, deletions: null, binary: true, oldSize: 81_920, newSize: 146_752 },
+      { path: "src/lib/scratch.ts", originalPath: null, status: "added", additions: 9, deletions: 0, untracked: true },
+    ];
+    return ok({
+      generation,
+      worktree: _repo,
+      baselineRef: baseline,
+      baselineOid: "3d1c8f0a2b4e6d8c0a1f3b5d7e9c2a4b6d8e0f1a",
+      headOid: branch.headOid,
+      branch: { ...branch },
+      commits: empty ? [] : commits.slice(0, 4),
+      commitCount: empty ? 0 : 4,
+      commitsTruncated: false,
+      files: empty ? [] : files,
+      filesTotal: empty ? 0 : files.length,
+      filesTruncated: false,
+      additions: empty ? 0 : 184,
+      deletions: empty ? 0 : 82,
+      dirty: !empty,
+      untrackedFiles: empty ? 0 : 1,
+      conflicted: false,
+      empty,
+      rangeVersion: `task:${baseline}:${branch.headOid}:dirty`,
+      message: empty ? "起点之后没有任何提交，也没有净改动。" : "任务范围包含 4 个提交，工作区还有未提交改动；任务范围与本次提交范围是两件事。",
+    }, 260);
+  },
+  loadTaskDiff: (_repo: string, _baseline: string, _head: string, path: string, _generation: number, _request: number, _original: string | null, offset = 0) => {
+    const diff = withHeaders(diffFor(path, false));
+    return ok(offset > 0 ? { ...diff, offset, lines: [], hunks: [] } : diff, 120);
+  },
+  taskReviewToken: (_repo: string, baselineOid: string, _head: string, relative: string, generation: number) => ok({
+    generation,
+    path: relative,
+    baselineOid,
+    state: "current",
+    token: `task:${baselineOid}:${relative}`,
+    status: "modified",
+    untracked: false,
+    unmerged: false,
+    baselineVersion: `blob:${relative}`,
+    contentVersion: `worktree:${relative}`,
+    truncated: false,
+    message: "",
+  }, 60),
   commitFileDiff: (_repo: string, _oid: string, _parent: string, path: string) => {
     const base = withHeaders(diffFor(path, false));
     // 提交差异同样给出两个固定提交的来源：改动前是父提交，改动后是这次提交。

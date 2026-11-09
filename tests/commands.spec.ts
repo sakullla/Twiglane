@@ -118,6 +118,18 @@ describe("整文件命令的侧别", () => {
     expect(commandAvailable(commandById("unstage.file")!, unstaged)).toBe(false);
     expect(commandReason(commandById("unstage.file")!, unstaged)).toBe("当前文件没有已暂存的改动");
   });
+
+  it("同一路径双侧都有改动时，禁用原因指向选中的那一侧", () => {
+    const stagedDouble = state({ fileStage: { path: "src/a.ts", side: "staged", reason: null, otherSide: true } });
+    const unstagedDouble = state({ fileStage: { path: "src/a.ts", side: "unstaged", reason: null, otherSide: true } });
+    expect(commandAvailable(commandById("stage.file")!, stagedDouble)).toBe(false);
+    expect(commandReason(commandById("stage.file")!, stagedDouble)).toBe("选中的是已暂存侧，要暂存请先选未暂存侧");
+    expect(commandAvailable(commandById("unstage.file")!, unstagedDouble)).toBe(false);
+    expect(commandReason(commandById("unstage.file")!, unstagedDouble)).toBe("选中的是未暂存侧，要取消暂存请先选已暂存侧");
+    // 另一侧没有改动时仍说「没有改动」，不会把用户指向一个空的另一侧。
+    const stagedOnly = state({ fileStage: { path: "src/a.ts", side: "staged", reason: null, otherSide: false } });
+    expect(commandReason(commandById("stage.file")!, stagedOnly)).toBe("当前文件没有可暂存的真实改动");
+  });
 });
 
 describe("文件导航命令", () => {

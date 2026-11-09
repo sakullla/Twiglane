@@ -414,6 +414,17 @@
   let multiLoading = $state(false);
   /** 多提交详情读取失败的提交数：合计与文件范围只覆盖读到的部分。 */
   let multiFailed = $state(0);
+  /**
+   * 多选读取的请求边界：每次重新选择、换仓库、切视图、重读或取消都换一张票。
+   * 只有当前票能改加载状态与结果，旧票的迟到结果既不落地也不把转圈留在屏幕上。
+   */
+  let multiTicket = 0;
+  /** 多选详情原地重读入口：条件没变也重新取一遍，不依赖用户改选择。 */
+  let multiRetry = $state(0);
+  /** 多选差异读取中：只为真正在途的读取显示转圈。 */
+  let multiDiffLoading = $state(false);
+  /** 多选差异原地重读入口。 */
+  let multiDiffRetry = $state(0);
   let multiDiffs = $state.raw<{ oid: string; summary: string; diff: DiffResponse | null; error: string | null }[]>([]);
   let parentChoice = $state<string | null>(null);
   let manualPath = $state<string | null>(null);
@@ -944,6 +955,7 @@
 
   $effect(() => {
     const ids = selectedOids;
+    void multiRetry;
     multiDetails = [];
     multiError = null;
     multiFailed = 0;
@@ -951,7 +963,9 @@
     if (!active || ids.length < 2) return;
     const repo = repoPath;
     const generation = readGeneration;
-    let cancelled = false;
+    const ticket = ++multiTicket;
+    // 只有当前请求边界能改状态：换选择、换仓库、切视图或取消之后，旧票一律作废。
+    const owned = () => ticket === multiTicket && opened.summary.path === repo;
     multiLoading = true;
     void (async () => {
       const errors: string[] = [];
@@ -966,34 +980,42 @@
             return null;
           }
         }, (row, index) => {
-          if (cancelled || opened.summary.path !== repo) return;
+          if (!owned()) return;
           completed[index] = row;
           multiDetails = completed.filter((item): item is CommitDetail => item != null);
           // 后续提交补入新路径时，保持已经开始阅读的文件。
           if (multiFocus === null) multiFocus = multiDetails[0]?.files[0]?.path ?? null;
           if (row === null) multiFailed += 1;
         });
-        if (cancelled || opened.summary.path !== repo) return;
-        multiFailed = rows.length - multiDetails.length;
-        multiError = errors[0] ?? null;
+        if (!owned()) return;
+        multiFailed = rows.filter((row) => row == null).length;
+        multiError = errors[0] ?? (multiDetails.length === 0 ? "所选提交的详情没有读取成功。" : null);
       } catch (error) {
-        if (!cancelled) multiError = normalizeError(error).message;
+        if (!owned()) return;
+        const failure = normalizeError(error);
+        // 被新选择替代或取消不是读取结果：不冒充成功，也不当成「没有文件变化」。
+        multiError = failure.code === "cancelled"
+          ? "这次多选读取被新的选择替代，没有留下结果。"
+          : failure.message;
       } finally {
-        if (!cancelled) multiLoading = false;
+        // 加载态一定在当前请求边界内结束：读完、失败、被替代都一样。
+        if (owned()) multiLoading = false;
       }
     })();
     return () => {
-      cancelled = true;
+      multiTicket += 1;
       multiLoading = false;
       multiDetailReads.cancel();
     };
   });
 
   $effect(() => {
+    void multiDiffRetry;
     if (!active || selectedOids.length < 2) {
       multiDiffs = [];
       multiDiffCache.clear();
       multiDiffScope = "";
+      multiDiffLoading = false;
       return;
     }
     const file = unionActive?.path ?? null;
@@ -1015,10 +1037,13 @@
     const keys = new Set(sources.map((item) => JSON.stringify([item.commit.oid, item.selectedParent])));
     for (const key of cache.keys()) if (!keys.has(key)) cache.delete(key);
     let cancelled = false;
+    const ticket = multiTicket;
+    const owned = () => !cancelled && ticket === multiTicket;
     const previous = untrack(() => new Map(multiDiffs.map((item) => [item.oid, item])));
     const completed = sources.map((item) => previous.get(item.commit.oid));
     const available = () => completed.filter((item): item is NonNullable<typeof item> => item !== undefined);
     multiDiffs = available();
+    multiDiffLoading = true;
     void (async () => {
       try {
         const rows = await multiDiffReads.run(sources, async (detail) => {
@@ -1049,18 +1074,24 @@
             };
           }
         }, (row, index) => {
-          if (cancelled) return;
+          if (!owned()) return;
           completed[index] = row;
           multiDiffs = available();
         });
-        if (cancelled) return;
+        if (!owned()) return;
         multiDiffs = rows;
       } catch (error) {
-        if (!cancelled) multiError = normalizeError(error).message;
+        if (!owned()) return;
+        const failure = normalizeError(error);
+        if (failure.code !== "cancelled") multiError = failure.message;
+      } finally {
+        // 差异标题下的转圈只跟当前请求边界：读完、失败、被替代都要停下来。
+        if (owned()) multiDiffLoading = false;
       }
     })();
     return () => {
       cancelled = true;
+      multiDiffLoading = false;
       multiDiffReads.cancel();
     };
   });
@@ -1822,6 +1853,7 @@
           <span class="infobar-text">
             {multiError}{#if multiFailed > 0}未读取的提交没有计入文件范围和合计。{/if}
           </span>
+          <button type="button" class="btn btn-ghost btn-sm" onclick={() => (multiRetry += 1)}>重新读取</button>
         </div>
       {/if}
       {#if selectedOids.length > 1}
@@ -1864,8 +1896,9 @@
                 <span class="empty-icon"><span class="spinner"></span></span>
                 <strong>正在读取提交中的文件</strong>
               </div>
-            {:else if unionFiles.length === 0 && multiFailed > 0}
+            {:else if unionFiles.length === 0 && (multiFailed > 0 || multiError)}
               <p class="commit-files-empty" role="status">有提交详情没读取成功，无法确认文件范围。</p>
+              <button type="button" class="btn btn-secondary btn-sm commit-files-retry" onclick={() => (multiRetry += 1)}>重新读取所选提交</button>
             {:else if unionFiles.length === 0}
               <p class="commit-files-empty">这些提交没有文件变化。</p>
             {:else}
@@ -1939,10 +1972,15 @@
                   <span class="empty-icon"><span class="spinner"></span></span>
                   <strong>正在读取所选提交的详情</strong>
                 </div>
-              {:else if unionActive && multiDiffs.length === 0}
+              {:else if unionActive && multiDiffs.length === 0 && multiDiffLoading}
                 <div class="empty compact" role="status" aria-busy="true">
                   <span class="empty-icon"><span class="spinner"></span></span>
                   <strong>正在读取差异</strong>
+                </div>
+              {:else if unionActive && multiDiffs.length === 0}
+                <div class="empty compact" role="status">
+                  <strong>这个文件在这些提交里的差异没有读取成功。</strong>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick={() => (multiDiffRetry += 1)}>重新读取差异</button>
                 </div>
               {/if}
               {#each multiDiffs as item (item.oid)}

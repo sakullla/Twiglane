@@ -43,7 +43,7 @@
     unmarkReviewedIn,
     type ReviewTarget,
   } from "./lib/review-progress.svelte";
-  import { branchLabel, commitScope, createSelectionResolver, dependencyNote, fileStageSide, filterRows, groupFiles, retainSelection, selectionAfterEdit, stagedFiles, syncLabel } from "./lib/labels";
+  import { branchLabel, commitScope, createSelectionResolver, dependencyNote, fileStageSide, filterRows, groupFiles, hasSide, retainSelection, selectionAfterEdit, stagedFiles, syncLabel } from "./lib/labels";
   import { startDesktopMeasure } from "./lib/measure";
   import { updateState, watchUpdateAvailable } from "./lib/update.svelte";
   import { isTextEntry, shortcutCommand } from "./lib/shortcuts";
@@ -482,14 +482,17 @@
    * 当前文件在真实 Git 状态里属于哪一侧：整文件暂存/取消暂存都以它为唯一依据。
    * 任务净差异来自提交时（真实状态里没有未提交改动）这里是 none，命令就地说明原因。
    */
-  let activeFileStage = $derived.by<{ path: string | null; side: "staged" | "unstaged" | "none" }>(() => {
+  let activeFileStage = $derived.by<{ path: string | null; side: "staged" | "unstaged" | "none"; otherSide: boolean }>(() => {
     // 只有改动与任务视图把选择作用在真实 Git 状态上；文件/历史视图没有可写的这一侧。
     const path = workspaceView === "changes" || workspaceView === "task" ? activeSelectedPath : null;
     const file = path ? opened?.snapshot.files.find((item) => item.path === path) : undefined;
     // 改动视图按用户选中的那一侧判定：同一路径同时有已暂存与未暂存时，选中已暂存就必须能取消暂存。
     // 任务行的侧别只是净结果（不等于真实索引状态），所以任务视图只按真实文件状态判定。
     const chosen = workspaceView === "changes" ? (selected?.side ?? null) : null;
-    return { path: path ?? null, side: path ? fileStageSide(file, chosen) : "none" };
+    const side = path ? fileStageSide(file, chosen) : "none";
+    // 同一路径另一侧是否也有改动：命令面板的禁用原因据此指向用户选中的那一侧。
+    const otherSide = file != null && side !== "none" && hasSide(file, side === "staged" ? "unstaged" : "staged");
+    return { path: path ?? null, side, otherSide };
   });
 
   /* 命令注册表的唯一状态输入：标题栏、左栏、溢出菜单与命令面板都读这一份。 */
@@ -525,7 +528,7 @@
           scope: workspaceView === "task" ? "task" : "changes",
         }
       : null,
-    fileStage: { path: activeFileStage.path, side: activeFileStage.side, reason: null },
+    fileStage: { path: activeFileStage.path, side: activeFileStage.side, reason: null, otherSide: activeFileStage.otherSide },
     hunkNav: activeHunk ? { prevReason: activeHunk.prevReason, nextReason: activeHunk.nextReason } : null,
     multiFile: multiActive,
     // 文件树定位以改动视图的选中文件为目标：没有选中就没有可定位的文件。
@@ -1509,9 +1512,11 @@
     void loadSelectedDiff();
   }
 
+  /**
+   * 普通进入历史（导航、命令、快捷键）保留上一次有效筛选与阅读位置：
+   * 从文件历史或提交搜索进入时才换成新的显式条件。
+   */
   function showHistory() {
-    historyPath = null;
-    historyQuery = "";
     useView("history");
   }
 
@@ -3606,16 +3611,19 @@
                     <div class="menu-sep"></div>
                     <div class="menu-label" role="presentation">分支与同步</div>
                     {#each overflowCommands as command (command.id)}
+                      {@const blocked = commandAvailable(command, commandState) ? null : commandReason(command, commandState)}
                       <button
                         type="button"
                         class="menu-item"
                         role="menuitem"
-                        disabled={!commandAvailable(command, commandState)}
-                        title={commandReason(command, commandState) || command.hint}
+                        disabled={blocked !== null}
+                        title={blocked ?? command.hint}
+                        aria-describedby={blocked ? `overflow-reason-${command.id}` : undefined}
                         onclick={() => runCommand(command.id)}
                       >
                         <Icon name={OVERFLOW_COMMAND_ICONS[command.id as keyof typeof OVERFLOW_COMMAND_ICONS] ?? "chevron-right"} />
-                        <span>{command.title}<small>{command.hint}</small></span>
+                        <!-- 禁用原因就地显示，不只放在悬停提示里：键盘与触屏都看不到 title。 -->
+                        <span>{command.title}<small id={blocked ? `overflow-reason-${command.id}` : undefined}>{blocked ?? command.hint}</small></span>
                       </button>
                     {/each}
                   {/snippet}

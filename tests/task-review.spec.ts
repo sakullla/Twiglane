@@ -710,6 +710,32 @@ describe("任务列表的键盘写入与隐藏（T3）", () => {
     expect(onUnstageFile).toHaveBeenCalledTimes(2);
   });
 
+  it("任务行真实侧别为 none 时，空格与双击都就地说明，不静默无反应", async () => {
+    const onStageFile = vi.fn();
+    const onUnstageFile = vi.fn();
+    // 任务净差异全部来自提交：真实索引与工作区里没有可写的一侧。
+    const stageSideFor = () => "none" as const;
+    render(TaskReview, { props: reviewProps({ onStageFile, onUnstageFile, stageSideFor }) });
+    const list = await screen.findByRole("listbox", { name: "任务文件" });
+    const row = [...list.querySelectorAll<HTMLElement>(".file-row")][0]!;
+    await fireEvent.click(row);
+    list.focus();
+
+    await fireEvent.keyDown(list, { key: " " });
+    const note = await screen.findByText(/没有未提交或已暂存的改动，空格不能把它写进索引/);
+    expect(note.getAttribute("role")).toBe("status");
+    expect(onStageFile).not.toHaveBeenCalled();
+    expect(onUnstageFile).not.toHaveBeenCalled();
+
+    await fireEvent.dblClick(row);
+    expect(screen.getByText(/没有未提交或已暂存的改动，空格不能把它写进索引/)).toBeTruthy();
+    expect(onStageFile).not.toHaveBeenCalled();
+
+    // 换成另一行后提示收起，不留在屏幕上冒充当前文件的状态。
+    await fireEvent.click([...list.querySelectorAll<HTMLElement>(".file-row")][1]!);
+    await waitFor(() => expect(screen.queryByText(/没有未提交或已暂存的改动/)).toBeNull());
+  });
+
   it("搜索时未审阅队列只走可见文件，不跳到被过滤掉的行", async () => {
     const onSelection = vi.fn();
     const onReviewNav = vi.fn();

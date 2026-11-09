@@ -25,6 +25,17 @@ curl -s http://127.0.0.1:1430/__ui-preview/health
   - `?recent=many`、`?recent=empty`、`?git=missing`、`?merge=conflict`、`?filter=truncated`、`?filter=error`、`?search=error` 等按异常状态展开。`?filter=error` 让树过滤的全仓补齐整体失败（说明里给「重试补齐」），`?search=error` 让全仓库文本搜索与文件内查找都失败（各自给出「重试搜索 / 重新读取目录」与「重试查找 / 重新读取文件」）。
 - `mock-files.ts` / `samples.ts`：目录、文档与差异样例。`README.md` 覆盖中文标题、同名重复标题、GFM 表格、只读任务列表、相对/缺失/外链、本地图片与远程图片占位。
 - `baseline-shots.mjs`：用 Chrome DevTools Protocol 驱动真实浏览器，按「起始页/改动/历史/合并/设置」× 深色/浅色 × 1280×840/900×600 截图；Markdown 阅读样例另存为 `files-markdown`、`files-markdown-toc`，manifest 里 `group: "markdown"`，与对照图分开统计（新样例不能混进优化前后对照）；再用 `?remote=unchecked`、`?remote=stale`、`?commit=error`、`?commit=push`、`?doc=error`、`?doc=large`、`?search=error`、`?filter=error` 与文件内查找失败截 9 个关键失败/未知状态（`group: "failure"`）。失败态采哪几种「主题 × 尺寸」组合由 `--failure-targets` 决定（逗号分隔的 `<theme>:<size>`，默认 `dark:1280x840,light:1280x840,dark:900x600`；列四种即采全四组合），拼错的组合会打印可选值而不是安静跳过。产物命名是 `<theme>-<size>-<view>.png`，写到 `--out` 目录；`manifest.json` 默认写到 `--out` 的上一级（可用 `--manifest` 覆盖），`shots` 逐张记录 `theme/size/view/group/state/bytes/sha256`，收尾按 `group` 打印三类数量，与 `docs/verification/ui-ux-markdown-2026-11-08/manifest.json` 的结构一致。`--base` 换地址，`CHROME_PATH` 指定浏览器。
+- 任务、工作区总览与历史取消（T5 新增，全部只用于界面呈现）：
+  - `?task=error`：起点校验失败——任务页就地说明「起点不是当前分支的祖先」，并给出重新读取与重选起点；
+  - `?task=empty`：成功读取但任务为空（空任务只在完整读取成功后才出现）；
+  - `?worktree=stale`：主仓库的远程状态标为「过期」，其余项仍按真实状态逐项显示；
+  - `?worktree=error`：整批工作区状态读取失败（界面必须说明整批失败，不能把旧数字当新鲜结果）；
+  - `?history=hang`：最新的两条提交详情永不返回，用来复现「旧批次在途请求挂住、换一批选择还要能读」；
+  - `?history=detail-error`：多选详情全部失败，界面给失败说明与「重新读取所选提交」。
+- `check-scenarios.mjs` 的键鼠场景用 CDP `Input.dispatchKeyEvent` / `Input.dispatchMouseEvent` / `Input.insertText`
+  发真实输入（不是 `element.click()` 或直接改 value）：任务打开、连续审阅（Alt+M / Alt+Shift+→）、空格整文件暂存、
+  提交区提交、历史换选择后的加载结束，以及工作区总览的分组/未知/缺失/过期。滚动定位关掉了平滑滚动，并对候选点做
+  `elementFromPoint` 命中测试，避免点到吸顶标题上。
 - `check-scenarios.mjs`：异常、大规模、提交/同步失败与 Markdown 阅读场景的可复跑自检（27 个场景，含文档预览、目录、源码往返、相对链接、超限退路、读取失败、历史提交里的 Markdown 差异、远程未核/过期与提交失败展开）。其中「目录列出中文重复标题且各自可辨」会实际点击两个同名目录项，核对 heading 锚点不同、`aria-current` 落在各自条目且滚动位置不同；三个查找失败场景（全文搜索、树过滤补齐、文件内查找）会实际点击恢复按钮并核对同一条失败重新出现，确认恢复入口可执行。
 
 ## 静态单文件页（没有常驻服务器时）
@@ -44,3 +55,24 @@ node node_modules/vite/bin/vite.js build --config scripts/ui-preview/vite.config
 ## 边界
 
 截图与自检只证明浏览器 + mock 数据下的外观和可达性，不能替代真实 Git 行为、桌面 WebView 或平台验证。`npm test` 里的 `tests/ui-preview.spec.ts` 会真起一次 dev server 校验 mock 替换与端口守卫。
+
+## 一键复跑（场景 + 截图）
+
+```bash
+node scripts/run-ui-verification.mjs
+```
+
+它按顺序做四件事，任何一步失败都以非 0 退出并把原因写进 `report.json`：
+
+1. 确认 1430 空闲，否则直接报「端口被占用」而不是对着旧页面出证据；
+2. 用 `scripts/ui-preview/vite.config.mjs` 起 mock 预览，轮询 `/__ui-preview/health` 直到 `mockApi` 为 `true`；
+3. 跑 `check-scenarios.mjs`（场景自检，含键鼠闭环）；
+4. 跑 `baseline-shots.mjs`：两主题 × 1280×840/900×600 的起始页、改动、历史、任务、工作区总览、提交区与设置，
+   外加失败/未知状态（`group: "failure"`）与「历史多选换选择后恢复」的证据图。
+
+可选参数：`--skip-shots` 只跑场景、`--only <场景名片段>` 只跑匹配的场景、`--base` 换地址、`--out` 换证据目录。
+
+### 采集不到时的写法
+
+截图脚本对「这一版界面本来就没有入口」的视图不再抛错中断：它把这件事实写进 manifest 的 `skipped` 与
+`report.json`，并在终端打印跳过原因。**没有采集到的对照图不会用旧图或合成图补齐。**

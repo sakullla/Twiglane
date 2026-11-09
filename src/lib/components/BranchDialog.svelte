@@ -842,9 +842,16 @@
             placeholder={`搜索${listScope === "local" ? "本地" : "远程"}分支`}
             autocomplete="off"
             spellcheck="false"
+            onkeydown={(event) => {
+              if (event.key === "Escape" && branchQuery) {
+                event.preventDefault();
+                event.stopPropagation();
+                branchQuery = "";
+              }
+            }}
           />
           {#if branchQuery}
-            <button type="button" class="field-clear" aria-label="清空分支搜索" onclick={() => (branchQuery = "")}><Icon name="x" size={12} /></button>
+            <button type="button" class="field-clear" aria-label="清空分支搜索" onclick={() => { branchQuery = ""; searchInput?.focus(); }}><Icon name="x" size={12} /></button>
           {/if}
         </div>
         <button

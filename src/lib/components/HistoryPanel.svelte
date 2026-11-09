@@ -644,7 +644,30 @@
     if (unionList) unionList.scrollTop = 0;
   });
 
+  function onDetailFilesKey(event: KeyboardEvent) {
+    if (isContextKey(event) && currentPath) {
+      event.preventDefault();
+      const row = fileListEl?.querySelector<HTMLElement>('.file-row[aria-selected="true"]');
+      fileMenu(currentPath, row ? pointFor(row) : { x: 160, y: 160 });
+      return;
+    }
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (filteredFiles.length === 0) return;
+    const index = filteredFiles.findIndex((file) => file.path === currentPath);
+    const next = nextIndex(index, event.key, filteredFiles.length);
+    if (next === null) return;
+    event.preventDefault();
+    goToFile(filteredFiles[next].path);
+    fileListEl?.focus({ preventScroll: true });
+  }
+
   function onUnionKey(event: KeyboardEvent) {
+    if (isContextKey(event) && unionActive) {
+      event.preventDefault();
+      const row = unionList?.querySelector<HTMLElement>('.file-row[aria-selected="true"]');
+      fileMenu(unionActive.path, row ? pointFor(row) : { x: 160, y: 160 });
+      return;
+    }
     if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
     const index = unionFiles.findIndex((file) => file.path === unionActive?.path);
     const next = nextIndex(index, event.key, unionFiles.length);
@@ -1322,7 +1345,7 @@
       return;
     }
     if (event.altKey || event.ctrlKey || event.metaKey) return;
-    if (event.key === "ArrowUp" && !event.shiftKey && current === 0) {
+    if ((event.key === "ArrowUp" || event.key === "k") && !event.shiftKey && current === 0) {
       event.preventDefault();
       document.getElementById("history-search")?.focus();
       return;
@@ -1536,6 +1559,13 @@
               autocomplete="off"
               spellcheck="false"
               value={author}
+              onkeydown={(event) => {
+                if (event.key === "Escape" && author) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  clearFilter("author");
+                }
+              }}
               oninput={(event) => {
                 author = event.currentTarget.value;
                 scheduleText();
@@ -1565,6 +1595,13 @@
               value={filePath ?? pathFilter}
               disabled={Boolean(filePath)}
               title={filePath ? "文件历史的路径不能改" : undefined}
+              onkeydown={(event) => {
+                if (!filePath && event.key === "Escape" && pathFilter) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  clearFilter("path");
+                }
+              }}
               oninput={(event) => {
                 if (filePath) return;
                 pathFilter = event.currentTarget.value;
@@ -2062,7 +2099,29 @@
               <div class="commit-files-filter">
                 <div class="field sm">
                   <Icon name="search" size={13} />
-                  <input aria-label="筛选提交中的文件" placeholder="筛选文件" autocomplete="off" spellcheck="false" bind:value={fileFilter} />
+                  <input
+                    aria-label="筛选提交中的文件"
+                    placeholder="筛选文件"
+                    autocomplete="off"
+                    spellcheck="false"
+                    bind:value={fileFilter}
+                    onkeydown={(event) => {
+                      if (event.key === "Escape" && fileFilter) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        fileFilter = "";
+                      } else if ((event.key === "ArrowDown" || event.key === "Enter") && filteredFiles.length > 0) {
+                        event.preventDefault();
+                        if (!filteredFiles.some((f) => f.path === currentPath)) goToFile(filteredFiles[0].path);
+                        fileListEl?.focus({ preventScroll: true });
+                      }
+                    }}
+                  />
+                  {#if fileFilter}
+                    <button type="button" class="field-clear" aria-label="清除文件筛选" onclick={() => (fileFilter = "")}>
+                      <Icon name="x" size={12} />
+                    </button>
+                  {/if}
                 </div>
               </div>
             {/if}
@@ -2079,6 +2138,7 @@
                 bind:this={fileListEl}
                 bind:clientHeight={fileViewport}
                 onscroll={(event) => (fileScroll = event.currentTarget.scrollTop)}
+                onkeydown={onDetailFilesKey}
               >
                 <div class="virtual-space" style={`height:${fileItems.length * FILE_ROW_HEIGHT}px`}>
                   {#each visibleFiles as item, index (item.kind === "dir" ? `d:${item.directory}` : `${item.file.status}:${item.file.path}`)}

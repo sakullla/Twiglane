@@ -817,7 +817,25 @@
           <div class="conflict-filter">
             <div class="field sm">
               <Icon name="search" size={13} />
-              <input aria-label="筛选冲突文件" placeholder="筛选文件" autocomplete="off" spellcheck="false" bind:value={fileFilter} />
+              <input
+                aria-label="筛选冲突文件"
+                placeholder="筛选文件"
+                autocomplete="off"
+                spellcheck="false"
+                bind:value={fileFilter}
+                onkeydown={(event) => {
+                  if (event.key === "Escape" && fileFilter) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    fileFilter = "";
+                  }
+                }}
+              />
+              {#if fileFilter}
+                <button type="button" class="field-clear" aria-label="清除冲突文件筛选" onclick={() => (fileFilter = "")}>
+                  <Icon name="x" size={12} />
+                </button>
+              {/if}
             </div>
           </div>
         {/if}

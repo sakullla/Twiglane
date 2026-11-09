@@ -322,4 +322,5 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
 }
 @container diff (max-width: 680px) {
   .diff-toolbar .diff-side { display: none; }
+  .diff-toolbar .file-copy-btn { display: none; }
 }

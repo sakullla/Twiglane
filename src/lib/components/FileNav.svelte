@@ -34,6 +34,26 @@
     if (refocus) recentButton?.focus({ preventScroll: true });
   }
 
+  $effect(() => {
+    if (!recentOpen) return;
+    const outside = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && !recentButton?.parentElement?.contains(target)) closeRecent(false);
+    };
+    const key = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeRecent(true);
+    };
+    window.addEventListener("mousedown", outside, true);
+    window.addEventListener("keydown", key, true);
+    return () => {
+      window.removeEventListener("mousedown", outside, true);
+      window.removeEventListener("keydown", key, true);
+    };
+  });
+
   function pick(path: string, line: number | null): void {
     closeRecent(true);
     nav.history?.onOpen(path, line);

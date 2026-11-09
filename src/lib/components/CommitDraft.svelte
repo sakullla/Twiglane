@@ -382,6 +382,15 @@
       onfocus={() => (active = true)}
       oninput={(event) => onInput((event.currentTarget as HTMLTextAreaElement).value)}
       onblur={onBlur}
+      onkeydown={(event) => {
+        if (event.isComposing || event.key !== "Escape") return;
+        if (!value) {
+          event.preventDefault();
+          event.stopPropagation();
+          active = false;
+          textarea?.blur();
+        }
+      }}
     ></textarea>
   </div>
 

@@ -320,7 +320,27 @@
     </form>
   {:else}
     <div class="tag-list-tools">
-      <div class="field"><Icon name="search" size={14} /><input aria-label="搜索标签" bind:this={searchInput} bind:value={query} placeholder="搜索标签、Hash 或附注" autocomplete="off" spellcheck="false" /></div>
+      <div class="field">
+        <Icon name="search" size={14} />
+        <input
+          aria-label="搜索标签"
+          bind:this={searchInput}
+          bind:value={query}
+          placeholder="搜索标签、Hash 或附注"
+          autocomplete="off"
+          spellcheck="false"
+          onkeydown={(event) => {
+            if (event.key === "Escape" && query) {
+              event.preventDefault();
+              event.stopPropagation();
+              query = "";
+            }
+          }}
+        />
+        {#if query}
+          <button type="button" class="field-clear" aria-label="清空标签搜索" onclick={() => { query = ""; searchInput?.focus(); }}><Icon name="x" size={12} /></button>
+        {/if}
+      </div>
       {#if loaded?.ok}<span class="count">{tags.length}</span>{/if}
       <!-- 检查中不禁用：禁用会把焦点弄丢，Esc 就到不了 Modal。 -->
       <button type="button" class="icon-btn" aria-label="刷新远程状态" aria-busy={remoteChecking} title={`重新读取 ${remote} 上的标签`} onclick={() => { if (!remoteChecking) void loadRemoteTags(); }}>

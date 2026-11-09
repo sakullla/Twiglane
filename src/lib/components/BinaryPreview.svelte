@@ -279,7 +279,7 @@
           <div class="pane-meta">
             {#if pane.result.size != null}<span>{formatBytes(pane.result.size)}</span>{/if}
             {#if pane.width != null && pane.height != null}<span>{pane.width} × {pane.height}</span>{/if}
-            {#if pane.result.lfsOid}<span class="badge" title={pane.result.lfsOid}>Git LFS</span>{/if}
+            {#if pane.result.lfsOid}<span class="chip" title={pane.result.lfsOid}>Git LFS</span>{/if}
           </div>
         {/if}
         {#if pane.error}
@@ -295,7 +295,7 @@
             <img src={pane.result.dataUrl} alt={sideLabel(side) + "：" + source?.path} onload={(event) => imageLoaded(side, event)} onerror={() => imageError(side)} />
           </div>
         {:else if pane.result?.kind === "archive"}
-          <div class="preview-toolbar"><Icon name="folder" size={14} /><span>压缩包目录 · {pane.result.entries.length}{pane.result.truncated ? "+" : ""} 项</span><div class="field sm archive-search"><Icon name="search" size={13} /><input aria-label={"筛选" + sideLabel(side) + "压缩包文件"} placeholder="筛选文件路径" bind:value={pane.query} oninput={() => { pane.scroll = 0; if (pane.listHost) pane.listHost.scrollTop = 0; }} /></div></div>
+          <div class="preview-toolbar"><Icon name="folder" size={14} /><span>压缩包目录 · {pane.result.entries.length}{pane.result.truncated ? "+" : ""} 项</span><div class="field sm archive-search"><Icon name="search" size={13} /><input aria-label={"筛选" + sideLabel(side) + "压缩包文件"} placeholder="筛选文件路径" bind:value={pane.query} oninput={() => { pane.scroll = 0; if (pane.listHost) pane.listHost.scrollTop = 0; }} onkeydown={(event) => { if (event.key === "Escape" && pane.query) { event.preventDefault(); event.stopPropagation(); pane.query = ""; pane.scroll = 0; if (pane.listHost) pane.listHost.scrollTop = 0; } }} />{#if pane.query}<button type="button" class="field-clear" aria-label="清空压缩包筛选" onclick={() => { pane.query = ""; pane.scroll = 0; if (pane.listHost) pane.listHost.scrollTop = 0; }}><Icon name="x" size={12} /></button>{/if}</div></div>
           <div class="archive-list" role="list" aria-label={sideLabel(side) + "压缩包文件"} bind:this={pane.listHost} bind:clientHeight={pane.viewport} onscroll={(event) => (pane.scroll = event.currentTarget.scrollTop)}>
             <div style={"height:" + range.start * 30 + "px"} aria-hidden="true"></div>
             {#each filtered.slice(range.start, range.end) as entry, i (range.start + i + ":" + entry.name)}

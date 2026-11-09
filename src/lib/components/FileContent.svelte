@@ -789,6 +789,16 @@
         {#if mark}
           <span class={`st ${mark.tone}`} title={mark.label} aria-label={`Git 状态：${mark.label}`}>{mark.letter}</span>
         {/if}
+        <button
+          type="button"
+          class="icon-btn sm file-copy-btn"
+          data-copied={copied ? "true" : undefined}
+          aria-label={copied ? "已复制文件路径" : "复制文件路径"}
+          title={copied ? "已复制路径" : `复制相对路径：${path}`}
+          onclick={() => void copyPath()}
+        >
+          <Icon name={copied ? "check" : "copy"} size={13} />
+        </button>
       </div>
       <div class="file-actions">
         {#if isMarkdown && !showImage}

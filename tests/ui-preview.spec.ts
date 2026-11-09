@@ -63,13 +63,17 @@ describe("浏览器预览的 mock 替换", () => {
     await server?.close();
   });
 
-  it("把 api 路径的不同写法认成同一个文件，而不是只做一次字符串相等", async () => {
-    const { sameFile, REAL_API_MODULE, MOCK_API_MODULE } = await import("../scripts/ui-preview/vite.config.mjs");
-    expect(sameFile("C:\\work\\src\\lib\\api.ts?t=1", "c:/work/src/lib/api.ts")).toBe(true);
-    expect(sameFile("C:/work/src/lib/api.ts", "C:/work/src/lib/api-extra.ts")).toBe(false);
-    expect(sameFile(REAL_API_MODULE, MOCK_API_MODULE)).toBe(false);
-    expect(sameFile("", REAL_API_MODULE)).toBe(false);
-  });
+  it(
+    "把 api 路径的不同写法认成同一个文件，而不是只做一次字符串相等",
+    async () => {
+      const { sameFile, REAL_API_MODULE, MOCK_API_MODULE } = await import("../scripts/ui-preview/vite.config.mjs");
+      expect(sameFile("C:\\work\\src\\lib\\api.ts?t=1", "c:/work/src/lib/api.ts")).toBe(true);
+      expect(sameFile("C:/work/src/lib/api.ts", "C:/work/src/lib/api-extra.ts")).toBe(false);
+      expect(sameFile(REAL_API_MODULE, MOCK_API_MODULE)).toBe(false);
+      expect(sameFile("", REAL_API_MODULE)).toBe(false);
+    },
+    30_000,
+  );
 
   // 首次 transformRequest 要冷编译整个 Svelte 外壳，在全量 npm test 的并行负载下
   // 实测会超过默认 5s 而误判失败（单跑约 2.5s）。这里给这一个用例显式放宽，

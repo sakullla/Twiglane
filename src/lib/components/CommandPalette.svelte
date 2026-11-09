@@ -188,6 +188,11 @@
             spellcheck="false"
             {placeholder}
           />
+          {#if query}
+            <button type="button" class="field-clear" tabindex="-1" aria-label="清空搜索" onclick={() => { query = ""; active = 0; inputEl?.focus(); }}>
+              <Icon name="x" size={12} />
+            </button>
+          {/if}
           <kbd>{MODIFIER_LABEL} K</kbd>
         </div>
       </div>

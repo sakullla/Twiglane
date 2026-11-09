@@ -20,8 +20,8 @@ export function nextIndex(current: number, key: string, count: number): number |
   if (count <= 0) return null;
   if (key === "Home") return 0;
   if (key === "End") return count - 1;
-  if (key === "ArrowDown") return Math.min(count - 1, current < 0 ? 0 : current + 1);
-  if (key === "ArrowUp") return Math.max(0, current < 0 ? 0 : current - 1);
+  if (key === "ArrowDown" || key === "j") return Math.min(count - 1, current < 0 ? 0 : current + 1);
+  if (key === "ArrowUp" || key === "k") return Math.max(0, current < 0 ? 0 : current - 1);
   return null;
 }
 

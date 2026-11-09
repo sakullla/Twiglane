@@ -2649,6 +2649,14 @@ describe("行选暂存（R6）", () => {
     await fireEvent.click(screen.getByRole("button", { name: "清除选中的行" }));
     expect(document.querySelector("[data-line-count]")?.textContent).toContain("0");
     expect(screen.getByRole("button", { name: "暂存选中行" }).hasAttribute("disabled")).toBe(true);
+
+    // 全选可选行：一键把所有完整块的新增/删除行都勾上，已全选时禁用并说明原因。
+    const selectAll = screen.getByRole("button", { name: "全选可选行" });
+    expect(selectAll.hasAttribute("disabled")).toBe(false);
+    await fireEvent.click(selectAll);
+    expect(document.querySelector("[data-line-count]")?.textContent).toContain("2");
+    expect(screen.getByRole("button", { name: "全选可选行" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "全选可选行" }).getAttribute("title")).toContain("已经选中全部可选行");
   });
 
   it("选行模式可直接点击新增或删除行，再次点击取消", async () => {

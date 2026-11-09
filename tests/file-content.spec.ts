@@ -110,6 +110,14 @@ describe("代码页", () => {
     expect(first.textContent).toContain("import");
     // 空白行也要占一个行号，不能把空行挤掉。
     expect(container.querySelector('[data-file-line="2"]')).toBeTruthy();
+
+    // 标题旁提供一键复制路径并给出状态反馈
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const copyBtn = screen.getByRole("button", { name: "复制文件路径" });
+    await fireEvent.click(copyBtn);
+    expect(writeText).toHaveBeenCalledWith("src/App.ts");
+    expect(await screen.findByRole("button", { name: "已复制文件路径" })).toBeTruthy();
   });
 
   it("续读从上次结束处继续，并在读完后收起入口", async () => {

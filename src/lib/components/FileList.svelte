@@ -321,7 +321,7 @@
       return;
     }
     if (event.altKey || event.ctrlKey || event.metaKey) return;
-    if (event.key === "ArrowUp" && !event.shiftKey && current === 0) {
+    if ((event.key === "ArrowUp" || event.key === "k") && !event.shiftKey && current === 0) {
       event.preventDefault();
       document.getElementById("file-search")?.focus();
       return;

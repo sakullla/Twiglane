@@ -301,7 +301,20 @@
                   {#if activeScope.paths.length > 8}
                     <div class="field sm stash-files-filter">
                       <Icon name="search" size={13} />
-                      <input aria-label="筛选保存范围里的文件" placeholder="筛选文件" autocomplete="off" spellcheck="false" bind:value={fileQuery} />
+                      <input
+                        aria-label="筛选保存范围里的文件"
+                        placeholder="筛选文件"
+                        autocomplete="off"
+                        spellcheck="false"
+                        bind:value={fileQuery}
+                        onkeydown={(event) => {
+                          if (event.key === "Escape" && fileQuery) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            fileQuery = "";
+                          }
+                        }}
+                      />
                       {#if fileQuery}
                         <button type="button" class="field-clear" aria-label="清空筛选" onclick={() => (fileQuery = "")}><Icon name="x" size={12} /></button>
                       {/if}

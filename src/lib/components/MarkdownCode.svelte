@@ -7,6 +7,7 @@
   let { text, language, active = true }: { text: string; language: string; active?: boolean } = $props();
   let visible = $state(false);
   let copied = $state(false);
+  let copyTimer: ReturnType<typeof setTimeout> | undefined;
   let copyError = $state("");
   let lines = $derived(text.split("\n"));
   const syntax = createHighlight(() => ({ lang: active && visible ? canonicalLanguage(language) : null, lines }));
@@ -21,13 +22,21 @@
     return { destroy: () => observer.disconnect() };
   }
 
-  $effect(() => { void text; copied = false; copyError = ""; });
+  $effect(() => { void text; copied = false; copyError = ""; clearTimeout(copyTimer); });
+  $effect(() => () => clearTimeout(copyTimer));
 
   async function copy() {
     const content = text;
     try {
       await navigator.clipboard.writeText(content);
-      if (content === text) { copied = true; copyError = ""; }
+      if (content === text) {
+        copied = true;
+        copyError = "";
+        clearTimeout(copyTimer);
+        copyTimer = setTimeout(() => {
+          if (content === text) copied = false;
+        }, 1800);
+      }
     } catch {
       if (content === text) copyError = "复制失败，可选择代码后复制。";
     }

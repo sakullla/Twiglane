@@ -390,9 +390,24 @@
     scrollTimer = setTimeout(saveSourcePosition, 120);
   }
 
+  let copiedPath = $state(false);
+  let copyTimer: ReturnType<typeof setTimeout> | undefined;
+
+  async function copyPath() {
+    try {
+      await navigator.clipboard.writeText(boundSource.path);
+      copiedPath = true;
+      clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => (copiedPath = false), 1500);
+    } catch {
+      copiedPath = false;
+    }
+  }
+
   // 卸载前把最后一次滚动位置落进会话，关闭阅读窗口后位置仍可恢复。
   $effect(() => () => {
     if (scrollTimer !== undefined) clearTimeout(scrollTimer);
+    if (copyTimer !== undefined) clearTimeout(copyTimer);
     saveSourcePosition();
   });
 
@@ -597,6 +612,16 @@
   <header class="doc-reader-head">
     <span class="doc-source" title={`来源：${sourceLabel}`}><Icon name="eye" size={13} />{sourceLabel}</span>
     <span class="doc-path" title={boundSource.path}>{boundSource.path}</span>
+    <button
+      type="button"
+      class="icon-btn sm file-copy-btn"
+      data-copied={copiedPath ? "true" : undefined}
+      aria-label={copiedPath ? "已复制文档路径" : "复制文档路径"}
+      title={copiedPath ? "已复制路径" : `复制相对路径：${boundSource.path}`}
+      onclick={() => void copyPath()}
+    >
+      <Icon name={copiedPath ? "check" : "copy"} size={12} />
+    </button>
     {#if hasTrail || hasAhead}
       <span class="doc-nav">
         <button type="button" class="icon-btn sm" aria-label="返回上一个文档" title={hasTrail ? "回到上一个文档与位置" : "没有上一个文档"} disabled={!hasTrail} onclick={back}>

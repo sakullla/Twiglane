@@ -536,6 +536,15 @@
     if (onFileHistory && selection) {
       tools.push({ id: "file-history", label: "此文件历史", icon: "history", run: () => onFileHistory?.(selection.path) });
     }
+    if (selection) {
+      tools.push({
+        id: "copy-path",
+        label: copiedPath ? "已复制文件路径" : "复制文件路径",
+        icon: copiedPath ? "check" : "copy",
+        state: copiedPath ? "已复制" : undefined,
+        run: () => void copy(selection.path, true),
+      });
+    }
     if (documentSides && selection && !inlineReadDocument) {
       tools.push({
         id: "read-document",
@@ -545,15 +554,28 @@
         run: () => readDocument(moreAnchor),
       });
     }
+    const allPickable = lines.filter((line): line is ViewLine & { hunkIndex: number; kind: "add" | "del" } => canPick(line));
+    const allPicked = allPickable.length > 0 && picked.length === allPickable.length;
     if (tier === "narrow" && pickMode) {
-      tools.push({
-        id: "clear-picks",
-        label: "清除选中的行",
-        icon: "x",
-        state: picked.length > 0 ? `已选 ${picked.length} 行` : undefined,
-        reason: picked.length === 0 ? "还没有选中任何行" : undefined,
-        run: () => (picked = []),
-      });
+      tools.push(
+        {
+          id: "select-all-picks",
+          label: "全选可选行",
+          icon: "check",
+          reason: allPicked ? "已经选中全部可选行" : allPickable.length === 0 ? "没有可选中的行" : undefined,
+          run: () => {
+            picked = allPickable.map((line) => ({ hunkIndex: line.hunkIndex, kind: line.kind, oldNo: line.oldNo, newNo: line.newNo }));
+          },
+        },
+        {
+          id: "clear-picks",
+          label: "清除选中的行",
+          icon: "x",
+          state: picked.length > 0 ? `已选 ${picked.length} 行` : undefined,
+          reason: picked.length === 0 ? "还没有选中任何行" : undefined,
+          run: () => (picked = []),
+        },
+      );
     }
     return tools;
   });
@@ -648,9 +670,18 @@
     if (!showOverflow && moreOpen) moreOpen = false;
   });
 
-  async function copy(text: string) {
+  let copiedPath = $state(false);
+  let copyTimer: ReturnType<typeof setTimeout> | undefined;
+  onDestroy(() => clearTimeout(copyTimer));
+
+  async function copy(text: string, isPath = false) {
     try {
       await navigator.clipboard.writeText(text);
+      if (isPath) {
+        copiedPath = true;
+        clearTimeout(copyTimer);
+        copyTimer = setTimeout(() => (copiedPath = false), 1500);
+      }
     } catch {
       // 剪贴板不可用时静默：菜单项本身不承担报错。
     }
@@ -685,7 +716,7 @@
         disabledReason: line && CODE_KINDS.has(line.kind) ? undefined : "这里不是代码行",
         run: () => line && void copy(codeOf(line)),
       },
-      { id: "copy-path", label: "复制文件路径", icon: "copy", run: () => void copy(selection.path) },
+      { id: "copy-path", label: "复制文件路径", icon: "copy", run: () => void copy(selection.path, true) },
     ];
     if (onFullFile) {
       entries.push(
@@ -729,6 +760,7 @@
 
   $effect(() => {
     selectionKey;
+    copiedPath = false;
     applyScroll(0);
     // 只跟文件切换和容器换新：embedded 的位置由下面恢复，这里不能归零。
     if (scroller && !untrack(() => embedded)) scroller.scrollLeft = 0;
@@ -1083,6 +1115,13 @@
     const page = Math.max(1, height > 0 ? Math.floor(height / ROW_HEIGHT) : 1);
     const delta =
       event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : event.key === "PageDown" ? page : event.key === "PageUp" ? -page : null;
+    if (event.key === "j" || event.key === "k") {
+      if (delta === null) {
+        event.preventDefault();
+        applyScroll(scrollByRows(scrollTop, event.key === "j" ? 1 : -1, total, height, ROW_HEIGHT));
+        return;
+      }
+    }
     if (delta === null) return;
     event.preventDefault();
     applyScroll(scrollByRows(scrollTop, delta, total, height, ROW_HEIGHT));
@@ -1143,6 +1182,18 @@
           <span class="diff-path" title={selection.side === "staged" ? `${selection.path}（已暂存）` : `${selection.path}（未暂存）`}>
             <bdi>{#if parts.dir}<span class="dir">{parts.dir}/</span>{/if}<strong>{parts.name}</strong></bdi>
           </span>
+          {#if !embedded}
+            <button
+              type="button"
+              class="icon-btn sm file-copy-btn"
+              data-copied={copiedPath ? "true" : undefined}
+              aria-label={copiedPath ? "已复制文件路径" : "复制文件路径"}
+              title={copiedPath ? "已复制路径" : `复制相对路径：${selection.path}`}
+              onclick={() => void copy(selection.path, true)}
+            >
+              <Icon name={copiedPath ? "check" : "copy"} size={12} />
+            </button>
+          {/if}
           {#if !readOnly}
             <span class="diff-side" class:staged={selection.side === "staged"}>
               {selection.side === "staged" ? "已暂存" : "未暂存"}
@@ -1247,7 +1298,20 @@
           <Icon name="check" size={13} /><span class="diff-hist-label">选行</span>
         </button>
         {#if pickMode}
-          <span class="badge" data-line-count aria-label={"已选择 " + picked.length + " 行"}>{picked.length} 行</span>
+          <span class="chip" data-line-count aria-label={"已选择 " + picked.length + " 行"}>{picked.length} 行</span>
+          {#if tier !== "narrow" && currentDiff.hunks.some((hunk) => hunk.complete)}
+            {@const allPickable = lines.filter((line): line is ViewLine & { hunkIndex: number; kind: "add" | "del" } => canPick(line))}
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              aria-label="全选可选行"
+              title={allPickable.length === 0 ? "没有可选中的行" : picked.length === allPickable.length ? "已经选中全部可选行" : "选中当前差异里全部可逐行暂存的新增与删除行"}
+              disabled={allPickable.length === 0 || picked.length === allPickable.length}
+              onclick={() => {
+                picked = allPickable.map((line) => ({ hunkIndex: line.hunkIndex, kind: line.kind, oldNo: line.oldNo, newNo: line.newNo }));
+              }}
+            >全选</button>
+          {/if}
           {#if tier !== "narrow"}
             <button
               type="button"

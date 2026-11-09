@@ -675,6 +675,7 @@
 /* 可聚焦滚动容器（与 .file-list / .history-list 同一判据）：焦点环用 --focus 画在内容之上。 */
 .diff-scroll:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .diff-line, .side-row { position: absolute; left: 0; right: 0; display: grid; align-items: center; font-family: var(--mono); font-size: var(--text-sm); line-height: 22px; white-space: pre; }
+.diff-line:not(.hunk):not(.add):not(.del):not(.picked):hover .ln, .side-cell:not(.hunk):not(.meta):not(.blank):not(.add):not(.del):not(.picked):hover .ln { color: var(--fg-muted); }
 .diff-line { grid-template-columns: 46px 46px minmax(0, 1fr) auto; }
 .diff-line .ln, .side-cell .ln { color: var(--fg-subtle); text-align: right; padding-right: 11px; font-size: var(--text-xs); user-select: none; height: 22px; background: var(--surface-2); }
 .diff-line .ln + .ln { border-right: 1px solid var(--border); }
@@ -686,6 +687,7 @@
 .diff-line.del .code { color: var(--fg); box-shadow: inset 2px 0 color-mix(in srgb, var(--del-fg) 65%, transparent); }
 .diff-line.del .ln { background: var(--del-strong); color: var(--del-fg); }
 .diff-line.pickable, .side-cell.pickable { cursor: pointer; }
+.diff-line.pickable:hover:not(.picked), .side-cell.pickable:hover:not(.picked) { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
 .diff-line.picked, .side-cell.picked { box-shadow: inset 0 0 0 1px var(--accent); }
 .diff-line.picked .ln, .side-cell.picked .ln { color: var(--accent-text); }
 .diff-line.hunk { background: var(--hunk-bg); color: var(--hunk-fg); }
@@ -701,6 +703,9 @@
 .hunk-btn.btn-secondary { background: var(--accent-soft); color: var(--accent-text); }
 .hunk-btn.btn-secondary:hover:not(:disabled) { background: var(--accent); color: var(--accent-fg); }
 .side-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
+.side-picks { display: inline-flex; align-items: center; gap: 2px; margin-right: var(--space-8); }
+.side-picks .hunk-btn { margin-right: 0; }
+.hunk-btn.line-pick { min-width: 24px; padding: 0 var(--space-6) !important; }
 .side-cell { display: grid; grid-template-columns: 48px minmax(0, 1fr); overflow: clip; min-width: 0; height: 22px; }
 .side-cell + .side-cell { border-left: 1px solid var(--border-strong); }
 .side-cell .code { overflow: clip; padding: 0 10px; }
@@ -2080,6 +2085,9 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .diff-toolbar.file-head { flex-wrap: nowrap; gap: var(--space-8); padding: 0 var(--space-8); }
 .file-head .file-nav { gap: var(--space-2); }
 .file-title { display: flex; align-items: center; gap: var(--space-8); min-width: 0; flex: 1; padding-left: var(--space-4); }
+.file-copy-btn { color: var(--fg-subtle); }
+.file-copy-btn:hover:not(:disabled) { color: var(--fg); }
+.file-copy-btn[data-copied="true"] { color: var(--success-text); }
 .file-head .file-nav + .file-title { padding-left: var(--space-8); border-left: 1px solid var(--border); }
 .file-title .st { width: 16px; height: 16px; font-size: 10px; }
 .breadcrumb { display: flex; align-items: center; gap: 3px; min-width: 0; overflow: hidden; color: var(--fg-subtle); font-size: var(--text-sm); }

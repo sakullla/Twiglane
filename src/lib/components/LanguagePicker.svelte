@@ -88,6 +88,11 @@
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
+      if (query) {
+        query = "";
+        active = 0;
+        return;
+      }
       open = false;
       button?.focus();
     } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -133,6 +138,11 @@
           bind:value={query}
           oninput={() => (active = 0)}
         />
+        {#if query}
+          <button type="button" class="field-clear" tabindex="-1" aria-label="清空语言搜索" onclick={() => { query = ""; active = 0; search?.focus(); }}>
+            <Icon name="x" size={12} />
+          </button>
+        {/if}
       </div>
       {#if !syntaxPrefs.enabled}
         <button type="button" class="lang-enable" onclick={() => { setSyntaxEnabled(true); open = false; }}>

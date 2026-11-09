@@ -770,10 +770,10 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     // 改动前一侧（暂存区）在预览里也要和改动后不同，否则看不出「读的是哪个版本」。
     if (document.kind === "text" && source.revision === "index") {
       if (document.text !== null) {
-        document.text = `> 预览 mock：这是暂存区（改动前）版本，正文与工作区可能不同。\n\n${document.text}`;
+        document.text = `> 预览 mock：这是暂存区版本，正文与工作区可能不同。\n\n${document.text}`;
       }
       if (document.lines.length > 0) {
-        document.lines = ["> 预览 mock：这是暂存区（改动前）版本。", "", ...document.lines];
+        document.lines = ["> 预览 mock：这是暂存区版本。", "", ...document.lines];
       }
     }
     return ok(document, 40);

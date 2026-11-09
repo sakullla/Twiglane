@@ -293,9 +293,13 @@ export function mockDocument(
     generation,
     source: { ...source, repository: "C:/Users/dev/project/twiglane" },
     size: 0,
+    // 与原生 RepositoryDocument 字段一致：document 模式也带空的 lines 与 version，
+    // 调用方（例如暂存区版本的改写）可以直接读 lines.length。
+    version: null as string | null,
     text: null as string | null,
     complete: false,
     offset,
+    lines: [] as string[],
     nextOffset: offset,
     hasMore: false,
     truncated: false,

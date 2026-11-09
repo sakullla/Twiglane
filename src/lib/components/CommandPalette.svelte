@@ -127,6 +127,16 @@
     if (current instanceof HTMLElement && current.classList.contains("palette-item")) optionAt(active)?.focus();
   }
 
+  /**
+   * 当前项始终留在可视区：焦点通常在搜索框上，方向键只移动高亮、不移动焦点，
+   * 列表不会自己跟着滚，高亮会移出屏幕。换关键词后游标回到第一条可用命令、
+   * 或打开时第一条可用命令不在顶部，同样要滚过去。与 Popover、语言选择器等列表同一做法。
+   */
+  $effect(() => {
+    if (!open) return;
+    optionAt(active)?.scrollIntoView?.({ block: "nearest" });
+  });
+
   /** Tab / Shift+Tab 只在面板内首尾环绕，绝不回落到背后的主界面。 */
   function trapFocus(step: number) {
     if (!card) return;

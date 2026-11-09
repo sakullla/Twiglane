@@ -8,7 +8,9 @@ const stylesDir = path.join(root, "src", "styles");
 const layerFiles = ["tokens.css", "base.css", "components.css", "layout.css"] as const;
 
 function read(file: string): string {
-  return readFileSync(file, "utf8");
+  // Windows 下 core.autocrlf 会把检出文件变成 CRLF；下面的选择器与规则按字面 \n 匹配，
+  // 统一成 LF 再断言，换行符不该决定门禁过不过。
+  return readFileSync(file, "utf8").replace(/\r\n/g, "\n");
 }
 
 function stripComments(css: string): string {

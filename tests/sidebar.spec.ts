@@ -659,6 +659,33 @@ describe("命令面板", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("方向键移动时把当前项滚进可视区，焦点留在搜索框也不丢高亮", async () => {
+    const scrolled: Element[] = [];
+    const originalScroll = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this);
+    };
+    try {
+      const many = Array.from({ length: 30 }, (_, i) => ({
+        id: `cmd.${i}`,
+        group: "视图",
+        title: `命令 ${i}`,
+        run: vi.fn(),
+      }));
+      render(CommandPalette, { props: { open: true, onClose: () => {}, commands: many } as never });
+      const input = screen.getByRole("combobox", { name: "搜索命令" });
+      const active = () => document.getElementById(input.getAttribute("aria-activedescendant") ?? "");
+      await fireEvent.keyDown(input, { key: "ArrowDown" });
+      await fireEvent.keyDown(input, { key: "ArrowDown" });
+      await tick();
+      expect(scrolled.length, "移动后尝试把当前项滚进可视区").toBeGreaterThan(0);
+      expect(scrolled[scrolled.length - 1], "最后一次滚动落在键盘当前项上").toBe(active());
+      expect(active()).toBe(screen.getAllByRole("option")[2]);
+    } finally {
+      Element.prototype.scrollIntoView = originalScroll;
+    }
+  });
+
   it("不可用动作就地说明原因且不执行", async () => {
     const run = vi.fn();
     render(CommandPalette, {

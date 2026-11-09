@@ -1000,6 +1000,74 @@ describe("连续审阅队列与真实写入边界（R2、R4、R6）", () => {
     await fireEvent.click(within(taskView).getByRole("button", { name: "换起点" }));
     await waitFor(() => expect(within(taskView).getByLabelText("选择任务起点")).toBeTruthy());
   });
+
+  it("同一路径同时有已暂存与未暂存时，整文件命令跟随选中的那一侧（R6）", async () => {
+    render(App);
+    await openRepo();
+    // 夹具里 src/app.css 同时在未暂存与已暂存分组里，是这条回归的双侧路径。
+    const rowsOf = () =>
+      [...document.querySelectorAll<HTMLElement>('.workbench-view[data-active="true"] .file-row[title="src/app.css"]')];
+    await waitFor(() => expect(rowsOf()).toHaveLength(2));
+
+    // 选中已暂存侧：面板必须提供「取消暂存当前文件」，不能因为另一侧也有改动就说没有已暂存改动。
+    await fireEvent.click(rowsOf()[1]);
+    await waitFor(() => expect(rowsOf()[1].getAttribute("aria-selected")).toBe("true"));
+    let palette = await openPalette();
+    expect(within(palette).getByRole("option", { name: /^取消暂存当前文件/ }).getAttribute("aria-disabled")).toBe("false");
+    const stageOption = within(palette).getByRole("option", { name: /^暂存当前文件/ });
+    expect(stageOption.getAttribute("aria-disabled")).toBe("true");
+    expect(stageOption.textContent).toContain("当前文件没有可暂存的真实改动");
+    await fireEvent.keyDown(palette, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "命令面板" })).toBeNull());
+
+    // 选中未暂存侧：方向反过来，取消暂存必须不可用。
+    await fireEvent.click(rowsOf()[0]);
+    await waitFor(() => expect(rowsOf()[0].getAttribute("aria-selected")).toBe("true"));
+    palette = await openPalette();
+    expect(within(palette).getByRole("option", { name: /^暂存当前文件/ }).getAttribute("aria-disabled")).toBe("false");
+    expect(within(palette).getByRole("option", { name: /^取消暂存当前文件/ }).getAttribute("aria-disabled")).toBe("true");
+    await fireEvent.keyDown(palette, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "命令面板" })).toBeNull());
+
+    // 真的执行一次：选中的是未暂存侧时只暂存，不会偷偷取消暂存。
+    mocks.stageFiles.mockResolvedValue(snapshot);
+    mocks.unstageFiles.mockResolvedValue(snapshot);
+    palette = await openPalette();
+    await fireEvent.click(within(palette).getByRole("option", { name: /^暂存当前文件/ }));
+    await waitFor(() => expect(mocks.stageFiles).toHaveBeenCalledWith(repoPath, ["src/app.css"], 4, expect.any(Number)));
+    expect(mocks.unstageFiles).not.toHaveBeenCalled();
+  });
+
+  it("搜索过滤改动队列：下一个未审阅只会走可见文件", async () => {
+    render(App);
+    await openRepo();
+    expect(selectedPath()).toBe("src/App.svelte");
+    // 搜索把 src/App.svelte 排除在可见行之外：队列必须跟着过滤后的有序行走。
+    await fireEvent.input(screen.getByLabelText("搜索改动文件"), { target: { value: "app.css" } });
+    await waitFor(() =>
+      expect(
+        [...document.querySelectorAll<HTMLElement>('.workbench-view[data-active="true"] .file-row')].every(
+          (row) => row.getAttribute("title") === "src/app.css",
+        ),
+      ).toBe(true),
+    );
+    await fireEvent.click(screen.getByRole("button", { name: "下一个未审阅文件" }));
+    await waitFor(() => expect(selectedPath()).toBe("src/app.css"));
+  });
+
+  it("⌥+M 在 macOS 的组合字符下仍然标记已审阅（物理键兜底）", async () => {
+    mocks.repositoryReviewToken.mockImplementation(async (_repo: string, path: string) => tokenFor(path, `tok:${path}`));
+    render(App);
+    await openRepo();
+    // macOS 的 ⌥ 是字符修饰键：⌥+M 的 event.key 是「µ」，只有 event.code 仍是 KeyM。
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "µ", code: "KeyM", altKey: true, bubbles: true }));
+    await tick();
+    await waitFor(() => expect(screen.getByLabelText("已审阅 1 个，共 6 个改动文件")).toBeTruthy());
+    // 再按一次撤销：方向与工具条按钮一致。
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "µ", code: "KeyM", altKey: true, bubbles: true }));
+    await tick();
+    await waitFor(() => expect(screen.getByLabelText("已审阅 0 个，共 6 个改动文件")).toBeTruthy());
+  });
 });
 
 describe("应用外壳", () => {

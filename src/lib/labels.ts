@@ -173,6 +173,25 @@ function hasSide(file: FileChange, side: FileRow["side"]): boolean {
   return side === "staged" ? file.staged !== "none" : file.untracked || file.unstaged !== "none";
 }
 
+/**
+ * 整文件暂存/取消暂存实际作用的那一侧（R6）。
+ *
+ * 同一路径可以同时在索引和工作区里有改动。用户选中哪一侧，命令就只能作用在哪一侧：
+ * 选中已暂存行时必须提供「取消暂存」，选中未暂存行时才提供「暂存」。
+ * 没有明确选择（或选择的一侧已经没有改动）时退回默认方向：先工作区、再索引。
+ * 任务净差异行的侧别只是「净结果」，不代表真实索引状态，调用方传 null 按真实文件判定。
+ */
+export function fileStageSide(
+  file: FileChange | null | undefined,
+  selectedSide: FileRow["side"] | null = null,
+): FileRow["side"] | "none" {
+  if (!file || file.unmerged) return "none";
+  if (selectedSide === "staged" && hasSide(file, "staged")) return "staged";
+  if (selectedSide === "unstaged" && hasSide(file, "unstaged")) return "unstaged";
+  if (hasSide(file, "unstaged")) return "unstaged";
+  return hasSide(file, "staged") ? "staged" : "none";
+}
+
 /** 一次刷新只索引一次文件，多选校验为 O(文件数 + 选中数)，不逐项重建全量行。 */
 export function createSelectionResolver(files: FileChange[], afterEdit: boolean): (item: FileSelection) => FileSelection | null {
   const byPath = new Map(files.map((file) => [file.path, file]));

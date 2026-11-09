@@ -75,6 +75,15 @@
     onHideReviewed?: (next: boolean) => void;
     /** 整文件暂存：写入真实索引，任务净差异本身不被应用。 */
     onStageFile?: (path: string) => void;
+    /** 整文件取消暂存：同一路径只有已暂存一侧时按钮与空格走这里。 */
+    onUnstageFile?: (path: string) => void;
+    /**
+     * 任务行在真实 Git 状态里的那一侧。任务净差异行本身只有一条结果，
+     * 按钮/空格的方向、文案与禁用都必须按真实状态判断，不能一律说「暂存」。
+     */
+    stageSideFor?: (path: string) => "staged" | "unstaged" | "none";
+    /** 写入或读取进行中：任务列表的整文件动作就地禁用并说明繁忙。 */
+    writeLocked?: boolean;
     /** 转到同一文件的真实未提交差异：按块/按行暂存只能在那里发生。 */
     onOpenUnstaged?: (path: string) => void;
     /** 回到改动视图的提交区：提交只按真实暂存范围执行。 */
@@ -115,6 +124,9 @@
     onToggleReview,
     onHideReviewed,
     onStageFile,
+    onUnstageFile,
+    stageSideFor,
+    writeLocked = false,
     onOpenUnstaged,
     onOpenChanges,
     stagedPaths = [],
@@ -635,7 +647,7 @@
           {selected}
           {selectedSet}
           {query}
-          disabled={false}
+          disabled={writeLocked}
           onQuery={(value) => (query = value)}
           onSelect={select}
           onMultiSelect={selectMany}
@@ -651,6 +663,8 @@
           {reviewNote}
           {reviewNav}
           {onStageFile}
+          {onUnstageFile}
+          {stageSideFor}
         />
         <div class="task-commits" aria-label="范围内提交">
           <div class="task-commits-head">

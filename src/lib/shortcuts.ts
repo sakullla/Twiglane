@@ -7,6 +7,8 @@
  */
 export interface KeyLike {
   key: string;
+  /** 物理键位置（KeyboardEvent.code）：macOS ⌥+字母会产生组合字符，只有它稳定。 */
+  code?: string;
   metaKey?: boolean;
   ctrlKey?: boolean;
   altKey?: boolean;
@@ -64,19 +66,45 @@ export function isTextEntry(target: EventTarget | null): boolean {
 }
 
 /**
+ * Alt 组合键的名字候选：先看 key，再看物理键。
+ *
+ * macOS 的 ⌥ 是字符修饰键：⌥+M 的 event.key 是「µ」而不是「m」，只按字符匹配会让
+ * 标记/撤销已审阅在 Mac 上悄悄失效。这里把 event.code 的 KeyX 还原成字母作为兜底；
+ * 常规键盘布局下 key 仍然优先，Windows/Linux 与现有测试的行为不变。
+ */
+function altKeyNames(event: KeyLike): string[] {
+  const names = [event.key];
+  const code = event.code;
+  if (code && code.length === 4 && code.startsWith("Key")) {
+    const letter = code.slice(3).toLowerCase();
+    if (letter !== event.key) names.push(letter);
+  }
+  return names;
+}
+
+function altCommand(map: Record<string, string>, event: KeyLike): string | null {
+  for (const name of altKeyNames(event)) {
+    const id = map[name];
+    if (id) return id;
+  }
+  return null;
+}
+
+/**
  * 返回命令 id；不是注册表里的组合键时返回 null。
  *
  * - 单独的 Alt+←/→ 切换上一个、下一个文件，Alt+↑/↓ 跳到上一处、下一处改动；
  *   Alt+Shift+←/→ 只在未审阅文件之间走，Alt+M 标记/撤销当前文件的已审阅；
  *   是否让位给输入框由外壳按焦点判断。
+ * - Alt+字母先按 key 再按物理键 event.code 匹配，macOS 的 ⌥ 组合字符不会让键位失效。
  * - 其余都是 ⌘/Ctrl 起手；此时 Alt 一律不认，避免和输入法的组合键抢键。
  * - Shift 只放行 ⌘⇧Enter（部分键盘布局里回车需要 Shift），其余一律不匹配，
  *   这样 ⌘⇧K 不会被当成 ⌘K。
  */
 export function shortcutCommand(event: KeyLike): string | null {
   const mod = event.metaKey || event.ctrlKey;
-  if (event.altKey && !mod && event.shiftKey) return ALT_SHIFT_COMMANDS[event.key] ?? null;
-  if (event.altKey && !mod && !event.shiftKey) return ALT_COMMANDS[event.key] ?? null;
+  if (event.altKey && !mod && event.shiftKey) return altCommand(ALT_SHIFT_COMMANDS, event);
+  if (event.altKey && !mod && !event.shiftKey) return altCommand(ALT_COMMANDS, event);
   if (!mod || event.altKey) return null;
   const key = event.key.toLowerCase();
   // ⌘⇧ 组合只认注册表里显式登记的几项，其余一律不匹配（⌘⇧K 仍然不是 ⌘K）。

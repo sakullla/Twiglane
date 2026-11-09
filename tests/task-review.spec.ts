@@ -668,4 +668,60 @@ describe("任务列表的键盘写入与隐藏（T3）", () => {
     await fireEvent.click(screen.getByRole("button", { name: "隐藏已审阅" }));
     expect(onHideReviewed).toHaveBeenCalledWith(false);
   });
+
+  it("整文件动作按真实侧别宣布方向：已暂存只说取消暂存，写入中就地禁用", async () => {
+    const onStageFile = vi.fn();
+    const onUnstageFile = vi.fn();
+    // 任务行本身只有净结果，方向必须来自真实 Git 状态：这里三条路径各代表一侧。
+    const stageSideFor = (path: string) =>
+      path === "docs/gone.md" ? "staged" : path === "src/app.ts" ? "unstaged" : "none";
+    const { rerender } = render(TaskReview, { props: reviewProps({ onStageFile, onUnstageFile, stageSideFor }) });
+    const list = await screen.findByRole("listbox", { name: "任务文件" });
+
+    // 真实状态只有已暂存一侧：按钮不能再宣称「暂存」。
+    expect(within(list).queryByRole("button", { name: "暂存 docs/gone.md 到索引" })).toBeNull();
+    await fireEvent.click(within(list).getByRole("button", { name: "取消暂存 docs/gone.md" }));
+    expect(onUnstageFile).toHaveBeenCalledWith("docs/gone.md");
+    expect(onStageFile).not.toHaveBeenCalled();
+
+    // 真实状态两侧都没有改动（任务净差异来自提交）：按钮禁用并说明原因。
+    const none = within(list).getByRole("button", { name: "src/fresh.ts 没有可暂存的真实改动" });
+    expect(none.hasAttribute("disabled")).toBe(true);
+
+    // 空格与按钮同一方向：选中已暂存行按空格也是取消暂存。
+    const row = [...list.querySelectorAll<HTMLElement>(".file-row")].find(
+      (item) => item.getAttribute("title") === "docs/gone.md",
+    )!;
+    await fireEvent.click(row);
+    list.focus();
+    await fireEvent.keyDown(list, { key: " " });
+    expect(onUnstageFile).toHaveBeenCalledTimes(2);
+    expect(onStageFile).not.toHaveBeenCalled();
+
+    // 写入中：整文件按钮禁用，空格也不再写入。
+    await rerender(reviewProps({ onStageFile, onUnstageFile, stageSideFor, writeLocked: true }));
+    const busy = await waitFor(() => {
+      const node = within(list).getByRole("button", { name: "取消暂存 docs/gone.md" });
+      expect(node.hasAttribute("disabled")).toBe(true);
+      return node;
+    });
+    expect(busy.getAttribute("title")).toContain("正在读取或写入");
+    await fireEvent.keyDown(list, { key: " " });
+    expect(onUnstageFile).toHaveBeenCalledTimes(2);
+  });
+
+  it("搜索时未审阅队列只走可见文件，不跳到被过滤掉的行", async () => {
+    const onSelection = vi.fn();
+    const onReviewNav = vi.fn();
+    render(TaskReview, { props: reviewProps({ onSelection, onReviewNav }) });
+    const list = await screen.findByRole("listbox", { name: "任务文件" });
+    await waitFor(() => expect(onSelection).toHaveBeenCalledWith("src/app.ts"));
+
+    await fireEvent.input(screen.getByLabelText("搜索任务文件"), { target: { value: "gone" } });
+    await waitFor(() => expect(list.querySelectorAll(".file-row")).toHaveLength(1));
+    // 队列与列表读同一份过滤后的有序行：总数只剩可见的那一个。
+    await waitFor(() => expect(onReviewNav.mock.calls.at(-1)?.[0]).toMatchObject({ total: 1, remaining: 1 }));
+    await fireEvent.click(screen.getByRole("button", { name: "下一个未审阅文件" }));
+    await waitFor(() => expect(onSelection).toHaveBeenLastCalledWith("docs/gone.md"));
+  });
 });

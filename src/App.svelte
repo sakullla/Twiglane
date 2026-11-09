@@ -42,7 +42,7 @@
     unmarkReviewedIn,
     type ReviewTarget,
   } from "./lib/review-progress.svelte";
-  import { branchLabel, commitScope, createSelectionResolver, dependencyNote, filterRows, groupFiles, retainSelection, selectionAfterEdit, stagedFiles, syncLabel } from "./lib/labels";
+  import { branchLabel, commitScope, createSelectionResolver, dependencyNote, fileStageSide, filterRows, groupFiles, retainSelection, selectionAfterEdit, stagedFiles, syncLabel } from "./lib/labels";
   import { startDesktopMeasure } from "./lib/measure";
   import { updateState, watchUpdateAvailable } from "./lib/update.svelte";
   import { isTextEntry, shortcutCommand } from "./lib/shortcuts";
@@ -485,10 +485,10 @@
     // 只有改动与任务视图把选择作用在真实 Git 状态上；文件/历史视图没有可写的这一侧。
     const path = workspaceView === "changes" || workspaceView === "task" ? activeSelectedPath : null;
     const file = path ? opened?.snapshot.files.find((item) => item.path === path) : undefined;
-    if (!path || !file || file.unmerged) return { path: path ?? null, side: "none" };
-    if (file.untracked || file.unstaged !== "none") return { path, side: "unstaged" };
-    if (file.staged !== "none") return { path, side: "staged" };
-    return { path, side: "none" };
+    // 改动视图按用户选中的那一侧判定：同一路径同时有已暂存与未暂存时，选中已暂存就必须能取消暂存。
+    // 任务行的侧别只是净结果（不等于真实索引状态），所以任务视图只按真实文件状态判定。
+    const chosen = workspaceView === "changes" ? (selected?.side ?? null) : null;
+    return { path: path ?? null, side: path ? fileStageSide(file, chosen) : "none" };
   });
 
   /* 命令注册表的唯一状态输入：标题栏、左栏、溢出菜单与命令面板都读这一份。 */
@@ -1417,18 +1417,30 @@
     );
   }
 
-  /** 在真实状态下把这个任务文件整文件暂存/取消暂存；任务净差异本身不被写入。 */
+  /**
+   * 任务行在真实 Git 状态里的那一侧：任务净差异只有一条结果，方向必须问真实 snapshot，
+   * 列表按钮、空格与命令面板读的都是这一份判定，界面声明的动作与写入方向才不会相反。
+   */
+  function taskFileStage(path: string): "staged" | "unstaged" | "none" {
+    return fileStageSide(opened?.snapshot.files.find((item) => item.path === path) ?? null);
+  }
+
+  /** 在真实状态下把这个任务文件整文件暂存；任务净差异本身不被写入。 */
   function stageTaskFile(path: string): void {
-    const file = opened?.snapshot.files.find((item) => item.path === path);
-    if (!file || file.unmerged) {
+    if (taskFileStage(path) !== "unstaged") {
       notice("这个文件没有可暂存的真实改动：任务净差异来自提交，不能在这里写入索引。");
       return;
     }
-    if (file.staged !== "none" && file.unstaged === "none" && !file.untracked) {
-      void unstagePath(path);
+    void stagePath(path);
+  }
+
+  /** 同一路径的真实状态只有已暂存一侧时，整文件动作是取消暂存。 */
+  function unstageTaskFile(path: string): void {
+    if (taskFileStage(path) !== "staged") {
+      notice("这个文件没有已暂存的真实改动，无法取消暂存。");
       return;
     }
-    void stagePath(path);
+    void unstagePath(path);
   }
 
   /** 打开文件视图里的某一种搜索（路径 / 全文），并把焦点交给它自己的输入框。 */
@@ -3695,6 +3707,9 @@
               onToggleReview={(path) => void toggleReviewed(path)}
               onHideReviewed={(next) => (taskHideReviewed = next)}
               onStageFile={stageTaskFile}
+              onUnstageFile={unstageTaskFile}
+              stageSideFor={taskFileStage}
+              writeLocked={writeLocked}
               onOpenUnstaged={openUnstagedDiff}
               onOpenChanges={showChanges}
               stagedPaths={stagedScopePaths}

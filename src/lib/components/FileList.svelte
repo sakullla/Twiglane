@@ -61,9 +61,16 @@
     reviewNav?: ReviewQueueState | null;
     /** 任务队列的整文件真实写入：把这条路径按真实工作区内容暂存到索引。 */
     onStageFile?: (path: string) => void;
+    /** 任务队列的反向真实写入：这条路径在真实状态里只有已暂存一侧时取消暂存。 */
+    onUnstageFile?: (path: string) => void;
     /**
-     * 任务队列：同一套虚拟化、目录分组、搜索与键盘导航，但分组表头改称「任务文件」，
-     * 并且不提供整文件暂存、空格暂存与取消暂存——任务净差异是只读的。
+     * 任务行在真实 Git 状态里的那一侧。任务净差异只有一条结果，行侧别不代表真实索引状态，
+     * 所以行内按钮、空格与文案的方向都由这份判定给出，不能一律写成「暂存」。
+     */
+    stageSideFor?: (path: string) => DiffSide | "none";
+    /**
+     * 任务队列：同一套虚拟化、目录分组、搜索与键盘导航，但分组表头改称「任务文件」。
+     * 任务净差异本身只读；行内与空格唯一的写入是整文件暂存/取消暂存这一条真实动作。
      */
     variant?: "changes" | "task";
     /** 搜索框的 id：改动与任务视图同时保活，id 不能重复。 */
@@ -111,10 +118,15 @@
     reviewNote = null,
     reviewNav = null,
     onStageFile,
+    onUnstageFile,
+    stageSideFor,
     variant = "changes",
     searchId = "file-search",
   }: Props = $props();
-  /** 任务队列只读：不写入暂存区，因此连行内的暂存入/出口都不画。 */
+  /** 任务队列的侧别：没有判定函数时退回「未暂存」，改动队列不用这一份。 */
+  function taskSide(row: FileRow): DiffSide | "none" {
+    return stageSideFor?.(row.path) ?? "unstaged";
+  }
   let taskMode = $derived(variant === "task");
   let groups = $derived(groupFiles(files));
   let conflictedRows = $derived(filterRows(groups.conflicted, query));
@@ -302,11 +314,17 @@
   });
 
   function toggle(row: FileRow) {
-    // 任务队列本身是只读净差异；空格与双击在这里只做「整文件暂存」这一条真实写入，
-    // 作用在真实工作区内容上，聚合净差异不会被当成补丁应用。
+    // 任务净差异本身只读；空格与双击在这里只做整文件暂存/取消暂存这一条真实写入，
+    // 方向按真实 Git 状态走，和行内按钮的 aria-label/title 是同一份判定。
     if (taskMode) {
       if (disabled) return;
-      onStageFile?.(row.path);
+      const side = taskSide(row);
+      if (side === "staged") {
+        if (onUnstageFile) onUnstageFile(row.path);
+        else onStageFile?.(row.path);
+      } else if (side === "unstaged") {
+        onStageFile?.(row.path);
+      }
       return;
     }
     if (disabled) return;
@@ -670,20 +688,33 @@
               </button>
             {/if}
             {#if taskMode}
-              <!-- 任务净差异只读；行内唯一写入是「整文件暂存」，作用在真实工作区内容上。 -->
-              {#if onStageFile && !row.unmerged}
+              <!-- 任务净差异只读；行内唯一写入是整文件暂存/取消暂存，方向按真实 Git 状态。
+                   按钮、空格、aria-label 与 title 必须说同一件事，不能宣布与写入相反的动作。 -->
+              {#if (onStageFile || onUnstageFile) && !row.unmerged}
+                {@const taskStage = taskSide(row)}
                 <button
                   type="button"
                   class="row-action"
-                  disabled={disabled}
-                  aria-label={`暂存 ${row.path} 到索引`}
-                  title={disabled ? BUSY_REASON : "把这个文件按真实工作区内容暂存到索引（空格）；任务净差异本身不被暂存"}
+                  disabled={disabled || taskStage === "none"}
+                  aria-label={taskStage === "staged"
+                    ? `取消暂存 ${row.path}`
+                    : taskStage === "unstaged"
+                      ? `暂存 ${row.path} 到索引`
+                      : `${row.path} 没有可暂存的真实改动`}
+                  title={disabled
+                    ? BUSY_REASON
+                    : taskStage === "staged"
+                      ? "这条路径在索引里只有已暂存内容：取消暂存（空格），任务净差异本身不被改动"
+                      : taskStage === "unstaged"
+                        ? "把这个文件按真实工作区内容暂存到索引（空格）；任务净差异本身不被暂存"
+                        : "任务净差异来自提交：真实工作区与索引里没有可暂存的改动"}
                   onclick={(event) => {
                     event.stopPropagation();
-                    onStageFile?.(row.path);
+                    if (taskStage === "staged") onUnstageFile?.(row.path);
+                    else if (taskStage === "unstaged") onStageFile?.(row.path);
                   }}
                 >
-                  <Icon name="plus" size={14} />
+                  <Icon name={taskStage === "staged" ? "minus" : "plus"} size={14} />
                 </button>
               {/if}
             {:else if row.unmerged}

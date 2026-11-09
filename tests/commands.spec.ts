@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { MODIFIER_LABEL } from "../src/lib/brand";
 import { COMMANDS, commandAvailable, commandById, commandReason, paletteItems, type CommandState } from "../src/lib/commands";
+import { fileStageSide } from "../src/lib/labels";
 import { shortcutCommand } from "../src/lib/shortcuts";
+import type { FileChange } from "../src/lib/types";
 
 function state(overrides: Partial<CommandState> = {}): CommandState {
   return {
@@ -81,6 +83,43 @@ describe("视图命令", () => {
     expect(commandAvailable(prev, state({ workspaceView: "files", fileNav: null }))).toBe(false);
   });
 });
+/** 同一路径同时在索引与工作区里有改动：两侧都真实存在。 */
+function bothSides(): FileChange {
+  return { path: "src/a.ts", originalPath: null, staged: "modified", unstaged: "modified", untracked: false, unmerged: false };
+}
+
+describe("整文件命令的侧别", () => {
+  it("同一路径两侧都有改动时，命令侧别跟随用户选中的那一侧", () => {
+    const file = bothSides();
+    // 选中已暂存行：只提供取消暂存，不能因为工作区也有改动就反过来提供暂存。
+    expect(fileStageSide(file, "staged")).toBe("staged");
+    expect(fileStageSide(file, "unstaged")).toBe("unstaged");
+    // 没有明确选择时退回默认方向：先工作区、再索引。
+    expect(fileStageSide(file)).toBe("unstaged");
+    expect(fileStageSide(file, null)).toBe("unstaged");
+  });
+
+  it("选中一侧已经没有改动时退回另一侧，两侧都没有就是 none", () => {
+    const stageOnly: FileChange = { ...bothSides(), unstaged: "none" };
+    expect(fileStageSide(stageOnly, "staged")).toBe("staged");
+    expect(fileStageSide(stageOnly, "unstaged")).toBe("staged");
+    expect(fileStageSide({ ...bothSides(), staged: "none" }, "staged")).toBe("unstaged");
+    expect(fileStageSide({ ...bothSides(), staged: "none", unstaged: "none" })).toBe("none");
+    // 冲突文件没有可写的单侧。
+    expect(fileStageSide({ ...bothSides(), unmerged: true })).toBe("none");
+  });
+
+  it("命令可用性随选中侧别成对切换：选中已暂存就能取消暂存", () => {
+    const staged = state({ fileStage: { path: "src/a.ts", side: "staged", reason: null } });
+    const unstaged = state({ fileStage: { path: "src/a.ts", side: "unstaged", reason: null } });
+    expect(commandAvailable(commandById("unstage.file")!, staged)).toBe(true);
+    expect(commandAvailable(commandById("stage.file")!, staged)).toBe(false);
+    expect(commandAvailable(commandById("stage.file")!, unstaged)).toBe(true);
+    expect(commandAvailable(commandById("unstage.file")!, unstaged)).toBe(false);
+    expect(commandReason(commandById("unstage.file")!, unstaged)).toBe("当前文件没有已暂存的改动");
+  });
+});
+
 describe("文件导航命令", () => {
   it("路径打开、全文搜索、在文件树中显示与新快捷键都登记在注册表里", () => {
     const ids = COMMANDS.filter((command) => command.group === "视图").map((command) => command.id);
@@ -148,6 +187,14 @@ describe("文件导航命令", () => {
     expect(shortcutCommand({ key: "ArrowRight", altKey: true, shiftKey: true })).toBe("review.next");
     expect(shortcutCommand({ key: "m", altKey: true })).toBe("review.toggle");
     expect(shortcutCommand({ key: "ArrowRight", altKey: true, ctrlKey: true })).toBeNull();
+    // macOS 的 ⌥ 是字符修饰键：⌥+M 的 key 是「µ」，物理键 code 仍是 KeyM。
+    // 只按 key 匹配会让标记快捷键在 Mac 上静默失效，所以 code 是兜底。
+    expect(shortcutCommand({ key: "µ", code: "KeyM", altKey: true })).toBe("review.toggle");
+    expect(shortcutCommand({ key: "m", code: "KeyM", altKey: true })).toBe("review.toggle");
+    // 兜底只认字母键：数字与方向键仍按原来的键名走，不凭空造出命令。
+    expect(shortcutCommand({ key: "µ", code: "Digit1", altKey: true })).toBeNull();
+    expect(shortcutCommand({ key: "µ", code: "KeyM", altKey: true, ctrlKey: true })).toBeNull();
+    expect(shortcutCommand({ key: "ArrowLeft", code: "ArrowLeft", altKey: true })).toBe("file.prev");
   });
 
   it("未审阅队列的四个命令读同一份状态，原因与队尾语义一致", () => {

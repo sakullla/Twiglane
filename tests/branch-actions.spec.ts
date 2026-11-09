@@ -14,6 +14,8 @@ const api = vi.hoisted(() => ({
   cancelRemote: vi.fn(),
   tagState: vi.fn(),
   openRepository: vi.fn(),
+  repoHeads: vi.fn(),
+  removeWorktree: vi.fn(),
 }));
 
 vi.mock("../src/lib/api", () => ({ api }));
@@ -82,6 +84,9 @@ beforeEach(() => {
   api.tagState.mockResolvedValue({ generation: 4, tags: [], snapshot });
   api.createBranchFrom.mockResolvedValue(state);
   api.renameBranch.mockResolvedValue(state);
+  api.repoHeads.mockImplementation(async (paths: string[]) =>
+    paths.map((path) => ({ path, branch: null, detached: null, missing: false, worktree: true, mainPath: "/repo" })),
+  );
 });
 
 afterEach(() => cleanup());
@@ -112,7 +117,7 @@ describe("分支右键菜单", () => {
     expect(onMergeBranch).toHaveBeenCalledWith("main");
   });
 
-  it("变基到所点分支；当前分支、其他工作区占用时不可用，远程分支可以当基底", async () => {
+  it("变基到所点分支；当前分支不可用，其他工作区占用的分支和远程分支都可以当基底", async () => {
     api.branchState.mockResolvedValue({
       ...state,
       branches: [
@@ -149,11 +154,12 @@ describe("分支右键菜单", () => {
 
     await fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
     await fireEvent.contextMenu(rowOf("shared"), { clientX: 80, clientY: 160 });
+    // 变基只改写当前分支：基底在别的工作区里检出并不妨碍，所以照常可用。
     const occupied = within(screen.getByRole("menu")).getByRole("menuitem", { name: "把当前分支变基到此分支…" });
-    expect(occupied.getAttribute("aria-disabled")).toBe("true");
-    expect(occupied.getAttribute("title")).toContain("正被其他工作区使用");
+    expect(occupied.getAttribute("aria-disabled")).toBeNull();
+    await fireEvent.click(occupied);
+    expect(onRebaseBranch).toHaveBeenLastCalledWith("shared");
 
-    await fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
     await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
     await fireEvent.click(screen.getByRole("button", { name: "展开分组 origin" }));
     await waitFor(() => expect(rowOf("origin/main")).toBeTruthy());
@@ -369,13 +375,21 @@ describe("分支右键菜单", () => {
     const props = dialogProps();
     render(BranchDialog, { props });
     await waitFor(() => expect(rowOf("shared")).toBeTruthy());
+    // 点被占用的分支不会切换，而是直接给出能做的事。
     await fireEvent.click(rowOf("shared"));
+    expect(screen.getByRole("menu")).toBeTruthy();
+    await fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
     await fireEvent.keyDown(rowOf("shared"), { key: "Enter" });
+    expect(screen.getByRole("menu")).toBeTruthy();
+    await fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
     expect(api.switchBranch).not.toHaveBeenCalled();
 
     await fireEvent.contextMenu(rowOf("shared"), { clientX: 40, clientY: 40 });
     const menu = screen.getByRole("menu");
-    expect(within(menu).getByRole("menuitem", { name: "切换到此分支" }).getAttribute("aria-disabled")).toBe("true");
+    // 切换、合并进它、重命名、删除分支都要先离开那个工作区：不再逐条灰着列出同一个原因。
+    expect(within(menu).queryByRole("menuitem", { name: "切换到此分支" })).toBeNull();
+    expect(within(menu).queryByRole("menuitem", { name: "重命名…" })).toBeNull();
+    expect(menu.textContent).toContain("已在工作区 other 中检出");
     await fireEvent.click(within(menu).getByRole("menuitem", { name: "打开此工作区" }));
     await waitFor(() => expect(api.openRepository).toHaveBeenCalledWith("D:/other", 7));
     expect(props.onOpened).toHaveBeenCalledWith(next);
@@ -675,5 +689,90 @@ describe("删除本地分支时同时删除同名远程分支、已合入主干�
     finish(afterLocal);
     await waitFor(() => expect(rowNames()).not.toContain("done"));
     await waitFor(() => expect(refresh.disabled).toBe(false));
+  });
+});
+
+describe("删除其他工作区", () => {
+  const occupied: BranchState = {
+    ...state,
+    branches: [...state.branches, branchRecord("shared", false, "D:/wt/shared")],
+  };
+  const released: BranchState = {
+    ...state,
+    branches: [...state.branches, branchRecord("shared", false, null)],
+  };
+
+  function renderDialog(extra: Record<string, unknown> = {}) {
+    const props = {
+      opened,
+      disabled: false,
+      onBusy: vi.fn(),
+      onSnapshot: vi.fn(),
+      onFailure: vi.fn(),
+      onNotice: vi.fn(),
+      onClose: vi.fn(),
+      onRecent: vi.fn(),
+      nextId: () => 7,
+      ...extra,
+    };
+    render(BranchDialog, { props });
+    return props;
+  }
+
+  it("行尾的删除换成删除工作区；确认后由后端删除，分支保留并刷新列表", async () => {
+    api.branchState.mockResolvedValueOnce(occupied).mockResolvedValue(released);
+    const recent = [{ name: "demo", path: "/repo", openedAtMs: 1 }];
+    api.removeWorktree.mockResolvedValue(recent);
+    const props = renderDialog();
+    await waitFor(() => expect(rowOf("shared")).toBeTruthy());
+    await waitFor(() => expect(api.repoHeads).toHaveBeenCalledWith(["D:/wt/shared"]));
+    await fireEvent.click(within(rowOf("shared")).getByRole("button", { name: "删除工作区 shared" }));
+    const dialog = await screen.findByRole("dialog", { name: "删除工作区" });
+    expect(dialog.textContent).toContain("D:/wt/shared");
+    expect(dialog.textContent).toContain("分支 shared 和已有提交都保留");
+    await fireEvent.click(within(dialog).getByRole("button", { name: "删除工作区" }));
+    await waitFor(() => expect(api.removeWorktree).toHaveBeenCalledWith("D:/wt/shared", false, 7));
+    expect(props.onRecent).toHaveBeenCalledWith(recent);
+    expect(api.deleteBranch).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "删除工作区" })).toBeNull());
+    expect(props.onNotice).toHaveBeenCalledWith(expect.stringContaining("分支 shared 和提交都保留"));
+    // 重读列表后占用标记消失，行尾回到普通的删除分支。
+    await waitFor(() => expect(within(rowOf("shared")).getByRole("button", { name: "删除 shared" })).toBeTruthy());
+  });
+
+  it("有未提交改动时再确认一次才强制删除；勾选后顺手删除分支", async () => {
+    api.branchState.mockResolvedValueOnce(occupied).mockResolvedValue(released);
+    api.removeWorktree
+      .mockRejectedValueOnce({ code: "worktree_dirty", message: "该工作区有未提交的改动或未跟踪文件，未删除。" })
+      .mockResolvedValue([]);
+    api.deleteBranch.mockResolvedValue(state);
+    renderDialog();
+    await waitFor(() => expect(rowOf("shared")).toBeTruthy());
+    await fireEvent.contextMenu(rowOf("shared"), { clientX: 40, clientY: 40 });
+    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "删除工作区…" }));
+    const first = await screen.findByRole("dialog", { name: "删除工作区" });
+    await fireEvent.click(within(first).getByRole("checkbox"));
+    await fireEvent.click(within(first).getByRole("button", { name: "删除工作区和分支" }));
+    const forced = await screen.findByRole("dialog", { name: "强制删除工作区" });
+    expect(forced.textContent).toContain("永久删除");
+    expect(api.deleteBranch).not.toHaveBeenCalled();
+    await fireEvent.click(within(forced).getByRole("button", { name: "强制删除" }));
+    await waitFor(() => expect(api.removeWorktree).toHaveBeenLastCalledWith("D:/wt/shared", true, 7));
+    await waitFor(() => expect(api.deleteBranch).toHaveBeenCalledWith("/repo", "shared", false, 4, 7));
+  });
+
+  it("主工作区不能删除：菜单与行尾都给出原因，不发请求", async () => {
+    api.branchState.mockResolvedValue(occupied);
+    api.repoHeads.mockResolvedValue([{ path: "D:/wt/shared", branch: "shared", detached: null, missing: false, worktree: false, mainPath: null }]);
+    renderDialog();
+    await waitFor(() => expect(rowOf("shared")).toBeTruthy());
+    await waitFor(() => expect(within(rowOf("shared")).getByRole("button", { name: "删除工作区 shared" }).hasAttribute("disabled")).toBe(true));
+    await fireEvent.contextMenu(rowOf("shared"), { clientX: 40, clientY: 40 });
+    const item = within(screen.getByRole("menu")).getByRole("menuitem", { name: "删除工作区…" });
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(item.getAttribute("title")).toContain("主工作区");
+    await fireEvent.click(item);
+    expect(screen.queryByRole("dialog", { name: "删除工作区" })).toBeNull();
+    expect(api.removeWorktree).not.toHaveBeenCalled();
   });
 });

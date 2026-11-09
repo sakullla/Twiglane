@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { MODIFIER_LABEL } from "../brand";
   import Icon from "./Icon.svelte";
 
@@ -47,11 +48,30 @@
   let filtered = $derived.by(() => {
     const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
     if (tokens.length === 0) return commands;
-    return commands.filter((item) => {
+    const hits = commands.filter((item) => {
       const haystack = `${item.title} ${item.group} ${item.keywords ?? ""}`.toLowerCase();
       return tokens.every((token) => haystack.includes(token));
     });
+    // 搜索时把可用的排在前面（组内原序不变）：回车执行的第一条不会是一条点不动的命令。
+    return [...hits.filter((item) => enabled(item)), ...hits.filter((item) => !enabled(item))];
   });
+
+  /** 换关键词后游标回到第一条可用的命令；同一个关键词不重置（鼠标/方向键选的位置保留）。 */
+  let seenQuery = "";
+  $effect.pre(() => {
+    const next = query;
+    untrack(() => {
+      if (next === seenQuery) return;
+      seenQuery = next;
+      active = firstEnabled();
+    });
+  });
+
+  /** 打开或换关键词时，游标落在第一条可用的命令上。 */
+  function firstEnabled(): number {
+    const index = filtered.findIndex((item) => enabled(item));
+    return index >= 0 ? index : 0;
+  }
 
   let groups = $derived.by(() => {
     const order: string[] = [];
@@ -69,7 +89,7 @@
   $effect(() => {
     if (open) {
       query = "";
-      active = 0;
+      active = untrack(firstEnabled);
       previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       inputEl?.focus();
     } else if (previous) {
@@ -178,7 +198,6 @@
             id="palette-input"
             bind:this={inputEl}
             bind:value={query}
-            oninput={() => (active = 0)}
             role="combobox"
             aria-expanded="true"
             aria-controls="palette-list"
@@ -216,6 +235,7 @@
                   tabindex={filtered[active] === item ? 0 : -1}
                   aria-selected={filtered[active] === item}
                   aria-disabled={!enabled(item)}
+                  title={!enabled(item) ? (item.reason ?? "当前不可用") : undefined}
                   onmouseenter={() => (active = positionOf(item))}
                   onclick={() => runCommand(item)}
                   onkeydown={(event) => {

@@ -451,8 +451,17 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       path,
       branch: index % 4 === 3 ? null : ["feature/modern-ui", "main", "develop", ""][index % 4] || "main",
       detached: index % 4 === 3 ? "1a2b3c4" : null,
-      missing: index === 2,
+      missing: index === 2 && !path.includes("/wt/"),
+      // 预览里 /wt/ 下的目录扮演 git worktree add 建的附属工作区。
+      worktree: path.includes("/wt/"),
+      mainPath: path.includes("/wt/") ? "C:/Users/dev/project/twiglane" : null,
     })), 60),
+  removeWorktree: (path: string) => {
+    for (const branch of branches) if (branch.worktree === path) branch.worktree = null;
+    recent = recent.filter((item) => item.path !== path);
+    generation += 1;
+    return ok(recent, 400);
+  },
   cancelRemote: () => {
     remoteAbort?.();
     return ok(undefined, 0);

@@ -169,6 +169,8 @@
   /** session 与 branchTips 同时读到的 generation；不一致时为 0。 */
   let factsGeneration = 0;
   let footFile = $state<HTMLDivElement | null>(null);
+  /** 合并方式与说明的落点：和主操作同一条底栏，决定「怎么做」的地方就是点下去的地方。 */
+  let footOptions = $state<HTMLDivElement | null>(null);
 
   let blocked = $derived(disabled || busy);
   let current = $derived(opened.snapshot.branch.detached || opened.snapshot.branch.unborn ? null : opened.snapshot.branch.name);
@@ -1025,6 +1027,7 @@
           {onOpenStash}
           {onOpenChanges}
           {branchGroups}
+          optionsTarget={footOptions}
         />
       {:else}
         <div class="empty" role="status"><span class="empty-icon"><span class="spinner"></span></span><strong>正在读取合并状态</strong></div>
@@ -1038,6 +1041,7 @@
 
   <div class="mp-foot" class:strip>
     <div class="mp-foot-file" bind:this={footFile}></div>
+    <div class="mp-foot-options" bind:this={footOptions}></div>
     {#if session && active && view && !view.editable && conflictTotal > 1}
       <!-- 二进制这类文件按文件停留：没有 ConflictResolver，导航在这里提供，语义相同。 -->
       <div class="cr-nav" role="group" aria-label="冲突导航">

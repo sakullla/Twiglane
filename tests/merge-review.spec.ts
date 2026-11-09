@@ -255,7 +255,55 @@ describe("合并准备", () => {
     expect(rebase.hasAttribute("disabled")).toBe(true);
     expect(rebase.getAttribute("title")).toContain("目标设为当前分支");
     expect(within(group).getByRole("radio", { name: /创建合并提交/ }).hasAttribute("disabled")).toBe(false);
-    expect(screen.getByText(/变基只改写当前分支/)).toBeTruthy();
+    // 方向条句尾提醒开始时会先切换到目标。
+    expect(screen.getByText(/开始时会先切换到 release/)).toBeTruthy();
+  });
+
+  it("方式与说明搬到宿主给的底栏落点；常用组合收在一个菜单里，当前方向打勾", async () => {
+    const foot = document.createElement("div");
+    foot.className = "test-foot";
+    document.body.append(foot);
+    const onPick = vi.fn();
+    render(MergeSetup, {
+      props: {
+        opened,
+        nextId: () => 1,
+        onGeneration: vi.fn(),
+        onFailure: vi.fn(),
+        branches: branches.map((branch) => ({ ...branch, current: branch.name === "feature" })),
+        mainBranches: ["main"],
+        current: "feature",
+        source: "main",
+        target: "feature",
+        mode: "merge",
+        message: "Merge branch 'main' into feature",
+        preview: preview({ source: "main", target: "feature", conflictCheck: "clean", conflictPaths: [] }),
+        previewing: false,
+        previewError: null,
+        blocked: false,
+        onSource: vi.fn(),
+        onTarget: vi.fn(),
+        onSwap: vi.fn(),
+        onPick,
+        onMode: vi.fn(),
+        onMessage: vi.fn(),
+        onRecheck: vi.fn(),
+        onOpenStash: vi.fn(),
+        optionsTarget: foot,
+      },
+    });
+    expect(within(foot).getByRole("radiogroup", { name: "方式" })).toBeTruthy();
+    expect(within(foot).getByRole("button", { name: "编辑合并说明" })).toBeTruthy();
+    // 方向读成一句话，只占一行。
+    const bar = screen.getByRole("region", { name: "合并方向" });
+    expect(bar.textContent).toContain("把");
+    expect(bar.textContent).toContain("合并到");
+    await fireEvent.click(within(bar).getByRole("button", { name: /常用/ }));
+    const menu = screen.getByRole("menu", { name: "常用合并" });
+    const update = within(menu).getByRole("menuitemcheckbox", { name: "用 main 更新 feature" });
+    expect(update.getAttribute("aria-checked")).toBe("true");
+    await fireEvent.click(within(menu).getByRole("menuitemcheckbox", { name: "把 feature 合并到 main" }));
+    expect(onPick).toHaveBeenCalledWith("feature", "main");
   });
 
   it("重新检查时保留上次结论并标明进行中", () => {

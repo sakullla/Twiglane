@@ -4,7 +4,7 @@
   import { api } from "../api";
   import { bucketBranches, filterBranches, groupIsOpen, isDefaultBranch, mainBranchNames, trackNameFor } from "../branches";
   import { normalizeError } from "../errors";
-  import type { BranchRecord, BranchState, OpenedRepository, StatusSnapshot } from "../types";
+  import type { BranchRecord, BranchState, OpenedRepository, RecentRepo, RepoHead, StatusSnapshot } from "../types";
   import ConfirmDialog, { type ConfirmNote, type ConfirmTarget } from "./ConfirmDialog.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest, isContextKey, pointFor } from "./ContextMenu.svelte";
   import BranchPicker from "./BranchPicker.svelte";
@@ -41,6 +41,8 @@
     blockedReason?: string | null;
     /** 打开其他工作区成功后交给外壳切换当前仓库。 */
     onOpened?: (repo: OpenedRepository) => void;
+    /** 删除附属工作区后，后端返回的最新「最近仓库」列表交给外壳。 */
+    onRecent?: (recent: RecentRepo[]) => void;
     /** 关闭后焦点去处（命令面板打开时由外壳传入）。 */
     returnFocus?: HTMLElement | null;
     nextId: () => number;
@@ -64,6 +66,7 @@
     branchGroups = true,
     blockedReason = null,
     onOpened,
+    onRecent,
     returnFocus = null,
     nextId,
   }: Props = $props();
@@ -72,6 +75,15 @@
   let defaultBranch = $state<string | null>(null);
   let groupOverrides = $state<Record<string, boolean>>({});
   let openingWorktree = $state(false);
+  /**
+   * 被其他工作区占用的分支所在目录的身份：是不是 `git worktree add` 建的附属工作区、目录还在不在。
+   * 只有附属工作区能在这里删除；主工作区和已经不存在的目录给出原因，不发请求。
+   */
+  let worktreeHeads = $state<Record<string, RepoHead>>({});
+  /** 删除工作区的确认：force 在 Git 报告有未提交改动后才置真，由用户再确认一次。 */
+  let worktreePrompt = $state<{ branch: BranchRecord; path: string; force: boolean; error: string | null } | null>(null);
+  /** 删除工作区后顺手删掉这个本地分支。默认不勾：分支和工作区是两件事。 */
+  let alsoDeleteBranch = $state(false);
   let branchQuery = $state("");
   /** 新建表单按需展开，展开时替换搜索和列表（R10：不和列表同时铺开）。 */
   let creating = $state(untrack(() => startCreating));
@@ -277,6 +289,36 @@
     defaultBranch = result.defaultBranch ?? null;
     mergeBases = result.mergeBases ?? [];
     onSnapshot(result.snapshot);
+    void readWorktreeHeads(result.branches);
+  }
+
+  /** 读一次占用分支的目录身份（只读本地文件，不跑 Git）；失败时菜单按「未知」处理，删除时由后端再判一次。 */
+  async function readWorktreeHeads(list: BranchRecord[]) {
+    const paths = [...new Set(list.filter((branch) => branch.worktree && !branch.current).map((branch) => branch.worktree as string))];
+    if (paths.length === 0) {
+      worktreeHeads = {};
+      return;
+    }
+    try {
+      const heads = await api.repoHeads(paths);
+      worktreeHeads = Object.fromEntries(heads.map((head) => [head.path, head]));
+    } catch {
+      worktreeHeads = {};
+    }
+  }
+
+  /** 这个工作区为什么不能在这里删除；能删时返回 undefined。 */
+  function worktreeRemoveReason(path: string): string | undefined {
+    const head = worktreeHeads[path];
+    if (!head) return undefined;
+    if (head.missing) return "目录已经不存在；在命令行运行 git worktree prune 可以清掉这条记录";
+    if (!head.worktree) return "这是主工作区，不能删除；只能删除 git worktree add 建出来的附属工作区";
+    return undefined;
+  }
+
+  function worktreeName(path: string): string {
+    const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
+    return parts[parts.length - 1] || path;
   }
 
   function isDefault(branch: BranchRecord): boolean {
@@ -312,7 +354,11 @@
   }
 
   function rowLabel(branch: BranchRecord): string {
-    const base = branch.current ? `当前分支 ${branch.name}` : `切换到 ${branch.name}`;
+    const base = branch.current
+      ? `当前分支 ${branch.name}`
+      : elsewhereReason(branch)
+        ? `${branch.name}，已在其他工作区检出`
+        : `切换到 ${branch.name}`;
     return isDefault(branch) ? `${base}，默认分支` : base;
   }
 
@@ -469,6 +515,10 @@
 
   /** 分支行的操作菜单：右键、菜单键或行尾的「⋯」都打开这一份。 */
   function branchMenu(branch: BranchRecord, point: { x: number; y: number }) {
+    if (elsewhereReason(branch)) {
+      worktreeMenu(branch, point);
+      return;
+    }
     const busy = blocked || openingWorktree ? (blockedReason ?? BUSY_REASON) : undefined;
     const currentReason = branch.current ? "这就是当前分支" : undefined;
     const elsewhere = elsewhereReason(branch);
@@ -541,6 +591,138 @@
       run: () => void askDelete(branch),
     });
     menu = { x: point.x, y: point.y, entries, label: `${branch.name} 的操作` };
+  }
+
+  /**
+   * 被其他工作区占用的分支：切换、合并进它、重命名、删除都要先把它从那个工作区里放出来，
+   * 这里不再逐条列出灰掉的同一个原因，而是直接给能做的事——打开那个工作区，或删除它。
+   * 以它为基底的动作（新建分支、合并到当前分支、把当前分支变基到它上面）不碰它，照常可用。
+   */
+  function worktreeMenu(branch: BranchRecord, point: { x: number; y: number }) {
+    const busy = blocked || openingWorktree ? (blockedReason ?? BUSY_REASON) : undefined;
+    const path = branch.worktree ?? "";
+    const entries: ContextMenuEntry[] = [
+      { heading: `已在工作区 ${worktreeName(path)} 中检出` },
+      { id: "open-worktree", label: "打开此工作区", icon: "folder-open", disabledReason: busy, run: () => void openWorktree(path) },
+      { id: "create", label: "从此分支新建分支…", icon: "plus", disabledReason: busy, run: () => createFrom(branch) },
+    ];
+    if (onMergeBranch) {
+      entries.push({
+        id: "merge",
+        label: `合并到当前分支（${current.name ?? "HEAD"}）…`,
+        icon: "merge",
+        disabledReason: busy,
+        run: () => onMergeBranch?.(branch.name),
+      });
+    }
+    if (onRebaseBranch && current.name) {
+      entries.push({
+        id: "rebase",
+        label: "把当前分支变基到此分支…",
+        icon: "branch",
+        disabledReason: busy,
+        run: () => onRebaseBranch?.(branch.name),
+      });
+    }
+    entries.push(
+      { separator: true },
+      { id: "copy", label: "复制分支名", icon: "copy", run: () => void copyName(branch.name) },
+      { id: "copy-worktree", label: "复制工作区路径", icon: "copy", run: () => void copyText(path, "工作区路径") },
+      { separator: true },
+      {
+        id: "remove-worktree",
+        label: "删除工作区…",
+        icon: "trash",
+        danger: true,
+        disabledReason: worktreeRemoveReason(path) ?? busy,
+        run: () => askRemoveWorktree(branch),
+      },
+    );
+    menu = { x: point.x, y: point.y, entries, label: `${branch.name} 的操作` };
+  }
+
+  async function copyText(text: string, what: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      onNotice(`已复制${what}`);
+    } catch {
+      onFailure({ code: "clipboard", message: `无法写入剪贴板，请手动复制${what}。` });
+    }
+  }
+
+  function askRemoveWorktree(branch: BranchRecord) {
+    const path = branch.worktree;
+    if (!path || worktreeRemoveReason(path) || blocked) return;
+    menu = null;
+    alsoDeleteBranch = false;
+    rememberOrigin();
+    worktreePrompt = { branch, path, force: false, error: null };
+  }
+
+  function cancelWorktreePrompt() {
+    if (writing) return;
+    worktreePrompt = null;
+    void restoreOrigin();
+  }
+
+  /** 删工作区由主仓库执行 git worktree remove；有未提交改动时 Git 拒绝，再确认一次才带 --force。 */
+  async function confirmRemoveWorktree() {
+    const prompt = worktreePrompt;
+    const currentRepo = opened;
+    if (!prompt || blocked) return;
+    const dropBranch = alsoDeleteBranch && !prompt.branch.remote;
+    let branchNote: string | null = null;
+    let failure: { code: string; message: string } | null = null;
+    writing = true;
+    localBusy = true;
+    onBusy("branch");
+    worktreePrompt = { ...prompt, error: null };
+    try {
+      const recent = await api.removeWorktree(prompt.path, prompt.force, nextId());
+      onRecent?.(recent);
+      if (dropBranch) {
+        try {
+          const ask = (generation: number) => api.deleteBranch(currentRepo.summary.path, prompt.branch.name, false, generation, nextId());
+          try {
+            await ask(currentRepo.generation);
+          } catch (error) {
+            const stale = normalizeError(error);
+            if (stale.code !== "stale" || stale.generation === undefined) throw stale;
+            await ask(stale.generation);
+          }
+        } catch (error) {
+          const branchFailure = normalizeError(error);
+          branchNote = branchFailure.code === "branch_unmerged"
+            ? `分支 ${prompt.branch.name} 还有未合入当前分支的提交，没有删除；需要时可以在列表里再删。`
+            : `分支 ${prompt.branch.name} 没有删除：${branchFailure.message}`;
+        }
+      }
+    } catch (error) {
+      failure = normalizeError(error);
+    } finally {
+      writing = false;
+      localBusy = false;
+      onBusy(null);
+    }
+    if (opened.summary.path !== currentRepo.summary.path) return;
+    if (failure) {
+      if (failure.code === "worktree_dirty" && !prompt.force) {
+        worktreePrompt = { ...prompt, force: true, error: null };
+      } else {
+        worktreePrompt = { ...prompt, error: failure.message };
+      }
+      return;
+    }
+    worktreePrompt = null;
+    void restoreOrigin();
+    if (branchNote) errorText = `已删除工作区 ${worktreeName(prompt.path)}。${branchNote}`;
+    else onNotice(
+      dropBranch
+        ? `已删除工作区 ${worktreeName(prompt.path)} 和分支 ${prompt.branch.name}。`
+        : `已删除工作区 ${worktreeName(prompt.path)}，分支 ${prompt.branch.name} 和提交都保留。`,
+    );
+    // 列表留在原处重读：占用标记随之消失，不闪回「正在读取」。
+    void loadBranches();
   }
 
   /** 打开占用该分支的工作区。不检出到当前工作区，也不改两边的提交和文件。 */
@@ -908,10 +1090,18 @@
               role="button"
               tabindex="0"
               aria-label={rowLabel(branch)}
-              aria-disabled={branch.current || occupied || blocked ? "true" : undefined}
-              title={branch.current ? "当前正在使用的分支" : occupied ? occupied : blocked ? (blockedReason ?? BUSY_REASON) : `点击切换到 ${branch.name}`}
-              onclick={() => {
-                if (!branch.current && !occupied) void switchTo(branch.name);
+              aria-disabled={branch.current || (blocked && !occupied) ? "true" : undefined}
+              aria-haspopup={occupied ? "menu" : undefined}
+              title={branch.current ? "当前正在使用的分支" : occupied ? `${occupied}
+点击查看可用操作：打开或删除这个工作区` : blocked ? (blockedReason ?? BUSY_REASON) : `点击切换到 ${branch.name}`}
+              onclick={(event) => {
+                // 被其他工作区占用的分支切不过来：点它直接给出能做的事，而不是什么也不发生。
+                if (occupied) {
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  branchMenu(branch, { x: Math.max(rect.left + 24, rect.right - 280), y: rect.bottom - 4 });
+                  return;
+                }
+                if (!branch.current) void switchTo(branch.name);
               }}
               oncontextmenu={(event) => {
                 event.preventDefault();
@@ -923,6 +1113,11 @@
                   branchMenu(branch, pointFor(event.currentTarget));
                   return;
                 }
+                if (occupied && (event.key === "Enter" || event.key === " ")) {
+                  event.preventDefault();
+                  branchMenu(branch, pointFor(event.currentTarget));
+                  return;
+                }
                 if (!branch.current && !occupied && (event.key === "Enter" || event.key === " ")) {
                   event.preventDefault();
                   void switchTo(branch.name);
@@ -930,7 +1125,7 @@
               }}
             >
               <span class="branch-row-icon" class:main={mainNames.has(branch.name)} title={mainNames.has(branch.name) ? "主干分支" : undefined}>
-                <Icon name={mainNames.has(branch.name) ? "star" : branch.current ? "check-circle" : branch.remote ? "cloud" : "branch"} size={16} />
+                <Icon name={mainNames.has(branch.name) ? "star" : branch.current ? "check-circle" : branch.remote ? "cloud" : occupied ? "folder" : "branch"} size={16} />
               </span>
               <div class="lr-main">
                 <span class="lr-title">
@@ -961,7 +1156,24 @@
                 >
                   <Icon name="more" size={14} />
                 </button>
-                {#if !branch.current}
+                {#if occupied && branch.worktree}
+                  {@const removeReason = worktreeRemoveReason(branch.worktree)}
+                  <!-- 占用中的分支删不掉；行尾的删除换成「删除它所在的工作区」，原因写在提示里。 -->
+                  <button
+                    type="button"
+                    class="icon-btn sm danger"
+                    aria-label={`删除工作区 ${worktreeName(branch.worktree)}`}
+                    title={removeReason ?? (blocked ? (blockedReason ?? BUSY_REASON) : `删除工作区 ${branch.worktree}（分支和提交保留）`)}
+                    disabled={blocked || Boolean(removeReason)}
+                    onclick={(event) => {
+                      event.stopPropagation();
+                      askRemoveWorktree(branch);
+                    }}
+                    onkeydown={keepRowKeys}
+                  >
+                    <Icon name="trash" size={13} />
+                  </button>
+                {:else if !branch.current}
                   <button
                     type="button"
                     class="icon-btn sm danger"
@@ -1084,6 +1296,41 @@
         <label class="confirm-option">
           <input type="checkbox" class="checkbox" bind:checked={alsoRemote} title={writing ? BUSY_REASON : undefined} disabled={writing} />
           <span>同时删除远程分支 <code>{target.twin.full}</code><small>本地和远程同名；勾选后也会从远程移除，其他协作者将看不到它</small></span>
+        </label>
+      {/if}
+    </ConfirmDialog>
+  {/if}
+  {#if worktreePrompt}
+    {@const prompt = worktreePrompt}
+    <ConfirmDialog
+      title={prompt.force ? "强制删除工作区" : "删除工作区"}
+      titleId="branch-worktree-remove-title"
+      message={prompt.force
+        ? "这个工作区里有未提交的改动或未跟踪文件。强制删除会把它们一起删掉。"
+        : `删除分支 ${prompt.branch.name} 所在的工作区目录？`}
+      targets={[{ icon: "folder", name: worktreeName(prompt.path), detail: prompt.path, tag: prompt.branch.name, tagTone: "info" }]}
+      targetsLabel="要删除的工作区"
+      notes={[
+        ...(prompt.force ? [{ tone: "warn" as const, text: "未提交的改动和未跟踪文件会被永久删除，本应用不能恢复。" }] : []),
+        alsoDeleteBranch
+          ? { tone: "info" as const, text: `随后删除本地分支 ${prompt.branch.name}；它有未合入当前分支的提交时会保留并说明。` }
+          : { tone: "ok" as const, text: `分支 ${prompt.branch.name} 和已有提交都保留在仓库里，可以随时重新检出。` },
+        { tone: "info" as const, text: "由仓库执行 git worktree remove；锁定的工作区不会被删除。" },
+      ]}
+      confirmLabel={prompt.force ? "强制删除" : alsoDeleteBranch ? "删除工作区和分支" : "删除工作区"}
+      confirmIcon="trash"
+      busy={writing}
+      error={prompt.error}
+      confirmBlocked={blocked && !writing ? (blockedReason ?? BUSY_REASON) : null}
+      focusKey={prompt.force}
+      impact="worktree-remove"
+      onConfirm={() => void confirmRemoveWorktree()}
+      onCancel={cancelWorktreePrompt}
+    >
+      {#if !prompt.branch.remote}
+        <label class="confirm-option">
+          <input type="checkbox" class="checkbox" bind:checked={alsoDeleteBranch} title={writing ? BUSY_REASON : undefined} disabled={writing} />
+          <span>同时删除本地分支 <code>{prompt.branch.name}</code><small>只删除已合入当前分支的分支；有未合入提交时保留并说明</small></span>
         </label>
       {/if}
     </ConfirmDialog>

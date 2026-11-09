@@ -267,8 +267,6 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
   .branch-pill { max-width: 210px; }
 }
 @media (max-width: 960px) {
-  .merge-flow { grid-template-columns: 1fr; }
-  .merge-flow-arrow { transform: rotate(-90deg); min-height: 20px; }
   /* 窄窗口仍保持三列：每列约 230px 放得下图标与两行文案。改成行式卡片只收高度，
      不再堆成三条整宽横条（900 宽时三条要占掉约 280px，把最近仓库挤到折叠线附近）。 */
   .action-card { flex-direction: row; align-items: center; padding: var(--space-12); }

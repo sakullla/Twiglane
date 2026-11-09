@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
+import { tick } from "svelte";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
 const repositoryFileContent = vi.hoisted(() => vi.fn());
@@ -119,6 +120,35 @@ describe("代码页", () => {
     await fireEvent.click(copyBtn);
     expect(writeText).toHaveBeenCalledWith("src/App.ts");
     expect(await screen.findByRole("button", { name: "已复制文件路径" })).toBeTruthy();
+  });
+
+  it("Ctrl+A 只选中这个文件的全部已读内容，复制写入整份文本，点一下或 Esc 取消", async () => {
+    repositoryFileContent.mockResolvedValue(text());
+    const { container } = render(FileContent, { props: props() as never });
+    await waitFor(() => expect(container.querySelector('[data-file-line="1"]')).toBeTruthy());
+    const code = container.querySelector<HTMLElement>(".file-code")!;
+    const selectAll = vi.spyOn(window.getSelection()!, "selectAllChildren");
+    code.focus();
+    const event = new KeyboardEvent("keydown", { key: "a", ctrlKey: true, bubbles: true, cancelable: true });
+    code.dispatchEvent(event);
+    await tick();
+    // 整个窗口不会被选中：原生全选被拦下，选区由代码区自己画。
+    expect(event.defaultPrevented).toBe(true);
+    expect(selectAll).not.toHaveBeenCalled();
+    expect(code.classList.contains("select-all")).toBe(true);
+
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    await fireEvent.keyDown(code, { key: "c", ctrlKey: true });
+    expect(writeText).toHaveBeenCalledWith('import { api } from "./api";\n\nconst value = 1;');
+
+    await fireEvent.keyDown(code, { key: "Escape" });
+    expect(code.classList.contains("select-all")).toBe(false);
+    await fireEvent.keyDown(code, { key: "a", ctrlKey: true });
+    expect(code.classList.contains("select-all")).toBe(true);
+    await fireEvent.pointerDown(code);
+    expect(code.classList.contains("select-all")).toBe(false);
+    selectAll.mockRestore();
   });
 
   it("续读从上次结束处继续，并在读完后收起入口", async () => {

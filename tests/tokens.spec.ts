@@ -780,11 +780,11 @@ describe("共享控件状态语义（T3）", () => {
     }
   });
 
-  it("命令面板的禁用项仍是键盘当前项时保留游标", () => {
+  it("命令面板的禁用项仍是键盘当前项时保留游标，原因只在当前项展开", () => {
     const rule = ruleBody(components, '.palette-item[aria-disabled="true"].active');
-    expect(rule, "当前项保留 accent 底色").toMatch(/background:\s*var\(--accent-soft\)/);
-    expect(rule, "左沿游标与禁用描边同时存在").toMatch(/box-shadow:\s*inset 2px 0 0 var\(--accent\), inset 0 0 0 1px var\(--control-border\)/);
-    expect(rule, "禁用描边不能覆盖游标").not.toMatch(/background:\s*var\(--surface-2\)/);
+    expect(rule, "当前项有底色").toMatch(/background:\s*var\(--hover\)/);
+    expect(rule, "左沿游标保留，换成中性色读出「点不动」").toMatch(/box-shadow:\s*inset 2px 0 0 var\(--fg-subtle\)/);
+    expect(ruleBody(components, ".palette-item:not(.active) .palette-reason"), "非当前项不挂原因").toMatch(/display:\s*none/);
   });
 
   it("幽灵按钮禁用时保持无框无底的同一形状，只用共享比例淡化", () => {
@@ -802,15 +802,22 @@ describe("共享控件状态语义（T3）", () => {
     expect(ruleBody(components, ".icon-btn:disabled")).toMatch(/box-shadow:\s*none/);
   });
 
+  it("列表型菜单项禁用时保持无框无底，只弱化文字并换禁止光标", () => {
+    // 菜单项静止时本来就无框无底：禁用后补框/底会比可用项更像按钮，可用性读反（同幽灵按钮）。
+    for (const selector of [".menu-item:disabled", '.context-item[aria-disabled="true"]', '.palette-item[aria-disabled="true"]']) {
+      const body = ruleBody(components, selector);
+      expect(body, `${selector} 不加内描边`).not.toMatch(/box-shadow:\s*inset 0 0 0 1px/);
+      expect(body, `${selector} 不加中性填充`).not.toMatch(/background:\s*var\(--surface-[23]\)/);
+      expect(body, `${selector} 换禁止光标`).toMatch(/cursor:\s*not-allowed/);
+    }
+  });
+
   it("禁用态除文字色外还有中性填充或控件边界，且不改变尺寸", () => {
     expect(ruleBody(components, ".btn:disabled"), "常规按钮").toMatch(/border-color:\s*var\(--control-border\)/);
     const soft = ruleBody(components, ".btn-danger-soft:disabled");
     expect(soft, "软色按钮禁用回到中性填充").toMatch(/background:\s*var\(--surface-3\)/);
     expect(soft, "软色按钮禁用不能把 .btn:disabled 的边界改回透明").not.toMatch(/border(-color)?:\s*[^;]*transparent/);
     for (const selector of [
-      ".menu-item:disabled",
-      '.context-item[aria-disabled="true"]',
-      '.palette-item[aria-disabled="true"]',
       '.segmented button:disabled, .segmented button[aria-disabled="true"]',
       ".composer-inline-action:disabled",
       ".switch input:disabled",

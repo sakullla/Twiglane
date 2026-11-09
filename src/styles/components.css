@@ -295,9 +295,10 @@
    写法和合并结果编辑框一致：2px --focus，负偏移保证环画在菜单项自身范围内。 */
 .menu-item:hover:not(:disabled) { background: var(--hover); }
 .menu-item:focus-visible { background: var(--hover); outline: 2px solid var(--focus); outline-offset: -2px; }
-/* 不可用菜单项不用整体 opacity：凡是要读的禁用原因都在条目里，文字必须保持可读；
-   中性填充 + 内描边给出文字之外的形状线索。 */
-.menu-item:disabled { cursor: not-allowed; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--control-border); color: var(--fg-subtle); }
+/* 不可用菜单项：菜单项静止时本来就无框无底，禁用后再补框/底会比可用项更像按钮，可用性读反
+   （与幽灵按钮同一条原则）。这里只弱化文字与图标、换成禁止光标；文字之外的线索是条目里写明的原因。 */
+.menu-item:disabled { cursor: not-allowed; background: transparent; color: var(--fg-subtle); }
+.menu-item:disabled:hover { background: transparent; }
 .menu-item > .icon { color: var(--accent-text); margin-top: 2px; }
 .menu-item:disabled > .icon { color: var(--fg-subtle); }
 .menu-item span { display: flex; flex-direction: column; line-height: 1.4; font-size: var(--text-sm); font-weight: var(--weight-medium); }
@@ -318,7 +319,7 @@
 
 /* ---------- 右键菜单 ---------- */
 /* 固定定位到指针处（由组件按窗口边缘翻转），条目单行、紧凑；不可用条目灰显并在提示里给原因。 */
-.context-menu { position: fixed; right: auto; min-width: 232px; max-width: 400px; max-height: calc(100vh - 16px); overflow: auto; padding: var(--space-4); outline: none; z-index: var(--z-toast); }
+.context-menu { position: fixed; right: auto; width: max-content; min-width: 232px; max-width: min(400px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow: auto; padding: var(--space-4); outline: none; z-index: var(--z-toast); }
 /* 菜单内没有任何可执行项时焦点落在菜单容器本身；容器也必须有可见焦点，不能只剩一条 outline:none。 */
 .context-menu:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .context-item { align-items: center; gap: var(--space-8); min-height: 30px; padding: var(--space-4) var(--space-8); }
@@ -330,7 +331,8 @@
 .context-item.active { background: var(--hover); }
 /* 键盘焦点与 hover 当前项同一底色，但补可见焦点环；环画在条目内部，不被菜单滚动容器裁掉。 */
 .context-item:focus-visible { background: var(--hover); outline: 2px solid var(--focus); outline-offset: -2px; }
-.context-item[aria-disabled="true"] { cursor: not-allowed; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--control-border); }
+.context-item[aria-disabled="true"] { cursor: not-allowed; background: transparent; }
+.context-item[aria-disabled="true"]:hover { background: transparent; }
 .context-item[aria-disabled="true"] .context-label, .context-item[aria-disabled="true"] > .icon { color: var(--fg-subtle); }
 .context-item.danger .context-label, .context-item.danger > .icon { color: var(--danger-text); }
 .context-item.danger.active { background: var(--danger-soft); }
@@ -891,14 +893,17 @@
 .palette-item.active:hover { background: var(--accent-soft); }
 .palette-item.active > span:first-child { color: var(--accent-text); }
 .palette-item:focus-visible { background: var(--hover); outline: 2px solid var(--focus); outline-offset: -2px; }
-/* 不可用动作就地给原因，不用整行淡化（会把文字压到 4.5:1 以下）；
-   中性填充 + 内描边提供文字之外的形状线索。 */
-.palette-item[aria-disabled="true"] { cursor: not-allowed; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--control-border); }
+/* 不可用动作不加框也不整行淡化：标题弱化、光标换成禁止；原因只在它成为当前项时展开，
+   列表里不会每行都挂一句说明（悬停或键盘移到它上面就能读到）。 */
+.palette-item[aria-disabled="true"] { cursor: not-allowed; background: transparent; }
+.palette-item[aria-disabled="true"]:hover { background: var(--hover); }
 .palette-item[aria-disabled="true"] > span:first-child { color: var(--fg-subtle); }
-/* 禁用项恰好是键盘当前项：active 底色与左沿游标必须保留，再叠禁用内描边。
-   特异性高于上面两条单独状态，避免「当前项与非当前禁用项同貌」而丢失键盘焦点。 */
-.palette-item[aria-disabled="true"].active { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent), inset 0 0 0 1px var(--control-border); }
-.palette-reason { max-width: 46%; overflow: hidden; text-overflow: ellipsis; color: var(--fg-subtle); font-size: var(--text-xs); white-space: nowrap; }
+.palette-item[aria-disabled="true"] kbd { opacity: var(--opacity-disabled); }
+/* 禁用项恰好是键盘当前项：保留左沿游标，底色换成中性，读得出「在这里，但点不动」。 */
+.palette-item[aria-disabled="true"].active { background: var(--hover); box-shadow: inset 2px 0 0 var(--fg-subtle); }
+.palette-item[aria-disabled="true"].active > span:first-child { color: var(--fg-muted); }
+.palette-reason { max-width: 46%; overflow: hidden; text-overflow: ellipsis; color: var(--fg-muted); font-size: var(--text-xs); white-space: nowrap; }
+.palette-item:not(.active) .palette-reason { display: none; }
 /* 区分用的补充（同名仓库路径、当前仓库）：紧跟标题，空间不够时先省略它，标题与快捷键列不动。 */
 .palette-detail { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg-subtle); font-size: var(--text-xs); white-space: nowrap; }
 .palette-empty { padding: var(--space-32) var(--space-16) var(--space-8); text-align: center; color: var(--fg-muted); font-size: var(--text-sm); }
@@ -1281,28 +1286,19 @@ label.list-row .checkbox { margin-top: 2px; }
 .modal-foot > .hint .icon { color: var(--accent-text); }
 
 /* ---------- 合并：选择方向与预览 ---------- */
-/* 版式：顶部一张「从 → 到」路线卡（两端都可选、可互换），下面是自动检查的结论、
-   统计与提交/文件清单，最后是合并方式。主操作固定在底部操作条。 */
-.merge-setup { width: min(1440px, 100%); min-height: 100%; margin: 0 auto; padding: var(--space-16) 20px; display: flex; flex-direction: column; gap: var(--space-12); }
-/* 有内容可审阅时整块铺满：配置区收在上面，审阅区占剩下的高度，各自滚动。 */
-.merge-setup.reviewing { height: 100%; }
-.merge-config { flex: none; display: flex; flex-direction: column; gap: var(--space-12); min-width: 0; }
-.merge-setup:not(.reviewing) .merge-config { width: min(1080px, 100%); margin: 0 auto; }
-.merge-route-card { display: grid; grid-template-columns: minmax(0, 1fr) 72px minmax(0, 1fr); align-items: center; gap: var(--space-8); padding: var(--space-12) var(--space-16) 10px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--border); }
-.merge-endpoint { display: flex; flex-direction: column; gap: var(--space-6); min-width: 0; }
-.merge-endpoint-label { display: inline-flex; align-items: center; gap: var(--space-6); color: var(--fg-muted); font-size: var(--text-sm); font-weight: var(--weight-medium); }
-.merge-endpoint-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.merge-endpoint-dot.source { background: var(--purple); }
-.merge-endpoint-dot.target { background: var(--accent); }
-.merge-endpoint-head { display: flex; align-items: center; gap: var(--space-8); min-width: 0; min-height: 20px; }
-.merge-endpoint small { display: inline-flex; align-items: center; gap: var(--space-4); min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-subtle); font-size: var(--text-xs); }
-.merge-endpoint-label { flex: none; }
-.merge-endpoint small.switch-note { color: var(--info-text); }
-.merge-flow { position: relative; display: flex; flex-direction: column; align-items: center; gap: var(--space-4); padding-top: 18px; }
-.merge-flow-track { position: relative; display: flex; align-items: center; justify-content: center; width: 100%; height: 28px; }
-.merge-flow-track::before { content: ""; position: absolute; left: 4px; right: 4px; top: 50%; height: 2px; border-radius: 2px; background: var(--border-strong); }
-.merge-flow-arrow { position: relative; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: var(--accent-fg); box-shadow: var(--shadow-sm); }
-.merge-swap { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--control-border); background: var(--surface); color: var(--fg-muted); transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), transform var(--duration-base) var(--ease); }
+/* 版式：顶部一行「把 A 合并到 B」方向条（两端可选、可互换，提醒跟在句尾，常用组合靠右）；
+   下面一条检查结论；有内容可审阅时其余高度全部交给提交/文件审阅区。合并方式与说明放在底部，
+   和主操作同一行。没有可审阅的内容时，结论本身居中成为这一页的主体。 */
+.merge-setup { width: min(1440px, 100%); height: 100%; margin: 0 auto; padding: var(--space-12) var(--space-16); display: flex; flex-direction: column; gap: var(--space-12); min-height: 0; }
+.merge-bar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); min-width: 0; flex: none; }
+.merge-bar-word { flex: none; color: var(--fg-muted); font-size: var(--text-sm); font-weight: var(--weight-medium); }
+.merge-bar-picker { flex: 0 1 320px; min-width: 180px; }
+.merge-bar-picker .branch-picker { width: 100%; }
+.merge-bar-note { display: inline-flex; align-items: center; gap: var(--space-4); flex: 0 1 auto; min-width: 0; max-width: 340px; height: 24px; padding: 0 var(--space-8); border-radius: 999px; font-size: var(--text-xs); white-space: nowrap; }
+.merge-bar-note > .icon { flex: none; }
+.merge-bar-note.info { background: var(--info-soft); color: var(--info-text); }
+.merge-bar-note.muted { background: var(--surface-3); color: var(--fg-muted); }
+.merge-swap { display: grid; place-items: center; flex: none; width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--control-border); background: var(--surface); color: var(--fg-muted); transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), transform var(--duration-base) var(--ease); }
 .merge-swap:hover:not(:disabled) { border-color: var(--control-border-hover); color: var(--fg); transform: rotate(180deg); }
 .merge-swap:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
 
@@ -1421,27 +1417,31 @@ label.list-row .checkbox { margin-top: 2px; }
 .branch-picker-space > .branch-group { height: 30px; min-height: 0; }
 .branch-picker-space > .branch-option { height: 36px; }
 
-.merge-suggest { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); margin-top: calc(var(--space-4) * -1); }
-.merge-suggest-label { color: var(--fg-subtle); font-size: var(--text-sm); }
-.merge-suggest-chip { height: 28px; padding: 0 var(--space-12); border-radius: 999px; border: 1px solid var(--control-border); background: var(--surface); color: var(--fg-muted); font-size: var(--text-sm); transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease); }
-.merge-suggest-chip:hover:not(:disabled) { border-color: var(--control-border-hover); color: var(--fg); }
-.merge-suggest-chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-text); }
+/* 常用组合入口靠在方向条最右侧；菜单里列出组合，当前方向打勾。 */
+.merge-suggest { flex: none; margin-left: auto; gap: var(--space-4); color: var(--fg-muted); }
 
-.merge-check { display: flex; flex-direction: column; gap: var(--space-12); }
-.merge-verdict { display: flex; align-items: center; gap: var(--space-12); padding: 10px var(--space-16); border-radius: var(--radius-lg); background: var(--surface); box-shadow: inset 0 0 0 1px var(--border); }
-.merge-verdict > div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.merge-verdict strong { font-size: var(--text-md); font-weight: var(--weight-semibold); color: var(--fg); }
-.merge-verdict p { color: var(--fg-muted); font-size: var(--text-sm); line-height: var(--leading-normal); }
-.merge-verdict-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; flex: none; background: var(--surface-3); color: var(--fg-muted); }
+.merge-check { display: flex; flex-direction: column; gap: var(--space-8); flex: none; min-width: 0; }
+.merge-check.solo { flex: 1; justify-content: center; align-items: center; padding-bottom: 8vh; }
+.merge-check.solo > * { width: min(760px, 100%); }
+.merge-verdict { display: flex; align-items: center; gap: var(--space-12); padding: var(--space-8) var(--space-12); border-radius: var(--radius); background: var(--surface); box-shadow: inset 0 0 0 1px var(--border); min-width: 0; }
+.merge-verdict-copy { flex: 1; min-width: 0; display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px var(--space-8); }
+.merge-verdict strong { flex: none; font-size: var(--text-base); font-weight: var(--weight-semibold); color: var(--fg); }
+.merge-verdict p { flex: 1 1 240px; min-width: 0; color: var(--fg-muted); font-size: var(--text-sm); line-height: var(--leading-normal); }
+.merge-verdict-icon { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; flex: none; background: var(--surface-3); color: var(--fg-muted); }
+.merge-check.solo .merge-verdict { flex-direction: column; text-align: center; gap: var(--space-8); padding: var(--space-24); border-radius: var(--radius-lg); }
+.merge-check.solo .merge-verdict-copy { flex-direction: column; align-items: center; }
+.merge-check.solo .merge-verdict strong { font-size: var(--text-md); }
+.merge-check.solo .merge-verdict p { flex: none; }
+.merge-check.solo .merge-verdict-icon { width: 40px; height: 40px; }
 .merge-verdict.ok { background: var(--success-softer); }
 .merge-verdict.ok .merge-verdict-icon { background: var(--success); color: var(--on-success); }
 .merge-verdict.warn { background: var(--warning-soft); }
 .merge-verdict.warn .merge-verdict-icon { background: var(--warning); color: var(--on-danger); }
 .merge-verdict.blocked { background: var(--danger-soft); }
 .merge-verdict.blocked .merge-verdict-icon { background: var(--danger); color: var(--on-danger); }
-.merge-verdict.idle .spinner { margin: 9px; color: var(--accent); }
+.merge-verdict.idle .merge-verdict-icon .spinner { color: var(--accent); }
 .merge-verdict-stats { flex: none; display: flex; align-items: center; gap: var(--space-4); }
-.merge-verdict-stats > span { display: inline-flex; align-items: baseline; gap: 3px; height: 24px; padding: 0 var(--space-8); border-radius: 999px; background: color-mix(in srgb, var(--surface) 72%, transparent); color: var(--fg-muted); font-size: var(--text-xs); line-height: 24px; }
+.merge-verdict-stats > span { display: inline-flex; align-items: baseline; gap: 3px; height: 22px; padding: 0 var(--space-8); border-radius: 999px; background: color-mix(in srgb, var(--surface) 72%, transparent); color: var(--fg-muted); font-size: var(--text-xs); line-height: 22px; }
 .merge-verdict-stats strong { font-size: var(--text-sm); font-weight: var(--weight-semibold); color: var(--fg); font-variant-numeric: tabular-nums; }
 .merge-verdict-stats > span.warn strong { color: var(--warning-text); }
 
@@ -1471,19 +1471,23 @@ label.list-row .checkbox { margin-top: 2px; }
 .merge-hot { flex: none; height: 20px; padding: 0 var(--space-8); border-radius: 999px; background: var(--warning-soft); color: var(--warning-text); font-size: var(--text-xs); font-weight: var(--weight-medium); line-height: 20px; }
 .merge-list-more { color: var(--fg-subtle); font-size: var(--text-sm); }
 
-.merge-options { display: flex; flex-direction: column; gap: var(--space-8); }
-.merge-options-row { display: flex; align-items: center; gap: var(--space-8) var(--space-12); flex-wrap: wrap; min-width: 0; }
-.merge-options-sep { width: 1px; height: 18px; background: var(--border-strong); flex: none; }
-.merge-options-row .merge-message { flex: 1; min-width: 260px; flex-direction: row; align-items: center; gap: var(--space-12); }
-.merge-options-row .merge-message .input { flex: 1; height: 30px; }
-button.merge-message-preview { display: inline-flex; align-items: center; gap: var(--space-6); flex: 0 1 auto; min-width: 0; max-width: 100%; height: 30px; padding: 0 var(--space-8); border-radius: var(--radius-sm); border: 1px dashed transparent; color: var(--fg); transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease); }
+.merge-options-host { display: flex; align-items: center; gap: var(--space-8); flex: 0 1 auto; min-width: 0; }
+.merge-options { display: flex; align-items: center; gap: var(--space-8) var(--space-12); flex: 0 1 auto; min-width: 0; }
+.merge-options .merge-message { flex: 0 1 420px; min-width: 200px; flex-direction: row; align-items: center; gap: var(--space-8); }
+.merge-options .merge-message .input { flex: 1; min-width: 0; height: 30px; }
+.merge-options .merge-mode-note { min-width: 0; align-items: center; }
+.merge-options .merge-mode-note > .icon { margin-top: 0; }
+.merge-options-ff { display: inline-flex; align-items: center; gap: var(--space-6); min-width: 0; color: var(--fg-muted); font-size: var(--text-sm); }
+.merge-options-ff > .icon { flex: none; color: var(--success-text); }
+.mp-foot-options { display: flex; align-items: center; flex: 0 1 auto; min-width: 0; }
+button.merge-message-preview { display: inline-flex; align-items: center; gap: var(--space-6); flex: 0 1 auto; min-width: 0; max-width: 420px; height: 30px; padding: 0 var(--space-8); border-radius: var(--radius-sm); border: 1px dashed transparent; color: var(--fg); transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease); }
 button.merge-message-preview code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: var(--text-sm); }
 button.merge-message-preview > .icon { flex: none; color: var(--fg-subtle); }
 button.merge-message-preview:hover:not(:disabled) { background: var(--hover); border-color: var(--control-border); }
 button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-text); }
 
 /* 合并审阅：左边列出将带入的提交 / 文件 / 冲突，右边是所选项的明细。 */
-.merge-review { flex: 1; min-height: 380px; display: grid; grid-template-columns: minmax(280px, 34%) minmax(0, 1fr); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--border); overflow: hidden; }
+.merge-review { flex: 1; min-height: 300px; display: grid; grid-template-columns: minmax(280px, 34%) minmax(0, 1fr); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--border); overflow: hidden; }
 .merge-review-side { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--border); background: var(--surface-2); }
 .merge-review-tabs { flex: none; display: flex; gap: 2px; padding: var(--space-4) var(--space-8) 0; box-shadow: inset 0 -1px 0 var(--border); }
 .merge-review-tabs button { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-6); height: 38px; padding: 0 var(--space-8); color: var(--fg-muted); font-size: var(--text-sm); font-weight: var(--weight-medium); white-space: nowrap; box-shadow: inset 0 -2px 0 transparent; transition: color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease); }
@@ -1532,7 +1536,6 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .merge-detail-diff { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .merge-review-detail .history-multi { flex: 1; min-height: 0; }
 /* 方式只在分叉时出现：一行标签 + 两段分段控件，说明跟在下面一行；快进时只有一句结论。 */
-.merge-mode-row { display: flex; align-items: center; gap: var(--space-12); flex-wrap: wrap; }
 .merge-mode-label, .merge-message-label { flex: none; color: var(--fg-muted); font-size: var(--text-sm); font-weight: var(--weight-medium); }
 .merge-mode button { height: 28px; padding: 0 var(--space-12); }
 .merge-mode button[aria-checked="true"] { background: var(--segmented-active-bg); color: var(--fg); box-shadow: var(--segmented-active-shadow); }
@@ -1541,8 +1544,6 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .merge-mode-note > .icon { flex: none; margin-top: 3px; color: var(--info-text); }
 .merge-mode-note.warn { color: var(--warning-text); }
 .merge-mode-note.warn > .icon { color: var(--warning-text); }
-.merge-message-row { display: flex; align-items: center; gap: var(--space-12); min-width: 0; }
-.merge-message-row .merge-message { flex: 1; min-width: 0; }
 .merge-message-preview { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); font-family: var(--mono); font-size: var(--text-sm); }
 .merge-message { display: flex; flex-direction: column; gap: var(--space-6); color: var(--fg-muted); font-size: var(--text-sm); font-weight: var(--weight-medium); }
 .merge-message .input { font-family: var(--mono); font-size: var(--text-sm); }
@@ -1561,9 +1562,8 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .merge-route-arrow { display: grid; place-items: center; color: var(--fg-subtle); }
 
 @media (max-width: 900px) {
-  .merge-route-card { grid-template-columns: minmax(0, 1fr); }
-  .merge-flow { flex-direction: row; justify-content: center; padding-top: 0; }
-  .merge-flow-track { width: 28px; transform: rotate(90deg); }
+  .merge-bar-picker { flex-basis: 220px; }
+  .merge-options .merge-message { min-width: 140px; }
 }
 
 /* ---------- 合并 modal：整屏工作区 ---------- */
@@ -1812,6 +1812,8 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .cr-pair.same .cr-half, .cr-half.blank, .cr-pair:not(.same) .cr-half.blank { background: var(--surface-2); }
 /* 选中代码时统一用 --fg：语法色叠上选区底后过不了 4.5:1，门禁按这条规则判定。 */
 .code ::selection, .code::selection { color: var(--fg); }
+/* 文件查看的「全选」：代码区是虚拟滚动的，选区不能交给浏览器画，按同一种选区色铺在每行文字上。 */
+.file-code.select-all .code-in, .file-code-wrap.select-all .code { background: color-mix(in srgb, var(--accent) var(--selection-mix), transparent); }
 .cr-half .mk { border-radius: 3px; }
 /* 叠层比例受代码文字 4.5:1 限制，所以再加一条底线，行内差异不只靠底色深浅辨认。 */
 .cr-half.ours .mk { background: color-mix(in srgb, var(--info) var(--mark-mix), transparent); box-shadow: inset 0 -1px 0 var(--info); }

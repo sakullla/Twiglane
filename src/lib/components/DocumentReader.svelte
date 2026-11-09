@@ -739,6 +739,7 @@
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
     <div
       class="doc-source-scroll"
+      data-select-scope
       role="region"
       aria-label="文档源码"
       tabindex="0"

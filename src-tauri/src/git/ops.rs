@@ -288,18 +288,21 @@ async fn open_root(
 ) -> Result<OpenedRepository, AppError> {
     let git = require_git(backend).await?;
     let (program, args) = status_command(&git.path, &root);
-    let scheduled = run_git(
-        backend,
-        &repo_key(&root),
-        JobKind::Read,
-        request_id,
-        program,
-        args,
-        None,
-    )
-    .await?;
-    let snapshot = status_from_output(backend, &root, &scheduled).await?;
-    let abbrev_length = read_abbrev_length(backend, &git.path, &root).await;
+    // 状态和提交缩写长度互不依赖：并行读，打开仓库少等一个 Git 进程。
+    let key = repo_key(&root);
+    let (scheduled, abbrev_length) = tokio::join!(
+        run_git(
+            backend,
+            &key,
+            JobKind::Read,
+            request_id,
+            program,
+            args,
+            None,
+        ),
+        read_abbrev_length(backend, &git.path, &root),
+    );
+    let snapshot = status_from_output(backend, &root, &scheduled?).await?;
     let summary = RepoSummary {
         name: repo_name(&root),
         path: repo_key(&root),
@@ -396,7 +399,8 @@ async fn decorate_status(backend: &Backend, root: &Path, snapshot: &mut StatusSn
         fill_untracked_lines(root, &mut snapshot.files).await;
         return;
     };
-    let (staged, unstaged) = tokio::join!(
+    // 两次 numstat 与未跟踪文件数行互不依赖：一起跑，打开和刷新都少等一轮。
+    let (staged, unstaged, untracked) = tokio::join!(
         async {
             if needs_staged_stats(&snapshot.files) {
                 read_numstat_map(backend, root, &git.path, true, snapshot.generation).await
@@ -410,10 +414,11 @@ async fn decorate_status(backend: &Backend, root: &Path, snapshot: &mut StatusSn
             } else {
                 HashMap::new()
             }
-        }
+        },
+        untracked_line_stats(root, &snapshot.files),
     );
     assign_worktree_numstat(&mut snapshot.files, &staged, &unstaged);
-    fill_untracked_lines(root, &mut snapshot.files).await;
+    apply_untracked_lines(&mut snapshot.files, untracked);
     crate::git::sizes::decorate_status_sizes(backend, &git.path, root, snapshot.generation, &mut snapshot.files).await;
 }
 
@@ -500,6 +505,12 @@ const UNTRACKED_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const UNTRACKED_STATUS_BYTES: u64 = 16 * 1024 * 1024;
 
 async fn fill_untracked_lines(root: &Path, files: &mut [FileChange]) {
+    let stats = untracked_line_stats(root, files).await;
+    apply_untracked_lines(files, stats);
+}
+
+/// 未跟踪文件的行数（按字节预算）。只读文件，不改 `files`，可以和 Git 读取并行。
+async fn untracked_line_stats(root: &Path, files: &[FileChange]) -> Vec<(usize, Option<LineStat>)> {
     let paths: Vec<_> = files
         .iter()
         .enumerate()
@@ -507,21 +518,25 @@ async fn fill_untracked_lines(root: &Path, files: &mut [FileChange]) {
         .map(|(index, file)| (index, file.path.clone()))
         .collect();
     if paths.is_empty() {
-        return;
+        return Vec::new();
     }
     let root = root.to_path_buf();
     // 文件 I/O 和数行在阻塞线程执行，避免占用异步 Git 调度线程。
-    let result = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let mut budget = UNTRACKED_STATUS_BYTES;
         paths
             .into_iter()
             .map(|(index, path)| (index, untracked_line_stat(&root, &path, &mut budget)))
             .collect::<Vec<_>>()
     })
-    .await;
-    if let Ok(stats) = result {
-        for (index, stat) in stats {
-            files[index].unstaged_lines = stat;
+    .await
+    .unwrap_or_default()
+}
+
+fn apply_untracked_lines(files: &mut [FileChange], stats: Vec<(usize, Option<LineStat>)>) {
+    for (index, stat) in stats {
+        if let Some(file) = files.get_mut(index) {
+            file.unstaged_lines = stat;
         }
     }
 }

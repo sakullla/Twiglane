@@ -94,6 +94,7 @@
   import RepositoryFiles from "./lib/components/RepositoryFiles.svelte";
   import RecoveryActions from "./lib/components/RecoveryActions.svelte";
   import RepoDialogs from "./lib/components/RepoDialogs.svelte";
+  import { scopedSelectAll } from "./lib/select-scope";
   import RepoSwitcher from "./lib/components/RepoSwitcher.svelte";
   import ScopeModal from "./lib/components/ScopeModal.svelte";
   import SettingsModal from "./lib/components/SettingsModal.svelte";
@@ -1971,6 +1972,10 @@
       const path = droppedPath ?? await pickDirectory("添加已有仓库");
       if (!path) return;
       if ((await flushDraft(drafts.path)) === false) return;
+      live = "正在读取仓库状态";
+      // 和切换最近仓库同一条路径：先停掉当前仓库还在排队的只读请求（历史分页、文件树、
+      // 大小统计……）。读取并发有上限，不停掉的话新仓库的状态读取要排在它们后面，打开会很慢。
+      await api.cancelReads().catch(() => undefined);
       const openedRepo = await api.addRepository(path, nextId());
       banner = null;
       rememberOpened(openedRepo);
@@ -2954,6 +2959,8 @@
     };
     window.addEventListener("keydown", layerListener, true);
     window.addEventListener("keydown", keyListener);
+    // ⌘/Ctrl A 收窄到焦点所在的阅读区域，不再把整个窗口的界面文字一起选中。
+    window.addEventListener("keydown", scopedSelectAll);
     // 窗口宽度决定左栏的渲染上限（fitPaneWidth）。
     const onResize = () => {
       windowWidth = currentWindowWidth();
@@ -3033,6 +3040,7 @@
       stopDrag.forEach((stop) => stop());
       window.removeEventListener("keydown", layerListener, true);
       window.removeEventListener("keydown", keyListener);
+      window.removeEventListener("keydown", scopedSelectAll);
       window.removeEventListener("resize", onResize);
       window.clearInterval(poll);
       if (draftTimer) clearTimeout(draftTimer);
@@ -3596,6 +3604,7 @@
     {branchGroups}
     blockedReason={writeLocked ? switchBlockedReason(commandState) : null}
     onOpened={rememberOpened}
+    onRecent={(list) => (recent = list)}
     {nextId}
   />
 {:else if taskModal === "settings"}

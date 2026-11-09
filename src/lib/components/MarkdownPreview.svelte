@@ -254,7 +254,7 @@
       {/if}
       <!-- 正文区本身是键盘可达的滚动区域：长文可用方向键/PageUp/Down 阅读。 -->
       <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-      <div class="md-scroll" role="region" aria-label="文档正文" tabindex="0" bind:this={scroller} onscroll={scrolled}>
+      <div class="md-scroll" role="region" aria-label="文档正文" tabindex="0" data-select-scope bind:this={scroller} onscroll={scrolled}>
         {#if document.blocks.length === 0}
           <div class="md-empty"><p>这是一个空文档。</p>{#if onSource}<button type="button" class="md-small-button" onclick={onSource}>查看源码</button>{/if}</div>
         {:else}

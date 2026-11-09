@@ -101,6 +101,17 @@
   let wrap = $state(false);
   let view = $state<"source" | "image">("source");
   let hitLine = $state<number | null>(null);
+  /**
+   * ⌘/Ctrl A 只选这个文件的正文。代码区是虚拟滚动的，屏幕外的行不在 DOM 里，浏览器原生全选
+   * 只会选中可见的几十行（并且会连同整个窗口一起选中）；这里改成「整份已读内容」的选中态，
+   * 用样式画出选区，复制时写入全部已读行。点一下、按 Esc 或换文件就取消。
+   */
+  let allSelected = $state(false);
+  $effect(() => {
+    void path;
+    void wrap;
+    allSelected = false;
+  });
   let copied = $state(false);
 
   let searchOpen = $state(false);
@@ -694,8 +705,26 @@
    * 在这里拦下并停止冒泡，全局的 ⌘/Ctrl F（聚焦文件树筛选）只在内容区之外生效。
    */
   function onContentKey(event: KeyboardEvent): void {
-    if (content?.kind !== "text") return;
     const mod = event.metaKey || event.ctrlKey;
+    if (allSelected && event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      allSelected = false;
+      return;
+    }
+    if (mod && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "a" && !isEditable(event.target)) {
+      event.preventDefault();
+      event.stopPropagation();
+      selectAllContent(event.currentTarget as HTMLElement);
+      return;
+    }
+    if (mod && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "c" && allSelected && !isEditable(event.target)) {
+      event.preventDefault();
+      event.stopPropagation();
+      void copyAll();
+      return;
+    }
+    if (content?.kind !== "text") return;
     if (!mod || event.altKey || event.shiftKey) return;
     const key = event.key.toLowerCase();
     if (key === "f") {
@@ -708,6 +737,48 @@
       searchOpen = false;
       void openGoto();
     }
+  }
+
+  function isEditable(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) return false;
+    return target.isContentEditable || Boolean(target.closest("input, textarea, select"));
+  }
+
+  /**
+   * 全选的范围只到这个文件的正文：排版预览与源码阅读选中正文节点本身；代码区（含自动换行）
+   * 进入「整份已读内容」选中态。都不是时（例如二进制、读取失败）什么也不选，绝不外溢到整个窗口。
+   */
+  function selectAllContent(root: HTMLElement): void {
+    const scope = root.querySelector<HTMLElement>("[data-select-scope]");
+    const selection = typeof window === "undefined" ? null : window.getSelection();
+    if (scope) {
+      allSelected = false;
+      selection?.selectAllChildren(scope);
+      return;
+    }
+    if (content?.kind === "text" && lines.length > 0) {
+      selection?.removeAllRanges();
+      allSelected = true;
+    }
+  }
+
+  async function copyAll(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(allText());
+    } catch {
+      // 剪贴板不可用时保留选中态，用户还能再试；不弹错误打断阅读。
+    }
+  }
+
+  /** 复制事件（右键菜单、系统菜单）走同一份内容：选中态下写入全部已读行，而不是可见那几行。 */
+  function onContentCopy(event: ClipboardEvent): void {
+    if (!allSelected || !event.clipboardData) return;
+    event.preventDefault();
+    event.clipboardData.setData("text/plain", allText());
+  }
+
+  function allText(): string {
+    return lines.join("\n");
   }
 
   function moreEntries(): ContextMenuEntry[] {
@@ -779,7 +850,14 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="file-content" onkeydown={onContentKey}>
+<div
+  class="file-content"
+  onkeydown={onContentKey}
+  oncopy={onContentCopy}
+  onpointerdown={() => {
+    if (allSelected) allSelected = false;
+  }}
+>
   {#if path && parts}
     <header class="diff-toolbar file-head">
       {#if nav}<FileNav {nav} steps={false} />{/if}
@@ -1068,7 +1146,7 @@
         </div>
       {/if}
       {#if wrap}
-        <div class="file-code-wrap" role="textbox" aria-readonly="true" aria-multiline="true" aria-label={`${parts.name} 内容`} tabindex="0">
+        <div class="file-code-wrap" class:select-all={allSelected} role="textbox" aria-readonly="true" aria-multiline="true" aria-label={`${parts.name} 内容`} tabindex="0">
           {#each lines as line, index (index)}
             {@const no = pageOffset + index + 1}
             <div class="file-wrap-line" class:hit={hitLine === no} data-file-line={no}>
@@ -1080,6 +1158,7 @@
       {:else}
         <div
           class="diff-scroll file-code"
+          class:select-all={allSelected}
           role="textbox"
           aria-readonly="true"
           aria-multiline="true"

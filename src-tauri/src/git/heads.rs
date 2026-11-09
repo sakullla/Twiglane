@@ -5,7 +5,7 @@
 //!
 //! 全部只读、限量、绝不自动 fetch：单项失败只把该项标为未知，其他项照常返回。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -25,6 +25,8 @@ use crate::redact::redact_error_text;
 const MAX_HEADS: usize = 600;
 /// 一次总览最多启动这么多次 `git status`：超出上限的工作区标为未知，而不是悄悄省略。
 const MAX_OVERVIEW_STATUS: usize = 200;
+/// 一次总览最多枚举这么多个主仓库的工作区（同一 common dir 只算一次）：超出同样标未知。
+const MAX_OVERVIEW_ENUMERATE: usize = 64;
 /// HEAD 与 .git 文件都很小；超过这个大小说明不是我们认识的格式。
 const MAX_HEAD_BYTES: u64 = 4096;
 
@@ -162,7 +164,8 @@ pub struct WorktreeItem {
     pub status: String,
     /// 该项的失败或限制说明；空字符串表示没有。
     pub note: String,
-    pub checked_at_ms: u64,
+    /// 读到状态的时间；失败、超限、缺失这类没有读到的项为空，界面不得拿它冒充当前状态。
+    pub checked_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -261,7 +264,8 @@ fn short_oid(oid: &str) -> Option<String> {
     (short.len() == 7).then(|| short.to_ascii_lowercase())
 }
 
-fn blank_item(path: String, main_path: Option<String>, now: u64) -> WorktreeItem {
+/// 一项还没读到状态的条目：字段未知、读取时间为空，绝不用调用时刻伪装成读过。
+fn blank_item(path: String, main_path: Option<String>) -> WorktreeItem {
     WorktreeItem {
         path,
         main_path,
@@ -285,7 +289,7 @@ fn blank_item(path: String, main_path: Option<String>, now: u64) -> WorktreeItem
         remote_check_stale: false,
         status: "unknown".to_string(),
         note: String::new(),
-        checked_at_ms: now,
+        checked_at_ms: None,
     }
 }
 
@@ -301,12 +305,34 @@ pub async fn worktree_overview(
     paths: &[String],
     request_id: u64,
 ) -> Result<WorktreeOverview, crate::error::AppError> {
+    worktree_overview_with(
+        backend,
+        paths,
+        request_id,
+        MAX_OVERVIEW_STATUS,
+        MAX_OVERVIEW_ENUMERATE,
+    )
+    .await
+}
+
+/// 枚举与状态读取的预算显式传入：测试用很小的预算就能覆盖「超限只影响该项」。
+async fn worktree_overview_with(
+    backend: &Backend,
+    paths: &[String],
+    request_id: u64,
+    max_status: usize,
+    max_enumerate: usize,
+) -> Result<WorktreeOverview, crate::error::AppError> {
     let git = require_git(backend).await?;
     let now = crate::state::now_ms();
     let mut items: Vec<WorktreeItem> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut recent_keys: HashSet<String> = HashSet::new();
-    let mut budget = MAX_OVERVIEW_STATUS;
+    let mut status_budget = max_status;
+    let mut list_budget = max_enumerate;
+    // 同一主仓库（common dir）只枚举一次：最近列表里主仓库与它的附属工作区常常同时在场，
+    // 各起一次 `git worktree list` 只是把同一份结果重复 spawn。
+    let mut listed: HashMap<String, Vec<WorktreeEntry>> = HashMap::new();
 
     for raw in paths.iter().take(MAX_HEADS) {
         let raw = raw.trim();
@@ -319,7 +345,7 @@ pub async fn worktree_overview(
         let input = match validate_input_path(raw) {
             Ok(input) => input,
             Err(_) => {
-                let mut item = blank_item(raw.to_string(), None, now);
+                let mut item = blank_item(raw.to_string(), None);
                 item.missing = true;
                 item.status = "missing".to_string();
                 item.note = "路径无效，无法读取这个工作区。".to_string();
@@ -332,7 +358,7 @@ pub async fn worktree_overview(
         let root = match canonical_existing(&input) {
             Ok(root) => root,
             Err(error) => {
-                let mut item = blank_item(raw.to_string(), None, now);
+                let mut item = blank_item(raw.to_string(), None);
                 item.missing = true;
                 item.status = "missing".to_string();
                 item.note = note_from(&error);
@@ -343,7 +369,7 @@ pub async fn worktree_overview(
             }
         };
         let Some(git_dir) = resolve_git_dir(&root) else {
-            let mut item = blank_item(repo_key(&root), None, now);
+            let mut item = blank_item(repo_key(&root), None);
             item.missing = true;
             item.status = "missing".to_string();
             item.note = "目录已存在，但不再是 Git 仓库。".to_string();
@@ -354,67 +380,90 @@ pub async fn worktree_overview(
         };
         let main = linked_main(&root, &git_dir).unwrap_or_else(|| root.clone());
         let main_path = repo_key(&main);
+        let main_key = path_key(&main);
 
-        let (program, args) = worktree_list_command(&git.path, &root);
-        let listed = run_git(
-            backend,
-            &repo_key(&main),
-            JobKind::Read,
-            request_id,
-            program,
-            args,
-            None,
-        )
-        .await;
-        let text = match listed {
-            Ok(scheduled) if scheduled.output.exit_code == 0 => {
-                String::from_utf8_lossy(&scheduled.output.stdout).into_owned()
-            }
-            Ok(scheduled) => {
-                let mut item = blank_item(repo_key(&root), Some(main_path.clone()), now);
-                item.note = if scheduled.output.stderr.is_empty() {
-                    "Git 没有列出这个仓库的工作区。".to_string()
-                } else {
-                    redact_error_text(String::from_utf8_lossy(&scheduled.output.stderr).trim())
-                };
-                if seen.insert(path_key(&root)) {
-                    items.push(item);
-                }
-                continue;
-            }
-            Err(error) => {
-                let mut item = blank_item(repo_key(&root), Some(main_path.clone()), now);
-                item.note = note_from(&error);
-                if seen.insert(path_key(&root)) {
-                    items.push(item);
-                }
-                continue;
-            }
-        };
-
-        let entries = parse_worktree_list(&text);
-        if entries.is_empty() {
-            let mut item = blank_item(repo_key(&root), Some(main_path.clone()), now);
-            item.note = "Git 没有列出这个仓库的工作区。".to_string();
+        // 同一主仓库已经有枚举结果时直接复用，不再为每个最近路径各起一次进程。
+        let entries = if let Some(cached) = listed.get(&main_key) {
+            cached.clone()
+        } else if list_budget == 0 {
+            let mut item = blank_item(repo_key(&root), Some(main_path.clone()));
+            item.note = format!("本次最多枚举 {max_enumerate} 个主仓库的工作区，这一项没有读取。");
             if seen.insert(path_key(&root)) {
                 items.push(item);
             }
             continue;
-        }
+        } else {
+            list_budget -= 1;
+            let (program, args) = worktree_list_command(&git.path, &root);
+            let scheduled = run_git(
+                backend,
+                &repo_key(&main),
+                JobKind::Read,
+                request_id,
+                program,
+                args,
+                None,
+            )
+            .await;
+            let text = match scheduled {
+                Ok(scheduled) if scheduled.output.exit_code == 0 => {
+                    String::from_utf8_lossy(&scheduled.output.stdout).into_owned()
+                }
+                Ok(scheduled) => {
+                    let mut item = blank_item(repo_key(&root), Some(main_path.clone()));
+                    item.note = if scheduled.output.stderr.is_empty() {
+                        "Git 没有列出这个仓库的工作区。".to_string()
+                    } else {
+                        redact_error_text(String::from_utf8_lossy(&scheduled.output.stderr).trim())
+                    };
+                    if seen.insert(path_key(&root)) {
+                        items.push(item);
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    let mut item = blank_item(repo_key(&root), Some(main_path.clone()));
+                    item.note = note_from(&error);
+                    if seen.insert(path_key(&root)) {
+                        items.push(item);
+                    }
+                    continue;
+                }
+            };
+            let entries = parse_worktree_list(&text);
+            if entries.is_empty() {
+                let mut item = blank_item(repo_key(&root), Some(main_path.clone()));
+                item.note = "Git 没有列出这个仓库的工作区。".to_string();
+                if seen.insert(path_key(&root)) {
+                    items.push(item);
+                }
+                continue;
+            }
+            // 统一成绝对路径并规范化：复用同一主仓库的枚举结果时不再关心是哪个最近项发起的。
+            let entries: Vec<WorktreeEntry> = entries
+                .into_iter()
+                .map(|mut entry| {
+                    let path = if entry.path.is_absolute() {
+                        entry.path.clone()
+                    } else {
+                        root.join(&entry.path)
+                    };
+                    entry.path = dunce::canonicalize(&path).unwrap_or(path);
+                    entry
+                })
+                .collect();
+            listed.insert(main_key.clone(), entries.clone());
+            entries
+        };
 
         for entry in entries {
-            let entry_path = if entry.path.is_absolute() {
-                entry.path.clone()
-            } else {
-                root.join(&entry.path)
-            };
-            let canonical = dunce::canonicalize(&entry_path).unwrap_or(entry_path);
+            let canonical = entry.path;
             let key = path_key(&canonical);
             if !seen.insert(key) {
                 continue;
             }
-            let mut item = blank_item(repo_key(&canonical), Some(main_path.clone()), now);
-            item.linked = path_key(&main) != path_key(&canonical);
+            let mut item = blank_item(repo_key(&canonical), Some(main_path.clone()));
+            item.linked = main_key != path_key(&canonical);
             item.locked = entry.locked;
             item.branch = entry.branch.clone();
             if entry.branch.is_none() {
@@ -433,14 +482,12 @@ pub async fn worktree_overview(
                 items.push(item);
                 continue;
             }
-            if budget == 0 {
-                item.note = format!(
-                    "本次最多读取 {MAX_OVERVIEW_STATUS} 个工作区的状态，这一项没有读取。"
-                );
+            if status_budget == 0 {
+                item.note = format!("本次最多读取 {max_status} 个工作区的状态，这一项没有读取。");
                 items.push(item);
                 continue;
             }
-            budget -= 1;
+            status_budget -= 1;
 
             let (program, args) = status_command(&git.path, &canonical);
             let scheduled = run_git(
@@ -453,28 +500,18 @@ pub async fn worktree_overview(
                 None,
             )
             .await;
-            let snapshot = match scheduled {
-                Ok(scheduled) if scheduled.output.exit_code == 0 => {
-                    match parse_status(&scheduled.output.stdout) {
-                        Ok(snapshot) => Some(snapshot),
-                        Err(error) => {
-                            item.note = note_from(&error);
-                            None
-                        }
-                    }
-                }
-                Ok(scheduled) => {
-                    let detail =
-                        redact_error_text(String::from_utf8_lossy(&scheduled.output.stderr).trim());
-                    item.note = if detail.is_empty() {
-                        "无法读取这个工作区的状态。".to_string()
-                    } else {
-                        detail
-                    };
-                    None
-                }
-                Err(error) => {
-                    item.note = note_from(&error);
+            let outcome = match scheduled {
+                Ok(scheduled) => status_outcome(
+                    scheduled.output.exit_code,
+                    &scheduled.output.stdout,
+                    &scheduled.output.stderr,
+                ),
+                Err(error) => Err(note_from(&error)),
+            };
+            let snapshot = match outcome {
+                Ok(snapshot) => Some(snapshot),
+                Err(note) => {
+                    item.note = note;
                     None
                 }
             };
@@ -511,6 +548,8 @@ pub async fn worktree_overview(
                 );
                 item.untracked = Some(files.iter().filter(|file| file.untracked).count() as u32);
                 item.status = "ready".to_string();
+                // 只有真读到状态时才记读取时间；未知项不带时间，界面就不会说它刚读过。
+                item.checked_at_ms = Some(now);
                 let checked = backend.remote_checks.get(&repo_key(&canonical));
                 let stale = checked.is_some_and(|at| remote_check_is_stale(at, now));
                 item.remote_checked_at_ms = checked;
@@ -531,6 +570,24 @@ pub async fn worktree_overview(
         items,
         checked_at_ms: now,
     })
+}
+
+/// `git status` 的输出归类：非零退出是进程失败，零退出但读不懂是解析失败。
+/// 两者都只让这一项变成未知，并带上已脱敏的原因；不会被当成干净。
+fn status_outcome(
+    exit_code: i32,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<crate::model::StatusSnapshot, String> {
+    if exit_code != 0 {
+        let detail = redact_error_text(String::from_utf8_lossy(stderr).trim());
+        return Err(if detail.is_empty() {
+            "无法读取这个工作区的状态。".to_string()
+        } else {
+            detail
+        });
+    }
+    parse_status(stdout).map_err(|error| note_from(&error))
 }
 
 fn read_small(path: &Path) -> Option<String> {
@@ -830,5 +887,129 @@ mod overview_tests {
             overview.items.iter().filter(|item| item.status == "ready").count(),
             2
         );
+    }
+
+    /// 200 超限：超出的项只标未知，不伪造读取时间，其他项照常是真实状态。
+    #[tokio::test]
+    async fn marks_over_limit_items_unknown_without_fake_check_time() {
+        let fixture = crate::test_support::git_fixture("overview-limit");
+        let backend = fixture.backend();
+        let main = base_repo(&fixture);
+        for name in ["one", "two", "three"] {
+            let path = fixture.path().join(name);
+            let branch = format!("{name}-branch");
+            git(&main, &["worktree", "add", "-b", branch.as_str(), repo_key(&path).as_str()]);
+        }
+        // 预算只够读主仓库加一个工作区：其余两项必须标未知，并且没有「读过」的时间。
+        let overview = worktree_overview_with(&backend, &[repo_key(&main)], 1, 2, 8)
+            .await
+            .unwrap();
+        assert_eq!(overview.items.len(), 4, "{:?}", overview.items);
+
+        let ready: Vec<&WorktreeItem> = overview
+            .items
+            .iter()
+            .filter(|item| item.status == "ready")
+            .collect();
+        assert_eq!(ready.len(), 2, "{:?}", overview.items);
+        for item in ready {
+            assert_eq!(item.checked_at_ms, Some(overview.checked_at_ms));
+            assert!(item.dirty.is_some() && item.changed.is_some());
+        }
+
+        let limited: Vec<&WorktreeItem> = overview
+            .items
+            .iter()
+            .filter(|item| item.status == "unknown")
+            .collect();
+        assert_eq!(limited.len(), 2, "{:?}", overview.items);
+        for item in limited {
+            assert_eq!(item.checked_at_ms, None, "没读到的项不能带检查时间");
+            assert_eq!(item.dirty, None, "没读到的项不能伪装成干净");
+            assert_eq!(item.changed, None);
+            assert!(item.note.contains("最多读取 2 个"), "{}", item.note);
+            // 分支来自权威枚举，仍然可信；不可信的只是未提交状态。
+            assert!(item.branch.is_some(), "{:?}", item);
+            assert!(item.linked || item.recent);
+        }
+    }
+
+    /// status 进程失败与解析失败都只让这一项未知，邻居不受影响。
+    #[tokio::test]
+    async fn marks_status_process_and_parse_failure_as_single_item_unknown() {
+        let fixture = crate::test_support::git_fixture("overview-status-failure");
+        let backend = fixture.backend();
+        let main = base_repo(&fixture);
+        let bad = fixture.path().join("bad");
+        git(&main, &["worktree", "add", "-b", "bad-branch", repo_key(&bad).as_str()]);
+        // 受控夹具：Git 仍然列出这个工作区，但 .git 指向不存在的 gitdir，status 非零退出。
+        fs::write(bad.join(".git"), "gitdir: /twiglane-missing-gitdir
+").unwrap();
+
+        let overview = worktree_overview_with(&backend, &[repo_key(&main)], 1, 8, 8)
+            .await
+            .unwrap();
+        let failed = item_at(&overview, &bad);
+        assert_eq!(failed.status, "unknown");
+        assert_eq!(failed.dirty, None, "读取失败不能伪装成干净");
+        assert_eq!(failed.changed, None);
+        assert_eq!(failed.checked_at_ms, None, "读取失败不能带伪造的检查时间");
+        assert!(!failed.note.is_empty());
+        assert_eq!(
+            failed.branch.as_deref(),
+            Some("bad-branch"),
+            "分支来自枚举，仍然给出"
+        );
+        assert_eq!(item_at(&overview, &main).status, "ready", "邻居照旧是真实状态");
+
+        // 解析失败是另一条分支：零退出但读不懂，同样只是这一项未知。
+        assert!(
+            status_outcome(0, b"this is not porcelain v2\n", b"").is_err(),
+            "零退出但读不懂必须是解析失败"
+        );
+        let process = status_outcome(128, b"", b"fatal: not a git repository\n").unwrap_err();
+        assert!(process.contains("not a git repository"), "{process}");
+        assert_eq!(
+            status_outcome(1, b"", b"").unwrap_err(),
+            "无法读取这个工作区的状态。"
+        );
+    }
+
+    /// 同一主仓库只枚举一次：主仓库与其附属工作区同在最近列表也只花一份预算。
+    #[tokio::test]
+    async fn enumerates_each_main_once_and_counts_it_into_the_budget() {
+        let fixture = crate::test_support::git_fixture("overview-enumerate-budget");
+        let backend = fixture.backend();
+        let main = base_repo(&fixture);
+        let linked = fixture.path().join("linked");
+        git(&main, &["worktree", "add", "-b", "linked-branch", repo_key(&linked).as_str()]);
+
+        // 预算只够枚举一个主仓库：主仓库与附属工作区共用同一次枚举，两项都读到状态。
+        let overview =
+            worktree_overview_with(&backend, &[repo_key(&main), repo_key(&linked)], 1, 8, 1)
+                .await
+                .unwrap();
+        assert_eq!(overview.items.len(), 2, "{:?}", overview.items);
+        assert!(
+            overview.items.iter().all(|item| item.status == "ready"),
+            "{:?}",
+            overview.items
+        );
+
+        // 另一个主仓库需要自己的一份预算：用完后只让它未知，既不重复枚举也不悄悄省略。
+        let other = fixture.repo("other");
+        git(&other, &["init", "-b", "main"]);
+        fs::write(other.join("b.txt"), "b\n").unwrap();
+        git(&other, &["add", "--", "b.txt"]);
+        git(&other, &["commit", "-m", "base"]);
+        let overview =
+            worktree_overview_with(&backend, &[repo_key(&main), repo_key(&other)], 2, 8, 1)
+                .await
+                .unwrap();
+        assert_eq!(item_at(&overview, &main).status, "ready");
+        let blocked = item_at(&overview, &other);
+        assert_eq!(blocked.status, "unknown");
+        assert_eq!(blocked.checked_at_ms, None);
+        assert!(blocked.note.contains("最多枚举 1 个"), "{}", blocked.note);
     }
 }

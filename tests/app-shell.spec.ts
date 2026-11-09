@@ -3403,8 +3403,18 @@ describe("worktree 总览（R3）", () => {
   async function openSwitcher() {
     render(App);
     await openRepo();
+    return openRepoSwitcher();
+  }
+
+  /** 已经渲染并打开仓库的前提下打开弹层：用来对比两次刷新前后的同一份列表。 */
+  async function openRepoSwitcher() {
     await fireEvent.click(screen.getByRole("button", { name: /^当前仓库/ }));
     return screen.findByRole("dialog", { name: "切换仓库" });
+  }
+
+  async function closeSwitcher(popover: HTMLElement) {
+    await fireEvent.keyDown(within(popover).getByRole("combobox"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "切换仓库" })).toBeNull());
   }
 
   it("按主仓库分组去重，同名仓库靠完整路径区分，缺失的最近项仍然保留", async () => {
@@ -3623,6 +3633,135 @@ describe("worktree 总览（R3）", () => {
     expect(row(popover, repoPath)?.textContent).not.toContain("已审阅");
     expect(popover.textContent).not.toContain("完成度");
     expect(popover.textContent).not.toContain("Agent");
+  });
+
+  it("附属工作区被删除后重开总览不再出现它，也不能再打开或删除", async () => {
+    const main = "C:/work/gone-wt";
+    const feature = "C:/work/gone-wt-feature";
+    useRecent([{ name: "gone-wt", path: main, openedAtMs: 1 }]);
+    mocks.repoHeads.mockResolvedValue([]);
+    mocks.worktreeOverview.mockResolvedValueOnce({
+      checkedAtMs: 1_700_000_500_000,
+      items: [
+        item({ path: main, branch: "main", mainPath: main, dirty: true, changed: 2, checkedAtMs: 1_700_000_500_000 }),
+        item({
+          path: feature,
+          branch: "old-branch",
+          mainPath: main,
+          linked: true,
+          recent: false,
+          checkedAtMs: 1_700_000_500_000,
+        }),
+      ],
+    });
+    render(App);
+    await openRepo();
+    let popover = await openRepoSwitcher();
+    await waitFor(() => expect(row(popover, feature)?.textContent).toContain("old-branch"));
+    expect(screen.getByRole("button", { name: "删除工作区 gone-wt-feature" })).toBeTruthy();
+    await closeSwitcher(popover);
+
+    // 这个 worktree 已经在别处被删除：权威枚举只剩主仓库。
+    mocks.worktreeOverview.mockResolvedValueOnce({
+      checkedAtMs: 1_700_000_600_000,
+      items: [item({ path: main, branch: "main", mainPath: main, checkedAtMs: 1_700_000_600_000 })],
+    });
+    popover = await openRepoSwitcher();
+    await waitFor(() => expect(row(popover, main)?.textContent).toContain("干净"));
+    // 旧分支、旧 dirty 与旧时间都不能继续出现，也不能还能打开或删除。
+    await waitFor(() => expect(row(popover, feature)).toBeNull());
+    expect(popover.textContent).not.toContain("old-branch");
+    expect(options(popover)).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "删除工作区 gone-wt-feature" })).toBeNull();
+  });
+
+  it("异步状态落地后键盘当前项按路径保持，不随下标漂移", async () => {
+    const alpha = "C:/work/alpha";
+    const beta = "C:/work/beta";
+    const extra = "C:/work/alpha-extra";
+    let finishOverview!: (value: unknown) => void;
+    mocks.worktreeOverview.mockReturnValueOnce(new Promise((resolve) => (finishOverview = resolve)));
+    useRecent([
+      { name: "alpha", path: alpha, openedAtMs: 3 },
+      { name: "beta", path: beta, openedAtMs: 2 },
+    ]);
+    mocks.repoHeads.mockResolvedValue([]);
+    const popover = await openSwitcher();
+    const search = within(popover).getByRole("combobox");
+    // demo（当前打开）+ alpha + beta；默认项落在第一个能切过去的仓库上。
+    await waitFor(() => expect(options(popover)).toHaveLength(3));
+    await fireEvent.keyDown(search, { key: "ArrowDown" });
+    expect(popover.querySelector(".switcher-option.active")?.getAttribute("data-worktree-path")).toBe(beta);
+
+    // 总览落地：alpha 组多出一个附属工作区，新行插在当前项之前。
+    finishOverview({
+      checkedAtMs: 1_700_000_700_000,
+      items: [
+        item({ path: alpha, branch: "main", mainPath: alpha, checkedAtMs: 1_700_000_700_000 }),
+        item({
+          path: extra,
+          branch: "extra-branch",
+          mainPath: alpha,
+          linked: true,
+          recent: false,
+          checkedAtMs: 1_700_000_700_000,
+        }),
+        item({ path: beta, branch: "main", mainPath: beta, checkedAtMs: 1_700_000_700_000 }),
+      ],
+    });
+    await waitFor(() => expect(options(popover)).toHaveLength(4));
+    // 当前项还是那个 beta：按路径找回，不跟着数字下标漂到新插入的行上。
+    expect(popover.querySelector(".switcher-option.active")?.getAttribute("data-worktree-path")).toBe(beta);
+  });
+
+  it("这次刷新没有确认到的缓存项标过期，而不是继续冒充当前状态", async () => {
+    const main = "C:/work/stale-wt";
+    const feature = "C:/work/stale-wt-feature";
+    useRecent([{ name: "stale-wt", path: main, openedAtMs: 1 }]);
+    mocks.repoHeads.mockResolvedValue([]);
+    mocks.worktreeOverview.mockResolvedValueOnce({
+      checkedAtMs: 1_700_000_800_000,
+      items: [
+        item({ path: main, branch: "main", mainPath: main, checkedAtMs: 1_700_000_800_000 }),
+        item({
+          path: feature,
+          branch: "feat",
+          mainPath: main,
+          linked: true,
+          recent: false,
+          dirty: true,
+          changed: 1,
+          checkedAtMs: 1_700_000_800_000,
+        }),
+      ],
+    });
+    render(App);
+    await openRepo();
+    let popover = await openRepoSwitcher();
+    await waitFor(() => expect(row(popover, feature)?.textContent).toContain("有改动 1"));
+    expect(popover.querySelector("[data-worktree-stale]")).toBeNull();
+    await closeSwitcher(popover);
+
+    // 这次主仓库只回未知：附属工作区没有被确认，不能继续当作当前状态。
+    mocks.worktreeOverview.mockResolvedValueOnce({
+      checkedAtMs: 1_700_000_900_000,
+      items: [
+        item({
+          path: main,
+          branch: "main",
+          mainPath: main,
+          status: "unknown",
+          dirty: null,
+          changed: null,
+          note: "无法读取这个工作区的状态。",
+          checkedAtMs: null,
+        }),
+      ],
+    });
+    popover = await openRepoSwitcher();
+    await waitFor(() => expect(popover.querySelector('[data-worktree-stale="' + feature + '"]')).toBeTruthy());
+    // 旧读数还在，但它带的是自己那次的时间，没有被刷新成当前。
+    expect(row(popover, feature)?.textContent).toContain("状态读取于");
   });
 });
 

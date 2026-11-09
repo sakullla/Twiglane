@@ -7,6 +7,11 @@
    */
   const knownHeads = new Map<string, RepoHead>();
   const knownItems = new Map<string, WorktreeItem>();
+  /**
+   * 最近一次成功总览回答过的路径。留在 knownItems 里却不在这张表里的项，
+   * 说明这次刷新没有确认到它，只能当过期结果显示，不能继续冒充当前状态。
+   */
+  const confirmedItems = new Set<string>();
 </script>
 
 <script lang="ts">
@@ -14,6 +19,7 @@
   import { api } from "../api";
   import {
     WORKTREE_FILTERS,
+    authoritativeMains,
     baseName,
     buildWorktreeGroups,
     filterWorktreeGroups,
@@ -103,6 +109,8 @@
   let query = $state("");
   let filter = $state<WorktreeFilter>("all");
   let active = $state(0);
+  /** 键盘当前项的稳定身份：列表异步变化时按路径找回，不跟着数字下标漂移。 */
+  let activeKey: string | null = null;
   /** 读到的 HEAD 与总览版本：Map 本身不是响应式的，换号让行重新取值。 */
   let headsVersion = $state(0);
   let itemsVersion = $state(0);
@@ -128,6 +136,19 @@
     return new Map(knownHeads);
   }
 
+  /** 最近一次成功刷新确认过的路径；还没成功过时为 null（不把缓存说成过期）。 */
+  function confirmedSet(): Set<string> | null {
+    void itemsVersion;
+    return confirmedItems.size === 0 ? null : new Set(confirmedItems);
+  }
+
+  /** 当前项记成路径：键盘、鼠标和异步落地都走同一份身份。 */
+  function setActive(index: number) {
+    active = index;
+    const row = selectable[index];
+    activeKey = row ? normalizeRepoPath(row.path) : null;
+  }
+
   /** 当前会话已审阅条数按规范化路径索引：没有记录就是 0 条，不是完成度。 */
   let reviewedTotals = $derived.by(() => {
     const totals: Record<string, number> = {};
@@ -136,7 +157,14 @@
   });
 
   let groups = $derived(
-    buildWorktreeGroups(repos, headMap(), pruneWorktreeItems(repos, itemMap()), currentPath, reviewedTotals),
+    buildWorktreeGroups(
+      repos,
+      headMap(),
+      pruneWorktreeItems(repos, itemMap()),
+      currentPath,
+      reviewedTotals,
+      confirmedSet(),
+    ),
   );
   let filtered = $derived(filterWorktreeGroups(groups, query, filter));
   let flat = $derived(flattenWorktreeGroups(filtered));
@@ -191,7 +219,18 @@
         const key = normalizeRepoPath(path);
         if (!answered.has(key)) knownItems.delete(key);
       }
+      // 权威枚举过的主仓库以这次结果为准：缓存里已经不在枚举中的附属工作区就是被删掉的，
+      // 不能继续显示旧分支/旧 dirty/旧时间，更不能还能打开或删除。
+      const authoritative = authoritativeMains(items);
+      for (const [key, cached] of [...knownItems]) {
+        if (answered.has(key)) continue;
+        const main = cached.mainPath ? normalizeRepoPath(cached.mainPath) : null;
+        if (main !== null && authoritative.has(main)) knownItems.delete(key);
+      }
       for (const item of items) knownItems.set(normalizeRepoPath(item.path), item);
+      // 未确认的缓存项留在原处，但只算过期结果。
+      for (const key of [...confirmedItems]) if (!answered.has(key)) confirmedItems.delete(key);
+      for (const key of answered) confirmedItems.add(key);
       itemsVersion += 1;
       statusCheckedAt = overview.checkedAtMs ?? Date.now();
     } catch (error) {
@@ -281,12 +320,18 @@
     const key = filter + " " + query;
     untrack(() => {
       if (key === seenQuery) {
-        active = Math.min(active, Math.max(0, rows.length - 1));
+        // 同一搜索条件下列表异步变了：按路径把当前项找回来，新插入的行不会顶替它。
+        const at = activeKey === null ? -1 : rows.findIndex((row) => normalizeRepoPath(row.path) === activeKey);
+        if (at >= 0) {
+          active = at;
+          return;
+        }
+        setActive(Math.min(active, Math.max(0, rows.length - 1)));
         return;
       }
       seenQuery = key;
       const first = rows.findIndex((row) => !row.current);
-      active = first >= 0 ? first : 0;
+      setActive(first >= 0 ? first : 0);
       if (list) list.scrollTop = 0;
       scrollTop = 0;
     });
@@ -431,7 +476,7 @@
   bind:active={
     () => active,
     (index) => {
-      active = index;
+      setActive(index);
       following = true;
     }
   }
@@ -504,13 +549,13 @@
                   tabindex="-1"
                   onmousemove={() => {
                     following = false;
-                    active = viewIndex;
+                    setActive(viewIndex);
                   }}
                   onclick={() => choose(view)}
                   oncontextmenu={(event) => {
                     event.preventDefault();
                     following = false;
-                    active = viewIndex;
+                    setActive(viewIndex);
                     onContextMenu(asRepo(view), { x: event.clientX, y: event.clientY }, contextHead(view));
                   }}
                   onkeydown={() => {}}
@@ -553,6 +598,12 @@
                       <span class="repo-state" class:muted={!view.liveRemoteChecked} data-worktree-remote={view.liveRemoteChecked ? "live" : view.remoteCheckedAtMs !== null ? "stale" : "none"}>{remoteText(view)}</span>
                       {#if view.reviewed > 0}<span class="repo-state accent">已审阅 {view.reviewed}</span>{/if}
                       <span class="repo-state muted">{statusTimeText(view)}</span>
+                      {#if view.stale}
+                        <span
+                          class="repo-state muted"
+                          title="这次刷新没有确认到这一项，显示的是更早读取的结果"
+                          data-worktree-stale={view.path}>可能已过期</span>
+                      {/if}
                       {#if view.note}<span class="repo-state muted repo-state-note" title={view.note}>{view.note}</span>{/if}
                     </span>
                     {#if reason}<span class="switcher-reason">{reason}</span>{/if}

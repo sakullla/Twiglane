@@ -756,7 +756,8 @@ export interface WorktreeItem {
   status: "ready" | "unknown" | "missing";
   /** 该项的失败或限制说明；空字符串表示没有。 */
   note: string;
-  checkedAtMs: number;
+  /** 读到状态的时间；失败、超限、缺失这类没读到的项为 null，界面不得拿它冒充当前状态。 */
+  checkedAtMs: number | null;
 }
 
 export interface WorktreeOverview {

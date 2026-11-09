@@ -97,6 +97,8 @@ export interface WorktreeRow {
   openedAtMs: number;
   /** 后端读到状态的时间；没有读到状态时为空。 */
   checkedAtMs: number | null;
+  /** 最近一次成功刷新没有确认到这一项：值来自更早的读取，不能当成当前状态。 */
+  stale: boolean;
   state: "ready" | "unknown" | "missing";
   note: string;
   dirty: boolean | null;
@@ -135,6 +137,7 @@ function rowOf(
   current: string | null,
   reviewed: Readonly<Record<string, number>>,
   recent: boolean,
+  confirmed: ReadonlySet<string> | null,
 ): WorktreeRow {
   const { name, path } = repo;
   const key = normalizeRepoPath(path);
@@ -154,6 +157,7 @@ function rowOf(
     recent,
     openedAtMs: repo.openedAtMs,
     checkedAtMs: item?.checkedAtMs ?? null,
+    stale: confirmed !== null && item !== null && !confirmed.has(key),
     state: item ? item.status : missing ? "missing" : "unknown",
     note: item?.note ?? (missing ? "目录已不存在或不再是 Git 仓库。" : "还没有读到这个工作区的状态。"),
     dirty: item?.dirty ?? null,
@@ -184,6 +188,7 @@ export function buildWorktreeGroups(
   items: ReadonlyMap<string, WorktreeItem>,
   currentPath: string | null,
   reviewed: Readonly<Record<string, number>> = {},
+  confirmed: ReadonlySet<string> | null = null,
 ): WorktreeGroup[] {
   const groups: WorktreeGroup[] = [];
   const byKey = new Map<string, WorktreeGroup>();
@@ -210,13 +215,23 @@ export function buildWorktreeGroups(
     const key = normalizeRepoPath(repo.path);
     if (seen.has(key)) continue;
     seen.add(key);
-    push(rowOf(repo, items.get(key) ?? null, heads.get(key) ?? null, current, reviewed, true));
+    push(rowOf(repo, items.get(key) ?? null, heads.get(key) ?? null, current, reviewed, true, confirmed));
   }
   for (const item of items.values()) {
     const key = normalizeRepoPath(item.path);
     if (seen.has(key)) continue;
     seen.add(key);
-    push(rowOf({ name: baseName(item.path), path: item.path, openedAtMs: 0 }, item, null, current, reviewed, false));
+    push(
+      rowOf(
+        { name: baseName(item.path), path: item.path, openedAtMs: 0 },
+        item,
+        null,
+        current,
+        reviewed,
+        false,
+        confirmed,
+      ),
+    );
   }
   // 组内主仓库在前；其余保持最近列表与枚举顺序（Array.sort 稳定）。
   for (const group of groups) group.rows.sort((left, right) => Number(left.linked) - Number(right.linked));
@@ -321,6 +336,25 @@ export function remoteText(row: WorktreeRow): string {
   if (row.remoteCheckedAtMs !== null) return `远程状态过期（${timeLabel(row.remoteCheckedAtMs)}）`;
   return "远程未核";
 }
+/**
+ * 本次总览真正权威枚举过的主仓库：它们的工作区列表以这次结果为准，
+ * 因此「不在这次结果里」的缓存项就是已经消失的工作区（ADR-4）。
+ *
+ * - 主仓库自己读到状态（ready）说明这次枚举成功，列表完整；
+ * - 主仓库自己已缺失（missing）时，它的附属工作区不可能还存在。
+ *
+ * 读取失败、超限、目录暂时读不到的项一律不算确认：宁可留着标过期，也不误删。
+ */
+export function authoritativeMains(items: readonly WorktreeItem[]): Set<string> {
+  const keys = new Set<string>();
+  for (const item of items) {
+    const own = normalizeRepoPath(item.path);
+    const main = item.mainPath ? normalizeRepoPath(item.mainPath) : own;
+    if (item.status === "ready" || (item.status === "missing" && main === own)) keys.add(main);
+  }
+  return keys;
+}
+
 /**
  * 只保留仍能归属到最近仓库的项：最近列表里被移除的仓库及其工作区不再复活，
  * 而它的附属工作区在移除后仍然在场（枚举结果没被重新请求）。

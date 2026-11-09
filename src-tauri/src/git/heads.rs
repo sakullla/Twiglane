@@ -1,15 +1,30 @@
-//! 不启动 Git，直接读各仓库的 HEAD 文件：仓库切换列表里显示每个仓库当前检出的分支。
-//! 只读、限量、出错就返回空，绝不阻塞界面，也不触碰索引或工作区。
+//! 仓库切换列表的数据源：
+//! - 直接读各仓库的 HEAD 文件得到当前检出的分支（不启动 Git，出错就返回空）；
+//! - 从最近仓库出发解析主仓库，用 `git worktree list --porcelain` 枚举实际附属工作区，
+//!   再逐项读取未提交、冲突与本地 upstream 的 ahead/behind，供 worktree 总览使用（ADR-4）。
+//!
+//! 全部只读、限量、绝不自动 fetch：单项失败只把该项标为未知，其他项照常返回。
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::git::ops::validate_input_path;
+use crate::git::command::{status_command, worktree_list_command};
+use crate::git::gate::remote_check_is_stale;
+use crate::git::ops::{
+    canonical_existing, repo_key, require_git, run_git, validate_input_path, Backend,
+};
+use crate::git::parse::parse_status;
+use crate::git::schedule::{internal_request_id, JobKind};
+use crate::model::ChangeKind;
+use crate::redact::redact_error_text;
 
 /// 一次最多读这么多仓库；最近列表再长，用户也只看得见前面一屏。
 const MAX_HEADS: usize = 600;
+/// 一次总览最多启动这么多次 `git status`：超出上限的工作区标为未知，而不是悄悄省略。
+const MAX_OVERVIEW_STATUS: usize = 200;
 /// HEAD 与 .git 文件都很小；超过这个大小说明不是我们认识的格式。
 const MAX_HEAD_BYTES: u64 = 4096;
 
@@ -109,6 +124,415 @@ pub(crate) fn resolve_git_dir(root: &Path) -> Option<PathBuf> {
     git_dir(root)
 }
 
+/// 一项工作区的真实状态。每项自带 `checkedAtMs` 与状态来源，
+/// 失败、缺失与未核各用不同字段表达，绝不把旧数字说成新鲜结果。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeItem {
+    /// 规范化后的工作区路径；目录缺失时是最近列表里记下的原路径。
+    pub path: String,
+    /// 所属主仓库的工作区路径；无法归属时为空。
+    pub main_path: Option<String>,
+    pub branch: Option<String>,
+    pub detached: Option<String>,
+    /// 目录已不存在或不再是 Git 仓库。
+    pub missing: bool,
+    /// 是 `git worktree add` 建出来的附属工作区。
+    pub linked: bool,
+    /// `git worktree lock` 锁定；删除保护不受影响。
+    pub locked: bool,
+    /// 这一项来自最近仓库列表（枚举出来的附属工作区可能不在其中）。
+    pub recent: bool,
+    /// 未提交状态是否读到；读不到时为空，界面显示未知而不是「干净」。
+    pub dirty: Option<bool>,
+    pub changed: Option<u32>,
+    pub staged: Option<u32>,
+    pub unstaged: Option<u32>,
+    pub untracked: Option<u32>,
+    pub conflicted: Option<u32>,
+    /// 本地 upstream 与其计数：未 fetch 时只代表本地已记录的远端分支。
+    pub upstream: Option<String>,
+    pub ahead: Option<u64>,
+    pub behind: Option<u64>,
+    /// 只在用户本会话确实核对过远程且仍在新鲜窗口内时为真；总览自身不 fetch。
+    pub live_remote_checked: bool,
+    pub remote_checked_at_ms: Option<u64>,
+    pub remote_check_stale: bool,
+    /// ready（读到）/ missing（目录不在）/ unknown（读失败或超限）。
+    pub status: String,
+    /// 该项的失败或限制说明；空字符串表示没有。
+    pub note: String,
+    pub checked_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeOverview {
+    pub items: Vec<WorktreeItem>,
+    pub checked_at_ms: u64,
+}
+
+/// `git worktree list --porcelain` 的一条记录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeEntry {
+    pub path: PathBuf,
+    pub head: Option<String>,
+    pub branch: Option<String>,
+    pub bare: bool,
+    pub locked: bool,
+    pub prunable: bool,
+}
+
+/// 解析工作区列表：空行分隔记录，路径原样给出（porcelain 不做引号转义）。
+pub fn parse_worktree_list(text: &str) -> Vec<WorktreeEntry> {
+    let mut entries: Vec<WorktreeEntry> = Vec::new();
+    let mut current: Option<WorktreeEntry> = None;
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            if let Some(entry) = current.take() {
+                entries.push(entry);
+            }
+            continue;
+        }
+        let (key, value) = match line.split_once(' ') {
+            Some((key, value)) => (key, value),
+            None => (line, ""),
+        };
+        match key {
+            "worktree" => {
+                if !value.is_empty() {
+                    if let Some(entry) = current.take() {
+                        entries.push(entry);
+                    }
+                    current = Some(WorktreeEntry {
+                        path: PathBuf::from(value),
+                        head: None,
+                        branch: None,
+                        bare: false,
+                        locked: false,
+                        prunable: false,
+                    });
+                }
+            }
+            "HEAD" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.head = Some(value.to_string());
+                }
+            }
+            "branch" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.branch =
+                        Some(value.strip_prefix("refs/heads/").unwrap_or(value).to_string());
+                }
+            }
+            "bare" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.bare = true;
+                }
+            }
+            "locked" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.locked = true;
+                }
+            }
+            "prunable" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.prunable = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(entry) = current.take() {
+        entries.push(entry);
+    }
+    entries
+}
+
+/// 用于去重与归属比对的路径身份：Windows 上大小写与分隔符都不参与判定。
+fn path_key(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/").to_lowercase()
+}
+
+fn short_oid(oid: &str) -> Option<String> {
+    let oid = oid.trim();
+    let short: String = oid.chars().take(7).collect();
+    (short.len() == 7).then(|| short.to_ascii_lowercase())
+}
+
+fn blank_item(path: String, main_path: Option<String>, now: u64) -> WorktreeItem {
+    WorktreeItem {
+        path,
+        main_path,
+        branch: None,
+        detached: None,
+        missing: false,
+        linked: false,
+        locked: false,
+        recent: false,
+        dirty: None,
+        changed: None,
+        staged: None,
+        unstaged: None,
+        untracked: None,
+        conflicted: None,
+        upstream: None,
+        ahead: None,
+        behind: None,
+        live_remote_checked: false,
+        remote_checked_at_ms: None,
+        remote_check_stale: false,
+        status: "unknown".to_string(),
+        note: String::new(),
+        checked_at_ms: now,
+    }
+}
+
+fn note_from(error: &crate::error::AppError) -> String {
+    redact_error_text(error.message.trim())
+}
+
+/// 工作区总览：从最近仓库解析主仓库，枚举实际附属工作区，再逐项读取真实状态。
+///
+/// 只读且不 fetch；每项独立读取，单项失败只把该项标成未知并带上原因。
+pub async fn worktree_overview(
+    backend: &Backend,
+    paths: &[String],
+    request_id: u64,
+) -> Result<WorktreeOverview, crate::error::AppError> {
+    let git = require_git(backend).await?;
+    let now = crate::state::now_ms();
+    let mut items: Vec<WorktreeItem> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut recent_keys: HashSet<String> = HashSet::new();
+    let mut budget = MAX_OVERVIEW_STATUS;
+
+    for raw in paths.iter().take(MAX_HEADS) {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        recent_keys.insert(raw.replace('\\', "/").to_lowercase());
+
+        // 最近项本身读不到：保留这一项，标成缺失，而不是从总览里消失。
+        let input = match validate_input_path(raw) {
+            Ok(input) => input,
+            Err(_) => {
+                let mut item = blank_item(raw.to_string(), None, now);
+                item.missing = true;
+                item.status = "missing".to_string();
+                item.note = "路径无效，无法读取这个工作区。".to_string();
+                if seen.insert(raw.replace('\\', "/").to_lowercase()) {
+                    items.push(item);
+                }
+                continue;
+            }
+        };
+        let root = match canonical_existing(&input) {
+            Ok(root) => root,
+            Err(error) => {
+                let mut item = blank_item(raw.to_string(), None, now);
+                item.missing = true;
+                item.status = "missing".to_string();
+                item.note = note_from(&error);
+                if seen.insert(raw.replace('\\', "/").to_lowercase()) {
+                    items.push(item);
+                }
+                continue;
+            }
+        };
+        let Some(git_dir) = resolve_git_dir(&root) else {
+            let mut item = blank_item(repo_key(&root), None, now);
+            item.missing = true;
+            item.status = "missing".to_string();
+            item.note = "目录已存在，但不再是 Git 仓库。".to_string();
+            if seen.insert(path_key(&root)) {
+                items.push(item);
+            }
+            continue;
+        };
+        let main = linked_main(&root, &git_dir).unwrap_or_else(|| root.clone());
+        let main_path = repo_key(&main);
+
+        let (program, args) = worktree_list_command(&git.path, &root);
+        let listed = run_git(
+            backend,
+            &repo_key(&main),
+            JobKind::Read,
+            request_id,
+            program,
+            args,
+            None,
+        )
+        .await;
+        let text = match listed {
+            Ok(scheduled) if scheduled.output.exit_code == 0 => {
+                String::from_utf8_lossy(&scheduled.output.stdout).into_owned()
+            }
+            Ok(scheduled) => {
+                let mut item = blank_item(repo_key(&root), Some(main_path.clone()), now);
+                item.note = if scheduled.output.stderr.is_empty() {
+                    "Git 没有列出这个仓库的工作区。".to_string()
+                } else {
+                    redact_error_text(String::from_utf8_lossy(&scheduled.output.stderr).trim())
+                };
+                if seen.insert(path_key(&root)) {
+                    items.push(item);
+                }
+                continue;
+            }
+            Err(error) => {
+                let mut item = blank_item(repo_key(&root), Some(main_path.clone()), now);
+                item.note = note_from(&error);
+                if seen.insert(path_key(&root)) {
+                    items.push(item);
+                }
+                continue;
+            }
+        };
+
+        let entries = parse_worktree_list(&text);
+        if entries.is_empty() {
+            let mut item = blank_item(repo_key(&root), Some(main_path.clone()), now);
+            item.note = "Git 没有列出这个仓库的工作区。".to_string();
+            if seen.insert(path_key(&root)) {
+                items.push(item);
+            }
+            continue;
+        }
+
+        for entry in entries {
+            let entry_path = if entry.path.is_absolute() {
+                entry.path.clone()
+            } else {
+                root.join(&entry.path)
+            };
+            let canonical = dunce::canonicalize(&entry_path).unwrap_or(entry_path);
+            let key = path_key(&canonical);
+            if !seen.insert(key) {
+                continue;
+            }
+            let mut item = blank_item(repo_key(&canonical), Some(main_path.clone()), now);
+            item.linked = path_key(&main) != path_key(&canonical);
+            item.locked = entry.locked;
+            item.branch = entry.branch.clone();
+            if entry.branch.is_none() {
+                item.detached = entry.head.as_deref().and_then(short_oid);
+            }
+            if entry.bare {
+                item.status = "unknown".to_string();
+                item.note = "裸仓库没有工作区，读不到未提交状态。".to_string();
+                items.push(item);
+                continue;
+            }
+            if entry.prunable || !canonical.is_dir() {
+                item.missing = true;
+                item.status = "missing".to_string();
+                item.note = "目录已不存在（Git 把这个工作区标记为可清理）。".to_string();
+                items.push(item);
+                continue;
+            }
+            if budget == 0 {
+                item.note = format!(
+                    "本次最多读取 {MAX_OVERVIEW_STATUS} 个工作区的状态，这一项没有读取。"
+                );
+                items.push(item);
+                continue;
+            }
+            budget -= 1;
+
+            let (program, args) = status_command(&git.path, &canonical);
+            let scheduled = run_git(
+                backend,
+                &repo_key(&canonical),
+                JobKind::Read,
+                internal_request_id(),
+                program,
+                args,
+                None,
+            )
+            .await;
+            let snapshot = match scheduled {
+                Ok(scheduled) if scheduled.output.exit_code == 0 => {
+                    match parse_status(&scheduled.output.stdout) {
+                        Ok(snapshot) => Some(snapshot),
+                        Err(error) => {
+                            item.note = note_from(&error);
+                            None
+                        }
+                    }
+                }
+                Ok(scheduled) => {
+                    let detail =
+                        redact_error_text(String::from_utf8_lossy(&scheduled.output.stderr).trim());
+                    item.note = if detail.is_empty() {
+                        "无法读取这个工作区的状态。".to_string()
+                    } else {
+                        detail
+                    };
+                    None
+                }
+                Err(error) => {
+                    item.note = note_from(&error);
+                    None
+                }
+            };
+
+            if let Some(snapshot) = snapshot {
+                let branch = snapshot.branch;
+                if branch.name.is_some() {
+                    item.branch = branch.name.clone();
+                    item.detached = None;
+                } else if branch.detached {
+                    item.detached = branch.head_oid.as_deref().and_then(short_oid);
+                }
+                item.upstream = branch.upstream.clone();
+                item.ahead = branch.ahead;
+                item.behind = branch.behind;
+                let files = &snapshot.files;
+                item.changed = Some(files.len() as u32);
+                item.dirty = Some(!files.is_empty());
+                item.conflicted = Some(files.iter().filter(|file| file.unmerged).count() as u32);
+                item.staged = Some(
+                    files
+                        .iter()
+                        .filter(|file| file.unmerged || file.staged != ChangeKind::None)
+                        .count() as u32,
+                );
+                item.unstaged = Some(
+                    files
+                        .iter()
+                        .filter(|file| {
+                            !file.untracked
+                                && (file.unmerged || file.unstaged != ChangeKind::None)
+                        })
+                        .count() as u32,
+                );
+                item.untracked = Some(files.iter().filter(|file| file.untracked).count() as u32);
+                item.status = "ready".to_string();
+                let checked = backend.remote_checks.get(&repo_key(&canonical));
+                let stale = checked.is_some_and(|at| remote_check_is_stale(at, now));
+                item.remote_checked_at_ms = checked;
+                item.remote_check_stale = stale;
+                item.live_remote_checked = checked.is_some() && !stale;
+            }
+            items.push(item);
+        }
+    }
+
+    for item in &mut items {
+        if recent_keys.contains(&item.path.replace('\\', "/").to_lowercase()) {
+            item.recent = true;
+        }
+    }
+
+    Ok(WorktreeOverview {
+        items,
+        checked_at_ms: now,
+    })
+}
+
 fn read_small(path: &Path) -> Option<String> {
     let meta = fs::metadata(path).ok()?;
     if !meta.is_file() || meta.len() > MAX_HEAD_BYTES {
@@ -164,5 +588,247 @@ mod tests {
 
         let _ = fs::remove_dir_all(&repo);
         let _ = fs::remove_dir_all(&worktree);
+    }
+}
+
+#[cfg(test)]
+mod overview_tests {
+    use super::*;
+    use std::process::Command;
+
+    /// 真实 Git 夹具：参数逐个传入，环境隔离，任何非零退出都直接失败。
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new(crate::test_support::system_git())
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", crate::test_support::isolated_gitconfig())
+            .env("GIT_AUTHOR_NAME", "Twiglane Test")
+            .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Twiglane Test")
+            .env("GIT_COMMITTER_EMAIL", "twiglane-test@example.com")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// 允许失败的 Git 调用（冲突合并预期非零退出）。
+    fn git_try(dir: &Path, args: &[&str]) -> bool {
+        Command::new(crate::test_support::system_git())
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", crate::test_support::isolated_gitconfig())
+            .env("GIT_AUTHOR_NAME", "Twiglane Test")
+            .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Twiglane Test")
+            .env("GIT_COMMITTER_EMAIL", "twiglane-test@example.com")
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    fn base_repo(fixture: &crate::test_support::GitFixture) -> PathBuf {
+        let main = fixture.repo("main");
+        git(&main, &["init", "-b", "main"]);
+        fs::write(main.join("a.txt"), "one\n").unwrap();
+        git(&main, &["add", "--", "a.txt"]);
+        git(&main, &["commit", "-m", "base"]);
+        main
+    }
+
+    fn item_at(overview: &WorktreeOverview, path: &Path) -> WorktreeItem {
+        let key = path_key(path);
+        overview
+            .items
+            .iter()
+            .find(|item| path_key(Path::new(&item.path)) == key)
+            .cloned()
+            .unwrap_or_else(|| panic!("总览里没有 {path:?}：{:?}", overview.items))
+    }
+
+    #[test]
+    fn parses_worktree_list_records() {
+        let text = "worktree /repo\nHEAD 0123456789abcdef\nbranch refs/heads/main\n\n\
+                    worktree /repo-wt\nHEAD abcdef0123456789\ndetached\nlocked held by me\n\n\
+                    worktree /repo-gone\nHEAD fedcba9876543210\nbranch refs/heads/gone\nprunable gitdir file points to non-existent location\n\n\
+                    worktree /repo.git\nHEAD 1111111111111111\nbare\n\n";
+        let entries = parse_worktree_list(text);
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].branch.as_deref(), Some("main"));
+        assert_eq!(entries[0].path, PathBuf::from("/repo"));
+        assert!(entries[1].branch.is_none());
+        assert!(entries[1].locked);
+        assert_eq!(entries[1].head.as_deref(), Some("abcdef0123456789"));
+        assert!(entries[2].prunable);
+        assert!(entries[3].bare);
+        // 空输入不会伪造记录。
+        assert!(parse_worktree_list("").is_empty());
+    }
+
+    #[tokio::test]
+    async fn groups_worktrees_by_main_and_reports_clean_dirty_locked_missing() {
+        let fixture = crate::test_support::git_fixture("overview-basic");
+        let backend = fixture.backend();
+        let main = base_repo(&fixture);
+        let clean = fixture.path().join("clean");
+        git(&main, &["worktree", "add", "-b", "clean-branch", repo_key(&clean).as_str()]);
+        let dirty = fixture.path().join("dirty");
+        git(&main, &["worktree", "add", "-b", "dirty-branch", repo_key(&dirty).as_str()]);
+        fs::write(dirty.join("scratch.txt"), "keep\n").unwrap();
+        let locked = fixture.path().join("locked");
+        git(&main, &["worktree", "add", "-b", "locked-branch", repo_key(&locked).as_str()]);
+        git(&main, &["worktree", "lock", repo_key(&locked).as_str()]);
+        // 最近列表里记着但目录已经不在的一项：必须保留并标成缺失。
+        let gone = fixture.path().join("gone");
+
+        let before = git(&main, &["rev-parse", "HEAD"]);
+        let overview = worktree_overview(
+            &backend,
+            &[repo_key(&main), repo_key(&dirty), repo_key(&gone)],
+            1,
+        )
+        .await
+        .unwrap();
+
+        // 主仓库 + 三个附属工作区 + 缺失项，同一路径只出现一次。
+        assert_eq!(overview.items.len(), 5, "{:?}", overview.items);
+        let main_key = path_key(&dunce::canonicalize(&main).unwrap());
+
+        let root = item_at(&overview, &main);
+        assert!(!root.linked);
+        assert!(root.recent);
+        assert_eq!(root.status, "ready");
+        assert_eq!(root.dirty, Some(false));
+        assert_eq!(root.changed, Some(0));
+        assert_eq!(root.branch.as_deref(), Some("main"));
+        assert_eq!(root.main_path.as_deref().map(|path| path_key(Path::new(path))), Some(main_key.clone()));
+        // 默认总览不 fetch：没有任何远程核对时间，只靠本地 upstream。
+        assert!(!root.live_remote_checked);
+        assert_eq!(root.remote_checked_at_ms, None);
+
+        let clean_item = item_at(&overview, &clean);
+        assert!(clean_item.linked);
+        assert!(!clean_item.recent, "枚举出来的工作区不在最近列表里");
+        assert_eq!(clean_item.status, "ready");
+        assert_eq!(clean_item.dirty, Some(false));
+        assert_eq!(clean_item.branch.as_deref(), Some("clean-branch"));
+        assert_eq!(clean_item.main_path.as_deref().map(|path| path_key(Path::new(path))), Some(main_key.clone()));
+
+        let dirty_item = item_at(&overview, &dirty);
+        assert_eq!(dirty_item.dirty, Some(true));
+        assert_eq!(dirty_item.untracked, Some(1));
+        assert!(dirty_item.recent);
+
+        let locked_item = item_at(&overview, &locked);
+        assert!(locked_item.locked);
+        assert_eq!(locked_item.status, "ready", "锁定的工作区状态仍然可读");
+        assert_eq!(locked_item.dirty, Some(false));
+
+        let gone_item = item_at(&overview, &gone);
+        assert!(gone_item.missing);
+        assert_eq!(gone_item.status, "missing");
+        assert!(gone_item.recent);
+        assert!(!gone_item.note.is_empty());
+        assert_eq!(gone_item.main_path, None);
+
+        // 总览只读：HEAD 与未跟踪文件都没有被改动或清理。
+        assert_eq!(git(&main, &["rev-parse", "HEAD"]), before);
+        assert!(dirty.join("scratch.txt").exists());
+        assert!(git(&dirty, &["status", "--porcelain"]).contains("scratch.txt"));
+    }
+
+    #[tokio::test]
+    async fn reports_conflict_ahead_behind_and_keeps_other_items() {
+        let fixture = crate::test_support::git_fixture("overview-sync");
+        let backend = fixture.backend();
+        let main = base_repo(&fixture);
+        let origin = fixture.path().join("origin.git");
+        git(fixture.path(), &["init", "--bare", repo_key(&origin).as_str()]);
+        git(&main, &["remote", "add", "origin", repo_key(&origin).as_str()]);
+        git(&main, &["push", "-u", "origin", "main"]);
+
+        // 冲突：同一条路径两侧各改一次后合并，Git 以非零退出留下冲突。
+        let conflict = fixture.path().join("conflict");
+        git(&main, &["worktree", "add", "-b", "conflict-branch", repo_key(&conflict).as_str()]);
+        fs::write(conflict.join("a.txt"), "theirs\n").unwrap();
+        git(&conflict, &["commit", "-am", "theirs"]);
+        fs::write(main.join("a.txt"), "ours\n").unwrap();
+        git(&main, &["commit", "-am", "ours"]);
+        // 先把主工作区的提交推上去，后面 ahead/behind 的计数才有确定的起点。
+        git(&main, &["push", "origin", "main"]);
+        assert!(!git_try(&conflict, &["merge", "main"]), "预期合并冲突");
+
+        // ahead：本地分支比 upstream 多一个提交。
+        let ahead = fixture.path().join("ahead");
+        git(&main, &["worktree", "add", "-b", "ahead-branch", repo_key(&ahead).as_str(), "origin/main"]);
+        git(&ahead, &["branch", "--set-upstream-to=origin/main"]);
+        fs::write(ahead.join("b.txt"), "b\n").unwrap();
+        git(&ahead, &["add", "--", "b.txt"]);
+        git(&ahead, &["commit", "-m", "ahead"]);
+
+        // behind：远端由主工作区推进，behind 自己 fetch 一次（用户动作，不是总览触发）。
+        let behind = fixture.path().join("behind");
+        git(&main, &["worktree", "add", "-b", "behind-branch", repo_key(&behind).as_str(), "origin/main"]);
+        git(&behind, &["branch", "--set-upstream-to=origin/main"]);
+        fs::write(main.join("c.txt"), "c\n").unwrap();
+        git(&main, &["add", "--", "c.txt"]);
+        git(&main, &["commit", "-m", "remote-ahead"]);
+        git(&main, &["push", "origin", "main"]);
+        git(&behind, &["fetch", "origin"]);
+
+        // 一个普通目录：无法归属，只让这一项失败。
+        let plain = fixture.repo("plain");
+        let overview =
+            worktree_overview(&backend, &[repo_key(&main), repo_key(&plain)], 2).await.unwrap();
+
+        let conflict_item = item_at(&overview, &conflict);
+        assert_eq!(conflict_item.status, "ready");
+        assert_eq!(conflict_item.conflicted, Some(1));
+        assert_eq!(conflict_item.dirty, Some(true));
+
+        let ahead_item = item_at(&overview, &ahead);
+        assert_eq!(ahead_item.upstream.as_deref(), Some("origin/main"));
+        assert_eq!(ahead_item.ahead, Some(1));
+        // 之后主工作区又推了一个提交，共享的 origin/main 跟着前进：这个分支同时落后 1。
+        assert_eq!(ahead_item.behind, Some(1));
+        assert_eq!(ahead_item.status, "ready");
+        // 没有实时核对过远程：界面必须能说「未核」而不是把本地 upstream 当远端真相。
+        assert!(!ahead_item.live_remote_checked);
+        assert_eq!(ahead_item.remote_checked_at_ms, None);
+
+        let behind_item = item_at(&overview, &behind);
+        assert_eq!(behind_item.behind, Some(1));
+        assert_eq!(behind_item.ahead, Some(0));
+
+        let plain_item = item_at(&overview, &plain);
+        assert!(plain_item.missing);
+        assert_eq!(plain_item.status, "missing");
+        // 普通目录失败不影响其他工作区继续可读。
+        let ready = overview.items.iter().filter(|item| item.status == "ready").count();
+        assert_eq!(ready, 4, "{:?}", overview.items);
+    }
+
+    #[tokio::test]
+    async fn reports_each_entry_when_the_batch_shares_one_recent_path() {
+        let fixture = crate::test_support::git_fixture("overview-dedupe");
+        let backend = fixture.backend();
+        let main = base_repo(&fixture);
+        let linked = fixture.path().join("linked");
+        git(&main, &["worktree", "add", "-b", "linked-branch", repo_key(&linked).as_str()]);
+        // 同一路径重复传入 + 主仓库与附属工作区都在最近列表里：按路径去重。
+        let paths = vec![repo_key(&main), repo_key(&linked), repo_key(&main)];
+        let overview = worktree_overview(&backend, &paths, 3).await.unwrap();
+        assert_eq!(overview.items.len(), 2, "{:?}", overview.items);
+        assert!(overview.items.iter().all(|item| item.recent));
+        assert_eq!(
+            overview.items.iter().filter(|item| item.status == "ready").count(),
+            2
+        );
     }
 }

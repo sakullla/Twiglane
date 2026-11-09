@@ -1559,6 +1559,18 @@ pub fn worktree_remove_command(
     (git.to_path_buf(), args)
 }
 
+/// 枚举主仓库及其附属工作区：`--porcelain` 直接给出路径、HEAD、分支、锁定与可清理状态。
+/// 只读：不 prune、不改写任何工作区元数据。
+pub fn worktree_list_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("worktree"),
+        OsString::from("list"),
+        OsString::from("--porcelain"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
 pub fn git_paths_command(git: &Path, root: &Path, names: &[&str]) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.push(OsString::from("rev-parse"));

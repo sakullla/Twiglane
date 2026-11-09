@@ -7,8 +7,8 @@ import {
   recordClioraMerge,
   resetClioraReview,
 } from "../src/lib/cliora-review.svelte";
-import { resetReviewProgress } from "../src/lib/review-progress.svelte";
-import type { DiffLine, DiffResponse, FileChange, HistoryCommit, StatusSnapshot } from "../src/lib/types";
+import { CHANGES_SCOPE, markReviewedIn, resetReviewProgress } from "../src/lib/review-progress.svelte";
+import type { DiffLine, DiffResponse, FileChange, HistoryCommit, StatusSnapshot, WorktreeItem } from "../src/lib/types";
 
 /* ------------------------------------------------------------------ *
  * App 级夹具：真实 api 由 vi.mock 顶替，界面走完整外壳。
@@ -97,6 +97,7 @@ const mocks = vi.hoisted(() => ({
   closeRepository: vi.fn(),
   forgetRecent: vi.fn(),
   repoHeads: vi.fn(),
+  worktreeOverview: vi.fn(),
   removeWorktree: vi.fn(),
   refreshStatus: vi.fn(),
   loadDiff: vi.fn(),
@@ -658,6 +659,8 @@ beforeEach(() => {
       files: [],
     };
   });
+  // 总览默认没有额外项：用例按需覆盖，没配 heads 的行仍显示「状态未知」。
+  mocks.worktreeOverview.mockResolvedValue({ items: [], checkedAtMs: 1_700_000_000_000 });
   mocks.measureProbe.mockResolvedValue({ enabled: false, elapsedMs: 0, script: null });
   mocks.mergePreview.mockImplementation(async (_path: string, source: string, target: string | null) => ({
     generation: 5,
@@ -1639,7 +1642,7 @@ describe("应用外壳", () => {
     await fireEvent.input(search, { target: { value: "archive" } });
     await waitFor(() => expect(within(popover).getAllByRole("option")).toHaveLength(1));
     await fireEvent.input(search, { target: { value: "没有这个仓库" } });
-    await waitFor(() => expect(popover.textContent).toContain("没有匹配的仓库"));
+    await waitFor(() => expect(popover.textContent).toContain("没有符合当前搜索与筛选的工作区"));
     await fireEvent.keyDown(search, { key: "Enter" });
     expect(mocks.openRepository, "没有结果时回车什么都不做").toHaveBeenCalledTimes(1);
 
@@ -1702,7 +1705,10 @@ describe("应用外壳", () => {
     const add = within(popover).getByRole("button", { name: "打开本地仓库" });
     const create = within(popover).getByRole("button", { name: "新建仓库" });
     await waitFor(() => expect(document.activeElement).toBe(search));
+    // 筛选按钮参与 Tab 序（键盘可切筛选），行内按钮仍然不进。
     await fireEvent.keyDown(search, { key: "Tab" });
+    expect(document.activeElement).toBe(within(popover).getByRole("button", { name: "全部" }));
+    for (let step = 0; step < 5; step += 1) await fireEvent.keyDown(document.activeElement!, { key: "Tab" });
     expect(document.activeElement, "行内按钮不进 Tab 序").toBe(add);
     await fireEvent.keyDown(add, { key: "ArrowDown" });
     await fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
@@ -3356,3 +3362,267 @@ describe("任务范围的外部变化与进度隔离（T3）", () => {
     expect(mocks.commitChanges).not.toHaveBeenCalled();
   });
 });
+
+
+describe("worktree 总览（R3）", () => {
+  /** 一个真实形状的总览项：默认干净、无 upstream、未核远程，用例只覆盖关心的字段。 */
+  function item(overrides: Partial<WorktreeItem> & { path: string }): WorktreeItem {
+    return {
+      mainPath: overrides.path,
+      branch: null,
+      detached: null,
+      missing: false,
+      linked: false,
+      locked: false,
+      recent: true,
+      dirty: false,
+      changed: 0,
+      staged: 0,
+      unstaged: 0,
+      untracked: 0,
+      conflicted: 0,
+      upstream: null,
+      ahead: null,
+      behind: null,
+      liveRemoteChecked: false,
+      remoteCheckedAtMs: null,
+      remoteCheckStale: false,
+      status: "ready",
+      note: "",
+      checkedAtMs: 1_700_000_000_000,
+      ...overrides,
+    } as WorktreeItem;
+  }
+
+  const options = (popover: HTMLElement) => [...popover.querySelectorAll<HTMLElement>('[role="option"]')];
+  const row = (popover: HTMLElement, path: string) =>
+    popover.querySelector<HTMLElement>('[data-worktree-path="' + path + '"]');
+  const filterButton = (popover: HTMLElement, label: string) =>
+    within(popover).getAllByRole("button").find((button) => (button.textContent ?? "").trim().startsWith(label))!;
+
+  async function openSwitcher() {
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: /^当前仓库/ }));
+    return screen.findByRole("dialog", { name: "切换仓库" });
+  }
+
+  it("按主仓库分组去重，同名仓库靠完整路径区分，缺失的最近项仍然保留", async () => {
+    const main = "C:/work/app";
+    const feature = "C:/work/app-feature";
+    const twin = "D:/archive/app";
+    const gone = "C:/work/gone";
+    useRecent([
+      { name: "app", path: main, openedAtMs: 4 },
+      { name: "app", path: twin, openedAtMs: 3 },
+      { name: "gone", path: gone, openedAtMs: 2 },
+    ]);
+    mocks.repoHeads.mockResolvedValue([
+      { path: main, branch: "main", detached: null, missing: false, worktree: false, mainPath: null },
+      { path: twin, branch: "main", detached: null, missing: false, worktree: false, mainPath: null },
+      { path: gone, branch: null, detached: null, missing: true, worktree: false, mainPath: null },
+    ]);
+    mocks.worktreeOverview.mockResolvedValue({
+      checkedAtMs: 1_700_000_000_500,
+      items: [
+        item({ path: main, branch: "main", mainPath: main, checkedAtMs: 1_700_000_000_500 }),
+        item({ path: feature, branch: "feature/x", mainPath: main, linked: true, recent: false, dirty: true, changed: 2, checkedAtMs: 1_700_000_000_500 }),
+        item({ path: twin, branch: "main", mainPath: twin, checkedAtMs: 1_700_000_000_500 }),
+        item({ path: gone, mainPath: null, status: "missing", missing: true, dirty: null, changed: null, note: "目录已不存在" }),
+      ],
+    });
+
+    const popover = await openSwitcher();
+    await waitFor(() => expect(options(popover)).toHaveLength(5));
+    // 打开中的 demo 也在最近列表里；同一路径只出现一次，枚举出来的 feature 补进主仓库那一组，
+    // 缺失项按原路径保留。
+    expect(options(popover).map((option) => option.dataset.worktreePath)).toEqual([repoPath, main, feature, twin, gone]);
+    // 只有真有两个工作区的组才有分组头，且它不可选。
+    const headers = [...popover.querySelectorAll<HTMLElement>("[data-group-row]")];
+    expect(headers).toHaveLength(1);
+    expect(headers[0].textContent).toContain("2 个工作区");
+    expect(headers[0].textContent).toContain("C:/work/app");
+    expect(headers[0].getAttribute("role")).toBe("presentation");
+    // 同名仓库用完整路径，附属工作区标出归属。
+    expect(row(popover, main)?.querySelector(".repo-path-full")?.textContent).toBe(main);
+    expect(row(popover, twin)?.querySelector(".repo-path-full")?.textContent).toBe(twin);
+    expect(row(popover, feature)?.querySelector(".repo-worktree")?.textContent).toContain("app");
+    // 缺失项只剩「目录不存在 + 状态未知·目录缺失」，没有伪造的数字。
+    const missing = row(popover, gone)!;
+    expect(missing.querySelector(".repo-head.missing")?.textContent).toContain("目录不存在");
+    expect(missing.querySelector('[data-worktree-state="missing"]')?.textContent).toContain("状态未知·目录缺失");
+    expect(missing.textContent).toContain("目录已不存在");
+    expect(missing.getAttribute("aria-disabled")).not.toBe("true");
+  });
+
+  it("状态还在读取时也能搜索并直接切换", async () => {
+    const busy = "C:/work/busy";
+    const busyTwin = "D:/archive/busy";
+    let finishOverview!: (value: unknown) => void;
+    mocks.worktreeOverview.mockReturnValueOnce(new Promise((resolve) => (finishOverview = resolve)));
+    useRecent([
+      { name: "busy", path: busy, openedAtMs: 2 },
+      { name: "busy", path: busyTwin, openedAtMs: 1 },
+    ]);
+    mocks.repoHeads.mockResolvedValue([]);
+
+    const popover = await openSwitcher();
+    expect(popover.textContent).toContain("正在读取各工作区的状态");
+    const search = within(popover).getByRole("combobox") as HTMLInputElement;
+    await fireEvent.input(search, { target: { value: "archive" } });
+    await waitFor(() => expect(options(popover)).toHaveLength(1));
+    await fireEvent.click(options(popover)[0]);
+    await waitFor(() => expect(mocks.openRepository).toHaveBeenLastCalledWith(busyTwin, expect.any(Number)));
+    finishOverview({ checkedAtMs: 1_700_000_000_950, items: [] });
+  });
+
+  it("筛选与搜索可组合，计数只认真实状态", async () => {
+    const main = "C:/work/panel";
+    const feature = "C:/work/panel-feature";
+    const twin = "D:/archive/panel";
+    useRecent([
+      { name: "panel", path: main, openedAtMs: 2 },
+      { name: "panel", path: twin, openedAtMs: 1 },
+    ]);
+    mocks.repoHeads.mockResolvedValue([]);
+    mocks.worktreeOverview.mockResolvedValue({
+      checkedAtMs: 1_700_000_000_900,
+      items: [
+        item({ path: main, branch: "main", mainPath: main, dirty: true, changed: 3, conflicted: 1, ahead: 1, checkedAtMs: 1_700_000_000_900 }),
+        item({ path: feature, branch: "feature/x", mainPath: main, linked: true, recent: false, ahead: 2, checkedAtMs: 1_700_000_000_900 }),
+        item({ path: twin, branch: "main", mainPath: twin, checkedAtMs: 1_700_000_000_900 }),
+      ],
+    });
+    const reopened = await openSwitcher();
+    await waitFor(() => expect(row(reopened, main)?.textContent).toContain("冲突 1"));
+    expect(row(reopened, main)?.textContent).toContain("有改动 3");
+    expect(row(reopened, main)?.textContent).toContain("待推送 1");
+    // 远程没有被实时核对过：文案只能是「远程未核」，不能把本地 upstream 当远端真相。
+    expect(row(reopened, main)?.textContent).toContain("远程未核");
+    expect(row(reopened, main)?.querySelector('[data-worktree-remote="none"]')).toBeTruthy();
+    expect(reopened.textContent).not.toContain("Agent");
+
+    // 筛选条按真实状态计数：worktree 1、有改动 1、有冲突 1、同步待处理 2。
+    expect(filterButton(reopened, "worktree").textContent).toContain("1");
+    expect(filterButton(reopened, "有改动").textContent).toContain("1");
+    expect(filterButton(reopened, "有冲突").textContent).toContain("1");
+    expect(filterButton(reopened, "同步待处理").textContent).toContain("2");
+
+    await fireEvent.click(filterButton(reopened, "有冲突"));
+    await waitFor(() => expect(options(reopened)).toHaveLength(1));
+    expect(options(reopened)[0].dataset.worktreePath).toBe(main);
+
+    // 筛选与关键字叠加：分支/路径都能搜到附属工作区。
+    await fireEvent.click(filterButton(reopened, "worktree"));
+    const field = within(reopened).getByRole("combobox") as HTMLInputElement;
+    await fireEvent.input(field, { target: { value: "feature" } });
+    await waitFor(() => expect(options(reopened)).toHaveLength(1));
+    expect(options(reopened)[0].dataset.worktreePath).toBe(feature);
+
+    // 组合无结果与「读取失败」是两种不同文案。
+    await fireEvent.input(field, { target: { value: "没有这个东西" } });
+    await waitFor(() =>
+      expect(reopened.querySelector("[data-worktree-empty]")?.textContent).toContain("没有符合当前搜索与筛选"),
+    );
+  });
+
+  it("状态读取失败时保留上次结果并带上它自己的读取时间", async () => {
+    const main = "C:/work/legacy";
+    useRecent([{ name: "legacy", path: main, openedAtMs: 1 }]);
+    mocks.repoHeads.mockResolvedValue([]);
+    mocks.worktreeOverview.mockResolvedValueOnce({
+      checkedAtMs: 1_700_000_111_000,
+      items: [item({ path: main, branch: "main", mainPath: main, dirty: true, changed: 3, checkedAtMs: 1_700_000_111_000 })],
+    });
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: /^当前仓库/ }));
+    let popover = await screen.findByRole("dialog", { name: "切换仓库" });
+    await waitFor(() => expect(row(popover, main)?.textContent).toContain("有改动 3"));
+    await fireEvent.keyDown(within(popover).getByRole("combobox"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "切换仓库" })).toBeNull());
+
+    mocks.worktreeOverview.mockRejectedValueOnce({ code: "status_failed", message: "无法读取仓库状态。" });
+    await fireEvent.click(screen.getByRole("button", { name: /^当前仓库/ }));
+    popover = await screen.findByRole("dialog", { name: "切换仓库" });
+    await waitFor(() =>
+      expect(popover.querySelector('[data-worktree-status="failed"]')?.textContent).toContain("无法读取仓库状态"),
+    );
+    // 上次结果仍然在，且时间取自它自己被读取的那一刻。
+    expect(row(popover, main)?.textContent).toContain("有改动 3");
+    expect(row(popover, main)?.textContent).toContain("状态读取于");
+    expect(popover.textContent).not.toContain("正在读取各工作区的状态");
+  });
+
+  it("迟到的总览不会把已经不在最近列表里的路径放回来", async () => {
+    const kept = "C:/work/kept";
+    const orphan = "C:/work/orphan";
+    let finishOverview!: (value: unknown) => void;
+    mocks.worktreeOverview.mockReturnValueOnce(new Promise((resolve) => (finishOverview = resolve)));
+    useRecent([{ name: "kept", path: kept, openedAtMs: 1 }]);
+    mocks.repoHeads.mockResolvedValue([]);
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: /^当前仓库/ }));
+    const popover = await screen.findByRole("dialog", { name: "切换仓库" });
+    // 打开中的 demo + kept；迟到的总览还没有结果。
+    await waitFor(() => expect(options(popover)).toHaveLength(2));
+
+    finishOverview({
+      checkedAtMs: 1_700_000_222_000,
+      items: [
+        item({ path: kept, branch: "main", mainPath: kept, checkedAtMs: 1_700_000_222_000 }),
+        item({ path: orphan, branch: "main", mainPath: orphan, recent: false, checkedAtMs: 1_700_000_222_000 }),
+      ],
+    });
+    await waitFor(() => expect(row(popover, kept)?.textContent).toContain("干净"));
+    expect(row(popover, orphan), "无法归属到任何最近仓库的项不出现").toBeNull();
+    expect(options(popover)).toHaveLength(2);
+  });
+
+  it("键盘能选到枚举出来的工作区并按它的路径切换，删除保护不变", async () => {
+    const main = "C:/work/team";
+    const feature = "C:/work/team-feature";
+    useRecent([{ name: "team", path: main, openedAtMs: 1 }]);
+    mocks.repoHeads.mockResolvedValue([]);
+    mocks.worktreeOverview.mockResolvedValue({
+      checkedAtMs: 1_700_000_333_000,
+      items: [
+        item({ path: main, branch: "main", mainPath: main, locked: true, checkedAtMs: 1_700_000_333_000 }),
+        item({ path: feature, branch: "team/feature", mainPath: main, linked: true, recent: false, checkedAtMs: 1_700_000_333_000 }),
+      ],
+    });
+    const popover = await openSwitcher();
+    // demo（当前打开）+ team 主仓库 + 枚举出来的附属工作区。
+    await waitFor(() => expect(options(popover)).toHaveLength(3));
+    expect(row(popover, main)?.textContent).toContain("已锁定");
+    // 锁定项的删除入口仍交给后端拒绝，界面不隐藏也不需要新规则。
+    expect(screen.getByRole("button", { name: "删除工作区 team-feature" })).toBeTruthy();
+
+    const search = within(popover).getByRole("combobox");
+    await fireEvent.keyDown(search, { key: "ArrowDown" });
+    expect(popover.querySelector(".switcher-option.active")?.getAttribute("data-worktree-path")).toBe(feature);
+    await fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() => expect(mocks.openRepository).toHaveBeenLastCalledWith(feature, expect.any(Number)));
+  });
+
+  it("只显示当前会话真实记录过的审阅条数，不推断完成度或运行状态", async () => {
+    const main = "C:/work/progress";
+    useRecent([{ name: "progress", path: main, openedAtMs: 1 }]);
+    mocks.repoHeads.mockResolvedValue([]);
+    mocks.worktreeOverview.mockResolvedValue({
+      checkedAtMs: 1_700_000_444_000,
+      items: [item({ path: main, branch: "main", mainPath: main, checkedAtMs: 1_700_000_444_000 })],
+    });
+    // 本会话里真的标记过两个文件：总览只报告这两条，不是「2/2 完成」。
+    markReviewedIn({ worktree: main, scope: CHANGES_SCOPE }, "src/a.ts", "tok-1");
+    markReviewedIn({ worktree: main, scope: CHANGES_SCOPE }, "src/b.ts", "tok-2");
+
+    const popover = await openSwitcher();
+    await waitFor(() => expect(row(popover, main)?.textContent).toContain("已审阅 2"));
+    expect(row(popover, repoPath)?.textContent).not.toContain("已审阅");
+    expect(popover.textContent).not.toContain("完成度");
+    expect(popover.textContent).not.toContain("Agent");
+  });
+});
+

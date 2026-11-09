@@ -1,14 +1,39 @@
 <script module lang="ts">
-  import type { RepoHead } from "../types";
+  import type { RepoHead, WorktreeItem } from "../types";
 
-  /** 各仓库当前检出的分支：弹层再次打开时先显示上次读到的，后台再刷新。 */
+  /**
+   * 上次读到的 HEAD 与总览：弹层再次打开时先显示上次结果，后台再刷新。
+   * 总览项自带 checkedAtMs，所以复用的永远是带时间的旧结果，而不是「看起来新鲜」的数字。
+   */
   const knownHeads = new Map<string, RepoHead>();
+  const knownItems = new Map<string, WorktreeItem>();
 </script>
 
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
   import { api } from "../api";
-  import { baseName, filterRecent, repeatedNames, rowOffsets, rowWindow } from "../recent";
+  import {
+    WORKTREE_FILTERS,
+    baseName,
+    buildWorktreeGroups,
+    filterWorktreeGroups,
+    flattenWorktreeGroups,
+    headOfRow,
+    normalizeRepoPath,
+    pruneWorktreeItems,
+    remoteText,
+    repeatedNames,
+    rowMatchesFilter,
+    rowOffsets,
+    rowWindow,
+    selectableWorktreeRows,
+    statusTimeText,
+    timeLabel,
+    type WorktreeFilter,
+    type WorktreeListRow,
+    type WorktreeRow,
+  } from "../recent";
+  import type { WorktreeReviewSummary } from "../review-progress.svelte";
   import type { IconName } from "../icons";
   import type { RecentRepo } from "../types";
   import { hueOf, repoBadgeLetters } from "../ui";
@@ -16,12 +41,12 @@
   import Popover from "./Popover.svelte";
 
   /**
-   * 标题栏仓库弹层：搜索最近仓库并直接切换，右键或菜单键打开仓库操作，
-   * 底部是打开、克隆、新建。切换判定由外壳给出（switchBlocked），这里只负责就地说明原因。
+   * 标题栏仓库弹层：按主仓库分组列出附属工作区，逐项显示真实 Git 状态，
+   * 搜索与筛选可组合，右键或菜单键打开仓库操作，底部是打开、克隆、新建（ADR-4）。
    *
-   * 几百个仓库时只渲染视口附近的行。同名仓库的完整路径会折行，行高不固定，所以先按估算排版，
-   * 渲染出来后记下实测高度。键盘当前项始终留在 DOM 里，Popover 的 scrollIntoView 和
-   * aria-activedescendant 才有落点。
+   * 状态读取是独立请求：慢或失败都不挡搜索与切换，只把对应项标成未知并带上读取时间。
+   * 几百个工作区时只渲染视口附近的行；分组头是虚拟化行但不是选择项，
+   * 键盘当前项始终留在 DOM 里，Popover 的 scrollIntoView 与 aria-activedescendant 才有落点。
    */
   interface Props {
     anchor: HTMLElement;
@@ -31,6 +56,8 @@
     blockedReason: string | null;
     /** 打开、克隆、新建不可用的原因。 */
     actionReason: string | null;
+    /** 当前会话已有的跨 worktree 审阅进度；没有记录的工作区不虚构完成度。 */
+    reviews?: WorktreeReviewSummary[];
     onSelect: (path: string) => void;
     onForget: (path: string) => void;
     onCopyPath: (path: string) => void;
@@ -41,7 +68,21 @@
     onClose: (refocus?: boolean) => void;
   }
 
-  let { anchor, repos, currentPath, blockedReason, actionReason, onSelect, onForget, onCopyPath, onRemoveWorktree, onContextMenu, onCommand, onClose }: Props = $props();
+  let {
+    anchor,
+    repos,
+    currentPath,
+    blockedReason,
+    actionReason,
+    reviews = [],
+    onSelect,
+    onForget,
+    onCopyPath,
+    onRemoveWorktree,
+    onContextMenu,
+    onCommand,
+    onClose,
+  }: Props = $props();
 
   const ACTIONS: { id: string; label: string; icon: IconName }[] = [
     { id: "repo.add", label: "打开本地仓库", icon: "folder-open" },
@@ -49,19 +90,62 @@
     { id: "repo.create", label: "新建仓库", icon: "folder-plus" },
   ];
 
-  const WIDTH = 480;
-  /** 单行仓库的高度与每多一行的增量，只是实测之前的估算。 */
-  const ROW = 49;
+  const WIDTH = 520;
+  /** 单行工作区的高度、分组头高度与每多一行的增量，只是实测之前的估算。 */
+  const ROW = 64;
+  const GROUP_ROW = 30;
   const EXTRA_LINE = 16;
-  /** 弹层宽 440 时一行完整路径大约放得下的字符数。 */
-  const PATH_CHARS = 64;
+  /** 弹层一行完整路径大约放得下的字符数。 */
+  const PATH_CHARS = 70;
   const OVERSCAN = 6;
   const FALLBACK_VIEWPORT = 480;
 
   let query = $state("");
+  let filter = $state<WorktreeFilter>("all");
   let active = $state(0);
-  /** 读到的 HEAD 版本号：Map 本身不是响应式的，换号让行重新取值。 */
+  /** 读到的 HEAD 与总览版本：Map 本身不是响应式的，换号让行重新取值。 */
   let headsVersion = $state(0);
+  let itemsVersion = $state(0);
+  let statusLoading = $state(false);
+  let statusError = $state<string | null>(null);
+  let statusCheckedAt = $state<number | null>(null);
+  /** 谁最后发起的请求谁写结果：旧响应不覆盖新列表。 */
+  let overviewSerial = 0;
+  let requestSeq = 0;
+
+  function nextRequestId(): number {
+    requestSeq = (requestSeq % 1_000_000) + 1;
+    return requestSeq;
+  }
+
+  function itemMap(): Map<string, WorktreeItem> {
+    void itemsVersion;
+    return new Map(knownItems);
+  }
+
+  function headMap(): Map<string, RepoHead> {
+    void headsVersion;
+    return new Map(knownHeads);
+  }
+
+  /** 当前会话已审阅条数按规范化路径索引：没有记录就是 0 条，不是完成度。 */
+  let reviewedTotals = $derived.by(() => {
+    const totals: Record<string, number> = {};
+    for (const summary of reviews) totals[normalizeRepoPath(summary.path)] = summary.reviewedTotal;
+    return totals;
+  });
+
+  let groups = $derived(
+    buildWorktreeGroups(repos, headMap(), pruneWorktreeItems(repos, itemMap()), currentPath, reviewedTotals),
+  );
+  let filtered = $derived(filterWorktreeGroups(groups, query, filter));
+  let flat = $derived(flattenWorktreeGroups(filtered));
+  let selectable = $derived(selectableWorktreeRows(flat));
+  let badgeLetters = $derived(repoBadgeLetters(selectable.map((row) => row.name)));
+  /** 同名仓库只能靠路径区分，这些行显示完整路径而不是截断（R6）。 */
+  let sameNames = $derived(
+    repeatedNames(selectable.map((row) => ({ name: row.name, path: row.path, openedAtMs: 0 }))),
+  );
 
   onMount(() => {
     const paths = repos.map((repo) => repo.path);
@@ -71,20 +155,70 @@
       try {
         const heads = await api.repoHeads(paths);
         if (!alive) return;
-        for (const head of heads ?? []) knownHeads.set(head.path, head);
+        const answered = new Set((heads ?? []).map((head) => normalizeRepoPath(head.path)));
+        // 这次没读到的仓库不能继续用上次的 HEAD：缓存只解释「读到过什么」，不是事实来源。
+        for (const path of paths) {
+          const key = normalizeRepoPath(path);
+          if (!answered.has(key)) knownHeads.delete(key);
+        }
+        for (const head of heads ?? []) knownHeads.set(normalizeRepoPath(head.path), head);
         headsVersion += 1;
       } catch {
         // 读不到分支只是少一条提示，不影响切换。
       }
     })();
+    void loadOverview(paths);
     return () => {
       alive = false;
     };
   });
 
-  function headOf(path: string): RepoHead | null {
-    void headsVersion;
-    return knownHeads.get(path) ?? null;
+  /**
+   * 逐项状态：单独请求，慢或失败都不影响搜索与切换。
+   * 失败时保留上次结果并说明「读取失败」，行上的时间仍然是被保留结果自己的时间。
+   */
+  async function loadOverview(paths: string[]) {
+    const serial = ++overviewSerial;
+    statusLoading = true;
+    statusError = null;
+    try {
+      const overview = await api.worktreeOverview(paths, nextRequestId());
+      if (serial !== overviewSerial) return;
+      const items = overview.items ?? [];
+      const answered = new Set(items.map((item) => normalizeRepoPath(item.path)));
+      // 本次没有结果的最近项不再沿用旧状态；枚举出来的工作区（不在请求里）保留自己的结果。
+      for (const path of paths) {
+        const key = normalizeRepoPath(path);
+        if (!answered.has(key)) knownItems.delete(key);
+      }
+      for (const item of items) knownItems.set(normalizeRepoPath(item.path), item);
+      itemsVersion += 1;
+      statusCheckedAt = overview.checkedAtMs ?? Date.now();
+    } catch (error) {
+      if (serial !== overviewSerial) return;
+      statusError = errorText(error);
+    } finally {
+      if (serial === overviewSerial) statusLoading = false;
+    }
+  }
+
+  function errorText(error: unknown): string {
+    if (error && typeof error === "object" && "message" in error) {
+      const message = (error as { message?: unknown }).message;
+      if (typeof message === "string" && message.trim()) return message.trim();
+    }
+    return "无法读取工作区状态。";
+  }
+
+  /** 筛选按钮上的实时条数：按真实状态统计，未知项不混进任何一档。 */
+  function countFor(id: WorktreeFilter): number {
+    let total = 0;
+    for (const group of groups) for (const row of group.rows) if (rowMatchesFilter(row, id)) total += 1;
+    return total;
+  }
+
+  function setFilter(next: WorktreeFilter) {
+    filter = next;
   }
 
   /** 名称里命中关键词的部分加粗，扫一眼就知道为什么匹配。 */
@@ -99,11 +233,6 @@
       { text: name.slice(at + term.length), hit: false },
     ].filter((part) => part.text);
   }
-  /** 关键字同时匹配名称、路径、当前分支和所属主仓库；分支读到后（headsVersion 变化）重新过滤。 */
-  let visible = $derived(filterRecent(repos, query, headOf));
-  let badgeLetters = $derived(repoBadgeLetters(visible.map((repo) => repo.name)));
-  /** 同名仓库只能靠路径区分，这些行显示完整路径而不是截断（R6）。 */
-  let sameNames = $derived(repeatedNames(repos));
 
   let space = $state<HTMLElement | null>(null);
   let list: HTMLElement | null = null;
@@ -115,41 +244,48 @@
   /** 方向键刚移动当前项：行高修正后还要把它留在视口里。 */
   let following = false;
   /** 整体重排时钉住的行：视口顶部那一行，和视口顶在行内的偏移。 */
-  let pinned: { path: string; within: number } | null = null;
+  let pinned: { key: string; within: number } | null = null;
 
-  function estimate(repo: RecentRepo): number {
-    const pathLines = sameNames.has(repo.name) ? Math.floor(repo.path.length / PATH_CHARS) : 0;
-    return ROW + pathLines * EXTRA_LINE + (reasonFor(repo) ? EXTRA_LINE : 0);
+  function estimate(row: WorktreeListRow): number {
+    if (row.kind === "group") return GROUP_ROW;
+    const pathLines = sameNames.has(row.row.name) ? Math.floor(row.row.path.length / PATH_CHARS) : 0;
+    // 原因文字挤掉一整行时先按估算撑高，渲染出来再按实测修正。
+    return ROW + pathLines * EXTRA_LINE + (reasonFor(row.row) ? EXTRA_LINE : 0);
   }
 
-  function heightOf(repo: RecentRepo): number {
-    return measured.get(repo.path) ?? estimate(repo);
+  function heightOf(row: WorktreeListRow): number {
+    return measured.get(row.key) ?? estimate(row);
   }
 
-  let offsets = $derived(rowOffsets(visible.map(heightOf)));
+  let offsets = $derived(rowOffsets(flat.map(heightOf)));
   let range = $derived(rowWindow(offsets, scrollTop, viewport > 0 ? viewport : FALLBACK_VIEWPORT, OVERSCAN));
   let rendered = $derived.by(() => {
-    const rows: { repo: RecentRepo; index: number }[] = [];
-    for (let index = range.start; index < range.end; index += 1) rows.push({ repo: visible[index], index });
-    if ((active < range.start || active >= range.end) && visible[active]) rows.push({ repo: visible[active], index: active });
+    const rows: { row: WorktreeListRow; index: number }[] = [];
+    for (let index = range.start; index < range.end; index += 1) rows.push({ row: flat[index], index });
+    // 键盘当前项必须留在 DOM：aria-activedescendant 与 scrollIntoView 都要有落点。
+    const current = selectable[active];
+    if (current && !rows.some((entry) => entry.row.kind === "item" && entry.row.row.path === current.path)) {
+      const at = flat.findIndex((entry) => entry.kind === "item" && entry.row.path === current.path);
+      if (at >= 0) rows.push({ row: flat[at], index: at });
+    }
     return rows;
   });
 
   /**
-   * 打开弹层或换关键词后，默认项落在第一个可切过去的仓库上：一次回车就能切换（R6）。
+   * 打开弹层、换关键词或换筛选后，默认项落在第一个可切过去的仓库上：一次回车就能切换（R6）。
    * 关键词没变而列表变了（从列表移除）时留在原位，不把当前项甩到视口外。
    */
   let seenQuery: string | null = null;
   $effect(() => {
-    const rows = visible;
-    const needle = query;
+    const rows = selectable;
+    const key = filter + " " + query;
     untrack(() => {
-      if (needle === seenQuery) {
+      if (key === seenQuery) {
         active = Math.min(active, Math.max(0, rows.length - 1));
         return;
       }
-      seenQuery = needle;
-      const first = rows.findIndex((repo) => repo.path !== currentPath);
+      seenQuery = key;
+      const first = rows.findIndex((row) => !row.current);
       active = first >= 0 ? first : 0;
       if (list) list.scrollTop = 0;
       scrollTop = 0;
@@ -166,28 +302,28 @@
     });
   });
 
-  function findPinned(host: HTMLElement): { path: string; within: number } | null {
-    let found: { path: string; within: number } | null = null;
+  function findPinned(host: HTMLElement): { key: string; within: number } | null {
+    let found: { key: string; within: number } | null = null;
     let best = -Infinity;
-    for (const row of space?.querySelectorAll<HTMLElement>("[data-repo-row]") ?? []) {
-      const top = parseFloat(row.style.top);
-      const path = visible[Number(row.dataset.repoRow)]?.path;
-      if (path === undefined || top > host.scrollTop || top <= best) continue;
+    for (const node of space?.querySelectorAll<HTMLElement>("[data-repo-row]") ?? []) {
+      const top = parseFloat(node.style.top);
+      const row = flat[Number(node.dataset.repoRow)];
+      if (!row || top > host.scrollTop || top <= best) continue;
       best = top;
-      found = { path, within: host.scrollTop - top };
+      found = { key: row.key, within: host.scrollTop - top };
     }
     return found;
   }
 
   function restorePinned(host: HTMLElement) {
     if (!pinned) return;
-    const { path, within } = pinned;
-    const index = visible.findIndex((repo) => repo.path === path);
+    const { key, within } = pinned;
+    const index = flat.findIndex((row) => row.key === key);
     if (index < 0) {
       pinned = null;
       return;
     }
-    host.scrollTop = offsets[index] + Math.min(within, heightOf(visible[index]) - 1);
+    host.scrollTop = offsets[index] + Math.min(within, Math.max(0, heightOf(flat[index]) - 1));
     scrollTop = host.scrollTop;
   }
 
@@ -218,15 +354,15 @@
   function measureRows(node: HTMLElement) {
     let next: Map<string, number> | null = null;
     let shift = 0;
-    for (const row of node.querySelectorAll<HTMLElement>("[data-repo-row]")) {
-      const height = row.offsetHeight;
-      const index = Number(row.dataset.repoRow);
-      const repo = visible[index];
-      if (!repo || height <= 0) continue;
-      const known = heightOf(repo);
+    for (const element of node.querySelectorAll<HTMLElement>("[data-repo-row]")) {
+      const height = element.offsetHeight;
+      const index = Number(element.dataset.repoRow);
+      const row = flat[index];
+      if (!row || height <= 0) continue;
+      const known = heightOf(row);
       if (height === known) continue;
       next ??= new Map(measured);
-      next.set(repo.path, height);
+      next.set(row.key, height);
       if (offsets[index] + known <= scrollTop) shift += height - known;
     }
     if (!next) {
@@ -244,7 +380,11 @@
         list.scrollTop += push;
         scrollTop = list.scrollTop;
       }
-      if (following) node.querySelector<HTMLElement>(`[data-repo-row="${active}"]`)?.scrollIntoView?.({ block: "nearest" });
+      if (following) {
+        // 方向键刚移动：行高修正后把当前项留在视口里。
+        const at = flat.findIndex((row) => row.kind === "item" && row.index === active);
+        node.querySelector<HTMLElement>('[data-repo-row="' + at + '"]')?.scrollIntoView?.({ block: "nearest" });
+      }
     });
   }
 
@@ -254,14 +394,31 @@
     if (node) untrack(() => measureRows(node));
   });
 
-  function reasonFor(repo: RecentRepo): string | null {
-    return repo.path === currentPath ? null : blockedReason;
+  function reasonFor(row: WorktreeRow): string | null {
+    return row.current ? null : blockedReason;
   }
 
-  function choose(repo: RecentRepo | undefined) {
-    if (!repo || reasonFor(repo)) return;
-    if (repo.path === currentPath) onClose();
-    else onSelect(repo.path);
+  function choose(row: WorktreeRow | undefined) {
+    if (!row || reasonFor(row)) return;
+    if (row.current) onClose();
+    else onSelect(row.path);
+  }
+
+  /** 枚举出来但不在最近列表里的工作区：切换目标就是它的路径。 */
+  function asRepo(row: WorktreeRow): RecentRepo {
+    return { name: row.name, path: row.path, openedAtMs: row.openedAtMs };
+  }
+
+  /** 一点状态都没读到时不给右键菜单伪造 head：菜单据此决定是否显示工作区操作。 */
+  function contextHead(row: WorktreeRow): RepoHead | null {
+    const head = headOfRow(row);
+    return head.branch || head.detached || head.missing || head.worktree ? head : null;
+  }
+
+  function emptyText(): string {
+    if (repos.length === 0) return "还没有最近仓库，从下面打开或克隆一个。";
+    if (query.trim() || filter !== "all") return "没有符合当前搜索与筛选的工作区，换个关键词或筛选条件试试。";
+    return "没有可显示的工作区。";
   }
 </script>
 
@@ -278,95 +435,158 @@
       following = true;
     }
   }
-  count={visible.length}
-  onChoose={(index) => choose(visible[index])}
-  onItemContextMenu={(index, point) => onContextMenu(visible[index], point, headOf(visible[index].path))}
+  count={selectable.length}
+  onChoose={(index) => choose(selectable[index])}
+  onItemContextMenu={(index, point) => {
+    const row = selectable[index];
+    if (row) onContextMenu(asRepo(row), point, contextHead(row));
+  }}
   {onClose}
 >
   {#snippet list(listId)}
     {#if repos.length === 0}
       <p class="branch-popover-empty">还没有最近仓库，从下面打开或克隆一个。</p>
-    {:else if visible.length === 0}
-      <p class="branch-popover-empty">没有匹配的仓库，试试名称、路径或分支名。</p>
-    {/if}
-    {#if visible.length > 0}
-      <div class="switcher-space" role="presentation" style={`height:${offsets[visible.length]}px`} use:trackList>
-      {#each rendered as { repo, index } (repo.path)}
-        {@const reason = reasonFor(repo)}
-        {@const current = repo.path === currentPath}
-        {@const head = headOf(repo.path)}
-        <div class="switcher-row" role="presentation" data-repo-row={index} style={`top:${offsets[index]}px`}>
-          <div
-            id={`${listId}-${index}`}
-            class="branch-option switcher-option"
-            class:active={index === active}
-            role="option"
-            aria-selected={current}
-            aria-setsize={visible.length}
-            aria-posinset={index + 1}
-            aria-disabled={reason ? "true" : undefined}
-            data-index={index}
-            title={reason ?? repo.path}
-            tabindex="-1"
-            onmousemove={() => {
-              following = false;
-              active = index;
-            }}
-            onclick={() => choose(repo)}
-            oncontextmenu={(event) => {
-              event.preventDefault();
-              following = false;
-              active = index;
-              onContextMenu(repo, { x: event.clientX, y: event.clientY }, head);
-            }}
-            onkeydown={() => {}}
+    {:else}
+      <div class="switcher-filters" role="group" aria-label="筛选工作区">
+        {#each WORKTREE_FILTERS as option (option.id)}
+          <button
+            type="button"
+            class="switcher-filter"
+            aria-pressed={filter === option.id}
+            data-worktree-filter={option.id}
+            title={option.id === "all" ? "全部工作区" : "只看" + option.label + "的工作区"}
+            onclick={() => setFilter(option.id)}
           >
-            <span class="repo-badge" style={`--hue:${hueOf(repo.path)}`} aria-hidden="true">{badgeLetters[index]}</span>
-            <span class="repo-text">
-              <span class="repo-line">
-                <span class="repo-name">{#each nameParts(repo.name, query) as part, partIndex (partIndex)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
-                {#if head?.missing}
-                  <span class="repo-head missing" title="目录已不存在或不再是 Git 仓库">目录不存在</span>
-                {:else if head?.branch}
-                  <span class="repo-head" title={`当前检出的分支：${head.branch}`}><Icon name="branch" size={11} /><span class="repo-head-name">{#each nameParts(head.branch, query) as part, partIndex (partIndex)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span></span>
-                {:else if head?.detached}
-                  <span class="repo-head detached" title={`游离 HEAD：${head.detached}`}><Icon name="commit" size={11} /><span class="repo-head-name">{head.detached}</span></span>
-                {/if}
-                {#if head?.worktree && !head.missing}
-                  <span class="repo-worktree" title={head.mainPath ? `附属工作区（git worktree），主仓库：${head.mainPath}` : "附属工作区（git worktree）"}>
-                    <Icon name="layers" size={11} />worktree{#if head.mainPath}<span class="repo-worktree-main">· {baseName(head.mainPath)}</span>{/if}
-                  </span>
-                {/if}
-              </span>
-              <span class={sameNames.has(repo.name) ? "repo-path-full" : "repo-path"}><bdi>{repo.path}</bdi></span>
-              {#if reason}<span class="switcher-reason">{reason}</span>{/if}
-            </span>
-            {#if current}<span class="switcher-current" aria-hidden="true"><Icon name="check" size={12} class="switcher-check" />当前</span>{/if}
-          </div>
-          <span class="switcher-actions">
-            <button type="button" class="icon-btn sm" tabindex="-1" aria-label={`复制 ${repo.name} 的完整路径`} title="复制完整路径" onclick={() => onCopyPath(repo.path)}>
-              <Icon name="copy" size={13} />
-            </button>
-            {#if head?.worktree && !head.missing}
-              <button
-                type="button"
-                class="icon-btn sm danger"
-                tabindex="-1"
-                aria-label={`删除工作区 ${repo.name}`}
-                title={current ? "当前打开的工作区不能删除，先切到其他仓库" : "删除这个 worktree（分支和提交保留）"}
-                disabled={current}
-                onclick={() => onRemoveWorktree(repo, head)}
-              >
-                <Icon name="trash" size={13} />
-              </button>
-            {/if}
-            <button type="button" class="icon-btn sm danger" tabindex="-1" aria-label={`从列表移除 ${repo.name}`} title="从列表移除（不删除文件）" onclick={() => onForget(repo.path)}>
-              <Icon name="x" size={13} />
-            </button>
-          </span>
-        </div>
-      {/each}
+            <span>{option.label}</span>
+            {#if option.id !== "all"}<span class="switcher-filter-count">{countFor(option.id)}</span>{/if}
+          </button>
+        {/each}
       </div>
+      {#if statusLoading}
+        <p class="switcher-status" role="status" data-worktree-status="loading">正在读取各工作区的状态；搜索和切换不用等它。</p>
+      {:else if statusError}
+        <p class="switcher-status danger" role="status" data-worktree-status="failed">
+          状态读取失败：{statusError}{#if statusCheckedAt !== null}（下面是上次读到的结果，时间见各行）{/if}
+        </p>
+      {:else if statusCheckedAt !== null}
+        <p class="switcher-status" role="status" data-worktree-status="ready">状态读取于 {timeLabel(statusCheckedAt)}；总览不会自动 fetch 远程。</p>
+      {/if}
+      {#if selectable.length === 0}
+        <p class="branch-popover-empty" data-worktree-empty>{emptyText()}</p>
+      {/if}
+      {#if flat.length > 0}
+        <div class="switcher-space" role="presentation" style={"height:" + offsets[flat.length] + "px"} use:trackList>
+          {#each rendered as { row, index } (row.key)}
+            {#if row.kind === "group"}
+              <div class="switcher-row switcher-group-row" role="presentation" data-group-row={row.group.key} data-repo-row={index} style={"top:" + offsets[index] + "px"}>
+                <span class="switcher-group-name"><Icon name="layers" size={11} />{row.group.name}</span>
+                <span class="switcher-group-path"><bdi>{row.group.mainPath ?? "归属未知"}</bdi></span>
+                <span class="switcher-group-count">{row.group.rows.length} 个工作区</span>
+              </div>
+            {:else}
+              {@const view = row.row}
+              {@const viewIndex = row.index}
+              {@const reason = reasonFor(view)}
+              {@const badge = badgeLetters[viewIndex] ?? ""}
+              <div class="switcher-row" role="presentation" data-repo-row={index} style={"top:" + offsets[index] + "px"}>
+                <div
+                  id={listId + "-" + viewIndex}
+                  class="branch-option switcher-option"
+                  class:active={viewIndex === active}
+                  role="option"
+                  aria-selected={view.current}
+                  aria-setsize={selectable.length}
+                  aria-posinset={viewIndex + 1}
+                  aria-disabled={reason ? "true" : undefined}
+                  data-index={viewIndex}
+                  data-worktree-path={view.path}
+                  title={reason ?? view.path}
+                  tabindex="-1"
+                  onmousemove={() => {
+                    following = false;
+                    active = viewIndex;
+                  }}
+                  onclick={() => choose(view)}
+                  oncontextmenu={(event) => {
+                    event.preventDefault();
+                    following = false;
+                    active = viewIndex;
+                    onContextMenu(asRepo(view), { x: event.clientX, y: event.clientY }, contextHead(view));
+                  }}
+                  onkeydown={() => {}}
+                >
+                  <span class="repo-badge" style={"--hue:" + hueOf(view.path)} aria-hidden="true">{badge}</span>
+                  <span class="repo-text">
+                    <span class="repo-line">
+                      <span class="repo-name">{#each nameParts(view.name, query) as part, partIndex (partIndex)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
+                      {#if view.missing}
+                        <span class="repo-head missing" title="目录已不存在或不再是 Git 仓库">目录不存在</span>
+                      {:else if view.branch}
+                        <span class="repo-head" title={"当前检出的分支：" + view.branch}><Icon name="branch" size={11} /><span class="repo-head-name">{#each nameParts(view.branch, query) as part, partIndex (partIndex)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span></span>
+                      {:else if view.detached}
+                        <span class="repo-head detached" title={"游离 HEAD：" + view.detached}><Icon name="commit" size={11} /><span class="repo-head-name">{view.detached}</span></span>
+                      {/if}
+                      {#if view.linked && !view.missing}
+                        <span class="repo-worktree" title={view.mainPath ? "附属工作区（git worktree），主仓库：" + view.mainPath : "附属工作区（git worktree），主仓库未知"}>
+                          <Icon name="layers" size={11} />worktree{#if view.mainPath}<span class="repo-worktree-main">· {baseName(view.mainPath)}</span>{/if}
+                        </span>
+                      {/if}
+                      {#if view.locked}
+                        <span class="repo-locked" title="已用 git worktree lock 锁定，删除会被拒绝">已锁定</span>
+                      {/if}
+                    </span>
+                    <span class={sameNames.has(view.name) ? "repo-path-full" : "repo-path"}><bdi>{view.path}</bdi></span>
+                    <span class="repo-status" data-worktree-state={view.state}>
+                      {#if view.state === "missing"}
+                        <span class="repo-state danger">状态未知·目录缺失</span>
+                      {:else if view.state === "unknown"}
+                        <span class="repo-state muted">状态未知</span>
+                      {:else if view.dirty}
+                        <span class="repo-state warn">有改动 {view.changed ?? 0}</span>
+                        {#if (view.conflicted ?? 0) > 0}<span class="repo-state danger">冲突 {view.conflicted}</span>{/if}
+                      {:else}
+                        <span class="repo-state ok">干净</span>
+                      {/if}
+                      {#if (view.ahead ?? 0) > 0}<span class="repo-state">待推送 {view.ahead}</span>{/if}
+                      {#if (view.behind ?? 0) > 0}<span class="repo-state">待拉取 {view.behind}</span>{/if}
+                      {#if view.upstream}<span class="repo-state muted" title={"本地 upstream：" + view.upstream}>{view.upstream}</span>{/if}
+                      <span class="repo-state" class:muted={!view.liveRemoteChecked} data-worktree-remote={view.liveRemoteChecked ? "live" : view.remoteCheckedAtMs !== null ? "stale" : "none"}>{remoteText(view)}</span>
+                      {#if view.reviewed > 0}<span class="repo-state accent">已审阅 {view.reviewed}</span>{/if}
+                      <span class="repo-state muted">{statusTimeText(view)}</span>
+                      {#if view.note}<span class="repo-state muted repo-state-note" title={view.note}>{view.note}</span>{/if}
+                    </span>
+                    {#if reason}<span class="switcher-reason">{reason}</span>{/if}
+                  </span>
+                  {#if view.current}<span class="switcher-current" aria-hidden="true"><Icon name="check" size={12} class="switcher-check" />当前</span>{/if}
+                </div>
+                <span class="switcher-actions">
+                  <button type="button" class="icon-btn sm" tabindex="-1" aria-label={"复制 " + view.name + " 的完整路径"} title="复制完整路径" onclick={() => onCopyPath(view.path)}>
+                    <Icon name="copy" size={13} />
+                  </button>
+                  {#if view.linked && !view.missing}
+                    <button
+                      type="button"
+                      class="icon-btn sm danger"
+                      tabindex="-1"
+                      aria-label={"删除工作区 " + view.name}
+                      title={view.current ? "当前打开的工作区不能删除，先切到其他仓库" : "删除这个 worktree（分支和提交保留）"}
+                      disabled={view.current}
+                      onclick={() => onRemoveWorktree(asRepo(view), headOfRow(view))}
+                    >
+                      <Icon name="trash" size={13} />
+                    </button>
+                  {/if}
+                  {#if view.recent}
+                    <button type="button" class="icon-btn sm danger" tabindex="-1" aria-label={"从列表移除 " + view.name} title="从列表移除（不删除文件）" onclick={() => onForget(view.path)}>
+                      <Icon name="x" size={13} />
+                    </button>
+                  {/if}
+                </span>
+              </div>
+            {/if}
+          {/each}
+        </div>
+      {/if}
     {/if}
   {/snippet}
   {#snippet foot()}
@@ -381,7 +601,7 @@
     <p class="switcher-hint" aria-hidden="true">
       <span><span class="key">↑</span><span class="key">↓</span>选择</span>
       <span><span class="key">Enter</span>打开</span>
-      <span>可搜分支名；输入 worktree 列出所有工作区</span>
+      <span>可搜名称、路径、分支与主仓库</span>
       <span>右键更多操作</span>
     </p>
   {/snippet}

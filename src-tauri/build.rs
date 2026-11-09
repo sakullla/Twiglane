@@ -103,6 +103,7 @@ fn main() {
             "track_remote_as",
             "cancel_remote",
             "repo_heads",
+            "worktree_overview",
             "remove_worktree",
             "compare_file_diff",
             "commit_branches",

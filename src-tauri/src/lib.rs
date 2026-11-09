@@ -128,6 +128,7 @@ pub fn run() {
             track_remote_as,
             cancel_remote,
             repo_heads,
+            worktree_overview,
             remove_worktree,
             publish_branch,
             associate_upstream,
@@ -821,6 +822,17 @@ async fn repo_heads(paths: Vec<String>) -> Result<Vec<crate::git::heads::RepoHea
     tauri::async_runtime::spawn_blocking(move || crate::git::heads::repo_heads(&paths))
         .await
         .map_err(|_| AppError::new("cancelled", "读取仓库分支已中断。"))
+}
+
+/// worktree 总览：从最近仓库解析主仓库、枚举附属工作区并逐项读取真实状态。
+/// 只读、不 fetch；单项失败只影响该项。前端另起请求，不阻塞搜索与切换。
+#[tauri::command(rename_all = "camelCase")]
+async fn worktree_overview(
+    state: State<'_, Arc<Backend>>,
+    paths: Vec<String>,
+    request_id: u64,
+) -> Result<crate::git::heads::WorktreeOverview, AppError> {
+    crate::git::heads::worktree_overview(state.inner(), &paths, request_id).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

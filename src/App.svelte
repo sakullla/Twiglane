@@ -36,6 +36,7 @@
     markReviewedIn,
     pruneReviewProgressIn,
     reviewPaths,
+    reviewSessionSummary,
     reviewSummaryIn,
     reviewTokens,
     taskReviewScope,
@@ -2797,9 +2798,12 @@
         },
       },
       { id: "copy", label: "复制完整路径", icon: "copy", run: () => void copyPath(repo.path) },
-      { separator: true },
-      { id: "forget", label: "从最近列表移除", icon: "x", danger: true, run: () => void forget(repo.path) },
     ];
+    // 「从列表移除」只对最近列表里的仓库有意义：总览也会列出枚举出来的附属工作区。
+    if (recent.some((item) => item.path === repo.path)) {
+      entries.push({ separator: true });
+      entries.push({ id: "forget", label: "从最近列表移除", icon: "x", danger: true, run: () => void forget(repo.path) });
+    }
     if (head?.worktree && !head.missing) {
       entries.push({
         id: "remove-worktree",
@@ -3422,6 +3426,7 @@
       currentPath={opened?.summary.path ?? null}
       blockedReason={switchBlocked(commandState) ? switchBlockedReason(commandState) : null}
       actionReason={writeLocked ? switchBlockedReason(commandState) : null}
+      reviews={reviewSessionSummary()}
       onSelect={(path) => {
         closeSwitcher();
         void openRecent(path);

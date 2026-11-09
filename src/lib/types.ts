@@ -726,6 +726,44 @@ export interface CommitBranches {
 }
 
 /** 仓库当前检出的分支（直接读 HEAD 文件）。 */
+/** worktree 总览的一项：每项自带状态来源与读取时间，缺失与未知分开表达（R3）。 */
+export interface WorktreeItem {
+  path: string;
+  /** 所属主仓库的工作区路径；无法归属时为 null。 */
+  mainPath: string | null;
+  branch: string | null;
+  detached: string | null;
+  missing: boolean;
+  /** 是 git worktree add 建出来的附属工作区。 */
+  linked: boolean;
+  locked: boolean;
+  /** 这一项来自最近仓库列表；枚举出来的附属工作区可能不在其中。 */
+  recent: boolean;
+  /** 未提交状态读不到时为 null，界面显示未知而不是「干净」。 */
+  dirty: boolean | null;
+  changed: number | null;
+  staged: number | null;
+  unstaged: number | null;
+  untracked: number | null;
+  conflicted: number | null;
+  /** 本地 upstream 及其计数；没有实时核对过远程时只代表本地记录。 */
+  upstream: string | null;
+  ahead: number | null;
+  behind: number | null;
+  liveRemoteChecked: boolean;
+  remoteCheckedAtMs: number | null;
+  remoteCheckStale: boolean;
+  status: "ready" | "unknown" | "missing";
+  /** 该项的失败或限制说明；空字符串表示没有。 */
+  note: string;
+  checkedAtMs: number;
+}
+
+export interface WorktreeOverview {
+  items: WorktreeItem[];
+  checkedAtMs: number;
+}
+
 export interface RepoHead {
   path: string;
   branch: string | null;

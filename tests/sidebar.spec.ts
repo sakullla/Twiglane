@@ -67,8 +67,8 @@ describe("仓库弹层", () => {
 });
 
 describe("大量最近仓库", () => {
-  /** RepoSwitcher 里单行与多一行原因文字的估算高度。 */
-  const ROW = 49;
+  /** RepoSwitcher 里单行与多一行原因文字的估算高度（分组是单工作区组，没有分组头）。 */
+  const ROW = 64;
   const LINE = 16;
   const many: RecentRepo[] = Array.from({ length: 500 }, (_, index) => {
     const name = index === 300 || index === 450 ? "demo" : `repo-${index}`;

@@ -17,6 +17,13 @@ describe("Tauri 命令参数", () => {
     invoke.mockClear();
   });
 
+  it("worktree 总览只传最近路径与请求号，不触发任何写入或 fetch", async () => {
+    const paths = ["C:/work/app", "C:/work/app-feature"];
+    await api.worktreeOverview(paths, 77);
+    expect(invoke).toHaveBeenLastCalledWith("worktree_overview", { paths, requestId: 77 });
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
   it("文档读取保留来源快照、分页版本与逐请求资源取消", async () => {
     const source = { revision: "index", path: "docs/中文 guide.md", snapshot: "a".repeat(64) };
     await api.repositoryDocument("/repo", source, 8, 501);

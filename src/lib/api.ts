@@ -30,6 +30,7 @@ import type {
   RepositoryReviewToken,
   RepositorySearchScope,
   RepoHead,
+  WorktreeOverview,
   RemoteState,
   RemoteTag,
   SettingsDto,
@@ -135,6 +136,12 @@ export const api = {
   forgetRecent: (path: string) => invoke<RecentRepo[]>("forget_recent", { path }),
   /** 直接读各仓库 HEAD 文件得到当前检出的分支，不启动 Git。 */
   repoHeads: (paths: string[]) => invoke<RepoHead[]>("repo_heads", { paths }),
+  /**
+   * worktree 总览：从最近仓库解析主仓库、枚举附属工作区，再逐项读取真实状态。
+   * 只读、不 fetch；单项失败只影响该项，结果自带 checkedAtMs。
+   */
+  worktreeOverview: (paths: string[], requestId: number) =>
+    invoke<WorktreeOverview>("worktree_overview", { paths, requestId }),
   /** 删除附属工作区（git worktree remove），成功后返回移出该项的最近列表；分支保留。 */
   removeWorktree: (path: string, force: boolean, requestId: number) =>
     invoke<RecentRepo[]>("remove_worktree", { path, force, requestId }),

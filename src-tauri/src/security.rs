@@ -113,6 +113,7 @@ fn capabilities_do_not_grant_a_shell() {
         "allow-track-remote-as",
         "allow-cancel-remote",
         "allow-repo-heads",
+        "allow-worktree-overview",
         "allow-remove-worktree",
         "allow-compare-file-diff",
         "allow-commit-branches",

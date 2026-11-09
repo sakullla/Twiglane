@@ -43,6 +43,13 @@
     reviewBusy?: string | null;
     /** 上一次标记失败的原因：就地说明，不弹全局错误。 */
     reviewNote?: string | null;
+    /**
+     * 任务队列：同一套虚拟化、目录分组、搜索与键盘导航，但分组表头改称「任务文件」，
+     * 并且不提供整文件暂存、空格暂存与取消暂存——任务净差异是只读的。
+     */
+    variant?: "changes" | "task";
+    /** 搜索框的 id：改动与任务视图同时保活，id 不能重复。 */
+    searchId?: string;
   }
 
   type SectionSide = DiffSide | "conflicted";
@@ -84,7 +91,11 @@
     onToggleReview,
     reviewBusy = null,
     reviewNote = null,
+    variant = "changes",
+    searchId = "file-search",
   }: Props = $props();
+  /** 任务队列只读：不写入暂存区，因此连行内的暂存入/出口都不画。 */
+  let taskMode = $derived(variant === "task");
   let groups = $derived(groupFiles(files));
   let conflictedRows = $derived(filterRows(groups.conflicted, query));
   let unstagedRows = $derived(filterRows(groups.unstaged, query));
@@ -271,6 +282,8 @@
   });
 
   function toggle(row: FileRow) {
+    // 任务队列是只读净差异：双击与空格在这里不触发任何写入。
+    if (taskMode) return;
     if (disabled) return;
     if (row.unmerged) {
       onResolve?.(row.path);
@@ -323,7 +336,7 @@
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     if ((event.key === "ArrowUp" || event.key === "k") && !event.shiftKey && current === 0) {
       event.preventDefault();
-      document.getElementById("file-search")?.focus();
+      document.getElementById(searchId)?.focus();
       return;
     }
     if (event.key === " " && current >= 0) {
@@ -350,8 +363,8 @@
   <div class="field sm">
     <Icon name="search" size={14} />
     <input
-      id="file-search"
-      aria-label="搜索改动文件"
+      id={searchId}
+      aria-label={taskMode ? "搜索任务文件" : "搜索改动文件"}
       placeholder="搜索文件或路径"
       autocomplete="off"
       spellcheck="false"
@@ -394,7 +407,7 @@
 <div
   class="file-list"
   role="listbox"
-  aria-label="改动文件"
+  aria-label={taskMode ? "任务文件" : "改动文件"}
   aria-multiselectable={onMultiSelect ? "true" : undefined}
   tabindex="0"
   bind:this={list}
@@ -434,7 +447,7 @@
             role="presentation"
             style={`top:${top}px;height:${ROW_HEIGHT}px`}
           >
-            <span>{item.side === "conflicted" ? "冲突" : item.side === "unstaged" ? "未暂存的改动" : "已暂存"}</span>
+            <span>{item.side === "conflicted" ? "冲突" : taskMode ? "任务文件" : item.side === "unstaged" ? "未暂存的改动" : "已暂存"}</span>
             <span class="count" class:danger={item.side === "conflicted"}>{item.count}</span>
             <span class="spacer"></span>
             {#if item.side === "conflicted" && onResolve}
@@ -448,7 +461,7 @@
               >
                 <Icon name="merge" size={13} /><span class="file-group-action">去处理</span>
               </button>
-            {:else if item.side === "unstaged" && onStageAll && item.paths.length > 0}
+            {:else if !taskMode && item.side === "unstaged" && onStageAll && item.paths.length > 0}
               <button
                 type="button"
                 class="btn btn-ghost btn-sm"
@@ -485,7 +498,7 @@
               <span class="count">{item.count}</span>
             </button>
             <span class="spacer"></span>
-            {#if item.side === "unstaged" && onStageAll && item.paths.length > 0}
+            {#if !taskMode && item.side === "unstaged" && onStageAll && item.paths.length > 0}
               <button
                 type="button"
                 class="btn btn-ghost btn-sm"
@@ -497,7 +510,7 @@
                   onStageAll(item.paths);
                 }}
               >暂存</button>
-            {:else if item.side === "staged" && onUnstageAll && item.paths.length > 0}
+            {:else if !taskMode && item.side === "staged" && onUnstageAll && item.paths.length > 0}
               <button
                 type="button"
                 class="btn btn-ghost btn-sm"
@@ -576,7 +589,9 @@
                 {/if}
               </button>
             {/if}
-            {#if row.unmerged}
+            {#if taskMode}
+              <!-- 任务队列是只读净差异：行内只有审阅标记，没有暂存/取消暂存。 -->
+            {:else if row.unmerged}
               <button
                 type="button"
                 class="row-action"

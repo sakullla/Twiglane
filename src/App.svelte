@@ -20,6 +20,7 @@
   import { DraftBuffer } from "./lib/draft";
   import {
     beginClioraReview,
+    clioraBaseline,
     clioraReview,
     clioraReturnOutcome,
     forgetClioraSourceUnless,
@@ -60,6 +61,7 @@
     StatusSnapshot,
     PullIntegration,
     TaskModal,
+    TaskRequest,
     Theme,
     WorkspaceView,
   } from "./lib/types";
@@ -99,6 +101,7 @@
   import ScopeModal from "./lib/components/ScopeModal.svelte";
   import SettingsModal from "./lib/components/SettingsModal.svelte";
   import StashModal from "./lib/components/StashModal.svelte";
+  import TaskReview from "./lib/components/TaskReview.svelte";
   import StatusBar from "./lib/components/StatusBar.svelte";
   import TitleBar from "./lib/components/TitleBar.svelte";
   import ViewSwitcher from "./lib/components/ViewSwitcher.svelte";
@@ -236,6 +239,15 @@
   let mergeMode = $state<MergeMode | null>(null);
   let historyPath = $state<string | null>(null);
   let historyQuery = $state("");
+  /**
+   * 任务视图的起点请求。null 表示还没有明确起点：任务页停在选择状态，
+   * 不会退回当前 HEAD、默认分支或上一次用过的起点（R1）。
+   */
+  let taskRequest = $state.raw<TaskRequest | null>(null);
+  let taskRequestNonce = 0;
+  /** 任务视图自己的文件导航与差异块导航，与改动、历史各留一份。 */
+  let taskNav = $state.raw<FileNavState | null>(null);
+  let taskHunk = $state<HunkNavReport | null>(null);
   let taskModal = $state<TaskModal | null>(null);
   /**
    * 只读文档阅读窗口的请求。
@@ -386,15 +398,29 @@
     const index = items.findIndex((row) => sameSelection(row, selected));
     return fileNavState(items, index, goToFile, multiActive ? "选中文件" : "文件");
   });
-  /* 三个视图各有自己的文件顺序：改动列表、文件树、提交内的文件。 */
+  /* 四个视图各有自己的文件顺序：改动列表、文件树、提交内的文件、任务净改动。 */
   let activeNav = $derived(
-    workspaceView === "changes" ? changesNav : workspaceView === "files" ? filesNav : historyNav,
+    workspaceView === "changes"
+      ? changesNav
+      : workspaceView === "files"
+        ? filesNav
+        : workspaceView === "task"
+          ? taskNav
+          : historyNav,
   );
   /** 两份差异都可能挂着：只采用当前视图那一份，多选时单文件差异已经卸掉。 */
   let changesHunk = $state<HunkNavReport | null>(null);
   let historyHunk = $state<HunkNavReport | null>(null);
   let activeHunk = $derived<HunkNavReport | null>(
-    workspaceView === "changes" ? (multiActive ? null : changesHunk) : workspaceView === "history" ? historyHunk : null,
+    workspaceView === "changes"
+      ? multiActive
+        ? null
+        : changesHunk
+      : workspaceView === "history"
+        ? historyHunk
+        : workspaceView === "task"
+          ? taskHunk
+          : null,
   );
   /** 回调身份必须稳定：内联函数每次渲染都是新的，差异视图会在上报和清空之间打转。 */
   function assignHunk(current: HunkNavReport | null, nav: HunkNavReport | null): HunkNavReport | null {
@@ -407,6 +433,9 @@
   }
   function reportHistoryHunk(nav: HunkNavReport | null) {
     historyHunk = assignHunk(historyHunk, nav);
+  }
+  function reportTaskHunk(nav: HunkNavReport | null) {
+    taskHunk = assignHunk(taskHunk, nav);
   }
 
   /* 命令注册表的唯一状态输入：标题栏、左栏、溢出菜单与命令面板都读这一份。 */
@@ -522,9 +551,11 @@
         ? document.getElementById("history-search")
         : workspaceView === "files"
           ? document.getElementById("files-search")
-          : opened
-            ? document.getElementById("file-search")
-            : document.getElementById("welcome-search") ?? document.querySelector<HTMLElement>(".welcome-actions button");
+          : workspaceView === "task"
+            ? document.getElementById("task-file-search") ?? document.getElementById("task-baseline-search")
+            : opened
+              ? document.getElementById("file-search")
+              : document.getElementById("welcome-search") ?? document.querySelector<HTMLElement>(".welcome-actions button");
       target?.focus();
     };
     if (paletteOpen) setTimeout(pick, 0);
@@ -535,6 +566,14 @@
     phaseNote = message;
     live = message;
     banner = null;
+  }
+
+  /**
+   * 任务读取失败：任务页已经就地给出原因与恢复入口，这里只把同一句原因交给读屏器，
+   * 不再额外弹一条通知条——同一件事不该在两处各说一遍。
+   */
+  function announceTaskFailure(error: unknown) {
+    live = normalizeError(error).message;
   }
 
   function showError(error: unknown) {
@@ -589,6 +628,9 @@
         return;
       case "view.history":
         showHistory();
+        return;
+      case "view.task":
+        showTask();
         return;
       case "file.prev":
         activeNav?.onPrev();
@@ -974,6 +1016,11 @@
     historyPath = null;
     historyQuery = "";
     filesNav = null;
+    // 换仓库清掉任务起点与导航：旧仓库的起点对新仓库不成立。
+    taskRequest = null;
+    taskRequestNonce += 1;
+    taskNav = null;
+    taskHunk = null;
     taskModal = null;
     paletteOpen = false;
     cloneOpen = false;
@@ -1308,6 +1355,12 @@
       historyPanel ??= import("./lib/components/HistoryPanel.svelte");
       return;
     }
+    if (view === "task") {
+      // 任务视图自己读净差异：改动视图的在途响应作废，回到改动视图时再按当前选择重读。
+      diffToken += 1;
+      diffLoading = false;
+      return;
+    }
     if (view === "files") {
       // 文件视图不画改动差异：在途响应作废，回到改动视图时再按当前选择重读。
       diffToken += 1;
@@ -1321,6 +1374,33 @@
     historyPath = null;
     historyQuery = "";
     useView("history");
+  }
+
+  /** 任务视图：没有起点就停在选择状态，绝不默认 HEAD 或默认分支。 */
+  function showTask() {
+    useView("task");
+  }
+
+  /**
+   * 带着明确起点进入任务视图。起点为空时请求保持 null：任务页要求用户自己选，
+   * 这里不补一个猜测的起点。
+   */
+  function openTaskReview(baseline: string | null, origin: TaskRequest["origin"]) {
+    const value = baseline?.trim() ?? "";
+    taskRequestNonce += 1;
+    taskRequest = value === "" ? null : { baseline: value, origin, nonce: taskRequestNonce };
+    useView("task");
+  }
+
+  /** 用户在选择器里选定的起点：只读取任务范围，不写入任何 Git 对象。 */
+  function pickTaskBaseline(baseline: string) {
+    openTaskReview(baseline, "manual");
+  }
+
+  /** 放弃当前起点：回到明确的选择状态。 */
+  function clearTaskBaseline() {
+    taskRequest = null;
+    taskRequestNonce += 1;
   }
 
   function openFileHistory(path: string) {
@@ -2082,6 +2162,9 @@
         worktreePath: openedRepo.summary.path,
         baseline: request.baseline,
       });
+      // 链接自带已校验起点：直接进入任务视图。没有起点时停在明确的选择状态，
+      // 不用当前 HEAD 或默认分支补一个（R1）。
+      openTaskReview(clioraBaseline(), "cliora");
       live = "已按 cliora 审查链接打开 " + openedRepo.summary.name;
       await api.clioraReviewReceipt(request.reviewId, request.sessionId, true, null);
     } catch (error) {
@@ -2192,6 +2275,9 @@
         workspaceView = "changes";
         historyPath = null;
         filesNav = null;
+        taskRequest = null;
+        taskNav = null;
+        taskHunk = null;
         taskModal = null;
         cloneOpen = false;
         paletteOpen = false;
@@ -3364,6 +3450,34 @@
                 />
               {/if}
             </div>
+          </div>
+          <div
+            class="workbench-view"
+            data-view-scope="task"
+            data-active={workspaceView === "task"}
+            aria-hidden={workspaceView !== "task"}
+            inert={workspaceView !== "task"}
+          >
+            <TaskReview
+              {opened}
+              active={workspaceView === "task"}
+              request={taskRequest}
+              {nextId}
+              fullFile={diffFullFile}
+              onFullFile={setFullFile}
+              onGeneration={adoptGeneration}
+              onNotice={notice}
+              onFailure={announceTaskFailure}
+              onFileHistory={openFileHistory}
+              onCommitHistory={openCommitSearch}
+              onReadDocument={openDocument}
+              onFileNav={(nav) => (taskNav = nav)}
+              onHunkNav={reportTaskHunk}
+              onPickBaseline={pickTaskBaseline}
+              onClearBaseline={clearTaskBaseline}
+              {paneHead}
+              {paneResizer}
+            />
           </div>
           {#if filesViewEnabled}
           <div

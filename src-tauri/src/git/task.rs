@@ -340,6 +340,17 @@ async fn net_files(
         .map(|file| file.path.as_str())
         .collect();
 
+    // 同一条路径既在起点里、又在工作区里未跟踪：`git diff <baseline>` 只按索引判断，
+    // 会把它报成删除，而工作区实际上有重建后的内容。这种情况下必须让工作区内容成为
+    // 这条路径的最终净结果，否则文件列表会与未跟踪计数、单文件差异互相矛盾。
+    let untracked_paths: HashSet<&str> = range
+        .snapshot
+        .files
+        .iter()
+        .filter(|file| file.untracked)
+        .map(|file| file.path.as_str())
+        .collect();
+
     let mut files = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut truncated = false;
@@ -347,6 +358,11 @@ async fn net_files(
         if files.len() >= MAX_TASK_FILES {
             truncated = true;
             break;
+        }
+        if untracked_paths.contains(file.path.as_str()) {
+            // 交给下面的未跟踪分支：条目、状态与行数都按工作区内容给，和
+            // untrackedFiles 计数、load_task_diff 的未跟踪读取保持同一份事实。
+            continue;
         }
         if !seen.insert(file.path.clone()) {
             continue;
@@ -1124,6 +1140,26 @@ mod tests {
         assert!(status.success(), "{args:?}");
     }
 
+    /// 预期会失败的 Git 动作（例如制造合并冲突）：只返回退出码，不 panic。
+    fn git_attempt(dir: &Path, args: &[&str]) -> i32 {
+        Command::new(crate::test_support::system_git())
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                crate::test_support::isolated_gitconfig(),
+            )
+            .env("GIT_AUTHOR_NAME", "Twiglane Test")
+            .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Twiglane Test")
+            .env("GIT_COMMITTER_EMAIL", "twiglane-test@example.com")
+            .status()
+            .unwrap()
+            .code()
+            .unwrap_or(-1)
+    }
+
     fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
         let output = Command::new(crate::test_support::system_git())
             .current_dir(dir)
@@ -1653,5 +1689,250 @@ mod tests {
             link.state,
             RepositoryReviewState::Unconfirmed | RepositoryReviewState::Unchanged
         ));
+    }
+
+    /// 同一路径先在提交里被删除、又在工作区以未跟踪文件重建：净结果必须给出工作区内容，
+    /// 不能因为路径去重把它丢成 deleted。
+    #[tokio::test]
+    async fn task_review_keeps_untracked_rebuild_of_deleted_path() {
+        let fixture = crate::test_support::git_fixture("task-review-rebuilt");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("rebuilt.txt"), "one\ntwo\n").unwrap();
+        fs::write(repo.join("stays.txt"), "stays\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
+        let baseline = git_stdout(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["rm", "-q", "rebuilt.txt"]);
+        git(&repo, &["commit", "-m", "delete rebuilt"]);
+        let head = git_stdout(&repo, &["rev-parse", "HEAD"]);
+        // 工作区里又以未跟踪文件重建同名路径。
+        fs::write(
+            repo.join("rebuilt.txt"),
+            "shadow one\nshadow two\nshadow three\n",
+        )
+        .unwrap();
+
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let task = task_review(&backend, &path, &baseline, generation, 2)
+            .await
+            .unwrap();
+
+        assert_eq!(task.head_oid, head);
+        assert_eq!(task.commit_count, 1);
+        assert_eq!(task.untracked_files, 1);
+        assert_eq!(task.files_total, 1, "{:?}", task.files.iter().map(|file| (&file.path, &file.status, file.untracked)).collect::<Vec<_>>());
+        let rebuilt = file(&task.files, "rebuilt.txt");
+        assert!(rebuilt.untracked, "工作区未跟踪重建必须留在净结果里");
+        assert_eq!(rebuilt.status, "added");
+        assert_eq!((rebuilt.additions, rebuilt.deletions), (Some(3), Some(0)));
+        // 与 untrackedFiles 计数、单文件差异同一份事实：不能还报成删除。
+        assert!(task.files.iter().all(|entry| entry.status != "deleted"));
+        assert_eq!((task.additions, task.deletions), (3, 0));
+
+        let diff = load_task_diff(
+            &backend,
+            &path,
+            &baseline,
+            &head,
+            "rebuilt.txt",
+            None,
+            task.generation,
+            3,
+            0,
+            0,
+            3,
+            false,
+        )
+        .await
+        .unwrap();
+        let text = diff.text.clone().unwrap_or_default();
+        assert!(text.contains("+shadow three"), "{text}");
+        assert_eq!((diff.additions, diff.deletions), (3, 0));
+    }
+
+    /// 任务读取、单文件差异与快照确认都是只读：HEAD、索引、工作区、引用与 stash 不变。
+    #[tokio::test]
+    async fn task_reads_do_not_write_head_index_or_worktree() {
+        let fixture = crate::test_support::git_fixture("task-readonly");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("tracked.txt"), "one\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
+        let baseline = git_stdout(&repo, &["rev-parse", "HEAD"]);
+        fs::write(repo.join("tracked.txt"), "one\ntwo\nthree\n").unwrap();
+        git(&repo, &["add", "tracked.txt"]);
+        git(&repo, &["commit", "-m", "commit tracked"]);
+        let head = git_stdout(&repo, &["rev-parse", "HEAD"]);
+        // HEAD 之后再改一次：读取同时覆盖提交、暂存、未暂存与未跟踪。
+        fs::write(repo.join("tracked.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        git(&repo, &["add", "tracked.txt"]);
+        fs::write(
+            repo.join("tracked.txt"),
+            "one\ntwo\nthree\nfour\nfive\n",
+        )
+        .unwrap();
+        fs::write(repo.join("untracked.txt"), "untracked\n").unwrap();
+
+        let fingerprint = || {
+            (
+                git_stdout(&repo, &["rev-parse", "HEAD"]),
+                git_bytes(&repo, &["ls-files", "-s"]),
+                git_bytes(&repo, &["status", "--porcelain=v1", "-z"]),
+                git_stdout(&repo, &["for-each-ref", "--format=%(refname) %(objectname)"]),
+                git_stdout(&repo, &["stash", "list"]),
+                fs::read_to_string(repo.join("tracked.txt")).unwrap(),
+                fs::read_to_string(repo.join("untracked.txt")).unwrap(),
+            )
+        };
+
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let before = fingerprint();
+        let task = task_review(&backend, &path, &baseline, generation, 2)
+            .await
+            .unwrap();
+        assert_eq!(task.files_total, 2);
+        load_task_diff(
+            &backend,
+            &path,
+            &baseline,
+            &head,
+            "tracked.txt",
+            None,
+            task.generation,
+            3,
+            0,
+            0,
+            3,
+            false,
+        )
+        .await
+        .unwrap();
+        load_task_diff(
+            &backend,
+            &path,
+            &baseline,
+            &head,
+            "untracked.txt",
+            None,
+            task.generation,
+            4,
+            0,
+            0,
+            3,
+            false,
+        )
+        .await
+        .unwrap();
+        let token = task_review_token(
+            &backend,
+            &path,
+            &baseline,
+            &head,
+            "tracked.txt",
+            task.generation,
+            5,
+        )
+        .await
+        .unwrap();
+        assert_eq!(token.state, RepositoryReviewState::Current);
+        assert!(token.token.is_some());
+
+        assert_eq!(
+            fingerprint(),
+            before,
+            "任务读取、差异读取与快照确认都不能写 HEAD、索引、工作区、引用或 stash"
+        );
+    }
+
+    /// UU 冲突：净结果标出这条路径的冲突状态，单文件差异仍可读，读取不写仓库。
+    #[tokio::test]
+    async fn task_review_reports_unmerged_conflict_without_writing() {
+        let fixture = crate::test_support::git_fixture("task-review-conflict");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("c.txt"), "base\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
+        let baseline = git_stdout(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "-q", "-b", "side"]);
+        fs::write(repo.join("c.txt"), "side\n").unwrap();
+        git(&repo, &["commit", "-q", "-a", "-m", "side"]);
+        git(&repo, &["checkout", "-q", "main"]);
+        fs::write(repo.join("c.txt"), "main\n").unwrap();
+        git(&repo, &["commit", "-q", "-a", "-m", "main"]);
+        let head = git_stdout(&repo, &["rev-parse", "HEAD"]);
+        assert_eq!(git_attempt(&repo, &["merge", "side"]), 1, "这里要制造 UU 冲突");
+        assert_eq!(
+            git_stdout(&repo, &["status", "--porcelain=v1", "--", "c.txt"]),
+            "UU c.txt"
+        );
+
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let before = (
+            git_stdout(&repo, &["rev-parse", "HEAD"]),
+            git_bytes(&repo, &["ls-files", "-s"]),
+            git_bytes(&repo, &["status", "--porcelain=v1", "-z"]),
+            fs::read_to_string(repo.join("c.txt")).unwrap(),
+        );
+
+        let task = task_review(&backend, &path, &baseline, generation, 2)
+            .await
+            .unwrap();
+        assert!(task.conflicted);
+        assert!(task.dirty);
+        let conflict = file(&task.files, "c.txt");
+        assert!(conflict.unmerged);
+        assert_eq!(conflict.status, "unmerged");
+
+        let token = task_review_token(
+            &backend,
+            &path,
+            &baseline,
+            &head,
+            "c.txt",
+            task.generation,
+            3,
+        )
+        .await
+        .unwrap();
+        assert!(token.unmerged);
+        assert_ne!(token.state, RepositoryReviewState::Unchanged);
+
+        let diff = load_task_diff(
+            &backend,
+            &path,
+            &baseline,
+            &head,
+            "c.txt",
+            None,
+            task.generation,
+            4,
+            0,
+            0,
+            3,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !diff.text.clone().unwrap_or_default().is_empty(),
+            "冲突路径仍要给出真实差异"
+        );
+
+        assert_eq!(
+            (
+                git_stdout(&repo, &["rev-parse", "HEAD"]),
+                git_bytes(&repo, &["ls-files", "-s"]),
+                git_bytes(&repo, &["status", "--porcelain=v1", "-z"]),
+                fs::read_to_string(repo.join("c.txt")).unwrap(),
+            ),
+            before,
+            "读取冲突状态不解决冲突、不改索引与工作区"
+        );
     }
 }

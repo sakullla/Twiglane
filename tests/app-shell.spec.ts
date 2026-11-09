@@ -412,6 +412,7 @@ const R11_ACTIONS: { id: string; title: string }[] = [
 
 /** 原清单之外后加的视图命令：文件切换、改动块跳转、聚焦搜索。 */
 const ADDED_COMMAND_IDS = [
+  "view.task",
   "file.prev",
   "file.next",
   "diff.hunk.prev",
@@ -424,6 +425,7 @@ const ADDED_COMMAND_IDS = [
   "file.forward",
 ];
 const ADDED_COMMAND_TITLES = [
+  "任务",
   "上一个文件",
   "下一个文件",
   "上一处改动",
@@ -891,7 +893,7 @@ describe("应用外壳", () => {
     expect(document.querySelector(".pane .composer"), "提交区在左栏").toBeTruthy();
   });
 
-  it("左栏头部切换视图，隐藏后仍能进入，导航恰好是改动、文件与提交历史", async () => {
+  it("左栏头部切换视图，隐藏后仍能进入，导航恰好是改动、历史、文件与任务", async () => {
     render(App);
     await openRepo();
 
@@ -901,7 +903,7 @@ describe("应用外壳", () => {
       [...nav.querySelectorAll<HTMLElement>("button")].map((item) => (item.getAttribute("aria-label") ?? "").replace(/\s+\d+$/, ""));
     const current = () => activeNav().querySelector<HTMLElement>('[aria-current="page"]')?.getAttribute("aria-label");
 
-    expect(labelsOf(activeNav())).toEqual(["改动", "提交历史", "文件"]);
+    expect(labelsOf(activeNav())).toEqual(["改动", "提交历史", "文件", "任务审阅"]);
     expect(current()).toMatch(/^改动/);
     // 点第二项真的换成历史，而不是只换高亮；历史懒加载期间左栏头部也不消失。
     await fireEvent.click(within(activeNav()).getByRole("button", { name: "提交历史" }));
@@ -916,10 +918,10 @@ describe("应用外壳", () => {
     await waitFor(() => expect(current()).toMatch(/^改动/));
     await press("2");
     await waitFor(() => expect(current()).toBe("提交历史"));
-    expect(labelsOf(activeNav())).toEqual(["改动", "提交历史", "文件"]);
+    expect(labelsOf(activeNav())).toEqual(["改动", "提交历史", "文件", "任务审阅"]);
   });
 
-  it("三个视图同时保活：⌘3 进入文件视图，隐藏视图 inert，切回改动恢复差异", async () => {
+  it("四个视图同时保活：⌘3 进入文件视图，隐藏视图 inert，切回改动恢复差异", async () => {
     render(App);
     await openRepo();
     const view = () =>
@@ -929,8 +931,8 @@ describe("应用外壳", () => {
     await press("3");
     await waitFor(() => expect(view()).toBe("files"));
     const views = [...document.querySelectorAll<HTMLElement>(".workbench-view")];
-    expect(views, "三个视图都在 DOM 里，切换不重挂").toHaveLength(3);
-    expect(views.filter((item) => item.getAttribute("aria-hidden") === "true")).toHaveLength(2);
+    expect(views, "四个视图都在 DOM 里，切换不重挂").toHaveLength(4);
+    expect(views.filter((item) => item.getAttribute("aria-hidden") === "true")).toHaveLength(3);
     expect(views.find((item) => item.dataset.active === "true")?.hasAttribute("inert")).toBe(false);
     await waitFor(() => expect(mocks.repositoryDirectory).toHaveBeenCalled());
 
@@ -1156,8 +1158,10 @@ describe("应用外壳", () => {
     const titles = options.map((option) => option.firstElementChild?.textContent?.trim());
     expect(titles.filter((title) => !ADDED_COMMAND_TITLES.includes(title ?? ""))).toEqual(R11_ACTIONS.map((action) => action.title));
     expect(titles, "同组命令连续，文件切换紧跟两个视图").toEqual(expect.arrayContaining(ADDED_COMMAND_TITLES));
-    expect(titles.indexOf("上一个文件")).toBe(titles.indexOf("提交历史") + 1);
-    expect(titles.indexOf("下一个文件")).toBe(titles.indexOf("提交历史") + 2);
+    // 任务视图排在提交历史之后，文件切换紧跟着它。
+    expect(titles.indexOf("任务")).toBe(titles.indexOf("提交历史") + 1);
+    expect(titles.indexOf("上一个文件")).toBe(titles.indexOf("任务") + 1);
+    expect(titles.indexOf("下一个文件")).toBe(titles.indexOf("任务") + 2);
 
     // 不可用的条目必须就地给出原因，不允许静默失败。
     for (const option of options) {

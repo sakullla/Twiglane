@@ -66,6 +66,45 @@ function diffFor(path: string): DiffResponse {
   };
 }
 
+/** 任务范围夹具：链接自带的起点就是 baseline，HEAD 仍是当前 HEAD。 */
+function taskFor(baseline: string) {
+  return {
+    generation: 4,
+    worktree: WORKTREE,
+    baselineRef: baseline,
+    baselineOid: baseline,
+    headOid: BASELINE,
+    branch,
+    commits: [],
+    commitCount: 0,
+    commitsTruncated: false,
+    files: [
+      {
+        path: "src/a.ts",
+        originalPath: null,
+        status: "modified",
+        additions: 1,
+        deletions: 0,
+        binary: false,
+        oldSize: null,
+        newSize: null,
+        untracked: false,
+        unmerged: false,
+      },
+    ],
+    filesTotal: 1,
+    filesTruncated: false,
+    additions: 1,
+    deletions: 0,
+    dirty: true,
+    untrackedFiles: 0,
+    conflicted: false,
+    empty: false,
+    rangeVersion: `range-${baseline}`,
+    message: "读取成功：起点之后 0 个提交，最终净改动 1 个文件。",
+  };
+}
+
 const mocks = vi.hoisted(() => {
   const created = new Map<string, ReturnType<typeof vi.fn>>();
   const api = new Proxy({} as Record<string, ReturnType<typeof vi.fn>>, {
@@ -345,7 +384,12 @@ describe("cliora v1 审查链接", () => {
     await mountShell();
     await waitFor(() => expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy());
 
-    const list = document.querySelector<HTMLElement>(".file-list");
+    // 链接带起点：外壳直接进入任务视图（只读）。审阅标记仍在改动视图里做。
+    await waitFor(() => expect(mocks.api.taskReview).toHaveBeenCalledWith(WORKTREE, BASELINE, expect.any(Number), expect.any(Number)));
+    const nav = document.querySelector<HTMLElement>('.workbench-view[data-active="true"] nav[aria-label="视图"]')!;
+    await fireEvent.click(within(nav).getByRole("button", { name: /^改动/ }));
+    await waitFor(() => expect(document.querySelector('.workbench-view[data-active="true"] .file-list')).toBeTruthy());
+    const list = document.querySelector<HTMLElement>('.workbench-view[data-active="true"] .file-list');
     expect(list).toBeTruthy();
     await fireEvent.click(await within(list!).findByRole("button", { name: "标记 src/a.ts 已审阅" }));
     await waitFor(() => expect(screen.getByLabelText("已审阅 1 个，共 1 个改动文件")).toBeTruthy());
@@ -357,6 +401,37 @@ describe("cliora v1 审查链接", () => {
     expect(mocks.api.commitChanges).not.toHaveBeenCalled();
     expect(mocks.api.startMerge).not.toHaveBeenCalled();
     expect(mocks.api.completeMerge).not.toHaveBeenCalled();
+  });
+
+  it("带起点的链接直接进入任务视图，没有起点时停在明确的选择状态", async () => {
+    deepLink.getCurrent.mockResolvedValue([URL_A]);
+    mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE));
+    await mountShell();
+
+    // 有已校验起点：任务视图建立范围，起点就是链接给的 baseline。
+    await waitFor(() => expect(mocks.api.taskReview).toHaveBeenCalledWith(WORKTREE, BASELINE, expect.any(Number), expect.any(Number)));
+    const taskView = () =>
+      document.querySelector<HTMLElement>('.workbench-view[data-view-scope="task"] [aria-current="page"]');
+    await waitFor(() => expect(taskView()?.getAttribute("data-view")).toBe("task"));
+    const context = await screen.findByRole("group", { name: "任务范围" });
+    expect(context.textContent).toContain("来自 cliora 审查链接");
+    expect(context.textContent).toContain(BASELINE.slice(0, 7));
+
+    // 没有起点的链接：不建立范围、不猜 HEAD，停在选择状态。
+    resetClioraReview();
+    mocks.api.taskReview.mockClear();
+    mocks.api.clioraReviewRequest.mockResolvedValue({
+      reviewId: REVIEW_B,
+      sessionId: SESSION_B,
+      worktreePath: WORKTREE,
+      baseline: null,
+    });
+    deepLink.getCurrent.mockResolvedValue([URL_B]);
+    cleanup();
+    await mountShell();
+    await waitFor(() => expect(mocks.api.openRepository).toHaveBeenCalledWith(WORKTREE, expect.any(Number)));
+    await screen.findByText(/任务起点必须由你明确选择/);
+    expect(mocks.api.taskReview).not.toHaveBeenCalled();
   });
 
   it("独立打开的仓库没有来源，不显示返回入口", async () => {

@@ -41,6 +41,18 @@
     onDiscard: () => void;
     /** 退出多选，回到焦点文件的单选。 */
     onClear: () => void;
+    /**
+     * 单文件差异的读取入口：任务视图换成「起点对工作区」的净差异读取，
+     * 不传时仍走 api.loadDiff 的改动读取。
+     */
+    loadDiff?: (
+      row: FileRow,
+      page: { generation: number; requestId: number; offset: number; limit: number; context?: number },
+    ) => Promise<DiffResponse>;
+    /** 读取范围的身份（任务起点、HEAD、范围版本）：变化时旧响应整轮作废。 */
+    scopeKey?: string;
+    /** 只读范围：净差异不能暂存，工具条只保留阅读相关入口。 */
+    readOnly?: boolean;
   }
 
   /** 同时在途的差异读取数：选 100 个文件也不会一次把读取通道占满。 */
@@ -76,6 +88,9 @@
     onUnstage,
     onDiscard,
     onClear,
+    loadDiff,
+    scopeKey = "",
+    readOnly = false,
   }: Props = $props();
 
   let scroller = $state<HTMLDivElement | null>(null);
@@ -110,6 +125,8 @@
       repo: opened.summary.path,
       generation: opened.generation,
       context: fullFile ? fullContext : undefined,
+      // 任务范围身份：起点、HEAD 或范围版本一变，这一轮的差异与失败都不再属于当前结果。
+      scope: readOnly ? scopeKey : "",
     };
   });
   type Round = typeof round;
@@ -145,7 +162,9 @@
     running += 1;
     reading.set(key, at);
     try {
-      const result = await api.loadDiff(at.repo, row.path, row.side === "staged", at.generation, nextId(), row.originalPath ?? null, 0, 0, at.context);
+      const result = loadDiff
+        ? await loadDiff(row, { generation: at.generation, requestId: nextId(), offset: 0, limit: 0, context: at.context })
+        : await api.loadDiff(at.repo, row.path, row.side === "staged", at.generation, nextId(), row.originalPath ?? null, 0, 0, at.context);
       if (!current(key, at)) return;
       settled.set(key, at);
       diffs = { ...diffs, [key]: reuseDiffContent(diffs[key], result) };
@@ -177,7 +196,10 @@
     const at = round;
     reading.set(key, at);
     try {
-      const page = await api.loadDiff(at.repo, row.path, row.side === "staged", at.generation, nextId(), row.originalPath ?? null, loaded.offset + loaded.lines.length, 400, at.context);
+      const offset = loaded.offset + loaded.lines.length;
+      const page = loadDiff
+        ? await loadDiff(row, { generation: at.generation, requestId: nextId(), offset, limit: 400, context: at.context })
+        : await api.loadDiff(at.repo, row.path, row.side === "staged", at.generation, nextId(), row.originalPath ?? null, offset, 400, at.context);
       if (current(key, at)) diffs = { ...diffs, [key]: appendDiffPage(loaded, page) };
     } catch (error) {
       if (current(key, at)) errors = { ...errors, [key]: normalizeError(error).message };
@@ -366,6 +388,12 @@
         <strong class="multi-stack-count">已选 {rows.length} 个文件</strong>
       </div>
     </div>
+    {#if readOnly}
+      <!-- 任务净差异同时含已提交与未提交内容，按块或整文件暂存都会落到错误范围：这里只读。 -->
+      <div class="diff-toolbar-group">
+        <span class="diff-note" role="note">任务净差异只读，不写入暂存区</span>
+      </div>
+    {:else}
     <div class="diff-toolbar-group">
       <button type="button" class="btn btn-ghost btn-sm" aria-label={`暂存 ${stageCount} 个文件`} title={disabled ? BUSY_REASON : stageCount === 0 ? "选中的文件里没有可暂存的改动" : excluded("暂存选中文件")} disabled={disabled || stageCount === 0} onclick={onStage}>
         <Icon name="plus" size={13} /><span class="diff-hist-label">暂存</span>
@@ -377,6 +405,7 @@
         <Icon name="trash" size={14} />
       </button>
     </div>
+    {/if}
     <div class="diff-toolbar-group">
       <button type="button" class="icon-btn sm" aria-label="全部收起" title={allCollapsed ? "已经全部收起" : "收起全部文件"} disabled={allCollapsed} onclick={() => (collapsed = new Set(keys))}>
         <Icon name="chevron-down" size={14} class="flip" />
@@ -423,7 +452,7 @@
             <button type="button" class="multi-file-toggle" aria-label={`${expanded ? "收起" : "展开"} ${row.path}`} aria-expanded={expanded} title={row.path} onclick={() => toggle(key)}>
               <span class={`st ${mark.tone}`}>{mark.letter}</span>
               <span class="multi-file-name"><strong>{parts.name}</strong>{#if parts.dir}<small>{parts.dir}</small>{/if}</span>
-              <span class="diff-side" class:staged={row.side === "staged"}>{row.unmerged ? "冲突" : row.side === "staged" ? "已暂存" : "未暂存"}</span>
+              <span class="diff-side" class:staged={row.side === "staged"}>{row.unmerged ? "冲突" : readOnly ? "任务净改动" : row.side === "staged" ? "已暂存" : "未暂存"}</span>
               <LineCounts stat={titleStat(stat, loaded)} />
               <Icon name="chevron-down" size={13} class={expanded ? "flip" : ""} />
             </button>
@@ -452,6 +481,7 @@
                 error={errors[key] ?? null}
                 loading={!loaded && !errors[key]}
                 {disabled}
+                {readOnly}
                 {fullFile}
                 onFullFile={onFullFile}
                 onStageHunk={(hunk) => loaded && onStageHunk({ path: row.path, side: row.side }, loaded, hunk)}

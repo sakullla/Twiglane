@@ -1079,6 +1079,11 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".doc-reader-head": "文档阅读头部与正文之间的分区线，来源与路径是只读文字，内部按钮自带控件边界",
   ".doc-notice": "文档阅读的就地说明条（位置调整/截断）与正文的分区线，纯状态文字",
   ".doc-more": "文档源码续读按钮区与源码之间的分区线，按钮自身带控件边界",
+  // --- components.css：任务审阅（只读范围信息与分区线） ---
+  ".task-context": "任务范围信息条与文件队列之间的分区线，条内全是只读文字与状态标记",
+  ".task-baseline": "起点选择器与文件队列之间的分区线，候选按钮自带 hover 背景",
+  ".task-failure": "任务范围失效说明条与文件队列之间的分区线，内部恢复按钮自带控件边界",
+  ".task-commits": "范围内历史与文件队列之间的分区线，提交条目是按钮并自带 hover 背景",
 
   // --- components.css：表格/列分隔线与分区线 ---
   ".panel-toolbar": "面板工具条底部横向分隔线",

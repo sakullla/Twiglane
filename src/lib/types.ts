@@ -5,7 +5,7 @@ export type PullIntegration = "merge" | "rebase";
  * 主视图三个：改动、文件、提交历史。三者同时保活，切换不重挂组件；
  * 临时保存、合并等低频任务进 modal 槽位。
  */
-export type WorkspaceView = "changes" | "files" | "history";
+export type WorkspaceView = "task" | "changes" | "files" | "history";
 /** 单槽 modal 的七个任务入口（data-task-modal 的取值集合就由它决定）。 */
 export type TaskModal = "stash" | "merge" | "branch" | "remote" | "settings" | "scope" | "publish";
 
@@ -338,6 +338,17 @@ export interface TaskReview {
   /** 范围版本：绑定 worktree、起点、HEAD 与未提交状态的形状。 */
   rangeVersion: string;
   message: string;
+}
+
+/**
+ * 任务页的起点请求：start 由用户显式选择，cliora 来自已校验的审查链接。
+ * 没有 baseline 时不建立任务范围——不会退回当前 HEAD 或默认分支。
+ */
+export interface TaskRequest {
+  baseline: string;
+  origin: "cliora" | "manual";
+  /** 每次进入任务页递增：同一个起点也要重新读取一次。 */
+  nonce: number;
 }
 
 /** 单条任务路径的快照确认：只有 current 带 token，其余状态保持未审阅。 */

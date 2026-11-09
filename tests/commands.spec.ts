@@ -25,7 +25,7 @@ function state(overrides: Partial<CommandState> = {}): CommandState {
 }
 
 describe("视图命令", () => {
-  it("三个视图按改动、文件、历史的顺序注册，文件用数字 3", () => {
+  it("视图按改动、文件、历史、任务的顺序注册，文件用数字 3、任务用 4", () => {
     const ids = COMMANDS.filter((command) => command.group === "视图").map((command) => command.id);
     expect(ids.slice(0, 3)).toEqual(["view.changes", "view.files", "view.history"]);
     const files = commandById("view.files")!;
@@ -34,6 +34,7 @@ describe("视图命令", () => {
     // 原快捷键不变：改动 1、历史 2。
     expect(commandById("view.changes")!.shortcut).toBe(`${MODIFIER_LABEL} 1`);
     expect(commandById("view.history")!.shortcut).toBe(`${MODIFIER_LABEL} 2`);
+    expect(commandById("view.task")!.shortcut).toBe(`${MODIFIER_LABEL} 4`);
   });
 
   it("没有仓库时文件视图不可用，原因与其它视图同源", () => {
@@ -60,6 +61,7 @@ describe("视图命令", () => {
     expect(shortcutCommand({ key: "2", ctrlKey: true })).toBe("view.history");
     expect(shortcutCommand({ key: "3", ctrlKey: true })).toBe("view.files");
     expect(shortcutCommand({ key: "3", metaKey: true })).toBe("view.files");
+    expect(shortcutCommand({ key: "4", ctrlKey: true })).toBe("view.task");
     // Shift 仍然不参与数字视图切换。
     expect(shortcutCommand({ key: "3", ctrlKey: true, shiftKey: true })).toBeNull();
   });
@@ -86,6 +88,7 @@ describe("文件导航命令", () => {
       "view.changes",
       "view.files",
       "view.history",
+      "view.task",
       "file.prev",
       "file.next",
       "diff.hunk.prev",

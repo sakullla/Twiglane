@@ -173,6 +173,19 @@ const VIEW_COMMANDS: CommandSpec[] = [
     shortcut: `${MODIFIER_LABEL} 2`,
     available: hasRepo,
     reason: hasRepoReason,
+  },  {
+    /**
+     * 任务审阅：从明确起点看整次任务的最终净结果，只读。
+     * Cliora 链接自带起点时直接进入这里；普通仓库从起点选择器开始。
+     * 数字键按原序列追加：1 改动、2 历史、3 文件保持不变，任务用 4。
+     */
+    id: "view.task",
+    group: "视图",
+    title: "任务",
+    hint: "从起点看整次任务的最终净结果，只读",
+    shortcut: `${MODIFIER_LABEL} 4`,
+    available: hasRepo,
+    reason: hasRepoReason,
   },
   {
     id: "file.prev",

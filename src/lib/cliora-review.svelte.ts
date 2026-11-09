@@ -60,6 +60,17 @@ export function forgetClioraSourceUnless(path: string): void {
   clioraReview.result = null;
 }
 
+/**
+ * 来源携带的任务起点：只有已校验的完整提交才有值。
+ *
+ * 任务范围必须由起点明确建立，因此缺失时返回 null，由任务页要求用户自己选择，
+ * 绝不在这里退回当前 HEAD 或默认分支。
+ */
+export function clioraBaseline(): string | null {
+  const baseline = clioraReview.source?.baseline?.trim() ?? "";
+  return baseline === "" ? null : baseline;
+}
+
 /** 来源是否就是这条路径的工作树。 */
 export function clioraSourceMatches(path: string): boolean {
   return clioraReview.source !== null && sameWorktreePath(clioraReview.source.worktreePath, path);

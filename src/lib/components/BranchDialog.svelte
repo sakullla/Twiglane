@@ -197,6 +197,10 @@
     ),
   );
   let current = $derived(opened.snapshot.branch);
+  /** 可以作为上游的远程跟踪分支：不含 origin/HEAD 这类符号引用。 */
+  let upstreamCandidates = $derived(branches.filter((branch) => branch.remote && !branch.name.endsWith("/HEAD")));
+  /** 当前分支能不能改上游：游离 HEAD 和还没有提交的分支都不行。 */
+  let canChangeUpstream = $derived(Boolean(current.name) && !current.detached && !current.unborn);
   let listReady = $derived(loaded?.key === opened.summary.path && loaded.ok);
   let listFailed = $derived(loaded?.key === opened.summary.path && !loaded.ok);
   let grouping = $derived(branchGroups !== false && branchQuery.trim() === "");
@@ -577,6 +581,15 @@
       });
     }
     entries.push({ separator: true });
+    if (branch.remote && canChangeUpstream && !branch.name.endsWith("/HEAD")) {
+      entries.push({
+        id: "set-upstream",
+        label: `设为 ${current.name} 的上游`,
+        icon: "link",
+        disabledReason: current.upstream === branch.name ? "它已经是当前分支的上游" : busy,
+        run: () => void changeUpstream(branch.name),
+      });
+    }
     if (!branch.remote) {
       entries.push({ id: "rename", label: "重命名…", icon: "pencil", disabledReason: elsewhere ?? busy, run: () => void askRename(branch) });
     }
@@ -769,6 +782,17 @@
     onClose();
   }
 
+  /** 把当前分支的上游改成所选远程分支（可以不同名）。只改配置，不推送；之后「推送」会推到这条上游。 */
+  async function changeUpstream(upstream: string) {
+    const currentRepo = opened;
+    const branchName = currentRepo.snapshot.branch.name;
+    if (!upstream || !branchName || upstream === currentRepo.snapshot.branch.upstream) return;
+    const result = await write(() => api.setUpstream(currentRepo.summary.path, upstream, currentRepo.generation, nextId()));
+    if (!result || opened.summary.path !== currentRepo.summary.path) return;
+    applyBranches(result);
+    onNotice(`已把 ${branchName} 的上游改为 ${upstream}。这一步没有推送。`);
+  }
+
   async function trackAs(remote: string, local: string) {
     const currentRepo = opened;
     const result = await write(() => api.trackRemoteAs(currentRepo.summary.path, remote, local, currentRepo.generation, nextId()));
@@ -906,6 +930,25 @@
     {#if current.upstream}
       <span class="branch-status-sync" title={`待推送 ${current.ahead ?? 0} 个提交`}><Icon name="arrow-up" size={12} />{current.ahead ?? 0}</span>
       <span class="branch-status-sync" title={`待拉取 ${current.behind ?? 0} 个提交`}><Icon name="arrow-down" size={12} />{current.behind ?? 0}</span>
+    {/if}
+    {#if canChangeUpstream}
+      <div class="branch-status-upstream-picker" data-upstream-picker>
+        <BranchPicker
+          label={current.upstream ? "修改上游分支" : "设置上游分支"}
+          branches={upstreamCandidates}
+          value=""
+          current={null}
+          exclude={current.upstream}
+          excludeReason="它已经是当前分支的上游"
+          placeholder={current.upstream ? "修改上游" : "设置上游"}
+          size="md"
+          disabled={blocked || !listReady || upstreamCandidates.length === 0}
+          disabledReason={blocked ? (blockedReason ?? BUSY_REASON) : upstreamCandidates.length === 0 && listReady ? "还没有远程分支，可以先获取更新或发布" : "正在读取分支列表"}
+          branchGroups={false}
+          mainBranches={[...mainNames]}
+          onChange={(name) => void changeUpstream(name)}
+        />
+      </div>
     {/if}
   </div>
 

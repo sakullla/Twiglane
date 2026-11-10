@@ -10,6 +10,8 @@
     initialSource?: string | null;
     initialTarget?: string | null;
     initialMode?: MergeMode | null;
+    /** 打开后直接弹出中止确认（主界面「中止合并」入口）。 */
+    initialAbort?: boolean;
     disabled: boolean;
     nextId: () => number;
     onClose: () => void;
@@ -34,6 +36,7 @@
     initialSource = null,
     initialTarget = null,
     initialMode = null,
+    initialAbort = false,
     disabled,
     nextId,
     onClose,
@@ -74,6 +77,7 @@
     {initialSource}
     {initialTarget}
     {initialMode}
+    {initialAbort}
     {disabled}
     {nextId}
     {onSnapshot}

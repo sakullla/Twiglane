@@ -66,6 +66,7 @@ fn capabilities_do_not_grant_a_shell() {
         "allow-push-branch",
         "allow-publish-branch",
         "allow-associate-upstream",
+        "allow-set-upstream",
         "allow-commit-and-push",
         "allow-branch-state",
         "allow-branch-list",

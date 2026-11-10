@@ -688,6 +688,15 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       generation += 1;
       return branchData();
     }, previewParams.get("remote") === "slow" ? 30_000 : 400, "删除远程分支"),
+  setUpstream: (_repo: string, upstream: string) => {
+    if (!branches.some((item) => item.remote && item.name === upstream)) {
+      return Promise.reject({ code: "upstream_missing", generation, message: `没有远程分支 ${upstream}。上游没有修改。` });
+    }
+    for (const item of branches) if (!item.remote && item.current) item.upstream = upstream;
+    branch.upstream = upstream;
+    generation += 1;
+    return ok(branchData(), 250);
+  },
   trackRemoteAs: (_repo: string, remoteBranch: string, local: string) => {
     if (branches.some((item) => !item.remote && item.name === local)) {
       return Promise.reject({ code: "branch_duplicate", generation, message: "已有同名分支，未再创建一个。" });

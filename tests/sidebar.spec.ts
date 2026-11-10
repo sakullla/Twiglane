@@ -323,6 +323,21 @@ describe("合并提示", () => {
     expect(banner?.getAttribute("aria-label")).toContain("合并进行中");
   });
 
+  it("可以中止时提示旁边给出「中止」，点击只请求中止、不打开合并；不可中止时不出现", async () => {
+    const onOpen = vi.fn();
+    const onAbort = vi.fn();
+    const { container, rerender } = render(MergeBanner, { props: props({ mergeInProgress: true, canAbort: true, onOpen, onAbort }) });
+    const abort = container.querySelector<HTMLButtonElement>("[data-merge-abort]");
+    expect(abort?.getAttribute("aria-label")).toBe("中止合并");
+    await fireEvent.click(abort!);
+    expect(onAbort).toHaveBeenCalledTimes(1);
+    expect(onOpen).not.toHaveBeenCalled();
+    await rerender(props({ mergeInProgress: true, canAbort: true, abortBlocked: true, onOpen, onAbort }));
+    expect(container.querySelector<HTMLButtonElement>("[data-merge-abort]")?.disabled).toBe(true);
+    await rerender(props({ conflictCount: 1, canAbort: false, onOpen, onAbort }));
+    expect(container.querySelector("[data-merge-abort]")).toBeNull();
+  });
+
   it("只有冲突、没有进行中的合并时（例如恢复临时保存），不声称合并进行中", () => {
     const { container } = render(MergeBanner, { props: props({ conflictCount: 1 }) });
     const banner = container.querySelector<HTMLElement>("[data-merge-banner]");

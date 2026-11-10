@@ -114,6 +114,7 @@ const mocks = vi.hoisted(() => ({
   publishBranch: vi.fn(),
   associateUpstream: vi.fn(),
   mergeSession: vi.fn(),
+  abortMerge: vi.fn(),
   saveDraft: vi.fn(),
   setTheme: vi.fn(),
   setPanelWidths: vi.fn(),
@@ -433,6 +434,8 @@ const ADDED_COMMAND_IDS = [
   "file.forward",
   "stage.file",
   "unstage.file",
+  "sync.upstream",
+  "task.abortMerge",
 ];
 const ADDED_COMMAND_TITLES = [
   "任务",
@@ -452,6 +455,8 @@ const ADDED_COMMAND_TITLES = [
   "前进",
   "暂存当前文件",
   "取消暂存当前文件",
+  "修改上游分支",
+  "中止合并",
 ];
 
 /** 注册表状态夹具：暂存区有 2 个文件、草稿已填，是「看起来都能用」的那一侧。 */
@@ -1377,6 +1382,20 @@ describe("应用外壳", () => {
     expect(banner()?.textContent, "历史视图同样显示").toContain("可以完成合并");
     await fireEvent.click(banner()!);
     await waitFor(() => expect(document.querySelector('[data-panel="merge"], .merge-panel')).toBeTruthy());
+  });
+
+  it("合并提示旁的「中止」打开合并并直接弹出中止确认，未确认不写入", async () => {
+    mocks.mergeSession.mockResolvedValue({ ...mergeSessionWith("merge"), snapshot });
+    mocks.branchState.mockResolvedValue(branchFixture());
+    mocks.abortMerge.mockResolvedValue({ generation: 4, wrote: false, paths: ["README.md"], stashOids: [], note: "中止会撤销合并中的编辑。", snapshot });
+    render(App);
+    await openRepo();
+    const abort = () => document.querySelector<HTMLButtonElement>('.workbench-view[data-active="true"] [data-merge-abort]');
+    await waitFor(() => expect(abort()).toBeTruthy());
+    await fireEvent.click(abort()!);
+    await waitFor(() => expect(mocks.abortMerge).toHaveBeenCalledWith(expect.any(String), false, expect.any(Number), expect.any(Number)));
+    await waitFor(() => expect(document.getElementById("abort-merge-title")).toBeTruthy());
+    expect(mocks.abortMerge.mock.calls.every((call) => call[1] === false), "只预览，没有确认就不中止").toBe(true);
   });
 
   it("左栏隐藏时状态栏接替合并提示，可点击进入，左栏显示时不重复", async () => {

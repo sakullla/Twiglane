@@ -27,6 +27,7 @@
     watchClioraReviewLinks,
   } from "./lib/cliora-review.svelte";
   import { normalizeError } from "./lib/errors";
+  import { showMergeAbort } from "./lib/resolve";
   import { clampWidth, FALLBACK_POLL_MS, fitPaneWidth, shouldPoll } from "./lib/layout";
   import {
     CHANGES_SCOPE,
@@ -320,6 +321,10 @@
     void loadSelectedDiff();
   }
   let mergeInProgress = $state(false);
+  /** 进行中的合并、变基或拣选可以中止：左栏提示和命令面板据此给出「中止」。 */
+  let mergeAbortable = $state(false);
+  /** 从主界面「中止合并」打开分支合并：面板读到会话后直接弹出中止确认。 */
+  let mergeAbortIntent = $state(false);
   let mergeProbeSerial = 0;
   let remoteName = $state<string | null>(null);
   /** 仓库配置的全部远程名（同步菜单用）。 */
@@ -511,6 +516,8 @@
     // 与 openRecent 的执行 guard 同源：任何 pending（含差异续读）都不切换仓库（R11）。
     switchingBlocked: pending !== null,
     upstreamMissing,
+    upstreamEditable: opened ? Boolean(opened.snapshot.branch.name) && !opened.snapshot.branch.detached && !opened.snapshot.branch.unborn : false,
+    mergeAbortable,
     stagedCount: scope.paths.length,
     stageTargets,
     unstageTargets,
@@ -774,6 +781,12 @@
       case "task.publish":
         openTask(id.slice(5) as TaskModal);
         return;
+      case "task.abortMerge":
+        abortMergeFromShell();
+        return;
+      case "sync.upstream":
+        openTask("branch");
+        return;
       case "task.settings":
         // 常规入口落在设置首屏；只有 Git 诊断入口才指定运行环境分区。
         openSettings();
@@ -874,9 +887,17 @@
     openTask("merge");
   }
 
+  /** 主界面的「中止合并」：打开分支合并，由面板读到当前会话后弹出同一份中止确认。 */
+  function abortMergeFromShell() {
+    if (!opened) return;
+    openTask("merge");
+    if (taskModal === "merge") mergeAbortIntent = true;
+  }
+
   /** 七个任务入口共用单槽：任一时刻只有一个任务 modal。 */
   function openTask(task: TaskModal) {
     if (task !== "settings" && !opened) return;
+    mergeAbortIntent = false;
     if (task !== "merge") {
       mergeSource = null;
       mergeTarget = null;
@@ -952,6 +973,7 @@
     settingsSection = null;
     if (closed === "merge") {
       conflictFocus = null;
+      mergeAbortIntent = false;
       mergeSource = null;
       mergeTarget = null;
       mergeMode = null;
@@ -1059,16 +1081,21 @@
     const current = opened;
     if (!current) {
       mergeInProgress = false;
+      mergeAbortable = false;
       return;
     }
     try {
       const session = await api.mergeSession(current.summary.path, current.generation, nextId());
       if (serial !== mergeProbeSerial || opened?.summary.path !== current.summary.path) return;
       mergeInProgress = session.operation === "merge" || session.canAbort;
+      mergeAbortable = showMergeAbort(session.operation, session.canAbort);
     } catch (error) {
       if (serial !== mergeProbeSerial || opened?.summary.path !== current.summary.path) return;
       // stale 只说明这次探测用了旧 generation，不代表合并结束，提示不能因此消失。
-      if (normalizeError(error).code !== "stale") mergeInProgress = false;
+      if (normalizeError(error).code !== "stale") {
+        mergeInProgress = false;
+        mergeAbortable = false;
+      }
     }
   }
 
@@ -1126,6 +1153,7 @@
     remoteNames = [];
     remoteNamesFor = null;
     mergeInProgress = false;
+    mergeAbortable = false;
     recent = [
       { name: next.summary.name, path: next.summary.path, openedAtMs: Date.now() },
       ...recent.filter((repo) => repo.path !== next.summary.path),
@@ -2512,6 +2540,7 @@
         cloneOpen = false;
         paletteOpen = false;
         mergeInProgress = false;
+        mergeAbortable = false;
       }
     } catch (error) {
       showError(error);
@@ -3524,7 +3553,7 @@
             <Icon name="archive" size={15} />
           </button>
         </div>
-        <MergeBanner {conflictCount} {mergeInProgress} onOpen={() => runCommand("task.merge")} />
+        <MergeBanner {conflictCount} {mergeInProgress} canAbort={mergeAbortable} abortBlocked={writeLocked} onOpen={() => runCommand("task.merge")} onAbort={() => runCommand("task.abortMerge")} />
       {/snippet}
       {#snippet paneResizer()}
         <PaneResizer
@@ -3930,6 +3959,7 @@
     initialSource={mergeSource}
     initialTarget={mergeTarget}
     initialMode={mergeMode}
+    initialAbort={mergeAbortIntent}
     {branchGroups}
     disabled={writeLocked}
     {nextId}

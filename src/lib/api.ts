@@ -254,6 +254,9 @@ export const api = {
     invoke<StatusSnapshot>("publish_branch", { path, remote, generation, requestId }),
   associateUpstream: (path: string, remote: string, generation: number, requestId: number) =>
     invoke<StatusSnapshot>("associate_upstream", { path, remote, generation, requestId }),
+  /** 把当前分支的上游改成任意远程跟踪分支（可以不同名）。只改配置，不推送。 */
+  setUpstream: (path: string, upstream: string, generation: number, requestId: number) =>
+    invoke<BranchState>("set_upstream", { path, upstream, generation, requestId }),
   /**
    * 提交并推送：只在 committed 为真时记录提交阶段的结果。推送失败不抹掉已完成的提交，
    * 也不声称推送成功。

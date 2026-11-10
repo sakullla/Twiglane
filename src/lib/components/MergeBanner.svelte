@@ -17,15 +17,21 @@
   interface Props {
     conflictCount: number;
     mergeInProgress: boolean;
+    /** 进行中的合并、变基或拣选可以中止：提示旁边给一个「中止」，不必先打开合并窗口找按钮。 */
+    canAbort?: boolean;
+    /** 写入进行中时中止按钮不可用。 */
+    abortBlocked?: boolean;
     onOpen: () => void;
+    onAbort?: () => void;
   }
 
-  let { conflictCount, mergeInProgress, onOpen }: Props = $props();
+  let { conflictCount, mergeInProgress, canAbort = false, abortBlocked = false, onOpen, onAbort }: Props = $props();
 
   let notice = $derived(mergeNotice(conflictCount, mergeInProgress));
 </script>
 
 {#if notice}
+  <div class="merge-banner-row">
   <button
     type="button"
     class="merge-banner"
@@ -38,4 +44,19 @@
     <span class="truncate">{notice.text}</span>
     <Icon name="chevron-right" size={14} />
   </button>
+  {#if canAbort && onAbort}
+    <button
+      type="button"
+      class="merge-banner-abort"
+      data-merge-abort
+      aria-label="中止合并"
+      title={abortBlocked ? "先等当前操作结束" : "中止合并：撤销合并中的编辑，回到开始之前（会先确认）"}
+      disabled={abortBlocked}
+      onclick={onAbort}
+    >
+      <Icon name="x" size={14} />
+      <span>中止</span>
+    </button>
+  {/if}
+  </div>
 {/if}

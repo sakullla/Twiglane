@@ -1242,6 +1242,8 @@ label.list-row .checkbox { margin-top: 2px; }
 .branch-status strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg); font-size: var(--text-sm); font-weight: var(--weight-semibold); }
 .branch-status-upstream { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg-subtle); }
 .branch-status-sync { display: inline-flex; align-items: center; gap: var(--space-2); flex: none; font-variant-numeric: tabular-nums; }
+.branch-status-upstream-picker { flex: none; width: 168px; margin-left: auto; }
+.branch-status-upstream-picker .branch-picker-trigger.md { height: 26px; }
 [data-task-modal="branch"] .modal-body > .segmented { align-self: flex-start; }
 .branch-panel { display: flex; flex-direction: column; gap: var(--space-12); min-width: 0; }
 .branch-panel [hidden], .tag-manager [hidden] { display: none; }

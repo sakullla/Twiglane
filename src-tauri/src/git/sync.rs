@@ -10,7 +10,7 @@ use crate::git::command::{
     branch_list_command, check_branch_command, credential_approve_command, credential_helper_command, merged_branches_command, clone_command, create_branch_at_command,
     create_branch_command, delete_branch_command, delete_remote_branch_command,
     delete_remote_tracking_command, fetch_command, publish_command, pull_ff_command, push_command,
-    push_to_remote_command,
+    push_to_remote_command, push_to_upstream_command,
     remote_add_command, remote_set_url_command, remote_verbose_command, rename_branch_command,
     set_upstream_to_command, status_command, switch_command, switch_track_as_command,
     switch_track_command,
@@ -476,6 +476,80 @@ pub async fn associate_upstream(
         return Err(AppError::new(
             "upstream_unconfirmed",
             "上游关联没有被 Git 确认，没有推送。",
+        )
+        .with_generation(after.generation));
+    }
+    Ok(after)
+}
+
+/// 把当前分支的上游改成任意已有的远程跟踪分支（例如 origin/develop）。
+/// 只改 `branch.<name>.remote/merge` 配置，不推送、不改工作区。
+pub async fn set_upstream(
+    backend: &Backend,
+    path: &str,
+    upstream: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    let root = repo_root(path)?;
+    let key = repo_key(&root);
+    let _guard = backend.actions.enter(action_key("sync", &key))?;
+    validate_branch_input(upstream).map_err(|_| {
+        AppError::new("upstream_invalid", "上游分支名称无效，上游没有修改。")
+    })?;
+    let git = require_git(backend).await?;
+    let current = load_branch_state(backend, &root, generation, request_id).await?;
+    let branch = &current.snapshot.branch;
+    if branch.unborn {
+        return Err(AppError::new("no_commit", "还没有提交，不能修改上游。")
+            .with_generation(current.generation));
+    }
+    if branch.detached {
+        return Err(detached_error().with_generation(current.generation));
+    }
+    let Some(local) = branch.name.clone() else {
+        return Err(detached_error().with_generation(current.generation));
+    };
+    if upstream.ends_with("/HEAD")
+        || !current
+            .branches
+            .iter()
+            .any(|item| item.remote && item.name == upstream)
+    {
+        return Err(AppError::new(
+            "upstream_missing",
+            format!("没有远程分支 {upstream}。可以先获取更新再选择。上游没有修改。"),
+        )
+        .with_generation(current.generation));
+    }
+    if branch.upstream.as_deref() == Some(upstream) {
+        return Ok(current);
+    }
+    let (program, args) = set_upstream_to_command(&git.path, &root, upstream, &local);
+    reject_force(&args)?;
+    let scheduled = write_repo(
+        backend,
+        &root,
+        current.generation,
+        internal_request_id(),
+        program,
+        args,
+    )
+    .await?;
+    if scheduled.output.exit_code != 0 {
+        return Err(finish_remote(
+            "upstream_failed",
+            &scheduled,
+            "上游没有修改，也没有推送。",
+        ));
+    }
+    let after = settle_read!(backend, &root, scheduled.generation, |current| {
+        load_branch_state(backend, &root, current, internal_request_id()).await
+    })?;
+    if after.snapshot.branch.upstream.as_deref() != Some(upstream) {
+        return Err(AppError::new(
+            "upstream_unconfirmed",
+            "上游修改没有被 Git 确认。请刷新后查看。",
         )
         .with_generation(after.generation));
     }
@@ -986,11 +1060,16 @@ async fn push_with_upstream(
     if before.branch.detached || before.branch.name.is_none() {
         return Err(detached_error());
     }
-    if before.branch.upstream.is_none() {
+    let Some(upstream) = before.branch.upstream.clone() else {
         return publish_to(backend, root, "", before.generation, internal_request_id()).await;
-    }
+    };
     let git = require_git(backend).await?;
-    let (program, args) = push_command(&git.path, root);
+    let branch = before.branch.name.clone().unwrap_or_default();
+    let (program, args) = if upstream_matches_branch(&upstream, &branch) {
+        push_command(&git.path, root)
+    } else {
+        push_to_upstream_command(&git.path, root)
+    };
     let scheduled = remote_write_repo(
         backend,
         root,
@@ -1680,6 +1759,18 @@ fn reject_force(args: &[OsString]) -> Result<(), AppError> {
     } else {
         Ok(())
     }
+}
+
+/// 上游是否就是「某个远程/同名分支」。只有同名时才沿用 Git 默认推送规则；
+/// 否则（包括无法确定时）按上游推送，避免 `simple` 模式因名称不同而拒绝。
+fn upstream_matches_branch(upstream: &str, branch: &str) -> bool {
+    if branch.is_empty() {
+        return false;
+    }
+    upstream
+        .strip_suffix(branch)
+        .and_then(|prefix| prefix.strip_suffix('/'))
+        .is_some_and(|remote| !remote.is_empty() && !remote.contains('/'))
 }
 
 fn upstream_ref_missing(text: &str) -> bool {
@@ -3091,6 +3182,61 @@ mod tests {
             git_text(&work, &["rev-parse", "HEAD"]),
             git_text(&work, &["rev-parse", "topic"])
         );
+    }
+
+    #[tokio::test]
+    async fn set_upstream_to_differently_named_branch_and_push_reaches_it() {
+        let fixture = crate::test_support::git_fixture("upstream-rename");
+        let backend = fixture.backend();
+        let (_origin, work) = seed_bare(&fixture);
+        git(&work, &["push", "origin", "main:develop"]);
+        git(&work, &["fetch", "origin"]);
+        git(&work, &["switch", "-c", "topic"]);
+        let opened = add_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        let missing = set_upstream(&backend, &opened.summary.path, "origin/nowhere", opened.generation, 2)
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code, "upstream_missing");
+        let invalid = set_upstream(&backend, &opened.summary.path, "-origin/x", opened.generation, 3)
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.code, "upstream_invalid");
+        let generation = backend.scheduler.current_generation(&repo_key(&work));
+        let changed = set_upstream(&backend, &opened.summary.path, "origin/develop", generation, 4)
+            .await
+            .unwrap();
+        assert_eq!(changed.snapshot.branch.upstream.as_deref(), Some("origin/develop"));
+        fs::write(work.join("file.txt"), "topic\n").unwrap();
+        git(&work, &["commit", "-am", "topic"]);
+        let head = git_text(&work, &["rev-parse", "HEAD"]);
+        let generation = backend.scheduler.current_generation(&repo_key(&work));
+        let pushed = push_branch(&backend, &opened.summary.path, generation, 5).await.unwrap();
+        assert_eq!(pushed.branch.upstream.as_deref(), Some("origin/develop"));
+        assert_eq!(
+            git_text(fixture.path(), &["--git-dir", "origin.git", "rev-parse", "develop"]).trim(),
+            head.trim()
+        );
+        // 没有在远程新建同名的 topic。
+        assert!(!git_text(fixture.path(), &["--git-dir", "origin.git", "branch", "--list"]).contains("topic"));
+        // 再改回 origin/main：同名上游切换也只改配置。
+        let generation = backend.scheduler.current_generation(&repo_key(&work));
+        let back = set_upstream(&backend, &opened.summary.path, "origin/main", generation, 6)
+            .await
+            .unwrap();
+        assert_eq!(back.snapshot.branch.upstream.as_deref(), Some("origin/main"));
+        assert_ne!(
+            git_text(fixture.path(), &["--git-dir", "origin.git", "rev-parse", "main"]).trim(),
+            head.trim()
+        );
+    }
+
+    #[test]
+    fn upstream_name_match_only_for_same_named_branch() {
+        assert!(upstream_matches_branch("origin/main", "main"));
+        assert!(upstream_matches_branch("origin/feature/x", "feature/x"));
+        assert!(!upstream_matches_branch("origin/develop", "main"));
+        assert!(!upstream_matches_branch("origin/feature/x", "x"));
+        assert!(!upstream_matches_branch("origin/main", ""));
     }
 
     fn branch_line(fields: [&str; 6]) -> String {

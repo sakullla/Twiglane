@@ -78,6 +78,8 @@
     initialTarget?: string | null;
     /** 打开时的方式。分叉拉取用设置里的预选；分支菜单「变基」固定为 rebase。 */
     initialMode?: MergeMode | null;
+    /** 从主界面「中止合并」进入：读到可中止的会话后直接弹出中止确认，不需要再找按钮。 */
+    initialAbort?: boolean;
     disabled: boolean;
     nextId: () => number;
     onSnapshot: (snapshot: StatusSnapshot) => void;
@@ -105,6 +107,7 @@
     initialSource = null,
     initialTarget = null,
     initialMode = null,
+    initialAbort = false,
     disabled,
     nextId,
     onSnapshot,
@@ -156,6 +159,8 @@
   let aborting = $state(false);
   let abortNote = $state("");
   let abortPaths = $state<string[]>([]);
+  /** 主界面的中止请求只兑现一次：取消确认后不会因为重新读取而再弹出。 */
+  let abortRequested = untrack(() => !initialAbort);
   let resolvedPaths = $state<string[]>([]);
   let fileFilter = $state("");
   let progressTick = $state(0);
@@ -340,6 +345,14 @@
       if (!target) target = here ?? listed.branches.find((branch) => !branch.remote)?.name ?? "";
       if (!source) {
         source = initialTarget && here && here !== target ? here : defaultSource(listed.branches, target);
+      }
+      if (!abortRequested) {
+        abortRequested = true;
+        if (showMergeAbort(next.operation, next.canAbort)) {
+          askAbort();
+        } else {
+          onNotice("当前没有可以中止的合并、变基或拣选。");
+        }
       }
       if (!message && next.operation === "merge") {
         message = next.source && next.target ? defaultMergeMessage(next.source, next.target, next.source.includes("/")) : "合并分支";

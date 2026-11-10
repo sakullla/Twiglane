@@ -56,6 +56,7 @@ fn main() {
             "push_branch",
             "publish_branch",
             "associate_upstream",
+            "set_upstream",
             "commit_and_push",
             "branch_state",
             "branch_list",

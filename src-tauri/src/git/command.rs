@@ -461,6 +461,18 @@ pub fn push_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     (git.to_path_buf(), args)
 }
 
+/// 上游分支与本地分支不同名时（例如 feature 跟踪 origin/develop），`push.default=simple` 会拒绝推送。
+/// 这里只对这一次调用改用 `upstream` 模式，把当前分支推到它跟踪的那条远程分支；不改用户配置，也不强推。
+pub fn push_to_upstream_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("-c"),
+        OsString::from("push.default=upstream"),
+        OsString::from("push"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
 pub fn publish_command(
     git: &Path,
     root: &Path,

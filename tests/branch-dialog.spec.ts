@@ -8,6 +8,7 @@ import type { BranchRecord, OpenedRepository } from "../src/lib/types";
 const branchState = vi.hoisted(() => vi.fn());
 const switchBranch = vi.hoisted(() => vi.fn());
 const trackRemoteAs = vi.hoisted(() => vi.fn());
+const setUpstream = vi.hoisted(() => vi.fn());
 const tagState = vi.hoisted(() => vi.fn());
 const remoteState = vi.hoisted(() => vi.fn());
 const addRemote = vi.hoisted(() => vi.fn());
@@ -23,6 +24,7 @@ vi.mock("../src/lib/api", () => ({
     branchList: branchState,
     switchBranch,
     trackRemoteAs,
+    setUpstream,
     createBranch: vi.fn(),
     createBranchFrom,
     renameBranch,
@@ -943,6 +945,30 @@ describe("打开其他工作区、默认徽章与斜杠分组", () => {
     await fireEvent.click(within(choice).getByRole("button", { name: /检出为 upstream-main/ }));
     await waitFor(() => expect(trackRemoteAs).toHaveBeenCalledWith("/repo", "upstream/main", "upstream-main", props.opened.generation, 9));
     await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith(expect.stringContaining("upstream-main")));
+  });
+
+  it("当前分支可以把上游改成不同名的远程分支，只改配置不推送", async () => {
+    const listed = [
+      record("feature/ui", true),
+      record("origin/HEAD", false, null, true),
+      record("origin/feature/ui", false, null, true),
+      record("origin/develop", false, null, true),
+    ];
+    const { props } = await showDialog(listed, null);
+    const changed = { ...opened.snapshot, branch: { ...opened.snapshot.branch, upstream: "origin/develop" } };
+    setUpstream.mockResolvedValueOnce({ generation: 5, branches: listed, snapshot: changed });
+    const picker = screen.getByRole("button", { name: "修改上游分支" });
+    await waitFor(() => expect((picker as HTMLButtonElement).disabled).toBe(false));
+    await fireEvent.click(picker);
+    await waitFor(() => expect(optionNames()).toEqual(expect.arrayContaining(["origin/develop", "origin/feature/ui"])));
+    expect(optionNames(), "符号引用不能作为上游").not.toContain("origin/HEAD");
+    const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(
+      (node) => node.querySelector(".branch-option-name")?.textContent === "origin/develop",
+    );
+    await fireEvent.click(option!);
+    await waitFor(() => expect(setUpstream).toHaveBeenCalledWith("/repo", "origin/develop", props.opened.generation, 9));
+    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith(expect.stringContaining("origin/develop")));
+    expect(props.onSnapshot).toHaveBeenCalledWith(changed);
   });
 
   it("分支菜单打开其他工作区；路径无效或正在写入时留在原仓库", async () => {

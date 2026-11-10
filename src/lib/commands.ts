@@ -36,6 +36,10 @@ export interface CommandState {
    */
   switchingBlocked: boolean;
   upstreamMissing: boolean;
+  /** 当前分支有名字（不是游离 HEAD、也不是还没有提交）：只有这时才能修改上游。 */
+  upstreamEditable?: boolean;
+  /** 仓库里有可以中止的合并、变基或拣选。 */
+  mergeAbortable?: boolean;
   /** 提交范围口径的已暂存文件数，与提交区 paths.length 同源。 */
   stagedCount: number;
   /** 「全部暂存」的精确目标：列表当前可见、未暂存且非冲突的文件路径。 */
@@ -466,6 +470,14 @@ const SYNC_COMMANDS: CommandSpec[] = [
     available: (state) => hasRepo(state) && idle(state),
     reason: repoBusyReason,
   },
+  {
+    id: "sync.upstream",
+    group: "同步",
+    title: "修改上游分支",
+    hint: "选择任意远程分支作为推送与拉取的上游，可以不同名",
+    available: (state) => hasRepo(state) && idle(state) && state.upstreamEditable !== false,
+    reason: (state) => (state.hasRepo && !state.writeLocked ? "当前不在有提交的分支上" : repoBusyReason(state)),
+  },
 ];
 
 const TASK_COMMANDS: CommandSpec[] = [
@@ -484,6 +496,18 @@ const TASK_COMMANDS: CommandSpec[] = [
     hint: "预览影响并处理冲突",
     available: hasRepo,
     reason: hasRepoReason,
+  },
+  {
+    id: "task.abortMerge",
+    group: "任务",
+    title: "中止合并",
+    hint: "撤销进行中的合并、变基或拣选，回到开始之前",
+    available: (state) => hasRepo(state) && idle(state) && state.mergeAbortable === true,
+    reason: (state) => {
+      if (!state.hasRepo) return "先打开一个仓库";
+      if (state.writeLocked) return busyReason(state);
+      return "当前没有进行中的合并";
+    },
   },
   {
     id: "task.branch",

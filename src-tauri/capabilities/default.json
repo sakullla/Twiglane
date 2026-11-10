@@ -55,6 +55,7 @@
     "allow-push-branch",
     "allow-publish-branch",
     "allow-associate-upstream",
+    "allow-set-upstream",
     "allow-commit-and-push",
     "allow-branch-state",
         "allow-branch-list",

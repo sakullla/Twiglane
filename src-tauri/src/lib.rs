@@ -132,6 +132,7 @@ pub fn run() {
             remove_worktree,
             publish_branch,
             associate_upstream,
+            set_upstream,
             commit_and_push,
             branch_state,
             branch_list,
@@ -866,6 +867,17 @@ async fn associate_upstream(
 ) -> Result<StatusSnapshot, AppError> {
     crate::git::sync::associate_upstream(state.inner(), &path, &remote, generation, request_id)
         .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn set_upstream(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    upstream: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    crate::git::sync::set_upstream(state.inner(), &path, &upstream, generation, request_id).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2010,6 +2022,7 @@ mod ipc_contract {
             "push_branch",
             "publish_branch",
             "associate_upstream",
+            "set_upstream",
             "commit_and_push",
             "branch_state",
             "create_branch",

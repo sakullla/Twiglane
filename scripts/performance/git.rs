@@ -225,6 +225,8 @@ async fn branches_files_and_merge_at_scale() {
             id,
             0,
             0,
+            0,
+            false,
         )
         .await
         .unwrap();
@@ -252,7 +254,9 @@ async fn branches_files_and_merge_at_scale() {
             old,
             5,
             0,
-            0
+            0,
+            0,
+            false
         )
         .await
         .unwrap_err()
@@ -269,6 +273,8 @@ async fn branches_files_and_merge_at_scale() {
         6,
         0,
         0,
+        0,
+        false,
     )
     .await
     .unwrap();

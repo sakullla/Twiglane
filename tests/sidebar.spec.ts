@@ -268,23 +268,28 @@ describe("大量最近仓库", () => {
 });
 
 describe("视图切换", () => {
-  it("展示改动数量，按改动、历史、文件、任务排列并标出当前视图", async () => {
+  it("展示改动数量，按改动、历史、文件排列并标出当前视图；没有独立的任务项", async () => {
     const onView = vi.fn();
     const { container } = render(ViewSwitcher, { props: { view: "changes", changeCount: 8, onView } });
     const nav = screen.getByRole("navigation", { name: "视图" });
-    // 顺序就是数字快捷键的顺序：改动 1、历史 2、文件 3、任务 4。
-    expect([...nav.querySelectorAll("button")].map((item) => item.getAttribute("aria-label"))).toEqual(["改动 8", "提交历史", "文件", "任务审阅"]);
+    // 顺序就是数字快捷键的顺序：改动 1、历史 2、文件 3。cliora 任务范围在历史里，不占切换位。
+    expect([...nav.querySelectorAll("button")].map((item) => item.getAttribute("aria-label"))).toEqual(["改动 8", "提交历史", "文件"]);
     expect(screen.getByRole("button", { name: /^改动 8/ }).getAttribute("aria-current")).toBe("page");
     expect(screen.getByRole("button", { name: "提交历史" }).getAttribute("title")).toContain("+2");
     expect(screen.getByRole("button", { name: "文件" }).getAttribute("title")).toContain("+3");
-    expect(screen.getByRole("button", { name: "任务审阅" }).getAttribute("title")).toContain("+4");
     expect(container.querySelector(".count")?.textContent).toBe("8");
     await fireEvent.click(screen.getByRole("button", { name: /^提交历史/ }));
     expect(onView).toHaveBeenCalledWith("history");
     await fireEvent.click(screen.getByRole("button", { name: /^文件/ }));
     expect(onView).toHaveBeenCalledWith("files");
-    await fireEvent.click(screen.getByRole("button", { name: /^任务审阅/ }));
-    expect(onView).toHaveBeenCalledWith("task");
+  });
+
+  it("有 cliora 任务范围时历史项带提示点，名称说明从历史进入审查", () => {
+    const { container } = render(ViewSwitcher, { props: { view: "changes", taskActive: true, onView: () => {} } });
+    const history = screen.getByRole("button", { name: "提交历史（含 cliora 任务范围）" });
+    expect(history.querySelector(".view-task-dot")).toBeTruthy();
+    expect(history.getAttribute("title")).toContain("任务净差异");
+    expect(container.querySelectorAll(".view-task-dot")).toHaveLength(1);
   });
 
   it("名称和快捷键由标签与提示承载，没有改动时不显示 0", () => {
@@ -1344,7 +1349,6 @@ describe("外壳样式契约", () => {
 
     // 不同上下文意图刻意保留各自取值，不被误并进 token：工具条分段 22px、视图切换 26px。
     expect(ruleBody(componentsCss, ".diff-toolbar .segmented button"), "差异工具条分段保持 22px").toMatch(/height:\s*22px/);
-    expect(ruleBody(componentsCss, ".union-diff-head .segmented button"), "并集工具条分段保持 22px").toMatch(/height:\s*22px/);
     expect(ruleBody(componentsCss, ".view-switcher button"), "视图切换保持 26px").toMatch(/height:\s*26px/);
   });
 

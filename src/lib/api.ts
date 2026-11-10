@@ -12,6 +12,7 @@ import type {
   HttpCredential,
   CommitBranches,
   CommitDetail,
+  CompareFiles,
   CommitPushReport,
   CommitResult,
   DiffResponse,
@@ -543,7 +544,10 @@ export const api = {
       ...(context === undefined ? {} : { context }),
       ...(asText ? { asText } : {}),
     }),
-  /** 任意两个提交之间某个文件的差异（合并预览：共同祖先 → 来源顶端）。 */
+  /**
+   * 任意两个提交之间某个文件的差异（合并预览：共同祖先 → 来源顶端；历史多选：最早所选之前 → 最新所选）。
+   * base 为空字符串时与空树比较。
+   */
   compareFileDiff: (
     path: string,
     base: string,
@@ -566,6 +570,12 @@ export const api = {
       limit,
       ...(context === undefined ? {} : { context }),
     }),
+  /**
+   * 两点之间的净文件清单：历史多选时只看这批提交合起来的最终结果。
+   * base 为 null 时与空树比较（最早所选是首个提交）。
+   */
+  compareFiles: (path: string, base: string | null, head: string, generation: number, requestId: number) =>
+    invoke<CompareFiles>("compare_files", { path, base, head, generation, requestId }),
   /** 包含这个提交的本地与远程分支。 */
   commitBranches: (path: string, oid: string, generation: number, requestId: number) =>
     invoke<CommitBranches>("commit_branches", { path, oid, generation, requestId }),

@@ -117,6 +117,7 @@ fn capabilities_do_not_grant_a_shell() {
         "allow-worktree-overview",
         "allow-remove-worktree",
         "allow-compare-file-diff",
+        "allow-compare-files",
         "allow-commit-branches",
         "allow-measure-probe",
         "allow-measure-sample",

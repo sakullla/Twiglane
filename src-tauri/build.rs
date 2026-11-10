@@ -107,6 +107,7 @@ fn main() {
             "worktree_overview",
             "remove_worktree",
             "compare_file_diff",
+            "compare_files",
             "commit_branches",
             "measure_probe",
             "measure_sample",

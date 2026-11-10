@@ -735,7 +735,11 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   historyPage: (_repo: string, query: string, offset: number, _generation?: number, _requestId?: number, filters?: { scope?: string; author?: string; path?: string }) => {
     const needle = query.trim().toLowerCase();
     const author = filters?.author?.trim().toLowerCase() ?? "";
-    const matched = commits.filter((item) => {
+    // 任务范围 range:<起点>：只列起点之后到 HEAD 的提交（mock 里是线性的前几条）。
+    const rangeBase = filters?.scope?.startsWith("range:") ? filters.scope.slice("range:".length) : null;
+    const rangeEnd = rangeBase ? commits.findIndex((item) => item.oid === rangeBase) : -1;
+    const scoped = rangeBase ? commits.slice(0, rangeEnd < 0 ? 0 : rangeEnd) : commits;
+    const matched = scoped.filter((item) => {
       const text = !needle || item.summary.toLowerCase().includes(needle) || item.oid.toLowerCase().startsWith(needle);
       const who = !author || item.authorName.toLowerCase().includes(author);
       return text && who;
@@ -777,6 +781,30 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     return ok({ generation, oid, branches: list, total: list.length, current: branch.name }, 350);
   },
   compareFileDiff: (_repo: string, _base: string, _head: string, path: string) => ok(withHeaders(diffFor(path, false)), 200),
+  /** 多选提交的最终结果：两点之间的净文件清单（mock 固定一份，含改名与删除）。 */
+  compareFiles: (_repo: string, base: string | null, head: string) => previewParams.get("history") === "compare-error"
+    ? Promise.reject({ code: "history_failed", message: "无法读取提交中的文件： git 命令返回非零状态。" })
+    : ok({
+    generation,
+    base,
+    head,
+    files: [
+      { path: "src/App.svelte", originalPath: null, status: "modified", additions: 21, deletions: 9 },
+      { path: "src/app.css", originalPath: null, status: "modified", additions: 12, deletions: 4 },
+      { path: "src/lib/components/Icon.svelte", originalPath: null, status: "added", additions: 29, deletions: 0 },
+      { path: "docs/guide/start.md", originalPath: "docs/start.md", status: "renamed", additions: 3, deletions: 1 },
+      { path: "src/lib/old.ts", originalPath: null, status: "deleted", additions: 0, deletions: 41 },
+    ],
+  }, 220),
+  /** ?cliora=1：预览里的 cliora 审查链接，起点是第 5 条提交（范围内 4 个提交）。 */
+  clioraReviewRequest: (url: string) => ok({
+    reviewId: "preview-review",
+    sessionId: "preview-session",
+    worktreePath: recent[0]?.path ?? "C:/Users/dev/project/twiglane",
+    baseline: url.includes("nobase=1") ? null : commits[4].oid,
+  }, 80),
+  clioraReviewReceipt: () => ok(undefined),
+  clioraReviewReturn: () => ok(undefined),
   cherryPickCommits: () => ok({ generation, conflicted: false, skipped: [], note: "已按从旧到新拣选到当前分支。没有推送。", snapshot: snapshot() }),
   checkoutCommit: () => ok({ ...snapshot(), branch: { ...snapshot().branch, detached: true, name: null } }),
   commitDetail: (_repo: string, oid: string) => {
@@ -835,7 +863,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       generation,
       worktree: _repo,
       baselineRef: baseline,
-      baselineOid: "3d1c8f0a2b4e6d8c0a1f3b5d7e9c2a4b6d8e0f1a",
+      baselineOid: /^[0-9a-f]{40}$/.test(baseline) ? baseline : "3d1c8f0a2b4e6d8c0a1f3b5d7e9c2a4b6d8e0f1a",
       headOid: branch.headOid,
       branch: { ...branch },
       commits: empty ? [] : commits.slice(0, 4),

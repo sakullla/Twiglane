@@ -29,10 +29,14 @@ export interface HistoryConditionInput {
   query: string;
 }
 
+/** 历史范围里的任务范围：`range:<完整起点>` 只列起点之后到 HEAD 的提交。 */
+export const HISTORY_RANGE_PREFIX = "range:";
+
 export function historyScopeLabel(scope: string, head: string | null): string {
   if (scope === "all") return "全部分支";
   if (scope === "unpushed") return head ? `未推送的提交（${head}）` : "未推送的提交";
   if (!scope || scope === "current") return head ? `当前分支 ${head}` : "当前分支";
+  if (scope.startsWith(HISTORY_RANGE_PREFIX)) return `任务范围 ${shortOid(scope.slice(HISTORY_RANGE_PREFIX.length))}..HEAD`;
   return `分支 ${scope}`;
 }
 

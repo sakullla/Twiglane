@@ -1,7 +1,7 @@
 import { hasCommitSummary } from "./ui";
 import type { IconName } from "./icons";
 import { MODIFIER_LABEL } from "./brand";
-import type { RecentRepo, TaskModal, Theme, WorkspaceView } from "./types";
+import type { CommandView, RecentRepo, TaskModal, Theme } from "./types";
 
 /**
  * 动作注册表：标题栏、左栏、溢出菜单与命令面板都从这里取同一份 id、名称与可用性判断，
@@ -18,7 +18,8 @@ export type CommandGroup = "视图" | "提交" | "同步" | "任务" | "仓库" 
 
 export interface CommandState {
   hasRepo: boolean;
-  workspaceView: WorkspaceView;
+  /** 当前视图；历史里选中「任务净差异」时为 task。 */
+  workspaceView: CommandView;
   taskModal: TaskModal | null;
   sidebarHidden: boolean;
   writeLocked: boolean;
@@ -66,7 +67,7 @@ export interface CommandState {
     scope: "changes" | "task";
   } | null;
   /**
-   * 整文件真实写入：改动视图作用于索引，任务视图暂存的是这个路径的真实工作区内容。
+   * 整文件真实写入：改动视图作用于索引，任务净差异里暂存的是这个路径的真实工作区内容。
    * `side` 说明当前选中文件在真实状态里属于哪一侧，`none` 表示没有可写的真实改动。
    */
   /** otherSide：这个路径的另一侧是否也有真实改动，禁用原因据此指向用户选中的那一侧。 */
@@ -154,7 +155,7 @@ const commitReason = (state: CommandState) => {
 };
 
 const NO_FILE_REASON = "先选择一个文件";
-/** 只有改动与任务视图有审阅队列；文件与历史视图里说明原因，而不是说「先选文件」。 */
+/** 只有改动视图与历史里的任务净差异有审阅队列；其它位置说明原因，而不是说「先选文件」。 */
 const NO_REVIEW_QUEUE = "当前视图没有审阅队列";
 /** 整文件写入不可用的原因：没有选中、正在读写、或这一侧本来就没有可写的真实改动。 */
 function fileStageReason(state: CommandState, action: "stage" | "unstage"): string {
@@ -163,7 +164,7 @@ function fileStageReason(state: CommandState, action: "stage" | "unstage"): stri
   if (!state.fileStage?.path) {
     return state.workspaceView === "changes" || state.workspaceView === "task"
       ? NO_FILE_REASON
-      : "改动与任务视图里才能写入索引";
+      : "改动视图或任务净差异里才能写入索引";
   }
   // 同一路径两侧都有改动时，原因必须指向用户选中的那一侧，否则另一侧明明有改动却被说成「没有改动」。
   const { side, otherSide } = state.fileStage;
@@ -200,19 +201,6 @@ const VIEW_COMMANDS: CommandSpec[] = [
     reason: hasRepoReason,
   },
   {
-    /**
-     * 文件是第三个保活视图，但在切换条里排在改动与历史之间（改动 / 文件 / 历史）。
-     * 数字键仍按原有序列追加：1 改动、2 历史保持不变，文件用 3。
-     */
-    id: "view.files",
-    group: "视图",
-    title: "文件",
-    hint: "按目录浏览仓库中的文件，只读预览内容",
-    shortcut: `${MODIFIER_LABEL} 3`,
-    available: filesAvailable,
-    reason: filesReason,
-  },
-  {
     id: "view.history",
     group: "视图",
     title: "提交历史",
@@ -220,19 +208,16 @@ const VIEW_COMMANDS: CommandSpec[] = [
     shortcut: `${MODIFIER_LABEL} 2`,
     available: hasRepo,
     reason: hasRepoReason,
-  },  {
-    /**
-     * 任务审阅：从明确起点看整次任务的最终净结果，只读。
-     * Cliora 链接自带起点时直接进入这里；普通仓库从起点选择器开始。
-     * 数字键按原序列追加：1 改动、2 历史、3 文件保持不变，任务用 4。
-     */
-    id: "view.task",
+  },
+  {
+    /** 与左栏切换条同序：改动 1、历史 2、文件 3，面板里不再出现与快捷键错位的顺序。 */
+    id: "view.files",
     group: "视图",
-    title: "任务",
-    hint: "从起点看整次任务的最终净结果，只读",
-    shortcut: `${MODIFIER_LABEL} 4`,
-    available: hasRepo,
-    reason: hasRepoReason,
+    title: "文件",
+    hint: "按目录浏览仓库中的文件，只读预览内容",
+    shortcut: `${MODIFIER_LABEL} 3`,
+    available: filesAvailable,
+    reason: filesReason,
   },
   {
     id: "file.prev",

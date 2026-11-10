@@ -27,16 +27,16 @@ function state(overrides: Partial<CommandState> = {}): CommandState {
 }
 
 describe("视图命令", () => {
-  it("视图按改动、文件、历史、任务的顺序注册，文件用数字 3、任务用 4", () => {
+  it("视图按改动、历史、文件的顺序注册，与左栏切换条和数字键同序；没有独立的任务视图", () => {
     const ids = COMMANDS.filter((command) => command.group === "视图").map((command) => command.id);
-    expect(ids.slice(0, 3)).toEqual(["view.changes", "view.files", "view.history"]);
+    expect(ids.slice(0, 3)).toEqual(["view.changes", "view.history", "view.files"]);
+    expect(commandById("view.task")).toBeUndefined();
     const files = commandById("view.files")!;
     expect(files.title).toBe("文件");
     expect(files.shortcut).toBe(`${MODIFIER_LABEL} 3`);
     // 原快捷键不变：改动 1、历史 2。
     expect(commandById("view.changes")!.shortcut).toBe(`${MODIFIER_LABEL} 1`);
     expect(commandById("view.history")!.shortcut).toBe(`${MODIFIER_LABEL} 2`);
-    expect(commandById("view.task")!.shortcut).toBe(`${MODIFIER_LABEL} 4`);
   });
 
   it("没有仓库时文件视图不可用，原因与其它视图同源", () => {
@@ -63,14 +63,15 @@ describe("视图命令", () => {
     expect(shortcutCommand({ key: "2", ctrlKey: true })).toBe("view.history");
     expect(shortcutCommand({ key: "3", ctrlKey: true })).toBe("view.files");
     expect(shortcutCommand({ key: "3", metaKey: true })).toBe("view.files");
-    expect(shortcutCommand({ key: "4", ctrlKey: true })).toBe("view.task");
+    // 任务范围并入历史：数字 4 不再对应任何视图。
+    expect(shortcutCommand({ key: "4", ctrlKey: true })).toBeNull();
     // Shift 仍然不参与数字视图切换。
     expect(shortcutCommand({ key: "3", ctrlKey: true, shiftKey: true })).toBeNull();
   });
 
-  it("命令面板里三个视图连续出现，文件在改动与历史之间", () => {
+  it("命令面板里三个视图连续出现，顺序与快捷键 1/2/3 一致", () => {
     const titles = paletteItems(state()).filter((item) => item.group === "视图").map((item) => item.title);
-    expect(titles.slice(0, 3)).toEqual(["改动", "文件", "提交历史"]);
+    expect(titles.slice(0, 3)).toEqual(["改动", "提交历史", "文件"]);
   });
 
   it("文件视图的上下文件切换读文件视图自己的导航状态", () => {
@@ -137,9 +138,8 @@ describe("文件导航命令", () => {
     const ids = COMMANDS.filter((command) => command.group === "视图").map((command) => command.id);
     expect(ids).toEqual([
       "view.changes",
-      "view.files",
       "view.history",
-      "view.task",
+      "view.files",
       "file.prev",
       "file.next",
       "review.prev",

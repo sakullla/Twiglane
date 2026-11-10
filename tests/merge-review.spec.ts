@@ -115,8 +115,21 @@ describe("合并审阅", () => {
     });
   }
 
-  it("默认选中第一个提交并读出它的明细；点另一个提交或用方向键切换", async () => {
+  it("默认先看文件的最终结果：文件页排在最前并选中第一个文件", async () => {
     renderReview();
+    const tabs = screen.getAllByRole("tab").map((tab) => tab.textContent?.replace(/\d+/g, "").trim());
+    expect(tabs.slice(0, 2)).toEqual(["文件", "提交"]);
+    expect(screen.getByRole("tab", { name: /文件/ }).getAttribute("aria-selected")).toBe("true");
+    const files = screen.getByRole("listbox", { name: "将带入的文件" });
+    expect(within(files).getAllByRole("option")[0].getAttribute("aria-selected")).toBe("true");
+    // 文件的最终结果：共同祖先 → 来源顶端，不是逐个提交。
+    await waitFor(() => expect(compareFileDiff).toHaveBeenCalledWith("/repo", "1".repeat(40), "2".repeat(40), "src/login.ts", 4, 1));
+    expect(commitDetail).not.toHaveBeenCalled();
+  });
+
+  it("提交页选中第一个提交并读出它的明细；点另一个提交或用方向键切换", async () => {
+    renderReview();
+    await fireEvent.click(screen.getByRole("tab", { name: /提交/ }));
     const list = screen.getByRole("listbox", { name: "将带入的提交" });
     expect(within(list).getAllByRole("option")).toHaveLength(2);
     await waitFor(() => expect(commitDetail).toHaveBeenCalledWith("/repo", commitA.oid, null, 4, 1));
@@ -147,6 +160,7 @@ describe("合并审阅", () => {
 
   it("筛选只留匹配的条目；没有共同祖先时不发差异读取并说明原因", async () => {
     renderReview({ baseOid: null });
+    await fireEvent.click(screen.getByRole("tab", { name: /提交/ }));
     await fireEvent.input(screen.getByRole("textbox", { name: "筛选提交" }), { target: { value: "跳转" } });
     const list = screen.getByRole("listbox", { name: "将带入的提交" });
     expect(within(list).getAllByRole("option")).toHaveLength(1);

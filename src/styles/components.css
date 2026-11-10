@@ -345,7 +345,7 @@
 .pane-head > .icon-btn { flex: none; }
 /* 视图切换是左栏主导航，刻意比普通分段（--control-segmented 24px）高一档到 26px，占满左栏宽度、
    更易命中；这是与一般分段不同的上下文意图，不并入该 token。 */
-.view-switcher button { flex: 1; gap: var(--space-6); height: 26px; }
+.view-switcher button { position: relative; flex: 1; gap: var(--space-6); height: 26px; }
 /* 视图切换铺满左栏宽度：两个主视图是左栏最重要的导航，不再缩在一角。 */
 .view-switcher { flex: 1; min-width: 0; }
 .view-switcher button { white-space: nowrap; min-width: 0; }
@@ -357,14 +357,22 @@
   .view-switcher button { padding: 0 var(--space-8); }
 }
 .inline-error { margin: 8px 10px 0; padding: 7px 10px; border-radius: var(--radius-sm); background: var(--danger-soft); color: var(--danger-text); font-size: var(--text-sm); }
-.file-tools { display: flex; align-items: center; gap: var(--space-6); padding: 0 var(--space-8) var(--space-8); flex: none; }
+.file-tools { display: flex; align-items: center; gap: var(--space-6); padding: 0 var(--space-8) var(--space-8); flex: none; container-type: inline-size; container-name: file-tools; }
+/* 搜索是最高频的入口：栏窄时审阅开关只留图标（名称在 aria-label 与悬停提示里），不把搜索框压到只剩两个字。 */
+@container file-tools (max-width: 420px) {
+  .review-hide .file-group-action { display: none; }
+  .review-hide { width: 26px; padding: 0; justify-content: center; }
+}
+@container file-tools (max-width: 300px) {
+  .review-count > .icon { display: none; }
+}
 .file-tools .segmented button { height: var(--control-segmented); padding: 0 var(--space-8); font-size: var(--text-xs); }
 /* 列表/目录切换只用图标：两个方块按钮，名称在 aria-label 和悬停提示里，把宽度留给搜索和标题。 */
 .segmented.icon-segmented button { width: 26px; height: 22px; padding: 0; }
 /* 搜索在前、排列方式在后：搜索是高频动作，占满剩余宽度。 */
 .file-tools .segmented { order: 2; }
 /* 左栏搜索框：比 --surface-2 的左栏暗一档，边界继承 .field 的 --control-border。 */
-.file-tools .field { flex: 1; min-width: 0; background: var(--surface); }
+.file-tools .field { flex: 1; min-width: 96px; background: var(--surface); }
 .history-tools .field { background: var(--surface); }
 .file-list { min-height: 0; flex: 1; overflow: auto; padding: 0 0 var(--space-8); position: relative; outline: none; container-type: inline-size; container-name: file-list; }
 /* 文件列表、差异面板、历史列表这三个可聚焦滚动容器同一判据：原来用 --accent-soft
@@ -978,7 +986,7 @@ label.list-row .checkbox { margin-top: 2px; }
 .history-multi-list li { display: flex; gap: var(--space-6); min-width: 0; color: var(--fg-muted); font-size: var(--text-sm); }
 .history-multi-list code { flex: none; }
 /* 多选提交：顶部是所选提交的紧凑清单（限高可滚，点一行只看那个提交），下面左文件右差异；
-   右侧按提交把所选文件的差异连续堆叠在一个纵向滚动里，块标题吸顶，块内只有横向滚动。 */
+   只看所选提交合起来的最终结果：文件清单与差异都是「最早所选之前 → 最新所选」两点之间的净变化。 */
 .union-head { border-bottom: 0; padding-bottom: var(--space-8); }
 .union-commits { flex: none; max-height: 152px; overflow: auto; margin: 0; padding: 0 var(--space-12) var(--space-8); list-style: none; display: flex; flex-direction: column; gap: 2px; border-bottom: 1px solid var(--border); }
 .union-commit { display: flex; align-items: center; gap: var(--space-8); width: 100%; min-height: 30px; padding: 0 var(--space-8); border-radius: var(--radius-sm); text-align: left; font-size: var(--text-sm); color: var(--fg); transition: background var(--duration-fast) var(--ease); }
@@ -987,24 +995,7 @@ label.list-row .checkbox { margin-top: 2px; }
 .union-commit-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .union-commit-meta { flex: none; color: var(--fg-subtle); font-size: var(--text-xs); }
 .union-commit code { flex: none; font-family: var(--mono); font-size: var(--text-xs); color: var(--fg-muted); }
-.union-diff { background: var(--surface-2); }
-.union-diff-head { flex: none; display: flex; align-items: center; gap: var(--space-8); min-height: 40px; padding: 0 var(--space-8) 0 var(--space-12); border-bottom: 1px solid var(--border); background: var(--surface); }
-.union-diff-head > .icon { flex: none; color: var(--fg-subtle); }
-.union-diff-name { font-weight: var(--weight-semibold); }
-.union-diff-count { flex: none; color: var(--fg-subtle); font-size: var(--text-xs); white-space: nowrap; }
-.union-diff-head .btn, .union-diff-head .segmented { flex: none; }
-.union-diff-head .segmented { padding: 2px; border-radius: var(--radius); }
-/* 并集差异头部的分段同样走工具条的 22px 紧凑档，与 diff-toolbar 一致，不并入 24px 主体 token。 */
-.union-diff-head .segmented button { height: 22px; padding: 0 var(--space-8); font-size: var(--text-xs); }
-.union-scroll { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; overflow-anchor: none; padding: 0 var(--space-12) var(--space-12); display: flex; flex-direction: column; gap: var(--space-12); }
-.union-scroll > :first-child { margin-top: var(--space-12); }
-.union-block { flex: none; min-width: 0; overflow: clip; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
-.union-block-head { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; gap: var(--space-8); min-height: 36px; margin: 0; padding: 0 var(--space-12); border-bottom: 1px solid var(--border); background: var(--surface-2); font-size: var(--text-sm); font-weight: var(--weight-normal); }
-.union-block-oid { flex: none; padding: 1px 6px; border-radius: var(--radius-xs); background: var(--surface-3); color: var(--fg-muted); font-family: var(--mono); font-size: var(--text-xs); }
-.union-block-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--weight-semibold); }
-.union-block-meta { flex: none; color: var(--fg-subtle); font-size: var(--text-xs); white-space: nowrap; }
-.union-block-head .diff-stats { flex: none; }
-.union-block > .infobar { margin: var(--space-8); }
+.union-hint.warn { color: var(--warning-text); }
 .history-list { flex: 1; min-width: 0; min-height: 0; overflow: auto; position: relative; padding: 0 0 var(--space-6); outline: none; container-type: inline-size; container-name: history-list; }
 /* 窄栏里把宽度留给摘要、作者和时间；Hash 仍在悬停提示和详情里。 */
 @container history-list (max-width: 240px) {
@@ -2297,27 +2288,45 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 
 
 
-/* ---------- 任务审阅（R1、R5、R6） ----------
-   任务页与改动页共用 .changes 的三列编排：左栏是范围与文件队列，右栏是净差异。
-   这里只补任务自己的信息条、起点选择器与范围内历史，不引入新的装饰层级。 */
-.task-context {
+/* ---------- 任务净差异（cliora 审查，R1、R4、R5、R6） ----------
+   任务范围不是独立视图：历史按「起点..HEAD」过滤后，列表顶部一行「任务净差异」，
+   选中它时历史详情区换成这里的布局——头部说明范围，左边任务文件队列，右边净差异。
+   形状沿用提交详情（commit-head / 左文件右差异），不引入新的装饰层级。 */
+/* 历史切换项上的小圆点：有 cliora 任务范围时提醒从历史进入审查，选中历史后不再显示。 */
+.view-task-dot { position: absolute; top: 4px; right: 6px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+
+/* 历史列表顶部的任务净差异行：与提交行同一套悬停/选中语义，图标位换成任务图标。 */
+.history-task-row {
+  position: relative;
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: flex-start;
+  gap: 10px;
   flex: none;
-  padding: var(--space-8) var(--space-8) var(--space-6);
-  border-bottom: 1px solid var(--border);
-  background: var(--surface-2);
+  margin: 0 var(--space-8) var(--space-6);
+  padding: 7px 10px 7px var(--space-8);
+  border-radius: var(--radius);
+  background: var(--surface-3);
+  color: var(--fg);
+  text-align: left;
+  transition: background var(--duration-fast) var(--ease);
 }
-.task-context-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-6);
-  min-width: 0;
-  color: var(--fg-muted);
-  font-size: var(--text-xs);
-}
-.task-stats { flex-wrap: wrap; row-gap: 2px; }
+.history-task-row:hover { background: var(--hover); }
+.history-task-row[aria-pressed="true"] { background: var(--accent-soft); }
+.history-task-row[aria-pressed="true"]::before { content: ""; position: absolute; left: -1px; top: 9px; bottom: 9px; width: 2.5px; border-radius: 2px; background: var(--accent); }
+.history-task-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.history-task-row .spinner { width: 11px; height: 11px; align-self: center; }
+.history-task-row .diff-stats { flex: none; }
+.history-task-icon { display: grid; place-items: center; flex: none; width: 22px; height: 22px; margin-top: 1px; border-radius: 50%; background: var(--accent-soft); color: var(--accent-text); }
+.history-task-row[aria-pressed="true"] .history-task-icon { background: var(--accent); color: var(--accent-fg); }
+.history-task-warn { color: var(--danger-text); }
+.history-task-done { color: var(--success-text); }
+
+/* 详情区里的任务净差异：占满详情高度，头部 + 暂存范围一行 + 左文件右差异。 */
+.task-detail { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--surface); }
+.task-byline { row-gap: var(--space-4); }
+.task-range { display: inline-flex; align-items: center; gap: var(--space-6); min-width: 0; }
+.task-range > .icon { flex: none; color: var(--fg-subtle); }
+.task-stats { display: inline-flex; align-items: center; gap: var(--space-6); flex-wrap: wrap; }
 .task-kicker { flex: none; color: var(--fg-subtle); }
 .task-value { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .task-oid { font-family: var(--mono); color: var(--fg); }
@@ -2332,107 +2341,38 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 }
 .task-tag.warn { background: var(--warning-soft); color: var(--warning-text); }
 .task-tag.danger { background: var(--danger-soft); color: var(--danger-text); }
+.task-reading { display: inline-flex; align-items: center; gap: var(--space-4); color: var(--fg-muted); }
+.task-reading .spinner { width: 11px; height: 11px; }
 .task-context-note { margin: 0; color: var(--fg-subtle); font-size: var(--text-xs); }
-/* 选择器只提供候选与手动输入：没有预选项，也就没有「看起来已经选好」的状态。 */
-.task-baseline {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-8);
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: var(--space-12) var(--space-8);
-  border-bottom: 1px solid var(--border);
-  background: var(--surface-2);
-}
-.task-baseline-note { margin: 0; color: var(--fg-subtle); font-size: var(--text-xs); line-height: 1.5; }
-.task-baseline-group { display: flex; flex-direction: column; gap: var(--space-4); min-height: 0; }
-.task-baseline-group h4 { margin: 0; color: var(--fg-subtle); font-size: var(--text-xs); font-weight: var(--weight-medium); }
-.task-baseline-list { display: flex; flex-direction: column; gap: 1px; margin: 0; padding: 0; list-style: none; }
-.task-baseline-item {
+/* 真实暂存范围：一行说明它和任务范围是两回事，路径清单在悬停提示里。 */
+.task-stage-scope {
   display: flex;
   align-items: center;
-  gap: var(--space-6);
-  width: 100%;
-  min-height: 24px;
-  padding: 0 var(--space-6);
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--fg);
-  font-size: var(--text-xs);
-  text-align: left;
-}
-.task-baseline-item:hover:not(:disabled) { background: var(--hover); }
-.task-baseline-item .name { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.task-baseline-item .oid { flex: none; font-family: var(--mono); color: var(--fg-muted); }
-.task-failure {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-6);
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-8);
   flex: none;
-  padding: var(--space-12) var(--space-8);
+  padding: var(--space-6) var(--space-16);
   border-bottom: 1px solid var(--border);
-  background: var(--danger-soft);
-  color: var(--danger-text);
+  background: var(--surface-2);
+  color: var(--fg-muted);
   font-size: var(--text-xs);
 }
-.task-failure strong { font-size: var(--text-sm); }
-.task-failure p { margin: 0; line-height: 1.5; }
-.task-failure .task-context-note { color: inherit; opacity: 0.85; }
-.task-failure-actions { display: flex; gap: var(--space-6); flex-wrap: wrap; }
+.task-failure p { margin: 0; }
 .task-empty { padding: var(--space-16) var(--space-12); }
-/* 范围内历史：与文件队列同一栏，最多一屏小半高；条目是按钮，键盘可达。 */
-.task-commits {
+.task-placeholder { background: var(--surface); }
+/* 左边任务文件队列沿用改动列表组件，宽度比提交文件栏宽一档：工具行里有审阅进度与导航。 */
+.task-split { flex: 1; min-height: 0; display: grid; grid-template-columns: clamp(280px, 32%, 380px) minmax(0, 1fr); }
+.task-files {
   display: flex;
   flex-direction: column;
-  flex: none;
-  max-height: 168px;
+  min-width: 0;
   min-height: 0;
-  overflow: auto;
-  padding: var(--space-6) 0 var(--space-8);
-  border-top: 1px solid var(--border);
+  padding-top: var(--space-8);
   background: var(--surface-2);
+  box-shadow: inset -1px 0 0 var(--border);
 }
-.task-commits-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-6);
-  padding: 0 var(--space-8);
-  color: var(--fg-muted);
-  font-size: var(--text-xs);
-}
-.task-commits-head .count {
-  height: 16px;
-  min-width: 16px;
-  padding: 0 var(--space-4);
-  background: var(--surface-3);
-  color: var(--fg-muted);
-  font-size: var(--text-xs);
-}
-.task-commits-head .spacer { flex: 1; }
-.task-commit-list { display: flex; flex-direction: column; gap: 1px; margin: var(--space-4) 0 0; padding: 0; list-style: none; }
-.task-commit {
-  display: flex;
-  align-items: center;
-  gap: var(--space-6);
-  width: 100%;
-  min-height: 24px;
-  padding: 0 var(--space-8);
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--fg);
-  font-size: var(--text-xs);
-  text-align: left;
-}
-.task-commit:hover { background: var(--hover); }
-.task-commit .oid { flex: none; font-family: var(--mono); color: var(--fg-muted); }
-.task-commit .summary { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.task-placeholder { display: grid; place-items: center; color: var(--fg-subtle); font-size: var(--text-sm); }
 /* 只读说明：任务净差异不提供暂存入口，用一句话代替按钮，而不是把按钮灰掉。 */
 .diff-note { color: var(--fg-subtle); font-size: var(--text-xs); }
-
 
 /* 右栏：净差异与（必要时）截断说明。截断说明独立一行，不挤动代码区。 */
 .task-diff { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -2446,39 +2386,6 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
   font-size: var(--text-xs);
   line-height: 1.5;
 }
-
-
-/* ---------- 连续审阅队列与真实暂存范围（R2、R4、R6） ----------
-   任务与改动共用同一套未审阅导航与状态；任务页另外把「任务范围」和「本次提交」分成两块，
-   形状靠细线和小标签，不加卡片与阴影。 */
-.file-tools .file-nav { flex: none; }
-.file-tag.rebuilt { background: var(--info-soft); color: var(--info-text); }
-.diff-side.task { background: var(--info-soft); color: var(--info-text); }
-.task-context-actions { gap: var(--space-4); flex-wrap: wrap; }
-.task-context-actions .btn { height: 22px; }
-.task-action-label { font-size: var(--text-xs); }
-.task-stage-scope {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: none;
-  padding: var(--space-6) var(--space-8);
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
-}
-.task-stage-list {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  margin: var(--space-4) 0 0;
-  padding: 0;
-  list-style: none;
-  color: var(--fg-muted);
-  font-family: var(--mono);
-  font-size: var(--text-xs);
-}
-.task-stage-list li { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.task-stage-list li.more { font-family: inherit; color: var(--fg-subtle); }
 .task-diff-actions {
   display: flex;
   align-items: center;
@@ -2488,6 +2395,15 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
   border-bottom: 1px solid var(--border);
   background: var(--surface-2);
 }
-@media (max-width: 1120px) {
-  .task-stage-list { max-height: 56px; overflow: auto; }
+/* 详情窄时改成上下：文件队列在上、限高，差异用满宽度。 */
+@container history-detail (max-width: 720px) {
+  .task-split { grid-template-columns: minmax(0, 1fr); grid-template-rows: fit-content(45%) minmax(0, 1fr); }
+  .task-files { box-shadow: inset 0 -1px 0 var(--border); }
 }
+
+
+/* ---------- 连续审阅队列（R2、R4、R6） ----------
+   任务与改动共用同一套未审阅导航与状态。 */
+.file-tools .file-nav { flex: none; }
+.file-tag.rebuilt { background: var(--info-soft); color: var(--info-text); }
+.diff-side.task { background: var(--info-soft); color: var(--info-text); }

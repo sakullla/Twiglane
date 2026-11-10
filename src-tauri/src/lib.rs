@@ -154,6 +154,7 @@ pub fn run() {
             commit_detail,
             commit_file_diff,
             compare_file_diff,
+            compare_files,
             commit_branches,
             file_history,
             cherry_pick_commits,
@@ -1471,6 +1472,26 @@ async fn compare_file_diff(
         offset.unwrap_or(0),
         limit.unwrap_or(0),
         context.unwrap_or(3),
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn compare_files(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    base: Option<String>,
+    head: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<crate::model::CompareFiles, AppError> {
+    crate::git::history::compare_files(
+        state.inner(),
+        &path,
+        base.as_deref(),
+        &head,
+        generation,
+        request_id,
     )
     .await
 }

@@ -1080,12 +1080,8 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".doc-notice": "文档阅读的就地说明条（位置调整/截断）与正文的分区线，纯状态文字",
   ".doc-more": "文档源码续读按钮区与源码之间的分区线，按钮自身带控件边界",
   // --- components.css：任务审阅（只读范围信息与分区线） ---
-  ".task-context": "任务范围信息条与文件队列之间的分区线，条内全是只读文字与状态标记",
-  ".task-stage-scope": "真实暂存范围信息条与文件队列之间的分区线，条内是只读路径与说明文字",
+  ".task-stage-scope": "真实暂存范围说明行与任务文件/差异之间的分区线，条内是只读说明文字",
   ".task-diff-actions": "任务净差异的按块/行转入口条与差异正文之间的分区线，按钮自身带控件边界",
-  ".task-baseline": "起点选择器与文件队列之间的分区线，候选按钮自带 hover 背景",
-  ".task-failure": "任务范围失效说明条与文件队列之间的分区线，内部恢复按钮自带控件边界",
-  ".task-commits": "范围内历史与文件队列之间的分区线，提交条目是按钮并自带 hover 背景",
 
   // --- components.css：表格/列分隔线与分区线 ---
   ".panel-toolbar": "面板工具条底部横向分隔线",
@@ -1098,9 +1094,6 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".side-cell + .side-cell": "双栏差异的列分隔竖线",
   ".split-hbar-cell + .split-hbar-cell": "双栏差异底部两条横向滚动条之间的列分隔竖线，与上方 .side-cell 竖线对齐",
   ".union-commits": "多选提交清单底部横向分区线，清单行自带 hover 反馈",
-  ".union-diff-head": "多选差异区文件标题条底部横向分隔线",
-  ".union-block": "多选差异里每个提交块的卡片外框，块内是只读差异",
-  ".union-block-head": "提交块吸顶标题底部横向分隔线",
 
   // --- components.css：语义色混合的容器描边（不是控件边界） ---
 

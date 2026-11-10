@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onDestroy, untrack, type Snippet } from "svelte";
   import { LatestReadQueue } from "../latest-read";
-  import { LatestBatchReadQueue } from "../latest-batch-read";
   import { api, type HistoryFilters } from "../api";
   import { normalizeError } from "../errors";
   import {
@@ -11,6 +10,7 @@
     commitLineTotals,
     commitSelectionRange,
     formatAuthoredAt,
+    HISTORY_RANGE_PREFIX,
     HISTORY_SEARCH_DEBOUNCE_MS,
     historyConditions,
     historyDayBound,
@@ -37,6 +37,7 @@
     OpenedRepository,
     PreviewSources,
     StatusSnapshot,
+    TaskSummary,
   } from "../types";
   import { FULL_FILE_CONTEXT, type HunkNavReport } from "../diff";
   import { createQuietActivity } from "../quiet-activity";
@@ -98,19 +99,27 @@
     onFullFile?: (next: boolean) => void;
     /** 从提交差异进入只读文档阅读；不传时不显示入口。 */
     onReadDocument?: (sources: PreviewSources, side: "old" | "new", trigger: HTMLElement | null) => void;
+    /**
+     * cliora 审查带来的任务范围：历史按「起点..HEAD」过滤，列表顶部多一行「任务净差异」。
+     * nonce 每次跳转递增：同一个起点再跳一次也回到任务净差异。
+     */
+    taskRange?: { baseline: string; nonce: number } | null;
+    /** 顶部那一行的摘要（含已审阅数），由外壳从任务净差异组件汇总。 */
+    taskSummary?: (TaskSummary & { reviewed: number }) | null;
+    /** 任务净差异的详情：选中顶部那一行时显示，选中提交时隐藏但保活。 */
+    taskDetail?: Snippet<[boolean]>;
+    /** 任务净差异是否正在详情区显示：外壳据此把审阅、暂存等命令作用到任务范围。 */
+    onTaskFocus?: (focused: boolean) => void;
   }
 
   const pageReads = new LatestReadQueue();
   const detailReads = new LatestReadQueue();
   const diffReads = new LatestReadQueue();
-  const multiDetailReads = new LatestBatchReadQueue();
-  const multiDiffReads = new LatestBatchReadQueue();
-  let multiDiffScope = "";
-  let multiDiffCache = new Map<string, Promise<DiffResponse>>();
+  const multiFileReads = new LatestReadQueue();
+  const multiDiffReads = new LatestReadQueue();
   onDestroy(() => {
     pageReads.close(); detailReads.close(); diffReads.close();
-    multiDetailReads.close(); multiDiffReads.close();
-    multiDiffCache.clear();
+    multiFileReads.close(); multiDiffReads.close();
   });
 
   /** 提交行两行排布（摘要 / 引用·作者·时间），52px；提交里的文件行与改动列表同为单行 30px。 */
@@ -184,6 +193,10 @@
     fullFile = false,
     onFullFile,
     onReadDocument,
+    taskRange = null,
+    taskSummary = null,
+    taskDetail,
+    onTaskFocus,
   }: Props = $props();
   /** 提交差异读取的上下文：完整文件时整份读出，否则用后端默认的 3 行。只在需要时追加参数。 */
   function contextArgs(full: boolean): [] | [number] {
@@ -408,24 +421,27 @@
   let checkoutTarget = $state<HistoryCommit | null>(null);
   let checkoutBusy = $state(false);
   let checkoutError = $state<string | null>(null);
-  let multiDetails = $state.raw<CommitDetail[]>([]);
+  /**
+   * 多选只看最终结果：「最早所选的父提交 → 最新所选」之间的净文件清单与净差异，
+   * 不再把每个提交的改动逐个堆叠——中间改了又改回的内容不会出现。
+   */
+  let multiFiles = $state.raw<CommitFileChange[]>([]);
   let multiError = $state<string | null>(null);
-  /** 多提交详情读取中：读完前不把空并集当成「没有文件变化」。 */
+  /** 净文件清单读取中：读完前不把空清单当成「没有文件变化」。 */
   let multiLoading = $state(false);
-  /** 多提交详情读取失败的提交数：合计与文件范围只覆盖读到的部分。 */
-  let multiFailed = $state(0);
   /**
    * 多选读取的请求边界：每次重新选择、换仓库、切视图、重读或取消都换一张票。
    * 只有当前票能改加载状态与结果，旧票的迟到结果既不落地也不把转圈留在屏幕上。
    */
   let multiTicket = 0;
-  /** 多选详情原地重读入口：条件没变也重新取一遍，不依赖用户改选择。 */
+  /** 多选清单原地重读入口：条件没变也重新取一遍，不依赖用户改选择。 */
   let multiRetry = $state(0);
   /** 多选差异读取中：只为真正在途的读取显示转圈。 */
   let multiDiffLoading = $state(false);
   /** 多选差异原地重读入口。 */
   let multiDiffRetry = $state(0);
-  let multiDiffs = $state.raw<{ oid: string; summary: string; diff: DiffResponse | null; error: string | null }[]>([]);
+  let multiDiff = $state.raw<DiffResponse | null>(null);
+  let multiDiffError = $state<string | null>(null);
   let parentChoice = $state<string | null>(null);
   let manualPath = $state<string | null>(null);
   let detail = $state.raw<CommitDetail | null>(null);
@@ -579,11 +595,13 @@
   let currentPath = $derived(viewMode === "single" ? activeFile?.path : (multiFocus ?? filteredFiles[0]?.path));
   let fileIndex = $derived(filteredFiles.findIndex((file) => file.path === currentPath));
   let fileNav = $derived(detail ? fileNavState(filteredFiles, fileIndex, (file) => goToFile(file.path)) : null);
+  /** 多选时的文件导航：在净文件清单里前后移动，和单个提交的文件导航是同一套命令。 */
+  let unionNav = $derived(
+    selectedOids.length > 1 && multiFiles.length > 0
+      ? fileNavState(multiFiles, multiFiles.findIndex((file) => file.path === unionActive?.path), (file) => focusUnion(file.path))
+      : null,
+  );
 
-  $effect(() => {
-    onFileNav?.(fileNav);
-    return () => onFileNav?.(null);
-  });
 
   $effect(() => {
     const element = bodyEl;
@@ -626,25 +644,109 @@
   }));
   let scopeNames = $derived.by(() => {
     const names = page?.branches ?? [];
-    if (!SCOPE_EXTRAS.has(scope) && !names.includes(scope)) return [...names, scope];
+    if (!SCOPE_EXTRAS.has(scope) && !scope.startsWith(HISTORY_RANGE_PREFIX) && !names.includes(scope)) return [...names, scope];
     return names;
   });
+  /** 任务范围在范围下拉框里是一个固定项：离开后还能从这里回来。 */
+  let rangeScope = $derived(taskRange ? `${HISTORY_RANGE_PREFIX}${taskRange.baseline}` : null);
+  let scopeExtras = $derived([
+    ...(rangeScope && taskRange
+      ? [{ value: rangeScope, label: `任务范围（${shortOid(taskRange.baseline)}..HEAD）`, icon: "layers" as const }]
+      : []),
+    { value: "current", label: `当前分支${page?.head ? `（${page.head}）` : ""}`, icon: "branch" as const },
+    { value: "unpushed", label: "未推送的提交", icon: "upload" as const },
+    { value: "all", label: "全部分支", icon: "layers" as const },
+  ]);
+  /** 顶部「任务净差异」行只在任务范围生效、且不是单文件历史时出现。 */
+  let taskRowShown = $derived(Boolean(rangeScope && activeScope === rangeScope && !filePath && taskDetail));
+  /** 任务净差异是否占着详情区：选中了顶部那一行，而不是某个提交。 */
+  let taskFocused = $state(false);
+  let taskShown = $derived(taskRowShown && taskFocused);
+  $effect(() => {
+    const shown = active && taskShown;
+    untrack(() => onTaskFocus?.(shown));
+  });
+  onDestroy(() => onTaskFocus?.(false));
+
+  let reportedNav = $derived(taskShown ? null : selectedOids.length > 1 ? unionNav : fileNav);
+
+  $effect(() => {
+    onFileNav?.(reportedNav);
+    return () => onFileNav?.(null);
+  });
+
+  /** 每次 cliora 跳转（nonce 变化）：清掉其它筛选，切到任务范围并选中「任务净差异」。 */
+  let seenTaskNonce = 0;
+  $effect(() => {
+    const range = taskRange;
+    untrack(() => {
+      if (!range) {
+        seenTaskNonce = 0;
+        taskFocused = false;
+        if (activeScope.startsWith(HISTORY_RANGE_PREFIX)) {
+          scope = "current";
+          activeScope = "current";
+        }
+        return;
+      }
+      if (range.nonce === seenTaskNonce) return;
+      seenTaskNonce = range.nonce;
+      query = "";
+      author = "";
+      pathFilter = "";
+      sinceDay = "";
+      untilDay = "";
+      activeQuery = "";
+      activeAuthor = "";
+      activePath = "";
+      activeSince = "";
+      activeUntil = "";
+      scope = `${HISTORY_RANGE_PREFIX}${range.baseline}`;
+      activeScope = scope;
+      focusTask();
+    });
+  });
+
+  /** 选中顶部「任务净差异」：提交选择清空，详情区交给任务净差异。 */
+  function focusTask() {
+    taskFocused = true;
+    selectedOids = [];
+    anchorOid = null;
+    parentChoice = null;
+    manualPath = null;
+    multiFocus = null;
+  }
   /** 历史范围下拉框的分支行：后端只给本地分支名，这里补成分支记录。 */
   let scopeBranches = $derived(
     scopeNames.map((name): BranchRecord => ({ name, remote: false, current: name === page?.head, upstream: null, worktree: null })),
   );
   let selectedIds = $derived(new Set(selectedOids));
   let selectedCommits = $derived(commits.filter((commit) => selectedIds.has(commit.oid)));
-  let unionFiles = $derived(unionCommitFiles(multiDetails));
-  /** 多提交的合计直接汇总并集文件：与逐文件累计一致，滚动只影响虚拟行，不收缩统计范围。 */
+  let unionFiles = $derived(multiFiles);
+  /** 净结果的合计：两点之间的净行数，中间改了又改回的行不计入。 */
   let unionLineTotals = $derived(multiLoading ? null : commitLineTotals(unionFiles));
   let unionActive = $derived(unionFiles.find((file) => file.path === multiFocus) ?? unionFiles[0] ?? null);
   let unionScroll = $state(0);
   let unionViewport = $state(0);
   let unionList = $state<HTMLDivElement | null>(null);
-  /** 多选差异区：各提交的差异连续堆叠在同一个纵向滚动里，块内只有横向滚动。 */
-  let unionHost = $state<HTMLDivElement | null>(null);
-  let unionLayout = $state<"unified" | "split">("unified");
+  /**
+   * 多选的比较两端：最新所选（列表里最上面那个）与最早所选的第一父提交。
+   * 所选提交在同一条第一父链上首尾相接时是「连续」的；否则中间未选的提交也计入净结果，界面要说清楚。
+   */
+  let multiRange = $derived.by(() => {
+    if (selectedCommits.length < 2) return null;
+    const newest = selectedCommits[0];
+    const oldest = selectedCommits[selectedCommits.length - 1];
+    let linear = true;
+    for (let index = 0; index < selectedCommits.length - 1; index += 1) {
+      if (selectedCommits[index].parents[0] !== selectedCommits[index + 1].oid) {
+        linear = false;
+        break;
+      }
+    }
+    return { head: newest.oid, base: oldest.parents[0] ?? null, linear };
+  });
+  let multiKey = $derived(multiRange ? `${multiRange.base ?? ""}..${multiRange.head}` : "");
   let unionRange = $derived(visibleRange(
     unionFiles.length, unionScroll, unionViewport > 0 ? unionViewport : unionScroll > 0 ? UNION_ROW_HEIGHT : 0, UNION_ROW_HEIGHT,
   ));
@@ -684,12 +786,8 @@
     const next = nextIndex(index, event.key, unionFiles.length);
     if (next === null) return;
     event.preventDefault();
-    multiFocus = unionFiles[next].path;
-    unionScroll = scrollIndexIntoView(next, unionScroll, unionViewport, UNION_ROW_HEIGHT);
-    if (unionList) {
-      unionList.scrollTop = unionScroll;
-      unionList.focus({ preventScroll: true });
-    }
+    focusUnion(unionFiles[next].path);
+    unionList?.focus({ preventScroll: true });
   }
   let diffSelection = $derived<FileSelection | null>(
     activeFile ? { path: activeFile.path, side: "unstaged" } : null,
@@ -737,6 +835,7 @@
       commits = [];
       page = null;
       detail = null;
+      taskFocused = Boolean(taskRange);
       detailError = null;
       parentChoice = null;
       manualPath = null;
@@ -810,7 +909,11 @@
         const ids = new Set(result.commits.map((commit) => commit.oid));
         const previous = selectedOids;
         const kept = previous.filter((oid) => ids.has(oid));
-        if (kept.length === 0) {
+        if (kept.length === 0 && untrack(() => taskFocused && taskRowShown)) {
+          // 任务净差异占着详情区：列表换页或刷新不把选择抢回到第一个提交。
+          selectedOids = [];
+          anchorOid = null;
+        } else if (kept.length === 0) {
           selectedOids = result.commits[0] ? [result.commits[0].oid] : [];
           anchorOid = selectedOids[0] ?? null;
           parentChoice = null;
@@ -953,148 +1056,135 @@
     };
   });
 
+  /** 净文件清单：两端不变（只是列表刷新）时不重读；两端或代次变化才读。 */
   $effect(() => {
-    const ids = selectedOids;
     void multiRetry;
-    multiDetails = [];
-    multiError = null;
-    multiFailed = 0;
-    multiLoading = false;
-    if (!active || ids.length < 2) return;
+    const key = multiKey;
     const repo = repoPath;
     const generation = readGeneration;
+    multiFiles = [];
+    multiError = null;
+    multiLoading = false;
+    if (!active || !key) return;
+    const range = untrack(() => multiRange);
+    if (!range) return;
     const ticket = ++multiTicket;
     // 只有当前请求边界能改状态：换选择、换仓库、切视图或取消之后，旧票一律作废。
     const owned = () => ticket === multiTicket && opened.summary.path === repo;
     multiLoading = true;
     void (async () => {
-      const errors: string[] = [];
-      const completed: (CommitDetail | null)[] = [];
       try {
-        const rows = await multiDetailReads.run(ids, async (oid) => {
-          try {
-            return await api.commitDetail(repo, oid, null, generation, nextId());
-          } catch (error) {
-            const failure = normalizeError(error);
-            if (failure.code !== "cancelled" && failure.code !== "stale") errors.push(failure.message);
-            return null;
-          }
-        }, (row, index) => {
-          if (!owned()) return;
-          completed[index] = row;
-          multiDetails = completed.filter((item): item is CommitDetail => item != null);
-          // 后续提交补入新路径时，保持已经开始阅读的文件。
-          if (multiFocus === null) multiFocus = multiDetails[0]?.files[0]?.path ?? null;
-          if (row === null) multiFailed += 1;
-        });
+        const result = await multiFileReads.run(() => api.compareFiles(repo, range.base, range.head, generation, nextId()));
         if (!owned()) return;
-        multiFailed = rows.filter((row) => row == null).length;
-        multiError = errors[0] ?? (multiDetails.length === 0 ? "所选提交的详情没有读取成功。" : null);
+        multiFiles = result.files;
+        // 换了选择但同一个文件仍在净结果里：保持正在读的文件。
+        if (!result.files.some((file) => file.path === multiFocus)) multiFocus = result.files[0]?.path ?? null;
+        if (result.generation !== generation) onGeneration(result.generation);
       } catch (error) {
         if (!owned()) return;
         const failure = normalizeError(error);
-        // 被新选择替代或取消不是读取结果：不冒充成功，也不当成「没有文件变化」。
-        multiError = failure.code === "cancelled"
-          ? "这次多选读取被新的选择替代，没有留下结果。"
-          : failure.message;
+        if (failure.code === "cancelled") return;
+        if (failure.code === "stale" && failure.generation !== undefined && failure.generation !== generation) {
+          onGeneration(failure.generation);
+          return;
+        }
+        // 读取失败不冒充「没有文件变化」：撤下清单，就地给重读入口。
+        multiError = failure.message;
       } finally {
-        // 加载态一定在当前请求边界内结束：读完、失败、被替代都一样。
         if (owned()) multiLoading = false;
       }
     })();
     return () => {
       multiTicket += 1;
       multiLoading = false;
-      multiDetailReads.cancel();
     };
   });
 
+  /** 所选文件的净差异：同一对两端、同一份完整文件偏好。 */
+  let multiDiffSerial = 0;
   $effect(() => {
     void multiDiffRetry;
-    if (!active || selectedOids.length < 2) {
-      multiDiffs = [];
-      multiDiffCache.clear();
-      multiDiffScope = "";
+    const key = multiKey;
+    const file = unionActive?.path ?? null;
+    const full = fullFile;
+    const repo = repoPath;
+    const generation = readGeneration;
+    multiDiffError = null;
+    if (!active || !key || !file || multiLoading) {
+      if (!key || !file) multiDiff = null;
       multiDiffLoading = false;
       return;
     }
-    const file = unionActive?.path ?? null;
-    const details = multiDetails;
-    const repo = repoPath;
-    const generation = readGeneration;
-    const scope = JSON.stringify([repo, generation, file]);
-    if (scope !== multiDiffScope) {
-      multiDiffs = [];
-      multiDiffScope = scope;
-      multiDiffCache = new Map();
-    }
-    const cache = multiDiffCache;
-    if (!file) {
-      multiDiffs = [];
-      return;
-    }
-    const sources = details.filter((detail) => detail.files.some((item) => item.path === file));
-    const keys = new Set(sources.map((item) => JSON.stringify([item.commit.oid, item.selectedParent])));
-    for (const key of cache.keys()) if (!keys.has(key)) cache.delete(key);
+    const range = untrack(() => multiRange);
+    if (!range) return;
+    const serial = ++multiDiffSerial;
     let cancelled = false;
-    const ticket = multiTicket;
-    const owned = () => !cancelled && ticket === multiTicket;
-    const previous = untrack(() => new Map(multiDiffs.map((item) => [item.oid, item])));
-    const completed = sources.map((item) => previous.get(item.commit.oid));
-    const available = () => completed.filter((item): item is NonNullable<typeof item> => item !== undefined);
-    multiDiffs = available();
     multiDiffLoading = true;
     void (async () => {
       try {
-        const rows = await multiDiffReads.run(sources, async (detail) => {
-          try {
-            const key = JSON.stringify([detail.commit.oid, detail.selectedParent]);
-            let pending = cache.get(key);
-            if (!pending) {
-              pending = api.commitFileDiff(
-                repo,
-                detail.commit.oid,
-                detail.selectedParent,
-                file,
-                generation,
-                nextId(),
-                0,
-                0,
-              );
-              cache.set(key, pending);
-            }
-            const diff = await pending;
-            return { oid: detail.commit.oid, summary: detail.commit.summary, diff, error: null as string | null };
-          } catch (error) {
-            return {
-              oid: detail.commit.oid,
-              summary: detail.commit.summary,
-              diff: null,
-              error: normalizeError(error).message,
-            };
-          }
-        }, (row, index) => {
-          if (!owned()) return;
-          completed[index] = row;
-          multiDiffs = available();
-        });
-        if (!owned()) return;
-        multiDiffs = rows;
+        const result = await multiDiffReads.run(() =>
+          api.compareFileDiff(repo, range.base ?? "", range.head, file, generation, nextId(), 0, 0, ...contextArgs(full)),
+        );
+        if (cancelled || serial !== multiDiffSerial || opened.summary.path !== repo) return;
+        multiDiff = result;
+        if (result.generation !== generation) onGeneration(result.generation);
       } catch (error) {
-        if (!owned()) return;
+        if (cancelled || serial !== multiDiffSerial) return;
         const failure = normalizeError(error);
-        if (failure.code !== "cancelled") multiError = failure.message;
+        if (failure.code === "cancelled") return;
+        if (failure.code === "stale" && failure.generation !== undefined && failure.generation !== generation) {
+          onGeneration(failure.generation);
+          return;
+        }
+        multiDiff = null;
+        multiDiffError = failure.message;
       } finally {
-        // 差异标题下的转圈只跟当前请求边界：读完、失败、被替代都要停下来。
-        if (owned()) multiDiffLoading = false;
+        if (!cancelled && serial === multiDiffSerial) multiDiffLoading = false;
       }
     })();
     return () => {
       cancelled = true;
-      multiDiffLoading = false;
-      multiDiffReads.cancel();
     };
   });
+
+  async function loadMoreMultiDiff() {
+    const current = multiDiff;
+    const range = multiRange;
+    const file = unionActive?.path ?? null;
+    if (!current || !range || !file || current.path !== file) return;
+    if (current.offset + current.lines.length >= current.totalLines) return;
+    const repo = opened.summary.path;
+    const serial = multiDiffSerial;
+    try {
+      const result = await api.compareFileDiff(
+        repo, range.base ?? "", range.head, file, opened.generation, nextId(),
+        current.offset + current.lines.length, 400, ...contextArgs(fullFile),
+      );
+      if (serial !== multiDiffSerial || opened.summary.path !== repo) return;
+      multiDiff = {
+        ...result,
+        offset: current.offset,
+        lines: [...current.lines, ...result.lines],
+        hunks: mergeHunks(current.hunks, result.hunks, current.lines.length),
+        totalLines: result.totalLines,
+      };
+    } catch (error) {
+      const failure = normalizeError(error);
+      if (failure.code === "stale" && failure.generation !== undefined && failure.generation !== opened.generation) {
+        onGeneration(failure.generation);
+        return;
+      }
+      multiDiffError = failure.message;
+    }
+  }
+
+  /** 多选文件列表里选中一个文件，并把它滚进可见区。 */
+  function focusUnion(path: string) {
+    multiFocus = path;
+    const index = unionFiles.findIndex((file) => file.path === path);
+    unionScroll = scrollIndexIntoView(index, unionScroll, unionViewport, UNION_ROW_HEIGHT);
+    if (unionList) unionList.scrollTop = unionScroll;
+  }
 
   function scheduleText() {
     if (searchTimer) clearTimeout(searchTimer);
@@ -1162,6 +1252,7 @@
   }
 
   function singleSelect(oid: string) {
+    taskFocused = false;
     if (selectedOids.length === 1 && selectedOids[0] === oid) {
       anchorOid = oid;
       return;
@@ -1176,6 +1267,7 @@
   }
 
   function clickCommit(event: MouseEvent, oid: string) {
+    taskFocused = false;
     if (event.shiftKey) {
       selectedOids = commitSelectionRange(commits.map((commit) => commit.oid), anchorOid, oid);
     } else if (event.metaKey || event.ctrlKey) {
@@ -1269,13 +1361,6 @@
     viewMode = next;
   }
 
-  /** 多提交对照块标题的阅读入口：来源就是这一提交的那份差异，缺失侧由阅读窗口说明。 */
-  function readUnionDocument(diff: DiffResponse | null, trigger: HTMLElement | null): void {
-    const sources = diff?.document;
-    if (!sources || !onReadDocument) return;
-    onReadDocument(sources, sources.new ? "new" : "old", trigger);
-  }
-
   function directoryOf(path: string): string {
     return path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
   }
@@ -1349,6 +1434,7 @@
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
       event.preventDefault();
       if (commits.length === 0) return;
+      taskFocused = false;
       selectedOids = commits.map((commit) => commit.oid);
       anchorOid ??= commits[0]?.oid ?? null;
       return;
@@ -1376,9 +1462,23 @@
       return;
     }
     if (event.altKey || event.ctrlKey || event.metaKey) return;
-    if ((event.key === "ArrowUp" || event.key === "k") && !event.shiftKey && current === 0) {
+    if ((event.key === "ArrowUp" || event.key === "k") && !event.shiftKey && current <= 0 && taskRowShown && !taskFocused) {
+      event.preventDefault();
+      focusTask();
+      return;
+    }
+    if ((event.key === "ArrowUp" || event.key === "k") && !event.shiftKey && (current === 0 || (taskFocused && taskRowShown))) {
       event.preventDefault();
       document.getElementById("history-search")?.focus();
+      return;
+    }
+    if ((event.key === "ArrowDown" || event.key === "j") && !event.shiftKey && taskFocused && taskRowShown) {
+      event.preventDefault();
+      const first = commits[0];
+      if (first) {
+        reveal(0);
+        singleSelect(first.oid);
+      }
       return;
     }
     const move = nextIndex(current, event.key, commits.length);
@@ -1389,35 +1489,6 @@
     if (!commit) return;
     if (event.shiftKey) selectedOids = commitSelectionRange(commits.map((item) => item.oid), anchorOid, commit.oid);
     else singleSelect(commit.oid);
-  }
-
-  function unionCommitFiles(details: CommitDetail[]): CommitFileChange[] {
-    const map = new Map<string, CommitFileChange>();
-    for (const detail of details) {
-      for (const file of detail.files) {
-        const existing = map.get(file.path);
-        if (!existing) {
-          map.set(file.path, { ...file });
-          continue;
-        }
-        if (file.binary || existing.binary) {
-          // 多个提交合起来看时，前后大小没有单一的「改动前」，只说是二进制。
-          existing.binary = true;
-          existing.additions = null;
-          existing.deletions = null;
-          existing.oldSize = null;
-          existing.newSize = null;
-        } else if (existing.additions != null && file.additions != null && existing.deletions != null && file.deletions != null) {
-          existing.additions += file.additions;
-          existing.deletions += file.deletions;
-        } else {
-          existing.additions = null;
-          existing.deletions = null;
-        }
-        if (existing.status !== file.status) existing.status = "modified";
-      }
-    }
-    return [...map.values()];
   }
 
   async function loadMoreDiff() {
@@ -1526,11 +1597,7 @@
             branches={scopeBranches}
             value={scope}
             current={page?.head ?? null}
-            extras={[
-              { value: "current", label: `当前分支${page?.head ? `（${page.head}）` : ""}`, icon: "branch" },
-              { value: "unpushed", label: "未推送的提交", icon: "upload" },
-              { value: "all", label: "全部分支", icon: "layers" },
-            ]}
+            extras={scopeExtras}
             {branchGroups}
             onChange={setScope}
           />
@@ -1657,6 +1724,45 @@
       {/if}
       {#if appendError}
         <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{appendError}已显示的提交仍保留。</span></div>
+      {/if}
+      {#if taskRowShown}
+        {@const summary = taskSummary}
+        <!-- 任务净差异：起点到工作区的最终结果，排在范围内提交之前；选中它时详情区显示任务审阅。 -->
+        <button
+          type="button"
+          class="history-task-row"
+          aria-pressed={taskFocused}
+          title="起点到当前工作区的最终结果：已提交与未提交的改动合成一份，只读"
+          onclick={() => {
+            focusTask();
+            list?.focus({ preventScroll: true });
+          }}
+        >
+          <span class="history-task-icon" aria-hidden="true"><Icon name="layers" size={15} /></span>
+          <span class="hr-main">
+            <span class="hr-line">
+              <span class="hr-summary">任务净差异</span>
+              {#if summary?.reading}<span class="spinner" aria-hidden="true"></span>{/if}
+            </span>
+            <span class="hr-meta">
+              {#if !summary || summary.state === "reading"}
+                <span>正在读取任务范围……</span>
+              {:else if summary.state === "failed"}
+                <span class="history-task-warn">任务范围读取失败，点开查看原因</span>
+              {:else if summary.state === "empty"}
+                <span>起点 {summary.baseline} 之后没有净改动</span>
+              {:else if summary.state === "none"}
+                <span>没有任务范围</span>
+              {:else}
+                <span>{summary.files} 个文件</span>
+                <LineCounts stat={{ additions: summary.additions, deletions: summary.deletions }} />
+                <span class="hr-dot"></span>
+                <span class:history-task-done={summary.reviewed === summary.files && summary.files > 0}>已审阅 {summary.reviewed}/{summary.files}</span>
+                {#if summary.dirty}<span class="hr-dot"></span><span>含未提交</span>{/if}
+              {/if}
+            </span>
+          </span>
+        </button>
       {/if}
       <div
         class="history-list"
@@ -1840,6 +1946,12 @@
     </aside>
     {@render paneResizer?.()}
     <div class="history-detail">
+      {#if taskRange && taskDetail}
+        {@render taskDetail(taskShown)}
+      {/if}
+      {#if taskShown}
+        <!-- 任务净差异占着详情区：提交详情与多选结果都不显示。 -->
+      {:else}
       {#if detailError}
         <div class="infobar error" role="alert">
           <Icon name="alert-circle" size={15} />
@@ -1847,22 +1959,25 @@
           <button type="button" class="btn btn-ghost btn-sm" onclick={retryDetail}>重新读取</button>
         </div>
       {/if}
-      {#if multiError}
-        <div class="infobar error" role="alert">
-          <Icon name="alert-circle" size={15} />
-          <span class="infobar-text">
-            {multiError}{#if multiFailed > 0}未读取的提交没有计入文件范围和合计。{/if}
-          </span>
-          <button type="button" class="btn btn-ghost btn-sm" onclick={() => (multiRetry += 1)}>重新读取</button>
-        </div>
-      {/if}
       {#if selectedOids.length > 1}
         <header class="commit-head union-head">
           <div class="commit-head-main">
-            <h2 class="commit-title">已选择 {selectedOids.length} 个提交</h2>
-            <p class="hint">左侧是这些提交改动过的全部文件；右侧按提交依次列出所选文件的差异，各自相对第一父提交。</p>
+            <h2 class="commit-title">已选择 {selectedOids.length} 个提交 · 最终结果</h2>
+            {#if multiRange && !multiRange.linear}
+              <p class="hint union-hint warn" role="note">
+                所选提交不连续：按「最早所选之前 → 最新所选」比较，中间没选中的提交也会计入最终结果。
+              </p>
+            {:else}
+              <p class="hint union-hint">只看这些提交合起来之后每个文件的最终变化，不逐个提交展开；中间改了又改回的内容不会出现。</p>
+            {/if}
           </div>
           <div class="commit-facts">
+            {#if multiRange}
+              <span class="oid-chip" title={`${multiRange.base ?? "空树"} → ${multiRange.head}`}>
+                <Icon name="commit" size={12} />
+                {multiRange.base ? shortOid(multiRange.base) : "空树"}..{shortOid(multiRange.head)}
+              </span>
+            {/if}
             <button type="button" class="btn btn-secondary btn-sm" title="回到只看最新的一个提交" onclick={() => singleSelect(selectedCommits[0]?.oid ?? selectedOids[0])}>
               <Icon name="x" size={13} />退出多选
             </button>
@@ -1883,24 +1998,23 @@
         <div class="commit-split" style={`--commit-files:${filesShown}px`} bind:clientWidth={splitWidth}>
           <aside class="commit-files" aria-label="提交中的文件">
             <div class="commit-files-head">
-              <span class="commit-files-title">变更文件</span>
+              <span class="commit-files-title">最终变更</span>
               {#if !multiLoading}<span class="count">{unionFiles.length}</span>{/if}
-              {#if multiLoading}<span class="hint" role="status">已读取 {multiDetails.length + multiFailed}/{selectedOids.length} 个提交</span>{/if}
               {#if unionLineTotals}
                 <span class="spacer"></span>
-                {@render lineTotal(unionLineTotals, "所选提交合计", multiFailed)}
+                {@render lineTotal(unionLineTotals, "所选提交合起来")}
               {/if}
             </div>
             {#if multiLoading && unionFiles.length === 0}
               <div class="empty compact" role="status" aria-busy="true">
                 <span class="empty-icon"><span class="spinner"></span></span>
-                <strong>正在读取提交中的文件</strong>
+                <strong>正在计算最终变更</strong>
               </div>
-            {:else if unionFiles.length === 0 && (multiFailed > 0 || multiError)}
-              <p class="commit-files-empty" role="status">有提交详情没读取成功，无法确认文件范围。</p>
-              <button type="button" class="btn btn-secondary btn-sm commit-files-retry" onclick={() => (multiRetry += 1)}>重新读取所选提交</button>
+            {:else if unionFiles.length === 0 && multiError}
+              <p class="commit-files-empty" role="alert">最终变更没有读取成功，无法确认文件范围：{multiError}</p>
+              <button type="button" class="btn btn-secondary btn-sm commit-files-retry" onclick={() => (multiRetry += 1)}>重新读取</button>
             {:else if unionFiles.length === 0}
-              <p class="commit-files-empty">这些提交没有文件变化。</p>
+              <p class="commit-files-empty">这些提交合起来没有文件变化。</p>
             {:else}
               <div
                 class="file-list history-files history-union-files"
@@ -1937,7 +2051,11 @@
                       <span class={`st ${mark.tone}`} title={commitFileLabel(file.status)}>{mark.letter}</span>
                       <span class="file-name">
                         <span class="fn">{parts.name}</span>
-                        {#if parts.dir}<span class="fd"><bdi>{parts.dir}</bdi></span>{/if}
+                        {#if file.originalPath}
+                          <span class="fd from" title={`重命名自 ${file.originalPath}`}>← {file.originalPath}</span>
+                        {:else if parts.dir}
+                          <span class="fd"><bdi>{parts.dir}</bdi></span>
+                        {/if}
                       </span>
                       <LineCounts stat={commitLineStat(file)} hideBinary />
                     </button>
@@ -1947,82 +2065,35 @@
             {/if}
           </aside>
           {@render filesResizer()}
-          <div class="commit-diff union-diff">
-            {#if unionActive}
-              {@const focused = splitPath(unionActive.path)}
-              <div class="union-diff-head">
-                <Icon name="file-diff" size={15} />
-                <span class="diff-path" title={unionActive.path}>
-                  <bdi>{#if focused.dir}<span class="dir">{focused.dir}/</span>{/if}<span class="union-diff-name">{focused.name}</span></bdi>
-                </span>
-                {#if multiDiffs.length > 0}<span class="union-diff-count">{multiDiffs.length} 个提交改动了它</span>{/if}
-                <span class="spacer"></span>
-                <button type="button" class="btn btn-ghost btn-sm" aria-label="此文件历史" title="查看这个文件的提交历史" onclick={() => unionActive && onFilePath(unionActive.path)}>
-                  <Icon name="history" size={14} /><span class="diff-hist-label">此文件历史</span>
-                </button>
-                <div class="segmented" role="group" aria-label="差异布局">
-                  <button type="button" aria-pressed={unionLayout === "unified"} title="统一视图" onclick={() => (unionLayout = "unified")}><Icon name="rows" size={12} />统一</button>
-                  <button type="button" aria-pressed={unionLayout === "split"} title="并排视图" onclick={() => (unionLayout = "split")}><Icon name="split" size={12} />并排</button>
-                </div>
+          <div class="commit-diff">
+            {#if multiDiffError && !multiDiffLoading}
+              <div class="empty compact" role="alert">
+                <span class="empty-icon err"><Icon name="alert-circle" size={22} /></span>
+                <strong>这个文件的最终差异没有读取成功</strong>
+                <p>{multiDiffError}</p>
+                <button type="button" class="btn btn-secondary btn-sm" onclick={() => (multiDiffRetry += 1)}>重新读取差异</button>
               </div>
+            {:else}
+              <DiffView {onGeneration}
+                selection={unionActive ? { path: unionActive.path, side: "unstaged" } : null}
+                diff={multiDiff && multiDiff.path === unionActive?.path ? multiDiff : null}
+                error={null}
+                loading={multiDiffLoading || (multiLoading && unionFiles.length === 0)}
+                {disabled}
+                readOnly={true}
+                readOnlyLabel="所选提交的最终结果"
+                onStageHunk={() => {}}
+                onLoadMore={loadMoreMultiDiff}
+                onFileHistory={onFilePath}
+                {fullFile}
+                {onFullFile}
+                {onReadDocument}
+                fileNav={unionNav}
+                fileCount={unionFiles.length}
+                onRetry={() => (multiDiffRetry += 1)}
+                {onHunkNav}
+              />
             {/if}
-            <div class="union-scroll" bind:this={unionHost}>
-              {#if multiLoading && !unionActive}
-                <div class="empty compact" role="status" aria-busy="true">
-                  <span class="empty-icon"><span class="spinner"></span></span>
-                  <strong>正在读取所选提交的详情</strong>
-                </div>
-              {:else if unionActive && multiDiffs.length === 0 && multiDiffLoading}
-                <div class="empty compact" role="status" aria-busy="true">
-                  <span class="empty-icon"><span class="spinner"></span></span>
-                  <strong>正在读取差异</strong>
-                </div>
-              {:else if unionActive && multiDiffs.length === 0}
-                <div class="empty compact" role="status">
-                  <strong>这个文件在这些提交里的差异没有读取成功。</strong>
-                  <button type="button" class="btn btn-secondary btn-sm" onclick={() => (multiDiffRetry += 1)}>重新读取差异</button>
-                </div>
-              {/if}
-              {#each multiDiffs as item (item.oid)}
-                {@const owner = selectedCommits.find((commit) => commit.oid === item.oid)}
-                {@const change = multiDetails.find((entry) => entry.commit.oid === item.oid)?.files.find((file) => file.path === unionActive?.path)}
-                <section class="union-block">
-                  <h3 class="union-block-head">
-                    <code class="union-block-oid">{shortOid(item.oid)}</code>
-                    <span class="union-block-summary" title={item.summary}>{item.summary}</span>
-                    {#if owner}<span class="union-block-meta">{owner.authorName} · {relativeTime(owner.authoredAt)}</span>{/if}
-                    {#if change}<LineCounts stat={commitLineStat(change)} hideBinary />{/if}
-                    {#if onReadDocument && item.diff?.document}
-                      <button
-                        type="button"
-                        class="icon-btn sm union-block-read"
-                        aria-label={`阅读 ${unionActive?.path ?? "这个文件"} 在这一提交的文档`}
-                        title={item.diff.document?.new ? "按版本阅读这个文档（这次提交）" : "按版本阅读这个文档（父提交）"}
-                        onclick={(event) => readUnionDocument(item.diff, event.currentTarget as HTMLElement)}
-                      ><Icon name="eye" size={13} /></button>
-                    {/if}
-                  </h3>
-                  {#if item.error}
-                    <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{item.error}</span></div>
-                  {:else}
-                    <DiffView {onGeneration}
-                      embedded
-                      scrollHost={unionHost}
-                      layout={unionLayout}
-                      selection={unionActive ? { path: unionActive.path, side: "unstaged" } : null}
-                      diff={item.diff}
-                      error={item.error}
-                      loading={item.diff === null && item.error === null}
-                      {disabled}
-                      readOnly={true}
-                      onStageHunk={() => {}}
-                      onLoadMore={() => {}}
-                      onFileHistory={onFilePath}
-                    />
-                  {/if}
-                </section>
-              {/each}
-            </div>
           </div>
         </div>
       {:else if detail}
@@ -2281,8 +2352,9 @@
         <div class="empty" role="status">
           <span class="empty-icon"><Icon name="commit" size={24} /></span>
           <strong>未选择提交</strong>
-          <p>选择左侧一条记录查看文件和差异。</p>
+          <p>选择左侧一条记录查看文件和差异；按住 Ctrl 或 Shift 多选，可看几个提交合起来的最终结果。</p>
         </div>
+      {/if}
       {/if}
     </div>
   </div>

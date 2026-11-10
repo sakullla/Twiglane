@@ -2,10 +2,16 @@ export type Theme = "light" | "dark" | "system";
 /** 分叉拉取预选的方式。旧设置没有这项时按合并。 */
 export type PullIntegration = "merge" | "rebase";
 /**
- * 主视图三个：改动、文件、提交历史。三者同时保活，切换不重挂组件；
+ * 主视图三个：改动、历史、文件。三者同时保活，切换不重挂组件；
  * 临时保存、合并等低频任务进 modal 槽位。
+ * cliora 审查的任务范围不是独立视图：它是历史里按「起点..HEAD」过滤后的顶部一行。
  */
-export type WorkspaceView = "task" | "changes" | "files" | "history";
+export type WorkspaceView = "changes" | "files" | "history";
+/**
+ * 命令可用性用的视图：历史里选中了「任务净差异」行时记为 task，
+ * 审阅队列、整文件暂存等命令据此作用在任务范围上。
+ */
+export type CommandView = WorkspaceView | "task";
 /** 单槽 modal 的七个任务入口（data-task-modal 的取值集合就由它决定）。 */
 export type TaskModal = "stash" | "merge" | "branch" | "remote" | "settings" | "scope" | "publish";
 
@@ -351,14 +357,29 @@ export interface TaskReview {
 }
 
 /**
- * 任务页的起点请求：start 由用户显式选择，cliora 来自已校验的审查链接。
- * 没有 baseline 时不建立任务范围——不会退回当前 HEAD 或默认分支。
+ * 任务范围请求：只来自已校验的 cliora 审查链接。
+ * 链接没有起点时不建立任务范围——不会退回当前 HEAD 或默认分支。
  */
 export interface TaskRequest {
   baseline: string;
-  origin: "cliora" | "manual";
+  origin: "cliora";
   /** 每次进入任务页递增：同一个起点也要重新读取一次。 */
   nonce: number;
+}
+
+/** 历史顶部「任务净差异」行的摘要：任务净差异组件上报，外壳补上审阅进度后交给历史。 */
+export interface TaskSummary {
+  /** none：没有任务范围；reading：首次读取中；ready/empty：读取成功；failed：读取失败或范围失效。 */
+  state: "none" | "reading" | "ready" | "empty" | "failed";
+  /** 已有结果上的重读也算读取中：行里显示转圈，但保留上一份统计。 */
+  reading: boolean;
+  files: number;
+  additions: number;
+  deletions: number;
+  commits: number;
+  dirty: boolean;
+  /** 起点的短标识，只用于显示。 */
+  baseline: string;
 }
 
 /** 单条任务路径的快照确认：只有 current 带 token，其余状态保持未审阅。 */
@@ -582,6 +603,14 @@ export interface HistoryPage {
   scope: string;
   branches: string[];
   head: string | null;
+}
+
+/** 两点之间的净文件清单：base 为 null 表示与空树比较。 */
+export interface CompareFiles {
+  generation: number;
+  base: string | null;
+  head: string;
+  files: CommitFileChange[];
 }
 
 export interface CommitFileChange {

@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { untrack, type Snippet } from "svelte";
+  import { untrack } from "svelte";
   import { api } from "../api";
   import { FULL_FILE_CONTEXT, reuseDiffContent, type HunkNavReport } from "../diff";
   import { normalizeError } from "../errors";
-  import { formatAuthoredAt, shortOid } from "../history";
+  import { shortOid } from "../history";
   import { branchLabel } from "../labels";
   import type {
     AppFailure,
@@ -17,6 +17,7 @@
     TaskFileChange,
     TaskRequest,
     TaskReview,
+    TaskSummary,
   } from "../types";
   import {
     fileNavState,
@@ -31,19 +32,21 @@
   import Icon from "./Icon.svelte";
   import LineCounts from "./LineCounts.svelte";
   import MultiFileDiff from "./MultiFileDiff.svelte";
-  import TaskBaselinePicker from "./TaskBaselinePicker.svelte";
 
   /**
-   * 任务审阅主视图：一次任务从明确起点到当前工作区的最终净结果。
+   * 任务净差异：cliora 审查链接带来的起点到当前工作区的最终结果。
+   *
+   * 它不是独立视图，而是历史详情区里的一块：历史按「起点..HEAD」过滤后，顶部「任务净差异」
+   * 行选中时显示它；选中某个提交时它隐藏但保活，回来时阅读位置不丢。
    *
    * 它只读：建立范围、浏览文件、看差异都走 task_review / load_task_diff，不切换分支、
-   * 不写索引也不碰工作区。写入仍然只发生在现有的改动视图与提交区（T3 才接队列写入）。
+   * 不写索引也不碰工作区。整文件暂存只写真实索引，按块/行暂存转到改动视图。
    *
    * 状态只有四种，而且互斥：
-   * - no-baseline：还没有明确起点，交给选择器，绝不用 HEAD 或默认分支补缺；
+   * - no-baseline：没有任务范围（链接没带起点），不用 HEAD 或默认分支补缺；
    * - reading：正在读取，保留上一份结果但明确标出「读取中」；
    * - ready：完整读取成功，此时才可能出现「空任务」；
-   * - failed：读取失败或任务范围失效，撤下结果并给出重新读取/重新选择入口。
+   * - failed：读取失败或任务范围失效，撤下结果并给出重新读取入口。
    */
   interface Props {
     opened: OpenedRepository;
@@ -57,15 +60,9 @@
     onNotice?: (message: string) => void;
     onFailure?: (error: unknown) => void;
     onFileHistory?: (path: string) => void;
-    /** 进入某个范围内提交：在提交历史里按完整标识查看它。 */
-    onCommitHistory?: (oid: string) => void;
     onReadDocument?: (sources: PreviewSources, side: "old" | "new", trigger: HTMLElement | null) => void;
     onFileNav?: (nav: FileNavState | null) => void;
     onHunkNav?: (nav: HunkNavReport | null) => void;
-    /** 用户在选择器里选定的起点：由外壳记录，刷新后仍然有效。 */
-    onPickBaseline: (baseline: string) => void;
-    /** 放弃当前起点，回到选择状态。 */
-    onClearBaseline: () => void;
     /** 任务范围的已审阅路径：与改动范围各自独立，互不作证。 */
     reviewed?: ReadonlySet<string>;
     reviewBusy?: string | null;
@@ -96,8 +93,10 @@
     onSelection?: (path: string | null) => void;
     /** 未审阅队列状态：与改动视图共用同一套命令与按钮。 */
     onReviewNav?: (nav: ReviewQueueState | null) => void;
-    paneHead?: Snippet;
-    paneResizer?: Snippet;
+    /** 历史顶部「任务净差异」行的摘要：读取状态、文件数与净行数。 */
+    onSummary?: (summary: TaskSummary) => void;
+    /** 是否显示在历史详情区：选中提交时隐藏但保活，读取与选择都不丢。 */
+    visible?: boolean;
   }
 
   let {
@@ -111,12 +110,9 @@
     onNotice,
     onFailure,
     onFileHistory,
-    onCommitHistory,
     onReadDocument,
     onFileNav,
     onHunkNav,
-    onPickBaseline,
-    onClearBaseline,
     reviewed = new Set<string>(),
     reviewBusy = null,
     reviewNote = null,
@@ -133,8 +129,8 @@
     onSnapshot,
     onSelection,
     onReviewNav,
-    paneHead,
-    paneResizer,
+    onSummary,
+    visible = true,
   }: Props = $props();
 
   /** 这些错误说明「任务范围不再成立」，要撤下结果而不是把它当成一次普通读取失败。 */
@@ -165,8 +161,6 @@
   let readSerial = 0;
   let reading = $state(false);
   let asTextFor = $state<string | null>(null);
-  /** 候选起点重读的触发键：范围失效后重新选择时递增。 */
-  let pickerKey = $state(0);
 
   function toKind(file: TaskFileChange): ChangeKind {
     switch (file.status) {
@@ -215,7 +209,7 @@
       ? rows.filter((row) => selectedSet.some((item) => sameSelection(item, row)))
       : selected ? rows.filter((row) => sameSelection(row, selected)) : [],
   );
-  let baselineLabel = $derived(task ? shortOid(task.baselineOid) : request?.baseline ?? "");
+  let baselineLabel = $derived(task ? shortOid(task.baselineOid) : request ? shortOid(request.baseline) : "");
   let headLabel = $derived(task ? shortOid(task.headOid) : "");
   let scopeKey = $derived(
     task ? `${task.worktree}|${task.baselineOid}|${task.headOid}|${task.rangeVersion}` : "",
@@ -248,6 +242,21 @@
 
   $effect(() => {
     onSelection?.(selected?.path ?? null);
+  });
+
+  /** 历史顶部那一行只需要一句话的摘要：状态、文件数与净行数，进度由外壳按审阅记录补上。 */
+  $effect(() => {
+    const current = task;
+    onSummary?.({
+      state: phase === "failed" ? "failed" : current ? (current.empty ? "empty" : "ready") : request ? "reading" : "none",
+      reading,
+      files: current?.filesTotal ?? 0,
+      additions: current?.additions ?? 0,
+      deletions: current?.deletions ?? 0,
+      commits: current?.commitCount ?? 0,
+      dirty: current?.dirty ?? false,
+      baseline: current ? shortOid(current.baselineOid) : request ? shortOid(request.baseline) : "",
+    });
   });
 
   function rowOf(path: string): FileRow | null {
@@ -495,151 +504,105 @@
   }
 
   function reload(): void {
-    const baseline = request?.baseline ?? null;
-    pickerKey += 1;
-    if (!baseline) {
-      void readTask(null);
-      return;
-    }
-    void readTask(baseline);
-  }
-
-  function reselect(): void {
-    pickerKey += 1;
-    onNotice?.("请重新选择这次任务的起点。");
-    // 起点由外壳保存：清掉它，任务页才会回到选择状态（刷新后也不会偷偷用回旧起点）。
-    onClearBaseline();
-  }
-
-  function openCommit(oid: string): void {
-    if (onCommitHistory) onCommitHistory(oid);
-    else onNotice?.("这里没有提交历史的入口。");
+    void readTask(request?.baseline ?? null);
   }
 </script>
 
-<div class="changes task-layout">
-  <section class="pane files" aria-label="任务范围与文件">
-    {@render paneHead?.()}
-    <div class="task-context" role="group" aria-label="任务范围">
-      <div class="task-context-row">
-        <span class="task-kicker">任务起点</span>
-        <span class="task-value task-oid" title={task?.baselineRef ?? request?.baseline ?? ""}>{baselineLabel || "未选择"}</span>
-        {#if request?.origin === "cliora"}
-          <span class="task-tag">来自 cliora 审查链接</span>
+<div class="task-detail" aria-label="任务净差异" style:display={visible ? null : "none"}>
+  <header class="commit-head task-head">
+    <div class="commit-head-main">
+      <h2 class="commit-title">任务净差异</h2>
+      <div class="commit-byline task-byline" role="group" aria-label="任务范围">
+        <span class="task-range" title={task ? `起点 ${task.baselineOid}\nHEAD ${task.headOid}` : (request?.baseline ?? "")}>
+          <span class="task-kicker">起点</span>
+          <code class="task-oid">{baselineLabel || "未选择"}</code>
+          <Icon name="arrow-right" size={12} />
+          {#if task}
+            <span class="task-value">{branchLabel(task.branch)}</span>
+            <code class="task-oid">{headLabel}</code>
+            {#if task.dirty}<span class="task-value">+ 未提交改动</span>{/if}
+          {:else}
+            <span class="task-value">工作区</span>
+          {/if}
+        </span>
+        {#if task}
+          <span class="task-stats">
+            <span class="task-value">{task.commitCount} 个提交</span>
+            <span class="task-value">{task.filesTotal} 个文件</span>
+            <LineCounts stat={{ additions: task.additions, deletions: task.deletions }} />
+          </span>
+          {#if task.untrackedFiles > 0}<span class="task-tag">未跟踪 {task.untrackedFiles} 个</span>{/if}
+          {#if task.conflicted}<span class="task-tag danger">有冲突</span>{/if}
+        {/if}
+        {#if request?.origin === "cliora"}<span class="task-tag">来自 cliora 审查链接</span>{/if}
+        <span class="read-only-chip" title="任务净差异只读：不会写入暂存区，也不改变提交范围">
+          <Icon name="eye" size={12} />只读
+        </span>
+        {#if reading}
+          <span class="task-reading" role="status"><span class="spinner" aria-hidden="true"></span>正在读取任务范围……</span>
         {/if}
       </div>
-      {#if task}
-        <div class="task-context-row">
-          <span class="task-kicker">当前</span>
-          <span class="task-value" title={task.branch.headOid ?? ""}>{branchLabel(task.branch)}</span>
-          <span class="task-value task-oid">{headLabel}</span>
-        </div>
-        <div class="task-context-row task-stats">
-          <span class="task-kicker">范围内</span>
-          <span class="task-value">{task.commitCount} 个提交</span>
-          <span class="task-value">{task.filesTotal} 个文件</span>
-          <LineCounts stat={{ additions: task.additions, deletions: task.deletions }} />
-          {#if task.dirty}
-            <span class="task-tag warn">含未提交改动</span>
-          {/if}
-          {#if task.untrackedFiles > 0}
-            <span class="task-value">未跟踪 {task.untrackedFiles} 个</span>
-          {/if}
-          {#if task.conflicted}
-            <span class="task-tag danger">有冲突</span>
-          {/if}
-        </div>
-      {/if}
-      {#if reading}
-        <div class="task-context-row" role="status"><span class="spinner" aria-hidden="true"></span>正在读取任务范围……</div>
-      {/if}
       {#if task?.filesTruncated}
         <p class="task-context-note" role="alert">{task.message}</p>
       {/if}
-      {#if task}
-        <!-- ready / empty 都要能换起点：起点是任务范围的一部分，选错了必须能当场改。 -->
-        <div class="task-context-row task-context-actions">
-          <button type="button" class="btn btn-ghost btn-sm" aria-label="换起点" title="放弃当前起点，回到起点选择状态" onclick={reselect}>
-            <Icon name="swap" size={13} /><span class="task-action-label">换起点</span>
-          </button>
-          {#if onOpenChanges}
-            <button
-              type="button"
-              class="btn btn-ghost btn-sm"
-              aria-label="回到改动视图提交"
-              title="提交只按真实暂存范围执行；任务净差异不会自动进入提交"
-              onclick={onOpenChanges}
-            >
-              <Icon name="commit" size={13} /><span class="task-action-label">回到提交区</span>
-            </button>
-          {/if}
-        </div>
-      {/if}
-      {#if task && !task.empty}
-        <!-- 任务净差异是只读的：这里说明它和「本次提交的暂存范围」不是同一件事（R4）。 -->
-        <p class="task-context-note">任务净差异只读：不会写入暂存区，也不改变提交范围。</p>
-      {/if}
     </div>
-
-    {#if task && !task.empty}
-      <!-- 真实暂存范围与任务范围分开：提交只读这一份，任务页的文件数不代表提交范围。 -->
-      <div class="task-stage-scope" aria-label="本次提交暂存范围">
-        <div class="task-context-row">
-          <span class="task-kicker">本次提交</span>
-          {#if stagedPaths.length === 0}
-            <span class="task-value">暂存区是空的：这次提交不会包含任何任务文件</span>
-          {:else}
-            <span class="task-value">{stagedPaths.length} 个已暂存文件</span>
-            <span class="task-tag">与任务范围分开</span>
-          {/if}
-        </div>
-        <p class="task-context-note">
-          提交只读取真实暂存范围；这里的 {reviewTotal} 个任务文件不会自动进入这次提交。
-        </p>
-        {#if stagedPaths.length > 0}
-          <ul class="task-stage-list">
-            {#each stagedPaths.slice(0, 6) as path (path)}
-              <li title={path}>{path}</li>
-            {/each}
-            {#if stagedPaths.length > 6}
-              <li class="more">另有 {stagedPaths.length - 6} 个已暂存文件</li>
-            {/if}
-          </ul>
-        {/if}
+    {#if task && onOpenChanges}
+      <div class="commit-facts">
+        <button
+          type="button"
+          class="btn btn-secondary btn-sm"
+          aria-label="回到改动视图提交"
+          title="提交只按真实暂存范围执行；任务净差异不会自动进入提交"
+          onclick={onOpenChanges}
+        >
+          <Icon name="commit" size={13} /><span>回到提交区</span>
+        </button>
       </div>
     {/if}
+  </header>
 
-    {#if phase === "no-baseline"}
-      {#if active}
-        <!-- 候选只在任务视图真的可见时读取：四个视图同时保活，隐藏的视图不发起仓库读取。 -->
-        <TaskBaselinePicker
-          {opened}
-          nextId={nextId}
-          reloadKey={pickerKey}
-          onPick={(baseline) => onPickBaseline(baseline)}
-          onFailure={() => {}}
-        />
-      {/if}
-    {:else if phase === "failed"}
-      <div class="task-failure" role="alert">
-        <strong>{invalidRange ? "任务范围已失效" : "读取任务范围失败"}</strong>
-        <p>{failure?.message ?? "无法读取这次任务，仓库没有被修改。"}</p>
-        <div class="task-failure-actions">
-          <button type="button" class="btn btn-secondary btn-sm" onclick={reload}>重新读取</button>
-          <button type="button" class="btn btn-ghost btn-sm" onclick={reselect}>重选起点</button>
-        </div>
-        <p class="task-context-note">这里不会显示上一次的结果：它不是这次任务当前的净差异。</p>
-      </div>
-    {:else if !task}
-      <div class="view-loading"><span class="spinner"></span></div>
-    {:else if task}
-      {#if task.empty}
-        <div class="empty task-empty">
-          <span class="empty-icon ok"><Icon name="check-circle" size={24} /></span>
-          <strong>这个任务没有净改动</strong>
-          <p>{task.message}</p>
-        </div>
+  {#if task && !task.empty}
+    <!-- 真实暂存范围与任务范围分开：提交只读这一份，任务文件数不代表提交范围（R4）。 -->
+    <div class="task-stage-scope" aria-label="本次提交暂存范围">
+      <span class="task-kicker">本次提交</span>
+      {#if stagedPaths.length === 0}
+        <span class="task-value">暂存区是空的：这次提交不会包含任何任务文件</span>
       {:else}
+        <span class="task-value" title={stagedPaths.join("\n")}>{stagedPaths.length} 个已暂存文件</span>
+        <span class="task-tag">与任务范围分开</span>
+      {/if}
+      <span class="task-context-note">提交只读取真实暂存范围，这里的 {reviewTotal} 个任务文件不会自动进入提交。</span>
+    </div>
+  {/if}
+
+  {#if phase === "failed"}
+    <div class="empty task-failure" role="alert">
+      <span class="empty-icon err"><Icon name="alert-circle" size={22} /></span>
+      <strong>{invalidRange ? "任务范围已失效" : "读取任务范围失败"}</strong>
+      <p>{failure?.message ?? "无法读取这次任务，仓库没有被修改。"}</p>
+      <p class="task-context-note">这里不会显示上一次的结果：它不是这次任务当前的净差异。</p>
+      <button type="button" class="btn btn-secondary btn-sm" onclick={reload}>重新读取</button>
+    </div>
+  {:else if phase === "no-baseline"}
+    <div class="empty" role="status">
+      <span class="empty-icon"><Icon name="layers" size={22} /></span>
+      <strong>没有任务范围</strong>
+      <p>cliora 审查链接没有携带起点，这里不会用 HEAD 或默认分支代替。</p>
+    </div>
+  {:else if !task}
+    <div class="empty" role="status" aria-busy="true">
+      <span class="empty-icon"><span class="spinner"></span></span>
+      <strong>正在读取任务范围</strong>
+    </div>
+  {:else if task.empty}
+    <div class="empty task-empty">
+      <span class="empty-icon ok"><Icon name="check-circle" size={24} /></span>
+      <strong>这个任务没有净改动</strong>
+      <p>{task.message}</p>
+    </div>
+  {:else}
+    <div class="task-split">
+      <aside class="task-files" aria-label="任务文件">
         <FileList
           variant="task"
           searchId="task-file-search"
@@ -666,134 +629,101 @@
           {onUnstageFile}
           {stageSideFor}
         />
-        <div class="task-commits" aria-label="范围内提交">
-          <div class="task-commits-head">
-            <strong>范围内历史</strong>
-            <span class="count">{task.commitCount}</span>
-            <span class="spacer"></span>
-            <span class="task-context-note">起点..HEAD</span>
-          </div>
-          {#if task.commits.length === 0}
-            <p class="task-context-note">起点之后没有提交，改动都在索引或工作区里。</p>
+      </aside>
+      {#if rows.length > 0}
+        <div class="task-diff">
+          {#if selected && onOpenUnstaged && !multiActive}
+            <!-- 聚合净差异不能直接应用：按块/行暂存要回到同一文件的真实未提交差异。 -->
+            <div class="task-diff-actions">
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm"
+                aria-label={`在未提交差异里按块/行暂存 ${selected.path}`}
+                title="任务净差异同时含已提交内容，不能直接做块/行补丁；转到这个文件的真实未提交差异再按块/行暂存"
+                onclick={() => selected && onOpenUnstaged?.(selected.path)}
+              >
+                <Icon name="file-diff" size={13} /><span>在未提交差异里按块/行暂存</span>
+              </button>
+            </div>
+          {/if}
+          {#if selectedRebuilt}
+            <!-- 工作区重建：起点里有旧版本，工作区里是未跟踪的同名文件。行数只统计重建后的内容，
+                 不暗示为纯新增；files 列表与这条单文件差异用的是同一份口径。 -->
+            <p class="task-diff-note" role="note">
+              这个路径在起点里有旧版本，当前是工作区重建：行数只统计重建后的文件，单文件差异按新增文件显示。
+            </p>
+          {/if}
+          {#if !multiActive && diff?.truncated}
+            <!-- 截断就如实说截断：不把只读到的一部分当成完整净差异（R7）。 -->
+            <p class="task-diff-note" role="alert">{diff.summary || "这条净差异超过预览上限，只读到一部分。"}</p>
+          {/if}
+          {#if multiActive}
+            <MultiFileDiff
+              {active}
+              {opened}
+              rows={selectedRows}
+              focus={selected}
+              {nav}
+              disabled={false}
+              readOnly
+              loadDiff={taskLoader}
+              scopeKey={scopeKey}
+              {fullFile}
+              fullContext={FULL_FILE_CONTEXT}
+              stageCount={0}
+              unstageCount={0}
+              discardCount={0}
+              conflictCount={0}
+              {onOpenUnstaged}
+              {nextId}
+              onFocus={focusBlock}
+              onStale={onGeneration}
+              onStageHunk={() => {}}
+              onFullFile={onFullFile}
+              onFileHistory={(path) => onFileHistory?.(path)}
+              onReadDocument={onReadDocument}
+              onStage={() => {}}
+              onUnstage={() => {}}
+              onDiscard={() => {}}
+              onClear={() => selected && select(selected)}
+            />
           {:else}
-            <ul class="task-commit-list">
-              {#each task.commits as commit (commit.oid)}
-                <li>
-                  <button
-                    type="button"
-                    class="task-commit"
-                    title={`${commit.authorName} · ${formatAuthoredAt(commit.authoredAt)}`}
-                    onclick={() => openCommit(commit.oid)}
-                  >
-                    <span class="oid">{shortOid(commit.oid)}</span>
-                    <span class="summary">{commit.summary}</span>
-                  </button>
-                </li>
-              {/each}
-            </ul>
-            {#if task.commitsTruncated}
-              <p class="task-context-note">只列出最近的 {task.commits.length} 个提交，共 {task.commitCount} 个。</p>
-            {/if}
+            <DiffView
+              selection={selected}
+              {diff}
+              error={diffError}
+              loading={diffLoading}
+              disabled={false}
+              readOnly
+              readOnlyLabel="任务净差异"
+              reviewed={selected ? reviewed.has(selected.path) : false}
+              reviewBusy={selected ? reviewBusy === selected.path : false}
+              onToggleReview={selected && onToggleReview ? () => onToggleReview(selected!.path) : undefined}
+              onStageHunk={() => {}}
+              onLoadMore={() => void loadMoreDiff()}
+              onFileHistory={onFileHistory}
+              onReadDocument={onReadDocument}
+              {fullFile}
+              onFullFile={onFullFile}
+              asText={asTextFor !== null && asTextFor === selected?.path}
+              onViewAsText={(next) => {
+                asTextFor = next && selected ? selected.path : null;
+                void loadSelectedDiff();
+              }}
+              fileNav={nav}
+              fileCount={rows.length}
+              onRetry={() => void loadSelectedDiff()}
+              onHunkNav={onHunkNav}
+            />
           {/if}
         </div>
+      {:else}
+        <div class="empty task-placeholder" role="status">
+          <span class="empty-icon"><Icon name="search" size={22} /></span>
+          <strong>没有匹配“{query.trim()}”的任务文件</strong>
+          <button type="button" class="btn btn-ghost btn-sm" onclick={() => (query = "")}>清除筛选</button>
+        </div>
       {/if}
-    {/if}
-  </section>
-  {@render paneResizer?.()}
-  {#if task && rows.length > 0}
-    <div class="task-diff">
-    {#if selected && onOpenUnstaged && !multiActive}
-      <!-- 聚合净差异不能直接应用：按块/行暂存要回到同一文件的真实未提交差异。 -->
-      <div class="task-diff-actions">
-        <button
-          type="button"
-          class="btn btn-ghost btn-sm"
-          aria-label={`在未提交差异里按块/行暂存 ${selected.path}`}
-          title="任务净差异同时含已提交内容，不能直接做块/行补丁；转到这个文件的真实未提交差异再按块/行暂存"
-          onclick={() => selected && onOpenUnstaged?.(selected.path)}
-        >
-          <Icon name="file-diff" size={13} /><span>在未提交差异里按块/行暂存</span>
-        </button>
-      </div>
-    {/if}
-    {#if selectedRebuilt}
-      <!-- 工作区重建：起点里有旧版本，工作区里是未跟踪的同名文件。行数只统计重建后的内容，
-           不暗示为纯新增；files 列表与这条单文件差异用的是同一份口径。 -->
-      <p class="task-diff-note" role="note">
-        这个路径在起点里有旧版本，当前是工作区重建：行数只统计重建后的文件，单文件差异按新增文件显示。
-      </p>
-    {/if}
-    {#if !multiActive && diff?.truncated}
-      <!-- 截断就如实说截断：不把只读到的一部分当成完整净差异（R7）。 -->
-      <p class="task-diff-note" role="alert">{diff.summary || "这条净差异超过预览上限，只读到一部分。"}</p>
-    {/if}
-    {#if multiActive}
-      <MultiFileDiff
-        {active}
-        {opened}
-        rows={selectedRows}
-        focus={selected}
-        {nav}
-        disabled={false}
-        readOnly
-        loadDiff={taskLoader}
-        scopeKey={scopeKey}
-        {fullFile}
-        fullContext={FULL_FILE_CONTEXT}
-        stageCount={0}
-        unstageCount={0}
-        discardCount={0}
-        conflictCount={0}
-        {onOpenUnstaged}
-        {nextId}
-        onFocus={focusBlock}
-        onStale={onGeneration}
-        onStageHunk={() => {}}
-        onFullFile={onFullFile}
-        onFileHistory={(path) => onFileHistory?.(path)}
-        onReadDocument={onReadDocument}
-        onStage={() => {}}
-        onUnstage={() => {}}
-        onDiscard={() => {}}
-        onClear={() => selected && select(selected)}
-      />
-    {:else}
-      <DiffView
-        selection={selected}
-        {diff}
-        error={diffError}
-        loading={diffLoading}
-        disabled={false}
-        readOnly
-        readOnlyLabel="任务净差异"
-        reviewed={selected ? reviewed.has(selected.path) : false}
-        reviewBusy={selected ? reviewBusy === selected.path : false}
-        onToggleReview={selected && onToggleReview ? () => onToggleReview(selected!.path) : undefined}
-        onStageHunk={() => {}}
-        onLoadMore={() => void loadMoreDiff()}
-        onFileHistory={onFileHistory}
-        onReadDocument={onReadDocument}
-        {fullFile}
-        onFullFile={onFullFile}
-        asText={asTextFor !== null && asTextFor === selected?.path}
-        onViewAsText={(next) => {
-          asTextFor = next && selected ? selected.path : null;
-          void loadSelectedDiff();
-        }}
-        fileNav={nav}
-        fileCount={rows.length}
-        onRetry={() => void loadSelectedDiff()}
-        onHunkNav={onHunkNav}
-      />
-    {/if}
     </div>
-  {:else if task && !task.empty}
-    <section class="diff dense task-placeholder" aria-label="任务净差异">
-      <p>没有匹配“{query.trim()}”的任务文件。</p>
-    </section>
-  {:else}
-    <section class="diff dense task-placeholder" aria-label="任务净差异">
-      <p>选择一个任务文件，查看它从起点到工作区的最终净差异。</p>
-    </section>
   {/if}
 </div>

@@ -1,8 +1,8 @@
 /**
- * 任务审阅（T2）：起点选择、范围上下文、净文件队列、只读净差异、范围内历史与失败恢复。
+ * 任务净差异（cliora 审查）：范围上下文、净文件队列、只读净差异与失败恢复。
  *
- * 组件级用例直接渲染 TaskReview，验证它自己的状态机；App 级用例验证外壳接线
- * （⌘4 / 视图切换 / cliora 之外的普通仓库入口）与「只读、不写 Git」的边界。
+ * 组件级用例直接渲染 TaskReview，验证它自己的状态机；App 级用例验证外壳接线：
+ * 任务范围只来自 cliora 链接，没有独立视图，普通仓库里不出现任务入口。
  * 真实 Git 的净差异语义由 Rust 侧夹具覆盖（src-tauri/src/git/task.rs）。
  */
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
@@ -252,7 +252,7 @@ function reviewProps(overrides: Record<string, unknown> = {}) {
   return {
     opened,
     active: true,
-    request: { baseline: "main~2", origin: "manual" as const, nonce: 1 },
+    request: { baseline: "main~2", origin: "cliora" as const, nonce: 1 },
     nextId: () => 7,
     fullFile: false,
     onFullFile: vi.fn(),
@@ -260,9 +260,7 @@ function reviewProps(overrides: Record<string, unknown> = {}) {
     onNotice: vi.fn(),
     onFailure: vi.fn(),
     onFileHistory: vi.fn(),
-    onCommitHistory: vi.fn(),
-    onPickBaseline: vi.fn(),
-    onClearBaseline: vi.fn(),
+    onSummary: vi.fn(),
     onFileNav: vi.fn(),
     onHunkNav: vi.fn(),
     reviewed: new Set<string>(),
@@ -283,13 +281,15 @@ function reviewProps(overrides: Record<string, unknown> = {}) {
 }
 
 describe("任务审阅组件", () => {
-  it("没有起点时只给选择器，不读取任务，也不用 HEAD 补缺", async () => {
-    render(TaskReview, { props: reviewProps({ request: null }) });
-    await screen.findByText(/任务起点必须由你明确选择/);
+  it("没有起点时不建立任务范围，也不用 HEAD 补缺", async () => {
+    const onSummary = vi.fn();
+    render(TaskReview, { props: reviewProps({ request: null, onSummary }) });
+    await screen.findByText("没有任务范围");
+    expect(screen.getByText(/不会用 HEAD 或默认分支代替/)).toBeTruthy();
     expect(mocks.api.taskReview).not.toHaveBeenCalled();
     expect(document.querySelector(".file-list")).toBeNull();
-    // 候选要用户自己点：没有任何一项被预选成起点。
-    expect(document.querySelector('.task-baseline-item[aria-pressed="true"]')).toBeNull();
+    expect(document.querySelector(".task-baseline")).toBeNull();
+    expect(onSummary).toHaveBeenLastCalledWith(expect.objectContaining({ state: "none" }));
   });
 
   it("有起点时展示范围上下文、净文件队列与提交统计", async () => {
@@ -300,8 +300,10 @@ describe("任务审阅组件", () => {
     expect(context.textContent).toContain("main");
     expect(context.textContent).toContain("2 个提交");
     expect(context.textContent).toContain("3 个文件");
-    expect(context.textContent).toContain("含未提交改动");
+    expect(context.textContent).toContain("+ 未提交改动");
     expect(context.textContent).toContain("未跟踪 1 个");
+    expect(context.textContent).toContain("来自 cliora 审查链接");
+    expect(screen.getByRole("heading", { name: "任务净差异" })).toBeTruthy();
     // 文件队列仍是同一套列表：表头改称任务文件，并且没有暂存入口。
     const list = await screen.findByRole("listbox", { name: "任务文件" });
     expect(within(list).getByText("任务文件")).toBeTruthy();
@@ -338,18 +340,21 @@ describe("任务审阅组件", () => {
     expect(mocks.api.loadTaskDiff).not.toHaveBeenCalled();
   });
 
-  it("范围失效时撤下结果并给出重新读取与重选起点", async () => {
-    const onClearBaseline = vi.fn();
-    const { rerender } = render(TaskReview, { props: reviewProps({ onClearBaseline }) });
+  it("范围失效时撤下结果并给出重新读取，不提供重选起点", async () => {
+    const onSummary = vi.fn();
+    const { rerender } = render(TaskReview, { props: reviewProps({ onSummary }) });
     await screen.findByRole("listbox", { name: "任务文件" });
     mocks.api.taskReview.mockRejectedValue({ code: "task_head_changed", message: "当前 HEAD 已经不是这个任务快照的 HEAD。" });
-    await rerender(reviewProps({ onClearBaseline, request: { baseline: "main~2", origin: "manual" as const, nonce: 2 } }));
+    await rerender(reviewProps({ onSummary, request: { baseline: "main~2", origin: "cliora" as const, nonce: 2 } }));
     await screen.findByText("任务范围已失效");
     // 旧结果被撤下：不能继续当成当前任务。
     expect(document.querySelector(".file-list")).toBeNull();
     expect(screen.queryByRole("listbox", { name: "任务文件" })).toBeNull();
-    await fireEvent.click(screen.getByRole("button", { name: "重选起点" }));
-    expect(onClearBaseline).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "重选起点" })).toBeNull();
+    expect(onSummary).toHaveBeenLastCalledWith(expect.objectContaining({ state: "failed" }));
+    mocks.api.taskReview.mockResolvedValue(taskFixture());
+    await fireEvent.click(screen.getByRole("button", { name: "重新读取" }));
+    await screen.findByRole("listbox", { name: "任务文件" });
   });
 
   it("旧响应不覆盖新选择", async () => {
@@ -360,7 +365,7 @@ describe("任务审阅组件", () => {
       .mockImplementationOnce(() => new Promise<TaskSnapshot>((resolve) => { finishSecond = resolve; }));
     const { rerender } = render(TaskReview, { props: reviewProps() });
     await waitFor(() => expect(mocks.api.taskReview).toHaveBeenCalledTimes(1));
-    await rerender(reviewProps({ request: { baseline: "feature/task", origin: "manual" as const, nonce: 2 } }));
+    await rerender(reviewProps({ request: { baseline: "feature/task", origin: "cliora" as const, nonce: 2 } }));
     await waitFor(() => expect(mocks.api.taskReview).toHaveBeenCalledTimes(2));
     finishSecond(taskFixture({ baselineRef: "feature/task", commitCount: 5, commits: [], message: "第二个选择" }));
     await waitFor(() => expect(document.body.textContent).toContain("5 个提交"));
@@ -370,13 +375,27 @@ describe("任务审阅组件", () => {
     expect(document.body.textContent).not.toContain("1 个提交");
   });
 
-  it("范围内提交可以进入提交历史", async () => {
-    const onCommitHistory = vi.fn();
-    render(TaskReview, { props: reviewProps({ onCommitHistory }) });
-    const history = await screen.findByLabelText("范围内提交");
-    expect(history.textContent).toContain("第二个提交");
-    await fireEvent.click(within(history).getByRole("button", { name: /第二个提交/ }));
-    expect(onCommitHistory).toHaveBeenCalledWith(commits[0].oid);
+  it("把读取状态、文件数与净行数上报给历史顶部那一行", async () => {
+    const onSummary = vi.fn();
+    render(TaskReview, { props: reviewProps({ onSummary }) });
+    expect(onSummary).toHaveBeenCalledWith(expect.objectContaining({ state: "reading", baseline: "main~2" }));
+    await screen.findByRole("listbox", { name: "任务文件" });
+    expect(onSummary).toHaveBeenLastCalledWith(
+      expect.objectContaining({ state: "ready", files: 3, additions: 9, deletions: 8, commits: 2, dirty: true, baseline: BASE.slice(0, 7) }),
+    );
+    // 范围内提交就是历史列表本身：任务详情里不再重复列一遍。
+    expect(screen.queryByLabelText("范围内提交")).toBeNull();
+  });
+
+  it("隐藏时保活：不卸载文件队列，也不清掉选择", async () => {
+    const { rerender } = render(TaskReview, { props: reviewProps() });
+    const list = await screen.findByRole("listbox", { name: "任务文件" });
+    await rerender(reviewProps({ visible: false }));
+    expect(document.querySelector<HTMLElement>(".task-detail")!.style.display).toBe("none");
+    expect(list.isConnected).toBe(true);
+    await rerender(reviewProps({ visible: true }));
+    expect(document.querySelector<HTMLElement>(".task-detail")!.style.display).toBe("");
+    expect(mocks.api.taskReview).toHaveBeenCalledTimes(1);
   });
 
   it("隐藏的任务视图不读取，回到任务页才按最新状态读取", async () => {
@@ -491,63 +510,24 @@ function activeView(): string | null {
   );
 }
 
-describe("任务视图接线", () => {
-  it("⌘4 进入任务视图，没有起点时要求选择，全程不写 Git", async () => {
+describe("任务范围的外壳接线", () => {
+  it("普通仓库没有任务入口：切换条只有三个视图，⌘4 不切视图，历史里没有任务行", async () => {
     render(App);
     await openRepo();
     expect(activeView()).toBe("changes");
+    const nav = document.querySelector('.workbench-view[data-active="true"] nav[aria-label="视图"]')!;
+    expect([...nav.querySelectorAll("button")].map((button) => button.getAttribute("data-view"))).toEqual(["changes", "history", "files"]);
     await press("4");
-    await waitFor(() => expect(activeView()).toBe("task"));
-    await screen.findByText(/任务起点必须由你明确选择/);
+    await tick();
+    expect(activeView()).toBe("changes");
+    await press("2");
+    await waitFor(() => expect(activeView()).toBe("history"));
+    await waitFor(() => expect(mocks.api.historyPage).toHaveBeenCalled(), { timeout: 8000 });
+    await waitFor(() => expect(document.querySelector('.workbench-view[data-active="true"] .history-row')).toBeTruthy(), { timeout: 8000 });
+    expect(screen.queryByRole("button", { name: /任务净差异/ })).toBeNull();
     expect(mocks.api.taskReview).not.toHaveBeenCalled();
     expect(mocks.created.get("stageFiles")?.mock.calls.length ?? 0).toBe(0);
     expect(mocks.created.get("commitChanges")?.mock.calls.length ?? 0).toBe(0);
-  });
-
-  it("从范围内的提交进入提交历史，不切换分支也不写工作区", async () => {
-    render(App);
-    await openRepo();
-    await press("4");
-    await waitFor(() => expect(activeView()).toBe("task"));
-    const picker = await screen.findByLabelText("选择任务起点");
-    await fireEvent.click(await within(picker).findByRole("button", { name: /feature\/task/ }));
-    const history = await screen.findByLabelText("范围内提交");
-    await waitFor(() => expect(within(history).getByRole("button", { name: /第二个提交/ })).toBeTruthy());
-    await fireEvent.click(within(history).getByRole("button", { name: /第二个提交/ }));
-    await waitFor(() => expect(activeView()).toBe("history"));
-    // 历史面板是懒加载的：等它真的带着这个提交标识发起读取。
-    await waitFor(
-      () =>
-        expect(mocks.api.historyPage).toHaveBeenCalledWith(
-          WORKTREE,
-          commits[0].oid,
-          0,
-          expect.any(Number),
-          expect.any(Number),
-        ),
-      { timeout: 8000 },
-    );
-    // 用完整提交标识进入历史：按哈希筛选，而不是切到那条提交所在的分支。
-    expect(mocks.created.get("switchBranch")?.mock.calls.length ?? 0).toBe(0);
-    expect(mocks.created.get("stageFiles")?.mock.calls.length ?? 0).toBe(0);
-  });
-
-  it("选定分支起点后读取任务范围，并让改动视图的选择与差异保持可用", async () => {
-    render(App);
-    await openRepo();
-    await press("4");
-    await waitFor(() => expect(activeView()).toBe("task"));
-    const picker = await screen.findByLabelText("选择任务起点");
-    await waitFor(() => expect(within(picker).getByRole("button", { name: /feature\/task/ })).toBeTruthy());
-    await fireEvent.click(within(picker).getByRole("button", { name: /feature\/task/ }));
-    await waitFor(() => expect(mocks.api.taskReview).toHaveBeenCalledWith(WORKTREE, "feature/task", 4, expect.any(Number)));
-    await screen.findByRole("listbox", { name: "任务文件" });
-    // 返回改动视图仍走原来的读取，任务范围不改变真实暂存内容。
-    mocks.api.loadDiff.mockClear();
-    await press("1");
-    await waitFor(() => expect(activeView()).toBe("changes"));
-    await waitFor(() => expect(mocks.api.loadDiff).toHaveBeenCalled());
-    expect(mocks.created.get("stageFiles")?.mock.calls.length ?? 0).toBe(0);
   });
 });
 /* ------------------------------------------------------------------ *
@@ -555,23 +535,11 @@ describe("任务视图接线", () => {
  * 组件级用例只验自己的状态与回调；真实 Git 语义仍由 Rust 夹具覆盖。
  * ------------------------------------------------------------------ */
 describe("任务审阅的队列与写入边界（T3）", () => {
-  it("ready 状态提供常驻「换起点」，复用 clearTaskBaseline", async () => {
-    const onClearBaseline = vi.fn();
-    render(TaskReview, { props: reviewProps({ onClearBaseline }) });
+  it("没有「换起点」入口：起点只来自 cliora 链接", async () => {
+    render(TaskReview, { props: reviewProps() });
     await screen.findByRole("listbox", { name: "任务文件" });
-    await fireEvent.click(screen.getByRole("button", { name: "换起点" }));
-    expect(onClearBaseline).toHaveBeenCalledTimes(1);
-  });
-
-  it("空任务同样能换起点，不需要先清掉空状态", async () => {
-    mocks.api.taskReview.mockResolvedValue(
-      taskFixture({ files: [], filesTotal: 0, additions: 0, deletions: 0, empty: true, dirty: false, untrackedFiles: 0, commitCount: 0, commits: [], message: "读取成功：起点之后没有提交，也没有未提交改动。" }),
-    );
-    const onClearBaseline = vi.fn();
-    render(TaskReview, { props: reviewProps({ onClearBaseline }) });
-    await screen.findByText("这个任务没有净改动");
-    await fireEvent.click(screen.getByRole("button", { name: "换起点" }));
-    expect(onClearBaseline).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "换起点" })).toBeNull();
+    expect(screen.getByRole("button", { name: "回到改动视图提交" })).toBeTruthy();
   });
 
   it("真实暂存范围与任务范围分开显示，空暂存区说清这次提交不含任务文件", async () => {
@@ -579,8 +547,9 @@ describe("任务审阅的队列与写入边界（T3）", () => {
     const scope = await screen.findByLabelText("本次提交暂存范围");
     expect(scope.textContent).toContain("2 个已暂存文件");
     expect(scope.textContent).toContain("与任务范围分开");
-    expect(scope.textContent).toContain("这里的 3 个任务文件不会自动进入这次提交");
-    expect(document.body.textContent).toContain("任务净差异只读");
+    expect(scope.textContent).toContain("这里的 3 个任务文件不会自动进入提交");
+    expect(scope.querySelector('[title]')?.getAttribute("title")).toBe("src/app.css\nREADME.md");
+    expect(document.querySelector(".read-only-chip")?.getAttribute("title")).toContain("任务净差异只读");
 
     await rerender(reviewProps({ stagedPaths: [] }));
     await waitFor(() =>

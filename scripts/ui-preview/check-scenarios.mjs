@@ -433,48 +433,33 @@ const SCENARIOS = [
     detail: "(document.querySelector('[data-push-error] [role=status]')?.textContent || '').trim().slice(0, 80)",
   },
   {
-    // T5 键鼠闭环（真实 DOM 键鼠，不是 element.click()）：打开任务 → 连续审阅 → 空格暂存 → 提交 → 回到来源。
-    name: "任务：键盘打开任务、连续审阅与空格整文件暂存",
-    url: "/",
+    // T5 键鼠闭环（真实 DOM 键鼠，不是 element.click()）：cliora 跳转 → 历史里的任务净差异 → 连续审阅 → 空格暂存。
+    name: "任务：cliora 跳转进入历史的任务净差异，连续审阅与空格整文件暂存",
+    url: "/?cliora=1",
     steps: async (drv) => {
-      await drv.until("Boolean(document.querySelector('.welcome-recent button'))", "起始页");
-      await drv.click(".welcome-recent button");
-      await drv.until("Boolean(document.querySelector('.view-switcher'))", "工作区");
-      // Ctrl+4 切到任务视图（快捷键与导航同源），起点必须由用户显式选择。
-      await drv.press("4", ["Ctrl"]);
-      await drv.until("Boolean(document.querySelector('.task-baseline-item'))", "任务起点候选");
-      // 候选项在读取分支/提交期间是 disabled 的：点它之前先等它真的可以点。
-      await drv.until("Boolean(document.querySelector('.task-baseline-item:not([disabled])'))", "起点可点击");
-      await drv.clickUntil(".task-baseline-item:not([disabled])", "!document.querySelector('.task-baseline')", "任务范围开始读取");
-      await drv.until("document.querySelectorAll('.workbench-view[data-active=true] .file-list .file-row').length > 0", "任务文件队列");
-      await drv.click('.workbench-view[data-active="true"] .file-list .file-row');
+      await drv.until("Boolean(document.querySelector('.history-task-row[aria-pressed=true]'))", "cliora 跳转后历史选中任务净差异");
+      await drv.until("document.querySelectorAll('.task-detail .file-list .file-row').length > 0", "任务文件队列");
+      await drv.click('.task-detail .file-list .file-row');
       // Alt+M 标记已审阅；Alt+Shift+→ 走下一个未审阅（与工具条、命令面板同一份判定）。
       await drv.press("m", ["Alt"]);
       await drv.until("document.querySelectorAll('.review-toggle.on').length >= 1", "已审阅标记");
       await drv.press("ArrowRight", ["Alt", "Shift"]);
       // 空格只写真实索引：任务净差异本身不被暂存。
       await drv.press(" ", []);
-      await drv.until("document.querySelectorAll('.workbench-view[data-active=true] .file-list .file-row').length > 0", "暂存后任务队列仍在");
+      await drv.until("document.querySelectorAll('.task-detail .file-list .file-row').length > 0", "暂存后任务队列仍在");
     },
     check:
-      "document.querySelectorAll('.review-toggle.on').length >= 1 && Boolean(document.querySelector('.task-context')) && !document.querySelector('.task-context [role=alert]')",
+      "document.querySelectorAll('.review-toggle.on').length >= 1 && Boolean(document.querySelector('.task-byline')) && document.querySelectorAll('.workbench-view[data-active=true] .view-switcher button').length === 3",
     detail:
-      "(document.querySelector('.task-context')?.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80)",
+      "(document.querySelector('.history-task-row')?.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80)",
   },
   {
-    name: "任务：键盘提交真实暂存并回到提交区",
-    url: "/",
+    name: "任务：从任务净差异回到提交区提交真实暂存",
+    url: "/?cliora=1",
     steps: async (drv) => {
-      await drv.until("Boolean(document.querySelector('.welcome-recent button'))", "起始页");
-      await drv.click(".welcome-recent button");
-      await drv.until("Boolean(document.querySelector('.view-switcher'))", "工作区");
-      await drv.press("4", ["Ctrl"]);
-      await drv.until("Boolean(document.querySelector('.task-baseline-item'))", "任务起点候选");
-      // 候选项在读取分支/提交期间是 disabled 的：点它之前先等它真的可以点。
-      await drv.until("Boolean(document.querySelector('.task-baseline-item:not([disabled])'))", "起点可点击");
-      await drv.clickUntil(".task-baseline-item:not([disabled])", "!document.querySelector('.task-baseline')", "任务范围开始读取");
-      await drv.until("document.querySelectorAll('.workbench-view[data-active=true] .file-list .file-row').length > 0", "任务文件队列");
-      await drv.click('.workbench-view[data-active="true"] .file-list .file-row');
+      await drv.until("Boolean(document.querySelector('.history-task-row[aria-pressed=true]'))", "cliora 跳转后历史选中任务净差异");
+      await drv.until("document.querySelectorAll('.task-detail .file-list .file-row').length > 0", "任务文件队列");
+      await drv.click('.task-detail .file-list .file-row');
       await drv.press(" ", []);
       // 暂存后任务范围会按新 generation 重读，入口在重读期间可能暂时不在，等它回来再点。
       await drv.until("Boolean(document.querySelector('[aria-label=\"回到改动视图提交\"]'))", "回到提交区入口");
@@ -492,35 +477,29 @@ const SCENARIOS = [
       "document.querySelector('.composer-scope')?.textContent?.trim() || ''",
   },
   {
-    // 用户报告的缺陷：旧批次的两个在途详情永不返回时，换一批选择也必须立刻读到并结束加载。
-    name: "历史：旧批次请求挂住时换选择仍能读到文件并结束加载",
-    url: "/?history=hang",
+    // 多选只看最终结果：两端之间一份净文件清单和一份差异，不按提交堆叠。
+    name: "历史：多选提交只显示合起来的最终结果",
+    url: "/",
     steps: async (drv) => {
       await drv.until("Boolean(document.querySelector('.welcome-recent button'))", "起始页");
       await drv.click(".welcome-recent button");
       await drv.until("Boolean(document.querySelector('.view-switcher'))", "工作区");
       await drv.click('[data-view="history"]');
       await drv.until("document.querySelectorAll('.history-list [role=option]').length > 0", "提交列表");
-      // 第一笔：选中最新的 4 个提交，其中两个详情永不返回。
       await drv.clickNth(".history-list [role=option]", 0);
       await drv.clickNth(".history-list [role=option]", 3, ["Shift"]);
-      await drv.until("Boolean(document.body.textContent.includes('已选择 4 个提交'))", "第一批多选");
-      // 换到更早的 4 个提交：新批次必须开始读取，不能排在被挂住的旧请求后面。
-      await drv.clickNth(".history-list [role=option]", 4);
-      await drv.clickNth(".history-list [role=option]", 7, ["Shift"]);
-      await drv.until("Boolean(document.body.textContent.includes('已选择 4 个提交'))", "第二批多选");
-      await drv.until("!document.body.textContent.includes('正在读取所选提交的详情')", "第二批加载结束");
-      await drv.until("document.querySelectorAll('.commit-files .file-row').length > 0", "第二批文件队列");
-      await drv.until("document.querySelectorAll('.union-block').length > 0", "第二批差异块");
+      await drv.until("Boolean(document.body.textContent.includes('已选择 4 个提交 · 最终结果'))", "多选最终结果");
+      await drv.until("document.querySelectorAll('.commit-files .file-row').length > 0", "净文件清单");
+      await drv.until("Boolean(document.querySelector('.commit-diff .diff-toolbar'))", "单一差异视图");
     },
     check:
-      "!document.body.textContent.includes('正在读取所选提交的详情') && document.querySelectorAll('.commit-files .file-row').length > 0 && document.querySelectorAll('.union-block').length > 0",
+      "document.querySelectorAll('.commit-files .file-row').length > 0 && document.querySelectorAll('.commit-diff .diff-toolbar').length === 1 && !document.querySelector('.union-block')",
     detail:
-      "document.querySelectorAll('.commit-files .file-row').length + ' 个文件；' + document.querySelectorAll('.union-block').length + ' 块差异'",
+      "document.querySelectorAll('.commit-files .file-row').length + ' 个文件；' + (document.querySelector('.union-head .oid-chip')?.textContent || '').trim()",
   },
   {
-    name: "历史：多选详情全部失败时说明原因并给出重新读取",
-    url: "/?history=detail-error",
+    name: "历史：最终结果读取失败时说明原因并给出重新读取",
+    url: "/?history=compare-error",
     steps: async (drv) => {
       await drv.until("Boolean(document.querySelector('.welcome-recent button'))", "起始页");
       await drv.click(".welcome-recent button");
@@ -530,30 +509,22 @@ const SCENARIOS = [
       await drv.clickNth(".history-list [role=option]", 0);
       await drv.clickNth(".history-list [role=option]", 2, ["Shift"]);
       await drv.until("Boolean(document.body.textContent.includes('已选择 3 个提交'))", "多选");
-      await drv.until("!document.body.textContent.includes('正在读取所选提交的详情')", "加载结束");
-      await drv.until("Boolean([...document.querySelectorAll('button')].find((b) => b.textContent.includes('重新读取所选提交')))", "重新读取入口");
+      await drv.until("Boolean(document.body.textContent.includes('最终变更没有读取成功'))", "失败说明");
     },
     check:
-      "Boolean(document.querySelector('.infobar.error')) && Boolean([...document.querySelectorAll('button')].find((b) => b.textContent.includes('重新读取所选提交'))) && !document.body.textContent.includes('这些提交没有文件变化')",
+      "Boolean([...document.querySelectorAll('.commit-files button')].find((b) => b.textContent.includes('重新读取'))) && !document.body.textContent.includes('这些提交合起来没有文件变化')",
     detail:
-      "(document.querySelector('.infobar.error')?.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80)",
+      "(document.querySelector('.commit-files-empty')?.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80)",
   },
   {
-    name: "任务：起点不可用时就地说明，仍能换起点",
-    url: "/?task=error",
+    name: "任务：起点不可用时就地说明，可重新读取",
+    url: "/?cliora=1&task=error",
     steps: async (drv) => {
-      await drv.until("Boolean(document.querySelector('.welcome-recent button'))", "起始页");
-      await drv.click(".welcome-recent button");
-      await drv.until("Boolean(document.querySelector('.view-switcher'))", "工作区");
-      await drv.press("4", ["Ctrl"]);
-      await drv.until("Boolean(document.querySelector('.task-baseline-item'))", "任务起点候选");
-      // 候选项在读取分支/提交期间是 disabled 的：点它之前先等它真的可以点。
-      await drv.until("Boolean(document.querySelector('.task-baseline-item:not([disabled])'))", "起点可点击");
-      await drv.clickUntil(".task-baseline-item:not([disabled])", "!document.querySelector('.task-baseline')", "任务范围开始读取");
+      await drv.until("Boolean(document.querySelector('.history-task-row'))", "任务净差异行");
       await drv.until("Boolean(document.querySelector('.task-failure[role=alert]'))", "任务读取失败说明");
     },
     check:
-      "(document.querySelector('.task-failure[role=alert]')?.innerText || '').includes('读取任务范围失败') && Boolean([...document.querySelectorAll('.task-failure button')].find((b) => b.textContent.includes('重选起点')))",
+      "(document.querySelector('.task-failure[role=alert]')?.innerText || '').includes('读取任务范围失败') && Boolean([...document.querySelectorAll('.task-failure button')].find((b) => b.textContent.includes('重新读取'))) && (document.querySelector('.history-task-row')?.textContent || '').includes('读取失败')",
     detail:
       "(document.querySelector('.task-failure')?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 120)",
   },

@@ -67,6 +67,7 @@
     PullIntegration,
     TaskModal,
     TaskRequest,
+    TaskSummary,
     Theme,
     WorkspaceView,
   } from "./lib/types";
@@ -251,6 +252,10 @@
    * 不会退回当前 HEAD、默认分支或上一次用过的起点（R1）。
    */
   let taskRequest = $state.raw<TaskRequest | null>(null);
+  /** 历史详情区正在显示「任务净差异」：审阅、整文件暂存等命令此时作用在任务范围上。 */
+  let taskFocus = $state(false);
+  /** 任务净差异的摘要：历史顶部那一行显示它。 */
+  let taskSummary = $state.raw<TaskSummary | null>(null);
   let taskRequestNonce = 0;
   /** 任务视图自己的文件导航与差异块导航，与改动、历史各留一份。 */
   let taskNav = $state.raw<FileNavState | null>(null);
@@ -388,15 +393,17 @@
   let reviewCounts = $derived(
     reviewSummaryIn(changesTarget ?? { worktree: "", scope: CHANGES_SCOPE }, opened ? reviewPaths(opened.snapshot.files) : []),
   );
-  let activeReviewedSet = $derived(workspaceView === "task" ? taskReviewedSet : reviewedSet);
+  /** 任务净差异是否就是当前审阅对象：只在历史视图里选中顶部那一行时成立。 */
+  let inTask = $derived(workspaceView === "history" && taskFocus && taskRequest !== null);
+  let activeReviewedSet = $derived(inTask ? taskReviewedSet : reviewedSet);
   /** 命令与按钮作用的文件：任务视图用任务页自己的选择，改动视图用改动列表的选择。 */
-  let activeSelectedPath = $derived(workspaceView === "task" ? taskSelectedPath : (selected?.path ?? null));
+  let activeSelectedPath = $derived(inTask ? taskSelectedPath : (selected?.path ?? null));
   let changesReviewNav = $derived.by<ReviewQueueState | null>(() => {
     if (!opened) return null;
     return reviewQueue(orderedRows(opened.snapshot.files, fileQuery), reviewedSet, selected, goToFile);
   });
   let activeReviewNav = $derived(
-    workspaceView === "task" ? taskReviewNav : workspaceView === "changes" ? changesReviewNav : null,
+    inTask ? taskReviewNav : workspaceView === "changes" ? changesReviewNav : null,
   );
 
   /** 真实暂存范围（与提交区同源）：任务页用它把「任务文件」和「本次提交」分开。 */
@@ -449,7 +456,7 @@
       ? changesNav
       : workspaceView === "files"
         ? filesNav
-        : workspaceView === "task"
+        : inTask
           ? taskNav
           : historyNav,
   );
@@ -461,10 +468,10 @@
       ? multiActive
         ? null
         : changesHunk
-      : workspaceView === "history"
-        ? historyHunk
-        : workspaceView === "task"
-          ? taskHunk
+      : inTask
+        ? taskHunk
+        : workspaceView === "history"
+          ? historyHunk
           : null,
   );
   /** 回调身份必须稳定：内联函数每次渲染都是新的，差异视图会在上报和清空之间打转。 */
@@ -489,7 +496,7 @@
    */
   let activeFileStage = $derived.by<{ path: string | null; side: "staged" | "unstaged" | "none"; otherSide: boolean }>(() => {
     // 只有改动与任务视图把选择作用在真实 Git 状态上；文件/历史视图没有可写的这一侧。
-    const path = workspaceView === "changes" || workspaceView === "task" ? activeSelectedPath : null;
+    const path = workspaceView === "changes" || inTask ? activeSelectedPath : null;
     const file = path ? opened?.snapshot.files.find((item) => item.path === path) : undefined;
     // 改动视图按用户选中的那一侧判定：同一路径同时有已暂存与未暂存时，选中已暂存就必须能取消暂存。
     // 任务行的侧别只是净结果（不等于真实索引状态），所以任务视图只按真实文件状态判定。
@@ -503,7 +510,7 @@
   /* 命令注册表的唯一状态输入：标题栏、左栏、溢出菜单与命令面板都读这一份。 */
   let commandState = $derived<CommandState>({
     hasRepo: opened !== null,
-    workspaceView,
+    workspaceView: inTask ? "task" : workspaceView,
     taskModal,
     sidebarHidden,
     // 任务级 modal 层占着单槽时写动作同样不可用：命令可用性与执行 guard 读同一份判定，
@@ -529,10 +536,10 @@
           toggleReason: activeSelectedPath ? (reviewBusy === activeSelectedPath ? "正在确认这个文件的快照" : null) : "先选择一个文件",
           reviewed: activeSelectedPath ? activeReviewedSet.has(activeSelectedPath) : false,
           hideReason: null,
-          hidden: workspaceView === "task" ? taskHideReviewed : hideReviewed,
+          hidden: inTask ? taskHideReviewed : hideReviewed,
           remaining: activeReviewNav.remaining,
           total: activeReviewNav.total,
-          scope: workspaceView === "task" ? "task" : "changes",
+          scope: inTask ? "task" : "changes",
         }
       : null,
     fileStage: { path: activeFileStage.path, side: activeFileStage.side, reason: null, otherSide: activeFileStage.otherSide },
@@ -625,12 +632,12 @@
         void filesView?.focusSearch("content");
         return;
       }
-      const target = workspaceView === "history"
-        ? document.getElementById("history-search")
-        : workspaceView === "files"
-          ? document.getElementById("files-search")
-          : workspaceView === "task"
-            ? document.getElementById("task-file-search") ?? document.getElementById("task-baseline-search")
+      const target = inTask
+        ? document.getElementById("task-file-search")
+        : workspaceView === "history"
+          ? document.getElementById("history-search")
+          : workspaceView === "files"
+            ? document.getElementById("files-search")
             : opened
               ? document.getElementById("file-search")
               : document.getElementById("welcome-search") ?? document.querySelector<HTMLElement>(".welcome-actions button");
@@ -709,9 +716,6 @@
       case "view.history":
         showHistory();
         return;
-      case "view.task":
-        showTask();
-        return;
       case "file.prev":
         activeNav?.onPrev();
         return;
@@ -728,7 +732,7 @@
         if (activeSelectedPath) void toggleReviewed(activeSelectedPath);
         return;
       case "review.hide":
-        if (workspaceView === "task") taskHideReviewed = !taskHideReviewed;
+        if (inTask) taskHideReviewed = !taskHideReviewed;
         else hideReviewed = !hideReviewed;
         return;
       case "stage.file":
@@ -1138,6 +1142,7 @@
     // 换仓库清掉任务起点、导航与已解析范围：旧仓库的起点对新仓库不成立。
     taskRequest = null;
     taskRequestNonce += 1;
+    taskSummary = null;
     taskNav = null;
     taskHunk = null;
     taskScope = null;
@@ -1525,12 +1530,6 @@
       historyPanel ??= import("./lib/components/HistoryPanel.svelte");
       return;
     }
-    if (view === "task") {
-      // 任务视图自己读净差异：改动视图的在途响应作废，回到改动视图时再按当前选择重读。
-      diffToken += 1;
-      diffLoading = false;
-      return;
-    }
     if (view === "files") {
       // 文件视图不画改动差异：在途响应作废，回到改动视图时再按当前选择重读。
       diffToken += 1;
@@ -1548,31 +1547,21 @@
     useView("history");
   }
 
-  /** 任务视图：没有起点就停在选择状态，绝不默认 HEAD 或默认分支。 */
-  function showTask() {
-    useView("task");
-  }
-
   /**
-   * 带着明确起点进入任务视图。起点为空时请求保持 null：任务页要求用户自己选，
-   * 这里不补一个猜测的起点。
+   * cliora 审查链接带着起点进来：历史按「起点..HEAD」过滤，并选中顶部「任务净差异」。
+   * 链接没有起点时不建立任务范围（不拿 HEAD 或默认分支补），只打开普通历史并说明原因。
    */
-  function openTaskReview(baseline: string | null, origin: TaskRequest["origin"]) {
+  function openTaskReview(baseline: string | null) {
     const value = baseline?.trim() ?? "";
     taskRequestNonce += 1;
-    taskRequest = value === "" ? null : { baseline: value, origin, nonce: taskRequestNonce };
-    useView("task");
-  }
-
-  /** 用户在选择器里选定的起点：只读取任务范围，不写入任何 Git 对象。 */
-  function pickTaskBaseline(baseline: string) {
-    openTaskReview(baseline, "manual");
-  }
-
-  /** 放弃当前起点：回到明确的选择状态。 */
-  function clearTaskBaseline() {
-    taskRequest = null;
-    taskRequestNonce += 1;
+    taskRequest = value === "" ? null : { baseline: value, origin: "cliora", nonce: taskRequestNonce };
+    if (!taskRequest) {
+      taskSummary = null;
+      notice("cliora 审查链接没有携带起点，已打开普通提交历史。");
+    }
+    historyPath = null;
+    historyQuery = "";
+    useView("history");
   }
 
   function openFileHistory(path: string) {
@@ -1706,7 +1695,7 @@
 
   /** 当前视图的审阅范围：任务视图用任务页解析出的范围，改动视图固定为当前未提交改动。 */
   function activeReviewTarget(): ReviewTarget | null {
-    if (workspaceView === "task") return taskTarget;
+    if (inTask) return taskTarget;
     return changesTarget;
   }
 
@@ -2416,9 +2405,9 @@
         worktreePath: openedRepo.summary.path,
         baseline: request.baseline,
       });
-      // 链接自带已校验起点：直接进入任务视图。没有起点时停在明确的选择状态，
+      // 链接自带已校验起点：历史按任务范围过滤并选中「任务净差异」。没有起点时只打开普通历史，
       // 不用当前 HEAD 或默认分支补一个（R1）。
-      openTaskReview(clioraBaseline(), "cliora");
+      openTaskReview(clioraBaseline());
       live = "已按 cliora 审查链接打开 " + openedRepo.summary.name;
       await api.clioraReviewReceipt(request.reviewId, request.sessionId, true, null);
     } catch (error) {
@@ -2530,6 +2519,7 @@
         historyPath = null;
         filesNav = null;
         taskRequest = null;
+        taskSummary = null;
         taskNav = null;
         taskHunk = null;
         taskScope = null;
@@ -3541,7 +3531,7 @@
     <main class="content" data-app-main tabindex="-1">
       {#snippet paneHead()}
         <div class="pane-head">
-          <ViewSwitcher view={workspaceView} {changeCount} showFiles={filesViewEnabled} onView={(view) => runCommand(`view.${view}`)} />
+          <ViewSwitcher view={workspaceView} {changeCount} showFiles={filesViewEnabled} taskActive={taskRequest !== null && workspaceView !== "history"} onView={(view) => runCommand(`view.${view}`)} />
           <span class="spacer"></span>
           <button
             type="button"
@@ -3555,7 +3545,45 @@
         </div>
         <MergeBanner {conflictCount} {mergeInProgress} canAbort={mergeAbortable} abortBlocked={writeLocked} onOpen={() => runCommand("task.merge")} onAbort={() => runCommand("task.abortMerge")} />
       {/snippet}
-      {#snippet paneResizer()}
+      {#snippet taskDetailView(visible: boolean)}
+  {#if opened}
+    <TaskReview
+      {opened}
+      active={workspaceView === "history"}
+      {visible}
+      request={taskRequest}
+      {nextId}
+      fullFile={diffFullFile}
+      onFullFile={setFullFile}
+      onGeneration={adoptGeneration}
+      onNotice={notice}
+      onFailure={announceTaskFailure}
+      onFileHistory={openFileHistory}
+      onReadDocument={openDocument}
+      onFileNav={(nav) => (taskNav = nav)}
+      onHunkNav={reportTaskHunk}
+      reviewed={taskReviewedSet}
+      {reviewBusy}
+      reviewNote={taskReviewNote}
+      hideReviewed={taskHideReviewed}
+      onToggleReview={(path) => void toggleReviewed(path)}
+      onHideReviewed={(next) => (taskHideReviewed = next)}
+      onStageFile={stageTaskFile}
+      onUnstageFile={unstageTaskFile}
+      stageSideFor={taskFileStage}
+      writeLocked={writeLocked}
+      onOpenUnstaged={openUnstagedDiff}
+      onOpenChanges={showChanges}
+      stagedPaths={stagedScopePaths}
+      onSnapshot={adoptTaskScope}
+      onSelection={(path) => (taskSelectedPath = path)}
+      onReviewNav={(nav) => (taskReviewNav = nav)}
+      onSummary={(summary) => (taskSummary = summary)}
+    />
+  {/if}
+{/snippet}
+
+{#snippet paneResizer()}
         <PaneResizer
           value={paneWidth}
           saved={widths.files}
@@ -3718,50 +3746,6 @@
               {/if}
             </div>
           </div>
-          <div
-            class="workbench-view"
-            data-view-scope="task"
-            data-active={workspaceView === "task"}
-            aria-hidden={workspaceView !== "task"}
-            inert={workspaceView !== "task"}
-          >
-            <TaskReview
-              {opened}
-              active={workspaceView === "task"}
-              request={taskRequest}
-              {nextId}
-              fullFile={diffFullFile}
-              onFullFile={setFullFile}
-              onGeneration={adoptGeneration}
-              onNotice={notice}
-              onFailure={announceTaskFailure}
-              onFileHistory={openFileHistory}
-              onCommitHistory={openCommitSearch}
-              onReadDocument={openDocument}
-              onFileNav={(nav) => (taskNav = nav)}
-              onHunkNav={reportTaskHunk}
-              onPickBaseline={pickTaskBaseline}
-              onClearBaseline={clearTaskBaseline}
-              reviewed={taskReviewedSet}
-              {reviewBusy}
-              reviewNote={taskReviewNote}
-              hideReviewed={taskHideReviewed}
-              onToggleReview={(path) => void toggleReviewed(path)}
-              onHideReviewed={(next) => (taskHideReviewed = next)}
-              onStageFile={stageTaskFile}
-              onUnstageFile={unstageTaskFile}
-              stageSideFor={taskFileStage}
-              writeLocked={writeLocked}
-              onOpenUnstaged={openUnstagedDiff}
-              onOpenChanges={showChanges}
-              stagedPaths={stagedScopePaths}
-              onSnapshot={adoptTaskScope}
-              onSelection={(path) => (taskSelectedPath = path)}
-              onReviewNav={(nav) => (taskReviewNav = nav)}
-              {paneHead}
-              {paneResizer}
-            />
-          </div>
           {#if filesViewEnabled}
           <div
             class="workbench-view"
@@ -3829,6 +3813,10 @@
                   {branchGroups}
                   {paneHead}
                   {paneResizer}
+                  taskRange={taskRequest ? { baseline: taskRequest.baseline, nonce: taskRequest.nonce } : null}
+                  taskSummary={taskSummary ? { ...taskSummary, reviewed: taskReviewNav ? taskReviewNav.total - taskReviewNav.remaining : 0 } : null}
+                  taskDetail={taskDetailView}
+                  onTaskFocus={(focused) => (taskFocus = focused)}
                 />
               {/await}
             {/if}

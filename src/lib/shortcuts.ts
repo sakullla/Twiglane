@@ -15,12 +15,11 @@ export interface KeyLike {
   shiftKey?: boolean;
 }
 
-/** 数字键沿用原有序列：1 改动、2 历史、3 文件不变，任务视图追加在 4。 */
+/** 数字键与左栏切换条同序：1 改动、2 历史、3 文件。 */
 const DIGIT_VIEWS: Record<string, string> = {
   "1": "view.changes",
   "2": "view.history",
   "3": "view.files",
-  "4": "view.task",
 };
 
 const KEY_COMMANDS: Record<string, string> = {

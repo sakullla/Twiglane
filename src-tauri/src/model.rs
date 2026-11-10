@@ -450,6 +450,16 @@ pub struct CommitDetail {
     pub files: Vec<CommitFileChange>,
 }
 
+/// 两点之间的净文件清单：`base` 为空表示与空树比较。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompareFiles {
+    pub generation: u64,
+    pub base: Option<String>,
+    pub head: String,
+    pub files: Vec<CommitFileChange>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FileHistoryPage {

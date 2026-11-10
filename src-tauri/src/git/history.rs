@@ -248,7 +248,8 @@ pub async fn compare_file_diff(
     context: u32,
 ) -> Result<crate::model::DiffResponse, AppError> {
     let root = repo_root(path)?;
-    let base = validate_oid(base)?;
+    // 空起点按空树比较：历史多选的最早一个是首个提交时没有父提交。
+    let base = if base.trim().is_empty() { EMPTY_TREE_OID.to_string() } else { validate_oid(base)? };
     let head = validate_oid(head)?;
     let requested = safe_relative(relative)?;
     let git = require_git(backend).await?;
@@ -273,6 +274,50 @@ pub async fn compare_file_diff(
         false,
     )
     .await
+}
+
+/// 任意两点之间的净文件清单：历史多选时只看这批提交合起来的最终结果。
+/// `base` 为 `None` 时按空树比较（最早所选是首个提交）。只读，不碰工作区与暂存区。
+pub async fn compare_files(
+    backend: &Backend,
+    path: &str,
+    base: Option<&str>,
+    head: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<crate::model::CompareFiles, AppError> {
+    let root = repo_root(path)?;
+    let head = validate_oid(head)?;
+    let base = match base.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => Some(validate_oid(value)?),
+        None => None,
+    };
+    // 没有起点时显式和空树比：`diff-tree --root` 对非根提交比的是它自己的父提交。
+    let compare_base = base.clone().unwrap_or_else(|| EMPTY_TREE_OID.to_string());
+    let git = require_git(backend).await?;
+    let (header, generation) = read_log(
+        backend,
+        &root,
+        &git.path,
+        generation,
+        request_id,
+        commit_header_command(&git.path, &root, &head),
+    )
+    .await?;
+    if parse_history_records(&header)?.is_empty() {
+        return Err(AppError::new(
+            "commit_missing",
+            "找不到这个提交，未改变当前分支、暂存区或工作区。",
+        ));
+    }
+    let (files, generation) =
+        load_commit_files(backend, &root, &git.path, &head, Some(&compare_base), generation).await?;
+    Ok(crate::model::CompareFiles {
+        generation,
+        base,
+        head,
+        files: files.as_ref().clone(),
+    })
 }
 
 /// 包含这个提交的本地与远程分支；当前检出的分支排在最前。
@@ -721,6 +766,8 @@ struct ResolvedHistory {
     /// 「未推送」：当前分支上还没到远程的提交。有上游时是 `@{upstream}..HEAD`，
     /// 没有上游时是 `HEAD --not --remotes`；由 ensure_scope 在读取前确定。
     unpushed: bool,
+    /// 任务范围：`<起点>..HEAD`。起点是已校验的完整提交标识，不是分支名，不走分支存在性校验。
+    range: bool,
     exclude_remotes: bool,
     author: Option<String>,
     path: Option<PathBuf>,
@@ -734,8 +781,12 @@ fn resolve_history(request: &HistoryRequest, file_path: Option<PathBuf>) -> Resu
     let author = normalize_query(&request.author)?;
     let raw = request.scope.trim();
     let unpushed = raw == "unpushed";
+    let range_base = raw.strip_prefix("range:");
     let (scope_all, revision, scope_label, head_scope) = if raw.is_empty() || raw == "current" {
         (false, None, "current".to_string(), true)
+    } else if let Some(base) = range_base {
+        let base = validate_oid(base)?;
+        (false, Some(format!("{base}..HEAD")), format!("range:{base}"), false)
     } else if unpushed {
         (false, None, "unpushed".to_string(), false)
     } else if raw == "all" {
@@ -758,6 +809,7 @@ fn resolve_history(request: &HistoryRequest, file_path: Option<PathBuf>) -> Resu
         scope_label,
         head_scope,
         unpushed,
+        range: range_base.is_some(),
         exclude_remotes: false,
         author: if author.is_empty() { None } else { Some(author) },
         path,
@@ -858,6 +910,9 @@ async fn ensure_scope(
         let born = head.exit_code == 0;
         resolved.revision = born.then(|| "HEAD".to_string());
         resolved.exclude_remotes = born;
+        return Ok(generation);
+    }
+    if resolved.range {
         return Ok(generation);
     }
     let Some(revision) = &resolved.revision else {
@@ -2918,6 +2973,48 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(invalid.code, "invalid_revision");
+
+        // 多选净结果：两点之间只列最终变化的文件，行数是净行数。
+        let net = compare_files(&backend, &repo_key(&repo), Some(&base), &tip, diff.generation, 405).await.unwrap();
+        assert_eq!(net.files.len(), 1);
+        assert_eq!(net.files[0].path, "file.txt");
+        assert_eq!((net.files[0].additions, net.files[0].deletions), (Some(1), Some(1)));
+        // 没有起点按空树比较：首个提交里的文件都算新增。
+        let from_empty = compare_files(&backend, &repo_key(&repo), None, &tip, net.generation, 406).await.unwrap();
+        assert_eq!(from_empty.files[0].status, "added");
+        let root_diff = compare_file_diff(&backend, &repo_key(&repo), "", &tip, "file.txt", from_empty.generation, 407, 0, 0, 3)
+            .await
+            .unwrap();
+        assert_eq!((root_diff.additions, root_diff.deletions), (1, 0));
+        let bad = compare_files(&backend, &repo_key(&repo), Some("HEAD"), &tip, root_diff.generation, 408).await.unwrap_err();
+        assert_eq!(bad.code, "invalid_revision");
+    }
+
+    #[tokio::test]
+    async fn range_scope_lists_only_commits_after_the_baseline() {
+        let fixture = crate::test_support::git_fixture("history-range");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "base\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
+        let base = git_text(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        fs::write(repo.join("file.txt"), "one\n").unwrap();
+        git(&repo, &["commit", "-am", "one"]);
+        fs::write(repo.join("file.txt"), "two\n").unwrap();
+        git(&repo, &["commit", "-am", "two"]);
+
+        let gen = generation(&backend, &repo);
+        let request = HistoryRequest { scope: format!("range:{base}"), ..HistoryRequest::default() };
+        let page = history_page(&backend, &repo_key(&repo), &request, gen, 501).await.unwrap();
+        let summaries: Vec<_> = page.commits.iter().map(|commit| commit.summary.as_str()).collect();
+        assert_eq!(summaries, vec!["two", "one"]);
+        assert_eq!(page.scope, format!("range:{base}"));
+
+        let invalid = HistoryRequest { scope: "range:HEAD~1".to_string(), ..HistoryRequest::default() };
+        let error = history_page(&backend, &repo_key(&repo), &invalid, page.generation, 502).await.unwrap_err();
+        assert_eq!(error.code, "invalid_revision");
     }
 
     #[tokio::test]

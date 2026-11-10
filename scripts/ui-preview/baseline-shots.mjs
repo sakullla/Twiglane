@@ -371,24 +371,21 @@ const FAILURE_STATES = [
     },
   },
   {
-    // T5：任务起点不可用时的失败态（就地说明 + 重新读取/重选起点，不摆出旧结果）。
+    // T5：cliora 任务起点不可用时的失败态（历史里任务行标出失败，详情就地说明并给出重新读取，不摆出旧结果）。
     view: "task-error",
-    query: "task=error",
-    state: "任务起点不可用：就地说明并给出重新读取与重选起点",
+    query: "cliora=1&task=error",
+    state: "任务起点不可用：历史任务行标出失败，详情就地说明并给出重新读取",
     run: async (cdp, sessionId) => {
-      await openRepository(cdp, sessionId, "Boolean(document.querySelector('.view-switcher'))", "工作区");
-      await evaluate(cdp, sessionId, click('[data-view="task"]'));
-      await waitFor(cdp, sessionId, "Boolean(document.querySelector('.task-baseline-item:not([disabled])'))", "任务起点候选");
-      await evaluate(cdp, sessionId, click(".task-baseline-item:not([disabled])"));
+      await waitFor(cdp, sessionId, "Boolean(document.querySelector('.history-task-row'))", "任务净差异行");
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('.task-failure'))", "任务读取失败");
       await pause(500);
     },
   },
   {
-    // 用户报告的挂起/取消路径：旧批次的两个详情永不返回，换一批选择后界面必须恢复成可读结果。
-    view: "history-cancel-recovered",
-    query: "history=hang",
-    state: "历史多选：旧批次请求挂住后换选择，加载结束并列出文件与差异",
+    // 多选只看最终结果：两端之间的净文件清单读取失败时不冒充「没有文件变化」，就地给出重新读取。
+    view: "history-final-error",
+    query: "history=compare-error",
+    state: "历史多选：最终结果读取失败时说明原因并给出重新读取",
     run: async (cdp, sessionId) => {
       await openRepository(cdp, sessionId, "Boolean(document.querySelector('.view-switcher'))", "工作区");
       await evaluate(cdp, sessionId, click('[data-view="history"]'));
@@ -402,14 +399,8 @@ const FAILURE_STATES = [
       })()`;
       await evaluate(cdp, sessionId, pick(0, false));
       await evaluate(cdp, sessionId, pick(3, true));
-      await waitFor(cdp, sessionId, "document.body.textContent.includes('已选择 4 个提交')", "第一批多选");
-      // 换到更早的 4 个提交：新批次必须自己开始读，并结束加载。
-      await evaluate(cdp, sessionId, pick(4, false));
-      await evaluate(cdp, sessionId, pick(7, true));
-      await waitFor(cdp, sessionId, "!document.body.textContent.includes('正在读取所选提交的详情')", "加载结束");
-      await waitFor(cdp, sessionId, "document.querySelectorAll('.commit-files .file-row').length > 0", "文件队列");
-      await waitFor(cdp, sessionId, "document.querySelectorAll('.union-block').length > 0", "差异块");
-      await pause(600);
+      await waitFor(cdp, sessionId, "document.body.textContent.includes('最终变更没有读取成功')", "失败说明");
+      await pause(500);
     },
   },
 ];
@@ -569,13 +560,13 @@ async function main() {
         await pause(900);
         await shot("history", "baseline", "历史视图（同数据对照）");
 
-        // T5：任务视图、工作区总览与提交区各留一张同数据对照（同一 mock 数据、同一主题与尺寸）。
-        await evaluate(cdp, sessionId, click('[data-view="task"]'));
-        await waitFor(cdp, sessionId, "Boolean(document.querySelector('.task-baseline-item:not([disabled])'))", "任务起点候选");
-        await evaluate(cdp, sessionId, click(".task-baseline-item:not([disabled])"));
-        await waitFor(cdp, sessionId, "document.querySelectorAll('.file-list .file-row').length > 0", "任务文件队列");
+        // T5：任务净差异、工作区总览与提交区各留一张同数据对照（同一 mock 数据、同一主题与尺寸）。
+        // 任务范围只来自 cliora 链接：预览用 ?cliora=1 模拟一次跳转，历史按起点过滤并选中任务净差异。
+        await cdp.send("Page.navigate", { url: base + "/?cliora=1" }, sessionId);
+        await waitFor(cdp, sessionId, "Boolean(document.querySelector('.history-task-row[aria-pressed=true]'))", "历史里的任务净差异");
+        await waitFor(cdp, sessionId, "document.querySelectorAll('.task-detail .file-list .file-row').length > 0", "任务文件队列");
         await pause(800);
-        await shot("task", "baseline", "任务视图：起点、范围内提交与净文件队列");
+        await shot("task", "baseline", "历史里的任务净差异：起点范围、任务文件队列与净差异");
 
         await evaluate(cdp, sessionId, click('[aria-label^="当前仓库"]'));
         await waitFor(cdp, sessionId, "Boolean(document.querySelector('.switcher-group-name'))", "工作区总览");

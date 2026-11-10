@@ -11,8 +11,9 @@
   import Icon from "./Icon.svelte";
 
   /**
-   * 合并前的审阅区：左边是将带入的提交、文件和预计冲突，右边是所选项的明细。
-   * 点提交看这次提交的全部改动；点文件看它从共同祖先到来源顶端一共带入了什么。
+   * 合并前的审阅区：左边是将带入的文件、提交和预计冲突，右边是所选项的明细。
+   * 默认先看文件：每个文件从共同祖先到来源顶端的最终结果，合并真正关心的是这个；
+   * 逐个提交的改动放在第二页，需要追溯来龙去脉时再看。
    * 全部只读：不切换分支，不碰工作区和暂存区。
    */
   interface Props {
@@ -31,7 +32,7 @@
     | { kind: "commit"; key: string; commit: HistoryCommit }
     | { kind: "file"; key: string; file: CommitFileChange; conflict: boolean };
 
-  let tab = $state<Tab>("commits");
+  let tab = $state<Tab>("files");
   let filter = $state("");
   let selectedKey = $state<string | null>(null);
   let listEl = $state<HTMLDivElement | null>(null);
@@ -78,12 +79,12 @@
       if (key === seenPreview) return;
       seenPreview = key;
       filter = "";
-      tab = preview.commits.length > 0 ? "commits" : "files";
+      tab = preview.files.length > 0 || preview.commits.length === 0 ? "files" : "commits";
       selectedKey = null;
     });
   });
   $effect(() => {
-    if (tab === "conflicts" && preview.conflictPaths.length === 0) tab = "commits";
+    if (tab === "conflicts" && preview.conflictPaths.length === 0) tab = preview.files.length > 0 ? "files" : "commits";
   });
 
   // 选中项被筛掉或换页后落到第一项：右侧总有内容可看，不用再点一次。
@@ -278,11 +279,11 @@
 <section class="merge-review" aria-label="合并内容">
   <aside class="merge-review-side" aria-label="将带入的内容">
     <div class="merge-review-tabs" role="tablist" aria-label="合并内容">
-      <button type="button" role="tab" aria-selected={tab === "commits"} disabled={preview.commits.length === 0} title={preview.commits.length === 0 ? "没有需要带入的提交" : undefined} onclick={() => setTab("commits")}>
-        <Icon name="commit" size={13} />提交<span class="count">{preview.incoming}</span>
-      </button>
-      <button type="button" role="tab" aria-selected={tab === "files"} disabled={preview.files.length === 0} title={preview.files.length === 0 ? "没有文件变化" : undefined} onclick={() => setTab("files")}>
+      <button type="button" role="tab" aria-selected={tab === "files"} disabled={preview.files.length === 0} title={preview.files.length === 0 ? "没有文件变化" : "每个文件合并后的最终结果"} onclick={() => setTab("files")}>
         <Icon name="file" size={13} />文件<span class="count">{preview.filesTotal}</span>
+      </button>
+      <button type="button" role="tab" aria-selected={tab === "commits"} disabled={preview.commits.length === 0} title={preview.commits.length === 0 ? "没有需要带入的提交" : "逐个提交查看带入的改动"} onclick={() => setTab("commits")}>
+        <Icon name="commit" size={13} />提交<span class="count">{preview.incoming}</span>
       </button>
       {#if preview.conflictPaths.length > 0}
         <button type="button" role="tab" aria-selected={tab === "conflicts"} onclick={() => setTab("conflicts")}>

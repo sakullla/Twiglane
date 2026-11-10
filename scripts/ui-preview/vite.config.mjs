@@ -76,6 +76,18 @@ function mockApiPlugin() {
   };
 }
 
+/** deep link 插件在浏览器里没有 Tauri 运行时：换成预览替身，?cliora=1 时冷启动带一条审查链接。 */
+function mockDeepLinkPlugin() {
+  const target = path.join(here, "mock-deep-link.ts");
+  return {
+    name: "twiglane-mock-deep-link",
+    enforce: "pre",
+    resolveId(source) {
+      return source === "@tauri-apps/plugin-deep-link" ? target : null;
+    },
+  };
+}
+
 /**
  * 取出可用于 net.connect 的字符串地址。
  * `vite --host` 会把 server.host 设成布尔 true（监听全部网卡），此时不能把它当地址用；
@@ -172,6 +184,6 @@ export {
 
 export default defineConfig({
   root,
-  plugins: [previewGuardPlugin(), mockApiPlugin(), svelte({ configFile: path.join(root, "svelte.config.js") })],
+  plugins: [previewGuardPlugin(), mockApiPlugin(), mockDeepLinkPlugin(), svelte({ configFile: path.join(root, "svelte.config.js") })],
   server: { port: PORT, strictPort: true, host: HOST },
 });

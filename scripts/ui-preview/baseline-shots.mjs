@@ -479,8 +479,9 @@ async function main() {
   );
 
   const manifest = {
-    workflow: "2026-11-08-ui-ux-markdown",
-    task: "T5",
+    // 当前工作流标识：runner 会核对它，不能沿用上一批证据的 ID。
+    workflow: "2026-11-09-ai-coding-ui-ux",
+    task: "T6",
     capturedAt: new Date().toISOString(),
     environment: {
       browser: "",
@@ -496,9 +497,11 @@ async function main() {
       worker: "预览页的 Markdown 解析在工作线程里进行；失败态由 ?remote= / ?commit= / ?doc= / ?search= 参数进入",
     },
     groups: {
-      baseline: "start/changes/history/settings/merge：与 01 基线同数据、同主题、同尺寸",
-      markdown: "files-markdown/files-markdown-toc：本轮新增能力样例，单独成组，不参与优化前后对照",
-      failure: "关键失败/未知状态：sync-unchecked/sync-stale/commit-error/commit-push-error/doc-error/doc-large/search-error/filter-error/find-error，逐张对应需求",
+      baseline: "start/changes/history/task/worktree/composer/merge/settings：与 01 基线同数据、同主题、同尺寸",
+      markdown: "files-markdown/files-markdown-toc：Markdown 排版预览与目录工具行，单独成组，不参与优化前后对照",
+      failure:
+        "关键失败/未知状态：sync-unchecked/sync-stale/commit-error/commit-push-error/doc-error/doc-large/" +
+        "search-error/filter-error/find-error/task-error/history-cancel-recovered，逐张对应需求",
     },
     shots: [],
     // 没有采集到的视图与原因：证据清单必须能解释「为什么少了一张」，不能安静跳过。
@@ -612,8 +615,8 @@ async function main() {
         );
         await pause(400);
         await shot("files-markdown", "markdown", "Markdown 默认排版预览");
-        // 目录开关只在「有标题且这一处显示工具行」时出现；当前文件视图的预览不给这一行，
-        // 所以按下开关存在与否决定是否截图，并把跳过原因写进 manifest，不伪造一张目录图。
+        // 文件视图的预览有标题时给出目录开关（.md-small-button，与阅读器同一套控件）；
+        // 仍然按「开关真的存在」决定是否截图，缺失时把原因写进 manifest，不伪造一张目录图。
         const toggled = await evaluate(
           cdp,
           sessionId,
@@ -638,7 +641,7 @@ async function main() {
           skipped.push({
             view: "files-markdown-toc",
             group: "markdown",
-            reason: "文件视图的 Markdown 预览没有目录开关（showTools=false）；这条已知差异记在 report.json 与 README 里。",
+            reason: "文件视图的 Markdown 预览没有目录开关：文档没有标题，或目录入口没有随预览出现。",
           });
           console.log("跳过 files-markdown-toc：文件视图的预览没有目录开关");
         }

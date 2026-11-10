@@ -25,7 +25,7 @@
     RepositorySearchScope,
     DocumentSource,
   } from "../types";
-  import { BUSY_REASON, formatBytes, rowMark, splitPath, type FileNavState } from "../ui";
+  import { BUSY_REASON, documentSourceLabel, formatBytes, rowMark, splitPath, type FileNavState } from "../ui";
   import type { DiffSide } from "../types";
   import BinaryPreview from "./BinaryPreview.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
@@ -901,9 +901,10 @@
             >源码</button>
           </div>
           {#if documentMode === "preview" && headingCount > 0}
+            <!-- 目录入口与阅读器自己的工具行同一套控件外观（.md-small-button），不另占一行。 -->
             <button
               type="button"
-              class="btn btn-ghost btn-sm file-outline-btn"
+              class="md-small-button file-outline-btn"
               aria-pressed={outlineOpen}
               aria-label="文档目录"
               title={outlineOpen ? "收起目录" : `显示目录（${headingCount} 个标题）`}
@@ -1202,6 +1203,11 @@
 
     {#if isMarkdown && documentMode === "preview"}
       <footer class="file-status" aria-label="文件信息">
+        <!-- 与阅读器的来源标识一致：排版预览看的是工作区当前内容，不是某个历史版本。 -->
+        <span class="file-status-item doc-source" title={`来源：${documentSourceLabel(documentSource)}`}>
+          <Icon name="eye" size={12} />{documentSourceLabel(documentSource)}
+        </span>
+        <span class="file-status-item doc-path" title={path}>{path}</span>
         <span class="file-status-item" class:changed={Boolean(mark)}>
           {#if mark}
             <span class={`tree-dot ${mark.tone}`} aria-hidden="true"></span>{mark.label}{hasStaged && hasUnstaged ? " · 部分已暂存" : hasStaged ? " · 已暂存" : ""}

@@ -552,10 +552,15 @@ describe("Markdown 阅读接入", () => {
     expect(container.querySelector("[data-file-line]")).toBeNull();
     expect(container.querySelector(".doc-reader-head")).toBeNull();
     expect(container.querySelector(".md-reading-tools")).toBeNull();
+    // 来源与路径用阅读器同一套标识收进底部状态条：不另占一行，但相对链接跳到别的文档后要能看出换成了哪个文件。
+    expect(container.querySelector(".file-status .doc-source")?.textContent?.trim()).toBe("工作区");
+    expect(container.querySelector(".file-status .doc-path")?.getAttribute("title")).toBe("docs/a.md");
     expect(screen.getAllByRole("button", { name: /复制文件路径|复制文档路径/ })).toHaveLength(1);
     expect(screen.getByTitle("64 字节").textContent).toBe(formatBytes(64));
     expect(screen.getByTitle("文件视图只读，不会改动工作区")).toBeTruthy();
     const outline = screen.getByRole("button", { name: "文档目录" });
+    // 与阅读器自己的目录工具行同一套控件外观，浏览器场景才能靠同一个类找到它。
+    expect(outline.classList.contains("md-small-button")).toBe(true);
     expect(outline.getAttribute("aria-pressed")).toBe("false");
     await fireEvent.click(outline);
     expect(outline.getAttribute("aria-pressed")).toBe("true");

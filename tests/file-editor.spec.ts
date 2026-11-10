@@ -595,3 +595,186 @@ describe("cliora 来源与编辑", () => {
     expect(screen.queryByRole("dialog", { name: "有未保存的编辑" })).toBeNull();
   });
 });
+
+describe("其他换仓库入口同样先处理草稿", () => {
+  const WORKTREE = "C:/work/wt";
+
+  function useWorktreeBranches() {
+    const branches = [
+      { name: "main", remote: false, current: true, upstream: "origin/main", worktree: null },
+      { name: "shared", remote: false, current: false, upstream: null, worktree: WORKTREE },
+    ];
+    const state = { generation: 4, branches, snapshot, defaultBranch: "main" };
+    mocks.api.branchState.mockResolvedValue(state);
+    mocks.api.branchList.mockResolvedValue(state);
+  }
+
+  const leaveDialog = () => screen.findByRole("dialog", { name: "有未保存的编辑" });
+  const opensOf = (path: string) => mocks.api.openRepository.mock.calls.filter((call) => call[0] === path).length;
+
+  /** 分支对话框里占用 shared 的那一行；取消后列表可能已重渲染，每次重新取。 */
+  async function sharedRow(): Promise<HTMLElement> {
+    const dialog = await screen.findByRole("dialog", { name: "分支与标签" });
+    return waitFor(() => {
+      const found = [...dialog.querySelectorAll<HTMLElement>(".branch-row")].find(
+        (item) => item.querySelector(".lr-title span")?.textContent === "shared",
+      );
+      if (!found) throw new Error("分支列表里没有 shared");
+      return found;
+    });
+  }
+
+  async function openWorktreeFromDialog(point: number) {
+    await fireEvent.contextMenu(await sharedRow(), { clientX: 12, clientY: point });
+    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "打开此工作区" }));
+  }
+
+  it("分支对话框打开另一个工作区：确认框叠在对话框上，取消后对话框、仓库与草稿都不变", async () => {
+    useWorktreeBranches();
+    render(App);
+    await openRepo();
+    await editFromChanges("draft\n");
+
+    await fireEvent.click(screen.getByRole("button", { name: "当前分支 main" }));
+    const switcher = await screen.findByRole("dialog", { name: "切换分支" });
+    await fireEvent.click(within(switcher).getByRole("button", { name: /管理分支与标签/ }));
+    await openWorktreeFromDialog(12);
+    const dialog = await leaveDialog();
+    expect(within(dialog).getByText("src/app.ts")).toBeTruthy();
+    expect(opensOf(WORKTREE), "回答之前不读取另一个工作区").toBe(0);
+    await fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "有未保存的编辑" })).toBeNull());
+    expect(opensOf(WORKTREE)).toBe(0);
+    expect(screen.getByRole("dialog", { name: "分支与标签" }), "取消后对话框留在原处").toBeTruthy();
+    // 对话框还开着，背景是 inert：标题栏只按隐藏元素查。
+    expect(screen.getByRole("button", { name: "当前仓库 demo", hidden: true })).toBeTruthy();
+    expect(fileEditor.session(REPO, "src/app.ts")?.draft).toBe("draft\n");
+
+    await openWorktreeFromDialog(20);
+    await fireEvent.click(within(await leaveDialog()).getByRole("button", { name: "放弃修改" }));
+    await waitFor(() => expect(mocks.api.openRepository).toHaveBeenLastCalledWith(WORKTREE, expect.any(Number)));
+    await waitFor(() => expect(screen.getByRole("button", { name: "当前仓库 wt" })).toBeTruthy());
+    expect(mocks.api.repositoryEditSave).not.toHaveBeenCalled();
+    expect(fileEditor.session(REPO, "src/app.ts")).toBeNull();
+  });
+
+  it("分支弹层打开另一个工作区：先收起弹层再问；取消不切换，保存后才打开", async () => {
+    useWorktreeBranches();
+    render(App);
+    await openRepo();
+    await editFromChanges("draft\n");
+
+    const openFromSwitcher = async () => {
+      await fireEvent.click(screen.getByRole("button", { name: "当前分支 main" }));
+      const switcher = await screen.findByRole("dialog", { name: "切换分支" });
+      await fireEvent.click(await within(switcher).findByRole("option", { name: /^shared/ }));
+      await fireEvent.click(await within(switcher).findByRole("button", { name: "打开此工作区" }));
+    };
+
+    await openFromSwitcher();
+    const dialog = await leaveDialog();
+    expect(screen.queryByRole("dialog", { name: "切换分支" }), "弹层先收起，确认框不会被它的点外关闭吞掉").toBeNull();
+    expect(opensOf(WORKTREE)).toBe(0);
+    await fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "有未保存的编辑" })).toBeNull());
+    expect(opensOf(WORKTREE)).toBe(0);
+    expect(screen.getByRole("button", { name: "当前仓库 demo" })).toBeTruthy();
+    expect(editorBox()!.value).toBe("draft\n");
+
+    await openFromSwitcher();
+    await fireEvent.click(within(await leaveDialog()).getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(mocks.api.openRepository).toHaveBeenLastCalledWith(WORKTREE, expect.any(Number)));
+    expect(mocks.api.repositoryEditSave.mock.calls.map((call) => call.slice(0, 4))).toEqual([[REPO, "src/app.ts", DIGEST, "draft\n"]]);
+    expect(opensOf(WORKTREE), "只打开一次").toBe(1);
+  });
+
+  it("克隆完成时窗口还开着：先问草稿；取消不切换，克隆结果只记入最近仓库并把监听接回当前仓库", async () => {
+    const cloned = { summary: { name: "fresh", path: "C:/parent/fresh" }, generation: 1, snapshot, draft: "", watchDegraded: false };
+    let finish: (value: unknown) => void = () => {};
+    mocks.api.cloneRepository.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    render(App);
+    await openRepo();
+    await editFromChanges("draft\n");
+    mocks.pickDirectory.mockResolvedValue("C:/parent");
+
+    await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "克隆远程仓库" }));
+    const clone = await screen.findByRole("dialog", { name: "克隆仓库" });
+    await fireEvent.input(within(clone).getByLabelText("远程地址"), { target: { value: "https://e.com/fresh.git" } });
+    await fireEvent.click(within(clone).getByRole("button", { name: /选择目录/ }));
+    const start = within(clone).getByRole("button", { name: /开始克隆/ });
+    await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+    await fireEvent.click(start);
+    await waitFor(() => expect(mocks.api.cloneRepository).toHaveBeenCalled());
+    const reopens = opensOf(REPO);
+
+    finish({ path: "C:/parent/fresh", opened: cloned });
+    const dialog = await leaveDialog();
+    expect(screen.getByRole("dialog", { name: "克隆仓库", hidden: true }), "回答之前克隆窗口不收起（被确认框压在下面）").toBeTruthy();
+    await fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "克隆仓库" })).toBeNull());
+    expect(screen.getByRole("button", { name: "当前仓库 demo" }), "没有切到克隆的仓库").toBeTruthy();
+    expect(fileEditor.session(REPO, "src/app.ts")?.draft).toBe("draft\n");
+    await waitFor(() => expect(document.body.textContent).toContain("未保存的编辑草稿已保留，没有切换仓库"));
+    // 后端克隆会把监听切到新仓库：取消切换后重新打开当前仓库把监听接回来。
+    await waitFor(() => expect(opensOf(REPO)).toBeGreaterThan(reopens));
+  });
+});
+
+describe("离开前保存后的状态", () => {
+  it("返回 cliora 前保存：按保存后的真实快照说明未提交改动，不再说只做了浏览", async () => {
+    const clean: StatusSnapshot = { generation: 4, branch, files: [] };
+    const dirty: StatusSnapshot = { generation: 5, branch, files: [change("src/app.ts", "none", "modified")] };
+    mocks.api.openRepository.mockImplementation(async (path: string) => ({
+      summary: { name: path.split("/").pop() ?? path, path },
+      generation: 4,
+      snapshot: clean,
+      draft: "",
+      watchDegraded: false,
+    }));
+    mocks.api.refreshStatus.mockResolvedValue(clean);
+    mocks.api.repositoryEditSave.mockImplementation(async (_repo: string, path: string, _digest: string, content: string) => {
+      // 保存后的状态读取慢一拍：不等它落定就统计，会拿到保存之前的干净快照。
+      mocks.api.refreshStatus.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve(dirty), 60)));
+      return editSnap({ generation: 5, path, digest: NEXT, text: content });
+    });
+    mocks.api.clioraReviewRequest.mockResolvedValue({ reviewId: "review-3", sessionId: "session-3", worktreePath: REPO, baseline: BASE });
+    render(App);
+    await waitFor(() => expect(deepLink.handler).toBeTruthy());
+    deepLink.handler!(["twiglane://review?v=1&reviewId=review-3"]);
+    await waitFor(() => expect(clioraReview.source?.reviewId).toBe("review-3"), { timeout: 8000 });
+
+    await fireEvent.click(await screen.findByRole("button", { name: "编辑工作区文件" }, { timeout: 8000 }));
+    await waitFor(() => expect(editorBox()?.value).toBe("line 1\nline 2\nline 3\n"));
+    await fireEvent.input(editorBox()!, { target: { value: "edited\n" } });
+
+    await fireEvent.click(screen.getByRole("button", { name: /^返回 cliora/ }));
+    const dialog = await screen.findByRole("dialog", { name: "有未保存的编辑" });
+    await fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith("review-3", "session-3", "reviewed", null));
+    await waitFor(() => expect(document.body.textContent).toContain("工作区还有 1 个未提交的改动"));
+    expect(document.body.textContent).not.toContain("本次只做了浏览");
+  });
+});
+
+describe("进入编辑时定位失败", () => {
+  it("文件树里找不到这个文件：回到原来的差异并说明，不停在什么都没选中的文件视图", async () => {
+    mocks.api.repositoryDirectory.mockImplementation(async (_repo: string, relative: string) => ({
+      generation: 4,
+      path: relative,
+      entries: relative === "" ? [{ name: "README.md", path: "README.md", kind: "file", ignored: false, size: 10, version: "r1", error: null }] : [],
+      errors: [],
+    }));
+    render(App);
+    await openRepo();
+    const edit = await waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>('.workbench-view[data-active="true"] button[aria-label="编辑工作区文件"]');
+      if (!button) throw new Error("差异工具条没有编辑入口");
+      return button;
+    });
+    await fireEvent.click(edit);
+    await waitFor(() => expect(document.body.textContent).toContain("没能在文件树里定位 src/app.ts"));
+    expect(activeView()).toBe("changes");
+    expect(mocks.api.repositoryEditSnapshot).not.toHaveBeenCalled();
+  });
+});

@@ -1156,8 +1156,8 @@
     const closingClone = cloneOpen;
     // 独立打开别的仓库会清掉 cliora 来源展示；同一 worktree 的重新打开保留来源。
     forgetClioraSourceUnless(next.summary.path);
-    // 编辑会话按仓库归属：别的仓库里干净的会话结束；没有经过关卡的入口（例如克隆完成、切到另一个
-    // worktree）留下的未保存草稿不丢，回到那个仓库后仍可保存或放弃。
+    // 编辑会话按仓库归属：别的仓库里干净的会话结束。用户发起的换仓库入口都先过草稿关卡；
+    // 关卡之外仍残留的未保存草稿（例如测量钩子直接克隆打开）也不丢，回到那个仓库后仍可保存或放弃。
     const keptDrafts = fileEditor.retainRepository(next.summary.path);
     if (opened?.summary.path !== next.summary.path) {
       editOrigin = null;
@@ -1226,13 +1226,24 @@
    * 克隆窗口还开着时用户在等结果，完成后照常打开。点过“在后台继续”就不再打断：
    * 不切换仓库、不关任何窗口，只加入最近仓库并通知。
    */
-  function cloneFinished(next: OpenedRepository) {
+  async function cloneFinished(next: OpenedRepository) {
     banner = null;
     const { name, path } = next.summary;
     if (cloneOpen) {
-      rememberOpened(next);
-      notice(`已克隆并打开 ${name}`);
-      return;
+      // 窗口还开着就会切到新仓库：当前仓库的未保存草稿先保存、放弃或取消。
+      // 取消只是不切换：克隆已经完成，按「在后台继续」的收尾记入最近仓库并把监听接回当前仓库。
+      const proceed = await confirmEditorLeave("打开克隆好的仓库");
+      if (proceed && cloneOpen) {
+        rememberOpened(next);
+        notice(`已克隆并打开 ${name}`);
+        return;
+      }
+      if (!proceed) {
+        recent = [{ name, path, openedAtMs: Date.now() }, ...recent.filter((repo) => repo.path !== path)];
+        notice(`克隆完成：${name}。未保存的编辑草稿已保留，没有切换仓库；可以从标题栏的仓库弹层打开。`);
+        if (opened) void rewatchCurrent(opened.summary.path);
+        return;
+      }
     }
     recent = [{ name, path, openedAtMs: Date.now() }, ...recent.filter((repo) => repo.path !== path)];
     notice(`克隆完成：${name}。可以从标题栏的仓库弹层打开。`);
@@ -1498,7 +1509,15 @@
     editOrigin = { path, view, side };
     showFiles();
     await tick();
-    await filesView?.reveal(path, null);
+    const revealed = await filesView?.reveal(path, null);
+    if (revealed === false) {
+      // 文件树里定位不到（例如刚被删除或移动）：不把人放在什么都没选中的文件视图里，回到原来的差异并说明。
+      if (editOrigin?.path === path) editOrigin = null;
+      if (view === "task") useView("history");
+      else showChanges();
+      notice(`没能在文件树里定位 ${path}，没有进入编辑。文件可能已被删除或移动，刷新后再试。`);
+      return;
+    }
     editRequest = { path, line, serial: ++editSerial };
   }
 
@@ -1588,6 +1607,29 @@
     });
   }
 
+  /** 当前仓库是否还有没处理的未保存草稿。 */
+  function hasLeaveDrafts(): boolean {
+    const repo = opened?.summary.path;
+    return repo ? fileEditor.dirty(repo).length > 0 : false;
+  }
+
+  /** 分支对话框「打开此工作区」：确认框叠在对话框上，取消后对话框与仓库都保持原样。 */
+  function worktreeLeaveGate(path: string): Promise<boolean> {
+    if (opened && samePath(opened.summary.path, path)) return Promise.resolve(true);
+    return confirmEditorLeave("打开另一个工作区");
+  }
+
+  /**
+   * 分支弹层「打开此工作区」：弹层挡不住叠在上面的确认框（点确认框就算点在外面，弹层会收起），
+   * 所以有草稿时先收起弹层，交给切换仓库同一条带关卡的打开路径；没有草稿照常由弹层自己打开。
+   */
+  function switcherWorktreeGate(path: string): Promise<boolean> {
+    if (!hasLeaveDrafts() || (opened && samePath(opened.summary.path, path))) return Promise.resolve(true);
+    closeSwitcher();
+    void tick().then(() => openRecent(path));
+    return Promise.resolve(false);
+  }
+
   function settleEditLeave(proceed: boolean) {
     const pending = editLeave;
     if (!pending || pending.busy) return;
@@ -1613,6 +1655,9 @@
       }
       handleEditSaved(outcome.snapshot);
     }
+    // 继续之前等状态按保存后的真实快照落定：随后的动作（例如返回 cliora 时统计未提交改动）
+    // 不能还用保存之前的快照。
+    await refresh().catch(() => false);
     pending.busy = false;
     settleEditLeave(true);
   }
@@ -3750,6 +3795,7 @@
         rebaseCurrentOnto(name);
       }}
       onOpened={rememberOpened}
+      beforeOpen={switcherWorktreeGate}
       onClose={closeSwitcher}
     />
   {/if}
@@ -4301,6 +4347,7 @@
     {branchGroups}
     blockedReason={writeLocked ? switchBlockedReason(commandState) : null}
     onOpened={rememberOpened}
+    beforeOpen={worktreeLeaveGate}
     onRecent={(list) => (recent = list)}
     {nextId}
   />
@@ -4364,6 +4411,7 @@
   onOpenHistory={openCommitSearch}
   {branchGroups}
   onOpenWorktree={rememberOpened}
+  beforeOpenWorktree={worktreeLeaveGate}
   {nextId}
   onPushTo={pushTo}
   onRemotes={(path, names) => {

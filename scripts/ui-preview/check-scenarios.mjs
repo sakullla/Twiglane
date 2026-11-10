@@ -40,7 +40,63 @@ const OPEN_README =
   OPEN_README_VIEW +
   " && Boolean(document.querySelector('.files-view .markdown-preview .md-body [data-markdown-anchor]')))";
 
+/**
+ * 轻量编辑场景的公共前缀：打开 README.md，切到「编辑」，等编辑器拿到完整快照后写入一份草稿并点保存。
+ * 草稿用原生 setter + input 事件写入（与浏览器输入同一条事件链），保存只改 mock 内存，不代表真实写入。
+ */
+const EDIT_README_AND_SAVE =
+  "(function () { " +
+  'if (!window.__filesOpened) { const recent = document.querySelector(".welcome-recent button"); if (recent) { window.__filesOpened = true; recent.click(); return false; } } ' +
+  'if (!document.querySelector(\'.workbench-view[data-active="true"] .files-view\')) { const sw = document.querySelector(\'.workbench-view[data-active="true"] [data-view="files"]\'); if (sw) { sw.click(); return false; } return false; } ' +
+  'if (!window.__readmeClicked) { const row = [...document.querySelectorAll(".file-tree-row")].find((item) => item.textContent.includes("README.md")); if (row) { window.__readmeClicked = true; row.click(); } return false; } ' +
+  'if (!window.__editClicked) { const edit = document.querySelector(\'.files-view [aria-label="编辑这个工作区文件"]\'); if (!edit) return false; window.__editClicked = true; edit.click(); return false; } ' +
+  'if (document.querySelector(".files-view [data-edit-readonly]")) return true; ' +
+  'const box = document.querySelector(".files-view .text-editor-input"); if (!box || !box.value) return false; ' +
+  'if (!window.__drafted) { const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set; setter.call(box, "# 预览编辑草稿\\n\\n" + box.value); box.dispatchEvent(new Event("input", { bubbles: true })); window.__drafted = true; return false; } ' +
+  'if (!window.__saved) { const save = document.querySelector(\'.files-view [aria-label="保存修改到工作区"]\'); if (!save || save.disabled) return false; window.__saved = true; save.click(); return false; } ' +
+  'const status = document.querySelector(".files-view [data-edit-status]")?.textContent || ""; ' +
+  'return status.includes("已保存") || Boolean(document.querySelector(".files-view [data-edit-conflict], .files-view [data-edit-error]")); ' +
+  "})()";
+
 const SCENARIOS = [
+  {
+    name: "轻量编辑：工作区文件输入后手动保存",
+    url: "/",
+    ready: EDIT_README_AND_SAVE,
+    check:
+      "(() => { const box = document.querySelector('.files-view .text-editor-input'); const save = document.querySelector('.files-view [aria-label=\"保存修改到工作区\"]'); " +
+      "return Boolean(box) && box.value.startsWith('# 预览编辑草稿') && Boolean(save) && save.disabled && (document.querySelector('.files-view [data-edit-status]')?.textContent || '').includes('已保存') " +
+      "&& !document.querySelector('.files-view [data-edit-conflict]') && !document.body.textContent.includes('终端'); })()",
+    detail: "(document.querySelector('.files-view [data-edit-status]')?.textContent || '').trim() + ' ｜ ' + (document.querySelector('.files-view .text-editor-meta')?.textContent || '').trim()",
+  },
+  {
+    name: "轻量编辑：保存冲突保留草稿且不能按旧基线再保存",
+    url: "/?edit=conflict",
+    ready: EDIT_README_AND_SAVE,
+    check:
+      "(() => { const box = document.querySelector('.files-view .text-editor-input'); const note = document.querySelector('.files-view [data-edit-conflict]'); const save = document.querySelector('.files-view [aria-label=\"保存修改到工作区\"]'); " +
+      "if (!box || !note || !save) return false; const labels = [...note.querySelectorAll('button')].map((button) => button.textContent.trim()); " +
+      "return box.value.startsWith('# 预览编辑草稿') && save.disabled && labels.includes('复制草稿') && labels.includes('放弃草稿并重新读取'); })()",
+    detail: "(document.querySelector('.files-view [data-edit-conflict]')?.textContent || '').trim().slice(0, 60)",
+  },
+  {
+    name: "轻量编辑：写入失败保留草稿并可重试",
+    url: "/?edit=fail",
+    ready: EDIT_README_AND_SAVE,
+    check:
+      "(() => { const box = document.querySelector('.files-view .text-editor-input'); const note = document.querySelector('.files-view [data-edit-error]'); " +
+      "if (!box || !note) return false; const retry = [...note.querySelectorAll('button')].find((button) => button.textContent.trim() === '重试保存'); " +
+      "return box.value.startsWith('# 预览编辑草稿') && Boolean(retry) && !retry.disabled && (note.textContent || '').includes('草稿仍保留'); })()",
+    detail: "(document.querySelector('.files-view [data-edit-error]')?.textContent || '').trim().slice(0, 60)",
+  },
+  {
+    name: "轻量编辑：混合行尾保持只读并说明原因",
+    url: "/?edit=mixed",
+    ready: EDIT_README_AND_SAVE,
+    check:
+      "Boolean(document.querySelector('.files-view [data-edit-readonly]')) && (document.querySelector('.files-view [data-edit-readonly]').textContent || '').includes('混用') && !document.querySelector('.files-view .text-editor-input')",
+    detail: "(document.querySelector('.files-view [data-edit-readonly] p')?.textContent || '').trim()",
+  },
   {
     name: "大规模最近仓库",
     url: "/?recent=many",

@@ -9,9 +9,13 @@ const repositoryDocument = vi.hoisted(() => vi.fn());
 const documentResource = vi.hoisted(() => vi.fn());
 const openDocumentUrl = vi.hoisted(() => vi.fn());
 const cancelDocumentResources = vi.hoisted(() => vi.fn(async () => {}));
+const repositoryEditSnapshot = vi.hoisted(() => vi.fn());
+const repositoryEditSave = vi.hoisted(() => vi.fn());
 vi.mock("../src/lib/api", () => ({
   api: {
     repositoryFileContent,
+    repositoryEditSnapshot,
+    repositoryEditSave,
     repositoryContentSearch,
     filePreview,
     repositoryDocument,
@@ -26,7 +30,14 @@ const cancelHighlight = vi.hoisted(() => vi.fn());
 vi.mock("../src/lib/syntax/client", () => ({ highlightLines: vi.fn(() => cancelHighlight) }));
 import FileContent from "../src/lib/components/FileContent.svelte";
 import { resetSyntaxPrefs } from "../src/lib/syntax/prefs.svelte";
-import type { OpenedRepository, RepositoryContentSearch, RepositoryDocument, RepositoryFileContent } from "../src/lib/types";
+import { createFileEditor } from "../src/lib/file-editor.svelte";
+import type {
+  OpenedRepository,
+  RepositoryContentSearch,
+  RepositoryDocument,
+  RepositoryEditSnapshot,
+  RepositoryFileContent,
+} from "../src/lib/types";
 import { formatBytes } from "../src/lib/ui";
 
 const repoPath = "C:/work/demo";
@@ -94,6 +105,8 @@ beforeEach(() => {
   documentResource.mockReset();
   openDocumentUrl.mockReset();
   cancelDocumentResources.mockClear();
+  repositoryEditSnapshot.mockReset();
+  repositoryEditSave.mockReset();
   resetSyntaxPrefs();
 });
 
@@ -557,7 +570,7 @@ describe("Markdown 阅读接入", () => {
     expect(container.querySelector(".file-status .doc-path")?.getAttribute("title")).toBe("docs/a.md");
     expect(screen.getAllByRole("button", { name: /复制文件路径|复制文档路径/ })).toHaveLength(1);
     expect(screen.getByTitle("64 字节").textContent).toBe(formatBytes(64));
-    expect(screen.getByTitle("文件视图只读，不会改动工作区")).toBeTruthy();
+    expect(screen.getByTitle("查看模式只读，不会改动工作区；切到「编辑」才会修改这个文件")).toBeTruthy();
     const outline = screen.getByRole("button", { name: "文档目录" });
     // 与阅读器自己的目录工具行同一套控件外观，浏览器场景才能靠同一个类找到它。
     expect(outline.classList.contains("md-small-button")).toBe(true);
@@ -776,3 +789,219 @@ describe("Markdown 阅读接入", () => {
     });
   });
 
+/* ------------------------------------------------------------------ *
+ * 轻量编辑（T2）：只编辑当前工作区的这一个文件，能不能编辑以后端完整快照为准；
+ * 草稿按「仓库 + 路径 + baseDigest」留在内存，外部修改绝不覆盖 dirty 草稿。
+ * ------------------------------------------------------------------ */
+describe("轻量编辑", () => {
+  const DIGEST = "a".repeat(64);
+  const NEXT = "b".repeat(64);
+
+  function editSnap(overrides: Partial<RepositoryEditSnapshot> = {}): RepositoryEditSnapshot {
+    return {
+      generation: 4,
+      path: "src/App.ts",
+      state: "editable",
+      editable: true,
+      size: 26,
+      digest: DIGEST,
+      text: "const a = 1;\nconst b = 2;\n",
+      bom: false,
+      lineEnding: "lf",
+      finalNewline: true,
+      message: "",
+      ...overrides,
+    };
+  }
+
+  const editorBox = () => document.querySelector<HTMLTextAreaElement>(".text-editor-input");
+
+  async function enterEdit(extra: Record<string, unknown> = {}) {
+    repositoryFileContent.mockResolvedValue(text());
+    const editor = createFileEditor();
+    const view = render(FileContent, { props: props({ editor, contentVersion: "v1", ...extra }) as never });
+    await waitFor(() => expect(view.container.querySelector('[data-file-line="1"]')).toBeTruthy());
+    await fireEvent.click(screen.getByRole("button", { name: "编辑这个工作区文件" }));
+    return { ...view, editor };
+  }
+
+  it("工作区文本切到编辑：读取完整快照，原生输入后只保存这一个文件", async () => {
+    repositoryEditSnapshot.mockResolvedValue(editSnap());
+    repositoryEditSave.mockResolvedValue(editSnap({ generation: 5, digest: NEXT, text: "const a = 10;\nconst b = 2;\n" }));
+    const onEditSaved = vi.fn();
+    await enterEdit({ onEditSaved });
+    await waitFor(() => expect(editorBox()).toBeTruthy());
+    expect(repositoryEditSnapshot).toHaveBeenCalledWith(repoPath, "src/App.ts", 4, expect.any(Number));
+    expect(editorBox()!.value).toBe("const a = 1;\nconst b = 2;\n");
+    expect(screen.getByText("LF · UTF-8")).toBeTruthy();
+    // 编辑模式下只读视图的查找、换行与「只读」状态条都退场，编辑器自带状态。
+    expect(screen.queryByRole("button", { name: "在文件内搜索" })).toBeNull();
+    expect(document.querySelector(".file-status")).toBeNull();
+    const save = screen.getByRole("button", { name: "保存修改到工作区" }) as HTMLButtonElement;
+    expect(save.disabled, "没有修改时不能保存").toBe(true);
+    expect(save.title).toBe("没有未保存的修改");
+
+    await fireEvent.input(editorBox()!, { target: { value: "const a = 10;\nconst b = 2;\n" } });
+    expect(document.querySelector("[data-edit-status]")?.textContent).toContain("有未保存的修改");
+    expect(save.disabled).toBe(false);
+    await fireEvent.click(save);
+    await waitFor(() =>
+      expect(repositoryEditSave).toHaveBeenCalledWith(repoPath, "src/App.ts", DIGEST, "const a = 10;\nconst b = 2;\n", 4, expect.any(Number)),
+    );
+    await waitFor(() => expect(onEditSaved).toHaveBeenCalledWith(expect.objectContaining({ generation: 5, digest: NEXT })));
+    await waitFor(() => expect(document.querySelector("[data-edit-status]")?.textContent).toContain("已保存"));
+    expect((screen.getByRole("button", { name: "保存修改到工作区" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("后端判为只读的文件说明具体原因，可以回到查看", async () => {
+    repositoryEditSnapshot.mockResolvedValue(
+      editSnap({
+        state: "mixedLineEndings",
+        editable: false,
+        text: null,
+        lineEnding: "mixed",
+        message: "文件混用 LF 与 CRLF 行尾，保持只读以免整份改写。",
+      }),
+    );
+    await enterEdit();
+    expect(await screen.findByText("文件混用 LF 与 CRLF 行尾，保持只读以免整份改写。")).toBeTruthy();
+    expect(editorBox()).toBeNull();
+    expect(screen.queryByRole("button", { name: "保存修改到工作区" })).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "回到查看" }));
+    await waitFor(() => expect(document.querySelector('[data-file-line="1"]')).toBeTruthy());
+    expect(repositoryEditSave).not.toHaveBeenCalled();
+  });
+
+  it("删除的文件与非文本内容没有编辑入口", async () => {
+    repositoryFileContent.mockResolvedValue(text({ kind: "binary", lines: [], message: "二进制内容不作为文本读取。" }));
+    const editor = createFileEditor();
+    const { unmount } = render(FileContent, { props: props({ editor }) as never });
+    await screen.findByText("二进制内容不作为文本读取。");
+    expect(screen.queryByRole("button", { name: "编辑这个工作区文件" })).toBeNull();
+    unmount();
+
+    render(FileContent, { props: props({ editor, path: null, missingPath: "src/App.ts" }) as never });
+    await screen.findByText("文件已删除");
+    expect(screen.queryByRole("button", { name: "编辑这个工作区文件" })).toBeNull();
+    expect(repositoryEditSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("dirty 草稿不能直接回到查看；外部修改只标冲突，不覆盖草稿，也不能按旧基线保存", async () => {
+    repositoryEditSnapshot.mockResolvedValue(editSnap());
+    const { rerender, editor } = await enterEdit();
+    await waitFor(() => expect(editorBox()).toBeTruthy());
+    await fireEvent.input(editorBox()!, { target: { value: "我的草稿\n" } });
+    const view = screen.getByRole("button", { name: "只读查看这个文件" }) as HTMLButtonElement;
+    expect(view.disabled).toBe(true);
+    expect(view.title).toContain("先保存或放弃修改");
+
+    // 外部把文件改成了另一份内容：版本前进触发按完整摘要复核。
+    repositoryEditSnapshot.mockResolvedValue(editSnap({ digest: NEXT, text: "外部内容\n" }));
+    await rerender(props({ editor, contentVersion: "v2" }) as never);
+    const conflict = await screen.findByText(/文件在编辑期间被外部修改/);
+    expect(conflict.closest("[data-edit-conflict]")).toBeTruthy();
+    expect(editorBox()!.value, "草稿保留").toBe("我的草稿\n");
+    const save = screen.getByRole("button", { name: "保存修改到工作区" }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    expect(save.title).toContain("外部修改");
+    expect(repositoryEditSave).not.toHaveBeenCalled();
+
+    // 明确放弃草稿并重新读取，才换到外部内容的新基线。
+    await fireEvent.click(screen.getByRole("button", { name: "放弃草稿并重新读取" }));
+    await waitFor(() => expect(editorBox()!.value).toBe("外部内容\n"));
+    expect(screen.queryByText(/文件在编辑期间被外部修改/)).toBeNull();
+  });
+
+  it("干净的编辑会话遇到外部修改直接换到新内容", async () => {
+    repositoryEditSnapshot.mockResolvedValue(editSnap());
+    const { rerender, editor } = await enterEdit();
+    await waitFor(() => expect(editorBox()).toBeTruthy());
+    repositoryEditSnapshot.mockResolvedValue(editSnap({ digest: NEXT, text: "外部内容\n" }));
+    await rerender(props({ editor, contentVersion: "v2" }) as never);
+    await waitFor(() => expect(editorBox()!.value).toBe("外部内容\n"));
+    expect(screen.queryByText(/文件在编辑期间被外部修改/)).toBeNull();
+  });
+
+  it("保存冲突与写入失败都保留草稿；写入失败可以就地重试", async () => {
+    repositoryEditSnapshot.mockResolvedValue(editSnap());
+    const onEditFailed = vi.fn();
+    await enterEdit({ onEditFailed });
+    await waitFor(() => expect(editorBox()).toBeTruthy());
+    await fireEvent.input(editorBox()!, { target: { value: "草稿 A\n" } });
+    repositoryEditSave.mockRejectedValueOnce({ code: "edit_write_failed", message: "文件是只读的，保存未写入任何内容。" });
+    await fireEvent.click(screen.getByRole("button", { name: "保存修改到工作区" }));
+    expect(await screen.findByText(/保存失败，草稿仍保留：文件是只读的/)).toBeTruthy();
+    expect(onEditFailed).toHaveBeenCalledWith("edit_write_failed");
+    expect(editorBox()!.value).toBe("草稿 A\n");
+
+    repositoryEditSave.mockRejectedValueOnce({ code: "edit_conflict", message: "文件在编辑期间已被外部修改，保存未写入，未覆盖外部内容。" });
+    await fireEvent.click(screen.getByRole("button", { name: "重试保存" }));
+    expect(await screen.findByText("文件在编辑期间已被外部修改，保存未写入，未覆盖外部内容。")).toBeTruthy();
+    expect(editorBox()!.value).toBe("草稿 A\n");
+    // 两次都按同一个基线摘要发送；冲突之后不能再按旧基线保存。
+    expect(repositoryEditSave.mock.calls.map((call) => call[2])).toEqual([DIGEST, DIGEST]);
+    expect((screen.getByRole("button", { name: "保存修改到工作区" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("文本输入与组字不冒泡到工作台；Ctrl S 只保存当前会话", async () => {
+    repositoryEditSnapshot.mockResolvedValue(editSnap());
+    repositoryEditSave.mockResolvedValue(editSnap({ generation: 5, digest: NEXT, text: "x\n" }));
+    await enterEdit();
+    await waitFor(() => expect(editorBox()).toBeTruthy());
+    const outer = vi.fn();
+    window.addEventListener("keydown", outer);
+    try {
+      const box = editorBox()!;
+      await fireEvent.input(box, { target: { value: "x\n" } });
+      // 背景的 Git 快捷键（Alt+M 标记、Ctrl Enter 提交、Ctrl F 查找）都不能从文本框里收到按键。
+      await fireEvent.keyDown(box, { key: "m", altKey: true });
+      await fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
+      await fireEvent.keyDown(box, { key: "f", ctrlKey: true });
+      // 组字中的按键属于输入法，连保存快捷键也不接。
+      await fireEvent.keyDown(box, { key: "s", ctrlKey: true, isComposing: true });
+      expect(outer).not.toHaveBeenCalled();
+      expect(repositoryEditSave).not.toHaveBeenCalled();
+      expect(screen.queryByLabelText("文件内搜索关键词")).toBeNull();
+
+      await fireEvent.keyDown(box, { key: "s", ctrlKey: true });
+      await waitFor(() => expect(repositoryEditSave).toHaveBeenCalledTimes(1));
+      expect(outer).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("keydown", outer);
+    }
+  });
+
+  it("外部编辑请求在路径选中后打开编辑器并定位到行，给出返回差异入口", async () => {
+    repositoryFileContent.mockResolvedValue(text());
+    repositoryEditSnapshot.mockResolvedValue(editSnap());
+    const run = vi.fn();
+    const editor = createFileEditor();
+    render(FileContent, {
+      props: props({
+        editor,
+        editRequest: { path: "src/App.ts", line: 2, serial: 1 },
+        editReturn: { path: "src/App.ts", label: "返回差异", run },
+      }) as never,
+    });
+    await waitFor(() => expect(editorBox()).toBeTruthy());
+    await waitFor(() => expect(editorBox()!.selectionStart).toBe("const a = 1;\n".length));
+    await fireEvent.click(screen.getByRole("button", { name: "返回差异" }));
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("换文件再回来草稿仍在，回来时按完整摘要复核", async () => {
+    repositoryEditSnapshot.mockResolvedValue(editSnap());
+    const { rerender, editor } = await enterEdit();
+    await waitFor(() => expect(editorBox()).toBeTruthy());
+    await fireEvent.input(editorBox()!, { target: { value: "留着的草稿\n" } });
+    repositoryFileContent.mockResolvedValue(text({ path: "src/Other.ts" }));
+    await rerender(props({ editor, path: "src/Other.ts", contentVersion: "o1" }) as never);
+    await waitFor(() => expect(editorBox()).toBeNull());
+    repositoryFileContent.mockResolvedValue(text());
+    const calls = repositoryEditSnapshot.mock.calls.length;
+    await rerender(props({ editor, path: "src/App.ts", contentVersion: "v1" }) as never);
+    await waitFor(() => expect(editorBox()!.value).toBe("留着的草稿\n"));
+    await waitFor(() => expect(repositoryEditSnapshot.mock.calls.length).toBeGreaterThan(calls));
+    expect(editor.dirty(repoPath).map((session) => session.path)).toEqual(["src/App.ts"]);
+  });
+});

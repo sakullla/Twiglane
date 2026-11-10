@@ -88,6 +88,12 @@
      * 前后版本按真实来源与重命名路径传递，缺失的一侧由阅读窗口自己说明。
      */
     onReadDocument?: (sources: PreviewSources, side: "old" | "new", trigger: HTMLElement | null) => void;
+    /**
+     * 在文件视图里编辑当前工作区这一侧的文件（带上当前位置附近的新侧行号）。
+     * 只在新侧就是工作区文件时由调用方传入；历史、旧侧、删除与多文件聚合不传。
+     * 差异本身仍然只读，保存只在文件视图的编辑器里发生。
+     */
+    onEdit?: (line: number | null) => void;
   }
 
   /**
@@ -129,6 +135,7 @@
     asText = false,
     onViewAsText,
     onReadDocument,
+    onEdit,
   }: Props = $props();
   let menu = $state<ContextMenuRequest | null>(null);
   /**
@@ -458,6 +465,16 @@
     if (!sources || !onReadDocument) return;
     onReadDocument(sources, documentSide, trigger);
   }
+  /** 进入编辑时定位的行：视口里第一条带新侧行号的行，没有就从文件开头。 */
+  function editLineHint(): number | null {
+    const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT));
+    for (let index = start; index < lines.length; index += 1) {
+      const no = lines[index]?.newNo;
+      if (typeof no === "number" && no > 0) return no;
+    }
+    return null;
+  }
+
   /* 文件工具里语言标签很窄，任何一档都留在工具条上；历史与完整文件在完整档才直接露出。 */
   let inlineLanguage = $derived(Boolean(currentDiff && !currentDiff.binary && selection));
   let inlineFileHistory = $derived(tier === "full" && Boolean(onFileHistory && selection));
@@ -613,6 +630,7 @@
       inlineReadDocument,
       Boolean(documentSides),
       onToggleReview ? (reviewed ? "reviewed" : "review") : "",
+      onEdit ? "edit" : "",
       currentDiff ? `${currentDiff.additions ?? ""}:${currentDiff.deletions ?? ""}` : "",
     ].join("|"),
   );
@@ -1294,8 +1312,21 @@
         {/if}
       </div>
     {/if}
-    {#if onToggleReview && selection}
+    {#if (onToggleReview || onEdit) && selection}
       <div class="diff-toolbar-group">
+        {#if onEdit}
+          <!-- 只编辑当前工作区这一侧：转到文件视图的编辑器，差异本身不提供保存。 -->
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm diff-edit-btn"
+            aria-label="编辑工作区文件"
+            title="在文件视图里编辑当前工作区的这个文件；保存只写入工作区，不暂存、不提交"
+            onclick={() => onEdit?.(editLineHint())}
+          >
+            <Icon name="pencil" size={13} /><span class="diff-hist-label">编辑</span>
+          </button>
+        {/if}
+        {#if onToggleReview}
         <button
           type="button"
           class="btn btn-ghost btn-sm review-toggle"
@@ -1317,6 +1348,7 @@
           {/if}
           <span class="diff-hist-label">{reviewed ? "已审阅" : "标记已审阅"}</span>
         </button>
+        {/if}
       </div>
     {/if}
     {#if onStageLines && currentDiff && !readOnly}

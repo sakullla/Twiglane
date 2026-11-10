@@ -26,6 +26,7 @@
     forgetClioraSourceUnless,
     watchClioraReviewLinks,
   } from "./lib/cliora-review.svelte";
+  import { fileEditor, type EditContext } from "./lib/file-editor.svelte";
   import { normalizeError } from "./lib/errors";
   import { showMergeAbort } from "./lib/resolve";
   import { clampWidth, FALLBACK_POLL_MS, fitPaneWidth, shouldPoll } from "./lib/layout";
@@ -65,6 +66,7 @@
     RepoHead,
     StatusSnapshot,
     PullIntegration,
+    RepositoryEditSnapshot,
     TaskModal,
     TaskRequest,
     TaskSummary,
@@ -89,7 +91,7 @@
   import CommandPalette from "./lib/components/CommandPalette.svelte";
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./lib/components/ContextMenu.svelte";
-  import { openModalCount } from "./lib/components/Modal.svelte";
+  import Modal, { openModalCount } from "./lib/components/Modal.svelte";
   import CommitDraft from "./lib/components/CommitDraft.svelte";
   import DetailDialog from "./lib/components/DetailDialog.svelte";
   import DiffView from "./lib/components/DiffView.svelte";
@@ -217,6 +219,21 @@
   let readPhase: "idle" | "reading" | "settled" = "idle";
   let dependencyOpen = $state(false);
   let historyPanel = $state<Promise<typeof import("./lib/components/HistoryPanel.svelte")> | null>(null);
+  /**
+   * 轻量编辑：从差异或任务净差异进入文件视图编辑的请求，以及编辑器里「返回差异」要回到哪里。
+   * 草稿本身在 fileEditor 里，按「仓库 + 路径 + baseDigest」保留，只在内存中。
+   */
+  let editRequest = $state<{ path: string; line: number | null; serial: number } | null>(null);
+  let editOrigin = $state<{ path: string; view: "changes" | "task"; side: DiffSide } | null>(null);
+  let editSerial = 0;
+  /** 换仓库或返回来源前的「保存 / 放弃 / 取消」；一次只有一个。 */
+  let editLeave = $state<{
+    purpose: string;
+    paths: string[];
+    busy: boolean;
+    error: string | null;
+    resolve: (proceed: boolean) => void;
+  } | null>(null);
   let writeLocked = $derived(pending !== null || reading);
   /** 左栏只由用户隐藏（⌘/Ctrl+B）：窗口变窄不会自动隐藏文件列表，只收紧渲染宽度（R14）。 */
   const FALLBACK_WINDOW_WIDTH = 1280;
@@ -1139,6 +1156,13 @@
     const closingClone = cloneOpen;
     // 独立打开别的仓库会清掉 cliora 来源展示；同一 worktree 的重新打开保留来源。
     forgetClioraSourceUnless(next.summary.path);
+    // 编辑会话按仓库归属：别的仓库里干净的会话结束；没有经过关卡的入口（例如克隆完成、切到另一个
+    // worktree）留下的未保存草稿不丢，回到那个仓库后仍可保存或放弃。
+    const keptDrafts = fileEditor.retainRepository(next.summary.path);
+    if (opened?.summary.path !== next.summary.path) {
+      editOrigin = null;
+      editRequest = null;
+    }
     repositoryEpoch += 1;
     if (draftTimer) clearTimeout(draftTimer);
     drafts.load(next.summary.path, next.draft);
@@ -1193,6 +1217,9 @@
     void loadSelectedDiff();
     void reverifyReviewed();
     if (closingClone) closeRepoDialogs();
+    if (keptDrafts.length > 0) {
+      notice(`另有 ${keptDrafts.length} 个文件的未保存草稿留在原仓库，回到那个仓库后可以保存或放弃。`);
+    }
   }
 
   /**
@@ -1457,6 +1484,146 @@
   function openFileDiff(path: string, side: DiffSide) {
     showChanges();
     selectFile({ path, side });
+  }
+
+  /**
+   * 从差异（改动或任务净差异）进入编辑：只切到文件视图并定位这个工作区文件，
+   * 由内容区读取完整快照。cliora 来源、任务范围与审阅进度都不动。
+   */
+  async function editInFiles(path: string, line: number | null, view: "changes" | "task", side: DiffSide = "unstaged") {
+    if (!filesViewEnabled) {
+      notice("文件视图已在设置里关闭，打开后才能编辑工作区文件。");
+      return;
+    }
+    editOrigin = { path, view, side };
+    showFiles();
+    await tick();
+    await filesView?.reveal(path, null);
+    editRequest = { path, line, serial: ++editSerial };
+  }
+
+  /** 编辑器里的「返回差异」：这个文件还有未保存修改时先问保存、放弃或取消。 */
+  async function returnFromEdit() {
+    const origin = editOrigin;
+    const current = opened;
+    if (!origin || !current) return;
+    if (!(await confirmEditorLeave("返回差异", [origin.path]))) return;
+    if (opened?.summary.path !== current.summary.path) return;
+    editOrigin = null;
+    // 已经保存或放弃：干净的会话结束，下次打开这个文件仍是只读查看。
+    if (fileEditor.dirty(current.summary.path).every((session) => session.path !== origin.path)) {
+      fileEditor.close(current.summary.path, origin.path);
+    }
+    if (origin.view === "task") {
+      useView("history");
+      return;
+    }
+    const file = current.snapshot.files.find((item) => item.path === origin.path);
+    if (!file) {
+      // 保存后这个文件可能已经没有改动：回到改动视图即可，不硬选一个不存在的差异。
+      showChanges();
+      return;
+    }
+    const side: DiffSide = file.untracked || file.unstaged !== "none" ? "unstaged" : "staged";
+    openFileDiff(origin.path, side);
+  }
+
+  /**
+   * 改动差异里可以进入编辑的路径：只有未暂存一侧（新侧就是工作区文件），且不是删除或未解决冲突；
+   * 已暂存一侧的新侧是索引，多选是聚合视图，都没有这个入口。
+   */
+  let changesEditPath = $derived.by(() => {
+    if (!filesViewEnabled || !opened || !selected || multiActive || selected.side !== "unstaged") return null;
+    const path = selected.path;
+    const file = opened.snapshot.files.find((item) => item.path === path);
+    if (!file || file.unmerged || file.unstaged === "deleted") return null;
+    return path;
+  });
+
+  let editReturn = $derived(
+    editOrigin
+      ? {
+          path: editOrigin.path,
+          label: editOrigin.view === "task" ? "返回任务差异" : "返回差异",
+          run: () => void returnFromEdit(),
+        }
+      : null,
+  );
+
+  function editContext(): EditContext {
+    return { generation: opened?.generation ?? 0, nextId, onGeneration: adoptGeneration };
+  }
+
+  /**
+   * 保存成功：只改了这一个工作区文件。按新代次刷新状态与当前差异，并重验两种范围的已审阅标记：
+   * 内容变了的文件旧 token 不再作证。不暂存、不提交，也不改变 cliora 结果。
+   */
+  function handleEditSaved(snapshot: RepositoryEditSnapshot) {
+    adoptGeneration(snapshot.generation);
+    live = `已保存 ${snapshot.path}：只写入工作区，没有暂存或提交。`;
+    void refresh();
+    void reverifyTaskReviewed();
+  }
+
+  /** 保存失败（含冲突）：草稿留在编辑器里，这里只按真实状态重读。 */
+  function handleEditFailed(_code: string) {
+    void refresh();
+  }
+
+  /**
+   * 换仓库或返回来源前的关卡：当前仓库（或指定文件）有未保存草稿时，必须选择保存、放弃或取消。
+   * 没有草稿直接放行；已经有一个关卡在等回答时，新的请求按取消处理。
+   */
+  function confirmEditorLeave(purpose: string, paths: string[] | null = null): Promise<boolean> {
+    const repo = opened?.summary.path;
+    if (!repo) return Promise.resolve(true);
+    const dirty = fileEditor
+      .dirty(repo)
+      .filter((session) => !paths || paths.includes(session.path))
+      .map((session) => session.path);
+    if (dirty.length === 0) return Promise.resolve(true);
+    if (editLeave) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      editLeave = { purpose, paths: dirty, busy: false, error: null, resolve };
+    });
+  }
+
+  function settleEditLeave(proceed: boolean) {
+    const pending = editLeave;
+    if (!pending || pending.busy) return;
+    editLeave = null;
+    pending.resolve(proceed);
+  }
+
+  /** 逐个保存；任何一个失败（含冲突）就停在对话框里说明，草稿不丢，可以放弃或取消。 */
+  async function saveEditLeave() {
+    const pending = editLeave;
+    const repo = opened?.summary.path;
+    if (!pending || pending.busy || !repo) return;
+    pending.busy = true;
+    pending.error = null;
+    for (const path of pending.paths) {
+      if (!fileEditor.dirty(repo).some((session) => session.path === path)) continue;
+      const outcome = await fileEditor.save(repo, path, editContext());
+      if (!outcome.ok) {
+        pending.busy = false;
+        pending.error = `${path} 没有保存：${outcome.message || "保存失败"}。草稿仍保留。`;
+        handleEditFailed(outcome.code);
+        return;
+      }
+      handleEditSaved(outcome.snapshot);
+    }
+    pending.busy = false;
+    settleEditLeave(true);
+  }
+
+  /** 明确放弃：只丢掉这几个文件的内存草稿，工作区文件保持读取时的样子。 */
+  function discardEditLeave() {
+    const pending = editLeave;
+    const repo = opened?.summary.path;
+    if (!pending || pending.busy || !repo) return;
+    for (const path of pending.paths) fileEditor.close(repo, path);
+    settleEditLeave(true);
   }
 
   /**
@@ -2322,6 +2489,7 @@
     try {
       const path = droppedPath ?? await pickDirectory("添加已有仓库");
       if (!path) return;
+      if (!(await confirmEditorLeave("打开另一个仓库"))) return;
       if ((await flushDraft(drafts.path)) === false) return;
       live = "正在读取仓库状态";
       // 和切换最近仓库同一条路径：先停掉当前仓库还在排队的只读请求（历史分页、文件树、
@@ -2339,6 +2507,7 @@
 
   async function chooseCreate() {
     if (pending || reading) return;
+    if (!(await confirmEditorLeave("新建并打开仓库"))) return;
     const path = await pickDirectory("选择要新建仓库的目录");
     if (!path) return;
     confirmPath = path;
@@ -2421,6 +2590,15 @@
       notice("请先关闭当前对话框并等待操作完成，再从 cliora 重新发起审查。");
       return;
     }
+    // 链接要打开另一个工作区：当前仓库的未保存草稿先保存、放弃或取消；取消就拒绝这条链接。
+    if (opened && !samePath(opened.summary.path, request.worktreePath)) {
+      const proceed = await confirmEditorLeave("按 cliora 审查链接打开另一个工作区");
+      if (!proceed || serial !== clioraLinkSerial) {
+        await rejectCliora(request, "open_failed");
+        if (!proceed) notice("已保留未保存的编辑草稿，没有打开 cliora 审查链接。");
+        return;
+      }
+    }
     try {
       await api.cancelReads();
       if (serial !== clioraLinkSerial) return;
@@ -2460,17 +2638,33 @@
   async function returnToCliora() {
     const source = clioraReview.source;
     if (!source) return;
+    // 返回来源前未保存的草稿必须有结论：保存只写工作区，不会变成提交或合入结果。
+    if (!(await confirmEditorLeave("返回 cliora"))) return;
+    if (clioraReview.source?.reviewId !== source.reviewId) return;
     const { outcome, headOid } = clioraReturnOutcome();
     try {
       await api.clioraReviewReturn(source.reviewId, source.sessionId, outcome, headOid);
+      // 普通保存不制造提交或合入结果；工作区还有未提交修改时如实说出来，不再一律说「只做了浏览」。
+      const uncommitted = opened?.snapshot.files.length ?? 0;
       notice(
-        outcome === "reviewed"
-          ? "已返回 cliora：本次只做了浏览，没有提交或合入。"
-          : "已返回 cliora，提交或合入结果以待复核声明发送。",
+        outcome !== "reviewed"
+          ? "已返回 cliora，提交或合入结果以待复核声明发送。"
+          : uncommitted > 0
+            ? `已返回 cliora：本次没有提交或合入，工作区还有 ${uncommitted} 个未提交的改动。`
+            : "已返回 cliora：本次只做了浏览，没有提交或合入。",
       );
     } catch (error) {
       showError(error);
     }
+  }
+
+  /** 两个仓库路径是否指向同一处：只抹平分隔符与尾部斜杠，Windows 下不区分大小写。 */
+  function samePath(a: string, b: string): boolean {
+    const norm = (value: string) => {
+      const flat = value.replace(/\\/g, "/").replace(/\/+$/, "");
+      return /^[a-z]:\//i.test(flat) ? flat.toLowerCase() : flat;
+    };
+    return norm(a) === norm(b);
   }
 
   async function openRecent(path: string) {
@@ -2479,6 +2673,8 @@
       notice("请先关闭当前对话框，再切换仓库。");
       return;
     }
+    // 切到另一个仓库前，当前仓库的未保存编辑草稿必须保存、放弃或取消。
+    if (opened && !samePath(opened.summary.path, path) && !(await confirmEditorLeave("切换仓库"))) return;
     if (switchBlocked(commandState)) {
       // R11：仓库弹层与命令面板已按同一条判定禁用，但快捷入口和测量钩子仍会走到这里，
       // 所以不能静默返回——把同一个原因说出来，各入口的结论才一致。
@@ -2528,11 +2724,15 @@
   }
 
   async function forget(path: string) {
+    if (opened?.summary.path === path && !(await confirmEditorLeave("关闭并移除这个仓库"))) return;
     try {
       recent = await api.forgetRecent(path);
       if (opened?.summary.path === path) {
         await api.closeRepository();
         repositoryEpoch += 1;
+        fileEditor.retainRepository("");
+        editOrigin = null;
+        editRequest = null;
         opened = null;
         selected = null;
         selectedSet = [];
@@ -3640,6 +3840,7 @@
       onSelection={(path) => (taskSelectedPath = path)}
       onReviewNav={(nav) => (taskReviewNav = nav)}
       onSummary={(summary) => (taskSummary = summary)}
+      onEditFile={filesViewEnabled ? (path, line) => void editInFiles(path, line, "task") : undefined}
     />
   {/if}
 {/snippet}
@@ -3803,6 +4004,11 @@
                   reviewed={selected ? reviewedSet.has(selected.path) : false}
                   reviewBusy={selected ? reviewBusy === selected.path : false}
                   onToggleReview={selected ? () => void toggleReviewed(selected!.path) : undefined}
+                  onEdit={changesEditPath
+                    ? (line) => {
+                        if (changesEditPath) void editInFiles(changesEditPath, line, "changes", "unstaged");
+                      }
+                    : undefined}
                 />
               {/if}
             </div>
@@ -3834,6 +4040,10 @@
               toAbsolute={absolutePath}
               onNav={(nav) => (filesNav = nav)}
               {paneHead}
+              {editRequest}
+              {editReturn}
+              onEditSaved={handleEditSaved}
+              onEditFailed={handleEditFailed}
             />
           </div>
           {/if}
@@ -3923,6 +4133,46 @@
 
 {#if contextMenu}
   <ContextMenu request={contextMenu} onClose={() => (contextMenu = null)} />
+{/if}
+
+{#if editLeave}
+  <!-- 未保存草稿的关卡：三个选择都明确写出后果；打开时焦点停在对话框本身，回车不会误丢或误存草稿。 -->
+  <Modal
+    title="有未保存的编辑"
+    titleId="edit-leave-title"
+    icon="pencil"
+    tone="warning"
+    size="sm"
+    description={`${editLeave.purpose}之前，先处理这些文件里还没保存的修改。`}
+    locked={editLeave.busy}
+    onClose={() => settleEditLeave(false)}
+  >
+    <div class="confirm-body" data-modal-impact="edit-leave">
+      <ul class="confirm-targets" aria-label="未保存的文件">
+        {#each editLeave.paths as path (path)}
+          <li title={path}>
+            <span class="confirm-target-icon"><Icon name="file" size={14} /></span>
+            <span class="confirm-target-main"><span class="confirm-target-name">{path}</span></span>
+          </li>
+        {/each}
+      </ul>
+      <ul class="confirm-notes">
+        <li class="info"><Icon name="info" size={14} /><span>保存只写入工作区文件，不暂存、不提交；文件在编辑期间被外部修改时不会覆盖。</span></li>
+        <li class="warn"><Icon name="alert" size={14} /><span>放弃会丢掉这些内存草稿，工作区文件保持原样。</span></li>
+      </ul>
+      {#if editLeave.error}
+        <div class="callout error" role="alert"><Icon name="alert-circle" size={15} /><span>{editLeave.error}</span></div>
+      {/if}
+    </div>
+    {#snippet footer()}
+      <span class="spacer"></span>
+      <button type="button" class="btn btn-secondary" title={editLeave?.busy ? "正在保存，完成后才能取消" : "保留草稿，不继续这次操作"} disabled={editLeave?.busy} onclick={() => settleEditLeave(false)}>取消</button>
+      <button type="button" class="btn btn-secondary btn-danger-soft" title={editLeave?.busy ? "正在保存" : "丢掉这些内存草稿后继续，工作区文件保持原样"} disabled={editLeave?.busy} onclick={discardEditLeave}>放弃修改</button>
+      <button type="button" class="btn btn-primary" title={editLeave?.busy ? "正在保存" : "逐个保存到工作区后继续；任何一个失败都会停下说明"} aria-busy={editLeave?.busy} disabled={editLeave?.busy} onclick={() => void saveEditLeave()}>
+        {#if editLeave?.busy}<span class="spinner"></span>{/if}保存
+      </button>
+    {/snippet}
+  </Modal>
 {/if}
 
 {#if worktreeRemoval}

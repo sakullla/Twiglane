@@ -2188,6 +2188,25 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 /* 目录入口沿用 .md-small-button 的外观，高度贴合工具条里的其它小按钮。 */
 .file-outline-btn { min-height: 26px; padding: 0 var(--space-8); }
 @container diff (max-width: 520px) { .file-status-item:last-child { display: none; } }
+/* 轻量编辑：原生 textarea + 虚拟化行号。不换行、等宽、行高 20px，与只读代码页同一密度。 */
+.file-edit-mode button { display: inline-flex; align-items: center; gap: 4px; }
+.text-editor { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.text-editor-bar { display: flex; align-items: center; gap: var(--space-8); flex: none; min-height: 34px; padding: 4px var(--space-8) 4px var(--space-12); border-bottom: 1px solid var(--border); background: var(--surface-2); font-size: var(--text-xs); color: var(--fg-muted); }
+.text-editor-status { display: inline-flex; align-items: center; gap: 6px; flex: none; white-space: nowrap; }
+.text-editor-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-subtle); }
+.text-editor-status.dirty { color: var(--fg); }
+.text-editor-status.dirty .text-editor-dot { background: var(--warning); }
+.text-editor-status.conflict { color: var(--danger-text); }
+.text-editor-status.conflict .text-editor-dot { background: var(--danger); }
+.text-editor-meta { flex: none; color: var(--fg-subtle); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.text-editor-alert { flex-wrap: wrap; }
+.text-editor-body { position: relative; display: flex; flex: 1; min-height: 0; background: var(--surface); }
+.text-editor-gutter { position: relative; flex: none; width: 56px; overflow: hidden; padding-top: 6px; border-right: 1px solid var(--border); color: var(--fg-subtle); font-family: var(--mono); font-size: var(--text-xs); line-height: 20px; text-align: right; user-select: none; }
+.text-editor-numbers { display: flex; flex-direction: column; padding-right: var(--space-8); will-change: transform; }
+.text-editor-numbers span { height: 20px; font-variant-numeric: tabular-nums; }
+.text-editor-input { flex: 1; min-width: 0; min-height: 0; margin: 0; padding: 6px var(--space-12) var(--space-12); border: 0; border-radius: 0; resize: none; overflow: auto; white-space: pre; overflow-wrap: normal; background: transparent; color: var(--fg); font-family: var(--mono); font-size: var(--text-sm); line-height: 20px; tab-size: 4; outline: none; }
+.text-editor-input:focus-visible { box-shadow: inset 0 0 0 2px var(--focus); }
+.text-editor-input[readonly] { color: var(--fg-muted); }
 .file-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; padding: var(--space-32) var(--space-24); text-align: center; color: var(--fg-muted); min-height: 0; }
 .file-state strong { color: var(--fg); font-size: var(--text-base); font-weight: var(--weight-semibold); }
 .file-state p { max-width: 420px; font-size: var(--text-sm); line-height: var(--leading-relaxed); word-break: break-word; }

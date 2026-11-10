@@ -2,7 +2,7 @@
   import { tick, untrack } from "svelte";
   import type { Snippet } from "svelte";
   import { changeDecorations, createFilesStore, isDeletedChange, isDirectoryKind, type FileTreeRow } from "../files.svelte";
-  import type { DiffSide, OpenedRepository } from "../types";
+  import type { DiffSide, OpenedRepository, RepositoryEditSnapshot } from "../types";
   import { fileNavState, type FileNavState } from "../ui";
   import FileContent from "./FileContent.svelte";
   import FileSearch from "./FileSearch.svelte";
@@ -10,7 +10,7 @@
   import PaneResizer from "./PaneResizer.svelte";
 
   /**
-   * 文件主视图：左侧按需目录树（或搜索面板），右侧只读内容。三个视图同时保活，
+   * 文件主视图：左侧按需目录树（或搜索面板），右侧内容（默认只读查看，工作区文本可切到轻量编辑）。三个视图同时保活，
    * 隐藏时停止新读取，重新激活按当前代次重验；切换仓库清空全部树、搜索与选择。
    */
   interface Props {
@@ -37,6 +37,12 @@
     onNav: (nav: FileNavState | null) => void;
     /** 三个视图共用的左栏头部（视图切换 + 临时保存），保持位置与宽度一致。 */
     paneHead?: Snippet;
+    /** 从差异进入编辑的请求：文件定位完成后由内容区打开编辑会话。 */
+    editRequest?: { path: string; line: number | null; serial: number } | null;
+    /** 编辑器里的「返回差异」入口，只在同一路径上显示。 */
+    editReturn?: { path: string; label: string; run: () => void } | null;
+    onEditSaved?: (snapshot: RepositoryEditSnapshot) => void;
+    onEditFailed?: (code: string) => void;
   }
 
   let {
@@ -57,6 +63,10 @@
     toAbsolute,
     onNav,
     paneHead,
+    editRequest = null,
+    editReturn = null,
+    onEditSaved,
+    onEditFailed,
   }: Props = $props();
 
   const store = createFilesStore({
@@ -281,5 +291,9 @@
     onFileHistory={onFileHistory}
     onOpenDiff={onOpenDiff}
     onRevealPath={(path) => store.locate(path, null)}
+    {editRequest}
+    {editReturn}
+    {onEditSaved}
+    {onEditFailed}
   />
 </div>

@@ -339,3 +339,64 @@ export function mockDocumentResource(source: { revision: string; path: string },
   return { generation, kind: "image", size: 68, dataUrl: PIXEL_PNG, entries: [], truncated: false, message: "", lfsOid: null, canDownload: false };
 }
 
+
+/**
+ * 轻量编辑的 mock：完整快照与保存都按内存里的 FILES 计算，保存会改写这份内存数据。
+ * 摘要只是可比较的指纹（不是真实 SHA-256），用来演示「基线没变才写入」。
+ * 只用于浏览器预览，不代表真实文件写入、原子替换或 Git 行为。
+ */
+function mockDigest(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0").repeat(8);
+}
+
+export function mockEditSnapshot(relative: string, generation: number, mode: string | null) {
+  const base = { generation, path: relative, bom: false, finalNewline: false, message: "" };
+  const text = FILES[relative];
+  if (text === undefined) {
+    const state = RESOURCES.has(relative) ? "resource" : relative === "assets/blob.bin" ? "binary" : "missing";
+    const message = state === "resource" ? "资源文件保持只读预览。" : state === "binary" ? "二进制内容不能作为文本编辑。" : "文件不存在。";
+    return { ...base, state, editable: false, size: 0, digest: null, text: null, lineEnding: "none", message };
+  }
+  if (mode === "mixed") {
+    return {
+      ...base,
+      state: "mixedLineEndings",
+      editable: false,
+      size: text.length,
+      digest: mockDigest(text),
+      text: null,
+      lineEnding: "mixed",
+      message: "文件混用 LF 与 CRLF 行尾，保持只读，避免保存时整份改写行尾。",
+    };
+  }
+  return {
+    ...base,
+    state: "editable",
+    editable: true,
+    size: text.length,
+    digest: mockDigest(text),
+    text,
+    lineEnding: text.includes("\n") ? "lf" : "none",
+    finalNewline: text.endsWith("\n"),
+  };
+}
+
+export function mockEditSave(relative: string, expectedDigest: string, content: string, generation: number, mode: string | null) {
+  const current = FILES[relative];
+  if (current === undefined || mode === "mixed") {
+    return { error: { code: "edit_conflict", message: "文件已不再处于可编辑状态，保存未写入，未覆盖外部内容。" } };
+  }
+  if (mode === "fail") {
+    return { error: { code: "edit_write_failed", message: "文件是只读的，保存未写入任何内容。" } };
+  }
+  if (mode === "conflict" || mockDigest(current) !== expectedDigest) {
+    return { error: { code: "edit_conflict", message: "文件在编辑期间已被外部修改，保存未写入，未覆盖外部内容。" } };
+  }
+  FILES[relative] = content;
+  return { snapshot: mockEditSnapshot(relative, generation, null) };
+}

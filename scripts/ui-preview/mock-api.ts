@@ -15,7 +15,7 @@ import { createTextDiff } from "../../src/lib/diff";
 /** 预览 mock 的自我标识：健康端点和回归测试靠它确认浏览器拿到的是 mock，而不是真实 Tauri api。 */
 export const UI_PREVIEW_MOCK = true;
 import { sampleFor } from "./samples";
-import { mockContentSearch, mockDirectory, mockDocument, mockDocumentResource, mockFilePage, mockPathSearch } from "./mock-files";
+import { mockContentSearch, mockDirectory, mockDocument, mockDocumentResource, mockEditSave, mockEditSnapshot, mockFilePage, mockPathSearch } from "./mock-files";
 
 const wait = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms));
 const now = Math.floor(Date.now() / 1000);
@@ -34,6 +34,8 @@ const now = Math.floor(Date.now() / 1000);
  * ?task=error / ?task=empty 让任务范围读取失败或成功但为空；?worktree=stale / ?worktree=error
  * 让工作区总览出现「远程过期」的一项或整批失败；?history=hang 让最新的两条提交详情永不返回
  * （复现「旧批次挂住、换选择还要能读」），?history=detail-error 让多选详情全部失败。
+ * 轻量编辑：?edit=conflict 让保存一律返回 edit_conflict（草稿保留），?edit=fail 让保存写入失败，
+ * ?edit=mixed 让编辑快照判为混合行尾只读。保存成功只改写 mock 内存，不代表真实文件写入。
  */
 const previewParams = new URLSearchParams(location.search);
 const healthyGit = { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "Git 2.49.0 可用" };
@@ -924,6 +926,16 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       return Promise.reject({ code: "path_unreadable", message: "无法读取这个文件：权限不足。" });
     }
     return ok(mockFilePage(relative, offset, limit, generation), 40);
+  },
+  repositoryEditSnapshot: (_repo: string, relative: string, generation: number) =>
+    ok(mockEditSnapshot(relative, generation, previewParams.get("edit")), 60),
+  repositoryEditSave: async (_repo: string, relative: string, expectedDigest: string, content: string, _generation: number) => {
+    await wait(160);
+    // 保存成功推进代次，与真实后端一致：随后的状态刷新按新代次读取。
+    const result = mockEditSave(relative, expectedDigest, content, generation + 1, previewParams.get("edit"));
+    if ("error" in result) return Promise.reject(result.error);
+    generation += 1;
+    return result.snapshot;
   },
   /**
    * 只读文档正文：?doc=error 演示读取失败，?doc=large 演示超过排版预览上限时仍可读源码，

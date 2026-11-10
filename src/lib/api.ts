@@ -26,6 +26,7 @@ import type {
   RecentRepo,
   RepositoryContentSearch,
   RepositoryDirectory,
+  RepositoryEditSnapshot,
   RepositoryFileContent,
   RepositoryPathSearch,
   RepositoryReviewToken,
@@ -312,6 +313,37 @@ export const api = {
       relative,
       offset,
       limit,
+      generation,
+      requestId,
+    }),
+  /**
+   * 轻量编辑读取：当前工作区普通文件的完整文本快照（内容摘要、BOM、统一行尾）。
+   * 不适用时返回只读原因，不改变分页只读合同。
+   */
+  repositoryEditSnapshot: (path: string, relative: string, generation: number, requestId: number) =>
+    invoke<RepositoryEditSnapshot>("repository_edit_snapshot", {
+      path,
+      relative,
+      generation,
+      requestId,
+    }),
+  /**
+   * 轻量编辑保存：后端在写锁内复核 expectedDigest 与可编辑能力后原子替换目标文件。
+   * 只改这一个工作区文件，不暂存、不提交；摘要不符返回 edit_conflict 且不写入。
+   */
+  repositoryEditSave: (
+    path: string,
+    relative: string,
+    expectedDigest: string,
+    content: string,
+    generation: number,
+    requestId: number,
+  ) =>
+    invoke<RepositoryEditSnapshot>("repository_edit_save", {
+      path,
+      relative,
+      expectedDigest,
+      content,
       generation,
       requestId,
     }),

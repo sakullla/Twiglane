@@ -97,6 +97,11 @@
     onSummary?: (summary: TaskSummary) => void;
     /** 是否显示在历史详情区：选中提交时隐藏但保活，读取与选择都不丢。 */
     visible?: boolean;
+    /**
+     * 编辑这个任务文件在当前工作区里的版本：净差异本身仍只读，编辑在文件视图里发生，
+     * 保存后任务按新的代次重读。删除与冲突文件没有这个入口。
+     */
+    onEditFile?: (path: string, line: number | null) => void;
   }
 
   let {
@@ -131,6 +136,7 @@
     onReviewNav,
     onSummary,
     visible = true,
+    onEditFile,
   }: Props = $props();
 
   /** 这些错误说明「任务范围不再成立」，要撤下结果而不是把它当成一次普通读取失败。 */
@@ -225,6 +231,11 @@
   let selectedRebuilt = $derived(
     selected ? (rows.find((row) => row.path === selected?.path)?.rebuilt ?? false) : false,
   );
+  /** 净结果里这条路径仍在工作区（不是删除、也不是未解决冲突）：只有这时才给编辑入口。 */
+  let selectedEditable = $derived.by(() => {
+    const row = selected ? rows.find((item) => item.path === selected?.path) : null;
+    return Boolean(row && row.unstaged !== "deleted" && !row.unmerged);
+  });
 
   let nav: FileNavState = $derived.by(() => {
     const items: FileRow[] = multiActive ? selectedRows : rows;
@@ -714,6 +725,12 @@
               fileCount={rows.length}
               onRetry={() => void loadSelectedDiff()}
               onHunkNav={onHunkNav}
+              onEdit={onEditFile && selected && selectedEditable
+                ? (line) => {
+                    // 编辑的是当前工作区文件，不是这份聚合差异；cliora 来源与任务范围保持不变。
+                    if (selected) onEditFile?.(selected.path, line);
+                  }
+                : undefined}
             />
           {/if}
         </div>

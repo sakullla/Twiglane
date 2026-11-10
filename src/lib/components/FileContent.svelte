@@ -5,6 +5,7 @@
   import { fileTone, matchSnippet } from "../file-kind";
   import { trackCodeScroll } from "../codeScroll.svelte";
   import { normalizeError } from "../errors";
+  import { fileEditor, isDirty, type EditContext, type FileEditor } from "../file-editor.svelte";
   import {
     createDocumentSession,
     initialDocumentMode,
@@ -21,6 +22,7 @@
   import type {
     OpenedRepository,
     RepositoryContentSearch,
+    RepositoryEditSnapshot,
     RepositoryFileContent,
     RepositorySearchScope,
     DocumentSource,
@@ -33,10 +35,14 @@
   import FileNav from "./FileNav.svelte";
   import Icon from "./Icon.svelte";
   import LanguagePicker from "./LanguagePicker.svelte";
+  import RepositoryTextEditor from "./RepositoryTextEditor.svelte";
 
   /**
-   * 只读文件内容：文本分页按需读取，代码页复用现有的语言推断、语言选择器与分词；
-   * 资源文件交给 file_preview（worktree 版本）。这里没有保存、编辑或执行入口。
+   * 文件内容：查看模式只读，文本分页按需读取，代码页复用现有的语言推断、语言选择器与分词；
+   * 资源文件交给 file_preview（worktree 版本）。
+   *
+   * 编辑模式只针对当前工作区的这一个文件：完整快照 + 原生文本输入 + 手动保存，
+   * 能不能编辑由后端快照决定（不按扩展名猜）。没有运行、终端、命令执行或 IDE 入口。
    */
   interface Props {
     /** 视图可见：隐藏时不发起新读取，重新激活时按当前代次重验。 */
@@ -63,6 +69,16 @@
     nav?: FileNavState | null;
     /** 文档内相对链接：在工作区里同步文件树并选中目标（历史/暂存区阅读不使用）。 */
     onRevealPath?: (path: string, line: number | null) => boolean | Promise<boolean>;
+    /** 编辑会话表；不传时用应用内唯一的那一份。 */
+    editor?: FileEditor;
+    /** 外部（差异、任务净差异）要求进入编辑：序号变化且路径已选中时生效。 */
+    editRequest?: { path: string; line: number | null; serial: number } | null;
+    /** 从差异进来的返回入口：只在同一路径上显示。 */
+    editReturn?: { path: string; label: string; run: () => void } | null;
+    /** 保存成功：外壳按新快照刷新状态、差异与审阅标记。 */
+    onEditSaved?: (snapshot: RepositoryEditSnapshot) => void;
+    /** 保存失败：外壳按真实状态重读（写入可能部分发生）。 */
+    onEditFailed?: (code: string) => void;
   }
 
   let {
@@ -82,6 +98,11 @@
     onOpenDiff,
     nav = null,
     onRevealPath,
+    editor = fileEditor,
+    editRequest = null,
+    editReturn = null,
+    onEditSaved,
+    onEditFailed,
   }: Props = $props();
 
   /** 与 components.css 的 .file-line 行高一致：虚拟窗口按它算，行号与代码同高。 */
@@ -162,6 +183,90 @@
   let previewSources = $derived(
     path ? { repository: opened.summary.path, old: null, new: { revision: "worktree", path } } : null,
   );
+
+  /*
+   * 编辑模式：这个文件有编辑会话就是在编辑。会话按「仓库 + 路径」留在内存里，
+   * 换文件再回来草稿还在；删除的文件与历史版本不会走到这里。
+   */
+  let editSession = $derived(path && !missingPath ? editor.session(opened.summary.path, path) : null);
+  let editing = $derived(editSession !== null);
+  let editDirty = $derived(isDirty(editSession));
+  /** 只有当前工作区的文本才给编辑入口；最终能否编辑仍以后端完整快照为准。 */
+  let canEdit = $derived(Boolean(path && !missingPath && (editing || content?.kind === "text")));
+  let editLine = $state<number | null>(null);
+  let editLineSerial = $state(0);
+  let showReturn = $derived(Boolean(editReturn && path && editReturn.path === path));
+
+  function editContext(): EditContext {
+    return { generation: opened.generation, nextId, onGeneration };
+  }
+
+  function startEdit(line: number | null = null): void {
+    if (!path || missingPath) return;
+    editLine = line;
+    editLineSerial += 1;
+    // 从查看切过来：文件内查找、跳行与整份选中都属于只读视图，先收起。
+    searchOpen = false;
+    gotoOpen = false;
+    allSelected = false;
+    void editor.open(opened.summary.path, path, editContext());
+  }
+
+  /** 回到查看：有未保存修改时不允许（按钮就地禁用并说明），干净会话直接结束并重读当前内容。 */
+  function stopEdit(): void {
+    if (!path || !editSession || isDirty(editSession)) return;
+    editor.close(opened.summary.path, path);
+    void read(path, 0, false, generation);
+  }
+
+  async function saveEdit(): Promise<void> {
+    if (!path) return;
+    const outcome = await editor.save(opened.summary.path, path, editContext());
+    if (outcome.ok) onEditSaved?.(outcome.snapshot);
+    else onEditFailed?.(outcome.code);
+  }
+
+  function reloadEdit(): void {
+    if (!path) return;
+    void editor.reload(opened.summary.path, path, editContext());
+  }
+
+  /* 外部要求进入编辑（差异里的「编辑」）：等文件树选中同一路径后生效，同一序号只生效一次。 */
+  let lastEditRequest = 0;
+  $effect(() => {
+    const request = editRequest;
+    const target = path;
+    if (!request || request.serial === lastEditRequest || request.path !== target || missingPath) return;
+    untrack(() => {
+      lastEditRequest = request.serial;
+      startEdit(request.line);
+    });
+  });
+
+  /*
+   * 文件版本变化或重新回到有会话的文件：按完整内容摘要复核。
+   * 干净会话换到新基线，dirty 草稿保留并标出冲突，绝不被外部内容覆盖。
+   * 本组件刚打开、正在读取的会话不重复复核。
+   */
+  let lastEditCheck = "";
+  $effect(() => {
+    const target = path;
+    const repoPath = opened.summary.path;
+    const version = fileVersion;
+    const key = reloadKey;
+    const visible = active;
+    const phase = editSession?.phase ?? null;
+    if (!target || phase === null || !visible) {
+      if (phase === null) lastEditCheck = "";
+      return;
+    }
+    const signature = JSON.stringify([repoPath, target, version, key]);
+    if (signature === lastEditCheck) return;
+    const previous = lastEditCheck;
+    lastEditCheck = signature;
+    if (previous === "" && phase === "loading") return;
+    untrack(() => void editor.checkExternal(repoPath, target, editContext()));
+  });
 
   /*
    * Markdown 阅读：普通打开默认排版预览，搜索命中或指定行进入源码。
@@ -705,6 +810,8 @@
    * 在这里拦下并停止冒泡，全局的 ⌘/Ctrl F（聚焦文件树筛选）只在内容区之外生效。
    */
   function onContentKey(event: KeyboardEvent): void {
+    // 编辑模式的按键归编辑器：只读视图的查找、跳行与整份选中都不在这里接管。
+    if (editing) return;
     const mod = event.metaKey || event.ctrlKey;
     if (allSelected && event.key === "Escape") {
       event.preventDefault();
@@ -883,7 +990,29 @@
         </button>
       </div>
       <div class="file-actions">
-        {#if isMarkdown && !showImage}
+        {#if canEdit}
+          <!-- 查看是只读的分页阅读；编辑只改当前工作区这一个文件，保存需要明确操作。 -->
+          <div class="segmented file-view-mode file-edit-mode" role="group" aria-label="查看或编辑">
+            <button
+              type="button"
+              aria-pressed={!editing}
+              aria-label="只读查看这个文件"
+              title={editDirty ? "有未保存的修改：先保存或放弃修改，再回到查看" : "只读查看，不会改动工作区"}
+              disabled={editing && (editDirty || Boolean(editSession?.saving))}
+              onclick={stopEdit}
+            >查看</button>
+            <button
+              type="button"
+              aria-pressed={editing}
+              aria-label="编辑这个工作区文件"
+              title="在这里修改当前工作区的这个文件；只在点「保存」时写入，不暂存、不提交"
+              onclick={() => {
+                if (!editing) startEdit();
+              }}
+            ><Icon name="pencil" size={12} />编辑</button>
+          </div>
+        {/if}
+        {#if isMarkdown && !showImage && !editing}
           <div class="segmented file-view-mode" role="group" aria-label="Markdown 显示方式">
             <button
               type="button"
@@ -912,7 +1041,7 @@
             ><Icon name="list" size={13} /><span>目录</span></button>
           {/if}
         {/if}
-        {#if isSvg && content?.kind === "text"}
+        {#if isSvg && content?.kind === "text" && !editing}
           <div class="segmented file-view-mode" role="group" aria-label="SVG 显示方式">
             <button
               type="button"
@@ -939,7 +1068,7 @@
             onclick={() => onOpenDiff?.(path, primarySide!)}
           ><Icon name="file-diff" size={13} /><span>查看改动</span></button>
         {/if}
-        {#if content?.kind === "text" && !showImage}
+        {#if content?.kind === "text" && !showImage && !editing}
           <button
             type="button"
             class="icon-btn sm"
@@ -973,7 +1102,7 @@
       </div>
     </header>
 
-    {#if searchOpen && content?.kind === "text"}
+    {#if searchOpen && content?.kind === "text" && !editing}
       <div class="file-findbar">
         <div class="field sm">
           <Icon name="search" size={13} />
@@ -1057,7 +1186,7 @@
       {/if}
     {/if}
 
-    {#if gotoOpen && content?.kind === "text"}
+    {#if gotoOpen && content?.kind === "text" && !editing}
       <div class="file-findbar">
         <div class="field sm file-goto">
           <Icon name="arrow-right" size={13} />
@@ -1087,11 +1216,26 @@
       </div>
     {/if}
 
-    {#if documentNotice}
+    {#if documentNotice && !editing}
       <p class="file-note" role="status"><Icon name="info" size={13} />{documentNotice}</p>
     {/if}
 
-    {#if isMarkdown && documentMode === "preview" && path}
+    {#if editing && editSession}
+      <RepositoryTextEditor
+        session={editSession}
+        name={parts.name}
+        writeLocked={disabled}
+        line={editLine}
+        lineSerial={editLineSerial}
+        returnLabel={showReturn ? editReturn?.label ?? null : null}
+        onReturn={() => editReturn?.run()}
+        onInput={(next) => path && editor.input(opened.summary.path, path, next)}
+        onSave={() => void saveEdit()}
+        onRevert={() => path && editor.revert(opened.summary.path, path)}
+        onReload={reloadEdit}
+        onExit={stopEdit}
+      />
+    {:else if isMarkdown && documentMode === "preview" && path}
       <!-- 普通打开 Markdown 默认进排版预览；源码仍是同一个工作区版本，切换不离开这个文件。 -->
       <DocumentReader
         {active}
@@ -1198,10 +1342,12 @@
         </div>
       {/if}
     {:else}
-      <div class="file-state"><strong>选择左侧的一个文件</strong><p>文件内容只读显示，不会改动工作区。</p></div>
+      <div class="file-state"><strong>选择左侧的一个文件</strong><p>查看模式只读，不会改动工作区。</p></div>
     {/if}
 
-    {#if isMarkdown && documentMode === "preview"}
+    {#if editing}
+      <!-- 编辑器自带状态栏：未保存/已保存、行尾与编码都在它的工具条上。 -->
+    {:else if isMarkdown && documentMode === "preview"}
       <footer class="file-status" aria-label="文件信息">
         <!-- 与阅读器的来源标识一致：排版预览看的是工作区当前内容，不是某个历史版本。 -->
         <span class="file-status-item doc-source" title={`来源：${documentSourceLabel(documentSource)}`}>
@@ -1217,7 +1363,7 @@
         </span>
         <span class="spacer"></span>
         {#if documentSize != null}<span class="file-status-item" title={`${documentSize} 字节`}>{formatBytes(documentSize)}</span>{/if}
-        <span class="file-status-item" title="文件视图只读，不会改动工作区"><Icon name="eye" size={12} />只读</span>
+        <span class="file-status-item" title="查看模式只读，不会改动工作区；切到「编辑」才会修改这个文件"><Icon name="eye" size={12} />只读</span>
       </footer>
     {:else if content && !error && !loading}
       <footer class="file-status" aria-label="文件信息">
@@ -1246,7 +1392,7 @@
           <span class="lang-chip off" title="这类文件不按代码着色"><Icon name="code" size={12} /><span>{languageLabel}</span></span>
         {/if}
         {#if content.size != null}<span class="file-status-item" title={`${content.size} 字节`}>{formatBytes(content.size)}</span>{/if}
-        <span class="file-status-item" title="文件视图只读，不会改动工作区"><Icon name="eye" size={12} />只读</span>
+        <span class="file-status-item" title="查看模式只读，不会改动工作区；切到「编辑」才会修改这个文件"><Icon name="eye" size={12} />只读</span>
       </footer>
     {/if}
   {:else if missingPath}

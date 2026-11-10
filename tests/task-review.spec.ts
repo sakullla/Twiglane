@@ -720,3 +720,48 @@ describe("任务列表的键盘写入与隐藏（T3）", () => {
     await waitFor(() => expect(onSelection).toHaveBeenLastCalledWith("docs/gone.md"));
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * 轻量编辑入口（T2）：任务净差异本身只读，只有「当前工作区一侧」能转去文件视图编辑。
+ * 删除文件、未解决冲突与多选聚合都没有编辑入口；组件自己从不写入文件。
+ * ------------------------------------------------------------------ */
+describe("任务净差异的轻量编辑入口（T2）", () => {
+  it("当前工作区里的任务文件可以转去编辑，净差异本身没有保存入口", async () => {
+    const onEditFile = vi.fn();
+    render(TaskReview, { props: reviewProps({ onEditFile }) });
+    await screen.findByRole("listbox", { name: "任务文件" });
+    const edit = await screen.findByRole("button", { name: "编辑工作区文件" });
+    await fireEvent.click(edit);
+    // 带上视口里第一条新侧行号，进入编辑时定位到附近。
+    expect(onEditFile).toHaveBeenCalledWith("src/app.ts", 1);
+    // 净差异仍标为只读，组件里没有任何保存或写文件的入口。
+    expect(screen.getByTitle(/任务净差异只读/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^保存/ })).toBeNull();
+    for (const name of ["repositoryEditSave", "repositoryEditSnapshot", "stageFiles", "commitChanges"]) {
+      expect(mocks.created.get(name)?.mock.calls.length ?? 0, name).toBe(0);
+    }
+  });
+
+  it("删除的任务文件没有编辑入口；没有接线时也不显示", async () => {
+    const onEditFile = vi.fn();
+    const { unmount } = render(TaskReview, { props: reviewProps({ onEditFile }) });
+    const list = await screen.findByRole("listbox", { name: "任务文件" });
+    await screen.findByRole("button", { name: "编辑工作区文件" });
+    const gone = [...list.querySelectorAll<HTMLElement>(".file-row")].find((row) => row.textContent?.includes("gone.md"));
+    expect(gone, "删除文件的行").toBeTruthy();
+    await fireEvent.click(gone!);
+    await waitFor(() =>
+      expect(mocks.api.loadTaskDiff).toHaveBeenLastCalledWith(
+        WORKTREE, BASE, HEAD, "docs/gone.md", 4, expect.any(Number), null, 0, 0, undefined, false,
+      ),
+    );
+    await waitFor(() => expect(screen.queryByRole("button", { name: "编辑工作区文件" })).toBeNull());
+    expect(onEditFile).not.toHaveBeenCalled();
+    unmount();
+
+    render(TaskReview, { props: reviewProps() });
+    await screen.findByRole("listbox", { name: "任务文件" });
+    await waitFor(() => expect(mocks.api.loadTaskDiff).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: "编辑工作区文件" })).toBeNull();
+  });
+});

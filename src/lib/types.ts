@@ -206,6 +206,42 @@ export interface RepositoryFileContent {
   message: string | null;
 }
 
+/**
+ * 轻量编辑一次读取/保存的能力状态（与后端 RepositoryEditState 一致）。
+ * 只有 editable 带完整文本；其余状态说明这条路径为什么继续只读。
+ */
+export type RepositoryEditState =
+  | "editable"
+  | "missing"
+  | "symlink"
+  | "special"
+  | "tooLarge"
+  | "binary"
+  | "invalidUtf8"
+  | "mixedLineEndings"
+  | "resource";
+
+/** 文件原本的统一行尾；mixed 只出现在只读原因里，保存不会写出混合行尾。 */
+export type RepositoryLineEnding = "none" | "lf" | "crlf" | "mixed";
+
+/**
+ * 当前工作区文件的完整编辑快照。digest 是原始字节（含 BOM）的 SHA-256，是保存时的冲突凭据；
+ * text 去掉 BOM、行尾统一为 LF，保存时后端按 bom / lineEnding 还原。
+ */
+export interface RepositoryEditSnapshot {
+  generation: number;
+  path: string;
+  state: RepositoryEditState;
+  editable: boolean;
+  size: number;
+  digest: string | null;
+  text: string | null;
+  bom: boolean;
+  lineEnding: RepositoryLineEnding;
+  finalNewline: boolean;
+  message: string;
+}
+
 /** 路径搜索的结果类型：文件来自 Git 路径集合，目录由文件祖先派生。 */
 export type RepositoryPathKind = "file" | "directory";
 

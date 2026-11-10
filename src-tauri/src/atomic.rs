@@ -11,8 +11,9 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// 与 `atomic_write` 相同，但保留目标文件已有的权限。目标必须存在。
 ///
-/// Unix 复制 mode 位；Windows 的只读属性由调用方在写入前拒绝，替换后的文件沿用
-/// 目录继承的 ACL。写入或替换失败都会删除临时文件，原文件保持不变。
+/// Unix 复制 mode 位；Windows 的只读属性由调用方在写入前拒绝，替换时由 `ReplaceFileW`
+/// 保留原文件的安全描述符。写入失败或替换失败且原文件仍在时删除临时文件，原文件保持不变；
+/// 若替换中途原文件已被移除，则保留临时文件并在错误中给出位置。
 pub fn atomic_write_preserving_permissions(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let permissions = fs::metadata(path)?.permissions();
     write_atomically(path, bytes, Some(permissions))
@@ -47,11 +48,29 @@ fn write_atomically(
         replace_file(&tmp, path)
     };
     if let Err(error) = replace {
-        let _ = fs::remove_file(&tmp);
-        return Err(error);
+        return Err(discard_failed_replacement(&tmp, path, error));
     }
     sync_dir(parent);
     Ok(())
+}
+
+/// 替换失败后的清理。目标仍在时删除临时文件，原文件保持不变；
+/// 目标已经不存在时（例如 Windows `ReplaceFileW` 在删除原文件后无法重命名替换文件），
+/// 临时文件是磁盘上仅存的一份内容：保留它并在错误里给出位置，绝不删除。
+fn discard_failed_replacement(tmp: &Path, target: &Path, error: io::Error) -> io::Error {
+    match fs::symlink_metadata(target) {
+        Err(missing) if missing.kind() == io::ErrorKind::NotFound => io::Error::new(
+            error.kind(),
+            format!(
+                "replace failed after the original file was removed; new content kept at {}: {error}",
+                tmp.display()
+            ),
+        ),
+        _ => {
+            let _ = fs::remove_file(tmp);
+            error
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -102,7 +121,15 @@ fn replace_file_preserving(from: &Path, to: &Path) -> io::Result<()> {
     };
     if ok == 0 {
         // 目标不存在或文件系统不支持时仍按普通替换完成，不因为保留权限而让保存失败。
-        return replace_file(from, to);
+        // ERROR_UNABLE_TO_MOVE_REPLACEMENT 时原文件可能已被删除：普通替换也失败的话，
+        // 由 `discard_failed_replacement` 保留临时文件，不会两份内容都丢失。
+        let replace_error = io::Error::last_os_error();
+        return replace_file(from, to).map_err(|fallback| {
+            io::Error::new(
+                fallback.kind(),
+                format!("{fallback} (ReplaceFileW: {replace_error})"),
+            )
+        });
     }
     Ok(())
 }
@@ -167,6 +194,28 @@ mod tests {
             .filter(|name| name.contains(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn failed_replace_drops_temp_only_while_the_original_still_exists() {
+        let dir = crate::test_support::TempDir::new("atomic-failed-replace");
+        let target = dir.path().join("note.txt");
+        fs::write(&target, b"old").unwrap();
+        let tmp = temp_path(&target);
+        fs::write(&tmp, b"new").unwrap();
+        let error = discard_failed_replacement(&tmp, &target, io::Error::other("denied"));
+        assert_eq!(error.to_string(), "denied");
+        assert!(!tmp.exists());
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+
+        // 原文件已在替换中途消失：临时文件是仅存的内容，必须保留并在错误中指出。
+        fs::remove_file(&target).unwrap();
+        fs::write(&tmp, b"new").unwrap();
+        let error = discard_failed_replacement(&tmp, &target, io::Error::other("denied"));
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(error.to_string().contains("new content kept at"), "{error}");
+        assert!(error.to_string().contains(&tmp.display().to_string()));
+        assert_eq!(fs::read(&tmp).unwrap(), b"new");
     }
 
     #[cfg(unix)]

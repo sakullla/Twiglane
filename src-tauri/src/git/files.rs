@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -1479,13 +1479,59 @@ pub async fn repository_content_search(
 /// 读取 Git 自己的对象摘要，既流式读到文件末尾，也与既有 snapshot/hash 语义一致。
 const MAX_REVIEW_BYTES: usize = 1024 * 1024;
 
-/// 审阅路径必须是仓库内的普通相对路径：绝对路径、..、.git 都拒绝。
+/// 判断一个路径组件在任一受支持的文件系统上是否可能打开 Git 元数据目录或 gitfile。
+///
+/// Windows 与 macOS 默认大小写不敏感；Windows 还会去掉名字末尾的点和空格、把 `name:stream`
+/// 解析到同一条目，并接受 8.3 短名（`GIT~1`）；HFS+ 会忽略部分零宽字符。这里按最宽的规则判断，
+/// 宁可拒绝一个罕见的同名普通文件，也不让编辑写入 `.git`。
+fn is_git_metadata_name(name: &OsStr) -> bool {
+    let text = name.to_string_lossy();
+    let visible: String = text
+        .chars()
+        .filter(|ch| {
+            !matches!(
+                *ch,
+                '\u{200C}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{206A}'..='\u{206F}' | '\u{FEFF}'
+            )
+        })
+        .collect();
+    let stem = visible.split(':').next().unwrap_or_default();
+    let trimmed = stem.trim_end_matches(['.', ' ']);
+    trimmed.eq_ignore_ascii_case(".git") || trimmed.eq_ignore_ascii_case("git~1")
+}
+
+fn has_git_metadata_component(relative: &Path) -> bool {
+    relative
+        .components()
+        .any(|component| is_git_metadata_name(component.as_os_str()))
+}
+
+fn git_metadata_error() -> AppError {
+    AppError::new(
+        "invalid_path",
+        "不能把 .git 元数据当作普通文件读取或写入。",
+    )
+}
+
+/// 按真实解析后的路径复核：大小写变体、末尾点、短名和流名都已被文件系统还原成真实名字，
+/// 只要解析结果落在仓库外或任一组件是 Git 元数据就拒绝。
+fn ensure_editable_location(root: &Path, resolved: &Path) -> Result<(), AppError> {
+    let Ok(inside) = resolved.strip_prefix(root) else {
+        return Err(AppError::new(
+            "invalid_path",
+            "文件必须位于当前仓库内，不能编辑仓库外的内容。",
+        ));
+    };
+    if has_git_metadata_component(inside) {
+        return Err(git_metadata_error());
+    }
+    Ok(())
+}
+
+/// 审阅路径必须是仓库内的普通相对路径：绝对路径、..、.git（含大小写、末尾点等别名）都拒绝。
 pub(crate) fn review_path(path: &str) -> Result<PathBuf, AppError> {
     let relative = safe_relative(path)?;
-    if relative
-        .components()
-        .any(|component| component.as_os_str() == ".git")
-    {
+    if has_git_metadata_component(&relative) {
         return Err(AppError::new(
             "invalid_path",
             "不能把 .git 当作普通文件确认。",
@@ -1947,6 +1993,8 @@ fn read_edit_file(root: &Path, relative: &Path, cancel: &Shutdown) -> Result<Edi
             "文件必须位于当前仓库内，不能编辑仓库外的内容。",
         ));
     }
+    // 词法检查无法穷举文件系统别名（如 8.3 短名）：按解析后的真实名字再拒绝一次 .git。
+    ensure_editable_location(root, &resolved)?;
     if meta.len() > MAX_EDIT_BYTES as u64 {
         return Ok(edit_read_only(
             RepositoryEditState::TooLarge,
@@ -2195,6 +2243,7 @@ pub async fn repository_edit_save(
     if !target.starts_with(&root) {
         return Err(edit_conflict("文件路径已不再安全，保存未写入。"));
     }
+    ensure_editable_location(&root, &target)?;
     let metadata = fs::metadata(&target).map_err(|error| {
         AppError::new(
             "edit_write_failed",
@@ -2210,15 +2259,21 @@ pub async fn repository_edit_save(
             "文件是只读的，保存未写入任何内容。",
         ));
     }
-    crate::atomic::atomic_write_preserving_permissions(&target, &bytes).map_err(|error| {
-        AppError::new(
+    if let Err(error) = crate::atomic::atomic_write_preserving_permissions(&target, &bytes) {
+        let detail = crate::redact::redact_error_text(&error.to_string());
+        if fs::symlink_metadata(&target).is_ok() {
+            return Err(AppError::new(
+                "edit_write_failed",
+                format!("无法写入文件，原文件保持不变。{detail}"),
+            ));
+        }
+        // 极少数替换失败会先移除原文件：如实告知，新内容保留在错误中指出的临时文件里。
+        guard.mark_written();
+        return Err(AppError::new(
             "edit_write_failed",
-            format!(
-                "无法写入文件，原文件保持不变。{}",
-                crate::redact::redact_error_text(&error.to_string())
-            ),
-        )
-    })?;
+            format!("替换文件失败且原文件已被移除，新内容保留在临时文件中。{detail}"),
+        ));
+    }
     guard.mark_written();
 
     let written = read_edit_file(&root, &relative_path, &Shutdown::new())?;
@@ -4938,5 +4993,105 @@ mod tests {
             .unwrap_err();
         assert_eq!(stale.code, "stale");
         assert_eq!(stale.generation, Some(saved.generation));
+    }
+
+    #[test]
+    fn git_metadata_names_cover_case_trailing_dots_streams_and_short_names() {
+        for name in [
+            ".git",
+            ".GIT",
+            ".Git",
+            ".git.",
+            ".git..",
+            ".git ",
+            ".git. ",
+            ".git::$INDEX_ALLOCATION",
+            ".git:stream",
+            "GIT~1",
+            "git~1",
+            ".g\u{200C}it",
+            "\u{FEFF}.git",
+        ] {
+            assert!(is_git_metadata_name(OsStr::new(name)), "{name:?}");
+        }
+        for name in [".gitignore", ".github", "git", "a.git", ".gitx", "GIT~2x"] {
+            assert!(!is_git_metadata_name(OsStr::new(name)), "{name:?}");
+        }
+        for path in [".GIT/config", ".git./config", ".Git/HEAD", "sub/.git /config"] {
+            let error = review_path(path).unwrap_err();
+            assert_eq!(error.code, "invalid_path", "{path}");
+        }
+        assert!(review_path(".github/workflows/ci.yml").is_ok());
+        assert!(review_path("docs/.gitignore").is_ok());
+    }
+
+    #[tokio::test]
+    async fn edit_snapshot_and_save_refuse_git_metadata_aliases() {
+        let fixture = crate::test_support::git_fixture("repository-edit-git-alias");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        let config_before = fs::read(root.join(".git/config")).unwrap();
+        let head_before = fs::read(root.join(".git/HEAD")).unwrap();
+        let path = root.to_str().unwrap();
+
+        for alias in [
+            ".git/config",
+            ".GIT/config",
+            ".git./config",
+            ".git /config",
+            ".Git/HEAD",
+            ".git::$INDEX_ALLOCATION/config",
+            "GIT~1/config",
+        ] {
+            let snapshot = repository_edit_snapshot(&backend, path, alias, 1, 1)
+                .await
+                .unwrap_err();
+            assert_eq!(snapshot.code, "invalid_path", "{alias}");
+            let current = if alias.ends_with("HEAD") {
+                &head_before
+            } else {
+                &config_before
+            };
+            let save = repository_edit_save(
+                &backend,
+                path,
+                alias,
+                &sha256_hex(current),
+                "[core]\n\tfsmonitor = probe-marker\n",
+                1,
+                2,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(save.code, "invalid_path", "{alias}");
+        }
+        assert_eq!(fs::read(root.join(".git/config")).unwrap(), config_before);
+        assert_eq!(fs::read(root.join(".git/HEAD")).unwrap(), head_before);
+        // 拒绝不产生写入，代次不前进。
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 1);
+    }
+
+    /// 词法检查之外的第二道防线：绕过 review_path 直接读取时，大小写不敏感的文件系统会把别名
+    /// 解析到真实的 .git，解析后的路径仍必须被拒绝。
+    #[cfg(windows)]
+    #[test]
+    fn resolved_git_metadata_is_rejected_even_without_the_lexical_guard() {
+        let fixture = crate::test_support::git_fixture("repository-edit-git-resolved");
+        let root = fixture.repo("repo");
+        git(&root, &["init", "-b", "main"]);
+        let root = canonical_existing(&root).unwrap();
+        for alias in [".GIT/config", ".git./config", ".Git/HEAD"] {
+            let error = read_edit_file(&root, Path::new(alias), &Shutdown::new()).unwrap_err();
+            assert_eq!(error.code, "invalid_path", "{alias}");
+        }
+        let resolved = canonical_existing(&root.join(".GIT").join("config")).unwrap();
+        assert_eq!(
+            ensure_editable_location(&root, &resolved).unwrap_err().code,
+            "invalid_path"
+        );
+        let ordinary = root.join("note.txt");
+        fs::write(&ordinary, b"x\n").unwrap();
+        assert!(ensure_editable_location(&root, &canonical_existing(&ordinary).unwrap()).is_ok());
     }
 }

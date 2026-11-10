@@ -41,6 +41,11 @@
     blockedReason?: string | null;
     /** 打开其他工作区成功后交给外壳切换当前仓库。 */
     onOpened?: (repo: OpenedRepository) => void;
+    /**
+     * 打开其他工作区之前的外壳关卡（例如当前仓库还有未保存的编辑草稿）。
+     * 返回 false 表示用户取消：不读取、不切换，对话框留在原处。
+     */
+    beforeOpen?: (path: string) => Promise<boolean>;
     /** 删除附属工作区后，后端返回的最新「最近仓库」列表交给外壳。 */
     onRecent?: (recent: RecentRepo[]) => void;
     /** 关闭后焦点去处（命令面板打开时由外壳传入）。 */
@@ -66,6 +71,7 @@
     branchGroups = true,
     blockedReason = null,
     onOpened,
+    beforeOpen,
     onRecent,
     returnFocus = null,
     nextId,
@@ -748,6 +754,25 @@
     menu = null;
     openingWorktree = true;
     errorText = null;
+    // 关卡在读取之前：取消时什么都没有发生，仓库和对话框保持原样。
+    if (beforeOpen) {
+      let proceed = false;
+      try {
+        proceed = await beforeOpen(path);
+      } catch {
+        proceed = false;
+      }
+      if (!proceed || opened.summary.path !== currentRepo.summary.path) {
+        openingWorktree = false;
+        return;
+      }
+      // 等回答期间开始了别的写入：和一开始就被拦住一样说明原因。
+      if (blocked) {
+        openingWorktree = false;
+        errorText = blockedReason ?? BUSY_REASON;
+        return;
+      }
+    }
     onBusy("open");
     try {
       const next = await api.openRepository(path, nextId());

@@ -14,7 +14,8 @@
     onClose: () => void;
     onBusy: (name: string | null) => void;
     onSnapshot: (snapshot: StatusSnapshot) => void;
-    onOpened: (repo: OpenedRepository) => void;
+    /** 克隆成功：外壳可以先问完（例如处理未保存的编辑草稿）再决定打开还是只通知，窗口等它结束才收起。 */
+    onOpened: (repo: OpenedRepository) => void | Promise<void>;
     onFailure: (error: unknown) => void;
     onNotice: (message: string) => void;
     onOpenHistory: (query: string) => void;
@@ -22,6 +23,8 @@
     branchGroups?: boolean;
     /** 从被占用的分支打开另一个工作区。 */
     onOpenWorktree?: (repo: OpenedRepository) => void;
+    /** 打开其他工作区之前的外壳关卡，返回 false 时不切换。 */
+    beforeOpenWorktree?: (path: string) => Promise<boolean>;
     nextId: () => number;
     /** 读到或改动了远程列表：外壳据此更新同步菜单里的「推送到其他远程」。 */
     onRemotes?: (path: string, names: string[]) => void;
@@ -42,6 +45,7 @@
     onOpenHistory,
     branchGroups = true,
     onOpenWorktree,
+    beforeOpenWorktree,
     nextId,
     onRemotes,
     onPushTo,
@@ -223,7 +227,7 @@
     authPrompt = null;
     authPassword = "";
     // 打开还是只通知由外壳决定：看用户是否已经收起窗口。
-    onOpened(result.opened);
+    await onOpened(result.opened);
     if (result.credentialNote) onNotice(result.credentialNote);
     // 收起后再次打开的可能是别的对话框，只关自己。
     if (mode === "clone") onClose();
@@ -469,5 +473,5 @@
     {/snippet}
   </Modal>
 {:else if mode === "branch" && opened}
-  <BranchDialog {opened} {disabled} {branchGroups} {onClose} {onBusy} {onSnapshot} {onFailure} {onNotice} {onOpenHistory} onOpened={onOpenWorktree} {nextId} />
+  <BranchDialog {opened} {disabled} {branchGroups} {onClose} {onBusy} {onSnapshot} {onFailure} {onNotice} {onOpenHistory} onOpened={onOpenWorktree} beforeOpen={beforeOpenWorktree} {nextId} />
 {/if}

@@ -41,6 +41,11 @@
     branchGroups?: boolean;
     /** 打开其他工作区成功后交给外壳切换当前仓库。 */
     onOpened?: (repo: OpenedRepository) => void;
+    /**
+     * 打开其他工作区之前的外壳关卡。返回 false 时弹层不读取、不切换：用户取消了，
+     * 或外壳已经收起弹层、改由自己走带确认的打开路径（弹层挡不住叠在上面的确认框）。
+     */
+    beforeOpen?: (path: string) => Promise<boolean>;
     onClose: (refocus?: boolean) => void;
   }
 
@@ -61,6 +66,7 @@
     onRebaseBranch,
     branchGroups = true,
     onOpened,
+    beforeOpen,
     onClose,
   }: Props = $props();
 
@@ -231,6 +237,18 @@
     const repo = opened;
     errorText = null;
     openingWorktree = true;
+    if (beforeOpen) {
+      let proceed = false;
+      try {
+        proceed = await beforeOpen(path);
+      } catch {
+        proceed = false;
+      }
+      if (!proceed || !mounted || opened.summary.path !== repo.summary.path) {
+        openingWorktree = false;
+        return;
+      }
+    }
     onBusy("open");
     try {
       const next = await api.openRepository(path, nextId());

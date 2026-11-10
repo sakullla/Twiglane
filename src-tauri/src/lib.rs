@@ -78,6 +78,8 @@ pub fn run() {
                 Arc::new(shutdown),
             ));
             app.manage(backend);
+            // cliora 审查来源只在内存里：返回时按它读取真实工作区状态。
+            app.manage(cliora::ReviewSources::default());
             // 启动 20 秒后静默检查一次更新：失败不打断当前版本使用。
             let update_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -205,7 +207,7 @@ pub fn run() {
     });
 }
 
-/// 已校验的 v1 审查请求。前端只按 worktree_path 打开，不再自己解析一次链接。
+/// 已校验的 v2 审查请求。前端只按 worktree_path 打开，不再自己解析一次链接。
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ClioraReviewRequest {
@@ -215,10 +217,15 @@ struct ClioraReviewRequest {
     baseline: Option<String>,
 }
 
-/// 解析并校验 cliora 的 v1 审查链接。纯解析：不打开仓库、不读 Git、不写任何状态。
+/// 解析并校验 cliora 的 v2 审查链接。不打开仓库、不读 Git、不落盘；只把校验通过的
+/// reviewId → 工作树记在内存里，返回时后端按它读取真实工作区状态。
 #[tauri::command]
-fn cliora_review_request(url: String) -> Result<ClioraReviewRequest, AppError> {
+fn cliora_review_request(
+    sources: State<'_, cliora::ReviewSources>,
+    url: String,
+) -> Result<ClioraReviewRequest, AppError> {
     let request = cliora::parse_review_url(&url)?;
+    sources.remember(&request.review_id, &request.worktree_path);
     Ok(ClioraReviewRequest {
         review_id: request.review_id,
         session_id: request.session_id,
@@ -246,28 +253,79 @@ fn cliora_review_receipt<R: Runtime>(
     cliora::notify_cliora(&app, &url)
 }
 
-/// 回送返回事件：只声明结果，不带原始 Git 输出；返回本身不写仓库。
+/// 返回后告诉前端这次实际发送的工作区状态，提示据此如实说明；uncommitted 只在读到时有值。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClioraReturnSent {
+    worktree_state: &'static str,
+    uncommitted: Option<u32>,
+}
+
+/// 按审查来源工作树读一次真实 `git status`，返回未提交文件数。Git 不可用、非零退出或
+/// 读不懂输出都返回 None（声明为 unknown），不当作干净。只读，不写仓库。
+async fn cliora_uncommitted_files(backend: &Backend, worktree: &std::path::Path) -> Option<usize> {
+    let git = ops::require_git(backend).await.ok()?;
+    let root = ops::canonical_existing(worktree).ok()?;
+    let (program, args) = crate::git::command::status_command(&git.path, &root);
+    let scheduled = ops::run_git(
+        backend,
+        &ops::repo_key(&root),
+        crate::git::schedule::JobKind::Read,
+        crate::git::schedule::internal_request_id(),
+        program,
+        args,
+        None,
+    )
+    .await
+    .ok()?;
+    if scheduled.output.exit_code != 0 {
+        return None;
+    }
+    crate::git::parse::parse_status(&scheduled.output.stdout)
+        .ok()
+        .map(|snapshot| snapshot.files.len())
+}
+
+/// 回送返回事件：Git 结果来自前端，工作区状态由后端按来源工作树重新读取真实 Git 状态
+/// 填写（读不到就是 unknown）。不带原始 Git 输出；返回本身不写仓库。
 #[tauri::command(rename_all = "camelCase")]
-fn cliora_review_return<R: Runtime>(
+async fn cliora_review_return<R: Runtime>(
     app: AppHandle<R>,
+    state: State<'_, Arc<Backend>>,
+    sources: State<'_, cliora::ReviewSources>,
     review_id: String,
     session_id: String,
     outcome: String,
     head_oid: Option<String>,
-) -> Result<(), AppError> {
-    let outcome = match outcome.as_str() {
-        "reviewed" => cliora::Outcome::Reviewed,
-        "committed" => cliora::Outcome::Committed,
-        "merged" => cliora::Outcome::Merged,
-        _ => {
-            return Err(AppError::new(
-                cliora::INVALID_RECEIPT,
-                "返回结果只能是 reviewed、committed 或 merged，未回送任何结果。",
-            ))
-        }
+) -> Result<ClioraReturnSent, AppError> {
+    let outcome = cliora::Outcome::parse(&outcome).ok_or_else(|| {
+        AppError::new(
+            cliora::INVALID_RECEIPT,
+            "返回结果只能是 reviewed、committed 或 merged，未回送任何结果。",
+        )
+    })?;
+    let uncommitted = match sources.worktree_for(&review_id) {
+        Some(worktree) => cliora_uncommitted_files(state.inner(), std::path::Path::new(&worktree)).await,
+        None => None,
     };
-    let url = cliora::returned_url(&review_id, &session_id, outcome, head_oid.as_deref())?;
-    cliora::open_in_cliora(&app, &url)
+    let worktree_state = cliora::worktree_state_of(uncommitted);
+    let url = cliora::returned_url(&cliora::ReviewReturn {
+        review_id,
+        session_id,
+        outcome,
+        head_oid,
+        worktree_state,
+        // 说明性元数据：只放应用版本这类短事实，cliora 保留但不据此改变 Git 结论。
+        meta: vec![(
+            "twiglane.version".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        )],
+    })?;
+    cliora::open_in_cliora(&app, &url)?;
+    Ok(ClioraReturnSent {
+        worktree_state: worktree_state.as_str(),
+        uncommitted: uncommitted.map(|count| u32::try_from(count).unwrap_or(u32::MAX)),
+    })
 }
 
 /// 通过链接唤起时把主窗口带到前台：先显示、取消最小化，再请求焦点。
@@ -1992,6 +2050,53 @@ mod ipc_contract {
                 "{command} 没有注册到 invoke handler",
             );
         }
+    }
+
+    /// 返回时的工作区状态由后端读真实 `git status`：干净是 0，有修改或未跟踪文件按条数计，
+    /// 来源目录已不存在时读不到（None，声明为 unknown），不会被当作干净。
+    #[tokio::test]
+    async fn cliora_return_reads_the_real_worktree_state() {
+        let fixture = crate::test_support::git_fixture("cliora-return");
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("a.txt"), "one
+").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        git(&repo, &["commit", "-m", "init"]);
+        let backend = fixture.backend();
+
+        assert_eq!(crate::cliora_uncommitted_files(&backend, &repo).await, Some(0));
+        fs::write(repo.join("a.txt"), "one
+two
+").unwrap();
+        fs::write(repo.join("new.txt"), "fresh
+").unwrap();
+        assert_eq!(crate::cliora_uncommitted_files(&backend, &repo).await, Some(2));
+        assert_eq!(
+            crate::cliora::worktree_state_of(crate::cliora_uncommitted_files(&backend, &repo).await),
+            crate::cliora::WorktreeState::Dirty,
+        );
+        let missing = fixture.path().join("gone");
+        assert_eq!(crate::cliora_uncommitted_files(&backend, &missing).await, None);
+        assert_eq!(
+            crate::cliora::worktree_state_of(crate::cliora_uncommitted_files(&backend, &missing).await),
+            crate::cliora::WorktreeState::Unknown,
+        );
+    }
+
+    /// 发给前端的返回结果只有实际发送的工作区状态和读到的条数，camelCase 与 TS 类型一致。
+    #[test]
+    fn cliora_return_sent_serializes_in_camel_case() {
+        let sent = crate::ClioraReturnSent { worktree_state: "dirty", uncommitted: Some(2) };
+        assert_eq!(
+            serde_json::to_value(&sent).unwrap(),
+            serde_json::json!({ "worktreeState": "dirty", "uncommitted": 2 }),
+        );
+        let unknown = crate::ClioraReturnSent { worktree_state: "unknown", uncommitted: None };
+        assert_eq!(
+            serde_json::to_value(&unknown).unwrap(),
+            serde_json::json!({ "worktreeState": "unknown", "uncommitted": null }),
+        );
     }
 
     fn git(dir: &Path, args: &[&str]) {

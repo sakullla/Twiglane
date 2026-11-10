@@ -1,12 +1,15 @@
-//! cliora 审查集成协议（v1）：\`twiglane://review\` 入站请求与 \`cliora://review\` 出站事件。
+//! cliora 审查集成协议（v2）：`twiglane://review` 入站请求与 `cliora://review` 出站事件。
 //!
-//! 合同来源是 cliora 仓库的 \`docs/integrations/twiglane-review-v1.md\`。这里只做纯字符串
-//! 解析/生成与固定 scheme 唤起：不打开仓库、不读 Git、不写任何状态，因此系统 deep link
-//! 这种不可信输入在任何 Git 写入之前就会被拒绝。
+//! 合同来源是 cliora 仓库的 `docs/integrations/twiglane-review-v2.md`。这里只做纯字符串
+//! 解析/生成、固定 scheme 唤起和内存里的审查来源记录：不打开仓库、不读 Git、不落盘，
+//! 因此系统 deep link 这种不可信输入在任何 Git 写入之前就会被拒绝。返回时的工作区状态
+//! 由命令层按来源工作树读取真实 Git 状态后交给这里生成链接。
 //!
 //! 长度、控制字符、重复/未知参数、ID/OID 格式都在这里挡掉；路径只做语法校验
-//! （绝对路径、长度、\`~\` 前缀），是否是真正的工作树根由 \`open_repository\` 在
-//! 打开时判定——它要求目录下存在 \`.git\`，所以子目录不会回退成父仓库。
+//! （绝对路径、长度、`~` 前缀），是否是真正的工作树根由 `open_repository` 在
+//! 打开时判定——它要求目录下存在 `.git`，所以子目录不会回退成父仓库。
+//!
+//! v2 与 v1 不兼容：两端同步升级，收到其他版本一律 `unsupported_version`，没有回退。
 
 use crate::error::AppError;
 
@@ -17,19 +20,25 @@ pub const INBOUND_SCHEME: &str = "cliora";
 /// 两个方向的固定 host。
 pub const HOST: &str = "review";
 /// 协议主版本。
-pub const VERSION: &str = "1";
+pub const VERSION: &str = "2";
 /// 整个 URL 的上限（UTF-8 字节）。
 pub const MAX_URL_LEN: usize = 2048;
 /// 解码后 worktreePath 的上限（字符）。
 pub const MAX_PATH_LEN: usize = 1000;
+/// returned 里 `meta.*` 参数的个数上限。
+pub const MAX_META_ENTRIES: usize = 8;
+/// 每个 meta 值解码后的字符上限。
+pub const MAX_META_VALUE_LEN: usize = 128;
+/// 扩展元数据参数名的固定前缀。
+const META_PREFIX: &str = "meta.";
 
-/// 稳定错误码：既是拒绝回执里的 \`reason\`，也是前端本地错误的 code。
+/// 稳定错误码：既是拒绝回执里的 `reason`，也是前端本地错误的 code。
 pub const UNSUPPORTED_VERSION: &str = "unsupported_version";
 pub const MALFORMED_REQUEST: &str = "malformed_request";
 pub const INVALID_PATH: &str = "invalid_path";
 pub const INVALID_RECEIPT: &str = "invalid_receipt";
 
-/// 已校验的 v1 审查请求。字段原样来自链接，不含任何凭据。
+/// 已校验的 v2 审查请求。字段原样来自链接，不含任何凭据。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewRequest {
     pub review_id: String,
@@ -38,7 +47,7 @@ pub struct ReviewRequest {
     pub baseline: Option<String>,
 }
 
-/// 回送 cliora 的结果声明。带 head_oid 的只是待复核声明，成功与否由 cliora 复核。
+/// 本次审查期间真实完成的 Git 操作。reviewed 表示没有提交或合入，不再表示“只浏览”。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Reviewed,
@@ -54,6 +63,97 @@ impl Outcome {
             Outcome::Merged => "merged",
         }
     }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "reviewed" => Some(Outcome::Reviewed),
+            "committed" => Some(Outcome::Committed),
+            "merged" => Some(Outcome::Merged),
+            _ => None,
+        }
+    }
+}
+
+/// 返回时 Twiglane 读到的工作区状态，与 outcome 正交。读不到就是 unknown，不能当作 clean。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeState {
+    Clean,
+    Dirty,
+    Unknown,
+}
+
+impl WorktreeState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WorktreeState::Clean => "clean",
+            WorktreeState::Dirty => "dirty",
+            WorktreeState::Unknown => "unknown",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "clean" => Some(WorktreeState::Clean),
+            "dirty" => Some(WorktreeState::Dirty),
+            "unknown" => Some(WorktreeState::Unknown),
+            _ => None,
+        }
+    }
+}
+
+/// 由返回时真实 `git status` 读到的未提交文件数得出工作区声明。None 表示没有读到
+/// （来源已不在记录里、Git 不可用或读取失败），只能是 unknown，绝不当作 clean。
+pub fn worktree_state_of(uncommitted: Option<usize>) -> WorktreeState {
+    match uncommitted {
+        None => WorktreeState::Unknown,
+        Some(0) => WorktreeState::Clean,
+        Some(_) => WorktreeState::Dirty,
+    }
+}
+
+/// 内存里最多记住的审查来源条数。更早的 reviewId 返回时读不到来源，只能声明 unknown。
+pub const MAX_REVIEW_SOURCES: usize = 8;
+
+/// 已校验链接带来的 reviewId → 工作树路径，只放在内存里（与前端来源一样不落盘）。
+/// 返回时后端按它读取真实工作区状态填写声明，前端不声明工作区状态。
+#[derive(Debug, Default)]
+pub struct ReviewSources {
+    entries: std::sync::Mutex<std::collections::VecDeque<(String, String)>>,
+}
+
+impl ReviewSources {
+    /// 记下这次审查的工作树；同一 reviewId 再来时以最新一次为准。
+    pub fn remember(&self, review_id: &str, worktree_path: &str) {
+        let mut entries = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        entries.retain(|(id, _)| id != review_id);
+        entries.push_back((review_id.to_string(), worktree_path.to_string()));
+        while entries.len() > MAX_REVIEW_SOURCES {
+            entries.pop_front();
+        }
+    }
+
+    /// 这次审查记下的工作树；没有记录时返回 None。
+    pub fn worktree_for(&self, review_id: &str) -> Option<String> {
+        let entries = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        entries
+            .iter()
+            .find(|(id, _)| id == review_id)
+            .map(|(_, path)| path.clone())
+    }
+}
+
+/// 一次 returned 事件的结构化内容。带 head_oid 的只是待复核声明，成功与否由 cliora 复核。
+///
+/// `meta` 是有界的说明性元数据：键为 `namespace.name`（不含 `meta.` 前缀），值是短文本事实。
+/// 新增结果维度优先放进核心字段或 meta，而不是继续堆位置参数。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewReturn {
+    pub review_id: String,
+    pub session_id: String,
+    pub outcome: Outcome,
+    pub head_oid: Option<String>,
+    pub worktree_state: WorktreeState,
+    pub meta: Vec<(String, String)>,
 }
 
 /// 允许出现在 rejected 回执 reason 里的错误码。
@@ -65,7 +165,7 @@ const REASONS: [&str; 5] = [
     "open_failed",
 ];
 
-/// 解析并校验 \`twiglane://review?v=1&...\`。错误码直接是拒绝回执的 reason。
+/// 解析并校验 `twiglane://review?v=2&...`。错误码直接是拒绝回执的 reason。
 pub fn parse_review_url(url: &str) -> Result<ReviewRequest, AppError> {
     if url.len() > MAX_URL_LEN {
         return Err(malformed("链接超过长度上限"));
@@ -95,7 +195,7 @@ pub fn parse_review_url(url: &str) -> Result<ReviewRequest, AppError> {
     if version != Some(VERSION) {
         return Err(AppError::new(
             UNSUPPORTED_VERSION,
-            "只支持 v1 审查链接，请升级 Twiglane 或 cliora。",
+            "只支持 v2 审查链接，请把 Twiglane 和 cliora 升级到同一协议版本。",
         ));
     }
     let review_id = required(&params, "reviewId")?;
@@ -126,51 +226,58 @@ pub fn parse_review_url(url: &str) -> Result<ReviewRequest, AppError> {
     })
 }
 
-/// 生成 \`accepted\` 回执。
+/// 生成 `accepted` 回执。
 pub fn accepted_url(review_id: &str, session_id: &str) -> Result<String, AppError> {
     build_event("accepted", review_id, session_id, &[])
 }
 
-/// 生成 \`rejected\` 回执。reason 只接受协议里的稳定错误码。
+/// 生成 `rejected` 回执。reason 只接受协议里的稳定错误码。
 pub fn rejected_url(review_id: &str, session_id: &str, reason: &str) -> Result<String, AppError> {
-    if !is_id(review_id) || !is_id(session_id) {
-        return Err(invalid_receipt("回执缺少可用的 reviewId 或 sessionId"));
-    }
     if !REASONS.contains(&reason) {
         return Err(invalid_receipt("回执的 reason 不在协议错误码里"));
     }
-    let url = format!(
-        "{INBOUND_SCHEME}://{HOST}?v={VERSION}&event=rejected&reviewId={}&sessionId={}&reason={}",
-        encode(review_id),
-        encode(session_id),
-        encode(reason),
-    );
-    check_len(url)
+    build_event("rejected", review_id, session_id, &[("reason", reason)])
 }
 
-/// 生成 \`returned\` 事件。committed/merged 必须带完整 headOid，reviewed 不能带。
-pub fn returned_url(
-    review_id: &str,
-    session_id: &str,
-    outcome: Outcome,
-    head_oid: Option<&str>,
-) -> Result<String, AppError> {
-    if !is_id(review_id) || !is_id(session_id) {
-        return Err(invalid_receipt("返回事件缺少可用的 reviewId 或 sessionId"));
-    }
-    let head = match (outcome, head_oid) {
+/// 生成 `returned` 事件。committed/merged 必须带完整 headOid，reviewed 不能带；
+/// worktreeState 必填；meta 必须符合有界扩展规则。
+pub fn returned_url(result: &ReviewReturn) -> Result<String, AppError> {
+    let head = match (result.outcome, result.head_oid.as_deref()) {
         (Outcome::Reviewed, None) => None,
         (Outcome::Reviewed, Some(_)) => {
-            return Err(invalid_receipt("只浏览的结果不能声明提交标识"));
+            return Err(invalid_receipt("没有提交或合入的结果不能声明提交标识"));
         }
         (_, Some(oid)) if is_oid(oid) => Some(oid),
         _ => return Err(invalid_receipt("提交或合入的结果必须带完整提交标识")),
     };
-    let mut extras = vec![("outcome", outcome.as_str())];
+    if result.meta.len() > MAX_META_ENTRIES {
+        return Err(invalid_receipt("返回事件的扩展元数据过多"));
+    }
+    let meta_keys: Vec<String> = result
+        .meta
+        .iter()
+        .map(|(key, _)| format!("{META_PREFIX}{key}"))
+        .collect();
+    for (index, (key, (_, value))) in meta_keys.iter().zip(result.meta.iter()).enumerate() {
+        if !is_meta_key(key) || !is_meta_value(value) {
+            return Err(invalid_receipt("返回事件的扩展元数据不符合协议"));
+        }
+        if meta_keys[..index].contains(key) {
+            return Err(invalid_receipt("返回事件的扩展元数据有重复键"));
+        }
+    }
+    let mut extras: Vec<(&str, &str)> = vec![("outcome", result.outcome.as_str())];
     if let Some(oid) = head {
         extras.push(("headOid", oid));
     }
-    build_event("returned", review_id, session_id, &extras)
+    extras.push(("worktreeState", result.worktree_state.as_str()));
+    for (key, (_, value)) in meta_keys.iter().zip(result.meta.iter()) {
+        extras.push((key.as_str(), value.as_str()));
+    }
+    let url = build_event("returned", &result.review_id, &result.session_id, &extras)?;
+    // 生成端与接收端用同一套规则：生成出来的链接必须能通过入站校验。
+    validate_inbound(&url).map_err(|_| invalid_receipt("返回事件不符合协议"))?;
+    Ok(url)
 }
 
 fn build_event(
@@ -189,6 +296,7 @@ fn build_event(
     );
     for (key, value) in extras {
         url.push('&');
+        // 参数名只含未保留字符（meta 键已校验），原样写出。
         url.push_str(key);
         url.push('=');
         url.push_str(&encode(value));
@@ -220,7 +328,21 @@ fn required<'a>(params: &'a [(String, String)], key: &str) -> Result<&'a str, Ap
         .ok_or_else(|| malformed(&format!("链接缺少 {key}")))
 }
 
-/// 解析查询串：重复或未知参数、空参数名、坏百分号编码、非 UTF-8 都失败。
+/// 参数名必须原样出现：不接受把名字写成百分号编码来绕过白名单。
+fn raw_name(raw: &str) -> Result<&str, AppError> {
+    if raw.is_empty() {
+        return Err(malformed("查询串里有空参数名"));
+    }
+    if !raw
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(malformed("链接参数名含协议之外的字符"));
+    }
+    Ok(raw)
+}
+
+/// 解析请求查询串：重复或未知参数（含 meta）、空参数名、坏百分号编码、非 UTF-8 都失败。
 fn parse_query(query: &str) -> Result<Vec<(String, String)>, AppError> {
     let mut params: Vec<(String, String)> = Vec::new();
     for pair in query.split('&') {
@@ -231,22 +353,19 @@ fn parse_query(query: &str) -> Result<Vec<(String, String)>, AppError> {
             Some((key, value)) => (key, value),
             None => (pair, ""),
         };
-        let key = decode(raw_key)?;
-        if key.is_empty() {
-            return Err(malformed("查询串里有空参数名"));
-        }
-        if !matches!(key.as_str(), "v" | "reviewId" | "sessionId" | "worktreePath" | "baseline") {
+        let key = raw_name(raw_key)?;
+        if !matches!(key, "v" | "reviewId" | "sessionId" | "worktreePath" | "baseline") {
             return Err(malformed("链接含协议之外的参数"));
         }
-        if params.iter().any(|(name, _)| name == &key) {
+        if params.iter().any(|(name, _)| name == key) {
             return Err(malformed("链接里同一个参数出现了多次"));
         }
-        params.push((key, decode(raw_value)?));
+        params.push((key.to_string(), decode(raw_value)?));
     }
     Ok(params)
 }
 
-/// 百分号解码：\`+\` 按字面加号处理，坏的 \`%\` 序列与非 UTF-8 都失败。
+/// 百分号解码：`+` 按字面加号处理，坏的 `%` 序列与非 UTF-8 都失败。
 fn decode(raw: &str) -> Result<String, AppError> {
     let bytes = raw.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -325,7 +444,36 @@ fn is_worktree_path(value: &str) -> bool {
     }
     std::path::Path::new(value).is_absolute()
 }
-/// 入站（Twiglane → cliora）URL 的完整校验：固定 scheme/host、v1、事件字段组合。
+
+/// `meta.<namespace>.<name>`：namespace `[a-z][a-z0-9-]{0,31}`，name `[A-Za-z][A-Za-z0-9_-]{0,31}`。
+fn is_meta_key(key: &str) -> bool {
+    let Some(rest) = key.strip_prefix(META_PREFIX) else {
+        return false;
+    };
+    let mut parts = rest.split('.');
+    let (Some(namespace), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let namespace_ok = (1..=32).contains(&namespace.len())
+        && namespace.as_bytes()[0].is_ascii_lowercase()
+        && namespace
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    let name_ok = (1..=32).contains(&name.len())
+        && name.as_bytes()[0].is_ascii_alphabetic()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+    namespace_ok && name_ok
+}
+
+/// meta 值：解码后 1–128 字符的单行短文本，不含任何控制字符。
+fn is_meta_value(value: &str) -> bool {
+    let count = value.chars().count();
+    (1..=MAX_META_VALUE_LEN).contains(&count) && !value.chars().any(char::is_control)
+}
+
+/// 入站（Twiglane → cliora）URL 的完整校验：固定 scheme/host、v2、事件字段组合与 meta 边界。
 ///
 /// 生成端已经走过一遍校验，这里再验一次是为了让“只打开固定 scheme”成立：
 /// 即使调用方传进陌生字符串，也不会被当成任意 URL 交给系统。
@@ -357,7 +505,7 @@ pub fn validate_inbound(url: &str) -> Result<(), AppError> {
     if field(&params, "v") != Some(VERSION) {
         return Err(AppError::new(
             UNSUPPORTED_VERSION,
-            "回执不是 v1 协议，未打开任何应用。",
+            "回执不是 v2 协议，未打开任何应用。",
         ));
     }
     let review_id = required(&params, "reviewId")?;
@@ -367,31 +515,42 @@ pub fn validate_inbound(url: &str) -> Result<(), AppError> {
     }
     match required(&params, "event")? {
         "accepted" => {
-            reject_extras(&params, &[])?;
+            reject_extras(&params, &[], false)?;
             Ok(())
         }
         "rejected" => {
-            reject_extras(&params, &["reason"])?;
+            reject_extras(&params, &["reason"], false)?;
             match required(&params, "reason")? {
                 reason if REASONS.contains(&reason) => Ok(()),
                 _ => Err(invalid_receipt("回执的 reason 不在协议错误码里")),
             }
         }
         "returned" => {
-            reject_extras(&params, &["outcome", "headOid"])?;
+            reject_extras(&params, &["outcome", "headOid", "worktreeState"], true)?;
             let outcome = required(&params, "outcome")?;
             let head = field(&params, "headOid");
             match (outcome, head) {
-                ("reviewed", None) => Ok(()),
-                ("committed" | "merged", Some(oid)) if is_oid(oid) => Ok(()),
-                _ => Err(invalid_receipt("返回事件的结果与提交标识不匹配")),
+                ("reviewed", None) => {}
+                ("committed" | "merged", Some(oid)) if is_oid(oid) => {}
+                _ => return Err(invalid_receipt("返回事件的结果与提交标识不匹配")),
             }
+            if WorktreeState::parse(required(&params, "worktreeState")?).is_none() {
+                return Err(invalid_receipt("返回事件的工作区状态不是协议里的取值"));
+            }
+            let meta_ok = params
+                .iter()
+                .filter(|(name, _)| name.starts_with(META_PREFIX))
+                .all(|(_, value)| is_meta_value(value));
+            if !meta_ok {
+                return Err(invalid_receipt("返回事件的扩展元数据不符合协议"));
+            }
+            Ok(())
         }
         _ => Err(invalid_receipt("回执的 event 不是协议里的取值")),
     }
 }
 
-/// 打开 cliora 的固定 scheme。只允许本模块校验过的 \`cliora://review\`。
+/// 打开 cliora 的固定 scheme。只允许本模块校验过的 `cliora://review`。
 pub fn open_in_cliora<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     url: &str,
@@ -443,25 +602,37 @@ pub fn notify_cliora<R: tauri::Runtime>(
 
 fn parse_inbound_query(query: &str) -> Result<Vec<(String, String)>, AppError> {
     let mut params: Vec<(String, String)> = Vec::new();
+    let mut meta = 0usize;
     for pair in query.split('&') {
         let (raw_key, raw_value) = match pair.split_once('=') {
             Some((key, value)) => (key, value),
             None => return Err(malformed("回执里有空参数")),
         };
-        let key = decode(raw_key)?;
-        if key.is_empty() {
-            return Err(malformed("回执里有空参数名"));
-        }
-        if !matches!(
-            key.as_str(),
-            "v" | "event" | "reviewId" | "sessionId" | "reason" | "outcome" | "headOid"
+        let key = raw_name(raw_key)?;
+        if key.starts_with(META_PREFIX) {
+            if !is_meta_key(key) {
+                return Err(malformed("回执的扩展元数据键不符合协议"));
+            }
+            meta += 1;
+            if meta > MAX_META_ENTRIES {
+                return Err(malformed("回执的扩展元数据过多"));
+            }
+        } else if !matches!(
+            key,
+            "v" | "event"
+                | "reviewId"
+                | "sessionId"
+                | "reason"
+                | "outcome"
+                | "headOid"
+                | "worktreeState"
         ) {
             return Err(malformed("回执含协议之外的参数"));
         }
-        if params.iter().any(|(name, _)| name == &key) {
+        if params.iter().any(|(name, _)| name == key) {
             return Err(malformed("回执里同一个参数出现了多次"));
         }
-        params.push((key, decode(raw_value)?));
+        params.push((key.to_string(), decode(raw_value)?));
     }
     Ok(params)
 }
@@ -473,11 +644,16 @@ fn field<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
-/// 事件不允许出现它自身之外的参数（例如 accepted 带 outcome）。
-fn reject_extras(params: &[(String, String)], allowed: &[&str]) -> Result<(), AppError> {
+/// 事件不允许出现它自身之外的参数（例如 accepted 带 outcome 或 meta）。
+fn reject_extras(
+    params: &[(String, String)],
+    allowed: &[&str],
+    allow_meta: bool,
+) -> Result<(), AppError> {
     let stray = params.iter().any(|(name, _)| {
         !matches!(name.as_str(), "v" | "event" | "reviewId" | "sessionId")
             && !allowed.contains(&name.as_str())
+            && !(allow_meta && name.starts_with(META_PREFIX))
     });
     if stray {
         return Err(invalid_receipt("回执带了当前事件不该有的参数"));
@@ -514,7 +690,7 @@ mod tests {
 
     fn good_fields() -> Vec<(&'static str, String)> {
         vec![
-            ("v", "1".to_string()),
+            ("v", "2".to_string()),
             ("reviewId", REVIEW.to_string()),
             ("sessionId", SESSION.to_string()),
             ("worktreePath", temp_worktree()),
@@ -530,6 +706,29 @@ mod tests {
 
     fn code_of(url: &str) -> String {
         parse_review_url(url).expect_err("应当拒绝").code
+    }
+
+    fn returned(
+        outcome: Outcome,
+        head_oid: Option<&str>,
+        worktree_state: WorktreeState,
+        meta: &[(&str, &str)],
+    ) -> ReviewReturn {
+        ReviewReturn {
+            review_id: REVIEW.to_string(),
+            session_id: SESSION.to_string(),
+            outcome,
+            head_oid: head_oid.map(str::to_string),
+            worktree_state,
+            meta: meta
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        }
+    }
+
+    fn returned_query(tail: &str) -> String {
+        format!("cliora://review?v=2&event=returned&reviewId={REVIEW}&sessionId={SESSION}{tail}")
     }
 
     #[test]
@@ -550,10 +749,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_other_versions() {
-        let mut fields = good_fields();
-        fields[0] = ("v", "2".to_string());
-        assert_eq!(code_of(&url_of(&fields)), UNSUPPORTED_VERSION);
+    fn rejects_v1_and_other_versions_without_fallback() {
+        for version in ["1", "3", "02", ""] {
+            let mut fields = good_fields();
+            fields[0] = ("v", version.to_string());
+            assert_eq!(code_of(&url_of(&fields)), UNSUPPORTED_VERSION, "v={version}");
+        }
 
         let mut missing = good_fields();
         missing.retain(|(key, _)| *key != "v");
@@ -563,7 +764,7 @@ mod tests {
     #[test]
     fn rejects_foreign_scheme_host_and_fragment() {
         let path = encode(&temp_worktree());
-        let tail = format!("v=1&reviewId={REVIEW}&sessionId={SESSION}&worktreePath={path}");
+        let tail = format!("v=2&reviewId={REVIEW}&sessionId={SESSION}&worktreePath={path}");
         for url in [
             format!("http://review?{tail}"),
             format!("twiglane://other?{tail}"),
@@ -603,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_and_unknown_params() {
+    fn rejects_duplicate_unknown_meta_and_encoded_params() {
         let mut duplicated = good_fields();
         duplicated.push(("sessionId", SESSION.to_string()));
         assert_eq!(code_of(&url_of(&duplicated)), MALFORMED_REQUEST);
@@ -611,6 +812,15 @@ mod tests {
         let mut unknown = good_fields();
         unknown.push(("foo", "1".to_string()));
         assert_eq!(code_of(&url_of(&unknown)), MALFORMED_REQUEST);
+
+        // 请求不接受扩展元数据：任务身份只由核心字段决定。
+        let mut meta = good_fields();
+        meta.push(("meta.cliora.note", "x".to_string()));
+        assert_eq!(code_of(&url_of(&meta)), MALFORMED_REQUEST);
+
+        // 参数名写成百分号编码也不能绕过白名单或重复检查。
+        let encoded = url_of(&good_fields()).replacen("v=2", "%76=2", 1);
+        assert_eq!(code_of(&encoded), MALFORMED_REQUEST);
     }
 
     #[test]
@@ -654,39 +864,93 @@ mod tests {
         assert_eq!(decode("a%20b").unwrap(), "a b");
         assert_eq!(decode("a+b").unwrap(), "a+b");
         assert_eq!(decode("%E4%BB%A3%E7%A0%81").unwrap(), "代码");
-        assert_eq!(parse_review_url(&format!("twiglane://review?v=1&reviewId={REVIEW}&sessionId={SESSION}&worktreePath=%ZZ")).unwrap_err().code, MALFORMED_REQUEST);
+        assert_eq!(parse_review_url(&format!("twiglane://review?v=2&reviewId={REVIEW}&sessionId={SESSION}&worktreePath=%ZZ")).unwrap_err().code, MALFORMED_REQUEST);
     }
 
     #[test]
     fn builds_events_that_satisfy_the_inbound_rules() {
         let accepted = accepted_url(REVIEW, SESSION).expect("accepted");
         validate_inbound(&accepted).expect("accepted 合法");
-        assert!(accepted.starts_with("cliora://review?v=1&event=accepted"));
+        assert!(accepted.starts_with("cliora://review?v=2&event=accepted"));
 
         let rejected = rejected_url(REVIEW, SESSION, "not_a_worktree").expect("rejected");
         validate_inbound(&rejected).expect("rejected 合法");
+        assert!(rejected.starts_with("cliora://review?v=2&event=rejected"));
 
-        let reviewed = returned_url(REVIEW, SESSION, Outcome::Reviewed, None).expect("reviewed");
-        validate_inbound(&reviewed).expect("reviewed 合法");
-
-        for outcome in [Outcome::Committed, Outcome::Merged] {
-            let returned = returned_url(REVIEW, SESSION, outcome, Some(OID)).expect("带 oid");
-            validate_inbound(&returned).expect("committed/merged 合法");
-            assert!(returned.contains(&format!("headOid={OID}")));
+        for state in [WorktreeState::Clean, WorktreeState::Dirty, WorktreeState::Unknown] {
+            let reviewed =
+                returned_url(&returned(Outcome::Reviewed, None, state, &[])).expect("reviewed");
+            validate_inbound(&reviewed).expect("reviewed 合法");
+            assert!(reviewed.contains(&format!("&worktreeState={}", state.as_str())));
+            assert!(!reviewed.contains("headOid"));
         }
+
+        // 提交或合入之后仍有其他未提交修改：outcome 与工作区状态正交。
+        for outcome in [Outcome::Committed, Outcome::Merged] {
+            let url = returned_url(&returned(outcome, Some(OID), WorktreeState::Dirty, &[]))
+                .expect("带 oid");
+            validate_inbound(&url).expect("committed/merged 合法");
+            assert!(url.contains(&format!("headOid={OID}")));
+            assert!(url.contains("worktreeState=dirty"));
+        }
+    }
+
+    #[test]
+    fn returned_carries_bounded_meta_without_changing_the_core() {
+        let plain = returned_url(&returned(Outcome::Committed, Some(OID), WorktreeState::Clean, &[]))
+            .expect("无 meta");
+        let with_meta = returned_url(&returned(
+            Outcome::Committed,
+            Some(OID),
+            WorktreeState::Clean,
+            &[("twiglane.version", "0.3.3"), ("acme.note", "多 语言 note")],
+        ))
+        .expect("说明性 meta");
+        validate_inbound(&with_meta).expect("带 meta 的 returned 合法");
+        assert!(with_meta.starts_with(&plain));
+        assert!(with_meta.contains("&meta.twiglane.version=0.3.3"));
+        assert!(with_meta.contains("&meta.acme.note=%E5%A4%9A%20"));
+
+        let bad_meta: [(&str, &str); 8] = [
+            ("twiglane", "1"),
+            ("twiglane.version.extra", "1"),
+            (".version", "1"),
+            ("Twiglane.version", "1"),
+            ("twiglane.ver sion", "1"),
+            ("twiglane.version", ""),
+            ("twiglane.version", "line\nbreak"),
+            ("twiglane.version", &"x".repeat(MAX_META_VALUE_LEN + 1)),
+        ];
+        for (key, value) in bad_meta {
+            assert_eq!(
+                returned_url(&returned(Outcome::Reviewed, None, WorktreeState::Clean, &[(key, value)]))
+                    .expect_err("坏 meta")
+                    .code,
+                INVALID_RECEIPT,
+                "{key}={value:?}"
+            );
+        }
+        let duplicated = [("twiglane.version", "1"), ("twiglane.version", "2")];
+        assert!(returned_url(&returned(Outcome::Reviewed, None, WorktreeState::Clean, &duplicated)).is_err());
+        let too_many: Vec<(String, String)> = (0..=MAX_META_ENTRIES)
+            .map(|index| (format!("ns.k{index}"), "v".to_string()))
+            .collect();
+        let borrowed: Vec<(&str, &str)> =
+            too_many.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect();
+        assert!(returned_url(&returned(Outcome::Reviewed, None, WorktreeState::Clean, &borrowed)).is_err());
     }
 
     #[test]
     fn refuses_incomplete_results() {
         assert_eq!(
-            returned_url(REVIEW, SESSION, Outcome::Committed, None)
+            returned_url(&returned(Outcome::Committed, None, WorktreeState::Clean, &[]))
                 .expect_err("缺 oid")
                 .code,
             INVALID_RECEIPT
         );
         assert_eq!(
-            returned_url(REVIEW, SESSION, Outcome::Reviewed, Some(OID))
-                .expect_err("只浏览不该带 oid")
+            returned_url(&returned(Outcome::Reviewed, Some(OID), WorktreeState::Dirty, &[]))
+                .expect_err("没有提交的结果不该带 oid")
                 .code,
             INVALID_RECEIPT
         );
@@ -700,6 +964,8 @@ mod tests {
             accepted_url("nope", SESSION).expect_err("坏 id").code,
             INVALID_RECEIPT
         );
+        assert_eq!(Outcome::parse("edited"), None);
+        assert_eq!(WorktreeState::parse("approved"), None);
     }
 
     #[test]
@@ -722,24 +988,93 @@ mod tests {
         }
 
         // 带尾斜杠的 returned 同样通过完整事件校验。
-        let returned = returned_url(REVIEW, SESSION, Outcome::Reviewed, None).expect("reviewed");
-        let slashed_returned = returned.replacen("cliora://review?", "cliora://review/?", 1);
+        let reviewed = returned_url(&returned(Outcome::Reviewed, None, WorktreeState::Dirty, &[]))
+            .expect("reviewed");
+        let slashed_returned = reviewed.replacen("cliora://review?", "cliora://review/?", 1);
         validate_inbound(&slashed_returned).expect("带尾斜杠的 returned");
     }
 
     #[test]
     fn inbound_validation_rejects_mismatched_event_fields() {
         for url in [
-            format!("cliora://review?v=1&event=accepted&reviewId={REVIEW}&sessionId={SESSION}&outcome=merged"),
-            format!("cliora://review?v=1&event=returned&reviewId={REVIEW}&sessionId={SESSION}&outcome=committed"),
-            format!("cliora://review?v=1&event=returned&reviewId={REVIEW}&sessionId={SESSION}&outcome=reviewed&headOid={OID}"),
-            format!("cliora://review?v=1&event=rejected&reviewId={REVIEW}&sessionId={SESSION}"),
-            format!("cliora://review?v=1&event=rejected&reviewId={REVIEW}&sessionId={SESSION}&reason=boom"),
-            format!("cliora://review?v=1&event=unknown&reviewId={REVIEW}&sessionId={SESSION}"),
-            format!("cliora://review?v=2&event=accepted&reviewId={REVIEW}&sessionId={SESSION}"),
-            format!("twiglane://review?v=1&event=accepted&reviewId={REVIEW}&sessionId={SESSION}"),
+            format!("cliora://review?v=2&event=accepted&reviewId={REVIEW}&sessionId={SESSION}&outcome=merged"),
+            format!("cliora://review?v=2&event=accepted&reviewId={REVIEW}&sessionId={SESSION}&worktreeState=clean"),
+            format!("cliora://review?v=2&event=accepted&reviewId={REVIEW}&sessionId={SESSION}&meta.twiglane.version=1"),
+            format!("cliora://review?v=2&event=rejected&reviewId={REVIEW}&sessionId={SESSION}&reason=open_failed&meta.twiglane.version=1"),
+            returned_query("&outcome=committed&worktreeState=clean"),
+            returned_query(&format!("&outcome=reviewed&headOid={OID}&worktreeState=clean")),
+            returned_query("&outcome=reviewed"),
+            returned_query("&outcome=reviewed&worktreeState=approved"),
+            returned_query("&outcome=edited&worktreeState=dirty"),
+            returned_query("&outcome=reviewed&worktreeState=clean&reason=open_failed"),
+            format!("cliora://review?v=2&event=rejected&reviewId={REVIEW}&sessionId={SESSION}"),
+            format!("cliora://review?v=2&event=rejected&reviewId={REVIEW}&sessionId={SESSION}&reason=boom"),
+            format!("cliora://review?v=2&event=unknown&reviewId={REVIEW}&sessionId={SESSION}"),
+            format!("twiglane://review?v=2&event=accepted&reviewId={REVIEW}&sessionId={SESSION}"),
         ] {
             assert!(validate_inbound(&url).is_err(), "{url}");
         }
+    }
+
+    #[test]
+    fn inbound_validation_rejects_v1_and_malformed_meta() {
+        for url in [
+            format!("cliora://review?v=1&event=accepted&reviewId={REVIEW}&sessionId={SESSION}"),
+            format!("cliora://review?v=1&event=returned&reviewId={REVIEW}&sessionId={SESSION}&outcome=reviewed"),
+            format!("cliora://review?v=3&event=accepted&reviewId={REVIEW}&sessionId={SESSION}"),
+        ] {
+            assert_eq!(validate_inbound(&url).expect_err("版本不匹配").code, UNSUPPORTED_VERSION, "{url}");
+        }
+        let long = "x".repeat(MAX_META_VALUE_LEN + 1);
+        for tail in [
+            "&meta.x=1".to_string(),
+            "&meta.x.y.z=1".to_string(),
+            "&meta..y=1".to_string(),
+            "&meta.X.y=1".to_string(),
+            "&meta.x.1y=1".to_string(),
+            "&meta.x.y=".to_string(),
+            "&meta.x.y=a%0Ab".to_string(),
+            format!("&meta.x.y={long}"),
+            "&meta%2Ex.y=1".to_string(),
+            "&meta.x.y=1&meta.x.y=2".to_string(),
+            (0..=MAX_META_ENTRIES).map(|index| format!("&meta.ns.k{index}=v")).collect(),
+            "&metadata=1".to_string(),
+        ] {
+            let url = returned_query(&format!("&outcome=reviewed&worktreeState=clean{tail}"));
+            assert!(validate_inbound(&url).is_err(), "{url}");
+        }
+        // 合法 meta 夹具：未知 namespace 也保留形状校验，核心字段不变。
+        validate_inbound(&returned_query(
+            "&outcome=reviewed&worktreeState=clean&meta.twiglane.version=0.3.3&meta.acme-tools.build_id=b-1",
+        ))
+        .expect("合法 meta");
+    }
+
+    /// 工作区声明只由真实读取结果决定：读不到就是 unknown，不会被当成 clean。
+    #[test]
+    fn worktree_state_comes_only_from_a_real_read() {
+        assert_eq!(worktree_state_of(None), WorktreeState::Unknown);
+        assert_eq!(worktree_state_of(Some(0)), WorktreeState::Clean);
+        assert_eq!(worktree_state_of(Some(3)), WorktreeState::Dirty);
+    }
+
+    /// 来源按 reviewId 记在内存里：同一 reviewId 以最新一次为准，超出上限时先丢最早的，
+    /// 未记录的 reviewId 读不到来源。
+    #[test]
+    fn review_sources_keep_the_latest_bounded_mapping() {
+        let sources = ReviewSources::default();
+        assert_eq!(sources.worktree_for(REVIEW), None);
+        sources.remember(REVIEW, "C:/work/a");
+        sources.remember(REVIEW, "C:/work/b");
+        assert_eq!(sources.worktree_for(REVIEW).as_deref(), Some("C:/work/b"));
+        for index in 0..MAX_REVIEW_SOURCES {
+            sources.remember(&format!("review-{index}"), &format!("C:/work/{index}"));
+        }
+        assert_eq!(sources.worktree_for(REVIEW), None, "最早的来源被挤出");
+        assert_eq!(sources.worktree_for("review-0").as_deref(), Some("C:/work/0"));
+        assert_eq!(
+            sources.worktree_for(&format!("review-{}", MAX_REVIEW_SOURCES - 1)).as_deref(),
+            Some(format!("C:/work/{}", MAX_REVIEW_SOURCES - 1).as_str()),
+        );
     }
 }

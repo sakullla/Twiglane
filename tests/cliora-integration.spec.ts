@@ -19,8 +19,21 @@ const SESSION_A = "0b1c2d3e-4f50-4172-8394-a5b6c7d8e9f0";
 const SESSION_B = "2c3d4e5f-6071-4283-94a5-b6c7d8e9f0a1";
 const BASELINE = "a".repeat(40);
 const COMMITTED = "b".repeat(40);
-const URL_A = "twiglane://review?v=1&reviewId=" + REVIEW_A + "&sessionId=" + SESSION_A + "&worktreePath=" + encodeURIComponent(WORKTREE) + "&baseline=" + BASELINE;
-const URL_B = "twiglane://review?v=1&reviewId=" + REVIEW_B + "&sessionId=" + SESSION_B + "&worktreePath=" + encodeURIComponent(WORKTREE);
+const URL_A = "twiglane://review?v=2&reviewId=" + REVIEW_A + "&sessionId=" + SESSION_A + "&worktreePath=" + encodeURIComponent(WORKTREE) + "&baseline=" + BASELINE;
+const URL_B = "twiglane://review?v=2&reviewId=" + REVIEW_B + "&sessionId=" + SESSION_B + "&worktreePath=" + encodeURIComponent(WORKTREE);
+
+/**
+ * 前端交给后端的返回参数：只有 Git outcome。工作区状态由后端按来源工作树读取真实 Git
+ * 状态填写（src-tauri 的单测覆盖），前端不声明。
+ */
+function returned(
+  reviewId: string,
+  sessionId: string,
+  outcome: "reviewed" | "committed" | "merged",
+  headOid: string | null,
+): [string, string, "reviewed" | "committed" | "merged", string | null] {
+  return [reviewId, sessionId, outcome, headOid];
+}
 
 const branch = {
   name: "main",
@@ -226,7 +239,7 @@ async function mountShell() {
   return handler;
 }
 
-describe("cliora v1 审查链接", () => {
+describe("cliora v2 审查链接", () => {
   it("冷启动只打开链接指定的 worktree 并回送 accepted", async () => {
     deepLink.getCurrent.mockResolvedValue([URL_A]);
     mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE));
@@ -284,7 +297,7 @@ describe("cliora v1 审查链接", () => {
     expect(mocks.api.clioraReviewReceipt).not.toHaveBeenCalledWith(REVIEW_A, SESSION_A, true, null);
 
     await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
-    await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(REVIEW_B, SESSION_B, "reviewed", null));
+    await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_B, SESSION_B, "reviewed", null)));
   });
 
   it("打开失败回送 rejected，不回退主仓库也不写 Git", async () => {
@@ -344,16 +357,16 @@ describe("cliora v1 审查链接", () => {
     );
     expect(mocks.api.clioraReviewReceipt).not.toHaveBeenCalledWith(REVIEW_B, SESSION_B, false, expect.anything());
     await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
-    await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(REVIEW_B, SESSION_B, "reviewed", null));
+    await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_B, SESSION_B, "reviewed", null)));
   });
 
   it("无效链接不打开仓库，也不伪造回执", async () => {
-    deepLink.getCurrent.mockResolvedValue(["twiglane://review?v=2&reviewId=x"]);
-    mocks.api.clioraReviewRequest.mockRejectedValue({ code: "unsupported_version", message: "只支持 v1 审查链接。" });
+    deepLink.getCurrent.mockResolvedValue(["twiglane://review?v=1&reviewId=x"]);
+    mocks.api.clioraReviewRequest.mockRejectedValue({ code: "unsupported_version", message: "只支持 v2 审查链接。" });
 
     await mountShell();
 
-    await waitFor(() => expect(mocks.api.clioraReviewRequest).toHaveBeenCalledWith("twiglane://review?v=2&reviewId=x"));
+    await waitFor(() => expect(mocks.api.clioraReviewRequest).toHaveBeenCalledWith("twiglane://review?v=1&reviewId=x"));
     expect(mocks.api.openRepository).not.toHaveBeenCalled();
     expect(mocks.api.clioraReviewReceipt).not.toHaveBeenCalled();
     expect(mocks.api.clioraReviewReturn).not.toHaveBeenCalled();
@@ -372,7 +385,7 @@ describe("cliora v1 审查链接", () => {
 
     mocks.api.commitChanges.mockClear();
     await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
-    await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(REVIEW_A, SESSION_A, "committed", COMMITTED));
+    await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_A, SESSION_A, "committed", COMMITTED)));
     expect(mocks.api.commitChanges).not.toHaveBeenCalled();
     expect(mocks.api.startMerge).not.toHaveBeenCalled();
     expect(mocks.api.completeMerge).not.toHaveBeenCalled();
@@ -395,7 +408,7 @@ describe("cliora v1 审查链接", () => {
     await waitFor(() => expect(screen.getByLabelText("已审阅 1 个，共 1 个改动文件")).toBeTruthy());
 
     await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
-    await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(REVIEW_A, SESSION_A, "reviewed", null));
+    await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_A, SESSION_A, "reviewed", null)));
     expect(document.body.textContent).not.toContain("已批准");
     expect(document.body.textContent).not.toContain("approved");
     expect(mocks.api.commitChanges).not.toHaveBeenCalled();
@@ -440,6 +453,66 @@ describe("cliora v1 审查链接", () => {
     await waitFor(() => expect(activeView()).toBe("history"));
     expect(screen.queryByRole("button", { name: /任务净差异/ })).toBeNull();
     expect(mocks.api.taskReview).not.toHaveBeenCalled();
+  });
+
+  it("提示按后端实际发送的工作区状态说明：干净、提交后仍有剩余修改分别如实提示", async () => {
+    const clean: StatusSnapshot = { generation: 4, branch, files: [] };
+    deepLink.getCurrent.mockResolvedValue([URL_A]);
+    mocks.api.openRepository.mockResolvedValue({ ...openedAt(WORKTREE), snapshot: clean });
+    mocks.api.refreshStatus.mockResolvedValue(clean);
+    mocks.api.clioraReviewReturn.mockResolvedValue({ worktreeState: "clean", uncommitted: 0 });
+    await mountShell();
+    await waitFor(() => expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy());
+
+    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_A, SESSION_A, "reviewed", null)));
+    await waitFor(() => expect(document.body.textContent).toContain("本次没有提交或合入，工作区没有未提交的改动"));
+
+    // 提交之后又留下未提交修改：outcome 仍是真实的提交，工作区状态来自后端读到的 dirty。
+    mocks.api.clioraReviewReturn.mockClear();
+    mocks.api.clioraReviewReturn.mockResolvedValue({ worktreeState: "dirty", uncommitted: 2 });
+    recordClioraCommit(WORKTREE, COMMITTED);
+    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_A, SESSION_A, "committed", COMMITTED)));
+    await waitFor(() => expect(document.body.textContent).toContain("提交或合入结果以待复核声明发送，工作区还有 2 个未提交的改动"));
+    expect(document.body.textContent).not.toContain("本次只做了浏览");
+    expect(mocks.api.commitChanges).not.toHaveBeenCalled();
+  });
+
+  it("前端快照不能替后端声明：本地看着干净，后端读到 dirty 时按 dirty 提示", async () => {
+    const clean: StatusSnapshot = { generation: 4, branch, files: [] };
+    deepLink.getCurrent.mockResolvedValue([URL_A]);
+    mocks.api.openRepository.mockResolvedValue({ ...openedAt(WORKTREE), snapshot: clean });
+    mocks.api.refreshStatus.mockResolvedValue(clean);
+    mocks.api.clioraReviewReturn.mockResolvedValue({ worktreeState: "dirty", uncommitted: 1 });
+    await mountShell();
+    await waitFor(() => expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy());
+
+    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await waitFor(() => expect(document.body.textContent).toContain("本次没有提交或合入，工作区还有 1 个未提交的改动"));
+    expect(document.body.textContent).not.toContain("本次没有提交或合入，工作区没有未提交的改动");
+  });
+
+  it("后端读不到工作区状态时如实说按未知发送；后端没给结果且本地也没读到时只说没读到", async () => {
+    deepLink.getCurrent.mockResolvedValue([URL_A]);
+    mocks.api.openRepository.mockResolvedValue({ ...openedAt(WORKTREE), snapshot: { generation: 4, branch, files: [] } });
+    mocks.api.clioraReviewReturn.mockResolvedValue({ worktreeState: "unknown", uncommitted: null });
+    await mountShell();
+    await waitFor(() => expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy());
+
+    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_A, SESSION_A, "reviewed", null)));
+    await waitFor(() => expect(document.body.textContent).toContain("这次没有读到工作区状态，已按未知发送"));
+
+    // 浏览器预览等没有后端结果的环境：返回前刷新也失败，就不能把旧快照当成干净。
+    mocks.api.clioraReviewReturn.mockClear();
+    mocks.api.clioraReviewReturn.mockResolvedValue(undefined);
+    mocks.api.refreshStatus.mockRejectedValue({ code: "git_failed", message: "读取状态失败。" });
+    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(document.body.textContent).toContain("本次没有提交或合入，这次没有读到工作区状态。"));
+    expect(document.body.textContent).not.toContain("本次没有提交或合入，工作区没有未提交的改动");
+    expect(mocks.api.commitChanges).not.toHaveBeenCalled();
   });
 
   it("独立打开的仓库没有来源，不显示返回入口", async () => {

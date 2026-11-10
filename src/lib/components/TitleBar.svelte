@@ -146,7 +146,7 @@
     cliora === null
       ? ""
       : cliora.outcome === "reviewed"
-        ? "仅浏览"
+        ? "未提交或合入"
         : (cliora.outcome === "committed" ? "已提交 " : "已合入 ") +
           (cliora.headOid ? shortOid(cliora.headOid) : ""),
   );
@@ -419,7 +419,7 @@
     {#if cliora}
       <div class="cliora-source" role="group" aria-label="cliora 审查来源">
         <span class="cliora-chip" title={`来源 cliora 审查 ${cliora.reviewId}`}>cliora</span>
-        <span class="cliora-result" title={cliora.outcome === "reviewed" ? "本次只做了浏览" : "提交或合入结果以待复核声明发送，cliora 会重新读取真实 HEAD"}>{clioraSummary}</span>
+        <span class="cliora-result" title={cliora.outcome === "reviewed" ? "本次没有提交或合入；返回时附上重新读取的工作区状态，cliora 会再复核" : "提交或合入结果以待复核声明发送，cliora 会重新读取真实 HEAD"}>{clioraSummary}</span>
         <button
           type="button"
           class="branch-pill cliora-return"

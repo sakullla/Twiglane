@@ -3,6 +3,8 @@ import { normalizeError } from "./errors";
 import type {
   BranchState,
   BranchListing,
+  ClioraOutcome,
+  ClioraReturnSent,
   DiffLineSelection,
   PreviewSource,
   DocumentSource,
@@ -113,7 +115,7 @@ export async function pickFile(title: string): Promise<string | null> {
 }
 
 /**
- * cliora v1 审查链接解析结果。协议校验在 Rust 侧完成，前端只按它打开准确的 worktree。
+ * cliora v2 审查链接解析结果。协议校验在 Rust 侧完成，前端只按它打开准确的 worktree。
  * `worktreePath` 是后端校验过的绝对路径，不含任何凭据。
  */
 export interface ClioraReviewRequest {
@@ -720,7 +722,7 @@ export const api = {
   measureWait: (ms: number) => invoke<void>("measure_wait", { ms }),
   /** 当前安装方式是否支持应用内安装（仅 Linux 非 AppImage 为 false）。 */
   updateInstallSupported: () => invoke<boolean>("update_install_supported"),
-  /** 解析并校验 cliora 的 v1 审查链接；失败时返回协议错误码，不做任何仓库操作。 */
+  /** 解析并校验 cliora 的 v2 审查链接；失败时返回协议错误码，不做任何仓库操作。 */
   clioraReviewRequest: (url: string) => invoke<ClioraReviewRequest>("cliora_review_request", { url }),
   /** 回送接收结果。accepted 为假时 reason 必须是协议里的稳定错误码。 */
   clioraReviewReceipt: (
@@ -730,13 +732,14 @@ export const api = {
     reason: string | null = null,
   ) => invoke<void>("cliora_review_receipt", { reviewId, sessionId, accepted, reason }),
   /**
-   * 回送返回事件。committed/merged 必须带完整 headOid；reviewed 不带。
+   * 回送 v2 返回事件。committed/merged 必须带完整 headOid；reviewed 不带。
+   * worktreeState 由后端按审查来源工作树读取真实 Git 状态填写，结果里告诉前端实际发送的状态。
    * 返回本身不执行任何 Git 写入。
    */
   clioraReviewReturn: (
     reviewId: string,
     sessionId: string,
-    outcome: "reviewed" | "committed" | "merged",
+    outcome: ClioraOutcome,
     headOid: string | null = null,
-  ) => invoke<void>("cliora_review_return", { reviewId, sessionId, outcome, headOid }),
+  ) => invoke<ClioraReturnSent>("cliora_review_return", { reviewId, sessionId, outcome, headOid }),
 };

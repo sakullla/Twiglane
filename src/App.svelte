@@ -22,7 +22,9 @@
     beginClioraReview,
     clioraBaseline,
     clioraReview,
+    clioraReturnNotice,
     clioraReturnOutcome,
+    clioraSourceMatches,
     forgetClioraSourceUnless,
     watchClioraReviewLinks,
   } from "./lib/cliora-review.svelte";
@@ -2609,7 +2611,7 @@
   }
 
   /**
-   * 处理 v1 审查链接（冷启动与运行中都走这里）。
+   * 处理 v2 审查链接（冷启动与运行中都走这里）。
    *
    * 解析在 Rust 侧完成；这里只按解析出的 worktreePath 调既有 openRepository：打开的是
    * 链接指定的那个工作树，子目录/父仓库都不会被替代，失败也不回退主检出。成功后建立
@@ -2687,17 +2689,17 @@
     if (!(await confirmEditorLeave("返回 cliora"))) return;
     if (clioraReview.source?.reviewId !== source.reviewId) return;
     const { outcome, headOid } = clioraReturnOutcome();
+    // 工作区声明由后端按来源工作树读取真实 Git 状态填写，前端不声明。这里刷新一次只为
+    // 后端没给出结果时提示仍按真实快照说明；当前仓库已不是来源工作树就当作没读到。
+    const fresh = await refresh().catch(() => false);
+    if (clioraReview.source?.reviewId !== source.reviewId) return;
+    const current = opened;
+    const localUncommitted =
+      fresh && current && clioraSourceMatches(current.summary.path) ? current.snapshot.files.length : null;
     try {
-      await api.clioraReviewReturn(source.reviewId, source.sessionId, outcome, headOid);
-      // 普通保存不制造提交或合入结果；工作区还有未提交修改时如实说出来，不再一律说「只做了浏览」。
-      const uncommitted = opened?.snapshot.files.length ?? 0;
-      notice(
-        outcome !== "reviewed"
-          ? "已返回 cliora，提交或合入结果以待复核声明发送。"
-          : uncommitted > 0
-            ? `已返回 cliora：本次没有提交或合入，工作区还有 ${uncommitted} 个未提交的改动。`
-            : "已返回 cliora：本次只做了浏览，没有提交或合入。",
-      );
+      const sent = await api.clioraReviewReturn(source.reviewId, source.sessionId, outcome, headOid);
+      // 普通保存不制造提交或合入结果；工作区还有未提交修改时如实说出来，不再说「只做了浏览」。
+      notice(clioraReturnNotice(outcome, sent, localUncommitted));
     } catch (error) {
       showError(error);
     }
@@ -3645,7 +3647,7 @@
       stopUpdate = await watchUpdateAvailable((offer) => {
         notice(`发现新版本 ${offer.version}，可从状态栏入口或设置安装。`);
       });
-      // v1 审查链接：冷启动先于运行中派发，App 侧用到达序号丢弃迟到的旧链接。
+      // v2 审查链接：冷启动先于运行中派发，App 侧用到达序号丢弃迟到的旧链接。
       stopClioraLink = await watchClioraReviewLinks((url) => {
         void handleClioraLink(url);
       });

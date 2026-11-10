@@ -392,6 +392,21 @@ export interface TaskReview {
   message: string;
 }
 
+/** 本次审查期间真实完成的 Git 操作：reviewed 表示没有提交或合入（不再表示“只浏览”）。 */
+export type ClioraOutcome = "reviewed" | "committed" | "merged";
+
+/** 返回前重新读到的工作区状态，与 outcome 正交；读不到就是 unknown，绝不当作 clean。 */
+export type ClioraWorktreeState = "clean" | "dirty" | "unknown";
+
+/**
+ * 返回 cliora 后后端告诉前端这次实际发送的工作区状态。工作区状态由后端按审查来源工作树
+ * 读取真实 Git 状态填写，前端不声明；uncommitted 只在读到时有值。
+ */
+export interface ClioraReturnSent {
+  worktreeState: ClioraWorktreeState;
+  uncommitted: number | null;
+}
+
 /**
  * 任务范围请求：只来自已校验的 cliora 审查链接。
  * 链接没有起点时不建立任务范围——不会退回当前 HEAD 或默认分支。

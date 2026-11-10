@@ -6,29 +6,43 @@
  * Playwright、开发模式的 register_all 都不能当作联动证据。报告缺失、字段缺失、
  * 状态自称通过但缺少实测支撑时一律失败，退出码 1（参数或文件问题为 2）。
  *
- * 用法：node scripts/verify-cliora-integration.mjs [--report <path>] [--json]
+ * 协议已升级到 v2（cliora 仓库 docs/integrations/twiglane-review-v2.md）。v1 时代的报告
+ * （format version 1）只是历史先例，不能代表当前候选：报告必须声明 v2 协议，且 Twiglane 安装版本
+ * 必须等于当前 package.json 版本；能读到 cliora 的 package.json 时，cliora 安装版本也必须一致。
+ *
+ * 用法：node scripts/verify-cliora-integration.mjs [--report <path>] [--cliora-package <path>] [--json]
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const DEFAULT_REPORT = "docs/verification/cliora-integration.json";
+const DEFAULT_CLIORA_PACKAGE = "../cliora/package.json";
 const FORMAT = "cliora-integration-evidence";
-const VERSION = 1;
+const VERSION = 2;
+const PROTOCOL = "twiglane-review-v2";
 
-/** 03 的执行计划列出的五个真实场景：缺任何一个都算证据不完整。 */
+/** 真实场景：缺任何一个都算证据不完整。后两项是 v2 新增的轻量编辑与扩展场景。 */
 const SCENARIOS = [
   { id: "cold-start-review", title: "cliora 冷启动唤起 Twiglane 并打开指定 worktree" },
-  { id: "commit-and-return", title: "Twiglane 提交后返回原 cliora 会话并复核提交" },
+  { id: "commit-and-return", title: "Twiglane 提交后返回原 cliora 会话并复核提交与剩余未提交修改" },
   { id: "merge-and-stale-head", title: "合入复核，以及返回后 HEAD 变化显示未确认" },
   { id: "invalid-links", title: "路径失效、无效协议、旧 reviewId、原会话失效、未注册 handler" },
   { id: "standalone-repository", title: "无来源仓库的现有提交与取消行为" },
+  {
+    id: "light-edit-return",
+    title: "Twiglane 轻量编辑保存后保留未提交修改，返回原 cliora 会话并显示真实未提交数量（不是只浏览）",
+  },
+  {
+    id: "extension-and-version-mismatch",
+    title: "合法 meta 扩展不改变复核；v1/版本不匹配与畸形扩展链接不写入、不回退、不双事件",
+  },
 ];
 
 /** 这些词出现在“已通过”的记录里说明证据不是实机联动。 */
 const NON_EVIDENCE = ["vitest", "playwright", "happy-dom", "mock", "register_all", "构建成功", "build only"];
 
 function parseArgs(argv) {
-  const options = { report: DEFAULT_REPORT, json: false };
+  const options = { report: DEFAULT_REPORT, clioraPackage: DEFAULT_CLIORA_PACKAGE, json: false };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--report") {
@@ -36,6 +50,11 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg.startsWith("--report=")) {
       options.report = arg.slice("--report=".length);
+    } else if (arg === "--cliora-package") {
+      options.clioraPackage = argv[index + 1];
+      index += 1;
+    } else if (arg.startsWith("--cliora-package=")) {
+      options.clioraPackage = arg.slice("--cliora-package=".length);
     } else if (arg === "--json") {
       options.json = true;
     } else if (arg === "--help" || arg === "-h") {
@@ -91,10 +110,23 @@ function scenarioProblems(scenario, builds) {
   return problems;
 }
 
+/** 读取 package.json 的版本；文件不存在时返回 null（cliora 仓库不在旁边时不做这一项比对）。 */
+function readPackageVersion(path) {
+  if (!existsSync(path)) return null;
+  try {
+    const version = JSON.parse(readFileSync(path, "utf8")).version;
+    return isNonEmptyString(version) ? version : null;
+  } catch {
+    return null;
+  }
+}
+
 function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
-    console.log("用法：node scripts/verify-cliora-integration.mjs [--report <path>] [--json]");
+    console.log(
+      "用法：node scripts/verify-cliora-integration.mjs [--report <path>] [--cliora-package <path>] [--json]",
+    );
     return;
   }
   if (options.unknown) fail("未知参数 " + options.unknown, 2);
@@ -112,19 +144,41 @@ function main() {
     fail("报告不是合法 JSON：" + error.message);
   }
   if (report.format !== FORMAT || report.version !== VERSION) {
-    fail("报告格式或版本不对，期望 " + FORMAT + " v" + VERSION);
+    fail(
+      "报告格式或版本不对，期望 " +
+        FORMAT +
+        " v" +
+        VERSION +
+        "（v1 协议时代的历史报告只作先例，当前候选需要重新实机执行）",
+    );
+  }
+  if (report.protocol !== PROTOCOL) {
+    fail("报告没有声明 " + PROTOCOL + " 协议，不能代表当前候选");
   }
   if (report.host?.platform !== "windows") {
     fail("真实联动证据只接受 Windows 主机记录（macOS/Linux 请写在 limitations）");
   }
   const builds = report.builds ?? {};
+  const versionProblems = [];
+  const twiglaneVersion = readPackageVersion(resolve(process.cwd(), "package.json"));
+  if (twiglaneVersion && builds.twiglane?.version !== twiglaneVersion) {
+    versionProblems.push(
+      "Twiglane 安装版本 " + (builds.twiglane?.version ?? "缺失") + " 不是当前候选 " + twiglaneVersion,
+    );
+  }
+  const clioraVersion = readPackageVersion(resolve(process.cwd(), options.clioraPackage));
+  if (clioraVersion && builds.cliora?.version !== clioraVersion) {
+    versionProblems.push(
+      "cliora 安装版本 " + (builds.cliora?.version ?? "缺失") + " 不是当前候选 " + clioraVersion,
+    );
+  }
   const recorded = new Map();
   for (const scenario of report.scenarios ?? []) {
     if (!isNonEmptyString(scenario?.id)) fail("场景缺少 id");
     if (recorded.has(scenario.id)) fail("场景重复：" + scenario.id);
     recorded.set(scenario.id, scenario);
   }
-  const problems = [];
+  const problems = [...versionProblems];
   for (const expected of SCENARIOS) {
     const scenario = recorded.get(expected.id);
     if (!scenario) {

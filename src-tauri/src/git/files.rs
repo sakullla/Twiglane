@@ -22,9 +22,10 @@ use crate::git::runner::ProcessOutput;
 use crate::git::schedule::{internal_request_id, GitJob, JobKind};
 use crate::model::{
     ChangeKind, RepositoryContentMatch, RepositoryContentSearch, RepositoryDirectory,
-    RepositoryDirectoryEntry, RepositoryEntryKind, RepositoryFileContent, RepositoryFileKind,
-    RepositoryPathEntry, RepositoryPathKind, RepositoryPathSearch, RepositoryReviewState,
-    RepositoryReviewToken, RepositorySearchScope, RepositorySearchSkip, RepositorySkipReason,
+    RepositoryDirectoryEntry, RepositoryEditSnapshot, RepositoryEditState, RepositoryEntryKind,
+    RepositoryFileContent, RepositoryFileKind, RepositoryLineEnding, RepositoryPathEntry,
+    RepositoryPathKind, RepositoryPathSearch, RepositoryReviewState, RepositoryReviewToken,
+    RepositorySearchScope, RepositorySearchSkip, RepositorySkipReason,
 };
 use crate::shutdown::Shutdown;
 
@@ -1816,6 +1817,422 @@ pub async fn repository_review_token(
         content_version,
         message,
     ))
+}
+
+/// 轻量编辑一次读取/保存的字节预算：与全文搜索的单文件上限一致（2 MiB）。
+const MAX_EDIT_BYTES: usize = 2 * 1024 * 1024;
+const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+
+/// 一条路径的完整读取结果，包含只读原因；只有 `Editable` 会带 text。
+#[derive(Debug)]
+struct EditRead {
+    state: RepositoryEditState,
+    size: u64,
+    digest: Option<String>,
+    text: Option<String>,
+    bom: bool,
+    line_ending: RepositoryLineEnding,
+    final_newline: bool,
+    message: String,
+}
+
+fn edit_read_only(state: RepositoryEditState, size: u64, message: &str) -> EditRead {
+    EditRead {
+        state,
+        size,
+        digest: None,
+        text: None,
+        bom: false,
+        line_ending: RepositoryLineEnding::None,
+        final_newline: false,
+        message: message.to_string(),
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// 统一行尾判定。单独一个 CR 或 LF/CRLF 混用都算 Mixed：首轮只读，避免保存时整份转换。
+fn scan_line_ending(bytes: &[u8]) -> RepositoryLineEnding {
+    let mut lf = 0_usize;
+    let mut crlf = 0_usize;
+    let mut lone_cr = false;
+    let mut index = 0_usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\r' if bytes.get(index + 1) == Some(&b'\n') => {
+                crlf += 1;
+                index += 2;
+                continue;
+            }
+            b'\r' => lone_cr = true,
+            b'\n' => lf += 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    if lone_cr || (lf > 0 && crlf > 0) {
+        RepositoryLineEnding::Mixed
+    } else if crlf > 0 {
+        RepositoryLineEnding::Crlf
+    } else if lf > 0 {
+        RepositoryLineEnding::Lf
+    } else {
+        RepositoryLineEnding::None
+    }
+}
+
+/// 读取一份可编辑文件的完整内容。所有只读边界都返回结构化状态，只有 I/O 自身失败才向上报错。
+fn read_edit_file(root: &Path, relative: &Path, cancel: &Shutdown) -> Result<EditRead, AppError> {
+    let display = display_path(relative);
+    let target = root.join(relative);
+    let meta = match fs::symlink_metadata(&target) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(edit_read_only(
+                RepositoryEditState::Missing,
+                0,
+                "文件不存在。",
+            ));
+        }
+        Err(error) => {
+            return Err(AppError::new(
+                "path_unreadable",
+                format!(
+                    "无法读取文件：{}",
+                    crate::redact::redact_error_text(&error.to_string())
+                ),
+            ));
+        }
+    };
+    if meta.file_type().is_symlink() {
+        return Ok(edit_read_only(
+            RepositoryEditState::Symlink,
+            meta.len(),
+            "不跟随符号链接编辑仓库文件。",
+        ));
+    }
+    if !meta.is_file() {
+        return Ok(edit_read_only(
+            RepositoryEditState::Special,
+            meta.len(),
+            "仅支持普通文本文件。",
+        ));
+    }
+    if let Err(error) = reject_symlink_components(root, relative) {
+        let state = match error.code.as_str() {
+            "file_path" => RepositoryEditState::Symlink,
+            "path_missing" => RepositoryEditState::Missing,
+            _ => return Err(error),
+        };
+        let message = if state == RepositoryEditState::Symlink {
+            "不跟随符号链接编辑仓库文件。"
+        } else {
+            "文件不存在。"
+        };
+        return Ok(edit_read_only(state, meta.len(), message));
+    }
+    let resolved = canonical_existing(&target)?;
+    if !resolved.starts_with(root) {
+        return Ok(edit_read_only(
+            RepositoryEditState::Symlink,
+            meta.len(),
+            "文件必须位于当前仓库内，不能编辑仓库外的内容。",
+        ));
+    }
+    if meta.len() > MAX_EDIT_BYTES as u64 {
+        return Ok(edit_read_only(
+            RepositoryEditState::TooLarge,
+            meta.len(),
+            &format!("文件超过 {MAX_EDIT_BYTES} 字节编辑上限，保持只读。"),
+        ));
+    }
+    let mut file = fs::File::open(&resolved).map_err(|error| {
+        AppError::new(
+            "path_unreadable",
+            format!(
+                "无法打开文件：{}",
+                crate::redact::redact_error_text(&error.to_string())
+            ),
+        )
+    })?;
+    let mut bytes: Vec<u8> = Vec::with_capacity(meta.len() as usize);
+    let mut chunk = [0_u8; 64 * 1024];
+    loop {
+        check_cancel(cancel)?;
+        let count = file.read(&mut chunk).map_err(|error| {
+            AppError::new(
+                "path_unreadable",
+                format!(
+                    "无法读取文件：{}",
+                    crate::redact::redact_error_text(&error.to_string())
+                ),
+            )
+        })?;
+        if count == 0 {
+            break;
+        }
+        if bytes.len() + count > MAX_EDIT_BYTES {
+            // 元数据之后文件可能又变大：按实际读到的内容判定超限，不按旧长度放行。
+            return Ok(edit_read_only(
+                RepositoryEditState::TooLarge,
+                meta.len(),
+                &format!("文件超过 {MAX_EDIT_BYTES} 字节编辑上限，保持只读。"),
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+    }
+    let size = bytes.len() as u64;
+    let digest = Some(sha256_hex(&bytes));
+    if wants_preview(&display, &bytes) && !svg_source_text(&display, &bytes) {
+        return Ok(EditRead {
+            state: RepositoryEditState::Resource,
+            size,
+            digest,
+            text: None,
+            bom: false,
+            line_ending: RepositoryLineEnding::None,
+            final_newline: false,
+            message: "此文件使用只读资源预览，不作为文本编辑。".to_string(),
+        });
+    }
+    if bytes.contains(&0) {
+        return Ok(EditRead {
+            state: RepositoryEditState::Binary,
+            size,
+            digest,
+            text: None,
+            bom: false,
+            line_ending: RepositoryLineEnding::None,
+            final_newline: false,
+            message: "二进制内容不支持编辑。".to_string(),
+        });
+    }
+    let bom = bytes.starts_with(UTF8_BOM);
+    let content = if bom {
+        &bytes[UTF8_BOM.len()..]
+    } else {
+        &bytes[..]
+    };
+    let Ok(text) = std::str::from_utf8(content) else {
+        return Ok(EditRead {
+            state: RepositoryEditState::InvalidUtf8,
+            size,
+            digest,
+            text: None,
+            bom,
+            line_ending: RepositoryLineEnding::None,
+            final_newline: false,
+            message: "文件不是有效 UTF-8 文本，保持只读。".to_string(),
+        });
+    };
+    let line_ending = scan_line_ending(content);
+    if line_ending == RepositoryLineEnding::Mixed {
+        return Ok(EditRead {
+            state: RepositoryEditState::MixedLineEndings,
+            size,
+            digest,
+            text: None,
+            bom,
+            line_ending,
+            final_newline: content.ends_with(b"\n"),
+            message: "文件包含混合行尾，保持只读以免保存时整份转换。".to_string(),
+        });
+    }
+    Ok(EditRead {
+        state: RepositoryEditState::Editable,
+        size,
+        digest,
+        // 传输文本统一 LF；BOM 与原始行尾分别记录，保存时再还原。
+        text: Some(text.replace("\r\n", "\n")),
+        bom,
+        line_ending,
+        final_newline: content.ends_with(b"\n"),
+        message: String::new(),
+    })
+}
+
+fn edit_snapshot(generation: u64, path: &str, read: EditRead) -> RepositoryEditSnapshot {
+    RepositoryEditSnapshot {
+        generation,
+        path: path.to_string(),
+        state: read.state,
+        editable: read.state == RepositoryEditState::Editable,
+        size: read.size,
+        digest: read.digest,
+        text: read.text,
+        bom: read.bom,
+        line_ending: read.line_ending,
+        final_newline: read.final_newline,
+        message: read.message,
+    }
+}
+
+/// 编辑读取：完整、有界、只读。成功时给出原始内容摘要与统一行尾，
+/// 不适用时给出具体只读原因；分页只读合同 `repository_file_content` 不受影响。
+pub async fn repository_edit_snapshot(
+    backend: &Backend,
+    path: &str,
+    relative: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<RepositoryEditSnapshot, AppError> {
+    let root = canonical_existing(&validate_input_path(path)?)?;
+    let relative_path = review_path(relative)?;
+    let relative_text = display_path(&relative_path);
+    let task_root = root.clone();
+    let task_relative = relative_path.clone();
+    let read = backend
+        .scheduler
+        .execute_blocking_read(
+            &repo_key(&root),
+            request_id,
+            generation,
+            move |cancel| read_edit_file(&task_root, &task_relative, &cancel),
+        )
+        .await?;
+    Ok(edit_snapshot(generation, &relative_text, read))
+}
+
+fn validate_edit_text(content: &str) -> Result<(), AppError> {
+    if content.contains('\0') {
+        return Err(AppError::new(
+            "edit_content",
+            "编辑内容包含空字符，未写入任何文件。",
+        ));
+    }
+    if content.contains('\r') {
+        return Err(AppError::new(
+            "edit_content",
+            "编辑内容必须使用 LF 行尾，未写入任何文件。",
+        ));
+    }
+    if content.len() > MAX_EDIT_BYTES {
+        return Err(AppError::new(
+            "edit_content",
+            format!("编辑内容超过 {MAX_EDIT_BYTES} 字节上限，未写入任何文件。"),
+        ));
+    }
+    Ok(())
+}
+
+/// 按原 BOM 与统一行尾重建字节；不补也不删末尾换行，完全由编辑文本决定。
+fn encode_edit_text(content: &str, bom: bool, line_ending: RepositoryLineEnding) -> Vec<u8> {
+    let body = if line_ending == RepositoryLineEnding::Crlf {
+        content.replace('\n', "\r\n")
+    } else {
+        content.to_string()
+    };
+    let mut bytes = Vec::with_capacity(body.len() + UTF8_BOM.len());
+    if bom {
+        bytes.extend_from_slice(UTF8_BOM);
+    }
+    bytes.extend_from_slice(body.as_bytes());
+    bytes
+}
+
+fn edit_conflict(message: &str) -> AppError {
+    AppError::new("edit_conflict", message)
+}
+
+/// 编辑保存：在仓库写锁内复核 generation、路径能力与 expectedDigest，
+/// 只有全部吻合才用同目录临时文件原子替换目标工作区文件。
+///
+/// 不运行 Git 写命令：不暂存、不提交、不推送、不合入。成功后 generation 前进，
+/// 返回重新读取的新快照；失败时原文件保持不变。
+pub async fn repository_edit_save(
+    backend: &Backend,
+    path: &str,
+    relative: &str,
+    expected_digest: &str,
+    content: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<RepositoryEditSnapshot, AppError> {
+    let root = canonical_existing(&validate_input_path(path)?)?;
+    let relative_path = review_path(relative)?;
+    let relative_text = display_path(&relative_path);
+    let expected = expected_digest.trim().to_ascii_lowercase();
+    if !is_sha256_hex(&expected) {
+        return Err(AppError::new(
+            "edit_digest",
+            "编辑基线摘要无效，未写入任何文件。",
+        ));
+    }
+    validate_edit_text(content)?;
+    let mut guard = backend
+        .scheduler
+        .lock_write(&repo_key(&root), request_id, generation)
+        .await?;
+
+    let current = read_edit_file(&root, &relative_path, &Shutdown::new())?;
+    if current.state != RepositoryEditState::Editable {
+        return Err(edit_conflict(
+            "文件已不再处于可编辑状态，保存未写入，未覆盖外部内容。",
+        ));
+    }
+    if current.digest.as_deref() != Some(expected.as_str()) {
+        return Err(edit_conflict(
+            "文件在编辑期间已被外部修改，保存未写入，未覆盖外部内容。",
+        ));
+    }
+    let bytes = encode_edit_text(content, current.bom, current.line_ending);
+    if bytes.len() > MAX_EDIT_BYTES {
+        return Err(AppError::new(
+            "edit_content",
+            format!("保存后的内容超过 {MAX_EDIT_BYTES} 字节上限，未写入任何文件。"),
+        ));
+    }
+    // 写锁内再解析一次目标：父目录在读取后被换成符号链接时也不能写到仓库外。
+    let target = canonical_existing(&root.join(&relative_path))?;
+    if !target.starts_with(&root) {
+        return Err(edit_conflict("文件路径已不再安全，保存未写入。"));
+    }
+    let metadata = fs::metadata(&target).map_err(|error| {
+        AppError::new(
+            "edit_write_failed",
+            format!(
+                "无法确认文件状态，未写入任何内容。{}",
+                crate::redact::redact_error_text(&error.to_string())
+            ),
+        )
+    })?;
+    if metadata.permissions().readonly() {
+        return Err(AppError::new(
+            "edit_write_failed",
+            "文件是只读的，保存未写入任何内容。",
+        ));
+    }
+    crate::atomic::atomic_write_preserving_permissions(&target, &bytes).map_err(|error| {
+        AppError::new(
+            "edit_write_failed",
+            format!(
+                "无法写入文件，原文件保持不变。{}",
+                crate::redact::redact_error_text(&error.to_string())
+            ),
+        )
+    })?;
+    guard.mark_written();
+
+    let written = read_edit_file(&root, &relative_path, &Shutdown::new())?;
+    let expected_after = sha256_hex(&bytes);
+    if written.state != RepositoryEditState::Editable
+        || written.digest.as_deref() != Some(expected_after.as_str())
+    {
+        return Err(AppError::new(
+            "edit_verify",
+            "文件已写入，但保存后的内容无法确认，请重新读取。",
+        ));
+    }
+    let new_generation = guard.finish();
+    Ok(edit_snapshot(new_generation, &relative_text, written))
 }
 
 #[cfg(test)]
@@ -3930,5 +4347,596 @@ mod tests {
             result.state,
             RepositoryReviewState::Unconfirmed | RepositoryReviewState::Unchanged
         ));
+    }
+
+    fn set_read_only(path: &Path, read_only: bool) {
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(read_only);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    fn bytes_of(parts: &[&[u8]]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for part in parts {
+            bytes.extend_from_slice(part);
+        }
+        bytes
+    }
+
+    #[tokio::test]
+    async fn edit_snapshot_reads_complete_text_with_digest_bom_and_line_endings() {
+        let fixture = crate::test_support::git_fixture("repository-edit-snapshot");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        let lf = b"one\ntwo\n";
+        let crlf = b"one\r\ntwo\r\n";
+        let bom = bytes_of(&[UTF8_BOM, b"one\ntwo\n"]);
+        fs::write(root.join("lf.txt"), lf).unwrap();
+        fs::write(root.join("crlf.txt"), crlf).unwrap();
+        fs::write(root.join("bom.txt"), &bom).unwrap();
+        fs::write(root.join("empty.txt"), b"").unwrap();
+        fs::write(root.join("none.txt"), b"single line").unwrap();
+        // 未跟踪文件同样可编辑：普通仓库没有 AI 元数据也能小改当前工作区文本。
+        fs::write(root.join("untracked.txt"), b"fresh\n").unwrap();
+        git(&root, &["add", "."]);
+        let path = root.to_str().unwrap();
+
+        let lf_digest = sha256_hex(lf);
+        let lf_snapshot = repository_edit_snapshot(&backend, path, "lf.txt", 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(lf_snapshot.generation, 1);
+        assert_eq!(lf_snapshot.path, "lf.txt");
+        assert_eq!(lf_snapshot.state, RepositoryEditState::Editable);
+        assert!(lf_snapshot.editable);
+        assert_eq!(lf_snapshot.text.as_deref(), Some("one\ntwo\n"));
+        assert_eq!(lf_snapshot.line_ending, RepositoryLineEnding::Lf);
+        assert!(!lf_snapshot.bom);
+        assert!(lf_snapshot.final_newline);
+        assert_eq!(lf_snapshot.size, lf.len() as u64);
+        assert_eq!(lf_snapshot.digest.as_deref(), Some(lf_digest.as_str()));
+        assert!(lf_snapshot.message.is_empty());
+
+        let crlf_snapshot = repository_edit_snapshot(&backend, path, "crlf.txt", 1, 2)
+            .await
+            .unwrap();
+        assert_eq!(crlf_snapshot.state, RepositoryEditState::Editable);
+        assert_eq!(crlf_snapshot.text.as_deref(), Some("one\ntwo\n"));
+        assert_eq!(crlf_snapshot.line_ending, RepositoryLineEnding::Crlf);
+        assert!(crlf_snapshot.final_newline);
+        assert_eq!(crlf_snapshot.digest.as_deref(), Some(sha256_hex(crlf).as_str()));
+
+        let bom_digest = sha256_hex(&bom);
+        let bom_snapshot = repository_edit_snapshot(&backend, path, "bom.txt", 1, 3)
+            .await
+            .unwrap();
+        assert_eq!(bom_snapshot.state, RepositoryEditState::Editable);
+        assert!(bom_snapshot.bom);
+        // 传输文本不带 BOM；摘要仍按含 BOM 的原始字节计算。
+        assert_eq!(bom_snapshot.text.as_deref(), Some("one\ntwo\n"));
+        assert_eq!(bom_snapshot.size, bom.len() as u64);
+        assert_eq!(bom_snapshot.digest.as_deref(), Some(bom_digest.as_str()));
+
+        let empty = repository_edit_snapshot(&backend, path, "empty.txt", 1, 4)
+            .await
+            .unwrap();
+        assert_eq!(empty.state, RepositoryEditState::Editable);
+        assert_eq!(empty.text.as_deref(), Some(""));
+        assert_eq!(empty.line_ending, RepositoryLineEnding::None);
+        assert!(!empty.final_newline);
+        assert_eq!(empty.digest.as_deref(), Some(sha256_hex(b"").as_str()));
+
+        let none = repository_edit_snapshot(&backend, path, "none.txt", 1, 5)
+            .await
+            .unwrap();
+        assert_eq!(none.text.as_deref(), Some("single line"));
+        assert_eq!(none.line_ending, RepositoryLineEnding::None);
+        assert!(!none.final_newline);
+
+        let untracked = repository_edit_snapshot(&backend, path, "untracked.txt", 1, 6)
+            .await
+            .unwrap();
+        assert_eq!(untracked.state, RepositoryEditState::Editable);
+        assert_eq!(untracked.text.as_deref(), Some("fresh\n"));
+    }
+
+    #[tokio::test]
+    async fn edit_snapshot_explains_every_read_only_boundary() {
+        let fixture = crate::test_support::git_fixture("repository-edit-readonly");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("too-large.txt"), vec![b'a'; MAX_EDIT_BYTES + 1]).unwrap();
+        fs::write(root.join("binary.bin"), b"a\0b").unwrap();
+        fs::write(root.join("invalid.txt"), [0xff_u8, 0xfe, 0xfd]).unwrap();
+        fs::write(root.join("mixed.txt"), b"one\r\ntwo\n").unwrap();
+        fs::write(root.join("lone-cr.txt"), b"one\rtwo").unwrap();
+        fs::write(root.join("logo.png"), b"not really a png").unwrap();
+        fs::create_dir_all(root.join("dir")).unwrap();
+        let path = root.to_str().unwrap();
+
+        let too_large = repository_edit_snapshot(&backend, path, "too-large.txt", 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(too_large.state, RepositoryEditState::TooLarge);
+        assert!(!too_large.editable && too_large.text.is_none());
+        assert!(too_large.message.contains("编辑上限"), "{}", too_large.message);
+
+        let binary = repository_edit_snapshot(&backend, path, "binary.bin", 1, 2)
+            .await
+            .unwrap();
+        assert_eq!(binary.state, RepositoryEditState::Binary);
+        assert!(binary.text.is_none());
+        assert!(binary.message.contains("二进制"), "{}", binary.message);
+
+        let invalid = repository_edit_snapshot(&backend, path, "invalid.txt", 1, 3)
+            .await
+            .unwrap();
+        assert_eq!(invalid.state, RepositoryEditState::InvalidUtf8);
+        assert!(invalid.text.is_none());
+        assert!(invalid.message.contains("UTF-8"), "{}", invalid.message);
+
+        let mixed = repository_edit_snapshot(&backend, path, "mixed.txt", 1, 4)
+            .await
+            .unwrap();
+        assert_eq!(mixed.state, RepositoryEditState::MixedLineEndings);
+        assert_eq!(mixed.line_ending, RepositoryLineEnding::Mixed);
+        assert!(mixed.text.is_none());
+        assert!(mixed.message.contains("混合行尾"), "{}", mixed.message);
+
+        // 单独一个 CR 也不是可保留的统一行尾，同样只读。
+        let lone = repository_edit_snapshot(&backend, path, "lone-cr.txt", 1, 5)
+            .await
+            .unwrap();
+        assert_eq!(lone.state, RepositoryEditState::MixedLineEndings);
+
+        let resource = repository_edit_snapshot(&backend, path, "logo.png", 1, 6)
+            .await
+            .unwrap();
+        assert_eq!(resource.state, RepositoryEditState::Resource);
+        assert!(resource.text.is_none());
+
+        let special = repository_edit_snapshot(&backend, path, "dir", 1, 7)
+            .await
+            .unwrap();
+        assert_eq!(special.state, RepositoryEditState::Special);
+        assert!(special.text.is_none());
+
+        let missing = repository_edit_snapshot(&backend, path, "gone.txt", 1, 8)
+            .await
+            .unwrap();
+        assert_eq!(missing.state, RepositoryEditState::Missing);
+        assert!(missing.text.is_none());
+
+        for unsafe_path in ["../escape.txt", ".git/config", ""] {
+            let error = repository_edit_snapshot(&backend, path, unsafe_path, 1, 9)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "invalid_path", "{unsafe_path}");
+        }
+
+        // 代次变化后旧读取不接纳。
+        backend.scheduler.bump_generation(&repo_key(&root));
+        let stale = repository_edit_snapshot(&backend, path, "mixed.txt", 1, 10)
+            .await
+            .unwrap_err();
+        assert_eq!(stale.code, "stale");
+        assert_eq!(stale.generation, Some(2));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn edit_snapshot_and_save_refuse_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = crate::test_support::git_fixture("repository-edit-symlink");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("target.txt"), b"secret\n").unwrap();
+        symlink(root.join("target.txt"), root.join("link.txt")).unwrap();
+        let path = root.to_str().unwrap();
+
+        let snapshot = repository_edit_snapshot(&backend, path, "link.txt", 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(snapshot.state, RepositoryEditState::Symlink);
+        assert!(!snapshot.editable && snapshot.text.is_none());
+
+        let error = repository_edit_save(
+            &backend,
+            path,
+            "link.txt",
+            &sha256_hex(b"secret\n"),
+            "mine\n",
+            1,
+            2,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "edit_conflict");
+        assert_eq!(fs::read(root.join("target.txt")).unwrap(), b"secret\n");
+    }
+
+    #[tokio::test]
+    async fn edit_save_preserves_bom_crlf_permissions_and_final_newline() {
+        let fixture = crate::test_support::git_fixture("repository-edit-save-crlf");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        let original = bytes_of(&[UTF8_BOM, b"one\r\ntwo\r\n"]);
+        fs::write(root.join("crlf.txt"), &original).unwrap();
+        fs::write(root.join("other.txt"), b"keep\r\n").unwrap();
+        git(&root, &["add", "."]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let target = root.join("crlf.txt");
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        let path = root.to_str().unwrap();
+
+        let before = repository_edit_snapshot(&backend, path, "crlf.txt", 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(before.line_ending, RepositoryLineEnding::Crlf);
+        assert!(before.bom);
+
+        let saved = repository_edit_save(
+            &backend,
+            path,
+            "crlf.txt",
+            before.digest.as_deref().unwrap(),
+            "ONE\ntwo\nthree\n",
+            1,
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.generation, 2);
+        assert_eq!(saved.state, RepositoryEditState::Editable);
+        assert_eq!(saved.text.as_deref(), Some("ONE\ntwo\nthree\n"));
+        assert_eq!(saved.line_ending, RepositoryLineEnding::Crlf);
+        assert!(saved.bom);
+        assert!(saved.final_newline);
+
+        let expected = bytes_of(&[UTF8_BOM, b"ONE\r\ntwo\r\nthree\r\n"]);
+        assert_eq!(fs::read(root.join("crlf.txt")).unwrap(), expected);
+        let expected_digest = sha256_hex(&expected);
+        assert_eq!(saved.digest.as_deref(), Some(expected_digest.as_str()));
+        assert_eq!(saved.size, expected.len() as u64);
+        // 未选择保存的文件不被修改。
+        assert_eq!(fs::read(root.join("other.txt")).unwrap(), b"keep\r\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(root.join("crlf.txt"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o640);
+        }
+    }
+
+    #[tokio::test]
+    async fn edit_save_keeps_lf_and_respects_missing_final_newline() {
+        let fixture = crate::test_support::git_fixture("repository-edit-save-lf");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("note.txt"), b"one\ntwo").unwrap();
+        let path = root.to_str().unwrap();
+
+        let before = repository_edit_snapshot(&backend, path, "note.txt", 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(before.line_ending, RepositoryLineEnding::Lf);
+        assert!(!before.final_newline);
+
+        // 编辑文本没有末尾换行，保存也不补。
+        let first = repository_edit_save(
+            &backend,
+            path,
+            "note.txt",
+            before.digest.as_deref().unwrap(),
+            "ONE\ntwo",
+            1,
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(!first.final_newline);
+        assert_eq!(fs::read(root.join("note.txt")).unwrap(), b"ONE\ntwo");
+        assert_eq!(first.generation, 2);
+
+        let second = repository_edit_save(
+            &backend,
+            path,
+            "note.txt",
+            first.digest.as_deref().unwrap(),
+            "ONE\ntwo\n",
+            2,
+            3,
+        )
+        .await
+        .unwrap();
+        assert!(second.final_newline);
+        assert_eq!(fs::read(root.join("note.txt")).unwrap(), b"ONE\ntwo\n");
+        assert_eq!(second.generation, 3);
+    }
+
+    #[tokio::test]
+    async fn edit_save_detects_same_length_external_change_without_overwriting() {
+        let fixture = crate::test_support::git_fixture("repository-edit-save-conflict");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("note.txt"), b"alpha\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let path = root.to_str().unwrap();
+
+        let before = repository_edit_snapshot(&backend, path, "note.txt", 1, 1)
+            .await
+            .unwrap();
+        // 同长度的外部修改：长度与时间戳之外的摘要必须能识别出来。
+        fs::write(root.join("note.txt"), b"bravo\n").unwrap();
+        let error = repository_edit_save(
+            &backend,
+            path,
+            "note.txt",
+            before.digest.as_deref().unwrap(),
+            "mines\n",
+            1,
+            2,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "edit_conflict");
+        assert!(error.message.contains("外部修改"), "{}", error.message);
+        assert_eq!(fs::read(root.join("note.txt")).unwrap(), b"bravo\n");
+        // 冲突不写入也不推进代次。
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 1);
+
+        // 用户重新读取后，以新摘要保存成功。
+        let refreshed = repository_edit_snapshot(&backend, path, "note.txt", 1, 3)
+            .await
+            .unwrap();
+        let saved = repository_edit_save(
+            &backend,
+            path,
+            "note.txt",
+            refreshed.digest.as_deref().unwrap(),
+            "mines\n",
+            1,
+            4,
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.digest.as_deref(), Some(sha256_hex(b"mines\n").as_str()));
+        assert_eq!(fs::read(root.join("note.txt")).unwrap(), b"mines\n");
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 2);
+
+        // 写锁内还复核 generation：外部刷新推进代次后，旧代次的保存不能写入。
+        backend.scheduler.bump_generation(&repo_key(&root));
+        let stale = repository_edit_save(
+            &backend,
+            path,
+            "note.txt",
+            saved.digest.as_deref().unwrap(),
+            "stale\n",
+            1,
+            5,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(stale.code, "stale");
+        assert_eq!(stale.generation, Some(3));
+        assert_eq!(fs::read(root.join("note.txt")).unwrap(), b"mines\n");
+    }
+
+    #[tokio::test]
+    async fn edit_save_rejects_files_that_stop_being_editable_after_the_snapshot() {
+        let fixture = crate::test_support::git_fixture("repository-edit-save-capability");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("target.txt"), b"keep\n").unwrap();
+        let path = root.to_str().unwrap();
+        let before = repository_edit_snapshot(&backend, path, "target.txt", 1, 1)
+            .await
+            .unwrap();
+        let digest = before.digest.unwrap();
+
+        // 文件被删除：不重建、不覆盖。
+        fs::remove_file(root.join("target.txt")).unwrap();
+        let missing = repository_edit_save(&backend, path, "target.txt", &digest, "mine\n", 1, 2)
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code, "edit_conflict");
+        assert!(!root.join("target.txt").exists());
+
+        // 同一路径变成目录：不写入。
+        fs::create_dir_all(root.join("target.txt")).unwrap();
+        let special = repository_edit_save(&backend, path, "target.txt", &digest, "mine\n", 1, 3)
+            .await
+            .unwrap_err();
+        assert_eq!(special.code, "edit_conflict");
+        assert!(root.join("target.txt").is_dir());
+        fs::remove_dir(root.join("target.txt")).unwrap();
+
+        // 恢复普通文件后再变成非法 UTF-8：旧摘要失配，保存不覆盖外部内容。
+        fs::write(root.join("target.txt"), b"keep\n").unwrap();
+        let again = repository_edit_snapshot(&backend, path, "target.txt", 1, 4)
+            .await
+            .unwrap();
+        assert_eq!(again.digest, Some(digest));
+        fs::write(root.join("target.txt"), [0xff_u8, 0xfe]).unwrap();
+        let invalid = repository_edit_save(
+            &backend,
+            path,
+            "target.txt",
+            again.digest.as_deref().unwrap(),
+            "mine\n",
+            1,
+            5,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(invalid.code, "edit_conflict");
+        assert_eq!(fs::read(root.join("target.txt")).unwrap(), [0xff_u8, 0xfe]);
+    }
+
+    #[tokio::test]
+    async fn edit_save_write_failures_keep_the_original_file_and_generation() {
+        let fixture = crate::test_support::git_fixture("repository-edit-save-failure");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("locked.txt"), b"keep\n").unwrap();
+        let path = root.to_str().unwrap();
+        let before = repository_edit_snapshot(&backend, path, "locked.txt", 1, 1)
+            .await
+            .unwrap();
+        let digest = before.digest.unwrap();
+
+        // 只读文件：保留原内容，不报告成功。
+        set_read_only(&root.join("locked.txt"), true);
+        let readonly = repository_edit_save(
+            &backend,
+            path,
+            "locked.txt",
+            &digest,
+            "mine\n",
+            1,
+            2,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(readonly.code, "edit_write_failed");
+        assert_eq!(fs::read(root.join("locked.txt")).unwrap(), b"keep\n");
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 1);
+        set_read_only(&root.join("locked.txt"), false);
+
+        // 摘要格式、正文边界都必须在写入前拒绝。
+        let bad_digest =
+            repository_edit_save(&backend, path, "locked.txt", "not-a-digest", "mine\n", 1, 3)
+                .await
+                .unwrap_err();
+        assert_eq!(bad_digest.code, "edit_digest");
+        let nul = repository_edit_save(
+            &backend,
+            path,
+            "locked.txt",
+            &digest,
+            "bad\0text",
+            1,
+            4,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(nul.code, "edit_content");
+        let cr = repository_edit_save(
+            &backend,
+            path,
+            "locked.txt",
+            &digest,
+            "bad\r\ntext",
+            1,
+            5,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(cr.code, "edit_content");
+        let oversized_content = "a".repeat(MAX_EDIT_BYTES + 1);
+        let oversized = repository_edit_save(
+            &backend,
+            path,
+            "locked.txt",
+            &digest,
+            &oversized_content,
+            1,
+            6,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(oversized.code, "edit_content");
+        assert_eq!(fs::read(root.join("locked.txt")).unwrap(), b"keep\n");
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 1);
+    }
+
+    #[tokio::test]
+    async fn edit_save_keeps_head_and_index_and_the_new_generation_refreshes() {
+        let fixture = crate::test_support::git_fixture("repository-edit-save-git");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("app.txt"), b"a\n").unwrap();
+        fs::write(root.join("other.txt"), b"b\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let path = root.to_str().unwrap();
+        let before_head = git_stdout(&root, &["rev-parse", "HEAD"]);
+        let before_index = git_stdout(&root, &["ls-files", "--stage"]);
+        assert_eq!(git_stdout(&root, &["status", "--porcelain"]), "");
+
+        let before = repository_edit_snapshot(&backend, path, "app.txt", 1, 1)
+            .await
+            .unwrap();
+        let saved = repository_edit_save(
+            &backend,
+            path,
+            "app.txt",
+            before.digest.as_deref().unwrap(),
+            "a\nb\n",
+            1,
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.generation, 2);
+        // 保存只改工作区文件：HEAD、暂存区与其他文件都不动。
+        assert_eq!(git_stdout(&root, &["rev-parse", "HEAD"]), before_head);
+        assert_eq!(git_stdout(&root, &["ls-files", "--stage"]), before_index);
+        assert_eq!(git_stdout(&root, &["status", "--porcelain"]), " M app.txt\n");
+        assert_eq!(fs::read(root.join("other.txt")).unwrap(), b"b\n");
+
+        // 新代次可以直接用于状态与单文件审阅刷新。
+        let status = crate::git::ops::refresh_status(
+            &backend,
+            path,
+            saved.generation,
+            crate::git::schedule::internal_request_id(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status.generation, saved.generation);
+        let app = status
+            .files
+            .iter()
+            .find(|file| file.path == "app.txt")
+            .unwrap();
+        assert_eq!(app.unstaged, ChangeKind::Modified);
+        assert!(status.files.iter().all(|file| file.path != "other.txt"));
+        let token = repository_review_token(
+            &backend,
+            path,
+            "app.txt",
+            saved.generation,
+            crate::git::schedule::internal_request_id(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(token.state, RepositoryReviewState::Current);
+        assert!(token.token.is_some());
+
+        // 保存前的旧代次已经失效，不能继续拿旧快照写入。
+        let stale = repository_edit_snapshot(&backend, path, "app.txt", before.generation, 7)
+            .await
+            .unwrap_err();
+        assert_eq!(stale.code, "stale");
+        assert_eq!(stale.generation, Some(saved.generation));
     }
 }

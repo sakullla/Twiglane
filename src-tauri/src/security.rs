@@ -45,6 +45,9 @@ fn capabilities_do_not_grant_a_shell() {
         "allow-cancel-document-resources",
         "allow-repository-directory",
         "allow-repository-file-content",
+        // 轻量编辑只有完整快照读取与写锁内保存两个命令：没有 shell、没有任意文件写入。
+        "allow-repository-edit-snapshot",
+        "allow-repository-edit-save",
         "allow-repository-path-search",
         "allow-repository-content-search",
         "allow-repository-review-token",

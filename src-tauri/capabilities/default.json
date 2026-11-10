@@ -35,6 +35,8 @@
     "allow-cancel-document-resources",
     "allow-repository-directory",
     "allow-repository-file-content",
+    "allow-repository-edit-snapshot",
+    "allow-repository-edit-save",
     "allow-repository-path-search",
     "allow-repository-content-search",
     "allow-repository-review-token",

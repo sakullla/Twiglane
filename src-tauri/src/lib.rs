@@ -37,8 +37,8 @@ use crate::model::{
     CommitResult, ConflictView, DiffResponse, DiscardResult, FileHistoryPage, GitInfo, HistoryPage,
     IgnoreOutcome, MergeComplete, MergePreview, MergeSession, OpenedRepository, PanelWidths,
     RecentRepo, RemoteState, RemoteTag, RepoChanged, RepositoryContentSearch, RepositoryDirectory,
-    RepositoryFileContent, RepositoryPathSearch, RepositorySearchScope, StashApplyResult,
-    StashSaveResult, StashState, StatusSnapshot, TagState, Theme, UndoResult,
+    RepositoryEditSnapshot, RepositoryFileContent, RepositoryPathSearch, RepositorySearchScope,
+    StashApplyResult, StashSaveResult, StashState, StatusSnapshot, TagState, Theme, UndoResult,
 };
 use crate::shutdown::Shutdown;
 use crate::state::{AppStore, PullIntegration};
@@ -106,6 +106,8 @@ pub fn run() {
             cancel_document_resources,
             repository_directory,
             repository_file_content,
+            repository_edit_snapshot,
+            repository_edit_save,
             repository_path_search,
             repository_content_search,
             repository_review_token,
@@ -1001,6 +1003,47 @@ async fn repository_file_content(
         &relative,
         offset,
         limit,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn repository_edit_snapshot(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    relative: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<RepositoryEditSnapshot, AppError> {
+    crate::git::files::repository_edit_snapshot(
+        state.inner(),
+        &path,
+        &relative,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+async fn repository_edit_save(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    relative: String,
+    expected_digest: String,
+    content: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<RepositoryEditSnapshot, AppError> {
+    crate::git::files::repository_edit_save(
+        state.inner(),
+        &path,
+        &relative,
+        &expected_digest,
+        &content,
         generation,
         request_id,
     )

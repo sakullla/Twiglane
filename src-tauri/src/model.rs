@@ -1009,3 +1009,54 @@ pub struct RepositoryContentSearch {
     pub text_truncated: bool,
     pub message: Option<String>,
 }
+
+/// 轻量编辑一次读取/保存的能力状态。只有 `Editable` 会带完整文本；
+/// 其余状态说明这条路径为什么继续保持只读。
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RepositoryEditState {
+    Editable,
+    Missing,
+    Symlink,
+    Special,
+    TooLarge,
+    Binary,
+    InvalidUtf8,
+    MixedLineEndings,
+    Resource,
+}
+
+/// 文件原本的统一行尾。`None` 表示整份内容没有换行；`Mixed` 只出现在只读原因里，
+/// 保存不会写出混合行尾。
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RepositoryLineEnding {
+    None,
+    Lf,
+    Crlf,
+    Mixed,
+}
+
+/// 一次完整文本编辑读取的快照。
+///
+/// `digest` 是原始文件字节（含 BOM）的 SHA-256，只随真实内容变化，是保存时的冲突凭据；
+/// `text` 去掉 BOM 并把行尾统一为 LF，保存时再按 `lineEnding` 还原。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryEditSnapshot {
+    pub generation: u64,
+    pub path: String,
+    pub state: RepositoryEditState,
+    pub editable: bool,
+    pub size: u64,
+    /// 未完整读取（超限、缺失、非普通文件）时为 null。
+    pub digest: Option<String>,
+    /// 只有 `editable` 为真时是完整文本；只读状态为 null。
+    pub text: Option<String>,
+    /// 原始文件带 UTF-8 BOM；保存时原样保留。
+    pub bom: bool,
+    pub line_ending: RepositoryLineEnding,
+    /// 编辑文本自身是否以换行结尾；保存不为它补换行。
+    pub final_newline: bool,
+    pub message: String,
+}

@@ -234,7 +234,7 @@
     <h2>外观</h2>
     <div class="settings-group">
       <div class="settings-row">
-        <span class="settings-label">主题<small>重启后保持</small></span>
+        <span class="settings-label">主题<small>跟随系统时随系统的浅色/深色切换</small></span>
         <div class="segmented" role="group" aria-label="外观">
           {#each THEMES as option (option.id)}
             <button type="button" aria-pressed={theme === option.id} title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => onTheme(option.id)}>
@@ -258,7 +258,7 @@
     <h2>仓库</h2>
     <div class="settings-group">
       <div class="settings-row">
-        <span class="settings-label">分叉时的拉取<small>重启后保持</small></span>
+        <span class="settings-label">分叉时的拉取<small>本地与远程各有新提交时，用合并还是变基来整合</small></span>
         <div class="segmented" role="group" aria-label="分叉时的拉取">
           {#each PULLS as option (option.id)}
             <button type="button" aria-pressed={pullIntegration === option.id} title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => onPullIntegration(option.id)}>
@@ -268,7 +268,7 @@
         </div>
       </div>
       <label class="settings-row switch">
-        <span class="settings-label">按斜杠分组分支<small>重启后保持</small></span>
+        <span class="settings-label">按斜杠分组分支<small>feature/login 归到 feature 组下，可逐组折叠</small></span>
         <input
           type="checkbox"
           checked={branchGroups}
@@ -278,7 +278,7 @@
         />
       </label>
       <label class="settings-row switch">
-        <span class="settings-label">显示文件视图<small>关闭后左栏只保留改动与历史；重启后保持</small></span>
+        <span class="settings-label">显示文件视图<small>关闭后左栏只保留改动与历史</small></span>
         <input
           type="checkbox"
           checked={filesView}

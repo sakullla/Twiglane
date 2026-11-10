@@ -586,6 +586,7 @@
       shortcut: item.shortcut,
       keywords: item.keywords,
       detail: item.detail,
+      hint: item.hint,
       enabled: item.enabled,
       reason: item.reason,
       run: () => runCommand(item.id),
@@ -785,6 +786,13 @@
       case "task.publish":
         openTask(id.slice(5) as TaskModal);
         return;
+      case "branch.switch":
+        openBranchSwitcher();
+        return;
+      case "branch.create":
+        openTask("branch");
+        if (taskModal === "branch") branchCreateIntent = true;
+        return;
       case "task.abortMerge":
         abortMergeFromShell();
         return;
@@ -844,6 +852,23 @@
   function toggleSwitcher(kind: "repo" | "branch", anchor: HTMLElement) {
     if (switcher?.kind === kind) closeSwitcher();
     else switcher = { kind, anchor };
+  }
+
+  /**
+   * 命令面板里的「切换分支」：和点标题栏的分支按钮是同一个弹层，锚点也是那枚按钮。
+   * 面板关闭时会把焦点还给打开前的控件，所以等这一轮更新落定再打开弹层，搜索框才留得住焦点。
+   * 没有可用的分支按钮（例如还读不到当前分支）时退到「分支与标签」。
+   */
+  function openBranchSwitcher() {
+    if (!opened) return;
+    void tick().then(() => {
+      const anchor = document.querySelector<HTMLButtonElement>(".titlebar .branch-pill:not(:disabled)");
+      if (!anchor) {
+        openTask("branch");
+        return;
+      }
+      if (switcher?.kind !== "branch") switcher = { kind: "branch", anchor };
+    });
   }
 
   function closeSwitcher(refocus = true) {
@@ -2021,6 +2046,9 @@
       selected = selectionAfterEdit(result.snapshot.files, selected);
       selectedSet = [];
       banner = result.pushed ? banner : null;
+      // 成功要看得见：提交后暂存区清空、说明框收起，界面上只剩「领先」数字悄悄加一。
+      // 与「提交并推送」一样用通知条报出提交了什么，几秒后自动收起。
+      if (!result.pushed) phaseNote = result.summary;
       live = result.summary;
       void probeMerge();
       await loadSelectedDiff();
@@ -2962,12 +2990,45 @@
     return isTextEntry(document.activeElement);
   }
 
+  /**
+   * 当前视图的主列表：没有仓库时是最近仓库的第一行，改动视图是文件列表，
+   * 历史是提交列表，文件视图是目录树。都已经在 Tab 序列里，这里只是给方向键一个入口。
+   */
+  function primaryList(): HTMLElement | null {
+    const view = document.querySelector<HTMLElement>('.workbench-view[data-active="true"]') ?? document;
+    if (!opened) return document.querySelector<HTMLElement>(".welcome-recent > button");
+    if (workspaceView === "history") return view.querySelector<HTMLElement>(".history-list");
+    if (workspaceView === "files") return view.querySelector<HTMLElement>('[role="tree"]');
+    return view.querySelector<HTMLElement>('.file-list[role="listbox"]');
+  }
+
+  /**
+   * 焦点不在任何控件上时（刚打开仓库、用 ⌘/Ctrl+数字切了视图、点过空白处），↑/↓ 直接进入主列表：
+   * 不必先按几次 Tab 才能用键盘浏览。列表拿到焦点后把同一次按键转交给它，第一下就能移动选择。
+   * 已经有焦点的控件、文本框和任何弹层都不受影响。
+   */
+  function enterPrimaryList(event: KeyboardEvent): boolean {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return false;
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.defaultPrevented) return false;
+    const focused = document.activeElement;
+    if (focused && focused !== document.body && focused !== document.documentElement) return false;
+    if (layerAtKey) return false;
+    const list = primaryList();
+    if (!list) return false;
+    event.preventDefault();
+    list.focus({ preventScroll: true });
+    // 最近仓库的行本身就是目标：聚焦第一行即可；列表容器则需要这次按键来移动选择。
+    if (opened) list.dispatchEvent(new KeyboardEvent("keydown", { key: event.key, bubbles: true, cancelable: true }));
+    return true;
+  }
+
   /** 键盘层：把按键翻成命令 id，再走与四个入口相同的 runCommand。 */
   function onWindowKeydown(event: KeyboardEvent) {
     if (paletteOpen) return;
     // 任务级 modal 层占着单槽（任务弹窗或只读阅读窗口）时按键全部让位：
     // 阅读窗口同样由 Modal 占层并让背景 inert，外壳键盘不能落到 inert 底下（R3/R6）。
     if (taskLayerOpen || cloneOpen || dependencyOpen || confirmPath !== null) return;
+    if (enterPrimaryList(event)) return;
     if (event.key === "Escape") {
       // 上面还有弹层时 Esc 只关那一层；输入框里的 Esc 归输入框。
       if (multiActive && workspaceView === "changes" && selected && !layerAtKey && !event.defaultPrevented && !isTextEntry(event.target)) {

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { MODIFIER_LABEL } from "../brand";
+  import { rankPalette } from "../palette-match";
   import Icon from "./Icon.svelte";
 
   /**
@@ -17,6 +18,8 @@
     keywords?: string;
     /** 选项上的弱化补充，例如同名仓库的路径；只用于区分，不参与过滤以外的判断。 */
     detail?: string;
+    /** 一行说明：标题只有两三个字时（「远程」「拉取」）靠它说清这条命令做什么，也参与匹配。 */
+    hint?: string;
     enabled?: boolean;
     reason?: string;
     run: () => void;
@@ -41,20 +44,36 @@
   const FOCUSABLE = 'input:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
   /**
-   * 过滤串 = 标题 + 分组 + 可选的关键词。
+   * 匹配与排序在 palette-match.ts：标题、检索词（别名/路径）、分组与说明都参与，
+   * 空格分隔的多个词须全部命中，中文关键词不计字序（「合并分支」能找到「分支合并」）。
    * 关键词只参与匹配、不进 DOM 文案：切换仓库的路径因此可搜，但选项上仍只显示仓库名。
-   * 空格分隔的多个词须全部命中（顺序不限）：「提交 推送」能找到「提交并推送」。
    */
-  let filtered = $derived.by(() => {
-    const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    if (tokens.length === 0) return commands;
-    const hits = commands.filter((item) => {
-      const haystack = `${item.title} ${item.group} ${item.keywords ?? ""}`.toLowerCase();
-      return tokens.every((token) => haystack.includes(token));
-    });
-    // 搜索时把可用的排在前面（组内原序不变）：回车执行的第一条不会是一条点不动的命令。
+  let ranked = $derived.by(() => {
+    if (query.trim() === "") return commands;
+    const hits = rankPalette(commands, query);
+    // 搜索时把可用的排在前面（各自按匹配质量排序）：回车执行的第一条不会是一条点不动的命令。
     return [...hits.filter((item) => enabled(item)), ...hits.filter((item) => !enabled(item))];
   });
+
+  /** 分组按首次出现排序，组内保持排序后的先后。 */
+  let groups = $derived.by(() => {
+    const order: string[] = [];
+    const bucket = new Map<string, PaletteCommand[]>();
+    for (const item of ranked) {
+      if (!bucket.has(item.group)) {
+        bucket.set(item.group, []);
+        order.push(item.group);
+      }
+      bucket.get(item.group)?.push(item);
+    }
+    return order.map((name) => ({ name, items: bucket.get(name) ?? [] }));
+  });
+
+  /**
+   * 游标走的顺序 = 屏幕上的顺序。排序后同组的命令不一定相邻，而界面按组归拢显示：
+   * 直接拿排序结果当游标顺序，方向键会在组之间来回跳，回车执行的也可能不是高亮的那一条。
+   */
+  let filtered = $derived(groups.flatMap((group) => group.items));
 
   /** 换关键词后游标回到第一条可用的命令；同一个关键词不重置（鼠标/方向键选的位置保留）。 */
   let seenQuery = "";
@@ -72,19 +91,6 @@
     const index = filtered.findIndex((item) => enabled(item));
     return index >= 0 ? index : 0;
   }
-
-  let groups = $derived.by(() => {
-    const order: string[] = [];
-    const bucket = new Map<string, PaletteCommand[]>();
-    for (const item of filtered) {
-      if (!bucket.has(item.group)) {
-        bucket.set(item.group, []);
-        order.push(item.group);
-      }
-      bucket.get(item.group)?.push(item);
-    }
-    return order.map((name) => ({ name, items: bucket.get(name) ?? [] }));
-  });
 
   $effect(() => {
     if (open) {
@@ -230,7 +236,7 @@
           <!-- 结论和下一步放进同一个 status：读屏一次把两句都播报，不会只念前半句。 -->
           <div role="status">
             <p class="palette-empty">没有匹配的命令</p>
-            <p class="palette-empty-hint">换个关键词试试，或按 Esc 关闭</p>
+            <p class="palette-empty-hint">换个说法试试：中文、Git 的英文叫法（如 stash、merge）或仓库路径都可以</p>
           </div>
         {:else}
           {#each groups as group (group.name)}
@@ -245,6 +251,7 @@
                   tabindex={filtered[active] === item ? 0 : -1}
                   aria-selected={filtered[active] === item}
                   aria-disabled={!enabled(item)}
+                  aria-describedby={!item.detail && item.hint ? "palette-hint-" + positionOf(item) : undefined}
                   title={!enabled(item) ? (item.reason ?? "当前不可用") : undefined}
                   onmouseenter={() => (active = positionOf(item))}
                   onclick={() => runCommand(item)}
@@ -258,7 +265,12 @@
                   }}
                 >
                   <span>{item.title}</span>
-                  {#if item.detail}<small class="palette-detail"><bdi>{item.detail}</bdi></small>{/if}
+                  {#if item.detail}
+                    <small class="palette-detail"><bdi>{item.detail}</bdi></small>
+                  {:else if item.hint}
+                    <!-- 说明由 aria-describedby 交给读屏器（隐藏节点仍可被引用）：不进可访问名称，名称仍只是标题。 -->
+                    <small id={"palette-hint-" + positionOf(item)} class="palette-detail palette-hint" aria-hidden="true">{item.hint}</small>
+                  {/if}
                   <span class="spacer"></span>
                   {#if !enabled(item)}<small class="palette-reason">{item.reason ?? "当前不可用"}</small>{/if}
                   {#if item.shortcut}<kbd>{item.shortcut}</kbd>{/if}

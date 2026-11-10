@@ -791,6 +791,8 @@
 .side-cell.del { background: var(--del-bg); color: var(--fg); }
 .side-cell.hunk, .side-cell.meta { background: var(--hunk-bg); color: var(--hunk-fg); }
 .side-cell.blank { background: var(--surface-2); }
+/* 占位格（对侧多出来的行）铺一层细斜纹：它不是文件里的空行，这一侧此处根本没有这一行。 */
+.side-cell.blank::after { content: ""; grid-column: 2; align-self: stretch; background-image: repeating-linear-gradient(-45deg, transparent 0 5px, color-mix(in srgb, var(--fg-subtle) 14%, transparent) 5px 6px); }
 .side-row.span .side-cell + .side-cell { border-left-color: transparent; }
 .diff-more { display: flex; align-items: center; gap: var(--space-12); padding: 9px 14px; border-top: 1px solid var(--border); background: var(--surface-2); flex: none; }
 .diff-more .hint { flex: 1; font-size: var(--text-xs); }
@@ -914,6 +916,9 @@
 .palette-item:not(.active) .palette-reason { display: none; }
 /* 区分用的补充（同名仓库路径、当前仓库）：紧跟标题，空间不够时先省略它，标题与快捷键列不动。 */
 .palette-detail { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg-subtle); font-size: var(--text-xs); white-space: nowrap; }
+/* 命令说明：比标题先让出宽度；不可用的当前项要显示原因，这时说明让位，一行只讲一件事。 */
+.palette-hint { flex-shrink: 4; }
+.palette-item.active[aria-disabled="true"] .palette-hint { display: none; }
 .palette-empty { padding: var(--space-32) var(--space-16) var(--space-8); text-align: center; color: var(--fg-muted); font-size: var(--text-sm); }
 /* 无匹配时给下一步，而不只是一个空白结论（R6）。 */
 .palette-empty-hint { padding: 0 var(--space-16) var(--space-32); text-align: center; color: var(--fg-subtle); font-size: var(--text-xs); }

@@ -845,7 +845,15 @@ describe("历史面板", () => {
       "撤销最近提交并保留改动",
       "从此提交新建分支",
       "复制提交哈希",
+      "复制提交说明",
     ]);
+    // 复制类菜单项：菜单随点击收起，成功要说明复制了什么。
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    await fireEvent.click(screen.getByRole("menuitem", { name: "复制提交说明" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(first.summary));
+    expect(onNotice).toHaveBeenCalledWith("已复制提交说明");
+    await fireEvent.contextMenu(row);
     const disabled = screen.getByRole("menuitem", { name: "撤销最近提交并保留改动" });
     const reason = disabled.querySelector(".context-copy small");
     expect(reason?.textContent).toBe("只能撤销当前分支的最近一次提交");

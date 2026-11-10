@@ -709,6 +709,50 @@ describe("命令面板", () => {
     }
   });
 
+  it("说明跟在标题后弱化显示：不进可访问名称，由 aria-describedby 交给读屏器，并参与匹配", async () => {
+    const items = [
+      { id: "task.remote", group: "任务", title: "远程", hint: "查看与修改远程地址", run: vi.fn() },
+      { id: "sync.pull", group: "同步", title: "拉取", hint: "能快进就快进", keywords: "pull", run: vi.fn() },
+    ];
+    render(CommandPalette, { props: { open: true, onClose: () => {}, commands: items } as never });
+    // 可访问名称仍然只是标题：说明里出现的词不会让按名称查找变得含糊。
+    const remote = screen.getByRole("option", { name: "远程" });
+    const hint = remote.querySelector<HTMLElement>(".palette-hint")!;
+    expect(hint.textContent).toBe("查看与修改远程地址");
+    expect(hint.getAttribute("aria-hidden")).toBe("true");
+    expect(remote.getAttribute("aria-describedby")).toBe(hint.id);
+
+    const input = screen.getByRole("combobox", { name: "搜索命令" });
+    await fireEvent.input(input, { target: { value: "地址" } });
+    expect(screen.getAllByRole("option").map((item) => item.querySelector("span")?.textContent)).toEqual(["远程"]);
+    await fireEvent.input(input, { target: { value: "PULL" } });
+    expect(screen.getAllByRole("option").map((item) => item.querySelector("span")?.textContent)).toEqual(["拉取"]);
+  });
+
+  it("排序后同组命令不相邻时，方向键仍按屏幕顺序走，回车执行的就是高亮的那一条", async () => {
+    // 「推送」：同步组的「推送」是标题前缀（最靠前），提交组的「提交并推送」只是包含，
+    // 同步组的「发布分支」靠别名命中。排序结果是 同步 → 提交 → 同步，界面按组归拢成 同步、同步、提交。
+    const runs = { push: vi.fn(), commitPush: vi.fn(), publish: vi.fn() };
+    const items = [
+      { id: "commit.push", group: "提交", title: "提交并推送", run: runs.commitPush },
+      { id: "task.publish", group: "同步", title: "发布分支", keywords: "推送新分支", run: runs.publish },
+      { id: "sync.push", group: "同步", title: "推送", run: runs.push },
+    ];
+    render(CommandPalette, { props: { open: true, onClose: () => {}, commands: items } as never });
+    const input = screen.getByRole("combobox", { name: "搜索命令" });
+    await fireEvent.input(input, { target: { value: "推送" } });
+    const titles = () => screen.getAllByRole("option").map((item) => item.querySelector("span")?.textContent);
+    expect(titles()).toEqual(["推送", "发布分支", "提交并推送"]);
+    const active = () => document.getElementById(input.getAttribute("aria-activedescendant") ?? "");
+    expect(active()).toBe(screen.getAllByRole("option")[0]);
+    await fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(active(), "下一条就是屏幕上的下一条").toBe(screen.getAllByRole("option")[1]);
+    expect(active()?.getAttribute("aria-selected")).toBe("true");
+    await fireEvent.keyDown(input, { key: "Enter" });
+    expect(runs.publish).toHaveBeenCalledTimes(1);
+    expect(runs.commitPush).not.toHaveBeenCalled();
+  });
+
   it("不可用动作就地说明原因且不执行", async () => {
     const run = vi.fn();
     render(CommandPalette, {
@@ -744,11 +788,11 @@ describe("命令面板", () => {
     expect(active()).toBe(screen.getAllByRole("option")[1]);
     await fireEvent.input(input, { target: { value: "没有这个" } });
     expect(screen.getByText("没有匹配的命令")).toBeTruthy();
-    expect(screen.getByText("换个关键词试试，或按 Esc 关闭")).toBeTruthy();
+    expect(screen.getByText(/换个说法试试/)).toBeTruthy();
     // 结论和下一步在同一个 status 里：读屏一次播报两句，不会只念到结论。
     const status = screen.getByRole("status");
     expect(status.textContent).toContain("没有匹配的命令");
-    expect(status.textContent).toContain("换个关键词试试，或按 Esc 关闭");
+    expect(status.textContent).toContain("换个说法试试");
     expect(input.getAttribute("aria-activedescendant"), "没有条目时不再指向不存在的 id").toBeNull();
   });
 

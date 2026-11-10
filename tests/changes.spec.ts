@@ -546,11 +546,14 @@ describe("主工作台", () => {
     expect(paletteItems(current).find((item) => item.id === `${REPO_SWITCH_PREFIX}/work/solo`)?.enabled).toBe(true);
   });
 
-  it("命令面板按仓库路径片段能筛出对应仓库，没有关键词的命令行为不变", async () => {
-    // 注册表一侧：切库命令单独带路径关键词，其它命令没有关键词
+  it("命令面板按仓库路径片段能筛出对应仓库，静态命令带的是检索别名而不是路径", async () => {
+    // 注册表一侧：切库命令的关键词就是路径；静态命令带 Git 英文叫法等别名，不带路径
     const items = paletteItems(commandState());
     expect(items.find((item) => item.id === `${REPO_SWITCH_PREFIX}${repoPath}`)?.keywords).toBe(repoPath);
-    expect(items.find((item) => item.id === "view.changes")?.keywords).toBeUndefined();
+    expect(items.find((item) => item.id === "view.changes")?.keywords).toContain("status");
+    // 切库条目的说明就是路径，已经由 keywords/detail 承担，不再重复成一行说明
+    expect(items.find((item) => item.id === `${REPO_SWITCH_PREFIX}${repoPath}`)?.hint).toBeUndefined();
+    expect(items.find((item) => item.id === "sync.pull")?.hint).toContain("快进");
 
     renderApp();
     await openRepo();
@@ -566,11 +569,15 @@ describe("主工作台", () => {
     // 关键词只参与过滤、不参与显示：选项文案里不出现路径
     expect(byPath[0].textContent).not.toContain("C:/work");
 
-    // 没有关键词的命令仍只按标题与分组匹配
+    // 标题命中排在最前；别名与说明只参与匹配
     await fireEvent.input(input, { target: { value: "提交历史" } });
     const byTitle = within(palette).getAllByRole("option");
-    expect(byTitle).toHaveLength(1);
     expect(byTitle[0].textContent).toContain("提交历史");
+    expect(byTitle[0].getAttribute("aria-selected")).toBe("true");
+
+    // Git 的英文叫法能找到对应的中文命令
+    await fireEvent.input(input, { target: { value: "stash" } });
+    expect(within(palette).getAllByRole("option").map((item) => item.querySelector("span")?.textContent)).toEqual(["临时保存"]);
   });
 
   it("草稿为空时面板里的提交项与提交区按钮一样不可用，并就地说明原因", async () => {
@@ -717,6 +724,9 @@ describe("主工作台", () => {
     await fireEvent.click(screen.getByRole("button", { name: "提交到本地" }));
     await waitFor(() => expect(document.querySelector("[data-commit-error]")).toBeNull());
     expect(document.querySelector("[data-commit-blocker]")?.textContent?.trim()).toBe("先暂存要提交的文件");
+    // 成功要看得见：提交区已经清空，通知条报出这次提交，而不是只有「领先」数字悄悄加一。
+    expect(document.querySelector(".toast.ok .toast-text")?.textContent).toBe("已提交 abcdef1");
+    expect(document.querySelector(".toast.error"), "成功时不留着上一次的失败通知").toBeNull();
   });
 
   it("历史与改动来回切换后各自滚动与选中保留，浏览历史不写入", async () => {

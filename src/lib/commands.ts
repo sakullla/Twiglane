@@ -495,6 +495,22 @@ const TASK_COMMANDS: CommandSpec[] = [
     },
   },
   {
+    id: "branch.switch",
+    group: "任务",
+    title: "切换分支",
+    hint: "搜索本地或远程分支并切换",
+    available: hasRepo,
+    reason: hasRepoReason,
+  },
+  {
+    id: "branch.create",
+    group: "任务",
+    title: "新建分支",
+    hint: "从当前分支或指定起点创建",
+    available: hasRepo,
+    reason: hasRepoReason,
+  },
+  {
     id: "task.branch",
     group: "任务",
     title: "分支与标签",
@@ -695,6 +711,62 @@ export function commandReason(command: CommandSpec, state: CommandState): string
   return command.reason?.(state) ?? "当前不可用";
 }
 
+/**
+ * 命令面板的检索别名：Git 的英文叫法与常见的另一种中文说法。只参与匹配，不显示。
+ * 空格分开的每一段是一条独立别名（中文别名按整段做不计字序的匹配）。
+ * 集中放在一张表里，标题与说明仍然只在各自的命令定义里写一次。
+ */
+const PALETTE_ALIASES: Record<string, string> = {
+  "view.changes": "changes status diff 工作区 未提交",
+  "view.history": "history log 日志 提交记录",
+  "view.files": "files tree explorer 文件树 目录 浏览",
+  "file.prev": "previous file",
+  "file.next": "next file",
+  "review.prev": "review previous",
+  "review.next": "review next",
+  "review.toggle": "review reviewed 已读",
+  "review.hide": "review reviewed 过滤已审阅",
+  "diff.hunk.prev": "hunk previous 上一块 改动块",
+  "diff.hunk.next": "hunk next 下一块 改动块",
+  "view.find": "find search filter 查找 过滤",
+  "files.quickOpen": "open file goto 打开文件 跳转文件",
+  "files.search": "grep search 全文搜索 搜索内容",
+  "file.reveal": "reveal locate 定位文件",
+  "file.back": "back",
+  "file.forward": "forward",
+  "task.scope": "scope staged 暂存范围",
+  "stage.all": "stage add 全部添加",
+  "unstage.all": "unstage reset 撤出暂存",
+  "stage.file": "stage add 添加文件",
+  "unstage.file": "unstage reset 撤出暂存",
+  "commit.local": "commit 本地提交",
+  "commit.push": "commit push",
+  "task.publish": "publish upstream 上游 推送新分支",
+  "sync.fetch": "fetch 抓取 下载远程",
+  "sync.pull": "pull 更新代码 下拉",
+  "sync.push": "push 上传",
+  "sync.upstream": "upstream tracking 跟踪分支 设置上游",
+  "task.stash": "stash 贮藏 储藏 搁置",
+  "task.merge": "merge rebase 合并分支 变基",
+  "task.abortMerge": "abort 取消合并 中止变基 中止拣选",
+  "branch.switch": "checkout switch branch 检出分支",
+  "branch.create": "create new branch 创建分支",
+  "task.branch": "branch tag 管理分支 删除分支 重命名分支 管理标签 新建标签",
+  "task.remote": "remote origin url 远端 远程地址",
+  "task.settings": "settings preferences 偏好 首选项 配置 应用更新",
+  "repo.add": "open 打开仓库 打开本地仓库",
+  "repo.clone": "clone",
+  "repo.create": "init 初始化仓库",
+  "repo.copyPath": "copy path 仓库路径",
+  "theme.light": "theme light 主题 亮色 白天",
+  "theme.dark": "theme dark 主题 暗色 夜间",
+  "theme.system": "theme system auto 主题 自动",
+  "view.refresh": "refresh reload 重新读取",
+  "rail.toggle": "sidebar 侧边栏 左栏",
+  "palette.open": "command palette",
+  "dialog.dependencies": "dependencies environment git 环境 诊断",
+};
+
 /** 命令面板条目：与其它入口同源，只是多了「为什么不可用」的就地说明。 */
 export interface PaletteItem {
   id: string;
@@ -705,6 +777,8 @@ export interface PaletteItem {
   keywords?: string;
   /** 选项上的弱化补充：同名仓库的路径、当前仓库标记。 */
   detail?: string;
+  /** 一行说明，跟在标题后面弱化显示并参与匹配。切换仓库的条目不带：路径已经是它的检索词。 */
+  hint?: string;
   enabled: boolean;
   reason?: string;
 }
@@ -717,8 +791,9 @@ export function paletteItems(state: CommandState): PaletteItem[] {
       group: command.group,
       title: command.title,
       shortcut: command.shortcut,
-      keywords: command.keywords,
+      keywords: command.keywords ?? PALETTE_ALIASES[command.id],
       detail: command.detail,
+      hint: command.id.startsWith(REPO_SWITCH_PREFIX) ? undefined : command.hint,
       enabled,
       reason: enabled ? undefined : commandReason(command, state),
     };

@@ -7,7 +7,7 @@ import { classifyDiffLine } from "../src/lib/diff";
 import { DraftBuffer } from "../src/lib/draft";
 import { normalizeError } from "../src/lib/errors";
 import { toSideRows } from "../src/lib/diff";
-import { branchLabel, commitScope, createSelectionResolver, dependencyNote, filterRows, gitInstallHint, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "../src/lib/labels";
+import { branchLabel, commitScope, createSelectionResolver, dependencyNote, filterRows, formatCheckedAt, gitInstallHint, groupFiles, retainSelection, selectionAfterEdit, syncLabel } from "../src/lib/labels";
 import { finishDiffAttempt } from "../src/lib/diff";
 import {
   clampWidth,
@@ -102,6 +102,16 @@ describe("工作区状态", () => {
       }
     }
     expect(createSelectionResolver(files, false)({ path: "conflict", side: "staged" })).toBeNull();
+  });
+
+  it("远程核对时间只写到需要的精度：当天只给时分，同年补月日，跨年才带年份", () => {
+    const at = (year: number, month: number, day: number, hour = 9, minute = 5) => new Date(year, month - 1, day, hour, minute).getTime();
+    const now = at(2026, 11, 10, 18, 0);
+    expect(formatCheckedAt(at(2026, 11, 10), now)).toBe("09:05");
+    expect(formatCheckedAt(at(2026, 11, 9), now)).toBe("11-09 09:05");
+    expect(formatCheckedAt(at(2025, 11, 10), now)).toBe("2025-11-10 09:05");
+    // 同月同日但不同年不是「今天」。
+    expect(formatCheckedAt(at(2025, 11, 10, 18, 0), now)).toContain("2025");
   });
 
   it("同步标签明确未检查远程", () => {

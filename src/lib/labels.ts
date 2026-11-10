@@ -35,10 +35,20 @@ export function branchLabel(branch: BranchInfo): string {
   return branch.name ?? "未知分支";
 }
 
-export function formatCheckedAt(ms: number): string {
+/**
+ * 远程核对时间：只写到读者需要的精度。
+ * 当天只给时分（状态栏与同步按钮常驻显示，完整日期每次都重复同一个「今天」），
+ * 同年的其它日子补月日，跨年才带年份。`now` 可注入，便于测试固定「今天」。
+ */
+export function formatCheckedAt(ms: number, now: number = Date.now()): string {
   const date = new Date(ms);
+  const today = new Date(now);
   const pad = (value: number) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const sameYear = date.getFullYear() === today.getFullYear();
+  if (sameYear && date.getMonth() === today.getMonth() && date.getDate() === today.getDate()) return time;
+  const day = `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  return sameYear ? `${day} ${time}` : `${date.getFullYear()}-${day} ${time}`;
 }
 
 export function syncLabel(branch: BranchInfo): string {

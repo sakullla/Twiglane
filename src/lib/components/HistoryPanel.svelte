@@ -228,9 +228,11 @@
   /** 「从此提交新建分支」的输入层。 */
   let branchFrom = $state<{ oid: string; summary: string; name: string; checkout: boolean; busy: boolean; error: string | null } | null>(null);
 
-  async function copyText(text: string) {
+  /** 右键菜单里的复制：菜单随点击收起，界面上没有别的变化，所以成功也要说一声复制了什么。 */
+  async function copyText(text: string, what: string) {
     try {
       await navigator.clipboard.writeText(text);
+      onNotice?.(`已复制${what}`);
     } catch {
       onFailure({ code: "clipboard", message: "无法写入剪贴板，请手动复制。" });
     }
@@ -262,7 +264,7 @@
             disabledReason: writeReason(),
             run: () => void runCherryPick(ordered),
           },
-          { id: "hash", label: "复制哈希", icon: "copy", run: () => void copyText(ordered.join("\n")) },
+          { id: "hash", label: "复制哈希", icon: "copy", run: () => void copyText(ordered.join("\n"), ` ${ordered.length} 个提交哈希`) },
         ]
       : [
           {
@@ -298,7 +300,8 @@
             disabledReason: writeReason(),
             run: () => (branchFrom = { oid: commit.oid, summary: commit.summary, name: "", checkout: true, busy: false, error: null }),
           },
-          { id: "hash", label: "复制提交哈希", icon: "copy", run: () => void copyText(commit.oid) },
+          { id: "hash", label: "复制提交哈希", icon: "copy", run: () => void copyText(commit.oid, `提交哈希 ${shortOid(commit.oid)}`) },
+          { id: "summary", label: "复制提交说明", icon: "copy", run: () => void copyText(commit.summary, "提交说明") },
         ];
     menu = { x: point.x, y: point.y, entries, label: ordered.length > 1 ? `已选 ${ordered.length} 个提交的操作` : `提交 ${shortOid(commit.oid)} 的操作` };
   }
@@ -306,7 +309,7 @@
   function fileMenu(relative: string, point: { x: number; y: number }) {
     const entries: ContextMenuEntry[] = [
       { id: "history", label: "查看此文件历史", icon: "history", run: () => onFilePath(relative) },
-      { id: "copy", label: "复制相对路径", icon: "copy", run: () => void copyText(relative) },
+      { id: "copy", label: "复制相对路径", icon: "copy", run: () => void copyText(relative, `相对路径 ${relative}`) },
       { id: "reveal", label: "在系统文件管理器中显示", icon: "folder", run: () => void revealFile(relative) },
     ];
     menu = { x: point.x, y: point.y, entries, label: `文件 ${relative} 的操作` };
@@ -1804,9 +1807,9 @@
             <strong>{statusText}</strong>
             {#if showConditions}<p class="history-conditions">{conditionText}</p>{/if}
             {#if filePath && page?.state === "no_file_history"}
-              <button type="button" class="btn btn-ghost btn-sm" onclick={onClearFile}>返回全部历史</button>
+              <button type="button" class="btn btn-secondary btn-sm" onclick={onClearFile}>返回全部历史</button>
             {:else if page?.state === "no_match" && hasActiveFilters}
-              <button type="button" class="btn btn-ghost btn-sm" onclick={clearAllFilters}>清除筛选条件</button>
+              <button type="button" class="btn btn-secondary btn-sm" onclick={clearAllFilters}>清除筛选条件</button>
             {/if}
           </div>
         {:else if commits.length === 0}
@@ -2353,6 +2356,14 @@
           <span class="empty-icon"><Icon name="commit" size={24} /></span>
           <strong>未选择提交</strong>
           <p>选择左侧一条记录查看文件和差异；按住 Ctrl 或 Shift 多选，可看几个提交合起来的最终结果。</p>
+        </div>
+      {:else if !loading && !refreshing && !detailError}
+        <!-- 列表是空的（没有匹配、读取失败或分支还没有提交）：原因与恢复入口已经在左侧，
+             这里不重复播报，只说明这块区域是做什么的，避免留下一整块没有解释的空白。 -->
+        <div class="empty" data-history-detail-empty>
+          <span class="empty-icon"><Icon name="commit" size={24} /></span>
+          <strong>没有可查看的提交</strong>
+          <p>左侧列表里出现提交后，这里显示所选提交的文件和差异。</p>
         </div>
       {/if}
       {/if}

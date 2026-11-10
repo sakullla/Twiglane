@@ -445,6 +445,8 @@ const ADDED_COMMAND_IDS = [
   "unstage.file",
   "sync.upstream",
   "task.abortMerge",
+  "branch.switch",
+  "branch.create",
 ];
 const ADDED_COMMAND_TITLES = [
   "上一个文件",
@@ -465,6 +467,8 @@ const ADDED_COMMAND_TITLES = [
   "取消暂存当前文件",
   "修改上游分支",
   "中止合并",
+  "切换分支",
+  "新建分支",
 ];
 
 /** 注册表状态夹具：暂存区有 2 个文件、草稿已填，是「看起来都能用」的那一侧。 */
@@ -2087,6 +2091,48 @@ describe("应用外壳", () => {
     await waitFor(() => expect(document.querySelector(".toast-text")?.textContent).toBe("已推送到 mirror，没有强行推送，上游保持不变。"));
   });
 
+  it("焦点不在任何控件上时，方向键直接进入当前视图的主列表；文本框与弹层不受影响", async () => {
+    render(App);
+    const arrow = (target: EventTarget, key = "ArrowDown") => {
+      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      target.dispatchEvent(event);
+      return event;
+    };
+    const blur = () => (document.activeElement as HTMLElement | null)?.blur?.();
+
+    // 起始页：没有焦点时 ↓ 落到第一条最近仓库。
+    await waitFor(() => expect(document.querySelector(".welcome-recent button")).toBeTruthy());
+    blur();
+    expect(document.activeElement).toBe(document.body);
+    expect(arrow(document.body).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(document.querySelector(".welcome-recent button"));
+
+    await openRepo();
+    blur();
+    const fileList = screen.getByRole("listbox", { name: "改动文件" });
+    const seen: string[] = [];
+    fileList.addEventListener("keydown", (event) => seen.push(event.key));
+    arrow(document.body);
+    expect(document.activeElement, "改动视图的主列表是文件列表").toBe(fileList);
+    expect(seen, "同一次按键转交给列表，第一下就能移动选择").toEqual(["ArrowDown"]);
+
+    // 已经有焦点的控件不被抢走；文本框里的方向键仍归光标。
+    const draft = document.querySelector<HTMLTextAreaElement>(".composer textarea")!;
+    draft.focus();
+    expect(arrow(draft).defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(draft);
+
+    // 带修饰键的方向键（Alt+↓ 是下一处改动）不走这条路。
+    blur();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", shiftKey: true, bubbles: true, cancelable: true }));
+    expect(document.activeElement).toBe(document.body);
+
+    // 弹层打开时让位：命令面板里的方向键只移动面板自己的高亮。
+    await openPalette();
+    arrow(document.body);
+    expect(document.activeElement).not.toBe(fileList);
+  });
+
   it("低频入口：分支弹层进入新建、合并和管理，同步菜单进入远程，命令面板的分支与标签仍是管理界面", async () => {
     mocks.branchState.mockResolvedValue(branchFixture());
     mocks.tagState.mockResolvedValue({ generation: 4, tags: [], snapshot });
@@ -2119,6 +2165,19 @@ describe("应用外壳", () => {
     await fireEvent.click(screen.getByRole("menuitem", { name: /^远程/ }));
     await waitFor(() => expect(document.querySelector('[data-task-modal="remote"]')).toBeTruthy());
     await closeModal();
+
+    // 命令面板的「新建分支」与「切换分支」：和标题栏入口落到同一处。
+    let branchPalette = await openPalette();
+    await fireEvent.click(within(branchPalette).getByRole("option", { name: "新建分支" }));
+    await waitFor(() => expect(document.querySelector('[data-task-modal="branch"]')).toBeTruthy());
+    expect(createForm(), "面板里的新建分支同样直接展开表单").toBeTruthy();
+    await closeModal();
+    branchPalette = await openPalette();
+    await fireEvent.click(within(branchPalette).getByRole("option", { name: "切换分支" }));
+    expect(await screen.findByRole("dialog", { name: "切换分支" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "命令面板" })).toBeNull();
+    await fireEvent.click(trigger);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "切换分支" })).toBeNull());
 
     const palette = await openPalette();
     await fireEvent.click(within(palette).getByRole("option", { name: /分支与标签/ }));

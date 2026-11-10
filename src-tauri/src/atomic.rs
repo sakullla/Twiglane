@@ -42,24 +42,37 @@ fn write_atomically(
         let _ = fs::remove_file(&tmp);
         return Err(error);
     }
+    // 只有替换前目标确实存在、替换失败后又不见了，临时文件才是仅存的内容；
+    // 首次创建（目标原本不存在）失败时照旧删除临时文件，不留下来历不明的未跟踪文件。
+    let target_existed = fs::symlink_metadata(path).is_ok();
     let replace = if permissions.is_some() {
         replace_file_preserving(&tmp, path)
     } else {
         replace_file(&tmp, path)
     };
     if let Err(error) = replace {
-        return Err(discard_failed_replacement(&tmp, path, error));
+        return Err(discard_failed_replacement(
+            &tmp,
+            path,
+            target_existed,
+            error,
+        ));
     }
     sync_dir(parent);
     Ok(())
 }
 
-/// 替换失败后的清理。目标仍在时删除临时文件，原文件保持不变；
-/// 目标已经不存在时（例如 Windows `ReplaceFileW` 在删除原文件后无法重命名替换文件），
-/// 临时文件是磁盘上仅存的一份内容：保留它并在错误里给出位置，绝不删除。
-fn discard_failed_replacement(tmp: &Path, target: &Path, error: io::Error) -> io::Error {
+/// 替换失败后的清理。目标仍在、或目标本来就不存在时删除临时文件，原状态保持不变；
+/// 目标替换前存在而现在已经不存在时（例如 Windows `ReplaceFileW` 在删除原文件后无法重命名
+/// 替换文件），临时文件是磁盘上仅存的一份内容：保留它并在错误里给出位置，绝不删除。
+fn discard_failed_replacement(
+    tmp: &Path,
+    target: &Path,
+    target_existed: bool,
+    error: io::Error,
+) -> io::Error {
     match fs::symlink_metadata(target) {
-        Err(missing) if missing.kind() == io::ErrorKind::NotFound => io::Error::new(
+        Err(missing) if target_existed && missing.kind() == io::ErrorKind::NotFound => io::Error::new(
             error.kind(),
             format!(
                 "replace failed after the original file was removed; new content kept at {}: {error}",
@@ -203,15 +216,25 @@ mod tests {
         fs::write(&target, b"old").unwrap();
         let tmp = temp_path(&target);
         fs::write(&tmp, b"new").unwrap();
-        let error = discard_failed_replacement(&tmp, &target, io::Error::other("denied"));
+        let error = discard_failed_replacement(&tmp, &target, true, io::Error::other("denied"));
         assert_eq!(error.to_string(), "denied");
         assert!(!tmp.exists());
         assert_eq!(fs::read(&target).unwrap(), b"old");
 
+        // 首次创建失败：目标本来就不存在，临时文件不是仅存内容，照旧删除。
+        let fresh = dir.path().join(".gitignore");
+        let fresh_tmp = temp_path(&fresh);
+        fs::write(&fresh_tmp, b"new").unwrap();
+        let error =
+            discard_failed_replacement(&fresh_tmp, &fresh, false, io::Error::other("denied"));
+        assert_eq!(error.to_string(), "denied");
+        assert!(!fresh_tmp.exists());
+        assert!(!fresh.exists());
+
         // 原文件已在替换中途消失：临时文件是仅存的内容，必须保留并在错误中指出。
         fs::remove_file(&target).unwrap();
         fs::write(&tmp, b"new").unwrap();
-        let error = discard_failed_replacement(&tmp, &target, io::Error::other("denied"));
+        let error = discard_failed_replacement(&tmp, &target, true, io::Error::other("denied"));
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert!(error.to_string().contains("new content kept at"), "{error}");
         assert!(error.to_string().contains(&tmp.display().to_string()));

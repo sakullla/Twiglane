@@ -19,7 +19,7 @@ use crate::git::ops::{
 use crate::git::parse::parse_status;
 use crate::git::preview::wants_preview;
 use crate::git::runner::ProcessOutput;
-use crate::git::schedule::{internal_request_id, GitJob, JobKind};
+use crate::git::schedule::{internal_request_id, CommandSpec, GitJob, JobKind};
 use crate::model::{
     ChangeKind, RepositoryContentMatch, RepositoryContentSearch, RepositoryDirectory,
     RepositoryDirectoryEntry, RepositoryEditSnapshot, RepositoryEditState, RepositoryEntryKind,
@@ -1513,16 +1513,112 @@ fn git_metadata_error() -> AppError {
     )
 }
 
+/// 编辑读写的文件系统边界：由 Git 确认的工作区根目录，以及必须排除的 Git 元数据目录。
+///
+/// 调用方传入的路径只是一个绝对目录，不能直接当作仓库根：否则 `path=<repo>/.git`
+/// 或任意非仓库目录都会把里面的文本变成“可编辑工作区文件”。
+struct EditBoundary {
+    root: PathBuf,
+    git_dirs: Vec<PathBuf>,
+}
+
+/// 对已规范化的根目录询问 Git 工作区顶层、当前 gitdir 与公共 gitdir。只读。
+fn edit_layout_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = review_prefix(root);
+    args.extend([
+        OsString::from("rev-parse"),
+        OsString::from("--path-format=absolute"),
+        OsString::from("--show-toplevel"),
+        OsString::from("--absolute-git-dir"),
+        OsString::from("--git-common-dir"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+const MAX_EDIT_LAYOUT_BYTES: usize = 64 * 1024;
+
+fn not_worktree_root_error() -> AppError {
+    AppError::new(
+        "invalid_path",
+        "只能编辑已打开仓库工作区内的文件，未读取或写入任何内容。",
+    )
+}
+
+/// 按 Git 的回答建立边界：必须是非裸仓库的工作区，且顶层正好等于传入的根目录。
+/// 在 gitdir 内、子目录、非仓库目录或无法确认时一律拒绝（fail closed）。
+fn edit_boundary_from_output(
+    root: &Path,
+    output: &ProcessOutput,
+) -> Result<EditBoundary, AppError> {
+    if output.exit_code != 0 || output.stdout_truncated {
+        return Err(not_worktree_root_error());
+    }
+    let text = std::str::from_utf8(&output.stdout).map_err(|_| not_worktree_root_error())?;
+    let lines: Vec<&str> = text
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .filter(|line| !line.is_empty())
+        .collect();
+    let [toplevel, git_dir, common_dir] = lines.as_slice() else {
+        return Err(not_worktree_root_error());
+    };
+    let toplevel =
+        canonical_existing(Path::new(toplevel)).map_err(|_| not_worktree_root_error())?;
+    if toplevel != root {
+        return Err(not_worktree_root_error());
+    }
+    let mut git_dirs = Vec::with_capacity(2);
+    for dir in [git_dir, common_dir] {
+        let dir = canonical_existing(Path::new(dir)).map_err(|_| not_worktree_root_error())?;
+        if root.starts_with(&dir) {
+            // 工作区本身落在 gitdir 里：无法把元数据和工作区文件分开，整体拒绝。
+            return Err(git_metadata_error());
+        }
+        if !git_dirs.contains(&dir) {
+            git_dirs.push(dir);
+        }
+    }
+    Ok(EditBoundary {
+        root: root.to_path_buf(),
+        git_dirs,
+    })
+}
+
+/// 只读通道里确认编辑边界：沿用读取请求的代次检查。
+async fn read_edit_boundary(
+    backend: &Backend,
+    key: &str,
+    generation: u64,
+    request_id: u64,
+    root: &Path,
+) -> Result<EditBoundary, AppError> {
+    let git = require_git(backend).await?;
+    let output = run_review_git(
+        backend,
+        key,
+        generation,
+        request_id,
+        edit_layout_command(&git.path, root),
+    )
+    .await?;
+    edit_boundary_from_output(root, &output)
+}
+
 /// 按真实解析后的路径复核：大小写变体、末尾点、短名和流名都已被文件系统还原成真实名字，
-/// 只要解析结果落在仓库外或任一组件是 Git 元数据就拒绝。
-fn ensure_editable_location(root: &Path, resolved: &Path) -> Result<(), AppError> {
-    let Ok(inside) = resolved.strip_prefix(root) else {
+/// 只要解析结果落在仓库外、落在 Git 确认的 gitdir/公共 gitdir 内，或任一组件是 Git 元数据就拒绝。
+fn ensure_editable_location(boundary: &EditBoundary, resolved: &Path) -> Result<(), AppError> {
+    let Ok(inside) = resolved.strip_prefix(&boundary.root) else {
         return Err(AppError::new(
             "invalid_path",
             "文件必须位于当前仓库内，不能编辑仓库外的内容。",
         ));
     };
-    if has_git_metadata_component(inside) {
+    if has_git_metadata_component(inside)
+        || boundary
+            .git_dirs
+            .iter()
+            .any(|dir| resolved.starts_with(dir))
+    {
         return Err(git_metadata_error());
     }
     Ok(())
@@ -1936,7 +2032,12 @@ fn scan_line_ending(bytes: &[u8]) -> RepositoryLineEnding {
 }
 
 /// 读取一份可编辑文件的完整内容。所有只读边界都返回结构化状态，只有 I/O 自身失败才向上报错。
-fn read_edit_file(root: &Path, relative: &Path, cancel: &Shutdown) -> Result<EditRead, AppError> {
+fn read_edit_file(
+    boundary: &EditBoundary,
+    relative: &Path,
+    cancel: &Shutdown,
+) -> Result<EditRead, AppError> {
+    let root = boundary.root.as_path();
     let display = display_path(relative);
     let target = root.join(relative);
     let meta = match fs::symlink_metadata(&target) {
@@ -1994,7 +2095,7 @@ fn read_edit_file(root: &Path, relative: &Path, cancel: &Shutdown) -> Result<Edi
         ));
     }
     // 词法检查无法穷举文件系统别名（如 8.3 短名）：按解析后的真实名字再拒绝一次 .git。
-    ensure_editable_location(root, &resolved)?;
+    ensure_editable_location(boundary, &resolved)?;
     if meta.len() > MAX_EDIT_BYTES as u64 {
         return Ok(edit_read_only(
             RepositoryEditState::TooLarge,
@@ -2135,16 +2236,15 @@ pub async fn repository_edit_snapshot(
     let root = canonical_existing(&validate_input_path(path)?)?;
     let relative_path = review_path(relative)?;
     let relative_text = display_path(&relative_path);
-    let task_root = root.clone();
+    let key = repo_key(&root);
+    // 先由 Git 确认这是工作区顶层并得到 gitdir，再读文件；不是仓库根就不读。
+    let boundary = read_edit_boundary(backend, &key, generation, request_id, &root).await?;
     let task_relative = relative_path.clone();
     let read = backend
         .scheduler
-        .execute_blocking_read(
-            &repo_key(&root),
-            request_id,
-            generation,
-            move |cancel| read_edit_file(&task_root, &task_relative, &cancel),
-        )
+        .execute_blocking_read(&key, request_id, generation, move |cancel| {
+            read_edit_file(&boundary, &task_relative, &cancel)
+        })
         .await?;
     Ok(edit_snapshot(generation, &relative_text, read))
 }
@@ -2215,12 +2315,28 @@ pub async fn repository_edit_save(
         ));
     }
     validate_edit_text(content)?;
+    let git = require_git(backend).await?;
     let mut guard = backend
         .scheduler
         .lock_write(&repo_key(&root), request_id, generation)
         .await?;
 
-    let current = read_edit_file(&root, &relative_path, &Shutdown::new())?;
+    // 写锁内重新向 Git 确认工作区顶层与 gitdir：传入路径不是仓库根、位于 gitdir 内
+    // 或不是仓库时，任何内容都不读不写。
+    let (program, args) = edit_layout_command(&git.path, &root);
+    let layout = guard
+        .run(CommandSpec {
+            program,
+            args,
+            stdin: None,
+            truncate_stdout: false,
+            output_limit: Some(MAX_EDIT_LAYOUT_BYTES),
+            writes: false,
+        })
+        .await?;
+    let boundary = edit_boundary_from_output(&root, &layout)?;
+
+    let current = read_edit_file(&boundary, &relative_path, &Shutdown::new())?;
     if current.state != RepositoryEditState::Editable {
         return Err(edit_conflict(
             "文件已不再处于可编辑状态，保存未写入，未覆盖外部内容。",
@@ -2243,7 +2359,7 @@ pub async fn repository_edit_save(
     if !target.starts_with(&root) {
         return Err(edit_conflict("文件路径已不再安全，保存未写入。"));
     }
-    ensure_editable_location(&root, &target)?;
+    ensure_editable_location(&boundary, &target)?;
     let metadata = fs::metadata(&target).map_err(|error| {
         AppError::new(
             "edit_write_failed",
@@ -2276,7 +2392,7 @@ pub async fn repository_edit_save(
     }
     guard.mark_written();
 
-    let written = read_edit_file(&root, &relative_path, &Shutdown::new())?;
+    let written = read_edit_file(&boundary, &relative_path, &Shutdown::new())?;
     let expected_after = sha256_hex(&bytes);
     if written.state != RepositoryEditState::Editable
         || written.digest.as_deref() != Some(expected_after.as_str())
@@ -5081,17 +5197,195 @@ mod tests {
         let root = fixture.repo("repo");
         git(&root, &["init", "-b", "main"]);
         let root = canonical_existing(&root).unwrap();
+        // 不带 gitdir 列表：只验证“解析后的真实名字”这一道防线。
+        let boundary = EditBoundary {
+            root: root.clone(),
+            git_dirs: Vec::new(),
+        };
         for alias in [".GIT/config", ".git./config", ".Git/HEAD"] {
-            let error = read_edit_file(&root, Path::new(alias), &Shutdown::new()).unwrap_err();
+            let error = read_edit_file(&boundary, Path::new(alias), &Shutdown::new()).unwrap_err();
             assert_eq!(error.code, "invalid_path", "{alias}");
         }
         let resolved = canonical_existing(&root.join(".GIT").join("config")).unwrap();
         assert_eq!(
-            ensure_editable_location(&root, &resolved).unwrap_err().code,
+            ensure_editable_location(&boundary, &resolved).unwrap_err().code,
             "invalid_path"
         );
         let ordinary = root.join("note.txt");
         fs::write(&ordinary, b"x\n").unwrap();
-        assert!(ensure_editable_location(&root, &canonical_existing(&ordinary).unwrap()).is_ok());
+        assert!(
+            ensure_editable_location(&boundary, &canonical_existing(&ordinary).unwrap()).is_ok()
+        );
+    }
+
+    /// 传入的仓库路径必须由 Git 确认是工作区顶层：gitdir 自身、子目录与非仓库目录都不能当作根。
+    #[tokio::test]
+    async fn edit_snapshot_and_save_require_the_git_worktree_root() {
+        let fixture = crate::test_support::git_fixture("repository-edit-worktree-root");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/app.txt"), b"app\n").unwrap();
+        let outside = fixture.repo("plain");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("settings.txt"), b"plain\n").unwrap();
+        let config_before = fs::read(root.join(".git/config")).unwrap();
+
+        let git_dir = root.join(".git");
+        let sub_dir = root.join("src");
+        let cases: [(&Path, &str, Vec<u8>); 3] = [
+            (git_dir.as_path(), "config", config_before.clone()),
+            (sub_dir.as_path(), "app.txt", b"app\n".to_vec()),
+            (outside.as_path(), "settings.txt", b"plain\n".to_vec()),
+        ];
+        for (index, (base, relative, current)) in cases.iter().enumerate() {
+            let path = base.to_str().unwrap();
+            let id = (index as u64) * 2 + 1;
+            let snapshot = repository_edit_snapshot(&backend, path, relative, 1, id)
+                .await
+                .unwrap_err();
+            assert_eq!(snapshot.code, "invalid_path", "{path}");
+            let save = repository_edit_save(
+                &backend,
+                path,
+                relative,
+                &sha256_hex(current),
+                "[core]\n\tfsmonitor = probe-marker\n",
+                1,
+                id + 1,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(save.code, "invalid_path", "{path}");
+            assert_eq!(&fs::read(base.join(relative)).unwrap(), current, "{path}");
+            let key = repo_key(&canonical_existing(base).unwrap());
+            assert_eq!(backend.scheduler.current_generation(&key), 1, "{path}");
+        }
+        assert_eq!(fs::read(root.join(".git/config")).unwrap(), config_before);
+
+        // 同一仓库从真正的工作区根打开时，普通文件仍可编辑。
+        let ok = repository_edit_snapshot(&backend, root.to_str().unwrap(), "src/app.txt", 1, 20)
+            .await
+            .unwrap();
+        assert_eq!(ok.state, RepositoryEditState::Editable);
+    }
+
+    /// gitdir 不叫 .git 也不能编辑：这里用 gitfile 把元数据放在工作区内的 store/ 目录，
+    /// 词法检查看不出来，必须靠 Git 报告的 gitdir 拒绝。
+    #[tokio::test]
+    async fn edit_snapshot_and_save_refuse_a_gitdir_without_a_git_name() {
+        let fixture = crate::test_support::git_fixture("repository-edit-separate-gitdir");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        fs::create_dir_all(&root).unwrap();
+        let store = root.join("store");
+        git(
+            &root,
+            &["init", "-b", "main", "--separate-git-dir", store.to_str().unwrap()],
+        );
+        assert!(root.join(".git").is_file());
+        fs::write(root.join("note.txt"), b"note\n").unwrap();
+        let config_before = fs::read(store.join("config")).unwrap();
+        let path = root.to_str().unwrap();
+
+        let snapshot = repository_edit_snapshot(&backend, path, "store/config", 1, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(snapshot.code, "invalid_path");
+        let save = repository_edit_save(
+            &backend,
+            path,
+            "store/config",
+            &sha256_hex(&config_before),
+            "[core]\n\tfsmonitor = probe-marker\n",
+            1,
+            2,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(save.code, "invalid_path");
+        assert_eq!(fs::read(store.join("config")).unwrap(), config_before);
+        // gitfile 本身仍由 .git 名字拦住。
+        let gitfile = repository_edit_snapshot(&backend, path, ".git", 1, 3)
+            .await
+            .unwrap_err();
+        assert_eq!(gitfile.code, "invalid_path");
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 1);
+
+        let note = repository_edit_snapshot(&backend, path, "note.txt", 1, 4)
+            .await
+            .unwrap();
+        assert_eq!(note.state, RepositoryEditState::Editable);
+    }
+
+    /// 关联工作树的 gitdir 与公共 gitdir 都在工作区外：普通文件可以保存，且不动主仓库。
+    #[tokio::test]
+    async fn edit_save_works_in_a_linked_worktree() {
+        let fixture = crate::test_support::git_fixture("repository-edit-linked-worktree");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("note.txt"), b"main\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let linked = fixture.repo("linked");
+        git(
+            &root,
+            &["worktree", "add", "-q", "-b", "topic", linked.to_str().unwrap()],
+        );
+        let path = linked.to_str().unwrap();
+        let before = repository_edit_snapshot(&backend, path, "note.txt", 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(before.state, RepositoryEditState::Editable);
+        let saved = repository_edit_save(
+            &backend,
+            path,
+            "note.txt",
+            before.digest.as_deref().unwrap(),
+            "linked\n",
+            1,
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.text.as_deref(), Some("linked\n"));
+        assert_eq!(fs::read(linked.join("note.txt")).unwrap(), b"linked\n");
+        assert_eq!(fs::read(root.join("note.txt")).unwrap(), b"main\n");
+    }
+
+    #[test]
+    fn edit_boundary_rejects_failed_or_mismatched_git_answers() {
+        let fixture = crate::test_support::git_fixture("repository-edit-boundary-parse");
+        let root = fixture.repo("repo");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        let root = canonical_existing(&root).unwrap();
+        let git_dir = root.join(".git");
+        let output = |exit_code: i32, stdout: String| ProcessOutput {
+            exit_code,
+            stdout: stdout.into_bytes(),
+            stderr: Vec::new(),
+            stdout_truncated: false,
+        };
+        let answer = |top: &Path| {
+            format!("{}\n{}\n{}\n", top.display(), git_dir.display(), git_dir.display())
+        };
+
+        let ok = edit_boundary_from_output(&root, &output(0, answer(&root))).unwrap();
+        assert_eq!(ok.git_dirs, vec![git_dir.clone()]);
+        for (code, stdout) in [
+            (128, String::new()),
+            (0, String::new()),
+            (0, answer(&root.join("src"))),
+            (0, format!("{}\n", root.display())),
+            (0, format!("{}\n{}\n", root.display(), root.join("missing").display())),
+            // 工作区落在 gitdir 里时无法区分元数据，整体拒绝。
+            (0, format!("{}\n{}\n{}\n", root.display(), root.display(), root.display())),
+        ] {
+            let error = edit_boundary_from_output(&root, &output(code, stdout.clone()));
+            assert_eq!(error.err().map(|e| e.code), Some("invalid_path".to_string()), "{stdout:?}");
+        }
     }
 }

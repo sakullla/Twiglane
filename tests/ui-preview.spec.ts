@@ -48,6 +48,7 @@ function get(port: number, urlPath: string): Promise<{ status: number; body: str
 describe("浏览器预览的 mock 替换", () => {
   let server: ViteDevServer;
   let port = 0;
+  let previewConfig: typeof import("../scripts/ui-preview/vite.config.mjs");
 
   beforeAll(async () => {
     port = await freePort();
@@ -61,6 +62,7 @@ describe("浏览器预览的 mock 替换", () => {
     // 全量 npm test 并行时冷编译可能超过单个请求的 15s 超时，结果取决于机器负载而不是 mock 替换本身。
     await server.transformRequest("/src/lib/api.ts");
     await server.transformRequest("/src/App.svelte");
+    previewConfig = await import("../scripts/ui-preview/vite.config.mjs");
   }, 90_000);
 
   afterAll(async () => {
@@ -70,7 +72,7 @@ describe("浏览器预览的 mock 替换", () => {
   it(
     "把 api 路径的不同写法认成同一个文件，而不是只做一次字符串相等",
     async () => {
-      const { sameFile, REAL_API_MODULE, MOCK_API_MODULE } = await import("../scripts/ui-preview/vite.config.mjs");
+      const { sameFile, REAL_API_MODULE, MOCK_API_MODULE } = previewConfig;
       expect(sameFile("C:\\work\\src\\lib\\api.ts?t=1", "c:/work/src/lib/api.ts")).toBe(true);
       expect(sameFile("C:/work/src/lib/api.ts", "C:/work/src/lib/api-extra.ts")).toBe(false);
       expect(sameFile(REAL_API_MODULE, MOCK_API_MODULE)).toBe(false);

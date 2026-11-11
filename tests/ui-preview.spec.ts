@@ -57,6 +57,10 @@ describe("浏览器预览的 mock 替换", () => {
       server: { host: "127.0.0.1", port, strictPort: false, hmr: false },
     });
     await server.listen();
+    // 预热：浏览器直接请求的 mock 模块与 App 外壳在这里先编译好（beforeAll 预算 90s）。
+    // 全量 npm test 并行时冷编译可能超过单个请求的 15s 超时，结果取决于机器负载而不是 mock 替换本身。
+    await server.transformRequest("/src/lib/api.ts");
+    await server.transformRequest("/src/App.svelte");
   }, 90_000);
 
   afterAll(async () => {

@@ -11,7 +11,7 @@ export interface GraphCommit {
   parents: string[];
 }
 
-export type GraphSegmentKind = "pass" | "merge" | "branch";
+export type GraphSegmentKind = "pass" | "merge" | "branch" | "outside";
 export type GraphSegmentSpan = "full" | "top" | "bottom";
 
 export interface GraphSegment {
@@ -21,7 +21,7 @@ export interface GraphSegment {
   to: number;
   /** 同一血缘固定同一个颜色序号。 */
   color: number;
-  /** pass 竖线；merge 从顶部汇入节点；branch 从节点分叉到底部。 */
+  /** pass 竖线；merge 从顶部汇入节点；branch 从节点分叉到底部；outside 从节点伸出的短尾，表示父提交在结果外。 */
   kind: GraphSegmentKind;
   /** 竖线的纵向范围：整行、到节点、从节点开始。 */
   span: GraphSegmentSpan;
@@ -154,9 +154,17 @@ export function buildHistoryGraph(
       const at = indexOf.get(parent);
       // 只在「出现在本次结果且排在当前行之后」时才连：绝不把数组下一行当成父提交。
       if (at === undefined || at <= index) {
+        // 第一父提交在结果外：沿本行 lane 竖直伸出一段短尾，不再斜拐到旁边的新 lane——
+        // 斜线看起来像一条分支，却又没有终点。其余结果外父提交仍各占一条 lane，画成斜向短尾。
+        if (!reused && slots[lane]?.oid === oid) {
+          reused = true;
+          segmentList.push({ from: lane, to: lane, color, kind: "outside", span: "bottom" });
+          parentOut.push({ oid: parent, lane, state: "outside" });
+          continue;
+        }
         const stub = allocate(OUTSIDE_PREFIX + parent);
         outside.push(stub);
-        segmentList.push({ from: lane, to: stub, color: slots[stub]!.color, kind: "branch", span: "bottom" });
+        segmentList.push({ from: lane, to: stub, color: slots[stub]!.color, kind: "outside", span: "bottom" });
         parentOut.push({ oid: parent, lane: stub, state: "outside" });
         continue;
       }

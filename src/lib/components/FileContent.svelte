@@ -195,21 +195,33 @@
   let canEdit = $derived(Boolean(path && !missingPath && (editing || content?.kind === "text")));
   let editLine = $state<number | null>(null);
   let editLineSerial = $state(0);
+  let editAlign = $state<"center" | "top">("center");
   let showReturn = $derived(Boolean(editReturn && path && editReturn.path === path));
 
   function editContext(): EditContext {
     return { generation: opened.generation, nextId, onGeneration };
   }
 
-  function startEdit(line: number | null = null): void {
+  function startEdit(line: number | null = null, align: "center" | "top" = "center"): void {
     if (!path || missingPath) return;
     editLine = line;
+    editAlign = align;
     editLineSerial += 1;
     // 从查看切过来：文件内查找、跳行与整份选中都属于只读视图，先收起。
     searchOpen = false;
     gotoOpen = false;
     allSelected = false;
     void editor.open(opened.summary.path, path, editContext());
+  }
+
+  /**
+   * 从查看切到编辑时保持阅读位置：取源码视口顶部那一行。自动换行时行高不固定、排版预览没有行号，
+   * 这两种情况从头开始，不猜位置。
+   */
+  function readingLine(): number | null {
+    if (wrap || view !== "source" || (isMarkdown && documentMode === "preview")) return null;
+    const top = Math.floor(scrollTop / ROW_HEIGHT) + 1;
+    return top > 1 ? top : null;
   }
 
   /** 回到查看：有未保存修改时不允许（按钮就地禁用并说明），干净会话直接结束并重读当前内容。 */
@@ -1007,7 +1019,7 @@
               aria-label="编辑这个工作区文件"
               title="在这里修改当前工作区的这个文件；只在点「保存」时写入，不暂存、不提交"
               onclick={() => {
-                if (!editing) startEdit();
+                if (!editing) startEdit(readingLine(), "top");
               }}
             ><Icon name="pencil" size={12} />编辑</button>
           </div>
@@ -1224,9 +1236,11 @@
       <RepositoryTextEditor
         session={editSession}
         name={parts.name}
+        {language}
         writeLocked={disabled}
         line={editLine}
         lineSerial={editLineSerial}
+        lineAlign={editAlign}
         returnLabel={showReturn ? editReturn?.label ?? null : null}
         onReturn={() => editReturn?.run()}
         onInput={(next) => path && editor.input(opened.summary.path, path, next)}

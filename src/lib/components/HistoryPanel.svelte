@@ -511,6 +511,11 @@
     const mid = height / 2;
     if (segment.kind === "merge") return `M ${x0} 0 L ${x1} ${mid}`;
     if (segment.kind === "branch") return `M ${x0} ${mid} L ${x1} ${height}`;
+    // 结果外父提交：从节点伸出一段短尾就停，不接到下一行，表明还有更早的提交没列出来。
+    if (segment.kind === "outside") {
+      const end = mid + (height - mid) * 0.6;
+      return `M ${x0} ${mid} L ${x0 + (x1 - x0) * 0.6} ${end}`;
+    }
     if (segment.span === "top") return `M ${x0} 0 L ${x0} ${mid}`;
     if (segment.span === "bottom") return `M ${x0} ${mid} L ${x0} ${height}`;
     return `M ${x0} 0 L ${x0} ${height}`;
@@ -1909,7 +1914,7 @@
                         focusable="false"
                       >
                         {#each drawn as segment, segmentIndex (segmentIndex)}
-                          <path class="graph-line" style={laneStyle(segment.color)} d={segmentPath(segment, GRAPH_HEIGHT)} />
+                          <path class="graph-line" class:outside={segment.kind === "outside"} style={laneStyle(segment.color)} d={segmentPath(segment, GRAPH_HEIGHT)} />
                         {/each}
                         {#if nodeLane !== null}
                           <circle
@@ -2477,6 +2482,8 @@
   }
   .hr-graph > svg { display: block; overflow: visible; }
   .hr-graph .graph-line { fill: none; stroke: var(--lane); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  /* 结果外父提交的短尾：虚线、降低不透明度，和真实连线区分开。 */
+  .hr-graph .graph-line.outside { stroke-dasharray: 2 3; opacity: 0.55; }
   .hr-graph .node { fill: var(--surface); stroke: var(--lane); stroke-width: 2; }
   /* HEAD 用实心节点区分当前上下文，和选中底色、引用胶囊互不替代。 */
   .hr-graph .node.head { fill: var(--lane); }

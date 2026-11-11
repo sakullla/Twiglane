@@ -24,7 +24,7 @@ function expectConsistent(commits: GraphCommit[], graph: ReturnType<typeof build
       expect(segment.to).toBeLessThan(row.lanes);
       if (segment.kind === "pass") expect(segment.from).toBe(segment.to);
       if (segment.kind === "merge") expect(segment.to).toBe(row.lane);
-      if (segment.kind === "branch") expect(segment.from).toBe(row.lane);
+      if (segment.kind === "branch" || segment.kind === "outside") expect(segment.from).toBe(row.lane);
     }
     for (const parent of row.parents) {
       expect(parent.lane).toBeGreaterThanOrEqual(0);
@@ -152,7 +152,10 @@ describe("历史拓扑", () => {
     ];
     const graph = buildHistoryGraph(commits);
     expectConsistent(commits, graph);
-    expect(graph.rows[0].parents).toEqual([{ oid: "gone", lane: 1, state: "outside" }]);
+    expect(graph.rows[0].parents).toEqual([{ oid: "gone", lane: 0, state: "outside" }]);
+    // 结果外的第一父提交沿本行 lane 竖直伸出短尾，不斜拐到旁边一条 lane。
+    expect(graph.rows[0].segments).toEqual([{ from: 0, to: 0, color: 0, kind: "outside", span: "bottom" }]);
+    expect(graph.rows[0].lanes).toBe(1);
     // 终止标记只在本行：下一行从 lane 0 重新开始，和结果外父提交没有任何连线。
     expect(graph.rows[1].lane).toBe(0);
     expect(graph.rows[1].lanes).toBe(1);
@@ -172,7 +175,7 @@ describe("历史拓扑", () => {
     ];
     const graph = buildHistoryGraph(commits);
     expectConsistent(commits, graph);
-    expect(graph.rows[1].parents).toEqual([{ oid: "older", lane: 1, state: "outside" }]);
+    expect(graph.rows[1].parents).toEqual([{ oid: "older", lane: 0, state: "outside" }]);
     expect(graph.rows[1].segments.every((segment) => segment.kind !== "merge")).toBe(true);
   });
 
@@ -185,7 +188,7 @@ describe("历史拓扑", () => {
     const filtered: GraphCommit[] = [all[0], all[2]];
     const graph = buildHistoryGraph(filtered);
     expectConsistent(filtered, graph);
-    expect(graph.rows[0].parents).toEqual([{ oid: "b", lane: 1, state: "outside" }]);
+    expect(graph.rows[0].parents).toEqual([{ oid: "b", lane: 0, state: "outside" }]);
     expect(graph.rows[1].lane).toBe(0);
     expect(graph.rows[1].segments.some((segment) => segment.from === 1 || segment.to === 1)).toBe(false);
   });
@@ -284,5 +287,36 @@ describe("拓扑绘制裁剪", () => {
     expect(visibleNodeLane(graph.rows[0], 2)).toBe(0);
     expect(visibleNodeLane(graph.rows[0], 1)).toBe(0);
     expect(visibleNodeLane({ ...graph.rows[0], lane: 3 }, 2)).toBeNull();
+  });
+});
+
+describe("结果外父提交的短尾", () => {
+  it("合并提交的第二父提交在结果外时另占一条 lane 画斜向短尾，主线父提交仍直连", () => {
+    const commits: GraphCommit[] = [
+      { oid: "merge", parents: ["main", "gone"] },
+      { oid: "main", parents: [] },
+    ];
+    const graph = buildHistoryGraph(commits);
+    expectConsistent(commits, graph);
+    expect(graph.rows[0].parents).toEqual([
+      { oid: "main", lane: 0, state: "visible" },
+      { oid: "gone", lane: 1, state: "outside" },
+    ]);
+    expect(segmentsOf("outside", graph.rows[0].segments)).toEqual([{ from: 0, to: 1, color: 1, kind: "outside", span: "bottom" }]);
+    expect(graph.rows[1].lanes).toBe(1);
+  });
+
+  it("第一父提交在结果外、第二父提交可见时，可见父另起一条 lane，两者不叠在同一条线上", () => {
+    const commits: GraphCommit[] = [
+      { oid: "merge", parents: ["gone", "side"] },
+      { oid: "side", parents: [] },
+    ];
+    const graph = buildHistoryGraph(commits);
+    expectConsistent(commits, graph);
+    expect(graph.rows[0].parents).toEqual([
+      { oid: "gone", lane: 0, state: "outside" },
+      { oid: "side", lane: 1, state: "visible" },
+    ]);
+    expect(graph.rows[1].lane).toBe(1);
   });
 });

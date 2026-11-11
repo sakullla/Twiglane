@@ -1004,4 +1004,37 @@ describe("轻量编辑", () => {
     await waitFor(() => expect(repositoryEditSnapshot.mock.calls.length).toBeGreaterThan(calls));
     expect(editor.dirty(repoPath).map((session) => session.path)).toEqual(["src/App.ts"]);
   });
+
+  it("编辑器内查找、替换与跳行只改草稿，不触发保存", async () => {
+    repositoryEditSnapshot.mockResolvedValue(editSnap());
+    await enterEdit();
+    await waitFor(() => expect(editorBox()).toBeTruthy());
+    const box = editorBox()!;
+    await fireEvent.keyDown(box, { key: "f", code: "KeyF", ctrlKey: true });
+    const query = (await screen.findByRole("textbox", { name: "在草稿中查找" })) as HTMLInputElement;
+    await fireEvent.input(query, { target: { value: "const" } });
+    await waitFor(() => expect(document.querySelector("[data-edit-find] .find-count")?.textContent).toBe("1/2"));
+    expect(document.querySelectorAll(".text-editor-hit")).toHaveLength(2);
+    await fireEvent.keyDown(query, { key: "Enter" });
+    expect(document.querySelector("[data-edit-find] .find-count")?.textContent).toBe("2/2");
+
+    await fireEvent.click(screen.getByRole("button", { name: "展开替换" }));
+    const replacement = screen.getByRole("textbox", { name: "替换为" }) as HTMLInputElement;
+    await fireEvent.input(replacement, { target: { value: "let" } });
+    await fireEvent.click(screen.getByRole("button", { name: "全部替换" }));
+    await waitFor(() => expect(editorBox()!.value).toBe("let a = 1;\nlet b = 2;\n"));
+    expect(document.querySelector("[data-edit-status]")?.textContent).toContain("有未保存的修改");
+    expect(repositoryEditSave).not.toHaveBeenCalled();
+    await waitFor(() => expect(document.querySelector("[data-edit-find] .find-count")?.textContent).toBe("没有匹配"));
+
+    await fireEvent.keyDown(query, { key: "Escape" });
+    expect(document.querySelector("[data-edit-find]")).toBeNull();
+    await fireEvent.keyDown(editorBox()!, { key: "g", code: "KeyG", ctrlKey: true });
+    const goto = (await screen.findByRole("textbox", { name: "跳到行号" })) as HTMLInputElement;
+    await fireEvent.input(goto, { target: { value: "2:5" } });
+    await fireEvent.keyDown(goto, { key: "Enter" });
+    await waitFor(() => expect(document.querySelector("[data-edit-goto]")).toBeNull());
+    expect(editorBox()!.selectionStart).toBe(15);
+    expect(document.querySelector("[data-edit-caret]")?.textContent).toContain("行 2，列 5");
+  });
 });

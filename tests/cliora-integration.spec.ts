@@ -5,6 +5,10 @@
  * 只打开链接指定的 worktree、accepted/rejected 的时机、返回时携带的结果、独立仓库
  * 没有来源。deep-link 插件用模块 mock 顶替，冷启动取 getCurrent，运行中走 onOpenUrl。
  */
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { recordClioraCommit, resetClioraReview } from "../src/lib/cliora-review.svelte";
@@ -524,5 +528,101 @@ describe("cliora v2 审查链接", () => {
     expect(screen.queryByRole("button", { name: /返回 cliora/ })).toBeNull();
     expect(mocks.api.clioraReviewReceipt).not.toHaveBeenCalled();
     expect(mocks.api.clioraReviewReturn).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 真实联动证据门禁（scripts/verify-cliora-integration.mjs）：只用临时报告驱动脚本，确认再次审阅闭环
+ * 是必需场景，缺少关键观察或沿用旧 reviewId 时不通过。这里不产生任何联动证据。
+ */
+describe("cliora 联动证据门禁", () => {
+  const root = path.resolve(__dirname, "..");
+  const version = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).version as string;
+  const build = (v: string) => ({ version: v, bundle: "nsis", installed: true, installerSha256: "c".repeat(64) });
+  const scenario = (id: string, observations: Record<string, string> = { result: "已实机观察" }) => ({
+    id,
+    status: "passed",
+    executedAt: "2026-11-11T08:00:00Z",
+    realApp: true,
+    realGit: true,
+    steps: ["在已安装的两端应用中操作"],
+    observations,
+  });
+  const reReview = {
+    clioraRecheck: "cliora 复核 HEAD 与未提交文件后显示剩余修改",
+    continuedFix: "在原会话继续修复并产生新提交",
+    firstReviewId: REVIEW_A,
+    reReviewId: REVIEW_B,
+    reReviewBaseline: BASELINE,
+    reReviewHead: COMMITTED,
+    staleReviewStateCleared: "旧差异与旧审阅标记未带入新范围",
+    staleReturnIgnored: "迟到的旧 returned 未覆盖新审查",
+  };
+  const BASE_IDS = [
+    "cold-start-review",
+    "commit-and-return",
+    "merge-and-stale-head",
+    "invalid-links",
+    "standalone-repository",
+    "light-edit-return",
+    "extension-and-version-mismatch",
+  ];
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), "twiglane-cliora-evidence-"));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function verify(scenarios: unknown[]) {
+    const report = path.join(dir, "report.json");
+    writeFileSync(
+      report,
+      JSON.stringify({
+        format: "cliora-integration-evidence",
+        version: 2,
+        protocol: "twiglane-review-v2",
+        host: { platform: "windows" },
+        builds: { twiglane: build(version), cliora: build("9.9.9") },
+        scenarios,
+        limitations: [{ platform: "macOS/Linux", verified: false }],
+      }),
+    );
+    return spawnSync(
+      process.execPath,
+      [
+        path.join(root, "scripts", "verify-cliora-integration.mjs"),
+        "--report",
+        report,
+        "--cliora-package",
+        path.join(dir, "missing-package.json"),
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8", timeout: 30_000 },
+    );
+  }
+
+  it("再次审阅闭环完整记录时才通过", () => {
+    const result = verify([...BASE_IDS.map((id) => scenario(id)), scenario("return-fix-and-re-review", reReview)]);
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).scenarios).toContain("return-fix-and-re-review");
+  });
+
+  it("缺少再次审阅场景时不通过", () => {
+    const result = verify(BASE_IDS.map((id) => scenario(id)));
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("缺少场景 return-fix-and-re-review");
+  });
+
+  it("再次审阅沿用旧 reviewId 或缺少迟到回执观察时不通过", () => {
+    const incomplete: Record<string, string> = { ...reReview, reReviewId: REVIEW_A };
+    delete incomplete.staleReturnIgnored;
+    const result = verify([...BASE_IDS.map((id) => scenario(id)), scenario("return-fix-and-re-review", incomplete)]);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("observations 缺少 staleReturnIgnored");
+    expect(result.stdout).toContain("firstReviewId、reReviewId 必须互不相同");
   });
 });

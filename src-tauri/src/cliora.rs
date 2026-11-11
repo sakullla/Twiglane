@@ -111,34 +111,96 @@ pub fn worktree_state_of(uncommitted: Option<usize>) -> WorktreeState {
     }
 }
 
-/// 内存里最多记住的审查来源条数。更早的 reviewId 返回时读不到来源，只能声明 unknown。
+/// 内存里最多记住的已接受审查来源条数。更早的 reviewId 返回时读不到来源，只能声明 unknown。
+/// 待定（已解析、尚未接受）的链接另有同样大小的上限，互不挤占。
 pub const MAX_REVIEW_SOURCES: usize = 8;
 
-/// 已校验链接带来的 reviewId → 工作树路径，只放在内存里（与前端来源一样不落盘）。
-/// 返回时后端按它读取真实工作区状态填写声明，前端不声明工作区状态。
+/// 一条已解析链接的来源：reviewId、sessionId 与链接指定的工作树。
+#[derive(Debug, Clone)]
+struct SourceEntry {
+    review_id: String,
+    session_id: String,
+    worktree_path: String,
+}
+
+#[derive(Debug, Default)]
+struct SourceBook {
+    /// 已解析但前端还没接受的链接。只在 accepted 回执时提升为正式来源。
+    pending: std::collections::VecDeque<SourceEntry>,
+    /// 已被前端接受（真正打开并建立来源）的审查。返回时只按这里读取工作树。
+    accepted: std::collections::VecDeque<SourceEntry>,
+}
+
+/// 审查来源 reviewId → 工作树路径，只放在内存里（与前端来源一样不落盘）。
+///
+/// 解析成功只暂存为待定；前端打开成功回送 accepted 时才成为正式来源，被拒绝、被忽略或
+/// 打开失败的链接不会改写或挤掉正式来源。同一 reviewId 先到先得：已有正式来源时，
+/// 后来的重复链接不会覆盖它。返回时后端按正式来源读取真实工作区状态，前端不声明。
 #[derive(Debug, Default)]
 pub struct ReviewSources {
-    entries: std::sync::Mutex<std::collections::VecDeque<(String, String)>>,
+    book: std::sync::Mutex<SourceBook>,
 }
 
 impl ReviewSources {
-    /// 记下这次审查的工作树；同一 reviewId 再来时以最新一次为准。
-    pub fn remember(&self, review_id: &str, worktree_path: &str) {
-        let mut entries = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        entries.retain(|(id, _)| id != review_id);
-        entries.push_back((review_id.to_string(), worktree_path.to_string()));
-        while entries.len() > MAX_REVIEW_SOURCES {
-            entries.pop_front();
+    fn lock(&self) -> std::sync::MutexGuard<'_, SourceBook> {
+        self.book.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// 暂存一条刚解析成功的链接。该 reviewId 已有正式来源或已有待定记录时不改动（先到先得）。
+    pub fn stage(&self, review_id: &str, session_id: &str, worktree_path: &str) {
+        let mut book = self.lock();
+        if book.accepted.iter().any(|entry| entry.review_id == review_id)
+            || book.pending.iter().any(|entry| entry.review_id == review_id)
+        {
+            return;
+        }
+        book.pending.push_back(SourceEntry {
+            review_id: review_id.to_string(),
+            session_id: session_id.to_string(),
+            worktree_path: worktree_path.to_string(),
+        });
+        while book.pending.len() > MAX_REVIEW_SOURCES {
+            book.pending.pop_front();
         }
     }
 
-    /// 这次审查记下的工作树；没有记录时返回 None。
-    pub fn worktree_for(&self, review_id: &str) -> Option<String> {
-        let entries = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        entries
+    /// 前端接受了这条链接：把 reviewId 与 sessionId 都对得上的待定记录提升为正式来源。
+    /// 已有正式来源时保留原记录，不被覆盖；没有对应待定记录时什么也不做。
+    pub fn accept(&self, review_id: &str, session_id: &str) {
+        let mut book = self.lock();
+        let Some(index) = book
+            .pending
             .iter()
-            .find(|(id, _)| id == review_id)
-            .map(|(_, path)| path.clone())
+            .position(|entry| entry.review_id == review_id && entry.session_id == session_id)
+        else {
+            return;
+        };
+        let Some(entry) = book.pending.remove(index) else {
+            return;
+        };
+        if book.accepted.iter().any(|existing| existing.review_id == review_id) {
+            return;
+        }
+        book.accepted.push_back(entry);
+        while book.accepted.len() > MAX_REVIEW_SOURCES {
+            book.accepted.pop_front();
+        }
+    }
+
+    /// 前端拒绝了这条链接：丢掉对应的待定记录，正式来源不受影响。
+    pub fn reject(&self, review_id: &str, session_id: &str) {
+        let mut book = self.lock();
+        book.pending
+            .retain(|entry| !(entry.review_id == review_id && entry.session_id == session_id));
+    }
+
+    /// 这次审查被接受时记下的工作树；没有正式来源时返回 None。
+    pub fn worktree_for(&self, review_id: &str) -> Option<String> {
+        self.lock()
+            .accepted
+            .iter()
+            .find(|entry| entry.review_id == review_id)
+            .map(|entry| entry.worktree_path.clone())
     }
 }
 
@@ -1058,17 +1120,22 @@ mod tests {
         assert_eq!(worktree_state_of(Some(3)), WorktreeState::Dirty);
     }
 
-    /// 来源按 reviewId 记在内存里：同一 reviewId 以最新一次为准，超出上限时先丢最早的，
-    /// 未记录的 reviewId 读不到来源。
+    /// 只有被接受的链接才成为来源：解析后暂存，accepted 回执才提升；sessionId 对不上的
+    /// 回执不提升。正式来源有上限，超出时先丢最早的，未记录的 reviewId 读不到来源。
     #[test]
-    fn review_sources_keep_the_latest_bounded_mapping() {
+    fn review_sources_keep_only_accepted_bounded_mapping() {
         let sources = ReviewSources::default();
         assert_eq!(sources.worktree_for(REVIEW), None);
-        sources.remember(REVIEW, "C:/work/a");
-        sources.remember(REVIEW, "C:/work/b");
-        assert_eq!(sources.worktree_for(REVIEW).as_deref(), Some("C:/work/b"));
+        sources.stage(REVIEW, SESSION, "C:/work/a");
+        assert_eq!(sources.worktree_for(REVIEW), None, "只解析未接受不算来源");
+        sources.accept(REVIEW, "other-session");
+        assert_eq!(sources.worktree_for(REVIEW), None, "sessionId 对不上不提升");
+        sources.accept(REVIEW, SESSION);
+        assert_eq!(sources.worktree_for(REVIEW).as_deref(), Some("C:/work/a"));
         for index in 0..MAX_REVIEW_SOURCES {
-            sources.remember(&format!("review-{index}"), &format!("C:/work/{index}"));
+            let id = format!("review-{index}");
+            sources.stage(&id, SESSION, &format!("C:/work/{index}"));
+            sources.accept(&id, SESSION);
         }
         assert_eq!(sources.worktree_for(REVIEW), None, "最早的来源被挤出");
         assert_eq!(sources.worktree_for("review-0").as_deref(), Some("C:/work/0"));
@@ -1076,5 +1143,42 @@ mod tests {
             sources.worktree_for(&format!("review-{}", MAX_REVIEW_SOURCES - 1)).as_deref(),
             Some(format!("C:/work/{}", MAX_REVIEW_SOURCES - 1).as_str()),
         );
+    }
+
+    /// 已接受的审查不会被同一 reviewId、指向别处的重复链接改写：重复链接只解析、
+    /// 即使随后又收到 accepted 回执，返回时读取的仍是最初被接受的工作树。
+    #[test]
+    fn duplicate_review_id_never_rewrites_the_accepted_source() {
+        let sources = ReviewSources::default();
+        sources.stage(REVIEW, SESSION, "C:/work/a");
+        sources.accept(REVIEW, SESSION);
+        sources.stage(REVIEW, SESSION, "C:/elsewhere");
+        assert_eq!(sources.worktree_for(REVIEW).as_deref(), Some("C:/work/a"));
+        sources.accept(REVIEW, SESSION);
+        assert_eq!(sources.worktree_for(REVIEW).as_deref(), Some("C:/work/a"));
+        sources.reject(REVIEW, SESSION);
+        assert_eq!(sources.worktree_for(REVIEW).as_deref(), Some("C:/work/a"), "拒绝不动正式来源");
+    }
+
+    /// 被拒绝、打开失败或被忽略的链接不占正式来源的位置：连续很多条只解析或被拒绝的
+    /// 链接之后，当前审查的来源仍在。
+    #[test]
+    fn rejected_or_ignored_links_never_evict_the_accepted_source() {
+        let sources = ReviewSources::default();
+        sources.stage(REVIEW, SESSION, "C:/work/a");
+        sources.accept(REVIEW, SESSION);
+        for index in 0..(MAX_REVIEW_SOURCES * 3) {
+            let id = format!("ignored-{index}");
+            sources.stage(&id, SESSION, &format!("C:/other/{index}"));
+            if index % 2 == 0 {
+                sources.reject(&id, SESSION);
+            }
+        }
+        assert_eq!(sources.worktree_for(REVIEW).as_deref(), Some("C:/work/a"));
+        assert_eq!(sources.worktree_for("ignored-1"), None, "未接受的链接没有来源");
+        // 被拒绝的待定记录已清掉；同一 reviewId 之后重新发起并被接受时按新链接记录。
+        sources.stage("ignored-0", SESSION, "C:/work/retry");
+        sources.accept("ignored-0", SESSION);
+        assert_eq!(sources.worktree_for("ignored-0").as_deref(), Some("C:/work/retry"));
     }
 }

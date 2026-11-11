@@ -217,15 +217,16 @@ struct ClioraReviewRequest {
     baseline: Option<String>,
 }
 
-/// 解析并校验 cliora 的 v2 审查链接。不打开仓库、不读 Git、不落盘；只把校验通过的
-/// reviewId → 工作树记在内存里，返回时后端按它读取真实工作区状态。
+/// 解析并校验 cliora 的 v2 审查链接。不打开仓库、不读 Git、不落盘；校验通过的
+/// reviewId → 工作树只在内存里暂存为待定。前端此时还没决定是否接受这条链接，
+/// 要等 accepted 回执才成为返回时读取真实工作区状态的来源。
 #[tauri::command]
 fn cliora_review_request(
     sources: State<'_, cliora::ReviewSources>,
     url: String,
 ) -> Result<ClioraReviewRequest, AppError> {
     let request = cliora::parse_review_url(&url)?;
-    sources.remember(&request.review_id, &request.worktree_path);
+    sources.stage(&request.review_id, &request.session_id, &request.worktree_path);
     Ok(ClioraReviewRequest {
         review_id: request.review_id,
         session_id: request.session_id,
@@ -235,19 +236,27 @@ fn cliora_review_request(
 }
 
 /// 回送接收结果。accepted 为假时必须带协议里的稳定错误码。
+///
+/// 接受时把这条链接的待定记录提升为正式来源（同一 reviewId 已有正式来源时不覆盖）；
+/// 拒绝时丢掉待定记录。被忽略、被拒绝或打开失败的链接因此不会改写当前审查的来源。
 #[tauri::command(rename_all = "camelCase")]
 fn cliora_review_receipt<R: Runtime>(
     app: AppHandle<R>,
+    sources: State<'_, cliora::ReviewSources>,
     review_id: String,
     session_id: String,
     accepted: bool,
     reason: Option<String>,
 ) -> Result<(), AppError> {
     let url = if accepted {
-        cliora::accepted_url(&review_id, &session_id)?
+        let url = cliora::accepted_url(&review_id, &session_id)?;
+        sources.accept(&review_id, &session_id);
+        url
     } else {
         let reason = reason.unwrap_or_else(|| "open_failed".to_string());
-        cliora::rejected_url(&review_id, &session_id, &reason)?
+        let url = cliora::rejected_url(&review_id, &session_id, &reason)?;
+        sources.reject(&review_id, &session_id);
+        url
     };
     // 回执只是告诉 cliora 结果，用户此刻要在 Twiglane 里审查：不把 cliora 切到前台。
     cliora::notify_cliora(&app, &url)
@@ -2082,6 +2091,46 @@ two
             crate::cliora::worktree_state_of(crate::cliora_uncommitted_files(&backend, &missing).await),
             crate::cliora::WorktreeState::Unknown,
         );
+    }
+
+    /// 同一 reviewId、指向另一个仓库的重复链接只被解析、没有被接受：返回时仍读取最初被接受的
+    /// 工作树的真实状态，不会用另一个目录的未提交数量冒充当前审查。
+    #[tokio::test]
+    async fn duplicate_review_link_does_not_change_the_worktree_read_on_return() {
+        let fixture = crate::test_support::git_fixture("cliora-duplicate");
+        let accepted = fixture.repo("accepted");
+        let other = fixture.repo("other");
+        for repo in [&accepted, &other] {
+            git(repo, &["init", "-b", "main"]);
+            fs::write(repo.join("a.txt"), "one\n").unwrap();
+            git(repo, &["add", "--", "a.txt"]);
+            git(repo, &["commit", "-m", "init"]);
+        }
+        fs::write(other.join("a.txt"), "changed\n").unwrap();
+        fs::write(other.join("b.txt"), "new\n").unwrap();
+        let backend = fixture.backend();
+        let sources = crate::cliora::ReviewSources::default();
+        let review = "6f1a2b3c-4d5e-4f60-8172-93a4b5c6d7e8";
+        let session = "0b1c2d3e-4f50-4172-8394-a5b6c7d8e9f0";
+
+        sources.stage(review, session, &accepted.to_string_lossy());
+        sources.accept(review, session);
+        // 重复链接：解析成功，但前端因为 reviewId 已处理而忽略，不会再回执。
+        sources.stage(review, session, &other.to_string_lossy());
+        let worktree = sources.worktree_for(review).expect("已接受的来源");
+        assert_eq!(
+            crate::cliora_uncommitted_files(&backend, std::path::Path::new(&worktree)).await,
+            Some(0),
+            "返回时读取的是最初被接受的干净工作树",
+        );
+        // 即便重复链接之后又收到一次 accepted 回执，也不覆盖已有正式来源。
+        sources.accept(review, session);
+        let worktree = sources.worktree_for(review).expect("已接受的来源");
+        assert_eq!(
+            crate::cliora_uncommitted_files(&backend, std::path::Path::new(&worktree)).await,
+            Some(0),
+        );
+        assert_eq!(crate::cliora_uncommitted_files(&backend, &other).await, Some(2));
     }
 
     /// 发给前端的返回结果只有实际发送的工作区状态和读到的条数，camelCase 与 TS 类型一致。

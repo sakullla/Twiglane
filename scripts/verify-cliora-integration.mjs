@@ -21,7 +21,11 @@ const FORMAT = "cliora-integration-evidence";
 const VERSION = 2;
 const PROTOCOL = "twiglane-review-v2";
 
-/** 真实场景：缺任何一个都算证据不完整。后两项是 v2 新增的轻量编辑与扩展场景。 */
+/**
+ * 真实场景：缺任何一个都算证据不完整。后三项是 v2 新增的轻量编辑、扩展与再次审阅闭环场景。
+ * requiredObservations 列出该场景 observations 里必须如实记录的键（非空文本）；
+ * distinctObservations 中的每组键取值必须互不相同（例如再次审阅必须使用新的 reviewId）。
+ */
 const SCENARIOS = [
   { id: "cold-start-review", title: "cliora 冷启动唤起 Twiglane 并打开指定 worktree" },
   { id: "commit-and-return", title: "Twiglane 提交后返回原 cliora 会话并复核提交与剩余未提交修改" },
@@ -35,6 +39,22 @@ const SCENARIOS = [
   {
     id: "extension-and-version-mismatch",
     title: "合法 meta 扩展不改变复核；v1/版本不匹配与畸形扩展链接不写入、不回退、不双事件",
+  },
+  {
+    id: "return-fix-and-re-review",
+    title:
+      "返回原会话后 Cliora 复核并继续修复，再用新的 reviewId、baseline 与 HEAD 唤起 Twiglane 再次审阅；旧差异、旧审阅标记与迟到的旧 returned 回执都不覆盖新审查",
+    requiredObservations: [
+      "clioraRecheck",
+      "continuedFix",
+      "firstReviewId",
+      "reReviewId",
+      "reReviewBaseline",
+      "reReviewHead",
+      "staleReviewStateCleared",
+      "staleReturnIgnored",
+    ],
+    distinctObservations: [["firstReviewId", "reReviewId"]],
   },
 ];
 
@@ -86,8 +106,24 @@ function isInstalledBuild(build) {
   );
 }
 
+/** 场景要求的观察键是否都如实记录，且要求不同的键确实不同。 */
+function observationProblems(expected, observations) {
+  const problems = [];
+  const recorded = observations && typeof observations === "object" ? observations : {};
+  for (const key of expected.requiredObservations ?? []) {
+    if (!isNonEmptyString(recorded[key])) problems.push("observations 缺少 " + key);
+  }
+  for (const keys of expected.distinctObservations ?? []) {
+    const values = keys.map((key) => recorded[key]).filter(isNonEmptyString);
+    if (values.length === keys.length && new Set(values.map((value) => value.trim())).size !== values.length) {
+      problems.push("observations 中 " + keys.join("、") + " 必须互不相同");
+    }
+  }
+  return problems;
+}
+
 /** 逐条检查声称通过的场景：必须有真实时间、真实应用、真实 Git 与可读观察结果。 */
-function scenarioProblems(scenario, builds) {
+function scenarioProblems(scenario, builds, expected = {}) {
   const problems = [];
   const text = [scenario.notes, JSON.stringify(scenario.observations ?? {})].join(" ").toLowerCase();
   for (const word of NON_EVIDENCE) {
@@ -104,6 +140,7 @@ function scenarioProblems(scenario, builds) {
   if (!scenario.observations || Object.keys(scenario.observations).length === 0) {
     problems.push("缺少观察结果");
   }
+  problems.push(...observationProblems(expected, scenario.observations));
   if (!isInstalledBuild(builds.twiglane) || !isInstalledBuild(builds.cliora)) {
     problems.push("两端安装包与安装记录不完整");
   }
@@ -189,7 +226,7 @@ function main() {
       problems.push("场景 " + expected.id + " 未通过（status=" + (scenario.status ?? "缺失") + "）");
       continue;
     }
-    for (const problem of scenarioProblems(scenario, builds)) {
+    for (const problem of scenarioProblems(scenario, builds, expected)) {
       problems.push("场景 " + expected.id + "：" + problem);
     }
   }

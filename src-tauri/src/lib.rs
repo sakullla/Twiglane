@@ -7,6 +7,7 @@ mod model;
 mod redact;
 mod shutdown;
 mod state;
+mod terminal;
 mod update;
 mod watch;
 
@@ -42,6 +43,9 @@ use crate::model::{
 };
 use crate::shutdown::Shutdown;
 use crate::state::{AppStore, PullIntegration};
+use crate::terminal::{
+    TerminalActivity, TerminalCloseRequested, TerminalManager, TerminalSnapshot,
+};
 
 pub fn run() {
     let shutdown = Shutdown::new();
@@ -78,6 +82,10 @@ pub fn run() {
                 Arc::new(shutdown),
             ));
             app.manage(backend);
+            // 终端独立于 Git 调度器与当前仓库监听：按仓库保存在应用内存中。
+            app.manage(TerminalManager::new(Arc::new(terminal::AppEvents::new(
+                app.handle().clone(),
+            ))));
             // cliora 审查来源只在内存里：返回时按它读取真实工作区状态。
             app.manage(cliora::ReviewSources::default());
             // 启动 20 秒后静默检查一次更新：失败不打断当前版本使用。
@@ -190,7 +198,12 @@ pub fn run() {
             update_install_supported,
             cliora_review_request,
             cliora_review_receipt,
-            cliora_review_return
+            cliora_review_return,
+            open_terminal,
+            restart_terminal,
+            terminal_write,
+            terminal_resize,
+            terminate_terminals
         ])
         .build(tauri::generate_context!())
         .expect("启动 Twiglane 失败");
@@ -201,9 +214,7 @@ pub fn run() {
         if blurred(&event) {
             let _ = app_handle.emit("window-blurred", ());
         }
-        if should_stop(&event) {
-            stop_backend(app_handle, &shutdown_for_run);
-        }
+        route_run_event(app_handle, &event, &shutdown_for_run);
     });
 }
 
@@ -500,16 +511,60 @@ mod menu_edit {
     }
 }
 
-fn should_stop(event: &RunEvent) -> bool {
-    matches!(
-        event,
-        RunEvent::Exit
-            | RunEvent::ExitRequested { .. }
-            | RunEvent::WindowEvent {
-                event: WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed,
-                ..
+/// 关窗/退出事件路由。有活动终端时先阻止立即关闭并请求界面确认；
+/// 没有活动终端时维持原来的直接停止行为。
+fn route_run_event(app: &AppHandle, event: &RunEvent, fallback: &Shutdown) {
+    match event {
+        RunEvent::WindowEvent {
+            event: WindowEvent::CloseRequested { api, .. },
+            ..
+        } => {
+            if request_terminal_confirmation(app) {
+                api.prevent_close();
+            } else {
+                stop_backend(app, fallback);
             }
-    )
+        }
+        RunEvent::ExitRequested { api, .. } => {
+            if request_terminal_confirmation(app) {
+                api.prevent_exit();
+            } else {
+                terminate_terminals_best_effort(app);
+                stop_backend(app, fallback);
+            }
+        }
+        RunEvent::WindowEvent {
+            event: WindowEvent::Destroyed,
+            ..
+        }
+        | RunEvent::Exit => {
+            terminate_terminals_best_effort(app);
+            stop_backend(app, fallback);
+        }
+        _ => {}
+    }
+}
+
+/// 只以管理器记录的活动进程为准，不看前端面板是否展开。发出确认事件后返回 true。
+fn request_terminal_confirmation(app: &AppHandle) -> bool {
+    let Some(manager) = app.try_state::<TerminalManager>() else {
+        return false;
+    };
+    let sessions = manager.active();
+    if sessions.is_empty() {
+        return false;
+    }
+    let _ = app.emit(
+        terminal::CLOSE_REQUESTED_EVENT,
+        TerminalCloseRequested { sessions },
+    );
+    true
+}
+
+fn terminate_terminals_best_effort(app: &AppHandle) {
+    if let Some(manager) = app.try_state::<TerminalManager>() {
+        manager.shutdown();
+    }
 }
 
 fn stop_backend(app: &AppHandle, fallback: &Shutdown) {
@@ -1930,6 +1985,49 @@ fn save_draft(
 fn cancel_reads(state: State<'_, Arc<Backend>>) -> Result<(), AppError> {
     state.scheduler.cancel_reads();
     Ok(())
+}
+
+/// 终端只接受仓库路径：shell、工作目录和进程树由后端按仓库规范路径固定。
+#[tauri::command(async)]
+fn open_terminal(
+    state: State<'_, TerminalManager>,
+    path: String,
+) -> Result<TerminalSnapshot, AppError> {
+    state.open(&path)
+}
+
+#[tauri::command(async)]
+fn restart_terminal(
+    state: State<'_, TerminalManager>,
+    path: String,
+) -> Result<TerminalSnapshot, AppError> {
+    state.restart(&path)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn terminal_write(
+    state: State<'_, TerminalManager>,
+    session_id: String,
+    data: String,
+) -> Result<(), AppError> {
+    state.write(&session_id, &data)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn terminal_resize(
+    state: State<'_, TerminalManager>,
+    session_id: String,
+    rows: u16,
+    cols: u16,
+) -> Result<(), AppError> {
+    state.resize(&session_id, rows, cols)
+}
+
+#[tauri::command(async)]
+fn terminate_terminals(
+    state: State<'_, TerminalManager>,
+) -> Result<Vec<TerminalActivity>, AppError> {
+    state.terminate_all()
 }
 
 #[derive(serde::Serialize)]

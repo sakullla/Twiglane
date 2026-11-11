@@ -119,6 +119,11 @@ fn main() {
             "cliora_review_request",
             "cliora_review_receipt",
             "cliora_review_return",
+            "open_terminal",
+            "restart_terminal",
+            "terminal_write",
+            "terminal_resize",
+            "terminate_terminals",
         ])),
     )
     .expect("failed to run tauri-build");

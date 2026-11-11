@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 #[test]
-fn capabilities_do_not_grant_a_shell() {
+fn capabilities_grant_only_explicit_terminal_ipc_not_a_generic_shell() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let capabilities: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(root.join("capabilities/default.json")).unwrap())
@@ -133,6 +133,13 @@ fn capabilities_do_not_grant_a_shell() {
         "allow-cliora-review-request",
         "allow-cliora-review-receipt",
         "allow-cliora-review-return",
+        // 终端只开放五个结构化命令：打开/附着、重启、写入、resize 与全部终止。
+        // 没有任何命令允许前端指定程序、参数或工作目录之外的路径。
+        "allow-open-terminal",
+        "allow-restart-terminal",
+        "allow-terminal-write",
+        "allow-terminal-resize",
+        "allow-terminate-terminals",
     ];
     assert_eq!(permissions, expected);
     assert!(permissions.iter().all(|permission| {
@@ -149,7 +156,10 @@ fn capabilities_do_not_grant_a_shell() {
     assert!(!config.to_ascii_lowercase().contains("shell"));
     let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
     assert!(!cargo.contains("tauri-plugin-shell"));
+    // 真实终端由 portable-pty 提供，而不是通用 shell 插件。
+    assert!(cargo.contains("portable-pty"));
     assert_source_has_no_shell(root.join("src").as_path());
+    assert_terminal_start_is_fixed(root);
 }
 
 /// macOS 需要原生装饰框承载交通灯，Windows 用自绘标题栏。平台覆盖文件由 Tauri 以 RFC 7396
@@ -220,6 +230,62 @@ fn assert_source_has_no_shell(dir: &Path) {
         let plugin = ["tauri", "_plugin_", "shell"].concat();
         assert!(!text.contains(&plugin), "{}", path.display());
     }
+}
+
+/// 终端模块只能启动解析出的默认 shell；前端能调用的命令不得携带程序、参数或 shell 字段。
+fn assert_terminal_start_is_fixed(root: &Path) {
+    let source = fs::read_to_string(root.join("src/terminal.rs")).unwrap();
+    assert_eq!(
+        source.matches("CommandBuilder::new(").count(),
+        1,
+        "终端只能有一个固定的 shell 启动点"
+    );
+    assert!(
+        source.contains("CommandBuilder::new(&shell)"),
+        "终端必须使用解析后的默认 shell 启动"
+    );
+    assert!(
+        source.contains("std::env::var_os(\"COMSPEC\")"),
+        "Windows 默认 shell 必须来自 %COMSPEC%"
+    );
+    assert!(
+        source.contains("std::env::var_os(\"SHELL\")"),
+        "Unix 默认 shell 必须来自 $SHELL"
+    );
+    assert!(
+        !source.contains("#[tauri::command]"),
+        "终端命令只在 lib.rs 暴露，模块本身不注册额外 IPC"
+    );
+
+    let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    for name in [
+        "open_terminal",
+        "restart_terminal",
+        "terminal_write",
+        "terminal_resize",
+        "terminate_terminals",
+    ] {
+        let signature = command_signature(&lib, name);
+        for forbidden in ["program", "args:", "command:", "shell:", "cwd:", "env:"] {
+            assert!(
+                !signature.contains(forbidden),
+                "{name} 不得接受前端指定的 {forbidden}: {signature}"
+            );
+        }
+    }
+}
+
+fn command_signature<'a>(source: &'a str, name: &str) -> &'a str {
+    let marker = format!("fn {name}(");
+    let start = source
+        .find(&marker)
+        .unwrap_or_else(|| panic!("缺少命令 {name}"));
+    let rest = &source[start..];
+    let end = rest
+        .find(") ->")
+        .or_else(|| rest.find('{'))
+        .expect("命令签名不完整");
+    &rest[..end]
 }
 
 fn rust_files(dir: &Path) -> Vec<std::path::PathBuf> {

@@ -505,17 +505,17 @@
     const busy = readOnly ? "正在保存或读取，暂时不能修改" : undefined;
     const entries: ContextMenuEntry[] = [
       { id: "undo", label: "撤销", icon: "undo", shortcut: `${MODIFIER_LABEL} Z`, disabledReason: busy, run: () => exec("undo") },
-      { id: "redo", label: "重做", shortcut: MODIFIER_LABEL === "⌘" ? "⌘ ⇧ Z" : "Ctrl Y", disabledReason: busy, run: () => exec("redo") },
+      { id: "redo", label: "重做", icon: "redo", shortcut: MODIFIER_LABEL === "⌘" ? "⌘ ⇧ Z" : "Ctrl Y", disabledReason: busy, run: () => exec("redo") },
       { separator: true },
-      { id: "cut", label: "剪切", shortcut: `${MODIFIER_LABEL} X`, disabledReason: busy ?? noSelection, run: () => exec("cut") },
+      { id: "cut", label: "剪切", icon: "scissors", shortcut: `${MODIFIER_LABEL} X`, disabledReason: busy ?? noSelection, run: () => exec("cut") },
       { id: "copy", label: "复制", icon: "copy", shortcut: `${MODIFIER_LABEL} C`, disabledReason: noSelection, run: () => exec("copy") },
-      { id: "paste", label: "粘贴", shortcut: `${MODIFIER_LABEL} V`, disabledReason: busy, run: () => void pasteText() },
+      { id: "paste", label: "粘贴", icon: "clipboard", shortcut: `${MODIFIER_LABEL} V`, disabledReason: busy, run: () => void pasteText() },
       { separator: true },
-      { id: "select-all", label: "全选", shortcut: `${MODIFIER_LABEL} A`, run: () => { textarea?.focus({ preventScroll: true }); textarea?.select(); syncCaret(); } },
+      { id: "select-all", label: "全选", icon: "select-all", shortcut: `${MODIFIER_LABEL} A`, run: () => { textarea?.focus({ preventScroll: true }); textarea?.select(); syncCaret(); } },
     ];
     entries.push({ separator: true });
     entries.push({ id: "find", label: "查找", icon: "search", shortcut: `${MODIFIER_LABEL} F`, run: () => void openFind(false) });
-    entries.push({ id: "replace", label: "替换", shortcut: IS_MAC ? "⌘ ⌥ F" : "Ctrl H", disabledReason: busy, run: () => void openFind(true) });
+    entries.push({ id: "replace", label: "替换", icon: "replace", shortcut: IS_MAC ? "⌘ ⌥ F" : "Ctrl H", disabledReason: busy, run: () => void openFind(true) });
     entries.push({ id: "goto", label: "跳到行", icon: "arrow-right", shortcut: `${MODIFIER_LABEL} G`, run: () => void openGoto() });
     const prefix = commentPrefix(language);
     if (prefix) {
@@ -523,6 +523,7 @@
       entries.push({
         id: "comment",
         label: "切换行注释",
+        icon: "code",
         shortcut: `${MODIFIER_LABEL} /`,
         disabledReason: busy,
         run: () => {

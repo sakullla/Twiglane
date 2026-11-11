@@ -1,6 +1,9 @@
 import { mount } from "svelte";
 import App from "./App.svelte";
 import "./app.css";
+import { trackInputModality } from "./lib/input-modality";
+
+trackInputModality();
 
 const target = document.getElementById("app");
 if (!target) {

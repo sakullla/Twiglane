@@ -272,7 +272,6 @@ function reviewProps(overrides: Record<string, unknown> = {}) {
     onStageFile: vi.fn(),
     onOpenUnstaged: vi.fn(),
     onOpenChanges: vi.fn(),
-    stagedPaths: [] as string[],
     onSnapshot: vi.fn(),
     onSelection: vi.fn(),
     onReviewNav: vi.fn(),
@@ -359,7 +358,7 @@ describe("任务审阅组件", () => {
     const onSummary = vi.fn();
     render(TaskReview, { props: reviewProps({ request: null, onSummary }) });
     await screen.findByText("没有任务范围");
-    expect(screen.getByText(/不会用 HEAD 或默认分支代替/)).toBeTruthy();
+    expect(screen.getByText("cliora 审查链接没有携带起点。")).toBeTruthy();
     expect(mocks.api.taskReview).not.toHaveBeenCalled();
     expect(document.querySelector(".file-list")).toBeNull();
     expect(document.querySelector(".task-baseline")).toBeNull();
@@ -376,7 +375,8 @@ describe("任务审阅组件", () => {
     expect(context.textContent).toContain("3 个文件");
     expect(context.textContent).toContain("+ 未提交改动");
     expect(context.textContent).toContain("未跟踪 1 个");
-    expect(context.textContent).toContain("来自 cliora 审查链接");
+    // 来源已由标题栏的 cliora 徽标说明，这里不再重复一枚标签。
+    expect(context.textContent).not.toContain("来自 cliora 审查链接");
     expect(screen.getByRole("heading", { name: "任务净差异" })).toBeTruthy();
     // 文件队列仍是同一套列表：表头改称任务文件，并且没有暂存入口。
     const list = await screen.findByRole("listbox", { name: "任务文件" });
@@ -486,7 +486,7 @@ describe("任务审阅组件", () => {
     await waitFor(() => expect(mocks.api.taskReview).toHaveBeenCalledTimes(2));
   });
 
-  it("多选文件时按块读取净差异，工具条只留只读说明", async () => {
+  it("多选文件时按块读取净差异，工具条不给暂存入口也不堆说明", async () => {
     render(TaskReview, { props: reviewProps() });
     const list = await screen.findByRole("listbox", { name: "任务文件" });
     const rows = within(list).getAllByRole("option");
@@ -500,7 +500,8 @@ describe("任务审阅组件", () => {
     const toolbar = document.querySelector(".multi-stack .diff-toolbar")!;
     expect(toolbar.querySelector('[aria-label^="暂存 "]')).toBeNull();
     expect(toolbar.querySelector('[aria-label^="放弃 "]')).toBeNull();
-    expect(document.body.textContent).toContain("任务净差异只读");
+    // 工具条不再挂长段只读说明：每个文件上的转入口本身已说明去哪里暂存。
+    expect(toolbar.textContent).not.toContain("任务净差异只读");
     // 每个文件的块标题都提供「转到真实未提交差异」，聚合补丁本身不能做块/行补丁。
     expect(
       within(document.querySelector<HTMLElement>(".multi-stack")!).getAllByRole("button", {
@@ -616,19 +617,12 @@ describe("任务审阅的队列与写入边界（T3）", () => {
     expect(screen.getByRole("button", { name: "回到改动视图提交" })).toBeTruthy();
   });
 
-  it("真实暂存范围与任务范围分开显示，空暂存区说清这次提交不含任务文件", async () => {
-    const { rerender } = render(TaskReview, { props: reviewProps({ stagedPaths: ["src/app.css", "README.md"] }) });
-    const scope = await screen.findByLabelText("本次提交暂存范围");
-    expect(scope.textContent).toContain("2 个已暂存文件");
-    expect(scope.textContent).toContain("与任务范围分开");
-    expect(scope.textContent).toContain("这里的 3 个任务文件不会自动进入提交");
-    expect(scope.querySelector('[title]')?.getAttribute("title")).toBe("src/app.css\nREADME.md");
+  it("不再在任务页重复说明暂存范围；只读标记仍在", async () => {
+    render(TaskReview, { props: reviewProps() });
+    await screen.findByRole("listbox", { name: "任务文件" });
+    expect(screen.queryByLabelText("本次提交暂存范围")).toBeNull();
+    expect(document.body.textContent).not.toContain("不会自动进入提交");
     expect(document.querySelector(".read-only-chip")?.getAttribute("title")).toContain("任务净差异只读");
-
-    await rerender(reviewProps({ stagedPaths: [] }));
-    await waitFor(() =>
-      expect(screen.getByLabelText("本次提交暂存范围").textContent).toContain("暂存区是空的"),
-    );
   });
 
   it("工作区重建在文件行与单文件差异里说明同一语义", async () => {

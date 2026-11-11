@@ -152,7 +152,6 @@
     {/if}
   </div>
   {#snippet footer()}
-    <span class="doc-dialog-note"><Icon name="eye" size={12} />只读阅读：不会修改文件、索引或提交范围</span>
     <span class="spacer"></span>
     <button type="button" class="btn btn-secondary" onclick={onClose}>关闭</button>
   {/snippet}

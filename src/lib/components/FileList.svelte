@@ -5,7 +5,6 @@
   import {
     ALL_REVIEWED,
     BUSY_REASON,
-    NO_MORE_UNREVIEWED,
     NO_REVIEW_FILES,
     rangeSelection,
     rowMark,
@@ -421,7 +420,7 @@
     <input
       id={searchId}
       aria-label={taskMode ? "搜索任务文件" : "搜索改动文件"}
-      placeholder="搜索文件或路径"
+      placeholder="搜索文件"
       autocomplete="off"
       spellcheck="false"
       value={query}
@@ -491,11 +490,7 @@
 {#if reviewNav && reviewNav.total > 0 && reviewNav.remaining === 0 && rows.length > 0}
   <!-- 队尾/全部完成的下一步：隐藏已审阅，或按真实暂存范围提交；都不改任务范围。 -->
   <p class="file-tree-status" role="status">
-    <span>{ALL_REVIEWED}：可以隐藏已审阅，或按真实暂存范围提交。</span>
-  </p>
-{:else if reviewNav && reviewNav.nextReason === NO_MORE_UNREVIEWED}
-  <p class="file-tree-status" role="status">
-    <span>{NO_MORE_UNREVIEWED}（已到队尾，不循环回开头）。</span>
+    <span>{ALL_REVIEWED}</span>
   </p>
 {:else if reviewNav && reviewNav.total === 0 && query.trim() === ""}
   <p class="file-tree-status" role="status"><span>{NO_REVIEW_FILES}。</span></p>
@@ -521,7 +516,6 @@
     <div class="empty">
       <span class="empty-icon ok"><Icon name="check-circle" size={22} /></span>
       <strong>已审阅的文件都隐藏了</strong>
-      <p>隐藏只影响显示，分组数量、任务范围与提交范围没有变化。</p>
       {#if onHideReviewed}
         <button type="button" class="btn btn-secondary btn-sm" onclick={() => onHideReviewed?.(false)}>显示已审阅</button>
       {/if}
@@ -531,7 +525,6 @@
     <div class="empty">
       <span class="empty-icon"><Icon name="search" size={22} /></span>
       <strong>没有匹配的文件</strong>
-      <p>当前搜索词没有匹配到{taskMode ? "任务" : "改动"}文件；清掉搜索可以回到完整队列。</p>
       <button type="button" class="btn btn-secondary btn-sm" onclick={() => onQuery("")}>清除筛选</button>
     </div>
   {:else if rows.length === 0}
@@ -539,11 +532,6 @@
     <div class="empty">
       <span class="empty-icon ok"><Icon name="check-circle" size={22} /></span>
       <strong>{reviewNav?.total ? ALL_REVIEWED : NO_REVIEW_FILES}</strong>
-      <p>
-        {reviewNav?.total
-          ? "全部文件都已审阅；可以隐藏已审阅，或到提交区按真实暂存范围提交。"
-          : "这个范围里没有可审阅的文件。"}
-      </p>
     </div>
   {:else}
     <div class="virtual-space" style={`height:${items.length * ROW_HEIGHT}px`}>

@@ -588,9 +588,8 @@ describe("主工作台", () => {
     const localButton = screen.getByRole("button", { name: "提交到本地" });
     expect(localButton.hasAttribute("disabled")).toBe(true);
     expect(localButton.getAttribute("title")).toContain("填写提交说明后即可提交");
-    const blocker = document.querySelector("[data-commit-blocker]");
-    expect(blocker?.textContent?.trim(), "原因要就地可见，而不是只在悬停提示里").toBe("填写提交说明后即可提交");
-    expect(blocker?.getAttribute("title")).toContain("填写提交说明后即可提交");
+    // 说明框空着本身一眼可见：不再在提交区下面多写一行原因，原因留在按钮提示与命令面板里。
+    expect(document.querySelector("[data-commit-blocker]")).toBeNull();
 
     await press("k");
     await screen.findByRole("dialog", { name: "命令面板" });
@@ -2609,14 +2608,12 @@ describe("文件列表的目录分组和行数", () => {
     const view = render(FileList, { props });
     // 一：已审阅被隐藏。
     expect(await screen.findByText("已审阅的文件都隐藏了")).toBeTruthy();
-    expect(document.body.textContent).toContain("分组数量、任务范围与提交范围没有变化");
     await fireEvent.click(screen.getByRole("button", { name: "显示已审阅" }));
     expect(onHideReviewed).toHaveBeenCalledWith(false);
 
     // 二：全部已审阅但不隐藏，给出下一步而不是空白。
     await view.rerender({ ...props, hideReviewed: false });
     expect(document.body.textContent).toContain("所有文件都已审阅");
-    expect(document.body.textContent).toContain("可以隐藏已审阅，或按真实暂存范围提交");
 
     // 三：筛选没有结果，下一步是清掉筛选。
     await view.rerender({ ...props, hideReviewed: false, query: "zzz" });

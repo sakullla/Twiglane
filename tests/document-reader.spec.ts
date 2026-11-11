@@ -369,7 +369,7 @@ describe("阅读窗口", () => {
     expect(dialog).toBeTruthy();
     expect(screen.getByRole("heading", { name: "阅读文档" })).toBeTruthy();
     expect(screen.getAllByTitle("来源：暂存区").length).toBeGreaterThan(0);
-    expect(container.textContent).toContain("只读阅读：不会修改文件、索引或提交范围");
+    expect(container.textContent).not.toContain("只读阅读");
     expect(await screen.findByRole("heading", { name: "标题" })).toBeTruthy();
     // 只有改动后一侧时说明另一侧为什么不在，不提供假的版本切换。
     expect(screen.getByText("这个文件是新出现的，改动前没有可阅读的版本。")).toBeTruthy();

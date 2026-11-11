@@ -352,7 +352,6 @@ describe("石墨靛蓝配色（R1）", () => {
     const components = read(path.join(stylesDir, "components.css"));
     const layout = read(path.join(stylesDir, "layout.css"));
     const componentSelectors = [
-      ".composer-meta:has(.composer-ready) > .icon",
       ".empty-icon.ok",
       ".toast.ok .toast-icon",
       ".callout.ok",
@@ -1082,7 +1081,6 @@ const DECORATIVE_HAIRLINE_RULES: Record<string, string> = {
   ".text-editor-bar": "轻量编辑工具条与文本区之间的分区线，条内是状态文字，按钮自身带控件边界",
   ".text-editor-gutter": "轻量编辑行号栏与文本区之间的竖向分栏线，行号是只读装饰文字",
   // --- components.css：任务审阅（只读范围信息与分区线） ---
-  ".task-stage-scope": "真实暂存范围说明行与任务文件/差异之间的分区线，条内是只读说明文字",
   ".task-diff-actions": "任务净差异的按块/行转入口条与差异正文之间的分区线，按钮自身带控件边界",
 
   // --- components.css：表格/列分隔线与分区线 ---

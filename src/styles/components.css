@@ -98,7 +98,7 @@
 /* 软色按钮静止时就有底色，禁用后回到中性填充；边界由 .btn:disabled 统一提供。 */
 .btn-danger-soft:disabled { background: var(--surface-3); }
 /* ghost 按钮静止时没有框也没有底：禁用后仍是同一个形状，只把内容淡下去。
-   给它补上底色和描边，会让不可用的那个反而比可用的更像按钮（如「已在最新」）。 */
+   给它补上底色和描边，会让不可用的那个反而比可用的更像按钮（如禁用的分页按钮）。 */
 .btn-ghost:disabled { background: transparent; border-color: transparent; opacity: var(--opacity-disabled); }
 .btn-primary:disabled kbd { background: var(--surface-2); border-color: var(--control-border); color: var(--fg-subtle); }
 .icon-btn {
@@ -318,26 +318,33 @@
 .branch-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 
 /* ---------- 右键菜单 ---------- */
-/* 固定定位到指针处（由组件按窗口边缘翻转），条目单行、紧凑；不可用条目灰显并在提示里给原因。 */
-.context-menu { position: fixed; right: auto; width: max-content; min-width: 232px; max-width: min(400px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow: auto; padding: var(--space-4); outline: none; z-index: var(--z-toast); }
+/* 固定定位到指针处（由组件按窗口边缘翻转），条目单行、紧凑；不可用条目灰显并在提示里给原因。
+   条目用固定列网格：图标列（菜单里有任一图标才留）→ 文字 → 快捷键/勾选，有无图标的条目文字都左对齐。 */
+.context-menu { position: fixed; right: auto; width: max-content; min-width: 220px; max-width: min(400px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow: auto; padding: var(--space-4); outline: none; z-index: var(--z-toast); }
 /* 菜单内没有任何可执行项时焦点落在菜单容器本身；容器也必须有可见焦点，不能只剩一条 outline:none。 */
 .context-menu:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
-.context-item { align-items: center; gap: var(--space-8); min-height: 30px; padding: var(--space-4) var(--space-8); }
-.context-item > .icon { margin-top: 0; color: var(--fg-muted); flex: none; }
+/* 指针唤起或正在用指针操作时，当前项只用底色标出（同系统菜单）；一按键组件就切回 keyboard，焦点环随之出现。 */
+.context-menu[data-input="pointer"]:focus-visible, .context-menu[data-input="pointer"] .context-item:focus-visible { outline: none; }
+.menu-item.context-item { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: start; column-gap: var(--space-8); min-height: 30px; padding: 5px var(--space-8); }
+.context-menu.has-icons .menu-item.context-item { grid-template-columns: 16px minmax(0, 1fr) auto auto; }
+.menu-item.context-item > .context-icon { display: inline-flex; align-items: center; justify-content: center; flex-direction: row; width: 16px; height: 20px; color: var(--fg-muted); }
 .context-item .context-copy { flex: 1; min-width: 0; }
-.context-item .context-label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); font-weight: var(--weight-normal); color: var(--fg); }
+.context-item .context-label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); font-weight: var(--weight-normal); line-height: 20px; color: var(--fg); }
 .context-item .context-copy small { overflow-wrap: anywhere; }
-.context-item kbd { margin-left: var(--space-12); font-size: var(--text-xs); }
-.context-item.active { background: var(--hover); }
+/* 快捷键只是提示：去掉键帽边框，用弱化文字靠右对齐，和系统菜单一致，不抢条目名的视线。 */
+.context-item .context-key { height: 20px; margin-left: var(--space-16); padding: 0; border: 0; background: none; box-shadow: none; color: var(--fg-subtle); font-size: var(--text-xs); font-weight: var(--weight-normal); line-height: 20px; letter-spacing: 0.02em; }
+.context-item.active { background: var(--active); }
 /* 键盘焦点与 hover 当前项同一底色，但补可见焦点环；环画在条目内部，不被菜单滚动容器裁掉。 */
-.context-item:focus-visible { background: var(--hover); outline: 2px solid var(--focus); outline-offset: -2px; }
+.context-item:focus-visible { background: var(--active); outline: 2px solid var(--focus); outline-offset: -2px; }
 .context-item[aria-disabled="true"] { cursor: not-allowed; background: transparent; }
 .context-item[aria-disabled="true"]:hover { background: transparent; }
-.context-item[aria-disabled="true"] .context-label, .context-item[aria-disabled="true"] > .icon { color: var(--fg-subtle); }
-.context-item.danger .context-label, .context-item.danger > .icon { color: var(--danger-text); }
+.context-item[aria-disabled="true"] .context-label, .menu-item.context-item[aria-disabled="true"] > .context-icon { color: var(--fg-subtle); }
+.context-item[aria-disabled="true"] .context-key { opacity: var(--opacity-disabled); }
+.context-item.danger .context-label, .menu-item.context-item.danger > .context-icon { color: var(--danger-text); }
 .context-item.danger.active { background: var(--danger-soft); }
-.context-icon-gap { width: 14px; flex: none; }
 .context-menu .menu-label { padding: var(--space-6) var(--space-8) var(--space-2); }
+/* 分组标题与条目文字对齐（跳过图标列）。 */
+.context-menu.has-icons .menu-label { padding-left: calc(var(--space-8) * 2 + 16px); }
 .context-menu .menu-sep { margin: var(--space-4) var(--space-2); }
 
 /* ---------- 面板骨架：文件列表 ---------- */
@@ -363,7 +370,7 @@
   .review-hide .file-group-action { display: none; }
   .review-hide { width: 26px; padding: 0; justify-content: center; }
 }
-@container file-tools (max-width: 300px) {
+@container file-tools (max-width: 340px) {
   .review-count > .icon { display: none; }
 }
 .file-tools .segmented button { height: var(--control-segmented); padding: 0 var(--space-8); font-size: var(--text-xs); }
@@ -372,7 +379,8 @@
 /* 搜索在前、排列方式在后：搜索是高频动作，占满剩余宽度。 */
 .file-tools .segmented { order: 2; }
 /* 左栏搜索框：比 --surface-2 的左栏暗一档，边界继承 .field 的 --control-border。 */
-.file-tools .field { flex: 1; min-width: 96px; background: var(--surface); }
+.file-tools .field { flex: 1; min-width: 112px; background: var(--surface); }
+.file-tools .field input { text-overflow: ellipsis; }
 .history-tools .field { background: var(--surface); }
 .file-list { min-height: 0; flex: 1; overflow: auto; padding: 0 0 var(--space-8); position: relative; outline: none; container-type: inline-size; container-name: file-list; }
 /* 文件列表、差异面板、历史列表这三个可聚焦滚动容器同一判据：原来用 --accent-soft
@@ -381,6 +389,10 @@
    并统一用 outline 而不是 inset box-shadow——容器内的行是绝对定位子元素，会盖住内阴影，
    而 outline 画在内容之上。 */
 .file-list:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; border-radius: 0; }
+/* 指针操作时（<html data-input="pointer">，见 lib/input-modality.ts）整块容器不画焦点环：点选行后被程序聚焦的列表、
+   差异区、历史与文件树不再每点一下就套一圈框，选中行本身已标出位置；一按导航键焦点环立刻回来。 */
+:root[data-input="pointer"] :is(.file-list, .diff-scroll, .history-list, .file-tree):focus-visible,
+:root[data-input="pointer"] .history-list:focus-visible .history-row[aria-selected="true"] { outline: none; }
 /* 代码窗口横向滚动（R21）：滚动容器是原生的，触控板、Shift+滚轮和滚动条都走浏览器；
    宽度由隐藏标尺撑开，标尺排的是全量候选的最长行，所以不随虚拟窗口跳动。
    行钉在 .code-stage 里（行号、块标题、按块暂存因此不动），只有 .code-in 按 --code-x 平移，
@@ -562,8 +574,6 @@
 .composer-meta { display: flex; align-items: center; gap: var(--space-6); min-width: 0; min-height: 20px; color: var(--fg-subtle); font-size: var(--text-xs); }
 .composer-meta > .icon { flex: none; }
 .composer-meta > span { min-width: 0; white-space: nowrap; }
-.composer-meta .composer-ready { color: var(--fg-muted); }
-.composer-meta:has(.composer-ready) > .icon { color: var(--success-text); }
 /* 提交失败的行内原因（R5）：与 data-commit-blocker 同一行、同一块，只是换成危险语义。 */
 /* 暂存区为空是「还没做」而不是「做错了」：图标取警告语义，与右上角范围标签的 .empty-scope 同一档，
    文字仍用弱化色，避免整行变成报警条。 */
@@ -2225,7 +2235,8 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .text-editor-opt.on { background: color-mix(in srgb, var(--focus) 22%, transparent); color: var(--fg); box-shadow: inset 0 0 0 1px var(--focus); }
 .text-editor-opt:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .text-editor-input::selection { background: color-mix(in srgb, var(--focus) 35%, transparent); }
-.text-editor-input:focus-visible { box-shadow: inset 0 0 0 2px var(--focus); }
+/* 整块编辑区本身就是焦点目标：四周 2px 环会把整个窗格框住、压过正文；改成左缘一条焦点色竖线，光标与当前行负责精确位置。 */
+.text-editor-input:focus-visible { box-shadow: inset 2px 0 0 var(--focus); }
 .text-editor-input[readonly] { caret-color: transparent; }
 .file-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; padding: var(--space-32) var(--space-24); text-align: center; color: var(--fg-muted); min-height: 0; }
 .file-state strong { color: var(--fg); font-size: var(--text-base); font-weight: var(--weight-semibold); }
@@ -2279,8 +2290,8 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .file-nav-recent .menu-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--weight-normal); }
 .file-nav-empty { margin: 0; padding: var(--space-8); color: var(--fg-subtle); font-size: var(--text-xs); }
 /* 右键/更多菜单里的开关条目：勾选状态画在右侧，未勾选时留出同样的位置。 */
-.context-check { display: inline-grid; place-items: center; width: 14px; flex: none; margin-left: var(--space-8); color: var(--accent-text); visibility: hidden; }
-.context-check.on { visibility: visible; }
+.menu-item.context-item > .context-check { display: inline-flex; align-items: center; justify-content: center; flex-direction: row; width: 14px; height: 20px; color: var(--accent-text); visibility: hidden; }
+.menu-item.context-item > .context-check.on { visibility: visible; }
 @media (prefers-reduced-motion: reduce) {
   .file-search-row, .file-search-group, .file-nav-recent, .file-tree-row, .tree-chevron > .icon { transition: none; animation: none; }
   .file-tree-skeleton > span, .file-skeleton .sk-code, .file-skeleton .sk-ln { animation: none; }
@@ -2325,7 +2336,6 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .doc-dialog-mode button { height: 22px; padding: 0 var(--space-8); font-size: var(--text-xs); }
 .doc-dialog-side { flex: none; }
 .doc-dialog-side button { height: 22px; padding: 0 var(--space-8); font-size: var(--text-xs); }
-.doc-dialog-note { display: inline-flex; align-items: center; gap: 5px; color: var(--fg-muted); font-size: var(--text-xs); }
 @media (prefers-reduced-motion: reduce) {
   .doc-notice, .doc-source-line { transition: none; }
 }
@@ -2358,7 +2368,6 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .history-task-row[aria-pressed="true"] { background: var(--accent-soft); }
 .history-task-row[aria-pressed="true"]::before { content: ""; position: absolute; left: -1px; top: 9px; bottom: 9px; width: 2.5px; border-radius: 2px; background: var(--accent); }
 .history-task-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
-.history-task-row .spinner { width: 11px; height: 11px; align-self: center; }
 .history-task-row .diff-stats { flex: none; }
 .history-task-icon { display: grid; place-items: center; flex: none; width: 22px; height: 22px; margin-top: 1px; border-radius: 50%; background: var(--accent-soft); color: var(--accent-text); }
 .history-task-row[aria-pressed="true"] .history-task-icon { background: var(--accent); color: var(--accent-fg); }
@@ -2385,22 +2394,7 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 }
 .task-tag.warn { background: var(--warning-soft); color: var(--warning-text); }
 .task-tag.danger { background: var(--danger-soft); color: var(--danger-text); }
-.task-reading { display: inline-flex; align-items: center; gap: var(--space-4); color: var(--fg-muted); }
-.task-reading .spinner { width: 11px; height: 11px; }
 .task-context-note { margin: 0; color: var(--fg-subtle); font-size: var(--text-xs); }
-/* 真实暂存范围：一行说明它和任务范围是两回事，路径清单在悬停提示里。 */
-.task-stage-scope {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2) var(--space-8);
-  flex: none;
-  padding: var(--space-6) var(--space-16);
-  border-bottom: 1px solid var(--border);
-  background: var(--surface-2);
-  color: var(--fg-muted);
-  font-size: var(--text-xs);
-}
 .task-failure p { margin: 0; }
 .task-empty { padding: var(--space-16) var(--space-12); }
 .task-placeholder { background: var(--surface); }
@@ -2415,8 +2409,6 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
   background: var(--surface-2);
   box-shadow: inset -1px 0 0 var(--border);
 }
-/* 只读说明：任务净差异不提供暂存入口，用一句话代替按钮，而不是把按钮灰掉。 */
-.diff-note { color: var(--fg-subtle); font-size: var(--text-xs); }
 
 /* 右栏：净差异与（必要时）截断说明。截断说明独立一行，不挤动代码区。 */
 .task-diff { display: flex; flex-direction: column; min-width: 0; min-height: 0; }

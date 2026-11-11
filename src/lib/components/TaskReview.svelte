@@ -88,8 +88,6 @@
     onOpenUnstaged?: (path: string) => void;
     /** 回到改动视图的提交区：提交只按真实暂存范围执行。 */
     onOpenChanges?: () => void;
-    /** 真实暂存范围（仓库相对路径）：与任务范围分开显示。 */
-    stagedPaths?: string[];
     /** 任务范围解析成功/撤下：外壳据此绑定快照 token 与进度记录。 */
     onSnapshot?: (scope: { worktree: string; baselineOid: string; headOid: string } | null) => void;
     /** 当前任务文件：命令面板的标记/暂存动作作用在这里。 */
@@ -133,7 +131,6 @@
     writeLocked = false,
     onOpenUnstaged,
     onOpenChanges,
-    stagedPaths = [],
     onSnapshot,
     onSelection,
     onReviewNav,
@@ -559,7 +556,8 @@
   }
 </script>
 
-<div class="task-detail" aria-label="任务净差异" style:display={visible ? null : "none"}>
+<!-- 后台重读不在界面上插提示或转圈：旧结果原地保留到新结果就绪，只用 aria-busy 告诉读屏。 -->
+<div class="task-detail" aria-label="任务净差异" aria-busy={reading && task ? "true" : undefined} style:display={visible ? null : "none"}>
   <header class="commit-head task-head">
     <div class="commit-head-main">
       <h2 class="commit-title">任务净差异</h2>
@@ -585,13 +583,9 @@
           {#if task.untrackedFiles > 0}<span class="task-tag">未跟踪 {task.untrackedFiles} 个</span>{/if}
           {#if task.conflicted}<span class="task-tag danger">有冲突</span>{/if}
         {/if}
-        {#if request?.origin === "cliora"}<span class="task-tag">来自 cliora 审查链接</span>{/if}
         <span class="read-only-chip" title="任务净差异只读：不会写入暂存区，也不改变提交范围">
           <Icon name="eye" size={12} />只读
         </span>
-        {#if reading}
-          <span class="task-reading" role="status"><span class="spinner" aria-hidden="true"></span>正在读取任务范围……</span>
-        {/if}
       </div>
       {#if task?.filesTruncated}
         <p class="task-context-note" role="alert">{task.message}</p>
@@ -612,33 +606,18 @@
     {/if}
   </header>
 
-  {#if task && !task.empty}
-    <!-- 真实暂存范围与任务范围分开：提交只读这一份，任务文件数不代表提交范围（R4）。 -->
-    <div class="task-stage-scope" aria-label="本次提交暂存范围">
-      <span class="task-kicker">本次提交</span>
-      {#if stagedPaths.length === 0}
-        <span class="task-value">暂存区是空的：这次提交不会包含任何任务文件</span>
-      {:else}
-        <span class="task-value" title={stagedPaths.join("\n")}>{stagedPaths.length} 个已暂存文件</span>
-        <span class="task-tag">与任务范围分开</span>
-      {/if}
-      <span class="task-context-note">提交只读取真实暂存范围，这里的 {reviewTotal} 个任务文件不会自动进入提交。</span>
-    </div>
-  {/if}
-
   {#if phase === "failed"}
     <div class="empty task-failure" role="alert">
       <span class="empty-icon err"><Icon name="alert-circle" size={22} /></span>
       <strong>{invalidRange ? "任务范围已失效" : "读取任务范围失败"}</strong>
       <p>{failure?.message ?? "无法读取这次任务，仓库没有被修改。"}</p>
-      <p class="task-context-note">这里不会显示上一次的结果：它不是这次任务当前的净差异。</p>
       <button type="button" class="btn btn-secondary btn-sm" onclick={reload}>重新读取</button>
     </div>
   {:else if phase === "no-baseline"}
     <div class="empty" role="status">
       <span class="empty-icon"><Icon name="layers" size={22} /></span>
       <strong>没有任务范围</strong>
-      <p>cliora 审查链接没有携带起点，这里不会用 HEAD 或默认分支代替。</p>
+      <p>cliora 审查链接没有携带起点。</p>
     </div>
   {:else if !task}
     <div class="empty" role="status" aria-busy="true">

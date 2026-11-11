@@ -409,7 +409,7 @@
           {#if stash}<span class="count">{stash.records.length}</span>{/if}
         </div>
         {#if stash && stash.records.length === 0}
-          <p class="stash-records-empty">还没有临时保存记录。没有可保存的内容时不会创建记录。</p>
+          <p class="stash-records-empty">还没有临时保存记录。</p>
         {/if}
         <div class="stash-list">
           {#each stash?.records ?? [] as record (record.oid)}

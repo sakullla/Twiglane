@@ -47,7 +47,7 @@
     unmarkReviewedIn,
     type ReviewTarget,
   } from "./lib/review-progress.svelte";
-  import { branchLabel, commitScope, createSelectionResolver, dependencyNote, fileStageSide, filterRows, groupFiles, hasSide, retainSelection, selectionAfterEdit, stagedFiles, syncLabel } from "./lib/labels";
+  import { branchLabel, commitScope, createSelectionResolver, dependencyNote, fileStageSide, filterRows, groupFiles, hasSide, retainSelection, selectionAfterEdit, syncLabel } from "./lib/labels";
   import { startDesktopMeasure } from "./lib/measure";
   import { updateState, watchUpdateAvailable } from "./lib/update.svelte";
   import { isTextEntry, shortcutCommand } from "./lib/shortcuts";
@@ -425,11 +425,6 @@
     inTask ? taskReviewNav : workspaceView === "changes" ? changesReviewNav : null,
   );
 
-  /** 真实暂存范围（与提交区同源）：任务页用它把「任务文件」和「本次提交」分开。 */
-  let stagedScopeFiles = $derived(stagedFiles(opened?.snapshot.files ?? []));
-  let stagedScopePaths = $derived(
-    stagedScopeFiles.map((file) => (file.originalPath ? `${file.originalPath} → ${file.path}` : file.path)),
-  );
   let changeCount = $derived(opened?.snapshot.files.length ?? 0);
   let conflictCount = $derived(opened?.snapshot.files.filter((file) => file.unmerged).length ?? 0);
   let upstreamMissing = $derived(opened ? !opened.snapshot.branch.upstream : false);
@@ -3806,7 +3801,7 @@
     <div class="progress-line" aria-hidden="true"></div>
     <div class="infobar info" role="status">
       <span class="spinner"></span>
-      <span class="infobar-text">正在读取仓库，可以切换仓库或使用键盘。取消只停止这次读取，不会写入仓库。</span>
+      <span class="infobar-text">正在读取仓库…</span>
       <button type="button" class="btn btn-secondary btn-sm" onclick={cancelReading}>取消读取</button>
     </div>
   {/if}
@@ -3883,7 +3878,6 @@
       writeLocked={writeLocked}
       onOpenUnstaged={openUnstagedDiff}
       onOpenChanges={showChanges}
-      stagedPaths={stagedScopePaths}
       onSnapshot={adoptTaskScope}
       onSelection={(path) => (taskSelectedPath = path)}
       onReviewNav={(nav) => (taskReviewNav = nav)}

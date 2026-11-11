@@ -613,14 +613,14 @@ describe("历史面板", () => {
     await fireEvent.scroll(list);
     expect(await screen.findByRole("option", { name: /commit-1/ })).toBeTruthy();
     expect(screen.getByRole("option", { name: /commit-0/ })).toBeTruthy();
-    expect(screen.getByText(/已加载最新 1–2 条/)).toBeTruthy();
+    expect(screen.getByText("2 条提交")).toBeTruthy();
     expect(historyPage.mock.calls.at(-1)?.[2]).toBe(1);
     expect(commitDetail.mock.calls.length).toBe(detailCalls);
     await fireEvent.click(screen.getByRole("button", { name: "回到最新" }));
     expect(list.scrollTop).toBe(0);
   });
 
-  it("分页按钮把「已在最新」写成可见文案，不只在 title 里", async () => {
+  it("已在最新时不摆灰按钮占位，只在离开顶部后给出「回到最新」", async () => {
     const rows = [commit(0), commit(1)];
     historyPage.mockResolvedValue({
       generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: rows,
@@ -631,12 +631,9 @@ describe("历史面板", () => {
     });
     render(HistoryPanel, { props: panelProps() });
     await screen.findByRole("option", { name: /commit-0/ });
-    const newest = screen.getByRole<HTMLButtonElement>("button", { name: "已在最新" });
-    // 禁用按钮不进 Tab，所以原因必须是可见文案；title 只作补充。
-    expect(newest.textContent?.trim()).toBe("已在最新");
-    expect(newest.disabled, "已经在最新一条提交").toBe(true);
-    expect(newest.title).toBe("已经在最新一条提交");
+    expect(screen.queryByRole("button", { name: "已在最新" })).toBeNull();
     expect(screen.queryByRole("button", { name: "回到最新" })).toBeNull();
+    expect(screen.getByText("2 条提交")).toBeTruthy();
   });
 
   it("从其他视图切回历史保留滚动位置，读取条件变化才回到顶部", async () => {
@@ -653,13 +650,8 @@ describe("历史面板", () => {
     await screen.findByRole("option", { name: /commit-0/ });
     const list = screen.getByRole("listbox", { name: "提交历史" });
     Object.defineProperty(list, "clientHeight", { configurable: true, value: 160 });
-    // 状态写进可见文案：不是可执行的「回到最新」，而是「已在最新」，禁用原因不用悬停就能读到。
-    const atNewest = () => screen.getByRole<HTMLButtonElement>("button", { name: "已在最新" });
     const backToNewest = () => screen.getByRole<HTMLButtonElement>("button", { name: "回到最新" });
-    expect(screen.queryByRole("button", { name: "回到最新" }), "已经在最新时不摆出可执行的动作").toBeNull();
-    expect(atNewest().disabled, "已经在顶部时没有可做的事").toBe(true);
-    expect(atNewest().textContent?.trim()).toBe("已在最新");
-    expect(atNewest().title).toBe("已经在最新一条提交");
+    expect(screen.queryByRole("button", { name: "回到最新" }), "已经在最新时不摆出动作").toBeNull();
 
     list.scrollTop = 320;
     await fireEvent.scroll(list);
@@ -786,7 +778,7 @@ describe("历史面板", () => {
     await fireEvent.scroll(list);
     expect(await screen.findByText(/这一页没有读到。已显示的提交仍保留。/)).toBeTruthy();
     expect(screen.getByRole("option", { name: /commit-0/ })).toBeTruthy();
-    expect(screen.getByText("已加载最新 1–1 条，还有更早的提交")).toBeTruthy();
+    expect(screen.getByText("1+ 条提交")).toBeTruthy();
     expect(historyPage).toHaveBeenCalledTimes(2);
     await fireEvent.scroll(list);
     expect(historyPage).toHaveBeenCalledTimes(2);
@@ -902,7 +894,7 @@ describe("历史面板", () => {
     expect(await screen.findByText("已选择 3 个提交 · 最终结果")).toBeTruthy();
     await waitFor(() => expect(compareFiles).toHaveBeenCalledWith("/repo", rows[3].oid, rows[0].oid, 3, 1));
     await waitFor(() => expect(compareFileDiff).toHaveBeenCalledWith("/repo", rows[3].oid, rows[0].oid, "src/a.txt", 3, 1, 0, 0));
-    expect(screen.getByText(/不逐个提交展开/)).toBeTruthy();
+    expect(screen.getByText("所选提交合在一起后的最终变化。")).toBeTruthy();
     expect(screen.queryByText(/所选提交不连续/)).toBeNull();
     // 只有一份差异视图，带自己的工具条，没有按提交堆叠的块。
     await waitFor(() => expect(document.querySelectorAll(".commit-diff .diff-toolbar")).toHaveLength(1));
@@ -1698,8 +1690,7 @@ describe("历史分栏", () => {
     const detail = document.querySelector<HTMLElement>(".history-layout > .history-detail")!;
     expect(within(pane).getByRole("textbox", { name: "搜索说明或提交哈希" })).toBeTruthy();
     expect(within(pane).getByRole("listbox", { name: "提交历史" })).toBeTruthy();
-    expect(within(pane).getByRole("button", { name: "已在最新" })).toBeTruthy();
-    expect(within(pane).getByText(/已加载最新 1–1 条/)).toBeTruthy();
+    expect(within(pane).getByText(/1 条提交/)).toBeTruthy();
     expect(pane.contains(document.querySelector(".commit-head")), "详情不进左栏").toBe(false);
     expect(within(detail).getByRole("group", { name: "历史差异模式" })).toBeTruthy();
     expect(detail.querySelector(".commit-files")).toBeTruthy();
@@ -1881,7 +1872,7 @@ describe("只读差异", () => {
     expect(openedPath).toBe("notes.txt");
   });
 
-  it("详情标明历史是只读的，复制完整标识有可读反馈", async () => {
+  it("提交详情不再挂「只读」标签，复制完整标识有可读反馈", async () => {
     const only = commit(0);
     historyPage.mockResolvedValue({
       generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [only],
@@ -1897,9 +1888,8 @@ describe("只读差异", () => {
     render(HistoryPanel, { props: panelProps() });
     await waitFor(() => expect(document.querySelector(".commit-head")).toBeTruthy());
 
-    const chip = document.querySelector<HTMLElement>(".commit-byline .read-only-chip")!;
-    expect(chip.textContent?.trim()).toBe("只读");
-    expect(chip.title, "禁用/只读原因不用悬停也能读到").toContain("不切换分支");
+    // 历史提交本来就不可改，标签只是重复事实。
+    expect(document.querySelector(".commit-byline .read-only-chip")).toBeNull();
 
     const live = document.querySelector<HTMLElement>(".commit-facts [aria-live]")!;
     expect(live.textContent, "还没复制时不播报").toBe("");

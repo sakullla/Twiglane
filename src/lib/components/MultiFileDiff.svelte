@@ -396,9 +396,7 @@
     </div>
     {#if readOnly}
       <!-- 任务净差异同时含已提交与未提交内容，按块或整文件暂存都会落到错误范围：这里只读。 -->
-      <div class="diff-toolbar-group">
-        <span class="diff-note" role="note">任务净差异只读，不写入暂存区；按块/行暂存请用每个文件上的入口转到真实未提交差异</span>
-      </div>
+      <span class="spacer"></span>
     {:else}
     <div class="diff-toolbar-group">
       <button type="button" class="btn btn-ghost btn-sm" aria-label={`暂存 ${stageCount} 个文件`} title={disabled ? BUSY_REASON : stageCount === 0 ? "选中的文件里没有可暂存的改动" : excluded("暂存选中文件")} disabled={disabled || stageCount === 0} onclick={onStage}>

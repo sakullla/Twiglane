@@ -885,3 +885,63 @@ describe("右键菜单定位", () => {
     expect(placed().top).toBe(140);
   });
 });
+
+describe("右键菜单的条目排版与输入方式", () => {
+  const entries = () => [
+    { id: "undo", label: "撤销", icon: "undo" as const, shortcut: "Ctrl Z", run: vi.fn() },
+    { id: "redo", label: "重做", shortcut: "Ctrl Y", run: vi.fn() },
+    { separator: true as const },
+    { id: "cut", label: "剪切", disabledReason: "没有选中的文本", run: vi.fn() },
+    { id: "copy", label: "复制", disabledReason: "没有选中的文本", run: vi.fn() },
+    { id: "paste", label: "粘贴", run: vi.fn() },
+  ];
+
+  it("菜单里有图标时每一项都占同一个图标列，没有图标的条目文字也左对齐", async () => {
+    render(ContextMenu, { props: { request: { x: 20, y: 20, label: "编辑菜单", entries: entries() }, onClose: () => {} } });
+    const menu = await screen.findByRole("menu");
+    expect(menu.classList.contains("has-icons")).toBe(true);
+    for (const item of within(menu).getAllByRole("menuitem")) {
+      expect(item.firstElementChild?.classList.contains("context-icon"), `${item.getAttribute("aria-label")} 首列是图标位`).toBe(true);
+    }
+  });
+
+  it("整个菜单都没有图标时不留空白图标列", async () => {
+    const request = { x: 20, y: 20, label: "纯文字", entries: [{ id: "a", label: "甲", run: vi.fn() }, { id: "b", label: "乙", run: vi.fn() }] };
+    render(ContextMenu, { props: { request, onClose: () => {} } });
+    const menu = await screen.findByRole("menu");
+    expect(menu.classList.contains("has-icons")).toBe(false);
+    expect(menu.querySelector(".context-icon")).toBeNull();
+  });
+
+  it("相邻条目同一不可用原因只写一次，各条目仍由 aria-describedby 指到这段说明", async () => {
+    render(ContextMenu, { props: { request: { x: 20, y: 20, label: "编辑菜单", entries: entries() }, onClose: () => {} } });
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByText("没有选中的文本")).toHaveLength(1);
+    const cut = within(menu).getByRole("menuitem", { name: "剪切" });
+    const copy = within(menu).getByRole("menuitem", { name: "复制" });
+    const id = copy.getAttribute("aria-describedby");
+    expect(id).toBeTruthy();
+    expect(cut.getAttribute("aria-describedby")).toBe(id);
+    expect(document.getElementById(id!)?.textContent).toBe("没有选中的文本");
+  });
+
+  it("指针唤起时不预选第一项、焦点由菜单容器接住；按方向键后切回键盘模式并聚焦第一项", async () => {
+    await fireEvent.pointerDown(document.body, { button: 2 });
+    render(ContextMenu, { props: { request: { x: 20, y: 20, label: "编辑菜单", entries: entries() }, onClose: () => {} } });
+    const menu = await screen.findByRole("menu");
+    expect(menu.dataset.input).toBe("pointer");
+    await waitFor(() => expect(document.activeElement).toBe(menu));
+    expect(menu.querySelector(".context-item.active")).toBeNull();
+    await fireEvent.keyDown(menu, { key: "ArrowDown" });
+    expect(menu.dataset.input).toBe("keyboard");
+    await waitFor(() => expect(document.activeElement).toBe(within(menu).getByRole("menuitem", { name: "撤销" })));
+  });
+
+  it("键盘唤起时仍聚焦第一项", async () => {
+    await fireEvent.keyDown(document.body, { key: "F10", shiftKey: true });
+    render(ContextMenu, { props: { request: { x: 20, y: 20, label: "编辑菜单", entries: entries() }, onClose: () => {} } });
+    const menu = await screen.findByRole("menu");
+    expect(menu.dataset.input).toBe("keyboard");
+    await waitFor(() => expect(document.activeElement).toBe(within(menu).getByRole("menuitem", { name: "撤销" })));
+  });
+});

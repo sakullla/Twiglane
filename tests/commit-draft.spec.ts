@@ -84,7 +84,8 @@ describe("提交区", () => {
     document.body.innerHTML = "";
     renderDraft({ value: "\n\n只有正文" });
     expect(screen.getByRole("button", { name: "提交到本地" }).hasAttribute("disabled")).toBe(true);
-    expect(document.querySelector("[data-commit-blocker]")?.textContent?.trim()).toBe("填写提交说明后即可提交");
+    expect(screen.getByRole("button", { name: "提交到本地" }).getAttribute("title")).toBe("填写提交说明后即可提交");
+    expect(document.querySelector("[data-commit-blocker]")).toBeNull();
   });
 
   it("第一行超过建议长度时给出计数提示，超过 72 个字符转为警示", () => {

@@ -261,12 +261,12 @@
     {:else if !source || !target}
       <div class="merge-verdict idle">
         <span class="merge-verdict-icon"><Icon name="merge" size={16} /></span>
-        <div class="merge-verdict-copy"><strong>选择两个分支</strong><p>选好后会自动检查：带入哪些提交、改了哪些文件、会不会冲突。检查不会修改任何文件。</p></div>
+        <div class="merge-verdict-copy"><strong>选择两个分支</strong><p>选好后自动检查带入的提交、改动文件和冲突。</p></div>
       </div>
     {:else if !ready || !preview}
       <div class="merge-verdict idle">
         <span class="merge-verdict-icon"><span class="spinner"></span></span>
-        <div class="merge-verdict-copy"><strong>正在检查 {source} → {target}</strong><p>只读比较，不会修改工作区。</p></div>
+        <div class="merge-verdict-copy"><strong>正在检查 {source} → {target}</strong></div>
       </div>
     {:else}
       {@const conflicts = preview.conflictCheck === "conflicts"}

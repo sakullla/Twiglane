@@ -570,7 +570,8 @@ describe("Markdown 阅读接入", () => {
     expect(container.querySelector(".file-status .doc-path")?.getAttribute("title")).toBe("docs/a.md");
     expect(screen.getAllByRole("button", { name: /复制文件路径|复制文档路径/ })).toHaveLength(1);
     expect(screen.getByTitle("64 字节").textContent).toBe(formatBytes(64));
-    expect(screen.getByTitle("查看模式只读，不会改动工作区；切到「编辑」才会修改这个文件")).toBeTruthy();
+    // 查看/编辑分段已表明模式，状态条不再重复一枚「只读」。
+    expect(container.querySelector(".file-status")?.textContent).not.toContain("只读");
     const outline = screen.getByRole("button", { name: "文档目录" });
     // 与阅读器自己的目录工具行同一套控件外观，浏览器场景才能靠同一个类找到它。
     expect(outline.classList.contains("md-small-button")).toBe(true);

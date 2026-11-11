@@ -395,8 +395,8 @@
   </div>
 
   <div class="composer-meta" class:warn={paths.length === 0} class:expanded={errorOpen}>
-    {#if blocker}
-      <!-- R5：主按钮不可用时就地给出可见的一行原因，不只挂在 title 上；.truncate 保持单行。 -->
+    {#if paths.length === 0}
+      <!-- 只有「没暂存」这种看不出来的原因才就地写一行；说明框空着一眼可见，原因留在按钮提示里。 -->
       <Icon name="info" size={12} />
       <span class="truncate" data-commit-blocker title={blocker}>{blocker}</span>
     {:else if error}
@@ -417,9 +417,6 @@
           {errorOpen ? "收起" : "展开"}
         </button>
       {/if}
-    {:else}
-      <Icon name="check-circle" size={12} />
-      <span class="truncate composer-ready" title="说明会自动保存为草稿">可以提交 · 草稿自动保存</span>
     {/if}
     <!-- 摘要字数与「全部暂存」互不挤占：两者是不同的问题（写多长 / 暂存了没有），
          任何一个都不该因为另一个出现而消失。 -->

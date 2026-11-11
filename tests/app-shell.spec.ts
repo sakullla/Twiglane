@@ -1006,10 +1006,7 @@ describe("连续审阅队列与真实写入边界（R2、R4、R6）", () => {
     const taskView = await enterTaskFromCliora(TASK_BASE);
     await waitFor(() => expect(activeView()).toBe("history"));
 
-    const scope = await within(taskView).findByLabelText("本次提交暂存范围");
-    await waitFor(() => expect(scope.textContent).toContain("2 个已暂存文件"));
-    expect(scope.textContent).toContain("与任务范围分开");
-    expect(scope.textContent).toContain("不会自动进入提交");
+    await within(taskView).findByRole("listbox", { name: "任务文件" });
 
     // 任务标记用任务范围的快照确认，改动范围的接口不参与。
     await fireEvent.click(within(taskView).getAllByRole("button", { name: "标记 src/App.svelte 已审阅" })[0]);
@@ -2749,14 +2746,14 @@ describe("应用外壳", () => {
     finish(undefined);
   });
 
-  it("起始页空状态保留三个入口，并说明打开只检查仓库身份", async () => {
+  it("起始页空状态保留三个入口，不再堆说明文字", async () => {
     useRecent([]);
     render(App);
     await waitFor(() => expect(document.querySelector("[data-welcome-empty]")).toBeTruthy());
     expect(document.querySelectorAll(".action-card")).toHaveLength(3);
     expect(screen.queryByRole("textbox", { name: "搜索最近仓库" }), "没有仓库时不出现搜索").toBeNull();
     expect(document.querySelector("[data-welcome-empty]")?.textContent).toContain("还没有最近仓库");
-    expect(document.querySelector("[data-welcome-empty-note]")?.textContent).toContain("不会初始化");
+    expect(document.querySelector("[data-welcome-empty-note]")).toBeNull();
     mocks.pickDirectory.mockResolvedValue(null);
     await fireEvent.click(screen.getByRole("button", { name: /打开本地仓库/ }));
     await waitFor(() => expect(mocks.pickDirectory).toHaveBeenCalledWith("添加已有仓库"));
@@ -3501,7 +3498,6 @@ describe("任务范围的外部变化与进度隔离（T3）", () => {
     expect(within(taskView).getByRole("alert").textContent).toContain("快照已变化");
     // 草稿、真实暂存范围与写入都没有被审阅失效波及。
     expect(document.querySelector<HTMLTextAreaElement>(".composer textarea")?.value).toBe("保留的提交草稿");
-    expect(within(taskView).getByLabelText("本次提交暂存范围").textContent).toContain("2 个已暂存文件");
     expect(mocks.stageFiles).not.toHaveBeenCalled();
     expect(mocks.unstageFiles).not.toHaveBeenCalled();
     expect(mocks.commitChanges).not.toHaveBeenCalled();

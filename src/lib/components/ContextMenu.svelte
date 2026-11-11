@@ -60,6 +60,21 @@
       .map((part) => KEY_NAMES[part] ?? (part.length === 1 ? part.toUpperCase() : part));
     return [...new Set(parts)].join("+");
   }
+
+  /**
+   * 最近一次输入是指针还是键盘：右键/点「更多」唤起时不预选第一项、不画焦点环（与系统菜单一致），
+   * Shift+F10 / 菜单键唤起时仍聚焦第一项并显示焦点环。只认最近 1 秒内的按下，避免很久以前的点击影响判断。
+   */
+  let lastPointerDown = -Infinity;
+  let lastKeyDown = -Infinity;
+  if (typeof window !== "undefined") {
+    window.addEventListener("pointerdown", () => (lastPointerDown = performance.now()), { capture: true, passive: true });
+    window.addEventListener("keydown", () => (lastKeyDown = performance.now()), { capture: true, passive: true });
+  }
+
+  export function openedByPointer(now = typeof performance !== "undefined" ? performance.now() : 0): boolean {
+    return lastPointerDown > lastKeyDown && now - lastPointerDown < 1000;
+  }
 </script>
 
 <script lang="ts">
@@ -82,6 +97,9 @@
   // 初始位置取唤起时的指针坐标；挂载后再按菜单尺寸向内翻转。
   let position = $state(untrack(() => ({ left: request.x, top: request.y })));
   let active = $state(-1);
+  // 指针操作时当前项只用底色标出；一按键就切回键盘模式，焦点环立刻出现。
+  let input = $state<"pointer" | "keyboard">(openedByPointer() ? "pointer" : "keyboard");
+  let hasIcons = $derived(request.entries.some((entry) => isItem(entry) && entry.icon));
   const returnFocus = typeof document !== "undefined" && document.activeElement instanceof HTMLElement ? document.activeElement : null;
 
   let items = $derived(request.entries.map((entry, index) => ({ entry, index })).filter(({ entry }) => isItem(entry)));
@@ -90,6 +108,22 @@
     return request.entries
       .map((entry, index) => (isItem(entry) && !entry.disabledReason ? index : -1))
       .filter((index) => index >= 0);
+  }
+
+  /**
+   * 相邻几项因同一原因不可用（如「剪切 / 复制」都「没有选中的文本」）时，原因只在这一组的最后一项下写一次，
+   * 像一条组脚注；组内各项的 aria-describedby 指向同一段说明——读屏与悬停提示不变，只是画面不再重复。
+   */
+  function reasonOwner(index: number): number {
+    const entry = request.entries[index];
+    if (!entry || !isItem(entry) || !entry.disabledReason) return -1;
+    let at = index;
+    while (at + 1 < request.entries.length) {
+      const next = request.entries[at + 1];
+      if (!isItem(next) || next.disabledReason !== entry.disabledReason) break;
+      at += 1;
+    }
+    return at;
   }
 
   function close(restore = true) {
@@ -118,6 +152,7 @@
 
   function onKey(event: KeyboardEvent) {
     event.stopPropagation();
+    input = "keyboard";
     if (event.key === "Escape" || event.key === "Tab") {
       event.preventDefault();
       close(true);
@@ -160,7 +195,7 @@
       position = { left, top };
     }
     const enabled = enabledIndexes();
-    if (enabled.length > 0) focusIndex(enabled[0]);
+    if (enabled.length > 0 && input === "keyboard") focusIndex(enabled[0]);
     else menu?.focus({ preventScroll: true });
 
     const outside = (event: MouseEvent) => {
@@ -183,6 +218,8 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
   class="menu context-menu"
+  class:has-icons={hasIcons}
+  data-input={input}
   role="menu"
   aria-label={request.label}
   aria-orientation="vertical"
@@ -190,6 +227,12 @@
   style={`left:${position.left}px;top:${position.top}px`}
   bind:this={menu}
   onkeydown={onKey}
+  onmouseleave={() => {
+    // 指针移出菜单时不再假装「停在某一项上」；键盘导航中的当前项保持不动。
+    if (input !== "pointer" || active === -1) return;
+    active = -1;
+    menu?.focus({ preventScroll: true });
+  }}
   oncontextmenu={(event) => event.preventDefault()}
 >
   {#each request.entries as entry, index (index)}
@@ -208,21 +251,22 @@
         tabindex="-1"
         data-entry={index}
         aria-disabled={entry.disabledReason ? "true" : undefined}
-        aria-describedby={entry.disabledReason ? `context-reason-${index}` : undefined}
+        aria-describedby={entry.disabledReason ? `context-reason-${reasonOwner(index)}` : undefined}
         aria-label={entry.label}
         aria-keyshortcuts={entry.shortcut ? shortcutKeys(entry.shortcut) : undefined}
         title={entry.disabledReason ?? undefined}
         onmousemove={() => {
+          input = "pointer";
           if (!entry.disabledReason && active !== index) focusIndex(index);
         }}
         onclick={() => run(entry)}
       >
-        {#if entry.icon}<Icon name={entry.icon} size={14} />{:else}<span class="context-icon-gap"></span>{/if}
+        {#if hasIcons}<span class="context-icon">{#if entry.icon}<Icon name={entry.icon} size={14} />{/if}</span>{/if}
         <span class="context-copy">
           <span class="context-label">{entry.label}</span>
-          {#if entry.disabledReason}<small id={`context-reason-${index}`}>{entry.disabledReason}</small>{/if}
+          {#if entry.disabledReason && reasonOwner(index) === index}<small id={`context-reason-${index}`}>{entry.disabledReason}</small>{/if}
         </span>
-        {#if entry.shortcut}<kbd>{entry.shortcut}</kbd>{/if}
+        {#if entry.shortcut}<kbd class="context-key">{entry.shortcut}</kbd>{/if}
         {#if entry.checked !== undefined}
           <span class="context-check" class:on={entry.checked} aria-hidden="true"><Icon name="check" size={13} /></span>
         {/if}

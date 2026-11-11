@@ -532,14 +532,7 @@
   );
   /** 已经在最新提交：此时「回到最新」没有可做的事，禁用并说明原因（R6）。 */
   let atNewest = $derived(commits.length > 0 && scrollTop <= 0);
-  /**
-   * 分页按钮的文案随状态走：已在最新时按钮直接写「已在最新」，禁用原因不必悬停就能读到（R4）。
-   * 两种文案都是四个字，位置、宽度和小窗口下的折行不变。
-   */
-  let newestLabel = $derived(atNewest ? "已在最新" : "回到最新");
-  let newestHint = $derived(
-    commits.length === 0 ? "还没有提交" : atNewest ? "已经在最新一条提交" : "滚回最新一条提交",
-  );
+  /** 「回到最新」只在离开顶部后出现；在最新时没有可做的事，不摆一个灰按钮占位。底栏高度固定，按钮出现不推动列表。 */
   let activeFile = $derived(detail ? preferredCommitFile(detail.files, manualPath ?? filePath) : null);
   let fileFilter = $state("");
   // 分组只改呈现，不写入设置，默认仍是列表。
@@ -1750,7 +1743,6 @@
           <span class="hr-main">
             <span class="hr-line">
               <span class="hr-summary">任务净差异</span>
-              {#if summary?.reading}<span class="spinner" aria-hidden="true"></span>{/if}
             </span>
             <span class="hr-meta">
               {#if !summary || summary.state === "reading"}
@@ -1940,16 +1932,14 @@
       </div>
       <div class="pager history-pager">
         <span class="pager-range">
-          {#if commits.length > 0}已加载最新 1–{commits.length} 条{page?.hasMore ? "，还有更早的提交" : ""}{:else}—{/if}
+          {#if commits.length > 0}{commits.length}{page?.hasMore ? "+" : ""} 条提交{/if}
         </span>
         <span class="spacer"></span>
-        <button
-          type="button"
-          class="btn btn-ghost btn-sm"
-          onclick={backToNewest}
-          disabled={commits.length === 0 || atNewest}
-          title={newestHint}
-        >{newestLabel}</button>
+        {#if commits.length > 0 && !atNewest}
+          <button type="button" class="btn btn-ghost btn-sm" onclick={backToNewest} title="滚回最新一条提交">
+            <Icon name="arrow-up" size={13} />回到最新
+          </button>
+        {/if}
       </div>
     </aside>
     {@render paneResizer?.()}
@@ -1976,7 +1966,7 @@
                 所选提交不连续：按「最早所选之前 → 最新所选」比较，中间没选中的提交也会计入最终结果。
               </p>
             {:else}
-              <p class="hint union-hint">只看这些提交合起来之后每个文件的最终变化，不逐个提交展开；中间改了又改回的内容不会出现。</p>
+              <p class="hint union-hint">所选提交合在一起后的最终变化。</p>
             {/if}
           </div>
           <div class="commit-facts">
@@ -2125,9 +2115,6 @@
               <span class="commit-email">{detail.commit.authorEmail}</span>
               <span title={formatAuthoredAt(detail.commit.authoredAt)}>{relativeTime(detail.commit.authoredAt)} · {formatAuthoredAt(detail.commit.authoredAt)}</span>
               <span class="commit-parents">{parentCaption(detail.commit.parents, detail.root)}</span>
-              <span class="read-only-chip" title="历史浏览是只读的：不切换分支，也不改动暂存区或工作区">
-                <Icon name="eye" size={12} />只读
-              </span>
               {#if pills.length > 1}
                 <!-- 引用多时才给收起入口：收起后只留计数，窄窗口把这一行让给差异。 -->
                 <button

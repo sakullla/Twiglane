@@ -146,7 +146,7 @@
     cliora === null
       ? ""
       : cliora.outcome === "reviewed"
-        ? "未提交或合入"
+        ? ""
         : (cliora.outcome === "committed" ? "已提交 " : "已合入 ") +
           (cliora.headOid ? shortOid(cliora.headOid) : ""),
   );
@@ -361,7 +361,7 @@
           <div class="menu sync-menu" role="menu" aria-label="同步" tabindex="-1" onkeydown={(event) => onMenuKey(event, "sync")}>
             <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => runSync(onFetch)}>
               <Icon name="download" />
-              <span>获取更新<small>下载远程分支与提交信息，不修改本地文件</small></span>
+              <span>获取更新<small>下载远程分支与提交，不改本地文件</small></span>
             </button>
             <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => runSync(onPull)}>
               <Icon name="arrow-down" />
@@ -419,12 +419,13 @@
     {#if cliora}
       <div class="cliora-source" role="group" aria-label="cliora 审查来源">
         <span class="cliora-chip" title={`来源 cliora 审查 ${cliora.reviewId}`}>cliora</span>
-        <span class="cliora-result" title={cliora.outcome === "reviewed" ? "本次没有提交或合入；返回时附上重新读取的工作区状态，cliora 会再复核" : "提交或合入结果以待复核声明发送，cliora 会重新读取真实 HEAD"}>{clioraSummary}</span>
+        <!-- 只有真的提交或合入了才报结果；「什么都没发生」不占标题栏。 -->
+        {#if clioraSummary}<span class="cliora-result" title="提交或合入结果以待复核声明发送，cliora 会重新读取真实 HEAD">{clioraSummary}</span>{/if}
         <button
           type="button"
           class="branch-pill cliora-return"
           data-titlebar-control
-          aria-label={`返回 cliora（${clioraSummary}）`}
+          aria-label={clioraSummary ? `返回 cliora（${clioraSummary}）` : "返回 cliora"}
           title="返回发起这次审查的 cliora 会话；不修改仓库、不关闭当前仓库"
           onclick={() => onClioraReturn?.()}
         >

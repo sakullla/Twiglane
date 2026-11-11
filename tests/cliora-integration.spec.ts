@@ -437,7 +437,6 @@ describe("cliora v2 审查链接", () => {
     const row = await screen.findByRole("button", { name: /任务净差异/ }, { timeout: 8000 });
     expect(row.getAttribute("aria-pressed")).toBe("true");
     const context = await screen.findByRole("group", { name: "任务范围" });
-    expect(context.textContent).toContain("来自 cliora 审查链接");
     expect(context.textContent).toContain(BASELINE.slice(0, 7));
 
     // 没有起点的链接：不建立范围、不猜 HEAD，只打开普通历史并说明原因。

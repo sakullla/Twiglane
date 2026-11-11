@@ -1356,7 +1356,7 @@
         </div>
       {/if}
     {:else}
-      <div class="file-state"><strong>选择左侧的一个文件</strong><p>查看模式只读，不会改动工作区。</p></div>
+      <div class="file-state"><strong>选择左侧的一个文件</strong></div>
     {/if}
 
     {#if editing}
@@ -1377,7 +1377,6 @@
         </span>
         <span class="spacer"></span>
         {#if documentSize != null}<span class="file-status-item" title={`${documentSize} 字节`}>{formatBytes(documentSize)}</span>{/if}
-        <span class="file-status-item" title="查看模式只读，不会改动工作区；切到「编辑」才会修改这个文件"><Icon name="eye" size={12} />只读</span>
       </footer>
     {:else if content && !error && !loading}
       <footer class="file-status" aria-label="文件信息">
@@ -1406,7 +1405,6 @@
           <span class="lang-chip off" title="这类文件不按代码着色"><Icon name="code" size={12} /><span>{languageLabel}</span></span>
         {/if}
         {#if content.size != null}<span class="file-status-item" title={`${content.size} 字节`}>{formatBytes(content.size)}</span>{/if}
-        <span class="file-status-item" title="查看模式只读，不会改动工作区；切到「编辑」才会修改这个文件"><Icon name="eye" size={12} />只读</span>
       </footer>
     {/if}
   {:else if missingPath}

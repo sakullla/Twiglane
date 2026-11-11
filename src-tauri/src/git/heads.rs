@@ -16,9 +16,8 @@ use crate::git::gate::remote_check_is_stale;
 use crate::git::ops::{
     canonical_existing, repo_key, require_git, run_git, validate_input_path, Backend,
 };
-use crate::git::parse::parse_status;
+use crate::git::parse::{parse_status_summary, StatusSummary};
 use crate::git::schedule::{internal_request_id, JobKind};
-use crate::model::ChangeKind;
 use crate::redact::redact_error_text;
 
 /// 一次最多读这么多仓库；最近列表再长，用户也只看得见前面一屏。
@@ -305,14 +304,19 @@ pub async fn worktree_overview(
     paths: &[String],
     request_id: u64,
 ) -> Result<WorktreeOverview, crate::error::AppError> {
-    worktree_overview_with(
-        backend,
-        paths,
-        request_id,
-        MAX_OVERVIEW_STATUS,
-        MAX_OVERVIEW_ENUMERATE,
-    )
-    .await
+    backend
+        .scheduler
+        .read_batch(
+            request_id,
+            worktree_overview_with(
+                backend,
+                paths,
+                internal_request_id(),
+                MAX_OVERVIEW_STATUS,
+                MAX_OVERVIEW_ENUMERATE,
+            ),
+        )
+        .await
 }
 
 /// 枚举与状态读取的预算显式传入：测试用很小的预算就能覆盖「超限只影响该项」。
@@ -527,26 +531,12 @@ async fn worktree_overview_with(
                 item.upstream = branch.upstream.clone();
                 item.ahead = branch.ahead;
                 item.behind = branch.behind;
-                let files = &snapshot.files;
-                item.changed = Some(files.len() as u32);
-                item.dirty = Some(!files.is_empty());
-                item.conflicted = Some(files.iter().filter(|file| file.unmerged).count() as u32);
-                item.staged = Some(
-                    files
-                        .iter()
-                        .filter(|file| file.unmerged || file.staged != ChangeKind::None)
-                        .count() as u32,
-                );
-                item.unstaged = Some(
-                    files
-                        .iter()
-                        .filter(|file| {
-                            !file.untracked
-                                && (file.unmerged || file.unstaged != ChangeKind::None)
-                        })
-                        .count() as u32,
-                );
-                item.untracked = Some(files.iter().filter(|file| file.untracked).count() as u32);
+                item.changed = Some(snapshot.changed);
+                item.dirty = Some(snapshot.changed > 0);
+                item.conflicted = Some(snapshot.conflicted);
+                item.staged = Some(snapshot.staged);
+                item.unstaged = Some(snapshot.unstaged);
+                item.untracked = Some(snapshot.untracked);
                 item.status = "ready".to_string();
                 // 只有真读到状态时才记读取时间；未知项不带时间，界面就不会说它刚读过。
                 item.checked_at_ms = Some(now);
@@ -578,7 +568,7 @@ fn status_outcome(
     exit_code: i32,
     stdout: &[u8],
     stderr: &[u8],
-) -> Result<crate::model::StatusSnapshot, String> {
+) -> Result<StatusSummary, String> {
     if exit_code != 0 {
         let detail = redact_error_text(String::from_utf8_lossy(stderr).trim());
         return Err(if detail.is_empty() {
@@ -587,7 +577,7 @@ fn status_outcome(
             detail
         });
     }
-    parse_status(stdout).map_err(|error| note_from(&error))
+    parse_status_summary(stdout).map_err(|error| note_from(&error))
 }
 
 fn read_small(path: &Path) -> Option<String> {

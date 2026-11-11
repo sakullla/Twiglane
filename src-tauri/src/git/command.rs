@@ -1205,19 +1205,10 @@ pub fn task_numstat_command(
 
 /// 单条路径的状态：任务快照只关心这一条路径的两侧状态、未跟踪与冲突。
 pub fn path_status_command(git: &Path, root: &Path, relative: &Path) -> (PathBuf, Vec<OsString>) {
-    let mut args = vec![
-        OsString::from("--literal-pathspecs"),
-        OsString::from("-C"),
-        root.as_os_str().to_os_string(),
-        OsString::from("--no-optional-locks"),
-        OsString::from("status"),
-        OsString::from("--porcelain=v2"),
-        OsString::from("-z"),
-        OsString::from("--untracked-files=all"),
-        OsString::from("--"),
-    ];
+    let (program, mut args) = status_command(git, root);
+    args.push(OsString::from("--"));
     args.push(relative.as_os_str().to_os_string());
-    (git.to_path_buf(), args)
+    (program, args)
 }
 
 /// 某个提交（或树）里一条路径的条目：任务快照用它给出起点侧的内容版本。

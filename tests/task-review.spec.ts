@@ -281,6 +281,80 @@ function reviewProps(overrides: Record<string, unknown> = {}) {
 }
 
 describe("任务审阅组件", () => {
+  it("连续分页不重复读取或跳过页，反复点击只保留一个分页请求", async () => {
+    const pending: Array<() => void> = [];
+    mocks.api.loadTaskDiff.mockImplementation((_worktree: string, _base: string, _head: string, path: string, _generation: number, _id: number, _original: string | null, offset: number) => {
+      const page = { ...diffFor(path), offset, totalLines: 18 };
+      return offset === 0 ? Promise.resolve(page) : new Promise((resolve) => pending.push(() => resolve(page)));
+    });
+    render(TaskReview, { props: reviewProps() });
+    let more = await screen.findByRole("button", { name: "继续加载" });
+    await fireEvent.click(more);
+    await fireEvent.click(more);
+    expect(mocks.api.loadTaskDiff).toHaveBeenCalledTimes(2);
+    pending[0]();
+    await waitFor(() => expect(document.body.textContent).toContain("已显示 12 / 18 行"));
+    more = screen.getByRole("button", { name: "继续加载" });
+    await fireEvent.click(more);
+    expect(mocks.api.loadTaskDiff.mock.calls.map((call) => call[7])).toEqual([0, 6, 12]);
+    pending[1]();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "继续加载" })).toBeNull());
+  });
+
+  it("快速点选只保留两项在途读取和最后一次待执行选择", async () => {
+    const finishes: Array<() => void> = [];
+    mocks.api.loadTaskDiff.mockImplementation((_worktree: string, _base: string, _head: string, path: string) =>
+      new Promise((resolve) => finishes.push(() => resolve(diffFor(path)))),
+    );
+    render(TaskReview, { props: reviewProps() });
+    const list = await screen.findByRole("listbox", { name: "任务文件" });
+    await waitFor(() => expect(mocks.api.loadTaskDiff).toHaveBeenCalledTimes(1));
+    const rows = within(list).getAllByRole("option");
+    await fireEvent.click(rows[1]);
+    await fireEvent.click(rows[2]);
+    await fireEvent.click(rows[0]);
+    expect(mocks.api.loadTaskDiff).toHaveBeenCalledTimes(2);
+    finishes[0]();
+    await waitFor(() => expect(mocks.api.loadTaskDiff).toHaveBeenCalledTimes(3));
+    expect(mocks.api.loadTaskDiff.mock.calls[2][3]).toBe(mocks.api.loadTaskDiff.mock.calls[0][3]);
+    finishes[1]();
+    finishes[2]();
+    await tick();
+    expect(mocks.api.loadTaskDiff).toHaveBeenCalledTimes(3);
+  });
+
+  it("隐藏详情释放差异，迟到结果不重新填入，返回时按保留选择重读", async () => {
+    let finish!: (value: DiffResponse) => void;
+    mocks.api.loadTaskDiff.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    const { rerender } = render(TaskReview, { props: reviewProps() });
+    await waitFor(() => expect(mocks.api.loadTaskDiff).toHaveBeenCalledTimes(1));
+    const path = mocks.api.loadTaskDiff.mock.calls[0][3];
+    await rerender(reviewProps({ visible: false }));
+    finish(diffFor(path));
+    await tick();
+    expect(document.querySelectorAll("[data-diff-row]")).toHaveLength(0);
+    await rerender(reviewProps({ visible: true }));
+    await waitFor(() => expect(mocks.api.loadTaskDiff).toHaveBeenCalledTimes(2));
+    expect(mocks.api.loadTaskDiff.mock.calls[1][3]).toBe(path);
+    expect(mocks.api.taskReview).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(document.querySelectorAll("[data-diff-row]").length).toBeGreaterThan(0));
+    await rerender(reviewProps({ visible: false }));
+    expect(document.querySelectorAll("[data-diff-row]")).toHaveLength(0);
+  });
+
+  it("离开视图后迟到的任务列表不再触发差异读取", async () => {
+    let finish!: (value: TaskSnapshot) => void;
+    mocks.api.taskReview.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    const { rerender } = render(TaskReview, { props: reviewProps() });
+    await waitFor(() => expect(mocks.api.taskReview).toHaveBeenCalledTimes(1));
+    await rerender(reviewProps({ active: false }));
+    finish(taskFixture());
+    await tick();
+    expect(mocks.api.loadTaskDiff).not.toHaveBeenCalled();
+    await rerender(reviewProps({ active: true }));
+    await waitFor(() => expect(mocks.api.loadTaskDiff).toHaveBeenCalledTimes(1));
+  });
+
   it("没有起点时不建立任务范围，也不用 HEAD 补缺", async () => {
     const onSummary = vi.fn();
     render(TaskReview, { props: reviewProps({ request: null, onSummary }) });

@@ -220,22 +220,39 @@ async fn resolve_range(
     root: &Path,
     git: &Path,
     baseline: &str,
-    expected_head: Option<&str>,
+    expected: Option<(&str, &Path)>,
     request_id: u64,
 ) -> Result<TaskRange, AppError> {
     let baseline_ref = baseline_spec(baseline)?;
-    let status_output = reads
-        .run(request_id, status_command(git, root), false, None)
-        .await?;
-    let snapshot = status_from_output(
-        reads.backend,
-        root,
-        &ScheduledOutput {
-            output: status_output,
-            generation: reads.generation,
-        },
-    )
-    .await?;
+    let command = match expected {
+        Some((_, relative)) => path_status_command(git, root, relative),
+        None => status_command(git, root),
+    };
+    let status_output = reads.run(request_id, command, false, None).await?;
+    // A file preview/token only needs this path's status and HEAD. Computing
+    // numstat and binary sizes for the whole worktree on every click is wasteful.
+    let snapshot = if expected.is_some() {
+        if status_output.exit_code != 0 {
+            return Err(git_failure(
+                "task_status",
+                &status_output,
+                "无法确认这条路径的状态，未修改仓库。",
+            ));
+        }
+        let mut snapshot = parse_status(&status_output.stdout)?;
+        snapshot.generation = reads.generation;
+        snapshot
+    } else {
+        status_from_output(
+            reads.backend,
+            root,
+            &ScheduledOutput {
+                output: status_output,
+                generation: reads.generation,
+            },
+        )
+        .await?
+    };
     let baseline_oid = resolve_commit(reads, root, git, &baseline_ref).await?;
     let head_oid = match snapshot.branch.head_oid.as_deref() {
         Some(oid) if is_full_oid(oid) => oid.to_ascii_lowercase(),
@@ -247,7 +264,7 @@ async fn resolve_range(
             ))
         }
     };
-    if let Some(expected) = expected_head {
+    if let Some((expected, _)) = expected {
         let expected = expected.trim().to_ascii_lowercase();
         if !is_full_oid(&expected) {
             return Err(version_unconfirmed());
@@ -625,13 +642,14 @@ pub async fn load_task_diff(
     let root = task_root(path)?;
     let git = require_git(backend).await?.path;
     let mut reads = TaskReads::new(backend, &root, generation);
-    let range = resolve_range(&mut reads, &root, &git, baseline, Some(head), request_id).await?;
     let relative_path = review_path(relative)?;
+    let range = resolve_range(&mut reads, &root, &git, baseline, Some((head, &relative_path)), request_id).await?;
     let original_path = match original {
         Some(value) if !value.is_empty() => Some(review_path(value)?),
         _ => None,
     };
-    let untracked = path_untracked(&mut reads, &root, &git, &relative_path).await?;
+    let display = display_path(&relative_path);
+    let untracked = range.snapshot.files.iter().any(|file| file.path == display && file.untracked);
     let paths = net_paths(&relative_path, original_path.as_deref());
     let (program, args) = task_diff_command(
         &git,
@@ -742,31 +760,6 @@ pub async fn load_task_diff(
     Ok(response)
 }
 
-/// 这一条路径在工作区里是否未跟踪：未跟踪只能和空文件比。
-async fn path_untracked(
-    reads: &mut TaskReads<'_>,
-    root: &Path,
-    git: &Path,
-    relative: &Path,
-) -> Result<bool, AppError> {
-    let output = reads
-        .step(path_status_command(git, root, relative), false, None)
-        .await?;
-    if output.exit_code != 0 {
-        return Err(git_failure(
-            "task_status",
-            &output,
-            "无法确认这条路径的改动状态，未修改仓库。",
-        ));
-    }
-    let snapshot = parse_status(&output.stdout)?;
-    let display = display_path(relative);
-    Ok(snapshot
-        .files
-        .iter()
-        .any(|file| file.path == display && file.untracked))
-}
-
 /// 截断的差异仍要给出完整统计：单独读一次这一条路径的 numstat。
 async fn path_numstat(
     reads: &mut TaskReads<'_>,
@@ -831,22 +824,11 @@ pub async fn task_review_token(
     let root = task_root(path)?;
     let git = require_git(backend).await?.path;
     let mut reads = TaskReads::new(backend, &root, generation);
-    let range = resolve_range(&mut reads, &root, &git, baseline, Some(head), request_id).await?;
     let relative_path = review_path(relative)?;
+    let range = resolve_range(&mut reads, &root, &git, baseline, Some((head, &relative_path)), request_id).await?;
     let display = display_path(&relative_path);
 
-    let status_output = reads
-        .step(path_status_command(&git, &root, &relative_path), false, None)
-        .await?;
-    if status_output.exit_code != 0 {
-        return Err(git_failure(
-            "task_status",
-            &status_output,
-            "无法确认这条路径的状态，未修改仓库。",
-        ));
-    }
-    let snapshot = parse_status(&status_output.stdout)?;
-    let change = snapshot.files.into_iter().find(|file| file.path == display);
+    let change = range.snapshot.files.iter().find(|file| file.path == display);
     let (staged, unstaged, untracked, unmerged, original_path) = match &change {
         Some(file) => (
             file.staged,
@@ -1211,6 +1193,30 @@ mod tests {
             .iter()
             .find(|file| file.path == path)
             .unwrap_or_else(|| panic!("missing {path} in {:?}", files.iter().map(|f| &f.path).collect::<Vec<_>>()))
+    }
+
+    #[tokio::test]
+    async fn single_file_reads_do_not_scan_unrelated_worktree_changes() {
+        let fixture = crate::test_support::git_fixture("task-path-budget");
+        let backend = fixture.backend_with_limit(4096, Vec::new());
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("target.txt"), "before\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
+        let head = git_stdout(&repo, &["rev-parse", "HEAD"]);
+        let (path, generation) = open_repo(&backend, &repo).await;
+        fs::write(repo.join("target.txt"), "after\n").unwrap();
+        for index in 0..1000 {
+            fs::write(repo.join(format!("unrelated-{index:04}.txt")), "unrelated\n").unwrap();
+        }
+        // The old full-worktree status exceeds the capture budget before even
+        // reaching this small diff. A path read must remain independent of it.
+        assert!(git_bytes(&repo, &["status", "--porcelain=v2", "-z", "--untracked-files=all"]).len() > 4096);
+        let diff = load_task_diff(&backend, &path, &head, &head, "target.txt", None, generation, 100, 0, 0, 3, false).await.unwrap();
+        assert_eq!((diff.additions, diff.deletions), (1, 1));
+        let token = task_review_token(&backend, &path, &head, &head, "target.txt", generation, 101).await.unwrap();
+        assert!(token.token.is_some());
     }
 
     /// 仅提交、提交后再改同一路径、暂存 + 未暂存、删除与未跟踪文件合并成一份净结果。

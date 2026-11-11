@@ -1,0 +1,32 @@
+{
+  "platform": "win32",
+  "node": "v22.23.4",
+  "baseline": "3fc82ed662bd6dbb7d5a5cec98af2324c41159f1",
+  "currentParserSha256": "d1d22b7fa7687d1d426c334ff3646586585d438cbadb65ff5b61c1dc833cedae",
+  "records": 100000,
+  "iterations": 30,
+  "scope": "Parser time and peak additional live allocations; excludes Git, IPC, WebView and input buffer",
+  "results": [
+    {
+      "case": "baseline-full",
+      "p50Ms": 58.9977,
+      "p95Ms": 103.37780000000001,
+      "peakParserBytes": 33814577,
+      "allocationsPerParse": 200035
+    },
+    {
+      "case": "current-full",
+      "p50Ms": 40.1871,
+      "p95Ms": 49.4555,
+      "peakParserBytes": 25917258,
+      "allocationsPerParse": 100018
+    },
+    {
+      "case": "current-overview",
+      "p50Ms": 13.023,
+      "p95Ms": 17.2789,
+      "peakParserBytes": 10,
+      "allocationsPerParse": 2
+    }
+  ]
+}

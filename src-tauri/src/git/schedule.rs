@@ -146,6 +146,23 @@ impl<R: ProcessRunner> GitScheduler<R> {
         self.run_job(job, false).await
     }
 
+    /// Keep one cancellation epoch across a multi-repository read. Inner steps
+    /// still acquire their own permits and validate their repository generation.
+    pub async fn read_batch<T>(
+        &self,
+        request_id: u64,
+        work: impl std::future::Future<Output = Result<T, AppError>>,
+    ) -> Result<T, AppError> {
+        let _request = RequestGuard::enter(&self.inflight, request_id)?;
+        let cancel = self.read_cancel_token();
+        tokio::select! {
+            biased;
+            _ = self.shutdown.cancelled() => Err(AppError::new("cancelled", "读取已关闭。")),
+            _ = cancel.cancelled() => Err(AppError::new("cancelled", "读取已取消。")),
+            result = work => result,
+        }
+    }
+
     /// A multi-step read keeps one caller identity/cancellation epoch. Each inner
     /// Git/filesystem step takes its own read permit, so no nested permit is held.
     pub async fn read_session<T, F, Fut>(
@@ -572,6 +589,40 @@ mod tests {
             assert_ne!(first, user.wrapping_add(1));
             assert_ne!(second, user.wrapping_add(1));
         }
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_batch_stops_later_repositories_and_releases_its_request() {
+        let scheduler = gated(GateRunner {
+            current: Arc::new(AtomicUsize::new(0)),
+            max: Arc::new(AtomicUsize::new(0)),
+            delay: Duration::ZERO,
+            started: StdMutex::new(None),
+            release: None,
+        });
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let later = Arc::new(AtomicUsize::new(0));
+        let running = {
+            let scheduler = scheduler.clone();
+            let later = later.clone();
+            tokio::spawn(async move {
+                scheduler.read_batch(71, async {
+                    scheduler.execute(job("first", JobKind::Read, 72, 1)).await?;
+                    started_tx.send(()).unwrap();
+                    let _ = resume_rx.await;
+                    later.fetch_add(1, Ordering::SeqCst);
+                    scheduler.execute(job("second", JobKind::Read, 73, 1)).await
+                }).await
+            })
+        };
+        started_rx.await.unwrap();
+        scheduler.cancel_reads();
+        let _ = resume_tx.send(());
+        let result = tokio::time::timeout(Duration::from_secs(2), running).await.unwrap().unwrap();
+        assert_eq!(result.unwrap_err().code, "cancelled");
+        assert_eq!(later.load(Ordering::SeqCst), 0);
+        assert!(scheduler.read_batch(71, async { Ok(()) }).await.is_ok());
     }
 
     #[tokio::test]

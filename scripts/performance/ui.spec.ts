@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   historyPage: vi.fn(), conflictView: vi.fn(), commitDetail: vi.fn(), loadDiff: vi.fn(),
   repositoryFileContent: vi.fn(), repositoryContentSearch: vi.fn(), repositoryPathSearch: vi.fn(), repositoryDirectory: vi.fn(),
   repositoryDocument: vi.fn(),
+  compareFiles: vi.fn(), compareFileDiff: vi.fn(),
 }));
 vi.mock("../../src/lib/api", () => ({ api }));
 
@@ -98,6 +99,8 @@ describe("大仓库的有界读取和渲染", () => {
     api.historyPage.mockResolvedValue({ generation: 1, commits, offset: 0, pageSize: 100, hasMore: false, state: "ok" });
     api.commitDetail.mockImplementation(async (_repo, oid) => ({ ...detail, commit: commits.find((item) => item.oid === oid) }));
     api.commitFileDiff.mockResolvedValue(diff);
+    api.compareFiles.mockResolvedValue({ generation: 1, base: commits[1].parents[0], head: commits[0].oid, files: detail.files });
+    api.compareFileDiff.mockImplementation(async (_repo, _base, _head, path) => ({ ...diff, path }));
     render(HistoryPanel, { opened, filePath: null, disabled: false, nextId: () => 1, onGeneration: vi.fn(), onFailure: vi.fn(), onFilePath: vi.fn(), onClearFile: vi.fn() });
     await fireEvent.click(await screen.findByRole("option", { name: /second/ }), { shiftKey: true });
     await waitFor(() => expect(document.querySelector(".history-union-files")).toBeTruthy());

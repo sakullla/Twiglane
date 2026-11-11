@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { untrack } from "svelte";
+  import { onDestroy, untrack } from "svelte";
   import { api } from "../api";
   import { FULL_FILE_CONTEXT, reuseDiffContent, type HunkNavReport } from "../diff";
   import { normalizeError } from "../errors";
   import { shortOid } from "../history";
   import { branchLabel } from "../labels";
+  import { LatestReadQueue } from "../latest-read";
   import type {
     AppFailure,
     ChangeKind,
@@ -21,9 +22,11 @@
   } from "../types";
   import {
     fileNavState,
+    appendDiffPage,
     orderedRows,
     reviewQueue,
     sameSelection,
+    selectionKey,
     type FileNavState,
     type ReviewQueueState,
   } from "../ui";
@@ -167,6 +170,17 @@
   let readSerial = 0;
   let reading = $state(false);
   let asTextFor = $state<string | null>(null);
+  const taskReads = new LatestReadQueue();
+  const diffReads = new LatestReadQueue();
+  let moreLoading = false;
+  let detailActive = $derived(active && visible);
+
+  onDestroy(() => {
+    readSerial += 1;
+    diffToken += 1;
+    taskReads.close();
+    diffReads.close();
+  });
 
   function toKind(file: TaskFileChange): ChangeKind {
     switch (file.status) {
@@ -209,10 +223,12 @@
 
   let files = $derived((task?.files ?? []).map(toChange));
   let rows = $derived(orderedRows(files, query));
+  let rowsByPath = $derived(new Map(rows.map((row) => [row.path, row])));
   let multiActive = $derived(selectedSet.length > 1);
+  let selectedKeys = $derived(new Set(selectedSet.map(selectionKey)));
   let selectedRows = $derived(
     selectedSet.length > 1
-      ? rows.filter((row) => selectedSet.some((item) => sameSelection(item, row)))
+      ? rows.filter((row) => selectedKeys.has(selectionKey(row)))
       : selected ? rows.filter((row) => sameSelection(row, selected)) : [],
   );
   let baselineLabel = $derived(task ? shortOid(task.baselineOid) : request ? shortOid(request.baseline) : "");
@@ -271,7 +287,7 @@
   });
 
   function rowOf(path: string): FileRow | null {
-    return rows.find((row) => row.path === path) ?? null;
+    return rowsByPath.get(path) ?? null;
   }
 
   function goToRow(row: FileRow): void {
@@ -310,6 +326,7 @@
 
   async function readTask(baseline: string | null): Promise<void> {
     const at = ++readSerial;
+    diffToken += 1;
     if (!baseline) {
       task = null;
       phase = "no-baseline";
@@ -327,19 +344,25 @@
     try {
       let result: TaskReview;
       try {
-        result = await api.taskReview(opened.summary.path, baseline, opened.generation, nextId());
+        result = await taskReads.run(() => {
+          if (at !== readSerial) throw { code: "cancelled" };
+          return api.taskReview(opened.summary.path, baseline, opened.generation, nextId());
+        });
       } catch (error) {
         const normalized = normalizeError(error);
         // 旧代次：收下后端给的新代次重读一次，不把一次过期请求当成任务结论。
         if (normalized.code !== "stale" || normalized.generation === undefined) throw error;
         if (at !== readSerial) return;
         onGeneration(normalized.generation);
-        result = await api.taskReview(
-          opened.summary.path,
-          baseline,
-          Math.max(normalized.generation, opened.generation),
-          nextId(),
-        );
+        result = await taskReads.run(() => {
+          if (at !== readSerial) throw { code: "cancelled" };
+          return api.taskReview(
+            opened.summary.path,
+            baseline,
+            Math.max(normalized.generation!, opened.generation),
+            nextId(),
+          );
+        });
       }
       if (at !== readSerial) return;
       task = result;
@@ -387,6 +410,8 @@
     // 四个视图同时保活：隐藏的任务视图不发起仓库读取，回到任务页时按最新状态重读。
     if (!isActive) {
       wasActive = false;
+      readSerial += 1;
+      reading = false;
       return;
     }
     if (key === readKey && wasActive) return;
@@ -395,11 +420,20 @@
     untrack(() => void readTask(baseline));
   });
 
+  $effect(() => {
+    void detailActive;
+    void fullFile;
+    untrack(() => {
+      if (!detailActive || !reading) void loadSelectedDiff();
+    });
+  });
+
   async function loadSelectedDiff(): Promise<void> {
     const token = ++diffToken;
-    const current = task;
+    // Do not retain the entire task file/commit list in an in-flight preview.
+    const current = task ? { worktree: task.worktree, baselineOid: task.baselineOid, headOid: task.headOid } : null;
     const choice = selected;
-    if (!current || !choice || multiActive) {
+    if (!detailActive || !current || !choice || multiActive) {
       diff = null;
       diffError = null;
       diffLoading = false;
@@ -412,7 +446,10 @@
     try {
       let result: DiffResponse;
       try {
-        result = await fetchDiff(current, choice.path, row?.originalPath ?? null, 0, 0, asText);
+        result = await diffReads.run(() => {
+          if (token !== diffToken) throw { code: "cancelled" };
+          return fetchDiff(current, choice.path, row?.originalPath ?? null, 0, 0, asText);
+        });
       } catch (error) {
         const normalized = normalizeError(error);
         if (normalized.code !== "stale" || normalized.generation === undefined) throw error;
@@ -444,7 +481,7 @@
   }
 
   async function fetchDiff(
-    current: TaskReview,
+    current: Pick<TaskReview, "worktree" | "baselineOid" | "headOid">,
     path: string,
     original: string | null,
     offset: number,
@@ -492,11 +529,12 @@
     const current = task;
     const choice = selected;
     const loaded = diff;
-    if (!current || !choice || !loaded) return;
+    if (!detailActive || moreLoading || !current || !choice || !loaded) return;
     if (loaded.offset + loaded.lines.length >= loaded.totalLines) return;
     const token = diffToken;
     const asText = asTextFor === choice.path;
     const row = rowOf(choice.path);
+    moreLoading = true;
     try {
       const page = await fetchDiff(
         current,
@@ -507,10 +545,12 @@
         asText,
       );
       if (token !== diffToken) return;
-      diff = { ...loaded, lines: [...loaded.lines, ...page.lines], offset: page.offset, totalLines: page.totalLines };
+      diff = appendDiffPage(loaded, page);
     } catch (error) {
       if (token !== diffToken) return;
       diffError = normalizeError(error).message;
+    } finally {
+      moreLoading = false;
     }
   }
 
@@ -670,7 +710,7 @@
           {/if}
           {#if multiActive}
             <MultiFileDiff
-              {active}
+              active={detailActive}
               {opened}
               rows={selectedRows}
               focus={selected}

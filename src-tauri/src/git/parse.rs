@@ -10,22 +10,72 @@ pub enum DiffBody {
 }
 
 pub fn parse_status(bytes: &[u8]) -> Result<StatusSnapshot, AppError> {
-    let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
+    let mut files = Vec::new();
+    let branch = visit_status(bytes, |file| {
+        files.push(FileChange {
+            path: file.path.to_string(),
+            original_path: file.original_path.map(str::to_string),
+            staged: file.staged,
+            unstaged: file.unstaged,
+            untracked: file.untracked,
+            unmerged: file.unmerged,
+            staged_lines: None,
+            unstaged_lines: None,
+        });
+    })?;
+    Ok(StatusSnapshot {
+        generation: 0,
+        branch,
+        files,
+    })
+}
+
+/// The switcher needs counts, not an owned path and FileChange for every file.
+#[derive(Debug, Default)]
+pub struct StatusSummary {
+    pub branch: BranchInfo,
+    pub changed: u32,
+    pub staged: u32,
+    pub unstaged: u32,
+    pub untracked: u32,
+    pub conflicted: u32,
+}
+
+pub fn parse_status_summary(bytes: &[u8]) -> Result<StatusSummary, AppError> {
+    let mut summary = StatusSummary::default();
+    summary.branch = visit_status(bytes, |file| {
+        summary.changed += 1;
+        summary.staged += u32::from(file.unmerged || file.staged != ChangeKind::None);
+        summary.unstaged += u32::from(
+            !file.untracked && (file.unmerged || file.unstaged != ChangeKind::None),
+        );
+        summary.untracked += u32::from(file.untracked);
+        summary.conflicted += u32::from(file.unmerged);
+    })?;
+    Ok(summary)
+}
+
+struct StatusFile<'a> {
+    path: &'a str,
+    original_path: Option<&'a str>,
+    staged: ChangeKind,
+    unstaged: ChangeKind,
+    untracked: bool,
+    unmerged: bool,
+}
+
+/// Borrow the process output and visit records without copying or indexing it.
+/// Both consumers share validation, including the extra NUL record for renames.
+fn visit_status(bytes: &[u8], mut visit: impl FnMut(StatusFile<'_>)) -> Result<BranchInfo, AppError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| {
         AppError::new(
             "status_encoding",
             "Git 状态包含无法安全显示的路径，已停止解析且未修改仓库。",
         )
     })?;
-    let mut parts: Vec<&str> = text.split('\0').collect();
-    if parts.last().is_some_and(|part| part.is_empty()) {
-        parts.pop();
-    }
+    let mut parts = text.split_terminator('\0');
     let mut branch = BranchInfo::default();
-    let mut files = Vec::new();
-    let mut index = 0;
-    while index < parts.len() {
-        let record = parts[index];
-        index += 1;
+    while let Some(record) = parts.next() {
         if record.is_empty() {
             continue;
         }
@@ -34,19 +84,17 @@ pub fn parse_status(bytes: &[u8]) -> Result<StatusSnapshot, AppError> {
             continue;
         }
         if record.starts_with("2 ") {
-            if index >= parts.len() {
-                return Err(AppError::new(
+            let original = parts.next().ok_or_else(|| {
+                AppError::new(
                     "status_parse",
                     "Git 重命名记录不完整，未据此修改仓库。",
-                ));
-            }
-            let original = parts[index];
-            index += 1;
-            files.push(parse_rename(record, original)?);
+                )
+            })?;
+            visit(parse_rename(record, original)?);
             continue;
         }
         if record.starts_with("1 ") {
-            files.push(parse_ordinary(record)?);
+            visit(parse_ordinary(record)?);
             continue;
         }
         if let Some(path) = record.strip_prefix("? ") {
@@ -54,15 +102,13 @@ pub fn parse_status(bytes: &[u8]) -> Result<StatusSnapshot, AppError> {
             if path.ends_with('/') {
                 continue;
             }
-            files.push(FileChange {
-                path: path.to_string(),
+            visit(StatusFile {
+                path,
                 original_path: None,
                 staged: ChangeKind::None,
                 unstaged: ChangeKind::None,
                 untracked: true,
                 unmerged: false,
-                staged_lines: None,
-                unstaged_lines: None,
             });
             continue;
         }
@@ -70,7 +116,7 @@ pub fn parse_status(bytes: &[u8]) -> Result<StatusSnapshot, AppError> {
             continue;
         }
         if record.starts_with("u ") {
-            files.push(parse_unmerged(record)?);
+            visit(parse_unmerged(record)?);
             continue;
         }
         return Err(AppError::new(
@@ -78,11 +124,7 @@ pub fn parse_status(bytes: &[u8]) -> Result<StatusSnapshot, AppError> {
             "无法识别 Git 状态记录，未据此修改仓库。",
         ));
     }
-    Ok(StatusSnapshot {
-        generation: 0,
-        branch,
-        files,
-    })
+    Ok(branch)
 }
 
 #[cfg(test)]
@@ -133,48 +175,42 @@ fn apply_header(branch: &mut BranchInfo, header: &str) {
     branch.live_remote_checked = false;
 }
 
-fn parse_ordinary(record: &str) -> Result<FileChange, AppError> {
-    let (fields, path) = split_fields(record, 8)?;
+fn parse_ordinary(record: &str) -> Result<StatusFile<'_>, AppError> {
+    let (fields, path) = split_fields::<8>(record)?;
     let (staged, unstaged) = xy(fields[1])?;
-    Ok(FileChange {
-        path: path.to_string(),
+    Ok(StatusFile {
+        path,
         original_path: None,
         staged,
         unstaged,
         untracked: false,
         unmerged: staged == ChangeKind::Unmerged || unstaged == ChangeKind::Unmerged,
-        staged_lines: None,
-        unstaged_lines: None,
     })
 }
 
-fn parse_rename(record: &str, original: &str) -> Result<FileChange, AppError> {
-    let (fields, path) = split_fields(record, 9)?;
+fn parse_rename<'a>(record: &'a str, original: &'a str) -> Result<StatusFile<'a>, AppError> {
+    let (fields, path) = split_fields::<9>(record)?;
     let (staged, unstaged) = xy(fields[1])?;
-    Ok(FileChange {
-        path: path.to_string(),
-        original_path: Some(original.to_string()),
+    Ok(StatusFile {
+        path,
+        original_path: Some(original),
         staged,
         unstaged,
         untracked: false,
         unmerged: false,
-        staged_lines: None,
-        unstaged_lines: None,
     })
 }
 
-fn parse_unmerged(record: &str) -> Result<FileChange, AppError> {
-    let (fields, path) = split_fields(record, 10)?;
+fn parse_unmerged(record: &str) -> Result<StatusFile<'_>, AppError> {
+    let (fields, path) = split_fields::<10>(record)?;
     let (staged, unstaged) = xy(fields[1])?;
-    Ok(FileChange {
-        path: path.to_string(),
+    Ok(StatusFile {
+        path,
         original_path: None,
         staged,
         unstaged,
         untracked: false,
         unmerged: true,
-        staged_lines: None,
-        unstaged_lines: None,
     })
 }
 
@@ -204,10 +240,10 @@ fn xy(value: &str) -> Result<(ChangeKind, ChangeKind), AppError> {
     }
 }
 
-fn split_fields(record: &str, count: usize) -> Result<(Vec<&str>, &str), AppError> {
+fn split_fields<const N: usize>(record: &str) -> Result<([&str; N], &str), AppError> {
     let mut rest = record;
-    let mut fields = Vec::with_capacity(count);
-    for _ in 0..count {
+    let mut fields = [""; N];
+    for field in &mut fields {
         rest = rest.trim_start();
         let Some((token, tail)) = rest.split_once(' ') else {
             return Err(AppError::new(
@@ -215,7 +251,7 @@ fn split_fields(record: &str, count: usize) -> Result<(Vec<&str>, &str), AppErro
                 "Git 状态记录缺少字段，未据此修改仓库。",
             ));
         };
-        fields.push(token);
+        *field = token;
         rest = tail;
     }
     let path = rest.trim_start();
@@ -231,6 +267,44 @@ fn split_fields(record: &str, count: usize) -> Result<(Vec<&str>, &str), AppErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_counts_match_full_status_for_all_record_kinds() {
+        let raw = concat!(
+            "# branch.oid abcdef\0# branch.head main\0# branch.upstream origin/main\0# branch.ab +3 -2\0",
+            "1 MM N... 100644 100644 100644 aaa bbb both.txt\0",
+            "1 .D N... 100644 100644 000000 aaa bbb deleted.txt\0",
+            "2 R. N... 100644 100644 100644 aaa bbb R100 renamed.txt\0old name.txt\0",
+            "u UU N... 100644 100644 100644 100644 aaa bbb ccc conflict.txt\0",
+            "? 新文件.txt\0? directory/\0! ignored.txt\0",
+        );
+        let full = parse_status(raw.as_bytes()).unwrap();
+        let summary = parse_status_summary(raw.as_bytes()).unwrap();
+        assert_eq!(summary.branch, full.branch);
+        assert_eq!(summary.changed, full.files.len() as u32);
+        assert_eq!(summary.changed, 5);
+        assert_eq!(summary.staged, 3);
+        assert_eq!(summary.unstaged, 3);
+        assert_eq!(summary.untracked, 1);
+        assert_eq!(summary.conflicted, 1);
+        assert_eq!(parse_status_summary(b"").unwrap().changed, 0);
+    }
+
+    #[test]
+    fn summary_rejects_the_same_malformed_input_as_full_status() {
+        for bytes in [
+            &b"? invalid-\xff\0"[..],
+            &b"2 R. N... 100644 100644 100644 aaa bbb R100 name\0"[..],
+            &b"1 missing-fields\0"[..],
+            &b"1 X N... 100644 100644 100644 aaa bbb name\0"[..],
+            &b"unexpected\0"[..],
+        ] {
+            assert_eq!(
+                parse_status_summary(bytes).unwrap_err(),
+                parse_status(bytes).unwrap_err(),
+            );
+        }
+    }
 
     #[test]
     fn parses_nul_status_with_spaces_and_renames() {

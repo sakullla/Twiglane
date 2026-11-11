@@ -3562,6 +3562,39 @@ describe("worktree 总览（R3）", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "切换仓库" })).toBeNull());
   }
 
+  it("扫描未完成时反复打开只读一次，完成后再打开仍刷新", async () => {
+    const main = "C:/work/shared-scan";
+    useRecent([{ name: "shared-scan", path: main, openedAtMs: 1 }]);
+    let finish!: (value: unknown) => void;
+    mocks.worktreeOverview.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    let popover = await openSwitcher();
+    await closeSwitcher(popover);
+    popover = await openRepoSwitcher();
+    expect(mocks.worktreeOverview).toHaveBeenCalledTimes(1);
+    finish({ checkedAtMs: 1_700_001_000_000, items: [item({ path: main, dirty: true, changed: 7 })] });
+    await waitFor(() => expect(row(popover, main)?.textContent).toContain("有改动 7"));
+    await closeSwitcher(popover);
+    mocks.worktreeOverview.mockResolvedValueOnce({ checkedAtMs: 1_700_001_100_000, items: [item({ path: main })] });
+    popover = await openRepoSwitcher();
+    await waitFor(() => expect(row(popover, main)?.textContent).toContain("干净"));
+    expect(mocks.worktreeOverview).toHaveBeenCalledTimes(2);
+  });
+
+  it("已关闭弹层的迟到响应不回写模块缓存", async () => {
+    const main = "C:/work/closed-scan";
+    useRecent([{ name: "closed-scan", path: main, openedAtMs: 1 }]);
+    let finish!: (value: unknown) => void;
+    mocks.worktreeOverview.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    const popover = await openSwitcher();
+    await closeSwitcher(popover);
+    finish({ checkedAtMs: 1_700_001_000_000, items: [item({ path: main, dirty: true, changed: 99 })] });
+    await tick();
+    mocks.worktreeOverview.mockRejectedValueOnce({ message: "读取失败" });
+    const reopened = await openRepoSwitcher();
+    await waitFor(() => expect(reopened.querySelector('[data-worktree-status="failed"]')).toBeTruthy());
+    expect(row(reopened, main)?.textContent).not.toContain("有改动 99");
+  });
+
   it("按主仓库分组去重，同名仓库靠完整路径区分，缺失的最近项仍然保留", async () => {
     const main = "C:/work/app";
     const feature = "C:/work/app-feature";

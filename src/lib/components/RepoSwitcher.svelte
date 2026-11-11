@@ -1,5 +1,23 @@
 <script module lang="ts">
-  import type { RepoHead, WorktreeItem } from "../types";
+  import { api } from "../api";
+  import type { RepoHead, WorktreeItem, WorktreeOverview } from "../types";
+
+  // Only share an unfinished scan. A later open still refreshes local Git state.
+  let pendingOverview: { key: string; promise: Promise<WorktreeOverview> } | null = null;
+  let overviewRequestId = 1_000_000_000_000;
+
+  function requestOverview(paths: string[]): Promise<WorktreeOverview> {
+    const key = JSON.stringify(paths);
+    if (pendingOverview?.key === key) return pendingOverview.promise;
+    const promise = api.worktreeOverview(paths, ++overviewRequestId);
+    const pending = { key, promise };
+    pendingOverview = pending;
+    const clear = () => {
+      if (pendingOverview === pending) pendingOverview = null;
+    };
+    void promise.then(clear, clear);
+    return promise;
+  }
 
   /**
    * 上次读到的 HEAD 与总览：弹层再次打开时先显示上次结果，后台再刷新。
@@ -16,7 +34,6 @@
 
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
-  import { api } from "../api";
   import {
     WORKTREE_FILTERS,
     authoritativeMains,
@@ -119,12 +136,6 @@
   let statusCheckedAt = $state<number | null>(null);
   /** 谁最后发起的请求谁写结果：旧响应不覆盖新列表。 */
   let overviewSerial = 0;
-  let requestSeq = 0;
-
-  function nextRequestId(): number {
-    requestSeq = (requestSeq % 1_000_000) + 1;
-    return requestSeq;
-  }
 
   function itemMap(): Map<string, WorktreeItem> {
     void itemsVersion;
@@ -177,6 +188,7 @@
 
   onMount(() => {
     const paths = repos.map((repo) => repo.path);
+    pruneCache();
     if (paths.length === 0) return;
     let alive = true;
     void (async () => {
@@ -198,8 +210,20 @@
     void loadOverview(paths);
     return () => {
       alive = false;
+      overviewSerial += 1;
     };
   });
+
+  // Evict forgotten repositories from the module cache, not just the rendered list.
+  function pruneCache() {
+    const paths = new Set(repos.map((repo) => normalizeRepoPath(repo.path)));
+    for (const key of knownHeads.keys()) if (!paths.has(key)) knownHeads.delete(key);
+    const kept = pruneWorktreeItems(repos, knownItems);
+    for (const key of knownItems.keys()) if (!kept.has(key)) knownItems.delete(key);
+    for (const key of confirmedItems) if (!knownItems.has(key)) confirmedItems.delete(key);
+    headsVersion += 1;
+    itemsVersion += 1;
+  }
 
   /**
    * 逐项状态：单独请求，慢或失败都不影响搜索与切换。
@@ -210,7 +234,7 @@
     statusLoading = true;
     statusError = null;
     try {
-      const overview = await api.worktreeOverview(paths, nextRequestId());
+      const overview = await requestOverview(paths);
       if (serial !== overviewSerial) return;
       const items = overview.items ?? [];
       const answered = new Set(items.map((item) => normalizeRepoPath(item.path)));
@@ -231,7 +255,7 @@
       // 未确认的缓存项留在原处，但只算过期结果。
       for (const key of [...confirmedItems]) if (!answered.has(key)) confirmedItems.delete(key);
       for (const key of answered) confirmedItems.add(key);
-      itemsVersion += 1;
+      pruneCache();
       statusCheckedAt = overview.checkedAtMs ?? Date.now();
     } catch (error) {
       if (serial !== overviewSerial) return;

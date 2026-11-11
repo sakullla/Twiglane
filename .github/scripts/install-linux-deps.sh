@@ -68,14 +68,48 @@ run_apt() {
     apt-get "${APT_OPTS[@]}" "$@"
 }
 
-for attempt in 1 2 3; do
+# A single mirror is a single point of failure: runners have been seen
+# where archive.ubuntu.com does not resolve at all for the whole job, so
+# retrying the same host never helps. Rotate through independent mirrors
+# (each attempt still bounded by `timeout`), skipping hosts DNS can't resolve.
+CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME}")"
+MIRRORS=(
+  http://archive.ubuntu.com/ubuntu
+  http://us.archive.ubuntu.com/ubuntu
+  http://azure.archive.ubuntu.com/ubuntu
+  http://mirrors.edge.kernel.org/ubuntu
+)
+
+use_mirror() {
+  local mirror="$1"
+  {
+    for suite in "${CODENAME}" "${CODENAME}-updates" "${CODENAME}-backports" "${CODENAME}-security"; do
+      echo "deb ${mirror} ${suite} main restricted universe multiverse"
+    done
+  } | sudo tee /etc/apt/sources.list >/dev/null
+  # Drop the image's deb822 / mirror-file Ubuntu entries so only this mirror is used.
+  sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/apt-mirrors.txt
+  sudo rm -rf /var/lib/apt/lists/partial/*
+}
+
+attempt=0
+for mirror in "${MIRRORS[@]}"; do
+  host="${mirror#http://}"
+  host="${host%%/*}"
+  if ! getent hosts "${host}" >/dev/null; then
+    echo "skip ${host}: DNS does not resolve" >&2
+    continue
+  fi
+  attempt=$((attempt + 1))
+  echo "apt attempt ${attempt} via ${mirror}" >&2
+  use_mirror "${mirror}"
   if run_apt 90 update \
     && run_apt 180 install -y --no-install-recommends "${PACKAGES[@]}"; then
     exit 0
   fi
-  echo "apt failed (attempt ${attempt}/3), retrying..." >&2
-  sleep $((attempt * 5))
+  echo "apt failed via ${mirror}, trying next mirror..." >&2
+  sleep 5
 done
 
-echo "apt failed after 3 attempts" >&2
+echo "apt failed on every mirror (${attempt} attempted)" >&2
 exit 1

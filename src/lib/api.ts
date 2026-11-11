@@ -51,6 +51,8 @@ import type {
   TagState,
   TaskReview,
   TaskReviewToken,
+  TerminalActivity,
+  TerminalSnapshot,
   Theme,
   PullIntegration,
   UndoResult,
@@ -714,6 +716,19 @@ export const api = {
   setPanelWidths: (widths: PanelWidths) => invoke<PanelWidths>("set_panel_widths", { widths }),
   saveDraft: (path: string, message: string) => invoke<void>("save_draft", { path, message }),
   cancelReads: () => invoke<void>("cancel_reads"),
+  /**
+   * 按仓库打开或附着终端。同一仓库重复调用返回原 sessionId；已退出的会话保持退出状态，
+   * 需要 restartTerminal 才会新建 shell。返回值里的 output/seq 用于重放。
+   */
+  openTerminal: (path: string) => invoke<TerminalSnapshot>("open_terminal", { path }),
+  restartTerminal: (path: string) => invoke<TerminalSnapshot>("restart_terminal", { path }),
+  /** 只向已有 sessionId 写入输入；终端已退出时后端返回 terminal_closed。 */
+  terminalWrite: (sessionId: string, data: string) =>
+    invoke<void>("terminal_write", { sessionId, data }),
+  terminalResize: (sessionId: string, rows: number, cols: number) =>
+    invoke<void>("terminal_resize", { sessionId, rows, cols }),
+  /** 结束所有运行中的终端 shell 与后代进程；失败时返回真实错误。 */
+  terminateTerminals: () => invoke<TerminalActivity[]>("terminate_terminals"),
   measureProbe: () =>
     invoke<{ enabled: boolean; elapsedMs: number; script: { steps?: unknown[] } | null }>("measure_probe"),
   measureSample: (name: string, detail: Record<string, unknown>) =>

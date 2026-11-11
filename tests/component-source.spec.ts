@@ -33,6 +33,13 @@ describe("README 与实现一致", () => {
     expect(readme).toContain("超时或关闭窗口只结束 git 进程本身，传输子进程可能短暂残留");
     expect(readme).not.toContain("超时只结束 `git ls-remote` 本身");
   });
+
+  it("README 不再把终端列为未交付能力，并说明会话保留与关窗确认", () => {
+    expect(readme).not.toContain("集成终端或任何命令执行");
+    expect(readme).toContain("### 工作台终端");
+    expect(readme).toContain("切换改动/历史/文件视图不会重建会话");
+    expect(readme).toContain("确认后先等待 `terminate_terminals`");
+  });
 });
 
 describe("组件源码约束", () => {
@@ -46,6 +53,32 @@ describe("组件源码约束", () => {
       }
     }
     expect(missing).toEqual([]);
+  });
+
+  it("底部终端接入状态栏、命令面板与关窗确认，不自动调用版本、提交、标签或推送 API", () => {
+    const sourceOf = (name: string) => sources.find((source) => source.name === name)!.text;
+    const panel = sourceOf("TerminalPanel.svelte");
+    const status = sourceOf("StatusBar.svelte");
+    const app = sourceOf("App.svelte");
+    expect(status).toContain("data-terminal-toggle");
+    expect(app).toContain("<TerminalPanel");
+    expect(app).toContain("TERMINAL_CLOSE_REQUESTED_EVENT");
+    expect(panel).toContain("terminal-output");
+    expect(panel).toContain("terminal-exit");
+    expect(panel).toContain("data-terminal-state");
+    // 终端只消费 PTY 的打开/写入/resize/终止命令；不调用任何 Git 写入或发布接口。
+    for (const banned of [
+      "commitChanges",
+      "commitAndPush",
+      "pushBranch",
+      "pushToRemote",
+      "createTag",
+      "pushTag",
+      "publishBranch",
+      "setTheme",
+    ]) {
+      expect(panel, `终端面板不能自动调用 ${banned}`).not.toContain(banned);
+    }
   });
 
   it("共用组件把关键原因和状态接入可访问语义", () => {

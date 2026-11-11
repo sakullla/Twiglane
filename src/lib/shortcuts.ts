@@ -58,10 +58,17 @@ const ALT_SHIFT_COMMANDS: Record<string, string> = {
   ArrowRight: "review.next",
 };
 
-/** 文字输入控件：Alt+←/→ 在这里按单词移动光标，也不能拿 Esc 去清多选。差异区是只读 textbox，不算。 */
+/**
+ * 文字输入控件：Alt+←/→ 在这里按单词移动光标，也不能拿 Esc 去清多选。差异区是只读 textbox，不算。
+ * xterm 的输入目标是 `.xterm-helper-textarea`，但 IME 组合与粘贴期间事件目标可能落在终端容器里，
+ * 所以整棵 `.xterm` 都算输入区：字符、方向键、Ctrl+C 与输入法都由终端处理，不落到背景快捷键。
+ */
 export function isTextEntry(target: EventTarget | null): boolean {
   const element = target as Partial<HTMLElement> | null;
-  return element?.tagName === "INPUT" || element?.tagName === "TEXTAREA" || element?.tagName === "SELECT" || element?.isContentEditable === true;
+  if (element?.tagName === "INPUT" || element?.tagName === "TEXTAREA" || element?.tagName === "SELECT" || element?.isContentEditable === true) {
+    return true;
+  }
+  return element?.closest?.(".xterm") != null;
 }
 
 /**

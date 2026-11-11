@@ -8,6 +8,7 @@ import type {
   OpenedRepository,
   PreviewSources,
   StatusSnapshot,
+  TerminalSnapshot,
   Theme,
 } from "../../src/lib/types";
 import { createTextDiff } from "../../src/lib/diff";
@@ -415,8 +416,24 @@ function mergeData() {
   };
 }
 
-export async function listenEvent() {
-  return () => {};
+/**
+ * 预览事件总线：真实后端用 Tauri emit，这里用内存监听表。
+ * 终端输出/退出事件因此能在浏览器里驱动同一个 TerminalPanel，而不是只有静态快照。
+ */
+type PreviewEventListener = (payload: unknown) => void;
+const previewListeners = new Map<string, Set<PreviewEventListener>>();
+
+export async function listenEvent<T>(name: string, handler: (payload: T) => void): Promise<() => void> {
+  const listeners = previewListeners.get(name) ?? new Set<PreviewEventListener>();
+  previewListeners.set(name, listeners);
+  listeners.add(handler as PreviewEventListener);
+  return () => {
+    listeners.delete(handler as PreviewEventListener);
+  };
+}
+
+function emitPreviewEvent(name: string, payload: unknown) {
+  for (const listener of [...(previewListeners.get(name) ?? [])]) listener(payload);
 }
 /** 预览没有 Tauri 运行时：版本号未知，设置里的应用更新分区按不可用展示。 */
 export async function appVersion() {
@@ -427,6 +444,109 @@ export async function pickDirectory() {
 }
 export async function pickFile() {
   return null;
+}
+
+/*
+ * 终端预览：只在 mock 内存里模拟按仓库一个会话。
+ * ?terminal=error 让启动失败，?terminal=exited 让打开时已是退出状态（可重新启动），
+ * ?terminal=write 让写入失败。默认回显输入，输入 exit 回车后给出退出码 0。
+ * 这里不执行任何真实命令，也不能替代桌面 PTY 行为。
+ */
+interface PreviewTerminal {
+  sessionId: string;
+  repoPath: string;
+  shell: string;
+  cwd: string;
+  running: boolean;
+  exitCode: number | null;
+  signal: string | null;
+  seq: number;
+  output: string;
+  line: string;
+}
+
+const terminalMode = previewParams.get("terminal") ?? "";
+const terminalSessions = new Map<string, PreviewTerminal>();
+const terminalById = new Map<string, PreviewTerminal>();
+let terminalSerial = 0;
+
+function terminalEmitOutput(session: PreviewTerminal, data: string) {
+  if (!data) return;
+  session.output += data;
+  session.seq += 1;
+  emitPreviewEvent("terminal-output", { sessionId: session.sessionId, seq: session.seq, data });
+}
+
+function terminalEmitExit(session: PreviewTerminal, exitCode: number) {
+  if (!session.running) return;
+  session.running = false;
+  session.exitCode = exitCode;
+  session.seq += 1;
+  emitPreviewEvent("terminal-exit", { sessionId: session.sessionId, seq: session.seq, exitCode, signal: null });
+}
+
+function terminalSnapshot(session: PreviewTerminal): TerminalSnapshot {
+  return {
+    sessionId: session.sessionId,
+    repoPath: session.repoPath,
+    shell: session.shell,
+    cwd: session.cwd,
+    running: session.running,
+    exitCode: session.exitCode,
+    signal: session.signal,
+    seq: session.seq,
+    output: session.output,
+  };
+}
+
+function createPreviewTerminal(path: string, running = true): PreviewTerminal {
+  terminalSerial += 1;
+  const session: PreviewTerminal = {
+    sessionId: `preview-terminal-${terminalSerial}`,
+    repoPath: path,
+    shell: "preview-shell",
+    cwd: path,
+    running,
+    exitCode: running ? null : 1,
+    signal: null,
+    seq: 0,
+    output: "",
+    line: "",
+  };
+  terminalSessions.set(path, session);
+  terminalById.set(session.sessionId, session);
+  terminalEmitOutput(
+    session,
+    "Twiglane 终端预览（mock 数据，不执行真实命令）\r\n" +
+      `工作目录：${path}\r\n` +
+      (running ? "$ " : "进程已退出，退出码 1。\r\n$ "),
+  );
+  return session;
+}
+
+function terminalReply(session: PreviewTerminal, data: string) {
+  if (!session.running) return;
+  if (data.includes("\u0003")) {
+    terminalEmitOutput(session, "^C\r\n$ ");
+    session.line = "";
+    return;
+  }
+  const text = data.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  terminalEmitOutput(session, text);
+  for (const char of text) {
+    if (char === "\n") {
+      const command = session.line.trim();
+      session.line = "";
+      if (command === "exit") {
+        terminalEmitExit(session, 0);
+        return;
+      }
+      if (command === "clear") continue;
+      terminalEmitOutput(session, "$ ");
+    } else {
+      session.line += char;
+    }
+  }
 }
 
 export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
@@ -450,6 +570,43 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     return ok(recent);
   },
   cancelReads: () => ok(undefined),
+  openTerminal: (path: string) => {
+    if (terminalMode === "error") {
+      return Promise.reject({ code: "terminal_start", message: "无法启动终端 shell：预览 mock 模拟启动失败。" });
+    }
+    const existing = terminalSessions.get(path);
+    if (existing) return ok(terminalSnapshot(existing), 60);
+    return ok(terminalSnapshot(createPreviewTerminal(path, terminalMode !== "exited")), 140);
+  },
+  restartTerminal: (path: string) => {
+    if (terminalMode === "error") {
+      return Promise.reject({ code: "terminal_start", message: "无法启动终端 shell：预览 mock 模拟启动失败。" });
+    }
+    return ok(terminalSnapshot(createPreviewTerminal(path, true)), 120);
+  },
+  terminalWrite: (sessionId: string, data: string) => {
+    if (terminalMode === "write") {
+      return Promise.reject({ code: "terminal_write", message: "无法写入终端：预览 mock 模拟写入失败。" });
+    }
+    const session = terminalById.get(sessionId);
+    if (!session) {
+      return Promise.reject({ code: "terminal_unknown", message: "终端会话不存在，请重新附着。" });
+    }
+    if (!session.running) {
+      return Promise.reject({ code: "terminal_closed", message: "终端已退出，无法继续输入。" });
+    }
+    terminalReply(session, data);
+    return ok(undefined, 10);
+  },
+  terminalResize: () => ok(undefined, 0),
+  terminateTerminals: () => {
+    const stopped = [...terminalSessions.values()].filter((session) => session.running);
+    for (const session of stopped) {
+      terminalEmitOutput(session, "\r\n终端已结束。\r\n");
+      terminalEmitExit(session, 0);
+    }
+    return ok(stopped.map((session) => ({ sessionId: session.sessionId, repoPath: session.repoPath })), 120);
+  },
   updateInstallSupported: () => ok(true),
   repoHeads: (paths: string[]) =>
     ok(paths.map((path, index) => ({

@@ -27,6 +27,9 @@
     /** 发现的新版本号；null 表示没有提示入口。与仓库无关（应用级更新），无仓库时也显示。 */
     updateVersion?: string | null;
     onOpenUpdate?: () => void;
+    /** 底部终端当前是否展开；入口与命令面板的 terminal.toggle 是同一条命令。 */
+    terminalOpen?: boolean;
+    onToggleTerminal?: () => void;
   }
 
   let {
@@ -45,6 +48,8 @@
     onOpenMerge,
     updateVersion = null,
     onOpenUpdate,
+    terminalOpen = false,
+    onToggleTerminal,
   }: Props = $props();
 
   let dotClass = $derived(degraded || warning ? "stale" : hasRepo ? "" : "off");
@@ -113,6 +118,22 @@
     <span class="sb-item sb-warn" title={warning}><span class="sb-text">{warning}</span></span>
   {/if}
   <span class="sb-live" aria-hidden="true"></span>
+  <!-- 终端入口与命令面板的 terminal.toggle 走同一条命令；无仓库时不可用并说明原因。 -->
+  {#if onToggleTerminal}
+    <button
+      type="button"
+      class="sb-item sb-terminal"
+      data-terminal-toggle
+      aria-label={terminalOpen ? "收起终端" : "展开终端"}
+      aria-expanded={terminalOpen}
+      title={hasRepo ? (terminalOpen ? "收起底部终端" : "展开底部终端，在仓库根目录运行命令") : "先打开一个仓库"}
+      disabled={!hasRepo}
+      onclick={onToggleTerminal}
+    >
+      <Icon name="code" size={12} />
+      <span class="sb-text">终端</span>
+    </button>
+  {/if}
   <!-- 没有仓库时没有工作区可刷新：按钮不占位，避免起始页出现一个无效动作。
        重新验证（文件监听、窗口聚焦、手动刷新、历史重读）只把这个入口换成进行中：位置固定在右下角，
        宽度按「刷新中」预留，进出都不挤动状态栏的其它内容；旧内容在各自面板里照常可读（R6）。

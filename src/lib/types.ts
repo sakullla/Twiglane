@@ -932,6 +932,45 @@ export interface UndoResult {
   snapshot: StatusSnapshot;
 }
 
+/**
+ * 一个仓库的终端快照。`seq` 是 `output` 覆盖的最后一个事件序号：附着之后只接受
+ * 同一 `sessionId` 且序号更大的输出/退出事件，否则会在重放时重复写入。
+ */
+export interface TerminalSnapshot {
+  sessionId: string;
+  repoPath: string;
+  shell: string;
+  cwd: string;
+  running: boolean;
+  exitCode: number | null;
+  signal: string | null;
+  seq: number;
+  output: string;
+}
+
+export interface TerminalOutputEvent {
+  sessionId: string;
+  seq: number;
+  data: string;
+}
+
+export interface TerminalExitEvent {
+  sessionId: string;
+  seq: number;
+  exitCode: number;
+  signal: string | null;
+}
+
+/** 关窗确认事件里的一项：仍在运行、按仓库保留的终端会话。 */
+export interface TerminalActivity {
+  sessionId: string;
+  repoPath: string;
+}
+
+export interface TerminalCloseRequested {
+  sessions: TerminalActivity[];
+}
+
 export interface DiscardFilePlan {
   path: string;
   originalPath: string | null;

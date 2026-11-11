@@ -66,7 +66,8 @@ const SCENARIOS = [
     check:
       "(() => { const box = document.querySelector('.files-view .text-editor-input'); const save = document.querySelector('.files-view [aria-label=\"保存修改到工作区\"]'); " +
       "return Boolean(box) && box.value.startsWith('# 预览编辑草稿') && Boolean(save) && save.disabled && (document.querySelector('.files-view [data-edit-status]')?.textContent || '').includes('已保存') " +
-      "&& !document.querySelector('.files-view [data-edit-conflict]') && !document.body.textContent.includes('终端'); })()",
+      // 终端是工作台底部面板，不在文件编辑器里；这段只核对编辑器自身没有终端入口。
+      "&& !document.querySelector('.files-view [data-edit-conflict]') && !(document.querySelector('.files-view')?.textContent || '').includes('终端'); })()",
     detail: "(document.querySelector('.files-view [data-edit-status]')?.textContent || '').trim() + ' ｜ ' + (document.querySelector('.files-view .text-editor-meta')?.textContent || '').trim()",
   },
   {
@@ -600,6 +601,86 @@ const SCENARIOS = [
       "document.querySelectorAll('.switcher-group-name').length + ' 个分组；未知 ' + document.querySelectorAll('[data-worktree-state=unknown]').length + ' 项；缺失 ' + document.querySelectorAll('[data-worktree-state=missing]').length + ' 项；过期 ' + document.querySelectorAll('[data-worktree-remote=stale]').length + ' 项'",
     },
   {
+    name: "终端：展开、输入回显与退出码",
+    url: "/",
+    steps: async (d) => {
+      await d.until("Boolean(document.querySelector('.welcome-recent button'))", "起始页出现");
+      await d.click(".welcome-recent button");
+      await d.until("Boolean(document.querySelector('.file-list'))", "仓库打开");
+      await d.click("[data-terminal-toggle]");
+      await d.until(
+        "Boolean(document.querySelector('.terminal-panel .xterm-helper-textarea')) && document.querySelector('[data-terminal-state]')?.dataset.terminalState === 'running'",
+        "终端进入运行中",
+      );
+      await d.click(".terminal-panel .xterm-screen");
+      await d.evaluate("document.querySelector('.terminal-panel .xterm-helper-textarea')?.focus()");
+      await d.typeText("echo hello");
+      await d.press("Enter");
+      await d.until(
+        "(document.querySelector('[data-terminal-panel]')?.textContent || '').includes('echo hello')",
+        "输入被回显",
+      );
+      await d.typeText("exit");
+      await d.press("Enter");
+      await d.until(
+        "document.querySelector('[data-terminal-state]')?.dataset.terminalState === 'exited'",
+        "退出码状态出现",
+      );
+    },
+    check:
+      "(() => { const state = document.querySelector('[data-terminal-state]'); return Boolean(state) && state.dataset.terminalState === 'exited' && (state.textContent || '').includes('退出码 0') && (document.querySelector('[data-terminal-panel]')?.textContent || '').includes('echo hello'); })()",
+    detail:
+      "(document.querySelector('[data-terminal-state]')?.textContent || '').trim() + ' ｜ ' + (document.querySelector('.terminal-path')?.textContent || '').trim()",
+  },
+  {
+    name: "终端：启动失败就地说明并保留重试",
+    url: "/?terminal=error",
+    steps: async (d) => {
+      await d.until("Boolean(document.querySelector('.welcome-recent button'))", "起始页出现");
+      await d.click(".welcome-recent button");
+      await d.until("Boolean(document.querySelector('.file-list'))", "仓库打开");
+      await d.click("[data-terminal-toggle]");
+      await d.until("Boolean(document.querySelector('[data-terminal-error]'))", "启动失败提示出现");
+    },
+    check:
+      "(() => { const error = document.querySelector('[data-terminal-error]'); const retry = document.querySelector('[data-terminal-retry]'); const state = document.querySelector('[data-terminal-state]'); return Boolean(error) && Boolean(retry) && error.textContent.includes('无法启动终端') && state?.dataset.terminalState === 'failed'; })()",
+    detail: "(document.querySelector('[data-terminal-error]')?.textContent || '').trim().slice(0, 80)",
+  },
+  {
+    name: "终端：已退出会话可重新启动",
+    url: "/?terminal=exited",
+    steps: async (d) => {
+      await d.until("Boolean(document.querySelector('.welcome-recent button'))", "起始页出现");
+      await d.click(".welcome-recent button");
+      await d.until("Boolean(document.querySelector('.file-list'))", "仓库打开");
+      await d.click("[data-terminal-toggle]");
+      await d.until("document.querySelector('[data-terminal-state]')?.dataset.terminalState === 'exited'", "打开时为退出状态");
+      await d.click("[data-terminal-restart]");
+      await d.until("document.querySelector('[data-terminal-state]')?.dataset.terminalState === 'running'", "重新启动后运行中");
+    },
+    check:
+      "(() => { const panel = document.querySelector('[data-terminal-panel]'); return Boolean(panel) && panel.textContent.includes('Twiglane 终端预览') && document.querySelector('[data-terminal-state]')?.dataset.terminalState === 'running'; })()",
+    detail: "(document.querySelector('[data-terminal-state]')?.textContent || '').trim()",
+  },
+  {
+    name: "终端：写入失败保留输出并说明原因",
+    url: "/?terminal=write",
+    steps: async (d) => {
+      await d.until("Boolean(document.querySelector('.welcome-recent button'))", "起始页出现");
+      await d.click(".welcome-recent button");
+      await d.until("Boolean(document.querySelector('.file-list'))", "仓库打开");
+      await d.click("[data-terminal-toggle]");
+      await d.until("Boolean(document.querySelector('.terminal-panel .xterm-helper-textarea'))", "终端就绪");
+      await d.click(".terminal-panel .xterm-screen");
+      await d.evaluate("document.querySelector('.terminal-panel .xterm-helper-textarea')?.focus()");
+      await d.typeText("x");
+      await d.until("Boolean(document.querySelector('[data-terminal-write-error]'))", "写入失败提示出现");
+    },
+    check:
+      "(() => { const error = document.querySelector('[data-terminal-write-error]'); const state = document.querySelector('[data-terminal-state]'); return Boolean(error) && error.textContent.includes('无法写入终端') && state?.dataset.terminalState === 'running'; })()",
+    detail: "(document.querySelector('[data-terminal-write-error]')?.textContent || '').trim().slice(0, 80)",
+  },
+  {
     name: "默认起始页",
     url: "/",
     ready: "Boolean(document.querySelector('.welcome-recent button'))",
@@ -793,6 +874,11 @@ async function main() {
         await send("Input.insertText", { text: value }, sessionId);
         await pause(180);
       };
+      /** 往当前焦点输入文本（终端的真实输入目标是 xterm 的隐藏 textarea）。 */
+      const typeText = async (value) => {
+        await send("Input.insertText", { text: value }, sessionId);
+        await pause(180);
+      };
       /** 点一次再等条件成立；没成立就再点（真鼠标重复点击，不是直接改状态）。 */
       const clickUntil = async (selector, expression, label, tries = 4) => {
         for (let attempt = 0; attempt < tries; attempt += 1) {
@@ -813,7 +899,7 @@ async function main() {
         const tail = await evaluate("(document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 160)", sessionId);
         throw new Error("等待超时：" + label + "｜当前界面：" + tail);
       };
-      return { press, click, clickNth, clickUntil, typeInto, until, evaluate: (expression) => evaluate(expression, sessionId), pause };
+      return { press, click, clickNth, clickUntil, typeInto, typeText, until, evaluate: (expression) => evaluate(expression, sessionId), pause };
     };
 
     const onlyIndex = args.indexOf("--only");

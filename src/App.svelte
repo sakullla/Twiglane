@@ -72,6 +72,8 @@
     TaskModal,
     TaskRequest,
     TaskSummary,
+    TerminalActivity,
+    TerminalCloseRequested,
     Theme,
     WorkspaceView,
   } from "./lib/types";
@@ -114,6 +116,7 @@
   import SettingsModal from "./lib/components/SettingsModal.svelte";
   import StashModal from "./lib/components/StashModal.svelte";
   import TaskReview from "./lib/components/TaskReview.svelte";
+  import TerminalPanel, { TERMINAL_CLOSE_REQUESTED_EVENT } from "./lib/components/TerminalPanel.svelte";
   import StatusBar from "./lib/components/StatusBar.svelte";
   import TitleBar from "./lib/components/TitleBar.svelte";
   import ViewSwitcher from "./lib/components/ViewSwitcher.svelte";
@@ -258,6 +261,13 @@
   let diffToken = 0;
   let fileQuery = $state("");
   let workspaceView = $state<WorkspaceView>("changes");
+  /** 底部终端展开状态只在内存里；切换视图不改变它，切换仓库时面板重新附着该仓库的会话。 */
+  let terminalOpen = $state(false);
+  /**
+   * 原生关窗被活动终端拦下后的确认层。取消保留进程，确认先等待 terminateTerminals 成功，
+   * 再请求关闭窗口；失败时对话框与真实错误都留着。
+   */
+  let terminalClose = $state<{ sessions: TerminalActivity[]; busy: boolean; error: string | null } | null>(null);
   let conflictFocus = $state<string | null>(null);
   /** 从分支菜单「合并到当前分支」进入时预选的来源分支。 */
   let mergeSource = $state<string | null>(null);
@@ -836,6 +846,10 @@
         // 没有仓库时没有左栏可隐藏，这里记下状态会让下次打开仓库时看不到左栏。
         if (opened) sidebarHidden = !sidebarHidden;
         return;
+      case "terminal.toggle":
+        // 没有仓库时命令不可用；这里也守住程序化入口，不展开一个没有工作目录的终端。
+        if (opened) terminalOpen = !terminalOpen;
+        return;
       case "palette.open":
         openPalette();
         return;
@@ -861,6 +875,33 @@
         if (id.startsWith(REPO_SWITCH_PREFIX)) void openRecent(id.slice(REPO_SWITCH_PREFIX.length));
         return;
     }
+  }
+
+  /**
+   * 原生关窗确认：取消不调用终止；确认先等待全部终端及其子进程结束，再请求窗口关闭。
+   * 任一阶段失败都保留对话框与真实错误，不把未结束的进程说成已经关闭。
+   */
+  async function confirmTerminalClose() {
+    const current = terminalClose;
+    if (!current || current.busy) return;
+    terminalClose = { ...current, busy: true, error: null };
+    try {
+      await api.terminateTerminals();
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      await getCurrentWindow().close();
+      terminalClose = null;
+    } catch (error) {
+      terminalClose = {
+        sessions: current.sessions,
+        busy: false,
+        error: normalizeError(error).message,
+      };
+    }
+  }
+
+  function terminalRepoName(path: string): string {
+    const parts = path.split(/[\\/]/).filter(Boolean);
+    return parts[parts.length - 1] ?? path;
   }
 
   function toggleSwitcher(kind: "repo" | "branch", anchor: HTMLElement) {
@@ -3594,6 +3635,7 @@
     let stopMedia = () => {};
     let stopUpdate = () => {};
     let stopClioraLink = () => {};
+    let stopTerminalClose = () => {};
     const keyListener = (event: KeyboardEvent) => onWindowKeydown(event);
     const layerListener = () => {
       layerAtKey = anyLayerOpen();
@@ -3646,6 +3688,11 @@
       stopClioraLink = await watchClioraReviewLinks((url) => {
         void handleClioraLink(url);
       });
+      // 后端只以真实活动进程判断是否需要确认；没有活动会话时不会发这个事件。
+      stopTerminalClose = await listenEvent<TerminalCloseRequested>(TERMINAL_CLOSE_REQUESTED_EVENT, (payload) => {
+        if (!payload || payload.sessions.length === 0) return;
+        terminalClose = { sessions: payload.sessions, busy: false, error: null };
+      });
     })();
     const poll = window.setInterval(() => {
       if (shouldPoll(degraded, windowFocused, opened !== null)) void refresh();
@@ -3693,6 +3740,7 @@
       stopMedia();
       stopUpdate();
       stopClioraLink();
+      stopTerminalClose();
     };
   });
 </script>
@@ -4152,6 +4200,16 @@
     </main>
   </div>
 
+  {#if opened}
+    <!-- 终端在三个工作台视图之外：切换视图不重挂；切换仓库时 path 变化，面板附着该仓库的会话。 -->
+    <TerminalPanel
+      path={opened.summary.path}
+      open={terminalOpen}
+      theme={resolvedTheme}
+      onClose={() => (terminalOpen = false)}
+    />
+  {/if}
+
   <StatusBar
     hasRepo={opened !== null}
     sync={syncText}
@@ -4168,6 +4226,8 @@
     onOpenMerge={() => runCommand("task.merge")}
     updateVersion={updateState.offer?.version ?? null}
     onOpenUpdate={() => openSettings("update")}
+    {terminalOpen}
+    onToggleTerminal={() => runCommand("terminal.toggle")}
   />
 </div>
 
@@ -4215,6 +4275,36 @@
       </button>
     {/snippet}
   </Modal>
+{/if}
+
+{#if terminalClose}
+  <!-- 原生关窗被活动终端拦下：取消不改进程；确认先等待终止成功再关闭，失败留在这一层。 -->
+  <ConfirmDialog
+    title="结束终端并关闭应用"
+    titleId="terminal-close-title"
+    icon="code"
+    tone="danger"
+    message="还有正在运行的终端命令。关闭窗口前会先结束这些终端及其子进程。"
+    targets={terminalClose.sessions.map((session) => ({
+      icon: "code" as const,
+      name: terminalRepoName(session.repoPath),
+      detail: session.repoPath,
+      tag: "运行中",
+      tagTone: "info" as const,
+    }))}
+    targetsLabel="运行中的终端会话"
+    notes={[
+      { tone: "warn" as const, text: "确认后会结束这些 shell 及其子进程，终端里未完成的进度会丢失。" },
+      { tone: "info" as const, text: "取消会保持应用与这些命令继续运行。" },
+    ]}
+    confirmLabel="结束终端并关闭"
+    confirmIcon="x"
+    busy={terminalClose.busy}
+    error={terminalClose.error}
+    impact="terminal-close"
+    onConfirm={() => void confirmTerminalClose()}
+    onCancel={() => (terminalClose = null)}
+  />
 {/if}
 
 {#if worktreeRemoval}

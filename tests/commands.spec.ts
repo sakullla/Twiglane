@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MODIFIER_LABEL } from "../src/lib/brand";
 import { COMMANDS, commandAvailable, commandById, commandReason, paletteItems, type CommandState } from "../src/lib/commands";
 import { fileStageSide } from "../src/lib/labels";
-import { shortcutCommand } from "../src/lib/shortcuts";
+import { isTextEntry, shortcutCommand } from "../src/lib/shortcuts";
 import type { FileChange } from "../src/lib/types";
 
 function state(overrides: Partial<CommandState> = {}): CommandState {
@@ -130,6 +130,39 @@ describe("整文件命令的侧别", () => {
     // 另一侧没有改动时仍说「没有改动」，不会把用户指向一个空的另一侧。
     const stagedOnly = state({ fileStage: { path: "src/a.ts", side: "staged", reason: null, otherSide: false } });
     expect(commandReason(commandById("stage.file")!, stagedOnly)).toBe("当前文件没有可暂存的真实改动");
+  });
+});
+
+describe("终端命令与键盘隔离", () => {
+  it("终端是状态栏与命令面板共用的同一条命令，没有仓库时不可用并说明原因", () => {
+    const terminal = commandById("terminal.toggle")!;
+    expect(terminal).toBeTruthy();
+    expect(terminal.group).toBe("界面");
+    expect(commandAvailable(terminal, state())).toBe(true);
+    expect(commandAvailable(terminal, state({ hasRepo: false }))).toBe(false);
+    expect(commandReason(terminal, state({ hasRepo: false }))).toBe("先打开一个仓库");
+    expect(paletteItems(state({ hasRepo: false })).find((item) => item.id === "terminal.toggle")).toMatchObject({
+      enabled: false,
+      reason: "先打开一个仓库",
+    });
+    expect(paletteItems(state()).find((item) => item.id === "terminal.toggle")?.enabled).toBe(true);
+  });
+
+  it("xterm 的输入区被当作文本输入：字符、方向键、Ctrl+C 与输入法不会翻成背景快捷键", () => {
+    const terminal = document.createElement("div");
+    terminal.className = "xterm";
+    const helper = document.createElement("textarea");
+    helper.className = "xterm-helper-textarea";
+    terminal.appendChild(helper);
+    document.body.appendChild(terminal);
+    try {
+      expect(isTextEntry(helper)).toBe(true);
+      // IME 组合期间事件目标可能是终端容器本身。
+      expect(isTextEntry(terminal)).toBe(true);
+      expect(isTextEntry(document.body)).toBe(false);
+    } finally {
+      terminal.remove();
+    }
   });
 });
 

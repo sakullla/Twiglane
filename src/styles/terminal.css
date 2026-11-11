@@ -1,0 +1,89 @@
+/* ==========================================================================
+   工作台底部终端 — 只依赖 tokens.css；面板是外壳与状态栏之间的一条固定高度区域，
+   展开/收起不改变三个工作台视图的挂载，也不重建后端会话。
+   ========================================================================== */
+@import "@xterm/xterm/css/xterm.css";
+
+.terminal-panel {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  height: clamp(150px, 32vh, 280px);
+  min-height: 130px;
+  max-height: 50vh;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  position: relative;
+  z-index: 1;
+}
+.terminal-panel[hidden] { display: none; }
+
+.terminal-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-height: 32px;
+  padding: 0 var(--space-8);
+  flex: none;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+.terminal-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  font-weight: var(--weight-semibold);
+  color: var(--fg);
+  flex: none;
+}
+.terminal-title .icon { color: var(--accent-text); }
+.terminal-status { flex: none; color: var(--fg-subtle); }
+.terminal-status[data-terminal-state="exited"] { color: var(--warning-text); }
+.terminal-status[data-terminal-state="failed"] { color: var(--danger-text); }
+.terminal-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-subtle);
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+}
+.terminal-spacer { flex: 1; min-width: var(--space-8); }
+.terminal-head .btn-sm { min-height: 24px; }
+
+.terminal-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.terminal-surface {
+  flex: 1;
+  min-height: 0;
+  padding: var(--space-4) var(--space-8);
+  overflow: hidden;
+  background: var(--surface);
+}
+.terminal-surface.terminal-hidden { display: none; }
+/* xterm 自带的内边距按面板高度收紧，最小窗口下仍能完整显示滚动区。 */
+.terminal-surface .xterm { height: 100%; }
+.terminal-surface .xterm-viewport { overflow-y: auto; }
+
+.terminal-notice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding: var(--space-6) var(--space-10);
+  flex: none;
+  font-size: var(--text-sm);
+  border-bottom: 1px solid var(--border);
+}
+.terminal-notice > span { flex: 1; min-width: 0; }
+.terminal-notice.error { background: var(--danger-soft); color: var(--danger-text); }
+.terminal-notice.warn { background: var(--warning-soft); color: var(--warning-text); }
+
+@media (max-height: 640px) {
+  .terminal-panel { height: 170px; min-height: 120px; }
+}

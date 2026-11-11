@@ -1003,7 +1003,13 @@ describe("样式分层结构", () => {
   it("src/app.css 只做 @import 聚合且顺序固定", () => {
     const entry = read(path.join(root, "src", "app.css")).replace(/\/\*[\s\S]*?\*\//g, "").trim();
     const imports = [...entry.matchAll(/@import\s+"([^"]+)";/g)].map((match) => match[1]);
-    expect(imports).toEqual(["./styles/tokens.css", "./styles/base.css", "./styles/components.css", "./styles/layout.css"]);
+    expect(imports).toEqual([
+      "./styles/tokens.css",
+      "./styles/base.css",
+      "./styles/components.css",
+      "./styles/layout.css",
+      "./styles/terminal.css",
+    ]);
     const withoutImports = entry.replace(/@import\s+"[^"]+";/g, "").trim();
     expect(withoutImports, "入口文件不应包含规则").toBe("");
   });

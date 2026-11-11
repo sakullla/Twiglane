@@ -630,6 +630,16 @@ const SHELL_COMMANDS: CommandSpec[] = [
     hint: "Git 与 WebView2 的安装说明",
     available: () => true,
   },
+  {
+    /** 与状态栏入口同一条命令：终端是工作台底部面板，不是第四个视图。 */
+    id: "terminal.toggle",
+    group: "界面",
+    title: "终端",
+    hint: "在仓库根目录展开或收起底部交互终端",
+    keywords: "terminal shell console 命令行 构建 测试 运行",
+    available: hasRepo,
+    reason: hasRepoReason,
+  },
 ];
 
 /** 静态部分：标题栏、溢出菜单与键盘层按 id 查的就是这一份。 */

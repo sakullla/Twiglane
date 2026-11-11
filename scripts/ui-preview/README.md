@@ -23,6 +23,7 @@ curl -s http://127.0.0.1:1430/__ui-preview/health
   - `?commit=push`：本地提交成功、推送失败，长推送错误可展开，重试入口只推送；
   - `?commitdoc=1`：给提交详情补一个 `README.md`，用来走「历史差异 → 阅读文档」入口（默认数据不变，不影响既有对照截图）；
   - `?edit=conflict` / `?edit=fail` / `?edit=mixed`：轻量编辑的保存冲突（草稿保留、不能按旧基线再保存）、写入失败（草稿保留、可就地重试）与混合行尾只读；不带参数时保存只改写 mock 内存里的文件内容，不代表真实写入；
+  - `?terminal=error` / `?terminal=exited` / `?terminal=write`：底部终端的启动失败、打开时已退出（可重新启动）与写入失败。默认 mock 只在内存里回显输入，输入 `exit` 回车后给出退出码 0；它不执行真实命令，也不代表桌面 PTY 行为；
   - `?recent=many`、`?recent=empty`、`?git=missing`、`?merge=conflict`、`?filter=truncated`、`?filter=error`、`?search=error` 等按异常状态展开。`?filter=error` 让树过滤的全仓补齐整体失败（说明里给「重试补齐」），`?search=error` 让全仓库文本搜索与文件内查找都失败（各自给出「重试搜索 / 重新读取目录」与「重试查找 / 重新读取文件」）。
 - `mock-files.ts` / `samples.ts`：目录、文档与差异样例。`README.md` 覆盖中文标题、同名重复标题、GFM 表格、只读任务列表、相对/缺失/外链、本地图片与远程图片占位。
 - `baseline-shots.mjs`：用 Chrome DevTools Protocol 驱动真实浏览器，按「起始页/改动/历史/任务/工作区总览/提交区/合并/设置」× 深色/浅色 × 1280×840/900×600 截图；Markdown 阅读样例另存为 `files-markdown`、`files-markdown-toc`，manifest 里 `group: "markdown"`，与对照图分开统计（新样例不能混进优化前后对照）；再用 `?remote=unchecked`、`?remote=stale`、`?commit=error`、`?commit=push`、`?doc=error`、`?doc=large`、`?search=error`、`?filter=error`、文件内查找失败、`?task=error` 与 `?history=hang` 截 11 个关键失败/未知状态（`group: "failure"`）。manifest 顶层写当前 workflow 标识（`2026-11-09-ai-coding-ui-ux`）与 `capturedAt`，runner 会核对这两项。失败态采哪几种「主题 × 尺寸」组合由 `--failure-targets` 决定（逗号分隔的 `<theme>:<size>`，默认 `dark:1280x840,light:1280x840,dark:900x600`；列四种即采全四组合），拼错的组合会打印可选值而不是安静跳过。产物命名是 `<theme>-<size>-<view>.png`，写到 `--out` 目录；`manifest.json` 默认写到 `--out` 的上一级（可用 `--manifest` 覆盖），`shots` 逐张记录 `theme/size/view/group/state/bytes/sha256`，收尾按 `group` 打印三类数量，与 `docs/verification/ui-ux-markdown-2026-11-08/manifest.json` 的结构一致。`--base` 换地址，`CHROME_PATH` 指定浏览器。
@@ -37,7 +38,7 @@ curl -s http://127.0.0.1:1430/__ui-preview/health
   发真实输入（不是 `element.click()` 或直接改 value）：任务打开、连续审阅（Alt+M / Alt+Shift+→）、空格整文件暂存、
   提交区提交、历史换选择后的加载结束，以及工作区总览的分组/未知/缺失/过期。滚动定位关掉了平滑滚动，并对候选点做
   `elementFromPoint` 命中测试，避免点到吸顶标题上。
-- `check-scenarios.mjs`：异常、大规模、提交/同步失败与 Markdown 阅读场景的可复跑自检（37 个场景，含轻量编辑的保存/冲突/写入失败/混合行尾只读、文档预览、目录、源码往返、相对链接、超限退路、读取失败、历史提交里的 Markdown 差异、远程未核/过期与提交失败展开）。其中「目录列出中文重复标题且各自可辨」会实际点击两个同名目录项，核对 heading 锚点不同、`aria-current` 落在各自条目且滚动位置不同；三个查找失败场景（全文搜索、树过滤补齐、文件内查找）会实际点击恢复按钮并核对同一条失败重新出现，确认恢复入口可执行。
+- `check-scenarios.mjs`：异常、大规模、提交/同步失败与 Markdown 阅读场景的可复跑自检（41 个场景，含轻量编辑的保存/冲突/写入失败/混合行尾只读、文档预览、目录、源码往返、相对链接、超限退路、读取失败、历史提交里的 Markdown 差异、远程未核/过期、提交失败展开，以及终端的展开/输入退出、启动失败、已退出重启与写入失败）。其中「目录列出中文重复标题且各自可辨」会实际点击两个同名目录项，核对 heading 锚点不同、`aria-current` 落在各自条目且滚动位置不同；三个查找失败场景（全文搜索、树过滤补齐、文件内查找）会实际点击恢复按钮并核对同一条失败重新出现，确认恢复入口可执行。
 
 ## 静态单文件页（没有常驻服务器时）
 

@@ -298,6 +298,7 @@
     onFileHistory={onFileHistory}
     onOpenDiff={onOpenDiff}
     onRevealPath={(path) => store.locate(path, null)}
+    includeIgnored={store.includeIgnored}
     {editRequest}
     {editReturn}
     {onEditSaved}

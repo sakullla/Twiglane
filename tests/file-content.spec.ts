@@ -11,11 +11,13 @@ const openDocumentUrl = vi.hoisted(() => vi.fn());
 const cancelDocumentResources = vi.hoisted(() => vi.fn(async () => {}));
 const repositoryEditSnapshot = vi.hoisted(() => vi.fn());
 const repositoryEditSave = vi.hoisted(() => vi.fn());
+const repositoryDirectory = vi.hoisted(() => vi.fn());
 vi.mock("../src/lib/api", () => ({
   api: {
     repositoryFileContent,
     repositoryEditSnapshot,
     repositoryEditSave,
+    repositoryDirectory,
     repositoryContentSearch,
     filePreview,
     repositoryDocument,
@@ -107,6 +109,7 @@ beforeEach(() => {
   cancelDocumentResources.mockClear();
   repositoryEditSnapshot.mockReset();
   repositoryEditSave.mockReset();
+  repositoryDirectory.mockReset();
   resetSyntaxPrefs();
 });
 
@@ -1037,5 +1040,58 @@ describe("轻量编辑", () => {
     await waitFor(() => expect(document.querySelector("[data-edit-goto]")).toBeNull());
     expect(editorBox()!.selectionStart).toBe(15);
     expect(document.querySelector("[data-edit-caret]")?.textContent).toContain("行 2，列 5");
+  });
+});
+
+describe("面包屑切换", () => {
+  function entry(path: string, kind: "file" | "directory", ignored = false) {
+    return { name: path.split("/").pop()!, path, kind, ignored, size: null, error: null };
+  }
+
+  it("点目录段列出上一级目录，可进入子目录并打开文件；点文件名列出同级文件", async () => {
+    repositoryFileContent.mockResolvedValue(text({ path: "src/lib/App.ts" }));
+    repositoryDirectory.mockImplementation(async (_repo: string, relative: string) => ({
+      generation: 4,
+      path: relative,
+      errors: [],
+      entries:
+        relative === ""
+          ? [entry("README.md", "file"), entry("src", "directory"), entry("docs", "directory")]
+          : relative === "src"
+            ? [entry("src/main.ts", "file"), entry("src/lib", "directory")]
+            : [entry("src/lib/App.ts", "file"), entry("src/lib/api.ts", "file")],
+    }));
+    const onRevealPath = vi.fn(async () => true);
+    render(FileContent, {
+      props: props({ path: "src/lib/App.ts", onRevealPath, includeIgnored: true }) as never,
+    });
+
+    await fireEvent.click(screen.getByRole("button", { name: "src" }));
+    await waitFor(() => expect(repositoryDirectory).toHaveBeenCalledWith(repoPath, "", true, 4, 1));
+    const listbox = await screen.findByRole("listbox", { name: "切换目录或文件" });
+    await waitFor(() => expect(listbox.querySelector('[data-crumb-entry="src"]')).toBeTruthy());
+    const names = [...listbox.querySelectorAll("[data-crumb-entry]")].map((row) => row.getAttribute("data-crumb-entry"));
+    // 根目录没有「上一级」；目录在前，文件在后。
+    expect(names).toEqual(["docs", "src", "README.md"]);
+    expect(listbox.querySelector('[data-crumb-entry="src"]')!.getAttribute("aria-selected")).toBe("true");
+
+    await fireEvent.click(listbox.querySelector('[data-crumb-entry="src"]')!);
+    await waitFor(() => expect(listbox.querySelector('[data-crumb-entry="src/main.ts"]')).toBeTruthy());
+    expect(listbox.querySelector('[data-crumb-entry=".."]')).toBeTruthy();
+    await fireEvent.click(listbox.querySelector('[data-crumb-entry="src/main.ts"]')!);
+    expect(onRevealPath).toHaveBeenCalledWith("src/main.ts", null);
+    await waitFor(() => expect(screen.queryByRole("listbox", { name: "切换目录或文件" })).toBeNull());
+
+    await fireEvent.click(screen.getByRole("button", { name: "App.ts" }));
+    const siblings = await screen.findByRole("listbox", { name: "切换目录或文件" });
+    await waitFor(() => expect(siblings.querySelector('[data-crumb-entry="src/lib/api.ts"]')).toBeTruthy());
+    expect(siblings.querySelector('[data-crumb-entry="src/lib/App.ts"]')!.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("没有定位入口时面包屑只是文字", async () => {
+    repositoryFileContent.mockResolvedValue(text());
+    render(FileContent, { props: props() as never });
+    await screen.findByText("App.ts");
+    expect(screen.queryByRole("button", { name: "src" })).toBeNull();
   });
 });

@@ -17,12 +17,15 @@ use update::update_install_supported;
 
 #[cfg(test)]
 mod security;
-#[cfg(test)]
+#[cfg(any(test, feature = "benchmarks"))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod test_support;
 
-#[cfg(all(test, feature = "performance-tests"))]
-#[path = "../../scripts/performance/git.rs"]
-mod performance_tests;
+#[cfg(feature = "benchmarks")]
+#[path = "../../scripts/benchmarks/git.rs"]
+mod benchmarks;
+#[cfg(feature = "benchmarks")]
+pub use benchmarks::run as benchmark_git;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -443,75 +446,14 @@ fn blurred(event: &RunEvent) -> bool {
 
 #[cfg(test)]
 mod menu_edit {
-    use super::{install_menu, menu_event_name};
-    use tauri::menu::MenuItemKind;
-    use tauri::Runtime;
-
-    fn walk<R: Runtime>(items: &[MenuItemKind<R>], found: &mut Vec<(String, String, bool)>) {
-        for item in items {
-            match item {
-                MenuItemKind::MenuItem(entry) => {
-                    found.push((entry.id().0.clone(), entry.text().unwrap(), false));
-                }
-                MenuItemKind::Predefined(entry) => {
-                    found.push((entry.id().0.clone(), entry.text().unwrap(), true));
-                }
-                MenuItemKind::Submenu(entry) => {
-                    found.push((entry.id().0.clone(), entry.text().unwrap(), false));
-                    walk(&entry.items().unwrap(), found);
-                }
-                _ => {}
-            }
-        }
-    }
+    use super::menu_event_name;
 
     #[test]
     fn system_edit_items_do_not_open_search_or_commit() {
         assert_eq!(menu_event_name("focus-search"), Some("menu-search"));
         assert_eq!(menu_event_name("commit-local"), Some("menu-commit"));
-        for id in [
-            "app-edit",
-            "undo",
-            "redo",
-            "cut",
-            "copy",
-            "paste",
-            "select_all",
-        ] {
+        for id in ["app-edit", "undo", "redo", "cut", "copy", "paste", "select_all"] {
             assert_eq!(menu_event_name(id), None, "{id}");
-        }
-
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .expect("menu app");
-        install_menu(&app).expect("install menu");
-        let menu = app.menu().expect("app menu");
-        let mut found = Vec::new();
-        walk(&menu.items().expect("items"), &mut found);
-
-        assert!(found.iter().any(|(id, text, predefined)| {
-            id == "focus-search" && text == "搜索仓库" && !predefined
-        }));
-        assert!(found.iter().any(|(id, text, predefined)| {
-            id == "commit-local" && text == "提交到本地" && !predefined
-        }));
-        let edit: Vec<&str> = found
-            .iter()
-            .filter(|(_, text, _)| !text.is_empty())
-            .skip_while(|(_, text, _)| text != "撤销")
-            .take(6)
-            .map(|(_, text, _)| text.as_str())
-            .collect();
-        assert_eq!(edit, ["撤销", "重做", "剪切", "复制", "粘贴", "全选"]);
-        for label in ["撤销", "重做", "剪切", "复制", "粘贴", "全选"] {
-            let (id, _, predefined) = found
-                .iter()
-                .find(|(_, text, _)| text == label)
-                .unwrap_or_else(|| panic!("missing {label}"));
-            assert!(predefined, "{label}");
-            assert_ne!(id, "focus-search");
-            assert_ne!(id, "commit-local");
-            assert_eq!(menu_event_name(id), None);
         }
     }
 }

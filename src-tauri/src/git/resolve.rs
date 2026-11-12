@@ -4038,7 +4038,6 @@ mod tests {
             .backend_with_extra_env(vec![("GIT_TRACE".into(), trace.as_os_str().to_os_string())]);
         let repo = fixture.repo("demo");
         git(&repo, &["init", "-b", "main"]);
-        let started = std::time::Instant::now();
         let session = merge_session(&backend, &repo_key(&repo), generation(&backend, &repo), 1)
             .await
             .unwrap();
@@ -4052,10 +4051,6 @@ mod tests {
             .lines()
             .filter(|line| line.contains("built-in: git rev-parse "))
             .count();
-        eprintln!(
-            "merge probe: {:?}, status={statuses}, path queries={paths}",
-            started.elapsed()
-        );
         assert_eq!(
             statuses, 1,
             "a merge probe must not scan the worktree twice"

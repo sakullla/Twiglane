@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { paletteScore, queryTokens, rankPalette } from "../src/lib/palette-match";
 import { paletteItems, type CommandState } from "../src/lib/commands";

@@ -1,7 +1,7 @@
 import type { CommitDetail, DiffResponse, OpenedRepository } from "../../src/lib/types";
 
 /** 独立压力测试的数据工具，不由普通测试导入。 */
-export class PerformanceFixture {
+export class ScaleFixture {
   readonly opened: OpenedRepository = {
     summary: { path: "/fixture", name: "fixture" }, generation: 1, draft: "", watchDegraded: false,
     snapshot: { generation: 1, files: [], branch: {

@@ -62,7 +62,7 @@ tauri = { version = "2.12.5", features = ["test"] }
 [features]
 default = []
 custom-protocol = ["tauri/custom-protocol"]
-performance-tests = []
+benchmarks = []
 
 [profile.release]
 opt-level = 3
@@ -71,3 +71,8 @@ codegen-units = 1
 strip = "symbols"
 panic = "abort"
 incremental = false
+
+[[example]]
+name = "benchmark-git"
+path = "../scripts/benchmarks/main.rs"
+required-features = ["benchmarks"]

@@ -87,6 +87,12 @@ const xtermMock = vi.hoisted(() => {
     onContextLoss() {}
     dispose() {}
   }
+  const webgls: FakeWebgl[] = [];
+  class FakeWebgl extends FakeAddon {
+    disposed = false;
+    constructor() { super(); webgls.push(this); }
+    override dispose() { this.disposed = true; }
+  }
   /** 查找插件：记录每次查找的参数，并能像 xterm 一样回报匹配计数。 */
   const searches: FakeSearch[] = [];
   class FakeSearch extends FakeAddon {
@@ -113,7 +119,7 @@ const xtermMock = vi.hoisted(() => {
       for (const handler of this.resultHandlers) handler({ resultIndex, resultCount });
     }
   }
-  return { instances, searches, Terminal: FakeTerminal, Addon: FakeAddon, Search: FakeSearch };
+  return { instances, searches, webgls, Webgl: FakeWebgl, Terminal: FakeTerminal, Addon: FakeAddon, Search: FakeSearch };
 });
 
 vi.mock("@xterm/xterm", () => ({ Terminal: xtermMock.Terminal }));
@@ -121,7 +127,7 @@ vi.mock("@xterm/addon-fit", () => ({ FitAddon: xtermMock.Addon }));
 vi.mock("@xterm/addon-search", () => ({ SearchAddon: xtermMock.Search }));
 vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: xtermMock.Addon }));
 vi.mock("@xterm/addon-unicode11", () => ({ Unicode11Addon: xtermMock.Addon }));
-vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: xtermMock.Addon }));
+vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: xtermMock.Webgl }));
 
 const windowMock = vi.hoisted(() => ({ close: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ close: windowMock.close }) }));
@@ -320,6 +326,7 @@ beforeEach(() => {
   mocks.handlers.clear();
   xtermMock.instances.length = 0;
   xtermMock.searches.length = 0;
+  xtermMock.webgls.length = 0;
   localStorage.clear();
   windowMock.close.mockReset();
   windowMock.close.mockResolvedValue(undefined);
@@ -528,6 +535,31 @@ describe("标签页与拆分布局", () => {
 /* ------------------------------------------------------------------ 面板 */
 
 describe("终端面板", () => {
+  it("隐藏终端释放 WebGL，再显示保留文本实例并恢复加速", async () => {
+    const { view } = await renderPanel();
+    const term = await waitForTerminal();
+    await waitFor(() => expect(xtermMock.webgls).toHaveLength(1));
+    await view.rerender({ open: false });
+    expect(xtermMock.webgls[0].disposed).toBe(true);
+    expect(term.disposed).toBe(false);
+    await view.rerender({ open: true });
+    await waitFor(() => expect(xtermMock.webgls).toHaveLength(2));
+    expect(xtermMock.instances).toHaveLength(1);
+    view.unmount();
+    expect(xtermMock.webgls[1].disposed).toBe(true);
+  });
+
+  it("启动请求期间卸载，迟到的新会话被关闭", async () => {
+    let finish!: (value: TerminalSnapshot) => void;
+    mocks.api.terminalCreate.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const { view } = await renderPanel();
+    await waitFor(() => expect(mocks.api.terminalCreate).toHaveBeenCalledTimes(1));
+    view.unmount();
+    finish(snapshot({ sessionId: "late" }));
+    await waitFor(() => expect(mocks.api.terminalClose).toHaveBeenCalledWith("late"));
+    expect(xtermMock.instances).toHaveLength(0);
+  });
+
   it("首次展开在仓库根目录新建会话；附着快照、丢弃旧序号与其他会话、显示退出码", async () => {
     await renderPanel();
     const term = await waitForTerminal();

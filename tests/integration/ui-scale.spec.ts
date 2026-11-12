@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { PerformanceFixture } from "./fixtures";
+import { ScaleFixture } from "./fixtures";
 import type { BranchRecord, DiffResponse, FileChange, FileRow, RepositoryDocument } from "../../src/lib/types";
 import { toSideRows, type ViewLine } from "../../src/lib/diff";
 import { createSelectionResolver } from "../../src/lib/labels";
@@ -26,7 +26,7 @@ import FileSearch from "../../src/lib/components/FileSearch.svelte";
 import FileTree from "../../src/lib/components/FileTree.svelte";
 import { createFilesStore, flattenTree, makeNode, type FileNode } from "../../src/lib/files.svelte";
 
-const { opened, detail, diff } = new PerformanceFixture();
+const { opened, detail, diff } = new ScaleFixture();
 
 beforeEach(() => { Object.values(api).forEach((mock) => mock.mockReset()); });
 
@@ -37,10 +37,8 @@ describe("大仓库的有界读取和渲染", () => {
       get path() { pathReads += 1; return `file-${index}.txt`; },
       originalPath: null, staged: "modified", unstaged: "none", untracked: false, unmerged: false,
     }));
-    const start = performance.now();
     const resolve = createSelectionResolver(files, true);
     const result = Array.from({ length: files.length }, (_, index) => resolve({ path: `file-${index}.txt`, side: "unstaged" }));
-    console.info(`20000 working tree selections: ${(performance.now() - start).toFixed(2)} ms`);
     expect(result.every((item) => item?.side === "staged")).toBe(true);
     expect(pathReads).toBe(files.length);
   });
@@ -82,9 +80,7 @@ describe("大仓库的有界读取和渲染", () => {
       { kind: "nonewline", text: "no newline", oldNo: null, newNo: null, hunkIndex: 0 },
       ...Array.from({ length: count + 1 }, (_, i) => ({ kind: "add", text: `+${i}`, oldNo: null, newNo: i + 1, hunkIndex: 0 })),
     ];
-    const start = performance.now();
     const rows = toSideRows(lines);
-    console.info(`20000-line replacement pairing: ${(performance.now() - start).toFixed(2)} ms`);
     expect(rows).toHaveLength(count + 2);
     for (let i = 0; i < count; i++) {
       expect([rows[i].left?.no, rows[i].right?.no]).toEqual([i + 1, i + 1]);
@@ -190,11 +186,11 @@ describe("大仓库的有界读取和渲染", () => {
     const rows = flattenTree([rootNode]);
     const height = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
     try {
-      const start = performance.now();
       render(FileTree, {
         props: {
           rows,
           selectedPath: "src/gen/file-19999.ts",
+          selectedPaths: new Set<string>(),
           loading: false,
           failure: null,
           query: "",
@@ -204,12 +200,13 @@ describe("大仓库的有界读取和渲染", () => {
           onIncludeIgnored: vi.fn(),
           onToggle: vi.fn(),
           onSelect: vi.fn(),
+          onSelectAll: vi.fn(),
+          onClearSelection: vi.fn(),
           onSplit: vi.fn(),
           onRefresh: vi.fn(),
         } as never,
       });
       await tick();
-      console.info("20000-row file tree render: " + (performance.now() - start).toFixed(2) + " ms");
       expect(document.querySelectorAll(".file-tree-row").length).toBeLessThan(100);
 
       const lines = Array.from({ length: 1000 }, (_, index) => "const row" + index + " = compute(" + index + ");");
@@ -273,7 +270,6 @@ describe("Markdown 阅读的规模与旧响应", () => {
   it("长文档按批上屏，DOM 不随段落数一起增长", async () => {
     const text = Array.from({ length: 400 }, (_, index) => `## 标题 ${index}\n\n第 ${index} 段正文。`).join("\n\n");
     api.repositoryDocument.mockResolvedValue(markdownDoc("docs/long.md", text));
-    const start = performance.now();
     render(FileContent, {
       props: {
         active: true,
@@ -286,7 +282,6 @@ describe("Markdown 阅读的规模与旧响应", () => {
       } as never,
     });
     await waitFor(() => expect(document.querySelectorAll(".md-block").length).toBeGreaterThan(0));
-    console.info("800-paragraph markdown first paint: " + (performance.now() - start).toFixed(2) + " ms");
     // 首屏只挂一档（48 段），其余由「继续阅读」补齐：段落再多也不会一次排进 DOM。
     expect(document.querySelectorAll(".md-block").length).toBeLessThanOrEqual(48);
     expect(screen.getByRole("button", { name: "继续阅读" })).toBeTruthy();
@@ -389,7 +384,6 @@ describe("文件搜索的规模入口", () => {
     await store.sync("C:/work/demo");
     const height = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
     try {
-      const start = performance.now();
       render(FileSearch, {
         store,
         disabled: false,
@@ -401,7 +395,6 @@ describe("文件搜索的规模入口", () => {
       store.setPathQuery("file-");
       await waitFor(() => expect(store.pathResult?.entries.length).toBe(20_000));
       await tick();
-      console.info("20000 path results render: " + (performance.now() - start).toFixed(2) + " ms");
       expect(document.querySelectorAll(".file-search-row").length).toBeLessThan(100);
       expect(document.querySelector(".file-search-note")?.textContent).toContain("已截断");
     } finally {

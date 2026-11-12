@@ -9,6 +9,9 @@ use crate::model::{
 
 pub const DIFF_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
 pub const DIFF_VIEW_LINE_LIMIT: u32 = 2_000;
+// 字节上限不能约束大量空行的对象开销，也不能保护单个超长 DOM 文本节点。
+const DIFF_PARSE_LINE_LIMIT: usize = 100_000;
+const DIFF_DISPLAY_LINE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedHunk {
@@ -38,7 +41,7 @@ pub fn snapshot_token(raw: &[u8], truncated: bool, path: &str, staged: bool) -> 
     hex_encode(hasher.finalize().as_slice())
 }
 
-pub fn parse_diff(bytes: &[u8], truncated_input: bool) -> Result<ParsedDiff, AppError> {
+pub fn parse_diff(bytes: &[u8], mut truncated_input: bool) -> Result<ParsedDiff, AppError> {
     if bytes.is_empty() {
         return Ok(ParsedDiff {
             binary: false,
@@ -61,12 +64,19 @@ pub fn parse_diff(bytes: &[u8], truncated_input: bool) -> Result<ParsedDiff, App
             truncated: truncated_input,
         });
     }
-    let text = std::str::from_utf8(bytes).map_err(|_| {
-        AppError::new(
-            "diff_encoding",
-            "差异包含无法安全显示的内容，已停止读取且未修改仓库。",
-        )
-    })?;
+    let text = match std::str::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) if truncated_input && error.error_len().is_none() => {
+            // 输出预算可能正好切在多字节字符中间，只舍弃最后未完成的字符。
+            std::str::from_utf8(&bytes[..error.valid_up_to()]).expect("validated UTF-8 prefix")
+        }
+        Err(_) => {
+            return Err(AppError::new(
+                "diff_encoding",
+                "差异包含无法安全显示的内容，已停止读取且未修改仓库。",
+            ))
+        }
+    };
     if is_binary_diff(text) {
         return Ok(ParsedDiff {
             binary: true,
@@ -78,7 +88,14 @@ pub fn parse_diff(bytes: &[u8], truncated_input: bool) -> Result<ParsedDiff, App
             truncated: truncated_input,
         });
     }
-    let lines = split_keep(text);
+    let mut lines: Vec<&str> = text
+        .split_inclusive('\n')
+        .take(DIFF_PARSE_LINE_LIMIT + 1)
+        .collect();
+    if lines.len() > DIFF_PARSE_LINE_LIMIT {
+        lines.truncate(DIFF_PARSE_LINE_LIMIT);
+        truncated_input = true;
+    }
     let hunk_at = lines.iter().position(|line| line.starts_with("@@"));
     let (preamble_lines, hunk_lines) = match hunk_at {
         Some(index) => (&lines[..index], &lines[index..]),
@@ -87,6 +104,9 @@ pub fn parse_diff(bytes: &[u8], truncated_input: bool) -> Result<ParsedDiff, App
     let preamble = preamble_lines.concat();
     let mut hunks = Vec::new();
     let mut cursor = 0;
+    let mut clipped = preamble_lines
+        .iter()
+        .any(|line| line.len() > DIFF_DISPLAY_LINE_BYTES);
     while cursor < hunk_lines.len() {
         let end = hunk_lines[cursor + 1..]
             .iter()
@@ -94,11 +114,15 @@ pub fn parse_diff(bytes: &[u8], truncated_input: bool) -> Result<ParsedDiff, App
             .map(|offset| cursor + 1 + offset)
             .unwrap_or(hunk_lines.len());
         let raw = hunk_lines[cursor..end].concat();
-        let header = hunk_lines[cursor]
-            .trim_end_matches(['\n', '\r'])
-            .to_string();
+        let full_header = hunk_lines[cursor].trim_end_matches(['\n', '\r']);
+        let header = display_text(full_header);
         let last = end == hunk_lines.len();
-        let complete = hunk_is_complete(&header, &hunk_lines[cursor..end], truncated_input && last);
+        let oversized = hunk_lines[cursor..end]
+            .iter()
+            .any(|line| line.trim_end_matches(['\n', '\r']).len() > DIFF_DISPLAY_LINE_BYTES);
+        clipped |= oversized;
+        let complete = !oversized
+            && hunk_is_complete(&header, &hunk_lines[cursor..end], truncated_input && last);
         let display = hunk_display_lines(hunks.len() as u32, &header, &hunk_lines[cursor..end]);
         hunks.push(ParsedHunk {
             index: hunks.len() as u32,
@@ -117,7 +141,7 @@ pub fn parse_diff(bytes: &[u8], truncated_input: bool) -> Result<ParsedDiff, App
         hunks,
         additions,
         deletions,
-        truncated: truncated_input,
+        truncated: truncated_input || clipped,
     })
 }
 
@@ -476,7 +500,7 @@ pub fn view_lines(
         for text in meta().skip(offset as usize).take((end - offset) as usize) {
             window.push(DiffLine {
                 kind: "meta".to_string(),
-                text: text.to_string(),
+                text: display_text(text),
                 old_no: None,
                 new_no: None,
                 hunk_index: None,
@@ -544,12 +568,27 @@ fn parse_stat(token: &str) -> Option<u64> {
     token.parse().ok()
 }
 
-fn is_binary_diff(text: &str) -> bool {
-    if text.contains("GIT binary patch") {
-        return true;
+fn display_text(text: &str) -> String {
+    if text.len() <= DIFF_DISPLAY_LINE_BYTES {
+        return text.to_string();
     }
-    let lower = text.to_ascii_lowercase();
-    (lower.contains("binary files ") || lower.starts_with("binary file")) && !text.contains("\n@@")
+    let mut end = DIFF_DISPLAY_LINE_BYTES - "…".len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+fn is_binary_diff(text: &str) -> bool {
+    // 二进制标记只在文件头里有效，正文中的同名文字仍是文本；不复制整份补丁做小写转换。
+    text.lines()
+        .take_while(|line| !line.starts_with("@@"))
+        .any(|line| {
+            line == "GIT binary patch"
+                || line
+                    .get(..11)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("binary file"))
+        })
 }
 
 fn hunk_is_complete(header: &str, lines: &[&str], truncated_tail: bool) -> bool {
@@ -604,7 +643,7 @@ fn hunk_display_lines(index: u32, header: &str, lines: &[&str]) -> Vec<DiffLine>
         if body.starts_with('\\') {
             display.push(DiffLine {
                 kind: "nonewline".to_string(),
-                text: body.to_string(),
+                text: display_text(body),
                 old_no: None,
                 new_no: None,
                 hunk_index: Some(index),
@@ -616,7 +655,7 @@ fn hunk_display_lines(index: u32, header: &str, lines: &[&str]) -> Vec<DiffLine>
             new_no = new_no.saturating_add(1);
             display.push(DiffLine {
                 kind: "add".to_string(),
-                text: body.to_string(),
+                text: display_text(body),
                 old_no: None,
                 new_no: Some(current),
                 hunk_index: Some(index),
@@ -626,7 +665,7 @@ fn hunk_display_lines(index: u32, header: &str, lines: &[&str]) -> Vec<DiffLine>
             old_no = old_no.saturating_add(1);
             display.push(DiffLine {
                 kind: "del".to_string(),
-                text: body.to_string(),
+                text: display_text(body),
                 old_no: Some(current),
                 new_no: None,
                 hunk_index: Some(index),
@@ -638,7 +677,7 @@ fn hunk_display_lines(index: u32, header: &str, lines: &[&str]) -> Vec<DiffLine>
             new_no = new_no.saturating_add(1);
             display.push(DiffLine {
                 kind: "context".to_string(),
-                text: body.to_string(),
+                text: display_text(body),
                 old_no: Some(current_old),
                 new_no: Some(current_new),
                 hunk_index: Some(index),
@@ -881,6 +920,52 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn truncated_utf8_tail_keeps_the_valid_prefix_but_rejects_invalid_bytes() {
+        let mut raw = b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -0,0 +1 @@\n+".to_vec();
+        raw.extend_from_slice(&[0xe4, 0xb8]);
+        let parsed = parse_diff(&raw, true).expect("截断在中文字符中间仍可预览");
+        assert!(parsed.truncated);
+        assert!(!parsed.hunks[0].complete);
+        assert!(parse_diff(&raw, false).is_err());
+        raw.push(0xff);
+        assert!(parse_diff(&raw, true).is_err());
+    }
+
+    #[test]
+    fn huge_line_preview_is_bounded_and_cannot_be_partially_staged() {
+        let raw = format!(
+            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -0,0 +1 @@\n+{}\n",
+            "界".repeat(50_000)
+        );
+        let parsed = parse_diff(raw.as_bytes(), false).unwrap();
+        assert!(parsed.truncated);
+        assert!(parsed.hunks[0].lines[1].text.len() <= 64 * 1024);
+        assert!(!parsed.hunks[0].complete);
+        assert_eq!(
+            build_patch(&parsed, &[0]).unwrap_err().code,
+            "truncated_hunk"
+        );
+    }
+
+    #[test]
+    fn many_tiny_lines_have_a_structural_memory_budget() {
+        let raw = format!(
+            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -0,0 +1,200000 @@\n{}",
+            "+\n".repeat(200_000)
+        );
+        let parsed = parse_diff(raw.as_bytes(), false).unwrap();
+        assert!(parsed.truncated);
+        assert!(parsed.hunks[0].lines.len() <= 100_000);
+        assert!(!parsed.hunks[0].complete);
+    }
+
+    #[test]
+    fn binary_marker_inside_text_does_not_hide_a_text_diff() {
+        let raw = b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -0,0 +1 @@\n+GIT binary patch\n";
+        assert!(!parse_diff(raw, false).unwrap().binary);
+    }
+
     use super::*;
 
     fn sample() -> &'static str {

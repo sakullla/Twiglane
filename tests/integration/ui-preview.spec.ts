@@ -1,3 +1,4 @@
+// @vitest-environment node
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
@@ -15,7 +16,7 @@ import { createServer, type Logger, type ViteDevServer } from "vite";
  * 限制：只证明浏览器模拟预览；不代表真实 Git 或平台行为。
  * ------------------------------------------------------------------ */
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const configFile = path.join(root, "scripts/ui-preview/vite.config.mjs");
 const realApi = path.join(root, "src/lib/api.ts").replace(/\\/g, "/");
 
@@ -48,7 +49,7 @@ function get(port: number, urlPath: string): Promise<{ status: number; body: str
 describe("浏览器预览的 mock 替换", () => {
   let server: ViteDevServer;
   let port = 0;
-  let previewConfig: typeof import("../scripts/ui-preview/vite.config.mjs");
+  let previewConfig: typeof import("../../scripts/ui-preview/vite.config.mjs");
 
   beforeAll(async () => {
     port = await freePort();
@@ -62,7 +63,7 @@ describe("浏览器预览的 mock 替换", () => {
     // 全量 npm test 并行时冷编译可能超过单个请求的 15s 超时，结果取决于机器负载而不是 mock 替换本身。
     await server.transformRequest("/src/lib/api.ts");
     await server.transformRequest("/src/App.svelte");
-    previewConfig = await import("../scripts/ui-preview/vite.config.mjs");
+    previewConfig = await import("../../scripts/ui-preview/vite.config.mjs");
   }, 90_000);
 
   afterAll(async () => {
@@ -147,7 +148,7 @@ describe("预览端口守卫", () => {
   }
 
   it("端口真的被占用时判定为占用，释放后判定为空闲", async () => {
-    const { portInUse } = await import("../scripts/ui-preview/vite.config.mjs");
+    const { portInUse } = await import("../../scripts/ui-preview/vite.config.mjs");
     const blocker = net.createServer();
     const busy = await listenOn(blocker);
     try {
@@ -160,7 +161,7 @@ describe("预览端口守卫", () => {
   }, 30_000);
 
   it("--host 得到的布尔 host 不会被当成地址传给 net.connect", async () => {
-    const { HOST, portInUse, probeHost } = await import("../scripts/ui-preview/vite.config.mjs");
+    const { HOST, portInUse, probeHost } = await import("../../scripts/ui-preview/vite.config.mjs");
     expect(probeHost(true)).toBe(HOST);
     expect(probeHost(undefined)).toBe(HOST);
     expect(probeHost("")).toBe(HOST);
@@ -178,7 +179,7 @@ describe("预览端口守卫", () => {
   }, 30_000);
 
   it("占用时给出可执行诊断，并按 fatal 决定是否退出", async () => {
-    const { reportPortInUse } = await import("../scripts/ui-preview/vite.config.mjs");
+    const { reportPortInUse } = await import("../../scripts/ui-preview/vite.config.mjs");
     const lines: string[] = [];
     const logger = { error: (message: string) => lines.push(message) };
     const exits: number[] = [];
@@ -242,4 +243,23 @@ describe("预览端口守卫", () => {
     // VITEST 下守卫不 process.exit（否则会把整个测试进程带走），但必须留下原因。
     expect(errors.join("\n")).toContain("已被其他进程占用");
   }, 60_000);
+});
+
+import { mockDocument } from "../../scripts/ui-preview/mock-files";
+
+describe("浏览器预览的文档 mock", () => {
+  it("document 模式也带齐原生字段：暂存区版本改写正文时读得到 lines", () => {
+    const document = mockDocument({ revision: "index", path: "README.md" }, "document", 0, undefined, 1);
+    expect(document.kind).toBe("text");
+    expect(document.text).toBeTruthy();
+    // 曾经缺 lines：预览里从差异打开「阅读文档」读暂存区版本会报 reading 'length'。
+    expect(Array.isArray(document.lines)).toBe(true);
+    expect(document.version).toBeNull();
+  });
+
+  it("source 模式按页返回源码行", () => {
+    const document = mockDocument({ revision: "index", path: "README.md" }, "source", 0, 2, 1);
+    expect(document.lines).toHaveLength(2);
+    expect(document.hasMore).toBe(true);
+  });
 });

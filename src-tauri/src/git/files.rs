@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{BufRead, BufReader, ErrorKind, Read};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -466,6 +466,7 @@ fn empty_content(
 
 #[derive(Debug, Default)]
 struct LineChunk {
+    consumed: u64,
     any: bool,
     truncated: bool,
     binary: bool,
@@ -513,6 +514,7 @@ fn read_line_chunk<R: BufRead>(
             }
         }
         reader.consume(consumed);
+        chunk.consumed += consumed as u64;
         if at_line_end {
             return Ok(chunk);
         }
@@ -535,6 +537,17 @@ pub(super) fn read_text_page(
     offset: u64,
     limit: usize,
     cancel: Arc<Shutdown>,
+) -> Result<RepositoryFileContent, AppError> {
+    read_text_page_cached(root, relative, offset, limit, cancel, None)
+}
+
+fn read_text_page_cached(
+    root: PathBuf,
+    relative: PathBuf,
+    offset: u64,
+    limit: usize,
+    cancel: Arc<Shutdown>,
+    cache: Option<&super::text_cursor::TextCursorCache>,
 ) -> Result<RepositoryFileContent, AppError> {
     check_cancel(&cancel)?;
     let display = display_path(&relative);
@@ -579,6 +592,9 @@ pub(super) fn read_text_page(
     }
     let mut file = fs::File::open(&resolved)
         .map_err(|error| AppError::new("path_unreadable", format!("无法打开文件：{error}")))?;
+    let meta = file
+        .metadata()
+        .map_err(|error| AppError::new("path_unreadable", format!("无法读取文件信息：{error}")))?;
     let mut probe = [0_u8; PROBE_BYTES];
     let count = file
         .read(&mut probe)
@@ -605,9 +621,14 @@ pub(super) fn read_text_page(
             "二进制内容不作为文本读取。",
         ));
     }
-    let chain = std::io::Cursor::new(probe.to_vec()).chain(file);
-    let mut reader = BufReader::new(chain);
-    let mut skipped = 0_u64;
+    let version = file_version(&meta);
+    let (mut skipped, mut position) = cache
+        .zip(version.as_deref())
+        .map(|(cache, version)| cache.nearest(&resolved, version, offset))
+        .unwrap_or((0, 0));
+    file.seek(SeekFrom::Start(position))
+        .map_err(|error| AppError::new("path_unreadable", format!("无法定位文件：{error}")))?;
+    let mut reader = BufReader::new(file);
     let mut buffer = Vec::new();
     while skipped < offset {
         check_cancel(&cancel)?;
@@ -630,8 +651,10 @@ pub(super) fn read_text_page(
                 "二进制内容不作为文本读取。",
             ));
         }
+        position += chunk.consumed;
         skipped += 1;
     }
+    let page_start = position;
     let mut lines: Vec<String> = Vec::new();
     let mut bytes = 0_usize;
     let mut truncated = false;
@@ -682,6 +705,7 @@ pub(super) fn read_text_page(
             }
         };
         truncated |= chunk.truncated;
+        position += chunk.consumed;
         bytes += line.len();
         lines.push(line);
         if bytes >= MAX_PAGE_BYTES {
@@ -696,6 +720,27 @@ pub(super) fn read_text_page(
             .map_err(|error| AppError::new("path_unreadable", format!("无法读取文件：{error}")))?
             .is_empty()
     };
+    check_cancel(&cancel)?;
+    // 文件在读取中改变时不发布索引；下一页仍通过版本变化触发正文重读。
+    if let Some((cache, version)) = cache.zip(version) {
+        if reader
+            .get_ref()
+            .metadata()
+            .ok()
+            .and_then(|meta| file_version(&meta))
+            .as_deref()
+            == Some(&version)
+        {
+            cache.remember(
+                resolved,
+                version,
+                [
+                    (offset, page_start),
+                    (offset + lines.len() as u64, position),
+                ],
+            );
+        }
+    }
     Ok(RepositoryFileContent {
         generation: 0,
         path: display,
@@ -723,10 +768,11 @@ pub async fn repository_file_content(
     let root = canonical_existing(&validate_input_path(path)?)?;
     let relative_path = safe_relative(relative)?;
     let limit = limit.unwrap_or(DEFAULT_PAGE_LINES).clamp(1, MAX_PAGE_LINES);
+    let cursors = Arc::clone(&backend.text_cursors);
     let mut result = backend
         .scheduler
         .execute_blocking_read(&repo_key(&root), request_id, generation, move |cancel| {
-            read_text_page(root, relative_path, offset, limit, cancel)
+            read_text_page_cached(root, relative_path, offset, limit, cancel, Some(&cursors))
         })
         .await?;
     result.generation = generation;
@@ -2408,6 +2454,89 @@ pub async fn repository_edit_save(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cached_pages_preserve_byte_boundaries_and_invalidate_changed_files() {
+        let dir = crate::test_support::TempDir::new("text-cursors");
+        let root = dir.path().to_path_buf();
+        let path = root.join("large.txt");
+        let cache = super::super::text_cursor::TextCursorCache::default();
+        let line = "界".repeat(20_000);
+        let original = format!("{line}\r\n").repeat(8);
+        fs::write(&path, &original).unwrap();
+        let read = |offset| {
+            read_text_page_cached(
+                root.clone(),
+                "large.txt".into(),
+                offset,
+                500,
+                Arc::new(Shutdown::new()),
+                Some(&cache),
+            )
+            .unwrap()
+        };
+        let first = read(0);
+        assert_eq!(first.lines.len(), 4);
+        assert_eq!(first.next_offset, 4);
+        let version = first.version.as_deref().unwrap();
+        assert_eq!(
+            cache.nearest(&path, version, 4),
+            (4, 4 * (line.len() + 2) as u64)
+        );
+        let second = read(4);
+        assert_eq!(second.lines, vec![line.clone(); 4]);
+        assert_eq!(second.next_offset, 8);
+        assert!(!second.has_more);
+        // 同名文件被替换后不能继续使用旧字节位置。
+        fs::write(&path, "one\ntwo\nthree\nfour\nlast").unwrap();
+        assert_eq!(read(4).lines, vec!["last"]);
+        assert_eq!(read(0).lines, vec!["one", "two", "three", "four", "last"]);
+    }
+
+    #[test]
+    fn cached_pages_keep_long_line_positions_and_cancellation() {
+        let dir = crate::test_support::TempDir::new("text-long-cursor");
+        let root = dir.path().to_path_buf();
+        let path = root.join("large.txt");
+        fs::write(
+            &path,
+            format!("{}\nnext😀\nlast", "x".repeat(2 * 1024 * 1024)),
+        )
+        .unwrap();
+        let cache = super::super::text_cursor::TextCursorCache::default();
+        let first = read_text_page_cached(
+            root.clone(),
+            "large.txt".into(),
+            0,
+            1,
+            Arc::new(Shutdown::new()),
+            Some(&cache),
+        )
+        .unwrap();
+        assert!(first.truncated);
+        assert_eq!(
+            cache.nearest(&path, first.version.as_deref().unwrap(), 1),
+            (1, 2 * 1024 * 1024 + 1)
+        );
+        let second = read_text_page_cached(
+            root.clone(),
+            "large.txt".into(),
+            1,
+            1,
+            Arc::new(Shutdown::new()),
+            Some(&cache),
+        )
+        .unwrap();
+        assert_eq!(second.lines, vec!["next😀"]);
+        let cancel = Arc::new(Shutdown::new());
+        cancel.cancel();
+        assert_eq!(
+            read_text_page_cached(root, "large.txt".into(), 1, 1, cancel, Some(&cache))
+                .unwrap_err()
+                .code,
+            "cancelled"
+        );
+    }
+
     use super::*;
     use std::process::Command;
 

@@ -112,7 +112,12 @@ fn apply_noninteractive(
 }
 
 pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerError> {
-    if request.shutdown.is_cancelled() {
+    if request.shutdown.is_cancelled()
+        || request
+            .cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+    {
         return Err(RunnerError::Cancelled);
     }
     let mut command = Command::new(&request.program);
@@ -183,15 +188,25 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
                 stdin_result = Some(result);
             }
             result = &mut stdout_read, if stdout_buf.is_none() => {
-                let (buf, truncated) = result?;
-                stdout_truncated = truncated;
-                stdout_buf = Some(buf);
+                match result {
+                    Ok((buf, truncated)) => {
+                        stdout_truncated = truncated;
+                        stdout_buf = Some(buf);
+                    }
+                    Err(error) => stop = Some(error),
+                }
             }
             result = &mut stderr_read, if stderr_buf.is_none() => {
-                stderr_buf = Some(result?.0);
+                match result {
+                    Ok((buf, _)) => stderr_buf = Some(buf),
+                    Err(error) => stop = Some(error),
+                }
             }
             result = child.wait(), if status.is_none() => {
-                status = Some(result.map_err(|error| RunnerError::Io(error.to_string()))?);
+                match result {
+                    Ok(value) => status = Some(value),
+                    Err(error) => stop = Some(RunnerError::Io(error.to_string())),
+                }
             }
             _ = &mut sleep => {
                 stop = Some(RunnerError::Timeout);
@@ -276,6 +291,19 @@ where
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[tokio::test]
+    async fn already_cancelled_reads_do_not_spawn_a_process() {
+        let cancel = Arc::new(Shutdown::new());
+        cancel.cancel();
+        let mut request = RealRunner::default().base_request(
+            PathBuf::from("missing-program-must-not-spawn"),
+            Vec::new(),
+            Arc::new(Shutdown::new()),
+        );
+        request.cancel = Some(cancel);
+        assert_eq!(run_process(request).await, Err(RunnerError::Cancelled));
+    }
 
     fn python() -> Option<PathBuf> {
         std::env::var_os("PYTHON").map(PathBuf::from).or_else(|| {
@@ -385,6 +413,26 @@ mod tests {
         let output = result.unwrap().unwrap();
         assert!(output.stdout_truncated);
         assert_eq!(output.stdout.len(), 1024);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_limit_reaps_the_child_before_returning() {
+        let dir = crate::test_support::TempDir::new("runner-limit-reap");
+        let pid_file = dir.path().join("pid");
+        let mut request = RealRunner::default().base_request(
+            python().expect("需要 Python 验证进程回收"),
+            vec!["-c".into(), "import os,sys,time,pathlib; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); sys.stdout.buffer.write(b'x'*2000000); sys.stdout.buffer.flush(); time.sleep(30)".into(), pid_file.as_os_str().to_os_string()],
+            Arc::new(Shutdown::new()),
+        );
+        request.output_limit = 1024;
+        assert_eq!(run_process(request).await, Err(RunnerError::OutputLimit));
+        let pid: i32 = std::fs::read_to_string(pid_file).unwrap().parse().unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
     }
 
     #[tokio::test]

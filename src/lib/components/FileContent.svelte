@@ -5,6 +5,7 @@
   import { fileTone, matchSnippet } from "../file-kind";
   import { trackCodeScroll } from "../codeScroll.svelte";
   import { normalizeError } from "../errors";
+  import { appendFileWindow } from "../file-window";
   import { fileEditor, isDirty, type EditContext, type FileEditor } from "../file-editor.svelte";
   import {
     createDocumentSession,
@@ -368,8 +369,14 @@
       }
       content = page;
       if (page.kind === "text") {
-        lines = append ? [...lines, ...page.lines] : page.lines;
-        pageOffset = append ? pageOffset : offset;
+        const window = appendFileWindow(append ? lines : [], page.lines);
+        lines = window.lines;
+        pageOffset = (append ? pageOffset : offset) + window.dropped;
+        if (append && window.dropped > 0) {
+          allSelected = false;
+          scrollTop = Math.max(0, scrollTop - window.dropped * ROW_HEIGHT);
+          if (scroller) scroller.scrollTop = scrollTop;
+        }
         hasMore = page.hasMore;
         if (!append) {
           scrollTop = 0;

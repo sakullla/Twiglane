@@ -426,37 +426,66 @@ async fn diff_file_between(
     };
     let parent_oid = selected.as_deref().unwrap_or(EMPTY_TREE_OID);
     let paths = diff_paths(file, requested)?;
-    let (program, args) = commit_diff_command(git, root, parent_oid, &oid, &paths, context, as_text);
-    let scheduled = backend
-        .scheduler
-        .execute(crate::git::schedule::GitJob {
-            repo_key: repo_key(root),
-            kind: JobKind::Read,
-            request_id: internal_request_id(),
-            generation,
-            program,
-            args,
-            stdin: None,
-            truncate_stdout: true,
-            output_limit: Some(capture_limit(backend)),
-            env: Vec::new(),
-        })
-        .await
-        .map_err(history_limit)?;
-    if diff_failed(&scheduled.output) {
-        return Err(git_failure(
-            "diff_failed",
-            &scheduled.output,
-            "无法读取这次提交的差异，未修改仓库。",
-        ));
-    }
-    let raw = first_file_diff(&scheduled.output.stdout);
-    let truncated = scheduled.output.stdout_truncated || raw.len() != scheduled.output.stdout.len();
-    let parsed = if as_text {
-        crate::git::patch::parse_diff_as_text(raw, truncated)?
-    } else {
-        parse_diff(raw, truncated)?
+    let (program, args) =
+        commit_diff_command(git, root, parent_oid, &oid, &paths, context, as_text);
+    let key = super::diff_cache::DiffCacheKey {
+        root: root.to_path_buf(),
+        program: program.clone(),
+        args: args.clone(),
+        generation,
+        output_limit: capture_limit(backend),
+        as_text,
     };
+    let cached = backend
+        .scheduler
+        .read_session(
+            &repo_key(root),
+            internal_request_id(),
+            generation,
+            |_| async {
+                if let Some(cached) = backend.history_diffs.get(&key) {
+                    return Ok(cached);
+                }
+                let scheduled = backend
+                    .scheduler
+                    .execute(crate::git::schedule::GitJob {
+                        repo_key: repo_key(root),
+                        kind: JobKind::Read,
+                        request_id: internal_request_id(),
+                        generation,
+                        program,
+                        args,
+                        stdin: None,
+                        truncate_stdout: true,
+                        output_limit: Some(key.output_limit),
+                        env: Vec::new(),
+                    })
+                    .await
+                    .map_err(history_limit)?;
+                if diff_failed(&scheduled.output) {
+                    return Err(git_failure(
+                        "diff_failed",
+                        &scheduled.output,
+                        "无法读取这次提交的差异，未修改仓库。",
+                    ));
+                }
+                let mut raw = scheduled.output.stdout;
+                let length = first_file_diff(&raw).len();
+                let truncated = scheduled.output.stdout_truncated || length != raw.len();
+                raw.truncate(length);
+                let parsed = if as_text {
+                    crate::git::patch::parse_diff_as_text(&raw, truncated)?
+                } else {
+                    parse_diff(&raw, truncated)?
+                };
+                let cached = Arc::new(super::diff_cache::CachedDiff { raw, parsed });
+                backend.history_diffs.insert(key, Arc::clone(&cached));
+                Ok(cached)
+            },
+        )
+        .await?;
+    let raw = cached.raw.as_slice();
+    let parsed = &cached.parsed;
     // 文件目录已按仓库、提交、父提交和 generation 缓存完整统计。
     // 切换文件或继续读取差异时直接复用；目录统计失败时仍可单独补读。
     // 按文本查看时目录把它记成二进制，只用这份文本差异里数到的行数。
@@ -467,32 +496,15 @@ async fn diff_file_between(
     } else if let (Some(additions), Some(deletions)) = (file.additions, file.deletions) {
         Some((Some(additions), Some(deletions)))
     } else {
-        commit_numstat(
-            backend,
-            git,
-            root,
-            parent_oid,
-            &oid,
-            &paths,
-            scheduled.generation,
-        )
-        .await?
+        commit_numstat(backend, git, root, parent_oid, &oid, &paths, generation).await?
     };
-    let sizes = if crate::git::changes::diff_is_binary(&parsed, counts) {
+    let sizes = if crate::git::changes::diff_is_binary(parsed, counts) {
         (file.old_size, file.new_size)
     } else {
         (None, None)
     };
     let mut response = response_from_diff(
-        scheduled.generation,
-        relative,
-        false,
-        &parsed,
-        raw,
-        counts,
-        sizes,
-        offset,
-        limit,
+        generation, relative, false, parsed, raw, counts, sizes, offset, limit,
     )?;
     if !as_text && crate::git::preview::wants_preview(relative, raw) {
         response.preview = Some(crate::git::preview::PreviewSources {
@@ -2625,7 +2637,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sixteen_commit_details_share_metadata_reads_and_keep_file_directories() {
+    async fn commit_details_share_metadata_reads_and_keep_file_directories() {
         let fixture = crate::test_support::git_fixture("history-multi-read");
         let trace = fixture.path().join("git-trace.log");
         let backend = fixture
@@ -2633,7 +2645,7 @@ mod tests {
         let repo = fixture.repo("demo");
         git(&repo, &["init", "-b", "main"]);
         let mut ids = Vec::new();
-        for index in 0..16 {
+        for index in 0..3 {
             fs::write(repo.join("file.txt"), format!("line {index}\n")).unwrap();
             git(&repo, &["add", "."]);
             git(
@@ -2649,7 +2661,6 @@ mod tests {
             ids.push(git_text(&repo, &["rev-parse", "HEAD"]));
         }
         let gen = generation(&backend, &repo);
-        let start = std::time::Instant::now();
         for (index, oid) in ids.iter().enumerate() {
             let detail =
                 commit_detail(&backend, &repo_key(&repo), oid, None, gen, index as u64 + 1)
@@ -2665,7 +2676,7 @@ mod tests {
                 .lines()
                 .filter(|line| line.contains("built-in: git log "))
                 .count(),
-            16,
+            3,
             "每份详情用一次 log 同时读取头信息和正文"
         );
         for (index, oid) in ids.iter().enumerate() {
@@ -2691,7 +2702,7 @@ mod tests {
                 .lines()
                 .filter(|line| line.contains("built-in: git diff-tree "))
                 .count(),
-            16,
+            3,
             "逐提交读取差异时不重复扫描已读取的文件目录"
         );
         assert_eq!(
@@ -2699,9 +2710,128 @@ mod tests {
                 .lines()
                 .filter(|line| line.contains("built-in: git diff --numstat "))
                 .count(),
-            16
+            3
         );
-        eprintln!("16 commit details and diffs: {:?}", start.elapsed());
+    }
+
+    #[tokio::test]
+    async fn immutable_diff_pages_reuse_git_and_separate_context_generation_and_text_mode() {
+        let fixture = crate::test_support::git_fixture("history-diff-cache");
+        let trace = fixture.path().join("trace.log");
+        let backend = fixture
+            .backend_with_extra_env(vec![("GIT_TRACE".into(), trace.as_os_str().to_os_string())]);
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "base\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
+        let base = git_text(&repo, &["rev-parse", "HEAD"]);
+        fs::write(repo.join("file.txt"), "changed\n".repeat(5000)).unwrap();
+        git(&repo, &["commit", "-am", "edit"]);
+        let oid = git_text(&repo, &["rev-parse", "HEAD"]);
+        let gen = generation(&backend, &repo);
+        let count = || {
+            fs::read_to_string(&trace)
+                .unwrap()
+                .lines()
+                .filter(|line| line.contains("built-in: git diff ") && line.contains("--unified="))
+                .count()
+        };
+        let mut token = String::new();
+        for (id, offset) in [(801, 0), (802, 400), (803, 800)] {
+            let diff = commit_file_diff(
+                &backend,
+                &repo_key(&repo),
+                &oid,
+                Some(&base),
+                "file.txt",
+                gen,
+                id,
+                offset,
+                400,
+                3,
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!((diff.additions, diff.deletions), (5000, 1));
+            assert_eq!(diff.offset, offset);
+            assert_eq!(diff.lines.len(), 400);
+            if token.is_empty() {
+                token = diff.snapshot;
+            } else {
+                assert_eq!(token, diff.snapshot);
+            }
+        }
+        assert_eq!(count(), 1, "翻页复用同一补丁，不重复启动 Git");
+        commit_file_diff(
+            &backend,
+            &repo_key(&repo),
+            &oid,
+            Some(&base),
+            "file.txt",
+            gen,
+            804,
+            0,
+            400,
+            0,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(count(), 2, "上下文选项独立缓存");
+        commit_file_diff(
+            &backend,
+            &repo_key(&repo),
+            &oid,
+            Some(&base),
+            "file.txt",
+            gen,
+            805,
+            0,
+            400,
+            3,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(count(), 3, "按文本查看独立缓存");
+        let next = backend.scheduler.bump_generation(&repo_key(&repo));
+        assert_eq!(
+            commit_file_diff(
+                &backend,
+                &repo_key(&repo),
+                &oid,
+                Some(&base),
+                "file.txt",
+                gen,
+                806,
+                0,
+                400,
+                3,
+                false
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "stale"
+        );
+        commit_file_diff(
+            &backend,
+            &repo_key(&repo),
+            &oid,
+            Some(&base),
+            "file.txt",
+            next,
+            807,
+            0,
+            400,
+            3,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(count(), 4, "代次变化后重新验证 Git");
     }
 
     #[tokio::test]

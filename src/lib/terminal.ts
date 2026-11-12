@@ -407,24 +407,27 @@ export class TerminalRouter {
 
   /** 订阅成功后才 resolve；失败时下次调用会重试。 */
   start(): Promise<void> {
+    if (this.disposed) return Promise.resolve();
     if (!this.ready) {
       this.ready = (async () => {
+        const stops: (() => void)[] = [];
         try {
           const stopOutput = await this.listen<TerminalOutputEvent>(TERMINAL_OUTPUT_EVENT, (event) =>
             this.targets.get(event.sessionId)?.output(event),
           );
+          stops.push(stopOutput);
+          if (this.disposed) return;
           const stopExit = await this.listen<TerminalExitEvent>(TERMINAL_EXIT_EVENT, (event) =>
             this.targets.get(event.sessionId)?.exit(event),
           );
-          if (this.disposed) {
-            stopOutput();
-            stopExit();
-            return;
-          }
-          this.stops.push(stopOutput, stopExit);
+          stops.push(stopExit);
+          if (this.disposed) return;
+          this.stops.push(...stops.splice(0));
         } catch (error) {
           this.ready = null;
           throw error;
+        } finally {
+          stops.forEach((stop) => stop());
         }
       })();
     }

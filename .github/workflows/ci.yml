@@ -36,6 +36,8 @@ jobs:
         run: npm run check
       - name: Test
         run: npm test
+      - name: Integration checks
+        run: npm run test:integration
       - name: Test release gate
         run: node --test .github/scripts/release-gate.test.cjs
       - name: Build

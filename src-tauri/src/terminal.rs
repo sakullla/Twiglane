@@ -5,9 +5,9 @@
 //! `%COMSPEC%`/`cmd.exe`、Git Bash 与 WSL；Unix 取 `$SHELL` 与 `/etc/shells` 中实际存在的
 //! shell。前端只能按 id 选择探测结果，不能传入程序名或参数。
 
-use std::collections::HashMap;
 #[cfg(unix)]
 use std::collections::HashSet;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,10 +34,12 @@ pub const MAX_SESSIONS_PER_REPO: usize = 12;
 const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_COLS: u16 = 80;
 const MAX_DIMENSION: u16 = 1000;
+/// 待发送输出达到阈值后暂停读取，最多再容纳一个解码后的 read 块。
+const MAX_UNSENT_BYTES: usize = 256 * 1024;
 /// 输出合并窗口：读线程把这段时间内的 PTY 输出攒成一个事件，大量输出时 IPC 次数
 /// 从「每次 read 一次」降到「每个窗口一次」；交互回显的额外延迟不可感知。
 const FLUSH_DELAY: Duration = Duration::from_millis(4);
-/// Unix 先 SIGTERM 再 SIGKILL；Windows 由 Job Object 一次终止。
+/// Unix 按终端挂断语义先 SIGHUP 再 SIGKILL；Windows 由 Job Object 一次终止。
 const STOP_GRACE: Duration = Duration::from_secs(2);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// 进程退出后给读线程排空管道的时间；ConPTY 关闭后剩余数据通常立即到达 EOF。
@@ -263,13 +265,44 @@ impl TerminalManager {
             .collect();
         let mut stopped = Vec::new();
         let mut failures = Vec::new();
+        let mut stopping = Vec::new();
+        // 先通知所有会话，再共用等待窗口；忽略挂断的程序不逐个累加两秒。
         for session in running {
-            match session.terminate() {
-                Ok(()) => stopped.push(TerminalActivity {
+            match session.begin_terminate() {
+                Ok(descendants) => stopping.push((session, descendants)),
+                Err(error) => failures.push(format!("{}: {}", session.repo_key, error.message)),
+            }
+        }
+        let grace = Instant::now() + STOP_GRACE;
+        for (session, _) in &stopping {
+            session.wait_until_stopped(grace.saturating_duration_since(Instant::now()));
+        }
+        let mut awaiting = Vec::new();
+        for (session, descendants) in stopping {
+            if session.is_running() || !descendants.is_empty() {
+                if let Err(error) = session.tree.force(&descendants) {
+                    failures.push(format!(
+                        "{}: {}",
+                        session.repo_key,
+                        stop_error(&error).message
+                    ));
+                    continue;
+                }
+            }
+            awaiting.push(session);
+        }
+        let deadline = Instant::now() + STOP_TIMEOUT.saturating_sub(STOP_GRACE);
+        for session in awaiting {
+            if session.wait_until_stopped(deadline.saturating_duration_since(Instant::now())) {
+                stopped.push(TerminalActivity {
                     session_id: session.id.clone(),
                     repo_path: session.repo_key.clone(),
-                }),
-                Err(error) => failures.push(format!("{}: {}", session.repo_key, error.message)),
+                });
+            } else {
+                failures.push(format!(
+                    "{}: 无法确认终端 shell 及其子进程已退出。",
+                    session.repo_key
+                ));
             }
         }
         if failures.is_empty() {
@@ -437,7 +470,7 @@ impl Drop for TerminalManager {
 struct Inner {
     status: Status,
     /// 已经推送过的输出；快照只包含这部分，与 `seq` 一致。
-    replay: String,
+    replay: ReplayBuffer,
     /// 已读到、尚未推送的输出；由合并线程按 `FLUSH_DELAY` 打包推送。
     unsent: String,
     seq: u64,
@@ -505,7 +538,7 @@ impl Session {
             signal,
             seq: inner.seq,
             output: if with_output {
-                inner.replay.clone()
+                inner.replay.text()
             } else {
                 String::new()
             },
@@ -515,6 +548,12 @@ impl Session {
     /// 读线程入口：只解码并暂存，真正推送交给合并线程。
     fn record_output(&self, chunk: &[u8]) {
         let mut inner = lock(&self.inner);
+        while inner.unsent.len() >= MAX_UNSENT_BYTES && matches!(inner.status, Status::Running) {
+            inner = self
+                .flush
+                .wait(inner)
+                .unwrap_or_else(|error| error.into_inner());
+        }
         if !matches!(inner.status, Status::Running) {
             return;
         }
@@ -539,8 +578,9 @@ impl Session {
                 return;
             }
             let data = std::mem::take(&mut inner.unsent);
+            self.flush.notify_all();
             inner.seq += 1;
-            push_replay(&mut inner.replay, &data);
+            inner.replay.push(&data);
             (data, inner.seq)
         };
         self.events.output(TerminalOutputEvent {
@@ -582,7 +622,7 @@ impl Session {
             let mut tail_event = None;
             if !tail.is_empty() {
                 inner.seq += 1;
-                push_replay(&mut inner.replay, &tail);
+                inner.replay.push(&tail);
                 tail_event = Some((tail, inner.seq));
             }
             inner.seq += 1;
@@ -661,26 +701,28 @@ impl Session {
             })
     }
 
-    fn terminate(&self) -> Result<(), AppError> {
+    fn begin_terminate(&self) -> Result<Vec<i32>, AppError> {
         if !self.is_running() {
-            return Ok(());
+            return Ok(Vec::new());
         }
-        // 先固定当前后代集合：shell 退出后它们可能被重新挂到 init，无法再按父子关系查找。
+        // 先固定后代集合，shell 退出后它们可能被重新挂到 init。
         let descendants = self.tree.descendants();
         if let Err(error) = self.tree.terminate(&descendants) {
-            if !self.is_running() {
-                return Ok(());
+            if self.is_running() {
+                return Err(stop_error(&error));
             }
-            return Err(stop_error(&error));
         }
-        if self.wait_until_stopped(STOP_GRACE) {
-            return Ok(());
-        }
-        if let Err(error) = self.tree.force(&descendants) {
-            if !self.is_running() {
-                return Ok(());
-            }
-            return Err(stop_error(&error));
+        Ok(descendants)
+    }
+
+    fn terminate(&self) -> Result<(), AppError> {
+        let descendants = self.begin_terminate()?;
+        self.wait_until_stopped(STOP_GRACE);
+        // shell 先退出并不代表后代已经结束：它们可能忽略挂断且已脱离 PTY。
+        if self.is_running() || !descendants.is_empty() {
+            self.tree
+                .force(&descendants)
+                .map_err(|error| stop_error(&error))?;
         }
         if self.wait_until_stopped(STOP_TIMEOUT.saturating_sub(STOP_GRACE)) {
             Ok(())
@@ -760,6 +802,8 @@ fn start_workers(session: Arc<Session>, mut reader: Box<dyn Read + Send>) {
             // 关闭 master 才会关闭伪控制台；已经读到的输出仍在管道里，读线程会先排空再 EOF。
             let master = lock(&waiter_session.master).take();
             drop(master);
+            // 已退出会话只保留回放，不再持有 PTY 输入句柄。
+            drop(lock(&waiter_session.writer).take());
             let mut handshake = lock(&waiter_session.handshake);
             let deadline = Instant::now() + READER_DRAIN_TIMEOUT;
             while !handshake.reader_done {
@@ -787,6 +831,7 @@ fn cleanup_failed_workers(session: &Session, waiter_failed: bool) {
     let _ = session.tree.terminate(&descendants);
     let _ = session.tree.force(&descendants);
     drop(lock(&session.master).take());
+    drop(lock(&session.writer).take());
     {
         let mut handshake = lock(&session.handshake);
         handshake.reader_done = true;
@@ -1071,16 +1116,40 @@ fn flush_pending(pending: &mut Vec<u8>) -> String {
     text
 }
 
-fn push_replay(replay: &mut String, text: &str) {
-    replay.push_str(text);
-    if replay.len() <= MAX_REPLAY_BYTES {
-        return;
+/// 环形字节缓冲区：饱和后只移动头指针，避免每次输出都搬移 2 MiB 历史。
+#[derive(Default)]
+struct ReplayBuffer {
+    bytes: VecDeque<u8>,
+}
+
+impl ReplayBuffer {
+    fn push(&mut self, text: &str) {
+        let mut start = text.len().saturating_sub(MAX_REPLAY_BYTES);
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        if start > 0 {
+            self.bytes.clear();
+        }
+        let text = &text[start..];
+        let cut = (self.bytes.len() + text.len()).saturating_sub(MAX_REPLAY_BYTES);
+        self.bytes.drain(..cut);
+        // 丢弃开头被截断字符的续字节，快照始终是有效 UTF-8。
+        while self.bytes.front().is_some_and(|byte| byte & 0xc0 == 0x80) {
+            self.bytes.pop_front();
+        }
+        // VecDeque::extend 的自动倍增可能超过回放预算；预先按有界容量保留空间。
+        let needed = self.bytes.len() + text.len();
+        if needed > self.bytes.capacity() {
+            let capacity = needed.next_power_of_two().min(MAX_REPLAY_BYTES);
+            self.bytes.reserve_exact(capacity - self.bytes.len());
+        }
+        self.bytes.extend(text.as_bytes());
     }
-    let mut cut = replay.len() - MAX_REPLAY_BYTES;
-    while cut < replay.len() && !replay.is_char_boundary(cut) {
-        cut += 1;
+
+    fn text(&self) -> String {
+        String::from_utf8(self.bytes.iter().copied().collect()).expect("terminal replay UTF-8")
     }
-    replay.drain(..cut);
 }
 
 enum ProcessTree {
@@ -1130,7 +1199,9 @@ impl ProcessTree {
         #[cfg(unix)]
         {
             let Self::Group { pid } = self;
-            signal_tree(*pid, descendants, libc::SIGTERM)
+            // 交互 shell 通常忽略 SIGTERM；SIGHUP 是关闭终端时的挂断通知，
+            // 避免正常关闭也总要等到两秒后的 SIGKILL。
+            signal_tree(*pid, descendants, libc::SIGHUP)
         }
         #[cfg(windows)]
         {
@@ -1224,8 +1295,8 @@ unsafe impl Sync for JobObject {}
 impl JobObject {
     fn create() -> std::io::Result<Self> {
         use windows_sys::Win32::System::JobObjects::{
-            CreateJobObjectW, SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JobObjectExtendedLimitInformation,
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         };
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if handle.is_null() {
@@ -1410,6 +1481,97 @@ mod tests {
             label: id.to_uppercase(),
             program: format!("/bin/{id}"),
             args: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn slow_event_delivery_applies_backpressure_until_flush() {
+        let dir = TempDir::new("terminal-backpressure");
+        let (manager, _) = manager();
+        let opened = ready(&manager, dir.path(), "输出背压");
+        let session = manager.find(&opened.session_id).unwrap();
+        // 暂停推送，模拟事件消费暂时跟不上；填满待发送缓冲区。
+        let emit = lock(&session.emit);
+        session.record_output(&vec![b'x'; MAX_UNSENT_BYTES]);
+        let writer = Arc::clone(&session);
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            writer.record_output(b"tail");
+            sent.send(()).unwrap();
+        });
+        assert!(matches!(
+            received.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(emit);
+        received
+            .recv_timeout(Duration::from_secs(5))
+            .expect("推送恢复后读取继续");
+        worker.join().unwrap();
+        manager.close(&opened.session_id).unwrap();
+    }
+
+    #[test]
+    fn replay_is_bounded_and_preserves_utf8_across_wraps() {
+        let mut replay = ReplayBuffer::default();
+        let mut expected = String::new();
+        let chunks = [
+            "a".repeat(MAX_REPLAY_BYTES - 1),
+            "中文😀".repeat(8192),
+            "tail".into(),
+        ];
+        for chunk in chunks.iter().cycle().take(15) {
+            replay.push(chunk);
+            expected.push_str(chunk);
+            let mut cut = expected.len().saturating_sub(MAX_REPLAY_BYTES);
+            while !expected.is_char_boundary(cut) {
+                cut += 1;
+            }
+            expected.drain(..cut);
+            assert_eq!(replay.text(), expected);
+            assert!(replay.bytes.len() <= MAX_REPLAY_BYTES);
+            assert!(replay.bytes.capacity() <= MAX_REPLAY_BYTES);
+        }
+        replay.push(&"界".repeat(MAX_REPLAY_BYTES));
+        assert!(replay.bytes.len() <= MAX_REPLAY_BYTES);
+        assert!(replay.text().chars().all(|ch| ch == '界'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bulk_shutdown_shares_grace_period_for_resistant_shells() {
+        let dir = TempDir::new("terminal-bulk-stop");
+        let (manager, _) = manager();
+        for _ in 0..3 {
+            let opened = ready(&manager, dir.path(), "忽略挂断的终端");
+            manager
+                .write(
+                    &opened.session_id,
+                    "trap '' HUP TERM; printf 'stop-%s\\n' ready\r\n",
+                )
+                .unwrap();
+            wait_for_output(&manager, &opened.session_id, "stop-ready");
+        }
+        assert_eq!(manager.terminate_all().unwrap().len(), 3);
+        assert!(!manager.has_active());
+    }
+
+    #[test]
+    fn repeated_close_releases_sessions_and_worker_references() {
+        let dir = TempDir::new("terminal-release");
+        let (manager, _) = manager();
+        for _ in 0..3 {
+            let opened = ready(&manager, dir.path(), "资源释放");
+            let session = manager.find(&opened.session_id).unwrap();
+            let weak = Arc::downgrade(&session);
+            drop(session);
+            manager.close(&opened.session_id).unwrap();
+            wait_until(
+                "读/合并/等待线程释放会话",
+                Duration::from_secs(5),
+                || weak.upgrade().is_none(),
+            );
+            assert!(manager.list(&path_text(dir.path())).unwrap().is_empty());
         }
     }
 
@@ -1713,6 +1875,37 @@ mod tests {
         assert_eq!(later, settled, "终止后仍有后代进程在写心跳");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn close_kills_resistant_descendants_even_when_shell_exits_first() {
+        for bulk in [false, true] {
+            let dir = TempDir::new("terminal-resistant-child");
+            let (manager, _) = manager();
+            let opened = ready(&manager, dir.path(), "后代进程清理");
+            manager.write(&opened.session_id,
+                "sh -c 'trap \"\" HUP TERM; while :; do echo x >> child-heartbeat; sleep 0.05; done' </dev/null >/dev/null 2>&1 &\r\n"
+            ).unwrap();
+            let heartbeat = dir.path().join("child-heartbeat");
+            wait_until("后代已开始运行", Duration::from_secs(5), || {
+                heartbeat.exists()
+            });
+            let session = manager.find(&opened.session_id).unwrap();
+            let descendants = session.tree.descendants();
+            if bulk {
+                manager.terminate_all().unwrap();
+            } else {
+                manager.close(&opened.session_id).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            let settled = std::fs::metadata(&heartbeat).unwrap().len();
+            std::thread::sleep(Duration::from_millis(250));
+            let later = std::fs::metadata(&heartbeat).unwrap().len();
+            // 即使断言失败也清理测试创建的进程。
+            let _ = session.tree.force(&descendants);
+            assert_eq!(settled, later, "shell 已退出，但后台后代仍占用资源");
+        }
+    }
+
     #[test]
     fn writes_and_resize_fail_after_exit_but_output_is_retained() {
         let dir = TempDir::new("terminal-closed");
@@ -1728,6 +1921,9 @@ mod tests {
         let exited = wait_for_exit(&manager, &opened.session_id);
         assert_eq!(exited.exit_code, Some(0));
         assert!(exited.output.contains("retained-output"));
+        let session = manager.find(&opened.session_id).unwrap();
+        assert!(lock(&session.writer).is_none(), "退出后释放输入句柄");
+        assert!(lock(&session.master).is_none(), "退出后释放 PTY");
 
         let write_error = manager
             .write(&opened.session_id, "echo ignored\r\n")

@@ -27,7 +27,9 @@ export default defineConfig({
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
   },
   test: {
+    pool: "threads",
+    maxWorkers: 4,
     environment: "happy-dom",
-    include: ["tests/**/*.spec.ts"],
+    include: ["tests/*.spec.ts"],
   },
 });

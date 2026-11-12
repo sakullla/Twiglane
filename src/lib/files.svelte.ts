@@ -571,10 +571,8 @@ export function createFilesStore(deps: FilesStoreDeps) {
   function findNode(list: FileNode[], path: string): FileNode | null {
     for (const node of list) {
       if (node.path === path) return node;
-      if (node.children) {
-        const found = findNode(node.children, path);
-        if (found) return found;
-      }
+      // 路径唯一：只进入目标的祖先分支，不遍历其它已缓存的子树。
+      if (path.startsWith(`${node.path}/`)) return node.children ? findNode(node.children, path) : null;
     }
     return null;
   }
@@ -666,7 +664,10 @@ export function createFilesStore(deps: FilesStoreDeps) {
       }
       return false;
     } finally {
-      if (owns()) busy(false);
+      if (owns()) {
+        busy(false);
+        serials.delete(path);
+      }
     }
   }
 
@@ -1172,7 +1173,7 @@ export function createFilesStore(deps: FilesStoreDeps) {
     if (query.trim()) void completeFilter();
   }
 
-  /** 手动或代次变化后的重验：重读根目录和所有已经读过的目录，保持展开与选择。 */
+  /** 重验展开与选中路径；其它折叠分支的旧缓存释放，下次展开时按需重读。 */
   async function revalidate(forceContent = false): Promise<boolean> {
     const refresh = ++refreshSerial;
     const current = repo;
@@ -1185,7 +1186,13 @@ export function createFilesStore(deps: FilesStoreDeps) {
     const targets: FileNode[] = [];
     const enqueue = (list: FileNode[]) => {
       for (const node of list) {
-        if (isDirectoryKind(node.kind) && node.children !== null) targets.push(node);
+        if (!isDirectoryKind(node.kind) || node.children === null) continue;
+        if (node.expanded || selectedPath?.startsWith(`${node.path}/`)) targets.push(node);
+        else {
+          serials.delete(node.path);
+          node.loading = false;
+          node.children = null;
+        }
       }
     };
     enqueue(nodes);

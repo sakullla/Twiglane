@@ -62,7 +62,7 @@
   import type { TerminalProfile, TerminalSnapshot } from "../types";
   import ContextMenu, { pointFor, type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
-  import TerminalPane, { type TerminalPaneApi, type TerminalPaneStatus } from "./TerminalPane.svelte";
+  import TerminalPane, { preloadTerminal, type TerminalPaneApi, type TerminalPaneStatus } from "./TerminalPane.svelte";
 
   /**
    * 工作台底部终端：多标签页、标签页内并排拆分、按仓库保存。
@@ -106,6 +106,7 @@
   }
 
   const router = new TerminalRouter(listenEvent);
+  let disposed = false;
   const paneApis = new Map<string, TerminalPaneApi>();
 
   let layouts = $state<Record<string, TerminalLayout>>({});
@@ -177,6 +178,7 @@
     };
     window.addEventListener("resize", onWindowResize);
     return () => {
+      disposed = true;
       window.removeEventListener("resize", onWindowResize);
       router.dispose();
     };
@@ -212,16 +214,24 @@
 
   /** 首次展开某个仓库：先恢复后端已有会话，没有才新建一个。返回是否新建过。 */
   async function bootstrap(repo: string): Promise<boolean> {
+    if (disposed) return false;
+    preloadTerminal();
     booting[repo] = true;
     bootErrors[repo] = null;
     try {
       const existing = await api.terminalList(repo);
+      if (disposed) return false;
       if (existing.length > 0) {
         existing.forEach(remember);
         layouts[repo] = layoutFromSessions(existing.map((snapshot) => snapshot.sessionId));
         return false;
       }
       const snapshot = await api.terminalCreate(repo, null);
+      // 组件卸载期间完成的新建没有归属，必须回收；已有后台会话仍按仓库保留。
+      if (disposed) {
+        await api.terminalClose(snapshot.sessionId);
+        return false;
+      }
       remember(snapshot);
       layouts[repo] = addGroup(emptyLayout(), snapshot.sessionId);
       return true;
@@ -236,15 +246,20 @@
   /** 新建终端：`split` 时并排进当前标签页，否则开新标签页。 */
   async function create(profile: string | null, split: boolean) {
     const repo = path;
-    if (!repo || creating) return;
+    if (!repo || creating || disposed) return;
     if (sessionCount(layouts[repo] ?? emptyLayout()) >= MAX_TERMINALS_PER_REPO) {
       actionError = limitReason || `每个仓库最多 ${MAX_TERMINALS_PER_REPO} 个终端，请先关闭不用的终端`;
       return;
     }
     creating = true;
+    preloadTerminal();
     actionError = null;
     try {
       const snapshot = await api.terminalCreate(repo, profile);
+      if (disposed) {
+        await api.terminalClose(snapshot.sessionId);
+        return;
+      }
       remember(snapshot);
       const current = layouts[repo] ?? emptyLayout();
       layouts[repo] = split ? splitGroup(current, current.activeGroup, snapshot.sessionId) : addGroup(current, snapshot.sessionId);
@@ -259,7 +274,7 @@
   /** 外壳的「新建终端」命令：面板还没有终端时由首次展开负责新建，不重复开两个。 */
   export async function newTerminal(profile: string | null = null) {
     const repo = path;
-    if (!repo) return;
+    if (!repo || disposed) return;
     const current = layouts[repo];
     if (!current || sessionCount(current) === 0) {
       if (booting[repo]) return;
@@ -292,11 +307,11 @@
   async function closeGroup(groupId: string) {
     const group = layout.groups.find((item) => item.id === groupId);
     if (!group) return;
-    for (const pane of [...group.panes]) await closeSession(pane);
+    await Promise.all(group.panes.map((pane) => closeSession(pane)));
   }
 
   async function closeOtherGroups(groupId: string) {
-    for (const group of layout.groups.filter((item) => item.id !== groupId)) await closeGroup(group.id);
+    await Promise.all(layout.groups.filter((item) => item.id !== groupId).map((group) => closeGroup(group.id)));
   }
 
   async function restartSession(sessionId: string) {
@@ -305,6 +320,10 @@
     actionError = null;
     try {
       const snapshot = await api.terminalRestart(sessionId);
+      if (disposed) {
+        await api.terminalClose(snapshot.sessionId);
+        return;
+      }
       remember(snapshot);
       layouts[repo] = replaceSession(layouts[repo] ?? emptyLayout(), sessionId, snapshot.sessionId);
       forget(sessionId);

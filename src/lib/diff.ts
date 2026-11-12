@@ -232,9 +232,38 @@ interface TextLine {
   text: string;
 }
 
+export const LOCAL_DIFF_LINE_LIMIT = 50_000;
+export const LOCAL_DIFF_CHAR_LIMIT = 2 * 1024 * 1024;
+const LOCAL_DIFF_LINE_CHARS = 32 * 1024;
+
+/** 只构造预算内的预览行，原始编辑文本始终由调用方保存。 */
+function previewDiffLines(text: string): { lines: string[]; truncated: boolean } {
+  const lines: string[] = [];
+  let start = 0;
+  let truncated = false;
+  const budgetEnd = Math.min(text.length, LOCAL_DIFF_CHAR_LIMIT);
+  const preview = text.slice(0, budgetEnd);
+  while (start < budgetEnd && lines.length < LOCAL_DIFF_LINE_LIMIT) {
+    const newline = preview.indexOf("\n", start);
+    const end = newline < 0 ? budgetEnd : newline;
+    const logicalEnd = newline >= 0 && end > start && text.charCodeAt(end - 1) === 13 ? end - 1 : end;
+    let keptEnd = Math.min(logicalEnd, budgetEnd, start + LOCAL_DIFF_LINE_CHARS);
+    if (keptEnd < logicalEnd) truncated = true;
+    const last = text.charCodeAt(keptEnd - 1);
+    const next = text.charCodeAt(keptEnd);
+    if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) keptEnd -= 1;
+    lines.push(text.slice(start, keptEnd));
+    start = end + 1;
+  }
+  return { lines, truncated: truncated || budgetEnd < text.length || start < text.length };
+}
+
 export function createTextDiff(path: string, before: string, after: string, generation = 0): DiffResponse {
-  const oldLines = diffLines(before);
-  const newLines = diffLines(after);
+  const oldPreview = previewDiffLines(before);
+  const newPreview = previewDiffLines(after);
+  const oldLines = oldPreview.lines;
+  const newLines = newPreview.lines;
+  const truncated = oldPreview.truncated || newPreview.truncated;
   let prefix = 0;
   while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) prefix += 1;
   let suffix = 0;
@@ -249,7 +278,7 @@ export function createTextDiff(path: string, before: string, after: string, gene
   const oldMiddle = oldLines.slice(prefix, oldLines.length - suffix);
   const newMiddle = newLines.slice(prefix, newLines.length - suffix);
   const middle: TextLine[] = [];
-  if (oldMiddle.length * newMiddle.length <= 500_000) {
+  if (oldMiddle.length > 0 && newMiddle.length > 0 && (oldMiddle.length + 1) * (newMiddle.length + 1) <= 500_000) {
     const table = Array.from({ length: oldMiddle.length + 1 }, () => new Uint32Array(newMiddle.length + 1));
     for (let i = oldMiddle.length - 1; i >= 0; i -= 1) {
       for (let j = newMiddle.length - 1; j >= 0; j -= 1) {
@@ -282,8 +311,8 @@ export function createTextDiff(path: string, before: string, after: string, gene
       j += 1;
     }
   } else {
-    middle.push(...oldMiddle.map((text) => ({ kind: "del" as const, text })));
-    middle.push(...newMiddle.map((text) => ({ kind: "add" as const, text })));
+    for (const text of oldMiddle) middle.push({ kind: "del", text });
+    for (const text of newMiddle) middle.push({ kind: "add", text });
   }
 
   const raw = [
@@ -310,7 +339,7 @@ export function createTextDiff(path: string, before: string, after: string, gene
   const changed = numbered.some((line) => line.kind !== "context");
   const lines: DiffLine[] = [];
   if (!changed) {
-    lines.push(...numbered);
+    for (const line of numbered) lines.push(line);
   } else {
     const included = numbered.map((line, index) => {
       if (line.kind !== "context") return true;
@@ -330,7 +359,7 @@ export function createTextDiff(path: string, before: string, after: string, gene
       const oldStart = group.find((line) => line.oldNo !== null)?.oldNo ?? 1;
       const newStart = group.find((line) => line.newNo !== null)?.newNo ?? 1;
       lines.push({ kind: "hunk", text: `@@ -${oldStart} +${newStart} @@`, oldNo: null, newNo: null, hunkIndex: null });
-      lines.push(...group);
+      for (const line of group) lines.push(line);
     }
   }
 
@@ -342,11 +371,13 @@ export function createTextDiff(path: string, before: string, after: string, gene
     staged: false,
     binary: false,
     text: null,
-    summary: `新增 ${additions} 行，删除 ${deletions} 行。`,
+    summary: truncated
+      ? `文本超过预览上限，仅显示部分内容：新增约 ${additions} 行，删除约 ${deletions} 行。原始文本未修改。`
+      : `新增 ${additions} 行，删除 ${deletions} 行。`,
     additions,
     deletions,
-    complete: true,
-    truncated: false,
+    complete: !truncated,
+    truncated,
     snapshot: `text-diff-${generation}`,
     hunks: [],
     lines,

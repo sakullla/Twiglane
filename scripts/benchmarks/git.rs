@@ -1,4 +1,4 @@
-//! 按需运行的真实 Git 压力工具。仅 performance-tests feature 编译此模块。
+//! 按需运行的独立 Git benchmark；不注册为单元测试。
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -8,7 +8,6 @@ use std::time::Instant;
 use crate::git::{history, ops, resolve, sync};
 use crate::test_support::{git_fixture, isolated_gitconfig, system_git, GitFixture};
 
-#[test]
 fn uncommitted_diff_paging_at_scale() {
     use crate::git::patch::{parse_diff, view_lines};
     let mut raw = String::from("diff --git a/large.txt b/large.txt\n--- a/large.txt\n+++ b/large.txt\n@@ -0,0 +1,50000 @@\n");
@@ -39,7 +38,6 @@ struct PerformanceFixture {
     trace: PathBuf,
 }
 
-#[tokio::test]
 async fn uncommitted_reads_at_scale() {
     let fixture = PerformanceFixture::new(1, 0, 5_000);
     fixture.git(&["checkout", "-f", "topic"], None);
@@ -47,24 +45,180 @@ async fn uncommitted_reads_at_scale() {
     ops::require_git(&fixture.backend).await.unwrap();
     let start = Instant::now();
     for id in 1..=10 {
-        let diff = crate::git::changes::load_diff(
-            &fixture.backend, &fixture.path, "large.txt", None, false,
-            fixture.generation(), id, 0, 0,
-        ).await.unwrap();
+        let diff = crate::git::changes::load_diff_with_context(
+            &fixture.backend,
+            &fixture.path,
+            "large.txt",
+            None,
+            false,
+            fixture.generation(),
+            id,
+            0,
+            0,
+            3,
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!((diff.additions, diff.deletions), (1, 5_000));
     }
-    eprintln!("10 uncommitted diffs: {:?}, {} diff processes", start.elapsed(), fixture.count("diff"));
-    assert_eq!(fixture.count("diff"), 10, "complete patches must not run a second diff for numstat");
+    eprintln!(
+        "10 uncommitted diffs: {:?}, {} diff processes",
+        start.elapsed(),
+        fixture.count("diff")
+    );
+    assert_eq!(
+        fixture.count("diff"),
+        10,
+        "complete patches must not run a second diff for numstat"
+    );
 
     // 大型导出文件不应让状态刷新遍历全部内容。
-    fs::write(fixture.root.join("export.txt"), "exported row\n".repeat(8_000_000)).unwrap();
+    fs::write(
+        fixture.root.join("export.txt"),
+        "exported row\n".repeat(8_000_000),
+    )
+    .unwrap();
     let start = Instant::now();
     for id in 11..=13 {
-        let status = ops::refresh_status(&fixture.backend, &fixture.path, fixture.generation(), id).await.unwrap();
-        assert!(status.files.iter().any(|file| file.path == "export.txt" && file.untracked));
-        assert!(status.files.iter().find(|file| file.path == "export.txt").unwrap().unstaged_lines.is_none());
+        let status = ops::refresh_status(&fixture.backend, &fixture.path, fixture.generation(), id)
+            .await
+            .unwrap();
+        assert!(status
+            .files
+            .iter()
+            .any(|file| file.path == "export.txt" && file.untracked));
+        assert!(status
+            .files
+            .iter()
+            .find(|file| file.path == "export.txt")
+            .unwrap()
+            .unstaged_lines
+            .is_none());
     }
-    eprintln!("3 status refreshes with 104 MB untracked export: {:?}", start.elapsed());
+    eprintln!(
+        "3 status refreshes with 104 MB untracked export: {:?}",
+        start.elapsed()
+    );
+}
+
+async fn huge_text_sequential_pages_reuse_byte_positions() {
+    use std::sync::Arc;
+    let mut fixture = PerformanceFixture::new(1, 0, 1);
+    let file = fs::File::create(fixture.root.join("huge.txt")).unwrap();
+    let mut writer = std::io::BufWriter::new(file);
+    let padding = "x".repeat(200);
+    for line in 0..500_000 {
+        writeln!(writer, "{line:06} {padding}").unwrap();
+    }
+    writer.flush().unwrap();
+    drop(writer);
+    let mut request = 1000;
+    for cached in [false, true] {
+        fixture.backend.text_cursors =
+            Arc::new(crate::git::text_cursor::TextCursorCache::default());
+        if cached {
+            crate::git::files::repository_file_content(
+                &fixture.backend,
+                &fixture.path,
+                "huge.txt",
+                99_500,
+                Some(500),
+                fixture.generation(),
+                request,
+            )
+            .await
+            .unwrap();
+            request += 1;
+        }
+        let start = Instant::now();
+        for page in 0..8 {
+            if !cached {
+                fixture.backend.text_cursors =
+                    Arc::new(crate::git::text_cursor::TextCursorCache::default());
+            }
+            let offset = 100_000 + page * 500;
+            let result = crate::git::files::repository_file_content(
+                &fixture.backend,
+                &fixture.path,
+                "huge.txt",
+                offset,
+                Some(500),
+                fixture.generation(),
+                request,
+            )
+            .await
+            .unwrap();
+            request += 1;
+            assert_eq!(result.lines.len(), 500);
+            assert!(result.lines[0].starts_with(&format!("{offset:06} ")));
+            assert_eq!(result.next_offset, offset + 500);
+        }
+        eprintln!(
+            "104 MB text, eight pages after line 100000, cached={cached}: {:?}",
+            start.elapsed()
+        );
+    }
+}
+
+async fn immutable_diff_paging_reuses_git_at_scale() {
+    let mut fixture = PerformanceFixture::new(1, 0, 5_000);
+    let oid = fixture.git(&["rev-parse", "topic"], None);
+    let mut request = 2000;
+    // 两组都先完成 Git 探测和文件目录读取，只对比补丁缓存本身。
+    history::commit_file_diff(
+        &fixture.backend,
+        &fixture.path,
+        &oid,
+        None,
+        "large.txt",
+        fixture.generation(),
+        request,
+        0,
+        400,
+        3,
+        false,
+    )
+    .await
+    .unwrap();
+    request += 1;
+    for cached in [false, true] {
+        fixture.backend.history_diffs = crate::git::diff_cache::DiffCache::default();
+        let start = Instant::now();
+        let before = if fixture.trace.exists() {
+            fixture.count("diff")
+        } else {
+            0
+        };
+        for page in 0..8 {
+            if !cached {
+                fixture.backend.history_diffs = crate::git::diff_cache::DiffCache::default();
+            }
+            let result = history::commit_file_diff(
+                &fixture.backend,
+                &fixture.path,
+                &oid,
+                None,
+                "large.txt",
+                fixture.generation(),
+                request,
+                page * 400,
+                400,
+                3,
+                false,
+            )
+            .await
+            .unwrap();
+            request += 1;
+            assert_eq!(result.additions, 5000);
+            assert_eq!(result.lines.len(), 400);
+        }
+        let processes = fixture.count("diff") - before;
+        eprintln!("5000-line historical diff, eight pages, cached={cached}: {:?}, {processes} diff processes (including numstat)", start.elapsed());
+        if cached {
+            assert_eq!(processes, 1);
+        }
+    }
 }
 
 impl PerformanceFixture {
@@ -145,7 +299,6 @@ impl PerformanceFixture {
     }
 }
 
-#[tokio::test]
 async fn branches_files_and_merge_at_scale() {
     let fixture = PerformanceFixture::new(20_000, 5_000, 5_000);
     ops::require_git(&fixture.backend).await.unwrap();
@@ -159,11 +312,16 @@ async fn branches_files_and_merge_at_scale() {
     let lists = fixture.count("for-each-ref");
     let statuses = fixture.count("status");
     let started = Instant::now();
-    let listing = sync::branch_list(&fixture.backend, &fixture.path, fixture.generation(), 999).await.unwrap();
+    let listing = sync::branch_list(&fixture.backend, &fixture.path, fixture.generation(), 999)
+        .await
+        .unwrap();
     assert_eq!(listing.branches.len(), 5_002);
     assert_eq!(fixture.count("for-each-ref"), lists + 1);
     assert_eq!(fixture.count("status"), statuses);
-    eprintln!("5002 branches lightweight (one Git process): {:?}", started.elapsed());
+    eprintln!(
+        "5002 branches lightweight (one Git process): {:?}",
+        started.elapsed()
+    );
 
     let oid = fixture.git(&["rev-parse", "topic"], None);
     let git = ops::require_git(&fixture.backend).await.unwrap();
@@ -323,4 +481,27 @@ async fn branches_files_and_merge_at_scale() {
         "real fast-forward merge of 20000 files: {:?}",
         started.elapsed()
     );
+}
+
+/// 明确选择场景；默认运行两个与大文本优化直接相关的 benchmark。
+pub fn run() {
+    let scenario = std::env::args().nth(1).unwrap_or_else(|| "text".into());
+    let runtime = tokio::runtime::Runtime::new().expect("benchmark runtime");
+    runtime.block_on(async {
+        match scenario.as_str() {
+            "text" => {
+                huge_text_sequential_pages_reuse_byte_positions().await;
+                immutable_diff_paging_reuses_git_at_scale().await;
+            }
+            "all" => {
+                branches_files_and_merge_at_scale().await;
+                huge_text_sequential_pages_reuse_byte_positions().await;
+                immutable_diff_paging_reuses_git_at_scale().await;
+                uncommitted_reads_at_scale().await;
+                uncommitted_diff_paging_at_scale();
+            }
+            "paging" => uncommitted_diff_paging_at_scale(),
+            _ => panic!("支持的场景：text、paging、all"),
+        }
+    });
 }

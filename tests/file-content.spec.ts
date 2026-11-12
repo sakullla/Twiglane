@@ -110,6 +110,26 @@ beforeEach(() => {
   resetSyntaxPrefs();
 });
 
+it("大文件续读释放旧页后继续使用绝对偏移，并可回到开头", async () => {
+  repositoryFileContent.mockImplementation(async (_repo: string, _path: string, offset: number) => text({
+    offset,
+    lines: Array.from({ length: 500 }, (_, index) => `row-${offset + index + 1}`),
+    nextOffset: offset + 500,
+    hasMore: true,
+  }));
+  render(FileContent, { props: props() });
+  await screen.findByText("row-1");
+  for (let page = 1; page <= 21; page += 1) {
+    await fireEvent.click(screen.getByTitle("继续读取后面的内容"));
+    await waitFor(() => expect(repositoryFileContent.mock.calls.at(-1)?.[2]).toBe(page * 500));
+    await waitFor(() => expect(screen.getByTitle("继续读取后面的内容").hasAttribute("disabled")).toBe(false));
+  }
+  expect(screen.getByText("正在显示第 1001 行起的内容")).toBeTruthy();
+  await fireEvent.click(screen.getByRole("button", { name: "回到开头" }));
+  await screen.findByText("row-1");
+  expect(repositoryFileContent.mock.calls.at(-1)?.[2]).toBe(0);
+});
+
 describe("代码页", () => {
   it("显示面包屑、Git 状态、语言、大小与行号", async () => {
     repositoryFileContent.mockResolvedValue(text());

@@ -435,7 +435,7 @@ where
         Ok(parsed) => parsed,
         Err(error) => return Err(finish_error(guard, error)),
     };
-    let token = snapshot_token(raw, truncated, relative, staged);
+    let token = snapshot_token(raw, parsed.truncated, relative, staged);
     if token != snapshot {
         return Err(finish_error(
             guard,
@@ -1128,6 +1128,38 @@ mod tests {
         .await
         .unwrap();
         (opened.summary.path, opened.generation)
+    }
+
+    #[tokio::test]
+    async fn oversized_hunk_is_rejected_but_other_complete_hunks_remain_stageable() {
+        let fixture = crate::test_support::git_fixture("long-line-stage");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Twiglane Test"]);
+        git(&repo, &["config", "user.email", "twiglane-test@example.com"]);
+        let mut lines: Vec<String> = (0..24).map(|line| format!("line {line}")).collect();
+        fs::write(repo.join("demo.txt"), lines.join("\n") + "\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
+        lines[3] = "SMALL CHANGE".into();
+        lines[18] = "界".repeat(50_000);
+        let worktree = lines.join("\n") + "\n";
+        fs::write(repo.join("demo.txt"), &worktree).unwrap();
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let diff = load_diff(&backend, &path, "demo.txt", None, false, generation, 2, 0, 0).await.unwrap();
+        assert!(diff.truncated);
+        assert_eq!(diff.hunks.len(), 2);
+        assert!(diff.hunks[0].stageable);
+        assert!(!diff.hunks[1].stageable);
+        let refused = stage_hunks(&backend, &path, "demo.txt", None, false, &[diff.hunks[1].index], &diff.snapshot, generation, 3).await.unwrap_err();
+        assert_eq!(refused.code, "truncated_hunk");
+        assert!(git_bytes(&repo, &["diff", "--cached"]).is_empty());
+        stage_hunks(&backend, &path, "demo.txt", None, false, &[diff.hunks[0].index], &diff.snapshot, refused.generation.unwrap(), 4).await.unwrap();
+        let staged = String::from_utf8(git_bytes(&repo, &["diff", "--cached"])).unwrap();
+        assert!(staged.contains("+SMALL CHANGE"));
+        assert!(!staged.contains("界"));
+        assert_eq!(fs::read_to_string(repo.join("demo.txt")).unwrap(), worktree);
     }
 
     #[tokio::test]

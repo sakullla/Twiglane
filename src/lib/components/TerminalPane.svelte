@@ -2,6 +2,7 @@
   import type { Terminal as XTerm } from "@xterm/xterm";
   import type { FitAddon } from "@xterm/addon-fit";
   import type { SearchAddon } from "@xterm/addon-search";
+  import type { WebglAddon } from "@xterm/addon-webgl";
   import type { TerminalFindOptions, TerminalFindResult } from "../terminal";
 
   /** 面板对单个终端的操作入口：右键菜单、查找条与工具栏都通过它驱动，不直接摸 xterm 实例。 */
@@ -62,6 +63,11 @@
       );
     }
     return modules;
+  }
+
+  /** 用户打开终端时，与后端启动 shell 并行加载前端模块。 */
+  export function preloadTerminal(): void {
+    void loadModules().catch(() => {});
   }
 
   /** WebGL 渲染器单独加载：不可用（驱动、上下文数量上限）时保留 DOM 渲染，不影响终端可用。 */
@@ -142,6 +148,8 @@
   let term: XTerm | null = null;
   let fit: FitAddon | null = null;
   let search: SearchAddon | null = null;
+  let webgl: WebglAddon | null = null;
+  let webglLoading = false;
   let disposed = false;
   let attached = false;
   let lastSeq = 0;
@@ -181,7 +189,11 @@
     const show = visible;
     const wants = focused;
     untrack(() => {
-      if (!show) return;
+      if (!show) {
+        releaseWebgl();
+        return;
+      }
+      if (term) void loadWebgl(term);
       scheduleFit();
       if (wants) requestFrame(() => term?.focus());
     });
@@ -281,11 +293,13 @@
 
       stopEvents = router.subscribe(sessionId, {
         output: (event) => {
-          if (!attached) pending.push({ kind: "output", ...event });
+          if (!attached && starting) pending.push({ kind: "output", ...event });
+          else if (!attached) return;
           else applyOutput(event);
         },
         exit: (event) => {
-          if (!attached) pending.push({ kind: "exit", ...event });
+          if (!attached && starting) pending.push({ kind: "exit", ...event });
+          else if (!attached) return;
           else applyExit(event);
         },
       });
@@ -299,10 +313,13 @@
     })();
     return () => {
       disposed = true;
+      attached = false;
+      pending = [];
       stopEvents();
       observer?.disconnect();
       if (fitFrame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(fitFrame);
       register(sessionId, null);
+      releaseWebgl();
       term?.dispose();
       term = null;
       fit = null;
@@ -311,17 +328,30 @@
   });
 
   async function loadWebgl(instance: XTerm) {
-    if (webglDisabled) return;
+    if (webglDisabled || !visible || webgl || webglLoading) return;
+    webglLoading = true;
+    let addon: WebglAddon | null = null;
     try {
       const { WebglAddon } = await import("@xterm/addon-webgl");
-      if (disposed || term !== instance) return;
-      const addon = new WebglAddon();
-      addon.onContextLoss(() => addon.dispose());
+      if (disposed || term !== instance || !visible) return;
+      addon = new WebglAddon();
+      addon.onContextLoss(() => releaseWebgl());
       instance.loadAddon(addon);
+      webgl = addon;
     } catch {
+      addon?.dispose();
       // 没有 WebGL：本次运行都用 DOM 渲染，不再反复尝试。
       webglDisabled = true;
+    } finally {
+      webglLoading = false;
     }
+  }
+
+  /** 隐藏标签页只保留终端文本状态，释放 WebGL 渲染器与纹理；再次显示时恢复加速。 */
+  function releaseWebgl() {
+    const addon = webgl;
+    webgl = null;
+    addon?.dispose();
   }
 
   async function attach() {
@@ -348,6 +378,7 @@
       if (term) sendSize(term.rows, term.cols);
     } catch (error) {
       if (disposed) return;
+      pending = [];
       attachError = normalizeError(error).message;
     } finally {
       if (!disposed) starting = false;

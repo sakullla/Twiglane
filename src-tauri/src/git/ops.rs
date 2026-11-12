@@ -37,6 +37,8 @@ pub struct Backend {
     pub actions: ActionGate,
     pub remote_checks: RemoteChecks,
     pub(crate) history_files: crate::git::history::CommitFilesCache,
+    pub(crate) history_diffs: crate::git::diff_cache::DiffCache,
+    pub(crate) text_cursors: Arc<crate::git::text_cursor::TextCursorCache>,
 }
 
 impl Backend {
@@ -59,6 +61,8 @@ impl Backend {
             actions: ActionGate::default(),
             remote_checks: RemoteChecks::default(),
             history_files: crate::git::history::CommitFilesCache::default(),
+            history_diffs: crate::git::diff_cache::DiffCache::default(),
+            text_cursors: Arc::new(crate::git::text_cursor::TextCursorCache::default()),
         }
     }
 }

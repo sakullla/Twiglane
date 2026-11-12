@@ -20,6 +20,26 @@ function setup(active = () => true) {
 beforeEach(() => { repositoryDirectory.mockReset(); });
 
 describe("文件树的计算与读取预算", () => {
+  it("重验释放无关折叠分支，选中文件的祖先仍更新；重新展开读取新内容", async () => {
+    repositoryDirectory.mockImplementation((_repo, path) => Promise.resolve(page(path,
+      path === "" ? [entry("a"), entry("b")] : [entry(`${path}/file.ts`, "file")],
+    )));
+    const store = setup();
+    await store.sync("/repo");
+    for (const node of store.nodes) await store.expand(node);
+    store.select("a/file.ts");
+    store.collapseAll();
+    repositoryDirectory.mockClear();
+    await store.revalidate();
+    expect(repositoryDirectory.mock.calls.map((call) => call[1])).toEqual(["", "a"]);
+    expect(store.resolve("a/file.ts")?.kind).toBe("file");
+    expect(store.nodes[1].children).toBeNull();
+    repositoryDirectory.mockClear();
+    await store.expand(store.nodes[1]);
+    expect(repositoryDirectory.mock.calls.map((call) => call[1])).toEqual(["b"]);
+    expect(store.resolve("b/file.ts")?.kind).toBe("file");
+  });
+
   it("多个读取方共享行数组，选择文件不重建，展开仍更新", async () => {
     repositoryDirectory.mockImplementation((_repo, path) => Promise.resolve(
       path === "" ? page("", [entry("src"), entry("readme", "file")]) : page(path, [entry("src/app.ts", "file")]),

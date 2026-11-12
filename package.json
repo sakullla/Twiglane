@@ -10,11 +10,13 @@
     "preview:ui": "vite --config scripts/ui-preview/vite.config.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json --threshold error",
     "test": "vitest run",
-    "test:performance": "node scripts/performance/run.mjs",
     "tauri": "tauri",
     "fixture": "node scripts/generate-fixture.mjs",
     "measure": "node scripts/measure-delivery.mjs",
-    "verify:delivery": "node scripts/verify-delivery.mjs"
+    "verify:delivery": "node scripts/verify-delivery.mjs",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "benchmark:git": "cargo run --locked --manifest-path src-tauri/Cargo.toml --features benchmarks --example benchmark-git --",
+    "benchmark:status": "node scripts/benchmarks/status.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.4",

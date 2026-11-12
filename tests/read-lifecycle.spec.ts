@@ -1,5 +1,49 @@
+// @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
+import { LatestReadQueue } from "../src/lib/latest-read";
 import { LatestBatchReadQueue } from "../src/lib/latest-batch-read";
+import { previewReads } from "../src/lib/preview-reads";
+import { TerminalRouter } from "../src/lib/terminal";
+
+describe("连续选择的读取队列", () => {
+  it("已启动的读取保持有界，过时的排队项不会执行", async () => {
+    const queue = new LatestReadQueue();
+    let finish!: (value: number) => void;
+    const first = queue.run(() => new Promise<number>((resolve) => (finish = resolve)));
+    const second = queue.run(() => new Promise<number>(() => {}));
+    void second;
+    const obsolete = vi.fn(async () => 3);
+    const dropped = queue.run(obsolete).catch((error) => error.code);
+    const newest = vi.fn(async () => 4);
+    const last = queue.run(newest);
+    await Promise.resolve();
+    expect(obsolete).not.toHaveBeenCalled();
+    expect(newest).not.toHaveBeenCalled();
+    expect(await dropped).toBe("cancelled");
+    finish(1);
+    expect(await first).toBe(1);
+    expect(await last).toBe(4);
+    expect(obsolete).not.toHaveBeenCalled();
+    queue.close();
+  });
+
+  it("组件销毁后不启动排队读取，失败也释放运行位置", async () => {
+    const queue = new LatestReadQueue();
+    let fail!: (reason: unknown) => void;
+    const first = queue.run(() => new Promise((_, reject) => (fail = reject))).catch(() => {});
+    void queue.run(() => new Promise(() => {}));
+    const task = vi.fn(async () => 1);
+    const pending = queue.run(task).catch((error) => error.code);
+    await Promise.resolve();
+    queue.close();
+    fail(new Error("read failed"));
+    await first;
+    expect(await pending).toBe("cancelled");
+    await expect(queue.run(task)).rejects.toMatchObject({ code: "cancelled" });
+    expect(task).not.toHaveBeenCalled();
+  });
+});
+
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -127,5 +171,55 @@ describe("历史批量读取", () => {
     queue.close();
     expect(await again).toBe("cancelled");
     await expect(queue.run([4], stuck)).rejects.toMatchObject({ code: "cancelled" });
+  });
+});
+
+
+it("快速浏览 50 个预览仍只有两个在途请求，关闭的排队项不再启动", async () => {
+  const releases: (() => void)[] = [];
+  const task = vi.fn(() => new Promise<void>((resolve) => releases.push(resolve)));
+  const controllers = Array.from({ length: 50 }, () => new AbortController());
+  const requests = controllers.map((controller) => previewReads.run(task, controller.signal).catch(() => {}));
+  await Promise.resolve();
+  expect(task).toHaveBeenCalledTimes(2);
+  controllers.forEach((controller) => controller.abort());
+  releases.forEach((release) => release());
+  await Promise.all(requests);
+  await Promise.resolve();
+  expect(task).toHaveBeenCalledTimes(2);
+  expect(await previewReads.run(async () => "fresh", new AbortController().signal)).toBe("fresh");
+});
+
+
+describe("终端订阅资源", () => {
+  it("第二个订阅失败时释放第一个，重试与销毁没有残留", async () => {
+    const stopOutput = vi.fn();
+    const stops = [vi.fn(), vi.fn()];
+    const listen = vi.fn()
+      .mockResolvedValueOnce(stopOutput)
+      .mockRejectedValueOnce(new Error("listen failed"))
+      .mockResolvedValueOnce(stops[0])
+      .mockResolvedValueOnce(stops[1]);
+    const router = new TerminalRouter(listen);
+    await expect(router.start()).rejects.toThrow("listen failed");
+    expect(stopOutput).toHaveBeenCalledTimes(1);
+    await router.start();
+    router.dispose();
+    stops.forEach((stop) => expect(stop).toHaveBeenCalledTimes(1));
+    await router.start();
+    expect(listen).toHaveBeenCalledTimes(4);
+  });
+
+  it("订阅还没完成就卸载，迟到的监听器立即释放", async () => {
+    let finish!: (stop: () => void) => void;
+    const stop = vi.fn();
+    const listen = vi.fn(() => new Promise<() => void>((resolve) => { finish = resolve; }));
+    const router = new TerminalRouter(listen);
+    const ready = router.start();
+    router.dispose();
+    finish(stop);
+    await ready;
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(listen).toHaveBeenCalledTimes(1);
   });
 });

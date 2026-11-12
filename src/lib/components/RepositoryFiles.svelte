@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick, untrack } from "svelte";
   import type { Snippet } from "svelte";
-  import { changeDecorations, createFilesStore, isDeletedChange, isDirectoryKind, type FileTreeRow } from "../files.svelte";
+  import { changeDecorations, createFilesStore, isDeletedChange, isDirectoryKind, type FileSelectionMode, type FileTreeRow } from "../files.svelte";
   import type { DiffSide, OpenedRepository, RepositoryEditSnapshot } from "../types";
   import { fileNavState, type FileNavState } from "../ui";
   import FileContent from "./FileContent.svelte";
@@ -182,13 +182,13 @@
   let treeRows = $derived(store.treeRows);
   let filterLimited = $derived(store.filterLimited);
 
-  function selectRow(row: FileTreeRow): void {
+  function selectRow(row: FileTreeRow, mode: FileSelectionMode = "single"): void {
     if (row.segment) return;
     if (row.extra) {
       void store.locate(row.path, null);
       return;
     }
-    store.select(row.path);
+    store.selectWith(row.path, mode);
   }
 
   function toggleRow(row: FileTreeRow): void {
@@ -225,6 +225,7 @@
         bind:this={filesTree}
         rows={treeRows}
         selectedPath={store.selectedPath}
+        selectedPaths={store.selectedPaths}
         loading={store.loading}
         failure={store.failure}
         query={store.query}
@@ -244,6 +245,8 @@
         onRetryFilter={() => store.retryFilter()}
         onToggle={toggleRow}
         onSelect={selectRow}
+        onSelectAll={store.selectAll}
+        onClearSelection={store.clearMultiSelection}
         onSplit={splitRow}
         onHistory={onFileHistory}
         onRefresh={refresh}

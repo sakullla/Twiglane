@@ -305,9 +305,13 @@ describe("全仓库文本搜索", () => {
     await waitFor(() => expect(repositoryContentSearch).toHaveBeenCalled());
     expect(repositoryContentSearch.mock.calls[0][2]).toEqual({ kind: "repository" });
     expect(await screen.findByText("3 处匹配", { exact: false })).toBeTruthy();
+    const firstGroup = document.querySelector('.file-search-group[title="src/a.ts"]')!;
+    expect(firstGroup.querySelector(".search-count")?.textContent).toBe("2 处");
+    expect(firstGroup.querySelector(".search-count")?.getAttribute("aria-label")).toBe("2 处匹配");
     const hits = screen.getAllByRole("option").filter((item) => item.className.includes("hit"));
     expect(hits).toHaveLength(3);
     expect(hits[0].textContent).toContain("2:3");
+    expect(hits[0].querySelector(".hit-column")?.textContent).toBe(":3");
     expect(hits[2].textContent).toContain("x panel");
     // 命中部分单独加亮。
     expect(hits[2].querySelector("mark")?.textContent).toBe("panel");
@@ -345,6 +349,11 @@ describe("全仓库文本搜索", () => {
     await fireEvent.input(input, { target: { value: "panel " } });
     await waitFor(() => expect(screen.getByText(/已截断/)).toBeTruthy());
     expect(screen.getByText(/跳过 3 个文件/)).toBeTruthy();
+    const status = screen.getByRole("status");
+    expect(status.querySelector(".file-search-note-main")?.textContent).toBe("1 处匹配 · 1 个文件");
+    expect(
+      [...status.querySelectorAll(".file-search-note-meta > span")].map((item) => item.textContent),
+    ).toEqual(["已截断，请缩小范围", "片段被截短", "跳过 3 个文件"]);
 
     repositoryContentSearch.mockRejectedValue({ code: "io", message: "无法读取 src/b.ts。" });
     await fireEvent.input(input, { target: { value: "pane" } });

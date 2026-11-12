@@ -26,13 +26,15 @@ import type {
 /** 目录行高（像素）：与 components.css 的 .file-tree-row 一致，虚拟化按它算窗口。 */
 export const FILE_ROW_HEIGHT = 26;
 /** 搜索结果行高（像素）：路径结果与全文结果的每一行都固定这么高，虚拟化按它算窗口。 */
-export const SEARCH_ROW_HEIGHT = 26;
+export const SEARCH_ROW_HEIGHT = 28;
 /** 一次路径 / 全文搜索的请求上限：后端另有自己的上限，这里只是给界面的显示边界。 */
 export const SEARCH_LIMIT = 200;
 /** 单链合并的上限：再多就不是「一个目录」而是层级本身，逐级展开更好读。 */
 export const MAX_CHAIN = 12;
 /** 树过滤里全仓库补齐行的显示上限：再多也没法在树里读，界面必须说明只列了前这些。 */
 export const FILTER_EXTRA_LIMIT = 60;
+
+export type FileSelectionMode = "single" | "toggle" | "range";
 
 export interface FileNode {
   path: string;
@@ -474,6 +476,8 @@ export function createFilesStore(deps: FilesStoreDeps) {
   let repo = $state<string | null>(null);
   let nodes = $state<FileNode[]>([]);
   let selectedPath = $state<string | null>(null);
+  let selectedPaths = $state.raw<ReadonlySet<string>>(new Set());
+  let selectionAnchor = $state<string | null>(null);
   let query = $state("");
   let includeIgnored = $state(false);
   let loading = $state(false);
@@ -530,6 +534,8 @@ export function createFilesStore(deps: FilesStoreDeps) {
     repo = next;
     nodes = [];
     selectedPath = null;
+    selectedPaths = new Set();
+    selectionAnchor = null;
     query = "";
     loading = false;
     failure = null;
@@ -802,6 +808,8 @@ export function createFilesStore(deps: FilesStoreDeps) {
     if (!(await revealTarget(path))) return false;
     const previousDirectory = currentDirectory();
     selectedPath = path;
+    selectedPaths = new Set();
+    selectionAnchor = path;
     remember(path, line);
     retargetDirectoryScope(previousDirectory);
     if (line !== null && line > 0) lineTarget = { path, line, serial: ++locateSerial };
@@ -821,14 +829,64 @@ export function createFilesStore(deps: FilesStoreDeps) {
     cursor = visits.length - 1;
   }
 
-  function select(path: string): void {
+  function focus(path: string): void {
     const previousDirectory = currentDirectory();
     selectedPath = path;
     remember(path, null);
     retargetDirectoryScope(previousDirectory);
   }
 
+  function select(path: string): void {
+    selectedPaths = new Set();
+    selectionAnchor = path;
+    focus(path);
+  }
+
+  function selectWith(path: string, mode: FileSelectionMode): void {
+    if (mode === "single") {
+      select(path);
+      return;
+    }
+    const previous = selectedPath;
+    const anchor = selectionAnchor ?? previous ?? path;
+    let next = new Set(selectedPaths);
+    if (mode === "range") {
+      const visible = treeRows.filter((row) => !row.segment);
+      const start = visible.findIndex((row) => row.path === anchor);
+      const end = visible.findIndex((row) => row.path === path);
+      if (start >= 0 && end >= 0) {
+        next = new Set(
+          visible.slice(Math.min(start, end), Math.max(start, end) + 1).map((row) => row.path),
+        );
+      }
+    } else {
+      if (next.size === 0 && previous && previous !== path) next.add(previous);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+    }
+    focus(path);
+    selectedPaths = next;
+    selectionAnchor = mode === "range" ? anchor : path;
+  }
+
+  function selectAll(): void {
+    const next = new Set(treeRows.filter((row) => !row.segment).map((row) => row.path));
+    const first = next.values().next().value as string | undefined;
+    if (!first) return;
+    const current = selectedPath;
+    if (!current || !next.has(current)) select(first);
+    selectedPaths = next;
+    selectionAnchor = current && next.has(current) ? current : first;
+  }
+
+  function clearMultiSelection(): void {
+    selectedPaths = new Set();
+    selectionAnchor = selectedPath;
+  }
+
   function setQuery(next: string): void {
+    selectedPaths = new Set();
+    selectionAnchor = selectedPath;
     query = next;
     void completeFilter();
   }
@@ -980,6 +1038,8 @@ export function createFilesStore(deps: FilesStoreDeps) {
 
   function setChangedOnly(next: boolean): void {
     if (changedOnly === next) return;
+    selectedPaths = new Set();
+    selectionAnchor = selectedPath;
     if (next) {
       changedOnly = true;
       // 两种树覆盖的范围不同：补齐结果要么作废，要么按新模式重新查一次。
@@ -1080,6 +1140,8 @@ export function createFilesStore(deps: FilesStoreDeps) {
     const previousDirectory = currentDirectory();
     await revealTarget(visit.path);
     selectedPath = visit.path;
+    selectedPaths = new Set();
+    selectionAnchor = visit.path;
     retargetDirectoryScope(previousDirectory);
     if (visit.line !== null && visit.line > 0) {
       lineTarget = { path: visit.path, line: visit.line, serial: ++locateSerial };
@@ -1262,6 +1324,9 @@ export function createFilesStore(deps: FilesStoreDeps) {
     get selectedPath() {
       return selectedPath;
     },
+    get selectedPaths() {
+      return selectedPaths;
+    },
     get query() {
       return query;
     },
@@ -1402,6 +1467,9 @@ export function createFilesStore(deps: FilesStoreDeps) {
     expand,
     collapseAll,
     select,
+    selectWith,
+    selectAll,
+    clearMultiSelection,
   };
 }
 

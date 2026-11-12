@@ -7,6 +7,7 @@ import {
   commitLineTotalLabel,
   commitLineTotals,
   commitSelectionRange,
+  historyAuthorSuggestions,
   historyConditions,
   historyDayBound,
   historyStatus,
@@ -146,6 +147,20 @@ describe("历史文案", () => {
     expect(historyStatus("ok")).toBeNull();
     expect(historyStatus("empty_repository")).not.toBe(historyStatus("no_match"));
     expect(historyStatus("no_match")).not.toBe(historyStatus("no_file_history"));
+  });
+
+  it("作者补全去重，并按姓名、邮箱与匹配位置排序", () => {
+    const authors = [
+      { authorName: "Grace", authorEmail: "grace@example.com" },
+      { authorName: "Ada", authorEmail: "ada@example.com" },
+      { authorName: "Ada", authorEmail: "ada@example.com" },
+      { authorName: "Lin", authorEmail: "ada.work@example.com" },
+      { authorName: "Other", authorEmail: "other@example.com" },
+    ];
+    expect(historyAuthorSuggestions(authors, "ada").map((item) => item.value)).toEqual(["Ada", "Lin"]);
+    expect(historyAuthorSuggestions(authors, "example.com").map((item) => item.value)).toEqual(["Grace", "Ada", "Lin", "Other"]);
+    expect(historyAuthorSuggestions(authors, "")).toHaveLength(4);
+    expect(historyAuthorSuggestions(authors, "missing")).toEqual([]);
   });
 
   it("生效条件按交集书写，日期含当天，接近底部才追加", () => {
@@ -586,6 +601,53 @@ describe("历史面板", () => {
       expect(screen.getByText(/生效条件：范围：当前分支 main/)).toBeTruthy();
       expect(screen.getByText(/仓库没有被修改/)).toBeTruthy();
       expect(historyPage).toHaveBeenCalledWith("/repo", "", 0, 3, 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("作者按姓名或邮箱补全，键盘选择后立即应用，Esc 分层关闭", async () => {
+    vi.useFakeTimers();
+    try {
+      historyPage.mockResolvedValue({
+        generation: 3,
+        query: "",
+        offset: 0,
+        pageSize: 100,
+        hasMore: false,
+        state: "ok",
+        commits: [
+          commit(0, { authorName: "Ada", authorEmail: "ada@example.com" }),
+          commit(1, { authorName: "Grace", authorEmail: "grace@example.com" }),
+        ],
+        scope: "current",
+        branches: ["main"],
+        head: "main",
+      });
+      render(HistoryPanel, { props: panelProps() });
+      await vi.runAllTimersAsync();
+      await fireEvent.click(screen.getByRole("button", { name: "更多筛选" }));
+      const input = screen.getByRole("combobox", { name: "作者" }) as HTMLInputElement;
+      await fireEvent.focus(input);
+      await fireEvent.input(input, { target: { value: "grace@" } });
+      const suggestions = screen.getByRole("listbox", { name: "作者建议" });
+      expect(within(suggestions).getByRole("option", { name: /Grace grace@example\.com/ })).toBeTruthy();
+      expect(input.getAttribute("aria-expanded")).toBe("true");
+
+      await fireEvent.keyDown(input, { key: "ArrowDown" });
+      await fireEvent.keyDown(input, { key: "Enter" });
+      expect(input.value).toBe("Grace");
+      expect(screen.queryByRole("listbox", { name: "作者建议" })).toBeNull();
+      await vi.runAllTimersAsync();
+      expect(historyPage).toHaveBeenLastCalledWith("/repo", "", 0, 3, 1, { author: "Grace" });
+
+      await fireEvent.focus(input);
+      expect(screen.getByRole("listbox", { name: "作者建议" })).toBeTruthy();
+      await fireEvent.keyDown(input, { key: "Escape" });
+      expect(input.value).toBe("Grace");
+      expect(screen.queryByRole("listbox", { name: "作者建议" })).toBeNull();
+      await fireEvent.keyDown(input, { key: "Escape" });
+      expect(input.value).toBe("");
     } finally {
       vi.useRealTimers();
     }

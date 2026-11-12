@@ -1,5 +1,5 @@
 import { abbrevLength } from "./abbrev.svelte";
-import type { LineStat } from "./types";
+import type { HistoryCommit, LineStat } from "./types";
 
 /** 提交缩写：长度跟随当前仓库的 Git 缩写设置（见 abbrev.svelte.ts），不写死 7 位。 */
 export function shortOid(oid: string): string {
@@ -53,6 +53,43 @@ export function historyConditions(filters: HistoryConditionInput): string {
   const query = filters.query.trim();
   if (query) parts.push(`说明或哈希：${query}`);
   return `生效条件：${parts.join("；")}。仓库没有被修改。`;
+}
+
+export interface HistoryAuthorSuggestion {
+  name: string;
+  email: string;
+  value: string;
+}
+
+/** 从已读提交补全作者：姓名优先于邮箱，精确与前缀匹配优先于包含，同名同邮箱只保留一次。 */
+export function historyAuthorSuggestions(
+  commits: readonly Pick<HistoryCommit, "authorName" | "authorEmail">[],
+  query: string,
+  limit = 8,
+): HistoryAuthorSuggestion[] {
+  const needle = query.trim().toLowerCase();
+  const unique = new Map<string, HistoryAuthorSuggestion & { score: number; order: number }>();
+  commits.forEach((commit, order) => {
+    const name = commit.authorName.trim();
+    const email = commit.authorEmail.trim();
+    if (!name && !email) return;
+    const key = `${name.toLowerCase()}\0${email.toLowerCase()}`;
+    if (unique.has(key)) return;
+    const lowerName = name.toLowerCase();
+    const lowerEmail = email.toLowerCase();
+    const score = !needle ? 0
+      : lowerName === needle || lowerEmail === needle ? 1
+        : lowerName.startsWith(needle) ? 2
+          : lowerEmail.startsWith(needle) ? 3
+            : lowerName.includes(needle) ? 4
+              : lowerEmail.includes(needle) ? 5
+                : -1;
+    if (score >= 0) unique.set(key, { name, email, value: name || email, score, order });
+  });
+  return [...unique.values()]
+    .sort((a, b) => a.score - b.score || a.order - b.order)
+    .slice(0, Math.max(0, limit))
+    .map(({ name, email, value }) => ({ name, email, value }));
 }
 
 /** 本地日历日的含当日边界，单位秒。结束日取到 23:59:59。非法日期返回 null。 */

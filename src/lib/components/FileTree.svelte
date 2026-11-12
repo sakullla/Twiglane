@@ -1,7 +1,7 @@
 <script lang="ts">
   import { MODIFIER_LABEL } from "../brand";
   import { fileTone } from "../file-kind";
-  import { FILTER_EXTRA_LIMIT, FILE_ROW_HEIGHT, rowIndex, type ChangeDecorations, type FileTreeRow } from "../files.svelte";
+  import { FILTER_EXTRA_LIMIT, FILE_ROW_HEIGHT, rowIndex, type ChangeDecorations, type FileSelectionMode, type FileTreeRow } from "../files.svelte";
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
   import { BUSY_REASON } from "../ui";
   import ContextMenu, { isContextKey, pointFor, type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
@@ -44,8 +44,11 @@
     onLocate?: (path: string) => void;
     /** 补齐失败后的就地重试：同一个过滤词重发一次全仓库补齐。 */
     onRetryFilter?: () => void;
+    selectedPaths: ReadonlySet<string>;
     onToggle: (row: FileTreeRow) => void;
-    onSelect: (row: FileTreeRow) => void;
+    onSelect: (row: FileTreeRow, mode?: FileSelectionMode) => void;
+    onSelectAll: () => void;
+    onClearSelection: () => void;
     onSplit: (row: FileTreeRow) => void;
     onHistory?: (path: string) => void;
     onRefresh: () => void;
@@ -88,8 +91,11 @@
     onSearch,
     onLocate,
     onRetryFilter,
+    selectedPaths,
     onToggle,
     onSelect,
+    onSelectAll,
+    onClearSelection,
     onSplit,
     onHistory,
     onRefresh,
@@ -117,6 +123,11 @@
   let range = $derived(visibleRange(rows.length, scrollTop, viewport > 0 ? viewport : 0, FILE_ROW_HEIGHT));
   let visible = $derived(rows.slice(range.start, range.end));
   let hasExpanded = $derived(rows.some((row) => row.expandable && row.expanded));
+  let selectedRows = $derived(rows.filter((row) => !row.segment && selectedPaths.has(row.path)));
+
+  function isSelected(row: FileTreeRow): boolean {
+    return selectedPaths.size > 0 ? selectedPaths.has(row.path) : row.path === selectedPath;
+  }
 
   function reveal(index: number) {
     const next = scrollIndexIntoView(index, scrollTop, viewport > 0 ? viewport : (list?.clientHeight ?? 0), FILE_ROW_HEIGHT);
@@ -157,14 +168,15 @@
     onToggle(row);
   }
 
-  /** 单击：目录选中并切换展开，文件选中即打开；补齐行先展开祖先再定位。 */
-  function activate(row: FileTreeRow) {
+  /** 普通点击保持单选与目录展开；Ctrl/⌘、Shift 只调整选择集合，不顺手折叠目录。 */
+  function activate(row: FileTreeRow, mode: FileSelectionMode = "single") {
     if (row.extra) {
       onLocate?.(row.path);
       return;
     }
-    onSelect(row);
-    if (row.expandable && !disabled) onToggle(row);
+    if (mode === "single") onSelect(row);
+    else onSelect(row, mode);
+    if (mode === "single" && row.expandable && !disabled) onToggle(row);
   }
 
   function expand(row: FileTreeRow) {
@@ -189,13 +201,24 @@
       const index = selectedPath ? rowIndex(rows, selectedPath) : -1;
       if (index >= 0) {
         event.preventDefault();
-        const element = list?.querySelector<HTMLElement>('.file-tree-row[aria-selected="true"]');
+        const element = list?.querySelector<HTMLElement>(".file-tree-row.active");
         menu = {
           ...(element ? pointFor(element) : { x: 120, y: 120 }),
           entries: menuEntries(rows[index]),
-          label: `${rows[index].path} 的操作`,
+          label: selectedRows.length > 1 ? `已选 ${selectedRows.length} 项的操作` : `${rows[index].path} 的操作`,
         };
       }
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+      event.preventDefault();
+      onSelectAll();
+      return;
+    }
+    if (event.key === "Escape" && selectedPaths.size > 0) {
+      event.preventDefault();
+      event.stopPropagation();
+      onClearSelection();
       return;
     }
     if (event.altKey || event.ctrlKey || event.metaKey) return;
@@ -233,9 +256,10 @@
     if (move === null) return;
     event.preventDefault();
     const target = rows[move];
-    if (!target) return;
+    if (!target || target.segment) return;
     reveal(move);
-    onSelect(target);
+    if (event.shiftKey) onSelect(target, "range");
+    else onSelect(target);
   }
 
   /** 系统定位文案按平台切换：与全应用菜单一致（文案是显示，不是动作，仍由 App 执行 reveal）。 */
@@ -259,7 +283,34 @@
     ];
   }
 
+  function copySelected(absolute = false): void {
+    if (!onCopyPath || selectedRows.length === 0) return;
+    const paths = selectedRows.map((row) => absolute && toAbsolute ? toAbsolute(row.path) : row.path);
+    onCopyPath(paths.join("\n"), `${selectedRows.length} 个${absolute ? "完整" : "相对"}路径`);
+  }
+
+  function revealSelected(): void {
+    if (!onReveal) return;
+    for (const row of selectedRows) onReveal(row.path);
+  }
+
+  function batchMenuEntries(): ContextMenuEntry[] {
+    const entries: ContextMenuEntry[] = [{ heading: `已选 ${selectedRows.length} 项` }];
+    if (onReveal) {
+      entries.push({ id: "reveal-selected", label: "在系统文件管理器中显示所选项目", icon: "folder-open", run: revealSelected });
+    }
+    if (onCopyPath) {
+      entries.push({ separator: true });
+      entries.push({ id: "copy-selected-rel", label: "复制所选相对路径", icon: "copy", run: () => copySelected() });
+      entries.push({ id: "copy-selected-abs", label: "复制所选完整路径", icon: "copy", run: () => copySelected(true) });
+    }
+    entries.push({ separator: true });
+    entries.push({ id: "clear-selected", label: "取消多选", icon: "x", shortcut: "Esc", run: onClearSelection });
+    return entries;
+  }
+
   function menuEntries(row: FileTreeRow): ContextMenuEntry[] {
+    if (selectedPaths.has(row.path) && selectedRows.length > 1) return batchMenuEntries();
     const entries: ContextMenuEntry[] = [];
     if (row.expandable) {
       // 目录：展开/折叠 → 系统定位该目录 → 路径复制。
@@ -488,6 +539,16 @@
   </div>
 </div>
 
+{#if selectedRows.length > 0}
+  <div class="file-selection-bar">
+    <span role="status"><Icon name="check" size={12} />已选 {selectedRows.length} 项</span>
+    <span class="spacer"></span>
+    {#if onCopyPath}<button type="button" class="link-btn" onclick={() => copySelected()}>复制路径</button>{/if}
+    {#if onReveal}<button type="button" class="link-btn" onclick={revealSelected}>系统定位</button>{/if}
+    <button type="button" class="icon-btn sm" aria-label="取消多选" title="取消多选（Esc）" onclick={onClearSelection}><Icon name="x" size={12} /></button>
+  </div>
+{/if}
+
 {#if filterNote && !(filterError && rows.length === 0)}
   <p class="file-tree-status" class:danger={filterNote.danger} role={filterNote.danger ? "alert" : "status"}>
     <span>{filterNote.text}</span>
@@ -513,6 +574,7 @@
   class="file-tree"
   role="tree"
   aria-label="仓库文件"
+  aria-multiselectable="true"
   aria-busy={loading}
   tabindex="0"
   bind:this={list}
@@ -613,16 +675,18 @@
           class:ignored={row.ignored}
           class:deleted={row.deleted}
           class:active={row.path === selectedPath}
+          class:selected={selectedPaths.has(row.path)}
           data-tone={status?.tone}
           role="treeitem"
-          aria-selected={row.path === selectedPath}
+          aria-selected={isSelected(row)}
           aria-level={row.depth + 1}
           aria-expanded={row.expandable ? row.expanded : undefined}
           tabindex="-1"
           style={`top:${top}px;height:${FILE_ROW_HEIGHT}px`}
           title={rowHint(row)}
-          onclick={() => {
-            activate(row);
+          onclick={(event) => {
+            const mode = event.shiftKey ? "range" : event.ctrlKey || event.metaKey ? "toggle" : "single";
+            activate(row, mode);
             focusList();
           }}
           onkeydown={(event) => {
@@ -635,9 +699,10 @@
           }}
           oncontextmenu={(event) => {
             event.preventDefault();
-            onSelect(row);
+            const keepMulti = selectedPaths.has(row.path) && selectedRows.length > 1;
+            if (!keepMulti) onSelect(row);
             moreOpen = false;
-            menu = { x: event.clientX, y: event.clientY, entries: menuEntries(row), label: `${row.path} 的操作` };
+            menu = { x: event.clientX, y: event.clientY, entries: menuEntries(row), label: keepMulti ? `已选 ${selectedRows.length} 项的操作` : `${row.path} 的操作` };
           }}
         >
           {#if row.depth > 0}<span class="tree-indent" style={`width:${row.depth * INDENT}px`} aria-hidden="true"></span>{/if}

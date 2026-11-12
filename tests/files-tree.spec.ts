@@ -120,6 +120,7 @@ describe("目录树交互", () => {
   const baseProps = () => ({
     rows: flattenTree(tree()),
     selectedPath: "src/lib/components/Button.svelte",
+    selectedPaths: new Set<string>(),
     loading: false,
     failure: null,
     query: "",
@@ -129,6 +130,8 @@ describe("目录树交互", () => {
     onIncludeIgnored: vi.fn(),
     onToggle: vi.fn(),
     onSelect: vi.fn(),
+    onSelectAll: vi.fn(),
+    onClearSelection: vi.fn(),
     onSplit: vi.fn(),
     onHistory: vi.fn(),
     onRefresh: vi.fn(),
@@ -226,6 +229,7 @@ describe("目录树右键菜单", () => {
   const baseProps = () => ({
     rows: flattenTree(tree()),
     selectedPath: "src/lib/components/Button.svelte",
+    selectedPaths: new Set<string>(),
     loading: false,
     failure: null,
     query: "",
@@ -235,6 +239,8 @@ describe("目录树右键菜单", () => {
     onIncludeIgnored: vi.fn(),
     onToggle: vi.fn(),
     onSelect: vi.fn(),
+    onSelectAll: vi.fn(),
+    onClearSelection: vi.fn(),
     onSplit: vi.fn(),
     onHistory: vi.fn(),
     onRefresh: vi.fn(),
@@ -434,6 +440,50 @@ describe("文件视图容器", () => {
     await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
     expect(repositoryDirectory.mock.calls[0].slice(0, 4)).toEqual([repoPath, "", false, 4]);
     expect(await screen.findByRole("treeitem", { name: /src/ })).toBeTruthy();
+  });
+
+  it("Ctrl 多选、Shift 范围、全选、批量复制与 Esc 使用同一份选择", async () => {
+    const entry = (path: string) => ({ name: path, path, kind: "file" as const, ignored: false, size: 4, error: null });
+    repositoryDirectory.mockResolvedValue(dir("", [entry("a.ts"), entry("b.ts"), entry("c.ts")]));
+    repositoryFileContent.mockResolvedValue({ generation: 4, path: "a.ts", kind: "text", size: 4, offset: 0, lines: ["a"], nextOffset: 1, hasMore: false, truncated: false, message: null });
+    const onCopyPath = vi.fn();
+    render(RepositoryFiles, { props: { ...viewProps(true), onCopyPath } as never });
+    const tree = await screen.findByRole("tree", { name: "仓库文件" });
+    const a = await within(tree).findByRole("treeitem", { name: "a.ts" });
+    const b = within(tree).getByRole("treeitem", { name: "b.ts" });
+    const c = within(tree).getByRole("treeitem", { name: "c.ts" });
+
+    await fireEvent.click(a);
+    await fireEvent.click(b, { ctrlKey: true });
+    expect(a.getAttribute("aria-selected")).toBe("true");
+    expect(b.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("已选 2 项")).toBeTruthy();
+
+    // Ctrl 点击的 b 是范围锚点：Shift 选 c 后保留 b、c，不残留隐藏的旧范围。
+    await fireEvent.click(c, { shiftKey: true });
+    expect(a.getAttribute("aria-selected")).toBe("false");
+    expect(b.getAttribute("aria-selected")).toBe("true");
+    expect(c.getAttribute("aria-selected")).toBe("true");
+
+    await fireEvent.keyDown(tree, { key: "a", ctrlKey: true });
+    expect(screen.getByText("已选 3 项")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "复制路径" }));
+    expect(onCopyPath).toHaveBeenLastCalledWith("a.ts\nb.ts\nc.ts", "3 个相对路径");
+
+    await fireEvent.contextMenu(b);
+    expect(screen.getByText("已选 3 项", { selector: ".menu-label" })).toBeTruthy();
+    await fireEvent.click(screen.getByRole("menuitem", { name: "复制所选完整路径" }));
+    expect(onCopyPath).toHaveBeenLastCalledWith("a.ts\nb.ts\nc.ts", "3 个完整路径");
+
+    await fireEvent.keyDown(tree, { key: "Escape" });
+    expect(screen.queryByText("已选 3 项")).toBeNull();
+    expect(c.getAttribute("aria-selected")).toBe("true");
+
+    await fireEvent.keyDown(tree, { key: "Home" });
+    await fireEvent.keyDown(tree, { key: "End", shiftKey: true });
+    expect(screen.getByText("已选 3 项")).toBeTruthy();
+    expect(a.getAttribute("aria-selected")).toBe("true");
+    expect(c.getAttribute("aria-selected")).toBe("true");
   });
 
   it("文件与祖先目录显示当前 StatusSnapshot 的 Git 装饰", async () => {

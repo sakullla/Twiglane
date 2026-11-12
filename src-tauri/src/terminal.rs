@@ -895,6 +895,7 @@ fn detect_profiles() -> Vec<ShellSpec> {
             );
         }
         candidates.push("/bin/sh".into());
+        let args = unix_shell_args(std::env::consts::OS);
         let mut seen = HashSet::new();
         for candidate in candidates {
             let path = Path::new(&candidate);
@@ -913,13 +914,23 @@ fn detect_profiles() -> Vec<ShellSpec> {
                 "fish" => "Fish".to_string(),
                 other => other.to_string(),
             };
-            push_spec(&mut specs, &name, &label, candidate, &[]);
+            push_spec(&mut specs, &name, &label, candidate, args);
         }
         if specs.is_empty() {
-            push_spec(&mut specs, "sh", "sh", "/bin/sh".into(), &[]);
+            push_spec(&mut specs, "sh", "sh", "/bin/sh".into(), args);
         }
     }
     specs
+}
+
+/// macOS 图形应用不经过登录 shell；以登录模式启动才能加载 .zprofile 等文件里的 PATH 与环境变量。
+#[cfg(any(unix, test))]
+fn unix_shell_args(os: &str) -> &'static [&'static str] {
+    if os == "macos" {
+        &["-l"]
+    } else {
+        &[]
+    }
 }
 
 /// 在 Windows 的已知安装位置与 PATH 中查找固定候选 shell，返回可执行文件绝对路径。
@@ -1431,6 +1442,13 @@ mod tests {
     }
 
     #[test]
+    fn macos_shells_load_login_environment() {
+        assert_eq!(unix_shell_args("macos"), &["-l"]);
+        assert!(unix_shell_args("linux").is_empty());
+        assert!(unix_shell_args("windows").is_empty());
+    }
+
+    #[test]
     fn detected_profiles_are_unique_and_point_at_existing_programs() {
         let profiles = detect_profiles();
         assert!(!profiles.is_empty(), "至少要有一个平台默认 shell");
@@ -1438,6 +1456,8 @@ mod tests {
         for profile in &profiles {
             assert!(ids.insert(profile.id.clone()), "终端类型 id 重复：{}", profile.id);
             assert!(!profile.label.is_empty());
+            #[cfg(unix)]
+            assert_eq!(profile.args, unix_shell_args(std::env::consts::OS));
         }
     }
 

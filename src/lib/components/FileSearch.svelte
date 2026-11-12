@@ -119,22 +119,22 @@
     }
   }
 
-  function pathStatus(): string {
-    if (store.pathError) return store.pathError;
-    if (store.pathBusy) return "正在查找路径…";
+  function pathStatus(): string[] {
+    if (store.pathError) return [store.pathError];
+    if (store.pathBusy) return ["正在查找路径…"];
     const result = store.pathResult;
-    if (!result) return "";
+    if (!result) return [];
     if (result.entries.length === 0) {
-      return result.scanned === 0 ? "仓库里没有可以匹配的路径" : "没有匹配的路径";
+      return [result.scanned === 0 ? "仓库里没有可以匹配的路径" : "没有匹配的路径"];
     }
-    return `${result.entries.length} 条路径${result.truncated ? "（已截断，请收窄查询）" : ""}`;
+    return [`${result.entries.length} 条路径${result.truncated ? "（已截断，请收窄查询）" : ""}`];
   }
 
-  function contentStatus(): string {
-    if (store.contentError) return store.contentError;
-    if (store.contentBusy) return "正在搜索工作区文本…";
+  function contentStatus(): string[] {
+    if (store.contentError) return [store.contentError];
+    if (store.contentBusy) return ["正在搜索工作区文本…"];
     const result = store.contentResult;
-    if (!result) return "";
+    if (!result) return [];
     const parts: string[] = [];
     const files = new Set(result.matches.map((match) => match.path)).size;
     parts.push(
@@ -148,10 +148,10 @@
     if (result.truncated) parts.push("已截断，请缩小范围");
     if (result.textTruncated) parts.push("片段被截短");
     if (result.skippedFiles > 0) parts.push(`跳过 ${result.skippedFiles} 个文件`);
-    return parts.join(" · ");
+    return parts;
   }
 
-  let status = $derived(mode === "path" ? pathStatus() : contentStatus());
+  let statusParts = $derived(mode === "path" ? pathStatus() : contentStatus());
   let statusDanger = $derived(Boolean(mode === "path" ? store.pathError : store.contentError));
   /* 正在飞的请求不该被第二个重试挤掉：按钮只在空闲时可点。 */
   let statusBusy = $derived(mode === "path" ? store.pathBusy : store.contentBusy);
@@ -289,9 +289,16 @@
     </div>
   {/if}
 
-  {#if status}
+  {#if statusParts.length > 0}
     <div class="file-search-note" class:danger={statusDanger} role={statusDanger ? "alert" : "status"}>
-      <span class="file-search-note-text">{status}</span>
+      <span class="file-search-note-text">
+        <span class="file-search-note-main">{statusParts[0]}</span>
+        {#if statusParts.length > 1}
+          <span class="file-search-note-meta">
+            {#each statusParts.slice(1) as part}<span>{part}</span>{/each}
+          </span>
+        {/if}
+      </span>
       {#if statusDanger}
         <span class="file-search-note-actions">
           <button
@@ -373,7 +380,7 @@
               <span class={`tree-icon ft-${fileTone(row.path)}`}><Icon name="file" size={13} /></span>
               <span class="search-name">{parts.name}</span>
               {#if parts.dir}<span class="search-dir">{parts.dir}</span>{/if}
-              <span class="search-count">{row.count}</span>
+              <span class="search-count" aria-label={`${row.count} 处匹配`}>{row.count} 处</span>
             </div>
           {:else}
             {@const snippet = matchSnippet(row.text, store.contentQuery, row.column)}
@@ -390,7 +397,7 @@
               onmousedown={(event) => event.preventDefault()}
               onclick={() => open(index)}
             >
-              <span class="hit-pos">{row.line}:{row.column}</span>
+              <span class="hit-pos"><span>{row.line}</span><span class="hit-column">:{row.column}</span></span>
               <span class="hit-text">{snippet.before}{#if snippet.match}<mark>{snippet.match}</mark>{/if}{snippet.after}</span>
             </button>
           {/if}

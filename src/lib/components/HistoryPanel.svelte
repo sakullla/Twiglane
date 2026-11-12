@@ -12,6 +12,7 @@
     formatAuthoredAt,
     HISTORY_RANGE_PREFIX,
     HISTORY_SEARCH_DEBOUNCE_MS,
+    historyAuthorSuggestions,
     historyConditions,
     historyDayBound,
     historyStatus,
@@ -380,6 +381,8 @@
 
   let query = $state("");
   let author = $state("");
+  let authorOpen = $state(false);
+  let authorActive = $state(0);
   let pathFilter = $state("");
   let sinceDay = $state("");
   let untilDay = $state("");
@@ -405,6 +408,8 @@
     head: string | null;
   } | null>(null);
   let commits = $state.raw<HistoryCommit[]>([]);
+  let authorSuggestions = $derived(historyAuthorSuggestions(commits, author));
+  let authorListOpen = $derived(authorOpen && authorSuggestions.length > 0);
   let listError = $state<string | null>(null);
   /** 本地筛选条件问题（例如日期无效）：不是读取失败，不给必然失败的重试。 */
   let listProblem = $state<string | null>(null);
@@ -1196,6 +1201,44 @@
     }, HISTORY_SEARCH_DEBOUNCE_MS);
   }
 
+  function chooseAuthor(candidate: (typeof authorSuggestions)[number]): void {
+    author = candidate.value;
+    activeAuthor = candidate.value;
+    authorOpen = false;
+    authorActive = 0;
+  }
+
+  function onAuthorKey(event: KeyboardEvent): void {
+    if (event.isComposing) return;
+    if ((event.key === "ArrowDown" || event.key === "ArrowUp") && authorSuggestions.length > 0) {
+      event.preventDefault();
+      authorOpen = true;
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      authorActive = (authorActive + delta + authorSuggestions.length) % authorSuggestions.length;
+      return;
+    }
+    if (event.key === "Enter" && authorListOpen) {
+      event.preventDefault();
+      event.stopPropagation();
+      const candidate = authorSuggestions[authorActive];
+      if (candidate) chooseAuthor(candidate);
+      return;
+    }
+    if (event.key === "Escape") {
+      if (authorOpen) {
+        event.preventDefault();
+        event.stopPropagation();
+        authorOpen = false;
+      } else if (author) {
+        event.preventDefault();
+        event.stopPropagation();
+        clearFilter("author");
+      }
+      return;
+    }
+    if (event.key === "Tab") authorOpen = false;
+  }
+
   function setScope(value: string) {
     scope = value;
     activeScope = value;
@@ -1213,7 +1256,11 @@
 
   function clearFilter(kind: "query" | "author" | "path" | "since" | "until") {
     if (kind === "query") query = "";
-    if (kind === "author") author = "";
+    if (kind === "author") {
+      author = "";
+      authorOpen = false;
+      authorActive = 0;
+    }
     if (kind === "path") pathFilter = "";
     if (kind === "since") sinceDay = "";
     if (kind === "until") untilDay = "";
@@ -1228,6 +1275,8 @@
   function clearAllFilters() {
     query = "";
     author = "";
+    authorOpen = false;
+    authorActive = 0;
     pathFilter = "";
     sinceDay = "";
     untilDay = "";
@@ -1608,7 +1657,8 @@
               <input
                 id="history-search"
                 aria-label="搜索说明或提交哈希"
-                placeholder="搜索说明或提交哈希"
+                placeholder="说明或提交哈希"
+                title="输入时自动搜索；↓ 进入提交列表，Enter 打开所选提交"
                 autocomplete="off"
                 spellcheck="false"
                 value={query}
@@ -1650,67 +1700,108 @@
           </div>
           {#if moreFilters}
           <div class="history-more-filters" id="history-more-filters">
-          <div class="field sm">
-            <Icon name="user" size={14} />
-            <input
-              aria-label="作者"
-              placeholder="作者"
-              autocomplete="off"
-              spellcheck="false"
-              value={author}
-              onkeydown={(event) => {
-                if (event.key === "Escape" && author) {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  clearFilter("author");
-                }
-              }}
-              oninput={(event) => {
-                author = event.currentTarget.value;
-                scheduleText();
-              }}
-            />
-            {#if author}
-              <button type="button" class="field-clear" aria-label="清除作者" onclick={() => clearFilter("author")}><Icon name="x" size={12} /></button>
-            {/if}
-          </div>
-          <div class="history-filter-row">
-            <input class="input" type="date" aria-label="开始日期" value={sinceDay} oninput={(event) => setDay("since", event.currentTarget.value)} />
-            <input class="input" type="date" aria-label="结束日期" value={untilDay} oninput={(event) => setDay("until", event.currentTarget.value)} />
-          </div>
-          {#if sinceDay || untilDay}
-            <div class="history-filter-row">
-              {#if sinceDay}<button type="button" class="btn btn-ghost btn-sm" onclick={() => clearFilter("since")}>清除开始日期</button>{/if}
-              {#if untilDay}<button type="button" class="btn btn-ghost btn-sm" onclick={() => clearFilter("until")}>清除结束日期</button>{/if}
+            <div class="history-filter-field">
+              <label for="history-author">作者 <span>姓名或邮箱</span></label>
+              <div
+                class="history-author-combobox"
+                onfocusout={(event) => {
+                  if (!(event.currentTarget as HTMLElement).contains(event.relatedTarget as Node | null)) authorOpen = false;
+                }}
+              >
+                <div class="field sm" class:open={authorListOpen}>
+                  <Icon name="user" size={14} />
+                  <input
+                    id="history-author"
+                    role="combobox"
+                    aria-label="作者"
+                    aria-autocomplete="list"
+                    aria-expanded={authorListOpen}
+                    aria-controls="history-author-suggestions"
+                    aria-activedescendant={authorListOpen ? `history-author-${authorActive}` : undefined}
+                    placeholder="输入姓名或邮箱"
+                    autocomplete="off"
+                    spellcheck="false"
+                    value={author}
+                    onfocus={() => {
+                      authorOpen = true;
+                      authorActive = 0;
+                    }}
+                    onkeydown={onAuthorKey}
+                    oninput={(event) => {
+                      author = event.currentTarget.value;
+                      authorActive = 0;
+                      authorOpen = true;
+                      scheduleText();
+                    }}
+                  />
+                  {#if author}
+                    <button type="button" class="field-clear" aria-label="清除作者" onclick={() => clearFilter("author")}><Icon name="x" size={12} /></button>
+                  {/if}
+                </div>
+                {#if authorListOpen}
+                  <div class="history-author-suggestions" id="history-author-suggestions" role="listbox" aria-label="作者建议">
+                    {#each authorSuggestions as candidate, index (`${candidate.name}\0${candidate.email}`)}
+                      <button
+                        type="button"
+                        id={`history-author-${index}`}
+                        role="option"
+                        aria-selected={index === authorActive}
+                        onmousedown={(event) => event.preventDefault()}
+                        onclick={() => chooseAuthor(candidate)}
+                      >
+                        <span class="avatar" style={`--hue:${hueOf(candidate.name || candidate.email)}`} aria-hidden="true">{initialOf(candidate.name || candidate.email)}</span>
+                        <span class="author-suggestion-text">
+                          <strong>{candidate.name || candidate.email}</strong>
+                          {#if candidate.name && candidate.email}<span>{candidate.email}</span>{/if}
+                        </span>
+                      </button>
+                    {/each}
+                    <p>来自已加载的提交</p>
+                  </div>
+                {/if}
+              </div>
             </div>
-          {/if}
-          <div class="field sm">
-            <Icon name="folder" size={14} />
-            <input
-              aria-label="路径"
-              placeholder="路径"
-              autocomplete="off"
-              spellcheck="false"
-              value={filePath ?? pathFilter}
-              disabled={Boolean(filePath)}
-              title={filePath ? "文件历史的路径不能改" : undefined}
-              onkeydown={(event) => {
-                if (!filePath && event.key === "Escape" && pathFilter) {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  clearFilter("path");
-                }
-              }}
-              oninput={(event) => {
-                if (filePath) return;
-                pathFilter = event.currentTarget.value;
-                scheduleText();
-              }}
-            />
-            {#if !filePath && pathFilter}
-              <button type="button" class="field-clear" aria-label="清除路径" onclick={() => clearFilter("path")}><Icon name="x" size={12} /></button>
+            <div class="history-filter-row">
+              <label class="history-date-field"><span>开始日期</span><input class="input" type="date" aria-label="开始日期" value={sinceDay} oninput={(event) => setDay("since", event.currentTarget.value)} /></label>
+              <label class="history-date-field"><span>结束日期</span><input class="input" type="date" aria-label="结束日期" value={untilDay} oninput={(event) => setDay("until", event.currentTarget.value)} /></label>
+            </div>
+            {#if sinceDay || untilDay}
+              <div class="history-filter-row">
+                {#if sinceDay}<button type="button" class="btn btn-ghost btn-sm" onclick={() => clearFilter("since")}>清除开始日期</button>{/if}
+                {#if untilDay}<button type="button" class="btn btn-ghost btn-sm" onclick={() => clearFilter("until")}>清除结束日期</button>{/if}
+              </div>
             {/if}
-          </div>
+            <div class="history-filter-field">
+              <label for="history-path">路径 <span>仓库相对路径</span></label>
+              <div class="field sm">
+                <Icon name="folder" size={14} />
+                <input
+                  id="history-path"
+                  aria-label="路径"
+                  placeholder="例如 src/lib"
+                  autocomplete="off"
+                  spellcheck="false"
+                  value={filePath ?? pathFilter}
+                  disabled={Boolean(filePath)}
+                  title={filePath ? "文件历史的路径不能改" : undefined}
+                  onkeydown={(event) => {
+                    if (!filePath && event.key === "Escape" && pathFilter) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      clearFilter("path");
+                    }
+                  }}
+                  oninput={(event) => {
+                    if (filePath) return;
+                    pathFilter = event.currentTarget.value;
+                    scheduleText();
+                  }}
+                />
+                {#if !filePath && pathFilter}
+                  <button type="button" class="field-clear" aria-label="清除路径" onclick={() => clearFilter("path")}><Icon name="x" size={12} /></button>
+                {/if}
+              </div>
+            </div>
           </div>
           {/if}
         </div>

@@ -29,15 +29,21 @@ const KEY_COMMANDS: Record<string, string> = {
   f: "view.find",
   p: "files.quickOpen",
   enter: "commit.local",
+  /** ⌘/Ctrl+`：与 VS Code 等编辑器一致的终端开关。 */
+  "`": "terminal.toggle",
 };
 
 /**
- * ⌘/Ctrl+Shift 组合：文件视图的搜索与返回/前进。
+ * ⌘/Ctrl+Shift 组合：文件视图的搜索与返回/前进、新建终端。
  * 这些键位此前没有含义，因此不覆盖 Alt+←/→、Alt+↑/↓ 与 ⌘/Ctrl+F。
+ * 新建终端按物理键 Backquote 识别：Shift 后 key 随键盘布局变成 ~ 或其它字符。
  */
 const SHIFT_KEY_COMMANDS: Record<string, string> = {
   arrowleft: "file.back",
   arrowright: "file.forward",
+};
+const SHIFT_CODE_COMMANDS: Record<string, string> = {
+  Backquote: "terminal.new",
 };
 
 const ALT_COMMANDS: Record<string, string> = {
@@ -114,7 +120,9 @@ export function shortcutCommand(event: KeyLike): string | null {
   if (!mod || event.altKey) return null;
   const key = event.key.toLowerCase();
   // ⌘⇧ 组合只认注册表里显式登记的几项，其余一律不匹配（⌘⇧K 仍然不是 ⌘K）。
-  if (event.shiftKey && key !== "enter") return SHIFT_KEY_COMMANDS[key] ?? null;
+  if (event.shiftKey && key !== "enter") {
+    return SHIFT_KEY_COMMANDS[key] ?? (event.code ? SHIFT_CODE_COMMANDS[event.code] : undefined) ?? null;
+  }
   const digit = DIGIT_VIEWS[event.key];
   if (digit) return digit;
   return KEY_COMMANDS[key] ?? null;

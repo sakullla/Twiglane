@@ -133,10 +133,15 @@ fn capabilities_grant_only_explicit_terminal_ipc_not_a_generic_shell() {
         "allow-cliora-review-request",
         "allow-cliora-review-receipt",
         "allow-cliora-review-return",
-        // 终端只开放五个结构化命令：打开/附着、重启、写入、resize 与全部终止。
-        // 没有任何命令允许前端指定程序、参数或工作目录之外的路径。
-        "allow-open-terminal",
-        "allow-restart-terminal",
+        // 终端只开放结构化命令：探测类型、列出/新建/附着/重启/关闭会话、写入、resize、
+        // 全部终止与保存偏好。没有任何命令允许前端指定程序、参数或仓库之外的工作目录。
+        "allow-terminal-profiles",
+        "allow-terminal-list",
+        "allow-terminal-create",
+        "allow-terminal-attach",
+        "allow-terminal-restart",
+        "allow-terminal-close",
+        "allow-set-terminal-prefs",
         "allow-terminal-write",
         "allow-terminal-resize",
         "allow-terminate-terminals",
@@ -241,12 +246,18 @@ fn assert_terminal_start_is_fixed(root: &Path) {
         "终端只能有一个固定的 shell 启动点"
     );
     assert!(
-        source.contains("CommandBuilder::new(&shell)"),
-        "终端必须使用解析后的默认 shell 启动"
+        source.contains("CommandBuilder::new(&spec.program)"),
+        "终端必须使用后端解析出的终端类型启动"
     );
+    for candidate in ["\"pwsh.exe\"", "\"powershell.exe\"", "find_git_bash()", "\"wsl.exe\""] {
+        assert!(
+            source.contains(candidate),
+            "Windows 终端类型必须来自固定候选：缺少 {candidate}"
+        );
+    }
     assert!(
-        source.contains("\"pwsh.exe\", \"powershell.exe\""),
-        "Windows 默认 shell 必须优先固定的 PowerShell 7 / 5.1 候选"
+        source.find("\"pwsh.exe\"") < source.find("\"powershell.exe\""),
+        "Windows 默认 shell 必须优先 PowerShell 7，其次 5.1"
     );
     assert!(
         source.contains("std::env::var_os(\"COMSPEC\")"),
@@ -257,14 +268,23 @@ fn assert_terminal_start_is_fixed(root: &Path) {
         "Unix 默认 shell 必须来自 $SHELL"
     );
     assert!(
+        source.contains("fn resolve_profile("),
+        "前端只能按 id 选择探测结果"
+    );
+    assert!(
         !source.contains("#[tauri::command]"),
         "终端命令只在 lib.rs 暴露，模块本身不注册额外 IPC"
     );
 
     let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
     for name in [
-        "open_terminal",
-        "restart_terminal",
+        "terminal_profiles",
+        "terminal_list",
+        "terminal_create",
+        "terminal_attach",
+        "terminal_restart",
+        "terminal_close",
+        "set_terminal_prefs",
         "terminal_write",
         "terminal_resize",
         "terminate_terminals",

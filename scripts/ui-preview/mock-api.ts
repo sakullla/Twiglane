@@ -455,6 +455,8 @@ export async function pickFile() {
 interface PreviewTerminal {
   sessionId: string;
   repoPath: string;
+  profile: string;
+  label: string;
   shell: string;
   cwd: string;
   running: boolean;
@@ -466,7 +468,6 @@ interface PreviewTerminal {
 }
 
 const terminalMode = previewParams.get("terminal") ?? "";
-const terminalSessions = new Map<string, PreviewTerminal>();
 const terminalById = new Map<string, PreviewTerminal>();
 let terminalSerial = 0;
 
@@ -489,6 +490,8 @@ function terminalSnapshot(session: PreviewTerminal): TerminalSnapshot {
   return {
     sessionId: session.sessionId,
     repoPath: session.repoPath,
+    profile: session.profile,
+    label: session.label,
     shell: session.shell,
     cwd: session.cwd,
     running: session.running,
@@ -499,11 +502,16 @@ function terminalSnapshot(session: PreviewTerminal): TerminalSnapshot {
   };
 }
 
-function createPreviewTerminal(path: string, running = true): PreviewTerminal {
+const PREVIEW_LABELS: Record<string, string> = { pwsh: "PowerShell", cmd: "命令提示符", "git-bash": "Git Bash" };
+
+function createPreviewTerminal(path: string, running = true, profile: string | null = null): PreviewTerminal {
   terminalSerial += 1;
+  const id = profile && PREVIEW_LABELS[profile] ? profile : "pwsh";
   const session: PreviewTerminal = {
     sessionId: `preview-terminal-${terminalSerial}`,
     repoPath: path,
+    profile: id,
+    label: PREVIEW_LABELS[id],
     shell: "preview-shell",
     cwd: path,
     running,
@@ -513,12 +521,12 @@ function createPreviewTerminal(path: string, running = true): PreviewTerminal {
     output: "",
     line: "",
   };
-  terminalSessions.set(path, session);
   terminalById.set(session.sessionId, session);
   terminalEmitOutput(
     session,
     "Twiglane 终端预览（mock 数据，不执行真实命令）\r\n" +
-      `工作目录：${path}\r\n` +
+      `\x1b[2m工作目录：${path}\x1b[0m\r\n` +
+      "\x1b[32m✔\x1b[0m \x1b[1mready\x1b[0m  \x1b[33mwarn\x1b[0m  \x1b[31merror\x1b[0m  \x1b[34minfo\x1b[0m  \x1b[35mdebug\x1b[0m  \x1b[36mtrace\x1b[0m  \x1b[93mnpm\x1b[0m  \x1b[90mhint\x1b[0m\r\n" +
       (running ? "$ " : "进程已退出，退出码 1。\r\n$ "),
   );
   return session;
@@ -560,6 +568,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       git: previewGit,
       recent,
       settingsWarning: null,
+      terminal: { profile: null, fontSize: 13 },
     }),
   addRepository: () => ok(opened(recent[0].path)),
   createRepository: (path: string) => ok(opened(path)),
@@ -570,20 +579,39 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     return ok(recent);
   },
   cancelReads: () => ok(undefined),
-  openTerminal: (path: string) => {
+  terminalProfiles: () =>
+    ok([
+      { id: "pwsh", label: "PowerShell", path: "C:/Program Files/PowerShell/7/pwsh.exe" },
+      { id: "cmd", label: "命令提示符", path: "C:/Windows/System32/cmd.exe" },
+      { id: "git-bash", label: "Git Bash", path: "C:/Program Files/Git/bin/bash.exe" },
+    ]),
+  terminalList: (path: string) =>
+    ok(
+      [...terminalById.values()].filter((session) => session.repoPath === path).map((session) => ({ ...terminalSnapshot(session), output: "" })),
+      40,
+    ),
+  terminalCreate: (path: string, profile: string | null) => {
     if (terminalMode === "error") {
       return Promise.reject({ code: "terminal_start", message: "无法启动终端 shell：预览 mock 模拟启动失败。" });
     }
-    const existing = terminalSessions.get(path);
-    if (existing) return ok(terminalSnapshot(existing), 60);
-    return ok(terminalSnapshot(createPreviewTerminal(path, terminalMode !== "exited")), 140);
+    return ok(terminalSnapshot(createPreviewTerminal(path, terminalMode !== "exited", profile)), 140);
   },
-  restartTerminal: (path: string) => {
-    if (terminalMode === "error") {
-      return Promise.reject({ code: "terminal_start", message: "无法启动终端 shell：预览 mock 模拟启动失败。" });
-    }
-    return ok(terminalSnapshot(createPreviewTerminal(path, true)), 120);
+  terminalAttach: (sessionId: string) => {
+    const session = terminalById.get(sessionId);
+    if (!session) return Promise.reject({ code: "terminal_unknown", message: "终端会话不存在，请重新附着。" });
+    return ok(terminalSnapshot(session), 30);
   },
+  terminalRestart: (sessionId: string) => {
+    const old = terminalById.get(sessionId);
+    if (!old) return Promise.reject({ code: "terminal_unknown", message: "终端会话不存在，请重新附着。" });
+    terminalById.delete(sessionId);
+    return ok(terminalSnapshot(createPreviewTerminal(old.repoPath, true, old.profile)), 120);
+  },
+  terminalClose: (sessionId: string) => {
+    terminalById.delete(sessionId);
+    return ok(undefined, 60);
+  },
+  setTerminalPrefs: (prefs: never) => ok(prefs),
   terminalWrite: (sessionId: string, data: string) => {
     if (terminalMode === "write") {
       return Promise.reject({ code: "terminal_write", message: "无法写入终端：预览 mock 模拟写入失败。" });
@@ -600,7 +628,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   },
   terminalResize: () => ok(undefined, 0),
   terminateTerminals: () => {
-    const stopped = [...terminalSessions.values()].filter((session) => session.running);
+    const stopped = [...terminalById.values()].filter((session) => session.running);
     for (const session of stopped) {
       terminalEmitOutput(session, "\r\n终端已结束。\r\n");
       terminalEmitExit(session, 0);

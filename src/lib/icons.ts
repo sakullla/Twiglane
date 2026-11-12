@@ -131,6 +131,11 @@ export const ICONS = {
   list: ["M9 6h12", "M9 12h12", "M9 18h12", "M4 6h.01", "M4 12h.01", "M4 18h.01"],
   // 筛选：漏斗。
   filter: ["M3 5h18l-7 8.5V19l-4 2v-7.5L3 5Z"],
+  // 终端：提示符 >_ 。
+  terminal: ["m4 17 6-6-6-6", "M12 19h8"],
+  // 最大化 / 还原面板：向外、向内的两个角。
+  maximize: ["M15 3h6v6", "M9 21H3v-6", "M21 3l-7 7", "M3 21l7-7"],
+  minimize: ["M4 14h6v6", "M20 10h-6V4", "M14 10l7-7", "M3 21l7-7"],
 } as const;
 
 export type IconName = keyof typeof ICONS;

@@ -29,6 +29,8 @@
     onOpenUpdate?: () => void;
     /** 底部终端当前是否展开；入口与命令面板的 terminal.toggle 是同一条命令。 */
     terminalOpen?: boolean;
+    /** 当前仓库的终端数量；多于一个时在入口上显示，收起时也知道有几个在跑。 */
+    terminalCount?: number;
     onToggleTerminal?: () => void;
   }
 
@@ -49,6 +51,7 @@
     updateVersion = null,
     onOpenUpdate,
     terminalOpen = false,
+    terminalCount = 0,
     onToggleTerminal,
   }: Props = $props();
 
@@ -126,12 +129,15 @@
       data-terminal-toggle
       aria-label={terminalOpen ? "收起终端" : "展开终端"}
       aria-expanded={terminalOpen}
-      title={hasRepo ? (terminalOpen ? "收起底部终端" : "展开底部终端，在仓库根目录运行命令") : "先打开一个仓库"}
+      title={hasRepo ? (terminalOpen ? `收起底部终端（${MODIFIER_LABEL}+\`）` : `展开底部终端，在仓库根目录运行命令（${MODIFIER_LABEL}+\`）`) : "先打开一个仓库"}
       disabled={!hasRepo}
       onclick={onToggleTerminal}
     >
-      <Icon name="code" size={12} />
+      <Icon name="terminal" size={12} />
       <span class="sb-text">终端</span>
+      {#if hasRepo && terminalCount > 1}
+        <span class="sb-count" aria-label={`${terminalCount} 个终端`}>{terminalCount}</span>
+      {/if}
     </button>
   {/if}
   <!-- 没有仓库时没有工作区可刷新：按钮不占位，避免起始页出现一个无效动作。

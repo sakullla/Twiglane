@@ -24,7 +24,7 @@ use crate::model::{
 };
 use crate::redact::redact_error_text;
 use crate::shutdown::Shutdown;
-use crate::state::{AppStore, PullIntegration};
+use crate::state::{AppStore, PullIntegration, TerminalPrefs};
 use crate::watch::WatchHub;
 
 pub struct Backend {
@@ -97,6 +97,8 @@ pub struct AppSettings {
     pub pull_integration: PullIntegration,
     pub branch_groups: bool,
     pub files_view: bool,
+    /// 终端默认类型与字号。
+    pub terminal: TerminalPrefs,
 }
 
 pub async fn get_settings(backend: &Backend) -> Result<AppSettings, AppError> {
@@ -113,6 +115,7 @@ pub async fn get_settings(backend: &Backend) -> Result<AppSettings, AppError> {
         pull_integration: snapshot.pull_integration,
         branch_groups: snapshot.branch_groups,
         files_view: snapshot.files_view,
+        terminal: snapshot.terminal,
     })
 }
 

@@ -213,6 +213,33 @@
   --syn-punctuation: #42444d;
   --syn-link: #0a3069;
   --push-count-bg: rgba(255, 255, 255, 0.17);
+  /* 终端配色：画布比面板 surface 略灰一级，和外壳区分又不跳色；16 色每一项（含亮色与
+     「亮白」）在画布上都 ≥ 4.5:1，深色程序常用的黄色、亮色在浅色主题下也可读。
+     xterm 由 TerminalPane 从这里读取，不在脚本里另写一份色值。 */
+  --term-bg: #fcfcfd;
+  --term-fg: #1f2129;
+  --term-cursor: #4f56e0;
+  --term-cursor-accent: #fcfcfd;
+  --term-selection: rgba(79, 86, 224, 0.2);
+  --term-selection-inactive: rgba(79, 86, 224, 0.1);
+  --term-scroll-thumb: rgba(21, 22, 27, 0.18);
+  --term-scroll-thumb-hover: rgba(21, 22, 27, 0.3);
+  --term-black: #1f2129;
+  --term-red: #c4303c;
+  --term-green: #1a7f37;
+  --term-yellow: #875800;
+  --term-blue: #2f5fd0;
+  --term-magenta: #8a3fc7;
+  --term-cyan: #0d7480;
+  --term-white: #5b5e69;
+  --term-bright-black: #666a76;
+  --term-bright-red: #cf3442;
+  --term-bright-green: #1b7d38;
+  --term-bright-yellow: #956300;
+  --term-bright-blue: #3b68dc;
+  --term-bright-magenta: #9446d3;
+  --term-bright-cyan: #107c88;
+  --term-bright-white: #3e4048;
 }
 
 /* 深色主题配色（键集合必须与上方浅色块一致） */
@@ -306,4 +333,30 @@
   --syn-punctuation: #c9d1d9;
   --syn-link: #a5d6ff;
   --push-count-bg: rgba(0, 0, 0, 0.15);
+  /* 终端配色：画布比 surface 深一级，前景与 16 色按深色画布取值（暗灰 ≥ 4.5:1，
+     用于命令补全建议等弱化文字）。 */
+  --term-bg: #111216;
+  --term-fg: #d9dbe3;
+  --term-cursor: #acb1fd;
+  --term-cursor-accent: #111216;
+  --term-selection: rgba(126, 133, 250, 0.3);
+  --term-selection-inactive: rgba(126, 133, 250, 0.16);
+  --term-scroll-thumb: rgba(235, 236, 240, 0.16);
+  --term-scroll-thumb-hover: rgba(235, 236, 240, 0.28);
+  --term-black: #2b2d35;
+  --term-red: #f2777f;
+  --term-green: #7fd49a;
+  --term-yellow: #e8c072;
+  --term-blue: #7aa6f8;
+  --term-magenta: #c49af8;
+  --term-cyan: #6fd0d9;
+  --term-white: #c3c6d0;
+  --term-bright-black: #7a7e8d;
+  --term-bright-red: #ff9aa1;
+  --term-bright-green: #a1e6b6;
+  --term-bright-yellow: #f5d695;
+  --term-bright-blue: #a0c0ff;
+  --term-bright-magenta: #d9b8ff;
+  --term-bright-cyan: #9ae3ea;
+  --term-bright-white: #f2f3f7;
 }

@@ -4,35 +4,47 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TerminalSnapshot } from "../src/lib/types";
 
 /* ------------------------------------------------------------------ *
- * 终端回归：面板只消费结构化 IPC，会话按仓库保留；展开/切换仓库用快照重放，
- * 旧序号与非当前会话的事件必须丢弃。关窗确认在 App 外壳里，取消不终止进程，
- * 确认先等待 terminateTerminals 成功再关窗口，失败保留对话框与真实错误。
+ * 终端回归：面板只消费结构化 IPC，会话按仓库保留，一个仓库可以有多个标签页与并排终端。
+ * 每个终端挂载时先订阅事件再附着快照，旧序号与其它会话的事件必须丢弃。关窗确认在 App 外壳里，
+ * 取消不终止进程，确认先等待 terminateTerminals 成功再关窗口，失败保留对话框与真实错误。
  * ------------------------------------------------------------------ */
 
 const xtermMock = vi.hoisted(() => {
-  const instances: {
+  const instances: FakeTerminalShape[] = [];
+  interface FakeTerminalShape {
     options: Record<string, unknown>;
     writes: string[];
     rows: number;
     cols: number;
+    selection: string;
+    pasted: string[];
     dataHandlers: ((data: string) => void)[];
     resizeHandlers: ((size: { rows: number; cols: number }) => void)[];
+    keyHandler: ((event: KeyboardEvent) => boolean) | null;
     disposed: boolean;
-  }[] = [];
-  class FakeTerminal {
-    options: Record<string, unknown> = {};
+  }
+  class FakeTerminal implements FakeTerminalShape {
+    options: Record<string, unknown>;
     writes: string[] = [];
     /** 与后端默认的 24×80 不同：附着后必须显式把真实尺寸补发给新会话。 */
     rows = 33;
     cols = 121;
+    selection = "";
+    pasted: string[] = [];
     dataHandlers: ((data: string) => void)[] = [];
     resizeHandlers: ((size: { rows: number; cols: number }) => void)[] = [];
+    keyHandler: ((event: KeyboardEvent) => boolean) | null = null;
     disposed = false;
-    constructor() {
+    unicode = { activeVersion: "6" };
+    constructor(options: Record<string, unknown> = {}) {
+      this.options = { ...options };
       instances.push(this);
     }
     loadAddon() {}
     open() {}
+    attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean) {
+      this.keyHandler = handler;
+    }
     onData(handler: (data: string) => void) {
       this.dataHandlers.push(handler);
     }
@@ -42,22 +54,48 @@ const xtermMock = vi.hoisted(() => {
     write(data: string) {
       this.writes.push(data);
     }
-    reset() {
-      this.writes.push("[reset]");
+    paste(data: string) {
+      this.pasted.push(data);
+    }
+    hasSelection() {
+      return this.selection.length > 0;
+    }
+    getSelection() {
+      return this.selection;
+    }
+    clearSelection() {
+      this.selection = "";
+    }
+    selectAll() {}
+    clear() {
+      this.writes.push("[clear]");
     }
     focus() {}
     dispose() {
       this.disposed = true;
     }
   }
-  class FakeFitAddon {
+  class FakeAddon {
     fit() {}
+    findNext() {
+      return true;
+    }
+    findPrevious() {
+      return true;
+    }
+    clearDecorations() {}
+    onContextLoss() {}
+    dispose() {}
   }
-  return { instances, Terminal: FakeTerminal, FitAddon: FakeFitAddon };
+  return { instances, Terminal: FakeTerminal, Addon: FakeAddon };
 });
 
 vi.mock("@xterm/xterm", () => ({ Terminal: xtermMock.Terminal }));
-vi.mock("@xterm/addon-fit", () => ({ FitAddon: xtermMock.FitAddon }));
+vi.mock("@xterm/addon-fit", () => ({ FitAddon: xtermMock.Addon }));
+vi.mock("@xterm/addon-search", () => ({ SearchAddon: xtermMock.Addon }));
+vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: xtermMock.Addon }));
+vi.mock("@xterm/addon-unicode11", () => ({ Unicode11Addon: xtermMock.Addon }));
+vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: xtermMock.Addon }));
 
 const windowMock = vi.hoisted(() => ({ close: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ close: windowMock.close }) }));
@@ -75,11 +113,17 @@ const mocks = vi.hoisted(() => {
     mergeSession: vi.fn(),
     loadDiff: vi.fn(),
     repositoryDirectory: vi.fn(),
-    openTerminal: vi.fn(),
-    restartTerminal: vi.fn(),
+    terminalProfiles: vi.fn(),
+    terminalList: vi.fn(),
+    terminalCreate: vi.fn(),
+    terminalAttach: vi.fn(),
+    terminalRestart: vi.fn(),
+    terminalClose: vi.fn(),
+    setTerminalPrefs: vi.fn(),
     terminalWrite: vi.fn(),
     terminalResize: vi.fn(),
     terminateTerminals: vi.fn(),
+    openDocumentUrl: vi.fn(),
     // 打开终端与命令面板不应自动触发的 Git 写入/发布接口。
     commitChanges: vi.fn(),
     commitAndPush: vi.fn(),
@@ -118,6 +162,20 @@ import TerminalPanel, {
   terminalEventApplies,
   terminalStatusLabel,
 } from "../src/lib/components/TerminalPanel.svelte";
+import {
+  MAX_PANES_PER_GROUP,
+  addGroup,
+  clampFontSize,
+  cycleGroup,
+  emptyLayout,
+  groupTitles,
+  layoutFromSessions,
+  readTerminalTheme,
+  removeSession,
+  replaceSession,
+  splitGroup,
+  terminalKeyAction,
+} from "../src/lib/terminal";
 
 const repoPath = "C:/work/demo";
 const otherRepo = "C:/work/other";
@@ -126,7 +184,9 @@ function snapshot(overrides: Partial<TerminalSnapshot> = {}): TerminalSnapshot {
   return {
     sessionId: "s1",
     repoPath,
-    shell: "/bin/sh",
+    profile: "pwsh",
+    label: "PowerShell",
+    shell: "C:/Program Files/PowerShell/7/pwsh.exe",
     cwd: repoPath,
     running: true,
     exitCode: null,
@@ -137,29 +197,84 @@ function snapshot(overrides: Partial<TerminalSnapshot> = {}): TerminalSnapshot {
   };
 }
 
+/** 模拟后端：按 sessionId 保存快照，create 依次分配 s1、s2…，attach 返回当前快照。 */
+let backend: Map<string, TerminalSnapshot>;
+let serial: number;
+
+function installBackend() {
+  backend = new Map();
+  serial = 0;
+  mocks.api.terminalList.mockImplementation(async (path: string) =>
+    [...backend.values()].filter((item) => item.repoPath === path).map((item) => ({ ...item, output: "" })),
+  );
+  mocks.api.terminalCreate.mockImplementation(async (path: string, profile: string | null) => {
+    serial += 1;
+    const created = snapshot({
+      sessionId: `s${serial}`,
+      repoPath: path,
+      cwd: path,
+      profile: profile ?? "pwsh",
+      label: profile === "cmd" ? "命令提示符" : "PowerShell",
+      output: `welcome-${serial}\r\n$ `,
+    });
+    backend.set(created.sessionId, created);
+    return created;
+  });
+  mocks.api.terminalAttach.mockImplementation(async (id: string) => {
+    const found = backend.get(id);
+    if (!found) throw { code: "terminal_unknown", message: "终端会话不存在" };
+    return found;
+  });
+  mocks.api.terminalRestart.mockImplementation(async (id: string) => {
+    const old = backend.get(id)!;
+    serial += 1;
+    const fresh = { ...old, sessionId: `s${serial}`, running: true, exitCode: null, seq: 1, output: "fresh\r\n$ " };
+    backend.delete(id);
+    backend.set(fresh.sessionId, fresh);
+    return fresh;
+  });
+  mocks.api.terminalClose.mockImplementation(async (id: string) => {
+    backend.delete(id);
+  });
+}
+
 function emit(name: string, payload: unknown) {
   for (const handler of [...(mocks.handlers.get(name) ?? [])]) handler(payload);
 }
 
-async function renderPanel(props: Partial<{ path: string; open: boolean; theme: "light" | "dark" }> = {}) {
+async function renderPanel(props: Partial<{ path: string; open: boolean; theme: "light" | "dark"; fontSize: number }> = {}) {
   const onClose = vi.fn();
+  const onFontSize = vi.fn();
   const view = render(TerminalPanel, {
-    props: { path: repoPath, open: true, theme: "dark", onClose, ...props },
+    props: { path: repoPath, open: true, theme: "dark", onClose, onFontSize, ...props },
   });
-  return { view, onClose };
+  return { view, onClose, onFontSize };
 }
 
-async function waitForPanel() {
-  await waitFor(() => expect(document.querySelector(".terminal-panel .xterm-helper-textarea, .terminal-panel")).toBeTruthy());
-  await waitFor(() => expect(mocks.api.openTerminal).toHaveBeenCalled());
-  await waitFor(() => expect(xtermMock.instances).toHaveLength(1));
-  return xtermMock.instances[0];
+async function waitForTerminal(index = 0) {
+  await waitFor(() => expect(xtermMock.instances.length).toBeGreaterThan(index));
+  const term = xtermMock.instances[index];
+  await waitFor(() => expect(term.writes.length).toBeGreaterThan(0));
+  return term;
+}
+
+function stateOf() {
+  return document.querySelector("[data-terminal-state]")?.getAttribute("data-terminal-state");
+}
+
+function tabs() {
+  return [...document.querySelectorAll<HTMLElement>("[data-terminal-tab]")];
+}
+
+function key(init: KeyboardEventInit & { key: string }) {
+  return new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.handlers.clear();
   xtermMock.instances.length = 0;
+  localStorage.clear();
   windowMock.close.mockReset();
   windowMock.close.mockResolvedValue(undefined);
   mocks.api.getSettings.mockResolvedValue({
@@ -175,19 +290,26 @@ beforeEach(() => {
     },
     recent: [],
     settingsWarning: null,
+    terminal: { profile: null, fontSize: 13 },
   });
   mocks.api.measureProbe.mockResolvedValue({ enabled: false, elapsedMs: 0, script: null });
   mocks.api.cancelReads.mockResolvedValue(undefined);
-  mocks.api.openTerminal.mockResolvedValue(snapshot());
-  mocks.api.restartTerminal.mockResolvedValue(snapshot({ sessionId: "s2", seq: 1, output: "fresh\r\n$ " }));
+  mocks.api.terminalProfiles.mockResolvedValue([
+    { id: "pwsh", label: "PowerShell", path: "C:/Program Files/PowerShell/7/pwsh.exe" },
+    { id: "cmd", label: "命令提示符", path: "C:/Windows/System32/cmd.exe" },
+  ]);
+  mocks.api.setTerminalPrefs.mockImplementation(async (prefs: unknown) => prefs);
   mocks.api.terminalWrite.mockResolvedValue(undefined);
   mocks.api.terminalResize.mockResolvedValue(undefined);
   mocks.api.terminateTerminals.mockResolvedValue([]);
+  installBackend();
 });
 
 afterEach(() => {
   cleanup();
 });
+
+/* ------------------------------------------------------------------ 纯逻辑 */
 
 describe("终端事件与状态", () => {
   it("只接受当前 sessionId 且序号更大的事件", () => {
@@ -214,129 +336,333 @@ describe("终端事件与状态", () => {
     expect(terminalStatusLabel({ ...base, running: false, exitCode: 7 })).toBe("已退出 · 退出码 7");
     expect(terminalStatusLabel({ ...base, running: false, exitCode: null, signal: "SIGTERM" })).toBe("已退出 · SIGTERM");
   });
+
+  it("按键归类：Ctrl+C 无选区时仍是中断信号，有选区或加 Shift 时复制；粘贴与界面快捷键被接管", () => {
+    const win = (init: Parameters<typeof terminalKeyAction>[0], selection = false) => terminalKeyAction(init, false, selection);
+    const mac = (init: Parameters<typeof terminalKeyAction>[0], selection = false) => terminalKeyAction(init, true, selection);
+    expect(win({ key: "c", ctrlKey: true })).toBeNull();
+    expect(win({ key: "c", ctrlKey: true }, true)).toBe("copy");
+    expect(win({ key: "C", ctrlKey: true, shiftKey: true })).toBe("copy");
+    expect(win({ key: "v", ctrlKey: true })).toBe("paste");
+    expect(win({ key: "V", ctrlKey: true, shiftKey: true })).toBe("paste");
+    expect(win({ key: "f", ctrlKey: true })).toBe("find");
+    expect(win({ key: "`", code: "Backquote", ctrlKey: true })).toBe("toggle");
+    expect(win({ key: "~", code: "Backquote", ctrlKey: true, shiftKey: true })).toBe("new");
+    expect(win({ key: "%", code: "Digit5", ctrlKey: true, shiftKey: true })).toBe("split");
+    expect(win({ key: "=", ctrlKey: true })).toBe("zoom-in");
+    expect(win({ key: "-", ctrlKey: true })).toBe("zoom-out");
+    expect(win({ key: "0", ctrlKey: true })).toBe("zoom-reset");
+    expect(win({ key: "PageDown", ctrlKey: true })).toBe("next-tab");
+    // 普通字符、Ctrl+R / Ctrl+D 等 shell 常用组合与 Alt 组合原样交给 shell。
+    expect(win({ key: "a" })).toBeNull();
+    expect(win({ key: "r", ctrlKey: true })).toBeNull();
+    expect(win({ key: "d", ctrlKey: true })).toBeNull();
+    expect(win({ key: "f", altKey: true })).toBeNull();
+    // macOS：⌘C 只在有选区时复制；Ctrl+C 始终是中断信号。
+    expect(mac({ key: "c", metaKey: true }, true)).toBe("copy");
+    expect(mac({ key: "c", ctrlKey: true }, true)).toBeNull();
+    expect(mac({ key: "v", metaKey: true })).toBe("paste");
+    expect(mac({ key: "f", metaKey: true })).toBe("find");
+    expect(mac({ key: "f", ctrlKey: true })).toBeNull();
+  });
+
+  it("字号夹在 9–24 之间并取整", () => {
+    expect(clampFontSize(3)).toBe(9);
+    expect(clampFontSize(40)).toBe(24);
+    expect(clampFontSize(13.6)).toBe(14);
+    expect(clampFontSize(Number.NaN)).toBe(13);
+  });
+
+  it("配色从终端令牌读取，读不到的键交给 xterm 缺省值", () => {
+    const tokens: Record<string, string> = { "--term-bg": " #111216", "--term-bright-yellow": "#f5d695" };
+    const theme = readTerminalTheme((token) => tokens[token] ?? "");
+    expect(theme).toEqual({ background: "#111216", brightYellow: "#f5d695" });
+  });
 });
 
-describe("终端面板", () => {
-  it("附着快照、丢弃旧序号与其他会话、显示退出码", async () => {
-    mocks.api.openTerminal.mockResolvedValue(snapshot({ sessionId: "s1", seq: 5, output: "welcome\r\n$ " }));
-    await renderPanel();
-    const term = await waitForPanel();
-    await waitFor(() => expect(term.writes).toContain("welcome\r\n$ "));
-    expect(document.querySelector("[data-terminal-state]")?.getAttribute("data-terminal-state")).toBe("running");
+describe("标签页与拆分布局", () => {
+  it("新建、拆分、关闭与重启都维持焦点与顺序", () => {
+    let layout = addGroup(emptyLayout(), "a");
+    layout = addGroup(layout, "b");
+    expect(layout.groups.map((group) => group.panes)).toEqual([["a"], ["b"]]);
+    expect(layout.focused).toBe("b");
 
-    emit(TERMINAL_OUTPUT_EVENT, { sessionId: "s1", seq: 6, data: "next-line\r\n" });
+    layout = splitGroup(layout, layout.activeGroup, "c");
+    expect(layout.groups[1].panes).toEqual(["b", "c"]);
+    expect(layout.focused).toBe("c");
+
+    layout = replaceSession(layout, "c", "c2");
+    expect(layout.groups[1].panes).toEqual(["b", "c2"]);
+    expect(layout.focused).toBe("c2");
+
+    // 关闭聚焦的并排终端：焦点留在同一标签页。
+    layout = removeSession(layout, "c2");
+    expect(layout.groups[1].panes).toEqual(["b"]);
+    expect(layout.focused).toBe("b");
+
+    // 关闭激活标签页的最后一个终端：落到相邻标签页。
+    layout = removeSession(layout, "b");
+    expect(layout.groups.map((group) => group.panes)).toEqual([["a"]]);
+    expect(layout.focused).toBe("a");
+    expect(removeSession(layout, "a")).toEqual({ groups: [], activeGroup: null, focused: null });
+  });
+
+  it("一个标签页最多并排四个，再拆分改为新标签页；切换标签页循环", () => {
+    let layout = addGroup(emptyLayout(), "p0");
+    for (let index = 1; index < MAX_PANES_PER_GROUP; index += 1) layout = splitGroup(layout, layout.activeGroup, `p${index}`);
+    expect(layout.groups).toHaveLength(1);
+    layout = splitGroup(layout, layout.activeGroup, "overflow");
+    expect(layout.groups).toHaveLength(2);
+    expect(layout.focused).toBe("overflow");
+    layout = cycleGroup(layout, 1);
+    expect(layout.activeGroup).toBe(layout.groups[0].id);
+    expect(layout.focused).toBe("p3");
+  });
+
+  it("同名标签页补序号，改过名的保留原名；恢复已有会话时各占一个标签页并激活第一个", () => {
+    const layout = layoutFromSessions(["a", "b", "c"]);
+    expect(layout.activeGroup).toBe(layout.groups[0].id);
+    const labels: Record<string, string> = { a: "PowerShell", b: "PowerShell", c: "Git Bash" };
+    expect([...groupTitles(layout, (id) => labels[id]).values()]).toEqual(["PowerShell", "PowerShell 2", "Git Bash"]);
+  });
+});
+
+/* ------------------------------------------------------------------ 面板 */
+
+describe("终端面板", () => {
+  it("首次展开在仓库根目录新建会话；附着快照、丢弃旧序号与其他会话、显示退出码", async () => {
+    await renderPanel();
+    const term = await waitForTerminal();
+    expect(mocks.api.terminalList).toHaveBeenCalledWith(repoPath);
+    expect(mocks.api.terminalCreate).toHaveBeenCalledWith(repoPath, null);
+    await waitFor(() => expect(term.writes).toContain("welcome-1\r\n$ "));
+    await waitFor(() => expect(stateOf()).toBe("running"));
+    expect(tabs()).toHaveLength(1);
+    expect(tabs()[0].textContent).toContain("PowerShell");
+
+    emit(TERMINAL_OUTPUT_EVENT, { sessionId: "s1", seq: 2, data: "next-line\r\n" });
     await tick();
     expect(term.writes.at(-1)).toBe("next-line\r\n");
 
     const written = term.writes.length;
-    emit(TERMINAL_OUTPUT_EVENT, { sessionId: "s1", seq: 5, data: "duplicate\r\n" });
+    emit(TERMINAL_OUTPUT_EVENT, { sessionId: "s1", seq: 2, data: "duplicate\r\n" });
     emit(TERMINAL_OUTPUT_EVENT, { sessionId: "old-session", seq: 99, data: "other\r\n" });
     await tick();
-    expect(term.writes, "快照覆盖的旧事件与其它仓库会话都不能重复写入").toHaveLength(written);
+    expect(term.writes, "快照覆盖的旧事件与其它会话都不能重复写入").toHaveLength(written);
 
-    emit(TERMINAL_EXIT_EVENT, { sessionId: "s1", seq: 7, exitCode: 7, signal: null });
-    await tick();
-    const state = document.querySelector("[data-terminal-state]");
-    expect(state?.getAttribute("data-terminal-state")).toBe("exited");
-    expect(state?.textContent).toContain("退出码 7");
+    emit(TERMINAL_EXIT_EVENT, { sessionId: "s1", seq: 3, exitCode: 7, signal: null });
+    await waitFor(() => expect(stateOf()).toBe("exited"));
+    expect(document.querySelector("[data-terminal-state]")?.textContent).toContain("退出码 7");
+    expect(document.querySelector("[data-terminal-exit]")?.textContent).toContain("退出码 7");
+    expect(tabs()[0].getAttribute("data-state")).toBe("exited");
     // 退出后输入不再写入，并就地说明；已有输出保留。
     term.dataHandlers[0]("echo ignored\r");
     await waitFor(() => expect(screen.getByText(/终端已退出，无法继续输入/)).toBeTruthy());
     expect(mocks.api.terminalWrite).not.toHaveBeenCalled();
   });
 
-  it("附着和重新启动后都把 xterm 的真实行列同步给新会话，不停留在后端默认 24×80", async () => {
-    mocks.api.openTerminal.mockResolvedValue(snapshot({ sessionId: "s1", seq: 1, running: true }));
-    mocks.api.restartTerminal.mockResolvedValue(snapshot({ sessionId: "s2", seq: 1, running: true, output: "fresh\r\n$ " }));
+  it("挂载前到达的输出由附着快照覆盖，快照之后的事件按序补上", async () => {
+    let releaseAttach!: () => void;
+    mocks.api.terminalAttach.mockImplementationOnce(
+      (id: string) =>
+        new Promise((resolve) => {
+          releaseAttach = () => resolve({ ...backend.get(id)!, seq: 4, output: "early\r\n" });
+        }),
+    );
     await renderPanel();
-    const term = await waitForPanel();
-    expect(term.rows).not.toBe(24);
-    expect(term.cols).not.toBe(80);
+    await waitFor(() => expect(mocks.api.terminalAttach).toHaveBeenCalledWith("s1"));
+    // 附着返回前到达：seq 4 已在快照里，seq 5 只能在快照之后写入一次。
+    emit(TERMINAL_OUTPUT_EVENT, { sessionId: "s1", seq: 4, data: "early\r\n" });
+    emit(TERMINAL_OUTPUT_EVENT, { sessionId: "s1", seq: 5, data: "late\r\n" });
+    releaseAttach();
+    const term = xtermMock.instances[0];
+    await waitFor(() => expect(term.writes).toEqual(["early\r\n", "late\r\n"]));
+  });
+
+  it("恢复后端已有会话：每个会话一个标签页，不新建 shell", async () => {
+    backend.set("a", snapshot({ sessionId: "a", label: "PowerShell", output: "a-out" }));
+    backend.set("b", snapshot({ sessionId: "b", profile: "cmd", label: "命令提示符", output: "b-out" }));
+    await renderPanel();
+    await waitFor(() => expect(tabs()).toHaveLength(2));
+    expect(mocks.api.terminalCreate).not.toHaveBeenCalled();
+    expect(tabs().map((tab) => tab.querySelector(".terminal-tab-label")?.textContent)).toEqual(["PowerShell", "命令提示符"]);
+    expect(tabs()[0].getAttribute("aria-selected")).toBe("true");
+    await waitFor(() => expect(mocks.api.terminalAttach).toHaveBeenCalledWith("a"));
+    await waitFor(() => expect(mocks.api.terminalAttach).toHaveBeenCalledWith("b"));
+  });
+
+  it("附着和重新启动后都把 xterm 的真实行列同步给会话，不停留在后端默认 24×80", async () => {
+    await renderPanel();
+    const term = await waitForTerminal();
     await waitFor(() => expect(mocks.api.terminalResize).toHaveBeenCalledWith("s1", term.rows, term.cols));
 
     emit(TERMINAL_EXIT_EVENT, { sessionId: "s1", seq: 2, exitCode: 0, signal: null });
-    await tick();
+    await waitFor(() => expect(document.querySelector("[data-terminal-restart]")).toBeTruthy());
     await fireEvent.click(document.querySelector<HTMLButtonElement>("[data-terminal-restart]")!);
-    await waitFor(() => expect(mocks.api.restartTerminal).toHaveBeenCalledWith(repoPath));
-    await waitFor(() => expect(mocks.api.terminalResize).toHaveBeenCalledWith("s2", term.rows, term.cols));
+    await waitFor(() => expect(mocks.api.terminalRestart).toHaveBeenCalledWith("s1"));
+    const fresh = await waitForTerminal(1);
+    await waitFor(() => expect(fresh.writes).toContain("fresh\r\n$ "));
+    await waitFor(() => expect(mocks.api.terminalResize).toHaveBeenCalledWith("s2", fresh.rows, fresh.cols));
+    expect(tabs(), "重启沿用原标签页").toHaveLength(1);
+    await waitFor(() => expect(stateOf()).toBe("running"));
   });
 
-  it("键盘输入与尺寸变化转成 terminalWrite / terminalResize；退出后可以重新启动", async () => {
+  it("键盘输入与尺寸变化转成 terminalWrite / terminalResize", async () => {
     await renderPanel();
-    const term = await waitForPanel();
+    const term = await waitForTerminal();
+    await waitFor(() => expect(stateOf()).toBe("running"));
     term.dataHandlers[0]("npm test\r");
     await waitFor(() => expect(mocks.api.terminalWrite).toHaveBeenCalledWith("s1", "npm test\r"));
     term.resizeHandlers[0]({ rows: 32, cols: 110 });
     await waitFor(() => expect(mocks.api.terminalResize).toHaveBeenCalledWith("s1", 32, 110));
-
-    emit(TERMINAL_EXIT_EVENT, { sessionId: "s1", seq: 2, exitCode: 0, signal: null });
-    await tick();
-    const restart = document.querySelector<HTMLButtonElement>("[data-terminal-restart]")!;
-    expect(restart).toBeTruthy();
-    await fireEvent.click(restart);
-    await waitFor(() => expect(mocks.api.restartTerminal).toHaveBeenCalledWith(repoPath));
-    await waitFor(() => expect(term.writes).toContain("fresh\r\n$ "));
-    expect(document.querySelector("[data-terminal-state]")?.getAttribute("data-terminal-state")).toBe("running");
   });
 
-  it("启动失败不伪装成可用终端，重试可以重新附着", async () => {
-    mocks.api.openTerminal.mockRejectedValueOnce({ code: "terminal_start", message: "无法启动终端 shell：模拟失败" });
+  it("新建标签页、选择终端类型、拆分与关闭；关掉最后一个终端收起面板", async () => {
+    const { onClose } = await renderPanel();
+    await waitForTerminal();
+
+    await fireEvent.click(document.querySelector<HTMLButtonElement>("[data-terminal-new]")!);
+    await waitFor(() => expect(tabs()).toHaveLength(2));
+    expect(mocks.api.terminalCreate).toHaveBeenLastCalledWith(repoPath, null);
+    expect(tabs()[1].getAttribute("aria-selected")).toBe("true");
+    expect(tabs()[1].textContent).toContain("PowerShell 2");
+
+    // 下拉里按类型新建：后端按 id 解析，前端不传程序路径。
+    await fireEvent.click(document.querySelector<HTMLButtonElement>("[data-terminal-profiles]")!);
+    const menu = await screen.findByRole("menu", { name: "选择终端类型" });
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: /命令提示符/ }));
+    await waitFor(() => expect(tabs()).toHaveLength(3));
+    expect(mocks.api.terminalCreate).toHaveBeenLastCalledWith(repoPath, "cmd");
+
+    // 拆分：同一标签页里并排，沿用当前终端的类型。
+    await fireEvent.click(document.querySelector<HTMLButtonElement>("[data-terminal-split]")!);
+    await waitFor(() => expect(document.querySelectorAll(".terminal-group.active [data-terminal-pane]")).toHaveLength(2));
+    expect(mocks.api.terminalCreate).toHaveBeenLastCalledWith(repoPath, "cmd");
+    expect(tabs()).toHaveLength(3);
+
+    // 关闭当前终端只关聚焦的那一格。
+    await fireEvent.click(document.querySelector<HTMLButtonElement>("[data-terminal-kill]")!);
+    await waitFor(() => expect(mocks.api.terminalClose).toHaveBeenCalledWith("s4"));
+    await waitFor(() => expect(document.querySelectorAll(".terminal-group.active [data-terminal-pane]")).toHaveLength(1));
+
+    // 逐个关闭标签页；最后一个关掉后收起面板。
+    for (const tab of tabs().reverse()) {
+      await fireEvent.click(tab.querySelector<HTMLButtonElement>(".terminal-tab-close")!);
+    }
+    await waitFor(() => expect(tabs()).toHaveLength(0));
+    expect(mocks.api.terminalClose).toHaveBeenCalledTimes(4);
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("关闭失败保留标签页并说明真实错误", async () => {
+    await renderPanel();
+    await waitForTerminal();
+    mocks.api.terminalClose.mockRejectedValueOnce({ code: "terminal_stop", message: "无法确认终端 shell 及其子进程已退出。" });
+    await fireEvent.click(document.querySelector<HTMLButtonElement>("[data-terminal-kill]")!);
+    await waitFor(() => expect(screen.getByText("无法确认终端 shell 及其子进程已退出。")).toBeTruthy());
+    expect(tabs()).toHaveLength(1);
+  });
+
+  it("启动失败不伪装成可用终端，重试可以重新新建", async () => {
+    mocks.api.terminalCreate.mockRejectedValueOnce({ code: "terminal_start", message: "无法启动终端 shell：模拟失败" });
     await renderPanel();
     await waitFor(() => expect(screen.getByText("无法启动终端 shell：模拟失败")).toBeTruthy());
-    const state = document.querySelector("[data-terminal-state]");
-    expect(state?.getAttribute("data-terminal-state")).toBe("failed");
-    expect(document.querySelector(".terminal-surface")?.classList.contains("terminal-hidden")).toBe(true);
-    expect(document.querySelector("[data-terminal-retry]")).toBeTruthy();
+    expect(stateOf()).toBe("failed");
+    expect(document.querySelector("[data-terminal-pane]")).toBeNull();
+    expect(xtermMock.instances).toHaveLength(0);
 
-    mocks.api.openTerminal.mockResolvedValue(snapshot({ seq: 1, output: "ok\r\n$ " }));
     await fireEvent.click(document.querySelector<HTMLButtonElement>("[data-terminal-retry]")!);
-    await waitFor(() => expect(mocks.api.openTerminal).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(document.querySelector("[data-terminal-state]")?.getAttribute("data-terminal-state")).toBe("running"));
-    expect(document.querySelector(".terminal-surface")?.classList.contains("terminal-hidden")).toBe(false);
+    await waitFor(() => expect(mocks.api.terminalCreate).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(stateOf()).toBe("running"));
+    expect(document.querySelector("[data-terminal-retry]")).toBeNull();
   });
 
   it("写入失败就地说明并保留已有输出", async () => {
     mocks.api.terminalWrite.mockRejectedValueOnce({ code: "terminal_write", message: "无法写入终端：模拟失败" });
     await renderPanel();
-    const term = await waitForPanel();
+    const term = await waitForTerminal();
+    await waitFor(() => expect(stateOf()).toBe("running"));
     term.dataHandlers[0]("x");
     await waitFor(() => expect(screen.getByText("无法写入终端：模拟失败")).toBeTruthy());
-    expect(term.writes).toContain("welcome\r\n$ ");
-    expect(document.querySelector("[data-terminal-state]")?.getAttribute("data-terminal-state")).toBe("running");
+    expect(term.writes).toContain("welcome-1\r\n$ ");
+    expect(stateOf()).toBe("running");
   });
 
-  it("收起再展开重新附着同一会话；浅深主题更新终端配色", async () => {
+  it("收起再展开保留同一 xterm 与会话；字号变化原地更新", async () => {
     const { view } = await renderPanel();
-    const term = await waitForPanel();
-    expect(term.options.theme).toMatchObject({ background: "#15181e" });
+    const term = await waitForTerminal();
+    expect(term.options.fontSize).toBe(13);
 
-    await view.rerender({ path: repoPath, open: false, theme: "dark", onClose: vi.fn() });
+    await view.rerender({ path: repoPath, open: false, theme: "dark", fontSize: 13 });
     await tick();
     expect(document.querySelector(".terminal-panel")?.hasAttribute("hidden")).toBe(true);
 
-    await view.rerender({ path: repoPath, open: true, theme: "light", onClose: vi.fn() });
-    await waitFor(() => expect(mocks.api.openTerminal).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(term.options.theme).toMatchObject({ background: "#ffffff" }));
+    await view.rerender({ path: repoPath, open: true, theme: "light", fontSize: 16 });
+    await waitFor(() => expect(term.options.fontSize).toBe(16));
     expect(xtermMock.instances, "收起/展开不重建 xterm 实例").toHaveLength(1);
-    expect(document.querySelector("[data-terminal-state]")?.getAttribute("data-terminal-state")).toBe("running");
+    expect(mocks.api.terminalCreate).toHaveBeenCalledTimes(1);
+    expect(stateOf()).toBe("running");
   });
 
-  it("切换仓库重新附着对应 sessionId 并重放该仓库的输出", async () => {
-    mocks.api.openTerminal.mockImplementation(async (path: string) =>
-      path === otherRepo
-        ? snapshot({ sessionId: "other", repoPath: otherRepo, cwd: otherRepo, seq: 2, output: "other-history\r\n$ " })
-        : snapshot(),
-    );
+  it("切换仓库各自一组终端；切回原仓库重新附着原会话并重放输出", async () => {
     const { view } = await renderPanel();
-    const term = await waitForPanel();
-    await waitFor(() => expect(term.writes).toContain("welcome\r\n$ "));
+    await waitForTerminal();
 
-    await view.rerender({ path: otherRepo, open: true, theme: "dark", onClose: vi.fn() });
-    await waitFor(() => expect(mocks.api.openTerminal).toHaveBeenCalledWith(otherRepo));
-    await waitFor(() => expect(term.writes).toContain("[reset]"));
-    await waitFor(() => expect(term.writes).toContain("other-history\r\n$ "));
-    expect(xtermMock.instances, "切换仓库不重建 xterm 实例").toHaveLength(1);
-    expect(document.querySelector("[data-terminal-state]")?.getAttribute("data-terminal-state")).toBe("running");
+    await view.rerender({ path: otherRepo, open: true, theme: "dark" });
+    await waitFor(() => expect(mocks.api.terminalCreate).toHaveBeenCalledWith(otherRepo, null));
+    const other = await waitForTerminal(1);
+    await waitFor(() => expect(other.writes).toContain("welcome-2\r\n$ "));
+    expect(xtermMock.instances[0].disposed, "离开仓库时卸载画面，会话仍在后端").toBe(true);
+
+    await view.rerender({ path: repoPath, open: true, theme: "dark" });
+    const back = await waitForTerminal(2);
+    await waitFor(() => expect(back.writes).toContain("welcome-1\r\n$ "));
+    expect(mocks.api.terminalCreate, "回到原仓库不新建 shell").toHaveBeenCalledTimes(2);
+    expect(mocks.api.terminalAttach.mock.calls.filter(([id]) => id === "s1")).toHaveLength(2);
+  });
+
+  it("右键菜单：无选区时复制不可用并说明原因，新建终端走同一入口", async () => {
+    await renderPanel();
+    await waitForTerminal();
+    const pane = document.querySelector<HTMLElement>("[data-terminal-pane]")!;
+    await fireEvent.contextMenu(pane, { clientX: 40, clientY: 40 });
+    const menu = await screen.findByRole("menu", { name: "终端操作" });
+    const copy = within(menu).getByRole("menuitem", { name: /复制/ });
+    expect(copy.getAttribute("aria-disabled")).toBe("true");
+    expect(within(menu).getByRole("menuitem", { name: /粘贴/ })).toBeTruthy();
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: /新建终端/ }));
+    await waitFor(() => expect(tabs()).toHaveLength(2));
+  });
+
+  it("终端内快捷键：Ctrl+Shift+5 拆分、Ctrl+F 打开查找、Ctrl+= 放大字号、Ctrl+` 收起；Ctrl+C 无选区交给 shell", async () => {
+    const { onClose, onFontSize } = await renderPanel();
+    const term = await waitForTerminal();
+    const handler = term.keyHandler!;
+    expect(handler(key({ key: "c", ctrlKey: true }))).toBe(true);
+
+    expect(handler(key({ key: "%", code: "Digit5", ctrlKey: true, shiftKey: true }))).toBe(false);
+    await waitFor(() => expect(document.querySelectorAll(".terminal-group.active [data-terminal-pane]")).toHaveLength(2));
+
+    handler(key({ key: "f", ctrlKey: true }));
+    await waitFor(() => expect(document.querySelector("[data-terminal-find]")).toBeTruthy());
+
+    handler(key({ key: "=", ctrlKey: true }));
+    expect(onFontSize).toHaveBeenCalledWith(14);
+
+    handler(key({ key: "`", code: "Backquote", ctrlKey: true }));
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("最大化切换面板状态，不影响会话", async () => {
+    await renderPanel();
+    await waitForTerminal();
+    const button = document.querySelector<HTMLButtonElement>("[data-terminal-maximize]")!;
+    await fireEvent.click(button);
+    expect(document.querySelector(".terminal-panel")?.classList.contains("maximized")).toBe(true);
+    expect(button.getAttribute("aria-pressed")).toBe("true");
+    await fireEvent.click(button);
+    expect(document.querySelector(".terminal-panel")?.classList.contains("maximized")).toBe(false);
+    expect(mocks.api.terminalCreate).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -414,6 +740,7 @@ async function renderShell() {
     },
     recent: [{ name: "demo", path: repoPath, openedAtMs: 1 }],
     settingsWarning: null,
+    terminal: { profile: null, fontSize: 13 },
   });
   mocks.api.openRepository.mockResolvedValue(openedRepo());
   mocks.api.mergeSession.mockResolvedValue({
@@ -431,7 +758,6 @@ async function renderShell() {
   });
   mocks.api.loadDiff.mockImplementation(async (_path: string, relative: string, staged: boolean) => simpleDiff(relative, staged));
   mocks.api.repositoryDirectory.mockResolvedValue({ generation: 4, path: "", entries: [], errors: [] });
-  mocks.api.openTerminal.mockResolvedValue(snapshot());
   render(App);
   await waitFor(() => expect(document.querySelector(".welcome-recent button")).toBeTruthy());
   await fireEvent.click(document.querySelector<HTMLButtonElement>(".welcome-recent button")!);
@@ -442,7 +768,7 @@ async function renderShell() {
 async function openTerminalFromStatus() {
   const toggle = document.querySelector<HTMLButtonElement>("[data-terminal-toggle]")!;
   await fireEvent.click(toggle);
-  await waitFor(() => expect(mocks.api.openTerminal).toHaveBeenCalledWith(repoPath));
+  await waitFor(() => expect(mocks.api.terminalCreate).toHaveBeenCalledWith(repoPath, null));
   await waitFor(() => expect(document.querySelector(".terminal-panel")?.hasAttribute("hidden")).toBe(false));
 }
 
@@ -454,15 +780,17 @@ describe("外壳终端入口与关窗确认", () => {
     expect(panel).toBeTruthy();
     expect(document.querySelector("[data-terminal-toggle]")?.getAttribute("aria-expanded")).toBe("true");
 
-    // 切到文件视图：三个工作台视图之外的面板仍在，没有再次打开会话。
+    // 切到文件视图：三个工作台视图之外的面板仍在，没有再次新建会话。
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "3", ctrlKey: true, bubbles: true }));
     await tick();
     expect(document.querySelector('.workbench-view[data-view-scope="files"][data-active="true"]')).toBeTruthy();
     expect(document.querySelector("[data-terminal-panel]")).toBe(panel);
-    expect(mocks.api.openTerminal).toHaveBeenCalledTimes(1);
+    expect(mocks.api.terminalCreate).toHaveBeenCalledTimes(1);
 
     // 在终端里输入普通构建命令只会写 PTY，不触发版本、提交、标签或推送接口。
-    xtermMock.instances[0].dataHandlers[0]("npm run build\r");
+    const term = await waitForTerminal();
+    await waitFor(() => expect(document.querySelector("[data-terminal-state]")?.getAttribute("data-terminal-state")).toBe("running"));
+    term.dataHandlers[0]("npm run build\r");
     await waitFor(() => expect(mocks.api.terminalWrite).toHaveBeenCalledWith("s1", "npm run build\r"));
 
     for (const banned of [
@@ -479,18 +807,34 @@ describe("外壳终端入口与关窗确认", () => {
     }
   });
 
-  it("命令面板与状态栏是同一个终端开关：展开与收起都走同一条命令", async () => {
+  it("命令面板与状态栏是同一个终端开关；Ctrl+` 也走同一条命令", async () => {
     await renderShell();
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
     const palette = await screen.findByRole("dialog", { name: "命令面板" });
     await fireEvent.click(within(palette).getByRole("option", { name: /^终端/ }));
-    await waitFor(() => expect(mocks.api.openTerminal).toHaveBeenCalledWith(repoPath));
+    await waitFor(() => expect(mocks.api.terminalCreate).toHaveBeenCalledWith(repoPath, null));
     expect(document.querySelector("[data-terminal-toggle]")?.getAttribute("aria-expanded")).toBe("true");
 
     await fireEvent.click(document.querySelector<HTMLButtonElement>("[data-terminal-toggle]")!);
     await waitFor(() => expect(document.querySelector("[data-terminal-panel]")?.hasAttribute("hidden")).toBe(true));
     expect(document.querySelector("[data-terminal-toggle]")?.getAttribute("aria-expanded")).toBe("false");
-    expect(mocks.api.openTerminal).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "`", code: "Backquote", ctrlKey: true, bubbles: true }));
+    await waitFor(() => expect(document.querySelector("[data-terminal-panel]")?.hasAttribute("hidden")).toBe(false));
+    expect(mocks.api.terminalCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("新建终端命令在已有终端时追加标签页，在没有终端时只新建一个", async () => {
+    await renderShell();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "~", code: "Backquote", ctrlKey: true, shiftKey: true, bubbles: true }));
+    await waitFor(() => expect(tabs()).toHaveLength(1));
+    await tick();
+    expect(mocks.api.terminalCreate).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "~", code: "Backquote", ctrlKey: true, shiftKey: true, bubbles: true }));
+    await waitFor(() => expect(tabs()).toHaveLength(2));
+    expect(mocks.api.terminalCreate).toHaveBeenCalledTimes(2);
+    expect(document.querySelector("[data-terminal-toggle] .sb-count")?.textContent).toBe("2");
   });
 
   it("关窗取消保持进程；确认先等待终止成功再关闭；失败保留对话框与错误", async () => {
@@ -498,7 +842,6 @@ describe("外壳终端入口与关窗确认", () => {
     await waitFor(() => expect(mocks.handlers.has(TERMINAL_CLOSE_REQUESTED_EVENT)).toBe(true));
     const sessions = [{ sessionId: "s1", repoPath }];
 
-    // 第一次：取消不调用终止，对话框收起，进程状态未被宣称结束。
     emit(TERMINAL_CLOSE_REQUESTED_EVENT, { sessions });
     const dialog = await screen.findByRole("dialog", { name: /结束终端并关闭应用/ });
     expect(within(dialog).getByText(repoPath)).toBeTruthy();
@@ -507,7 +850,6 @@ describe("外壳终端入口与关窗确认", () => {
     expect(mocks.api.terminateTerminals).not.toHaveBeenCalled();
     expect(windowMock.close).not.toHaveBeenCalled();
 
-    // 第二次：终止失败时对话框与真实错误保留，窗口不关闭。
     mocks.api.terminateTerminals.mockRejectedValueOnce({ code: "terminal_stop", message: "部分终端未能终止：无法确认 shell 已退出。" });
     emit(TERMINAL_CLOSE_REQUESTED_EVENT, { sessions });
     const failed = await screen.findByRole("dialog", { name: /结束终端并关闭应用/ });
@@ -516,7 +858,6 @@ describe("外壳终端入口与关窗确认", () => {
     expect(screen.getByRole("dialog", { name: /结束终端并关闭应用/ })).toBeTruthy();
     expect(windowMock.close).not.toHaveBeenCalled();
 
-    // 第三次：终止成功后请求关闭窗口；两件事的顺序固定。
     emit(TERMINAL_CLOSE_REQUESTED_EVENT, { sessions });
     const confirmed = await screen.findByRole("dialog", { name: /结束终端并关闭应用/ });
     await fireEvent.click(within(confirmed).getByRole("button", { name: "结束终端并关闭" }));
@@ -544,7 +885,6 @@ describe("外壳终端入口与关窗确认", () => {
     await waitFor(() => expect(confirm.disabled).toBe(true));
     expect(confirm.getAttribute("aria-busy")).toBe("true");
 
-    // 第二次原生关窗请求到达时，确认按钮必须保持忙碌，不能被重新启用。
     emit(TERMINAL_CLOSE_REQUESTED_EVENT, { sessions });
     await tick();
     expect(confirm.disabled).toBe(true);

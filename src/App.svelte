@@ -74,9 +74,12 @@
     TaskSummary,
     TerminalActivity,
     TerminalCloseRequested,
+    TerminalPrefs,
+    TerminalProfile,
     Theme,
     WorkspaceView,
   } from "./lib/types";
+  import { TERMINAL_FONT_DEFAULT, clampFontSize } from "./lib/terminal";
   import {
     batchSummary,
     batchTargets,
@@ -246,7 +249,7 @@
   let sidebarHidden = $state(false);
   let paneWidth = $derived(fitPaneWidth(widths.files, windowWidth));
   /** 设置 modal 打开时要定位的分区；由 Git 诊断入口置为 runtime、更新入口置为 update，其余入口为空。 */
-  let settingsSection = $state<"appearance" | "runtime" | "update" | null>(null);
+  let settingsSection = $state<"appearance" | "runtime" | "update" | "terminal" | null>(null);
   /** 当前打开的标题栏弹层；anchor 是触发按钮，关闭后焦点回到这里。 */
   let switcher = $state.raw<{ kind: "repo" | "branch"; anchor: HTMLElement } | null>(null);
   let confirmPath = $state<string | null>(null);
@@ -263,6 +266,12 @@
   let workspaceView = $state<WorkspaceView>("changes");
   /** 底部终端展开状态只在内存里；切换视图不改变它，切换仓库时面板重新附着该仓库的会话。 */
   let terminalOpen = $state(false);
+  /** 终端偏好（设置里保存）与本机探测到的终端类型（设置打开时才探测）。 */
+  let terminalPrefs = $state<TerminalPrefs>({ profile: null, fontSize: TERMINAL_FONT_DEFAULT });
+  let terminalProfiles = $state<TerminalProfile[]>([]);
+  /** 当前仓库的终端数量；状态栏在多于一个时显示数量。 */
+  let terminalCount = $state(0);
+  let terminalPanel = $state<{ newTerminal: (profile?: string | null) => Promise<void> } | null>(null);
   /**
    * 原生关窗被活动终端拦下后的确认层。取消保留进程，确认先等待 terminateTerminals 成功，
    * 再请求关闭窗口；失败时对话框与真实错误都留着。
@@ -850,6 +859,11 @@
         // 没有仓库时命令不可用；这里也守住程序化入口，不展开一个没有工作目录的终端。
         if (opened) terminalOpen = !terminalOpen;
         return;
+      case "terminal.new":
+        if (!opened) return;
+        terminalOpen = true;
+        void terminalPanel?.newTerminal(null);
+        return;
       case "palette.open":
         openPalette();
         return;
@@ -1025,7 +1039,7 @@
   }
 
   /** 设置 modal：默认落在外观首屏，Git 诊断/更新入口另行指定分区（R10、R1）。 */
-  function openSettings(section: "appearance" | "runtime" | "update" | null = null) {
+  function openSettings(section: "appearance" | "runtime" | "update" | "terminal" | null = null) {
     settingsSection = section;
     openTask("settings");
   }
@@ -1145,6 +1159,10 @@
       pullIntegration = settings.pullIntegration === "rebase" ? "rebase" : "merge";
       branchGroups = settings.branchGroups !== false;
       filesViewEnabled = settings.filesView !== false;
+      terminalPrefs = {
+        profile: settings.terminal?.profile ?? null,
+        fontSize: clampFontSize(settings.terminal?.fontSize ?? TERMINAL_FONT_DEFAULT),
+      };
       if (!filesViewEnabled && workspaceView === "files") showChanges();
       widths = {
         sidebar: clampWidth(settings.panelWidths.sidebar),
@@ -3229,6 +3247,34 @@
     }
   }
 
+  /**
+   * 终端偏好（默认终端类型与字号）：先更新界面再保存；保存失败只提示，已经生效的字号保留。
+   * 缩放快捷键连续触发时合并到最后一次再保存。
+   */
+  let terminalPrefsTimer: ReturnType<typeof setTimeout> | null = null;
+  function changeTerminalPrefs(next: TerminalPrefs) {
+    terminalPrefs = { profile: next.profile ?? null, fontSize: clampFontSize(next.fontSize) };
+    if (terminalPrefsTimer) clearTimeout(terminalPrefsTimer);
+    terminalPrefsTimer = setTimeout(() => {
+      terminalPrefsTimer = null;
+      void api.setTerminalPrefs(terminalPrefs).catch(showError);
+    }, 250);
+  }
+
+  function openTerminalSettings() {
+    openSettings("terminal");
+  }
+
+  /** 设置里的「默认终端」下拉：打开时探测一次本机终端类型。 */
+  async function loadTerminalProfiles() {
+    if (terminalProfiles.length > 0) return;
+    try {
+      terminalProfiles = await api.terminalProfiles();
+    } catch (error) {
+      showError(error);
+    }
+  }
+
   async function changeFilesView(next: boolean) {
     filesViewEnabled = next;
     // 正在看文件时关掉：回到改动视图，不留一个看不见的当前视图。
@@ -4207,10 +4253,16 @@
   {#if opened}
     <!-- 终端在三个工作台视图之外：切换视图不重挂；切换仓库时 path 变化，面板附着该仓库的会话。 -->
     <TerminalPanel
+      bind:this={terminalPanel}
       path={opened.summary.path}
       open={terminalOpen}
       theme={resolvedTheme}
+      fontSize={terminalPrefs.fontSize}
+      defaultProfile={terminalPrefs.profile ?? null}
       onClose={() => (terminalOpen = false)}
+      onFontSize={(size) => changeTerminalPrefs({ ...terminalPrefs, fontSize: size })}
+      onOpenSettings={openTerminalSettings}
+      onCountChange={(count) => (terminalCount = count)}
     />
   {/if}
 
@@ -4231,6 +4283,7 @@
     updateVersion={updateState.offer?.version ?? null}
     onOpenUpdate={() => openSettings("update")}
     {terminalOpen}
+    {terminalCount}
     onToggleTerminal={() => runCommand("terminal.toggle")}
   />
 </div>
@@ -4456,6 +4509,10 @@
     onPullIntegration={(next) => void changePullIntegration(next)}
     onBranchGroups={(next) => void changeBranchGroups(next)}
     onFilesView={(next) => void changeFilesView(next)}
+    {terminalPrefs}
+    {terminalProfiles}
+    onTerminalPrefs={changeTerminalPrefs}
+    onLoadTerminalProfiles={loadTerminalProfiles}
     onRedetect={redetectGit}
     onChooseGit={chooseGit}
     onClearGit={clearGit}

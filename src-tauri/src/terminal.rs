@@ -1,10 +1,13 @@
-//! 工作台交互终端：真实 PTY、按仓库单会话与整树终止。
+//! 工作台交互终端：真实 PTY、按仓库多会话与整树终止。
 //!
-//! 前端只能传入仓库路径、已有 `sessionId`、输入文本和行列数；shell 固定取平台默认值
-//! （Unix `$SHELL` 或 `/bin/sh`；Windows 优先 PowerShell 7，其次 Windows PowerShell 5.1，
-//! 最后退回 `%COMSPEC%`/`cmd.exe`），不接受程序名或参数。
+//! 前端只能传入仓库路径、已有 `sessionId`、终端类型 id、输入文本和行列数。终端类型
+//! （profile）由后端在固定候选里探测：Windows 依次是 PowerShell 7、Windows PowerShell 5.1、
+//! `%COMSPEC%`/`cmd.exe`、Git Bash 与 WSL；Unix 取 `$SHELL` 与 `/etc/shells` 中实际存在的
+//! shell。前端只能按 id 选择探测结果，不能传入程序名或参数。
 
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,19 +25,25 @@ pub const OUTPUT_EVENT: &str = "terminal-output";
 pub const EXIT_EVENT: &str = "terminal-exit";
 pub const CLOSE_REQUESTED_EVENT: &str = "terminal-close-requested";
 
-/// 每个仓库保留的输出上限。只影响内存重放；新输出始终继续推送。
+/// 每个会话保留的输出上限。只影响内存重放；新输出始终继续推送。
 const MAX_REPLAY_BYTES: usize = 2 * 1024 * 1024;
 /// 单个写入请求上限，避免一次 IPC 把 PTY 写端长时间占住。
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
+/// 每个仓库同时保留的会话上限（含已退出但保留输出的会话），防止误操作无限新建 shell。
+pub const MAX_SESSIONS_PER_REPO: usize = 12;
 const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_COLS: u16 = 80;
 const MAX_DIMENSION: u16 = 1000;
+/// 输出合并窗口：读线程把这段时间内的 PTY 输出攒成一个事件，大量输出时 IPC 次数
+/// 从「每次 read 一次」降到「每个窗口一次」；交互回显的额外延迟不可感知。
+const FLUSH_DELAY: Duration = Duration::from_millis(4);
 /// Unix 先 SIGTERM 再 SIGKILL；Windows 由 Job Object 一次终止。
 const STOP_GRACE: Duration = Duration::from_secs(2);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// 进程退出后给读线程排空管道的时间；ConPTY 关闭后剩余数据通常立即到达 EOF。
 const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 static SESSION_SEQ: AtomicU64 = AtomicU64::new(1);
+static SESSION_ORDER: AtomicU64 = AtomicU64::new(1);
 
 /// 附加/打开终端时返回的快照。`seq` 是快照 `output` 覆盖的最后一个事件序号；
 /// 后续事件序号更大，前端据此丢弃旧事件或当前会话之外的事件。
@@ -43,6 +52,9 @@ static SESSION_SEQ: AtomicU64 = AtomicU64::new(1);
 pub struct TerminalSnapshot {
     pub session_id: String,
     pub repo_path: String,
+    /// 终端类型 id 与显示名，来自后端探测结果。
+    pub profile: String,
+    pub label: String,
     pub shell: String,
     pub cwd: String,
     pub running: bool,
@@ -50,6 +62,15 @@ pub struct TerminalSnapshot {
     pub signal: Option<String>,
     pub seq: u64,
     pub output: String,
+}
+
+/// 本机可用的终端类型。`path` 只用于在设置里展示，启动时后端按 id 重新解析。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalProfile {
+    pub id: String,
+    pub label: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -111,10 +132,29 @@ impl TerminalEvents for AppEvents {
     }
 }
 
+/// 后端内部的启动规格：程序与参数都只来自固定候选，不经过前端。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellSpec {
+    id: String,
+    label: String,
+    program: String,
+    args: Vec<String>,
+}
+
+impl ShellSpec {
+    fn profile(&self) -> TerminalProfile {
+        TerminalProfile {
+            id: self.id.clone(),
+            label: self.label.clone(),
+            path: self.program.clone(),
+        }
+    }
+}
+
 pub struct TerminalManager {
     events: Arc<dyn TerminalEvents>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
-    /// 串行化打开/重启，避免同一仓库并发创建两个 shell；不覆盖整个运行期。
+    /// 串行化新建/重启/全部终止，避免关窗确认期间又启动新的 shell；不覆盖整个运行期。
     open_lock: Mutex<()>,
 }
 
@@ -127,38 +167,78 @@ impl TerminalManager {
         }
     }
 
-    /// 打开或附着仓库终端。已有会话原样返回（包括已退出但保留输出的会话）。
-    pub fn open(&self, path: &str) -> Result<TerminalSnapshot, AppError> {
-        let repo = canonical_repo(path)?;
-        let _open = lock(&self.open_lock);
-        let key = repo_key(&repo);
-        if let Some(session) = lock(&self.sessions).get(&key).cloned() {
-            return Ok(session.snapshot());
-        }
-        let (session, reader) = self.spawn(repo, key.clone(), default_shell())?;
-        lock(&self.sessions).insert(key, Arc::clone(&session));
-        start_workers(Arc::clone(&session), reader);
-        Ok(session.snapshot())
+    /// 本机可用的终端类型，第一项是平台默认。
+    pub fn profiles(&self) -> Vec<TerminalProfile> {
+        detect_profiles().iter().map(ShellSpec::profile).collect()
     }
 
-    /// 显式重启已退出的会话；仍在运行时拒绝，避免同一仓库出现两个 shell。
-    pub fn restart(&self, path: &str) -> Result<TerminalSnapshot, AppError> {
+    /// 仓库现有会话（按创建顺序，含已退出但保留输出的会话）；不带输出，附着时再取。
+    pub fn list(&self, path: &str) -> Result<Vec<TerminalSnapshot>, AppError> {
         let repo = canonical_repo(path)?;
-        let _open = lock(&self.open_lock);
         let key = repo_key(&repo);
-        if let Some(existing) = lock(&self.sessions).get(&key).cloned() {
-            if existing.is_running() {
-                return Err(AppError::new(
-                    "terminal_running",
-                    "终端仍在运行，未重复启动新会话。",
-                ));
-            }
+        let mut sessions: Vec<Arc<Session>> = lock(&self.sessions)
+            .values()
+            .filter(|session| session.repo_key == key)
+            .cloned()
+            .collect();
+        sessions.sort_by_key(|session| session.order);
+        Ok(sessions
+            .iter()
+            .map(|session| session.snapshot(false))
+            .collect())
+    }
+
+    /// 在仓库根目录新建一个会话。`profile` 为空时用设置里的默认类型（`preferred`），
+    /// 默认类型已不在本机时退回平台默认，不让旧设置挡住终端启动。
+    pub fn create(
+        &self,
+        path: &str,
+        profile: Option<&str>,
+        preferred: Option<&str>,
+    ) -> Result<TerminalSnapshot, AppError> {
+        let repo = canonical_repo(path)?;
+        let spec = resolve_profile(&detect_profiles(), profile, preferred)?;
+        self.create_with(repo, spec)
+    }
+
+    /// 附着已有会话：返回完整输出用于重放。
+    pub fn attach(&self, session_id: &str) -> Result<TerminalSnapshot, AppError> {
+        Ok(self.find(session_id)?.snapshot(true))
+    }
+
+    /// 用同一终端类型重启已退出的会话；新会话占原位置，旧会话的输出随之丢弃。
+    /// 仍在运行时拒绝，避免误把正在跑的命令替换掉。
+    pub fn restart(&self, session_id: &str) -> Result<TerminalSnapshot, AppError> {
+        let old = self.find(session_id)?;
+        if old.is_running() {
+            return Err(AppError::new(
+                "terminal_running",
+                "终端仍在运行，未重复启动新会话。",
+            ));
         }
-        let (session, reader) = self.spawn(repo, key.clone(), default_shell())?;
-        let replaced = lock(&self.sessions).insert(key, Arc::clone(&session));
-        drop(replaced);
+        let repo = canonical_repo(&old.repo_path.to_string_lossy())?;
+        let _open = lock(&self.open_lock);
+        let (session, reader) = self.spawn(repo, old.spec.clone(), Some(old.order))?;
+        {
+            let mut sessions = lock(&self.sessions);
+            sessions.remove(&old.id);
+            sessions.insert(session.id.clone(), Arc::clone(&session));
+        }
         start_workers(Arc::clone(&session), reader);
-        Ok(session.snapshot())
+        Ok(session.snapshot(true))
+    }
+
+    /// 关闭一个会话：仍在运行时先终止 shell 及其子进程，确认结束后才移除；
+    /// 终止失败时保留会话并返回真实错误。
+    pub fn close(&self, session_id: &str) -> Result<(), AppError> {
+        let session = match self.find(session_id) {
+            Ok(session) => session,
+            // 已经不在：关闭是幂等的，不把重复关闭报成错误。
+            Err(_) => return Ok(()),
+        };
+        session.terminate()?;
+        lock(&self.sessions).remove(&session.id);
+        Ok(())
     }
 
     pub fn write(&self, session_id: &str, data: &str) -> Result<(), AppError> {
@@ -174,7 +254,7 @@ impl TerminalManager {
     /// 终止所有仍在运行的终端（shell 及其后代），等待退出后返回被终止的会话。
     /// 任一失败都会在完成其余会话后返回真实错误，不虚报全部结束。
     pub fn terminate_all(&self) -> Result<Vec<TerminalActivity>, AppError> {
-        // 与打开/重启串行：确认关窗期间不能再启动新的 shell。
+        // 与新建/重启串行：确认关窗期间不能再启动新的 shell。
         let _open = lock(&self.open_lock);
         let running: Vec<Arc<Session>> = lock(&self.sessions)
             .values()
@@ -203,9 +283,14 @@ impl TerminalManager {
     }
 
     pub fn active(&self) -> Vec<TerminalActivity> {
-        lock(&self.sessions)
+        let mut sessions: Vec<Arc<Session>> = lock(&self.sessions)
             .values()
             .filter(|session| session.is_running())
+            .cloned()
+            .collect();
+        sessions.sort_by_key(|session| session.order);
+        sessions
+            .iter()
             .map(|session| TerminalActivity {
                 session_id: session.id.clone(),
                 repo_path: session.repo_key.clone(),
@@ -226,23 +311,38 @@ impl TerminalManager {
     }
 
     fn find(&self, session_id: &str) -> Result<Arc<Session>, AppError> {
-        lock(&self.sessions)
+        lock(&self.sessions).get(session_id).cloned().ok_or_else(|| {
+            AppError::new(
+                "terminal_unknown",
+                "终端会话不存在，可能已被关闭或重新启动，请重新附着。",
+            )
+        })
+    }
+
+    fn create_with(&self, repo: PathBuf, spec: ShellSpec) -> Result<TerminalSnapshot, AppError> {
+        let _open = lock(&self.open_lock);
+        let key = repo_key(&repo);
+        let count = lock(&self.sessions)
             .values()
-            .find(|session| session.id == session_id)
-            .cloned()
-            .ok_or_else(|| {
-                AppError::new(
-                    "terminal_unknown",
-                    "终端会话不存在，可能已被重新启动，请重新附着。",
-                )
-            })
+            .filter(|session| session.repo_key == key)
+            .count();
+        if count >= MAX_SESSIONS_PER_REPO {
+            return Err(AppError::new(
+                "terminal_limit",
+                format!("这个仓库已有 {MAX_SESSIONS_PER_REPO} 个终端，请先关闭不用的终端。"),
+            ));
+        }
+        let (session, reader) = self.spawn(repo, spec, None)?;
+        lock(&self.sessions).insert(session.id.clone(), Arc::clone(&session));
+        start_workers(Arc::clone(&session), reader);
+        Ok(session.snapshot(true))
     }
 
     fn spawn(
         &self,
         repo: PathBuf,
-        key: String,
-        shell: String,
+        spec: ShellSpec,
+        order: Option<u64>,
     ) -> Result<(Arc<Session>, Box<dyn Read + Send>), AppError> {
         let pty = native_pty_system();
         let pair = pty
@@ -254,10 +354,12 @@ impl TerminalManager {
             })
             .map_err(|error| start_error(&error))?;
         let portable_pty::PtyPair { slave, master } = pair;
-        let mut command = CommandBuilder::new(&shell);
+        let mut command = CommandBuilder::new(&spec.program);
+        command.args(&spec.args);
         command.cwd(&repo);
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
+        command.env("TERM_PROGRAM", "Twiglane");
         let mut child = match slave.spawn_command(command) {
             Ok(child) => child,
             Err(error) => return Err(start_error(&error)),
@@ -288,14 +390,17 @@ impl TerminalManager {
                 return Err(start_error(&error));
             }
         };
-        let id = next_session_id();
+        let key = repo_key(&repo);
         let session = Arc::new(Session {
-            id,
+            id: next_session_id(),
+            order: order.unwrap_or_else(|| SESSION_ORDER.fetch_add(1, Ordering::Relaxed)),
             repo_path: repo,
             repo_key: key,
-            shell,
+            spec,
             inner: Mutex::new(Inner::default()),
             ended: Condvar::new(),
+            flush: Condvar::new(),
+            emit: Mutex::new(()),
             handshake: Mutex::new(Handshake::default()),
             handshake_cv: Condvar::new(),
             child: Mutex::new(Some(child)),
@@ -308,14 +413,17 @@ impl TerminalManager {
     }
 
     #[cfg(test)]
-    fn open_with_shell(&self, path: &Path, shell: &str) -> Result<TerminalSnapshot, AppError> {
+    fn create_with_shell(&self, path: &Path, shell: &str) -> Result<TerminalSnapshot, AppError> {
         let repo = canonical_repo(&path.to_string_lossy())?;
-        let _open = lock(&self.open_lock);
-        let key = repo_key(&repo);
-        let (session, reader) = self.spawn(repo, key.clone(), shell.to_string())?;
-        lock(&self.sessions).insert(key, Arc::clone(&session));
-        start_workers(Arc::clone(&session), reader);
-        Ok(session.snapshot())
+        self.create_with(
+            repo,
+            ShellSpec {
+                id: "test".into(),
+                label: "test".into(),
+                program: shell.into(),
+                args: Vec::new(),
+            },
+        )
     }
 }
 
@@ -328,7 +436,10 @@ impl Drop for TerminalManager {
 #[derive(Default)]
 struct Inner {
     status: Status,
+    /// 已经推送过的输出；快照只包含这部分，与 `seq` 一致。
     replay: String,
+    /// 已读到、尚未推送的输出；由合并线程按 `FLUSH_DELAY` 打包推送。
+    unsent: String,
     seq: u64,
     /// 跨 read 边界未完成的 UTF-8 字节；避免把多字节字符拆成替换字符。
     pending: Vec<u8>,
@@ -351,11 +462,17 @@ struct Handshake {
 
 struct Session {
     id: String,
+    /// 创建顺序；重启沿用原值，标签页位置不跳动。
+    order: u64,
     repo_path: PathBuf,
     repo_key: String,
-    shell: String,
+    spec: ShellSpec,
     inner: Mutex<Inner>,
     ended: Condvar,
+    /// 读线程写入 `unsent` 后唤醒合并线程。
+    flush: Condvar,
+    /// 推送顺序锁：分配序号与发出事件在同一把锁内，保证事件按序号到达。
+    emit: Mutex<()>,
     handshake: Mutex<Handshake>,
     handshake_cv: Condvar,
     child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
@@ -370,7 +487,7 @@ impl Session {
         matches!(lock(&self.inner).status, Status::Running)
     }
 
-    fn snapshot(&self) -> TerminalSnapshot {
+    fn snapshot(&self, with_output: bool) -> TerminalSnapshot {
         let inner = lock(&self.inner);
         let (running, exit_code, signal) = match &inner.status {
             Status::Running => (true, None, None),
@@ -379,16 +496,23 @@ impl Session {
         TerminalSnapshot {
             session_id: self.id.clone(),
             repo_path: self.repo_key.clone(),
-            shell: self.shell.clone(),
+            profile: self.spec.id.clone(),
+            label: self.spec.label.clone(),
+            shell: self.spec.program.clone(),
             cwd: self.repo_path.to_string_lossy().into_owned(),
             running,
             exit_code,
             signal,
             seq: inner.seq,
-            output: inner.replay.clone(),
+            output: if with_output {
+                inner.replay.clone()
+            } else {
+                String::new()
+            },
         }
     }
 
+    /// 读线程入口：只解码并暂存，真正推送交给合并线程。
     fn record_output(&self, chunk: &[u8]) {
         let mut inner = lock(&self.inner);
         if !matches!(inner.status, Status::Running) {
@@ -398,10 +522,27 @@ impl Session {
         if data.is_empty() {
             return;
         }
-        inner.seq += 1;
-        let seq = inner.seq;
-        push_replay(&mut inner.replay, &data);
+        let was_empty = inner.unsent.is_empty();
+        inner.unsent.push_str(&data);
         drop(inner);
+        if was_empty {
+            self.flush.notify_all();
+        }
+    }
+
+    /// 把暂存输出打包成一个事件推送。与 `finish` 共用推送顺序锁。
+    fn flush_output(&self) {
+        let _emit = lock(&self.emit);
+        let (data, seq) = {
+            let mut inner = lock(&self.inner);
+            if !matches!(inner.status, Status::Running) || inner.unsent.is_empty() {
+                return;
+            }
+            let data = std::mem::take(&mut inner.unsent);
+            inner.seq += 1;
+            push_replay(&mut inner.replay, &data);
+            (data, inner.seq)
+        };
         self.events.output(TerminalOutputEvent {
             session_id: self.id.clone(),
             seq,
@@ -409,13 +550,35 @@ impl Session {
         });
     }
 
+    /// 合并线程：有暂存输出时等一个短窗口再整体推送；会话结束后退出，剩余输出由 `finish` 推送。
+    fn run_flusher(&self) {
+        loop {
+            {
+                let mut inner = lock(&self.inner);
+                while inner.unsent.is_empty() && matches!(inner.status, Status::Running) {
+                    inner = self
+                        .flush
+                        .wait(inner)
+                        .unwrap_or_else(|error| error.into_inner());
+                }
+                if !matches!(inner.status, Status::Running) {
+                    return;
+                }
+            }
+            std::thread::sleep(FLUSH_DELAY);
+            self.flush_output();
+        }
+    }
+
     fn finish(&self, code: i32, signal: Option<String>) {
+        let _emit = lock(&self.emit);
         let (tail, exit_seq) = {
             let mut inner = lock(&self.inner);
             if matches!(inner.status, Status::Exited { .. }) {
                 return;
             }
-            let tail = flush_pending(&mut inner.pending);
+            let mut tail = std::mem::take(&mut inner.unsent);
+            tail.push_str(&flush_pending(&mut inner.pending));
             let mut tail_event = None;
             if !tail.is_empty() {
                 inner.seq += 1;
@@ -429,6 +592,7 @@ impl Session {
                 signal: signal.clone(),
             };
             self.ended.notify_all();
+            self.flush.notify_all();
             (tail_event, exit_seq)
         };
         if let Some((data, seq)) = tail {
@@ -555,14 +719,14 @@ impl Session {
     }
 }
 
-/// 读线程持续转发输出；等待线程负责真实退出状态，并在进程结束后关闭 PTY，
-/// 让 ConPTY 的输出管道尽快到达 EOF（Windows 上退出进程本身不会关闭伪控制台）。
+/// 读线程持续转发输出；合并线程按窗口打包推送；等待线程负责真实退出状态，并在进程结束后
+/// 关闭 PTY，让 ConPTY 的输出管道尽快到达 EOF（Windows 上退出进程本身不会关闭伪控制台）。
 fn start_workers(session: Arc<Session>, mut reader: Box<dyn Read + Send>) {
     let reader_session = Arc::clone(&session);
     let reader_thread = std::thread::Builder::new()
         .name(format!("twiglane-terminal-read-{}", session.id))
         .spawn(move || {
-            let mut buffer = [0_u8; 8192];
+            let mut buffer = vec![0_u8; 32 * 1024];
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
@@ -575,6 +739,11 @@ fn start_workers(session: Arc<Session>, mut reader: Box<dyn Read + Send>) {
             handshake.reader_done = true;
             reader_session.handshake_cv.notify_all();
         });
+
+    let flusher_session = Arc::clone(&session);
+    let flusher_thread = std::thread::Builder::new()
+        .name(format!("twiglane-terminal-flush-{}", session.id))
+        .spawn(move || flusher_session.run_flusher());
 
     let waiter_session = Arc::clone(&session);
     let waiter_thread = std::thread::Builder::new()
@@ -608,7 +777,7 @@ fn start_workers(session: Arc<Session>, mut reader: Box<dyn Read + Send>) {
             waiter_session.finish(code, signal);
         });
 
-    if reader_thread.is_err() || waiter_thread.is_err() {
+    if reader_thread.is_err() || waiter_thread.is_err() || flusher_thread.is_err() {
         cleanup_failed_workers(&session, waiter_thread.is_err());
     }
 }
@@ -646,28 +815,111 @@ fn canonical_repo(path: &str) -> Result<PathBuf, AppError> {
     Ok(root)
 }
 
-fn default_shell() -> String {
+/// 按 id 选择终端类型：显式请求必须存在；否则用偏好，偏好失效时退回第一项（平台默认）。
+fn resolve_profile(
+    specs: &[ShellSpec],
+    requested: Option<&str>,
+    preferred: Option<&str>,
+) -> Result<ShellSpec, AppError> {
+    if let Some(id) = requested.filter(|id| !id.is_empty()) {
+        return specs
+            .iter()
+            .find(|spec| spec.id == id)
+            .cloned()
+            .ok_or_else(|| {
+                AppError::new(
+                    "terminal_profile",
+                    "所选终端类型在本机不可用，未启动终端。",
+                )
+            });
+    }
+    if let Some(id) = preferred.filter(|id| !id.is_empty()) {
+        if let Some(spec) = specs.iter().find(|spec| spec.id == id) {
+            return Ok(spec.clone());
+        }
+    }
+    specs
+        .first()
+        .cloned()
+        .ok_or_else(|| AppError::new("terminal_start", "本机没有可用的终端 shell。"))
+}
+
+fn push_spec(specs: &mut Vec<ShellSpec>, id: &str, label: &str, program: String, args: &[&str]) {
+    if specs.iter().any(|spec| spec.id == id) {
+        return;
+    }
+    specs.push(ShellSpec {
+        id: id.into(),
+        label: label.into(),
+        program,
+        args: args.iter().map(|arg| arg.to_string()).collect(),
+    });
+}
+
+/// 在固定候选中探测本机终端类型，第一项是平台默认。
+fn detect_profiles() -> Vec<ShellSpec> {
+    let mut specs = Vec::new();
     #[cfg(windows)]
     {
-        // 优先现成的 PowerShell 7，其次 Windows PowerShell 5.1；都不可用时退回
-        // 系统注册的 COMSPEC（通常是 cmd.exe）。候选固定在后端，前端仍不能指定程序。
-        for name in ["pwsh.exe", "powershell.exe"] {
-            if let Some(found) = find_windows_executable(name) {
-                return found;
-            }
+        // 默认顺序：PowerShell 7、Windows PowerShell 5.1、系统注册的 COMSPEC（通常是 cmd.exe）。
+        if let Some(found) = find_windows_executable("pwsh.exe") {
+            push_spec(&mut specs, "pwsh", "PowerShell", found, &[]);
         }
-        std::env::var_os("COMSPEC")
+        if let Some(found) = find_windows_executable("powershell.exe") {
+            push_spec(&mut specs, "powershell", "Windows PowerShell", found, &[]);
+        }
+        let comspec = std::env::var_os("COMSPEC")
             .filter(|value| !value.is_empty())
             .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "cmd.exe".to_string())
+            .unwrap_or_else(|| "cmd.exe".to_string());
+        push_spec(&mut specs, "cmd", "命令提示符", comspec, &[]);
+        if let Some(found) = find_git_bash() {
+            push_spec(&mut specs, "git-bash", "Git Bash", found, &["--login", "-i"]);
+        }
+        if let Some(found) = find_windows_executable("wsl.exe") {
+            push_spec(&mut specs, "wsl", "WSL", found, &[]);
+        }
     }
     #[cfg(unix)]
     {
-        std::env::var_os("SHELL")
-            .filter(|value| !value.is_empty())
-            .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "/bin/sh".to_string())
+        let mut candidates: Vec<String> = Vec::new();
+        if let Some(shell) = std::env::var_os("SHELL").filter(|value| !value.is_empty()) {
+            candidates.push(shell.to_string_lossy().into_owned());
+        }
+        if let Ok(text) = std::fs::read_to_string("/etc/shells") {
+            candidates.extend(
+                text.lines()
+                    .map(str::trim)
+                    .filter(|line| line.starts_with('/'))
+                    .map(str::to_string),
+            );
+        }
+        candidates.push("/bin/sh".into());
+        let mut seen = HashSet::new();
+        for candidate in candidates {
+            let path = Path::new(&candidate);
+            let Some(name) = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+            else {
+                continue;
+            };
+            if !path.is_file() || !seen.insert(name.clone()) {
+                continue;
+            }
+            let label = match name.as_str() {
+                "bash" => "Bash".to_string(),
+                "zsh" => "Zsh".to_string(),
+                "fish" => "Fish".to_string(),
+                other => other.to_string(),
+            };
+            push_spec(&mut specs, &name, &label, candidate, &[]);
+        }
+        if specs.is_empty() {
+            push_spec(&mut specs, "sh", "sh", "/bin/sh".into(), &[]);
+        }
     }
+    specs
 }
 
 /// 在 Windows 的已知安装位置与 PATH 中查找固定候选 shell，返回可执行文件绝对路径。
@@ -691,13 +943,41 @@ fn find_windows_executable(name: &str) -> Option<String> {
                 );
             }
         }
+        "wsl.exe" => {
+            if let Some(root) = std::env::var_os("SystemRoot") {
+                candidates.push(PathBuf::from(root).join("System32").join(name));
+            }
+        }
         _ => {}
     }
-    if let Some(path) = std::env::var_os("PATH") {
-        candidates.extend(std::env::split_paths(&path).map(|dir| dir.join(name)));
+    // WSL 只认系统目录，不从 PATH 里拿同名程序。
+    if name != "wsl.exe" {
+        if let Some(path) = std::env::var_os("PATH") {
+            candidates.extend(std::env::split_paths(&path).map(|dir| dir.join(name)));
+        }
     }
     candidates
         .into_iter()
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.to_string_lossy().into_owned())
+}
+
+/// Git for Windows 自带的 bash：只认安装目录下的 `bin\bash.exe`，不从 PATH 里拿
+/// （PATH 上的 bash.exe 可能是 WSL 的启动器）。
+#[cfg(windows)]
+fn find_git_bash() -> Option<String> {
+    let mut roots = Vec::new();
+    for key in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
+        if let Some(root) = std::env::var_os(key) {
+            roots.push(PathBuf::from(root).join("Git"));
+        }
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        roots.push(PathBuf::from(local).join("Programs").join("Git"));
+    }
+    roots
+        .into_iter()
+        .map(|root| root.join("bin").join("bash.exe"))
         .find(|candidate| candidate.is_file())
         .map(|candidate| candidate.to_string_lossy().into_owned())
 }
@@ -1027,6 +1307,39 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
+    /// 新建测试 shell 并等它可以接收命令。Windows 的 ConPTY 启动时会发出光标位置查询
+    /// `ESC[6n`，等到终端回复才继续输出；真实界面里由 xterm 回复，测试里没有 xterm，
+    /// 这里代为回复，再等 cmd 打出提示符。Unix 的 sh 不需要这一步。
+    fn ready(manager: &TerminalManager, path: &Path, label: &str) -> TerminalSnapshot {
+        let opened = manager
+            .create_with_shell(path, test_shell())
+            .unwrap_or_else(|error| panic!("{label}: {}", error.message));
+        if cfg!(windows) {
+            let id = opened.session_id.clone();
+            let mut answered = 0;
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let snapshot = manager.attach(&id).expect("新建后的快照");
+                let asks = snapshot.output.matches("\u{1b}[6n").count();
+                while answered < asks {
+                    let _ = manager.write(&id, "\u{1b}[1;1R");
+                    answered += 1;
+                }
+                if snapshot.output.contains('>') {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{label}: 等待 cmd 提示符超时；running={} output={:?}",
+                    snapshot.running,
+                    snapshot.output
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        opened
+    }
+
     fn wait_until(label: &str, timeout: Duration, mut check: impl FnMut() -> bool) {
         let deadline = Instant::now() + timeout;
         loop {
@@ -1038,11 +1351,12 @@ mod tests {
         }
     }
 
-    fn wait_for_output(manager: &TerminalManager, path: &str, needle: &str) {
+    /// 超时时带上 shell、运行状态与输出尾部，CI 上失败能直接看到现场。
+    fn wait_for_output(manager: &TerminalManager, session: &str, needle: &str) {
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut last: Option<TerminalSnapshot> = None;
         loop {
-            if let Ok(snapshot) = manager.open(path) {
+            if let Ok(snapshot) = manager.attach(session) {
                 if snapshot.output.contains(needle) {
                     return;
                 }
@@ -1069,14 +1383,62 @@ mod tests {
         }
     }
 
-    fn wait_for_exit(manager: &TerminalManager, path: &str) -> TerminalSnapshot {
+    fn wait_for_exit(manager: &TerminalManager, session: &str) -> TerminalSnapshot {
         wait_until("终端退出", Duration::from_secs(15), || {
             manager
-                .open(path)
+                .attach(session)
                 .map(|snapshot| !snapshot.running)
                 .unwrap_or(false)
         });
-        manager.open(path).expect("退出后的快照")
+        manager.attach(session).expect("退出后的快照")
+    }
+
+    fn spec(id: &str) -> ShellSpec {
+        ShellSpec {
+            id: id.into(),
+            label: id.to_uppercase(),
+            program: format!("/bin/{id}"),
+            args: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn profile_resolution_prefers_request_then_setting_then_platform_default() {
+        let specs = vec![spec("pwsh"), spec("cmd"), spec("bash")];
+        assert_eq!(resolve_profile(&specs, None, None).unwrap().id, "pwsh");
+        assert_eq!(
+            resolve_profile(&specs, None, Some("bash")).unwrap().id,
+            "bash"
+        );
+        // 设置里的默认类型已不在本机：退回平台默认，不挡住终端启动。
+        assert_eq!(
+            resolve_profile(&specs, None, Some("fish")).unwrap().id,
+            "pwsh"
+        );
+        assert_eq!(
+            resolve_profile(&specs, Some("cmd"), Some("bash")).unwrap().id,
+            "cmd"
+        );
+        // 显式请求一个不存在的类型必须失败，不能悄悄换成别的 shell。
+        assert_eq!(
+            resolve_profile(&specs, Some("fish"), None).unwrap_err().code,
+            "terminal_profile"
+        );
+        assert_eq!(
+            resolve_profile(&[], None, None).unwrap_err().code,
+            "terminal_start"
+        );
+    }
+
+    #[test]
+    fn detected_profiles_are_unique_and_point_at_existing_programs() {
+        let profiles = detect_profiles();
+        assert!(!profiles.is_empty(), "至少要有一个平台默认 shell");
+        let mut ids = std::collections::HashSet::new();
+        for profile in &profiles {
+            assert!(ids.insert(profile.id.clone()), "终端类型 id 重复：{}", profile.id);
+            assert!(!profile.label.is_empty());
+        }
     }
 
     #[test]
@@ -1085,19 +1447,17 @@ mod tests {
         let (manager, events) = manager();
         let path = path_text(dir.path());
 
-        let opened = manager
-            .open_with_shell(dir.path(), test_shell())
-            .expect("打开终端");
+        let opened = ready(&manager, dir.path(), "打开终端");
         assert!(opened.running);
         assert_eq!(opened.cwd, opened.repo_path);
         assert!(!opened.shell.is_empty());
-        assert_eq!(opened.output, "");
+        assert_eq!(opened.profile, "test");
 
         manager
             .resize(&opened.session_id, 40, 120)
             .expect("调整终端尺寸");
         let session = lock(&manager.sessions)
-            .get(&opened.repo_path)
+            .get(&opened.session_id)
             .cloned()
             .expect("会话");
         assert_eq!(session.window_size(), Some((40, 120)));
@@ -1105,24 +1465,22 @@ mod tests {
         manager
             .write(&opened.session_id, "echo twiglane-pty-marker\r\n")
             .expect("写入输入");
-        wait_for_output(&manager, &path, "twiglane-pty-marker");
+        wait_for_output(&manager, &opened.session_id, "twiglane-pty-marker");
         manager
             .write(&opened.session_id, "echo second-line\r\n")
             .expect("再次写入");
-        wait_for_output(&manager, &path, "second-line");
+        wait_for_output(&manager, &opened.session_id, "second-line");
 
-        let attached = manager.open(&path).expect("重新附着");
-        assert_eq!(
-            attached.session_id, opened.session_id,
-            "重复打开必须附着原会话"
-        );
-        assert!(attached.output.contains("twiglane-pty-marker"));
+        let listed = manager.list(&path).expect("列出会话");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].session_id, opened.session_id);
+        assert!(listed[0].output.is_empty(), "列表不携带输出，附着时再取");
         assert_eq!(manager.active().len(), 1);
 
         manager
             .write(&opened.session_id, "exit 7\r\n")
             .expect("退出输入");
-        let exited = wait_for_exit(&manager, &path);
+        let exited = wait_for_exit(&manager, &opened.session_id);
         assert_eq!(exited.session_id, opened.session_id);
         assert_eq!(exited.exit_code, Some(7));
         assert!(exited.output.contains("twiglane-pty-marker"));
@@ -1132,14 +1490,99 @@ mod tests {
         let outputs = lock(&events.outputs);
         let exits = lock(&events.exits);
         let mut last = 0;
+        let mut joined = String::new();
         for event in outputs.iter() {
             assert!(event.seq > last, "输出事件序号必须单调递增");
             last = event.seq;
+            joined.push_str(&event.data);
         }
+        assert_eq!(joined, exited.output, "推送的输出与重放内容一致，没有丢失或重复");
         let exit = exits.last().expect("退出事件");
         assert_eq!(exit.exit_code, 7);
         assert!(exit.seq > last, "退出事件必须排在最后一段输出之后");
         assert_eq!(exit.session_id, opened.session_id);
+    }
+
+    #[test]
+    fn one_repository_holds_several_independent_sessions() {
+        let dir = TempDir::new("terminal-multi");
+        let (manager, _) = manager();
+        let path = path_text(dir.path());
+
+        let first = ready(&manager, dir.path(), "第一个终端");
+        let second = ready(&manager, dir.path(), "第二个终端");
+        assert_ne!(first.session_id, second.session_id);
+        let order: Vec<String> = manager
+            .list(&path)
+            .unwrap()
+            .into_iter()
+            .map(|snapshot| snapshot.session_id)
+            .collect();
+        assert_eq!(order, vec![first.session_id.clone(), second.session_id.clone()]);
+
+        manager
+            .write(&first.session_id, "echo marker-first\r\n")
+            .unwrap();
+        manager
+            .write(&second.session_id, "echo marker-second\r\n")
+            .unwrap();
+        wait_for_output(&manager, &first.session_id, "marker-first");
+        wait_for_output(&manager, &second.session_id, "marker-second");
+        assert!(!manager
+            .attach(&first.session_id)
+            .unwrap()
+            .output
+            .contains("marker-second"));
+
+        // 关闭第一个：运行中的 shell 被终止并移除，第二个不受影响。
+        manager.close(&first.session_id).expect("关闭第一个终端");
+        assert_eq!(
+            manager.attach(&first.session_id).unwrap_err().code,
+            "terminal_unknown"
+        );
+        manager.close(&first.session_id).expect("重复关闭是幂等的");
+        assert_eq!(manager.list(&path).unwrap().len(), 1);
+        assert!(manager.attach(&second.session_id).unwrap().running);
+
+        // 已退出的会话重启后占原位置，旧 id 失效。
+        manager.write(&second.session_id, "exit 0\r\n").unwrap();
+        wait_for_exit(&manager, &second.session_id);
+        let third = ready(&manager, dir.path(), "第三个终端");
+        let restarted = manager.restart(&second.session_id).expect("重启");
+        assert_ne!(restarted.session_id, second.session_id);
+        assert!(restarted.running);
+        let order: Vec<String> = manager
+            .list(&path)
+            .unwrap()
+            .into_iter()
+            .map(|snapshot| snapshot.session_id)
+            .collect();
+        assert_eq!(order, vec![restarted.session_id.clone(), third.session_id.clone()]);
+        assert_eq!(
+            manager.restart(&restarted.session_id).unwrap_err().code,
+            "terminal_running",
+            "运行中的会话不能被重启替换"
+        );
+        assert_eq!(manager.terminate_all().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn session_count_per_repository_is_capped() {
+        let dir = TempDir::new("terminal-cap");
+        let (manager, _) = manager();
+        for _ in 0..MAX_SESSIONS_PER_REPO {
+            manager
+                .create_with_shell(dir.path(), test_shell())
+                .expect("上限内可以新建");
+        }
+        assert_eq!(
+            manager
+                .create_with_shell(dir.path(), test_shell())
+                .unwrap_err()
+                .code,
+            "terminal_limit"
+        );
+        manager.terminate_all().expect("终止");
     }
 
     #[test]
@@ -1150,17 +1593,13 @@ mod tests {
         std::fs::create_dir_all(&alpha).unwrap();
         std::fs::create_dir_all(&beta).unwrap();
         let (manager, _) = manager();
-        let alpha_path = path_text(&alpha);
-        let beta_path = path_text(&beta);
 
-        let alpha_session = manager
-            .open_with_shell(&alpha, test_shell())
-            .expect("仓库 A");
-        let beta_session = manager
-            .open_with_shell(&beta, test_shell())
-            .expect("仓库 B");
+        let alpha_session = ready(&manager, &alpha, "仓库 A");
+        let beta_session = ready(&manager, &beta, "仓库 B");
         assert_ne!(alpha_session.session_id, beta_session.session_id);
         assert_eq!(manager.active().len(), 2);
+        assert_eq!(manager.list(&path_text(&alpha)).unwrap().len(), 1);
+        assert_eq!(manager.list(&path_text(&beta)).unwrap().len(), 1);
 
         manager
             .write(&alpha_session.session_id, "echo marker-alpha\r\n")
@@ -1168,26 +1607,19 @@ mod tests {
         manager
             .write(&beta_session.session_id, "echo marker-beta\r\n")
             .expect("写入 B");
-        wait_for_output(&manager, &alpha_path, "marker-alpha");
-        wait_for_output(&manager, &beta_path, "marker-beta");
-        let alpha_snapshot = manager.open(&alpha_path).unwrap();
-        let beta_snapshot = manager.open(&beta_path).unwrap();
-        assert!(alpha_snapshot.output.contains("marker-alpha"));
+        wait_for_output(&manager, &alpha_session.session_id, "marker-alpha");
+        wait_for_output(&manager, &beta_session.session_id, "marker-beta");
+        let alpha_snapshot = manager.attach(&alpha_session.session_id).unwrap();
+        let beta_snapshot = manager.attach(&beta_session.session_id).unwrap();
         assert!(!alpha_snapshot.output.contains("marker-beta"));
-        assert!(beta_snapshot.output.contains("marker-beta"));
         assert!(!beta_snapshot.output.contains("marker-alpha"));
 
         manager
             .write(&alpha_session.session_id, "exit 3\r\n")
             .expect("退出 A");
-        let alpha_exited = wait_for_exit(&manager, &alpha_path);
+        let alpha_exited = wait_for_exit(&manager, &alpha_session.session_id);
         assert_eq!(alpha_exited.exit_code, Some(3));
-        wait_until("B 仍在运行", Duration::from_secs(5), || {
-            manager
-                .open(&beta_path)
-                .map(|snapshot| snapshot.running)
-                .unwrap_or(false)
-        });
+        assert!(manager.attach(&beta_session.session_id).unwrap().running);
         assert_eq!(manager.active().len(), 1);
 
         let stopped = manager.terminate_all().expect("终止剩余终端");
@@ -1203,15 +1635,22 @@ mod tests {
         let (manager, _) = manager();
 
         let missing = dir.path().join("missing");
-        let error = manager.open(&path_text(&missing)).unwrap_err();
+        let error = manager.create(&path_text(&missing), None, None).unwrap_err();
         assert_eq!(error.code, "path_unreadable");
         assert!(manager.active().is_empty());
+        assert_eq!(
+            manager
+                .create(&path_text(dir.path()), Some("no-such-profile"), None)
+                .unwrap_err()
+                .code,
+            "terminal_profile"
+        );
 
-        match manager.open_with_shell(dir.path(), "twiglane-shell-does-not-exist") {
+        match manager.create_with_shell(dir.path(), "twiglane-shell-does-not-exist") {
             Err(error) => assert_eq!(error.code, "terminal_start"),
-            Ok(_) => {
+            Ok(snapshot) => {
                 // Unix 的 fork/exec 可能异步失败，子进程会立即以非零状态退出。
-                let exited = wait_for_exit(&manager, &path_text(dir.path()));
+                let exited = wait_for_exit(&manager, &snapshot.session_id);
                 assert_ne!(exited.exit_code, Some(0));
             }
         }
@@ -1223,11 +1662,8 @@ mod tests {
     fn terminate_kills_the_shell_and_descendants() {
         let dir = TempDir::new("terminal-tree");
         let (manager, _) = manager();
-        let path = path_text(dir.path());
         let heartbeat = dir.path().join("heartbeat.txt");
-        let opened = manager
-            .open_with_shell(dir.path(), test_shell())
-            .expect("打开终端");
+        let opened = ready(&manager, dir.path(), "打开终端");
 
         let command = if cfg!(windows) {
             "cmd /c \"for /l %i in (1,0,2) do @(echo x>>heartbeat.txt & ping -n 2 127.0.0.1 >nul)\"\r\n"
@@ -1246,7 +1682,7 @@ mod tests {
         let stopped = manager.terminate_all().expect("终止整棵进程树");
         assert_eq!(stopped.len(), 1);
         assert!(!manager.has_active());
-        let exited = manager.open(&path).expect("终止后的快照");
+        let exited = manager.attach(&opened.session_id).expect("终止后的快照");
         assert!(!exited.running);
 
         // 心跳文件不再增长，说明 shell 之外的后代也已被终止。
@@ -1261,18 +1697,15 @@ mod tests {
     fn writes_and_resize_fail_after_exit_but_output_is_retained() {
         let dir = TempDir::new("terminal-closed");
         let (manager, _) = manager();
-        let path = path_text(dir.path());
-        let opened = manager
-            .open_with_shell(dir.path(), test_shell())
-            .expect("打开终端");
+        let opened = ready(&manager, dir.path(), "打开终端");
         manager
             .write(&opened.session_id, "echo retained-output\r\n")
             .expect("写入");
-        wait_for_output(&manager, &path, "retained-output");
+        wait_for_output(&manager, &opened.session_id, "retained-output");
         manager
             .write(&opened.session_id, "exit 0\r\n")
             .expect("退出");
-        let exited = wait_for_exit(&manager, &path);
+        let exited = wait_for_exit(&manager, &opened.session_id);
         assert_eq!(exited.exit_code, Some(0));
         assert!(exited.output.contains("retained-output"));
 

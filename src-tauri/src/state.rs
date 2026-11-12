@@ -26,6 +26,47 @@ fn default_branch_groups() -> bool {
     true
 }
 
+/// 终端字号的允许范围与缺省值；前端缩放与设置都夹在这个范围里。
+pub const TERMINAL_FONT_MIN: u8 = 9;
+pub const TERMINAL_FONT_MAX: u8 = 24;
+pub const TERMINAL_FONT_DEFAULT: u8 = 13;
+
+fn default_terminal_font() -> u8 {
+    TERMINAL_FONT_DEFAULT
+}
+
+/// 终端偏好。`profile` 只存终端类型 id，启动时由后端在本机探测结果里重新解析；
+/// 旧设置文件没有这一项时读成平台默认与缺省字号。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalPrefs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default = "default_terminal_font")]
+    pub font_size: u8,
+}
+
+impl Default for TerminalPrefs {
+    fn default() -> Self {
+        Self {
+            profile: None,
+            font_size: TERMINAL_FONT_DEFAULT,
+        }
+    }
+}
+
+impl TerminalPrefs {
+    pub fn clamped(self) -> Self {
+        Self {
+            profile: self
+                .profile
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty() && id.len() <= 64),
+            font_size: self.font_size.clamp(TERMINAL_FONT_MIN, TERMINAL_FONT_MAX),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Persisted {
@@ -38,6 +79,8 @@ pub struct Persisted {
     /// 左栏是否显示「文件」视图；旧设置文件缺省为显示。
     #[serde(default = "default_branch_groups")]
     pub files_view: bool,
+    #[serde(default)]
+    pub terminal: TerminalPrefs,
     pub panel_widths: PanelWidths,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_executable: Option<String>,
@@ -53,6 +96,7 @@ impl Default for Persisted {
             pull_integration: PullIntegration::Merge,
             branch_groups: true,
             files_view: true,
+            terminal: TerminalPrefs::default(),
             panel_widths: PanelWidths::default(),
             git_executable: None,
             recent: Vec::new(),
@@ -124,6 +168,16 @@ impl AppStore {
             data.files_view = files_view;
             Ok(())
         })
+    }
+
+    pub fn set_terminal_prefs(&self, prefs: TerminalPrefs) -> Result<TerminalPrefs, AppError> {
+        let prefs = prefs.clamped();
+        let saved = prefs.clone();
+        self.update(|data| {
+            data.terminal = prefs;
+            Ok(())
+        })?;
+        Ok(saved)
     }
 
     pub fn set_panel_widths(&self, widths: PanelWidths) -> Result<(), AppError> {

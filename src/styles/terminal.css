@@ -1,75 +1,267 @@
-/* ==========================================================================
-   工作台底部终端 — 只依赖 tokens.css；面板是外壳与状态栏之间的一条固定高度区域，
-   展开/收起不改变三个工作台视图的挂载，也不重建后端会话。
-   ========================================================================== */
 @import "@xterm/xterm/css/xterm.css";
+
+/* ==========================================================================
+   工作台底部终端 — 只依赖 tokens.css；面板是外壳与状态栏之间的一条可调高度区域，
+   展开/收起不改变三个工作台视图的挂载，也不重建后端会话。终端画布与 16 色取自
+   tokens.css 的 --term-*，xterm 的配色由 TerminalPane 从同一组令牌读取。
+   ========================================================================== */
 
 .terminal-panel {
   display: flex;
   flex-direction: column;
   flex: none;
-  height: clamp(150px, 32vh, 280px);
-  min-height: 130px;
-  max-height: 50vh;
-  background: var(--surface);
+  height: clamp(180px, 34vh, 320px);
+  min-height: 140px;
+  max-height: calc(100% - var(--titlebar-height, 40px) - 160px);
+  background: var(--term-bg);
   border-top: 1px solid var(--border);
   position: relative;
   z-index: 1;
 }
 .terminal-panel[hidden] { display: none; }
+/* 最大化：覆盖在工作台之上（标题栏与状态栏之间），工作台本身不卸载也不重排。 */
+.terminal-panel.maximized {
+  position: absolute;
+  top: var(--titlebar-height, 40px);
+  bottom: var(--statusbar-height);
+  left: 0;
+  right: 0;
+  height: auto;
+  max-height: none;
+  z-index: 5;
+  border-top: 0;
+}
+.terminal-panel.resizing { user-select: none; -webkit-user-select: none; }
+.terminal-panel.resizing .terminal-body { pointer-events: none; }
 
+/* 顶边拖动条：命中区 6px，悬停/拖动时用 accent 细线提示可调。 */
+.terminal-resizer {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 6px;
+  cursor: ns-resize;
+  z-index: 2;
+  outline: none;
+}
+.terminal-resizer::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 2px;
+  height: 2px;
+  background: transparent;
+  transition: background var(--duration-fast) var(--ease);
+}
+.terminal-resizer:hover::after,
+.terminal-resizer:focus-visible::after,
+.terminal-panel.resizing .terminal-resizer::after { background: var(--accent); }
+.terminal-panel.maximized .terminal-resizer { display: none; }
+
+/* ---------------------------------------------------------------- 头部 */
 .terminal-head {
   display: flex;
   align-items: center;
-  gap: var(--space-8);
-  min-height: 32px;
-  padding: 0 var(--space-8);
+  gap: var(--space-4);
+  height: 34px;
+  padding: 0 var(--space-6) 0 var(--space-4);
   flex: none;
   background: var(--surface-2);
-  border-bottom: 1px solid var(--border);
+  box-shadow: inset 0 -1px 0 var(--border);
   font-size: var(--text-xs);
   color: var(--fg-muted);
+  user-select: none;
+  -webkit-user-select: none;
 }
-.terminal-title {
+.terminal-tabs {
+  display: flex;
+  align-items: stretch;
+  align-self: stretch;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.terminal-tabs::-webkit-scrollbar { display: none; }
+.terminal-tab {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-4);
-  font-weight: var(--weight-semibold);
-  color: var(--fg);
+  gap: var(--space-6);
   flex: none;
+  max-width: 220px;
+  padding: 0 var(--space-4) 0 var(--space-8);
+  margin-top: var(--space-4);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  color: var(--fg-subtle);
+  cursor: pointer;
+  position: relative;
+  transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
 }
-.terminal-title .icon { color: var(--accent-text); }
-.terminal-status { flex: none; color: var(--fg-subtle); }
-.terminal-status[data-terminal-state="exited"] { color: var(--warning-text); }
-.terminal-status[data-terminal-state="failed"] { color: var(--danger-text); }
-.terminal-path {
+.terminal-tab:hover { background: var(--surface-3); color: var(--fg); }
+.terminal-tab.active {
+  background: var(--term-bg);
+  color: var(--fg);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.terminal-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.terminal-tab-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--fg-subtle);
-  font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+  font-weight: var(--weight-medium);
 }
+.terminal-tab-input {
+  width: 120px;
+  min-width: 0;
+  height: 20px;
+  padding: 0 var(--space-4);
+  font: inherit;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-xs);
+  outline: none;
+}
+/* 状态点：运行中 success、已退出 warning、失败 danger、启动中弱化。 */
+.terminal-tab-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--success);
+}
+.terminal-tab[data-state="exited"] .terminal-tab-dot { background: var(--warning-text); }
+.terminal-tab[data-state="failed"] .terminal-tab-dot { background: var(--danger-text); }
+.terminal-tab[data-state="starting"] .terminal-tab-dot { background: var(--fg-subtle); }
+.terminal-tab-count {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--fg-subtle);
+  font-variant-numeric: tabular-nums;
+}
+.terminal-tab-close {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--fg-subtle);
+  cursor: pointer;
+  opacity: 0;
+}
+.terminal-tab:hover .terminal-tab-close,
+.terminal-tab.active .terminal-tab-close { opacity: 1; }
+.terminal-tab-close:hover { background: var(--surface-3); color: var(--fg); }
+
+.terminal-new { display: inline-flex; align-items: center; flex: none; margin-left: var(--space-2); }
+.terminal-new .terminal-new-more { width: 18px; min-width: 18px; }
 .terminal-spacer { flex: 1; min-width: var(--space-8); }
+.terminal-status {
+  flex: none;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-subtle);
+  padding-right: var(--space-4);
+}
+.terminal-status[data-terminal-state="running"] { color: var(--fg-subtle); }
+.terminal-status[data-terminal-state="exited"] { color: var(--warning-text); }
+.terminal-status[data-terminal-state="failed"] { color: var(--danger-text); }
 .terminal-head .btn-sm { min-height: 24px; }
 
+/* ---------------------------------------------------------------- 画面 */
 .terminal-body {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  position: relative;
+  background: var(--term-bg);
 }
+.terminal-group {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.terminal-group[hidden] { display: none; }
+.terminal-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+}
+.terminal-pane + .terminal-pane { box-shadow: inset 1px 0 0 var(--border-strong); }
+.terminal-pane-label {
+  flex: none;
+  padding: var(--space-2) var(--space-8);
+  font-size: var(--text-xs);
+  color: var(--fg-subtle);
+  box-shadow: inset 0 -1px 0 var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.terminal-group .terminal-pane.focused .terminal-pane-label { color: var(--accent-text); box-shadow: inset 0 -2px 0 var(--accent); }
 .terminal-surface {
   flex: 1;
   min-height: 0;
-  padding: var(--space-4) var(--space-8);
+  padding: var(--space-6) 0 var(--space-4) var(--space-12);
   overflow: hidden;
-  background: var(--surface);
+  background: var(--term-bg);
 }
 .terminal-surface.terminal-hidden { display: none; }
-/* xterm 自带的内边距按面板高度收紧，最小窗口下仍能完整显示滚动区。 */
 .terminal-surface .xterm { height: 100%; }
-.terminal-surface .xterm-viewport { overflow-y: auto; }
+.terminal-surface .xterm-viewport { overflow-y: auto; background: var(--term-bg); }
+.terminal-surface .xterm .xterm-scroll-area { background: transparent; }
+
+.terminal-link-hint {
+  position: absolute;
+  transform: translate(8px, -130%);
+  padding: var(--space-2) var(--space-6);
+  font-size: var(--text-xs);
+  color: var(--fg);
+  background: var(--surface);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-md);
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 3;
+}
+
+/* 退出条：贴在画面底部，输出保留在上方可滚动查看。 */
+.terminal-exit {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  flex: none;
+  padding: var(--space-4) var(--space-8) var(--space-4) var(--space-12);
+  font-size: var(--text-sm);
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+.terminal-exit-text { font-weight: var(--weight-medium); }
+.terminal-exit-note { color: var(--fg-subtle); font-size: var(--text-xs); }
+
+.terminal-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-8);
+  flex: 1;
+  color: var(--fg-subtle);
+  font-size: var(--text-sm);
+}
 
 .terminal-notice {
   display: flex;
@@ -78,12 +270,74 @@
   padding: var(--space-6) var(--space-8);
   flex: none;
   font-size: var(--text-sm);
-  border-bottom: 1px solid var(--border);
 }
 .terminal-notice > span { flex: 1; min-width: 0; }
 .terminal-notice.error { background: var(--danger-soft); color: var(--danger-text); }
 .terminal-notice.warn { background: var(--warning-soft); color: var(--warning-text); }
 
-@media (max-height: 640px) {
-  .terminal-panel { height: 170px; min-height: 120px; }
+/* 查找条：浮在画面右上角，不挤占输出高度。 */
+.terminal-find {
+  position: absolute;
+  top: var(--space-6);
+  right: var(--space-16);
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-4) var(--space-4) var(--space-8);
+  background: var(--surface);
+  color: var(--fg-subtle);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  z-index: 4;
 }
+.terminal-find-input {
+  width: 200px;
+  height: 24px;
+  padding: 0 var(--space-4);
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--fg);
+  background: transparent;
+  border: 0;
+  outline: none;
+}
+.terminal-find-miss { font-size: var(--text-xs); color: var(--danger-text); white-space: nowrap; }
+
+@media (max-height: 640px) {
+  .terminal-panel { height: 180px; min-height: 120px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .terminal-tab, .terminal-resizer::after { transition: none; }
+}
+
+/* ---------------------------------------------------------------- 状态栏入口 */
+.sb-terminal[aria-expanded="true"] { color: var(--accent-text); }
+.sb-count {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 var(--space-4);
+  border-radius: 8px;
+  display: inline-grid;
+  place-items: center;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+/* ---------------------------------------------------------------- 设置分区 */
+.settings-terminal-select { width: 220px; height: 28px; font-size: var(--text-sm); }
+.settings-terminal-path {
+  display: block;
+  margin-top: var(--space-2);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--fg-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 360px;
+}
+.settings-stepper { display: inline-flex; align-items: center; gap: var(--space-4); }
+.settings-stepper output { min-width: 44px; text-align: center; font-variant-numeric: tabular-nums; color: var(--fg); }

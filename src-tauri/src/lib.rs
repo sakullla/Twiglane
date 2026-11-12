@@ -42,9 +42,9 @@ use crate::model::{
     StashApplyResult, StashSaveResult, StashState, StatusSnapshot, TagState, Theme, UndoResult,
 };
 use crate::shutdown::Shutdown;
-use crate::state::{AppStore, PullIntegration};
+use crate::state::{AppStore, PullIntegration, TerminalPrefs};
 use crate::terminal::{
-    TerminalActivity, TerminalCloseRequested, TerminalManager, TerminalSnapshot,
+    TerminalActivity, TerminalCloseRequested, TerminalManager, TerminalProfile, TerminalSnapshot,
 };
 
 pub fn run() {
@@ -199,8 +199,13 @@ pub fn run() {
             cliora_review_request,
             cliora_review_receipt,
             cliora_review_return,
-            open_terminal,
-            restart_terminal,
+            terminal_profiles,
+            terminal_list,
+            terminal_create,
+            terminal_attach,
+            terminal_restart,
+            terminal_close,
+            set_terminal_prefs,
             terminal_write,
             terminal_resize,
             terminate_terminals
@@ -1987,21 +1992,59 @@ fn cancel_reads(state: State<'_, Arc<Backend>>) -> Result<(), AppError> {
     Ok(())
 }
 
-/// 终端只接受仓库路径：shell、工作目录和进程树由后端按仓库规范路径固定。
+/// 终端只接受仓库路径、会话 id 与终端类型 id：shell 程序、参数、工作目录和进程树都由
+/// 后端按本机探测结果与仓库规范路径固定。
 #[tauri::command(async)]
-fn open_terminal(
-    state: State<'_, TerminalManager>,
-    path: String,
-) -> Result<TerminalSnapshot, AppError> {
-    state.open(&path)
+fn terminal_profiles(state: State<'_, TerminalManager>) -> Vec<TerminalProfile> {
+    state.profiles()
 }
 
 #[tauri::command(async)]
-fn restart_terminal(
+fn terminal_list(
     state: State<'_, TerminalManager>,
     path: String,
+) -> Result<Vec<TerminalSnapshot>, AppError> {
+    state.list(&path)
+}
+
+#[tauri::command(async)]
+fn terminal_create(
+    state: State<'_, TerminalManager>,
+    backend: State<'_, Arc<Backend>>,
+    path: String,
+    profile: Option<String>,
 ) -> Result<TerminalSnapshot, AppError> {
-    state.restart(&path)
+    let preferred = backend.store.snapshot().terminal.profile;
+    state.create(&path, profile.as_deref(), preferred.as_deref())
+}
+
+#[tauri::command(async, rename_all = "camelCase")]
+fn terminal_attach(
+    state: State<'_, TerminalManager>,
+    session_id: String,
+) -> Result<TerminalSnapshot, AppError> {
+    state.attach(&session_id)
+}
+
+#[tauri::command(async, rename_all = "camelCase")]
+fn terminal_restart(
+    state: State<'_, TerminalManager>,
+    session_id: String,
+) -> Result<TerminalSnapshot, AppError> {
+    state.restart(&session_id)
+}
+
+#[tauri::command(async, rename_all = "camelCase")]
+fn terminal_close(state: State<'_, TerminalManager>, session_id: String) -> Result<(), AppError> {
+    state.close(&session_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn set_terminal_prefs(
+    state: State<'_, Arc<Backend>>,
+    prefs: TerminalPrefs,
+) -> Result<TerminalPrefs, AppError> {
+    state.store.set_terminal_prefs(prefs)
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -52,6 +52,8 @@ import type {
   TaskReview,
   TaskReviewToken,
   TerminalActivity,
+  TerminalPrefs,
+  TerminalProfile,
   TerminalSnapshot,
   Theme,
   PullIntegration,
@@ -716,12 +718,20 @@ export const api = {
   setPanelWidths: (widths: PanelWidths) => invoke<PanelWidths>("set_panel_widths", { widths }),
   saveDraft: (path: string, message: string) => invoke<void>("save_draft", { path, message }),
   cancelReads: () => invoke<void>("cancel_reads"),
-  /**
-   * 按仓库打开或附着终端。同一仓库重复调用返回原 sessionId；已退出的会话保持退出状态，
-   * 需要 restartTerminal 才会新建 shell。返回值里的 output/seq 用于重放。
-   */
-  openTerminal: (path: string) => invoke<TerminalSnapshot>("open_terminal", { path }),
-  restartTerminal: (path: string) => invoke<TerminalSnapshot>("restart_terminal", { path }),
+  /** 本机可用的终端类型，第一项是平台默认。 */
+  terminalProfiles: () => invoke<TerminalProfile[]>("terminal_profiles"),
+  /** 仓库现有终端会话（按创建顺序，不带输出）；附着时用 terminalAttach 取输出重放。 */
+  terminalList: (path: string) => invoke<TerminalSnapshot[]>("terminal_list", { path }),
+  /** 在仓库根目录新建会话；profile 为空时用设置里的默认终端类型。 */
+  terminalCreate: (path: string, profile: string | null = null) =>
+    invoke<TerminalSnapshot>("terminal_create", { path, profile }),
+  /** 附着已有会话：返回完整输出与 seq，用于重放并丢弃旧事件。 */
+  terminalAttach: (sessionId: string) => invoke<TerminalSnapshot>("terminal_attach", { sessionId }),
+  /** 用同一终端类型重启已退出的会话；运行中返回 terminal_running。 */
+  terminalRestart: (sessionId: string) => invoke<TerminalSnapshot>("terminal_restart", { sessionId }),
+  /** 关闭会话：运行中先终止 shell 及其子进程，确认结束后才移除。 */
+  terminalClose: (sessionId: string) => invoke<void>("terminal_close", { sessionId }),
+  setTerminalPrefs: (prefs: TerminalPrefs) => invoke<TerminalPrefs>("set_terminal_prefs", { prefs }),
   /** 只向已有 sessionId 写入输入；终端已退出时后端返回 terminal_closed。 */
   terminalWrite: (sessionId: string, data: string) =>
     invoke<void>("terminal_write", { sessionId, data }),

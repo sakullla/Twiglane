@@ -448,6 +448,7 @@ const ADDED_COMMAND_IDS = [
   "branch.switch",
   "branch.create",
   "terminal.toggle",
+  "terminal.new",
 ];
 const ADDED_COMMAND_TITLES = [
   "上一个文件",
@@ -471,6 +472,7 @@ const ADDED_COMMAND_TITLES = [
   "切换分支",
   "新建分支",
   "终端",
+  "新建终端",
 ];
 
 /** 注册表状态夹具：暂存区有 2 个文件、草稿已填，是「看起来都能用」的那一侧。 */

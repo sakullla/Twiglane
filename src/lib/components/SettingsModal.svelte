@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { untrack } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { BUSY_REASON } from "../ui";
   import { dependencyNote } from "../labels";
   import { appVersion } from "../api";
-  import type { GitInfo, PullIntegration, Theme } from "../types";
+  import type { GitInfo, PullIntegration, TerminalPrefs, TerminalProfile, Theme } from "../types";
+  import { TERMINAL_FONT_DEFAULT, TERMINAL_FONT_MAX, TERMINAL_FONT_MIN, clampFontSize } from "../terminal";
   import { LANGUAGE_OPTIONS } from "../syntax/languages";
   import { setSyntaxEnabled, syntaxPrefs } from "../syntax/prefs.svelte";
   import { checkForUpdates, installUpdate, isNativeRuntime, updateState } from "../update.svelte";
@@ -25,6 +26,11 @@
     /** 左栏是否显示「文件」视图。 */
     filesView?: boolean;
     onFilesView?: (enabled: boolean) => void;
+    /** 终端偏好与本机探测到的终端类型；打开设置时由外壳探测一次。 */
+    terminalPrefs?: TerminalPrefs;
+    terminalProfiles?: TerminalProfile[];
+    onTerminalPrefs?: (prefs: TerminalPrefs) => void;
+    onLoadTerminalProfiles?: () => void;
     onRedetect: () => void;
     onChooseGit: () => void;
     onClearGit: () => void;
@@ -32,7 +38,7 @@
      * 打开时定位的分区：Git 不可用的诊断入口指向 "runtime"，更新提示入口指向
      * "update"，其余入口不传（等价于现在的首屏：外观在运行环境之上）。不改任何按钮行为。
      */
-    section?: "appearance" | "runtime" | "update" | null;
+    section?: "appearance" | "runtime" | "update" | "terminal" | null;
     /** 关闭后焦点去处（命令面板打开时由外壳传入）。 */
     returnFocus?: HTMLElement | null;
   }
@@ -49,6 +55,10 @@
     onBranchGroups = () => {},
     filesView = true,
     onFilesView = () => {},
+    terminalPrefs = { profile: null, fontSize: TERMINAL_FONT_DEFAULT },
+    terminalProfiles = [],
+    onTerminalPrefs = () => {},
+    onLoadTerminalProfiles = () => {},
     onRedetect,
     onChooseGit,
     onClearGit,
@@ -68,12 +78,34 @@
 
   let runtimeSection = $state<HTMLElement | null>(null);
   let updateSection = $state<HTMLElement | null>(null);
+  let terminalSection = $state<HTMLElement | null>(null);
+
+  // 打开设置时探测一次本机终端类型（外壳缓存结果，重复打开不再探测）。
+  onMount(() => onLoadTerminalProfiles());
+
+  /** 设置里的默认终端已不在本机时如实说明，启动时后端会退回平台默认。 */
+  let terminalProfileMissing = $derived(
+    Boolean(terminalPrefs.profile) &&
+      terminalProfiles.length > 0 &&
+      !terminalProfiles.some((profile) => profile.id === terminalPrefs.profile),
+  );
+  let terminalSelected = $derived(
+    terminalProfiles.find((profile) => profile.id === terminalPrefs.profile) ?? terminalProfiles[0] ?? null,
+  );
+
+  function setTerminalProfile(id: string) {
+    onTerminalPrefs({ ...terminalPrefs, profile: id || null });
+  }
+
+  function stepTerminalFont(delta: number) {
+    onTerminalPrefs({ ...terminalPrefs, fontSize: clampFontSize(terminalPrefs.fontSize + delta) });
+  }
 
   /* 诊断入口要真的落到运行环境分区：Modal 的首焦点读 [data-autofocus]，
      这里再补一次滚动，避免那一块在 modal 滚动区之外。 */
   $effect(() => {
-    if (section !== "runtime" && section !== "update") return;
-    const target = section === "update" ? updateSection : runtimeSection;
+    if (section !== "runtime" && section !== "update" && section !== "terminal") return;
+    const target = section === "update" ? updateSection : section === "terminal" ? terminalSection : runtimeSection;
     if (!target || typeof target.scrollIntoView !== "function") return;
     target.scrollIntoView({ block: "start" });
   });
@@ -285,6 +317,67 @@
           onchange={(event) => onFilesView((event.currentTarget as HTMLInputElement).checked)}
         />
       </label>
+    </div>
+  </section>
+
+  <section
+    class="settings-section"
+    data-settings-section="terminal"
+    tabindex="-1"
+    data-autofocus={section === "terminal" ? "" : undefined}
+    bind:this={terminalSection}
+  >
+    <h2>终端</h2>
+    <div class="settings-group">
+      <div class="settings-row">
+        <span class="settings-label">
+          默认终端<small>新建终端时使用；底部终端的「▾」菜单里仍可临时选择其他类型</small>
+          {#if terminalSelected}
+            <span class="settings-terminal-path" title={terminalSelected.path}>{terminalSelected.path}</span>
+          {/if}
+        </span>
+        <select
+          class="select settings-terminal-select"
+          aria-label="默认终端"
+          data-settings-terminal-profile
+          value={terminalProfileMissing ? "" : (terminalPrefs.profile ?? "")}
+          onchange={(event) => setTerminalProfile((event.currentTarget as HTMLSelectElement).value)}
+        >
+          <option value="">自动{terminalProfiles[0] ? `（${terminalProfiles[0].label}）` : ""}</option>
+          {#each terminalProfiles as profile (profile.id)}
+            <option value={profile.id}>{profile.label}</option>
+          {/each}
+        </select>
+      </div>
+      {#if terminalProfileMissing}
+        <p class="settings-note" role="status">之前选择的终端在本机已不可用，新建终端会使用平台默认。</p>
+      {/if}
+      <div class="settings-row">
+        <span class="settings-label">字号<small>终端里也可以用 Ctrl/⌘ 加 = 、- 、0 缩放与还原</small></span>
+        <div class="settings-stepper" role="group" aria-label="终端字号">
+          <button
+            type="button"
+            class="icon-btn sm"
+            aria-label="减小终端字号"
+            title={terminalPrefs.fontSize <= TERMINAL_FONT_MIN ? "已是最小字号" : "减小字号"}
+            disabled={terminalPrefs.fontSize <= TERMINAL_FONT_MIN}
+            onclick={() => stepTerminalFont(-1)}
+          >
+            <Icon name="minus" size={12} />
+          </button>
+          <output aria-live="polite">{terminalPrefs.fontSize} px</output>
+          <button
+            type="button"
+            class="icon-btn sm"
+            aria-label="增大终端字号"
+            title={terminalPrefs.fontSize >= TERMINAL_FONT_MAX ? "已是最大字号" : "增大字号"}
+            disabled={terminalPrefs.fontSize >= TERMINAL_FONT_MAX}
+            onclick={() => stepTerminalFont(1)}
+          >
+            <Icon name="plus" size={12} />
+          </button>
+        </div>
+      </div>
     </div>
   </section>
 

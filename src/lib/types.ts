@@ -514,6 +514,8 @@ export interface SettingsDto {
   branchGroups?: boolean;
   /** 左栏是否显示「文件」视图；旧响应缺省时按显示处理。 */
   filesView?: boolean;
+  /** 终端偏好；旧响应缺省时按平台默认与 13 号字处理。 */
+  terminal?: TerminalPrefs;
 }
 
 export interface RepoChanged {
@@ -939,6 +941,9 @@ export interface UndoResult {
 export interface TerminalSnapshot {
   sessionId: string;
   repoPath: string;
+  /** 终端类型 id 与显示名（后端探测结果）。旧数据缺省时界面按 shell 文件名显示。 */
+  profile?: string;
+  label?: string;
   shell: string;
   cwd: string;
   running: boolean;
@@ -969,6 +974,19 @@ export interface TerminalActivity {
 
 export interface TerminalCloseRequested {
   sessions: TerminalActivity[];
+}
+
+/** 本机可用的终端类型；`path` 只用于在设置里展示。 */
+export interface TerminalProfile {
+  id: string;
+  label: string;
+  path: string;
+}
+
+/** 终端偏好：默认终端类型（null 表示平台默认）与字号。 */
+export interface TerminalPrefs {
+  profile?: string | null;
+  fontSize: number;
 }
 
 export interface DiscardFilePlan {

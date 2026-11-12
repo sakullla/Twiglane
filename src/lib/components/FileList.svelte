@@ -459,13 +459,24 @@
     </div>
   {/if}
   {#if onToggleReview || reviewTotal > 0}
+    {@const ratio = reviewTotal > 0 ? Math.min(1, reviewReviewed / reviewTotal) : 0}
+    {@const done = reviewTotal > 0 && reviewReviewed >= reviewTotal}
     <span
       class="review-count"
+      class:done
       role="status"
       aria-label={`已审阅 ${reviewReviewed} 个，共 ${reviewTotal} 个${taskMode ? "任务文件" : "改动文件"}`}
       title="已审阅数是本地人工进度，不代表批准、提交或 Cliora 结果"
     >
-      <Icon name="check-circle" size={13} />{reviewReviewed}/{reviewTotal}
+      {#if done}
+        <Icon name="check-circle" size={13} />
+      {:else}
+        <!-- 进度环：一眼看出还剩多少，比纯数字更容易在连续审阅时感知推进。 -->
+        <svg class="review-ring" width="13" height="13" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <circle cx="8" cy="8" r="6" pathLength="100" />
+          {#if ratio > 0}<circle class="review-ring-fill" cx="8" cy="8" r="6" pathLength="100" stroke-dasharray={`${ratio * 100} 100`} />{/if}
+        </svg>
+      {/if}{reviewReviewed}/{reviewTotal}
     </span>
   {/if}
   {#if onHideReviewed}
@@ -489,8 +500,12 @@
 {/if}
 {#if reviewNav && reviewNav.total > 0 && reviewNav.remaining === 0 && rows.length > 0}
   <!-- 队尾/全部完成的下一步：隐藏已审阅，或按真实暂存范围提交；都不改任务范围。 -->
-  <p class="file-tree-status" role="status">
+  <p class="file-tree-status review-done" role="status">
+    <Icon name="check-circle" size={13} />
     <span>{ALL_REVIEWED}</span>
+    {#if onHideReviewed && !hideReviewed}
+      <button type="button" class="btn btn-ghost btn-sm" onclick={() => onHideReviewed?.(true)}>收起已审阅</button>
+    {/if}
   </p>
 {:else if reviewNav && reviewNav.total === 0 && query.trim() === ""}
   <p class="file-tree-status" role="status"><span>{NO_REVIEW_FILES}。</span></p>

@@ -32,6 +32,8 @@
     onOpenDefault?: (path: string) => void;
     /** 复制文本到剪贴板：由 App 的 copyText 给出成功提示与失败可见错误。 */
     onCopyPath?: (text: string, what: string) => void;
+    /** 文件树「插入路径到终端」：外壳负责展开终端并换成完整路径。 */
+    onInsertToTerminal?: (paths: string[]) => void;
     /** 仓库相对路径拼成完整路径（仅用于「复制完整路径」文本）。 */
     toAbsolute?: (relative: string) => string;
     onNav: (nav: FileNavState | null) => void;
@@ -60,6 +62,7 @@
     onReveal,
     onOpenDefault,
     onCopyPath,
+    onInsertToTerminal,
     toAbsolute,
     onNav,
     paneHead,
@@ -254,6 +257,7 @@
         {onReveal}
         {onOpenDefault}
         {onCopyPath}
+        {onInsertToTerminal}
         {toAbsolute}
         {hasChange}
         onViewDiff={viewDiff}

@@ -63,6 +63,8 @@
     onOpenDefault?: (path: string) => void;
     /** 复制一段文本到剪贴板：由 App 的 copyText 给出成功提示与失败可见错误，不再静默吞错。 */
     onCopyPath?: (text: string, what: string) => void;
+    /** 把仓库相对路径插入当前终端（加引号、不回车）；由外壳展开终端并换成完整路径。 */
+    onInsertToTerminal?: (paths: string[]) => void;
     /** 把仓库相对路径拼成完整路径（仅供「复制完整路径」文本用，不用于系统打开）。 */
     toAbsolute?: (relative: string) => string;
     /** 一个文件是否在当前改动集：有改动才显示「查看改动」。 */
@@ -103,6 +105,7 @@
     onReveal,
     onOpenDefault,
     onCopyPath,
+    onInsertToTerminal,
     toAbsolute,
     hasChange,
     onViewDiff,
@@ -283,6 +286,17 @@
     ];
   }
 
+  function terminalEntry(paths: string[], deleted = false): ContextMenuEntry[] {
+    if (!onInsertToTerminal) return [];
+    return [{
+      id: "insert-terminal",
+      label: paths.length > 1 ? "插入所选路径到终端" : "插入路径到终端",
+      icon: "terminal",
+      disabledReason: deleted ? "文件已删除，工作区里没有它" : undefined,
+      run: () => onInsertToTerminal?.(paths),
+    }];
+  }
+
   function copySelected(absolute = false): void {
     if (!onCopyPath || selectedRows.length === 0) return;
     const paths = selectedRows.map((row) => absolute && toAbsolute ? toAbsolute(row.path) : row.path);
@@ -299,6 +313,7 @@
     if (onReveal) {
       entries.push({ id: "reveal-selected", label: "在系统文件管理器中显示所选项目", icon: "folder-open", run: revealSelected });
     }
+    entries.push(...terminalEntry(selectedRows.map((row) => row.path)));
     if (onCopyPath) {
       entries.push({ separator: true });
       entries.push({ id: "copy-selected-rel", label: "复制所选相对路径", icon: "copy", run: () => copySelected() });
@@ -333,6 +348,11 @@
           run: () => onReveal?.(row.path),
         });
       }
+      const terminal = terminalEntry([row.path]);
+      if (terminal.length > 0) {
+        if (!onReveal) entries.push({ separator: true });
+        entries.push(...terminal);
+      }
       const copies = copyEntries(row, "复制目录名");
       if (copies.length > 0) {
         entries.push({ separator: true });
@@ -366,6 +386,11 @@
           run: () => onOpenDefault?.(row.path),
         });
       }
+    }
+    const terminal = terminalEntry([row.path], row.deleted);
+    if (terminal.length > 0) {
+      if (!onReveal && !onOpenDefault) entries.push({ separator: true });
+      entries.push(...terminal);
     }
     const copies = copyEntries(row, "复制文件名");
     if (copies.length > 0) {

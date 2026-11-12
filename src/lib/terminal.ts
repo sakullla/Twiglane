@@ -173,6 +173,63 @@ export function readTerminalTheme(read: (token: string) => string): TerminalThem
   return theme;
 }
 
+/* ---------------------------------------------------------------- 查找 */
+
+export interface TerminalFindOptions {
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  regex: boolean;
+}
+
+/** 查找结果：`index` 从 0 开始，-1 表示有匹配但还没定位到当前项（或超出加亮上限）。 */
+export interface TerminalFindResult {
+  index: number;
+  count: number;
+}
+
+/** 搜索插件最多加亮的匹配数；超过时 xterm 给出的计数就是上限本身。 */
+export const TERMINAL_FIND_LIMIT = 1000;
+
+/** 正则模式下的查询能否编译；不能时不交给 xterm，直接在查找条里说明。 */
+export function terminalFindProblem(query: string, options: Pick<TerminalFindOptions, "regex">): string | null {
+  if (!options.regex || !query) return null;
+  try {
+    new RegExp(query);
+    return null;
+  } catch {
+    return "正则无效";
+  }
+}
+
+/** 查找条右侧的计数：「3/12」「无结果」「1000+ 处」；还没查或没有计数时返回空串。 */
+export function terminalFindSummary(query: string, result: TerminalFindResult | null, miss: boolean): string {
+  if (!query) return "";
+  if (miss || (result && result.count === 0)) return "无结果";
+  if (!result) return "";
+  if (result.count >= TERMINAL_FIND_LIMIT) {
+    return result.index >= 0 ? `${result.index + 1}/${TERMINAL_FIND_LIMIT}+` : `${TERMINAL_FIND_LIMIT}+ 处`;
+  }
+  return result.index >= 0 ? `${result.index + 1}/${result.count}` : `${result.count} 处`;
+}
+
+/** 匹配加亮的颜色（xterm 要求 #RRGGBB），随主题令牌变化；读不到时用中性的黄色系。 */
+export function terminalFindDecorations(read: (token: string) => string) {
+  const pick = (token: string, fallback: string) => {
+    const value = read(token).trim();
+    return /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
+  };
+  const match = pick("--term-find-match", "#5a4a1f");
+  const active = pick("--term-find-active", "#e8c072");
+  return {
+    matchBackground: match,
+    matchBorder: match,
+    matchOverviewRuler: match,
+    activeMatchBackground: pick("--term-find-active-bg", match),
+    activeMatchBorder: active,
+    activeMatchColorOverviewRuler: active,
+  };
+}
+
 /* ---------------------------------------------------------------- 布局 */
 
 /** 一个标签页：并排的若干终端会话。`name` 是使用者改过的名字，null 时按终端类型显示。 */

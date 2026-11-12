@@ -240,6 +240,10 @@
   --term-bright-magenta: #9446d3;
   --term-bright-cyan: #107c88;
   --term-bright-white: #3e4048;
+  /* 终端查找加亮（#RRGGBB，xterm 不接受透明度）：其余匹配淡底，当前匹配加深并描边。 */
+  --term-find-match: #f6e7b8;
+  --term-find-active-bg: #f0d27c;
+  --term-find-active: #956300;
 }
 
 /* 深色主题配色（键集合必须与上方浅色块一致） */
@@ -359,4 +363,7 @@
   --term-bright-magenta: #d9b8ff;
   --term-bright-cyan: #9ae3ea;
   --term-bright-white: #f2f3f7;
+  --term-find-match: #3d3520;
+  --term-find-active-bg: #6b5420;
+  --term-find-active: #e8c072;
 }

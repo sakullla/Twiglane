@@ -2614,6 +2614,11 @@ describe("文件列表的目录分组和行数", () => {
     // 二：全部已审阅但不隐藏，给出下一步而不是空白。
     await view.rerender({ ...props, hideReviewed: false });
     expect(document.body.textContent).toContain("所有文件都已审阅");
+    // 全部审阅完：计数换成完成态，并直接给出「收起已审阅」。
+    expect(document.querySelector(".review-count.done")).toBeTruthy();
+    onHideReviewed.mockClear();
+    await fireEvent.click(screen.getByRole("button", { name: "收起已审阅" }));
+    expect(onHideReviewed).toHaveBeenCalledWith(true);
 
     // 三：筛选没有结果，下一步是清掉筛选。
     await view.rerender({ ...props, hideReviewed: false, query: "zzz" });

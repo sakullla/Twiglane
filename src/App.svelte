@@ -276,6 +276,7 @@
     dragOver: (x: number, y: number) => boolean;
     dragEnd: () => void;
     dropPaths: (paths: string[], x: number, y: number) => boolean;
+    insertPaths: (paths: string[]) => Promise<boolean>;
   } | null>(null);
   /**
    * 原生关窗被活动终端拦下后的确认层。取消保留进程，确认先等待 terminateTerminals 成功，
@@ -2935,6 +2936,14 @@
     return `${root.replace(/[\\/]+$/, "")}${separator}${relative.split("/").join(separator)}`;
   }
 
+  /** 文件树「插入到终端」：展开终端，按终端类型加引号插入完整路径，不回车。 */
+  async function insertIntoTerminal(relatives: string[]) {
+    if (!opened || relatives.length === 0) return;
+    terminalOpen = true;
+    await tick();
+    await terminalPanel?.insertPaths(relatives.map(absolutePath));
+  }
+
   async function revealInFolder(relative: string) {
     const current = opened;
     if (!current) return;
@@ -4218,6 +4227,7 @@
               onReveal={(path) => void revealInFolder(path)}
               onOpenDefault={(path) => void openWithDefault(path)}
               onCopyPath={(text, what) => void copyText(text, what)}
+              onInsertToTerminal={(paths) => void insertIntoTerminal(paths)}
               toAbsolute={absolutePath}
               onNav={(nav) => (filesNav = nav)}
               {paneHead}

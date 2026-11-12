@@ -10,7 +10,10 @@ import {
   historyAuthorSuggestions,
   historyConditions,
   historyDayBound,
+  historyFilterChips,
   historyStatus,
+  hashMatchLength,
+  matchParts,
   mergeAbortAvailable,
   parentCaption,
   preferredCommitFile,
@@ -136,6 +139,49 @@ function panelProps(filePath: string | null = null) {
     onClearFile: () => {},
   };
 }
+
+describe("历史搜索命中与筛选标签", () => {
+  it("不区分大小写标出每一处命中，空词或无命中返回整段", () => {
+    expect(matchParts("Fix fix FIX", "fix")).toEqual([
+      { text: "Fix", hit: true },
+      { text: " ", hit: false },
+      { text: "fix", hit: true },
+      { text: " ", hit: false },
+      { text: "FIX", hit: true },
+    ]);
+    expect(matchParts("修复合并冲突后状态未刷新", " 状态 ")).toEqual([
+      { text: "修复合并冲突后", hit: false },
+      { text: "状态", hit: true },
+      { text: "未刷新", hit: false },
+    ]);
+    expect(matchParts("summary", "")).toEqual([{ text: "summary", hit: false }]);
+    expect(matchParts("summary", "body-only")).toEqual([{ text: "summary", hit: false }]);
+    // 字面匹配：正则元字符不被解释。
+    expect(matchParts("a.b axb", ".")).toEqual([
+      { text: "a", hit: false },
+      { text: ".", hit: true },
+      { text: "b axb", hit: false },
+    ]);
+  });
+
+  it("只有至少 4 位的十六进制前缀才加亮哈希，长度不超过显示的缩写", () => {
+    const oid = "abcdef1234567890abcdef1234567890abcdef12";
+    expect(hashMatchLength(oid, "ABCD", 7)).toBe(4);
+    expect(hashMatchLength(oid, "abcdef1234", 7)).toBe(7);
+    expect(hashMatchLength(oid, "abc", 7)).toBe(0);
+    expect(hashMatchLength(oid, "bcde", 7)).toBe(0);
+    expect(hashMatchLength(oid, "fix bug", 7)).toBe(0);
+  });
+
+  it("生效条件按作者、日期、路径排列，空值不列出", () => {
+    expect(historyFilterChips({ author: " Ada ", path: "", since: "2024-01-02", until: "" })).toEqual([
+      { kind: "author", label: "Ada", title: "作者：Ada" },
+      { kind: "since", label: "2024-01-02 起", title: "开始日期：2024-01-02（含当天）" },
+    ]);
+    expect(historyFilterChips({ author: "", path: "src/lib", since: "", until: "2024-02-01" }).map((chip) => chip.kind)).toEqual(["until", "path"]);
+    expect(historyFilterChips({ author: "", path: " ", since: "", until: "" })).toEqual([]);
+  });
+});
 
 describe("历史文案", () => {
   it("区分空仓库、无匹配和无文件历史", () => {
@@ -592,15 +638,66 @@ describe("历史面板", () => {
         head: "main",
       });
       historyPage.mockClear();
-      await fireEvent.click(screen.getByRole("button", { name: "清除作者" }));
+      // 面板里一键清掉作者、日期与路径；搜索词单独清除。
+      await fireEvent.click(screen.getByRole("button", { name: /清除作者、日期与路径/ }));
       await fireEvent.click(screen.getByRole("button", { name: "清除说明或哈希" }));
-      await fireEvent.click(screen.getByRole("button", { name: "清除开始日期" }));
-      await fireEvent.click(screen.getByRole("button", { name: "清除结束日期" }));
       await vi.advanceTimersByTimeAsync(0);
       expect(await screen.findByText("当前分支还没有提交。范围是当前分支。")).toBeTruthy();
       expect(screen.getByText(/生效条件：范围：当前分支 main/)).toBeTruthy();
       expect(screen.getByText(/仓库没有被修改/)).toBeTruthy();
       expect(historyPage).toHaveBeenCalledWith("/repo", "", 0, 3, 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("搜索词在提交说明与哈希里加亮，收起筛选后生效条件成标签可逐项清除，计数改为匹配", async () => {
+    vi.useFakeTimers();
+    try {
+      historyPage.mockResolvedValue({
+        generation: 3,
+        query: "",
+        offset: 0,
+        pageSize: 100,
+        hasMore: false,
+        state: "ok",
+        commits: [commit(0, { summary: "Fix sync state" })],
+        scope: "current",
+        branches: ["main"],
+        head: "main",
+      });
+      render(HistoryPanel, { props: panelProps() });
+      await vi.runAllTimersAsync();
+      expect(screen.getByText("1 条提交")).toBeTruthy();
+      await fireEvent.input(screen.getByLabelText("搜索说明或提交哈希"), { target: { value: "sync" } });
+      await vi.advanceTimersByTimeAsync(300);
+      const row = screen.getByRole("option", { name: /Fix sync state/ });
+      expect([...row.querySelectorAll(".hr-summary mark")].map((mark) => mark.textContent)).toEqual(["sync"]);
+      expect(screen.getByText("1 条匹配")).toBeTruthy();
+
+      await fireEvent.click(screen.getByRole("button", { name: "更多筛选" }));
+      await fireEvent.input(screen.getByLabelText("作者"), { target: { value: "Ada" } });
+      await fireEvent.input(screen.getByLabelText("开始日期"), { target: { value: "2024-01-02" } });
+      await vi.advanceTimersByTimeAsync(300);
+      // 面板展开时不重复列标签；收起后标签替代面板说明哪些条件在生效。
+      expect(screen.queryByRole("list", { name: "生效的筛选条件" })).toBeNull();
+      await fireEvent.click(screen.getByRole("button", { name: "更多筛选（已生效 2 项）" }));
+      const chips = screen.getByRole("list", { name: "生效的筛选条件" });
+      expect(within(chips).getAllByRole("listitem").map((item) => item.textContent?.trim())).toEqual(["Ada", "2024-01-02 起"]);
+
+      historyPage.mockClear();
+      await fireEvent.click(within(chips).getByRole("button", { name: "清除作者：Ada" }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(historyPage).toHaveBeenLastCalledWith("/repo", "sync", 0, 3, 1, { since: historyDayBound("2024-01-02", false) });
+      expect(screen.getByRole("button", { name: "更多筛选（已生效 1 项）" })).toBeTruthy();
+
+      // 底栏「清除筛选」一次清掉搜索词与其余条件，计数回到「条提交」。
+      historyPage.mockClear();
+      await fireEvent.click(screen.getByRole("button", { name: /清除筛选/ }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(historyPage).toHaveBeenLastCalledWith("/repo", "", 0, 3, 1);
+      expect(screen.queryByRole("list", { name: "生效的筛选条件" })).toBeNull();
+      expect(screen.getByText("1 条提交")).toBeTruthy();
     } finally {
       vi.useRealTimers();
     }

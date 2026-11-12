@@ -288,6 +288,21 @@ describe("目录树右键菜单", () => {
     expect(props.onToggle).not.toHaveBeenCalled();
   });
 
+  it("插入路径到终端：文件与目录都有入口，传仓库相对路径；没有终端回调时不显示", async () => {
+    const onInsertToTerminal = vi.fn();
+    const view = render(FileTree, { props: { ...baseProps(), onInsertToTerminal } as never });
+    let menu = await openMenu("src/lib/components/Button.svelte");
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: /插入路径到终端/ }));
+    expect(onInsertToTerminal).toHaveBeenCalledWith(["src/lib/components/Button.svelte"]);
+    menu = await openMenu("src/lib/components");
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: /插入路径到终端/ }));
+    expect(onInsertToTerminal).toHaveBeenLastCalledWith(["src/lib/components"]);
+    view.unmount();
+    render(FileTree, { props: baseProps() as never });
+    menu = await openMenu("src/lib/components/Button.svelte");
+    expect(labels(menu).some((text) => text.includes("终端"))).toBe(false);
+  });
+
   it("文件菜单分组：打开、文件历史、系统定位、用默认程序打开、三种路径复制", async () => {
     render(FileTree, { props: baseProps() as never });
     const menu = await openMenu("src/lib/components/Button.svelte");

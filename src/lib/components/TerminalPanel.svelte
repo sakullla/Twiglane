@@ -51,7 +51,11 @@
     sessionCount,
     shellLabel,
     splitGroup,
+    terminalFindProblem,
+    terminalFindSummary,
     terminalStateName,
+    type TerminalFindOptions,
+    type TerminalFindResult,
     type TerminalKeyAction,
     type TerminalLayout,
   } from "../terminal";
@@ -114,9 +118,16 @@
   let maximized = $state(false);
   let height = $state<number | null>(loadHeight());
   let menu = $state<ContextMenuRequest | null>(null);
+  /** 插入路径时等待终端就绪的上限：覆盖首次加载 xterm 与启动 shell。 */
+  const INSERT_WAIT_MS = 8000;
   let findOpen = $state(false);
   let findQuery = $state("");
   let findMiss = $state(false);
+  /** 大小写、全词、正则三个开关在面板内共用，关掉查找条也保留，下次打开沿用。 */
+  let findOptions = $state<TerminalFindOptions>({ caseSensitive: false, wholeWord: false, regex: false });
+  let findResult = $state<TerminalFindResult | null>(null);
+  let findProblem = $derived(terminalFindProblem(findQuery, findOptions));
+  let findSummary = $derived(findProblem ?? terminalFindSummary(findQuery, findResult, findMiss));
   let renaming = $state<string | null>(null);
   let renameValue = $state("");
   let panel: HTMLElement;
@@ -578,22 +589,47 @@
 
   function runFind(direction: "next" | "prev", incremental = false) {
     const paneApi = focusedApi();
-    if (!paneApi || !findQuery) {
+    if (!paneApi || !findQuery || findProblem) {
       findMiss = false;
+      findResult = null;
+      if (!findQuery || findProblem) paneApi?.clearFind();
       return;
     }
-    findMiss = !paneApi.find(findQuery, direction, incremental);
+    findMiss = !paneApi.find(findQuery, direction, { ...findOptions, incremental });
+  }
+
+  /** 只接收当前聚焦终端的计数：并排的其他终端不会改写查找条上的数字。 */
+  function onFindResults(sessionId: string, result: TerminalFindResult) {
+    if (!findOpen || sessionId !== layout.focused) return;
+    findResult = result;
+    if (result.count > 0) findMiss = false;
+  }
+
+  function toggleFindOption(key: keyof TerminalFindOptions) {
+    findOptions = { ...findOptions, [key]: !findOptions[key] };
+    findResult = null;
+    runFind("next", true);
+    findInput?.focus();
   }
 
   function closeFind() {
     findOpen = false;
     findMiss = false;
+    findResult = null;
     const paneApi = focusedApi();
     paneApi?.clearFind();
     paneApi?.focus();
   }
 
   function onFindKey(event: KeyboardEvent) {
+    if (event.altKey && !event.ctrlKey && !event.metaKey) {
+      const option = ({ c: "caseSensitive", w: "wholeWord", r: "regex" } as const)[event.key.toLowerCase()];
+      if (option) {
+        event.preventDefault();
+        toggleFindOption(option);
+        return;
+      }
+    }
     if (event.key === "Enter") {
       event.preventDefault();
       runFind(event.shiftKey ? "prev" : "next");
@@ -640,6 +676,30 @@
     const text = formatDroppedPaths(paths, infos[target]?.profile ?? "");
     if (text) paneApis.get(target)?.insert(text);
     return true;
+  }
+
+  /**
+   * 从文件树等入口把路径插入当前终端（不回车）：面板由外壳展开，这里等终端就绪后插入。
+   * 还没有终端时先按展开流程启动一个；启动失败或超时如实说明，返回 false。
+   */
+  export async function insertPaths(paths: string[]): Promise<boolean> {
+    const repo = path;
+    if (!repo || paths.length === 0) return false;
+    const deadline = Date.now() + INSERT_WAIT_MS;
+    while (Date.now() < deadline) {
+      if (path !== repo) return false;
+      if (bootErrors[repo]) return false;
+      const sessionId = layout.focused;
+      const paneApi = sessionId ? paneApis.get(sessionId) : null;
+      if (sessionId && paneApi?.isAttached()) {
+        const text = formatDroppedPaths(paths, infos[sessionId]?.profile ?? "");
+        // 插入失败（终端已退出）时由那一格就地说明并给出重新启动。
+        return text ? paneApi.insert(text) : false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    actionError = "终端还没有准备好，路径没有插入；请稍后重试。";
+    return false;
   }
 
   /* ------------------------------------------------------------ 高度 */
@@ -895,6 +955,7 @@
             onContextMenu={paneMenu}
             onRestart={restartSession}
             onClosePane={(id) => void closeSession(id)}
+            {onFindResults}
             register={registerPane}
           />
         {/each}
@@ -919,11 +980,23 @@
           oninput={() => runFind("next", true)}
           onkeydown={onFindKey}
         />
-        {#if findMiss}<span class="terminal-find-miss" role="status">无结果</span>{/if}
-        <button type="button" class="icon-btn sm" aria-label="上一个匹配" title="上一个（Shift+Enter）" disabled={!findQuery} onclick={() => runFind("prev")}>
+        <span
+          class="terminal-find-count"
+          class:miss={Boolean(findProblem) || findSummary === "无结果"}
+          role="status"
+          aria-live="polite"
+          data-terminal-find-count
+        >{findSummary}</span>
+        <span class="terminal-find-options" role="group" aria-label="查找选项">
+          <button type="button" class="terminal-find-option" aria-pressed={findOptions.caseSensitive} aria-label="区分大小写" title="区分大小写（Alt+C）" onclick={() => toggleFindOption("caseSensitive")}>Aa</button>
+          <button type="button" class="terminal-find-option" aria-pressed={findOptions.wholeWord} aria-label="全词匹配" title="全词匹配（Alt+W）" onclick={() => toggleFindOption("wholeWord")}><span class="word">ab</span></button>
+          <button type="button" class="terminal-find-option" aria-pressed={findOptions.regex} aria-label="正则表达式" title="正则表达式（Alt+R）" onclick={() => toggleFindOption("regex")}>.*</button>
+        </span>
+        <span class="terminal-find-sep" aria-hidden="true"></span>
+        <button type="button" class="icon-btn sm" aria-label="上一个匹配" title="上一个（Shift+Enter）" disabled={!findQuery || Boolean(findProblem)} onclick={() => runFind("prev")}>
           <Icon name="chevron-up" size={13} />
         </button>
-        <button type="button" class="icon-btn sm" aria-label="下一个匹配" title="下一个（Enter）" disabled={!findQuery} onclick={() => runFind("next")}>
+        <button type="button" class="icon-btn sm" aria-label="下一个匹配" title="下一个（Enter）" disabled={!findQuery || Boolean(findProblem)} onclick={() => runFind("next")}>
           <Icon name="chevron-down" size={13} />
         </button>
         <button type="button" class="icon-btn sm" aria-label="关闭查找" title="关闭查找（Esc）" onclick={closeFind}>

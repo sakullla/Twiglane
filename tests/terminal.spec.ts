@@ -87,12 +87,38 @@ const xtermMock = vi.hoisted(() => {
     onContextLoss() {}
     dispose() {}
   }
-  return { instances, Terminal: FakeTerminal, Addon: FakeAddon };
+  /** 查找插件：记录每次查找的参数，并能像 xterm 一样回报匹配计数。 */
+  const searches: FakeSearch[] = [];
+  class FakeSearch extends FakeAddon {
+    calls: { direction: "next" | "prev"; query: string; options: Record<string, unknown> }[] = [];
+    resultHandlers: ((result: { resultIndex: number; resultCount: number }) => void)[] = [];
+    found = true;
+    constructor() {
+      super();
+      searches.push(this);
+    }
+    override findNext(query?: string, options?: Record<string, unknown>) {
+      this.calls.push({ direction: "next", query: query ?? "", options: options ?? {} });
+      return this.found;
+    }
+    override findPrevious(query?: string, options?: Record<string, unknown>) {
+      this.calls.push({ direction: "prev", query: query ?? "", options: options ?? {} });
+      return this.found;
+    }
+    onDidChangeResults(handler: (result: { resultIndex: number; resultCount: number }) => void) {
+      this.resultHandlers.push(handler);
+      return { dispose() {} };
+    }
+    emit(resultIndex: number, resultCount: number) {
+      for (const handler of this.resultHandlers) handler({ resultIndex, resultCount });
+    }
+  }
+  return { instances, searches, Terminal: FakeTerminal, Addon: FakeAddon, Search: FakeSearch };
 });
 
 vi.mock("@xterm/xterm", () => ({ Terminal: xtermMock.Terminal }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: xtermMock.Addon }));
-vi.mock("@xterm/addon-search", () => ({ SearchAddon: xtermMock.Addon }));
+vi.mock("@xterm/addon-search", () => ({ SearchAddon: xtermMock.Search }));
 vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: xtermMock.Addon }));
 vi.mock("@xterm/addon-unicode11", () => ({ Unicode11Addon: xtermMock.Addon }));
 vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: xtermMock.Addon }));
@@ -173,6 +199,9 @@ import {
   readTerminalTheme,
   formatDroppedPaths,
   quotePathForShell,
+  terminalFindDecorations,
+  terminalFindProblem,
+  terminalFindSummary,
   removeSession,
   replaceSession,
   splitGroup,
@@ -290,6 +319,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.handlers.clear();
   xtermMock.instances.length = 0;
+  xtermMock.searches.length = 0;
   localStorage.clear();
   windowMock.close.mockReset();
   windowMock.close.mockResolvedValue(undefined);
@@ -416,6 +446,35 @@ describe("拖入路径的引号与路径写法", () => {
   it("多个路径空格连接并补一个尾随空格；空列表不插入任何内容", () => {
     expect(formatDroppedPaths(["/a", "/b c"], "bash")).toBe("/a '/b c' ");
     expect(formatDroppedPaths([], "bash")).toBe("");
+  });
+});
+
+describe("终端查找文案", () => {
+  it("计数显示当前项/总数，超出加亮上限时加 +，没有命中写「无结果」", () => {
+    expect(terminalFindSummary("", { index: 0, count: 3 }, false)).toBe("");
+    expect(terminalFindSummary("err", null, false)).toBe("");
+    expect(terminalFindSummary("err", { index: 1, count: 3 }, false)).toBe("2/3");
+    expect(terminalFindSummary("err", { index: -1, count: 3 }, false)).toBe("3 处");
+    expect(terminalFindSummary("err", { index: -1, count: 0 }, false)).toBe("无结果");
+    expect(terminalFindSummary("err", null, true)).toBe("无结果");
+    expect(terminalFindSummary("err", { index: 4, count: 1000 }, false)).toBe("5/1000+");
+    expect(terminalFindSummary("err", { index: -1, count: 1000 }, false)).toBe("1000+ 处");
+  });
+
+  it("只有正则模式才校验表达式", () => {
+    expect(terminalFindProblem("a(b", { regex: true })).toBe("正则无效");
+    expect(terminalFindProblem("a(b", { regex: false })).toBeNull();
+    expect(terminalFindProblem("a+b", { regex: true })).toBeNull();
+    expect(terminalFindProblem("", { regex: true })).toBeNull();
+  });
+
+  it("加亮颜色取主题令牌，非 #RRGGBB 时退回缺省", () => {
+    const tokens: Record<string, string> = { "--term-find-match": " #112233 ", "--term-find-active": "rgba(0,0,0,.5)" };
+    const decorations = terminalFindDecorations((token) => tokens[token] ?? "");
+    expect(decorations.matchBackground).toBe("#112233");
+    expect(decorations.activeMatchBackground).toBe("#112233");
+    expect(decorations.activeMatchBorder).toMatch(/^#[0-9a-f]{6}$/i);
+    expect(decorations.activeMatchBorder).not.toBe("rgba(0,0,0,.5)");
   });
 });
 
@@ -690,6 +749,67 @@ describe("终端面板", () => {
 
     handler(key({ key: "`", code: "Backquote", ctrlKey: true }));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("查找条：显示当前终端的匹配计数，大小写/全词/正则开关随查找下发，无效正则不交给 xterm", async () => {
+    await renderPanel();
+    const term = await waitForTerminal();
+    await waitFor(() => expect(stateOf()).toBe("running"));
+    term.keyHandler!(key({ key: "f", ctrlKey: true }));
+    const input = await waitFor(() => {
+      const found = document.querySelector<HTMLInputElement>("[data-terminal-find]");
+      expect(found).toBeTruthy();
+      return found!;
+    });
+    const search = xtermMock.searches[0];
+    const count = () => document.querySelector("[data-terminal-find-count]")?.textContent?.trim();
+
+    await fireEvent.input(input, { target: { value: "error" } });
+    expect(search.calls.at(-1)).toMatchObject({
+      direction: "next",
+      query: "error",
+      options: { incremental: true, caseSensitive: false, wholeWord: false, regex: false },
+    });
+    expect(search.calls.at(-1)?.options.decorations).toBeTruthy();
+    search.emit(1, 4);
+    await tick();
+    expect(count()).toBe("2/4");
+
+    await fireEvent.click(screen.getByRole("button", { name: "区分大小写" }));
+    expect(screen.getByRole("button", { name: "区分大小写" }).getAttribute("aria-pressed")).toBe("true");
+    expect(search.calls.at(-1)?.options).toMatchObject({ caseSensitive: true });
+    await fireEvent.keyDown(input, { key: "w", altKey: true });
+    expect(screen.getByRole("button", { name: "全词匹配" }).getAttribute("aria-pressed")).toBe("true");
+    expect(search.calls.at(-1)?.options).toMatchObject({ caseSensitive: true, wholeWord: true });
+
+    // 正则模式下无法编译的表达式：就地说明，不调用 xterm，上一/下一个禁用。
+    await fireEvent.click(screen.getByRole("button", { name: "正则表达式" }));
+    const before = search.calls.length;
+    await fireEvent.input(input, { target: { value: "err(" } });
+    expect(search.calls.length).toBe(before);
+    expect(count()).toBe("正则无效");
+    expect((screen.getByRole("button", { name: "下一个匹配" }) as HTMLButtonElement).disabled).toBe(true);
+
+    search.found = false;
+    await fireEvent.input(input, { target: { value: "nothing" } });
+    expect(count()).toBe("无结果");
+
+    // 关闭后再打开：开关保留，计数清空。
+    await fireEvent.keyDown(input, { key: "Escape" });
+    term.keyHandler!(key({ key: "f", ctrlKey: true }));
+    await waitFor(() => expect(document.querySelector("[data-terminal-find]")).toBeTruthy());
+    expect(screen.getByRole("button", { name: "正则表达式" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("插入路径：等终端附着后按类型加引号插入、不回车；还没有终端时先启动一个", async () => {
+    const { view } = await renderPanel();
+    const panel = view.component as unknown as { insertPaths: (paths: string[]) => Promise<boolean> };
+    const inserted = panel.insertPaths(["C:\\work\\my file.txt"]);
+    const term = await waitForTerminal();
+    expect(await inserted).toBe(true);
+    expect(term.pasted.at(-1)).toBe(formatDroppedPaths(["C:\\work\\my file.txt"], "pwsh"));
+    expect(term.pasted.at(-1)).not.toContain("\r");
+    expect(await panel.insertPaths([])).toBe(false);
   });
 
   it("拖入文件：经过时高亮目标终端，放下按终端类型插入带引号的路径且不回车；终端外交还外壳", async () => {

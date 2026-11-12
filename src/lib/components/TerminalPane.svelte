@@ -2,6 +2,7 @@
   import type { Terminal as XTerm } from "@xterm/xterm";
   import type { FitAddon } from "@xterm/addon-fit";
   import type { SearchAddon } from "@xterm/addon-search";
+  import type { TerminalFindOptions, TerminalFindResult } from "../terminal";
 
   /** 面板对单个终端的操作入口：右键菜单、查找条与工具栏都通过它驱动，不直接摸 xterm 实例。 */
   export interface TerminalPaneApi {
@@ -11,9 +12,12 @@
     paste(): Promise<void>;
     /** 把一段文本当作粘贴送进终端（拖入路径用）；终端已退出时返回 false。 */
     insert(text: string): boolean;
+    /** 快照已附着（输出可写）：插入路径前等到这一步，避免把「还在附着」误报成已退出。 */
+    isAttached(): boolean;
     selectAll(): void;
     clear(): void;
-    find(query: string, direction: "next" | "prev", incremental?: boolean): boolean;
+    /** 查找并定位；匹配计数随后经 `onFindResults` 送回（输出变化时也会更新）。 */
+    find(query: string, direction: "next" | "prev", options?: Partial<TerminalFindOptions> & { incremental?: boolean }): boolean;
     clearFind(): void;
   }
 
@@ -74,6 +78,8 @@
   import { normalizeError } from "../errors";
   import {
     readTerminalTheme,
+    terminalFindDecorations,
+    TERMINAL_FIND_LIMIT,
     stripWindowsTerminalReplies,
     terminalEventApplies,
     terminalKeyAction,
@@ -107,6 +113,8 @@
     onContextMenu: (sessionId: string, event: MouseEvent) => void;
     onRestart: (sessionId: string) => Promise<void>;
     onClosePane: (sessionId: string) => void;
+    /** 查找匹配数变化（含输出刷新后的重算）。 */
+    onFindResults?: (sessionId: string, result: TerminalFindResult) => void;
     register: (sessionId: string, api: TerminalPaneApi | null) => void;
   }
 
@@ -126,6 +134,7 @@
     onContextMenu,
     onRestart,
     onClosePane,
+    onFindResults,
     register,
   }: Props = $props();
 
@@ -236,7 +245,10 @@
         theme: readTerminalTheme(cssValue),
       });
       const fitAddon = new loaded.FitAddon();
-      const searchAddon = new loaded.SearchAddon();
+      const searchAddon = new loaded.SearchAddon({ highlightLimit: TERMINAL_FIND_LIMIT });
+      searchAddon.onDidChangeResults?.(({ resultIndex, resultCount }) => {
+        onFindResults?.(sessionId, { index: resultIndex, count: resultCount });
+      });
       instance.loadAddon(fitAddon);
       instance.loadAddon(searchAddon);
       instance.loadAddon(
@@ -465,14 +477,22 @@
       term.focus();
       return true;
     },
+    isAttached: () => attached,
     selectAll: () => term?.selectAll(),
     clear: () => {
       term?.clear();
       term?.focus();
     },
-    find: (query, direction, incremental = false) => {
+    find: (query, direction, settings = {}) => {
       if (!search || !query) return false;
-      const options = { incremental, caseSensitive: false };
+      const options = {
+        incremental: settings.incremental ?? false,
+        caseSensitive: settings.caseSensitive ?? false,
+        wholeWord: settings.wholeWord ?? false,
+        regex: settings.regex ?? false,
+        // 加亮全部匹配：xterm 只在开了加亮时才回报计数，也让人一眼看到所有命中位置。
+        decorations: terminalFindDecorations(cssValue),
+      };
       return direction === "prev" ? search.findPrevious(query, options) : search.findNext(query, options);
     },
     clearFind: () => {

@@ -323,7 +323,28 @@
   border: 0;
   outline: none;
 }
-.terminal-find-miss { font-size: var(--text-xs); color: var(--danger-text); white-space: nowrap; }
+/* 计数固定最小宽度：数字变化时右侧按钮不跳动。 */
+.terminal-find-count { min-width: 4.5em; font-size: var(--text-xs); color: var(--fg-muted); text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.terminal-find-count:empty { visibility: hidden; }
+.terminal-find-count.miss { color: var(--danger-text); }
+.terminal-find-options { display: inline-flex; gap: 1px; }
+.terminal-find-option {
+  display: grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 3px;
+  border-radius: var(--radius-sm);
+  color: var(--fg-subtle);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+}
+.terminal-find-option .word { text-decoration: underline; text-underline-offset: 2px; }
+.terminal-find-option:hover { background: var(--hover); color: var(--fg); }
+.terminal-find-option[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-text); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+.terminal-find-option:focus-visible { outline: 2px solid var(--focus); outline-offset: -1px; }
+.terminal-find-sep { width: 1px; height: 16px; margin: 0 2px; background: var(--border); }
 
 @media (max-height: 640px) {
   .terminal-panel { height: 180px; min-height: 120px; }

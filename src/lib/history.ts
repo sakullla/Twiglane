@@ -55,6 +55,58 @@ export function historyConditions(filters: HistoryConditionInput): string {
   return `生效条件：${parts.join("；")}。仓库没有被修改。`;
 }
 
+export interface TextPart {
+  text: string;
+  hit: boolean;
+}
+
+/**
+ * 把提交说明按搜索词拆段，用于在列表里标出命中。与后端 `git log -i --fixed-strings` 一致：
+ * 不区分大小写、按字面匹配、标出每一处。只在说明正文里命中（摘要里没有）时返回整段不加亮。
+ */
+export function matchParts(text: string, query: string): TextPart[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [{ text, hit: false }];
+  const lower = text.toLowerCase();
+  // 小写化可能改变长度（少数 Unicode 字符），这时位置对不上原文，宁可不加亮也不标错。
+  if (lower.length !== text.length) return [{ text, hit: false }];
+  const parts: TextPart[] = [];
+  let from = 0;
+  for (let at = lower.indexOf(needle); at >= 0; at = lower.indexOf(needle, from)) {
+    if (at > from) parts.push({ text: text.slice(from, at), hit: false });
+    parts.push({ text: text.slice(at, at + needle.length), hit: true });
+    from = at + needle.length;
+  }
+  if (from < text.length) parts.push({ text: text.slice(from), hit: false });
+  return parts.length > 0 ? parts : [{ text, hit: false }];
+}
+
+/** 搜索词是这条提交哈希的前缀时，缩写里要加亮的字符数；不是哈希前缀返回 0。 */
+export function hashMatchLength(oid: string, query: string, shown: number): number {
+  const needle = query.trim().toLowerCase();
+  if (needle.length < 4 || !/^[0-9a-f]+$/.test(needle)) return 0;
+  return oid.toLowerCase().startsWith(needle) ? Math.min(needle.length, shown) : 0;
+}
+
+export type HistoryFilterKind = "author" | "path" | "since" | "until";
+
+/** 收起「更多筛选」时仍可见的生效条件，逐项可单独清除；文件历史的路径固定，不列出。 */
+export function historyFilterChips(filters: {
+  author: string;
+  path: string;
+  since: string;
+  until: string;
+}): { kind: HistoryFilterKind; label: string; title: string }[] {
+  const chips: { kind: HistoryFilterKind; label: string; title: string }[] = [];
+  const author = filters.author.trim();
+  if (author) chips.push({ kind: "author", label: author, title: `作者：${author}` });
+  if (filters.since) chips.push({ kind: "since", label: `${filters.since} 起`, title: `开始日期：${filters.since}（含当天）` });
+  if (filters.until) chips.push({ kind: "until", label: `至 ${filters.until}`, title: `结束日期：${filters.until}（含当天）` });
+  const path = filters.path.trim();
+  if (path) chips.push({ kind: "path", label: path, title: `路径：${path}` });
+  return chips;
+}
+
 export interface HistoryAuthorSuggestion {
   name: string;
   email: string;

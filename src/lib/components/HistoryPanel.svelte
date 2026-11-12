@@ -10,12 +10,15 @@
     commitLineTotals,
     commitSelectionRange,
     formatAuthoredAt,
+    hashMatchLength,
     HISTORY_RANGE_PREFIX,
     HISTORY_SEARCH_DEBOUNCE_MS,
     historyAuthorSuggestions,
     historyConditions,
     historyDayBound,
+    historyFilterChips,
     historyStatus,
+    matchParts,
     parentCaption,
     commitBodyRest,
     preferredCommitFile,
@@ -397,6 +400,10 @@
   let activeSince = $state("");
   let activeUntil = $state("");
   let activeScope = $state("current");
+  /** 收起时仍列出已生效的作者、日期、路径：不用展开面板也知道列表被什么条件收窄，并能逐项清除。 */
+  let filterChips = $derived(
+    historyFilterChips({ author: activeAuthor, path: filePath ? "" : activePath, since: activeSince, until: activeUntil }),
+  );
   let lastSearchSeed = "";
   let page = $state.raw<{
     generation: number;
@@ -1271,6 +1278,20 @@
     activeUntil = untilDay;
   }
 
+  /** 只清作者、日期、路径：保留搜索词与范围，「更多筛选」面板里的一键清除。 */
+  function clearAdvancedFilters() {
+    author = "";
+    authorOpen = false;
+    authorActive = 0;
+    if (!filePath) pathFilter = "";
+    sinceDay = "";
+    untilDay = "";
+    activeAuthor = "";
+    activePath = pathFilter.trim();
+    activeSince = "";
+    activeUntil = "";
+  }
+
   /** 无匹配时一次清掉全部筛选，回到可读的当前范围。 */
   function clearAllFilters() {
     query = "";
@@ -1765,12 +1786,6 @@
               <label class="history-date-field"><span>开始日期</span><input class="input" type="date" aria-label="开始日期" value={sinceDay} oninput={(event) => setDay("since", event.currentTarget.value)} /></label>
               <label class="history-date-field"><span>结束日期</span><input class="input" type="date" aria-label="结束日期" value={untilDay} oninput={(event) => setDay("until", event.currentTarget.value)} /></label>
             </div>
-            {#if sinceDay || untilDay}
-              <div class="history-filter-row">
-                {#if sinceDay}<button type="button" class="btn btn-ghost btn-sm" onclick={() => clearFilter("since")}>清除开始日期</button>{/if}
-                {#if untilDay}<button type="button" class="btn btn-ghost btn-sm" onclick={() => clearFilter("until")}>清除结束日期</button>{/if}
-              </div>
-            {/if}
             <div class="history-filter-field">
               <label for="history-path">路径 <span>仓库相对路径</span></label>
               <div class="field sm">
@@ -1802,7 +1817,24 @@
                 {/if}
               </div>
             </div>
+            {#if advancedCount > 0}
+              <div class="history-filter-actions">
+                <button type="button" class="btn btn-ghost btn-sm" onclick={clearAdvancedFilters}>
+                  <Icon name="x" size={12} />清除作者、日期与路径
+                </button>
+              </div>
+            {/if}
           </div>
+          {:else if filterChips.length > 0}
+            <ul class="history-filter-chips" aria-label="生效的筛选条件">
+              {#each filterChips as chip (chip.kind)}
+                <li class="history-filter-chip" title={chip.title}>
+                  <Icon name={chip.kind === "author" ? "user" : chip.kind === "path" ? "folder" : "history"} size={11} />
+                  <span class="truncate">{chip.label}</span>
+                  <button type="button" aria-label={`清除${chip.title}`} onclick={() => clearFilter(chip.kind)}><Icon name="x" size={10} /></button>
+                </li>
+              {/each}
+            </ul>
           {/if}
         </div>
       </div>
@@ -1919,6 +1951,8 @@
             {#each visible as commit, index (commit.oid)}
               {@const pills = refPills(commit.labels)}
               {@const row = graphOn ? graph.rows[range.start + index] : null}
+              {@const short = shortOid(commit.oid)}
+              {@const hashHit = hashMatchLength(commit.oid, activeQuery, short.length)}
               <div
                 id={"history-commit-" + commit.oid}
                 class="history-row"
@@ -1952,8 +1986,8 @@
                 <span class="avatar" style={`--hue:${hueOf(commit.authorName)}`} aria-hidden="true">{initialOf(commit.authorName)}</span>
                 <span class="hr-main">
                   <span class="hr-line">
-                    <span class="hr-summary">{commit.summary}</span>
-                    <code class="hr-hash">{shortOid(commit.oid)}</code>
+                    <span class="hr-summary">{#each matchParts(commit.summary, activeQuery) as part, partIndex (partIndex)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
+                    <code class="hr-hash">{#if hashHit > 0}<mark>{short.slice(0, hashHit)}</mark>{short.slice(hashHit)}{:else}{short}{/if}</code>
                   </span>
                   <span class="hr-meta">
                     {#each pills.slice(0, 2) as pill (`${pill.kind}:${pill.name}`)}
@@ -2023,9 +2057,14 @@
       </div>
       <div class="pager history-pager">
         <span class="pager-range">
-          {#if commits.length > 0}{commits.length}{page?.hasMore ? "+" : ""} 条提交{/if}
+          {#if commits.length > 0}{commits.length}{page?.hasMore ? "+" : ""} {hasNarrowing ? "条匹配" : "条提交"}{/if}
         </span>
         <span class="spacer"></span>
+        {#if commits.length > 0 && hasNarrowing}
+          <button type="button" class="btn btn-ghost btn-sm" onclick={clearAllFilters} title="清除搜索词与作者、日期、路径，范围回到当前分支">
+            <Icon name="x" size={12} />清除筛选
+          </button>
+        {/if}
         {#if commits.length > 0 && !atNewest}
           <button type="button" class="btn btn-ghost btn-sm" onclick={backToNewest} title="滚回最新一条提交">
             <Icon name="arrow-up" size={13} />回到最新

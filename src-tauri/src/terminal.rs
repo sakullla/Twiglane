@@ -1013,6 +1013,16 @@ mod tests {
         (Arc::new(TerminalManager::new(sink)), events)
     }
 
+    /// PTY 测试验证的是输入输出与进程生命周期，不依赖产品默认 shell：
+    /// 显式使用 cmd/sh，避免 CI 上 PowerShell 启动较慢或环境 profile 影响。
+    fn test_shell() -> &'static str {
+        if cfg!(windows) {
+            "cmd.exe"
+        } else {
+            "/bin/sh"
+        }
+    }
+
     fn path_text(path: &Path) -> String {
         path.to_string_lossy().into_owned()
     }
@@ -1053,7 +1063,9 @@ mod tests {
         let (manager, events) = manager();
         let path = path_text(dir.path());
 
-        let opened = manager.open(&path).expect("打开终端");
+        let opened = manager
+            .open_with_shell(dir.path(), test_shell())
+            .expect("打开终端");
         assert!(opened.running);
         assert_eq!(opened.cwd, opened.repo_path);
         assert!(!opened.shell.is_empty());
@@ -1119,8 +1131,12 @@ mod tests {
         let alpha_path = path_text(&alpha);
         let beta_path = path_text(&beta);
 
-        let alpha_session = manager.open(&alpha_path).expect("仓库 A");
-        let beta_session = manager.open(&beta_path).expect("仓库 B");
+        let alpha_session = manager
+            .open_with_shell(&alpha, test_shell())
+            .expect("仓库 A");
+        let beta_session = manager
+            .open_with_shell(&beta, test_shell())
+            .expect("仓库 B");
         assert_ne!(alpha_session.session_id, beta_session.session_id);
         assert_eq!(manager.active().len(), 2);
 
@@ -1187,7 +1203,9 @@ mod tests {
         let (manager, _) = manager();
         let path = path_text(dir.path());
         let heartbeat = dir.path().join("heartbeat.txt");
-        let opened = manager.open(&path).expect("打开终端");
+        let opened = manager
+            .open_with_shell(dir.path(), test_shell())
+            .expect("打开终端");
 
         let command = if cfg!(windows) {
             "cmd /c \"for /l %i in (1,0,2) do @(echo x>>heartbeat.txt & ping -n 2 127.0.0.1 >nul)\"\r\n"
@@ -1222,7 +1240,9 @@ mod tests {
         let dir = TempDir::new("terminal-closed");
         let (manager, _) = manager();
         let path = path_text(dir.path());
-        let opened = manager.open(&path).expect("打开终端");
+        let opened = manager
+            .open_with_shell(dir.path(), test_shell())
+            .expect("打开终端");
         manager
             .write(&opened.session_id, "echo retained-output\r\n")
             .expect("写入");

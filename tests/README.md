@@ -1,5 +1,7 @@
 # 测试分工
 
+使用 Node.js 26（与 `.nvmrc`、CI 和发布构建一致）。
+
 - `npm test`：纯逻辑和组件回归，使用 4 个隔离线程；不共享测试文件的 mock 状态。
 - `npm run test:integration`：真实 Vite 预览接线与大列表功能边界，CI 单独执行。
 - `cargo test --locked --manifest-path src-tauri/Cargo.toml`：原生行为与真实 Git/PTY 回归。

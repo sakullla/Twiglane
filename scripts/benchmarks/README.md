@@ -14,7 +14,7 @@ npm run benchmark:text
 
 Git benchmark 通过 `cargo run --features benchmarks --example benchmark-git` 执行，默认是未优化构建。`status` 独立编译指定提交与当前工作区的状态解析器，测量时间和分配；没有启动桌面 WebView。耗时受编译模式、磁盘缓存和系统负载影响，不等同于桌面帧率或应用 RSS。
 
-`text` 命令使用 Node 22 的 TypeScript 类型剥离，运行冲突解析与来源标记的纯逻辑测量。原先单元测试中的 1.5 秒耗时断言已移除。
+`text` 命令使用 Node 26 的 TypeScript 类型剥离，运行冲突解析与来源标记的纯逻辑测量。原先单元测试中的 1.5 秒耗时断言已移除。
 
 工具使用临时匿名仓库和隔离的 Git 配置，不修改个人仓库；结束后清理临时数据。断言只用于确认被测结果有效，不把计时阈值设为通过条件。
 

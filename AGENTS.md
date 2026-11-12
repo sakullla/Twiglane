@@ -10,7 +10,7 @@ Twiglane is a lightweight desktop Git client built with Svelte 5, TypeScript, Ru
 - `public/` and `src-tauri/icons/` hold assets. `scripts/` provides fixtures, delivery checks, and UI mocks; `docs/verification/` stores verification evidence.
 
 ## Build, Test, and Development Commands
-Use Node.js 22 (matching CI), stable Rust, system Git, and the platform's Tauri prerequisites.
+Use Node.js 26 (matching CI), stable Rust, system Git, and the platform's Tauri prerequisites.
 
 - `npm ci`: install dependencies from the lockfile.
 - `npm run tauri dev`: run the desktop app with Vite hot reload.

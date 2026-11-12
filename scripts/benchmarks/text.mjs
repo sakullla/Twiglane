@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 import { parseConflictText, composeConflictText, hasConflictMarkers } from "../../src/lib/conflict.ts";
 import { computeMarks } from "../../src/lib/three-way-marks.ts";
 
-// Node 22 的类型剥离直接执行真实纯逻辑模块；不注册测试，也不设耗时通过阈值。
+// Node 26 的类型剥离直接执行真实纯逻辑模块；不注册测试，也不设耗时通过阈值。
 const lines = [];
 for (let block = 0; block < 120; block += 1) {
   for (let index = 0; index < 400; index += 1) lines.push(`const v${block}_${index} = ${index};`);

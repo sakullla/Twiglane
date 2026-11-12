@@ -117,7 +117,7 @@ macOS 使用系统 WebKit，不下载 WebView2。Windows 使用系统 WebView2�
 
 ## 验证
 
-本轮 UI/UX 与 Markdown 阅读的证据、同数据前后对照与未覆盖项记录在 `docs/verification/ui-ux-markdown-2026-11-08/`：界面截图来自浏览器 + mock 数据（Chrome、浅深两主题 × 1280×840 与 900×600，另有 9 个关键失败/未知状态的四种「主题 × 尺寸」组合），由 `scripts/ui-preview/baseline-shots.mjs` 实际跑出；`scripts/ui-preview/check-scenarios.mjs` 复跑 41 个交互场景（含工作台终端的展开、输入退出、启动失败、已退出重启与写入失败）。Rust 真实 Git 夹具负责版本与路径边界。仓库 CI 与正式检查使用 Node.js 22；本地未在 Node.js 22 与 macOS/WebView 实机上复核的部分在该记录里明确标为未验证，不随实现一起宣称通过。
+本轮 UI/UX 与 Markdown 阅读的证据、同数据前后对照与未覆盖项记录在 `docs/verification/ui-ux-markdown-2026-11-08/`：界面截图来自浏览器 + mock 数据（Chrome、浅深两主题 × 1280×840 与 900×600，另有 9 个关键失败/未知状态的四种「主题 × 尺寸」组合），由 `scripts/ui-preview/baseline-shots.mjs` 实际跑出；`scripts/ui-preview/check-scenarios.mjs` 复跑 41 个交互场景（含工作台终端的展开、输入退出、启动失败、已退出重启与写入失败）。Rust 真实 Git 夹具负责版本与路径边界。当前开发、CI 与发布构建统一使用 Node.js 26；上述历史记录的环境与未覆盖项保留原样，不随版本升级改写为已验证。
 
 ### CI 与版本发布
 
@@ -149,7 +149,7 @@ node scripts/verify-delivery.mjs
 
 ## 开发
 
-需要 Node.js、Rust、系统 Git，以及 macOS 上的 Xcode 或 Windows 上的 WebView2。推荐 Git 2.48 或更高版本；更低版本会提示并继续尝试。图形界面的 PATH 可能和终端不同，因此启动时会检查 PATH 与常见安装位置，也可以手动选择 `git` 可执行文件。
+需要 Node.js 26、Rust、系统 Git，以及 macOS 上的 Xcode 或 Windows 上的 WebView2。推荐 Git 2.48 或更高版本；更低版本会提示并继续尝试。图形界面的 PATH 可能和终端不同，因此启动时会检查 PATH 与常见安装位置，也可以手动选择 `git` 可执行文件。
 
 ```bash
 npm install

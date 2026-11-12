@@ -329,7 +329,7 @@ const SCENARIOS = [
       OPEN_README +
       ") return false; " +
       "const nav = document.querySelector('.files-view .md-outline'); " +
-      "if (!nav) { const toggle = [...document.querySelectorAll('.files-view .md-small-button')].find((item) => item.textContent.includes('目录')); if (toggle) toggle.click(); return false; } " +
+      "if (!nav) { const toggle = document.querySelector('.files-view button[aria-label=\"文档目录\"]'); if (toggle) toggle.click(); return false; } " +
       "const duplicated = [...nav.querySelectorAll('button')].filter((item) => item.textContent.includes('中文重复标题')); return duplicated.length >= 2; })()",
     // 不只数条目：真的点击两个同名项，核对锚点 id 不同、aria-current 落在各自条目上、滚动位置也不同。
     // 若回归把两个重复标题合并到同一 heading id，这里会失败，而不是靠顺序蒙混过关。
@@ -360,13 +360,13 @@ const SCENARIOS = [
       "(() => { if (!" +
       OPEN_README +
       ") return false; " +
-      "const open = [...document.querySelectorAll('.files-view .md-small-button')].find((item) => item.textContent.includes('收起目录')); " +
+      "const open = document.querySelector('.files-view button[aria-label=\"文档目录\"][aria-pressed=\"true\"]'); " +
       "if (open) { if (!window.__outlineClosing) { window.__outlineClosing = true; open.click(); } return false; } " +
       "return Boolean(document.querySelector('.files-view .markdown-preview .md-body')); })()",
     check:
       "!document.querySelector('.files-view .md-outline') && Boolean(document.querySelector('.files-view .markdown-preview .md-body'))",
     detail:
-      "[...document.querySelectorAll('.files-view .md-small-button')].map((item) => item.textContent.trim()).join(' / ')",
+      "[...document.querySelectorAll('.files-view button[aria-label=\"文档目录\"]')].map((item) => item.getAttribute('aria-pressed')).join(' / ')",
   },
   {
     name: "文档阅读：预览与源码往返不离开这个文件",

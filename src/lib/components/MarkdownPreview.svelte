@@ -255,10 +255,30 @@
       <!-- 正文区本身是键盘可达的滚动区域：长文可用方向键/PageUp/Down 阅读。 -->
       <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
       <div class="md-scroll" role="region" aria-label="文档正文" tabindex="0" data-select-scope bind:this={scroller} onscroll={scrolled}>
-        {#if document.blocks.length === 0}
+        {#if document.blocks.length === 0 && !document.frontmatter}
           <div class="md-empty"><p>这是一个空文档。</p>{#if onSource}<button type="button" class="md-small-button" onclick={onSource}>查看源码</button>{/if}</div>
         {:else}
           <article class="md-body" id={`${prefix}-document`}>
+            {#if document.frontmatter}
+              {@const meta = document.frontmatter}
+              <!-- 文件头属性：键值表，不再被当成分隔线 + 段落 + 标题排进正文。 -->
+              <details class="md-frontmatter" open>
+                <summary><Icon name="chevron-right" size={12} /><span>文件头属性</span><span class="md-frontmatter-count">{meta.fields.length}</span></summary>
+                {#each meta.comments as comment}
+                  <p class="md-frontmatter-note">{comment}</p>
+                {/each}
+                {#if meta.fields.length > 0}
+                  <dl>
+                    {#each meta.fields as field}
+                      <div class="md-frontmatter-row">
+                        <dt>{field.key}</dt>
+                        <dd class:block={field.block}>{#if field.value === ""}<span class="md-frontmatter-empty">空</span>{:else}{field.value}{/if}</dd>
+                      </div>
+                    {/each}
+                  </dl>
+                {/if}
+              </details>
+            {/if}
             {#each document.blocks.slice(0, rendered) as block, index (`${documentKey}:${index}`)}
               <div class="md-block"><MarkdownNodes nodes={[block]} {documentKey} {active} {prefix} onLink={follow} {onLoadImage} /></div>
             {/each}

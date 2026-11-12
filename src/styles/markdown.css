@@ -60,3 +60,20 @@
   .md-outline { flex: 0 0 auto; max-height: 160px; border-right: 0; border-bottom: 1px solid var(--border); }
   .md-body { padding: var(--space-16) var(--space-16) 48px; }
 }
+/* 文件头属性（YAML frontmatter）：紧凑的键值表，默认展开，可收起；不参与正文标题与目录。 */
+.md-frontmatter { margin: 0 0 var(--space-24); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); font-size: var(--text-sm); line-height: var(--leading-normal); }
+.md-frontmatter > summary { display: flex; align-items: center; gap: var(--space-6); padding: var(--space-6) var(--space-12); color: var(--fg-muted); cursor: pointer; list-style: none; user-select: none; }
+.md-frontmatter > summary::-webkit-details-marker { display: none; }
+.md-frontmatter > summary .icon { transition: transform 120ms ease; }
+.md-frontmatter[open] > summary .icon { transform: rotate(90deg); }
+.md-frontmatter[open] > summary { border-bottom: 1px solid var(--border); }
+.md-frontmatter > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; border-radius: var(--radius); }
+.md-frontmatter-count { margin-left: auto; color: var(--fg-subtle); font-size: var(--text-xs); }
+.md-body .md-frontmatter-note { margin: 0; padding: var(--space-8) var(--space-12) 0; color: var(--fg-muted); }
+.md-frontmatter dl { display: grid; grid-template-columns: minmax(64px, max-content) 1fr; margin: 0; padding: var(--space-6) 0; }
+.md-frontmatter-row { display: contents; }
+.md-frontmatter dt, .md-frontmatter dd { padding: var(--space-4) var(--space-12); }
+.md-frontmatter dt { color: var(--fg-muted); font-family: var(--mono); font-size: var(--text-xs); line-height: 22px; white-space: nowrap; }
+.md-frontmatter dd { margin: 0; min-width: 0; color: var(--fg); white-space: pre-wrap; }
+.md-frontmatter dd.block { font-family: var(--mono); font-size: var(--text-xs); }
+.md-frontmatter-empty { color: var(--fg-subtle); }

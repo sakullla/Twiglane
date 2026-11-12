@@ -2238,8 +2238,6 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 /* Markdown 排版预览的来源/路径：与阅读器的 .doc-source/.doc-path 同一标识，放在已有状态条里不另占一行。 */
 .file-status .doc-source { height: 18px; font-size: var(--text-xs); }
 .file-status .doc-path { flex: 0 1 auto; min-width: 0; max-width: 40ch; font-size: var(--text-xs); }
-/* 目录入口沿用 .md-small-button 的外观，高度贴合工具条里的其它小按钮。 */
-.file-outline-btn { min-height: 26px; padding: 0 var(--space-8); }
 @container diff (max-width: 520px) { .file-status-item:last-child { display: none; } }
 /* 轻量编辑：原生 textarea + 虚拟化行号。不换行、等宽、行高 20px，与只读代码页同一密度。 */
 .file-edit-mode button { display: inline-flex; align-items: center; gap: 4px; }

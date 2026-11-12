@@ -188,3 +188,45 @@ describe("Markdown 样式跟随主题与内容区滚动", () => {
     expect(css).toMatch(/\.md-body \{[^}]*overflow-wrap:\s*anywhere/);
   });
 });
+
+describe("Markdown 文件头属性", () => {
+  const source = [
+    "---",
+    "# Runtime 只读取这一处文件头机器区；不要在正文重复机器字段。",
+    "format: exploration",
+    'summary: "已综合三个只读探索 section，并定位 \\"缺口\\"。"',
+    "tags:",
+    "  - a",
+    "  - b",
+    "empty:",
+    "---",
+    "",
+    "# 通用工作流探索证据",
+    "",
+    "正文",
+  ].join("\n");
+
+  it("拆出键值、注释与多行值，正文不再出现分隔线和被误判的标题", () => {
+    const result = parseMarkdownDocument(source);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const meta = result.document.frontmatter!;
+    expect(meta.comments).toEqual(["Runtime 只读取这一处文件头机器区；不要在正文重复机器字段。"]);
+    expect(meta.fields).toEqual([
+      { key: "format", value: "exploration", block: false },
+      { key: "summary", value: '已综合三个只读探索 section，并定位 "缺口"。', block: false },
+      { key: "tags", value: "- a\n- b", block: true },
+      { key: "empty", value: "", block: false },
+    ]);
+    expect(result.document.headings.map((heading) => heading.text)).toEqual(["通用工作流探索证据"]);
+    expect(result.document.blocks[0]).toMatchObject({ kind: "heading", depth: 1 });
+    expect(result.document.blocks.some((block) => block.kind === "hr")).toBe(false);
+  });
+
+  it("不在第一行或认不出键值的 --- 段照常当正文", () => {
+    const later = parseMarkdownDocument("正文\n\n---\nkey: v\n---\n");
+    expect(later.ok && later.document.frontmatter).toBeFalsy();
+    const prose = parseMarkdownDocument("---\n这不是键值\n---\n");
+    expect(prose.ok && prose.document.frontmatter).toBeFalsy();
+  });
+});

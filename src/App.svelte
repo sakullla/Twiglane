@@ -3691,7 +3691,11 @@
       // 后端只以真实活动进程判断是否需要确认；没有活动会话时不会发这个事件。
       stopTerminalClose = await listenEvent<TerminalCloseRequested>(TERMINAL_CLOSE_REQUESTED_EVENT, (payload) => {
         if (!payload || payload.sessions.length === 0) return;
-        terminalClose = { sessions: payload.sessions, busy: false, error: null };
+        // 已有确认层时只更新会话列表：重复的原生关窗请求不能重置进行中的 busy，
+        // 也不能清掉上一次终止失败的真实错误。
+        terminalClose = terminalClose
+          ? { ...terminalClose, sessions: payload.sessions }
+          : { sessions: payload.sessions, busy: false, error: null };
       });
     })();
     const poll = window.setInterval(() => {

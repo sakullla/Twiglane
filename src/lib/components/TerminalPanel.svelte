@@ -34,6 +34,15 @@
     return `已退出 · 退出码 ${state.exitCode ?? "未知"}`;
   }
 
+  /**
+   * Windows 上 ConPTY/clink 会把终端对 DA 查询的回复当作键盘输入插入命令行，
+   * 出现 `[?1;2c` 之类字面文本并污染后续命令。写入 PTY 前丢弃 DA1/DA2 回复；
+   * DSR、方向键等其它序列保持原样。
+   */
+  export function stripWindowsTerminalReplies(data: string): string {
+    return data.replace(/\x1b\[[?>][0-9;]*c/g, "");
+  }
+
   /** xterm 的取色跟随应用 token 的浅深结果；面板本身仍由 terminal.css 绘制背景。 */
   export const TERMINAL_THEMES = {
     dark: {
@@ -308,6 +317,9 @@
     signalName = event.signal;
   }
 
+  /** Windows WebView2 的用户代理包含 Windows；其它平台保留终端查询回复不动。 */
+  const IS_WINDOWS = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
+
   async function sendInput(data: string) {
     const id = sessionId;
     if (!id) return;
@@ -315,8 +327,10 @@
       writeError = "终端已退出，无法继续输入；请重新启动这个会话。";
       return;
     }
+    const payload = IS_WINDOWS ? stripWindowsTerminalReplies(data) : data;
+    if (!payload) return;
     try {
-      await api.terminalWrite(id, data);
+      await api.terminalWrite(id, payload);
       writeError = null;
     } catch (error) {
       const failure = normalizeError(error);

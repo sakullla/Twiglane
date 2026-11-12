@@ -114,6 +114,7 @@ import TerminalPanel, {
   TERMINAL_CLOSE_REQUESTED_EVENT,
   TERMINAL_EXIT_EVENT,
   TERMINAL_OUTPUT_EVENT,
+  stripWindowsTerminalReplies,
   terminalEventApplies,
   terminalStatusLabel,
 } from "../src/lib/components/TerminalPanel.svelte";
@@ -195,6 +196,13 @@ describe("终端事件与状态", () => {
     expect(terminalEventApplies("s1", "s1", 0, 1)).toBe(false);
     expect(terminalEventApplies("s1", "s2", 9, 1)).toBe(false);
     expect(terminalEventApplies(null, "s1", 2, 1)).toBe(false);
+  });
+
+  it("Windows 的 DA 回复在写入 PTY 前被丢弃，普通按键与 DSR 不受影响", () => {
+    expect(stripWindowsTerminalReplies("\x1b[?1;2c")).toBe("");
+    expect(stripWindowsTerminalReplies("\x1b[>0;276;0c")).toBe("");
+    expect(stripWindowsTerminalReplies("a\x1b[?1;2cb")).toBe("ab");
+    expect(stripWindowsTerminalReplies("\x1b[A\x1b[1;24R\r")).toBe("\x1b[A\x1b[1;24R\r");
   });
 
   it("状态文字如实区分启动中、失败、运行与真实退出码", () => {
@@ -516,6 +524,35 @@ describe("外壳终端入口与关窗确认", () => {
     expect(mocks.api.terminateTerminals.mock.invocationCallOrder.at(-1)).toBeLessThan(
       windowMock.close.mock.invocationCallOrder[0],
     );
+  });
+
+  it("终止进行中再次收到原生关窗请求不会重置忙碌状态", async () => {
+    await renderShell();
+    await waitFor(() => expect(mocks.handlers.has(TERMINAL_CLOSE_REQUESTED_EVENT)).toBe(true));
+    const sessions = [{ sessionId: "s1", repoPath }];
+    let resolveTerminate!: (value: typeof sessions) => void;
+    mocks.api.terminateTerminals.mockImplementationOnce(
+      () => new Promise<typeof sessions>((resolve) => {
+        resolveTerminate = resolve;
+      }),
+    );
+
+    emit(TERMINAL_CLOSE_REQUESTED_EVENT, { sessions });
+    const dialog = await screen.findByRole("dialog", { name: /结束终端并关闭应用/ });
+    const confirm = within(dialog).getByRole("button", { name: "结束终端并关闭" }) as HTMLButtonElement;
+    await fireEvent.click(confirm);
+    await waitFor(() => expect(confirm.disabled).toBe(true));
+    expect(confirm.getAttribute("aria-busy")).toBe("true");
+
+    // 第二次原生关窗请求到达时，确认按钮必须保持忙碌，不能被重新启用。
+    emit(TERMINAL_CLOSE_REQUESTED_EVENT, { sessions });
+    await tick();
+    expect(confirm.disabled).toBe(true);
+    expect(confirm.getAttribute("aria-busy")).toBe("true");
+    expect(windowMock.close).not.toHaveBeenCalled();
+
+    resolveTerminate([]);
+    await waitFor(() => expect(windowMock.close).toHaveBeenCalled());
   });
 
   it("没有活动会话的关窗事件不弹确认", async () => {

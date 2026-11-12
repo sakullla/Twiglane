@@ -1,7 +1,8 @@
 //! 工作台交互终端：真实 PTY、按仓库单会话与整树终止。
 //!
 //! 前端只能传入仓库路径、已有 `sessionId`、输入文本和行列数；shell 固定取平台默认值
-//! （Unix `$SHELL` 或 `/bin/sh`，Windows `%COMSPEC%` 或 `cmd.exe`），不接受程序名或参数。
+//! （Unix `$SHELL` 或 `/bin/sh`；Windows 优先 PowerShell 7，其次 Windows PowerShell 5.1，
+//! 最后退回 `%COMSPEC%`/`cmd.exe`），不接受程序名或参数。
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -648,6 +649,13 @@ fn canonical_repo(path: &str) -> Result<PathBuf, AppError> {
 fn default_shell() -> String {
     #[cfg(windows)]
     {
+        // 优先现成的 PowerShell 7，其次 Windows PowerShell 5.1；都不可用时退回
+        // 系统注册的 COMSPEC（通常是 cmd.exe）。候选固定在后端，前端仍不能指定程序。
+        for name in ["pwsh.exe", "powershell.exe"] {
+            if let Some(found) = find_windows_executable(name) {
+                return found;
+            }
+        }
         std::env::var_os("COMSPEC")
             .filter(|value| !value.is_empty())
             .map(|value| value.to_string_lossy().into_owned())
@@ -660,6 +668,38 @@ fn default_shell() -> String {
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_else(|| "/bin/sh".to_string())
     }
+}
+
+/// 在 Windows 的已知安装位置与 PATH 中查找固定候选 shell，返回可执行文件绝对路径。
+#[cfg(windows)]
+fn find_windows_executable(name: &str) -> Option<String> {
+    let mut candidates = Vec::new();
+    match name {
+        "pwsh.exe" => {
+            if let Some(root) = std::env::var_os("ProgramFiles") {
+                candidates.push(PathBuf::from(root).join("PowerShell").join("7").join(name));
+            }
+        }
+        "powershell.exe" => {
+            if let Some(root) = std::env::var_os("SystemRoot") {
+                candidates.push(
+                    PathBuf::from(root)
+                        .join("System32")
+                        .join("WindowsPowerShell")
+                        .join("v1.0")
+                        .join(name),
+                );
+            }
+        }
+        _ => {}
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        candidates.extend(std::env::split_paths(&path).map(|dir| dir.join(name)));
+    }
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.to_string_lossy().into_owned())
 }
 
 fn next_session_id() -> String {

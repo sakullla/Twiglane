@@ -245,8 +245,12 @@ fn assert_terminal_start_is_fixed(root: &Path) {
         "终端必须使用解析后的默认 shell 启动"
     );
     assert!(
+        source.contains("\"pwsh.exe\", \"powershell.exe\""),
+        "Windows 默认 shell 必须优先固定的 PowerShell 7 / 5.1 候选"
+    );
+    assert!(
         source.contains("std::env::var_os(\"COMSPEC\")"),
-        "Windows 默认 shell 必须来自 %COMSPEC%"
+        "Windows 缺少 PowerShell 时必须退回 %COMSPEC%"
     );
     assert!(
         source.contains("std::env::var_os(\"SHELL\")"),

@@ -271,7 +271,12 @@
   let terminalProfiles = $state<TerminalProfile[]>([]);
   /** 当前仓库的终端数量；状态栏在多于一个时显示数量。 */
   let terminalCount = $state(0);
-  let terminalPanel = $state<{ newTerminal: (profile?: string | null) => Promise<void> } | null>(null);
+  let terminalPanel = $state<{
+    newTerminal: (profile?: string | null) => Promise<void>;
+    dragOver: (x: number, y: number) => boolean;
+    dragEnd: () => void;
+    dropPaths: (paths: string[], x: number, y: number) => boolean;
+  } | null>(null);
   /**
    * 原生关窗被活动终端拦下后的确认层。取消保留进程，确认先等待 terminateTerminals 成功，
    * 再请求关闭窗口；失败时对话框与真实错误都留着。
@@ -2566,6 +2571,27 @@
     await addExistingRepository();
   }
 
+  /** Tauri 的拖放坐标是相对 webview 的物理像素，换成 CSS 像素才能和元素位置比较。 */
+  function dropPoint(position: { x: number; y: number } | undefined): { x: number; y: number } | null {
+    if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y)) return null;
+    const ratio = window.devicePixelRatio || 1;
+    return { x: position.x / ratio, y: position.y / ratio };
+  }
+
+  /** 有对话框或命令面板盖着时终端不可见也不可操作，不接收拖入。 */
+  function terminalDropAllowed(): boolean {
+    return terminalOpen && !taskModal && !cloneOpen && !dependencyOpen && !confirmPath && !paletteOpen && openModalCount() === 0;
+  }
+
+  function dragOverTerminal(position: { x: number; y: number } | undefined): boolean {
+    const point = dropPoint(position);
+    if (!point || !terminalDropAllowed()) {
+      terminalPanel?.dragEnd();
+      return false;
+    }
+    return terminalPanel?.dragOver(point.x, point.y) ?? false;
+  }
+
   async function dropRepository(paths: string[]) {
     draggingRepository = false;
     if (writeLocked) {
@@ -3667,9 +3693,24 @@
       else stopDrag.push(stop);
     };
     void Promise.all([
-      registerDrag("tauri://drag-enter", () => { draggingRepository = true; }),
-      registerDrag("tauri://drag-leave", () => { draggingRepository = false; }),
-      registerDrag<{ paths: string[] }>("tauri://drag-drop", (event) => {
+      registerDrag<{ position?: { x: number; y: number } }>("tauri://drag-enter", (event) => {
+        draggingRepository = !dragOverTerminal(event.position);
+      }),
+      registerDrag<{ position?: { x: number; y: number } }>("tauri://drag-over", (event) => {
+        // 拖进终端时收起「拖入仓库」的整窗提示，只高亮那一格终端；移出终端再显示回来。
+        draggingRepository = !dragOverTerminal(event.position);
+      }),
+      registerDrag("tauri://drag-leave", () => {
+        draggingRepository = false;
+        terminalPanel?.dragEnd();
+      }),
+      registerDrag<{ paths: string[]; position?: { x: number; y: number } }>("tauri://drag-drop", (event) => {
+        const point = dropPoint(event.position);
+        if (point && terminalDropAllowed() && terminalPanel?.dropPaths(event.paths, point.x, point.y)) {
+          draggingRepository = false;
+          return;
+        }
+        terminalPanel?.dragEnd();
         void dropRepository(event.paths);
       }),
     ]).catch((error) => { if (!disposed) showError(error); });

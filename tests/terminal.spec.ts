@@ -171,6 +171,8 @@ import {
   groupTitles,
   layoutFromSessions,
   readTerminalTheme,
+  formatDroppedPaths,
+  quotePathForShell,
   removeSession,
   replaceSession,
   splitGroup,
@@ -268,6 +270,20 @@ function tabs() {
 
 function key(init: KeyboardEventInit & { key: string }) {
   return new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+}
+
+/** happy-dom 不做布局：让每个终端格都占 (0,0)-(800,400)，其它元素保持原样。 */
+function stubPaneRect() {
+  const original = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+    if (this.hasAttribute("data-terminal-pane")) {
+      return { left: 0, top: 0, right: 800, bottom: 400, width: 800, height: 400, x: 0, y: 0, toJSON() {} } as DOMRect;
+    }
+    return original.call(this);
+  };
+  return () => {
+    HTMLElement.prototype.getBoundingClientRect = original;
+  };
 }
 
 beforeEach(() => {
@@ -377,6 +393,29 @@ describe("终端事件与状态", () => {
     const tokens: Record<string, string> = { "--term-bg": " #111216", "--term-bright-yellow": "#f5d695" };
     const theme = readTerminalTheme((token) => tokens[token] ?? "");
     expect(theme).toEqual({ background: "#111216", brightYellow: "#f5d695" });
+  });
+});
+
+describe("拖入路径的引号与路径写法", () => {
+  it("按终端类型加引号：不需要时保持原样，特殊字符不会被 shell 展开", () => {
+    expect(quotePathForShell("C:\\work\\demo\\a.txt", "pwsh")).toBe("C:\\work\\demo\\a.txt");
+    expect(quotePathForShell("C:\\Program Files\\it's.txt", "pwsh")).toBe("'C:\\Program Files\\it''s.txt'");
+    expect(quotePathForShell("C:\\a $b.txt", "powershell")).toBe("'C:\\a $b.txt'");
+    expect(quotePathForShell("C:\\Program Files\\x", "cmd")).toBe('"C:\\Program Files\\x"');
+    expect(quotePathForShell("C:\\100%\\x", "cmd")).toBe('"C:\\100%\\x"');
+    expect(quotePathForShell("/home/me/src", "bash")).toBe("/home/me/src");
+    expect(quotePathForShell("/home/me/it's $x", "zsh")).toBe("'/home/me/it'\\''s $x'");
+    expect(quotePathForShell("/home/me/it's", "fish")).toBe("'/home/me/it\\'s'");
+  });
+
+  it("Git Bash 与 WSL 把盘符路径换成各自的写法", () => {
+    expect(quotePathForShell("C:\\work\\demo", "git-bash")).toBe("/c/work/demo");
+    expect(quotePathForShell("D:\\My Docs\\a.md", "wsl")).toBe("'/mnt/d/My Docs/a.md'");
+  });
+
+  it("多个路径空格连接并补一个尾随空格；空列表不插入任何内容", () => {
+    expect(formatDroppedPaths(["/a", "/b c"], "bash")).toBe("/a '/b c' ");
+    expect(formatDroppedPaths([], "bash")).toBe("");
   });
 });
 
@@ -653,6 +692,37 @@ describe("终端面板", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("拖入文件：经过时高亮目标终端，放下按终端类型插入带引号的路径且不回车；终端外交还外壳", async () => {
+    const { view } = await renderPanel();
+    const term = await waitForTerminal();
+    await waitFor(() => expect(stateOf()).toBe("running"));
+    const restore = stubPaneRect();
+    try {
+      const panel = view.component as unknown as {
+        dragOver: (x: number, y: number) => boolean;
+        dropPaths: (paths: string[], x: number, y: number) => boolean;
+      };
+      expect(panel.dragOver(50, 50)).toBe(true);
+      await waitFor(() => expect(document.querySelector("[data-terminal-drop-hint]")).toBeTruthy());
+      expect(panel.dragOver(5000, 5000)).toBe(false);
+      await waitFor(() => expect(document.querySelector("[data-terminal-drop-hint]")).toBeNull());
+
+      expect(panel.dropPaths(["C:\\Program Files\\demo", "C:\\work\\a.txt"], 50, 50)).toBe(true);
+      expect(term.pasted).toEqual(["'C:\\Program Files\\demo' C:\\work\\a.txt "]);
+      expect(document.querySelector("[data-terminal-drop-hint]")).toBeNull();
+      expect(panel.dropPaths(["C:\\x"], 5000, 5000), "终端之外的放下由外壳处理").toBe(false);
+
+      // 已退出的终端不插入，就地说明。
+      emit(TERMINAL_EXIT_EVENT, { sessionId: "s1", seq: 2, exitCode: 0, signal: null });
+      await waitFor(() => expect(stateOf()).toBe("exited"));
+      expect(panel.dropPaths(["C:\\y"], 50, 50)).toBe(true);
+      expect(term.pasted).toHaveLength(1);
+      await waitFor(() => expect(screen.getByText(/终端已退出，无法插入路径/)).toBeTruthy());
+    } finally {
+      restore();
+    }
+  });
+
   it("最大化切换面板状态，不影响会话", async () => {
     await renderPanel();
     await waitForTerminal();
@@ -835,6 +905,26 @@ describe("外壳终端入口与关窗确认", () => {
     await waitFor(() => expect(tabs()).toHaveLength(2));
     expect(mocks.api.terminalCreate).toHaveBeenCalledTimes(2);
     expect(document.querySelector("[data-terminal-toggle] .sb-count")?.textContent).toBe("2");
+  });
+
+  it("从系统拖入文件到展开的终端：插入路径，不按「拖入仓库」处理", async () => {
+    await renderShell();
+    await openTerminalFromStatus();
+    const term = await waitForTerminal();
+    await waitFor(() => expect(document.querySelector("[data-terminal-state]")?.getAttribute("data-terminal-state")).toBe("running"));
+    const restore = stubPaneRect();
+    const ratio = window.devicePixelRatio || 1;
+    try {
+      emit("tauri://drag-enter", { paths: ["C:\\work\\a b.txt"], position: { x: 40 * ratio, y: 40 * ratio } });
+      await waitFor(() => expect(document.querySelector("[data-terminal-drop-hint]")).toBeTruthy());
+      expect(document.querySelector(".repository-drop-hint"), "落在终端上时不显示拖入仓库的整窗提示").toBeNull();
+      emit("tauri://drag-drop", { paths: ["C:\\work\\a b.txt"], position: { x: 40 * ratio, y: 40 * ratio } });
+      await waitFor(() => expect(term.pasted).toEqual(["'C:\\work\\a b.txt' "]));
+      expect(document.querySelector("[data-terminal-drop-hint]")).toBeNull();
+      expect(mocks.api.openRepository).toHaveBeenCalledTimes(1);
+    } finally {
+      restore();
+    }
   });
 
   it("关窗取消保持进程；确认先等待终止成功再关闭；失败保留对话框与错误", async () => {

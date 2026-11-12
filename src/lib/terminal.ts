@@ -388,3 +388,38 @@ export class TerminalRouter {
     this.targets.clear();
   }
 }
+
+/* ---------------------------------------------------------------- 拖入路径 */
+
+const WINDOWS_DRIVE = /^([A-Za-z]):[\\/](.*)$/;
+
+/** 按终端类型把一个路径写成可直接粘到命令行的参数：需要时加引号，Git Bash / WSL 换成各自的路径写法。 */
+export function quotePathForShell(path: string, profile: string): string {
+  const id = profile.toLowerCase();
+  if (id === "cmd") {
+    // cmd 的参数只认双引号；路径里不会出现双引号（Windows 文件名不允许）。
+    return /^[\w@%+=:,.\\/-]+$/.test(path) && !path.includes("%") ? path : `"${path}"`;
+  }
+  if (id === "pwsh" || id === "powershell") {
+    if (/^[\w@+=:,.\\/-]+$/.test(path)) return path;
+    // 单引号里不展开变量；单引号本身写成两个单引号。
+    return `'${path.replace(/'/g, "''")}'`;
+  }
+  let posix = path;
+  const drive = WINDOWS_DRIVE.exec(path);
+  if (drive && (id === "git-bash" || id === "wsl")) {
+    const rest = drive[2].replace(/\\/g, "/");
+    const letter = drive[1].toLowerCase();
+    posix = id === "wsl" ? `/mnt/${letter}/${rest}` : `/${letter}/${rest}`;
+  }
+  if (/^[\w@%+=:,./-]+$/.test(posix)) return posix;
+  if (id === "fish") return `'${posix.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+  // POSIX shell：单引号里一切按字面，单引号本身写成 '\''。
+  return `'${posix.replace(/'/g, "'\\''")}'`;
+}
+
+/** 多个路径用空格连接，末尾补一个空格，方便接着输入。 */
+export function formatDroppedPaths(paths: string[], profile: string): string {
+  const parts = paths.filter((path) => path.length > 0).map((path) => quotePathForShell(path, profile));
+  return parts.length > 0 ? `${parts.join(" ")} ` : "";
+}

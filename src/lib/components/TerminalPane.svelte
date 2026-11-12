@@ -9,6 +9,8 @@
     hasSelection(): boolean;
     copy(): Promise<boolean>;
     paste(): Promise<void>;
+    /** 把一段文本当作粘贴送进终端（拖入路径用）；终端已退出时返回 false。 */
+    insert(text: string): boolean;
     selectAll(): void;
     clear(): void;
     find(query: string, direction: "next" | "prev", incremental?: boolean): boolean;
@@ -97,6 +99,8 @@
     label: string;
     /** 并排显示时才显示的小标题，用来分辨焦点在哪一格。 */
     showLabel?: boolean;
+    /** 正有文件拖到这一格上方：显示放下提示。 */
+    dropActive?: boolean;
     onStatus: (sessionId: string, status: TerminalPaneStatus) => void;
     onFocus: (sessionId: string) => void;
     onAction: (sessionId: string, action: TerminalKeyAction) => void;
@@ -115,6 +119,7 @@
     fontSize,
     label,
     showLabel = false,
+    dropActive = false,
     onStatus,
     onFocus,
     onAction,
@@ -450,6 +455,16 @@
     hasSelection: () => term?.hasSelection() ?? false,
     copy: () => copySelection(false),
     paste: () => pasteClipboard(),
+    insert: (text) => {
+      if (!term || !text) return false;
+      if (!attached || !running) {
+        writeError = "终端已退出，无法插入路径；请重新启动这个会话。";
+        return false;
+      }
+      term.paste(text);
+      term.focus();
+      return true;
+    },
     selectAll: () => term?.selectAll(),
     clear: () => {
       term?.clear();
@@ -482,6 +497,7 @@
 <div
   class="terminal-pane"
   class:focused
+  class:drop-active={dropActive}
   data-terminal-pane={sessionId}
   data-terminal-session-state={attachError ? "failed" : starting ? "starting" : running ? "running" : "exited"}
   onfocusin={() => onFocus(sessionId)}
@@ -519,6 +535,11 @@
   {#if linkHint}
     <div class="terminal-link-hint" style={`left:${linkHint.x}px;top:${linkHint.y}px`} aria-hidden="true">
       {IS_MAC ? "⌘" : "Ctrl"}+单击打开链接
+    </div>
+  {/if}
+  {#if dropActive}
+    <div class="terminal-drop-hint" data-terminal-drop-hint aria-hidden="true">
+      <Icon name="terminal" size={16} />松开以插入路径
     </div>
   {/if}
   {#if exited}

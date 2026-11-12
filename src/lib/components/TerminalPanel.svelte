@@ -40,6 +40,7 @@
     cycleGroup,
     emptyLayout,
     focusSession,
+    formatDroppedPaths,
     groupOf,
     groupTitles,
     layoutFromSessions,
@@ -603,6 +604,44 @@
     }
   }
 
+  /* ------------------------------------------------------------ 拖入文件 */
+
+  let dropTarget = $state<string | null>(null);
+
+  /** 视口坐标下方的终端格（只看展开且激活的标签页）。 */
+  function paneAt(x: number, y: number): string | null {
+    if (!open || !panel) return null;
+    for (const element of panel.querySelectorAll<HTMLElement>(".terminal-group.active [data-terminal-pane]")) {
+      const rect = element.getBoundingClientRect();
+      if (x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom) return element.dataset.terminalPane ?? null;
+    }
+    return null;
+  }
+
+  /** 拖动经过时由外壳调用：返回是否落在终端上，落在上面就高亮那一格。 */
+  export function dragOver(x: number, y: number): boolean {
+    dropTarget = paneAt(x, y);
+    return dropTarget !== null;
+  }
+
+  export function dragEnd() {
+    dropTarget = null;
+  }
+
+  /**
+   * 放下文件或目录：落在终端上就按该终端的类型加引号后插入命令行（不回车），返回 true；
+   * 不在终端上返回 false，由外壳按原来的「拖入仓库」处理。
+   */
+  export function dropPaths(paths: string[], x: number, y: number): boolean {
+    const target = paneAt(x, y);
+    dropTarget = null;
+    if (!target) return false;
+    setLayout(focusSession(layout, target));
+    const text = formatDroppedPaths(paths, infos[target]?.profile ?? "");
+    if (text) paneApis.get(target)?.insert(text);
+    return true;
+  }
+
   /* ------------------------------------------------------------ 高度 */
 
   function clampHeight(value: number): number {
@@ -849,6 +888,7 @@
             {fontSize}
             label={infos[sessionId]?.label ?? "终端"}
             showLabel={group.panes.length > 1}
+            dropActive={dropTarget === sessionId}
             onStatus={onPaneStatus}
             onFocus={onPaneFocus}
             onAction={onPaneAction}

@@ -239,6 +239,27 @@
   z-index: 3;
 }
 
+/* 拖入文件：高亮目标那一格，提示松开后插入路径（不会回车执行）。 */
+.terminal-pane.drop-active { box-shadow: inset 0 0 0 2px var(--accent); }
+.terminal-drop-hint {
+  position: absolute;
+  left: 50%;
+  bottom: var(--space-16);
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+  padding: var(--space-6) var(--space-12);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  pointer-events: none;
+  z-index: 3;
+}
+
 /* 退出条：贴在画面底部，输出保留在上方可滚动查看。 */
 .terminal-exit {
   display: flex;

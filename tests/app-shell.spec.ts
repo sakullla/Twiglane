@@ -374,14 +374,15 @@ describe("原生文件夹拖放", () => {
 
   it("卸载后完成的原生拖放监听注册立即取消", async () => {
     const registrations: (() => void)[] = [];
-    const stops = [vi.fn(), vi.fn(), vi.fn()];
+    // enter / over / leave / drop 四个监听：over 用来判断是否拖到终端上。
+    const stops = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
     mocks.listenEvent.mockImplementation((name: string) => {
       if (!name.startsWith("tauri://drag-")) return Promise.resolve(() => {});
       const stop = stops[registrations.length];
       return new Promise((resolve) => { registrations.push(() => resolve(stop)); });
     });
     const view = render(App);
-    await waitFor(() => expect(registrations).toHaveLength(3));
+    await waitFor(() => expect(registrations).toHaveLength(4));
     view.unmount();
     registrations.forEach((finish) => finish());
     await waitFor(() => stops.forEach((stop) => expect(stop).toHaveBeenCalledOnce()));

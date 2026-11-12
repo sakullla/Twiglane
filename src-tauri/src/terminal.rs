@@ -1039,12 +1039,34 @@ mod tests {
     }
 
     fn wait_for_output(manager: &TerminalManager, path: &str, needle: &str) {
-        wait_until(needle, Duration::from_secs(15), || {
-            manager
-                .open(path)
-                .map(|snapshot| snapshot.output.contains(needle))
-                .unwrap_or(false)
-        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut last: Option<TerminalSnapshot> = None;
+        loop {
+            if let Ok(snapshot) = manager.open(path) {
+                if snapshot.output.contains(needle) {
+                    return;
+                }
+                last = Some(snapshot);
+            }
+            if Instant::now() >= deadline {
+                match last {
+                    Some(snapshot) => {
+                        let count = snapshot.output.chars().count();
+                        let tail: String = snapshot
+                            .output
+                            .chars()
+                            .skip(count.saturating_sub(2000))
+                            .collect();
+                        panic!(
+                            "等待超时：{needle}；shell={:?} running={} exit={:?} output={:?}",
+                            snapshot.shell, snapshot.running, snapshot.exit_code, tail
+                        );
+                    }
+                    None => panic!("等待超时：{needle}；无法读取终端快照"),
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn wait_for_exit(manager: &TerminalManager, path: &str) -> TerminalSnapshot {

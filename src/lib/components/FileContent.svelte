@@ -31,6 +31,7 @@
   import { BUSY_REASON, documentSourceLabel, formatBytes, rowMark, splitPath, type FileNavState } from "../ui";
   import type { DiffSide } from "../types";
   import BinaryPreview from "./BinaryPreview.svelte";
+  import BreadcrumbPicker from "./BreadcrumbPicker.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
   import DocumentReader from "./DocumentReader.svelte";
   import FileNav from "./FileNav.svelte";
@@ -70,6 +71,8 @@
     nav?: FileNavState | null;
     /** 文档内相对链接：在工作区里同步文件树并选中目标（历史/暂存区阅读不使用）。 */
     onRevealPath?: (path: string, line: number | null) => boolean | Promise<boolean>;
+    /** 面包屑切换弹层是否列出被忽略的条目：跟随文件树的「显示被忽略的文件」。 */
+    includeIgnored?: boolean;
     /** 编辑会话表；不传时用应用内唯一的那一份。 */
     editor?: FileEditor;
     /** 外部（差异、任务净差异）要求进入编辑：序号变化且路径已选中时生效。 */
@@ -99,6 +102,7 @@
     onOpenDiff,
     nav = null,
     onRevealPath,
+    includeIgnored = false,
     editor = fileEditor,
     editRequest = null,
     editReturn = null,
@@ -162,6 +166,30 @@
   let fileVersion = $derived(contentVersion ?? generation);
 
   let parts = $derived(path ? splitPath(path) : null);
+  /** 面包屑的每一段：点它列出所在目录，切换到同级目录或文件。 */
+  let crumbs = $derived(
+    parts?.dir
+      ? parts.dir.split("/").map((segment, index, all) => ({
+          name: segment,
+          path: all.slice(0, index + 1).join("/"),
+          parent: all.slice(0, index).join("/"),
+        }))
+      : [],
+  );
+  let crumbPicker = $state<{ anchor: HTMLElement; directory: string; current: string } | null>(null);
+  $effect(() => {
+    void path;
+    untrack(() => (crumbPicker = null));
+  });
+
+  function openCrumb(event: MouseEvent, directory: string, current: string): void {
+    const anchor = event.currentTarget as HTMLElement;
+    if (crumbPicker?.anchor === anchor) {
+      crumbPicker = null;
+      return;
+    }
+    crumbPicker = { anchor, directory, current };
+  }
   let language = $derived(path ? effectiveLanguage(path) : null);
   let languageLabel = $derived(languageName(language));
   let change = $derived(path ? opened.snapshot.files.find((file) => file.path === path) ?? null : null);
@@ -989,11 +1017,52 @@
       {#if nav}<FileNav {nav} steps={false} />{/if}
       <div class="file-title" title={path}>
         <span class="breadcrumb">
-          {#each (parts.dir ? parts.dir.split("/") : []) as segment, index (index)}
-            <span class="crumb">{segment}</span><span class="crumb-sep" aria-hidden="true">/</span>
-          {/each}
-          <strong class="crumb-name">{parts.name}</strong>
+          {#if onRevealPath}
+            {#each crumbs as crumb (crumb.path)}
+              <button
+                type="button"
+                class="crumb crumb-btn"
+                aria-haspopup="dialog"
+                aria-expanded={crumbPicker?.current === crumb.path}
+                title={`切换到 ${crumb.parent || "仓库根目录"} 下的其他目录或文件`}
+                onclick={(event) => openCrumb(event, crumb.parent, crumb.path)}
+              >{crumb.name}</button><span class="crumb-sep" aria-hidden="true">/</span>
+            {/each}
+            <button
+              type="button"
+              class="crumb-name crumb-btn"
+              aria-haspopup="dialog"
+              aria-expanded={crumbPicker?.current === path}
+              title={`切换到 ${parts.dir || "仓库根目录"} 下的其他文件`}
+              onclick={(event) => openCrumb(event, parts?.dir ?? "", path ?? "")}
+            >{parts.name}</button>
+          {:else}
+            {#each crumbs as crumb (crumb.path)}
+              <span class="crumb">{crumb.name}</span><span class="crumb-sep" aria-hidden="true">/</span>
+            {/each}
+            <strong class="crumb-name">{parts.name}</strong>
+          {/if}
         </span>
+        {#if crumbPicker}
+          {#key crumbPicker}
+            <BreadcrumbPicker
+              anchor={crumbPicker.anchor}
+              repository={opened.summary.path}
+              directory={crumbPicker.directory}
+              current={crumbPicker.current}
+              {includeIgnored}
+              {generation}
+              {nextId}
+              {onGeneration}
+              onOpen={(target) => void onRevealPath?.(target, null)}
+              onClose={(refocus) => {
+                const anchor = crumbPicker?.anchor;
+                crumbPicker = null;
+                if (refocus) anchor?.focus({ preventScroll: true });
+              }}
+            />
+          {/key}
+        {/if}
         {#if mark}
           <span class={`st ${mark.tone}`} title={mark.label} aria-label={`Git 状态：${mark.label}`}>{mark.letter}</span>
         {/if}

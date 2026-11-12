@@ -606,14 +606,13 @@ async function main() {
         );
         await pause(400);
         await shot("files-markdown", "markdown", "Markdown 默认排版预览");
-        // 文件视图的预览有标题时给出目录开关（.md-small-button，与阅读器同一套控件）；
+        // 文件视图的预览有标题时在工具条上给出目录图标开关（aria-label「文档目录」）；
         // 仍然按「开关真的存在」决定是否截图，缺失时把原因写进 manifest，不伪造一张目录图。
         const toggled = await evaluate(
           cdp,
           sessionId,
           `(() => {
-            const toggle = [...document.querySelectorAll(".files-view .md-small-button")]
-              .find((item) => item.textContent.includes("目录"));
+            const toggle = document.querySelector('.files-view button[aria-label="文档目录"]');
             if (!toggle) return false;
             toggle.click();
             return true;

@@ -576,8 +576,8 @@ describe("Markdown 阅读接入", () => {
     // 查看/编辑分段已表明模式，状态条不再重复一枚「只读」。
     expect(container.querySelector(".file-status")?.textContent).not.toContain("只读");
     const outline = screen.getByRole("button", { name: "文档目录" });
-    // 与阅读器自己的目录工具行同一套控件外观，浏览器场景才能靠同一个类找到它。
-    expect(outline.classList.contains("md-small-button")).toBe(true);
+    // 目录是工具条上的图标开关，和搜索、更多同一排，不再占一个带文字的按钮。
+    expect(outline.classList.contains("icon-btn")).toBe(true);
     expect(outline.getAttribute("aria-pressed")).toBe("false");
     await fireEvent.click(outline);
     expect(outline.getAttribute("aria-pressed")).toBe("true");

@@ -285,3 +285,16 @@ describe("Markdown 阅读", () => {
     expect(view.component.position().anchor).toBe("目标");
   });
 });
+
+describe("Markdown 文件头属性", () => {
+  it("以可收起的键值表显示在正文之前", async () => {
+    const { container } = render(MarkdownPreview, { text: "---\n# 机器区说明\nformat: exploration\n---\n\n# 标题\n", documentKey: "fm" });
+    await screen.findByRole("heading", { name: "标题" });
+    const meta = container.querySelector("details.md-frontmatter")!;
+    expect(meta.hasAttribute("open")).toBe(true);
+    expect(meta.querySelector("dt")?.textContent).toBe("format");
+    expect(meta.querySelector("dd")?.textContent).toBe("exploration");
+    expect(meta.textContent).toContain("机器区说明");
+    expect(screen.queryByRole("heading", { name: /format/ })).toBeNull();
+  });
+});

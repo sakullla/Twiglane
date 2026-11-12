@@ -1071,7 +1071,47 @@
         </button>
       </div>
       <div class="file-actions">
-        {#if canEdit}
+        {#if isMarkdown && !showImage}
+          <!--
+            Markdown 只有一组模式：预览 / 源码 / 编辑。三者互斥，合成一个分段控件，
+            不再叠「查看·编辑」和「预览·源码」两组按钮。dirty 草稿不能直接离开编辑。
+          -->
+          <div class="segmented file-view-mode file-edit-mode" role="group" aria-label="Markdown 显示方式">
+            <button
+              type="button"
+              aria-pressed={!editing && documentMode === "preview"}
+              aria-label="预览这个 Markdown 文档"
+              title={editing && editDirty ? "有未保存的修改：先保存或放弃修改，再回到预览" : "排版预览（只读）"}
+              disabled={editing && (editDirty || Boolean(editSession?.saving))}
+              onclick={() => {
+                if (editing) stopEdit();
+                setDocumentMode("preview");
+              }}
+            >预览</button>
+            <button
+              type="button"
+              aria-pressed={!editing && documentMode === "source"}
+              aria-label="查看这个 Markdown 的源码"
+              title={editing && editDirty ? "有未保存的修改：先保存或放弃修改，再回到源码" : "显示源码文本（只读）"}
+              disabled={editing && (editDirty || Boolean(editSession?.saving))}
+              onclick={() => {
+                if (editing) stopEdit();
+                setDocumentMode("source");
+              }}
+            >源码</button>
+            {#if canEdit}
+              <button
+                type="button"
+                aria-pressed={editing}
+                aria-label="编辑这个工作区文件"
+                title="在这里修改当前工作区的这个文件；只在点「保存」时写入，不暂存、不提交"
+                onclick={() => {
+                  if (!editing) startEdit(readingLine(), "top");
+                }}
+              ><Icon name="pencil" size={12} />编辑</button>
+            {/if}
+          </div>
+        {:else if canEdit}
           <!-- 查看是只读的分页阅读；编辑只改当前工作区这一个文件，保存需要明确操作。 -->
           <div class="segmented file-view-mode file-edit-mode" role="group" aria-label="查看或编辑">
             <button
@@ -1092,35 +1132,6 @@
               }}
             ><Icon name="pencil" size={12} />编辑</button>
           </div>
-        {/if}
-        {#if isMarkdown && !showImage && !editing}
-          <div class="segmented file-view-mode" role="group" aria-label="Markdown 显示方式">
-            <button
-              type="button"
-              aria-pressed={documentMode === "preview"}
-              aria-label="预览这个 Markdown 文档"
-              title="排版预览（只读）"
-              onclick={() => setDocumentMode("preview")}
-            >预览</button>
-            <button
-              type="button"
-              aria-pressed={documentMode === "source"}
-              aria-label="查看这个 Markdown 的源码"
-              title="显示源码文本"
-              onclick={() => setDocumentMode("source")}
-            >源码</button>
-          </div>
-          {#if documentMode === "preview" && headingCount > 0}
-            <!-- 目录入口与阅读器自己的工具行同一套控件外观（.md-small-button），不另占一行。 -->
-            <button
-              type="button"
-              class="md-small-button file-outline-btn"
-              aria-pressed={outlineOpen}
-              aria-label="文档目录"
-              title={outlineOpen ? "收起目录" : `显示目录（${headingCount} 个标题）`}
-              onclick={() => (outlineOpen = !outlineOpen)}
-            ><Icon name="list" size={13} /><span>目录</span></button>
-          {/if}
         {/if}
         {#if isSvg && content?.kind === "text" && !editing}
           <div class="segmented file-view-mode" role="group" aria-label="SVG 显示方式">
@@ -1148,6 +1159,16 @@
             title={primarySide === "unstaged" ? "回到改动视图，定位到这个文件未暂存的一侧" : "回到改动视图，定位到这个文件已暂存的一侧"}
             onclick={() => onOpenDiff?.(path, primarySide!)}
           ><Icon name="file-diff" size={13} /><span>查看改动</span></button>
+        {/if}
+        {#if isMarkdown && !showImage && !editing && documentMode === "preview" && headingCount > 0}
+          <button
+            type="button"
+            class="icon-btn sm"
+            aria-pressed={outlineOpen}
+            aria-label="文档目录"
+            title={outlineOpen ? "收起目录" : `显示目录（${headingCount} 个标题）`}
+            onclick={() => (outlineOpen = !outlineOpen)}
+          ><Icon name="list" size={14} /></button>
         {/if}
         {#if content?.kind === "text" && !showImage && !editing}
           <button

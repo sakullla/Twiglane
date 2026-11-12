@@ -35,9 +35,25 @@ export interface MarkdownListItem {
   children: MarkdownNode[];
 }
 
+/** 文件头 YAML（`---` 包围）：顶层键值按行列出，嵌套或多行的值保留原文。 */
+export interface MarkdownFrontmatterField {
+  key: string;
+  value: string;
+  /** 值跨多行（列表、映射、块文本）：按等宽原文显示。 */
+  block: boolean;
+}
+
+export interface MarkdownFrontmatter {
+  fields: MarkdownFrontmatterField[];
+  /** 顶层注释行（去掉 `#`），作为说明显示。 */
+  comments: string[];
+  raw: string;
+}
+
 export interface MarkdownDocument {
   blocks: MarkdownNode[];
   headings: MarkdownHeading[];
+  frontmatter?: MarkdownFrontmatter | null;
 }
 
 export type MarkdownParseResult =

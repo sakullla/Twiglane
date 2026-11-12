@@ -166,24 +166,7 @@ describe("冲突标记解析", () => {
     expect(inlineRange("same", "same")).toBeNull();
   });
 
-  it("五万行、上百处冲突的文件解析与组合仍是线性开销", () => {
-    const lines: string[] = [];
-    for (let block = 0; block < 120; block += 1) {
-      for (let index = 0; index < 400; index += 1) lines.push(`const v${block}_${index} = ${index};`);
-      lines.push("<<<<<<< HEAD", `ours ${block}`, "=======", `theirs ${block}`, ">>>>>>> main");
-    }
-    const text = `${lines.join("\n")}\n`;
-    expect(splitRawLines(text).length).toBeGreaterThan(48_000);
-    const started = performance.now();
-    const parsed = parseConflictText(text);
-    const resolutions = Object.fromEntries(parsed.hunks.map((hunk) => [hunk.index, { choice: "theirs" as const }]));
-    const composed = composeConflictText(parsed, resolutions);
-    const elapsed = performance.now() - started;
-    expect(parsed.hunks).toHaveLength(120);
-    expect(hasConflictMarkers(composed)).toBe(false);
-    expect(composed).toContain("theirs 119\n");
-    expect(elapsed).toBeLessThan(1500);
-  });
+
 });
 
 describe("逐处处理冲突", () => {
@@ -480,18 +463,7 @@ describe("结果栏来源标记", () => {
     expect(mapLine([], [], 3)).toBe(0);
   });
 
-  it("几万行与大量重复行都在预算内完成", () => {
-    const unique = Array.from({ length: 60_000 }, (_, index) => `const value${index} = ${index};`);
-    const edited = unique.map((line, index) => (index % 500 === 0 ? `${line} // 改` : line));
-    const repeated = Array.from({ length: 60_000 }, (_, index) => (index % 3 === 0 ? "}" : index % 3 === 1 ? "" : "  x();"));
-    const shifted = ["first", ...repeated.slice(0, 30_000), "middle", ...repeated.slice(30_000).reverse()];
-    const started = performance.now();
-    const marks = computeMarks(`${edited.join("\n")}\n`, `${unique.join("\n")}\n`, `${unique.join("\n")}\n`);
-    computeMarks(`${shifted.join("\n")}\n`, `${repeated.join("\n")}\n`, `${shifted.join("\n")}\n`);
-    expect(performance.now() - started).toBeLessThan(1500);
-    expect(marks.runs).toHaveLength(120);
-    expect(marks.runs.every((run) => run.kind === "manual")).toBe(true);
-  });
+
 
   it("超过上限时关闭标记", () => {
     expect(exceedsMarkLimit("a\n", "b\n")).toBe(false);

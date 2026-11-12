@@ -1,7 +1,7 @@
 {
   "name": "twiglane",
   "private": true,
-  "version": "0.3.11",
+  "version": "0.3.12",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,7 +16,8 @@
     "verify:delivery": "node scripts/verify-delivery.mjs",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "benchmark:git": "cargo run --locked --manifest-path src-tauri/Cargo.toml --features benchmarks --example benchmark-git --",
-    "benchmark:status": "node scripts/benchmarks/status.mjs"
+    "benchmark:status": "node scripts/benchmarks/status.mjs",
+    "benchmark:text": "node scripts/benchmarks/text.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.4",

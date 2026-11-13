@@ -628,7 +628,9 @@
 
 /* ---------- 差异视图 ---------- */
 .diff { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--surface); overflow: hidden; flex: 1; container-type: inline-size; container-name: diff; }
-@container diff (max-width: 640px) { .diff-hist-label, .diff-summary, .diff-ws-note { display: none; } }
+/* 窄容器只藏说明文字：.diff-ws-note-btn 是「完整文件/已隐藏 N 处」的一键恢复入口，
+   过滤生效时它必须外显，不能跟着纯文本提示一起被收掉。 */
+@container diff (max-width: 640px) { .diff-hist-label, .diff-summary, .diff-ws-note:not(.diff-ws-note-btn) { display: none; } }
 @container diff (max-width: 480px) { .diff-side, .diff-stats { display: none; } .diff-line { grid-template-columns: 36px 36px minmax(0, 1fr) auto; } }
 .diff:focus { outline: none; }
 .file-nav { display: inline-flex; align-items: center; gap: var(--space-4); flex: none; }

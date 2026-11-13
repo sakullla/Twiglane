@@ -284,7 +284,7 @@ export function buildChangedTree(
 function sortNodes(list: FileNode[]): void {
   list.sort((left, right) =>
     isDirectoryKind(left.kind) === isDirectoryKind(right.kind)
-      ? left.name.localeCompare(right.name)
+      ? left.name.localeCompare(right.name, undefined, { numeric: true })
       : isDirectoryKind(left.kind)
         ? -1
         : 1,

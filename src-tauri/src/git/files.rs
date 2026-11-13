@@ -171,8 +171,7 @@ fn read_directory(
         let right_dir = is_directory_entry(right.kind);
         right_dir
             .cmp(&left_dir)
-            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| natural_cmp(&left.name, &right.name))
     });
     Ok((entries, errors))
 }
@@ -182,6 +181,92 @@ fn is_directory_entry(kind: RepositoryEntryKind) -> bool {
         kind,
         RepositoryEntryKind::Directory | RepositoryEntryKind::NestedRepository
     )
+}
+
+enum NaturalChunk {
+    Num(String),
+    Str(String),
+}
+
+/// 把名称拆成数字段与文本段：数字段按数值参与比较，其余保持原样顺序。
+fn natural_chunks(text: &str) -> Vec<NaturalChunk> {
+    let mut chunks = Vec::new();
+    let mut digits = String::new();
+    let mut letters = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_digit() {
+            if !letters.is_empty() {
+                chunks.push(NaturalChunk::Str(std::mem::take(&mut letters)));
+            }
+            digits.push(ch);
+        } else {
+            if !digits.is_empty() {
+                chunks.push(NaturalChunk::Num(std::mem::take(&mut digits)));
+            }
+            letters.push(ch);
+        }
+    }
+    if !digits.is_empty() {
+        chunks.push(NaturalChunk::Num(digits));
+    }
+    if !letters.is_empty() {
+        chunks.push(NaturalChunk::Str(letters));
+    }
+    chunks
+}
+
+fn compare_natural_chunks(
+    left: &[NaturalChunk],
+    right: &[NaturalChunk],
+    case_sensitive: bool,
+) -> std::cmp::Ordering {
+    let mut left = left.iter();
+    let mut right = right.iter();
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(NaturalChunk::Num(a)), Some(NaturalChunk::Num(b))) => {
+                let a_trim = a.trim_start_matches('0');
+                let b_trim = b.trim_start_matches('0');
+                let ord = a_trim
+                    .len()
+                    .cmp(&b_trim.len())
+                    .then_with(|| a_trim.cmp(b_trim));
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+                // 数值相同但前导零不同：零少的在前，保证次序确定。
+                let ord = a.len().cmp(&b.len());
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+            (Some(NaturalChunk::Num(_)), Some(NaturalChunk::Str(_))) => {
+                return std::cmp::Ordering::Less;
+            }
+            (Some(NaturalChunk::Str(_)), Some(NaturalChunk::Num(_))) => {
+                return std::cmp::Ordering::Greater;
+            }
+            (Some(NaturalChunk::Str(a)), Some(NaturalChunk::Str(b))) => {
+                let ord = if case_sensitive {
+                    a.cmp(b)
+                } else {
+                    a.to_lowercase().cmp(&b.to_lowercase())
+                };
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+    }
+}
+
+/// 自然排序：连续数字按数值比较（`T2` 排在 `T11` 前）；先不区分大小写，再按原样打破平手。
+fn natural_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    compare_natural_chunks(&natural_chunks(left), &natural_chunks(right), false)
+        .then_with(|| compare_natural_chunks(&natural_chunks(left), &natural_chunks(right), true))
 }
 
 /// 把本目录的直接子项拼成 `git check-ignore --stdin` 的输入（NUL 分隔，末尾同样带分隔符）。
@@ -2640,6 +2725,30 @@ mod tests {
         assert!(repository_directory(&backend, path, "../", false, 1, 5)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn directory_sorts_names_naturally() {
+        let fixture = crate::test_support::git_fixture("repository-files-directory");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("T11-run.md"), "11").unwrap();
+        fs::write(root.join("T2-run.md"), "2").unwrap();
+        fs::write(root.join("T9-run.md"), "9").unwrap();
+        fs::write(root.join("a10.txt"), "10").unwrap();
+        fs::write(root.join("a2.txt"), "2").unwrap();
+        fs::write(root.join("1.md"), "1").unwrap();
+        let path = root.to_str().unwrap();
+        let visible = repository_directory(&backend, path, "", false, 1, 1)
+            .await
+            .unwrap();
+        let names: Vec<_> = visible
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, ["1.md", "a2.txt", "a10.txt", "T2-run.md", "T9-run.md", "T11-run.md"]);
     }
 
     #[tokio::test]

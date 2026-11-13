@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { chainOf, FILE_ROW_HEIGHT, filterRows, flattenTree, makeNode, type FileNode } from "../src/lib/files.svelte";
+import { chainOf, FILE_ROW_HEIGHT, filterRows, flattenTree, buildChangedTree, makeNode, type FileNode } from "../src/lib/files.svelte";
+import type { FileChange } from "../src/lib/types";
 
 const repositoryDirectory = vi.hoisted(() => vi.fn());
 const repositoryFileContent = vi.hoisted(() => vi.fn());
@@ -113,6 +114,13 @@ describe("目录树结构", () => {
       "src/lib/components",
       "src/lib/components/Icon.svelte",
     ]);
+  });
+
+  it("仅改动树按自然序排列：数字段按数值比较", () => {
+    const change = (path: string): FileChange => ({ path, originalPath: null, staged: "none", unstaged: "modified", untracked: false, unmerged: false });
+    const files = [change("task-runs/T11-run.md"), change("task-runs/T2-run.md"), change("task-runs/T9-run.md")];
+    const rows = flattenTree(buildChangedTree(files));
+    expect(rows.map((row) => row.path)).toEqual(["task-runs", "task-runs/T2-run.md", "task-runs/T9-run.md", "task-runs/T11-run.md"]);
   });
 });
 

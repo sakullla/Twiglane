@@ -824,10 +824,14 @@ describe("差异区", () => {
   it("可展开为完整文件（按大上下文重新读取），展开后不提供按块暂存", async () => {
     await openRepo();
     await waitFor(() => expect(document.querySelector(".hunk-btn")).toBeTruthy());
-    await fireEvent.click(screen.getByRole("button", { name: /只看改动/ }));
+    // 完整文件开关常驻「更多差异工具」，与主行恢复提示共用同一份状态。
+    await fireEvent.click(screen.getByRole("button", { name: /更多差异工具/ }));
+    await fireEvent.click(within(screen.getByRole("dialog", { name: "差异工具" })).getByRole("option", { name: /查看完整文件/ }));
     await waitFor(() => expect(mocks.loadDiff.mock.calls.at(-1)?.[8]).toBe(1_000_000));
     await waitFor(() => expect(document.querySelector(".hunk-btn")).toBeNull());
     expect(localStorage.getItem("twiglane.diffFullFile")).toBe("1");
+    // 生效期间主行外显一键恢复提示，不展开菜单也能看到当前在看整份文件。
+    expect(document.querySelector("[data-diff-full]")?.textContent).toContain("完整文件");
     // 右键里的「暂存此块」说明为什么现在不能用
     await fireEvent.contextMenu(document.querySelector("[data-line='3']")!, { clientX: 300, clientY: 200 });
     const stage = within(screen.getByRole("menu")).getByRole("menuitem", { name: "暂存此块" });

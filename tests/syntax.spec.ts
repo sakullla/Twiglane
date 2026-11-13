@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/svelte";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createTextDiff } from "../src/lib/diff";
@@ -177,9 +177,19 @@ describe("差异视图里的语法高亮", () => {
     });
   }
 
+  /** 语言选择是溢出菜单的常驻行：先开「更多差异工具」再断言当前语言。 */
+  async function languageChip() {
+    await fireEvent.click(screen.getByRole("button", { name: /更多差异工具/ }));
+    const dialog = screen.getByRole("dialog", { name: "差异工具" });
+    const chip = dialog.querySelector(".diff-tool-language .lang-chip");
+    expect(chip).toBeTruthy();
+    return { dialog, chip: chip as HTMLElement };
+  }
+
   it("按文件语言着色并显示语言；再次打开同一内容命中缓存也不会反复渲染", async () => {
     const first = renderDiff("src/panel.ts", "export const LIMIT = 20;\n", "export const LIMIT = 50;\n");
-    expect(screen.getByRole("button", { name: "语法高亮语言：TypeScript" })).toBeTruthy();
+    const { dialog } = await languageChip();
+    expect(within(dialog as HTMLElement).getByRole("button", { name: "语法高亮语言：TypeScript" })).toBeTruthy();
     await waitFor(() => expect(document.querySelector(".diff .tk-keyword")).toBeTruthy(), { timeout: 5000 });
     expect(screen.getByText(codeLine("export const LIMIT = 50;"))).toBeTruthy();
     expect(document.querySelector(".diff-line.add .wd")?.textContent).toBe("5");
@@ -229,7 +239,8 @@ describe("差异视图里的语法高亮", () => {
   it("关闭语法高亮后按纯文本显示，行内改动标记仍在", async () => {
     setSyntaxEnabled(false);
     renderDiff("src/panel.ts", "export const LIMIT = 20;\n", "export const LIMIT = 50;\n");
-    expect(screen.getByRole("button", { name: "语法高亮语言：高亮已关闭" })).toBeTruthy();
+    const { dialog } = await languageChip();
+    expect(within(dialog as HTMLElement).getByRole("button", { name: "语法高亮语言：高亮已关闭" })).toBeTruthy();
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(document.querySelector(".diff [class*='tk-']")).toBeNull();
     expect(document.querySelector(".diff-line.del .wd")?.textContent).toBe("2");

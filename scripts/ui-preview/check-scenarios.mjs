@@ -313,6 +313,31 @@ const SCENARIOS = [
     detail: "document.querySelector('.review-count')?.textContent?.trim() || ''",
   },
   {
+    name: "改动视图：低频差异工具收进溢出菜单",
+    url: "/",
+    ready:
+      "(function () { " +
+      'if (!window.__diffOpened) { const recent = document.querySelector(".welcome-recent button"); if (!recent) return false; window.__diffOpened = true; recent.click(); return false; } ' +
+      "if (!document.querySelector('.file-list .file-row')) return false; " +
+      "if (!window.__diffRow) { const row = [...document.querySelectorAll('.file-list .file-row')].find((item) => item.textContent.includes('repo.rs')); if (!row) return false; window.__diffRow = true; row.click(); return false; } " +
+      "return Boolean(document.querySelector('.diff-toolbar')) && document.querySelectorAll('.diff-scroll .diff-line').length > 0; })()",
+    // 主行只留路径/统计/上下文动作与布局切换；语言、空白偏好、文件历史与完整文件都在溢出菜单里。
+    check:
+      "(async () => { const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); " +
+      "const bar = document.querySelector('.diff-toolbar'); if (!bar) return false; " +
+      "const names = [...bar.querySelectorAll('button')].map((button) => button.getAttribute('aria-label') || button.textContent.trim()); " +
+      "if (names.some((label) => /显示空白字符|忽略纯空白|此文件历史|完整文件|只看改动|语法高亮/.test(label))) { window.__toolOpts = { leak: names.filter((label) => /空白|历史|完整|只看|语法/.test(label)) }; return false; } " +
+      "const more = bar.querySelector('.diff-more-btn'); if (!more) return false; " +
+      "more.click(); await wait(200); " +
+      "const dialog = document.querySelector('.popover'); if (!dialog) return false; " +
+      "const opts = [...dialog.querySelectorAll('[role=option]')].map((item) => item.textContent || ''); " +
+      "const lang = Boolean(dialog.querySelector('.diff-tool-language .lang-chip')); " +
+      "window.__toolOpts = { opts, lang }; " +
+      "return lang && opts.some((text) => text.includes('显示空白字符')) && opts.some((text) => text.includes('忽略纯空白')) && opts.some((text) => text.includes('完整文件')) && opts.some((text) => text.includes('此文件历史')); })()",
+    detail:
+      "(() => { const result = window.__toolOpts; if (!result) return '(未记录)'; if (result.leak) return '主行漏出低频控件：' + result.leak.join(' / '); return JSON.stringify({ lang: result.lang, opts: result.opts.length }); })()",
+  },
+  {
     name: "文档阅读：Markdown 默认排版预览",
     url: "/",
     ready: OPEN_README,
@@ -656,7 +681,10 @@ const SCENARIOS = [
       await d.click("[data-terminal-toggle]");
       await d.until("document.querySelector('[data-terminal-state]')?.dataset.terminalState === 'exited'", "打开时为退出状态");
       await d.click("[data-terminal-restart]");
-      await d.until("document.querySelector('[data-terminal-state]')?.dataset.terminalState === 'running'", "重新启动后运行中");
+      await d.until(
+        "document.querySelector('[data-terminal-state]')?.dataset.terminalState === 'running' && (document.querySelector('[data-terminal-panel]')?.textContent || '').includes('Twiglane 终端预览')",
+        "重新启动后输出已渲染",
+      );
     },
     check:
       "(() => { const panel = document.querySelector('[data-terminal-panel]'); return Boolean(panel) && panel.textContent.includes('Twiglane 终端预览') && document.querySelector('[data-terminal-state]')?.dataset.terminalState === 'running'; })()",

@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 
 /** 本次工作流标识：manifest 与 report 都用它，runner 不接受沿用上一批的 ID。 */
-const WORKFLOW_ID = "2026-11-09-ai-coding-ui-ux";
+const WORKFLOW_ID = "2026-11-13-modern-ui-ux-redesign";
 const args = process.argv.slice(2);
 const has = (name) => args.includes(name);
 const readArg = (name, fallback) => {

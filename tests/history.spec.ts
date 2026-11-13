@@ -1888,13 +1888,14 @@ describe("历史分栏", () => {
     const view = render(HistoryPanel, { props: { ...panelProps(), fullFile: false, onFullFile } });
     await waitFor(() => expect(commitFileDiff).toHaveBeenCalled());
     expect(commitFileDiff.mock.calls.at(-1)?.length, "默认读取不追加上下文参数").toBe(8);
-    // 宽工具条直接给入口，窄时收进「更多差异工具」；两处共用同一个切换。
-    const inline = await waitFor(() => {
-      const button = document.querySelector<HTMLButtonElement>(".diff-toolbar .diff-full-toggle");
+    // 完整文件开关常驻「更多差异工具」：菜单项与主行的恢复提示共用同一个切换。
+    const more = await waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>(".diff-toolbar .diff-more-btn");
       if (button) return button;
-      throw new Error("没有完整文件入口");
+      throw new Error("没有差异工具入口");
     });
-    await fireEvent.click(inline);
+    await fireEvent.click(more);
+    await fireEvent.click(within(screen.getByRole("dialog", { name: "差异工具" })).getByRole("option", { name: /查看完整文件/ }));
     expect(onFullFile).toHaveBeenCalledWith(true);
     commitFileDiff.mockClear();
     await view.rerender({ ...panelProps(), fullFile: true, onFullFile });
@@ -2027,7 +2028,8 @@ describe("只读差异", () => {
       },
     });
     expect(screen.queryByRole("button", { name: "暂存此块" })).toBeNull();
-    await fireEvent.click(screen.getByRole("button", { name: "此文件历史" }));
+    await fireEvent.click(screen.getByRole("button", { name: /更多差异工具/ }));
+    await fireEvent.click(within(screen.getByRole("dialog", { name: "差异工具" })).getByRole("option", { name: /此文件历史/ }));
     expect(openedPath).toBe("notes.txt");
   });
 

@@ -1355,7 +1355,7 @@ describe("差异工具条分段与空/失败状态（T3）", () => {
     onNext: () => {},
   });
 
-  it("工具条按「位置与身份 → 文件动作 → 显示方式」三段排列", () => {
+  it("工具条按「位置与身份 → 显示方式 → 低频工具」排列，低频项不占主行", async () => {
     render(DiffView, {
       props: {
         ...base(),
@@ -1373,20 +1373,29 @@ describe("差异工具条分段与空/失败状态（T3）", () => {
     // 第一段：上一个/下一个文件 + 路径与侧别，位置信息在前。
     expect(groups[0].querySelector(".file-nav")).toBeTruthy();
     expect(groups[0].querySelector(".diff-path")).toBeTruthy();
-    // 第二段：只放能对这个文件做的事。
-    expect(within(groups[1]).getByRole("button", { name: "此文件历史" })).toBeTruthy();
-    expect(within(groups[1]).getByRole("button", { name: /只看改动|完整文件/ })).toBeTruthy();
-    // 第三段：显示方式留在最右。
-    expect(within(groups[2]).getByRole("group", { name: "差异布局" })).toBeTruthy();
+    // 第二段：显示方式（统一/并排）。
+    expect(within(groups[1]).getByRole("group", { name: "差异布局" })).toBeTruthy();
+    // 第三段：低频文件工具收在最右的溢出菜单，不在主行内联。
+    expect(within(groups[1]).queryByRole("button", { name: "此文件历史" })).toBeNull();
+    await fireEvent.click(within(groups[2]).getByRole("button", { name: /更多差异工具/ }));
+    const dialog = screen.getByRole("dialog", { name: "差异工具" });
+    expect(within(dialog).getByRole("option", { name: /此文件历史/ })).toBeTruthy();
+    expect(within(dialog).getByRole("option", { name: /只看改动|完整文件/ })).toBeTruthy();
+    // 语法高亮语言是菜单常驻行，挂在搜索框下而不是工具条上。
+    expect(dialog.querySelector(".diff-tool-language .lang-chip")).toBeTruthy();
   });
 
-  it("没有语言、历史、完整文件这些动作时只留两段，不画空段", () => {
+  it("没有历史、完整文件这些动作时不画空段，溢出只剩复制路径", async () => {
     render(DiffView, { props: { ...base(), selection, diff: null } });
     const groups = [...(document.querySelector(".diff-toolbar") as HTMLElement).children] as HTMLElement[];
-    expect(groups).toHaveLength(2);
+    expect(groups).toHaveLength(3);
     expect(groups[0].className).toContain("context");
     expect(groups[1].querySelector(".segmented")).toBeTruthy();
     expect(document.querySelectorAll(".diff-toolbar-group:empty")).toHaveLength(0);
+    await fireEvent.click(within(groups[2]).getByRole("button", { name: /更多差异工具/ }));
+    const options = within(screen.getByRole("dialog", { name: "差异工具" })).getAllByRole("option");
+    expect(options).toHaveLength(1);
+    expect(options[0].textContent).toContain("复制文件路径");
   });
 
   it("读取失败时就地给出「重新读取」，走同一条读取回调", async () => {
@@ -1453,16 +1462,30 @@ describe("差异空白显示与纯空白过滤（T3）", () => {
     onLoadMore: () => {},
   });
   const button = (name: string) => screen.getByRole("button", { name });
+  const moreTrigger = () => screen.getByRole("button", { name: /更多差异工具/ });
+  const toolsDialog = () => screen.getByRole("dialog", { name: "差异工具" });
+  /* 显示偏好常驻「更多差异工具」：菜单项的 aria-selected 对应原来内联按钮的 aria-pressed；
+     条目可访问名带有「已开启/已关闭」状态文字，按前缀匹配。 */
+  const openTool = async (name: string) => {
+    await fireEvent.click(moreTrigger());
+    await fireEvent.click(within(toolsDialog()).getByRole("option", { name: new RegExp(`^${name}`) }));
+  };
+  const toolSelected = async (name: string) => {
+    await fireEvent.click(moreTrigger());
+    const selected = within(toolsDialog()).getByRole("option", { name: new RegExp(`^${name}`) }).getAttribute("aria-selected");
+    await fireEvent.keyDown(toolsDialog(), { key: "Escape" });
+    return selected;
+  };
 
   beforeEach(() => resetDiffPrefs());
 
   it("打开「显示空白」标出空格与制表符，代码文本仍是原文", async () => {
     render(DiffView, { props: base() });
     expect(document.querySelector(".diff .ws-space")).toBeNull();
-    expect(button("显示空白字符").getAttribute("aria-pressed")).toBe("false");
+    expect(await toolSelected("显示空白字符")).toBe("false");
 
-    await fireEvent.click(button("显示空白字符"));
-    expect(button("显示空白字符").getAttribute("aria-pressed")).toBe("true");
+    await openTool("显示空白字符");
+    expect(await toolSelected("显示空白字符")).toBe("true");
     expect(document.querySelectorAll(".diff .ws-space").length).toBeGreaterThan(0);
     expect(document.querySelectorAll(".diff .ws-tab").length).toBeGreaterThan(0);
     // 标记是纯视觉的：DOM 文本还是原始行，没有插入「·」「→」这类字符。
@@ -1470,14 +1493,14 @@ describe("差异空白显示与纯空白过滤（T3）", () => {
     expect(screen.getByText(codeLine("\tconst indent = 1;"))).toBeTruthy();
     // 偏好写进本机，再点一次回到原文。
     expect(JSON.parse(localStorage.getItem("twiglane.diffPrefs") ?? "{}").showWhitespace).toBe(true);
-    await fireEvent.click(button("显示空白字符"));
-    expect(button("显示空白字符").getAttribute("aria-pressed")).toBe("false");
+    await openTool("显示空白字符");
+    expect(await toolSelected("显示空白字符")).toBe("false");
     expect(document.querySelector(".diff .ws-space")).toBeNull();
   });
 
   it("「忽略纯空白改动」只隐藏纯空白块，混合块与行号保持原样", async () => {
     render(DiffView, { props: base() });
-    await fireEvent.click(button("忽略纯空白改动"));
+    await openTool("忽略纯空白改动");
 
     // 只改了缩进的块整块隐藏（块头一起走），混合块两行都留着。
     expect(screen.queryByText(codeLine("  const indent = 1;"))).toBeNull();
@@ -1525,7 +1548,7 @@ describe("差异空白显示与纯空白过滤（T3）", () => {
       lines: wsLines.slice(0, 3),
     };
     render(DiffView, { props: { ...base(), diff: indentOnly } });
-    await fireEvent.click(button("忽略纯空白改动"));
+    await openTool("忽略纯空白改动");
 
     expect(screen.getByText("差异已被当前过滤条件隐藏")).toBeTruthy();
     expect(screen.queryByText("没有文本差异")).toBeNull();
@@ -1534,14 +1557,14 @@ describe("差异空白显示与纯空白过滤（T3）", () => {
     await fireEvent.click(button("显示空白改动"));
     expect(screen.queryByText("差异已被当前过滤条件隐藏")).toBeNull();
     expect(screen.getByText(codeLine("  const indent = 1;"))).toBeTruthy();
-    expect(button("忽略纯空白改动").getAttribute("aria-pressed")).toBe("false");
+    expect(await toolSelected("忽略纯空白改动")).toBe("false");
   });
 
   it("显示空白时右键复制仍然是原始文本", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     render(DiffView, { props: base() });
-    await fireEvent.click(button("显示空白字符"));
+    await openTool("显示空白字符");
 
     const row = document.querySelector<HTMLElement>('.diff-line[data-line="1"]')!;
     await fireEvent.contextMenu(row);
@@ -1552,10 +1575,10 @@ describe("差异空白显示与纯空白过滤（T3）", () => {
   it("并排视图同样标出空白，过滤对两栏一起生效", async () => {
     render(DiffView, { props: base() });
     await fireEvent.click(button("并排"));
-    await fireEvent.click(button("显示空白字符"));
+    await openTool("显示空白字符");
     expect(document.querySelector(".side-cell .ws-space")).toBeTruthy();
 
-    await fireEvent.click(button("忽略纯空白改动"));
+    await openTool("忽略纯空白改动");
     expect(screen.queryByText(codeLine("  const indent = 1;"))).toBeNull();
     expect(screen.getByText(codeLine("const value = 2;"))).toBeTruthy();
     expect(document.querySelector(".side-row")).toBeTruthy();
@@ -2890,7 +2913,8 @@ describe("行选暂存（R6）", () => {
     await fireEvent.click(screen.getByRole("button", { name: "选择新增第 2 行" }));
     expect(document.querySelector("[data-line-count]")?.textContent).toContain("1");
 
-    await fireEvent.click(screen.getByRole("button", { name: "忽略纯空白改动" }));
+    await fireEvent.click(screen.getByRole("button", { name: /更多差异工具/ }));
+    await fireEvent.click(within(screen.getByRole("dialog", { name: "差异工具" })).getByRole("option", { name: /忽略纯空白改动/ }));
     await tick();
     // 可见行集合变了：选择与选行模式一起失效，看不见的行不会被写入。
     expect(document.querySelector("[data-line-count]")).toBeNull();
@@ -3032,21 +3056,22 @@ describe("差异工具条随面板宽度收敛（R2）", () => {
     };
   }
 
-  it("1200 宽直接露出全部工具，900 宽把文件工具与显示偏好收进溢出，560 再收布局", async () => {
+  it("低频工具任何宽度都在溢出菜单；900 宽布局仍直接可见，560 再收布局", async () => {
     resetDiffPrefs();
     const width = stubToolbarWidth(1200);
     try {
       render(DiffView, { props: baseProps() });
       await tick();
-      expect(screen.getByRole("button", { name: "显示空白字符" })).toBeTruthy();
-      expect(screen.queryByRole("button", { name: /更多差异工具/ })).toBeNull();
+      // 宽窗口主行也只留核心动作与布局切换：语言、显示偏好、历史与完整文件始终在溢出里。
+      expect(screen.queryByRole("button", { name: "显示空白字符" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "此文件历史" })).toBeNull();
+      expect(screen.getByRole("button", { name: /更多差异工具/ })).toBeTruthy();
       expect((document.querySelector(".diff-toolbar") as HTMLElement).children).toHaveLength(3);
 
       cleanup();
       width.set(900);
       render(DiffView, { props: baseProps() });
       await tick();
-      // 中间档：布局仍直接可见；很少切换的显示偏好和文件历史、完整文件一起进溢出，把宽度留给文件名。
       expect(screen.queryByRole("button", { name: "显示空白字符" })).toBeNull();
       expect(screen.getByRole("group", { name: "差异布局" })).toBeTruthy();
       expect(screen.queryByRole("button", { name: "此文件历史" })).toBeNull();
@@ -3062,7 +3087,11 @@ describe("差异工具条随面板宽度收敛（R2）", () => {
       expect(screen.getByRole("button", { name: "上一个文件" })).toBeTruthy();
       expect(screen.getByRole("button", { name: "上一处改动" })).toBeTruthy();
       expect(document.querySelector(".diff-path")?.getAttribute("title")).toBe("demo.txt（未暂存）");
-      expect(screen.getByRole("button", { name: /更多差异工具/ })).toBeTruthy();
+      await fireEvent.click(screen.getByRole("button", { name: /更多差异工具/ }));
+      const dialog = screen.getByRole("dialog", { name: "差异工具" });
+      expect(within(dialog).getByRole("option", { name: /显示空白字符/ })).toBeTruthy();
+      expect(within(dialog).getByRole("option", { name: /此文件历史/ })).toBeTruthy();
+      expect(dialog.querySelector(".diff-tool-language .lang-chip")).toBeTruthy();
     } finally {
       width.restore();
     }
@@ -3206,13 +3235,16 @@ describe("差异工具条随面板宽度收敛（R2）", () => {
       expect(screen.queryByRole("button", { name: "显示空白字符" })).toBeNull();
       expect(screen.getByRole("button", { name: /更多差异工具/ })).toBeTruthy();
 
-      // 文件名放得下之后，宽度变化会从完整档重新量。
+      // 文件名放得下之后，宽度变化会从完整档重新量；布局回到直接可见，
+      // 显示偏好作为低频工具仍在溢出菜单里，不回主行。
       rangeRect.mockReturnValue({ width: 40 } as DOMRect);
       width.set(1260);
       observers.flush();
       await tick();
       await waitFor(() => expect(screen.getByRole("group", { name: "差异布局" })).toBeTruthy());
-      expect(screen.getByRole("button", { name: "显示空白字符" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "显示空白字符" })).toBeNull();
+      await fireEvent.click(screen.getByRole("button", { name: /更多差异工具/ }));
+      expect(within(screen.getByRole("dialog", { name: "差异工具" })).getByRole("option", { name: /显示空白字符/ })).toBeTruthy();
     } finally {
       rect.mockRestore();
       rangeRect.mockRestore();
@@ -3264,7 +3296,7 @@ describe("差异工具条随面板宽度收敛（R2）", () => {
 /* ------------------------------------------------------------------ *
  * R5：差异里的 Markdown 阅读入口。
  * 入口只在差异真的带 `document` 来源时出现，交给阅读窗口的是这一侧的真实版本；
- * 与「此文件历史」「完整文件」一样按面板宽度收敛，窄窗口从溢出入口进。
+ * 「阅读文档」是主行的上下文动作，只在最窄一档从溢出入口进。
  * ------------------------------------------------------------------ */
 describe("差异里的文档阅读入口（R5）", () => {
   const selection = { path: "docs/readme.md", side: "unstaged" as const };

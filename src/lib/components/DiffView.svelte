@@ -449,10 +449,10 @@
     escalated === 0 ? baseTier : escalated === 1 ? (baseTier === "full" ? "compact" : "narrow") : "narrow",
   );
   let showLayoutInline = $derived(tier !== "narrow");
-  /* 显示偏好（空白标记、略过纯空白）是设一次就很少再动的开关，中间宽度先把它们收进溢出；
-     布局切换更常用，留到最窄一档才收。开启状态仍在溢出按钮的计数与「已隐藏 N 处」提示里。 */
-  let showDisplayPrefsInline = $derived(tier === "full" && canFilterWhitespace);
-  let showOverflow = $derived(tier !== "full");
+  /* 语言、显示偏好、文件历史与完整文件是低频动作：任何宽度都收进「更多差异工具」，
+     主行只留文件路径、增删统计、上下文动作与布局切换；生效状态仍在溢出按钮的
+     计数与「已隐藏 N 处」「完整文件」提示里，不会跟着藏起来。 */
+  let showOverflow = $derived(Boolean(selection));
   /* Markdown 差异才有文档来源：前后版本的正文都在对应版本里读，不从这份 diff 拼。 */
   let documentSides = $derived(onReadDocument ? currentDiff?.document ?? null : null);
   /* 默认看这个差异的「后」侧：改动对比里它就是当前工作区/暂存区/这次提交的正文。 */
@@ -475,12 +475,9 @@
     return null;
   }
 
-  /* 文件工具里语言标签很窄，任何一档都留在工具条上；历史与完整文件在完整档才直接露出。 */
-  let inlineLanguage = $derived(Boolean(currentDiff && !currentDiff.binary && selection));
-  let inlineFileHistory = $derived(tier === "full" && Boolean(onFileHistory && selection));
-  let inlineFullFile = $derived(tier === "full" && Boolean(onFullFile && selection));
-  let inlineReadDocument = $derived(tier === "full" && Boolean(documentSides && selection));
-  let hasInlineFileTools = $derived(inlineLanguage || inlineFileHistory || inlineFullFile || inlineReadDocument);
+  /* 语言收进溢出菜单顶部的常驻行；「阅读文档」是上下文主动作，只在最窄档进菜单。 */
+  let showLanguageInMenu = $derived(Boolean(currentDiff && !currentDiff.binary && selection));
+  let inlineReadDocument = $derived(tier !== "narrow" && Boolean(documentSides && selection));
 
   interface DiffTool {
     id: string;
@@ -521,7 +518,7 @@
         },
       );
     }
-    if (canFilterWhitespace && !showDisplayPrefsInline) {
+    if (canFilterWhitespace) {
       tools.push(
         {
           id: "show-whitespace",
@@ -1271,34 +1268,9 @@
       </div>
       {#if refreshVisible && currentDiff}<span class="spinner muted" aria-hidden="true" title="正在刷新差异"></span>{/if}
     </div>
-    {#if hasInlineFileTools}
+    {#if (onToggleReview || onEdit || inlineReadDocument) && selection}
       <div class="diff-toolbar-group">
-        {#if inlineLanguage && selection}
-          <LanguagePicker path={selection.path} />
-        {/if}
-        {#if inlineFileHistory && selection}
-          <button
-            type="button"
-            class="btn btn-ghost btn-sm"
-            aria-label="此文件历史"
-            title="查看这个文件的提交历史"
-            onclick={() => onFileHistory?.(selection.path)}
-          >
-            <Icon name="history" size={14} /><span class="diff-hist-label">此文件历史</span>
-          </button>
-        {/if}
-        {#if inlineFullFile && selection}
-          <button
-            type="button"
-            class="btn btn-ghost btn-sm diff-full-toggle"
-            aria-pressed={fullFile}
-            title={fullFile ? "只显示改动附近的内容" : "把整份文件都显示出来（改动仍高亮）"}
-            onclick={() => onFullFile?.(!fullFile)}
-          >
-            <Icon name="rows" size={13} /><span class="diff-hist-label">{fullFile ? "完整文件" : "只看改动"}</span>
-          </button>
-        {/if}
-        {#if inlineReadDocument && selection}
+        {#if inlineReadDocument}
           <!-- 文件身份之后的第一个阅读动作：按版本读正文，和差异视图本身互不影响。 -->
           <button
             type="button"
@@ -1310,10 +1282,6 @@
             <Icon name="eye" size={13} /><span class="diff-hist-label">阅读文档</span>
           </button>
         {/if}
-      </div>
-    {/if}
-    {#if (onToggleReview || onEdit) && selection}
-      <div class="diff-toolbar-group">
         {#if onEdit}
           <!-- 只编辑当前工作区这一侧：转到文件视图的编辑器，差异本身不提供保存。 -->
           <button
@@ -1403,53 +1371,29 @@
         {/if}
       </div>
     {/if}
-    {#if showLayoutInline || showDisplayPrefsInline}
+    {#if showLayoutInline}
       <div class="diff-toolbar-group">
-        {#if showLayoutInline}
-          <div class="segmented" role="group" aria-label="差异布局">
-            <button type="button" aria-pressed={preferred === "unified"} title="统一视图" onclick={() => (ownMode = "unified")}><Icon name="rows" size={12} />统一</button>
-            <button type="button" aria-pressed={preferred === "split"} title="并排视图" onclick={() => (ownMode = "split")}><Icon name="split" size={12} />并排</button>
-          </div>
-        {/if}
-        <!-- 只有真正的文本差异才有可标记的空白：二进制、图片预览、冲突专用视图和截断内容上不出现这两个开关。 -->
-        {#if showDisplayPrefsInline && canFilterWhitespace}
-          <!-- 两个开关都只影响显示：代码文本、复制内容和暂存补丁仍用原始差异。 -->
-          <button
-            type="button"
-            class="btn btn-ghost btn-sm diff-ws-btn"
-            aria-pressed={diffPrefs.showWhitespace}
-            aria-label="显示空白字符"
-            title={diffPrefs.showWhitespace ? "不再标出空格与制表符" : "把空格和制表符标出来；复制与暂存仍是原文"}
-            onclick={toggleShowWhitespace}
-          >
-            <Icon name="eye" size={13} /><span class="diff-hist-label">空白</span>
-          </button>
-          <button
-            type="button"
-            class="btn btn-ghost btn-sm diff-ws-btn"
-            aria-pressed={diffPrefs.hideWhitespaceOnly}
-            aria-label="忽略纯空白改动"
-            title={diffPrefs.hideWhitespaceOnly ? "重新显示只改了空白的改动块" : "隐藏只改了空白字符的改动块；混合改动仍然完整显示"}
-            onclick={toggleHideWhitespaceOnly}
-          >
-            <Icon name="filter" size={13} /><span class="diff-hist-label">略过空白</span>
-          </button>
-          {#if whitespaceFilter.hunks.size > 0}
-            <span
-              class="diff-ws-note"
-              role="status"
-              data-diff-trimmed
-              title={whitespaceFilter.lines + " 行只改了空白，按当前设置没有显示；点「略过空白」可以恢复"}
-            >已隐藏 {whitespaceFilter.hunks.size} 处</span>
-          {/if}
-        {/if}
+        <div class="segmented" role="group" aria-label="差异布局">
+          <button type="button" aria-pressed={preferred === "unified"} title="统一视图" onclick={() => (ownMode = "unified")}><Icon name="rows" size={12} />统一</button>
+          <button type="button" aria-pressed={preferred === "split"} title="并排视图" onclick={() => (ownMode = "split")}><Icon name="split" size={12} />并排</button>
+        </div>
       </div>
     {/if}
     {#if showOverflow}
-      <!-- 溢出入口（R2）：与直接入口共用同一份 diffPrefs / fullFile / renderMode 状态，
-           生效状态写在条目右侧，禁用原因就地说明；关闭后焦点回到触发按钮。 -->
+      <!-- 溢出入口：低频工具与显示偏好常驻这里，与主行动作共用同一份 diffPrefs / fullFile /
+           renderMode 状态，生效状态写在条目右侧，禁用原因就地说明；关闭后焦点回到触发按钮。 -->
       <div class="diff-toolbar-group diff-overflow">
-        {#if !showDisplayPrefsInline && whitespaceFilter.hunks.size > 0}
+        {#if fullFile && onFullFile && selection}
+          <!-- 「查看完整文件」收进溢出，但生效期间主行留一个一眼可见的恢复入口。 -->
+          <button
+            type="button"
+            class="diff-ws-note diff-ws-note-btn"
+            data-diff-full
+            title="当前显示整份文件，改动仍高亮；点击恢复只看改动部分"
+            onclick={() => onFullFile?.(false)}
+          >完整文件</button>
+        {/if}
+        {#if whitespaceFilter.hunks.size > 0}
           <!-- 开关收进了溢出，但「有改动没显示」这件事不能跟着藏起来。 -->
           <button
             type="button"
@@ -1485,6 +1429,15 @@
             onChoose={(index) => runTool(visibleTools[index])}
             onClose={closeMore}
           >
+            {#snippet notice()}
+              {#if selection && showLanguageInMenu}
+                <!-- 语法高亮语言是低频偏好：作为菜单常驻行放在搜索框下，不占主工具条。
+                     它自带弹层，展开时点按不冒泡到本菜单的外部关闭。 -->
+                <div class="diff-tool-language">
+                  <LanguagePicker path={selection.path} />
+                </div>
+              {/if}
+            {/snippet}
             {#snippet list(listId)}
               {#if visibleTools.length === 0}
                 <p class="diff-tool-empty">没有匹配的差异工具</p>

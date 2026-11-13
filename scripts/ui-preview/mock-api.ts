@@ -15,6 +15,10 @@ import { createTextDiff } from "../../src/lib/diff";
 
 /** 预览 mock 的自我标识：健康端点和回归测试靠它确认浏览器拿到的是 mock，而不是真实 Tauri api。 */
 export const UI_PREVIEW_MOCK = true;
+
+/* 预览里终端固定走 DOM 渲染器：场景断言靠 DOM 文本核对输出与回显，headless Chrome 的
+   SwiftShader WebGL 会让 .xterm-rows 为空。真实 Tauri 窗口没有这个标记，仍按可用性用 WebGL。 */
+(window as unknown as { __uiPreviewDomTerminal?: boolean }).__uiPreviewDomTerminal = true;
 import { sampleFor } from "./samples";
 import { mockContentSearch, mockDirectory, mockDocument, mockDocumentResource, mockEditSave, mockEditSnapshot, mockFilePage, mockPathSearch } from "./mock-files";
 

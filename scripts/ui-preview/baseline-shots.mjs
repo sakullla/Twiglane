@@ -471,7 +471,7 @@ async function main() {
 
   const manifest = {
     // 当前工作流标识：runner 会核对它，不能沿用上一批证据的 ID。
-    workflow: "2026-11-09-ai-coding-ui-ux",
+    workflow: "2026-11-13-modern-ui-ux-redesign",
     task: "T6",
     capturedAt: new Date().toISOString(),
     environment: {

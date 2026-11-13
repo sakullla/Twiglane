@@ -562,6 +562,15 @@
    * 唯一标签会被永久藏掉且没有展开入口（开关在单引用时不渲染）。
    */
   let refsCollapsed = $state(false);
+  /** 用户是否手动收/展过引用：动过之后不再自动调整，切换提交也不重置。 */
+  let refsUserSet = $state(false);
+  let detailPills = $derived(detail ? refPills(detail.commit.labels) : []);
+  /* 引用超过三个时默认收成「引用 N」计数，把头部高度让给变更文件与差异；两三个引用
+     直接铺开，构不成堆叠就不藏。用户手动收/展过一次后完全跟着用户的选择走。 */
+  $effect(() => {
+    const count = detailPills.length;
+    if (!refsUserSet) refsCollapsed = count > 3;
+  });
   /** 变更文件栏的宽度：拖动中间的分隔条调整，存在本机偏好里；渲染时给差异区至少留 MIN_DIFF_WIDTH。 */
   let filesWidth = $state(readFilesWidth());
   let splitWidth = $state(0);
@@ -2225,7 +2234,7 @@
           </div>
         </div>
       {:else if detail}
-        {@const pills = refPills(detail.commit.labels)}
+        {@const pills = detailPills}
         <header class="commit-head">
           <div class="commit-head-main">
             <h2 class="commit-title">{detail.commit.summary}</h2>
@@ -2253,7 +2262,10 @@
                   aria-expanded={!refsCollapsed}
                   aria-label={refsCollapsed ? `展开提交引用（${pills.length}）` : "收起提交引用"}
                   title={refsCollapsed ? `展开 ${pills.length} 个引用` : "收起引用，给差异腾出空间"}
-                  onclick={() => (refsCollapsed = !refsCollapsed)}
+                  onclick={() => {
+                    refsCollapsed = !refsCollapsed;
+                    refsUserSet = true;
+                  }}
                 >
                   <Icon name="chevron-down" size={11} class={refsCollapsed ? "" : "flip"} />
                   {refsCollapsed ? `引用 ${pills.length}` : "收起引用"}

@@ -73,6 +73,12 @@
   /** WebGL 渲染器单独加载：不可用（驱动、上下文数量上限）时保留 DOM 渲染，不影响终端可用。 */
   let webglDisabled = false;
 
+  /* mock 预览打的标记：headless Chrome 也有 SwiftShader WebGL，canvas 渲染会让场景断言读不到
+     DOM 文本；预览固定 DOM 渲染器，真实窗口不受影响。 */
+  const previewDomTerminal =
+    typeof window !== "undefined" &&
+    Boolean((window as unknown as { __uiPreviewDomTerminal?: boolean }).__uiPreviewDomTerminal);
+
   const IS_WINDOWS = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
   const IS_MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform ?? "");
   const FALLBACK_FONT = '"Cascadia Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
@@ -328,7 +334,7 @@
   });
 
   async function loadWebgl(instance: XTerm) {
-    if (webglDisabled || !visible || webgl || webglLoading) return;
+    if (webglDisabled || previewDomTerminal || !visible || webgl || webglLoading) return;
     webglLoading = true;
     let addon: WebglAddon | null = null;
     try {

@@ -523,9 +523,9 @@ describe("只读差异的窄工具条（R2）", () => {
     try {
       const view = render(DiffView, { props: { ...base(), onReadDocument } });
       await tick();
-      // 起点：普通文本差异放得下，完整档没有溢出入口。
+      // 起点：普通文本差异没有「阅读文档」入口；低频工具的溢出入口则始终在场。
       expect(screen.queryByRole("button", { name: "阅读文档" })).toBeNull();
-      expect(screen.queryByRole("button", { name: /更多差异工具/ })).toBeNull();
+      expect(screen.queryByRole("button", { name: /更多差异工具/ })).toBeTruthy();
 
       // 同宽度换成 Markdown 差异：多出的「阅读文档」把内容挤宽，ResizeObserver 收不到通知。
       contentWidth = 1200;
@@ -534,9 +534,8 @@ describe("只读差异的窄工具条（R2）", () => {
         diff: { ...base().diff, document: mdSides },
         onReadDocument,
       });
-      // 重测后按溢出自愈收敛：按钮不再直接露出，低频工具统一进溢出菜单。
-      await waitFor(() => expect(screen.queryByRole("button", { name: /更多差异工具/ })).toBeTruthy());
-      expect(screen.queryByRole("button", { name: "阅读文档" })).toBeNull();
+      // 重测后按溢出自愈收敛：阅读入口不再直接露出，与低频工具统一进溢出菜单。
+      await waitFor(() => expect(screen.queryByRole("button", { name: "阅读文档" })).toBeNull());
       await fireEvent.click(screen.getByRole("button", { name: /更多差异工具/ }));
       const dialog = screen.getByRole("dialog", { name: "差异工具" });
       expect(within(dialog).getByRole("option", { name: /阅读文档/ })).toBeTruthy();

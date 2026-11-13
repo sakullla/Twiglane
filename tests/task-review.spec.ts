@@ -784,6 +784,8 @@ describe("任务列表的键盘写入与隐藏（T3）", () => {
     await waitFor(() => expect(list.querySelectorAll(".file-row")).toHaveLength(1));
     // 队列与列表读同一份过滤后的有序行：总数只剩可见的那一个。
     await waitFor(() => expect(onReviewNav.mock.calls.at(-1)?.[0]).toMatchObject({ total: 1, remaining: 1 }));
+    // 未审阅跳转收在审阅辅助条里：先展开工具，再点「下一个」。
+    await fireEvent.click(screen.getByRole("button", { name: "审阅工具" }));
     await fireEvent.click(screen.getByRole("button", { name: "下一个未审阅文件" }));
     await waitFor(() => expect(onSelection).toHaveBeenLastCalledWith("docs/gone.md"));
   });

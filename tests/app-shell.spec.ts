@@ -1091,6 +1091,8 @@ describe("连续审阅队列与真实写入边界（R2、R4、R6）", () => {
         ),
       ).toBe(true),
     );
+    // 未审阅跳转收在审阅辅助条里：先展开工具，再点「下一个」。
+    await fireEvent.click(screen.getByRole("button", { name: "审阅工具" }));
     await fireEvent.click(screen.getByRole("button", { name: "下一个未审阅文件" }));
     await waitFor(() => expect(selectedPath()).toBe("src/app.css"));
   });

@@ -37,7 +37,8 @@
   import Icon from "./Icon.svelte";
 
   /**
-   * 提交区：目标分支与范围两枚标签 → 一个说明框（第一行是摘要）→ 一行状态 → 主次两个按钮。
+   * 提交区：范围标签 → 一个说明框（第一行是摘要）→ 一行状态 → 主次两个按钮。
+   * 目标分支不再重复画胶囊：顶栏常驻当前分支，提交按钮的说明里同样点名目标。
    * 说明框静止时只占一行，聚焦或有内容时展开到记住的高度。
    *
    * 提交区上沿是一条可拖动的分隔线：向上拖把说明框拉高、向下拖还给文件列表，
@@ -328,9 +329,6 @@
   ></div>
   <span class="sr-only">{scope}</span>
   <div class="composer-head">
-    <span class="composer-branch" title={`提交到 ${branch}`}>
-      <Icon name="branch" size={12} /><span class="truncate">{branch}</span>
-    </span>
     {#if onScope}
       <button
         type="button"
@@ -472,7 +470,7 @@
       type="button"
       class="btn btn-primary composer-commit"
       aria-label="提交到本地"
-      title={blocker || `提交到本地，不会推送（${MODIFIER_LABEL}+Enter）`}
+      title={blocker || `提交到本地分支 ${branch}，不会推送（${MODIFIER_LABEL}+Enter）`}
       disabled={!ready}
       onclick={onCommit}
     >

@@ -366,11 +366,6 @@
 }
 .inline-error { margin: 8px 10px 0; padding: 7px 10px; border-radius: var(--radius-sm); background: var(--danger-soft); color: var(--danger-text); font-size: var(--text-sm); }
 .file-tools { display: flex; align-items: center; gap: var(--space-6); padding: 0 var(--space-8) var(--space-8); flex: none; container-type: inline-size; container-name: file-tools; }
-/* 搜索是最高频的入口：栏窄时审阅开关只留图标（名称在 aria-label 与悬停提示里），不把搜索框压到只剩两个字。 */
-@container file-tools (max-width: 420px) {
-  .review-hide .file-group-action { display: none; }
-  .review-hide { width: 26px; padding: 0; justify-content: center; }
-}
 @container file-tools (max-width: 340px) {
   .review-count > .icon { display: none; }
 }
@@ -379,8 +374,17 @@
 .segmented.icon-segmented button { width: 26px; height: 22px; padding: 0; }
 /* 搜索在前、排列方式在后：搜索是高频动作，占满剩余宽度。 */
 .file-tools .segmented { order: 2; }
-/* 左栏搜索框：比 --surface-2 的左栏暗一档，边界继承 .field 的 --control-border。 */
-.file-tools .field { flex: 1; min-width: 112px; background: var(--surface); }
+/* 左栏搜索框：比 --surface-2 的左栏暗一档，边界继承 .field 的 --control-border。
+   主行现在只有搜索、进度胶囊、审阅开关与排列切换，搜索可以安心吃到行内最小宽度。 */
+.file-tools .field { flex: 1; min-width: 0; background: var(--surface); }
+/* 审阅辅助条：低频审阅动作的抽屉——未审阅跳转与隐藏已审阅收在这里，
+   静止时收起为一枚 chevron；有审阅进度或正在隐藏已审阅时自动展开。 */
+.review-bar { display: flex; align-items: center; gap: var(--space-6); flex: none; margin: calc(var(--space-6) * -1) var(--space-8) var(--space-8); padding: var(--space-4) var(--space-6); border-radius: var(--radius-sm); background: var(--surface-3); }
+.review-bar .file-nav { flex: none; }
+.review-bar .review-hide { margin-left: auto; }
+.review-tools-toggle { position: relative; }
+.review-tools-toggle .icon { transition: transform var(--duration-fast) var(--ease); }
+.review-tools-toggle[aria-expanded="true"] { color: var(--accent-text); }
 .file-tools .field input { text-overflow: ellipsis; }
 .history-tools .field { background: var(--surface); }
 .file-list { min-height: 0; flex: 1; overflow: auto; padding: 0 0 var(--space-8); position: relative; outline: none; container-type: inline-size; container-name: file-list; }
@@ -468,9 +472,15 @@
 .file-row .row-action:focus-visible { outline-offset: -1px; }
 .file-row:hover .row-action, .file-row[aria-selected="true"] .row-action, .row-action:focus-visible { opacity: 1; }
 .file-row[aria-selected="true"] .row-action { color: var(--accent-text); }
+/* 行尾审阅标记同一套降噪：静止未选中行不画未点亮的对勾；已标记（.on）、
+   悬停、选中、键盘聚焦与确认中（:disabled 的转圈）都必须看得见。 */
+.file-row .review-toggle { opacity: 0; transition: opacity var(--duration-fast) var(--ease), background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease); }
+.file-row:hover .review-toggle, .file-row[aria-selected="true"] .review-toggle, .review-toggle:focus-visible, .file-row .review-toggle.on, .file-row .review-toggle:disabled { opacity: 1; }
+/* 多选的成员行同样收敛：未点亮的标记跟其它行内动作一样退后。 */
+.file-row[data-member]:not(:hover) .review-toggle:not(.on):not(:focus-visible) { opacity: 0; }
 /* 窄栏里隐藏的行内动作不占位，把宽度留给文件名；键盘用空格暂存，悬停和选中时才出现。 */
 @container file-list (max-width: 240px) {
-  .file-row:not(:hover, [aria-selected="true"]) .row-action { display: none; }
+  .file-row:not(:hover, [aria-selected="true"]) .row-action, .file-row:not(:hover, [aria-selected="true"]) .review-toggle:not(.on):not(:disabled) { display: none; }
   /* 分组动作收成图标，名称由 aria-label 和悬停提示承载，分组标题才读得全。 */
   .file-group-action { display: none; }
   .file-group { gap: var(--space-4); padding-left: var(--space-6); }
@@ -509,22 +519,6 @@
 .composer-resizer:focus-visible::after { height: 2px; background: var(--focus); }
 .composer.resizing, .composer.resizing * { cursor: row-resize; user-select: none; }
 .composer-head { display: flex; align-items: center; gap: var(--space-6); min-width: 0; min-height: 24px; }
-.composer-branch {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-4);
-  min-width: 0;
-  max-width: 62%;
-  height: 22px;
-  padding: 0 var(--space-8);
-  border-radius: var(--radius-sm);
-  background: var(--accent-soft);
-  color: var(--accent-text);
-  font-family: var(--mono);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-medium);
-}
-.composer-branch .icon { flex: none; }
 .composer-scope {
   display: inline-flex;
   align-items: center;
@@ -2441,7 +2435,7 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .task-empty { padding: var(--space-16) var(--space-12); }
 .task-placeholder { background: var(--surface); }
 /* 左边任务文件队列沿用改动列表组件，宽度比提交文件栏宽一档：工具行里有审阅进度与导航。 */
-.task-split { flex: 1; min-height: 0; display: grid; grid-template-columns: clamp(280px, 32%, 380px) minmax(0, 1fr); }
+.task-split { flex: 1; min-height: 0; display: grid; grid-template-columns: clamp(300px, 34%, 420px) minmax(0, 1fr); }
 .task-files {
   display: flex;
   flex-direction: column;
@@ -2482,6 +2476,6 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 
 /* ---------- 连续审阅队列（R2、R4、R6） ----------
    任务与改动共用同一套未审阅导航与状态。 */
-.file-tools .file-nav { flex: none; }
+.file-tools .review-tools-toggle, .review-bar .file-nav { flex: none; }
 .file-tag.rebuilt { background: var(--info-soft); color: var(--info-text); }
 .diff-side.task { background: var(--info-soft); color: var(--info-text); }

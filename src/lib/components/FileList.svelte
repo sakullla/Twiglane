@@ -129,6 +129,15 @@
   let taskMode = $derived(variant === "task");
   /** 任务行空格/双击没有执行时的就地说明：纯键盘操作不能静默无反应。 */
   let stageNote = $state<string | null>(null);
+  /**
+   * 审阅辅助条按需展开：主工具行只留搜索、进度胶囊与排列切换；一旦出现审阅进度
+   * （标过任意文件）就自动展开一次；「隐藏已审阅」生效期间强制展开，恢复入口必须够得着。
+   */
+  let reviewToolsOpen = $state(false);
+  $effect(() => {
+    if (reviewReviewed > 0) reviewToolsOpen = true;
+  });
+  let reviewToolsShown = $derived(reviewToolsOpen || hideReviewed);
   let groups = $derived(groupFiles(files));
   let conflictedRows = $derived(filterRows(groups.conflicted, query));
   let unstagedRows = $derived(filterRows(groups.unstaged, query));
@@ -410,11 +419,9 @@
   }
 </script>
 
+<!-- 主工具行：全宽自适应搜索 + 紧凑审阅进度胶囊 + 排列切换。
+     未审阅跳转与隐藏已审阅收进下方按需展开的审阅辅助条，不再与搜索争夺一行。 -->
 <div class="file-tools">
-  <div class="segmented icon-segmented" role="group" aria-label="文件排列">
-    <button type="button" aria-pressed={!directoryMode} aria-label="列表" title="平铺列表" onclick={() => (directoryMode = false)}><Icon name="list" size={14} /></button>
-    <button type="button" aria-pressed={directoryMode} aria-label="目录" title="按目录分组" onclick={() => (directoryMode = true)}><Icon name="folder" size={14} /></button>
-  </div>
   <div class="field sm">
     <Icon name="search" size={14} />
     <input
@@ -433,31 +440,6 @@
       </button>
     {/if}
   </div>
-  {#if reviewNav}
-    <!-- 连续审阅：只在未审阅文件之间走，到队尾停下，不回到开头。按钮与 review.prev/next 同源。 -->
-    <div class="file-nav" role="group" aria-label="未审阅文件">
-      <button
-        type="button"
-        class="icon-btn sm"
-        aria-label="上一个未审阅文件"
-        title={reviewNav.prevReason ?? "上一个未审阅文件（Alt+Shift+←）"}
-        disabled={reviewNav.prevReason !== null}
-        onclick={reviewNav.onPrev}
-      >
-        <Icon name="chevron-left" size={14} />
-      </button>
-      <button
-        type="button"
-        class="icon-btn sm"
-        aria-label="下一个未审阅文件"
-        title={reviewNav.nextReason ?? "下一个未审阅文件（Alt+Shift+→）"}
-        disabled={reviewNav.nextReason !== null}
-        onclick={reviewNav.onNext}
-      >
-        <Icon name="chevron-right" size={14} />
-      </button>
-    </div>
-  {/if}
   {#if onToggleReview || reviewTotal > 0}
     {@const ratio = reviewTotal > 0 ? Math.min(1, reviewReviewed / reviewTotal) : 0}
     {@const done = reviewTotal > 0 && reviewReviewed >= reviewTotal}
@@ -479,19 +461,70 @@
       {/if}{reviewReviewed}/{reviewTotal}
     </span>
   {/if}
-  {#if onHideReviewed}
+  {#if reviewNav || onHideReviewed}
     <button
       type="button"
-      class="btn btn-ghost btn-sm review-hide"
-      aria-pressed={hideReviewed}
-      aria-label="隐藏已审阅"
-      title={hideReviewed ? "重新显示已审阅的文件；分组数量与提交范围不受影响" : "折叠已审阅的文件；只改显示，不改提交范围"}
-      onclick={() => onHideReviewed?.(!hideReviewed)}
+      class="icon-btn sm review-tools-toggle"
+      aria-expanded={reviewToolsShown}
+      aria-label="审阅工具"
+      title={hideReviewed
+        ? "已隐藏已审阅的文件：先在下方恢复显示"
+        : reviewToolsShown
+          ? "收起审阅工具（未审阅跳转、隐藏已审阅）"
+          : "展开审阅工具：未审阅跳转、隐藏已审阅"}
+      disabled={hideReviewed}
+      onclick={() => (reviewToolsOpen = !reviewToolsOpen)}
     >
-      <Icon name="eye" size={13} /><span class="file-group-action">已审阅</span>
+      <Icon name="chevron-down" size={14} class={reviewToolsShown ? "flip" : ""} />
     </button>
   {/if}
+  <div class="segmented icon-segmented" role="group" aria-label="文件排列">
+    <button type="button" aria-pressed={!directoryMode} aria-label="列表" title="平铺列表" onclick={() => (directoryMode = false)}><Icon name="list" size={14} /></button>
+    <button type="button" aria-pressed={directoryMode} aria-label="目录" title="按目录分组" onclick={() => (directoryMode = true)}><Icon name="folder" size={14} /></button>
+  </div>
 </div>
+{#if reviewToolsShown}
+  <!-- 审阅辅助条：未审阅跳转与隐藏已审阅。按钮与 review.prev/next 命令同源。 -->
+  <div class="review-bar" role="group" aria-label="审阅工具">
+    {#if reviewNav}
+      <!-- 连续审阅：只在未审阅文件之间走，到队尾停下，不回到开头。 -->
+      <div class="file-nav" role="group" aria-label="未审阅文件">
+        <button
+          type="button"
+          class="icon-btn sm"
+          aria-label="上一个未审阅文件"
+          title={reviewNav.prevReason ?? "上一个未审阅文件（Alt+Shift+←）"}
+          disabled={reviewNav.prevReason !== null}
+          onclick={reviewNav.onPrev}
+        >
+          <Icon name="chevron-left" size={14} />
+        </button>
+        <button
+          type="button"
+          class="icon-btn sm"
+          aria-label="下一个未审阅文件"
+          title={reviewNav.nextReason ?? "下一个未审阅文件（Alt+Shift+→）"}
+          disabled={reviewNav.nextReason !== null}
+          onclick={reviewNav.onNext}
+        >
+          <Icon name="chevron-right" size={14} />
+        </button>
+      </div>
+    {/if}
+    {#if onHideReviewed}
+      <button
+        type="button"
+        class="btn btn-ghost btn-sm review-hide"
+        aria-pressed={hideReviewed}
+        aria-label="隐藏已审阅"
+        title={hideReviewed ? "重新显示已审阅的文件；分组数量与提交范围不受影响" : "折叠已审阅的文件；只改显示，不改提交范围"}
+        onclick={() => onHideReviewed?.(!hideReviewed)}
+      >
+        <Icon name="eye" size={13} /><span class="file-group-action">已审阅</span>
+      </button>
+    {/if}
+  </div>
+{/if}
 {#if reviewNote}
   <p class="file-tree-status danger" role="alert">{reviewNote}</p>
 {/if}

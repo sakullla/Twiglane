@@ -411,11 +411,14 @@ describe("提交区", () => {
     expect(document.querySelector(".composer-count")?.textContent).toBe("摘要 41/72");
   });
 
-  it("可提交时显示目标分支与文件数，提交按钮可用", async () => {
+  it("可提交时范围与提交按钮可用，目标分支由提交入口说明", async () => {
     const { onCommit } = renderDraft({ value: "重做提交区" });
-    expect(document.querySelector(".composer-branch")?.textContent).toContain("feature/ui");
+    // 分支胶囊已移除：顶栏常驻当前分支，提交按钮的说明里同样点名目标分支。
+    expect(document.querySelector(".composer-branch")).toBeNull();
+    const commit = screen.getByRole("button", { name: "提交到本地" });
+    expect(commit.getAttribute("title")).toContain("feature/ui");
     expect(screen.getByRole("button", { name: "本次提交范围：2 个已暂存文件" }).textContent).toContain("2 个文件");
-    await fireEvent.click(screen.getByRole("button", { name: "提交到本地" }));
+    await fireEvent.click(commit);
     expect(onCommit).toHaveBeenCalledTimes(1);
   });
 

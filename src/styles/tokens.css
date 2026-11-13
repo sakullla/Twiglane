@@ -270,7 +270,9 @@
   --accent-fg: #0c0e29;
   --accent-text: #b0b5fd;
   --on-accent-soft: rgba(0, 0, 0, 0.14);
-  --on-accent-line: rgba(255, 255, 255, 0.22);
+  /* 深色主题的 accent 前景是深色文字：accent 上的线条与描边同向取暗色叠加，
+     而不是浅色——白线在浅靛蓝底上接近不可见（ref-pill 内环、主按钮 kbd 描边）。 */
+  --on-accent-line: rgba(0, 0, 0, 0.2);
   /* 成功语义：与浅色主题同义，按深色画布取值。 */
   --success: #5fcf80;
   --success-soft: rgba(95, 207, 128, 0.14);

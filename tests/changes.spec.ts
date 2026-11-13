@@ -400,8 +400,8 @@ describe("主工作台", () => {
     for (const row of document.querySelectorAll<HTMLElement>("[data-diff-row]")) {
       expect(row.style.height).toBe(`${ROW_HEIGHT}px`);
     }
-    // 标题栏仍是 6 个常驻控件（刷新、发布分支等已离开标题栏）。
-    expect(document.querySelectorAll("[data-titlebar-control]")).toHaveLength(6);
+    // 标题栏常驻 7 个控件（品牌/仓库/分支/命令面板/同步/主题/设置；刷新、发布分支等已离开标题栏）。
+    expect(document.querySelectorAll("[data-titlebar-control]")).toHaveLength(7);
   });
 
   it("提交区无多行说明，撤销提交与放弃修改只在溢出菜单里", async () => {
@@ -2586,7 +2586,44 @@ describe("文件列表的目录分组和行数", () => {
     expect(props.onStageAll).toHaveBeenCalledWith(["notes/todo.log"]);
   });
 
-  
+
+  it("审阅辅助条按需展开：静止时收成开关，有审阅进度或正在隐藏时自动展开", async () => {
+    const files = [change("a.ts", "none", "modified"), change("b.ts", "none", "modified")];
+    const rows = orderedRows(files);
+    const queue = reviewQueue(rows, new Set<string>(), null, () => {});
+    const props = {
+      ...listProps(files),
+      reviewed: new Set<string>(),
+      reviewTotal: 2,
+      reviewReviewed: 0,
+      hideReviewed: false,
+      onHideReviewed: vi.fn(),
+      onToggleReview: vi.fn(),
+      reviewNav: queue,
+    };
+    // 有审阅进度：辅助条自动展开，不需要先点开关。
+    render(FileList, { props: { ...props, reviewReviewed: 1 } });
+    expect(await screen.findByRole("button", { name: "下一个未审阅文件" })).toBeTruthy();
+    document.body.innerHTML = "";
+
+    // 正在隐藏已审阅：辅助条强制展开，开关禁用并说明原因，恢复入口始终够得着。
+    render(FileList, { props: { ...props, hideReviewed: true } });
+    const pinned = screen.getByRole("button", { name: "审阅工具" }) as HTMLButtonElement;
+    expect(pinned.disabled).toBe(true);
+    expect(await screen.findByRole("button", { name: "隐藏已审阅" })).toBeTruthy();
+    document.body.innerHTML = "";
+
+    // 静止无进度：主工具行只有搜索、计数、开关与排列切换；点开关按需展开。
+    render(FileList, { props });
+    expect(screen.queryByRole("button", { name: "下一个未审阅文件" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "隐藏已审阅" })).toBeNull();
+    const toggle = screen.getByRole("button", { name: "审阅工具" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await fireEvent.click(toggle);
+    expect(await screen.findByRole("button", { name: "下一个未审阅文件" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "隐藏已审阅" })).toBeTruthy();
+  });
+
   it("三类空状态各自给出下一步：隐藏已审阅、清筛选、全部完成", async () => {
     const files = [change("a.ts", "none", "modified"), change("b.ts", "modified", "none")];
     const reviewed = new Set(["a.ts", "b.ts"]);

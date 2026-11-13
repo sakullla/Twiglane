@@ -39,6 +39,44 @@ export function repeatedNames(repos: RecentRepo[]): Set<string> {
   return repeated;
 }
 
+/**
+ * 同名仓库的路径差异段：组内所有路径的最长公共前缀之后、到下一个分隔符为止的那一段，
+ * 是唯一能区分彼此的片段。返回每条路径的 { head, diverge, tail } 拆分，渲染时差异段
+ * 用正文色强调、公共段保持弱化色，一眼看出两个同名仓库差在哪。
+ * 比较时统一分隔符与大小写（Windows 上 C:\x 与 c:/x 同仓），渲染保留原样；组内路径
+ * 完全相同时 diverge 为空，退化成普通显示。
+ */
+export function pathDivergence(paths: readonly string[]): Map<string, { head: string; diverge: string; tail: string }> {
+  const result = new Map<string, { head: string; diverge: string; tail: string }>();
+  if (paths.length < 2) {
+    for (const path of paths) result.set(path, { head: "", diverge: "", tail: path });
+    return result;
+  }
+  const keys = paths.map((path) => normalizeRepoPath(path));
+  let common = keys[0];
+  for (const key of keys.slice(1)) {
+    let index = 0;
+    while (index < common.length && index < key.length && common[index] === key[index]) index += 1;
+    common = common.slice(0, index);
+    if (!common) break;
+  }
+  for (let index = 0; index < paths.length; index += 1) {
+    const path = paths[index];
+    const key = keys[index];
+    if (key.length <= common.length) {
+      result.set(path, { head: path, diverge: "", tail: "" });
+      continue;
+    }
+    // 公共前缀截回分隔符边界：半段分隔符差异没有信息量，整段一起当公共部分。
+    let cut = common.length;
+    while (cut > 0 && key[cut - 1] !== "/") cut -= 1;
+    let end = key.indexOf("/", cut);
+    if (end < 0) end = key.length;
+    result.set(path, { head: path.slice(0, cut), diverge: path.slice(cut, end), tail: path.slice(end) });
+  }
+  return result;
+}
+
 /** 每一行的顶部位置，末尾多一项是总高度。 */
 export function rowOffsets(heights: readonly number[]): number[] {
   const offsets = [0];

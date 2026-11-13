@@ -1,6 +1,6 @@
 <script lang="ts">
   import { MODIFIER_LABEL } from "../brand";
-  import { filterRecent, repeatedNames } from "../recent";
+  import { filterRecent, pathDivergence, repeatedNames } from "../recent";
   import type { RecentRepo } from "../types";
   import { hueOf, relativeTime, repoBadgeLetters } from "../ui";
   import BrandMark from "./BrandMark.svelte";
@@ -46,6 +46,21 @@
   let shown = $derived(matches.slice(0, LIMIT));
   let badgeLetters = $derived(repoBadgeLetters(shown.map((repo) => repo.name)));
   let sameNames = $derived(repeatedNames(recent));
+  /* 同名仓库路径里的差异段：整组一起算公共前缀，各行只高亮自己与众不同的那一段。 */
+  let divergences = $derived.by(() => {
+    const map = new Map<string, { head: string; diverge: string; tail: string }>();
+    const byName = new Map<string, string[]>();
+    for (const repo of recent) {
+      if (!sameNames.has(repo.name)) continue;
+      const list = byName.get(repo.name) ?? [];
+      list.push(repo.path);
+      byName.set(repo.name, list);
+    }
+    for (const paths of byName.values()) {
+      for (const [path, parts] of pathDivergence(paths)) map.set(path, parts);
+    }
+    return map;
+  });
   let actionTitle = $derived(disabled ? disabledReason || undefined : undefined);
 
   /** 回车打开第一条结果；Esc 只清空关键词；向下进入结果列表。 */
@@ -174,7 +189,16 @@
               <span class="repo-badge" style={`--hue:${hueOf(repo.path)}`} aria-hidden="true">{badgeLetters[index]}</span>
               <span class="repo-text">
                 <span class="repo-name">{repo.name}</span>
-                <span class={sameNames.has(repo.name) ? "repo-path-full" : "repo-path"}><bdi>{repo.path}</bdi></span>
+                <span class={sameNames.has(repo.name) ? "repo-path-full" : "repo-path"}>
+                  <bdi>
+                    {#if divergences.get(repo.path)?.diverge}
+                      {@const parts = divergences.get(repo.path)!}
+                      {parts.head}<span class="path-diverge">{parts.diverge}</span>{parts.tail}
+                    {:else}
+                      {repo.path}
+                    {/if}
+                  </bdi>
+                </span>
               </span>
               {#if openedLabel(repo)}<span class="repo-when" data-repo-when>{openedLabel(repo)}</span>{/if}
             </button>

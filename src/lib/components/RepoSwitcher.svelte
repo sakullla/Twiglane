@@ -43,6 +43,7 @@
     flattenWorktreeGroups,
     headOfRow,
     normalizeRepoPath,
+    pathDivergence,
     pruneWorktreeItems,
     remoteText,
     repeatedNames,
@@ -185,6 +186,21 @@
   let sameNames = $derived(
     repeatedNames(selectable.map((row) => ({ name: row.name, path: row.path, openedAtMs: 0 }))),
   );
+  /* 同名仓库路径里的差异段：整组一起算公共前缀，各行只高亮自己与众不同的那一段。 */
+  let divergences = $derived.by(() => {
+    const map = new Map<string, { head: string; diverge: string; tail: string }>();
+    const byName = new Map<string, string[]>();
+    for (const row of selectable) {
+      if (!sameNames.has(row.name)) continue;
+      const list = byName.get(row.name) ?? [];
+      list.push(row.path);
+      byName.set(row.name, list);
+    }
+    for (const paths of byName.values()) {
+      for (const [path, parts] of pathDivergence(paths)) map.set(path, parts);
+    }
+    return map;
+  });
 
   onMount(() => {
     const paths = repos.map((repo) => repo.path);
@@ -604,7 +620,16 @@
                         <span class="repo-locked" title="已用 git worktree lock 锁定，删除会被拒绝">已锁定</span>
                       {/if}
                     </span>
-                    <span class={sameNames.has(view.name) ? "repo-path-full" : "repo-path"}><bdi>{view.path}</bdi></span>
+                    <span class={sameNames.has(view.name) ? "repo-path-full" : "repo-path"}>
+                      <bdi>
+                        {#if divergences.get(view.path)?.diverge}
+                          {@const parts = divergences.get(view.path)!}
+                          {parts.head}<span class="path-diverge">{parts.diverge}</span>{parts.tail}
+                        {:else}
+                          {view.path}
+                        {/if}
+                      </bdi>
+                    </span>
                     <span class="repo-status" data-worktree-state={view.state}>
                       {#if view.state === "missing"}
                         <span class="repo-state danger">状态未知·目录缺失</span>

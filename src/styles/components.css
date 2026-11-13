@@ -1388,6 +1388,8 @@ label.list-row .checkbox { margin-top: 2px; }
 .switcher-reason { flex: none; max-width: 60%; color: var(--fg-subtle); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .repo-text .switcher-reason { max-width: 100%; }
 .repo-path-full { color: var(--fg-subtle); font-size: var(--text-xs); overflow-wrap: anywhere; }
+/* 同名仓库：路径里与其他同名项不同的段用正文色强调，公共段保持弱化。 */
+.repo-path-full .path-diverge { color: var(--fg); font-weight: var(--weight-medium); }
 .switcher-error { flex: none; display: flex; align-items: flex-start; gap: var(--space-6); margin: 0 var(--space-8) var(--space-8); color: var(--danger-text); font-size: var(--text-sm); line-height: var(--leading-normal); }
 .switcher-error > .icon { flex: none; margin-top: 2px; }
 .switcher-notice { flex: none; display: flex; align-items: flex-start; gap: var(--space-6); margin: 0 10px var(--space-8); padding: var(--space-6) var(--space-8); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--fg-muted); font-size: var(--text-xs); line-height: var(--leading-normal); }

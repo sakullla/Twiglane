@@ -23,7 +23,7 @@ import {
   shouldPoll,
   visibleRange,
 } from "../src/lib/layout";
-import { baseName, filterRecent } from "../src/lib/recent";
+import { baseName, filterRecent, pathDivergence } from "../src/lib/recent";
 import type { BranchInfo, FileChange, RecentRepo, RepoHead } from "../src/lib/types";
 import StatusBar from "../src/lib/components/StatusBar.svelte";
 
@@ -80,6 +80,27 @@ describe("最近仓库", () => {
     expect(filterRecent(list, "develop")).toEqual([]);
     expect(baseName("/work/app/")).toBe("app");
     expect(baseName("C:\\work\\app")).toBe("app");
+  });
+
+  it("同名仓库的路径差异段：公共段与差异段拆分正确", () => {
+    const parts = pathDivergence(["/work/alpha/demo", "/work/beta/demo"]);
+    expect(parts.get("/work/alpha/demo")).toEqual({ head: "/work/", diverge: "alpha", tail: "/demo" });
+    expect(parts.get("/work/beta/demo")).toEqual({ head: "/work/", diverge: "beta", tail: "/demo" });
+    // 拼接回原始路径，渲染不会丢字符。
+    for (const [path, piece] of parts) {
+      expect(piece.head + piece.diverge + piece.tail).toBe(path);
+    }
+  });
+
+  it("路径差异段：盘符不同、公共前缀截回整段、单条与完全相同的路径", () => {
+    const byDrive = pathDivergence(["C:/work/demo", "D:/work/demo"]);
+    expect(byDrive.get("C:/work/demo")).toEqual({ head: "", diverge: "C:", tail: "/work/demo" });
+    // 公共前缀停在段中间时截回分隔符边界，差异段保持完整可读。
+    const midSegment = pathDivergence(["/work/alpha1/demo", "/work/alpha2/demo"]);
+    expect(midSegment.get("/work/alpha1/demo")).toEqual({ head: "/work/", diverge: "alpha1", tail: "/demo" });
+    // 组内只有自己或路径完全相同：没有可强调的差异段。
+    expect(pathDivergence(["/only/one"]).get("/only/one")).toEqual({ head: "", diverge: "", tail: "/only/one" });
+    expect(pathDivergence(["/same/demo", "/same/demo"]).get("/same/demo")).toEqual({ head: "/same/demo", diverge: "", tail: "" });
   });
 });
 

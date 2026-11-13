@@ -40,11 +40,12 @@ describe("仓库弹层", () => {
     };
   }
 
-  it("同时展示同名仓库的完整路径", () => {
+  it("同时展示同名仓库的完整路径，差异段单独标出", () => {
     render(RepoSwitcher, { props: repoProps() as never });
     expect(screen.getAllByText("demo")).toHaveLength(2);
-    expect(screen.getByText("/work/alpha/demo")).toBeTruthy();
-    expect(screen.getByText("/work/beta/demo")).toBeTruthy();
+    const rows = [...document.querySelectorAll(".repo-path-full")];
+    expect(rows.map((node) => node.textContent)).toEqual(["/work/alpha/demo", "/work/beta/demo"]);
+    expect(rows.map((node) => node.querySelector(".path-diverge")?.textContent)).toEqual(["alpha", "beta"]);
   });
 
   it("搜索框只过滤最近仓库，框内不挂 Ctrl/⌘K 键帽", () => {
@@ -944,7 +945,7 @@ describe("起始页", () => {
       expect(document.querySelector(removed), removed).toBeNull();
     }
     expect(screen.queryByText(/本地优先/), "没有卖点").toBeNull();
-    await fireEvent.click(screen.getByText("/work/beta/demo"));
+    await fireEvent.click(screen.getByText((_content: string, el: Element | null) => el instanceof HTMLElement && el.classList.contains("repo-path-full") && el.textContent === "/work/beta/demo"));
     expect(onOpen).toHaveBeenCalledWith("/work/beta/demo");
   });
 
@@ -1066,7 +1067,7 @@ describe("起始页", () => {
     render(Welcome, {
       props: { recent: repos, disabled: false, onAdd: () => {}, onClone: () => {}, onCreate: () => {}, onOpen, onContextMenu },
     });
-    const row = screen.getByText("/work/beta/demo").closest("button")!;
+    const row = screen.getByText((_content: string, el: Element | null) => el instanceof HTMLElement && el.classList.contains("repo-path-full") && el.textContent === "/work/beta/demo").closest("button")!;
     await fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
     expect(onContextMenu).toHaveBeenLastCalledWith(expect.objectContaining({ path: "/work/beta/demo" }), { x: 40, y: 60 });
     await fireEvent.keyDown(row, { key: "F10", shiftKey: true });

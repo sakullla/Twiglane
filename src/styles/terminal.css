@@ -91,19 +91,19 @@
   gap: var(--space-6);
   flex: none;
   max-width: 220px;
-  padding: 0 var(--space-4) 0 var(--space-8);
-  margin-top: var(--space-4);
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  padding: 0 var(--space-6) 0 var(--space-8);
+  margin: var(--space-4) 0;
+  border-radius: var(--radius-sm);
   color: var(--fg-subtle);
   cursor: pointer;
   position: relative;
   transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
 }
-.terminal-tab:hover { background: var(--surface-3); color: var(--fg); }
+.terminal-tab:hover { background: var(--hover); color: var(--fg); }
 .terminal-tab.active {
-  background: var(--term-bg);
+  background: var(--surface);
   color: var(--fg);
-  box-shadow: inset 0 2px 0 var(--accent);
+  box-shadow: var(--shadow-xs);
 }
 .terminal-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .terminal-tab-label {

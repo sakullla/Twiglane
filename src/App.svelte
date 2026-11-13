@@ -3867,6 +3867,7 @@
     {theme}
     disabled={writeLocked}
     onBrand={() => runCommand("palette.open")}
+    onPalette={() => runCommand("palette.open")}
     openSwitcher={switcher?.kind ?? null}
     onRepo={(anchor) => toggleSwitcher("repo", anchor)}
     onBranch={(anchor) => toggleSwitcher("branch", anchor)}

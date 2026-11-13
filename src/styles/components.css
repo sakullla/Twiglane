@@ -32,7 +32,7 @@
   gap: var(--space-6);
   height: 32px;
   padding: 0 var(--space-12);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   border: 1px solid transparent;
   font-weight: var(--weight-medium);
   font-size: var(--text-base);
@@ -45,26 +45,24 @@
 .btn-sm { height: 26px; padding: 0 var(--space-8); font-size: var(--text-sm); gap: 5px; border-radius: var(--radius-sm); }
 .btn-lg { height: 40px; padding: 0 18px; font-size: var(--text-md); }
 .btn-block { width: 100%; }
-/* 主按钮：实心 --accent 填充。不再向 --accent-fg 混色做渐变：两端点虽受门禁约束，
-   混出来的中间色不受约束，靛蓝上会把标签压到 4.5:1 以下。 */
+/* 主按钮：实心 --accent 填充，配柔和阴影与微内高光。 */
 .btn-primary {
   background: var(--accent);
   color: var(--accent-fg);
-  box-shadow: 0 1px 2px color-mix(in srgb, var(--accent) 30%, transparent), inset 0 1px 0 var(--on-accent-line);
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 26%, transparent), inset 0 1px 0 var(--on-accent-line);
 }
 .btn-primary:hover:not(:disabled) {
   background: var(--accent-hover);
-  box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 24%, transparent), inset 0 1px 0 var(--on-accent-line);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 30%, transparent), inset 0 1px 0 var(--on-accent-line);
 }
 .btn-primary kbd { background: var(--on-accent-soft); border-color: var(--on-accent-line); color: inherit; box-shadow: none; margin-left: 3px; }
-/* 次级按钮与 .field / .branch-pill 同一套「一条控件边界 + 表面填充」，
-   不再额外加投影：带边界的控件在四个表面上都靠这条边界区分，阴影只是多一层噪声。 */
-.btn-secondary { background: var(--surface); border-color: var(--control-border); color: var(--fg); }
-.btn-secondary:hover:not(:disabled) { background-color: var(--surface); background-image: linear-gradient(var(--hover), var(--hover)); border-color: var(--control-border-hover); }
+/* 次级按钮：柔和控件边界 + 抬起表面 + 微阴影。 */
+.btn-secondary { background: var(--surface); border-color: var(--control-border); box-shadow: var(--shadow-xs); color: var(--fg); }
+.btn-secondary:hover:not(:disabled) { background-color: var(--surface-3); background-image: none; border-color: var(--control-border-hover); }
 .btn-ghost { color: var(--fg-muted); border-radius: var(--radius-sm); }
 .btn-ghost:hover:not(:disabled) { background: var(--hover); color: var(--fg); }
-.btn-danger { background: var(--danger); color: var(--on-danger); box-shadow: 0 1px 2px color-mix(in srgb, var(--danger) 30%, transparent); }
-.btn-danger:hover:not(:disabled) { background: var(--danger-hover); box-shadow: 0 4px 12px color-mix(in srgb, var(--danger) 22%, transparent); }
+.btn-danger { background: var(--danger); color: var(--on-danger); box-shadow: 0 2px 6px color-mix(in srgb, var(--danger) 28%, transparent); }
+.btn-danger:hover:not(:disabled) { background: var(--danger-hover); box-shadow: 0 4px 12px color-mix(in srgb, var(--danger) 24%, transparent); }
 .btn-danger-soft { color: var(--danger-text); }
 .btn-danger-soft:hover:not(:disabled) { background: var(--danger-soft); }
 .btn-warning-soft { background: var(--warning-soft); color: var(--warning-text); }
@@ -72,8 +70,7 @@
 .btn-accent-soft { background: var(--accent-soft); color: var(--accent-text); }
 .btn-accent-soft:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 17%, transparent); }
 /* 开启/按下态（aria-pressed）：与列表选中、分段选中共用同一套强调色语言——浅底 +
-   强调文字 + 强调边界。只靠 hover 那点灰度差不构成选中态；边界本来就有 1px 透明
-   占位，换色不会改变按钮尺寸。差异工具条的空白开关也走同一套，不另立一种选中底色。 */
+   强调文字 + 强调边界。 */
 .btn-ghost[aria-pressed="true"]:not(:disabled),
 .btn-secondary[aria-pressed="true"]:not(:disabled),
 .diff-toolbar .diff-ws-btn[aria-pressed="true"]:not(:disabled) {
@@ -90,17 +87,12 @@
   border-color: var(--accent-hover);
   color: var(--accent-text);
 }
-/* 不可用态不用整体 opacity：淡化后的强调色底文字对比度过低，看起来像「坏掉的主按钮」。
-   改成中性填充 + 弱化文字 + 3:1 的控件边界：文字之外还有形状线索，且边界占的是
-   .btn 本来预留的 1px 透明位，尺寸不变。 */
-.btn:disabled { cursor: not-allowed; box-shadow: none; transform: none; background: var(--surface-3); background-image: none; border-color: var(--control-border); color: var(--fg-subtle); }
-.btn-secondary:disabled { background: var(--surface-2); border-color: var(--control-border); }
-/* 软色按钮静止时就有底色，禁用后回到中性填充；边界由 .btn:disabled 统一提供。 */
-.btn-danger-soft:disabled { background: var(--surface-3); }
-/* ghost 按钮静止时没有框也没有底：禁用后仍是同一个形状，只把内容淡下去。
-   给它补上底色和描边，会让不可用的那个反而比可用的更像按钮（如禁用的分页按钮）。 */
+/* 不可用态采用柔和无框中性槽位，不再绘制抢眼硬线框，视觉安静退后但保持可读。 */
+.btn:disabled { cursor: not-allowed; box-shadow: none; transform: none; background: var(--surface-3); background-image: none; border-color: transparent; color: var(--fg-subtle); }
+.btn-secondary:disabled { background: var(--surface-3); border-color: transparent; }
+.btn-danger-soft:disabled { background: var(--surface-3); border-color: transparent; }
 .btn-ghost:disabled { background: transparent; border-color: transparent; opacity: var(--opacity-disabled); }
-.btn-primary:disabled kbd { background: var(--surface-2); border-color: var(--control-border); color: var(--fg-subtle); }
+.btn-primary:disabled kbd { background: var(--surface-2); border-color: transparent; color: var(--fg-subtle); }
 .icon-btn {
   display: inline-grid;
   place-items: center;
@@ -154,7 +146,7 @@
 .segmented button:focus-visible { outline-offset: -2px; }
 /* aria-disabled 与原生 disabled 走同一套不可用外观：弱化文字 + 中性填充 + 内描边，
    除颜色外还有可辨的形状；aria 形式仍可聚焦，原因由 title 承担。 */
-.segmented button:disabled, .segmented button[aria-disabled="true"] { cursor: not-allowed; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--control-border); color: var(--fg-subtle); }
+.segmented button:disabled, .segmented button[aria-disabled="true"] { cursor: not-allowed; background: transparent; box-shadow: none; color: var(--fg-subtle); opacity: var(--opacity-disabled); }
 .segmented button[aria-pressed="true"], .segmented button[aria-selected="true"], .view-switcher button[aria-current="page"] { background: var(--segmented-active-bg); color: var(--fg); box-shadow: var(--segmented-active-shadow); }
 /* 选中但当前不可用：保留分段选中底色与 active 阴影，文字回到可读的弱化档，
    再叠加一圈在 active 底上仍 ≥3:1 的内描边（--control-border 在深色 active 底上
@@ -176,23 +168,25 @@
   gap: var(--space-8);
   height: 32px;
   padding: 0 var(--space-8) 0 10px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   border: 1px solid var(--control-border);
   background: var(--surface);
   color: var(--fg-subtle);
+  box-shadow: var(--shadow-xs);
   transition: border-color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease), background var(--duration-fast) var(--ease);
 }
 .field:hover { border-color: var(--control-border-hover); }
-/* 输入类控件的内层 input 不画焦点，统一由外框画和全局一样的 --focus 环；--accent-soft 光晕只有 1.15:1，不算焦点环。 */
-.field:focus-within { border-color: var(--accent); outline: 2px solid var(--focus); outline-offset: -1px; color: var(--accent-text); background: var(--surface); }
+/* 输入类控件的内层 input 不画焦点，统一由外框画和全局一样的 --focus 环。 */
+.field:focus-within { border-color: var(--accent); outline: 2px solid var(--focus); outline-offset: -1px; color: var(--accent-text); background: var(--surface); box-shadow: none; }
 .field input { flex: 1; min-width: 0; border: 0; background: transparent; outline: none; color: var(--fg); padding: 0; height: 100%; font-size: var(--text-base); }
 .field input::placeholder, .input::placeholder, .textarea::placeholder { color: var(--fg-subtle); }
-.field.sm { height: 30px; }
+.field.sm { height: 30px; border-radius: var(--radius-sm); }
 .field-clear { color: var(--fg-subtle); display: grid; place-items: center; border-radius: 5px; width: 19px; height: 19px; }
 .field-clear:hover { color: var(--fg); background: var(--hover); }
-.input, .textarea, .select { width: 100%; border: 1px solid var(--control-border); background: var(--surface); border-radius: var(--radius-sm); padding: var(--space-8) 12px; color: var(--fg); transition: border-color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease); }
+.input, .textarea, .select { width: 100%; border: 1px solid var(--control-border); background: var(--surface); border-radius: var(--radius); padding: var(--space-8) 12px; color: var(--fg); box-shadow: var(--shadow-xs); transition: border-color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease); }
 .input { height: 32px; padding-block: 0; }
-.input:focus, .textarea:focus, .select:focus { border-color: var(--accent); outline: 2px solid var(--focus); outline-offset: -1px; }
+.input:hover, .textarea:hover, .select:hover { border-color: var(--control-border-hover); }
+.input:focus, .textarea:focus, .select:focus { border-color: var(--accent); outline: 2px solid var(--focus); outline-offset: -1px; box-shadow: none; }
 .input[readonly] { background: var(--surface-2); color: var(--fg-muted); }
 .textarea { resize: vertical; line-height: 1.55; min-height: 76px; }
 .textarea.code, .input.code { font-family: var(--mono); font-size: var(--text-sm); }

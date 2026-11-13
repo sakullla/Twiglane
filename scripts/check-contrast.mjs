@@ -190,15 +190,15 @@ const UI_PAIRS = [
   // 三栏结果行号栏的来源色条与图例色块：行号栏是 --surface-2，图例在 --accent-softer 上。
   ...["info", "purple", "add-fg", "warning"].map((name) => [name, "surface-2"]),
   ...["info", "purple", "add-fg", "warning-text"].map((name) => [name, "accent-softer"]),
-  ["control-border", "surface"],
-  ["control-border", "bg"],
-  ["control-border", "surface-2"],
-  ["control-border", "surface-3"],
-  ["control-border-hover", "surface"],
-  ["control-border-hover", "bg"],
-  ["control-border-hover", "surface-2"],
-  ["control-border-hover", "surface-3"],
 ];
+
+/**
+ * 柔和控件边界：现代界面依靠表面明度阶梯、微阴影与柔和描边区分输入和次级控件，
+ * 不再要求 --control-border 对所有表面强拉 ≥ 3:1 重灰线框（但不允许退化为与表面同色，
+ * 且悬停态边界必须比静止态对所在表面更明显）。
+ */
+const SOFT_BORDER_SURFACES = ["surface", "surface-2"];
+const MIN_SOFT_BORDER = 1.12;
 
 /** 半透明底实际落在的表面：画布、面板、侧栏与合并侧栏这一档。 */
 const TRANSLUCENT_BASES = ["bg", "surface", "surface-2"];
@@ -782,6 +782,21 @@ function main() {
     };
     check(TEXT_PAIRS, MIN_TEXT, "text");
     check(UI_PAIRS, MIN_UI, "ui");
+    for (const surfaceName of SOFT_BORDER_SURFACES) {
+      const bg = background(tokens, surfaceName, `${theme}/soft-border`, problems);
+      const idle = resolve(tokens, "control-border", bg, `${theme}/soft-border`, problems);
+      const hover = resolve(tokens, "control-border-hover", bg, `${theme}/soft-border`, problems);
+      if (bg && idle && hover) {
+        const idleRatio = ratio(idle, bg);
+        const hoverRatio = ratio(hover, bg);
+        if (idleRatio < MIN_SOFT_BORDER) {
+          failures.push(`${theme}/soft-border --control-border on --${surfaceName} = ${idleRatio.toFixed(2)}:1 (< ${MIN_SOFT_BORDER}:1)`);
+        }
+        if (hoverRatio <= idleRatio + 0.05) {
+          failures.push(`${theme}/soft-border --control-border-hover (${hoverRatio.toFixed(2)}:1) 必须比 --control-border (${idleRatio.toFixed(2)}:1) 在 --${surfaceName} 上更清晰`);
+        }
+      }
+    }
     for (const base of SELECTED_ROW_BASES) {
       for (const fgName of SELECTED_ROW_TEXT) {
         judgeStack(`${theme}/selected --${fgName}`, fgName, [base, SELECTED_ROW_LAYER], MIN_TEXT, "selected");

@@ -47,13 +47,18 @@
 .titlebar .repo-badge { width: 22px; height: 22px; border-radius: var(--radius-sm); font-size: var(--text-xs); }
 .titlebar .repo-switch + .branch-pill { margin-left: var(--space-12); }
 .titlebar .repo-switch + .branch-pill::before { content: "/"; position: absolute; left: calc(var(--space-12) * -1 + 1px); color: var(--border-strong); font-size: var(--text-md); font-weight: var(--weight-normal); pointer-events: none; }
-.branch-pill { position: relative; display: inline-flex; align-items: center; gap: var(--space-6); height: var(--titlebar-control); max-width: 260px; padding: 0 var(--space-6) 0 var(--space-8); border-radius: var(--radius-sm); border: 1px solid var(--control-border); background: var(--surface); color: var(--fg); font-size: var(--text-sm); font-weight: var(--weight-medium); min-width: 0; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease); }
-.branch-pill:hover:not(:disabled) { border-color: var(--control-border-hover); background: var(--surface-3); }
-.branch-pill[aria-expanded="true"] { border-color: var(--accent); }
+.branch-pill { position: relative; display: inline-flex; align-items: center; gap: var(--space-6); height: var(--titlebar-control); max-width: 260px; padding: 0 var(--space-8); border-radius: var(--radius); border: 1px solid transparent; background: var(--surface-3); color: var(--fg); font-size: var(--text-sm); font-weight: var(--weight-medium); min-width: 0; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease); }
+.branch-pill:hover:not(:disabled) { border-color: var(--control-border-hover); background: var(--surface); box-shadow: var(--shadow-xs); }
+.branch-pill[aria-expanded="true"] { border-color: var(--accent); background: var(--surface); }
 .branch-pill > .icon:first-child { color: var(--accent-text); }
 .branch-pill > .icon:last-child { color: var(--fg-subtle); }
 .branch-pill:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
-.titlebar .icon-btn { width: var(--titlebar-control); height: var(--titlebar-control); border-radius: var(--radius-sm); }
+.titlebar-palette { display: inline-flex; align-items: center; gap: var(--space-8); flex: 0 1 248px; min-width: 0; height: var(--titlebar-control); padding: 0 var(--space-6) 0 10px; border-radius: var(--radius); border: 1px solid var(--control-border); background: var(--surface); color: var(--fg-subtle); font-size: var(--text-xs); box-shadow: var(--shadow-xs); transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease); }
+.titlebar-palette:hover { border-color: var(--control-border-hover); color: var(--fg); }
+.titlebar-palette > .icon { flex: none; color: var(--fg-subtle); }
+.titlebar-palette-label { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.titlebar-palette kbd { flex: none; padding: 2px 5px; font-size: 10px; background: var(--surface-2); border-color: var(--border); }
+.titlebar .icon-btn { width: var(--titlebar-control); height: var(--titlebar-control); border-radius: var(--radius); }
 /* 标题栏里的焦点环收在控件内：40px 条高上外扩 2px 会盖住相邻控件与分隔线。 */
 .titlebar [data-titlebar-control]:focus-visible { outline-offset: -2px; }
 /* macOS：原生交通灯保留（tauri.macos.conf.json 的 Overlay + hiddenTitle），
@@ -140,21 +145,21 @@
 .welcome-brand .brand-text strong { font-size: 26px; font-weight: var(--weight-bold); letter-spacing: -0.03em; line-height: 1.15; }
 .welcome-brand .brand-text span { margin-top: var(--space-4); color: var(--fg-muted); font-size: var(--text-base); }
 .welcome-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-12); }
-.action-card { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-12); min-width: 0; padding: var(--space-16); border-radius: var(--radius-lg); border: 1px solid var(--control-border); background: var(--surface); color: var(--fg); text-align: left; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease); }
+.action-card { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-12); min-width: 0; padding: var(--space-16); border-radius: var(--radius-lg); border: 1px solid var(--control-border); background: var(--surface); color: var(--fg); box-shadow: var(--shadow-xs); text-align: left; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease); }
 .action-card:hover:not(:disabled) { background: var(--surface); border-color: var(--control-border-hover); box-shadow: var(--shadow-md); transform: translateY(-1px); }
 .action-card:active:not(:disabled) { transform: none; }
-.action-card > .icon { flex: none; box-sizing: content-box; padding: var(--space-8); border-radius: var(--radius); background: var(--surface-3); color: var(--fg-muted); }
+.action-card > .icon { flex: none; box-sizing: content-box; padding: var(--space-8); border-radius: var(--radius); background: var(--accent-softer); color: var(--accent-text); }
 .ac-copy { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
 .ac-copy strong { font-size: var(--text-base); font-weight: var(--weight-semibold); white-space: nowrap; }
 .ac-copy > span { font-size: var(--text-xs); line-height: var(--leading-normal); color: var(--fg-muted); overflow-wrap: anywhere; }
 /* 组内节奏 24px，组间（入口 → 最近仓库）多一档 8px：两段任务读起来是两块，而不是一列。 */
 .welcome-section { margin-top: var(--space-8); }
-/* 主操作是实心 --accent，边界没有意义；说明文字是正文，必须取不透明的 --accent-fg。 */
-.action-card.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 28%, transparent), inset 0 1px 0 var(--on-accent-line); }
-.action-card.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: transparent; }
+/* 主操作是实心 --accent，说明文字必须取不透明的 --accent-fg。 */
+.action-card.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; box-shadow: 0 8px 22px color-mix(in srgb, var(--accent) 26%, transparent), inset 0 1px 0 var(--on-accent-line); }
+.action-card.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: transparent; box-shadow: 0 10px 26px color-mix(in srgb, var(--accent) 32%, transparent), inset 0 1px 0 var(--on-accent-line); }
 .action-card.primary > .icon { color: var(--accent-fg); background: var(--on-accent-soft); }
 .action-card.primary .ac-copy > span { color: var(--accent-fg); }
-.action-card:disabled, .action-card.primary:disabled { background: var(--surface-2); border-color: var(--control-border); color: var(--fg-subtle); cursor: not-allowed; box-shadow: none; }
+.action-card:disabled, .action-card.primary:disabled { background: var(--surface-2); border-color: transparent; color: var(--fg-subtle); cursor: not-allowed; box-shadow: none; }
 .action-card:disabled > .icon, .action-card.primary:disabled > .icon, .action-card:disabled .ac-copy > span, .action-card.primary:disabled .ac-copy > span { color: var(--fg-subtle); }
 .action-card:disabled > .icon, .action-card.primary:disabled > .icon { background: var(--surface-3); }
 .welcome-section { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
@@ -163,7 +168,7 @@
 .welcome-search input { font-size: var(--text-sm); }
 .welcome-section-head h2 { color: var(--fg-muted); font-size: var(--text-eyebrow); font-weight: var(--weight-semibold); letter-spacing: var(--tracking-eyebrow); text-transform: uppercase; }
 .welcome-section-head > .hint { flex: none; font-size: var(--text-xs); }
-.welcome-recent { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-6); border-radius: var(--radius-lg); background: var(--surface); }
+.welcome-recent { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-6); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-md); }
 .welcome-recent button { position: relative; display: flex; align-items: center; gap: var(--space-12); width: 100%; min-width: 0; padding: var(--space-8) var(--space-32) var(--space-8) var(--space-8); border-radius: var(--radius); text-align: left; transition: background var(--duration-fast) var(--ease); }
 .welcome-recent button:hover { background: var(--hover); }
 /* 行尾的箭头只在悬停或聚焦时出现：告诉用户「点这一行就打开」，静止时不添噪。 */
@@ -270,6 +275,8 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
 @media (max-width: 1120px) {
   .repo-switch { max-width: 200px; }
   .branch-pill { max-width: 210px; }
+  .titlebar-palette { flex: none; padding: 0 var(--space-8); }
+  .titlebar-palette-label { display: none; }
 }
 @media (max-width: 960px) {
   /* 窄窗口仍保持三列：每列约 230px 放得下图标与两行文案。改成行式卡片只收高度，

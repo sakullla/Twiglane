@@ -57,6 +57,11 @@ describe("主题与无障碍契约", () => {
     }
   });
 
+  it("禁用按钮采用柔和无框槽位，不再绘制抢眼的硬线框", () => {
+    expect(rule(components, ".btn:disabled")).toMatch(/border-color:\s*transparent/);
+    expect(rule(components, ".btn-secondary:disabled")).toMatch(/border-color:\s*transparent/);
+  });
+
   it("减少动效不会隐藏控件或清除状态颜色", () => {
     const reduced = base.match(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
     expect(reduced).toMatch(/animation:\s*none !important/);

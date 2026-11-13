@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { BRAND } from "../brand";
+  import { BRAND, MODIFIER_LABEL } from "../brand";
   import type { RepoSummary, Theme } from "../types";
   import { BUSY_REASON, hueOf, repoBadgeLetter } from "../ui";
   import {
@@ -59,6 +59,8 @@
     /** 返回 cliora 原会话。只回送结果，不执行 Git 写入。 */
     onClioraReturn?: () => void;
     onBrand: () => void;
+    /** 显式打开命令面板；未传时复用品牌入口行为。 */
+    onPalette?: () => void;
     onRepo: (anchor: HTMLElement) => void;
     onBranch: (anchor: HTMLElement) => void;
     onFetch: () => void;
@@ -97,6 +99,7 @@
     cliora = null,
     onClioraReturn,
     onBrand,
+    onPalette,
     onRepo,
     onBranch,
     onFetch,
@@ -316,6 +319,21 @@
       </button>
     {/if}
   </div>
+
+  <span class="titlebar-spacer" data-tauri-drag-region aria-hidden="true"></span>
+
+  <button
+    type="button"
+    class="titlebar-palette"
+    data-titlebar-control
+    aria-label="命令面板"
+    title={`搜索命令、切换仓库或分支（${MODIFIER_LABEL}+K）`}
+    onclick={() => (onPalette ?? onBrand)()}
+  >
+    <Icon name="search" size={13} />
+    <span class="titlebar-palette-label">搜索或运行命令</span>
+    <kbd aria-hidden="true">{MODIFIER_LABEL} K</kbd>
+  </button>
 
   <span class="titlebar-spacer" data-tauri-drag-region aria-hidden="true"></span>
 

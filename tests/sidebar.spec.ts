@@ -371,10 +371,11 @@ describe("自绘标题栏", () => {
     };
   }
 
-  it("没有打开仓库时不显示分支和同步", () => {
+  it("没有打开仓库时不显示分支和同步，但保留命令面板直达入口", () => {
     const { container } = render(TitleBar, { props: titleProps({ repo: null, branch: null }) as never });
     expect(container.querySelector(".branch-pill")).toBeNull();
-    expect(container.querySelectorAll("[data-titlebar-control]").length).toBeLessThanOrEqual(6);
+    expect(container.querySelector(".titlebar-palette")).toBeTruthy();
+    expect(container.querySelectorAll("[data-titlebar-control]")).toHaveLength(5);
   });
 
   it("命令面板过滤后游标归零，回车执行第一条匹配", async () => {
@@ -400,20 +401,22 @@ describe("自绘标题栏", () => {
     expect(skip).not.toHaveBeenCalled();
   });
 
-  it("常驻交互项恰好 6 个，且不含刷新、发布分支、只关联上游、远程管理", () => {
-    const { container } = render(TitleBar, { props: titleProps() as never });
+  it("常驻交互项恰好 7 个（含显式命令面板入口），且不含刷新、发布分支、只关联上游、远程管理", async () => {
+    const onPalette = vi.fn();
+    const { container } = render(TitleBar, { props: titleProps({ onPalette }) as never });
     const controls = [...container.querySelectorAll("[data-titlebar-control]")];
-    expect(controls).toHaveLength(6);
-    // 下拉未打开时，标题栏里的应用可交互元素也只有这 6 个（同步的三个动作收在组内菜单）；
+    expect(controls).toHaveLength(7);
+    // 下拉未打开时，标题栏里的应用可交互元素也只有这 7 个（同步的三个动作收在组内菜单）；
     // 自绘窗口按钮属于窗口装饰，不算应用交互项。
     const appButtons = [...container.querySelectorAll("button")].filter(
       (item) => item.closest(".titlebar-window-controls") === null,
     );
-    expect(appButtons).toHaveLength(6);
+    expect(appButtons).toHaveLength(7);
     const text = controls.map((item) => `${item.getAttribute("aria-label")} ${item.textContent}`).join(" ");
     expect(text).toContain("品牌");
     expect(text).toContain("当前仓库");
     expect(text).toContain("当前分支");
+    expect(text).toContain("命令面板");
     expect(text).toContain("同步");
     expect(text).toContain("主题");
     expect(text).toContain("设置");
@@ -421,6 +424,8 @@ describe("自绘标题栏", () => {
     expect(text).not.toContain("发布分支");
     expect(text).not.toContain("只关联上游");
     expect(text).not.toContain("远程管理");
+    await fireEvent.click(screen.getByRole("button", { name: "命令面板" }));
+    expect(onPalette).toHaveBeenCalledTimes(1);
   });
 
   it("同步组一处提供获取、拉取、推送，并把动作回写给调用方", async () => {
@@ -534,7 +539,7 @@ describe("自绘标题栏", () => {
 
   it("上游未关联时分支处只显示状态提示，不新增按钮", () => {
     const { container } = render(TitleBar, { props: titleProps({ upstreamMissing: true }) as never });
-    expect(container.querySelectorAll("[data-titlebar-control]")).toHaveLength(6);
+    expect(container.querySelectorAll("[data-titlebar-control]")).toHaveLength(7);
     expect(container.textContent).toContain("未关联上游");
     expect(container.textContent).not.toContain("发布分支");
   });
@@ -551,9 +556,9 @@ describe("自绘标题栏", () => {
     expect(onTheme).toHaveBeenCalledWith("system");
   });
 
-  it("Windows 自绘窗口按钮不占用 6 个控制项，macOS 不留自绘按钮", () => {
+  it("Windows 自绘窗口按钮不占用常驻控制项，macOS 不留自绘按钮", () => {
     const windows = render(TitleBar, { props: titleProps({ platform: "windows" }) as never });
-    expect(windows.container.querySelectorAll("[data-titlebar-control]")).toHaveLength(6);
+    expect(windows.container.querySelectorAll("[data-titlebar-control]")).toHaveLength(7);
     expect(screen.getByRole("button", { name: "最小化窗口" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "关闭窗口" }).hasAttribute("data-titlebar-control")).toBe(false);
     windows.unmount();
@@ -1167,6 +1172,7 @@ describe("外壳样式契约", () => {
           ".titlebar-actions",
           ".titlebar-spacer",
           ".titlebar-brand",
+          ".titlebar-palette",
           ".titlebar-macos",
           ".titlebar-window-controls",
           ".titlebar-win-btn",
@@ -1267,7 +1273,7 @@ describe("外壳样式契约", () => {
    * 6 设置 .icon-btn.titlebar-settings（复用图标按钮的规则）。
    * 后三项必须在各自追加规则里不写 height，否则六个项又会分叉。
    */
-  it("标题栏六个常驻项（品牌/仓库/分支/同步/主题/设置）同高，高度只来自 --titlebar-control", () => {
+  it("标题栏常驻项（品牌/仓库/分支/命令面板/同步/主题/设置）同高，高度只来自 --titlebar-control", () => {
     const tokensCss = readLayer("tokens.css");
     const control = Number(tokensCss.match(/--titlebar-control:\s*(\d+)px/)?.[1]);
     expect(control, "标题栏控件高度令牌必须是一个实际像素值").toBeGreaterThan(0);
@@ -1275,6 +1281,7 @@ describe("外壳样式契约", () => {
       [".titlebar-brand", "品牌"],
       [".repo-switch", "仓库"],
       [".branch-pill", "分支（同步 .sync-pill 复用同一规则）"],
+      [".titlebar-palette", "命令面板触发入口"],
     ];
     for (const [selector, label] of owned) {
       const body = ruleBody(layoutCss, selector);

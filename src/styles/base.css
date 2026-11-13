@@ -44,13 +44,12 @@ kbd {
   font-size: var(--text-xs);
   font-weight: var(--weight-medium);
   line-height: 1;
-  padding: 3px 5px;
+  padding: 3px 6px;
   border-radius: 5px;
   border: 1px solid var(--border);
-  background: var(--surface-2);
+  background: var(--surface-3);
   color: var(--fg-subtle);
   white-space: nowrap;
-  box-shadow: 0 1px 0 var(--border);
 }
 
 /* 滚动条：细轨 + 圆头，悬浮时向前景色靠近 */

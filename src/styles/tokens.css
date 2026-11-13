@@ -112,35 +112,32 @@
 :root,
 [data-theme="light"] {
   color-scheme: light;
-  /* 石墨中性灰：表面保持纯白，层级主要靠明度差，颜色只留给选中、差异与状态 */
-  --bg: #f4f4f6;
+  /* 现代微冷中性灰：靠表面明度阶梯与细腻阴影区分层级，控件采用柔和描边 */
+  --bg: #f3f4f6;
   --surface: #ffffff;
-  --surface-2: #f7f7f9;
-  --surface-3: #ebecf0;
-  --hover: rgba(20, 22, 34, 0.045);
-  --active: rgba(20, 22, 34, 0.075);
-  --border: #e5e6eb;
-  --border-strong: #d5d7de;
-  /* 控件边界：表单控件、次级按钮与可点击的 bordered 行的自身边界。
-     发丝线 --border/--border-strong 只做面板外框与分隔线，控件边界必须
-     对 surface/bg/surface-2/surface-3 均 ≥ 3:1（R14 交互元素边界）。 */
-  --control-border: #81848f;
-  --control-border-hover: #6a6d78;
-  --fg: #15161b;
-  --fg-muted: #4a4d57;
-  --fg-subtle: #5b5e69;
+  --surface-2: #f6f7f8;
+  --surface-3: #ebedf0;
+  --hover: rgba(18, 22, 36, 0.045);
+  --active: rgba(18, 22, 36, 0.08);
+  --border: #e4e6ea;
+  --border-strong: #d4d7dd;
+  /* 柔和控件边界：取代过去突兀的高对比灰框，配合表面明度差与微阴影勾勒输入与次级按钮。 */
+  --control-border: #d7d9df;
+  --control-border-hover: #babdc7;
+  --fg: #15161a;
+  --fg-muted: #464a57;
+  --fg-subtle: #555a67;
   /* 弱化正文：已完成/已标记等非活动行的主文字（如冲突侧栏的已标记文件）。
-     整行或文字 opacity 会把前景与所在表面按 α 混合，因此弱化不走 opacity，改用本令牌：
-     取值已把余量算进来，即使再叠加元素级 0.75 淡化，对 --surface / --surface-2 仍 ≥4.5:1。 */
-  --fg-dimmed: #3e4048;
-  --accent: #4f56e0;
-  --accent-hover: #434ad2;
-  --accent-soft: rgba(79, 86, 224, 0.1);
-  --accent-softer: rgba(79, 86, 224, 0.055);
+     取值已把余量算进来，即使叠加元素级 0.75 淡化，对 --surface / --surface-2 仍 ≥4.5:1。 */
+  --fg-dimmed: #3b3e49;
+  --accent: #4e56e6;
+  --accent-hover: #4149d8;
+  --accent-soft: rgba(78, 86, 230, 0.095);
+  --accent-softer: rgba(78, 86, 230, 0.05);
   --accent-fg: #ffffff;
-  --accent-text: #3f46c8;
-  --on-accent-soft: rgba(255, 255, 255, 0.16);
-  --on-accent-line: rgba(255, 255, 255, 0.24);
+  --accent-text: #3c43c9;
+  --on-accent-soft: rgba(255, 255, 255, 0.18);
+  --on-accent-line: rgba(255, 255, 255, 0.26);
   /* 成功语义：成功、完成、通过、已解决都走这组语义绿。靛蓝只留给选中、主操作和焦点，
      新增行继续走 --add-*，两者同属绿色但含义不同，不互相引用。 */
   --success: #1a7f37;
@@ -170,14 +167,15 @@
   --del-bg: #fdeeee;
   --del-strong: #f8d5d8;
   --del-fg: #a13239;
-  --hunk-bg: #f0f1f6;
-  --hunk-fg: #555a70;
-  --focus: #4f56e0;
-  --overlay: rgba(15, 16, 24, 0.32);
-  --shadow-sm: 0 1px 2px rgba(18, 20, 30, 0.06);
-  --shadow-md: 0 0 0 1px rgba(18, 20, 30, 0.05), 0 4px 12px rgba(18, 20, 30, 0.07);
-  --shadow-lg: 0 0 0 1px rgba(18, 20, 30, 0.06), 0 16px 48px rgba(18, 20, 30, 0.16), 0 4px 12px rgba(18, 20, 30, 0.06);
-  --brand-grad: linear-gradient(145deg, #858cfa 0%, #4f56e0 80%);
+  --hunk-bg: #eef0f6;
+  --hunk-fg: #52576d;
+  --focus: #4e56e6;
+  --overlay: rgba(13, 15, 24, 0.34);
+  --shadow-xs: 0 1px 2px rgba(15, 18, 28, 0.04);
+  --shadow-sm: 0 1px 3px rgba(15, 18, 28, 0.06), 0 1px 2px rgba(15, 18, 28, 0.04);
+  --shadow-md: 0 0 0 1px rgba(15, 18, 28, 0.05), 0 6px 18px rgba(15, 18, 28, 0.07), 0 2px 6px rgba(15, 18, 28, 0.04);
+  --shadow-lg: 0 0 0 1px rgba(15, 18, 28, 0.06), 0 20px 52px rgba(15, 18, 28, 0.16), 0 6px 16px rgba(15, 18, 28, 0.06);
+  --brand-grad: linear-gradient(145deg, #838bfa 0%, #4e56e6 80%);
   --brand-logo-fg: #ffffff;
   --brand-logo-highlight: rgba(255, 255, 255, 0.28);
   --avatar-fg: #ffffff;
@@ -249,30 +247,30 @@
 /* 深色主题配色（键集合必须与上方浅色块一致） */
 [data-theme="dark"] {
   color-scheme: dark;
-  --bg: #0d0e11;
-  --surface: #16171b;
-  --surface-2: #111215;
-  --surface-3: #24252b;
-  --hover: rgba(232, 234, 245, 0.055);
-  --active: rgba(232, 234, 245, 0.09);
-  --border: #23252b;
-  --border-strong: #30323a;
-  /* 控件边界：与浅色主题同义，对深色四个表面均 ≥ 3:1。 */
-  --control-border: #70737e;
-  --control-border-hover: #858893;
-  --fg: #ebecf0;
-  --fg-muted: #a2a5af;
-  --fg-subtle: #9295a0;
+  --bg: #0c0d0f;
+  --surface: #16181d;
+  --surface-2: #111216;
+  --surface-3: #22242b;
+  --hover: rgba(230, 234, 248, 0.055);
+  --active: rgba(230, 234, 248, 0.09);
+  --border: #22242a;
+  --border-strong: #2f323b;
+  /* 柔和控件边界：与深色表面自然融合，悬停时微亮响应。 */
+  --control-border: #2b2e37;
+  --control-border-hover: #3d414e;
+  --fg: #ededf1;
+  --fg-muted: #a4a8b6;
+  --fg-subtle: #9499a8;
   /* 弱化正文：与浅色主题同义，取值按 0.75 元素级淡化的合成结果标定。 */
-  --fg-dimmed: #b5b8c0;
-  --accent: #7e85fa;
-  --accent-hover: #979cfc;
-  --accent-soft: rgba(126, 133, 250, 0.14);
-  --accent-softer: rgba(126, 133, 250, 0.08);
-  --accent-fg: #0d0f2b;
-  --accent-text: #acb1fd;
+  --fg-dimmed: #b7bbc7;
+  --accent: #8087fb;
+  --accent-hover: #989efc;
+  --accent-soft: rgba(128, 135, 251, 0.14);
+  --accent-softer: rgba(128, 135, 251, 0.08);
+  --accent-fg: #0c0e29;
+  --accent-text: #b0b5fd;
   --on-accent-soft: rgba(0, 0, 0, 0.14);
-  --on-accent-line: rgba(0, 0, 0, 0.16);
+  --on-accent-line: rgba(255, 255, 255, 0.22);
   /* 成功语义：与浅色主题同义，按深色画布取值。 */
   --success: #5fcf80;
   --success-soft: rgba(95, 207, 128, 0.14);
@@ -301,18 +299,19 @@
   --del-strong: rgba(238, 111, 120, 0.19);
   --del-fg: #f2a4aa;
   --hunk-bg: rgba(140, 148, 190, 0.08);
-  --hunk-fg: #a9adc0;
-  --focus: #959bfa;
-  --overlay: rgba(4, 5, 8, 0.6);
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
-  --shadow-md: 0 0 0 1px rgba(255, 255, 255, 0.04), 0 6px 18px rgba(0, 0, 0, 0.38);
-  --shadow-lg: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 24px 64px rgba(0, 0, 0, 0.6), 0 6px 18px rgba(0, 0, 0, 0.35);
+  --hunk-fg: #adb1c4;
+  --focus: #969cfc;
+  --overlay: rgba(4, 5, 10, 0.64);
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.24);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.36);
+  --shadow-md: 0 0 0 1px rgba(255, 255, 255, 0.045), 0 8px 22px rgba(0, 0, 0, 0.42);
+  --shadow-lg: 0 0 0 1px rgba(255, 255, 255, 0.065), 0 24px 64px rgba(0, 0, 0, 0.62), 0 8px 20px rgba(0, 0, 0, 0.36);
   --brand-grad: linear-gradient(145deg, #a6abfc 0%, #5d64e8 80%);
   --brand-logo-fg: #ffffff;
   --brand-logo-highlight: rgba(255, 255, 255, 0.28);
   --avatar-fg: #ffffff;
   --switch-knob: #ffffff;
-  --segmented-active-bg: #2c2e35;
+  --segmented-active-bg: #2b2f3c;
   --segmented-active-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05), 0 1px 3px rgba(0, 0, 0, 0.4);
   /* --hue 派生配比：与浅色主题同义，亮度按深色画布重新取值。 */
   --avatar-bg-sat: 26%;
@@ -327,7 +326,7 @@
   /* 语法高亮：与浅色主题同义，按深色画布取值。 */
   --mark-mix: 14%;
   --selection-mix: 24%;
-  --syn-keyword: #ff8b82;
+  --syn-keyword: #ff928a;
   --syn-string: #a5d6ff;
   --syn-string-expression: #8ee99a;
   --syn-constant: #8cc8ff;

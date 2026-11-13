@@ -118,15 +118,15 @@
     <section class="welcome-actions" aria-label="开始使用">
       <button type="button" class="action-card primary" {disabled} title={actionTitle} onclick={onAdd}>
         <Icon name="folder-open" size={18} />
-        <span class="ac-copy"><strong>打开本地仓库</strong><span>选择目录，或把文件夹拖进窗口</span></span>
+        <span class="ac-copy"><strong>打开本地仓库</strong><span>选择或拖入本地文件夹</span></span>
       </button>
       <button type="button" class="action-card" {disabled} title={actionTitle} onclick={onClone}>
         <Icon name="download" size={18} />
-        <span class="ac-copy"><strong>克隆远程仓库</strong><span>HTTPS、SSH 或本机路径</span></span>
+        <span class="ac-copy"><strong>克隆远程仓库</strong><span>从远程地址克隆到本地</span></span>
       </button>
       <button type="button" class="action-card" {disabled} title={actionTitle} onclick={onCreate}>
         <Icon name="folder-plus" size={18} />
-        <span class="ac-copy"><strong>新建仓库</strong><span>在空目录初始化 Git</span></span>
+        <span class="ac-copy"><strong>新建仓库</strong><span>在空目录初始化新仓库</span></span>
       </button>
     </section>
 

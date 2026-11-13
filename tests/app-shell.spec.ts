@@ -1111,15 +1111,16 @@ describe("连续审阅队列与真实写入边界（R2、R4、R6）", () => {
 });
 
 describe("应用外壳", () => {
-  it("标题栏不超过 6 个常驻控件，刷新、发布分支、只关联上游、远程管理都不在里面", async () => {
+  it("标题栏常驻控件包含显式命令面板入口，刷新、发布分支、只关联上游、远程管理都不在里面", async () => {
     render(App);
 
-    // 未打开仓库时不超过 6 个（R6）：分支和同步没有对象，不显示无效控件。
+    // 未打开仓库时不显示分支和同步，但保留命令面板搜索入口。
     const idle = [...document.querySelectorAll<HTMLElement>("[data-titlebar-control]")];
-    expect(idle.length).toBeLessThanOrEqual(6);
+    expect(idle).toHaveLength(5);
     expect(idle.map((control) => control.getAttribute("aria-label"))).toEqual([
       `${BRAND.full} 品牌菜单`,
       "打开仓库",
+      "命令面板",
       "主题：深色",
       "设置",
     ]);
@@ -1133,20 +1134,21 @@ describe("应用外壳", () => {
     expect(header!.hasAttribute("data-tauri-drag-region")).toBe(true);
 
     const controls = [...header!.querySelectorAll<HTMLElement>("[data-titlebar-control]")];
-    expect(controls).toHaveLength(6);
+    expect(controls).toHaveLength(7);
     for (const control of controls) {
       expect(control.tagName, "常驻控件都是可交互按钮").toBe("BUTTON");
       expect(control.hasAttribute("data-tauri-drag-region"), "交互控件不参与拖拽").toBe(false);
     }
 
-    // 逐项比对六个角色，而不是只看数量：品牌、仓库、分支、同步组、主题、设置。
+    // 逐项比对七个角色：品牌、仓库、分支、命令面板、同步组、主题、设置。
     const labels = controls.map((control) => control.getAttribute("aria-label") ?? "");
     expect(labels[0]).toBe(`${BRAND.full} 品牌菜单`);
     expect(labels[1]).toBe("当前仓库 demo");
     expect(labels[2]).toBe("当前分支 main");
-    expect(labels[3]).toMatch(/^同步 /);
-    expect(labels[4]).toBe("主题：深色");
-    expect(labels[5]).toBe("设置");
+    expect(labels[3]).toBe("命令面板");
+    expect(labels[4]).toMatch(/^同步 /);
+    expect(labels[5]).toBe("主题：深色");
+    expect(labels[6]).toBe("设置");
 
     for (const control of controls) {
       for (const banned of ["刷新", "发布分支", "只关联上游", "远程管理"]) {

@@ -752,21 +752,6 @@
             <Icon name={rowIcon(row)} size={14} />
           </span>
           <span class="tree-name">{row.label}</span>
-          {#if row.splittable}
-            <button
-              type="button"
-              class="tree-split"
-              aria-label={`把 ${row.label} 拆成逐级目录`}
-              title="拆成逐级目录，恢复按层展开"
-              tabindex="-1"
-              onclick={(event) => {
-                event.stopPropagation();
-                onSplit(row);
-              }}
-            >
-              <Icon name="list" size={12} />
-            </button>
-          {/if}
           <span class="tree-trail">
             {#if row.loading && row.node.children === null}<span class="spinner muted" aria-hidden="true" title="正在读取目录"></span>{/if}
             {#if row.deleted}<span class="tree-tag danger" title="工作区里没有这个文件，只能看改动或历史">已删除</span>{/if}

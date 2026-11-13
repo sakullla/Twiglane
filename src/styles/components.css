@@ -2138,9 +2138,6 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .tree-tag, .file-tag { flex: none; padding: 0 5px; border-radius: var(--radius-xs); background: var(--surface-3); color: var(--fg-subtle); font-size: var(--text-xs); line-height: 16px; }
 .file-tag { background: var(--warning-soft); color: var(--warning-text); }
 .tree-tag.danger { background: var(--danger-soft); color: var(--danger-text); }
-.tree-split { flex: none; width: 18px; height: 18px; display: grid; place-items: center; border-radius: var(--radius-xs); color: var(--fg-subtle); opacity: 0; }
-.file-tree-row:hover .tree-split, .tree-split:focus-visible { opacity: 1; }
-.tree-split:hover { background: var(--surface-3); color: var(--fg); }
 @container file-tree (max-width: 220px) {
   .tree-tag, .tree-note { display: none; }
 }

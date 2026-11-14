@@ -82,6 +82,8 @@
   const IS_WINDOWS = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
   const IS_MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform ?? "");
   const FALLBACK_FONT = '"Cascadia Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  /** 快速收起/展开复用纹理；持续隐藏后仍释放 GPU 资源。 */
+  export const WEBGL_RELEASE_DELAY_MS = 1500;
 </script>
 
 <script lang="ts">
@@ -98,7 +100,7 @@
     type TerminalKeyAction,
     type TerminalRouter,
   } from "../terminal";
-  import type { TerminalExitEvent, TerminalOutputEvent } from "../types";
+  import type { TerminalExitEvent, TerminalOutputEvent, TerminalSnapshot } from "../types";
   import Icon from "./Icon.svelte";
 
   /**
@@ -156,11 +158,16 @@
   let search: SearchAddon | null = null;
   let webgl: WebglAddon | null = null;
   let webglLoading = false;
+  let webglReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+  let webglLoadTimer: ReturnType<typeof setTimeout> | null = null;
+  let webglFrame = 0;
   let disposed = false;
   let attached = false;
   let lastSeq = 0;
   let pending: ({ kind: "output" } & TerminalOutputEvent | { kind: "exit" } & TerminalExitEvent)[] = [];
   let lastSize = "";
+  let pendingSize: { rows: number; cols: number } | null = null;
+  let resizing = false;
   let fitFrame = 0;
 
   let starting = $state(true);
@@ -196,18 +203,32 @@
     const wants = focused;
     untrack(() => {
       if (!show) {
-        releaseWebgl();
+        cancelWebglLoad();
+        if (webgl && webglReleaseTimer === null) {
+          webglReleaseTimer = setTimeout(() => {
+            webglReleaseTimer = null;
+            if (!visible) releaseWebgl();
+          }, WEBGL_RELEASE_DELAY_MS);
+        }
         return;
       }
-      if (term) void loadWebgl(term);
+      cancelWebglRelease();
+      scheduleWebgl();
       scheduleFit();
-      if (wants) requestFrame(() => term?.focus());
+      if (wants) requestFrame(() => {
+        if (!disposed && visible && focused) term?.focus();
+      });
     });
   });
 
   function requestFrame(callback: () => void): number {
     if (typeof requestAnimationFrame === "function") return requestAnimationFrame(callback);
     return setTimeout(callback, 16) as unknown as number;
+  }
+
+  function cancelFrame(frame: number) {
+    if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(frame);
+    else clearTimeout(frame);
   }
 
   function cssValue(token: string): string {
@@ -234,15 +255,36 @@
     }
     void (async () => {
       let loaded: Modules;
+      let snapshot: TerminalSnapshot | null;
+      // 先接收事件，再并行加载 xterm 与读取快照；加载期间的输出按序号补齐。
+      stopEvents = router.subscribe(sessionId, {
+        output: (event) => {
+          if (!attached && starting) pending.push({ kind: "output", ...event });
+          else if (attached) applyOutput(event);
+        },
+        exit: (event) => {
+          if (!attached && starting) pending.push({ kind: "exit", ...event });
+          else if (attached) applyExit(event);
+        },
+      });
       try {
-        loaded = await loadModules();
+        [loaded, snapshot] = await Promise.all([
+          loadModules(),
+          (async () => {
+            // 订阅失败时仍可显示一次快照；再次附着会补上新输出。
+            await router.start().catch(() => {});
+            if (disposed) return null;
+            return api.terminalAttach(sessionId);
+          })(),
+        ]);
       } catch (error) {
         if (disposed) return;
+        pending = [];
         attachError = normalizeError(error).message;
         starting = false;
         return;
       }
-      if (disposed) return;
+      if (disposed || !snapshot) return;
       const instance = new loaded.Terminal({
         allowProposedApi: true,
         convertEol: false,
@@ -293,29 +335,10 @@
       term = instance;
       fit = fitAddon;
       search = searchAddon;
-      void loadWebgl(instance);
       register(sessionId, paneApi);
-      fitNow();
-
-      stopEvents = router.subscribe(sessionId, {
-        output: (event) => {
-          if (!attached && starting) pending.push({ kind: "output", ...event });
-          else if (!attached) return;
-          else applyOutput(event);
-        },
-        exit: (event) => {
-          if (!attached && starting) pending.push({ kind: "exit", ...event });
-          else if (!attached) return;
-          else applyExit(event);
-        },
-      });
-      try {
-        await router.start();
-      } catch {
-        // 事件订阅失败时仍附着一次快照：至少能看到已有输出，新输出由下一次附着补上。
-      }
-      if (disposed) return;
-      await attach();
+      attach(snapshot);
+      scheduleWebgl();
+      if (visible && focused) instance.focus();
     })();
     return () => {
       disposed = true;
@@ -323,7 +346,10 @@
       pending = [];
       stopEvents();
       observer?.disconnect();
-      if (fitFrame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(fitFrame);
+      pendingSize = null;
+      if (fitFrame) cancelFrame(fitFrame);
+      cancelWebglLoad();
+      cancelWebglRelease();
       register(sessionId, null);
       releaseWebgl();
       term?.dispose();
@@ -332,6 +358,30 @@
       search = null;
     };
   });
+
+  function cancelWebglRelease() {
+    if (webglReleaseTimer !== null) clearTimeout(webglReleaseTimer);
+    webglReleaseTimer = null;
+  }
+
+  function cancelWebglLoad() {
+    if (webglFrame) cancelFrame(webglFrame);
+    webglFrame = 0;
+    if (webglLoadTimer !== null) clearTimeout(webglLoadTimer);
+    webglLoadTimer = null;
+  }
+
+  /** 先让面板与首屏输出绘制，再初始化 GPU，避免纹理创建阻塞展开这一帧。 */
+  function scheduleWebgl() {
+    if (webglDisabled || previewDomTerminal || !term || !attached || !visible || disposed || webgl || webglLoading || webglFrame || webglLoadTimer !== null) return;
+    webglFrame = requestFrame(() => {
+      webglFrame = 0;
+      webglLoadTimer = setTimeout(() => {
+        webglLoadTimer = null;
+        if (term && !disposed) void loadWebgl(term);
+      }, 0);
+    });
+  }
 
   async function loadWebgl(instance: XTerm) {
     if (webglDisabled || previewDomTerminal || !visible || webgl || webglLoading) return;
@@ -353,42 +403,31 @@
     }
   }
 
-  /** 隐藏标签页只保留终端文本状态，释放 WebGL 渲染器与纹理；再次显示时恢复加速。 */
+  /** 持续隐藏或卸载时释放渲染器；终端文本仍由 xterm 保存。 */
   function releaseWebgl() {
     const addon = webgl;
     webgl = null;
     addon?.dispose();
   }
 
-  async function attach() {
-    starting = true;
-    attachError = null;
-    try {
-      const snapshot = await api.terminalAttach(sessionId);
-      if (disposed) return;
-      running = snapshot.running;
-      exitCode = snapshot.exitCode;
-      signalName = snapshot.signal;
-      lastSeq = snapshot.seq;
-      if (snapshot.output) term?.write(snapshot.output);
-      attached = true;
-      const buffered = pending;
-      pending = [];
-      for (const event of buffered) {
-        if (event.kind === "output") applyOutput(event);
-        else applyExit(event);
-      }
-      // 后端新建 PTY 固定 24×80：附着后必须补一次真实尺寸，否则换行和全屏程序会错位。
-      lastSize = "";
-      fitNow();
-      if (term) sendSize(term.rows, term.cols);
-    } catch (error) {
-      if (disposed) return;
-      pending = [];
-      attachError = normalizeError(error).message;
-    } finally {
-      if (!disposed) starting = false;
+  function attach(snapshot: TerminalSnapshot) {
+    running = snapshot.running;
+    exitCode = snapshot.exitCode;
+    signalName = snapshot.signal;
+    lastSeq = snapshot.seq;
+    attached = true;
+    if (snapshot.output) term?.write(snapshot.output);
+    const buffered = pending;
+    pending = [];
+    for (const event of buffered) {
+      if (event.kind === "output") applyOutput(event);
+      else applyExit(event);
     }
+    // 后端新建 PTY 固定 24×80：附着后必须补一次真实尺寸，否则换行和全屏程序会错位。
+    lastSize = "";
+    fitNow();
+    if (term) sendSize(term.rows, term.cols);
+    starting = false;
   }
 
   function applyOutput(event: TerminalOutputEvent) {
@@ -425,18 +464,36 @@
 
   /** 行列变化才发给后端；失败只影响尺寸，不改变会话状态，下一次变化还会再同步。 */
   function sendSize(rows: number, cols: number) {
-    if (!attached || !running || !rows || !cols) return;
-    const size = `${rows}x${cols}`;
-    if (size === lastSize) return;
-    lastSize = size;
-    void api.terminalResize(sessionId, rows, cols).catch(() => {
-      lastSize = "";
-    });
+    if (!attached || !running || !visible || disposed || !rows || !cols) return;
+    pendingSize = { rows, cols };
+    if (!resizing) void flushSizes();
+  }
+
+  /** 原生 resize 可阻塞：每个会话只发一个在途请求，中间尺寸折叠为最新值。 */
+  async function flushSizes() {
+    resizing = true;
+    try {
+      while (pendingSize && !disposed && running && visible) {
+        const { rows, cols } = pendingSize;
+        pendingSize = null;
+        const size = `${rows}x${cols}`;
+        if (size === lastSize) continue;
+        try {
+          await api.terminalResize(sessionId, rows, cols);
+          lastSize = size;
+        } catch {
+          lastSize = "";
+        }
+      }
+    } finally {
+      pendingSize = null;
+      resizing = false;
+    }
   }
 
   /** 拖动面板高度、窗口缩放时合并到下一帧再测量，避免每个像素都重排一次。 */
   function scheduleFit() {
-    if (fitFrame) return;
+    if (fitFrame || !visible || disposed) return;
     fitFrame = requestFrame(() => {
       fitFrame = 0;
       fitNow();
@@ -448,6 +505,7 @@
     if (!host.clientWidth || !host.clientHeight) return;
     try {
       fit.fit();
+      if (term) sendSize(term.rows, term.cols);
     } catch {
       // 容器暂时不可测量时跳过；下次可见会重新测量。
     }

@@ -216,6 +216,7 @@
   async function bootstrap(repo: string): Promise<boolean> {
     if (disposed) return false;
     preloadTerminal();
+    void router.start().catch(() => {});
     booting[repo] = true;
     bootErrors[repo] = null;
     try {

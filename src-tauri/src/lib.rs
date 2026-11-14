@@ -1998,7 +1998,8 @@ fn terminal_write(
     state.write(&session_id, &data)
 }
 
-#[tauri::command(rename_all = "camelCase")]
+// ConPTY 尺寸调整可能等待控制台响应，不能占用窗口消息线程。
+#[tauri::command(async, rename_all = "camelCase")]
 fn terminal_resize(
     state: State<'_, TerminalManager>,
     session_id: String,

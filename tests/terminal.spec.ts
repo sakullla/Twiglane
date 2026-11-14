@@ -119,10 +119,13 @@ const xtermMock = vi.hoisted(() => {
       for (const handler of this.resultHandlers) handler({ resultIndex, resultCount });
     }
   }
-  return { instances, searches, webgls, Webgl: FakeWebgl, Terminal: FakeTerminal, Addon: FakeAddon, Search: FakeSearch };
+  return { loadGate: null as Promise<void> | null, instances, searches, webgls, Webgl: FakeWebgl, Terminal: FakeTerminal, Addon: FakeAddon, Search: FakeSearch };
 });
 
-vi.mock("@xterm/xterm", () => ({ Terminal: xtermMock.Terminal }));
+vi.mock("@xterm/xterm", async () => {
+  await xtermMock.loadGate;
+  return { Terminal: xtermMock.Terminal };
+});
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: xtermMock.Addon }));
 vi.mock("@xterm/addon-search", () => ({ SearchAddon: xtermMock.Search }));
 vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: xtermMock.Addon }));
@@ -194,6 +197,7 @@ import TerminalPanel, {
   terminalEventApplies,
   terminalStatusLabel,
 } from "../src/lib/components/TerminalPanel.svelte";
+import { WEBGL_RELEASE_DELAY_MS } from "../src/lib/components/TerminalPane.svelte";
 import {
   MAX_PANES_PER_GROUP,
   addGroup,
@@ -360,6 +364,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
 });
 
 /* ------------------------------------------------------------------ 纯逻辑 */
@@ -535,13 +540,54 @@ describe("标签页与拆分布局", () => {
 /* ------------------------------------------------------------------ 面板 */
 
 describe("终端面板", () => {
-  it("隐藏终端释放 WebGL，再显示保留文本实例并恢复加速", async () => {
+  it("xterm 加载期间并行附着快照，期间的输出与退出事件按序补齐", async () => {
+    let loaded!: () => void;
+    xtermMock.loadGate = new Promise<void>((resolve) => { loaded = resolve; });
+    try {
+      await renderPanel();
+      await waitFor(() => expect(mocks.api.terminalAttach).toHaveBeenCalledWith("s1"));
+      expect(xtermMock.instances).toHaveLength(0);
+      emit(TERMINAL_OUTPUT_EVENT, { sessionId: "s1", seq: 1, data: "duplicate" });
+      emit(TERMINAL_OUTPUT_EVENT, { sessionId: "s1", seq: 2, data: "during-load\r\n" });
+      emit(TERMINAL_EXIT_EVENT, { sessionId: "s1", seq: 3, exitCode: 0, signal: null });
+    } finally {
+      loaded();
+      xtermMock.loadGate = null;
+    }
+    const term = await waitForTerminal();
+    expect(term.writes).toEqual(["welcome-1\r\n$ ", "during-load\r\n"]);
+    await waitFor(() => expect(stateOf()).toBe("exited"));
+  });
+
+  it("快速收起再展开复用 WebGL，卸载立即释放", async () => {
     const { view } = await renderPanel();
     const term = await waitForTerminal();
     await waitFor(() => expect(xtermMock.webgls).toHaveLength(1));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    for (let index = 0; index < 5; index += 1) {
+      await view.rerender({ open: false });
+      expect(xtermMock.webgls[0].disposed).toBe(false);
+      await view.rerender({ open: true });
+    }
+    await vi.advanceTimersByTimeAsync(WEBGL_RELEASE_DELAY_MS);
+    expect(xtermMock.webgls).toHaveLength(1);
+    expect(xtermMock.webgls[0].disposed).toBe(false);
+    expect(term.disposed).toBe(false);
+    view.unmount();
+    expect(xtermMock.webgls[0].disposed).toBe(true);
+  });
+
+  it("持续隐藏后释放 WebGL，再显示保留文本实例并恢复加速", async () => {
+    const { view } = await renderPanel();
+    const term = await waitForTerminal();
+    await waitFor(() => expect(xtermMock.webgls).toHaveLength(1));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     await view.rerender({ open: false });
+    expect(xtermMock.webgls[0].disposed).toBe(false);
+    await vi.advanceTimersByTimeAsync(WEBGL_RELEASE_DELAY_MS);
     expect(xtermMock.webgls[0].disposed).toBe(true);
     expect(term.disposed).toBe(false);
+    vi.useRealTimers();
     await view.rerender({ open: true });
     await waitFor(() => expect(xtermMock.webgls).toHaveLength(2));
     expect(xtermMock.instances).toHaveLength(1);
@@ -605,7 +651,7 @@ describe("终端面板", () => {
     emit(TERMINAL_OUTPUT_EVENT, { sessionId: "s1", seq: 4, data: "early\r\n" });
     emit(TERMINAL_OUTPUT_EVENT, { sessionId: "s1", seq: 5, data: "late\r\n" });
     releaseAttach();
-    const term = xtermMock.instances[0];
+    const term = await waitForTerminal();
     await waitFor(() => expect(term.writes).toEqual(["early\r\n", "late\r\n"]));
   });
 
@@ -645,6 +691,56 @@ describe("终端面板", () => {
     await waitFor(() => expect(mocks.api.terminalWrite).toHaveBeenCalledWith("s1", "npm test\r"));
     term.resizeHandlers[0]({ rows: 32, cols: 110 });
     await waitFor(() => expect(mocks.api.terminalResize).toHaveBeenCalledWith("s1", 32, 110));
+  });
+
+  it("尺寸请求串行并合并到最新值，失败后同一尺寸仍可重试", async () => {
+    await renderPanel();
+    const term = await waitForTerminal();
+    await waitFor(() => expect(mocks.api.terminalResize).toHaveBeenCalled());
+    mocks.api.terminalResize.mockClear();
+    let finish!: () => void;
+    mocks.api.terminalResize.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    term.resizeHandlers[0]({ rows: 30, cols: 100 });
+    term.resizeHandlers[0]({ rows: 40, cols: 110 });
+    term.resizeHandlers[0]({ rows: 50, cols: 120 });
+    expect(mocks.api.terminalResize.mock.calls).toEqual([["s1", 30, 100]]);
+    finish();
+    await waitFor(() => expect(mocks.api.terminalResize.mock.calls).toEqual([["s1", 30, 100], ["s1", 50, 120]]));
+    mocks.api.terminalResize.mockRejectedValueOnce(new Error("resize failed"));
+    term.resizeHandlers[0]({ rows: 60, cols: 130 });
+    await tick();
+    term.resizeHandlers[0]({ rows: 60, cols: 130 });
+    await waitFor(() => expect(mocks.api.terminalResize).toHaveBeenCalledTimes(4));
+  });
+
+  it("收起或卸载期间不继续发送排队的尺寸请求", async () => {
+    const { view } = await renderPanel();
+    const term = await waitForTerminal();
+    await waitFor(() => expect(mocks.api.terminalResize).toHaveBeenCalled());
+    mocks.api.terminalResize.mockClear();
+    let finish!: () => void;
+    mocks.api.terminalResize.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    term.resizeHandlers[0]({ rows: 30, cols: 100 });
+    term.resizeHandlers[0]({ rows: 40, cols: 110 });
+    await view.rerender({ open: false });
+    finish();
+    await tick();
+    expect(mocks.api.terminalResize.mock.calls).toEqual([["s1", 30, 100]]);
+    term.resizeHandlers[0]({ rows: 50, cols: 120 });
+    expect(mocks.api.terminalResize).toHaveBeenCalledTimes(1);
+    view.unmount();
+    term.resizeHandlers[0]({ rows: 60, cols: 130 });
+    expect(mocks.api.terminalResize).toHaveBeenCalledTimes(1);
+  });
+
+  it("附着失败停止缓冲输出，不创建终端渲染器", async () => {
+    mocks.api.terminalAttach.mockRejectedValueOnce(new Error("attach failed"));
+    await renderPanel();
+    await waitFor(() => expect(stateOf()).toBe("failed"));
+    emit(TERMINAL_OUTPUT_EVENT, { sessionId: "s1", seq: 2, data: "late" });
+    await tick();
+    expect(xtermMock.instances).toHaveLength(0);
+    expect(xtermMock.webgls).toHaveLength(0);
   });
 
   it("新建标签页、选择终端类型、拆分与关闭；关掉最后一个终端收起面板", async () => {

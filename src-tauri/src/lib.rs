@@ -122,6 +122,10 @@ pub fn run() {
             repository_file_content,
             repository_edit_snapshot,
             repository_edit_save,
+            repository_create_entry,
+            repository_copy_entry,
+            repository_move_entry,
+            repository_delete_entry,
             repository_path_search,
             repository_content_search,
             repository_review_token,
@@ -1116,6 +1120,84 @@ async fn repository_edit_save(
         &relative,
         &expected_digest,
         &content,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn repository_create_entry(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    relative: String,
+    kind: crate::git::files::RepositoryCreateEntryKind,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    crate::git::files::repository_create_entry(
+        state.inner(),
+        &path,
+        &relative,
+        kind,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn repository_copy_entry(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    source: String,
+    target: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    crate::git::files::repository_copy_entry(
+        state.inner(),
+        &path,
+        &source,
+        &target,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn repository_move_entry(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    source: String,
+    target: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    crate::git::files::repository_move_entry(
+        state.inner(),
+        &path,
+        &source,
+        &target,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn repository_delete_entry(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    relative: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    crate::git::files::repository_delete_entry(
+        state.inner(),
+        &path,
+        &relative,
         generation,
         request_id,
     )

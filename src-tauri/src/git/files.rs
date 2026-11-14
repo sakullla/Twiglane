@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use sha2::{Digest, Sha256};
@@ -2535,6 +2536,673 @@ pub async fn repository_edit_save(
     }
     let new_generation = guard.finish();
     Ok(edit_snapshot(new_generation, &relative_text, written))
+}
+
+/// 新建项目的封闭类型；前端不能用任意文件类型或永久删除选项扩大命令能力。
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RepositoryCreateEntryKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrdinaryEntryKind {
+    File,
+    Directory,
+}
+
+fn mutation_path(path: &str) -> Result<PathBuf, AppError> {
+    let path = review_path(path)?;
+    let normalized: PathBuf = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(name),
+            Component::CurDir => None,
+            _ => None,
+        })
+        .collect();
+    if normalized.as_os_str().is_empty() {
+        return Err(AppError::new(
+            "invalid_path",
+            "文件或目录路径不能为空，未修改仓库。",
+        ));
+    }
+    Ok(normalized)
+}
+
+fn nested_repository_error() -> AppError {
+    AppError::new(
+        "nested_repository",
+        "嵌套仓库及其内部路径不支持文件结构操作，未修改任何内容。",
+    )
+}
+
+fn unsupported_entry_error() -> AppError {
+    AppError::new(
+        "unsupported_entry",
+        "仅支持普通文件和普通目录；符号链接、特殊文件不受支持。",
+    )
+}
+
+/// 校验源或目标的全部父级：中途符号链接、嵌套仓库、gitdir 和不存在的目录均失败关闭。
+fn entry_parent(
+    boundary: &EditBoundary,
+    relative: &Path,
+    writable: bool,
+) -> Result<PathBuf, AppError> {
+    let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
+    reject_symlink_components(&boundary.root, parent_relative)?;
+    let mut current = boundary.root.clone();
+    for component in parent_relative.components() {
+        current.push(component.as_os_str());
+        if current.join(".git").symlink_metadata().is_ok() {
+            return Err(nested_repository_error());
+        }
+    }
+    let parent = canonical_existing(&boundary.root.join(parent_relative))?;
+    ensure_editable_location(boundary, &parent)?;
+    let metadata = fs::metadata(&parent).map_err(|error| {
+        entry_io_error(error, "无法读取父目录，未修改任何内容。")
+    })?;
+    if !metadata.is_dir() {
+        return Err(AppError::new(
+            "invalid_parent",
+            "目标父路径不是普通目录，未修改任何内容。",
+        ));
+    }
+    if writable && metadata.permissions().readonly() {
+        return Err(AppError::new(
+            "permission",
+            "父目录是只读的，未修改任何内容。",
+        ));
+    }
+    Ok(parent)
+}
+
+fn ordinary_entry(
+    boundary: &EditBoundary,
+    relative: &Path,
+    writable_parent: bool,
+) -> Result<(PathBuf, OrdinaryEntryKind), AppError> {
+    entry_parent(boundary, relative, writable_parent)?;
+    let candidate = boundary.root.join(relative);
+    let metadata = match candidate.symlink_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Err(AppError::new("path_missing", "源项目不存在，未修改任何内容。"));
+        }
+        Err(error) => return Err(entry_io_error(error, "无法读取源项目，未修改任何内容。")),
+    };
+    let kind = if metadata.file_type().is_symlink() {
+        return Err(unsupported_entry_error());
+    } else if metadata.is_file() {
+        OrdinaryEntryKind::File
+    } else if metadata.is_dir() {
+        if candidate.join(".git").symlink_metadata().is_ok() {
+            return Err(nested_repository_error());
+        }
+        OrdinaryEntryKind::Directory
+    } else {
+        return Err(unsupported_entry_error());
+    };
+    reject_symlink_components(&boundary.root, relative)?;
+    let resolved = canonical_existing(&candidate)?;
+    ensure_editable_location(boundary, &resolved)?;
+    Ok((resolved, kind))
+}
+
+fn new_entry_target(boundary: &EditBoundary, relative: &Path) -> Result<PathBuf, AppError> {
+    let parent = entry_parent(boundary, relative, true)?;
+    let target = parent.join(relative.file_name().ok_or_else(|| {
+        AppError::new("invalid_path", "目标名称无效，未修改任何内容。")
+    })?);
+    match target.symlink_metadata() {
+        Ok(_) => Err(AppError::new(
+            "entry_exists",
+            "目标已存在，未覆盖已有内容。",
+        )),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(target),
+        Err(error) => Err(entry_io_error(error, "无法确认目标状态，未修改任何内容。")),
+    }
+}
+
+fn entry_io_error(error: std::io::Error, message: &'static str) -> AppError {
+    let code = match error.kind() {
+        ErrorKind::AlreadyExists => "entry_exists",
+        ErrorKind::PermissionDenied => "permission",
+        ErrorKind::NotFound => "path_missing",
+        _ => "entry_write_failed",
+    };
+    // 不把操作系统错误中的本机绝对路径回传给 IPC；稳定错误码与操作结果已足够定位。
+    AppError::new(code, message)
+}
+
+static TEMP_ENTRY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+/// 只清理由本次复制创建的临时项；Drop 永远不会触碰最终目标或已有内容。
+struct TemporaryEntry {
+    path: PathBuf,
+    active: bool,
+}
+
+impl TemporaryEntry {
+    fn candidate(parent: &Path) -> PathBuf {
+        parent.join(format!(
+            ".twiglane-entry-{}-{}",
+            std::process::id(),
+            TEMP_ENTRY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn file(parent: &Path) -> std::io::Result<(Self, fs::File)> {
+        for _ in 0..100 {
+            let path = Self::candidate(parent);
+            match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => return Ok((Self { path, active: true }, file)),
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            "temporary entry names exhausted",
+        ))
+    }
+
+    fn directory(parent: &Path) -> std::io::Result<Self> {
+        for _ in 0..100 {
+            let path = Self::candidate(parent);
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path, active: true }),
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            "temporary entry names exhausted",
+        ))
+    }
+
+    fn publish(mut self, target: &Path) -> std::io::Result<()> {
+        rename_without_overwrite(&self.path, target)?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for TemporaryEntry {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        match self.path.symlink_metadata() {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                let _ = fs::remove_dir_all(&self.path);
+            }
+            Ok(_) => {
+                let _ = fs::remove_file(&self.path);
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+/// 文件与目录都用文件系统的排他重命名发布；不支持该能力的平台直接失败，不做覆盖回退。
+#[cfg(target_os = "macos")]
+fn rename_without_overwrite(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
+    let target = std::ffi::CString::new(target.as_os_str().as_bytes())?;
+    // SAFETY: 两个 CString 都以 NUL 结尾且在本调用期间存活；renamex_np 不保留指针。
+    let result = unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn rename_without_overwrite(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
+    let target = std::ffi::CString::new(target.as_os_str().as_bytes())?;
+    // SAFETY: 路径指针有效；AT_FDCWD 与 RENAME_NOREPLACE 要求排他创建目标。
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn rename_without_overwrite(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain([0]).collect();
+    let target: Vec<u16> = target.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: 两个宽字符串均以 NUL 终止；不传 REPLACE_EXISTING，因此已有目标不会覆盖。
+    let result = unsafe {
+        windows_sys::Win32::Storage::FileSystem::MoveFileExW(source.as_ptr(), target.as_ptr(), 0)
+    };
+    if result != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn rename_without_overwrite(_source: &Path, _target: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "atomic no-replace rename is unavailable",
+    ))
+}
+
+fn copy_file_contents(source: &Path, target: &Path) -> Result<(), AppError> {
+    let mut input = fs::File::open(source)
+        .map_err(|error| entry_io_error(error, "无法读取源文件，未发布复制目标。"))?;
+    let metadata = input
+        .metadata()
+        .map_err(|error| entry_io_error(error, "无法确认源文件，未发布复制目标。"))?;
+    if !metadata.is_file() {
+        return Err(unsupported_entry_error());
+    }
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .map_err(|error| entry_io_error(error, "无法创建复制内容，已有目标未被覆盖。"))?;
+    std::io::copy(&mut input, &mut output)
+        .map_err(|error| entry_io_error(error, "复制文件失败，未发布复制目标。"))?;
+    drop(output);
+    fs::set_permissions(target, metadata.permissions())
+        .map_err(|error| entry_io_error(error, "复制权限失败，未发布复制目标。"))?;
+    Ok(())
+}
+
+fn copy_directory_contents(source: &Path, target: &Path) -> Result<(), AppError> {
+    let entries = fs::read_dir(source)
+        .map_err(|error| entry_io_error(error, "无法读取源目录，未发布复制目标。"))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| entry_io_error(error, "无法读取目录项，未发布复制目标。"))?;
+        let source_path = entry.path();
+        let metadata = source_path
+            .symlink_metadata()
+            .map_err(|error| entry_io_error(error, "无法确认目录项类型，未发布复制目标。"))?;
+        if metadata.file_type().is_symlink() {
+            return Err(AppError::new(
+                "unsupported_entry",
+                "目录含符号链接，未跟随链接且未发布复制目标。",
+            ));
+        }
+        if is_git_metadata_name(&entry.file_name()) {
+            return Err(nested_repository_error());
+        }
+        let target_path = target.join(entry.file_name());
+        if metadata.is_file() {
+            copy_file_contents(&source_path, &target_path)?;
+        } else if metadata.is_dir() {
+            if source_path.join(".git").symlink_metadata().is_ok() {
+                return Err(nested_repository_error());
+            }
+            fs::create_dir(&target_path)
+                .map_err(|error| entry_io_error(error, "创建复制目录失败，未发布目标。"))?;
+            copy_directory_contents(&source_path, &target_path)?;
+            fs::set_permissions(&target_path, metadata.permissions())
+                .map_err(|error| entry_io_error(error, "复制目录权限失败，未发布目标。"))?;
+        } else {
+            return Err(AppError::new(
+                "unsupported_entry",
+                "目录含特殊文件，未发布复制目标。",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn create_entry(
+    boundary: &EditBoundary,
+    relative: &Path,
+    kind: RepositoryCreateEntryKind,
+) -> Result<(), AppError> {
+    let target = new_entry_target(boundary, relative)?;
+    match kind {
+        RepositoryCreateEntryKind::File => fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(target)
+            .map(|_| ()),
+        RepositoryCreateEntryKind::Directory => fs::create_dir(target),
+    }
+    .map_err(|error| entry_io_error(error, "新建失败，未覆盖已有内容。"))
+}
+
+fn copy_entry(
+    boundary: &EditBoundary,
+    source_relative: &Path,
+    target_relative: &Path,
+) -> Result<(), AppError> {
+    let (source, kind) = ordinary_entry(boundary, source_relative, false)?;
+    let target = new_entry_target(boundary, target_relative)?;
+    if kind == OrdinaryEntryKind::Directory
+        && (target_relative.starts_with(source_relative) || target.starts_with(&source))
+    {
+        return Err(AppError::new(
+            "invalid_target",
+            "不能把目录复制到自身或自身后代，未修改任何内容。",
+        ));
+    }
+    let parent = target.parent().ok_or_else(|| {
+        AppError::new("invalid_path", "目标父目录无效，未修改任何内容。")
+    })?;
+    match kind {
+        OrdinaryEntryKind::File => {
+            let (temporary, mut output) = TemporaryEntry::file(parent)
+                .map_err(|error| entry_io_error(error, "无法创建复制临时文件。"))?;
+            let mut input = fs::File::open(&source)
+                .map_err(|error| entry_io_error(error, "无法读取源文件，未发布复制目标。"))?;
+            let metadata = input
+                .metadata()
+                .map_err(|error| entry_io_error(error, "无法确认源文件，未发布复制目标。"))?;
+            if !metadata.is_file() {
+                return Err(unsupported_entry_error());
+            }
+            std::io::copy(&mut input, &mut output)
+                .map_err(|error| entry_io_error(error, "复制文件失败，未发布复制目标。"))?;
+            drop(output);
+            fs::set_permissions(&temporary.path, metadata.permissions())
+                .map_err(|error| entry_io_error(error, "复制权限失败，未发布复制目标。"))?;
+            temporary
+                .publish(&target)
+                .map_err(|error| entry_io_error(error, "发布复制文件失败，已有目标未被覆盖。"))
+        }
+        OrdinaryEntryKind::Directory => {
+            let metadata = fs::metadata(&source)
+                .map_err(|error| entry_io_error(error, "无法确认源目录，未发布复制目标。"))?;
+            let temporary = TemporaryEntry::directory(parent)
+                .map_err(|error| entry_io_error(error, "无法创建复制临时目录。"))?;
+            copy_directory_contents(&source, &temporary.path)?;
+            fs::set_permissions(&temporary.path, metadata.permissions())
+                .map_err(|error| entry_io_error(error, "复制目录权限失败，未发布目标。"))?;
+            temporary
+                .publish(&target)
+                .map_err(|error| entry_io_error(error, "发布复制目录失败，已有目标未被覆盖。"))
+        }
+    }
+}
+
+fn move_entry(
+    boundary: &EditBoundary,
+    source_relative: &Path,
+    target_relative: &Path,
+) -> Result<(), AppError> {
+    let (source, kind) = ordinary_entry(boundary, source_relative, true)?;
+    let target = new_entry_target(boundary, target_relative)?;
+    if kind == OrdinaryEntryKind::Directory
+        && (target_relative.starts_with(source_relative) || target.starts_with(&source))
+    {
+        return Err(AppError::new(
+            "invalid_target",
+            "不能把目录移到自身或自身后代，未修改任何内容。",
+        ));
+    }
+    rename_without_overwrite(&source, &target)
+        .map_err(|error| entry_io_error(error, "移动或重命名失败，未覆盖已有内容。"))
+}
+
+async fn run_entry_mutation<F>(
+    backend: &Backend,
+    path: &str,
+    root: PathBuf,
+    generation: u64,
+    request_id: u64,
+    operation: F,
+) -> Result<crate::model::StatusSnapshot, AppError>
+where
+    F: FnOnce(&EditBoundary) -> Result<(), AppError>,
+{
+    let git = require_git(backend).await?;
+    let key = repo_key(&root);
+    let mut guard = backend
+        .scheduler
+        .lock_write(&key, request_id, generation)
+        .await?;
+    let (program, args) = edit_layout_command(&git.path, &root);
+    let layout = guard
+        .run(CommandSpec {
+            program,
+            args,
+            stdin: None,
+            truncate_stdout: false,
+            output_limit: Some(MAX_EDIT_LAYOUT_BYTES),
+            writes: false,
+        })
+        .await?;
+    let boundary = edit_boundary_from_output(&root, &layout)?;
+    operation(&boundary)?;
+    guard.mark_written();
+    let new_generation = guard.finish();
+    settle_read!(backend, &root, new_generation, |current| {
+        crate::git::ops::refresh_status(backend, path, current, internal_request_id()).await
+    })
+}
+
+pub async fn repository_create_entry(
+    backend: &Backend,
+    path: &str,
+    relative: &str,
+    kind: RepositoryCreateEntryKind,
+    generation: u64,
+    request_id: u64,
+) -> Result<crate::model::StatusSnapshot, AppError> {
+    let root = canonical_existing(&validate_input_path(path)?)?;
+    let relative = mutation_path(relative)?;
+    run_entry_mutation(backend, path, root, generation, request_id, |boundary| {
+        create_entry(boundary, &relative, kind)
+    })
+    .await
+}
+
+pub async fn repository_copy_entry(
+    backend: &Backend,
+    path: &str,
+    source: &str,
+    target: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<crate::model::StatusSnapshot, AppError> {
+    let root = canonical_existing(&validate_input_path(path)?)?;
+    let source = mutation_path(source)?;
+    let target = mutation_path(target)?;
+    run_entry_mutation(backend, path, root, generation, request_id, |boundary| {
+        copy_entry(boundary, &source, &target)
+    })
+    .await
+}
+
+pub async fn repository_move_entry(
+    backend: &Backend,
+    path: &str,
+    source: &str,
+    target: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<crate::model::StatusSnapshot, AppError> {
+    let root = canonical_existing(&validate_input_path(path)?)?;
+    let source = mutation_path(source)?;
+    let target = mutation_path(target)?;
+    run_entry_mutation(backend, path, root, generation, request_id, |boundary| {
+        move_entry(boundary, &source, &target)
+    })
+    .await
+}
+
+fn move_to_system_trash(target: &Path) -> Result<(), AppError> {
+    trash::delete(target).map_err(|_| {
+        AppError::new(
+            "trash_failed",
+            "系统回收站操作失败，未执行永久删除。",
+        )
+    })
+}
+
+async fn repository_delete_entry_with<F>(
+    backend: &Backend,
+    path: &str,
+    relative: &str,
+    generation: u64,
+    request_id: u64,
+    trash_adapter: F,
+) -> Result<crate::model::StatusSnapshot, AppError>
+where
+    F: FnOnce(&Path) -> Result<(), AppError>,
+{
+    let root = canonical_existing(&validate_input_path(path)?)?;
+    let relative = mutation_path(relative)?;
+    let git = require_git(backend).await?;
+    let key = repo_key(&root);
+    let mut guard = backend
+        .scheduler
+        .lock_write(&key, request_id, generation)
+        .await?;
+    let (program, args) = edit_layout_command(&git.path, &root);
+    let layout = guard
+        .run(CommandSpec {
+            program,
+            args,
+            stdin: None,
+            truncate_stdout: false,
+            output_limit: Some(MAX_EDIT_LAYOUT_BYTES),
+            writes: false,
+        })
+        .await?;
+    let boundary = edit_boundary_from_output(&root, &layout)?;
+    let (target, _) = ordinary_entry(&boundary, &relative, true)?;
+    let adapter_result = trash_adapter(&target);
+    let target_state = target.symlink_metadata();
+    match (adapter_result, target_state) {
+        (Ok(()), Err(error)) if error.kind() == ErrorKind::NotFound => {
+            guard.mark_written();
+            let new_generation = guard.finish();
+            settle_read!(backend, &root, new_generation, |current| {
+                crate::git::ops::refresh_status(backend, path, current, internal_request_id()).await
+            })
+        }
+        (Ok(()), Ok(_)) => {
+            let current = guard.finish();
+            let _ = crate::git::ops::refresh_status(
+                backend,
+                path,
+                current,
+                internal_request_id(),
+            )
+            .await;
+            Err(AppError::new(
+                "trash_failed",
+                "回收站未移除目标，未报告删除成功，也未执行永久删除。",
+            ))
+        }
+        (Ok(()), Err(_)) => {
+            let current = guard.finish();
+            let refreshed = crate::git::ops::refresh_status(
+                backend,
+                path,
+                current,
+                internal_request_id(),
+            )
+            .await
+            .is_ok();
+            Err(AppError::new(
+                "trash_failed",
+                if refreshed {
+                    "无法确认回收站结果，已刷新真实状态；未执行永久删除。"
+                } else {
+                    "无法确认回收站结果及当前状态；未执行永久删除。"
+                },
+            ))
+        }
+        (Err(_), Ok(_)) => {
+            let current = guard.finish();
+            let _ = crate::git::ops::refresh_status(
+                backend,
+                path,
+                current,
+                internal_request_id(),
+            )
+            .await;
+            Err(AppError::new(
+                "trash_failed",
+                "系统回收站操作失败，目标仍保留；未执行永久删除。",
+            ))
+        }
+        (Err(_), Err(error)) if error.kind() == ErrorKind::NotFound => {
+            // 库可能移动后报告错误：代次和真实状态仍要推进，但绝不把错误改成成功。
+            guard.mark_written();
+            let new_generation = guard.finish();
+            let _ = crate::git::ops::refresh_status(
+                backend,
+                path,
+                new_generation,
+                internal_request_id(),
+            )
+            .await;
+            Err(AppError::new(
+                "trash_failed",
+                "回收站返回错误，但目标已离开工作区；已推进代次并刷新状态，未执行永久删除。",
+            )
+            .with_generation(new_generation))
+        }
+        (Err(_), Err(_)) => {
+            let current = guard.finish();
+            let refreshed = crate::git::ops::refresh_status(
+                backend,
+                path,
+                current,
+                internal_request_id(),
+            )
+            .await
+            .is_ok();
+            Err(AppError::new(
+                "trash_failed",
+                if refreshed {
+                    "回收站返回错误，无法确认目标是否仍保留；已刷新真实状态，未执行永久删除。"
+                } else {
+                    "回收站返回错误，无法确认目标及当前状态；未执行永久删除。"
+                },
+            ))
+        }
+    }
+}
+
+pub async fn repository_delete_entry(
+    backend: &Backend,
+    path: &str,
+    relative: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<crate::model::StatusSnapshot, AppError> {
+    repository_delete_entry_with(
+        backend,
+        path,
+        relative,
+        generation,
+        request_id,
+        move_to_system_trash,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -5625,5 +6293,502 @@ mod tests {
             let error = edit_boundary_from_output(&root, &output(code, stdout.clone()));
             assert_eq!(error.err().map(|e| e.code), Some("invalid_path".to_string()), "{stdout:?}");
         }
+    }
+
+    fn assert_head_and_index(root: &Path, head: &str, index: &str) {
+        assert_eq!(git_stdout(root, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git_stdout(root, &["ls-files", "--stage"]), index);
+    }
+
+    fn assert_no_entry_temporaries(root: &Path) {
+        let names: Vec<_> = fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(
+            names
+                .iter()
+                .all(|name| !name.to_string_lossy().starts_with(".twiglane-entry-")),
+            "{names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn entry_create_copy_and_move_return_same_generation_status_without_git_writes() {
+        let fixture = crate::test_support::git_fixture("repository-entry-success");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::create_dir_all(root.join("tree/sub")).unwrap();
+        fs::write(root.join("tree/root.txt"), b"root\n").unwrap();
+        fs::write(root.join("tree/sub/child.txt"), b"child\n").unwrap();
+        fs::write(root.join("tracked.txt"), b"tracked\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let path = root.to_str().unwrap();
+        let head = git_stdout(&root, &["rev-parse", "HEAD"]);
+        let index = git_stdout(&root, &["ls-files", "--stage"]);
+
+        let created_file = repository_create_entry(
+            &backend,
+            path,
+            "empty.txt",
+            RepositoryCreateEntryKind::File,
+            1,
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(created_file.generation, 2);
+        assert_eq!(fs::metadata(root.join("empty.txt")).unwrap().len(), 0);
+        assert!(created_file.files.iter().any(|file| file.path == "empty.txt"));
+
+        let created_directory = repository_create_entry(
+            &backend,
+            path,
+            "copies",
+            RepositoryCreateEntryKind::Directory,
+            created_file.generation,
+            11,
+        )
+        .await
+        .unwrap();
+        assert_eq!(created_directory.generation, 3);
+        assert!(root.join("copies").is_dir());
+        assert_eq!(fs::read_dir(root.join("copies")).unwrap().count(), 0);
+
+        let copied_file = repository_copy_entry(
+            &backend,
+            path,
+            "tracked.txt",
+            "copies/file.txt",
+            created_directory.generation,
+            12,
+        )
+        .await
+        .unwrap();
+        assert_eq!(copied_file.generation, 4);
+        assert_eq!(fs::read(root.join("copies/file.txt")).unwrap(), b"tracked\n");
+        assert_eq!(fs::read(root.join("tracked.txt")).unwrap(), b"tracked\n");
+
+        let copied_directory = repository_copy_entry(
+            &backend,
+            path,
+            "tree",
+            "cloned",
+            copied_file.generation,
+            13,
+        )
+        .await
+        .unwrap();
+        assert_eq!(copied_directory.generation, 5);
+        assert_eq!(fs::read(root.join("cloned/root.txt")).unwrap(), b"root\n");
+        assert_eq!(
+            fs::read(root.join("cloned/sub/child.txt")).unwrap(),
+            b"child\n"
+        );
+
+        let renamed = repository_move_entry(
+            &backend,
+            path,
+            "copies/file.txt",
+            "renamed.txt",
+            copied_directory.generation,
+            14,
+        )
+        .await
+        .unwrap();
+        assert_eq!(renamed.generation, 6);
+        assert!(!root.join("copies/file.txt").exists());
+        assert_eq!(fs::read(root.join("renamed.txt")).unwrap(), b"tracked\n");
+
+        let moved = repository_move_entry(
+            &backend,
+            path,
+            "cloned",
+            "moved",
+            renamed.generation,
+            15,
+        )
+        .await
+        .unwrap();
+        assert_eq!(moved.generation, 7);
+        assert!(!root.join("cloned").exists());
+        assert_eq!(fs::read(root.join("moved/sub/child.txt")).unwrap(), b"child\n");
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), moved.generation);
+        assert_head_and_index(&root, &head, &index);
+        assert_no_entry_temporaries(&root);
+    }
+
+    #[tokio::test]
+    async fn entry_operations_reject_conflicts_unsafe_paths_and_special_targets() {
+        let fixture = crate::test_support::git_fixture("repository-entry-rejections");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::create_dir_all(root.join("dir/sub")).unwrap();
+        fs::write(root.join("dir/sub/keep.txt"), b"keep\n").unwrap();
+        fs::write(root.join("source.txt"), b"source\n").unwrap();
+        fs::write(root.join("target.txt"), b"existing\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let path = root.to_str().unwrap();
+        let head = git_stdout(&root, &["rev-parse", "HEAD"]);
+        let index = git_stdout(&root, &["ls-files", "--stage"]);
+
+        let conflict = repository_create_entry(
+            &backend,
+            path,
+            "target.txt",
+            RepositoryCreateEntryKind::File,
+            1,
+            20,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(conflict.code, "entry_exists");
+        let conflict = repository_copy_entry(&backend, path, "source.txt", "target.txt", 1, 21)
+            .await
+            .unwrap_err();
+        assert_eq!(conflict.code, "entry_exists");
+        let conflict = repository_move_entry(&backend, path, "source.txt", "target.txt", 1, 22)
+            .await
+            .unwrap_err();
+        assert_eq!(conflict.code, "entry_exists");
+        assert_eq!(fs::read(root.join("target.txt")).unwrap(), b"existing\n");
+        assert_eq!(fs::read(root.join("source.txt")).unwrap(), b"source\n");
+
+        let absolute = fixture.path().join("outside.txt").to_string_lossy().into_owned();
+        for (offset, invalid) in [
+            "".to_string(),
+            "../outside.txt".to_string(),
+            absolute,
+            ".git/config".to_string(),
+            "bad\0name".to_string(),
+            "bad\nname".to_string(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = 30 + offset as u64 * 4;
+            for error in [
+                repository_create_entry(
+                    &backend,
+                    path,
+                    &invalid,
+                    RepositoryCreateEntryKind::File,
+                    1,
+                    id,
+                )
+                .await
+                .unwrap_err(),
+                repository_copy_entry(&backend, path, "source.txt", &invalid, 1, id + 1)
+                    .await
+                    .unwrap_err(),
+                repository_move_entry(&backend, path, &invalid, "other.txt", 1, id + 2)
+                    .await
+                    .unwrap_err(),
+                repository_delete_entry(&backend, path, &invalid, 1, id + 3)
+                    .await
+                    .unwrap_err(),
+            ] {
+                assert_eq!(error.code, "invalid_path", "{invalid:?}");
+            }
+        }
+        assert!(!fixture.path().join("outside.txt").exists());
+
+        let missing_parent = repository_create_entry(
+            &backend,
+            path,
+            "absent/child.txt",
+            RepositoryCreateEntryKind::File,
+            1,
+            60,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing_parent.code, "path_missing");
+
+        for (source, target, id) in [("dir", "dir", 61), ("dir", "dir/sub/copy", 62)] {
+            let error = repository_move_entry(&backend, path, source, target, 1, id)
+                .await
+                .unwrap_err();
+            assert!(matches!(error.code.as_str(), "entry_exists" | "invalid_target"));
+            let error = repository_copy_entry(&backend, path, source, target, 1, id + 10)
+                .await
+                .unwrap_err();
+            assert!(matches!(error.code.as_str(), "entry_exists" | "invalid_target"));
+        }
+
+        let child = root.join("child");
+        fs::create_dir(&child).unwrap();
+        git(&child, &["init", "-b", "main"]);
+        fs::write(child.join("inside.txt"), b"nested\n").unwrap();
+        for error in [
+            repository_copy_entry(&backend, path, "child", "child-copy", 1, 80)
+                .await
+                .unwrap_err(),
+            repository_move_entry(&backend, path, "child", "child-moved", 1, 81)
+                .await
+                .unwrap_err(),
+            repository_delete_entry(&backend, path, "child", 1, 82)
+                .await
+                .unwrap_err(),
+            repository_copy_entry(&backend, path, "child/inside.txt", "nested.txt", 1, 83)
+                .await
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.code, "nested_repository");
+        }
+        assert_eq!(fs::read(child.join("inside.txt")).unwrap(), b"nested\n");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink("source.txt", root.join("link.txt")).unwrap();
+            let outside = fixture.path().join("outside");
+            fs::create_dir(&outside).unwrap();
+            symlink(&outside, root.join("escape")).unwrap();
+            let fifo = root.join("fifo");
+            let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+            // SAFETY: fifo_c 是有效的 NUL 结尾路径；只在测试临时仓库创建 FIFO。
+            assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+            for (source, id) in [("link.txt", 90), ("fifo", 94)] {
+                for error in [
+                    repository_copy_entry(&backend, path, source, "special-copy", 1, id)
+                        .await
+                        .unwrap_err(),
+                    repository_move_entry(&backend, path, source, "special-move", 1, id + 1)
+                        .await
+                        .unwrap_err(),
+                    repository_delete_entry(&backend, path, source, 1, id + 2)
+                        .await
+                        .unwrap_err(),
+                ] {
+                    assert_eq!(error.code, "unsupported_entry", "{source}");
+                }
+            }
+            let linked_parent = repository_create_entry(
+                &backend,
+                path,
+                "escape/new.txt",
+                RepositoryCreateEntryKind::File,
+                1,
+                100,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(linked_parent.code, "file_path");
+            assert!(!outside.join("new.txt").exists());
+
+            // 已创建过部分临时内容也必须整体失败，不能留下半个目标或跟随链接。
+            symlink("../source.txt", root.join("dir/link.txt")).unwrap();
+            let partial = repository_copy_entry(&backend, path, "dir", "partial-copy", 1, 101)
+                .await
+                .unwrap_err();
+            assert_eq!(partial.code, "unsupported_entry");
+            assert!(!root.join("partial-copy").exists());
+            assert_eq!(fs::read(root.join("source.txt")).unwrap(), b"source\n");
+        }
+
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 1);
+        assert_head_and_index(&root, &head, &index);
+        assert_no_entry_temporaries(&root);
+    }
+
+    #[tokio::test]
+    async fn entry_write_failures_and_stale_requests_do_not_change_disk_or_generation() {
+        let fixture = crate::test_support::git_fixture("repository-entry-write-failure");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::create_dir(root.join("locked")).unwrap();
+        fs::write(root.join("source.txt"), b"source\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let path = root.to_str().unwrap();
+        let head = git_stdout(&root, &["rev-parse", "HEAD"]);
+        let index = git_stdout(&root, &["ls-files", "--stage"]);
+
+        set_read_only(&root.join("locked"), true);
+        for error in [
+            repository_create_entry(
+                &backend,
+                path,
+                "locked/new.txt",
+                RepositoryCreateEntryKind::File,
+                1,
+                110,
+            )
+            .await
+            .unwrap_err(),
+            repository_copy_entry(&backend, path, "source.txt", "locked/copy.txt", 1, 111)
+                .await
+                .unwrap_err(),
+            repository_move_entry(&backend, path, "source.txt", "locked/move.txt", 1, 112)
+                .await
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.code, "permission");
+        }
+        set_read_only(&root.join("locked"), false);
+        assert_eq!(fs::read_dir(root.join("locked")).unwrap().count(), 0);
+        assert_eq!(fs::read(root.join("source.txt")).unwrap(), b"source\n");
+
+        backend.scheduler.bump_generation(&repo_key(&root));
+        for error in [
+            repository_create_entry(
+                &backend,
+                path,
+                "stale.txt",
+                RepositoryCreateEntryKind::File,
+                1,
+                120,
+            )
+            .await
+            .unwrap_err(),
+            repository_copy_entry(&backend, path, "source.txt", "stale-copy.txt", 1, 121)
+                .await
+                .unwrap_err(),
+            repository_move_entry(&backend, path, "source.txt", "stale-move.txt", 1, 122)
+                .await
+                .unwrap_err(),
+            repository_delete_entry(&backend, path, "source.txt", 1, 123)
+                .await
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.code, "stale");
+            assert_eq!(error.generation, Some(2));
+        }
+        assert!(root.join("source.txt").exists());
+        assert!(!root.join("stale.txt").exists());
+        assert!(!root.join("stale-copy.txt").exists());
+        assert!(!root.join("stale-move.txt").exists());
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 2);
+        assert_head_and_index(&root, &head, &index);
+        assert_no_entry_temporaries(&root);
+    }
+
+    #[tokio::test]
+    async fn trash_adapter_failures_preserve_files_directories_and_git_state() {
+        let fixture = crate::test_support::git_fixture("repository-entry-trash-failure");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::create_dir_all(root.join("directory/sub")).unwrap();
+        fs::write(root.join("file.txt"), b"file\n").unwrap();
+        fs::write(root.join("directory/sub/keep.txt"), b"keep\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let path = root.to_str().unwrap();
+        let head = git_stdout(&root, &["rev-parse", "HEAD"]);
+        let index = git_stdout(&root, &["ls-files", "--stage"]);
+
+        for (relative, id) in [("file.txt", 130), ("directory", 131)] {
+            let error = repository_delete_entry_with(
+                &backend,
+                path,
+                relative,
+                1,
+                id,
+                |_| Err(AppError::new("trash_failed", "injected unavailable trash")),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, "trash_failed");
+            assert!(error.message.contains("目标仍保留"));
+            assert!(!error.message.contains("injected"));
+        }
+        assert_eq!(fs::read(root.join("file.txt")).unwrap(), b"file\n");
+        assert_eq!(
+            fs::read(root.join("directory/sub/keep.txt")).unwrap(),
+            b"keep\n"
+        );
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 1);
+        assert_head_and_index(&root, &head, &index);
+        assert_eq!(git_stdout(&root, &["status", "--porcelain"]), "");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn delete_file_and_nonempty_directory_use_the_real_macos_trash() {
+        struct RestoreFromTrash {
+            trashed: PathBuf,
+            original: PathBuf,
+        }
+        impl Drop for RestoreFromTrash {
+            fn drop(&mut self) {
+                if self.trashed.symlink_metadata().is_ok() {
+                    let _ = fs::rename(&self.trashed, &self.original);
+                }
+            }
+        }
+
+        let fixture = crate::test_support::git_fixture("repository-entry-real-trash");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        let unique = format!(
+            "twiglane-t2-{}-{}",
+            std::process::id(),
+            TEMP_ENTRY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let file_name = format!("{unique}.txt");
+        let directory_name = format!("{unique}-directory");
+        fs::write(root.join(&file_name), b"trash file\n").unwrap();
+        fs::create_dir_all(root.join(&directory_name).join("sub")).unwrap();
+        fs::write(
+            root.join(&directory_name).join("sub/keep.txt"),
+            b"trash directory\n",
+        )
+        .unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let path = root.to_str().unwrap();
+        let head = git_stdout(&root, &["rev-parse", "HEAD"]);
+        let index = git_stdout(&root, &["ls-files", "--stage"]);
+        let trash = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".Trash");
+
+        let original_file = root.join(&file_name);
+        let trashed_file = trash.join(&file_name);
+        assert!(!trashed_file.exists());
+        let _restore_file = RestoreFromTrash {
+            trashed: trashed_file.clone(),
+            original: original_file.clone(),
+        };
+        let deleted_file = repository_delete_entry(&backend, path, &file_name, 1, 140)
+            .await
+            .unwrap();
+        assert_eq!(deleted_file.generation, 2);
+        assert!(!original_file.exists());
+        assert!(trashed_file.is_file(), "真实文件必须进入 ~/.Trash");
+        assert!(deleted_file.files.iter().any(|file| {
+            file.path == file_name && file.unstaged == ChangeKind::Deleted
+        }));
+
+        let original_directory = root.join(&directory_name);
+        let trashed_directory = trash.join(&directory_name);
+        assert!(!trashed_directory.exists());
+        let _restore_directory = RestoreFromTrash {
+            trashed: trashed_directory.clone(),
+            original: original_directory.clone(),
+        };
+        let deleted_directory = repository_delete_entry(
+            &backend,
+            path,
+            &directory_name,
+            deleted_file.generation,
+            141,
+        )
+        .await
+        .unwrap();
+        assert_eq!(deleted_directory.generation, 3);
+        assert!(!original_directory.exists());
+        assert!(trashed_directory.join("sub/keep.txt").is_file());
+        assert!(deleted_directory.files.iter().any(|file| {
+            file.path == format!("{directory_name}/sub/keep.txt")
+                && file.unstaged == ChangeKind::Deleted
+        }));
+        assert_head_and_index(&root, &head, &index);
     }
 }

@@ -40,6 +40,8 @@ tauri-plugin-process = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-updater = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
+# 文件删除只进入系统回收站；锁定版本并在适配层失败时直接报错，不做永久删除回退。
+trash = "=5.3.0"
 
 [target.'cfg(unix)'.dependencies]
 # 终止终端时向 shell 所在的独立进程组发信号，覆盖其全部后代。
@@ -52,6 +54,7 @@ sysinfo = "0.31"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Storage_FileSystem",
   "Win32_System_JobObjects",
   "Win32_System_Threading",
 ] }

@@ -94,6 +94,7 @@
     "allow-complete-merge",
     "allow-abort-merge",
     "allow-undo-commit",
+    "allow-amend-commit",
     "allow-discard-changes",
     "allow-set-theme",
     "allow-set-pull-integration",

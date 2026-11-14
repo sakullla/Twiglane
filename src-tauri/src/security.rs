@@ -106,6 +106,7 @@ fn capabilities_grant_only_explicit_terminal_ipc_not_a_generic_shell() {
         "allow-complete-merge",
         "allow-abort-merge",
         "allow-undo-commit",
+        "allow-amend-commit",
         "allow-discard-changes",
         "allow-set-theme",
         "allow-set-pull-integration",

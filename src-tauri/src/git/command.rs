@@ -341,6 +341,58 @@ pub fn commit_command(git: &Path, root: &Path, message: &str) -> (PathBuf, Vec<O
     (git.to_path_buf(), args)
 }
 
+/// 修订当前 HEAD。`only` 为 true 时用 `--only` 保持原提交树和当前索引不变。
+pub fn commit_amend_command(
+    git: &Path,
+    root: &Path,
+    message: &str,
+    only: bool,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.push(OsString::from("commit"));
+    args.push(OsString::from("--amend"));
+    if only {
+        args.push(OsString::from("--only"));
+    }
+    args.extend([OsString::from("-m"), OsString::from(message)]);
+    (git.to_path_buf(), args)
+}
+
+/// 修订只读取 HEAD 与父提交，避免非法 UTF-8 的说明主题让整个记录无法解析。
+pub fn amend_head_record_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("log"),
+        OsString::from("-1"),
+        OsString::from("--format=%H%x1f%P"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// 当前 HEAD 的完整说明。`%B` 不做展示截断；调用方负责大小与 UTF-8 边界。
+pub fn head_message_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("log"),
+        OsString::from("-1"),
+        OsString::from("--format=%B"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// 暂存区快照：完整 raw 差异字节用于确认令牌，不截断。
+pub fn cached_raw_diff_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("diff"),
+        OsString::from("--cached"),
+        OsString::from("--raw"),
+        OsString::from("-z"),
+        OsString::from("--full-index"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
 pub fn head_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.extend([OsString::from("rev-parse"), OsString::from("HEAD")]);

@@ -95,6 +95,7 @@ fn main() {
             "complete_merge",
             "abort_merge",
             "undo_commit",
+            "amend_commit",
             "discard_changes",
             "set_theme",
             "set_pull_integration",

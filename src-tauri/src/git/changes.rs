@@ -1030,6 +1030,48 @@ fn classify_commit(root: &Path, output: &ProcessOutput) -> AppError {
     )
 }
 
+/// 修订提交失败的分类。与普通提交共用身份、索引锁和钩子判定，但提示保留修订草稿。
+pub(crate) fn classify_amend(root: &Path, output: &ProcessOutput) -> AppError {
+    let detail = redact_error_text(command_text(output).trim());
+    if is_identity_error(&detail) {
+        let base = "缺少提交身份。请配置 user.name 与 user.email 后再试。修订草稿和暂存区都还保留。";
+        return if detail.is_empty() {
+            AppError::new("identity_missing", base)
+        } else {
+            AppError::new("identity_missing", format!("{base} {detail}"))
+        };
+    }
+    if is_index_lock(&detail) {
+        return AppError::new(
+            "index_lock",
+            "索引锁仍在，修订没有创建。未删除该锁。修订草稿和暂存区都还保留。",
+        );
+    }
+    let hook = detail.to_ascii_lowercase().contains("hook")
+        || hook_executable(root, "pre-commit")
+        || hook_executable(root, "commit-msg");
+    if hook {
+        let reason = if detail.is_empty() {
+            "提交钩子拒绝了这次修订。".to_string()
+        } else {
+            format!("提交钩子拒绝了这次修订。{detail}")
+        };
+        return AppError::new(
+            "hook_rejected",
+            format!("{reason} 修订草稿和暂存区都还保留。"),
+        );
+    }
+    let reason = if detail.is_empty() {
+        "修订没有完成。".to_string()
+    } else {
+        format!("修订没有完成。{detail}")
+    };
+    AppError::new(
+        "commit_failed",
+        format!("{reason} 修订草稿和暂存区都还保留。"),
+    )
+}
+
 fn identity_error(detail: &str) -> AppError {
     let detail = redact_error_text(detail.trim());
     let base = "缺少提交身份。请配置 user.name 与 user.email 后再试。说明和已暂存内容都还保留。";

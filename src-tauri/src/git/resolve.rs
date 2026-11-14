@@ -7,12 +7,14 @@ use crate::atomic::atomic_write;
 use crate::error::AppError;
 use crate::git::advice::{classify_problem, problem_error, GitProblem};
 use crate::git::command::{
-    add_command, ancestor_command, branch_contains_command, cached_diff_quiet_command,
-    cat_blob_command, checkout_index_stage_command, checkout_side_command,
-    cherry_pick_abort_command, cherry_pick_continue_command, cherry_pick_range_command,
-    clean_files_command, commit_command, commit_no_edit_command, commits_between_count_command,
-    detach_at_command, fetch_one_command, git_path_command, git_paths_command, hash_object_command,
-    head_command, history_details_command,
+    add_command, amend_head_record_command, ancestor_command, branch_contains_command,
+    cached_diff_quiet_command, cached_raw_diff_command, cat_blob_command,
+    checkout_index_stage_command, checkout_side_command, cherry_pick_abort_command,
+    cherry_pick_continue_command, cherry_pick_range_command, clean_files_command,
+    commit_amend_command, commit_command, commit_no_edit_command,
+    commits_between_count_command, detach_at_command, diff_tree_command, fetch_one_command,
+    git_path_command, git_paths_command, hash_object_command, head_command, head_message_command,
+    history_details_command,
     head_match_command, head_record_command, ls_remote_tags_command, merge_abort_command,
     merge_base_command, merge_divergence_command, merge_ff_only_command, merge_incoming_files_command,
     merge_incoming_log_command, merge_no_commit_command, merge_tree_command, push_reflog_command,
@@ -22,6 +24,7 @@ use crate::git::command::{
     stash_list_command, status_command, switch_command, unmerged_index_command,
     update_index_info_command,
 };
+use crate::git::changes::classify_amend;
 use crate::git::gate::action_key;
 use crate::git::history::{parse_history_records, parse_name_status, validate_oid as history_oid};
 use crate::git::ops::{
@@ -33,12 +36,13 @@ use crate::git::patch::DIFF_PREVIEW_BYTES;
 use crate::git::runner::{ProcessOutput, RealRunner};
 use crate::git::schedule::{internal_request_id, CommandSpec, JobKind, WriteGuard};
 use crate::model::{
-    AbortImpact, ChangeKind, CherryPickOutcome, CommitFileChange, ConflictEntry, ConflictSide,
-    ConflictView,
+    AbortImpact, AmendOutcome, ChangeKind, CherryPickOutcome, CommitFileChange, ConflictEntry,
+    ConflictSide, ConflictView,
     DiscardFilePlan, DiscardResult, FileChange, HistoryCommit, MergeComplete, MergePreview,
     MergeSession, RevertOutcome, RevertTarget, StatusSnapshot, UndoResult, MAX_DRAFT_CHARS,
 };
 use crate::redact::{contains_secret, redact_error_text};
+use sha2::{Digest, Sha256};
 
 const MAX_LISTED_PATHS: usize = 200;
 const MERGE_MSG_LIMIT: usize = 8 * 1024;
@@ -1999,6 +2003,7 @@ async fn undo_preview(
         git,
         snapshot.generation,
         internal_request_id(),
+        "撤销",
     )
     .await?;
     let dirty = index_dirty(backend, root, git, record.0, internal_request_id()).await?;
@@ -2084,7 +2089,7 @@ async fn undo_in_guard(
 ) -> Result<Undone, AppError> {
     let snapshot = status_in_guard(guard, backend, git, root).await?;
     let operation = operation_in_guard(guard, git, root, &snapshot).await?;
-    let record = head_record_in_guard(guard, git, root).await?;
+    let record = head_record_in_guard(guard, git, root, "撤销").await?;
     let dirty = cached_dirty_in_guard(guard, git, root).await?;
     let remotes = remote_names_in_guard(guard, git, root).await?;
     let plan = undo_plan(
@@ -2158,7 +2163,7 @@ async fn assess_unpushed(
             "无法检查远程分支和 tag，不能确认这次提交是否已经传播。未撤销提交。",
         ));
     }
-    let reread = head_record_in_guard(guard, git, root).await?;
+    let reread = head_record_in_guard(guard, git, root, "撤销").await?;
     let Some(reread) = reread else {
         return Err(AppError::new(
             "undo_head_changed",
@@ -2186,6 +2191,28 @@ async fn assess_unpushed(
     })
 }
 
+/// 远程传播政策：撤销与修订共用同一组检查，只替换原因代码和动作文案。
+struct PropagationPolicy {
+    unclear: &'static str,
+    offline: &'static str,
+    pushed: &'static str,
+    action: &'static str,
+}
+
+const UNDO_PROPAGATION: PropagationPolicy = PropagationPolicy {
+    unclear: "undo_unclear",
+    offline: "undo_offline",
+    pushed: "undo_pushed",
+    action: "撤销提交",
+};
+
+const AMEND_PROPAGATION: PropagationPolicy = PropagationPolicy {
+    unclear: "amend_unclear",
+    offline: "amend_offline",
+    pushed: "amend_pushed",
+    action: "修订提交",
+};
+
 async fn ensure_not_published(
     guard: &mut WriteGuard<'_, RealRunner>,
     git: &Path,
@@ -2193,23 +2220,39 @@ async fn ensure_not_published(
     remote: &str,
     oid: &str,
 ) -> Result<(), AppError> {
+    verify_not_published(guard, git, root, remote, oid, &UNDO_PROPAGATION).await
+}
+
+async fn verify_not_published(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+    remote: &str,
+    oid: &str,
+    policy: &PropagationPolicy,
+) -> Result<(), AppError> {
     let contained = run_spec(guard, branch_contains_command(git, root, oid), false, false).await?;
     if contained.exit_code != 0 && contained.exit_code != 1 {
         return Err(git_failure(
-            "undo_unclear",
+            policy.unclear,
             &contained,
-            "无法确认提交是否已在远程分支上，未撤销。",
+            &format!("无法确认提交是否已在远程分支上，未{}。", policy.action),
         ));
     }
     if contained.stdout_truncated {
         return Err(AppError::new(
-            "undo_unclear",
-            "远程分支列表不完整，不能确认传播范围。未撤销提交。",
+            policy.unclear,
+            format!("远程分支列表不完整，不能确认传播范围。未{}。", policy.action),
         ));
     }
-    if remote_contains(&contained.stdout)? {
+    if remote_contains(&contained.stdout).map_err(|_| {
+        AppError::new(
+            policy.unclear,
+            format!("远程分支列表无法安全解析，未{}。", policy.action),
+        )
+    })? {
         return Err(AppError::new(
-            "undo_pushed",
+            policy.pushed,
             "这个提交已经出现在该远程的分支上，未改写共享历史。",
         ));
     }
@@ -2222,28 +2265,36 @@ async fn ensure_not_published(
     .await?;
     if tags.exit_code != 0 {
         return Err(git_failure(
-            "undo_offline",
+            policy.offline,
             &tags,
-            "无法读取远程 tag，不能确认这次提交是否已经传播。未撤销提交。",
+            &format!(
+                "无法读取远程 tag，不能确认这次提交是否已经传播。未{}。",
+                policy.action
+            ),
         ));
     }
     if tags.stdout_truncated {
         return Err(AppError::new(
-            "undo_unclear",
-            "远程 tag 列表不完整，不能确认传播范围。未撤销提交。",
+            policy.unclear,
+            format!("远程 tag 列表不完整，不能确认传播范围。未{}。", policy.action),
         ));
     }
-    if remote_tag_contains(&tags.stdout, oid)? {
+    if remote_tag_contains(&tags.stdout, oid).map_err(|_| {
+        AppError::new(
+            policy.unclear,
+            format!("远程 tag 记录无法解析，未{}。", policy.action),
+        )
+    })? {
         return Err(AppError::new(
-            "undo_pushed",
+            policy.pushed,
             "这个提交已经出现在该远程的 tag 上，未改写共享历史。",
         ));
     }
     // A rewritten remote branch drops `branch -r --contains`, but the local
     // remote-tracking reflog still records `update by push` for that OID.
-    if push_reflog_contains(guard, git, root, remote, oid).await? {
+    if push_reflog_contains(guard, git, root, remote, oid, policy).await? {
         return Err(AppError::new(
-            "undo_pushed",
+            policy.pushed,
             "本地推送记录显示这个提交曾经推送到该远程，未改写共享历史。",
         ));
     }
@@ -2256,6 +2307,7 @@ async fn push_reflog_contains(
     root: &Path,
     remote: &str,
     oid: &str,
+    policy: &PropagationPolicy,
 ) -> Result<bool, AppError> {
     let listed = run_spec(
         guard,
@@ -2266,12 +2318,17 @@ async fn push_reflog_contains(
     .await?;
     if listed.exit_code != 0 || listed.stdout_truncated {
         return Err(git_failure(
-            "undo_unclear",
+            policy.unclear,
             &listed,
-            "无法读取远程跟踪记录，不能确认传播范围。未撤销提交。",
+            &format!("无法读取远程跟踪记录，不能确认传播范围。未{}。", policy.action),
         ));
     }
-    let refs = parse_remote_refs(&listed.stdout, remote)?;
+    let refs = parse_remote_refs(&listed.stdout, remote).map_err(|_| {
+        AppError::new(
+            policy.unclear,
+            format!("远程跟踪记录无法解析，未{}。", policy.action),
+        )
+    })?;
     for refname in refs {
         let output = run_spec(
             guard,
@@ -2282,12 +2339,17 @@ async fn push_reflog_contains(
         .await?;
         if output.exit_code != 0 || output.stdout_truncated {
             return Err(git_failure(
-                "undo_unclear",
+                policy.unclear,
                 &output,
-                "本地推送记录无法解析，不能确认传播范围。未撤销提交。",
+                &format!("本地推送记录无法解析，不能确认传播范围。未{}。", policy.action),
             ));
         }
-        if parse_push_reflog(&output.stdout, oid)? {
+        if parse_push_reflog(&output.stdout, oid).map_err(|_| {
+            AppError::new(
+                policy.unclear,
+                format!("本地推送记录无法解析，未{}。", policy.action),
+            )
+        })? {
             return Ok(true);
         }
     }
@@ -2390,6 +2452,870 @@ fn undo_result(
         reason: plan.reason.clone(),
         snapshot,
     }
+}
+
+struct AmendPreviewData {
+    record: Option<HeadRecord>,
+    message: Result<String, AppError>,
+    files: Vec<CommitFileChange>,
+    staged_paths: Vec<String>,
+    staged_token: Option<String>,
+}
+
+impl AmendPreviewData {
+    fn outcome(
+        self,
+        snapshot: StatusSnapshot,
+        code: &str,
+        eligible: bool,
+        note: String,
+    ) -> AmendOutcome {
+        let record = self.record;
+        AmendOutcome {
+            generation: snapshot.generation,
+            code: code.to_string(),
+            eligible,
+            wrote: false,
+            head_oid: record.as_ref().map(|item| item.oid.clone()),
+            parent_oid: record
+                .as_ref()
+                .and_then(|item| item.parents.first().cloned()),
+            summary: record.map(|item| item.summary).unwrap_or_default(),
+            message: self.message.unwrap_or_default(),
+            files: self.files,
+            staged_paths: self.staged_paths,
+            staged_token: self.staged_token,
+            note,
+            snapshot,
+        }
+    }
+}
+
+/// 预览并确认修订当前 HEAD。`confirm=false` 只读取；确认在写锁内复核 HEAD、
+/// 暂存快照令牌、操作状态和远程传播范围，再改写最近提交。不推送。
+#[allow(clippy::too_many_arguments)]
+pub async fn amend_commit(
+    backend: &Backend,
+    path: &str,
+    expected_head: &str,
+    message: Option<&str>,
+    include_staged: bool,
+    staged_token: Option<&str>,
+    confirm: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<AmendOutcome, AppError> {
+    let expected_head = history_oid(expected_head)?;
+    let root = repo_root(path)?;
+    let git = require_git(backend).await?;
+    if !confirm {
+        return amend_preview(
+            backend,
+            &root,
+            &git.path,
+            &expected_head,
+            message,
+            include_staged,
+            generation,
+            request_id,
+        )
+        .await;
+    }
+    // 输入校验在取锁前完成：空说明或超限说明不应产生任何 Git 写入。
+    let requested = match message {
+        Some(value) => Some(normalize_amend_message(value)?),
+        None => None,
+    };
+    let token = validate_staged_token(staged_token)?;
+    ensure_no_index_lock(&root)?;
+    let _gate = backend
+        .actions
+        .enter(action_key("amend", &repo_key(&root)))?;
+    let mut guard = write_lock(backend, &root, generation, request_id).await?;
+    let outcome = amend_in_guard(
+        &mut guard,
+        backend,
+        &git.path,
+        &root,
+        &expected_head,
+        requested.as_deref(),
+        include_staged,
+        &token,
+    )
+    .await;
+    let generation = guard.finish();
+    let amended = outcome.map_err(|error| attach_generation(error, generation))?;
+    let snapshot = settle_read!(backend, &root, generation, |current| read_status(
+        backend,
+        &root,
+        current,
+        internal_request_id()
+    )
+    .await)?;
+    if snapshot.branch.head_oid.as_deref() != Some(amended.oid.as_str()) {
+        return Err(AppError::new(
+            "amend_unverified",
+            "修订命令已返回，但 HEAD 与预期不一致。请刷新后确认，不要重复修订。",
+        )
+        .with_generation(snapshot.generation));
+    }
+    Ok(AmendOutcome {
+        generation: snapshot.generation,
+        code: "ok".to_string(),
+        eligible: true,
+        wrote: true,
+        head_oid: Some(amended.oid),
+        parent_oid: amended.parent,
+        summary: amended.summary,
+        message: amended.message,
+        files: amended.files,
+        staged_paths: staged_paths(&snapshot),
+        staged_token: amended.staged_token,
+        note: amend_success_note(include_staged),
+        snapshot,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn amend_preview(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    expected_head: &str,
+    message: Option<&str>,
+    include_staged: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<AmendOutcome, AppError> {
+    let snapshot = read_status(backend, root, generation, request_id).await?;
+    let mut data = AmendPreviewData {
+        record: None,
+        message: Ok(String::new()),
+        files: Vec::new(),
+        staged_paths: staged_paths(&snapshot),
+        staged_token: None,
+    };
+    let operation =
+        operation_from_snapshot(backend, root, git, &snapshot, internal_request_id()).await?;
+    if operation != "none" {
+        let (code, note) = if operation == "unmerged" {
+            (
+                "amend_unmerged",
+                "还有未解决的冲突，不能修订最近提交。仓库没有改动。",
+            )
+        } else {
+            (
+                "amend_in_progress",
+                "已有进行中的操作，不能修订最近提交。仓库没有改动。",
+            )
+        };
+        return Ok(data.outcome(snapshot, code, false, note.to_string()));
+    }
+    if snapshot.branch.detached || snapshot.branch.unborn || snapshot.branch.name.is_none() {
+        return Ok(data.outcome(
+            snapshot,
+            "amend_detached",
+            false,
+            "当前不在本地分支上，不能修订最近提交。仓库没有改动。".to_string(),
+        ));
+    }
+    let (next, record) = amend_head_record(
+        backend,
+        root,
+        git,
+        snapshot.generation,
+        internal_request_id(),
+    )
+    .await?;
+    data.record = record;
+    let mut generation = next;
+    let Some(record) = data.record.as_ref() else {
+        return Ok(data.outcome(
+            snapshot,
+            "amend_no_commit",
+            false,
+            "当前分支还没有提交，没有可以修订的最近提交。仓库没有改动。".to_string(),
+        ));
+    };
+    if record.oid != expected_head {
+        return Ok(data.outcome(
+            snapshot,
+            "amend_head_changed",
+            false,
+            "当前提交与打开修订时看到的不一致，未写入。请重新预览。".to_string(),
+        ));
+    }
+    let parent_oid = record.parents.first().cloned();
+    let merge = record.parents.len() > 1;
+    let oid = record.oid.clone();
+    let (next, message_read) =
+        read_amend_message(backend, root, git, generation, internal_request_id()).await?;
+    generation = next;
+    data.message = message_read;
+    if let Err(error) = &data.message {
+        let code = error.code.clone();
+        let note = error.message.clone();
+        return Ok(data.outcome(snapshot, &code, false, note));
+    }
+    if let Some(record) = data.record.as_mut() {
+        record.summary = data
+            .message
+            .as_ref()
+            .map(|message| message.lines().next().unwrap_or("").to_string())
+            .unwrap_or_default();
+    }
+    let (next, files) = head_files(backend, root, git, &oid, parent_oid.as_deref(), generation)
+        .await?;
+    generation = next;
+    data.files = files;
+    let (next, token) =
+        staged_token_for_amend(backend, root, git, generation, internal_request_id()).await?;
+    generation = next;
+    match token {
+        Ok(token) => data.staged_token = Some(token),
+        Err(error) => {
+            let code = error.code.clone();
+            let note = error.message.clone();
+            return Ok(data.outcome(snapshot, &code, false, note));
+        }
+    }
+    if let Some(value) = message {
+        if let Err(error) = normalize_amend_message(value) {
+            let code = error.code.clone();
+            let note = error.message.clone();
+            return Ok(data.outcome(snapshot, &code, false, note));
+        }
+    }
+    if merge {
+        return Ok(data.outcome(
+            snapshot,
+            "amend_merge",
+            false,
+            "这是合并提交，不能用这个入口修订。仓库没有改动。".to_string(),
+        ));
+    }
+    let (next, remotes) = amend_remote_names(backend, root, git, generation, internal_request_id())
+        .await?;
+    generation = next;
+    if remotes.len() != 1 {
+        return Ok(data.outcome(
+            snapshot,
+            "amend_unclear",
+            false,
+            "需要且仅能核对一个远程。没有唯一远程时，传播范围不明，未修订提交。".to_string(),
+        ));
+    }
+    let remote = remotes[0].clone();
+    ensure_no_index_lock(root)?;
+    let _gate = backend.actions.enter(action_key("amend", &repo_key(root)))?;
+    let mut guard = write_lock(backend, root, generation, internal_request_id()).await?;
+    let assessed =
+        assess_amend_in_guard(&mut guard, backend, git, root, &remote, expected_head).await;
+    let generation = guard.finish();
+    let refreshed = settle_read!(backend, root, generation, |current| read_status(
+        backend,
+        root,
+        current,
+        internal_request_id()
+    )
+    .await);
+    match assessed {
+        Ok((_ready, token, paths)) => {
+            let snapshot = refreshed.map_err(|error| attach_generation(error, generation))?;
+            data.staged_token = Some(token);
+            data.staged_paths = paths;
+            Ok(data.outcome(
+                snapshot,
+                "ok",
+                true,
+                amend_preview_note(&remote, include_staged),
+            ))
+        }
+        Err(error) => {
+            let error = attach_generation(error, generation);
+            if !amend_preview_refusal(&error.code) {
+                return Err(error);
+            }
+            let snapshot = match refreshed {
+                Ok(snapshot) => snapshot,
+                Err(read_error) => return Err(attach_generation(read_error, generation)),
+            };
+            let code = error.code.clone();
+            let note = error.message;
+            Ok(data.outcome(snapshot, &code, false, note))
+        }
+    }
+}
+
+struct Amended {
+    oid: String,
+    parent: Option<String>,
+    summary: String,
+    message: String,
+    files: Vec<CommitFileChange>,
+    staged_token: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn amend_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    backend: &Backend,
+    git: &Path,
+    root: &Path,
+    expected_head: &str,
+    message: Option<&str>,
+    include_staged: bool,
+    staged_token: &str,
+) -> Result<Amended, AppError> {
+    let snapshot = status_in_guard(guard, backend, git, root).await?;
+    let operation = operation_in_guard(guard, git, root, &snapshot).await?;
+    if operation == "unmerged" {
+        return Err(AppError::new(
+            "amend_unmerged",
+            "还有未解决的冲突，不能修订最近提交。原 HEAD 和暂存区都没有改动。",
+        ));
+    }
+    if operation != "none" {
+        return Err(AppError::new(
+            "amend_in_progress",
+            "已有进行中的操作，不能修订最近提交。原 HEAD 和暂存区都没有改动。",
+        ));
+    }
+    if snapshot.branch.detached || snapshot.branch.unborn || snapshot.branch.name.is_none() {
+        return Err(AppError::new(
+            "amend_detached",
+            "当前不在本地分支上，不能修订最近提交。原 HEAD 和暂存区都没有改动。",
+        ));
+    }
+    let Some(record) = amend_head_record_in_guard(guard, git, root).await? else {
+        return Err(AppError::new(
+            "amend_no_commit",
+            "当前分支还没有提交，没有可以修订的最近提交。仓库没有改动。",
+        ));
+    };
+    if record.oid != expected_head {
+        return Err(AppError::new(
+            "amend_head_changed",
+            "当前提交与确认修订时看到的不一致，未写入。请重新预览后再确认。",
+        ));
+    }
+    if record.parents.len() > 1 {
+        return Err(AppError::new(
+            "amend_merge",
+            "这是合并提交，不能用这个入口修订。原 HEAD 和暂存区都没有改动。",
+        ));
+    }
+    let original = amend_message_in_guard(guard, git, root).await?;
+    let requested = match message {
+        Some(value) => normalize_amend_message(value)?,
+        None => normalize_amend_message(&original)?,
+    };
+    let staged = staged_paths(&snapshot);
+    if requested == original.trim() && (!include_staged || staged.is_empty()) {
+        return Err(AppError::new(
+            "amend_no_change",
+            "说明没有变化，也没有选择纳入非空的暂存改动，未修订。原 HEAD 和暂存区都没有改动。",
+        ));
+    }
+    let current_token = staged_token_in_guard(guard, git, root).await?;
+    if current_token != staged_token {
+        return Err(AppError::new(
+            "amend_stale_index",
+            "暂存区在预览后已经变化，未修订提交。请重新预览后再确认；已暂存内容仍然保留。",
+        ));
+    }
+    let files = head_files_in_guard(guard, git, root, &record.oid, record.parents.first().map(String::as_str)).await?;
+    let remotes = amend_remote_names_in_guard(guard, git, root).await?;
+    if remotes.len() != 1 {
+        return Err(AppError::new(
+            "amend_unclear",
+            "需要且仅能核对一个远程。没有唯一远程时，传播范围不明，未修订提交。",
+        ));
+    }
+    assess_amend_ready(guard, git, root, &remotes[0], expected_head).await?;
+    let output = run_spec(
+        guard,
+        commit_amend_command(git, root, &requested, !include_staged),
+        true,
+        false,
+    )
+    .await?;
+    if output.exit_code != 0 {
+        return Err(classify_amend(root, &output));
+    }
+    let oid = head_in_guard(guard, git, root).await?;
+    if !is_oid(&oid) || oid == expected_head {
+        return Err(AppError::new(
+            "amend_unverified",
+            "修订命令已返回，但无法确认新的 HEAD。请刷新后查看历史，不要重复修订。",
+        ));
+    }
+    let staged_token = staged_token_in_guard(guard, git, root).await.ok();
+    Ok(Amended {
+        oid,
+        parent: record.parents.first().cloned(),
+        summary: requested.lines().next().unwrap_or("").to_string(),
+        message: requested,
+        files,
+        staged_token,
+    })
+}
+
+async fn assess_amend_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    backend: &Backend,
+    git: &Path,
+    root: &Path,
+    remote: &str,
+    expected_head: &str,
+) -> Result<(HeadRecord, String, Vec<String>), AppError> {
+    let ready = assess_amend_ready(guard, git, root, remote, expected_head).await?;
+    let token = staged_token_in_guard(guard, git, root).await?;
+    let status = status_in_guard(guard, backend, git, root).await?;
+    Ok((ready, token, staged_paths(&status)))
+}
+
+async fn assess_amend_ready(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+    remote: &str,
+    expected_head: &str,
+) -> Result<HeadRecord, AppError> {
+    if !remote_ref_name_ok(remote) {
+        return Err(AppError::new(
+            "amend_unclear",
+            "远程名称无法安全核对，未修订提交。",
+        ));
+    }
+    let fetched = run_spec(guard, fetch_one_command(git, root, remote), true, false).await?;
+    if fetched.exit_code != 0 {
+        return Err(git_failure(
+            "amend_offline",
+            &fetched,
+            "无法检查远程分支和 tag，不能确认这次提交是否已经传播。未修订提交。",
+        ));
+    }
+    let Some(reread) = amend_head_record_in_guard(guard, git, root).await? else {
+        return Err(AppError::new(
+            "amend_head_changed",
+            "当前提交已经变化，未修订。请重新预览后再确认。",
+        ));
+    };
+    if reread.oid != expected_head {
+        return Err(AppError::new(
+            "amend_head_changed",
+            "写入前核对时 HEAD 已变化，未修订提交。请重新预览后再确认。",
+        ));
+    }
+    if reread.parents.len() > 1 {
+        return Err(AppError::new(
+            "amend_merge",
+            "这是合并提交，不能用这个入口修订。原 HEAD 和暂存区都没有改动。",
+        ));
+    }
+    verify_not_published(guard, git, root, remote, &reread.oid, &AMEND_PROPAGATION).await?;
+    Ok(reread)
+}
+
+fn amend_preview_refusal(code: &str) -> bool {
+    matches!(
+        code,
+        "amend_pushed"
+            | "amend_unclear"
+            | "amend_offline"
+            | "amend_head_changed"
+            | "amend_stale_index"
+            | "amend_token_unreadable"
+            | "amend_in_progress"
+            | "amend_unmerged"
+            | "amend_merge"
+            | "amend_detached"
+            | "amend_no_commit"
+    )
+}
+
+fn amend_preview_note(remote: &str, include_staged: bool) -> String {
+    let effect = if include_staged {
+        "确认后会把当前暂存改动纳入新提交；未暂存和未跟踪内容不会加入。"
+    } else {
+        "确认后只更新说明，原提交树和当前暂存区保持不变。"
+    };
+    format!(
+        "已核对唯一远程 {remote} 的分支、tag 和本地推送记录，没有发现这个提交。确认时会再次核对；离线、已发布、记录无法解析或暂存区变化都会停止。{effect}不会推送。"
+    )
+}
+
+fn amend_success_note(include_staged: bool) -> String {
+    if include_staged {
+        "已用新的修订提交替换最近提交，当前暂存改动已纳入；未暂存和未跟踪文件没有加入。没有推送。".to_string()
+    } else {
+        "已用新的修订提交替换最近提交，只更新了说明；原提交树和当前暂存区保持不变。没有推送。".to_string()
+    }
+}
+
+fn normalize_amend_message(message: &str) -> Result<String, AppError> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::new(
+            "empty_message",
+            "请先填写修订后的提交说明。原 HEAD、修订草稿和暂存区都未改动。",
+        ));
+    }
+    if trimmed.chars().count() > MAX_DRAFT_CHARS {
+        return Err(AppError::new(
+            "message_too_large",
+            "修订说明超过 64 KiB 草稿上限，未修订提交。修订草稿和暂存区都还保留。",
+        ));
+    }
+    if trimmed.contains('\0') {
+        return Err(AppError::new(
+            "invalid_message",
+            "修订说明包含无法保存的字符，未修订提交。修订草稿和暂存区都还保留。",
+        ));
+    }
+    if contains_secret(trimmed) {
+        return Err(AppError::new(
+            "draft_secret",
+            "修订说明包含疑似凭据或私钥，未修订提交。修订草稿和暂存区都还保留。",
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn validate_staged_token(token: Option<&str>) -> Result<String, AppError> {
+    let Some(token) = token else {
+        return Err(AppError::new(
+            "amend_stale_index",
+            "确认缺少暂存区快照令牌，未修订提交。请重新预览后再确认。",
+        ));
+    };
+    let token = token.trim().to_ascii_lowercase();
+    if token.len() != 64 || !token.chars().all(|character| character.is_ascii_hexdigit()) {
+        return Err(AppError::new(
+            "amend_stale_index",
+            "暂存区快照令牌无效，未修订提交。请重新预览后再确认。",
+        ));
+    }
+    Ok(token)
+}
+
+fn decode_amend_message(bytes: &[u8]) -> Result<String, AppError> {
+    let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
+        AppError::new(
+            "amend_message_unreadable",
+            "原提交说明包含无法安全显示的内容，不能修订。原 HEAD 和暂存区都没有改动。",
+        )
+    })?;
+    if text.chars().count() > MAX_DRAFT_CHARS {
+        return Err(AppError::new(
+            "amend_message_too_large",
+            "原提交说明超过 64 KiB 草稿上限，不能修订。原 HEAD 和暂存区都没有改动。",
+        ));
+    }
+    Ok(text.trim_end_matches(['\r', '\n']).to_string())
+}
+
+fn parse_amend_head_record(bytes: &[u8]) -> Result<Option<HeadRecord>, AppError> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    let text = String::from_utf8(bytes.to_vec())
+        .map_err(|_| AppError::new("history_parse", "当前提交标识无法核对，未修订。"))?;
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    let mut parts = line.splitn(2, '\u{1f}');
+    let oid = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+    let parents = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+    if !is_oid(&oid) {
+        return Err(AppError::new(
+            "history_parse",
+            "当前提交标识无法核对，未修订。",
+        ));
+    }
+    let parents = if parents.is_empty() {
+        Vec::new()
+    } else {
+        parents
+            .split_whitespace()
+            .map(|item| item.to_ascii_lowercase())
+            .collect()
+    };
+    if parents.iter().any(|item| !is_oid(item)) {
+        return Err(AppError::new(
+            "history_parse",
+            "父提交标识无法核对，未修订。",
+        ));
+    }
+    Ok(Some(HeadRecord {
+        oid,
+        parents,
+        summary: String::new(),
+    }))
+}
+
+async fn amend_head_record(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    generation: u64,
+    request_id: u64,
+) -> Result<(u64, Option<HeadRecord>), AppError> {
+    let (output, generation) = run_read(
+        backend,
+        root,
+        generation,
+        request_id,
+        amend_head_record_command(git, root),
+    )
+    .await?;
+    if output.exit_code != 0 {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        if stderr.contains("does not have any commits") {
+            return Ok((generation, None));
+        }
+        return Err(git_failure(
+            "history_failed",
+            &output,
+            "无法读取当前提交，未修订。",
+        )
+        .with_generation(generation));
+    }
+    Ok((generation, parse_amend_head_record(&output.stdout)?))
+}
+
+async fn amend_head_record_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+) -> Result<Option<HeadRecord>, AppError> {
+    let output = run_spec(guard, amend_head_record_command(git, root), false, false).await?;
+    if output.exit_code != 0 {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        if stderr.contains("does not have any commits") {
+            return Ok(None);
+        }
+        return Err(git_failure(
+            "history_failed",
+            &output,
+            "无法读取当前提交，未修订。",
+        ));
+    }
+    parse_amend_head_record(&output.stdout)
+}
+
+async fn read_amend_message(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    generation: u64,
+    request_id: u64,
+) -> Result<(u64, Result<String, AppError>), AppError> {
+    let (output, generation) = run_read(
+        backend,
+        root,
+        generation,
+        request_id,
+        head_message_command(git, root),
+    )
+    .await?;
+    if output.exit_code != 0 {
+        return Err(git_failure(
+            "amend_message_unreadable",
+            &output,
+            "无法读取原提交说明，未修订。原 HEAD 和暂存区都没有改动。",
+        )
+        .with_generation(generation));
+    }
+    if output.stdout_truncated {
+        return Ok((
+            generation,
+            Err(AppError::new(
+                "amend_message_too_large",
+                "原提交说明超过可读取上限，不能修订。原 HEAD 和暂存区都没有改动。",
+            )),
+        ));
+    }
+    Ok((generation, decode_amend_message(&output.stdout)))
+}
+
+async fn amend_message_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+) -> Result<String, AppError> {
+    let output = run_spec(guard, head_message_command(git, root), false, false).await?;
+    if output.exit_code != 0 {
+        return Err(git_failure(
+            "amend_message_unreadable",
+            &output,
+            "无法读取原提交说明，未修订。原 HEAD 和暂存区都没有改动。",
+        ));
+    }
+    if output.stdout_truncated {
+        return Err(AppError::new(
+            "amend_message_too_large",
+            "原提交说明超过可读取上限，不能修订。原 HEAD 和暂存区都没有改动。",
+        ));
+    }
+    decode_amend_message(&output.stdout)
+}
+
+async fn head_files(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    oid: &str,
+    parent: Option<&str>,
+    generation: u64,
+) -> Result<(u64, Vec<CommitFileChange>), AppError> {
+    let (output, generation) = run_read(
+        backend,
+        root,
+        generation,
+        internal_request_id(),
+        diff_tree_command(git, root, parent, oid),
+    )
+    .await?;
+    if output.exit_code != 0 {
+        return Err(git_failure(
+            "amend_files_failed",
+            &output,
+            "无法读取原提交文件，未修订。原 HEAD 和暂存区都没有改动。",
+        )
+        .with_generation(generation));
+    }
+    let files = parse_name_status(&output.stdout).map_err(|error| attach_generation(error, generation))?;
+    Ok((generation, files))
+}
+
+async fn head_files_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+    oid: &str,
+    parent: Option<&str>,
+) -> Result<Vec<CommitFileChange>, AppError> {
+    let output = run_spec(
+        guard,
+        diff_tree_command(git, root, parent, oid),
+        false,
+        false,
+    )
+    .await?;
+    if output.exit_code != 0 {
+        return Err(git_failure(
+            "amend_files_failed",
+            &output,
+            "无法读取原提交文件，未修订。原 HEAD 和暂存区都没有改动。",
+        ));
+    }
+    parse_name_status(&output.stdout)
+}
+
+async fn staged_token_for_amend(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    generation: u64,
+    request_id: u64,
+) -> Result<(u64, Result<String, AppError>), AppError> {
+    let (output, generation) = run_read(
+        backend,
+        root,
+        generation,
+        request_id,
+        cached_raw_diff_command(git, root),
+    )
+    .await?;
+    if output.exit_code != 0 || output.stdout_truncated {
+        return Ok((
+            generation,
+            Err(AppError::new(
+                "amend_token_unreadable",
+                "无法完整读取暂存区，不能确认修订范围。原 HEAD 和暂存区都没有改动。",
+            )),
+        ));
+    }
+    Ok((generation, Ok(sha256_hex(&output.stdout))))
+}
+
+async fn staged_token_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+) -> Result<String, AppError> {
+    let output = run_spec(guard, cached_raw_diff_command(git, root), false, false).await?;
+    if output.exit_code != 0 || output.stdout_truncated {
+        return Err(AppError::new(
+            "amend_token_unreadable",
+            "无法完整读取暂存区，不能确认修订范围。原 HEAD 和暂存区都没有改动。",
+        ));
+    }
+    Ok(sha256_hex(&output.stdout))
+}
+
+async fn amend_remote_names(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    generation: u64,
+    request_id: u64,
+) -> Result<(u64, Vec<String>), AppError> {
+    let (output, generation) = run_read(
+        backend,
+        root,
+        generation,
+        request_id,
+        remote_names_command(git, root),
+    )
+    .await?;
+    if output.exit_code != 0 {
+        return Err(git_failure(
+            "amend_unclear",
+            &output,
+            "无法读取远程列表，未修订提交。",
+        )
+        .with_generation(generation));
+    }
+    Ok((
+        generation,
+        parse_remote_names(&output.stdout, "amend_unclear")?,
+    ))
+}
+
+async fn amend_remote_names_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+) -> Result<Vec<String>, AppError> {
+    let output = run_spec(guard, remote_names_command(git, root), false, false).await?;
+    if output.exit_code != 0 {
+        return Err(git_failure(
+            "amend_unclear",
+            &output,
+            "无法读取远程列表，未修订提交。",
+        ));
+    }
+    parse_remote_names(&output.stdout, "amend_unclear")
+}
+
+fn staged_paths(snapshot: &StatusSnapshot) -> Vec<String> {
+    let mut paths: Vec<String> = snapshot
+        .files
+        .iter()
+        .filter(|file| !file.untracked && file.staged != ChangeKind::None)
+        .map(|file| file.path.clone())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn discard_plan(
@@ -2715,9 +3641,8 @@ fn validate_oid(oid: &str) -> Result<String, AppError> {
     }
 }
 
-fn remote_contains(bytes: &[u8]) -> Result<bool, AppError> {
-    let text = String::from_utf8(bytes.to_vec())
-        .map_err(|_| AppError::new("undo_unclear", "远程分支列表无法安全解析，未撤销提交。"))?;
+fn remote_contains(bytes: &[u8]) -> Result<bool, ()> {
+    let text = String::from_utf8(bytes.to_vec()).map_err(|_| ())?;
     Ok(text.lines().any(|line| {
         let line = line.trim();
         !line.is_empty() && !line.starts_with('(')
@@ -2737,26 +3662,19 @@ fn remote_ref_name_ok(name: &str) -> bool {
         && !name.contains("..")
 }
 
-fn remote_tag_contains(bytes: &[u8], oid: &str) -> Result<bool, AppError> {
-    let text = String::from_utf8(bytes.to_vec())
-        .map_err(|_| AppError::new("undo_unclear", "远程 tag 记录无法解析，未撤销提交。"))?;
+fn remote_tag_contains(bytes: &[u8], oid: &str) -> Result<bool, ()> {
+    let text = String::from_utf8(bytes.to_vec()).map_err(|_| ())?;
     let mut found = false;
     for line in text.lines() {
         if line.is_empty() {
             continue;
         }
         let Some((left, right)) = line.split_once('\t') else {
-            return Err(AppError::new(
-                "undo_unclear",
-                "远程 tag 记录无法解析，未撤销提交。",
-            ));
+            return Err(());
         };
         let left = left.trim().to_ascii_lowercase();
         if !is_oid(&left) || !right.starts_with("refs/tags/") {
-            return Err(AppError::new(
-                "undo_unclear",
-                "远程 tag 记录无法解析，未撤销提交。",
-            ));
+            return Err(());
         }
         if left == oid {
             found = true;
@@ -2765,9 +3683,8 @@ fn remote_tag_contains(bytes: &[u8], oid: &str) -> Result<bool, AppError> {
     Ok(found)
 }
 
-fn parse_remote_refs(bytes: &[u8], remote: &str) -> Result<Vec<String>, AppError> {
-    let text = String::from_utf8(bytes.to_vec())
-        .map_err(|_| AppError::new("undo_unclear", "远程跟踪记录无法解析，未撤销提交。"))?;
+fn parse_remote_refs(bytes: &[u8], remote: &str) -> Result<Vec<String>, ()> {
+    let text = String::from_utf8(bytes.to_vec()).map_err(|_| ())?;
     let prefix = format!("refs/remotes/{remote}/");
     let mut refs = Vec::new();
     for line in text.lines() {
@@ -2781,39 +3698,29 @@ fn parse_remote_refs(bytes: &[u8], remote: &str) -> Result<Vec<String>, AppError
                 .any(|character| character.is_whitespace() || character == '\\')
             || line.contains("..")
         {
-            return Err(AppError::new(
-                "undo_unclear",
-                "远程跟踪记录无法解析，未撤销提交。",
-            ));
+            return Err(());
         }
         refs.push(line.to_string());
     }
     Ok(refs)
 }
 
-fn parse_push_reflog(bytes: &[u8], oid: &str) -> Result<bool, AppError> {
+fn parse_push_reflog(bytes: &[u8], oid: &str) -> Result<bool, ()> {
     if bytes.is_empty() {
         return Ok(false);
     }
-    let text = String::from_utf8(bytes.to_vec())
-        .map_err(|_| AppError::new("undo_unclear", "本地推送记录无法解析，未撤销提交。"))?;
+    let text = String::from_utf8(bytes.to_vec()).map_err(|_| ())?;
     let mut found = false;
     for line in text.lines() {
         if line.is_empty() {
             continue;
         }
         let Some((raw_oid, subject)) = line.split_once('\u{1f}') else {
-            return Err(AppError::new(
-                "undo_unclear",
-                "本地推送记录无法解析，未撤销提交。",
-            ));
+            return Err(());
         };
         let raw_oid = raw_oid.trim().to_ascii_lowercase();
         if !is_oid(&raw_oid) {
-            return Err(AppError::new(
-                "undo_unclear",
-                "本地推送记录无法解析，未撤销提交。",
-            ));
+            return Err(());
         }
         if raw_oid == oid && subject.contains("update by push") {
             found = true;
@@ -2881,12 +3788,12 @@ fn is_oid(value: &str) -> bool {
         && value.chars().all(|character| character.is_ascii_hexdigit())
 }
 
-fn parse_head_record(bytes: &[u8]) -> Result<Option<HeadRecord>, AppError> {
+fn parse_head_record(bytes: &[u8], action: &str) -> Result<Option<HeadRecord>, AppError> {
     if bytes.is_empty() {
         return Ok(None);
     }
     let text = String::from_utf8(bytes.to_vec())
-        .map_err(|_| AppError::new("history_parse", "当前提交无法安全显示，未撤销。"))?;
+        .map_err(|_| AppError::new("history_parse", "当前提交无法安全显示，未继续写入。"))?;
     let line = text.lines().next().unwrap_or("").trim();
     if line.is_empty() {
         return Ok(None);
@@ -2898,7 +3805,7 @@ fn parse_head_record(bytes: &[u8]) -> Result<Option<HeadRecord>, AppError> {
     if !is_oid(&oid) {
         return Err(AppError::new(
             "history_parse",
-            "当前提交标识无法核对，未撤销。",
+            format!("当前提交标识无法核对，未{action}。"),
         ));
     }
     let parents = if parents.is_empty() {
@@ -2912,7 +3819,7 @@ fn parse_head_record(bytes: &[u8]) -> Result<Option<HeadRecord>, AppError> {
     if parents.iter().any(|item| !is_oid(item)) {
         return Err(AppError::new(
             "history_parse",
-            "父提交标识无法核对，未撤销。",
+            format!("父提交标识无法核对，未{action}。"),
         ));
     }
     Ok(Some(HeadRecord {
@@ -2922,9 +3829,9 @@ fn parse_head_record(bytes: &[u8]) -> Result<Option<HeadRecord>, AppError> {
     }))
 }
 
-fn parse_remote_names(bytes: &[u8]) -> Result<Vec<String>, AppError> {
+fn parse_remote_names(bytes: &[u8], code: &'static str) -> Result<Vec<String>, AppError> {
     let text = String::from_utf8(bytes.to_vec())
-        .map_err(|_| AppError::new("undo_unclear", "远程名称无法安全显示，未撤销提交。"))?;
+        .map_err(|_| AppError::new(code, "远程名称无法安全显示，未继续写入。"))?;
     let mut names = Vec::new();
     for line in text.lines() {
         let name = line.trim();
@@ -2936,10 +3843,7 @@ fn parse_remote_names(bytes: &[u8]) -> Result<Vec<String>, AppError> {
                 .chars()
                 .any(|character| character.is_whitespace() || character.is_control())
         {
-            return Err(AppError::new(
-                "undo_unclear",
-                "远程名称无法安全核对，未撤销提交。",
-            ));
+            return Err(AppError::new(code, "远程名称无法安全核对，未继续写入。"));
         }
         names.push(name.to_string());
     }
@@ -3664,6 +4568,7 @@ async fn read_head_record(
     git: &Path,
     generation: u64,
     request_id: u64,
+    action: &str,
 ) -> Result<(u64, Option<HeadRecord>), AppError> {
     let (output, generation) = run_read(
         backend,
@@ -3678,18 +4583,21 @@ async fn read_head_record(
         if stderr.contains("does not have any commits") {
             return Ok((generation, None));
         }
-        return Err(
-            git_failure("history_failed", &output, "无法读取当前提交，未撤销。")
-                .with_generation(generation),
-        );
+        return Err(git_failure(
+            "history_failed",
+            &output,
+            &format!("无法读取当前提交，未{action}。"),
+        )
+        .with_generation(generation));
     }
-    Ok((generation, parse_head_record(&output.stdout)?))
+    Ok((generation, parse_head_record(&output.stdout, action)?))
 }
 
 async fn head_record_in_guard(
     guard: &mut WriteGuard<'_, RealRunner>,
     git: &Path,
     root: &Path,
+    action: &str,
 ) -> Result<Option<HeadRecord>, AppError> {
     let output = run_spec(guard, head_record_command(git, root), false, false).await?;
     if output.exit_code != 0 {
@@ -3700,10 +4608,10 @@ async fn head_record_in_guard(
         return Err(git_failure(
             "history_failed",
             &output,
-            "无法读取当前提交，未撤销。",
+            &format!("无法读取当前提交，未{action}。"),
         ));
     }
-    parse_head_record(&output.stdout)
+    parse_head_record(&output.stdout, action)
 }
 
 async fn head_in_guard(
@@ -3783,7 +4691,7 @@ async fn remote_names(
                 .with_generation(generation),
         );
     }
-    Ok((generation, parse_remote_names(&output.stdout)?))
+    Ok((generation, parse_remote_names(&output.stdout, "undo_unclear")?))
 }
 
 async fn remote_names_in_guard(
@@ -3799,7 +4707,7 @@ async fn remote_names_in_guard(
             "无法读取远程列表，未撤销提交。",
         ));
     }
-    parse_remote_names(&output.stdout)
+    parse_remote_names(&output.stdout, "undo_unclear")
 }
 
 async fn stash_oids(
@@ -4642,6 +5550,91 @@ mod tests {
         backend.scheduler.current_generation(&repo_key(root))
     }
 
+    fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
+        let output = Command::new(crate::test_support::system_git())
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                crate::test_support::isolated_gitconfig(),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    }
+
+    fn git_stdin(dir: &Path, args: &[&str], input: &[u8]) -> String {
+        use std::io::Write;
+        let mut child = Command::new(crate::test_support::system_git())
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                crate::test_support::isolated_gitconfig(),
+            )
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn amend_token(dir: &Path) -> String {
+        use sha2::{Digest, Sha256};
+        format!(
+            "{:x}",
+            Sha256::digest(git_bytes(
+                dir,
+                &["diff", "--cached", "--raw", "-z", "--full-index"]
+            ))
+        )
+    }
+
+    fn init_amend_repo(repo: &Path) -> (PathBuf, String, String) {
+        let bare = repo
+            .parent()
+            .expect("fixture parent")
+            .join("remote.git");
+        git(repo, &["init", "-b", "main"]);
+        fs::write(repo.join("a.txt"), "base\n").unwrap();
+        fs::write(repo.join("b.txt"), "base\n").unwrap();
+        git(repo, &["add", "--", "a.txt", "b.txt"]);
+        git(repo, &["commit", "-m", "base"]);
+        fs::create_dir_all(&bare).unwrap();
+        git(&bare, &["init", "--bare"]);
+        git(
+            repo,
+            &["remote", "add", "origin", bare.to_str().unwrap()],
+        );
+        git(repo, &["push", "-u", "origin", "main"]);
+        fs::write(repo.join("a.txt"), "local\n").unwrap();
+        fs::write(repo.join("b.txt"), "local\n").unwrap();
+        git(
+            repo,
+            &[
+                "commit",
+                "-am",
+                "subject line\n\nbody line one\nbody line two",
+            ],
+        );
+        let head = git_text(repo, &["rev-parse", "HEAD"]);
+        (bare, head, git_text(repo, &["rev-parse", "HEAD^{tree}"]))
+    }
+
     fn init_pair(repo: &Path) {
         git(repo, &["init", "-b", "main"]);
         fs::write(repo.join("my file.txt"), "base\n").unwrap();
@@ -4668,6 +5661,7 @@ mod tests {
         let record = parse_head_record(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u{1f}bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\u{1f}subject\n"
                 .as_bytes(),
+            "撤销",
         )
         .unwrap()
         .unwrap();
@@ -4675,6 +5669,7 @@ mod tests {
         assert_eq!(record.summary, "subject");
         assert!(parse_head_record(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u{1f}\u{1f}root\n".as_bytes(),
+            "撤销",
         )
         .unwrap()
         .unwrap()
@@ -7581,5 +8576,877 @@ mod tests {
         assert_eq!(fs::read_to_string(repo.join("b.txt")).unwrap(), "main-b\n");
         assert_eq!(git_text(&repo, &["rev-parse", "stash@{0}"]), stashed);
         assert!(aborted.stash_oids.iter().any(|oid| oid == &stashed));
+    }
+
+    #[tokio::test]
+    async fn amend_preview_returns_full_message_files_paths_and_token() {
+        let fixture = crate::test_support::git_fixture("amend-preview");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        let (_bare, head, _tree) = init_amend_repo(&repo);
+        fs::write(repo.join("a.txt"), "staged\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        fs::write(repo.join("b.txt"), "unstaged\n").unwrap();
+        fs::write(repo.join("c.txt"), "untracked\n").unwrap();
+        let parent = git_text(&repo, &["rev-parse", "HEAD~1"]);
+        let path = repo_key(&repo);
+        let token = amend_token(&repo);
+
+        let preview = amend_commit(
+            &backend,
+            &path,
+            &head,
+            None,
+            false,
+            None,
+            false,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(preview.eligible, "{}", preview.note);
+        assert_eq!(preview.code, "ok");
+        assert!(!preview.wrote);
+        assert_eq!(preview.head_oid.as_deref(), Some(head.as_str()));
+        assert_eq!(preview.parent_oid.as_deref(), Some(parent.as_str()));
+        assert_eq!(preview.summary, "subject line");
+        assert_eq!(
+            preview.message,
+            "subject line\n\nbody line one\nbody line two"
+        );
+        assert!(!preview.message.contains('…'));
+        assert_eq!(
+            preview
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "b.txt"]
+        );
+        assert_eq!(preview.staged_paths, vec!["a.txt".to_string()]);
+        assert_eq!(preview.staged_token.as_deref(), Some(token.as_str()));
+        assert!(preview.note.contains("没有发现这个提交"));
+        assert!(preview.note.contains("不会推送"));
+        // 预览不写 HEAD、索引或工作区。
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git_text(&repo, &["diff", "--cached", "--name-only"]), "a.txt");
+        assert_eq!(
+            git_text(&repo, &["status", "--porcelain=v1"])
+                .lines()
+                .count(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn amend_message_only_keeps_tree_and_staged_index() {
+        let fixture = crate::test_support::git_fixture("amend-message-only");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        let (_bare, head, tree) = init_amend_repo(&repo);
+        fs::write(repo.join("a.txt"), "staged\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        fs::write(repo.join("b.txt"), "unstaged\n").unwrap();
+        fs::write(repo.join("c.txt"), "untracked\n").unwrap();
+        let staged_before = git_bytes(&repo, &["diff", "--cached"]);
+        let parent_before = git_text(&repo, &["rev-parse", "HEAD~1"]);
+        let path = repo_key(&repo);
+        let preview = amend_commit(
+            &backend,
+            &path,
+            &head,
+            None,
+            false,
+            None,
+            false,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(preview.eligible, "{}", preview.note);
+
+        let done = amend_commit(
+            &backend,
+            &path,
+            &head,
+            Some("rewritten subject\n\nrewritten body"),
+            false,
+            preview.staged_token.as_deref(),
+            true,
+            preview.generation,
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(done.eligible);
+        assert!(done.wrote);
+        assert_eq!(done.code, "ok");
+        let new_head = git_text(&repo, &["rev-parse", "HEAD"]);
+        assert_ne!(new_head, head);
+        assert_eq!(done.head_oid.as_deref(), Some(new_head.as_str()));
+        assert_eq!(done.summary, "rewritten subject");
+        assert_eq!(done.message, "rewritten subject\n\nrewritten body");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD^{tree}"]), tree);
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD~1"]), parent_before);
+        assert_eq!(git_text(&repo, &["log", "-1", "--format=%B"]), "rewritten subject\n\nrewritten body");
+        assert_eq!(git_bytes(&repo, &["diff", "--cached"]), staged_before);
+        assert_eq!(git_text(&repo, &["diff", "--cached", "--name-only"]), "a.txt");
+        assert_eq!(fs::read_to_string(repo.join("b.txt")).unwrap(), "unstaged\n");
+        assert_eq!(fs::read_to_string(repo.join("c.txt")).unwrap(), "untracked\n");
+        assert_eq!(done.staged_paths, vec!["a.txt".to_string()]);
+        assert!(done.note.contains("保持不变"));
+        assert!(done.note.contains("没有推送"));
+        // 远程没有变化（本地新提交还没有推送）。
+        let remote_tip = git_text(
+            repo.parent().unwrap().join("remote.git").as_path(),
+            &["rev-parse", "refs/heads/main"],
+        );
+        assert_eq!(remote_tip, git_text(&repo, &["rev-parse", "HEAD~1"]));
+    }
+
+    #[tokio::test]
+    async fn amend_including_staged_forms_new_tree_without_adding_unstaged_or_untracked() {
+        let fixture = crate::test_support::git_fixture("amend-staged");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        let (_bare, head, tree) = init_amend_repo(&repo);
+        fs::write(repo.join("a.txt"), "staged\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        fs::write(repo.join("b.txt"), "unstaged\n").unwrap();
+        fs::write(repo.join("c.txt"), "untracked\n").unwrap();
+        let path = repo_key(&repo);
+        let preview = amend_commit(
+            &backend,
+            &path,
+            &head,
+            None,
+            true,
+            None,
+            false,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(preview.eligible, "{}", preview.note);
+        assert_eq!(preview.staged_paths, vec!["a.txt".to_string()]);
+
+        // 说明不变，但明确纳入非空暂存改动：允许形成新树。
+        let done = amend_commit(
+            &backend,
+            &path,
+            &head,
+            Some(&preview.message),
+            true,
+            preview.staged_token.as_deref(),
+            true,
+            preview.generation,
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(done.wrote);
+        let new_tree = git_text(&repo, &["rev-parse", "HEAD^{tree}"]);
+        assert_ne!(new_tree, tree);
+        assert_eq!(git_text(&repo, &["show", "HEAD:a.txt"]), "staged");
+        assert_eq!(git_text(&repo, &["diff", "--cached", "--name-only"]), "");
+        assert!(done.staged_paths.is_empty());
+        assert_eq!(done.staged_token.as_deref(), Some(amend_token(&repo).as_str()));
+        assert_eq!(fs::read_to_string(repo.join("b.txt")).unwrap(), "unstaged\n");
+        assert_eq!(fs::read_to_string(repo.join("c.txt")).unwrap(), "untracked\n");
+        assert_eq!(
+            git_text(&repo, &["status", "--porcelain=v1"]),
+            "M b.txt\n?? c.txt"
+        );
+        assert!(done.note.contains("纳入"));
+    }
+
+    #[tokio::test]
+    async fn amend_root_keeps_tree_for_message_only_and_includes_staged_when_asked() {
+        let fixture = crate::test_support::git_fixture("amend-root");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        let bare = fixture.path().join("remote.git");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("a.txt"), "root\n").unwrap();
+        fs::write(repo.join("b.txt"), "root\n").unwrap();
+        git(&repo, &["add", "--", "a.txt", "b.txt"]);
+        git(&repo, &["commit", "-m", "root subject"]);
+        fs::create_dir_all(&bare).unwrap();
+        git(&bare, &["init", "--bare"]);
+        git(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        fs::write(repo.join("a.txt"), "staged\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        let head = git_text(&repo, &["rev-parse", "HEAD"]);
+        let tree = git_text(&repo, &["rev-parse", "HEAD^{tree}"]);
+        let path = repo_key(&repo);
+
+        let preview = amend_commit(
+            &backend,
+            &path,
+            &head,
+            None,
+            false,
+            None,
+            false,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(preview.eligible, "{}", preview.note);
+        assert_eq!(preview.parent_oid, None);
+        let only = amend_commit(
+            &backend,
+            &path,
+            &head,
+            Some("root rewritten"),
+            false,
+            preview.staged_token.as_deref(),
+            true,
+            preview.generation,
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD^{tree}"]), tree);
+        assert_eq!(git_text(&repo, &["rev-list", "--count", "HEAD"]), "1");
+        assert_eq!(git_text(&repo, &["diff", "--cached", "--name-only"]), "a.txt");
+        assert_eq!(only.summary, "root rewritten");
+
+        let second = amend_commit(
+            &backend,
+            &path,
+            &only.head_oid.clone().unwrap(),
+            Some("root with staged"),
+            true,
+            only.staged_token.as_deref(),
+            true,
+            only.generation,
+            3,
+        )
+        .await
+        .unwrap();
+        assert_ne!(git_text(&repo, &["rev-parse", "HEAD^{tree}"]), tree);
+        assert_eq!(git_text(&repo, &["show", "HEAD:a.txt"]), "staged");
+        assert_eq!(git_text(&repo, &["diff", "--cached", "--name-only"]), "");
+        assert!(second.note.contains("纳入"));
+    }
+
+    #[tokio::test]
+    async fn amend_lengths_multiline_and_invalid_message_boundaries() {
+        let fixture = crate::test_support::git_fixture("amend-length");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        let (_bare, _head, _tree) = init_amend_repo(&repo);
+        let path = repo_key(&repo);
+        // 超过 16 KiB 且远小于 64 KiB 的多行说明不被展示截断。
+        let mut large = String::from("large subject\n\n");
+        let mut index = 0;
+        while large.chars().count() < 17 * 1024 {
+            large.push_str(&format!("line {index} 0123456789abcdef\n"));
+            index += 1;
+        }
+        assert!(large.chars().count() > 16 * 1024);
+        assert!(large.chars().count() < crate::model::MAX_DRAFT_CHARS);
+        fs::write(repo.join("message.txt"), &large).unwrap();
+        fs::write(repo.join("a.txt"), "large\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        git(&repo, &["commit", "-F", "message.txt"]);
+        let large_head = git_text(&repo, &["rev-parse", "HEAD"]);
+        let preview = amend_commit(
+            &backend,
+            &path,
+            &large_head,
+            None,
+            false,
+            None,
+            false,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(preview.eligible, "{}", preview.note);
+        assert_eq!(preview.message.trim(), large.trim());
+        assert!(!preview.message.contains('…'));
+
+        // 接受接近边界内的多行说明。
+        let replacement = format!("{large}\nappended line");
+        let done = amend_commit(
+            &backend,
+            &path,
+            &large_head,
+            Some(&replacement),
+            false,
+            preview.staged_token.as_deref(),
+            true,
+            preview.generation,
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(done.wrote);
+        assert_eq!(done.message, replacement.trim());
+
+        // 超过 64 KiB 的说明在写入前拒绝，HEAD 不变。
+        let too_large = "x".repeat(crate::model::MAX_DRAFT_CHARS + 1);
+        let before = git_text(&repo, &["rev-parse", "HEAD"]);
+        let rejected = amend_commit(
+            &backend,
+            &path,
+            &before,
+            Some(&too_large),
+            false,
+            done.staged_token.as_deref(),
+            true,
+            done.generation,
+            3,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(rejected.code, "message_too_large");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), before);
+
+        // 恰好达到上限的字节长度可解码；多一个字符或非法 UTF-8 不可修订。
+        let exact = vec![b'a'; crate::model::MAX_DRAFT_CHARS];
+        assert_eq!(
+            decode_amend_message(&exact).unwrap().chars().count(),
+            crate::model::MAX_DRAFT_CHARS
+        );
+        let overflow = vec![b'a'; crate::model::MAX_DRAFT_CHARS + 1];
+        assert_eq!(
+            decode_amend_message(&overflow).unwrap_err().code,
+            "amend_message_too_large"
+        );
+        assert_eq!(
+            decode_amend_message(b"ok\n\xff").unwrap_err().code,
+            "amend_message_unreadable"
+        );
+    }
+
+    #[tokio::test]
+    async fn amend_rejects_no_change_stale_head_stale_token_and_new_operation() {
+        let fixture = crate::test_support::git_fixture("amend-stale");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        let (_bare, head, _tree) = init_amend_repo(&repo);
+        let path = repo_key(&repo);
+        let preview = amend_commit(
+            &backend,
+            &path,
+            &head,
+            None,
+            false,
+            None,
+            false,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(preview.eligible, "{}", preview.note);
+        assert!(preview.staged_paths.is_empty());
+
+        let unchanged = amend_commit(
+            &backend,
+            &path,
+            &head,
+            Some(&preview.message),
+            false,
+            preview.staged_token.as_deref(),
+            true,
+            preview.generation,
+            2,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unchanged.code, "amend_no_change");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), head);
+        let unchanged_staged = amend_commit(
+            &backend,
+            &path,
+            &head,
+            Some(&preview.message),
+            true,
+            preview.staged_token.as_deref(),
+            true,
+            preview.generation,
+            3,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unchanged_staged.code, "amend_no_change");
+
+        // 直接创建新提交后，过期 HEAD 被拒绝。
+        fs::write(repo.join("a.txt"), "moved\n").unwrap();
+        git(&repo, &["commit", "-am", "moved on"]);
+        let moved = git_text(&repo, &["rev-parse", "HEAD"]);
+        let stale_head = amend_commit(
+            &backend,
+            &path,
+            &head,
+            Some("new message"),
+            false,
+            preview.staged_token.as_deref(),
+            true,
+            preview.generation,
+            4,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(stale_head.code, "amend_head_changed");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), moved);
+
+        // 预览后暂存区变化，旧令牌不能确认（仅说明模式也必须一致）。
+        let fresh = amend_commit(
+            &backend,
+            &path,
+            &moved,
+            None,
+            false,
+            None,
+            false,
+            generation(&backend, &repo),
+            5,
+        )
+        .await
+        .unwrap();
+        assert!(fresh.eligible, "{}", fresh.note);
+        fs::write(repo.join("a.txt"), "late staged\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        let stale_token = amend_commit(
+            &backend,
+            &path,
+            &moved,
+            Some("rewritten after stage"),
+            false,
+            fresh.staged_token.as_deref(),
+            true,
+            fresh.generation,
+            6,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(stale_token.code, "amend_stale_index");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), moved);
+        assert_eq!(git_text(&repo, &["diff", "--cached", "--name-only"]), "a.txt");
+
+        // 预览后出现进行中的操作，确认时被拒绝。
+        let current = git_text(&repo, &["rev-parse", "HEAD"]);
+        let quiet = amend_commit(
+            &backend,
+            &path,
+            &current,
+            None,
+            false,
+            None,
+            false,
+            generation(&backend, &repo),
+            7,
+        )
+        .await
+        .unwrap();
+        assert!(quiet.eligible, "{}", quiet.note);
+        fs::write(repo.join(".git/MERGE_HEAD"), &current).unwrap();
+        let in_progress = amend_commit(
+            &backend,
+            &path,
+            &current,
+            Some("blocked by operation"),
+            false,
+            quiet.staged_token.as_deref(),
+            true,
+            quiet.generation,
+            8,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(in_progress.code, "amend_in_progress");
+        fs::remove_file(repo.join(".git/MERGE_HEAD")).unwrap();
+    }
+
+    #[tokio::test]
+    async fn amend_refuses_pushed_offline_unclear_and_rechecks_push_before_write() {
+        let fixture = crate::test_support::git_fixture("amend-remote");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        let bare = fixture.path().join("remote.git");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("a.txt"), "base\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        fs::create_dir_all(&bare).unwrap();
+        git(&bare, &["init", "--bare"]);
+        git(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        git(&repo, &["push", "-u", "origin", "main"]);
+        fs::write(repo.join("a.txt"), "next\n").unwrap();
+        git(&repo, &["commit", "-am", "next"]);
+        let next = git_text(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["push", "origin", "main"]);
+        let path = repo_key(&repo);
+
+        let pushed = amend_commit(
+            &backend,
+            &path,
+            &next,
+            None,
+            false,
+            None,
+            false,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(!pushed.eligible);
+        assert_eq!(pushed.code, "amend_pushed");
+        assert!(pushed.note.contains("未改写共享历史"));
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), next);
+
+        // 预览通过后提交被推送到远程，确认必须再次核对并拒绝。
+        fs::write(repo.join("a.txt"), "local only\n").unwrap();
+        git(&repo, &["commit", "-am", "local only"]);
+        let local = git_text(&repo, &["rev-parse", "HEAD"]);
+        let preview = amend_commit(
+            &backend,
+            &path,
+            &local,
+            None,
+            false,
+            None,
+            false,
+            generation(&backend, &repo),
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(preview.eligible, "{}", preview.note);
+        git(&repo, &["push", "origin", "main"]);
+        let refused = amend_commit(
+            &backend,
+            &path,
+            &local,
+            Some("rewrite after push"),
+            false,
+            preview.staged_token.as_deref(),
+            true,
+            preview.generation,
+            3,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.code, "amend_pushed");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), local);
+
+        // 多个远程时传播范围不明。
+        let backup = fixture.path().join("backup.git");
+        fs::create_dir_all(&backup).unwrap();
+        git(&backup, &["init", "--bare"]);
+        git(&repo, &["remote", "add", "backup", backup.to_str().unwrap()]);
+        let unclear = amend_commit(
+            &backend,
+            &path,
+            &local,
+            None,
+            false,
+            None,
+            false,
+            generation(&backend, &repo),
+            4,
+        )
+        .await
+        .unwrap();
+        assert!(!unclear.eligible);
+        assert_eq!(unclear.code, "amend_unclear");
+
+        // 唯一远程不可访问时无法核对传播范围。
+        git(&repo, &["remote", "remove", "backup"]);
+        let missing = fixture.path().join("missing.git");
+        git(
+            &repo,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                missing.to_str().unwrap(),
+            ],
+        );
+        let offline = amend_commit(
+            &backend,
+            &path,
+            &local,
+            None,
+            false,
+            None,
+            false,
+            generation(&backend, &repo),
+            5,
+        )
+        .await
+        .unwrap();
+        assert!(!offline.eligible);
+        assert_eq!(offline.code, "amend_offline");
+    }
+
+    #[tokio::test]
+    async fn amend_refuses_detached_and_merge_head() {
+        let fixture = crate::test_support::git_fixture("amend-shape");
+        let backend = fixture.backend();
+        let repo = fixture.repo("detached");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("a.txt"), "base\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        let head = git_text(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "--detach", &head]);
+        let path = repo_key(&repo);
+        let detached = amend_commit(
+            &backend,
+            &path,
+            &head,
+            None,
+            false,
+            None,
+            false,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(!detached.eligible);
+        assert_eq!(detached.code, "amend_detached");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), head);
+        git(&repo, &["checkout", "main"]);
+
+        let merge_repo = fixture.repo("merge");
+        git(&merge_repo, &["init", "-b", "main"]);
+        fs::write(merge_repo.join("a.txt"), "base\n").unwrap();
+        git(&merge_repo, &["add", "--", "a.txt"]);
+        git(&merge_repo, &["commit", "-m", "base"]);
+        git(&merge_repo, &["checkout", "-b", "feature"]);
+        fs::write(merge_repo.join("b.txt"), "feature\n").unwrap();
+        git(&merge_repo, &["add", "--", "b.txt"]);
+        git(&merge_repo, &["commit", "-m", "feature"]);
+        git(&merge_repo, &["checkout", "main"]);
+        fs::write(merge_repo.join("c.txt"), "main\n").unwrap();
+        git(&merge_repo, &["add", "--", "c.txt"]);
+        git(&merge_repo, &["commit", "-m", "main"]);
+        git(&merge_repo, &["merge", "--no-ff", "feature", "-m", "merge feature"]);
+        let merge_head = git_text(&merge_repo, &["rev-parse", "HEAD"]);
+        let merge_path = repo_key(&merge_repo);
+        let merge = amend_commit(
+            &backend,
+            &merge_path,
+            &merge_head,
+            None,
+            false,
+            None,
+            false,
+            generation(&backend, &merge_repo),
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(!merge.eligible);
+        assert_eq!(merge.code, "amend_merge");
+        assert_eq!(merge.message, "merge feature");
+        assert!(merge.files.iter().any(|file| file.path == "b.txt"));
+        assert!(merge.staged_token.is_some());
+        assert_eq!(git_text(&merge_repo, &["rev-parse", "HEAD"]), merge_head);
+    }
+
+    #[tokio::test]
+    async fn amend_hook_identity_index_lock_and_invalid_message_keep_recoverable_state() {
+        let fixture = crate::test_support::git_fixture("amend-failures");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        let (_bare, head, tree) = init_amend_repo(&repo);
+        fs::write(repo.join("a.txt"), "staged\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        let staged_before = git_bytes(&repo, &["diff", "--cached"]);
+        let path = repo_key(&repo);
+        let preview = amend_commit(
+            &backend,
+            &path,
+            &head,
+            None,
+            false,
+            None,
+            false,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(preview.eligible, "{}", preview.note);
+
+        for (message, code) in [
+            ("   ", "empty_message"),
+            ("bad\0message", "invalid_message"),
+            ("token=abcdef123456", "draft_secret"),
+        ] {
+            let rejected = amend_commit(
+                &backend,
+                &path,
+                &head,
+                Some(message),
+                false,
+                preview.staged_token.as_deref(),
+                true,
+                preview.generation,
+                2,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(rejected.code, code);
+            assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), head);
+        }
+
+        let hook = repo.join(".git/hooks/pre-commit");
+        fs::write(&hook, "#!/bin/sh\necho amend hook refused >&2\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&hook).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&hook, permissions).unwrap();
+        }
+        let hook_rejected = amend_commit(
+            &backend,
+            &path,
+            &head,
+            Some("hook blocked"),
+            false,
+            preview.staged_token.as_deref(),
+            true,
+            preview.generation,
+            3,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(hook_rejected.code, "hook_rejected");
+        assert!(hook_rejected.message.contains("修订草稿"));
+        assert!(hook_rejected.message.contains("amend hook refused"));
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git_bytes(&repo, &["diff", "--cached"]), staged_before);
+        fs::remove_file(&hook).unwrap();
+
+        let lock = repo.join(".git/index.lock");
+        fs::write(&lock, "locked").unwrap();
+        let locked = amend_commit(
+            &backend,
+            &path,
+            &head,
+            Some("lock blocked"),
+            false,
+            preview.staged_token.as_deref(),
+            true,
+            preview.generation,
+            4,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(locked.code, "index_lock");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), head);
+        fs::remove_file(&lock).unwrap();
+
+        // 去掉身份后提交无法创建，原 HEAD、树、暂存区与远程都不变。
+        let anonymous = fixture.backend_with_extra_env(vec![
+            (
+                std::ffi::OsString::from("GIT_AUTHOR_NAME"),
+                std::ffi::OsString::from(""),
+            ),
+            (
+                std::ffi::OsString::from("GIT_AUTHOR_EMAIL"),
+                std::ffi::OsString::from(""),
+            ),
+            (
+                std::ffi::OsString::from("GIT_COMMITTER_NAME"),
+                std::ffi::OsString::from(""),
+            ),
+            (
+                std::ffi::OsString::from("GIT_COMMITTER_EMAIL"),
+                std::ffi::OsString::from(""),
+            ),
+        ]);
+        let anon_preview = amend_commit(
+            &anonymous,
+            &path,
+            &head,
+            None,
+            false,
+            None,
+            false,
+            generation(&anonymous, &repo),
+            5,
+        )
+        .await
+        .unwrap();
+        assert!(anon_preview.eligible, "{}", anon_preview.note);
+        let missing_identity = amend_commit(
+            &anonymous,
+            &path,
+            &head,
+            Some("no identity"),
+            false,
+            anon_preview.staged_token.as_deref(),
+            true,
+            anon_preview.generation,
+            6,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing_identity.code, "identity_missing");
+        assert!(missing_identity.message.contains("user.name"));
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD^{tree}"]), tree);
+        assert_eq!(git_bytes(&repo, &["diff", "--cached"]), staged_before);
+    }
+
+    #[tokio::test]
+    async fn amend_refuses_invalid_utf8_commit_message() {
+        let fixture = crate::test_support::git_fixture("amend-invalid-utf8");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("a.txt"), "base\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        let tree = git_text(&repo, &["rev-parse", "HEAD^{tree}"]);
+        let parent = git_text(&repo, &["rev-parse", "HEAD"]);
+        let mut raw = format!(
+            "tree {tree}\nparent {parent}\nauthor Twiglane Test <twiglane-test@example.com> 1700000000 +0000\ncommitter Twiglane Test <twiglane-test@example.com> 1700000000 +0000\n\nsubject "
+        )
+        .into_bytes();
+        raw.push(0xff);
+        raw.push(b'\n');
+        let oid = git_stdin(
+            &repo,
+            &["hash-object", "-t", "commit", "-w", "--stdin"],
+            &raw,
+        );
+        git(&repo, &["update-ref", "refs/heads/main", &oid]);
+        let path = repo_key(&repo);
+        let preview = amend_commit(
+            &backend,
+            &path,
+            &oid,
+            None,
+            false,
+            None,
+            false,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(!preview.eligible);
+        assert_eq!(preview.code, "amend_message_unreadable");
+        assert!(preview.message.is_empty());
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), oid);
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD^{tree}"]), tree);
     }
 }

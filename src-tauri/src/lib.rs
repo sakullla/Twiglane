@@ -37,12 +37,12 @@ use crate::error::AppError;
 use crate::git::ops::{self, Backend};
 use crate::git::runner::RealRunner;
 use crate::model::{
-    AbortImpact, BranchState, CherryPickOutcome, CloneResult, CommitDetail, CommitPushReport,
-    CommitResult, ConflictView, DiffResponse, DiscardResult, FileHistoryPage, GitInfo, HistoryPage,
-    IgnoreOutcome, MergeComplete, MergePreview, MergeSession, OpenedRepository, PanelWidths,
-    RecentRepo, RemoteState, RemoteTag, RepoChanged, RepositoryContentSearch, RepositoryDirectory,
-    RepositoryEditSnapshot, RepositoryFileContent, RepositoryPathSearch, RepositorySearchScope,
-    RevertOutcome,
+    AbortImpact, AmendOutcome, BranchState, CherryPickOutcome, CloneResult, CommitDetail,
+    CommitPushReport, CommitResult, ConflictView, DiffResponse, DiscardResult, FileHistoryPage,
+    GitInfo, HistoryPage, IgnoreOutcome, MergeComplete, MergePreview, MergeSession,
+    OpenedRepository, PanelWidths, RecentRepo, RemoteState, RemoteTag, RepoChanged,
+    RepositoryContentSearch, RepositoryDirectory, RepositoryEditSnapshot, RepositoryFileContent,
+    RepositoryPathSearch, RepositorySearchScope, RevertOutcome,
     StashApplyResult, StashSaveResult, StashState, StatusSnapshot, TagState, Theme, UndoResult,
 };
 use crate::shutdown::Shutdown;
@@ -188,6 +188,7 @@ pub fn run() {
             complete_merge,
             abort_merge,
             undo_commit,
+            amend_commit,
             discard_changes,
             set_theme,
             set_pull_integration,
@@ -1880,6 +1881,33 @@ async fn undo_commit(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
+async fn amend_commit(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    expected_head: String,
+    message: Option<String>,
+    include_staged: bool,
+    staged_token: Option<String>,
+    confirm: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<AmendOutcome, AppError> {
+    crate::git::resolve::amend_commit(
+        state.inner(),
+        &path,
+        &expected_head,
+        message.as_deref(),
+        include_staged,
+        staged_token.as_deref(),
+        confirm,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
 async fn discard_changes(
     state: State<'_, Arc<Backend>>,
     path: String,
@@ -2435,6 +2463,7 @@ two
                 super::merge_session,
                 super::abort_merge,
                 super::undo_commit,
+                super::amend_commit,
                 super::discard_changes
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -2602,6 +2631,19 @@ two
                 serde_json::json!({
                     "path": "/tmp/unused",
                     "expectedHead": "abc",
+                    "confirm": false,
+                    "generation": 1,
+                    "request_id": 1
+                }),
+            ),
+            (
+                "amend_commit",
+                serde_json::json!({
+                    "path": "/tmp/unused",
+                    "expectedHead": "abc",
+                    "message": "next",
+                    "includeStaged": false,
+                    "stagedToken": "def",
                     "confirm": false,
                     "generation": 1,
                     "request_id": 1

@@ -516,6 +516,33 @@ pub struct RevertOutcome {
     pub snapshot: StatusSnapshot,
 }
 
+/// 修订最近提交的预览与写入结果。与撤销、拣选结果分开，避免借用字段语义不符的模型。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AmendOutcome {
+    pub generation: u64,
+    /// `ok`，或预览/确认被拒绝的原因代码。
+    pub code: String,
+    pub eligible: bool,
+    pub wrote: bool,
+    /// 预览时是原 HEAD；确认成功时是新的 HEAD。
+    pub head_oid: Option<String>,
+    /// 原提交的父提交；首个提交为空。
+    pub parent_oid: Option<String>,
+    /// 原提交的主题行；确认成功后是新说明的主题行。
+    pub summary: String,
+    /// 预览返回未截断的原说明；原文非法 UTF-8 或超过草稿上限时为空，并由 `note` 说明。
+    pub message: String,
+    /// 原提交修改的文件。
+    pub files: Vec<CommitFileChange>,
+    /// 当前暂存区中的路径（未暂存和未跟踪文件不在其中）。
+    pub staged_paths: Vec<String>,
+    /// 完整 `git diff --cached --raw -z --full-index` 字节的 SHA-256；读取失败时为空。
+    pub staged_token: Option<String>,
+    pub note: String,
+    pub snapshot: StatusSnapshot,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StashPreview {

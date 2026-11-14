@@ -1641,7 +1641,8 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .merge-route-arrow { display: grid; place-items: center; color: var(--fg-subtle); }
 
 @media (max-width: 900px) {
-  .merge-bar-picker { flex-basis: 220px; }
+  /* 换行仍按 220px 判断；同一行有余量时长到常规的 320px，分支名不必在空白旁边被截断。 */
+  .merge-bar-picker { flex: 1 1 220px; max-width: 320px; }
   .merge-options .merge-message { min-width: 140px; }
 }
 
@@ -2173,7 +2174,8 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 
 /* 内容区：头部一行放位置与动作，底部状态条放语言、大小与 Git 状态，正文只留代码。 */
 .file-content { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--surface); }
-.diff-toolbar.file-head { flex-wrap: nowrap; gap: var(--space-8); padding: 0 var(--space-8); }
+/* 头部自身作为尺寸容器：文件视图里没有 .diff 祖先，按 diff 容器查询时窄窗格规则永远不生效。 */
+.diff-toolbar.file-head { flex-wrap: nowrap; gap: var(--space-8); padding: 0 var(--space-8); container-type: inline-size; container-name: file-head; }
 .file-head .file-nav { gap: var(--space-2); }
 .file-title { display: flex; align-items: center; gap: var(--space-8); min-width: 0; flex: 1; padding-left: var(--space-4); }
 .file-copy-btn { color: var(--fg-subtle); }
@@ -2191,12 +2193,20 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .crumb-picker-ignored { color: var(--fg-subtle); }
 .crumb-picker-option > .icon:last-child { flex: none; color: var(--fg-subtle); }
 .crumb-sep { flex: none; color: var(--fg-subtle); opacity: 0.6; }
+/* 按钮版文件名带左右 -3px 外边距（悬停底色外扩），面包屑的内容宽度因此比按钮少 6px；
+   上限不补回这 6px 时，空间充足也会把短文件名截成「README.…」。 */
+.crumb-name.crumb-btn { max-width: calc(100% + 6px); }
 .crumb-name { flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); font-size: var(--text-base); font-weight: var(--weight-semibold); }
 .file-actions { display: flex; align-items: center; gap: var(--space-2); flex: none; }
 .file-actions .file-diff-btn { margin-right: var(--space-4); color: var(--accent-text); }
 .file-actions .segmented { margin-right: var(--space-6); }
 .file-actions .segmented button { height: 22px; padding: 0 var(--space-8); font-size: var(--text-xs); }
-@container diff (max-width: 560px) { .crumb { display: none; } .crumb-sep { display: none; } }
+@container file-head (max-width: 560px) {
+  .crumb { display: none; }
+  .crumb-sep { display: none; }
+  /* 窄窗格把空间让给文件名：「查看改动」只留图标，aria-label 与 title 仍给出完整说明。 */
+  .file-actions .file-diff-btn > span { display: none; }
+}
 /* 文件内搜索与跳行：一条输入、计数、上一处/下一处与关闭，和编辑器的查找条同一习惯。 */
 .file-findbar { display: flex; align-items: center; gap: var(--space-2); padding: 6px var(--space-8) 6px var(--space-12); border-bottom: 1px solid var(--border); background: var(--surface-2); flex: none; }
 .file-findbar .field { flex: 1; min-width: 140px; max-width: 520px; margin-right: var(--space-4); background: var(--surface); }

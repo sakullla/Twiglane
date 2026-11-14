@@ -64,3 +64,20 @@ describe("组件源码约束", () => {
     expect(offenders).toEqual([]);
   });
 });
+
+describe("文件头部布局约束", () => {
+  const css = readFileSync(path.join(root, "src/styles/components.css"), "utf8");
+
+  it("窄窗格规则按头部自身宽度查询：文件视图没有 .diff 祖先容器", () => {
+    expect(css).toMatch(/\.diff-toolbar\.file-head \{[^}]*container-type: inline-size;[^}]*container-name: file-head;/);
+    const query = css.match(/@container file-head \(max-width: 560px\) \{([\s\S]*?)\n\}/);
+    expect(query?.[1]).toContain(".crumb { display: none; }");
+    expect(query?.[1]).toContain(".file-actions .file-diff-btn > span { display: none; }");
+    expect(css).not.toContain("@container diff (max-width: 560px) {\n  .crumb");
+  });
+
+  it("按钮版文件名的宽度上限补回左右 -3px 外边距，短文件名不会被误截断", () => {
+    expect(css).toMatch(/\.crumb-btn \{[^}]*margin: 0 -3px;/);
+    expect(css).toContain(".crumb-name.crumb-btn { max-width: calc(100% + 6px); }");
+  });
+});

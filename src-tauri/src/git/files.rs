@@ -3,6 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -2546,6 +2547,8 @@ pub enum RepositoryCreateEntryKind {
     Directory,
 }
 
+/// 结构操作的封闭类型；只在提供 fd 相对写入原语的平台上存在。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OrdinaryEntryKind {
     File,
@@ -2571,6 +2574,7 @@ fn mutation_path(path: &str) -> Result<PathBuf, AppError> {
     Ok(normalized)
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn nested_repository_error() -> AppError {
     AppError::new(
         "nested_repository",
@@ -2578,6 +2582,7 @@ fn nested_repository_error() -> AppError {
     )
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn unsupported_entry_error() -> AppError {
     AppError::new(
         "unsupported_entry",
@@ -2585,6 +2590,7 @@ fn unsupported_entry_error() -> AppError {
     )
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn entry_io_error(error: std::io::Error, message: &'static str) -> AppError {
     let code = match error.kind() {
         ErrorKind::AlreadyExists => "entry_exists",
@@ -2596,8 +2602,12 @@ fn entry_io_error(error: std::io::Error, message: &'static str) -> AppError {
     AppError::new(code, message)
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 static TEMP_ENTRY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+// 没有 fd 相对原语的平台上 `trash_entry` 在校验前就失败关闭，永远不会构造这些取值；
+// 枚举仍要保留，让 `repository_delete_entry_with` 的结果分派跨平台共用同一份代码。
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EntryTargetState {
     Present,
@@ -2612,6 +2622,15 @@ fn platform_entry_unsupported() -> AppError {
         "当前平台尚不能绑定最终文件身份执行安全结构操作，未修改任何内容。",
     )
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use secure_entry_ops::BoundTrashTarget;
+
+/// 不提供 fd 相对写入原语的平台没有可绑定的回收站目标：命令在校验前就失败关闭，
+/// 适配器永远不会被调用。保留该类型只为让 `repository_delete_entry` 的适配器签名跨平台一致。
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[allow(dead_code)]
+struct BoundTrashTarget;
 
 /// 所有最终写操作都相对于已打开、no-follow 的目录或文件描述符完成。
 /// 路径校验之后即使外部进程替换父目录，也不会让写入转到另一个目录。
@@ -2636,6 +2655,9 @@ mod secure_entry_ops {
     }
 
     impl NodeStat {
+        // `libc::stat` 的字段宽度依平台而变（macOS 的 st_dev/st_mode 窄于 Linux），
+        // 这些提升到 u64/u32 的转换在其中一个平台必然“多余”，故整体允许该 lint。
+        #[allow(clippy::unnecessary_cast)]
         fn from_raw(stat: &libc::stat) -> Self {
             Self {
                 identity: Identity {
@@ -2656,6 +2678,7 @@ mod secure_entry_ops {
             }
         }
 
+        #[allow(clippy::unnecessary_cast)]
         fn kind(self) -> Option<OrdinaryEntryKind> {
             match self.mode & libc::S_IFMT as u32 {
                 value if value == libc::S_IFREG as u32 => Some(OrdinaryEntryKind::File),
@@ -2675,11 +2698,23 @@ mod secure_entry_ops {
         })
     }
 
+    #[cfg(target_os = "macos")]
     fn fd_path(fd: RawFd) -> PathBuf {
-        if cfg!(target_os = "macos") {
-            PathBuf::from(format!("/dev/fd/{fd}"))
+        PathBuf::from(format!("/dev/fd/{fd}"))
+    }
+
+    /// 已打开目录 fd 的当前绝对路径。只用于 `--separate-git-dir` 等场景下回收站的
+    /// 原始路径记录，不参与任何写入解析。
+    #[cfg(target_os = "linux")]
+    fn fd_directory_path(fd: RawFd) -> std::io::Result<PathBuf> {
+        let path = fs::read_link(PathBuf::from(format!("/proc/self/fd/{fd}")))?;
+        if path.is_absolute() {
+            Ok(path)
         } else {
-            PathBuf::from(format!("/proc/self/fd/{fd}"))
+            Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                "directory descriptor has no absolute path",
+            ))
         }
     }
 
@@ -2707,6 +2742,8 @@ mod secure_entry_ops {
         }
     }
 
+    /// 打开已存在项目。带 `O_CREAT` 的调用必须走 [`create_at`]：可变参数缺省时
+    /// 内核会拿到未定义的权限位。
     fn open_at(directory: RawFd, name: &OsStr, flags: libc::c_int) -> std::io::Result<RawFd> {
         let name = c_string(name)?;
         // SAFETY: name 以 NUL 结尾；directory 是存活的本模块目录 fd。
@@ -2715,6 +2752,31 @@ mod secure_entry_ops {
                 directory,
                 name.as_ptr(),
                 flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd >= 0 {
+            Ok(fd)
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    /// 排他创建新项目；显式给出权限位，避免依赖 `openat` 可变参数的未定义值。
+    /// `mode` 用 C 的 `unsigned int`，在可变参数调用里对两种平台都是正确的提升类型。
+    fn create_at(
+        directory: RawFd,
+        name: &OsStr,
+        flags: libc::c_int,
+        mode: libc::c_uint,
+    ) -> std::io::Result<RawFd> {
+        let name = c_string(name)?;
+        // SAFETY: name 以 NUL 结尾；带 O_CREAT 时第四参数是必需的权限位。
+        let fd = unsafe {
+            libc::openat(
+                directory,
+                name.as_ptr(),
+                flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                mode,
             )
         };
         if fd >= 0 {
@@ -2870,6 +2932,27 @@ mod secure_entry_ops {
         }
     }
 
+    /// 回收站适配器收到的已绑定目标：字段全部来自校验时打开的描述符，
+    /// 适配器无法退回按字符串重新解析的仓库路径。
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub(super) struct BoundTrashTarget {
+        /// macOS 回收站实现按 /dev/fd/N 重新打开同一 inode 后交给系统回收站。
+        #[cfg(target_os = "macos")]
+        pub(super) fd_path: PathBuf,
+        /// Linux freedesktop 实现在这个已打开的父目录里改名，绝不重新解析仓库路径。
+        #[cfg(target_os = "linux")]
+        parent: RawFd,
+        #[cfg(target_os = "linux")]
+        name: OsString,
+        #[cfg(target_os = "linux")]
+        identity: Identity,
+        #[cfg(target_os = "linux")]
+        kind: OrdinaryEntryKind,
+        /// 写入 `.trashinfo` 的原始路径；取自已打开父目录的当前路径。
+        #[cfg(target_os = "linux")]
+        original_path: PathBuf,
+    }
+
     struct EntrySource {
         parent: EntryParent,
         kind: OrdinaryEntryKind,
@@ -2879,6 +2962,7 @@ mod secure_entry_ops {
     }
 
     impl EntrySource {
+        #[cfg(target_os = "macos")]
         fn fd(&self) -> RawFd {
             self.file
                 .as_ref()
@@ -2887,10 +2971,28 @@ mod secure_entry_ops {
                 .expect("entry source always owns an open descriptor")
         }
 
-        fn trash_path(&self) -> PathBuf {
-            // trash crate 仍负责系统回收站；这里只给它绑定目标本身的 fd 路径，
-            // 不再给会被外部替换的仓库路径。
-            fd_path(self.fd())
+        fn bound_trash_target(&self) -> Result<BoundTrashTarget, AppError> {
+            // 回收站实现只拿到校验时打开的描述符与身份，拿不到可被替换的仓库路径字符串。
+            #[cfg(target_os = "macos")]
+            {
+                Ok(BoundTrashTarget {
+                    fd_path: fd_path(self.fd()),
+                })
+            }
+            #[cfg(target_os = "linux")]
+            {
+                // 只用于 .trashinfo 记录的原始绝对路径，来自已打开父目录的当前路径 + 目标名。
+                let parent_path = fd_directory_path(self.parent.directory.fd).map_err(|error| {
+                    entry_io_error(error, "无法确认回收站目标的原始路径，未删除任何内容。")
+                })?;
+                Ok(BoundTrashTarget {
+                    parent: self.parent.directory.fd,
+                    name: self.parent.name.clone(),
+                    identity: self.stat.identity,
+                    kind: self.kind,
+                    original_path: parent_path.join(&self.parent.name),
+                })
+            }
         }
 
         fn original_state(&self) -> EntryTargetState {
@@ -3058,6 +3160,12 @@ mod secure_entry_ops {
                 }
                 OrdinaryEntryKind::Directory => {
                     let directory = Directory { fd };
+                    // 入口自身也必须与 Git 报告的实际 gitdir 身份比较：`--separate-git-dir`
+                    // 可以把元数据放在工作区内并且不叫 .git，只看名字会把 gitdir 当普通目录，
+                    // 让 copy/move/trash 作用在仓库元数据上。
+                    if self.is_git_directory(&directory)? {
+                        return Err(git_metadata_error());
+                    }
                     if directory
                         .has_dot_git()
                         .map_err(|error| entry_io_error(error, "无法确认嵌套仓库边界。"))?
@@ -3078,12 +3186,13 @@ mod secure_entry_ops {
     }
 
     fn open_new_file(directory: &Directory, name: &OsStr) -> std::io::Result<fs::File> {
-        open_at(
+        create_at(
             directory.fd,
             name,
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            0o666,
         )
-        // SAFETY: open_at 成功返回由本次调用独占的新文件 fd。
+        // SAFETY: create_at 成功返回由本次调用独占的新文件 fd。
         .map(|fd| unsafe { fs::File::from_raw_fd(fd) })
     }
 
@@ -3097,10 +3206,51 @@ mod secure_entry_ops {
         }
     }
 
-    fn unlink_at(directory: &Directory, name: &OsStr, flags: libc::c_int) -> std::io::Result<()> {
+    fn unlink_at_fd(directory: RawFd, name: &OsStr, flags: libc::c_int) -> std::io::Result<()> {
         let name = c_string(name)?;
         // SAFETY: name 有效；不会跟随末级符号链接。
-        if unsafe { libc::unlinkat(directory.fd, name.as_ptr(), flags) } == 0 {
+        if unsafe { libc::unlinkat(directory, name.as_ptr(), flags) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    fn unlink_at(directory: &Directory, name: &OsStr, flags: libc::c_int) -> std::io::Result<()> {
+        unlink_at_fd(directory.fd, name, flags)
+    }
+
+    fn rename_exclusive_at(
+        source: RawFd,
+        source_name: &OsStr,
+        target: RawFd,
+        target_name: &OsStr,
+    ) -> std::io::Result<()> {
+        let source_name = c_string(source_name)?;
+        let target_name = c_string(target_name)?;
+        #[cfg(target_os = "macos")]
+        // SAFETY: 名称有效，两个目录 fd 均存活；RENAME_EXCL 禁止覆盖。
+        let result = unsafe {
+            libc::renameatx_np(
+                source,
+                source_name.as_ptr(),
+                target,
+                target_name.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        #[cfg(target_os = "linux")]
+        // SAFETY: 名称有效，两个目录 fd 均存活；RENAME_NOREPLACE 禁止覆盖。
+        let result = unsafe {
+            libc::renameat2(
+                source,
+                source_name.as_ptr(),
+                target,
+                target_name.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result == 0 {
             Ok(())
         } else {
             Err(std::io::Error::last_os_error())
@@ -3113,29 +3263,22 @@ mod secure_entry_ops {
         target: &Directory,
         target_name: &OsStr,
     ) -> std::io::Result<()> {
+        rename_exclusive_at(source.fd, source_name, target.fd, target_name)
+    }
+
+    /// 文件系统不支持 `RENAME_NOREPLACE` 时的普通改名；只在调用方已独占确认目标不存在后使用。
+    #[cfg(target_os = "linux")]
+    fn rename_without_flags(
+        source: RawFd,
+        source_name: &OsStr,
+        target: RawFd,
+        target_name: &OsStr,
+    ) -> std::io::Result<()> {
         let source_name = c_string(source_name)?;
         let target_name = c_string(target_name)?;
-        #[cfg(target_os = "macos")]
-        // SAFETY: 名称有效，两个目录 fd 均存活；RENAME_EXCL 禁止覆盖。
+        // SAFETY: 名称有效，两个目录 fd 均存活；调用方已确认目标不存在。
         let result = unsafe {
-            libc::renameatx_np(
-                source.fd,
-                source_name.as_ptr(),
-                target.fd,
-                target_name.as_ptr(),
-                libc::RENAME_EXCL,
-            )
-        };
-        #[cfg(target_os = "linux")]
-        // SAFETY: 名称有效，两个目录 fd 均存活；RENAME_NOREPLACE 禁止覆盖。
-        let result = unsafe {
-            libc::renameat2(
-                source.fd,
-                source_name.as_ptr(),
-                target.fd,
-                target_name.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
+            libc::renameat(source, source_name.as_ptr(), target, target_name.as_ptr())
         };
         if result == 0 {
             Ok(())
@@ -3494,12 +3637,357 @@ mod secure_entry_ops {
         adapter: F,
     ) -> Result<(Result<(), AppError>, EntryTargetState), AppError>
     where
-        F: FnOnce(&Path) -> Result<(), AppError>,
+        F: FnOnce(&BoundTrashTarget) -> Result<(), AppError>,
     {
         let root = SecureRoot::open(boundary)?;
         let source = root.source(relative, true)?;
-        let result = adapter(&source.trash_path());
+        let target = source.bound_trash_target()?;
+        let result = adapter(&target);
         Ok((result, source.original_state()))
+    }
+
+    // ---- Linux：按 freedesktop 规范直接写入系统回收站目录 ----
+    //
+    // 不能把 `/proc/self/fd/N` 交给路径型的回收站库：它的 freedesktop 后端只
+    // canonicalize 父目录、保留末级名字，随后 rename / copy+delete 都在 procfs 上失败，
+    // 还会在回收站留下以 fd 序号命名的副本。这里的所有步骤都相对已打开的父目录 fd 完成。
+
+    #[cfg(target_os = "linux")]
+    fn trash_unavailable() -> AppError {
+        AppError::new("trash_failed", "系统回收站不可用，未执行永久删除。")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn trash_failed_with(message: &'static str) -> AppError {
+        AppError::new("trash_failed", message)
+    }
+
+    /// `$XDG_DATA_HOME/Trash`；未设置或不是绝对路径时回退 `~/.local/share/Trash`。
+    #[cfg(target_os = "linux")]
+    pub(super) fn freedesktop_trash_root() -> Result<PathBuf, AppError> {
+        let data_home = match std::env::var_os("XDG_DATA_HOME") {
+            Some(value) if !value.is_empty() && Path::new(&value).is_absolute() => PathBuf::from(value),
+            _ => {
+                let home = std::env::var_os("HOME")
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(trash_unavailable)?;
+                PathBuf::from(home).join(".local").join("share")
+            }
+        };
+        Ok(data_home.join("Trash"))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn prepare_trash_directory(root: &Path, name: &str) -> Result<Directory, AppError> {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        // 回收站根目录沿用数据目录的默认权限，只有 files/info 收紧到本人可访问。
+        builder.create(root).map_err(|_| trash_unavailable())?;
+        let path = root.join(name);
+        match fs::create_dir(&path) {
+            Ok(()) => {
+                // 回收站可能保存未提交的源码。
+                let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o700));
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(trash_unavailable()),
+        }
+        let path = canonical_existing(&path).map_err(|_| trash_unavailable())?;
+        Directory::open_path(&path).map_err(|_| trash_unavailable())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn absent_in(directory: &Directory, name: &OsStr) -> Result<bool, AppError> {
+        match stat_at(directory.fd, name) {
+            Ok(_) => Ok(false),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(true),
+            Err(error) => Err(entry_io_error(
+                error,
+                "无法确认回收站目录内容，未执行删除。",
+            )),
+        }
+    }
+
+    /// 与 gio 一致：先尝试原名，冲突时依次使用 `名字.2`、`名字.3`……，绝不覆盖已有项目。
+    #[cfg(target_os = "linux")]
+    fn suffixed_name(name: &OsStr, attempt: u32) -> OsString {
+        if attempt == 0 {
+            return name.to_os_string();
+        }
+        let mut bytes = name.to_os_string().into_vec();
+        bytes.extend_from_slice(format!(".{}", attempt + 1).as_bytes());
+        OsString::from_vec(bytes)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn trash_info_name(file_name: &OsStr) -> OsString {
+        let mut bytes = file_name.to_os_string().into_vec();
+        bytes.extend_from_slice(b".trashinfo");
+        OsString::from_vec(bytes)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reserve_trash_names(
+        files: &Directory,
+        info: &Directory,
+        name: &OsStr,
+    ) -> Result<(OsString, OsString), AppError> {
+        for attempt in 0..100u32 {
+            let candidate = suffixed_name(name, attempt);
+            let info_name = trash_info_name(&candidate);
+            if absent_in(files, &candidate)? && absent_in(info, &info_name)? {
+                return Ok((candidate, info_name));
+            }
+        }
+        Err(trash_failed_with(
+            "回收站中同名项目过多，未执行删除，也未永久删除源项目。",
+        ))
+    }
+
+    /// freedesktop 的 `.trashinfo` 只保留非保留字符，其余按 UTF-8 字节百分号编码。
+    #[cfg(target_os = "linux")]
+    fn percent_encoded_path(path: &Path) -> String {
+        let mut encoded = String::new();
+        for &byte in path.as_os_str().as_bytes() {
+            let keep = byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'/');
+            if keep {
+                encoded.push(byte as char);
+            } else {
+                encoded.push_str(&format!("%{byte:02X}"));
+            }
+        }
+        encoded
+    }
+
+    #[cfg(target_os = "linux")]
+    fn deletion_timestamp() -> Result<String, AppError> {
+        let mut now: libc::time_t = 0;
+        // SAFETY: 输出参数可写；time 只把当前时间写入该变量。
+        unsafe { libc::time(&mut now) };
+        // SAFETY: broken_down 可写，now 有效；localtime_r 使用调用方存储。
+        let mut broken_down = unsafe { std::mem::zeroed::<libc::tm>() };
+        let converted = unsafe { libc::localtime_r(&now, &mut broken_down) };
+        if converted.is_null() {
+            return Err(trash_failed_with(
+                "无法记录回收站删除时间，未执行删除。",
+            ));
+        }
+        Ok(format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+            broken_down.tm_year + 1900,
+            broken_down.tm_mon + 1,
+            broken_down.tm_mday,
+            broken_down.tm_hour,
+            broken_down.tm_min,
+            broken_down.tm_sec
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn trash_info_contents(original: &Path) -> Result<Vec<u8>, AppError> {
+        let mut text = String::from("[Trash Info]\nPath=");
+        text.push_str(&percent_encoded_path(original));
+        text.push_str("\nDeletionDate=");
+        text.push_str(&deletion_timestamp()?);
+        text.push('\n');
+        Ok(text.into_bytes())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_trash_info(
+        info: &Directory,
+        info_name: &OsStr,
+        contents: &[u8],
+    ) -> Result<(), AppError> {
+        use std::io::Write;
+        let fd = create_at(
+            info.fd,
+            info_name,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            0o666,
+        )
+        .map_err(|error| entry_io_error(error, "无法写入回收站信息，未执行删除。"))?;
+        // SAFETY: create_at 返回本次独占的新文件 fd。
+        let mut file = unsafe { fs::File::from_raw_fd(fd) };
+        file.write_all(contents)
+            .and_then(|()| file.flush())
+            .map_err(|error| entry_io_error(error, "写入回收站信息失败，未执行删除。"))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn trash_to_freedesktop(target: &BoundTrashTarget) -> Result<(), AppError> {
+        let root = freedesktop_trash_root()?;
+        trash_to_freedesktop_in(target, &root)
+    }
+
+    /// 实际回收站根目录由调用方给出，便于用临时目录验证真实写入行为。
+    #[cfg(target_os = "linux")]
+    pub(super) fn trash_to_freedesktop_in(
+        target: &BoundTrashTarget,
+        trash_root: &Path,
+    ) -> Result<(), AppError> {
+        // 先按已绑定的父目录 fd 复核目标身份，避免校验后被替换的项目进入回收站。
+        let current = stat_at(target.parent, &target.name)
+            .map_err(|error| entry_io_error(error, "无法确认回收站目标，未删除任何内容。"))?;
+        if current.identity != target.identity || current.kind() != Some(target.kind) {
+            return Err(AppError::new(
+                "entry_changed",
+                "目标在删除前已变化，未移入回收站。",
+            ));
+        }
+        let files = prepare_trash_directory(trash_root, "files")?;
+        let info = prepare_trash_directory(trash_root, "info")?;
+        let (file_name, info_name) = reserve_trash_names(&files, &info, &target.name)?;
+        write_trash_info(&info, &info_name, &trash_info_contents(&target.original_path)?)?;
+        if let Err(error) = move_into_trash(target, &files, &file_name) {
+            // 目标没有进入回收站时不留下孤立的 .trashinfo；跨卷复制已落地则保留配对信息。
+            if absent_in(&files, &file_name).unwrap_or(false) {
+                let _ = unlink_at(&info, &info_name, 0);
+            }
+            return Err(error);
+        }
+        let trashed = stat_at(files.fd, &file_name)
+            .map_err(|error| entry_io_error(error, "无法确认回收站结果，未执行永久删除。"))?;
+        if trashed.identity != target.identity {
+            return Err(trash_failed_with(
+                "回收站项目身份与目标不一致，未报告删除成功。",
+            ));
+        }
+        match stat_at(target.parent, &target.name) {
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            _ => Err(trash_failed_with(
+                "回收站未移除工作区目标，未报告删除成功。",
+            )),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn move_into_trash(
+        target: &BoundTrashTarget,
+        files: &Directory,
+        file_name: &OsStr,
+    ) -> Result<(), AppError> {
+        match rename_exclusive_at(target.parent, &target.name, files.fd, file_name) {
+            Ok(()) => Ok(()),
+            // 跨卷：按规范回退“复制到回收站 + 移除源”，两者都相对已打开的 fd 执行。
+            Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
+                copy_then_remove_source(target, files, file_name)
+            }
+            // 文件系统不支持 RENAME_NOREPLACE：名称已确认不存在，仍以普通 renameat 完成。
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::EINVAL) | Some(libc::ENOSYS)
+                ) =>
+            {
+                if !absent_in(files, file_name)? {
+                    return Err(trash_failed_with(
+                        "回收站中已存在同名项目，未执行删除。",
+                    ));
+                }
+                rename_without_flags(target.parent, &target.name, files.fd, file_name)
+                    .map_err(|error| entry_io_error(error, "无法把目标移入回收站，未执行永久删除。"))
+            }
+            Err(error) => Err(entry_io_error(
+                error,
+                "无法把目标移入回收站，未执行永久删除。",
+            )),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn open_bound_source(target: &BoundTrashTarget, flags: libc::c_int) -> Result<(RawFd, NodeStat), AppError> {
+        let fd = open_at(target.parent, &target.name, flags)
+            .map_err(|error| entry_io_error(error, "源项目已变化或为符号链接，未执行删除。"))?;
+        let opened = match stat_fd(fd) {
+            Ok(stat) => stat,
+            Err(error) => {
+                // SAFETY: open_at 成功返回新 fd，尚未移交所有权。
+                let _ = unsafe { libc::close(fd) };
+                return Err(entry_io_error(error, "无法绑定源项目身份。"));
+            }
+        };
+        if opened.identity != target.identity || opened.kind() != Some(target.kind) {
+            // SAFETY: 同上，fd 尚未移交所有权。
+            let _ = unsafe { libc::close(fd) };
+            return Err(AppError::new(
+                "entry_changed",
+                "源项目在删除前已变化，未执行删除。",
+            ));
+        }
+        Ok((fd, opened))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn copy_then_remove_source(
+        target: &BoundTrashTarget,
+        files: &Directory,
+        file_name: &OsStr,
+    ) -> Result<(), AppError> {
+        match target.kind {
+            OrdinaryEntryKind::File => {
+                let (fd, opened) = open_bound_source(target, libc::O_RDONLY)?;
+                // SAFETY: fd 已确认是本次绑定的普通文件，所有权唯一移交给 File。
+                let mut input = unsafe { fs::File::from_raw_fd(fd) };
+                let (mut temporary, mut target_file) = TemporaryEntry::file(files)
+                    .map_err(|error| entry_io_error(error, "无法在回收站创建临时文件。"))?;
+                let result = (|| {
+                    std::io::copy(&mut input, &mut target_file)
+                        .map_err(|error| entry_io_error(error, "复制到回收站失败，源项目未移除。"))?;
+                    target_file
+                        .set_permissions(fs::Permissions::from_mode(opened.mode))
+                        .map_err(|error| entry_io_error(error, "设置回收站副本权限失败。"))?;
+                    drop(target_file);
+                    temporary
+                        .publish(file_name)
+                        .map_err(|error| entry_io_error(error, "无法发布回收站项目。"))
+                })();
+                finish_temporary(&mut temporary, result)?;
+            }
+            OrdinaryEntryKind::Directory => {
+                let (fd, opened) =
+                    open_bound_source(target, libc::O_RDONLY | libc::O_DIRECTORY)?;
+                let source = Directory { fd };
+                let mut temporary = TemporaryEntry::directory(files)
+                    .map_err(|error| entry_io_error(error, "无法在回收站创建临时目录。"))?;
+                let result = (|| {
+                    let destination = temporary
+                        .directory
+                        .as_ref()
+                        .expect("directory temporary");
+                    copy_directory_contents(&source, destination)?;
+                    destination
+                        .set_mode(opened.mode)
+                        .map_err(|error| entry_io_error(error, "设置回收站副本权限失败。"))?;
+                    temporary
+                        .publish(file_name)
+                        .map_err(|error| entry_io_error(error, "无法发布回收站项目。"))
+                })();
+                finish_temporary(&mut temporary, result)?;
+            }
+        }
+        remove_source_entry(target)
+    }
+
+    /// 副本已在回收站落地后才移除源项目；删除仍相对已绑定父目录执行。
+    #[cfg(target_os = "linux")]
+    fn remove_source_entry(target: &BoundTrashTarget) -> Result<(), AppError> {
+        match target.kind {
+            OrdinaryEntryKind::File => unlink_at_fd(target.parent, &target.name, 0).map_err(|error| {
+                entry_io_error(error, "文件已复制到回收站，但工作区源文件未能移除。")
+            }),
+            OrdinaryEntryKind::Directory => {
+                let (fd, _) = open_bound_source(target, libc::O_RDONLY | libc::O_DIRECTORY)?;
+                let directory = Directory { fd };
+                cleanup_directory(&directory).map_err(|error| {
+                    entry_io_error(error, "目录已复制到回收站，但工作区源目录未能完全移除。")
+                })?;
+                unlink_at_fd(target.parent, &target.name, libc::AT_REMOVEDIR).map_err(|error| {
+                    entry_io_error(error, "目录已复制到回收站，但工作区源目录未能移除。")
+                })
+            }
+        }
     }
 
     #[cfg(test)]
@@ -3613,22 +4101,115 @@ mod secure_entry_ops {
             let boundary = boundary(&root);
             let secure = SecureRoot::open(&boundary).unwrap();
             let source = secure.source(Path::new("work/trash.txt"), true).unwrap();
+            // 校验阶段绑定给回收站的目标：父目录在替换后仍然指向原项目。
+            let target = source.bound_trash_target().unwrap();
 
             fs::rename(root.join("work"), root.join("original-work")).unwrap();
             symlink(&outside, root.join("work")).unwrap();
-            let mut observed = Vec::new();
-            fs::File::open(source.trash_path())
-                .unwrap()
-                .read_to_end(&mut observed)
-                .unwrap();
 
-            assert_eq!(observed, b"original\n");
+            // 适配器拿到的是已打开的描述符与身份，不是替换后的仓库路径。
+            #[cfg(target_os = "macos")]
+            {
+                let mut observed = Vec::new();
+                fs::File::open(&target.fd_path)
+                    .unwrap()
+                    .read_to_end(&mut observed)
+                    .unwrap();
+                assert_eq!(observed, b"original\n");
+            }
+            #[cfg(target_os = "linux")]
+            {
+                assert_eq!(target.kind, OrdinaryEntryKind::File);
+                assert_eq!(
+                    stat_at(target.parent, &target.name).unwrap().identity,
+                    target.identity
+                );
+                // .trashinfo 记录的原始路径来自已打开父目录，而不是被替换的名字。
+                assert_eq!(
+                    target.original_path,
+                    boundary.root.join("work").join("trash.txt")
+                );
+                let fd = open_at(target.parent, &target.name, libc::O_RDONLY).unwrap();
+                // SAFETY: open_at 返回本次独占的 fd，读取后由 File 关闭。
+                let mut file = unsafe { fs::File::from_raw_fd(fd) };
+                let mut observed = Vec::new();
+                file.read_to_end(&mut observed).unwrap();
+                assert_eq!(observed, b"original\n");
+            }
+
             assert_eq!(source.original_state(), EntryTargetState::Present);
             assert_eq!(fs::read(outside.join("trash.txt")).unwrap(), b"outside\n");
             assert_eq!(
                 fs::read(root.join("original-work/trash.txt")).unwrap(),
                 b"original\n"
             );
+        }
+
+        /// Linux 回收站在临时目录上真实写入：普通文件与非空目录必须离开工作区、
+        /// 出现在 `Trash/files`，并写下记录原始路径的 `.trashinfo`。
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn linux_trash_moves_files_and_directories_into_the_xdg_trash() {
+            let fixture = crate::test_support::git_fixture("secure-trash-xdg");
+            let root = fixture.repo("repo");
+            fs::write(root.join("note.txt"), b"note\n").unwrap();
+            fs::create_dir(root.join("tree")).unwrap();
+            fs::write(root.join("tree/child.txt"), b"child\n").unwrap();
+            let boundary = boundary(&root);
+            let secure = SecureRoot::open(&boundary).unwrap();
+            let trash_root = fixture.path().join("xdg-data").join("Trash");
+
+            let source = secure.source(Path::new("note.txt"), true).unwrap();
+            let file = source.bound_trash_target().unwrap();
+            trash_to_freedesktop_in(&file, &trash_root).unwrap();
+            drop(source);
+
+            let files = trash_root.join("files");
+            assert!(!root.join("note.txt").exists());
+            assert_eq!(fs::read(files.join("note.txt")).unwrap(), b"note\n");
+            let info = fs::read_to_string(trash_root.join("info/note.txt.trashinfo")).unwrap();
+            assert!(info.starts_with("[Trash Info]\n"), "{info}");
+            assert!(
+                info.contains(&format!(
+                    "Path={}",
+                    percent_encoded_path(&boundary.root.join("note.txt"))
+                )),
+                "{info}"
+            );
+            assert!(info.contains("\nDeletionDate="), "{info}");
+
+            let source = secure.source(Path::new("tree"), true).unwrap();
+            let directory = source.bound_trash_target().unwrap();
+            trash_to_freedesktop_in(&directory, &trash_root).unwrap();
+            drop(source);
+
+            assert!(!root.join("tree").exists());
+            assert_eq!(fs::read(files.join("tree/child.txt")).unwrap(), b"child\n");
+            assert!(trash_root.join("info/tree.trashinfo").is_file());
+        }
+
+        /// 回收站已有同名项目时不得覆盖，而是以不冲突的新名称发布。
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn linux_trash_publishes_a_new_name_instead_of_overwriting() {
+            let fixture = crate::test_support::git_fixture("secure-trash-xdg-collision");
+            let root = fixture.repo("repo");
+            fs::write(root.join("note.txt"), b"new\n").unwrap();
+            let boundary = boundary(&root);
+            let secure = SecureRoot::open(&boundary).unwrap();
+            let trash_root = fixture.path().join("xdg-data").join("Trash");
+            let files = trash_root.join("files");
+            fs::create_dir_all(&files).unwrap();
+            fs::write(files.join("note.txt"), b"older\n").unwrap();
+
+            let source = secure.source(Path::new("note.txt"), true).unwrap();
+            let target = source.bound_trash_target().unwrap();
+            trash_to_freedesktop_in(&target, &trash_root).unwrap();
+
+            assert!(!root.join("note.txt").exists());
+            assert_eq!(fs::read(files.join("note.txt")).unwrap(), b"older\n");
+            assert_eq!(fs::read(files.join("note.txt.2")).unwrap(), b"new\n");
+            assert!(trash_root.join("info/note.txt.2.trashinfo").is_file());
         }
     }
 }
@@ -3688,7 +4269,7 @@ fn trash_entry<F>(
     adapter: F,
 ) -> Result<(Result<(), AppError>, EntryTargetState), AppError>
 where
-    F: FnOnce(&Path) -> Result<(), AppError>,
+    F: FnOnce(&BoundTrashTarget) -> Result<(), AppError>,
 {
     secure_entry_ops::trash(boundary, relative, adapter)
 }
@@ -3700,7 +4281,7 @@ fn trash_entry<F>(
     _adapter: F,
 ) -> Result<(Result<(), AppError>, EntryTargetState), AppError>
 where
-    F: FnOnce(&Path) -> Result<(), AppError>,
+    F: FnOnce(&BoundTrashTarget) -> Result<(), AppError>,
 {
     Err(platform_entry_unsupported())
 }
@@ -3807,19 +4388,24 @@ pub async fn repository_move_entry(
     .await
 }
 
-fn move_to_system_trash(target: &Path) -> Result<(), AppError> {
-    // macOS 走身份绑定回收站：target 是已校验目标的 /dev/fd/N，绝不退回仓库路径。
+/// 系统回收站适配器：只消费已绑定的目标身份，绝不退回按字符串重新解析的仓库路径，
+/// 也绝不调用永久删除。macOS 走 NSFileManager 的 file reference URL，Linux 按
+/// freedesktop 规范直接写入 `$XDG_DATA_HOME/Trash`；其它平台在校验阶段就已失败关闭。
+fn move_to_system_trash(target: &BoundTrashTarget) -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
-    let result = macos_trash::trash_bound_to_fd_path(target);
-    // 其它平台暂不提供绑定 fd 身份的系统回收站实现；适配层失败即报错，不永久删除。
-    #[cfg(not(target_os = "macos"))]
-    let result = trash::TrashContext::new().delete(target).map_err(|_| {
-        AppError::new(
-            "trash_failed",
-            "系统回收站操作失败，未执行永久删除。",
-        )
-    });
-    result
+    {
+        // target.fd_path 是已校验目标的 /dev/fd/N。
+        macos_trash::trash_bound_to_fd_path(&target.fd_path)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        secure_entry_ops::trash_to_freedesktop(target)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = target;
+        Err(platform_entry_unsupported())
+    }
 }
 
 /// macOS 回收站删除绑定"已打开 fd 的文件身份"，而不是可被外部替换的路径字符串。
@@ -3944,7 +4530,7 @@ async fn repository_delete_entry_with<F>(
     trash_adapter: F,
 ) -> Result<crate::model::StatusSnapshot, AppError>
 where
-    F: FnOnce(&Path) -> Result<(), AppError>,
+    F: FnOnce(&BoundTrashTarget) -> Result<(), AppError>,
 {
     let root = canonical_existing(&validate_input_path(path)?)?;
     let relative = mutation_path(relative)?;
@@ -7175,6 +7761,7 @@ mod tests {
         assert_eq!(git_stdout(root, &["ls-files", "--stage"]), index);
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn assert_no_entry_temporaries(root: &Path) {
         let names: Vec<_> = fs::read_dir(root)
             .unwrap()
@@ -7202,7 +7789,7 @@ mod tests {
                 RepositoryCreateEntryKind::File,
             )
             .unwrap_err(),
-            copy_entry(&boundary, Path::new("a"), Path::new("b")).unwrap_err(),
+            copy_entry(&boundary, Path::new("a"), Path::new("b"), &mut false).unwrap_err(),
             move_entry(&boundary, Path::new("a"), Path::new("b")).unwrap_err(),
             trash_entry(&boundary, Path::new("a"), |_| {
                 panic!("不支持的平台不得调用回收站适配器")
@@ -7214,6 +7801,55 @@ mod tests {
         }
     }
 
+    /// 非 macOS/Linux 目标没有 fd 相对原语：四个命令必须给出结构化错误并停在校验前，
+    /// 而不是 panic 或写入磁盘。Windows CI 用这个用例证明失败关闭的具体形态。
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[tokio::test]
+    async fn entry_commands_fail_closed_without_descriptor_relative_primitives() {
+        let fixture = crate::test_support::git_fixture("repository-entry-unsupported-platform");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("note.txt"), b"note\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let path = root.to_str().unwrap();
+        let head = git_stdout(&root, &["rev-parse", "HEAD"]);
+        let index = git_stdout(&root, &["ls-files", "--stage"]);
+
+        let errors = [
+            repository_create_entry(
+                &backend,
+                path,
+                "new.txt",
+                RepositoryCreateEntryKind::File,
+                1,
+                300,
+            )
+            .await
+            .unwrap_err(),
+            repository_copy_entry(&backend, path, "note.txt", "copy.txt", 1, 301)
+                .await
+                .unwrap_err(),
+            repository_move_entry(&backend, path, "note.txt", "moved.txt", 1, 302)
+                .await
+                .unwrap_err(),
+            repository_delete_entry(&backend, path, "note.txt", 1, 303)
+                .await
+                .unwrap_err(),
+        ];
+        for error in errors {
+            assert_eq!(error.code, "entry_platform_unsupported");
+        }
+        assert_eq!(fs::read(root.join("note.txt")).unwrap(), b"note\n");
+        assert!(!root.join("new.txt").exists());
+        assert!(!root.join("copy.txt").exists());
+        assert!(!root.join("moved.txt").exists());
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 1);
+        assert_head_and_index(&root, &head, &index);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     async fn entry_create_copy_and_move_return_same_generation_status_without_git_writes() {
         let fixture = crate::test_support::git_fixture("repository-entry-success");
@@ -7321,6 +7957,7 @@ mod tests {
         assert_no_entry_temporaries(&root);
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     async fn entry_operations_reject_conflicts_unsafe_paths_and_special_targets() {
         let fixture = crate::test_support::git_fixture("repository-entry-rejections");
@@ -7503,6 +8140,74 @@ mod tests {
         assert_no_entry_temporaries(&root);
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn entry_names(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// `--separate-git-dir` 把 gitdir 放在工作区内且不叫 `.git` 时，入口自身也必须按身份拒绝：
+    /// copy/move/trash 一旦作用在仓库元数据上，移动或删除会直接损坏仓库。
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn entry_operations_refuse_a_gitdir_without_a_git_name() {
+        let fixture = crate::test_support::git_fixture("repository-entry-separate-gitdir");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        let store = root.join("store");
+        git(
+            &root,
+            &["init", "-b", "main", "--separate-git-dir", store.to_str().unwrap()],
+        );
+        assert!(root.join(".git").is_file());
+        assert!(store.join("HEAD").is_file());
+        fs::write(root.join("note.txt"), b"note\n").unwrap();
+        let path = root.to_str().unwrap();
+        let config = fs::read(store.join("config")).unwrap();
+        let names_before = entry_names(&root);
+
+        for (source, target, id) in [
+            ("store", "store-copy", 200u64),
+            ("store", "store-moved", 202),
+            ("store/config", "config-copy", 204),
+            ("store/config", "config-moved", 206),
+        ] {
+            let copied = repository_copy_entry(&backend, path, source, target, 1, id)
+                .await
+                .unwrap_err();
+            assert_eq!(copied.code, "invalid_path", "{source} -> {target}");
+            let moved = repository_move_entry(&backend, path, source, target, 1, id + 1)
+                .await
+                .unwrap_err();
+            assert_eq!(moved.code, "invalid_path", "{source} -> {target}");
+        }
+        for (source, id) in [("store", 210u64), ("store/config", 211)] {
+            let deleted = repository_delete_entry(&backend, path, source, 1, id)
+                .await
+                .unwrap_err();
+            assert_eq!(deleted.code, "invalid_path", "{source}");
+        }
+        // gitdir 及其内容必须原样保留，也没有任何新条目落地。
+        assert_eq!(fs::read(store.join("config")).unwrap(), config);
+        assert!(store.join("HEAD").is_file());
+        assert_eq!(entry_names(&root), names_before);
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 1);
+
+        // 同仓库的普通文件仍可复制：防线只针对 gitdir，不误伤工作区文件。
+        let copied = repository_copy_entry(&backend, path, "note.txt", "note-copy.txt", 1, 220)
+            .await
+            .unwrap();
+        assert_eq!(copied.generation, 2);
+        assert_eq!(fs::read(root.join("note-copy.txt")).unwrap(), b"note\n");
+        assert_eq!(fs::read(store.join("config")).unwrap(), config);
+        assert!(store.join("HEAD").is_file());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     async fn entry_write_failures_and_stale_requests_do_not_change_disk_or_generation() {
         let fixture = crate::test_support::git_fixture("repository-entry-write-failure");
@@ -7576,6 +8281,7 @@ mod tests {
         assert_no_entry_temporaries(&root);
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     async fn trash_adapter_failures_preserve_files_directories_and_git_state() {
         let fixture = crate::test_support::git_fixture("repository-entry-trash-failure");
@@ -7616,7 +8322,7 @@ mod tests {
         assert_eq!(git_stdout(&root, &["status", "--porcelain"]), "");
     }
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     async fn failed_copy_cleans_nested_readonly_temporary_directories() {
         use std::os::unix::fs::{symlink, PermissionsExt};
@@ -7654,6 +8360,7 @@ mod tests {
         fs::set_permissions(&readonly, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     async fn trash_error_after_removal_distinguishes_refresh_success_and_failure() {
         let fixture = crate::test_support::git_fixture("repository-entry-trash-refresh");

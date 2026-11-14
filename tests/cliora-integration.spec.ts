@@ -395,6 +395,76 @@ describe("cliora v2 审查链接", () => {
     expect(mocks.api.completeMerge).not.toHaveBeenCalled();
   });
 
+  it("提交区修订成功更新快照，普通提交草稿保持不变", async () => {
+    deepLink.getCurrent.mockResolvedValue([URL_A]);
+    mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE));
+    await mountShell();
+    await waitFor(() => expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy());
+    const nav = document.querySelector<HTMLElement>('.workbench-view[data-active="true"] nav[aria-label="视图"]')!;
+    await fireEvent.click(within(nav).getByRole("button", { name: /^改动/ }));
+    const draft = (await screen.findByLabelText("提交说明草稿")) as HTMLTextAreaElement;
+    await fireEvent.input(draft, { target: { value: "普通提交草稿" } });
+
+    const preview = {
+      generation: 4,
+      code: "ok",
+      eligible: true,
+      wrote: false,
+      headOid: BASELINE,
+      parentOid: "c".repeat(40),
+      summary: "旧说明",
+      message: "旧说明\n\n完整正文",
+      files: [{ path: "src/a.ts", originalPath: null, status: "modified", additions: 1, deletions: 0 }],
+      stagedPaths: ["src/a.ts"],
+      stagedToken: "f".repeat(64),
+      note: "预览",
+      snapshot,
+    };
+    const amendedSnapshot: StatusSnapshot = {
+      ...snapshot,
+      generation: 5,
+      branch: { ...branch, headOid: COMMITTED },
+      files: [
+        ...changes,
+        { path: "src/b.ts", originalPath: null, staged: "none", unstaged: "modified", untracked: false, unmerged: false },
+      ],
+    };
+    const done = {
+      ...preview,
+      generation: 5,
+      wrote: true,
+      headOid: COMMITTED,
+      summary: "新说明",
+      message: "新说明",
+      note: "已用新的修订提交替换最近提交。没有推送。",
+      snapshot: amendedSnapshot,
+    };
+    mocks.api.amendCommit.mockResolvedValueOnce(preview).mockResolvedValueOnce(done);
+
+    await fireEvent.click(screen.getByRole("button", { name: "更多提交操作" }));
+    await fireEvent.click(await screen.findByRole("menuitem", { name: "修订最近提交" }));
+    const dialog = await screen.findByRole("dialog", { name: "修订最近提交" });
+    expect(mocks.api.amendCommit).toHaveBeenCalledWith(WORKTREE, BASELINE, null, false, null, false, 4, expect.any(Number));
+    expect((within(dialog).getByLabelText("修订后的提交说明") as HTMLTextAreaElement).value).toBe("旧说明\n\n完整正文");
+    await fireEvent.input(within(dialog).getByLabelText("修订后的提交说明"), { target: { value: "新说明" } });
+    await fireEvent.click(within(dialog).getByRole("button", { name: "确认修订提交" }));
+    await waitFor(() =>
+      expect(mocks.api.amendCommit).toHaveBeenLastCalledWith(
+        WORKTREE,
+        BASELINE,
+        "新说明",
+        false,
+        "f".repeat(64),
+        true,
+        4,
+        expect.any(Number),
+      ),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "修订最近提交" })).toBeNull());
+    expect((screen.getByLabelText("提交说明草稿") as HTMLTextAreaElement).value).toBe("普通提交草稿");
+    await waitFor(() => expect(document.querySelector('.file-row[title="src/b.ts"]')).toBeTruthy());
+  });
+
   it("全部文件标记已审阅后仍返回 reviewed，不出现批准", async () => {
     deepLink.getCurrent.mockResolvedValue([URL_A]);
     mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE));

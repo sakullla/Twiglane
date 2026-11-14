@@ -742,6 +742,34 @@ export interface RevertOutcome {
   snapshot: StatusSnapshot;
 }
 
+/**
+ * 修订最近提交的预览与写入结果（字段与 Rust AmendOutcome 的 camelCase 一致）。
+ * 预览返回未截断的原说明、原提交文件、当前暂存路径与快照令牌；确认成功返回新 HEAD。
+ */
+export interface AmendOutcome {
+  generation: number;
+  /** ok，或预览/确认被拒绝的原因代码。 */
+  code: string;
+  eligible: boolean;
+  wrote: boolean;
+  /** 预览时是原 HEAD；确认成功时是新的 HEAD。 */
+  headOid: string | null;
+  /** 原提交的父提交；首个提交为空。 */
+  parentOid: string | null;
+  /** 原提交的主题行；确认成功后是新说明的主题行。 */
+  summary: string;
+  /** 预览返回未截断的原说明；原文非法 UTF-8 或超过草稿上限时为空，并由 note 说明。 */
+  message: string;
+  /** 原提交修改的文件。 */
+  files: CommitFileChange[];
+  /** 当前暂存区中的路径（未暂存和未跟踪文件不在其中）。 */
+  stagedPaths: string[];
+  /** 完整暂存快照的令牌；读取失败时为空。 */
+  stagedToken: string | null;
+  note: string;
+  snapshot: StatusSnapshot;
+}
+
 export interface StashPreview {
   trackedCount: number;
   untrackedCount: number;

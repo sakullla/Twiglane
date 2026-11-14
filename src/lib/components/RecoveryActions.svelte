@@ -3,10 +3,11 @@
   import { api } from "../api";
   import { normalizeError } from "../errors";
   import { changeLabel } from "../labels";
-  import { shortOid } from "../history";
+  import { commitFileLabel, shortOid } from "../history";
   import { visibleRange } from "../layout";
-  import { discardActionLabel, discardBoundary, undoActionLabel } from "../resolve";
+  import { discardActionLabel, discardBoundary, undoActionLabel, amendActionLabel } from "../resolve";
   import type {
+    AmendOutcome,
     DiscardFilePlan,
     HistoryCommit,
     MergeSession,
@@ -16,7 +17,7 @@
     UndoResult,
   } from "../types";
   import Icon from "./Icon.svelte";
-  import ConfirmDialog from "./ConfirmDialog.svelte";
+  import ConfirmDialog, { type ConfirmNote } from "./ConfirmDialog.svelte";
 
   interface Props {
     opened: OpenedRepository;
@@ -37,7 +38,7 @@
 
   let { opened, disabled, nextId, onSnapshot, onFailure, onNotice, onMerge, variant = "toolbar", onSettled }: Props = $props();
 
-  let mode = $state<"discard" | "undo" | "revert" | null>(null);
+  let mode = $state<"discard" | "undo" | "revert" | "amend" | null>(null);
   let plans = $state<DiscardFilePlan[]>([]);
   let checked = $state<string[]>([]);
   let boundary = $state(discardBoundary());
@@ -47,6 +48,12 @@
   /** 还原预览：目标顺序与后端返回一致（由新到旧），确认只使用这份预览。 */
   let revert = $state<RevertOutcome | null>(null);
   let revertRepository = "";
+  /** 修订预览与用户草稿分开保存：失败或重新预览都不能丢掉已经输入的说明。 */
+  let amend = $state<AmendOutcome | null>(null);
+  let amendRepository = "";
+  let amendDraft = $state("");
+  let amendIncludeStaged = $state(false);
+  let amendRefreshed = $state(false);
   /** 放弃预览所属仓库与 generation：确认写入只使用这份预览对应的仓库和状态。 */
   let discardRepository = "";
   let discardGeneration = 0;
@@ -62,6 +69,55 @@
   let planScroll = $state(0);
   let planViewport = $state(0);
   let planRange = $derived(visibleRange(plans.length, planScroll, planViewport, PLAN_ROW));
+
+  /** 修订说明与预览原文都按 trim 比较：后端也会 trim 后再写回。 */
+  let amendMessage = $derived(amendDraft.trim());
+  let amendUnchanged = $derived(
+    Boolean(amend) &&
+      amendMessage === (amend?.message.trim() ?? "") &&
+      (!amendIncludeStaged || (amend?.stagedPaths.length ?? 0) === 0),
+  );
+  /** 修订确认按钮不可用的原因；无实际变化必须就地说明，而不是只灰掉按钮。 */
+  let amendConfirmBlocked = $derived.by(() => {
+    if (!amend) return null;
+    if (disabled) return BUSY_REASON;
+    if (!amend.eligible) return amend.note;
+    if (!amend.headOid) return "没有可修订的最近提交，请重新预览";
+    if (!amendMessage) return "先填写修订后的提交说明";
+    if (!amend.stagedToken) return "暂存区快照不可用，请重新预览后再确认";
+    if (amendUnchanged) return "说明没有变化，也没有纳入非空的暂存改动，不能写入";
+    return null;
+  });
+  /** 提交区菜单入口的不可用原因：没有 HEAD 或游离 HEAD 时不提供可执行修订。 */
+  let amendMenuBlocked = $derived(
+    blocked
+      ? BUSY_REASON
+      : opened.snapshot.branch.detached
+        ? "请先切换到本地分支"
+        : opened.snapshot.branch.unborn || !opened.snapshot.branch.headOid
+          ? "当前分支还没有可修订的提交"
+          : null,
+  );
+  let amendNotes = $derived.by((): ConfirmNote[] => {
+    if (!amend) return [];
+    const notes: ConfirmNote[] = [];
+    if (amend.eligible) {
+      notes.push({
+        tone: "ok",
+        text: amendIncludeStaged
+          ? "确认后会把当前暂存改动纳入新提交；未暂存和未跟踪内容不会加入。"
+          : "确认后只更新说明，原提交树和当前暂存区保持不变。",
+      });
+      notes.push({
+        tone: "info",
+        text: "已核对唯一远程的分支、tag 与本地推送记录；确认时会再次核对，离线、已发布、记录无法解析或暂存区变化都会停止。不会推送。",
+      });
+    } else {
+      notes.push({ tone: "warn", text: amend.note });
+    }
+    return notes;
+  });
+  const AMEND_FILE_LIMIT = 200;
 
   let confirming = false;
   $effect(() => {
@@ -98,6 +154,17 @@
     errorText = null;
   }
 
+  /** 收起并清空修订确认：预览、仓库绑定和用户草稿一起丢弃。 */
+  function resetAmend() {
+    mode = null;
+    amend = null;
+    amendRepository = "";
+    amendDraft = "";
+    amendIncludeStaged = false;
+    amendRefreshed = false;
+    errorText = null;
+  }
+
   /**
    * 仓库切换时，确认层里的清单属于旧仓库，必须作废。
    * 写入已经开始时结果仍可能落在原仓库，提示要如实说明，且本组件不再应用它。
@@ -123,6 +190,13 @@
         busy
           ? "仓库已切换，原仓库的还原提交仍在处理中；结果不会应用到当前仓库。"
           : "仓库已切换，还原提交的确认已作废，没有写入任何内容。",
+      );
+    } else if (mode === "amend" && amendRepository && amendRepository !== path) {
+      resetAmend();
+      onNotice(
+        busy
+          ? "仓库已切换，原仓库的修订提交仍在处理中；结果不会应用到当前仓库。"
+          : "仓库已切换，修订提交的确认已作废，没有写入任何内容。",
       );
     }
   }
@@ -430,6 +504,170 @@
     }
   }
 
+  /**
+   * 修订最近提交：从历史 HEAD 或提交区菜单进入。预览只读取，确认时才改写 HEAD；
+   * 传入的 expectedHead 是用户右键的那条提交，必须与当前 HEAD 一致才能预览。
+   */
+  export async function amendLatest(expectedHead?: string) {
+    if (blocked) return;
+    await openAmend(expectedHead);
+  }
+
+  async function openAmend(expectedHead?: string) {
+    if (busy || disabled) return;
+    const repository = opened.summary.path;
+    const generation = opened.generation;
+    const head = expectedHead ?? opened.snapshot.branch.headOid;
+    if (opened.snapshot.branch.detached) {
+      errorText = "当前不在本地分支上，不能修订最近提交。";
+      onFailure({ code: "amend_detached", message: errorText });
+      return;
+    }
+    if (!head) {
+      errorText = "当前分支还没有可修订的提交。";
+      onFailure({ code: "amend_no_commit", message: errorText });
+      return;
+    }
+    busy = true;
+    errorText = null;
+    try {
+      // 预览不带 message/token：它们只在确认时绑定用户这次选择，预览只负责读原说明与暂存快照。
+      const preview = await api.amendCommit(repository, head, null, false, null, false, generation, nextId());
+      if (opened.summary.path !== repository) return;
+      amendRepository = repository;
+      amend = preview;
+      amendDraft = preview.message;
+      amendIncludeStaged = false;
+      amendRefreshed = false;
+      mode = "amend";
+    } catch (error) {
+      if (opened.summary.path !== repository) return;
+      const failure = normalizeError(error);
+      errorText = failure.message;
+      onFailure(failure);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function cancelAmend() {
+    if (busy) return;
+    resetAmend();
+  }
+
+  async function confirmAmend() {
+    const current = amend;
+    if (busy || !current || !amendRepository || amendRepository !== opened.summary.path) {
+      if (mode === "amend" && amendRepository !== opened.summary.path) {
+        invalidateStaleConfirmation(opened.summary.path);
+      }
+      return;
+    }
+    if (!current.eligible || !current.stagedToken || amendConfirmBlocked) return;
+    const repository = amendRepository;
+    busy = true;
+    errorText = null;
+    try {
+      const result = await api.amendCommit(
+        repository,
+        current.headOid ?? "",
+        amendDraft,
+        amendIncludeStaged,
+        current.stagedToken,
+        true,
+        current.generation,
+        nextId(),
+      );
+      if (opened.summary.path !== repository) {
+        resetAmend();
+        return;
+      }
+      if (!result.wrote) {
+        errorText = result.note || "修订没有写入，请重新预览后再确认。";
+        return;
+      }
+      onSnapshot(result.snapshot);
+      onNotice(result.note || "已修订最近提交。没有推送。");
+      resetAmend();
+    } catch (error) {
+      if (opened.summary.path !== repository) {
+        resetAmend();
+        return;
+      }
+      const failure = normalizeError(error);
+      // 失败保持弹层打开：预览、说明草稿和勾选状态都还在，用户可以重试或先重新预览。
+      errorText =
+        failure.code === "amend_stale_index" || failure.code === "amend_head_changed"
+          ? `${failure.message} 点「重新预览」刷新后再确认，修订草稿仍在。`
+          : failure.message;
+      onFailure(failure);
+    } finally {
+      busy = false;
+    }
+  }
+
+  /**
+   * 重新预览：先读取最新状态拿到当前 HEAD，再重读原说明与暂存令牌；用户已经输入的草稿
+   * 与“纳入暂存”选择保留，只刷新预览事实。
+   */
+  async function rePreviewAmend() {
+    if (busy) return;
+    const current = amend;
+    if (!current || !amendRepository || amendRepository !== opened.summary.path) {
+      if (mode === "amend") invalidateStaleConfirmation(opened.summary.path);
+      return;
+    }
+    const repository = amendRepository;
+    const draft = amendDraft;
+    const include = amendIncludeStaged;
+    busy = true;
+    errorText = null;
+    try {
+      const snapshot = await freshSnapshot(repository, current.generation);
+      if (opened.summary.path !== repository) return;
+      onSnapshot(snapshot);
+      const head = snapshot.branch.headOid;
+      if (!head) {
+        errorText = "当前分支还没有可修订的提交。";
+        return;
+      }
+      const preview = await api.amendCommit(
+        repository,
+        head,
+        null,
+        include,
+        null,
+        false,
+        snapshot.generation,
+        nextId(),
+      );
+      if (opened.summary.path !== repository) return;
+      amend = preview;
+      amendDraft = draft;
+      amendIncludeStaged = preview.stagedPaths.length === 0 ? false : include;
+      amendRefreshed = true;
+    } catch (error) {
+      if (opened.summary.path !== repository) return;
+      const failure = normalizeError(error);
+      errorText = failure.message;
+      onFailure(failure);
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** 读取最新快照；generation 过期时沿错误带来的新代次重试一次。 */
+  async function freshSnapshot(repository: string, generation: number): Promise<StatusSnapshot> {
+    const ask = (value: number) => api.refreshStatus(repository, value, nextId());
+    try {
+      return await ask(generation);
+    } catch (error) {
+      const failure = normalizeError(error);
+      if (failure.code !== "stale" || failure.generation === undefined) throw failure;
+      return await ask(failure.generation);
+    }
+  }
+
   function sideText(plan: DiscardFilePlan): string {
     if (plan.untracked) return "未跟踪";
     const staged = changeLabel(plan.staged);
@@ -455,6 +693,18 @@
   <button type="button" class="menu-item" role="menuitem" aria-label={undoActionLabel()} title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={() => void openUndo()}>
     <Icon name="undo" />
     <span>撤销最近提交<small>仅限未推送的普通提交，文件改动保留</small></span>
+  </button>
+  <button
+    type="button"
+    class="menu-item"
+    role="menuitem"
+    aria-label={amendActionLabel()}
+    title={amendMenuBlocked ?? "只改写当前 HEAD；预填完整原说明，可显式纳入暂存改动"}
+    disabled={amendMenuBlocked !== null}
+    onclick={() => void openAmend()}
+  >
+    <Icon name="pencil" />
+    <span>修订最近提交…<small>仅限未推送的普通 HEAD；默认只改说明，不自动纳入暂存</small></span>
   </button>
   <button
     type="button"
@@ -601,3 +851,140 @@
     onCancel={cancelRevert}
   />
 {/if}
+{#if mode === "amend" && amend}
+  <ConfirmDialog
+    title="修订最近提交"
+    titleId="amend-title"
+    icon="pencil"
+    tone="warning"
+    size="lg"
+    message="用新的提交替换当前 HEAD。原提交会离开历史，新提交只在本机，不会推送。"
+    targets={amend.headOid
+      ? [{ icon: "commit", name: amend.summary || "（没有提交说明）", detail: shortOid(amend.headOid) }]
+      : []}
+    targetsLabel="要修订的最近提交"
+    notes={amendNotes}
+    confirmLabel="确认修订提交"
+    confirmIcon="pencil"
+    busy={busy}
+    confirmBlocked={amendConfirmBlocked}
+    error={errorText}
+    focus="body"
+    impact="amend"
+    onConfirm={() => void confirmAmend()}
+    onCancel={cancelAmend}
+  >
+    <div class="amend-form">
+      <label class="amend-label" for="amend-message">提交说明</label>
+      <textarea
+        id="amend-message"
+        class="textarea code amend-message"
+        aria-label="修订后的提交说明"
+        data-autofocus
+        spellcheck="false"
+        title={busy ? "写入完成后才能修改修订说明" : undefined}
+        disabled={busy}
+        value={amendDraft}
+        oninput={(event) => (amendDraft = event.currentTarget.value)}
+      ></textarea>
+      {#if amendRefreshed}
+        <p class="hint" role="status">预览已刷新，请再次确认；你的修订草稿仍保留。</p>
+      {/if}
+      {#if amend.eligible && amendUnchanged}
+        <p class="callout info" role="status">说明没有变化，也没有纳入非空的暂存改动；没有可写入的修订内容。</p>
+      {/if}
+      <div class="amend-scope">
+        <div class="list-section amend-section">
+          <span>原提交修改的文件</span>
+          <span class="spacer"></span>
+          <span>{amend.files.length}</span>
+        </div>
+        {#if amend.files.length === 0}
+          <p class="hint">原提交没有文件改动。</p>
+        {:else}
+          <ul class="list-box amend-files" aria-label="原提交修改的文件">
+            {#each amend.files.slice(0, AMEND_FILE_LIMIT) as file (file.path)}
+              <li class="list-row">
+                <span class="lr-main">
+                  <span class="lr-title mono">{file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}</span>
+                  <span class="lr-sub">{commitFileLabel(file.status)}</span>
+                </span>
+              </li>
+            {/each}
+          </ul>
+          {#if amend.files.length > AMEND_FILE_LIMIT}
+            <p class="hint">还有 {amend.files.length - AMEND_FILE_LIMIT} 个文件未显示；完整清单见提交详情。</p>
+          {/if}
+        {/if}
+      </div>
+      <div class="amend-scope">
+        <div class="list-section amend-section">
+          <span>当前暂存改动</span>
+          <span class="spacer"></span>
+          <span>{amend.stagedPaths.length}</span>
+        </div>
+        {#if amend.stagedPaths.length === 0}
+          <p class="hint">当前没有已暂存改动；这次只能修改说明。</p>
+        {:else}
+          <ul class="list-box amend-files" aria-label="当前暂存改动">
+            {#each amend.stagedPaths.slice(0, AMEND_FILE_LIMIT) as path (path)}
+              <li class="list-row">
+                <span class="lr-main"><span class="lr-title mono">{path}</span></span>
+              </li>
+            {/each}
+          </ul>
+          {#if amend.stagedPaths.length > AMEND_FILE_LIMIT}
+            <p class="hint">还有 {amend.stagedPaths.length - AMEND_FILE_LIMIT} 个暂存路径未显示。</p>
+          {/if}
+        {/if}
+      </div>
+      <label class="confirm-option amend-option">
+        <input
+          type="checkbox"
+          class="checkbox"
+          aria-label="纳入当前暂存改动"
+          title={busy
+            ? "写入完成后才能修改"
+            : amend.stagedPaths.length === 0
+              ? "当前没有已暂存改动，只能修改说明"
+              : undefined}
+          disabled={busy || amend.stagedPaths.length === 0}
+          checked={amendIncludeStaged}
+          onchange={(event) => (amendIncludeStaged = event.currentTarget.checked)}
+        />
+        <span>
+          <strong>纳入当前暂存改动</strong>
+          <small>默认不勾选；未暂存和未跟踪文件不会被自动加入。</small>
+        </span>
+      </label>
+      <div class="amend-actions">
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm"
+          title={busy ? "写入完成后才能重新预览" : "重新读取 HEAD、原说明与暂存快照；保留修订草稿"}
+          disabled={busy}
+          onclick={() => void rePreviewAmend()}
+        >
+          <Icon name="refresh" size={13} />重新预览
+        </button>
+        <span class="spacer"></span>
+        <span class="amend-hint">只改写本地历史，不推送。</span>
+      </div>
+    </div>
+  </ConfirmDialog>
+{/if}
+<style>
+  .amend-form { display: flex; flex-direction: column; gap: var(--space-12); min-width: 0; }
+  .amend-label { font-size: var(--text-xs); font-weight: var(--weight-semibold); color: var(--fg-subtle); }
+  .amend-message { min-height: 150px; max-height: 320px; font-family: var(--mono); font-size: var(--text-sm); }
+  .amend-scope { display: flex; flex-direction: column; min-width: 0; }
+  .amend-section { position: static; border: 1px solid var(--border); border-bottom: 0; border-radius: var(--radius) var(--radius) 0 0; }
+  .amend-files { max-height: 180px; border-radius: 0 0 var(--radius) var(--radius); }
+  .amend-files .list-row { min-height: 34px; padding-block: 6px; }
+  .amend-option:has(input:checked) {
+    background: var(--accent-softer);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  .amend-actions { display: flex; align-items: center; gap: var(--space-8); }
+  .amend-hint { color: var(--fg-subtle); font-size: var(--text-xs); }
+</style>

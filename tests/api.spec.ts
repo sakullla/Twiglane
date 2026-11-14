@@ -451,6 +451,37 @@ describe("Tauri 命令参数", () => {
       expect(call[1]).not.toHaveProperty("expected_head");
     }
   });
+
+  it("修订预览与确认按 camelCase 传完整说明、暂存令牌与纳入暂存选择", async () => {
+    const token = "f".repeat(64);
+    await api.amendCommit("/repo", "head", null, false, null, false, 8, 70);
+    await api.amendCommit("/repo", "head", "新的说明\n\n正文", true, token, true, 8, 71);
+    expect(invoke).toHaveBeenNthCalledWith(1, "amend_commit", {
+      path: "/repo",
+      expectedHead: "head",
+      message: null,
+      includeStaged: false,
+      stagedToken: null,
+      confirm: false,
+      generation: 8,
+      requestId: 70,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "amend_commit", {
+      path: "/repo",
+      expectedHead: "head",
+      message: "新的说明\n\n正文",
+      includeStaged: true,
+      stagedToken: token,
+      confirm: true,
+      generation: 8,
+      requestId: 71,
+    });
+    for (const call of invoke.mock.calls) {
+      expect(call[1]).not.toHaveProperty("expected_head");
+      expect(call[1]).not.toHaveProperty("include_staged");
+      expect(call[1]).not.toHaveProperty("staged_token");
+    }
+  });
 });
 describe("任务审阅命令", () => {
   beforeEach(() => {
@@ -723,6 +754,52 @@ describe("cliora 审查接线", () => {
     invoke.mockRejectedValueOnce({ code: "revert_failed", message: "没有完成。" });
     await expect(api.revertCommits("/repo", ["a".repeat(40)], OID, true, 4, 5)).rejects.toMatchObject({
       code: "revert_failed",
+    });
+    expect(clioraReview.result).toBeNull();
+  });
+
+  it("只有实际写入的修订记录 committed；预览、未写入和失败不记录", async () => {
+    const token = "f".repeat(64);
+    const preview = {
+      generation: 5,
+      code: "ok",
+      eligible: true,
+      wrote: false,
+      headOid: OID,
+      parentOid: "c".repeat(40),
+      summary: "原说明",
+      message: "原说明\n\n正文",
+      files: [],
+      stagedPaths: [],
+      stagedToken: token,
+      note: "预览",
+      snapshot: {},
+    };
+
+    // 预览（confirm=false）不会写入新 HEAD。
+    invoke.mockResolvedValueOnce(preview);
+    await api.amendCommit("/repo", OID, null, false, null, false, 4, 1);
+    expect(clioraReview.result).toBeNull();
+
+    // 确认成功、HEAD 已换成新提交才记录 committed。
+    const amended = "d".repeat(40);
+    invoke.mockResolvedValueOnce({ ...preview, wrote: true, headOid: amended, summary: "新说明" });
+    await api.amendCommit("/repo", OID, "新说明", false, token, true, 4, 2);
+    expect(clioraReview.result).toMatchObject({ outcome: "committed", headOid: amended });
+
+    // 没有写入的确认结果不记录。
+    resetClioraReview();
+    beginClioraReview({ reviewId: REVIEW, sessionId: SESSION, worktreePath: "/repo", baseline: null });
+    invoke.mockResolvedValueOnce({ ...preview, wrote: false, note: "没有变化。" });
+    await api.amendCommit("/repo", OID, "原说明", false, token, true, 4, 3);
+    expect(clioraReview.result).toBeNull();
+
+    // 失败不记录，也不保留上一次的成功结果。
+    resetClioraReview();
+    beginClioraReview({ reviewId: REVIEW, sessionId: SESSION, worktreePath: "/repo", baseline: null });
+    invoke.mockRejectedValueOnce({ code: "hook_rejected", message: "提交钩子拒绝。" });
+    await expect(api.amendCommit("/repo", OID, "新说明", false, token, true, 4, 4)).rejects.toMatchObject({
+      code: "hook_rejected",
     });
     expect(clioraReview.result).toBeNull();
   });

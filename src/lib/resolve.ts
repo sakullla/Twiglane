@@ -94,6 +94,10 @@ export function undoActionLabel(): string {
   return "撤销最近提交并保留改动";
 }
 
+export function amendActionLabel(): string {
+  return "修订最近提交";
+}
+
 export function discardActionLabel(): string {
   return "放弃所选文件修改";
 }

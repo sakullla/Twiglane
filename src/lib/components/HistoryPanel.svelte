@@ -256,6 +256,17 @@
     return writeReason();
   }
 
+  /** 修订只适用于当前本地分支 HEAD 的普通提交；非 HEAD 和合并提交不提供可执行入口。 */
+  function amendReason(commit: HistoryCommit): string | undefined {
+    const write = writeReason();
+    if (write) return write;
+    if (opened.snapshot.branch.detached) return "请先切换到本地分支";
+    if (opened.snapshot.branch.unborn || !opened.snapshot.branch.headOid) return "当前分支还没有可修订的提交";
+    if (commit.oid !== opened.snapshot.branch.headOid) return "只能修订当前分支的最近一次提交";
+    if (commit.parents.length > 1) return "合并提交不能用这个入口修订";
+    return undefined;
+  }
+
   function orderedSelection(ids: string[]): string[] {
     const chosen = new Set(ids);
     return commits.filter((commit) => chosen.has(commit.oid)).map((commit) => commit.oid);
@@ -269,6 +280,15 @@
       selectedOids = ids;
     }
     const ordered = orderedSelection(ids);
+    const amendEntry: ContextMenuEntry | null = commit.oid === opened.snapshot.branch.headOid
+      ? {
+          id: "amend",
+          label: "修订最近提交…",
+          icon: "pencil",
+          disabledReason: amendReason(commit),
+          run: () => void recovery.amendLatest(commit.oid),
+        }
+      : null;
     const entries: ContextMenuEntry[] = ordered.length > 1
       ? [
           {
@@ -321,6 +341,7 @@
               : opened.snapshot.branch.detached ? "请先切换到本地分支" : undefined),
             run: () => void recovery.undoLatest(commit.oid),
           },
+          ...(amendEntry ? [amendEntry] : []),
           {
             id: "branch",
             label: "从此提交新建分支",

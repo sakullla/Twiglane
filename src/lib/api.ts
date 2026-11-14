@@ -59,6 +59,7 @@ import type {
   PullIntegration,
   UndoResult,
   RevertOutcome,
+  AmendOutcome,
 } from "./types";
 
 /** 历史筛选。缺省字段不传，后端按当前分支、无作者、无日期、无路径处理。 */
@@ -657,6 +658,36 @@ export const api = {
       requestId,
     });
     if (result.wrote && result.created > 0 && result.headOid) {
+      recordClioraCommit(path, result.headOid);
+    }
+    return result;
+  },
+  /**
+   * 修订最近提交：先以 confirm=false 预览完整原说明、原提交文件、暂存路径与快照令牌，
+   * 确认后在写锁内复核并改写 HEAD。只有实际写入成功才记录 cliora committed；
+   * 预览、取消、无实际变化和失败都不记录。
+   */
+  amendCommit: async (
+    path: string,
+    expectedHead: string,
+    message: string | null,
+    includeStaged: boolean,
+    stagedToken: string | null,
+    confirm: boolean,
+    generation: number,
+    requestId: number,
+  ) => {
+    const result = await invoke<AmendOutcome>("amend_commit", {
+      path,
+      expectedHead,
+      message,
+      includeStaged,
+      stagedToken,
+      confirm,
+      generation,
+      requestId,
+    });
+    if (result.wrote && result.headOid) {
       recordClioraCommit(path, result.headOid);
     }
     return result;

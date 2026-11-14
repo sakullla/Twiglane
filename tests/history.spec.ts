@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { createRawSnippet, tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import DiffView from "../src/lib/components/DiffView.svelte";
@@ -39,6 +39,8 @@ const applyStash = vi.hoisted(() => vi.fn());
 const deleteStash = vi.hoisted(() => vi.fn());
 const cherryPickCommits = vi.hoisted(() => vi.fn());
 const revertCommits = vi.hoisted(() => vi.fn());
+const amendCommit = vi.hoisted(() => vi.fn());
+const refreshStatus = vi.hoisted(() => vi.fn());
 const undoCommit = vi.hoisted(() => vi.fn());
 const checkoutCommit = vi.hoisted(() => vi.fn());
 const revealPath = vi.hoisted(() => vi.fn());
@@ -59,6 +61,8 @@ vi.mock("../src/lib/api", () => ({
     deleteStash,
     cherryPickCommits,
     revertCommits,
+    amendCommit,
+    refreshStatus,
     checkoutCommit,
     undoCommit,
     revealPath,
@@ -326,6 +330,8 @@ describe("历史面板", () => {
     compareFileDiff.mockResolvedValue(diff);
     fileHistory.mockReset();
     revertCommits.mockReset();
+    amendCommit.mockReset();
+    refreshStatus.mockReset();
     mergeSession.mockReset();
     commitDetail.mockResolvedValue({
       generation: 3,
@@ -357,6 +363,130 @@ describe("历史面板", () => {
     await fireEvent.click(screen.getByRole("button", { name: "确认撤销提交" }));
     await waitFor(() => expect(undoCommit).toHaveBeenCalledWith("/repo", head.oid, true, 3, 1));
     expect(onSnapshot).toHaveBeenCalledWith(expect.objectContaining({ generation: 4 }));
+  });
+
+  it("只有 HEAD 提供修订入口，非 HEAD 与合并 HEAD 不提供可执行修订", async () => {
+    const head = commit(0, { oid: "abc" });
+    historyPage.mockResolvedValue({
+      generation: 3, commits: [head, commit(1)], hasMore: false, offset: 0, pageSize: 100, state: "ok",
+      scope: "current", branches: ["main"], head: "main",
+    });
+    render(HistoryPanel, { props: panelProps() });
+    await fireEvent.contextMenu(await screen.findByRole("option", { name: /commit-1/ }));
+    expect(screen.queryByRole("menuitem", { name: /修订最近提交/ })).toBeNull();
+    await fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    await fireEvent.contextMenu(screen.getByRole("option", { name: /commit-0/ }));
+    expect(screen.getByRole("menuitem", { name: "修订最近提交…" }).getAttribute("aria-disabled")).not.toBe("true");
+
+    // 合并 HEAD：入口仍在，但灰显并说明只能修订普通提交。
+    const mergeHead = commit(0, { oid: "abc", parents: ["a".repeat(40), "b".repeat(40)] });
+    historyPage.mockResolvedValue({
+      generation: 3, commits: [mergeHead], hasMore: false, offset: 0, pageSize: 100, state: "ok",
+      scope: "current", branches: ["main"], head: "main",
+    });
+    cleanup();
+    render(HistoryPanel, { props: panelProps() });
+    await fireEvent.contextMenu(await screen.findByRole("option", { name: /commit-0/ }));
+    const amend = screen.getByRole("menuitem", { name: "修订最近提交…" });
+    expect(amend.getAttribute("aria-disabled")).toBe("true");
+    expect(amend.textContent).toContain("合并提交");
+    expect(amendCommit).not.toHaveBeenCalled();
+  });
+
+  it("历史 HEAD 修订预填完整说明、展示原提交与暂存范围，取消不写入", async () => {
+    const head = commit(0, { oid: "abc" });
+    historyPage.mockResolvedValue({
+      generation: 3, commits: [head], hasMore: false, offset: 0, pageSize: 100, state: "ok",
+      scope: "current", branches: ["main"], head: "main",
+    });
+    const message = "修复登录跳转\n\n- 第一段正文\n- 第二段正文\n\n完整说明不能被截断。";
+    const preview = {
+      generation: 3,
+      code: "ok",
+      eligible: true,
+      wrote: false,
+      headOid: "abc",
+      parentOid: "b".repeat(40),
+      summary: "修复登录跳转",
+      message,
+      files: [
+        { path: "src/login.ts", originalPath: null, status: "modified", additions: 2, deletions: 1 },
+        { path: "docs/note.md", originalPath: null, status: "added", additions: 1, deletions: 0 },
+      ],
+      stagedPaths: ["src/login.ts"],
+      stagedToken: "f".repeat(64),
+      note: "已核对唯一远程 origin，没有发现这个提交。不会推送。",
+      snapshot: opened.snapshot,
+    };
+    amendCommit.mockResolvedValueOnce(preview);
+    const onSnapshot = vi.fn();
+    const onNotice = vi.fn();
+    render(HistoryPanel, { props: { ...panelProps(), onSnapshot, onNotice } });
+    await fireEvent.contextMenu(await screen.findByRole("option", { name: /commit-0/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: "修订最近提交…" }));
+    const dialog = await screen.findByRole("dialog", { name: "修订最近提交" });
+    expect(amendCommit).toHaveBeenCalledWith("/repo", "abc", null, false, null, false, 3, 1);
+    expect((within(dialog).getByLabelText("修订后的提交说明") as HTMLTextAreaElement).value).toBe(message);
+    const files = within(dialog).getByRole("list", { name: "原提交修改的文件" });
+    expect(within(files).getByText("src/login.ts")).toBeTruthy();
+    expect(within(files).getByText("docs/note.md")).toBeTruthy();
+    expect(within(dialog).getByRole("list", { name: "当前暂存改动" }).textContent).toContain("src/login.ts");
+    expect((within(dialog).getByLabelText("纳入当前暂存改动") as HTMLInputElement).checked).toBe(false);
+    await fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("dialog", { name: "修订最近提交" })).toBeNull();
+    expect(amendCommit).toHaveBeenCalledTimes(1);
+    expect(onSnapshot).not.toHaveBeenCalled();
+    expect(onNotice).not.toHaveBeenCalled();
+  });
+
+  it("历史 HEAD 修订成功更新快照并关闭弹层", async () => {
+    const head = commit(0, { oid: "abc" });
+    historyPage.mockResolvedValue({
+      generation: 3, commits: [head], hasMore: false, offset: 0, pageSize: 100, state: "ok",
+      scope: "current", branches: ["main"], head: "main",
+    });
+    const preview = {
+      generation: 3,
+      code: "ok",
+      eligible: true,
+      wrote: false,
+      headOid: "abc",
+      parentOid: "b".repeat(40),
+      summary: "旧说明",
+      message: "旧说明",
+      files: [],
+      stagedPaths: [],
+      stagedToken: "f".repeat(64),
+      note: "预览",
+      snapshot: opened.snapshot,
+    };
+    const done = {
+      ...preview,
+      generation: 5,
+      wrote: true,
+      headOid: "d".repeat(40),
+      summary: "新说明",
+      message: "新说明",
+      note: "已用新的修订提交替换最近提交。没有推送。",
+      snapshot: {
+        ...opened.snapshot,
+        generation: 5,
+        branch: { ...opened.snapshot.branch, headOid: "d".repeat(40) },
+      },
+    };
+    amendCommit.mockResolvedValueOnce(preview).mockResolvedValueOnce(done);
+    const onSnapshot = vi.fn();
+    const onNotice = vi.fn();
+    render(HistoryPanel, { props: { ...panelProps(), onSnapshot, onNotice } });
+    await fireEvent.contextMenu(await screen.findByRole("option", { name: /commit-0/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: "修订最近提交…" }));
+    const dialog = await screen.findByRole("dialog", { name: "修订最近提交" });
+    await fireEvent.input(within(dialog).getByLabelText("修订后的提交说明"), { target: { value: "新说明" } });
+    await fireEvent.click(within(dialog).getByRole("button", { name: "确认修订提交" }));
+    await waitFor(() => expect(amendCommit).toHaveBeenLastCalledWith("/repo", "abc", "新说明", false, "f".repeat(64), true, 3, 1));
+    expect(onSnapshot).toHaveBeenCalledWith(expect.objectContaining({ generation: 5 }));
+    expect(onNotice).toHaveBeenCalledWith(done.note);
+    expect(screen.queryByRole("dialog", { name: "修订最近提交" })).toBeNull();
   });
 
   it("历史右键还原先展示预览，单个目标取消后不写入", async () => {

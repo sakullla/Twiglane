@@ -3,6 +3,7 @@ import { tick } from "svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   abortActionLabel,
+  amendActionLabel,
   canCompleteMerge,
   conflictKindLabel,
   continueActionLabel,
@@ -26,6 +27,8 @@ const completeMerge = vi.hoisted(() => vi.fn());
 const abortMerge = vi.hoisted(() => vi.fn());
 const undoCommit = vi.hoisted(() => vi.fn());
 const discardChanges = vi.hoisted(() => vi.fn());
+const amendCommit = vi.hoisted(() => vi.fn());
+const refreshStatus = vi.hoisted(() => vi.fn());
 
 vi.mock("../src/lib/api", () => ({
   api: {
@@ -40,6 +43,8 @@ vi.mock("../src/lib/api", () => ({
     abortMerge,
     undoCommit,
     discardChanges,
+    amendCommit,
+    refreshStatus,
   },
 }));
 
@@ -138,6 +143,8 @@ describe("合并与恢复文案", () => {
     expect(abortActionLabel("revert")).toBe("中止还原");
     expect(undoActionLabel()).toContain("撤销最近提交");
     expect(undoActionLabel()).not.toBe(discardActionLabel());
+    expect(amendActionLabel()).toContain("修订最近提交");
+    expect(amendActionLabel()).not.toBe(undoActionLabel());
     expect(discardActionLabel()).toContain("放弃");
     expect(discardBoundary()).toContain("取消不写入");
   });
@@ -1153,6 +1160,201 @@ describe("放弃与撤销", () => {
     expect(screen.getByText("修复登录跳转")).toBeTruthy();
     expect(screen.getByText("aaaaaaa")).toBeTruthy();
     expect(undoCommit).toHaveBeenCalledWith("/repo", "a".repeat(40), false, 4, 3);
+  });
+});
+
+describe("修订最近提交", () => {
+  const head = "a".repeat(40);
+  const token = "f".repeat(64);
+  const otherOpened: OpenedRepository = {
+    ...opened,
+    summary: { name: "other", path: "/other" },
+    generation: 5,
+    snapshot: {
+      ...opened.snapshot,
+      generation: 5,
+      branch: { ...opened.snapshot.branch, headOid: "b".repeat(40) },
+    },
+  };
+
+  function preview(extra: Record<string, unknown> = {}) {
+    return {
+      generation: 4,
+      code: "ok",
+      eligible: true,
+      wrote: false,
+      headOid: head,
+      parentOid: "b".repeat(40),
+      summary: "修复登录跳转",
+      message: "修复登录跳转\n\n- 保留正文\n- 完整说明",
+      files: [
+        { path: "src/login.ts", originalPath: null, status: "modified", additions: 2, deletions: 1 },
+        { path: "docs/note.md", originalPath: null, status: "added", additions: 1, deletions: 0 },
+      ],
+      stagedPaths: ["src/login.ts", "docs/note.md"],
+      stagedToken: token,
+      note: "已核对唯一远程 origin，没有发现这个提交。确认时会再次核对。不会推送。",
+      snapshot: opened.snapshot,
+      ...extra,
+    };
+  }
+
+  function actionProps(extra: Record<string, unknown> = {}) {
+    return {
+      opened,
+      disabled: false,
+      nextId: () => 1,
+      onSnapshot: vi.fn(),
+      onFailure: vi.fn(),
+      onNotice: vi.fn(),
+      onMerge: () => {},
+      variant: "menu" as const,
+      ...extra,
+    };
+  }
+
+  beforeEach(() => {
+    amendCommit.mockReset();
+    refreshStatus.mockReset();
+  });
+
+  it("提交区菜单打开修订表单，预填完整说明并展示原提交与暂存范围，默认不纳入暂存", async () => {
+    const current = preview();
+    amendCommit.mockResolvedValueOnce(current);
+    const props = actionProps();
+    render(RecoveryActions, { props });
+    await fireEvent.click(screen.getByRole("menuitem", { name: amendActionLabel() }));
+    const dialog = await screen.findByRole("dialog", { name: "修订最近提交" });
+    expect(amendCommit).toHaveBeenCalledWith("/repo", head, null, false, null, false, 4, 1);
+    const message = within(dialog).getByLabelText("修订后的提交说明") as HTMLTextAreaElement;
+    expect(message.value).toBe(current.message);
+    const files = within(dialog).getByRole("list", { name: "原提交修改的文件" });
+    expect(within(files).getByText("src/login.ts")).toBeTruthy();
+    expect(within(files).getByText("修改")).toBeTruthy();
+    expect(within(files).getByText("docs/note.md")).toBeTruthy();
+    expect(within(files).getByText("新增")).toBeTruthy();
+    const staged = within(dialog).getByRole("list", { name: "当前暂存改动" });
+    expect(within(staged).getByText("src/login.ts")).toBeTruthy();
+    expect(within(staged).getByText("docs/note.md")).toBeTruthy();
+    expect((within(dialog).getByLabelText("纳入当前暂存改动") as HTMLInputElement).checked).toBe(false);
+    // 原说明和勾选都没变：确认禁用并就地说明。
+    expect(within(dialog).getByRole("button", { name: "确认修订提交" }).hasAttribute("disabled")).toBe(true);
+    expect(within(dialog).getByText(/说明没有变化/)).toBeTruthy();
+    await fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(amendCommit).toHaveBeenCalledTimes(1);
+  });
+
+  it("说明未变化时不能写入；改说明并明确纳入暂存后确认，成功更新快照", async () => {
+    const current = preview();
+    const done = {
+      ...current,
+      generation: 5,
+      wrote: true,
+      headOid: "c".repeat(40),
+      summary: "更新后的说明",
+      message: "更新后的说明",
+      note: "已用新的修订提交替换最近提交。没有推送。",
+      snapshot: {
+        ...opened.snapshot,
+        generation: 5,
+        branch: { ...opened.snapshot.branch, headOid: "c".repeat(40) },
+      },
+    };
+    amendCommit.mockResolvedValueOnce(current).mockResolvedValueOnce(done);
+    const props = actionProps();
+    render(RecoveryActions, { props });
+    await fireEvent.click(screen.getByRole("menuitem", { name: amendActionLabel() }));
+    const dialog = await screen.findByRole("dialog", { name: "修订最近提交" });
+    await fireEvent.click(within(dialog).getByLabelText("纳入当前暂存改动"));
+    const message = within(dialog).getByLabelText("修订后的提交说明") as HTMLTextAreaElement;
+    await fireEvent.input(message, { target: { value: "更新后的说明" } });
+    expect(within(dialog).getByRole("button", { name: "确认修订提交" }).hasAttribute("disabled")).toBe(false);
+    await fireEvent.click(within(dialog).getByRole("button", { name: "确认修订提交" }));
+    await vi.waitFor(() =>
+      expect(amendCommit).toHaveBeenLastCalledWith("/repo", head, "更新后的说明", true, token, true, 4, 1),
+    );
+    expect(props.onSnapshot).toHaveBeenCalledWith(expect.objectContaining({ generation: 5 }));
+    expect(props.onNotice).toHaveBeenCalledWith(done.note);
+    expect(screen.queryByRole("dialog", { name: "修订最近提交" })).toBeNull();
+  });
+
+  it("确认失败保留弹层和草稿；重新预览刷新事实后仍可再次确认", async () => {
+    const current = preview();
+    const refreshed = { ...current, generation: 5, stagedToken: "e".repeat(64) };
+    const done = {
+      ...refreshed,
+      wrote: true,
+      headOid: "d".repeat(40),
+      note: "已修订最近提交。没有推送。",
+      snapshot: {
+        ...opened.snapshot,
+        generation: 5,
+        branch: { ...opened.snapshot.branch, headOid: "d".repeat(40) },
+      },
+    };
+    amendCommit
+      .mockResolvedValueOnce(current)
+      .mockRejectedValueOnce({ code: "amend_stale_index", message: "暂存区在预览后已经变化，未修订提交。", generation: 5 })
+      .mockResolvedValueOnce(refreshed)
+      .mockResolvedValueOnce(done);
+    refreshStatus.mockResolvedValue({ ...opened.snapshot, generation: 5 });
+    const props = actionProps();
+    render(RecoveryActions, { props });
+    await fireEvent.click(screen.getByRole("menuitem", { name: amendActionLabel() }));
+    const dialog = await screen.findByRole("dialog", { name: "修订最近提交" });
+    const message = within(dialog).getByLabelText("修订后的提交说明") as HTMLTextAreaElement;
+    await fireEvent.input(message, { target: { value: "新的说明\n\n正文" } });
+    await fireEvent.click(within(dialog).getByRole("button", { name: "确认修订提交" }));
+    await vi.waitFor(() => expect(amendCommit).toHaveBeenCalledTimes(2));
+    expect(props.onFailure).toHaveBeenCalledWith(expect.objectContaining({ code: "amend_stale_index" }));
+    expect(await screen.findByText(/暂存区在预览后已经变化/)).toBeTruthy();
+    expect((within(dialog).getByLabelText("修订后的提交说明") as HTMLTextAreaElement).value).toBe("新的说明\n\n正文");
+
+    await fireEvent.click(within(dialog).getByRole("button", { name: /重新预览/ }));
+    await vi.waitFor(() => expect(refreshStatus).toHaveBeenCalledWith("/repo", 4, 1));
+    await vi.waitFor(() => expect(amendCommit).toHaveBeenCalledTimes(3));
+    expect(amendCommit).toHaveBeenLastCalledWith("/repo", head, null, false, null, false, 5, 1);
+    expect(await screen.findByText(/预览已刷新，请再次确认/)).toBeTruthy();
+    expect((within(dialog).getByLabelText("修订后的提交说明") as HTMLTextAreaElement).value).toBe("新的说明\n\n正文");
+
+    await fireEvent.click(within(dialog).getByRole("button", { name: "确认修订提交" }));
+    await vi.waitFor(() =>
+      expect(amendCommit).toHaveBeenLastCalledWith("/repo", head, "新的说明\n\n正文", false, "e".repeat(64), true, 5, 1),
+    );
+    expect(props.onSnapshot).toHaveBeenCalledWith(expect.objectContaining({ generation: 5 }));
+    expect(screen.queryByRole("dialog", { name: "修订最近提交" })).toBeNull();
+  });
+
+  it("不可用预览就地说明原因，合并提交没有可执行修订", async () => {
+    amendCommit.mockResolvedValueOnce(
+      preview({
+        code: "amend_merge",
+        eligible: false,
+        stagedToken: null,
+        note: "这是合并提交，不能用这个入口修订。仓库没有改动。",
+      }),
+    );
+    render(RecoveryActions, { props: actionProps() });
+    await fireEvent.click(screen.getByRole("menuitem", { name: amendActionLabel() }));
+    const dialog = await screen.findByRole("dialog", { name: "修订最近提交" });
+    expect(within(dialog).getByText("这是合并提交，不能用这个入口修订。仓库没有改动。")).toBeTruthy();
+    const confirm = within(dialog).getByRole("button", { name: "确认修订提交" });
+    expect(confirm.hasAttribute("disabled")).toBe(true);
+    expect(confirm.getAttribute("title")).toContain("合并提交");
+    await fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(amendCommit).toHaveBeenCalledTimes(1);
+  });
+
+  it("仓库切换使旧修订确认作废，不写入新仓库", async () => {
+    amendCommit.mockResolvedValueOnce(preview());
+    const props = actionProps();
+    const view = render(RecoveryActions, { props });
+    await fireEvent.click(screen.getByRole("menuitem", { name: amendActionLabel() }));
+    await screen.findByRole("dialog", { name: "修订最近提交" });
+    await view.rerender({ ...props, opened: otherOpened });
+    await vi.waitFor(() => expect(screen.queryByRole("dialog", { name: "修订最近提交" })).toBeNull());
+    expect(props.onNotice).toHaveBeenCalledWith("仓库已切换，修订提交的确认已作废，没有写入任何内容。");
+    expect(amendCommit).toHaveBeenCalledTimes(1);
   });
 });
 

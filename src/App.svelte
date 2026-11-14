@@ -370,8 +370,12 @@
     void loadSelectedDiff();
   }
   let mergeInProgress = $state(false);
-  /** 进行中的合并、变基或拣选可以中止：左栏提示和命令面板据此给出「中止」。 */
+  /** 进行中的合并、变基、拣选或还原可以中止：左栏提示和命令面板据此给出「中止」。 */
   let mergeAbortable = $state(false);
+  /** 左栏提示按实际操作说“合并/还原”，不把还原伪装成分支合并。 */
+  let mergeOperation = $state("none");
+  /** 还原序列停在后续目标时 canContinue 为 false：横幅只说可以中止，不说可以继续。 */
+  let mergeCanContinue = $state(false);
   /** 从主界面「中止合并」打开分支合并：面板读到会话后直接弹出中止确认。 */
   let mergeAbortIntent = $state(false);
   let mergeProbeSerial = 0;
@@ -1190,6 +1194,8 @@
     if (!current) {
       mergeInProgress = false;
       mergeAbortable = false;
+      mergeOperation = "none";
+      mergeCanContinue = false;
       return;
     }
     try {
@@ -1197,12 +1203,16 @@
       if (serial !== mergeProbeSerial || opened?.summary.path !== current.summary.path) return;
       mergeInProgress = session.operation === "merge" || session.canAbort;
       mergeAbortable = showMergeAbort(session.operation, session.canAbort);
+      mergeOperation = session.operation;
+      mergeCanContinue = session.canContinue;
     } catch (error) {
       if (serial !== mergeProbeSerial || opened?.summary.path !== current.summary.path) return;
       // stale 只说明这次探测用了旧 generation，不代表合并结束，提示不能因此消失。
       if (normalizeError(error).code !== "stale") {
         mergeInProgress = false;
         mergeAbortable = false;
+        mergeOperation = "none";
+        mergeCanContinue = false;
       }
     }
   }
@@ -1270,6 +1280,8 @@
     remoteNamesFor = null;
     mergeInProgress = false;
     mergeAbortable = false;
+    mergeOperation = "none";
+    mergeCanContinue = false;
     recent = [
       { name: next.summary.name, path: next.summary.path, openedAtMs: Date.now() },
       ...recent.filter((repo) => repo.path !== next.summary.path),
@@ -2887,6 +2899,8 @@
         paletteOpen = false;
         mergeInProgress = false;
         mergeAbortable = false;
+        mergeOperation = "none";
+        mergeCanContinue = false;
       }
     } catch (error) {
       showError(error);
@@ -3996,7 +4010,7 @@
             <Icon name="archive" size={15} />
           </button>
         </div>
-        <MergeBanner {conflictCount} {mergeInProgress} canAbort={mergeAbortable} abortBlocked={writeLocked} onOpen={() => runCommand("task.merge")} onAbort={() => runCommand("task.abortMerge")} />
+        <MergeBanner {conflictCount} {mergeInProgress} operation={mergeOperation} canContinue={mergeCanContinue} canAbort={mergeAbortable} abortBlocked={writeLocked} onOpen={() => runCommand("task.merge")} onAbort={() => runCommand("task.abortMerge")} />
       {/snippet}
       {#snippet taskDetailView(visible: boolean)}
   {#if opened}
@@ -4268,6 +4282,7 @@
                   onClearFile={() => (historyPath = null)}
                   onSnapshot={mergeSnapshot}
                   onNotice={notice}
+                  onMerge={() => runCommand("task.merge")}
                   onFileNav={(nav) => (historyNav = nav)}
                   onHunkNav={reportHistoryHunk}
                   onActivity={reportHistoryActivity}
@@ -4331,6 +4346,8 @@
     onToggleSidebar={() => runCommand("rail.toggle")}
     {conflictCount}
     {mergeInProgress}
+    mergeOperation={mergeOperation}
+    mergeCanContinue={mergeCanContinue}
     onOpenMerge={() => runCommand("task.merge")}
     updateVersion={updateState.offer?.version ?? null}
     onOpenUpdate={() => openSettings("update")}

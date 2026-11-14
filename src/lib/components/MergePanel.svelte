@@ -52,7 +52,7 @@
   import { portal } from "../portal";
   import { visibleRange, scrollIndexIntoView } from "../layout";
   import { shortOid } from "../history";
-  import { canCompleteMerge, conflictKindLabel, operationCaption, showMergeAbort } from "../resolve";
+  import { abortActionLabel, canCompleteMerge, conflictKindLabel, continueActionLabel, operationCaption, operationVerb, showMergeAbort } from "../resolve";
   import type {
     BranchRecord,
     ConflictView,
@@ -99,6 +99,8 @@
     closeLabel?: string;
     /** 设置里的分支分组，传给合并方向的分支选择器。 */
     branchGroups?: boolean;
+    /** 会话操作变化时上报给宿主的窗口标题：还原不能被标题写成“合并分支”。 */
+    onOperation?: (operation: string, unresolved: number) => void;
   }
 
   let {
@@ -122,6 +124,7 @@
     onClose,
     closeLabel,
     branchGroups = true,
+    onOperation,
   }: Props = $props();
 
   interface Finished {
@@ -132,6 +135,8 @@
     oid: string | null;
     commits: number;
     switchedFrom: string | null;
+    /** 这次完成的是还原提交，不是分支合并：完成页不能提供“再合并一次”。 */
+    revert?: boolean;
   }
 
   let session = $state.raw<MergeSession | null>(null);
@@ -183,7 +188,8 @@
     session?.operation === "merge" ||
       session?.operation === "unmerged" ||
       session?.operation === "rebase" ||
-      session?.operation === "cherry-pick",
+      session?.operation === "cherry-pick" ||
+      session?.operation === "revert",
   );
   /** 合并进行中：头部和底部都收成一条细条，把高度让给冲突内容。 */
   let strip = $derived(Boolean(session && active));
@@ -191,7 +197,14 @@
   let conflictTotal = $derived((session?.unresolved ?? 0) + resolvedPaths.length);
   let resolvedPercent = $derived(conflictTotal > 0 ? Math.round((resolvedPaths.length / conflictTotal) * 100) : 0);
   let currentLabel = $derived(session?.target ?? opened.snapshot.branch.name ?? "当前分支");
-  let incomingLabel = $derived(session?.source ?? (session?.operation === "unmerged" ? "另一侧" : "来源分支"));
+  let incomingLabel = $derived(
+    session?.source ??
+      (session?.operation === "revert"
+        ? "被还原的提交"
+        : session?.operation === "unmerged"
+          ? "另一侧"
+          : "来源分支"),
+  );
   let filteredConflicts = $derived(
     (session?.conflicts ?? []).filter((entry) => entry.path.toLowerCase().includes(fileFilter.trim().toLowerCase())),
   );
@@ -220,6 +233,12 @@
     });
   });
   let operation = $derived(session?.operation ?? null);
+  /** 标题跟随当前会话：还原冲突显示“还原冲突”，还原无冲突显示“还原提交”。 */
+  $effect(() => {
+    const state = session;
+    if (!state) return;
+    onOperation?.(state.operation, state.unresolved);
+  });
   /** 预检依赖的实际仓库状态。generation 推进但它不变时不重新检查：预检不能触发自己。 */
   let repoState = $derived.by(() => {
     const snapshot = session?.snapshot;
@@ -284,7 +303,7 @@
     }
     if (stay) return false;
     const left = state.unresolved;
-    const finish = state.operation === "rebase" ? "继续变基" : state.operation === "cherry-pick" ? "继续拣选" : "完成合并";
+    const finish = continueActionLabel(state.operation);
     onNotice(
       filePending(here.path)
         ? `没有其他未处理的文件。明确标记这个文件后可以${finish}。`
@@ -351,7 +370,7 @@
         if (showMergeAbort(next.operation, next.canAbort)) {
           askAbort();
         } else {
-          onNotice("当前没有可以中止的合并、变基或拣选。");
+          onNotice("当前没有可以中止的合并、变基、拣选或还原。");
         }
       }
       if (!message && next.operation === "merge") {
@@ -614,7 +633,7 @@
     const path = focusPath;
     const state = session;
     if (!path || !state) return;
-    if (state.operation !== "merge" && state.operation !== "unmerged" && state.operation !== "rebase" && state.operation !== "cherry-pick") return;
+    if (state.operation !== "merge" && state.operation !== "unmerged" && state.operation !== "rebase" && state.operation !== "cherry-pick" && state.operation !== "revert") return;
     const key = `${state.generation}:${path}`;
     if (openedFocus === key) return;
     if (!state.conflicts.some((entry) => entry.path === path)) return;
@@ -687,16 +706,17 @@
 
   function complete() {
     const state = session;
-    if (!state || !canCompleteMerge(state.operation, state.unresolved)) return;
+    if (!state || !canCompleteMerge(state.operation, state.unresolved, state.canContinue)) return;
     const kept = message;
     const repo = opened.summary.path;
     const from = state.source ?? incomingLabel;
     const into = state.target ?? currentLabel;
     const count = conflictTotal;
     const rebasing = state.operation === "rebase";
+    const reverting = state.operation === "revert";
     void run(async () => {
       try {
-        const done = await api.completeMerge(repo, kept, state.generation, nextId());
+        const done = await api.completeMerge(repo, kept, state.generation, nextId(), state.operation);
         message = "";
         messageByRepo.delete(repo);
         resolvedPaths = [];
@@ -712,6 +732,7 @@
           oid: done.oid,
           commits: count,
           switchedFrom: switchedFromByRepo.get(repo) ?? null,
+          revert: reverting,
         };
       } catch (error) {
         const failure = normalizeError(error);
@@ -727,15 +748,11 @@
   }
 
   function abortLabel(operation: string): string {
-    if (operation === "rebase") return "中止变基";
-    if (operation === "cherry-pick") return "中止拣选";
-    return "中止合并";
+    return abortActionLabel(operation);
   }
 
   function continueLabel(operation: string): string {
-    if (operation === "rebase") return "继续变基";
-    if (operation === "cherry-pick") return "继续拣选";
-    return "完成合并";
+    return continueActionLabel(operation);
   }
 
   function askAbort() {
@@ -783,17 +800,24 @@
   }
 </script>
 
-<section class={`merge-panel ${embedded ? "embedded" : "span-main"}`} aria-label="分支合并" data-panel="merge">
+<section class={`merge-panel ${embedded ? "embedded" : "span-main"}`} aria-label={session?.operation === "revert" ? "还原提交" : "分支合并"} data-panel="merge">
   <!-- 搬走的必须是这个常驻节点：Svelte 销毁 {#if} 分支时沿分支首节点的 nextSibling 走，
        分支首尾节点被搬走后遍历中断，后面的节点会残留。 -->
   <div class="mp-head-host" use:portal={headTarget}>
     {#if session && active}
       <div class="mp-head">
-        <span class="merge-route" title={`把 ${incomingLabel} 合并到 ${currentLabel}`}>
-          <span class="merge-route-branch source"><Icon name="branch" size={12} /><span class="truncate">{incomingLabel}</span></span>
-          <span class="merge-route-arrow"><Icon name="arrow-right" size={14} /></span>
-          <span class="merge-route-branch target"><Icon name="branch" size={12} /><span class="truncate">{currentLabel}</span></span>
-        </span>
+        {#if session.operation === "revert"}
+          <span class="merge-route" title="还原提交：按由新到旧创建逆向提交">
+            <span class="merge-route-branch source"><Icon name="undo" size={12} /><span class="truncate">还原提交</span></span>
+          </span>
+          <span class="mp-note truncate" title={session.note}>{session.note}</span>
+        {:else}
+          <span class="merge-route" title={`把 ${incomingLabel} 合并到 ${currentLabel}`}>
+            <span class="merge-route-branch source"><Icon name="branch" size={12} /><span class="truncate">{incomingLabel}</span></span>
+            <span class="merge-route-arrow"><Icon name="arrow-right" size={14} /></span>
+            <span class="merge-route-branch target"><Icon name="branch" size={12} /><span class="truncate">{currentLabel}</span></span>
+          </span>
+        {/if}
         {#if session.operation === "unmerged"}
           <span class="mp-note truncate" title={session.note}>{session.note}</span>
         {:else if session.operation === "rebase"}
@@ -909,6 +933,7 @@
                 {view}
                 {currentLabel}
                 {incomingLabel}
+                operation={session.operation}
                 draft={conflictDrafts.get(draftKey(view.path)) ?? null}
                 disabled={blocked}
                 onDraft={(draft, progress) => view && storeDraft(view.path, draft, progress)}
@@ -960,9 +985,23 @@
             <p>
               {#if session.unresolved === 0}
                 {#if session.operation === "rebase"}
-                  检查无误后，在下方继续变基。继续只改写当前分支，不会推送，也不能跳过。
+                  {#if !session.canContinue}
+                    变基序列停在后续目标，无法继续应用。可以在上方中止回到变基前；不能跳过。
+                  {:else}
+                    检查无误后，在下方继续变基。继续只改写当前分支，不会推送，也不能跳过。
+                  {/if}
                 {:else if session.operation === "cherry-pick"}
-                  检查无误后，在下方继续拣选。不会推送，也不能跳过。
+                  {#if !session.canContinue}
+                    拣选序列停在后续目标，无法继续应用。可以在上方中止回到拣选前；不能跳过。
+                  {:else}
+                    检查无误后，在下方继续拣选。不会推送，也不能跳过。
+                  {/if}
+                {:else if session.operation === "revert"}
+                  {#if session.canContinue}
+                    检查无误后，在下方继续还原。不会推送，也不能跳过。
+                  {:else}
+                    还原序列停在后续目标，无法继续应用。可以在上方中止回到本次还原开始前；已经创建的还原提交会一并撤销。
+                  {/if}
                 {:else}
                   检查无误后，在下方填写说明并完成合并。完成只在本地提交，不会推送。
                 {/if}
@@ -979,19 +1018,23 @@
     <div class="panel-scroll mp-scroll">
       <div class="merge-done" role="status">
         <span class="merge-done-icon"><Icon name="check" size={28} stroke={2.4} /></span>
-        <h2>{finished.rebased ? `已把 ${finished.target} 接到 ${finished.source} 顶端` : finished.fastForwarded ? `已把 ${finished.target} 快进到 ${finished.source}` : `已把 ${finished.source} 合并到 ${finished.target}`}</h2>
+        <h2>{finished.revert ? "已继续还原" : finished.rebased ? `已把 ${finished.target} 接到 ${finished.source} 顶端` : finished.fastForwarded ? `已把 ${finished.target} 快进到 ${finished.source}` : `已把 ${finished.source} 合并到 ${finished.target}`}</h2>
         <p>
-          {#if finished.rebased}
+          {#if finished.revert}
+            后续目标已处理，还原提交已创建{#if finished.oid}<code>{shortOid(finished.oid)}</code>{/if}。结果只在本地，尚未推送。
+          {:else if finished.rebased}
             当前分支已被改写。远程不变，没有推送。
           {:else if finished.fastForwarded}没有创建合并提交，{finished.target} 现在指向 {finished.oid ? shortOid(finished.oid) : "来源的最新提交"}。结果只在本地，尚未推送。
           {:else}已创建合并提交{#if finished.oid}<code>{shortOid(finished.oid)}</code>{/if}。结果只在本地，尚未推送。{/if}
         </p>
         <div class="merge-done-actions">
-          {#if finished.switchedFrom}
+          {#if finished.switchedFrom && !finished.revert}
             <button type="button" class="btn btn-secondary" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={switchBack}><Icon name="arrow-left" size={14} />切回 {finished.switchedFrom}</button>
           {/if}
           {#if onOpenHistory}<button type="button" class="btn btn-secondary" onclick={onOpenHistory}><Icon name="history" size={14} />查看提交历史</button>{/if}
-          <button type="button" class="btn btn-ghost" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={startOver}><Icon name="merge" size={14} />再合并一次</button>
+          {#if !finished.revert}
+            <button type="button" class="btn btn-ghost" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={startOver}><Icon name="merge" size={14} />再合并一次</button>
+          {/if}
         </div>
       </div>
     </div>
@@ -1093,11 +1136,25 @@
         <span class="mp-status ok" title={reason}><Icon name="check-circle" size={13} /><span class="truncate">{reason}</span></span>
       {/if}
     {:else if session?.operation === "rebase" || session?.operation === "cherry-pick"}
-      {#if session.unresolved > 0}
+      {#if !session.canContinue && session.unresolved === 0}
+        {@const reason = `${operationVerb(session.operation)}序列停在后续目标，无法继续应用。可以中止回到操作开始前。`}
+        <span class="mp-status warn" title={reason}><Icon name="alert" size={13} /><span class="truncate">{reason}</span></span>
+      {:else if session.unresolved > 0}
         {@const reason = `还有 ${session.unresolved} 个未解决冲突，不能算完成。不能跳过。`}
         <span class="mp-status warn" title={reason}><Icon name="alert" size={13} /><span class="truncate">{reason}</span></span>
       {:else}
         {@const reason = session.operation === "rebase" ? "冲突已全部处理。继续变基不会推送，也不能跳过。" : "冲突已全部处理。继续拣选不会推送，也不能跳过。"}
+        <span class="mp-status ok" title={reason}><Icon name="check-circle" size={13} /><span class="truncate">{reason}</span></span>
+      {/if}
+    {:else if session?.operation === "revert"}
+      {#if !session.canContinue}
+        {@const reason = "还原序列停在后续目标，无法继续应用。可以中止回到本次还原开始前。"}
+        <span class="mp-status warn" title={reason}><Icon name="alert" size={13} /><span class="truncate">{reason}</span></span>
+      {:else if session.unresolved > 0}
+        {@const reason = `还有 ${session.unresolved} 个未解决冲突，不能继续还原。不能跳过。`}
+        <span class="mp-status warn" title={reason}><Icon name="alert" size={13} /><span class="truncate">{reason}</span></span>
+      {:else}
+        {@const reason = "冲突已全部处理。继续还原不会推送，也不能跳过。"}
         <span class="mp-status ok" title={reason}><Icon name="check-circle" size={13} /><span class="truncate">{reason}</span></span>
       {/if}
     {:else if session?.operation === "unmerged"}
@@ -1107,20 +1164,24 @@
     {/if}
     <span class="spacer"></span>
     {#if onClose}<button type="button" class={`btn btn-secondary ${strip ? "btn-sm" : ""}`} onclick={() => onClose?.()}>{#if closeLabel && !finished}<Icon name="arrow-left" size={14} />{closeLabel}{:else}{finished ? "完成" : "关闭"}{/if}</button>{/if}
-    {#if session?.operation === "merge" || session?.operation === "rebase" || session?.operation === "cherry-pick"}
+    {#if session?.operation === "merge" || session?.operation === "rebase" || session?.operation === "cherry-pick" || session?.operation === "revert"}
       <button
         type="button"
         class="btn btn-primary btn-sm"
         title={blocked
           ? BUSY_REASON
-          : !canCompleteMerge(session.operation, session.unresolved)
-            ? session.operation === "merge"
-              ? `还有 ${session.unresolved} 个未解决冲突，不能完成合并。`
-              : "还有未解决冲突，不能算完成。不能跳过。"
+          : !canCompleteMerge(session.operation, session.unresolved, session.canContinue)
+            ? session.unresolved > 0
+              ? session.operation === "merge"
+                ? `还有 ${session.unresolved} 个未解决冲突，不能完成合并。`
+                : session.operation === "revert"
+                  ? `还有 ${session.unresolved} 个未解决冲突，不能继续还原。不能跳过。`
+                  : "还有未解决冲突，不能算完成。不能跳过。"
+              : `${operationVerb(session.operation)}序列停在后续目标，不能继续，只能中止。`
             : session.operation === "merge" && message.trim() === ""
               ? "填写合并说明后才能完成"
               : undefined}
-        disabled={blocked || !canCompleteMerge(session.operation, session.unresolved) || (session.operation === "merge" && message.trim() === "")}
+        disabled={blocked || !canCompleteMerge(session.operation, session.unresolved, session.canContinue) || (session.operation === "merge" && message.trim() === "")}
         onclick={complete}
       >
         <Icon name="check" size={14} />{continueLabel(session.operation)}
@@ -1156,10 +1217,14 @@
       targets={abortPaths.map((path) => ({ icon: "file", name: path }))}
       targetsLabel="受影响的路径"
       notes={[
-        abortPaths.length > 0
-          ? { tone: "warn", text: `这 ${abortPaths.length} 个文件里的解决结果（包括这里尚未写入的逐处选择）会被撤销，不能由这里找回。` }
-          : { tone: "ok", text: "没有需要撤销的合并编辑。" },
-        { tone: "info", text: "仓库回到开始之前的状态；取消则保持当前进度，可以继续处理。" },
+        session?.operation === "revert"
+          ? abortPaths.length > 0
+            ? { tone: "warn", text: `这 ${abortPaths.length} 个路径里的还原结果（包括这里尚未写入的逐处选择）会被撤销；本次还原已创建的提交也会一并撤销，不能由这里找回。` }
+            : { tone: "warn", text: "本次还原已创建的提交和冲突编辑都会被撤销，不能由这里找回。" }
+          : abortPaths.length > 0
+            ? { tone: "warn", text: `这 ${abortPaths.length} 个文件里的解决结果（包括这里尚未写入的逐处选择）会被撤销，不能由这里找回。` }
+            : { tone: "ok", text: "没有需要撤销的合并编辑。" },
+        { tone: "info", text: session?.operation === "revert" ? "仓库回到本次还原开始前的状态；取消保持当前进度。" : "仓库回到开始之前的状态；取消则保持当前进度，可以继续处理。" },
       ]}
       confirmLabel={abortLabel(session?.operation ?? "merge")}
       confirmIcon="x"

@@ -51,6 +51,8 @@
     view: ConflictView;
     currentLabel: string;
     incomingLabel: string;
+    /** 当前会话操作：还原时底部提示用“完成还原”，不能伪装成分支合并。 */
+    operation?: string;
     draft?: ConflictDraft | null;
     disabled: boolean;
     /** 每次选择变化时回报草稿与进度，宿主据此在文件列表上显示「已处理 x/y」并在切换文件后恢复。 */
@@ -79,6 +81,7 @@
     view,
     currentLabel,
     incomingLabel,
+    operation = "merge",
     draft = null,
     disabled,
     onDraft,
@@ -853,7 +856,9 @@
         ? `已处理 ${done} / ${total} 处。每一处都要明确选择后才能标记。`
         : pendingElsewhere > 0
           ? "全部冲突已处理。标记前可在「结果预览」里通读一遍。"
-          : "全部冲突已处理，标记后可以完成合并。标记前可在「结果预览」里通读一遍。",
+          : operation === "revert"
+            ? "全部冲突已处理，标记后可以继续还原。标记前可在「结果预览」里通读一遍。"
+            : "全部冲突已处理，标记后可以完成合并。标记前可在「结果预览」里通读一遍。",
   );
   let showHunkNav = $derived(hunkMode && effectiveMode === "hunks");
   let showNav = $derived(showHunkNav || fileTotal > 1);

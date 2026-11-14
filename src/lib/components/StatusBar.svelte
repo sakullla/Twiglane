@@ -23,6 +23,10 @@
     onToggleSidebar?: () => void;
     conflictCount?: number;
     mergeInProgress?: boolean;
+    /** 进行中的操作：还原时状态栏提示不能用“合并进行中”。 */
+    mergeOperation?: string;
+    /** 还原序列停在后续目标时为 false：提示只能中止。 */
+    mergeCanContinue?: boolean;
     onOpenMerge?: () => void;
     /** 发现的新版本号；null 表示没有提示入口。与仓库无关（应用级更新），无仓库时也显示。 */
     updateVersion?: string | null;
@@ -47,6 +51,8 @@
     onToggleSidebar,
     conflictCount = 0,
     mergeInProgress = false,
+    mergeOperation = "merge",
+    mergeCanContinue = true,
     onOpenMerge,
     updateVersion = null,
     onOpenUpdate,
@@ -56,7 +62,12 @@
   }: Props = $props();
 
   let dotClass = $derived(degraded || warning ? "stale" : hasRepo ? "" : "off");
-  let notice = $derived(hasRepo && sidebarHidden && onOpenMerge ? mergeNotice(conflictCount, mergeInProgress) : null);
+  let revert = $derived(mergeOperation === "revert");
+  let notice = $derived(
+    hasRepo && sidebarHidden && onOpenMerge
+      ? mergeNotice(conflictCount, mergeInProgress, mergeOperation, mergeCanContinue)
+      : null,
+  );
   let sidebarAction = $derived(sidebarHidden ? "显示侧栏" : "隐藏侧栏");
 </script>
 
@@ -98,10 +109,10 @@
       class="sb-item sb-merge"
       data-merge-status
       aria-label={notice.label}
-      title="打开分支合并继续处理"
+      title={revert ? "打开还原继续处理" : "打开分支合并继续处理"}
       onclick={onOpenMerge}
     >
-      <Icon name="merge" size={12} />
+      <Icon name={revert ? "undo" : "merge"} size={12} />
       <span>{notice.text}</span>
     </button>
   {/if}

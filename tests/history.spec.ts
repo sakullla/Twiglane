@@ -38,10 +38,12 @@ const saveStash = vi.hoisted(() => vi.fn());
 const applyStash = vi.hoisted(() => vi.fn());
 const deleteStash = vi.hoisted(() => vi.fn());
 const cherryPickCommits = vi.hoisted(() => vi.fn());
+const revertCommits = vi.hoisted(() => vi.fn());
 const undoCommit = vi.hoisted(() => vi.fn());
 const checkoutCommit = vi.hoisted(() => vi.fn());
 const revealPath = vi.hoisted(() => vi.fn());
 const createBranchFrom = vi.hoisted(() => vi.fn());
+const mergeSession = vi.hoisted(() => vi.fn());
 
 vi.mock("../src/lib/api", () => ({
   api: {
@@ -56,10 +58,12 @@ vi.mock("../src/lib/api", () => ({
     applyStash,
     deleteStash,
     cherryPickCommits,
+    revertCommits,
     checkoutCommit,
     undoCommit,
     revealPath,
     createBranchFrom,
+    mergeSession,
   },
 }));
 
@@ -321,6 +325,8 @@ describe("历史面板", () => {
     compareFiles.mockResolvedValue({ generation: 3, base: null, head: "", files: [] });
     compareFileDiff.mockResolvedValue(diff);
     fileHistory.mockReset();
+    revertCommits.mockReset();
+    mergeSession.mockReset();
     commitDetail.mockResolvedValue({
       generation: 3,
       commit: commit(0),
@@ -351,6 +357,271 @@ describe("历史面板", () => {
     await fireEvent.click(screen.getByRole("button", { name: "确认撤销提交" }));
     await waitFor(() => expect(undoCommit).toHaveBeenCalledWith("/repo", head.oid, true, 3, 1));
     expect(onSnapshot).toHaveBeenCalledWith(expect.objectContaining({ generation: 4 }));
+  });
+
+  it("历史右键还原先展示预览，单个目标取消后不写入", async () => {
+    const head = commit(0);
+    historyPage.mockResolvedValue({
+      generation: 3, commits: [head], hasMore: false, offset: 0, pageSize: 100, state: "ok",
+      scope: "current", branches: ["main"], head: "main",
+    });
+    const preview = {
+      generation: 3,
+      code: "ok",
+      eligible: true,
+      wrote: false,
+      headOid: "abc",
+      targets: [{ oid: head.oid, summary: head.summary, authorName: "Ada", authoredAt: 1 }],
+      created: 0,
+      conflicted: false,
+      note: "将按由新到旧的顺序还原 1 个提交。不会推送。取消不会写入。",
+      snapshot: opened.snapshot,
+    };
+    revertCommits.mockResolvedValueOnce(preview);
+    render(HistoryPanel, { props: panelProps() });
+    await fireEvent.contextMenu(await screen.findByRole("option", { name: /commit-0/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: "还原此提交…" }));
+    await screen.findByRole("dialog", { name: "还原提交" });
+    expect(revertCommits).toHaveBeenCalledTimes(1);
+    expect(revertCommits).toHaveBeenCalledWith("/repo", [head.oid], "abc", false, 3, 1);
+    expect(screen.getAllByText(/取消不会写入/).length).toBeGreaterThan(0);
+    await fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("dialog", { name: "还原提交" })).toBeNull();
+    expect(revertCommits).toHaveBeenCalledTimes(1);
+  });
+
+  it("多个提交按历史顺序预览，清单与确认都保持后端返回的目标顺序", async () => {
+    const first = commit(0);
+    const second = commit(1);
+    historyPage.mockResolvedValue({
+      generation: 3, commits: [first, second], hasMore: false, offset: 0, pageSize: 100, state: "ok",
+      scope: "current", branches: ["main"], head: "main",
+    });
+    const preview = {
+      generation: 3,
+      code: "ok",
+      eligible: true,
+      wrote: false,
+      headOid: "abc",
+      targets: [
+        { oid: second.oid, summary: second.summary, authorName: "Ada", authoredAt: 2 },
+        { oid: first.oid, summary: first.summary, authorName: "Ada", authoredAt: 1 },
+      ],
+      created: 0,
+      conflicted: false,
+      note: "将按由新到旧的顺序还原 2 个提交。不会推送。取消不会写入。",
+      snapshot: opened.snapshot,
+    };
+    const done = {
+      ...preview,
+      generation: 5,
+      wrote: true,
+      created: 2,
+      note: "已按由新到旧的顺序创建 2 个逆向提交。原提交仍在历史中。没有推送。",
+      snapshot: { ...opened.snapshot, generation: 5 },
+    };
+    revertCommits.mockResolvedValueOnce(preview);
+    revertCommits.mockResolvedValueOnce(done);
+    const onSnapshot = vi.fn();
+    const onNotice = vi.fn();
+    const onMerge = vi.fn();
+    render(HistoryPanel, { props: { ...panelProps(), onSnapshot, onNotice, onMerge } });
+    await screen.findByRole("option", { name: /commit-0/ });
+    await fireEvent.click(screen.getByRole("option", { name: /commit-1/ }), { shiftKey: true });
+    await fireEvent.contextMenu(screen.getByRole("option", { name: /commit-1/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: "还原这些提交…" }));
+    await screen.findByRole("dialog", { name: "还原提交" });
+    // 预览请求按历史列表顺序（由新到旧）。
+    expect(revertCommits).toHaveBeenCalledWith("/repo", [first.oid, second.oid], "abc", false, 3, 1);
+    const targets = screen.getByRole("list", { name: "要还原的提交（由新到旧）" });
+    expect(within(targets).getAllByRole("listitem").map((item) => item.querySelector(".confirm-target-name")?.textContent)).toEqual([
+      second.summary,
+      first.summary,
+    ]);
+    await fireEvent.click(screen.getByRole("button", { name: "确认还原 2 个提交" }));
+    await waitFor(() => expect(revertCommits).toHaveBeenLastCalledWith("/repo", [second.oid, first.oid], "abc", true, 3, 1));
+    expect(onSnapshot).toHaveBeenCalledWith(expect.objectContaining({ generation: 5 }));
+    expect(onNotice).toHaveBeenCalledWith(done.note);
+    expect(onMerge).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "还原提交" })).toBeNull();
+  });
+
+  it("还原停在冲突时先回写快照，再打开现有冲突面板", async () => {
+    const head = commit(0);
+    historyPage.mockResolvedValue({
+      generation: 3, commits: [head], hasMore: false, offset: 0, pageSize: 100, state: "ok",
+      scope: "current", branches: ["main"], head: "main",
+    });
+    const preview = {
+      generation: 3,
+      code: "ok",
+      eligible: true,
+      wrote: false,
+      headOid: "abc",
+      targets: [{ oid: head.oid, summary: head.summary, authorName: "Ada", authoredAt: 1 }],
+      created: 0,
+      conflicted: false,
+      note: "将按由新到旧的顺序还原 1 个提交。不会推送。取消不会写入。",
+      snapshot: opened.snapshot,
+    };
+    const conflict = {
+      ...preview,
+      code: "revert_conflict",
+      generation: 5,
+      wrote: true,
+      conflicted: true,
+      note: "还没有创建还原提交。还原停在冲突，后面的提交还没有处理。",
+      snapshot: { ...opened.snapshot, generation: 5 },
+    };
+    revertCommits.mockResolvedValueOnce(preview);
+    revertCommits.mockResolvedValueOnce(conflict);
+    const onSnapshot = vi.fn();
+    const onMerge = vi.fn();
+    render(HistoryPanel, { props: { ...panelProps(), onSnapshot, onMerge } });
+    await fireEvent.contextMenu(await screen.findByRole("option", { name: /commit-0/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: "还原此提交…" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "确认还原提交" }));
+    await waitFor(() => expect(onMerge).toHaveBeenCalledTimes(1));
+    expect(onSnapshot).toHaveBeenCalledWith(expect.objectContaining({ generation: 5 }));
+    expect(screen.queryByRole("dialog", { name: "还原提交" })).toBeNull();
+  });
+
+  it("还原失败保留就地错误；检测到仍在进行中的还原时刷新快照并打开面板", async () => {
+    const head = commit(0);
+    historyPage.mockResolvedValue({
+      generation: 3, commits: [head], hasMore: false, offset: 0, pageSize: 100, state: "ok",
+      scope: "current", branches: ["main"], head: "main",
+    });
+    const preview = {
+      generation: 3,
+      code: "ok",
+      eligible: true,
+      wrote: false,
+      headOid: "abc",
+      targets: [{ oid: head.oid, summary: head.summary, authorName: "Ada", authoredAt: 1 }],
+      created: 0,
+      conflicted: false,
+      note: "将按由新到旧的顺序还原 1 个提交。不会推送。取消不会写入。",
+      snapshot: opened.snapshot,
+    };
+    const failure = {
+      code: "revert_failed",
+      message: "本次还原没有完成。本次还原已创建 1 个提交。Git 仍处于还原进行中；可以中止回到本次还原开始前，不能跳过。",
+      generation: 6,
+    };
+    revertCommits.mockResolvedValueOnce(preview);
+    revertCommits.mockRejectedValueOnce(failure);
+    mergeSession.mockResolvedValue({
+      generation: 6,
+      operation: "revert",
+      canContinue: false,
+      canAbort: true,
+      source: null,
+      target: "main",
+      headOid: "c".repeat(40),
+      conflicts: [],
+      unresolved: 0,
+      note: "还原序列停在后续目标，无法继续应用。可以中止回到本次还原开始前。",
+      snapshot: { ...opened.snapshot, generation: 6 },
+    });
+    const onFailure = vi.fn();
+    const onSnapshot = vi.fn();
+    const onMerge = vi.fn();
+    render(HistoryPanel, { props: { ...panelProps(), onFailure, onSnapshot, onMerge } });
+    await fireEvent.contextMenu(await screen.findByRole("option", { name: /commit-0/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: "还原此提交…" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "确认还原提交" }));
+    await waitFor(() => expect(onFailure).toHaveBeenCalledWith(expect.objectContaining({ code: "revert_failed" })));
+    expect(mergeSession).toHaveBeenCalledWith("/repo", 6, 1);
+    expect(onSnapshot).toHaveBeenCalledWith(expect.objectContaining({ generation: 6 }));
+    await waitFor(() => expect(onMerge).toHaveBeenCalledTimes(1));
+  });
+
+  it("还原确认失败且没有残留会话时就地保留错误，可以重试", async () => {
+    const head = commit(0);
+    historyPage.mockResolvedValue({
+      generation: 3, commits: [head], hasMore: false, offset: 0, pageSize: 100, state: "ok",
+      scope: "current", branches: ["main"], head: "main",
+    });
+    const preview = {
+      generation: 3,
+      code: "ok",
+      eligible: true,
+      wrote: false,
+      headOid: "abc",
+      targets: [{ oid: head.oid, summary: head.summary, authorName: "Ada", authoredAt: 1 }],
+      created: 0,
+      conflicted: false,
+      note: "将按由新到旧的顺序还原 1 个提交。不会推送。取消不会写入。",
+      snapshot: opened.snapshot,
+    };
+    revertCommits.mockResolvedValueOnce(preview);
+    revertCommits.mockRejectedValueOnce({ code: "revert_failed", message: "还原没有完成，仓库没有改动。", generation: 5 });
+    mergeSession.mockResolvedValue({
+      generation: 5,
+      operation: "none",
+      canContinue: false,
+      canAbort: false,
+      source: null,
+      target: "main",
+      headOid: "abc",
+      conflicts: [],
+      unresolved: 0,
+      note: "当前没有进行中的合并。",
+      snapshot: { ...opened.snapshot, generation: 5 },
+    });
+    const onFailure = vi.fn();
+    const onMerge = vi.fn();
+    const onSnapshot = vi.fn();
+    render(HistoryPanel, { props: { ...panelProps(), onFailure, onMerge, onSnapshot } });
+    await fireEvent.contextMenu(await screen.findByRole("option", { name: /commit-0/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: "还原此提交…" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "确认还原提交" }));
+    await waitFor(() => expect(onFailure).toHaveBeenCalledWith(expect.objectContaining({ code: "revert_failed" })));
+    // 失败就地显示在确认层里，确认按钮恢复可用，取消仍然不写入。
+    expect(await screen.findByText("还原没有完成，仓库没有改动。")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "确认还原提交" }).hasAttribute("disabled")).toBe(false);
+    expect(mergeSession).toHaveBeenCalledWith("/repo", 5, 1);
+    expect(onSnapshot).toHaveBeenCalledWith(expect.objectContaining({ generation: 5 }));
+    expect(onMerge).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("dialog", { name: "还原提交" })).toBeNull();
+    expect(revertCommits).toHaveBeenCalledTimes(2);
+  });
+
+  it("还原写入在途时取消不生效，结果落地后才收起", async () => {
+    const head = commit(0);
+    historyPage.mockResolvedValue({
+      generation: 3, commits: [head], hasMore: false, offset: 0, pageSize: 100, state: "ok",
+      scope: "current", branches: ["main"], head: "main",
+    });
+    const preview = {
+      generation: 3,
+      code: "ok",
+      eligible: true,
+      wrote: false,
+      headOid: "abc",
+      targets: [{ oid: head.oid, summary: head.summary, authorName: "Ada", authoredAt: 1 }],
+      created: 0,
+      conflicted: false,
+      note: "将按由新到旧的顺序还原 1 个提交。不会推送。取消不会写入。",
+      snapshot: opened.snapshot,
+    };
+    let finish: (value: unknown) => void = () => {};
+    revertCommits.mockResolvedValueOnce(preview);
+    revertCommits.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    render(HistoryPanel, { props: panelProps() });
+    await fireEvent.contextMenu(await screen.findByRole("option", { name: /commit-0/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: "还原此提交…" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "确认还原提交" }));
+    await tick();
+    expect(screen.getByRole("button", { name: "取消" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "关闭对话框" }).hasAttribute("disabled")).toBe(true);
+    await fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(screen.getByRole("dialog", { name: "还原提交" })).toBeTruthy();
+
+    finish({ generation: 5, wrote: true, created: 1, conflicted: false, note: "已创建 1 个逆向提交。", snapshot: { ...opened.snapshot, generation: 5 } });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "还原提交" })).toBeNull());
   });
 
   it("长列表只渲染可见提交，并显示父提交和分支", async () => {
@@ -992,6 +1263,7 @@ describe("历史面板", () => {
     // 禁用项把原因写在条目里，整条 textContent 不再是名称；顺序按 .context-label 读。
     expect(screen.getAllByRole("menuitem").map((item) => item.querySelector(".context-label")?.textContent)).toEqual([
       "拣选到当前分支",
+      "还原此提交…",
       "检出此提交",
       "撤销最近提交并保留改动",
       "从此提交新建分支",
@@ -1031,7 +1303,7 @@ describe("历史面板", () => {
     expect(within(union).queryByText("b.txt")).toBeNull();
     expect(commitDetail).not.toHaveBeenCalledWith("/repo", second.oid, null, 3, 1);
     await fireEvent.contextMenu(screen.getByRole("option", { name: /commit-1/ }));
-    expect(screen.getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["拣选这些提交", "复制哈希"]);
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["拣选这些提交", "还原这些提交…", "复制哈希"]);
     await fireEvent.click(screen.getByRole("menuitem", { name: "拣选这些提交" }));
     await waitFor(() => expect(cherryPickCommits).toHaveBeenCalledWith("/repo", [first.oid, second.oid], 3, 1));
     expect(onNotice).toHaveBeenCalledWith("已按从旧到新拣选到当前分支。没有推送。");

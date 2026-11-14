@@ -716,6 +716,32 @@ export interface CherryPickOutcome {
   snapshot: StatusSnapshot;
 }
 
+/** 还原预览里的一个目标提交：顺序与调用方确认的列表一致（由新到旧）。 */
+export interface RevertTarget {
+  oid: string;
+  summary: string;
+  authorName: string;
+  authoredAt: number;
+}
+
+export interface RevertOutcome {
+  generation: number;
+  /** ok / revert_conflict，或预览、确认被拒绝的原因代码。 */
+  code: string;
+  eligible: boolean;
+  wrote: boolean;
+  /** 预览时是当时的 HEAD；确认后是写入完成后的 HEAD。 */
+  headOid: string | null;
+  /** 按输入顺序（由新到旧）排列的目标提交。 */
+  targets: RevertTarget[];
+  /** 实际创建的逆向提交数。 */
+  created: number;
+  /** 是否停在冲突。为 true 时 created 可能小于目标数。 */
+  conflicted: boolean;
+  note: string;
+  snapshot: StatusSnapshot;
+}
+
 export interface StashPreview {
   trackedCount: number;
   untrackedCount: number;

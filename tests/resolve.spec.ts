@@ -2,11 +2,14 @@ import { fireEvent, render, screen, within } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  abortActionLabel,
   canCompleteMerge,
   conflictKindLabel,
+  continueActionLabel,
   discardActionLabel,
   discardBoundary,
   operationCaption,
+  operationVerb,
   showMergeAbort,
   undoActionLabel,
 } from "../src/lib/resolve";
@@ -42,6 +45,7 @@ vi.mock("../src/lib/api", () => ({
 
 import MergePanel, { adjacentPendingFile, clearConflictDrafts } from "../src/lib/components/MergePanel.svelte";
 import MergeModal from "../src/lib/components/MergeModal.svelte";
+import MergeBanner, { mergeNotice } from "../src/lib/components/MergeBanner.svelte";
 import PublishModal from "../src/lib/components/PublishModal.svelte";
 import RecoveryActions from "../src/lib/components/RecoveryActions.svelte";
 import ScopeModal from "../src/lib/components/ScopeModal.svelte";
@@ -109,6 +113,7 @@ describe("合并与恢复文案", () => {
     expect(operationCaption("merge")).toBe("正在进行分支合并");
     expect(operationCaption("rebase")).toBe("正在变基");
     expect(operationCaption("cherry-pick")).toBe("正在拣选");
+    expect(operationCaption("revert")).toBe("正在还原提交");
     expect(operationCaption("unmerged")).toContain("不是分支合并");
     expect(operationCaption("none")).toContain("没有进行中的合并");
     expect(conflictKindLabel("binary")).toBe("二进制冲突");
@@ -119,14 +124,57 @@ describe("合并与恢复文案", () => {
     expect(canCompleteMerge("rebase", 1)).toBe(false);
     expect(canCompleteMerge("cherry-pick", 0)).toBe(true);
     expect(canCompleteMerge("cherry-pick", 1)).toBe(false);
+    expect(canCompleteMerge("revert", 0)).toBe(true);
+    expect(canCompleteMerge("revert", 1)).toBe(false);
+    // sequencer 停在后续目标时不能继续，只能中止。
+    expect(canCompleteMerge("revert", 0, false)).toBe(false);
     expect(showMergeAbort("rebase", true)).toBe(true);
     expect(showMergeAbort("cherry-pick", false)).toBe(false);
+    expect(showMergeAbort("revert", true)).toBe(true);
     expect(showMergeAbort("unmerged", true)).toBe(false);
     expect(showMergeAbort("merge", true)).toBe(true);
+    expect(operationVerb("revert")).toBe("还原");
+    expect(continueActionLabel("revert")).toBe("继续还原");
+    expect(abortActionLabel("revert")).toBe("中止还原");
     expect(undoActionLabel()).toContain("撤销最近提交");
     expect(undoActionLabel()).not.toBe(discardActionLabel());
     expect(discardActionLabel()).toContain("放弃");
     expect(discardBoundary()).toContain("取消不写入");
+  });
+});
+
+describe("还原提示", () => {
+  it("还原进行中显示还原文案和中止还原，不伪装成分支合并", () => {
+    const { container } = render(MergeBanner, {
+      props: {
+        conflictCount: 2,
+        mergeInProgress: true,
+        operation: "revert",
+        canAbort: true,
+        onOpen: vi.fn(),
+        onAbort: vi.fn(),
+      },
+    });
+    const banner = container.querySelector<HTMLElement>("[data-merge-banner]")!;
+    expect(banner.textContent).toContain("2 个还原冲突待处理");
+    expect(banner.getAttribute("aria-label")).toContain("还原进行中");
+    expect(banner.getAttribute("title")).toContain("还原");
+    expect(banner.textContent).not.toContain("合并");
+    const abort = container.querySelector<HTMLElement>("[data-merge-abort]")!;
+    expect(abort.getAttribute("aria-label")).toBe("中止还原");
+    expect(abort.getAttribute("title")).toContain("中止还原");
+    expect(mergeNotice(2, true, "revert")?.label).not.toContain("分支合并");
+  });
+
+  it("冲突已解决但仍进行中时提示继续还原；没有操作时与既有合并文案保持一致", () => {
+    expect(mergeNotice(0, true, "revert")?.text).toBe("可以继续还原");
+    expect(mergeNotice(0, false, "revert")).toBeNull();
+    expect(mergeNotice(2, true, "merge")?.text).toBe("2 个冲突待处理");
+    expect(mergeNotice(0, true, "merge")?.text).toBe("可以完成合并");
+    expect(mergeNotice(2, true, "merge")?.label).toContain("打开分支合并");
+    // 还原序列停在后续目标：不能说可以继续，只能中止。
+    expect(mergeNotice(0, true, "revert", false)?.text).toBe("还原停在后续目标，可以中止");
+    expect(mergeNotice(0, true, "revert", false)?.label).toContain("打开还原");
   });
 });
 
@@ -139,6 +187,7 @@ describe("合并面板", () => {
     startMerge.mockReset();
     completeMerge.mockReset();
     conflictView.mockReset();
+    abortMerge.mockReset();
     branchState.mockResolvedValue({ generation: 4, branches: [], snapshot: opened.snapshot });
   });
 
@@ -171,6 +220,143 @@ describe("合并面板", () => {
     expect(screen.getByRole("button", { name: "中止变基" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /跳过/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "完成合并" })).toBeNull();
+  });
+
+  it("还原冲突显示继续/中止还原，不出现完成合并或跳过", async () => {
+    mergeSession.mockResolvedValue(
+      session({
+        operation: "revert",
+        canAbort: true,
+        canContinue: false,
+        unresolved: 1,
+        conflicts: [{ path: "file.txt", kind: "text", summary: "文本" }],
+        note: "正在还原（revert）。还有 1 个未解决冲突，不能完成。解决后可以继续，也可以中止。不能跳过。",
+      }),
+    );
+    render(MergePanel, {
+      opened,
+      disabled: false,
+      nextId: () => 1,
+      onSnapshot: () => {},
+      onGeneration: () => {},
+      onFailure: () => {},
+      onNotice: () => {},
+      onOpenStash: () => {},
+    });
+    const continueRevert = await screen.findByRole("button", { name: "继续还原" });
+    expect(continueRevert.hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "中止还原" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "完成合并" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /跳过/ })).toBeNull();
+    expect(screen.getAllByText(/正在还原/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/合并进行中/)).toBeNull();
+  });
+
+  it("中止还原先确认并说明已创建的提交会被撤销", async () => {
+    mergeSession.mockResolvedValueOnce(
+      session({
+        operation: "revert",
+        canAbort: true,
+        canContinue: false,
+        unresolved: 1,
+        conflicts: [{ path: "file.txt", kind: "text", summary: "文本" }],
+        note: "正在还原（revert）。还有 1 个未解决冲突，不能完成。",
+      }),
+    );
+    mergeSession.mockResolvedValue(session());
+    abortMerge.mockResolvedValue({
+      generation: 8,
+      wrote: false,
+      paths: ["file.txt"],
+      stashOids: [],
+      note: "中止会撤销这次还原，并恢复原状态。",
+      snapshot: opened.snapshot,
+    });
+    render(MergePanel, {
+      opened,
+      disabled: false,
+      nextId: () => 1,
+      onSnapshot: () => {},
+      onGeneration: () => {},
+      onFailure: () => {},
+      onNotice: () => {},
+      onOpenStash: () => {},
+    });
+    await fireEvent.click(await screen.findByRole("button", { name: "中止还原" }));
+    const dialog = await screen.findByRole("dialog", { name: "中止还原" });
+    expect(abortMerge).toHaveBeenCalledWith("/repo", false, 4, 1);
+    expect(dialog.textContent).toContain("本次还原已创建的提交也会一并撤销");
+    expect(dialog.textContent).toContain("仓库回到本次还原开始前的状态");
+    await fireEvent.click(within(dialog).getByRole("button", { name: "中止还原" }));
+    await vi.waitFor(() => expect(abortMerge).toHaveBeenLastCalledWith("/repo", true, 8, 1));
+  });
+
+  it("sequencer 停在后续目标时只能中止，不能把暂停说成可继续", async () => {
+    mergeSession.mockResolvedValue(
+      session({
+        operation: "revert",
+        canAbort: true,
+        canContinue: false,
+        unresolved: 0,
+        conflicts: [],
+        note: "还原序列停在后续目标，无法继续应用。可以中止回到本次还原开始前。",
+      }),
+    );
+    render(MergePanel, {
+      opened,
+      disabled: false,
+      nextId: () => 1,
+      onSnapshot: () => {},
+      onGeneration: () => {},
+      onFailure: () => {},
+      onNotice: () => {},
+      onOpenStash: () => {},
+    });
+    const continueRevert = await screen.findByRole("button", { name: "继续还原" });
+    expect(continueRevert.hasAttribute("disabled")).toBe(true);
+    expect(continueRevert.getAttribute("title")).toContain("只能中止");
+    expect(screen.getByRole("button", { name: "中止还原" })).toBeTruthy();
+    expect(screen.getAllByText(/序列停在后续目标/).length).toBeGreaterThan(0);
+  });
+
+  it("继续还原完成后显示还原完成页，只提供查看历史", async () => {
+    mergeSession.mockResolvedValueOnce(
+      session({
+        operation: "revert",
+        canAbort: true,
+        canContinue: true,
+        unresolved: 0,
+        conflicts: [],
+        note: "正在还原（revert）。冲突已全部标记，可以继续。",
+      }),
+    );
+    mergeSession.mockResolvedValue(session());
+    completeMerge.mockResolvedValue({
+      oid: "d".repeat(40),
+      generation: 7,
+      summary: "已继续还原，后续目标已处理。没有推送。",
+      files: [],
+      snapshot: opened.snapshot,
+    });
+    const onOpenHistory = vi.fn();
+    render(MergePanel, {
+      opened,
+      disabled: false,
+      nextId: () => 3,
+      onSnapshot: () => {},
+      onGeneration: () => {},
+      onFailure: () => {},
+      onNotice: () => {},
+      onOpenStash: () => {},
+      onOpenHistory,
+    });
+    await fireEvent.click(await screen.findByRole("button", { name: "继续还原" }));
+    expect(await screen.findByText("已继续还原")).toBeTruthy();
+    expect(completeMerge).toHaveBeenCalledWith("/repo", "", 4, 3, "revert");
+    expect(screen.queryByRole("button", { name: "再合并一次" })).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "查看提交历史" }));
+    expect(onOpenHistory).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/尚未推送/)).toBeTruthy();
   });
 
   it("未解决冲突时不能完成合并", async () => {
@@ -545,7 +731,7 @@ describe("合并面板", () => {
       onOpenStash: () => {},
     });
     await fireEvent.click(await screen.findByRole("button", { name: "继续变基" }));
-    await vi.waitFor(() => expect(completeMerge).toHaveBeenCalledWith("/repo", expect.any(String), 4, 1));
+    await vi.waitFor(() => expect(completeMerge).toHaveBeenCalledWith("/repo", expect.any(String), 4, 1, "rebase"));
     await vi.waitFor(() => expect(onFailure).toHaveBeenCalled());
     expect(await screen.findByRole("button", { name: "继续变基" })).toBeTruthy();
     expect((await screen.findByRole("button", { name: "继续变基" })).hasAttribute("disabled")).toBe(true);
@@ -1005,6 +1191,56 @@ describe("合并任务 modal", () => {
     await vi.waitFor(() => expect(document.querySelector(".mp-body")).toBeNull());
     expect(document.querySelector(".mp-head"), "标题行里的路由也一起移除").toBeNull();
     expect(document.querySelector(".mp-head-host"), "常驻节点留在落点").toBeTruthy();
+  });
+
+  it("还原会话的窗口标题与冲突底部提示显示还原语义", async () => {
+    clearConflictDrafts();
+    mergeSession.mockResolvedValueOnce(
+      session({
+        operation: "revert",
+        canAbort: true,
+        canContinue: true,
+        unresolved: 1,
+        conflicts: [{ path: "revert.txt", kind: "text", summary: "文本" }],
+        note: "正在还原（revert）。还有 1 个未解决冲突。",
+      }),
+    );
+    conflictView.mockResolvedValue({
+      generation: 4,
+      path: "revert.txt",
+      kind: "text",
+      editable: true,
+      ours: { present: true, binary: false, truncated: false, text: "ours\n", summary: "当前" },
+      theirs: { present: true, binary: false, truncated: false, text: "theirs\n", summary: "被还原的提交" },
+      result: {
+        present: true,
+        binary: false,
+        truncated: false,
+        text: "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> main\n",
+        summary: "结果",
+      },
+      note: "可以编辑还原冲突。",
+    });
+    renderMergeModal();
+    expect(await screen.findByRole("dialog", { name: "还原冲突" })).toBeTruthy();
+    await fireEvent.click(await screen.findByRole("button", { name: "采用当前" }));
+    expect(await screen.findByText(/标记后可以继续还原/)).toBeTruthy();
+    expect(screen.queryByText(/标记后可以完成合并/)).toBeNull();
+  });
+
+  it("还原暂停会话的窗口标题显示还原提交", async () => {
+    mergeSession.mockResolvedValueOnce(
+      session({
+        operation: "revert",
+        canAbort: true,
+        canContinue: false,
+        unresolved: 0,
+        conflicts: [],
+        note: "还原序列停在后续目标，无法继续应用。",
+      }),
+    );
+    renderMergeModal();
+    expect(await screen.findByRole("dialog", { name: "还原提交" })).toBeTruthy();
   });
 
   it("完成后冲突界面完全移除，只剩完成页", async () => {

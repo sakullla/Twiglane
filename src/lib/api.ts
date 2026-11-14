@@ -58,6 +58,7 @@ import type {
   Theme,
   PullIntegration,
   UndoResult,
+  RevertOutcome,
 } from "./types";
 
 /** 历史筛选。缺省字段不传，后端按当前分支、无作者、无日期、无路径处理。 */
@@ -635,6 +636,31 @@ export const api = {
     }),
   cherryPickCommits: (path: string, oids: string[], generation: number, requestId: number) =>
     invoke<CherryPickOutcome>("cherry_pick_commits", { path, oids, generation, requestId }),
+  /**
+   * 还原一组普通提交：先以 confirm=false 预览由新到旧的目标，确认后在本地创建逆向提交，不推送。
+   * 只有真正创建了提交才记录 cliora committed；预览、取消、失败和未创建任何提交的冲突都不记录。
+   */
+  revertCommits: async (
+    path: string,
+    oids: string[],
+    expectedHead: string,
+    confirm: boolean,
+    generation: number,
+    requestId: number,
+  ) => {
+    const result = await invoke<RevertOutcome>("revert_commits", {
+      path,
+      oids,
+      expectedHead,
+      confirm,
+      generation,
+      requestId,
+    });
+    if (result.wrote && result.created > 0 && result.headOid) {
+      recordClioraCommit(path, result.headOid);
+    }
+    return result;
+  },
   checkoutCommit: (path: string, oid: string, generation: number, requestId: number) =>
     invoke<StatusSnapshot>("checkout_commit", { path, oid, generation, requestId }),
   stashState: (path: string, includeUntracked: boolean, generation: number, requestId: number) =>
@@ -699,9 +725,20 @@ export const api = {
       generation,
       requestId,
     }),
-  completeMerge: async (path: string, message: string, generation: number, requestId: number) => {
+  /**
+   * 结束当前冲突会话。merge 保持既有 merged 回送；revert 继续完成后是逆向提交，
+   * 按 committed 记录。其他操作沿用原有的 merged 语义。
+   */
+  completeMerge: async (
+    path: string,
+    message: string,
+    generation: number,
+    requestId: number,
+    operation: string | null = null,
+  ) => {
     const done = await invoke<MergeComplete>("complete_merge", { path, message, generation, requestId });
-    recordClioraMerge(path, done.oid);
+    if (operation === "revert") recordClioraCommit(path, done.oid);
+    else recordClioraMerge(path, done.oid);
     return done;
   },
   abortMerge: (path: string, confirm: boolean, generation: number, requestId: number) =>

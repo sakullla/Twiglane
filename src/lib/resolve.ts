@@ -7,7 +7,7 @@ export function operationCaption(operation: string): string {
     case "cherry-pick":
       return "正在拣选";
     case "revert":
-      return "检测到 revert 进行中";
+      return "正在还原提交";
     case "bisect":
       return "检测到 bisect 进行中";
     case "unmerged":
@@ -15,6 +15,34 @@ export function operationCaption(operation: string): string {
     default:
       return "没有进行中的合并";
   }
+}
+
+/** 进行中的操作以哪个动词描述：还原文案不能借用“合并”。 */
+export function operationVerb(operation: string): string {
+  switch (operation) {
+    case "rebase":
+      return "变基";
+    case "cherry-pick":
+      return "拣选";
+    case "revert":
+      return "还原";
+    default:
+      return "合并";
+  }
+}
+
+export function continueActionLabel(operation: string): string {
+  if (operation === "rebase") return "继续变基";
+  if (operation === "cherry-pick") return "继续拣选";
+  if (operation === "revert") return "继续还原";
+  return "完成合并";
+}
+
+export function abortActionLabel(operation: string): string {
+  if (operation === "rebase") return "中止变基";
+  if (operation === "cherry-pick") return "中止拣选";
+  if (operation === "revert") return "中止还原";
+  return "中止合并";
 }
 
 export function conflictKindLabel(kind: string): string {
@@ -36,12 +64,26 @@ export function conflictKindLabel(kind: string): string {
   }
 }
 
-export function canCompleteMerge(operation: string, unresolved: number): boolean {
-  return (operation === "merge" || operation === "rebase" || operation === "cherry-pick") && unresolved === 0;
+/**
+ * 能否结束当前会话：revert 也要继续，但 sequencer 停在后续目标（canContinue 为 false）时
+ * 只能中止，不能继续。旧调用方不传 canContinue 时保持原有“只看冲突数”的结论。
+ */
+export function canCompleteMerge(operation: string, unresolved: number, canContinue = true): boolean {
+  return (
+    (operation === "merge" || operation === "rebase" || operation === "cherry-pick" || operation === "revert") &&
+    unresolved === 0 &&
+    canContinue
+  );
 }
 
 export function showMergeAbort(operation: string, canAbort: boolean): boolean {
-  return (operation === "merge" || operation === "rebase" || operation === "cherry-pick") && canAbort;
+  return (
+    (operation === "merge" ||
+      operation === "rebase" ||
+      operation === "cherry-pick" ||
+      operation === "revert") &&
+    canAbort
+  );
 }
 
 export function discardBoundary(): string {

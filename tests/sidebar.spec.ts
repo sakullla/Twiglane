@@ -637,6 +637,30 @@ describe("状态栏", () => {
     expect(container.querySelector("[data-merge-status]")).toBeNull();
   });
 
+  it("侧栏隐藏时还原提示显示还原文案，不显示合并进行中", async () => {
+    const onOpenMerge = vi.fn();
+    const base = {
+      hasRepo: true,
+      sync: "",
+      conflictCount: 2,
+      mergeInProgress: true,
+      mergeOperation: "revert",
+      mergeCanContinue: false,
+      sidebarHidden: true,
+      onOpenMerge,
+    };
+    const { container, rerender } = render(StatusBar, { props: base as never });
+    const notice = screen.getByRole("button", { name: "还原进行中，2 个还原冲突待处理，打开还原" });
+    expect(notice.textContent).toContain("2 个还原冲突待处理");
+    expect(notice.getAttribute("title")).toBe("打开还原继续处理");
+    expect(screen.queryByText(/合并进行中/)).toBeNull();
+
+    await rerender({ ...base, conflictCount: 0, mergeCanContinue: false } as never);
+    expect(container.querySelector("[data-merge-status]")?.textContent, "暂停时只能说中止").toContain("还原停在后续目标，可以中止");
+    await rerender({ ...base, conflictCount: 0, mergeCanContinue: true } as never);
+    expect(container.querySelector("[data-merge-status]")?.textContent).toContain("可以继续还原");
+  });
+
   it("隐藏侧栏按钮说出下一步动作，没有仓库时不显示", async () => {
     const onToggleSidebar = vi.fn();
     const { rerender } = render(StatusBar, { props: { hasRepo: true, sync: "", onToggleSidebar } as never });

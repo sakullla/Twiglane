@@ -85,6 +85,8 @@
     /** 从某个提交新建分支后回写最新状态（切换时工作区与分支都会变）。 */
     onSnapshot?: (snapshot: StatusSnapshot) => void;
     onNotice?: (message: string) => void;
+    /** 打开现有冲突面板（还原冲突后由外壳切到合并任务，继续/中止在那里完成）。 */
+    onMerge?: () => void;
     /** 变更文件的上一个/下一个状态：外壳据此响应 file.prev、file.next。 */
     onFileNav?: (nav: FileNavState | null) => void;
     /** 单文件差异的上一处/下一处改动。全部文件视图不报，那里没有一条可滚的差异。 */
@@ -188,6 +190,7 @@
     onClearFile,
     onSnapshot,
     onNotice,
+    onMerge,
     onFileNav,
     onHunkNav,
     onActivity,
@@ -246,6 +249,13 @@
     return disabled ? "正在读取或写入，稍后再试" : undefined;
   }
 
+  /** 还原只适用于本地分支上的提交；游离/未出生分支在打开预览前就说清原因。 */
+  function revertReason(): string | undefined {
+    if (opened.snapshot.branch.detached) return "请先切换到本地分支";
+    if (opened.snapshot.branch.unborn || !opened.snapshot.branch.headOid) return "当前分支还没有可还原的提交";
+    return writeReason();
+  }
+
   function orderedSelection(ids: string[]): string[] {
     const chosen = new Set(ids);
     return commits.filter((commit) => chosen.has(commit.oid)).map((commit) => commit.oid);
@@ -268,6 +278,13 @@
             disabledReason: writeReason(),
             run: () => void runCherryPick(ordered),
           },
+          {
+            id: "revert",
+            label: "还原这些提交…",
+            icon: "undo",
+            disabledReason: revertReason(),
+            run: () => void recovery.revertCommits(selectedCommits),
+          },
           { id: "hash", label: "复制哈希", icon: "copy", run: () => void copyText(ordered.join("\n"), ` ${ordered.length} 个提交哈希`) },
         ]
       : [
@@ -277,6 +294,13 @@
             icon: "merge",
             disabledReason: writeReason(),
             run: () => void runCherryPick([commit.oid]),
+          },
+          {
+            id: "revert",
+            label: "还原此提交…",
+            icon: "undo",
+            disabledReason: revertReason(),
+            run: () => void recovery.revertCommits([commit]),
           },
           {
             id: "checkout",
@@ -2593,7 +2617,7 @@
   variant="headless"
   onSnapshot={(snapshot) => { onGeneration(snapshot.generation); onSnapshot?.(snapshot); }}
   onNotice={(message) => onNotice?.(message)}
-  onMerge={() => {}}
+  onMerge={() => onMerge?.()}
 />
 <style>
   /* 拓扑只是一条紧凑的竖条：每行只画自己的竖线、节点和行内斜线，没有全尺寸历史 SVG。

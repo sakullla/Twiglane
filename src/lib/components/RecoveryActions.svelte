@@ -6,7 +6,15 @@
   import { shortOid } from "../history";
   import { visibleRange } from "../layout";
   import { discardActionLabel, discardBoundary, undoActionLabel } from "../resolve";
-  import type { DiscardFilePlan, OpenedRepository, StatusSnapshot, UndoResult } from "../types";
+  import type {
+    DiscardFilePlan,
+    HistoryCommit,
+    MergeSession,
+    OpenedRepository,
+    RevertOutcome,
+    StatusSnapshot,
+    UndoResult,
+  } from "../types";
   import Icon from "./Icon.svelte";
   import ConfirmDialog from "./ConfirmDialog.svelte";
 
@@ -29,13 +37,16 @@
 
   let { opened, disabled, nextId, onSnapshot, onFailure, onNotice, onMerge, variant = "toolbar", onSettled }: Props = $props();
 
-  let mode = $state<"discard" | "undo" | null>(null);
+  let mode = $state<"discard" | "undo" | "revert" | null>(null);
   let plans = $state<DiscardFilePlan[]>([]);
   let checked = $state<string[]>([]);
   let boundary = $state(discardBoundary());
   let undo = $state<UndoResult | null>(null);
   /** 撤销预览所属仓库：确认写入前必须与当前仓库一致。 */
   let undoRepository = "";
+  /** 还原预览：目标顺序与后端返回一致（由新到旧），确认只使用这份预览。 */
+  let revert = $state<RevertOutcome | null>(null);
+  let revertRepository = "";
   /** 放弃预览所属仓库与 generation：确认写入只使用这份预览对应的仓库和状态。 */
   let discardRepository = "";
   let discardGeneration = 0;
@@ -79,6 +90,14 @@
     errorText = null;
   }
 
+  /** 收起并清空还原确认：旧预览的目标清单和仓库绑定一起丢弃。 */
+  function resetRevert() {
+    mode = null;
+    revert = null;
+    revertRepository = "";
+    errorText = null;
+  }
+
   /**
    * 仓库切换时，确认层里的清单属于旧仓库，必须作废。
    * 写入已经开始时结果仍可能落在原仓库，提示要如实说明，且本组件不再应用它。
@@ -97,6 +116,13 @@
         busy
           ? "仓库已切换，原仓库的撤销提交仍在处理中；结果不会应用到当前仓库。"
           : "仓库已切换，撤销提交的确认已作废，没有写入任何内容。",
+      );
+    } else if (mode === "revert" && revertRepository && revertRepository !== path) {
+      resetRevert();
+      onNotice(
+        busy
+          ? "仓库已切换，原仓库的还原提交仍在处理中；结果不会应用到当前仓库。"
+          : "仓库已切换，还原提交的确认已作废，没有写入任何内容。",
       );
     }
   }
@@ -282,6 +308,128 @@
     }
   }
 
+  /**
+   * 还原提交：先读预览（写锁之外，confirm=false），确认时才创建逆向提交。
+   * 传入的 commits 保持历史列表的顺序（由新到旧），预览返回的目标顺序原样展示与回传。
+   */
+  export async function revertCommits(commits: HistoryCommit[]) {
+    if (blocked || commits.length === 0) return;
+    await openRevert(commits.map((commit) => commit.oid));
+  }
+
+  async function openRevert(oids: string[]) {
+    if (busy || disabled || oids.length === 0) return;
+    const repository = opened.summary.path;
+    const generation = opened.generation;
+    const head = opened.snapshot.branch.headOid;
+    if (!head) {
+      errorText = "当前分支还没有可还原的提交。";
+      onFailure({ code: "revert_empty", message: errorText });
+      return;
+    }
+    busy = true;
+    errorText = null;
+    try {
+      const preview = await api.revertCommits(repository, oids, head, false, generation, nextId());
+      if (opened.summary.path !== repository) return;
+      revertRepository = repository;
+      revert = preview;
+      mode = "revert";
+    } catch (error) {
+      if (opened.summary.path !== repository) return;
+      const failure = normalizeError(error);
+      errorText = failure.message;
+      onFailure(failure);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function cancelRevert() {
+    if (busy) return;
+    resetRevert();
+  }
+
+  async function confirmRevert() {
+    const current = revert;
+    if (
+      busy ||
+      !current?.eligible ||
+      !revertRepository ||
+      revertRepository !== opened.summary.path ||
+      current.targets.length === 0
+    ) {
+      if (mode === "revert" && revertRepository !== opened.summary.path) {
+        invalidateStaleConfirmation(opened.summary.path);
+      }
+      return;
+    }
+    const repository = revertRepository;
+    const oids = current.targets.map((target) => target.oid);
+    busy = true;
+    errorText = null;
+    try {
+      const result = await api.revertCommits(
+        repository,
+        oids,
+        current.headOid ?? "",
+        true,
+        current.generation,
+        nextId(),
+      );
+      if (opened.summary.path !== repository) {
+        resetRevert();
+        return;
+      }
+      onSnapshot(result.snapshot);
+      onNotice(result.note);
+      if (result.conflicted) {
+        resetRevert();
+        // 冲突是正常进度：快照已回写，接着打开现有冲突面板，由用户解决后继续或中止。
+        onMerge();
+        return;
+      }
+      resetRevert();
+    } catch (error) {
+      if (opened.summary.path !== repository) {
+        resetRevert();
+        return;
+      }
+      const failure = normalizeError(error);
+      errorText = failure.message;
+      onFailure(failure);
+      await recoverRevertFailure(repository, failure.generation);
+    } finally {
+      busy = false;
+    }
+  }
+
+  /**
+   * 还原失败可能已经留下部分提交或 sequencer 状态。先刷新快照；检测到仍在进行中的还原时
+   * 打开现有冲突面板，让用户明确中止，而不是把有残留的状态显示成“什么都没发生”。
+   */
+  async function recoverRevertFailure(repository: string, generation?: number) {
+    const ask = (value: number) => api.mergeSession(repository, value, nextId());
+    try {
+      let session: MergeSession;
+      try {
+        session = await ask(generation ?? opened.generation);
+      } catch (error) {
+        const stale = normalizeError(error);
+        if (stale.code !== "stale" || stale.generation === undefined) throw stale;
+        session = await ask(stale.generation);
+      }
+      if (opened.summary.path !== repository) return;
+      onSnapshot(session.snapshot);
+      if (session.operation === "revert" && session.canAbort) {
+        resetRevert();
+        onMerge();
+      }
+    } catch {
+      // 刷新失败不覆盖最初的就地错误：它才是这次写入失败的直接证据。
+    }
+  }
+
   function sideText(plan: DiscardFilePlan): string {
     if (plan.untracked) return "未跟踪";
     const staged = changeLabel(plan.staged);
@@ -424,5 +572,32 @@
     error={errorText}
     onConfirm={() => void confirmUndo()}
     onCancel={cancelUndo}
+  />
+{/if}
+{#if mode === "revert" && revert}
+  <ConfirmDialog
+    title="还原提交"
+    titleId="revert-title"
+    icon="undo"
+    tone="warning"
+    message="为所选提交按由新到旧创建逆向提交。原提交仍在历史中，不会推送。"
+    targets={revert.targets.map((target) => ({
+      icon: "commit",
+      name: target.summary || "（没有提交说明）",
+      detail: shortOid(target.oid),
+    }))}
+    targetsLabel="要还原的提交（由新到旧）"
+    notes={[
+      { tone: revert.eligible ? "ok" : "warn", text: revert.note },
+      { tone: "info", text: "取消不会写入。还原出现冲突时进入冲突处理：解决后可以继续，也可以中止回到开始前，不能跳过。" },
+    ]}
+    confirmLabel={revert.targets.length > 1 ? `确认还原 ${revert.targets.length} 个提交` : "确认还原提交"}
+    confirmIcon="undo"
+    busy={busy}
+    confirmBlocked={!revert.eligible ? revert.note : disabled ? BUSY_REASON : null}
+    error={errorText}
+    focus="cancel"
+    onConfirm={() => void confirmRevert()}
+    onCancel={cancelRevert}
   />
 {/if}

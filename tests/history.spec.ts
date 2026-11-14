@@ -1052,6 +1052,54 @@ describe("历史面板", () => {
     }
   });
 
+  it("起止日期形成区间约束，可分别清除并保留另一侧边界", async () => {
+    historyPage.mockResolvedValue({
+      generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok",
+      commits: [commit(0)], scope: "current", branches: ["main"], head: "main",
+    });
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0/ });
+    await fireEvent.click(screen.getByRole("button", { name: "更多筛选" }));
+    const sinceInput = screen.getByLabelText("开始日期") as HTMLInputElement;
+    const untilInput = screen.getByLabelText("结束日期") as HTMLInputElement;
+    expect(sinceInput.type).toBe("date");
+    expect(untilInput.type).toBe("date");
+    expect(document.querySelectorAll(".history-date-range input[type=\"date\"]")).toHaveLength(2);
+    expect(document.querySelector(".history-date-range input[type=\"time\"]")).toBeNull();
+
+    await fireEvent.input(sinceInput, { target: { value: "2024-01-02" } });
+    await waitFor(() => expect(historyPage).toHaveBeenLastCalledWith("/repo", "", 0, 3, 1, {
+      since: historyDayBound("2024-01-02", false),
+    }));
+    expect(untilInput.min).toBe("2024-01-02");
+    expect(sinceInput.max).toBe("");
+
+    await fireEvent.input(untilInput, { target: { value: "2024-01-05" } });
+    await waitFor(() => expect(historyPage).toHaveBeenLastCalledWith("/repo", "", 0, 3, 1, {
+      since: historyDayBound("2024-01-02", false),
+      until: historyDayBound("2024-01-05", true),
+    }));
+    expect(sinceInput.max).toBe("2024-01-05");
+    expect(untilInput.min).toBe("2024-01-02");
+
+    await fireEvent.click(screen.getByRole("button", { name: "清除开始日期" }));
+    await waitFor(() => expect(historyPage).toHaveBeenLastCalledWith("/repo", "", 0, 3, 1, {
+      until: historyDayBound("2024-01-05", true),
+    }));
+    expect(sinceInput.value).toBe("");
+    expect(untilInput.value).toBe("2024-01-05");
+    expect(sinceInput.max).toBe("2024-01-05");
+    expect(untilInput.min).toBe("");
+    expect(screen.queryByRole("button", { name: "清除开始日期" })).toBeNull();
+
+    await fireEvent.click(screen.getByRole("button", { name: "清除结束日期" }));
+    await waitFor(() => expect(historyPage).toHaveBeenLastCalledWith("/repo", "", 0, 3, 1));
+    expect(sinceInput.value).toBe("");
+    expect(untilInput.value).toBe("");
+    expect(sinceInput.max).toBe("");
+    expect(screen.queryByRole("button", { name: "清除结束日期" })).toBeNull();
+  });
+
   it("搜索词在提交说明与哈希里加亮，收起筛选后生效条件成标签可逐项清除，计数改为匹配", async () => {
     vi.useFakeTimers();
     try {
@@ -1091,6 +1139,12 @@ describe("历史面板", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(historyPage).toHaveBeenLastCalledWith("/repo", "sync", 0, 3, 1, { since: historyDayBound("2024-01-02", false) });
       expect(screen.getByRole("button", { name: "更多筛选（已生效 1 项）" })).toBeTruthy();
+
+      historyPage.mockClear();
+      await fireEvent.click(within(chips).getByRole("button", { name: "清除开始日期：2024-01-02（含当天）" }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(historyPage).toHaveBeenLastCalledWith("/repo", "sync", 0, 3, 1);
+      expect(screen.queryByRole("list", { name: "生效的筛选条件" })).toBeNull();
 
       // 底栏「清除筛选」一次清掉搜索词与其余条件，计数回到「条提交」。
       historyPage.mockClear();
@@ -1809,7 +1863,7 @@ describe("历史面板", () => {
     expect(screen.queryByText("历史没有读取成功。")).toBeNull();
   });
 
-  it("无效日期归为筛选条件问题，不提供必然失败的重试", async () => {
+  it("无效或反向日期关联到日期组且零请求，修正或清除后恢复", async () => {
     historyPage.mockResolvedValue({
       generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok",
       commits: [commit(0)], scope: "current", branches: ["main"], head: "main",
@@ -1817,19 +1871,89 @@ describe("历史面板", () => {
     render(HistoryPanel, { props: panelProps() });
     await screen.findByRole("option", { name: /commit-0/ });
     await fireEvent.click(screen.getByRole("button", { name: "更多筛选" }));
-    await fireEvent.input(screen.getByLabelText("开始日期"), { target: { value: "2024-01-03" } });
-    await fireEvent.input(screen.getByLabelText("结束日期"), { target: { value: "2024-01-02" } });
+    const group = screen.getByRole("group", { name: "起止日期" });
+    const sinceInput = screen.getByLabelText("开始日期") as HTMLInputElement;
+    const untilInput = screen.getByLabelText("结束日期") as HTMLInputElement;
+    expect(group.getAttribute("aria-invalid")).toBe("false");
+    expect(sinceInput.getAttribute("aria-invalid")).toBe("false");
+    expect(untilInput.getAttribute("aria-invalid")).toBe("false");
+
+    await fireEvent.input(sinceInput, { target: { value: "2024-01-03" } });
+    await waitFor(() => expect(historyPage).toHaveBeenLastCalledWith("/repo", "", 0, 3, 1, {
+      since: historyDayBound("2024-01-03", false),
+    }));
+    historyPage.mockClear();
+    await fireEvent.input(untilInput, { target: { value: "2024-01-02" } });
 
     expect(await screen.findByText("筛选条件无效，未读取历史。")).toBeTruthy();
-    expect(screen.getByText("开始日期晚于结束日期，未读取历史，仓库没有改动。")).toBeTruthy();
+    expect(within(group).getByText("开始日期晚于结束日期，未读取历史，仓库没有改动。")).toBeTruthy();
+    expect(group.getAttribute("aria-invalid")).toBe("true");
+    expect(group.getAttribute("aria-describedby")).toBe("history-date-problem");
+    expect(sinceInput.getAttribute("aria-invalid")).toBe("true");
+    expect(untilInput.getAttribute("aria-invalid")).toBe("true");
+    expect(sinceInput.getAttribute("aria-describedby")).toBe("history-date-problem");
+    expect(untilInput.getAttribute("aria-describedby")).toBe("history-date-problem");
+    expect(within(group).getByRole("alert").id).toBe("history-date-problem");
+    expect(historyPage, "反向区间不能发起新查询").not.toHaveBeenCalled();
     expect(screen.queryByText("历史没有读取成功。"), "本地校验不是读取失败").toBeNull();
     expect(screen.queryByRole("button", { name: "重新读取" }), "条件没变时重试是死路").toBeNull();
     expect(screen.queryByRole("option", { name: /commit-0/ })).toBeNull();
 
-    await fireEvent.click(screen.getByRole("button", { name: "清除筛选条件" }));
-    await waitFor(() => expect(screen.queryByText("筛选条件无效，未读取历史。")).toBeNull());
+    await fireEvent.input(untilInput, { target: { value: "2024-01-04" } });
+    await waitFor(() => expect(historyPage).toHaveBeenLastCalledWith("/repo", "", 0, 3, 1, {
+      since: historyDayBound("2024-01-03", false),
+      until: historyDayBound("2024-01-04", true),
+    }));
     expect(await screen.findByRole("option", { name: /commit-0/ })).toBeTruthy();
-    expect(screen.getByRole("option", { name: /commit-0/ }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.queryByText("筛选条件无效，未读取历史。")).toBeNull();
+    expect(group.getAttribute("aria-invalid")).toBe("false");
+    expect(group.getAttribute("aria-describedby")).toBeNull();
+    expect(sinceInput.getAttribute("aria-describedby")).toBeNull();
+
+    historyPage.mockClear();
+    // 原生 value setter 会把非法日期清洗为空；模拟已有数据或程序输入绕过 setter 的无效值。
+    Object.defineProperty(sinceInput, "value", { configurable: true, writable: true, value: "2024-02-31" });
+    await fireEvent.input(sinceInput);
+    expect(await within(group).findByText("日期无效，未读取历史，仓库没有改动。")).toBeTruthy();
+    expect(group.getAttribute("aria-invalid")).toBe("true");
+    expect(historyPage, "无效日期不能发起新查询").not.toHaveBeenCalled();
+    expect(screen.queryByText("历史没有读取成功。")).toBeNull();
+
+    await fireEvent.click(screen.getByRole("button", { name: "清除开始日期" }));
+    await waitFor(() => expect(historyPage).toHaveBeenLastCalledWith("/repo", "", 0, 3, 1, {
+      until: historyDayBound("2024-01-04", true),
+    }));
+    expect(await screen.findByRole("option", { name: /commit-0/ })).toBeTruthy();
+    expect(screen.queryByText("筛选条件无效，未读取历史。")).toBeNull();
+    expect(sinceInput.value).toBe("");
+    expect(sinceInput.getAttribute("aria-invalid")).toBe("false");
+  });
+
+  it("文件历史沿用同一日期拦截和单侧清除语义", async () => {
+    fileHistory.mockResolvedValue({
+      generation: 3, path: "notes.txt", offset: 0, pageSize: 100, hasMore: false, state: "no_file_history",
+      commits: [],
+    });
+    render(HistoryPanel, { props: panelProps("notes.txt") });
+    await waitFor(() => expect(fileHistory).toHaveBeenCalledWith("/repo", "notes.txt", 0, 3, 1));
+    await fireEvent.click(screen.getByRole("button", { name: "更多筛选" }));
+    await fireEvent.input(screen.getByLabelText("开始日期"), { target: { value: "2024-01-03" } });
+    await waitFor(() => expect(fileHistory).toHaveBeenLastCalledWith("/repo", "notes.txt", 0, 3, 1, {
+      since: historyDayBound("2024-01-03", false),
+    }));
+
+    fileHistory.mockClear();
+    await fireEvent.input(screen.getByLabelText("结束日期"), { target: { value: "2024-01-02" } });
+    const group = screen.getByRole("group", { name: "起止日期" });
+    expect(await within(group).findByText("开始日期晚于结束日期，未读取历史，仓库没有改动。")).toBeTruthy();
+    expect(fileHistory).not.toHaveBeenCalled();
+    expect(historyPage).not.toHaveBeenCalled();
+
+    await fireEvent.click(screen.getByRole("button", { name: "清除结束日期" }));
+    await waitFor(() => expect(fileHistory).toHaveBeenLastCalledWith("/repo", "notes.txt", 0, 3, 1, {
+      since: historyDayBound("2024-01-03", false),
+    }));
+    expect(screen.queryByText("筛选条件无效，未读取历史。")).toBeNull();
   });
 });
 

@@ -1774,6 +1774,7 @@
             </button>
           </div>
           {#if moreFilters}
+          {@const dateError = dateProblem()}
           <div class="history-more-filters" id="history-more-filters">
             <div class="history-filter-field">
               <label for="history-author">作者 <span>姓名或邮箱</span></label>
@@ -1836,9 +1837,59 @@
                 {/if}
               </div>
             </div>
-            <div class="history-filter-row">
-              <label class="history-date-field"><span>开始日期</span><input class="input" type="date" aria-label="开始日期" value={sinceDay} oninput={(event) => setDay("since", event.currentTarget.value)} /></label>
-              <label class="history-date-field"><span>结束日期</span><input class="input" type="date" aria-label="结束日期" value={untilDay} oninput={(event) => setDay("until", event.currentTarget.value)} /></label>
+            <!-- 组级状态覆盖程序化反向区间；两个原生输入也分别关联同一错误。 -->
+            <!-- svelte-ignore a11y_role_supports_aria_props -->
+            <div
+              class="history-date-range"
+              role="group"
+              aria-label="起止日期"
+              aria-invalid={Boolean(dateError)}
+              aria-describedby={dateError ? "history-date-problem" : undefined}
+            >
+              <div class="history-filter-row">
+                <div class="history-date-field">
+                  <label for="history-since-day">开始日期</label>
+                  <div class="history-date-control">
+                    <input
+                      id="history-since-day"
+                      class="input"
+                      type="date"
+                      aria-label="开始日期"
+                      aria-invalid={Boolean(dateError)}
+                      aria-describedby={dateError ? "history-date-problem" : undefined}
+                      max={untilDay || undefined}
+                      value={sinceDay}
+                      oninput={(event) => setDay("since", event.currentTarget.value)}
+                    />
+                    {#if sinceDay}
+                      <button type="button" class="history-date-clear" aria-label="清除开始日期" title="清除开始日期" onclick={() => clearFilter("since")}><Icon name="x" size={12} /></button>
+                    {/if}
+                  </div>
+                </div>
+                <span class="history-date-separator" aria-hidden="true">至</span>
+                <div class="history-date-field">
+                  <label for="history-until-day">结束日期</label>
+                  <div class="history-date-control">
+                    <input
+                      id="history-until-day"
+                      class="input"
+                      type="date"
+                      aria-label="结束日期"
+                      aria-invalid={Boolean(dateError)}
+                      aria-describedby={dateError ? "history-date-problem" : undefined}
+                      min={sinceDay || undefined}
+                      value={untilDay}
+                      oninput={(event) => setDay("until", event.currentTarget.value)}
+                    />
+                    {#if untilDay}
+                      <button type="button" class="history-date-clear" aria-label="清除结束日期" title="清除结束日期" onclick={() => clearFilter("until")}><Icon name="x" size={12} /></button>
+                    {/if}
+                  </div>
+                </div>
+              </div>
+              {#if dateError}
+                <p class="history-date-problem" id="history-date-problem" role="alert"><Icon name="alert-circle" size={13} />{dateError}</p>
+              {/if}
             </div>
             <div class="history-filter-field">
               <label for="history-path">路径 <span>仓库相对路径</span></label>

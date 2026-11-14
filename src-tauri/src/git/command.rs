@@ -933,6 +933,22 @@ pub fn ancestor_command(
     (git.to_path_buf(), args)
 }
 
+/// 两个提交之间新增了多少提交（`from..to`，只用于已校验的提交标识）。
+pub fn commits_between_count_command(
+    git: &Path,
+    root: &Path,
+    from: &str,
+    to: &str,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("rev-list"),
+        OsString::from("--count"),
+        OsString::from(format!("{from}..{to}")),
+    ]);
+    (git.to_path_buf(), args)
+}
+
 pub fn cherry_pick_range_command(
     git: &Path,
     root: &Path,
@@ -1491,6 +1507,29 @@ pub fn cherry_pick_abort_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsStr
     (git.to_path_buf(), args)
 }
 
+/// 多提交还原按参数顺序（调用方已按由新到旧排好）生成逆向提交。
+/// `--no-edit` 沿用 Git 生成的 `Revert "..."` 说明，不打开编辑器；不跳过、不推送。
+pub fn revert_command(git: &Path, root: &Path, oids: &[String]) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([OsString::from("revert"), OsString::from("--no-edit")]);
+    for oid in oids {
+        args.push(OsString::from(oid));
+    }
+    (git.to_path_buf(), args)
+}
+
+pub fn revert_continue_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([OsString::from("revert"), OsString::from("--continue")]);
+    (git.to_path_buf(), args)
+}
+
+pub fn revert_abort_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([OsString::from("revert"), OsString::from("--abort")]);
+    (git.to_path_buf(), args)
+}
+
 pub fn unmerged_index_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.extend([
@@ -1968,12 +2007,37 @@ mod tests {
             .1
             .iter()
             .any(|arg| arg == "--abort"));
+        let revert_args = revert_command(git, root, &["aaa".to_string(), "bbb".to_string()]);
+        assert_eq!(revert_args.1[revert_args.1.len() - 4], "revert");
+        assert!(revert_args.1.iter().any(|arg| arg == "--no-edit"));
+        assert_eq!(
+            revert_args.1[revert_args.1.len() - 2],
+            OsString::from("aaa")
+        );
+        assert_eq!(
+            revert_args.1[revert_args.1.len() - 1],
+            OsString::from("bbb")
+        );
+        assert!(revert_continue_command(git, root)
+            .1
+            .iter()
+            .any(|arg| arg == "--continue"));
+        assert!(revert_abort_command(git, root)
+            .1
+            .iter()
+            .any(|arg| arg == "--abort"));
+        let between = commits_between_count_command(git, root, "aaa", "bbb").1;
+        assert!(between.iter().any(|arg| arg == "--count"));
+        assert!(between.iter().any(|arg| arg == "aaa..bbb"));
         for sequencer in [
             rebase_args.clone(),
             rebase_continue_command(git, root).1,
             rebase_abort_command(git, root).1,
             cherry_pick_continue_command(git, root).1,
             cherry_pick_abort_command(git, root).1,
+            revert_args.1.clone(),
+            revert_continue_command(git, root).1,
+            revert_abort_command(git, root).1,
         ] {
             assert!(!sequencer.iter().any(|arg| {
                 let text = arg.to_string_lossy();

@@ -486,6 +486,36 @@ pub struct CherryPickOutcome {
     pub snapshot: StatusSnapshot,
 }
 
+/// 还原预览里的一个目标提交，顺序与调用方确认的列表一致（由新到旧）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RevertTarget {
+    pub oid: String,
+    pub summary: String,
+    pub author_name: String,
+    pub authored_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RevertOutcome {
+    pub generation: u64,
+    /// `ok`、`revert_conflict`，或预览/确认被拒绝的原因代码。
+    pub code: String,
+    pub eligible: bool,
+    pub wrote: bool,
+    /// 预览时是当时的 HEAD；确认后是写入完成后的 HEAD。
+    pub head_oid: Option<String>,
+    /// 按输入顺序（由新到旧）排列的目标提交。
+    pub targets: Vec<RevertTarget>,
+    /// 实际创建的逆向提交数。
+    pub created: u32,
+    /// 是否停在冲突。为 true 时 `created` 可能小于目标数，不能报告为全部完成。
+    pub conflicted: bool,
+    pub note: String,
+    pub snapshot: StatusSnapshot,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StashPreview {

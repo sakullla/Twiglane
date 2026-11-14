@@ -10,15 +10,16 @@ use crate::git::command::{
     add_command, ancestor_command, branch_contains_command, cached_diff_quiet_command,
     cat_blob_command, checkout_index_stage_command, checkout_side_command,
     cherry_pick_abort_command, cherry_pick_continue_command, cherry_pick_range_command,
-    clean_files_command, commit_command, commit_no_edit_command, detach_at_command,
-    fetch_one_command, git_path_command, git_paths_command, hash_object_command, head_command,
-    history_details_command,
+    clean_files_command, commit_command, commit_no_edit_command, commits_between_count_command,
+    detach_at_command, fetch_one_command, git_path_command, git_paths_command, hash_object_command,
+    head_command, history_details_command,
     head_match_command, head_record_command, ls_remote_tags_command, merge_abort_command,
     merge_base_command, merge_divergence_command, merge_ff_only_command, merge_incoming_files_command,
     merge_incoming_log_command, merge_no_commit_command, merge_tree_command, push_reflog_command,
     rebase_abort_command, rebase_command, rebase_continue_command, remote_names_command,
     remote_tracking_command, remove_path_command, reset_soft_command, restore_worktree_command,
-    rev_parse_command, stash_list_command, status_command, switch_command, unmerged_index_command,
+    rev_parse_command, revert_abort_command, revert_command, revert_continue_command,
+    stash_list_command, status_command, switch_command, unmerged_index_command,
     update_index_info_command,
 };
 use crate::git::gate::action_key;
@@ -35,7 +36,7 @@ use crate::model::{
     AbortImpact, ChangeKind, CherryPickOutcome, CommitFileChange, ConflictEntry, ConflictSide,
     ConflictView,
     DiscardFilePlan, DiscardResult, FileChange, HistoryCommit, MergeComplete, MergePreview,
-    MergeSession, StatusSnapshot, UndoResult, MAX_DRAFT_CHARS,
+    MergeSession, RevertOutcome, RevertTarget, StatusSnapshot, UndoResult, MAX_DRAFT_CHARS,
 };
 use crate::redact::{contains_secret, redact_error_text};
 
@@ -854,11 +855,11 @@ fn session_from(
 }
 
 fn conflict_operation(operation: &str) -> bool {
-    matches!(operation, "merge" | "unmerged" | "rebase" | "cherry-pick")
+    matches!(operation, "merge" | "unmerged" | "rebase" | "cherry-pick" | "revert")
 }
 
 fn abortable_operation(operation: &str) -> bool {
-    matches!(operation, "merge" | "rebase" | "cherry-pick")
+    matches!(operation, "merge" | "rebase" | "cherry-pick" | "revert")
 }
 
 fn resolvable_operation(operation: &str) -> bool {
@@ -887,7 +888,12 @@ fn operation_note(operation: &str, source: Option<&str>, unresolved: u32) -> Str
         "cherry-pick" => format!(
             "正在拣选（cherry-pick）。还有 {unresolved} 个未解决冲突，不能完成。解决后可以继续，也可以中止。不能跳过。"
         ),
-        "revert" => "检测到 revert 进行中。这里不会伪造 revert 的继续或中止。".to_string(),
+        "revert" if unresolved == 0 => {
+            "正在还原（revert）。冲突已全部标记，可以继续。不能跳过。中止会让当前分支回到本次还原开始前。不会推送。".to_string()
+        }
+        "revert" => format!(
+            "正在还原（revert）。还有 {unresolved} 个未解决冲突，不能完成。解决后可以继续，也可以中止。不能跳过。"
+        ),
         "bisect" => "检测到 bisect 进行中。这里不会伪造 bisect 操作。".to_string(),
         "unmerged" => "工作区有未合并文件，但没有分支合并进行中。这不是合并，不能完成合并，也不能中止合并。可以逐个文件编辑结果、选择一侧或处理修改/删除。若来自临时保存，原记录仍保留。".to_string(),
         "none" => "当前没有进行中的合并。".to_string(),
@@ -1581,7 +1587,7 @@ async fn complete_in_guard(
 ) -> Result<CompletedMerge, AppError> {
     let snapshot = status_in_guard(guard, backend, git, root).await?;
     let operation = operation_in_guard(guard, git, root, &snapshot).await?;
-    if operation == "rebase" || operation == "cherry-pick" {
+    if operation == "rebase" || operation == "cherry-pick" || operation == "revert" {
         return continue_sequencer(guard, backend, git, root, &snapshot, &operation).await;
     }
     if operation != "merge" {
@@ -1676,21 +1682,21 @@ async fn continue_sequencer(
     }
     let mid = status_in_guard(guard, backend, git, root).await?;
     let now = operation_in_guard(guard, git, root, &mid).await?;
-    // commit --no-edit removes CHERRY_PICK_HEAD before later picks run.
-    // sequencer/todo still lists those picks, so this is not completion.
-    let cherry_pick_remains = if operation == "cherry-pick" && now == "none" {
-        cherry_pick_todo_pending(guard, git, root).await?
+    // commit --no-edit removes CHERRY_PICK_HEAD / REVERT_HEAD before later
+    // items run. sequencer/todo still lists those items, so this is not completion.
+    let sequencer_remains = if now == "none" && matches!(operation, "cherry-pick" | "revert") {
+        sequencer_todo_pending(guard, git, root, operation).await?
     } else {
         false
     };
-    if now == "none" && !cherry_pick_remains {
+    if now == "none" && !sequencer_remains {
         return Ok(CompletedMerge {
             oid: head_in_guard(guard, git, root).await?,
             summary: continue_summary(operation),
             files,
         });
     }
-    if now != operation && !cherry_pick_remains {
+    if now != operation && !sequencer_remains {
         return Err(AppError::new(
             "unsupported_operation",
             format!("{} 未继续。", operation_note(&now, None, 0)),
@@ -1699,6 +1705,7 @@ async fn continue_sequencer(
     let command = match operation {
         "rebase" => rebase_continue_command(git, root),
         "cherry-pick" => cherry_pick_continue_command(git, root),
+        "revert" => revert_continue_command(git, root),
         _ => {
             return Err(AppError::new(
                 "unsupported_operation",
@@ -1710,10 +1717,15 @@ async fn continue_sequencer(
     let after = status_in_guard(guard, backend, git, root).await?;
     let after_op = operation_in_guard(guard, git, root, &after).await?;
     if after_op == "none" && output.exit_code == 0 {
-        if operation == "cherry-pick" && cherry_pick_todo_pending(guard, git, root).await? {
+        if matches!(operation, "cherry-pick" | "revert")
+            && sequencer_todo_pending(guard, git, root, operation).await?
+        {
             return Err(AppError::new(
                 "sequencer_paused",
-                "拣选还有后续提交，不能算完成。可以继续，或中止回到操作前。不能跳过。",
+                format!(
+                    "{}还有后续提交，不能算完成。可以继续，或中止回到操作前。不能跳过。",
+                    operation_verb(operation)
+                ),
             ));
         }
         return Ok(CompletedMerge {
@@ -1722,7 +1734,7 @@ async fn continue_sequencer(
             files,
         });
     }
-    if after_op == "rebase" || after_op == "cherry-pick" {
+    if matches!(after_op.as_str(), "rebase" | "cherry-pick" | "revert") {
         let paused = stages_in_guard(guard, git, root).await?;
         if !paused.is_empty() {
             return Err(AppError::new(
@@ -1747,6 +1759,7 @@ fn continue_summary(operation: &str) -> String {
     match operation {
         "rebase" => "已把当前分支上尚未进入基底的提交接到基底顶端。没有推送。".to_string(),
         "cherry-pick" => "已继续拣选。没有推送。".to_string(),
+        "revert" => "已继续还原，后续目标已处理。没有推送。".to_string(),
         _ => "已继续。没有推送。".to_string(),
     }
 }
@@ -1865,6 +1878,7 @@ fn abort_command(
         "merge" => merge_abort_command(git, root),
         "rebase" => rebase_abort_command(git, root),
         "cherry-pick" => cherry_pick_abort_command(git, root),
+        "revert" => revert_abort_command(git, root),
         _ => {
             return Err(AppError::new(
                 "unsupported_operation",
@@ -1878,6 +1892,7 @@ fn operation_verb(operation: &str) -> &'static str {
     match operation {
         "rebase" => "变基",
         "cherry-pick" => "拣选",
+        "revert" => "还原",
         _ => "合并",
     }
 }
@@ -3152,11 +3167,14 @@ fn sequencer_todo_has_instruction(contents: &str) -> bool {
     })
 }
 
-async fn cherry_pick_todo_pending(
+async fn sequencer_todo_pending(
     guard: &mut WriteGuard<'_, RealRunner>,
     git: &Path,
     root: &Path,
+    operation: &str,
 ) -> Result<bool, AppError> {
+    let verb = operation_verb(operation);
+    let note = format!("无法确认{verb}是否还有后续提交，未把它标成完成。");
     let output = run_spec(
         guard,
         git_path_command(git, root, "sequencer/todo"),
@@ -3165,27 +3183,15 @@ async fn cherry_pick_todo_pending(
     )
     .await?;
     if output.exit_code != 0 {
-        return Err(git_failure(
-            "operation_failed",
-            &output,
-            "无法确认拣选是否还有后续提交，未把它标成完成。",
-        ));
+        return Err(git_failure("operation_failed", &output, &note));
     }
     let Some(path) = resolved_git_path(root, &output.stdout) else {
-        return Err(AppError::new(
-            "operation_failed",
-            "无法确认拣选是否还有后续提交，未把它标成完成。",
-        ));
+        return Err(AppError::new("operation_failed", note));
     };
     let contents = match std::fs::read_to_string(&path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(_) => {
-            return Err(AppError::new(
-                "operation_failed",
-                "无法确认拣选是否还有后续提交，未把它标成完成。",
-            ))
-        }
+        Err(_) => return Err(AppError::new("operation_failed", note)),
     };
     Ok(sequencer_todo_has_instruction(&contents))
 }
@@ -3688,11 +3694,19 @@ pub async fn cherry_pick_commits(
     if operation != "none" {
         return Err(AppError::new(
             "unsupported_operation",
-            "已有进行中的合并、变基或拣选，未开始新的拣选。",
+            "已有进行中的合并、变基、拣选或还原，未开始新的拣选。",
         )
         .with_generation(snapshot.generation));
     }
-    let commits = load_pick_commits(backend, &root, &git.path, &unique, snapshot.generation).await?;
+    let commits = load_commits_for_action(
+        backend,
+        &root,
+        &git.path,
+        &unique,
+        snapshot.generation,
+        "拣选",
+    )
+    .await?;
     if commits.iter().any(|commit| commit.parents.len() != 1) {
         return Err(AppError::new(
             "cherry_pick_merge",
@@ -3787,7 +3801,7 @@ pub async fn checkout_commit(
     if operation != "none" {
         return Err(AppError::new(
             "unsupported_operation",
-            "已有进行中的合并、变基或拣选，未检出。当前分支没有移动。",
+            "已有进行中的合并、变基、拣选或还原，未检出。当前分支没有移动。",
         )
         .with_generation(snapshot.generation));
     }
@@ -3807,12 +3821,13 @@ pub async fn checkout_commit(
     .await)
 }
 
-async fn load_pick_commits(
+async fn load_commits_for_action(
     backend: &Backend,
     root: &Path,
     git: &Path,
     oids: &[String],
     generation: u64,
+    action: &str,
 ) -> Result<Vec<HistoryCommit>, AppError> {
     let (output, generation) = run_read(
         backend,
@@ -3826,14 +3841,42 @@ async fn load_pick_commits(
         return Err(git_failure(
             "commit_missing",
             &output,
-            "找不到所选提交，未拣选。",
+            &format!("找不到所选提交，未{action}。"),
         )
         .with_generation(generation));
     }
     let commits = parse_history_records(&output.stdout)
         .map_err(|error| attach_generation(error, generation))?;
     if oids.iter().any(|oid| commits.iter().all(|commit| commit.oid != *oid)) {
-        return Err(AppError::new("commit_missing", "找不到所选提交，未拣选。").with_generation(generation));
+        return Err(
+            AppError::new("commit_missing", format!("找不到所选提交，未{action}。"))
+                .with_generation(generation),
+        );
+    }
+    Ok(commits)
+}
+
+async fn load_commits_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+    oids: &[String],
+    action: &str,
+) -> Result<Vec<HistoryCommit>, AppError> {
+    let output = run_spec(guard, history_details_command(git, root, oids), false, false).await?;
+    if output.exit_code != 0 {
+        return Err(git_failure(
+            "commit_missing",
+            &output,
+            &format!("找不到所选提交，未{action}。"),
+        ));
+    }
+    let commits = parse_history_records(&output.stdout)?;
+    if oids.iter().any(|oid| commits.iter().all(|commit| commit.oid != *oid)) {
+        return Err(AppError::new(
+            "commit_missing",
+            format!("找不到所选提交，未{action}。"),
+        ));
     }
     Ok(commits)
 }
@@ -3857,7 +3900,7 @@ async fn cherry_pick_in_guard(
     if operation != "none" {
         return Err(AppError::new(
             "unsupported_operation",
-            "已有进行中的合并、变基或拣选，未开始新的拣选。",
+            "已有进行中的合并、变基、拣选或还原，未开始新的拣选。",
         ));
     }
     let output = run_spec(
@@ -3882,6 +3925,416 @@ async fn cherry_pick_in_guard(
     Ok((false, success_note(skipped)))
 }
 
+const MAX_REVERTS: usize = 100;
+
+/// 预览并确认还原一组普通提交。`oids` 保持调用方（历史列表）的由新到旧顺序；
+/// 确认后逐个生成逆向提交，不推送。遇冲突时结果如实给出已创建数量和是否暂停。
+#[allow(clippy::too_many_arguments)]
+pub async fn revert_commits(
+    backend: &Backend,
+    path: &str,
+    oids: &[String],
+    expected_head: &str,
+    confirm: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<RevertOutcome, AppError> {
+    if oids.is_empty() {
+        return Err(AppError::new("revert_empty", "没有选择提交，未还原。"));
+    }
+    if oids.len() > MAX_REVERTS {
+        return Err(AppError::new(
+            "revert_limit",
+            format!("一次最多还原 {MAX_REVERTS} 个提交，未执行。"),
+        ));
+    }
+    let mut seen = HashSet::new();
+    let mut ordered = Vec::new();
+    for oid in oids {
+        let oid = history_oid(oid)?;
+        if seen.insert(oid.clone()) {
+            ordered.push(oid);
+        }
+    }
+    let expected_head = history_oid(expected_head)?;
+    let root = repo_root(path)?;
+    let git = require_git(backend).await?;
+    if !confirm {
+        return revert_preview(
+            backend,
+            &root,
+            &git.path,
+            &ordered,
+            &expected_head,
+            generation,
+            request_id,
+        )
+        .await;
+    }
+    ensure_no_index_lock(&root)?;
+    let _gate = backend
+        .actions
+        .enter(action_key("revert", &repo_key(&root)))?;
+    let mut guard = write_lock(backend, &root, generation, request_id).await?;
+    let outcome =
+        revert_in_guard(&mut guard, backend, &git.path, &root, &ordered, &expected_head).await;
+    let generation = guard.finish();
+    let outcome = outcome.map_err(|error| attach_generation(error, generation))?;
+    let snapshot = settle_read!(backend, &root, generation, |current| read_status(
+        backend,
+        &root,
+        current,
+        internal_request_id()
+    )
+    .await)?;
+    Ok(RevertOutcome {
+        generation: snapshot.generation,
+        code: if outcome.conflicted {
+            "revert_conflict".to_string()
+        } else {
+            "ok".to_string()
+        },
+        eligible: true,
+        wrote: true,
+        head_oid: snapshot.branch.head_oid.clone(),
+        targets: outcome.targets,
+        created: outcome.created,
+        conflicted: outcome.conflicted,
+        note: outcome.note,
+        snapshot,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn revert_preview(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    ordered: &[String],
+    expected_head: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<RevertOutcome, AppError> {
+    let snapshot = read_status(backend, root, generation, request_id).await?;
+    let operation =
+        operation_from_snapshot(backend, root, git, &snapshot, internal_request_id()).await?;
+    let commits =
+        load_commits_for_action(backend, root, git, ordered, snapshot.generation, "还原").await?;
+    let mut plan = revert_plan(&snapshot, &operation, ordered, &commits, expected_head);
+    if plan.eligible {
+        if let Some(oid) =
+            unreachable_target_in_read(backend, root, git, ordered, snapshot.generation).await?
+        {
+            plan.eligible = false;
+            plan.code = "revert_unrelated".to_string();
+            plan.note = format!(
+                "提交 {} 不在当前分支的历史中，不能还原。仓库没有改动。",
+                short_oid(&oid)
+            );
+        }
+    }
+    Ok(RevertOutcome {
+        generation: snapshot.generation,
+        code: plan.code,
+        eligible: plan.eligible,
+        wrote: false,
+        head_oid: plan.head_oid,
+        targets: plan.targets,
+        created: 0,
+        conflicted: false,
+        note: plan.note,
+        snapshot,
+    })
+}
+
+struct RevertPlan {
+    code: String,
+    eligible: bool,
+    head_oid: Option<String>,
+    targets: Vec<RevertTarget>,
+    note: String,
+}
+
+fn revert_plan(
+    snapshot: &StatusSnapshot,
+    operation: &str,
+    ordered: &[String],
+    commits: &[HistoryCommit],
+    expected_head: &str,
+) -> RevertPlan {
+    let targets = revert_targets(ordered, commits);
+    let head_oid = snapshot.branch.head_oid.clone();
+    let blocked = |code: &str, note: String| RevertPlan {
+        code: code.to_string(),
+        eligible: false,
+        head_oid: head_oid.clone(),
+        targets: targets.clone(),
+        note,
+    };
+    if operation != "none" {
+        return blocked(
+            "revert_in_progress",
+            "已有进行中的操作，未开始还原。仓库没有改动。".to_string(),
+        );
+    }
+    if snapshot.branch.detached || snapshot.branch.unborn || snapshot.branch.name.is_none() {
+        return blocked(
+            "revert_detached",
+            "当前不在本地分支上，不能还原提交。仓库没有改动。".to_string(),
+        );
+    }
+    if head_oid.as_deref() != Some(expected_head) {
+        return blocked(
+            "revert_head_changed",
+            "当前提交与打开还原时看到的不一致，未写入。".to_string(),
+        );
+    }
+    if let Some(commit) = commits.iter().find(|commit| commit.parents.len() > 1) {
+        return blocked(
+            "revert_merge",
+            format!(
+                "提交 {} 是合并提交，不能还原。本轮不支持选择父提交方向。仓库没有改动。",
+                short_oid(&commit.oid)
+            ),
+        );
+    }
+    RevertPlan {
+        code: "ok".to_string(),
+        eligible: true,
+        head_oid,
+        targets,
+        note: format!(
+            "将按由新到旧的顺序还原 {} 个提交，为每个目标创建对应的逆向提交。不会推送。取消不会写入。",
+            ordered.len()
+        ),
+    }
+}
+
+fn revert_targets(ordered: &[String], commits: &[HistoryCommit]) -> Vec<RevertTarget> {
+    ordered
+        .iter()
+        .filter_map(|oid| commits.iter().find(|commit| commit.oid == *oid))
+        .map(|commit| RevertTarget {
+            oid: commit.oid.clone(),
+            summary: commit.summary.clone(),
+            author_name: commit.author_name.clone(),
+            authored_at: commit.authored_at,
+        })
+        .collect()
+}
+
+struct Reverted {
+    created: u32,
+    conflicted: bool,
+    targets: Vec<RevertTarget>,
+    note: String,
+}
+
+async fn revert_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    backend: &Backend,
+    git: &Path,
+    root: &Path,
+    ordered: &[String],
+    expected_head: &str,
+) -> Result<Reverted, AppError> {
+    let snapshot = status_in_guard(guard, backend, git, root).await?;
+    let operation = operation_in_guard(guard, git, root, &snapshot).await?;
+    let commits = load_commits_in_guard(guard, git, root, ordered, "还原").await?;
+    let plan = revert_plan(&snapshot, &operation, ordered, &commits, expected_head);
+    if !plan.eligible {
+        return Err(AppError::new(plan.code, plan.note));
+    }
+    ensure_reachable_in_guard(guard, git, root, ordered).await?;
+    let before = head_in_guard(guard, git, root).await?;
+    let output = run_spec(guard, revert_command(git, root, ordered), true, false).await?;
+    let after = status_in_guard(guard, backend, git, root).await?;
+    let after_op = operation_in_guard(guard, git, root, &after).await?;
+    let created = created_commits_in_guard(guard, git, root, &before).await?;
+    if after_op == "revert" {
+        return Ok(Reverted {
+            created,
+            conflicted: true,
+            targets: plan.targets,
+            note: revert_conflict_note(created, ordered.len()),
+        });
+    }
+    if output.exit_code != 0 {
+        // 没有操作标记却留下 sequencer 是 Git 在目标之间失败后的半成品状态；
+        // 中止序列会把失败前已创建的部分提交一并回滚，避免留下半次还原。
+        let residue = path_exists_in_guard(guard, git, root, "sequencer").await?;
+        let mut remaining = created;
+        if residue {
+            let aborted = run_spec(guard, revert_abort_command(git, root), true, false).await?;
+            if aborted.exit_code != 0 {
+                return Err(prefix_created(
+                    classified_git(
+                        "revert_failed",
+                        &aborted,
+                        "还原没有完成，残留的还原序列也没有清理。请刷新后核对仓库状态。",
+                    ),
+                    created,
+                ));
+            }
+            remaining = created_commits_in_guard(guard, git, root, &before).await?;
+        }
+        let mut error = classified_git(
+            "revert_failed",
+            &output,
+            "还原没有完成。会覆盖未提交内容时不会写入，当前分支和工作区应保持原样。",
+        );
+        if remaining > 0 {
+            error = prefix_created(error, remaining);
+        } else if created > 0 {
+            error.message = format!(
+                "本次还原没有完成，已回滚失败前创建的部分提交。{}",
+                error.message
+            );
+        }
+        return Err(error);
+    }
+    Ok(Reverted {
+        created,
+        conflicted: false,
+        targets: plan.targets,
+        note: revert_success_note(created, ordered.len()),
+    })
+}
+
+async fn unreachable_target_in_read(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    oids: &[String],
+    generation: u64,
+) -> Result<Option<String>, AppError> {
+    let mut generation = generation;
+    for oid in oids {
+        let (output, next) = run_read(
+            backend,
+            root,
+            generation,
+            internal_request_id(),
+            ancestor_command(git, root, oid, "HEAD"),
+        )
+        .await?;
+        generation = next;
+        match output.exit_code {
+            0 => {}
+            1 => return Ok(Some(oid.clone())),
+            _ => {
+                return Err(git_failure(
+                    "revert_failed",
+                    &output,
+                    "无法确认提交是否在当前分支上，未还原。",
+                )
+                .with_generation(generation))
+            }
+        }
+    }
+    Ok(None)
+}
+
+async fn ensure_reachable_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+    oids: &[String],
+) -> Result<(), AppError> {
+    for oid in oids {
+        let output = run_spec(guard, ancestor_command(git, root, oid, "HEAD"), false, false).await?;
+        match output.exit_code {
+            0 => {}
+            1 => {
+                return Err(AppError::new(
+                    "revert_unrelated",
+                    format!(
+                        "提交 {} 不在当前分支的历史中，不能还原。仓库没有改动。",
+                        short_oid(oid)
+                    ),
+                ))
+            }
+            _ => {
+                return Err(git_failure(
+                    "revert_failed",
+                    &output,
+                    "无法确认提交是否在当前分支上，未还原。",
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn created_commits_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+    before: &str,
+) -> Result<u32, AppError> {
+    let after = head_in_guard(guard, git, root).await?;
+    let output = run_spec(
+        guard,
+        commits_between_count_command(git, root, before, &after),
+        false,
+        false,
+    )
+    .await?;
+    if output.exit_code != 0 {
+        return Err(git_failure(
+            "revert_unverified",
+            &output,
+            "无法确认本次还原创建了多少提交，请刷新后核对历史。",
+        ));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| {
+            AppError::new(
+                "revert_unverified",
+                "无法确认本次还原创建了多少提交，请刷新后核对历史。",
+            )
+        })
+}
+
+fn revert_success_note(created: u32, total: usize) -> String {
+    if created as usize == total {
+        format!(
+            "已按由新到旧的顺序创建 {created} 个逆向提交。原提交仍在历史中。没有推送。"
+        )
+    } else {
+        format!(
+            "只创建了 {created} 个逆向提交，计划还原 {total} 个提交。请核对历史。没有推送。"
+        )
+    }
+}
+
+fn revert_conflict_note(created: u32, total: usize) -> String {
+    let progress = if created == 0 {
+        "还没有创建还原提交。".to_string()
+    } else {
+        format!("已创建 {created} 个还原提交，计划共 {total} 个。")
+    };
+    format!(
+        "{progress}还原停在冲突，后面的提交还没有处理。解决冲突后可以继续，也可以中止回到本次还原开始前。不能跳过。没有推送。"
+    )
+}
+
+fn prefix_created(mut error: AppError, created: u32) -> AppError {
+    if created > 0 {
+        error.message = format!(
+            "本次还原已创建 {created} 个还原提交，后续没有执行。{}",
+            error.message
+        );
+    }
+    error
+}
+
+fn short_oid(oid: &str) -> &str {
+    &oid[..oid.len().min(7)]
+}
+
 async fn detach_in_guard(
     guard: &mut WriteGuard<'_, RealRunner>,
     backend: &Backend,
@@ -3894,7 +4347,7 @@ async fn detach_in_guard(
     if operation != "none" {
         return Err(AppError::new(
             "unsupported_operation",
-            "已有进行中的合并、变基或拣选，未检出。当前分支没有移动。",
+            "已有进行中的合并、变基、拣选或还原，未检出。当前分支没有移动。",
         ));
     }
     let output = run_spec(guard, detach_at_command(git, root, oid), true, false).await?;
@@ -6068,5 +6521,658 @@ mod tests {
             .unwrap_err();
         assert_eq!(still.code, "unsupported_operation");
         assert_eq!(git_text(&repo, &["rev-parse", "stash@{0}"]), stashed);
+    }
+
+    #[tokio::test]
+    async fn revert_preview_keeps_newest_first_and_confirm_creates_reverse_commits() {
+        let fixture = crate::test_support::git_fixture("history-revert");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("a.txt"), "base\n").unwrap();
+        fs::write(repo.join("b.txt"), "base\n").unwrap();
+        fs::write(repo.join("c.txt"), "base\n").unwrap();
+        git(&repo, &["add", "--", "a.txt", "b.txt", "c.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&repo, &["commit", "-am", "one"]);
+        let one = git_text(&repo, &["rev-parse", "HEAD"]);
+        fs::write(repo.join("b.txt"), "two\n").unwrap();
+        git(&repo, &["commit", "-am", "two"]);
+        fs::write(repo.join("c.txt"), "three\n").unwrap();
+        git(&repo, &["commit", "-am", "three"]);
+        let three = git_text(&repo, &["rev-parse", "HEAD"]);
+        let path = repo_key(&repo);
+        let preview = revert_commits(
+            &backend,
+            &path,
+            &[three.clone(), three.clone(), one.clone()],
+            &three,
+            false,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(preview.eligible);
+        assert_eq!(preview.code, "ok");
+        assert!(!preview.wrote);
+        assert_eq!(preview.head_oid.as_deref(), Some(three.as_str()));
+        assert_eq!(preview.created, 0);
+        assert!(!preview.conflicted);
+        assert_eq!(
+            preview
+                .targets
+                .iter()
+                .map(|target| target.oid.as_str())
+                .collect::<Vec<_>>(),
+            vec![three.as_str(), one.as_str()]
+        );
+        assert_eq!(preview.targets[0].summary, "three");
+        assert_eq!(preview.targets[1].summary, "one");
+        assert!(preview.note.contains("由新到旧"));
+        assert!(preview.note.contains("取消不会写入"));
+        // 取消预览不写 HEAD、索引或工作区。
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), three);
+        assert_eq!(git_text(&repo, &["status", "--porcelain=v1"]), "");
+        assert_eq!(git_text(&repo, &["diff", "--cached", "--name-only"]), "");
+        assert_eq!(fs::read_to_string(repo.join("c.txt")).unwrap(), "three\n");
+
+        let done = revert_commits(
+            &backend,
+            &path,
+            &[three.clone(), one.clone()],
+            &three,
+            true,
+            preview.generation,
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(done.eligible);
+        assert!(done.wrote);
+        assert!(!done.conflicted);
+        assert_eq!(done.code, "ok");
+        assert_eq!(done.created, 2);
+        assert_eq!(done.head_oid.as_deref(), done.snapshot.branch.head_oid.as_deref());
+        assert!(done.note.contains("没有推送"));
+        assert_eq!(
+            git_text(&repo, &["log", "-2", "--format=%s"]),
+            "Revert \"one\"\nRevert \"three\""
+        );
+        assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "base\n");
+        assert_eq!(fs::read_to_string(repo.join("b.txt")).unwrap(), "two\n");
+        assert_eq!(fs::read_to_string(repo.join("c.txt")).unwrap(), "base\n");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD~2"]), three);
+    }
+
+    #[tokio::test]
+    async fn revert_allows_root_and_pushed_commits_without_pushing() {
+        let fixture = crate::test_support::git_fixture("revert-pushed");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        let bare = fixture.path().join("remote.git");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("a.txt"), "root\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        git(&repo, &["commit", "-m", "root"]);
+        let root = git_text(&repo, &["rev-parse", "HEAD"]);
+        fs::create_dir_all(&bare).unwrap();
+        git(&bare, &["init", "--bare"]);
+        git(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        git(&repo, &["push", "-u", "origin", "main"]);
+        fs::write(repo.join("b.txt"), "next\n").unwrap();
+        git(&repo, &["add", "--", "b.txt"]);
+        git(&repo, &["commit", "-m", "next"]);
+        let next = git_text(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["push", "origin", "main"]);
+        let remote_tip = git_text(&bare, &["rev-parse", "refs/heads/main"]);
+        assert_eq!(remote_tip, next);
+        let path = repo_key(&repo);
+
+        // 已推送的普通提交允许还原，并且不触碰远程。
+        let preview = revert_commits(
+            &backend,
+            &path,
+            std::slice::from_ref(&next),
+            &next,
+            false,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(preview.eligible, "{}", preview.note);
+        let done = revert_commits(
+            &backend,
+            &path,
+            std::slice::from_ref(&next),
+            &next,
+            true,
+            preview.generation,
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(done.created, 1);
+        assert_eq!(git_text(&repo, &["log", "-1", "--format=%s"]), "Revert \"next\"");
+        assert!(!repo.join("b.txt").exists());
+        assert_eq!(git_text(&bare, &["rev-parse", "refs/heads/main"]), next);
+        assert_eq!(git_text(&repo, &["rev-parse", "origin/main"]), next);
+        assert!(git_text(&repo, &["log", "--format=%s"]).contains("next"));
+
+        // 首个提交也允许还原：逆向提交删除它引入的文件，原提交仍在历史中。
+        let current = git_text(&repo, &["rev-parse", "HEAD"]);
+        let root_preview = revert_commits(
+            &backend,
+            &path,
+            std::slice::from_ref(&root),
+            &current,
+            false,
+            done.generation,
+            3,
+        )
+        .await
+        .unwrap();
+        assert!(root_preview.eligible, "{}", root_preview.note);
+        let undone = revert_commits(
+            &backend,
+            &path,
+            std::slice::from_ref(&root),
+            &current,
+            true,
+            root_preview.generation,
+            4,
+        )
+        .await
+        .unwrap();
+        assert_eq!(undone.created, 1);
+        assert_eq!(git_text(&repo, &["log", "-1", "--format=%s"]), "Revert \"root\"");
+        assert!(!repo.join("a.txt").exists());
+        assert!(git_text(&repo, &["log", "--format=%s"]).contains("root"));
+        assert_eq!(git_text(&bare, &["rev-parse", "refs/heads/main"]), next);
+        assert_eq!(git_text(&repo, &["rev-parse", "origin/main"]), next);
+    }
+
+    #[tokio::test]
+    async fn revert_refuses_merge_detached_in_progress_stale_and_unrelated_targets() {
+        let fixture = crate::test_support::git_fixture("revert-shape");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("a.txt"), "base\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        let base = git_text(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "-b", "feature"]);
+        fs::write(repo.join("a.txt"), "feature\n").unwrap();
+        git(&repo, &["commit", "-am", "feature"]);
+        git(&repo, &["checkout", "main"]);
+        fs::write(repo.join("a.txt"), "ours\n").unwrap();
+        git(&repo, &["commit", "-am", "ours"]);
+        let conflicted = Command::new(crate::test_support::system_git())
+            .current_dir(&repo)
+            .args(["merge", "--no-ff", "feature"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                crate::test_support::isolated_gitconfig(),
+            )
+            .env("GIT_AUTHOR_NAME", "Twiglane Test")
+            .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Twiglane Test")
+            .env("GIT_COMMITTER_EMAIL", "twiglane-test@example.com")
+            .status()
+            .unwrap();
+        assert!(!conflicted.success());
+        fs::write(repo.join("a.txt"), "merged\n").unwrap();
+        git(&repo, &["add", "--", "a.txt"]);
+        git(&repo, &["commit", "-m", "merge"]);
+        let merge_oid = git_text(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "-b", "side", &base]);
+        fs::write(repo.join("side.txt"), "side\n").unwrap();
+        git(&repo, &["add", "--", "side.txt"]);
+        git(&repo, &["commit", "-m", "side"]);
+        let side_oid = git_text(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "main"]);
+        let path = repo_key(&repo);
+
+        let preview = revert_commits(
+            &backend,
+            &path,
+            std::slice::from_ref(&merge_oid),
+            &merge_oid,
+            false,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(!preview.eligible);
+        assert_eq!(preview.code, "revert_merge");
+        assert_eq!(preview.targets.len(), 1);
+        assert!(preview.note.contains("合并提交"));
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), merge_oid);
+        assert!(!repo.join(".git/REVERT_HEAD").exists());
+        let refused = revert_commits(
+            &backend,
+            &path,
+            std::slice::from_ref(&merge_oid),
+            &merge_oid,
+            true,
+            preview.generation,
+            2,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.code, "revert_merge");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), merge_oid);
+        assert!(!repo.join(".git/sequencer").exists());
+
+        // 过期确认：expectedHead 仍是较早的提交。
+        let stale = revert_commits(
+            &backend,
+            &path,
+            std::slice::from_ref(&base),
+            &base,
+            true,
+            refused.generation.unwrap(),
+            3,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(stale.code, "revert_head_changed");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), merge_oid);
+
+        // 目标不在当前分支的历史中。
+        let unrelated = revert_commits(
+            &backend,
+            &path,
+            std::slice::from_ref(&side_oid),
+            &merge_oid,
+            true,
+            stale.generation.unwrap(),
+            4,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unrelated.code, "revert_unrelated");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), merge_oid);
+
+        // 游离 HEAD。
+        git(&repo, &["checkout", "--detach", &merge_oid]);
+        let detached_preview = revert_commits(
+            &backend,
+            &path,
+            std::slice::from_ref(&base),
+            &merge_oid,
+            false,
+            generation(&backend, &repo),
+            5,
+        )
+        .await
+        .unwrap();
+        assert!(!detached_preview.eligible);
+        assert_eq!(detached_preview.code, "revert_detached");
+        let detached = revert_commits(
+            &backend,
+            &path,
+            std::slice::from_ref(&base),
+            &merge_oid,
+            true,
+            detached_preview.generation,
+            6,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(detached.code, "revert_detached");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), merge_oid);
+        git(&repo, &["checkout", "main"]);
+
+        // 已有进行中的合并。
+        git(&repo, &["checkout", "-b", "topic"]);
+        fs::write(repo.join("a.txt"), "topic\n").unwrap();
+        git(&repo, &["commit", "-am", "topic"]);
+        git(&repo, &["checkout", "main"]);
+        fs::write(repo.join("a.txt"), "main-again\n").unwrap();
+        git(&repo, &["commit", "-am", "main-again"]);
+        let busy_head = git_text(&repo, &["rev-parse", "HEAD"]);
+        let busy_merge = Command::new(crate::test_support::system_git())
+            .current_dir(&repo)
+            .args(["merge", "--no-commit", "--no-ff", "topic"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                crate::test_support::isolated_gitconfig(),
+            )
+            .env("GIT_AUTHOR_NAME", "Twiglane Test")
+            .env("GIT_AUTHOR_EMAIL", "twiglane-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Twiglane Test")
+            .env("GIT_COMMITTER_EMAIL", "twiglane-test@example.com")
+            .status()
+            .unwrap();
+        assert!(!busy_merge.success());
+        assert!(repo.join(".git/MERGE_HEAD").exists());
+        let busy = revert_commits(
+            &backend,
+            &path,
+            std::slice::from_ref(&base),
+            &busy_head,
+            true,
+            generation(&backend, &repo),
+            7,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(busy.code, "revert_in_progress");
+        assert!(repo.join(".git/MERGE_HEAD").exists());
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), busy_head);
+        git(&repo, &["merge", "--abort"]);
+    }
+
+    #[tokio::test]
+    async fn revert_refuses_to_overwrite_local_content_and_cleans_partial_sequencer() {
+        let fixture = crate::test_support::git_fixture("revert-dirty");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("a.txt"), "base\n").unwrap();
+        fs::write(repo.join("b.txt"), "base\n").unwrap();
+        git(&repo, &["add", "--", "a.txt", "b.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        fs::write(repo.join("b.txt"), "one\n").unwrap();
+        git(&repo, &["commit", "-am", "one"]);
+        let one = git_text(&repo, &["rev-parse", "HEAD"]);
+        fs::write(repo.join("a.txt"), "two\n").unwrap();
+        git(&repo, &["commit", "-am", "two"]);
+        let two = git_text(&repo, &["rev-parse", "HEAD"]);
+        fs::write(repo.join("b.txt"), "dirty-b\n").unwrap();
+        let path = repo_key(&repo);
+        let error = revert_commits(
+            &backend,
+            &path,
+            &[two.clone(), one.clone()],
+            &two,
+            true,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "local_changes");
+        assert!(
+            error.message.contains("已回滚失败前创建的部分提交"),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join("b.txt")).unwrap(),
+            "dirty-b\n"
+        );
+        assert_eq!(git_text(&repo, &["status", "--porcelain=v1"]), "M b.txt");
+        assert!(!repo.join(".git/REVERT_HEAD").exists());
+        assert!(
+            !repo.join(".git/sequencer").exists(),
+            "目标之间失败后不能留下没有操作标记的还原序列"
+        );
+        // 失败后回到还原前，不留下半次还原的提交。
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), two);
+        assert_eq!(git_text(&repo, &["log", "-1", "--format=%s"]), "two");
+        assert_eq!(
+            git_text(&repo, &["rev-list", "--count", &format!("{two}..HEAD")]),
+            "0"
+        );
+        assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "two\n");
+    }
+
+    #[tokio::test]
+    async fn revert_reports_partial_progress_and_abort_rolls_back_created_commits() {
+        let fixture = crate::test_support::git_fixture("revert-partial");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("a.txt"), "base\n").unwrap();
+        fs::write(repo.join("b.txt"), "base\n").unwrap();
+        git(&repo, &["add", "--", "a.txt", "b.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        fs::write(repo.join("b.txt"), "one\n").unwrap();
+        git(&repo, &["commit", "-am", "one"]);
+        let one = git_text(&repo, &["rev-parse", "HEAD"]);
+        fs::write(repo.join("a.txt"), "two\n").unwrap();
+        git(&repo, &["commit", "-am", "two"]);
+        let two = git_text(&repo, &["rev-parse", "HEAD"]);
+        fs::write(repo.join("b.txt"), "later-b\n").unwrap();
+        git(&repo, &["commit", "-am", "later-b"]);
+        let head = git_text(&repo, &["rev-parse", "HEAD"]);
+        let path = repo_key(&repo);
+        let started = revert_commits(
+            &backend,
+            &path,
+            &[two.clone(), one.clone()],
+            &head,
+            true,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(started.wrote);
+        assert!(started.conflicted);
+        assert_eq!(started.code, "revert_conflict");
+        assert_eq!(started.created, 1);
+        assert_eq!(started.targets.len(), 2);
+        assert!(
+            started.note.contains("已创建 1 个还原提交"),
+            "{}",
+            started.note
+        );
+        assert!(started.note.contains("计划共 2 个"));
+        assert!(started.note.contains("后面的提交还没有处理"));
+        assert!(!started.note.contains("已按由新到旧"));
+        assert_eq!(
+            git_text(&repo, &["log", "-1", "--format=%s"]),
+            "Revert \"two\""
+        );
+        assert!(repo.join(".git/REVERT_HEAD").exists());
+
+        let session = merge_session(&backend, &path, started.generation, 2)
+            .await
+            .unwrap();
+        assert_eq!(session.operation, "revert");
+        assert!(session.can_abort);
+        let aborted = abort_merge(&backend, &path, true, session.generation, 3)
+            .await
+            .unwrap();
+        assert!(aborted.wrote);
+        assert!(aborted.note.contains("还原"));
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), head);
+        assert!(!repo.join(".git/REVERT_HEAD").exists());
+        assert!(!repo.join(".git/sequencer").exists());
+        assert_eq!(git_text(&repo, &["status", "--porcelain=v1"]), "");
+        assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "two\n");
+        assert_eq!(fs::read_to_string(repo.join("b.txt")).unwrap(), "later-b\n");
+    }
+
+    fn init_revert_conflict(repo: &Path) -> (String, String, String) {
+        git(repo, &["init", "-b", "main"]);
+        fs::write(repo.join("a.txt"), "base\n").unwrap();
+        fs::write(repo.join("b.txt"), "base\n").unwrap();
+        git(repo, &["add", "--", "a.txt", "b.txt"]);
+        git(repo, &["commit", "-m", "base"]);
+        fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(repo, &["commit", "-am", "one"]);
+        fs::write(repo.join("b.txt"), "two\n").unwrap();
+        git(repo, &["commit", "-am", "two"]);
+        let two = git_text(repo, &["rev-parse", "HEAD"]);
+        let one = git_text(repo, &["rev-parse", "HEAD~1"]);
+        fs::write(repo.join("a.txt"), "main-a\n").unwrap();
+        git(repo, &["commit", "-am", "main-a"]);
+        fs::write(repo.join("b.txt"), "main-b\n").unwrap();
+        git(repo, &["commit", "-am", "main-b"]);
+        let head = git_text(repo, &["rev-parse", "HEAD"]);
+        (two, one, head)
+    }
+
+    #[tokio::test]
+    async fn multi_commit_revert_continue_handles_consecutive_conflicts_and_later_todo() {
+        let fixture = crate::test_support::git_fixture("revert-sequence");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        let (two, one, head) = init_revert_conflict(&repo);
+        let path = repo_key(&repo);
+        let started = revert_commits(
+            &backend,
+            &path,
+            &[two.clone(), one.clone()],
+            &head,
+            true,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(started.wrote);
+        assert!(started.conflicted);
+        assert_eq!(started.code, "revert_conflict");
+        assert_eq!(started.created, 0);
+        assert_eq!(started.targets.len(), 2);
+        assert!(started.note.contains("后面的提交还没有处理"));
+        assert!(started.note.contains("不能跳过"));
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), head);
+        assert!(repo.join(".git/REVERT_HEAD").exists());
+        assert!(repo.join(".git/sequencer/todo").exists());
+
+        let session = merge_session(&backend, &path, started.generation, 2)
+            .await
+            .unwrap();
+        assert_eq!(session.operation, "revert");
+        assert!(session.can_abort);
+        assert!(!session.can_continue);
+        assert!(session.note.contains("还原"));
+        assert!(session.note.contains("不能跳过"));
+        let blocked = complete_merge(&backend, &path, "should-not-finish", session.generation, 3)
+            .await
+            .unwrap_err();
+        assert_eq!(blocked.code, "conflicts_open");
+        assert!(repo.join(".git/REVERT_HEAD").exists());
+
+        let resolved = resolve_conflict(
+            &backend,
+            &path,
+            "b.txt",
+            "text",
+            Some("b-ok\n".to_string()),
+            blocked.generation.unwrap(),
+            4,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved.unresolved, 0);
+        assert!(resolved.can_continue);
+        let paused = complete_merge(
+            &backend,
+            &path,
+            "should-not-replace-the-subject",
+            resolved.generation,
+            5,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(paused.code, "sequencer_paused");
+        assert!(paused.message.contains("又遇到冲突"), "{}", paused.message);
+        assert_eq!(git_text(&repo, &["log", "-1", "--format=%s"]), "Revert \"two\"");
+        assert!(repo.join(".git/REVERT_HEAD").exists());
+        assert!(repo.join(".git/sequencer/todo").exists());
+
+        let next = resolve_conflict(
+            &backend,
+            &path,
+            "a.txt",
+            "text",
+            Some("a-ok\n".to_string()),
+            paused.generation.unwrap(),
+            6,
+        )
+        .await
+        .unwrap();
+        assert_eq!(next.unresolved, 0);
+        let done = complete_merge(
+            &backend,
+            &path,
+            "should-not-replace-the-subject",
+            next.generation,
+            7,
+        )
+        .await
+        .unwrap();
+        assert!(done.summary.contains("没有推送"));
+        assert_eq!(
+            git_text(&repo, &["log", "-2", "--format=%s"]),
+            "Revert \"one\"\nRevert \"two\""
+        );
+        assert_eq!(
+            git_text(&repo, &["log", "-1", "--format=%P", "HEAD~1"]),
+            head
+        );
+        assert!(!repo.join(".git/REVERT_HEAD").exists());
+        assert!(!repo.join(".git/sequencer").exists());
+        assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "a-ok\n");
+        assert_eq!(fs::read_to_string(repo.join("b.txt")).unwrap(), "b-ok\n");
+        assert_eq!(git_text(&repo, &["symbolic-ref", "HEAD"]), "refs/heads/main");
+    }
+
+    #[tokio::test]
+    async fn revert_abort_restores_head_index_worktree_and_keeps_stash() {
+        let fixture = crate::test_support::git_fixture("revert-abort");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        let (two, one, head) = init_revert_conflict(&repo);
+        fs::write(repo.join("notes.txt"), "stashed\n").unwrap();
+        git(&repo, &["add", "--", "notes.txt"]);
+        git(&repo, &["stash", "push", "-m", "keep-me"]);
+        let stashed = git_text(&repo, &["rev-parse", "stash@{0}"]);
+        let path = repo_key(&repo);
+        let started = revert_commits(
+            &backend,
+            &path,
+            &[two.clone(), one.clone()],
+            &head,
+            true,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(started.conflicted);
+        assert!(repo.join(".git/REVERT_HEAD").exists());
+        // 模拟用户已开始编辑并暂存冲突结果。
+        fs::write(repo.join("b.txt"), "partial\n").unwrap();
+        git(&repo, &["add", "--", "b.txt"]);
+        assert_eq!(git_text(&repo, &["diff", "--cached", "--name-only"]), "b.txt");
+
+        let preview = abort_merge(&backend, &path, false, started.generation, 2)
+            .await
+            .unwrap();
+        assert!(!preview.wrote);
+        assert!(preview.note.contains("取消不会写入"));
+        assert!(preview.paths.iter().any(|item| item == "b.txt"));
+        assert!(preview.stash_oids.iter().any(|oid| oid == &stashed));
+        assert!(repo.join(".git/REVERT_HEAD").exists());
+
+        let aborted = abort_merge(&backend, &path, true, preview.generation, 3)
+            .await
+            .unwrap();
+        assert!(aborted.wrote);
+        assert!(aborted.note.contains("还原"));
+        assert!(!repo.join(".git/REVERT_HEAD").exists());
+        assert!(!repo.join(".git/sequencer").exists());
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git_text(&repo, &["symbolic-ref", "HEAD"]), "refs/heads/main");
+        assert_eq!(git_text(&repo, &["diff", "--cached", "--name-only"]), "");
+        assert_eq!(git_text(&repo, &["status", "--porcelain=v1"]), "");
+        assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "main-a\n");
+        assert_eq!(fs::read_to_string(repo.join("b.txt")).unwrap(), "main-b\n");
+        assert_eq!(git_text(&repo, &["rev-parse", "stash@{0}"]), stashed);
+        assert!(aborted.stash_oids.iter().any(|oid| oid == &stashed));
     }
 }

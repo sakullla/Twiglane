@@ -92,6 +92,7 @@ fn capabilities_grant_only_explicit_terminal_ipc_not_a_generic_shell() {
         "allow-commit-file-diff",
         "allow-file-history",
         "allow-cherry-pick-commits",
+        "allow-revert-commits",
         "allow-checkout-commit",
         "allow-stash-state",
         "allow-save-stash",

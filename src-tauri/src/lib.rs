@@ -42,6 +42,7 @@ use crate::model::{
     IgnoreOutcome, MergeComplete, MergePreview, MergeSession, OpenedRepository, PanelWidths,
     RecentRepo, RemoteState, RemoteTag, RepoChanged, RepositoryContentSearch, RepositoryDirectory,
     RepositoryEditSnapshot, RepositoryFileContent, RepositoryPathSearch, RepositorySearchScope,
+    RevertOutcome,
     StashApplyResult, StashSaveResult, StashState, StatusSnapshot, TagState, Theme, UndoResult,
 };
 use crate::shutdown::Shutdown;
@@ -173,6 +174,7 @@ pub fn run() {
             commit_branches,
             file_history,
             cherry_pick_commits,
+            revert_commits,
             checkout_commit,
             stash_state,
             save_stash,
@@ -1667,6 +1669,28 @@ async fn cherry_pick_commits(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+async fn revert_commits(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    oids: Vec<String>,
+    expected_head: String,
+    confirm: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<RevertOutcome, AppError> {
+    crate::git::resolve::revert_commits(
+        state.inner(),
+        &path,
+        &oids,
+        &expected_head,
+        confirm,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
 async fn checkout_commit(
     state: State<'_, Arc<Backend>>,
     path: String,
@@ -2407,6 +2431,7 @@ two
                 super::delete_branch,
                 super::history_page,
                 super::delete_stash,
+                super::revert_commits,
                 super::merge_session,
                 super::abort_merge,
                 super::undo_commit,
@@ -2543,6 +2568,17 @@ two
                 serde_json::json!({
                     "path": "/tmp/unused",
                     "oid": "abc",
+                    "confirm": false,
+                    "generation": 1,
+                    "request_id": 1
+                }),
+            ),
+            (
+                "revert_commits",
+                serde_json::json!({
+                    "path": "/tmp/unused",
+                    "oids": ["abc"],
+                    "expectedHead": "def",
                     "confirm": false,
                     "generation": 1,
                     "request_id": 1

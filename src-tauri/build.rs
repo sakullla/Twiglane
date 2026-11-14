@@ -81,6 +81,7 @@ fn main() {
             "commit_file_diff",
             "file_history",
             "cherry_pick_commits",
+            "revert_commits",
             "checkout_commit",
             "stash_state",
             "save_stash",

@@ -227,9 +227,18 @@ pub async fn merge_session(
     } else {
         (stages.0, String::new())
     };
-    Ok(session_from(
+    let stalled = matches!(operation.as_str(), "revert" | "cherry-pick")
+        && !head_marker_present(backend, &root, &git.path, &operation, message.0).await?;
+    let mut session = session_from(
         &snapshot, &operation, &stages.1, &message.1, message.0,
-    ))
+    );
+    if stalled {
+        // 没有 REVERT_HEAD/CHERRY_PICK_HEAD 但 sequencer 仍有指令：
+        // Git 的 --continue 只会清理序列，不会应用剩余目标，因此不能再算可继续。
+        session.can_continue = false;
+        session.note = sequencer_paused_note(&operation);
+    }
+    Ok(session)
 }
 
 pub async fn conflict_view(
@@ -889,7 +898,7 @@ fn operation_note(operation: &str, source: Option<&str>, unresolved: u32) -> Str
             "正在拣选（cherry-pick）。还有 {unresolved} 个未解决冲突，不能完成。解决后可以继续，也可以中止。不能跳过。"
         ),
         "revert" if unresolved == 0 => {
-            "正在还原（revert）。冲突已全部标记，可以继续。不能跳过。中止会让当前分支回到本次还原开始前。不会推送。".to_string()
+            "正在还原（revert）。冲突已全部标记；可以继续，或在后续目标无法应用时中止。不能跳过。中止会让当前分支回到本次还原开始前。不会推送。".to_string()
         }
         "revert" => format!(
             "正在还原（revert）。还有 {unresolved} 个未解决冲突，不能完成。解决后可以继续，也可以中止。不能跳过。"
@@ -1643,6 +1652,20 @@ async fn continue_sequencer(
     snapshot: &StatusSnapshot,
     operation: &str,
 ) -> Result<CompletedMerge, AppError> {
+    if !head_marker_present_in_guard(guard, git, root, operation).await? {
+        // 没有 REVERT_HEAD/CHERRY_PICK_HEAD 时，Git 的 --continue 只会清理序列，
+        // 不会应用剩余目标；这里只能如实报告停在后续目标，由用户明确中止。
+        let created = sequencer_created_in_guard(guard, git, root).await?;
+        return Err(AppError::new(
+            "sequencer_paused",
+            format!(
+                "{}{}序列停在后续目标，无法继续应用。可以中止回到本次{}开始前。不能跳过。没有推送。",
+                sequencer_progress(operation, created),
+                operation_verb(operation),
+                operation_verb(operation)
+            ),
+        ));
+    }
     let stages = stages_in_guard(guard, git, root).await?;
     if !stages.is_empty() {
         return Err(AppError::new(
@@ -1736,10 +1759,26 @@ async fn continue_sequencer(
     }
     if matches!(after_op.as_str(), "rebase" | "cherry-pick" | "revert") {
         let paused = stages_in_guard(guard, git, root).await?;
-        if !paused.is_empty() {
+        let marker_present =
+            head_marker_present_in_guard(guard, git, root, &after_op).await?;
+        if !paused.is_empty() && marker_present {
             return Err(AppError::new(
                 "sequencer_paused",
                 "这次继续又遇到冲突，不能算完成。后面的提交还没有应用。可以解决后继续，或中止回到操作前。不能跳过。",
+            ));
+        }
+        if !marker_present {
+            // 后续目标无法应用（例如空目标）时 Git 会留下 sequencer 但移除操作标记；
+            // 这时不能算完成，也不能继续，只能由用户明确中止。
+            let created = sequencer_created_in_guard(guard, git, root).await?;
+            return Err(AppError::new(
+                "sequencer_paused",
+                format!(
+                    "{}{}序列停在后续目标，无法继续应用。可以中止回到本次{}开始前。不能跳过。没有推送。",
+                    sequencer_progress(&after_op, created),
+                    operation_verb(&after_op),
+                    operation_verb(&after_op)
+                ),
             ));
         }
         return Err(classified_git(
@@ -3074,7 +3113,8 @@ async fn operation_from_snapshot(
     snapshot: &StatusSnapshot,
     request_id: u64,
 ) -> Result<String, AppError> {
-    let names: Vec<_> = sequencer_markers().iter().map(|(name, _)| *name).collect();
+    let mut names: Vec<_> = sequencer_markers().iter().map(|(name, _)| *name).collect();
+    names.push(SEQUENCER_TODO);
     let (output, _) = run_read(
         backend,
         root,
@@ -3092,7 +3132,8 @@ async fn operation_in_guard(
     root: &Path,
     snapshot: &StatusSnapshot,
 ) -> Result<String, AppError> {
-    let names: Vec<_> = sequencer_markers().iter().map(|(name, _)| *name).collect();
+    let mut names: Vec<_> = sequencer_markers().iter().map(|(name, _)| *name).collect();
+    names.push(SEQUENCER_TODO);
     let output = run_spec(guard, git_paths_command(git, root, &names), false, false).await?;
     operation_from_paths(root, snapshot, &output)
 }
@@ -3112,7 +3153,7 @@ fn operation_from_paths(
     let text = String::from_utf8_lossy(&output.stdout);
     let paths: Vec<_> = text.lines().collect();
     let markers = sequencer_markers();
-    if paths.len() != markers.len() {
+    if paths.len() != markers.len() + 1 {
         return Err(AppError::new(
             "operation_failed",
             "仓库操作状态路径不完整，未修改仓库。",
@@ -3121,6 +3162,13 @@ fn operation_from_paths(
     for (path, (_, kind)) in paths.iter().zip(markers) {
         if git_path_exists(root, path.as_bytes()) {
             return Ok(kind.to_string());
+        }
+    }
+    // 没有 REVERT_HEAD/CHERRY_PICK_HEAD 时，sequencer/todo 仍可能停在某个目标上。
+    // 按未完成指令的类型继续把它当作进行中的操作，避免把它误判为空闲后破坏仓库。
+    if let Some(todo) = paths.last() {
+        if let Some(kind) = sequencer_todo_kind(root, todo.as_bytes())? {
+            return Ok(kind);
         }
     }
     Ok(if snapshot.files.iter().any(|file| file.unmerged) {
@@ -3167,6 +3215,96 @@ fn sequencer_todo_has_instruction(contents: &str) -> bool {
     })
 }
 
+const SEQUENCER_TODO: &str = "sequencer/todo";
+
+/// 从 sequencer/todo 的未完成指令推断操作类型。
+/// 空 todo、只有注释/提示、混合或未知指令都返回 None，不把完成状态当成进行中。
+fn sequencer_todo_operation(contents: &str) -> Option<String> {
+    let mut found: Option<&str> = None;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("hint:") {
+            continue;
+        }
+        let kind = match line.split_whitespace().next()? {
+            "revert" => "revert",
+            "pick" => "cherry-pick",
+            _ => return None,
+        };
+        if found.is_some_and(|existing| existing != kind) {
+            return None;
+        }
+        found = Some(kind);
+    }
+    found.map(str::to_string)
+}
+
+fn sequencer_todo_kind(root: &Path, path_stdout: &[u8]) -> Result<Option<String>, AppError> {
+    let Some(path) = resolved_git_path(root, path_stdout) else {
+        return Ok(None);
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Ok(sequencer_todo_operation(&contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(AppError::new(
+            "operation_failed",
+            "无法读取拣选或还原序列状态，未修改仓库。",
+        )),
+    }
+}
+
+fn sequencer_head_marker(operation: &str) -> Option<&'static str> {
+    match operation {
+        "revert" => Some("REVERT_HEAD"),
+        "cherry-pick" => Some("CHERRY_PICK_HEAD"),
+        _ => None,
+    }
+}
+
+/// 操作仍在当前目标上时 Git 会保留 REVERT_HEAD/CHERRY_PICK_HEAD；
+/// 只有它还在，`--continue` 才能提交当前项并继续后续目标。
+async fn head_marker_present(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    operation: &str,
+    generation: u64,
+) -> Result<bool, AppError> {
+    match sequencer_head_marker(operation) {
+        Some(name) => {
+            path_present(
+                backend,
+                root,
+                git,
+                name,
+                generation,
+                internal_request_id(),
+            )
+            .await
+        }
+        None => Ok(true),
+    }
+}
+
+async fn path_present(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    name: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<bool, AppError> {
+    let (output, _) = run_read(
+        backend,
+        root,
+        generation,
+        request_id,
+        git_path_command(git, root, name),
+    )
+    .await?;
+    Ok(output.exit_code == 0 && git_path_exists(root, &output.stdout))
+}
+
 async fn sequencer_todo_pending(
     guard: &mut WriteGuard<'_, RealRunner>,
     git: &Path,
@@ -3177,7 +3315,7 @@ async fn sequencer_todo_pending(
     let note = format!("无法确认{verb}是否还有后续提交，未把它标成完成。");
     let output = run_spec(
         guard,
-        git_path_command(git, root, "sequencer/todo"),
+        git_path_command(git, root, SEQUENCER_TODO),
         false,
         false,
     )
@@ -3207,6 +3345,80 @@ async fn path_exists_in_guard(
         return Ok(false);
     }
     Ok(git_path_exists(root, &output.stdout))
+}
+
+async fn head_marker_present_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+    operation: &str,
+) -> Result<bool, AppError> {
+    match sequencer_head_marker(operation) {
+        Some(name) => path_exists_in_guard(guard, git, root, name).await,
+        None => Ok(true),
+    }
+}
+
+/// Git 在 sequencer/head 保存本次序列开始前的 HEAD；用它与当前 HEAD 计算已创建的提交数。
+async fn sequencer_created_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    git: &Path,
+    root: &Path,
+) -> Result<Option<u32>, AppError> {
+    let output = run_spec(
+        guard,
+        git_path_command(git, root, "sequencer/head"),
+        false,
+        false,
+    )
+    .await?;
+    if output.exit_code != 0 {
+        return Ok(None);
+    }
+    let Some(path) = resolved_git_path(root, &output.stdout) else {
+        return Ok(None);
+    };
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Ok(None);
+    };
+    let start = contents.trim().to_ascii_lowercase();
+    if !is_oid(&start) {
+        return Ok(None);
+    }
+    let current = head_in_guard(guard, git, root).await?;
+    if start == current {
+        return Ok(Some(0));
+    }
+    let counted = run_spec(
+        guard,
+        commits_between_count_command(git, root, &start, &current),
+        false,
+        false,
+    )
+    .await?;
+    if counted.exit_code != 0 {
+        return Ok(None);
+    }
+    Ok(String::from_utf8_lossy(&counted.stdout)
+        .trim()
+        .parse::<u32>()
+        .ok())
+}
+
+fn sequencer_progress(operation: &str, created: Option<u32>) -> String {
+    let verb = operation_verb(operation);
+    match created {
+        Some(0) => format!("本次{verb}还没有创建提交。"),
+        Some(count) => format!("本次{verb}已创建 {count} 个提交。"),
+        None => format!("本次{verb}的部分进度可能已经写入。"),
+    }
+}
+
+fn sequencer_paused_note(operation: &str) -> String {
+    let verb = operation_verb(operation);
+    format!(
+        "{verb}序列停在后续目标，无法继续应用。可以中止回到本次{verb}开始前；已经创建的{verb}提交和冲突编辑会在中止时撤销。不能跳过。没有推送。"
+    )
 }
 
 async fn ensure_ref(
@@ -4151,7 +4363,8 @@ async fn revert_in_guard(
     let after = status_in_guard(guard, backend, git, root).await?;
     let after_op = operation_in_guard(guard, git, root, &after).await?;
     let created = created_commits_in_guard(guard, git, root, &before).await?;
-    if after_op == "revert" {
+    let head_marker = path_exists_in_guard(guard, git, root, "REVERT_HEAD").await?;
+    if after_op == "revert" && head_marker {
         return Ok(Reverted {
             created,
             conflicted: true,
@@ -4159,37 +4372,23 @@ async fn revert_in_guard(
             note: revert_conflict_note(created, ordered.len()),
         });
     }
-    if output.exit_code != 0 {
-        // 没有操作标记却留下 sequencer 是 Git 在目标之间失败后的半成品状态；
-        // 中止序列会把失败前已创建的部分提交一并回滚，避免留下半次还原。
+    if output.exit_code != 0 || after_op != "none" {
+        // 没有 REVERT_HEAD 却留下 sequencer/todo 是 Git 在目标之间失败后的半成品状态。
+        // 不自动中止（已经创建的提交必须由用户明确中止才会撤销），只如实报告部分进度。
         let residue = path_exists_in_guard(guard, git, root, "sequencer").await?;
-        let mut remaining = created;
-        if residue {
-            let aborted = run_spec(guard, revert_abort_command(git, root), true, false).await?;
-            if aborted.exit_code != 0 {
-                return Err(prefix_created(
-                    classified_git(
-                        "revert_failed",
-                        &aborted,
-                        "还原没有完成，残留的还原序列也没有清理。请刷新后核对仓库状态。",
-                    ),
-                    created,
-                ));
-            }
-            remaining = created_commits_in_guard(guard, git, root, &before).await?;
-        }
         let mut error = classified_git(
             "revert_failed",
             &output,
             "还原没有完成。会覆盖未提交内容时不会写入，当前分支和工作区应保持原样。",
         );
-        if remaining > 0 {
-            error = prefix_created(error, remaining);
-        } else if created > 0 {
+        if residue || after_op == "revert" {
             error.message = format!(
-                "本次还原没有完成，已回滚失败前创建的部分提交。{}",
+                "本次还原没有完成。{}Git 仍处于还原进行中；可以中止回到本次还原开始前，不能跳过。{}",
+                sequencer_progress("revert", Some(created)),
                 error.message
             );
+        } else if created > 0 {
+            error = prefix_created(error, created);
         }
         return Err(error);
     }
@@ -5176,6 +5375,25 @@ mod tests {
         assert!(sequencer_todo_has_instruction(todo));
         assert!(!sequencer_todo_has_instruction("hint: nothing\n# done\n\n"));
         assert!(!sequencer_todo_has_instruction(""));
+    }
+
+    #[test]
+    fn sequencer_todo_operation_only_reports_unfinished_known_instructions() {
+        assert_eq!(
+            sequencer_todo_operation("revert abcdef1 one\nrevert abcdef2 two\n").as_deref(),
+            Some("revert")
+        );
+        assert_eq!(
+            sequencer_todo_operation("pick abcdef1 one\npick abcdef2 two\n").as_deref(),
+            Some("cherry-pick")
+        );
+        assert_eq!(sequencer_todo_operation("hint: done\n# comment\n\n"), None);
+        assert_eq!(sequencer_todo_operation(""), None);
+        assert_eq!(
+            sequencer_todo_operation("revert abcdef1 one\npick abcdef2 two\n"),
+            None
+        );
+        assert_eq!(sequencer_todo_operation("noop\n"), None);
     }
 
     #[tokio::test]
@@ -6604,6 +6822,13 @@ mod tests {
         assert_eq!(fs::read_to_string(repo.join("b.txt")).unwrap(), "two\n");
         assert_eq!(fs::read_to_string(repo.join("c.txt")).unwrap(), "base\n");
         assert_eq!(git_text(&repo, &["rev-parse", "HEAD~2"]), three);
+        assert!(!repo.join(".git/REVERT_HEAD").exists());
+        assert!(!repo.join(".git/sequencer").exists());
+        let quiet = merge_session(&backend, &path, done.generation, 3)
+            .await
+            .unwrap();
+        assert_eq!(quiet.operation, "none");
+        assert!(!quiet.can_abort);
     }
 
     #[tokio::test]
@@ -6871,7 +7096,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revert_refuses_to_overwrite_local_content_and_cleans_partial_sequencer() {
+    async fn revert_partial_failure_stays_visible_and_blocks_new_revert_until_abort() {
         let fixture = crate::test_support::git_fixture("revert-dirty");
         let backend = fixture.backend();
         let repo = fixture.repo("demo");
@@ -6901,8 +7126,19 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, "local_changes");
         assert!(
-            error.message.contains("已回滚失败前创建的部分提交"),
+            error.message.contains("已创建 1 个提交"),
             "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("仍处于还原进行中"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("可以中止"), "{}", error.message);
+        assert!(
+            !error.message.contains("已回滚"),
+            "不能自动撤销用户已经创建的提交：{}",
             error.message
         );
         assert_eq!(
@@ -6912,17 +7148,68 @@ mod tests {
         assert_eq!(git_text(&repo, &["status", "--porcelain=v1"]), "M b.txt");
         assert!(!repo.join(".git/REVERT_HEAD").exists());
         assert!(
-            !repo.join(".git/sequencer").exists(),
-            "目标之间失败后不能留下没有操作标记的还原序列"
+            repo.join(".git/sequencer").exists(),
+            "部分进度和 Git 的进行中状态必须保留，等待用户明确中止"
         );
-        // 失败后回到还原前，不留下半次还原的提交。
+        let head = git_text(&repo, &["rev-parse", "HEAD"]);
+        assert_eq!(git_text(&repo, &["log", "-1", "--format=%s"]), "Revert \"two\"");
+        assert_eq!(
+            git_text(&repo, &["rev-list", "--count", &format!("{two}..HEAD")]),
+            "1"
+        );
+
+        // 遗留 sequencer 现在会被识别为进行中的 revert，新还原必须被阻止。
+        let session = merge_session(&backend, &path, error.generation.unwrap(), 2)
+            .await
+            .unwrap();
+        assert_eq!(session.operation, "revert");
+        assert!(session.can_abort);
+        assert!(!session.can_continue);
+        assert!(
+            session.note.contains("无法继续应用"),
+            "{}",
+            session.note
+        );
+        assert!(session.note.contains("中止"));
+        let blocked = revert_commits(
+            &backend,
+            &path,
+            std::slice::from_ref(&two),
+            &head,
+            true,
+            session.generation,
+            3,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(blocked.code, "revert_in_progress");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), head);
+        assert!(repo.join(".git/sequencer").exists());
+
+        // 中止由用户明确触发：回到本次还原开始前，并保留本地脏内容。
+        let preview = abort_merge(&backend, &path, false, blocked.generation.unwrap(), 4)
+            .await
+            .unwrap();
+        assert!(!preview.wrote);
+        assert!(preview.note.contains("取消不会写入"));
+        let aborted = abort_merge(&backend, &path, true, preview.generation, 5)
+            .await
+            .unwrap();
+        assert!(aborted.wrote);
+        assert!(aborted.note.contains("还原"));
         assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), two);
-        assert_eq!(git_text(&repo, &["log", "-1", "--format=%s"]), "two");
+        assert!(!repo.join(".git/REVERT_HEAD").exists());
+        assert!(!repo.join(".git/sequencer").exists());
+        assert_eq!(git_text(&repo, &["status", "--porcelain=v1"]), "M b.txt");
+        assert_eq!(
+            fs::read_to_string(repo.join("b.txt")).unwrap(),
+            "dirty-b\n"
+        );
+        assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "two\n");
         assert_eq!(
             git_text(&repo, &["rev-list", "--count", &format!("{two}..HEAD")]),
             "0"
         );
-        assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "two\n");
     }
 
     #[tokio::test]
@@ -7119,6 +7406,126 @@ mod tests {
         assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "a-ok\n");
         assert_eq!(fs::read_to_string(repo.join("b.txt")).unwrap(), "b-ok\n");
         assert_eq!(git_text(&repo, &["symbolic-ref", "HEAD"]), "refs/heads/main");
+    }
+
+    #[tokio::test]
+    async fn revert_continue_hard_failure_reports_progress_and_abort_restores_start() {
+        let fixture = crate::test_support::git_fixture("revert-continue-empty");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("a.txt"), "base\n").unwrap();
+        fs::write(repo.join("b.txt"), "base\n").unwrap();
+        git(&repo, &["add", "--", "a.txt", "b.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        fs::write(repo.join("b.txt"), "one\n").unwrap();
+        git(&repo, &["commit", "-am", "one"]);
+        let one = git_text(&repo, &["rev-parse", "HEAD"]);
+        fs::write(repo.join("a.txt"), "two\n").unwrap();
+        git(&repo, &["commit", "-am", "two"]);
+        let two = git_text(&repo, &["rev-parse", "HEAD"]);
+        // 先把 one 的效果撤销掉：稍后继续还原 one 时会产生空目标。
+        fs::write(repo.join("b.txt"), "base\n").unwrap();
+        git(&repo, &["commit", "-am", "undo-one"]);
+        fs::write(repo.join("a.txt"), "later-a\n").unwrap();
+        git(&repo, &["commit", "-am", "later-a"]);
+        let head = git_text(&repo, &["rev-parse", "HEAD"]);
+        let path = repo_key(&repo);
+        let started = revert_commits(
+            &backend,
+            &path,
+            &[two.clone(), one.clone()],
+            &head,
+            true,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(started.conflicted);
+        assert!(repo.join(".git/REVERT_HEAD").exists());
+        let resolved = resolve_conflict(
+            &backend,
+            &path,
+            "a.txt",
+            "text",
+            Some("resolved-a\n".to_string()),
+            started.generation,
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved.unresolved, 0);
+        let paused = complete_merge(&backend, &path, "ignored", resolved.generation, 3)
+            .await
+            .unwrap_err();
+        assert_eq!(paused.code, "sequencer_paused");
+        assert!(
+            paused.message.contains("已创建 1 个提交"),
+            "{}",
+            paused.message
+        );
+        assert!(
+            paused.message.contains("无法继续应用"),
+            "{}",
+            paused.message
+        );
+        assert!(paused.message.contains("可以中止"), "{}", paused.message);
+        assert!(paused.message.contains("不能跳过"), "{}", paused.message);
+        assert!(!paused.message.contains("已继续还原"));
+        assert_eq!(git_text(&repo, &["log", "-1", "--format=%s"]), "Revert \"two\"");
+        assert!(!repo.join(".git/REVERT_HEAD").exists());
+        assert!(repo.join(".git/sequencer/todo").exists());
+
+        let session = merge_session(&backend, &path, paused.generation.unwrap(), 4)
+            .await
+            .unwrap();
+        assert_eq!(session.operation, "revert");
+        assert!(session.can_abort);
+        assert!(!session.can_continue);
+        assert!(
+            session.note.contains("无法继续应用"),
+            "{}",
+            session.note
+        );
+        assert!(session.note.contains("中止"));
+        let current = git_text(&repo, &["rev-parse", "HEAD"]);
+        let blocked = revert_commits(
+            &backend,
+            &path,
+            std::slice::from_ref(&two),
+            &current,
+            true,
+            session.generation,
+            5,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(blocked.code, "revert_in_progress");
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), current);
+        assert!(repo.join(".git/sequencer").exists());
+
+        let preview = abort_merge(&backend, &path, false, blocked.generation.unwrap(), 6)
+            .await
+            .unwrap();
+        assert!(!preview.wrote);
+        assert!(preview.note.contains("取消不会写入"));
+        let aborted = abort_merge(&backend, &path, true, preview.generation, 7)
+            .await
+            .unwrap();
+        assert!(aborted.wrote);
+        assert!(aborted.note.contains("还原"));
+        assert_eq!(git_text(&repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git_text(&repo, &["symbolic-ref", "HEAD"]), "refs/heads/main");
+        assert!(!repo.join(".git/REVERT_HEAD").exists());
+        assert!(!repo.join(".git/sequencer").exists());
+        assert_eq!(git_text(&repo, &["status", "--porcelain=v1"]), "");
+        assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "later-a\n");
+        assert_eq!(fs::read_to_string(repo.join("b.txt")).unwrap(), "base\n");
+        assert_eq!(
+            git_text(&repo, &["rev-list", "--count", &format!("{head}..HEAD")]),
+            "0"
+        );
     }
 
     #[tokio::test]

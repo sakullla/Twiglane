@@ -886,12 +886,14 @@ describe("名称排序", () => {
     await fireEvent.click(a2);
     expect(a2.getAttribute("aria-selected")).toBe("true");
 
-    await fireEvent.click(screen.getByRole("button", { name: "按名称降序排列" }));
+    await fireEvent.click(screen.getByRole("button", { name: "名称升序" }));
     await waitFor(() => expect(paths()).toEqual(["b.txt", "a10.txt", "a2.txt"]));
     // 选择按路径保留，不跟着行号走。
     expect(within(tree).getByRole("treeitem", { name: "a2.txt" }).getAttribute("aria-selected")).toBe("true");
-    // 按钮变成升序入口，语义状态同步。
-    expect(screen.getByRole("button", { name: "按名称升序排列" }).getAttribute("aria-pressed")).toBe("true");
+    // 名称与 aria-pressed 都描述当前模式（降序），不再出现「按升序排列，已按下」的矛盾读法。
+    const sortButton = screen.getByRole("button", { name: "名称降序" });
+    expect(sortButton.getAttribute("aria-pressed")).toBe("true");
+    expect(sortButton.getAttribute("title")).toContain("当前按名称降序");
 
     // Shift 范围按当前显示顺序：从第一行到尾行覆盖三行。
     await fireEvent.click(within(tree).getByRole("treeitem", { name: "b.txt" }));

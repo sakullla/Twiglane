@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
 import { describe, expect, it, vi } from "vitest";
+import { ICONS } from "../src/lib/icons";
 import type { FileEntryRequest, FileEntryResult } from "../src/lib/types";
 
 import FileOperationDialog, {
@@ -34,6 +35,11 @@ function submitButton(): HTMLButtonElement {
 
 async function type(inputSelector: string, value: string) {
   await fireEvent.input(document.querySelector(inputSelector)!, { target: { value } });
+}
+
+/** 标题行的图标语义：新建文件与新建目录不能共用同一个图标。 */
+function modalIconPaths(): string[] {
+  return [...document.querySelectorAll(".modal-icon svg path")].map((path) => path.getAttribute("d") ?? "");
 }
 
 describe("文件操作表单的纯校验", () => {
@@ -89,6 +95,47 @@ describe("新建文件与目录", () => {
       kind: "directory",
     });
     await waitFor(() => expect(p.onClose).toHaveBeenCalled());
+  });
+
+  it("目录行上新建文件：说明、图标、占位符与提交参数都按文件", async () => {
+    const p = props({ action: "createFile", path: "src/lib", kind: "directory" });
+    render(FileOperationDialog, { props: p as never });
+    const dialog = screen.getByRole("dialog", { name: "新建文件" });
+    expect(dialog.textContent).toContain("在 src/lib 下新建空文件");
+    expect(dialog.textContent).not.toContain("新建空目录");
+    expect(modalIconPaths()).toEqual(ICONS.file);
+    const input = document.querySelector<HTMLInputElement>("[data-entry-input='name']")!;
+    expect(input.placeholder).toBe("例如 notes.md");
+
+    await type("[data-entry-input='name']", "notes.md");
+    expect(document.querySelector("[data-entry-preview]")?.textContent).toContain("src/lib/notes.md");
+    await fireEvent.click(submitButton());
+    await waitFor(() => expect(p.onSubmit).toHaveBeenCalledWith({
+      action: "createFile",
+      source: "",
+      target: "src/lib/notes.md",
+      kind: "file",
+    }));
+  });
+
+  it("目录行上新建目录：说明、图标与提交参数都按目录", async () => {
+    const p = props({ action: "createDirectory", path: "src/lib", kind: "directory" });
+    render(FileOperationDialog, { props: p as never });
+    const dialog = screen.getByRole("dialog", { name: "新建目录" });
+    expect(dialog.textContent).toContain("在 src/lib 下新建空目录");
+    expect(dialog.textContent).not.toContain("新建空文件");
+    expect(modalIconPaths()).toEqual(ICONS["folder-plus"]);
+    const input = document.querySelector<HTMLInputElement>("[data-entry-input='name']")!;
+    expect(input.placeholder).toBe("例如 components");
+
+    await type("[data-entry-input='name']", "components");
+    await fireEvent.click(submitButton());
+    await waitFor(() => expect(p.onSubmit).toHaveBeenCalledWith({
+      action: "createDirectory",
+      source: "",
+      target: "src/lib/components",
+      kind: "directory",
+    }));
   });
 
   it("名称非法时就地说明并保留输入，不调用命令", async () => {
@@ -156,6 +203,33 @@ describe("复制与移动", () => {
       action: "copy",
       source: "src/lib/a.ts",
       target: "src/lib/a-副本.ts",
+      kind: "file",
+    }));
+  });
+
+  it("复制目录时沿用行类型提交目录，默认目标是同目录副本", async () => {
+    const p = props({ action: "copy", path: "src/lib/old", kind: "directory" });
+    render(FileOperationDialog, { props: p as never });
+    const input = document.querySelector<HTMLInputElement>("[data-entry-input='target']")!;
+    expect(input.value).toBe("src/lib/old-副本");
+    await fireEvent.click(submitButton());
+    await waitFor(() => expect(p.onSubmit).toHaveBeenCalledWith({
+      action: "copy",
+      source: "src/lib/old",
+      target: "src/lib/old-副本",
+      kind: "directory",
+    }));
+  });
+
+  it("移动文件时沿用行类型提交文件", async () => {
+    const p = props({ action: "move", path: "src/lib/a.ts", kind: "file" });
+    render(FileOperationDialog, { props: p as never });
+    await type("[data-entry-input='target']", "src/lib/b.ts");
+    await fireEvent.click(submitButton());
+    await waitFor(() => expect(p.onSubmit).toHaveBeenCalledWith({
+      action: "move",
+      source: "src/lib/a.ts",
+      target: "src/lib/b.ts",
       kind: "file",
     }));
   });

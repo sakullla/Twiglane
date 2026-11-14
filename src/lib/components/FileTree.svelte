@@ -603,7 +603,7 @@
         type="button"
         class="icon-btn sm"
         aria-pressed={nameDirection === "desc"}
-        aria-label={nameDirection === "asc" ? "按名称降序排列" : "按名称升序排列"}
+        aria-label={`名称${nameDirection === "asc" ? "升序" : "降序"}`}
         title={`当前按名称${nameDirection === "asc" ? "升序" : "降序"}，目录始终在前；点击改为${nameDirection === "asc" ? "降序" : "升序"}`}
         onclick={() => onNameDirection?.(nameDirection === "asc" ? "desc" : "asc")}
       >

@@ -2165,7 +2165,12 @@
         request.action === "delete"
           ? `已移到系统回收站：${request.source}`
           : `${entryActionLabel(request.action)}完成：${target}`;
-      const message = placed ? done : `${done}；目标不在当前筛选或排序的可见范围里`;
+      /* 定位会先清空树筛选再展开目标；仍没就位时只有两种真实原因，不能都算到筛选或排序头上。 */
+      const message = placed
+        ? done
+        : workspaceView === "files"
+          ? `${done}；目标还没能定位，可能是读取所在目录失败，或它已不在工作区里。`
+          : `${done}；文件视图当前不在前台，切过去就能看到目标。`;
       notice(message);
       return { ok: true, code: "ok", message, path: target || request.source };
     } catch (error) {

@@ -106,7 +106,19 @@
   let { action, path, kind, disabled, draftPaths = [], onClose, onSubmit }: Props = $props();
 
   const creating = $derived(action === "createFile" || action === "createDirectory");
-  const newKind: "file" | "directory" = $derived(action === "createDirectory" || kind === "directory" ? "directory" : "file");
+  /**
+   * 新建的实际类型只由动作决定：目录行上的「新建文件」是文件，行的 kind 只用来决定
+   * 新建位置与复制/移动/删除的目标类型，不能反过来改写新建要建什么。
+   */
+  const newKind: "file" | "directory" = $derived(
+    action === "createFile"
+      ? "file"
+      : action === "createDirectory"
+        ? "directory"
+        : kind === "directory"
+          ? "directory"
+          : "file",
+  );
   /** 新建的所在目录：目录行本身，或文件所在的父目录。 */
   const directory = $derived(kind === "directory" ? path : parentDirectory(path));
 
@@ -174,7 +186,7 @@
       action,
       source,
       target: action === "delete" ? "" : destination,
-      kind: action === "createFile" ? "file" : action === "createDirectory" ? "directory" : newKind,
+      kind: newKind,
     };
   }
 

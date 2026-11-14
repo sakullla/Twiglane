@@ -485,13 +485,13 @@ const TASK_COMMANDS: CommandSpec[] = [
   {
     id: "task.abortMerge",
     group: "任务",
-    title: "中止合并",
-    hint: "撤销进行中的合并、变基或拣选，回到开始之前",
+    title: "中止当前操作",
+    hint: "撤销进行中的合并、变基、拣选或还原，回到开始之前",
     available: (state) => hasRepo(state) && idle(state) && state.mergeAbortable === true,
     reason: (state) => {
       if (!state.hasRepo) return "先打开一个仓库";
       if (state.writeLocked) return busyReason(state);
-      return "当前没有进行中的合并";
+      return "当前没有进行中的合并、变基、拣选或还原";
     },
   },
   {
@@ -770,7 +770,7 @@ const PALETTE_ALIASES: Record<string, string> = {
   "sync.upstream": "upstream tracking 跟踪分支 设置上游",
   "task.stash": "stash 贮藏 储藏 搁置",
   "task.merge": "merge rebase 合并分支 变基",
-  "task.abortMerge": "abort 取消合并 中止变基 中止拣选",
+  "task.abortMerge": "abort 取消合并 中止变基 中止拣选 中止还原 中止当前操作",
   "branch.switch": "checkout switch branch 检出分支",
   "branch.create": "create new branch 创建分支",
   "task.branch": "branch tag 管理分支 删除分支 重命名分支 管理标签 新建标签",

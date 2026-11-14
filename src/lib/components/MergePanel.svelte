@@ -233,11 +233,13 @@
     });
   });
   let operation = $derived(session?.operation ?? null);
+  /** 完成页仍属于还原会话：此时 session 已回到 none，标题和标签必须继续显示还原。 */
+  let displayOperation = $derived(finished?.revert ? "revert" : session?.operation ?? "none");
+  let displayUnresolved = $derived(finished ? 0 : session?.unresolved ?? 0);
   /** 标题跟随当前会话：还原冲突显示“还原冲突”，还原无冲突显示“还原提交”。 */
   $effect(() => {
-    const state = session;
-    if (!state) return;
-    onOperation?.(state.operation, state.unresolved);
+    if (!session && !finished) return;
+    onOperation?.(displayOperation, displayUnresolved);
   });
   /** 预检依赖的实际仓库状态。generation 推进但它不变时不重新检查：预检不能触发自己。 */
   let repoState = $derived.by(() => {
@@ -800,7 +802,7 @@
   }
 </script>
 
-<section class={`merge-panel ${embedded ? "embedded" : "span-main"}`} aria-label={session?.operation === "revert" ? "还原提交" : "分支合并"} data-panel="merge">
+<section class={`merge-panel ${embedded ? "embedded" : "span-main"}`} aria-label={displayOperation === "revert" ? "还原提交" : "分支合并"} data-panel="merge">
   <!-- 搬走的必须是这个常驻节点：Svelte 销毁 {#if} 分支时沿分支首节点的 nextSibling 走，
        分支首尾节点被搬走后遍历中断，后面的节点会残留。 -->
   <div class="mp-head-host" use:portal={headTarget}>
@@ -1147,7 +1149,7 @@
         <span class="mp-status ok" title={reason}><Icon name="check-circle" size={13} /><span class="truncate">{reason}</span></span>
       {/if}
     {:else if session?.operation === "revert"}
-      {#if !session.canContinue}
+      {#if !session.canContinue && session.unresolved === 0}
         {@const reason = "还原序列停在后续目标，无法继续应用。可以中止回到本次还原开始前。"}
         <span class="mp-status warn" title={reason}><Icon name="alert" size={13} /><span class="truncate">{reason}</span></span>
       {:else if session.unresolved > 0}

@@ -245,6 +245,10 @@ describe("合并面板", () => {
     });
     const continueRevert = await screen.findByRole("button", { name: "继续还原" });
     expect(continueRevert.hasAttribute("disabled")).toBe(true);
+    const foot = document.querySelector<HTMLElement>(".mp-foot")!;
+    expect(foot.textContent).toContain("还有 1 个未解决冲突，不能继续还原");
+    expect(foot.textContent).not.toContain("停在后续目标");
+    await vi.waitFor(() => expect(continueRevert.getAttribute("title")).toContain("还有 1 个未解决冲突"));
     expect(screen.getByRole("button", { name: "中止还原" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "完成合并" })).toBeNull();
     expect(screen.queryByRole("button", { name: /跳过/ })).toBeNull();
@@ -1241,6 +1245,32 @@ describe("合并任务 modal", () => {
     );
     renderMergeModal();
     expect(await screen.findByRole("dialog", { name: "还原提交" })).toBeTruthy();
+  });
+
+  it("继续还原完成后的窗口标题与面板标签保持还原语义", async () => {
+    const live = session({
+      operation: "revert",
+      canAbort: true,
+      canContinue: true,
+      unresolved: 0,
+      conflicts: [],
+      note: "正在还原（revert）。冲突已全部标记，可以继续。",
+    });
+    mergeSession.mockResolvedValueOnce(live);
+    mergeSession.mockResolvedValue(session());
+    completeMerge.mockResolvedValue({
+      oid: "d".repeat(40),
+      generation: 7,
+      summary: "已继续还原，后续目标已处理。没有推送。",
+      files: [],
+      snapshot: opened.snapshot,
+    });
+    renderMergeModal();
+    await fireEvent.click(await screen.findByRole("button", { name: "继续还原" }));
+    expect(await screen.findByText("已继续还原")).toBeTruthy();
+    expect(await screen.findByRole("dialog", { name: "还原提交" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "合并分支" })).toBeNull();
+    expect(document.querySelector('[data-panel="merge"]')?.getAttribute("aria-label")).toBe("还原提交");
   });
 
   it("完成后冲突界面完全移除，只剩完成页", async () => {

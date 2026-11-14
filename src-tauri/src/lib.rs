@@ -365,18 +365,18 @@ pub(crate) fn bring_to_front<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-/// 登记 scheme。安装包由 deep-link 插件的安装脚本写入，所以 Windows 只有 debug 构建
-/// （开发模式）才运行期登记，release 不再覆盖安装器写好的登记；Linux 没有安装器负责登记，
-/// 任何构建都注册。失败只影响链接入口，不影响仓库编辑，所以不中断启动。
+/// Windows 的 scheme 统一由安装器登记，debug 和 release 启动都不覆盖，
+/// 避免开发构建把正式版的 twiglane:// 入口劫持到 target/debug。
+/// Linux 没有安装器负责登记，仍在运行期注册。失败只影响链接入口，不中断启动。
 fn register_deep_link<R: Runtime>(app: &tauri::App<R>) {
-    #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
+    #[cfg(target_os = "linux")]
     {
         use tauri_plugin_deep_link::DeepLinkExt;
         if let Err(error) = app.deep_link().register_all() {
             eprintln!("cliora 审查 scheme 登记失败：{error}");
         }
     }
-    #[cfg(not(any(target_os = "linux", all(debug_assertions, windows))))]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = app;
     }
@@ -2142,6 +2142,17 @@ mod ipc_contract {
                 "{command} 没有注册到 invoke handler",
             );
         }
+    }
+
+    /// Windows 的协议归安装器管理。没有注册插件的 app 也必须能完成此步骤，
+    /// 防止开发启动再次调用插件，把正式版入口覆盖为当前 debug/test 可执行文件。
+    #[cfg(windows)]
+    #[test]
+    fn windows_startup_leaves_installer_protocol_registration_alone() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        super::register_deep_link(&app);
     }
 
     /// 返回时的工作区状态由后端读真实 `git status`：干净是 0，有修改或未跟踪文件按条数计，

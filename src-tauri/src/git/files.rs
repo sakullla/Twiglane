@@ -4765,14 +4765,13 @@ where
             ))
         }
         (Ok(()), EntryTargetState::Unknown) => {
-            let current = guard.finish();
-            let refreshed = crate::git::ops::refresh_status(
-                backend,
-                path,
-                current,
-                internal_request_id(),
-            )
-            .await
+            // 无法确认目标是否已离开：按"可能已写入"推进代次，旧代次的在途读取不能再
+            // 把已删除项目当作当前状态；错误携带新代次，前端据此重新同步。
+            guard.mark_written();
+            let new_generation = guard.finish();
+            let refreshed = settle_read!(backend, &root, new_generation, |current| {
+                crate::git::ops::refresh_status(backend, path, current, internal_request_id()).await
+            })
             .is_ok();
             Err(AppError::new(
                 "trash_failed",
@@ -4781,7 +4780,8 @@ where
                 } else {
                     "无法确认回收站结果及当前状态；未执行永久删除。"
                 },
-            ))
+            )
+            .with_generation(new_generation))
         }
         (Err(_), EntryTargetState::Present) => {
             let current = guard.finish();
@@ -4816,14 +4816,12 @@ where
             .with_generation(new_generation))
         }
         (Err(_), EntryTargetState::Unknown) => {
-            let current = guard.finish();
-            let refreshed = crate::git::ops::refresh_status(
-                backend,
-                path,
-                current,
-                internal_request_id(),
-            )
-            .await
+            // 适配器可能在报错前已移动目标：同样按可能已写入处理。
+            guard.mark_written();
+            let new_generation = guard.finish();
+            let refreshed = settle_read!(backend, &root, new_generation, |current| {
+                crate::git::ops::refresh_status(backend, path, current, internal_request_id()).await
+            })
             .is_ok();
             Err(AppError::new(
                 "trash_failed",
@@ -4832,7 +4830,8 @@ where
                 } else {
                     "回收站返回错误，无法确认目标及当前状态；未执行永久删除。"
                 },
-            ))
+            )
+            .with_generation(new_generation))
         }
     }
 }
@@ -8615,6 +8614,67 @@ mod tests {
         assert!(!root.join("second.txt").exists());
         assert_eq!(fs::read(quarantine.join("second.txt")).unwrap(), b"second\n");
         assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 3);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn trash_with_unknown_target_state_advances_generation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // root 绕过目录权限检查，无法制造"无法确认目标状态"。
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let fixture = crate::test_support::git_fixture("repository-entry-trash-unknown");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::create_dir_all(root.join("locked")).unwrap();
+        fs::write(root.join("locked/first.txt"), b"first\n").unwrap();
+        fs::write(root.join("locked/second.txt"), b"second\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let quarantine = fixture.path().join("quarantine");
+        fs::create_dir(&quarantine).unwrap();
+        let path = root.to_str().unwrap();
+        let locked = root.join("locked");
+
+        // 适配器报告成功、也可能报错，但目标状态都无法确认：两种情况都必须推进代次。
+        for (name, id, generation, adapter_ok) in
+            [("first.txt", 140, 1, true), ("second.txt", 141, 2, false)]
+        {
+            let source = locked.join(name);
+            let destination = quarantine.join(name);
+            let directory = locked.clone();
+            let error = repository_delete_entry_with(
+                &backend,
+                path,
+                &format!("locked/{name}"),
+                generation,
+                id,
+                move |_| {
+                    fs::rename(&source, &destination).unwrap();
+                    fs::set_permissions(&directory, fs::Permissions::from_mode(0o000)).unwrap();
+                    if adapter_ok {
+                        Ok(())
+                    } else {
+                        Err(AppError::new("trash_failed", "injected unknown"))
+                    }
+                },
+            )
+            .await
+            .unwrap_err();
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(error.code, "trash_failed");
+            assert!(error.message.contains("无法确认"));
+            assert!(!error.message.contains("injected"));
+            assert_eq!(error.generation, Some(generation + 1));
+            assert_eq!(
+                backend.scheduler.current_generation(&repo_key(&root)),
+                generation + 1
+            );
+            assert!(!root.join("locked").join(name).exists());
+        }
     }
 
     #[cfg(target_os = "macos")]

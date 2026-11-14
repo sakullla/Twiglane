@@ -1396,6 +1396,10 @@ mod tests {
     #[tokio::test]
     async fn unreadable_directory_probe_is_permission_and_does_not_init() {
         use std::os::unix::fs::PermissionsExt;
+        // root 绕过目录权限检查，无法制造不可读目录（容器与部分 CI 以 root 运行）。
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
         let fixture = crate::test_support::git_fixture("probe-permission");
         let backend = fixture.backend();
         let locked = fixture.path().join("locked");

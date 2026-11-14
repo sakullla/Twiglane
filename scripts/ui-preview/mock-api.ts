@@ -997,6 +997,67 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   clioraReviewReceipt: () => ok(undefined),
   clioraReviewReturn: () => ok(undefined),
   cherryPickCommits: () => ok({ generation, conflicted: false, skipped: [], note: "已按从旧到新拣选到当前分支。没有推送。", snapshot: snapshot() }),
+  /**
+   * 预览/确认还原。只模拟成功路径；冲突仍由 ?merge=conflict 的合并 mock 覆盖。
+   * 这不是真实 Git 行为，只用于打开还原弹层与核对还原文案。
+   */
+  revertCommits: (_repo: string, oids: string[], expectedHead: string, confirm: boolean) => {
+    const targets = oids.map((oid) => {
+      const commit = commits.find((item) => item.oid === oid) ?? commits[0];
+      return { oid: commit.oid, summary: commit.summary, authorName: commit.authorName, authoredAt: commit.authoredAt };
+    });
+    if (!confirm) {
+      return ok({
+        generation, code: "ok", eligible: true, wrote: false, headOid: expectedHead, targets,
+        created: 0, conflicted: false,
+        note: `将按由新到旧的顺序还原 ${targets.length} 个提交。不会推送。取消不会写入。`,
+        snapshot: snapshot(),
+      });
+    }
+    generation += 1;
+    branch.ahead += 1;
+    branch.headOid = "e".repeat(40);
+    return ok({
+      generation, code: "ok", eligible: true, wrote: true, headOid: branch.headOid, targets,
+      created: targets.length, conflicted: false,
+      note: "已按由新到旧的顺序创建逆向提交。原提交仍在历史中。没有推送。",
+      snapshot: snapshot(),
+    });
+  },
+  /**
+   * 预览/确认修订最近提交。只模拟成功路径；失败、无变化和过期确认由前端测试覆盖。
+   */
+  amendCommit: (_repo: string, expectedHead: string, message: string | null, includeStaged: boolean, _token: string | null, confirm: boolean) => {
+    const commit = commits.find((item) => item.oid === expectedHead) ?? commits[0];
+    const original = `${commit.summary}\n\n这次提交重新组织了主界面：\n- 顶栏集中同步操作\n- 改动列表分组并支持全部暂存`;
+    const stagedPaths = files.filter((item) => !item.untracked && item.staged !== "none").map((item) => item.path);
+    const changed = [
+      { path: "src/App.svelte", originalPath: null, status: "modified", additions: 9, deletions: 7 },
+      { path: "src/app.css", originalPath: null, status: "modified", additions: 12, deletions: 4 },
+    ];
+    if (!confirm) {
+      return ok({
+        generation, code: "ok", eligible: true, wrote: false, headOid: commit.oid,
+        parentOid: commit.parents[0] ?? null, summary: commit.summary, message: original,
+        files: changed, stagedPaths, stagedToken: "f".repeat(64),
+        note: "已核对唯一远程的分支、tag 与本地推送记录，没有发现这个提交。确认时会再次核对。不会推送。",
+        snapshot: snapshot(),
+      });
+    }
+    const next = (message ?? original).trim() || original.trim();
+    generation += 1;
+    branch.ahead += 1;
+    branch.headOid = "d".repeat(40);
+    return ok({
+      generation, code: "ok", eligible: true, wrote: true, headOid: branch.headOid,
+      parentOid: commit.parents[0] ?? null, summary: next.split("\n")[0], message: next,
+      files: changed, stagedPaths, stagedToken: "f".repeat(64),
+      note: includeStaged
+        ? "已用新的修订提交替换最近提交，当前暂存改动已纳入；未暂存和未跟踪文件没有加入。没有推送。"
+        : "已用新的修订提交替换最近提交，只更新了说明；原提交树和当前暂存区保持不变。没有推送。",
+      snapshot: snapshot(),
+    });
+  },
   checkoutCommit: () => ok({ ...snapshot(), branch: { ...snapshot().branch, detached: true, name: null } }),
   commitDetail: (_repo: string, oid: string) => {
     // ?history=hang：最新的两条提交详情永不返回，用来复现「旧批次在途请求不结束、新选择还要能读」。

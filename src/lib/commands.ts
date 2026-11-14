@@ -770,7 +770,7 @@ const PALETTE_ALIASES: Record<string, string> = {
   "sync.upstream": "upstream tracking 跟踪分支 设置上游",
   "task.stash": "stash 贮藏 储藏 搁置",
   "task.merge": "merge rebase 合并分支 变基",
-  "task.abortMerge": "abort 取消合并 中止变基 中止拣选 中止还原 中止当前操作",
+  "task.abortMerge": "abort 取消合并 中止合并 中止变基 中止拣选 中止还原 中止当前操作",
   "branch.switch": "checkout switch branch 检出分支",
   "branch.create": "create new branch 创建分支",
   "task.branch": "branch tag 管理分支 删除分支 重命名分支 管理标签 新建标签",

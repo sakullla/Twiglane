@@ -56,6 +56,7 @@ struct Stages {
     theirs_mode: String,
 }
 
+#[derive(Debug)]
 struct HeadRecord {
     oid: String,
     parents: Vec<String>,
@@ -2611,7 +2612,15 @@ async fn amend_preview(
         };
         return Ok(data.outcome(snapshot, code, false, note.to_string()));
     }
-    if snapshot.branch.detached || snapshot.branch.unborn || snapshot.branch.name.is_none() {
+    if snapshot.branch.unborn {
+        return Ok(data.outcome(
+            snapshot,
+            "amend_no_commit",
+            false,
+            "当前分支还没有提交，没有可以修订的最近提交。仓库没有改动。".to_string(),
+        ));
+    }
+    if snapshot.branch.detached || snapshot.branch.name.is_none() {
         return Ok(data.outcome(
             snapshot,
             "amend_detached",
@@ -2781,7 +2790,13 @@ async fn amend_in_guard(
             "已有进行中的操作，不能修订最近提交。原 HEAD 和暂存区都没有改动。",
         ));
     }
-    if snapshot.branch.detached || snapshot.branch.unborn || snapshot.branch.name.is_none() {
+    if snapshot.branch.unborn {
+        return Err(AppError::new(
+            "amend_no_commit",
+            "当前分支还没有提交，没有可以修订的最近提交。仓库没有改动。",
+        ));
+    }
+    if snapshot.branch.detached || snapshot.branch.name.is_none() {
         return Err(AppError::new(
             "amend_detached",
             "当前不在本地分支上，不能修订最近提交。原 HEAD 和暂存区都没有改动。",
@@ -2833,9 +2848,17 @@ async fn amend_in_guard(
         ));
     }
     assess_amend_ready(guard, git, root, &remotes[0], expected_head).await?;
-    let output = run_spec(
+    // fetch 可能持续一段时间：外部 git add/merge/checkout 若在这段时间改变工作区，
+    // 必须在真正写入前重新核对，不能只依赖 fetch 前的暂存令牌与操作状态。
+    recheck_amend_after_fetch(guard, backend, git, root, staged_token).await?;
+    let mut message = requested.clone().into_bytes();
+    if !message.ends_with(b"\n") {
+        message.push(b'\n');
+    }
+    let output = run_spec_with_input(
         guard,
-        commit_amend_command(git, root, &requested, !include_staged),
+        commit_amend_command(git, root, !include_staged),
+        Some(message),
         true,
         false,
     )
@@ -2916,6 +2939,50 @@ async fn assess_amend_ready(
     }
     verify_not_published(guard, git, root, remote, &reread.oid, &AMEND_PROPAGATION).await?;
     Ok(reread)
+}
+
+/// fetch 结束后再核对一次操作、分支与暂存令牌，覆盖远程核验期间的并发变化。
+async fn recheck_amend_after_fetch(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    backend: &Backend,
+    git: &Path,
+    root: &Path,
+    staged_token: &str,
+) -> Result<(), AppError> {
+    let snapshot = status_in_guard(guard, backend, git, root).await?;
+    if snapshot.branch.unborn {
+        return Err(AppError::new(
+            "amend_no_commit",
+            "当前分支还没有提交，没有可以修订的最近提交。仓库没有改动。",
+        ));
+    }
+    if snapshot.branch.detached || snapshot.branch.name.is_none() {
+        return Err(AppError::new(
+            "amend_detached",
+            "当前不在本地分支上，不能修订最近提交。仓库没有改动。",
+        ));
+    }
+    let operation = operation_in_guard(guard, git, root, &snapshot).await?;
+    if operation == "unmerged" {
+        return Err(AppError::new(
+            "amend_unmerged",
+            "还有未解决的冲突，不能修订最近提交。仓库没有改动。",
+        ));
+    }
+    if operation != "none" {
+        return Err(AppError::new(
+            "amend_in_progress",
+            "已有进行中的操作，不能修订最近提交。仓库没有改动。",
+        ));
+    }
+    let current_token = staged_token_in_guard(guard, git, root).await?;
+    if current_token != staged_token {
+        return Err(AppError::new(
+            "amend_stale_index",
+            "暂存区在远程核验期间已经变化，未修订提交。请重新预览后再确认；已暂存内容仍然保留。",
+        ));
+    }
+    Ok(())
 }
 
 fn amend_preview_refusal(code: &str) -> bool {
@@ -3179,11 +3246,11 @@ async fn head_files(
         diff_tree_command(git, root, parent, oid),
     )
     .await?;
-    if output.exit_code != 0 {
+    if output.exit_code != 0 || output.stdout_truncated {
         return Err(git_failure(
             "amend_files_failed",
             &output,
-            "无法读取原提交文件，未修订。原 HEAD 和暂存区都没有改动。",
+            "无法完整读取原提交文件，未修订。原 HEAD 和暂存区都没有改动。",
         )
         .with_generation(generation));
     }
@@ -3205,11 +3272,11 @@ async fn head_files_in_guard(
         false,
     )
     .await?;
-    if output.exit_code != 0 {
+    if output.exit_code != 0 || output.stdout_truncated {
         return Err(git_failure(
             "amend_files_failed",
             &output,
-            "无法读取原提交文件，未修订。原 HEAD 和暂存区都没有改动。",
+            "无法完整读取原提交文件，未修订。原 HEAD 和暂存区都没有改动。",
         ));
     }
     parse_name_status(&output.stdout)
@@ -3282,7 +3349,7 @@ async fn amend_remote_names(
     }
     Ok((
         generation,
-        parse_remote_names(&output.stdout, "amend_unclear")?,
+        parse_remote_names(&output.stdout, "amend_unclear", "修订提交")?,
     ))
 }
 
@@ -3299,7 +3366,7 @@ async fn amend_remote_names_in_guard(
             "无法读取远程列表，未修订提交。",
         ));
     }
-    parse_remote_names(&output.stdout, "amend_unclear")
+    parse_remote_names(&output.stdout, "amend_unclear", "修订提交")
 }
 
 fn staged_paths(snapshot: &StatusSnapshot) -> Vec<String> {
@@ -3792,8 +3859,12 @@ fn parse_head_record(bytes: &[u8], action: &str) -> Result<Option<HeadRecord>, A
     if bytes.is_empty() {
         return Ok(None);
     }
-    let text = String::from_utf8(bytes.to_vec())
-        .map_err(|_| AppError::new("history_parse", "当前提交无法安全显示，未继续写入。"))?;
+    let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
+        AppError::new(
+            "history_parse",
+            format!("当前提交无法安全显示，未{action}。"),
+        )
+    })?;
     let line = text.lines().next().unwrap_or("").trim();
     if line.is_empty() {
         return Ok(None);
@@ -3829,9 +3900,14 @@ fn parse_head_record(bytes: &[u8], action: &str) -> Result<Option<HeadRecord>, A
     }))
 }
 
-fn parse_remote_names(bytes: &[u8], code: &'static str) -> Result<Vec<String>, AppError> {
-    let text = String::from_utf8(bytes.to_vec())
-        .map_err(|_| AppError::new(code, "远程名称无法安全显示，未继续写入。"))?;
+fn parse_remote_names(
+    bytes: &[u8],
+    code: &'static str,
+    action: &str,
+) -> Result<Vec<String>, AppError> {
+    let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
+        AppError::new(code, format!("远程名称无法安全显示，未{action}。"))
+    })?;
     let mut names = Vec::new();
     for line in text.lines() {
         let name = line.trim();
@@ -3843,7 +3919,10 @@ fn parse_remote_names(bytes: &[u8], code: &'static str) -> Result<Vec<String>, A
                 .chars()
                 .any(|character| character.is_whitespace() || character.is_control())
         {
-            return Err(AppError::new(code, "远程名称无法安全核对，未继续写入。"));
+            return Err(AppError::new(
+                code,
+                format!("远程名称无法安全核对，未{action}。"),
+            ));
         }
         names.push(name.to_string());
     }
@@ -3921,12 +4000,22 @@ async fn run_spec(
     writes: bool,
     truncate: bool,
 ) -> Result<ProcessOutput, AppError> {
+    run_spec_with_input(guard, command, None, writes, truncate).await
+}
+
+async fn run_spec_with_input(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    command: (PathBuf, Vec<std::ffi::OsString>),
+    input: Option<Vec<u8>>,
+    writes: bool,
+    truncate: bool,
+) -> Result<ProcessOutput, AppError> {
     let (program, args) = command;
     guard
         .run(CommandSpec {
             program,
             args,
-            stdin: None,
+            stdin: input,
             truncate_stdout: truncate,
             output_limit: None,
             writes,
@@ -4691,7 +4780,10 @@ async fn remote_names(
                 .with_generation(generation),
         );
     }
-    Ok((generation, parse_remote_names(&output.stdout, "undo_unclear")?))
+    Ok((
+        generation,
+        parse_remote_names(&output.stdout, "undo_unclear", "撤销提交")?,
+    ))
 }
 
 async fn remote_names_in_guard(
@@ -4707,7 +4799,7 @@ async fn remote_names_in_guard(
             "无法读取远程列表，未撤销提交。",
         ));
     }
-    parse_remote_names(&output.stdout, "undo_unclear")
+    parse_remote_names(&output.stdout, "undo_unclear", "撤销提交")
 }
 
 async fn stash_oids(
@@ -5284,11 +5376,14 @@ async fn revert_in_guard(
         // 没有 REVERT_HEAD 却留下 sequencer/todo 是 Git 在目标之间失败后的半成品状态。
         // 不自动中止（已经创建的提交必须由用户明确中止才会撤销），只如实报告部分进度。
         let residue = path_exists_in_guard(guard, git, root, "sequencer").await?;
-        let mut error = classified_git(
-            "revert_failed",
-            &output,
-            "还原没有完成。会覆盖未提交内容时不会写入，当前分支和工作区应保持原样。",
-        );
+        // 已经创建部分提交或留下 sequencer 时，不能再声称分支和工作区保持原样；
+        // 只有完全未写入的失败才使用“保持原样”的兜底文案。
+        let fallback = if residue || after_op == "revert" || created > 0 {
+            "还原没有完成。请刷新后核对当前分支、工作区和暂存区。"
+        } else {
+            "还原没有完成。会覆盖未提交内容时不会写入，当前分支和工作区应保持原样。"
+        };
+        let mut error = classified_git("revert_failed", &output, fallback);
         if residue || after_op == "revert" {
             error.message = format!(
                 "本次还原没有完成。{}Git 仍处于还原进行中；可以中止回到本次还原开始前，不能跳过。{}",
@@ -5675,6 +5770,25 @@ mod tests {
         .unwrap()
         .parents
         .is_empty());
+        // 共享解析保留各自动作的失败文案：撤销不应写成“未继续写入”。
+        let undo_head = parse_head_record(b"\xff", "撤销").unwrap_err();
+        assert!(undo_head.message.contains("未撤销"), "{}", undo_head.message);
+        let amend_head = parse_head_record(b"\xff", "修订").unwrap_err();
+        assert!(amend_head.message.contains("未修订"), "{}", amend_head.message);
+        let undo_remote =
+            parse_remote_names(b"\xff", "undo_unclear", "撤销提交").unwrap_err();
+        assert!(
+            undo_remote.message.contains("未撤销提交"),
+            "{}",
+            undo_remote.message
+        );
+        let amend_remote =
+            parse_remote_names(b"\xff", "amend_unclear", "修订提交").unwrap_err();
+        assert!(
+            amend_remote.message.contains("未修订提交"),
+            "{}",
+            amend_remote.message
+        );
     }
 
     #[tokio::test]
@@ -8130,6 +8244,11 @@ mod tests {
             "{}",
             error.message
         );
+        assert!(
+            !error.message.contains("当前分支和工作区应保持原样"),
+            "已创建部分提交时不能声称分支和工作区未变：{}",
+            error.message
+        );
         assert!(error.message.contains("可以中止"), "{}", error.message);
         assert!(
             !error.message.contains("已回滚"),
@@ -8891,6 +9010,46 @@ mod tests {
         assert!(done.wrote);
         assert_eq!(done.message, replacement.trim());
 
+        // 接近 64 KiB 的说明经 stdin（-F -）写入，不再受 Windows 单个 -m 实参上限影响。
+        let mut near_limit = String::from("near limit\n\n");
+        while near_limit.chars().count() < 60 * 1024 {
+            near_limit.push_str("0123456789abcdef\n");
+        }
+        assert!(near_limit.chars().count() < crate::model::MAX_DRAFT_CHARS);
+        let current_head = done.head_oid.clone().unwrap();
+        let near_preview = amend_commit(
+            &backend,
+            &path,
+            &current_head,
+            None,
+            false,
+            None,
+            false,
+            done.generation,
+            4,
+        )
+        .await
+        .unwrap();
+        let done = amend_commit(
+            &backend,
+            &path,
+            &current_head,
+            Some(&near_limit),
+            false,
+            near_preview.staged_token.as_deref(),
+            true,
+            near_preview.generation,
+            5,
+        )
+        .await
+        .unwrap();
+        assert!(done.wrote);
+        assert_eq!(done.message, near_limit.trim());
+        assert_eq!(
+            git_text(&repo, &["log", "-1", "--format=%B"]).trim(),
+            near_limit.trim()
+        );
+
         // 超过 64 KiB 的说明在写入前拒绝，HEAD 不变。
         let too_large = "x".repeat(crate::model::MAX_DRAFT_CHARS + 1);
         let before = git_text(&repo, &["rev-parse", "HEAD"]);
@@ -9256,6 +9415,48 @@ mod tests {
         assert!(merge.files.iter().any(|file| file.path == "b.txt"));
         assert!(merge.staged_token.is_some());
         assert_eq!(git_text(&merge_repo, &["rev-parse", "HEAD"]), merge_head);
+    }
+
+    #[tokio::test]
+    async fn amend_empty_branch_reports_no_commit() {
+        let fixture = crate::test_support::git_fixture("amend-unborn");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        let path = repo_key(&repo);
+        let expected = "a".repeat(40);
+        let preview = amend_commit(
+            &backend,
+            &path,
+            &expected,
+            None,
+            false,
+            None,
+            false,
+            generation(&backend, &repo),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(!preview.eligible);
+        assert_eq!(preview.code, "amend_no_commit");
+        assert!(preview.note.contains("还没有提交"), "{}", preview.note);
+
+        let token = "b".repeat(64);
+        let error = amend_commit(
+            &backend,
+            &path,
+            &expected,
+            Some("message"),
+            false,
+            Some(&token),
+            true,
+            generation(&backend, &repo),
+            2,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "amend_no_commit");
     }
 
     #[tokio::test]

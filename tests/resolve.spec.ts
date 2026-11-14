@@ -1218,6 +1218,21 @@ describe("修订最近提交", () => {
     refreshStatus.mockReset();
   });
 
+  it("没有暂存改动时复选框禁用，超过 16 KiB 的完整说明原样预填", async () => {
+    const long = `长说明\n\n${"0123456789abcdef".repeat(1200)}`;
+    const current = preview({ message: long, stagedPaths: [] });
+    amendCommit.mockResolvedValueOnce(current);
+    render(RecoveryActions, { props: actionProps() });
+    await fireEvent.click(screen.getByRole("menuitem", { name: amendActionLabel() }));
+    const dialog = await screen.findByRole("dialog", { name: "修订最近提交" });
+    const message = within(dialog).getByLabelText("修订后的提交说明") as HTMLTextAreaElement;
+    expect(message.value).toBe(long);
+    const checkbox = within(dialog).getByLabelText("纳入当前暂存改动") as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+    expect(checkbox.disabled).toBe(true);
+    expect(within(dialog).getByText(/当前没有已暂存改动/)).toBeTruthy();
+  });
+
   it("提交区菜单打开修订表单，预填完整说明并展示原提交与暂存范围，默认不纳入暂存", async () => {
     const current = preview();
     amendCommit.mockResolvedValueOnce(current);

@@ -69,6 +69,7 @@ describe("命令面板匹配与排序", () => {
     expect(first("stash")).toBe("task.stash");
     expect(first("贮藏")).toBe("task.stash");
     expect(first("合并分支")).toBe("task.merge");
+    expect(first("中止合并")).toBe("task.abortMerge");
     expect(first("新建分支")).toBe("branch.create");
     expect(first("切换分支")).toBe("branch.switch");
     expect(first("checkout")).toBe("branch.switch");

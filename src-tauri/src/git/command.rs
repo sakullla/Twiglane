@@ -342,10 +342,10 @@ pub fn commit_command(git: &Path, root: &Path, message: &str) -> (PathBuf, Vec<O
 }
 
 /// 修订当前 HEAD。`only` 为 true 时用 `--only` 保持原提交树和当前索引不变。
+/// 说明从 stdin 以 `-F -` 传入，避免 Windows 单个 `-m` 实参接近命令行上限时无法启动。
 pub fn commit_amend_command(
     git: &Path,
     root: &Path,
-    message: &str,
     only: bool,
 ) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, false);
@@ -354,7 +354,7 @@ pub fn commit_amend_command(
     if only {
         args.push(OsString::from("--only"));
     }
-    args.extend([OsString::from("-m"), OsString::from(message)]);
+    args.extend([OsString::from("-F"), OsString::from("-")]);
     (git.to_path_buf(), args)
 }
 

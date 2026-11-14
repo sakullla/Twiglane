@@ -2585,88 +2585,6 @@ fn unsupported_entry_error() -> AppError {
     )
 }
 
-/// 校验源或目标的全部父级：中途符号链接、嵌套仓库、gitdir 和不存在的目录均失败关闭。
-fn entry_parent(
-    boundary: &EditBoundary,
-    relative: &Path,
-    writable: bool,
-) -> Result<PathBuf, AppError> {
-    let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
-    reject_symlink_components(&boundary.root, parent_relative)?;
-    let mut current = boundary.root.clone();
-    for component in parent_relative.components() {
-        current.push(component.as_os_str());
-        if current.join(".git").symlink_metadata().is_ok() {
-            return Err(nested_repository_error());
-        }
-    }
-    let parent = canonical_existing(&boundary.root.join(parent_relative))?;
-    ensure_editable_location(boundary, &parent)?;
-    let metadata = fs::metadata(&parent).map_err(|error| {
-        entry_io_error(error, "无法读取父目录，未修改任何内容。")
-    })?;
-    if !metadata.is_dir() {
-        return Err(AppError::new(
-            "invalid_parent",
-            "目标父路径不是普通目录，未修改任何内容。",
-        ));
-    }
-    if writable && metadata.permissions().readonly() {
-        return Err(AppError::new(
-            "permission",
-            "父目录是只读的，未修改任何内容。",
-        ));
-    }
-    Ok(parent)
-}
-
-fn ordinary_entry(
-    boundary: &EditBoundary,
-    relative: &Path,
-    writable_parent: bool,
-) -> Result<(PathBuf, OrdinaryEntryKind), AppError> {
-    entry_parent(boundary, relative, writable_parent)?;
-    let candidate = boundary.root.join(relative);
-    let metadata = match candidate.symlink_metadata() {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Err(AppError::new("path_missing", "源项目不存在，未修改任何内容。"));
-        }
-        Err(error) => return Err(entry_io_error(error, "无法读取源项目，未修改任何内容。")),
-    };
-    let kind = if metadata.file_type().is_symlink() {
-        return Err(unsupported_entry_error());
-    } else if metadata.is_file() {
-        OrdinaryEntryKind::File
-    } else if metadata.is_dir() {
-        if candidate.join(".git").symlink_metadata().is_ok() {
-            return Err(nested_repository_error());
-        }
-        OrdinaryEntryKind::Directory
-    } else {
-        return Err(unsupported_entry_error());
-    };
-    reject_symlink_components(&boundary.root, relative)?;
-    let resolved = canonical_existing(&candidate)?;
-    ensure_editable_location(boundary, &resolved)?;
-    Ok((resolved, kind))
-}
-
-fn new_entry_target(boundary: &EditBoundary, relative: &Path) -> Result<PathBuf, AppError> {
-    let parent = entry_parent(boundary, relative, true)?;
-    let target = parent.join(relative.file_name().ok_or_else(|| {
-        AppError::new("invalid_path", "目标名称无效，未修改任何内容。")
-    })?);
-    match target.symlink_metadata() {
-        Ok(_) => Err(AppError::new(
-            "entry_exists",
-            "目标已存在，未覆盖已有内容。",
-        )),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(target),
-        Err(error) => Err(entry_io_error(error, "无法确认目标状态，未修改任何内容。")),
-    }
-}
-
 fn entry_io_error(error: std::io::Error, message: &'static str) -> AppError {
     let code = match error.kind() {
         ErrorKind::AlreadyExists => "entry_exists",
@@ -2680,287 +2598,1111 @@ fn entry_io_error(error: std::io::Error, message: &'static str) -> AppError {
 
 static TEMP_ENTRY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-/// 只清理由本次复制创建的临时项；Drop 永远不会触碰最终目标或已有内容。
-struct TemporaryEntry {
-    path: PathBuf,
-    active: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryTargetState {
+    Present,
+    Missing,
+    Unknown,
 }
 
-impl TemporaryEntry {
-    fn candidate(parent: &Path) -> PathBuf {
-        parent.join(format!(
-            ".twiglane-entry-{}-{}",
-            std::process::id(),
-            TEMP_ENTRY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ))
-    }
-
-    fn file(parent: &Path) -> std::io::Result<(Self, fs::File)> {
-        for _ in 0..100 {
-            let path = Self::candidate(parent);
-            match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(file) => return Ok((Self { path, active: true }, file)),
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        Err(std::io::Error::new(
-            ErrorKind::AlreadyExists,
-            "temporary entry names exhausted",
-        ))
-    }
-
-    fn directory(parent: &Path) -> std::io::Result<Self> {
-        for _ in 0..100 {
-            let path = Self::candidate(parent);
-            match fs::create_dir(&path) {
-                Ok(()) => return Ok(Self { path, active: true }),
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        Err(std::io::Error::new(
-            ErrorKind::AlreadyExists,
-            "temporary entry names exhausted",
-        ))
-    }
-
-    fn publish(mut self, target: &Path) -> std::io::Result<()> {
-        rename_without_overwrite(&self.path, target)?;
-        self.active = false;
-        Ok(())
-    }
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn platform_entry_unsupported() -> AppError {
+    AppError::new(
+        "entry_platform_unsupported",
+        "当前平台尚不能绑定最终文件身份执行安全结构操作，未修改任何内容。",
+    )
 }
 
-impl Drop for TemporaryEntry {
-    fn drop(&mut self) {
-        if !self.active {
-            return;
+/// 所有最终写操作都相对于已打开、no-follow 的目录或文件描述符完成。
+/// 路径校验之后即使外部进程替换父目录，也不会让写入转到另一个目录。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod secure_entry_ops {
+    use super::*;
+    use std::ffi::{CStr, CString, OsString};
+    use std::os::fd::{FromRawFd, RawFd};
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Identity {
+        device: u64,
+        inode: u64,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct NodeStat {
+        identity: Identity,
+        mode: u32,
+    }
+
+    impl NodeStat {
+        fn from_raw(stat: &libc::stat) -> Self {
+            Self {
+                identity: Identity {
+                    device: stat.st_dev as u64,
+                    inode: stat.st_ino,
+                },
+                mode: stat.st_mode as u32,
+            }
         }
-        match self.path.symlink_metadata() {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                let _ = fs::remove_dir_all(&self.path);
+
+        fn from_metadata(metadata: &fs::Metadata) -> Self {
+            Self {
+                identity: Identity {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                },
+                mode: metadata.mode(),
             }
-            Ok(_) => {
-                let _ = fs::remove_file(&self.path);
+        }
+
+        fn kind(self) -> Option<OrdinaryEntryKind> {
+            match self.mode & libc::S_IFMT as u32 {
+                value if value == libc::S_IFREG as u32 => Some(OrdinaryEntryKind::File),
+                value if value == libc::S_IFDIR as u32 => Some(OrdinaryEntryKind::Directory),
+                _ => None,
             }
-            Err(_) => {}
+        }
+
+        fn writable(self) -> bool {
+            self.mode & 0o222 != 0
         }
     }
-}
 
-/// 文件与目录都用文件系统的排他重命名发布；不支持该能力的平台直接失败，不做覆盖回退。
-#[cfg(target_os = "macos")]
-fn rename_without_overwrite(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
-    let target = std::ffi::CString::new(target.as_os_str().as_bytes())?;
-    // SAFETY: 两个 CString 都以 NUL 结尾且在本调用期间存活；renamex_np 不保留指针。
-    let result = unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
+    fn c_string(name: &OsStr) -> std::io::Result<CString> {
+        CString::new(name.as_bytes()).map_err(|error| {
+            std::io::Error::new(ErrorKind::InvalidInput, error)
+        })
     }
-}
 
-#[cfg(target_os = "linux")]
-fn rename_without_overwrite(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
-    let target = std::ffi::CString::new(target.as_os_str().as_bytes())?;
-    // SAFETY: 路径指针有效；AT_FDCWD 与 RENAME_NOREPLACE 要求排他创建目标。
-    let result = unsafe {
-        libc::renameat2(
-            libc::AT_FDCWD,
-            source.as_ptr(),
-            libc::AT_FDCWD,
-            target.as_ptr(),
-            libc::RENAME_NOREPLACE,
+    fn fd_path(fd: RawFd) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            PathBuf::from(format!("/dev/fd/{fd}"))
+        } else {
+            PathBuf::from(format!("/proc/self/fd/{fd}"))
+        }
+    }
+
+    fn stat_fd(fd: RawFd) -> std::io::Result<NodeStat> {
+        let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        // SAFETY: stat 指向有效且可写的存储，fd 由本模块持有。
+        if unsafe { libc::fstat(fd, &mut stat) } == 0 {
+            Ok(NodeStat::from_raw(&stat))
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    fn stat_at(directory: RawFd, name: &OsStr) -> std::io::Result<NodeStat> {
+        let name = c_string(name)?;
+        let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        // SAFETY: name 以 NUL 结尾，stat 可写；NOFOLLOW 防止读取链接目标。
+        if unsafe {
+            libc::fstatat(directory, name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW)
+        } == 0
+        {
+            Ok(NodeStat::from_raw(&stat))
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    fn open_at(directory: RawFd, name: &OsStr, flags: libc::c_int) -> std::io::Result<RawFd> {
+        let name = c_string(name)?;
+        // SAFETY: name 以 NUL 结尾；directory 是存活的本模块目录 fd。
+        let fd = unsafe {
+            libc::openat(
+                directory,
+                name.as_ptr(),
+                flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd >= 0 {
+            Ok(fd)
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    struct DirectoryStream(*mut libc::DIR);
+
+    impl Drop for DirectoryStream {
+        fn drop(&mut self) {
+            // SAFETY: fdopendir 成功后 DIR 唯一归本 guard，closedir 同时关闭其 dup fd。
+            let _ = unsafe { libc::closedir(self.0) };
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn errno_pointer() -> *mut libc::c_int {
+        // SAFETY: macOS 返回当前线程的 errno 地址。
+        unsafe { libc::__error() }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn errno_pointer() -> *mut libc::c_int {
+        // SAFETY: Linux 返回当前线程的 errno 地址。
+        unsafe { libc::__errno_location() }
+    }
+
+    fn directory_names(fd: RawFd) -> std::io::Result<Vec<OsString>> {
+        // SAFETY: 复制 fd，F_DUPFD_CLOEXEC 防止新描述符泄漏到子进程。
+        let duplicated = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+        if duplicated < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: fdopendir 接管 duplicated；失败时仍由这里关闭。
+        let stream = unsafe { libc::fdopendir(duplicated) };
+        if stream.is_null() {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: fdopendir 失败时所有权尚未移交。
+            let _ = unsafe { libc::close(duplicated) };
+            return Err(error);
+        }
+        let stream = DirectoryStream(stream);
+        let mut names = Vec::new();
+        loop {
+            // SAFETY: errno 指针属于当前线程，先清零以区分目录结束和读取失败。
+            unsafe { *errno_pointer() = 0 };
+            // SAFETY: stream 是存活的 DIR；返回的 entry 在下一次 readdir 前读取。
+            let entry = unsafe { libc::readdir(stream.0) };
+            if entry.is_null() {
+                // SAFETY: 读取刚才 readdir 设置/保留的 errno。
+                let errno = unsafe { *errno_pointer() };
+                if errno == 0 {
+                    break;
+                }
+                return Err(std::io::Error::from_raw_os_error(errno));
+            }
+            // SAFETY: readdir 的 d_name 是以 NUL 结尾的当前目录项名称。
+            let bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+            if matches!(bytes, b"." | b"..") {
+                continue;
+            }
+            names.push(OsString::from_vec(bytes.to_vec()));
+        }
+        names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        Ok(names)
+    }
+
+    struct Directory {
+        fd: RawFd,
+    }
+
+    impl Directory {
+        fn open_path(path: &Path) -> std::io::Result<Self> {
+            let path = c_string(path.as_os_str())?;
+            // SAFETY: path 以 NUL 结尾；NOFOLLOW + DIRECTORY 只接受真实目录。
+            let fd = unsafe {
+                libc::open(
+                    path.as_ptr(),
+                    libc::O_RDONLY
+                        | libc::O_DIRECTORY
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
+                )
+            };
+            if fd >= 0 {
+                Ok(Self { fd })
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        }
+
+        fn open_at(parent: &Self, name: &OsStr) -> std::io::Result<Self> {
+            open_at(parent.fd, name, libc::O_RDONLY | libc::O_DIRECTORY)
+                .map(|fd| Self { fd })
+        }
+
+        fn duplicate(&self) -> std::io::Result<Self> {
+            Self::open_at(self, OsStr::new("."))
+        }
+
+        fn stat(&self) -> std::io::Result<NodeStat> {
+            stat_fd(self.fd)
+        }
+
+        fn has_dot_git(&self) -> std::io::Result<bool> {
+            match stat_at(self.fd, OsStr::new(".git")) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error),
+            }
+        }
+
+        fn set_mode(&self, mode: u32) -> std::io::Result<()> {
+            // SAFETY: fd 是本模块持有的目录；只修改该描述符指向的临时目录权限。
+            if unsafe { libc::fchmod(self.fd, (mode & 0o7777) as libc::mode_t) } == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        }
+
+        fn names(&self) -> std::io::Result<Vec<OsString>> {
+            directory_names(self.fd)
+        }
+    }
+
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            // SAFETY: fd 只在这里关闭一次，Directory 不实现 Clone/Copy。
+            let _ = unsafe { libc::close(self.fd) };
+        }
+    }
+
+    struct EntryParent {
+        directory: Directory,
+        name: OsString,
+        ancestors: Vec<Identity>,
+    }
+
+    impl EntryParent {
+        fn ensure_absent(&self) -> Result<(), AppError> {
+            match stat_at(self.directory.fd, &self.name) {
+                Ok(_) => Err(AppError::new(
+                    "entry_exists",
+                    "目标已存在，未覆盖已有内容。",
+                )),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(entry_io_error(error, "无法确认目标状态，未修改任何内容。")),
+            }
+        }
+    }
+
+    struct EntrySource {
+        parent: EntryParent,
+        kind: OrdinaryEntryKind,
+        stat: NodeStat,
+        file: Option<fs::File>,
+        directory: Option<Directory>,
+    }
+
+    impl EntrySource {
+        fn fd(&self) -> RawFd {
+            self.file
+                .as_ref()
+                .map(std::os::fd::AsRawFd::as_raw_fd)
+                .or_else(|| self.directory.as_ref().map(|directory| directory.fd))
+                .expect("entry source always owns an open descriptor")
+        }
+
+        fn trash_path(&self) -> PathBuf {
+            // trash crate 仍负责系统回收站；这里只给它绑定目标本身的 fd 路径，
+            // 不再给会被外部替换的仓库路径。
+            fd_path(self.fd())
+        }
+
+        fn original_state(&self) -> EntryTargetState {
+            match stat_at(self.parent.directory.fd, &self.parent.name) {
+                Ok(_) => EntryTargetState::Present,
+                Err(error) if error.kind() == ErrorKind::NotFound => EntryTargetState::Missing,
+                Err(_) => EntryTargetState::Unknown,
+            }
+        }
+    }
+
+    struct SecureRoot {
+        root: Directory,
+        git_directories: Vec<Directory>,
+    }
+
+    impl SecureRoot {
+        fn open(boundary: &EditBoundary) -> Result<Self, AppError> {
+            let expected = fs::symlink_metadata(&boundary.root)
+                .map_err(|error| entry_io_error(error, "无法确认工作区身份，未修改内容。"))?;
+            let root = Directory::open_path(&boundary.root)
+                .map_err(|error| entry_io_error(error, "无法安全打开工作区，未修改内容。"))?;
+            if root.stat().map_err(|error| entry_io_error(error, "无法绑定工作区身份。"))?
+                != NodeStat::from_metadata(&expected)
+            {
+                return Err(AppError::new(
+                    "invalid_path",
+                    "工作区在校验期间已变化，未修改任何内容。",
+                ));
+            }
+            let mut git_directories = Vec::new();
+            for path in &boundary.git_dirs {
+                let expected = fs::symlink_metadata(path)
+                    .map_err(|_| git_metadata_error())?;
+                let directory = Directory::open_path(path).map_err(|_| git_metadata_error())?;
+                if directory.stat().map_err(|_| git_metadata_error())?
+                    != NodeStat::from_metadata(&expected)
+                {
+                    return Err(git_metadata_error());
+                }
+                git_directories.push(directory);
+            }
+            Ok(Self {
+                root,
+                git_directories,
+            })
+        }
+
+        fn is_git_directory(&self, directory: &Directory) -> Result<bool, AppError> {
+            let identity = directory
+                .stat()
+                .map_err(|error| entry_io_error(error, "无法确认目录身份。"))?
+                .identity;
+            self.git_directories
+                .iter()
+                .map(|git| {
+                    git.stat()
+                        .map(|stat| stat.identity == identity)
+                        .map_err(|_| git_metadata_error())
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(|matches| matches.into_iter().any(|matched| matched))
+        }
+
+        fn parent(&self, relative: &Path, writable: bool) -> Result<EntryParent, AppError> {
+            let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+            let name = relative.file_name().ok_or_else(|| {
+                AppError::new("invalid_path", "目标名称无效，未修改任何内容。")
+            })?;
+            let mut directory = self.root.duplicate().map_err(|error| {
+                entry_io_error(error, "无法打开工作区目录，未修改任何内容。")
+            })?;
+            let mut ancestors = vec![directory
+                .stat()
+                .map_err(|error| entry_io_error(error, "无法确认工作区目录身份。"))?
+                .identity];
+            for component in parent.components() {
+                let Component::Normal(name) = component else {
+                    return Err(AppError::new("invalid_path", "父路径无效，未修改内容。"));
+                };
+                let stat = stat_at(directory.fd, name)
+                    .map_err(|error| entry_io_error(error, "父目录不存在或无法读取。"))?;
+                if stat.kind() != Some(OrdinaryEntryKind::Directory) {
+                    return Err(AppError::new(
+                        "file_path",
+                        "父路径包含符号链接或非目录，未跟随。",
+                    ));
+                }
+                let next = Directory::open_at(&directory, name).map_err(|error| {
+                    entry_io_error(error, "父目录在校验期间已变化，未跟随符号链接。")
+                })?;
+                if self.is_git_directory(&next)? {
+                    return Err(git_metadata_error());
+                }
+                if next
+                    .has_dot_git()
+                    .map_err(|error| entry_io_error(error, "无法确认嵌套仓库边界。"))?
+                {
+                    return Err(nested_repository_error());
+                }
+                ancestors.push(next
+                    .stat()
+                    .map_err(|error| entry_io_error(error, "无法确认父目录身份。"))?
+                    .identity);
+                directory = next;
+            }
+            if writable
+                && !directory
+                    .stat()
+                    .map_err(|error| entry_io_error(error, "无法确认父目录权限。"))?
+                    .writable()
+            {
+                return Err(AppError::new(
+                    "permission",
+                    "父目录是只读的，未修改任何内容。",
+                ));
+            }
+            Ok(EntryParent {
+                directory,
+                name: name.to_os_string(),
+                ancestors,
+            })
+        }
+
+        fn target(&self, relative: &Path) -> Result<EntryParent, AppError> {
+            let target = self.parent(relative, true)?;
+            target.ensure_absent()?;
+            Ok(target)
+        }
+
+        fn source(&self, relative: &Path, writable: bool) -> Result<EntrySource, AppError> {
+            let parent = self.parent(relative, writable)?;
+            let expected = stat_at(parent.directory.fd, &parent.name)
+                .map_err(|error| entry_io_error(error, "源项目不存在或无法读取。"))?;
+            let Some(kind) = expected.kind() else {
+                return Err(unsupported_entry_error());
+            };
+            let fd = match kind {
+                OrdinaryEntryKind::File => open_at(
+                    parent.directory.fd,
+                    &parent.name,
+                    libc::O_RDONLY,
+                ),
+                OrdinaryEntryKind::Directory => open_at(
+                    parent.directory.fd,
+                    &parent.name,
+                    libc::O_RDONLY | libc::O_DIRECTORY,
+                ),
+            }
+            .map_err(|error| entry_io_error(error, "源项目已变化或为符号链接，未跟随。"))?;
+            let stat = stat_fd(fd).map_err(|error| {
+                // SAFETY: open_at 成功返回新 fd；失败路径需要自行关闭。
+                let _ = unsafe { libc::close(fd) };
+                entry_io_error(error, "无法绑定源项目身份。")
+            })?;
+            if stat.kind() != Some(kind) {
+                // SAFETY: 同上，fd 尚未移交所有权。
+                let _ = unsafe { libc::close(fd) };
+                return Err(unsupported_entry_error());
+            }
+            let (file, directory) = match kind {
+                OrdinaryEntryKind::File => {
+                    // SAFETY: fd 已确认是普通文件，所有权唯一移交给 File。
+                    (Some(unsafe { fs::File::from_raw_fd(fd) }), None)
+                }
+                OrdinaryEntryKind::Directory => {
+                    let directory = Directory { fd };
+                    if directory
+                        .has_dot_git()
+                        .map_err(|error| entry_io_error(error, "无法确认嵌套仓库边界。"))?
+                    {
+                        return Err(nested_repository_error());
+                    }
+                    (None, Some(directory))
+                }
+            };
+            Ok(EntrySource {
+                parent,
+                kind,
+                stat,
+                file,
+                directory,
+            })
+        }
+    }
+
+    fn open_new_file(directory: &Directory, name: &OsStr) -> std::io::Result<fs::File> {
+        open_at(
+            directory.fd,
+            name,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
         )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
+        // SAFETY: open_at 成功返回由本次调用独占的新文件 fd。
+        .map(|fd| unsafe { fs::File::from_raw_fd(fd) })
     }
-}
 
-#[cfg(windows)]
-fn rename_without_overwrite(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    let source: Vec<u16> = source.as_os_str().encode_wide().chain([0]).collect();
-    let target: Vec<u16> = target.as_os_str().encode_wide().chain([0]).collect();
-    // SAFETY: 两个宽字符串均以 NUL 终止；不传 REPLACE_EXISTING，因此已有目标不会覆盖。
-    let result = unsafe {
-        windows_sys::Win32::Storage::FileSystem::MoveFileExW(source.as_ptr(), target.as_ptr(), 0)
-    };
-    if result != 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-fn rename_without_overwrite(_source: &Path, _target: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        ErrorKind::Unsupported,
-        "atomic no-replace rename is unavailable",
-    ))
-}
-
-fn copy_file_contents(source: &Path, target: &Path) -> Result<(), AppError> {
-    let mut input = fs::File::open(source)
-        .map_err(|error| entry_io_error(error, "无法读取源文件，未发布复制目标。"))?;
-    let metadata = input
-        .metadata()
-        .map_err(|error| entry_io_error(error, "无法确认源文件，未发布复制目标。"))?;
-    if !metadata.is_file() {
-        return Err(unsupported_entry_error());
-    }
-    let mut output = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(target)
-        .map_err(|error| entry_io_error(error, "无法创建复制内容，已有目标未被覆盖。"))?;
-    std::io::copy(&mut input, &mut output)
-        .map_err(|error| entry_io_error(error, "复制文件失败，未发布复制目标。"))?;
-    drop(output);
-    fs::set_permissions(target, metadata.permissions())
-        .map_err(|error| entry_io_error(error, "复制权限失败，未发布复制目标。"))?;
-    Ok(())
-}
-
-fn copy_directory_contents(source: &Path, target: &Path) -> Result<(), AppError> {
-    let entries = fs::read_dir(source)
-        .map_err(|error| entry_io_error(error, "无法读取源目录，未发布复制目标。"))?;
-    for entry in entries {
-        let entry = entry
-            .map_err(|error| entry_io_error(error, "无法读取目录项，未发布复制目标。"))?;
-        let source_path = entry.path();
-        let metadata = source_path
-            .symlink_metadata()
-            .map_err(|error| entry_io_error(error, "无法确认目录项类型，未发布复制目标。"))?;
-        if metadata.file_type().is_symlink() {
-            return Err(AppError::new(
-                "unsupported_entry",
-                "目录含符号链接，未跟随链接且未发布复制目标。",
-            ));
+    fn mkdir_at(directory: &Directory, name: &OsStr) -> std::io::Result<()> {
+        let name = c_string(name)?;
+        // SAFETY: name 有效；mkdirat 只在这个已绑定目录里创建单级目录。
+        if unsafe { libc::mkdirat(directory.fd, name.as_ptr(), 0o777) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
         }
-        if is_git_metadata_name(&entry.file_name()) {
-            return Err(nested_repository_error());
+    }
+
+    fn unlink_at(directory: &Directory, name: &OsStr, flags: libc::c_int) -> std::io::Result<()> {
+        let name = c_string(name)?;
+        // SAFETY: name 有效；不会跟随末级符号链接。
+        if unsafe { libc::unlinkat(directory.fd, name.as_ptr(), flags) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
         }
-        let target_path = target.join(entry.file_name());
-        if metadata.is_file() {
-            copy_file_contents(&source_path, &target_path)?;
-        } else if metadata.is_dir() {
-            if source_path.join(".git").symlink_metadata().is_ok() {
+    }
+
+    fn rename_exclusive(
+        source: &Directory,
+        source_name: &OsStr,
+        target: &Directory,
+        target_name: &OsStr,
+    ) -> std::io::Result<()> {
+        let source_name = c_string(source_name)?;
+        let target_name = c_string(target_name)?;
+        #[cfg(target_os = "macos")]
+        // SAFETY: 名称有效，两个目录 fd 均存活；RENAME_EXCL 禁止覆盖。
+        let result = unsafe {
+            libc::renameatx_np(
+                source.fd,
+                source_name.as_ptr(),
+                target.fd,
+                target_name.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        #[cfg(target_os = "linux")]
+        // SAFETY: 名称有效，两个目录 fd 均存活；RENAME_NOREPLACE 禁止覆盖。
+        let result = unsafe {
+            libc::renameat2(
+                source.fd,
+                source_name.as_ptr(),
+                target.fd,
+                target_name.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    fn copy_open_file(
+        mut input: fs::File,
+        target: &Directory,
+        target_name: &OsStr,
+        mode: u32,
+    ) -> Result<(), AppError> {
+        let mut output = open_new_file(target, target_name)
+            .map_err(|error| entry_io_error(error, "无法创建复制文件，未发布目标。"))?;
+        std::io::copy(&mut input, &mut output)
+            .map_err(|error| entry_io_error(error, "复制文件失败，未发布目标。"))?;
+        output
+            .set_permissions(fs::Permissions::from_mode(mode))
+            .map_err(|error| entry_io_error(error, "复制文件权限失败，未发布目标。"))
+    }
+
+    fn copy_directory_contents(source: &Directory, target: &Directory) -> Result<(), AppError> {
+        let names = source
+            .names()
+            .map_err(|error| entry_io_error(error, "无法读取源目录，未发布复制目标。"))?;
+        for name in names {
+            if is_git_metadata_name(&name) {
                 return Err(nested_repository_error());
             }
-            fs::create_dir(&target_path)
-                .map_err(|error| entry_io_error(error, "创建复制目录失败，未发布目标。"))?;
-            copy_directory_contents(&source_path, &target_path)?;
-            fs::set_permissions(&target_path, metadata.permissions())
-                .map_err(|error| entry_io_error(error, "复制目录权限失败，未发布目标。"))?;
-        } else {
-            return Err(AppError::new(
-                "unsupported_entry",
-                "目录含特殊文件，未发布复制目标。",
-            ));
+            let stat = stat_at(source.fd, &name)
+                .map_err(|error| entry_io_error(error, "无法确认目录项，未发布复制目标。"))?;
+            let Some(kind) = stat.kind() else {
+                return Err(AppError::new(
+                    "unsupported_entry",
+                    "目录含符号链接或特殊文件，未跟随且未发布复制目标。",
+                ));
+            };
+            match kind {
+                OrdinaryEntryKind::File => {
+                    let input = open_at(source.fd, &name, libc::O_RDONLY)
+                        .map_err(|error| entry_io_error(error, "源文件已变化或为符号链接。"))?;
+                    // SAFETY: open_at 返回独占 fd；下面 fstat 后再移交 File。
+                    let input = unsafe { fs::File::from_raw_fd(input) };
+                    let opened = NodeStat::from_metadata(
+                        &input
+                            .metadata()
+                            .map_err(|error| entry_io_error(error, "无法绑定源文件身份。"))?,
+                    );
+                    // 绑定同一已验证身份： opened inode 必须等于先前 NOFOLLOW stat，
+                    // 否则说明校验后被替换，失败关闭而不是复制替换物。
+                    if opened.kind() != Some(OrdinaryEntryKind::File)
+                        || opened.identity != stat.identity
+                    {
+                        return Err(AppError::new(
+                            "entry_changed",
+                            "源文件在复制前已变化，未发布复制目标。",
+                        ));
+                    }
+                    copy_open_file(input, target, &name, stat.mode)?;
+                }
+                OrdinaryEntryKind::Directory => {
+                    let child_source = Directory::open_at(source, &name)
+                        .map_err(|error| entry_io_error(error, "源目录已变化或为符号链接。"))?;
+                    let child_stat = child_source
+                        .stat()
+                        .map_err(|error| entry_io_error(error, "无法绑定源目录身份。"))?;
+                    if child_stat.identity != stat.identity {
+                        return Err(AppError::new(
+                            "entry_changed",
+                            "源目录在复制前已变化，未发布复制目标。",
+                        ));
+                    }
+                    if child_source
+                        .has_dot_git()
+                        .map_err(|error| entry_io_error(error, "无法确认嵌套仓库边界。"))?
+                    {
+                        return Err(nested_repository_error());
+                    }
+                    mkdir_at(target, &name)
+                        .map_err(|error| entry_io_error(error, "创建复制目录失败，未发布目标。"))?;
+                    let child_target = Directory::open_at(target, &name)
+                        .map_err(|error| entry_io_error(error, "无法绑定复制目录身份。"))?;
+                    copy_directory_contents(&child_source, &child_target)?;
+                    child_target
+                        .set_mode(stat.mode)
+                        .map_err(|error| entry_io_error(error, "复制目录权限失败，未发布目标。"))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    struct TemporaryEntry<'a> {
+        parent: &'a Directory,
+        name: OsString,
+        directory: Option<Directory>,
+        active: bool,
+    }
+
+    impl<'a> TemporaryEntry<'a> {
+        fn candidate() -> OsString {
+            OsString::from(format!(
+                ".twiglane-entry-{}-{}",
+                std::process::id(),
+                TEMP_ENTRY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ))
+        }
+
+        fn file(parent: &'a Directory) -> std::io::Result<(Self, fs::File)> {
+            for _ in 0..100 {
+                let name = Self::candidate();
+                match open_new_file(parent, &name) {
+                    Ok(file) => {
+                        return Ok((
+                            Self {
+                                parent,
+                                name,
+                                directory: None,
+                                active: true,
+                            },
+                            file,
+                        ));
+                    }
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(std::io::Error::new(ErrorKind::AlreadyExists, "temporary names exhausted"))
+        }
+
+        fn directory(parent: &'a Directory) -> std::io::Result<Self> {
+            for _ in 0..100 {
+                let name = Self::candidate();
+                match mkdir_at(parent, &name) {
+                    Ok(()) => {
+                        let directory = match Directory::open_at(parent, &name) {
+                            Ok(directory) => directory,
+                            Err(error) => {
+                                // mkdir 已成功但打开失败时也必须清掉这个空临时目录。
+                                return match unlink_at(parent, &name, libc::AT_REMOVEDIR) {
+                                    Ok(()) => Err(error),
+                                    Err(cleanup) => Err(cleanup),
+                                };
+                            }
+                        };
+                        return Ok(Self {
+                            parent,
+                            name,
+                            directory: Some(directory),
+                            active: true,
+                        });
+                    }
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(std::io::Error::new(ErrorKind::AlreadyExists, "temporary names exhausted"))
+        }
+
+        fn publish(&mut self, target_name: &OsStr) -> std::io::Result<()> {
+            rename_exclusive(self.parent, &self.name, self.parent, target_name)?;
+            self.active = false;
+            Ok(())
+        }
+
+        fn cleanup(&mut self) -> std::io::Result<()> {
+            if !self.active {
+                return Ok(());
+            }
+            let result = if let Some(directory) = &self.directory {
+                cleanup_directory(directory).and_then(|()| {
+                    unlink_at(self.parent, &self.name, libc::AT_REMOVEDIR)
+                })
+            } else {
+                unlink_at(self.parent, &self.name, 0)
+            };
+            match result {
+                Ok(()) => {
+                    self.active = false;
+                    Ok(())
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    self.active = false;
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
         }
     }
-    Ok(())
+
+    impl Drop for TemporaryEntry<'_> {
+        fn drop(&mut self) {
+            // 正常错误路径在返回前显式 cleanup；这里只兜底 panic/提前退出，不吞并业务结果。
+            let _ = self.cleanup();
+        }
+    }
+
+    fn cleanup_directory(directory: &Directory) -> std::io::Result<()> {
+        let mode = directory.stat()?.mode;
+        // 只恢复本次临时树的用户 rwx，确保只读子目录也可清理；不还原成只读后再删父项。
+        directory.set_mode(mode | 0o700)?;
+        for name in directory.names()? {
+            let stat = stat_at(directory.fd, &name)?;
+            if stat.kind() == Some(OrdinaryEntryKind::Directory) {
+                let child = Directory::open_at(directory, &name)?;
+                cleanup_directory(&child)?;
+                unlink_at(directory, &name, libc::AT_REMOVEDIR)?;
+            } else {
+                unlink_at(directory, &name, 0)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_temporary(
+        temporary: &mut TemporaryEntry<'_>,
+        result: Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => match temporary.cleanup() {
+                Ok(()) => Err(error),
+                Err(_) => Err(AppError::new(
+                    "entry_cleanup_failed",
+                    format!(
+                        "{} 本次临时内容也未能完全清理；最终目标未发布，请检查临时项。",
+                        error.message
+                    ),
+                )),
+            },
+        }
+    }
+
+    pub(super) fn create(
+        boundary: &EditBoundary,
+        relative: &Path,
+        kind: RepositoryCreateEntryKind,
+    ) -> Result<(), AppError> {
+        let root = SecureRoot::open(boundary)?;
+        let target = root.target(relative)?;
+        match kind {
+            RepositoryCreateEntryKind::File => open_new_file(&target.directory, &target.name).map(|_| ()),
+            RepositoryCreateEntryKind::Directory => mkdir_at(&target.directory, &target.name),
+        }
+        .map_err(|error| entry_io_error(error, "新建失败，未覆盖已有内容。"))
+    }
+
+    pub(super) fn copy(
+        boundary: &EditBoundary,
+        source_relative: &Path,
+        target_relative: &Path,
+        wrote: &mut bool,
+    ) -> Result<(), AppError> {
+        let root = SecureRoot::open(boundary)?;
+        let source = root.source(source_relative, false)?;
+        let target = root.target(target_relative)?;
+        if source.kind == OrdinaryEntryKind::Directory
+            && (target_relative.starts_with(source_relative)
+                || target.ancestors.contains(&source.stat.identity))
+        {
+            return Err(AppError::new(
+                "invalid_target",
+                "不能把目录复制到自身或自身后代，未修改任何内容。",
+            ));
+        }
+        let mut temporary = match source.kind {
+            OrdinaryEntryKind::File => {
+                let (mut temporary, output) = TemporaryEntry::file(&target.directory)
+                    .map_err(|error| entry_io_error(error, "无法创建复制临时文件。"))?;
+                // 临时文件已落盘：即使后续复制失败，也属写锁内已发生的部分写入。
+                *wrote = true;
+                let input = source.file.expect("file source");
+                let result = (|| {
+                    let mut input = input;
+                    let mut output = output;
+                    std::io::copy(&mut input, &mut output)
+                        .map_err(|error| entry_io_error(error, "复制文件失败，未发布目标。"))?;
+                    output
+                        .set_permissions(fs::Permissions::from_mode(source.stat.mode))
+                        .map_err(|error| entry_io_error(error, "复制文件权限失败，未发布目标。"))?;
+                    drop(output);
+                    temporary_publish(&mut temporary, &target.name)
+                })();
+                return finish_temporary(&mut temporary, result);
+            }
+            OrdinaryEntryKind::Directory => {
+                let temporary = TemporaryEntry::directory(&target.directory)
+                    .map_err(|error| entry_io_error(error, "无法创建复制临时目录。"))?;
+                // 临时目录已落盘：即使后续内容复制失败，也属写锁内已发生的部分写入。
+                *wrote = true;
+                temporary
+            }
+        };
+        let result = (|| {
+            let temporary_directory = temporary.directory.as_ref().expect("directory temporary");
+            copy_directory_contents(
+                source.directory.as_ref().expect("directory source"),
+                temporary_directory,
+            )?;
+            temporary_directory
+                .set_mode(source.stat.mode)
+                .map_err(|error| entry_io_error(error, "复制目录权限失败，未发布目标。"))?;
+            temporary_publish(&mut temporary, &target.name)
+        })();
+        finish_temporary(&mut temporary, result)
+    }
+
+    fn temporary_publish(
+        temporary: &mut TemporaryEntry<'_>,
+        target_name: &OsStr,
+    ) -> Result<(), AppError> {
+        temporary
+            .publish(target_name)
+            .map_err(|error| entry_io_error(error, "发布复制失败，已有目标未被覆盖。"))
+    }
+
+    pub(super) fn move_entry(
+        boundary: &EditBoundary,
+        source_relative: &Path,
+        target_relative: &Path,
+    ) -> Result<(), AppError> {
+        let root = SecureRoot::open(boundary)?;
+        let source = root.source(source_relative, true)?;
+        let target = root.target(target_relative)?;
+        if source.kind == OrdinaryEntryKind::Directory
+            && (target_relative.starts_with(source_relative)
+                || target.ancestors.contains(&source.stat.identity))
+        {
+            return Err(AppError::new(
+                "invalid_target",
+                "不能把目录移到自身或自身后代，未修改任何内容。",
+            ));
+        }
+        let current = stat_at(source.parent.directory.fd, &source.parent.name)
+            .map_err(|error| entry_io_error(error, "源项目在移动前已变化，未执行移动。"))?;
+        if current.identity != source.stat.identity || current.kind() != Some(source.kind) {
+            return Err(AppError::new(
+                "entry_changed",
+                "源项目在移动前已变化，未执行移动。",
+            ));
+        }
+        rename_exclusive(
+            &source.parent.directory,
+            &source.parent.name,
+            &target.directory,
+            &target.name,
+        )
+        .map_err(|error| entry_io_error(error, "移动或重命名失败，未覆盖已有内容。"))
+    }
+
+    pub(super) fn trash<F>(
+        boundary: &EditBoundary,
+        relative: &Path,
+        adapter: F,
+    ) -> Result<(Result<(), AppError>, EntryTargetState), AppError>
+    where
+        F: FnOnce(&Path) -> Result<(), AppError>,
+    {
+        let root = SecureRoot::open(boundary)?;
+        let source = root.source(relative, true)?;
+        let result = adapter(&source.trash_path());
+        Ok((result, source.original_state()))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::io::Read;
+        use std::os::unix::fs::symlink;
+
+        fn boundary(root: &Path) -> EditBoundary {
+            fs::create_dir(root.join(".git")).unwrap();
+            let root = canonical_existing(root).unwrap();
+            EditBoundary {
+                root: root.clone(),
+                git_dirs: vec![root.join(".git")],
+            }
+        }
+
+        #[test]
+        fn create_stays_in_the_open_parent_after_path_replacement() {
+            let fixture = crate::test_support::git_fixture("secure-create-race");
+            let root = fixture.repo("repo");
+            fs::create_dir(root.join("work")).unwrap();
+            let outside = fixture.path().join("outside");
+            fs::create_dir(&outside).unwrap();
+            let boundary = boundary(&root);
+            let secure = SecureRoot::open(&boundary).unwrap();
+            let parent = secure.parent(Path::new("work/new.txt"), true).unwrap();
+
+            fs::rename(root.join("work"), root.join("original-work")).unwrap();
+            symlink(&outside, root.join("work")).unwrap();
+            open_new_file(&parent.directory, &parent.name).unwrap();
+
+            assert!(root.join("original-work/new.txt").is_file());
+            assert!(!outside.join("new.txt").exists());
+        }
+
+        #[test]
+        fn copied_file_is_the_open_source_not_a_replacement_symlink() {
+            let fixture = crate::test_support::git_fixture("secure-copy-race");
+            let root = fixture.repo("repo");
+            fs::write(root.join("source.txt"), b"original\n").unwrap();
+            let outside = fixture.path().join("outside.txt");
+            fs::write(&outside, b"outside secret\n").unwrap();
+            let boundary = boundary(&root);
+            let secure = SecureRoot::open(&boundary).unwrap();
+            let source = secure.source(Path::new("source.txt"), false).unwrap();
+            let target = secure.target(Path::new("copy.txt")).unwrap();
+
+            fs::rename(root.join("source.txt"), root.join("original.txt")).unwrap();
+            symlink(&outside, root.join("source.txt")).unwrap();
+            copy_open_file(
+                source.file.expect("open source file"),
+                &target.directory,
+                &target.name,
+                source.stat.mode,
+            )
+            .unwrap();
+
+            assert_eq!(fs::read(root.join("copy.txt")).unwrap(), b"original\n");
+            assert_eq!(fs::read(outside).unwrap(), b"outside secret\n");
+            let mut opened = fs::File::open(root.join("source.txt")).unwrap();
+            let mut replacement = String::new();
+            opened.read_to_string(&mut replacement).unwrap();
+            assert_eq!(replacement, "outside secret\n");
+        }
+
+        #[test]
+        fn move_uses_open_source_and_target_parents_after_replacement() {
+            let fixture = crate::test_support::git_fixture("secure-move-race");
+            let root = fixture.repo("repo");
+            fs::create_dir(root.join("work")).unwrap();
+            fs::write(root.join("work/source.txt"), b"original\n").unwrap();
+            let outside = fixture.path().join("outside");
+            fs::create_dir(&outside).unwrap();
+            fs::write(outside.join("source.txt"), b"outside\n").unwrap();
+            let boundary = boundary(&root);
+            let secure = SecureRoot::open(&boundary).unwrap();
+            let source = secure.source(Path::new("work/source.txt"), true).unwrap();
+            let target = secure.target(Path::new("moved.txt")).unwrap();
+
+            fs::rename(root.join("work"), root.join("original-work")).unwrap();
+            symlink(&outside, root.join("work")).unwrap();
+            assert_eq!(
+                stat_at(source.parent.directory.fd, &source.parent.name)
+                    .unwrap()
+                    .identity,
+                source.stat.identity
+            );
+            rename_exclusive(
+                &source.parent.directory,
+                &source.parent.name,
+                &target.directory,
+                &target.name,
+            )
+            .unwrap();
+
+            assert_eq!(fs::read(root.join("moved.txt")).unwrap(), b"original\n");
+            assert_eq!(fs::read(outside.join("source.txt")).unwrap(), b"outside\n");
+            assert!(!root.join("original-work/source.txt").exists());
+        }
+
+        #[test]
+        fn trash_adapter_receives_the_open_target_after_parent_replacement() {
+            let fixture = crate::test_support::git_fixture("secure-trash-race");
+            let root = fixture.repo("repo");
+            fs::create_dir(root.join("work")).unwrap();
+            fs::write(root.join("work/trash.txt"), b"original\n").unwrap();
+            let outside = fixture.path().join("outside");
+            fs::create_dir(&outside).unwrap();
+            fs::write(outside.join("trash.txt"), b"outside\n").unwrap();
+            let boundary = boundary(&root);
+            let secure = SecureRoot::open(&boundary).unwrap();
+            let source = secure.source(Path::new("work/trash.txt"), true).unwrap();
+
+            fs::rename(root.join("work"), root.join("original-work")).unwrap();
+            symlink(&outside, root.join("work")).unwrap();
+            let mut observed = Vec::new();
+            fs::File::open(source.trash_path())
+                .unwrap()
+                .read_to_end(&mut observed)
+                .unwrap();
+
+            assert_eq!(observed, b"original\n");
+            assert_eq!(source.original_state(), EntryTargetState::Present);
+            assert_eq!(fs::read(outside.join("trash.txt")).unwrap(), b"outside\n");
+            assert_eq!(
+                fs::read(root.join("original-work/trash.txt")).unwrap(),
+                b"original\n"
+            );
+        }
+    }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn create_entry(
     boundary: &EditBoundary,
     relative: &Path,
     kind: RepositoryCreateEntryKind,
 ) -> Result<(), AppError> {
-    let target = new_entry_target(boundary, relative)?;
-    match kind {
-        RepositoryCreateEntryKind::File => fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(target)
-            .map(|_| ()),
-        RepositoryCreateEntryKind::Directory => fs::create_dir(target),
-    }
-    .map_err(|error| entry_io_error(error, "新建失败，未覆盖已有内容。"))
+    secure_entry_ops::create(boundary, relative, kind)
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn create_entry(
+    _boundary: &EditBoundary,
+    _relative: &Path,
+    _kind: RepositoryCreateEntryKind,
+) -> Result<(), AppError> {
+    Err(platform_entry_unsupported())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn copy_entry(
     boundary: &EditBoundary,
-    source_relative: &Path,
-    target_relative: &Path,
+    source: &Path,
+    target: &Path,
+    wrote: &mut bool,
 ) -> Result<(), AppError> {
-    let (source, kind) = ordinary_entry(boundary, source_relative, false)?;
-    let target = new_entry_target(boundary, target_relative)?;
-    if kind == OrdinaryEntryKind::Directory
-        && (target_relative.starts_with(source_relative) || target.starts_with(&source))
-    {
-        return Err(AppError::new(
-            "invalid_target",
-            "不能把目录复制到自身或自身后代，未修改任何内容。",
-        ));
-    }
-    let parent = target.parent().ok_or_else(|| {
-        AppError::new("invalid_path", "目标父目录无效，未修改任何内容。")
-    })?;
-    match kind {
-        OrdinaryEntryKind::File => {
-            let (temporary, mut output) = TemporaryEntry::file(parent)
-                .map_err(|error| entry_io_error(error, "无法创建复制临时文件。"))?;
-            let mut input = fs::File::open(&source)
-                .map_err(|error| entry_io_error(error, "无法读取源文件，未发布复制目标。"))?;
-            let metadata = input
-                .metadata()
-                .map_err(|error| entry_io_error(error, "无法确认源文件，未发布复制目标。"))?;
-            if !metadata.is_file() {
-                return Err(unsupported_entry_error());
-            }
-            std::io::copy(&mut input, &mut output)
-                .map_err(|error| entry_io_error(error, "复制文件失败，未发布复制目标。"))?;
-            drop(output);
-            fs::set_permissions(&temporary.path, metadata.permissions())
-                .map_err(|error| entry_io_error(error, "复制权限失败，未发布复制目标。"))?;
-            temporary
-                .publish(&target)
-                .map_err(|error| entry_io_error(error, "发布复制文件失败，已有目标未被覆盖。"))
-        }
-        OrdinaryEntryKind::Directory => {
-            let metadata = fs::metadata(&source)
-                .map_err(|error| entry_io_error(error, "无法确认源目录，未发布复制目标。"))?;
-            let temporary = TemporaryEntry::directory(parent)
-                .map_err(|error| entry_io_error(error, "无法创建复制临时目录。"))?;
-            copy_directory_contents(&source, &temporary.path)?;
-            fs::set_permissions(&temporary.path, metadata.permissions())
-                .map_err(|error| entry_io_error(error, "复制目录权限失败，未发布目标。"))?;
-            temporary
-                .publish(&target)
-                .map_err(|error| entry_io_error(error, "发布复制目录失败，已有目标未被覆盖。"))
-        }
-    }
+    secure_entry_ops::copy(boundary, source, target, wrote)
 }
 
-fn move_entry(
-    boundary: &EditBoundary,
-    source_relative: &Path,
-    target_relative: &Path,
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn copy_entry(
+    _boundary: &EditBoundary,
+    _source: &Path,
+    _target: &Path,
+    _wrote: &mut bool,
 ) -> Result<(), AppError> {
-    let (source, kind) = ordinary_entry(boundary, source_relative, true)?;
-    let target = new_entry_target(boundary, target_relative)?;
-    if kind == OrdinaryEntryKind::Directory
-        && (target_relative.starts_with(source_relative) || target.starts_with(&source))
-    {
-        return Err(AppError::new(
-            "invalid_target",
-            "不能把目录移到自身或自身后代，未修改任何内容。",
-        ));
-    }
-    rename_without_overwrite(&source, &target)
-        .map_err(|error| entry_io_error(error, "移动或重命名失败，未覆盖已有内容。"))
+    Err(platform_entry_unsupported())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn move_entry(boundary: &EditBoundary, source: &Path, target: &Path) -> Result<(), AppError> {
+    secure_entry_ops::move_entry(boundary, source, target)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn move_entry(_boundary: &EditBoundary, _source: &Path, _target: &Path) -> Result<(), AppError> {
+    Err(platform_entry_unsupported())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn trash_entry<F>(
+    boundary: &EditBoundary,
+    relative: &Path,
+    adapter: F,
+) -> Result<(Result<(), AppError>, EntryTargetState), AppError>
+where
+    F: FnOnce(&Path) -> Result<(), AppError>,
+{
+    secure_entry_ops::trash(boundary, relative, adapter)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn trash_entry<F>(
+    _boundary: &EditBoundary,
+    _relative: &Path,
+    _adapter: F,
+) -> Result<(Result<(), AppError>, EntryTargetState), AppError>
+where
+    F: FnOnce(&Path) -> Result<(), AppError>,
+{
+    Err(platform_entry_unsupported())
 }
 
 async fn run_entry_mutation<F>(
@@ -2972,7 +3714,7 @@ async fn run_entry_mutation<F>(
     operation: F,
 ) -> Result<crate::model::StatusSnapshot, AppError>
 where
-    F: FnOnce(&EditBoundary) -> Result<(), AppError>,
+    F: FnOnce(&EditBoundary, &mut bool) -> Result<(), AppError>,
 {
     let git = require_git(backend).await?;
     let key = repo_key(&root);
@@ -2992,12 +3734,21 @@ where
         })
         .await?;
     let boundary = edit_boundary_from_output(&root, &layout)?;
-    operation(&boundary)?;
-    guard.mark_written();
+    // wrote 由操作在真正落盘时置位：复制可能先建临时项再失败，仍属写锁内已发生
+    // 的部分写入，必须推进代次；纯校验失败（未落盘）则不推进。
+    let mut wrote = false;
+    let result = operation(&boundary, &mut wrote);
+    if wrote {
+        guard.mark_written();
+    }
     let new_generation = guard.finish();
-    settle_read!(backend, &root, new_generation, |current| {
-        crate::git::ops::refresh_status(backend, path, current, internal_request_id()).await
-    })
+    match result {
+        Ok(()) => settle_read!(backend, &root, new_generation, |current| {
+            crate::git::ops::refresh_status(backend, path, current, internal_request_id()).await
+        }),
+        Err(error) if wrote => Err(error.with_generation(new_generation)),
+        Err(error) => Err(error),
+    }
 }
 
 pub async fn repository_create_entry(
@@ -3010,8 +3761,11 @@ pub async fn repository_create_entry(
 ) -> Result<crate::model::StatusSnapshot, AppError> {
     let root = canonical_existing(&validate_input_path(path)?)?;
     let relative = mutation_path(relative)?;
-    run_entry_mutation(backend, path, root, generation, request_id, |boundary| {
-        create_entry(boundary, &relative, kind)
+    run_entry_mutation(backend, path, root, generation, request_id, |boundary, wrote| {
+        let result = create_entry(boundary, &relative, kind);
+        // 新建是原子操作：只有成功才真正落盘。
+        *wrote = result.is_ok();
+        result
     })
     .await
 }
@@ -3027,8 +3781,8 @@ pub async fn repository_copy_entry(
     let root = canonical_existing(&validate_input_path(path)?)?;
     let source = mutation_path(source)?;
     let target = mutation_path(target)?;
-    run_entry_mutation(backend, path, root, generation, request_id, |boundary| {
-        copy_entry(boundary, &source, &target)
+    run_entry_mutation(backend, path, root, generation, request_id, |boundary, wrote| {
+        copy_entry(boundary, &source, &target, wrote)
     })
     .await
 }
@@ -3044,19 +3798,141 @@ pub async fn repository_move_entry(
     let root = canonical_existing(&validate_input_path(path)?)?;
     let source = mutation_path(source)?;
     let target = mutation_path(target)?;
-    run_entry_mutation(backend, path, root, generation, request_id, |boundary| {
-        move_entry(boundary, &source, &target)
+    run_entry_mutation(backend, path, root, generation, request_id, |boundary, wrote| {
+        let result = move_entry(boundary, &source, &target);
+        // 移动/重命名是原子操作：只有成功才真正落盘。
+        *wrote = result.is_ok();
+        result
     })
     .await
 }
 
 fn move_to_system_trash(target: &Path) -> Result<(), AppError> {
-    trash::delete(target).map_err(|_| {
+    // macOS 走身份绑定回收站：target 是已校验目标的 /dev/fd/N，绝不退回仓库路径。
+    #[cfg(target_os = "macos")]
+    let result = macos_trash::trash_bound_to_fd_path(target);
+    // 其它平台暂不提供绑定 fd 身份的系统回收站实现；适配层失败即报错，不永久删除。
+    #[cfg(not(target_os = "macos"))]
+    let result = trash::TrashContext::new().delete(target).map_err(|_| {
         AppError::new(
             "trash_failed",
             "系统回收站操作失败，未执行永久删除。",
         )
-    })
+    });
+    result
+}
+
+/// macOS 回收站删除绑定"已打开 fd 的文件身份"，而不是可被外部替换的路径字符串。
+///
+/// 流程：重新打开 /dev/fd/N（内核引用同一已打开文件）→ fstat 取 inode →
+/// F_GETPATH 取当前路径 → 构造 NSURL file reference URL（.file/id=fsid.inode）→
+/// 用 NSURLFileResourceIdentifierKey/NSURLVolumeIdentifierKey 校验 inode 与卷均与
+/// 已打开 fd 一致 → trashItemAtURL 只删除该身份。任何一步失败都关闭报错，
+/// 绝不回退到仓库路径，也绝不永久删除。
+#[cfg(target_os = "macos")]
+mod macos_trash {
+    use super::*;
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{
+        NSData, NSFileManager, NSNumber, NSString, NSURL, NSURLFileResourceIdentifierKey,
+        NSURLVolumeIdentifierKey,
+    };
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    fn trash_failed() -> AppError {
+        AppError::new(
+            "trash_failed",
+            "系统回收站操作失败，未执行永久删除。",
+        )
+    }
+
+    pub(super) fn trash_bound_to_fd_path(fd_path: &Path) -> Result<(), AppError> {
+        let c = CString::new(fd_path.as_os_str().as_bytes()).map_err(|_| trash_failed())?;
+        // SAFETY: c 以 NUL 结尾；/dev/fd/N 指向已校验的打开文件，O_NOFOLLOW 不跟随链接。
+        let fd = unsafe {
+            libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        };
+        if fd < 0 {
+            return Err(trash_failed());
+        }
+        let result = trash_open_fd(fd);
+        // SAFETY: fd 由本次 open 独占，无论成败都关闭，不影响源 EntrySource 的 fd。
+        unsafe { libc::close(fd) };
+        result
+    }
+
+    fn trash_open_fd(fd: libc::c_int) -> Result<(), AppError> {
+        let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        // SAFETY: stat 可写，fd 存活。
+        if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+            return Err(trash_failed());
+        }
+        let inode = stat.st_ino;
+        let mut buf = vec![0u8; libc::PATH_MAX as usize];
+        // SAFETY: buf 容量 PATH_MAX，fd 存活；F_GETPATH 写入 NUL 结尾路径。
+        if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } != 0 {
+            return Err(trash_failed());
+        }
+        let end = buf.iter().position(|&b| b == 0).ok_or_else(trash_failed)?;
+        let path = std::str::from_utf8(&buf[..end]).map_err(|_| trash_failed())?;
+        let file_url = NSURL::fileURLWithPath(&NSString::from_str(path));
+        let path_volume = volume_id(&file_url).ok_or_else(trash_failed)?;
+        let reference = file_url.fileReferenceURL().ok_or_else(trash_failed)?;
+        let (ref_inode, ref_fsid) = file_id(&reference).ok_or_else(trash_failed)?;
+        // 身份必须与已打开 fd 完全一致：inode 绑定文件本身，fsid 绑定所在卷。
+        // 路径在校验后被替换时，reference 仍指向原 inode，此处不会误删替换物。
+        if ref_inode != inode || ref_fsid != path_volume {
+            return Err(trash_failed());
+        }
+        NSFileManager::defaultManager()
+            .trashItemAtURL_resultingItemURL_error(&reference, None)
+            .map_err(|_| trash_failed())
+    }
+
+    fn resource(url: &NSURL, key: &NSString) -> Option<Retained<AnyObject>> {
+        // SAFETY: key 为 Foundation 常量；value 输出参数由 objc2 负责内存管理。
+        unsafe {
+            let mut value: Option<Retained<AnyObject>> = None;
+            url.getResourceValue_forKey_error(&mut value, key).ok()?;
+            value
+        }
+    }
+
+    fn as_u64(obj: Retained<AnyObject>) -> Option<u64> {
+        if let Ok(number) = obj.clone().downcast::<NSNumber>() {
+            return Some(number.unsignedLongLongValue());
+        }
+        if let Ok(data) = obj.downcast::<NSData>() {
+            let bytes = data.to_vec();
+            let mut arr = [0u8; 8];
+            let n = bytes.len().min(8);
+            arr[..n].copy_from_slice(&bytes[..n]);
+            return Some(u64::from_le_bytes(arr));
+        }
+        None
+    }
+
+    fn volume_id(url: &NSURL) -> Option<u64> {
+        // SAFETY: NSURLVolumeIdentifierKey 为 Foundation extern 常量。
+        as_u64(resource(url, unsafe { NSURLVolumeIdentifierKey })?)
+    }
+
+    // NSURLFileResourceIdentifierKey 在本机返回 [inode(8 LE), fsid(8 LE)] 的 NSData；
+    // 格式不符时返回 None，由调用方失败关闭。
+    fn file_id(url: &NSURL) -> Option<(u64, u64)> {
+        // SAFETY: NSURLFileResourceIdentifierKey 为 Foundation extern 常量。
+        let obj = resource(url, unsafe { NSURLFileResourceIdentifierKey })?;
+        let data = obj.downcast::<NSData>().ok()?;
+        let bytes = data.to_vec();
+        if bytes.len() < 16 {
+            return None;
+        }
+        let inode = u64::from_le_bytes(bytes[0..8].try_into().ok()?);
+        let fsid = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
+        Some((inode, fsid))
+    }
 }
 
 async fn repository_delete_entry_with<F>(
@@ -3090,18 +3966,16 @@ where
         })
         .await?;
     let boundary = edit_boundary_from_output(&root, &layout)?;
-    let (target, _) = ordinary_entry(&boundary, &relative, true)?;
-    let adapter_result = trash_adapter(&target);
-    let target_state = target.symlink_metadata();
+    let (adapter_result, target_state) = trash_entry(&boundary, &relative, trash_adapter)?;
     match (adapter_result, target_state) {
-        (Ok(()), Err(error)) if error.kind() == ErrorKind::NotFound => {
+        (Ok(()), EntryTargetState::Missing) => {
             guard.mark_written();
             let new_generation = guard.finish();
             settle_read!(backend, &root, new_generation, |current| {
                 crate::git::ops::refresh_status(backend, path, current, internal_request_id()).await
             })
         }
-        (Ok(()), Ok(_)) => {
+        (Ok(()), EntryTargetState::Present) => {
             let current = guard.finish();
             let _ = crate::git::ops::refresh_status(
                 backend,
@@ -3115,7 +3989,7 @@ where
                 "回收站未移除目标，未报告删除成功，也未执行永久删除。",
             ))
         }
-        (Ok(()), Err(_)) => {
+        (Ok(()), EntryTargetState::Unknown) => {
             let current = guard.finish();
             let refreshed = crate::git::ops::refresh_status(
                 backend,
@@ -3134,7 +4008,7 @@ where
                 },
             ))
         }
-        (Err(_), Ok(_)) => {
+        (Err(_), EntryTargetState::Present) => {
             let current = guard.finish();
             let _ = crate::git::ops::refresh_status(
                 backend,
@@ -3148,24 +4022,25 @@ where
                 "系统回收站操作失败，目标仍保留；未执行永久删除。",
             ))
         }
-        (Err(_), Err(error)) if error.kind() == ErrorKind::NotFound => {
+        (Err(_), EntryTargetState::Missing) => {
             // 库可能移动后报告错误：代次和真实状态仍要推进，但绝不把错误改成成功。
             guard.mark_written();
             let new_generation = guard.finish();
-            let _ = crate::git::ops::refresh_status(
-                backend,
-                path,
-                new_generation,
-                internal_request_id(),
-            )
-            .await;
+            let refreshed = settle_read!(backend, &root, new_generation, |current| {
+                crate::git::ops::refresh_status(backend, path, current, internal_request_id()).await
+            })
+            .is_ok();
             Err(AppError::new(
                 "trash_failed",
-                "回收站返回错误，但目标已离开工作区；已推进代次并刷新状态，未执行永久删除。",
+                if refreshed {
+                    "回收站返回错误，但目标已离开工作区；已推进代次并刷新状态，未执行永久删除。"
+                } else {
+                    "回收站返回错误，目标已离开工作区；已推进代次，但状态刷新失败，未执行永久删除。"
+                },
             )
             .with_generation(new_generation))
         }
-        (Err(_), Err(_)) => {
+        (Err(_), EntryTargetState::Unknown) => {
             let current = guard.finish();
             let refreshed = crate::git::ops::refresh_status(
                 backend,
@@ -6313,6 +7188,32 @@ mod tests {
         );
     }
 
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn platforms_without_descriptor_relative_writes_fail_closed() {
+        let boundary = EditBoundary {
+            root: PathBuf::from("unsupported-platform"),
+            git_dirs: Vec::new(),
+        };
+        let errors = [
+            create_entry(
+                &boundary,
+                Path::new("new.txt"),
+                RepositoryCreateEntryKind::File,
+            )
+            .unwrap_err(),
+            copy_entry(&boundary, Path::new("a"), Path::new("b")).unwrap_err(),
+            move_entry(&boundary, Path::new("a"), Path::new("b")).unwrap_err(),
+            trash_entry(&boundary, Path::new("a"), |_| {
+                panic!("不支持的平台不得调用回收站适配器")
+            })
+            .unwrap_err(),
+        ];
+        for error in errors {
+            assert_eq!(error.code, "entry_platform_unsupported");
+        }
+    }
+
     #[tokio::test]
     async fn entry_create_copy_and_move_return_same_generation_status_without_git_writes() {
         let fixture = crate::test_support::git_fixture("repository-entry-success");
@@ -6587,10 +7488,16 @@ mod tests {
                 .await
                 .unwrap_err();
             assert_eq!(partial.code, "unsupported_entry");
+            // 复制已创建临时目录（写锁内部分写入），失败后仍推进代次并随错误返回。
+            assert_eq!(partial.generation, Some(2));
             assert!(!root.join("partial-copy").exists());
             assert_eq!(fs::read(root.join("source.txt")).unwrap(), b"source\n");
         }
 
+        // 仅 unix 安全结构路径会执行 dir→partial-copy 并推进代次；其余拒绝用例都不落盘。
+        #[cfg(unix)]
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 2);
+        #[cfg(not(unix))]
         assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 1);
         assert_head_and_index(&root, &head, &index);
         assert_no_entry_temporaries(&root);
@@ -6709,21 +7616,131 @@ mod tests {
         assert_eq!(git_stdout(&root, &["status", "--porcelain"]), "");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_copy_cleans_nested_readonly_temporary_directories() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let fixture = crate::test_support::git_fixture("repository-entry-readonly-cleanup");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::create_dir_all(root.join("source/a-readonly/nested")).unwrap();
+        fs::write(root.join("source/a-readonly/nested/file.txt"), b"read only\n").unwrap();
+        fs::write(root.join("source/a-readonly/root.txt"), b"root\n").unwrap();
+        fs::write(root.join("existing.txt"), b"keep\n").unwrap();
+        symlink("../existing.txt", root.join("source/z-link")).unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let readonly = root.join("source/a-readonly/nested");
+        fs::set_permissions(&readonly, fs::Permissions::from_mode(0o555)).unwrap();
+        let path = root.to_str().unwrap();
+        let head = git_stdout(&root, &["rev-parse", "HEAD"]);
+        let index = git_stdout(&root, &["ls-files", "--stage"]);
+
+        // 名称排序保证 a-readonly 已复制并设为只读，然后才遇到 z-link 失败。
+        let error = repository_copy_entry(&backend, path, "source", "destination", 1, 135)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "unsupported_entry");
+        // 临时树已落盘（写锁内部分写入）：清理成功后代次仍推进，并随错误返回。
+        assert_eq!(error.generation, Some(2));
+        assert!(!root.join("destination").exists());
+        assert_eq!(fs::read(root.join("existing.txt")).unwrap(), b"keep\n");
+        assert_eq!(fs::read(readonly.join("file.txt")).unwrap(), b"read only\n");
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 2);
+        assert_no_entry_temporaries(&root);
+        assert_head_and_index(&root, &head, &index);
+        fs::set_permissions(&readonly, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn trash_error_after_removal_distinguishes_refresh_success_and_failure() {
+        let fixture = crate::test_support::git_fixture("repository-entry-trash-refresh");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("first.txt"), b"first\n").unwrap();
+        fs::write(root.join("second.txt"), b"second\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let quarantine = fixture.path().join("quarantine");
+        fs::create_dir(&quarantine).unwrap();
+        let path = root.to_str().unwrap();
+
+        let first_root = root.clone();
+        let first_quarantine = quarantine.clone();
+        let refreshed = repository_delete_entry_with(
+            &backend,
+            path,
+            "first.txt",
+            1,
+            136,
+            move |_| {
+                fs::rename(
+                    first_root.join("first.txt"),
+                    first_quarantine.join("first.txt"),
+                )
+                .unwrap();
+                Err(AppError::new("trash_failed", "injected after removal"))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refreshed.generation, Some(2));
+        assert!(refreshed.message.contains("已推进代次并刷新状态"));
+        assert!(!refreshed.message.contains("刷新失败"));
+        assert!(!root.join("first.txt").exists());
+        assert_eq!(fs::read(quarantine.join("first.txt")).unwrap(), b"first\n");
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 2);
+
+        let second_root = root.clone();
+        let second_quarantine = quarantine.clone();
+        let detached_git = fixture.path().join("detached-git");
+        let refresh_failed = repository_delete_entry_with(
+            &backend,
+            path,
+            "second.txt",
+            2,
+            137,
+            move |_| {
+                fs::rename(
+                    second_root.join("second.txt"),
+                    second_quarantine.join("second.txt"),
+                )
+                .unwrap();
+                fs::rename(second_root.join(".git"), detached_git).unwrap();
+                Err(AppError::new("trash_failed", "injected refresh failure"))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refresh_failed.generation, Some(3));
+        assert!(refresh_failed.message.contains("已推进代次"));
+        assert!(refresh_failed.message.contains("状态刷新失败"));
+        assert!(!refresh_failed.message.contains("并刷新状态"));
+        assert!(!root.join("second.txt").exists());
+        assert_eq!(fs::read(quarantine.join("second.txt")).unwrap(), b"second\n");
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 3);
+    }
+
+    #[cfg(target_os = "macos")]
+    struct RestoreFromTrash {
+        trashed: PathBuf,
+        original: PathBuf,
+    }
+    #[cfg(target_os = "macos")]
+    impl Drop for RestoreFromTrash {
+        fn drop(&mut self) {
+            if self.trashed.symlink_metadata().is_ok() {
+                let _ = fs::rename(&self.trashed, &self.original);
+            }
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn delete_file_and_nonempty_directory_use_the_real_macos_trash() {
-        struct RestoreFromTrash {
-            trashed: PathBuf,
-            original: PathBuf,
-        }
-        impl Drop for RestoreFromTrash {
-            fn drop(&mut self) {
-                if self.trashed.symlink_metadata().is_ok() {
-                    let _ = fs::rename(&self.trashed, &self.original);
-                }
-            }
-        }
-
         let fixture = crate::test_support::git_fixture("repository-entry-real-trash");
         let root = fixture.repo("repo");
         let backend = fixture.backend();
@@ -6790,5 +7807,57 @@ mod tests {
                 && file.unstaged == ChangeKind::Deleted
         }));
         assert_head_and_index(&root, &head, &index);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_trash_binds_the_open_identity_after_path_replacement() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+
+        let fixture = crate::test_support::git_fixture("repository-entry-trash-identity-race");
+        let root = fixture.repo("repo");
+        let unique = format!(
+            "twiglane-t2-race-{}-{}",
+            std::process::id(),
+            TEMP_ENTRY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let original_name = format!("{unique}-original.txt");
+        let target = root.join(format!("{unique}.txt"));
+        let outside = fixture.path().join("outside.txt");
+        fs::write(&target, b"original content\n").unwrap();
+        fs::write(&outside, b"outside secret\n").unwrap();
+
+        // 打开并绑定目标身份（模拟 source 校验后持有的 fd）。
+        let c = std::ffi::CString::new(target.as_os_str().as_bytes()).unwrap();
+        // SAFETY: c 以 NUL 结尾；只在测试临时仓库打开普通文件。
+        let fd = unsafe {
+            libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        };
+        assert!(fd >= 0, "open failed: {}", std::io::Error::last_os_error());
+
+        let trash = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".Trash");
+        let trashed = trash.join(&original_name);
+        let _restore = RestoreFromTrash {
+            trashed: trashed.clone(),
+            original: root.join(&original_name),
+        };
+
+        // 路径替换：原文件改名，目标位置换成指向 outside 的符号链接。
+        fs::rename(&target, root.join(&original_name)).unwrap();
+        symlink(&outside, &target).unwrap();
+
+        // 通过 /dev/fd 绑定身份删除：必须删原 inode，绝不跟随替换后的链接。
+        let result = super::macos_trash::trash_bound_to_fd_path(&PathBuf::from(format!(
+            "/dev/fd/{fd}"
+        )));
+        // SAFETY: fd 由本次 open 独占。
+        unsafe { libc::close(fd) };
+        result.unwrap();
+
+        assert_eq!(fs::read(&outside).unwrap(), b"outside secret\n");
+        assert!(!root.join(&original_name).exists(), "原文件必须被回收站删除");
+        assert_eq!(fs::read(&target).unwrap(), b"outside secret\n");
+        assert_eq!(fs::read(&trashed).unwrap(), b"original content\n");
     }
 }

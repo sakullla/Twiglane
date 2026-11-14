@@ -310,13 +310,18 @@ describe("文件树右键菜单（文件视图整合）", () => {
     await waitFor(() => expect(row("src/App.svelte").getAttribute("aria-selected")).toBe("true"));
   });
 
-  it("文件树右键菜单不含文件写入、Git 写入或编辑器入口（R8/R9）", async () => {
+  it("文件树右键菜单只做结构操作，不含 Git 写入、忽略或编辑器入口（R8/R9）", async () => {
     const treeEl = await openFilesView();
     await expandSrc(treeEl);
     const menu = await menuFor(treeEl, "src/App.svelte");
     const text = within(menu).getAllByRole("menuitem").map((item) => item.textContent ?? "").join(" ");
-    for (const forbidden of ["暂存", "提交", "放弃", "删除", "重命名", "新建", "保存", ".gitignore", "加入", "忽略"]) {
+    // 新建/复制/移动/删除是文件视图自己的结构操作入口（T3 接入）；
+    // 暂存、提交、忽略规则与编辑器仍不在这个菜单里，写 Git 的命令也不会因此多出来。
+    for (const forbidden of ["暂存", "提交", "放弃", "保存", ".gitignore", "加入", "忽略", "编辑"]) {
       expect(text.includes(forbidden), `不应含「${forbidden}」`).toBe(false);
+    }
+    for (const expected of ["新建文件", "新建目录", "复制到…", "移动或重命名", "移到回收站"]) {
+      expect(text.includes(expected), `应含「${expected}」`).toBe(true);
     }
     expect(mocks.stageFiles).not.toHaveBeenCalled();
     expect(mocks.ignorePath).not.toHaveBeenCalled();

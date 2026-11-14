@@ -194,8 +194,51 @@ describe("Tauri 命令参数", () => {
     });
   });
 
-  it("路径与内容搜索命令按 camelCase 传参，scope 用 kind 判别", async () => {
-    await api.repositoryPathSearch("/repo", "main", "src", true, 50, 8, 70);
+  it("文件操作命令按 camelCase 传参，四个命令都带 generation 与 requestId", async () => {
+    await api.repositoryCreateEntry("/repo", "src/new.ts", "file", 8, 80);
+    await api.repositoryCreateEntry("/repo", "src/newdir", "directory", 8, 81);
+    await api.repositoryCopyEntry("/repo", "src/a.ts", "src/a-副本.ts", 8, 82);
+    await api.repositoryMoveEntry("/repo", "src/a.ts", "src/lib/a.ts", 8, 83);
+    await api.repositoryDeleteEntry("/repo", "src/old", 8, 84);
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "repository_create_entry", {
+      path: "/repo",
+      relative: "src/new.ts",
+      kind: "file",
+      generation: 8,
+      requestId: 80,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "repository_create_entry", {
+      path: "/repo",
+      relative: "src/newdir",
+      kind: "directory",
+      generation: 8,
+      requestId: 81,
+    });
+    // 复制与移动都只传源、目标与写入上下文，不发明后端没有的参数。
+    expect(invoke).toHaveBeenNthCalledWith(3, "repository_copy_entry", {
+      path: "/repo",
+      source: "src/a.ts",
+      target: "src/a-副本.ts",
+      generation: 8,
+      requestId: 82,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(4, "repository_move_entry", {
+      path: "/repo",
+      source: "src/a.ts",
+      target: "src/lib/a.ts",
+      generation: 8,
+      requestId: 83,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(5, "repository_delete_entry", {
+      path: "/repo",
+      relative: "src/old",
+      generation: 8,
+      requestId: 84,
+    });
+  });
+
+  it("路径与内容搜索命令按 camelCase 传参，scope 用 kind 判别", async () => {    await api.repositoryPathSearch("/repo", "main", "src", true, 50, 8, 70);
     await api.repositoryContentSearch(
       "/repo",
       "needle",

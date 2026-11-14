@@ -184,6 +184,32 @@ export interface RepositoryDirectory {
   errors: string[];
 }
 
+/**
+ * 文件视图的结构操作：只新建/复制/移动/删除工作区里的普通文件与目录。
+ * 这些动作不暂存、不提交、不推送，也不提供永久删除。
+ */
+export type FileEntryAction = "createFile" | "createDirectory" | "copy" | "move" | "delete";
+
+/** 一次结构操作的完整请求：目标路径都是仓库相对路径，不含绝对路径或 shell 片段。 */
+export interface FileEntryRequest {
+  action: FileEntryAction;
+  /** 复制、移动与删除的源路径；新建时为空字符串。 */
+  source: string;
+  /** 新建、复制与移动的目标路径；删除时为空字符串。 */
+  target: string;
+  /** 新建的条目类型；复制与移动沿用源项目的类型。 */
+  kind: "file" | "directory";
+}
+
+/** 结构操作结果：失败时保留归一化后的原因，交给表单就地显示。 */
+export interface FileEntryResult {
+  ok: boolean;
+  code: string;
+  message: string;
+  /** 成功时新建/复制/移动的目标路径；删除为空字符串。 */
+  path: string;
+}
+
 export type RepositoryFileKind =
   | "text"
   | "resource"

@@ -58,6 +58,70 @@ const EDIT_README_AND_SAVE =
   'return status.includes("已保存") || Boolean(document.querySelector(".files-view [data-edit-conflict], .files-view [data-edit-error]")); ' +
   "})()";
 
+/**
+ * 文件操作场景共用步骤：它们只核对浏览器 mock 内存里的界面接线与失败分支，
+ * 不代表真实磁盘写入、真实系统回收站或 Windows 行为。
+ */
+async function openFilesView(d) {
+  await d.until("Boolean(document.querySelector('.welcome-recent button'))", "起始页出现");
+  await d.click(".welcome-recent button");
+  await d.until("Boolean(document.querySelector('.file-list'))", "仓库打开");
+  await d.until("Boolean(document.querySelector('.workbench-view[data-active=\"true\"] [data-view=\"files\"]'))", "文件视图切换出现");
+  await d.click('.workbench-view[data-active="true"] [data-view="files"]');
+  await d.until("document.querySelectorAll('.file-tree-row').length > 0", "根目录树出现");
+}
+
+async function clickRow(d, text) {
+  const index = await d.evaluate(
+    `[...document.querySelectorAll('.file-tree-row')].findIndex((row) => row.textContent.includes(${JSON.stringify(text)}))`,
+  );
+  if (index < 0) throw new Error("找不到文件树行：" + text);
+  await d.clickNth(".file-tree-row", index);
+}
+
+async function rightClickRow(d, text) {
+  const index = await d.evaluate(
+    `[...document.querySelectorAll('.file-tree-row')].findIndex((row) => row.textContent.includes(${JSON.stringify(text)}))`,
+  );
+  if (index < 0) throw new Error("找不到文件树行：" + text);
+  await d.rightClick(".file-tree-row", index);
+  await d.until("Boolean(document.querySelector('[role=\"menu\"]'))", "目录树右键菜单出现");
+}
+
+async function clickMenuItem(d, label) {
+  const index = await d.evaluate(
+    `[...document.querySelectorAll('[role="menuitem"]')].findIndex((item) => (item.getAttribute('aria-label') || item.textContent || '').includes(${JSON.stringify(label)}))`,
+  );
+  if (index < 0) throw new Error("菜单里没有：" + label);
+  await d.clickNth('[role="menuitem"]', index);
+  await d.until("!document.querySelector('[role=\"menu\"]')", "菜单关闭");
+}
+
+/** 右键 README.md → 新建文件 → 填名字 → 提交；失败分支由页面的 ?entry= 决定。 */
+async function createFileFlow(d, name) {
+  await rightClickRow(d, "README.md");
+  await clickMenuItem(d, "新建文件");
+  await d.until("Boolean(document.querySelector('[data-entry-form=\"createFile\"]'))", "新建文件表单出现");
+  await d.typeInto("#entry-name", name);
+  // 仓库仍在读取时提交按钮是禁用的：等它可用再点，避免把「点不动」误判成失败。
+  await d.until("(() => { const button = document.querySelector('[data-entry-submit]'); return Boolean(button) && !button.disabled; })()", "提交按钮可用");
+  await d.click("[data-entry-submit]");
+}
+
+/** 右键 README.md → 移到回收站 → 在确认框里真的点一次危险按钮。 */
+async function deleteReadmeFlow(d) {
+  await rightClickRow(d, "README.md");
+  await clickMenuItem(d, "移到回收站");
+  await d.until("Boolean(document.querySelector('[data-modal-impact=\"entry-delete\"]'))", "移到回收站确认框出现");
+  await d.until("(() => { const button = document.querySelector('.modal-foot .btn-danger'); return Boolean(button) && !button.disabled; })()", "确认按钮可用");
+  // 点一次后等确认框给出结果：失败会留下原因，成功则关闭确认框。
+  await d.clickUntil(
+    ".modal-foot .btn-danger",
+    "Boolean(document.querySelector('.confirm-body .callout.error')) || !document.querySelector('[data-modal-impact=\"entry-delete\"]')",
+    "点击移到回收站",
+  );
+}
+
 const SCENARIOS = [
   {
     name: "轻量编辑：工作区文件输入后手动保存",
@@ -709,6 +773,141 @@ const SCENARIOS = [
     detail: "(document.querySelector('[data-terminal-write-error]')?.textContent || '').trim().slice(0, 80)",
   },
   {
+    name: "文件视图：右键新建文件并刷新目录树",
+    url: "/",
+    steps: async (d) => {
+      await openFilesView(d);
+      await createFileFlow(d, "notes.md");
+      await d.until("[...document.querySelectorAll('.file-tree-row')].some((row) => row.textContent.includes('notes.md'))", "新文件出现在目录树");
+      await d.until("(document.querySelector('.toast-text')?.textContent || '').includes('新建文件完成')", "新建完成提示出现");
+    },
+    check: `(() => {
+      const rows = [...document.querySelectorAll('.file-tree-row')];
+      return rows.some((row) => row.textContent.includes('notes.md'))
+        && (document.querySelector('.file-tree-row.active')?.textContent || '').includes('notes.md')
+        && (document.querySelector('.toast-text')?.textContent || '').includes('新建文件完成');
+    })()`,
+    detail: `(() => {
+      const row = [...document.querySelectorAll('.file-tree-row')].find((item) => item.textContent.includes('notes.md'));
+      return '新行：' + (row?.getAttribute('title') || '') + '｜提示：' + ((document.querySelector('.toast-text')?.textContent || '').trim()) + '（mock 内存，不代表真实磁盘）';
+    })()`,
+  },
+  {
+    name: "文件视图：新建重名保留输入并说明原因",
+    url: "/?entry=duplicate",
+    steps: async (d) => {
+      await openFilesView(d);
+      await createFileFlow(d, "notes.md");
+      await d.until("(document.querySelector('[data-entry-error]')?.textContent || '').includes('已存在')", "重名原因出现");
+    },
+    check: `(() => {
+      const form = document.querySelector('[data-entry-form="createFile"]');
+      const input = document.querySelector('#entry-name');
+      const error = document.querySelector('[data-entry-error]');
+      const rows = [...document.querySelectorAll('.file-tree-row')];
+      return Boolean(form) && Boolean(input) && input.value === 'notes.md'
+        && Boolean(error) && (error.textContent || '').includes('已存在')
+        && !rows.some((row) => row.textContent.includes('notes.md'));
+    })()`,
+    detail: `(() => {
+      const error = (document.querySelector('[data-entry-error]')?.textContent || '').trim();
+      const input = document.querySelector('#entry-name');
+      return '保留输入：' + (input?.value || '') + '｜原因：' + error;
+    })()`,
+  },
+  {
+    name: "文件视图：特殊类型不提供可执行的文件操作",
+    url: "/",
+    steps: async (d) => {
+      await openFilesView(d);
+      // 先真实点开 docs：非常规条目只有从目录读取来的行才带着真实类型。
+      await clickRow(d, "docs");
+      await d.until(
+        "[...document.querySelectorAll('.file-tree-row')].some((row) => row.textContent.includes('guide'))",
+        "展开 docs 目录",
+      );
+      // 再按路径筛小范围：虚拟列表只渲染可见行，筛选后目标行一定在。
+      await d.typeInto("#files-search", "docs/");
+      await d.until(
+        "[...document.querySelectorAll('.file-tree-row')].some((row) => row.textContent.trim().startsWith('link'))",
+        "筛出符号链接行",
+      );
+      // 菜单一次只开一个：先把符号链接的灰显原因记下来，再核对特殊文件那一行。
+      await rightClickRow(d, "link");
+      await d.evaluate(
+        `window.__entrySymlinkMenu = [...document.querySelectorAll('[role="menuitem"][aria-disabled="true"]')].map((node) => (node.getAttribute('aria-label') || '') + '：' + (node.getAttribute('title') || '')).join(' | ')`,
+      );
+      // 关菜单并把焦点放回筛选框，再用 Esc 清空筛选词，然后重新筛出 socket。
+      await d.click("#files-search");
+      await d.until("!document.querySelector('[role=\"menu\"]')", "菜单关闭");
+      await d.press("Escape");
+      await d.until("document.querySelector('#files-search').value === ''", "筛选清空");
+      await d.typeInto("#files-search", "socket");
+      await d.until(
+        "[...document.querySelectorAll('.file-tree-row')].some((row) => row.textContent.includes('socket'))",
+        "筛出特殊文件行",
+      );
+      await rightClickRow(d, "socket");
+    },
+    check: `(() => {
+      const labels = ['新建文件', '新建目录', '复制到…', '移动或重命名', '移到回收站'];
+      const rows = [...document.querySelectorAll('[role="menuitem"]')];
+      const find = (label) => rows.find((node) => (node.getAttribute('aria-label') || '').includes(label));
+      const special = labels.every((label) => {
+        const node = find(label);
+        return Boolean(node) && node.getAttribute('aria-disabled') === 'true' && (node.getAttribute('title') || '').includes('特殊文件');
+      });
+      const symlinkMenu = window.__entrySymlinkMenu || '';
+      const symlink = labels.every((label) => symlinkMenu.includes(label + '：') && symlinkMenu.includes('符号链接'));
+      return special && symlink;
+    })()`,
+    detail: `(() => {
+      const special = [...document.querySelectorAll('[role="menuitem"][aria-disabled="true"]')].map((node) => node.getAttribute('aria-label') + '：' + (node.getAttribute('title') || '')).join(' | ');
+      return '特殊文件：' + special + '｜符号链接：' + (window.__entrySymlinkMenu || '');
+    })()`,
+  },
+  {
+    name: "文件视图：回收站不可用时保留文件并说明原因",
+    url: "/?entry=trash",
+    steps: async (d) => {
+      await openFilesView(d);
+      await deleteReadmeFlow(d);
+      await d.until("(document.querySelector('.confirm-body .callout.error')?.textContent || '').includes('回收站')", "回收站失败原因出现");
+    },
+    check: `(() => {
+      const error = document.querySelector('.confirm-body .callout.error');
+      const rows = [...document.querySelectorAll('.file-tree-row')];
+      return Boolean(error) && (error.textContent || '').includes('回收站')
+        && rows.some((row) => row.textContent.includes('README.md'))
+        && Boolean(document.querySelector('[data-modal-impact="entry-delete"]'));
+    })()`,
+    detail: `(() => {
+      const error = (document.querySelector('.confirm-body .callout.error')?.textContent || '').trim();
+      return '原因：' + error + '（mock 场景，不是真实系统回收站）';
+    })()`,
+  },
+  {
+    name: "文件视图：过期结果不写入目录树",
+    url: "/?entry=stale",
+    steps: async (d) => {
+      await openFilesView(d);
+      await createFileFlow(d, "notes.md");
+      await d.until("(document.querySelector('[data-entry-error]')?.textContent || '').includes('代次过期')", "过期原因出现");
+    },
+    check: `(() => {
+      const error = document.querySelector('[data-entry-error]');
+      const input = document.querySelector('#entry-name');
+      const rows = [...document.querySelectorAll('.file-tree-row')];
+      return Boolean(error) && (error.textContent || '').includes('代次过期')
+        && Boolean(input) && input.value === 'notes.md'
+        && !rows.some((row) => row.textContent.includes('notes.md'));
+    })()`,
+    detail: `(() => {
+      const error = (document.querySelector('[data-entry-error]')?.textContent || '').trim();
+      return '原因：' + error + '｜目录树行数：' + document.querySelectorAll('.file-tree-row').length;
+    })()`,
+  },
+  {
     name: "默认起始页",
     url: "/",
     ready: "Boolean(document.querySelector('.welcome-recent button'))",
@@ -896,6 +1095,15 @@ async function main() {
         if (!point) throw new Error("找不到可点击的第 " + index + " 个元素： " + selector);
         await pressAt(point, list);
       };
+      /** 真实右键：目录树与文件列表靠 contextmenu 打开菜单，坐标必须来自元素自身。 */
+      const rightClick = async (selector, index = 0) => {
+        const point = await rectOf(selector, index);
+        if (!point) throw new Error("找不到可右键的第 " + index + " 个元素： " + selector);
+        for (const type of ["mousePressed", "mouseReleased"]) {
+          await send("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: "right", clickCount: 1 }, sessionId);
+        }
+        await pause(220);
+      };
       const typeInto = async (selector, value) => {
         await click(selector);
         await evaluate(`document.querySelector(${JSON.stringify(selector)})?.focus()`, sessionId);
@@ -927,7 +1135,7 @@ async function main() {
         const tail = await evaluate("(document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 160)", sessionId);
         throw new Error("等待超时：" + label + "｜当前界面：" + tail);
       };
-      return { press, click, clickNth, clickUntil, typeInto, typeText, until, evaluate: (expression) => evaluate(expression, sessionId), pause };
+      return { press, click, clickNth, rightClick, clickUntil, typeInto, typeText, until, evaluate: (expression) => evaluate(expression, sessionId), pause };
     };
 
     const onlyIndex = args.indexOf("--only");

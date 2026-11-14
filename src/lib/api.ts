@@ -355,6 +355,27 @@ export const api = {
       generation,
       requestId,
     }),
+  /**
+   * 新建普通文件或空目录：目标必须不存在，只接受仓库相对路径。
+   * 只写工作区，不暂存、不提交；成功后返回同一新代次的 StatusSnapshot。
+   */
+  repositoryCreateEntry: (
+    path: string,
+    relative: string,
+    kind: "file" | "directory",
+    generation: number,
+    requestId: number,
+  ) =>
+    invoke<StatusSnapshot>("repository_create_entry", { path, relative, kind, generation, requestId }),
+  /** 复制单个普通文件或目录到仓库内的新路径：不覆盖已有目标。 */
+  repositoryCopyEntry: (path: string, source: string, target: string, generation: number, requestId: number) =>
+    invoke<StatusSnapshot>("repository_copy_entry", { path, source, target, generation, requestId }),
+  /** 移动或重命名普通文件与目录：目标必须不存在，也不能是自身的后代。 */
+  repositoryMoveEntry: (path: string, source: string, target: string, generation: number, requestId: number) =>
+    invoke<StatusSnapshot>("repository_move_entry", { path, source, target, generation, requestId }),
+  /** 把普通文件或空/非空目录移入系统回收站：不提供永久删除，失败不降级。 */
+  repositoryDeleteEntry: (path: string, relative: string, generation: number, requestId: number) =>
+    invoke<StatusSnapshot>("repository_delete_entry", { path, relative, generation, requestId }),
   /** 按仓库相对路径查找文件与派生目录；directory 限定目录范围，includeIgnored 只影响本次请求。 */
   repositoryPathSearch: (
     path: string,

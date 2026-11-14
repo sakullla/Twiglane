@@ -51,6 +51,9 @@ const DIRECTORIES: Record<string, MockEntry[]> = {
     entry("docs", "guide", "directory"),
     entry("docs", "README.md", "file", { size: 900 }),
     entry("docs", "notes.txt", "file", { ignored: true, size: 120 }),
+    // 可读目录里的非常规条目：文件树的右键菜单对它们只灰显并写明原因。
+    entry("docs", "link", "symlink", { size: 0 }),
+    entry("docs", "socket", "special", { size: 0 }),
   ],
   "docs/guide": [
     entry("docs/guide", "getting-started.md", "file", { size: 2200 }),
@@ -206,6 +209,17 @@ export function mockFilePage(relative: string, offset: number, limit: number | u
 
 /** mock 里算作「有未提交改动」的路径：changed-only 搜索与仅改动树都以它为准。 */
 export const MOCK_CHANGED = ["src/app.ts", "README.md", "src/lib/legacy/old-panel.ts"];
+
+function markChanged(relative: string): void {
+  if (!MOCK_CHANGED.includes(relative)) MOCK_CHANGED.push(relative);
+}
+
+function unmarkChanged(relative: string): void {
+  for (let index = MOCK_CHANGED.length - 1; index >= 0; index -= 1) {
+    const path = MOCK_CHANGED[index];
+    if (path === relative || path.startsWith(relative + "/")) MOCK_CHANGED.splice(index, 1);
+  }
+}
 
 export function mockContentSearch(
   query: string,
@@ -399,4 +413,157 @@ export function mockEditSave(relative: string, expectedDigest: string, content: 
   }
   FILES[relative] = content;
   return { snapshot: mockEditSnapshot(relative, generation, null) };
+}
+
+/**
+ * 文件操作（新建、复制、移动、删除）的 mock：只改写上面这份内存里的目录与文件内容，
+ * 用来预览界面接线与失败分支。它不是真实磁盘写入，也不是系统回收站：
+ * 删除只是把条目从 mock 内存里移走，浏览器刷新后一切都回到初始数据。
+ * ?entry=duplicate / special / trash 让对应失败分支可复现；stale 由 mock-api 在代次层面处理。
+ */
+export type MockEntryMode = "duplicate" | "special" | "trash" | "stale" | null;
+
+type MockEntryResult = { path: string } | { error: { code: string; message: string } };
+
+function parentOf(relative: string): string {
+  const at = relative.lastIndexOf("/");
+  return at < 0 ? "" : relative.slice(0, at);
+}
+
+function nameOf(relative: string): string {
+  const at = relative.lastIndexOf("/");
+  return at < 0 ? relative : relative.slice(at + 1);
+}
+
+function findEntry(relative: string): MockEntry | undefined {
+  return (DIRECTORIES[parentOf(relative)] ?? []).find((item) => item.path === relative);
+}
+
+function pathExists(relative: string): boolean {
+  return relative === "" || findEntry(relative) !== undefined;
+}
+
+function removeEntry(relative: string): MockEntry | undefined {
+  const list = DIRECTORIES[parentOf(relative)];
+  if (!list) return undefined;
+  const at = list.findIndex((item) => item.path === relative);
+  return at < 0 ? undefined : list.splice(at, 1)[0];
+}
+
+/** 一个路径连同它的目录后代：复制、移动与删除都按整棵子树处理。 */
+function subtreePaths(relative: string): string[] {
+  const paths = [relative];
+  for (const [dir, items] of Object.entries(DIRECTORIES)) {
+    if (dir === relative || dir.startsWith(relative + "/")) {
+      paths.push(dir);
+      for (const item of items) paths.push(item.path);
+    }
+  }
+  return paths;
+}
+
+function cloneSubtree(source: string, target: string): void {
+  for (const path of subtreePaths(source)) {
+    const original = findEntry(path);
+    const next = target + path.slice(source.length);
+    const parent = parentOf(next);
+    if (!DIRECTORIES[parent]) DIRECTORIES[parent] = [];
+    DIRECTORIES[parent].push({
+      name: nameOf(next),
+      path: next,
+      kind: original?.kind ?? "directory",
+      ...(original?.ignored ? { ignored: true } : {}),
+      ...(original?.size === undefined ? {} : { size: original.size }),
+    });
+    if (!DIRECTORIES[next]) DIRECTORIES[next] = [];
+  }
+  for (const path of Object.keys(FILES)) {
+    if (path === source || path.startsWith(source + "/")) FILES[target + path.slice(source.length)] = FILES[path];
+  }
+}
+
+function dropSubtree(relative: string): void {
+  for (const path of subtreePaths(relative)) {
+    if (path !== relative) delete DIRECTORIES[path];
+  }
+  for (const path of Object.keys(FILES)) {
+    if (path === relative || path.startsWith(relative + "/")) delete FILES[path];
+  }
+  removeEntry(relative);
+  unmarkChanged(relative);
+}
+
+function failure(code: string, message: string): { error: { code: string; message: string } } {
+  return { error: { code, message } };
+}
+
+export function mockCreateEntry(relative: string, kind: "file" | "directory", mode: MockEntryMode): MockEntryResult {
+  const target = relative.trim();
+  if (!target) return failure("entry_invalid", "请填写名称，没有写入任何内容。");
+  if (mode === "special") return failure("unsupported_entry", "符号链接与特殊文件不参与文件操作，没有写入任何内容。");
+  if (mode === "duplicate" || pathExists(target)) {
+    return failure("entry_exists", `目标已存在：${target}，没有写入任何内容。请换一个名称。`);
+  }
+  const parent = parentOf(target);
+  if (!pathExists(parent)) return failure("entry_missing", `父目录不存在：${parent}，没有写入任何内容。`);
+  if (!DIRECTORIES[parent]) DIRECTORIES[parent] = [];
+  DIRECTORIES[parent].push({ name: nameOf(target), path: target, kind, ...(kind === "file" ? { size: 0 } : {}) });
+  if (kind === "directory") {
+    DIRECTORIES[target] = DIRECTORIES[target] ?? [];
+  } else {
+    FILES[target] = FILES[target] ?? "";
+    markChanged(target);
+  }
+  return { path: target };
+}
+
+export function mockCopyEntry(source: string, relative: string, mode: MockEntryMode): MockEntryResult {
+  const target = relative.trim();
+  if (mode === "special") return failure("unsupported_entry", "符号链接与特殊文件不参与文件操作，没有写入任何内容。");
+  if (!target) return failure("entry_invalid", "请填写目标路径，没有写入任何内容。");
+  if (!pathExists(source)) return failure("entry_missing", `源路径不存在：${source}，没有复制任何内容。`);
+  if (mode === "duplicate" || pathExists(target)) {
+    return failure("entry_exists", `目标已存在：${target}，没有复制任何内容。请换一个路径。`);
+  }
+  if (target === source || target.startsWith(source + "/")) {
+    return failure("entry_invalid", "不能把目录复制到它自己或它的子目录里。");
+  }
+  const parent = parentOf(target);
+  if (!pathExists(parent)) return failure("entry_missing", `父目录不存在：${parent}，没有复制任何内容。`);
+  cloneSubtree(source, target);
+  for (const path of subtreePaths(target)) {
+    if (FILES[path] !== undefined) markChanged(path);
+  }
+  return { path: target };
+}
+
+export function mockMoveEntry(source: string, relative: string, mode: MockEntryMode): MockEntryResult {
+  const target = relative.trim();
+  if (mode === "special") return failure("unsupported_entry", "符号链接与特殊文件不参与文件操作，没有写入任何内容。");
+  if (!target) return failure("entry_invalid", "请填写目标路径，没有写入任何内容。");
+  if (!pathExists(source)) return failure("entry_missing", `源路径不存在：${source}，没有移动任何内容。`);
+  if (mode === "duplicate" || pathExists(target)) {
+    return failure("entry_exists", `目标已存在：${target}，没有移动任何内容。请换一个路径。`);
+  }
+  if (target === source) return failure("entry_invalid", "移动目标不能与源路径相同。");
+  if (target.startsWith(source + "/")) return failure("entry_invalid", "不能把目录移动到它自己或它的子目录里。");
+  const parent = parentOf(target);
+  if (!pathExists(parent)) return failure("entry_missing", `父目录不存在：${parent}，没有移动任何内容。`);
+  cloneSubtree(source, target);
+  for (const path of subtreePaths(target)) {
+    if (FILES[path] !== undefined) markChanged(path);
+  }
+  dropSubtree(source);
+  return { path: target };
+}
+
+export function mockDeleteEntry(relative: string, mode: MockEntryMode): MockEntryResult {
+  if (mode === "trash") {
+    return failure("trash_unavailable", `无法把 ${relative} 移入系统回收站：系统回收站不可用，文件仍在原处。`);
+  }
+  if (mode === "special") return failure("unsupported_entry", "符号链接与特殊文件不参与文件操作，没有写入任何内容。");
+  if (!relative) return failure("entry_invalid", "根目录不能删除。");
+  if (!pathExists(relative)) return failure("entry_missing", `目标不存在：${relative}，没有删除任何内容。`);
+  dropSubtree(relative);
+  return { path: relative };
 }

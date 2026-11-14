@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { chainOf, FILE_ROW_HEIGHT, filterRows, flattenTree, buildChangedTree, makeNode, type FileNode } from "../src/lib/files.svelte";
+import { chainOf, FILE_ROW_HEIGHT, filterRows, flattenTree, buildChangedTree, makeNode, sortTree, type FileNode } from "../src/lib/files.svelte";
 import type { FileChange } from "../src/lib/types";
 
 const repositoryDirectory = vi.hoisted(() => vi.fn());
@@ -424,15 +424,151 @@ describe("目录树右键菜单", () => {
     expect(props.onCopyPath).toHaveBeenLastCalledWith("Button.svelte", "文件名");
   });
 
-  it("右键菜单不含任何文件写入、Git 写入或编辑器入口（R8/R9 边界）", async () => {
+  it("没有宿主授权时不出现文件操作入口，也不含 Git 写入或编辑器入口", async () => {
     render(FileTree, { props: { ...baseProps(), hasChange: vi.fn(() => true) } as never });
     const fileMenu = labels(await openMenu("src/lib/components/Button.svelte")).join(" ");
     await fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
     const dirMenu = labels(await openMenu("src/lib/components")).join(" ");
-    for (const forbidden of ["暂存", "提交", "放弃", "删除", "重命名", "新建", "移动", "保存", ".gitignore", "忽略", "加入"]) {
+    // 只读宿主（例如审阅、历史）不传 onEntryAction：菜单里就没有结构操作。
+    for (const absent of ["新建文件", "新建目录", "复制到", "移动或重命名", "移到回收站"]) {
+      expect(fileMenu.includes(absent), `文件菜单不应含「${absent}」`).toBe(false);
+      expect(dirMenu.includes(absent), `目录菜单不应含「${absent}」`).toBe(false);
+    }
+    // 文件操作不借菜单做 Git 写入或编辑器入口。
+    for (const forbidden of ["暂存", "提交", "放弃", "保存", ".gitignore", "忽略", "加入"]) {
       expect(fileMenu.includes(forbidden), `文件菜单不应含「${forbidden}」`).toBe(false);
       expect(dirMenu.includes(forbidden), `目录菜单不应含「${forbidden}」`).toBe(false);
     }
+  });
+
+  it("有多选时只提供系统定位、终端与路径复制，不提供批量结构操作", async () => {
+    const rows = flattenTree([
+      node("a.ts", "file", null, "a.ts"),
+      node("b.ts", "file", null, "b.ts"),
+      node("c.ts", "file", null, "c.ts"),
+    ]);
+    const onEntryAction = vi.fn();
+    render(FileTree, {
+      props: {
+        ...baseProps(),
+        rows,
+        selectedPath: "b.ts",
+        selectedPaths: new Set(["a.ts", "b.ts"]),
+        onEntryAction,
+      } as never,
+    });
+    const menu = await openMenu("b.ts");
+    const names = labels(menu);
+    expect(screen.getByText("已选 2 项", { selector: ".menu-label" })).toBeTruthy();
+    expect(names.some((text) => text.startsWith("复制所选相对路径"))).toBe(true);
+    for (const absent of ["新建文件", "新建目录", "复制到", "移动或重命名", "移到回收站"]) {
+      expect(names.some((text) => text.startsWith(absent)), absent).toBe(false);
+    }
+    expect(onEntryAction).not.toHaveBeenCalled();
+  });
+});
+
+describe("文件与目录操作入口", () => {
+  const baseProps = () => ({
+    rows: flattenTree(tree()),
+    selectedPath: "src/lib/components/Button.svelte",
+    selectedPaths: new Set<string>(),
+    loading: false,
+    failure: null,
+    query: "",
+    includeIgnored: false,
+    disabled: false,
+    onQuery: vi.fn(),
+    onIncludeIgnored: vi.fn(),
+    onToggle: vi.fn(),
+    onSelect: vi.fn(),
+    onSelectAll: vi.fn(),
+    onClearSelection: vi.fn(),
+    onSplit: vi.fn(),
+    onHistory: vi.fn(),
+    onRefresh: vi.fn(),
+    onReveal: vi.fn(),
+    onOpenDefault: vi.fn(),
+    onCopyPath: vi.fn(),
+    toAbsolute: (relative: string) => `C:/work/demo/${relative}`,
+    hasChange: vi.fn(() => false),
+    onViewDiff: vi.fn(),
+  });
+
+  async function openMenu(path: string) {
+    const treeEl = screen.getByRole("tree", { name: "仓库文件" });
+    const row =
+      treeEl.querySelector<HTMLElement>(`.file-tree-row[title="${path}"]`) ??
+      within(treeEl).getByRole("treeitem", { name: new RegExp(path.split("/").pop()!) });
+    await fireEvent.contextMenu(row, { clientX: 60, clientY: 80 });
+    return screen.getByRole("menu");
+  }
+
+  it("目录与文件菜单上报右键目标与动作：新建、复制、移动、删除", async () => {
+    const onEntryAction = vi.fn();
+    render(FileTree, { props: { ...baseProps(), onEntryAction } as never });
+    const menu = await openMenu("src/lib/components");
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "新建文件" }));
+    expect(onEntryAction).toHaveBeenLastCalledWith(
+      "createFile",
+      expect.objectContaining({ path: "src/lib/components", kind: "directory" }),
+    );
+    await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitem", { name: "新建目录" }));
+    expect(onEntryAction).toHaveBeenLastCalledWith(
+      "createDirectory",
+      expect.objectContaining({ path: "src/lib/components", kind: "directory" }),
+    );
+    await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitem", { name: "复制到…" }));
+    expect(onEntryAction).toHaveBeenLastCalledWith("copy", expect.objectContaining({ path: "src/lib/components" }));
+    await fireEvent.click(within(await openMenu("src/lib/components/Icon.svelte")).getByRole("menuitem", { name: "移动或重命名" }));
+    expect(onEntryAction).toHaveBeenLastCalledWith("move", expect.objectContaining({ path: "src/lib/components/Icon.svelte" }));
+    await fireEvent.click(within(await openMenu("src/lib/components/Icon.svelte")).getByRole("menuitem", { name: "移到回收站" }));
+    expect(onEntryAction).toHaveBeenLastCalledWith("delete", expect.objectContaining({ path: "src/lib/components/Icon.svelte" }));
+  });
+
+  it("特殊类型、嵌套仓库、已删除文件与忙碌状态灰显并说明原因", async () => {
+    const rows = flattenTree([
+      node("link.ts", "symlink", null, "link.ts"),
+      node("pipe.fifo", "special", null, "pipe.fifo"),
+      node("vendor", "nestedRepository", [], "vendor"),
+    ]);
+    const onEntryAction = vi.fn();
+    const props = { ...baseProps(), rows, onEntryAction };
+    const view = render(FileTree, { props: props as never });
+
+    const symlinkMenu = await openMenu("link.ts");
+    const create = within(symlinkMenu).getByRole("menuitem", { name: "新建文件" });
+    expect(create.getAttribute("aria-disabled")).toBe("true");
+    expect(within(symlinkMenu).getByText("符号链接不参与文件操作")).toBeTruthy();
+    await fireEvent.click(create);
+    expect(onEntryAction).not.toHaveBeenCalled();
+
+    const specialMenu = await openMenu("pipe.fifo");
+    expect(within(specialMenu).getByText("特殊文件不参与文件操作")).toBeTruthy();
+
+    const nestedMenu = await openMenu("vendor");
+    expect(within(nestedMenu).getByText("嵌套仓库不参与文件操作")).toBeTruthy();
+    expect(onEntryAction).not.toHaveBeenCalled();
+
+    // 写入或读取在途：所有结构操作一起灰显，并给出同一条忙碌原因。
+    view.unmount();
+    render(FileTree, { props: { ...baseProps(), onEntryAction, disabled: true } as never });
+    const busyMenu = await openMenu("src/lib/components/Icon.svelte");
+    expect(within(busyMenu).getByRole("menuitem", { name: "移到回收站" }).getAttribute("aria-disabled")).toBe("true");
+    expect(busyMenu.textContent).toContain("正在读取或写入");
+  });
+
+  it("已删除文件的移入回收站灰显，理由说明文件已不在工作区", async () => {
+    const rows = flattenTree(tree());
+    const target = rows.find((row) => row.path === "src/lib/components/Button.svelte")!;
+    rows[rows.indexOf(target)] = { ...target, deleted: true };
+    const onEntryAction = vi.fn();
+    render(FileTree, { props: { ...baseProps(), rows, onEntryAction } as never });
+    const menu = await openMenu("src/lib/components/Button.svelte");
+    const remove = within(menu).getByRole("menuitem", { name: "移到回收站" });
+    expect(remove.getAttribute("aria-disabled")).toBe("true");
+    expect(within(menu).getByText("文件已从工作区删除，不能在这里操作")).toBeTruthy();
+    expect(onEntryAction).not.toHaveBeenCalled();
   });
 });
 
@@ -666,5 +802,100 @@ describe("文件视图容器", () => {
     await fireEvent.click(screen.getByRole("button", { name: "更多文件树选项" }));
     const refresh = await screen.findByRole("menuitem", { name: "重新读取目录" });
     expect(refresh.getAttribute("aria-disabled")).toBeNull();
+  });
+});
+
+describe("名称排序", () => {
+  function mixedTree(): FileNode[] {
+    const deep = node("src", "directory", [
+      node("src/b.ts", "file", null, "b.ts"),
+      node("src/a10.ts", "file", null, "a10.ts"),
+      node("src/a2.ts", "file", null, "a2.ts"),
+    ]);
+    deep.expanded = true;
+    return [
+      node("b.txt", "file", null, "b.txt"),
+      node("a10.txt", "file", null, "a10.txt"),
+      node("a2.txt", "file", null, "a2.txt"),
+      deep,
+      node("vendor", "nestedRepository", [], "vendor"),
+    ];
+  }
+
+  it("目录与嵌套仓库始终在前，名称按自然顺序比较（a2 在 a10 之前）", () => {
+    const names = (direction: "asc" | "desc") => sortTree(mixedTree(), direction).map((item) => item.name);
+    expect(names("asc")).toEqual(["src", "vendor", "a2.txt", "a10.txt", "b.txt"]);
+    // 降序只反转同一组里的名称，目录组不会排到文件后面。
+    expect(names("desc")).toEqual(["vendor", "src", "b.txt", "a10.txt", "a2.txt"]);
+  });
+
+  it("子目录里的名称按同一规则逐个排序", () => {
+    const src = sortTree(mixedTree(), "asc").find((item) => item.name === "src")!;
+    expect(src.children?.map((item) => item.name)).toEqual(["a2.ts", "a10.ts", "b.ts"]);
+    const desc = sortTree(mixedTree(), "desc").find((item) => item.name === "src")!;
+    expect(desc.children?.map((item) => item.name)).toEqual(["b.ts", "a10.ts", "a2.ts"]);
+  });
+
+  it("仅改动树用同一个方向重建，过滤结果也沿用同一份顺序", () => {
+    const changes: FileChange[] = [
+      { path: "src/b.ts", originalPath: null, staged: "none", unstaged: "modified", untracked: false, unmerged: false },
+      { path: "src/a10.ts", originalPath: null, staged: "none", unstaged: "modified", untracked: false, unmerged: false },
+      { path: "src/a2.ts", originalPath: null, staged: "none", unstaged: "modified", untracked: false, unmerged: false },
+      { path: "README.md", originalPath: null, staged: "none", unstaged: "modified", untracked: false, unmerged: false },
+    ];
+    const names = (direction: "asc" | "desc") => buildChangedTree(changes, undefined, false, direction).map((item) => item.name);
+    expect(names("asc")).toEqual(["src", "README.md"]);
+    // 方向只影响同一组里的名称：目录仍排在文件前面。
+    expect(names("desc")).toEqual(["src", "README.md"]);
+    const children = (direction: "asc" | "desc") =>
+      buildChangedTree(changes, undefined, false, direction).find((item) => item.name === "src")?.children?.map((item) => item.name);
+    expect(children("asc")).toEqual(["a2.ts", "a10.ts", "b.ts"]);
+    expect(children("desc")).toEqual(["b.ts", "a10.ts", "a2.ts"]);
+
+    // 过滤只筛选已排序的行，不重新排序。
+    const rows = flattenTree(buildChangedTree(changes, undefined, false, "desc"));
+    expect(filterRows(rows, ".ts").map((row) => row.path)).toEqual(["src", "src/b.ts", "src/a10.ts", "src/a2.ts"]);
+  });
+
+  it("切换升降序保留选择，Shift 范围按当前显示顺序计算", async () => {
+    const entry = (path: string) => ({ name: path, path, kind: "file" as const, ignored: false, size: 4, error: null });
+    repositoryDirectory.mockResolvedValue(dir("", [entry("b.txt"), entry("a10.txt"), entry("a2.txt")]));
+    repositoryFileContent.mockResolvedValue({
+      generation: 4, path: "a2.txt", kind: "text", size: 4, offset: 0, lines: ["a"], nextOffset: 1, hasMore: false, truncated: false, message: null,
+    });
+    const props = () => ({
+      active: true,
+      opened: opened(),
+      disabled: false,
+      nextId: () => 1,
+      paneWidth: 280,
+      windowWidth: 1280,
+      onResize: vi.fn(),
+      onResizeCommit: vi.fn(),
+      onGeneration: vi.fn(),
+      onFileHistory: vi.fn(),
+      onNav: vi.fn(),
+    });
+    render(RepositoryFiles, { props: props() as never });
+    const tree = await screen.findByRole("tree", { name: "仓库文件" });
+    const paths = () =>
+      [...tree.querySelectorAll<HTMLElement>(".file-tree-row")].map((row) => row.getAttribute("title"));
+    await waitFor(() => expect(paths()).toEqual(["a2.txt", "a10.txt", "b.txt"]));
+
+    const a2 = within(tree).getByRole("treeitem", { name: "a2.txt" });
+    await fireEvent.click(a2);
+    expect(a2.getAttribute("aria-selected")).toBe("true");
+
+    await fireEvent.click(screen.getByRole("button", { name: "按名称降序排列" }));
+    await waitFor(() => expect(paths()).toEqual(["b.txt", "a10.txt", "a2.txt"]));
+    // 选择按路径保留，不跟着行号走。
+    expect(within(tree).getByRole("treeitem", { name: "a2.txt" }).getAttribute("aria-selected")).toBe("true");
+    // 按钮变成升序入口，语义状态同步。
+    expect(screen.getByRole("button", { name: "按名称升序排列" }).getAttribute("aria-pressed")).toBe("true");
+
+    // Shift 范围按当前显示顺序：从第一行到尾行覆盖三行。
+    await fireEvent.click(within(tree).getByRole("treeitem", { name: "b.txt" }));
+    await fireEvent.click(within(tree).getByRole("treeitem", { name: "a2.txt" }), { shiftKey: true });
+    expect(screen.getByText("已选 3 项")).toBeTruthy();
   });
 });

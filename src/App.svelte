@@ -57,6 +57,9 @@
     DiffSide,
     DiffLineSelection,
     DiffResponse,
+    FileEntryAction,
+    FileEntryRequest,
+    FileEntryResult,
     FileRow,
     FileSelection,
     GitInfo,
@@ -203,10 +206,11 @@
   /** 多选集合：不足两项时为空，主内容区走单文件差异（R19）。 */
   let selectedSet = $state.raw<FileSelection[]>([]);
   let fileList = $state<ReturnType<typeof FileList> | null>(null);
-  /** 文件视图的对外入口：展开祖先定位路径、聚焦两种搜索。 */
+  /** 文件视图的对外入口：展开祖先定位路径、聚焦两种搜索、操作成功后的选择维护。 */
   let filesView = $state<{
     reveal: (path: string, line?: number | null) => Promise<boolean>;
     focusSearch: (mode: "path" | "content") => Promise<void>;
+    afterEntry: (action: FileEntryAction, path: string, target: string) => Promise<boolean>;
   } | null>(null);
   /** 批量写入里单个文件遇到 stale 的重试上限，与后端 settle_read 一致。 */
   const BATCH_STALE_RETRIES = 6;
@@ -617,6 +621,8 @@
         return "正在读取仓库";
       case "clone":
         return "正在克隆";
+      case "entry":
+        return "正在整理文件";
       default:
         return commandState.writing ? "写入中" : "读取中";
     }
@@ -2067,6 +2073,113 @@
     const described: AppFailure = { ...failure, message: describeFailure(failure, stage, next) };
     showError(described);
     return described;
+  }
+
+  /* 当前仓库里存在未保存草稿的路径：表单提前提示，删除确认据此禁用。 */
+  let entryDrafts = $derived.by(() => {
+    const repo = opened?.summary.path;
+    return repo ? fileEditor.dirty(repo).map((session) => session.path) : [];
+  });
+
+  /** 目标路径本身或它的目录后代有草稿：改名、移动或删除都会改写它们依赖的路径。 */
+  function draftConflicts(paths: string[], drafts: string[]): string[] {
+    return drafts.filter((draft) => paths.some((path) => draft === path || draft.startsWith(`${path}/`)));
+  }
+
+  function entryActionLabel(action: FileEntryAction): string {
+    switch (action) {
+      case "createFile":
+        return "新建文件";
+      case "createDirectory":
+        return "新建目录";
+      case "copy":
+        return "复制";
+      case "move":
+        return "移动或重命名";
+      default:
+        return "移到回收站";
+    }
+  }
+
+  /**
+   * 文件视图的四个结构操作：草稿关卡、重复提交保护、命令调用与快照接纳都在这里。
+   * 复制不删改来源，因此不受草稿关卡约束；名称与目标路径由视图里的表单校验。
+   */
+  async function runEntryAction(request: FileEntryRequest): Promise<FileEntryResult> {
+    const target = request.target.trim();
+    const failed = (code: string, message: string): FileEntryResult => ({
+      ok: false,
+      code,
+      message,
+      path: target || request.source,
+    });
+    const current = opened;
+    if (!current) return failed("no_repository", "还没有打开仓库");
+    if (pending === "entry") return failed("busy", "上一次文件操作还没有结束");
+    if (writeLocked) return failed("busy", "正在读写仓库，完成后再试");
+    if (request.action !== "delete" && !target) return failed("empty_target", "请填写目标路径");
+    if (request.action === "delete" && !request.source) return failed("empty_source", "没有要删除的目标");
+
+    if (request.action === "move" || request.action === "delete") {
+      const conflicts = draftConflicts([request.source], entryDrafts);
+      if (conflicts.length > 0) {
+        const shown = conflicts.slice(0, 3).join("、");
+        return failed(
+          "draft",
+          `${entryActionLabel(request.action)}被阻止：${shown}${conflicts.length > 3 ? ` 等 ${conflicts.length} 个路径` : ""}还有未保存的草稿。先保存或放弃草稿，草稿与磁盘都没有被改动。`,
+        );
+      }
+    }
+
+    const repo = current.summary.path;
+    const generation = current.generation;
+    const requestId = nextId();
+    pending = "entry";
+    try {
+      let snapshot: StatusSnapshot;
+      switch (request.action) {
+        case "createFile":
+          snapshot = await api.repositoryCreateEntry(repo, target, "file", generation, requestId);
+          break;
+        case "createDirectory":
+          snapshot = await api.repositoryCreateEntry(repo, target, "directory", generation, requestId);
+          break;
+        case "copy":
+          snapshot = await api.repositoryCopyEntry(repo, request.source, target, generation, requestId);
+          break;
+        case "move":
+          snapshot = await api.repositoryMoveEntry(repo, request.source, target, generation, requestId);
+          break;
+        default:
+          snapshot = await api.repositoryDeleteEntry(repo, request.source, generation, requestId);
+      }
+      // 迟到结果只属于发起它的仓库：期间切换了仓库就不改写当前状态，也不假装目标已可见。
+      if (opened?.summary.path !== repo) {
+        const message = `${entryActionLabel(request.action)}已完成，但当前已切换到另一个仓库；请回到原仓库查看结果。`;
+        live = message;
+        return { ok: true, code: "other_repository", message, path: target || request.source };
+      }
+      applySnapshot(snapshot);
+      const placed = (await filesView?.afterEntry(request.action, request.source, target)) ?? false;
+      const done =
+        request.action === "delete"
+          ? `已移到系统回收站：${request.source}`
+          : `${entryActionLabel(request.action)}完成：${target}`;
+      const message = placed ? done : `${done}；目标不在当前筛选或排序的可见范围里`;
+      notice(message);
+      return { ok: true, code: "ok", message, path: target || request.source };
+    } catch (error) {
+      if (opened?.summary.path !== repo) {
+        const failure = normalizeError(error);
+        const message = `${entryActionLabel(request.action)}失败：${failure.message}`;
+        live = message;
+        return { ok: false, code: failure.code, message, path: target || request.source };
+      }
+      const failure = handleMutationError(error);
+      return { ok: false, code: failure.code, message: failure.message, path: target || request.source };
+    } finally {
+      if (pending === "entry") pending = null;
+    }
   }
 
   async function stagePath(relative: string) {
@@ -4250,6 +4363,8 @@
               {editReturn}
               onEditSaved={handleEditSaved}
               onEditFailed={handleEditFailed}
+              onEntry={runEntryAction}
+              draftPaths={entryDrafts}
             />
           </div>
           {/if}

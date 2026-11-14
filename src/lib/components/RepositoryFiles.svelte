@@ -2,9 +2,10 @@
   import { tick, untrack } from "svelte";
   import type { Snippet } from "svelte";
   import { changeDecorations, createFilesStore, isDeletedChange, isDirectoryKind, type FileSelectionMode, type FileTreeRow } from "../files.svelte";
-  import type { DiffSide, OpenedRepository, RepositoryEditSnapshot } from "../types";
+  import type { DiffSide, FileEntryAction, FileEntryRequest, FileEntryResult, OpenedRepository, RepositoryEditSnapshot, RepositoryEntryKind } from "../types";
   import { fileNavState, type FileNavState } from "../ui";
   import FileContent from "./FileContent.svelte";
+  import FileOperationDialog from "./FileOperationDialog.svelte";
   import FileSearch from "./FileSearch.svelte";
   import FileTree from "./FileTree.svelte";
   import PaneResizer from "./PaneResizer.svelte";
@@ -45,6 +46,10 @@
     editReturn?: { path: string; label: string; run: () => void } | null;
     onEditSaved?: (snapshot: RepositoryEditSnapshot) => void;
     onEditFailed?: (code: string) => void;
+    /** 新建/复制/移动/删除的实际执行在外壳：这里只负责表单与目标上报。 */
+    onEntry?: (request: FileEntryRequest) => Promise<FileEntryResult>;
+    /** 当前仓库里存在未保存草稿的路径，供表单提前提示与禁用删除确认。 */
+    draftPaths?: string[];
   }
 
   let {
@@ -70,6 +75,8 @@
     editReturn = null,
     onEditSaved,
     onEditFailed,
+    onEntry,
+    draftPaths = [],
   }: Props = $props();
 
   const store = createFilesStore({
@@ -206,6 +213,51 @@
     void store.revalidate(true);
   }
 
+  /* 文件操作：树只上报右键目标，表单与删除确认放在对话框里，命令与状态应用交给外壳。 */
+  let entrySerial = 0;
+  let entryRequest = $state<{ action: FileEntryAction; path: string; kind: RepositoryEntryKind; serial: number } | null>(
+    null,
+  );
+
+  function requestEntry(action: FileEntryAction, row: FileTreeRow): void {
+    if (!onEntry) return;
+    entryRequest = { action, path: row.path, kind: row.kind, serial: ++entrySerial };
+  }
+
+  function parentOf(relative: string): string {
+    const index = relative.lastIndexOf("/");
+    return index > 0 ? relative.slice(0, index) : "";
+  }
+
+  /**
+   * 操作成功后的选择维护：先等代次重验落地，删除把指向目标及其后代的选中退回父目录，
+   * 新建/复制/移动选中新目标。返回目标是否已在当前视图里就位。
+   */
+  export async function afterEntry(action: FileEntryAction, path: string, target: string): Promise<boolean> {
+    // 新代次先触发本组件的可见性重验；等它落地再定位，避免两次目录读取互相作废。
+    await tick();
+    await store.settled();
+    if (action === "delete") {
+      const selected = store.selectedPath;
+      if (selected && (selected === path || selected.startsWith(`${path}/`))) {
+        const parent = parentOf(path);
+        if (parent) store.select(parent);
+        else store.clearSelection();
+      }
+      if ([...store.selectedPaths].some((item) => item === path || item.startsWith(`${path}/`))) {
+        store.clearMultiSelection();
+      }
+      return true;
+    }
+    const located = await store.locate(target, null);
+    if (!located && store.selectedPath === path) {
+      const parent = parentOf(path);
+      if (parent) store.select(parent);
+      else store.clearSelection();
+    }
+    return located;
+  }
+
   /** 文件是否在当前改动集：文件装饰存在即有改动（删除墓碑也算），决定是否显示「查看改动」。 */
   function hasChange(path: string): boolean {
     return Boolean(decorations.files[path]);
@@ -235,6 +287,9 @@
         includeIgnored={store.includeIgnored}
         changedOnly={store.changedOnly}
         {decorations}
+        nameDirection={store.nameDirection}
+        onNameDirection={(next) => store.setNameDirection(next)}
+        onEntryAction={onEntry ? requestEntry : undefined}
         filterError={store.filterError}
         filterTruncated={store.filterTruncated}
         filterBusy={store.filterBusy}
@@ -304,4 +359,17 @@
     {onEditSaved}
     {onEditFailed}
   />
+  {#if entryRequest && onEntry}
+    {#key entryRequest.serial}
+      <FileOperationDialog
+        action={entryRequest.action}
+        path={entryRequest.path}
+        kind={entryRequest.kind}
+        {disabled}
+        {draftPaths}
+        onClose={() => (entryRequest = null)}
+        onSubmit={onEntry}
+      />
+    {/key}
+  {/if}
 </div>

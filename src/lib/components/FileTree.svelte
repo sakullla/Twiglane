@@ -1,9 +1,10 @@
 <script lang="ts">
   import { MODIFIER_LABEL } from "../brand";
   import { fileTone } from "../file-kind";
-  import { FILTER_EXTRA_LIMIT, FILE_ROW_HEIGHT, rowIndex, type ChangeDecorations, type FileSelectionMode, type FileTreeRow } from "../files.svelte";
+  import { FILTER_EXTRA_LIMIT, FILE_ROW_HEIGHT, rowIndex, type ChangeDecorations, type FileSelectionMode, type FileTreeRow, type NameDirection } from "../files.svelte";
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
   import { BUSY_REASON } from "../ui";
+  import type { FileEntryAction } from "../types";
   import ContextMenu, { isContextKey, pointFor, type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
 
@@ -71,6 +72,15 @@
     hasChange?: (path: string) => boolean;
     /** 查看这个文件的改动：路由到既有的差异视图入口。 */
     onViewDiff?: (path: string) => void;
+    /** 当前名称排序方向：工具栏的排序控件据此显示状态，行顺序由文件 store 派生。 */
+    nameDirection?: NameDirection;
+    /** 切换名称升/降序：只改显示顺序，不重读目录。 */
+    onNameDirection?: (next: NameDirection) => void;
+    /**
+     * 结构操作上报：只给出动作与右键目标，组件本身不调 api、不做草稿判断。
+     * 新建、复制、移动/重命名与删除的规则都在文件视图与外壳里。
+     */
+    onEntryAction?: (action: FileEntryAction, row: FileTreeRow) => void;
   }
 
   let {
@@ -109,6 +119,9 @@
     toAbsolute,
     hasChange,
     onViewDiff,
+    nameDirection = "asc",
+    onNameDirection,
+    onEntryAction,
   }: Props = $props();
 
   /** 缩进宽度：与 components.css 的缩进引导线周期一致。 */
@@ -308,6 +321,33 @@
     for (const row of selectedRows) onReveal(row.path);
   }
 
+  /**
+   * 结构操作只对普通文件与目录开放：符号链接、特殊文件、嵌套仓库、读取失败的条目
+   * 以及仅改动树里的删除墓碑都不是可操作目标；不可用时在菜单里写明原因，不静默隐藏。
+   */
+  function entryBlockedReason(row: FileTreeRow): string | null {
+    if (row.segment) return "这一行只表示目录层级，不是可操作的项目";
+    if (row.deleted) return "文件已从工作区删除，不能在这里操作";
+    if (row.kind === "symlink") return "符号链接不参与文件操作";
+    if (row.kind === "special") return "特殊文件不参与文件操作";
+    if (row.kind === "nestedRepository") return "嵌套仓库不参与文件操作";
+    if (row.kind === "error") return "这个条目读取失败，不能在这里操作";
+    return null;
+  }
+
+  function entryActionEntries(row: FileTreeRow): ContextMenuEntry[] {
+    if (!onEntryAction) return [];
+    const blocked = disabled ? BUSY_REASON : entryBlockedReason(row);
+    const run = (action: FileEntryAction) => () => onEntryAction?.(action, row);
+    return [
+      { id: "create-file", label: "新建文件", icon: "file", disabledReason: blocked ?? undefined, run: run("createFile") },
+      { id: "create-directory", label: "新建目录", icon: "folder-plus", disabledReason: blocked ?? undefined, run: run("createDirectory") },
+      { id: "copy-entry", label: "复制到…", icon: "copy", disabledReason: blocked ?? undefined, run: run("copy") },
+      { id: "move-entry", label: "移动或重命名", icon: "pencil", disabledReason: blocked ?? undefined, run: run("move") },
+      { id: "delete-entry", label: "移到回收站", icon: "trash", danger: true, disabledReason: blocked ?? undefined, run: run("delete") },
+    ];
+  }
+
   function batchMenuEntries(): ContextMenuEntry[] {
     const entries: ContextMenuEntry[] = [{ heading: `已选 ${selectedRows.length} 项` }];
     if (onReveal) {
@@ -338,6 +378,11 @@
       });
       if (row.splittable) {
         entries.push({ id: "split", label: "拆成逐级目录", icon: "list", run: () => onSplit(row) });
+      }
+      const directoryActions = entryActionEntries(row);
+      if (directoryActions.length > 0) {
+        entries.push({ separator: true });
+        entries.push(...directoryActions);
       }
       if (onReveal) {
         entries.push({ separator: true });
@@ -371,6 +416,11 @@
     }
     if (row.splittable) {
       entries.push({ id: "split", label: "拆成逐级目录", icon: "list", run: () => onSplit(row) });
+    }
+    const fileActions = entryActionEntries(row);
+    if (fileActions.length > 0) {
+      entries.push({ separator: true });
+      entries.push(...fileActions);
     }
     if (onReveal || onOpenDefault) {
       entries.push({ separator: true });
@@ -546,6 +596,18 @@
         onclick={() => onChangedOnly?.(!changedOnly)}
       >
         <Icon name="file-diff" size={14} />
+      </button>
+    {/if}
+    {#if onNameDirection}
+      <button
+        type="button"
+        class="icon-btn sm"
+        aria-pressed={nameDirection === "desc"}
+        aria-label={nameDirection === "asc" ? "按名称降序排列" : "按名称升序排列"}
+        title={`当前按名称${nameDirection === "asc" ? "升序" : "降序"}，目录始终在前；点击改为${nameDirection === "asc" ? "降序" : "升序"}`}
+        onclick={() => onNameDirection?.(nameDirection === "asc" ? "desc" : "asc")}
+      >
+        <Icon name={nameDirection === "asc" ? "arrow-up" : "arrow-down"} size={14} />
       </button>
     {/if}
     <button

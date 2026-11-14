@@ -20,7 +20,20 @@ export const UI_PREVIEW_MOCK = true;
    SwiftShader WebGL 会让 .xterm-rows 为空。真实 Tauri 窗口没有这个标记，仍按可用性用 WebGL。 */
 (window as unknown as { __uiPreviewDomTerminal?: boolean }).__uiPreviewDomTerminal = true;
 import { sampleFor } from "./samples";
-import { mockContentSearch, mockDirectory, mockDocument, mockDocumentResource, mockEditSave, mockEditSnapshot, mockFilePage, mockPathSearch } from "./mock-files";
+import {
+  mockContentSearch,
+  mockCopyEntry,
+  mockCreateEntry,
+  mockDeleteEntry,
+  mockDirectory,
+  mockDocument,
+  mockDocumentResource,
+  mockEditSave,
+  mockEditSnapshot,
+  mockFilePage,
+  mockMoveEntry,
+  mockPathSearch,
+} from "./mock-files";
 
 const wait = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms));
 const now = Math.floor(Date.now() / 1000);
@@ -323,6 +336,29 @@ const ok = async <T>(value: T, ms?: number) => {
   await wait(ms);
   return value;
 };
+
+/**
+ * 文件操作的 mock 场景开关：?entry=duplicate 让新建/复制/移动一律撞上重名，
+ * ?entry=special 让符号链接与特殊类型的目标被拒，?entry=trash 让删除报回收站不可用，
+ * ?entry=stale 让第一次结构操作按过期代次失败一次。成功路径只改写 mock 内存。
+ */
+const entryMode = previewParams.get("entry") as "duplicate" | "special" | "trash" | "stale" | null;
+let entryStaleServed = false;
+
+function entryStaleFailure(action: string) {
+  return { code: "stale", message: `仓库状态已被其它操作更新（代次过期），这次${action}没有执行；请按最新状态重试。` };
+}
+
+/** 结构操作成功后的改动列表：新建/复制/移动的目标算未跟踪，删除则连同后代一起移出改动列表。 */
+function markEntryChanges(path: string): void {
+  if (files.some((item) => item.path === path)) return;
+  files = [...files, file(path, "none", "none", { untracked: true })];
+}
+
+function dropEntryChanges(path: string): void {
+  files = files.filter((item) => item.path !== path && !item.path.startsWith(path + "/"));
+}
+
 
 /**
  * 本地提交在 mock 里的落地效果：已提交的暂存项离开改动列表，领先计数前进一位，代次递增。
@@ -1164,6 +1200,55 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       ...base, binary: true, lines: [], hunks: [], oldSize: 81920, newSize: 146752,
       preview: { repository: _repo, old: { revision: _parent, path }, new: { revision: _oid, path } },
     } : base);
+  },
+  repositoryCreateEntry: async (_repo: string, relative: string, kind: "file" | "directory", _generation: number, _request: number) => {
+    await wait(150);
+    if (entryMode === "stale" && !entryStaleServed) {
+      entryStaleServed = true;
+      return Promise.reject(entryStaleFailure("新建"));
+    }
+    const result = mockCreateEntry(relative, kind, entryMode);
+    if ("error" in result) return Promise.reject(result.error);
+    generation += 1;
+    markEntryChanges(result.path);
+    return snapshot();
+  },
+  repositoryCopyEntry: async (_repo: string, source: string, target: string, _generation: number, _request: number) => {
+    await wait(150);
+    if (entryMode === "stale" && !entryStaleServed) {
+      entryStaleServed = true;
+      return Promise.reject(entryStaleFailure("复制"));
+    }
+    const result = mockCopyEntry(source, target, entryMode);
+    if ("error" in result) return Promise.reject(result.error);
+    generation += 1;
+    markEntryChanges(result.path);
+    return snapshot();
+  },
+  repositoryMoveEntry: async (_repo: string, source: string, target: string, _generation: number, _request: number) => {
+    await wait(150);
+    if (entryMode === "stale" && !entryStaleServed) {
+      entryStaleServed = true;
+      return Promise.reject(entryStaleFailure("移动"));
+    }
+    const result = mockMoveEntry(source, target, entryMode);
+    if ("error" in result) return Promise.reject(result.error);
+    generation += 1;
+    dropEntryChanges(source);
+    markEntryChanges(result.path);
+    return snapshot();
+  },
+  repositoryDeleteEntry: async (_repo: string, relative: string, _generation: number, _request: number) => {
+    await wait(150);
+    if (entryMode === "stale" && !entryStaleServed) {
+      entryStaleServed = true;
+      return Promise.reject(entryStaleFailure("删除"));
+    }
+    const result = mockDeleteEntry(relative, entryMode);
+    if ("error" in result) return Promise.reject(result.error);
+    generation += 1;
+    dropEntryChanges(relative);
+    return snapshot();
   },
   repositoryDirectory: (_repo: string, relative: string, includeIgnored: boolean, generation: number) => {
     if (relative === "broken") {

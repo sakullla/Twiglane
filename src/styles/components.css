@@ -1311,6 +1311,14 @@ label.list-row .checkbox { margin-top: 2px; }
 .branch-create .label { color: var(--fg); }
 .branch-create .hint, .tag-create .hint { font-size: var(--text-xs); }
 .create-form-actions { display: flex; justify-content: flex-end; gap: var(--space-8); }
+/* ---------- 文件操作：新建、复制、移动与删除 ---------- */
+.entry-form { display: flex; flex-direction: column; gap: var(--space-8); padding: 14px; border-radius: var(--radius); background: var(--surface-2); }
+.entry-form .label { color: var(--fg); }
+.entry-form .hint { margin: 0; font-size: var(--text-xs); }
+.entry-form .hint.danger { color: var(--danger-text); }
+.entry-source, .entry-preview { margin: 0; color: var(--fg-subtle); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.entry-source code, .entry-preview code { font-family: var(--mono); color: var(--fg); }
+.entry-preview { color: var(--fg-muted); }
 .tag-manager { display: flex; flex-direction: column; gap: var(--space-12); }
 .tag-create-grid { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr); gap: 10px; }
 .tag-create-grid .label { margin-bottom: 5px; font-size: var(--text-xs); }

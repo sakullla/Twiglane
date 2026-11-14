@@ -35,6 +35,8 @@ export const MAX_CHAIN = 12;
 export const FILTER_EXTRA_LIMIT = 60;
 
 export type FileSelectionMode = "single" | "toggle" | "range";
+/** 名称排序方向：目录/嵌套仓库始终先于文件，只有同一组内的名称顺序反向。 */
+export type NameDirection = "asc" | "desc";
 
 export interface FileNode {
   path: string;
@@ -245,6 +247,7 @@ export function buildChangedTree(
   files: readonly FileChange[],
   collapsed?: ReadonlySet<string>,
   forceExpanded = false,
+  direction: NameDirection = "asc",
 ): FileNode[] {
   const roots: FileNode[] = [];
   const dirs = new Map<string, FileNode>();
@@ -276,20 +279,40 @@ export function buildChangedTree(
     node.deleted = isDeletedChange(file);
     list.push(node);
   }
-  sortNodes(roots);
+  sortNodes(roots, direction);
   return roots;
 }
 
-/** 目录优先、再按名称排序：改动树是从路径合成的，顺序不能靠快照的偶然次序。 */
-function sortNodes(list: FileNode[]): void {
-  list.sort((left, right) =>
-    isDirectoryKind(left.kind) === isDirectoryKind(right.kind)
-      ? left.name.localeCompare(right.name, undefined, { numeric: true })
-      : isDirectoryKind(left.kind)
-        ? -1
-        : 1,
-  );
-  for (const node of list) if (node.children) sortNodes(node.children);
+/** 目录与嵌套仓库成一组、其余条目成另一组：排序只在组内进行，目录不该排到文件后面。 */
+function folderRank(kind: RepositoryEntryKind): number {
+  return kind === "directory" || kind === "nestedRepository" ? 0 : 1;
+}
+
+/** 同一组内按自然名称顺序（数字段按数值）；降序只在组内反向，目录优先级不变。 */
+export function compareNodeNames(left: FileNode, right: FileNode, direction: NameDirection): number {
+  const group = folderRank(left.kind) - folderRank(right.kind);
+  if (group !== 0) return group;
+  const order = left.name.localeCompare(right.name, undefined, { numeric: true });
+  return direction === "desc" ? -order : order;
+}
+
+/**
+ * 目录优先、再按名称排序：改动树与目录读取结果共用这一份顺序。
+ * 从后端拿到的是普通数组，就地排序不会影响节点身份。
+ */
+function sortNodes(list: FileNode[], direction: NameDirection = "asc"): void {
+  list.sort((left, right) => compareNodeNames(left, right, direction));
+  for (const node of list) if (node.children) sortNodes(node.children, direction);
+}
+
+/**
+ * 按方向重排已读到的整棵树：返回新的数组身份、保留节点本身，
+ * 因此展开状态、已读子项与选中路径都不受影响，只是显示顺序变了。
+ */
+export function sortTree(nodes: readonly FileNode[], direction: NameDirection): FileNode[] {
+  const sorted = [...nodes].sort((left, right) => compareNodeNames(left, right, direction));
+  for (const node of sorted) if (node.children) node.children = sortTree(node.children, direction);
+  return sorted;
 }
 
 /**
@@ -517,6 +540,8 @@ export function createFilesStore(deps: FilesStoreDeps) {
   /** 全仓库补齐还在飞行中：这时候没有行不等于「没有匹配」，界面必须显示正在补齐。 */
   let filterBusy = $state(false);
   let changedOnly = $state(false);
+  /** 名称排序方向：普通树、过滤结果与仅改动树共用，后端目录读取接口不受影响。 */
+  let nameDirection = $state<NameDirection>("asc");
   /** 仅改动树里被折叠的目录路径：节点每次重建，折叠状态必须按路径记。 */
   let changedCollapsed = $state<ReadonlySet<string>>(new Set());
   /** 定位目标行：路径 + 行号 + 序号，内容区据此读取目标页并滚动。 */
@@ -594,6 +619,8 @@ export function createFilesStore(deps: FilesStoreDeps) {
       previous.error = entry.error;
       return previous;
     });
+    // 目录读取结果的顺序与名称排序方向一致：目录/嵌套仓库始终在前，组内按当前方向。
+    sortNodes(children, nameDirection);
     // 条目和顺序未变时保留数组身份；元数据字段自身仍会通知订阅者。
     if ((!node || node.children !== null) && existing.length === children.length && existing.every((child, index) => child === children[index])) return;
     if (node) node.children = children;
@@ -885,6 +912,23 @@ export function createFilesStore(deps: FilesStoreDeps) {
     selectionAnchor = selectedPath;
   }
 
+  /** 清空单选与多选：选中的文件被移走或删除后不该继续指向不存在的路径。 */
+  function clearSelection(): void {
+    selectedPath = null;
+    selectedPaths = new Set();
+    selectionAnchor = null;
+  }
+
+  /**
+   * 切换名称排序方向：只重排已读到的树，不重读目录、不改展开状态与选择。
+   * 仅改动树每次由改动快照重建，它读的是同一个 nameDirection。
+   */
+  function setNameDirection(next: NameDirection): void {
+    if (nameDirection === next) return;
+    nameDirection = next;
+    nodes = sortTree(nodes, next);
+  }
+
   function setQuery(next: string): void {
     selectedPaths = new Set();
     selectionAnchor = selectedPath;
@@ -1173,8 +1217,17 @@ export function createFilesStore(deps: FilesStoreDeps) {
     if (query.trim()) void completeFilter();
   }
 
+  /** 最近一次树重验的落地承诺：结构操作成功后要等它完成，再选中新目标。 */
+  let refreshJob: Promise<boolean> = Promise.resolve(true);
+
   /** 重验展开与选中路径；其它折叠分支的旧缓存释放，下次展开时按需重读。 */
-  async function revalidate(forceContent = false): Promise<boolean> {
+  function revalidate(forceContent = false): Promise<boolean> {
+    const job = runRevalidate(forceContent);
+    refreshJob = job;
+    return job;
+  }
+
+  async function runRevalidate(forceContent = false): Promise<boolean> {
     const refresh = ++refreshSerial;
     const current = repo;
     const owns = () => refresh === refreshSerial && repo === current && deps.active();
@@ -1272,8 +1325,8 @@ export function createFilesStore(deps: FilesStoreDeps) {
   function changedRows(): FileTreeRow[] {
     const files = deps.files?.() ?? [];
     const needle = query.trim();
-    if (!needle) return flattenTree(buildChangedTree(files, changedCollapsed));
-    return flattenTree(buildChangedTree(changedFilesMatching(files, needle), changedCollapsed, true));
+    if (!needle) return flattenTree(buildChangedTree(files, changedCollapsed, false, nameDirection));
+    return flattenTree(buildChangedTree(changedFilesMatching(files, needle), changedCollapsed, true, nameDirection));
   }
 
   /** 当前树的可见行：仅改动时来自 StatusSnapshot，否则来自按需读到的目录。 */
@@ -1375,6 +1428,10 @@ export function createFilesStore(deps: FilesStoreDeps) {
     get changedOnly() {
       return changedOnly;
     },
+    /** 当前名称排序方向：界面的排序控件据此显示，树行顺序也从它派生。 */
+    get nameDirection() {
+      return nameDirection;
+    },
     get pathQuery() {
       return pathQuery;
     },
@@ -1459,6 +1516,7 @@ export function createFilesStore(deps: FilesStoreDeps) {
     setScopeKind,
     setSearchIgnored,
     setChangedOnly,
+    setNameDirection,
     retryPathSearch,
     retryContentSearch,
     retryFilter,
@@ -1470,6 +1528,7 @@ export function createFilesStore(deps: FilesStoreDeps) {
     activate,
     setVisible,
     revalidate,
+    settled: () => refreshJob,
     toggle,
     expand,
     collapseAll,
@@ -1477,6 +1536,7 @@ export function createFilesStore(deps: FilesStoreDeps) {
     selectWith,
     selectAll,
     clearMultiSelection,
+    clearSelection,
   };
 }
 

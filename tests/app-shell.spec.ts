@@ -145,8 +145,13 @@ const mocks = vi.hoisted(() => ({
   pickFile: vi.fn(),
   repositoryDirectory: vi.fn(),
   repositoryFileContent: vi.fn(),
+  repositoryEditSnapshot: vi.fn(),
   repositoryPathSearch: vi.fn(),
   repositoryContentSearch: vi.fn(),
+  repositoryCreateEntry: vi.fn(),
+  repositoryCopyEntry: vi.fn(),
+  repositoryMoveEntry: vi.fn(),
+  repositoryDeleteEntry: vi.fn(),
   repositoryReviewToken: vi.fn(),
   taskReview: vi.fn(),
   taskReviewToken: vi.fn(),
@@ -180,6 +185,7 @@ vi.mock("../src/lib/api", () => ({
 }));
 
 import App from "../src/App.svelte";
+import { fileEditor } from "../src/lib/file-editor.svelte";
 import { paletteItems, REPO_SWITCH_PREFIX, type CommandState } from "../src/lib/commands";
 
 describe("原生状态测量", () => {
@@ -641,6 +647,19 @@ beforeEach(() => {
     truncated: false,
     message: null,
   });
+  mocks.repositoryEditSnapshot.mockResolvedValue({
+    generation: 4,
+    path: "README.md",
+    state: "editable",
+    editable: true,
+    size: 8,
+    digest: "d".repeat(64),
+    text: "# demo\n",
+    bom: false,
+    lineEnding: "lf",
+    finalNewline: true,
+    message: "",
+  });
   mocks.openRepository.mockResolvedValue({
     summary: { name: "demo", path: repoPath },
     generation: 4,
@@ -841,16 +860,18 @@ describe("审阅进度（R5）", () => {
     expect(within(fileList()).getAllByRole("button", { name: /标记 .* 已审阅/ }).length).toBeGreaterThan(0);
   });
 
-  it("文件视图与审阅入口不提供新建、删除、保存、运行或 LSP 能力", async () => {
+  it("文件视图仍不提供 IDE、运行或保存语义，结构操作只在目录树右键菜单里", async () => {
     render(App);
     await openRepo();
-    // 文件视图、改动列表与差异工具条：只读浏览与审阅，不含文件管理、编辑或 IDE 语义入口。
+    // 文件视图、改动列表与差异工具条：不含编辑器替代品或 IDE 语义入口。
     const texts = [
       ...document.querySelectorAll<HTMLElement>(".workbench-view button, .workbench-view [role=menuitem]"),
     ].map((node) => (node.getAttribute("aria-label") ?? "") + (node.textContent ?? ""));
-    for (const banned of ["新建文件", "新建目录", "移动文件", "重命名文件", "删除文件", "保存文件", "另存", "运行", "调试", "定义", "引用", "重构", "评论", "批准"]) {
+    for (const banned of ["保存文件", "另存", "运行", "调试", "定义", "引用", "重构", "评论", "批准"]) {
       expect(texts.some((text) => text.includes(banned)), `${banned} 不该出现在文件与审阅入口`).toBe(false);
     }
+    // 文件操作不占常驻工具条：要先右键目标才出现。
+    expect(texts.some((text) => text.includes("新建文件"))).toBe(false);
   });
 });
 
@@ -3948,3 +3969,214 @@ describe("worktree 总览（R3）", () => {
   });
 });
 
+
+/* ------------------------------------------------------------------ *
+ * T3：文件视图的结构操作接线。命令调用、全局 pending、草稿关卡与快照接纳都在外壳。
+ * ------------------------------------------------------------------ */
+describe("文件操作接线（T3）", () => {
+  const directoryEntry = (path: string, kind: "file" | "directory" = "file") => ({
+    name: path.split("/").pop() ?? path,
+    path,
+    kind,
+    ignored: false,
+    size: kind === "file" ? 4 : null,
+    error: null,
+  });
+
+  /** 目录内容按代次变化：写入成功后重新读取要能看到新条目。 */
+  function serveDirectory(entriesFor: (generation: number) => ReturnType<typeof directoryEntry>[]) {
+    mocks.repositoryDirectory.mockImplementation(async (_repo, relative, _ignored, generation) =>
+      relative === ""
+        ? { generation, path: "", entries: entriesFor(generation), errors: [] }
+        : { generation, path: relative, entries: [], errors: [] },
+    );
+  }
+
+  async function openFilesView() {
+    serveDirectory(() => [directoryEntry("README.md"), directoryEntry("src", "directory")]);
+    render(App);
+    await openRepo();
+    await press("3");
+    const tree = await screen.findByRole("tree", { name: "仓库文件" });
+    await within(tree).findByRole("treeitem", { name: /README\.md/ });
+    return tree;
+  }
+
+  function row(tree: HTMLElement, path: string): HTMLElement {
+    const found = tree.querySelector<HTMLElement>(`.file-tree-row[title="${path}"]`);
+    if (!found) throw new Error(`没有 ${path} 这一行`);
+    return found;
+  }
+
+  async function menuAction(tree: HTMLElement, path: string, action: string) {
+    await fireEvent.contextMenu(row(tree, path), { clientX: 40, clientY: 60 });
+    await fireEvent.click(await screen.findByRole("menuitem", { name: action }));
+  }
+
+  const entryInput = () => document.querySelector<HTMLInputElement>("[data-entry-input]")!;
+  const submitEntry = () => document.querySelector<HTMLButtonElement>("[data-entry-submit]")!;
+
+  afterEach(() => {
+    fileEditor.reset();
+  });
+
+  it("新建文件成功后按原仓库的新代次刷新，并选中新目标", async () => {
+    const tree = await openFilesView();
+    serveDirectory((generation) =>
+      generation >= 5 ? [directoryEntry("README.md"), directoryEntry("src", "directory"), directoryEntry("notes.md")] : [directoryEntry("README.md"), directoryEntry("src", "directory")],
+    );
+    mocks.repositoryCreateEntry.mockResolvedValue({
+      ...snapshot,
+      generation: 5,
+      files: [...changes, change("notes.md", "none", "none", { untracked: true })],
+    });
+
+    await menuAction(tree, "README.md", "新建文件");
+    await waitFor(() => expect(entryInput()).toBeTruthy());
+    expect(document.querySelector("[data-entry-form='createFile']")).toBeTruthy();
+    await fireEvent.input(entryInput(), { target: { value: "notes.md" } });
+    await fireEvent.click(submitEntry());
+
+    await waitFor(() =>
+      expect(mocks.repositoryCreateEntry).toHaveBeenCalledWith(repoPath, "notes.md", "file", 4, expect.any(Number)),
+    );
+    // 新代次落到外壳，文件树按新代次重读，新目标被选中。
+    await waitFor(() => expect(mocks.repositoryDirectory).toHaveBeenLastCalledWith(repoPath, "", false, 5, expect.any(Number)));
+    await waitFor(() => expect(row(tree, "notes.md").getAttribute("aria-selected")).toBe("true"));
+    await waitFor(() => expect(document.querySelector(".toast-text")?.textContent).toBe("新建文件完成：notes.md"));
+    // 表单已收起。
+    expect(document.querySelector("[data-entry-form]")).toBeNull();
+  });
+
+  it("失败保留表单与已填内容，不假装成功也不刷新", async () => {
+    const tree = await openFilesView();
+    mocks.repositoryCopyEntry.mockRejectedValue({ code: "target_exists", message: "目标已经存在：src/a.ts" });
+
+    await menuAction(tree, "README.md", "复制到…");
+    await waitFor(() => expect(entryInput()).toBeTruthy());
+    expect(entryInput().value).toBe("README-副本.md");
+    mocks.repositoryDirectory.mockClear();
+    await fireEvent.click(submitEntry());
+
+    await waitFor(() =>
+      expect(mocks.repositoryCopyEntry).toHaveBeenCalledWith(repoPath, "README.md", "README-副本.md", 4, expect.any(Number)),
+    );
+    await waitFor(() => expect(document.querySelector("[data-entry-error]")?.textContent).toContain("目标已经存在"));
+    expect(document.querySelector("[data-entry-form='copy']")).toBeTruthy();
+    expect(entryInput().value).toBe("README-副本.md");
+    expect(mocks.repositoryDirectory).not.toHaveBeenCalled();
+  });
+
+  it("写入在途时同一次提交不会发送两次", async () => {
+    const tree = await openFilesView();
+    let finish!: (value: unknown) => void;
+    mocks.repositoryCreateEntry.mockImplementation(() => new Promise((resolve) => (finish = resolve)));
+
+    await menuAction(tree, "README.md", "新建文件");
+    await waitFor(() => expect(entryInput()).toBeTruthy());
+    await fireEvent.input(entryInput(), { target: { value: "notes.md" } });
+    await fireEvent.click(submitEntry());
+    await waitFor(() => expect(mocks.repositoryCreateEntry).toHaveBeenCalledTimes(1));
+    expect(submitEntry().disabled).toBe(true);
+    await fireEvent.click(submitEntry());
+    expect(mocks.repositoryCreateEntry).toHaveBeenCalledTimes(1);
+
+    finish({ ...snapshot, generation: 5 });
+    await waitFor(() => expect(document.querySelector("[data-entry-form]")).toBeNull());
+    expect(mocks.repositoryCreateEntry).toHaveBeenCalledTimes(1);
+  });
+
+  it("目标有未保存草稿时移动与删除都被阻止，草稿、磁盘与 Git 状态不变", async () => {
+    const tree = await openFilesView();
+    await fireEvent.click(within(tree).getByRole("treeitem", { name: /README\.md/ }));
+    await fireEvent.click(await screen.findByRole("button", { name: "编辑这个工作区文件" }));
+    const textarea = (await screen.findByLabelText("README.md 编辑内容")) as HTMLTextAreaElement;
+    await fireEvent.input(textarea, { target: { value: "# 改过的草稿\n" } });
+
+    // 移动/重命名：外壳先拒绝，命令一次都不发。
+    await menuAction(tree, "README.md", "移动或重命名");
+    await waitFor(() => expect(entryInput()).toBeTruthy());
+    await fireEvent.input(entryInput(), { target: { value: "README2.md" } });
+    await fireEvent.click(submitEntry());
+    await waitFor(() => expect(document.querySelector("[data-entry-error]")?.textContent).toContain("未保存的草稿"));
+    expect(mocks.repositoryMoveEntry).not.toHaveBeenCalled();
+    expect(entryInput().value).toBe("README2.md");
+    expect(document.querySelector("[data-entry-form='move']")).toBeTruthy();
+
+    // 取消后草稿还在，文件树与快照都没有被改写。
+    await fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(document.querySelector("[data-entry-form]")).toBeNull());
+    expect((await screen.findByLabelText("README.md 编辑内容") as HTMLTextAreaElement).value).toBe("# 改过的草稿\n");
+    expect(row(tree, "README.md")).toBeTruthy();
+
+    // 删除：确认按钮不可用，并说明涉及的草稿路径。
+    await menuAction(tree, "README.md", "移到回收站");
+    const confirm = (await screen.findByRole("button", { name: "移到回收站" })) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    expect(confirm.getAttribute("title")).toContain("README.md");
+    expect(screen.getByRole("dialog", { name: "移到回收站" }).textContent).toContain("README.md");
+    await fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(mocks.repositoryDeleteEntry).not.toHaveBeenCalled();
+    expect(mocks.refreshStatus).not.toHaveBeenCalled();
+  });
+
+  it("删除成功后清掉指向目标的选中并回到可用的父目录上下文", async () => {
+    serveDirectory(() => [directoryEntry("README.md"), directoryEntry("src", "directory")]);
+    render(App);
+    await openRepo();
+    await press("3");
+    const tree = await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(within(tree).getByRole("treeitem", { name: /README\.md/ }));
+    await waitFor(() => expect(row(tree, "README.md").getAttribute("aria-selected")).toBe("true"));
+
+    mocks.repositoryDeleteEntry.mockResolvedValue({
+      ...snapshot,
+      generation: 5,
+      files: changes.filter((file) => file.path !== "README.md"),
+    });
+    serveDirectory((generation) => (generation >= 5 ? [directoryEntry("src", "directory")] : [directoryEntry("README.md"), directoryEntry("src", "directory")]));
+
+    await menuAction(tree, "README.md", "移到回收站");
+    await fireEvent.click((await screen.findByRole("button", { name: "移到回收站" })) as HTMLButtonElement);
+    await waitFor(() => expect(mocks.repositoryDeleteEntry).toHaveBeenCalledWith(repoPath, "README.md", 4, expect.any(Number)));
+    await waitFor(() => expect(tree.querySelector('.file-tree-row[title="README.md"]')).toBeNull());
+    // 根目录下的目标删掉后选择退回仓库根，不继续指向已经不存在的路径。
+    await waitFor(() => expect(row(tree, "src").getAttribute("aria-selected")).toBe("false"));
+    expect(document.querySelector('.file-tree-row[aria-selected="true"]')).toBeNull();
+    await waitFor(() => expect(document.querySelector(".toast-text")?.textContent).toBe("已移到系统回收站：README.md"));
+  });
+
+  it("成功后的旧代次快照迟到时不把文件树退回上一次的状态", async () => {
+    const tree = await openFilesView();
+    mocks.repositoryCreateEntry.mockResolvedValue({
+      ...snapshot,
+      generation: 5,
+      files: [...changes, change("notes.md", "none", "none", { untracked: true })],
+    });
+    serveDirectory((generation) =>
+      generation >= 5
+        ? [directoryEntry("README.md"), directoryEntry("src", "directory"), directoryEntry("notes.md")]
+        : [directoryEntry("README.md"), directoryEntry("src", "directory")],
+    );
+
+    await menuAction(tree, "README.md", "新建文件");
+    await waitFor(() => expect(entryInput()).toBeTruthy());
+    await fireEvent.input(entryInput(), { target: { value: "notes.md" } });
+    await fireEvent.click(submitEntry());
+    await waitFor(() => expect(row(tree, "notes.md")).toBeTruthy());
+    // 等这次写入真正结束（toast 出现后 pending 才会清空），再手动刷新。
+    await waitFor(() => expect(document.querySelector(".toast-text")?.textContent).toContain("新建文件完成"));
+    await tick();
+
+    // 刷新在飞行中带着旧代次回来：不能把刚出现的目标吞掉，也不能把代次退回去。
+    mocks.refreshStatus.mockResolvedValue({ ...snapshot, generation: 4 });
+    mocks.repositoryDirectory.mockClear();
+    await press("r");
+    await waitFor(() => expect(mocks.refreshStatus).toHaveBeenCalled());
+    await tick();
+    expect(row(tree, "notes.md")).toBeTruthy();
+    if (mocks.repositoryDirectory.mock.calls.length > 0) {
+      expect(mocks.repositoryDirectory.mock.calls.every((call) => call[3] >= 5)).toBe(true);
+    }
+  });
+});

@@ -2948,6 +2948,9 @@ mod secure_entry_ops {
         identity: Identity,
         #[cfg(target_os = "linux")]
         kind: OrdinaryEntryKind,
+        /// 跨卷复制会生成新 inode，副本只能按类型与权限核对，故保留校验时的权限位。
+        #[cfg(target_os = "linux")]
+        mode: u32,
         /// 写入 `.trashinfo` 的原始路径；取自已打开父目录的当前路径。
         #[cfg(target_os = "linux")]
         original_path: PathBuf,
@@ -2990,6 +2993,7 @@ mod secure_entry_ops {
                     name: self.parent.name.clone(),
                     identity: self.stat.identity,
                     kind: self.kind,
+                    mode: self.stat.mode,
                     original_path: parent_path.join(&self.parent.name),
                 })
             }
@@ -3821,11 +3825,33 @@ mod secure_entry_ops {
         trash_to_freedesktop_in(target, &root)
     }
 
+    /// 目标进入回收站的方式：同卷 rename 保留原 inode，跨卷回退会发布新 inode 的副本。
+    #[cfg(target_os = "linux")]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TrashMoveStrategy {
+        Rename,
+        Copy,
+    }
+
+    /// 发布策略可替换，便于在单卷宿主上验证跨卷（EXDEV）回退的结果，而不必真实挂载两卷。
+    #[cfg(target_os = "linux")]
+    type TrashPlacement =
+        fn(&BoundTrashTarget, &Directory, &OsStr) -> Result<TrashMoveStrategy, AppError>;
+
     /// 实际回收站根目录由调用方给出，便于用临时目录验证真实写入行为。
     #[cfg(target_os = "linux")]
     pub(super) fn trash_to_freedesktop_in(
         target: &BoundTrashTarget,
         trash_root: &Path,
+    ) -> Result<(), AppError> {
+        trash_to_freedesktop_with(target, trash_root, move_into_trash)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn trash_to_freedesktop_with(
+        target: &BoundTrashTarget,
+        trash_root: &Path,
+        place: TrashPlacement,
     ) -> Result<(), AppError> {
         // 先按已绑定的父目录 fd 复核目标身份，避免校验后被替换的项目进入回收站。
         let current = stat_at(target.parent, &target.name)
@@ -3840,20 +3866,17 @@ mod secure_entry_ops {
         let info = prepare_trash_directory(trash_root, "info")?;
         let (file_name, info_name) = reserve_trash_names(&files, &info, &target.name)?;
         write_trash_info(&info, &info_name, &trash_info_contents(&target.original_path)?)?;
-        if let Err(error) = move_into_trash(target, &files, &file_name) {
-            // 目标没有进入回收站时不留下孤立的 .trashinfo；跨卷复制已落地则保留配对信息。
-            if absent_in(&files, &file_name).unwrap_or(false) {
-                let _ = unlink_at(&info, &info_name, 0);
+        let strategy = match place(target, &files, &file_name) {
+            Ok(strategy) => strategy,
+            Err(error) => {
+                // 目标没有进入回收站时不留下孤立的 .trashinfo；跨卷复制已落地则保留配对信息。
+                if absent_in(&files, &file_name).unwrap_or(false) {
+                    let _ = unlink_at(&info, &info_name, 0);
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
-        let trashed = stat_at(files.fd, &file_name)
-            .map_err(|error| entry_io_error(error, "无法确认回收站结果，未执行永久删除。"))?;
-        if trashed.identity != target.identity {
-            return Err(trash_failed_with(
-                "回收站项目身份与目标不一致，未报告删除成功。",
-            ));
-        }
+        };
+        verify_trashed_entry(target, &files, &file_name, strategy)?;
         match stat_at(target.parent, &target.name) {
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
             _ => Err(trash_failed_with(
@@ -3862,17 +3885,59 @@ mod secure_entry_ops {
         }
     }
 
+    /// 回收站结果的核对方式取决于进入方式：跨卷副本是新 inode，不能按 device+inode 比对。
+    #[cfg(target_os = "linux")]
+    fn verify_trashed_entry(
+        target: &BoundTrashTarget,
+        files: &Directory,
+        file_name: &OsStr,
+        strategy: TrashMoveStrategy,
+    ) -> Result<(), AppError> {
+        let trashed = stat_at(files.fd, file_name)
+            .map_err(|error| entry_io_error(error, "无法确认回收站结果，未执行永久删除。"))?;
+        match strategy {
+            TrashMoveStrategy::Rename => {
+                if trashed.identity != target.identity {
+                    return Err(trash_failed_with(
+                        "回收站项目身份与目标不一致，未报告删除成功。",
+                    ));
+                }
+            }
+            // 副本必然落在回收站所在的卷，但 inode 与原项目不同；改核对类型与权限位。
+            // 副本完整性由复制时逐字节写入与源文件大小比对保证，源项目移除也在其后。
+            // 只比较 rwx：fchmod 可能按调用者身份丢弃 setuid/setgid，那不能把已完成的
+            // 移动重新报成失败。
+            TrashMoveStrategy::Copy => {
+                let trash_volume = files
+                    .stat()
+                    .map_err(|error| entry_io_error(error, "无法确认回收站卷，未报告删除成功。"))?
+                    .identity
+                    .device;
+                let intact = trashed.identity.device == trash_volume
+                    && trashed.kind() == Some(target.kind)
+                    && trashed.mode & 0o777 == target.mode & 0o777;
+                if !intact {
+                    return Err(trash_failed_with(
+                        "回收站副本与目标不一致，未报告删除成功。",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(target_os = "linux")]
     fn move_into_trash(
         target: &BoundTrashTarget,
         files: &Directory,
         file_name: &OsStr,
-    ) -> Result<(), AppError> {
+    ) -> Result<TrashMoveStrategy, AppError> {
         match rename_exclusive_at(target.parent, &target.name, files.fd, file_name) {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(TrashMoveStrategy::Rename),
             // 跨卷：按规范回退“复制到回收站 + 移除源”，两者都相对已打开的 fd 执行。
             Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
                 copy_then_remove_source(target, files, file_name)
+                    .map(|()| TrashMoveStrategy::Copy)
             }
             // 文件系统不支持 RENAME_NOREPLACE：名称已确认不存在，仍以普通 renameat 完成。
             Err(error)
@@ -3887,7 +3952,8 @@ mod secure_entry_ops {
                     ));
                 }
                 rename_without_flags(target.parent, &target.name, files.fd, file_name)
-                    .map_err(|error| entry_io_error(error, "无法把目标移入回收站，未执行永久删除。"))
+                    .map_err(|error| entry_io_error(error, "无法把目标移入回收站，未执行永久删除。"))?;
+                Ok(TrashMoveStrategy::Rename)
             }
             Err(error) => Err(entry_io_error(
                 error,
@@ -3933,8 +3999,17 @@ mod secure_entry_ops {
                 let (mut temporary, mut target_file) = TemporaryEntry::file(files)
                     .map_err(|error| entry_io_error(error, "无法在回收站创建临时文件。"))?;
                 let result = (|| {
-                    std::io::copy(&mut input, &mut target_file)
+                    let expected = input
+                        .metadata()
+                        .map(|metadata| metadata.len())
+                        .map_err(|error| entry_io_error(error, "无法读取源文件大小，未移除源项目。"))?;
+                    let copied = std::io::copy(&mut input, &mut target_file)
                         .map_err(|error| entry_io_error(error, "复制到回收站失败，源项目未移除。"))?;
+                    // 少复制了才说明副本不完整：源文件在复制期间被追加不属于失败，
+                    // 而副本不完整时源项目必须留在原地。
+                    if copied < expected {
+                        return Err(trash_failed_with("回收站副本不完整，源项目未移除。"));
+                    }
                     target_file
                         .set_permissions(fs::Permissions::from_mode(opened.mode))
                         .map_err(|error| entry_io_error(error, "设置回收站副本权限失败。"))?;
@@ -4210,6 +4285,120 @@ mod secure_entry_ops {
             assert_eq!(fs::read(files.join("note.txt")).unwrap(), b"older\n");
             assert_eq!(fs::read(files.join("note.txt.2")).unwrap(), b"new\n");
             assert!(trash_root.join("info/note.txt.2.trashinfo").is_file());
+        }
+
+        /// 跨卷（EXDEV）回退发布的是新 inode 的副本，必须按复制策略报告成功。
+        #[cfg(target_os = "linux")]
+        fn forced_copy_placement(
+            target: &BoundTrashTarget,
+            files: &Directory,
+            file_name: &OsStr,
+        ) -> Result<TrashMoveStrategy, AppError> {
+            copy_then_remove_source(target, files, file_name)
+                .map(|()| TrashMoveStrategy::Copy)
+        }
+
+        /// 单卷宿主无法真实构造 EXDEV，这里在同一入口注入复制策略：磁盘结果与
+        /// rename 路径一致（目标离开工作区、副本与 .trashinfo 成对出现），且不得
+        /// 因为副本 inode 与原项目不同就报删除失败。
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn linux_trash_cross_volume_copy_fallback_reports_success() {
+            let fixture = crate::test_support::git_fixture("secure-trash-xdg-exdev");
+            let root = fixture.repo("repo");
+            fs::write(root.join("note.txt"), b"note\n").unwrap();
+            fs::create_dir(root.join("tree")).unwrap();
+            fs::write(root.join("tree/child.txt"), b"child\n").unwrap();
+            let boundary = boundary(&root);
+            let secure = SecureRoot::open(&boundary).unwrap();
+            let trash_root = fixture.path().join("xdg-data").join("Trash");
+            let trashed_files = trash_root.join("files");
+
+            let source = secure.source(Path::new("note.txt"), true).unwrap();
+            let file = source.bound_trash_target().unwrap();
+            trash_to_freedesktop_with(&file, &trash_root, forced_copy_placement).unwrap();
+            let identity = file.identity;
+            drop(source);
+
+            assert!(!root.join("note.txt").exists());
+            assert_eq!(fs::read(trashed_files.join("note.txt")).unwrap(), b"note\n");
+            assert!(trash_root.join("info/note.txt.trashinfo").is_file());
+            // 副本是重新创建的 inode（真实跨卷时还在另一个 device 上），
+            // 旧实现正是在按 inode 比对时把这次成功误报为删除失败。
+            let trashed_dir = Directory::open_path(&trashed_files).unwrap();
+            let trashed = stat_at(trashed_dir.fd, OsStr::new("note.txt")).unwrap();
+            assert_ne!(trashed.identity.inode, identity.inode);
+            assert_eq!(trashed.kind(), Some(OrdinaryEntryKind::File));
+
+            let source = secure.source(Path::new("tree"), true).unwrap();
+            let directory = source.bound_trash_target().unwrap();
+            trash_to_freedesktop_with(&directory, &trash_root, forced_copy_placement).unwrap();
+            drop(source);
+
+            assert!(!root.join("tree").exists());
+            assert_eq!(
+                fs::read(trashed_files.join("tree/child.txt")).unwrap(),
+                b"child\n"
+            );
+            assert!(trash_root.join("info/tree.trashinfo").is_file());
+        }
+
+        /// 校验必须跟随进入方式：rename 策略要求 inode 相同，复制策略要求类型与权限一致。
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn linux_trash_verification_follows_the_placement_strategy() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let fixture = crate::test_support::git_fixture("secure-trash-xdg-verify");
+            let root = fixture.repo("repo");
+            fs::write(root.join("note.txt"), b"note\n").unwrap();
+            let boundary = boundary(&root);
+            let secure = SecureRoot::open(&boundary).unwrap();
+            let trash_root = fixture.path().join("xdg-data").join("Trash");
+            let trashed_files = trash_root.join("files");
+            let files = prepare_trash_directory(&trash_root, "files").unwrap();
+
+            let source = secure.source(Path::new("note.txt"), true).unwrap();
+            let target = source.bound_trash_target().unwrap();
+            let source_mode = source.stat.mode & 0o777;
+
+            // 同卷 rename 保留原 inode，两种策略都接受这个结果。
+            rename_exclusive_at(target.parent, &target.name, files.fd, OsStr::new("note.txt"))
+                .unwrap();
+            verify_trashed_entry(
+                &target,
+                &files,
+                OsStr::new("note.txt"),
+                TrashMoveStrategy::Rename,
+            )
+            .unwrap();
+            verify_trashed_entry(&target, &files, OsStr::new("note.txt"), TrashMoveStrategy::Copy)
+                .unwrap();
+
+            // 新 inode 的副本不能冒充 rename 结果。
+            fs::write(trashed_files.join("copy.txt"), b"note\n").unwrap();
+            let error = verify_trashed_entry(
+                &target,
+                &files,
+                OsStr::new("copy.txt"),
+                TrashMoveStrategy::Rename,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "trash_failed");
+
+            // 权限与源项目不一致的副本也不能报告删除成功。
+            let mismatched = trashed_files.join("mode.txt");
+            fs::write(&mismatched, b"note\n").unwrap();
+            fs::set_permissions(&mismatched, fs::Permissions::from_mode(source_mode ^ 0o001))
+                .unwrap();
+            let error = verify_trashed_entry(
+                &target,
+                &files,
+                OsStr::new("mode.txt"),
+                TrashMoveStrategy::Copy,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "trash_failed");
         }
     }
 }
@@ -8131,11 +8320,8 @@ mod tests {
             assert_eq!(fs::read(root.join("source.txt")).unwrap(), b"source\n");
         }
 
-        // 仅 unix 安全结构路径会执行 dir→partial-copy 并推进代次；其余拒绝用例都不落盘。
-        #[cfg(unix)]
+        // 安全结构路径会执行 dir→partial-copy 并推进代次；其余拒绝用例都不落盘。
         assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 2);
-        #[cfg(not(unix))]
-        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 1);
         assert_head_and_index(&root, &head, &index);
         assert_no_entry_temporaries(&root);
     }

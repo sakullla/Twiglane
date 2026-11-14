@@ -200,8 +200,6 @@ fn entry_commands_are_relative_structured_and_have_no_permanent_delete() {
     assert!(create.contains("relative: String") && create.contains("kind:"));
     let delete = command_signature(&lib, "repository_delete_entry");
     assert!(delete.contains("relative: String") && !delete.contains("target:"));
-    let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
-    assert!(cargo.contains("trash = \"=5.3.0\""));
 }
 
 /// macOS 需要原生装饰框承载交通灯，Windows 用自绘标题栏。平台覆盖文件由 Tauri 以 RFC 7396

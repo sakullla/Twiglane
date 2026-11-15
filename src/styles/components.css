@@ -2376,6 +2376,9 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 /* 右键/更多菜单里的开关条目：勾选状态画在右侧，未勾选时留出同样的位置。 */
 .menu-item.context-item > .context-check { display: inline-flex; align-items: center; justify-content: center; flex-direction: row; width: 14px; height: 20px; color: var(--accent-text); visibility: hidden; }
 .menu-item.context-item > .context-check.on { visibility: visible; }
+/* 二级菜单入口：右侧箭头；子菜单展开时父条目保持高亮。 */
+.menu-item.context-item > .context-arrow { display: inline-flex; align-items: center; justify-content: center; flex-direction: row; width: 14px; height: 20px; margin-left: var(--space-16); color: var(--fg-subtle); }
+.menu-item.context-item[aria-expanded="true"] > .context-arrow { color: var(--fg-muted); }
 @media (prefers-reduced-motion: reduce) {
   .file-search-row, .file-search-group, .file-nav-recent, .file-tree-row, .tree-chevron > .icon { transition: none; animation: none; }
   .file-tree-skeleton > span, .file-skeleton .sk-code, .file-skeleton .sk-ln { animation: none; }

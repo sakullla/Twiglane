@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { openTreeSubmenu } from "./helpers/menu";
 
 const repositoryDirectory = vi.hoisted(() => vi.fn());
 const repositoryFileContent = vi.hoisted(() => vi.fn());
@@ -96,12 +97,13 @@ function contentSearch(overrides: Partial<RepositoryContentSearch> = {}): Reposi
   };
 }
 
-/** 全仓库搜索和按路径打开在文件行的右键菜单里。右键普通行会选中它。 */
+/** 全仓库搜索在文件行右键菜单的「文件树」子菜单里；右键普通行会选中它。按路径打开走 Ctrl/⌘ P。 */
 async function openTreeAction(action: string, rowName: RegExp = /^README\.md$/) {
   const tree = await screen.findByRole("tree", { name: "仓库文件" });
   const row = await within(tree).findByRole("treeitem", { name: rowName });
   await fireEvent.contextMenu(row);
-  await fireEvent.click(await screen.findByRole("menuitem", { name: action }));
+  const sub = await openTreeSubmenu(await screen.findByRole("menu", { name: /的操作$/ }));
+  await fireEvent.click(within(sub).getByRole("menuitem", { name: action }));
 }
 
 type FilesHost = { focusSearch: (mode: "path" | "content") => Promise<void> };
@@ -187,12 +189,12 @@ describe("路径快速打开", () => {
       message: null,
     });
 
-    render(RepositoryFiles, { props: viewProps() as never });
+    const view = render(RepositoryFiles, { props: viewProps() as never });
     await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
 
-    // 按路径打开在文件行的右键菜单里（也可以用 ⌘/Ctrl P）。
-    await openTreeAction("按路径打开");
-    const input = screen.getByRole("textbox", { name: "按路径打开文件" });
+    // 按路径打开走 ⌘/Ctrl P 与命令面板，外壳调用视图的 focusSearch("path")。
+    await (view.component as FilesHost).focusSearch("path");
+    const input = await screen.findByRole("textbox", { name: "按路径打开文件" });
     await fireEvent.input(input, { target: { value: "Button" } });
     await waitFor(() => expect(repositoryPathSearch).toHaveBeenCalled());
     expect(repositoryPathSearch.mock.calls[0].slice(0, 4)).toEqual([repoPath, "Button", null, false]);
@@ -234,8 +236,8 @@ describe("路径快速打开", () => {
 
     const view = render(RepositoryFiles, { props: viewProps() as never });
     await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
-    await openTreeAction("按路径打开");
-    const input = screen.getByRole("textbox", { name: "按路径打开文件" });
+    await (view.component as FilesHost).focusSearch("path");
+    const input = await screen.findByRole("textbox", { name: "按路径打开文件" });
     await fireEvent.input(input, { target: { value: "old" } });
     await fireEvent.input(input, { target: { value: "app" } });
     expect(await screen.findByRole("option", { name: /app\.ts/ })).toBeTruthy();

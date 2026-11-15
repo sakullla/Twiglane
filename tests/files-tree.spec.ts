@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { openSubmenu, openTreeSubmenu, pickMenuItem, rootMenu } from "./helpers/menu";
 import { chainOf, FILE_ROW_HEIGHT, filterRows, flattenTree, buildChangedTree, makeNode, sortTree, type FileNode } from "../src/lib/files.svelte";
 import { BUSY_REASON } from "../src/lib/ui";
 import type { FileChange } from "../src/lib/types";
@@ -270,7 +271,7 @@ describe("目录树右键菜单", () => {
 
   async function openMenu(path: string) {
     await fireEvent.contextMenu(rowEl(path), { clientX: 60, clientY: 80 });
-    return screen.getByRole("menu");
+    return rootMenu();
   }
 
   function labels(menu: HTMLElement): string[] {
@@ -279,12 +280,28 @@ describe("目录树右键菜单", () => {
       .map((item) => item.textContent?.trim() ?? "");
   }
 
-  it("目录菜单分组：展开/折叠、系统打开该目录、三种路径复制；右键目录不改变展开态", async () => {
+  /** 顶层条目加上各个可展开子菜单里的条目（子菜单逐个展开读取）。 */
+  async function deepLabels(menu: HTMLElement): Promise<string[]> {
+    const names = labels(menu);
+    for (const trigger of within(menu).getAllByRole("menuitem")) {
+      if (trigger.getAttribute("aria-haspopup") !== "menu" || trigger.getAttribute("aria-disabled") === "true") continue;
+      const sub = await openSubmenu(menu, trigger.getAttribute("aria-label") ?? "");
+      names.push(...within(sub).queryAllByRole("menuitem").map((item) => item.textContent?.trim() ?? ""));
+      names.push(...within(sub).queryAllByRole("menuitemcheckbox").map((item) => item.textContent?.trim() ?? ""));
+    }
+    return names;
+  }
+
+  it("目录菜单分组：系统定位、路径子菜单（三种复制）；展开/折叠交给单击，右键目录不改变展开态", async () => {
     const props = baseProps();
     render(FileTree, { props: props as never });
     const menu = await openMenu("src/lib/components");
-    const names = labels(menu);
-    for (const label of ["折叠", "在系统文件管理器中打开该目录", "复制相对路径", "复制完整路径", "复制目录名"]) {
+    const top = labels(menu);
+    // 展开/折叠由单击完成，菜单里不再重复。
+    expect(top.some((text) => text === "折叠" || text === "展开")).toBe(false);
+    expect(top.some((text) => /资源管理器|访达/.test(text))).toBe(true);
+    const names = await deepLabels(menu);
+    for (const label of ["复制相对路径", "复制完整路径", "复制目录名"]) {
       expect(names.some((text) => text.startsWith(label)), label).toBe(true);
     }
     // 目录没有「用默认程序打开」「查看改动」「查看文件历史」。
@@ -301,22 +318,24 @@ describe("目录树右键菜单", () => {
     const onInsertToTerminal = vi.fn();
     const view = render(FileTree, { props: { ...baseProps(), onInsertToTerminal } as never });
     let menu = await openMenu("src/lib/components/Button.svelte");
-    await fireEvent.click(within(menu).getByRole("menuitem", { name: /插入路径到终端/ }));
+    await pickMenuItem(menu, "路径", /插入路径到终端/);
     expect(onInsertToTerminal).toHaveBeenCalledWith(["src/lib/components/Button.svelte"]);
     menu = await openMenu("src/lib/components");
-    await fireEvent.click(within(menu).getByRole("menuitem", { name: /插入路径到终端/ }));
+    await pickMenuItem(menu, "路径", /插入路径到终端/);
     expect(onInsertToTerminal).toHaveBeenLastCalledWith(["src/lib/components"]);
     view.unmount();
     render(FileTree, { props: baseProps() as never });
     menu = await openMenu("src/lib/components/Button.svelte");
-    expect(labels(menu).some((text) => text.includes("终端"))).toBe(false);
+    expect((await deepLabels(menu)).some((text) => text.includes("终端"))).toBe(false);
   });
 
-  it("文件菜单分组：打开、文件历史、系统定位、用默认程序打开、三种路径复制", async () => {
+  it("文件菜单分组：文件历史、系统定位、用默认程序打开、路径子菜单（三种复制）", async () => {
     render(FileTree, { props: baseProps() as never });
     const menu = await openMenu("src/lib/components/Button.svelte");
-    const names = labels(menu);
-    for (const label of ["打开", "查看文件历史", "用默认程序打开", "复制相对路径", "复制完整路径", "复制文件名"]) {
+    // 单击即打开文件，菜单不再重复「打开」。
+    expect(labels(menu).includes("打开")).toBe(false);
+    const names = await deepLabels(menu);
+    for (const label of ["查看文件历史", "用默认程序打开", "复制相对路径", "复制完整路径", "复制文件名"]) {
       expect(names.some((text) => text.startsWith(label)), label).toBe(true);
     }
     // 系统定位按平台切换文案（测试环境非 mac，故为资源管理器）。
@@ -343,22 +362,23 @@ describe("目录树右键菜单", () => {
     const view = render(FileTree, { props: { ...baseProps(), onIgnore } as never });
 
     let menu = await openMenu("src/lib/components/Button.svelte");
-    await fireEvent.click(within(menu).getByRole("menuitem", { name: "加入 .gitignore" }));
+    await pickMenuItem(menu, "忽略", "加入 .gitignore");
     expect(onIgnore).toHaveBeenLastCalledWith("src/lib/components/Button.svelte", false);
 
     menu = await openMenu("src/lib/components/Button.svelte");
-    await fireEvent.click(within(menu).getByRole("menuitem", { name: "加入 .git/info/exclude" }));
+    await pickMenuItem(menu, "忽略", "仅本地（.git/info/exclude）");
     expect(onIgnore).toHaveBeenLastCalledWith("src/lib/components/Button.svelte", true);
 
     // 目录同样可忽略：规则按目录路径写入，写入后整棵子树都不再列出。
     menu = await openMenu("src/lib/components");
-    await fireEvent.click(within(menu).getByRole("menuitem", { name: "加入 .gitignore" }));
+    await pickMenuItem(menu, "忽略", "加入 .gitignore");
     expect(onIgnore).toHaveBeenLastCalledWith("src/lib/components", false);
 
     view.unmount();
     render(FileTree, { props: baseProps() as never });
     menu = await openMenu("src/lib/components/Button.svelte");
-    expect(labels(menu).some((text) => text.startsWith("加入"))).toBe(false);
+    expect(labels(menu).includes("忽略")).toBe(false);
+    expect((await deepLabels(menu)).some((text) => text.startsWith("加入"))).toBe(false);
   });
 
   it("已忽略的条目与忙碌时忽略入口灰显，菜单内说明原因", async () => {
@@ -368,19 +388,21 @@ describe("目录树右键菜单", () => {
     const onIgnore = vi.fn();
     const view = render(FileTree, { props: { ...baseProps(), rows, onIgnore } as never });
 
+    // 整个「忽略」子菜单入口灰显，点了也不展开。
     let menu = await openMenu("README.md");
-    const git = within(menu).getByRole("menuitem", { name: "加入 .gitignore" });
+    const git = within(menu).getByRole("menuitem", { name: "忽略" });
     expect(git.getAttribute("aria-disabled")).toBe("true");
     expect(within(menu).getByText("已经处于忽略状态，不会重复写入规则")).toBeTruthy();
     await fireEvent.click(git);
+    expect(screen.queryByRole("menu", { name: "忽略" })).toBeNull();
     expect(onIgnore).not.toHaveBeenCalled();
 
     view.unmount();
     render(FileTree, { props: { ...baseProps(), disabled: true, onIgnore } as never });
     menu = await openMenu("README.md");
-    const local = within(menu).getByRole("menuitem", { name: "加入 .git/info/exclude" });
+    const local = within(menu).getByRole("menuitem", { name: "忽略" });
     expect(local.getAttribute("aria-disabled")).toBe("true");
-    expect(within(menu).getByText(BUSY_REASON)).toBeTruthy();
+    expect(within(menu).getAllByText(BUSY_REASON).length).toBeGreaterThan(0);
     await fireEvent.click(local);
     expect(onIgnore).not.toHaveBeenCalled();
   });
@@ -397,17 +419,18 @@ describe("目录树右键菜单", () => {
     expect(open.getAttribute("aria-describedby")).toBe(reason.id);
     // 历史与路径复制不受影响。
     expect(within(menu).getByRole("menuitem", { name: "查看文件历史" })).toBeTruthy();
-    expect(within(menu).getByRole("menuitem", { name: "复制相对路径" })).toBeTruthy();
+    const paths = await openSubmenu(menu, "路径");
+    expect(within(paths).getByRole("menuitem", { name: "复制相对路径" })).toBeTruthy();
   });
 
   it("复制相对/完整/文件名分别得到对应文本，不再静默吞错", async () => {
     const props = baseProps();
     render(FileTree, { props: props as never });
-    await fireEvent.click(within(await openMenu("src/lib/components/Button.svelte")).getByRole("menuitem", { name: "复制相对路径" }));
+    await pickMenuItem(await openMenu("src/lib/components/Button.svelte"), "路径", "复制相对路径");
     expect(props.onCopyPath).toHaveBeenLastCalledWith("src/lib/components/Button.svelte", "相对路径");
-    await fireEvent.click(within(await openMenu("src/lib/components/Button.svelte")).getByRole("menuitem", { name: "复制完整路径" }));
+    await pickMenuItem(await openMenu("src/lib/components/Button.svelte"), "路径", "复制完整路径");
     expect(props.onCopyPath).toHaveBeenLastCalledWith("C:/work/demo/src\\lib\\components\\Button.svelte", "完整路径");
-    await fireEvent.click(within(await openMenu("src/lib/components/Button.svelte")).getByRole("menuitem", { name: "复制文件名" }));
+    await pickMenuItem(await openMenu("src/lib/components/Button.svelte"), "路径", "复制文件名");
     expect(props.onCopyPath).toHaveBeenLastCalledWith("Button.svelte", "文件名");
   });
 
@@ -415,9 +438,9 @@ describe("目录树右键菜单", () => {
     const props = baseProps();
     render(FileTree, { props: props as never });
     const menu = await openMenu("src/lib/components");
-    await fireEvent.click(within(menu).getByRole("menuitem", { name: "在系统文件管理器中打开该目录" }));
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: /资源管理器|访达/ }));
     expect(props.onReveal).toHaveBeenCalledWith("src/lib/components");
-    await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitem", { name: "复制目录名" }));
+    await pickMenuItem(await openMenu("src/lib/components"), "路径", "复制目录名");
     expect(props.onCopyPath).toHaveBeenLastCalledWith("components", "目录名");
   });
 
@@ -434,7 +457,7 @@ describe("目录树右键菜单", () => {
     const props = { ...baseProps(), selectedPath: "src/lib/components/Icon.svelte" };
     render(FileTree, { props: props as never });
     // 右键 Button（A 是 Icon）：先把选中切到 Button，再对 Button 执行。
-    await fireEvent.click(within(await openMenu("src/lib/components/Button.svelte")).getByRole("menuitem", { name: "复制相对路径" }));
+    await pickMenuItem(await openMenu("src/lib/components/Button.svelte"), "路径", "复制相对路径");
     expect(props.onSelect).toHaveBeenLastCalledWith(expect.objectContaining({ path: "src/lib/components/Button.svelte" }));
     expect(props.onCopyPath).toHaveBeenLastCalledWith("src/lib/components/Button.svelte", "相对路径");
   });
@@ -455,7 +478,7 @@ describe("目录树右键菜单", () => {
     menu = screen.getByRole("menu");
     expect(labels(menu)).toEqual(keyboardLabels);
     // 动作走同一回调。
-    await fireEvent.click(within(menu).getByRole("menuitem", { name: "复制相对路径" }));
+    await pickMenuItem(menu, "路径", "复制相对路径");
     expect(props.onCopyPath).toHaveBeenLastCalledWith("src/lib/components/Button.svelte", "相对路径");
   });
 
@@ -465,11 +488,11 @@ describe("目录树右键菜单", () => {
     const menu = await openMenu("src/lib/components/Button.svelte");
     // .context-menu 固定定位并带 max-height + overflow，超长菜单在自身滚动而不是撑爆视口。
     expect(menu.classList.contains("context-menu")).toBe(true);
-    // 末尾分组的条目（复制文件名）仍然渲染、可被键盘与指针到达。
-    const last = within(menu).getByRole("menuitem", { name: "复制文件名" });
+    // 末尾分组的条目（文件树子菜单）仍然渲染、可被键盘与指针到达。
+    const last = within(menu).getByRole("menuitem", { name: "文件树" });
     expect(last).toBeTruthy();
-    await fireEvent.click(last);
-    expect(props.onCopyPath).toHaveBeenLastCalledWith("Button.svelte", "文件名");
+    await pickMenuItem(menu, "文件树", "重新读取目录");
+    expect(props.onRefresh).toHaveBeenCalled();
   });
 
   it("没有宿主授权时不出现文件操作入口，也不含 Git 写入或编辑器入口", async () => {
@@ -478,7 +501,7 @@ describe("目录树右键菜单", () => {
     await fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
     const dirMenu = labels(await openMenu("src/lib/components")).join(" ");
     // 只读宿主（例如审阅、历史）不传 onEntryAction：菜单里就没有结构操作。
-    for (const absent of ["新建文件", "新建目录", "复制到", "移动或重命名", "删除…"]) {
+    for (const absent of ["新建", "复制到", "移动或重命名", "删除…"]) {
       expect(fileMenu.includes(absent), `文件菜单不应含「${absent}」`).toBe(false);
       expect(dirMenu.includes(absent), `目录菜单不应含「${absent}」`).toBe(false);
     }
@@ -508,7 +531,8 @@ describe("目录树右键菜单", () => {
     const menu = await openMenu("b.ts");
     const names = labels(menu);
     expect(screen.getByText("已选 2 项", { selector: ".menu-label" })).toBeTruthy();
-    expect(names.some((text) => text.startsWith("复制所选相对路径"))).toBe(true);
+    const paths = await openSubmenu(menu, "路径");
+    expect(within(paths).getByRole("menuitem", { name: "复制相对路径" })).toBeTruthy();
     for (const label of ["复制 2 项到…", "移动 2 项到…", "删除 2 项…"]) {
       expect(names.some((text) => text.startsWith(label)), label).toBe(true);
     }
@@ -536,8 +560,10 @@ describe("目录树右键菜单", () => {
     const menu = await openMenu("src");
     expect(within(menu).getByText("已选 1 项", { selector: ".menu-label" })).toBeTruthy();
     expect(screen.getByText(/已选\s*4\s*项/)).toBeTruthy();
-    expect(within(menu).getByText("符号链接不参与文件操作")).toBeTruthy();
-    expect(within(menu).getByText("嵌套仓库不参与文件操作")).toBeTruthy();
+    // 不参与操作的项目收在子菜单里，逐项写明原因。
+    const excluded = await openSubmenu(menu, "2 项不参与操作");
+    expect(within(excluded).getByText("符号链接不参与文件操作")).toBeTruthy();
+    expect(within(excluded).getByText("嵌套仓库不参与文件操作")).toBeTruthy();
     expect(within(menu).queryByRole("menuitem", { name: "src/a.ts" })).toBeNull();
     await fireEvent.keyDown(screen.getByRole("tree", { name: "仓库文件" }), { key: "Delete" });
     expect(onBatchEntry).toHaveBeenCalledWith("delete", [expect.objectContaining({ path: "src" })]);
@@ -610,7 +636,7 @@ describe("目录树默认外观", () => {
     const row = treeEl.querySelector<HTMLElement>(`.file-tree-row[title="${path}"]`);
     if (!row) throw new Error(`没有 ${path} 这一行`);
     await fireEvent.contextMenu(row, { clientX: 40, clientY: 48 });
-    return screen.getByRole("menu");
+    return rootMenu();
   }
 
   function expectNoTreeChrome() {
@@ -651,31 +677,33 @@ describe("目录树默认外观", () => {
     const props = baseProps();
     const view = render(FileTree, { props: props as never });
     let menu = await openMenu("src/lib/components");
-    for (const name of ["新建文件", "新建目录", "复制到…", "移动或重命名", "删除…", "复制相对路径", "在系统文件管理器中打开该目录"]) {
+    for (const name of ["新建", "复制到…", "移动或重命名…", "删除…", "路径", "文件树"]) {
       expect(within(menu).getByRole("menuitem", { name }), name).toBeTruthy();
     }
-    for (const name of ["全仓库搜索", "按路径打开", "全部折叠", "重新读取目录"]) {
-      expect(within(menu).getByRole("menuitem", { name }), name).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: /资源管理器|访达/ })).toBeTruthy();
+    const create = await openSubmenu(menu, "新建");
+    for (const name of ["文件…", "目录…"]) expect(within(create).getByRole("menuitem", { name }), name).toBeTruthy();
+    const treeMenu = await openSubmenu(menu, "文件树");
+    for (const name of ["全仓库搜索", "全部折叠", "重新读取目录"]) {
+      expect(within(treeMenu).getByRole("menuitem", { name }), name).toBeTruthy();
     }
-    const changed = within(menu).getByRole("menuitemcheckbox", { name: "只看有改动的文件" });
-    expect(changed.getAttribute("aria-checked")).toBe("false");
-    const sort = within(menu).getByRole("menuitemcheckbox", { name: "名称升序" });
-    expect(sort.getAttribute("aria-checked")).toBe("false");
-    expect(within(menu).getByRole("menuitemcheckbox", { name: "显示忽略的文件" }).getAttribute("aria-checked")).toBe("false");
+    // 按路径打开走 Ctrl/⌘ P，不再占菜单位置。
+    expect(within(treeMenu).queryByRole("menuitem", { name: "按路径打开" })).toBeNull();
+    expect(within(treeMenu).getByRole("menuitemcheckbox", { name: "只看有改动的文件" }).getAttribute("aria-checked")).toBe("false");
+    expect(within(treeMenu).getByRole("menuitemcheckbox", { name: "名称降序" }).getAttribute("aria-checked")).toBe("false");
+    expect(within(treeMenu).getByRole("menuitemcheckbox", { name: "显示忽略的文件" }).getAttribute("aria-checked")).toBe("false");
 
-    await fireEvent.click(within(menu).getByRole("menuitem", { name: "全仓库搜索" }));
+    await fireEvent.click(within(treeMenu).getByRole("menuitem", { name: "全仓库搜索" }));
     expect(props.onSearch).toHaveBeenCalledWith("content");
-    await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitem", { name: "按路径打开" }));
-    expect(props.onSearch).toHaveBeenCalledWith("path");
-    await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitemcheckbox", { name: "只看有改动的文件" }));
+    await pickMenuItem(await openMenu("src/lib/components"), "文件树", "只看有改动的文件");
     expect(props.onChangedOnly).toHaveBeenCalledWith(true);
-    await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitemcheckbox", { name: "名称升序" }));
+    await pickMenuItem(await openMenu("src/lib/components"), "文件树", "名称降序");
     expect(props.onNameDirection).toHaveBeenCalledWith("desc");
-    await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitemcheckbox", { name: "显示忽略的文件" }));
+    await pickMenuItem(await openMenu("src/lib/components"), "文件树", "显示忽略的文件");
     expect(props.onIncludeIgnored).toHaveBeenCalledWith(true);
-    await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitem", { name: "全部折叠" }));
+    await pickMenuItem(await openMenu("src/lib/components"), "文件树", "全部折叠");
     expect(props.onCollapseAll).toHaveBeenCalled();
-    await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitem", { name: "重新读取目录" }));
+    await pickMenuItem(await openMenu("src/lib/components"), "文件树", "重新读取目录");
     expect(props.onRefresh).toHaveBeenCalled();
 
     view.unmount();
@@ -689,10 +717,10 @@ describe("目录树默认外观", () => {
       } as never,
     });
     menu = await openMenu("b.ts");
-    expect(within(menu).getByRole("menuitem", { name: "全仓库搜索" })).toBeTruthy();
-    expect(within(menu).getByRole("menuitemcheckbox", { name: "只看有改动的文件" })).toBeTruthy();
-    expect(within(menu).getByRole("menuitem", { name: "按路径打开" })).toBeTruthy();
     expect(within(menu).getByRole("menuitem", { name: "复制 2 项到…" })).toBeTruthy();
+    const batchTree = await openSubmenu(menu, "文件树");
+    expect(within(batchTree).getByRole("menuitem", { name: "全仓库搜索" })).toBeTruthy();
+    expect(within(batchTree).getByRole("menuitemcheckbox", { name: "只看有改动的文件" })).toBeTruthy();
     expectNoTreeChrome();
   });
 
@@ -701,7 +729,11 @@ describe("目录树默认外观", () => {
     const view = render(FileTree, { props: props as never });
     expect(screen.getByText("正在只看有改动的文件")).toBeTruthy();
     const menu = await openMenu("README.md");
-    expect(within(menu).getByRole("menuitemcheckbox", { name: "只看有改动的文件" }).getAttribute("aria-checked")).toBe("true");
+    const treeMenu = await openSubmenu(menu, "文件树");
+    expect(within(treeMenu).getByRole("menuitemcheckbox", { name: "只看有改动的文件" }).getAttribute("aria-checked")).toBe("true");
+    // Esc 先收回子菜单，再关掉整个菜单。
+    await fireEvent.keyDown(treeMenu, { key: "Escape" });
+    expect(screen.queryByRole("menu", { name: "文件树" })).toBeNull();
     await fireEvent.keyDown(menu, { key: "Escape" });
     await fireEvent.click(screen.getByRole("button", { name: "显示全部" }));
     expect(props.onChangedOnly).toHaveBeenCalledWith(false);
@@ -714,7 +746,7 @@ describe("目录树默认外观", () => {
     const props = { ...baseProps(), nameDirection: "desc" as const };
     render(FileTree, { props: props as never });
     expect(document.querySelector(".file-tree-status")).toBeNull();
-    const item = within(await openMenu("README.md")).getByRole("menuitemcheckbox", { name: "名称降序" });
+    const item = within(await openSubmenu(await openMenu("README.md"), "文件树")).getByRole("menuitemcheckbox", { name: "名称降序" });
     expect(item.getAttribute("aria-checked")).toBe("true");
     await fireEvent.click(item);
     expect(props.onNameDirection).toHaveBeenCalledWith("asc");
@@ -755,26 +787,26 @@ describe("文件与目录操作入口", () => {
       treeEl.querySelector<HTMLElement>(`.file-tree-row[title="${path}"]`) ??
       within(treeEl).getByRole("treeitem", { name: new RegExp(path.split("/").pop()!) });
     await fireEvent.contextMenu(row, { clientX: 60, clientY: 80 });
-    return screen.getByRole("menu");
+    return rootMenu();
   }
 
   it("目录与文件菜单上报右键目标与动作：新建、复制、移动、删除", async () => {
     const onEntryAction = vi.fn();
     render(FileTree, { props: { ...baseProps(), onEntryAction } as never });
     const menu = await openMenu("src/lib/components");
-    await fireEvent.click(within(menu).getByRole("menuitem", { name: "新建文件" }));
+    await pickMenuItem(menu, "新建", "文件…");
     expect(onEntryAction).toHaveBeenLastCalledWith(
       "createFile",
       expect.objectContaining({ path: "src/lib/components", kind: "directory" }),
     );
-    await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitem", { name: "新建目录" }));
+    await pickMenuItem(await openMenu("src/lib/components"), "新建", "目录…");
     expect(onEntryAction).toHaveBeenLastCalledWith(
       "createDirectory",
       expect.objectContaining({ path: "src/lib/components", kind: "directory" }),
     );
     await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitem", { name: "复制到…" }));
     expect(onEntryAction).toHaveBeenLastCalledWith("copy", expect.objectContaining({ path: "src/lib/components" }));
-    await fireEvent.click(within(await openMenu("src/lib/components/Icon.svelte")).getByRole("menuitem", { name: "移动或重命名" }));
+    await fireEvent.click(within(await openMenu("src/lib/components/Icon.svelte")).getByRole("menuitem", { name: "移动或重命名…" }));
     expect(onEntryAction).toHaveBeenLastCalledWith("move", expect.objectContaining({ path: "src/lib/components/Icon.svelte" }));
     await fireEvent.click(within(await openMenu("src/lib/components/Icon.svelte")).getByRole("menuitem", { name: "删除…" }));
     expect(onEntryAction).toHaveBeenLastCalledWith("delete", expect.objectContaining({ path: "src/lib/components/Icon.svelte" }));
@@ -815,7 +847,7 @@ describe("文件与目录操作入口", () => {
     const view = render(FileTree, { props: props as never });
 
     const symlinkMenu = await openMenu("link.ts");
-    const create = within(symlinkMenu).getByRole("menuitem", { name: "新建文件" });
+    const create = within(symlinkMenu).getByRole("menuitem", { name: "新建" });
     expect(create.getAttribute("aria-disabled")).toBe("true");
     expect(within(symlinkMenu).getByText("符号链接不参与文件操作")).toBeTruthy();
     await fireEvent.click(create);
@@ -915,7 +947,7 @@ describe("文件视图容器", () => {
 
     await fireEvent.contextMenu(b);
     expect(screen.getByText("已选 3 项", { selector: ".menu-label" })).toBeTruthy();
-    await fireEvent.click(screen.getByRole("menuitem", { name: "复制所选完整路径" }));
+    await pickMenuItem(rootMenu(), "路径", "复制完整路径");
     expect(onCopyPath).toHaveBeenLastCalledWith("a.ts\nb.ts\nc.ts", "3 个完整路径");
 
     await fireEvent.keyDown(tree, { key: "Escape" });
@@ -1019,7 +1051,7 @@ describe("文件视图容器", () => {
     const tree = await screen.findByRole("tree", { name: "仓库文件" });
     await waitFor(() => expect(repositoryDirectory).toHaveBeenCalledTimes(1));
     await fireEvent.contextMenu(await within(tree).findByRole("treeitem", { name: "src" }));
-    await fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: "只看有改动的文件" }));
+    await pickMenuItem(await screen.findByRole("menu", { name: /的操作$/ }), "文件树", "只看有改动的文件");
     expect(await screen.findByText("正在只看有改动的文件")).toBeTruthy();
     const kept = await screen.findByRole("treeitem", { name: /kept\.rs/ });
     expect(within(kept).getByLabelText("修改")).toBeTruthy();
@@ -1063,7 +1095,7 @@ describe("文件视图容器", () => {
 
     repositoryDirectory.mockResolvedValue(dir("", [], 5));
     await fireEvent.contextMenu(within(treeEl).getByRole("treeitem", { name: "src" }));
-    const ignoredToggle = await screen.findByRole("menuitemcheckbox", { name: "显示忽略的文件" });
+    const ignoredToggle = within(await openSubmenu(await screen.findByRole("menu", { name: /的操作$/ }), "文件树")).getByRole("menuitemcheckbox", { name: "显示忽略的文件" });
     expect(ignoredToggle.getAttribute("aria-checked")).toBe("false");
     await fireEvent.click(ignoredToggle);
     await waitFor(() => expect(repositoryDirectory).toHaveBeenLastCalledWith(repoPath, "", true, 5, expect.any(Number)));
@@ -1140,7 +1172,7 @@ describe("文件视图容器", () => {
     expect(repositoryDirectory).toHaveBeenLastCalledWith(repoPath, "", false, 7, expect.any(Number));
     // 刷新入口没有被残留的 loading 锁死。
     await fireEvent.contextMenu(screen.getByRole("treeitem", { name: "later.ts" }));
-    const refresh = await screen.findByRole("menuitem", { name: "重新读取目录" });
+    const refresh = within(await openSubmenu(await screen.findByRole("menu", { name: /的操作$/ }), "文件树")).getByRole("menuitem", { name: "重新读取目录" });
     expect(refresh.getAttribute("aria-disabled")).toBeNull();
   });
 });
@@ -1227,7 +1259,7 @@ describe("名称排序", () => {
     expect(a2.getAttribute("aria-selected")).toBe("true");
 
     await fireEvent.contextMenu(a2);
-    const ascending = screen.getByRole("menuitemcheckbox", { name: "名称升序" });
+    const ascending = within(await openTreeSubmenu(rootMenu())).getByRole("menuitemcheckbox", { name: "名称降序" });
     expect(ascending.getAttribute("aria-checked")).toBe("false");
     expect(document.querySelector(".file-tree-status")?.textContent ?? "").not.toMatch(/升序|降序/);
     await fireEvent.click(ascending);
@@ -1237,8 +1269,9 @@ describe("名称排序", () => {
     expect(document.querySelector(".file-tree-status")).toBeNull();
     expect(screen.queryByRole("button", { name: "名称降序" })).toBeNull();
     await fireEvent.contextMenu(within(tree).getByRole("treeitem", { name: "a2.txt" }));
-    const descending = screen.getByRole("menuitemcheckbox", { name: "名称降序" });
+    const descending = within(await openTreeSubmenu(rootMenu())).getByRole("menuitemcheckbox", { name: "名称降序" });
     expect(descending.getAttribute("aria-checked")).toBe("true");
+    await fireEvent.keyDown(descending, { key: "Tab" });
 
     // Shift 范围按当前显示顺序：从第一行到尾行覆盖三行。
     await fireEvent.click(within(tree).getByRole("treeitem", { name: "b.txt" }));

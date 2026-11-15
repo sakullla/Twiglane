@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { pickMenuItem, rootMenu } from "./helpers/menu";
 import { BRAND } from "../src/lib/brand";
 import {
   beginClioraReview,
@@ -4009,9 +4010,12 @@ describe("文件操作接线（T3）", () => {
     return found;
   }
 
+  /** 「新建文件」在「新建」子菜单里，其余结构操作在顶层。 */
   async function menuAction(tree: HTMLElement, path: string, action: string) {
     await fireEvent.contextMenu(row(tree, path), { clientX: 40, clientY: 60 });
-    await fireEvent.click(await screen.findByRole("menuitem", { name: action }));
+    await screen.findByRole("menu", { name: /的操作$/ });
+    if (action === "新建文件") await pickMenuItem(rootMenu(), "新建", "文件…");
+    else await pickMenuItem(rootMenu(), action === "移动或重命名" ? "移动或重命名…" : action);
   }
 
   const entryInput = () => document.querySelector<HTMLInputElement>("[data-entry-input]")!;

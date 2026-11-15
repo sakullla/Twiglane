@@ -310,21 +310,40 @@ describe("文件树右键菜单（文件视图整合）", () => {
     await waitFor(() => expect(row("src/App.svelte").getAttribute("aria-selected")).toBe("true"));
   });
 
-  it("文件树右键菜单只做结构操作，不含 Git 写入、忽略或编辑器入口（R8/R9）", async () => {
+  it("文件树右键菜单只做结构操作与忽略规则，不含暂存、提交、放弃与编辑器入口（R8/R9）", async () => {
     const treeEl = await openFilesView();
     await expandSrc(treeEl);
     const menu = await menuFor(treeEl, "src/App.svelte");
     const text = within(menu).getAllByRole("menuitem").map((item) => item.textContent ?? "").join(" ");
     // 新建/复制/移动/删除是文件视图自己的结构操作入口（T3 接入）；
-    // 暂存、提交、忽略规则与编辑器仍不在这个菜单里，写 Git 的命令也不会因此多出来。
-    for (const forbidden of ["暂存", "提交", "放弃", "保存", ".gitignore", "加入", "忽略", "编辑"]) {
+    // 加入 .gitignore / .git/info/exclude 是文件视图自己的忽略入口；
+    // 暂存、提交、放弃与编辑器仍不在这个菜单里，写 Git 的命令也不会因此多出来。
+    for (const forbidden of ["暂存", "提交", "放弃", "保存", "编辑"]) {
       expect(text.includes(forbidden), `不应含「${forbidden}」`).toBe(false);
     }
-    for (const expected of ["新建文件", "新建目录", "复制到…", "移动或重命名", "移到回收站"]) {
+    for (const expected of ["新建文件", "新建目录", "复制到…", "移动或重命名", "移到回收站", "加入 .gitignore", "加入 .git/info/exclude"]) {
       expect(text.includes(expected), `应含「${expected}」`).toBe(true);
     }
     expect(mocks.stageFiles).not.toHaveBeenCalled();
     expect(mocks.ignorePath).not.toHaveBeenCalled();
+  });
+
+  it("文件树把右键目标加入 .gitignore 或本地排除，写入后按新代次重读", async () => {
+    const treeEl = await openFilesView();
+    await fireEvent.click(await within(treeEl).findByRole("button", { name: "展开 notes" }));
+    await waitFor(() => expect(treeEl.querySelector('.file-tree-row[title="notes/todo.log"]')).toBeTruthy());
+
+    await fireEvent.click(within(await menuFor(treeEl, "notes/todo.log")).getByRole("menuitem", { name: "加入 .gitignore" }));
+    await waitFor(() => expect(mocks.ignorePath).toHaveBeenCalledWith(repoPath, "/notes/todo.log", false, 4, expect.any(Number)));
+
+    // 规则写进 .gitignore 后快照代次前进，文件树按新代次重读，不再停在旧列表上。
+    await waitFor(() =>
+      expect(mocks.repositoryDirectory.mock.calls.some((call) => call[1] === "" && call[3] === 5)).toBe(true),
+    );
+
+    // 目录也能只写本地排除。
+    await fireEvent.click(within(await menuFor(treeEl, "src")).getByRole("menuitem", { name: "加入 .git/info/exclude" }));
+    await waitFor(() => expect(mocks.ignorePath).toHaveBeenCalledWith(repoPath, "/src", true, 5, expect.any(Number)));
   });
 });
 

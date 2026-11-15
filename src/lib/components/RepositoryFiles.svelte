@@ -48,6 +48,8 @@
     onEditFailed?: (code: string) => void;
     /** 新建/复制/移动/删除的实际执行在外壳：这里只负责表单与目标上报。 */
     onEntry?: (request: FileEntryRequest) => Promise<FileEntryResult>;
+    /** 把文件或目录加入 .gitignore（local=false）或 .git/info/exclude：写入与刷新由外壳执行。 */
+    onIgnore?: (path: string, local: boolean) => void;
     /** 当前仓库里存在未保存草稿的路径，供表单提前提示与禁用删除确认。 */
     draftPaths?: string[];
   }
@@ -76,6 +78,7 @@
     onEditSaved,
     onEditFailed,
     onEntry,
+    onIgnore,
     draftPaths = [],
   }: Props = $props();
 
@@ -316,6 +319,7 @@
         {toAbsolute}
         {hasChange}
         onViewDiff={viewDiff}
+        {onIgnore}
       />
     {:else}
       <FileSearch

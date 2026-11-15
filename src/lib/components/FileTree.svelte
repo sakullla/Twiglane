@@ -81,6 +81,11 @@
      * 新建、复制、移动/重命名与删除的规则都在文件视图与外壳里。
      */
     onEntryAction?: (action: FileEntryAction, row: FileTreeRow) => void;
+    /**
+     * 加入忽略规则：`local` 为 true 时只写 .git/info/exclude。
+     * 与改动列表的右键菜单同一组入口，写入与状态刷新都由外壳执行。
+     */
+    onIgnore?: (path: string, local: boolean) => void;
   }
 
   let {
@@ -122,6 +127,7 @@
     nameDirection = "asc",
     onNameDirection,
     onEntryAction,
+    onIgnore,
   }: Props = $props();
 
   /** 缩进宽度：与 components.css 的缩进引导线周期一致。 */
@@ -348,6 +354,27 @@
     ];
   }
 
+  /**
+   * 忽略入口：与改动列表同一组两项，按右键目标的路径写规则（目录写入后整棵子树都不再列出）。
+   * 已在忽略范围内的条目不重复写规则，删除墓碑也不需要，灰显并在菜单里说明原因。
+   */
+  function ignoreEntries(row: FileTreeRow): ContextMenuEntry[] {
+    if (!onIgnore) return [];
+    const blocked = disabled
+      ? BUSY_REASON
+      : row.segment
+        ? "这一行只表示目录层级，不是可操作的项目"
+        : row.deleted
+          ? "文件已从工作区删除，不需要再写忽略规则"
+          : row.ignored
+            ? "已经处于忽略状态，不会重复写入规则"
+            : undefined;
+    return [
+      { id: "ignore-git", label: "加入 .gitignore", icon: "eye", disabledReason: blocked, run: () => onIgnore?.(row.path, false) },
+      { id: "ignore-local", label: "加入 .git/info/exclude", icon: "eye", disabledReason: blocked, run: () => onIgnore?.(row.path, true) },
+    ];
+  }
+
   function batchMenuEntries(): ContextMenuEntry[] {
     const entries: ContextMenuEntry[] = [{ heading: `已选 ${selectedRows.length} 项` }];
     if (onReveal) {
@@ -368,7 +395,7 @@
     if (selectedPaths.has(row.path) && selectedRows.length > 1) return batchMenuEntries();
     const entries: ContextMenuEntry[] = [];
     if (row.expandable) {
-      // 目录：展开/折叠 → 系统定位该目录 → 路径复制。
+      // 目录：展开/折叠 → 系统定位该目录 → 路径复制 → 忽略规则。
       entries.push({
         id: "toggle",
         label: row.expanded ? "折叠" : "展开",
@@ -403,10 +430,15 @@
         entries.push({ separator: true });
         entries.push(...copies);
       }
+      const directoryIgnores = ignoreEntries(row);
+      if (directoryIgnores.length > 0) {
+        entries.push({ separator: true });
+        entries.push(...directoryIgnores);
+      }
       return entries;
     }
 
-    // 文件：应用内查看（打开 / 有改动时查看改动 / 文件历史） → 系统操作（定位 / 默认程序打开） → 路径复制。
+    // 文件：应用内查看（打开 / 有改动时查看改动 / 文件历史） → 系统操作（定位 / 默认程序打开） → 路径复制 → 忽略规则。
     entries.push({ id: "open", label: "打开", icon: "file", run: () => onSelect(row) });
     if (onViewDiff && hasChange?.(row.path)) {
       entries.push({ id: "diff", label: "查看改动", icon: "file-diff", run: () => onViewDiff?.(row.path) });
@@ -446,6 +478,11 @@
     if (copies.length > 0) {
       entries.push({ separator: true });
       entries.push(...copies);
+    }
+    const ignores = ignoreEntries(row);
+    if (ignores.length > 0) {
+      entries.push({ separator: true });
+      entries.push(...ignores);
     }
     return entries;
   }

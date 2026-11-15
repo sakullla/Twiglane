@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { chainOf, FILE_ROW_HEIGHT, filterRows, flattenTree, buildChangedTree, makeNode, sortTree, type FileNode } from "../src/lib/files.svelte";
+import { BUSY_REASON } from "../src/lib/ui";
 import type { FileChange } from "../src/lib/types";
 
 const repositoryDirectory = vi.hoisted(() => vi.fn());
@@ -335,6 +336,53 @@ describe("目录树右键菜单", () => {
     // 另一个没有改动的文件不显示该项。
     const second = await openMenu("src/lib/components/Icon.svelte");
     expect(labels(second).some((text) => text.startsWith("查看改动"))).toBe(false);
+  });
+
+  it("忽略入口：文件与目录都按右键目标上报 .gitignore 与本地排除；没有回调时不显示", async () => {
+    const onIgnore = vi.fn();
+    const view = render(FileTree, { props: { ...baseProps(), onIgnore } as never });
+
+    let menu = await openMenu("src/lib/components/Button.svelte");
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "加入 .gitignore" }));
+    expect(onIgnore).toHaveBeenLastCalledWith("src/lib/components/Button.svelte", false);
+
+    menu = await openMenu("src/lib/components/Button.svelte");
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "加入 .git/info/exclude" }));
+    expect(onIgnore).toHaveBeenLastCalledWith("src/lib/components/Button.svelte", true);
+
+    // 目录同样可忽略：规则按目录路径写入，写入后整棵子树都不再列出。
+    menu = await openMenu("src/lib/components");
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "加入 .gitignore" }));
+    expect(onIgnore).toHaveBeenLastCalledWith("src/lib/components", false);
+
+    view.unmount();
+    render(FileTree, { props: baseProps() as never });
+    menu = await openMenu("src/lib/components/Button.svelte");
+    expect(labels(menu).some((text) => text.startsWith("加入"))).toBe(false);
+  });
+
+  it("已忽略的条目与忙碌时忽略入口灰显，菜单内说明原因", async () => {
+    const rows = flattenTree(tree());
+    const readme = rows.find((row) => row.path === "README.md")!;
+    rows[rows.indexOf(readme)] = { ...readme, ignored: true };
+    const onIgnore = vi.fn();
+    const view = render(FileTree, { props: { ...baseProps(), rows, onIgnore } as never });
+
+    let menu = await openMenu("README.md");
+    const git = within(menu).getByRole("menuitem", { name: "加入 .gitignore" });
+    expect(git.getAttribute("aria-disabled")).toBe("true");
+    expect(within(menu).getByText("已经处于忽略状态，不会重复写入规则")).toBeTruthy();
+    await fireEvent.click(git);
+    expect(onIgnore).not.toHaveBeenCalled();
+
+    view.unmount();
+    render(FileTree, { props: { ...baseProps(), disabled: true, onIgnore } as never });
+    menu = await openMenu("README.md");
+    const local = within(menu).getByRole("menuitem", { name: "加入 .git/info/exclude" });
+    expect(local.getAttribute("aria-disabled")).toBe("true");
+    expect(within(menu).getByText(BUSY_REASON)).toBeTruthy();
+    await fireEvent.click(local);
+    expect(onIgnore).not.toHaveBeenCalled();
   });
 
   it("已删除文件的「用默认程序打开」灰显，菜单内可读原因，历史与复制仍在", async () => {

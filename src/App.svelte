@@ -4360,6 +4360,7 @@
               onReveal={(path) => void revealInFolder(path)}
               onOpenDefault={(path) => void openWithDefault(path)}
               onCopyPath={(text, what) => void copyText(text, what)}
+              onIgnore={(path, local) => void ignore(path, local)}
               onInsertToTerminal={(paths) => void insertIntoTerminal(paths)}
               toAbsolute={absolutePath}
               onNav={(nav) => (filesNav = nav)}

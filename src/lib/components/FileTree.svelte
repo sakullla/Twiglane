@@ -12,8 +12,10 @@
    * 按需目录树：只渲染后端已读到的直接子项，长列表用固定行高虚拟化。
    * 行本身不发起请求，展开、拆分、选择都由文件视图的状态模块决定，组件只上报动作。
    *
-   * 工具条只常驻三件事：筛选、全仓库搜索、只看改动；按路径打开、显示忽略、全部折叠与重新读取收进「更多」。
+   * 工具条只常驻筛选框。全仓库搜索、只看改动、名称排序、按路径打开、显示忽略、
+   * 全部折叠与重新读取都在行的右键菜单里，不另放常驻图标。
    * 单击目录即展开/折叠（同时选中它，供「当前目录」搜索范围使用），单击文件即打开。
+   * 行上不渲染选择框；多选仍用 Ctrl/Shift 与高亮，数量按点中的行。
    */
   interface Props {
     rows: FileTreeRow[];
@@ -72,7 +74,7 @@
     hasChange?: (path: string) => boolean;
     /** 查看这个文件的改动：路由到既有的差异视图入口。 */
     onViewDiff?: (path: string) => void;
-    /** 当前名称排序方向：工具栏的排序控件据此显示状态，行顺序由文件 store 派生。 */
+    /** 当前名称排序方向：不是升序时只在右键菜单标明，行顺序由文件 store 派生。 */
     nameDirection?: NameDirection;
     /** 切换名称升/降序：只改显示顺序，不重读目录。 */
     onNameDirection?: (next: NameDirection) => void;
@@ -140,10 +142,6 @@
   let viewport = $state(0);
   let list = $state<HTMLDivElement | null>(null);
   let menu = $state<ContextMenuRequest | null>(null);
-  let moreButton = $state<HTMLButtonElement | null>(null);
-  /** 「更多」菜单是否由更多按钮唤起：按钮据此显示展开态，再点一次即收起。 */
-  let moreOpen = $state(false);
-  let moreClosedAt = 0;
 
   let range = $derived(visibleRange(rows.length, scrollTop, viewport > 0 ? viewport : 0, FILE_ROW_HEIGHT));
   let visible = $derived(rows.slice(range.start, range.end));
@@ -246,7 +244,7 @@
         menu = {
           ...(element ? pointFor(element) : { x: 120, y: 120 }),
           entries: menuEntries(rows[index]),
-          label: selectedRows.length > 1 ? `已选 ${selectedRows.length} 项的操作` : `${rows[index].path} 的操作`,
+          label: selectedRows.length > 1 ? multiMenuLabel() : `${rows[index].path} 的操作`,
         };
       }
       return;
@@ -402,15 +400,119 @@
     ];
   }
 
+  /** 菜单标题与复制/移动/删除的数量用收敛后的目标，不按未收敛的选中行数。 */
+  function multiMenuLabel(): string {
+    return `已选 ${batchRows.length} 项的操作`;
+  }
+
+  /** 被排除的符号链接、特殊文件、嵌套仓库、读取失败条目和删除墓碑：菜单里写明原因。 */
+  function blockedNotes(): ContextMenuEntry[] {
+    const blocked = selectedRows.filter((row) => entryBlockedReason(row));
+    if (blocked.length === 0) return [];
+    const notes: ContextMenuEntry[] = [{ heading: "不参与操作" }];
+    for (const row of blocked) {
+      notes.push({
+        id: `excluded-${row.path}`,
+        label: row.path,
+        icon: "alert-circle",
+        disabledReason: entryBlockedReason(row) ?? undefined,
+        run: () => {},
+      });
+    }
+    return notes;
+  }
+
+  /**
+   * 原先工具条上的树级动作：全仓库搜索、只看改动、名称排序，以及「更多」里的按路径打开、
+   * 显示忽略、全部折叠、重新读取。单选和多选菜单都挂在这里，不另做常驻按钮。
+   */
+  function treeActionEntries(): ContextMenuEntry[] {
+    const entries: ContextMenuEntry[] = [];
+    if (onSearch) {
+      entries.push({
+        id: "content-search",
+        label: "全仓库搜索",
+        icon: "search",
+        run: () => onSearch?.("content"),
+      });
+    }
+    if (onChangedOnly) {
+      entries.push({
+        id: "changed-only",
+        label: "只看有改动的文件",
+        icon: "file-diff",
+        checked: changedOnly,
+        run: () => onChangedOnly?.(!changedOnly),
+      });
+    }
+    if (onNameDirection) {
+      entries.push({
+        id: "name-sort",
+        label: `名称${nameDirection === "asc" ? "升序" : "降序"}`,
+        icon: nameDirection === "asc" ? "arrow-up" : "arrow-down",
+        checked: nameDirection === "desc",
+        run: () => onNameDirection?.(nameDirection === "asc" ? "desc" : "asc"),
+      });
+    }
+    if (onSearch) {
+      entries.push({
+        id: "quick-open",
+        label: "按路径打开",
+        icon: "file",
+        shortcut: `${MODIFIER_LABEL} P`,
+        run: () => onSearch?.("path"),
+      });
+    }
+    const tail: ContextMenuEntry[] = [{
+      id: "ignored",
+      label: "显示忽略的文件",
+      icon: "eye",
+      checked: includeIgnored,
+      run: () => onIncludeIgnored(!includeIgnored),
+    }];
+    if (onCollapseAll) {
+      tail.push({
+        id: "collapse",
+        label: "全部折叠",
+        icon: "chevron-up",
+        disabledReason: hasExpanded ? undefined : "没有展开的目录",
+        run: () => onCollapseAll?.(),
+      });
+    }
+    tail.push({
+      id: "refresh",
+      label: "重新读取目录",
+      icon: "refresh",
+      disabledReason: loading ? "正在读取目录" : undefined,
+      run: onRefresh,
+    });
+    if (entries.length > 0) entries.push({ separator: true });
+    entries.push(...tail);
+    return entries;
+  }
+
+  function appendTreeActions(entries: ContextMenuEntry[]): ContextMenuEntry[] {
+    const extra = treeActionEntries();
+    if (extra.length === 0) return entries;
+    if (entries.length > 0) entries.push({ separator: true });
+    entries.push(...extra);
+    return entries;
+  }
+
   function batchMenuEntries(): ContextMenuEntry[] {
-    const entries: ContextMenuEntry[] = [{ heading: `已选 ${selectedRows.length} 项` }];
+    const entries: ContextMenuEntry[] = [{ heading: `已选 ${batchRows.length} 项` }];
     if (onBatchEntry) {
       const run = (action: "copy" | "move" | "delete") => () => onBatchEntry?.(action, batchRows);
       entries.push({ id: "copy-selected", label: `复制 ${batchRows.length} 项到…`, icon: "copy", disabledReason: batchReason, run: run("copy") });
       entries.push({ id: "move-selected", label: `移动 ${batchRows.length} 项到…`, icon: "pencil", disabledReason: batchReason, run: run("move") });
       entries.push({ id: "delete-selected", label: `删除 ${batchRows.length} 项…`, icon: "trash", danger: true, shortcut: "Delete", disabledReason: batchReason, run: run("delete") });
-      entries.push({ separator: true });
     }
+    const notes = blockedNotes();
+    if (notes.length > 0) {
+      entries.push({ separator: true });
+      entries.push(...notes);
+    }
+    if (onBatchEntry || notes.length > 0) entries.push({ separator: true });
     if (onReveal) {
       entries.push({ id: "reveal-selected", label: "在系统文件管理器中显示", icon: "folder-open", run: revealSelected });
     }
@@ -423,7 +525,7 @@
     entries.push({ separator: true });
     entries.push({ id: "select-all", label: "选择当前列表全部项目", icon: "select-all", shortcut: `${MODIFIER_LABEL} A`, run: onSelectAll });
     entries.push({ id: "clear-selected", label: "取消多选", icon: "x", shortcut: "Esc", run: onClearSelection });
-    return entries;
+    return appendTreeActions(entries);
   }
 
   function menuEntries(row: FileTreeRow): ContextMenuEntry[] {
@@ -470,7 +572,7 @@
         entries.push({ separator: true });
         entries.push(...directoryIgnores);
       }
-      return entries;
+      return appendTreeActions(entries);
     }
 
     // 文件：应用内查看（打开 / 有改动时查看改动 / 文件历史） → 系统操作（定位 / 默认程序打开） → 路径复制 → 忽略规则。
@@ -519,74 +621,20 @@
       entries.push({ separator: true });
       entries.push(...ignores);
     }
-    return entries;
-  }
-
-  function moreEntries(): ContextMenuEntry[] {
-    const entries: ContextMenuEntry[] = [];
-    if (onSearch) {
-      entries.push({
-        id: "quick-open",
-        label: "按路径打开",
-        icon: "file",
-        shortcut: `${MODIFIER_LABEL} P`,
-        run: () => onSearch?.("path"),
-      });
-      entries.push({ separator: true });
-    }
-    entries.push({
-      id: "ignored",
-      label: "显示忽略的文件",
-      icon: "eye",
-      checked: includeIgnored,
-      run: () => onIncludeIgnored(!includeIgnored),
-    });
-    if (onCollapseAll) {
-      entries.push({
-        id: "collapse",
-        label: "全部折叠",
-        icon: "chevron-up",
-        disabledReason: hasExpanded ? undefined : "没有展开的目录",
-        run: () => onCollapseAll?.(),
-      });
-    }
-    entries.push({
-      id: "refresh",
-      label: "重新读取目录",
-      icon: "refresh",
-      disabledReason: loading ? "正在读取目录" : undefined,
-      run: onRefresh,
-    });
-    return entries;
+    return appendTreeActions(entries);
   }
 
   function openSelectionMenu(event: MouseEvent): void {
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    moreOpen = false;
     menu = {
       x: rect.left,
       y: rect.bottom + 4,
       entries: batchMenuEntries(),
-      label: `已选 ${selectedRows.length} 项的操作`,
-    };
-  }
-
-  function toggleMore(): void {
-    // 菜单在按下时已因「点到外面」关闭：同一次点击不再把它打开。
-    if (moreOpen || performance.now() - moreClosedAt < 250) return;
-    const rect = moreButton?.getBoundingClientRect();
-    moreOpen = true;
-    menu = {
-      x: rect ? rect.right - 232 : 120,
-      y: rect ? rect.bottom + 4 : 120,
-      entries: moreEntries(),
-      label: "文件树选项",
+      label: multiMenuLabel(),
     };
   }
 
   function closeMenu(): void {
-    if (moreOpen) moreClosedAt = performance.now();
-    moreOpen = false;
     menu = null;
   }
 
@@ -624,6 +672,8 @@
     if (changedOnly) return { text: "仅在改动文件里匹配；改动树不需要全仓库补齐。", danger: false };
     return null;
   });
+  /** 过滤说明已经占着树上方时，不再叠一层模式说明。 */
+  let showModeNotes = $derived(!(filterNote && !(filterError && rows.length === 0)));
 </script>
 
 <div class="file-tools">
@@ -657,56 +707,6 @@
       </button>
     {/if}
   </div>
-  <div class="file-tools-actions">
-    {#if onSearch}
-      <button
-        type="button"
-        class="icon-btn sm"
-        aria-label="全仓库搜索"
-        title="全仓库搜索：在工作区文本里查找固定字符串"
-        onclick={() => onSearch?.("content")}
-      >
-        <Icon name="search" size={14} />
-      </button>
-    {/if}
-    {#if onChangedOnly}
-      <button
-        type="button"
-        class="icon-btn sm"
-        aria-pressed={changedOnly}
-        aria-label="只看有改动的文件"
-        title={changedOnly ? "显示完整仓库树" : "只看有改动的文件"}
-        onclick={() => onChangedOnly?.(!changedOnly)}
-      >
-        <Icon name="file-diff" size={14} />
-      </button>
-    {/if}
-    {#if onNameDirection}
-      <button
-        type="button"
-        class="icon-btn sm"
-        aria-pressed={nameDirection === "desc"}
-        aria-label={`名称${nameDirection === "asc" ? "升序" : "降序"}`}
-        title={`当前按名称${nameDirection === "asc" ? "升序" : "降序"}，目录始终在前；点击改为${nameDirection === "asc" ? "降序" : "升序"}`}
-        onclick={() => onNameDirection?.(nameDirection === "asc" ? "desc" : "asc")}
-      >
-        <Icon name={nameDirection === "asc" ? "arrow-up" : "arrow-down"} size={14} />
-      </button>
-    {/if}
-    <button
-      type="button"
-      class="icon-btn sm"
-      aria-label="更多文件树选项"
-      aria-haspopup="menu"
-      aria-expanded={moreOpen}
-      title="更多：按路径打开、显示忽略的文件、全部折叠、重新读取"
-      bind:this={moreButton}
-      onclick={toggleMore}
-    >
-      <Icon name="more" size={14} />
-      {#if includeIgnored}<span class="tool-dot" aria-hidden="true"></span>{/if}
-    </button>
-  </div>
 </div>
 
 {#if selectedRows.length > 0}
@@ -735,7 +735,14 @@
       >重试补齐</button>
     {/if}
   </p>
-{:else if includeIgnored && !query}
+{/if}
+{#if showModeNotes && changedOnly && !query}
+  <p class="file-tree-status" role="status">
+    <Icon name="file-diff" size={12} /><span>正在只看有改动的文件</span>
+    <button type="button" class="link-btn" onclick={() => onChangedOnly?.(false)}>显示全部</button>
+  </p>
+{/if}
+{#if showModeNotes && includeIgnored && !query}
   <p class="file-tree-status" role="status">
     <Icon name="eye" size={12} /><span>正在显示被忽略的文件</span>
     <button type="button" class="link-btn" onclick={() => onIncludeIgnored(false)}>隐藏</button>
@@ -874,27 +881,10 @@
             event.preventDefault();
             const keepMulti = selectedPaths.has(row.path) && selectedRows.length > 1;
             if (!keepMulti) onSelect(row);
-            moreOpen = false;
-            menu = { x: event.clientX, y: event.clientY, entries: menuEntries(row), label: keepMulti ? `已选 ${selectedRows.length} 项的操作` : `${row.path} 的操作` };
+            menu = { x: event.clientX, y: event.clientY, entries: menuEntries(row), label: keepMulti ? multiMenuLabel() : `${row.path} 的操作` };
           }}
         >
           {#if row.depth > 0}<span class="tree-indent" style={`width:${row.depth * INDENT}px`} aria-hidden="true"></span>{/if}
-          {#if !row.segment && !row.extra}
-            <button
-              type="button"
-              class="tree-select"
-              class:checked={selectedPaths.has(row.path)}
-              aria-label={selectedPaths.has(row.path) ? `取消选择 ${row.path}` : `选择 ${row.path}`}
-              aria-pressed={selectedPaths.has(row.path)}
-              tabindex="-1"
-              title="选择项目；也可按住 Ctrl 或 Shift 点击行"
-              onclick={(event) => {
-                event.stopPropagation();
-                onSelect(row, "toggle");
-                focusList();
-              }}
-            ><Icon name="check" size={11} /></button>
-          {/if}
           {#if row.expandable}
             <button
               type="button"

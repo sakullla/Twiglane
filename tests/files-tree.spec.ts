@@ -521,14 +521,204 @@ describe("目录树右键菜单", () => {
       { ...node("src", "directory", [], "src"), expanded: true },
       node("src/a.ts", "file", null, "a.ts"),
       node("link.ts", "symlink", null, "link.ts"),
+      node("vendor", "nestedRepository", [], "vendor"),
     ]);
     const onBatchEntry = vi.fn();
     render(FileTree, {
-      props: { ...baseProps(), rows, selectedPath: "src", selectedPaths: new Set(["src", "src/a.ts", "link.ts"]), onBatchEntry } as never,
+      props: {
+        ...baseProps(),
+        rows,
+        selectedPath: "src",
+        selectedPaths: new Set(["src", "src/a.ts", "link.ts", "vendor"]),
+        onBatchEntry,
+      } as never,
     });
     const menu = await openMenu("src");
+    expect(within(menu).getByText("已选 1 项", { selector: ".menu-label" })).toBeTruthy();
+    expect(screen.getByText(/已选\s*4\s*项/)).toBeTruthy();
+    expect(within(menu).getByText("符号链接不参与文件操作")).toBeTruthy();
+    expect(within(menu).getByText("嵌套仓库不参与文件操作")).toBeTruthy();
+    expect(within(menu).queryByRole("menuitem", { name: "src/a.ts" })).toBeNull();
+    await fireEvent.keyDown(screen.getByRole("tree", { name: "仓库文件" }), { key: "Delete" });
+    expect(onBatchEntry).toHaveBeenCalledWith("delete", [expect.objectContaining({ path: "src" })]);
+    onBatchEntry.mockClear();
     await fireEvent.click(within(menu).getByRole("menuitem", { name: "复制 1 项到…" }));
     expect(onBatchEntry).toHaveBeenCalledWith("copy", [expect.objectContaining({ path: "src" })]);
+  });
+
+  it("目录外的另一项仍单独计入，子路径不另算", async () => {
+    const rows = flattenTree([
+      { ...node("src", "directory", [], "src"), expanded: true },
+      node("src/a.ts", "file", null, "a.ts"),
+      node("note.txt", "file", null, "note.txt"),
+    ]);
+    const onBatchEntry = vi.fn();
+    render(FileTree, {
+      props: {
+        ...baseProps(),
+        rows,
+        selectedPath: "src",
+        selectedPaths: new Set(["src", "src/a.ts", "note.txt"]),
+        onBatchEntry,
+      } as never,
+    });
+    const menu = await openMenu("note.txt");
+    expect(within(menu).getByText("已选 2 项", { selector: ".menu-label" })).toBeTruthy();
+    expect(screen.getByText(/已选\s*3\s*项/)).toBeTruthy();
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "移动 2 项到…" }));
+    expect(onBatchEntry).toHaveBeenCalledWith("move", [
+      expect.objectContaining({ path: "src" }),
+      expect.objectContaining({ path: "note.txt" }),
+    ]);
+  });
+});
+
+describe("目录树默认外观", () => {
+  const baseProps = () => ({
+    rows: flattenTree(tree()),
+    selectedPath: "src/lib/components/Button.svelte",
+    selectedPaths: new Set<string>(),
+    loading: false,
+    failure: null,
+    query: "",
+    includeIgnored: false,
+    disabled: false,
+    onQuery: vi.fn(),
+    onIncludeIgnored: vi.fn(),
+    onToggle: vi.fn(),
+    onSelect: vi.fn(),
+    onSelectAll: vi.fn(),
+    onClearSelection: vi.fn(),
+    onSplit: vi.fn(),
+    onHistory: vi.fn(),
+    onRefresh: vi.fn(),
+    onReveal: vi.fn(),
+    onOpenDefault: vi.fn(),
+    onCopyPath: vi.fn(),
+    toAbsolute: (relative: string) => `C:/work/demo/${relative}`,
+    hasChange: vi.fn(() => false),
+    onViewDiff: vi.fn(),
+    onSearch: vi.fn(),
+    onChangedOnly: vi.fn(),
+    onNameDirection: vi.fn(),
+    onCollapseAll: vi.fn(),
+    onEntryAction: vi.fn(),
+  });
+
+  async function openMenu(path: string) {
+    const treeEl = screen.getByRole("tree", { name: "仓库文件" });
+    const row = treeEl.querySelector<HTMLElement>(`.file-tree-row[title="${path}"]`);
+    if (!row) throw new Error(`没有 ${path} 这一行`);
+    await fireEvent.contextMenu(row, { clientX: 40, clientY: 48 });
+    return screen.getByRole("menu");
+  }
+
+  function expectNoTreeChrome() {
+    expect(document.querySelector(".tree-select")).toBeNull();
+    expect(document.querySelector(".file-tools-actions")).toBeNull();
+    for (const name of ["全仓库搜索", "只看有改动的文件", "更多文件树选项"]) {
+      expect(screen.queryByRole("button", { name })).toBeNull();
+    }
+    expect(screen.queryByRole("button", { name: /名称(升序|降序)/ })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "过滤文件树" })).toBeTruthy();
+  }
+
+  it("未多选时没有选择框，筛选框旁也没有四个图标", async () => {
+    render(FileTree, { props: baseProps() as never });
+    expectNoTreeChrome();
+    const treeEl = screen.getByRole("tree", { name: "仓库文件" });
+    await fireEvent.mouseEnter(treeEl);
+    await fireEvent.focus(treeEl);
+    const row = treeEl.querySelector(".file-tree-row") as HTMLElement;
+    await fireEvent.mouseEnter(row);
+    await fireEvent.focus(row);
+    expectNoTreeChrome();
+  });
+
+  it("多选仍只高亮并显示已选行数，Esc 后选择框和图标都不出现", async () => {
+    const props = { ...baseProps(), selectedPaths: new Set(["src/lib/components", "README.md"]) };
+    const view = render(FileTree, { props: props as never });
+    expect(screen.getByText(/已选\s*2\s*项/)).toBeTruthy();
+    expectNoTreeChrome();
+    await fireEvent.keyDown(screen.getByRole("tree", { name: "仓库文件" }), { key: "Escape" });
+    expect(props.onClearSelection).toHaveBeenCalled();
+    await view.rerender({ ...props, selectedPaths: new Set<string>() } as never);
+    expect(screen.queryByText(/已选\s*2\s*项/)).toBeNull();
+    expectNoTreeChrome();
+  });
+
+  it("单选与多选右键都能到达树级动作，并保留新建、复制、移动、删除和复制路径", async () => {
+    const props = baseProps();
+    const view = render(FileTree, { props: props as never });
+    let menu = await openMenu("src/lib/components");
+    for (const name of ["新建文件", "新建目录", "复制到…", "移动或重命名", "删除…", "复制相对路径", "在系统文件管理器中打开该目录"]) {
+      expect(within(menu).getByRole("menuitem", { name }), name).toBeTruthy();
+    }
+    for (const name of ["全仓库搜索", "按路径打开", "全部折叠", "重新读取目录"]) {
+      expect(within(menu).getByRole("menuitem", { name }), name).toBeTruthy();
+    }
+    const changed = within(menu).getByRole("menuitemcheckbox", { name: "只看有改动的文件" });
+    expect(changed.getAttribute("aria-checked")).toBe("false");
+    const sort = within(menu).getByRole("menuitemcheckbox", { name: "名称升序" });
+    expect(sort.getAttribute("aria-checked")).toBe("false");
+    expect(within(menu).getByRole("menuitemcheckbox", { name: "显示忽略的文件" }).getAttribute("aria-checked")).toBe("false");
+
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "全仓库搜索" }));
+    expect(props.onSearch).toHaveBeenCalledWith("content");
+    await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitem", { name: "按路径打开" }));
+    expect(props.onSearch).toHaveBeenCalledWith("path");
+    await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitemcheckbox", { name: "只看有改动的文件" }));
+    expect(props.onChangedOnly).toHaveBeenCalledWith(true);
+    await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitemcheckbox", { name: "名称升序" }));
+    expect(props.onNameDirection).toHaveBeenCalledWith("desc");
+    await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitemcheckbox", { name: "显示忽略的文件" }));
+    expect(props.onIncludeIgnored).toHaveBeenCalledWith(true);
+    await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitem", { name: "全部折叠" }));
+    expect(props.onCollapseAll).toHaveBeenCalled();
+    await fireEvent.click(within(await openMenu("src/lib/components")).getByRole("menuitem", { name: "重新读取目录" }));
+    expect(props.onRefresh).toHaveBeenCalled();
+
+    view.unmount();
+    render(FileTree, {
+      props: {
+        ...baseProps(),
+        rows: flattenTree([node("a.ts", "file", null, "a.ts"), node("b.ts", "file", null, "b.ts")]),
+        selectedPath: "a.ts",
+        selectedPaths: new Set(["a.ts", "b.ts"]),
+        onBatchEntry: vi.fn(),
+      } as never,
+    });
+    menu = await openMenu("b.ts");
+    expect(within(menu).getByRole("menuitem", { name: "全仓库搜索" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitemcheckbox", { name: "只看有改动的文件" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: "按路径打开" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: "复制 2 项到…" })).toBeTruthy();
+    expectNoTreeChrome();
+  });
+
+  it("只看有改动时树上方有一行可关闭的说明，关掉后图标排不出现", async () => {
+    const props = { ...baseProps(), changedOnly: true };
+    const view = render(FileTree, { props: props as never });
+    expect(screen.getByText("正在只看有改动的文件")).toBeTruthy();
+    const menu = await openMenu("README.md");
+    expect(within(menu).getByRole("menuitemcheckbox", { name: "只看有改动的文件" }).getAttribute("aria-checked")).toBe("true");
+    await fireEvent.keyDown(menu, { key: "Escape" });
+    await fireEvent.click(screen.getByRole("button", { name: "显示全部" }));
+    expect(props.onChangedOnly).toHaveBeenCalledWith(false);
+    await view.rerender({ ...props, changedOnly: false } as never);
+    expect(screen.queryByText("正在只看有改动的文件")).toBeNull();
+    expectNoTreeChrome();
+  });
+
+  it("名称不是升序时只在右键菜单标明，不另起说明行", async () => {
+    const props = { ...baseProps(), nameDirection: "desc" as const };
+    render(FileTree, { props: props as never });
+    expect(document.querySelector(".file-tree-status")).toBeNull();
+    const item = within(await openMenu("README.md")).getByRole("menuitemcheckbox", { name: "名称降序" });
+    expect(item.getAttribute("aria-checked")).toBe("true");
+    await fireEvent.click(item);
+    expect(props.onNameDirection).toHaveBeenCalledWith("asc");
+    expect(screen.queryByRole("button", { name: "名称降序" })).toBeNull();
   });
 });
 
@@ -700,6 +890,12 @@ describe("文件视图容器", () => {
     const b = within(tree).getByRole("treeitem", { name: "b.ts" });
     const c = within(tree).getByRole("treeitem", { name: "c.ts" });
 
+    expect(document.querySelector(".tree-select")).toBeNull();
+    expect(screen.queryByRole("button", { name: "全仓库搜索" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "只看有改动的文件" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "更多文件树选项" })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "过滤文件树" })).toBeTruthy();
+
     await fireEvent.click(a);
     await fireEvent.click(b, { ctrlKey: true });
     expect(a.getAttribute("aria-selected")).toBe("true");
@@ -725,12 +921,60 @@ describe("文件视图容器", () => {
     await fireEvent.keyDown(tree, { key: "Escape" });
     expect(screen.queryByText("已选 3 项")).toBeNull();
     expect(c.getAttribute("aria-selected")).toBe("true");
+    expect(document.querySelector(".tree-select")).toBeNull();
+    expect(screen.queryByRole("button", { name: "全仓库搜索" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /名称(升序|降序)/ })).toBeNull();
 
     await fireEvent.keyDown(tree, { key: "Home" });
     await fireEvent.keyDown(tree, { key: "End", shiftKey: true });
     expect(screen.getByText(/已选\s*3\s*项/)).toBeTruthy();
     expect(a.getAttribute("aria-selected")).toBe("true");
     expect(c.getAttribute("aria-selected")).toBe("true");
+    expect(document.querySelector(".tree-select")).toBeNull();
+  });
+
+  it("同时选中目录和子路径时，删除确认清单只有该目录", async () => {
+    const entry = (path: string, kind: "file" | "directory" = "file") => ({
+      name: path.split("/").pop() ?? path,
+      path,
+      kind,
+      ignored: false,
+      size: kind === "file" ? 4 : null,
+      error: null,
+    });
+    repositoryDirectory.mockImplementation((_repo: string, relative: string) => {
+      if (relative === "") return Promise.resolve(dir("", [entry("src", "directory"), entry("note.txt")]));
+      if (relative === "src") return Promise.resolve(dir("src", [entry("src/a.ts")]));
+      return Promise.resolve(dir(relative, []));
+    });
+    repositoryFileContent.mockResolvedValue({
+      generation: 4,
+      path: "src/a.ts",
+      kind: "text",
+      size: 4,
+      offset: 0,
+      lines: ["a"],
+      nextOffset: 1,
+      hasMore: false,
+      truncated: false,
+      message: null,
+    });
+    render(RepositoryFiles, { props: { ...viewProps(true), onEntry: vi.fn(async () => ({ ok: false, message: "" })) } as never });
+    const tree = await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.click(await within(tree).findByRole("button", { name: "展开 src" }));
+    await within(tree).findByRole("treeitem", { name: "src/a.ts" });
+    await fireEvent.click(within(tree).getByRole("treeitem", { name: "src" }), { ctrlKey: true });
+    await fireEvent.click(within(tree).getByRole("treeitem", { name: "src/a.ts" }), { ctrlKey: true });
+    expect(screen.getByText(/已选\s*2\s*项/)).toBeTruthy();
+    expect(document.querySelector(".tree-select")).toBeNull();
+    await fireEvent.contextMenu(within(tree).getByRole("treeitem", { name: "src" }));
+    const menu = screen.getByRole("menu");
+    expect(within(menu).getByText("已选 1 项", { selector: ".menu-label" })).toBeTruthy();
+    expect(menu.getAttribute("aria-label")).toBe("已选 1 项的操作");
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "删除 1 项…" }));
+    const dialog = await screen.findByRole("dialog", { name: "删除" });
+    expect(dialog.textContent).toContain("src");
+    expect(dialog.textContent).not.toContain("src/a.ts");
   });
 
   it("文件与祖先目录显示当前 StatusSnapshot 的 Git 装饰", async () => {
@@ -768,17 +1012,25 @@ describe("文件视图容器", () => {
       { path: "src/gone.rs", originalPath: null, staged: "none", unstaged: "deleted", untracked: false, unmerged: false },
       { path: "src/kept.rs", originalPath: null, staged: "modified", unstaged: "modified", untracked: false, unmerged: false },
     ];
-    repositoryDirectory.mockResolvedValue(dir("", []));
+    repositoryDirectory.mockResolvedValue(dir("", [
+      { name: "src", path: "src", kind: "directory", ignored: false, size: null, error: null },
+    ]));
     render(RepositoryFiles, { props: { ...viewProps(true), opened: repo } as never });
-    await screen.findByRole("tree", { name: "仓库文件" });
+    const tree = await screen.findByRole("tree", { name: "仓库文件" });
     await waitFor(() => expect(repositoryDirectory).toHaveBeenCalledTimes(1));
-    // 「只看有改动的文件」在树上方的工具条里，不在树内部。
-    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+    await fireEvent.contextMenu(await within(tree).findByRole("treeitem", { name: "src" }));
+    await fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: "只看有改动的文件" }));
+    expect(await screen.findByText("正在只看有改动的文件")).toBeTruthy();
     const kept = await screen.findByRole("treeitem", { name: /kept\.rs/ });
     expect(within(kept).getByLabelText("修改")).toBeTruthy();
     const gone = await screen.findByRole("treeitem", { name: /gone\.rs/ });
     expect(within(gone).getByText("已删除")).toBeTruthy();
     // 仅改动树由快照派生，切换后不再读取目录。
+    expect(repositoryDirectory).toHaveBeenCalledTimes(1);
+    await fireEvent.click(screen.getByRole("button", { name: "显示全部" }));
+    await waitFor(() => expect(screen.queryByText("正在只看有改动的文件")).toBeNull());
+    expect(screen.queryByRole("button", { name: "全仓库搜索" })).toBeNull();
+    expect(document.querySelector(".tree-select")).toBeNull();
     expect(repositoryDirectory).toHaveBeenCalledTimes(1);
   });
 
@@ -810,7 +1062,7 @@ describe("文件视图容器", () => {
     expect(within(ignoredRow).getByText("忽略")).toBeTruthy();
 
     repositoryDirectory.mockResolvedValue(dir("", [], 5));
-    await fireEvent.click(screen.getByRole("button", { name: "更多文件树选项" }));
+    await fireEvent.contextMenu(within(treeEl).getByRole("treeitem", { name: "src" }));
     const ignoredToggle = await screen.findByRole("menuitemcheckbox", { name: "显示忽略的文件" });
     expect(ignoredToggle.getAttribute("aria-checked")).toBe("false");
     await fireEvent.click(ignoredToggle);
@@ -887,7 +1139,7 @@ describe("文件视图容器", () => {
     expect(screen.queryByText("stale.ts")).toBeNull();
     expect(repositoryDirectory).toHaveBeenLastCalledWith(repoPath, "", false, 7, expect.any(Number));
     // 刷新入口没有被残留的 loading 锁死。
-    await fireEvent.click(screen.getByRole("button", { name: "更多文件树选项" }));
+    await fireEvent.contextMenu(screen.getByRole("treeitem", { name: "later.ts" }));
     const refresh = await screen.findByRole("menuitem", { name: "重新读取目录" });
     expect(refresh.getAttribute("aria-disabled")).toBeNull();
   });
@@ -974,14 +1226,19 @@ describe("名称排序", () => {
     await fireEvent.click(a2);
     expect(a2.getAttribute("aria-selected")).toBe("true");
 
-    await fireEvent.click(screen.getByRole("button", { name: "名称升序" }));
+    await fireEvent.contextMenu(a2);
+    const ascending = screen.getByRole("menuitemcheckbox", { name: "名称升序" });
+    expect(ascending.getAttribute("aria-checked")).toBe("false");
+    expect(document.querySelector(".file-tree-status")?.textContent ?? "").not.toMatch(/升序|降序/);
+    await fireEvent.click(ascending);
     await waitFor(() => expect(paths()).toEqual(["b.txt", "a10.txt", "a2.txt"]));
-    // 选择按路径保留，不跟着行号走。
+    // 选择按路径保留，不跟着行号走。降序只在右键菜单标明，不另起说明行，也不回到常驻按钮。
     expect(within(tree).getByRole("treeitem", { name: "a2.txt" }).getAttribute("aria-selected")).toBe("true");
-    // 名称与 aria-pressed 都描述当前模式（降序），不再出现「按升序排列，已按下」的矛盾读法。
-    const sortButton = screen.getByRole("button", { name: "名称降序" });
-    expect(sortButton.getAttribute("aria-pressed")).toBe("true");
-    expect(sortButton.getAttribute("title")).toContain("当前按名称降序");
+    expect(document.querySelector(".file-tree-status")).toBeNull();
+    expect(screen.queryByRole("button", { name: "名称降序" })).toBeNull();
+    await fireEvent.contextMenu(within(tree).getByRole("treeitem", { name: "a2.txt" }));
+    const descending = screen.getByRole("menuitemcheckbox", { name: "名称降序" });
+    expect(descending.getAttribute("aria-checked")).toBe("true");
 
     // Shift 范围按当前显示顺序：从第一行到尾行覆盖三行。
     await fireEvent.click(within(tree).getByRole("treeitem", { name: "b.txt" }));

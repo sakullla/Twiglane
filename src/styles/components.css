@@ -1123,7 +1123,8 @@ label.list-row .checkbox { margin-top: 2px; }
 .cb-more:hover { border-color: var(--control-border-hover); color: var(--fg); background: var(--hover); }
 .commit-facts { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
 .commit-parents { color: var(--fg-muted); }
-.commit-compare { grid-column: 1 / -1; display: flex; align-items: center; gap: var(--space-12); color: var(--fg-muted); font-size: var(--text-sm); }
+.commit-compare { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8) var(--space-12); color: var(--fg-muted); font-size: var(--text-sm); }
+.commit-compare-hint { min-width: 0; color: var(--fg-subtle); font-size: var(--text-xs); }
 /* 历史详情是只读的：这枚标记说明为什么这里没有暂存入口（R2、R6）。 */
 .read-only-chip { display: inline-flex; align-items: center; gap: 4px; flex: none; height: 22px; padding: 0 var(--space-8); border-radius: 999px; background: var(--surface-3); color: var(--fg-muted); font-size: var(--text-xs); font-weight: var(--weight-medium); white-space: nowrap; }
 .read-only-chip > .icon { color: var(--fg-subtle); }
@@ -1607,6 +1608,13 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .merge-detail-title h3 { flex: 1 1 auto; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-md); font-weight: var(--weight-semibold); color: var(--fg); }
 .merge-detail-title h3.mono { flex: 0 1 auto; font-family: var(--mono); font-size: var(--text-base); }
 .merge-detail-dir { flex: 0 1 auto; min-width: 0; color: var(--fg-subtle); font-size: var(--text-sm); }
+.merge-detail-lines { display: inline-flex; align-items: center; gap: var(--space-4); flex: none; font-family: var(--mono); font-size: var(--text-xs); font-weight: var(--weight-semibold); font-variant-numeric: tabular-nums; }
+.merge-detail-lines .add { color: var(--add-fg); }
+.merge-detail-lines .del { color: var(--del-fg); }
+.merge-detail-scope { display: inline-flex; align-items: center; gap: var(--space-4); flex: none; padding: 1px var(--space-8); border-radius: 999px; background: var(--surface-2); color: var(--fg-muted); font-size: var(--text-xs); }
+.merge-detail-scope code { font-family: var(--mono); color: var(--fg); }
+.merge-detail-scope strong { color: var(--purple); font-family: var(--mono); font-weight: var(--weight-medium); }
+.merge-entry .chip.current, .merge-detail-note .chip.current { flex: none; height: 20px; padding: 0 var(--space-8); background: var(--success-soft); color: var(--success-text); font-size: var(--text-xs); }
 .merge-detail-step { flex: none; color: var(--fg-subtle); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .merge-detail-nav { flex: none; display: flex; gap: 2px; }
 .merge-detail-byline { display: flex; align-items: center; gap: var(--space-8); flex-wrap: wrap; min-width: 0; color: var(--fg-muted); font-size: var(--text-xs); }
@@ -1640,6 +1648,18 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 /* 完成页 */
 .mp-scroll:has(> .merge-done) { display: flex; }
 .merge-done { display: flex; flex-direction: column; align-items: center; gap: var(--space-12); max-width: 560px; margin: auto; padding: var(--space-32) var(--space-24) 96px; text-align: center; }
+.merge-done-summary { display: flex; flex-direction: column; align-items: center; gap: var(--space-12); width: 100%; }
+.merge-done-copy { display: flex; flex-direction: column; align-items: center; gap: var(--space-6); min-width: 0; }
+.merge-done-headline { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: var(--space-8); }
+.merge-done-stats { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: var(--space-6); margin-top: var(--space-2); }
+.merge-done-stats .chip.current { background: var(--success-soft); color: var(--success-text); }
+.merge-done.has-review { flex: 1; width: min(1280px, 100%); max-width: none; margin: 0 auto; padding: var(--space-16) var(--space-24); text-align: left; align-items: stretch; gap: var(--space-12); min-height: 0; }
+.merge-done.has-review .merge-done-summary { flex-direction: row; align-items: center; gap: var(--space-16); padding: var(--space-12) var(--space-16); border-radius: var(--radius-lg); background: var(--surface-2); }
+.merge-done.has-review .merge-done-icon { width: 42px; height: 42px; flex: none; }
+.merge-done.has-review .merge-done-copy { flex: 1; align-items: flex-start; gap: var(--space-4); }
+.merge-done.has-review .merge-done-headline, .merge-done.has-review .merge-done-stats { justify-content: flex-start; }
+.merge-done.has-review .merge-done-actions { margin-top: 0; flex: none; }
+.merge-done-review { flex: 1; min-height: 320px; display: flex; flex-direction: column; }
 .merge-done-icon { display: grid; place-items: center; width: 64px; height: 64px; border-radius: 50%; background: var(--success); color: var(--on-success); box-shadow: 0 10px 30px color-mix(in srgb, var(--success) 30%, transparent); animation: pop var(--duration-base) var(--ease-out); }
 .merge-done h2 { font-size: var(--text-lg); font-weight: var(--weight-semibold); color: var(--fg); }
 .merge-done p { color: var(--fg-muted); font-size: var(--text-base); line-height: var(--leading-relaxed); }
@@ -1843,6 +1863,22 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .cr-line .code, .cr-half .code { flex: 1; min-width: 0; padding: 0 var(--space-12) 0 var(--space-8); overflow: clip; white-space: pre; }
 .cr-line.res { background: var(--success-softer); }
 .cr-line.res .ln { color: var(--success-text); }
+.cr-line.res[data-origin="ours"] { background: var(--info-soft); box-shadow: inset 3px 0 0 var(--info); }
+.cr-line.res[data-origin="ours"] .ln { color: var(--info-text); }
+.cr-line.res[data-origin="theirs"] { background: var(--purple-soft); box-shadow: inset 3px 0 0 var(--purple); }
+.cr-line.res[data-origin="theirs"] .ln { color: var(--purple); }
+.cr-line.res[data-origin="base"] { background: var(--warning-soft); box-shadow: inset 3px 0 0 var(--warning); }
+.cr-line.res[data-origin="base"] .ln { color: var(--warning-text); }
+.cr-line.res[data-origin="custom"], .cr-line.res[data-origin="both"] { box-shadow: inset 3px 0 0 var(--success); }
+.cr-origin { flex: none; align-self: center; height: 16px; padding: 0 var(--space-4); margin-left: var(--space-2); border-radius: 4px; font-family: var(--font); font-size: 11px; font-weight: var(--weight-semibold); line-height: 16px; user-select: none; }
+.cr-origin.ours { background: var(--info-soft); color: var(--info-text); }
+.cr-origin.theirs { background: var(--purple-soft); color: var(--purple); }
+.cr-origin.base { background: var(--warning-soft); color: var(--warning-text); }
+.cr-origin.custom { background: var(--success-soft); color: var(--success-text); }
+.cr-origin.both { background: var(--surface-2); color: var(--fg-muted); }
+.cr-res-summary { color: var(--fg-muted); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; }
+.cr-cols.reshead { background: var(--surface-2); }
+.cr-cols.reshead .cr-col { color: var(--success-text); }
 .cr-line.res.is-empty .code { font-family: var(--font); color: var(--fg-muted); font-style: italic; }
 .cr-line.warn { background: var(--warning-soft); }
 .cr-line.warn .ln { color: var(--warning-text); }
@@ -2041,6 +2077,7 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .three-way-gutter-row.marker i { color: var(--warning-text); }
 .three-way-legend { display: flex; flex: 1 0 100%; flex-wrap: wrap; align-items: center; gap: 0 var(--space-8); min-height: 18px; margin: 0; color: var(--fg-muted); font-size: var(--text-xs); line-height: 18px; }
 .three-way-key { display: inline-flex; align-items: center; gap: var(--space-4); white-space: nowrap; }
+.three-way-key b { font-weight: var(--weight-semibold); font-variant-numeric: tabular-nums; color: var(--fg); }
 .three-way-key i { width: 3px; height: 11px; flex: none; border-radius: 1px; background: var(--fg-subtle); }
 .three-way-key.ours i { background: var(--info); }
 .three-way-key.theirs i { background: var(--purple); }

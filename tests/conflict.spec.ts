@@ -7,6 +7,7 @@ import {
   alignHunk,
   applyEol,
   composeConflictText,
+  describeHunkResolution,
   detectEol,
   hasConflictMarkers,
   hunkHint,
@@ -15,6 +16,7 @@ import {
   normalizeEol,
   parseConflictText,
   resolvedLines,
+  resolvedLinesWithOrigin,
   simpleResolution,
   splitRawLines,
   unresolvedCount,
@@ -391,6 +393,37 @@ describe("逐处处理冲突", () => {
     expect(ruler.classList.contains("half")).toBe(false);
     expect(ruler.querySelector<HTMLElement>("span")?.dataset.text).toBe(long);
     expect(document.querySelector(".cr-line .code-in")?.textContent).toBe(long);
+  });
+
+  it("已解决冲突逐行标注来源，并支持不撤销直接展开对照两侧", async () => {
+    const parsed = parseConflictText(TWO);
+    expect(resolvedLinesWithOrigin(parsed.hunks[1], { choice: "ours-theirs" })).toEqual([
+      { text: "ours two a", origin: "ours" },
+      { text: "ours two b", origin: "ours" },
+      { text: "theirs two", origin: "theirs" },
+    ]);
+    expect(describeHunkResolution(parsed.hunks[1], { choice: "ours-theirs" })).toBe("当前 2 行 + 来源 1 行");
+
+    renderResolver();
+    await fireEvent.click(within(head(1)).getByRole("button", { name: "当前 + 来源" }));
+    expect(head(1).querySelector(".cr-res-summary")?.textContent).toBe("当前 2 行 + 来源 1 行");
+    const origins = [...document.querySelectorAll(".cr-line.res .cr-origin")].map((node) => node.textContent);
+    expect(origins).toEqual(["当前", "当前", "来源"]);
+    // 默认收起原始两栏，只剩第一处未解决冲突的 1 行 cr-pair
+    expect(document.querySelectorAll(".cr-pair")).toHaveLength(1);
+
+    // 点击「对照两侧」在不撤销选择的前提下同时展开原始对比与合并结果
+    const compareBtn = within(head(1)).getByRole("button", { name: "对照两侧" });
+    await fireEvent.click(compareBtn);
+    expect(compareBtn.getAttribute("aria-pressed")).toBe("true");
+    expect(head(1).querySelector('[data-hunk-state="resolved"]')?.textContent).toBe("当前在前，保留两者");
+    expect(document.querySelector(".cr-cols.reshead")?.textContent).toContain("合并结果");
+    expect(document.querySelectorAll(".cr-pair").length).toBeGreaterThan(1);
+
+    // 切到结果预览后，合并进来的行同样保留当前/来源标记
+    await fireEvent.click(screen.getByRole("button", { name: "结果预览" }));
+    const previewOrigins = [...document.querySelectorAll(".cr-line.res .cr-origin")].map((node) => node.textContent);
+    expect(previewOrigins).toEqual(["当前", "当前", "来源"]);
   });
 });
 

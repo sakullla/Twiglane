@@ -23,14 +23,17 @@
     nextId: () => number;
     onGeneration: (generation: number) => void;
     onFailure: (error: unknown) => void;
+    /** 合并完成后的结果审阅态：标识本次已合入与已解决冲突的文件。 */
+    postMerge?: boolean;
+    resolvedPaths?: string[];
   }
 
-  let { opened, preview, disabled, nextId, onGeneration, onFailure }: Props = $props();
+  let { opened, preview, disabled, nextId, onGeneration, onFailure, postMerge = false, resolvedPaths = [] }: Props = $props();
 
   type Tab = "commits" | "files" | "conflicts";
   type Entry =
     | { kind: "commit"; key: string; commit: HistoryCommit }
-    | { kind: "file"; key: string; file: CommitFileChange; conflict: boolean };
+    | { kind: "file"; key: string; file: CommitFileChange; conflict: boolean; resolved: boolean };
 
   let tab = $state<Tab>("files");
   let filter = $state("");
@@ -39,9 +42,16 @@
   let filterInput = $state<HTMLInputElement | null>(null);
 
   let conflictSet = $derived(new Set(preview.conflictPaths));
+  let resolvedSet = $derived(new Set(resolvedPaths));
   let commitEntries = $derived<Entry[]>(preview.commits.map((commit) => ({ kind: "commit", key: `c:${commit.oid}`, commit })));
   let fileEntries = $derived<Entry[]>(
-    preview.files.map((file) => ({ kind: "file", key: `f:${file.path}`, file, conflict: conflictSet.has(file.path) })),
+    preview.files.map((file) => ({
+      kind: "file",
+      key: `f:${file.path}`,
+      file,
+      conflict: conflictSet.has(file.path),
+      resolved: resolvedSet.has(file.path),
+    })),
   );
   /** 预计冲突的路径可能不在已列出的文件里（文件列表有上限）：补成一条修改记录。 */
   let conflictEntries = $derived<Entry[]>(
@@ -50,6 +60,7 @@
       key: `f:${path}`,
       file: preview.files.find((file) => file.path === path) ?? { path, originalPath: null, status: "modified" },
       conflict: true,
+      resolved: resolvedSet.has(path),
     })),
   );
   let tabEntries = $derived(tab === "commits" ? commitEntries : tab === "files" ? fileEntries : conflictEntries);
@@ -181,6 +192,10 @@
         return;
       }
       if (entry.kind === "commit") {
+        if (typeof api.commitDetail !== "function") {
+          detailLoading = false;
+          return;
+        }
         detailLoading = true;
         void withRetry((generation) => api.commitDetail(repo, entry.commit.oid, null, generation, nextId()), mine)
           .then((result) => {
@@ -199,7 +214,7 @@
           });
         return;
       }
-      if (!preview.baseOid || !preview.sourceOid) {
+      if (!preview.baseOid || !preview.sourceOid || typeof api.compareFileDiff !== "function") {
         detailLoading = false;
         return;
       }
@@ -363,7 +378,11 @@
               <span class="merge-entry-title">{parts.name}</span>
               {#if parts.dir}<span class="merge-entry-meta"><bdi class="truncate">{parts.dir}</bdi></span>{/if}
             </span>
-            {#if entry.conflict && tab !== "conflicts"}<span class="merge-hot">可能冲突</span>{/if}
+            {#if entry.resolved}
+              <span class="chip current">已解冲突</span>
+            {:else if entry.conflict && tab !== "conflicts"}
+              <span class="merge-hot">{postMerge ? "曾有冲突" : "可能冲突"}</span>
+            {/if}
           </div>
         {/if}
       {:else}
@@ -430,12 +449,24 @@
       {@const file = selected.file}
       {@const parts = splitPath(file.path)}
       {@const mark = statusMark(commitFileLabel(file.status))}
+      {@const activeDiff = fileDiff && fileDiff.path === file.path ? fileDiff : null}
       <header class="merge-detail-head">
         <div class="merge-detail-title">
           <span class={`st ${mark.tone}`} title={commitFileLabel(file.status)}>{mark.letter}</span>
           <h3 class="mono" title={file.path}>{parts.name}</h3>
           {#if parts.dir}<span class="merge-detail-dir truncate" title={parts.dir}>{parts.dir}</span>{/if}
+          {#if activeDiff && !activeDiff.binary}
+            <span class="merge-detail-lines" aria-label={`新增 ${activeDiff.additions} 行，删除 ${activeDiff.deletions} 行`}>
+              {#if activeDiff.additions > 0}<span class="add">+{activeDiff.additions}</span>{/if}
+              {#if activeDiff.deletions > 0}<span class="del">-{activeDiff.deletions}</span>{/if}
+            </span>
+          {/if}
           <span class="spacer"></span>
+          {#if preview.baseOid && preview.source}
+            <span class="merge-detail-scope" title={`展示从共同祖先 ${shortOid(preview.baseOid)} 到来源分支 ${preview.source} 的净改动`}>
+              共同祖先 <code>{shortOid(preview.baseOid)}</code> → <strong>{preview.source}</strong>
+            </span>
+          {/if}
           <span class="merge-detail-step">{selectedIndex + 1} / {entries.length}</span>
           <div class="merge-detail-nav" role="group" aria-label="切换文件">
             <button type="button" class="icon-btn sm" aria-label="上一个文件" title="上一个（↑）" disabled={selectedIndex <= 0} onclick={() => select(selectedIndex - 1)}><Icon name="arrow-up" size={13} /></button>
@@ -444,8 +475,12 @@
         </div>
         <p class="merge-detail-note">
           {#if file.originalPath}<span class="mono">{file.originalPath} → {file.path}</span>　{/if}
-          {#if selected.conflict}
-            <span class="merge-hot">可能冲突</span> {preview.target} 也改了这个文件，开始合并后逐处选择保留哪边。
+          {#if selected.resolved}
+            <span class="chip current">已解决冲突</span> 本次合并中已处理 {preview.source} 与 {preview.target} 在此文件的冲突，下方为来源分支 {preview.source} 带入的改动。
+          {:else if selected.conflict}
+            <span class="merge-hot">{postMerge ? "曾有冲突" : "可能冲突"}</span> {preview.target} 也改了这个文件，{postMerge ? "合并时已处理。" : "开始合并后逐处选择保留哪边。"}
+          {:else if postMerge}
+            已把 {preview.source} 自分叉以来对这个文件的全部改动合入 {preview.target}。
           {:else}
             {preview.source} 自分叉以来对这个文件的全部改动，合并后会进入 {preview.target}。
           {/if}

@@ -296,6 +296,14 @@ const CODE_CHROME_STACKS = [
   { fg: "add-fg", layers: ["surface-2"], site: ".three-way-gutter-row.manual i" },
   { fg: "warning-text", layers: ["surface-2"], site: ".three-way-gutter-row.marker i" },
   { fg: "warning-text", layers: ["surface-2", "warning-soft"], site: ".cr-head .chip.warn" },
+  { fg: "fg-muted", layers: ["surface-2"], site: ".cr-head .cr-res-summary" },
+  { fg: "fg-muted", layers: ["surface", "accent-softer"], site: ".cr-head.current .cr-res-summary" },
+  { fg: "success-text", layers: ["surface", "surface-2"], site: ".cr-cols.reshead .cr-col" },
+  { fg: "info-text", layers: ["surface", "info-soft", "info-soft"], site: ".cr-origin.ours" },
+  { fg: "purple", layers: ["surface", "purple-soft", "purple-soft"], site: ".cr-origin.theirs" },
+  { fg: "warning-text", layers: ["surface", "warning-soft", "warning-soft"], site: ".cr-origin.base" },
+  { fg: "success-text", layers: ["surface", "success-softer", "success-soft"], site: ".cr-origin.custom" },
+  { fg: "fg-muted", layers: ["surface", "success-softer", "surface-2"], site: ".cr-origin.both" },
 ];
 
 /** 叠层比例的唯一来源：这些声明必须引用令牌，写死百分比门禁就和渲染脱节了。 */

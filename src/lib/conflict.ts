@@ -247,6 +247,120 @@ export function resolvedLines(hunk: ConflictHunk, resolution: ConflictResolution
   return resolvedRawLines(hunk, resolution, "\n").map(stripEol);
 }
 
+/** 已解决冲突行的数据来源：当前分支、来源分支、两侧共有、共同祖先或手动改写。 */
+export type ResolvedLineOrigin = "ours" | "theirs" | "both" | "base" | "custom";
+
+export interface ResolvedHunkLine {
+  text: string;
+  origin: ResolvedLineOrigin;
+}
+
+/** 一处冲突在给定选择下的显示行及每行的来源标记。 */
+export function resolvedLinesWithOrigin(hunk: ConflictHunk, resolution: ConflictResolution): ResolvedHunkLine[] {
+  const oursLines = hunk.ours.map(stripEol);
+  const theirsLines = hunk.theirs.map(stripEol);
+  const baseLines = (hunk.base ?? []).map(stripEol);
+  const oursSet = new Set(oursLines);
+  const theirsSet = new Set(theirsLines);
+  const baseSet = new Set(baseLines);
+
+  switch (resolution.choice) {
+    case "ours":
+      return oursLines.map((text) => ({
+        text,
+        origin: theirsSet.has(text) ? "both" : "ours",
+      }));
+    case "theirs":
+      return theirsLines.map((text) => ({
+        text,
+        origin: oursSet.has(text) ? "both" : "theirs",
+      }));
+    case "base":
+      return baseLines.map((text) => ({
+        text,
+        origin: "base",
+      }));
+    case "none":
+      return [];
+    case "ours-theirs":
+      return [
+        ...oursLines.map((text): ResolvedHunkLine => ({ text, origin: "ours" })),
+        ...theirsLines.map((text): ResolvedHunkLine => ({ text, origin: "theirs" })),
+      ];
+    case "theirs-ours":
+      return [
+        ...theirsLines.map((text): ResolvedHunkLine => ({ text, origin: "theirs" })),
+        ...oursLines.map((text): ResolvedHunkLine => ({ text, origin: "ours" })),
+      ];
+    case "custom":
+      return (resolution.lines ?? []).map((text): ResolvedHunkLine => {
+        const inOurs = oursSet.has(text);
+        const inTheirs = theirsSet.has(text);
+        if (inOurs && inTheirs) return { text, origin: "both" };
+        if (inOurs) return { text, origin: "ours" };
+        if (inTheirs) return { text, origin: "theirs" };
+        if (baseSet.has(text)) return { text, origin: "base" };
+        return { text, origin: "custom" };
+      });
+  }
+}
+
+export function resolvedOriginLabel(origin: ResolvedLineOrigin): string {
+  switch (origin) {
+    case "ours":
+      return "当前";
+    case "theirs":
+      return "来源";
+    case "both":
+      return "共有";
+    case "base":
+      return "祖先";
+    case "custom":
+      return "手改";
+  }
+}
+
+/** 简要说明一处已解决冲突实际合并了两侧的哪些内容。 */
+export function describeHunkResolution(hunk: ConflictHunk, resolution: ConflictResolution): string {
+  const oursCount = hunk.ours.length;
+  const theirsCount = hunk.theirs.length;
+  const baseCount = (hunk.base ?? []).length;
+  switch (resolution.choice) {
+    case "ours":
+      return `保留当前 ${oursCount} 行 · 舍弃来源 ${theirsCount} 行`;
+    case "theirs":
+      return `保留来源 ${theirsCount} 行 · 舍弃当前 ${oursCount} 行`;
+    case "ours-theirs":
+      return `当前 ${oursCount} 行 + 来源 ${theirsCount} 行`;
+    case "theirs-ours":
+      return `来源 ${theirsCount} 行 + 当前 ${oursCount} 行`;
+    case "base":
+      return `恢复祖先 ${baseCount} 行`;
+    case "none":
+      return `已清空两侧（当前 ${oursCount} 行 / 来源 ${theirsCount} 行）`;
+    case "custom": {
+      const lines = resolvedLinesWithOrigin(hunk, resolution);
+      if (lines.length === 0) return "手动清空（0 行）";
+      let ours = 0;
+      let theirs = 0;
+      let custom = 0;
+      let both = 0;
+      for (const item of lines) {
+        if (item.origin === "ours") ours += 1;
+        else if (item.origin === "theirs") theirs += 1;
+        else if (item.origin === "both") both += 1;
+        else custom += 1;
+      }
+      const parts: string[] = [];
+      if (ours > 0) parts.push(`当前 ${ours}`);
+      if (theirs > 0) parts.push(`来源 ${theirs}`);
+      if (both > 0) parts.push(`共有 ${both}`);
+      if (custom > 0) parts.push(`手改 ${custom}`);
+      return parts.length > 0 ? `共 ${lines.length} 行（${parts.join(" · ")}）` : `共 ${lines.length} 行`;
+    }
+  }
+}
+
 /** 组合最终文本：未处理的冲突原样保留标记。不做任何选择时与原文逐字节一致。 */
 export function composeConflictText(parsed: ParsedConflictFile, resolutions: ConflictResolutions): string {
   const out: string[] = [];

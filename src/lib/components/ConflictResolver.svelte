@@ -9,6 +9,7 @@
     alignHunk,
     choiceLabel,
     composeConflictText,
+    describeHunkResolution,
     detectEol,
     hasConflictMarkers,
     hintLabel,
@@ -17,6 +18,8 @@
     keepBothSides,
     parseConflictText,
     resolvedLines,
+    resolvedLinesWithOrigin,
+    resolvedOriginLabel,
     simpleResolution,
     stripEol,
     unresolvedCount,
@@ -25,6 +28,7 @@
     type ConflictHunk,
     type ConflictResolution,
     type ConflictResolutions,
+    type ResolvedLineOrigin,
   } from "../conflict";
   import { createTextDiff } from "../diff";
   import { trackCodeScroll } from "../codeScroll.svelte";
@@ -128,6 +132,7 @@
   let editing = $state<number | null>(null);
   let editText = $state("");
   let showBase = $state(false);
+  let compareResolved = $state<Record<number, boolean>>({});
   let armed = $state(false);
   let reveal = $state<Record<number, { head: number; tail: number }>>({});
   let moreOpen = $state(false);
@@ -138,6 +143,9 @@
   let total = $derived(parsed.hunks.length);
   let remaining = $derived(unresolvedCount(parsed, resolutions));
   let done = $derived(total - remaining);
+  let allResolvedCompared = $derived(
+    done > 0 && parsed.hunks.every((hunk) => !resolutions[hunk.index] || Boolean(compareResolved[hunk.index])),
+  );
   let hasBase = $derived(parsed.hunks.some((hunk) => hunk.base !== null));
   let simple = $derived(
     parsed.hunks.filter((hunk) => !resolutions[hunk.index] && simpleResolution(hunk) !== null),
@@ -194,13 +202,14 @@
 
   type Row =
     | { kind: "fold"; seg: number; hidden: number; from: number; up: boolean; down: boolean }
-    | { kind: "ctx"; no: number; text: string; tone?: "res" | "warn"; bk?: string; bi?: number }
+    | { kind: "ctx"; no: number; text: string; tone?: "res" | "warn"; origin?: ResolvedLineOrigin; bk?: string; bi?: number }
     | { kind: "head"; hunk: number }
     | { kind: "cols"; hunk: number }
     | { kind: "pair"; hunk: number; ours: string | null; theirs: string | null; oNo: number | null; tNo: number | null; same: boolean; last: boolean; oi?: number; ti?: number }
     | { kind: "basehead"; hunk: number }
     | { kind: "base"; hunk: number; text: string; no: number; last: boolean; bk?: string; bi?: number }
-    | { kind: "res"; hunk: number; text: string; no: number; last: boolean; bk?: string; bi?: number }
+    | { kind: "reshead"; hunk: number }
+    | { kind: "res"; hunk: number; text: string; no: number; origin: ResolvedLineOrigin; last: boolean; bk?: string; bi?: number }
     | { kind: "empty"; hunk: number }
     | { kind: "edit"; hunk: number; height: number }
     | { kind: "gap" };
@@ -213,6 +222,7 @@
         return HEAD;
       case "cols":
       case "basehead":
+      case "reshead":
         return COLS;
       case "edit":
         return row.height;
@@ -296,15 +306,57 @@
         return;
       }
       if (resolution) {
-        const lines = resolvedLines(hunk, resolution);
-        if (lines.length === 0) rows.push({ kind: "empty", hunk: hunk.index });
+        if (compareResolved[hunk.index]) {
+          if (showBase && hunk.base) {
+            rows.push({ kind: "basehead", hunk: hunk.index });
+            const baseBk = `b:${hunk.index}`;
+            registerBlock(baseBk, hunk.base, 0, hunk.base.length, leadIn);
+            hunk.base.forEach((line, index) =>
+              rows.push({ kind: "base", hunk: hunk.index, text: stripEol(line), no: index + 1, last: false, bk: baseBk, bi: index }),
+            );
+          }
+          rows.push({ kind: "cols", hunk: hunk.index });
+          registerBlock(`o:${hunk.index}`, hunk.ours, 0, hunk.ours.length, leadIn);
+          registerBlock(`t:${hunk.index}`, hunk.theirs, 0, hunk.theirs.length, leadIn);
+          const aligned = alignments[hunk.index] ?? [];
+          if (aligned.length === 0) {
+            rows.push({ kind: "pair", hunk: hunk.index, ours: null, theirs: null, oNo: null, tNo: null, same: false, last: false });
+          }
+          aligned.forEach((pair) =>
+            rows.push({
+              kind: "pair",
+              hunk: hunk.index,
+              ours: pair.ours === null ? null : stripEol(hunk.ours[pair.ours]),
+              theirs: pair.theirs === null ? null : stripEol(hunk.theirs[pair.theirs]),
+              oNo: pair.ours === null ? null : no + pair.ours,
+              tNo: pair.theirs === null ? null : no + pair.theirs,
+              same: pair.same,
+              last: false,
+              oi: pair.ours ?? undefined,
+              ti: pair.theirs ?? undefined,
+            }),
+          );
+          rows.push({ kind: "reshead", hunk: hunk.index });
+        }
+        const items = resolvedLinesWithOrigin(hunk, resolution);
+        const lines = items.map((item) => item.text);
+        if (items.length === 0) rows.push({ kind: "empty", hunk: hunk.index });
         const bk = `r:${hunk.index}:${resolution.choice}:${resolution.choice === "custom" ? lines.join("\n") : ""}`;
         registerBlock(bk, lines, 0, lines.length, leadIn);
-        lines.forEach((text, index) =>
-          rows.push({ kind: "res", hunk: hunk.index, text, no: no + index, last: index === lines.length - 1, bk, bi: index }),
+        items.forEach((item, index) =>
+          rows.push({
+            kind: "res",
+            hunk: hunk.index,
+            text: item.text,
+            no: no + index,
+            origin: item.origin,
+            last: index === items.length - 1,
+            bk,
+            bi: index,
+          }),
         );
         rows.push({ kind: "gap" });
-        no += lines.length;
+        no += items.length;
         return;
       }
       if (showBase && hunk.base) {
@@ -354,11 +406,27 @@
         return;
       }
       const resolution = resolutions[segment.hunk.index];
-      const lines = resolution ? resolvedLines(segment.hunk, resolution) : segment.hunk.raw.map(stripEol);
-      const bk = resolution ? `pr:${segment.hunk.index}:${lines.join("\n")}` : "";
-      if (bk) registerBlock(bk, lines, 0, lines.length);
+      if (resolution) {
+        const items = resolvedLinesWithOrigin(segment.hunk, resolution);
+        const lines = items.map((item) => item.text);
+        const bk = `pr:${segment.hunk.index}:${lines.join("\n")}`;
+        registerBlock(bk, lines, 0, lines.length);
+        items.forEach((item, index) =>
+          rows.push({
+            kind: "ctx",
+            no: no++,
+            text: item.text,
+            tone: "res",
+            origin: item.origin,
+            bk,
+            bi: index,
+          }),
+        );
+        return;
+      }
+      const lines = segment.hunk.raw.map(stripEol);
       lines.forEach((text, index) =>
-        rows.push({ kind: "ctx", no: no++, text, tone: resolution ? "res" : "warn", bk: bk || undefined, bi: index }),
+        rows.push({ kind: "ctx", no: no++, text, tone: "warn", bi: index }),
       );
     });
     return rows;
@@ -544,8 +612,28 @@
     const next = { ...resolutions };
     delete next[index];
     resolutions = next;
+    if (compareResolved[index]) {
+      const nextCompare = { ...compareResolved };
+      delete nextCompare[index];
+      compareResolved = nextCompare;
+    }
     if (editing === index) editing = null;
     current = index;
+  }
+
+  function toggleCompare(index: number) {
+    compareResolved = { ...compareResolved, [index]: !compareResolved[index] };
+  }
+
+  function toggleAllCompare() {
+    const nextVal = !allResolvedCompared;
+    const next: Record<number, boolean> = {};
+    if (nextVal) {
+      for (const hunk of parsed.hunks) {
+        if (resolutions[hunk.index]) next[hunk.index] = true;
+      }
+    }
+    compareResolved = next;
   }
 
   function startEdit(index: number) {
@@ -611,6 +699,7 @@
     moreOpen = false;
     base = original;
     resolutions = {};
+    compareResolved = {};
     whole = null;
     editing = null;
     armed = false;
@@ -910,6 +999,12 @@
       </button>
     {/if}
     {#if hunkMode && effectiveMode === "hunks"}
+      {#if done > 0}
+        <label class="cr-toggle" title="在已解决的冲突处同时展开两侧原始对比，无需撤销即可核对">
+          <input type="checkbox" class="checkbox" checked={allResolvedCompared} onchange={toggleAllCompare} />
+          <span><span class="cr-toggle-wide">对照</span>两侧</span>
+        </label>
+      {/if}
       <label class="cr-toggle" title={hasBase ? "在每处冲突上方显示共同祖先版本" : "冲突标记里没有共同祖先。可设置 git config merge.conflictStyle zdiff3 后重新合并"}>
         <input type="checkbox" class="checkbox" bind:checked={showBase} title={hasBase ? undefined : "冲突标记里没有共同祖先"} disabled={!hasBase} />
         <span><span class="cr-toggle-wide">共同</span>祖先</span>
@@ -1040,8 +1135,8 @@
                 {/if}
               </div>
             {:else if row.kind === "ctx"}
-              <div class={`cr-row cr-line ${row.tone ?? ""}`} style={`top:${top}px;height:${height}px`}>
-                <span class="ln">{row.no}</span><span class="code"><span class="code-in" data-len={row.text.length}>{#each lineSegments(row.text, tokensOf(row.bk, row.bi)) as seg, i (i)}<span class={seg.k}>{seg.t}</span>{/each}</span></span>
+              <div class={`cr-row cr-line ${row.tone ?? ""}`} data-origin={row.origin} style={`top:${top}px;height:${height}px`}>
+                <span class="ln">{row.no}</span>{#if row.origin}<span class={`cr-origin ${row.origin}`} title={`来自${resolvedOriginLabel(row.origin)}`}>{resolvedOriginLabel(row.origin)}</span>{/if}<span class="code"><span class="code-in" data-len={row.text.length}>{#each lineSegments(row.text, tokensOf(row.bk, row.bi)) as seg, i (i)}<span class={seg.k}>{seg.t}</span>{/each}</span></span>
               </div>
             {:else if row.kind === "head"}
               {@const h = parsed.hunks[row.hunk]}
@@ -1060,6 +1155,7 @@
                 </button>
                 {#if state}
                   <span class="chip current" data-hunk-state="resolved">{choiceLabel(state.choice)}</span>
+                  {#if h}<span class="cr-res-summary" title="此冲突块的合并结果构成">{describeHunkResolution(h, state)}</span>{/if}
                 {:else if editing === row.hunk}
                   <span class="chip">正在编辑</span>
                 {:else}
@@ -1070,6 +1166,15 @@
                 {#if editing === row.hunk}
                   <span class="hint">Ctrl+Enter 完成 · Esc 取消</span>
                 {:else if state}
+                  <button
+                    type="button"
+                    class="btn btn-ghost btn-sm"
+                    aria-pressed={Boolean(compareResolved[row.hunk])}
+                    title="展开或收起两侧原始差异对照（不撤销当前选择）"
+                    onclick={() => toggleCompare(row.hunk)}
+                  >
+                    <Icon name="split" size={13} />对照两侧
+                  </button>
                   <button type="button" class="btn btn-ghost btn-sm" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => startEdit(row.hunk)}><Icon name="pencil" size={13} />编辑</button>
                   <button type="button" class="btn btn-ghost btn-sm" disabled={disabled} title="撤销这一处的选择（U）" onclick={() => undo(row.hunk)}><Icon name="undo" size={13} />撤销</button>
                 {:else}
@@ -1115,9 +1220,15 @@
               <div class="cr-row cr-line base cr-card" class:current={current === hunk} style={`top:${top}px;height:${height}px`}>
                 <span class="ln">{row.no}</span><span class="code"><span class="code-in" data-len={row.text.length}>{#each lineSegments(row.text, tokensOf(row.bk, row.bi)) as seg, i (i)}<span class={seg.k}>{seg.t}</span>{/each}</span></span>
               </div>
+            {:else if row.kind === "reshead"}
+              {@const h = parsed.hunks[row.hunk]}
+              {@const state = statusOf(row.hunk)}
+              <div class="cr-row cr-cols reshead cr-card" class:current={current === hunk} style={`top:${top}px;height:${height}px`}>
+                <span class="cr-col"><span class="cr-swatch"></span>合并结果{#if h && state}<small>{describeHunkResolution(h, state)}</small>{/if}</span>
+              </div>
             {:else if row.kind === "res"}
-              <div class="cr-row cr-line res cr-card" class:current={current === hunk} class:last={isLastRowOfCard(row)} style={`top:${top}px;height:${height}px`}>
-                <span class="ln">{row.no}</span><span class="code"><span class="code-in" data-len={row.text.length}>{#each lineSegments(row.text, tokensOf(row.bk, row.bi)) as seg, i (i)}<span class={seg.k}>{seg.t}</span>{/each}</span></span>
+              <div class="cr-row cr-line res cr-card" class:current={current === hunk} class:last={isLastRowOfCard(row)} data-origin={row.origin} style={`top:${top}px;height:${height}px`}>
+                <span class="ln">{row.no}</span><span class={`cr-origin ${row.origin}`} title={`来自${resolvedOriginLabel(row.origin)}`}>{resolvedOriginLabel(row.origin)}</span><span class="code"><span class="code-in" data-len={row.text.length}>{#each lineSegments(row.text, tokensOf(row.bk, row.bi)) as seg, i (i)}<span class={seg.k}>{seg.t}</span>{/each}</span></span>
               </div>
             {:else if row.kind === "empty"}
               <div class="cr-row cr-line res is-empty cr-card last" class:current={current === hunk} style={`top:${top}px;height:${height}px`}>

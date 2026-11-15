@@ -582,6 +582,8 @@ async function main() {
         await shot("composer", "baseline", "提交区：真实暂存范围与提交草稿");
 
         await openCommand(cdp, sessionId, "分支合并", "#merge-modal-title");
+        await waitFor(cdp, sessionId, "Boolean(document.querySelector('.merge-review'))", "合并审阅加载完成");
+        await pause(400);
         await shot("merge", "baseline", "合并弹窗（同数据对照）");
         await evaluate(cdp, sessionId, pressEscape);
         await waitFor(cdp, sessionId, "!document.querySelector('[role=dialog]')", "关闭合并弹窗");

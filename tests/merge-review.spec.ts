@@ -156,6 +156,8 @@ describe("合并审阅", () => {
     expect(within(conflicts).getAllByRole("option")).toHaveLength(1);
     await waitFor(() => expect(compareFileDiff).toHaveBeenLastCalledWith("/repo", "1".repeat(40), "2".repeat(40), "src/app.ts", 4, 1));
     expect(document.querySelector(".merge-detail-note")?.textContent).toContain("main 也改了这个文件");
+    expect(document.querySelector(".merge-detail-scope")?.textContent).toContain("共同祖先 1111111 → feature");
+    expect(document.querySelector(".merge-detail-lines")?.textContent).toContain("+1");
   });
 
   it("筛选只留匹配的条目；没有共同祖先时不发差异读取并说明原因", async () => {

@@ -294,7 +294,8 @@
         {#if previewing}<span class="spinner muted"></span>{/if}
         {#if preview.incoming > 0}
           <span class="merge-verdict-stats" aria-label={`将带入 ${preview.incoming} 个提交、${preview.filesTotal} 个文件`}>
-            <span><strong>{preview.incoming}</strong>个提交</span>
+            <span title={`来源分支 ${preview.source} 将带入 ${preview.incoming} 个提交`}>来源 <strong>+{preview.incoming}</strong> 个提交</span>
+            {#if preview.outgoing > 0}<span title={`目标分支 ${preview.target} 自分叉以来独有 ${preview.outgoing} 个提交`}>目标独有 <strong>{preview.outgoing}</strong> 个提交</span>{/if}
             <span><strong>{preview.filesTotal}</strong>个文件</span>
             {#if preview.conflictPaths.length > 0}<span class="warn"><strong>{preview.conflictPaths.length}</strong>处可能冲突</span>{/if}
           </span>

@@ -627,6 +627,16 @@
   /** 整次提交的增删行数：只加文本文件，二进制和没有统计的文件不计入，全都没有统计时不显示。 */
   let lineTotals = $derived(commitLineTotals(detail?.files ?? []));
   let bodyRest = $derived(detail ? commitBodyRest(detail.body, detail.commit.summary) : "");
+  /** 从合并提交说明中提取来源与目标分支名（如 Merge branch 'feature' into main）。 */
+  let mergeSides = $derived.by(() => {
+    if (!detail?.merge) return null;
+    const summary = detail.commit.summary.trim();
+    const branchMatch = summary.match(/^Merge (?:remote-tracking )?branch(?:es)? '([^']+)'(?: into (\S+))?/i);
+    if (branchMatch) return { incoming: branchMatch[1], target: branchMatch[2] ?? null };
+    const prMatch = summary.match(/^Merge pull request #\d+ from (\S+)/i);
+    if (prMatch) return { incoming: prMatch[1], target: null };
+    return null;
+  });
   type FileItem =
     | { kind: "dir"; directory: string; label: string; count: number; collapsed: boolean }
     | { kind: "file"; file: (typeof filteredFiles)[number] };
@@ -2396,20 +2406,34 @@
             <span class="sr-only" aria-live="polite">{copiedOid ? "已复制提交 " + shortOid(copiedOid) : ""}</span>
           </div>
           {#if detail.merge}
+            {@const activeParent = parentChoice ?? detail.selectedParent ?? detail.commit.parents[0]}
+            {@const activeParentIndex = Math.max(0, detail.commit.parents.indexOf(activeParent ?? ""))}
             <div class="commit-compare">
-              <span>比较对象</span>
+              <span>比较基准</span>
               <div class="segmented" role="group" aria-label="选择父提交">
                 {#each detail.commit.parents as parent, index (parent)}
+                  {@const parentCommit = commits.find((item) => item.oid === parent)}
                   <button
                     type="button"
-                    aria-pressed={(parentChoice ?? detail.selectedParent) === parent}
-                    title={index === 0 ? "相对合并前的主线：看这次合并带进来了什么" : "相对被合并的分支：看合并时主线这边有什么不同"}
+                    aria-pressed={activeParent === parent}
+                    title={index === 0
+                      ? `相对合并前的主线（${shortOid(parent)}${parentCommit ? ` · ${parentCommit.summary}` : ""}）：查看本次从合入分支带进来的改动`
+                      : `相对被合并分支（${shortOid(parent)}${parentCommit ? ` · ${parentCommit.summary}` : ""}）：查看合并前主线已有的改动`}
                     onclick={() => (parentChoice = parent)}
                   >
-                    {index === 0 ? "主线" : `第 ${index + 1} 个父提交`} · {shortOid(parent)}
+                    {index === 0
+                      ? `合入变更（相对${mergeSides?.target ? ` ${mergeSides.target}` : "主线"} · ${shortOid(parent)}）`
+                      : `主线原有（相对${index === 1 && mergeSides?.incoming ? ` ${mergeSides.incoming}` : `第 ${index + 1} 父提交`} · ${shortOid(parent)}）`}
                   </button>
                 {/each}
               </div>
+              <span class="commit-compare-hint truncate">
+                {#if activeParentIndex === 0}
+                  展示从{mergeSides?.incoming ? `「${mergeSides.incoming}」` : "被合并分支"}带入{mergeSides?.target ? `「${mergeSides.target}」` : "主线"}的净改动
+                {:else}
+                  展示合并前{mergeSides?.target ? `「${mergeSides.target}」` : "主线"}相对{mergeSides?.incoming ? `「${mergeSides.incoming}」` : "被合并分支"}已有的改动
+                {/if}
+              </span>
             </div>
           {/if}
         </header>

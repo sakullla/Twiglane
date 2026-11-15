@@ -1560,7 +1560,19 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     mergeOperation = "none";
     branch.ahead += 1;
     generation += 1;
-    return ok({ oid: "merge1234567890", generation, summary: "已完成合并 merge123", files: [], snapshot: snapshot() });
+    return ok({
+      oid: "merge1234567890",
+      generation,
+      summary: "已完成合并 merge123",
+      files: [
+        "src/lib/merge.ts",
+        "src/styles/theme.css",
+        "src/lib/components/BranchPicker.svelte",
+        "docs/guide/merge.md",
+        "src/lib/legacy.ts",
+      ],
+      snapshot: snapshot(),
+    });
   },
   abortMerge: (_repo: string, confirm: boolean) => {
     if (confirm) {

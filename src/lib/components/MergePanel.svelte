@@ -55,6 +55,7 @@
   import { abortActionLabel, canCompleteMerge, conflictKindLabel, continueActionLabel, operationCaption, operationVerb, showMergeAbort } from "../resolve";
   import type {
     BranchRecord,
+    CommitFileChange,
     ConflictView,
     MergePreview,
     MergeSession,
@@ -64,6 +65,7 @@
   import { BUSY_REASON, splitPath } from "../ui";
   import ConflictResolver from "./ConflictResolver.svelte";
   import Icon from "./Icon.svelte";
+  import MergeReview from "./MergeReview.svelte";
   import MergeSetup, { type MergeMode } from "./MergeSetup.svelte";
   import ConfirmDialog from "./ConfirmDialog.svelte";
   import ThreeWayMerge from "./ThreeWayMerge.svelte";
@@ -134,12 +136,17 @@
     rebased: boolean;
     oid: string | null;
     commits: number;
+    outgoing?: number;
+    filesTotal?: number;
+    resolvedPaths?: string[];
+    reviewPreview?: MergePreview | null;
     switchedFrom: string | null;
     /** 这次完成的是还原提交，不是分支合并：完成页不能提供“再合并一次”。 */
     revert?: boolean;
   }
 
   let session = $state.raw<MergeSession | null>(null);
+  let lastPreview = $state<MergePreview | null>(null);
   let branches = $state<BranchRecord[]>([]);
   /** 主干分支（本地默认分支及其远程对应分支），分支下拉框里用星标。 */
   let mainBranches = $state<string[]>([]);
@@ -519,6 +526,7 @@
     const chosenMode: MergeMode = checked.fastForward ? "ff-only" : mode === "rebase" ? "rebase" : "merge";
     if (chosenMode === "rebase" && target !== current) return;
     confirmingRebase = false;
+    lastPreview = checked;
     const repo = opened.summary.path;
     const note = setupMessage.trim() || defaultMergeMessage(checked.source, checked.target, sourceRemote);
     void run(async () => {
@@ -553,6 +561,10 @@
           rebased: true,
           oid: started.snapshot.branch.headOid,
           commits: checked.incoming,
+          outgoing: checked.outgoing,
+          filesTotal: checked.filesTotal,
+          resolvedPaths: [],
+          reviewPreview: checked,
           switchedFrom: null,
         };
         onNotice("已把当前分支上尚未进入基底的提交接到基底顶端。没有推送。");
@@ -567,6 +579,10 @@
           rebased: false,
           oid: started.snapshot.branch.headOid,
           commits: checked.incoming,
+          outgoing: checked.outgoing,
+          filesTotal: checked.filesTotal,
+          resolvedPaths: [],
+          reviewPreview: checked,
           switchedFrom: started.switchedFrom ?? null,
         };
         onNotice(`已把 ${checked.target} 快进到 ${checked.source}。`);
@@ -583,6 +599,10 @@
           rebased: false,
           oid: done.oid,
           commits: checked.incoming,
+          outgoing: checked.outgoing,
+          filesTotal: checked.filesTotal || done.files.length,
+          resolvedPaths: [],
+          reviewPreview: checked,
           switchedFrom: started.switchedFrom ?? null,
         };
         onNotice(done.summary);
@@ -716,6 +736,7 @@
     const count = conflictTotal;
     const rebasing = state.operation === "rebase";
     const reverting = state.operation === "revert";
+    const resolvedSnapshot = [...resolvedPaths];
     void run(async () => {
       try {
         const done = await api.completeMerge(repo, kept, state.generation, nextId(), state.operation);
@@ -726,13 +747,52 @@
         onNotice(done.summary);
         session = await api.mergeSession(repo, done.generation, nextId());
         view = null;
+        const matchedPreview = lastPreview && lastPreview.source === from && lastPreview.target === into ? lastPreview : null;
+        const fallbackPaths = [...new Set([...done.files, ...resolvedSnapshot])];
+        const fallbackFiles: CommitFileChange[] = fallbackPaths.map((path) => ({
+          path,
+          originalPath: null,
+          status: "modified",
+        }));
+        const reviewPreview: MergePreview | null = reverting
+          ? null
+          : matchedPreview ??
+            (fallbackFiles.length > 0
+              ? {
+                  generation: done.generation,
+                  source: from,
+                  target: into,
+                  headOid: done.oid ?? state.headOid,
+                  dirty: false,
+                  localPaths: [],
+                  canStart: false,
+                  operation: "none",
+                  note: done.summary,
+                  current: into,
+                  needsSwitch: false,
+                  incoming: count,
+                  outgoing: 0,
+                  upToDate: false,
+                  fastForward: false,
+                  commits: [],
+                  files: fallbackFiles,
+                  filesTotal: fallbackFiles.length,
+                  conflictCheck: "clean",
+                  conflictPaths: resolvedSnapshot,
+                  blocker: null,
+                }
+              : null);
         finished = {
           source: from,
           target: into,
           fastForwarded: false,
           rebased: rebasing,
           oid: done.oid,
-          commits: count,
+          commits: matchedPreview?.incoming ?? count,
+          outgoing: matchedPreview?.outgoing ?? 0,
+          filesTotal: matchedPreview?.filesTotal || fallbackFiles.length,
+          resolvedPaths: resolvedSnapshot,
+          reviewPreview,
           switchedFrom: switchedFromByRepo.get(repo) ?? null,
           revert: reverting,
         };
@@ -1017,27 +1077,67 @@
       </div>
     </div>
   {:else if finished}
+    {@const hasReview = Boolean(
+      !finished.revert &&
+        finished.reviewPreview &&
+        (finished.reviewPreview.files.length > 0 || finished.reviewPreview.commits.length > 0),
+    )}
     <div class="panel-scroll mp-scroll">
-      <div class="merge-done" role="status">
-        <span class="merge-done-icon"><Icon name="check" size={28} stroke={2.4} /></span>
-        <h2>{finished.revert ? "已继续还原" : finished.rebased ? `已把 ${finished.target} 接到 ${finished.source} 顶端` : finished.fastForwarded ? `已把 ${finished.target} 快进到 ${finished.source}` : `已把 ${finished.source} 合并到 ${finished.target}`}</h2>
-        <p>
-          {#if finished.revert}
-            后续目标已处理，还原提交已创建{#if finished.oid}<code>{shortOid(finished.oid)}</code>{/if}。结果只在本地，尚未推送。
-          {:else if finished.rebased}
-            当前分支已被改写。远程不变，没有推送。
-          {:else if finished.fastForwarded}没有创建合并提交，{finished.target} 现在指向 {finished.oid ? shortOid(finished.oid) : "来源的最新提交"}。结果只在本地，尚未推送。
-          {:else}已创建合并提交{#if finished.oid}<code>{shortOid(finished.oid)}</code>{/if}。结果只在本地，尚未推送。{/if}
-        </p>
-        <div class="merge-done-actions">
-          {#if finished.switchedFrom && !finished.revert}
-            <button type="button" class="btn btn-secondary" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={switchBack}><Icon name="arrow-left" size={14} />切回 {finished.switchedFrom}</button>
-          {/if}
-          {#if onOpenHistory}<button type="button" class="btn btn-secondary" onclick={onOpenHistory}><Icon name="history" size={14} />查看提交历史</button>{/if}
-          {#if !finished.revert}
-            <button type="button" class="btn btn-ghost" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={startOver}><Icon name="merge" size={14} />再合并一次</button>
-          {/if}
+      <div class="merge-done" class:has-review={hasReview} role="status">
+        <div class="merge-done-summary">
+          <span class="merge-done-icon"><Icon name="check" size={hasReview ? 22 : 28} stroke={2.4} /></span>
+          <div class="merge-done-copy">
+            <div class="merge-done-headline">
+              <h2>{finished.revert ? "已继续还原" : finished.rebased ? `已把 ${finished.target} 接到 ${finished.source} 顶端` : finished.fastForwarded ? `已把 ${finished.target} 快进到 ${finished.source}` : `已把 ${finished.source} 合并到 ${finished.target}`}</h2>
+              {#if !finished.revert && finished.source && finished.target}
+                <span class="merge-route" title={`方向：${finished.source} → ${finished.target}`}>
+                  <span class="merge-route-branch source"><Icon name="branch" size={12} /><span class="truncate">{finished.source}</span></span>
+                  <span class="merge-route-arrow"><Icon name="arrow-right" size={13} /></span>
+                  <span class="merge-route-branch target"><Icon name="branch" size={12} /><span class="truncate">{finished.target}</span></span>
+                </span>
+              {/if}
+            </div>
+            <p>
+              {#if finished.revert}
+                后续目标已处理，还原提交已创建{#if finished.oid}<code>{shortOid(finished.oid)}</code>{/if}。结果只在本地，尚未推送。
+              {:else if finished.rebased}
+                当前分支已被改写。远程不变，没有推送。
+              {:else if finished.fastForwarded}没有创建合并提交，{finished.target} 现在指向 {finished.oid ? shortOid(finished.oid) : "来源的最新提交"}。结果只在本地，尚未推送。
+              {:else}已创建合并提交{#if finished.oid}<code>{shortOid(finished.oid)}</code>{/if}。结果只在本地，尚未推送。{/if}
+            </p>
+            {#if !finished.revert && (finished.commits > 0 || (finished.outgoing ?? 0) > 0 || (finished.filesTotal ?? 0) > 0 || (finished.resolvedPaths?.length ?? 0) > 0)}
+              <div class="merge-done-stats" aria-label="本次合并两侧概览">
+                {#if finished.commits > 0}<span class="chip">来源带入 {finished.commits} 个提交</span>{/if}
+                {#if (finished.outgoing ?? 0) > 0}<span class="chip">目标原有 {finished.outgoing} 个提交</span>{/if}
+                {#if (finished.filesTotal ?? 0) > 0}<span class="chip">涉及 {finished.filesTotal} 个文件</span>{/if}
+                {#if (finished.resolvedPaths?.length ?? 0) > 0}<span class="chip current">已解决 {finished.resolvedPaths?.length} 个冲突文件</span>{/if}
+              </div>
+            {/if}
+          </div>
+          <div class="merge-done-actions">
+            {#if finished.switchedFrom && !finished.revert}
+              <button type="button" class="btn btn-secondary" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={switchBack}><Icon name="arrow-left" size={14} />切回 {finished.switchedFrom}</button>
+            {/if}
+            {#if onOpenHistory}<button type="button" class="btn btn-secondary" onclick={onOpenHistory}><Icon name="history" size={14} />查看提交历史</button>{/if}
+            {#if !finished.revert}
+              <button type="button" class="btn btn-ghost" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={startOver}><Icon name="merge" size={14} />再合并一次</button>
+            {/if}
+          </div>
         </div>
+        {#if hasReview && finished.reviewPreview}
+          <div class="merge-done-review">
+            <MergeReview
+              {opened}
+              preview={finished.reviewPreview}
+              postMerge={true}
+              resolvedPaths={finished.resolvedPaths ?? []}
+              disabled={blocked}
+              {nextId}
+              {onGeneration}
+              {onFailure}
+            />
+          </div>
+        {/if}
       </div>
     </div>
   {:else if external && session}

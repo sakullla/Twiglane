@@ -219,6 +219,15 @@
     return rows;
   });
   let hasMarkers = $derived(marks?.runs.some((run) => run.kind === "marker") ?? false);
+  let markCounts = $derived.by(() => {
+    if (!marks) return null;
+    const counts: Record<MarkKind, number> = { same: 0, ours: 0, theirs: 0, manual: 0, marker: 0 };
+    for (const run of marks.runs) {
+      counts[run.kind] += run.to - run.from;
+    }
+    counts.same = Math.max(0, marks.lines - counts.ours - counts.theirs - counts.manual - counts.marker);
+    return counts;
+  });
 
   let oursNumbers = $derived(numbers(view.ours.text));
   let theirsNumbers = $derived(numbers(view.theirs.text));
@@ -265,9 +274,9 @@
             <Icon name="info" size={12} /><span>{marksOff}</span>
           {:else}
             {#each KEYS as key (key.kind)}
-              <span class={`three-way-key ${key.kind}`} title={key.title}><i></i>{key.label}</span>
+              <span class={`three-way-key ${key.kind}`} title={key.title}><i></i>{key.label}{#if markCounts && markCounts[key.kind] > 0} <b>{markCounts[key.kind]}</b>{/if}</span>
             {/each}
-            {#if hasMarkers}<span class="three-way-key marker" title="尚未处理的冲突标记行"><i></i>冲突标记</span>{/if}
+            {#if hasMarkers}<span class="three-way-key marker" title="尚未处理的冲突标记行"><i></i>冲突标记{#if markCounts && markCounts.marker > 0} <b>{markCounts.marker}</b>{/if}</span>{/if}
           {/if}
         </p>
       {/if}

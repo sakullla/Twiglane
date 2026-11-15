@@ -3088,4 +3088,44 @@ describe("历史里的 cliora 任务范围", () => {
     const row = await screen.findByRole("button", { name: /任务净差异/ });
     expect(row.textContent).toContain("任务范围读取失败");
   });
+
+  it("合并提交详情清晰标识两侧父提交比较基准与改动含义", async () => {
+    const p1 = "1".repeat(40);
+    const p2 = "2".repeat(40);
+    const mergeRow = commit(0, {
+      oid: "m".repeat(40),
+      parents: [p1, p2],
+      summary: "Merge branch 'feature/ui' into main",
+    });
+    historyPage.mockResolvedValue({
+      generation: 3,
+      query: "",
+      offset: 0,
+      pageSize: 100,
+      hasMore: false,
+      state: "ok",
+      commits: [mergeRow],
+      scope: "current",
+      branches: ["main"],
+      head: "main",
+    });
+    commitDetail.mockImplementation(async (_repo: string, _oid: string, parent: string | null) => ({
+      generation: 3,
+      commit: mergeRow,
+      body: mergeRow.summary,
+      root: false,
+      merge: true,
+      selectedParent: parent ?? p1,
+      files: [{ path: "src/app.ts", originalPath: null, status: "modified", additions: 2, deletions: 1 }],
+    }));
+    render(HistoryPanel, { props: { ...panelProps(), taskRange: null } });
+    const incomingBtn = await screen.findByRole("button", { name: /合入变更（相对 main · 1111111）/ });
+    const mainlineBtn = screen.getByRole("button", { name: /主线原有（相对 feature\/ui · 2222222）/ });
+    expect(incomingBtn.getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelector(".commit-compare-hint")?.textContent).toContain("展示从「feature/ui」带入「main」的净改动");
+
+    await fireEvent.click(mainlineBtn);
+    await waitFor(() => expect(mainlineBtn.getAttribute("aria-pressed")).toBe("true"));
+    expect(document.querySelector(".commit-compare-hint")?.textContent).toContain("展示合并前「main」相对「feature/ui」已有的改动");
+  });
 });

@@ -671,6 +671,10 @@ describe("合并面板", () => {
     await vi.waitFor(() => expect(completeMerge).toHaveBeenCalledWith("/repo", "Merge branch 'feature' into main", 6, 1));
     expect(startMerge).toHaveBeenCalledWith("/repo", "feature", null, "merge", 5, 1);
     expect(await screen.findByText("已把 feature 合并到 main")).toBeTruthy();
+    // 合并完成后保留两侧概览与合入文件审阅，不再丢失合并上下文。
+    expect(screen.getByLabelText("本次合并两侧概览").textContent).toContain("来源带入 2 个提交");
+    expect(screen.getByLabelText("本次合并两侧概览").textContent).toContain("目标原有 1 个提交");
+    expect(screen.getByRole("listbox", { name: "将带入的文件" }).textContent).toContain("login.ts");
   });
 
   it("变基先确认将改写当前分支，取消不开始", async () => {

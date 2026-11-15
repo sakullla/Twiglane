@@ -1073,6 +1073,34 @@ describe("起始页", () => {
       expect(document.activeElement).toBe(box());
     });
 
+    it("起始页卡片支持左右方向键切换、下方向键进入列表，列表支持 Home/End 并在无搜索框时回跳入口", async () => {
+      render(Welcome, {
+        props: {
+          recent: many.slice(0, 3),
+          disabled: false,
+          onAdd: () => {},
+          onClone: () => {},
+          onCreate: () => {},
+          onOpen: () => {},
+        },
+      });
+      const cards = [...document.querySelectorAll<HTMLButtonElement>(".welcome-actions > .action-card")];
+      const rows = [...document.querySelectorAll<HTMLButtonElement>(".welcome-recent > button")];
+      cards[0].focus();
+      await fireEvent.keyDown(cards[0], { key: "ArrowRight" });
+      expect(document.activeElement).toBe(cards[1]);
+      await fireEvent.keyDown(cards[1], { key: "ArrowLeft" });
+      expect(document.activeElement).toBe(cards[0]);
+      await fireEvent.keyDown(cards[0], { key: "ArrowDown" });
+      expect(document.activeElement).toBe(rows[0]);
+      await fireEvent.keyDown(rows[0], { key: "End" });
+      expect(document.activeElement).toBe(rows[2]);
+      await fireEvent.keyDown(rows[2], { key: "Home" });
+      expect(document.activeElement).toBe(rows[0]);
+      await fireEvent.keyDown(rows[0], { key: "ArrowUp" });
+      expect(document.activeElement).toBe(cards[0]);
+    });
+
     it("没有匹配时说明，清空按钮恢复列表", async () => {
       renderMany();
       await fireEvent.input(box(), { target: { value: "没有这个" } });

@@ -81,6 +81,25 @@
     }
   }
 
+  function onActionKey(event: KeyboardEvent) {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    const cards = [...(event.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLButtonElement>(":scope > .action-card:not(:disabled)") ?? []];
+    const index = cards.indexOf(event.currentTarget as HTMLButtonElement);
+    if (index < 0) return;
+    if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+      event.preventDefault();
+      const delta = event.key === "ArrowRight" ? 1 : -1;
+      cards[(index + delta + cards.length) % cards.length]?.focus();
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      const target = document.getElementById("welcome-search") ?? document.querySelector<HTMLButtonElement>(".welcome-recent > button");
+      if (!target) return;
+      event.preventDefault();
+      target.focus();
+    }
+  }
+
   function onRowKey(event: KeyboardEvent, repo: RecentRepo) {
     if (isContextKey(event) && onContextMenu) {
       event.preventDefault();
@@ -88,15 +107,20 @@
       return;
     }
     if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") return;
     const buttons = [...(event.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLButtonElement>(":scope > button") ?? []];
     const index = buttons.indexOf(event.currentTarget as HTMLButtonElement);
     if (index < 0) return;
-    if (event.key === "ArrowUp" && index === 0) {
-      const search = document.getElementById("welcome-search");
-      if (!search) return;
+    if (event.key === "Home" || event.key === "End") {
       event.preventDefault();
-      search.focus();
+      buttons[event.key === "Home" ? 0 : buttons.length - 1]?.focus();
+      return;
+    }
+    if (event.key === "ArrowUp" && index === 0) {
+      const above = document.getElementById("welcome-search") ?? document.querySelector<HTMLButtonElement>(".welcome-actions > .action-card:not(:disabled)");
+      if (!above) return;
+      event.preventDefault();
+      above.focus();
       return;
     }
     event.preventDefault();
@@ -116,15 +140,15 @@
     <div class="welcome-brand"><BrandMark /></div>
 
     <section class="welcome-actions" aria-label="开始使用">
-      <button type="button" class="action-card primary" {disabled} title={actionTitle} onclick={onAdd}>
+      <button type="button" class="action-card primary" {disabled} title={actionTitle} onclick={onAdd} onkeydown={onActionKey}>
         <Icon name="folder-open" size={18} />
         <span class="ac-copy"><strong>打开本地仓库</strong><span>选择或拖入本地文件夹</span></span>
       </button>
-      <button type="button" class="action-card" {disabled} title={actionTitle} onclick={onClone}>
+      <button type="button" class="action-card" {disabled} title={actionTitle} onclick={onClone} onkeydown={onActionKey}>
         <Icon name="download" size={18} />
         <span class="ac-copy"><strong>克隆远程仓库</strong><span>从远程地址克隆到本地</span></span>
       </button>
-      <button type="button" class="action-card" {disabled} title={actionTitle} onclick={onCreate}>
+      <button type="button" class="action-card" {disabled} title={actionTitle} onclick={onCreate} onkeydown={onActionKey}>
         <Icon name="folder-plus" size={18} />
         <span class="ac-copy"><strong>新建仓库</strong><span>在空目录初始化新仓库</span></span>
       </button>

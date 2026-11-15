@@ -3492,3 +3492,66 @@ describe("连续审阅队列（R2）", () => {
     expect(done.nextReason).toBe(ALL_REVIEWED);
   });
 });
+
+describe("差异逐行选择交互：Shift 连选与 Esc 退出", () => {
+  beforeEach(() => resetDiffPrefs());
+
+  it("Shift+点击按区间连选或批量取消可选行，按 Esc 退出选行模式并清空选择", async () => {
+    const onStageLines = vi.fn();
+    const lines: DiffLine[] = [
+      { kind: "hunk", text: "@@ -1,5 +1,6 @@", oldNo: null, newNo: null, hunkIndex: 0 },
+      { kind: "context", text: " head", oldNo: 1, newNo: 1, hunkIndex: 0 },
+      { kind: "del", text: "-old1", oldNo: 2, newNo: null, hunkIndex: 0 },
+      { kind: "del", text: "-old2", oldNo: 3, newNo: null, hunkIndex: 0 },
+      { kind: "add", text: "+new1", oldNo: null, newNo: 2, hunkIndex: 0 },
+      { kind: "add", text: "+new2", oldNo: null, newNo: 3, hunkIndex: 0 },
+      { kind: "add", text: "+new3", oldNo: null, newNo: 4, hunkIndex: 0 },
+      { kind: "context", text: " tail", oldNo: 4, newNo: 5, hunkIndex: 0 },
+    ];
+    const diff = pickableDiff({
+      path: "src/range.ts",
+      lines,
+      totalLines: lines.length,
+      hunks: [{ index: 0, header: "@@ -1,5 +1,6 @@", complete: true, stageable: true, startLine: 0, lineCount: lines.length }],
+    });
+    render(DiffView, {
+      props: {
+        selection: { path: "src/range.ts", side: "unstaged" },
+        diff,
+        error: null,
+        loading: false,
+        disabled: false,
+        onStageHunk: () => {},
+        onStageLines,
+        onLoadMore: () => {},
+      },
+    });
+
+    await fireEvent.click(screen.getByRole("button", { name: "选择行" }));
+    const picks = () => [...document.querySelectorAll<HTMLButtonElement>("[data-line-pick]")];
+    expect(picks()).toHaveLength(5);
+
+    // 先点第 1 个可选行（old1），再 Shift+点第 4 个可选行（new2）：中间行一并选入。
+    await fireEvent.click(picks()[0]);
+    expect(document.querySelector("[data-line-count]")?.textContent).toBe("1 行");
+    await fireEvent.click(picks()[3], { shiftKey: true });
+    expect(document.querySelector("[data-line-count]")?.textContent).toBe("4 行");
+
+    // 单点取消第 2 个可选行（old2），再 Shift+点第 4 个可选行：这一段批量取消，只剩第 1 行。
+    await fireEvent.click(picks()[1]);
+    expect(document.querySelector("[data-line-count]")?.textContent).toBe("3 行");
+    await fireEvent.click(picks()[3], { shiftKey: true });
+    expect(document.querySelector("[data-line-count]")?.textContent).toBe("1 行");
+
+    await fireEvent.click(screen.getByRole("button", { name: "暂存选中行" }));
+    expect(onStageLines).toHaveBeenCalledWith([
+      expect.objectContaining({ kind: "del", oldNo: 2, newNo: null }),
+    ]);
+
+    // 聚焦差异滚动容器后按 Esc 直接退出选行模式并清掉已选状态。
+    const scroller = screen.getByRole("textbox", { name: "差异文本" });
+    await fireEvent.keyDown(scroller, { key: "Escape" });
+    expect(screen.getByRole("button", { name: "选择行" }).getAttribute("aria-pressed")).toBe("false");
+    expect(document.querySelector("[data-line-count]")).toBeNull();
+  });
+});

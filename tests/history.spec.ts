@@ -3128,4 +3128,59 @@ describe("历史里的 cliora 任务范围", () => {
     await waitFor(() => expect(mainlineBtn.getAttribute("aria-pressed")).toBe("true"));
     expect(document.querySelector(".commit-compare-hint")?.textContent).toContain("展示合并前「main」相对「feature/ui」已有的改动");
   });
+
+  it("多选提交最终变更超过 8 个文件时可筛选，并支持一键复制单提交完整说明", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    const rows = chain(3);
+    historyPage.mockResolvedValue({
+      generation: 3, commits: rows, offset: 0, pageSize: 100, hasMore: false, state: "ok",
+      scope: "current", branches: ["main"], head: "main",
+    });
+    commitDetail.mockResolvedValue({
+      generation: 3,
+      commit: rows[0],
+      body: `${rows[0].summary}\n\n详细背景第一段\n详细背景第二段`,
+      root: false,
+      merge: false,
+      selectedParent: rows[0].parents[0],
+      files: [{ path: "src/index.ts", originalPath: null, status: "modified", additions: 2, deletions: 1 }],
+    });
+    compareFiles.mockResolvedValue({
+      generation: 3,
+      base: rows[1].parents[0],
+      head: rows[0].oid,
+      files: Array.from({ length: 10 }, (_, index) => ({
+        path: `src/module-${index}.ts`,
+        originalPath: null,
+        status: "modified",
+        additions: index + 1,
+        deletions: 0,
+      })),
+    });
+
+    render(HistoryPanel, { props: { ...panelProps(), taskRange: null } });
+    const copyMsgBtn = await screen.findByRole("button", { name: "复制提交说明" });
+    await fireEvent.click(copyMsgBtn);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(`${rows[0].summary}\n\n详细背景第一段\n详细背景第二段`));
+
+    await fireEvent.click(screen.getByRole("option", { name: /commit-1/ }), { shiftKey: true });
+    const filterInput = await screen.findByRole("textbox", { name: "筛选最终变更文件" });
+    expect(document.querySelector(".commit-files-head .count")?.textContent).toBe("10");
+
+    await fireEvent.input(filterInput, { target: { value: "module-7" } });
+    expect(document.querySelector(".commit-files-head .count")?.textContent).toBe("1/10");
+    const union = screen.getByRole("listbox", { name: "提交中的文件列表" });
+    expect(within(union).getAllByRole("option")).toHaveLength(1);
+    expect(within(union).getByText("module-7.ts")).toBeTruthy();
+
+    await fireEvent.input(filterInput, { target: { value: "not-found" } });
+    expect(screen.getByText("没有匹配的文件。")).toBeTruthy();
+    await fireEvent.keyDown(filterInput, { key: "Escape" });
+    expect(document.querySelector(".commit-files-head .count")?.textContent).toBe("10");
+  });
 });

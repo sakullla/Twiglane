@@ -88,19 +88,34 @@ async function rightClickRow(d, text) {
   await d.until("Boolean(document.querySelector('[role=\"menu\"]'))", "目录树右键菜单出现");
 }
 
-async function clickMenuItem(d, label) {
+async function clickMenuItem(d, label, depth = 0) {
+  const selector = `[role="menu"][data-depth="${depth}"] .context-item`;
   const index = await d.evaluate(
-    `[...document.querySelectorAll('[role="menuitem"]')].findIndex((item) => (item.getAttribute('aria-label') || item.textContent || '').includes(${JSON.stringify(label)}))`,
+    `[...document.querySelectorAll(${JSON.stringify(selector)})].findIndex((item) => (item.getAttribute('aria-label') || item.textContent || '').includes(${JSON.stringify(label)}))`,
   );
   if (index < 0) throw new Error("菜单里没有：" + label);
-  await d.clickNth('[role="menuitem"]', index);
+  await d.clickNth(selector, index);
   await d.until("!document.querySelector('[role=\"menu\"]')", "菜单关闭");
 }
 
-/** 右键 README.md → 新建文件 → 填名字 → 提交；失败分支由页面的 ?entry= 决定。 */
+async function clickSubmenuItem(d, parentLabel, childLabel) {
+  const parentSelector = '[role="menu"][data-depth="0"] .context-item';
+  const parentIndex = await d.evaluate(
+    `[...document.querySelectorAll(${JSON.stringify(parentSelector)})].findIndex((item) => (item.getAttribute('aria-label') || item.textContent || '').includes(${JSON.stringify(parentLabel)}))`,
+  );
+  if (parentIndex < 0) throw new Error("菜单里没有父级：" + parentLabel);
+  await d.clickNth(parentSelector, parentIndex);
+  await d.until(
+    "Boolean(document.querySelector('[role=\"menu\"][data-depth=\"1\"]:not([style*=\"visibility:hidden\"])'))",
+    parentLabel + " 子菜单展开",
+  );
+  await clickMenuItem(d, childLabel, 1);
+}
+
+/** 右键 README.md → 新建 ▸ 文件… → 填名字 → 提交；失败分支由页面的 ?entry= 决定。 */
 async function createFileFlow(d, name) {
   await rightClickRow(d, "README.md");
-  await clickMenuItem(d, "新建文件");
+  await clickSubmenuItem(d, "新建", "文件…");
   await d.until("Boolean(document.querySelector('[data-entry-form=\"createFile\"]'))", "新建文件表单出现");
   await d.typeInto("#entry-name", name);
   // 仓库仍在读取时提交按钮是禁用的：等它可用再点，避免把「点不动」误判成失败。
@@ -108,17 +123,17 @@ async function createFileFlow(d, name) {
   await d.click("[data-entry-submit]");
 }
 
-/** 右键 README.md → 移到回收站 → 在确认框里真的点一次危险按钮。 */
+/** 右键 README.md → 删除… → 在确认框里真的点一次危险按钮。 */
 async function deleteReadmeFlow(d) {
   await rightClickRow(d, "README.md");
-  await clickMenuItem(d, "移到回收站");
-  await d.until("Boolean(document.querySelector('[data-modal-impact=\"entry-delete\"]'))", "移到回收站确认框出现");
+  await clickMenuItem(d, "删除…");
+  await d.until("Boolean(document.querySelector('[data-modal-impact=\"entry-delete\"]'))", "删除确认框出现");
   await d.until("(() => { const button = document.querySelector('.modal-foot .btn-danger'); return Boolean(button) && !button.disabled; })()", "确认按钮可用");
   // 点一次后等确认框给出结果：失败会留下原因，成功则关闭确认框。
   await d.clickUntil(
     ".modal-foot .btn-danger",
     "Boolean(document.querySelector('.confirm-body .callout.error')) || !document.querySelector('[data-modal-impact=\"entry-delete\"]')",
-    "点击移到回收站",
+    "点击删除确认",
   );
 }
 
@@ -212,17 +227,22 @@ const SCENARIOS = [
   {
     name: "文件视图：按路径打开未展开的文件",
     url: "/",
-    ready:
-      "(() => { if (!window.__filesOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__filesOpened = true; recent.click(); return false; } } " +
-      "if (!document.querySelector('.workbench-view[data-active=\"true\"] .files-view')) { const sw = document.querySelector('.workbench-view[data-active=\"true\"] [data-view=\"files\"]'); if (sw) { sw.click(); return false; } return false; } " +
-      "if (window.__quickPicked) return Boolean(document.querySelector('.files-view [data-file-line]')); " +
-      // 按路径打开是低频入口，收在文件树的「更多」菜单里（工具条只常驻筛选/全仓库搜索/只看改动）。
-      "if (!window.__quickOpen) { const more = document.querySelector('.files-view [aria-label=\"更多文件树选项\"]'); if (!more) return false; more.click(); window.__quickOpen = true; return false; } " +
-      "if (!document.querySelector('#file-quick-open')) { const item = [...document.querySelectorAll('[role=\"menuitem\"]')].find((node) => node.textContent.includes('按路径打开')); if (!item) return false; item.click(); return false; } " +
-      "const input = document.querySelector('#file-quick-open'); if (!input) return false; " +
-      "if (input.value !== 'util') { input.value = 'util'; input.dispatchEvent(new Event('input', { bubbles: true })); return false; } " +
-      "const option = [...document.querySelectorAll('.file-search-row.path')].find((item) => item.textContent.includes('util.rs')); if (!option) return false; " +
-      "window.__quickPicked = true; option.click(); return false; })()",
+    steps: async (d) => {
+      await openFilesView(d);
+      // 按路径打开走 Ctrl/⌘ P 快捷键入口（命令面板同样提供）。
+      await d.press("p", ["Ctrl"]);
+      await d.until("Boolean(document.querySelector('#file-quick-open'))", "按路径打开输入出现");
+      await d.typeInto("#file-quick-open", "util");
+      await d.until(
+        "[...document.querySelectorAll('.file-search-row.path')].some((item) => item.textContent.includes('util.rs'))",
+        "匹配到 util.rs",
+      );
+      const index = await d.evaluate(
+        "[...document.querySelectorAll('.file-search-row.path')].findIndex((item) => item.textContent.includes('util.rs'))",
+      );
+      await d.clickNth(".file-search-row.path", index);
+      await d.until("Boolean(document.querySelector('.files-view [data-file-line]'))", "util.rs 正文打开");
+    },
     check:
       "(document.querySelector('.file-tree-row.active')?.textContent || '').includes('util.rs') && Boolean(document.querySelector('.files-view [data-file-line]'))",
     detail: "document.querySelector('.file-tree-row.active')?.getAttribute('title') || ''",
@@ -230,13 +250,14 @@ const SCENARIOS = [
   {
     name: "文件视图：全文搜索按文件分组",
     url: "/",
-    ready:
-      "(() => { if (!window.__filesOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__filesOpened = true; recent.click(); return false; } } " +
-      "if (!document.querySelector('.workbench-view[data-active=\"true\"] .files-view')) { const sw = document.querySelector('.workbench-view[data-active=\"true\"] [data-view=\"files\"]'); if (sw) { sw.click(); return false; } return false; } " +
-      "if (!window.__contentOpen) { const open = document.querySelector('.files-view [aria-label=\"全仓库搜索\"]'); if (open) { window.__contentOpen = true; open.click(); return false; } return false; } " +
-      "const input = document.querySelector('#file-content-search'); if (!input) return false; " +
-      "if (input.value !== 'import') { input.value = 'import'; input.dispatchEvent(new Event('input', { bubbles: true })); return false; } " +
-      "return document.querySelectorAll('.file-search-group').length > 0; })()",
+    steps: async (d) => {
+      await openFilesView(d);
+      await rightClickRow(d, "README.md");
+      await clickSubmenuItem(d, "文件树", "全仓库搜索");
+      await d.until("Boolean(document.querySelector('#file-content-search'))", "全文搜索输入出现");
+      await d.typeInto("#file-content-search", "import");
+      await d.until("document.querySelectorAll('.file-search-group').length > 0", "全文搜索分组出现");
+    },
     check: "document.querySelectorAll('.file-search-group').length >= 1 && document.querySelectorAll('.file-search-row.hit').length >= 2",
     detail:
       "document.querySelectorAll('.file-search-group').length + ' 个文件 / ' + document.querySelectorAll('.file-search-row.hit').length + ' 处匹配'",
@@ -244,11 +265,15 @@ const SCENARIOS = [
   {
     name: "文件视图：仅改动树保留删除墓碑",
     url: "/",
-    ready:
-      "(() => { if (!window.__filesOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__filesOpened = true; recent.click(); return false; } } " +
-      "if (!document.querySelector('.workbench-view[data-active=\"true\"] .files-view')) { const sw = document.querySelector('.workbench-view[data-active=\"true\"] [data-view=\"files\"]'); if (sw) { sw.click(); return false; } return false; } " +
-      "if (!window.__changedOnly) { const toggle = document.querySelector('.files-view [aria-label=\"只看有改动的文件\"]'); if (toggle) { window.__changedOnly = true; toggle.click(); return false; } return false; } " +
-      "return [...document.querySelectorAll('.file-tree-row')].some((row) => row.textContent.includes('old-panel.ts')); })()",
+    steps: async (d) => {
+      await openFilesView(d);
+      await rightClickRow(d, "README.md");
+      await clickSubmenuItem(d, "文件树", "只看有改动的文件");
+      await d.until(
+        "[...document.querySelectorAll('.file-tree-row')].some((row) => row.textContent.includes('old-panel.ts'))",
+        "删除墓碑出现",
+      );
+    },
     check:
       "[...document.querySelectorAll('.file-tree-row')].some((row) => row.textContent.includes('old-panel.ts') && row.textContent.includes('已删除'))",
     detail:
@@ -257,13 +282,14 @@ const SCENARIOS = [
   {
     name: "文件视图：搜索局部失败给出原因与就地恢复入口",
     url: "/?search=error",
-    ready:
-      "(() => { if (!window.__filesOpened) { const recent = document.querySelector('.welcome-recent button'); if (recent) { window.__filesOpened = true; recent.click(); return false; } } " +
-      "if (!document.querySelector('.workbench-view[data-active=\"true\"] .files-view')) { const sw = document.querySelector('.workbench-view[data-active=\"true\"] [data-view=\"files\"]'); if (sw) { sw.click(); return false; } return false; } " +
-      "if (!window.__contentOpen) { const open = document.querySelector('.files-view [aria-label=\"全仓库搜索\"]'); if (open) { window.__contentOpen = true; open.click(); return false; } return false; } " +
-      "const input = document.querySelector('#file-content-search'); if (!input) return false; " +
-      "if (input.value !== 'import') { input.value = 'import'; input.dispatchEvent(new Event('input', { bubbles: true })); return false; } " +
-      "return Boolean(document.querySelector('.file-search-note.danger')); })()",
+    steps: async (d) => {
+      await openFilesView(d);
+      await rightClickRow(d, "README.md");
+      await clickSubmenuItem(d, "文件树", "全仓库搜索");
+      await d.until("Boolean(document.querySelector('#file-content-search'))", "全文搜索输入出现");
+      await d.typeInto("#file-content-search", "import");
+      await d.until("Boolean(document.querySelector('.file-search-note.danger'))", "搜索失败原因出现");
+    },
     // 失败块里必须同时有原因和可执行的恢复动作；再真的点一次「重试搜索」，
     // 核对按钮确实重发了请求（同一条失败原因重新出现），而不是只是画了一个按钮。
     check:
@@ -285,13 +311,16 @@ const SCENARIOS = [
   {
     name: "文件视图：仅改动与树过滤叠加只留改动路径",
     url: "/",
-    ready:
-      '(() => { if (!window.__filesOpened) { const recent = document.querySelector(".welcome-recent button"); if (recent) { window.__filesOpened = true; recent.click(); return false; } } ' +
-      'if (!document.querySelector(\'.workbench-view[data-active="true"] .files-view\')) { const sw = document.querySelector(\'.workbench-view[data-active="true"] [data-view="files"]\'); if (sw) { sw.click(); return false; } return false; } ' +
-      'if (!window.__changedOnly) { const toggle = document.querySelector(\'.files-view [aria-label="只看有改动的文件"]\'); if (toggle) { window.__changedOnly = true; toggle.click(); return false; } return false; } ' +
-      'const input = document.querySelector(\'.files-view [aria-label="过滤文件树"]\'); if (!input) return false; ' +
-      'if (input.value !== "old") { input.value = "old"; input.dispatchEvent(new Event("input", { bubbles: true })); return false; } ' +
-      'return [...document.querySelectorAll(".file-tree-row")].some((row) => row.textContent.includes("old-panel.ts")); })()',
+    steps: async (d) => {
+      await openFilesView(d);
+      await rightClickRow(d, "README.md");
+      await clickSubmenuItem(d, "文件树", "只看有改动的文件");
+      await d.typeInto('.files-view [aria-label="过滤文件树"]', "old");
+      await d.until(
+        "[...document.querySelectorAll('.file-tree-row')].some((row) => row.textContent.includes('old-panel.ts'))",
+        "改动过滤结果出现",
+      );
+    },
     check:
       '![...document.querySelectorAll(".file-tree-row")].some((row) => row.textContent.includes("全仓库")) && [...document.querySelectorAll(".file-tree-row")].some((row) => row.textContent.includes("old-panel.ts")) && document.body.textContent.includes("仅在改动文件里匹配")',
     detail: '[...document.querySelectorAll(".file-tree-row")].map((row) => row.textContent.trim()).join(" | ")',
@@ -850,9 +879,9 @@ const SCENARIOS = [
       await rightClickRow(d, "socket");
     },
     check: `(() => {
-      const labels = ['新建文件', '新建目录', '复制到…', '移动或重命名', '移到回收站'];
+      const labels = ['新建', '复制到…', '移动或重命名…', '删除…'];
       const rows = [...document.querySelectorAll('[role="menuitem"]')];
-      const find = (label) => rows.find((node) => (node.getAttribute('aria-label') || '').includes(label));
+      const find = (label) => rows.find((node) => (node.getAttribute('aria-label') || '') === label);
       const special = labels.every((label) => {
         const node = find(label);
         return Boolean(node) && node.getAttribute('aria-disabled') === 'true' && (node.getAttribute('title') || '').includes('特殊文件');

@@ -320,8 +320,7 @@ const FAILURE_STATES = [
       await evaluate(cdp, sessionId, click('[data-view="files"]'));
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view'))", "文件视图");
       await pause(600);
-      await evaluate(cdp, sessionId, click('.files-view [aria-label="全仓库搜索"]'));
-      await waitFor(cdp, sessionId, "Boolean(document.querySelector('#file-content-search'))", "全文搜索输入");
+      await openCommand(cdp, sessionId, "全仓库搜索", "#file-content-search");
       await evaluate(cdp, sessionId, typeInto("#file-content-search", "import"));
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('.file-search-note.danger'))", "搜索失败原因");
       await waitFor(

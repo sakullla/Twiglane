@@ -168,7 +168,7 @@
 .welcome-search input { font-size: var(--text-sm); }
 .welcome-section-head h2 { color: var(--fg-muted); font-size: var(--text-eyebrow); font-weight: var(--weight-semibold); letter-spacing: var(--tracking-eyebrow); text-transform: uppercase; }
 .welcome-section-head > .hint { flex: none; font-size: var(--text-xs); }
-.welcome-recent { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-6); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-md); }
+.welcome-recent { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-6); border-radius: var(--radius-lg); background: var(--surface); box-shadow: 0 0 0 1px var(--border), var(--shadow-md); }
 .welcome-recent button { position: relative; display: flex; align-items: center; gap: var(--space-12); width: 100%; min-width: 0; padding: var(--space-8) var(--space-32) var(--space-8) var(--space-8); border-radius: var(--radius); text-align: left; transition: background var(--duration-fast) var(--ease); }
 .welcome-recent button:hover { background: var(--hover); }
 /* 行尾的箭头只在悬停或聚焦时出现：告诉用户「点这一行就打开」，静止时不添噪。 */
@@ -184,7 +184,7 @@
 /* 搜索时结果行数会变：留够五行的高度，搜索框不跟着上下跳。 */
 .welcome-recent.searchable { min-height: 257px; }
 .welcome-no-match { margin: 0; padding: var(--space-8); }
-.welcome-empty { margin: 0; padding: var(--space-24) var(--space-16); border-radius: var(--radius-lg); background: var(--surface); text-align: center; }
+.welcome-empty { margin: 0; padding: var(--space-24) var(--space-16); border-radius: var(--radius-lg); background: var(--surface); box-shadow: 0 0 0 1px var(--border); text-align: center; }
 /* 和主界面的 Git 诊断通知条同一语义：Git 不可用是错误，不是提醒。 */
 .welcome-diagnostic { display: flex; align-items: center; gap: var(--space-8); width: 100%; padding: var(--space-8) var(--space-12); border-radius: var(--radius); background: var(--danger-soft); color: var(--danger-text); font-size: var(--text-sm); font-weight: var(--weight-medium); text-align: left; }
 .welcome-diagnostic > span { flex: 1; min-width: 0; }

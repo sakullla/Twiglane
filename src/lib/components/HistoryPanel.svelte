@@ -672,10 +672,15 @@
   let currentPath = $derived(viewMode === "single" ? activeFile?.path : (multiFocus ?? filteredFiles[0]?.path));
   let fileIndex = $derived(filteredFiles.findIndex((file) => file.path === currentPath));
   let fileNav = $derived(detail ? fileNavState(filteredFiles, fileIndex, (file) => goToFile(file.path)) : null);
-  /** 多选时的文件导航：在净文件清单里前后移动，和单个提交的文件导航是同一套命令。 */
+  let unionFilter = $state("");
+  let unionFiles = $derived(filterRows(multiFiles, unionFilter));
+  /** 净结果的合计：两点之间的净行数，中间改了又改回的行不计入。 */
+  let unionLineTotals = $derived(multiLoading ? null : commitLineTotals(multiFiles));
+  let unionActive = $derived(unionFiles.find((file) => file.path === multiFocus) ?? unionFiles[0] ?? null);
+  /** 多选时的文件导航：在当前可见的净文件清单里前后移动，和单个提交的文件导航是同一套命令。 */
   let unionNav = $derived(
-    selectedOids.length > 1 && multiFiles.length > 0
-      ? fileNavState(multiFiles, multiFiles.findIndex((file) => file.path === unionActive?.path), (file) => focusUnion(file.path))
+    selectedOids.length > 1 && unionFiles.length > 0
+      ? fileNavState(unionFiles, unionFiles.findIndex((file) => file.path === unionActive?.path), (file) => focusUnion(file.path))
       : null,
   );
 
@@ -799,10 +804,6 @@
   );
   let selectedIds = $derived(new Set(selectedOids));
   let selectedCommits = $derived(commits.filter((commit) => selectedIds.has(commit.oid)));
-  let unionFiles = $derived(multiFiles);
-  /** 净结果的合计：两点之间的净行数，中间改了又改回的行不计入。 */
-  let unionLineTotals = $derived(multiLoading ? null : commitLineTotals(unionFiles));
-  let unionActive = $derived(unionFiles.find((file) => file.path === multiFocus) ?? unionFiles[0] ?? null);
   let unionScroll = $state(0);
   let unionViewport = $state(0);
   let unionList = $state<HTMLDivElement | null>(null);
@@ -1134,6 +1135,11 @@
   });
 
   /** 净文件清单：两端不变（只是列表刷新）时不重读；两端或代次变化才读。 */
+  $effect(() => {
+    void multiKey;
+    unionFilter = "";
+  });
+
   $effect(() => {
     void multiRetry;
     const key = multiKey;
@@ -1675,16 +1681,33 @@
   }
 
   let copiedOid = $state<string | null>(null);
+  let copiedMessage = $state<string | null>(null);
 
   async function copyOid(oid: string) {
     try {
       await navigator.clipboard.writeText(oid);
       copiedOid = oid;
+      copiedMessage = null;
       setTimeout(() => {
         if (copiedOid === oid) copiedOid = null;
       }, 1500);
     } catch {
       copiedOid = null;
+    }
+  }
+
+  async function copyMessage(oid: string, summary: string, body: string) {
+    const text = [summary, body].filter(Boolean).join("\n\n");
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      copiedMessage = oid;
+      copiedOid = null;
+      setTimeout(() => {
+        if (copiedMessage === oid) copiedMessage = null;
+      }, 1500);
+    } catch {
+      copiedMessage = null;
     }
   }
 
@@ -2242,22 +2265,54 @@
           <aside class="commit-files" aria-label="提交中的文件">
             <div class="commit-files-head">
               <span class="commit-files-title">最终变更</span>
-              {#if !multiLoading}<span class="count">{unionFiles.length}</span>{/if}
+              {#if !multiLoading}<span class="count">{unionFilter.trim() ? `${unionFiles.length}/${multiFiles.length}` : multiFiles.length}</span>{/if}
               {#if unionLineTotals}
                 <span class="spacer"></span>
                 {@render lineTotal(unionLineTotals, "所选提交合起来")}
               {/if}
             </div>
-            {#if multiLoading && unionFiles.length === 0}
+            {#if multiFiles.length > 8}
+              <div class="commit-files-filter">
+                <div class="field sm">
+                  <Icon name="search" size={13} />
+                  <input
+                    aria-label="筛选最终变更文件"
+                    placeholder="筛选文件"
+                    autocomplete="off"
+                    spellcheck="false"
+                    bind:value={unionFilter}
+                    onkeydown={(event) => {
+                      if (event.key === "Escape" && unionFilter) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        unionFilter = "";
+                      } else if ((event.key === "ArrowDown" || event.key === "Enter") && unionFiles.length > 0) {
+                        event.preventDefault();
+                        if (!unionFiles.some((f) => f.path === unionActive?.path)) focusUnion(unionFiles[0].path);
+                        unionList?.focus({ preventScroll: true });
+                      }
+                    }}
+                  />
+                  {#if unionFilter}
+                    <button type="button" class="field-clear" aria-label="清除文件筛选" onclick={() => (unionFilter = "")}>
+                      <Icon name="x" size={12} />
+                    </button>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+            {#if multiLoading && multiFiles.length === 0}
               <div class="empty compact" role="status" aria-busy="true">
                 <span class="empty-icon"><span class="spinner"></span></span>
                 <strong>正在计算最终变更</strong>
               </div>
-            {:else if unionFiles.length === 0 && multiError}
+            {:else if multiFiles.length === 0 && multiError}
               <p class="commit-files-empty" role="alert">最终变更没有读取成功，无法确认文件范围：{multiError}</p>
               <button type="button" class="btn btn-secondary btn-sm commit-files-retry" onclick={() => (multiRetry += 1)}>重新读取</button>
-            {:else if unionFiles.length === 0}
+            {:else if multiFiles.length === 0}
               <p class="commit-files-empty">这些提交合起来没有文件变化。</p>
+            {:else if unionFiles.length === 0}
+              <p class="commit-files-empty">没有匹配的文件。</p>
             {:else}
               <div
                 class="file-list history-files history-union-files"
@@ -2321,7 +2376,7 @@
                 selection={unionActive ? { path: unionActive.path, side: "unstaged" } : null}
                 diff={multiDiff && multiDiff.path === unionActive?.path ? multiDiff : null}
                 error={null}
-                loading={multiDiffLoading || (multiLoading && unionFiles.length === 0)}
+                loading={multiDiffLoading || (multiLoading && multiFiles.length === 0)}
                 {disabled}
                 readOnly={true}
                 readOnlyLabel="所选提交的最终结果"
@@ -2332,7 +2387,7 @@
                 {onFullFile}
                 {onReadDocument}
                 fileNav={unionNav}
-                fileCount={unionFiles.length}
+                fileCount={multiFiles.length}
                 onRetry={() => (multiDiffRetry += 1)}
                 {onHunkNav}
               />
@@ -2396,6 +2451,15 @@
               <button type="button" aria-pressed={viewMode === "single"} title="一次看一个文件" onclick={() => useMode("single")}><Icon name="file" size={12} />单文件</button>
               <button type="button" aria-pressed={viewMode === "multi"} title="连续查看整次提交的全部文件" onclick={() => useMode("multi")}><Icon name="layers" size={12} />全部文件</button>
             </div>
+            <button
+              type="button"
+              class="icon-btn sm"
+              aria-label="复制提交说明"
+              title={copiedMessage === detail.commit.oid ? "已复制提交说明" : bodyRest ? "复制完整提交说明（摘要与正文）" : "复制提交摘要"}
+              onclick={() => copyMessage(detail?.commit.oid ?? "", detail?.commit.summary ?? "", bodyRest)}
+            >
+              <Icon name={copiedMessage === detail.commit.oid ? "check" : "copy"} size={13} />
+            </button>
             <span class="oid-chip" title={detail.commit.oid}>
               <Icon name="commit" size={12} />
               {shortOid(detail.commit.oid)}
@@ -2403,7 +2467,7 @@
                 <Icon name={copiedOid === detail.commit.oid ? "check" : "copy"} size={12} />
               </button>
             </span>
-            <span class="sr-only" aria-live="polite">{copiedOid ? "已复制提交 " + shortOid(copiedOid) : ""}</span>
+            <span class="sr-only" aria-live="polite">{copiedOid ? "已复制提交 " + shortOid(copiedOid) : copiedMessage ? "已复制提交说明" : ""}</span>
           </div>
           {#if detail.merge}
             {@const activeParent = parentChoice ?? detail.selectedParent ?? detail.commit.parents[0]}

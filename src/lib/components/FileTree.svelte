@@ -574,6 +574,67 @@
     return groups(view, entryActionEntries(row), system, treeActionEntries());
   }
 
+  /** 空白区域右键：面向仓库根目录的新建、系统定位、路径与文件树视图开关，不额外给树顶加按钮。 */
+  function rootMenuEntries(): ContextMenuEntry[] {
+    const rootNode = {
+      path: "",
+      name: "",
+      kind: "directory" as const,
+      ignored: false,
+      size: null,
+      error: null,
+      children: null,
+      expanded: true,
+      loading: false,
+      failure: null,
+      split: false,
+    };
+    const rootRow: FileTreeRow = {
+      node: rootNode,
+      path: "",
+      label: "",
+      depth: 0,
+      kind: "directory",
+      ignored: false,
+      size: null,
+      error: null,
+      expanded: true,
+      expandable: true,
+      loading: false,
+      failure: null,
+      empty: false,
+      chain: 1,
+      splittable: false,
+      segment: false,
+    };
+    const actions: ContextMenuEntry[] = [];
+    if (onEntryAction) {
+      const blocked = disabled ? BUSY_REASON : undefined;
+      actions.push({
+        id: "create",
+        label: "新建",
+        icon: "plus",
+        disabledReason: blocked,
+        submenu: [
+          { id: "create-file", label: "文件…", icon: "file", run: () => onEntryAction?.("createFile", rootRow) },
+          { id: "create-directory", label: "目录…", icon: "folder-plus", run: () => onEntryAction?.("createDirectory", rootRow) },
+        ],
+      });
+    }
+    const system: ContextMenuEntry[] = [];
+    if (onReveal) system.push({ id: "reveal-root", label: revealLabel, icon: "folder-open", run: () => onReveal?.("") });
+    const paths: ContextMenuEntry[] = [];
+    if (onCopyPath && toAbsolute) {
+      paths.push({ id: "copy-root-abs", label: "复制完整路径", icon: "copy", run: () => onCopyPath?.(toAbsolute(""), "仓库路径") });
+    }
+    if (onInsertToTerminal) {
+      if (paths.length > 0) paths.push({ separator: true });
+      paths.push({ id: "insert-root-terminal", label: "插入路径到终端", icon: "terminal", run: () => onInsertToTerminal?.([""]) });
+    }
+    if (paths.length > 0) system.push({ id: "path", label: "路径", icon: "link", submenu: paths });
+    return groups(actions, system, treeActionEntries());
+  }
+
   function openSelectionMenu(event: MouseEvent): void {
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
     menu = {
@@ -708,6 +769,14 @@
   tabindex="0"
   bind:this={list}
   onkeydown={onKey}
+  oncontextmenu={(event) => {
+    if (event.defaultPrevented) return;
+    if (event.target instanceof Element && event.target.closest(".file-tree-row, button, a, input")) return;
+    const entries = rootMenuEntries();
+    if (entries.length === 0) return;
+    event.preventDefault();
+    menu = { x: event.clientX, y: event.clientY, entries, label: "仓库根目录的操作" };
+  }}
   onscroll={(event) => (scrollTop = event.currentTarget.scrollTop)}
   bind:clientHeight={viewport}
 >

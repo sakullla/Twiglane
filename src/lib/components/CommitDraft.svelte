@@ -35,6 +35,7 @@
   import { MODIFIER_LABEL } from "../brand";
   import { BUSY_REASON, hasCommitSummary, summaryLength } from "../ui";
   import Icon from "./Icon.svelte";
+  import { openModalCount } from "./Modal.svelte";
 
   /**
    * 提交区：范围标签 → 一个说明框（第一行是摘要）→ 一行状态 → 主次两个按钮。
@@ -114,6 +115,7 @@
   let moreOpen = $state(false);
   let moreAnchor = $state<HTMLDivElement | null>(null);
   let moreButton = $state<HTMLButtonElement | null>(null);
+  let moreMenu = $state<HTMLDivElement | null>(null);
   let section = $state<HTMLElement | null>(null);
   let textarea = $state<HTMLTextAreaElement | null>(null);
   let menuStyle = $state("");
@@ -153,10 +155,13 @@
   $effect(() => {
     if (!moreOpen) return;
     const close = (event: MouseEvent) => {
+      if (openModalCount() > 0 || moreMenu?.querySelector("[data-modal-backdrop]")) return;
       if (moreAnchor && !moreAnchor.contains(event.target as Node)) moreOpen = false;
     };
     const key = (event: KeyboardEvent) => {
-      if (event.key === "Escape") moreOpen = false;
+      if (event.key !== "Escape" || openModalCount() > 0 || moreMenu?.querySelector("[data-modal-backdrop]")) return;
+      event.preventDefault();
+      void closeMore();
     };
     window.addEventListener("mousedown", close);
     window.addEventListener("keydown", key);
@@ -180,11 +185,16 @@
     };
   });
 
+  function moreMenuItems(): HTMLButtonElement[] {
+    if (!moreMenu) return [];
+    return [...moreMenu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')];
+  }
+
   /**
    * 菜单固定定位到按钮上方：文件列表面板是 overflow:hidden，绝对定位的菜单会被裁掉
    * （最窄 160px 时只剩一条缝）。向上展开、右对齐按钮，并按可用高度限制菜单高度。
    */
-  function toggleMore() {
+  async function toggleMore(focusEdge?: "first" | "last") {
     if (moreOpen) {
       moreOpen = false;
       return;
@@ -197,6 +207,32 @@
       menuStyle = `position:fixed;top:auto;left:auto;right:${right}px;bottom:${bottom}px;max-height:${room}px`;
     }
     moreOpen = true;
+    if (focusEdge) {
+      await tick();
+      const items = moreMenuItems();
+      (focusEdge === "last" ? items[items.length - 1] : items[0])?.focus();
+    }
+  }
+
+  function onMoreMenuKey(event: KeyboardEvent) {
+    if (openModalCount() > 0 || moreMenu?.querySelector("[data-modal-backdrop]")) return;
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") return;
+    const items = moreMenuItems();
+    if (items.length === 0) return;
+    event.preventDefault();
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (event.key === "Home") {
+      items[0]?.focus();
+      return;
+    }
+    if (event.key === "End") {
+      items[items.length - 1]?.focus();
+      return;
+    }
+    const delta = event.key === "ArrowDown" ? 1 : -1;
+    const next = current < 0 ? (delta > 0 ? 0 : items.length - 1) : (current + delta + items.length) % items.length;
+    items[next]?.focus();
   }
 
   async function closeMore() {
@@ -353,12 +389,35 @@
           aria-expanded={moreOpen}
           title="更多：处理冲突、撤销提交、放弃修改与同步"
           bind:this={moreButton}
-          onclick={toggleMore}
+          onclick={(event) => void toggleMore(event.detail === 0 ? "first" : undefined)}
+          onkeydown={(event) => {
+            if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+            if (event.key === "ArrowDown") {
+              event.preventDefault();
+              if (!moreOpen) void toggleMore("first");
+              else moreMenuItems()[0]?.focus();
+            } else if (event.key === "ArrowUp") {
+              event.preventDefault();
+              if (!moreOpen) void toggleMore("last");
+              else {
+                const items = moreMenuItems();
+                items[items.length - 1]?.focus();
+              }
+            }
+          }}
         >
           <Icon name="more" size={15} />
         </button>
         {#if moreOpen}
-          <div class="menu composer-more-menu" role="menu" aria-label="更多提交操作" style={menuStyle}>
+          <div
+            class="menu composer-more-menu"
+            role="menu"
+            tabindex="-1"
+            aria-label="更多提交操作"
+            style={menuStyle}
+            bind:this={moreMenu}
+            onkeydown={onMoreMenuKey}
+          >
             {@render overflow(closeMore)}
           </div>
         {/if}
@@ -381,8 +440,14 @@
       oninput={(event) => onInput((event.currentTarget as HTMLTextAreaElement).value)}
       onblur={onBlur}
       onkeydown={(event) => {
-        if (event.isComposing || event.key !== "Escape") return;
-        if (!value) {
+        if (event.isComposing) return;
+        if (ready && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key === "Enter") {
+          event.preventDefault();
+          event.stopPropagation();
+          onCommit();
+          return;
+        }
+        if (event.key === "Escape" && !value) {
           event.preventDefault();
           event.stopPropagation();
           active = false;

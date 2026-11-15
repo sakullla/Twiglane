@@ -42,6 +42,7 @@
   user-select: none;
 }
 .btn:active:not(:disabled) { transform: translateY(0.5px); }
+.btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .btn-sm { height: 26px; padding: 0 var(--space-8); font-size: var(--text-sm); gap: 5px; border-radius: var(--radius-sm); }
 .btn-lg { height: 40px; padding: 0 18px; font-size: var(--text-md); }
 .btn-block { width: 100%; }
@@ -512,9 +513,11 @@
   .composer { gap: var(--space-4); padding: var(--space-6) var(--space-12); }
   .composer-actions .btn { height: 30px; }
 }
-/* 上沿分隔线：命中区上下各 5px，覆盖在 1px 的分区线上；悬停、聚焦或拖动时亮出 accent 指示条。 */
+/* 上沿分隔线：命中区上下各 5px，覆盖在 1px 的分区线上；悬停、聚焦或拖动时亮出 accent 指示条与中段把手。 */
 .composer-resizer { position: absolute; top: -5px; left: 0; right: 0; height: 10px; z-index: var(--z-resizer); cursor: row-resize; outline: none; touch-action: none; }
+.composer-resizer::before { content: ""; position: absolute; left: 50%; top: 3px; width: 28px; height: 4px; border-radius: 999px; background: var(--accent); opacity: 0; transform: translateX(-50%); transition: opacity var(--duration-fast) var(--ease); pointer-events: none; z-index: 1; }
 .composer-resizer::after { content: ""; position: absolute; left: 0; right: 0; top: 4px; height: 2px; background: transparent; transition: background var(--duration-fast) var(--ease); }
+.composer-resizer:hover::before, .composer-resizer:focus-visible::before, .composer.resizing .composer-resizer::before { opacity: 1; }
 .composer-resizer:hover::after, .composer.resizing .composer-resizer::after { background: var(--accent); }
 .composer-resizer:focus-visible::after { height: 2px; background: var(--focus); }
 .composer.resizing, .composer.resizing * { cursor: row-resize; user-select: none; }
@@ -718,16 +721,17 @@
 .diff-line.pickable:hover:not(.picked), .side-cell.pickable:hover:not(.picked) { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
 .diff-line.picked, .side-cell.picked { box-shadow: inset 0 0 0 1px var(--accent); }
 .diff-line.picked .ln, .side-cell.picked .ln { color: var(--accent-text); }
-.diff-line.hunk { background: var(--hunk-bg); color: var(--hunk-fg); }
+.diff-line.hunk { background: var(--hunk-bg); color: var(--hunk-fg); box-shadow: inset 0 1px 0 var(--border), inset 0 -1px 0 var(--border); }
 .diff-line.hunk .ln { border-right-color: transparent; background: transparent; }
 /* 块标题：「第 68–74 行」+ 所在函数，用界面字体而不是 Git 的 @@ 原文。 */
 .hunk-caption { display: flex; align-items: center; gap: var(--space-8); min-width: 0; font-family: var(--font); }
 .hunk-at { flex: none; font-weight: var(--weight-medium); color: var(--hunk-fg); }
 .hunk-context { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); color: var(--fg-muted); }
-.side-hunk { grid-column: 1 / 3; grid-row: 1; min-width: 0; overflow: hidden; background: var(--hunk-bg); grid-template-columns: 48px minmax(0, 1fr); }
+.side-hunk { grid-column: 1 / 3; grid-row: 1; min-width: 0; overflow: hidden; background: var(--hunk-bg); box-shadow: inset 0 1px 0 var(--border), inset 0 -1px 0 var(--border); grid-template-columns: 48px minmax(0, 1fr); }
 .side-row > .hunk-btn { grid-column: 3; grid-row: 1; }
 /* 按块暂存：块标题行右侧的一枚胶囊，与行同高，不压住代码。 */
 .hunk-btn { margin: 0 var(--space-8) 0 0; height: 20px !important; padding: 0 10px !important; border: 0 !important; font-family: var(--font); font-size: var(--text-xs) !important; font-weight: var(--weight-medium); border-radius: 999px !important; box-shadow: none !important; }
+.hunk-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .hunk-btn.btn-secondary { background: var(--accent-soft); color: var(--accent-text); }
 .hunk-btn.btn-secondary:hover:not(:disabled) { background: var(--accent); color: var(--accent-fg); }
 .side-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
@@ -1098,6 +1102,7 @@ label.list-row .checkbox { margin-top: 2px; }
 .commit-body-row { display: flex; align-items: center; gap: var(--space-4); min-width: 0; }
 .commit-body-row.open { flex-direction: column; align-items: flex-start; }
 .commit-body-row .commit-body { flex: 0 1 auto; min-width: 0; }
+.commit-body-row.open .commit-body { padding-left: var(--space-12); border-left: 2px solid var(--border-strong); margin-block: var(--space-2); }
 .commit-body-toggle { flex: none; height: 22px; padding: 0 var(--space-6); }
 .icon.flip { transform: rotate(180deg); }
 .commit-byline { display: flex; align-items: center; gap: var(--space-2) var(--space-8); flex-wrap: wrap; font-size: var(--text-xs); color: var(--fg-muted); }

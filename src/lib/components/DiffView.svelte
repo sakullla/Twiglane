@@ -351,12 +351,16 @@
     return lines[cell.index] ?? null;
   }
 
-  function pickRowSide(cell: { index?: number } | null): void {
-    const line = pickLineOf(cell);
-    if (line) toggleLine(line);
+  function pickRowSide(cell: { index?: number } | null, shiftKey = false): void {
+    if (!cell || cell.index === undefined) return;
+    toggleLineAt(cell.index, shiftKey);
   }
 
   type PickableLine = { hunkIndex: number | null; kind: string; oldNo: number | null; newNo: number | null };
+
+  /** 连选锚点：记录最近一次单点/连选落在 lines 里的下标，以及那一次是「选入」还是「取消」。 */
+  let pickAnchorIndex = $state<number | null>(null);
+  let pickAnchorSelecting = $state(true);
 
   function isPicked(line: PickableLine): boolean {
     const key = pickKey(line);
@@ -379,12 +383,48 @@
     picked = [...picked, { hunkIndex: line.hunkIndex as number, kind: line.kind as "add" | "del", oldNo: line.oldNo, newNo: line.newNo }];
   }
 
+  function toggleLineAt(index: number, shiftKey = false): void {
+    const line = lines[index];
+    if (!line || !canPick(line)) return;
+    if (shiftKey && pickAnchorIndex !== null && pickAnchorIndex !== index) {
+      const from = Math.min(pickAnchorIndex, index);
+      const to = Math.max(pickAnchorIndex, index);
+      const rangeLines: Array<ViewLine & { hunkIndex: number; kind: "add" | "del" }> = [];
+      for (let cursor = from; cursor <= to; cursor += 1) {
+        const candidate = lines[cursor];
+        if (candidate && canPick(candidate)) {
+          rangeLines.push(candidate as ViewLine & { hunkIndex: number; kind: "add" | "del" });
+        }
+      }
+      if (rangeLines.length > 0) {
+        if (pickAnchorSelecting) {
+          const existing = new Set(picked.map(pickKey));
+          const additions = rangeLines
+            .filter((item) => !existing.has(pickKey(item)))
+            .map((item) => ({ hunkIndex: item.hunkIndex, kind: item.kind, oldNo: item.oldNo, newNo: item.newNo }));
+          if (additions.length > 0) picked = [...picked, ...additions];
+        } else {
+          const removeKeys = new Set(rangeLines.map(pickKey));
+          picked = picked.filter((item) => !removeKeys.has(pickKey(item)));
+        }
+        pickAnchorIndex = index;
+        return;
+      }
+    }
+    const wasPicked = isPicked(line);
+    toggleLine(line);
+    pickAnchorSelecting = !wasPicked;
+    pickAnchorIndex = index;
+  }
+
   /** 进入或退出选行模式都清空选择，避免看不见的选择被写入。 */
   function setPickMode(next: boolean): void {
     if (next && !canPickLines) return;
     if (pickMode === next) return;
     pickMode = next;
     picked = [];
+    pickAnchorIndex = null;
+    pickAnchorSelecting = true;
   }
 
   function commitPickedLines(): void {
@@ -399,6 +439,8 @@
   function clearLineSelection(): void {
     if (picked.length > 0) picked = [];
     if (pickMode) pickMode = false;
+    pickAnchorIndex = null;
+    pickAnchorSelecting = true;
   }
 
   let lineScope = $derived(
@@ -1146,8 +1188,7 @@
     if (!pickMode || !(event.target instanceof Element) || event.target.closest("button")) return;
     const target = event.target.closest<HTMLElement>("[data-line]");
     const index = Number(target?.dataset.line);
-    const line = Number.isInteger(index) ? lines[index] : null;
-    if (line) toggleLine(line);
+    if (Number.isInteger(index)) toggleLineAt(index, event.shiftKey);
   }
 
   function onDiffKey(event: KeyboardEvent) {
@@ -1329,7 +1370,7 @@
           class="btn btn-ghost btn-sm diff-ws-btn diff-pick-btn"
           aria-pressed={pickMode}
           aria-label="选择行"
-          title={pickBlocker ?? (pickMode ? "点击已选行可取消；再次点「选行」退出" : "开启后直接点击新增或删除行，再单独暂存")}
+          title={pickBlocker ?? (pickMode ? "点击已选行可取消，Shift+点击可连选区间，按 Esc 或再次点「选行」退出" : "开启后点击新增或删除行（Shift+点击连选区间），再单独暂存")}
           disabled={!canPickLines && !pickMode}
           onclick={() => setPickMode(!pickMode)}
         >
@@ -1347,6 +1388,8 @@
               disabled={allPickable.length === 0 || picked.length === allPickable.length}
               onclick={() => {
                 picked = allPickable.map((line) => ({ hunkIndex: line.hunkIndex, kind: line.kind, oldNo: line.oldNo, newNo: line.newNo }));
+                pickAnchorIndex = null;
+                pickAnchorSelecting = true;
               }}
             >全选</button>
           {/if}
@@ -1357,7 +1400,11 @@
               aria-label="清除选中的行"
               title={picked.length === 0 ? "还没有选中任何行" : "清空当前的行选择"}
               disabled={picked.length === 0}
-              onclick={() => (picked = [])}
+              onclick={() => {
+                picked = [];
+                pickAnchorIndex = null;
+                pickAnchorSelecting = true;
+              }}
             >清除</button>
           {/if}
           <button
@@ -1559,6 +1606,12 @@
       bind:this={scroller}
       onclick={onDiffClick}
       onkeydown={(event) => {
+        if (event.key === "Escape" && pickMode && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+          event.preventDefault();
+          event.stopPropagation();
+          setPickMode(false);
+          return;
+        }
         if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
           event.preventDefault();
           const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
@@ -1625,7 +1678,7 @@
                   aria-label={pickLabel(line)}
                   title={pickLabel(line)}
                   data-line-pick={absolute}
-                  onclick={() => toggleLine(line)}
+                  onclick={(event) => toggleLineAt(absolute, event.shiftKey)}
                 >
                   <Icon name={isPicked(line) ? "check" : line.kind === "del" ? "minus" : "plus"} size={11} />
                 </button>
@@ -1691,7 +1744,7 @@
                       aria-label={pickLabel(pickLineOf(row.left)!)}
                       title={pickLabel(pickLineOf(row.left)!)}
                       data-line-pick={row.left?.index}
-                      onclick={() => pickRowSide(row.left)}
+                      onclick={(event) => pickRowSide(row.left, event.shiftKey)}
                     >
                       <Icon name={isPicked(pickLineOf(row.left)!) ? "check" : "minus"} size={11} />
                     </button>
@@ -1706,7 +1759,7 @@
                       aria-label={pickLabel(pickLineOf(row.right)!)}
                       title={pickLabel(pickLineOf(row.right)!)}
                       data-line-pick={row.right?.index}
-                      onclick={() => pickRowSide(row.right)}
+                      onclick={(event) => pickRowSide(row.right, event.shiftKey)}
                     >
                       <Icon name={isPicked(pickLineOf(row.right)!) ? "check" : "plus"} size={11} />
                     </button>

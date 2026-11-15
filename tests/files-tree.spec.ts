@@ -724,6 +724,38 @@ describe("目录树默认外观", () => {
     expectNoTreeChrome();
   });
 
+  it("在目录树空白处右键提供仓库根目录的新建、路径与文件树入口，不额外增加常驻按钮", async () => {
+    const onEntryAction = vi.fn();
+    const onCopyPath = vi.fn();
+    const onReveal = vi.fn();
+    const props = {
+      ...baseProps(),
+      onEntryAction,
+      onCopyPath,
+      onReveal,
+      toAbsolute: (rel: string) => (rel ? `/repo/${rel}` : "/repo"),
+    };
+    render(FileTree, { props: props as never });
+    expectNoTreeChrome();
+
+    const treeEl = screen.getByRole("tree", { name: "仓库文件" });
+    await fireEvent.contextMenu(treeEl, { clientX: 64, clientY: 180 });
+    const menu = screen.getByRole("menu", { name: "仓库根目录的操作" });
+    expect(within(menu).getByRole("menuitem", { name: "新建" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: "路径" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: "文件树" })).toBeTruthy();
+
+    const createSub = await openSubmenu(menu, "新建");
+    await fireEvent.click(within(createSub).getByRole("menuitem", { name: "文件…" }));
+    expect(onEntryAction).toHaveBeenCalledWith("createFile", expect.objectContaining({ path: "", kind: "directory" }));
+
+    await fireEvent.contextMenu(treeEl, { clientX: 64, clientY: 180 });
+    const pathSub = await openSubmenu(screen.getByRole("menu", { name: "仓库根目录的操作" }), "路径");
+    await fireEvent.click(within(pathSub).getByRole("menuitem", { name: "复制完整路径" }));
+    expect(onCopyPath).toHaveBeenCalledWith("/repo", "仓库路径");
+    expectNoTreeChrome();
+  });
+
   it("只看有改动时树上方有一行可关闭的说明，关掉后图标排不出现", async () => {
     const props = { ...baseProps(), changedOnly: true };
     const view = render(FileTree, { props: props as never });

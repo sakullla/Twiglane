@@ -3126,10 +3126,12 @@
   }
 
   function absolutePath(relative: string): string {
-    const root = opened?.summary.path ?? "";
-    const separator = root.includes("\\") && !root.includes("/") ? "\\" : "/";
+    const raw = opened?.summary.path ?? "";
+    const cleanRoot = raw.replace(/[\\/]+$/, "") || (raw.startsWith("/") ? "/" : raw);
+    if (!relative) return cleanRoot;
+    const separator = raw.includes("\\") && !raw.includes("/") ? "\\" : "/";
     // 仓库路径是 Windows 风格（只含反斜杠）时用反斜杠拼接，否则用斜杠；去掉末尾多余的分隔符。
-    return `${root.replace(/[\\/]+$/, "")}${separator}${relative.split("/").join(separator)}`;
+    return `${cleanRoot === "/" ? "" : cleanRoot}${separator}${relative.split("/").join(separator)}`;
   }
 
   /** 文件树「插入到终端」：展开终端，按终端类型加引号插入完整路径，不回车。 */

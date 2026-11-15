@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/svelte";
-import { tick } from "svelte";
+import { createRawSnippet, tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTextDiff } from "../src/lib/diff";
 import { hasCommitSummary } from "../src/lib/ui";
@@ -511,6 +511,56 @@ describe("提交区", () => {
     expect(row.textContent).toContain("不会再次提交");
     await fireEvent.click(screen.getByRole("button", { name: "重试推送" }));
     expect(onRetryPush).toHaveBeenCalledTimes(1);
+  });
+
+  it("在说明输入框内按 Ctrl/⌘+Enter 可直接提交，输入法选词或未就绪时不误触", async () => {
+    const emptyDraft = renderDraft({ value: "" });
+    const emptyBox = screen.getByRole("textbox", { name: "提交说明草稿" });
+    await fireEvent.keyDown(emptyBox, { key: "Enter", ctrlKey: true });
+    expect(emptyDraft.onCommit).not.toHaveBeenCalled();
+    document.body.innerHTML = "";
+
+    const { onCommit } = renderDraft({ value: "feat: 完善提交框快捷键" });
+    const box = screen.getByRole("textbox", { name: "提交说明草稿" });
+    await fireEvent.keyDown(box, { key: "Enter", ctrlKey: true, isComposing: true });
+    expect(onCommit).not.toHaveBeenCalled();
+    await fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
+    expect(onCommit).toHaveBeenCalledTimes(1);
+    await fireEvent.keyDown(box, { key: "Enter", metaKey: true });
+    expect(onCommit).toHaveBeenCalledTimes(2);
+  });
+
+  it("更多提交操作菜单支持方向键、Home/End 跳过禁用项并在 Esc 后把焦点还给触发按钮", async () => {
+    const overflow = createRawSnippet<[() => void]>(() => ({
+      render: () => `
+        <div>
+          <button type="button" role="menuitem">撤销上一次提交</button>
+          <button type="button" role="menuitem" disabled title="没有冲突">处理冲突</button>
+          <button type="button" role="menuitem">放弃全部未暂存修改</button>
+        </div>
+      `,
+    }));
+    renderDraft({ value: "feat: 菜单键盘导航", overflow });
+    const trigger = screen.getByRole("button", { name: "更多提交操作" });
+    trigger.focus();
+    await fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    await tick();
+
+    const first = screen.getByRole("menuitem", { name: "撤销上一次提交" });
+    const third = screen.getByRole("menuitem", { name: "放弃全部未暂存修改" });
+    expect(document.activeElement).toBe(first);
+
+    await fireEvent.keyDown(first, { key: "ArrowDown" });
+    expect(document.activeElement, "跳过中间禁用的菜单项").toBe(third);
+    await fireEvent.keyDown(third, { key: "Home" });
+    expect(document.activeElement).toBe(first);
+    await fireEvent.keyDown(first, { key: "End" });
+    expect(document.activeElement).toBe(third);
+
+    await fireEvent.keyDown(window, { key: "Escape" });
+    await tick();
+    expect(screen.queryByRole("menu", { name: "更多提交操作" })).toBeNull();
+    expect(document.activeElement).toBe(trigger);
   });
 });
 

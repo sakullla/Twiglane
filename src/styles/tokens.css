@@ -105,7 +105,8 @@
   --radius-lg: 12px;
   --radius-xl: 14px;
   --font: "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", sans-serif;
-  --mono: "JetBrains Mono", "Cascadia Code", "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+  /* 等宽字体本身不含中文字形：末尾补上各平台的无衬线中文字体，否则代码、差异与终端里的中文会落到浏览器默认的衬线体（宋体）。 */
+  --mono: "JetBrains Mono", "Cascadia Code", "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, "Liberation Mono", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans Mono CJK SC", "Noto Sans CJK SC", "Source Han Sans SC", "WenQuanYi Micro Hei Mono", monospace;
 }
 
 /* 浅色主题配色 */

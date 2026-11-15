@@ -146,6 +146,7 @@
       class="file-nav-pos"
       aria-live="polite"
       aria-label={`第 ${nav.index + 1} / ${nav.total} 个文件`}
+      title={`第 ${nav.index + 1} 个文件，共 ${nav.total} 个`}
     >{nav.index + 1}/{nav.total}</span>
   {/if}
   {/if}

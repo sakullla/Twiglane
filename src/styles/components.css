@@ -360,15 +360,25 @@
 .view-switcher button { white-space: nowrap; min-width: 0; }
 .pane-head > .spacer { display: none; }
 .view-switcher .count { height: 16px; min-width: 16px; padding: 0 var(--space-4); font-size: var(--text-xs); }
-/* 左栏最窄时收起计数，保证临时保存按钮不被裁掉。 */
-@container pane-head (max-width: 200px) {
+/* 左栏变窄时先收起计数，再窄就只留图标（名称与快捷键在 aria-label 和悬停提示里），
+   三个视图按钮的文字不会互相压叠，临时保存按钮也不被裁掉。 */
+@container pane-head (max-width: 250px) {
   .view-switcher .count { display: none; }
   .view-switcher button { padding: 0 var(--space-8); }
+}
+@container pane-head (max-width: 200px) {
+  .view-switcher button > span:not([class]) { display: none; }
+  .view-switcher button { padding: 0; }
 }
 .inline-error { margin: 8px 10px 0; padding: 7px 10px; border-radius: var(--radius-sm); background: var(--danger-soft); color: var(--danger-text); font-size: var(--text-sm); }
 .file-tools { display: flex; align-items: center; gap: var(--space-6); padding: 0 var(--space-8) var(--space-8); flex: none; container-type: inline-size; container-name: file-tools; }
 @container file-tools (max-width: 340px) {
   .review-count > .icon { display: none; }
+}
+/* 左栏接近最窄时把宽度让给搜索框（否则只剩一个图标宽）：审阅进度暂时收起，加宽左栏就回来；
+   审阅标记、未审阅跳转与隐藏已审阅都不受影响。 */
+@container file-tools (max-width: 200px) {
+  .review-count { display: none; }
 }
 .file-tools .segmented button { height: var(--control-segmented); padding: 0 var(--space-8); font-size: var(--text-xs); }
 /* 列表/目录切换只用图标：两个方块按钮，名称在 aria-label 和悬停提示里，把宽度留给搜索和标题。 */
@@ -552,7 +562,8 @@
 }
 .composer-box:hover { border-color: var(--control-border-hover); }
 .composer-box:focus-within { border-color: var(--accent); outline: 2px solid var(--focus); outline-offset: -1px; }
-.composer-count { flex: none; margin-left: auto; color: var(--fg-subtle); font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* 摘要字数在范围标签那一行，紧挨「更多」按钮左侧。 */
+.composer-count { flex: none; padding: 0 var(--space-2); color: var(--fg-subtle); font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .composer-count.near { color: var(--warning-text); }
 .composer-count.over { color: var(--danger-text); font-weight: var(--weight-semibold); }
 .composer-box textarea {
@@ -589,7 +600,6 @@
 .composer-meta > .composer-inline-action { order: 2; }
 [data-push-error] > .composer-inline-action:not(.composer-expand) { order: 4; margin-left: 0; }
 .composer-expand + .composer-inline-action { margin-left: 0; }
-.composer-meta > .composer-count { order: 4; }
 .composer-inline-action {
   flex: none;
   margin-left: auto;
@@ -603,8 +613,6 @@
   white-space: nowrap;
   transition: background var(--duration-fast) var(--ease);
 }
-/* 字数提示已经在右端吃掉自动外边距，按钮就紧跟在它后面，不再被推到另一侧。 */
-.composer-count + .composer-inline-action { margin-left: 0; }
 .composer-inline-action:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 20%, transparent); }
 .composer-inline-action:disabled { cursor: not-allowed; background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--control-border); color: var(--fg-subtle); }
 .composer-actions { display: flex; gap: var(--space-6); min-width: 0; }
@@ -616,6 +624,8 @@
 /* 窄栏（左栏最窄 160px）：收起键位提示，两个提交按钮上下排列，文字都完整显示（R3）。 */
 @container composer (max-width: 300px) {
   .composer-commit kbd { display: none; }
+  /* 窄栏里范围标签、字数和「更多」挤在一行：字数只留数字，完整说明在 title 与 aria-label 里。 */
+  .composer-count-label { display: none; }
   .composer-meta { flex-wrap: wrap; }
   .composer-meta > span { flex: 1 1 0; min-width: 96px; white-space: normal; }
   .composer-actions { flex-direction: column; }
@@ -746,9 +756,13 @@
 .code-in[data-sign]::before { content: attr(data-sign); display: inline-block; width: 1.6ch; color: var(--fg-subtle); user-select: none; }
 .diff-line.add .code-in[data-sign]::before, .side-cell.add .code-in[data-sign]::before { color: var(--add-fg); font-weight: var(--weight-semibold); }
 .diff-line.del .code-in[data-sign]::before, .side-cell.del .code-in[data-sign]::before { color: var(--del-fg); font-weight: var(--weight-semibold); }
-/* 行内改动：配对的删除/新增行之间真正不同的字符，用更深一档的增删底色加一条底线标出，不只靠底色深浅。 */
+/* 行内改动：配对的删除/新增行之间真正不同的字符，用更深一档的增删底色加一条底线标出，不只靠底色深浅。
+   语法高亮会把一段改动切成多个相邻的 span：只在整段的两端收圆角，中间接缝处直角相接，
+   底色与底线连成一整段，不会断成一节一节、像拼写检查的波浪线。 */
 .diff-line.add .wd, .side-cell.add .wd { background: var(--add-strong); border-radius: 3px; box-shadow: inset 0 -1px 0 var(--add-fg); }
 .diff-line.del .wd, .side-cell.del .wd { background: var(--del-strong); border-radius: 3px; box-shadow: inset 0 -1px 0 var(--del-fg); }
+.code-in .wd:has(+ .wd) { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.code-in .wd + .wd { border-top-left-radius: 0; border-bottom-left-radius: 0; }
 
 /* ---------- 语法高亮（Shiki CSS 变量主题的语义类，颜色在 tokens.css） ---------- */
 .tk-keyword { color: var(--syn-keyword); }

@@ -393,9 +393,14 @@ describe("提交区", () => {
     expect(document.querySelector(".composer-meta")?.className).toContain("warn");
     expect(document.querySelector(".composer-scope")?.className).toContain("empty-scope");
     document.body.innerHTML = "";
-    // 有暂存文件、只是没写说明：不是警告，状态行保持中性。
+    // 有暂存文件、只是没写说明：不是警告，也不常驻一条空状态行占高度。
     renderDraft({ value: "" });
-    expect(document.querySelector(".composer-meta")?.className).not.toContain("warn");
+    expect(document.querySelector(".composer-meta")).toBeNull();
+    // 开始写说明后字数出现在范围标签那一行，仍然不额外插入状态行，按钮不会被顶下去。
+    document.body.innerHTML = "";
+    renderDraft({ value: "修复登录跳转" });
+    expect(document.querySelector(".composer-meta")).toBeNull();
+    expect(document.querySelector(".composer-head .composer-count")?.textContent).toBe("摘要 6/72");
   });
 
   it("字数提示和「全部暂存」同时成立时都在，互不顶掉", async () => {

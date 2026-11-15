@@ -1265,7 +1265,7 @@
           >
             <Icon name="chevron-down" size={15} />
           </button>
-          {#if hunkState.current >= 0}<span class="file-nav-pos" title={moreToRead ? "后面还有没读到的内容，按「下一处」会继续读取" : undefined}>{hunkState.current + 1}/{hunkState.total}{moreToRead ? "+" : ""}</span>{/if}
+          {#if hunkState.current >= 0}<span class="file-nav-pos" title={moreToRead ? "后面还有没读到的内容，按「下一处」会继续读取" : `当前文件的第 ${hunkState.current + 1} 处改动，共 ${hunkState.total} 处`}>{hunkState.current + 1}/{hunkState.total}{moreToRead ? "+" : ""}</span>{/if}
         </div>
       {/if}
       <div class="diff-file">

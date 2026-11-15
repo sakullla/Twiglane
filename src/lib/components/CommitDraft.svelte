@@ -379,6 +379,14 @@
       </button>
     {/if}
     <span class="spacer"></span>
+    <!-- 摘要字数放在范围标签这一行的空位里：不再为它常驻一条状态行，开始打字时按钮也不会被顶下去。 -->
+    {#if summaryChars > 0}
+      <span
+        class={`composer-count ${counterTone}`}
+        title={`第一行是摘要：建议不超过 ${SUMMARY_SOFT} 个字符，最多 ${SUMMARY_HARD} 个`}
+        aria-label={`摘要 ${summaryChars} 个字符`}
+      ><span class="composer-count-label">{"摘要 "}</span>{summaryChars}/{SUMMARY_HARD}</span>
+    {/if}
     {#if overflow}
       <div class="menu-anchor" bind:this={moreAnchor}>
         <button
@@ -457,6 +465,8 @@
     ></textarea>
   </div>
 
+  <!-- 状态行只在有话要说时出现（没暂存 / 提交失败），平时不占高度。 -->
+  {#if paths.length === 0 || error}
   <div class="composer-meta" class:warn={paths.length === 0} class:expanded={errorOpen}>
     {#if paths.length === 0}
       <!-- 只有「没暂存」这种看不出来的原因才就地写一行；说明框空着一眼可见，原因留在按钮提示里。 -->
@@ -481,21 +491,13 @@
         </button>
       {/if}
     {/if}
-    <!-- 摘要字数与「全部暂存」互不挤占：两者是不同的问题（写多长 / 暂存了没有），
-         任何一个都不该因为另一个出现而消失。 -->
-    {#if summaryChars > 0}
-      <span
-        class={`composer-count ${counterTone}`}
-        title={`第一行是摘要：建议不超过 ${SUMMARY_SOFT} 个字符，最多 ${SUMMARY_HARD} 个`}
-        aria-label={`摘要 ${summaryChars} 个字符`}
-      >摘要 {summaryChars}/{SUMMARY_HARD}</span>
-    {/if}
     {#if paths.length === 0 && stageableCount > 0 && onStageAll}
       <button type="button" class="composer-inline-action" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={onStageAll}>
         全部暂存 {stageableCount}
       </button>
     {/if}
   </div>
+  {/if}
 
   {#if pushError}
     <!-- 两个阶段分开说明：本地提交已完成，失败只在推送；重试入口只推送，不会再次提交（R6）。

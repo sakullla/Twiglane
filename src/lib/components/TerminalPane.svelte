@@ -81,7 +81,7 @@
 
   const IS_WINDOWS = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
   const IS_MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform ?? "");
-  const FALLBACK_FONT = '"Cascadia Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  const FALLBACK_FONT = '"Cascadia Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans Mono CJK SC", monospace';
   /** 快速收起/展开复用纹理；持续隐藏后仍释放 GPU 资源。 */
   export const WEBGL_RELEASE_DELAY_MS = 1500;
 </script>

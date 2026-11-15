@@ -607,7 +607,7 @@
       icon: "trash",
       danger: true,
       disabledReason: branch.current ? "不能删除当前分支，先切换到其他分支" : (elsewhere ?? busy),
-      run: () => void askDelete(branch),
+      run: () => requestDelete(branch),
     });
     menu = { x: point.x, y: point.y, entries, label: `${branch.name} 的操作` };
   }
@@ -654,7 +654,7 @@
         icon: "trash",
         danger: true,
         disabledReason: worktreeRemoveReason(path) ?? busy,
-        run: () => askRemoveWorktree(branch),
+        run: () => requestDelete(branch),
       },
     );
     menu = { x: point.x, y: point.y, entries, label: `${branch.name} 的操作` };
@@ -684,6 +684,27 @@
     void restoreOrigin();
   }
 
+  /** 图标、右键和更多菜单共用删除入口，按当前列表的占用状态选择确认框。 */
+  function requestDelete(branch: BranchRecord) {
+    const target = branches.find((item) => item.name === branch.name && item.remote === branch.remote);
+    if (!target || target.current || blocked) return;
+    menu = null;
+    if (elsewhereReason(target)) askRemoveWorktree(target);
+    else askDelete(target);
+  }
+
+  /** 删除工作区及失败的 Git 写入都可能推进代次，后续删分支统一跟上再试一次。 */
+  async function deleteLocalBranch(repo: OpenedRepository, name: string, force: boolean): Promise<BranchState> {
+    const ask = (generation: number) => api.deleteBranch(repo.summary.path, name, force, generation, nextId());
+    try {
+      return await ask(repo.generation);
+    } catch (error) {
+      const failure = normalizeError(error);
+      if (failure.code !== "stale" || failure.generation === undefined) throw failure;
+      return ask(failure.generation);
+    }
+  }
+
   /** 删工作区由主仓库执行 git worktree remove；有未提交改动时 Git 拒绝，再确认一次才带 --force。 */
   async function confirmRemoveWorktree() {
     const prompt = worktreePrompt;
@@ -691,6 +712,8 @@
     if (!prompt || blocked) return;
     const dropBranch = alsoDeleteBranch && !prompt.branch.remote;
     let branchNote: string | null = null;
+    let branchUnmerged = false;
+    let deletedBranchState: BranchState | null = null;
     let failure: { code: string; message: string } | null = null;
     writing = true;
     localBusy = true;
@@ -701,18 +724,12 @@
       onRecent?.(recent);
       if (dropBranch) {
         try {
-          const ask = (generation: number) => api.deleteBranch(currentRepo.summary.path, prompt.branch.name, false, generation, nextId());
-          try {
-            await ask(currentRepo.generation);
-          } catch (error) {
-            const stale = normalizeError(error);
-            if (stale.code !== "stale" || stale.generation === undefined) throw stale;
-            await ask(stale.generation);
-          }
+          deletedBranchState = await deleteLocalBranch(currentRepo, prompt.branch.name, false);
         } catch (error) {
           const branchFailure = normalizeError(error);
-          branchNote = branchFailure.code === "branch_unmerged"
-            ? `分支 ${prompt.branch.name} 还有未合入当前分支的提交，没有删除；需要时可以在列表里再删。`
+          branchUnmerged = branchFailure.code === "branch_unmerged";
+          branchNote = branchUnmerged
+            ? `分支 ${prompt.branch.name} 还有未合入的提交，尚未删除；再次确认后才会删除分支。`
             : `分支 ${prompt.branch.name} 没有删除：${branchFailure.message}`;
         }
       }
@@ -733,15 +750,25 @@
       return;
     }
     worktreePrompt = null;
-    void restoreOrigin();
+    // 先同步真实列表，再显示部分成功的说明，避免读取入口清掉刚写下的错误。
+    if (deletedBranchState) applyBranches(deletedBranchState);
+    else await loadBranches();
+    if (opened.summary.path !== currentRepo.summary.path) return;
     if (branchNote) errorText = `已删除工作区 ${worktreeName(prompt.path)}。${branchNote}`;
     else onNotice(
       dropBranch
         ? `已删除工作区 ${worktreeName(prompt.path)} 和分支 ${prompt.branch.name}。`
         : `已删除工作区 ${worktreeName(prompt.path)}，分支 ${prompt.branch.name} 和提交都保留。`,
     );
-    // 列表留在原处重读：占用标记随之消失，不闪回「正在读取」。
-    void loadBranches();
+    if (branchUnmerged) {
+      const branch = branches.find((item) => !item.remote && item.name === prompt.branch.name);
+      if (branch && !branch.current && !elsewhereReason(branch)) {
+        alsoRemote = false;
+        confirmDelete = { kind: "local", name: branch.name, force: true, twin: remoteTwin(branch), branch };
+        return;
+      }
+    }
+    void restoreOrigin();
   }
 
   /** 打开占用该分支的工作区。不检出到当前工作区，也不改两边的提交和文件。 */
@@ -829,6 +856,7 @@
   }
 
   function askDelete(branch: BranchRecord) {
+    menu = null;
     let prompt: typeof confirmDelete;
     if (branch.remote) {
       const slash = branch.name.indexOf("/");
@@ -868,7 +896,7 @@
       if (target.kind === "remote") {
         return api.deleteRemoteBranch(currentRepo.summary.path, target.remote, target.name, true, currentRepo.generation, nextId());
       }
-      const local = await api.deleteBranch(currentRepo.summary.path, target.name, target.force, currentRepo.generation, nextId());
+      const local = await deleteLocalBranch(currentRepo, target.name, target.force);
       if (!twin) return local;
       // 本地已经删掉：远程失败时不回滚，也不把整次操作算作失败，只如实说明哪一半没完成。
       try {
@@ -1235,7 +1263,7 @@
                     disabled={blocked || Boolean(removeReason)}
                     onclick={(event) => {
                       event.stopPropagation();
-                      askRemoveWorktree(branch);
+                      requestDelete(branch);
                     }}
                     onkeydown={keepRowKeys}
                   >
@@ -1250,7 +1278,7 @@
                     disabled={blocked}
                     onclick={(event) => {
                       event.stopPropagation();
-                      void askDelete(branch);
+                      requestDelete(branch);
                     }}
                     onkeydown={keepRowKeys}
                   >
@@ -1381,7 +1409,7 @@
       notes={[
         ...(prompt.force ? [{ tone: "warn" as const, text: "未提交的改动和未跟踪文件会被永久删除，本应用不能恢复。" }] : []),
         alsoDeleteBranch
-          ? { tone: "info" as const, text: `随后删除本地分支 ${prompt.branch.name}；它有未合入当前分支的提交时会保留并说明。` }
+          ? { tone: "info" as const, text: `随后删除本地分支 ${prompt.branch.name}；它有未合入的提交时，会再次确认是否仍然删除分支。` }
           : { tone: "ok" as const, text: `分支 ${prompt.branch.name} 和已有提交都保留在仓库里，可以随时重新检出。` },
         { tone: "info" as const, text: "由仓库执行 git worktree remove；锁定的工作区不会被删除。" },
       ]}
@@ -1398,7 +1426,7 @@
       {#if !prompt.branch.remote}
         <label class="confirm-option">
           <input type="checkbox" class="checkbox" bind:checked={alsoDeleteBranch} title={writing ? BUSY_REASON : undefined} disabled={writing} />
-          <span>同时删除本地分支 <code>{prompt.branch.name}</code><small>只删除已合入当前分支的分支；有未合入提交时保留并说明</small></span>
+          <span>同时删除本地分支 <code>{prompt.branch.name}</code><small>有未合入的提交时，会再次确认是否仍然删除分支</small></span>
         </label>
       {/if}
     </ConfirmDialog>

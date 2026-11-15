@@ -215,11 +215,16 @@ describe("分支右键菜单", () => {
     expect(screen.getByRole("button", { name: "新分支的起点" }).dataset.value).toBe("");
   });
 
-  it("未合入才升级强删确认：焦点落在取消，再次确认才带 force", async () => {
+  it.each(["icon", "menu"])("%s 删除未合入分支：焦点落在取消，再次确认才带 force", async (entry) => {
     api.deleteBranch.mockRejectedValueOnce({ code: "branch_unmerged", message: "未合入" }).mockResolvedValueOnce(state);
     setup();
     await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
-    await fireEvent.click(screen.getByRole("button", { name: "删除 main" }));
+    if (entry === "menu") {
+      await fireEvent.contextMenu(rowOf("main"), { clientX: 40, clientY: 40 });
+      await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "删除…" }));
+    } else {
+      await fireEvent.click(screen.getByRole("button", { name: "删除 main" }));
+    }
     await fireEvent.click(await screen.findByRole("button", { name: "删除分支" }));
     const force = await screen.findByRole("button", { name: "仍然删除" });
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "取消" })));
@@ -718,6 +723,53 @@ describe("删除其他工作区", () => {
     render(BranchDialog, { props });
     return props;
   }
+
+  it.each(["icon", "menu"])("%s 勾选删除分支后，未合入时沿用图标的再次确认流程", async (entry) => {
+    api.branchState.mockResolvedValueOnce(occupied).mockResolvedValue(released);
+    api.removeWorktree.mockResolvedValue([]);
+    api.deleteBranch.mockRejectedValueOnce({ code: "stale", message: "过期", generation: 5 })
+      .mockRejectedValueOnce({ code: "branch_unmerged", message: "未合入", generation: 6 })
+      .mockRejectedValueOnce({ code: "stale", message: "过期", generation: 6 })
+      .mockResolvedValueOnce({ ...state, generation: 7, snapshot: { ...snapshot, generation: 7 } });
+    const props = renderDialog();
+    await waitFor(() => expect(rowOf("shared")).toBeTruthy());
+    if (entry === "menu") {
+      await fireEvent.contextMenu(rowOf("shared"), { clientX: 40, clientY: 40 });
+      await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "删除工作区…" }));
+    } else {
+      await fireEvent.click(screen.getByRole("button", { name: "删除工作区 shared" }));
+    }
+    const dialog = await screen.findByRole("dialog", { name: "删除工作区" });
+    await fireEvent.click(within(dialog).getByRole("checkbox"));
+    await fireEvent.click(within(dialog).getByRole("button", { name: "删除工作区和分支" }));
+    const force = await screen.findByRole("button", { name: "仍然删除" });
+    expect(api.deleteBranch.mock.calls.map((call) => call.slice(1, 4))).toEqual([
+      ["shared", false, 4], ["shared", false, 5],
+    ]);
+    expect(document.body.textContent).toContain("已删除工作区 shared");
+    expect(document.activeElement?.textContent).toBe("取消");
+    await fireEvent.click(force);
+    await waitFor(() => expect(rowNames()).not.toContain("shared"));
+    expect(api.deleteBranch).toHaveBeenLastCalledWith("/repo", "shared", true, 6, 7);
+    expect(api.removeWorktree).toHaveBeenCalledTimes(1);
+    expect(props.onNotice).toHaveBeenCalledWith("已删除本地分支 shared");
+  });
+
+  it("工作区已删除但分支删除失败：刷新后保留原因，不升级为强删", async () => {
+    api.branchState.mockResolvedValueOnce(occupied).mockResolvedValue(released);
+    api.removeWorktree.mockResolvedValue([]);
+    api.deleteBranch.mockRejectedValue({ code: "permission", message: "无法写入分支引用" });
+    const props = renderDialog();
+    await waitFor(() => expect(rowOf("shared")).toBeTruthy());
+    await fireEvent.click(screen.getByRole("button", { name: "删除工作区 shared" }));
+    const dialog = await screen.findByRole("dialog", { name: "删除工作区" });
+    await fireEvent.click(within(dialog).getByRole("checkbox"));
+    await fireEvent.click(within(dialog).getByRole("button", { name: "删除工作区和分支" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "删除 shared" })).toBeTruthy());
+    expect(screen.getByRole("alert").textContent).toContain("分支 shared 没有删除：无法写入分支引用");
+    expect(screen.queryByRole("button", { name: "仍然删除" })).toBeNull();
+    expect(props.onNotice).not.toHaveBeenCalled();
+  });
 
   it("行尾的删除换成删除工作区；确认后由后端删除，分支保留并刷新列表", async () => {
     api.branchState.mockResolvedValueOnce(occupied).mockResolvedValue(released);

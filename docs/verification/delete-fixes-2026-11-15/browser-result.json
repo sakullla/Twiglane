@@ -1,0 +1,32 @@
+{
+  "method": "browser-mock",
+  "before": {
+    "calls": [
+      [
+        "C:/Users/dev/project/twiglane",
+        "fix/merge-refresh",
+        false,
+        1,
+        9
+      ]
+    ],
+    "focus": "取消",
+    "dialog": " 删除未合入的分支     分支 fix/merge-refresh 还有未合入的提交，仍要删除吗？    fix/merge-refresh 本地分支 · 仅存在于本地    它含有尚未合入当前分支的提交，删除后这些提交不能由这里自动恢复。    取消 仍然删除"
+  },
+  "after": [
+    [
+      "C:/Users/dev/project/twiglane",
+      "fix/merge-refresh",
+      false,
+      1,
+      9
+    ],
+    [
+      "C:/Users/dev/project/twiglane",
+      "fix/merge-refresh",
+      true,
+      2,
+      12
+    ]
+  ]
+}

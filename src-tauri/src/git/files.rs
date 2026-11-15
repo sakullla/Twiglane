@@ -2574,7 +2574,7 @@ fn mutation_path(path: &str) -> Result<PathBuf, AppError> {
     Ok(normalized)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn nested_repository_error() -> AppError {
     AppError::new(
         "nested_repository",
@@ -2582,7 +2582,7 @@ fn nested_repository_error() -> AppError {
     )
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn unsupported_entry_error() -> AppError {
     AppError::new(
         "unsupported_entry",
@@ -2590,7 +2590,7 @@ fn unsupported_entry_error() -> AppError {
     )
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn entry_io_error(error: std::io::Error, message: &'static str) -> AppError {
     let code = match error.kind() {
         ErrorKind::AlreadyExists => "entry_exists",
@@ -2605,9 +2605,9 @@ fn entry_io_error(error: std::io::Error, message: &'static str) -> AppError {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 static TEMP_ENTRY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-// 没有 fd 相对原语的平台上 `trash_entry` 在校验前就失败关闭，永远不会构造这些取值；
+// 没有回收站适配器的平台上 `trash_entry` 在校验前就失败关闭，永远不会构造这些取值；
 // 枚举仍要保留，让 `repository_delete_entry_with` 的结果分派跨平台共用同一份代码。
-#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux", windows)), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EntryTargetState {
     Present,
@@ -2626,9 +2626,15 @@ fn platform_entry_unsupported() -> AppError {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use secure_entry_ops::BoundTrashTarget;
 
-/// 不提供 fd 相对写入原语的平台没有可绑定的回收站目标：命令在校验前就失败关闭，
+#[cfg(windows)]
+#[path = "windows_trash.rs"]
+mod windows_trash;
+#[cfg(windows)]
+use windows_trash::BoundTrashTarget;
+
+/// 没有回收站适配器的平台不存在可绑定的回收站目标：命令在校验前就失败关闭，
 /// 适配器永远不会被调用。保留该类型只为让 `repository_delete_entry` 的适配器签名跨平台一致。
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 #[allow(dead_code)]
 struct BoundTrashTarget;
 
@@ -4463,7 +4469,19 @@ where
     secure_entry_ops::trash(boundary, relative, adapter)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn trash_entry<F>(
+    boundary: &EditBoundary,
+    relative: &Path,
+    adapter: F,
+) -> Result<(Result<(), AppError>, EntryTargetState), AppError>
+where
+    F: FnOnce(&BoundTrashTarget) -> Result<(), AppError>,
+{
+    windows_trash::trash(boundary, relative, adapter)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn trash_entry<F>(
     _boundary: &EditBoundary,
     _relative: &Path,
@@ -4577,9 +4595,9 @@ pub async fn repository_move_entry(
     .await
 }
 
-/// 系统回收站适配器：只消费已绑定的目标身份，绝不退回按字符串重新解析的仓库路径，
-/// 也绝不调用永久删除。macOS 走 NSFileManager 的 file reference URL，Linux 按
-/// freedesktop 规范直接写入 `$XDG_DATA_HOME/Trash`；其它平台在校验阶段就已失败关闭。
+/// 系统回收站适配器：消费已校验的目标，绝不调用永久删除。
+/// macOS 走 NSFileManager 的 file reference URL，Linux 按
+/// freedesktop 规范写入回收站；Windows 使用带身份复核的 IFileOperation。
 fn move_to_system_trash(target: &BoundTrashTarget) -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
     {
@@ -4590,7 +4608,11 @@ fn move_to_system_trash(target: &BoundTrashTarget) -> Result<(), AppError> {
     {
         secure_entry_ops::trash_to_freedesktop(target)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    {
+        windows_trash::recycle(target)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = target;
         Err(platform_entry_unsupported())
@@ -7979,6 +8001,7 @@ mod tests {
             .unwrap_err(),
             copy_entry(&boundary, Path::new("a"), Path::new("b"), &mut false).unwrap_err(),
             move_entry(&boundary, Path::new("a"), Path::new("b")).unwrap_err(),
+            #[cfg(not(windows))]
             trash_entry(&boundary, Path::new("a"), |_| {
                 panic!("不支持的平台不得调用回收站适配器")
             })
@@ -7989,8 +8012,7 @@ mod tests {
         }
     }
 
-    /// 非 macOS/Linux 目标没有 fd 相对原语：四个命令必须给出结构化错误并停在校验前，
-    /// 而不是 panic 或写入磁盘。Windows CI 用这个用例证明失败关闭的具体形态。
+    /// 未实现的结构命令仍须失败关闭；Windows 回收站另有真实操作回归覆盖。
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     #[tokio::test]
     async fn entry_commands_fail_closed_without_descriptor_relative_primitives() {
@@ -8022,6 +8044,7 @@ mod tests {
             repository_move_entry(&backend, path, "note.txt", "moved.txt", 1, 302)
                 .await
                 .unwrap_err(),
+            #[cfg(not(windows))]
             repository_delete_entry(&backend, path, "note.txt", 1, 303)
                 .await
                 .unwrap_err(),
@@ -8466,7 +8489,7 @@ mod tests {
         assert_no_entry_temporaries(&root);
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     #[tokio::test]
     async fn trash_adapter_failures_preserve_files_directories_and_git_state() {
         let fixture = crate::test_support::git_fixture("repository-entry-trash-failure");
@@ -8545,7 +8568,7 @@ mod tests {
         fs::set_permissions(&readonly, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     #[tokio::test]
     async fn trash_error_after_removal_distinguishes_refresh_success_and_failure() {
         let fixture = crate::test_support::git_fixture("repository-entry-trash-refresh");

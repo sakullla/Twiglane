@@ -880,7 +880,9 @@
           oncontextmenu={(event) => {
             event.preventDefault();
             const keepMulti = selectedPaths.has(row.path) && selectedRows.length > 1;
-            if (!keepMulti) onSelect(row);
+            // 补齐行还没读进当前树。右键若走 onSelect 会立刻定位并清掉过滤，菜单里的树级动作就点不到了。
+            // 左键和菜单里的「打开」仍然定位。
+            if (!keepMulti && !row.extra) onSelect(row);
             menu = { x: event.clientX, y: event.clientY, entries: menuEntries(row), label: keepMulti ? multiMenuLabel() : `${row.path} 的操作` };
           }}
         >

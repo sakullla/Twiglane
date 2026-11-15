@@ -83,6 +83,22 @@ function page(path: string, offset: number, generation = 4) {
   };
 }
 
+/** 只看改动在行的右键菜单里。优先右键目录，避免顺手打开文件内容。 */
+async function showChangedOnly() {
+  const tree = screen.getByRole("tree", { name: "仓库文件" });
+  const rows = within(tree).getAllByRole("treeitem");
+  const row = rows.find((item) => item.getAttribute("aria-label") === "src") ?? rows[0];
+  await fireEvent.contextMenu(row);
+  await fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: "只看有改动的文件" }));
+}
+
+/** 模式开关不再是常驻按钮。筛选框的占位文案跟着同一份状态变，过滤时也还在。 */
+function expectChangedOnly(on: boolean) {
+  expect(screen.getByRole("textbox", { name: "过滤文件树" }).getAttribute("placeholder")).toBe(
+    on ? "筛选改动文件" : "筛选文件",
+  );
+}
+
 function viewProps(overrides: Record<string, unknown> = {}) {
   return {
     active: true,
@@ -146,7 +162,7 @@ describe("改动与文件的双向导航", () => {
     await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
     repositoryDirectory.mockClear();
 
-    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+    await showChangedOnly();
     const treeEl = await screen.findByRole("tree", { name: "仓库文件" });
     const gone = await within(treeEl).findByRole("treeitem", { name: /gone\.md/ });
     expect(gone.textContent).toContain("已删除");
@@ -340,9 +356,11 @@ describe("改动与文件的双向导航", () => {
     const extra = await within(treeEl).findByRole("treeitem", { name: /app\.ts/ });
     expect(extra.textContent).toContain("全仓库");
 
-    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
-    const changedOnlyButton = screen.getByRole("button", { name: "只看有改动的文件" });
-    expect(changedOnlyButton.getAttribute("aria-pressed")).toBe("true");
+    await showChangedOnly();
+    const filter = screen.getByRole("textbox", { name: "过滤文件树" }) as HTMLInputElement;
+    // 右键补齐行只开菜单，不能把这次过滤清掉。
+    expect(filter.value).toBe("app");
+    expectChangedOnly(true);
 
     const changedTree = screen.getByRole("tree", { name: "仓库文件" });
     const rows = within(changedTree).getAllByRole("treeitem");
@@ -353,7 +371,7 @@ describe("改动与文件的双向导航", () => {
 
     await fireEvent.click(appRow);
     // 点击改动文件行不能把「只看有改动」悄悄关掉。
-    expect(screen.getByRole("button", { name: "只看有改动的文件" }).getAttribute("aria-pressed")).toBe("true");
+    expectChangedOnly(true);
   });
 
   it("先开仅改动再过滤：只在改动文件里匹配，不请求全仓补齐", async () => {
@@ -373,7 +391,7 @@ describe("改动与文件的双向导航", () => {
       { props: viewProps({ opened: opened([change("src/app.ts", "none", "modified")]) }) as never },
     );
     const treeEl = await screen.findByRole("tree", { name: "仓库文件" });
-    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+    await showChangedOnly();
     await fireEvent.input(screen.getByRole("textbox", { name: "过滤文件树" }), { target: { value: "app" } });
 
     const changedTree = await screen.findByRole("tree", { name: "仓库文件" });
@@ -387,7 +405,9 @@ describe("改动与文件的双向导航", () => {
   });
 
   it("仅改动树的折叠按路径保持，不被每次重建弹回展开", async () => {
-    repositoryDirectory.mockResolvedValue(dir("", []));
+    repositoryDirectory.mockImplementation((_repo: string, relative: string) =>
+      Promise.resolve(relative === "" ? dir("", [entry("src", "directory")]) : dir(relative, [])),
+    );
     render(
       RepositoryFiles,
       {
@@ -397,7 +417,7 @@ describe("改动与文件的双向导航", () => {
       },
     );
     await screen.findByRole("tree", { name: "仓库文件" });
-    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+    await showChangedOnly();
     const tree = await screen.findByRole("tree", { name: "仓库文件" });
     expect(within(tree).getByRole("treeitem", { name: /app\.ts/ })).toBeTruthy();
 
@@ -457,7 +477,7 @@ describe("仅改动树的定位与过滤", () => {
     repositoryDirectory.mockResolvedValue(dir("", [entry("README.md"), entry("src", "directory")]));
     const view = render(RepositoryFiles, { props: viewProps({ opened: opened(changes) }) as never });
     await screen.findByRole("tree", { name: "仓库文件" });
-    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+    await showChangedOnly();
 
     const tree = await screen.findByRole("tree", { name: "仓库文件" });
     expect(within(tree).getByRole("treeitem", { name: /app\.ts/ })).toBeTruthy();
@@ -476,7 +496,7 @@ describe("仅改动树的定位与过滤", () => {
     // 目标行被滚动到可见位置。
     expect(after.scrollTop).toBe(Number.parseFloat(target.style.top || "0"));
     // 目标在改动树里：不能被静默关掉仅改动模式。
-    expect(screen.getByRole("button", { name: "只看有改动的文件" }).getAttribute("aria-pressed")).toBe("true");
+    expectChangedOnly(true);
     // 定位到行号后内容区确实按这个路径读取。
     await waitFor(() =>
       expect(repositoryFileContent).toHaveBeenLastCalledWith(repoPath, "src/lib/util.ts", expect.any(Number), undefined, 4, expect.any(Number)),
@@ -484,11 +504,13 @@ describe("仅改动树的定位与过滤", () => {
   });
 
   it("仅改动模式的后退与前进到折叠分支里的文件：树解除折叠并选中，内容照旧读取", async () => {
-    repositoryDirectory.mockResolvedValue(dir("", []));
+    repositoryDirectory.mockImplementation((_repo: string, relative: string) =>
+      Promise.resolve(relative === "" ? dir("", [entry("src", "directory")]) : dir(relative, [])),
+    );
     const onNav = vi.fn();
     render(RepositoryFiles, { props: viewProps({ opened: opened(changes), onNav }) as never });
     await screen.findByRole("tree", { name: "仓库文件" });
-    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+    await showChangedOnly();
 
     // 打开折叠分支里的文件，形成一条打开历史。
     const opened1 = await screen.findByRole("tree", { name: "仓库文件" });
@@ -517,7 +539,7 @@ describe("仅改动树的定位与过滤", () => {
     expect(within(backTree).getByRole("button", { name: "折叠 src" })).toBeTruthy();
     expect(backTree.scrollTop).toBe(Number.parseFloat(target.style.top || "0"));
     // 目标在改动树里：后退不能顺带关掉仅改动模式。
-    expect(screen.getByRole("button", { name: "只看有改动的文件" }).getAttribute("aria-pressed")).toBe("true");
+    expectChangedOnly(true);
 
     // 前进回改动树根部的文件：选中随之移动。
     nav().history.onForward();
@@ -534,12 +556,10 @@ describe("仅改动树的定位与过滤", () => {
     repositoryDirectory.mockResolvedValue(dir("", [entry("README.md"), entry("other.md")]));
     const view = render(RepositoryFiles, { props: viewProps({ opened: opened(changes) }) as never });
     await screen.findByRole("tree", { name: "仓库文件" });
-    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+    await showChangedOnly();
     await fireEvent.click(await screen.findByRole("button", { name: "折叠 src" }));
     await revealHost(view).reveal("other.md", null);
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "只看有改动的文件" }).getAttribute("aria-pressed")).toBe("false"),
-    );
+    await waitFor(() => expectChangedOnly(false));
     expect(within(screen.getByRole("tree", { name: "仓库文件" })).getByRole("treeitem", { name: /other\.md/ })).toBeTruthy();
   });
 
@@ -547,7 +567,7 @@ describe("仅改动树的定位与过滤", () => {
     repositoryDirectory.mockResolvedValue(dir("", [entry("README.md"), entry("src", "directory")]));
     render(RepositoryFiles, { props: viewProps({ opened: opened(changes) }) as never });
     await screen.findByRole("tree", { name: "仓库文件" });
-    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+    await showChangedOnly();
     await fireEvent.click(await screen.findByRole("button", { name: "折叠 src" }));
 
     const filter = screen.getByRole("textbox", { name: "过滤文件树" });
@@ -598,7 +618,7 @@ describe("仅改动树的定位与过滤", () => {
     );
 
     // 打开仅改动，再点一个改动文件：后退目标就是改动树外的那个文件。
-    await fireEvent.click(screen.getByRole("button", { name: "只看有改动的文件" }));
+    await showChangedOnly();
     await fireEvent.click(
       await within(screen.getByRole("tree", { name: "仓库文件" })).findByRole("treeitem", { name: /app\.ts/ }),
     );
@@ -618,7 +638,7 @@ describe("仅改动树的定位与过滤", () => {
     // 退出仅改动后补齐必须立刻在飞行中：不能说「没有匹配」，也不能丢掉用户的查询。
     await waitFor(() => expect(screen.getAllByText(/正在全仓库补齐匹配/).length).toBeGreaterThan(0));
     expect(screen.queryByText("没有匹配的路径")).toBeNull();
-    expect(screen.getByRole("button", { name: "只看有改动的文件" }).getAttribute("aria-pressed")).toBe("false");
+    expectChangedOnly(false);
     expect(filter.value).toBe("cfg");
 
     finish({

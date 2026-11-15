@@ -96,6 +96,16 @@ function contentSearch(overrides: Partial<RepositoryContentSearch> = {}): Reposi
   };
 }
 
+/** 全仓库搜索和按路径打开在文件行的右键菜单里。右键普通行会选中它。 */
+async function openTreeAction(action: string, rowName: RegExp = /^README\.md$/) {
+  const tree = await screen.findByRole("tree", { name: "仓库文件" });
+  const row = await within(tree).findByRole("treeitem", { name: rowName });
+  await fireEvent.contextMenu(row);
+  await fireEvent.click(await screen.findByRole("menuitem", { name: action }));
+}
+
+type FilesHost = { focusSearch: (mode: "path" | "content") => Promise<void> };
+
 function viewProps(overrides: Record<string, unknown> = {}) {
   return {
     active: true,
@@ -180,9 +190,8 @@ describe("路径快速打开", () => {
     render(RepositoryFiles, { props: viewProps() as never });
     await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
 
-    // 按路径打开收在文件树的「更多」里（也可以用 ⌘/Ctrl P）。
-    await fireEvent.click(screen.getByRole("button", { name: "更多文件树选项" }));
-    await fireEvent.click(await screen.findByRole("menuitem", { name: "按路径打开" }));
+    // 按路径打开在文件行的右键菜单里（也可以用 ⌘/Ctrl P）。
+    await openTreeAction("按路径打开");
     const input = screen.getByRole("textbox", { name: "按路径打开文件" });
     await fireEvent.input(input, { target: { value: "Button" } });
     await waitFor(() => expect(repositoryPathSearch).toHaveBeenCalled());
@@ -225,8 +234,7 @@ describe("路径快速打开", () => {
 
     const view = render(RepositoryFiles, { props: viewProps() as never });
     await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
-    await fireEvent.click(screen.getByRole("button", { name: "更多文件树选项" }));
-    await fireEvent.click(await screen.findByRole("menuitem", { name: "按路径打开" }));
+    await openTreeAction("按路径打开");
     const input = screen.getByRole("textbox", { name: "按路径打开文件" });
     await fireEvent.input(input, { target: { value: "old" } });
     await fireEvent.input(input, { target: { value: "app" } });
@@ -298,7 +306,7 @@ describe("全仓库文本搜索", () => {
 
     render(RepositoryFiles, { props: viewProps() as never });
     await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
-    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    await openTreeAction("全仓库搜索");
     const input = screen.getByRole("textbox", { name: "全仓库文本搜索" });
     await fireEvent.input(input, { target: { value: "panel" } });
 
@@ -331,7 +339,7 @@ describe("全仓库文本搜索", () => {
     render(RepositoryFiles, { props: viewProps() as never });
     await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
 
-    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    await openTreeAction("全仓库搜索");
     const input = screen.getByRole("textbox", { name: "全仓库文本搜索" });
     await fireEvent.input(input, { target: { value: "panel" } });
     await waitFor(() => expect(repositoryContentSearch).toHaveBeenCalled());
@@ -364,9 +372,10 @@ describe("全仓库文本搜索", () => {
   it("当前目录范围只在选中目录时可用，并把该目录交给后端", async () => {
     treeDirs();
     repositoryContentSearch.mockResolvedValue(contentSearch());
-    render(RepositoryFiles, { props: viewProps() as never });
-    const treeEl = await screen.findByRole("tree", { name: "仓库文件" });
-    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    const view = render(RepositoryFiles, { props: viewProps() as never });
+    await screen.findByRole("tree", { name: "仓库文件" });
+    // 命令入口不选中行。右键菜单会先选中那一行，当前目录就会变成可用。
+    await (view.component as FilesHost).focusSearch("content");
     const input = screen.getByRole("textbox", { name: "全仓库文本搜索" });
 
     // 还没选中任何东西：当前目录不可用，并给出原因。
@@ -376,8 +385,8 @@ describe("全仓库文本搜索", () => {
 
     await fireEvent.click(screen.getByRole("button", { name: "关闭搜索" }));
     const freshTree = await screen.findByRole("tree", { name: "仓库文件" });
-    await fireEvent.click(within(freshTree).getByRole("treeitem", { name: /src/ }));
-    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    await fireEvent.click(within(freshTree).getByRole("treeitem", { name: /^src$/ }));
+    await openTreeAction("全仓库搜索", /^src$/);
     await fireEvent.input(screen.getByRole("textbox", { name: "全仓库文本搜索" }), { target: { value: "panel" } });
     await fireEvent.click(screen.getByRole("button", { name: "当前目录" }));
     await waitFor(() =>
@@ -397,7 +406,7 @@ describe("四处查找各自说明范围", () => {
     expect(filter.getAttribute("data-search-scope")).toBe("tree");
     expect(filter.getAttribute("title")).toContain("不读文件内容");
 
-    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    await openTreeAction("全仓库搜索");
     const content = screen.getByRole("textbox", { name: "全仓库文本搜索" });
     expect(content.getAttribute("data-search-scope")).toBe("content");
     expect(content.getAttribute("title")).toContain("工作区文本");
@@ -559,8 +568,8 @@ describe("目录树全局过滤的状态", () => {
     repositoryContentSearch.mockResolvedValue(contentSearch());
     render(RepositoryFiles, { props: viewProps() as never });
     const treeEl = await screen.findByRole("tree", { name: "仓库文件" });
-    await fireEvent.click(within(treeEl).getByRole("treeitem", { name: /src/ }));
-    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    await fireEvent.click(within(treeEl).getByRole("treeitem", { name: /^src$/ }));
+    await openTreeAction("全仓库搜索", /^src$/);
     await fireEvent.input(screen.getByRole("textbox", { name: "全仓库文本搜索" }), { target: { value: "panel" } });
     await fireEvent.click(screen.getByRole("button", { name: "当前目录" }));
     await waitFor(() =>
@@ -620,7 +629,7 @@ describe("查找失败到就地恢复的路径（R2/R6）", () => {
     render(RepositoryFiles, { props: viewProps() as never });
     await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
 
-    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    await openTreeAction("全仓库搜索");
     await fireEvent.input(screen.getByRole("textbox", { name: "全仓库文本搜索" }), { target: { value: "panel" } });
     await waitFor(() => expect(alertContaining("无法读取 src/b.ts。")).toBeTruthy());
     const alert = alertContaining("无法读取 src/b.ts。")!;
@@ -642,7 +651,7 @@ describe("查找失败到就地恢复的路径（R2/R6）", () => {
     render(RepositoryFiles, { props: viewProps() as never });
     await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
 
-    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    await openTreeAction("全仓库搜索");
     await fireEvent.input(screen.getByRole("textbox", { name: "全仓库文本搜索" }), { target: { value: "panel" } });
     await waitFor(() => expect(alertContaining("搜索时有一个目录读取失败。")).toBeTruthy());
     const alert = alertContaining("搜索时有一个目录读取失败。")!;
@@ -667,7 +676,7 @@ describe("查找失败到就地恢复的路径（R2/R6）", () => {
     render(RepositoryFiles, { props: viewProps() as never });
     await waitFor(() => expect(repositoryDirectory).toHaveBeenCalled());
 
-    await fireEvent.click(screen.getByRole("button", { name: "全仓库搜索" }));
+    await openTreeAction("全仓库搜索");
     const input = screen.getByRole("textbox", { name: "全仓库文本搜索" });
     await fireEvent.input(input, { target: { value: "panel" } });
     await waitFor(() => expect(alertContaining("搜索时有一个目录读取失败。")).toBeTruthy());

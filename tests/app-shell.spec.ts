@@ -4183,8 +4183,8 @@ describe("文件操作接线（T3）", () => {
     });
     serveDirectory((generation) => generation >= 5 ? [directoryEntry("empty", "directory")] : [directoryEntry("README.md"), directoryEntry("src", "directory"), directoryEntry("empty", "directory")]);
 
-    await fireEvent.click(tree.querySelector('.file-tree-row[title="README.md"] .tree-select') as HTMLElement);
-    await fireEvent.click(tree.querySelector('.file-tree-row[title="src"] .tree-select') as HTMLElement);
+    await fireEvent.click(row(tree, "README.md"));
+    await fireEvent.click(row(tree, "src"), { ctrlKey: true });
     await fireEvent.keyDown(tree, { key: "Delete" });
     const dialog = await screen.findByRole("dialog", { name: "删除 2 个项目" });
     await fireEvent.click(within(dialog).getByRole("button", { name: "删除 2 个项目" }));

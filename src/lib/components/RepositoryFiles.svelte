@@ -5,7 +5,7 @@
   import type { DiffSide, FileEntryAction, FileEntryRequest, FileEntryResult, OpenedRepository, RepositoryEditSnapshot, RepositoryEntryKind } from "../types";
   import { fileNavState, type FileNavState } from "../ui";
   import FileContent from "./FileContent.svelte";
-  import FileOperationDialog from "./FileOperationDialog.svelte";
+  import FileOperationDialog, { type EntryTarget } from "./FileOperationDialog.svelte";
   import FileSearch from "./FileSearch.svelte";
   import FileTree from "./FileTree.svelte";
   import PaneResizer from "./PaneResizer.svelte";
@@ -47,7 +47,8 @@
     onEditSaved?: (snapshot: RepositoryEditSnapshot) => void;
     onEditFailed?: (code: string) => void;
     /** 新建/复制/移动/删除的实际执行在外壳：这里只负责表单与目标上报。 */
-    onEntry?: (request: FileEntryRequest) => Promise<FileEntryResult>;
+    /** 第二个参数只在多选删除时出现：外壳据此一次提交整批路径。 */
+    onEntry?: (request: FileEntryRequest, batchSources?: string[]) => Promise<FileEntryResult>;
     /** 把文件或目录加入 .gitignore（local=false）或 .git/info/exclude：写入与刷新由外壳执行。 */
     onIgnore?: (path: string, local: boolean) => void;
     /** 当前仓库里存在未保存草稿的路径，供表单提前提示与禁用删除确认。 */
@@ -218,13 +219,32 @@
 
   /* 文件操作：树只上报右键目标，表单与删除确认放在对话框里，命令与状态应用交给外壳。 */
   let entrySerial = 0;
-  let entryRequest = $state<{ action: FileEntryAction; path: string; kind: RepositoryEntryKind; serial: number } | null>(
-    null,
-  );
+  let entryRequest = $state<{
+    action: FileEntryAction;
+    path: string;
+    kind: RepositoryEntryKind;
+    entries: EntryTarget[];
+    /** 多选：删除时整批路径一次提交，复制/移动仍按项逐个进行。 */
+    sources: string[];
+    serial: number;
+  } | null>(null);
 
   function requestEntry(action: FileEntryAction, row: FileTreeRow): void {
     if (!onEntry) return;
-    entryRequest = { action, path: row.path, kind: row.kind, serial: ++entrySerial };
+    entryRequest = { action, path: row.path, kind: row.kind, entries: [], sources: [], serial: ++entrySerial };
+  }
+
+  function requestBatchEntry(action: "copy" | "move" | "delete", rows: FileTreeRow[]): void {
+    const first = rows[0];
+    if (!onEntry || !first) return;
+    entryRequest = {
+      action,
+      path: first.path,
+      kind: first.kind,
+      entries: rows.map((row) => ({ path: row.path, kind: row.kind })),
+      sources: rows.map((row) => row.path),
+      serial: ++entrySerial,
+    };
   }
 
   function parentOf(relative: string): string {
@@ -293,6 +313,7 @@
         nameDirection={store.nameDirection}
         onNameDirection={(next) => store.setNameDirection(next)}
         onEntryAction={onEntry ? requestEntry : undefined}
+        onBatchEntry={onEntry ? requestBatchEntry : undefined}
         filterError={store.filterError}
         filterTruncated={store.filterTruncated}
         filterBusy={store.filterBusy}
@@ -369,6 +390,8 @@
         action={entryRequest.action}
         path={entryRequest.path}
         kind={entryRequest.kind}
+        entries={entryRequest.entries}
+        batchSources={entryRequest.sources}
         {disabled}
         {draftPaths}
         onClose={() => (entryRequest = null)}

@@ -397,6 +397,12 @@
       selectAll();
       return;
     }
+    if (event.key === "Escape" && multi && selected) {
+      event.preventDefault();
+      event.stopPropagation();
+      single(selected);
+      return;
+    }
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     if ((event.key === "ArrowUp" || event.key === "k") && !event.shiftKey && current === 0) {
       event.preventDefault();
@@ -678,6 +684,7 @@
           <div
             class="file-row"
             role="option"
+            aria-label={row.path}
             style={`top:${top + ROW_GAP / 2}px;height:${ROW_HEIGHT - ROW_GAP}px`}
             aria-selected={isSelected(row)}
             data-member={multi && isSelected(row) && !isFocus(row) ? "" : undefined}
@@ -701,6 +708,22 @@
               }
             }}
           >
+            {#if onMultiSelect}
+              <button
+                type="button"
+                class="file-check"
+                class:checked={multi && isSelected(row)}
+                aria-label={multi && isSelected(row) ? `取消选择 ${row.path}` : `选择 ${row.path}`}
+                aria-pressed={multi && isSelected(row)}
+                tabindex="-1"
+                title="选择文件；也可按住 Ctrl 或 Shift 点击行"
+                onclick={(event) => {
+                  event.stopPropagation();
+                  toggleRow(row);
+                  list?.focus({ preventScroll: true });
+                }}
+              ><Icon name="check" size={11} /></button>
+            {/if}
             <span class={`st ${mark.tone}`} title={mark.label} aria-label={mark.label}>{mark.letter}</span>
             <span class="file-name">
               <span class="fn">{parts.name}</span>

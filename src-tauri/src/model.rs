@@ -1117,3 +1117,24 @@ pub struct RepositoryEditSnapshot {
     pub final_newline: bool,
     pub message: String,
 }
+
+/// 一次批量删除里失败的单个条目：错误码与说明都是给人看的，路径是仓库相对路径。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchDeleteFailure {
+    pub path: String,
+    pub code: String,
+    pub message: String,
+}
+
+/// 批量删除的结果：快照是这次请求真正对应的真实状态，其余三个列表用来在界面上报告进度。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchDeleteResult {
+    pub snapshot: StatusSnapshot,
+    /// 已删除（或已离开工作区）的仓库相对路径。
+    pub deleted: Vec<String>,
+    /// 选择时还在、删除前已经不存在的路径：不算失败。
+    pub skipped: Vec<String>,
+    pub failures: Vec<BatchDeleteFailure>,
+}

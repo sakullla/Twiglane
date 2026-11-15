@@ -42,6 +42,7 @@ fn main() {
             "repository_copy_entry",
             "repository_move_entry",
             "repository_delete_entry",
+            "repository_delete_entries",
             "repository_path_search",
             "repository_content_search",
             "repository_review_token",

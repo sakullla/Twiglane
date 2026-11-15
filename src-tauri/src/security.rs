@@ -48,11 +48,13 @@ fn capabilities_grant_only_explicit_terminal_ipc_not_a_generic_shell() {
         // 轻量编辑只有完整快照读取与写锁内保存两个命令：没有 shell、没有任意文件写入。
         "allow-repository-edit-snapshot",
         "allow-repository-edit-save",
-        // 结构操作只接受仓库相对路径；删除只有系统回收站入口，没有永久删除参数。
+        // 结构操作只接受仓库相对路径；永久删除是独立命令，不是回收站命令的隐式参数。
+        // 批量删除同样只收相对路径数组：没有 shell、没有任意路径。
         "allow-repository-create-entry",
         "allow-repository-copy-entry",
         "allow-repository-move-entry",
         "allow-repository-delete-entry",
+        "allow-repository-delete-entries",
         "allow-repository-path-search",
         "allow-repository-content-search",
         "allow-repository-review-token",
@@ -175,7 +177,7 @@ fn capabilities_grant_only_explicit_terminal_ipc_not_a_generic_shell() {
 }
 
 #[test]
-fn entry_commands_are_relative_structured_and_have_no_permanent_delete() {
+fn entry_commands_are_relative_structured_and_delete_location_is_explicit() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
     for name in [
@@ -200,6 +202,14 @@ fn entry_commands_are_relative_structured_and_have_no_permanent_delete() {
     assert!(create.contains("relative: String") && create.contains("kind:"));
     let delete = command_signature(&lib, "repository_delete_entry");
     assert!(delete.contains("relative: String") && !delete.contains("target:"));
+    // 删除命令只收仓库相对路径数组；落点由显式 permanent 布尔决定，没有绝对路径或 shell 片段。
+    let batch = command_signature(&lib, "repository_delete_entries");
+    for required in ["relatives: Vec<String>", "permanent: bool", "generation: u64", "request_id: u64"] {
+        assert!(batch.contains(required), "{required}");
+    }
+    for forbidden in ["absolute", "target:", "args:", "command:", "shell:", "relative: String"] {
+        assert!(!batch.contains(forbidden), "{forbidden}: {batch}");
+    }
 }
 
 /// macOS 需要原生装饰框承载交通灯，Windows 用自绘标题栏。平台覆盖文件由 Tauri 以 RFC 7396

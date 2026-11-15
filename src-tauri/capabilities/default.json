@@ -41,6 +41,7 @@
     "allow-repository-copy-entry",
     "allow-repository-move-entry",
     "allow-repository-delete-entry",
+    "allow-repository-delete-entries",
     "allow-repository-path-search",
     "allow-repository-content-search",
     "allow-repository-review-token",

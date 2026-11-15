@@ -186,7 +186,7 @@ export interface RepositoryDirectory {
 
 /**
  * 文件视图的结构操作：只新建/复制/移动/删除工作区里的普通文件与目录。
- * 这些动作不暂存、不提交、不推送，也不提供永久删除。
+ * 这些动作不暂存、不提交、不推送；删除的落点（回收站或永久删除）由确认框里的选项决定。
  */
 export type FileEntryAction = "createFile" | "createDirectory" | "copy" | "move" | "delete";
 
@@ -199,6 +199,23 @@ export interface FileEntryRequest {
   target: string;
   /** 新建的条目类型；复制与移动沿用源项目的类型。 */
   kind: "file" | "directory";
+  /** 只对删除有意义：为真时跳过回收站直接永久删除；缺省进系统回收站。 */
+  permanent?: boolean;
+}
+
+/** 批量删除里失败的单个条目：路径是仓库相对路径，code 是后端的稳定错误码。 */
+export interface BatchDeleteFailure {
+  path: string;
+  code: string;
+  message: string;
+}
+
+/** 批量删除结果：一次请求只推进一个代次，snapshot 是这次请求对应的真实状态。 */
+export interface BatchDeleteResult {
+  snapshot: StatusSnapshot;
+  deleted: string[];
+  skipped: string[];
+  failures: BatchDeleteFailure[];
 }
 
 /** 结构操作结果：失败时保留归一化后的原因，交给表单就地显示。 */

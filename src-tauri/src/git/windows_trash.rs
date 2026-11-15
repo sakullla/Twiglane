@@ -365,6 +365,22 @@ impl IFileOperationProgressSink_Impl for RecycleSink_Impl {
     }
 }
 
+pub(super) fn delete_permanently(target: &BoundTrashTarget) -> Result<(), AppError> {
+    target.verify()?;
+    let directory = info(&target.file)?.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
+    let result = if directory {
+        fs::remove_dir_all(&target.path)
+    } else {
+        fs::remove_file(&target.path)
+    };
+    result.map_err(|error| {
+        entry_io_error(
+            error,
+            "永久删除失败；已删除的内容无法恢复，其余内容保留。",
+        )
+    })
+}
+
 pub(super) fn recycle(target: &BoundTrashTarget) -> Result<(), AppError> {
     // A dedicated STA avoids a caller's existing COM apartment and keeps all COM objects local.
     std::thread::scope(|scope| {
@@ -560,6 +576,7 @@ mod tests {
                 relative,
                 i as u64 + 1,
                 900 + i as u64,
+                DeleteMode::Trash,
                 |target| {
                     let result = recycle(target);
                     let recycled = final_path(&target.file).unwrap();

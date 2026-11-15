@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
@@ -23,7 +23,7 @@ use crate::git::preview::wants_preview;
 use crate::git::runner::ProcessOutput;
 use crate::git::schedule::{internal_request_id, CommandSpec, GitJob, JobKind};
 use crate::model::{
-    ChangeKind, RepositoryContentMatch, RepositoryContentSearch, RepositoryDirectory,
+    BatchDeleteFailure, BatchDeleteResult, ChangeKind, RepositoryContentMatch, RepositoryContentSearch, RepositoryDirectory,
     RepositoryDirectoryEntry, RepositoryEditSnapshot, RepositoryEditState, RepositoryEntryKind,
     RepositoryFileContent, RepositoryFileKind, RepositoryLineEnding, RepositoryPathEntry,
     RepositoryPathKind, RepositoryPathSearch, RepositoryReviewState, RepositoryReviewToken,
@@ -185,51 +185,32 @@ fn is_directory_entry(kind: RepositoryEntryKind) -> bool {
     )
 }
 
-enum NaturalChunk {
-    Num(String),
-    Str(String),
+/// 借用名称中的数字/文本段，比较时不创建分段数组或复制名称。
+fn natural_chunks(mut text: &str) -> impl Iterator<Item = &str> {
+    std::iter::from_fn(move || {
+        let digit = text.as_bytes().first()?.is_ascii_digit();
+        let end = text
+            .bytes()
+            .position(|byte| byte.is_ascii_digit() != digit)
+            .unwrap_or(text.len());
+        // 分界总在 ASCII 数字与其它字符之间，因此不会切开 UTF-8 字符。
+        let (chunk, rest) = text.split_at(end);
+        text = rest;
+        Some(chunk)
+    })
 }
 
-/// 把名称拆成数字段与文本段：数字段按数值参与比较，其余保持原样顺序。
-fn natural_chunks(text: &str) -> Vec<NaturalChunk> {
-    let mut chunks = Vec::new();
-    let mut digits = String::new();
-    let mut letters = String::new();
-    for ch in text.chars() {
-        if ch.is_ascii_digit() {
-            if !letters.is_empty() {
-                chunks.push(NaturalChunk::Str(std::mem::take(&mut letters)));
-            }
-            digits.push(ch);
-        } else {
-            if !digits.is_empty() {
-                chunks.push(NaturalChunk::Num(std::mem::take(&mut digits)));
-            }
-            letters.push(ch);
-        }
-    }
-    if !digits.is_empty() {
-        chunks.push(NaturalChunk::Num(digits));
-    }
-    if !letters.is_empty() {
-        chunks.push(NaturalChunk::Str(letters));
-    }
-    chunks
-}
-
-fn compare_natural_chunks(
-    left: &[NaturalChunk],
-    right: &[NaturalChunk],
-    case_sensitive: bool,
-) -> std::cmp::Ordering {
-    let mut left = left.iter();
-    let mut right = right.iter();
+fn compare_natural_chunks(left: &str, right: &str, case_sensitive: bool) -> std::cmp::Ordering {
+    let mut left = natural_chunks(left);
+    let mut right = natural_chunks(right);
     loop {
         match (left.next(), right.next()) {
             (None, None) => return std::cmp::Ordering::Equal,
             (None, Some(_)) => return std::cmp::Ordering::Less,
             (Some(_), None) => return std::cmp::Ordering::Greater,
-            (Some(NaturalChunk::Num(a)), Some(NaturalChunk::Num(b))) => {
+            (Some(a), Some(b))
+                if a.as_bytes()[0].is_ascii_digit() && b.as_bytes()[0].is_ascii_digit() =>
+            {
                 let a_trim = a.trim_start_matches('0');
                 let b_trim = b.trim_start_matches('0');
                 let ord = a_trim
@@ -245,15 +226,19 @@ fn compare_natural_chunks(
                     return ord;
                 }
             }
-            (Some(NaturalChunk::Num(_)), Some(NaturalChunk::Str(_))) => {
+            (Some(a), Some(_)) if a.as_bytes()[0].is_ascii_digit() => {
                 return std::cmp::Ordering::Less;
             }
-            (Some(NaturalChunk::Str(_)), Some(NaturalChunk::Num(_))) => {
+            (Some(_), Some(b)) if b.as_bytes()[0].is_ascii_digit() => {
                 return std::cmp::Ordering::Greater;
             }
-            (Some(NaturalChunk::Str(a)), Some(NaturalChunk::Str(b))) => {
+            (Some(a), Some(b)) => {
                 let ord = if case_sensitive {
                     a.cmp(b)
+                } else if a.is_ascii() && b.is_ascii() {
+                    a.bytes()
+                        .map(|byte| byte.to_ascii_lowercase())
+                        .cmp(b.bytes().map(|byte| byte.to_ascii_lowercase()))
                 } else {
                     a.to_lowercase().cmp(&b.to_lowercase())
                 };
@@ -267,8 +252,8 @@ fn compare_natural_chunks(
 
 /// 自然排序：连续数字按数值比较（`T2` 排在 `T11` 前）；先不区分大小写，再按原样打破平手。
 fn natural_cmp(left: &str, right: &str) -> std::cmp::Ordering {
-    compare_natural_chunks(&natural_chunks(left), &natural_chunks(right), false)
-        .then_with(|| compare_natural_chunks(&natural_chunks(left), &natural_chunks(right), true))
+    compare_natural_chunks(left, right, false)
+        .then_with(|| compare_natural_chunks(left, right, true))
 }
 
 /// 把本目录的直接子项拼成 `git check-ignore --stdin` 的输入（NUL 分隔，末尾同样带分隔符）。
@@ -1062,33 +1047,39 @@ fn rank_path_entries(
             *slot &= entry.ignored;
         }
     }
-    let mut candidates: Vec<(u32, &str, bool, bool)> = Vec::new();
+    // 最大堆只保留最好的 limit 条；最差项在堆顶，避免保存并排序全仓匹配。
+    // 元组前缀就是既有排序键：质量、路径字节长度、字典序。
+    let mut candidates = BinaryHeap::new();
+    let mut matched = 0_usize;
+    let mut consider = |path, directory, ignored| {
+        if let Some(rank) = path_match_rank(path, &query) {
+            matched += 1;
+            let candidate = (rank, path.len(), path, directory, ignored);
+            if candidates.len() < limit {
+                candidates.push(candidate);
+            } else if let Some(mut worst) = candidates.peek_mut() {
+                if candidate < *worst {
+                    *worst = candidate;
+                }
+            }
+        }
+    };
     for entry in paths {
         if entry.directory {
             // 目录统一由派生集合给出，避免同一个目录既是条目又被派生一次。
             continue;
         }
-        if let Some(rank) = path_match_rank(&entry.path, &query) {
-            candidates.push((rank, entry.path.as_str(), false, entry.ignored));
-        }
+        consider(entry.path.as_str(), false, entry.ignored);
     }
     for (path, ignored) in &directories {
-        if let Some(rank) = path_match_rank(path, &query) {
-            candidates.push((rank, path, true, *ignored));
-        }
+        consider(path, true, *ignored);
     }
     let scanned = (paths.len() + directories.len()) as u64;
-    candidates.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
-            .then_with(|| left.1.len().cmp(&right.1.len()))
-            .then_with(|| left.1.cmp(right.1))
-    });
-    let truncated = candidates.len() > limit;
-    candidates.truncate(limit);
+    let truncated = matched > limit;
     let entries = candidates
+        .into_sorted_vec()
         .into_iter()
-        .map(|(_, path, directory, ignored)| RepositoryPathEntry {
+        .map(|(_, _, path, directory, ignored)| RepositoryPathEntry {
             path: path.to_string(),
             kind: if directory {
                 RepositoryPathKind::Directory
@@ -1259,16 +1250,13 @@ fn line_match(
 ) -> Option<(RepositoryContentMatch, bool)> {
     let byte_index = line.find(query)?;
     let column = line[..byte_index].chars().count() as u64 + 1;
-    let mut text = line.to_string();
-    let mut text_truncated = false;
-    if text.len() > MAX_MATCH_TEXT_BYTES {
-        let mut end = MAX_MATCH_TEXT_BYTES;
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
-        text_truncated = true;
+    let mut end = line.len().min(MAX_MATCH_TEXT_BYTES);
+    while !line.is_char_boundary(end) {
+        end -= 1;
     }
+    // 先截取再分配；String::truncate 不会释放长行原本占用的容量。
+    let text = line[..end].to_string();
+    let text_truncated = end < line.len();
     Some((
         RepositoryContentMatch {
             path: relative.to_string(),
@@ -1410,7 +1398,7 @@ fn search_file(
         return Ok(());
     }
     outcome.scanned_bytes += size;
-    let chain = std::io::Cursor::new(probe.to_vec()).chain(file);
+    let chain = std::io::Cursor::new(probe).chain(file);
     let mut reader = BufReader::new(chain);
     let mut buffer = Vec::new();
     let mut line_no = 0_u64;
@@ -2945,14 +2933,10 @@ mod secure_entry_ops {
         /// macOS 回收站实现按 /dev/fd/N 重新打开同一 inode 后交给系统回收站。
         #[cfg(target_os = "macos")]
         pub(super) fd_path: PathBuf,
-        /// Linux freedesktop 实现在这个已打开的父目录里改名，绝不重新解析仓库路径。
-        #[cfg(target_os = "linux")]
+        /// 永久删除与 Linux 回收站都相对这个已打开的父目录操作，绝不重新解析仓库路径。
         parent: RawFd,
-        #[cfg(target_os = "linux")]
         name: OsString,
-        #[cfg(target_os = "linux")]
         identity: Identity,
-        #[cfg(target_os = "linux")]
         kind: OrdinaryEntryKind,
         /// 跨卷复制会生成新 inode，副本只能按类型与权限核对，故保留校验时的权限位。
         #[cfg(target_os = "linux")]
@@ -2986,6 +2970,10 @@ mod secure_entry_ops {
             {
                 Ok(BoundTrashTarget {
                     fd_path: fd_path(self.fd()),
+                    parent: self.parent.directory.fd,
+                    name: self.parent.name.clone(),
+                    identity: self.stat.identity,
+                    kind: self.kind,
                 })
             }
             #[cfg(target_os = "linux")]
@@ -3654,6 +3642,70 @@ mod secure_entry_ops {
         let target = source.bound_trash_target()?;
         let result = adapter(&target);
         Ok((result, source.original_state()))
+    }
+
+    fn permanent_delete_error(error: std::io::Error) -> AppError {
+        entry_io_error(error, "永久删除失败；已删除的内容无法恢复，其余内容保留。")
+    }
+
+    fn directory_entry_names(directory: &Directory) -> std::io::Result<Vec<OsString>> {
+        #[cfg(target_os = "macos")]
+        let path = PathBuf::from(format!("/dev/fd/{}", directory.fd));
+        #[cfg(target_os = "linux")]
+        let path = PathBuf::from(format!("/proc/self/fd/{}", directory.fd));
+        fs::read_dir(path)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect()
+    }
+
+    fn delete_directory_contents(directory: &Directory) -> Result<(), AppError> {
+        for name in directory_entry_names(directory).map_err(permanent_delete_error)? {
+            if name == ".git" {
+                return Err(git_metadata_error());
+            }
+            let stat = stat_at(directory.fd, &name).map_err(permanent_delete_error)?;
+            match stat.kind() {
+                Some(OrdinaryEntryKind::File) => {
+                    unlink_at(directory, &name, 0).map_err(permanent_delete_error)?;
+                }
+                Some(OrdinaryEntryKind::Directory) => {
+                    let child = Directory::open_at(directory, &name).map_err(permanent_delete_error)?;
+                    if child.has_dot_git().map_err(permanent_delete_error)? {
+                        return Err(nested_repository_error());
+                    }
+                    delete_directory_contents(&child)?;
+                    unlink_at(directory, &name, libc::AT_REMOVEDIR).map_err(permanent_delete_error)?;
+                }
+                None => return Err(unsupported_entry_error()),
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn delete_permanently(target: &BoundTrashTarget) -> Result<(), AppError> {
+        let current = stat_at(target.parent, &target.name).map_err(permanent_delete_error)?;
+        if current.identity != target.identity || current.kind() != Some(target.kind) {
+            return Err(AppError::new(
+                "entry_changed",
+                "永久删除目标在校验期间已变化，未继续执行。",
+            ));
+        }
+        match target.kind {
+            OrdinaryEntryKind::File => unlink_at_fd(target.parent, &target.name, 0),
+            OrdinaryEntryKind::Directory => {
+                // SAFETY: dup 给父目录描述符一个独立所有者，Directory 释放时不会影响 target。
+                let parent_fd = unsafe { libc::dup(target.parent) };
+                if parent_fd < 0 {
+                    return Err(permanent_delete_error(std::io::Error::last_os_error()));
+                }
+                let parent = Directory { fd: parent_fd };
+                let directory = Directory::open_at(&parent, &target.name)
+                    .map_err(permanent_delete_error)?;
+                delete_directory_contents(&directory)?;
+                unlink_at_fd(target.parent, &target.name, libc::AT_REMOVEDIR)
+            }
+        }
+        .map_err(permanent_delete_error)
     }
 
     // ---- Linux：按 freedesktop 规范直接写入系统回收站目录 ----
@@ -4619,6 +4671,22 @@ fn move_to_system_trash(target: &BoundTrashTarget) -> Result<(), AppError> {
     }
 }
 
+fn permanently_delete_entry(target: &BoundTrashTarget) -> Result<(), AppError> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        secure_entry_ops::delete_permanently(target)
+    }
+    #[cfg(windows)]
+    {
+        windows_trash::delete_permanently(target)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        let _ = target;
+        Err(platform_entry_unsupported())
+    }
+}
+
 /// macOS 回收站删除绑定"已打开 fd 的文件身份"，而不是可被外部替换的路径字符串。
 ///
 /// 流程：重新打开 /dev/fd/N（内核引用同一已打开文件）→ fstat 取 inode →
@@ -4732,12 +4800,33 @@ mod macos_trash {
     }
 }
 
+/// 删除的落点由调用方显式选择：默认进系统回收站，只有确认框里明确选了永久删除才走不可恢复的路径。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeleteMode {
+    Trash,
+    Permanent,
+}
+
+impl DeleteMode {
+    fn permanent(self) -> bool {
+        matches!(self, DeleteMode::Permanent)
+    }
+
+    fn error_code(self) -> &'static str {
+        match self {
+            DeleteMode::Trash => "trash_failed",
+            DeleteMode::Permanent => "permanent_delete_failed",
+        }
+    }
+}
+
 async fn repository_delete_entry_with<F>(
     backend: &Backend,
     path: &str,
     relative: &str,
     generation: u64,
     request_id: u64,
+    mode: DeleteMode,
     trash_adapter: F,
 ) -> Result<crate::model::StatusSnapshot, AppError>
 where
@@ -4764,6 +4853,8 @@ where
         .await?;
     let boundary = edit_boundary_from_output(&root, &layout)?;
     let (adapter_result, target_state) = trash_entry(&boundary, &relative, trash_adapter)?;
+    let permanent = mode.permanent();
+    let error_code = mode.error_code();
     match (adapter_result, target_state) {
         (Ok(()), EntryTargetState::Missing) => {
             guard.mark_written();
@@ -4782,8 +4873,12 @@ where
             )
             .await;
             Err(AppError::new(
-                "trash_failed",
-                "回收站未移除目标，未报告删除成功，也未执行永久删除。",
+                error_code,
+                if permanent {
+                    "永久删除未移除目标，未报告删除成功。"
+                } else {
+                    "回收站未移除目标，未报告删除成功，也未执行永久删除。"
+                },
             ))
         }
         (Ok(()), EntryTargetState::Unknown) => {
@@ -4796,8 +4891,14 @@ where
             })
             .is_ok();
             Err(AppError::new(
-                "trash_failed",
-                if refreshed {
+                error_code,
+                if permanent {
+                    if refreshed {
+                        "无法确认永久删除结果，已刷新真实状态。"
+                    } else {
+                        "无法确认永久删除结果及当前状态。"
+                    }
+                } else if refreshed {
                     "无法确认回收站结果，已刷新真实状态；未执行永久删除。"
                 } else {
                     "无法确认回收站结果及当前状态；未执行永久删除。"
@@ -4806,6 +4907,10 @@ where
             .with_generation(new_generation))
         }
         (Err(_), EntryTargetState::Present) => {
+            // 永久删除目录可能已删掉一部分后代后失败；不能像回收站失败那样假定没有写入。
+            if permanent {
+                guard.mark_written();
+            }
             let current = guard.finish();
             let _ = crate::git::ops::refresh_status(
                 backend,
@@ -4814,10 +4919,15 @@ where
                 internal_request_id(),
             )
             .await;
-            Err(AppError::new(
-                "trash_failed",
-                "系统回收站操作失败，目标仍保留；未执行永久删除。",
-            ))
+            let error = AppError::new(
+                error_code,
+                if permanent {
+                    "永久删除失败，目标或部分内容仍保留；已刷新真实状态。"
+                } else {
+                    "系统回收站操作失败，目标仍保留；未执行永久删除。"
+                },
+            );
+            Err(if permanent { error.with_generation(current) } else { error })
         }
         (Err(_), EntryTargetState::Missing) => {
             // 库可能移动后报告错误：代次和真实状态仍要推进，但绝不把错误改成成功。
@@ -4828,8 +4938,14 @@ where
             })
             .is_ok();
             Err(AppError::new(
-                "trash_failed",
-                if refreshed {
+                error_code,
+                if permanent {
+                    if refreshed {
+                        "永久删除返回错误，但目标已离开工作区；已推进代次并刷新状态。"
+                    } else {
+                        "永久删除返回错误，目标已离开工作区；已推进代次，但状态刷新失败。"
+                    }
+                } else if refreshed {
                     "回收站返回错误，但目标已离开工作区；已推进代次并刷新状态，未执行永久删除。"
                 } else {
                     "回收站返回错误，目标已离开工作区；已推进代次，但状态刷新失败，未执行永久删除。"
@@ -4846,8 +4962,14 @@ where
             })
             .is_ok();
             Err(AppError::new(
-                "trash_failed",
-                if refreshed {
+                error_code,
+                if permanent {
+                    if refreshed {
+                        "永久删除返回错误，无法确认目标是否仍保留；已刷新真实状态。"
+                    } else {
+                        "永久删除返回错误，无法确认目标及当前状态。"
+                    }
+                } else if refreshed {
                     "回收站返回错误，无法确认目标是否仍保留；已刷新真实状态，未执行永久删除。"
                 } else {
                     "回收站返回错误，无法确认目标及当前状态；未执行永久删除。"
@@ -4871,13 +4993,262 @@ pub async fn repository_delete_entry(
         relative,
         generation,
         request_id,
+        DeleteMode::Trash,
         move_to_system_trash,
     )
     .await
 }
 
+/// 一次请求删除多个条目（多选删除几千个文件时由前端合成）。
+///
+/// 与逐个调用 `repository_delete_entry` 相比，这里只取一次写锁、只跑一次仓库布局检查：
+/// 几百个条目逐个取锁既慢，又会在中途刷新状态，让后续请求带着旧代次被拒。
+/// 每条目标仍在删除前单独核对身份（`BoundTrashTarget::verify`），所以并发写入造成的
+/// 条目变化只会让这一条失败，不会误删别的内容。
+///
+/// 两条不变的边界：
+/// - `.git` 以及任何嵌套仓库都不会被删除，整批以 `entry_forbidden` 失败退出；
+/// - 目标在正在删除的目录里（父子同时被选）不再单独处理，上级目录删除后它自然离开工作区。
+pub async fn repository_delete_entries(
+    backend: &Backend,
+    path: &str,
+    relatives: &[String],
+    mode: DeleteMode,
+    generation: u64,
+    request_id: u64,
+) -> Result<BatchDeleteResult, AppError> {
+    if relatives.is_empty() {
+        return Err(AppError::new(
+            "empty_source",
+            "没有要删除的目标，未执行任何删除。",
+        ));
+    }
+    let root = canonical_existing(&validate_input_path(path)?)?;
+    // 先逐条校验路径形状：`.git`、绝对路径、`..` 都在这里被整批拒绝，一个目标都不会删。
+    // 「删除前已经不存在」不算校验问题，放到下面按条目报告为 skipped。
+    let mut targets = Vec::with_capacity(relatives.len());
+    for relative in relatives {
+        targets.push(mutation_path(relative)?);
+    }
+    targets.sort();
+    targets.dedup();
+    // 父目录先删：子项随后变成"目标不存在"，不会因此报告失败。
+    // "是否位于另一个目标之下"要在排序前一次性算好，否则排序键里再借用 targets 会冲突。
+    let nested: Vec<bool> = targets
+        .iter()
+        .map(|candidate| {
+            targets
+                .iter()
+                .any(|other| other != candidate && candidate.starts_with(other))
+        })
+        .collect();
+    let mut order: Vec<usize> = (0..targets.len()).collect();
+    order.sort_by_key(|&index| (nested[index], targets[index].components().count()));
+    let targets: Vec<PathBuf> = order.into_iter().map(|index| targets[index].clone()).collect();
+
+    let git = require_git(backend).await?;
+    let key = repo_key(&root);
+    let mut guard = backend
+        .scheduler
+        .lock_write(&key, request_id, generation)
+        .await?;
+    let (program, args) = edit_layout_command(&git.path, &root);
+    let layout = guard
+        .run(CommandSpec {
+            program,
+            args,
+            stdin: None,
+            truncate_stdout: false,
+            output_limit: Some(MAX_EDIT_LAYOUT_BYTES),
+            writes: false,
+        })
+        .await?;
+    let boundary = edit_boundary_from_output(&root, &layout)?;
+
+    let mut deleted: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut failures: Vec<BatchDeleteFailure> = Vec::new();
+    let mut removed_under: Vec<PathBuf> = Vec::new();
+    for target in &targets {
+        if removed_under.iter().any(|parent| target.starts_with(parent)) {
+            skipped.push(target.to_string_lossy().replace('\\', "/"));
+            continue;
+        }
+        let relative = target.to_string_lossy().replace('\\', "/");
+        match delete_entry_once(&boundary, target, mode) {
+            Ok(true) => {
+                guard.mark_written();
+                if target.is_dir() {
+                    removed_under.push(target.clone());
+                }
+                deleted.push(relative);
+            }
+            Ok(false) => skipped.push(relative),
+            Err(error) => failures.push(BatchDeleteFailure {
+                path: relative,
+                code: error.code,
+                message: error.message,
+            }),
+        }
+    }
+
+    let generation = guard.finish();
+    // 只刷新一次状态：部分失败也要把真实结果交给界面，而不是让它停在旧列表上。
+    // 刷新失败时仍返回新代次，调用方据此重新同步，绝不把失败改写成成功。
+    match crate::git::ops::refresh_status(backend, path, generation, internal_request_id()).await {
+        Ok(snapshot) => Ok(BatchDeleteResult {
+            snapshot,
+            deleted,
+            skipped,
+            failures,
+        }),
+        Err(_) if !deleted.is_empty() => Err(AppError::new(
+            mode.error_code(),
+            format!("已删除 {} 项，但状态刷新失败；请手动刷新。", deleted.len()),
+        )
+        .with_generation(generation)),
+        Err(_) => Err(AppError::new(
+            "batch_delete_failed",
+            "删除没有完成，状态也未能刷新；未执行任何删除。",
+        )
+        .with_generation(generation)),
+    }
+}
+
+/// 单条删除：目标已不在工作区返回 `Ok(false)`，其余错误原样上抛。
+fn delete_entry_once(boundary: &EditBoundary, relative: &Path, mode: DeleteMode) -> Result<bool, AppError> {
+    let outcome = match mode {
+        DeleteMode::Trash => trash_entry(boundary, relative, move_to_system_trash).map(|(_, state)| state),
+        DeleteMode::Permanent => trash_entry(boundary, relative, permanently_delete_entry).map(|(_, state)| state),
+    };
+    match outcome {
+        Ok(EntryTargetState::Missing) => Ok(true),
+        Ok(EntryTargetState::Present) | Ok(EntryTargetState::Unknown) => Err(AppError::new(
+            mode.error_code(),
+            match mode {
+                DeleteMode::Trash => "回收站没有移除目标；内容仍在原处。",
+                DeleteMode::Permanent => "永久删除没有移除目标；内容仍保留。",
+            },
+        )),
+        // 选择之后、删除之前已经不在工作区的条目：打开目标时就会以缺失报告。
+        Err(error) if error.code == "path_missing" || error.code == "entry_missing" => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn natural_sort_preserves_numeric_case_and_unicode_order() {
+        use std::cmp::Ordering;
+        for (left, right) in [
+            ("", "a"),
+            ("0", "00"),
+            ("a2", "a02"),
+            ("a02", "a10"),
+            ("T2", "T11"),
+            ("A2", "a2"),
+            ("a2", "A10"),
+            ("x99999999999999999999", "x100000000000000000000"),
+            ("文件2", "文件10"),
+            ("É2", "é2"),
+            ("ΟΣ2", "ος2"),
+            ("a1", "aa"),
+        ] {
+            assert_eq!(natural_cmp(left, right), Ordering::Less, "{left} < {right}");
+            assert_eq!(natural_cmp(right, left), Ordering::Greater);
+            assert_eq!(natural_cmp(left, left), Ordering::Equal);
+        }
+        assert_eq!(
+            natural_chunks("目录12é003.rs").collect::<Vec<_>>(),
+            ["目录", "12", "é", "003", ".rs"]
+        );
+    }
+
+    #[test]
+    fn path_search_top_results_match_full_sort_for_broad_queries() {
+        let mut paths: Vec<_> = (0..10_000)
+            .rev()
+            .map(|index| EnumeratedPath {
+                path: format!("dir{}/nested/file{index}.ts", index % 37),
+                directory: false,
+                ignored: index % 3 == 0,
+            })
+            .collect();
+        paths.push(EnumeratedPath {
+            path: "empty".into(),
+            directory: true,
+            ignored: true,
+        });
+        paths.push(EnumeratedPath {
+            path: "dir0".into(),
+            directory: true,
+            ignored: true,
+        });
+        paths.push(EnumeratedPath {
+            path: "目录/É2.ts".into(),
+            directory: false,
+            ignored: false,
+        });
+        let mut all: HashMap<&str, (bool, bool)> = HashMap::new();
+        for entry in &paths {
+            let value = all.entry(&entry.path).or_insert((entry.directory, true));
+            value.1 &= entry.ignored;
+            for (offset, _) in entry.path.match_indices('/') {
+                let value = all.entry(&entry.path[..offset]).or_insert((true, true));
+                value.1 &= entry.ignored;
+            }
+        }
+        let scanned = paths.len() + all.values().filter(|(directory, _)| *directory).count();
+        for query in ["", "file", "7", "dir", "nested", "é", "missing"] {
+            let mut expected: Vec<_> = all
+                .iter()
+                .filter_map(|(path, (directory, ignored))| {
+                    path_match_rank(path, query)
+                        .map(|rank| (rank, path.len(), *path, *directory, *ignored))
+                })
+                .collect();
+            expected.sort();
+            for limit in [0, 1, 17, 200, expected.len(), expected.len() + 1] {
+                let (entries, actual_scanned, truncated) = rank_path_entries(&paths, query, limit);
+                let actual: Vec<_> = entries
+                    .iter()
+                    .map(|entry| {
+                        (
+                            entry.path.as_str(),
+                            matches!(entry.kind, RepositoryPathKind::Directory),
+                            entry.ignored,
+                        )
+                    })
+                    .collect();
+                let wanted: Vec<_> = expected
+                    .iter()
+                    .take(limit)
+                    .map(|entry| (entry.2, entry.3, entry.4))
+                    .collect();
+                assert_eq!(actual, wanted, "query={query}, limit={limit}");
+                assert_eq!(actual_scanned, scanned as u64);
+                assert_eq!(truncated, expected.len() > limit);
+            }
+        }
+    }
+
+    #[test]
+    fn content_match_keeps_only_snippet_capacity_and_character_columns() {
+        let line = format!("{}needle", "界".repeat(20_000));
+        let (found, truncated) = line_match("large.txt", 7, &line, "needle").unwrap();
+        assert_eq!(found.column, 20_001);
+        assert_eq!(found.line, 7);
+        assert_eq!(found.text, "界".repeat(MAX_MATCH_TEXT_BYTES / 3));
+        assert!(truncated);
+        assert!(found.text.capacity() <= MAX_MATCH_TEXT_BYTES);
+        let (exact, truncated) =
+            line_match("exact.txt", 1, &"x".repeat(MAX_MATCH_TEXT_BYTES), "x").unwrap();
+        assert_eq!(exact.text.len(), MAX_MATCH_TEXT_BYTES);
+        assert!(!truncated);
+        assert!(line_match("missing.txt", 1, &line, "absent").is_none());
+    }
+
     #[test]
     fn cached_pages_preserve_byte_boundaries_and_invalidate_changed_files() {
         let dir = crate::test_support::TempDir::new("text-cursors");
@@ -8491,6 +8862,207 @@ mod tests {
 
     #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     #[tokio::test]
+    async fn permanent_delete_removes_files_and_directories_without_touching_git_metadata() {
+        let fixture = crate::test_support::git_fixture("repository-entry-permanent-delete");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::create_dir_all(root.join("directory/sub")).unwrap();
+        fs::write(root.join("file.txt"), b"file\n").unwrap();
+        fs::write(root.join("directory/sub/keep.txt"), b"delete\n").unwrap();
+        fs::write(root.join("keep.txt"), b"keep\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let path = root.to_str().unwrap();
+        let head = git_stdout(&root, &["rev-parse", "HEAD"]);
+        let index = git_stdout(&root, &["ls-files", "--stage"]);
+
+        let file_result = repository_delete_entry_with(
+            &backend,
+            path,
+            "file.txt",
+            1,
+            150,
+            DeleteMode::Permanent,
+            permanently_delete_entry,
+        )
+        .await
+        .unwrap();
+        assert_eq!(file_result.generation, 2);
+        assert!(!root.join("file.txt").exists());
+        let directory_result = repository_delete_entry_with(
+            &backend,
+            path,
+            "directory",
+            2,
+            151,
+            DeleteMode::Permanent,
+            permanently_delete_entry,
+        )
+        .await
+        .unwrap();
+        assert_eq!(directory_result.generation, 3);
+        assert!(!root.join("directory").exists());
+        assert_eq!(fs::read(root.join("keep.txt")).unwrap(), b"keep\n");
+        assert!(root.join(".git").is_dir());
+        assert_head_and_index(&root, &head, &index);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    #[tokio::test]
+    async fn permanent_partial_failure_advances_generation_and_reports_remaining_content() {
+        let fixture = crate::test_support::git_fixture("repository-entry-permanent-partial");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::create_dir_all(root.join("directory")).unwrap();
+        fs::write(root.join("directory/child.txt"), b"child\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let path = root.to_str().unwrap();
+        let child = root.join("directory/child.txt");
+        let error = repository_delete_entry_with(
+            &backend,
+            path,
+            "directory",
+            1,
+            152,
+            DeleteMode::Permanent,
+            move |_| {
+                fs::remove_file(child).unwrap();
+                Err(AppError::new("injected", "stop after child"))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "permanent_delete_failed");
+        assert_eq!(error.generation, Some(2));
+        assert!(error.message.contains("部分内容仍保留"));
+        assert!(root.join("directory").is_dir());
+        assert!(!root.join("directory/child.txt").exists());
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 2);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    #[tokio::test]
+    async fn batch_delete_removes_thousands_of_files_in_one_lock_and_reports_absent_targets() {
+        let fixture = crate::test_support::git_fixture("repository-batch-permanent-delete");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::create_dir_all(root.join("bulk/nested")).unwrap();
+        let mut relatives = Vec::new();
+        for index in 0..1200 {
+            let relative = format!("bulk/file-{index:04}.txt");
+            fs::write(root.join(&relative), b"x\n").unwrap();
+            relatives.push(relative);
+        }
+        fs::write(root.join("bulk/nested/keep.txt"), b"x\n").unwrap();
+        fs::write(root.join("outside.txt"), b"keep\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let path = root.to_str().unwrap();
+        let head = git_stdout(&root, &["rev-parse", "HEAD"]);
+        let index = git_stdout(&root, &["ls-files", "--stage"]);
+        // 选了目录又选了它里面的文件、选了重复项、还选了早已不存在的项：
+        // 目录删除后子项记为 skipped，本轮只推进一次代次，且不碰 .git 与目录外文件。
+        relatives.push("bulk".to_string());
+        relatives.push("bulk/file-0000.txt".to_string());
+        relatives.push("gone.txt".to_string());
+
+        let result = repository_delete_entries(
+            &backend,
+            path,
+            &relatives,
+            DeleteMode::Permanent,
+            1,
+            160,
+        )
+        .await
+        .unwrap();
+        assert!(!root.join("bulk").exists());
+        assert_eq!(fs::read(root.join("outside.txt")).unwrap(), b"keep\n");
+        assert!(root.join(".git").is_dir());
+        assert!(result.failures.is_empty(), "{:?}", result.failures);
+        assert!(result.deleted.iter().any(|item| item == "bulk"));
+        assert!(result.skipped.iter().any(|item| item == "gone.txt"));
+        assert_eq!(result.snapshot.generation, 2);
+        assert_head_and_index(&root, &head, &index);
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 2);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    #[tokio::test]
+    async fn batch_delete_rejects_git_metadata_without_touching_other_targets() {
+        let fixture = crate::test_support::git_fixture("repository-batch-delete-guards");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("a.txt"), b"a\n").unwrap();
+        fs::write(root.join("b.txt"), b"b\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let path = root.to_str().unwrap();
+        let head = git_stdout(&root, &["rev-parse", "HEAD"]);
+        let index = git_stdout(&root, &["ls-files", "--stage"]);
+        let relatives = vec!["a.txt".to_string(), ".git".to_string()];
+
+        let error = repository_delete_entries(&backend, path, &relatives, DeleteMode::Permanent, 1, 161)
+            .await
+            .unwrap_err();
+        // 路径校验先于任何删除：整批拒绝时连 a.txt 都不会动。
+        assert!(matches!(error.code.as_str(), "invalid_path" | "entry_forbidden" | "git_metadata"), "{}", error.code);
+        assert!(root.join("a.txt").exists());
+        assert!(root.join(".git").is_dir());
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 1);
+        assert_head_and_index(&root, &head, &index);
+
+        let result = repository_delete_entries(
+            &backend,
+            path,
+            &["b.txt".to_string()],
+            DeleteMode::Permanent,
+            1,
+            162,
+        )
+        .await
+        .unwrap();
+        assert!(result.failures.is_empty());
+        assert!(!root.join("b.txt").exists());
+        assert!(root.join("a.txt").exists());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    #[tokio::test]
+    async fn batch_delete_reports_absent_targets_as_skipped_and_refreshes_once() {
+        let fixture = crate::test_support::git_fixture("repository-batch-delete-partial");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend();
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join("a.txt"), b"a\n").unwrap();
+        fs::write(root.join("b.txt"), b"b\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let path = root.to_str().unwrap();
+        // 一个在删除前已经不存在的目标不会阻断其它条目，也不会制造失败。
+        let result = repository_delete_entries(
+            &backend,
+            path,
+            &["a.txt".to_string(), "b.txt".to_string(), "missing.txt".to_string()],
+            DeleteMode::Permanent,
+            1,
+            163,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.deleted.len(), 2);
+        assert!(result.skipped.contains(&"missing.txt".to_string()));
+        assert!(!root.join("a.txt").exists() && !root.join("b.txt").exists());
+        assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 2);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    #[tokio::test]
     async fn trash_adapter_failures_preserve_files_directories_and_git_state() {
         let fixture = crate::test_support::git_fixture("repository-entry-trash-failure");
         let root = fixture.repo("repo");
@@ -8512,6 +9084,7 @@ mod tests {
                 relative,
                 1,
                 id,
+                DeleteMode::Trash,
                 |_| Err(AppError::new("trash_failed", "injected unavailable trash")),
             )
             .await
@@ -8591,6 +9164,7 @@ mod tests {
             "first.txt",
             1,
             136,
+            DeleteMode::Trash,
             move |_| {
                 fs::rename(
                     first_root.join("first.txt"),
@@ -8618,6 +9192,7 @@ mod tests {
             "second.txt",
             2,
             137,
+            DeleteMode::Trash,
             move |_| {
                 fs::rename(
                     second_root.join("second.txt"),
@@ -8675,6 +9250,7 @@ mod tests {
                 &format!("locked/{name}"),
                 generation,
                 id,
+                DeleteMode::Trash,
                 move |_| {
                     fs::rename(&source, &destination).unwrap();
                     fs::set_permissions(&directory, fs::Permissions::from_mode(0o000)).unwrap();

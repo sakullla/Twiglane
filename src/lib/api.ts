@@ -1,6 +1,7 @@
 import { recordClioraCommit, recordClioraMerge } from "./cliora-review.svelte";
 import { normalizeError } from "./errors";
 import type {
+  BatchDeleteResult,
   BranchState,
   BranchListing,
   ClioraOutcome,
@@ -373,9 +374,15 @@ export const api = {
   /** 移动或重命名普通文件与目录：目标必须不存在，也不能是自身的后代。 */
   repositoryMoveEntry: (path: string, source: string, target: string, generation: number, requestId: number) =>
     invoke<StatusSnapshot>("repository_move_entry", { path, source, target, generation, requestId }),
-  /** 把普通文件或空/非空目录移入系统回收站：不提供永久删除，失败不降级。 */
+  /** 把普通文件或空/非空目录移入系统回收站；失败不降级为永久删除。只有本应用脚本仍用它。 */
   repositoryDeleteEntry: (path: string, relative: string, generation: number, requestId: number) =>
     invoke<StatusSnapshot>("repository_delete_entry", { path, relative, generation, requestId }),
+  /**
+   * 文件视图唯一的删除命令（单选与多选共用）：一次请求、一次写锁、一次状态刷新。
+   * permanent 必须显式传入——为真才是跳过回收站的永久删除，不会隐式降级。
+   */
+  repositoryDeleteEntries: (path: string, relatives: string[], permanent: boolean, generation: number, requestId: number) =>
+    invoke<BatchDeleteResult>("repository_delete_entries", { path, relatives, permanent, generation, requestId }),
   /** 按仓库相对路径查找文件与派生目录；directory 限定目录范围，includeIgnored 只影响本次请求。 */
   repositoryPathSearch: (
     path: string,

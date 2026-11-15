@@ -37,7 +37,7 @@ use crate::error::AppError;
 use crate::git::ops::{self, Backend};
 use crate::git::runner::RealRunner;
 use crate::model::{
-    AbortImpact, AmendOutcome, BranchState, CherryPickOutcome, CloneResult, CommitDetail,
+    AbortImpact, AmendOutcome, BatchDeleteResult, BranchState, CherryPickOutcome, CloneResult, CommitDetail,
     CommitPushReport, CommitResult, ConflictView, DiffResponse, DiscardResult, FileHistoryPage,
     GitInfo, HistoryPage, IgnoreOutcome, MergeComplete, MergePreview, MergeSession,
     OpenedRepository, PanelWidths, RecentRepo, RemoteState, RemoteTag, RepoChanged,
@@ -126,6 +126,7 @@ pub fn run() {
             repository_copy_entry,
             repository_move_entry,
             repository_delete_entry,
+            repository_delete_entries,
             repository_path_search,
             repository_content_search,
             repository_review_token,
@@ -1198,6 +1199,32 @@ async fn repository_delete_entry(
         state.inner(),
         &path,
         &relative,
+        generation,
+        request_id,
+    )
+    .await
+}
+/// 删除命令（含单条）：权限与参数形状一致，只多一个 `relatives` 数组与显式的 `permanent` 落点。
+/// `permanent` 为假时进系统回收站；为真时才是不可恢复的永久删除，绝不降级、绝不隐式切换。
+#[tauri::command(rename_all = "camelCase")]
+async fn repository_delete_entries(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    relatives: Vec<String>,
+    permanent: bool,
+    generation: u64,
+    request_id: u64,
+) -> Result<BatchDeleteResult, AppError> {
+    let mode = if permanent {
+        crate::git::files::DeleteMode::Permanent
+    } else {
+        crate::git::files::DeleteMode::Trash
+    };
+    crate::git::files::repository_delete_entries(
+        state.inner(),
+        &path,
+        &relatives,
+        mode,
         generation,
         request_id,
     )

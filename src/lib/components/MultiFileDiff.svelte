@@ -58,6 +58,12 @@
      * 这里转到同一文件的真实未提交差异，由那边的写锁与过期保护接管。
      */
     onOpenUnstaged?: (path: string) => void;
+    /** 任务多选：批量审阅与真实索引写入，净差异本身仍保持只读。 */
+    reviewed?: ReadonlySet<string>;
+    onToggleReview?: (path: string) => void;
+    stageSideFor?: (path: string) => "staged" | "unstaged" | "none";
+    onStageFiles?: (paths: string[]) => void;
+    onUnstageFiles?: (paths: string[]) => void;
   }
 
   /** 同时在途的差异读取数：选 100 个文件也不会一次把读取通道占满。 */
@@ -97,6 +103,11 @@
     scopeKey = "",
     readOnly = false,
     onOpenUnstaged,
+    reviewed = new Set<string>(),
+    onToggleReview,
+    stageSideFor,
+    onStageFiles,
+    onUnstageFiles,
   }: Props = $props();
 
   let scroller = $state<HTMLDivElement | null>(null);
@@ -119,6 +130,15 @@
   let retained = $derived(new Set(active ? shown.filter((row) => !collapsed.has(selectionKey(row))).map(selectionKey) : []));
   let allCollapsed = $derived(keys.every((key) => collapsed.has(key)));
   let noneCollapsed = $derived(collapsed.size === 0);
+  let reviewPending = $derived([...new Set(rows.map((row) => row.path))].filter((path) => !reviewed.has(path)));
+  let reviewDone = $derived([...new Set(rows.map((row) => row.path))].filter((path) => reviewed.has(path)));
+  let taskStageTargets = $derived([...new Set(rows.filter((row) => !row.unmerged && stageSideFor?.(row.path) === "unstaged").map((row) => row.path))]);
+  let taskUnstageTargets = $derived([...new Set(rows.filter((row) => !row.unmerged && stageSideFor?.(row.path) === "staged").map((row) => row.path))]);
+
+  function reviewSelected(value: boolean): void {
+    if (!onToggleReview) return;
+    for (const path of value ? reviewPending : reviewDone) onToggleReview(path);
+  }
 
   /**
    * 仓库、状态快照、generation 或读取范围任何一个变了都算新的一轮：这个对象每轮都是新的，
@@ -395,7 +415,24 @@
       </div>
     </div>
     {#if readOnly}
-      <!-- 任务净差异同时含已提交与未提交内容，按块或整文件暂存都会落到错误范围：这里只读。 -->
+      <!-- 净差异保持只读；批量动作明确写入真实审阅记录或真实索引。 -->
+      <div class="diff-toolbar-group task-batch-actions">
+        {#if onToggleReview}
+          <button type="button" class="btn btn-ghost btn-sm" aria-label={`标记 ${reviewPending.length} 个文件为已审阅`} title="确认这些文件的当前快照并记录人工审阅进度" disabled={disabled || reviewPending.length === 0} onclick={() => reviewSelected(true)}>
+            <Icon name="check" size={13} /><span class="diff-hist-label">标记已审阅</span>
+          </button>
+        {/if}
+        {#if onStageFiles}
+          <button type="button" class="btn btn-ghost btn-sm" aria-label={`暂存 ${taskStageTargets.length} 个文件`} title={taskStageTargets.length === 0 ? "选中的文件没有可暂存的真实改动" : "按真实工作区内容暂存；不会把任务净差异写进索引"} disabled={disabled || taskStageTargets.length === 0} onclick={() => onStageFiles?.(taskStageTargets)}>
+            <Icon name="plus" size={13} /><span class="diff-hist-label">暂存</span>
+          </button>
+        {/if}
+        {#if onUnstageFiles}
+          <button type="button" class="btn btn-ghost btn-sm" aria-label={`取消暂存 ${taskUnstageTargets.length} 个文件`} title={taskUnstageTargets.length === 0 ? "选中的文件没有已暂存的真实改动" : "取消这些文件在真实索引里的暂存"} disabled={disabled || taskUnstageTargets.length === 0} onclick={() => onUnstageFiles?.(taskUnstageTargets)}>
+            <Icon name="minus" size={13} /><span class="diff-hist-label">取消暂存</span>
+          </button>
+        {/if}
+      </div>
       <span class="spacer"></span>
     {:else}
     <div class="diff-toolbar-group">

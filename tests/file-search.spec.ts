@@ -459,7 +459,7 @@ describe("目录树全局过滤", () => {
       ),
     );
     // 定位后过滤被清空，目标所在分支已经展开。
-    expect(await screen.findByRole("treeitem", { name: /src/ })).toBeTruthy();
+    expect(await screen.findByRole("treeitem", { name: "src" })).toBeTruthy();
   });
 });
 

@@ -30,6 +30,7 @@
     type FileNavState,
     type ReviewQueueState,
   } from "../ui";
+  import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
   import DiffView from "./DiffView.svelte";
   import FileList from "./FileList.svelte";
   import Icon from "./Icon.svelte";
@@ -77,6 +78,11 @@
     onStageFile?: (path: string) => void;
     /** 整文件取消暂存：同一路径只有已暂存一侧时按钮与空格走这里。 */
     onUnstageFile?: (path: string) => void;
+    /** 多选整文件动作：由外壳一次持有写锁，避免逐文件操作互相抢占。 */
+    onStageFiles?: (paths: string[]) => void;
+    onUnstageFiles?: (paths: string[]) => void;
+    /** 复制一个或多个仓库相对路径，成功与失败反馈由外壳统一处理。 */
+    onCopyPaths?: (paths: string[]) => void;
     /**
      * 任务行在真实 Git 状态里的那一侧。任务净差异行本身只有一条结果，
      * 按钮/空格的方向、文案与禁用都必须按真实状态判断，不能一律说「暂存」。
@@ -127,6 +133,9 @@
     onHideReviewed,
     onStageFile,
     onUnstageFile,
+    onStageFiles,
+    onUnstageFiles,
+    onCopyPaths,
     stageSideFor,
     writeLocked = false,
     onOpenUnstaged,
@@ -319,6 +328,93 @@
 
   function focusBlock(item: FileSelection): void {
     selected = item;
+  }
+
+  let fileMenu = $state<ContextMenuRequest | null>(null);
+
+  function menuTargets(row: FileRow): FileRow[] {
+    return multiActive && selectedKeys.has(selectionKey(row)) ? selectedRows : [row];
+  }
+
+  function setReviewed(targets: FileRow[], value: boolean): void {
+    if (!onToggleReview) return;
+    for (const path of new Set(targets.map((row) => row.path))) {
+      if (reviewed.has(path) !== value) onToggleReview(path);
+    }
+  }
+
+  function stageTargets(targets: FileRow[], side: "staged" | "unstaged"): string[] {
+    return [...new Set(targets.filter((row) => !row.unmerged && stageSideFor?.(row.path) === side).map((row) => row.path))];
+  }
+
+  function runStage(targets: FileRow[], side: "staged" | "unstaged"): void {
+    const paths = stageTargets(targets, side);
+    if (paths.length === 0 || writeLocked) return;
+    if (side === "unstaged") {
+      if (onStageFiles) onStageFiles(paths);
+      else for (const path of paths) onStageFile?.(path);
+    } else {
+      if (onUnstageFiles) onUnstageFiles(paths);
+      else for (const path of paths) onUnstageFile?.(path);
+    }
+  }
+
+  function stageEntries(targets: FileRow[]): ContextMenuEntry[] {
+    if (!onStageFile && !onUnstageFile && !onStageFiles && !onUnstageFiles) return [];
+    const stageCount = stageTargets(targets, "unstaged").length;
+    const unstageCount = stageTargets(targets, "staged").length;
+    const busy = writeLocked ? "正在读取或写入，稍后再试" : undefined;
+    return [
+      {
+        id: "stage",
+        label: targets.length > 1 ? `暂存 ${stageCount} 个文件到索引` : "暂存到索引",
+        icon: "plus",
+        disabledReason: busy ?? (stageCount === 0 ? "所选文件没有可暂存的真实改动" : undefined),
+        run: () => runStage(targets, "unstaged"),
+      },
+      {
+        id: "unstage",
+        label: targets.length > 1 ? `取消暂存 ${unstageCount} 个文件` : "取消暂存",
+        icon: "minus",
+        disabledReason: busy ?? (unstageCount === 0 ? "所选文件没有已暂存的真实改动" : undefined),
+        run: () => runStage(targets, "staged"),
+      },
+    ];
+  }
+
+  function openFileMenu(row: FileRow, point: { x: number; y: number }): void {
+    const targets = menuTargets(row);
+    const entries: ContextMenuEntry[] = [];
+    if (targets.length > 1) {
+      entries.push({ heading: `已选 ${targets.length} 个文件` });
+      if (onToggleReview) {
+        const pending = targets.filter((item) => !reviewed.has(item.path)).length;
+        const done = targets.length - pending;
+        entries.push({ id: "review", label: `标记 ${pending} 个文件为已审阅`, icon: "check", disabledReason: pending === 0 ? "所选文件都已审阅" : undefined, run: () => setReviewed(targets, true) });
+        entries.push({ id: "unreview", label: `撤销 ${done} 个文件的已审阅标记`, icon: "undo", disabledReason: done === 0 ? "所选文件还没有已审阅标记" : undefined, run: () => setReviewed(targets, false) });
+      }
+      entries.push(...stageEntries(targets));
+    } else {
+      entries.push({ id: "open", label: "查看净差异", icon: "file-diff", run: () => select({ path: row.path, side: row.side }) });
+      if (onToggleReview) {
+        const done = reviewed.has(row.path);
+        entries.push({ id: "review", label: done ? "撤销已审阅标记" : "标记为已审阅", icon: done ? "undo" : "check", run: () => setReviewed([row], !done) });
+      }
+      entries.push(...stageEntries([row]));
+      if (onFileHistory) entries.push({ id: "history", label: "查看文件历史", icon: "history", run: () => onFileHistory?.(row.path) });
+      if (onEditFile && row.unstaged !== "deleted" && !row.unmerged) {
+        entries.push({ id: "edit", label: "编辑工作区文件", icon: "pencil", run: () => onEditFile?.(row.path, null) });
+      }
+    }
+    if (onCopyPaths) {
+      entries.push({ separator: true });
+      entries.push({ id: "copy", label: targets.length > 1 ? "复制所选相对路径" : "复制相对路径", icon: "copy", run: () => onCopyPaths?.(targets.map((item) => item.path)) });
+    }
+    if (targets.length > 1) {
+      entries.push({ separator: true });
+      entries.push({ id: "clear", label: "退出多选", icon: "x", shortcut: "Esc", run: () => selected && select(selected) });
+    }
+    fileMenu = { ...point, entries, label: targets.length > 1 ? `已选 ${targets.length} 个文件的操作` : `${row.path} 的操作` };
   }
 
   async function readTask(baseline: string | null): Promise<void> {
@@ -644,6 +740,7 @@
           onQuery={(value) => (query = value)}
           onSelect={select}
           onMultiSelect={selectMany}
+          onContextMenu={openFileMenu}
           onStage={() => {}}
           onUnstage={() => {}}
           {reviewed}
@@ -694,7 +791,7 @@
               rows={selectedRows}
               focus={selected}
               {nav}
-              disabled={false}
+              disabled={writeLocked}
               readOnly
               loadDiff={taskLoader}
               scopeKey={scopeKey}
@@ -706,6 +803,11 @@
               conflictCount={0}
               {onOpenUnstaged}
               {nextId}
+              {reviewed}
+              {onToggleReview}
+              {stageSideFor}
+              {onStageFiles}
+              {onUnstageFiles}
               onFocus={focusBlock}
               onStale={onGeneration}
               onStageHunk={() => {}}
@@ -763,3 +865,7 @@
     </div>
   {/if}
 </div>
+
+{#if fileMenu}
+  <ContextMenu request={fileMenu} onClose={() => (fileMenu = null)} />
+{/if}

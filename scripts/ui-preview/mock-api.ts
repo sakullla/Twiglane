@@ -1250,6 +1250,25 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     dropEntryChanges(relative);
     return snapshot();
   },
+  // 批量删除：真实后端一次取锁、一次刷新；mock 只模拟"逐条处理、缺失记 skipped"的结果形状。
+  repositoryDeleteEntries: async (_repo: string, relatives: string[], _permanent: boolean, _generation: number, _request: number) => {
+    await wait(200);
+    const deleted: string[] = [];
+    const skipped: string[] = [];
+    const failures: { path: string; code: string; message: string }[] = [];
+    for (const relative of relatives) {
+      const result = mockDeleteEntry(relative, entryMode);
+      if ("error" in result) {
+        if (result.error.code === "entry_missing") skipped.push(relative);
+        else failures.push({ path: relative, ...result.error });
+        continue;
+      }
+      deleted.push(relative);
+      dropEntryChanges(relative);
+    }
+    if (deleted.length > 0) generation += 1;
+    return { snapshot: await snapshot(), deleted, skipped, failures };
+  },
   repositoryDirectory: (_repo: string, relative: string, includeIgnored: boolean, generation: number) => {
     if (relative === "broken") {
       return Promise.reject({ code: "path_unreadable", message: "无法读取这个目录：权限不足。" });

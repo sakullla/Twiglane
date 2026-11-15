@@ -53,6 +53,7 @@
   import { isTextEntry, shortcutCommand } from "./lib/shortcuts";
   import type {
     AppFailure,
+    BatchDeleteResult,
     DiffHunk,
     DiffSide,
     DiffLineSelection,
@@ -164,6 +165,8 @@
   /** 关闭了常驻的 Git 诊断通知条；起始页的空状态入口不受影响（R13 仍要能诊断）。 */
   let gitDismissed = $state(false);
   let warning = $state<string | null>(null);
+  /** 同一条提示条既显示失败也显示"部分完成"：只有前者是错误色。 */
+  let bannerTone = $state<"error" | "warn">("error");
   let banner = $state<string | null>(null);
   let live = $state("正在准备 Twiglane");
   let opened = $state.raw<OpenedRepository | null>(null);
@@ -697,10 +700,12 @@
     else pick();
   }
 
-  function notice(message: string) {
-    phaseNote = message;
+  /** 运行提示：默认是成功提示；部分条目未完成的结论不能藏在"完成"的绿字里，改走黄色提示条。 */
+  function notice(message: string, tone: "ok" | "warn" = "ok") {
+    phaseNote = tone === "ok" ? message : null;
+    banner = tone === "ok" ? null : message;
+    if (tone === "warn") bannerTone = "warn";
     live = message;
-    banner = null;
   }
 
   /**
@@ -717,6 +722,7 @@
     // 失败结论与上一次的成功提示不能同时挂着：error toast 出现时把旧成功 toast 收起。
     phaseNote = null;
     banner = normalized.message;
+    bannerTone = "error";
     live = normalized.message;
   }
 
@@ -2086,7 +2092,7 @@
     return drafts.filter((draft) => paths.some((path) => draft === path || draft.startsWith(`${path}/`)));
   }
 
-  function entryActionLabel(action: FileEntryAction): string {
+  function entryActionLabel(action: FileEntryAction, request?: FileEntryRequest): string {
     switch (action) {
       case "createFile":
         return "新建文件";
@@ -2097,15 +2103,41 @@
       case "move":
         return "移动或重命名";
       default:
-        return "移到回收站";
+        return request?.permanent ? "永久删除" : "移到回收站";
     }
+  }
+
+  /**
+   * 多选删除一次交给后端一批处理：它只取一次写锁、只刷新一次状态。
+   * 逐个调用在几百个文件时会反复取锁并让后续请求带着旧代次被拒。
+   */
+  async function runBatchDelete(
+    repo: string,
+    paths: string[],
+    permanent: boolean,
+    generation: number,
+    requestId: number,
+  ): Promise<BatchDeleteResult> {
+    const result = await api.repositoryDeleteEntries(repo, paths, permanent, generation, requestId);
+    applySnapshot(result.snapshot);
+    const failed = result.failures.slice(0, 3).map((item) => `${item.path}（${item.message}）`).join("、");
+    const operated = result.deleted.length + result.skipped.length;
+    void (await filesView?.afterEntry("delete", paths[0] ?? "", ""));
+    const done = permanent ? "已永久删除" : "已移到系统回收站";
+    if (result.failures.length === 0) {
+      // 单项说清楚是哪一项；多项只说数量（列表已经在界面上更新）。
+      notice(paths.length === 1 ? `${done}：${paths[0]}` : `${done} ${operated} 项`);
+    } else {
+      notice(`${done} ${operated} 项，${result.failures.length} 项未完成${failed ? `：${failed}` : ""}`, "warn");
+    }
+    return result;
   }
 
   /**
    * 文件视图的四个结构操作：草稿关卡、重复提交保护、命令调用与快照接纳都在这里。
    * 复制不删改来源，因此不受草稿关卡约束；名称与目标路径由视图里的表单校验。
    */
-  async function runEntryAction(request: FileEntryRequest): Promise<FileEntryResult> {
+  async function runEntryAction(request: FileEntryRequest, batchDelete?: string[]): Promise<FileEntryResult> {
     const target = request.target.trim();
     const failed = (code: string, message: string): FileEntryResult => ({
       ok: false,
@@ -2117,16 +2149,18 @@
     if (!current) return failed("no_repository", "还没有打开仓库");
     if (pending === "entry") return failed("busy", "上一次文件操作还没有结束");
     if (writeLocked) return failed("busy", "正在读写仓库，完成后再试");
-    if (request.action !== "delete" && !target) return failed("empty_target", "请填写目标路径");
-    if (request.action === "delete" && !request.source) return failed("empty_source", "没有要删除的目标");
+    const deleting = request.action === "delete";
+    const permanent = deleting && request.permanent === true;
+    if (!deleting && !target) return failed("empty_target", "请填写目标路径");
+    if (deleting && !request.source) return failed("empty_source", "没有要删除的目标");
 
-    if (request.action === "move" || request.action === "delete") {
+    if (request.action === "move" || deleting) {
       const conflicts = draftConflicts([request.source], entryDrafts);
       if (conflicts.length > 0) {
         const shown = conflicts.slice(0, 3).join("、");
         return failed(
           "draft",
-          `${entryActionLabel(request.action)}被阻止：${shown}${conflicts.length > 3 ? ` 等 ${conflicts.length} 个路径` : ""}还有未保存的草稿。先保存或放弃草稿，草稿与磁盘都没有被改动。`,
+          `${entryActionLabel(request.action, request)}被阻止：${shown}${conflicts.length > 3 ? ` 等 ${conflicts.length} 个路径` : ""}还有未保存的草稿。先保存或放弃草稿，草稿与磁盘都没有被改动。`,
         );
       }
     }
@@ -2136,6 +2170,42 @@
     const requestId = nextId();
     pending = "entry";
     try {
+      // 删除不分单选多选：一次命令、一次写锁、一次刷新；几千个文件也不会逐个抢锁。
+      // 单选也走批量结果，提示里的计数与失败明细和面板"批量操作"完全一致。
+      if (deleting) {
+        const result = await runBatchDelete(repo, batchDelete ?? [request.source], permanent, generation, requestId);
+        if (opened?.summary.path !== repo) {
+          const message = `已${entryActionLabel(request.action, request)}，但当前已切换到另一个仓库；请回到原仓库查看结果。`;
+          live = message;
+          return { ok: true, code: "other_repository", message, path: request.source };
+        }
+        const items = batchDelete ?? [request.source];
+        const done = permanent ? `已永久删除：${request.source}` : `已移到系统回收站：${request.source}`;
+        const placed = (await filesView?.afterEntry(request.action, request.source, "")) ?? false;
+        if (items.length === 1) {
+          const message = result.failures.length === 0 ? (placed ? done : `${done}；文件视图已刷新，目标不在列表里就是它已离开工作区。`) : "";
+          if (!message) {
+            return {
+              ok: false,
+              code: "partial",
+              message: `未完成：${result.failures[0]?.message ?? "目标可能仍在原处"}`,
+              path: request.source,
+            };
+          }
+          return { ok: true, code: "ok", message, path: request.source };
+        }
+        return result.failures.length === 0
+          ? { ok: true, code: "ok", message: "", path: request.source }
+          : {
+              ok: false,
+              code: "partial",
+              message: `未完成 ${result.failures.length} 项：${result.failures
+                .slice(0, 3)
+                .map((item) => `${item.path}（${item.message}）`)
+                .join("、")}`,
+              path: result.failures[0]?.path ?? request.source,
+            };
+      }
       let snapshot: StatusSnapshot;
       switch (request.action) {
         case "createFile":
@@ -2147,24 +2217,18 @@
         case "copy":
           snapshot = await api.repositoryCopyEntry(repo, request.source, target, generation, requestId);
           break;
-        case "move":
-          snapshot = await api.repositoryMoveEntry(repo, request.source, target, generation, requestId);
-          break;
         default:
-          snapshot = await api.repositoryDeleteEntry(repo, request.source, generation, requestId);
+          snapshot = await api.repositoryMoveEntry(repo, request.source, target, generation, requestId);
       }
       // 迟到结果只属于发起它的仓库：期间切换了仓库就不改写当前状态，也不假装目标已可见。
       if (opened?.summary.path !== repo) {
-        const message = `${entryActionLabel(request.action)}已完成，但当前已切换到另一个仓库；请回到原仓库查看结果。`;
+        const message = `${entryActionLabel(request.action, request)}已完成，但当前已切换到另一个仓库；请回到原仓库查看结果。`;
         live = message;
         return { ok: true, code: "other_repository", message, path: target || request.source };
       }
       applySnapshot(snapshot);
       const placed = (await filesView?.afterEntry(request.action, request.source, target)) ?? false;
-      const done =
-        request.action === "delete"
-          ? `已移到系统回收站：${request.source}`
-          : `${entryActionLabel(request.action)}完成：${target}`;
+      const done = `${entryActionLabel(request.action)}完成：${target}`;
       /* 定位会先清空树筛选再展开目标；仍没就位时只有两种真实原因，不能都算到筛选或排序头上。 */
       const message = placed
         ? done
@@ -2176,7 +2240,7 @@
     } catch (error) {
       if (opened?.summary.path !== repo) {
         const failure = normalizeError(error);
-        const message = `${entryActionLabel(request.action)}失败：${failure.message}`;
+        const message = `${entryActionLabel(request.action, request)}失败：${failure.message}`;
         live = message;
         return { ok: false, code: failure.code, message, path: target || request.source };
       }
@@ -4155,6 +4219,9 @@
       onHideReviewed={(next) => (taskHideReviewed = next)}
       onStageFile={stageTaskFile}
       onUnstageFile={unstageTaskFile}
+      onStageFiles={(paths) => void runBatch("stage", paths)}
+      onUnstageFiles={(paths) => void runBatch("unstage", paths)}
+      onCopyPaths={(paths) => void copyText(paths.join("\n"), paths.length > 1 ? `${paths.length} 个相对路径` : "相对路径")}
       stageSideFor={taskFileStage}
       writeLocked={writeLocked}
       onOpenUnstaged={openUnstagedDiff}
@@ -4785,8 +4852,8 @@
 
 <div class="toasts">
   {#if banner}
-    <div class="toast error" role="alert">
-      <span class="toast-icon"><Icon name="alert-circle" size={16} /></span>
+    <div class="toast {bannerTone}" role={bannerTone === "error" ? "alert" : "status"}>
+      <span class="toast-icon"><Icon name={bannerTone === "error" ? "alert-circle" : "alert"} size={16} /></span>
       <span class="toast-text">{banner}</span>
       <button type="button" class="icon-btn sm" aria-label="关闭提示" onclick={() => (banner = null)}><Icon name="x" size={14} /></button>
     </div>

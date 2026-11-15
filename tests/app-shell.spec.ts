@@ -152,6 +152,7 @@ const mocks = vi.hoisted(() => ({
   repositoryCopyEntry: vi.fn(),
   repositoryMoveEntry: vi.fn(),
   repositoryDeleteEntry: vi.fn(),
+  repositoryDeleteEntries: vi.fn(),
   repositoryReviewToken: vi.fn(),
   taskReview: vi.fn(),
   taskReviewToken: vi.fn(),
@@ -4110,11 +4111,11 @@ describe("文件操作接线（T3）", () => {
     expect(row(tree, "README.md")).toBeTruthy();
 
     // 删除：确认按钮不可用，并说明涉及的草稿路径。
-    await menuAction(tree, "README.md", "移到回收站");
+    await menuAction(tree, "README.md", "删除…");
     const confirm = (await screen.findByRole("button", { name: "移到回收站" })) as HTMLButtonElement;
     expect(confirm.disabled).toBe(true);
     expect(confirm.getAttribute("title")).toContain("README.md");
-    expect(screen.getByRole("dialog", { name: "移到回收站" }).textContent).toContain("README.md");
+    expect(screen.getByRole("dialog", { name: "删除" }).textContent).toContain("README.md");
     await fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(mocks.repositoryDeleteEntry).not.toHaveBeenCalled();
     expect(mocks.refreshStatus).not.toHaveBeenCalled();
@@ -4129,21 +4130,68 @@ describe("文件操作接线（T3）", () => {
     await fireEvent.click(within(tree).getByRole("treeitem", { name: /README\.md/ }));
     await waitFor(() => expect(row(tree, "README.md").getAttribute("aria-selected")).toBe("true"));
 
-    mocks.repositoryDeleteEntry.mockResolvedValue({
-      ...snapshot,
-      generation: 5,
-      files: changes.filter((file) => file.path !== "README.md"),
+    mocks.repositoryDeleteEntries.mockResolvedValue({
+      snapshot: { ...snapshot, generation: 5, files: changes.filter((file) => file.path !== "README.md") },
+      deleted: ["README.md"],
+      skipped: [],
+      failures: [],
     });
     serveDirectory((generation) => (generation >= 5 ? [directoryEntry("src", "directory")] : [directoryEntry("README.md"), directoryEntry("src", "directory")]));
 
-    await menuAction(tree, "README.md", "移到回收站");
+    await menuAction(tree, "README.md", "删除…");
     await fireEvent.click((await screen.findByRole("button", { name: "移到回收站" })) as HTMLButtonElement);
-    await waitFor(() => expect(mocks.repositoryDeleteEntry).toHaveBeenCalledWith(repoPath, "README.md", 4, expect.any(Number)));
+    await waitFor(() => expect(mocks.repositoryDeleteEntries).toHaveBeenCalledWith(repoPath, ["README.md"], false, 4, expect.any(Number)));
     await waitFor(() => expect(tree.querySelector('.file-tree-row[title="README.md"]')).toBeNull());
     // 根目录下的目标删掉后选择退回仓库根，不继续指向已经不存在的路径。
     await waitFor(() => expect(row(tree, "src").getAttribute("aria-selected")).toBe("false"));
     expect(document.querySelector('.file-tree-row[aria-selected="true"]')).toBeNull();
     await waitFor(() => expect(document.querySelector(".toast-text")?.textContent).toBe("已移到系统回收站：README.md"));
+  });
+
+  it("删除确认里取消勾选回收站后，同一个删除命令带上永久标记", async () => {
+    const tree = await openFilesView();
+    await fireEvent.click(within(tree).getByRole("treeitem", { name: "README.md" }));
+    mocks.repositoryDeleteEntries.mockResolvedValue({
+      snapshot: { ...snapshot, generation: 5, files: [] },
+      deleted: ["README.md"],
+      skipped: [],
+      failures: [],
+    });
+    serveDirectory((generation) => generation >= 5 ? [directoryEntry("src", "directory")] : [directoryEntry("README.md"), directoryEntry("src", "directory")]);
+
+    await fireEvent.keyDown(tree, { key: "Delete" });
+    const dialog = await screen.findByRole("dialog", { name: "删除" });
+    await fireEvent.click(dialog.querySelector("[data-entry-recycle]") as HTMLInputElement);
+    expect(dialog.textContent).toContain("此操作无法撤销");
+    expect(mocks.repositoryDeleteEntry).not.toHaveBeenCalled();
+    expect(mocks.repositoryDeleteEntries).not.toHaveBeenCalled();
+    await fireEvent.click(within(dialog).getByRole("button", { name: "永久删除" }));
+    // 单选也走同一个删除命令：落点由显式的 permanent=true 决定，不另开一个后端入口。
+    await waitFor(() => expect(mocks.repositoryDeleteEntries).toHaveBeenCalledWith(repoPath, ["README.md"], true, 4, expect.any(Number)));
+    expect(mocks.repositoryDeleteEntry).not.toHaveBeenCalled();
+    await waitFor(() => expect(document.querySelector(".toast-text")?.textContent).toBe("已永久删除：README.md"));
+  });
+
+  it("多选删除一次提交整批路径，不让每个文件各抢一次写锁", async () => {
+    const tree = await openFilesView();
+    const targets = ["README.md", "src"];
+    mocks.repositoryDeleteEntries.mockResolvedValue({
+      snapshot: { ...snapshot, generation: 5, files: [] },
+      deleted: targets,
+      skipped: [],
+      failures: [],
+    });
+    serveDirectory((generation) => generation >= 5 ? [directoryEntry("empty", "directory")] : [directoryEntry("README.md"), directoryEntry("src", "directory"), directoryEntry("empty", "directory")]);
+
+    await fireEvent.click(tree.querySelector('.file-tree-row[title="README.md"] .tree-select') as HTMLElement);
+    await fireEvent.click(tree.querySelector('.file-tree-row[title="src"] .tree-select') as HTMLElement);
+    await fireEvent.keyDown(tree, { key: "Delete" });
+    const dialog = await screen.findByRole("dialog", { name: "删除 2 个项目" });
+    await fireEvent.click(within(dialog).getByRole("button", { name: "删除 2 个项目" }));
+    await waitFor(() => expect(mocks.repositoryDeleteEntries).toHaveBeenCalledTimes(1));
+    expect(mocks.repositoryDeleteEntries).toHaveBeenCalledWith(repoPath, expect.arrayContaining(["README.md", "src"]), false, 4, expect.any(Number));
+    expect(mocks.repositoryDeleteEntry).not.toHaveBeenCalled();
+    await waitFor(() => expect(document.querySelector(".toast-text")?.textContent).toBe("已移到系统回收站 2 项"));
   });
 
   it("成功后的旧代次快照迟到时不把文件树退回上一次的状态", async () => {

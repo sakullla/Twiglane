@@ -159,7 +159,7 @@ describe("目录树交互", () => {
     render(FileTree, { props: props as never });
     const treeEl = screen.getByRole("tree", { name: "仓库文件" });
     expect(treeEl).toBeTruthy();
-    const first = within(treeEl).getByRole("treeitem", { name: /src\/lib\/components/ });
+    const first = within(treeEl).getByRole("treeitem", { name: "src/lib/components" });
     expect(first.getAttribute("title")).toBe("src/lib/components");
     expect(first.textContent).toContain("忽略");
     expect(within(treeEl).getByText("Button.svelte")).toBeTruthy();
@@ -478,7 +478,7 @@ describe("目录树右键菜单", () => {
     await fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
     const dirMenu = labels(await openMenu("src/lib/components")).join(" ");
     // 只读宿主（例如审阅、历史）不传 onEntryAction：菜单里就没有结构操作。
-    for (const absent of ["新建文件", "新建目录", "复制到", "移动或重命名", "移到回收站"]) {
+    for (const absent of ["新建文件", "新建目录", "复制到", "移动或重命名", "删除…"]) {
       expect(fileMenu.includes(absent), `文件菜单不应含「${absent}」`).toBe(false);
       expect(dirMenu.includes(absent), `目录菜单不应含「${absent}」`).toBe(false);
     }
@@ -489,30 +489,46 @@ describe("目录树右键菜单", () => {
     }
   });
 
-  it("有多选时只提供系统定位、终端与路径复制，不提供批量结构操作", async () => {
+  it("多选菜单提供批量复制、移动与删除，保留系统定位和路径复制", async () => {
     const rows = flattenTree([
       node("a.ts", "file", null, "a.ts"),
       node("b.ts", "file", null, "b.ts"),
       node("c.ts", "file", null, "c.ts"),
     ]);
-    const onEntryAction = vi.fn();
+    const onBatchEntry = vi.fn();
     render(FileTree, {
       props: {
         ...baseProps(),
         rows,
         selectedPath: "b.ts",
         selectedPaths: new Set(["a.ts", "b.ts"]),
-        onEntryAction,
+        onBatchEntry,
       } as never,
     });
     const menu = await openMenu("b.ts");
     const names = labels(menu);
     expect(screen.getByText("已选 2 项", { selector: ".menu-label" })).toBeTruthy();
     expect(names.some((text) => text.startsWith("复制所选相对路径"))).toBe(true);
-    for (const absent of ["新建文件", "新建目录", "复制到", "移动或重命名", "移到回收站"]) {
-      expect(names.some((text) => text.startsWith(absent)), absent).toBe(false);
+    for (const label of ["复制 2 项到…", "移动 2 项到…", "删除 2 项…"]) {
+      expect(names.some((text) => text.startsWith(label)), label).toBe(true);
     }
-    expect(onEntryAction).not.toHaveBeenCalled();
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "移动 2 项到…" }));
+    expect(onBatchEntry).toHaveBeenCalledWith("move", [expect.objectContaining({ path: "a.ts" }), expect.objectContaining({ path: "b.ts" })]);
+  });
+
+  it("批量结构操作排除目录后代与特殊项目，避免同一内容被处理两次", async () => {
+    const rows = flattenTree([
+      { ...node("src", "directory", [], "src"), expanded: true },
+      node("src/a.ts", "file", null, "a.ts"),
+      node("link.ts", "symlink", null, "link.ts"),
+    ]);
+    const onBatchEntry = vi.fn();
+    render(FileTree, {
+      props: { ...baseProps(), rows, selectedPath: "src", selectedPaths: new Set(["src", "src/a.ts", "link.ts"]), onBatchEntry } as never,
+    });
+    const menu = await openMenu("src");
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "复制 1 项到…" }));
+    expect(onBatchEntry).toHaveBeenCalledWith("copy", [expect.objectContaining({ path: "src" })]);
   });
 });
 
@@ -570,8 +586,32 @@ describe("文件与目录操作入口", () => {
     expect(onEntryAction).toHaveBeenLastCalledWith("copy", expect.objectContaining({ path: "src/lib/components" }));
     await fireEvent.click(within(await openMenu("src/lib/components/Icon.svelte")).getByRole("menuitem", { name: "移动或重命名" }));
     expect(onEntryAction).toHaveBeenLastCalledWith("move", expect.objectContaining({ path: "src/lib/components/Icon.svelte" }));
-    await fireEvent.click(within(await openMenu("src/lib/components/Icon.svelte")).getByRole("menuitem", { name: "移到回收站" }));
+    await fireEvent.click(within(await openMenu("src/lib/components/Icon.svelte")).getByRole("menuitem", { name: "删除…" }));
     expect(onEntryAction).toHaveBeenLastCalledWith("delete", expect.objectContaining({ path: "src/lib/components/Icon.svelte" }));
+  });
+
+  it("只有一个删除入口：Delete 与右键都是同一个删除动作，不再另设永久删除快捷键", async () => {
+    const rows = flattenTree([node("a.ts", "file", null, "a.ts"), node("b.ts", "file", null, "b.ts")]);
+    const onEntryAction = vi.fn();
+    const onBatchEntry = vi.fn();
+    const props = { ...baseProps(), rows, selectedPath: "a.ts", onEntryAction, onBatchEntry };
+    const view = render(FileTree, { props: props as never });
+    const tree = screen.getByRole("tree", { name: "仓库文件" });
+    await fireEvent.keyDown(tree, { key: "Delete" });
+    expect(onEntryAction).toHaveBeenLastCalledWith("delete", expect.objectContaining({ path: "a.ts" }));
+    // 落点由确认框里的选项决定：加 Shift 不会滑到另一个不可恢复的动作。
+    await fireEvent.keyDown(tree, { key: "Delete", shiftKey: true });
+    expect(onEntryAction).toHaveBeenLastCalledWith("delete", expect.objectContaining({ path: "a.ts" }));
+
+    await view.rerender({ ...props, selectedPaths: new Set(["a.ts", "b.ts"]) } as never);
+    await fireEvent.keyDown(tree, { key: "Delete", shiftKey: true });
+    expect(onBatchEntry).toHaveBeenCalledWith("delete", [
+      expect.objectContaining({ path: "a.ts" }),
+      expect.objectContaining({ path: "b.ts" }),
+    ]);
+    const menu = await openMenu("a.ts");
+    expect(within(menu).queryByRole("menuitem", { name: /永久删除/ })).toBeNull();
+    expect(within(menu).getByRole("menuitem", { name: "删除 2 项…" }).getAttribute("aria-keyshortcuts")).toBe("Delete");
   });
 
   it("特殊类型、嵌套仓库、已删除文件与忙碌状态灰显并说明原因", async () => {
@@ -602,7 +642,7 @@ describe("文件与目录操作入口", () => {
     view.unmount();
     render(FileTree, { props: { ...baseProps(), onEntryAction, disabled: true } as never });
     const busyMenu = await openMenu("src/lib/components/Icon.svelte");
-    expect(within(busyMenu).getByRole("menuitem", { name: "移到回收站" }).getAttribute("aria-disabled")).toBe("true");
+    expect(within(busyMenu).getByRole("menuitem", { name: "删除…" }).getAttribute("aria-disabled")).toBe("true");
     expect(busyMenu.textContent).toContain("正在读取或写入");
   });
 
@@ -613,7 +653,7 @@ describe("文件与目录操作入口", () => {
     const onEntryAction = vi.fn();
     render(FileTree, { props: { ...baseProps(), rows, onEntryAction } as never });
     const menu = await openMenu("src/lib/components/Button.svelte");
-    const remove = within(menu).getByRole("menuitem", { name: "移到回收站" });
+    const remove = within(menu).getByRole("menuitem", { name: "删除…" });
     expect(remove.getAttribute("aria-disabled")).toBe("true");
     expect(within(menu).getByText("文件已从工作区删除，不能在这里操作")).toBeTruthy();
     expect(onEntryAction).not.toHaveBeenCalled();
@@ -664,7 +704,7 @@ describe("文件视图容器", () => {
     await fireEvent.click(b, { ctrlKey: true });
     expect(a.getAttribute("aria-selected")).toBe("true");
     expect(b.getAttribute("aria-selected")).toBe("true");
-    expect(screen.getByText("已选 2 项")).toBeTruthy();
+    expect(screen.getByText(/已选\s*2\s*项/)).toBeTruthy();
 
     // Ctrl 点击的 b 是范围锚点：Shift 选 c 后保留 b、c，不残留隐藏的旧范围。
     await fireEvent.click(c, { shiftKey: true });
@@ -673,7 +713,7 @@ describe("文件视图容器", () => {
     expect(c.getAttribute("aria-selected")).toBe("true");
 
     await fireEvent.keyDown(tree, { key: "a", ctrlKey: true });
-    expect(screen.getByText("已选 3 项")).toBeTruthy();
+    expect(screen.getByText(/已选\s*3\s*项/)).toBeTruthy();
     await fireEvent.click(screen.getByRole("button", { name: "复制路径" }));
     expect(onCopyPath).toHaveBeenLastCalledWith("a.ts\nb.ts\nc.ts", "3 个相对路径");
 
@@ -688,7 +728,7 @@ describe("文件视图容器", () => {
 
     await fireEvent.keyDown(tree, { key: "Home" });
     await fireEvent.keyDown(tree, { key: "End", shiftKey: true });
-    expect(screen.getByText("已选 3 项")).toBeTruthy();
+    expect(screen.getByText(/已选\s*3\s*项/)).toBeTruthy();
     expect(a.getAttribute("aria-selected")).toBe("true");
     expect(c.getAttribute("aria-selected")).toBe("true");
   });
@@ -946,6 +986,6 @@ describe("名称排序", () => {
     // Shift 范围按当前显示顺序：从第一行到尾行覆盖三行。
     await fireEvent.click(within(tree).getByRole("treeitem", { name: "b.txt" }));
     await fireEvent.click(within(tree).getByRole("treeitem", { name: "a2.txt" }), { shiftKey: true });
-    expect(screen.getByText("已选 3 项")).toBeTruthy();
+    expect(screen.getByText(/已选\s*3\s*项/)).toBeTruthy();
   });
 });

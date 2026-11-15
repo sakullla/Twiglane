@@ -510,6 +510,62 @@ describe("任务审阅组件", () => {
     ).toBeGreaterThan(0);
   });
 
+  it("任务文件支持右键审阅、真实暂存、历史与复制路径", async () => {
+    const onToggleReview = vi.fn();
+    const onStageFile = vi.fn();
+    const onFileHistory = vi.fn();
+    const onCopyPaths = vi.fn();
+    render(TaskReview, {
+      props: reviewProps({ onToggleReview, onStageFile, onFileHistory, onCopyPaths, stageSideFor: () => "unstaged" }),
+    });
+    const list = await screen.findByRole("listbox", { name: "任务文件" });
+    const row = within(list).getByRole("option", { name: "src/app.ts" });
+    await fireEvent.contextMenu(row, { clientX: 80, clientY: 100 });
+    const menu = await screen.findByRole("menu", { name: "src/app.ts 的操作" });
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "标记为已审阅" }));
+    expect(onToggleReview).toHaveBeenCalledWith("src/app.ts");
+
+    await fireEvent.contextMenu(row);
+    await fireEvent.click(screen.getByRole("menuitem", { name: "暂存到索引" }));
+    expect(onStageFile).toHaveBeenCalledWith("src/app.ts");
+    await fireEvent.contextMenu(row);
+    await fireEvent.click(screen.getByRole("menuitem", { name: "查看文件历史" }));
+    expect(onFileHistory).toHaveBeenCalledWith("src/app.ts");
+    await fireEvent.contextMenu(row);
+    await fireEvent.click(screen.getByRole("menuitem", { name: "复制相对路径" }));
+    expect(onCopyPaths).toHaveBeenCalledWith(["src/app.ts"]);
+  });
+
+  it("多选右键与差异工具条共享批量审阅和真实索引目标", async () => {
+    const onToggleReview = vi.fn();
+    const onStageFiles = vi.fn();
+    const onUnstageFiles = vi.fn();
+    const onCopyPaths = vi.fn();
+    const stageSideFor = (path: string) => path === "src/app.ts" ? "unstaged" as const : path === "docs/gone.md" ? "staged" as const : "none" as const;
+    render(TaskReview, { props: reviewProps({ onToggleReview, onStageFiles, onUnstageFiles, onCopyPaths, stageSideFor }) });
+    const list = await screen.findByRole("listbox", { name: "任务文件" });
+    await fireEvent.click(within(list).getByRole("option", { name: "docs/gone.md" }), { ctrlKey: true });
+    const selected = within(list).getByRole("option", { name: "src/app.ts" });
+    await fireEvent.contextMenu(selected);
+    const menu = await screen.findByRole("menu", { name: "已选 2 个文件的操作" });
+    expect(within(menu).getByRole("menuitem", { name: "标记 2 个文件为已审阅" })).toBeTruthy();
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "暂存 1 个文件到索引" }));
+    expect(onStageFiles).toHaveBeenCalledWith(["src/app.ts"]);
+
+    await fireEvent.contextMenu(selected);
+    await fireEvent.click(screen.getByRole("menuitem", { name: "取消暂存 1 个文件" }));
+    expect(onUnstageFiles).toHaveBeenCalledWith(["docs/gone.md"]);
+    await fireEvent.contextMenu(selected);
+    await fireEvent.click(screen.getByRole("menuitem", { name: "复制所选相对路径" }));
+    expect(onCopyPaths).toHaveBeenCalledWith(["src/app.ts", "docs/gone.md"]);
+
+    const toolbar = document.querySelector<HTMLElement>(".multi-stack .diff-toolbar")!;
+    await fireEvent.click(within(toolbar).getByRole("button", { name: "标记 2 个文件为已审阅" }));
+    expect(onToggleReview).toHaveBeenCalledTimes(2);
+    await fireEvent.keyDown(list, { key: "Escape" });
+    await waitFor(() => expect(document.querySelector(".multi-stack")).toBeNull());
+  });
+
   it("单文件读取失败就地说明并可按同一读取路径重试", async () => {
     mocks.api.loadTaskDiff.mockRejectedValueOnce({ code: "diff_failed", message: "无法读取这次任务的差异，未修改仓库。" });
     render(TaskReview, { props: reviewProps() });

@@ -261,15 +261,99 @@ describe("复制与移动", () => {
   });
 });
 
+describe("批量复制、移动与删除", () => {
+  const entries = [
+    { path: "src/a.ts", kind: "file" as const },
+    { path: "docs/guide.md", kind: "file" as const },
+  ];
+
+  it("复制到同一目录时保留名称并逐项提交", async () => {
+    const p = props({ action: "copy", path: entries[0].path, kind: "file", entries });
+    render(FileOperationDialog, { props: p as never });
+    expect(screen.getByRole("dialog", { name: "复制 2 个项目" })).toBeTruthy();
+    await type("[data-entry-input='target']", "archive");
+    await fireEvent.click(submitButton());
+    await waitFor(() => expect(p.onSubmit).toHaveBeenCalledTimes(2));
+    expect(p.onSubmit.mock.calls.map((call) => call[0])).toEqual([
+      { action: "copy", source: "src/a.ts", target: "archive/a.ts", kind: "file" },
+      { action: "copy", source: "docs/guide.md", target: "archive/guide.md", kind: "file" },
+    ]);
+    expect(p.onClose).toHaveBeenCalled();
+  });
+
+  it("目录移进自身会在写入前拦截", async () => {
+    const p = props({
+      action: "move",
+      path: "src",
+      kind: "directory",
+      entries: [{ path: "src", kind: "directory" }, { path: "docs", kind: "directory" }],
+    });
+    render(FileOperationDialog, { props: p as never });
+    await type("[data-entry-input='target']", "src/child");
+    await fireEvent.click(submitButton());
+    expect(document.querySelector("[data-entry-problem]")?.textContent).toContain("子目录");
+    expect(p.onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("部分失败就停止后续写入，并明确已完成与未处理数量", async () => {
+    const onSubmit = vi.fn()
+      .mockImplementationOnce(async (request: FileEntryRequest) => ok(request))
+      .mockResolvedValueOnce({ ok: false, code: "target_exists", message: "目标已存在。", path: "archive/guide.md" });
+    const p = props({ action: "copy", path: entries[0].path, kind: "file", entries, onSubmit });
+    render(FileOperationDialog, { props: p as never });
+    await type("[data-entry-input='target']", "archive");
+    await fireEvent.click(submitButton());
+    await waitFor(() => expect(document.querySelector("[data-entry-error]")?.textContent).toContain("已完成 1 项，其余 1 项未处理"));
+    expect(onSubmit).toHaveBeenCalledTimes(2);
+    expect(p.onClose).not.toHaveBeenCalled();
+  });
+
+  it("批量删除列出全部目标，默认进回收站并一次提交整批路径", async () => {
+    const sources = ["src/a.ts", "docs/guide.md"];
+    const p = props({ action: "delete", path: sources[0], kind: "file", entries, batchSources: sources });
+    render(FileOperationDialog, { props: p as never });
+    const dialog = screen.getByRole("dialog", { name: "删除 2 个项目" });
+    expect(dialog.textContent).toContain("src/a.ts");
+    expect(dialog.textContent).toContain("docs/guide.md");
+    expect(dialog.textContent).toContain("移入系统回收站");
+    await fireEvent.click(screen.getByRole("button", { name: "删除 2 个项目" }));
+    // 一次提交：后端一次取锁、一次刷新，几千个文件也不会逐个抢锁。
+    await waitFor(() => expect(p.onSubmit).toHaveBeenCalledTimes(1));
+    expect((p.onSubmit.mock.calls[0] as unknown[])[1]).toEqual(sources);
+    expect(p.onSubmit.mock.calls[0][0]).not.toHaveProperty("permanent");
+    expect(p.onClose).toHaveBeenCalled();
+  });
+
+  it("几千个条目只渲染前面一小段，其余按数量汇总", async () => {
+    const sources = Array.from({ length: 3000 }, (_, index) => `bulk/file-${index}.txt`);
+    const p = props({
+      action: "delete",
+      path: sources[0],
+      kind: "file",
+      entries: sources.map((path) => ({ path, kind: "file" as const })),
+      batchSources: sources,
+    });
+    render(FileOperationDialog, { props: p as never });
+    const dialog = screen.getByRole("dialog", { name: "删除 3000 个项目" });
+    expect(dialog.querySelectorAll(".confirm-targets li").length).toBeLessThan(80);
+    expect(dialog.textContent).toContain("另有 2992 个项目");
+    await fireEvent.click(screen.getByRole("button", { name: "删除 3000 个项目" }));
+    await waitFor(() => expect(p.onSubmit).toHaveBeenCalledTimes(1));
+    expect((p.onSubmit.mock.calls[0] as unknown[])[1]).toHaveLength(3000);
+  });
+});
+
 describe("删除确认", () => {
-  it("明确说明进入系统回收站，取消不提交", async () => {
+  it("默认勾选回收站：明确说明落点，取消不提交", async () => {
     const p = props({ action: "delete", path: "src/lib/old", kind: "directory" });
     render(FileOperationDialog, { props: p as never });
-    const dialog = screen.getByRole("dialog", { name: "移到回收站" });
+    const dialog = screen.getByRole("dialog", { name: "删除" });
+    const recycle = dialog.querySelector("[data-entry-recycle]") as HTMLInputElement;
+    expect(recycle.checked).toBe(true);
     expect(dialog.textContent).toContain("系统回收站");
     expect(dialog.textContent).toContain("不会暂存、提交或推送");
     expect(dialog.textContent).toContain("目录及其内容会一起移入回收站");
-    expect(dialog.textContent).toContain("本应用不提供永久删除");
+    expect(dialog.textContent).toContain("可以稍后从系统回收站恢复");
 
     await fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(p.onClose).toHaveBeenCalledTimes(1);
@@ -287,7 +371,7 @@ describe("删除确认", () => {
       target: "",
       kind: "file",
     }));
-    await waitFor(() => expect(screen.getByRole("dialog", { name: "移到回收站" }).textContent).toContain("系统回收站不可用"));
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "删除" }).textContent).toContain("系统回收站不可用"));
     expect(p.onClose).not.toHaveBeenCalled();
   });
 
@@ -302,7 +386,7 @@ describe("删除确认", () => {
     const confirm = screen.getByRole("button", { name: "移到回收站" }) as HTMLButtonElement;
     expect(confirm.disabled).toBe(true);
     expect(confirm.getAttribute("title")).toContain("src/lib/a.ts");
-    const dialog = screen.getByRole("dialog", { name: "移到回收站" });
+    const dialog = screen.getByRole("dialog", { name: "删除" });
     expect(dialog.textContent).toContain("src/lib/a.ts");
     expect(dialog.textContent).toContain("src/lib/deep/b.ts");
     expect(dialog.textContent).not.toContain("src/other.ts");
@@ -320,5 +404,44 @@ describe("删除确认", () => {
     expect(onSubmit).toHaveBeenCalledTimes(1);
     finish({ ok: true, code: "ok", message: "", path: "src/lib/old" });
     await waitFor(() => expect(p.onClose).toHaveBeenCalledTimes(1));
+  });
+
+  it("取消勾选回收站才变成永久删除：明确不可恢复，默认焦点仍在取消", async () => {
+    const p = props({ action: "delete", path: "src/lib/old", kind: "directory" });
+    render(FileOperationDialog, { props: p as never });
+    const dialog = screen.getByRole("dialog", { name: "删除" });
+    const recycle = dialog.querySelector("[data-entry-recycle]") as HTMLInputElement;
+    await fireEvent.click(recycle);
+    expect(recycle.checked).toBe(false);
+    expect(dialog.textContent).toContain("此操作无法撤销");
+    expect(dialog.textContent).toContain("目录及其全部内容会被永久删除");
+    expect(dialog.textContent).toContain("不会经过系统回收站");
+    expect(document.activeElement?.textContent).toBe("取消");
+    await fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
+    await waitFor(() => expect(p.onSubmit).toHaveBeenCalledWith({
+      action: "delete",
+      source: "src/lib/old",
+      target: "",
+      kind: "directory",
+      permanent: true,
+    }));
+  });
+
+  it("批量永久删除同样一次提交整批路径，并带上永久标记", async () => {
+    const sources = ["src/a.ts", "docs/b.md"];
+    const p = props({
+      action: "delete",
+      path: sources[0],
+      kind: "file",
+      entries: sources.map((path) => ({ path, kind: "file" as const })),
+      batchSources: sources,
+    });
+    render(FileOperationDialog, { props: p as never });
+    const dialog = screen.getByRole("dialog", { name: "删除 2 个项目" });
+    await fireEvent.click(dialog.querySelector("[data-entry-recycle]") as HTMLInputElement);
+    await fireEvent.click(screen.getByRole("button", { name: "永久删除 2 个项目" }));
+    await waitFor(() => expect(p.onSubmit).toHaveBeenCalledTimes(1));
+    expect(p.onSubmit.mock.calls[0][0]).toMatchObject({ action: "delete", permanent: true });
+    expect((p.onSubmit.mock.calls[0] as unknown[])[1]).toEqual(sources);
   });
 });

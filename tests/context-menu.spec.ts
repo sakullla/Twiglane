@@ -318,10 +318,11 @@ describe("文件树右键菜单（文件视图整合）", () => {
     // 新建/复制/移动/删除是文件视图自己的结构操作入口（T3 接入）；
     // 加入 .gitignore / .git/info/exclude 是文件视图自己的忽略入口；
     // 暂存、提交、放弃与编辑器仍不在这个菜单里，写 Git 的命令也不会因此多出来。
-    for (const forbidden of ["暂存", "提交", "放弃", "保存", "编辑"]) {
+    // 永久删除不再单独占一行：落点由确认框里的「移到系统回收站」选项决定。
+    for (const forbidden of ["暂存", "提交", "放弃", "保存", "编辑", "永久删除"]) {
       expect(text.includes(forbidden), `不应含「${forbidden}」`).toBe(false);
     }
-    for (const expected of ["新建文件", "新建目录", "复制到…", "移动或重命名", "移到回收站", "加入 .gitignore", "加入 .git/info/exclude"]) {
+    for (const expected of ["新建文件", "新建目录", "复制到…", "移动或重命名", "删除…", "加入 .gitignore", "加入 .git/info/exclude"]) {
       expect(text.includes(expected), `应含「${expected}」`).toBe(true);
     }
     expect(mocks.stageFiles).not.toHaveBeenCalled();

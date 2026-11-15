@@ -81,6 +81,8 @@
      * 新建、复制、移动/重命名与删除的规则都在文件视图与外壳里。
      */
     onEntryAction?: (action: FileEntryAction, row: FileTreeRow) => void;
+    /** 多选结构操作：目标只含可操作的文件/目录，嵌套选择已收敛为最外层项目。 */
+    onBatchEntry?: (action: "copy" | "move" | "delete", rows: FileTreeRow[]) => void;
     /**
      * 加入忽略规则：`local` 为 true 时只写 .git/info/exclude。
      * 与改动列表的右键菜单同一组入口，写入与状态刷新都由外壳执行。
@@ -127,6 +129,7 @@
     nameDirection = "asc",
     onNameDirection,
     onEntryAction,
+    onBatchEntry,
     onIgnore,
   }: Props = $props();
 
@@ -146,6 +149,12 @@
   let visible = $derived(rows.slice(range.start, range.end));
   let hasExpanded = $derived(rows.some((row) => row.expandable && row.expanded));
   let selectedRows = $derived(rows.filter((row) => !row.segment && selectedPaths.has(row.path)));
+  let batchRows = $derived(
+    selectedRows.filter((row) =>
+      !entryBlockedReason(row) && !selectedRows.some((other) => other !== row && other.kind === "directory" && row.path.startsWith(`${other.path}/`)),
+    ),
+  );
+  let batchReason = $derived(disabled ? BUSY_REASON : batchRows.length === 0 ? "所选项目都不支持文件操作" : undefined);
 
   function isSelected(row: FileTreeRow): boolean {
     return selectedPaths.size > 0 ? selectedPaths.has(row.path) : row.path === selectedPath;
@@ -218,6 +227,16 @@
     return -1;
   }
 
+  /** 删除只有一个入口：回收站还是永久删除由确认框里的选项决定，树不另设动作或快捷键。 */
+  function requestDelete(row: FileTreeRow): void {
+    if (disabled) return;
+    if (selectedPaths.has(row.path) && selectedRows.length > 1 && onBatchEntry) {
+      if (batchRows.length > 0) onBatchEntry("delete", batchRows);
+      return;
+    }
+    if (onEntryAction && !entryBlockedReason(row)) onEntryAction("delete", row);
+  }
+
   function onKey(event: KeyboardEvent) {
     if (isContextKey(event)) {
       const index = selectedPath ? rowIndex(rows, selectedPath) : -1;
@@ -235,6 +254,14 @@
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
       event.preventDefault();
       onSelectAll();
+      return;
+    }
+    if (event.key === "Delete" && !event.altKey && !event.ctrlKey && !event.metaKey) {
+      const current = selectedPath ? rowIndex(rows, selectedPath) : -1;
+      if (current >= 0) {
+        event.preventDefault();
+        requestDelete(rows[current]);
+      }
       return;
     }
     if (event.key === "Escape" && selectedPaths.size > 0) {
@@ -350,7 +377,7 @@
       { id: "create-directory", label: "新建目录", icon: "folder-plus", disabledReason: blocked ?? undefined, run: run("createDirectory") },
       { id: "copy-entry", label: "复制到…", icon: "copy", disabledReason: blocked ?? undefined, run: run("copy") },
       { id: "move-entry", label: "移动或重命名", icon: "pencil", disabledReason: blocked ?? undefined, run: run("move") },
-      { id: "delete-entry", label: "移到回收站", icon: "trash", danger: true, disabledReason: blocked ?? undefined, run: run("delete") },
+      { id: "delete-entry", label: "删除…", icon: "trash", danger: true, shortcut: "Delete", disabledReason: blocked ?? undefined, run: run("delete") },
     ];
   }
 
@@ -377,8 +404,15 @@
 
   function batchMenuEntries(): ContextMenuEntry[] {
     const entries: ContextMenuEntry[] = [{ heading: `已选 ${selectedRows.length} 项` }];
+    if (onBatchEntry) {
+      const run = (action: "copy" | "move" | "delete") => () => onBatchEntry?.(action, batchRows);
+      entries.push({ id: "copy-selected", label: `复制 ${batchRows.length} 项到…`, icon: "copy", disabledReason: batchReason, run: run("copy") });
+      entries.push({ id: "move-selected", label: `移动 ${batchRows.length} 项到…`, icon: "pencil", disabledReason: batchReason, run: run("move") });
+      entries.push({ id: "delete-selected", label: `删除 ${batchRows.length} 项…`, icon: "trash", danger: true, shortcut: "Delete", disabledReason: batchReason, run: run("delete") });
+      entries.push({ separator: true });
+    }
     if (onReveal) {
-      entries.push({ id: "reveal-selected", label: "在系统文件管理器中显示所选项目", icon: "folder-open", run: revealSelected });
+      entries.push({ id: "reveal-selected", label: "在系统文件管理器中显示", icon: "folder-open", run: revealSelected });
     }
     entries.push(...terminalEntry(selectedRows.map((row) => row.path)));
     if (onCopyPath) {
@@ -387,6 +421,7 @@
       entries.push({ id: "copy-selected-abs", label: "复制所选完整路径", icon: "copy", run: () => copySelected(true) });
     }
     entries.push({ separator: true });
+    entries.push({ id: "select-all", label: "选择当前列表全部项目", icon: "select-all", shortcut: `${MODIFIER_LABEL} A`, run: onSelectAll });
     entries.push({ id: "clear-selected", label: "取消多选", icon: "x", shortcut: "Esc", run: onClearSelection });
     return entries;
   }
@@ -523,6 +558,17 @@
       run: onRefresh,
     });
     return entries;
+  }
+
+  function openSelectionMenu(event: MouseEvent): void {
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    moreOpen = false;
+    menu = {
+      x: rect.left,
+      y: rect.bottom + 4,
+      entries: batchMenuEntries(),
+      label: `已选 ${selectedRows.length} 项的操作`,
+    };
   }
 
   function toggleMore(): void {
@@ -665,10 +711,12 @@
 
 {#if selectedRows.length > 0}
   <div class="file-selection-bar">
-    <span role="status"><Icon name="check" size={12} />已选 {selectedRows.length} 项</span>
+    <span role="status"><Icon name="check-circle" size={13} />已选 {selectedRows.length} 项</span>
     <span class="spacer"></span>
     {#if onCopyPath}<button type="button" class="link-btn" onclick={() => copySelected()}>复制路径</button>{/if}
-    {#if onReveal}<button type="button" class="link-btn" onclick={revealSelected}>系统定位</button>{/if}
+    <button type="button" class="btn btn-secondary btn-sm" aria-haspopup="menu" onclick={openSelectionMenu}>
+      批量操作<Icon name="chevron-down" size={11} />
+    </button>
     <button type="button" class="icon-btn sm" aria-label="取消多选" title="取消多选（Esc）" onclick={onClearSelection}><Icon name="x" size={12} /></button>
   </div>
 {/if}
@@ -802,6 +850,7 @@
           class:selected={selectedPaths.has(row.path)}
           data-tone={status?.tone}
           role="treeitem"
+          aria-label={row.path}
           aria-selected={isSelected(row)}
           aria-level={row.depth + 1}
           aria-expanded={row.expandable ? row.expanded : undefined}
@@ -830,6 +879,22 @@
           }}
         >
           {#if row.depth > 0}<span class="tree-indent" style={`width:${row.depth * INDENT}px`} aria-hidden="true"></span>{/if}
+          {#if !row.segment && !row.extra}
+            <button
+              type="button"
+              class="tree-select"
+              class:checked={selectedPaths.has(row.path)}
+              aria-label={selectedPaths.has(row.path) ? `取消选择 ${row.path}` : `选择 ${row.path}`}
+              aria-pressed={selectedPaths.has(row.path)}
+              tabindex="-1"
+              title="选择项目；也可按住 Ctrl 或 Shift 点击行"
+              onclick={(event) => {
+                event.stopPropagation();
+                onSelect(row, "toggle");
+                focusList();
+              }}
+            ><Icon name="check" size={11} /></button>
+          {/if}
           {#if row.expandable}
             <button
               type="button"

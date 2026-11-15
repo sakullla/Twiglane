@@ -194,12 +194,13 @@ describe("Tauri 命令参数", () => {
     });
   });
 
-  it("文件操作命令按 camelCase 传参，四个命令都带 generation 与 requestId", async () => {
+  it("文件操作命令按 camelCase 传参，删除带 generation、requestId 与显式落点", async () => {
     await api.repositoryCreateEntry("/repo", "src/new.ts", "file", 8, 80);
     await api.repositoryCreateEntry("/repo", "src/newdir", "directory", 8, 81);
     await api.repositoryCopyEntry("/repo", "src/a.ts", "src/a-副本.ts", 8, 82);
     await api.repositoryMoveEntry("/repo", "src/a.ts", "src/lib/a.ts", 8, 83);
     await api.repositoryDeleteEntry("/repo", "src/old", 8, 84);
+    await api.repositoryDeleteEntries("/repo", ["src/old", "src/gone"], true, 8, 85);
 
     expect(invoke).toHaveBeenNthCalledWith(1, "repository_create_entry", {
       path: "/repo",
@@ -235,6 +236,14 @@ describe("Tauri 命令参数", () => {
       relative: "src/old",
       generation: 8,
       requestId: 84,
+    });
+    // 删除命令用数组收相对路径，并显式带上永久标记；没有绝对路径或额外参数。
+    expect(invoke).toHaveBeenNthCalledWith(6, "repository_delete_entries", {
+      path: "/repo",
+      relatives: ["src/old", "src/gone"],
+      permanent: true,
+      generation: 8,
+      requestId: 85,
     });
   });
 

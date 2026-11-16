@@ -6,8 +6,8 @@
  * Playwright、开发模式的 register_all 都不能当作联动证据。报告缺失、字段缺失、
  * 状态自称通过但缺少实测支撑时一律失败，退出码 1（参数或文件问题为 2）。
  *
- * 协议已升级到 v2（cliora 仓库 docs/integrations/twiglane-review-v2.md）。v1 时代的报告
- * （format version 1）只是历史先例，不能代表当前候选：报告必须声明 v2 协议，且 Twiglane 安装版本
+ * 协议已升级到 v3（cliora 仓库 docs/integrations/twiglane-review-v3.md）。v1 时代的报告
+ * （format version 1）只是历史先例，不能代表当前候选：报告必须声明 v3 协议，且 Twiglane 安装版本
  * 必须等于当前 package.json 版本；能读到 cliora 的 package.json 时，cliora 安装版本也必须一致。
  *
  * 用法：node scripts/verify-cliora-integration.mjs [--report <path>] [--cliora-package <path>] [--json]
@@ -18,8 +18,8 @@ import { resolve } from "node:path";
 const DEFAULT_REPORT = "docs/verification/cliora-integration.json";
 const DEFAULT_CLIORA_PACKAGE = "../cliora/package.json";
 const FORMAT = "cliora-integration-evidence";
-const VERSION = 2;
-const PROTOCOL = "twiglane-review-v2";
+const VERSION = 3;
+const PROTOCOL = "twiglane-review-v3";
 
 /**
  * 真实场景：缺任何一个都算证据不完整。后三项是 v2 新增的轻量编辑、扩展与再次审阅闭环场景。
@@ -27,6 +27,12 @@ const PROTOCOL = "twiglane-review-v2";
  * distinctObservations 中的每组键取值必须互不相同（例如再次审阅必须使用新的 reviewId）。
  */
 const SCENARIOS = [
+  { id: "project-prompt-review-return", title: "两个业务项目和多仓范围提示词进入实际会话、审查并返回原项目/仓库/会话", requiredObservations: ["workspaceA", "workspaceB", "promptScope", "originalSession", "returnedSource"], distinctObservations: [["workspaceA", "workspaceB"]] },
+  { id: "multi-source-switchback", title: "A 切 B 再回 A 保留独立来源、基线和草稿，B 的提交不计入 A", requiredObservations: ["reviewA", "reviewB", "baselineA", "baselineB", "draftRestored", "independentResults"], distinctObservations: [["reviewA", "reviewB"]] },
+  { id: "same-checkout-source-selection", title: "同工作树多个来源显式选择，结果只进入选中的来源", requiredObservations: ["explicitSelection", "independentResults"] },
+  { id: "source-capacity-and-expiry", title: "容量满不淘汰来源，显式释放和重启失效明确", requiredObservations: ["capacityError", "retainedSource", "explicitRelease", "restartExpired"] },
+  { id: "v2-source-roundtrip", title: "合法 v2 来源原版本回送，v3 失败不自动降级", requiredObservations: ["v2Receipt", "v2Return", "v3NoDowngrade"] },
+  { id: "result-revision-order", title: "v3 重复和逆序结果、迟到接收回执不能覆盖新结果", requiredObservations: ["newRevision", "oldRevisionIgnored", "lateReceiptIgnored"] },
   { id: "cold-start-review", title: "cliora 冷启动唤起 Twiglane 并打开指定 worktree" },
   { id: "commit-and-return", title: "Twiglane 提交后返回原 cliora 会话并复核提交与剩余未提交修改" },
   { id: "merge-and-stale-head", title: "合入复核，以及返回后 HEAD 变化显示未确认" },
@@ -99,10 +105,10 @@ function isInstalledBuild(build) {
   return (
     build &&
     isNonEmptyString(build.version) &&
-    build.bundle === "nsis" &&
+    ["nsis", "app", "deb", "appimage"].includes(build.bundle) &&
     build.installed === true &&
-    isNonEmptyString(build.installerSha256) &&
-    /^[0-9a-f]{64}$/.test(build.installerSha256)
+    isNonEmptyString(build.artifactSha256 ?? build.installerSha256) &&
+    /^[0-9a-f]{64}$/.test(build.artifactSha256 ?? build.installerSha256)
   );
 }
 
@@ -186,14 +192,14 @@ function main() {
         FORMAT +
         " v" +
         VERSION +
-        "（v1 协议时代的历史报告只作先例，当前候选需要重新实机执行）",
+        "（旧协议时代的历史报告只作先例，当前候选需要重新实机执行）",
     );
   }
   if (report.protocol !== PROTOCOL) {
     fail("报告没有声明 " + PROTOCOL + " 协议，不能代表当前候选");
   }
-  if (report.host?.platform !== "windows") {
-    fail("真实联动证据只接受 Windows 主机记录（macOS/Linux 请写在 limitations）");
+  if (!["windows", "macos", "linux"].includes(report.host?.platform)) {
+    fail("真实联动证据缺少 windows/macos/linux 实际主机记录");
   }
   const builds = report.builds ?? {};
   const versionProblems = [];

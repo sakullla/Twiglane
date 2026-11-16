@@ -187,3 +187,8 @@ npm run preview:ui   # 打开 http://127.0.0.1:1430
 ## 数据
 
 应用状态位于系统提供的应用数据目录中的 `state.json`。从最近列表移除仓库只会更新这份列表，不会删除仓库文件。
+
+
+Cliora reviews use the [v3 source contract](docs/integrations/twiglane-review-v3.md), with strict [v2 compatibility](docs/integrations/twiglane-review-v2.md). Review sources retain their own project, repository, session, baseline and Git result when switching A → B → A. Use the review-source selector to choose a source explicitly on shared checkouts; independent work does not copy a result into another source. Up to eight accepted or pending sources are kept in memory, and capacity requires explicitly closing a source. Accepted sources and native Git results can be restored after a webview reload; unfinished opens expire visibly. Closed sources and full application restarts require a new review from Cliora. Return results describe only that repository's real Git work, with current dirty state read through GitScheduler; they do not indicate tests passed or a whole project completed. v3 return revisions reject duplicate or reordered results without changing the legacy v2 field set.
+
+The two repositories carry byte-identical `tests/fixtures/reviews/protocol-v3.json`. Development checks, browser captures and native scheme limitations are separated in [the verification record](docs/verification/multi-repository-project-workspaces.md). `scripts/verify-cliora-integration.mjs` now requires v3 evidence, including source switching, explicit selection, expiry, legacy compatibility and return ordering; historical v2 reports cannot establish acceptance for the current candidate.

@@ -1,5 +1,5 @@
 import type { Projects, WorkspacePreview, WorkspaceManifest, WorkspaceCandidate, WorkspaceDiscovery } from "./workspaces";
-import { recordClioraCommit, recordClioraMerge } from "./cliora-review.svelte";
+import { captureClioraReview, recordClioraCommit, recordClioraMerge, type ClioraSourceSnapshot } from "./cliora-review.svelte";
 import { normalizeError } from "./errors";
 import type {
   BatchDeleteResult,
@@ -127,6 +127,10 @@ export async function pickFile(title: string): Promise<string | null> {
  * `worktreePath` 是后端校验过的绝对路径，不含任何凭据。
  */
 export interface ClioraReviewRequest {
+  protocolVersion: 2 | 3;
+  workspaceId: string | null;
+  repositoryId: string | null;
+  workspaceName: string | null;
   reviewId: string;
   sessionId: string;
   worktreePath: string;
@@ -255,8 +259,9 @@ export const api = {
    * 独立仓库与失败、取消都不写结果。记录只是待复核声明，cliora 会重新读取 HEAD。
    */
   commitChanges: async (path: string, message: string, generation: number, requestId: number) => {
-    const result = await invoke<CommitResult>("commit_changes", { path, message, generation, requestId });
-    recordClioraCommit(path, result.oid);
+    const reviewId = captureClioraReview(path);
+    const result = await invoke<CommitResult>("commit_changes", { path, message, generation, requestId, ...(reviewId ? { reviewId } : {}) });
+    recordClioraCommit(path, result.oid, reviewId);
     return result;
   },
   /**
@@ -294,8 +299,9 @@ export const api = {
    * 也不声称推送成功。
    */
   commitAndPush: async (path: string, message: string, generation: number, requestId: number) => {
-    const report = await invoke<CommitPushReport>("commit_and_push", { path, message, generation, requestId });
-    if (report.committed && report.oid) recordClioraCommit(path, report.oid);
+    const reviewId = captureClioraReview(path);
+    const report = await invoke<CommitPushReport>("commit_and_push", { path, message, generation, requestId, ...(reviewId ? { reviewId } : {}) });
+    if (report.committed && report.oid) recordClioraCommit(path, report.oid, reviewId);
     return report;
   },
   filePreview: (path: string, source: PreviewSource, generation: number, download = false) =>
@@ -698,6 +704,7 @@ export const api = {
     generation: number,
     requestId: number,
   ) => {
+    const reviewId = captureClioraReview(path);
     const result = await invoke<RevertOutcome>("revert_commits", {
       path,
       oids,
@@ -705,9 +712,10 @@ export const api = {
       confirm,
       generation,
       requestId,
+      ...(reviewId ? { reviewId } : {}),
     });
     if (result.wrote && result.created > 0 && result.headOid) {
-      recordClioraCommit(path, result.headOid);
+      recordClioraCommit(path, result.headOid, reviewId);
     }
     return result;
   },
@@ -726,6 +734,7 @@ export const api = {
     generation: number,
     requestId: number,
   ) => {
+    const reviewId = captureClioraReview(path);
     const result = await invoke<AmendOutcome>("amend_commit", {
       path,
       expectedHead,
@@ -735,9 +744,10 @@ export const api = {
       confirm,
       generation,
       requestId,
+      ...(reviewId ? { reviewId } : {}),
     });
     if (result.wrote && result.headOid) {
-      recordClioraCommit(path, result.headOid);
+      recordClioraCommit(path, result.headOid, reviewId);
     }
     return result;
   },
@@ -778,10 +788,11 @@ export const api = {
     generation: number,
     requestId: number,
   ) => {
-    const session = await invoke<MergeSession>("start_merge", { path, source, target, mode, generation, requestId });
+    const reviewId = captureClioraReview(path);
+    const session = await invoke<MergeSession>("start_merge", { path, source, target, mode, generation, requestId, ...(reviewId ? { reviewId } : {}) });
     // 只有快进或变基真正完成才算合入；留在冲突状态的结果不记录。
     if ((session.fastForwarded || session.rebased) && session.headOid) {
-      recordClioraMerge(path, session.headOid);
+      recordClioraMerge(path, session.headOid, reviewId);
     }
     return session;
   },
@@ -816,9 +827,10 @@ export const api = {
     requestId: number,
     operation: string | null = null,
   ) => {
-    const done = await invoke<MergeComplete>("complete_merge", { path, message, generation, requestId });
-    if (operation === "revert") recordClioraCommit(path, done.oid);
-    else recordClioraMerge(path, done.oid);
+    const reviewId = captureClioraReview(path);
+    const done = await invoke<MergeComplete>("complete_merge", { path, message, generation, requestId, ...(reviewId ? { reviewId } : {}) });
+    if (operation === "revert") recordClioraCommit(path, done.oid, reviewId);
+    else recordClioraMerge(path, done.oid, reviewId);
     return done;
   },
   abortMerge: (path: string, confirm: boolean, generation: number, requestId: number) =>
@@ -865,6 +877,8 @@ export const api = {
   /** 当前安装方式是否支持应用内安装（仅 Linux 非 AppImage 为 false）。 */
   updateInstallSupported: () => invoke<boolean>("update_install_supported"),
   /** 解析并校验 cliora 的 v2 审查链接；失败时返回协议错误码，不做任何仓库操作。 */
+  clioraReviewSources: (resetPending = false) => invoke<{ sources: ClioraSourceSnapshot[]; expiredPending: number }>("cliora_review_sources", { resetPending }),
+  clioraReviewForget: (reviewId: string, sessionId: string) => invoke<void>("cliora_review_forget", { reviewId, sessionId }),
   clioraReviewRequest: (url: string) => invoke<ClioraReviewRequest>("cliora_review_request", { url }),
   /** 回送接收结果。accepted 为假时 reason 必须是协议里的稳定错误码。 */
   clioraReviewReceipt: (

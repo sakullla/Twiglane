@@ -26,6 +26,10 @@
     clioraReturnOutcome,
     clioraSourceMatches,
     forgetClioraSourceUnless,
+    forgetClioraReview,
+    selectClioraSource,
+    hydrateClioraReviews,
+    clioraSourceEpoch,
     watchClioraReviewLinks,
   } from "./lib/cliora-review.svelte";
   import { fileEditor, type EditContext } from "./lib/file-editor.svelte";
@@ -1294,7 +1298,7 @@
     const closingClone = cloneOpen;
     saveReadingContext();
     const context = readingContexts.restore(next.summary.path);
-    // 独立打开别的仓库会清掉 cliora 来源展示；同一 worktree 的重新打开保留来源。
+    // 切仓只切换活动审查来源，保留各来源的结果和基线。
     forgetClioraSourceUnless(next.summary.path);
     // 编辑会话按仓库归属：别的仓库里干净的会话结束。用户发起的换仓库入口都先过草稿关卡；
     // 关卡之外仍残留的未保存草稿（例如测量钩子直接克隆打开）也不丢，回到那个仓库后仍可保存或放弃。
@@ -2920,6 +2924,8 @@
 
   /** 审查链接的到达序号：后到的新链接优先，旧的打开结果不再抢来源。 */
   let clioraLinkSerial = 0;
+  let clioraLinkQueue = Promise.resolve();
+  let clioraSourcesNotice = $state("");
 
   /**
    * 本实例已处理过的 reviewId。冷启动的 getCurrent 与运行中的 onOpenUrl 可能对同一条
@@ -2952,7 +2958,7 @@
   }
 
   /**
-   * 处理 v2 审查链接（冷启动与运行中都走这里）。
+   * 处理 v2/v3 审查链接（冷启动与运行中都走这里）。
    *
    * 解析在 Rust 侧完成；这里只按解析出的 worktreePath 调既有 openRepository：打开的是
    * 链接指定的那个工作树，子目录/父仓库都不会被替代，失败也不回退主检出。成功后建立
@@ -2965,7 +2971,10 @@
       request = await api.clioraReviewRequest(url);
     } catch (error) {
       // 解析失败时没有可信的 reviewId/sessionId，不能伪造回执，只能在本地说明。
-      live = "cliora 审查链接无效，未打开任何仓库，仓库没有改动。";
+      const failure = normalizeError(error);
+      live = failure.code === "source_capacity" ? "审查来源已满，已保留的来源未被移除。请明确关闭一项后重新发起。"
+        : failure.code === "source_expired" ? "此审查来源已失效，请从原 Cliora 会话重新发起。"
+        : "cliora 审查链接无效，未打开任何仓库，仓库没有改动。";
       showError(error);
       return;
     }
@@ -2993,7 +3002,18 @@
       const openedRepo = await api.openRepository(request.worktreePath, nextId());
       if (serial !== clioraLinkSerial) return;
       rememberOpened(openedRepo);
+      let receiptFailure: unknown = null;
+      try { await api.clioraReviewReceipt(request.reviewId, request.sessionId, true, null); }
+      catch (error) {
+        // Native registration precedes transport; only this transport error leaves an accepted source.
+        if (normalizeError(error).code !== "cliora_unavailable") throw error;
+        receiptFailure = error;
+      }
       beginClioraReview({
+        protocolVersion: request.protocolVersion,
+        workspaceId: request.workspaceId,
+        repositoryId: request.repositoryId,
+        workspaceName: request.workspaceName,
         reviewId: request.reviewId,
         sessionId: request.sessionId,
         worktreePath: openedRepo.summary.path,
@@ -3003,7 +3023,7 @@
       // 不用当前 HEAD 或默认分支补一个（R1）。
       openTaskReview(clioraBaseline());
       live = "已按 cliora 审查链接打开 " + openedRepo.summary.name;
-      await api.clioraReviewReceipt(request.reviewId, request.sessionId, true, null);
+      if (receiptFailure) { live = "工作树已打开，但接收确认未送达 Cliora。来源与草稿已保留，请确认 Cliora 可用后返回。"; showError(receiptFailure); }
     } catch (error) {
       const failure = normalizeError(error);
       const reason = clioraRejectReason(failure.code);
@@ -3023,9 +3043,17 @@
    * 返回发起这次审查的 cliora 会话：只回送最新结果，不执行任何 Git 写入，也不关闭仓库、
    * 不清空草稿。没有来源时按钮不显示，这里再挡一次。
    */
+  async function refreshClioraSources() {
+    const epoch = clioraSourceEpoch();
+    try {
+      const snapshot = await api.clioraReviewSources();
+      if (snapshot && Array.isArray(snapshot.sources)) hydrateClioraReviews(snapshot.sources, epoch);
+    } catch { /* Keep current sources; a failed refresh cannot invent a new result. */ }
+  }
+
   async function returnToCliora() {
     const source = clioraReview.source;
-    if (!source) return;
+    if (!source || !opened || !clioraSourceMatches(opened.summary.path)) return;
     // 返回来源前未保存的草稿必须有结论：保存只写工作区，不会变成提交或合入结果。
     if (!(await confirmEditorLeave("返回 cliora"))) return;
     if (clioraReview.source?.reviewId !== source.reviewId) return;
@@ -3039,11 +3067,43 @@
       fresh && current && clioraSourceMatches(current.summary.path) ? current.snapshot.files.length : null;
     try {
       const sent = await api.clioraReviewReturn(source.reviewId, source.sessionId, outcome, headOid);
+      await refreshClioraSources();
       // 普通保存不制造提交或合入结果；工作区还有未提交修改时如实说出来，不再说「只做了浏览」。
       notice(clioraReturnNotice(outcome, sent, localUncommitted));
     } catch (error) {
+      if (normalizeError(error).code === "source_result_changed") {
+        await refreshClioraSources();
+      }
       showError(error);
     }
+  }
+
+  async function chooseClioraReview(reviewId: string) {
+    if (!reviewId) { selectClioraSource(null); closeTask(); return; }
+    const source = clioraReview.sources.find((item) => item.reviewId === reviewId);
+    if (!source || switchBlocked(commandState)) return;
+    if (!opened || !samePath(opened.summary.path, source.worktreePath)) await openRecent(source.worktreePath);
+    if (!opened || !samePath(opened.summary.path, source.worktreePath)) return;
+    if (selectClioraSource(reviewId)) openTaskReview(clioraBaseline());
+  }
+
+  async function closeClioraReview(reviewId = clioraReview.source?.reviewId) {
+    const source = clioraReview.sources.find((item) => item.reviewId === reviewId);
+    if (!source || switchBlocked(commandState)) return;
+    const wasActive = clioraReview.source?.reviewId === source.reviewId;
+    try {
+      await api.clioraReviewForget(source.reviewId, source.sessionId);
+      forgetClioraReview(source.reviewId);
+      if (wasActive) closeTask();
+      notice("已关闭此审查来源；仓库、阅读记录和草稿仍保留。需要审查时从 Cliora 重新发起。");
+    } catch (error) { showError(error); }
+  }
+
+  function clioraProjectLabel(source: (typeof clioraReview.sources)[number]): string {
+    if (!source.workspaceId) return "独立仓库";
+    const project = projects.projects.find((item) => item.manifest.workspaceId === source.workspaceId);
+    const membership = project && source.repositoryId && project.manifest.repositories.some((repo) => repo.id === source.repositoryId);
+    return (source.workspaceName ?? project?.manifest.name ?? source.workspaceId.slice(0, 8)) + (!project ? "（项目未关联）" : !membership ? "（仓库未关联）" : "");
   }
 
   /** 两个仓库路径是否指向同一处：只抹平分隔符与尾部斜杠，Windows 下不区分大小写。 */
@@ -4061,10 +4121,25 @@
       stopUpdate = await watchUpdateAvailable((offer) => {
         notice(`发现新版本 ${offer.version}，可从状态栏入口或设置安装。`);
       });
-      // v2 审查链接：冷启动先于运行中派发，App 侧用到达序号丢弃迟到的旧链接。
+      // Subscribe while restoring, but serialize every native prepare AFTER old pending opens expire.
+      // A hot/cold link arriving during bootstrap cannot be cleared by a late resetPending RPC.
+      const epoch = clioraSourceEpoch();
+      const restoreSources = (async () => {
+        try {
+          const restored = await api.clioraReviewSources(true);
+          if (restored && Array.isArray(restored.sources) && hydrateClioraReviews(restored.sources, epoch)) {
+            if (restored.sources.length) clioraSourcesNotice = "已恢复本次运行的审查来源与各仓库结果；返回时仍会复核真实 Git 状态。";
+            if (restored.expiredPending) clioraSourcesNotice += ` ${restored.expiredPending} 条尚未接受的来源已失效，请从原 Cliora 会话重新发起。`;
+          }
+        } catch {
+          clioraSourcesNotice = "未能恢复本次运行的来源，请重试打开窗口；应用进程重启后需从原 Cliora 会话重新发起。";
+        }
+      })();
+      clioraLinkQueue = restoreSources;
       stopClioraLink = await watchClioraReviewLinks((url) => {
-        void handleClioraLink(url);
+        clioraLinkQueue = clioraLinkQueue.then(() => handleClioraLink(url)).catch(showError);
       });
+      await restoreSources;
       // 后端只以真实活动进程判断是否需要确认；没有活动会话时不会发这个事件。
       stopTerminalClose = await listenEvent<TerminalCloseRequested>(TERMINAL_CLOSE_REQUESTED_EVENT, (payload) => {
         if (!payload || payload.sessions.length === 0) return;
@@ -4175,6 +4250,35 @@
       : null}
     onClioraReturn={returnToCliora}
   />
+
+  <div class="review-context-bar" aria-label="保留的 Cliora 审查">
+    <label>审查来源 <select aria-label="选择 Cliora 审查来源" value={clioraReview.source?.reviewId ?? ""} disabled={writeLocked} onchange={(event) => void chooseClioraReview(event.currentTarget.value)}>
+      <option value="">{clioraReview.sources.length ? "选择来源 / 当前独立操作" : "暂无来源"}</option>
+      {#each clioraReview.sources as source (source.reviewId)}
+        <option value={source.reviewId}>{clioraProjectLabel(source)} · {source.worktreePath} · 会话 {source.sessionId.slice(0, 8)} · 审查 {source.reviewId.slice(0, 8)}</option>
+      {/each}
+    </select></label>
+    {#if clioraReview.source}
+      <span title={clioraReview.source.repositoryId ?? "独立仓库"}>{clioraProjectLabel(clioraReview.source)} · 仓库 {clioraReview.source.repositoryId?.slice(0, 8) ?? "未关联"}</span>
+      <button class="btn sm" disabled={writeLocked} onclick={() => void closeClioraReview()}>关闭此审查来源</button>
+    {/if}
+    {#if clioraReview.sources.length}
+      <details class="review-source-manager">
+        <summary>管理审查来源（{clioraReview.sources.length}）</summary>
+        <ul aria-label="全部审查来源">
+          {#each clioraReview.sources as source (source.reviewId)}
+            <li data-review-source-id={source.reviewId}>
+              <span title={source.worktreePath}>{clioraProjectLabel(source)} · {source.worktreePath} · 会话 {source.sessionId.slice(0, 8)}</span>
+              <button class="btn sm" disabled={writeLocked} onclick={() => void closeClioraReview(source.reviewId)} aria-label={`关闭审查来源 ${source.reviewId.slice(0, 8)}`}>关闭来源</button>
+            </li>
+          {/each}
+        </ul>
+      </details>
+    {/if}
+    {#if clioraSourcesNotice}<span role="status">{clioraSourcesNotice}</span>{/if}
+    {#if clioraReview.lastReturn}<span>已保留上次返回尝试，接收结果以 Cliora 为准</span>{/if}
+    <small>{clioraReview.sources.length}/8 · 来源仅在本次运行保留；重启后请从 Cliora 重新发起。结果只属于对应仓库。</small>
+  </div>
 
   <div class="project-context-bar" data-project-context>
     <label>项目 <select aria-label="业务项目" value={selectedProjectId ?? ""} onchange={(e) => selectProject(e.currentTarget.value || null)}>

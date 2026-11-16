@@ -1,3 +1,4 @@
+import type { ClioraReviewSource, ClioraSourceSnapshot } from "../../src/lib/cliora-review.svelte";
 import type { Projects, WorkspacePreview, WorkspaceManifest, WorkspaceCandidate } from "../../src/lib/workspaces";
 // 仅用于浏览器里预览界面（npm run preview:ui）。不会进入 Tauri 构建，也不代表真实 Git 行为。
 import type {
@@ -497,6 +498,11 @@ let projectData: Projects = { hostId: workspaceHost, projects: previewParams.has
   }, sourcePath: "/work/shared/product.dev-workspace.json", digest: "mock-preview-digest", error: previewParams.get("projects") === "missing" ? "项目清单无法读取：源文件已移动" : null,
   favorites: ["33333333-3333-4333-8333-000000000001"], bindings: {},
 }] : [] };
+// Synthetic scheme records for the double-product capture; never loaded by the native app.
+const previewSources = new Map<string, { version: string; sessionId: string; revision: number; request?: ClioraReviewSource; accepted?: boolean; lastReturn?: ClioraSourceSnapshot["lastReturn"] }>();
+const previewReviewEvidence = { receipts: [] as string[], returns: [] as { url: string; uncommitted: number }[] };
+(window as unknown as { __clioraPreviewEvidence: typeof previewReviewEvidence }).__clioraPreviewEvidence = previewReviewEvidence;
+
 const workspaceResult = () => ok(structuredClone(projectData), 30);
 const previewCandidates = (paths: string[]): WorkspaceCandidate[] => paths.map((path) => ({ path, name: path.split("/").at(-1) ?? path, commonDirectory: `${path}/.git`, repositoryId: null, error: null }));
 
@@ -1051,14 +1057,42 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     ],
   }, 220),
   /** ?cliora=1：预览里的 cliora 审查链接，起点是第 5 条提交（范围内 4 个提交）。 */
-  clioraReviewRequest: (url: string) => ok({
-    reviewId: "preview-review",
-    sessionId: "preview-session",
-    worktreePath: recent[0]?.path ?? "C:/Users/dev/project/twiglane",
-    baseline: url.includes("nobase=1") ? null : commits[4].oid,
-  }, 80),
-  clioraReviewReceipt: () => ok(undefined),
-  clioraReviewReturn: () => ok(undefined),
+  clioraReviewRequest: (url: string) => {
+    const params = new URL(url).searchParams;
+    const reviewId = params.get("reviewId") ?? "preview-review";
+    const sessionId = params.get("sessionId") ?? "preview-session";
+    if (!previewSources.has(reviewId) && previewSources.size >= 8) return Promise.reject({ code: "source_capacity", message: "已保留 8 个审查来源，请明确关闭一项后重新发起。" });
+    previewSources.set(reviewId, previewSources.get(reviewId) ?? { version: params.get("v") ?? "3", sessionId, revision: 0 });
+    const request: ClioraReviewSource = { protocolVersion: params.get("v") === "2" ? 2 : 3,
+      reviewId, sessionId, worktreePath: params.get("worktreePath") ?? recent[0]?.path ?? "C:/Users/dev/project/twiglane",
+      baseline: params.get("nobase") === "1" ? null : params.get("baseline") ?? commits[4].oid,
+      workspaceId: params.get("workspaceId"), repositoryId: params.get("repositoryId"), workspaceName: params.get("workspaceName"),
+    };
+    previewSources.get(reviewId)!.request = request;
+    return ok(request, 80);
+  },
+  clioraReviewReceipt: (reviewId: string, sessionId: string, accepted: boolean, reason: string | null) => {
+    const source = previewSources.get(reviewId);
+    if (!source || source.sessionId !== sessionId) return Promise.reject({ code: "source_expired", message: "审查来源已失效，请重新发起。" });
+    const params = new URLSearchParams({ v: source.version, event: accepted ? "accepted" : "rejected", reviewId, sessionId });
+    source.accepted = accepted;
+    if (!accepted) { params.set("reason", reason ?? "open_failed"); previewSources.delete(reviewId); }
+    previewReviewEvidence.receipts.push("cliora://review?" + params.toString());
+    return ok(undefined);
+  },
+  clioraReviewSources: () => ok({ sources: [...previewSources.values()].filter((entry) => entry.accepted && entry.request).map((entry) => ({ source: entry.request!, result: null, lastReturn: entry.lastReturn ?? null })), expiredPending: 0 }),
+  clioraReviewForget: (reviewId: string) => { previewSources.delete(reviewId); return ok(undefined); },
+  clioraReviewReturn: (reviewId: string, sessionId: string, outcome: string, headOid: string | null) => {
+    const source = previewSources.get(reviewId);
+    if (!source || source.sessionId !== sessionId) return Promise.reject({ code: "source_expired", message: "审查来源已失效，请重新发起。" });
+    const uncommitted = snapshot().files.length;
+    const params = new URLSearchParams({ v: source.version, event: "returned", reviewId, sessionId, outcome, worktreeState: uncommitted ? "dirty" : "clean" });
+    if (headOid) params.set("headOid", headOid);
+    if (source.version === "3") params.set("resultRevision", String(++source.revision));
+    source.lastReturn = { revision: source.revision, declaration: { reviewId, sessionId, outcome: outcome as "reviewed" | "committed" | "merged", headOid, worktreeState: uncommitted ? "dirty" : "clean", meta: [] } };
+    previewReviewEvidence.returns.push({ url: "cliora://review?" + params.toString(), uncommitted });
+    return ok({ worktreeState: uncommitted ? "dirty" : "clean", uncommitted });
+  },
   cherryPickCommits: () => ok({ generation, conflicted: false, skipped: [], note: "已按从旧到新拣选到当前分支。没有推送。", snapshot: snapshot() }),
   /**
    * 预览/确认还原。只模拟成功路径；冲突仍由 ?merge=conflict 的合并 mock 覆盖。

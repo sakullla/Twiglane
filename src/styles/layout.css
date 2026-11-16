@@ -337,3 +337,17 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
 .project-context-path { flex: 1; min-width: 140px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--fg-muted); }
 .project-context-error { max-width: 100%; color: var(--danger-text); overflow-wrap: anywhere; }
 .project-switcher-note { display: flex; justify-content: space-between; align-items: center; padding: var(--space-8); gap: var(--space-8); color: var(--fg-muted); }
+
+/* In-memory review source navigation and explicit capacity management. */
+
+.review-context-bar { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; padding: var(--space-6) var(--space-12); flex: none; background: var(--surface-2); border-bottom: 1px solid var(--border); font-size: 12px; }
+.review-context-bar label { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+.review-context-bar select { min-width: 120px; max-width: min(520px, 60vw); color: var(--fg); background: var(--surface); border: 1px solid var(--control-border); border-radius: var(--radius); padding: var(--space-4); }
+.review-context-bar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
+.review-context-bar small { color: var(--fg-dimmed); }
+
+.review-source-manager { min-width: 0; }
+.review-source-manager summary { cursor: pointer; }
+.review-source-manager ul { list-style: none; margin: 6px 0; padding: 0; max-height: 200px; overflow: auto; }
+.review-source-manager li { display: flex; align-items: center; gap: 8px; padding: 4px 0; min-width: 0; }
+.review-source-manager li span { max-width: min(680px, 60vw); }

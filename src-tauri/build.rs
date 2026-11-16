@@ -137,6 +137,8 @@ fn main() {
             "cliora_review_request",
             "cliora_review_receipt",
             "cliora_review_return",
+            "cliora_review_forget",
+            "cliora_review_sources",
             "terminal_profiles",
             "terminal_list",
             "terminal_create",

@@ -10,7 +10,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { api } from "../src/lib/api";
-import { beginClioraReview, clioraReview, resetClioraReview } from "../src/lib/cliora-review.svelte";
+import { beginClioraReview, clioraReview, resetClioraReview, selectClioraSource } from "../src/lib/cliora-review.svelte";
 
 describe("Tauri 命令参数", () => {
   beforeEach(() => {
@@ -675,6 +675,24 @@ describe("cliora 审查接线", () => {
   });
 
   afterEach(() => resetClioraReview());
+
+  it("同工作树切换到另一来源后，迟到的提交不能记入新来源", async () => {
+    let complete!: (value: unknown) => void;
+    invoke.mockImplementationOnce(async () => new Promise((resolve) => { complete = resolve; }));
+    const pending = api.commitChanges("/repo", "message", 1, 2);
+    // api.ts imports Tauri lazily; wait until the actual native write has entered the mock.
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("commit_changes", { path: "/repo", message: "message", generation: 1, requestId: 2, reviewId: REVIEW }));
+    beginClioraReview({ reviewId: "other-review", sessionId: "other-session", worktreePath: "/repo", baseline: null });
+    complete({ oid: OID });
+    await pending;
+    expect(clioraReview.result).toBeNull();
+    invoke.mockResolvedValueOnce({ oid: "c".repeat(40) });
+    await api.commitChanges("/repo", "B message", 1, 3);
+    expect(clioraReview.source?.reviewId).toBe("other-review");
+    expect(clioraReview.result?.headOid).toBe("c".repeat(40));
+    selectClioraSource(REVIEW);
+    expect(clioraReview.result?.headOid).toBe(OID);
+  });
 
   it("链接解析、回执与返回事件按 camelCase 传参", async () => {
     await api.clioraReviewRequest("twiglane://review?v=1");

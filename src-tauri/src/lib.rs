@@ -223,6 +223,8 @@ pub fn run() {
             cliora_review_request,
             cliora_review_receipt,
             cliora_review_return,
+            cliora_review_forget,
+            cliora_review_sources,
             terminal_profiles,
             terminal_list,
             terminal_create,
@@ -247,17 +249,21 @@ pub fn run() {
     });
 }
 
-/// 已校验的 v2 审查请求。前端只按 worktree_path 打开，不再自己解析一次链接。
+/// 已校验的 v2/v3 审查请求。前端只按 worktree_path 打开，不再自己解析一次链接。
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ClioraReviewRequest {
+    protocol_version: u8,
+    workspace_id: Option<String>,
+    repository_id: Option<String>,
+    workspace_name: Option<String>,
     review_id: String,
     session_id: String,
     worktree_path: String,
     baseline: Option<String>,
 }
 
-/// 解析并校验 cliora 的 v2 审查链接。不打开仓库、不读 Git、不落盘；校验通过的
+/// 解析并校验 cliora 的 v2/v3 审查链接。不打开仓库、不读 Git、不落盘；校验通过的
 /// reviewId → 工作树只在内存里暂存为待定。前端此时还没决定是否接受这条链接，
 /// 要等 accepted 回执才成为返回时读取真实工作区状态的来源。
 #[tauri::command]
@@ -266,8 +272,12 @@ fn cliora_review_request(
     url: String,
 ) -> Result<ClioraReviewRequest, AppError> {
     let request = cliora::parse_review_url(&url)?;
-    sources.stage(&request.review_id, &request.session_id, &request.worktree_path);
+    sources.stage_request(&request)?;
     Ok(ClioraReviewRequest {
+        protocol_version: request.protocol_version,
+        workspace_id: request.workspace_id,
+        repository_id: request.repository_id,
+        workspace_name: request.workspace_name,
         review_id: request.review_id,
         session_id: request.session_id,
         worktree_path: request.worktree_path,
@@ -288,18 +298,39 @@ fn cliora_review_receipt<R: Runtime>(
     accepted: bool,
     reason: Option<String>,
 ) -> Result<(), AppError> {
+    let request = sources.request_for(&review_id, &session_id, false)?;
     let url = if accepted {
-        let url = cliora::accepted_url(&review_id, &session_id)?;
-        sources.accept(&review_id, &session_id);
+        let path = ops::canonical_existing(std::path::Path::new(&request.worktree_path))?;
+        let url = cliora::source_event_url(&request, None, cliora::accepted_url(&review_id, &session_id)?)?;
+        sources.accept_path(&review_id, &session_id, path.to_string_lossy().into_owned())?;
         url
     } else {
         let reason = reason.unwrap_or_else(|| "open_failed".to_string());
-        let url = cliora::rejected_url(&review_id, &session_id, &reason)?;
+        let url = cliora::source_event_url(&request, None, cliora::rejected_url(&review_id, &session_id, &reason)?)?;
         sources.reject(&review_id, &session_id);
         url
     };
     // 回执只是告诉 cliora 结果，用户此刻要在 Twiglane 里审查：不把 cliora 切到前台。
     cliora::notify_cliora(&app, &url)
+}
+
+/// Hydrate the running process's bounded source state after a webview reload. No disk restore.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClioraReviewSources {
+    sources: Vec<cliora::ReviewSourceSnapshot>,
+    expired_pending: usize,
+}
+#[tauri::command(rename_all = "camelCase")]
+fn cliora_review_sources(sources: State<'_, cliora::ReviewSources>, reset_pending: Option<bool>) -> ClioraReviewSources {
+    let expired_pending = if reset_pending == Some(true) { sources.expire_pending() } else { 0 };
+    ClioraReviewSources { sources: sources.snapshots(), expired_pending }
+}
+
+/// Explicitly release a source; this does not close a repository or discard any draft.
+#[tauri::command(rename_all = "camelCase")]
+fn cliora_review_forget(sources: State<'_, cliora::ReviewSources>, review_id: String, session_id: String) -> Result<(), AppError> {
+    sources.forget(&review_id, &session_id)
 }
 
 /// 返回后告诉前端这次实际发送的工作区状态，提示据此如实说明；uncommitted 只在读到时有值。
@@ -315,6 +346,8 @@ struct ClioraReturnSent {
 async fn cliora_uncommitted_files(backend: &Backend, worktree: &std::path::Path) -> Option<usize> {
     let git = ops::require_git(backend).await.ok()?;
     let root = ops::canonical_existing(worktree).ok()?;
+    // Match open_repository's root requirement. Git must not walk up to a parent after .git disappears.
+    if !root.join(".git").exists() { return None; }
     let (program, args) = crate::git::command::status_command(&git.path, &root);
     let scheduled = ops::run_git(
         backend,
@@ -335,7 +368,7 @@ async fn cliora_uncommitted_files(backend: &Backend, worktree: &std::path::Path)
         .map(|snapshot| snapshot.files.len())
 }
 
-/// 回送返回事件：Git 结果来自前端，工作区状态由后端按来源工作树重新读取真实 Git 状态
+/// 回送返回事件：Git 结果必须匹配原生成功缓存，工作区状态按来源工作树重新读取真实 Git 状态
 /// 填写（读不到就是 unknown）。不带原始 Git 输出；返回本身不写仓库。
 #[tauri::command(rename_all = "camelCase")]
 async fn cliora_review_return<R: Runtime>(
@@ -353,12 +386,20 @@ async fn cliora_review_return<R: Runtime>(
             "返回结果只能是 reviewed、committed 或 merged，未回送任何结果。",
         )
     })?;
-    let uncommitted = match sources.worktree_for(&review_id) {
-        Some(worktree) => cliora_uncommitted_files(state.inner(), std::path::Path::new(&worktree)).await,
-        None => None,
+    let request = sources.request_for(&review_id, &session_id, true)?;
+    let actual = sources.snapshots().into_iter().find(|entry| entry.source.review_id == review_id).and_then(|entry| entry.result);
+    let matches = match actual {
+        Some(result) => result.outcome == outcome && Some(result.head_oid.as_str()) == head_oid.as_deref(),
+        None => outcome == cliora::Outcome::Reviewed && head_oid.is_none(),
     };
+    if !matches { return Err(AppError::new("source_result_changed", "来源的 Git 结果已变化或无法恢复，请重新选择来源后重试；未发送结果。")); }
+    // Allocate on request entry, before async Git reads: a slow older request keeps its older revision.
+    let revision = sources.next_result_revision(&review_id, &session_id)?;
+    let uncommitted = cliora_uncommitted_files(state.inner(), std::path::Path::new(&request.worktree_path)).await;
+    // A source explicitly closed during the read cannot send a late return.
+    sources.request_for(&review_id, &session_id, true)?;
     let worktree_state = cliora::worktree_state_of(uncommitted);
-    let url = cliora::returned_url(&cliora::ReviewReturn {
+    let declaration = cliora::ReviewReturn {
         review_id,
         session_id,
         outcome,
@@ -369,7 +410,9 @@ async fn cliora_review_return<R: Runtime>(
             "twiglane.version".to_string(),
             env!("CARGO_PKG_VERSION").to_string(),
         )],
-    })?;
+    };
+    let url = cliora::source_event_url(&request, Some(revision), cliora::returned_url(&declaration)?)?;
+    sources.remember_return(revision, &declaration)?;
     cliora::open_in_cliora(&app, &url)?;
     Ok(ClioraReturnSent {
         worktree_state: worktree_state.as_str(),
@@ -778,12 +821,16 @@ async fn stage_lines(
 #[tauri::command(rename_all = "camelCase")]
 async fn commit_changes(
     state: State<'_, Arc<Backend>>,
+    sources: State<'_, cliora::ReviewSources>,
+    review_id: Option<String>,
     path: String,
     message: String,
     generation: u64,
     request_id: u64,
 ) -> Result<CommitResult, AppError> {
-    crate::git::changes::commit_index(state.inner(), &path, &message, generation, request_id).await
+    let result = crate::git::changes::commit_index(state.inner(), &path, &message, generation, request_id).await?;
+    sources.record_git_result(review_id.as_deref(), &path, cliora::Outcome::Committed, &result.oid);
+    Ok(result)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -976,12 +1023,16 @@ async fn set_upstream(
 #[tauri::command(rename_all = "camelCase")]
 async fn commit_and_push(
     state: State<'_, Arc<Backend>>,
+    sources: State<'_, cliora::ReviewSources>,
+    review_id: Option<String>,
     path: String,
     message: String,
     generation: u64,
     request_id: u64,
 ) -> Result<CommitPushReport, AppError> {
-    crate::git::sync::commit_and_push(state.inner(), &path, &message, generation, request_id).await
+    let report = crate::git::sync::commit_and_push(state.inner(), &path, &message, generation, request_id).await?;
+    if report.committed { sources.record_git_result(review_id.as_deref(), &path, cliora::Outcome::Committed, &report.oid); }
+    Ok(report)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1792,8 +1843,11 @@ async fn cherry_pick_commits(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
 async fn revert_commits(
     state: State<'_, Arc<Backend>>,
+    sources: State<'_, cliora::ReviewSources>,
+    review_id: Option<String>,
     path: String,
     oids: Vec<String>,
     expected_head: String,
@@ -1801,7 +1855,7 @@ async fn revert_commits(
     generation: u64,
     request_id: u64,
 ) -> Result<RevertOutcome, AppError> {
-    crate::git::resolve::revert_commits(
+    let result = crate::git::resolve::revert_commits(
         state.inner(),
         &path,
         &oids,
@@ -1809,8 +1863,9 @@ async fn revert_commits(
         confirm,
         generation,
         request_id,
-    )
-    .await
+    ).await?;
+    if result.wrote && result.created > 0 { if let Some(oid) = result.head_oid.as_deref() { sources.record_git_result(review_id.as_deref(), &path, cliora::Outcome::Committed, oid); } }
+    Ok(result)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1894,8 +1949,11 @@ async fn merge_preview(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
 async fn start_merge(
     state: State<'_, Arc<Backend>>,
+    sources: State<'_, cliora::ReviewSources>,
+    review_id: Option<String>,
     path: String,
     source: String,
     target: Option<String>,
@@ -1903,7 +1961,7 @@ async fn start_merge(
     generation: u64,
     request_id: u64,
 ) -> Result<MergeSession, AppError> {
-    crate::git::resolve::start_merge(
+    let result = crate::git::resolve::start_merge(
         state.inner(),
         &path,
         &source,
@@ -1911,8 +1969,9 @@ async fn start_merge(
         mode.as_deref(),
         generation,
         request_id,
-    )
-    .await
+    ).await?;
+    if result.fast_forwarded || result.rebased { if let Some(oid) = result.head_oid.as_deref() { sources.record_git_result(review_id.as_deref(), &path, cliora::Outcome::Merged, oid); } }
+    Ok(result)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1962,13 +2021,19 @@ async fn resolve_conflict(
 #[tauri::command(rename_all = "camelCase")]
 async fn complete_merge(
     state: State<'_, Arc<Backend>>,
+    sources: State<'_, cliora::ReviewSources>,
+    review_id: Option<String>,
     path: String,
     message: String,
     generation: u64,
     request_id: u64,
 ) -> Result<MergeComplete, AppError> {
-    crate::git::resolve::complete_merge(state.inner(), &path, &message, generation, request_id)
-        .await
+    let operation = crate::git::resolve::merge_session(state.inner(), &path, generation, crate::git::schedule::internal_request_id()).await.ok().map(|session| session.operation);
+    let done = crate::git::resolve::complete_merge(state.inner(), &path, &message, generation, request_id).await?;
+    if let Some(operation) = operation {
+        sources.record_git_result(review_id.as_deref(), &path, if operation == "revert" { cliora::Outcome::Committed } else { cliora::Outcome::Merged }, &done.oid);
+    }
+    Ok(done)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2006,6 +2071,8 @@ async fn undo_commit(
 #[allow(clippy::too_many_arguments)]
 async fn amend_commit(
     state: State<'_, Arc<Backend>>,
+    sources: State<'_, cliora::ReviewSources>,
+    review_id: Option<String>,
     path: String,
     expected_head: String,
     message: Option<String>,
@@ -2015,7 +2082,7 @@ async fn amend_commit(
     generation: u64,
     request_id: u64,
 ) -> Result<AmendOutcome, AppError> {
-    crate::git::resolve::amend_commit(
+    let result = crate::git::resolve::amend_commit(
         state.inner(),
         &path,
         &expected_head,
@@ -2025,8 +2092,9 @@ async fn amend_commit(
         confirm,
         generation,
         request_id,
-    )
-    .await
+    ).await?;
+    if result.wrote { if let Some(oid) = result.head_oid.as_deref() { sources.record_git_result(review_id.as_deref(), &path, cliora::Outcome::Committed, oid); } }
+    Ok(result)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2382,24 +2450,58 @@ two
         let review = "6f1a2b3c-4d5e-4f60-8172-93a4b5c6d7e8";
         let session = "0b1c2d3e-4f50-4172-8394-a5b6c7d8e9f0";
 
-        sources.stage(review, session, &accepted.to_string_lossy());
-        sources.accept(review, session);
+        let request = crate::cliora::ReviewRequest {
+            protocol_version: 3, workspace_id: None, repository_id: None, workspace_name: None,
+            review_id: review.into(), session_id: session.into(), worktree_path: accepted.to_string_lossy().into_owned(), baseline: None,
+        };
+        sources.stage_request(&request).unwrap();
+        sources.accept_path(review, session, request.worktree_path.clone()).unwrap();
         // 重复链接：解析成功，但前端因为 reviewId 已处理而忽略，不会再回执。
-        sources.stage(review, session, &other.to_string_lossy());
-        let worktree = sources.worktree_for(review).expect("已接受的来源");
+        assert!(sources.stage_request(&crate::cliora::ReviewRequest { worktree_path: other.to_string_lossy().into_owned(), ..request.clone() }).is_err());
+        let worktree = sources.request_for(review, session, true).unwrap().worktree_path;
         assert_eq!(
             crate::cliora_uncommitted_files(&backend, std::path::Path::new(&worktree)).await,
             Some(0),
             "返回时读取的是最初被接受的干净工作树",
         );
         // 即便重复链接之后又收到一次 accepted 回执，也不覆盖已有正式来源。
-        sources.accept(review, session);
-        let worktree = sources.worktree_for(review).expect("已接受的来源");
+        sources.accept_path(review, session, other.to_string_lossy().into_owned()).unwrap();
+        let worktree = sources.request_for(review, session, true).unwrap().worktree_path;
         assert_eq!(
             crate::cliora_uncommitted_files(&backend, std::path::Path::new(&worktree)).await,
             Some(0),
         );
         assert_eq!(crate::cliora_uncommitted_files(&backend, &other).await, Some(2));
+    }
+
+    #[tokio::test]
+    async fn expired_review_root_never_falls_back_to_a_parent_repository() {
+        let fixture = crate::test_support::git_fixture("cliora-expired-nested");
+        let parent = fixture.repo("parent");
+        git(&parent, &["init", "-b", "main"]);
+        let child = parent.join("child"); fs::create_dir(&child).unwrap();
+        git(&child, &["init", "-b", "main"]);
+        let backend = fixture.backend();
+        assert_eq!(crate::cliora_uncommitted_files(&backend, &child).await, Some(0));
+        fs::remove_dir_all(child.join(".git")).unwrap();
+        // Without the review root guard, ordinary Git discovery still succeeds on the parent.
+        git(&child, &["rev-parse", "--show-toplevel"]);
+        assert_eq!(crate::cliora_uncommitted_files(&backend, &child).await, None);
+    }
+
+    #[tokio::test]
+    async fn review_states_are_read_from_main_and_linked_roots_independently() {
+        let fixture = crate::test_support::git_fixture("cliora-main-linked");
+        let main = fixture.repo("main");
+        git(&main, &["init", "-b", "main"]);
+        fs::write(main.join("a.txt"), "one\n").unwrap();
+        git(&main, &["add", "--", "a.txt"]); git(&main, &["commit", "-m", "init"]);
+        let linked = fixture.path().join("linked");
+        git(&main, &["worktree", "add", "-b", "feature", linked.to_str().unwrap()]);
+        fs::write(linked.join("b.txt"), "linked remains dirty\n").unwrap();
+        let backend = fixture.backend();
+        assert_eq!(crate::cliora_uncommitted_files(&backend, &main).await, Some(0));
+        assert_eq!(crate::cliora_uncommitted_files(&backend, &linked).await, Some(1));
     }
 
     /// 发给前端的返回结果只有实际发送的工作区状态和读到的条数，camelCase 与 TS 类型一致。

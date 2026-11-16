@@ -1,19 +1,18 @@
-/**
- * cliora 审查来源上下文（内存态，Svelte 5 模块级 $state，先例 update.svelte.ts）。
- *
- * 只有 deep link 成功打开目标 worktree 后才会写入来源；独立打开别的仓库会清除展示。
- * 结果只记录真实成功的 Git 操作（在 api.ts 的成功边界写入），失败、取消、仅有冲突草稿
- * 都不记录。这里不做持久化：应用重启后旧 reviewId 不再有来源，链接按失效处理。
- *
- * v2 的返回把 Git outcome 与工作区状态分开：普通文件保存只让工作区变成 dirty，
- * 绝不制造提交、合入或批准结果。
+/** In-memory review sources, keyed by reviewId. Navigation changes only the active selection.
+ * Results belong to the source selected when a successful Git operation began; restart expires them.
+ * File saves and local review marks never create committed/merged outcomes.
  */
+import { checkoutKey } from "./workspaces";
 import type { ClioraOutcome, ClioraReturnSent, ClioraWorktreeState } from "./types";
 
 export type { ClioraOutcome, ClioraWorktreeState } from "./types";
 
-/** 一次审查来源。字段原样来自已校验的 v2 链接。 */
+/** 一次审查来源。字段原样来自已校验的 v2/v3 链接。 */
 export interface ClioraReviewSource {
+  protocolVersion: 2 | 3;
+  workspaceId: string | null;
+  repositoryId: string | null;
+  workspaceName: string | null;
   reviewId: string;
   sessionId: string;
   /** 已由后端校验并 canonicalize 的目标工作树根目录。 */
@@ -29,38 +28,88 @@ export interface ClioraReviewResult {
   recordedAt: number;
 }
 
-export const clioraReview = $state({
-  source: null as ClioraReviewSource | null,
-  result: null as ClioraReviewResult | null,
+export interface ClioraSourceSnapshot {
+  source: ClioraReviewSource;
+  result: ClioraReviewResult | null;
+  lastReturn: { revision: number; declaration: { reviewId: string; sessionId: string; outcome: ClioraOutcome; headOid: string | null; worktreeState: ClioraWorktreeState; meta: [string, string][] } } | null;
+}
+
+export const MAX_REVIEW_SOURCES = 8;
+let mutationEpoch = 0;
+export function clioraSourceEpoch(): number { return mutationEpoch; }
+const store = $state({
+  entries: {} as Record<string, ClioraSourceSnapshot>,
+  activeReviewId: null as string | null,
+  currentPath: null as string | null,
+  selections: {} as Record<string, string>,
 });
 
-/**
- * 路径比较：Windows 上大小写与分隔符都不参与判定，另外忽略 canonicalize 可能留下的
- * 长路径前缀。仓库路径来自后端，这里只用于“同一个工作树”的判定。
- */
+export const clioraReview = {
+  get lastReturn(): ClioraSourceSnapshot["lastReturn"] { return store.activeReviewId ? store.entries[store.activeReviewId]?.lastReturn ?? null : null; },
+  get sources(): ClioraReviewSource[] { return Object.values(store.entries).map((entry) => entry.source); },
+  get source(): ClioraReviewSource | null { return store.activeReviewId ? store.entries[store.activeReviewId]?.source ?? null : null; },
+  get result(): ClioraReviewResult | null { return store.activeReviewId ? store.entries[store.activeReviewId]?.result ?? null : null; },
+};
+
+/** Reuse project checkout semantics: POSIX case and literal backslashes are significant. */
 export function sameWorktreePath(a: string, b: string): boolean {
-  const normalize = (value: string) =>
-    value
-      .trim()
-      .replace(/^\\\\\?\\/, "")
-      .replace(/\\/g, "/")
-      .replace(/\/+$/, "")
-      .toLowerCase();
-  return normalize(a) === normalize(b);
+  return checkoutKey(a) === checkoutKey(b);
 }
 
-/** 记录来源；同时清掉上一次的结果，避免旧结果挂在新来源上。 */
-export function beginClioraReview(source: ClioraReviewSource): void {
-  clioraReview.source = { ...source };
-  clioraReview.result = null;
+/** The link itself explicitly selects its source. Existing IDs never reset a result or baseline. */
+export function beginClioraReview(input: Pick<ClioraReviewSource, "reviewId" | "sessionId" | "worktreePath" | "baseline"> & Partial<ClioraReviewSource>): void {
+  const source: ClioraReviewSource = { ...input, protocolVersion: input.protocolVersion ?? 2, workspaceId: input.workspaceId ?? null, repositoryId: input.repositoryId ?? null, workspaceName: input.workspaceName ?? null };
+  const known = store.entries[source.reviewId];
+  if (known && (known.source.sessionId !== source.sessionId || !sameWorktreePath(known.source.worktreePath, source.worktreePath))) {
+    throw new Error("审查标识已绑定其它来源，请从 Cliora 重新发起。");
+  }
+  if (!known && clioraReview.sources.length >= MAX_REVIEW_SOURCES) throw new Error("审查来源已满，请明确关闭一个来源后重新发起。");
+  if (!known) { store.entries = { ...store.entries, [source.reviewId]: { source, result: null, lastReturn: null } }; mutationEpoch += 1; }
+  store.currentPath = source.worktreePath;
+  selectClioraSource(source.reviewId);
 }
 
-/** 独立打开其它仓库时调用：只清展示，不动任何仓库的草稿与工作区。 */
+/** Hydrate only the current native process. Full process restart returns no sources. */
+export function hydrateClioraReviews(snapshots: ClioraSourceSnapshot[], expectedEpoch = mutationEpoch): boolean {
+  if (expectedEpoch !== mutationEpoch) return false;
+  if (snapshots.length > MAX_REVIEW_SOURCES) throw new Error("原生审查来源超出上限，请重新启动并从 Cliora 重新发起。");
+  store.entries = Object.fromEntries(snapshots.map((entry) => [entry.source.reviewId, { source: { ...entry.source }, result: entry.result ? { ...entry.result } : null, lastReturn: entry.lastReturn }]));
+  mutationEpoch += 1;
+  if (store.currentPath) forgetClioraSourceUnless(store.currentPath);
+  else store.activeReviewId = null;
+  return true;
+}
+
+/** Navigation changes only the active display; every other source and result stays in memory. */
 export function forgetClioraSourceUnless(path: string): void {
-  if (!clioraReview.source) return;
-  if (sameWorktreePath(clioraReview.source.worktreePath, path)) return;
-  clioraReview.source = null;
-  clioraReview.result = null;
+  store.currentPath = path;
+  const matches = clioraReview.sources.filter((source) => sameWorktreePath(source.worktreePath, path));
+  const selected = store.selections[checkoutKey(path)];
+  store.activeReviewId = Object.hasOwn(store.selections, checkoutKey(path))
+    ? matches.some((source) => source.reviewId === selected) ? selected : null
+    : matches.length === 1 ? matches[0].reviewId : null;
+}
+
+export function selectClioraSource(reviewId: string | null): boolean {
+  const source = reviewId ? store.entries[reviewId]?.source : null;
+  if (source && (!store.currentPath || !sameWorktreePath(store.currentPath, source.worktreePath))) return false;
+  store.activeReviewId = source?.reviewId ?? null;
+  if (store.currentPath) store.selections = { ...store.selections, [checkoutKey(store.currentPath)]: source?.reviewId ?? "" };
+  return true;
+}
+
+/** Called only after native release succeeds; never removes repository drafts or files. */
+export function forgetClioraReview(reviewId: string): void {
+  const entries = { ...store.entries };
+  delete entries[reviewId];
+  store.entries = entries;
+  mutationEpoch += 1;
+  if (store.activeReviewId === reviewId) store.activeReviewId = null;
+  // Do not implicitly select another source on this same checkout.
+}
+
+export function captureClioraReview(path: string): string | null {
+  return clioraSourceMatches(path) ? clioraReview.source!.reviewId : null;
 }
 
 /**
@@ -80,19 +129,21 @@ export function clioraSourceMatches(path: string): boolean {
 }
 
 /** 只有来源匹配时才记录提交结果；没有来源的独立仓库不显示任何 cliora 结果。 */
-export function recordClioraCommit(path: string, oid: string): void {
-  recordClioraOutcome(path, "committed", oid);
+export function recordClioraCommit(path: string, oid: string, reviewId = captureClioraReview(path)): void {
+  recordClioraOutcome(path, "committed", oid, reviewId);
 }
 
 /** 只有来源匹配时才记录合入结果（快进、变基完成，或合并提交完成）。 */
-export function recordClioraMerge(path: string, oid: string): void {
-  recordClioraOutcome(path, "merged", oid);
+export function recordClioraMerge(path: string, oid: string, reviewId = captureClioraReview(path)): void {
+  recordClioraOutcome(path, "merged", oid, reviewId);
 }
 
-function recordClioraOutcome(path: string, outcome: "committed" | "merged", oid: string): void {
-  if (!clioraSourceMatches(path)) return;
-  if (!oid) return;
-  clioraReview.result = { outcome, headOid: oid, recordedAt: Date.now() };
+function recordClioraOutcome(path: string, outcome: "committed" | "merged", oid: string, reviewId: string | null): void {
+  if (!reviewId || !oid) return;
+  const entry = store.entries[reviewId];
+  if (!entry || !sameWorktreePath(entry.source.worktreePath, path)) return;
+  store.entries = { ...store.entries, [reviewId]: { ...entry, result: { outcome, headOid: oid, recordedAt: Date.now() } } };
+  mutationEpoch += 1;
 }
 
 /** 返回 cliora 时的 Git 结果声明：没有成功的提交或合入就是 reviewed，绝不推断成功。 */
@@ -144,8 +195,11 @@ export function clioraReturnNotice(
 
 /** 测试用：清空来源与结果。 */
 export function resetClioraReview(): void {
-  clioraReview.source = null;
-  clioraReview.result = null;
+  mutationEpoch += 1;
+  store.entries = {};
+  store.activeReviewId = null;
+  store.currentPath = null;
+  store.selections = {};
 }
 /** 链接来源：冷启动（应用启动时带来的链接）或运行中。 */
 export type ClioraLinkStyle = "cold" | "hot";

@@ -1,14 +1,14 @@
-// 预览用的 deep link 插件替身：?cliora=1 时冷启动带一条 cliora v1 审查链接，
-// 外壳按真实流程解析（mock 的 clioraReviewRequest）、打开工作树并进入历史里的任务范围。
-// ?cliora=nobase 模拟链接没带起点：只打开普通历史并说明原因。
+// Browser-only deep link substitute for the capture harness. Native builds use the real plugin.
 const params = new URLSearchParams(location.search);
-
 export async function getCurrent(): Promise<string[] | null> {
   const mode = params.get("cliora");
-  if (!mode) return null;
-  return [`twiglane://review?v=1&reviewId=preview-review&sessionId=preview-session${mode === "nobase" ? "&nobase=1" : ""}`];
+  if (!mode || mode === "external") return null;
+  const query = new URLSearchParams({ v: "3", reviewId: "6f1a2b3c-4d5e-4f60-8172-93a4b5c6d7e8", sessionId: "0b1c2d3e-4f50-4172-8394-a5b6c7d8e9f0", worktreePath: "C:/Users/dev/project/twiglane" });
+  if (mode === "nobase") query.set("nobase", "1");
+  return ["twiglane://review?" + query.toString()];
 }
-
-export async function onOpenUrl(_handler: (urls: string[]) => void): Promise<() => void> {
-  return () => {};
+export async function onOpenUrl(handler: (urls: string[]) => void): Promise<() => void> {
+  const listener = (event: Event) => handler((event as CustomEvent<string[]>).detail);
+  window.addEventListener("twiglane-preview-deep-link", listener);
+  return () => window.removeEventListener("twiglane-preview-deep-link", listener);
 }

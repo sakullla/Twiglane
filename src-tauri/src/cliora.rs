@@ -1,6 +1,6 @@
-//! cliora 审查集成协议（v2）：`twiglane://review` 入站请求与 `cliora://review` 出站事件。
+//! cliora 审查集成协议（v3 with strict v2 compatibility）：`twiglane://review` 入站请求与 `cliora://review` 出站事件。
 //!
-//! 合同来源是 cliora 仓库的 `docs/integrations/twiglane-review-v2.md`。这里只做纯字符串
+//! 合同来源是 cliora 仓库的 `docs/integrations/twiglane-review-v3.md`。这里只做纯字符串
 //! 解析/生成、固定 scheme 唤起和内存里的审查来源记录：不打开仓库、不读 Git、不落盘，
 //! 因此系统 deep link 这种不可信输入在任何 Git 写入之前就会被拒绝。返回时的工作区状态
 //! 由命令层按来源工作树读取真实 Git 状态后交给这里生成链接。
@@ -9,7 +9,7 @@
 //! （绝对路径、长度、`~` 前缀），是否是真正的工作树根由 `open_repository` 在
 //! 打开时判定——它要求目录下存在 `.git`，所以子目录不会回退成父仓库。
 //!
-//! v2 与 v1 不兼容：两端同步升级，收到其他版本一律 `unsupported_version`，没有回退。
+//! New requests use v3; legal v2 sources return v2. Unknown versions never fall back.
 
 use crate::error::AppError;
 
@@ -39,8 +39,13 @@ pub const INVALID_PATH: &str = "invalid_path";
 pub const INVALID_RECEIPT: &str = "invalid_receipt";
 
 /// 已校验的 v2 审查请求。字段原样来自链接，不含任何凭据。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReviewRequest {
+    pub protocol_version: u8,
+    pub workspace_id: Option<String>,
+    pub repository_id: Option<String>,
+    pub workspace_name: Option<String>,
     pub review_id: String,
     pub session_id: String,
     pub worktree_path: String,
@@ -48,7 +53,8 @@ pub struct ReviewRequest {
 }
 
 /// 本次审查期间真实完成的 Git 操作。reviewed 表示没有提交或合入，不再表示“只浏览”。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Outcome {
     Reviewed,
     Committed,
@@ -75,7 +81,8 @@ impl Outcome {
 }
 
 /// 返回时 Twiglane 读到的工作区状态，与 outcome 正交。读不到就是 unknown，不能当作 clean。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum WorktreeState {
     Clean,
     Dirty,
@@ -111,20 +118,44 @@ pub fn worktree_state_of(uncommitted: Option<usize>) -> WorktreeState {
     }
 }
 
-/// 内存里最多记住的已接受审查来源条数。更早的 reviewId 返回时读不到来源，只能声明 unknown。
-/// 待定（已解析、尚未接受）的链接另有同样大小的上限，互不挤占。
+/// Accepted and pending sources share this bound. Capacity never evicts an existing source.
 pub const MAX_REVIEW_SOURCES: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceGitResult {
+    pub outcome: Outcome,
+    pub head_oid: String,
+    pub recorded_at: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceReturnResult {
+    pub revision: u64,
+    pub declaration: ReviewReturn,
+}
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSourceSnapshot {
+    pub source: ReviewRequest,
+    pub result: Option<SourceGitResult>,
+    pub last_return: Option<SourceReturnResult>,
+}
 
 /// 一条已解析链接的来源：reviewId、sessionId 与链接指定的工作树。
 #[derive(Debug, Clone)]
 struct SourceEntry {
-    review_id: String,
-    session_id: String,
-    worktree_path: String,
+    result: Option<SourceGitResult>,
+    last_return: Option<SourceReturnResult>,
+    result_revision: u64,
+    original_path: String,
+    request: ReviewRequest,
 }
 
 #[derive(Debug, Default)]
 struct SourceBook {
+    /// Tombstones prevent a delayed duplicate from reviving an explicitly closed source.
+    retired: std::collections::HashSet<String>,
     /// 已解析但前端还没接受的链接。只在 accepted 回执时提升为正式来源。
     pending: std::collections::VecDeque<SourceEntry>,
     /// 已被前端接受（真正打开并建立来源）的审查。返回时只按这里读取工作树。
@@ -146,61 +177,104 @@ impl ReviewSources {
         self.book.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// 暂存一条刚解析成功的链接。该 reviewId 已有正式来源或已有待定记录时不改动（先到先得）。
-    pub fn stage(&self, review_id: &str, session_id: &str, worktree_path: &str) {
+    /// Reserve capacity before opening. No accepted or pending source is silently evicted.
+    pub fn stage_request(&self, request: &ReviewRequest) -> Result<(), AppError> {
         let mut book = self.lock();
-        if book.accepted.iter().any(|entry| entry.review_id == review_id)
-            || book.pending.iter().any(|entry| entry.review_id == review_id)
-        {
-            return;
+        if book.retired.contains(&request.review_id) { return Err(AppError::new("source_expired", "此审查来源已关闭，请从 Cliora 重新发起。")); }
+        if let Some(existing) = book.accepted.iter().chain(book.pending.iter()).find(|entry| entry.request.review_id == request.review_id) {
+            // An accepted path is canonical; identities and the original baseline must still agree.
+            if existing.original_path != request.worktree_path || existing.request.session_id != request.session_id || existing.request.protocol_version != request.protocol_version
+                || existing.request.workspace_id != request.workspace_id || existing.request.repository_id != request.repository_id
+                || existing.request.baseline != request.baseline || existing.request.workspace_name != request.workspace_name {
+                return Err(AppError::new("source_mismatch", "审查标识已绑定其它来源，请从 Cliora 重新发起。"));
+            }
+            return Ok(());
         }
-        book.pending.push_back(SourceEntry {
-            review_id: review_id.to_string(),
-            session_id: session_id.to_string(),
-            worktree_path: worktree_path.to_string(),
-        });
-        while book.pending.len() > MAX_REVIEW_SOURCES {
-            book.pending.pop_front();
+        if book.retired.len() + book.accepted.len() + book.pending.len() >= 256 { return Err(AppError::new("source_capacity", "本次运行的来源记录已满，请重新启动 Twiglane，再从 Cliora 重新发起。")); }
+        if book.accepted.len() + book.pending.len() >= MAX_REVIEW_SOURCES {
+            return Err(AppError::new("source_capacity", "已保留 8 个审查来源。请在来源列表明确关闭一项，再从 Cliora 重新发起。"));
         }
+        book.pending.push_back(SourceEntry { result: None, last_return: None, result_revision: 0, original_path: request.worktree_path.clone(), request: request.clone() });
+        Ok(())
     }
 
-    /// 前端接受了这条链接：把 reviewId 与 sessionId 都对得上的待定记录提升为正式来源。
-    /// 已有正式来源时保留原记录，不被覆盖；没有对应待定记录时什么也不做。
-    pub fn accept(&self, review_id: &str, session_id: &str) {
+    pub fn request_for(&self, review_id: &str, session_id: &str, accepted_only: bool) -> Result<ReviewRequest, AppError> {
+        let book = self.lock();
+        book.accepted.iter().chain(book.pending.iter().filter(|_| !accepted_only))
+            .find(|entry| entry.request.review_id == review_id && entry.request.session_id == session_id)
+            .map(|entry| entry.request.clone())
+            .ok_or_else(|| AppError::new("source_expired", "审查来源已失效或应用已重启，请从原 Cliora 会话重新发起；未发送结果。"))
+    }
+
+    pub fn accept_path(&self, review_id: &str, session_id: &str, path: String) -> Result<(), AppError> {
         let mut book = self.lock();
-        let Some(index) = book
-            .pending
-            .iter()
-            .position(|entry| entry.review_id == review_id && entry.session_id == session_id)
-        else {
-            return;
-        };
-        let Some(entry) = book.pending.remove(index) else {
-            return;
-        };
-        if book.accepted.iter().any(|existing| existing.review_id == review_id) {
-            return;
-        }
+        if book.accepted.iter().any(|entry| entry.request.review_id == review_id && entry.request.session_id == session_id) { return Ok(()); }
+        let index = book.pending.iter().position(|entry| entry.request.review_id == review_id && entry.request.session_id == session_id)
+            .ok_or_else(|| AppError::new("source_expired", "审查来源不存在，未发送回执。"))?;
+        let mut entry = book.pending.remove(index).expect("pending entry exists");
+        entry.request.worktree_path = path;
         book.accepted.push_back(entry);
-        while book.accepted.len() > MAX_REVIEW_SOURCES {
-            book.accepted.pop_front();
-        }
+        Ok(())
     }
 
-    /// 前端拒绝了这条链接：丢掉对应的待定记录，正式来源不受影响。
     pub fn reject(&self, review_id: &str, session_id: &str) {
         let mut book = self.lock();
-        book.pending
-            .retain(|entry| !(entry.review_id == review_id && entry.session_id == session_id));
+        let count = book.pending.len();
+        book.pending.retain(|entry| !(entry.request.review_id == review_id && entry.request.session_id == session_id));
+        if book.pending.len() != count { book.retired.insert(review_id.to_owned()); }
     }
 
-    /// 这次审查被接受时记下的工作树；没有正式来源时返回 None。
-    pub fn worktree_for(&self, review_id: &str) -> Option<String> {
-        self.lock()
-            .accepted
-            .iter()
-            .find(|entry| entry.review_id == review_id)
-            .map(|entry| entry.worktree_path.clone())
+    /// A new webview cannot complete an old unaccepted open. Retire it explicitly, keeping accepted sources.
+    pub fn expire_pending(&self) -> usize {
+        let mut book = self.lock();
+        let pending = std::mem::take(&mut book.pending); let count = pending.len();
+        for entry in pending { book.retired.insert(entry.request.review_id); }
+        count
+    }
+
+    /// Only accepted sources are hydrated. Pending opens cannot become invented UI sources.
+    pub fn snapshots(&self) -> Vec<ReviewSourceSnapshot> {
+        self.lock().accepted.iter().map(|entry| ReviewSourceSnapshot { source: entry.request.clone(), result: entry.result.clone(), last_return: entry.last_return.clone() }).collect()
+    }
+
+    /// Called only at the native success boundary of an existing protected Git write.
+    pub fn record_git_result(&self, review_id: Option<&str>, path: &str, outcome: Outcome, head_oid: &str) {
+        let Some(review_id) = review_id else { return; };
+        if !is_oid(head_oid) || outcome == Outcome::Reviewed { return; }
+        let Ok(root) = crate::git::ops::canonical_existing(std::path::Path::new(path)) else { return; };
+        let mut book = self.lock();
+        let Some(entry) = book.accepted.iter_mut().find(|entry| entry.request.review_id == review_id && std::path::Path::new(&entry.request.worktree_path) == root) else { return; };
+        let recorded_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_millis() as u64).unwrap_or(0);
+        entry.result = Some(SourceGitResult { outcome, head_oid: head_oid.into(), recorded_at });
+    }
+
+    pub fn remember_return(&self, revision: u64, declaration: &ReviewReturn) -> Result<(), AppError> {
+        let mut book = self.lock();
+        let entry = book.accepted.iter_mut().find(|entry| entry.request.review_id == declaration.review_id && entry.request.session_id == declaration.session_id)
+            .ok_or_else(|| AppError::new("source_expired", "审查来源已失效，未发送结果。"))?;
+        if revision == 0 || revision > entry.result_revision || entry.last_return.as_ref().is_some_and(|result| result.revision >= revision) {
+            return Err(AppError::new("stale_result", "较新的返回结果已存在，本次过期结果未发送。"));
+        }
+        entry.last_return = Some(SourceReturnResult { revision, declaration: declaration.clone() });
+        Ok(())
+    }
+
+    pub fn next_result_revision(&self, review_id: &str, session_id: &str) -> Result<u64, AppError> {
+        let mut book = self.lock();
+        let entry = book.accepted.iter_mut().find(|entry| entry.request.review_id == review_id && entry.request.session_id == session_id)
+            .ok_or_else(|| AppError::new("source_expired", "审查来源已失效，未发送结果。"))?;
+        entry.result_revision = entry.result_revision.checked_add(1).filter(|revision| *revision <= 9_007_199_254_740_991)
+            .ok_or_else(|| invalid_receipt("审查返回序号已耗尽，请重新发起"))?;
+        Ok(entry.result_revision)
+    }
+
+    pub fn forget(&self, review_id: &str, session_id: &str) -> Result<(), AppError> {
+        self.request_for(review_id, session_id, false)?;
+        let mut book = self.lock();
+        book.pending.retain(|entry| entry.request.review_id != review_id);
+        book.accepted.retain(|entry| entry.request.review_id != review_id);
+        book.retired.insert(review_id.to_owned());
+        Ok(())
     }
 }
 
@@ -208,7 +282,8 @@ impl ReviewSources {
 ///
 /// `meta` 是有界的说明性元数据：键为 `namespace.name`（不含 `meta.` 前缀），值是短文本事实。
 /// 新增结果维度优先放进核心字段或 meta，而不是继续堆位置参数。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReviewReturn {
     pub review_id: String,
     pub session_id: String,
@@ -232,7 +307,7 @@ pub fn parse_review_url(url: &str) -> Result<ReviewRequest, AppError> {
     if url.len() > MAX_URL_LEN {
         return Err(malformed("链接超过长度上限"));
     }
-    if url.chars().any(|ch| ch <= '\u{1f}' || ch == '\u{7f}' || ch == ' ') {
+    if url.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
         return Err(malformed("链接含控制字符或未编码空格"));
     }
     let rest = url
@@ -246,19 +321,32 @@ pub fn parse_review_url(url: &str) -> Result<ReviewRequest, AppError> {
         Some((host, query)) => (host, query),
         None => return Err(malformed("链接缺少查询参数")),
     };
-    if !is_host(host) {
-        return Err(malformed("链接目标不是 review"));
+    if !is_host(host) || query.contains('?') {
+        return Err(malformed("链接目标不是 review 或含未编码问号"));
     }
     let params = parse_query(query)?;
     let version = params
         .iter()
         .find(|(key, _)| key == "v")
         .map(|(_, value)| value.as_str());
-    if version != Some(VERSION) {
+    if !matches!(version, Some("2" | "3")) {
         return Err(AppError::new(
             UNSUPPORTED_VERSION,
-            "只支持 v2 审查链接，请把 Twiglane 和 cliora 升级到同一协议版本。",
+            "支持 v2/v3 审查链接，请把 Twiglane 和 cliora 升级到同一协议版本。",
         ));
+    }
+    let protocol_version = if version == Some("3") { 3 } else { 2 };
+    let optional = |key: &str| params.iter().find(|(name, _)| name == key).map(|(_, value)| value.clone());
+    let workspace_id = optional("workspaceId");
+    let repository_id = optional("repositoryId");
+    let workspace_name = optional("workspaceName");
+    if protocol_version == 2 && (workspace_id.is_some() || repository_id.is_some() || workspace_name.is_some()) {
+        return Err(malformed("v2 不接受项目来源字段"));
+    }
+    if workspace_id.as_deref().is_some_and(|id| !is_id(id)) || repository_id.as_deref().is_some_and(|id| !is_id(id))
+        || workspace_name.as_deref().is_some_and(|name| name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control))
+        || (workspace_name.is_some() && workspace_id.is_none()) {
+        return Err(malformed("项目来源标识或显示名无效"));
     }
     let review_id = required(&params, "reviewId")?;
     if !is_id(review_id) {
@@ -281,6 +369,7 @@ pub fn parse_review_url(url: &str) -> Result<ReviewRequest, AppError> {
         None => None,
     };
     Ok(ReviewRequest {
+        protocol_version, workspace_id, repository_id, workspace_name,
         review_id: review_id.to_string(),
         session_id: session_id.to_string(),
         worktree_path: worktree_path.to_string(),
@@ -416,7 +505,7 @@ fn parse_query(query: &str) -> Result<Vec<(String, String)>, AppError> {
             None => (pair, ""),
         };
         let key = raw_name(raw_key)?;
-        if !matches!(key, "v" | "reviewId" | "sessionId" | "worktreePath" | "baseline") {
+        if !matches!(key, "v" | "reviewId" | "sessionId" | "worktreePath" | "baseline" | "workspaceId" | "repositoryId" | "workspaceName") {
             return Err(malformed("链接含协议之外的参数"));
         }
         if params.iter().any(|(name, _)| name == key) {
@@ -498,7 +587,7 @@ fn is_worktree_path(value: &str) -> bool {
     if value.is_empty() || value.chars().count() > MAX_PATH_LEN {
         return false;
     }
-    if value.chars().any(|ch| ch <= '\u{1f}' || ch == '\u{7f}') {
+    if value.chars().any(char::is_control) {
         return false;
     }
     if value.starts_with('~') {
@@ -545,7 +634,7 @@ pub fn validate_inbound(url: &str) -> Result<(), AppError> {
     }
     if url
         .chars()
-        .any(|ch| ch <= '\u{1f}' || ch == '\u{7f}' || ch == ' ')
+        .any(|ch| ch.is_control() || ch.is_whitespace())
     {
         return Err(malformed("回执链接含控制字符或未编码空格"));
     }
@@ -564,12 +653,21 @@ pub fn validate_inbound(url: &str) -> Result<(), AppError> {
         return Err(malformed("回执目标不是 review"));
     }
     let params = parse_inbound_query(query)?;
-    if field(&params, "v") != Some(VERSION) {
+    let v3 = field(&params, "v") == Some("3");
+    let returned = field(&params, "event") == Some("returned");
+    match (v3, returned, field(&params, "resultRevision")) {
+        (true, true, Some(raw)) if !raw.is_empty() && !raw.starts_with('0') && raw.bytes().all(|byte| byte.is_ascii_digit())
+            && raw.parse::<u64>().is_ok_and(|revision| revision <= 9_007_199_254_740_991) => {},
+        (true, true, _) | (_, _, Some(_)) => return Err(invalid_receipt("返回序号不符合来源协议")),
+        _ => {},
+    }
+    if !matches!(field(&params, "v"), Some("2" | "3")) {
         return Err(AppError::new(
             UNSUPPORTED_VERSION,
             "回执不是 v2 协议，未打开任何应用。",
         ));
     }
+    let params: Vec<_> = params.into_iter().filter(|(key, _)| key != "resultRevision").collect();
     let review_id = required(&params, "reviewId")?;
     let session_id = required(&params, "sessionId")?;
     if !is_id(review_id) || !is_id(session_id) {
@@ -610,6 +708,20 @@ pub fn validate_inbound(url: &str) -> Result<(), AppError> {
         }
         _ => Err(invalid_receipt("回执的 event 不是协议里的取值")),
     }
+}
+
+/// The source registry chooses the return version. Frontend cannot choose or downgrade it.
+pub fn source_event_url(request: &ReviewRequest, result_revision: Option<u64>, url: String) -> Result<String, AppError> {
+    let url = match request.protocol_version {
+        2 => url,
+        3 => url.replacen("?v=2&", "?v=3&", 1),
+        _ => return Err(invalid_receipt("来源协议版本无效")),
+    };
+    let url = if request.protocol_version == 3 {
+        match result_revision { Some(revision) => format!("{url}&resultRevision={revision}"), None => url }
+    } else { url };
+    validate_inbound(&url)?;
+    Ok(url)
 }
 
 /// 打开 cliora 的固定 scheme。只允许本模块校验过的 `cliora://review`。
@@ -688,6 +800,7 @@ fn parse_inbound_query(query: &str) -> Result<Vec<(String, String)>, AppError> {
                 | "outcome"
                 | "headOid"
                 | "worktreeState"
+                | "resultRevision"
         ) {
             return Err(malformed("回执含协议之外的参数"));
         }
@@ -812,7 +925,7 @@ mod tests {
 
     #[test]
     fn rejects_v1_and_other_versions_without_fallback() {
-        for version in ["1", "3", "02", ""] {
+        for version in ["1", "4", "02", ""] {
             let mut fields = good_fields();
             fields[0] = ("v", version.to_string());
             assert_eq!(code_of(&url_of(&fields)), UNSUPPORTED_VERSION, "v={version}");
@@ -1083,7 +1196,7 @@ mod tests {
         for url in [
             format!("cliora://review?v=1&event=accepted&reviewId={REVIEW}&sessionId={SESSION}"),
             format!("cliora://review?v=1&event=returned&reviewId={REVIEW}&sessionId={SESSION}&outcome=reviewed"),
-            format!("cliora://review?v=3&event=accepted&reviewId={REVIEW}&sessionId={SESSION}"),
+            format!("cliora://review?v=4&event=accepted&reviewId={REVIEW}&sessionId={SESSION}"),
         ] {
             assert_eq!(validate_inbound(&url).expect_err("版本不匹配").code, UNSUPPORTED_VERSION, "{url}");
         }
@@ -1120,65 +1233,118 @@ mod tests {
         assert_eq!(worktree_state_of(Some(3)), WorktreeState::Dirty);
     }
 
-    /// 只有被接受的链接才成为来源：解析后暂存，accepted 回执才提升；sessionId 对不上的
-    /// 回执不提升。正式来源有上限，超出时先丢最早的，未记录的 reviewId 读不到来源。
+    fn request(id: &str, path: &str) -> ReviewRequest {
+        ReviewRequest { protocol_version: 3, workspace_id: None, repository_id: None, workspace_name: None,
+            review_id: id.into(), session_id: SESSION.into(), worktree_path: path.into(), baseline: None }
+    }
+
     #[test]
-    fn review_sources_keep_only_accepted_bounded_mapping() {
+    fn sources_are_bounded_without_evicting_and_require_exact_identity() {
         let sources = ReviewSources::default();
-        assert_eq!(sources.worktree_for(REVIEW), None);
-        sources.stage(REVIEW, SESSION, "C:/work/a");
-        assert_eq!(sources.worktree_for(REVIEW), None, "只解析未接受不算来源");
-        sources.accept(REVIEW, "other-session");
-        assert_eq!(sources.worktree_for(REVIEW), None, "sessionId 对不上不提升");
-        sources.accept(REVIEW, SESSION);
-        assert_eq!(sources.worktree_for(REVIEW).as_deref(), Some("C:/work/a"));
         for index in 0..MAX_REVIEW_SOURCES {
-            let id = format!("review-{index}");
-            sources.stage(&id, SESSION, &format!("C:/work/{index}"));
-            sources.accept(&id, SESSION);
+            let request = request(&format!("review-{index}"), &format!("/work/{index}"));
+            sources.stage_request(&request).unwrap();
+            sources.accept_path(&request.review_id, SESSION, request.worktree_path.clone()).unwrap();
         }
-        assert_eq!(sources.worktree_for(REVIEW), None, "最早的来源被挤出");
-        assert_eq!(sources.worktree_for("review-0").as_deref(), Some("C:/work/0"));
-        assert_eq!(
-            sources.worktree_for(&format!("review-{}", MAX_REVIEW_SOURCES - 1)).as_deref(),
-            Some(format!("C:/work/{}", MAX_REVIEW_SOURCES - 1).as_str()),
-        );
+        assert!(sources.stage_request(&request("overflow", "/work/overflow")).is_err());
+        assert_eq!(sources.request_for("review-0", SESSION, true).unwrap().worktree_path, "/work/0");
+        assert!(sources.request_for("review-0", "wrong-session", true).is_err());
+        assert!(sources.stage_request(&ReviewRequest { session_id: "other".into(), ..request("review-0", "/elsewhere") }).is_err());
+        sources.forget("review-0", SESSION).unwrap();
+        sources.stage_request(&request("overflow", "/work/overflow")).unwrap();
+        assert!(sources.request_for("review-0", SESSION, true).is_err());
+        assert!(sources.request_for("overflow", SESSION, true).is_err());
+        sources.reject("overflow", SESSION);
+        assert!(sources.request_for("overflow", SESSION, false).is_err());
     }
 
-    /// 已接受的审查不会被同一 reviewId、指向别处的重复链接改写：重复链接只解析、
-    /// 即使随后又收到 accepted 回执，返回时读取的仍是最初被接受的工作树。
     #[test]
-    fn duplicate_review_id_never_rewrites_the_accepted_source() {
-        let sources = ReviewSources::default();
-        sources.stage(REVIEW, SESSION, "C:/work/a");
-        sources.accept(REVIEW, SESSION);
-        sources.stage(REVIEW, SESSION, "C:/elsewhere");
-        assert_eq!(sources.worktree_for(REVIEW).as_deref(), Some("C:/work/a"));
-        sources.accept(REVIEW, SESSION);
-        assert_eq!(sources.worktree_for(REVIEW).as_deref(), Some("C:/work/a"));
-        sources.reject(REVIEW, SESSION);
-        assert_eq!(sources.worktree_for(REVIEW).as_deref(), Some("C:/work/a"), "拒绝不动正式来源");
+    fn source_version_controls_every_receipt_and_return() {
+        for version in [2, 3] {
+            let request = ReviewRequest { protocol_version: version, ..request(REVIEW, "/work/a") };
+            let url = source_event_url(&request, None, accepted_url(REVIEW, SESSION).unwrap()).unwrap();
+            assert!(url.contains(&format!("?v={version}&")));
+            validate_inbound(&url).unwrap();
+        }
+    }
+    #[test]
+    fn shared_v3_fixtures_cover_requests_and_outbound_validation() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/reviews/protocol-v3.json")).unwrap();
+        for case in fixtures["requests"].as_array().unwrap() {
+            if case["platform"] == "unix" && cfg!(windows) || case["platform"] == "windows" && !cfg!(windows) { continue; }
+            assert_eq!(parse_review_url(case["url"].as_str().unwrap()).is_ok(), case["valid"].as_bool().unwrap(), "{}", case["name"]);
+        }
+        for case in fixtures["events"].as_array().unwrap() {
+            assert_eq!(validate_inbound(case["url"].as_str().unwrap()).is_ok(), case["valid"].as_bool().unwrap(), "{}", case["name"]);
+        }
     }
 
-    /// 被拒绝、打开失败或被忽略的链接不占正式来源的位置：连续很多条只解析或被拒绝的
-    /// 链接之后，当前审查的来源仍在。
     #[test]
-    fn rejected_or_ignored_links_never_evict_the_accepted_source() {
+    fn return_revisions_are_source_bound_and_released_sources_expire() {
         let sources = ReviewSources::default();
-        sources.stage(REVIEW, SESSION, "C:/work/a");
-        sources.accept(REVIEW, SESSION);
-        for index in 0..(MAX_REVIEW_SOURCES * 3) {
-            let id = format!("ignored-{index}");
-            sources.stage(&id, SESSION, &format!("C:/other/{index}"));
-            if index % 2 == 0 {
-                sources.reject(&id, SESSION);
-            }
-        }
-        assert_eq!(sources.worktree_for(REVIEW).as_deref(), Some("C:/work/a"));
-        assert_eq!(sources.worktree_for("ignored-1"), None, "未接受的链接没有来源");
-        // 被拒绝的待定记录已清掉；同一 reviewId 之后重新发起并被接受时按新链接记录。
-        sources.stage("ignored-0", SESSION, "C:/work/retry");
-        sources.accept("ignored-0", SESSION);
-        assert_eq!(sources.worktree_for("ignored-0").as_deref(), Some("C:/work/retry"));
+        let request = request(REVIEW, "/work/a");
+        sources.stage_request(&request).unwrap();
+        sources.accept_path(REVIEW, SESSION, "/work/a".into()).unwrap();
+        assert_eq!(sources.next_result_revision(REVIEW, SESSION).unwrap(), 1);
+        assert_eq!(sources.next_result_revision(REVIEW, SESSION).unwrap(), 2);
+        assert!(sources.next_result_revision(REVIEW, "other").is_err());
+        sources.lock().accepted[0].result_revision = 9_007_199_254_740_991;
+        assert!(sources.next_result_revision(REVIEW, SESSION).is_err());
+        sources.forget(REVIEW, SESSION).unwrap();
+        assert!(sources.next_result_revision(REVIEW, SESSION).is_err());
+        assert!(sources.stage_request(&request).is_err(), "a released source cannot be revived by an old link");
+        assert!(ReviewSources::default().request_for(REVIEW, SESSION, true).is_err());
     }
+
+    #[test]
+    fn rejected_duplicates_cannot_restage_or_consume_capacity() {
+        let sources = ReviewSources::default();
+        let rejected = request("rejected", "/work/a");
+        sources.stage_request(&rejected).unwrap(); sources.reject("rejected", SESSION);
+        assert!(sources.stage_request(&rejected).is_err());
+        for index in 0..MAX_REVIEW_SOURCES { sources.stage_request(&request(&format!("source-{index}"), "/work/other")).unwrap(); }
+        assert_eq!(sources.lock().pending.len(), MAX_REVIEW_SOURCES);
+    }
+
+    #[test]
+    fn native_snapshots_keep_independent_git_results_and_ordered_returns() {
+        let temp = crate::test_support::TempDir::new("cliora-snapshots");
+        let a = temp.path().join("A"); let b = temp.path().join("B");
+        std::fs::create_dir(&a).unwrap(); std::fs::create_dir(&b).unwrap();
+        let sources = ReviewSources::default();
+        for (id, path) in [("A", &a), ("B", &b)] {
+            let request = request(id, path.to_str().unwrap()); sources.stage_request(&request).unwrap();
+            sources.accept_path(id, SESSION, path.to_str().unwrap().into()).unwrap();
+        }
+        sources.record_git_result(Some("A"), b.to_str().unwrap(), Outcome::Committed, OID);
+        assert!(sources.snapshots().iter().all(|entry| entry.result.is_none()));
+        sources.record_git_result(Some("A"), a.to_str().unwrap(), Outcome::Committed, OID);
+        sources.record_git_result(Some("B"), b.to_str().unwrap(), Outcome::Merged, &"b".repeat(40));
+        let first = sources.next_result_revision("A", SESSION).unwrap(); let second = sources.next_result_revision("A", SESSION).unwrap();
+        let declaration = ReviewReturn { review_id: "A".into(), session_id: SESSION.into(), outcome: Outcome::Committed, head_oid: Some(OID.into()), worktree_state: WorktreeState::Dirty, meta: Vec::new() };
+        sources.remember_return(second, &declaration).unwrap(); assert!(sources.remember_return(first, &declaration).is_err());
+        let snapshots = sources.snapshots();
+        assert_eq!(snapshots[0].result.as_ref().unwrap().head_oid, OID);
+        assert_eq!(snapshots[0].last_return.as_ref().unwrap().revision, 2);
+        assert_eq!(snapshots[1].result.as_ref().unwrap().outcome, Outcome::Merged);
+        assert!(snapshots[1].last_return.is_none());
+        let json = serde_json::to_value(&snapshots[0]).unwrap();
+        assert_eq!(json["source"]["protocolVersion"], 3); assert_eq!(json["result"]["outcome"], "committed");
+        assert_eq!(json["lastReturn"]["declaration"]["headOid"], OID);
+        assert!(ReviewSources::default().snapshots().is_empty(), "a process restart cannot invent a previous source");
+    }
+
+    #[test]
+    fn webview_restore_expires_only_unaccepted_opens_and_keeps_capacity_visible() {
+        let sources = ReviewSources::default();
+        sources.stage_request(&request("accepted", "/work/a")).unwrap(); sources.accept_path("accepted", SESSION, "/work/a".into()).unwrap();
+        sources.stage_request(&request("pending", "/work/b")).unwrap();
+        assert_eq!(sources.expire_pending(), 1);
+        assert_eq!(sources.snapshots().len(), 1);
+        assert_eq!(sources.snapshots()[0].source.review_id, "accepted");
+        assert!(sources.stage_request(&request("pending", "/work/b")).is_err());
+        assert_eq!(sources.expire_pending(), 0);
+        for index in 0..7 { sources.stage_request(&request(&format!("new-{index}"), "/work/new")).unwrap(); }
+    }
+
 }

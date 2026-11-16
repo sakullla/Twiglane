@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { recordClioraCommit, resetClioraReview } from "../src/lib/cliora-review.svelte";
+import { clioraReview, clioraBaseline, recordClioraCommit, resetClioraReview } from "../src/lib/cliora-review.svelte";
 import { resetReviewProgress } from "../src/lib/review-progress.svelte";
 import type { DiffLine, DiffResponse, FileChange, StatusSnapshot } from "../src/lib/types";
 
@@ -207,6 +207,7 @@ function resetMocks() {
     worktreePath: WORKTREE,
     baseline: BASELINE,
   });
+  mocks.api.clioraReviewSources.mockResolvedValue(null);
   mocks.api.clioraReviewReceipt.mockResolvedValue(undefined);
   mocks.api.clioraReviewReturn.mockResolvedValue(undefined);
   // 审阅进度只影响本地标记，不参与协议结果。
@@ -278,7 +279,7 @@ describe("cliora v2 审查链接", () => {
     await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
     await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledTimes(1));
   });
-  it("运行中链接与冷启动一致，迟到的旧链接不覆盖较新的来源", async () => {
+  it("运行中链接串行建立多个来源，最后来源活动且能显式切回", async () => {
     let finishFirst!: (value: unknown) => void;
     mocks.api.openRepository
       .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }))
@@ -293,12 +294,15 @@ describe("cliora v2 审查链接", () => {
     handle([URL_A]);
     await waitFor(() => expect(mocks.api.openRepository).toHaveBeenCalledTimes(1));
     handle([URL_B]);
-    await waitFor(() => expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledWith(REVIEW_B, SESSION_B, true, null));
-
-    // 第一条链接此时才打开完成：它已经过期，不能再抢来源，也不能回送 accepted。
+    expect(mocks.api.openRepository).toHaveBeenCalledTimes(1);
     finishFirst(openedAt(WORKTREE));
-    await waitFor(() => expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledTimes(1));
-    expect(mocks.api.clioraReviewReceipt).not.toHaveBeenCalledWith(REVIEW_A, SESSION_A, true, null);
+    await waitFor(() => expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledTimes(2));
+    expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledWith(REVIEW_A, SESSION_A, true, null);
+    expect(clioraReview.sources).toHaveLength(2);
+    await fireEvent.change(screen.getByRole("combobox", { name: "选择 Cliora 审查来源" }), { target: { value: REVIEW_A } });
+    expect(clioraBaseline()).toBe(BASELINE);
+    await fireEvent.change(screen.getByRole("combobox", { name: "选择 Cliora 审查来源" }), { target: { value: REVIEW_B } });
+    expect(clioraBaseline()).toBeNull();
 
     await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
     await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_B, SESSION_B, "reviewed", null)));
@@ -352,13 +356,14 @@ describe("cliora v2 审查链接", () => {
     handle([URL_A]);
     await waitFor(() => expect(mocks.api.openRepository).toHaveBeenCalledTimes(1));
     handle([URL_B]);
-    await waitFor(() => expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledWith(REVIEW_B, SESSION_B, true, null));
+    expect(mocks.api.openRepository).toHaveBeenCalledTimes(1);
 
     // 旧链接此时才失败：它自己的 reviewId 收到 rejected，但界面与来源仍是新链接的。
     failFirst({ code: "path_missing", message: "路径不存在，未创建或修改任何文件。" });
     await waitFor(() =>
       expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledWith(REVIEW_A, SESSION_A, false, "invalid_path"),
     );
+    await waitFor(() => expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledWith(REVIEW_B, SESSION_B, true, null));
     expect(mocks.api.clioraReviewReceipt).not.toHaveBeenCalledWith(REVIEW_B, SESSION_B, false, expect.anything());
     await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
     await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_B, SESSION_B, "reviewed", null)));
@@ -588,6 +593,110 @@ describe("cliora v2 审查链接", () => {
     expect(mocks.api.commitChanges).not.toHaveBeenCalled();
   });
 
+  it("失效路径的非活动来源无需打开即可明确关闭，当前来源仍保留", async () => {
+    mocks.api.clioraReviewSources.mockResolvedValue({ sources: [
+      { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_A, sessionId: SESSION_A, worktreePath: WORKTREE, baseline: BASELINE }, result: null, lastReturn: null },
+      { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_B, sessionId: SESSION_B, worktreePath: OTHER_WORKTREE, baseline: COMMITTED }, result: null, lastReturn: null },
+    ], expiredPending: 0 });
+    mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE)); await mountShell();
+    const select = screen.getByRole("combobox", { name: "选择 Cliora 审查来源" });
+    await waitFor(() => expect(within(select).getAllByRole("option")).toHaveLength(3));
+    await fireEvent.change(select, { target: { value: REVIEW_A } });
+    await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_A));
+    mocks.api.openRepository.mockRejectedValueOnce({ code: "path_missing", message: "B 目录失效" });
+    await fireEvent.change(select, { target: { value: REVIEW_B } });
+    await waitFor(() => expect(document.body.textContent).toContain("B 目录失效"));
+    await fireEvent.click(screen.getByText("管理审查来源（2）"));
+    await fireEvent.click(screen.getByRole("button", { name: `关闭审查来源 ${REVIEW_B.slice(0, 8)}` }));
+    await waitFor(() => expect(mocks.api.clioraReviewForget).toHaveBeenCalledWith(REVIEW_B, SESSION_B));
+    expect(clioraReview.source?.reviewId).toBe(REVIEW_A);
+    expect(clioraReview.sources.map(source => source.reviewId)).toEqual([REVIEW_A]);
+  });
+
+  it("原生 accepted 尚未完成时不把新来源用于 Git 操作，回执传输失败也不伪造 rejected", async () => {
+    let finishReceipt!: (value: unknown) => void;
+    mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE));
+    mocks.api.clioraReviewReceipt.mockImplementationOnce(() => new Promise(resolve => { finishReceipt = resolve; }));
+    const handle = await mountShell(); handle([URL_A]);
+    await waitFor(() => expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledWith(REVIEW_A, SESSION_A, true, null));
+    expect(clioraReview.source).toBeNull();
+    finishReceipt(undefined);
+    await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_A));
+    mocks.api.clioraReviewRequest.mockResolvedValue({ reviewId: REVIEW_B, sessionId: SESSION_B, worktreePath: WORKTREE, baseline: null });
+    mocks.api.clioraReviewReceipt.mockRejectedValueOnce({ code: "cliora_unavailable", message: "系统回执投递失败" });
+    handle([URL_B]);
+    await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_B));
+    expect(mocks.api.clioraReviewReceipt).not.toHaveBeenCalledWith(REVIEW_B, SESSION_B, false, expect.anything());
+    expect(document.body.textContent).toContain("系统回执投递失败");
+  });
+
+  it("首次恢复未完成时到达的新链接等待旧 pending 过期后才原生登记", async () => {
+    let finishRestore!: (value: unknown) => void;
+    mocks.api.clioraReviewSources.mockImplementationOnce(() => new Promise(resolve => { finishRestore = resolve; }));
+    mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE));
+    const handle = await mountShell();
+    handle([URL_A]);
+    await waitFor(() => expect(mocks.api.clioraReviewSources).toHaveBeenCalledWith(true));
+    expect(mocks.api.clioraReviewRequest).not.toHaveBeenCalled();
+    finishRestore({ sources: [], expiredPending: 1 });
+    await waitFor(() => expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledWith(REVIEW_A, SESSION_A, true, null));
+    expect(clioraReview.sources.map(source => source.reviewId)).toEqual([REVIEW_A]);
+  });
+
+  it("webview 重载从原生恢复多个来源和最近返回结果，不伪造新的 accepted", async () => {
+    mocks.api.clioraReviewSources.mockResolvedValue({ sources: [
+      { source: { protocolVersion: 3, workspaceId: "project-A", repositoryId: "repo-A", workspaceName: "电商平台", reviewId: REVIEW_A, sessionId: SESSION_A, worktreePath: WORKTREE, baseline: BASELINE }, result: { outcome: "committed", headOid: COMMITTED, recordedAt: 1 }, lastReturn: { revision: 2, declaration: { reviewId: REVIEW_A, sessionId: SESSION_A, outcome: "committed", headOid: COMMITTED, worktreeState: "dirty", meta: [] } } },
+      { source: { protocolVersion: 2, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_B, sessionId: SESSION_B, worktreePath: OTHER_WORKTREE, baseline: COMMITTED }, result: null, lastReturn: null },
+    ], expiredPending: 1 });
+    mocks.api.openRepository.mockImplementation(async (path: string) => openedAt(path));
+    await mountShell();
+    const select = screen.getByRole("combobox", { name: "选择 Cliora 审查来源" });
+    await waitFor(() => expect(within(select).getAllByRole("option")).toHaveLength(3));
+    expect(clioraReview.source).toBeNull();
+    expect(document.body.textContent).toContain("1 条尚未接受的来源已失效");
+    expect(mocks.api.clioraReviewSources).toHaveBeenCalledWith(true);
+    await fireEvent.change(select, { target: { value: REVIEW_A } });
+    await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_A));
+    expect(clioraBaseline()).toBe(BASELINE);
+    expect(clioraReview.result?.headOid).toBe(COMMITTED);
+    expect(clioraReview.lastReturn?.revision).toBe(2);
+    expect(screen.getByText("已保留上次返回尝试，接收结果以 Cliora 为准")).toBeTruthy();
+    expect(mocks.api.clioraReviewReceipt).not.toHaveBeenCalled();
+    await fireEvent.change(select, { target: { value: REVIEW_B } });
+    await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_B));
+    expect(clioraReview.result).toBeNull();
+  });
+
+  it("两个项目审查 A 切 B 再回 A 保留各自基线和结果，显式关闭才释放", async () => {
+    const otherUrl = URL_B + "&v3-source";
+    mocks.api.clioraReviewRequest.mockImplementation(async (url: string) => ({
+      protocolVersion: 3, workspaceId: url === URL_A ? "project-A" : "project-B", repositoryId: url === URL_A ? "repo-A" : "repo-B",
+      workspaceName: url === URL_A ? "电商平台" : "支付系统", reviewId: url === URL_A ? REVIEW_A : REVIEW_B,
+      sessionId: url === URL_A ? SESSION_A : SESSION_B, worktreePath: url === URL_A ? WORKTREE : OTHER_WORKTREE,
+      baseline: url === URL_A ? BASELINE : COMMITTED,
+    }));
+    mocks.api.openRepository.mockImplementation(async (path: string) => ({ ...openedAt(path), draft: path === WORKTREE ? "A draft" : "B draft" }));
+    deepLink.getCurrent.mockResolvedValue([URL_A]);
+    const handle = await mountShell();
+    await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_A));
+    recordClioraCommit(WORKTREE, COMMITTED);
+    handle([otherUrl]);
+    await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_B));
+    expect(clioraReview.result).toBeNull();
+    expect(clioraBaseline()).toBe(COMMITTED);
+    const sources = screen.getByRole("combobox", { name: "选择 Cliora 审查来源" });
+    expect(within(sources).getAllByRole("option")).toHaveLength(3);
+    await fireEvent.change(sources, { target: { value: REVIEW_A } });
+    await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_A));
+    expect(clioraBaseline()).toBe(BASELINE);
+    expect(clioraReview.result?.headOid).toBe(COMMITTED);
+    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_A, SESSION_A, "committed", COMMITTED)));
+    await fireEvent.click(screen.getByRole("button", { name: "关闭此审查来源" }));
+    await waitFor(() => expect(mocks.api.clioraReviewForget).toHaveBeenCalledWith(REVIEW_A, SESSION_A));
+    expect(clioraReview.sources.map((source) => source.reviewId)).toEqual([REVIEW_B]);
+  });
+
   it("独立打开的仓库没有来源，不显示返回入口", async () => {
     mocks.api.openRepository.mockResolvedValue(openedAt("C:/work/demo"));
     await mountShell();
@@ -615,7 +724,13 @@ describe("cliora 联动证据门禁", () => {
     realApp: true,
     realGit: true,
     steps: ["在已安装的两端应用中操作"],
-    observations,
+    observations: {
+      workspaceA: "project-A", workspaceB: "project-B", promptScope: "repository A", originalSession: SESSION_A, returnedSource: "project A/repo A/session A",
+      reviewA: REVIEW_A, reviewB: REVIEW_B, baselineA: BASELINE, baselineB: COMMITTED, draftRestored: "A草稿恢复", independentResults: "B未继承A结果",
+      explicitSelection: "用户选择A", capacityError: "第九条拒绝", retainedSource: "第一条仍在", explicitRelease: "明确关闭", restartExpired: "来源失效",
+      v2Receipt: "v2", v2Return: "v2", v3NoDowngrade: "没有重发v2", newRevision: "2", oldRevisionIgnored: "1被忽略", lateReceiptIgnored: "状态保持returned",
+      ...observations,
+    },
   });
   const reReview = {
     clioraRecheck: "cliora 复核 HEAD 与未提交文件后显示剩余修改",
@@ -628,6 +743,8 @@ describe("cliora 联动证据门禁", () => {
     staleReturnIgnored: "迟到的旧 returned 未覆盖新审查",
   };
   const BASE_IDS = [
+    "project-prompt-review-return", "multi-source-switchback", "same-checkout-source-selection",
+    "source-capacity-and-expiry", "v2-source-roundtrip", "result-revision-order",
     "cold-start-review",
     "commit-and-return",
     "merge-and-stale-head",
@@ -652,8 +769,8 @@ describe("cliora 联动证据门禁", () => {
       report,
       JSON.stringify({
         format: "cliora-integration-evidence",
-        version: 2,
-        protocol: "twiglane-review-v2",
+        version: 3,
+        protocol: "twiglane-review-v3",
         host: { platform: "windows" },
         builds: { twiglane: build(version), cliora: build("9.9.9") },
         scenarios,

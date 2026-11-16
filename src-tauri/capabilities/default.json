@@ -138,6 +138,8 @@
     "allow-cliora-review-request",
     "allow-cliora-review-receipt",
     "allow-cliora-review-return",
+    "allow-cliora-review-forget",
+    "allow-cliora-review-sources",
     "allow-terminal-profiles",
     "allow-terminal-list",
     "allow-terminal-create",

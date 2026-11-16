@@ -4257,7 +4257,7 @@
   />
 
   <div class="review-context-bar" aria-label="保留的 Cliora 审查">
-    <label>审查来源 <select aria-label="选择 Cliora 审查来源" value={clioraReview.source?.reviewId ?? ""} disabled={writeLocked} onchange={(event) => void chooseClioraReview(event.currentTarget.value)}>
+    <label>审查来源 <select aria-label="选择 Cliora 审查来源" value={clioraReview.source?.reviewId ?? ""} disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : undefined} onchange={(event) => void chooseClioraReview(event.currentTarget.value)}>
       <option value="">{clioraReview.sources.length ? "选择来源 / 当前独立操作" : "暂无来源"}</option>
       {#each clioraReview.sources as source (source.reviewId)}
         <option value={source.reviewId}>{clioraProjectLabel(source)} · {source.worktreePath} · 会话 {source.sessionId.slice(0, 8)} · 审查 {source.reviewId.slice(0, 8)}</option>
@@ -4265,7 +4265,7 @@
     </select></label>
     {#if clioraReview.source}
       <span title={clioraReview.source.repositoryId ?? "独立仓库"}>{clioraProjectLabel(clioraReview.source)} · 仓库 {clioraReview.source.repositoryId?.slice(0, 8) ?? "未关联"}</span>
-      <button class="btn sm" disabled={writeLocked} onclick={() => void closeClioraReview()}>关闭此审查来源</button>
+      <button class="btn sm" disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : undefined} onclick={() => void closeClioraReview()}>关闭此审查来源</button>
     {/if}
     {#if clioraReview.sources.length}
       <details class="review-source-manager">
@@ -4274,7 +4274,7 @@
           {#each clioraReview.sources as source (source.reviewId)}
             <li data-review-source-id={source.reviewId}>
               <span title={source.worktreePath}>{clioraProjectLabel(source)} · {source.worktreePath} · 会话 {source.sessionId.slice(0, 8)}</span>
-              <button class="btn sm" disabled={writeLocked} onclick={() => void closeClioraReview(source.reviewId)} aria-label={`关闭审查来源 ${source.reviewId.slice(0, 8)}`}>关闭来源</button>
+              <button class="btn sm" disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : undefined} onclick={() => void closeClioraReview(source.reviewId)} aria-label={`关闭审查来源 ${source.reviewId.slice(0, 8)}`}>关闭来源</button>
             </li>
           {/each}
         </ul>

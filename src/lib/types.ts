@@ -753,6 +753,8 @@ export interface FileHistoryPage {
 
 export interface CherryPickOutcome {
   generation: number;
+  created: number;
+  headOid: string | null;
   conflicted: boolean;
   skipped: string[];
   note: string;
@@ -1003,6 +1005,7 @@ export interface ConflictView {
 }
 
 export interface MergeComplete {
+  operation: "merge" | "rebase" | "cherry-pick" | "revert";
   oid: string;
   generation: number;
   summary: string;

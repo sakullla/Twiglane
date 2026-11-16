@@ -369,6 +369,7 @@ pub async fn complete_merge(
         .with_generation(snapshot.generation));
     }
     Ok(MergeComplete {
+        operation: prepared.operation,
         oid: prepared.oid,
         generation: snapshot.generation,
         summary: prepared.summary,
@@ -1587,6 +1588,7 @@ fn write_conflict_file(root: &Path, relative: &Path, bytes: &[u8]) -> Result<(),
 }
 
 struct CompletedMerge {
+    operation: String,
     oid: String,
     summary: String,
     files: Vec<String>,
@@ -1638,6 +1640,7 @@ async fn complete_in_guard(
     }
     if !path_exists_in_guard(guard, git, root, "MERGE_HEAD").await? {
         return Ok(CompletedMerge {
+            operation: operation.to_owned(),
             oid: after,
             summary: format!("已完成合并提交，包含 {} 个路径。", files.len()),
             files,
@@ -1719,6 +1722,7 @@ async fn continue_sequencer(
     };
     if now == "none" && !sequencer_remains {
         return Ok(CompletedMerge {
+            operation: operation.to_owned(),
             oid: head_in_guard(guard, git, root).await?,
             summary: continue_summary(operation),
             files,
@@ -1757,6 +1761,7 @@ async fn continue_sequencer(
             ));
         }
         return Ok(CompletedMerge {
+            operation: operation.to_owned(),
             oid: head_in_guard(guard, git, root).await?,
             summary: continue_summary(operation),
             files,
@@ -4961,6 +4966,8 @@ pub async fn cherry_pick_commits(
     if todo.is_empty() {
         return Ok(CherryPickOutcome {
             generation,
+            created: 0,
+            head_oid: None,
             conflicted: false,
             skipped: skipped.clone(),
             note: only_skipped_note(&skipped),
@@ -4981,11 +4988,16 @@ pub async fn cherry_pick_commits(
         internal_request_id(),
     )
     .await)?;
+    if outcome.created > 0 && snapshot.branch.head_oid != outcome.head_oid {
+        return Err(AppError::new("cherry_pick_unverified", "拣选后的 HEAD 已变化，请刷新核对，未声明提交结果。").with_generation(snapshot.generation));
+    }
     Ok(CherryPickOutcome {
         generation: snapshot.generation,
-        conflicted: outcome.0,
+        created: outcome.created,
+        head_oid: outcome.head_oid,
+        conflicted: outcome.conflicted,
         skipped,
-        note: outcome.1,
+        note: outcome.note,
         snapshot,
     })
 }
@@ -5093,6 +5105,13 @@ async fn load_commits_in_guard(
     Ok(commits)
 }
 
+struct PickedCommits {
+    conflicted: bool,
+    note: String,
+    created: u32,
+    head_oid: Option<String>,
+}
+
 async fn cherry_pick_in_guard(
     guard: &mut WriteGuard<'_, RealRunner>,
     backend: &Backend,
@@ -5100,7 +5119,7 @@ async fn cherry_pick_in_guard(
     root: &Path,
     todo: &[String],
     skipped: &[String],
-) -> Result<(bool, String), AppError> {
+) -> Result<PickedCommits, AppError> {
     let snapshot = status_in_guard(guard, backend, git, root).await?;
     if snapshot.branch.detached || snapshot.branch.unborn || snapshot.branch.name.is_none() {
         return Err(AppError::new(
@@ -5115,6 +5134,7 @@ async fn cherry_pick_in_guard(
             "已有进行中的合并、变基、拣选或还原，未开始新的拣选。",
         ));
     }
+    let before = head_in_guard(guard, git, root).await?;
     let output = run_spec(
         guard,
         cherry_pick_range_command(git, root, todo),
@@ -5124,8 +5144,13 @@ async fn cherry_pick_in_guard(
     .await?;
     let after = status_in_guard(guard, backend, git, root).await?;
     let after_op = operation_in_guard(guard, git, root, &after).await?;
+    let created = created_action_commits_in_guard(guard, git, root, &before, "cherry_pick_unverified", "拣选").await?;
+    if created as usize > todo.len() {
+        return Err(AppError::new("cherry_pick_unverified", "拣选期间出现了计划之外的提交，请刷新核对。"));
+    }
+    let head_oid = if created > 0 { Some(head_in_guard(guard, git, root).await?) } else { None };
     if after_op == "cherry-pick" {
-        return Ok((true, conflict_note(skipped)));
+        return Ok(PickedCommits { conflicted: true, note: conflict_note(skipped), created, head_oid });
     }
     if output.exit_code != 0 {
         return Err(classified_git(
@@ -5134,7 +5159,7 @@ async fn cherry_pick_in_guard(
             "拣选没有完成。会覆盖未提交修改时不会开始，当前分支应保持原样。",
         ));
     }
-    Ok((false, success_note(skipped)))
+    Ok(PickedCommits { conflicted: false, note: success_note(skipped), created, head_oid })
 }
 
 const MAX_REVERTS: usize = 100;
@@ -5469,10 +5494,13 @@ async fn ensure_reachable_in_guard(
 }
 
 async fn created_commits_in_guard(
-    guard: &mut WriteGuard<'_, RealRunner>,
-    git: &Path,
-    root: &Path,
-    before: &str,
+    guard: &mut WriteGuard<'_, RealRunner>, git: &Path, root: &Path, before: &str,
+) -> Result<u32, AppError> {
+    created_action_commits_in_guard(guard, git, root, before, "revert_unverified", "还原").await
+}
+
+async fn created_action_commits_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>, git: &Path, root: &Path, before: &str, code: &'static str, verb: &str,
 ) -> Result<u32, AppError> {
     let after = head_in_guard(guard, git, root).await?;
     let output = run_spec(
@@ -5484,9 +5512,9 @@ async fn created_commits_in_guard(
     .await?;
     if output.exit_code != 0 {
         return Err(git_failure(
-            "revert_unverified",
+            code,
             &output,
-            "无法确认本次还原创建了多少提交，请刷新后核对历史。",
+            &format!("无法确认本次{verb}创建了多少提交，请刷新后核对历史。"),
         ));
     }
     String::from_utf8_lossy(&output.stdout)
@@ -5494,8 +5522,8 @@ async fn created_commits_in_guard(
         .parse::<u32>()
         .map_err(|_| {
             AppError::new(
-                "revert_unverified",
-                "无法确认本次还原创建了多少提交，请刷新后核对历史。",
+                code,
+                format!("无法确认本次{verb}创建了多少提交，请刷新后核对历史。"),
             )
         })
 }

@@ -694,6 +694,49 @@ describe("cliora 审查接线", () => {
     expect(clioraReview.result?.headOid).toBe(OID);
   });
 
+  it("成功拣选的提交保留给开始时的 A 来源，迟到完成不污染 B", async () => {
+    let complete!: (value: unknown) => void;
+    invoke.mockImplementationOnce(async () => new Promise(resolve => { complete = resolve; }));
+    const pending = api.cherryPickCommits("/repo", ["a".repeat(40)], 4, 101);
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("cherry_pick_commits", expect.objectContaining({ path: "/repo", requestId: 101 })));
+    beginClioraReview({ reviewId: "B", sessionId: "session-B", worktreePath: "/other", baseline: null });
+    complete({ generation: 5, created: 1, headOid: OID, conflicted: false, skipped: [], note: "done", snapshot: { branch: { headOid: OID } } });
+    await pending;
+    expect(clioraReview.source?.reviewId).toBe("B"); expect(clioraReview.result).toBeNull();
+    beginClioraReview({ reviewId: REVIEW, sessionId: SESSION, worktreePath: "/repo", baseline: null });
+    expect(clioraReview.result).toMatchObject({ outcome: "committed", headOid: OID });
+    expect(invoke).toHaveBeenCalledWith("cherry_pick_commits", { path: "/repo", oids: ["a".repeat(40)], generation: 4, requestId: 101, reviewId: REVIEW });
+  });
+
+  it("拣选全部跳过、纯冲突或失败均不制造提交结果", async () => {
+    for (const outcome of [{ created: 0, headOid: null, conflicted: false, skipped: [OID] }, { created: 0, headOid: null, conflicted: true, skipped: [] }]) {
+      invoke.mockResolvedValueOnce({ ...outcome, generation: 5, note: "unchanged", snapshot: { branch: { headOid: OID } } });
+      await api.cherryPickCommits("/repo", [OID], 4, 102);
+      expect(clioraReview.result).toBeNull();
+    }
+    invoke.mockRejectedValueOnce({ code: "cherry_pick_failed", message: "failed" });
+    await expect(api.cherryPickCommits("/repo", [OID], 4, 103)).rejects.toMatchObject({ code: "cherry_pick_failed" });
+    expect(clioraReview.result).toBeNull();
+  });
+
+  it("拣选部分提交后冲突保留真实提交，全跳过和失败不抹去已有结果", async () => {
+    invoke.mockResolvedValueOnce({ created: 1, headOid: OID, conflicted: true, skipped: [], generation: 5, snapshot: {} });
+    await api.cherryPickCommits("/repo", ["a".repeat(40), "c".repeat(40)], 4, 105);
+    expect(clioraReview.result).toMatchObject({ outcome: "committed", headOid: OID });
+    invoke.mockResolvedValueOnce({ created: 0, headOid: null, conflicted: false, skipped: [OID], generation: 5, snapshot: {} });
+    await api.cherryPickCommits("/repo", [OID], 5, 106);
+    expect(clioraReview.result?.headOid).toBe(OID);
+    invoke.mockRejectedValueOnce({ code: "cherry_pick_failed", message: "failed" });
+    await expect(api.cherryPickCommits("/repo", [OID], 5, 107)).rejects.toMatchObject({ code: "cherry_pick_failed" });
+    expect(clioraReview.result).toMatchObject({ outcome: "committed", headOid: OID });
+  });
+
+  it("继续拣选完成的实际提交声明为 committed", async () => {
+    invoke.mockResolvedValueOnce({ oid: OID, generation: 5, operation: "cherry-pick", summary: "continued", files: [], snapshot: {} });
+    await api.completeMerge("/repo", "", 4, 104, "merge");
+    expect(clioraReview.result).toMatchObject({ outcome: "committed", headOid: OID });
+  });
+
   it("链接解析、回执与返回事件按 camelCase 传参", async () => {
     await api.clioraReviewRequest("twiglane://review?v=1");
     await api.clioraReviewReceipt(REVIEW, SESSION, true);
@@ -875,21 +918,21 @@ describe("cliora 审查接线", () => {
   });
 
   it("还原继续完成记录 committed，merge 既有 merged 回送不变", async () => {
-    invoke.mockResolvedValueOnce({ oid: OID, generation: 6, summary: "已继续还原。没有推送。", files: [], snapshot: {} });
+    invoke.mockResolvedValueOnce({ oid: OID, generation: 6, operation: "revert", summary: "已继续还原。没有推送。", files: [], snapshot: {} });
     await api.completeMerge("/repo", "", 5, 6, "revert");
     expect(clioraReview.result).toMatchObject({ outcome: "committed", headOid: OID });
 
     resetClioraReview();
     beginClioraReview({ reviewId: REVIEW, sessionId: SESSION, worktreePath: "/repo", baseline: null });
-    invoke.mockResolvedValueOnce({ oid: OID, generation: 6, summary: "合并完成。", files: [], snapshot: {} });
+    invoke.mockResolvedValueOnce({ oid: OID, generation: 6, operation: "merge", summary: "合并完成。", files: [], snapshot: {} });
     await api.completeMerge("/repo", "合并", 5, 7, "merge");
     expect(clioraReview.result).toMatchObject({ outcome: "merged", headOid: OID });
 
     resetClioraReview();
     beginClioraReview({ reviewId: REVIEW, sessionId: SESSION, worktreePath: "/repo", baseline: null });
-    invoke.mockResolvedValueOnce({ oid: OID, generation: 6, summary: "继续拣选。", files: [], snapshot: {} });
+    invoke.mockResolvedValueOnce({ oid: OID, generation: 6, operation: "cherry-pick", summary: "继续拣选。", files: [], snapshot: {} });
     await api.completeMerge("/repo", "", 5, 8, "cherry-pick");
-    expect(clioraReview.result).toMatchObject({ outcome: "merged", headOid: OID });
+    expect(clioraReview.result).toMatchObject({ outcome: "committed", headOid: OID });
   });
 
   it("只有快进、变基或合并提交完成才记录合入", async () => {
@@ -925,7 +968,7 @@ describe("cliora 审查接线", () => {
     await api.startMerge("/repo", "feature", null, "merge", 4, 3);
     expect(clioraReview.result).toBeNull();
 
-    invoke.mockResolvedValueOnce({ oid: OID, generation: 6, summary: "合并", files: [], snapshot: {} });
+    invoke.mockResolvedValueOnce({ oid: OID, generation: 6, operation: "merge", summary: "合并", files: [], snapshot: {} });
     await api.completeMerge("/repo", "合并", 5, 4);
     expect(clioraReview.result).toMatchObject({ outcome: "merged", headOid: OID });
   });

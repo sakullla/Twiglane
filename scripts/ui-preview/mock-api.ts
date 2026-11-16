@@ -1093,7 +1093,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     previewReviewEvidence.returns.push({ url: "cliora://review?" + params.toString(), uncommitted });
     return ok({ worktreeState: uncommitted ? "dirty" : "clean", uncommitted });
   },
-  cherryPickCommits: () => ok({ generation, conflicted: false, skipped: [], note: "已按从旧到新拣选到当前分支。没有推送。", snapshot: snapshot() }),
+  cherryPickCommits: () => ok({ generation, created: 1, headOid: branch.headOid, conflicted: false, skipped: [], note: "已按从旧到新拣选到当前分支。没有推送。", snapshot: snapshot() }),
   /**
    * 预览/确认还原。只模拟成功路径；冲突仍由 ?merge=conflict 的合并 mock 覆盖。
    * 这不是真实 Git 行为，只用于打开还原弹层与核对还原文案。
@@ -1622,6 +1622,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     branch.ahead += 1;
     generation += 1;
     return ok({
+      operation: "merge",
       oid: "merge1234567890",
       generation,
       summary: "已完成合并 merge123",

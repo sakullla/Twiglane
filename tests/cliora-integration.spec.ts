@@ -613,6 +613,31 @@ describe("cliora v2 审查链接", () => {
     expect(clioraReview.sources.map(source => source.reviewId)).toEqual([REVIEW_A]);
   });
 
+  it("accepted 迟到期间普通切到 B，保留 A 来源但不改 B 仓库或任务起点", async () => {
+    let finishReceipt!: (value: unknown) => void;
+    mocks.api.getSettings.mockResolvedValue({ theme: "dark", panelWidths: { sidebar: 256, files: 360 }, git: { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "available" }, recent: [{ name: "other", path: OTHER_WORKTREE, openedAtMs: 1 }], settingsWarning: null });
+    mocks.api.openRepository.mockImplementation(async (path: string) => openedAt(path));
+    mocks.api.clioraReviewReceipt.mockImplementationOnce(() => new Promise(resolve => { finishReceipt = resolve; }));
+    const handle = await mountShell(); handle([URL_A]);
+    await waitFor(() => expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledWith(REVIEW_A, SESSION_A, true, null));
+    await fireEvent.click(screen.getByRole("button", { name: "当前仓库 代码 demo" }));
+    const switcher = await screen.findByRole("dialog", { name: "切换仓库" });
+    await fireEvent.click(within(switcher).getByRole("option", { name: /other/ }));
+    await waitFor(() => expect(document.querySelector(".project-context-path")?.textContent).toContain(OTHER_WORKTREE));
+    mocks.api.taskReview.mockClear();
+    finishReceipt(undefined);
+    await waitFor(() => expect(clioraReview.sources.map(source => source.reviewId)).toContain(REVIEW_A));
+    expect(clioraReview.source).toBeNull();
+    expect(clioraBaseline()).toBeNull();
+    expect(document.querySelector(".project-context-path")?.textContent).toContain(OTHER_WORKTREE);
+    expect(mocks.api.taskReview).not.toHaveBeenCalledWith(OTHER_WORKTREE, BASELINE, expect.anything(), expect.anything());
+    expect(mocks.api.taskReview).not.toHaveBeenCalled();
+    await fireEvent.change(screen.getByRole("combobox", { name: "选择 Cliora 审查来源" }), { target: { value: REVIEW_A } });
+    await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_A));
+    expect(document.querySelector(".project-context-path")?.textContent).toContain(WORKTREE);
+    expect(clioraBaseline()).toBe(BASELINE);
+  });
+
   it("原生 accepted 尚未完成时不把新来源用于 Git 操作，回执传输失败也不伪造 rejected", async () => {
     let finishReceipt!: (value: unknown) => void;
     mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE));

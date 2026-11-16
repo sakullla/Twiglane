@@ -1833,13 +1833,16 @@ async fn file_history(
 #[tauri::command(rename_all = "camelCase")]
 async fn cherry_pick_commits(
     state: State<'_, Arc<Backend>>,
+    sources: State<'_, cliora::ReviewSources>,
+    review_id: Option<String>,
     path: String,
     oids: Vec<String>,
     generation: u64,
     request_id: u64,
 ) -> Result<CherryPickOutcome, AppError> {
-    crate::git::resolve::cherry_pick_commits(state.inner(), &path, &oids, generation, request_id)
-        .await
+    let result = crate::git::resolve::cherry_pick_commits(state.inner(), &path, &oids, generation, request_id).await?;
+    if result.created > 0 { if let Some(oid) = result.head_oid.as_deref() { sources.record_git_result(review_id.as_deref(), &path, cliora::Outcome::Committed, oid); } }
+    Ok(result)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2028,11 +2031,9 @@ async fn complete_merge(
     generation: u64,
     request_id: u64,
 ) -> Result<MergeComplete, AppError> {
-    let operation = crate::git::resolve::merge_session(state.inner(), &path, generation, crate::git::schedule::internal_request_id()).await.ok().map(|session| session.operation);
     let done = crate::git::resolve::complete_merge(state.inner(), &path, &message, generation, request_id).await?;
-    if let Some(operation) = operation {
-        sources.record_git_result(review_id.as_deref(), &path, if operation == "revert" { cliora::Outcome::Committed } else { cliora::Outcome::Merged }, &done.oid);
-    }
+    let outcome = match done.operation.as_str() { "revert" | "cherry-pick" => cliora::Outcome::Committed, _ => cliora::Outcome::Merged };
+    sources.record_git_result(review_id.as_deref(), &path, outcome, &done.oid);
     Ok(done)
 }
 
@@ -2537,6 +2538,102 @@ two
         assert!(status.success(), "{args:?}");
     }
 
+    fn cliora_cherry_pick_case(case: &str) {
+        use tauri::Manager;
+        let skip = case.starts_with("skip"); let failure = case.starts_with("failure"); let preserve = case.ends_with("preserve");
+        let fixture = crate::test_support::git_fixture("cliora-cherry-result");
+        let repo = fixture.repo("A"); let other = fixture.repo("B");
+        for path in [&repo, &other] {
+            git(path, &["init", "-b", "main"]);
+            fs::write(path.join("shared.txt"), "base\n").unwrap();
+            git(path, &["add", "--", "shared.txt"]); git(path, &["commit", "-m", "base"]);
+        }
+        let oid = |path: &Path, reference: &str| {
+            let output = Command::new(crate::test_support::system_git()).current_dir(path).args(["rev-parse", reference]).output().unwrap();
+            assert!(output.status.success()); String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&repo, &["checkout", "-b", "feature"]);
+        let conflict = matches!(case, "conflict" | "continue" | "partial") || failure;
+        let first = if case == "partial" {
+            fs::write(repo.join("picked.txt"), "first\n").unwrap(); git(&repo, &["add", "--", "picked.txt"]);
+            git(&repo, &["commit", "-m", "first", "--date=2001-01-01T00:00:00Z"]);
+            Some(oid(&repo, "HEAD"))
+        } else { None };
+        fs::write(repo.join(if conflict { "shared.txt" } else { "picked.txt" }), "picked\n").unwrap();
+        git(&repo, &["add", "--", "."]); git(&repo, &["commit", "-m", "picked", "--date=2002-01-01T00:00:00Z"]);
+        let patch = oid(&repo, "HEAD"); git(&repo, &["checkout", "main"]);
+        if conflict && !failure {
+            fs::write(repo.join("shared.txt"), "main\n").unwrap(); git(&repo, &["commit", "-am", "main"]);
+        }
+        if skip || preserve {
+            // The service rejects root/merge commits before ancestor skipping; use a normal existing commit.
+            fs::write(repo.join("existing.txt"), "already here\n").unwrap();
+            git(&repo, &["add", "--", "existing.txt"]); git(&repo, &["commit", "-m", "already"]);
+        }
+        let before = oid(&repo, "HEAD"); let other_before = oid(&other, "HEAD");
+        if failure { fs::write(repo.join("shared.txt"), "local unsaved\n").unwrap(); }
+        let backend = Arc::new(fixture.backend()); let sources = crate::cliora::ReviewSources::default();
+        let review_a = "6f1a2b3c-4d5e-4f60-8172-93a4b5c6d7e8";
+        let review_b = "1a2b3c4d-5e6f-4071-8293-a4b5c6d7e8f9";
+        let session = "0b1c2d3e-4f50-4172-8394-a5b6c7d8e9f0";
+        for (review, path) in [(review_a, &repo), (review_b, &other)] {
+            let request = crate::cliora::ReviewRequest { protocol_version: 3, workspace_id: None, repository_id: None, workspace_name: None, review_id: review.into(), session_id: session.into(), worktree_path: repo_key(path), baseline: Some(oid(path, if review == review_a && preserve { "HEAD~1" } else { "HEAD" })) };
+            sources.stage_request(&request).unwrap(); sources.accept_path(review, session, repo_key(path)).unwrap();
+        }
+        if preserve { sources.record_git_result(Some(review_a), &repo_key(&repo), crate::cliora::Outcome::Committed, &before); }
+        let app = tauri::test::mock_builder().manage(Arc::clone(&backend)).manage(sources)
+            .invoke_handler(tauri::generate_handler![super::cherry_pick_commits, super::complete_merge])
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+        let path = repo_key(&repo); let mut picks = first.into_iter().collect::<Vec<_>>();
+        picks.push(if skip { before.clone() } else { patch });
+        let result = invoke(&window, "cherry_pick_commits", serde_json::json!({ "path": path, "oids": picks, "generation": backend.scheduler.current_generation(&path), "requestId": 99001, "reviewId": review_a }));
+        if failure { assert!(result.is_err()); }
+        else {
+            let result = result.unwrap();
+            assert_eq!(result["conflicted"], matches!(case, "conflict" | "continue" | "partial"));
+            if skip { assert_eq!(result["skipped"].as_array().unwrap().len(), 1); }
+            assert_eq!(result["created"], if matches!(case, "success" | "partial") { 1 } else { 0 });
+            assert_eq!(result["headOid"], if matches!(case, "success" | "partial") { serde_json::json!(oid(&repo, "HEAD")) } else { serde_json::Value::Null });
+        }
+        if case == "continue" {
+            git(&repo, &["checkout", "--theirs", "--", "shared.txt"]); git(&repo, &["add", "--", "shared.txt"]);
+            let completed = invoke(&window, "complete_merge", serde_json::json!({ "path": path, "message": "", "generation": backend.scheduler.current_generation(&path), "requestId": 99002, "reviewId": review_a })).unwrap();
+            assert_eq!(completed["operation"], "cherry-pick");
+        }
+        let snapshots = app.state::<crate::cliora::ReviewSources>().snapshots();
+        let a = snapshots.iter().find(|source| source.source.review_id == review_a).unwrap();
+        let b = snapshots.iter().find(|source| source.source.review_id == review_b).unwrap();
+        if matches!(case, "success" | "partial" | "continue") {
+            let after = oid(&repo, "HEAD"); assert_ne!(after, before);
+            let result = a.result.as_ref().expect("a real created commit must be retained for source A");
+            assert_eq!(result.outcome, crate::cliora::Outcome::Committed); assert_eq!(result.head_oid, after);
+        } else {
+            assert_eq!(oid(&repo, "HEAD"), before);
+            if preserve { assert_eq!(a.result.as_ref().unwrap().head_oid, before); } else { assert!(a.result.is_none()); }
+        }
+        assert!(b.result.is_none()); assert_eq!(oid(&other, "HEAD"), other_before);
+        assert_eq!(fs::read_to_string(other.join("shared.txt")).unwrap(), "base\n");
+    }
+
+    #[test]
+    fn cliora_cherry_pick_success_records_real_source_commit() { cliora_cherry_pick_case("success"); }
+    #[test]
+    fn cliora_cherry_pick_all_skipped_records_no_commit() { cliora_cherry_pick_case("skip"); }
+    #[test]
+    fn cliora_cherry_pick_pure_conflict_records_no_commit() { cliora_cherry_pick_case("conflict"); }
+    #[test]
+    fn cliora_cherry_pick_failure_records_no_commit() { cliora_cherry_pick_case("failure"); }
+    #[test]
+    fn cliora_cherry_pick_partial_conflict_retains_created_commit() { cliora_cherry_pick_case("partial"); }
+    #[test]
+    fn cliora_cherry_pick_continue_is_committed_not_merged() { cliora_cherry_pick_case("continue"); }
+
+    #[test]
+    fn cliora_cherry_pick_skip_preserves_existing_result() { cliora_cherry_pick_case("skip-preserve"); }
+    #[test]
+    fn cliora_cherry_pick_failure_preserves_existing_result() { cliora_cherry_pick_case("failure-preserve"); }
+
     fn payload_after(command: &str) -> &str {
         let marker = format!("\"{command}\"");
         let start = API_SOURCE
@@ -2666,6 +2763,7 @@ two
         let backend = Arc::new(fixture.backend());
         let app = tauri::test::mock_builder()
             .manage(Arc::clone(&backend))
+            .manage(crate::cliora::ReviewSources::default())
             .invoke_handler(tauri::generate_handler![
                 super::add_repository,
                 super::create_repository,

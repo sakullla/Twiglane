@@ -480,6 +480,9 @@ pub struct FileHistoryPage {
 #[serde(rename_all = "camelCase")]
 pub struct CherryPickOutcome {
     pub generation: u64,
+    /// Branch commits verified inside this controlled cherry-pick, including completed items before conflict.
+    pub created: u32,
+    pub head_oid: Option<String>,
     pub conflicted: bool,
     pub skipped: Vec<String>,
     pub note: String,
@@ -720,6 +723,8 @@ pub struct ConflictView {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeComplete {
+    /// Operation actually completed under the write guard, never inferred from the active UI.
+    pub operation: String,
     pub oid: String,
     pub generation: u64,
     pub summary: String,

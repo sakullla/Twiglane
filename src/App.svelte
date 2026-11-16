@@ -3002,6 +3002,8 @@
       const openedRepo = await api.openRepository(request.worktreePath, nextId());
       if (serial !== clioraLinkSerial) return;
       rememberOpened(openedRepo);
+      const acceptedEpoch = repositoryEpoch;
+      const acceptedSourceEpoch = clioraSourceEpoch();
       let receiptFailure: unknown = null;
       try { await api.clioraReviewReceipt(request.reviewId, request.sessionId, true, null); }
       catch (error) {
@@ -3009,6 +3011,8 @@
         if (normalizeError(error).code !== "cliora_unavailable") throw error;
         receiptFailure = error;
       }
+      const activate = repositoryEpoch === acceptedEpoch && clioraSourceEpoch() === acceptedSourceEpoch
+        && opened !== null && samePath(opened.summary.path, openedRepo.summary.path);
       beginClioraReview({
         protocolVersion: request.protocolVersion,
         workspaceId: request.workspaceId,
@@ -3018,7 +3022,8 @@
         sessionId: request.sessionId,
         worktreePath: openedRepo.summary.path,
         baseline: request.baseline,
-      });
+      }, activate);
+      if (!activate) return;
       // 链接自带已校验起点：历史按任务范围过滤并选中「任务净差异」。没有起点时只打开普通历史，
       // 不用当前 HEAD 或默认分支补一个（R1）。
       openTaskReview(clioraBaseline());

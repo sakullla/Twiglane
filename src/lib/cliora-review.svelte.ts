@@ -57,7 +57,7 @@ export function sameWorktreePath(a: string, b: string): boolean {
 }
 
 /** The link itself explicitly selects its source. Existing IDs never reset a result or baseline. */
-export function beginClioraReview(input: Pick<ClioraReviewSource, "reviewId" | "sessionId" | "worktreePath" | "baseline"> & Partial<ClioraReviewSource>): void {
+export function beginClioraReview(input: Pick<ClioraReviewSource, "reviewId" | "sessionId" | "worktreePath" | "baseline"> & Partial<ClioraReviewSource>, activate = true): void {
   const source: ClioraReviewSource = { ...input, protocolVersion: input.protocolVersion ?? 2, workspaceId: input.workspaceId ?? null, repositoryId: input.repositoryId ?? null, workspaceName: input.workspaceName ?? null };
   const known = store.entries[source.reviewId];
   if (known && (known.source.sessionId !== source.sessionId || !sameWorktreePath(known.source.worktreePath, source.worktreePath))) {
@@ -65,8 +65,8 @@ export function beginClioraReview(input: Pick<ClioraReviewSource, "reviewId" | "
   }
   if (!known && clioraReview.sources.length >= MAX_REVIEW_SOURCES) throw new Error("审查来源已满，请明确关闭一个来源后重新发起。");
   if (!known) { store.entries = { ...store.entries, [source.reviewId]: { source, result: null, lastReturn: null } }; mutationEpoch += 1; }
-  store.currentPath = source.worktreePath;
-  selectClioraSource(source.reviewId);
+  // A receipt can complete after ordinary navigation. Retain its source without changing that view.
+  if (activate) { store.currentPath = source.worktreePath; selectClioraSource(source.reviewId); }
 }
 
 /** Hydrate only the current native process. Full process restart returns no sources. */
@@ -93,6 +93,7 @@ export function forgetClioraSourceUnless(path: string): void {
 export function selectClioraSource(reviewId: string | null): boolean {
   const source = reviewId ? store.entries[reviewId]?.source : null;
   if (source && (!store.currentPath || !sameWorktreePath(store.currentPath, source.worktreePath))) return false;
+  mutationEpoch += 1;
   store.activeReviewId = source?.reviewId ?? null;
   if (store.currentPath) store.selections = { ...store.selections, [checkoutKey(store.currentPath)]: source?.reviewId ?? "" };
   return true;

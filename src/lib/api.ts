@@ -690,8 +690,12 @@ export const api = {
       requestId,
       ...historyFilterPayload(filters, true),
     }),
-  cherryPickCommits: (path: string, oids: string[], generation: number, requestId: number) =>
-    invoke<CherryPickOutcome>("cherry_pick_commits", { path, oids, generation, requestId }),
+  cherryPickCommits: async (path: string, oids: string[], generation: number, requestId: number) => {
+    const reviewId = captureClioraReview(path);
+    const result = await invoke<CherryPickOutcome>("cherry_pick_commits", { path, oids, generation, requestId, ...(reviewId ? { reviewId } : {}) });
+    if (result.created > 0 && result.headOid) recordClioraCommit(path, result.headOid, reviewId);
+    return result;
+  },
   /**
    * 还原一组普通提交：先以 confirm=false 预览由新到旧的目标，确认后在本地创建逆向提交，不推送。
    * 只有真正创建了提交才记录 cliora committed；预览、取消、失败和未创建任何提交的冲突都不记录。
@@ -817,20 +821,20 @@ export const api = {
       requestId,
     }),
   /**
-   * 结束当前冲突会话。merge 保持既有 merged 回送；revert 继续完成后是逆向提交，
-   * 按 committed 记录。其他操作沿用原有的 merged 语义。
+   * Classify the actual operation returned by the native write guard: cherry-pick/revert
+   * create commits; completed merge/rebase records an integration. The active UI is not evidence.
    */
   completeMerge: async (
     path: string,
     message: string,
     generation: number,
     requestId: number,
-    operation: string | null = null,
+    _operation: string | null = null,
   ) => {
     const reviewId = captureClioraReview(path);
     const done = await invoke<MergeComplete>("complete_merge", { path, message, generation, requestId, ...(reviewId ? { reviewId } : {}) });
-    if (operation === "revert") recordClioraCommit(path, done.oid, reviewId);
-    else recordClioraMerge(path, done.oid, reviewId);
+    if (done.operation === "revert" || done.operation === "cherry-pick") recordClioraCommit(path, done.oid, reviewId);
+    else if (done.operation === "merge" || done.operation === "rebase") recordClioraMerge(path, done.oid, reviewId);
     return done;
   },
   abortMerge: (path: string, confirm: boolean, generation: number, requestId: number) =>

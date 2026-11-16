@@ -93,10 +93,19 @@
     files: () => opened.snapshot.files,
   });
 
+  const searchModes = new Map<string, "none" | "path" | "content">();
+  let searchRepository: string | null = null;
   /* 仓库身份变化：清空树、选择、搜索与打开历史；隐藏时不读。 */
   $effect(() => {
     const repoPath = opened.summary.path;
-    untrack(() => void store.sync(repoPath));
+    untrack(() => {
+      if (searchRepository !== repoPath) {
+        if (searchRepository) searchModes.set(searchRepository, searchMode);
+        searchRepository = repoPath;
+        searchMode = searchModes.get(repoPath) ?? searchMode;
+      }
+      void store.sync(repoPath);
+    });
   });
 
   /* 可见性变化：隐藏只在隐藏瞬间记一次代次快照，隐藏期间的变化留到激活时重验。 */
@@ -180,7 +189,7 @@
   let selectedEntry = $derived(store.selectedPath ? store.resolve(store.selectedPath) : null);
   /* 删除的文件不读取当前内容：只提供改动与历史（旧版本）。 */
   let missingPath = $derived(
-    store.selectedPath && deletedPaths.has(store.selectedPath) ? store.selectedPath : null,
+    store.selectedPath && (deletedPaths.has(store.selectedPath) || (store.loaded && !store.loading && !store.failure && !selectedEntry)) ? store.selectedPath : null,
   );
   /* 目录与嵌套仓库只选中，不打开内容；符号链接与特殊文件仍让内容区显示真实状态。 */
   let openPath = $derived(
@@ -301,6 +310,7 @@
     {#if searchMode === "none"}
       <FileTree
         bind:this={filesTree}
+        readingKey={opened.summary.path}
         rows={treeRows}
         selectedPath={store.selectedPath}
         selectedPaths={store.selectedPaths}

@@ -2784,7 +2784,7 @@ mod secure_entry_ops {
 
     impl Drop for DirectoryStream {
         fn drop(&mut self) {
-            // SAFETY: fdopendir 成功后 DIR 唯一归本 guard，closedir 同时关闭其 dup fd。
+            // SAFETY: fdopendir 成功后 DIR 唯一归本 guard，closedir 同时关闭独立的枚举 fd。
             let _ = unsafe { libc::closedir(self.0) };
         }
     }
@@ -2802,17 +2802,16 @@ mod secure_entry_ops {
     }
 
     fn directory_names(fd: RawFd) -> std::io::Result<Vec<OsString>> {
-        // SAFETY: 复制 fd，F_DUPFD_CLOEXEC 防止新描述符泄漏到子进程。
-        let duplicated = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
-        if duplicated < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // SAFETY: fdopendir 接管 duplicated；失败时仍由这里关闭。
-        let stream = unsafe { libc::fdopendir(duplicated) };
+        // dup shares the original open-file-description cursor: a second scan can see EOF.
+        // Reopen "." relative to the bound directory to get an independent cursor without
+        // resolving its former path. open_at retains O_NOFOLLOW/O_CLOEXEC and O_DIRECTORY.
+        let enumeration = open_at(fd, OsStr::new("."), libc::O_RDONLY | libc::O_DIRECTORY)?;
+        // SAFETY: fdopendir 接管 enumeration；失败时仍由这里关闭。
+        let stream = unsafe { libc::fdopendir(enumeration) };
         if stream.is_null() {
             let error = std::io::Error::last_os_error();
             // SAFETY: fdopendir 失败时所有权尚未移交。
-            let _ = unsafe { libc::close(duplicated) };
+            let _ = unsafe { libc::close(enumeration) };
             return Err(error);
         }
         let stream = DirectoryStream(stream);
@@ -3649,13 +3648,9 @@ mod secure_entry_ops {
     }
 
     fn directory_entry_names(directory: &Directory) -> std::io::Result<Vec<OsString>> {
-        #[cfg(target_os = "macos")]
-        let path = PathBuf::from(format!("/dev/fd/{}", directory.fd));
-        #[cfg(target_os = "linux")]
-        let path = PathBuf::from(format!("/proc/self/fd/{}", directory.fd));
-        fs::read_dir(path)?
-            .map(|entry| entry.map(|entry| entry.file_name()))
-            .collect()
+        // macOS /dev/fd/N is not a directory accepted by opendir. Enumerate the
+        // already-bound directory directly, with the same independent-cursor primitive.
+        directory.names()
     }
 
     fn delete_directory_contents(directory: &Directory) -> Result<(), AppError> {
@@ -4136,6 +4131,26 @@ mod secure_entry_ops {
                 root: root.clone(),
                 git_dirs: vec![root.join(".git")],
             }
+        }
+
+        #[test]
+        fn repeated_directory_enumeration_has_an_independent_cursor_and_keeps_bound_identity() {
+            let fixture = crate::test_support::git_fixture("secure-directory-enumeration");
+            let root = fixture.repo("repo");
+            fs::create_dir(root.join("work")).unwrap();
+            fs::write(root.join("work/child.txt"), b"original\n").unwrap();
+            let outside = fixture.path().join("outside");
+            fs::create_dir(&outside).unwrap();
+            fs::write(outside.join("outside.txt"), b"untouched\n").unwrap();
+            let directory = Directory::open_path(&root.join("work")).unwrap();
+            let expected = vec![OsString::from("child.txt")];
+            assert_eq!(directory.names().unwrap(), expected);
+            assert_eq!(directory.names().unwrap(), expected);
+            fs::rename(root.join("work"), root.join("original-work")).unwrap();
+            symlink(&outside, root.join("work")).unwrap();
+            assert_eq!(directory.names().unwrap(), expected);
+            assert_eq!(directory_entry_names(&directory).unwrap(), expected);
+            assert_eq!(fs::read(outside.join("outside.txt")).unwrap(), b"untouched\n");
         }
 
         #[test]

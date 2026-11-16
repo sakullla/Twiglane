@@ -1,3 +1,4 @@
+import type { Projects, WorkspacePreview, WorkspaceManifest, WorkspaceCandidate } from "../../src/lib/workspaces";
 // 仅用于浏览器里预览界面（npm run preview:ui）。不会进入 Tauri 构建，也不代表真实 Git 行为。
 import type {
   BranchRecord,
@@ -202,9 +203,10 @@ function snapshot(): StatusSnapshot {
   return { generation, branch: { ...branch }, files: files.map((item) => ({ ...item })) };
 }
 
+const commitDrafts = new Map<string, string>();
 function opened(path: string): OpenedRepository {
   const name = path.split(/[\\/]/).pop() ?? path;
-  return { summary: { name, path }, generation, snapshot: snapshot(), draft: "", watchDegraded: false };
+  return { summary: { name, path }, generation, snapshot: snapshot(), draft: commitDrafts.get(path) ?? "", watchDegraded: false };
 }
 
 /** 与原生 changes/history 同一形状的 Markdown 前后版本来源：非 Markdown 不给。 */
@@ -483,8 +485,20 @@ export async function pickDirectory() {
   return "C:/Users/dev/project/new-repo";
 }
 export async function pickFile() {
-  return null;
+  return previewParams.has("projects") ? "/work/shared/product.dev-workspace.json" : null;
 }
+export async function saveWorkspaceFile() { return "/work/shared/new-project.dev-workspace.json"; }
+export async function pickDirectories() { return ["/work/discovered/service-one", "/work/discovered/service-two"]; }
+const workspaceHost = "11111111-1111-4111-8111-111111111111";
+let projectData: Projects = { hostId: workspaceHost, projects: previewParams.has("projects") ? [{
+  manifest: { schemaVersion: 1, workspaceId: "22222222-2222-4222-8222-222222222222", name: "北辰业务平台 · 多仓库", revision: 1,
+    repositories: Array.from({ length: 60 }, (_, index) => ({ id: `33333333-3333-4333-8333-${String(index).padStart(12, "0")}`, name: index === 5 ? "service-with-a-very-long-name-for-reading-context-and-project-navigation" : index < 2 ? "demo" : `service-${String(index).padStart(2, "0")}`,
+      locations: [{ hostId: index === 59 ? "44444444-4444-4444-8444-444444444444" : workspaceHost, path: index === 0 ? "C:/Users/dev/project/twiglane" : index < 2 ? "/work/beta/demo" : `/work/business-platform/independent-services/service-${String(index).padStart(2, "0")}` }] })),
+  }, sourcePath: "/work/shared/product.dev-workspace.json", digest: "mock-preview-digest", error: previewParams.get("projects") === "missing" ? "项目清单无法读取：源文件已移动" : null,
+  favorites: ["33333333-3333-4333-8333-000000000001"], bindings: {},
+}] : [] };
+const workspaceResult = () => ok(structuredClone(projectData), 30);
+const previewCandidates = (paths: string[]): WorkspaceCandidate[] => paths.map((path) => ({ path, name: path.split("/").at(-1) ?? path, commonDirectory: `${path}/.git`, repositoryId: null, error: null }));
 
 /*
  * 终端预览：只在 mock 内存里模拟按仓库一个会话。
@@ -598,6 +612,17 @@ function terminalReply(session: PreviewTerminal, data: string) {
 }
 
 export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
+  workspaceList: workspaceResult,
+  workspaceCreate: (name: string) => { projectData.projects.push({ manifest: { schemaVersion: 1, workspaceId: crypto.randomUUID(), name, revision: 1, repositories: [] }, sourcePath: null, digest: null, error: null, favorites: [], bindings: {} }); return workspaceResult(); },
+  workspacePreview: (path: string) => ok({ path, manifest: projectData.projects[0]?.manifest, digest: "mock-preview-digest", conflict: previewParams.get("projects") === "conflict" }),
+  workspaceAttach: (preview: WorkspacePreview, _adopt: boolean) => { const existing = projectData.projects.find((p) => p.manifest.workspaceId === preview.manifest.workspaceId); if (existing) { existing.manifest = preview.manifest; existing.error = null; } return workspaceResult(); },
+  workspaceUpdate: (manifest: WorkspaceManifest, expectedRevision: number) => { const p = projectData.projects.find((p) => p.manifest.workspaceId === manifest.workspaceId); if (!p || p.manifest.revision !== expectedRevision) return Promise.reject({ code: "workspace_conflict", message: "项目名单已变化，请刷新后重试" }); p.manifest = { ...manifest, revision: expectedRevision + 1 }; return workspaceResult(); },
+  workspaceRefresh: (_id: string) => workspaceResult(),
+  workspacePublish: (id: string, _revision: number, path: string) => { const p = projectData.projects.find((p) => p.manifest.workspaceId === id); if (p) p.sourcePath = path; return workspaceResult(); },
+  workspaceFavorite: (id: string, repo: string, enabled: boolean) => { const p = projectData.projects.find((p) => p.manifest.workspaceId === id); if (p) p.favorites = enabled ? [...p.favorites, repo] : p.favorites.filter((r) => r !== repo); return workspaceResult(); },
+  workspaceCandidates: (paths: string[]) => ok(previewCandidates(paths)),
+  workspaceDiscover: (_root: string) => ok({ candidates: previewCandidates(["/work/discovered/service-one", "/work/discovered/service-two"]), partial: false, cancelled: false }),
+  workspaceCancelDiscovery: () => ok(undefined),
   detectGit: () => ok(previewGit),
   setGitExecutable: () => ok({}),
   clearGitExecutable: () => ok({}),
@@ -681,7 +706,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       path,
       branch: index % 4 === 3 ? null : ["feature/modern-ui", "main", "develop", ""][index % 4] || "main",
       detached: index % 4 === 3 ? "1a2b3c4" : null,
-      missing: index === 2 && !path.includes("/wt/"),
+      missing: previewParams.has("projects") ? path.endsWith("service-02") : index === 2 && !path.includes("/wt/"),
       // 预览里 /wt/ 下的目录扮演 git worktree add 建的附属工作区。
       worktree: path.includes("/wt/"),
       mainPath: path.includes("/wt/") ? "C:/Users/dev/project/twiglane" : null,
@@ -787,7 +812,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     return ok(snapshot());
   },
   stageHunks: () => ok(snapshot()),
-  saveDraft: () => ok(undefined),
+  saveDraft: (path: string, message: string) => { commitDrafts.set(path, message); return ok(undefined); },
   commitChanges: (_repo: string, message: string) => {
     if (previewParams.get("commit") === "error") {
       return Promise.reject({ code: "commit_hook", generation, message: COMMIT_FAILURE });

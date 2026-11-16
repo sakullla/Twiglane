@@ -1,3 +1,4 @@
+import type { Projects, WorkspacePreview, WorkspaceManifest, WorkspaceCandidate, WorkspaceDiscovery } from "./workspaces";
 import { recordClioraCommit, recordClioraMerge } from "./cliora-review.svelte";
 import { normalizeError } from "./errors";
 import type {
@@ -132,7 +133,27 @@ export interface ClioraReviewRequest {
   baseline: string | null;
 }
 
+export async function saveWorkspaceFile(): Promise<string | null> {
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  return save({ title: "发布项目清单", defaultPath: "project.dev-workspace.json", filters: [{ name: "项目清单", extensions: ["json"] }] });
+}
+export async function pickDirectories(): Promise<string[]> {
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({ title: "选择项目仓库（可多选）", directory: true, multiple: true });
+  return Array.isArray(selected) ? selected : typeof selected === "string" ? [selected] : [];
+}
 export const api = {
+  workspaceList: () => invoke<Projects>("workspace_list"),
+  workspaceCreate: (name: string) => invoke<Projects>("workspace_create", { name }),
+  workspacePreview: (path: string) => invoke<WorkspacePreview>("workspace_preview", { path }),
+  workspaceAttach: (preview: WorkspacePreview, adopt: boolean) => invoke<Projects>("workspace_attach", { preview, adopt }),
+  workspaceUpdate: (manifest: WorkspaceManifest, expectedRevision: number) => invoke<Projects>("workspace_update", { manifest, expectedRevision }),
+  workspaceRefresh: (id: string) => invoke<Projects>("workspace_refresh", { id }),
+  workspacePublish: (id: string, expectedRevision: number, path: string) => invoke<Projects>("workspace_publish", { id, expectedRevision, path }),
+  workspaceFavorite: (id: string, repositoryId: string, enabled: boolean) => invoke<Projects>("workspace_favorite", { id, repositoryId, enabled }),
+  workspaceCandidates: (paths: string[], requestId: number) => invoke<WorkspaceCandidate[]>("workspace_candidates", { paths, requestId }),
+  workspaceDiscover: (root: string, requestId: number) => invoke<WorkspaceDiscovery>("workspace_discover", { root, requestId }),
+  workspaceCancelDiscovery: () => invoke<void>("workspace_cancel_discovery"),
   detectGit: () => invoke<GitInfo>("detect_git"),
   setGitExecutable: (path: string) => invoke<GitInfo>("set_git_executable", { path }),
   clearGitExecutable: () => invoke<GitInfo>("clear_git_executable"),

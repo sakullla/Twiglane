@@ -33,7 +33,7 @@
 </script>
 
 <script lang="ts">
-  import { onMount, tick, untrack } from "svelte";
+  import { onMount, tick, untrack, type Snippet } from "svelte";
   import {
     WORKTREE_FILTERS,
     authoritativeMains,
@@ -74,6 +74,7 @@
    */
   interface Props {
     anchor: HTMLElement;
+    projectBar?: Snippet;
     repos: RecentRepo[];
     currentPath: string | null;
     /** 不能切换仓库时的原因；只影响其他仓库，当前仓库不需要切换。 */
@@ -94,6 +95,7 @@
 
   let {
     anchor,
+    projectBar,
     repos,
     currentPath,
     blockedReason,
@@ -529,6 +531,7 @@
   {onClose}
 >
   {#snippet list(listId)}
+    {@render projectBar?.()}
     {#if repos.length === 0}
       <p class="branch-popover-empty">还没有最近仓库，从下面打开或克隆一个。</p>
     {:else}

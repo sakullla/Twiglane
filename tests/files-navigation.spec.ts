@@ -720,3 +720,21 @@ describe("Markdown 阅读与最近打开", () => {
     await waitFor(() => expect(document.querySelector<HTMLDivElement>(".md-scroll")?.scrollTop).toBe(50));
   });
 });
+
+it("切回 A 后上次选中的文件已移除，明确显示失效并保留历史入口", async () => {
+  let aExists = true;
+  repositoryDirectory.mockImplementation((repo: string) => Promise.resolve(dir("", repo === "C:/work/other" ? [entry("b.ts")] : aExists ? [entry("a.ts")] : [])));
+  const onFileHistory = vi.fn();
+  const props = viewProps({ onFileHistory });
+  const view = render(RepositoryFiles, { props: props as never });
+  await fireEvent.click(await screen.findByRole("treeitem", { name: /a\.ts/ }));
+  await waitFor(() => expect(repositoryFileContent).toHaveBeenCalled());
+  await view.rerender({ ...props, opened: opened([], 4, "C:/work/other") } as never);
+  await screen.findByRole("treeitem", { name: /b\.ts/ });
+  aExists = false;
+  await view.rerender(props as never);
+  expect(await screen.findByText("上次选中的路径已不存在")).toBeTruthy();
+  await fireEvent.click(screen.getByRole("button", { name: "查看文件历史" }));
+  expect(onFileHistory).toHaveBeenCalledWith("a.ts");
+  expect(screen.queryByText("选择一个文件开始浏览")).toBeNull();
+});

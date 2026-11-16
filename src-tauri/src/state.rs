@@ -11,7 +11,7 @@ use crate::error::AppError;
 use crate::model::{PanelWidths, RecentRepo, Theme, MAX_DRAFT_CHARS, MAX_RECENT};
 use crate::redact::reject_secret_draft;
 
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;
 
 /// 分叉拉取预选的方式。旧设置文件没有这一项时读成合并。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -86,6 +86,8 @@ pub struct Persisted {
     pub git_executable: Option<String>,
     pub recent: Vec<RecentRepo>,
     pub drafts: BTreeMap<String, String>,
+    #[serde(default)]
+    pub workspaces: Vec<crate::workspaces::Project>,
 }
 
 impl Default for Persisted {
@@ -101,6 +103,7 @@ impl Default for Persisted {
             git_executable: None,
             recent: Vec::new(),
             drafts: BTreeMap::new(),
+            workspaces: Vec::new(),
         }
     }
 }
@@ -208,15 +211,7 @@ impl AppStore {
                 },
             );
             if data.recent.len() > MAX_RECENT {
-                let removed: Vec<String> = data
-                    .recent
-                    .split_off(MAX_RECENT)
-                    .into_iter()
-                    .map(|repo| repo.path)
-                    .collect();
-                for path in removed {
-                    data.drafts.remove(&path);
-                }
+                data.recent.truncate(MAX_RECENT);
             }
             Ok(())
         })
@@ -225,7 +220,6 @@ impl AppStore {
     pub fn forget_recent(&self, path: &str) -> Result<Vec<RecentRepo>, AppError> {
         self.update(|data| {
             data.recent.retain(|repo| repo.path != path);
-            data.drafts.remove(path);
             Ok(())
         })?;
         Ok(self.snapshot().recent)
@@ -257,7 +251,7 @@ impl AppStore {
         })
     }
 
-    fn update(
+    pub(crate) fn update(
         &self,
         change: impl FnOnce(&mut Persisted) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
@@ -293,6 +287,21 @@ fn load_from_disk(path: &Path) -> (Persisted, bool) {
     };
     match serde_json::from_slice::<Persisted>(&bytes) {
         Ok(data) if data.version == STATE_VERSION => (data, false),
+        Ok(mut data) if data.version == 1 => {
+            // Backup the exact old bytes before the first v2 write. Failure keeps v1 untouched.
+            let backup = path.with_file_name("state.v1.backup.json");
+            if !backup.exists() && atomic_write(&backup, &bytes).is_err() {
+                return (data, true);
+            }
+            data.version = STATE_VERSION;
+            match serde_json::to_vec_pretty(&data)
+                .ok()
+                .and_then(|next| atomic_write(path, &next).ok())
+            {
+                Some(()) => (data, false),
+                None => (data, true),
+            }
+        }
         _ => (Persisted::default(), true),
     }
 }
@@ -345,7 +354,7 @@ mod tests {
         assert_eq!(store.draft("/work/a"), "修正空状态文案");
         assert_eq!(store.draft("/work/b"), "另一份说明");
         store.forget_recent("/work/a").unwrap();
-        assert_eq!(store.draft("/work/a"), "");
+        assert_eq!(store.draft("/work/a"), "修正空状态文案");
     }
 
     #[test]
@@ -457,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_cap_drops_oldest_draft() {
+    fn recent_cap_and_forget_preserve_checkout_drafts() {
         let dir = crate::test_support::TempDir::new("state-cap");
         let store = store_in(dir.path());
         for index in 0..=MAX_RECENT {
@@ -469,11 +478,53 @@ mod tests {
         }
         let snapshot = store.snapshot();
         assert_eq!(snapshot.recent.len(), MAX_RECENT);
-        assert!(!snapshot.drafts.contains_key("/repo/0"));
+        assert!(snapshot.drafts.contains_key("/repo/0"));
+        store.forget_recent("/repo/1").unwrap();
+        assert_eq!(store_in(dir.path()).draft("/repo/1"), "说明");
         assert_eq!(
             snapshot.drafts.get("/repo/1").map(String::as_str),
             Some("说明")
         );
+    }
+
+    #[test]
+    fn migrates_v1_with_exact_backup_without_losing_recent_or_drafts() {
+        let dir = crate::test_support::TempDir::new("state-v1");
+        let path = dir.path().join("state.json");
+        let mut old = serde_json::to_value(Persisted::default()).unwrap();
+        old["version"] = 1.into();
+        old.as_object_mut().unwrap().remove("workspaces");
+        old["drafts"] = serde_json::json!({"/missing/old-checkout": "保留旧说明"});
+        old["recent"] =
+            serde_json::json!([{"name":"demo", "path":"/missing/old-checkout", "openedAtMs":42}]);
+        let bytes = serde_json::to_vec(&old).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        let store = AppStore::open(path.clone());
+        assert!(store.settings_warning().is_none());
+        assert_eq!(store.snapshot().version, 2);
+        assert_eq!(store.snapshot().recent[0].opened_at_ms, 42);
+        assert_eq!(store.draft("/missing/old-checkout"), "保留旧说明");
+        assert_eq!(
+            fs::read(dir.path().join("state.v1.backup.json")).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            AppStore::open(path).draft("/missing/old-checkout"),
+            "保留旧说明"
+        );
+    }
+
+    #[test]
+    fn unknown_state_version_is_preserved_and_cannot_be_overwritten() {
+        let dir = crate::test_support::TempDir::new("state-future");
+        let path = dir.path().join("state.json");
+        let mut value = serde_json::to_value(Persisted::default()).unwrap();
+        value["version"] = 999.into();
+        let bytes = serde_json::to_vec(&value).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        let store = AppStore::open(path.clone());
+        assert!(store.set_theme(Theme::Light).is_err());
+        assert_eq!(fs::read(path).unwrap(), bytes);
     }
 
     fn object_keys(value: &Value) -> Vec<String> {

@@ -136,3 +136,37 @@ describe("文件树的计算与读取预算", () => {
     expect(rows.some((row) => row.path === "dir")).toBe(false);
   });
 });
+
+describe("跨 checkout 的文件阅读", () => {
+  it("A→B→A 保留展开目录、搜索、选择和前后导航，并重验 A 的数据", async () => {
+    repositoryDirectory.mockImplementation((repo, path) => Promise.resolve(page(path,
+      path === "" ? [entry("src"), entry(repo === "/b" ? "b.txt" : "a.txt", "file")] : [entry("src/app.ts", "file")],
+    )));
+    const store = setup();
+    await store.sync("/a");
+    await store.expand(store.nodes[0]);
+    store.select("a.txt"); store.select("src/app.ts");
+    store.setChangedOnly(true);
+    await store.sync("/b");
+    expect(store.selectedPath).toBeNull();
+    store.select("b.txt");
+    await store.sync("/a");
+    expect(store.selectedPath).toBe("src/app.ts");
+    expect(store.changedOnly).toBe(true);
+    expect(store.recent.map((v) => v.path)).toEqual(["a.txt", "src/app.ts"]);
+    expect(store.canBack).toBe(true);
+    expect(store.nodes[0].expanded).toBe(true);
+    expect(repositoryDirectory.mock.calls.filter((c) => c[0] === "/a" && c[1] === "")).toHaveLength(2);
+  });
+  it("B 的迟到结果在切回 A 后不改 A 的树或选择", async () => {
+    let finish!: (value: RepositoryDirectory) => void;
+    repositoryDirectory.mockImplementation((repo) => repo === "/b" ? new Promise((resolve) => finish = resolve) : Promise.resolve(page("", [entry("a.txt", "file")])));
+    const store = setup();
+    await store.sync("/a"); store.select("a.txt");
+    const pending = store.sync("/b");
+    await store.sync("/a");
+    finish(page("", [entry("late-b.txt", "file")])); await pending;
+    expect(store.selectedPath).toBe("a.txt");
+    expect(store.rows.map((r) => r.path)).toEqual(["a.txt"]);
+  });
+});

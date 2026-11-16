@@ -168,6 +168,8 @@ export interface DocumentSessionDeps {
   /** 当前仓库根目录；会话按它区分条目，切仓库后旧位置不会被套用。 */
   repository: () => string | null;
   limit?: number;
+  /** File workbench sessions retain the reading budget separately for each checkout. */
+  perRepository?: boolean;
 }
 
 /**
@@ -178,6 +180,7 @@ export function createDocumentSession(deps: DocumentSessionDeps) {
   const limit = Math.max(1, deps.limit ?? DOCUMENT_SESSION_LIMIT);
   let entries = $state<Record<string, DocumentReading>>({});
   let order: string[] = [];
+  const repositories = new Map<string, string | null>();
 
   function keyOf(source: DocumentSourceKey): string {
     return documentSessionKey(deps.repository(), source);
@@ -190,8 +193,8 @@ export function createDocumentSession(deps: DocumentSessionDeps) {
   }
 
   /** 合并写入：只更新给了的字段，其余保持原值；版本为 null 时不覆盖已知版本。 */
-  function remember(source: DocumentSourceKey, patch: Partial<DocumentReading>): void {
-    const key = keyOf(source);
+  function remember(source: DocumentSourceKey, patch: Partial<DocumentReading>, repository = deps.repository()): void {
+    const key = documentSessionKey(repository, source);
     const previous = entries[key] ?? emptyReading();
     const next: DocumentReading = {
       mode: patch.mode ?? previous.mode,
@@ -201,11 +204,16 @@ export function createDocumentSession(deps: DocumentSessionDeps) {
     };
     const rest = order.filter((item) => item !== key);
     rest.push(key);
-    // 有界缓存：只保留最近用过的条目，旧位置不再无限增长。
-    while (rest.length > limit) {
-      const dropped = rest.shift();
+    repositories.set(key, repository);
+    // A large project must not evict A just because the user opens one file in 60 other checkouts.
+    // File workbenches keep a bounded file budget per checkout; standalone readers keep the total budget.
+    const owned = deps.perRepository ? rest.filter((item) => repositories.get(item) === repository) : [...rest];
+    while (owned.length > limit) {
+      const dropped = owned.shift();
       if (dropped !== undefined) {
         delete entries[dropped];
+        repositories.delete(dropped);
+        rest.splice(rest.indexOf(dropped), 1);
       }
     }
     order = rest;
@@ -219,11 +227,13 @@ export function createDocumentSession(deps: DocumentSessionDeps) {
     delete next[key];
     entries = next;
     order = order.filter((item) => item !== key);
+    repositories.delete(key);
   }
 
   function clear(): void {
     entries = {};
     order = [];
+    repositories.clear();
   }
 
   return {

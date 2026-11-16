@@ -323,9 +323,10 @@
   let documentNotice = $state<string | null>(null);
   /** 上一次恢复用的签名：同一个签名不重复恢复。 */
   let restoreSignature = "";
+  let sourceRestoreSerial = 0;
   /** 本次打开已经落地的显式行定位序号：同一序号再回到源码时应当按会话位置恢复。 */
   let appliedLineSerial: number | null = null;
-  const documentSession: DocumentSession = createDocumentSession({ repository: () => opened.summary.path });
+  const documentSession: DocumentSession = createDocumentSession({ repository: () => opened.summary.path, perRepository: true });
   let documentSource = $derived<DocumentSource>({
     revision: "worktree",
     path: path ?? "",
@@ -466,18 +467,20 @@
   let lastPath: string | null = null;
   $effect(() => {
     const target = path;
-    if (target === lastPath) return;
-    lastPath = target;
+    const identity = JSON.stringify([opened.summary.path, target]);
+    if (identity === lastPath) return;
+    lastPath = identity;
     untrack(() => {
       // 换文件即取消旧搜索：迟到的匹配属于上一个文件，不能显示、也不能跳行。
       searchSerial += 1;
       searching = false;
+      // Commit the captured prior checkout position before clearing the visible content.
+      commitQueuedSourceSave();
       resetContent();
       documentNotice = null;
-      // 排队中的位置属于上一个文件：按排队时的身份落定，不能写进新文件的会话条目。
-      commitQueuedSourceSave();
       // 上一个文件的位置恢复签名与已落地的行定位都不再适用于这个文件。
       restoreSignature = "";
+      sourceRestoreSerial += 1;
       appliedLineSerial = null;
       // Markdown 沿用同身份上一次的阅读模式；其它文件只有源码一种显示方式。
       documentMode = target && isMarkdownPath(target)
@@ -543,7 +546,7 @@
   }
 
   function saveSourcePosition(): void {
-    if (!isMarkdown || !path || !content || content.kind !== "text") return;
+    if (!path || !content || content.kind !== "text") return;
     const line = pageOffset + Math.floor(scrollTop / ROW_HEIGHT) + 1;
     documentSession.remember(documentSource, {
       mode: "source",
@@ -555,7 +558,7 @@
   function queueSaveSourcePosition(): void {
     if (saveTimer !== undefined) clearTimeout(saveTimer);
     saveTimer = undefined;
-    if (!path || !isMarkdown || !content || content.kind !== "text") return;
+    if (!path || !content || content.kind !== "text") return;
     // 排队时把目标和位置一起快照：定时器触发时可能已经换了文件或版本，
     // 读实时状态会把上一次滚动写成新文件的源码位置、清掉它的预览行。
     const repository = opened.summary.path;
@@ -564,9 +567,8 @@
     const line = pageOffset + Math.floor(scrollTop / ROW_HEIGHT) + 1;
     const top = scrollTop;
     const commit = () => {
-      // 仓库换了就不再写：会话按「仓库 + 版本 + 路径」分条目，旧仓库的位置不能落到新仓库。
-      if (opened.summary.path !== repository) return;
-      documentSession.remember(source, { mode: "source", source: { line, top }, version });
+      // The captured checkout identity remains authoritative even after the UI switches repositories.
+      documentSession.remember(source, { mode: "source", source: { line, top }, version }, repository);
     };
     queuedSourceCommit = commit;
     saveTimer = setTimeout(() => {
@@ -604,6 +606,8 @@
    * 分页起点没变时按保存的精确偏移写回，避免只按行居中把位置挪走。
    */
   async function restoreSourcePosition(target: string): Promise<void> {
+    const serial = ++sourceRestoreSerial;
+    const repository = opened.summary.path;
     const stored = documentSession.recall({ revision: "worktree", path: target }, content?.version ?? null);
     if (!stored) return;
     const line = Math.max(1, Math.trunc(stored.reading.source.line));
@@ -611,10 +615,11 @@
     const top = Math.max(0, Math.trunc(stored.reading.source.top));
     if (line - 1 < pageOffset || line - 1 >= pageOffset + lines.length) {
       await read(target, line - 1, false, generation);
-      if (path !== target) return;
+      if (path !== target || opened.summary.path !== repository || serial !== sourceRestoreSerial) return;
       // 等这一页真的挂进 DOM 再滚：否则 scrollTop 会被旧高度夹住。
       await tick();
     }
+    if (path !== target || opened.summary.path !== repository || serial !== sourceRestoreSerial) return;
     if (alignedSourceTop(line, top)) {
       scrollTop = top;
       if (scroller) scroller.scrollTop = top;
@@ -641,7 +646,7 @@
     const mode = documentMode;
     const explicit = line;
     const serial = lineSerial;
-    if (!loaded || loaded.kind !== "text" || !target || !isMarkdownPath(target)) return;
+    if (!loaded || loaded.kind !== "text" || !target) return;
     const signature = JSON.stringify([opened.summary.path, target, mode, loaded.version ?? "", serial, explicit]);
     if (mode !== "source" || signature === restoreSignature) return;
     untrack(() => {
@@ -675,7 +680,7 @@
   function onCodeScroll(event: Event): void {
     const target = event.currentTarget as HTMLElement;
     scrollTop = target.scrollTop;
-    if (isMarkdown) queueSaveSourcePosition();
+    queueSaveSourcePosition();
     if (!hasMore || loading || loadingMore || error || viewport <= 0) return;
     if (scrollTop + viewport >= (lines.length - PREFETCH_ROWS) * ROW_HEIGHT) void loadMore();
   }
@@ -1507,7 +1512,7 @@
   {:else if missingPath}
     <div class="file-state" role="status">
       <span class="empty-icon err"><Icon name="trash" size={22} /></span>
-      <strong>文件已删除</strong>
+      <strong>{deletedChange ? "文件已删除" : "上次选中的路径已不存在"}</strong>
       <p><code>{missingPath}</code> 已不在工作区里，可以从改动或历史查看旧版本。</p>
       <div class="file-state-actions">
         {#if onOpenDiff && deletedChange && deletedChange.unstaged !== "none"}

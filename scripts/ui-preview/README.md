@@ -79,3 +79,13 @@ node scripts/run-ui-verification.mjs
 
 截图脚本对「这一版界面本来就没有入口」的视图不再抛错中断：它把这件事实写进 manifest 的 `skipped` 与
 `report.json`，并在终端打印跳过原因。**没有采集到的对照图不会用旧图或合成图补齐。**
+
+## 多仓库项目场景
+
+`?projects=1` 提供 60 个持久成员、同名不同路径、长名称、收藏及外机位置；`?projects=missing` 保留来源失效的最后快照。与 recent30 独立。`--projects` 只跑本任务的项目场景与项目截图（深浅主题、1280/900），不会改原有完整 gallery。
+
+```bash
+node scripts/run-ui-verification.mjs --projects --out docs/verification/multi-repository-project-workspaces-ui
+```
+
+该入口核对真实浏览器页面错误、水平溢出、A→B→A 的草稿和选中上下文，并使用既有 CDP 截图工具。Git、文件选择和共享清单 IO 由 synthetic API 提供；不能据此宣称两端已安装应用或原生 Git 验收通过。

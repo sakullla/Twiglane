@@ -1,3 +1,4 @@
+import { checkoutKey } from "./workspaces";
 import type { RecentRepo, RepoHead, WorktreeItem } from "./types";
 
 /** 搜「worktree」或「工作区」时列出所有附属工作区。 */
@@ -101,7 +102,7 @@ export function rowWindow(offsets: readonly number[], top: number, height: numbe
 }
 /** 路径身份：Windows 上大小写与分隔符都不参与判定，末尾分隔符也忽略。 */
 export function normalizeRepoPath(path: string): string {
-  return path.trim().replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return checkoutKey(path);
 }
 
 /** worktree 总览的筛选条件；都是真实 Git 状态，不需要额外的运行状态。 */

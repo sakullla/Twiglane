@@ -118,6 +118,9 @@
   import RecoveryActions from "./lib/components/RecoveryActions.svelte";
   import RepoDialogs from "./lib/components/RepoDialogs.svelte";
   import { scopedSelectAll } from "./lib/select-scope";
+  import ProjectManager from "./lib/components/ProjectManager.svelte";
+  import { checkoutKey, projectMemberForCheckout, projectRepos, type Projects } from "./lib/workspaces";
+  import { CheckoutContexts } from "./lib/checkout-context";
   import RepoSwitcher from "./lib/components/RepoSwitcher.svelte";
   import ScopeModal from "./lib/components/ScopeModal.svelte";
   import SettingsModal from "./lib/components/SettingsModal.svelte";
@@ -160,7 +163,52 @@
   });
 
   let widths = $state<PanelWidths>({ sidebar: 256, files: 360 });
+  let opened = $state.raw<OpenedRepository | null>(null);
   let recent = $state<RecentRepo[]>([]);
+  let projects = $state<Projects>({ hostId: "", projects: [] });
+  let selectedProjectId = $state<string | null>(null);
+  let projectManagerOpen = $state(false);
+  let projectFailure = $state<string | null>(null);
+  let projectsSerial = 0;
+  const selectedProject = $derived(projects.projects.find((p) => p.manifest.workspaceId === selectedProjectId) ?? null);
+  const switcherRepos = $derived(projectRepos(selectedProject, projects.hostId, recent));
+  let projectHeads = $state.raw<RepoHead[]>([]);
+  const currentProjectRepository = $derived(selectedProject && opened ? projectMemberForCheckout(selectedProject, projects.hostId, opened.summary.path, projectHeads) : null);
+  const currentProjectMember = $derived(currentProjectRepository !== null);
+  $effect(() => {
+    const current = opened?.summary.path;
+    const project = selectedProject;
+    const host = projects.hostId;
+    projectHeads = [];
+    if (!current || !project) return;
+    // Bounded on-disk HEAD metadata only; Git status stays in the existing Scheduler overview.
+    const paths = [...new Set([current, ...projectRepos(project, host, []).map((repo) => repo.path)])];
+    let alive = true;
+    void api.repoHeads(paths).then((heads) => { if (alive) projectHeads = heads ?? []; }).catch(() => {});
+    return () => { alive = false; };
+  });
+  async function loadProjects(refresh = false) {
+    const serial = ++projectsSerial;
+    try {
+      let next = await api.workspaceList();
+      if (refresh) for (const project of next.projects.filter((p) => p.sourcePath)) {
+        if (serial !== projectsSerial) return;
+        next = await api.workspaceRefresh(project.manifest.workspaceId);
+      }
+      if (serial !== projectsSerial) return;
+      projects = next;
+      projectFailure = null;
+    } catch (error) { if (serial === projectsSerial) projectFailure = normalizeError(error).message; }
+  }
+  function acceptProjects(next: Projects) { projectsSerial += 1; projects = next; projectFailure = null; }
+  function selectProject(id: string | null) { selectedProjectId = id; if (id) void loadProjects(true); }
+  function manageProjects() { closeSwitcher(); projectManagerOpen = true; void loadProjects(); }
+  interface ReadingContext {
+    view: WorkspaceView; selected: FileSelection | null; selectedSet: FileSelection[]; query: string;
+    historyPath: string | null; historyQuery: string; taskRequest: TaskRequest | null;
+    taskSelectedPath: string | null; taskScope: { worktree: string; baselineOid: string; headOid: string } | null; draft: string;
+  }
+  const readingContexts = new CheckoutContexts<ReadingContext>();
   let git = $state<GitInfo | null>(null);
   /** 关闭了常驻的 Git 诊断通知条；起始页的空状态入口不受影响（R13 仍要能诊断）。 */
   let gitDismissed = $state(false);
@@ -169,7 +217,6 @@
   let bannerTone = $state<"error" | "warn">("error");
   let banner = $state<string | null>(null);
   let live = $state("正在准备 Twiglane");
-  let opened = $state.raw<OpenedRepository | null>(null);
   let badgeNames = $derived.by(() => {
     const names = recent.map((item) => item.name);
     const current = opened?.summary.name;
@@ -1238,6 +1285,11 @@
      * 所以先记下「窗口还开着」，等状态改完再由同一个关闭收尾交回焦点，否则焦点留在 body。
      */
     const closingClone = cloneOpen;
+    if (opened) readingContexts.save(opened.summary.path, {
+      view: workspaceView, selected, selectedSet, query: fileQuery, historyPath, historyQuery,
+      taskRequest, taskSelectedPath, taskScope, draft,
+    });
+    const context = readingContexts.restore(next.summary.path);
     // 独立打开别的仓库会清掉 cliora 来源展示；同一 worktree 的重新打开保留来源。
     forgetClioraSourceUnless(next.summary.path);
     // 编辑会话按仓库归属：别的仓库里干净的会话结束。用户发起的换仓库入口都先过草稿关卡；
@@ -1250,17 +1302,20 @@
     repositoryEpoch += 1;
     if (draftTimer) clearTimeout(draftTimer);
     drafts.load(next.summary.path, next.draft);
-    draft = next.draft;
+    draft = context?.draft ?? next.draft;
+    if (draft !== next.draft) drafts.edit(draft);
     opened = next;
     setAbbrevLength(next.abbrevLength);
     // 换仓库清空审阅进度；同一个 worktree 重新打开保留。进度只在本会话内有效。
     beginReviewProgress(next.summary.path);
     reviewNote = null;
-    selectedSet = [];
+    selectedSet = context?.selectedSet ?? [];
     degraded = next.watchDegraded;
     const groups = groupFiles(next.snapshot.files);
     const first = groups.unstaged[0] ?? groups.staged[0] ?? groups.conflicted[0];
-    selected = retainSelection(next.snapshot.files, selected) ?? (first ? { path: first.path, side: first.side } : null);
+    const restoredSelection = retainSelection(next.snapshot.files, context?.selected ?? null);
+    const lostSelection = context?.view === "changes" && context.selected && !restoredSelection ? context.selected.path : null;
+    selected = restoredSelection ?? (first ? { path: first.path, side: first.side } : null);
     diff = null;
     diffError = null;
     commitError = null;
@@ -1268,18 +1323,20 @@
     pushFailure = null;
     stopRefreshIndicator();
     phaseNote = null;
-    workspaceView = "changes";
-    historyPath = null;
-    historyQuery = "";
+    workspaceView = context?.view ?? "changes";
+    fileQuery = context?.query ?? "";
+    historyPath = context?.historyPath ?? null;
+    historyQuery = context?.historyQuery ?? "";
+    if (workspaceView === "history") historyPanel ??= import("./lib/components/HistoryPanel.svelte");
     filesNav = null;
     // 换仓库清掉任务起点、导航与已解析范围：旧仓库的起点对新仓库不成立。
-    taskRequest = null;
+    taskRequest = context?.taskRequest ?? null;
     taskRequestNonce += 1;
     taskSummary = null;
     taskNav = null;
     taskHunk = null;
-    taskScope = null;
-    taskSelectedPath = null;
+    taskScope = context?.taskScope ?? null;
+    taskSelectedPath = context?.taskSelectedPath ?? null;
     taskReviewNav = null;
     taskReviewNote = null;
     taskModal = null;
@@ -1303,6 +1360,7 @@
     void loadSelectedDiff();
     void reverifyReviewed();
     if (closingClone) closeRepoDialogs();
+    if (lostSelection) notice(`上次选中的 ${lostSelection} 已不在当前改动列表中，已保留仓库入口和提交草稿。`);
     if (keptDrafts.length > 0) {
       notice(`另有 ${keptDrafts.length} 个文件的未保存草稿留在原仓库，回到那个仓库后可以保存或放弃。`);
     }
@@ -2982,11 +3040,7 @@
 
   /** 两个仓库路径是否指向同一处：只抹平分隔符与尾部斜杠，Windows 下不区分大小写。 */
   function samePath(a: string, b: string): boolean {
-    const norm = (value: string) => {
-      const flat = value.replace(/\\/g, "/").replace(/\/+$/, "");
-      return /^[a-z]:\//i.test(flat) ? flat.toLowerCase() : flat;
-    };
-    return norm(a) === norm(b);
+    return checkoutKey(a) === checkoutKey(b);
   }
 
   async function openRecent(path: string) {
@@ -3009,6 +3063,8 @@
     stopRefreshIndicator();
     live = "正在读取仓库状态";
     try {
+      if ((await flushDraft(drafts.path)) === false) return;
+      if (serial !== readSerial) return;
       await api.cancelReads();
       if (serial !== readSerial) return;
       readPhase = "reading";
@@ -3890,6 +3946,7 @@
   }
 
   onMount(() => {
+    void loadProjects(true);
     let disposed = false;
     const stopDrag: (() => void)[] = [];
     const registerDrag = async <T,>(name: string, handler: (payload: T) => void) => {
@@ -3955,6 +4012,7 @@
       stopFocus = await listenEvent("window-focused", () => {
         windowFocused = true;
         void refresh();
+        void loadProjects(true);
       });
       stopBlur = await listenEvent("window-blurred", () => {
         windowFocused = false;
@@ -4093,10 +4151,23 @@
     onClioraReturn={returnToCliora}
   />
 
+  <div class="project-context-bar" data-project-context>
+    <label>项目 <select aria-label="业务项目" value={selectedProjectId ?? ""} onchange={(e) => selectProject(e.currentTarget.value || null)}>
+      <option value="">独立仓库 / 最近使用</option>
+      {#each projects.projects as project (project.manifest.workspaceId)}<option value={project.manifest.workspaceId}>{project.manifest.name} · {project.manifest.repositories.length} 个仓库 · {project.manifest.workspaceId.slice(0, 8)}</option>{/each}
+    </select></label>
+    <button class="btn sm" onclick={manageProjects} disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : "管理项目名单、共享清单和本机目录关联"}>管理项目</button>
+    {#if opened}<span class="project-context-path" title={opened.summary.path}>{selectedProject ? currentProjectMember ? selectedProject.manifest.name : "当前仓库不在此项目中" : "独立打开"} / {currentProjectRepository?.name ?? opened.summary.name} · {opened.summary.path}</span>{/if}
+    {#if projectFailure || selectedProject?.error}<span class="project-context-error" role="status">名单快照待处理：{projectFailure ?? selectedProject?.error}</span>{/if}
+  </div>
+  {#snippet projectSwitcherNote()}<div class="project-switcher-note"><span>{selectedProject ? `${selectedProject.manifest.name} · ${selectedProject.manifest.repositories.length} 个仓库` : "最近使用 · 独立仓库"}</span><button class="btn sm" onclick={manageProjects}>管理项目</button></div>{/snippet}
+  {#if projectManagerOpen}<ProjectManager data={projects} selectedId={selectedProjectId} {nextId} onData={acceptProjects} onSelect={selectProject} onClose={() => projectManagerOpen = false} />{/if}
   {#if switcher?.kind === "repo"}
+    {#key `${selectedProjectId ?? "recent"}:${selectedProject?.manifest.revision ?? 0}`}
     <RepoSwitcher
       anchor={switcher.anchor}
-      repos={recent}
+      repos={switcherRepos}
+      projectBar={projectSwitcherNote}
       currentPath={opened?.summary.path ?? null}
       blockedReason={switchBlocked(commandState) ? switchBlockedReason(commandState) : null}
       actionReason={writeLocked ? switchBlockedReason(commandState) : null}
@@ -4112,6 +4183,7 @@
       onCommand={runFromSwitcher}
       onClose={closeSwitcher}
     />
+    {/key}
   {:else if switcher?.kind === "branch" && opened}
     <BranchSwitcher
       anchor={switcher.anchor}
@@ -4383,6 +4455,7 @@
                   onReadDocument={openDocument}
                   fullFile={diffFullFile}
                   onFullFile={setFullFile}
+                  readingKey={`${opened.summary.path}:changes`}
                   asText={diffAsText !== null && diffAsText === asTextKey(selected)}
                   onViewAsText={setDiffAsText}
                   fileNav={changesNav}

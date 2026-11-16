@@ -329,3 +329,11 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
   .diff-toolbar .diff-side { display: none; }
   .diff-toolbar .file-copy-btn { display: none; }
 }
+
+/* Business project organization is independent of the selected Git checkout. */
+.project-context-bar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); padding: var(--space-6) var(--space-12); flex: none; min-width: 0; background: var(--surface-2); font-size: var(--text-sm); }
+.project-context-bar label { display: flex; align-items: center; gap: var(--space-6); min-width: 0; }
+.project-context-bar select { max-width: 320px; min-width: 180px; color: var(--fg); background: var(--surface); border: 1px solid var(--control-border); border-radius: var(--radius); padding: var(--space-4); }
+.project-context-path { flex: 1; min-width: 140px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--fg-muted); }
+.project-context-error { max-width: 100%; color: var(--danger-text); overflow-wrap: anywhere; }
+.project-switcher-note { display: flex; justify-content: space-between; align-items: center; padding: var(--space-8); gap: var(--space-8); color: var(--fg-muted); }

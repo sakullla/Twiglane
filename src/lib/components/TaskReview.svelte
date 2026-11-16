@@ -821,6 +821,7 @@
             />
           {:else}
             <DiffView
+              readingKey={`${opened.summary.path}:task:${request?.baseline ?? ""}`}
               selection={selected}
               {diff}
               error={diffError}

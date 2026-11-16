@@ -1832,6 +1832,8 @@ describe("应用外壳", () => {
     await waitFor(() => expect(document.activeElement).toBe(search));
     // 筛选按钮参与 Tab 序（键盘可切筛选），行内按钮仍然不进。
     await fireEvent.keyDown(search, { key: "Tab" });
+    expect(document.activeElement).toBe(within(popover).getByRole("button", { name: "管理项目" }));
+    await fireEvent.keyDown(document.activeElement!, { key: "Tab" });
     expect(document.activeElement).toBe(within(popover).getByRole("button", { name: "全部" }));
     for (let step = 0; step < 5; step += 1) await fireEvent.keyDown(document.activeElement!, { key: "Tab" });
     expect(document.activeElement, "行内按钮不进 Tab 序").toBe(add);
@@ -4231,4 +4233,60 @@ describe("文件操作接线（T3）", () => {
       expect(mocks.repositoryDirectory.mock.calls.every((call) => call[3] >= 5)).toBe(true);
     }
   });
+});
+
+describe("项目内跨仓阅读与提交草稿", () => {
+  it("A→B→A 恢复选择、视图与提交草稿，并在取消旧读取后才打开目标", async () => {
+    const other = "C:/work/other";
+    useRecent([{ name: "demo", path: repoPath, openedAtMs: 1 }, { name: "other", path: other, openedAtMs: 2 }]);
+    mocks.openRepository.mockImplementation(async (path: string) => ({
+      summary: { name: path === repoPath ? "demo" : "other", path }, generation: 4, snapshot,
+      draft: "", watchDegraded: false,
+    }));
+    render(App); await openRepo();
+    const list = document.querySelector<HTMLElement>(".file-list")!;
+    const target = list.querySelector<HTMLElement>('.file-row[title="src/app.css"]')!;
+    await fireEvent.click(target);
+    const input = document.querySelector<HTMLTextAreaElement>(".composer textarea") ?? screen.getByRole("textbox", { name: /提交说明/ });
+    await fireEvent.input(input, { target: { value: "只属于 A 的提交说明" } });
+    async function switchTo(name: string, path: string) {
+      await fireEvent.click(screen.getByRole("button", { name: /当前仓库/ }));
+      const popover = await screen.findByRole("dialog", { name: "切换仓库" });
+      await fireEvent.click(within(popover).getByRole("option", { name: new RegExp(name) }));
+      await waitFor(() => expect(mocks.openRepository).toHaveBeenLastCalledWith(path, expect.any(Number)));
+      await waitFor(() => expect(screen.getByRole("button", { name: `当前仓库 ${name}` })).toBeTruthy());
+      await waitFor(() => expect(document.querySelector(".file-list")).toBeTruthy());
+    }
+    await switchTo("other", other);
+    expect((document.querySelector(".composer textarea") as HTMLTextAreaElement)?.value ?? "").not.toContain("只属于 A");
+    expect(mocks.saveDraft).toHaveBeenCalledWith(repoPath, "只属于 A 的提交说明");
+    await switchTo("demo", repoPath);
+    await waitFor(() => expect((document.querySelector(".composer textarea") as HTMLTextAreaElement)?.value).toBe("只属于 A 的提交说明"));
+    expect(document.querySelector('.file-row[aria-selected="true"]')?.getAttribute("title")).toBe("src/app.css");
+    expect(mocks.cancelReads.mock.invocationCallOrder.at(-1)).toBeLessThan(mocks.openRepository.mock.invocationCallOrder.at(-1)!);
+  });
+});
+
+it("重新打开时旧改动选择失效会说明原因，提交草稿仍保留", async () => {
+  const other = "C:/work/other";
+  useRecent([{ name: "demo", path: repoPath, openedAtMs: 1 }, { name: "other", path: other, openedAtMs: 2 }]);
+  let aRemoved = false;
+  mocks.openRepository.mockImplementation(async (path: string) => ({
+    summary: { name: path === repoPath ? "demo" : "other", path }, generation: 4,
+    snapshot: path === repoPath && aRemoved ? { ...snapshot, files: [] } : snapshot,
+    draft: "", watchDegraded: false,
+  }));
+  render(App); await openRepo();
+  await fireEvent.input(screen.getByRole("textbox", { name: "提交说明草稿" }), { target: { value: "保留说明" } });
+  async function switchTo(name: string) {
+    await fireEvent.click(screen.getByRole("button", { name: /当前仓库/ }));
+    const menu = await screen.findByRole("dialog", { name: "切换仓库" });
+    await fireEvent.click(within(menu).getByRole("option", { name: new RegExp(name) }));
+    await waitFor(() => expect(screen.getByRole("button", { name: `当前仓库 ${name}` })).toBeTruthy());
+  }
+  await switchTo("other");
+  aRemoved = true;
+  await switchTo("demo");
+  await waitFor(() => expect(document.body.textContent).toContain("上次选中的 src/App.svelte 已不在当前改动列表中"));
+  expect((screen.getByRole("textbox", { name: "提交说明草稿" }) as HTMLTextAreaElement).value).toBe("保留说明");
 });

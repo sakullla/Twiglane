@@ -21,6 +21,7 @@ const readArg = (name, fallback) => {
   const index = args.indexOf(name);
   return index >= 0 && args[index + 1] ? args[index + 1] : fallback;
 };
+const projectsOnly = args.includes("--projects");
 const base = readArg("--base", "http://127.0.0.1:1430");
 const outDir = path.resolve(readArg("--out", "docs/verification/ui-ux-markdown-2026-11-08/after"));
 // 与已提交证据一致：图片在 after/，manifest 在验证目录根部，file 字段相对 manifest。
@@ -470,8 +471,8 @@ async function main() {
 
   const manifest = {
     // 当前工作流标识：runner 会核对它，不能沿用上一批证据的 ID。
-    workflow: "2026-11-13-modern-ui-ux-redesign",
-    task: "T6",
+    workflow: projectsOnly ? "2026-11-16-multi-repository-project-workspaces" : "2026-11-13-modern-ui-ux-redesign",
+    task: projectsOnly ? "T2" : "T6",
     capturedAt: new Date().toISOString(),
     environment: {
       browser: "",
@@ -483,10 +484,11 @@ async function main() {
     page: {
       url: base,
       build: "npm run preview:ui（scripts/ui-preview/vite.config.mjs，mock API，127.0.0.1:1430）",
-      data: "scripts/ui-preview/mock-api.ts + mock-files.ts + samples.ts（与 01 基线同一组数据）",
+      data: projectsOnly ? "?projects=1/missing：60 个项目成员、长名称、同名路径、收藏和外机/缺源快照" : "scripts/ui-preview/mock-api.ts + mock-files.ts + samples.ts（与 01 基线同一组数据）",
       worker: "预览页的 Markdown 解析在工作线程里进行；失败态由 ?remote= / ?commit= / ?doc= / ?search= 参数进入",
     },
     groups: {
+      ...(projectsOnly ? { projects: "项目总览、项目管理、来源失效快照；各按两主题两尺寸采集" } : {}),
       baseline: "start/changes/history/task/worktree/composer/merge/settings：与 01 基线同数据、同主题、同尺寸",
       markdown: "files-markdown/files-markdown-toc：Markdown 排版预览与目录工具行，单独成组，不参与优化前后对照",
       failure:
@@ -528,6 +530,19 @@ async function main() {
 
         const skipped = manifest.skipped;
         const shot = async (view, group = "baseline", state = "normal") => {
+          if (projectsOnly) {
+            await waitFor(cdp, sessionId, `document.documentElement.dataset.theme === ${JSON.stringify(theme)}`, "实际主题已应用");
+            await evaluate(cdp, sessionId, `(async () => {
+              const finite = document.getAnimations().filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity);
+              await Promise.all(finite.map((animation) => animation.finished.catch(() => {})));
+              await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+              return true;
+            })()`);
+          }
+          const paint = await evaluate(cdp, sessionId, `({ theme:document.documentElement.dataset.theme, surface:getComputedStyle(document.documentElement).getPropertyValue('--surface').trim(), modalOpacity:document.querySelector('.modal-card') ? getComputedStyle(document.querySelector('.modal-card')).opacity : null, backdropOpacity:document.querySelector('.modal-backdrop') ? getComputedStyle(document.querySelector('.modal-backdrop')).opacity : null })`);
+          if (projectsOnly && (paint.theme !== theme || (paint.modalOpacity !== null && paint.modalOpacity !== "1") || (paint.backdropOpacity !== null && paint.backdropOpacity !== "1"))) throw new Error(`${view}: paint not ready ${JSON.stringify(paint)}`);
+          const overflow = await evaluate(cdp, sessionId, "Math.max(0, document.documentElement.scrollWidth - innerWidth)");
+          if (projectsOnly && overflow > 1) throw new Error(`${view}: horizontal overflow ${overflow}px`);
           const image = await cdp.send("Page.captureScreenshot", { format: "png" }, sessionId);
           const buffer = Buffer.from(image.data, "base64");
           const file = `${theme}-${size.label}-${view}.png`;
@@ -541,12 +556,41 @@ async function main() {
             // 只写 state 文字时分组无法逐条校验。
             group,
             state,
+            ...(projectsOnly ? { paint, horizontalOverflow: overflow } : {}),
             bytes: buffer.length,
             sha256: crypto.createHash("sha256").update(buffer).digest("hex"),
           });
           const errors = [...consoleErrors(cdp, sessionId), ...runtimeExceptions(cdp, sessionId)];
+          if (projectsOnly && errors.length) throw new Error(`${view}: ${JSON.stringify(errors)}`);
           console.log("captured", file, `group=${group}`, errors.length > 0 ? `控制台错误 ${errors.length} 条` : "");
         };
+
+        if (projectsOnly) {
+          await cdp.send("Page.navigate", { url: base + "/?projects=1" }, sessionId);
+          await waitFor(cdp, sessionId, "document.querySelector('[aria-label=业务项目]')?.options.length === 2", "项目名单");
+          await evaluate(cdp, sessionId, "const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[1].value; select.dispatchEvent(new Event('change', { bubbles: true }));");
+          await waitFor(cdp, sessionId, "Boolean(document.querySelector('.welcome-recent button'))", "项目起始页仓库入口");
+          await evaluate(cdp, sessionId, click('.welcome-recent button'));
+          await waitFor(cdp, sessionId, "Boolean(document.querySelector('.file-list'))", "仓库打开");
+          await pause(500);
+          await evaluate(cdp, sessionId, click('[aria-label^="当前仓库"]'));
+          await waitFor(cdp, sessionId, "Boolean(document.querySelector('[data-worktree-state=unknown]'))", "项目总览读取");
+          await pause(300);
+          await shot("project-overview", "projects", "60 仓成员源，收藏优先、未知/缺失状态和 worktree 分组");
+          await evaluate(cdp, sessionId, pressEscape);
+          await evaluate(cdp, sessionId, click('[data-project-context] button'));
+          await waitFor(cdp, sessionId, "Boolean(document.querySelector('[data-workspace-manager]'))", "项目管理");
+          await shot("project-manager", "projects", "共享文件、60 仓名单、批量纳入与目录修复入口");
+          await evaluate(cdp, sessionId, pressEscape);
+          await cdp.send("Page.navigate", { url: base + "/?projects=missing" }, sessionId);
+          await waitFor(cdp, sessionId, "document.querySelector('[aria-label=业务项目]')?.options.length === 2", "来源失效项目名单");
+          await evaluate(cdp, sessionId, "const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[1].value; select.dispatchEvent(new Event('change', { bubbles: true }));");
+          await evaluate(cdp, sessionId, click('[data-project-context] button'));
+          await waitFor(cdp, sessionId, "Boolean(document.querySelector('[data-workspace-manager]'))", "失效快照管理");
+          await shot("project-source-missing", "projects", "来源失效仍保留最后快照，禁止旧名单覆盖，提供重新预览/刷新");
+          await cdp.send("Target.closeTarget", { targetId });
+          continue;
+        }
 
         await shot("start", "baseline", "起始页");
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rememberScroll } from "../checkout-context";
   import { fileTone } from "../file-kind";
   import { FILTER_EXTRA_LIMIT, FILE_ROW_HEIGHT, rowIndex, type ChangeDecorations, type FileSelectionMode, type FileTreeRow, type NameDirection } from "../files.svelte";
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
@@ -17,6 +18,7 @@
    * 行上不渲染选择框；多选仍用 Ctrl/Shift 与高亮，数量按点中的行。
    */
   interface Props {
+    readingKey?: string;
     rows: FileTreeRow[];
     selectedPath: string | null;
     loading: boolean;
@@ -93,6 +95,7 @@
 
   let {
     rows,
+    readingKey = "",
     selectedPath,
     loading,
     failure,
@@ -761,6 +764,7 @@
 {/if}
 
 <div
+  use:rememberScroll={readingKey ? `${readingKey}:tree` : null}
   class="file-tree"
   role="tree"
   aria-label="仓库文件"

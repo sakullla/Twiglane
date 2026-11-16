@@ -136,3 +136,29 @@ describe("打开模式与位置夹取", () => {
     expect(clampSourceLine(Number.NaN, 1, 10)).toBeNull();
   });
 });
+
+it("排队位置按捕获的 checkout 保存，切仓后不落入新仓库", () => {
+  let repository = "/a";
+  const session = createDocumentSession({ repository: () => repository });
+  const source = { revision: "worktree", path: "src/app.ts" };
+  const captured = repository;
+  repository = "/b";
+  session.remember(source, { mode: "source", source: { line: 20, top: 380 } }, captured);
+  expect(session.recall(source)).toBeNull();
+  repository = "/a";
+  expect(session.recall(source)?.reading.source).toEqual({ line: 20, top: 380 });
+});
+
+it("60 个 checkout 的文件位置分别限额，其他仓库不会淘汰 A", () => {
+  let repository = "/a";
+  const session = createDocumentSession({ repository: () => repository, limit: 2, perRepository: true });
+  const source = { revision: "worktree", path: "src/app.ts" };
+  session.remember(source, { mode: "source", source: { line: 20, top: 380 } });
+  for (let index = 0; index < 60; index += 1) {
+    repository = `/checkout-${index}`;
+    for (let file = 0; file < 3; file += 1) session.remember({ revision: "worktree", path: `file-${file}.ts` }, { mode: "source" });
+    expect(session.recall({ revision: "worktree", path: "file-0.ts" })).toBeNull();
+  }
+  repository = "/a";
+  expect(session.recall(source)?.reading.source.top).toBe(380);
+});

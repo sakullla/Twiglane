@@ -4741,6 +4741,7 @@ name = "twiglane"
 version = "0.3.23"
 dependencies = [
  "base64 0.22.1",
+ "dirs",
  "dunce",
  "flate2",
  "imagesize",
@@ -4765,7 +4766,9 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "tempfile",
  "tokio",
+ "uuid",
  "windows 0.62.2",
  "windows-core 0.62.2",
  "windows-sys 0.61.2",

@@ -3184,3 +3184,30 @@ describe("历史里的 cliora 任务范围", () => {
     expect(document.querySelector(".commit-files-head .count")?.textContent).toBe("10");
   });
 });
+
+describe("checkout 历史阅读连续性", () => {
+  it("A→B→A 恢复查询、提交选择和列表位置，不把 A 的选择套到 B", async () => {
+    const aCommits = Array.from({ length: 100 }, (_, index) => commit(index));
+    const bCommits = Array.from({ length: 100 }, (_, index) => commit(index + 200));
+    historyPage.mockImplementation(async (repo: string, query: string) => ({ generation: 3, query, offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: repo === "/repo" ? aCommits : bCommits }));
+    const aProps = { ...panelProps(), searchQuery: "scope-a" };
+    const view = render(HistoryPanel, { props: aProps });
+    await screen.findByRole("option", { name: /commit-0\b/ });
+    const list = document.querySelector<HTMLElement>(".history-list")!;
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 520 });
+    list.scrollTop = 1300; await fireEvent.scroll(list);
+    const target = await screen.findByRole("option", { name: /commit-25\b/ });
+    await fireEvent.click(target);
+    await waitFor(() => expect(target.getAttribute("aria-selected")).toBe("true"));
+    const other = { ...opened, summary: { name: "other", path: "/other" } };
+    await view.rerender({ ...panelProps(), opened: other, searchQuery: "" });
+    await screen.findByRole("option", { name: /commit-200\b/ });
+    expect((screen.getByLabelText("搜索说明或提交哈希") as HTMLInputElement).value).toBe("");
+    expect(document.querySelector('.history-list [aria-selected="true"]')?.textContent).toContain("commit-200");
+    await view.rerender(aProps);
+    await waitFor(() => expect(historyPage).toHaveBeenLastCalledWith("/repo", "scope-a", 0, 3, 1));
+    await waitFor(() => expect(document.querySelector('.history-list [aria-selected="true"]')?.textContent).toContain("commit-25"));
+    expect((screen.getByLabelText("搜索说明或提交哈希") as HTMLInputElement).value).toBe("scope-a");
+    expect(list.scrollTop).toBe(1300);
+  });
+});

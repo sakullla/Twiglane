@@ -5,6 +5,7 @@
   import { HUNK_LAST, changeRunIndexes, hunkCaption, hunkJump, hunkRowIndexes, lineSelectionScope, splitColumnsFit, toSideRows, visibleDiffLines, whitespaceOnlyHunks, type HunkNavReport, type ViewLine, type WhitespaceFilter } from "../diff";
   import { diffPrefs, setHideWhitespaceOnly, toggleHideWhitespaceOnly, toggleShowWhitespace } from "../diff-prefs.svelte";
   import type { IconName } from "../icons";
+  import { rememberScroll } from "../checkout-context";
   import { trackCodeScroll } from "../codeScroll.svelte";
   import { codeContentSize, codeRuler, rulerPadding, scrollByRows, visibleRange } from "../layout";
   import type { DiffHunk, DiffLineSelection, DiffResponse, FileSelection, PreviewSources } from "../types";
@@ -22,6 +23,7 @@
   import Popover from "./Popover.svelte";
 
   interface Props {
+    readingKey?: string;
     onGeneration?: (generation: number) => void;
     selection: FileSelection | null;
     diff: DiffResponse | null;
@@ -106,6 +108,7 @@
   let {
     onGeneration,
     selection,
+    readingKey = "",
     diff,
     error,
     loading,
@@ -164,7 +167,7 @@
   let hbar = $state<HTMLDivElement | null>(null);
   let trackWidth = $state(0);
   let trackView = $state(0);
-  let selectionKey = $derived(selection ? `${selection.side}:${selection.path}` : "");
+  let selectionKey = $derived(selection ? `${readingKey || diff?.preview?.repository || ""}:${selection.side}:${selection.path}` : "");
   let currentDiff = $derived(
     selection && diff?.path === selection.path && diff.staged === (selection.side === "staged") ? diff : null,
   );
@@ -1604,6 +1607,7 @@
       tabindex="0"
       aria-label="差异文本"
       bind:this={scroller}
+      use:rememberScroll={readingKey ? selectionKey : null}
       onclick={onDiffClick}
       onkeydown={(event) => {
         if (event.key === "Escape" && pickMode && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {

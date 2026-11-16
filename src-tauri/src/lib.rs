@@ -10,6 +10,7 @@ mod state;
 mod terminal;
 mod update;
 mod watch;
+mod workspaces;
 
 pub use measure::mark_process_start;
 
@@ -79,6 +80,7 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|error| error.to_string())?;
             std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+            app.manage(Arc::new(workspaces::Discovery::default()));
             let store = AppStore::open(dir.join("state.json"));
             let backend = Arc::new(Backend::new(
                 store,
@@ -105,6 +107,17 @@ pub fn run() {
             set_git_executable,
             clear_git_executable,
             get_settings,
+            workspace_list,
+            workspace_create,
+            workspace_preview,
+            workspace_attach,
+            workspace_update,
+            workspace_refresh,
+            workspace_publish,
+            workspace_favorite,
+            workspace_candidates,
+            workspace_discover,
+            workspace_cancel_discovery,
             add_repository,
             create_repository,
             open_repository,
@@ -2829,4 +2842,79 @@ two
         assert_eq!(fs::read(plain.join("keep.txt")).unwrap(), b"same");
         backend.watches.stop();
     }
+}
+
+async fn workspace_io<T: Send + 'static>(work: impl FnOnce() -> Result<T, AppError> + Send + 'static) -> Result<T, AppError> {
+    tauri::async_runtime::spawn_blocking(work).await.map_err(|_| AppError::new("workspace", "项目读取已中断"))?
+}
+#[tauri::command]
+async fn workspace_list(state: State<'_, Arc<Backend>>) -> Result<workspaces::Projects, AppError> {
+    let backend = Arc::clone(state.inner());
+    workspace_io(move || workspaces::list(&backend.store)).await
+}
+#[tauri::command]
+async fn workspace_create(state: State<'_, Arc<Backend>>, name: String) -> Result<workspaces::Projects, AppError> {
+    let backend = Arc::clone(state.inner());
+    workspace_io(move || workspaces::create(&backend.store, &name)).await
+}
+#[tauri::command]
+async fn workspace_preview(state: State<'_, Arc<Backend>>, path: String) -> Result<workspaces::Preview, AppError> {
+    let backend = Arc::clone(state.inner());
+    workspace_io(move || workspaces::preview(&backend.store, &path)).await
+}
+#[tauri::command]
+async fn workspace_attach(state: State<'_, Arc<Backend>>, preview: workspaces::Preview, adopt: bool) -> Result<workspaces::Projects, AppError> {
+    let backend = Arc::clone(state.inner());
+    workspace_io(move || workspaces::attach(&backend.store, preview, adopt)).await
+}
+#[tauri::command(rename_all = "camelCase")]
+async fn workspace_update(state: State<'_, Arc<Backend>>, manifest: workspaces::Manifest, expected_revision: u64) -> Result<workspaces::Projects, AppError> {
+    let backend = Arc::clone(state.inner());
+    workspace_io(move || workspaces::update(&backend.store, manifest, expected_revision)).await
+}
+#[tauri::command]
+async fn workspace_refresh(state: State<'_, Arc<Backend>>, id: String) -> Result<workspaces::Projects, AppError> {
+    let backend = Arc::clone(state.inner());
+    workspace_io(move || workspaces::refresh(&backend.store, &id)).await
+}
+#[tauri::command(rename_all = "camelCase")]
+async fn workspace_publish(state: State<'_, Arc<Backend>>, id: String, expected_revision: u64, path: String) -> Result<workspaces::Projects, AppError> {
+    let backend = Arc::clone(state.inner());
+    workspace_io(move || workspaces::publish(&backend.store, &id, expected_revision, &path)).await
+}
+#[tauri::command(rename_all = "camelCase")]
+async fn workspace_favorite(state: State<'_, Arc<Backend>>, id: String, repository_id: String, enabled: bool) -> Result<workspaces::Projects, AppError> {
+    let backend = Arc::clone(state.inner());
+    workspace_io(move || workspaces::favorite(&backend.store, &id, &repository_id, enabled)).await
+}
+#[tauri::command(rename_all = "camelCase")]
+async fn workspace_candidates(state: State<'_, Arc<Backend>>, paths: Vec<String>, request_id: u64) -> Result<Vec<workspaces::Candidate>, AppError> {
+    workspaces::candidates(state.inner(), paths, request_id).await
+}
+#[tauri::command(rename_all = "camelCase")]
+async fn workspace_discover(state: State<'_, Arc<Backend>>, discovery: State<'_, Arc<workspaces::Discovery>>, root: String, request_id: u64) -> Result<workspaces::DiscoveryResult, AppError> {
+    use std::sync::atomic::Ordering;
+    let discovery = Arc::clone(discovery.inner());
+    // One discovery at a time; a second call must not reset an active caller's cancel token.
+    static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if RUNNING.swap(true, Ordering::SeqCst) { return Err(AppError::new("workspace_busy", "仓库发现正在进行，请先取消或等待")); }
+    struct Guard;
+    impl Drop for Guard { fn drop(&mut self) { RUNNING.store(false, Ordering::SeqCst); } }
+    let _guard = Guard;
+    discovery.0.store(false, Ordering::SeqCst);
+    let scan = Arc::clone(&discovery);
+    let (paths, issues, partial) = workspace_io(move || workspaces::discover_paths(&root, &scan.0)).await?;
+    let cancelled = discovery.0.load(Ordering::SeqCst);
+    let mut candidates = issues;
+    if !cancelled {
+        for path in paths {
+            if discovery.0.load(Ordering::SeqCst) { break; }
+            candidates.extend(workspaces::candidates(state.inner(), vec![path], request_id.wrapping_add(candidates.len() as u64 * 4)).await?);
+        }
+    }
+    Ok(workspaces::DiscoveryResult { candidates, partial, cancelled: discovery.0.load(Ordering::SeqCst) })
+}
+#[tauri::command]
+fn workspace_cancel_discovery(discovery: State<'_, Arc<workspaces::Discovery>>) {
+    discovery.0.store(true, std::sync::atomic::Ordering::SeqCst);
 }

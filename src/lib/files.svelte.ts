@@ -554,7 +554,28 @@ export function createFilesStore(deps: FilesStoreDeps) {
   let visits = $state<{ path: string; line: number | null }[]>([]);
   let cursor = $state(-1);
 
+  // Checkout reading state is independent of the recent list and Git generations.
+  // Store snapshots only after cancelling this store's outstanding read ownership.
+  interface ReadingState {
+    nodes: FileNode[]; selectedPath: string | null; selectedPaths: ReadonlySet<string>;
+    query: string; includeIgnored: boolean; changedOnly: boolean; changedCollapsed: ReadonlySet<string>;
+    pathQuery: string; contentQuery: string; scopeKind: RepositorySearchScope["kind"]; searchIgnored: boolean;
+    visits: { path: string; line: number | null }[]; cursor: number; nameDirection: NameDirection;
+  }
+  const readings = new Map<string, ReadingState>();
+  function saveReading(): void {
+    if (!repo) return;
+    const copy = $state.snapshot(nodes);
+    const settled = (list: FileNode[]) => { for (const node of list) { node.loading = false; if (node.children) settled(node.children); } };
+    settled(copy);
+    readings.set(repo, {
+      nodes: copy, selectedPath, selectedPaths: new Set(selectedPaths), query,
+      includeIgnored, changedOnly, changedCollapsed: new Set(changedCollapsed), pathQuery,
+      contentQuery, scopeKind, searchIgnored, visits: $state.snapshot(visits), cursor, nameDirection,
+    });
+  }
   function reset(next: string | null): void {
+    saveReading();
     refreshSerial += 1;
     repo = next;
     nodes = [];
@@ -572,6 +593,30 @@ export function createFilesStore(deps: FilesStoreDeps) {
     lineTarget = null;
     visits = [];
     cursor = -1;
+    includeIgnored = false;
+    scopeKind = "repository";
+    searchIgnored = false;
+    const saved = next ? readings.get(next) : undefined;
+    if (saved) {
+      nodes = saved.nodes;
+      selectedPath = saved.selectedPath;
+      selectedPaths = saved.selectedPaths;
+      query = saved.query;
+      includeIgnored = saved.includeIgnored;
+      changedOnly = saved.changedOnly;
+      changedCollapsed = saved.changedCollapsed;
+      pathQuery = saved.pathQuery;
+      contentQuery = saved.contentQuery;
+      scopeKind = saved.scopeKind;
+      searchIgnored = saved.searchIgnored;
+      visits = saved.visits;
+      cursor = saved.cursor;
+      nameDirection = saved.nameDirection;
+      // Cached tree is useful navigation, but cannot certify the newly opened Git generation.
+      loaded = true;
+      verifiedGeneration = -1;
+      revision += 1;
+    }
   }
 
   /** 切仓库或清空视图时撤下全部搜索状态：旧仓库的结果一律不留在界面上。 */
@@ -1280,10 +1325,12 @@ export function createFilesStore(deps: FilesStoreDeps) {
   async function sync(next: string | null): Promise<void> {
     if (next !== repo) {
       reset(next);
-      verifiedGeneration = deps.generation();
+      if (!loaded) verifiedGeneration = deps.generation();
     }
     if (!next || !deps.active()) return;
-    if (!loaded && !loading) {
+    if (loaded && verifiedGeneration !== deps.generation()) {
+      await revalidate();
+    } else if (!loaded && !loading) {
       const done = await loadDirectory("", null);
       if (done && deps.active()) verifiedGeneration = deps.generation();
     }

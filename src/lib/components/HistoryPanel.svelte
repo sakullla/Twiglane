@@ -761,7 +761,9 @@
   let seenTaskNonce = 0;
   $effect(() => {
     const range = taskRange;
+    const repo = repoPath;
     untrack(() => {
+      syncReading(repo);
       if (!range) {
         seenTaskNonce = 0;
         taskFocused = false;
@@ -893,33 +895,63 @@
     return null;
   }
 
+  interface HistoryReading {
+    query: string; author: string; pathFilter: string; sinceDay: string; untilDay: string; scope: string;
+    activeQuery: string; activeAuthor: string; activePath: string; activeSince: string; activeUntil: string; activeScope: string;
+    commits: HistoryCommit[]; selectedOids: string[]; anchorOid: string | null; parentChoice: string | null;
+    manualPath: string | null; multiFocus: string | null; scrollTop: number; fileScroll: number;
+    viewMode: "single" | "multi"; fileFilter: string; lastReadSignature: string | null; lastSearchSeed: string;
+    page: typeof page; taskFocused: boolean; seenTaskNonce: number;
+  }
+  const readings = new Map<string, HistoryReading>();
+  let loadedRepo: string | null = null;
+  let restoreCount = 0;
+  function syncReading(repo: string) {
+    if (loadedRepo === repo) return;
+    if (loadedRepo) readings.set(loadedRepo, {
+      query, author, pathFilter, sinceDay, untilDay, scope,
+      activeQuery, activeAuthor, activePath, activeSince, activeUntil, activeScope,
+      commits, selectedOids, anchorOid, parentChoice, manualPath, multiFocus,
+      scrollTop, fileScroll, viewMode, fileFilter, lastReadSignature, lastSearchSeed, page, taskFocused, seenTaskNonce,
+    });
+    loadedRepo = repo;
+    const saved = readings.get(repo);
+    query = saved?.query ?? ""; author = saved?.author ?? ""; pathFilter = saved?.pathFilter ?? "";
+    sinceDay = saved?.sinceDay ?? ""; untilDay = saved?.untilDay ?? ""; scope = saved?.scope ?? "current";
+    activeQuery = saved?.activeQuery ?? ""; activeAuthor = saved?.activeAuthor ?? ""; activePath = saved?.activePath ?? "";
+    activeSince = saved?.activeSince ?? ""; activeUntil = saved?.activeUntil ?? ""; activeScope = saved?.activeScope ?? "current";
+    commits = saved?.commits ?? []; selectedOids = saved?.selectedOids ?? []; anchorOid = saved?.anchorOid ?? null;
+    parentChoice = saved?.parentChoice ?? null; manualPath = saved?.manualPath ?? null; multiFocus = saved?.multiFocus ?? null;
+    scrollTop = saved?.scrollTop ?? 0; fileScroll = saved?.fileScroll ?? 0; viewMode = saved?.viewMode ?? "single";
+    fileFilter = saved?.fileFilter ?? ""; lastReadSignature = saved?.lastReadSignature ?? null;
+    lastSearchSeed = saved?.lastSearchSeed ?? ""; page = saved?.page ?? null;
+    restoreCount = saved?.commits.length ?? 0;
+    detail = null; detailError = null; commitDiff = null; diffError = null;
+    multiFiles = []; multiDiff = null; multiError = null; multiDiffError = null;
+    taskFocused = saved?.taskFocused ?? false;
+    seenTaskNonce = saved?.seenTaskNonce ?? 0;
+    loadSerial += 1;
+    if (list) list.scrollTop = scrollTop;
+    if (fileListEl) fileListEl.scrollTop = fileScroll;
+  }
+  // Save even if the panel is hidden when the checkout changes; stale reads retain their own repo guards.
+  $effect(() => { const repo = repoPath; untrack(() => syncReading(repo)); });
   $effect(() => {
     const seed = searchQuery;
-    if (seed === lastSearchSeed) return;
-    lastSearchSeed = seed;
-    query = seed;
-    activeQuery = seed;
+    const repo = repoPath;
+    untrack(() => {
+      syncReading(repo);
+      if (seed === lastSearchSeed) return;
+      lastSearchSeed = seed;
+      query = seed;
+      activeQuery = seed;
+    });
   });
 
-  let loadedRepo: string | null = null;
   $effect(() => {
     if (!active) return;
     const repo = repoPath;
-    // 选择只属于产生它的仓库；先清空，不能等新列表返回后才换掉旧 oid。
-    untrack(() => {
-      if (loadedRepo === repo) return;
-      loadedRepo = repo;
-      selectedOids = [];
-      commits = [];
-      page = null;
-      detail = null;
-      taskFocused = Boolean(taskRange);
-      detailError = null;
-      parentChoice = null;
-      manualPath = null;
-      multiFocus = null;
-      anchorOid = null;
-    });
+    untrack(() => syncReading(repo));
     const generation = readGeneration;
     const relative = filePath;
     const q = activeQuery;
@@ -957,13 +989,20 @@
           anchorOid = null;
           return;
         }
-        const result = await pageReads.run(async () => relative
-          ? (filters
-            ? api.fileHistory(repo, relative, 0, generation, nextId(), filters)
-            : api.fileHistory(repo, relative, 0, generation, nextId()))
-          : (filters
-            ? api.historyPage(repo, q, 0, generation, nextId(), filters)
-            : api.historyPage(repo, q, 0, generation, nextId())));
+        const targetCount = untrack(() => restoreCount);
+        const result = await pageReads.run(async () => {
+          const readPage = (offset: number) => relative
+            ? (filters ? api.fileHistory(repo, relative, offset, generation, nextId(), filters) : api.fileHistory(repo, relative, offset, generation, nextId()))
+            : (filters ? api.historyPage(repo, q, offset, generation, nextId(), filters) : api.historyPage(repo, q, offset, generation, nextId()));
+          const first = await readPage(0);
+          let cursor = first;
+          while (first.commits.length < targetCount && cursor.hasMore && cursor.commits.length > 0) {
+            if (cancelled || serial !== loadSerial || opened.summary.path !== repo) return first;
+            cursor = await readPage(first.commits.length);
+            first.commits.push(...cursor.commits);
+          }
+          return { ...first, hasMore: cursor.hasMore };
+        });
         if (cancelled || serial !== loadSerial || opened.summary.path !== repo) return;
         // 只有读取条件真的变了才回到顶部；从改动切回历史属于同一次浏览，滚动位置保留（R3）。
         if (signature !== lastReadSignature) {
@@ -973,6 +1012,7 @@
         } else if (list && list.scrollTop !== scrollTop) {
           list.scrollTop = scrollTop;
         }
+        restoreCount = 0;
         commits = result.commits;
         page = {
           generation: result.generation,
@@ -2373,6 +2413,7 @@
               </div>
             {:else}
               <DiffView {onGeneration}
+                readingKey={`${repoPath}:history:${selectedOid ?? "multi"}`}
                 selection={unionActive ? { path: unionActive.path, side: "unstaged" } : null}
                 diff={multiDiff && multiDiff.path === unionActive?.path ? multiDiff : null}
                 error={null}
@@ -2645,6 +2686,7 @@
               />
             {:else}
               <DiffView {onGeneration}
+                readingKey={`${repoPath}:history:${selectedOid ?? "multi"}`}
                 selection={diffSelection}
                 diff={commitDiff}
                 error={diffError}

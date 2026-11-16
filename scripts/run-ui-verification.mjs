@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 
 /** 本次工作流标识：manifest 与 report 都用它，runner 不接受沿用上一批的 ID。 */
-const WORKFLOW_ID = "2026-11-13-modern-ui-ux-redesign";
+const WORKFLOW_ID = process.argv.includes("--projects") ? "2026-11-16-multi-repository-project-workspaces" : "2026-11-13-modern-ui-ux-redesign";
 const args = process.argv.slice(2);
 const has = (name) => args.includes(name);
 const readArg = (name, fallback) => {
@@ -25,7 +25,7 @@ const explicitOut = has("--out");
 const outDir = explicitOut
   ? path.resolve(readArg("--out"))
   : fs.mkdtempSync(path.join(os.tmpdir(), "twiglane-ui-verification-"));
-const only = readArg("--only", null);
+const only = readArg("--only", has("--projects") ? "项目：" : null);
 const skipShots = has("--skip-shots");
 const startedAt = new Date();
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -128,7 +128,7 @@ const report = {
   shots: { manifest: null, workflow: null, capturedAt: null, fresh: false, groups: {}, files: 0, exitCode: null },
   limits: [
     "浏览器 + mock 数据：不代表真实 Git 行为、桌面 WebView、安装包或其它平台。",
-    "mock 不注册系统 Cliora 深链协议；返回来源按「手动起点 + 回到提交区」路径验证，深链路径由 tests/cliora-integration.spec.ts 与真实 Git 脚本覆盖。",
+    has("--projects") ? "项目模式只验证项目导航、草稿和关联快照；不验证审查协议或系统深链往返。" : "mock 不注册系统 Cliora 深链协议；返回来源按「手动起点 + 回到提交区」路径验证，深链路径由 tests/cliora-integration.spec.ts 与真实 Git 脚本覆盖。",
     "截图与场景都跑在 Chrome headless，与 Tauri 窗口的标题栏/原生弹层存在差异。",
   ],
   failures,
@@ -196,7 +196,7 @@ try {
     // 先移走旧 manifest：这次运行必须自己写出新的一份，不能拿上一批的结果冒充。
     fs.rmSync(manifestPath, { force: true });
     const shots = await run(process.execPath, [
-      "scripts/ui-preview/baseline-shots.mjs",
+      ...(has("--projects") ? ["scripts/ui-preview/baseline-shots.mjs", "--projects"] : ["scripts/ui-preview/baseline-shots.mjs"]),
       "--base", base,
       "--out", path.join(outDir, "after"),
       "--manifest", manifestPath,

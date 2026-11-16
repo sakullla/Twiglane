@@ -92,6 +92,7 @@ const commits: HistoryCommit[] = Array.from({ length: 4 }, (_, index) => ({
 
 const mocks = vi.hoisted(() => ({
   getSettings: vi.fn(),
+  workspaceList: vi.fn(),
   openRepository: vi.fn(),
   addRepository: vi.fn(),
   createRepository: vi.fn(),
@@ -624,6 +625,7 @@ beforeEach(() => {
     recent: [{ name: "demo", path: repoPath, openedAtMs: 1 }],
     settingsWarning: null,
   });
+  mocks.workspaceList.mockResolvedValue({ hostId: "host", projects: [] });
   mocks.listenEvent.mockResolvedValue(() => {});
   mocks.pickDirectory.mockResolvedValue(null);
   mocks.pickFile.mockResolvedValue(null);
@@ -4239,9 +4241,11 @@ describe("项目内跨仓阅读与提交草稿", () => {
   it("A→B→A 恢复选择、视图与提交草稿，并在取消旧读取后才打开目标", async () => {
     const other = "C:/work/other";
     useRecent([{ name: "demo", path: repoPath, openedAtMs: 1 }, { name: "other", path: other, openedAtMs: 2 }]);
+    const saved = new Map<string, string>();
+    mocks.saveDraft.mockImplementation(async (path: string, message: string) => { saved.set(path, message); });
     mocks.openRepository.mockImplementation(async (path: string) => ({
       summary: { name: path === repoPath ? "demo" : "other", path }, generation: 4, snapshot,
-      draft: "", watchDegraded: false,
+      draft: saved.get(path) ?? "", watchDegraded: false,
     }));
     render(App); await openRepo();
     const list = document.querySelector<HTMLElement>(".file-list")!;
@@ -4271,10 +4275,12 @@ it("重新打开时旧改动选择失效会说明原因，提交草稿仍保留"
   const other = "C:/work/other";
   useRecent([{ name: "demo", path: repoPath, openedAtMs: 1 }, { name: "other", path: other, openedAtMs: 2 }]);
   let aRemoved = false;
+  const saved = new Map<string, string>();
+  mocks.saveDraft.mockImplementation(async (path: string, message: string) => { saved.set(path, message); });
   mocks.openRepository.mockImplementation(async (path: string) => ({
     summary: { name: path === repoPath ? "demo" : "other", path }, generation: 4,
     snapshot: path === repoPath && aRemoved ? { ...snapshot, files: [] } : snapshot,
-    draft: "", watchDegraded: false,
+    draft: saved.get(path) ?? "", watchDegraded: false,
   }));
   render(App); await openRepo();
   await fireEvent.input(screen.getByRole("textbox", { name: "提交说明草稿" }), { target: { value: "保留说明" } });
@@ -4289,4 +4295,95 @@ it("重新打开时旧改动选择失效会说明原因，提交草稿仍保留"
   await switchTo("demo");
   await waitFor(() => expect(document.body.textContent).toContain("上次选中的 src/App.svelte 已不在当前改动列表中"));
   expect((screen.getByRole("textbox", { name: "提交说明草稿" }) as HTMLTextAreaElement).value).toBe("保留说明");
+});
+
+
+it.each([0, 650])("返修：新草稿等待 %d 毫秒后忘记当前仓库并从项目重开，不被旧阅读缓存覆盖", async (delay) => {
+  const other = "C:/work/other";
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  const hostId = "11111111-1111-4111-8111-111111111111";
+  const saved = new Map<string, string>();
+  mocks.repoHeads.mockResolvedValue([]);
+  useRecent([{ name: "demo", path: repoPath, openedAtMs: 1 }, { name: "other", path: other, openedAtMs: 2 }]);
+  mocks.workspaceList.mockResolvedValue({ hostId, projects: [{ manifest: {
+    schemaVersion: 1, workspaceId: projectId, name: "项目 P", revision: 1,
+    repositories: [repoPath, other].map((path, index) => ({ id: `repo-${index}`, name: index ? "other" : "demo", locations: [{ hostId, path }] })),
+  }, sourcePath: null, digest: null, error: null, favorites: [], bindings: {} }] });
+  mocks.saveDraft.mockImplementation(async (path: string, message: string) => { saved.set(path, message); });
+  mocks.openRepository.mockImplementation(async (path: string) => ({
+    summary: { name: path === repoPath ? "demo" : "other", path }, generation: 4, snapshot,
+    draft: saved.get(path) ?? "", watchDegraded: false,
+  }));
+  mocks.forgetRecent.mockResolvedValue([{ name: "other", path: other, openedAtMs: 2 }]);
+  render(App); await openRepo();
+  async function switchTo(path: string, name: string) {
+    await fireEvent.click(screen.getByRole("button", { name: /当前仓库/ }));
+    const menu = await screen.findByRole("dialog", { name: "切换仓库" });
+    await fireEvent.click(menu.querySelector<HTMLElement>(`[data-worktree-path="${path}"]`)!);
+    await waitFor(() => expect(screen.getByRole("button", { name: `当前仓库 ${name}` })).toBeTruthy());
+  }
+  const input = () => screen.getByRole("textbox", { name: "提交说明草稿" }) as HTMLTextAreaElement;
+  await fireEvent.input(input(), { target: { value: "A-old" } });
+  await switchTo(other, "other");
+  await switchTo(repoPath, "demo");
+  await fireEvent.input(input(), { target: { value: "A-new-preserve" } });
+  if (delay) {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    expect(saved.get(repoPath)).toBe("A-new-preserve");
+  }
+  await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
+  await fireEvent.click(await screen.findByRole("button", { name: "从列表移除 demo" }));
+  await waitFor(() => expect(document.querySelector(".welcome-recent button")).toBeTruthy());
+  await fireEvent.click(document.querySelector<HTMLButtonElement>(".welcome-recent button")!);
+  await waitFor(() => expect(screen.getByRole("button", { name: "当前仓库 other" })).toBeTruthy());
+  await fireEvent.change(screen.getByRole("combobox", { name: "业务项目" }), { target: { value: projectId } });
+  await switchTo(repoPath, "demo");
+  await waitFor(() => expect(input().value).toBe("A-new-preserve"));
+  await switchTo(other, "other");
+  expect(saved.get(repoPath)).toBe("A-new-preserve");
+});
+
+it("返修：忘记前保存失败会保留当前仓库和未保存草稿，重试成功才关闭", async () => {
+  mocks.saveDraft.mockRejectedValue({ code: "state_write", message: "无法保存草稿，请重试" });
+  mocks.forgetRecent.mockResolvedValue([]);
+  render(App); await openRepo();
+  const input = () => screen.getByRole("textbox", { name: "提交说明草稿" }) as HTMLTextAreaElement;
+  await fireEvent.input(input(), { target: { value: "必须保留的未保存草稿" } });
+  async function forgetCurrent() {
+    if (!screen.queryByRole("dialog", { name: "切换仓库" })) {
+      await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
+    }
+    await fireEvent.click(await screen.findByRole("button", { name: "从列表移除 demo" }));
+  }
+  await forgetCurrent();
+  await waitFor(() => expect(document.body.textContent).toContain("无法保存草稿，请重试"));
+  expect(mocks.forgetRecent).not.toHaveBeenCalled();
+  expect(mocks.closeRepository).not.toHaveBeenCalled();
+  expect(input().value).toBe("必须保留的未保存草稿");
+  mocks.saveDraft.mockResolvedValue(undefined);
+  await forgetCurrent();
+  await waitFor(() => expect(mocks.forgetRecent).toHaveBeenCalledWith(repoPath));
+  await waitFor(() => expect(document.querySelector(".welcome")).toBeTruthy());
+});
+
+it("返修：忘记等待在途保存，再串行保存更新的文本，不把新草稿写回旧值", async () => {
+  let complete!: () => void;
+  const saved = new Map<string, string>();
+  mocks.saveDraft.mockImplementationOnce((path: string, message: string) => new Promise<void>((resolve) => {
+    complete = () => { saved.set(path, message); resolve(); };
+  })).mockImplementation(async (path: string, message: string) => { saved.set(path, message); });
+  mocks.forgetRecent.mockResolvedValue([]);
+  render(App); await openRepo();
+  const input = screen.getByRole("textbox", { name: "提交说明草稿" });
+  await fireEvent.input(input, { target: { value: "first-in-flight" } });
+  await waitFor(() => expect(mocks.saveDraft).toHaveBeenCalledTimes(1), { timeout: 1200 });
+  await fireEvent.input(input, { target: { value: "newest-before-forget" } });
+  await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
+  await fireEvent.click(await screen.findByRole("button", { name: "从列表移除 demo" }));
+  expect(mocks.saveDraft).toHaveBeenCalledTimes(1);
+  expect(mocks.forgetRecent).not.toHaveBeenCalled();
+  complete();
+  await waitFor(() => expect(mocks.forgetRecent).toHaveBeenCalledWith(repoPath));
+  expect(mocks.saveDraft).toHaveBeenLastCalledWith(repoPath, "newest-before-forget");
+  expect(saved.get(repoPath)).toBe("newest-before-forget");
 });

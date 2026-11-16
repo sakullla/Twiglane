@@ -482,7 +482,7 @@ export async function appVersion() {
   return null;
 }
 export async function pickDirectory() {
-  return "C:/Users/dev/project/new-repo";
+  return previewParams.has("projects") ? "/work/discovered" : "C:/Users/dev/project/new-repo";
 }
 export async function pickFile() {
   return previewParams.has("projects") ? "/work/shared/product.dev-workspace.json" : null;
@@ -621,7 +621,9 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   workspacePublish: (id: string, _revision: number, path: string) => { const p = projectData.projects.find((p) => p.manifest.workspaceId === id); if (p) p.sourcePath = path; return workspaceResult(); },
   workspaceFavorite: (id: string, repo: string, enabled: boolean) => { const p = projectData.projects.find((p) => p.manifest.workspaceId === id); if (p) p.favorites = enabled ? [...p.favorites, repo] : p.favorites.filter((r) => r !== repo); return workspaceResult(); },
   workspaceCandidates: (paths: string[]) => ok(previewCandidates(paths)),
-  workspaceDiscover: (_root: string) => ok({ candidates: previewCandidates(["/work/discovered/service-one", "/work/discovered/service-two"]), partial: false, cancelled: false }),
+  workspaceDiscover: (root: string) => ok({ candidates: previewCandidates(previewParams.has("projects")
+    ? Array.from({ length: 60 }, (_, index) => `${root}/${index === 48 ? "a-long-platform-directory-for-candidate-preview/" : ""}team-${index}/service-${index}`)
+    : ["/work/discovered/service-one", "/work/discovered/service-two"]), partial: false, cancelled: false }),
   workspaceCancelDiscovery: () => ok(undefined),
   detectGit: () => ok(previewGit),
   setGitExecutable: () => ok({}),

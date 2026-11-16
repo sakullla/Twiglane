@@ -265,10 +265,13 @@ describe("工作区状态", () => {
     expect(shouldPoll(true, false, true)).toBe(false);
     expect(shouldPoll(false, true, true)).toBe(false);
     const buffer = new DraftBuffer();
-    buffer.load("/a", "old");
+    buffer.load("/a");
     buffer.edit("新说明");
-    buffer.load("/b", "");
-    expect(buffer.takePending("/a")).toBeNull();
+    buffer.load("/b");
+    expect(buffer.takePending("/a")).toBe("新说明");
+    expect(buffer.peek("/a")).toBe("新说明");
+    buffer.saved("/a", "新说明");
+    expect(buffer.peek("/a")).toBeNull();
     expect(buffer.takePending("/b")).toBeNull();
   });
 
@@ -443,5 +446,31 @@ describe("代码窗口标尺", () => {
 
   it("空输入不产生标尺", () => {
     expect(codeRuler([])).toEqual([]);
+  });
+});
+
+describe("返修：未确认保存的提交草稿按 checkout 隔离", () => {
+  it("保存回执只清除对应版本，旧失败不会覆盖较新输入或其他仓库", () => {
+    const buffer = new DraftBuffer();
+    buffer.load("/a"); buffer.edit("old");
+    expect(buffer.takePending("/a")).toBe("old");
+    expect(buffer.peek("/a")).toBe("old");
+    buffer.edit("new"); buffer.saved("/a", "old");
+    expect(buffer.peek("/a")).toBe("new");
+    buffer.load("/b"); buffer.edit("B-only");
+    buffer.failed("/a", "old");
+    expect(buffer.takePending("/a")).toBe("new");
+    expect(buffer.peek("/b")).toBe("B-only");
+    buffer.saved("/a", "new");
+    expect(buffer.peek("/a")).toBeNull();
+  });
+  it("POSIX 字面反斜杠和嵌套目录的未保存草稿不会串仓", () => {
+    const buffer = new DraftBuffer();
+    const literal = String.raw`/tmp/team\service`;
+    const nested = "/tmp/team/service";
+    buffer.load(literal); buffer.edit("literal-only");
+    buffer.load(nested); buffer.edit("nested-only");
+    expect(buffer.peek(literal)).toBe("literal-only");
+    expect(buffer.peek(nested)).toBe("nested-only");
   });
 });

@@ -488,7 +488,7 @@ async function main() {
       worker: "预览页的 Markdown 解析在工作线程里进行；失败态由 ?remote= / ?commit= / ?doc= / ?search= 参数进入",
     },
     groups: {
-      ...(projectsOnly ? { projects: "项目总览、项目管理、来源失效快照；各按两主题两尺寸采集" } : {}),
+      ...(projectsOnly ? { projects: "项目总览、项目管理、候选搜索预览、来源失效快照；各按两主题两尺寸采集" } : {}),
       baseline: "start/changes/history/task/worktree/composer/merge/settings：与 01 基线同数据、同主题、同尺寸",
       markdown: "files-markdown/files-markdown-toc：Markdown 排版预览与目录工具行，单独成组，不参与优化前后对照",
       failure:
@@ -581,6 +581,13 @@ async function main() {
           await evaluate(cdp, sessionId, click('[data-project-context] button'));
           await waitFor(cdp, sessionId, "Boolean(document.querySelector('[data-workspace-manager]'))", "项目管理");
           await shot("project-manager", "projects", "共享文件、60 仓名单、批量纳入与目录修复入口");
+          await evaluate(cdp, sessionId, "[...document.querySelectorAll('[data-workspace-manager] button')].find((button) => button.textContent === '从目录发现').click()");
+          await waitFor(cdp, sessionId, "document.querySelectorAll('.candidate-results input').length === 60", "60 个发现候选");
+          await evaluate(cdp, sessionId, typeInto('[aria-label="搜索候选仓库"]', "service-48"));
+          await waitFor(cdp, sessionId, "document.querySelectorAll('.candidate-results input').length === 1", "候选搜索结果");
+          await evaluate(cdp, sessionId, click('.candidate-results input'));
+          await evaluate(cdp, sessionId, "document.querySelector('[aria-label=搜索候选仓库]').closest('section').scrollIntoView({ block: 'center' })");
+          await shot("project-candidates", "projects", "60 个发现候选名称/完整路径搜索，取消匹配项后仍保留筛选外的 59 项选择");
           await evaluate(cdp, sessionId, pressEscape);
           await cdp.send("Page.navigate", { url: base + "/?projects=missing" }, sessionId);
           await waitFor(cdp, sessionId, "document.querySelector('[aria-label=业务项目]')?.options.length === 2", "来源失效项目名单");

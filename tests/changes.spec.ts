@@ -721,8 +721,17 @@ describe("主工作台", () => {
       snapshot: { generation: 5, branch, files: [] },
     });
     await fireEvent.click(screen.getByRole("button", { name: "提交到本地" }));
-    await waitFor(() => expect(document.querySelector("[data-commit-error]")).toBeNull());
-    expect(document.querySelector("[data-commit-blocker]")?.textContent?.trim()).toBe("先暂存要提交的文件");
+    // Error is cleared when a retry starts. Wait for the native success snapshot and
+    // the settled UI instead, including the saved message, empty draft and empty index.
+    await waitFor(() => {
+      expect(mocks.commitChanges).toHaveBeenCalledTimes(2);
+      expect(mocks.commitChanges).toHaveBeenLastCalledWith(repoPath, "重做工作台外壳，补一句", 4, expect.any(Number));
+      expect(document.querySelector(".toast.ok .toast-text")?.textContent).toBe("已提交 abcdef1");
+      expect(textarea().value).toBe("");
+      expect(document.querySelectorAll(".file-list .file-row")).toHaveLength(0);
+      expect(document.querySelector("[data-commit-blocker]")?.textContent?.trim()).toBe("先暂存要提交的文件");
+    });
+    expect(document.querySelector("[data-commit-error]")).toBeNull();
     // 成功要看得见：提交区已经清空，通知条报出这次提交，而不是只有「领先」数字悄悄加一。
     expect(document.querySelector(".toast.ok .toast-text")?.textContent).toBe("已提交 abcdef1");
     expect(document.querySelector(".toast.error"), "成功时不留着上一次的失败通知").toBeNull();

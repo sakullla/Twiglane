@@ -23,6 +23,11 @@
   let preview = $state<WorkspacePreview | null>(null);
   let adopt = $state(false);
   let candidates = $state<WorkspaceCandidate[]>([]);
+  let candidateQuery = $state("");
+  const matchingCandidates = $derived(candidates.filter((candidate) => {
+    const needle = candidateQuery.trim().toLocaleLowerCase();
+    return !needle || [candidate.name, candidate.path].some((text) => text.toLocaleLowerCase().includes(needle));
+  }));
   let chosen = $state<Set<string>>(new Set());
   let repairId = $state<string | null>(null);
   let cancelRequested = $state(false);
@@ -85,6 +90,7 @@
         if (!valid.length) return;
         candidates = await api.workspaceCandidates(valid, nextId());
       }
+      candidateQuery = "";
       chosen = new Set(candidates.filter((candidate) => !candidate.error).map((candidate) => candidate.path));
     });
   }
@@ -105,6 +111,14 @@
       repairId = null;
       notice = "项目名单已保存，源码与 Git 内容未移动。";
     });
+  }
+  function selectMatching(enabled: boolean) {
+    const next = new Set(chosen);
+    for (const candidate of matchingCandidates) {
+      if (candidate.error) continue;
+      if (enabled) next.add(candidate.path); else next.delete(candidate.path);
+    }
+    chosen = next;
   }
   function toggle(path: string) {
     const next = new Set(chosen);
@@ -169,10 +183,16 @@
         {#if candidates.length}
           <section class="manifest-preview" aria-label="候选仓库">
             <h4>{repairId ? "选择一个目录替换此仓库的本机位置" : "选择要纳入的仓库"}</h4>
-            <div class="preview-members">
-              {#each candidates as candidate, index (`${candidate.path}:${index}`)}
-                <label class="candidate"><input type={repairId ? "radio" : "checkbox"} name="candidate" checked={chosen.has(candidate.path)} disabled={Boolean(candidate.error)} title={candidate.error ?? undefined} onchange={() => { if (repairId) chosen = new Set([candidate.path]); else toggle(candidate.path); }} /><span>{candidate.name}<span class="project-path">{candidate.path}</span>{#if candidate.error}<span class="project-error">{candidate.error}</span>{/if}</span></label>
-              {/each}
+            <input aria-label="搜索候选仓库" placeholder="搜索候选名称或完整路径" bind:value={candidateQuery} />
+            <p class="project-note" role="status">显示 {matchingCandidates.length} / {candidates.length} 个候选，已选 {chosen.size} 个；筛选不会改变已有选择。</p>
+            {#if !repairId}<div class="project-toolbar">
+              <button class="btn" disabled={Boolean(busy) || !matchingCandidates.some((candidate) => !candidate.error)} title={busyReason ?? (!matchingCandidates.some((candidate) => !candidate.error) ? "当前没有可选择的候选仓库。" : "仅选择当前搜索结果，保留筛选外的选择。") } onclick={() => selectMatching(true)}>全选当前结果</button>
+              <button class="btn" disabled={Boolean(busy) || !matchingCandidates.some((candidate) => chosen.has(candidate.path))} title={busyReason ?? (!matchingCandidates.some((candidate) => chosen.has(candidate.path)) ? "当前结果中没有已选候选。" : "仅清除当前搜索结果的选择，保留筛选外的选择。") } onclick={() => selectMatching(false)}>清除当前结果的选择</button>
+            </div>{/if}
+            <div class="preview-members candidate-results">
+              {#each matchingCandidates as candidate, index (`${candidate.path}:${index}`)}
+                <label class="candidate"><input type={repairId ? "radio" : "checkbox"} name="candidate" checked={chosen.has(candidate.path)} disabled={Boolean(busy) || Boolean(candidate.error)} title={busyReason ?? candidate.error ?? undefined} onchange={() => { if (repairId) chosen = new Set([candidate.path]); else toggle(candidate.path); }} /><span>{candidate.name}<span class="project-path">{candidate.path}</span>{#if candidate.error}<span class="project-error">{candidate.error}</span>{/if}</span></label>
+              {:else}<p class="project-note">没有匹配的候选，换个名称或路径；筛选外的选择仍然保留。</p>{/each}
             </div>
             <div class="project-toolbar"><button class="btn primary" disabled={Boolean(busy) || !chosen.size} title={busyReason ?? (!chosen.size ? "请先选择至少一个可读取的仓库目录。" : undefined)} onclick={add}>确认{repairId ? "重新关联" : `纳入 ${chosen.size} 个位置`}</button><button class="btn" disabled={Boolean(busy)} title={busyReason} onclick={() => { candidates = []; repairId = null; }}>取消</button></div>
           </section>
@@ -205,6 +225,7 @@
   .project-error { color: var(--danger-text); font-size: 12px; overflow-wrap: anywhere; }
   .manifest-preview { border: 1px solid var(--control-border); border-radius: 8px; padding: 12px; margin: 12px 0; }
   .preview-members { max-height: 220px; overflow: auto; margin: 10px 0; }
+  .candidate-results { max-height: min(220px, 24vh); }
   .candidate { display: flex; gap: 10px; padding: 7px 0; align-items: start; }
   .project-members { max-height: 360px; overflow: auto; margin-top: 10px; }
   .project-member { border-top: 1px solid var(--control-border); padding: 12px 0; }

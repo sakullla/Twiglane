@@ -206,7 +206,7 @@
   interface ReadingContext {
     view: WorkspaceView; selected: FileSelection | null; selectedSet: FileSelection[]; query: string;
     historyPath: string | null; historyQuery: string; taskRequest: TaskRequest | null;
-    taskSelectedPath: string | null; taskScope: { worktree: string; baselineOid: string; headOid: string } | null; draft: string;
+    taskSelectedPath: string | null; taskScope: { worktree: string; baselineOid: string; headOid: string } | null;
   }
   const readingContexts = new CheckoutContexts<ReadingContext>();
   let git = $state<GitInfo | null>(null);
@@ -1276,6 +1276,13 @@
     }
   }
 
+  function saveReadingContext() {
+    if (opened) readingContexts.save(opened.summary.path, {
+      view: workspaceView, selected, selectedSet, query: fileQuery, historyPath, historyQuery,
+      taskRequest, taskSelectedPath, taskScope,
+    });
+  }
+
   function rememberOpened(next: OpenedRepository) {
     /**
      * 克隆成功时窗口还开着，用户在看结果：外壳在这里就把窗口关掉。
@@ -1285,10 +1292,7 @@
      * 所以先记下「窗口还开着」，等状态改完再由同一个关闭收尾交回焦点，否则焦点留在 body。
      */
     const closingClone = cloneOpen;
-    if (opened) readingContexts.save(opened.summary.path, {
-      view: workspaceView, selected, selectedSet, query: fileQuery, historyPath, historyQuery,
-      taskRequest, taskSelectedPath, taskScope, draft,
-    });
+    saveReadingContext();
     const context = readingContexts.restore(next.summary.path);
     // 独立打开别的仓库会清掉 cliora 来源展示；同一 worktree 的重新打开保留来源。
     forgetClioraSourceUnless(next.summary.path);
@@ -1301,9 +1305,11 @@
     }
     repositoryEpoch += 1;
     if (draftTimer) clearTimeout(draftTimer);
-    drafts.load(next.summary.path, next.draft);
-    draft = context?.draft ?? next.draft;
-    if (draft !== next.draft) drafts.edit(draft);
+    drafts.load(next.summary.path);
+    // Reading snapshots never override a newer native draft. Only unacknowledged
+    // local edits (including an in-flight save) may overlay the native value.
+    draft = drafts.peek(next.summary.path) ?? next.draft;
+    if (drafts.peek(next.summary.path) !== null) scheduleDraftSave();
     opened = next;
     setAbbrevLength(next.abbrevLength);
     // 换仓库清空审阅进度；同一个 worktree 重新打开保留。进度只在本会话内有效。
@@ -2567,7 +2573,8 @@
         live = banner;
       }
       draft = "";
-      drafts.load(current.summary.path, "");
+      drafts.clear(current.summary.path);
+      drafts.load(current.summary.path);
       opened = { ...opened, snapshot: result.snapshot, generation: result.generation, draft: "" };
       selected = selectionAfterEdit(result.snapshot.files, selected);
       selectedSet = [];
@@ -2620,7 +2627,8 @@
       const result = await api.commitAndPush(current.summary.path, message, current.generation, nextId());
       if (opened?.summary.path !== current.summary.path) return;
       draft = "";
-      drafts.load(current.summary.path, "");
+      drafts.clear(current.summary.path);
+      drafts.load(current.summary.path);
       opened = { ...opened, snapshot: result.snapshot, generation: result.generation, draft: "" };
       selected = selectionAfterEdit(result.snapshot.files, selected);
       selectedSet = [];
@@ -3104,9 +3112,16 @@
   async function forget(path: string) {
     if (opened?.summary.path === path && !(await confirmEditorLeave("关闭并移除这个仓库"))) return;
     try {
+      if (opened?.summary.path === path) {
+        if (switchBlocked(commandState)) { notice(switchBlockedReason(commandState)); return; }
+        if ((await flushDraft(path)) === false) return;
+      }
       recent = await api.forgetRecent(path);
       if (opened?.summary.path === path) {
         await api.closeRepository();
+        saveReadingContext();
+        if (draftTimer) clearTimeout(draftTimer);
+        drafts.unload();
         repositoryEpoch += 1;
         fileEditor.retainRepository("");
         editOrigin = null;
@@ -3467,17 +3482,27 @@
     }, 400);
   }
 
-  async function flushDraft(path: string | null) {
+  // Serialize writes for the same checkout, including a debounce already in flight.
+  const draftSaves = new Map<string, Promise<void | false>>();
+  async function flushDraft(path: string | null): Promise<void | false> {
     if (!path) return;
-    const message = drafts.takePending(path);
-    if (message === null) return;
-    try {
-      await api.saveDraft(path, message);
-    } catch (error) {
-      if (drafts.peek(path) === null) drafts.edit(message);
-      showError(error);
-      return false;
-    }
+    const key = checkoutKey(path);
+    const prior = draftSaves.get(key) ?? Promise.resolve();
+    const saving = prior.then(async (): Promise<void | false> => {
+      const message = drafts.takePending(path);
+      if (message === null) return;
+      try {
+        await api.saveDraft(path, message);
+        drafts.saved(path, message);
+      } catch (error) {
+        drafts.failed(path, message);
+        showError(error);
+        return false;
+      }
+    });
+    draftSaves.set(key, saving);
+    try { return await saving; }
+    finally { if (draftSaves.get(key) === saving) draftSaves.delete(key); }
   }
 
   function onDraftInput(value: string) {

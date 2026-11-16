@@ -1194,4 +1194,58 @@ mod tests {
                 .2
         );
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn posix_literal_backslash_and_nested_paths_are_distinct_real_repositories() {
+        let fixture = crate::test_support::git_fixture("workspace-posix-backslash");
+        let backend = fixture.backend();
+        let literal = fixture.path().join(r"team\service");
+        let nested = fixture.path().join("team/service");
+        let mut paths = Vec::new();
+        for root in [&literal, &nested] {
+            fs::create_dir_all(root).unwrap();
+            git(root, &["init", "-b", "main"]);
+            fs::write(root.join("app.txt"), "base\n").unwrap();
+            git(root, &["add", "."]);
+            git(root, &["commit", "-m", "base"]);
+            paths.push(text(root).unwrap());
+        }
+        let found = candidates(&backend, paths.clone(), 800).await.unwrap();
+        assert!(found.iter().all(|candidate| candidate.error.is_none()));
+        assert_ne!(found[0].path, found[1].path);
+        assert_ne!(found[0].common_directory, found[1].common_directory);
+        let projects = create(&backend.store, "literal and nested").unwrap();
+        let mut definition = projects.projects[0].manifest.clone();
+        definition.repositories = paths
+            .iter()
+            .map(|path| ManifestRepository {
+                id: Uuid::new_v4().to_string(),
+                name: "service".into(),
+                locations: vec![ManifestLocation {
+                    host_id: projects.host_id.clone(),
+                    path: path.clone(),
+                }],
+            })
+            .collect();
+        update(&backend.store, definition, 1).unwrap();
+        backend
+            .store
+            .save_draft(&paths[0], "literal draft")
+            .unwrap();
+        backend.store.save_draft(&paths[1], "nested draft").unwrap();
+        for (path, expected) in paths.iter().zip(["literal draft", "nested draft"]) {
+            let opened = crate::git::ops::open_repository(&backend, path, 900)
+                .await
+                .unwrap();
+            assert_eq!(opened.summary.path, *path);
+            assert_eq!(opened.draft, expected);
+        }
+        assert_eq!(
+            backend.store.snapshot().workspaces[0]
+                .manifest
+                .repositories
+                .len(),
+            2
+        );
+    }
 }

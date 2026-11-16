@@ -1,0 +1,49 @@
+{
+  "format": "ui_verification_report",
+  "workflow": "2026-11-16-multi-repository-project-workspaces",
+  "createdAt": "2026-11-16T16:06:47.964Z",
+  "startedAt": "2026-11-16T16:06:47.963Z",
+  "base": "http://127.0.0.1:1430",
+  "runner": "scripts/run-ui-verification.mjs",
+  "output": {
+    "dir": "docs/verification/multi-repository-project-workspaces-ui",
+    "kind": "explicit",
+    "note": "显式 --out：写入调用者目录（归档证据）"
+  },
+  "environment": {
+    "node": "v26.13.0",
+    "platform": "darwin arm64",
+    "temp": "/var/folders/vy/lszwy3c52plgsr4_19b2pxvh0000gn/T"
+  },
+  "health": {
+    "mockApi": true,
+    "resolvedApi": "scripts/ui-preview/mock-api.ts",
+    "realApi": "src/lib/api.ts"
+  },
+  "scenarios": {
+    "total": 6,
+    "passed": 6,
+    "failed": 0,
+    "failures": [],
+    "exitCode": 0,
+    "output": "PASS  项目：发现 60 个候选后按名称和路径搜索，多选跨筛选保留  {\"initial\":60,\"candidates\":60,\"accepted\":59,\"members\":119}\nPASS  项目：保存新草稿后忘记当前仓库，经项目重新打开仍以持久值为准  \"A-new-preserve\"\nPASS  项目：60 仓持久成员、状态未知与长名称搜索  {\"members\":60,\"rendered\":1,\"overflow\":0}\nPASS  项目：A 切 B 再回 A 保留草稿与选中文件  \"项目 A 的草稿，不自动提交\"\nPASS  项目：附属 worktree 继续显示同一业务项目归属  \"北辰业务平台 · 多仓库 / demo · C:/Users/dev/project/twiglane/wt/review\"\nPASS  项目：来源失效保留快照与修复入口  {\"members\":60,\"stale\":true}\n场景自检：6/6 通过"
+  },
+  "shots": {
+    "manifest": "docs/verification/multi-repository-project-workspaces-ui/manifest.json",
+    "workflow": "2026-11-16-multi-repository-project-workspaces",
+    "capturedAt": "2026-11-16T16:07:11.132Z",
+    "fresh": true,
+    "groups": {
+      "projects": 16
+    },
+    "files": 16,
+    "exitCode": 0
+  },
+  "limits": [
+    "浏览器 + mock 数据：不代表真实 Git 行为、桌面 WebView、安装包或其它平台。",
+    "项目模式只验证项目导航、草稿和关联快照；不验证审查协议或系统深链往返。",
+    "截图与场景都跑在 Chrome headless，与 Tauri 窗口的标题栏/原生弹层存在差异。"
+  ],
+  "failures": [],
+  "status": "passed"
+}

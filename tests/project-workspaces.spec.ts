@@ -115,3 +115,60 @@ it("主检出与附属 worktree 复用项目仓库身份，子模块不按父目
   expect(projectMemberForCheckout(p, host, `${main}/module`, heads)).toBeNull();
   expect(projectMemberForCheckout(p, "foreign", "/other/linked", heads)).toBeNull();
 });
+
+
+describe("返修：POSIX 字面路径身份", () => {
+  const literal = String.raw`/tmp/team\service`;
+  const nested = "/tmp/team/service";
+  it("helper 保留 POSIX 反斜杠与大小写，仅 Windows 语法做 Windows 规范化", () => {
+    expect(checkoutKey(literal)).toBe(literal);
+    expect(checkoutKey(literal)).not.toBe(checkoutKey(nested));
+    expect(checkoutKey("/tmp/Team")).not.toBe(checkoutKey("/tmp/team"));
+    expect(checkoutKey(String.raw`C:\Work\Demo`)).toBe(checkoutKey("c:/work/demo"));
+    expect(checkoutKey(String.raw`\\Server\Share\Repo`)).toBe(checkoutKey("//server/share/repo"));
+    expect(checkoutKey(String.raw`\\?\C:\Work\Demo`)).toBe(checkoutKey("c:/work/demo"));
+    expect(checkoutKey(String.raw`\\?\UNC\Server\Share\Repo`)).toBe(checkoutKey("//server/share/repo"));
+    expect(checkoutKey("/")).toBe("/");
+  });
+  it("checkout 缓存不把字面反斜杠目录的草稿传给嵌套目录", () => {
+    const contexts = new CheckoutContexts<{ draft: string }>();
+    contexts.save(literal, { draft: "literal-only" });
+    expect(contexts.restore(nested)).toBeUndefined();
+    contexts.save(nested, { draft: "nested-only" });
+    expect(contexts.restore(literal)?.draft).toBe("literal-only");
+  });
+  it("候选去重与项目归属区分两个合法 POSIX 工作目录", () => {
+    const candidate = (path: string) => ({ path, name: "service", commonDirectory: `${path}/.git`, repositoryId: null, error: null });
+    const result = addCandidates(project(0).manifest, [candidate(literal), candidate(nested)], host);
+    expect(result.repositories).toHaveLength(2);
+    const p = { ...project(0), manifest: { ...result, repositories: [result.repositories[0]] } };
+    expect(projectMemberForCheckout(p, host, nested, [])).toBeNull();
+  });
+});
+
+it("返修：60 个发现候选可按名称和完整路径搜索，隐藏的多选仍保留", async () => {
+  const p = project(0);
+  const data: Projects = { hostId: host, projects: [p] };
+  const found = Array.from({ length: 60 }, (_, index) => ({ path: `/work/team-${index}/service-${index}`, name: `service-${index}`, commonDirectory: `/git/${index}`, repositoryId: null, error: null }));
+  mocks.discover.mockResolvedValue({ candidates: found, partial: false, cancelled: false });
+  mocks.update.mockResolvedValue(data);
+  render(ProjectManager, { data, selectedId: p.manifest.workspaceId, nextId: () => 1, onData: vi.fn(), onSelect: vi.fn(), onClose: vi.fn() });
+  await fireEvent.click(screen.getByRole("button", { name: "从目录发现" }));
+  const candidates = await screen.findByRole("region", { name: "候选仓库" });
+  const search = within(candidates).getByRole("textbox", { name: "搜索候选仓库" });
+  await fireEvent.input(search, { target: { value: "service-48" } });
+  expect(within(candidates).getAllByRole("checkbox")).toHaveLength(1);
+  await fireEvent.click(within(candidates).getByRole("checkbox"));
+  await fireEvent.input(search, { target: { value: "/work/team-59/" } });
+  expect(within(candidates).getAllByRole("checkbox")).toHaveLength(1);
+  expect((within(candidates).getByRole("checkbox") as HTMLInputElement).checked).toBe(true);
+  await fireEvent.input(search, { target: { value: "no-match" } });
+  expect(within(candidates).queryAllByRole("checkbox")).toHaveLength(0);
+  expect(within(candidates).getByText(/没有匹配的候选/)).toBeTruthy();
+  await fireEvent.input(search, { target: { value: "" } });
+  expect(within(candidates).getAllByRole("checkbox")).toHaveLength(60);
+  await fireEvent.click(within(candidates).getByRole("button", { name: "确认纳入 59 个位置" }));
+  await waitFor(() => expect(mocks.update).toHaveBeenCalled());
+  expect(mocks.update.mock.calls[0][0].repositories).toHaveLength(59);
+  expect(mocks.update.mock.calls[0][0].repositories.some((repo: { locations: { path: string }[] }) => repo.locations[0].path.includes("team-48/"))).toBe(false);
+});

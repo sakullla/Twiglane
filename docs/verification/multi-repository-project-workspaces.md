@@ -55,3 +55,33 @@ state.json v1 升级到 v2 前保留精确字节备份 `state.v1.backup.json`，
 最后两条前端失效选择回归在 1470 项全量测试之后加入；相关 189 项与类型检查已补验。完整 Rust 的 security 期望通过独立 3 项补验闭合，没有把分段通过写成“最终完整 403 项已一次通过”。最终候选的累计正式命令仍交 Delivery。
 
 人工查看最终 gallery 的固定图：`multi-repository-project-workspaces-ui/after/light-900x600-project-source-missing.png`、`multi-repository-project-workspaces-ui/after/dark-900x600-project-manager.png`，以及深浅色 1280 总览/管理代表图。最后重采报告范围文案只声明项目场景，不声称验证了审查协议或系统深链。
+
+
+## T2-A2 独立审查返修
+
+开发核验延续至 2026-11-17（Asia/Shanghai），受控回执的 UTC 时间为准。
+
+本轮基于 Twiglane `1235545e65c37e08451510f5a193aef811d51384` 返修。已存在的 build.rs / capability 最小 ACL 补丁原样保留；它们此前遗漏于固定候选，由 Owner 在本轮实际 candidate 收录时对账，不能用工作区测试代替候选文件收录。新增候选截图也需随本轮 gallery 收录，Worker 没有操作 Git index/HEAD。
+
+草稿修前反例是实际 App 路径：A 输入 old → B → A 改为 new 并等待 650ms 保存 → 忘记当前 A → recent B → 项目名单 A。单独回归明确得到 Expected `A-new-preserve` / Received `A-old`，且没有未处理的 fixture 异常，回执 `cb8942fe6e0a452938ce567a2410843d000e43be2faf5a5cf2a419e6f4dae2ca`。初次批量修前用例同时复现 POSIX helper/cache/候选去重三例及候选缺搜索；其中草稿 fixture 缺 Promise mock 的异常已先修正，不能拿该异常作为草稿根因证据。
+
+修复后阅读上下文不再存储提交草稿；持久值以 native open 返回为准，只有 DraftBuffer 中未确认保存的本地编辑可以覆盖它。保存按 checkout 串行，旧回执不能清除较新输入，失败只回到原 checkout 的待保存记录。忘记当前仓库先等待保存，失败保留仓库和草稿；文件编辑的原保存/放弃/取消关卡保持。回归包含 0ms 和 650ms 保存窗口、旧请求在途时的新输入、失败后的原弹层重试，以及离开后不得把旧缓存写回 native store。
+
+候选区现有独立名称/完整路径搜索、无匹配提示、匹配结果全选/清除及明确的总数/已选数；筛选不改变筛选外多选。60 个候选排除第 48 项后，跨名称/路径/无匹配筛选及清空搜索仍保持 59 项，确认只纳入这 59 项。候选预览图单列为 `project-candidates`，与已纳入成员搜索区分。
+
+checkoutKey 先识别原始 Windows drive/UNC/extended 语法才规范化反斜杠及大小写；POSIX 目录保留字面反斜杠及大小写。helper、CheckoutContexts、DraftBuffer、候选去重与项目归属均有反例覆盖。原生临时 Git 测试实际创建 `team\service` 与 `team/service` 两个不同目录，验证 common directory、成员、打开目标和持久草稿独立；没有改动原生 Git 行为来绕过这个反例。
+
+| A2 开发检查 | 实际结果 | 回执目录名 |
+| --- | --- | --- |
+| npm run check | 0 errors、0 warnings | `a560349cea6c1556ecb49678b9102fdee21cb30579863290a3497fc2a6fe1e76` |
+| 真实 POSIX 两目录单独回归 | 1 通过 | `87366edcebbfd2c7e76df7d1d78bdd884aa419feb0a0fd3e9b83b4222d4d74cd` |
+| 全 Rust library / main / doc | 404 / 0 / 0 通过 | `c4c621e6e214d6b9e6e5c7457f7502cbeae44e94acf7ed619fb54e69ac9af5ac` |
+| Clippy all-targets -D warnings | 通过 | `47fd3c436dba64e244ba28bd04a0b45d41cb043f7e390dc78efb4d70cc5ea2cb` |
+| npm run build | 通过 | `289df37526222e387b7f5b09d57d9db49f35b130045b9446d5d94c6c0bcfc7a2` |
+| npm test 全量 | 1481 / 1482 通过；唯一旧 changes 断言在重试开始清 error 时就检查成功 blocker，未等待 Native 成功落地，随后仅修测试等待真实成功终态 | `adb5508dc8b3d515275a784bb4c87d80e5b1cb8efc22ddfbfe33fe6125d283b7` |
+| 提交/改动直接组补验 | 116 通过；保留并加强 Native repo/消息/generation、成功 toast、草稿清空、empty-index 文件行和精确 blocker 的检查 | `c8f276b2de3566376c5ba8e70f4f9ad34492b39d513037e0769aa692360b652d` |
+| A2 浏览器完整复验 | 6 / 6 通过，16 图；Native mock 与界面均保持 A-new-preserve；60 候选过滤后仅纳入 59 项；真实主题匹配、modal/backdrop opacity=1、水平溢出 0，无页面错误 | `a1cd17cd9c18a3cc100c88afb499a39d85d9fa50bf7a9c2367a036e8c358272b` |
+
+A2 末轮检查中，产品源码保持冻结；仅修正了旧提交测试的成功终态等待，以及浏览器驱动的兄弟操作按钮/右键菜单、残留弹层关闭和按完整路径选 B，未用更长超时或产品改动绕过失败。全量前端 1481 / 1482 加上相关 116 项补验按原样记录，未写成“1482 项整批一次通过”；正式累计验证仍交 Delivery。
+
+已再次实际查看最终 `after/dark-900x600-project-candidates.png` 与 `after/light-1280x840-project-candidates.png`：候选名称、长完整路径、1 / 60 搜索结果、筛选外 59 项多选及确认操作均清楚可见，弹窗不透明且主题正确。浏览器证据仍只适用于 synthetic API，不证明双端安装应用或系统 scheme。

@@ -22,8 +22,15 @@ export interface WorkspaceCandidate { path: string; name: string; commonDirector
 export interface WorkspaceDiscovery { candidates: WorkspaceCandidate[]; cancelled: boolean; partial: boolean }
 /** POSIX is case-sensitive; drive/UNC path comparison follows the receiving Windows convention. */
 export function checkoutKey(path: string): string {
-  const flat = path.replace(/\\/g, "/").replace(/\/+$/, "");
-  return /^[a-z]:\//i.test(flat) || flat.startsWith("//") ? flat.toLocaleLowerCase() : flat;
+  // A backslash is a literal filename character in a POSIX path. Classify the
+  // original syntax before normalizing Windows separators or casing.
+  const windows = /^[a-z]:[\\/]/i.test(path) || /^(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+/.test(path);
+  if (!windows) return path.replace(/\/+$/, "") || (path.startsWith("/") ? "/" : path);
+  let flat = path.replace(/\\/g, "/");
+  if (/^\/\/\?\/unc\//i.test(flat)) flat = "//" + flat.slice(8);
+  else if (/^\/\/\?\/[a-z]:\//i.test(flat)) flat = flat.slice(4);
+  flat = flat.startsWith("//") ? "//" + flat.slice(2).replace(/\/+/g, "/") : flat.replace(/\/+/g, "/");
+  return (/^[a-z]:\/$/i.test(flat) ? flat : flat.replace(/\/+$/, "")).toLowerCase();
 }
 export function projectRepos(project: Project | null, hostId: string, recent: RecentRepo[]): RecentRepo[] {
   if (!project) return recent;

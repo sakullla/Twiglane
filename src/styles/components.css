@@ -1456,6 +1456,7 @@ label.list-row .checkbox { margin-top: 2px; }
 .switcher-filter[aria-pressed="true"] .switcher-filter-count { color: var(--accent-text); }
 .switcher-status { margin: 0 var(--space-8) var(--space-6); color: var(--fg-subtle); font-size: var(--text-xs); line-height: var(--leading-normal); }
 .switcher-status.danger { color: var(--danger-text); }
+.switcher-status.warn { color: var(--warning-text); }
 .switcher-group-row { display: flex; align-items: center; gap: var(--space-6); padding: 0 var(--space-8); color: var(--fg-subtle); font-size: var(--text-xs); }
 .switcher-group-name { display: inline-flex; align-items: center; gap: var(--space-4); flex: none; color: var(--fg-muted); font-weight: var(--weight-semibold); }
 .switcher-group-name > .icon { color: var(--accent-text); }

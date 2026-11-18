@@ -28,6 +28,17 @@ describe("项目与 checkout 的身份和持久成员", () => {
     expect(groups.every((g) => g.rows.every((r) => r.state === "unknown" && r.dirty === null && r.checkedAtMs === null))).toBe(true);
     expect(repos.filter((r) => r.name === "demo").map((r) => r.path)).toEqual(["/work/team-0/demo", "/work/team-1/demo"]);
   });
+  it("选择项目后按当前仓库 → 收藏 → 最近打开 → 名称排序，而不是名单导入顺序", () => {
+    const p = project(6);
+    p.manifest.repositories.reverse();
+    const recent = [
+      { name: "service-3", path: "/work/team-3/demo", openedAtMs: 30 },
+      { name: "service-4", path: "/work/team-4/demo", openedAtMs: 40 },
+    ];
+    p.favorites = ["repo-5"];
+    const order = projectRepos(p, host, recent, "/work/team-2/demo").map((repo) => repo.path);
+    expect(order).toEqual(["/work/team-2/demo", "/work/team-5/demo", "/work/team-4/demo", "/work/team-3/demo", "/work/team-1/demo", "/work/team-0/demo"]);
+  });
   it("外机位置不成为本机 Git 目标，独立 recent 仍可打开", () => {
     const p = project(1); p.manifest.repositories[0].locations[0].hostId = "foreign";
     expect(projectRepos(p, host, [])).toEqual([]);

@@ -110,6 +110,7 @@ const mocks = vi.hoisted(() => ({
   commitChanges: vi.fn(),
   commitAndPush: vi.fn(),
   fetchRemote: vi.fn(),
+  cancelRemote: vi.fn(),
   pullFastForward: vi.fn(),
   pushBranch: vi.fn(),
   pushToRemote: vi.fn(),
@@ -1655,6 +1656,28 @@ describe("应用外壳", () => {
     expect(reasonOf(writingState, switchId)).toBe("正在写入，稍后再试");
   });
 
+  it("断网时远程操作卡住不挡切换：弹层先说明，切换会先停下远程命令再打开目标仓库", async () => {
+    let fail!: (error: unknown) => void;
+    mocks.pullFastForward.mockImplementation(() => new Promise((_, reject) => { fail = reject; }));
+    mocks.cancelRemote.mockImplementation(async () => { fail({ code: "cancelled", generation: 4, message: "已取消远程操作。" }); });
+    useRecent([{ name: "demo", path: repoPath, openedAtMs: 1 }, { name: "other", path: "C:/work/other", openedAtMs: 2 }]);
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: /^同步/ }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: /拉取/ }));
+    await waitFor(() => expect(mocks.pullFastForward).toHaveBeenCalledTimes(1));
+    const before = mocks.openRepository.mock.calls.length;
+    await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
+    const popover = await screen.findByRole("dialog", { name: "切换仓库" });
+    expect(popover.querySelector("[data-switch-note]")?.textContent).toContain("先停止它");
+    const other = within(popover).getByRole("option", { name: /other/ });
+    expect(other.getAttribute("aria-disabled"), "远程操作只是在等网络，不挡切换").toBeNull();
+    await fireEvent.click(other);
+    await waitFor(() => expect(mocks.cancelRemote).toHaveBeenCalledWith(repoPath));
+    await waitFor(() => expect(mocks.openRepository.mock.calls.length).toBeGreaterThan(before));
+    expect(mocks.openRepository.mock.calls.at(-1)?.[0]).toBe("C:/work/other");
+  });
+
   it("差异续读期间三个入口对切换仓库的结论一致，拖入目录会说明原因而不是静默失败（R11）", async () => {
     // 续读那一次 loadDiff 挂起不结算，把外壳稳定停在 pending="diff" 上。
     let hold: ((value: DiffResponse) => void) | null = null;
@@ -1700,8 +1723,8 @@ describe("应用外壳", () => {
     const popover = await screen.findByRole("dialog", { name: "切换仓库" });
     const other = within(popover).getByRole("option", { name: /other/ });
     expect(other.getAttribute("aria-disabled"), "标题栏弹层与面板同源").toBe("true");
-    // 灰条目也要说出原因：README 承诺「就地禁用并给出原因」，所以写进条目文本和 title。
-    expect(other.textContent, "条目上带着同一个原因").toContain("正在读取，稍后再试");
+    // 灰条目也要说出原因：README 承诺「就地禁用并给出原因」——列表顶部说一次，条目 title 带着同一个原因。
+    expect(popover.querySelector("[data-switch-blocked]")?.textContent, "弹层顶部带着同一个原因").toContain("正在读取，稍后再试");
     expect(other.getAttribute("title")).toBe("正在读取，稍后再试");
     expect(within(popover).getByRole("option", { name: /demo/ }).getAttribute("aria-disabled")).toBeNull();
     await fireEvent.click(other);

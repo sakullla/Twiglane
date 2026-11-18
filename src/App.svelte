@@ -175,7 +175,7 @@
   let projectFailure = $state<string | null>(null);
   let projectsSerial = 0;
   const selectedProject = $derived(projects.projects.find((p) => p.manifest.workspaceId === selectedProjectId) ?? null);
-  const switcherRepos = $derived(projectRepos(selectedProject, projects.hostId, recent));
+  const switcherRepos = $derived(projectRepos(selectedProject, projects.hostId, recent, opened?.summary.path ?? null));
   let projectHeads = $state.raw<RepoHead[]>([]);
   const currentProjectRepository = $derived(selectedProject && opened ? projectMemberForCheckout(selectedProject, projects.hostId, opened.summary.path, projectHeads) : null);
   const currentProjectMember = $derived(currentProjectRepository !== null);
@@ -448,6 +448,11 @@
   /** 会访问远程、可以取消的同步动作。 */
   const REMOTE_PENDING = new Set(["fetch", "pull", "push", "publish", "associate"]);
   /**
+   * 切换仓库时可以让路的动作：只等网络的远程操作。
+   * 断网或远程卡住时，切换会先停下当前仓库的远程命令（本地提交不受影响），而不是把用户锁在这个仓库里。
+   */
+  const SWITCH_INTERRUPTIBLE = new Set([...REMOTE_PENDING, "commit-push"]);
+  /**
    * 同步失败的阶段与重试范围。远程未知不能与成功共用一句话；
    * 推送失败时本地提交已经落地，重试只重试推送。
    */
@@ -623,8 +628,9 @@
     // 把它算成写入会让读取期间的不可用原因失真（R11）。
     writing: pending !== null && pending !== "diff",
     reading: reading || pending === "diff",
-    // 与 openRecent 的执行 guard 同源：任何 pending（含差异续读）都不切换仓库（R11）。
-    switchingBlocked: pending !== null,
+    // 与 openRecent 的执行 guard 同源：本地写入与差异续读期间不切换仓库（R11）；
+    // 远程操作只是在等网络，切换时先停下它，不挡切换。
+    switchingBlocked: pending !== null && !SWITCH_INTERRUPTIBLE.has(pending),
     upstreamMissing,
     upstreamEditable: opened ? Boolean(opened.snapshot.branch.name) && !opened.snapshot.branch.detached && !opened.snapshot.branch.unborn : false,
     mergeAbortable,
@@ -3106,6 +3112,16 @@
     } catch (error) { showError(error); }
   }
 
+  /** 审查来源的仓库名：工作区路径最后一段，比整条路径好认。 */
+  function clioraRepoName(source: (typeof clioraReview.sources)[number]): string {
+    return source.worktreePath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || source.worktreePath;
+  }
+
+  /** 下拉里的一行：仓库名 · 项目 · 会话短号；完整路径放在提示与下方说明里。 */
+  function clioraSourceLabel(source: (typeof clioraReview.sources)[number]): string {
+    return `${clioraRepoName(source)} · ${clioraProjectLabel(source)} · 会话 ${source.sessionId.slice(0, 8)}`;
+  }
+
   function clioraProjectLabel(source: (typeof clioraReview.sources)[number]): string {
     if (!source.workspaceId) return "独立仓库";
     const project = projects.projects.find((item) => item.manifest.workspaceId === source.workspaceId);
@@ -3116,6 +3132,29 @@
   /** 两个仓库路径是否指向同一处：只抹平分隔符与尾部斜杠，Windows 下不区分大小写。 */
   function samePath(a: string, b: string): boolean {
     return checkoutKey(a) === checkoutKey(b);
+  }
+
+  /**
+   * 切换前停下当前仓库的远程操作：断网时 push/pull 可能要等到超时，不能因此不让切换。
+   * 「提交并推送」可能还在本地提交阶段，所以按间隔重发取消，直到这次动作真正结束；
+   * 本地提交本身不会被打断，推送失败的说明随旧仓库一起留下，回来后可以只重试推送。
+   */
+  async function stopRemoteForSwitch(fromPath: string): Promise<boolean> {
+    const name = pending;
+    live = "正在停止当前仓库的远程操作，然后切换";
+    syncCancelling = true;
+    const deadline = Date.now() + 15_000;
+    while (pending !== null && SWITCH_INTERRUPTIBLE.has(pending) && Date.now() < deadline) {
+      await api.cancelRemote(fromPath).catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    syncCancelling = false;
+    if (pending !== null) {
+      notice(switchBlockedReason(commandState));
+      return false;
+    }
+    notice(name === "commit-push" ? "已停止推送并切换；本地提交已保留，回到原仓库可以只重试推送。" : "已停止远程操作并切换；原仓库没有被改动。");
+    return true;
   }
 
   async function openRecent(path: string) {
@@ -3131,6 +3170,9 @@
       // 所以不能静默返回——把同一个原因说出来，各入口的结论才一致。
       notice(switchBlockedReason(commandState));
       return;
+    }
+    if (pending !== null && SWITCH_INTERRUPTIBLE.has(pending) && opened && !samePath(opened.summary.path, path)) {
+      if (!(await stopRemoteForSwitch(opened.summary.path))) return;
     }
     const serial = ++readSerial;
     reading = true;
@@ -4304,32 +4346,39 @@
       <span class="review-strip-title">Cliora 审查</span>
       {#if clioraReview.sources.length > 0}
         <label class="review-strip-select">
-          <select aria-label="选择 Cliora 审查来源" value={clioraReview.source?.reviewId ?? ""} disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : undefined} onchange={(event) => void chooseClioraReview(event.currentTarget.value)}>
-            <option value="">选择来源 / 当前独立操作</option>
+          <select aria-label="选择 Cliora 审查来源" value={clioraReview.source?.reviewId ?? ""} disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : clioraReview.source?.worktreePath} onchange={(event) => void chooseClioraReview(event.currentTarget.value)}>
+            <option value="">不使用审查来源（独立操作）</option>
             {#each clioraReview.sources as source (source.reviewId)}
-              <option value={source.reviewId}>{clioraProjectLabel(source)} · {source.worktreePath} · 会话 {source.sessionId.slice(0, 8)} · 审查 {source.reviewId.slice(0, 8)}</option>
+              <option value={source.reviewId}>{clioraSourceLabel(source)}</option>
             {/each}
           </select>
           <Icon name="chevron-down" size={12} />
         </label>
       {/if}
       {#if clioraReview.source}
-        <span class="review-strip-meta" title={clioraReview.source.repositoryId ?? "独立仓库"}>{clioraProjectLabel(clioraReview.source)} · 仓库 {clioraReview.source.repositoryId?.slice(0, 8) ?? "未关联"}</span>
+        {@const project = clioraProjectLabel(clioraReview.source)}
+        <span class="review-strip-meta" title={clioraReview.source.worktreePath}>
+          {#if clioraReview.source.workspaceId}<span class="review-strip-project"><Icon name="layers" size={11} />{project}</span>{/if}
+          <bdi class="review-strip-path">{clioraReview.source.worktreePath}</bdi>
+        </span>
       {/if}
       {#if clioraSourcesNotice}<span class="review-strip-note" role="status">{clioraSourcesNotice}</span>{/if}
       {#if clioraReview.lastReturn}<span class="review-strip-note">已保留上次返回尝试，接收结果以 Cliora 为准</span>{/if}
       <span class="spacer"></span>
       {#if clioraReview.source}
-        <button class="btn btn-ghost btn-sm" disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : undefined} onclick={() => void closeClioraReview()}>关闭此审查来源</button>
+        <button class="btn btn-ghost btn-sm" disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : "关闭后仓库、阅读记录和草稿都保留"} onclick={() => void closeClioraReview()}>关闭此审查来源</button>
       {/if}
-      {#if clioraReview.sources.length}
+      {#if clioraReview.sources.length > 1}
         <details class="review-source-manager">
           <summary title="来源仅在本次运行保留；重启后请从 Cliora 重新发起。结果只属于对应仓库。">管理审查来源（{clioraReview.sources.length}）</summary>
           <div class="review-source-pop">
             <ul aria-label="全部审查来源">
               {#each clioraReview.sources as source (source.reviewId)}
-                <li data-review-source-id={source.reviewId}>
-                  <span title={source.worktreePath}>{clioraProjectLabel(source)} · {source.worktreePath} · 会话 {source.sessionId.slice(0, 8)}</span>
+                <li data-review-source-id={source.reviewId} class:current={clioraReview.source?.reviewId === source.reviewId}>
+                  <span class="review-source-text" title={source.worktreePath}>
+                    <strong>{clioraRepoName(source)}</strong>
+                    <small>{clioraProjectLabel(source)} · 会话 {source.sessionId.slice(0, 8)}</small>
+                  </span>
                   <button class="btn btn-ghost btn-sm" disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : undefined} onclick={() => void closeClioraReview(source.reviewId)} aria-label={`关闭审查来源 ${source.reviewId.slice(0, 8)}`}>关闭来源</button>
                 </li>
               {/each}
@@ -4340,7 +4389,7 @@
       {/if}
     </div>
   {/if}
-  {#snippet projectSwitcherNote()}<div class="project-switcher-note"><span>{selectedProject ? `${selectedProject.manifest.name} · ${selectedProject.manifest.repositories.length} 个仓库` : "最近使用 · 独立仓库"}</span><button class="btn sm" onclick={manageProjects}>管理项目</button></div>{/snippet}
+  {#snippet projectSwitcherNote()}<div class="project-switcher-note"><span>{selectedProject ? `${selectedProject.manifest.name} · ${selectedProject.manifest.repositories.length} 个仓库` : "最近使用 · 独立仓库"}</span><button class="btn btn-ghost btn-sm" onclick={manageProjects}><Icon name="settings" size={13} />管理项目</button></div>{/snippet}
   {#if projectManagerOpen}<ProjectManager data={projects} selectedId={selectedProjectId} {nextId} onData={acceptProjects} onSelect={selectProject} onClose={() => projectManagerOpen = false} />{/if}
   {#if switcher?.kind === "repo"}
     {#key `${selectedProjectId ?? "recent"}:${selectedProject?.manifest.revision ?? 0}`}
@@ -4350,6 +4399,7 @@
       projectBar={projectSwitcherNote}
       currentPath={opened?.summary.path ?? null}
       blockedReason={switchBlocked(commandState) ? switchBlockedReason(commandState) : null}
+      switchNote={pending !== null && SWITCH_INTERRUPTIBLE.has(pending) ? "正在进行远程操作；切到其他仓库会先停止它，本地提交不受影响。" : null}
       actionReason={writeLocked ? switchBlockedReason(commandState) : null}
       reviews={reviewSessionSummary()}
       onSelect={(path) => {

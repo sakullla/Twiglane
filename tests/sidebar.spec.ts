@@ -70,7 +70,6 @@ describe("仓库弹层", () => {
 describe("大量最近仓库", () => {
   /** RepoSwitcher 里单行与多一行原因文字的估算高度（分组是单工作区组，没有分组头）。 */
   const ROW = 64;
-  const LINE = 16;
   const many: RecentRepo[] = Array.from({ length: 500 }, (_, index) => {
     const name = index === 300 || index === 450 ? "demo" : `repo-${index}`;
     return { name, path: `/work/group-${index}/${name}`, openedAtMs: index };
@@ -207,11 +206,10 @@ describe("大量最近仓库", () => {
     }
   });
 
-  it("阻塞解除时行高整体变化，视口顶部的行不跳", async () => {
+  it("阻塞出现或解除时行高不变，视口顶部的行不跳", async () => {
     const view = render(RepoSwitcher, { props: props({ blockedReason: "操作进行中" }) as never });
     const list = document.querySelector(".popover-list") as HTMLElement;
-    const blockedTop = ROW + (ROW + LINE) * 299;
-    list.scrollTop = blockedTop + 10;
+    list.scrollTop = ROW * 300 + 10;
     await fireEvent.scroll(list);
     await view.rerender({ blockedReason: null });
     await tick();
@@ -219,7 +217,7 @@ describe("大量最近仓库", () => {
     expect(options().some((option) => option.dataset.index === "300")).toBe(true);
     await view.rerender({ blockedReason: "又忙了" });
     await tick();
-    expect(list.scrollTop, "阻塞出现时同样钉住").toBe(blockedTop + 10);
+    expect(list.scrollTop, "阻塞出现时同样不动").toBe(ROW * 300 + 10);
   });
 
   it("重排后实测行高和估算不同，锚点按实测位置恢复；行内偏移不超过新行高", async () => {
@@ -259,12 +257,21 @@ describe("大量最近仓库", () => {
     expect(active()?.dataset.index).toBe("2");
   });
 
-  it("禁止切换时原因写在行内，行高一起算进去", () => {
+  it("禁止切换时原因只在列表顶部说一次，行不重复、行高不变", () => {
     render(RepoSwitcher, { props: props({ blockedReason: "操作进行中" }) as never });
     const row = options().find((option) => option.dataset.index === "2") as HTMLElement;
     expect(row.getAttribute("aria-disabled")).toBe("true");
-    expect(row.textContent).toContain("操作进行中");
-    expect((row.parentElement as HTMLElement).style.top).toBe(`${ROW + (ROW + LINE)}px`);
+    expect(row.getAttribute("title")).toBe("操作进行中");
+    expect(row.textContent).not.toContain("操作进行中");
+    expect(document.querySelector("[data-switch-blocked]")?.textContent).toContain("操作进行中");
+    expect((row.parentElement as HTMLElement).style.top).toBe(`${ROW * 2}px`);
+  });
+
+  it("远程操作期间可以切换，并提前说明切换会先停止它", () => {
+    render(RepoSwitcher, { props: props({ switchNote: "正在进行远程操作；切到其他仓库会先停止它" }) as never });
+    const row = options().find((option) => option.dataset.index === "2") as HTMLElement;
+    expect(row.getAttribute("aria-disabled")).toBeNull();
+    expect(document.querySelector("[data-switch-note]")?.textContent).toContain("先停止它");
   });
 });
 

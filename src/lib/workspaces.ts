@@ -32,14 +32,28 @@ export function checkoutKey(path: string): string {
   flat = flat.startsWith("//") ? "//" + flat.slice(2).replace(/\/+/g, "/") : flat.replace(/\/+/g, "/");
   return (/^[a-z]:\/$/i.test(flat) ? flat : flat.replace(/\/+$/, "")).toLowerCase();
 }
-export function projectRepos(project: Project | null, hostId: string, recent: RecentRepo[]): RecentRepo[] {
+/**
+ * 项目里的仓库顺序按「我接下来最可能打开谁」排：当前仓库 → 收藏 → 最近打开（新的在前）→ 其余按名称。
+ * 名单原始顺序只是导入顺序，对挑选没有意义；同名同时间时保持名单顺序（排序稳定）。
+ */
+export function projectRepos(project: Project | null, hostId: string, recent: RecentRepo[], currentPath: string | null = null): RecentRepo[] {
   if (!project) return recent;
-  return [...project.manifest.repositories]
-    .sort((a, b) => Number(project.favorites.includes(b.id)) - Number(project.favorites.includes(a.id)))
-    .flatMap((repo) => repo.locations.filter((l) => l.hostId === hostId).map((location) => ({
-      name: repo.name, path: location.path,
-      openedAtMs: recent.find((r) => checkoutKey(r.path) === checkoutKey(location.path))?.openedAtMs ?? 0,
-    })));
+  const opened = new Map(recent.map((r) => [checkoutKey(r.path), r.openedAtMs]));
+  const current = currentPath ? checkoutKey(currentPath) : null;
+  const rows = project.manifest.repositories.flatMap((repo) => {
+    const favorite = project.favorites.includes(repo.id);
+    return repo.locations.filter((l) => l.hostId === hostId).map((location) => ({
+      repo: { name: repo.name, path: location.path, openedAtMs: opened.get(checkoutKey(location.path)) ?? 0 },
+      favorite,
+      current: current !== null && checkoutKey(location.path) === current,
+    }));
+  });
+  rows.sort((a, b) =>
+    Number(b.current) - Number(a.current)
+    || Number(b.favorite) - Number(a.favorite)
+    || b.repo.openedAtMs - a.repo.openedAtMs
+    || a.repo.name.localeCompare(b.repo.name, undefined, { numeric: true, sensitivity: "base" }));
+  return rows.map((row) => row.repo);
 }
 export function addCandidates(manifest: WorkspaceManifest, candidates: WorkspaceCandidate[], hostId: string): WorkspaceManifest {
   const repositories = manifest.repositories.map((repo) => ({ ...repo, locations: repo.locations.map((l) => ({ ...l })) }));

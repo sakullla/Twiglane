@@ -79,6 +79,8 @@
     currentPath: string | null;
     /** 不能切换仓库时的原因；只影响其他仓库，当前仓库不需要切换。 */
     blockedReason: string | null;
+    /** 可以切换、但切换会带来附带动作时的说明（例如先停下正在等网络的远程操作）。 */
+    switchNote?: string | null;
     /** 打开、克隆、新建不可用的原因。 */
     actionReason: string | null;
     /** 当前会话已有的跨 worktree 审阅进度；没有记录的工作区不虚构完成度。 */
@@ -99,6 +101,7 @@
     repos,
     currentPath,
     blockedReason,
+    switchNote = null,
     actionReason,
     reviews = [],
     onSelect,
@@ -330,8 +333,7 @@
   function estimate(row: WorktreeListRow): number {
     if (row.kind === "group") return GROUP_ROW;
     const pathLines = sameNames.has(row.row.name) ? Math.floor(row.row.path.length / PATH_CHARS) : 0;
-    // 原因文字挤掉一整行时先按估算撑高，渲染出来再按实测修正。
-    return ROW + pathLines * EXTRA_LINE + (reasonFor(row.row) ? EXTRA_LINE : 0);
+    return ROW + pathLines * EXTRA_LINE;
   }
 
   function heightOf(row: WorktreeListRow): number {
@@ -550,6 +552,11 @@
           </button>
         {/each}
       </div>
+      {#if blockedReason}
+        <p class="switcher-status warn" role="status" data-switch-blocked>暂时不能切换：{blockedReason}</p>
+      {:else if switchNote}
+        <p class="switcher-status warn" role="status" data-switch-note>{switchNote}</p>
+      {/if}
       {#if statusLoading}
         <p class="switcher-status" role="status" data-worktree-status="loading">正在读取各工作区的状态；搜索和切换不用等它。</p>
       {:else if statusError}
@@ -658,7 +665,6 @@
                       {/if}
                       {#if view.note}<span class="repo-state muted repo-state-note" title={view.note}>{view.note}</span>{/if}
                     </span>
-                    {#if reason}<span class="switcher-reason">{reason}</span>{/if}
                   </span>
                   {#if view.current}<span class="switcher-current" aria-hidden="true"><Icon name="check" size={12} class="switcher-check" />当前</span>{/if}
                 </div>

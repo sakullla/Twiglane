@@ -48,13 +48,13 @@
 .btn-block { width: 100%; }
 /* 主按钮：实心 --accent 填充，配柔和阴影与微内高光。 */
 .btn-primary {
-  background: var(--accent);
+  background: var(--accent-grad);
   color: var(--accent-fg);
-  box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 26%, transparent), inset 0 1px 0 var(--on-accent-line);
+  box-shadow: 0 4px 12px -2px color-mix(in srgb, var(--accent) 38%, transparent), inset 0 1px 0 var(--on-accent-line);
 }
 .btn-primary:hover:not(:disabled) {
   background: var(--accent-hover);
-  box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 30%, transparent), inset 0 1px 0 var(--on-accent-line);
+  box-shadow: 0 6px 16px -2px color-mix(in srgb, var(--accent) 44%, transparent), inset 0 1px 0 var(--on-accent-line);
 }
 .btn-primary kbd { background: var(--on-accent-soft); border-color: var(--on-accent-line); color: inherit; box-shadow: none; margin-left: 3px; }
 /* 次级按钮：柔和控件边界 + 抬起表面 + 微阴影。 */

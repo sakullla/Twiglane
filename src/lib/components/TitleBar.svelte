@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, type Snippet } from "svelte";
   import { BRAND, MODIFIER_LABEL } from "../brand";
   import type { RepoSummary, Theme } from "../types";
   import { BUSY_REASON, hueOf, repoBadgeLetter } from "../ui";
@@ -58,6 +58,8 @@
     cliora?: ClioraBadge | null;
     /** 返回 cliora 原会话。只回送结果，不执行 Git 写入。 */
     onClioraReturn?: () => void;
+    /** 品牌与仓库之间的上下文位（业务项目）；由外壳提供，没有项目时不占位。 */
+    context?: Snippet;
     onBrand: () => void;
     /** 显式打开命令面板；未传时复用品牌入口行为。 */
     onPalette?: () => void;
@@ -98,6 +100,7 @@
     repoNames = [],
     cliora = null,
     onClioraReturn,
+    context,
     onBrand,
     onPalette,
     onRepo,
@@ -281,6 +284,7 @@
     >
       <BrandMark compact />
     </button>
+    {@render context?.()}
     <button
       type="button"
       class="repo-switch"
@@ -436,7 +440,6 @@
 
     {#if cliora}
       <div class="cliora-source" role="group" aria-label="cliora 审查来源">
-        <span class="cliora-chip" title={`来源 cliora 审查 ${cliora.reviewId}`}>cliora</span>
         <!-- 只有真的提交或合入了才报结果；「什么都没发生」不占标题栏。 -->
         {#if clioraSummary}<span class="cliora-result" title="提交或合入结果以待复核声明发送，cliora 会重新读取真实 HEAD">{clioraSummary}</span>{/if}
         <button
@@ -447,6 +450,7 @@
           title="返回发起这次审查的 cliora 会话；不修改仓库、不关闭当前仓库"
           onclick={() => onClioraReturn?.()}
         >
+          <Icon name="sparkle" size={13} />
           <span>返回 cliora</span>
           <Icon name="arrow-right" size={13} />
         </button>
@@ -530,15 +534,6 @@
     padding-left: var(--space-6);
   }
 
-  .cliora-chip {
-    padding: 0 var(--space-6);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    color: var(--fg-muted);
-    font-size: var(--text-xs);
-    line-height: 18px;
-  }
-
   .cliora-result {
     color: var(--fg-muted);
     font-size: var(--text-xs);
@@ -546,6 +541,13 @@
   }
 
   .cliora-return {
-    gap: var(--space-4);
+    gap: var(--space-6);
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
+
+  .cliora-return:hover:not(:disabled) {
+    background: var(--accent-soft);
+    border-color: var(--accent);
   }
 </style>

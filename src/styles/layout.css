@@ -134,48 +134,50 @@
 .merge-banner-abort:disabled { cursor: not-allowed; opacity: var(--opacity-disabled); }
 
 /* ---------- 起始页 ---------- */
-/* 单屏：品牌标记、三个入口、最近仓库（R8）。画布保持无色，层次只靠明度：
-   --bg 上放一块 --surface 列表；靛蓝只留给主操作和焦点。
+/* 单屏启动台：居中的品牌、三个入口、最近仓库（R8）。画布顶部一层极淡的环境光（--ambient-glow）
+   让首屏不再是一块平灰；靛蓝只留给主操作和焦点。
    内容靠 margin: auto 居中，窗口放不下时从顶部开始滚动，不会被裁掉上半截。 */
-.welcome { flex: 1; min-width: 0; min-height: 0; display: flex; padding: var(--space-32); overflow: auto; background: var(--bg); }
-.welcome-inner { width: min(720px, 100%); margin: auto; display: flex; flex-direction: column; gap: var(--space-24); }
-.welcome-brand { display: flex; flex-direction: column; gap: var(--space-16); }
-.welcome-brand .brand { flex: none; gap: var(--space-16); }
-.welcome-brand .brand-logo { width: 52px; height: 52px; border-radius: var(--radius-xl); box-shadow: var(--shadow-md); }
-.welcome-brand .brand-text strong { font-size: 26px; font-weight: var(--weight-bold); letter-spacing: -0.03em; line-height: 1.15; }
-.welcome-brand .brand-text span { margin-top: var(--space-4); color: var(--fg-muted); font-size: var(--text-base); }
+.welcome { flex: 1; min-width: 0; min-height: 0; display: flex; padding: var(--space-32); overflow: auto; background: var(--ambient-glow), var(--bg); }
+.welcome-inner { width: min(760px, 100%); margin: auto; display: flex; flex-direction: column; gap: var(--space-24); }
+.welcome-brand { display: flex; flex-direction: column; align-items: center; gap: var(--space-16); text-align: center; }
+.welcome-brand .brand { flex: none; flex-direction: column; gap: var(--space-16); }
+.welcome-brand .brand-logo { width: 64px; height: 64px; border-radius: 18px; box-shadow: 0 14px 34px -10px color-mix(in srgb, var(--accent) 55%, transparent), var(--shadow-sm); }
+.welcome-brand .brand-text { align-items: center; }
+.welcome-brand .brand-text strong { font-size: 30px; font-weight: var(--weight-bold); letter-spacing: -0.035em; line-height: 1.1; }
+.welcome-brand .brand-text span { margin-top: var(--space-6); color: var(--fg-muted); font-size: var(--text-base); }
 .welcome-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-12); }
-.action-card { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-12); min-width: 0; padding: var(--space-16); border-radius: var(--radius-lg); border: 1px solid var(--control-border); background: var(--surface); color: var(--fg); box-shadow: var(--shadow-xs); text-align: left; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease); }
+.action-card { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-12); min-width: 0; padding: var(--space-16); border-radius: var(--radius-xl); border: 1px solid var(--control-border); background: var(--surface); color: var(--fg); box-shadow: var(--shadow-xs); text-align: left; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), transform var(--duration-base) var(--ease), box-shadow var(--duration-base) var(--ease); }
 .action-card:hover:not(:disabled) { background: var(--surface); border-color: var(--control-border-hover); box-shadow: var(--shadow-md); transform: translateY(-1px); }
 .action-card:active:not(:disabled) { transform: none; }
-.action-card > .icon { flex: none; box-sizing: content-box; padding: var(--space-8); border-radius: var(--radius); background: var(--accent-softer); color: var(--accent-text); }
+.action-card > .icon { flex: none; box-sizing: content-box; padding: 9px; border-radius: var(--radius-lg); background: var(--accent-soft); color: var(--accent-text); }
 .ac-copy { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
 .ac-copy strong { font-size: var(--text-base); font-weight: var(--weight-semibold); white-space: nowrap; }
 .ac-copy > span { font-size: var(--text-xs); line-height: var(--leading-normal); color: var(--fg-muted); overflow-wrap: anywhere; }
 /* 组内节奏 24px，组间（入口 → 最近仓库）多一档 8px：两段任务读起来是两块，而不是一列。 */
 .welcome-section { margin-top: var(--space-8); }
-/* 主操作是实心 --accent，说明文字必须取不透明的 --accent-fg。 */
-.action-card.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; box-shadow: 0 8px 22px color-mix(in srgb, var(--accent) 26%, transparent), inset 0 1px 0 var(--on-accent-line); }
-.action-card.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: transparent; box-shadow: 0 10px 26px color-mix(in srgb, var(--accent) 32%, transparent), inset 0 1px 0 var(--on-accent-line); }
+/* 主操作是实心渐变，说明文字必须取不透明的 --accent-fg。 */
+.action-card.primary { background: var(--accent-grad); color: var(--accent-fg); border-color: transparent; box-shadow: 0 12px 28px -8px color-mix(in srgb, var(--accent) 55%, transparent), inset 0 1px 0 var(--on-accent-line); }
+.action-card.primary:hover:not(:disabled) { background: var(--accent-grad); border-color: transparent; box-shadow: 0 16px 34px -8px color-mix(in srgb, var(--accent) 62%, transparent), inset 0 1px 0 var(--on-accent-line); }
 .action-card.primary > .icon { color: var(--accent-fg); background: var(--on-accent-soft); }
 .action-card.primary .ac-copy > span { color: var(--accent-fg); }
 .action-card:disabled, .action-card.primary:disabled { background: var(--surface-2); border-color: transparent; color: var(--fg-subtle); cursor: not-allowed; box-shadow: none; }
 .action-card:disabled > .icon, .action-card.primary:disabled > .icon, .action-card:disabled .ac-copy > span, .action-card.primary:disabled .ac-copy > span { color: var(--fg-subtle); }
 .action-card:disabled > .icon, .action-card.primary:disabled > .icon { background: var(--surface-3); }
-.welcome-section { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
-.welcome-section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-height: 32px; }
-.welcome-search { flex: 1; min-width: 0; max-width: 300px; margin-left: auto; }
+/* 最近仓库是一整块卡片：标题与搜索在卡片头部，列表贴着卡片内边距排列。 */
+.welcome-section { display: flex; flex-direction: column; min-width: 0; border-radius: var(--radius-xl); background: var(--surface); box-shadow: 0 0 0 1px var(--border), var(--shadow-md); overflow: hidden; }
+.welcome-section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-height: 44px; padding: var(--space-6) var(--space-8) var(--space-6) var(--space-16); border-bottom: 1px solid var(--border); }
+.welcome-search { flex: 1; min-width: 0; max-width: 280px; margin-left: auto; }
 .welcome-search input { font-size: var(--text-sm); }
-.welcome-section-head h2 { color: var(--fg-muted); font-size: var(--text-eyebrow); font-weight: var(--weight-semibold); letter-spacing: var(--tracking-eyebrow); text-transform: uppercase; }
+.welcome-section-head h2 { color: var(--fg); font-size: var(--text-section-title); font-weight: var(--weight-semibold); }
 .welcome-section-head > .hint { flex: none; font-size: var(--text-xs); }
-.welcome-recent { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-6); border-radius: var(--radius-lg); background: var(--surface); box-shadow: 0 0 0 1px var(--border), var(--shadow-md); }
-.welcome-recent button { position: relative; display: flex; align-items: center; gap: var(--space-12); width: 100%; min-width: 0; padding: var(--space-8) var(--space-32) var(--space-8) var(--space-8); border-radius: var(--radius); text-align: left; transition: background var(--duration-fast) var(--ease); }
+.welcome-recent { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-6); }
+.welcome-recent button { position: relative; display: flex; align-items: center; gap: var(--space-12); width: 100%; min-width: 0; padding: var(--space-8) var(--space-32) var(--space-8) var(--space-8); border-radius: var(--radius-lg); text-align: left; transition: background var(--duration-fast) var(--ease); }
 .welcome-recent button:hover { background: var(--hover); }
 /* 行尾的箭头只在悬停或聚焦时出现：告诉用户「点这一行就打开」，静止时不添噪。 */
-.welcome-recent button::after { content: "→"; position: absolute; right: var(--space-12); top: 50%; transform: translate(-4px, -50%); color: var(--fg-subtle); opacity: 0; transition: opacity var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease); }
+.welcome-recent button::after { content: "→"; position: absolute; right: var(--space-12); top: 50%; transform: translate(-4px, -50%); color: var(--accent-text); opacity: 0; transition: opacity var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease); }
 .welcome-recent button:hover::after, .welcome-recent button:focus-visible::after { opacity: 1; transform: translate(0, -50%); }
 .welcome-recent button:focus-visible { outline-offset: -2px; }
-.welcome-recent .repo-badge { box-shadow: none; }
+.welcome-recent .repo-badge { width: 34px; height: 34px; border-radius: var(--radius-lg); box-shadow: none; font-size: var(--text-base); }
 .welcome-recent .repo-text { flex: 1; }
 /* 上次打开时间：行尾弱化读数，等宽数字；悬停箭头落在按钮右侧预留的内边距里，两者不重叠。 */
 .welcome-recent .repo-when { flex: none; color: var(--fg-subtle); font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -184,21 +186,24 @@
 /* 搜索时结果行数会变：留够五行的高度，搜索框不跟着上下跳。 */
 .welcome-recent.searchable { min-height: 257px; }
 .welcome-no-match { margin: 0; padding: var(--space-8); }
-.welcome-empty { margin: 0; padding: var(--space-24) var(--space-16); border-radius: var(--radius-lg); background: var(--surface); box-shadow: 0 0 0 1px var(--border); text-align: center; }
+.welcome-empty { margin: 0; padding: var(--space-24) var(--space-16); text-align: center; }
 /* 和主界面的 Git 诊断通知条同一语义：Git 不可用是错误，不是提醒。 */
-.welcome-diagnostic { display: flex; align-items: center; gap: var(--space-8); width: 100%; padding: var(--space-8) var(--space-12); border-radius: var(--radius); background: var(--danger-soft); color: var(--danger-text); font-size: var(--text-sm); font-weight: var(--weight-medium); text-align: left; }
+.welcome-diagnostic { display: flex; align-items: center; gap: var(--space-8); width: 100%; padding: var(--space-8) var(--space-12); border-radius: var(--radius-lg); background: var(--danger-soft); color: var(--danger-text); font-size: var(--text-sm); font-weight: var(--weight-medium); text-align: left; }
 .welcome-diagnostic > span { flex: 1; min-width: 0; }
 .welcome-diagnostic > .icon { flex: none; }
 button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 18%, transparent); }
-.welcome-reason { margin: calc(var(--space-16) * -1) 0 0; font-size: var(--text-xs); }
+.welcome-reason { margin: calc(var(--space-16) * -1) 0 0; font-size: var(--text-xs); text-align: center; }
 .welcome-foot { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: var(--space-6) var(--space-16); color: var(--fg-subtle); font-size: var(--text-xs); }
 .welcome-foot > span { display: inline-flex; align-items: center; gap: var(--space-6); }
 /* 最小窗口一屏放下入口、诊断和最近仓库：只收间距，版式不变（R8、R14）。 */
 @media (max-height: 720px) {
   .welcome { padding-block: var(--space-16); }
   .welcome-inner { gap: var(--space-16); }
-  .welcome-brand .brand-logo { width: 40px; height: 40px; }
+  .welcome-brand .brand { flex-direction: row; gap: var(--space-12); }
+  .welcome-brand .brand-text { align-items: flex-start; }
+  .welcome-brand .brand-logo { width: 40px; height: 40px; border-radius: var(--radius-lg); }
   .welcome-brand .brand-text strong { font-size: var(--text-lg); }
+  .welcome-brand .brand-text span { margin-top: var(--space-2); }
   .action-card { flex-direction: row; align-items: center; padding: var(--space-12); }
   /* 入口在窄高窗口仍是一排三列，省出的高度够放使用提示（拖入打开、命令面板），不再隐藏。 */
   .welcome-foot { gap: var(--space-4) var(--space-12); }
@@ -206,9 +211,8 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
   .welcome-section { margin-top: 0; }
   .welcome-recent button { padding-block: var(--space-6); }
 }
-/* 最小窗口 900×600 的可视高度只有 534px，上一档量出来是 583px：最后两行最近仓库
-   被压到状态栏下面，要靠滚动才看得见，「一屏放下」不成立。
-   这一档只收紧同一套版式的间距与图标块（不改结构、不减少条目），把内容收进 534px。 */
+/* 最小窗口 900×600 的可视高度只有 534px：这一档只收紧同一套版式的间距与图标块
+   （不改结构、不减少条目），把内容收进 534px。 */
 @media (max-height: 660px) {
   .welcome { padding-block: var(--space-8); }
   .welcome-inner { gap: var(--space-12); }
@@ -222,9 +226,8 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
   .welcome-section-head { min-height: 24px; }
   .welcome-recent { padding: var(--space-4); }
   .welcome-recent button { padding-block: var(--space-4); }
-  /* 搜索时结果行数会变，占位高度必须按这一档的紧凑行高重算，而不是清零：
-     紧凑行高 40.390625px × 5 + 间隙 2px × 4 + 内边距 4px × 2 ≈ 218px（900×600 实测 217.95px）。
-     占位一旦小于五行，.welcome-inner 的 margin:auto 就会把整块重新居中，搜索框在 900×600 下从 304 跳到 392。 */
+  .welcome-recent .repo-badge { width: 30px; height: 30px; border-radius: var(--radius); }
+  /* 搜索时结果行数会变，占位高度按这一档的紧凑行高重算，而不是清零，避免搜索框上下跳。 */
   .welcome-recent.searchable { min-height: 218px; }
 }
 /* 减少动效：卡片不再做 1px 抬升，悬停只留边界与底色（base.css 已关掉过渡）。 */
@@ -330,24 +333,45 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
   .diff-toolbar .file-copy-btn { display: none; }
 }
 
-/* Business project organization is independent of the selected Git checkout. */
-.project-context-bar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); padding: var(--space-6) var(--space-12); flex: none; min-width: 0; background: var(--surface-2); font-size: var(--text-sm); }
-.project-context-bar label { display: flex; align-items: center; gap: var(--space-6); min-width: 0; }
-.project-context-bar select { max-width: 320px; min-width: 180px; color: var(--fg); background: var(--surface); border: 1px solid var(--control-border); border-radius: var(--radius); padding: var(--space-4); }
-.project-context-path { flex: 1; min-width: 140px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--fg-muted); }
-.project-context-error { max-width: 100%; color: var(--danger-text); overflow-wrap: anywhere; }
-.project-switcher-note { display: flex; justify-content: space-between; align-items: center; padding: var(--space-8); gap: var(--space-8); color: var(--fg-muted); }
+/* ---------- 业务项目标签（标题栏） ----------
+   有项目时才出现在品牌与仓库之间：一枚短标签说明「现在按哪个项目看仓库」。
+   原生 select 透明铺满整枚标签，下拉仍是系统菜单，键盘与读屏行为不变。 */
+.project-chip { position: relative; display: inline-flex; align-items: center; gap: var(--space-6); flex: none; max-width: 200px; height: var(--titlebar-control); padding: 0 var(--space-8); border-radius: var(--radius); color: var(--fg-muted); font-size: var(--text-sm); font-weight: var(--weight-medium); transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease); }
+.project-chip:hover { background: var(--hover); color: var(--fg); }
+.project-chip:focus-within { outline: 2px solid var(--focus); outline-offset: -2px; }
+.project-chip > .icon:first-child { color: var(--accent-text); }
+.project-chip > .icon:last-of-type { color: var(--fg-subtle); }
+.project-chip[data-state="project"] { background: var(--accent-softer); color: var(--accent-text); }
+.project-chip[data-state="project"]:hover { background: var(--accent-soft); }
+.project-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-chip-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--warning); }
+.project-chip[data-state="error"] .project-chip-dot { background: var(--danger); }
+.project-chip select { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; appearance: none; -webkit-appearance: none; border: 0; }
+.titlebar .project-chip + .repo-switch { position: relative; margin-left: var(--space-12); }
+.titlebar .project-chip + .repo-switch::before { content: "/"; position: absolute; left: calc(var(--space-12) * -1 + 1px); color: var(--border-strong); font-size: var(--text-md); font-weight: var(--weight-normal); pointer-events: none; }
+.project-switcher-note { display: flex; justify-content: space-between; align-items: center; padding: var(--space-8); gap: var(--space-8); color: var(--fg-muted); font-size: var(--text-sm); }
 
-/* In-memory review source navigation and explicit capacity management. */
-
-.review-context-bar { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; padding: var(--space-6) var(--space-12); flex: none; background: var(--surface-2); border-bottom: 1px solid var(--border); font-size: 12px; }
-.review-context-bar label { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
-.review-context-bar select { min-width: 120px; max-width: min(520px, 60vw); color: var(--fg); background: var(--surface); border: 1px solid var(--control-border); border-radius: var(--radius); padding: var(--space-4); }
-.review-context-bar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
-.review-context-bar small { color: var(--fg-dimmed); }
-
-.review-source-manager { min-width: 0; }
-.review-source-manager summary { cursor: pointer; }
-.review-source-manager ul { list-style: none; margin: 6px 0; padding: 0; max-height: 200px; overflow: auto; }
-.review-source-manager li { display: flex; align-items: center; gap: 8px; padding: 4px 0; min-width: 0; }
-.review-source-manager li span { max-width: min(680px, 60vw); }
+/* ---------- Cliora 审查条 ----------
+   只在保留了审查来源时出现：一条淡靛蓝细条，左侧标识与来源选择，右侧关闭与管理。
+   容量与保留规则收在「管理」弹层底部，不再常驻一行说明。 */
+.review-strip { position: relative; z-index: var(--z-sticky); display: flex; align-items: center; gap: var(--space-8); min-width: 0; min-height: 36px; padding: var(--space-4) var(--space-12); flex: none; background: var(--accent-softer); border-bottom: 1px solid var(--border); font-size: var(--text-sm); }
+.review-strip-mark { display: grid; place-items: center; width: 22px; height: 22px; border-radius: var(--radius-sm); background: var(--accent-soft); color: var(--accent-text); flex: none; }
+.review-strip-title { font-weight: var(--weight-semibold); color: var(--accent-text); white-space: nowrap; flex: none; }
+.review-strip-select { position: relative; display: inline-flex; align-items: center; min-width: 0; max-width: min(460px, 45vw); }
+.review-strip-select select { appearance: none; -webkit-appearance: none; width: 100%; min-width: 160px; height: 26px; padding: 0 26px 0 var(--space-8); border-radius: var(--radius-sm); border: 1px solid var(--control-border); background: var(--surface); color: var(--fg); font-size: var(--text-sm); text-overflow: ellipsis; cursor: pointer; }
+.review-strip-select select:hover:not(:disabled) { border-color: var(--control-border-hover); }
+.review-strip-select select:disabled { cursor: not-allowed; color: var(--fg-subtle); background: var(--surface-3); }
+.review-strip-select > .icon { position: absolute; right: var(--space-8); color: var(--fg-subtle); pointer-events: none; }
+.review-strip-meta, .review-strip-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-muted); }
+.review-strip-meta { max-width: 260px; }
+.review-strip-note { max-width: 360px; }
+.review-source-manager { position: relative; flex: none; }
+.review-source-manager summary { display: inline-flex; align-items: center; height: 26px; padding: 0 var(--space-8); border-radius: var(--radius-sm); color: var(--fg-muted); font-weight: var(--weight-medium); cursor: pointer; list-style: none; white-space: nowrap; }
+.review-source-manager summary::-webkit-details-marker { display: none; }
+.review-source-manager summary:hover, .review-source-manager[open] summary { background: var(--hover); color: var(--fg); }
+.review-source-pop { position: absolute; top: calc(100% + 6px); right: 0; z-index: var(--z-menu); width: min(560px, 80vw); padding: var(--space-6); border-radius: var(--radius-lg); background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow-lg); animation: pop var(--duration-fast) var(--ease-out); }
+.review-source-pop ul { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow: auto; }
+.review-source-pop li { display: flex; align-items: center; gap: var(--space-8); min-height: 34px; padding: 0 var(--space-4) 0 var(--space-8); border-radius: var(--radius); min-width: 0; }
+.review-source-pop li:hover { background: var(--hover); }
+.review-source-pop li span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.review-source-pop small { display: block; margin-top: var(--space-6); padding: var(--space-6) var(--space-8) var(--space-2); border-top: 1px solid var(--border); color: var(--fg-muted); font-size: var(--text-xs); line-height: var(--leading-normal); }

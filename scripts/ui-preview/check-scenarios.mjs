@@ -142,9 +142,9 @@ const SCENARIOS = [
     name: "项目：发现 60 个候选后按名称和路径搜索，多选跨筛选保留",
     url: "/?projects=1",
     steps: async (drv) => {
-      await drv.until("document.querySelector('[aria-label=业务项目]')?.options.length === 2", "项目名单");
+      await drv.until("document.querySelector('[aria-label=业务项目]')?.options.length === 3", "项目名单");
       await drv.evaluate("const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[1].value; select.dispatchEvent(new Event('change', { bubbles: true }));");
-      await drv.click("[data-project-context] button");
+      await drv.evaluate("{ const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[select.options.length - 1].value; select.dispatchEvent(new Event('change', { bubbles: true })); }");
       await drv.until("Boolean(document.querySelector('[data-workspace-manager]'))", "项目管理");
       await drv.evaluate("[...document.querySelectorAll('[data-workspace-manager] button')].find((button) => button.textContent === '从目录发现').click()");
       await drv.until("document.querySelectorAll('.candidate-results input').length === 60", "60 个发现候选");
@@ -208,7 +208,7 @@ const SCENARIOS = [
     name: "项目：60 仓持久成员、状态未知与长名称搜索",
     url: "/?projects=1",
     steps: async (drv) => {
-      await drv.until("document.querySelector('[aria-label=业务项目]')?.options.length === 2", "项目名单");
+      await drv.until("document.querySelector('[aria-label=业务项目]')?.options.length === 3", "项目名单");
       await drv.evaluate("const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[1].value; select.dispatchEvent(new Event('change', { bubbles: true }));");
       await drv.until("Boolean(document.querySelector('.welcome-recent button'))", "设置读取完成，起始页仓库入口已出现");
       await drv.click(".welcome-recent button");
@@ -246,7 +246,7 @@ const SCENARIOS = [
     name: "项目：附属 worktree 继续显示同一业务项目归属",
     url: "/?projects=1",
     steps: async (drv) => {
-      await drv.until("document.querySelector('[aria-label=业务项目]')?.options.length === 2", "项目名单");
+      await drv.until("document.querySelector('[aria-label=业务项目]')?.options.length === 3", "项目名单");
       await drv.evaluate("const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[1].value; select.dispatchEvent(new Event('change', { bubbles: true }));");
       await drv.until("Boolean(document.querySelector('.welcome-recent button'))", "仓库入口");
       await drv.click(".welcome-recent button");
@@ -263,9 +263,9 @@ const SCENARIOS = [
     name: "项目：来源失效保留快照与修复入口",
     url: "/?projects=missing",
     steps: async (drv) => {
-      await drv.until("document.querySelector('[aria-label=业务项目]')?.options.length === 2", "项目名单");
+      await drv.until("document.querySelector('[aria-label=业务项目]')?.options.length === 3", "项目名单");
       await drv.evaluate("const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[1].value; select.dispatchEvent(new Event('change', { bubbles: true }));");
-      await drv.click("[data-project-context] button");
+      await drv.evaluate("{ const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[select.options.length - 1].value; select.dispatchEvent(new Event('change', { bubbles: true })); }");
       await drv.until("Boolean(document.querySelector('[data-workspace-manager]'))", "项目管理");
     },
     check: "document.body.innerText.includes('最后可读快照') && document.querySelectorAll('.project-member').length === 60 && document.body.innerText.includes('其他主机，暂不可用') && document.documentElement.scrollWidth <= innerWidth + 1",

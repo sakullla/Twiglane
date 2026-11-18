@@ -207,6 +207,8 @@
   function acceptProjects(next: Projects) { projectsSerial += 1; projects = next; projectFailure = null; }
   function selectProject(id: string | null) { selectedProjectId = id; if (id) void loadProjects(true); }
   function manageProjects() { closeSwitcher(); projectManagerOpen = true; void loadProjects(); }
+  /** 项目下拉里「管理项目…」的哨兵值：选中它只打开管理弹窗，不改变当前项目。 */
+  const MANAGE_PROJECTS = "__manage_projects__";
   interface ReadingContext {
     view: WorkspaceView; selected: FileSelection | null; selectedSet: FileSelection[]; query: string;
     historyPath: string | null; historyQuery: string; taskRequest: TaskRequest | null;
@@ -4254,46 +4256,90 @@
         }
       : null}
     onClioraReturn={returnToCliora}
-  />
+  >
+    {#snippet context()}
+      <!-- 业务项目只在建过项目后出现：没有项目的用户不必看到这个概念，管理入口留在仓库弹层与命令面板里。
+           可见的是一枚短标签，原生 select 透明覆盖在上面，下拉仍是系统菜单，读屏仍读到完整的项目说明。 -->
+      {#if projects.projects.length > 0 || selectedProject}
+        {@const projectOutside = selectedProject !== null && opened !== null && !currentProjectMember}
+        {@const projectProblem = projectFailure ?? selectedProject?.error ?? null}
+        <div
+          class="project-chip"
+          data-project-context
+          data-state={projectProblem ? "error" : projectOutside ? "outside" : selectedProject ? "project" : "recent"}
+          title={projectProblem ? `名单快照待处理：${projectProblem}` : projectOutside ? "当前仓库不在此项目中" : selectedProject ? `${selectedProject.manifest.name} · ${selectedProject.manifest.repositories.length} 个仓库` : "未选择项目：仓库列表显示最近使用"}
+        >
+          <Icon name="layers" size={14} />
+          <span class="project-chip-label">{selectedProject?.manifest.name ?? "全部仓库"}</span>
+          {#if projectProblem || projectOutside}<span class="project-chip-dot" aria-hidden="true"></span>{/if}
+          <Icon name="chevron-down" size={12} />
+          <select
+            aria-label="业务项目"
+            value={selectedProjectId ?? ""}
+            onchange={(e) => {
+              const value = e.currentTarget.value;
+              if (value === MANAGE_PROJECTS) {
+                e.currentTarget.value = selectedProjectId ?? "";
+                if (!writeLocked) manageProjects();
+                return;
+              }
+              selectProject(value || null);
+            }}
+          >
+            <option value="">全部仓库 · 最近使用</option>
+            {#each projects.projects as project (project.manifest.workspaceId)}<option value={project.manifest.workspaceId}>{project.manifest.name} · {project.manifest.repositories.length} 个仓库 · {project.manifest.workspaceId.slice(0, 8)}</option>{/each}
+            <option value={MANAGE_PROJECTS} disabled={writeLocked}>管理项目…</option>
+          </select>
+        </div>
+        {#if projectProblem}<span class="sr-only project-context-error" role="status">名单快照待处理：{projectProblem}</span>{/if}
+      {/if}
+      {#if opened}<span class="sr-only project-context-path">{selectedProject ? currentProjectMember ? selectedProject.manifest.name : "当前仓库不在此项目中" : "独立打开"} / {currentProjectRepository?.name ?? opened.summary.name} · {opened.summary.path}</span>{/if}
+    {/snippet}
+  </TitleBar>
 
-  <div class="review-context-bar" aria-label="保留的 Cliora 审查">
-    <label>审查来源 <select aria-label="选择 Cliora 审查来源" value={clioraReview.source?.reviewId ?? ""} disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : undefined} onchange={(event) => void chooseClioraReview(event.currentTarget.value)}>
-      <option value="">{clioraReview.sources.length ? "选择来源 / 当前独立操作" : "暂无来源"}</option>
-      {#each clioraReview.sources as source (source.reviewId)}
-        <option value={source.reviewId}>{clioraProjectLabel(source)} · {source.worktreePath} · 会话 {source.sessionId.slice(0, 8)} · 审查 {source.reviewId.slice(0, 8)}</option>
-      {/each}
-    </select></label>
-    {#if clioraReview.source}
-      <span title={clioraReview.source.repositoryId ?? "独立仓库"}>{clioraProjectLabel(clioraReview.source)} · 仓库 {clioraReview.source.repositoryId?.slice(0, 8) ?? "未关联"}</span>
-      <button class="btn sm" disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : undefined} onclick={() => void closeClioraReview()}>关闭此审查来源</button>
-    {/if}
-    {#if clioraReview.sources.length}
-      <details class="review-source-manager">
-        <summary>管理审查来源（{clioraReview.sources.length}）</summary>
-        <ul aria-label="全部审查来源">
-          {#each clioraReview.sources as source (source.reviewId)}
-            <li data-review-source-id={source.reviewId}>
-              <span title={source.worktreePath}>{clioraProjectLabel(source)} · {source.worktreePath} · 会话 {source.sessionId.slice(0, 8)}</span>
-              <button class="btn sm" disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : undefined} onclick={() => void closeClioraReview(source.reviewId)} aria-label={`关闭审查来源 ${source.reviewId.slice(0, 8)}`}>关闭来源</button>
-            </li>
-          {/each}
-        </ul>
-      </details>
-    {/if}
-    {#if clioraSourcesNotice}<span role="status">{clioraSourcesNotice}</span>{/if}
-    {#if clioraReview.lastReturn}<span>已保留上次返回尝试，接收结果以 Cliora 为准</span>{/if}
-    <small>{clioraReview.sources.length}/8 · 来源仅在本次运行保留；重启后请从 Cliora 重新发起。结果只属于对应仓库。</small>
-  </div>
-
-  <div class="project-context-bar" data-project-context>
-    <label>项目 <select aria-label="业务项目" value={selectedProjectId ?? ""} onchange={(e) => selectProject(e.currentTarget.value || null)}>
-      <option value="">独立仓库 / 最近使用</option>
-      {#each projects.projects as project (project.manifest.workspaceId)}<option value={project.manifest.workspaceId}>{project.manifest.name} · {project.manifest.repositories.length} 个仓库 · {project.manifest.workspaceId.slice(0, 8)}</option>{/each}
-    </select></label>
-    <button class="btn sm" onclick={manageProjects} disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : "管理项目名单、共享清单和本机目录关联"}>管理项目</button>
-    {#if opened}<span class="project-context-path" title={opened.summary.path}>{selectedProject ? currentProjectMember ? selectedProject.manifest.name : "当前仓库不在此项目中" : "独立打开"} / {currentProjectRepository?.name ?? opened.summary.name} · {opened.summary.path}</span>{/if}
-    {#if projectFailure || selectedProject?.error}<span class="project-context-error" role="status">名单快照待处理：{projectFailure ?? selectedProject?.error}</span>{/if}
-  </div>
+  <!-- Cliora 审查来源：只有真的保留了来源（或有一条需要读到的说明）时才出现，平时不占一行。 -->
+  {#if clioraReview.sources.length > 0 || clioraSourcesNotice || clioraReview.lastReturn}
+    <div class="review-strip" aria-label="保留的 Cliora 审查">
+      <span class="review-strip-mark" aria-hidden="true"><Icon name="sparkle" size={13} /></span>
+      <span class="review-strip-title">Cliora 审查</span>
+      {#if clioraReview.sources.length > 0}
+        <label class="review-strip-select">
+          <select aria-label="选择 Cliora 审查来源" value={clioraReview.source?.reviewId ?? ""} disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : undefined} onchange={(event) => void chooseClioraReview(event.currentTarget.value)}>
+            <option value="">选择来源 / 当前独立操作</option>
+            {#each clioraReview.sources as source (source.reviewId)}
+              <option value={source.reviewId}>{clioraProjectLabel(source)} · {source.worktreePath} · 会话 {source.sessionId.slice(0, 8)} · 审查 {source.reviewId.slice(0, 8)}</option>
+            {/each}
+          </select>
+          <Icon name="chevron-down" size={12} />
+        </label>
+      {/if}
+      {#if clioraReview.source}
+        <span class="review-strip-meta" title={clioraReview.source.repositoryId ?? "独立仓库"}>{clioraProjectLabel(clioraReview.source)} · 仓库 {clioraReview.source.repositoryId?.slice(0, 8) ?? "未关联"}</span>
+      {/if}
+      {#if clioraSourcesNotice}<span class="review-strip-note" role="status">{clioraSourcesNotice}</span>{/if}
+      {#if clioraReview.lastReturn}<span class="review-strip-note">已保留上次返回尝试，接收结果以 Cliora 为准</span>{/if}
+      <span class="spacer"></span>
+      {#if clioraReview.source}
+        <button class="btn btn-ghost btn-sm" disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : undefined} onclick={() => void closeClioraReview()}>关闭此审查来源</button>
+      {/if}
+      {#if clioraReview.sources.length}
+        <details class="review-source-manager">
+          <summary title="来源仅在本次运行保留；重启后请从 Cliora 重新发起。结果只属于对应仓库。">管理审查来源（{clioraReview.sources.length}）</summary>
+          <div class="review-source-pop">
+            <ul aria-label="全部审查来源">
+              {#each clioraReview.sources as source (source.reviewId)}
+                <li data-review-source-id={source.reviewId}>
+                  <span title={source.worktreePath}>{clioraProjectLabel(source)} · {source.worktreePath} · 会话 {source.sessionId.slice(0, 8)}</span>
+                  <button class="btn btn-ghost btn-sm" disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : undefined} onclick={() => void closeClioraReview(source.reviewId)} aria-label={`关闭审查来源 ${source.reviewId.slice(0, 8)}`}>关闭来源</button>
+                </li>
+              {/each}
+            </ul>
+            <small>{clioraReview.sources.length}/8 · 来源仅在本次运行保留；重启后请从 Cliora 重新发起。结果只属于对应仓库。</small>
+          </div>
+        </details>
+      {/if}
+    </div>
+  {/if}
   {#snippet projectSwitcherNote()}<div class="project-switcher-note"><span>{selectedProject ? `${selectedProject.manifest.name} · ${selectedProject.manifest.repositories.length} 个仓库` : "最近使用 · 独立仓库"}</span><button class="btn sm" onclick={manageProjects}>管理项目</button></div>{/snippet}
   {#if projectManagerOpen}<ProjectManager data={projects} selectedId={selectedProjectId} {nextId} onData={acceptProjects} onSelect={selectProject} onClose={() => projectManagerOpen = false} />{/if}
   {#if switcher?.kind === "repo"}

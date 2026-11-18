@@ -567,7 +567,7 @@ async function main() {
 
         if (projectsOnly) {
           await cdp.send("Page.navigate", { url: base + "/?projects=1" }, sessionId);
-          await waitFor(cdp, sessionId, "document.querySelector('[aria-label=业务项目]')?.options.length === 2", "项目名单");
+          await waitFor(cdp, sessionId, "document.querySelector('[aria-label=业务项目]')?.options.length === 3", "项目名单");
           await evaluate(cdp, sessionId, "const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[1].value; select.dispatchEvent(new Event('change', { bubbles: true }));");
           await waitFor(cdp, sessionId, "Boolean(document.querySelector('.welcome-recent button'))", "项目起始页仓库入口");
           await evaluate(cdp, sessionId, click('.welcome-recent button'));
@@ -578,7 +578,7 @@ async function main() {
           await pause(300);
           await shot("project-overview", "projects", "60 仓成员源，收藏优先、未知/缺失状态和 worktree 分组");
           await evaluate(cdp, sessionId, pressEscape);
-          await evaluate(cdp, sessionId, click('[data-project-context] button'));
+          await evaluate(cdp, sessionId, "{ const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[select.options.length - 1].value; select.dispatchEvent(new Event('change', { bubbles: true })); }");
           await waitFor(cdp, sessionId, "Boolean(document.querySelector('[data-workspace-manager]'))", "项目管理");
           await shot("project-manager", "projects", "共享文件、60 仓名单、批量纳入与目录修复入口");
           await evaluate(cdp, sessionId, "[...document.querySelectorAll('[data-workspace-manager] button')].find((button) => button.textContent === '从目录发现').click()");
@@ -590,9 +590,9 @@ async function main() {
           await shot("project-candidates", "projects", "60 个发现候选名称/完整路径搜索，取消匹配项后仍保留筛选外的 59 项选择");
           await evaluate(cdp, sessionId, pressEscape);
           await cdp.send("Page.navigate", { url: base + "/?projects=missing" }, sessionId);
-          await waitFor(cdp, sessionId, "document.querySelector('[aria-label=业务项目]')?.options.length === 2", "来源失效项目名单");
+          await waitFor(cdp, sessionId, "document.querySelector('[aria-label=业务项目]')?.options.length === 3", "来源失效项目名单");
           await evaluate(cdp, sessionId, "const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[1].value; select.dispatchEvent(new Event('change', { bubbles: true }));");
-          await evaluate(cdp, sessionId, click('[data-project-context] button'));
+          await evaluate(cdp, sessionId, "{ const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[select.options.length - 1].value; select.dispatchEvent(new Event('change', { bubbles: true })); }");
           await waitFor(cdp, sessionId, "Boolean(document.querySelector('[data-workspace-manager]'))", "失效快照管理");
           await shot("project-source-missing", "projects", "来源失效仍保留最后快照，禁止旧名单覆盖，提供重新预览/刷新");
           await cdp.send("Target.closeTarget", { targetId });

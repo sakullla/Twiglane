@@ -498,6 +498,16 @@ let projectData: Projects = { hostId: workspaceHost, projects: previewParams.has
   }, sourcePath: "/work/shared/product.dev-workspace.json", digest: "mock-preview-digest", error: previewParams.get("projects") === "missing" ? "项目清单无法读取：源文件已移动" : null,
   favorites: ["33333333-3333-4333-8333-000000000001"], bindings: {},
 }] : [] };
+// `?projects=many`：几十个项目，核对项目下拉在规模下的搜索与滚动。
+if (previewParams.get("projects") === "many") {
+  for (let index = 0; index < 36; index += 1) {
+    projectData.projects.push({
+      manifest: { schemaVersion: 1, workspaceId: `55555555-5555-4555-8555-${String(index).padStart(12, "0")}`, name: ["支付", "物流", "会员", "风控", "报表", "运营"][index % 6] + `中心 ${index + 1}`, revision: 1,
+        repositories: Array.from({ length: 3 + (index % 9) * 7 }, (_, repo) => ({ id: `66666666-6666-4666-8666-${String(index * 100 + repo).padStart(12, "0")}`, name: `svc-${index}-${repo}`, locations: [{ hostId: workspaceHost, path: `/work/p${index}/svc-${repo}` }] })) },
+      sourcePath: index % 3 === 0 ? `/work/shared/p${index}.dev-workspace.json` : null, digest: null, error: null, favorites: [], bindings: {},
+    });
+  }
+}
 // Synthetic scheme records for the double-product capture; never loaded by the native app.
 const previewSources = new Map<string, { version: string; sessionId: string; revision: number; request?: ClioraReviewSource; accepted?: boolean; lastReturn?: ClioraSourceSnapshot["lastReturn"] }>();
 const previewReviewEvidence = { receipts: [] as string[], returns: [] as { url: string; uncommitted: number }[] };

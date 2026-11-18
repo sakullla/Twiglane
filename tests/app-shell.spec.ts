@@ -189,6 +189,7 @@ vi.mock("../src/lib/api", () => ({
 }));
 
 import App from "../src/App.svelte";
+import { pickMenu } from "./select-menu-helpers";
 import { fileEditor } from "../src/lib/file-editor.svelte";
 import { paletteItems, REPO_SWITCH_PREFIX, type CommandState } from "../src/lib/commands";
 
@@ -4359,7 +4360,7 @@ it.each([0, 650])("返修：新草稿等待 %d 毫秒后忘记当前仓库并从
   await waitFor(() => expect(document.querySelector(".welcome-recent button")).toBeTruthy());
   await fireEvent.click(document.querySelector<HTMLButtonElement>(".welcome-recent button")!);
   await waitFor(() => expect(screen.getByRole("button", { name: "当前仓库 other" })).toBeTruthy());
-  await fireEvent.change(screen.getByRole("combobox", { name: "业务项目" }), { target: { value: projectId } });
+  await pickMenu("业务项目", projectId);
   await switchTo(repoPath, "demo");
   await waitFor(() => expect(input().value).toBe("A-new-preserve"));
   await switchTo(other, "other");

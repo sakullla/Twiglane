@@ -17,6 +17,8 @@
     placeholder: string;
     /** 搜索框的可访问名称；缺省同 placeholder。 */
     searchLabel?: string;
+    /** 选项很少时不放搜索框：焦点留在弹层本身，方向键与回车照样工作。 */
+    searchable?: boolean;
     query: string;
     active: number;
     /** 列表条目数；方向键在 0…count-1 之间循环。 */
@@ -24,6 +26,8 @@
     width?: number;
     /** 至少和触发按钮一样宽（表单里的下拉框）。 */
     matchAnchor?: boolean;
+    /** 最高多少像素；长列表（仓库切换）可以给得更高，仍收在窗口内。 */
+    maxHeight?: number;
     onChoose: (index: number) => void;
     onItemContextMenu?: (index: number, point: { x: number; y: number }) => void;
     /** refocus：是否把焦点还给触发按钮。点外面关闭时焦点已经在用户点的地方。 */
@@ -39,11 +43,13 @@
     label,
     placeholder,
     searchLabel,
+    searchable = true,
     query = $bindable(),
     active = $bindable(),
     count,
     width = 400,
     matchAnchor = false,
+    maxHeight = 480,
     onChoose,
     onItemContextMenu,
     onClose,
@@ -54,7 +60,7 @@
 
   const MARGIN = 8;
   const GAP = 6;
-  const MAX_HEIGHT = 480;
+  const MAX_HEIGHT = untrack(() => maxHeight);
   const listId = `popover-${Math.random().toString(36).slice(2, 9)}`;
   /** 触发按钮在打开期间不会换人；先抓成普通常量，卸载后异步续体不再读父组件的响应式 prop。 */
   const anchorEl = untrack(() => anchor);
@@ -81,11 +87,32 @@
     const left = Math.max(MARGIN, Math.min(rect.left, window.innerWidth - fit - MARGIN));
     const below = window.innerHeight - rect.bottom - GAP - MARGIN;
     const above = rect.top - GAP - MARGIN;
+    // 弹窗里的下拉：带 transform 的祖先会成为 fixed 的包含块，坐标要扣掉它的原点，否则整体偏移。
+    const origin = containingOrigin();
     if (below < 280 && above > below) {
-      place = { top: null, bottom: window.innerHeight - rect.top + GAP, left, width: fit, maxHeight: Math.min(MAX_HEIGHT, above) };
+      place = { top: null, bottom: window.innerHeight - rect.top + GAP - origin.bottom, left: left - origin.left, width: fit, maxHeight: Math.min(MAX_HEIGHT, above) };
       return;
     }
-    place = { top: rect.bottom + GAP, bottom: null, left, width: fit, maxHeight: Math.min(MAX_HEIGHT, below) };
+    place = { top: rect.bottom + GAP - origin.top, bottom: null, left: left - origin.left, width: fit, maxHeight: Math.min(MAX_HEIGHT, below) };
+  }
+
+  /** fixed 定位的实际原点：视口时为 0；被带 transform 的祖先接管时是那个祖先的左上（以及到视口底的距离）。 */
+  function containingOrigin(): { left: number; top: number; bottom: number } {
+    if (!root) return { left: 0, top: 0, bottom: 0 };
+    const box = root.getBoundingClientRect();
+    const style = getComputedStyle(root);
+    const left = box.left - (parseFloat(style.left) || 0);
+    if (place.top !== null) {
+      const top = box.top - (parseFloat(style.top) || 0);
+      return { left, top, bottom: 0 };
+    }
+    const bottom = window.innerHeight - box.bottom - (parseFloat(style.bottom) || 0);
+    return { left, top: 0, bottom };
+  }
+
+  /** 方向键与回车作用的元素：有搜索框时是搜索框，没有时是弹层本身。 */
+  function keyTarget(): HTMLElement | null {
+    return searchable ? search : listEl;
   }
 
   function reveal() {
@@ -141,7 +168,7 @@
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const step = event.key === "ArrowDown" ? 1 : -1;
-      if (event.target !== search) {
+      if (event.target !== keyTarget()) {
         cycleFocus(step);
       } else if (count > 0) {
         active = (active + step + count) % count;
@@ -149,8 +176,15 @@
       }
       return;
     }
-    if (event.target !== search) return;
-    if (event.key === "Enter") {
+    if (event.target !== keyTarget()) return;
+    if (event.key === "Home" || event.key === "End") {
+      if (searchable || count === 0) return;
+      event.preventDefault();
+      active = event.key === "Home" ? 0 : count - 1;
+      reveal();
+      return;
+    }
+    if (event.key === "Enter" || (!searchable && event.key === " ")) {
       event.preventDefault();
       if (count > 0) onChoose(active);
     } else if (isContextKey(event) && onItemContextMenu) {
@@ -168,7 +202,8 @@
 
   onMount(() => {
     measure();
-    search?.focus();
+    if (searchable) search?.focus();
+    else listEl?.focus({ preventScroll: true });
     reveal();
     const outside = (event: MouseEvent) => {
       const target = event.target as Element | null;
@@ -184,7 +219,10 @@
     window.addEventListener("mousedown", outside, true);
     window.addEventListener("keydown", key);
     window.addEventListener("resize", measure);
+    // 弹窗里的下拉：外层弹窗的进场动画还在缩放时量到的位置会偏，动画结束后再量一次。
+    const settle = window.setTimeout(measure, 220);
     return () => {
+      window.clearTimeout(settle);
       window.removeEventListener("mousedown", outside, true);
       window.removeEventListener("keydown", key);
       window.removeEventListener("resize", measure);
@@ -202,6 +240,7 @@
   onkeydown={onKey}
   onmousedown={keepFocus}
 >
+  {#if searchable}
   <div class="popover-search">
     <div class="field sm">
       <Icon name="search" size={14} />
@@ -225,8 +264,17 @@
       {/if}
     </div>
   </div>
+  {/if}
   {@render notice?.()}
-  <div class="popover-list" id={listId} role="listbox" aria-label={label} bind:this={listEl}>
+  <div
+    class="popover-list"
+    id={listId}
+    role="listbox"
+    aria-label={label}
+    tabindex={searchable ? undefined : -1}
+    aria-activedescendant={!searchable && count > 0 ? `${listId}-${active}` : undefined}
+    bind:this={listEl}
+  >
     {@render list(listId)}
   </div>
   {#if foot}

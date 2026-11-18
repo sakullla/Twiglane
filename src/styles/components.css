@@ -1457,7 +1457,10 @@ label.list-row .checkbox { margin-top: 2px; }
 .switcher-status { margin: 0 var(--space-8) var(--space-6); color: var(--fg-subtle); font-size: var(--text-xs); line-height: var(--leading-normal); }
 .switcher-status.danger { color: var(--danger-text); }
 .switcher-status.warn { color: var(--warning-text); }
-.switcher-group-row { display: flex; align-items: center; gap: var(--space-6); padding: 0 var(--space-8); color: var(--fg-subtle); font-size: var(--text-xs); }
+/* 项目分组标题：与上一行之间留出间隔和一条细线，标题贴着自己的组，不和上一组的行粘在一起。 */
+.switcher-group-row { display: flex; align-items: center; gap: var(--space-6); height: 38px; margin-top: 0; padding: 10px 10px 2px; color: var(--fg-subtle); font-size: var(--text-xs); }
+.switcher-group-row::before { content: ""; position: absolute; top: 4px; left: 10px; right: 10px; border-top: 1px solid var(--border); }
+.switcher-group-row.leading::before { display: none; }
 .switcher-group-name { display: inline-flex; align-items: center; gap: var(--space-4); flex: none; color: var(--fg-muted); font-weight: var(--weight-semibold); }
 .switcher-group-name > .icon { color: var(--accent-text); }
 .switcher-group-path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11px; }
@@ -2599,3 +2602,41 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 @container diff (max-width: 880px) {
   .task-batch-actions .diff-hist-label { display: none; }
 }
+
+/* ---------- 项目 / 来源下拉框（SelectMenu）----------
+   与仓库、分支弹层同一套外壳；选项是「徽章 + 名称 + 第二行说明 + 勾」，底部放管理动作。
+   field 是表单里的整行，chip 是标题栏与横条里的紧凑标签。 */
+.select-menu { position: relative; min-width: 0; }
+.select-menu.is-field { width: 100%; }
+.select-menu-trigger { display: flex; align-items: center; gap: var(--space-6); width: 100%; min-width: 0; text-align: left; color: var(--fg); transition: border-color var(--duration-fast) var(--ease), background var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease); }
+.select-menu.is-field .select-menu-trigger { height: 34px; padding: 0 10px 0 var(--space-8); border: 1px solid var(--control-border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-xs); }
+.select-menu.is-field .select-menu-trigger:hover:not(:disabled) { border-color: var(--control-border-hover); }
+.select-menu.is-field .select-menu-trigger[aria-expanded="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.select-menu.is-chip .select-menu-trigger { height: 28px; max-width: 280px; padding: 0 var(--space-8); border-radius: var(--radius); background: transparent; color: var(--fg-muted); font-weight: var(--weight-medium); }
+.select-menu.is-chip .select-menu-trigger:hover:not(:disabled), .select-menu.is-chip .select-menu-trigger[aria-expanded="true"] { background: var(--hover); color: var(--fg); }
+.select-menu-trigger:disabled { cursor: not-allowed; opacity: var(--opacity-disabled); }
+.select-menu-trigger:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.select-menu-trigger > .icon:first-child { flex: none; color: var(--accent-text); }
+.select-menu-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select-menu.is-chip .select-menu-text { flex: 0 1 auto; }
+.select-menu-text.empty { color: var(--fg-subtle); }
+.select-menu-caret { flex: none; margin-left: auto; color: var(--fg-subtle); transition: transform var(--duration-fast) var(--ease); }
+.select-menu.is-chip .select-menu-caret { margin-left: 0; }
+.select-menu-caret.flip { transform: rotate(180deg); }
+.select-menu-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--warning); }
+.select-menu-badge { display: inline-grid; place-items: center; flex: none; width: 26px; height: 26px; border-radius: var(--radius-sm); font-size: var(--text-xs); font-weight: var(--weight-semibold); color: hsl(var(--hue, 238) var(--repo-badge-fg-sat) var(--repo-badge-fg-light)); background: hsl(var(--hue, 238) var(--repo-badge-bg-sat) var(--repo-badge-bg-light)); box-shadow: inset 0 0 0 1px hsl(var(--hue, 238) var(--repo-badge-ring-sat) var(--repo-badge-ring-light) / var(--repo-badge-ring-alpha)); }
+.select-menu-badge.sm { width: 20px; height: 20px; font-size: 11px; border-radius: var(--radius-xs); }
+.popover .select-menu-option { display: flex; align-items: center; gap: 10px; min-height: 38px; padding: var(--space-4) 10px; border-radius: var(--radius); cursor: pointer; }
+.popover .select-menu-option.active { background: var(--hover); }
+.popover .select-menu-option[aria-selected="true"] { background: var(--accent-softer); }
+.popover .select-menu-option[aria-selected="true"].active { background: var(--accent-soft); }
+.popover .select-menu-option[aria-disabled="true"] { cursor: not-allowed; opacity: 0.6; }
+.select-menu-icon { display: grid; place-items: center; flex: none; width: 26px; height: 26px; border-radius: var(--radius-sm); background: var(--surface-3); color: var(--fg-muted); }
+.select-menu-copy { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.select-menu-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); font-size: var(--text-sm); font-weight: var(--weight-medium); }
+.select-menu-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-subtle); font-size: var(--text-xs); }
+.select-menu-tag { flex: none; height: 18px; padding: 0 6px; border-radius: 999px; background: var(--surface-3); color: var(--fg-muted); font-size: 11px; font-weight: var(--weight-medium); line-height: 18px; white-space: nowrap; }
+.select-menu-check { display: grid; place-items: center; flex: none; width: 14px; color: var(--accent-text); }
+.popover-list:has(> .select-menu-option) { padding-top: var(--space-6); }
+.popover-foot .select-menu-action { gap: var(--space-8); }
+.popover-list:focus { outline: none; }

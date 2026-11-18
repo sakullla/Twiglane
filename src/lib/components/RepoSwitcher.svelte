@@ -122,7 +122,7 @@
   const WIDTH = 520;
   /** 单行工作区的高度、分组头高度与每多一行的增量，只是实测之前的估算。 */
   const ROW = 64;
-  const GROUP_ROW = 30;
+  const GROUP_ROW = 38;
   const EXTRA_LINE = 16;
   /** 弹层一行完整路径大约放得下的字符数。 */
   const PATH_CHARS = 70;
@@ -515,6 +515,7 @@
   {anchor}
   label="切换仓库"
   width={WIDTH}
+  maxHeight={760}
   placeholder="搜索仓库名称、路径、分支或 worktree"
   bind:query
   bind:active={
@@ -573,7 +574,7 @@
         <div class="switcher-space" role="presentation" style={"height:" + offsets[flat.length] + "px"} use:trackList>
           {#each rendered as { row, index } (row.key)}
             {#if row.kind === "group"}
-              <div class="switcher-row switcher-group-row" role="presentation" data-group-row={row.group.key} data-repo-row={index} style={"top:" + offsets[index] + "px"}>
+              <div class="switcher-row switcher-group-row" class:leading={index === 0} role="presentation" data-group-row={row.group.key} data-repo-row={index} style={"top:" + offsets[index] + "px"}>
                 <span class="switcher-group-name"><Icon name="layers" size={11} />{row.group.name}</span>
                 <span class="switcher-group-path"><bdi>{row.group.mainPath ?? "归属未知"}</bdi></span>
                 <span class="switcher-group-count">{row.group.rows.length} 个工作区</span>

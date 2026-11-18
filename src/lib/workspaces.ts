@@ -90,3 +90,8 @@ export function projectMemberForCheckout(
     return head && !head.missing && checkoutKey(head.mainPath ?? head.path) === main;
   })) ?? null;
 }
+
+/** 项目名的首字（跳过开头的符号），用作徽章；同一函数给标题栏、管理弹窗与审查来源共用。 */
+export function projectInitial(name: string): string {
+  return (name.replace(/^[^\p{L}\p{N}]+/u, "")[0] ?? "?").toLocaleUpperCase();
+}

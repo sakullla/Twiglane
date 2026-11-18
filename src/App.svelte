@@ -93,6 +93,7 @@
     batchTargets,
     fileNavState,
     hasCommitSummary,
+    hueOf,
     orderedRows,
     reviewQueue,
     rowsInSelection,
@@ -123,6 +124,8 @@
   import RepoDialogs from "./lib/components/RepoDialogs.svelte";
   import { scopedSelectAll } from "./lib/select-scope";
   import ProjectManager from "./lib/components/ProjectManager.svelte";
+  import SelectMenu, { type SelectMenuOption } from "./lib/components/SelectMenu.svelte";
+  import { projectInitial } from "./lib/workspaces";
   import { checkoutKey, projectMemberForCheckout, projectRepos, type Projects } from "./lib/workspaces";
   import { CheckoutContexts } from "./lib/checkout-context";
   import RepoSwitcher from "./lib/components/RepoSwitcher.svelte";
@@ -175,6 +178,18 @@
   let projectFailure = $state<string | null>(null);
   let projectsSerial = 0;
   const selectedProject = $derived(projects.projects.find((p) => p.manifest.workspaceId === selectedProjectId) ?? null);
+  /** 标题栏项目下拉：「全部仓库」在前，项目带首字徽章、仓库数与来源。 */
+  const projectMenuOptions = $derived<SelectMenuOption[]>([
+    { value: "", label: "全部仓库", detail: "不按项目筛选，列出最近使用的仓库", icon: "history" },
+    ...projects.projects.map((project) => ({
+      value: project.manifest.workspaceId,
+      label: project.manifest.name,
+      detail: `${project.manifest.repositories.length} 个仓库${project.error ? " · 名单待处理" : ""}`,
+      badge: projectInitial(project.manifest.name),
+      hue: hueOf(project.manifest.workspaceId),
+      tag: project.sourcePath ? "共享" : undefined,
+    })),
+  ]);
   const switcherRepos = $derived(projectRepos(selectedProject, projects.hostId, recent, opened?.summary.path ?? null));
   let projectHeads = $state.raw<RepoHead[]>([]);
   const currentProjectRepository = $derived(selectedProject && opened ? projectMemberForCheckout(selectedProject, projects.hostId, opened.summary.path, projectHeads) : null);
@@ -208,7 +223,6 @@
   function selectProject(id: string | null) { selectedProjectId = id; if (id) void loadProjects(true); }
   function manageProjects() { closeSwitcher(); projectManagerOpen = true; void loadProjects(); }
   /** 项目下拉里「管理项目…」的哨兵值：选中它只打开管理弹窗，不改变当前项目。 */
-  const MANAGE_PROJECTS = "__manage_projects__";
   interface ReadingContext {
     view: WorkspaceView; selected: FileSelection | null; selectedSet: FileSelection[]; query: string;
     historyPath: string | null; historyQuery: string; taskRequest: TaskRequest | null;
@@ -3117,10 +3131,55 @@
     return source.worktreePath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || source.worktreePath;
   }
 
-  /** 下拉里的一行：仓库名 · 项目 · 会话短号；完整路径放在提示与下方说明里。 */
-  function clioraSourceLabel(source: (typeof clioraReview.sources)[number]): string {
-    return `${clioraRepoName(source)} · ${clioraProjectLabel(source)} · 会话 ${source.sessionId.slice(0, 8)}`;
+  /**
+   * 来源下拉：仓库名为主，第二行是项目、会话、任务起点与审查号。
+   * 同一会话对同一工作树重复发起时，行文字原本完全一样；这里按到达顺序标出「最新 / 较早第 N 次」，
+   * 并给出起点与审查号，用户能分清要回报哪一次。当前仓库的来源排在前面。
+   */
+  const clioraSourceRanks = $derived.by(() => {
+    const groups = new Map<string, string[]>();
+    for (const source of clioraReview.sources) {
+      const key = source.sessionId + "\u0000" + checkoutKey(source.worktreePath);
+      groups.set(key, [...(groups.get(key) ?? []), source.reviewId]);
+    }
+    const ranks = new Map<string, { order: number; total: number }>();
+    for (const ids of groups.values()) ids.forEach((id, index) => ranks.set(id, { order: index + 1, total: ids.length }));
+    return ranks;
+  });
+
+  function clioraRepeatLabel(source: (typeof clioraReview.sources)[number]): string | null {
+    const rank = clioraSourceRanks.get(source.reviewId);
+    if (!rank || rank.total < 2) return null;
+    return rank.order === rank.total ? "最新发起" : `第 ${rank.order} 次发起`;
   }
+
+  function clioraSourceText(source: (typeof clioraReview.sources)[number]): string {
+    const repeat = clioraRepeatLabel(source);
+    return clioraRepoName(source) + (repeat ? ` · ${repeat}` : "");
+  }
+
+  const clioraSourceOptions = $derived<SelectMenuOption[]>([
+    { value: "", label: "不使用审查来源", detail: "独立操作当前仓库，不回报给 Cliora", icon: "x" },
+    ...[...clioraReview.sources]
+      .sort((a, b) => Number(!!opened && samePath(b.worktreePath, opened.summary.path)) - Number(!!opened && samePath(a.worktreePath, opened.summary.path)))
+      .map((source) => {
+        const repeat = clioraRepeatLabel(source);
+        const parts = [
+          clioraProjectLabel(source),
+          `会话 ${source.sessionId.slice(0, 8)}`,
+          source.baseline ? `起点 ${source.baseline.slice(0, 7)}` : "无起点",
+          `审查 ${source.reviewId.slice(0, 8)}`,
+        ];
+        return {
+          value: source.reviewId,
+          label: clioraRepoName(source),
+          detail: parts.join(" · "),
+          badge: projectInitial(clioraRepoName(source)),
+          hue: hueOf(source.worktreePath),
+          tag: repeat ?? (opened && samePath(source.worktreePath, opened.summary.path) ? "当前仓库" : undefined),
+        };
+      }),
+  ]);
 
   function clioraProjectLabel(source: (typeof clioraReview.sources)[number]): string {
     if (!source.workspaceId) return "独立仓库";
@@ -4305,34 +4364,21 @@
       {#if projects.projects.length > 0 || selectedProject}
         {@const projectOutside = selectedProject !== null && opened !== null && !currentProjectMember}
         {@const projectProblem = projectFailure ?? selectedProject?.error ?? null}
-        <div
-          class="project-chip"
-          data-project-context
-          data-state={projectProblem ? "error" : projectOutside ? "outside" : selectedProject ? "project" : "recent"}
+        <SelectMenu
+          class={`project-chip${selectedProject ? " selected" : ""}${projectProblem ? " problem" : ""}`}
+          variant="chip"
+          label="业务项目"
+          icon="layers"
+          value={selectedProjectId ?? ""}
+          text={selectedProject?.manifest.name ?? "全部仓库"}
+          dot={Boolean(projectProblem || projectOutside)}
           title={projectProblem ? `名单快照待处理：${projectProblem}` : projectOutside ? "当前仓库不在此项目中" : selectedProject ? `${selectedProject.manifest.name} · ${selectedProject.manifest.repositories.length} 个仓库` : "未选择项目：仓库列表显示最近使用"}
-        >
-          <Icon name="layers" size={14} />
-          <span class="project-chip-label">{selectedProject?.manifest.name ?? "全部仓库"}</span>
-          {#if projectProblem || projectOutside}<span class="project-chip-dot" aria-hidden="true"></span>{/if}
-          <Icon name="chevron-down" size={12} />
-          <select
-            aria-label="业务项目"
-            value={selectedProjectId ?? ""}
-            onchange={(e) => {
-              const value = e.currentTarget.value;
-              if (value === MANAGE_PROJECTS) {
-                e.currentTarget.value = selectedProjectId ?? "";
-                if (!writeLocked) manageProjects();
-                return;
-              }
-              selectProject(value || null);
-            }}
-          >
-            <option value="">全部仓库 · 最近使用</option>
-            {#each projects.projects as project (project.manifest.workspaceId)}<option value={project.manifest.workspaceId}>{project.manifest.name} · {project.manifest.repositories.length} 个仓库 · {project.manifest.workspaceId.slice(0, 8)}</option>{/each}
-            <option value={MANAGE_PROJECTS} disabled={writeLocked}>管理项目…</option>
-          </select>
-        </div>
+          options={projectMenuOptions}
+          actions={[{ id: "manage", label: "管理项目…", icon: "settings", disabledReason: writeLocked ? switchBlockedReason(commandState) : null, run: manageProjects }]}
+          searchPlaceholder="搜索项目"
+          width={320}
+          onChange={(value) => selectProject(value || null)}
+        />
         {#if projectProblem}<span class="sr-only project-context-error" role="status">名单快照待处理：{projectProblem}</span>{/if}
       {/if}
       {#if opened}<span class="sr-only project-context-path">{selectedProject ? currentProjectMember ? selectedProject.manifest.name : "当前仓库不在此项目中" : "独立打开"} / {currentProjectRepository?.name ?? opened.summary.name} · {opened.summary.path}</span>{/if}
@@ -4345,15 +4391,20 @@
       <span class="review-strip-mark" aria-hidden="true"><Icon name="sparkle" size={13} /></span>
       <span class="review-strip-title">Cliora 审查</span>
       {#if clioraReview.sources.length > 0}
-        <label class="review-strip-select">
-          <select aria-label="选择 Cliora 审查来源" value={clioraReview.source?.reviewId ?? ""} disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : clioraReview.source?.worktreePath} onchange={(event) => void chooseClioraReview(event.currentTarget.value)}>
-            <option value="">不使用审查来源（独立操作）</option>
-            {#each clioraReview.sources as source (source.reviewId)}
-              <option value={source.reviewId}>{clioraSourceLabel(source)}</option>
-            {/each}
-          </select>
-          <Icon name="chevron-down" size={12} />
-        </label>
+        <SelectMenu
+          class="review-strip-select"
+          variant="chip"
+          label="选择 Cliora 审查来源"
+          value={clioraReview.source?.reviewId ?? ""}
+          text={clioraReview.source ? clioraSourceText(clioraReview.source) : "选择审查来源"}
+          title={writeLocked ? switchBlockedReason(commandState) : clioraReview.source?.worktreePath}
+          disabled={writeLocked}
+          disabledReason={writeLocked ? switchBlockedReason(commandState) : undefined}
+          options={clioraSourceOptions}
+          searchPlaceholder="搜索仓库、项目或会话"
+          width={420}
+          onChange={(value) => void chooseClioraReview(value)}
+        />
       {/if}
       {#if clioraReview.source}
         {@const project = clioraProjectLabel(clioraReview.source)}
@@ -4377,7 +4428,7 @@
                 <li data-review-source-id={source.reviewId} class:current={clioraReview.source?.reviewId === source.reviewId}>
                   <span class="review-source-text" title={source.worktreePath}>
                     <strong>{clioraRepoName(source)}</strong>
-                    <small>{clioraProjectLabel(source)} · 会话 {source.sessionId.slice(0, 8)}</small>
+                    <small>{clioraProjectLabel(source)} · 会话 {source.sessionId.slice(0, 8)}{#if clioraRepeatLabel(source)} · {clioraRepeatLabel(source)}{/if} · 审查 {source.reviewId.slice(0, 8)}</small>
                   </span>
                   <button class="btn btn-ghost btn-sm" disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : undefined} onclick={() => void closeClioraReview(source.reviewId)} aria-label={`关闭审查来源 ${source.reviewId.slice(0, 8)}`}>关闭来源</button>
                 </li>

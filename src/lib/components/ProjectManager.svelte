@@ -4,7 +4,9 @@
   import { addCandidates, type Projects, type WorkspaceCandidate, type WorkspaceManifest, type WorkspacePreview } from "../workspaces";
   import Modal from "./Modal.svelte";
   import Icon from "./Icon.svelte";
+  import SelectMenu, { type SelectMenuOption } from "./SelectMenu.svelte";
   import { hueOf } from "../ui";
+  import { projectInitial } from "../workspaces";
   interface Props {
     data: Projects;
     selectedId: string | null;
@@ -37,9 +39,17 @@
   let creating = $state(false);
   let renaming = $state(false);
   $effect(() => { if (data.projects.length === 0) creating = true; });
-  function initial(text: string): string {
-    return (text.replace(/^[^\p{L}\p{N}]+/u, "")[0] ?? "?").toLocaleUpperCase();
-  }
+  const initial = projectInitial;
+  const projectOptions = $derived<SelectMenuOption[]>([
+    { value: "", label: "未选择项目", detail: "只用独立打开的仓库，不按项目筛选", icon: "history" },
+    ...data.projects.map((item) => ({
+      value: item.manifest.workspaceId,
+      label: item.manifest.name,
+      detail: `${item.manifest.repositories.length} 个仓库 · ${item.sourcePath ? "共享清单" : "仅本机"}${item.error ? " · 名单待处理" : ""}`,
+      badge: projectInitial(item.manifest.name),
+      hue: hueOf(item.manifest.workspaceId),
+    })),
+  ]);
   let filtered = $derived(project?.manifest.repositories.filter((repo) => {
     const needle = query.trim().toLocaleLowerCase();
     return !needle || [repo.name, ...repo.locations.map((l) => l.path)].some((text) => text.toLocaleLowerCase().includes(needle));
@@ -141,16 +151,18 @@
   description="把散落在不同目录的 Git 仓库归到一个项目里。与 Cliora 共用时，两端打开同一份 .dev-workspace.json。">
   <div class="projects-manager" data-workspace-manager>
     <div class="pm-bar">
-      <label class="pm-select">
-        <span class="sr-only">当前项目</span>
-        <Icon name="layers" size={14} />
-        <select class="select" aria-label="管理业务项目" value={selectedId ?? ""} disabled={Boolean(busy)} title={busyReason} onchange={(e) => { onSelect(e.currentTarget.value || null); candidates = []; query = ""; renaming = false; }}>
-          <option value="">未选择项目（独立仓库）</option>
-          {#each data.projects as item (item.manifest.workspaceId)}
-            <option value={item.manifest.workspaceId}>{item.manifest.name} · {item.manifest.repositories.length} 个仓库</option>
-          {/each}
-        </select>
-      </label>
+      <SelectMenu
+        class="pm-select"
+        label="管理业务项目"
+        value={selectedId ?? ""}
+        options={projectOptions}
+        placeholder="选择项目"
+        disabled={Boolean(busy)}
+        disabledReason={busyReason}
+        searchPlaceholder="搜索项目"
+        width={420}
+        onChange={(value) => { onSelect(value || null); candidates = []; query = ""; renaming = false; }}
+      />
       <button class="btn btn-secondary" aria-pressed={creating} disabled={Boolean(busy)} title={busyReason ?? "新建一个只在本机的项目"} onclick={() => creating = !creating}><Icon name="plus" size={14} />新建项目</button>
       <button class="btn btn-secondary" disabled={Boolean(busy)} title={busyReason ?? "打开与 Cliora 共用的 .dev-workspace.json"} onclick={openManifest}><Icon name="folder-open" size={14} />打开项目清单</button>
     </div>
@@ -270,9 +282,7 @@
 <style>
   .projects-manager { display: grid; gap: 12px; min-width: 0; }
   .pm-bar, .pm-inline { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
-  .pm-select { position: relative; display: flex; align-items: center; flex: 1; min-width: 220px; }
-  .pm-select > :global(.icon) { position: absolute; left: 10px; color: var(--accent-text); pointer-events: none; }
-  .pm-select select { padding-left: 30px; font-weight: var(--weight-medium); }
+  .pm-bar > :global(.pm-select) { flex: 1; min-width: 220px; }
   .pm-inline > .input { flex: 1; min-width: 180px; }
   .pm-search { flex: 1; min-width: 200px; }
   .pm-msg { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 10px; border-radius: var(--radius); background: var(--surface-2); color: var(--fg-muted); font-size: var(--text-sm); overflow-wrap: anywhere; }

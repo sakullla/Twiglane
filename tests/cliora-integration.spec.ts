@@ -158,6 +158,7 @@ vi.mock("../src/lib/api", () => ({
 }));
 
 import App from "../src/App.svelte";
+import { menuValues, pickMenu } from "./select-menu-helpers";
 
 function resetMocks() {
   for (const fn of mocks.created.values()) fn.mockReset();
@@ -299,9 +300,9 @@ describe("cliora v2 审查链接", () => {
     await waitFor(() => expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledTimes(2));
     expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledWith(REVIEW_A, SESSION_A, true, null);
     expect(clioraReview.sources).toHaveLength(2);
-    await fireEvent.change(screen.getByRole("combobox", { name: "选择 Cliora 审查来源" }), { target: { value: REVIEW_A } });
+    await pickMenu("选择 Cliora 审查来源", REVIEW_A);
     expect(clioraBaseline()).toBe(BASELINE);
-    await fireEvent.change(screen.getByRole("combobox", { name: "选择 Cliora 审查来源" }), { target: { value: REVIEW_B } });
+    await pickMenu("选择 Cliora 审查来源", REVIEW_B);
     expect(clioraBaseline()).toBeNull();
 
     await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
@@ -599,18 +600,39 @@ describe("cliora v2 审查链接", () => {
       { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_B, sessionId: SESSION_B, worktreePath: OTHER_WORKTREE, baseline: COMMITTED }, result: null, lastReturn: null },
     ], expiredPending: 0 });
     mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE)); await mountShell();
-    const select = screen.getByRole("combobox", { name: "选择 Cliora 审查来源" });
-    await waitFor(() => expect(within(select).getAllByRole("option")).toHaveLength(3));
-    await fireEvent.change(select, { target: { value: REVIEW_A } });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "选择 Cliora 审查来源" })).toBeTruthy());
+    expect(await menuValues("选择 Cliora 审查来源")).toHaveLength(3);
+    await pickMenu("选择 Cliora 审查来源", REVIEW_A);
     await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_A));
     mocks.api.openRepository.mockRejectedValueOnce({ code: "path_missing", message: "B 目录失效" });
-    await fireEvent.change(select, { target: { value: REVIEW_B } });
+    await pickMenu("选择 Cliora 审查来源", REVIEW_B);
     await waitFor(() => expect(document.body.textContent).toContain("B 目录失效"));
     await fireEvent.click(screen.getByText("管理审查来源（2）"));
     await fireEvent.click(screen.getByRole("button", { name: `关闭审查来源 ${REVIEW_B.slice(0, 8)}` }));
     await waitFor(() => expect(mocks.api.clioraReviewForget).toHaveBeenCalledWith(REVIEW_B, SESSION_B));
     expect(clioraReview.source?.reviewId).toBe(REVIEW_A);
     expect(clioraReview.sources.map(source => source.reviewId)).toEqual([REVIEW_A]);
+  });
+
+  it("同一会话对同一工作树重复发起时，下拉标出发起次序与审查号，不再出现两行一样的文字", async () => {
+    mocks.api.clioraReviewSources.mockResolvedValue({ sources: [
+      { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_A, sessionId: SESSION_A, worktreePath: WORKTREE, baseline: BASELINE }, result: null, lastReturn: null },
+      { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_B, sessionId: SESSION_A, worktreePath: WORKTREE, baseline: BASELINE }, result: null, lastReturn: null },
+    ], expiredPending: 0 });
+    mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE)); await mountShell();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "选择 Cliora 审查来源" })).toBeTruthy());
+    await fireEvent.click(screen.getByRole("button", { name: "选择 Cliora 审查来源" }));
+    const rows = await waitFor(() => {
+      const nodes = [...document.querySelectorAll<HTMLElement>(".popover [role=option]")].filter((node) => node.dataset.value);
+      expect(nodes).toHaveLength(2);
+      return nodes;
+    });
+    const texts = rows.map((node) => node.textContent ?? "");
+    expect(new Set(texts).size).toBe(2);
+    expect(texts[0]).toContain("第 1 次发起");
+    expect(texts[0]).toContain(`审查 ${REVIEW_A.slice(0, 8)}`);
+    expect(texts[1]).toContain("最新发起");
+    expect(texts[1]).toContain(`审查 ${REVIEW_B.slice(0, 8)}`);
   });
 
   it("accepted 迟到期间普通切到 B，保留 A 来源但不改 B 仓库或任务起点", async () => {
@@ -632,7 +654,7 @@ describe("cliora v2 审查链接", () => {
     expect(document.querySelector(".project-context-path")?.textContent).toContain(OTHER_WORKTREE);
     expect(mocks.api.taskReview).not.toHaveBeenCalledWith(OTHER_WORKTREE, BASELINE, expect.anything(), expect.anything());
     expect(mocks.api.taskReview).not.toHaveBeenCalled();
-    await fireEvent.change(screen.getByRole("combobox", { name: "选择 Cliora 审查来源" }), { target: { value: REVIEW_A } });
+    await pickMenu("选择 Cliora 审查来源", REVIEW_A);
     await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_A));
     expect(document.querySelector(".project-context-path")?.textContent).toContain(WORKTREE);
     expect(clioraBaseline()).toBe(BASELINE);
@@ -675,19 +697,19 @@ describe("cliora v2 审查链接", () => {
     ], expiredPending: 1 });
     mocks.api.openRepository.mockImplementation(async (path: string) => openedAt(path));
     await mountShell();
-    const select = screen.getByRole("combobox", { name: "选择 Cliora 审查来源" });
-    await waitFor(() => expect(within(select).getAllByRole("option")).toHaveLength(3));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "选择 Cliora 审查来源" })).toBeTruthy());
+    expect(await menuValues("选择 Cliora 审查来源")).toHaveLength(3);
     expect(clioraReview.source).toBeNull();
     expect(document.body.textContent).toContain("1 条尚未接受的来源已失效");
     expect(mocks.api.clioraReviewSources).toHaveBeenCalledWith(true);
-    await fireEvent.change(select, { target: { value: REVIEW_A } });
+    await pickMenu("选择 Cliora 审查来源", REVIEW_A);
     await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_A));
     expect(clioraBaseline()).toBe(BASELINE);
     expect(clioraReview.result?.headOid).toBe(COMMITTED);
     expect(clioraReview.lastReturn?.revision).toBe(2);
     expect(screen.getByText("已保留上次返回尝试，接收结果以 Cliora 为准")).toBeTruthy();
     expect(mocks.api.clioraReviewReceipt).not.toHaveBeenCalled();
-    await fireEvent.change(select, { target: { value: REVIEW_B } });
+    await pickMenu("选择 Cliora 审查来源", REVIEW_B);
     await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_B));
     expect(clioraReview.result).toBeNull();
   });
@@ -709,9 +731,8 @@ describe("cliora v2 审查链接", () => {
     await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_B));
     expect(clioraReview.result).toBeNull();
     expect(clioraBaseline()).toBe(COMMITTED);
-    const sources = screen.getByRole("combobox", { name: "选择 Cliora 审查来源" });
-    expect(within(sources).getAllByRole("option")).toHaveLength(3);
-    await fireEvent.change(sources, { target: { value: REVIEW_A } });
+    expect(await menuValues("选择 Cliora 审查来源")).toHaveLength(3);
+    await pickMenu("选择 Cliora 审查来源", REVIEW_A);
     await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_A));
     expect(clioraBaseline()).toBe(BASELINE);
     expect(clioraReview.result?.headOid).toBe(COMMITTED);

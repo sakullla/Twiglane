@@ -568,6 +568,14 @@ const REPO_COMMANDS: CommandSpec[] = [
     available: hasRepo,
     reason: hasRepoReason,
   },
+  {
+    id: "project.manage",
+    group: "仓库",
+    title: "业务项目",
+    hint: "创建本地项目或打开与 Cliora 共用的 .dev-workspace.json 清单",
+    available: idle,
+    reason: busyReason,
+  },
 ];
 
 const THEME_COMMANDS: CommandSpec[] = [
@@ -780,6 +788,7 @@ const PALETTE_ALIASES: Record<string, string> = {
   "repo.clone": "clone",
   "repo.create": "init 初始化仓库",
   "repo.copyPath": "copy path 仓库路径",
+  "project.manage": "project workspace manifest 管理项目 项目清单 多仓库 cliora",
   "theme.light": "theme light 主题 亮色 白天",
   "theme.dark": "theme dark 主题 暗色 夜间",
   "theme.system": "theme system auto 主题 自动",

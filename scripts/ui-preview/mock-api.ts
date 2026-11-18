@@ -641,6 +641,25 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     ? Array.from({ length: 60 }, (_, index) => `${root}/${index === 48 ? "a-long-platform-directory-for-candidate-preview/" : ""}team-${index}/service-${index}`)
     : ["/work/discovered/service-one", "/work/discovered/service-two"]), partial: false, cancelled: false }),
   workspaceCancelDiscovery: () => ok(undefined),
+  workspaceDelete: (id: string) => {
+    const index = projectData.projects.findIndex((p) => p.manifest.workspaceId === id);
+    if (index < 0) return Promise.reject({ code: "workspace", message: "项目不存在" });
+    projectData.projects.splice(index, 1);
+    return workspaceResult();
+  },
+  workspacePreviewLink: (url: string) => {
+    if (!url.startsWith("twiglane://workspace?") && !url.startsWith("twiglane://workspace/?")) {
+      return Promise.reject({ code: "workspace", message: "项目清单链接格式无效" });
+    }
+    const query = url.slice(url.indexOf("?") + 1);
+    const params = new URLSearchParams(query);
+    const file = params.get("file");
+    if (params.get("v") !== "1" || !file || !file.endsWith(".dev-workspace.json")) {
+      return Promise.reject({ code: "workspace", message: "请选择绝对路径的 *.dev-workspace.json 项目清单" });
+    }
+    return ok({ path: file, manifest: projectData.projects[0]?.manifest, digest: "mock-preview-digest", conflict: previewParams.get("projects") === "conflict" });
+  },
+  workspaceOpenInCliora: (_path: string) => ok(undefined, 20),
   detectGit: () => ok(previewGit),
   setGitExecutable: () => ok({}),
   clearGitExecutable: () => ok({}),

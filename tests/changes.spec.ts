@@ -2638,11 +2638,16 @@ describe("文件列表的目录分组和行数", () => {
     expect(await screen.findByRole("button", { name: "下一个未审阅文件" })).toBeTruthy();
     document.body.innerHTML = "";
 
-    // 正在隐藏已审阅：辅助条强制展开，开关禁用并说明原因，恢复入口始终够得着。
+    // 正在隐藏已审阅：辅助条默认展开，仍允许用户手动收起与重新展开。
     render(FileList, { props: { ...props, hideReviewed: true } });
     const pinned = screen.getByRole("button", { name: "审阅工具" }) as HTMLButtonElement;
-    expect(pinned.disabled).toBe(true);
+    expect(pinned.disabled).toBe(false);
     expect(await screen.findByRole("button", { name: "隐藏已审阅" })).toBeTruthy();
+    await fireEvent.click(pinned);
+    expect(screen.queryByRole("button", { name: "隐藏已审阅" })).toBeNull();
+    expect(pinned.getAttribute("data-active")).toBe("true");
+    await fireEvent.click(pinned);
+    expect(screen.getByRole("button", { name: "隐藏已审阅" })).toBeTruthy();
     document.body.innerHTML = "";
 
     // 静止无进度：主工具行只有搜索、计数、开关与排列切换；点开关按需展开。
@@ -2803,6 +2808,12 @@ describe("行选暂存（R6）", () => {
     expect(document.querySelector("[data-line-count]")?.textContent).toContain("2");
     expect(screen.getByRole("button", { name: "全选可选行" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "全选可选行" }).getAttribute("title")).toContain("已经选中全部可选行");
+
+    // 焦点留在工具栏按钮上时按 Esc，同样退出选行模式并清空已选行。
+    toggle.focus();
+    await fireEvent.keyDown(toggle, { key: "Escape" });
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    expect(document.querySelector("[data-line-count]")).toBeNull();
   });
 
   it("选行模式可直接点击新增或删除行，再次点击取消", async () => {

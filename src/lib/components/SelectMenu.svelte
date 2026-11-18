@@ -52,6 +52,8 @@
     text?: string;
     /** 在触发按钮上点一个提示点（例如名单有问题）。 */
     dot?: boolean;
+    /** 放在标题栏交互槽位时标上 data-titlebar-control：既走内收焦点环，也不参与窗口拖拽。 */
+    titlebarControl?: boolean;
     title?: string;
     width?: number;
     searchPlaceholder?: string;
@@ -73,6 +75,7 @@
     icon,
     text,
     dot = false,
+    titlebarControl = false,
     title,
     width = 360,
     searchPlaceholder = "搜索",
@@ -144,6 +147,7 @@
   <button
     type="button"
     class="select-menu-trigger"
+    data-titlebar-control={titlebarControl ? "" : undefined}
     aria-label={label}
     aria-haspopup="listbox"
     aria-expanded={open}

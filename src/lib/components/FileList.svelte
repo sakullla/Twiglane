@@ -135,9 +135,9 @@
    */
   let reviewToolsOpen = $state(false);
   $effect(() => {
-    if (reviewReviewed > 0) reviewToolsOpen = true;
+    if (reviewReviewed > 0 || hideReviewed) reviewToolsOpen = true;
   });
-  let reviewToolsShown = $derived(reviewToolsOpen || hideReviewed);
+  let reviewToolsShown = $derived(reviewToolsOpen);
   let groups = $derived(groupFiles(files));
   let conflictedRows = $derived(filterRows(groups.conflicted, query));
   let unstagedRows = $derived(filterRows(groups.unstaged, query));
@@ -471,14 +471,14 @@
     <button
       type="button"
       class="icon-btn sm review-tools-toggle"
+      data-active={hideReviewed && !reviewToolsShown ? "true" : undefined}
       aria-expanded={reviewToolsShown}
       aria-label="审阅工具"
-      title={hideReviewed
-        ? "已隐藏已审阅的文件：先在下方恢复显示"
-        : reviewToolsShown
-          ? "收起审阅工具（未审阅跳转、隐藏已审阅）"
+      title={reviewToolsShown
+        ? "收起审阅工具（未审阅跳转、隐藏已审阅）"
+        : hideReviewed
+          ? "展开审阅工具（当前已隐藏已审阅文件）"
           : "展开审阅工具：未审阅跳转、隐藏已审阅"}
-      disabled={hideReviewed}
       onclick={() => (reviewToolsOpen = !reviewToolsOpen)}
     >
       <Icon name="chevron-down" size={14} class={reviewToolsShown ? "flip" : ""} />

@@ -183,6 +183,27 @@ describe("还原提示", () => {
     expect(mergeNotice(0, true, "revert", false)?.text).toBe("还原停在后续目标，可以中止");
     expect(mergeNotice(0, true, "revert", false)?.label).toContain("打开还原");
   });
+
+  it("变基与拣选显示各自的操作文案和中止标签，不混写成合并", () => {
+    expect(mergeNotice(3, true, "rebase")?.text).toBe("3 个变基冲突待处理");
+    expect(mergeNotice(0, true, "rebase")?.text).toBe("可以继续变基");
+    expect(mergeNotice(3, true, "rebase")?.label).toContain("变基进行中");
+    expect(mergeNotice(1, true, "cherry-pick")?.text).toBe("1 个拣选冲突待处理");
+    expect(mergeNotice(0, true, "cherry-pick")?.text).toBe("可以继续拣选");
+    expect(mergeNotice(1, true, "cherry-pick")?.label).toContain("拣选进行中");
+
+    const rebaseView = render(MergeBanner, {
+      props: { conflictCount: 1, mergeInProgress: true, operation: "rebase", canAbort: true, onOpen: vi.fn(), onAbort: vi.fn() },
+    });
+    expect(rebaseView.container.querySelector("[data-merge-abort]")?.getAttribute("aria-label")).toBe("中止变基");
+    rebaseView.unmount();
+
+    const pickView = render(MergeBanner, {
+      props: { conflictCount: 0, mergeInProgress: true, operation: "cherry-pick", canAbort: true, onOpen: vi.fn(), onAbort: vi.fn() },
+    });
+    expect(pickView.container.querySelector("[data-merge-banner]")?.textContent).toContain("可以继续拣选");
+    expect(pickView.container.querySelector("[data-merge-abort]")?.getAttribute("aria-label")).toBe("中止拣选");
+  });
 });
 
 describe("合并面板", () => {

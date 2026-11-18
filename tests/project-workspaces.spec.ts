@@ -3,9 +3,29 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CheckoutContexts } from "../src/lib/checkout-context";
 import { addCandidates, checkoutKey, projectMemberForCheckout, projectRepos, type Project, type Projects, type WorkspaceManifest } from "../src/lib/workspaces";
 import { buildWorktreeGroups } from "../src/lib/recent";
-const mocks = vi.hoisted(() => ({ create: vi.fn(), update: vi.fn(), preview: vi.fn(), attach: vi.fn(), favorite: vi.fn(), discover: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  create: vi.fn(),
+  update: vi.fn(),
+  preview: vi.fn(),
+  attach: vi.fn(),
+  favorite: vi.fn(),
+  discover: vi.fn(),
+  remove: vi.fn(),
+  openInCliora: vi.fn(),
+  repoHeads: vi.fn(),
+}));
 vi.mock("../src/lib/api", () => ({
-  api: { workspaceCreate: mocks.create, workspaceUpdate: mocks.update, workspacePreview: mocks.preview, workspaceAttach: mocks.attach, workspaceFavorite: mocks.favorite, workspaceDiscover: mocks.discover },
+  api: {
+    workspaceCreate: mocks.create,
+    workspaceUpdate: mocks.update,
+    workspacePreview: mocks.preview,
+    workspaceAttach: mocks.attach,
+    workspaceFavorite: mocks.favorite,
+    workspaceDiscover: mocks.discover,
+    workspaceDelete: mocks.remove,
+    workspaceOpenInCliora: mocks.openInCliora,
+    repoHeads: mocks.repoHeads,
+  },
   pickFile: vi.fn(async () => "/work/project.dev-workspace.json"), pickDirectories: vi.fn(async () => ["/work/new-repo"]), pickDirectory: vi.fn(async () => "/work"), saveWorkspaceFile: vi.fn(async () => "/work/new.dev-workspace.json"),
 }));
 import ProjectManager from "../src/lib/components/ProjectManager.svelte";
@@ -182,4 +202,120 @@ it("返修：60 个发现候选可按名称和完整路径搜索，隐藏的多�
   await waitFor(() => expect(mocks.update).toHaveBeenCalled());
   expect(mocks.update.mock.calls[0][0].repositories).toHaveLength(59);
   expect(mocks.update.mock.calls[0][0].repositories.some((repo: { locations: { path: string }[] }) => repo.locations[0].path.includes("team-48/"))).toBe(false);
+});
+
+describe("项目管理生命周期、筛选、打开与深链预览一次性消费", () => {
+  it("成员按收藏置前，识别缺失目录并提供筛选胶囊、多词搜索、直接打开与在 Cliora 打开", async () => {
+    const p: Project = {
+      manifest: {
+        schemaVersion: 1,
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        name: "共享平台",
+        revision: 2,
+        repositories: [
+          { id: "repo-curr", name: "alpha-current", locations: [{ hostId: host, path: "/work/alpha" }] },
+          { id: "repo-gone", name: "beta-missing", locations: [{ hostId: host, path: "/work/gone" }] },
+          { id: "repo-fav", name: "gamma-fav", locations: [{ hostId: host, path: "/work/platform/gamma" }] },
+        ],
+      },
+      sourcePath: "/work/shared.dev-workspace.json",
+      digest: "d1",
+      error: null,
+      favorites: ["repo-fav"],
+      bindings: {},
+    };
+    mocks.repoHeads.mockResolvedValue([
+      { path: "/work/alpha", mainPath: null, branch: "main", detached: null, missing: false, worktree: false },
+      { path: "/work/gone", mainPath: null, branch: null, detached: null, missing: true, worktree: false },
+      { path: "/work/platform/gamma", mainPath: null, branch: "main", detached: null, missing: false, worktree: false },
+    ]);
+    mocks.openInCliora.mockResolvedValue(undefined);
+    const onOpenRepo = vi.fn();
+    render(ProjectManager, {
+      data: { hostId: host, projects: [p] },
+      selectedId: p.manifest.workspaceId,
+      currentPath: "/work/alpha",
+      nextId: () => 1,
+      onData: vi.fn(),
+      onSelect: vi.fn(),
+      onOpenRepo,
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => expect(screen.getByText(/目录不存在，请重新关联/)).toBeTruthy());
+    // 收藏置前：gamma-fav 排在第一位，其余保持清单顺序。
+    const items = [...document.querySelectorAll(".project-member")];
+    expect(items.map((el) => el.querySelector("strong")?.textContent)).toEqual(["gamma-fav", "alpha-current", "beta-missing"]);
+    expect(items[1].querySelector(".pm-current-badge")?.textContent).toBe("当前");
+    expect(items[2].classList.contains("broken")).toBe(true);
+
+    // 筛选胶囊：待处理只留缺失目录项，再点恢复全部。
+    const filters = screen.getByRole("group", { name: "筛选项目成员" });
+    await fireEvent.click(within(filters).getByRole("button", { name: /待处理 1/ }));
+    expect([...document.querySelectorAll(".project-member strong")].map((el) => el.textContent)).toEqual(["beta-missing"]);
+    await fireEvent.click(within(filters).getByRole("button", { name: /全部 3/ }));
+
+    // 多词跨名称与路径匹配 + 清空按钮。
+    const search = screen.getByRole("textbox", { name: "搜索项目仓库" }) as HTMLInputElement;
+    await fireEvent.input(search, { target: { value: "platform gamma" } });
+    expect([...document.querySelectorAll(".project-member strong")].map((el) => el.textContent)).toEqual(["gamma-fav"]);
+    await fireEvent.click(screen.getByRole("button", { name: "清空搜索" }));
+    expect(search.value).toBe("");
+    expect(document.querySelectorAll(".project-member")).toHaveLength(3);
+
+    // 在 Cliora 打开共享清单 + 打开某个成员仓库。
+    await fireEvent.click(screen.getByRole("button", { name: "在 Cliora 打开" }));
+    await waitFor(() => expect(mocks.openInCliora).toHaveBeenCalledWith("/work/shared.dev-workspace.json"));
+    await fireEvent.click(screen.getByRole("button", { name: "打开 gamma-fav" }));
+    expect(onOpenRepo).toHaveBeenCalledWith("/work/platform/gamma");
+  });
+
+  it("移除本地项目与取消关联共享清单均需明确确认，且切换选中项目", async () => {
+    const shared: Project = { ...project(1), sourcePath: "/work/shared.dev-workspace.json", digest: "d1" };
+    const local: Project = {
+      ...project(1),
+      manifest: { ...project(1).manifest, workspaceId: "99999999-9999-4999-8999-999999999999", name: "本机项目" },
+    };
+    const nextData: Projects = { hostId: host, projects: [local] };
+    mocks.remove.mockResolvedValue(nextData);
+    mocks.repoHeads.mockResolvedValue([]);
+    const onData = vi.fn();
+    const onSelect = vi.fn();
+    render(ProjectManager, {
+      data: { hostId: host, projects: [shared, local] },
+      selectedId: shared.manifest.workspaceId,
+      nextId: () => 1,
+      onData,
+      onSelect,
+      onClose: vi.fn(),
+    });
+
+    await fireEvent.click(screen.getByRole("button", { name: "取消关联清单" }));
+    const confirmRegion = screen.getByRole("region", { name: "确认取消关联清单" });
+    expect(confirmRegion.textContent).toContain(".dev-workspace.json");
+    expect(mocks.remove).not.toHaveBeenCalled();
+    await fireEvent.click(within(confirmRegion).getByRole("button", { name: "确认取消关联" }));
+    await waitFor(() => expect(mocks.remove).toHaveBeenCalledWith(shared.manifest.workspaceId));
+    expect(onData).toHaveBeenCalledWith(nextData);
+    expect(onSelect).toHaveBeenCalledWith(local.manifest.workspaceId);
+  });
+
+  it("initialPreview 交给弹窗后立即消费父层意图，关闭预览后不会残留", async () => {
+    const p = project(1);
+    mocks.repoHeads.mockResolvedValue([]);
+    const onConsumeInitialPreview = vi.fn();
+    render(ProjectManager, {
+      data: { hostId: host, projects: [] },
+      selectedId: null,
+      initialPreview: { manifest: p.manifest, path: "/work/incoming.dev-workspace.json", digest: "obs", conflict: false },
+      nextId: () => 1,
+      onData: vi.fn(),
+      onSelect: vi.fn(),
+      onConsumeInitialPreview,
+      onClose: vi.fn(),
+    });
+    expect(await screen.findByRole("region", { name: "项目清单预览" })).toBeTruthy();
+    expect(onConsumeInitialPreview).toHaveBeenCalledTimes(1);
+    expect(mocks.attach).not.toHaveBeenCalled();
+  });
 });

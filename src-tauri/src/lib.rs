@@ -118,6 +118,9 @@ pub fn run() {
             workspace_candidates,
             workspace_discover,
             workspace_cancel_discovery,
+            workspace_delete,
+            workspace_preview_link,
+            workspace_open_in_cliora,
             add_repository,
             create_repository,
             open_repository,
@@ -3117,4 +3120,18 @@ async fn workspace_discover(state: State<'_, Arc<Backend>>, discovery: State<'_,
 #[tauri::command]
 fn workspace_cancel_discovery(discovery: State<'_, Arc<workspaces::Discovery>>) {
     discovery.0.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+#[tauri::command]
+async fn workspace_delete(state: State<'_, Arc<Backend>>, id: String) -> Result<workspaces::Projects, AppError> {
+    let backend = Arc::clone(state.inner());
+    workspace_io(move || workspaces::delete(&backend.store, &id)).await
+}
+#[tauri::command]
+async fn workspace_preview_link(state: State<'_, Arc<Backend>>, url: String) -> Result<workspaces::Preview, AppError> {
+    let backend = Arc::clone(state.inner());
+    workspace_io(move || workspaces::preview_link(&backend.store, &url)).await
+}
+#[tauri::command]
+fn workspace_open_in_cliora<R: Runtime>(app: AppHandle<R>, path: String) -> Result<(), AppError> {
+    workspaces::open_in_cliora(&app, &path)
 }

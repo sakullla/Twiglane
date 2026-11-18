@@ -63,6 +63,8 @@
 
   let dotClass = $derived(degraded || warning ? "stale" : hasRepo ? "" : "off");
   let revert = $derived(mergeOperation === "revert");
+  let rebase = $derived(mergeOperation === "rebase");
+  let cherryPick = $derived(mergeOperation === "cherry-pick");
   let notice = $derived(
     hasRepo && sidebarHidden && onOpenMerge
       ? mergeNotice(conflictCount, mergeInProgress, mergeOperation, mergeCanContinue)
@@ -109,10 +111,10 @@
       class="sb-item sb-merge"
       data-merge-status
       aria-label={notice.label}
-      title={revert ? "打开还原继续处理" : "打开分支合并继续处理"}
+      title={revert ? "打开还原继续处理" : rebase ? "打开变基继续处理" : cherryPick ? "打开拣选继续处理" : "打开分支合并继续处理"}
       onclick={onOpenMerge}
     >
-      <Icon name={revert ? "undo" : "merge"} size={12} />
+      <Icon name={revert ? "undo" : cherryPick ? "commit" : "merge"} size={12} />
       <span>{notice.text}</span>
     </button>
   {/if}

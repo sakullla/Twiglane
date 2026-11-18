@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 const MAX_REVISION: u64 = 9_007_199_254_740_991;
 const MAX_MANIFEST: u64 = 8 * 1024 * 1024;
+const MAX_WORKSPACE_URL_LEN: usize = 16_384;
+const WORKSPACE_HOST: &str = "workspace";
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManifestLocation {
@@ -329,6 +331,138 @@ pub fn create(store: &AppStore, title: &str) -> Result<Projects, AppError> {
         Ok(())
     })?;
     list(store)
+}
+pub fn delete(store: &AppStore, id: &str) -> Result<Projects, AppError> {
+    store.update(|state| {
+        let index = project_index(state, id)?;
+        state.workspaces.remove(index);
+        Ok(())
+    })?;
+    list(store)
+}
+fn decode_percent(raw: &str) -> Result<String, AppError> {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = bytes
+                .get(index + 1..index + 3)
+                .ok_or_else(|| failure("项目清单链接里的百分号编码不完整"))?;
+            let text = std::str::from_utf8(hex)
+                .map_err(|_| failure("项目清单链接里的百分号编码不完整"))?;
+            let byte = u8::from_str_radix(text, 16)
+                .map_err(|_| failure("项目清单链接里的百分号编码不合法"))?;
+            out.push(byte);
+            index += 3;
+            continue;
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(out).map_err(|_| failure("项目清单链接里的百分号编码不是合法 UTF-8"))
+}
+fn encode_percent(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+fn parse_workspace_link_with_scheme(url: &str, expected_scheme: &str) -> Result<String, AppError> {
+    if url.len() > MAX_WORKSPACE_URL_LEN {
+        return Err(failure("项目清单链接超过长度上限"));
+    }
+    if url.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+        return Err(failure("项目清单链接含控制字符或未编码空格"));
+    }
+    if url.contains('#') {
+        return Err(failure("项目清单链接不接受 fragment"));
+    }
+    let rest = url
+        .strip_prefix(expected_scheme)
+        .and_then(|tail| tail.strip_prefix("://"))
+        .ok_or_else(|| failure("项目清单链接协议不受支持"))?;
+    let (host, query) = rest
+        .split_once('?')
+        .ok_or_else(|| failure("项目清单链接缺少查询参数"))?;
+    if host.strip_suffix('/').unwrap_or(host) != WORKSPACE_HOST || query.contains('?') {
+        return Err(failure("项目清单链接目标不是 workspace 或格式无效"));
+    }
+    let mut version: Option<String> = None;
+    let mut file: Option<String> = None;
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            return Err(failure("项目清单链接含空查询参数"));
+        }
+        let (raw_key, raw_value) = pair
+            .split_once('=')
+            .ok_or_else(|| failure("项目清单链接查询参数缺少键值分隔"))?;
+        match raw_key {
+            "v" => {
+                if version.is_some() {
+                    return Err(failure("项目清单链接含重复参数 v"));
+                }
+                version = Some(decode_percent(raw_value)?);
+            }
+            "file" => {
+                if file.is_some() {
+                    return Err(failure("项目清单链接含重复参数 file"));
+                }
+                file = Some(decode_percent(raw_value)?);
+            }
+            _ => return Err(failure("项目清单链接含协议之外的参数")),
+        }
+    }
+    if version.as_deref() != Some("1") {
+        return Err(failure("仅支持 v=1 项目清单链接"));
+    }
+    let file = file.filter(|value| !value.is_empty()).ok_or_else(|| {
+        failure("项目清单链接缺少 file 参数")
+    })?;
+    if file.len() > MAX_WORKSPACE_URL_LEN
+        || file.chars().any(char::is_control)
+        || file.starts_with('~')
+        || !absolute_location_path(&file)
+        || !Path::new(&file).is_absolute()
+    {
+        return Err(failure("项目清单链接里的文件路径必须是本机绝对路径"));
+    }
+    Ok(file)
+}
+pub fn parse_workspace_url(url: &str) -> Result<String, AppError> {
+    parse_workspace_link_with_scheme(url, "twiglane")
+}
+/// Preview-only deep-link entry (`twiglane://workspace?v=1&file=<abs-path>`).
+/// Never auto-adopts a manifest or executes Git.
+pub fn preview_link(store: &AppStore, url: &str) -> Result<Preview, AppError> {
+    let file = parse_workspace_url(url)?;
+    preview(store, &file)
+}
+pub fn build_cliora_workspace_url(path: &str) -> Result<String, AppError> {
+    let canonical = canonical_source(path, false)?;
+    if fs::symlink_metadata(&canonical).is_ok_and(|metadata| !metadata.file_type().is_file()) {
+        return Err(failure("项目清单来源已变化，需重新选择普通文件"));
+    }
+    let file = text(&canonical).map_err(failure)?;
+    let url = format!("cliora://workspace?v=1&file={}", encode_percent(&file));
+    parse_workspace_link_with_scheme(&url, "cliora")?;
+    Ok(url)
+}
+pub fn open_in_cliora<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    path: &str,
+) -> Result<(), AppError> {
+    let url = build_cliora_workspace_url(path)?;
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(&url, None::<&str>)
+        .map_err(|error| AppError::new("cliora_unavailable", format!("无法唤起 cliora：{error}")))
 }
 pub fn preview(store: &AppStore, path: &str) -> Result<Preview, AppError> {
     let path = canonical_source(path, false)?;
@@ -1247,5 +1381,122 @@ mod tests {
                 .len(),
             2
         );
+    }
+    #[test]
+    fn delete_removes_only_target_workspace_and_preserves_manifest_repo_and_drafts() {
+        let dir = TempDir::new("workspace-delete");
+        let store = store(&dir);
+        let root = dir.path().join("repo");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join("README.md"), "keep\n").unwrap();
+        let host = host_id_for(&store).unwrap();
+        let mut shared = manifest();
+        shared.repositories.truncate(1);
+        shared.repositories[0].locations = vec![ManifestLocation {
+            host_id: host.clone(),
+            path: text(&root).unwrap(),
+        }];
+        let source = write_source(&dir, &shared);
+        let source_bytes = fs::read(&source).unwrap();
+        attach(
+            &store,
+            preview(&store, source.to_str().unwrap()).unwrap(),
+            false,
+        )
+        .unwrap();
+        let after_local = create(&store, "keep-local").unwrap();
+        let local_id = after_local.projects[1].manifest.workspace_id.clone();
+        store
+            .save_draft(&text(&root).unwrap(), "preserved commit draft")
+            .unwrap();
+
+        assert!(delete(&store, "missing-workspace-id").is_err());
+        let remaining = delete(&store, &shared.workspace_id).unwrap();
+        assert_eq!(remaining.projects.len(), 1);
+        assert_eq!(remaining.projects[0].manifest.workspace_id, local_id);
+        assert_eq!(fs::read(&source).unwrap(), source_bytes);
+        assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), "keep\n");
+        assert_eq!(store.draft(&text(&root).unwrap()), "preserved commit draft");
+
+        // Removing the workspace retires its binding claim so another workspace can adopt a new ID for that checkout.
+        let mut rebound = remaining.projects[0].manifest.clone();
+        rebound.repositories = vec![ManifestRepository {
+            id: Uuid::new_v4().to_string(),
+            name: "rebound".into(),
+            locations: vec![ManifestLocation {
+                host_id: host,
+                path: text(&root).unwrap(),
+            }],
+        }];
+        update(&store, rebound, 1).unwrap();
+    }
+    #[test]
+    fn workspace_preview_link_validates_strictly_never_auto_adopts_and_builds_cliora_url() {
+        let dir = TempDir::new("workspace-link");
+        let store = store(&dir);
+        let initial = manifest();
+        let plus_dir = dir.path().join("c++ team");
+        fs::create_dir_all(&plus_dir).unwrap();
+        let path = plus_dir.join("shared+v1.dev-workspace.json");
+        fs::write(&path, serde_json::to_vec_pretty(&initial).unwrap()).unwrap();
+        let canonical = dunce::canonicalize(&path).unwrap();
+        let encoded = encode_percent(canonical.to_str().unwrap());
+
+        for valid in [
+            format!("twiglane://workspace?v=1&file={encoded}"),
+            format!("twiglane://workspace/?file={encoded}&v=1"),
+        ] {
+            let observed = preview_link(&store, &valid).unwrap();
+            assert_eq!(observed.manifest, initial);
+            assert_eq!(observed.path, canonical.to_str().unwrap());
+            assert!(
+                store.snapshot().workspaces.is_empty(),
+                "preview_link must never auto-adopt"
+            );
+        }
+
+        // Literal '+' in query stays '+' when unencoded.
+        let literal_plus = encoded.replace("%2B", "+").replace("%2b", "+");
+        let observed_plus = preview_link(
+            &store,
+            &format!("twiglane://workspace?v=1&file={literal_plus}"),
+        )
+        .unwrap();
+        assert_eq!(observed_plus.path, canonical.to_str().unwrap());
+
+        for invalid in [
+            format!("cliora://workspace?v=1&file={encoded}"),
+            format!("https://workspace?v=1&file={encoded}"),
+            format!("twiglane://review?v=1&file={encoded}"),
+            format!("twiglane://workspace/extra?v=1&file={encoded}"),
+            format!("twiglane://user@workspace?v=1&file={encoded}"),
+            format!("twiglane://workspace:8080?v=1&file={encoded}"),
+            format!("twiglane://workspace?v=2&file={encoded}"),
+            format!("twiglane://workspace?file={encoded}"),
+            "twiglane://workspace?v=1".to_string(),
+            format!("twiglane://workspace?v=1&v=1&file={encoded}"),
+            format!("twiglane://workspace?v=1&file={encoded}&file={encoded}"),
+            format!("twiglane://workspace?v=1&file={encoded}&adopt=1"),
+            format!("twiglane://workspace?v=1&file={encoded}#frag"),
+            format!("twiglane://workspace?v=1&file={} raw", encoded),
+            format!("twiglane://workspace?v=1&file={encoded}\n"),
+            "twiglane://workspace?v=1&file=relative.dev-workspace.json".to_string(),
+            "twiglane://workspace?v=1&file=~/shared.dev-workspace.json".to_string(),
+            "twiglane://workspace?v=1&file=%ZZ".to_string(),
+            format!("twiglane://workspace?v=1&file={}", "a".repeat(16_385)),
+        ] {
+            assert!(preview_link(&store, &invalid).is_err(), "{invalid}");
+        }
+        assert!(store.snapshot().workspaces.is_empty());
+
+        let outbound = build_cliora_workspace_url(path.to_str().unwrap()).unwrap();
+        assert!(outbound.starts_with("cliora://workspace?v=1&file="));
+        assert_eq!(
+            parse_workspace_link_with_scheme(&outbound, "cliora").unwrap(),
+            canonical.to_str().unwrap()
+        );
+        let non_manifest = plus_dir.join("notes.json");
+        fs::write(&non_manifest, "{}").unwrap();
+        assert!(build_cliora_workspace_url(non_manifest.to_str().unwrap()).is_err());
     }
 }

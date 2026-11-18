@@ -126,7 +126,7 @@
   import ProjectManager from "./lib/components/ProjectManager.svelte";
   import SelectMenu, { type SelectMenuOption } from "./lib/components/SelectMenu.svelte";
   import { projectInitial } from "./lib/workspaces";
-  import { checkoutKey, projectMemberForCheckout, projectRepos, type Projects } from "./lib/workspaces";
+  import { checkoutKey, projectMemberForCheckout, projectRepos, type Projects, type WorkspacePreview } from "./lib/workspaces";
   import { CheckoutContexts } from "./lib/checkout-context";
   import RepoSwitcher from "./lib/components/RepoSwitcher.svelte";
   import ScopeModal from "./lib/components/ScopeModal.svelte";
@@ -175,8 +175,11 @@
   let projects = $state<Projects>({ hostId: "", projects: [] });
   let selectedProjectId = $state<string | null>(null);
   let projectManagerOpen = $state(false);
+  let projectInitialPreview = $state<WorkspacePreview | null>(null);
   let projectFailure = $state<string | null>(null);
   let projectsSerial = 0;
+  let lastProjectsLoadAt = 0;
+  const PROJECT_FOCUS_THROTTLE_MS = 3_000;
   const selectedProject = $derived(projects.projects.find((p) => p.manifest.workspaceId === selectedProjectId) ?? null);
   /** 标题栏项目下拉：「全部仓库」在前，项目带首字徽章、仓库数与来源。 */
   const projectMenuOptions = $derived<SelectMenuOption[]>([
@@ -208,6 +211,7 @@
   });
   async function loadProjects(refresh = false) {
     const serial = ++projectsSerial;
+    lastProjectsLoadAt = Date.now();
     try {
       let next = await api.workspaceList();
       if (refresh) for (const project of next.projects.filter((p) => p.sourcePath)) {
@@ -216,10 +220,27 @@
       }
       if (serial !== projectsSerial) return;
       projects = next;
+      lastProjectsLoadAt = Date.now();
+      if (selectedProjectId !== null && !next.projects.some((p) => p.manifest.workspaceId === selectedProjectId)) {
+        selectedProjectId = null;
+      }
       projectFailure = null;
     } catch (error) { if (serial === projectsSerial) projectFailure = normalizeError(error).message; }
   }
-  function acceptProjects(next: Projects) { projectsSerial += 1; projects = next; projectFailure = null; }
+  function acceptProjects(next: Projects) {
+    projectsSerial += 1;
+    lastProjectsLoadAt = Date.now();
+    projects = next;
+    if (selectedProjectId !== null && !next.projects.some((p) => p.manifest.workspaceId === selectedProjectId)) {
+      selectedProjectId = null;
+    }
+    projectFailure = null;
+  }
+  function refreshProjectsOnFocus() {
+    if (writeLocked || !projects.projects.some((p) => p.sourcePath)) return;
+    if (Date.now() - lastProjectsLoadAt < PROJECT_FOCUS_THROTTLE_MS) return;
+    void loadProjects(true);
+  }
   function selectProject(id: string | null) { selectedProjectId = id; if (id) void loadProjects(true); }
   function manageProjects() { closeSwitcher(); projectManagerOpen = true; void loadProjects(); }
   /** 项目下拉里「管理项目…」的哨兵值：选中它只打开管理弹窗，不改变当前项目。 */
@@ -676,7 +697,7 @@
       : null,
     draft,
     theme,
-    recentRepos: recent,
+    recentRepos: switcherRepos,
     currentRepoPath: opened?.summary.path ?? null,
   });
   /** 状态栏只给一句正在进行的动作：本地读取、远程网络与写入不共用「加载中」这种笼统说法（R6）。 */
@@ -970,6 +991,9 @@
         return;
       case "repo.create":
         void chooseCreate();
+        return;
+      case "project.manage":
+        manageProjects();
         return;
       case "theme.light":
       case "theme.dark":
@@ -2948,6 +2972,83 @@
   let clioraLinkSerial = 0;
   let clioraLinkQueue = Promise.resolve();
   let clioraSourcesNotice = $state("");
+  let reviewManagerOpen = $state(false);
+  let reviewManagerAnchor = $state<HTMLDivElement | null>(null);
+  let reviewManagerTrigger = $state<HTMLButtonElement | null>(null);
+  let reviewManagerStyle = $state("");
+
+  $effect(() => {
+    if (clioraReview.sources.length <= 1) reviewManagerOpen = false;
+  });
+
+  function measureReviewManager() {
+    if (!reviewManagerTrigger || typeof window === "undefined") return;
+    const MARGIN = 8;
+    const GAP = 6;
+    const rect = reviewManagerTrigger.getBoundingClientRect();
+    const fit = Math.min(560, window.innerWidth - MARGIN * 2);
+    const left = Math.max(MARGIN, Math.min(rect.right - fit, window.innerWidth - fit - MARGIN));
+    const top = Math.min(rect.bottom + GAP, Math.max(MARGIN, window.innerHeight - 160));
+    const maxHeight = Math.max(150, window.innerHeight - top - MARGIN);
+    reviewManagerStyle = `position:fixed;top:${top}px;left:${left}px;right:auto;width:${fit}px;max-height:${maxHeight}px`;
+  }
+
+  function closeReviewManager(refocus = true) {
+    if (!reviewManagerOpen) return;
+    reviewManagerOpen = false;
+    if (refocus) reviewManagerTrigger?.focus({ preventScroll: true });
+  }
+
+  function toggleReviewManager() {
+    if (reviewManagerOpen) {
+      closeReviewManager(true);
+      return;
+    }
+    measureReviewManager();
+    reviewManagerOpen = true;
+  }
+
+  $effect(() => {
+    if (!reviewManagerOpen || typeof window === "undefined") return;
+    const onOutside = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (!target || reviewManagerAnchor?.contains(target)) return;
+      closeReviewManager(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing || event.defaultPrevented) return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeReviewManager(true);
+    };
+    const onResize = () => measureReviewManager();
+    window.addEventListener("mousedown", onOutside, true);
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("mousedown", onOutside, true);
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("resize", onResize);
+    };
+  });
+
+  /**
+   * 入站 `twiglane://workspace?v=1&file=<abs-path>`：只请求预览，绝不自动关联或执行 Git。
+   * 交给 ProjectManager 后立即清除父层意图，关闭或关联后再重开不会复现旧预览。
+   */
+  async function handleWorkspaceLink(url: string) {
+    try {
+      const observed = await api.workspacePreviewLink(url);
+      closeSwitcher(false);
+      projectInitialPreview = observed;
+      projectManagerOpen = true;
+      void loadProjects();
+      live = `已预览项目清单 ${observed.manifest.name}`;
+    } catch (error) {
+      live = "项目清单链接无效，未修改任何项目或仓库。";
+      showError(error);
+    }
+  }
 
   /**
    * 本实例已处理过的 reviewId。冷启动的 getCurrent 与运行中的 onOpenUrl 可能对同一条
@@ -3793,7 +3894,7 @@
    * 这些层的状态分散在各组件里，所以看 modal 计数和 DOM，不逐个枚举。
    */
   function anyLayerOpen(): boolean {
-    return openModalCount() > 0 || document.querySelector(".menu, .popover, [role='menu']") !== null;
+    return openModalCount() > 0 || document.querySelector(".menu, .popover, .review-source-pop, [role='menu']") !== null;
   }
 
   /** 菜单事件没有按键目标，只看当前焦点是不是文本框。 */
@@ -4192,7 +4293,11 @@
     const onResize = () => {
       windowWidth = currentWindowWidth();
     };
+    const onWindowFocus = () => {
+      refreshProjectsOnFocus();
+    };
     window.addEventListener("resize", onResize);
+    window.addEventListener("focus", onWindowFocus);
     if (typeof window.matchMedia === "function") {
       const media = window.matchMedia(DARK_QUERY);
       const onChange = (event: MediaQueryListEvent) => {
@@ -4205,7 +4310,7 @@
       stopFocus = await listenEvent("window-focused", () => {
         windowFocused = true;
         void refresh();
-        void loadProjects(true);
+        refreshProjectsOnFocus();
       });
       stopBlur = await listenEvent("window-blurred", () => {
         windowFocused = false;
@@ -4245,6 +4350,10 @@
       })();
       clioraLinkQueue = restoreSources;
       stopClioraLink = await watchClioraReviewLinks((url) => {
+        if (url.startsWith("twiglane://workspace")) {
+          clioraLinkQueue = clioraLinkQueue.then(() => handleWorkspaceLink(url)).catch(showError);
+          return;
+        }
         clioraLinkQueue = clioraLinkQueue.then(() => handleClioraLink(url)).catch(showError);
       });
       await restoreSources;
@@ -4294,6 +4403,7 @@
       window.removeEventListener("keydown", keyListener);
       window.removeEventListener("keydown", scopedSelectAll);
       window.removeEventListener("resize", onResize);
+      window.removeEventListener("focus", onWindowFocus);
       window.clearInterval(poll);
       if (draftTimer) clearTimeout(draftTimer);
       stopFocus();
@@ -4321,6 +4431,7 @@
   <TitleBar
     repo={opened?.summary ?? null}
     branch={opened ? branchText : null}
+    detached={opened?.snapshot.branch.detached ?? false}
     {upstreamMissing}
     {ahead}
     {behind}
@@ -4367,6 +4478,7 @@
         <SelectMenu
           class={`project-chip${selectedProject ? " selected" : ""}${projectProblem ? " problem" : ""}`}
           variant="chip"
+          titlebarControl
           label="业务项目"
           icon="layers"
           value={selectedProjectId ?? ""}
@@ -4413,35 +4525,105 @@
           <bdi class="review-strip-path">{clioraReview.source.worktreePath}</bdi>
         </span>
       {/if}
-      {#if clioraSourcesNotice}<span class="review-strip-note" role="status">{clioraSourcesNotice}</span>{/if}
+      {#if clioraSourcesNotice}
+        <span class="review-strip-notice">
+          <span class="review-strip-note" role="status">{clioraSourcesNotice}</span>
+          <button
+            type="button"
+            class="icon-btn sm review-strip-dismiss"
+            aria-label="关闭审查提示"
+            title="关闭这条提示"
+            onclick={() => (clioraSourcesNotice = "")}
+          >
+            <Icon name="x" size={12} />
+          </button>
+        </span>
+      {/if}
       {#if clioraReview.lastReturn}<span class="review-strip-note">已保留上次返回尝试，接收结果以 Cliora 为准</span>{/if}
       <span class="spacer"></span>
+      {#if clioraReview.source && (clioraBaseline() !== null ? !(workspaceView === "history" && taskFocus) : workspaceView !== "history")}
+        <button
+          type="button"
+          class="btn btn-secondary btn-sm review-strip-jump"
+          aria-label="查看任务净差异"
+          title="回到 Cliora 审查起点范围，查看任务净差异"
+          onclick={() => openTaskReview(clioraBaseline())}
+        ><Icon name="file-diff" size={13} />任务净差异</button>
+      {/if}
       {#if clioraReview.source}
         <button class="btn btn-ghost btn-sm" disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : "关闭后仓库、阅读记录和草稿都保留"} onclick={() => void closeClioraReview()}>关闭此审查来源</button>
       {/if}
       {#if clioraReview.sources.length > 1}
-        <details class="review-source-manager">
-          <summary title="来源仅在本次运行保留；重启后请从 Cliora 重新发起。结果只属于对应仓库。">管理审查来源（{clioraReview.sources.length}）</summary>
-          <div class="review-source-pop">
-            <ul aria-label="全部审查来源">
-              {#each clioraReview.sources as source (source.reviewId)}
-                <li data-review-source-id={source.reviewId} class:current={clioraReview.source?.reviewId === source.reviewId}>
-                  <span class="review-source-text" title={source.worktreePath}>
-                    <strong>{clioraRepoName(source)}</strong>
-                    <small>{clioraProjectLabel(source)} · 会话 {source.sessionId.slice(0, 8)}{#if clioraRepeatLabel(source)} · {clioraRepeatLabel(source)}{/if} · 审查 {source.reviewId.slice(0, 8)}</small>
-                  </span>
-                  <button class="btn btn-ghost btn-sm" disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : undefined} onclick={() => void closeClioraReview(source.reviewId)} aria-label={`关闭审查来源 ${source.reviewId.slice(0, 8)}`}>关闭来源</button>
-                </li>
-              {/each}
-            </ul>
-            <small>{clioraReview.sources.length}/8 · 来源仅在本次运行保留；重启后请从 Cliora 重新发起。结果只属于对应仓库。</small>
-          </div>
-        </details>
+        <div class="review-source-manager" bind:this={reviewManagerAnchor}>
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm review-source-manager-trigger"
+            aria-haspopup="dialog"
+            aria-expanded={reviewManagerOpen}
+            title="来源仅在本次运行保留；重启后请从 Cliora 重新发起。结果只属于对应仓库。"
+            bind:this={reviewManagerTrigger}
+            onclick={toggleReviewManager}
+          >管理审查来源（{clioraReview.sources.length}）</button>
+          {#if reviewManagerOpen}
+            <div
+              class="review-source-pop"
+              role="dialog"
+              aria-label="管理审查来源"
+              tabindex="-1"
+              style={reviewManagerStyle}
+            >
+              <ul aria-label="全部审查来源">
+                {#each clioraReview.sources as source (source.reviewId)}
+                  <li data-review-source-id={source.reviewId} class:current={clioraReview.source?.reviewId === source.reviewId}>
+                    <button
+                      type="button"
+                      class="review-source-switch"
+                      disabled={writeLocked}
+                      title={writeLocked ? switchBlockedReason(commandState) : `切换到 ${source.worktreePath}`}
+                      onclick={() => {
+                        closeReviewManager(false);
+                        void chooseClioraReview(source.reviewId);
+                      }}
+                    >
+                      <span class="review-source-text" title={source.worktreePath}>
+                        <strong>{clioraRepoName(source)}</strong>
+                        <small>{clioraProjectLabel(source)} · 会话 {source.sessionId.slice(0, 8)}{#if clioraRepeatLabel(source)} · {clioraRepeatLabel(source)}{/if} · 审查 {source.reviewId.slice(0, 8)}</small>
+                      </span>
+                    </button>
+                    <button class="btn btn-ghost btn-sm" type="button" disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : undefined} onclick={() => void closeClioraReview(source.reviewId)} aria-label={`关闭审查来源 ${source.reviewId.slice(0, 8)}`}>关闭来源</button>
+                  </li>
+                {/each}
+              </ul>
+              <small>{clioraReview.sources.length}/8 · 来源仅在本次运行保留；重启后请从 Cliora 重新发起。结果只属于对应仓库。</small>
+            </div>
+          {/if}
+        </div>
       {/if}
     </div>
   {/if}
   {#snippet projectSwitcherNote()}<div class="project-switcher-note"><span>{selectedProject ? `${selectedProject.manifest.name} · ${selectedProject.manifest.repositories.length} 个仓库` : "最近使用 · 独立仓库"}</span><button class="btn btn-ghost btn-sm" onclick={manageProjects}><Icon name="settings" size={13} />管理项目</button></div>{/snippet}
-  {#if projectManagerOpen}<ProjectManager data={projects} selectedId={selectedProjectId} {nextId} onData={acceptProjects} onSelect={selectProject} onClose={() => projectManagerOpen = false} />{/if}
+  {#if projectManagerOpen}
+    <ProjectManager
+      data={projects}
+      selectedId={selectedProjectId}
+      currentPath={opened?.summary.path ?? null}
+      initialPreview={projectInitialPreview}
+      {nextId}
+      onData={acceptProjects}
+      onSelect={selectProject}
+      onOpenRepo={(path) => {
+        projectManagerOpen = false;
+        void openRecent(path);
+      }}
+      onConsumeInitialPreview={() => {
+        projectInitialPreview = null;
+      }}
+      onClose={() => {
+        projectInitialPreview = null;
+        projectManagerOpen = false;
+      }}
+    />
+  {/if}
   {#if switcher?.kind === "repo"}
     {#key `${selectedProjectId ?? "recent"}:${selectedProject?.manifest.revision ?? 0}`}
     <RepoSwitcher
@@ -4641,6 +4823,7 @@
                 />
                 <CommitDraft
                   branch={branchText}
+                  detached={opened.snapshot.branch.detached}
                   scope={scope.label}
                   paths={scope.paths}
                   value={draft}
@@ -4847,6 +5030,9 @@
       {:else}
         <Welcome
           {recent}
+          repos={selectedProject ? switcherRepos : undefined}
+          projectName={selectedProject?.manifest.name ?? null}
+          onProjects={manageProjects}
           disabled={writeLocked}
           disabledReason={writeLocked ? switchBlockedReason(commandState) : ""}
           diagnostic={gitDiagnostic}

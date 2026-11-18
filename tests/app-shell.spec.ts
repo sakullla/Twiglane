@@ -459,6 +459,7 @@ const ADDED_COMMAND_IDS = [
   "task.abortMerge",
   "branch.switch",
   "branch.create",
+  "project.manage",
   "terminal.toggle",
   "terminal.new",
 ];
@@ -483,6 +484,7 @@ const ADDED_COMMAND_TITLES = [
   "中止当前操作",
   "切换分支",
   "新建分支",
+  "业务项目",
   "终端",
   "新建终端",
 ];
@@ -3617,6 +3619,22 @@ describe("worktree 总览（R3）", () => {
     await fireEvent.keyDown(within(popover).getByRole("combobox"), { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "切换仓库" })).toBeNull());
   }
+
+  it("可搜索弹层有输入时第一次按 Esc 清空搜索词，再按一次才关闭弹层", async () => {
+    const main = "C:/work/esc-clear";
+    useRecent([{ name: "esc-clear", path: main, openedAtMs: 1 }]);
+    mocks.repoHeads.mockResolvedValue([]);
+    mocks.worktreeOverview.mockResolvedValue({ checkedAtMs: 1_700_001_000_000, items: [] });
+    const popover = await openSwitcher();
+    const search = within(popover).getByRole("combobox") as HTMLInputElement;
+    await fireEvent.input(search, { target: { value: "esc-clear" } });
+    expect(search.value).toBe("esc-clear");
+    await fireEvent.keyDown(search, { key: "Escape" });
+    expect(search.value).toBe("");
+    expect(screen.getByRole("dialog", { name: "切换仓库" })).toBe(popover);
+    await fireEvent.keyDown(search, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "切换仓库" })).toBeNull());
+  });
 
   it("扫描未完成时反复打开只读一次，完成后再打开仍刷新", async () => {
     const main = "C:/work/shared-scan";

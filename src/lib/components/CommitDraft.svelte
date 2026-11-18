@@ -49,6 +49,7 @@
    */
   interface Props {
     branch: string;
+    detached?: boolean;
     scope: string;
     paths: string[];
     value: string;
@@ -81,6 +82,7 @@
 
   let {
     branch,
+    detached = false,
     scope,
     paths,
     value,
@@ -529,6 +531,13 @@
           {retryingPush ? "正在重试推送…" : "重试推送"}
         </button>
       {/if}
+    </div>
+  {/if}
+
+  {#if detached}
+    <div class="composer-meta warn" data-commit-detached role="status">
+      <Icon name="info" size={12} />
+      <span class="truncate" title="当前处于游离 HEAD，新提交不会推进任何分支；需要保留时请新建分支">游离 HEAD：新提交不归属任何分支，需要保留请新建分支</span>
     </div>
   {/if}
 

@@ -37,6 +37,7 @@
   interface Props {
     repo: RepoSummary | null;
     branch: string | null;
+    detached?: boolean;
     upstreamMissing?: boolean;
     ahead?: number;
     behind?: number;
@@ -87,6 +88,7 @@
   let {
     repo,
     branch,
+    detached = false,
     upstreamMissing = false,
     ahead = 0,
     behind = 0,
@@ -143,7 +145,7 @@
   let hasWindowControl = $derived(platform === "windows");
   let branchText = $derived(branch ?? "无分支");
   let branchTitle = $derived(
-    `当前分支：${branchText}${upstreamMissing ? "（未关联上游）" : ""}\n点击切换分支`,
+    `当前分支：${branchText}${detached ? "（游离 HEAD）" : upstreamMissing ? "（未关联上游）" : ""}\n点击切换分支`,
   );
   let upstreamRemote = $derived(upstream ? upstream.slice(0, Math.max(0, upstream.indexOf("/"))) || null : null);
   let pushTarget = $derived(upstream ?? (remotes[0] ? `${remotes[0]}（发布）` : null));
@@ -182,7 +184,7 @@
       ? "进行中"
       : ahead > 0 || behind > 0
         ? `领先 ${ahead}，落后 ${behind}${remoteNote}`
-        : `${upstreamMissing ? "未关联上游" : "与上游一致"}${remoteNote}`,
+        : `${detached ? "游离 HEAD" : upstreamMissing ? "未关联上游" : "与上游一致"}${remoteNote}`,
   );
 
   $effect(() => {
@@ -318,7 +320,7 @@
       >
         <Icon name="branch" size={15} />
         <span class="truncate">{branchText}</span>
-        {#if upstreamMissing}<span class="branch-hint">未关联上游</span>{/if}
+        {#if detached}<span class="branch-hint">游离 HEAD</span>{:else if upstreamMissing}<span class="branch-hint">未关联上游</span>{/if}
         <Icon name="chevron-down" size={13} />
       </button>
     {/if}
@@ -549,5 +551,11 @@
   .cliora-return:hover:not(:disabled) {
     background: var(--accent-soft);
     border-color: var(--accent);
+  }
+
+  @media (max-width: 1120px) {
+    .cliora-result {
+      display: none;
+    }
   }
 </style>

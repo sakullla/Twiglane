@@ -614,6 +614,76 @@ describe("cliora v2 审查链接", () => {
     expect(clioraReview.sources.map(source => source.reviewId)).toEqual([REVIEW_A]);
   });
 
+  it("审查来源管理弹层支持点击条目切换、Esc 关闭归还焦点，且审查条支持一键回到任务净差异与关闭提示", async () => {
+    mocks.api.clioraReviewSources.mockResolvedValue({
+      sources: [
+        { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_A, sessionId: SESSION_A, worktreePath: WORKTREE, baseline: BASELINE }, result: null, lastReturn: null },
+        { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_B, sessionId: SESSION_B, worktreePath: OTHER_WORKTREE, baseline: COMMITTED }, result: null, lastReturn: null },
+      ],
+      expiredPending: 0,
+    });
+    mocks.api.openRepository.mockImplementation(async (path: string) => openedAt(path));
+    await mountShell();
+
+    // 恢复提示带可关闭按钮。
+    const dismiss = await screen.findByRole("button", { name: "关闭审查提示" });
+    await fireEvent.click(dismiss);
+    expect(screen.queryByRole("button", { name: "关闭审查提示" })).toBeNull();
+
+    // 打开管理弹层：Esc 关闭并把焦点归还给「管理审查来源（2）」按钮。
+    const trigger = screen.getByRole("button", { name: "管理审查来源（2）" });
+    await fireEvent.click(trigger);
+    expect(screen.getByRole("dialog", { name: "管理审查来源" })).toBeTruthy();
+    await fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "管理审查来源" })).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+
+    // 再次打开管理弹层，直接点击第二条来源切换工作树与审查来源。
+    await fireEvent.click(trigger);
+    const pop = screen.getByRole("dialog", { name: "管理审查来源" });
+    const rowB = pop.querySelector<HTMLElement>(`[data-review-source-id="${REVIEW_B}"] .review-source-switch`)!;
+    await fireEvent.click(rowB);
+    await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_B));
+    expect(screen.queryByRole("dialog", { name: "管理审查来源" })).toBeNull();
+
+    // 切换到「改动」视图后，审查条出现「查看任务净差异」，一键跳回任务净差异。
+    await fireEvent.click(screen.getByRole("button", { name: /^改动/ }));
+    const jump = await screen.findByRole("button", { name: "查看任务净差异" });
+    mocks.api.taskReview.mockClear();
+    await fireEvent.click(jump);
+    await waitFor(() => expect(mocks.api.taskReview).toHaveBeenCalledWith(OTHER_WORKTREE, COMMITTED, expect.anything(), expect.anything()));
+  });
+
+  it("twiglane://workspace 深链先走预览且不触发 clioraReviewRequest，关闭重开项目管理不会复现旧预览", async () => {
+    mocks.api.workspaceList.mockResolvedValue({ hostId: "11111111-1111-4111-8111-111111111111", projects: [] });
+    mocks.api.workspacePreviewLink.mockResolvedValue({
+      path: "/work/shared.dev-workspace.json",
+      digest: "digest-1",
+      conflict: false,
+      manifest: {
+        schemaVersion: 1,
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        name: "深链预览项目",
+        revision: 1,
+        repositories: [],
+      },
+    });
+    const handle = await mountShell();
+    handle(["twiglane://workspace?v=1&file=%2Fwork%2Fshared.dev-workspace.json"]);
+
+    const previewRegion = await screen.findByRole("region", { name: "项目清单预览" });
+    expect(within(previewRegion).getByText("深链预览项目")).toBeTruthy();
+    expect(mocks.api.clioraReviewRequest).not.toHaveBeenCalled();
+    expect(mocks.api.workspaceAttach).not.toHaveBeenCalled();
+
+    // 关闭项目管理弹窗后，再从起始页「业务项目」打开：旧预览已被消费，不会复现。
+    await fireEvent.keyDown(document.querySelector(".modal-card")!, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "业务项目" })).toBeNull());
+    await fireEvent.click(screen.getByRole("button", { name: "业务项目" }));
+    await screen.findByRole("dialog", { name: "业务项目" });
+    expect(screen.queryByRole("region", { name: "项目清单预览" })).toBeNull();
+  });
+
   it("同一会话对同一工作树重复发起时，下拉标出发起次序与审查号，不再出现两行一样的文字", async () => {
     mocks.api.clioraReviewSources.mockResolvedValue({ sources: [
       { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_A, sessionId: SESSION_A, worktreePath: WORKTREE, baseline: BASELINE }, result: null, lastReturn: null },

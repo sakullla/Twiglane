@@ -980,4 +980,15 @@ describe("cliora 审查接线", () => {
     expect(clioraReview.result).toBeNull();
     expect(clioraReview.source).toBeNull();
   });
+
+  it("业务项目删除、深链预览与在 Cliora 打开按结构化参数调用", async () => {
+    await api.workspaceDelete("ws-1");
+    expect(invoke).toHaveBeenLastCalledWith("workspace_delete", { id: "ws-1" });
+    await api.workspacePreviewLink("twiglane://workspace?v=1&file=%2Fwork%2Fshared.dev-workspace.json");
+    expect(invoke).toHaveBeenLastCalledWith("workspace_preview_link", {
+      url: "twiglane://workspace?v=1&file=%2Fwork%2Fshared.dev-workspace.json",
+    });
+    await api.workspaceOpenInCliora("/work/shared.dev-workspace.json");
+    expect(invoke).toHaveBeenLastCalledWith("workspace_open_in_cliora", { path: "/work/shared.dev-workspace.json" });
+  });
 });

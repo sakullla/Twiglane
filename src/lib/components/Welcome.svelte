@@ -15,6 +15,12 @@
    */
   interface Props {
     recent: RecentRepo[];
+    /** 选中业务项目时传入该项目的本机仓库列表；缺省展示最近仓库。 */
+    repos?: RecentRepo[];
+    /** 当前选中的业务项目名称；有值时分区标题与空状态按项目表达。 */
+    projectName?: string | null;
+    /** 打开业务项目管理弹窗。 */
+    onProjects?: () => void;
     disabled: boolean;
     /** 三个入口不可用的原因：写在入口下方，不只放在悬停提示里（R12）。 */
     disabledReason?: string;
@@ -28,6 +34,9 @@
   }
   let {
     recent,
+    repos,
+    projectName = null,
+    onProjects,
     disabled,
     disabledReason = "",
     onAdd,
@@ -40,17 +49,18 @@
   }: Props = $props();
   const LIMIT = 5;
   let query = $state("");
-  let searchable = $derived(recent.length > LIMIT);
+  let items = $derived(repos ?? recent);
+  let searchable = $derived(items.length > LIMIT);
   let searching = $derived(searchable && query.trim().length > 0);
-  let matches = $derived(searching ? filterRecent(recent, query) : recent);
+  let matches = $derived(searching ? filterRecent(items, query) : items);
   let shown = $derived(matches.slice(0, LIMIT));
   let badgeLetters = $derived(repoBadgeLetters(shown.map((repo) => repo.name)));
-  let sameNames = $derived(repeatedNames(recent));
+  let sameNames = $derived(repeatedNames(items));
   /* 同名仓库路径里的差异段：整组一起算公共前缀，各行只高亮自己与众不同的那一段。 */
   let divergences = $derived.by(() => {
     const map = new Map<string, { head: string; diverge: string; tail: string }>();
     const byName = new Map<string, string[]>();
-    for (const repo of recent) {
+    for (const repo of items) {
       if (!sameNames.has(repo.name)) continue;
       const list = byName.get(repo.name) ?? [];
       list.push(repo.path);
@@ -170,13 +180,13 @@
       {/if}
     {/if}
 
-    <section class="welcome-section" aria-label="最近仓库">
+    <section class="welcome-section" aria-label={projectName ? `项目仓库：${projectName}` : "最近仓库"}>
       <div class="welcome-section-head">
-        <h2>最近仓库</h2>
+        <h2>{projectName ? `${projectName} · 项目仓库` : "最近仓库"}</h2>
         {#if searchable}
           <div class="field sm welcome-search">
             <Icon name="search" size={14} />
-            <input id="welcome-search" aria-label="搜索最近仓库" placeholder="搜索名称或路径" autocomplete="off" spellcheck="false" bind:value={query} onkeydown={onSearchKey} />
+            <input id="welcome-search" aria-label={projectName ? "搜索项目仓库" : "搜索最近仓库"} placeholder="搜索名称或路径" autocomplete="off" spellcheck="false" bind:value={query} onkeydown={onSearchKey} />
             {#if query}
               <button type="button" class="field-clear" aria-label="清空搜索" onclick={() => (query = "")}>
                 <Icon name="x" size={12} />
@@ -184,15 +194,27 @@
             {/if}
           </div>
           <span class="hint" role="status" data-welcome-count>
-            {#if !searching}共 {recent.length} 个{:else if matches.length > shown.length}匹配 {matches.length} 个，显示前 {shown.length} 个{:else}匹配 {matches.length} 个{/if}
+            {#if !searching}共 {items.length} 个{:else if matches.length > shown.length}匹配 {matches.length} 个，显示前 {shown.length} 个{:else}匹配 {matches.length} 个{/if}
           </span>
-          {#if !searching && recent.length > shown.length}
+          {#if !searching && items.length > shown.length}
             <span class="hint" data-welcome-limit>显示前 {shown.length} 个</span>
           {/if}
         {/if}
+        {#if onProjects}
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm welcome-projects-btn"
+            {disabled}
+            title={actionTitle ?? "创建本地业务项目，或打开与 Cliora 共用的 .dev-workspace.json 项目清单"}
+            onclick={onProjects}
+          >
+            <Icon name="layers" size={13} />
+            <span>业务项目</span>
+          </button>
+        {/if}
       </div>
-      {#if recent.length === 0}
-        <p class="hint welcome-empty" data-welcome-empty>还没有最近仓库，先打开或克隆一个。</p>
+      {#if items.length === 0}
+        <p class="hint welcome-empty" data-welcome-empty>{projectName ? "此项目在本机还没有可用仓库，可在「业务项目」中纳入或重新关联目录。" : "还没有最近仓库，先打开或克隆一个。"}</p>
       {:else}
         <div class="welcome-recent" class:searchable>
           {#if shown.length === 0}

@@ -20,6 +20,7 @@
   import LanguagePicker from "./LanguagePicker.svelte";
   import Icon from "./Icon.svelte";
   import LineCounts from "./LineCounts.svelte";
+  import { openModalCount } from "./Modal.svelte";
   import Popover from "./Popover.svelte";
 
   interface Props {
@@ -429,6 +430,29 @@
     pickAnchorIndex = null;
     pickAnchorSelecting = true;
   }
+
+  function canHandlePickEscape(event: KeyboardEvent): boolean {
+    if (event.key !== "Escape" || !pickMode || event.isComposing || event.defaultPrevented) return false;
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+    if (openModalCount() > 0) return false;
+    if (document.querySelector(".menu, .popover, .review-source-pop, [role='menu']")) return false;
+    return true;
+  }
+
+  $effect(() => {
+    if (!pickMode) return;
+    const onWindowEscape = (event: KeyboardEvent) => {
+      if (!canHandlePickEscape(event)) return;
+      if (root?.closest('[aria-hidden="true"]')) return;
+      const target = event.target;
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setPickMode(false);
+    };
+    window.addEventListener("keydown", onWindowEscape);
+    return () => window.removeEventListener("keydown", onWindowEscape);
+  });
 
   function commitPickedLines(): void {
     if (!onStageLines || picked.length === 0 || disabled) return;
@@ -1377,7 +1401,7 @@
           disabled={!canPickLines && !pickMode}
           onclick={() => setPickMode(!pickMode)}
         >
-          <Icon name="check" size={13} /><span class="diff-hist-label">选行</span>
+          <Icon name="list-checks" size={13} /><span class="diff-hist-label">选行</span>
         </button>
         {#if pickMode}
           <span class="chip" data-line-count aria-label={"已选择 " + picked.length + " 行"}>{picked.length} 行</span>

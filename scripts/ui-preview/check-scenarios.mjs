@@ -137,15 +137,32 @@ async function deleteReadmeFlow(d) {
   );
 }
 
+async function selectBusinessProject(d, index = 1) {
+  await d.until('Boolean(document.querySelector(\'[aria-label="业务项目"]\'))', "项目菜单入口出现");
+  await d.click('[aria-label="业务项目"]');
+  await d.until(
+    `document.querySelectorAll('.popover[aria-label="业务项目"] [role="option"]').length > ${index} && Boolean(document.querySelector('.popover[aria-label="业务项目"] .select-menu-action'))`,
+    "项目名单",
+  );
+  await d.click(`.popover[aria-label="业务项目"] [role="option"][data-index="${index}"]`);
+  await d.until('!document.querySelector(\'.popover[aria-label="业务项目"]\')', "项目选择完成");
+}
+
+async function openProjectManagerMenu(d) {
+  await d.until('Boolean(document.querySelector(\'[aria-label="业务项目"]\'))', "项目菜单入口出现");
+  await d.click('[aria-label="业务项目"]');
+  await d.until('Boolean(document.querySelector(\'.popover[aria-label="业务项目"] .select-menu-action\'))', "管理项目动作出现");
+  await d.click('.popover[aria-label="业务项目"] .select-menu-action');
+  await d.until("Boolean(document.querySelector('[data-workspace-manager]'))", "项目管理");
+}
+
 const SCENARIOS = [
   {
     name: "项目：发现 60 个候选后按名称和路径搜索，多选跨筛选保留",
     url: "/?projects=1",
     steps: async (drv) => {
-      await drv.until("document.querySelector('[aria-label=业务项目]')?.options.length === 3", "项目名单");
-      await drv.evaluate("const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[1].value; select.dispatchEvent(new Event('change', { bubbles: true }));");
-      await drv.evaluate("{ const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[select.options.length - 1].value; select.dispatchEvent(new Event('change', { bubbles: true })); }");
-      await drv.until("Boolean(document.querySelector('[data-workspace-manager]'))", "项目管理");
+      await selectBusinessProject(drv, 1);
+      await openProjectManagerMenu(drv);
       await drv.evaluate("[...document.querySelectorAll('[data-workspace-manager] button')].find((button) => button.textContent === '从目录发现').click()");
       await drv.until("document.querySelectorAll('.candidate-results input').length === 60", "60 个发现候选");
       await drv.typeInto('[aria-label="搜索候选仓库"]', "service-48");
@@ -195,7 +212,7 @@ const SCENARIOS = [
       await drv.until("!document.querySelector('.popover') && !document.querySelector('[role=menu]')", "关闭残留仓库弹层");
       await drv.click('.welcome-recent button[title="C:/Users/dev/work/design-system"]');
       await drv.until("document.querySelector('[aria-label^=当前仓库]')?.getAttribute('aria-label').includes('design-system')", "再次打开 B");
-      await drv.evaluate("const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[1].value; select.dispatchEvent(new Event('change', { bubbles: true }));");
+      await selectBusinessProject(drv, 1);
       await drv.click('[aria-label^="当前仓库"]');
       await drv.click('[data-worktree-path="C:/Users/dev/project/twiglane"]');
       await drv.until("document.querySelector('[aria-label=提交说明草稿]')?.value === 'A-new-preserve'", "从持久项目名单重开 A，草稿没有回退");
@@ -208,8 +225,7 @@ const SCENARIOS = [
     name: "项目：60 仓持久成员、状态未知与长名称搜索",
     url: "/?projects=1",
     steps: async (drv) => {
-      await drv.until("document.querySelector('[aria-label=业务项目]')?.options.length === 3", "项目名单");
-      await drv.evaluate("const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[1].value; select.dispatchEvent(new Event('change', { bubbles: true }));");
+      await selectBusinessProject(drv, 1);
       await drv.until("Boolean(document.querySelector('.welcome-recent button'))", "设置读取完成，起始页仓库入口已出现");
       await drv.click(".welcome-recent button");
       await drv.until("Boolean(document.querySelector('.file-list'))", "仓库打开");
@@ -218,7 +234,7 @@ const SCENARIOS = [
       await drv.typeInto('[placeholder="搜索仓库名称、路径、分支或 worktree"]', "long-name-for-reading");
       await drv.until("document.querySelectorAll('.popover [role=option]').length === 1", "全名单搜索长名称");
     },
-    check: "document.body.innerText.includes('service-with-a-very-long-name-for-reading-context') && document.querySelector('[aria-label=业务项目]').selectedOptions[0].textContent.includes('60 个仓库') && document.documentElement.scrollWidth <= innerWidth + 1",
+    check: "document.body.innerText.includes('service-with-a-very-long-name-for-reading-context') && document.querySelector('[aria-label=业务项目]')?.title.includes('60 个仓库') && document.querySelector('[aria-label=业务项目] .select-menu-text')?.textContent.includes('北辰业务平台') && document.documentElement.scrollWidth <= innerWidth + 1",
     detail: "({ members:60, rendered:document.querySelectorAll('.popover [role=option]').length, overflow:document.documentElement.scrollWidth-innerWidth })",
   },
   {
@@ -246,8 +262,7 @@ const SCENARIOS = [
     name: "项目：附属 worktree 继续显示同一业务项目归属",
     url: "/?projects=1",
     steps: async (drv) => {
-      await drv.until("document.querySelector('[aria-label=业务项目]')?.options.length === 3", "项目名单");
-      await drv.evaluate("const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[1].value; select.dispatchEvent(new Event('change', { bubbles: true }));");
+      await selectBusinessProject(drv, 1);
       await drv.until("Boolean(document.querySelector('.welcome-recent button'))", "仓库入口");
       await drv.click(".welcome-recent button");
       await drv.until("Boolean(document.querySelector('.file-list'))", "仓库打开");
@@ -256,17 +271,15 @@ const SCENARIOS = [
       await drv.click('[data-worktree-path="C:/Users/dev/project/twiglane/wt/review"]');
       await drv.until("document.querySelector('.project-context-path')?.textContent.includes('/wt/review') && document.querySelector('.project-context-path')?.textContent.includes('北辰业务平台')", "相同项目归属");
     },
-    check: "document.querySelector('[aria-label=业务项目]').selectedOptions[0].textContent.includes('60 个仓库') && !document.querySelector('.project-context-path').textContent.includes('不在此项目')",
+    check: "document.querySelector('[aria-label=业务项目]')?.title.includes('60 个仓库') && !document.querySelector('.project-context-path').textContent.includes('不在此项目')",
     detail: "document.querySelector('.project-context-path')?.textContent",
   },
   {
     name: "项目：来源失效保留快照与修复入口",
     url: "/?projects=missing",
     steps: async (drv) => {
-      await drv.until("document.querySelector('[aria-label=业务项目]')?.options.length === 3", "项目名单");
-      await drv.evaluate("const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[1].value; select.dispatchEvent(new Event('change', { bubbles: true }));");
-      await drv.evaluate("{ const select = document.querySelector('[aria-label=业务项目]'); select.value = select.options[select.options.length - 1].value; select.dispatchEvent(new Event('change', { bubbles: true })); }");
-      await drv.until("Boolean(document.querySelector('[data-workspace-manager]'))", "项目管理");
+      await selectBusinessProject(drv, 1);
+      await openProjectManagerMenu(drv);
     },
     check: "document.body.innerText.includes('最后可读快照') && document.querySelectorAll('.project-member').length === 60 && document.body.innerText.includes('其他主机，暂不可用') && document.documentElement.scrollWidth <= innerWidth + 1",
     detail: "({members:document.querySelectorAll('.project-member').length, stale:document.body.innerText.includes('源文件已移动')})",

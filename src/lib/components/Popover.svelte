@@ -152,10 +152,15 @@
   function onKey(event: KeyboardEvent) {
     // 输入法选词时的方向键和回车属于输入法。
     if (event.isComposing) return;
-    // 在弹层内就把 Esc 消费掉：弹层开在 modal 里时，只收起弹层，不让 modal 跟着关闭。
+    // 在弹层内就把 Esc 消费掉：有搜索词时先清空关键词，空着再按才收起弹层，也不让外层 modal 跟着关闭。
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
+      if (searchable && query.length > 0) {
+        query = "";
+        search?.focus();
+        return;
+      }
       close(true);
       return;
     }
@@ -212,8 +217,14 @@
       close(false);
     };
     const key = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.isComposing) return;
+      if (event.key !== "Escape" || event.isComposing || event.defaultPrevented) return;
+      if (document.querySelector(".context-menu")) return;
       event.preventDefault();
+      if (searchable && query.length > 0) {
+        query = "";
+        search?.focus();
+        return;
+      }
       close(true);
     };
     window.addEventListener("mousedown", outside, true);

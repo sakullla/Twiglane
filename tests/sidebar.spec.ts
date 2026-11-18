@@ -551,6 +551,12 @@ describe("自绘标题栏", () => {
     expect(container.textContent).not.toContain("发布分支");
   });
 
+  it("游离 HEAD 时分支胶囊提示「游离 HEAD」而非误导性的「未关联上游」", () => {
+    const { container } = render(TitleBar, { props: titleProps({ branch: "HEAD @ 8f3c2a1", detached: true, upstreamMissing: true }) as never });
+    expect(container.querySelector(".branch-hint")?.textContent).toBe("游离 HEAD");
+    expect(container.textContent).not.toContain("未关联上游");
+  });
+
   it("主题控件提供浅色、深色、跟随系统三态并回写选择", async () => {
     const onTheme = vi.fn();
     render(TitleBar, { props: titleProps({ theme: "light", onTheme }) as never });
@@ -1017,6 +1023,32 @@ describe("起始页", () => {
     const rows = [...container.querySelectorAll(".welcome-recent button")];
     expect(rows[0].querySelector("[data-repo-when]")?.textContent).toBe("3 小时前");
     expect(rows[1].querySelector("[data-repo-when]"), "1970 年的占位时间戳不当作真实打开时间").toBeNull();
+  });
+
+  it("选中业务项目时起始页显示该项目仓库并提供业务项目管理入口，三列卡片不变", async () => {
+    const onProjects = vi.fn();
+    const projectList = [
+      { name: "svc-orders", path: "/work/orders", openedAtMs: 0 },
+      { name: "svc-billing", path: "/work/billing", openedAtMs: 0 },
+    ];
+    const { container } = render(Welcome, {
+      props: {
+        recent: repos,
+        repos: projectList,
+        projectName: "北辰业务平台",
+        onProjects,
+        disabled: false,
+        onAdd: () => {},
+        onClone: () => {},
+        onCreate: () => {},
+        onOpen: () => {},
+      },
+    });
+    expect(container.querySelectorAll(".welcome-actions > .action-card")).toHaveLength(3);
+    expect(screen.getByRole("heading", { name: "北辰业务平台 · 项目仓库" })).toBeTruthy();
+    expect([...container.querySelectorAll(".welcome-recent .repo-name")].map((el) => el.textContent)).toEqual(["svc-orders", "svc-billing"]);
+    await fireEvent.click(screen.getByRole("button", { name: "业务项目" }));
+    expect(onProjects).toHaveBeenCalledTimes(1);
   });
 
   describe("多于 5 个时搜索", () => {

@@ -320,6 +320,25 @@ describe("项目管理生命周期、筛选、打开与深链预览一次性消�
   });
 });
 
+describe("管理项目页：新建项目", () => {
+  it("没有项目时只有一个新建入口；点开后搜索词带入名称并能创建", async () => {
+    mocks.repoHeads.mockResolvedValue([]);
+    const created = project(1);
+    mocks.create.mockResolvedValue({ hostId: host, projects: [created] });
+    const onData = vi.fn();
+    render(ProjectManager, { data: { hostId: host, projects: [] }, selectedId: null, nextId: () => 1, onData, onSelect: vi.fn(), onClose: vi.fn() });
+    expect(screen.queryByRole("textbox", { name: "新项目名称" })).toBeNull();
+    expect(screen.getAllByRole("button", { name: /新建项目/ })).toHaveLength(1);
+    await fireEvent.input(screen.getByRole("textbox", { name: "搜索项目" }), { target: { value: "34343" } });
+    await fireEvent.click(screen.getByRole("button", { name: /新建项目/ }));
+    const input = (await screen.findByRole("textbox", { name: "新项目名称" })) as HTMLInputElement;
+    expect(input.value).toBe("34343");
+    await fireEvent.click(screen.getByRole("button", { name: /创建项目/ }));
+    await waitFor(() => expect(mocks.create).toHaveBeenCalledWith("34343"));
+    expect(onData).toHaveBeenCalled();
+  });
+});
+
 describe("管理项目页：项目列表、右键与浏览不改范围", () => {
   function two(): Projects {
     const a = project(3);

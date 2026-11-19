@@ -109,9 +109,25 @@
   let menu = $state<ContextMenuRequest | null>(null);
   let memberSearch = $state<HTMLInputElement | null>(null);
 
-  $effect(() => {
-    if (data.projects.length === 0 && !preview) creating = true;
-  });
+  let nameInput = $state<HTMLInputElement | null>(null);
+
+  /** 打开新建表单：搜索框里已有、但没匹配到项目的文字直接作为名称带入。 */
+  function startCreate(seed = "") {
+    preview = null;
+    confirmDelete = false;
+    renaming = false;
+    if (seed.trim() && !name.trim()) name = seed.trim();
+    creating = true;
+    void tick().then(() => {
+      nameInput?.focus();
+      nameInput?.select();
+    });
+  }
+
+  function cancelCreate() {
+    creating = false;
+    name = "";
+  }
 
   // 外部意图只执行一次：改名、编辑成员或删除确认。
   let focusApplied = false;
@@ -275,6 +291,7 @@
       const path = await pickFile("打开与 Cliora 共用的项目清单");
       if (!path) return;
       preview = await api.workspacePreview(path);
+      creating = false;
       adopt = false;
     });
   }
@@ -556,41 +573,6 @@
           <button type="button" class="field-clear" aria-label="清空项目搜索" onclick={() => (projectQuery = "")}><Icon name="x" size={12} /></button>
         {/if}
       </div>
-      {#if creating}
-        <form
-          class="pmx-create"
-          onsubmit={(e) => {
-            e.preventDefault();
-            void create();
-          }}
-        >
-          <!-- svelte-ignore a11y_autofocus -->
-          <input
-            class="input"
-            aria-label="新项目名称"
-            placeholder="项目名称，例如：电商平台"
-            maxlength="160"
-            bind:value={name}
-            disabled={Boolean(busy)}
-            title={busyReason}
-            autofocus
-            onkeydown={(e) => {
-              if (e.key === "Escape" && data.projects.length > 0) {
-                e.preventDefault();
-                e.stopPropagation();
-                creating = false;
-                name = "";
-              }
-            }}
-          />
-          <div class="pmx-create-actions">
-            {#if data.projects.length > 0}
-              <button class="btn btn-ghost btn-sm" type="button" disabled={Boolean(busy)} title={busyReason} onclick={() => { creating = false; name = ""; }}>取消</button>
-            {/if}
-            <button class="btn btn-primary btn-sm" disabled={Boolean(busy) || !name.trim()} title={busyReason ?? (!name.trim() ? "请先填写新项目名称。" : undefined)} type="submit">创建本地项目</button>
-          </div>
-        </form>
-      {/if}
       <div class="pmx-projects" role="group" aria-label="全部项目">
         {#each visibleProjects as item (item.manifest.workspaceId)}
           {@const id = item.manifest.workspaceId}
@@ -618,11 +600,10 @@
       </div>
       <div class="pmx-side-foot">
         <button
-          class="btn btn-secondary btn-sm"
-          aria-pressed={creating}
-          disabled={Boolean(busy)}
-          title={busyReason ?? "新建一个只在本机的项目"}
-          onclick={() => (creating = !creating)}
+          class="btn btn-primary btn-sm"
+          disabled={Boolean(busy) || creating}
+          title={busyReason ?? (creating ? "正在新建项目" : "新建一个只在本机的项目")}
+          onclick={() => startCreate(visibleProjects.length === 0 ? projectQuery : "")}
         ><Icon name="plus" size={13} />新建项目</button>
         <button
           class="btn btn-ghost btn-sm"
@@ -686,7 +667,43 @@
         </section>
       {/if}
 
-      {#if project}
+      {#if creating}
+        <form
+          class="pmx-create"
+          aria-label="新建项目"
+          onsubmit={(e) => {
+            e.preventDefault();
+            void create();
+          }}
+        >
+          <span class="pmx-create-icon" aria-hidden="true"><Icon name="layers" size={20} /></span>
+          <h3>新建项目</h3>
+          <p>起个名字，创建后再把本机的 Git 仓库加进来。</p>
+          <input
+            class="input"
+            aria-label="新项目名称"
+            placeholder="例如：电商平台"
+            maxlength="160"
+            bind:this={nameInput}
+            bind:value={name}
+            disabled={Boolean(busy)}
+            title={busyReason}
+            onkeydown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                cancelCreate();
+              }
+            }}
+          />
+          <div class="pmx-create-actions">
+            <button class="btn btn-ghost" type="button" disabled={Boolean(busy)} title={busyReason} onclick={cancelCreate}>取消</button>
+            <button class="btn btn-primary" disabled={Boolean(busy) || !name.trim()} title={busyReason ?? (!name.trim() ? "先填写项目名称" : undefined)} type="submit">
+              <Icon name="plus" size={14} />创建项目
+            </button>
+          </div>
+        </form>
+      {:else if project}
         {@const current = project}
         <section class="pm-project" aria-label="项目成员">
           <header class="pm-head">
@@ -942,10 +959,17 @@
           </div>
         </section>
       {:else if !preview}
-        <div class="pm-empty grow">
-          <Icon name="layers" size={24} />
-          <p>{data.projects.length > 0 ? "从左侧选择一个项目，查看和整理它的仓库。" : "新建一个本地项目，或打开与 Cliora 共用的项目清单。"}</p>
-        </div>
+        {#if data.projects.length > 0}
+          <div class="pm-empty grow">
+            <Icon name="layers" size={24} />
+            <p>从左侧选择一个项目，查看和整理它的仓库。</p>
+          </div>
+        {:else}
+          <div class="pm-empty grow">
+            <Icon name="layers" size={24} />
+            <p>还没有项目。点左下角「新建项目」开始，或打开 Cliora 共用的项目清单。</p>
+          </div>
+        {/if}
       {/if}
     </section>
   </div>
@@ -959,8 +983,13 @@
   .pmx { display: grid; grid-template-columns: 248px minmax(0, 1fr); gap: 0; height: min(640px, calc(100vh - 200px)); min-height: 360px; border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; background: var(--surface); }
   .pmx-side { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); background: var(--surface-2); }
   .pmx-side-search { margin: 10px 10px 6px; }
-  .pmx-create { display: grid; gap: 6px; margin: 0 10px 6px; }
-  .pmx-create-actions { display: flex; justify-content: flex-end; gap: 6px; }
+  .pmx-create { display: flex; flex-direction: column; align-items: center; gap: 10px; width: min(420px, 100%); margin: auto; padding: 28px 24px; text-align: center; }
+  .pmx-create { border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface-2); }
+  .pmx-create h3 { margin: 0; font-size: var(--text-md, 15px); font-weight: var(--weight-semibold); }
+  .pmx-create p { margin: 0 0 4px; color: var(--fg-muted); font-size: var(--text-sm); }
+  .pmx-create .input { width: 100%; height: 36px; }
+  .pmx-create-icon { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); }
+  .pmx-create-actions { display: flex; justify-content: center; gap: 8px; margin-top: 4px; }
   .pmx-projects { flex: 1; min-height: 0; overflow: auto; padding: 2px 6px 6px; display: grid; align-content: start; gap: 1px; }
   .pmx-project { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 6px 8px; border: 0; border-radius: var(--radius); background: transparent; color: var(--fg); text-align: left; cursor: pointer; }
   .pmx-project:hover { background: var(--hover); }

@@ -1399,8 +1399,10 @@ label.list-row .checkbox { margin-top: 2px; }
 .merge-swap:hover:not(:disabled) { border-color: var(--control-border-hover); color: var(--fg); transform: rotate(180deg); }
 .merge-swap:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
 
-/* 标题栏可搜索弹层：外壳在 Popover，条目沿用 .branch-option 的 hover、键盘当前项与选中态。 */
-.popover { position: fixed; z-index: var(--z-menu); display: flex; flex-direction: column; overflow: hidden; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-lg), 0 0 0 1px var(--border); outline: none; animation: pop var(--duration-fast) var(--ease-out); }
+/* 标题栏可搜索弹层：外壳在 Popover，条目沿用 .branch-option 的 hover、键盘当前项与选中态。
+   入场只淡入、不做位移或缩放：位置在首帧就按触发按钮定好，位移动画会让「打开后回跳」多一种来源
+   （同时会污染 fixed 包含块的原点推算）。普通菜单 .menu 与弹窗仍用 pop。 */
+.popover { position: fixed; z-index: var(--z-menu); display: flex; flex-direction: column; overflow: hidden; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-lg), 0 0 0 1px var(--border); outline: none; animation: fade var(--duration-fast) var(--ease-out); }
 .popover-search { flex: none; padding: 10px 10px var(--space-8); }
 .popover-search .field.sm { height: 34px; }
 .popover-list { flex: 1; min-height: 0; overflow: auto; padding: 0 var(--space-6) var(--space-6); }

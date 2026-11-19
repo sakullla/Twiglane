@@ -59,6 +59,86 @@ describe("标题栏项目下拉：选项右键是应用菜单", () => {
   });
 });
 
+describe("标题栏项目下拉：没有搜索框时的键盘与焦点", () => {
+  const options = [
+    { value: "", label: "全部仓库" },
+    { value: "p1", label: "青山" },
+    { value: "p2", label: "北辰" },
+  ];
+
+  async function open() {
+    const onChange = vi.fn();
+    render(SelectMenu, { props: { label: "业务项目", value: "", options, onChange } });
+    const trigger = screen.getByRole("button", { name: "业务项目" });
+    trigger.focus();
+    // 触发按钮上的方向键直接展开，并停在当前项上。
+    await fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    const list = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(".popover [role='listbox']");
+      if (!found) throw new Error("弹层没有打开");
+      return found;
+    });
+    return { onChange, trigger, list };
+  }
+
+  it("方向键换当前项，回车选中并收起，焦点回到触发按钮", async () => {
+    const { onChange, trigger, list } = await open();
+    // 没有搜索框：焦点落在列表本身，方向键交给弹层而不是页面滚动。
+    await waitFor(() => expect(document.activeElement).toBe(list));
+    expect(document.querySelector(".popover input")).toBeNull();
+    expect(list.getAttribute("aria-activedescendant")).toBe(`${list.id}-0`);
+
+    await fireEvent.keyDown(list, { key: "ArrowDown" });
+    expect(list.getAttribute("aria-activedescendant")).toBe(`${list.id}-1`);
+    await fireEvent.keyDown(list, { key: "ArrowUp" });
+    await fireEvent.keyDown(list, { key: "ArrowUp" });
+    // 循环：从第一项向上回到最后一项。
+    expect(list.getAttribute("aria-activedescendant")).toBe(`${list.id}-2`);
+
+    await fireEvent.keyDown(list, { key: "Enter" });
+    expect(onChange).toHaveBeenCalledWith("p2");
+    await waitFor(() => expect(document.querySelector(".popover")).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("Tab 与 Esc 都收起弹层并归还焦点，不把焦点留在已卸载的列表上", async () => {
+    for (const key of ["Tab", "Escape"]) {
+      const { trigger, list } = await open();
+      await waitFor(() => expect(document.activeElement).toBe(list));
+      await fireEvent.keyDown(list, { key });
+      await waitFor(() => expect(document.querySelector(".popover")).toBeNull());
+      expect(document.activeElement, `${key} 收起后焦点回到触发按钮`).toBe(trigger);
+      cleanup();
+      document.body.innerHTML = "";
+    }
+  });
+
+  it("点外面关闭不抢焦点：焦点留在用户点的位置", async () => {
+    const { list } = await open();
+    await waitFor(() => expect(document.activeElement).toBe(list));
+    const outside = document.createElement("button");
+    outside.textContent = "外面";
+    document.body.append(outside);
+    outside.focus();
+    outside.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    await waitFor(() => expect(document.querySelector(".popover")).toBeNull());
+    expect(document.activeElement).toBe(outside);
+  });
+
+  it("选项变多出现搜索框时，焦点回到搜索框而不是列表", async () => {
+    const many = Array.from({ length: 9 }, (_, index) => ({ value: `p${index}`, label: `项目 ${index}` }));
+    render(SelectMenu, { props: { label: "业务项目", value: "", options: many, onChange: vi.fn() } });
+    await fireEvent.click(screen.getByRole("button", { name: "业务项目" }));
+    const search = await waitFor(() => {
+      const found = document.querySelector<HTMLInputElement>(".popover input");
+      if (!found) throw new Error("没有搜索框");
+      return found;
+    });
+    await waitFor(() => expect(document.activeElement).toBe(search));
+    expect(screen.getByRole("button", { name: "业务项目" })).toBeTruthy();
+  });
+});
+
 describe("标题栏分支汇总提醒", () => {
   function props(overrides: Record<string, unknown> = {}) {
     return {

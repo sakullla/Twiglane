@@ -199,6 +199,35 @@
   let projectHeads = $state.raw<RepoHead[]>([]);
   const currentProjectRepository = $derived(selectedProject && opened ? projectMemberForCheckout(selectedProject, projects.hostId, opened.summary.path, projectHeads) : null);
   const currentProjectMember = $derived(currentProjectRepository !== null);
+  /** 名单本身的问题：读取失败或留存的是待处理快照。两者都让「属于哪个项目」不可信，必须说出区别。 */
+  const projectProblem = $derived(projectFailure ?? selectedProject?.error ?? null);
+  /** 当前仓库不在所选项目里（含附属 worktree 也没归属到成员）；归属仍由 projectMemberForCheckout 判断。 */
+  const projectOutside = $derived(selectedProject !== null && opened !== null && !currentProjectMember);
+  /** 项目标签上的可见状态字：项目外、名单待处理都要有文字，不能只留提示点与悬浮说明（R2）。 */
+  const projectScopeTag = $derived(projectProblem ? "名单待处理" : projectOutside ? "项目外" : "");
+  /**
+   * 仓库弹层顶部的范围说明：当前仓库不属于所选项目、或名单读不到时，说清实际关系并给出下一步。
+   * 只描述已有事实，不因为「看起来该属于」去改写范围或换个仓库顶替。
+   */
+  const projectScopeHint = $derived.by((): { kind: "outside" | "broken"; text: string; action: "all" | "refresh"; label: string } | null => {
+    if (projectFailure) return { kind: "broken", text: `项目名单读取失败（${projectFailure}）`, action: "refresh", label: "重试读取" };
+    if (selectedProject?.error) return { kind: "broken", text: `项目名单待处理（${selectedProject.error}）`, action: "refresh", label: "刷新清单" };
+    if (projectOutside && selectedProject) {
+      return {
+        kind: "outside",
+        text: `当前仓库 ${opened?.summary.name ?? ""} 不在「${selectedProject.manifest.name}」中：下面只列出该项目的仓库。`,
+        action: "all",
+        label: "改看全部仓库",
+      };
+    }
+    return null;
+  });
+  /** 所选项目里本机真的有位置的成员数：与名单总数不同时说明有成员只存在于别的主机，需要重新关联。 */
+  const projectLocalCount = $derived(
+    selectedProject
+      ? selectedProject.manifest.repositories.filter((repo) => repo.locations.some((location) => location.hostId === projects.hostId)).length
+      : 0,
+  );
   $effect(() => {
     const current = opened?.summary.path;
     const project = selectedProject;
@@ -4546,25 +4575,22 @@
   >
     {#snippet context()}
       <!-- 业务项目只在建过项目后出现：没有项目的用户不必看到这个概念，管理入口留在仓库弹层与命令面板里。
-           可见的是一枚短标签，原生 select 透明覆盖在上面，下拉仍是系统菜单，读屏仍读到完整的项目说明。 -->
+           可见的是一枚短标签：项目名 + 必要时的「项目外 / 名单待处理」字样，读屏仍读到完整的项目说明。 -->
       {#if projects.projects.length > 0 || selectedProject}
-        {@const projectOutside = selectedProject !== null && opened !== null && !currentProjectMember}
-        {@const projectProblem = projectFailure ?? selectedProject?.error ?? null}
         <SelectMenu
-          class={`project-chip${selectedProject ? " selected" : ""}${projectProblem ? " problem" : ""}`}
+          class={`project-chip${selectedProject ? " selected" : ""}${projectProblem ? " problem" : ""}${projectOutside ? " outside" : ""}`}
           variant="chip"
           titlebarControl
           label="业务项目"
-          icon="layers"
           value={selectedProjectId ?? ""}
-          text={selectedProject?.manifest.name ?? "全部仓库"}
           dot={Boolean(projectProblem || projectOutside)}
-          title={projectProblem ? `名单快照待处理：${projectProblem}` : projectOutside ? "当前仓库不在此项目中" : selectedProject ? `${selectedProject.manifest.name} · ${selectedProject.manifest.repositories.length} 个仓库` : "未选择项目：仓库列表显示最近使用"}
+          title={projectProblem ? `名单快照待处理：${projectProblem}` : projectOutside ? `当前仓库不在此项目中：${selectedProject?.manifest.name ?? ""}` : selectedProject ? `${selectedProject.manifest.name} · ${selectedProject.manifest.repositories.length} 个仓库` : "未选择项目：仓库列表显示最近使用"}
           options={projectMenuOptions}
           actions={[{ id: "manage", label: "管理项目…", icon: "settings", disabledReason: writeLocked ? switchBlockedReason(commandState) : null, run: manageProjects }]}
           optionMenu={projectOptionMenu}
           searchPlaceholder="搜索项目"
           width={320}
+          trigger={projectChipContent}
           onChange={(value) => selectProject(value || null)}
         />
         {#if projectProblem}<span class="sr-only project-context-error" role="status">名单快照待处理：{projectProblem}</span>{/if}
@@ -4677,7 +4703,28 @@
       {/if}
     </div>
   {/if}
-  {#snippet projectSwitcherNote()}<div class="project-switcher-note"><span>{selectedProject ? `${selectedProject.manifest.name} · ${selectedProject.manifest.repositories.length} 个仓库` : "最近使用 · 独立仓库"}</span><button class="btn btn-ghost btn-sm" onclick={manageProjects}><Icon name="settings" size={13} />管理项目</button></div>{/snippet}
+  <!-- 标题栏项目标签的可见内容：图标 + 项目名 +「项目外 / 名单待处理」。名称可省略，状态字不参与省略。 -->
+  {#snippet projectChipContent()}
+    <Icon name="layers" size={14} />
+    <span class="select-menu-text" class:empty={!selectedProject}>{selectedProject?.manifest.name ?? "全部仓库"}</span>
+    {#if projectScopeTag}<span class="project-chip-tag" data-project-scope-tag={projectOutside ? "outside" : "broken"}>{projectScopeTag}</span>{/if}
+  {/snippet}
+  {#snippet projectSwitcherNote()}
+    <div class="project-switcher-note">
+      <span>{selectedProject ? `${selectedProject.manifest.name} · ${selectedProject.manifest.repositories.length} 个仓库${projectLocalCount < selectedProject.manifest.repositories.length ? ` · 本机可用 ${projectLocalCount} 个` : ""}` : "最近使用 · 独立仓库"}</span>
+      <button class="btn btn-ghost btn-sm" onclick={manageProjects}><Icon name="settings" size={13} />管理项目</button>
+    </div>
+    <!-- 范围说明与恢复入口：说清当前仓库与项目的关系，并给一条不改身份的下一步（切到全部仓库 / 重读名单）。 -->
+    {#if projectScopeHint}
+      <p class="project-switcher-hint" data-project-scope={projectScopeHint.kind} role="status">
+        <Icon name={projectScopeHint.kind === "outside" ? "info" : "alert-circle"} size={13} />
+        <span class="project-switcher-hint-text">{projectScopeHint.text}</span>
+        <button type="button" class="btn btn-secondary btn-sm" data-project-scope-action={projectScopeHint.action} onclick={() => (projectScopeHint.action === "all" ? selectProject(null) : void loadProjects(true))}>
+          {projectScopeHint.label}
+        </button>
+      </p>
+    {/if}
+  {/snippet}
   {#if projectManagerOpen}
     <ProjectManager
       data={projects}

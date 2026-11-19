@@ -9,6 +9,8 @@
    * 底部动作是普通按钮，Tab 在搜索框与它们之间循环。
    * 右键菜单叠在弹层上时不算「点外面」，它的 Esc 也由菜单自己消费，只关闭菜单这一层。
    * 表单里的下拉框（BranchPicker）也用它：没有底部动作时 Tab 收起弹层，下方放不下时向上展开。
+   * 位置只在挂载时（首帧前）量一次，之后只随窗口尺寸或包含块动画结束重算：不做固定延时重测，
+   * 也不用自身的入场动画参与几何计算，避免「先摆放、动画结束后再跳回去」。
    */
   interface Props {
     /** 触发按钮：定位基准，也是关闭后焦点回去的地方。 */
@@ -80,14 +82,17 @@
     `${place.top !== null ? `top:${place.top}px` : `bottom:${place.bottom}px`};left:${place.left}px;width:${place.width}px;max-height:${place.maxHeight}px`,
   );
 
-  /** 贴着触发按钮向下展开，并收在窗口内：900×600 下也要完整可见（R14）。下方太挤而上方更宽时向上展开。 */
+  /**
+   * 贴着触发按钮向下展开，并收在窗口内：900×600 下也要完整可见（R14）。下方太挤而上方更宽时向上展开。
+   * 方向在首次显示前就定下来，之后内容增减只改高度，贴着触发按钮的那条边不动。
+   */
   function measure() {
     const rect = anchorEl.getBoundingClientRect();
     const fit = Math.min(matchAnchor ? Math.max(width, rect.width) : width, window.innerWidth - MARGIN * 2);
     const left = Math.max(MARGIN, Math.min(rect.left, window.innerWidth - fit - MARGIN));
     const below = window.innerHeight - rect.bottom - GAP - MARGIN;
     const above = rect.top - GAP - MARGIN;
-    // 弹窗里的下拉：带 transform 的祖先会成为 fixed 的包含块，坐标要扣掉它的原点，否则整体偏移。
+    // 弹窗里的下拉：带变换的祖先会成为 fixed 的包含块，坐标要扣掉它的原点，否则整体偏移。
     const origin = containingOrigin();
     if (below < 280 && above > below) {
       place = { top: null, bottom: window.innerHeight - rect.top + GAP - origin.bottom, left: left - origin.left, width: fit, maxHeight: Math.min(MAX_HEIGHT, above) };
@@ -96,18 +101,44 @@
     place = { top: rect.bottom + GAP - origin.top, bottom: null, left: left - origin.left, width: fit, maxHeight: Math.min(MAX_HEIGHT, below) };
   }
 
-  /** fixed 定位的实际原点：视口时为 0；被带 transform 的祖先接管时是那个祖先的左上（以及到视口底的距离）。 */
+  /**
+   * fixed 定位的包含块原点：视口时为 0；被带变换的祖先接管时是那个祖先的左上（以及到视口底的距离）。
+   * 只从祖先取，不拿弹层自己的矩形反推：入场变换会让弹层矩形和它的相邻边一起偏移，
+   * 「矩形 − 内联 top」减出来的原点就把动画位移算成了包含块偏移——首次摆放偏低，动画结束后
+   * 再量一次才回到正确位置，看起来就是打开后向上回跳。位置因此必须先于任何自身变换确定。
+   */
   function containingOrigin(): { left: number; top: number; bottom: number } {
-    if (!root) return { left: 0, top: 0, bottom: 0 };
-    const box = root.getBoundingClientRect();
-    const style = getComputedStyle(root);
-    const left = box.left - (parseFloat(style.left) || 0);
-    if (place.top !== null) {
-      const top = box.top - (parseFloat(style.top) || 0);
-      return { left, top, bottom: 0 };
+    const block = fixedContainingBlock(root);
+    if (!block) return { left: 0, top: 0, bottom: 0 };
+    const box = block.getBoundingClientRect();
+    const style = getComputedStyle(block);
+    return {
+      left: box.left + px(style.borderLeftWidth),
+      top: box.top + px(style.borderTopWidth),
+      bottom: window.innerHeight - box.bottom + px(style.borderBottomWidth),
+    };
+  }
+
+  /** 会接管 fixed 后代的最近祖先：带变换、滤镜、透视、contain 或 will-change 的那一层。 */
+  function fixedContainingBlock(from: HTMLElement | null): HTMLElement | null {
+    for (let node = from?.parentElement ?? null; node && node !== document.body; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (
+        moved(style.transform) || moved(style.filter) || moved(style.backdropFilter) || moved(style.perspective)
+        || /(^|\s)(paint|layout|strict|content)(\s|$)/.test(style.contain ?? "")
+        || /transform|filter|perspective|backdrop-filter/.test(style.willChange ?? "")
+      ) return node;
     }
-    const bottom = window.innerHeight - box.bottom - (parseFloat(style.bottom) || 0);
-    return { left, top: 0, bottom };
+    return null;
+  }
+
+  /** 计算值可能是 none 或空（未实现该属性）：只有真正的非空非 none 才创建包含块。 */
+  function moved(value: string | undefined): boolean {
+    return value != null && value !== "" && value !== "none";
+  }
+
+  function px(value: string | undefined): number {
+    return parseFloat(value ?? "") || 0;
   }
 
   /** 方向键与回车作用的元素：有搜索框时是搜索框，没有时是弹层本身。 */
@@ -245,15 +276,31 @@
     window.addEventListener("mousedown", outside, true);
     window.addEventListener("keydown", key);
     window.addEventListener("resize", measure);
-    // 弹窗里的下拉：外层弹窗的进场动画还在缩放时量到的位置会偏，动画结束后再量一次。
-    const settle = window.setTimeout(measure, 220);
+    // 弹窗里的下拉：外层弹窗的进场缩放还在跑时，包含块坐标本身在变，量到的位置会偏。
+    // 等那层动画真正结束再量一次，而不是用一个固定延时去猜（延时会在无关动画中途插一脚，制造第二次位移）。
+    const settle = settleWhenContainingBlockStopsMoving();
     return () => {
-      window.clearTimeout(settle);
+      settle();
       window.removeEventListener("mousedown", outside, true);
       window.removeEventListener("keydown", key);
       window.removeEventListener("resize", measure);
     };
   });
+
+  /**
+   * 包含块正在播动画（例如外层弹窗的进场）时，动画结束后的坐标才稳定。
+   * 没有这种祖先、或浏览器不支持 getAnimations 时什么都不做：位置已经由首次测量定下。
+   */
+  function settleWhenContainingBlockStopsMoving(): () => void {
+    const block = fixedContainingBlock(root);
+    if (!block || typeof block.getAnimations !== "function") return () => {};
+    let alive = true;
+    for (const animation of block.getAnimations()) {
+      if (animation.playState !== "running") continue;
+      animation.finished.then(() => { if (alive) measure(); }, () => {});
+    }
+    return () => { alive = false; };
+  }
 </script>
 
 <div
@@ -261,6 +308,7 @@
   role="dialog"
   aria-label={label}
   tabindex="-1"
+  data-side={place.top !== null ? "down" : "up"}
   style={placeStyle}
   bind:this={root}
   onkeydown={onKey}

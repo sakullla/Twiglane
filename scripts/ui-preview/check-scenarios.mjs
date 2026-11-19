@@ -156,6 +156,62 @@ async function openProjectManagerMenu(d) {
   await d.until("Boolean(document.querySelector('[data-workspace-manager]'))", "项目管理");
 }
 
+/**
+ * 按帧记录共用弹层的矩形（R1）：点开之前就开始采样，动画期间与异步内容到达之后的每一帧都算。
+ * 贴住触发按钮的那条边（向下展开时的上边、向上展开时的下边）必须从第一帧起就不动，
+ * 否则就是「先摆一个位置、动画结束后再跳回来」。
+ */
+async function startPopoverFrames(d, anchorSelector) {
+  await d.evaluate(`(() => {
+    const anchor = document.querySelector(${JSON.stringify(anchorSelector)});
+    if (!anchor) return false;
+    window.__frames = [];
+    window.__sampling = true;
+    const start = performance.now();
+    const tick = () => {
+      const pop = document.querySelector('.popover[role="dialog"]');
+      if (pop) {
+        const box = pop.getBoundingClientRect();
+        const base = anchor.getBoundingClientRect();
+        window.__frames.push({
+          side: pop.dataset.side || '',
+          top: Math.round(box.top * 100) / 100,
+          bottom: Math.round(box.bottom * 100) / 100,
+          left: Math.round(box.left * 100) / 100,
+          height: Math.round(box.height * 100) / 100,
+          gap: Math.round((box.top - base.bottom) * 100) / 100,
+        });
+      }
+      if (window.__sampling && performance.now() - start < 3000) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+    return true;
+  })()`);
+}
+
+/** 停止采样并汇总：同一条边的最大跳变（edgeSpan）与间隙跳变（gapSpan），以及高度是否随后增长过。 */
+async function collectPopoverFrames(d, key) {
+  await d.evaluate("window.__sampling = false");
+  await d.evaluate(`(() => {
+    const frames = window.__frames || [];
+    const sides = [...new Set(frames.map((frame) => frame.side))];
+    const down = sides.length === 1 && sides[0] === 'down';
+    const span = (values) => (values.length === 0 ? 0 : Math.round((Math.max(...values) - Math.min(...values)) * 100) / 100);
+    const gaps = frames.filter((frame) => frame.side === 'down').map((frame) => frame.gap);
+    window[${JSON.stringify(key)}] = {
+      frames: frames.length,
+      sides,
+      edgeSpan: span(frames.map((frame) => (down ? frame.top : frame.bottom))),
+      gapSpan: span(gaps),
+      gap: gaps.length > 0 ? gaps[0] : null,
+      first: frames[0] ?? null,
+      last: frames[frames.length - 1] ?? null,
+      heightGrew: frames.length > 1 && frames[frames.length - 1].height > frames[0].height + 0.5,
+    };
+    return window[${JSON.stringify(key)}];
+  })()`);
+}
+
 const SCENARIOS = [
   {
     name: "项目：发现 60 个候选后按名称和路径搜索，多选跨筛选保留",
@@ -231,7 +287,8 @@ const SCENARIOS = [
       await drv.until("Boolean(document.querySelector('.file-list'))", "仓库打开");
       await drv.click('[aria-label^="当前仓库"]');
       await drv.until("Boolean(document.querySelector('[data-worktree-state=unknown]')) && Boolean(document.querySelector('[data-worktree-state=missing]'))", "真实状态形状");
-      await drv.typeInto('[placeholder="搜索仓库名称、路径、分支或 worktree"]', "long-name-for-reading");
+      // 有仓库时 placeholder 会带上数量，所以按稳定的可访问名称定位搜索框。
+      await drv.typeInto('[aria-label="搜索仓库名称、路径、分支或 worktree"]', "long-name-for-reading");
       await drv.until("document.querySelectorAll('.popover [role=option]').length === 1", "全名单搜索长名称");
     },
     check: "document.body.innerText.includes('service-with-a-very-long-name-for-reading-context') && document.querySelector('[aria-label=业务项目]')?.title.includes('60 个仓库') && document.querySelector('[aria-label=业务项目] .select-menu-text')?.textContent.includes('北辰业务平台') && document.documentElement.scrollWidth <= innerWidth + 1",
@@ -280,9 +337,68 @@ const SCENARIOS = [
     steps: async (drv) => {
       await selectBusinessProject(drv, 1);
       await openProjectManagerMenu(drv);
+      // 成员行用 content-visibility: auto 跳过屏幕外的渲染：把列表滚进视野并滚到底，等最后一行真的渲染出来。
+      await drv.until(
+        "(() => { const list = document.querySelector('.project-members'); if (!list) return false; list.scrollIntoView({ block: 'center' }); list.scrollTop = list.scrollHeight; return document.body.innerText.includes('其他主机，暂不可用'); })()",
+        "其他主机的成员说明",
+      );
     },
-    check: "document.body.innerText.includes('最后可读快照') && document.querySelectorAll('.project-member').length === 60 && document.body.innerText.includes('其他主机，暂不可用') && document.documentElement.scrollWidth <= innerWidth + 1",
-    detail: "({members:document.querySelectorAll('.project-member').length, stale:document.body.innerText.includes('源文件已移动')})",
+    check: "document.body.innerText.includes('最后可读快照') && document.querySelectorAll('.project-member').length === 60 && [...document.querySelectorAll('.project-member')].some((member) => member.textContent.includes('其他主机，暂不可用')) && document.documentElement.scrollWidth <= innerWidth + 1",
+    detail: "({members:document.querySelectorAll('.project-member').length, snapshot:document.body.innerText.includes('最后可读快照'), foreign:[...document.querySelectorAll('.project-member')].some((member) => member.textContent.includes('其他主机，暂不可用')), stale:document.body.innerText.includes('源文件已移动'), overflow:document.documentElement.scrollWidth-innerWidth})",
+  },
+
+  {
+    name: "项目：弹层首帧到位，入场动画结束后不回跳",
+    url: "/?projects=1",
+    steps: async (drv) => {
+      await drv.until("Boolean(document.querySelector('.welcome-recent button'))", "仓库入口");
+      await drv.click(".welcome-recent button");
+      await drv.until("Boolean(document.querySelector('.file-list'))", "仓库打开");
+      await drv.until('Boolean(document.querySelector(\'[aria-label="业务项目"]\'))', "项目入口出现");
+      // 标题栏项目下拉：点开之前开始采帧，覆盖入场动画全程。
+      await startPopoverFrames(drv, '[aria-label="业务项目"]');
+      await drv.click('[aria-label="业务项目"]');
+      await drv.until('Boolean(document.querySelector(\'.popover[aria-label="业务项目"]\'))', "项目下拉打开");
+      await drv.pause(420);
+      await collectPopoverFrames(drv, "__chipFrames");
+      await drv.press("Escape");
+      await drv.until("!document.querySelector('.popover')", "项目下拉收起");
+      // 仓库弹层的内容随后会随 worktree 状态更新：更新完贴着触发按钮的那条边同样不能动。
+      await startPopoverFrames(drv, '[aria-label^="当前仓库"]');
+      await drv.click('[aria-label^="当前仓库"]');
+      await drv.until("Boolean(document.querySelector('.popover[aria-label=\"切换仓库\"]'))", "仓库弹层打开");
+      await drv.until("Boolean(document.querySelector('.popover .rs-option'))", "仓库行出现");
+      await drv.until("!document.querySelector('.popover [data-worktree-status=loading]')", "各工作区状态读取结束");
+      await drv.pause(520);
+      await collectPopoverFrames(drv, "__switcherFrames");
+    },
+    check:
+      "(() => { const ok = (value) => Boolean(value) && value.frames >= 8 && value.sides.length === 1 && value.sides[0] === 'down' && value.edgeSpan <= 0.5 && value.gapSpan <= 0.5 && Math.abs(value.gap - 6) <= 0.6; return ok(window.__chipFrames) && ok(window.__switcherFrames) && document.documentElement.scrollWidth <= innerWidth + 1; })()",
+    detail: "({ chip: window.__chipFrames, switcher: window.__switcherFrames })",
+  },
+  {
+    name: "项目：不在项目里的仓库有标记、说明与回到全部仓库的入口",
+    url: "/?projects=1",
+    steps: async (drv) => {
+      await drv.until("Boolean(document.querySelector('.welcome-recent button[title=\"C:/Users/dev/work/design-system\"]'))", "项目外的仓库入口");
+      await drv.click('.welcome-recent button[title="C:/Users/dev/work/design-system"]');
+      await drv.until("Boolean(document.querySelector('.file-list'))", "项目外的仓库打开");
+      await selectBusinessProject(drv, 1);
+      await drv.until("document.querySelector('.project-chip-tag')?.textContent.includes('项目外')", "标题栏上的项目外标记");
+      await drv.until("document.querySelector('[aria-label=业务项目]')?.title.includes('当前仓库不在此项目中')", "标记带完整提示");
+      // 范围说明与恢复入口在仓库弹层顶部：说清当前仓库不属于这个项目，并给一条不改身份的下一步。
+      await drv.click('[aria-label^="当前仓库"]');
+      await drv.until("Boolean(document.querySelector('.popover [data-project-scope=outside]'))", "仓库弹层里的范围说明");
+      await drv.until("document.querySelector('[data-project-scope=outside]').innerText.includes('design-system')", "说明点名当前仓库");
+      await drv.click('[data-project-scope-action="all"]');
+      await drv.until("!document.querySelector('[data-project-scope]') && !document.querySelector('.project-chip-tag')", "恢复后标记与说明消失");
+      await drv.until("document.querySelector('[aria-label=业务项目] .select-menu-text')?.textContent.includes('全部仓库')", "回到全部仓库");
+      await drv.until("Boolean(document.querySelector('.popover [data-worktree-path=\"C:/Users/dev/work/design-system\"]'))", "当前仓库回到仓库列表");
+    },
+    check:
+      "(() => { const chip = document.querySelector('[aria-label=\"业务项目\"] .select-menu-text')?.textContent || ''; return chip.includes('全部仓库') && Boolean(document.querySelector('.popover [data-worktree-path=\"C:/Users/dev/work/design-system\"]')) && !document.querySelector('.project-chip-tag') && !document.querySelector('[data-project-scope]') && document.documentElement.scrollWidth <= innerWidth + 1; })()",
+    detail:
+      "({ chip: document.querySelector('[aria-label=\"业务项目\"]')?.title || '', scope: document.querySelector('.project-switcher-note')?.textContent || '', list: document.querySelectorAll('.popover [role=option]').length })",
   },
 
   {

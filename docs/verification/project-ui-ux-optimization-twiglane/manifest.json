@@ -1,0 +1,299 @@
+{
+  "workflow": "2026-11-16-multi-repository-project-workspaces",
+  "task": "T2",
+  "capturedAt": "2026-11-19T17:07:05.083Z",
+  "environment": {
+    "browser": "Chrome 158.0.8127.36（DevTools 协议驱动）",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/158.0.0.0 Safari/537.36",
+    "devicePixelRatio": 1,
+    "platform": "darwin",
+    "node": "v26.13.0"
+  },
+  "page": {
+    "url": "http://127.0.0.1:1430",
+    "build": "npm run preview:ui（scripts/ui-preview/vite.config.mjs，mock API，127.0.0.1:1430）",
+    "data": "?projects=1/missing：60 个项目成员、长名称、同名路径、收藏和外机/缺源快照",
+    "worker": "预览页的 Markdown 解析在工作线程里进行；失败态由 ?remote= / ?commit= / ?doc= / ?search= 参数进入"
+  },
+  "groups": {
+    "projects": "项目总览、项目管理、候选搜索预览、来源失效快照；各按两主题两尺寸采集",
+    "baseline": "start/changes/history/task/worktree/composer/merge/settings：与 01 基线同数据、同主题、同尺寸",
+    "markdown": "files-markdown/files-markdown-toc：Markdown 排版预览与目录工具行，单独成组，不参与优化前后对照",
+    "failure": "关键失败/未知状态：sync-unchecked/sync-stale/commit-error/commit-push-error/doc-error/doc-large/search-error/filter-error/find-error/task-error/history-cancel-recovered，逐张对应需求"
+  },
+  "shots": [
+    {
+      "file": "after/dark-1280x840-project-overview.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "project-overview",
+      "group": "projects",
+      "state": "60 仓成员源，收藏优先、未知/缺失状态和 worktree 分组",
+      "paint": {
+        "theme": "dark",
+        "surface": "#15161c",
+        "modalOpacity": null,
+        "backdropOpacity": null
+      },
+      "horizontalOverflow": 0,
+      "bytes": 206837,
+      "sha256": "ca6b16c42efc9f6dab5e4bd0d11222d2bcc925b33d00ebf22fc472c892d71856"
+    },
+    {
+      "file": "after/dark-1280x840-project-manager.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "project-manager",
+      "group": "projects",
+      "state": "共享文件、60 仓名单、批量纳入与目录修复入口",
+      "paint": {
+        "theme": "dark",
+        "surface": "#15161c",
+        "modalOpacity": "1",
+        "backdropOpacity": "1"
+      },
+      "horizontalOverflow": 0,
+      "bytes": 214451,
+      "sha256": "fe67684361f3140728d37bb6172728d28351b2105c38bad6a5d8c0ad02edc9ce"
+    },
+    {
+      "file": "after/dark-1280x840-project-candidates.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "project-candidates",
+      "group": "projects",
+      "state": "60 个发现候选名称/完整路径搜索，取消匹配项后仍保留筛选外的 59 项选择",
+      "paint": {
+        "theme": "dark",
+        "surface": "#15161c",
+        "modalOpacity": "1",
+        "backdropOpacity": "1"
+      },
+      "horizontalOverflow": 0,
+      "bytes": 211872,
+      "sha256": "4e24ede4beb0b002523d7cd09114679cfd72e3b9733955ece62658794aa60d4e"
+    },
+    {
+      "file": "after/dark-1280x840-project-source-missing.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "project-source-missing",
+      "group": "projects",
+      "state": "来源失效仍保留最后快照，禁止旧名单覆盖，提供重新预览/刷新",
+      "paint": {
+        "theme": "dark",
+        "surface": "#15161c",
+        "modalOpacity": "1",
+        "backdropOpacity": "1"
+      },
+      "horizontalOverflow": 0,
+      "bytes": 162902,
+      "sha256": "4774336c5380d5ac7f1b1270d7cd2f56e1ed0e9adadc0da2c3a455e47ad12cb6"
+    },
+    {
+      "file": "after/dark-900x600-project-overview.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "project-overview",
+      "group": "projects",
+      "state": "60 仓成员源，收藏优先、未知/缺失状态和 worktree 分组",
+      "paint": {
+        "theme": "dark",
+        "surface": "#15161c",
+        "modalOpacity": null,
+        "backdropOpacity": null
+      },
+      "horizontalOverflow": 0,
+      "bytes": 146967,
+      "sha256": "6adbc5ad7a59603981df16bff0eb6fbb4d09d83bbadac0455d46b5b700588839"
+    },
+    {
+      "file": "after/dark-900x600-project-manager.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "project-manager",
+      "group": "projects",
+      "state": "共享文件、60 仓名单、批量纳入与目录修复入口",
+      "paint": {
+        "theme": "dark",
+        "surface": "#15161c",
+        "modalOpacity": "1",
+        "backdropOpacity": "1"
+      },
+      "horizontalOverflow": 0,
+      "bytes": 120806,
+      "sha256": "233f547b919bd93888732d7d8714965355c1c8f0c261b086a9982308c0b38f7a"
+    },
+    {
+      "file": "after/dark-900x600-project-candidates.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "project-candidates",
+      "group": "projects",
+      "state": "60 个发现候选名称/完整路径搜索，取消匹配项后仍保留筛选外的 59 项选择",
+      "paint": {
+        "theme": "dark",
+        "surface": "#15161c",
+        "modalOpacity": "1",
+        "backdropOpacity": "1"
+      },
+      "horizontalOverflow": 0,
+      "bytes": 125753,
+      "sha256": "7533ab52beb1306df0eb53ea6471b345fb17b87b8159ca0dc1119c85f7ff30ec"
+    },
+    {
+      "file": "after/dark-900x600-project-source-missing.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "project-source-missing",
+      "group": "projects",
+      "state": "来源失效仍保留最后快照，禁止旧名单覆盖，提供重新预览/刷新",
+      "paint": {
+        "theme": "dark",
+        "surface": "#15161c",
+        "modalOpacity": "1",
+        "backdropOpacity": "1"
+      },
+      "horizontalOverflow": 0,
+      "bytes": 108676,
+      "sha256": "125de841cd4b97c3ed8d4d9f3d788a669b73add46a207189e55426c4c6d8d477"
+    },
+    {
+      "file": "after/light-1280x840-project-overview.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "project-overview",
+      "group": "projects",
+      "state": "60 仓成员源，收藏优先、未知/缺失状态和 worktree 分组",
+      "paint": {
+        "theme": "light",
+        "surface": "#ffffff",
+        "modalOpacity": null,
+        "backdropOpacity": null
+      },
+      "horizontalOverflow": 0,
+      "bytes": 199733,
+      "sha256": "8f7046a28dea5e5ed7b796d2aa88b47b35a6e2db234f8f25bfdc152f8c1465de"
+    },
+    {
+      "file": "after/light-1280x840-project-manager.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "project-manager",
+      "group": "projects",
+      "state": "共享文件、60 仓名单、批量纳入与目录修复入口",
+      "paint": {
+        "theme": "light",
+        "surface": "#ffffff",
+        "modalOpacity": "1",
+        "backdropOpacity": "1"
+      },
+      "horizontalOverflow": 0,
+      "bytes": 223080,
+      "sha256": "acda733c3fb4012a70cb55ce27f2dd583cc6a869c8ef00f88c61ad98929eb752"
+    },
+    {
+      "file": "after/light-1280x840-project-candidates.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "project-candidates",
+      "group": "projects",
+      "state": "60 个发现候选名称/完整路径搜索，取消匹配项后仍保留筛选外的 59 项选择",
+      "paint": {
+        "theme": "light",
+        "surface": "#ffffff",
+        "modalOpacity": "1",
+        "backdropOpacity": "1"
+      },
+      "horizontalOverflow": 0,
+      "bytes": 220542,
+      "sha256": "7ac48e3e21945fa79e442b2f290f65ed00085620058a68a01249bc68c1a9a7da"
+    },
+    {
+      "file": "after/light-1280x840-project-source-missing.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "project-source-missing",
+      "group": "projects",
+      "state": "来源失效仍保留最后快照，禁止旧名单覆盖，提供重新预览/刷新",
+      "paint": {
+        "theme": "light",
+        "surface": "#ffffff",
+        "modalOpacity": "1",
+        "backdropOpacity": "1"
+      },
+      "horizontalOverflow": 0,
+      "bytes": 165033,
+      "sha256": "23f0377dad7becd0728a652d7ba6880ff891b3f4ad5f59c51897e88b0e178260"
+    },
+    {
+      "file": "after/light-900x600-project-overview.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "project-overview",
+      "group": "projects",
+      "state": "60 仓成员源，收藏优先、未知/缺失状态和 worktree 分组",
+      "paint": {
+        "theme": "light",
+        "surface": "#ffffff",
+        "modalOpacity": null,
+        "backdropOpacity": null
+      },
+      "horizontalOverflow": 0,
+      "bytes": 140461,
+      "sha256": "35d56a258b119a7b1873ec174706b7ebec4f5222e7fcef73162a09335236ccdf"
+    },
+    {
+      "file": "after/light-900x600-project-manager.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "project-manager",
+      "group": "projects",
+      "state": "共享文件、60 仓名单、批量纳入与目录修复入口",
+      "paint": {
+        "theme": "light",
+        "surface": "#ffffff",
+        "modalOpacity": "1",
+        "backdropOpacity": "1"
+      },
+      "horizontalOverflow": 0,
+      "bytes": 125567,
+      "sha256": "3953d9f7a0f95475adf2fef053b5737847b7dc666ad31171532aaecadd8fb9e9"
+    },
+    {
+      "file": "after/light-900x600-project-candidates.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "project-candidates",
+      "group": "projects",
+      "state": "60 个发现候选名称/完整路径搜索，取消匹配项后仍保留筛选外的 59 项选择",
+      "paint": {
+        "theme": "light",
+        "surface": "#ffffff",
+        "modalOpacity": "1",
+        "backdropOpacity": "1"
+      },
+      "horizontalOverflow": 0,
+      "bytes": 129172,
+      "sha256": "1b165f2722dab187c1bbe7e5846040335eb304fd03f69cc1009159af7f0a4494"
+    },
+    {
+      "file": "after/light-900x600-project-source-missing.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "project-source-missing",
+      "group": "projects",
+      "state": "来源失效仍保留最后快照，禁止旧名单覆盖，提供重新预览/刷新",
+      "paint": {
+        "theme": "light",
+        "surface": "#ffffff",
+        "modalOpacity": "1",
+        "backdropOpacity": "1"
+      },
+      "horizontalOverflow": 0,
+      "bytes": 111011,
+      "sha256": "706283c994c1b44d593a177d4caa48f8ebdfc19217f82b5d19fda2f34f70ab7c"
+    }
+  ],
+  "skipped": []
+}

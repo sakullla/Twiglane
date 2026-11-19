@@ -139,11 +139,17 @@ class Cdp {
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function evaluate(cdp, sessionId, expression) {
-  const result = await cdp.send(
-    "Runtime.evaluate",
-    { expression, awaitPromise: true, returnByValue: true },
-    sessionId,
-  );
+  let result;
+  try {
+    result = await cdp.send(
+      "Runtime.evaluate",
+      { expression, awaitPromise: true, returnByValue: true },
+      sessionId,
+    );
+  } catch (error) {
+    // 失败时要能看出挂在哪一句上：否则「CDP 超时」无法区分是等待条件还是等待动画。
+    throw new Error(`${error.message}｜表达式：${expression.replace(/\s+/g, " ").slice(0, 140)}`);
+  }
   if (result.exceptionDetails) throw new Error(result.exceptionDetails.text ?? "页面脚本异常");
   return result.result?.value;
 }
@@ -534,12 +540,18 @@ async function main() {
         const shot = async (view, group = "baseline", state = "normal") => {
           if (projectsOnly) {
             await waitFor(cdp, sessionId, `document.documentElement.dataset.theme === ${JSON.stringify(theme)}`, "实际主题已应用");
-            await evaluate(cdp, sessionId, `(async () => {
+            // 等有限次数的动画结束：入场动画不结束就截图会拍到中间帧。
+            // 已经离开渲染树的动画可能永远不结束，所以每个动画都带一个上限，并把卡住的动画报出来。
+            const stuck = await evaluate(cdp, sessionId, `(async () => {
               const finite = document.getAnimations().filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity);
-              await Promise.all(finite.map((animation) => animation.finished.catch(() => {})));
+              const stuck = await Promise.all(finite.map((animation) => Promise.race([
+                animation.finished.then(() => null, () => null),
+                new Promise((resolve) => setTimeout(() => resolve(animation.animationName || animation.transitionProperty || animation.constructor.name), 1500)),
+              ])));
               await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-              return true;
+              return stuck.filter(Boolean);
             })()`);
+            if (Array.isArray(stuck) && stuck.length > 0) console.warn(view + ": 动画没有自行结束 " + JSON.stringify(stuck));
           }
           const paint = await evaluate(cdp, sessionId, `({ theme:document.documentElement.dataset.theme, surface:getComputedStyle(document.documentElement).getPropertyValue('--surface').trim(), modalOpacity:document.querySelector('.modal-card') ? getComputedStyle(document.querySelector('.modal-card')).opacity : null, backdropOpacity:document.querySelector('.modal-backdrop') ? getComputedStyle(document.querySelector('.modal-backdrop')).opacity : null })`);
           if (projectsOnly && (paint.theme !== theme || (paint.modalOpacity !== null && paint.modalOpacity !== "1") || (paint.backdropOpacity !== null && paint.backdropOpacity !== "1"))) throw new Error(`${view}: paint not ready ${JSON.stringify(paint)}`);

@@ -1045,7 +1045,7 @@
               aria-pressed={view?.path === entry.path}
               aria-haspopup="menu"
               aria-disabled={blocked}
-              title={blocked ? BUSY_REASON : entry.path}
+              title={entry.path}
               onclick={() => openConflict(entry.path)}
               oncontextmenu={(event) => {
                 event.preventDefault();

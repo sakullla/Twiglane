@@ -7,7 +7,7 @@
 // manifest.json 默认写到 --out 的上一级（可用 --manifest 覆盖），逐张记录 bytes 与 sha256，
 // 因此提交后的证据可以由这个脚本原样重建与校验。
 //
-// 用法：node scripts/ui-preview/baseline-shots.mjs [--base http://127.0.0.1:1430] [--out docs/verification/ui-ux-markdown-2026-11-08/after] [--manifest <path>] [--failure-targets dark:1280x840,light:1280x840,dark:900x600,light:900x600]
+// 用法：node scripts/ui-preview/baseline-shots.mjs [--base http://127.0.0.1:1430] [--out docs/verification/ui-ux-markdown-2026-11-08/after] [--manifest <path>] [--failure-targets dark:1280x840,light:1280x840,dark:900x600,light:900x600] [--scale 2]
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -37,6 +37,8 @@ const CHROME_CANDIDATES = [
   "/usr/bin/google-chrome",
 ];
 
+// README 截图用 --scale 2 取高清图；证据截图保持默认 1。
+const SCALE = Number(readArg("--scale", "1"));
 const THEMES = ["dark", "light"];
 const SIZES = [
   { label: "1280x840", width: 1280, height: 840 },
@@ -477,7 +479,7 @@ async function main() {
     environment: {
       browser: "",
       userAgent: "",
-      devicePixelRatio: 1,
+      devicePixelRatio: SCALE,
       platform: os.platform(),
       node: process.version,
     },
@@ -516,7 +518,7 @@ async function main() {
         await cdp.send("Network.enable", {}, sessionId);
         await cdp.send(
           "Emulation.setDeviceMetricsOverride",
-          { width: size.width, height: size.height, deviceScaleFactor: 1, mobile: false },
+          { width: size.width, height: size.height, deviceScaleFactor: SCALE, mobile: false },
           sessionId,
         );
         await cdp.send(

@@ -245,11 +245,25 @@ describe("合并准备", () => {
     expect(rebase.hasAttribute("disabled")).toBe(false);
   });
 
-  it("预计冲突时给出冲突审查页和逐处处理说明", () => {
+  it("预计冲突时直接列出冲突文件和逐处处理说明；明细默认收起，展开后有冲突页", async () => {
     renderSetup();
     expect(screen.getByText("预计 1 个文件有冲突")).toBeTruthy();
-    expect(screen.getByRole("tab", { name: /冲突/ })).toBeTruthy();
+    expect(screen.getByRole("list", { name: "预计冲突的文件" }).textContent).toContain("app.ts");
     expect(document.querySelector(".merge-next")?.textContent).toContain("逐处解决 1 个文件");
+    expect(screen.queryByRole("tab")).toBeNull();
+    const toggle = screen.getByRole("button", { name: /查看改动明细/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("tab", { name: /冲突/ })).toBeTruthy();
+  });
+
+  it("数字一眼可读：带入提交、文件和可能冲突", () => {
+    renderSetup();
+    const stats = screen.getByLabelText("将带入 120 个提交、2 个文件");
+    expect(stats.textContent).toContain("120");
+    expect(stats.textContent).toContain("个提交带入");
+    expect(stats.textContent).toContain("个可能冲突");
   });
 
   it("预检失败只给重试和检查说明，不展示合并方式", () => {
@@ -275,10 +289,7 @@ describe("合并准备", () => {
     expect(screen.getByText(/开始时会先切换到 release/)).toBeTruthy();
   });
 
-  it("方式与说明搬到宿主给的底栏落点；常用组合收在一个菜单里，当前方向打勾", async () => {
-    const foot = document.createElement("div");
-    foot.className = "test-foot";
-    document.body.append(foot);
+  it("方向、结论和方式自上而下排在同一页；常用组合直接列成按钮，当前方向标为按下", async () => {
     const onPick = vi.fn();
     render(MergeSetup, {
       props: {
@@ -305,20 +316,18 @@ describe("合并准备", () => {
         onMessage: vi.fn(),
         onRecheck: vi.fn(),
         onOpenStash: vi.fn(),
-        optionsTarget: foot,
       },
     });
-    expect(within(foot).getByRole("radiogroup", { name: "方式" })).toBeTruthy();
-    expect(within(foot).getByRole("button", { name: "编辑合并说明" })).toBeTruthy();
-    // 方向读成一句话，只占一行。
+    const method = screen.getByRole("region", { name: "合并方式与说明" });
+    expect(within(method).getByRole("radiogroup", { name: "方式" })).toBeTruthy();
+    expect(within(method).getByRole("button", { name: "编辑合并说明" })).toBeTruthy();
     const bar = screen.getByRole("region", { name: "合并方向" });
-    expect(bar.textContent).toContain("把");
-    expect(bar.textContent).toContain("合并到");
-    await fireEvent.click(within(bar).getByRole("button", { name: /常用/ }));
-    const menu = screen.getByRole("menu", { name: "常用合并" });
-    const update = within(menu).getByRole("menuitemcheckbox", { name: "用 main 更新 feature" });
-    expect(update.getAttribute("aria-checked")).toBe("true");
-    await fireEvent.click(within(menu).getByRole("menuitemcheckbox", { name: "把 feature 合并到 main" }));
+    expect(bar.textContent).toContain("来源");
+    expect(bar.textContent).toContain("目标");
+    const quick = within(bar).getByRole("group", { name: "常用合并" });
+    const update = within(quick).getByRole("button", { name: "用 main 更新 feature" });
+    expect(update.getAttribute("aria-pressed")).toBe("true");
+    await fireEvent.click(within(quick).getByRole("button", { name: "把 feature 合并到 main" }));
     expect(onPick).toHaveBeenCalledWith("feature", "main");
   });
 

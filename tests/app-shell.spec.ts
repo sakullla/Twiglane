@@ -1863,7 +1863,8 @@ describe("应用外壳", () => {
     expect(document.activeElement).toBe(within(popover).getByRole("button", { name: "管理项目" }));
     await fireEvent.keyDown(document.activeElement!, { key: "Tab" });
     expect(document.activeElement).toBe(within(popover).getByRole("button", { name: "全部" }));
-    for (let step = 0; step < 5; step += 1) await fireEvent.keyDown(document.activeElement!, { key: "Tab" });
+    // 计数为 0 的筛选不显示：只有一个干净仓库时只剩「全部」。
+    await fireEvent.keyDown(document.activeElement!, { key: "Tab" });
     expect(document.activeElement, "行内按钮不进 Tab 序").toBe(add);
     await fireEvent.keyDown(add, { key: "ArrowDown" });
     await fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });

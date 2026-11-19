@@ -898,6 +898,26 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   associateUpstream: () => ok(snapshot()),
   branchList: () => ok(branchData()),
   branchState: () => ok(branchData()),
+  branchTracking: () =>
+    ok({
+      generation,
+      branches: branches
+        .filter((item) => !item.remote)
+        .map((item, index) => ({
+          name: item.name,
+          upstream: item.upstream,
+          ahead: item.upstream ? (item.current ? branch.ahead ?? 0 : index % 3 === 1 ? 2 : 0) : 0,
+          behind: item.upstream ? (item.current ? branch.behind ?? 0 : index % 2 === 1 ? 3 : 0) : 0,
+          gone: false,
+        })),
+    }),
+  updateBranch: (_repo: string, name: string) => {
+    if (name.includes("diverge")) {
+      return Promise.reject({ code: "branch_not_fast_forward", generation, message: `${name} 与上游已经分叉，不能快进。分支保持原样；请切换到它后合并或变基。` });
+    }
+    return ok(branchData(), 600);
+  },
+  pushLocalBranch: () => ok(branchData(), 600),
   createBranch: (_repo: string, name: string) => {
     if (!branches.some((item) => item.name === name)) {
       branches.push({ name, remote: false, current: false, upstream: null, worktree: null });

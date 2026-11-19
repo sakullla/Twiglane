@@ -33,7 +33,7 @@
 </script>
 
 <script lang="ts">
-  import { onMount, tick, untrack, type Snippet } from "svelte";
+  import { onDestroy, onMount, untrack, type Snippet } from "svelte";
   import {
     WORKTREE_FILTERS,
     authoritativeMains,
@@ -52,7 +52,6 @@
     rowWindow,
     selectableWorktreeRows,
     statusTimeText,
-    timeLabel,
     type WorktreeFilter,
     type WorktreeListRow,
     type WorktreeRow,
@@ -119,17 +118,47 @@
     { id: "repo.create", label: "新建仓库", icon: "folder-plus" },
   ];
 
-  const WIDTH = 520;
-  /** 单行工作区的高度、分组头高度与每多一行的增量，只是实测之前的估算。 */
-  const ROW = 64;
-  const GROUP_ROW = 38;
-  const EXTRA_LINE = 16;
-  /** 弹层一行完整路径大约放得下的字符数。 */
-  const PATH_CHARS = 70;
-  const OVERSCAN = 6;
+  const WIDTH = 540;
+  /** 固定行高：工作区两行（名称 + 路径），分组头一行。 */
+  const ROW = 52;
+  const GROUP_ROW = 30;
+  const OVERSCAN = 8;
   const FALLBACK_VIEWPORT = 480;
+  /** 超过这个数量才给搜索加防抖：少量仓库时输入即筛，几百个时合并连续击键。 */
+  const DEBOUNCE_FROM = 120;
+  const DEBOUNCE_MS = 120;
 
   let query = $state("");
+  /** 真正参与筛选的关键词：仓库多时比输入框晚一拍。 */
+  let searchTerm = $state("");
+  let searchTimer: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => {
+    const next = query;
+    untrack(() => {
+      if (searchTimer) clearTimeout(searchTimer);
+      searchTimer = null;
+      if (next === searchTerm) return;
+      if (repos.length < DEBOUNCE_FROM || next === "") {
+        searchTerm = next;
+        return;
+      }
+      searchTimer = setTimeout(() => {
+        searchTimer = null;
+        searchTerm = query;
+      }, DEBOUNCE_MS);
+    });
+  });
+  onDestroy(() => {
+    if (searchTimer) clearTimeout(searchTimer);
+  });
+  /** 回车时关键词还没落地：立刻用输入框里的词筛一次，并落到第一个可切换的仓库。 */
+  function flushSearch(): boolean {
+    if (searchTerm === query) return false;
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = null;
+    searchTerm = query;
+    return true;
+  }
   let filter = $state<WorktreeFilter>("all");
   let active = $state(0);
   /** 键盘当前项的稳定身份：列表异步变化时按路径找回，不跟着数字下标漂移。 */
@@ -183,7 +212,7 @@
       confirmedSet(),
     ),
   );
-  let filtered = $derived(filterWorktreeGroups(groups, query, filter));
+  let filtered = $derived(filterWorktreeGroups(groups, searchTerm, filter));
   let flat = $derived(flattenWorktreeGroups(filtered));
   let selectable = $derived(selectableWorktreeRows(flat));
   let badgeLetters = $derived(repoBadgeLetters(selectable.map((row) => row.name)));
@@ -318,26 +347,13 @@
     ].filter((part) => part.text);
   }
 
-  let space = $state<HTMLElement | null>(null);
   let list: HTMLElement | null = null;
   let scrollTop = $state(0);
   let viewport = $state(0);
-  /** 实测行高；原因文字整体出现或消失时行高都变，换一份重新量。 */
-  let measured = $state.raw(new Map<string, number>());
-  let measuredFor: string | null | undefined;
-  /** 方向键刚移动当前项：行高修正后还要把它留在视口里。 */
-  let following = false;
-  /** 整体重排时钉住的行：视口顶部那一行，和视口顶在行内的偏移。 */
-  let pinned: { key: string; within: number } | null = null;
 
-  function estimate(row: WorktreeListRow): number {
-    if (row.kind === "group") return GROUP_ROW;
-    const pathLines = sameNames.has(row.row.name) ? Math.floor(row.row.path.length / PATH_CHARS) : 0;
-    return ROW + pathLines * EXTRA_LINE;
-  }
-
+  /** 固定行高：不用逐行实测，几百个工作区滚动时只做加法。 */
   function heightOf(row: WorktreeListRow): number {
-    return measured.get(row.key) ?? estimate(row);
+    return row.kind === "group" ? GROUP_ROW : ROW;
   }
 
   let offsets = $derived(rowOffsets(flat.map(heightOf)));
@@ -361,7 +377,7 @@
   let seenQuery: string | null = null;
   $effect(() => {
     const rows = selectable;
-    const key = filter + " " + query;
+    const key = filter + " " + searchTerm;
     untrack(() => {
       if (key === seenQuery) {
         // 同一搜索条件下列表异步变了：按路径把当前项找回来，新插入的行不会顶替它。
@@ -381,49 +397,14 @@
     });
   });
 
-  /* 阻塞出现或解除时几乎每行都变高或变矮，先趁 DOM 还是旧布局记下视口顶部的行，重排后恢复。 */
-  $effect.pre(() => {
-    if (blockedReason === measuredFor) return;
-    measuredFor = blockedReason;
-    untrack(() => {
-      pinned = list ? findPinned(list) : null;
-      measured = new Map();
-    });
-  });
-
-  function findPinned(host: HTMLElement): { key: string; within: number } | null {
-    let found: { key: string; within: number } | null = null;
-    let best = -Infinity;
-    for (const node of space?.querySelectorAll<HTMLElement>("[data-repo-row]") ?? []) {
-      const top = parseFloat(node.style.top);
-      const row = flat[Number(node.dataset.repoRow)];
-      if (!row || top > host.scrollTop || top <= best) continue;
-      best = top;
-      found = { key: row.key, within: host.scrollTop - top };
-    }
-    return found;
-  }
-
-  function restorePinned(host: HTMLElement) {
-    if (!pinned) return;
-    const { key, within } = pinned;
-    const index = flat.findIndex((row) => row.key === key);
-    if (index < 0) {
-      pinned = null;
-      return;
-    }
-    host.scrollTop = offsets[index] + Math.min(within, Math.max(0, heightOf(flat[index]) - 1));
-    scrollTop = host.scrollTop;
-  }
-
   /** 滚动容器是 Popover 的列表区，这里挂在内容轨道上跟着它走。 */
   function trackList(node: HTMLElement) {
     const host = node.parentElement as HTMLElement;
+    // 浏览器每帧最多派发一次 scroll；这里只记两个数，窗口在同一轮更新里重算一次。
     const read = () => {
       scrollTop = host.scrollTop;
       viewport = host.clientHeight;
     };
-    space = node;
     list = host;
     read();
     host.addEventListener("scroll", read, { passive: true });
@@ -433,55 +414,10 @@
       destroy() {
         host.removeEventListener("scroll", read);
         observer?.disconnect();
-        space = null;
         list = null;
       },
     };
   }
-
-  /** 视口上方的行变高时同步推开滚动位置，看着的内容不跳。 */
-  function measureRows(node: HTMLElement) {
-    let next: Map<string, number> | null = null;
-    let shift = 0;
-    for (const element of node.querySelectorAll<HTMLElement>("[data-repo-row]")) {
-      const height = element.offsetHeight;
-      const index = Number(element.dataset.repoRow);
-      const row = flat[index];
-      if (!row || height <= 0) continue;
-      const known = heightOf(row);
-      if (height === known) continue;
-      next ??= new Map(measured);
-      next.set(row.key, height);
-      if (offsets[index] + known <= scrollTop) shift += height - known;
-    }
-    if (!next) {
-      if (list) restorePinned(list);
-      pinned = null;
-      following = false;
-      return;
-    }
-    measured = next;
-    // 钉住期间位置由锚点决定；下一轮测量可能先于这里结束钉住，所以在这里就定下不再推开。
-    const push = pinned ? 0 : shift;
-    void tick().then(() => {
-      if (list && pinned) restorePinned(list);
-      else if (push !== 0 && list) {
-        list.scrollTop += push;
-        scrollTop = list.scrollTop;
-      }
-      if (following) {
-        // 方向键刚移动：行高修正后把当前项留在视口里。
-        const at = flat.findIndex((row) => row.kind === "item" && row.index === active);
-        node.querySelector<HTMLElement>('[data-repo-row="' + at + '"]')?.scrollIntoView?.({ block: "nearest" });
-      }
-    });
-  }
-
-  $effect(() => {
-    void rendered;
-    const node = space;
-    if (node) untrack(() => measureRows(node));
-  });
 
   function reasonFor(row: WorktreeRow): string | null {
     return row.current ? null : blockedReason;
@@ -504,9 +440,28 @@
     return head.branch || head.detached || head.missing || head.worktree ? head : null;
   }
 
+  /** 行上的完整状态句：给读屏和提示用，视觉上只留紧凑徽标。 */
+  function statusSentence(row: WorktreeRow): string {
+    const parts: string[] = [];
+    if (row.state === "missing") parts.push("状态未知·目录缺失");
+    else if (row.state === "unknown") parts.push("状态未知");
+    else if (row.dirty) {
+      parts.push(`有改动 ${row.changed ?? 0}`);
+      if ((row.conflicted ?? 0) > 0) parts.push(`冲突 ${row.conflicted}`);
+    } else parts.push("干净");
+    if ((row.ahead ?? 0) > 0) parts.push(`待推送 ${row.ahead}`);
+    if ((row.behind ?? 0) > 0) parts.push(`待拉取 ${row.behind}`);
+    if (row.upstream) parts.push(`上游 ${row.upstream}`);
+    parts.push(remoteText(row));
+    if (row.reviewed > 0) parts.push(`已审阅 ${row.reviewed}`);
+    parts.push(statusTimeText(row));
+    if (row.stale) parts.push("可能已过期");
+    return parts.join("，");
+  }
+
   function emptyText(): string {
     if (repos.length === 0) return "还没有最近仓库，从下面打开或克隆一个。";
-    if (query.trim() || filter !== "all") return "没有符合当前搜索与筛选的工作区，换个关键词或筛选条件试试。";
+    if (searchTerm.trim() || filter !== "all") return "没有符合当前搜索与筛选的工作区，换个关键词或筛选条件试试。";
     return "没有可显示的工作区。";
   }
 </script>
@@ -516,17 +471,20 @@
   label="切换仓库"
   width={WIDTH}
   maxHeight={760}
-  placeholder="搜索仓库名称、路径、分支或 worktree"
+  placeholder={repos.length > 0 ? `搜索 ${repos.length} 个仓库：名称、路径、分支或 worktree` : "搜索仓库名称、路径、分支或 worktree"}
+  searchLabel="搜索仓库名称、路径、分支或 worktree"
   bind:query
-  bind:active={
-    () => active,
-    (index) => {
-      setActive(index);
-      following = true;
-    }
-  }
+  bind:active={() => active, (index) => setActive(index)}
   count={selectable.length}
-  onChoose={(index) => choose(selectable[index])}
+  onChoose={(index) => {
+    if (flushSearch()) {
+      const first = selectable.findIndex((row) => !row.current);
+      setActive(first >= 0 ? first : 0);
+      choose(selectable[active]);
+      return;
+    }
+    choose(selectable[index]);
+  }}
   onItemContextMenu={(index, point) => {
     const row = selectable[index];
     if (row) onContextMenu(asRepo(row), point, contextHead(row));
@@ -538,56 +496,68 @@
     {#if repos.length === 0}
       <p class="branch-popover-empty">还没有最近仓库，从下面打开或克隆一个。</p>
     {:else}
-      <div class="switcher-filters" role="group" aria-label="筛选工作区">
-        {#each WORKTREE_FILTERS as option (option.id)}
-          <button
-            type="button"
-            class="switcher-filter"
-            aria-pressed={filter === option.id}
-            data-worktree-filter={option.id}
-            title={option.id === "all" ? "全部工作区" : "只看" + option.label + "的工作区"}
-            onclick={() => setFilter(option.id)}
-          >
-            <span>{option.label}</span>
-            {#if option.id !== "all"}<span class="switcher-filter-count">{countFor(option.id)}</span>{/if}
-          </button>
-        {/each}
+      <div class="rs-toolbar">
+        <div class="switcher-filters rs-filters" role="group" aria-label="筛选工作区">
+          {#each WORKTREE_FILTERS as option (option.id)}
+            {@const count = option.id === "all" ? 0 : countFor(option.id)}
+            {#if option.id === "all" || count > 0 || filter === option.id}
+              <button
+                type="button"
+                class="switcher-filter"
+                aria-pressed={filter === option.id}
+                data-worktree-filter={option.id}
+                title={option.id === "all" ? "全部工作区" : "只看" + option.label + "的工作区"}
+                onmousedown={(event) => event.stopPropagation()}
+                onclick={() => setFilter(filter === option.id && option.id !== "all" ? "all" : option.id)}
+              >
+                <span>{option.label}</span>
+                {#if option.id !== "all"}<span class="switcher-filter-count">{count}</span>{/if}
+              </button>
+            {/if}
+          {/each}
+        </div>
+        {#if statusLoading}
+          <span class="rs-status" role="status" data-worktree-status="loading" title="正在读取各工作区的状态；搜索和切换不用等它">
+            <span class="spinner"></span><span class="sr-only">正在读取各工作区的状态；搜索和切换不用等它。</span>
+          </span>
+        {:else if statusError}
+          <span class="rs-status danger" role="status" data-worktree-status="failed" title={`状态读取失败：${statusError}${statusCheckedAt !== null ? "（显示的是上次读到的结果）" : ""}`}>
+            <Icon name="alert-circle" size={13} /><span class="rs-status-text">读取失败</span><span class="sr-only">：{statusError}{#if statusCheckedAt !== null}（下面是上次读到的结果）{/if}</span>
+          </span>
+        {/if}
       </div>
       {#if blockedReason}
         <p class="switcher-status warn" role="status" data-switch-blocked>暂时不能切换：{blockedReason}</p>
       {:else if switchNote}
         <p class="switcher-status warn" role="status" data-switch-note>{switchNote}</p>
       {/if}
-      {#if statusLoading}
-        <p class="switcher-status" role="status" data-worktree-status="loading">正在读取各工作区的状态；搜索和切换不用等它。</p>
-      {:else if statusError}
-        <p class="switcher-status danger" role="status" data-worktree-status="failed">
-          状态读取失败：{statusError}{#if statusCheckedAt !== null}（下面是上次读到的结果，时间见各行）{/if}
-        </p>
-      {:else if statusCheckedAt !== null}
-        <p class="switcher-status" role="status" data-worktree-status="ready">状态读取于 {timeLabel(statusCheckedAt)}；总览不会自动 fetch 远程。</p>
-      {/if}
       {#if selectable.length === 0}
         <p class="branch-popover-empty" data-worktree-empty>{emptyText()}</p>
       {/if}
       {#if flat.length > 0}
-        <div class="switcher-space" role="presentation" style={"height:" + offsets[flat.length] + "px"} use:trackList>
+        <div class="switcher-space" role="presentation" style={"height:" + offsets[flat.length] + "px"} use:trackList oncontextmenu={(event) => {
+          const target = event.target as Element | null;
+          if (!target?.closest?.("input")) event.preventDefault();
+        }}>
           {#each rendered as { row, index } (row.key)}
             {#if row.kind === "group"}
-              <div class="switcher-row switcher-group-row" class:leading={index === 0} role="presentation" data-group-row={row.group.key} data-repo-row={index} style={"top:" + offsets[index] + "px"}>
-                <span class="switcher-group-name"><Icon name="layers" size={11} />{row.group.name}</span>
-                <span class="switcher-group-path"><bdi>{row.group.mainPath ?? "归属未知"}</bdi></span>
-                <span class="switcher-group-count">{row.group.rows.length} 个工作区</span>
+              <div class="switcher-row rs-group" class:leading={index === 0} role="presentation" data-group-row={row.group.key} data-repo-row={index} style={"top:" + offsets[index] + "px"} title={row.group.mainPath ?? "归属未知"}>
+                <Icon name="layers" size={12} />
+                <span class="rs-group-name">{row.group.name}</span>
+                <span class="rs-group-count">{row.group.rows.length} 个工作区</span>
+                <span class="rs-group-path"><bdi>{row.group.mainPath ?? "归属未知"}</bdi></span>
               </div>
             {:else}
               {@const view = row.row}
               {@const viewIndex = row.index}
               {@const reason = reasonFor(view)}
               {@const badge = badgeLetters[viewIndex] ?? ""}
-              <div class="switcher-row" role="presentation" data-repo-row={index} style={"top:" + offsets[index] + "px"}>
+              {@const nested = view.linked && row.group.rows.length > 1}
+              {@const sentence = statusSentence(view)}
+              <div class="switcher-row rs-row" class:nested role="presentation" data-repo-row={index} style={"top:" + offsets[index] + "px"}>
                 <div
                   id={listId + "-" + viewIndex}
-                  class="branch-option switcher-option"
+                  class="branch-option switcher-option rs-option"
                   class:active={viewIndex === active}
                   role="option"
                   aria-selected={view.current}
@@ -599,75 +569,65 @@
                   title={reason ?? view.path}
                   tabindex="-1"
                   onmousemove={() => {
-                    following = false;
-                    setActive(viewIndex);
+                    if (viewIndex !== active) setActive(viewIndex);
                   }}
                   onclick={() => choose(view)}
                   oncontextmenu={(event) => {
                     event.preventDefault();
-                    following = false;
                     setActive(viewIndex);
                     onContextMenu(asRepo(view), { x: event.clientX, y: event.clientY }, contextHead(view));
                   }}
                   onkeydown={() => {}}
                 >
-                  <span class="repo-badge" style={"--hue:" + hueOf(view.path)} aria-hidden="true">{badge}</span>
-                  <span class="repo-text">
-                    <span class="repo-line">
-                      <span class="repo-name">{#each nameParts(view.name, query) as part, partIndex (partIndex)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
+                  {#if nested}
+                    <span class="rs-tree" aria-hidden="true"></span>
+                  {:else}
+                    <span class="repo-badge rs-badge" style={"--hue:" + hueOf(view.path)} aria-hidden="true">{badge}</span>
+                  {/if}
+                  <span class="rs-text">
+                    <span class="rs-line">
+                      <span class="repo-name rs-name">{#each nameParts(view.name, searchTerm) as part, partIndex (partIndex)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
                       {#if view.missing}
                         <span class="repo-head missing" title="目录已不存在或不再是 Git 仓库">目录不存在</span>
                       {:else if view.branch}
-                        <span class="repo-head" title={"当前检出的分支：" + view.branch}><Icon name="branch" size={11} /><span class="repo-head-name">{#each nameParts(view.branch, query) as part, partIndex (partIndex)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span></span>
+                        <span class="repo-head" title={"当前检出的分支：" + view.branch}><Icon name="branch" size={11} /><span class="repo-head-name">{#each nameParts(view.branch, searchTerm) as part, partIndex (partIndex)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span></span>
                       {:else if view.detached}
                         <span class="repo-head detached" title={"游离 HEAD：" + view.detached}><Icon name="commit" size={11} /><span class="repo-head-name">{view.detached}</span></span>
                       {/if}
-                      {#if view.linked && !view.missing}
+                      {#if view.linked && !view.missing && !nested}
                         <span class="repo-worktree" title={view.mainPath ? "附属工作区（git worktree），主仓库：" + view.mainPath : "附属工作区（git worktree），主仓库未知"}>
-                          <Icon name="layers" size={11} />worktree{#if view.mainPath}<span class="repo-worktree-main">· {baseName(view.mainPath)}</span>{/if}
+                          <Icon name="layers" size={11} />{#if view.mainPath}<span class="repo-worktree-main">{baseName(view.mainPath)}</span>{:else}worktree{/if}
                         </span>
+                      {:else if nested && view.mainPath}
+                        <span class="repo-worktree sr-only">worktree · {baseName(view.mainPath)}</span>
                       {/if}
                       {#if view.locked}
-                        <span class="repo-locked" title="已用 git worktree lock 锁定，删除会被拒绝">已锁定</span>
+                        <span class="rs-icon-badge warn" title="已用 git worktree lock 锁定，删除会被拒绝"><span class="repo-locked">已锁定</span></span>
                       {/if}
                     </span>
-                    <span class={sameNames.has(view.name) ? "repo-path-full" : "repo-path"}>
-                      <bdi>
-                        {#if divergences.get(view.path)?.diverge}
-                          {@const parts = divergences.get(view.path)!}
-                          {parts.head}<span class="path-diverge">{parts.diverge}</span>{parts.tail}
-                        {:else}
-                          {view.path}
-                        {/if}
-                      </bdi>
-                    </span>
-                    <span class="repo-status" data-worktree-state={view.state}>
-                      {#if view.state === "missing"}
-                        <span class="repo-state danger">状态未知·目录缺失</span>
-                      {:else if view.state === "unknown"}
-                        <span class="repo-state muted">状态未知</span>
-                      {:else if view.dirty}
-                        <span class="repo-state warn">有改动 {view.changed ?? 0}</span>
-                        {#if (view.conflicted ?? 0) > 0}<span class="repo-state danger">冲突 {view.conflicted}</span>{/if}
-                      {:else}
-                        <span class="repo-state ok">干净</span>
-                      {/if}
-                      {#if (view.ahead ?? 0) > 0}<span class="repo-state">待推送 {view.ahead}</span>{/if}
-                      {#if (view.behind ?? 0) > 0}<span class="repo-state">待拉取 {view.behind}</span>{/if}
-                      {#if view.upstream}<span class="repo-state muted" title={"本地 upstream：" + view.upstream}>{view.upstream}</span>{/if}
-                      <span class="repo-state" class:muted={!view.liveRemoteChecked} data-worktree-remote={view.liveRemoteChecked ? "live" : view.remoteCheckedAtMs !== null ? "stale" : "none"}>{remoteText(view)}</span>
-                      {#if view.reviewed > 0}<span class="repo-state accent">已审阅 {view.reviewed}</span>{/if}
-                      <span class="repo-state muted">{statusTimeText(view)}</span>
-                      {#if view.stale}
-                        <span
-                          class="repo-state muted"
-                          title="这次刷新没有确认到这一项，显示的是更早读取的结果"
-                          data-worktree-stale={view.path}>可能已过期</span>
-                      {/if}
-                      {#if view.note}<span class="repo-state muted repo-state-note" title={view.note}>{view.note}</span>{/if}
-                    </span>
+                    <span class={sameNames.has(view.name) ? "repo-path-full rs-path" : "repo-path rs-path"}><bdi>{#if divergences.get(view.path)?.diverge}{@const parts = divergences.get(view.path)!}{parts.head}<span class="path-diverge">{parts.diverge}</span>{parts.tail}{:else}{view.path}{/if}</bdi></span>
                   </span>
-                  {#if view.current}<span class="switcher-current" aria-hidden="true"><Icon name="check" size={12} class="switcher-check" />当前</span>{/if}
+                  <span class="repo-status rs-state" data-worktree-state={view.state} title={sentence}>
+                    <span class="sr-only">{sentence}{#if view.note && view.state !== "ready"}；{view.note}{/if}</span>
+                    <span class="sr-only" data-worktree-remote={view.liveRemoteChecked ? "live" : view.remoteCheckedAtMs !== null ? "stale" : "none"}></span>
+                    {#if view.stale}<span class="rs-chip muted" data-worktree-stale={view.path} aria-hidden="true">过期</span>{/if}
+                    {#if view.state === "unknown"}
+                      <span class="rs-chip muted" aria-hidden="true">?</span>
+                    {:else if view.state === "ready"}
+                      {#if (view.conflicted ?? 0) > 0}<span class="rs-chip danger" aria-hidden="true"><Icon name="alert" size={11} />{view.conflicted}</span>{/if}
+                      {#if view.dirty}
+                        <span class="rs-chip warn" aria-hidden="true"><span class="rs-dot"></span>{view.changed ?? 0}</span>
+                      {/if}
+                    {/if}
+                    {#if (view.behind ?? 0) > 0 || (view.ahead ?? 0) > 0}
+                      <span class="rs-chip sync" aria-hidden="true">{#if (view.behind ?? 0) > 0}<span>↓{view.behind}</span>{/if}{#if (view.ahead ?? 0) > 0}<span class="up">↑{view.ahead}</span>{/if}</span>
+                    {/if}
+                    {#if view.reviewed > 0}<span class="rs-chip accent" aria-hidden="true"><Icon name="eye" size={11} />{view.reviewed}</span>{/if}
+                    {#if view.state === "ready" && !view.dirty && (view.conflicted ?? 0) === 0 && !view.stale}
+                      <span class="rs-clean" aria-hidden="true"><Icon name="check" size={11} /></span>
+                    {/if}
+                  </span>
+                  {#if view.current}<span class="switcher-current rs-current" aria-hidden="true">当前</span>{/if}
                 </div>
                 <span class="switcher-actions">
                   <button type="button" class="icon-btn sm" tabindex="-1" aria-label={"复制 " + view.name + " 的完整路径"} title="复制完整路径" onclick={() => onCopyPath(view.path)}>
@@ -708,11 +668,48 @@
         </button>
       {/each}
     </div>
-    <p class="switcher-hint" aria-hidden="true">
-      <span><span class="key">↑</span><span class="key">↓</span>选择</span>
-      <span><span class="key">Enter</span>打开</span>
-      <span>可搜名称、路径、分支与主仓库</span>
-      <span>右键更多操作</span>
-    </p>
   {/snippet}
 </Popover>
+
+<style>
+  .rs-toolbar { display: flex; align-items: center; gap: var(--space-6); margin: 0 var(--space-8) var(--space-6); min-height: 24px; }
+  .rs-toolbar > .rs-filters { flex: 1; min-width: 0; margin: 0; }
+  .rs-status { display: inline-flex; align-items: center; gap: 4px; flex: none; color: var(--fg-subtle); font-size: var(--text-xs); }
+  .rs-status.danger { color: var(--danger-text); }
+  .rs-status .spinner { width: 12px; height: 12px; }
+  .rs-group { display: flex; align-items: center; gap: 6px; height: 30px; padding: 8px 12px 0; color: var(--fg-subtle); font-size: var(--text-xs); }
+  .rs-group :global(.icon) { flex: none; color: var(--accent-text); }
+  .rs-group-name { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-muted); font-weight: var(--weight-semibold); }
+  .rs-group-count { flex: none; font-variant-numeric: tabular-nums; }
+  .rs-group-path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: right; font: 10.5px/1 var(--mono); opacity: 0.7; }
+  .rs-group-path bdi { direction: ltr; unicode-bidi: isolate; }
+  .rs-group:not(.leading)::before { content: ""; position: absolute; top: 3px; left: 12px; right: 12px; border-top: 1px solid var(--border); }
+  .rs-row { height: 52px; }
+  :global(.popover) .rs-row .rs-option { display: flex; align-items: center; gap: 10px; height: 50px; padding: 0 10px; border-radius: var(--radius); }
+  :global(.popover) .rs-row.nested .rs-option { padding-left: 22px; }
+  .rs-badge { flex: none; width: 28px !important; height: 28px !important; border-radius: var(--radius-sm); font-size: 12px; }
+  .rs-tree { position: relative; flex: none; width: 16px; height: 50px; }
+  .rs-tree::before { content: ""; position: absolute; left: 3px; top: 0; bottom: 50%; border-left: 1.5px solid var(--border-strong, var(--border)); border-bottom: 1.5px solid var(--border-strong, var(--border)); width: 10px; border-bottom-left-radius: 6px; }
+  .rs-text { display: flex; flex-direction: column; justify-content: center; gap: 2px; flex: 1; min-width: 0; }
+  .rs-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .rs-name { flex: 0 1 auto; min-width: 3em; font-weight: var(--weight-semibold); }
+  .rs-line :global(.repo-head) { max-width: 55%; }
+  .rs-line :global(.repo-worktree) { max-width: 30%; }
+  .rs-path { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; font: 11px/1.3 var(--mono); color: var(--fg-subtle); opacity: 0.85; }
+  .rs-path bdi { direction: ltr; unicode-bidi: isolate; }
+  .rs-path :global(.path-diverge) { color: var(--fg); font-weight: var(--weight-medium); }
+  .rs-state { display: inline-flex; align-items: center; gap: 4px; flex: none; flex-wrap: nowrap; }
+  .rs-chip { display: inline-flex; align-items: center; gap: 3px; height: 18px; padding: 0 6px; border-radius: 999px; background: var(--surface-3); color: var(--fg-muted); font: 600 11px/1 var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .rs-chip.warn { background: var(--warning-soft); color: var(--warning-text); }
+  .rs-chip.danger { background: var(--danger-soft); color: var(--danger-text); }
+  .rs-chip.accent { background: var(--accent-softer); color: var(--accent-text); }
+  .rs-chip.muted { background: transparent; color: var(--fg-subtle); font-family: var(--font); font-weight: var(--weight-normal); }
+  .rs-chip.sync { background: var(--info-soft); color: var(--info-text); gap: 5px; }
+  .rs-chip.sync .up { color: var(--accent-text); }
+  .rs-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .rs-clean { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; color: var(--success-text); opacity: 0.75; }
+  .rs-icon-badge { flex: none; }
+  .rs-current { flex: none; }
+  /* 悬停时右侧的操作按钮盖在状态徽标上，不再挤占名称。 */
+  .rs-row :global(.switcher-actions) { right: 6px; }
+</style>

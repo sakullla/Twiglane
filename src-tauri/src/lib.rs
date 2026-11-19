@@ -173,6 +173,9 @@ pub fn run() {
             commit_and_push,
             branch_state,
             branch_list,
+            branch_tracking,
+            update_branch,
+            push_local_branch,
             create_branch,
             create_branch_from,
             rename_branch,
@@ -1443,6 +1446,38 @@ async fn branch_list(
     request_id: u64,
 ) -> Result<crate::model::BranchListing, AppError> {
     crate::git::sync::branch_list(state.inner(), &path, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn branch_tracking(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<crate::model::BranchTracking, AppError> {
+    crate::git::sync::branch_tracking(state.inner(), &path, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn update_branch(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    name: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    crate::git::sync::update_branch(state.inner(), &path, &name, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn push_local_branch(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    name: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    crate::git::sync::push_local_branch(state.inner(), &path, &name, generation, request_id).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

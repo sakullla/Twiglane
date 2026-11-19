@@ -1,4 +1,4 @@
-import type { BranchRecord } from "./types";
+import type { BranchRecord, BranchTrack } from "./types";
 
 export function filterBranches(branches: BranchRecord[], query: string): BranchRecord[] {
   const needle = query.trim().toLowerCase();
@@ -101,4 +101,36 @@ export function trackNameFor(remoteBranch: string, branches: BranchRecord[]): st
     const candidate = `${base}-${index}`;
     if (!taken.has(candidate)) return candidate;
   }
+}
+
+export interface TrackingSummary {
+  /** 落后上游、可以拉取的本地分支数。 */
+  pull: number;
+  /** 领先上游、可以推送的本地分支数。 */
+  push: number;
+  /** 上游已被删除的分支数。 */
+  gone: number;
+}
+
+/** 汇总领先/落后：只数分支，不列明细；几百个分支也只是一次遍历。 */
+export function trackingSummary(tracks: readonly BranchTrack[] | null | undefined): TrackingSummary {
+  const summary: TrackingSummary = { pull: 0, push: 0, gone: 0 };
+  for (const track of tracks ?? []) {
+    if (track.gone) summary.gone += 1;
+    if (track.behind > 0) summary.pull += 1;
+    if (track.ahead > 0) summary.push += 1;
+  }
+  return summary;
+}
+
+/** 汇总成一句短提示；都为 0 时返回 null。 */
+export function trackingSummaryText(summary: TrackingSummary): string | null {
+  const parts: string[] = [];
+  if (summary.pull > 0) parts.push(`${summary.pull} 个分支需要拉取`);
+  if (summary.push > 0) parts.push(`${summary.push} 个分支需要推送`);
+  return parts.length ? parts.join(" · ") : null;
+}
+
+export function trackingMap(tracks: readonly BranchTrack[] | null | undefined): Map<string, BranchTrack> {
+  return new Map((tracks ?? []).map((track) => [track.name, track]));
 }

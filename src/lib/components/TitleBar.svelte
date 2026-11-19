@@ -81,6 +81,11 @@
     onPushAll?: () => void;
     onCancelSync?: () => void;
     onRemote: () => void;
+    /**
+     * 全部本地分支相对上游的汇总（fetch 后更新）：分支按钮上一枚小点、同步菜单里一行提醒。
+     * 只给数量，不列明细；明细在分支弹层的 ↑↓ 徽标里。
+     */
+    branchSync?: { pull: number; push: number } | null;
     onTheme: (theme: Theme) => void;
     onSettings: () => void;
   }
@@ -119,6 +124,7 @@
     onPushAll,
     onCancelSync,
     onRemote,
+    branchSync = null,
     onTheme,
     onSettings,
   }: Props = $props();
@@ -138,6 +144,16 @@
   let themeTrigger = $state<HTMLButtonElement | null>(null);
   let syncTrigger = $state<HTMLButtonElement | null>(null);
   let maximized = $state(false);
+  let branchTrigger = $state<HTMLButtonElement | null>(null);
+  /** 「有 X 个分支需要拉取 · Y 个需要推送」；都为 0 时为空。 */
+  let branchSyncText = $derived(
+    [
+      branchSync && branchSync.pull > 0 ? `${branchSync.pull} 个分支需要拉取` : "",
+      branchSync && branchSync.push > 0 ? `${branchSync.push} 个分支需要推送` : "",
+    ]
+      .filter(Boolean)
+      .join(" · "),
+  );
 
   let badgeNames = $derived(repoNames.length > 0 ? repoNames : repo ? [repo.name] : []);
   let badgeLetter = $derived(repo ? repoBadgeLetter(repo.name, badgeNames) : "");
@@ -145,7 +161,7 @@
   let hasWindowControl = $derived(platform === "windows");
   let branchText = $derived(branch ?? "无分支");
   let branchTitle = $derived(
-    `当前分支：${branchText}${detached ? "（游离 HEAD）" : upstreamMissing ? "（未关联上游）" : ""}\n点击切换分支`,
+    `当前分支：${branchText}${detached ? "（游离 HEAD）" : upstreamMissing ? "（未关联上游）" : ""}${branchSyncText ? `\n${branchSyncText}（在分支列表里右键可直接拉取或推送）` : ""}\n点击切换分支`,
   );
   let upstreamRemote = $derived(upstream ? upstream.slice(0, Math.max(0, upstream.indexOf("/"))) || null : null);
   let pushTarget = $derived(upstream ?? (remotes[0] ? `${remotes[0]}（发布）` : null));
@@ -312,15 +328,17 @@
         class="branch-pill"
         data-titlebar-control
         disabled={branch === null}
-        aria-label={`当前分支 ${branchText}`}
+        aria-label={`当前分支 ${branchText}${branchSyncText ? `，${branchSyncText}` : ""}`}
         aria-haspopup="dialog"
         aria-expanded={openSwitcher === "branch"}
         title={branchTitle}
+        bind:this={branchTrigger}
         onclick={(event) => onBranch(event.currentTarget)}
       >
         <Icon name="branch" size={15} />
         <span class="truncate">{branchText}</span>
         {#if detached}<span class="branch-hint">游离 HEAD</span>{:else if upstreamMissing}<span class="branch-hint">未关联上游</span>{/if}
+        {#if branchSyncText}<span class="branch-sync-dot" data-branch-sync-dot aria-hidden="true"></span>{/if}
         <Icon name="chevron-down" size={13} />
       </button>
     {/if}
@@ -383,6 +401,22 @@
         </button>
         {#if syncMenu}
           <div class="menu sync-menu" role="menu" aria-label="同步" tabindex="-1" onkeydown={(event) => onMenuKey(event, "sync")}>
+            {#if branchSyncText}
+              <button
+                type="button"
+                class="menu-item sync-branches"
+                role="menuitem"
+                data-sync-branches
+                onclick={() => {
+                  openMenu = null;
+                  if (branchTrigger) onBranch(branchTrigger);
+                }}
+              >
+                <Icon name="branch" />
+                <span>{branchSyncText}<small>查看这些分支，右键可直接拉取或推送</small></span>
+              </button>
+              <div class="menu-sep" role="separator"></div>
+            {/if}
             <button type="button" class="menu-item" role="menuitem" title={disabled ? BUSY_REASON : undefined} disabled={disabled} onclick={() => runSync(onFetch)}>
               <Icon name="download" />
               <span>获取更新<small>下载远程分支与提交，不改本地文件</small></span>

@@ -14,6 +14,7 @@
     type CommandState,
   } from "./lib/commands";
   import { LatestReadQueue } from "./lib/latest-read";
+  import { findSeed, focusFindTarget, seedInput, selectedText } from "./lib/find-seed";
   import { createDocumentSession } from "./lib/document-session.svelte";
   import { shortOid } from "./lib/history";
   import { FULL_FILE_CONTEXT, finishDiffAttempt, reuseDiffContent, type HunkNavReport } from "./lib/diff";
@@ -140,6 +141,7 @@
   import Welcome from "./lib/components/Welcome.svelte";
   import { createQuietActivity } from "./lib/quiet-activity";
   import { setAbbrevLength } from "./lib/abbrev.svelte";
+  import { trackingSummary } from "./lib/branches";
 
   /* 外观：三态选择 + 系统解析。documentElement 上只写 light / dark，
      "system" 由 matchMedia 解析，并跟随系统变化（R14/T2 的 Theme 收口在这里）。 */
@@ -242,7 +244,38 @@
     void loadProjects(true);
   }
   function selectProject(id: string | null) { selectedProjectId = id; if (id) void loadProjects(true); }
-  function manageProjects() { closeSwitcher(); projectManagerOpen = true; void loadProjects(); }
+  function manageProjects() { closeSwitcher(); projectManagerFocus = null; projectManagerOpen = true; void loadProjects(); }
+  /** 管理页直接定位到某个项目并展开动作（标题栏项目菜单右键）。 */
+  let projectManagerFocus = $state<{ id: string; action: "rename" | "members" | "delete" | null } | null>(null);
+  function manageProject(id: string, action: "rename" | "members" | "delete" | null) {
+    closeSwitcher();
+    projectManagerFocus = { id, action };
+    projectManagerOpen = true;
+    void loadProjects();
+  }
+  /** 标题栏项目下拉的选项右键：应用自己的菜单代替 WebView 原生菜单。 */
+  function projectOptionMenu(option: SelectMenuOption): ContextMenuEntry[] {
+    const blocked = writeLocked ? switchBlockedReason(commandState) : undefined;
+    if (!option.value) {
+      return [
+        { id: "select", label: "按最近使用列出仓库", icon: "history", disabledReason: selectedProjectId === null ? "已经是全部仓库" : undefined, run: () => selectProject(null) },
+        { separator: true },
+        { id: "manage", label: "管理项目…", icon: "settings", disabledReason: blocked, run: manageProjects },
+      ];
+    }
+    const project = projects.projects.find((p) => p.manifest.workspaceId === option.value);
+    const id = option.value;
+    return [
+      { id: "select", label: "切换到此项目", icon: "check-circle", disabledReason: selectedProjectId === id ? "已经是当前项目" : undefined, run: () => selectProject(id) },
+      { id: "refresh", label: "刷新清单", icon: "refresh", run: () => void api.workspaceRefresh(id).then(acceptProjects, (error: unknown) => showError(error)) },
+      { separator: true },
+      { id: "rename", label: "重命名…", icon: "pencil", disabledReason: blocked ?? (project?.error ? "名单待处理，请先在管理项目中刷新或重新预览" : undefined), run: () => manageProject(id, "rename") },
+      { id: "members", label: "编辑成员…", icon: "folder-plus", disabledReason: blocked, run: () => manageProject(id, "members") },
+      { id: "manage", label: "在管理项目中打开…", icon: "settings", disabledReason: blocked, run: () => manageProject(id, null) },
+      { separator: true },
+      { id: "delete", label: project?.sourcePath ? "取消关联清单…" : "删除项目…", icon: "trash", danger: true, disabledReason: blocked, run: () => manageProject(id, "delete") },
+    ];
+  }
   /** 项目下拉里「管理项目…」的哨兵值：选中它只打开管理弹窗，不改变当前项目。 */
   interface ReadingContext {
     view: WorkspaceView; selected: FileSelection | null; selectedSet: FileSelection[]; query: string;
@@ -479,6 +512,24 @@
   let remoteNames = $state<string[]>([]);
   /** remoteNames 属于哪个仓库：同一仓库只读一次，远程弹窗读到或改动时直接更新。 */
   let remoteNamesFor: string | null = null;
+  /** 全部本地分支相对上游的汇总（同步完成或分支弹层读到后更新），只属于读到它的仓库。 */
+  let branchSyncFor = $state<{ path: string; pull: number; push: number } | null>(null);
+  const branchSync = $derived(branchSyncFor && opened && branchSyncFor.path === opened.summary.path ? branchSyncFor : null);
+  function acceptBranchTracking(path: string, tracks: import("./lib/types").BranchTrack[]) {
+    const summary = trackingSummary(tracks);
+    branchSyncFor = { path, pull: summary.pull, push: summary.push };
+  }
+  /** 一次 for-each-ref 读全部本地分支的领先/落后；只是提示，失败不打扰。 */
+  async function refreshBranchTracking() {
+    const current = opened;
+    if (!current || typeof api.branchTracking !== "function") return;
+    try {
+      const result = await api.branchTracking(current.summary.path, current.generation, nextId());
+      if (opened?.summary.path === current.summary.path && result) acceptBranchTracking(current.summary.path, result.branches ?? []);
+    } catch {
+      // 只是少了汇总提醒。
+    }
+  }
   let syncCancelling = $state(false);
   /** 会访问远程、可以取消的同步动作。 */
   const REMOTE_PENDING = new Set(["fetch", "pull", "push", "publish", "associate"]);
@@ -773,10 +824,18 @@
    * 所以从面板执行时要等这一轮收尾后再聚焦。
    */
   function focusFinder() {
+    // 有单行选区时作为筛选词带入（与文件内查找一致）；从命令面板执行时选区是面板自己的，不带入。
+    // 选区落在差异代码里时不带入：代码片段填进文件/提交筛选框只会把列表筛空。
+    const anchor = document.getSelection?.()?.anchorNode ?? null;
+    const anchorElement = anchor instanceof Element ? anchor : anchor?.parentElement ?? null;
+    const inCode = !!anchorElement?.closest("section.diff, [data-diff-row]");
+    const seed = paletteOpen || inCode ? null : findSeed(selectedText());
     const pick = () => {
       if (workspaceView === "files" && !document.getElementById("files-search")) {
         // 搜索面板正开着（目录树不在 DOM 里）：焦点交给当前那种搜索的输入框。
-        void filesView?.focusSearch("content");
+        void filesView?.focusSearch("content").then(() => {
+          if (seed !== null) seedInput(document.getElementById("file-content-search") as HTMLInputElement | null, seed);
+        });
         return;
       }
       const target = inTask
@@ -788,7 +847,7 @@
             : opened
               ? document.getElementById("file-search")
               : document.getElementById("welcome-search") ?? document.querySelector<HTMLElement>(".welcome-actions button");
-      target?.focus();
+      focusFindTarget(target, seed);
     };
     if (paletteOpen) setTimeout(pick, 0);
     else pick();
@@ -2771,6 +2830,7 @@
       const snapshot = await action(current.summary.path, current.generation);
       if (opened?.summary.path !== current.summary.path) return;
       applySnapshot(snapshot);
+      void refreshBranchTracking();
       banner = null;
       if (name === "push" || name === "publish") {
         pushRetry = false;
@@ -4457,6 +4517,7 @@
     onPushAll={pushToAll}
     onCancelSync={cancelSync}
     onRemote={() => runCommand("task.remote")}
+    {branchSync}
     onTheme={(next) => runCommand(`theme.${next}`)}
     onSettings={() => runCommand("task.settings")}
     repoNames={badgeNames}
@@ -4487,6 +4548,7 @@
           title={projectProblem ? `名单快照待处理：${projectProblem}` : projectOutside ? "当前仓库不在此项目中" : selectedProject ? `${selectedProject.manifest.name} · ${selectedProject.manifest.repositories.length} 个仓库` : "未选择项目：仓库列表显示最近使用"}
           options={projectMenuOptions}
           actions={[{ id: "manage", label: "管理项目…", icon: "settings", disabledReason: writeLocked ? switchBlockedReason(commandState) : null, run: manageProjects }]}
+          optionMenu={projectOptionMenu}
           searchPlaceholder="搜索项目"
           width={320}
           onChange={(value) => selectProject(value || null)}
@@ -4606,6 +4668,7 @@
     <ProjectManager
       data={projects}
       selectedId={selectedProjectId}
+      focus={projectManagerFocus}
       currentPath={opened?.summary.path ?? null}
       initialPreview={projectInitialPreview}
       {nextId}
@@ -4620,6 +4683,7 @@
       }}
       onClose={() => {
         projectInitialPreview = null;
+        projectManagerFocus = null;
         projectManagerOpen = false;
       }}
     />
@@ -4675,6 +4739,7 @@
       }}
       onOpened={rememberOpened}
       beforeOpen={switcherWorktreeGate}
+      onTracking={(tracks) => acceptBranchTracking(opened!.summary.path, tracks)}
       onClose={closeSwitcher}
     />
   {/if}
@@ -5265,6 +5330,7 @@
       closeTask();
       showHistory();
     }}
+    onPush={() => void runSync("push", (path, generation) => api.pushBranch(path, generation, nextId()))}
   />
 {:else if opened && taskModal === "branch"}
   <BranchDialog

@@ -319,3 +319,71 @@ describe("项目管理生命周期、筛选、打开与深链预览一次性消�
     expect(mocks.attach).not.toHaveBeenCalled();
   });
 });
+
+describe("管理项目页：项目列表、右键与浏览不改范围", () => {
+  function two(): Projects {
+    const a = project(3);
+    const b: Project = { ...project(2), manifest: { ...project(2).manifest, workspaceId: "33333333-3333-4333-8333-333333333333", name: "端到端" } };
+    return { hostId: host, projects: [a, b] };
+  }
+
+  it("左侧列出全部项目并可搜索；点选只切换查看，不改标题栏范围，「设为当前范围」才改", async () => {
+    mocks.repoHeads.mockResolvedValue([]);
+    const data = two();
+    const onSelect = vi.fn();
+    render(ProjectManager, { data, selectedId: data.projects[0].manifest.workspaceId, nextId: () => 1, onData: vi.fn(), onSelect, onClose: vi.fn() });
+    expect(screen.getByRole("dialog", { name: "管理项目" })).toBeTruthy();
+    const list = screen.getByRole("group", { name: "全部项目" });
+    expect(within(list).getAllByRole("button").map((b) => b.querySelector(".pmx-project-name")?.textContent)).toEqual(["业务项目", "端到端"]);
+    await fireEvent.input(screen.getByRole("textbox", { name: "搜索项目" }), { target: { value: "端到" } });
+    expect(within(list).getAllByRole("button")).toHaveLength(1);
+    await fireEvent.click(within(list).getByRole("button", { name: /端到端/ }));
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: "端到端" })).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "设为当前范围" }));
+    expect(onSelect).toHaveBeenCalledWith("33333333-3333-4333-8333-333333333333");
+  });
+
+  it("项目与成员行右键是应用菜单（不出原生菜单）：重命名、编辑成员、删除；成员可复制路径、移除", async () => {
+    mocks.repoHeads.mockResolvedValue([]);
+    const data = two();
+    mocks.update.mockResolvedValue(data);
+    render(ProjectManager, { data, selectedId: null, nextId: () => 1, onData: vi.fn(), onSelect: vi.fn(), onClose: vi.fn() });
+    const row = within(screen.getByRole("group", { name: "全部项目" })).getByRole("button", { name: /端到端/ });
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 });
+    row.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    let menu = await screen.findByRole("menu", { name: "端到端 的操作" });
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(
+      expect.arrayContaining(["设为当前范围", "重命名…", "编辑成员…", "刷新清单", "删除项目…"]),
+    );
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: "重命名…" }));
+    const field = await screen.findByRole("textbox", { name: "项目显示名称" });
+    await fireEvent.input(field, { target: { value: "端到端测试" } });
+    await fireEvent.click(screen.getByRole("button", { name: "保存名称" }));
+    await waitFor(() => expect(mocks.update).toHaveBeenCalled());
+    expect(mocks.update.mock.calls[0][0].name).toBe("端到端测试");
+
+    const member = document.querySelector<HTMLElement>(".project-member")!;
+    await fireEvent.contextMenu(member, { clientX: 20, clientY: 20 });
+    menu = await screen.findByRole("menu", { name: /的操作$/ });
+    expect(within(menu).getByRole("menuitem", { name: "复制完整路径" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: "从项目移除" })).toBeTruthy();
+  });
+
+  it("从标题栏菜单带来的意图：直接定位项目并展开删除确认", async () => {
+    mocks.repoHeads.mockResolvedValue([]);
+    const data = two();
+    render(ProjectManager, {
+      data,
+      selectedId: data.projects[0].manifest.workspaceId,
+      focus: { id: "33333333-3333-4333-8333-333333333333", action: "delete" },
+      nextId: () => 1,
+      onData: vi.fn(),
+      onSelect: vi.fn(),
+      onClose: vi.fn(),
+    });
+    expect(await screen.findByRole("region", { name: "确认移除本地项目" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "端到端" })).toBeTruthy();
+  });
+});

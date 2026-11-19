@@ -24,6 +24,8 @@
     onOpenStash: () => void;
     onOpenChanges?: () => void;
     onOpenHistory?: () => void;
+    /** 完成页的「推送」：由外壳走统一的同步流程。 */
+    onPush?: () => void;
     /** 设置里的分支分组，传给来源与目标两个分支选择器。 */
     branchGroups?: boolean;
     /** 关闭后焦点去处（命令面板打开时由外壳传入）。 */
@@ -48,6 +50,7 @@
     onOpenStash,
     onOpenChanges,
     onOpenHistory,
+    onPush,
     branchGroups = true,
     returnFocus = null,
   }: Props = $props();
@@ -98,6 +101,7 @@
     {onOpenStash}
     {onOpenChanges}
     {onOpenHistory}
+    {onPush}
     {branchGroups}
     onOperation={(operation, unresolved) => {
       sessionOperation = operation;

@@ -570,7 +570,8 @@ describe("合并面板", () => {
     const { bump } = mountForPreview({}, tips);
     const start = await screen.findByRole("button", { name: "合并到 main" });
     expect(historyPage).not.toHaveBeenCalled();
-    const incoming = () => screen.getByRole("tab", { name: /^提交/ }).querySelector(".count")?.textContent;
+    // 检查结论里的数字：带入的提交数。
+    const incoming = () => document.querySelector(".ms-stats .ms-stat strong")?.textContent;
     expect(incoming()).toBe("2");
 
     let finish: (value: unknown) => void = () => {};
@@ -674,7 +675,9 @@ describe("合并面板", () => {
     completeMerge.mockResolvedValue({ oid: "d".repeat(40), generation: 7, summary: "已完成合并提交，包含 1 个路径。", files: [], snapshot: opened.snapshot });
     renderPanel();
     expect(await screen.findByText("可以合并，没有冲突")).toBeTruthy();
-    // 审阅区默认先看文件的最终结果；提交列表在第二页，可逐条点开查看明细。
+    // 明细默认收起，结论与数字已经够做决定；展开后先看文件的最终结果，提交在第二页。
+    expect(screen.queryByRole("listbox", { name: "将带入的文件" })).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: /查看改动明细/ }));
     expect(screen.getByRole("listbox", { name: "将带入的文件" })).toBeTruthy();
     await fireEvent.click(screen.getByRole("tab", { name: /提交/ }));
     expect(screen.getByRole("listbox", { name: "将带入的提交" }).textContent).toContain("加上登录页");
@@ -692,10 +695,15 @@ describe("合并面板", () => {
     await vi.waitFor(() => expect(completeMerge).toHaveBeenCalledWith("/repo", "Merge branch 'feature' into main", 6, 1));
     expect(startMerge).toHaveBeenCalledWith("/repo", "feature", null, "merge", 5, 1);
     expect(await screen.findByText("已把 feature 合并到 main")).toBeTruthy();
-    // 合并完成后保留两侧概览与合入文件审阅，不再丢失合并上下文。
-    expect(screen.getByLabelText("本次合并两侧概览").textContent).toContain("来源带入 2 个提交");
-    expect(screen.getByLabelText("本次合并两侧概览").textContent).toContain("目标原有 1 个提交");
-    expect(screen.getByRole("listbox", { name: "将带入的文件" }).textContent).toContain("login.ts");
+    // 完成页只给结论：合并提交、带入多少、是否已推送；不再浏览代码差异。
+    const facts = screen.getByLabelText("本次合并概览");
+    expect(facts.textContent).toContain("合并提交");
+    expect(facts.textContent).toContain("ddddddd");
+    expect(facts.textContent).toContain("2 个提交");
+    expect(facts.textContent).toContain("1 个文件");
+    expect(facts.textContent).toContain("推送");
+    expect(screen.queryByRole("listbox", { name: "将带入的文件" })).toBeNull();
+    expect(screen.queryByRole("tab")).toBeNull();
   });
 
   it("变基先确认将改写当前分支，取消不开始", async () => {
@@ -717,7 +725,10 @@ describe("合并面板", () => {
     await fireEvent.click(screen.getByRole("button", { name: "变基并改写当前分支" }));
     await fireEvent.click(within(await screen.findByRole("dialog", { name: "确认变基" })).getByRole("button", { name: "确认变基" }));
     await vi.waitFor(() => expect(startMerge).toHaveBeenCalledWith("/repo", "origin/main", null, "rebase", 5, 1));
-    expect(await screen.findByText(/远程不变，没有推送/)).toBeTruthy();
+    expect(await screen.findByText("已把 main 接到 origin/main 顶端")).toBeTruthy();
+    // 变基改写了历史：完成页不提供普通推送，只说明要去同步菜单强制推送。
+    expect(screen.getByText(/需要强制推送/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "推送" })).toBeNull();
   });
 
   it("目标不是当前分支时不能开始变基", async () => {
@@ -771,7 +782,7 @@ describe("合并面板", () => {
     await vi.waitFor(() => expect(onFailure).toHaveBeenCalled());
     expect(await screen.findByRole("button", { name: "继续变基" })).toBeTruthy();
     expect((await screen.findByRole("button", { name: "继续变基" })).hasAttribute("disabled")).toBe(true);
-    expect(screen.queryByText(/远程不变，没有推送/)).toBeNull();
+    expect(document.querySelector(".merge-done")).toBeNull();
     expect(screen.queryByRole("button", { name: /跳过/ })).toBeNull();
   });
 
@@ -950,7 +961,7 @@ describe("合并面板", () => {
     expect(resolveConflict).toHaveBeenCalledWith("/repo", "file.txt", "text", "both\n", 4, 1);
     expect(onSnapshot).toHaveBeenCalledWith(resolved.snapshot);
     expect(onFailure).not.toHaveBeenCalled();
-    expect(screen.getByText("所有冲突都已标记")).toBeTruthy();
+    expect(screen.getByText("冲突已全部解决")).toBeTruthy();
   });
 
   it("快捷填入只编辑结果，明确标记后才写入", async () => {
@@ -1435,7 +1446,8 @@ describe("合并任务 modal", () => {
     expect(document.querySelector(".mp-body")).toBeTruthy();
     await fireEvent.click(await screen.findByRole("button", { name: "中止合并" }));
     await vi.waitFor(() => expect(document.querySelector(".mp-body")).toBeNull());
-    expect(document.querySelector(".mp-head"), "标题行里的路由也一起移除").toBeNull();
+    expect(screen.queryByRole("button", { name: "中止合并" }), "标题行里的中止也一起移除").toBeNull();
+    expect(document.querySelector('.merge-steps [aria-current="step"]')?.getAttribute("data-step"), "步骤回到选择分支").toBe("choose");
     expect(document.querySelector(".mp-head-host"), "常驻节点留在落点").toBeTruthy();
   });
 
@@ -1526,7 +1538,8 @@ describe("合并任务 modal", () => {
     await fireEvent.click(screen.getByRole("button", { name: "完成合并" }));
     await vi.waitFor(() => expect(document.querySelector(".merge-done")).toBeTruthy());
     expect(document.querySelector(".mp-body")).toBeNull();
-    expect(document.querySelector(".mp-head")).toBeNull();
+    expect(screen.queryByRole("button", { name: "中止合并" })).toBeNull();
+    expect(document.querySelector('.merge-steps [aria-current="step"]')?.getAttribute("data-step")).toBe("done");
   });
 
   it("有未解决冲突时底部只留一句进度和原因，全部解决后才出现合并说明", async () => {
@@ -1548,10 +1561,13 @@ describe("合并任务 modal", () => {
     expect(foot.textContent).toContain("已解决 0 / 1 个文件，还有 1 个未解决冲突，不能完成合并");
     expect(document.querySelectorAll(".mp-foot .mp-status")).toHaveLength(1);
     expect(screen.queryByRole("textbox", { name: "合并说明" })).toBeNull();
-    expect(document.querySelector(".merge-progress"), "还没有进度时不留空进度槽").toBeNull();
+    // 侧栏一开始就给出整体进度：0 / 1，不等第一个文件解决才出现。
+    const progress = screen.getByRole("progressbar", { name: "冲突处理进度" });
+    expect(progress.getAttribute("aria-valuenow")).toBe("0");
+    expect(progress.getAttribute("aria-valuemax")).toBe("1");
   });
 
-  it("路由和中止并入标题行，排在标题之后；note 收缩不影响路由", async () => {
+  it("步骤条和中止并入标题行，排在标题之后；合并方向放在冲突侧栏顶部", async () => {
     mergeSession.mockResolvedValue(
       session({ operation: "merge", canAbort: true, unresolved: 1, conflicts: [], note: "说明" }),
     );
@@ -1559,7 +1575,9 @@ describe("合并任务 modal", () => {
     const abort = await screen.findByRole("button", { name: "中止合并" });
     const head = document.querySelector<HTMLElement>(".modal-head")!;
     expect(head.contains(abort)).toBe(true);
-    expect(head.querySelector(".modal-titles + .mp-head-slot .mp-head .merge-route")).toBeTruthy();
+    expect(head.querySelector(".modal-titles + .mp-head-slot .mp-head .merge-steps")).toBeTruthy();
+    expect(head.querySelector('[aria-current="step"]')?.textContent).toContain("解决冲突");
+    expect(document.querySelector(".conflict-sidebar .merge-route")?.textContent).toContain("main");
     expect(document.querySelector(".modal-body .mp-head"), "正文里不留第二条工具行").toBeNull();
     expect(document.querySelector("[data-panel='merge']"), "面板仍在正文").toBeTruthy();
   });

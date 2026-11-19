@@ -133,6 +133,13 @@ it("大文件续读释放旧页后继续使用绝对偏移，并可回到开头"
   expect(repositoryFileContent.mock.calls.at(-1)?.[2]).toBe(0);
 });
 
+/** 某一行代码里的第一个文本节点（跳过 Svelte 的锚点注释）。 */
+function lineText(container: HTMLElement, line: number): Text {
+  const host = container.querySelector(`[data-file-line="${line}"] .code-in`)!;
+  const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
+  return walker.nextNode() as Text;
+}
+
 describe("代码页", () => {
   it("显示面包屑、Git 状态、语言、大小与行号", async () => {
     repositoryFileContent.mockResolvedValue(text());
@@ -241,6 +248,65 @@ describe("代码页", () => {
     await fireEvent.click(screen.getByRole("option"));
     await waitFor(() => expect(repositoryFileContent).toHaveBeenLastCalledWith(repoPath, "src/App.ts", 89, undefined, 4, 1));
     await view.rerender(props() as never);
+  });
+
+  it("选中单行文字后 Ctrl+F：查找框带入选区并全选，立即定位到选区所在行的匹配", async () => {
+    repositoryFileContent.mockResolvedValue(text());
+    repositoryContentSearch.mockResolvedValue({
+      generation: 4,
+      query: "value",
+      scope: "file",
+      scopePath: "src/App.ts",
+      matches: [
+        { path: "src/App.ts", line: 1, column: 1, text: "value" },
+        { path: "src/App.ts", line: 3, column: 7, text: "const value = 1;" },
+      ],
+      filesScanned: 1,
+      skipped: [],
+      skippedFiles: 0,
+      truncated: false,
+      textTruncated: false,
+      message: null,
+    } satisfies RepositoryContentSearch);
+    const { container } = render(FileContent, { props: props() as never });
+    await waitFor(() => expect(container.querySelector('[data-file-line="3"]')).toBeTruthy());
+    const code = container.querySelector<HTMLElement>(".file-code")!;
+    const textNode = lineText(container, 3);
+    const range = document.createRange();
+    range.setStart(textNode, 6);
+    range.setEnd(textNode, 11);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    code.focus();
+    await fireEvent.keyDown(code, { key: "f", ctrlKey: true });
+    const input = (await screen.findByLabelText("文件内搜索关键词")) as HTMLInputElement;
+    expect(input.value).toBe("value");
+    await waitFor(() => expect(repositoryContentSearch).toHaveBeenCalled());
+    expect(repositoryContentSearch.mock.calls[0][1]).toBe("value");
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    expect([input.selectionStart, input.selectionEnd]).toEqual([0, 5]);
+    // 定位到选区所在的第 3 行，而不是第一处匹配。
+    await waitFor(() => expect(container.querySelector('[data-file-line="3"]')?.classList.contains("hit")).toBe(true));
+    expect(screen.getByText(/2\/2 处匹配/)).toBeTruthy();
+    window.getSelection()!.removeAllRanges();
+  });
+
+  it("跨行选区按 Ctrl+F 不带入，只打开查找框", async () => {
+    repositoryFileContent.mockResolvedValue(text());
+    const { container } = render(FileContent, { props: props() as never });
+    await waitFor(() => expect(container.querySelector('[data-file-line="3"]')).toBeTruthy());
+    const code = container.querySelector<HTMLElement>(".file-code")!;
+    const range = document.createRange();
+    range.setStart(lineText(container, 1), 0);
+    range.setEnd(lineText(container, 3), 5);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    code.focus();
+    await fireEvent.keyDown(code, { key: "f", ctrlKey: true });
+    const input = (await screen.findByLabelText("文件内搜索关键词")) as HTMLInputElement;
+    expect(input.value).toBe("");
+    expect(repositoryContentSearch).not.toHaveBeenCalled();
+    window.getSelection()!.removeAllRanges();
   });
 
   it("文件内搜索失败时就地重试，或重读文件后重找", async () => {
@@ -1027,6 +1093,25 @@ describe("轻量编辑", () => {
     await waitFor(() => expect(editorBox()!.value).toBe("留着的草稿\n"));
     await waitFor(() => expect(repositoryEditSnapshot.mock.calls.length).toBeGreaterThan(calls));
     expect(editor.dirty(repoPath).map((session) => session.path)).toEqual(["src/App.ts"]);
+  });
+
+  it("编辑器里选中单行文字后 Ctrl+F 带入查找框并全选；跨行选区保留原查找词", async () => {
+    repositoryEditSnapshot.mockResolvedValue(editSnap());
+    await enterEdit();
+    await waitFor(() => expect(editorBox()).toBeTruthy());
+    const box = editorBox()!;
+    box.setSelectionRange(6, 7);
+    await fireEvent.keyDown(box, { key: "f", code: "KeyF", ctrlKey: true });
+    const query = (await screen.findByRole("textbox", { name: "在草稿中查找" })) as HTMLInputElement;
+    await waitFor(() => expect(query.value).toBe("a"));
+    await waitFor(() => expect(document.activeElement).toBe(query));
+    expect([query.selectionStart, query.selectionEnd]).toEqual([0, 1]);
+    await waitFor(() => expect(document.querySelector("[data-edit-find] .find-count")?.textContent).toBe("1/1"));
+
+    box.setSelectionRange(0, "const a = 1;\nconst".length);
+    await fireEvent.keyDown(box, { key: "f", code: "KeyF", ctrlKey: true });
+    await tick();
+    expect(query.value).toBe("a");
   });
 
   it("编辑器内查找、替换与跳行只改草稿，不触发保存", async () => {

@@ -302,6 +302,25 @@ pub struct BranchRecord {
     pub merged: bool,
 }
 
+/// 一个本地分支相对其上游的领先/落后。数字来自本地的远程跟踪引用，只在 fetch 之后才反映远程。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchTrack {
+    pub name: String,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    /// 配置了上游，但远程跟踪引用已经不在（远程分支被删除）。
+    pub gone: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchTracking {
+    pub generation: u64,
+    pub branches: Vec<BranchTrack>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchListing {

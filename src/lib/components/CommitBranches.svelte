@@ -20,6 +20,7 @@
   import { api } from "../api";
   import { LatestReadQueue } from "../latest-read";
   import { normalizeError } from "../errors";
+  import ContextMenu, { type ContextMenuRequest } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
 
   /**
@@ -48,6 +49,31 @@
   let expanded = $state(false);
   let retry = $state(0);
   let token = 0;
+  let menu = $state<ContextMenuRequest | null>(null);
+  let copied = $state<string | null>(null);
+
+  /** 分支芯片右键：复制完整分支名（芯片里的名字可能被省略）。 */
+  function chipMenu(event: MouseEvent, name: string) {
+    event.preventDefault();
+    menu = {
+      x: event.clientX,
+      y: event.clientY,
+      label: `${name} 的操作`,
+      entries: [
+        {
+          id: "copy",
+          label: "复制分支名",
+          icon: "copy",
+          run: () => {
+            void navigator.clipboard?.writeText(name).then(
+              () => (copied = name),
+              () => (copied = null),
+            );
+          },
+        },
+      ],
+    };
+  }
 
   $effect(() => {
     const mine = ++token;
@@ -143,19 +169,22 @@
   {:else if result}
     <span class="commit-branches-list" title={summary}>
       {#if current && !onCurrent}
-        <span class="cb-chip warn" title={`当前检出的 ${current} 不包含这次提交：改动还没有进入当前分支`}>
-          <Icon name="alert" size={11} />不在当前分支 {current}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <span class="cb-chip warn" data-not-on-current title={`当前检出的 ${current} 不包含这次提交：改动还没有进入当前分支`} oncontextmenu={(event) => chipMenu(event, current)}>
+          <Icon name="alert" size={11} /><span class="cb-name cb-warn-text">不在当前分支 {current}</span>
         </span>
       {/if}
       {#if branches.length === 0}
         <span class="commit-branches-hint">没有分支包含它（可能只在游离提交或已删除的分支上）</span>
       {/if}
       {#each shown as branch (`${branch.remote}:${branch.name}`)}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <span
           class="cb-chip"
           class:current={branch.current}
           class:remote={branch.remote}
           title={branch.current ? `当前检出的分支 ${branch.name} 已包含这次提交` : branch.remote ? `远程分支 ${branch.name}` : `本地分支 ${branch.name}`}
+          oncontextmenu={(event) => chipMenu(event, branch.name)}
         >
           {#if branch.current}<Icon name="check" size={11} />{:else if branch.remote}<Icon name="cloud" size={11} />{/if}
           <span class="cb-name">{branch.name}</span>
@@ -174,4 +203,8 @@
       {#if loading}<span class="spinner muted"></span>{/if}
     </span>
   {/if}
+  {#if copied}<span class="sr-only" role="status">已复制分支名 {copied}</span>{/if}
 </div>
+{#if menu}
+  <ContextMenu request={menu} onClose={() => (menu = null)} />
+{/if}

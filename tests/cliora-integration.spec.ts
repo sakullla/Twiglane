@@ -678,9 +678,9 @@ describe("cliora v2 审查链接", () => {
 
     // 关闭项目管理弹窗后，再从起始页「业务项目」打开：旧预览已被消费，不会复现。
     await fireEvent.keyDown(document.querySelector(".modal-card")!, { key: "Escape" });
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "业务项目" })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "管理项目" })).toBeNull());
     await fireEvent.click(screen.getByRole("button", { name: "业务项目" }));
-    await screen.findByRole("dialog", { name: "业务项目" });
+    await screen.findByRole("dialog", { name: "管理项目" });
     expect(screen.queryByRole("region", { name: "项目清单预览" })).toBeNull();
   });
 

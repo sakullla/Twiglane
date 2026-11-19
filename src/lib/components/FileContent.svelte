@@ -6,6 +6,7 @@
   import { trackCodeScroll } from "../codeScroll.svelte";
   import { normalizeError } from "../errors";
   import { appendFileWindow } from "../file-window";
+  import { findSeed, matchIndexFromLine, selectedText, selectionLines } from "../find-seed";
   import { fileEditor, isDirty, type EditContext, type FileEditor } from "../file-editor.svelte";
   import {
     createDocumentSession,
@@ -149,6 +150,7 @@
   let resultKey = $state(-1);
   let searching = $state(false);
   let searchInput = $state<HTMLInputElement | null>(null);
+  let contentRoot = $state<HTMLDivElement | null>(null);
 
   let gotoOpen = $state(false);
   let gotoValue = $state("");
@@ -821,10 +823,28 @@
   }
 
   function openSearch(): void {
+    // 和 VS Code 一样：单行选区作为查找词带入，并定位到选区所在处的匹配。须在切换源码前读选区。
+    const span = selectionLines("data-file-line");
+    // 选区跨了代码行时不带入（虚拟列表的行之间 toString 不一定有换行）。
+    const seed = span && span.start !== span.end ? null : findSeed(selectedText(contentRoot, searchInput));
+    const seedLine = seed === null ? null : (span?.start ?? null);
     // 文件内查找只在源码上有意义：从预览发起时先切到源码，搜索框才不会被预览盖住。
     if (isMarkdown) setDocumentMode("source");
     searchOpen = true;
     gotoOpen = false;
+    if (seed !== null) {
+      const locate = () => {
+        if (searchQuery !== seed || !searchResult) return;
+        const index = matchIndexFromLine(searchResult.matches, seedLine);
+        if (index >= 0) pickMatch(index);
+      };
+      if (seed !== searchQuery || !searchResult) {
+        searchQuery = seed;
+        void runSearch().then(locate);
+      } else {
+        locate();
+      }
+    }
     queueMicrotask(() => {
       searchInput?.focus();
       searchInput?.select();
@@ -1011,6 +1031,7 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="file-content"
+  bind:this={contentRoot}
   onkeydown={onContentKey}
   oncopy={onContentCopy}
   onpointerdown={() => {

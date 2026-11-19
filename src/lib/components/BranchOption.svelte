@@ -40,6 +40,11 @@
     onChoose: () => void;
     onContextMenu?: (point: { x: number; y: number }) => void;
     trailing?: Snippet;
+    /** 相对上游领先 / 落后的提交数（fetch 之后才反映远程）；0 或缺省时不画。 */
+    ahead?: number;
+    behind?: number;
+    /** 上游分支已从远程删除。 */
+    gone?: boolean;
   }
 
   let {
@@ -65,7 +70,16 @@
     onChoose,
     onContextMenu,
     trailing,
+    ahead = 0,
+    behind = 0,
+    gone = false,
   }: Props = $props();
+
+  let syncTitle = $derived(
+    [behind > 0 ? `落后上游 ${behind} 个提交，可以拉取` : "", ahead > 0 ? `领先上游 ${ahead} 个提交，可以推送` : ""]
+      .filter(Boolean)
+      .join("；"),
+  );
 </script>
 
 <div
@@ -99,6 +113,14 @@
     <span class="branch-option-name">{text ?? name}</span>
     {#if merged}<span class="merged-badge" data-merged-branch role="img" aria-label="已合入主干" title={mergedTitle}><Icon name="check" size={10} /></span>{/if}
   </span>
+  {#if gone}
+    <span class="branch-sync gone" data-branch-gone title="上游分支已从远程删除">上游已删</span>
+  {:else if ahead > 0 || behind > 0}
+    <span class="branch-sync" data-branch-sync={`${ahead}/${behind}`} title={syncTitle} aria-label={syncTitle}>
+      {#if behind > 0}<span class="branch-sync-behind">↓{behind}</span>{/if}
+      {#if ahead > 0}<span class="branch-sync-ahead">↑{ahead}</span>{/if}
+    </span>
+  {/if}
   {#if isDefault}<span class="branch-picker-tag default-branch" data-default-branch>默认</span>{/if}
   {#if current}<span class="branch-picker-tag">当前</span>{/if}
   {#if note}<span class="branch-option-note">{note}</span>{/if}

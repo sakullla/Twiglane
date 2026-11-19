@@ -349,7 +349,14 @@
     place(0);
     const enabled = enabledIndexes(request.entries);
     if (enabled.length > 0 && input === "keyboard") focusIndex(0, enabled[0]);
-    else panels[0]?.focus({ preventScroll: true });
+    else {
+      // 量完尺寸前面板还是 visibility:hidden，此时 focus() 不生效：焦点留在触发元素上，
+      // Esc 就会落到外层（例如合并 modal）把整个窗口关掉。等显示后再聚焦。
+      panels[0]?.focus({ preventScroll: true });
+      void tick().then(() => {
+        if (!panels[0]?.contains(document.activeElement)) panels[0]?.focus({ preventScroll: true });
+      });
+    }
 
     const outside = (event: MouseEvent) => {
       if (!panels.some((panel) => panel?.contains(event.target as Node))) close(false);

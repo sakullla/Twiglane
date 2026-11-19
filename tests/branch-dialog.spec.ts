@@ -1223,12 +1223,16 @@ describe("打开其他工作区、默认徽章与斜杠分组", () => {
     let menu = screen.getByRole("menu", { name: "main 的操作" });
     expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual([
       "切换到此分支",
-      "从此分支新建分支…",
+      "拉取（快进，不切换） 没有上游分支，无法拉取；可以先推送并建立上游",
+      "推送并建立上游",
       "合并到当前分支（feature/ui）…",
       "把 feature/ui 合并到此分支…",
       "把当前分支变基到此分支…",
+      "从此分支新建分支…",
       "复制分支名",
-      "重命名或删除…",
+      "重命名…",
+      "删除分支…",
+      "在分支管理中打开…",
     ]);
     await fireEvent.click(within(menu).getByRole("menuitem", { name: "从此分支新建分支…" }));
     expect(props.onCreateBranch).toHaveBeenLastCalledWith("main");

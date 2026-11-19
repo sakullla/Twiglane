@@ -1518,6 +1518,242 @@ pub async fn push_to_remote(
     .await)
 }
 
+/// 一条本地分支的上游跟踪信息（含快进/推送需要的远程名与远程引用名）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrackLine {
+    track: crate::model::BranchTrack,
+    remote: String,
+    remote_ref: String,
+}
+
+/// 解析 `ahead 3, behind 2` / `ahead 1` / `behind 4` / `gone` / 空。
+fn parse_track(text: &str) -> (u32, u32, bool) {
+    let text = text.trim();
+    if text == "gone" {
+        return (0, 0, true);
+    }
+    let mut ahead = 0;
+    let mut behind = 0;
+    for part in text.split(',') {
+        let mut words = part.split_whitespace();
+        match (words.next(), words.next().and_then(|n| n.parse::<u32>().ok())) {
+            (Some("ahead"), Some(n)) => ahead = n,
+            (Some("behind"), Some(n)) => behind = n,
+            _ => {}
+        }
+    }
+    (ahead, behind, false)
+}
+
+fn parse_tracking(bytes: &[u8]) -> Vec<TrackLine> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut lines = Vec::new();
+    for line in text.split('\n') {
+        let mut parts = line.split('\u{1f}');
+        let Some(name) = parts.next().and_then(|refname| refname.strip_prefix("refs/heads/")) else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        let upstream = parts.next().unwrap_or("").trim();
+        let (ahead, behind, gone) = parse_track(parts.next().unwrap_or(""));
+        let remote = parts.next().unwrap_or("").trim().to_string();
+        let remote_ref = parts.next().unwrap_or("").trim().to_string();
+        lines.push(TrackLine {
+            track: crate::model::BranchTrack {
+                name: name.to_string(),
+                upstream: (!upstream.is_empty()).then(|| upstream.to_string()),
+                ahead,
+                behind,
+                gone,
+            },
+            remote,
+            remote_ref,
+        });
+    }
+    lines
+}
+
+async fn read_tracking(
+    backend: &Backend,
+    root: &Path,
+    git: &Path,
+    generation: u64,
+    request_id: u64,
+) -> Result<(Vec<TrackLine>, u64), AppError> {
+    let (program, args) = crate::git::command::branch_tracking_command(git, root);
+    let read = read_repo(backend, root, generation, request_id, program, args).await?;
+    if read.output.exit_code != 0 {
+        return Err(git_failure("branch_failed", &read.output, "无法读取分支的上游状态。")
+            .with_generation(read.generation));
+    }
+    Ok((parse_tracking(&read.output.stdout), read.generation))
+}
+
+/// 全部本地分支相对上游的领先/落后：只读、不访问远程，一次 `for-each-ref`。
+pub async fn branch_tracking(
+    backend: &Backend,
+    path: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<crate::model::BranchTracking, AppError> {
+    let root = repo_root(path)?;
+    let git = require_git(backend).await?;
+    let (lines, generation) = read_tracking(backend, &root, &git.path, generation, request_id).await?;
+    Ok(crate::model::BranchTracking {
+        generation,
+        branches: lines.into_iter().map(|line| line.track).collect(),
+    })
+}
+
+/// 远程引用名只接受普通的 `refs/heads/...`，拼进 refspec 前排除冒号、通配符与强制前缀。
+fn validate_remote_ref(remote_ref: &str) -> Result<(), AppError> {
+    let Some(short) = remote_ref.strip_prefix("refs/heads/") else {
+        return Err(AppError::new("upstream_invalid", "上游不是普通分支，未执行。"));
+    };
+    validate_branch_input(short)
+        .map_err(|_| AppError::new("upstream_invalid", "上游分支名称无效，未执行。"))
+}
+
+fn validate_track_remote(remote: &str) -> Result<(), AppError> {
+    if remote == "." {
+        return Ok(());
+    }
+    validate_remote_name(remote)
+}
+
+/// 不切换分支地把一个非当前的本地分支快进到上游（`git fetch <remote> <src>:<dst>`）。
+/// 不能快进时 Git 拒绝更新，分支保持原样；当前分支走常规拉取，其他工作区检出的分支不碰。
+pub async fn update_branch(
+    backend: &Backend,
+    path: &str,
+    name: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    let root = repo_root(path)?;
+    let key = repo_key(&root);
+    let _guard = backend.actions.enter(action_key("sync", &key))?;
+    validate_branch_input(name)?;
+    let git = require_git(backend).await?;
+    let current = load_branch_state(backend, &root, generation, request_id).await?;
+    let Some(branch) = current.branches.iter().find(|branch| !branch.remote && branch.name == name) else {
+        return Err(AppError::new("branch_missing", "没有这个本地分支，未拉取。")
+            .with_generation(current.generation));
+    };
+    if branch.current || current.snapshot.branch.name.as_deref() == Some(name) {
+        return Err(AppError::new(
+            "branch_current",
+            "这是当前分支，请用同步菜单里的「拉取」更新它和工作区。",
+        )
+        .with_generation(current.generation));
+    }
+    if let Some(worktree) = &branch.worktree {
+        if !same_worktree(worktree, &root) {
+            return Err(AppError::new(
+                "branch_worktree",
+                format!("{name} 正在其他工作区检出，请在那个工作区里拉取。工作区路径：{worktree}"),
+            )
+            .with_generation(current.generation));
+        }
+    }
+    let (lines, generation) =
+        read_tracking(backend, &root, &git.path, current.generation, internal_request_id()).await?;
+    let Some(line) = lines.into_iter().find(|line| line.track.name == name) else {
+        return Err(AppError::new("branch_missing", "没有这个本地分支，未拉取。").with_generation(generation));
+    };
+    let Some(upstream) = line.track.upstream.clone() else {
+        return Err(AppError::new(
+            "no_upstream",
+            format!("{name} 没有上游，无法拉取。可以先推送并建立上游。"),
+        )
+        .with_generation(generation));
+    };
+    if line.track.gone {
+        return Err(AppError::new(
+            "upstream_gone",
+            format!("{name} 的上游 {upstream} 已经不在远程上，未拉取。"),
+        )
+        .with_generation(generation));
+    }
+    validate_track_remote(&line.remote)?;
+    validate_remote_ref(&line.remote_ref)?;
+    let (program, args) =
+        crate::git::command::fetch_into_branch_command(&git.path, &root, &line.remote, &line.remote_ref, name);
+    reject_force(&args)?;
+    let scheduled = remote_write_repo(backend, &root, generation, internal_request_id(), program, args).await?;
+    if scheduled.output.exit_code != 0 {
+        let text = output_text(&scheduled.output);
+        let lower = text.to_ascii_lowercase();
+        if lower.contains("non-fast-forward") || lower.contains("[rejected]") || text.contains("非快进") || text.contains("[已拒绝]") {
+            return Err(AppError::new(
+                "branch_not_fast_forward",
+                format!(
+                    "{name} 与 {upstream} 已经分叉（本地领先 {} 个提交），不能快进。分支保持原样；请切换到它后合并或变基。",
+                    line.track.ahead
+                ),
+            )
+            .with_generation(scheduled.generation));
+        }
+        if lower.contains("refusing to fetch into") || lower.contains("checked out at") {
+            return Err(AppError::new(
+                "branch_worktree",
+                format!("{name} 正在某个工作区检出，Git 拒绝直接更新它。请在那个工作区里拉取。"),
+            )
+            .with_generation(scheduled.generation));
+        }
+        return Err(finish_remote("pull_failed", &scheduled, "拉取没有完成，分支保持原样。"));
+    }
+    backend.remote_checks.note(&key, now_ms());
+    settle_read!(backend, &root, scheduled.generation, |current| {
+        load_branch_state(backend, &root, current, internal_request_id()).await
+    })
+}
+
+/// 不切换分支地推送一个本地分支：有上游时推到上游，没有上游时发布到默认远程并建立跟踪。不强推。
+pub async fn push_local_branch(
+    backend: &Backend,
+    path: &str,
+    name: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    let root = repo_root(path)?;
+    let key = repo_key(&root);
+    let _guard = backend.actions.enter(action_key("sync", &key))?;
+    validate_branch_input(name)?;
+    let git = require_git(backend).await?;
+    let (lines, generation) = read_tracking(backend, &root, &git.path, generation, request_id).await?;
+    let Some(line) = lines.into_iter().find(|line| line.track.name == name) else {
+        return Err(AppError::new("branch_missing", "没有这个本地分支，未推送。").with_generation(generation));
+    };
+    let (program, args) = match (&line.track.upstream, line.remote.as_str()) {
+        (Some(_), remote) if !remote.is_empty() && remote != "." && !line.track.gone => {
+            validate_remote_name(remote)?;
+            validate_remote_ref(&line.remote_ref)?;
+            crate::git::command::push_branch_to_command(&git.path, &root, remote, name, &line.remote_ref)
+        }
+        _ => {
+            let remote = resolve_remote(backend, &root, &git.path, "", generation).await?;
+            publish_command(&git.path, &root, &remote, name)
+        }
+    };
+    reject_force(&args)?;
+    let scheduled = remote_write_repo(backend, &root, generation, internal_request_id(), program, args).await?;
+    if scheduled.output.exit_code != 0 {
+        return Err(finish_remote(
+            "push_failed",
+            &scheduled,
+            &format!("{name} 没有推送，也没有强行推送。"),
+        ));
+    }
+    backend.remote_checks.note(&key, now_ms());
+    settle_read!(backend, &root, scheduled.generation, |current| {
+        load_branch_state(backend, &root, current, internal_request_id()).await
+    })
+}
+
 fn attach_generation(backend: &Backend, root: &Path, error: AppError) -> AppError {
     if error.generation.is_some() {
         error
@@ -3508,6 +3744,152 @@ mod tests {
         assert_eq!(plain_error.code, "not_repository");
         assert_eq!(git_text(&work, &["rev-parse", "HEAD"]), main_head);
         assert_eq!(fs::read(work.join("file.txt")).unwrap(), main_file);
+    }
+
+    #[test]
+    fn parses_tracking_counts_and_gone_upstreams() {
+        assert_eq!(parse_track(""), (0, 0, false));
+        assert_eq!(parse_track("ahead 3"), (3, 0, false));
+        assert_eq!(parse_track("behind 12"), (0, 12, false));
+        assert_eq!(parse_track("ahead 1, behind 2"), (1, 2, false));
+        assert_eq!(parse_track("gone"), (0, 0, true));
+        let text = "refs/heads/main\u{1f}origin/main\u{1f}behind 2\u{1f}origin\u{1f}refs/heads/main\nrefs/heads/solo\u{1f}\u{1f}\u{1f}\u{1f}\n";
+        let lines = parse_tracking(text.as_bytes());
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].track.behind, 2);
+        assert_eq!(lines[0].remote, "origin");
+        assert_eq!(lines[0].remote_ref, "refs/heads/main");
+        assert_eq!(lines[1].track.upstream, None);
+        assert!(validate_remote_ref("refs/heads/feature/x").is_ok());
+        for bad in ["refs/tags/v1", "refs/heads/a:b", "refs/heads/-x", "+refs/heads/main", "refs/heads/*"] {
+            assert!(validate_remote_ref(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn branch_remote_commands_use_argument_arrays_without_force() {
+        let root = Path::new("/repo");
+        let (_, args) = crate::git::command::fetch_into_branch_command(Path::new("git"), root, "origin", "refs/heads/dev", "dev");
+        let text: Vec<String> = args.iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
+        let at = text.iter().position(|arg| arg == "fetch").unwrap();
+        assert_eq!(&text[at..], ["fetch", "--", "origin", "refs/heads/dev:refs/heads/dev"]);
+        assert!(reject_force(&args).is_ok());
+        let (_, args) = crate::git::command::push_branch_to_command(Path::new("git"), root, "origin", "dev", "refs/heads/dev");
+        let text: Vec<String> = args.iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
+        let at = text.iter().position(|arg| arg == "push").unwrap();
+        assert_eq!(&text[at..], ["push", "--", "origin", "refs/heads/dev:refs/heads/dev"]);
+        assert!(!text.iter().any(|arg| arg.starts_with('+')));
+    }
+
+    /// 在 work 里准备一个跟踪 origin/dev 的非当前分支 dev，并让远程 dev 前进一个提交。
+    fn seed_dev_behind(fixture: &crate::test_support::GitFixture, origin: &Path, work: &Path) -> PathBuf {
+        git(work, &["switch", "-c", "dev"]);
+        git(work, &["push", "-u", "origin", "dev"]);
+        git(work, &["switch", "main"]);
+        let other = fixture.path().join("other");
+        git(fixture.path(), &["clone", "-b", "dev", repo_key(origin).as_str(), "other"]);
+        fs::write(other.join("file.txt"), "base\ndev upstream\n").unwrap();
+        git(&other, &["commit", "-am", "dev upstream"]);
+        git(&other, &["push"]);
+        other
+    }
+
+    #[tokio::test]
+    async fn tracking_reports_ahead_behind_after_fetch_and_updates_branch_without_switching() {
+        let fixture = crate::test_support::git_fixture("branch-update-ff");
+        let backend = fixture.backend();
+        let (origin, work) = seed_bare(&fixture);
+        let other = seed_dev_behind(&fixture, &origin, &work);
+        let opened = add_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        let fetched = fetch_remote(&backend, &opened.summary.path, opened.generation, 2).await.unwrap();
+        let tracking = branch_tracking(&backend, &opened.summary.path, fetched.generation, 3).await.unwrap();
+        let dev = tracking.branches.iter().find(|item| item.name == "dev").unwrap();
+        assert_eq!((dev.ahead, dev.behind, dev.gone), (0, 1, false));
+        assert_eq!(dev.upstream.as_deref(), Some("origin/dev"));
+        let main = tracking.branches.iter().find(|item| item.name == "main").unwrap();
+        assert_eq!((main.ahead, main.behind), (0, 0));
+
+        let head = git_text(&work, &["rev-parse", "HEAD"]);
+        let file = fs::read(work.join("file.txt")).unwrap();
+        let updated = update_branch(&backend, &opened.summary.path, "dev", tracking.generation, 4).await.unwrap();
+        assert_eq!(updated.snapshot.branch.name.as_deref(), Some("main"), "不切换分支");
+        assert_eq!(git_text(&work, &["rev-parse", "HEAD"]), head);
+        assert_eq!(fs::read(work.join("file.txt")).unwrap(), file, "工作区不变");
+        assert_eq!(git_text(&work, &["rev-parse", "dev"]), git_text(&other, &["rev-parse", "HEAD"]));
+
+        // 当前分支不走这条路，交给常规拉取。
+        let current = update_branch(&backend, &opened.summary.path, "main", updated.generation, 5).await.unwrap_err();
+        assert_eq!(current.code, "branch_current");
+    }
+
+    #[tokio::test]
+    async fn update_branch_refuses_diverged_branch_and_leaves_it_untouched() {
+        let fixture = crate::test_support::git_fixture("branch-update-diverged");
+        let backend = fixture.backend();
+        let (origin, work) = seed_bare(&fixture);
+        seed_dev_behind(&fixture, &origin, &work);
+        git(&work, &["switch", "dev"]);
+        fs::write(work.join("file.txt"), "base\nlocal dev\n").unwrap();
+        git(&work, &["commit", "-am", "local dev"]);
+        git(&work, &["switch", "main"]);
+        let local_dev = git_text(&work, &["rev-parse", "dev"]);
+        let opened = add_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        let error = update_branch(&backend, &opened.summary.path, "dev", opened.generation, 2).await.unwrap_err();
+        assert_eq!(error.code, "branch_not_fast_forward", "{}", error.message);
+        assert!(error.message.contains("不能快进"));
+        assert_eq!(git_text(&work, &["rev-parse", "dev"]), local_dev, "分叉时分支不动");
+
+        let missing = update_branch(&backend, &opened.summary.path, "nope", error.generation.unwrap(), 3).await.unwrap_err();
+        assert_eq!(missing.code, "branch_missing");
+        let invalid = update_branch(&backend, &opened.summary.path, "--force", error.generation.unwrap(), 4).await.unwrap_err();
+        assert_eq!(invalid.code, "branch_invalid");
+    }
+
+    #[tokio::test]
+    async fn push_local_branch_pushes_non_current_branch_and_publishes_untracked_one() {
+        let fixture = crate::test_support::git_fixture("branch-push-local");
+        let backend = fixture.backend();
+        let (_origin, work) = seed_bare(&fixture);
+        git(&work, &["switch", "-c", "dev"]);
+        git(&work, &["push", "-u", "origin", "dev"]);
+        fs::write(work.join("file.txt"), "base\ndev local\n").unwrap();
+        git(&work, &["commit", "-am", "dev local"]);
+        git(&work, &["switch", "main"]);
+        git(&work, &["branch", "solo"]);
+        let opened = add_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        let tracking = branch_tracking(&backend, &opened.summary.path, opened.generation, 2).await.unwrap();
+        assert_eq!(tracking.branches.iter().find(|item| item.name == "dev").unwrap().ahead, 1);
+
+        let pushed = push_local_branch(&backend, &opened.summary.path, "dev", tracking.generation, 3).await.unwrap();
+        assert_eq!(pushed.snapshot.branch.name.as_deref(), Some("main"));
+        assert_eq!(
+            git_text(fixture.path(), &["--git-dir", "origin.git", "rev-parse", "dev"]),
+            git_text(&work, &["rev-parse", "dev"])
+        );
+        let published = push_local_branch(&backend, &opened.summary.path, "solo", pushed.generation, 4).await.unwrap();
+        let solo = published.branches.iter().find(|item| !item.remote && item.name == "solo").unwrap();
+        assert_eq!(solo.upstream.as_deref(), Some("origin/solo"));
+    }
+
+    #[tokio::test]
+    async fn push_local_branch_is_rejected_without_force_when_remote_moved() {
+        let fixture = crate::test_support::git_fixture("branch-push-rejected");
+        let backend = fixture.backend();
+        let (origin, work) = seed_bare(&fixture);
+        seed_dev_behind(&fixture, &origin, &work);
+        git(&work, &["switch", "dev"]);
+        fs::write(work.join("file.txt"), "base\nlocal dev\n").unwrap();
+        git(&work, &["commit", "-am", "local dev"]);
+        git(&work, &["switch", "main"]);
+        let remote_dev = git_text(fixture.path(), &["--git-dir", "origin.git", "rev-parse", "dev"]);
+        let opened = add_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        let error = push_local_branch(&backend, &opened.summary.path, "dev", opened.generation, 2).await.unwrap_err();
+        assert_eq!(error.code, "push_rejected", "{}", error.message);
+        assert_eq!(
+            git_text(fixture.path(), &["--git-dir", "origin.git", "rev-parse", "dev"]),
+            remote_dev,
+            "不强推"
+        );
     }
 }
 

@@ -590,6 +590,21 @@ export interface BranchRecord {
   merged?: boolean;
 }
 
+/** 本地分支相对上游的领先/落后：来自本地远程跟踪引用，fetch 之后才反映远程。 */
+export interface BranchTrack {
+  name: string;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  /** 配置了上游，但远程分支已经不在。 */
+  gone: boolean;
+}
+
+export interface BranchTracking {
+  generation: number;
+  branches: BranchTrack[];
+}
+
 export interface BranchListing {
   generation: number;
   branches: BranchRecord[];

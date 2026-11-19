@@ -1966,6 +1966,33 @@ describe("上一个、下一个文件（R20）", () => {
     await waitFor(() => expect(document.querySelector(".toast.ok")?.textContent).toContain("已经是第一个文件"));
   });
 
+  it("有单行选区时 Ctrl+F 把选中文字带入文件筛选并全选，跨行选区不带入", async () => {
+    renderApp();
+    await openRepo();
+    const name = fileRows().map((row) => row.querySelector(".fn")).find((node) => node?.textContent === "app.css")!;
+    const range = document.createRange();
+    range.setStart(name.firstChild!, 0);
+    range.setEnd(name.firstChild!, 3);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    await press("f");
+    const input = document.getElementById("file-search") as HTMLInputElement;
+    expect(document.activeElement).toBe(input);
+    await waitFor(() => expect(input.value).toBe("app"));
+    expect([input.selectionStart, input.selectionEnd]).toEqual([0, 3]);
+
+    input.blur();
+    const multi = document.createElement("pre");
+    multi.textContent = "one\ntwo";
+    document.body.appendChild(multi);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.selectAllChildren(multi);
+    await press("f");
+    expect(input.value).toBe("app");
+    multi.remove();
+    window.getSelection()!.removeAllRanges();
+  });
+
   it("Alt+↑/↓ 在单文件差异里跳到改动块头，输入框和多选不跳", async () => {
     const lines: DiffLine[] = [
       { kind: "hunk", text: "@@ -1 +1 @@ first", oldNo: null, newNo: null, hunkIndex: 0 },

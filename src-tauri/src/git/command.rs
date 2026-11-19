@@ -734,6 +734,57 @@ pub fn delete_remote_tracking_command(
     (git.to_path_buf(), args)
 }
 
+/// 一次读出全部本地分支相对上游的领先/落后：`for-each-ref` 只走一遍引用，几百个分支也只起一个进程。
+/// 字段：引用名、上游短名、`ahead N, behind M` / `gone`、上游所在远程名、上游在远程上的引用名。
+pub fn branch_tracking_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    let format = "%(refname)\u{1f}%(upstream:short)\u{1f}%(upstream:track,nobracket)\u{1f}%(upstream:remotename)\u{1f}%(upstream:remoteref)".to_string();
+    args.extend([
+        OsString::from("for-each-ref"),
+        OsString::from("--format"),
+        OsString::from(format),
+        OsString::from("refs/heads"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// 不切换分支地快进一个本地分支：`git fetch -- <remote> <remoteref>:refs/heads/<name>`。
+/// refspec 不带 `+`，不能快进时由 Git 拒绝，本地分支保持原样。
+pub fn fetch_into_branch_command(
+    git: &Path,
+    root: &Path,
+    remote: &str,
+    remote_ref: &str,
+    name: &str,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("fetch"),
+        OsString::from("--"),
+        OsString::from(remote),
+        OsString::from(format!("{remote_ref}:refs/heads/{name}")),
+    ]);
+    (git.to_path_buf(), args)
+}
+
+/// 不切换分支地推送一个本地分支到它的上游：`git push -- <remote> refs/heads/<name>:<remoteref>`，不强推。
+pub fn push_branch_to_command(
+    git: &Path,
+    root: &Path,
+    remote: &str,
+    name: &str,
+    remote_ref: &str,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("push"),
+        OsString::from("--"),
+        OsString::from(remote),
+        OsString::from(format!("refs/heads/{name}:{remote_ref}")),
+    ]);
+    (git.to_path_buf(), args)
+}
+
 pub fn tag_list_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     let format = "%(refname:short)\u{1f}%(objectname)\u{1f}%(*objectname)\u{1f}%(creatordate:unix)\u{1f}%(subject)".to_string();

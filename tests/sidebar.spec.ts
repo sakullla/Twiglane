@@ -68,8 +68,8 @@ describe("仓库弹层", () => {
 });
 
 describe("大量最近仓库", () => {
-  /** RepoSwitcher 里单行与多一行原因文字的估算高度（分组是单工作区组，没有分组头）。 */
-  const ROW = 64;
+  /** RepoSwitcher 的固定行高（分组是单工作区组，没有分组头）。 */
+  const ROW = 52;
   const many: RecentRepo[] = Array.from({ length: 500 }, (_, index) => {
     const name = index === 300 || index === 450 ? "demo" : `repo-${index}`;
     return { name, path: `/work/group-${index}/${name}`, openedAtMs: index };
@@ -130,7 +130,8 @@ describe("大量最近仓库", () => {
   it("过滤对全量生效，不区分大小写，能搜路径片段", async () => {
     render(RepoSwitcher, { props: props() as never });
     await fireEvent.input(input(), { target: { value: "GROUP-449" } });
-    expect(options()).toHaveLength(1);
+    // 500 个仓库时搜索有一拍防抖：连续击键只筛一次。
+    await waitFor(() => expect(options()).toHaveLength(1));
     expect(options()[0].textContent).toContain("repo-449");
     expect(options()[0].dataset.index).toBe("0");
   });
@@ -141,7 +142,7 @@ describe("大量最近仓库", () => {
     list.scrollTop = 4000;
     await fireEvent.scroll(list);
     await fireEvent.input(input(), { target: { value: "repo-1" } });
-    expect(list.scrollTop).toBe(0);
+    await waitFor(() => expect(list.scrollTop).toBe(0));
     expect(options().some((option) => option.dataset.index === "0")).toBe(true);
   });
 
@@ -187,63 +188,37 @@ describe("大量最近仓库", () => {
     expect(active()?.dataset.index).toBe("300");
   });
 
-  it("实测行高修正定位；视口上方的行变高时滚动位置同步推开", async () => {
-    const offsetHeight = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
-      return this.dataset.repoRow === "300" ? ROW + 30 : this.dataset.repoRow ? ROW : 0;
-    });
-    try {
-      render(RepoSwitcher, { props: props() as never });
-      const list = document.querySelector(".popover-list") as HTMLElement;
-      list.scrollTop = ROW * 305;
-      await fireEvent.scroll(list);
-      await tick();
-      await tick();
-      const after = options().find((option) => option.dataset.index === "301")?.parentElement as HTMLElement;
-      expect(after.style.top).toBe(`${ROW * 301 + 30}px`);
-      expect(list.scrollTop).toBe(ROW * 305 + 30);
-    } finally {
-      offsetHeight.mockRestore();
-    }
-  });
-
-  it("阻塞出现或解除时行高不变，视口顶部的行不跳", async () => {
+  it("固定行高：阻塞出现或解除时行位置不变，视口顶部的行不跳", async () => {
     const view = render(RepoSwitcher, { props: props({ blockedReason: "操作进行中" }) as never });
     const list = document.querySelector(".popover-list") as HTMLElement;
     list.scrollTop = ROW * 300 + 10;
     await fireEvent.scroll(list);
+    const top = () => (options().find((option) => option.dataset.index === "300")?.parentElement as HTMLElement).style.top;
+    expect(top()).toBe(`${ROW * 300}px`);
     await view.rerender({ blockedReason: null });
     await tick();
     expect(list.scrollTop, "第 300 行留在视口顶，行内偏移不变").toBe(ROW * 300 + 10);
-    expect(options().some((option) => option.dataset.index === "300")).toBe(true);
+    expect(top()).toBe(`${ROW * 300}px`);
     await view.rerender({ blockedReason: "又忙了" });
     await tick();
-    expect(list.scrollTop, "阻塞出现时同样不动").toBe(ROW * 300 + 10);
+    expect(top()).toBe(`${ROW * 300}px`);
   });
 
-  it("重排后实测行高和估算不同，锚点按实测位置恢复；行内偏移不超过新行高", async () => {
-    const offsetHeight = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
-      return this.dataset.repoRow ? 42 : 0;
-    });
-    try {
-      const view = render(RepoSwitcher, { props: props({ blockedReason: "操作进行中" }) as never });
-      const list = document.querySelector(".popover-list") as HTMLElement;
-      await tick();
-      await tick();
-      const row = () => options().find((option) => option.dataset.index === "20")?.parentElement as HTMLElement;
-      list.scrollTop = ROW * 20;
-      await fireEvent.scroll(list);
-      await tick();
-      await tick();
-      list.scrollTop = parseFloat(row().style.top) + 41;
-      await fireEvent.scroll(list);
-      await tick();
-      await view.rerender({ blockedReason: null });
-      for (let step = 0; step < 30; step += 1) await tick();
-      expect(list.scrollTop - parseFloat(row().style.top), "第 20 行还在视口顶").toBeGreaterThanOrEqual(0);
-      expect(list.scrollTop - parseFloat(row().style.top)).toBeLessThan(42);
-    } finally {
-      offsetHeight.mockRestore();
-    }
+  it("连续输入后立刻回车：用输入框里的关键词筛选并切到第一个匹配", async () => {
+    const onSelect = vi.fn();
+    render(RepoSwitcher, { props: props({ onSelect }) as never });
+    await fireEvent.input(input(), { target: { value: "group-44" } });
+    await fireEvent.input(input(), { target: { value: "group-449" } });
+    await fireEvent.keyDown(input(), { key: "Enter" });
+    expect(onSelect).toHaveBeenCalledWith(many[449].path);
+  });
+
+  it("行上只留紧凑徽标，完整状态句给读屏；不再显示「状态读取于 / 不会自动 fetch」的说明行", () => {
+    render(RepoSwitcher, { props: props() as never });
+    expect(document.body.textContent).not.toContain("总览不会自动 fetch 远程");
+    const row = options()[1];
+    expect(row.querySelector(".rs-path")).toBeTruthy();
+    expect(row.querySelector(".sr-only")?.textContent).toContain("状态未读取");
   });
 
   it("从列表移除后当前项留在原位，不甩回开头", async () => {

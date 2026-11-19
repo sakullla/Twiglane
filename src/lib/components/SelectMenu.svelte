@@ -27,6 +27,7 @@
 
 <script lang="ts">
   import { untrack, type Snippet } from "svelte";
+  import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
   import Popover from "./Popover.svelte";
 
@@ -61,6 +62,11 @@
     onChange: (value: string) => void;
     /** 触发按钮内容的完全自定义（替换图标与文字，箭头仍由组件画）。 */
     trigger?: Snippet;
+    /**
+     * 选项右键（或菜单键）时的应用菜单条目；返回 null 时只挡掉原生菜单。
+     * 条目执行前下拉先收起，动作可以放心打开别的弹窗。
+     */
+    optionMenu?: (option: SelectMenuOption) => ContextMenuEntry[] | null;
   }
 
   let {
@@ -82,7 +88,33 @@
     class: className = "",
     onChange,
     trigger: triggerContent,
+    optionMenu,
   }: Props = $props();
+
+  let menu = $state<ContextMenuRequest | null>(null);
+
+  function wrapEntries(entries: ContextMenuEntry[]): ContextMenuEntry[] {
+    return entries.map((entry) => {
+      if (!("id" in entry)) return entry;
+      return {
+        ...entry,
+        submenu: entry.submenu ? wrapEntries(entry.submenu) : undefined,
+        run: entry.run
+          ? () => {
+              hide(false);
+              entry.run?.();
+            }
+          : undefined,
+      };
+    });
+  }
+
+  function openOptionMenu(option: SelectMenuOption | undefined, point: { x: number; y: number }) {
+    if (!option || !optionMenu) return;
+    const entries = optionMenu(option);
+    if (!entries || entries.length === 0) return;
+    menu = { x: point.x, y: point.y, entries: wrapEntries(entries), label: `${option.label} 的操作` };
+  }
 
   const SEARCH_FROM = 8;
 
@@ -192,6 +224,7 @@
       {width}
       matchAnchor={variant === "field"}
       onChoose={(index) => choose(shown[index])}
+      onItemContextMenu={optionMenu ? (index, point) => openOptionMenu(shown[index], point) : undefined}
       onClose={(refocus) => hide(refocus)}
       foot={actions.length ? actionFoot : undefined}
     >
@@ -210,6 +243,11 @@
             tabindex="-1"
             onmousemove={() => (active = index)}
             onclick={() => choose(option)}
+            oncontextmenu={(event) => {
+              event.preventDefault();
+              active = index;
+              openOptionMenu(option, { x: event.clientX, y: event.clientY });
+            }}
             onkeydown={() => {}}
           >
             {#if option.badge}
@@ -235,3 +273,7 @@
     </Popover>
   {/if}
 </div>
+
+{#if menu}
+  <ContextMenu request={menu} onClose={() => (menu = null)} />
+{/if}

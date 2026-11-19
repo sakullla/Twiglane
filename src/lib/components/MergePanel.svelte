@@ -53,9 +53,9 @@
   import { visibleRange, scrollIndexIntoView } from "../layout";
   import { shortOid } from "../history";
   import { abortActionLabel, canCompleteMerge, conflictKindLabel, continueActionLabel, operationCaption, operationVerb, showMergeAbort } from "../resolve";
+  import { conflictFileMenu, markerFreeText, mergeSteps, pushState } from "../merge-flow";
   import type {
     BranchRecord,
-    CommitFileChange,
     ConflictView,
     MergePreview,
     MergeSession,
@@ -64,9 +64,10 @@
   } from "../types";
   import { BUSY_REASON, splitPath } from "../ui";
   import ConflictResolver from "./ConflictResolver.svelte";
+  import ContextMenu, { isContextKey, pointFor, type ContextMenuRequest } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
-  import MergeReview from "./MergeReview.svelte";
   import MergeSetup, { type MergeMode } from "./MergeSetup.svelte";
+  import MergeSteps from "./MergeSteps.svelte";
   import ConfirmDialog from "./ConfirmDialog.svelte";
   import ThreeWayMerge from "./ThreeWayMerge.svelte";
   import { detectEol, keepBothSides } from "../conflict";
@@ -91,6 +92,8 @@
     onOpenStash: () => void;
     onOpenChanges?: () => void;
     onOpenHistory?: () => void;
+    /** 完成页的「推送」：交给宿主走统一的同步流程（进度、取消、凭据与失败说明）。 */
+    onPush?: () => void;
     /** 作为任务 modal 的内容时不再自带整页面板外框。 */
     embedded?: boolean;
     /** 路由与中止的落点：任务 modal 把它们并入标题行，不再多占一条工具行。 */
@@ -121,6 +124,7 @@
     onOpenStash,
     onOpenChanges,
     onOpenHistory,
+    onPush,
     embedded = false,
     headTarget = null,
     onClose,
@@ -139,7 +143,6 @@
     outgoing?: number;
     filesTotal?: number;
     resolvedPaths?: string[];
-    reviewPreview?: MergePreview | null;
     switchedFrom: string | null;
     /** 这次完成的是还原提交，不是分支合并：完成页不能提供“再合并一次”。 */
     revert?: boolean;
@@ -186,8 +189,6 @@
   /** session 与 branchTips 同时读到的 generation；不一致时为 0。 */
   let factsGeneration = 0;
   let footFile = $state<HTMLDivElement | null>(null);
-  /** 合并方式与说明的落点：和主操作同一条底栏，决定「怎么做」的地方就是点下去的地方。 */
-  let footOptions = $state<HTMLDivElement | null>(null);
 
   let blocked = $derived(disabled || busy);
   let current = $derived(opened.snapshot.branch.detached || opened.snapshot.branch.unborn ? null : opened.snapshot.branch.name);
@@ -564,10 +565,8 @@
           outgoing: checked.outgoing,
           filesTotal: checked.filesTotal,
           resolvedPaths: [],
-          reviewPreview: checked,
           switchedFrom: null,
         };
-        onNotice("已把当前分支上尚未进入基底的提交接到基底顶端。没有推送。");
         return;
       }
       if (started.fastForwarded) {
@@ -582,10 +581,8 @@
           outgoing: checked.outgoing,
           filesTotal: checked.filesTotal,
           resolvedPaths: [],
-          reviewPreview: checked,
           switchedFrom: started.switchedFrom ?? null,
         };
-        onNotice(`已把 ${checked.target} 快进到 ${checked.source}。`);
         return;
       }
       if (started.operation === "merge" && started.unresolved === 0) {
@@ -602,10 +599,9 @@
           outgoing: checked.outgoing,
           filesTotal: checked.filesTotal || done.files.length,
           resolvedPaths: [],
-          reviewPreview: checked,
           switchedFrom: started.switchedFrom ?? null,
         };
-        onNotice(done.summary);
+        // 完成页已经说明结果，不再额外弹提示。
         return;
       }
       message = note;
@@ -694,21 +690,35 @@
   }
 
   function resolve(choice: string, content?: string) {
-    const state = session;
     const selected = view;
-    if (!state || !selected) return;
+    if (!session || !selected) return;
     const text = choice === "text" ? (content ?? resultText) : null;
-    void run(async () => {
-      const next = await api.resolveConflict(opened.summary.path, selected.path, choice, text, state.generation, nextId());
-      session = next;
-      const stillConflicted = next.conflicts.some((entry) => entry.path === selected.path);
-      if (!stillConflicted) {
-        resolvedPaths = [...new Set([...resolvedPaths, selected.path])];
-        conflictDrafts.delete(draftKey(selected.path));
-        conflictProgress.delete(draftKey(selected.path));
-        progressTick += 1;
-      }
-      onSnapshot(next.snapshot);
+    void run(() => applyResolution(selected.path, choice, text));
+  }
+
+  /**
+   * 写入一个文件的解决结果。可以是正在打开的文件，也可以是右键菜单里的另一个文件：
+   * 后者写完保持当前打开的文件不动；前者解决后跳到下一个冲突文件。始终带会话的 generation 写入。
+   */
+  async function applyResolution(path: string, choice: string, text: string | null) {
+    const state = session;
+    if (!state) return;
+    const selected = view;
+    const next = await api.resolveConflict(opened.summary.path, path, choice, text, state.generation, nextId());
+    session = next;
+    const stillConflicted = next.conflicts.some((entry) => entry.path === path);
+    if (!stillConflicted) {
+      resolvedPaths = [...new Set([...resolvedPaths, path])];
+      conflictDrafts.delete(draftKey(path));
+      conflictProgress.delete(draftKey(path));
+      progressTick += 1;
+    }
+    onSnapshot(next.snapshot);
+    if (selected && selected.path !== path) {
+      if (!stillConflicted) onNotice(`${path} 已标记为已解决。`);
+      return;
+    }
+    {
       if (stillConflicted) {
         view = selected;
       } else if (next.conflicts[0]) {
@@ -718,13 +728,116 @@
         view = nextView;
         resultText = nextView.result.text ?? "";
         onGeneration(nextView.generation);
-        onNotice(`${selected.path} 已标记为已解决，已打开下一个冲突文件。`);
+        onNotice(`${path} 已标记为已解决，已打开下一个冲突文件。`);
       } else {
         view = null;
-        onNotice(`${selected.path} 已标记为已解决，所有冲突文件均已处理。`);
+        onNotice(`${path} 已标记为已解决，所有冲突文件均已处理。`);
       }
+    }
+  }
+
+  /** 右键「整个文件采用一侧」：由后端取那一侧的完整版本写回，和解决器里的同名动作一致。 */
+  function takeSide(path: string, choice: "ours" | "theirs") {
+    if (!session) return;
+    void run(() => applyResolution(path, choice, null));
+  }
+
+  /**
+   * 右键「按工作区内容标记为已解决」：用户在外部编辑器里改好了文件时用。
+   * 重新读取工作区内容，仍有冲突标记或不是文本时不写入，只说明原因。
+   */
+  function markAsIs(path: string) {
+    const state = session;
+    if (!state) return;
+    void run(async () => {
+      const current = await api.conflictView(opened.summary.path, path, state.generation, nextId());
+      if (!current.editable || !markerFreeText(current.result.text)) {
+        onNotice(
+          current.editable
+            ? `${path} 里还有冲突标记，没有标记。先解决其中的冲突，或整个文件采用一侧。`
+            : `${path} 不能按文本标记，请整个文件采用一侧。`,
+        );
+        return;
+      }
+      await applyResolution(path, "text", current.result.text);
     });
   }
+
+  async function copyFilePath(path: string) {
+    try {
+      await navigator.clipboard.writeText(path);
+      onNotice("已复制路径。");
+    } catch {
+      onFailure({ code: "clipboard", message: "无法写入剪贴板，请手动复制路径。" });
+    }
+  }
+
+  let copiedOid = $state(false);
+
+  async function copyOid(oid: string) {
+    if (!oid) return;
+    try {
+      await navigator.clipboard.writeText(oid);
+      copiedOid = true;
+      setTimeout(() => (copiedOid = false), 1600);
+    } catch {
+      onFailure({ code: "clipboard", message: "无法写入剪贴板，请手动复制提交标识。" });
+    }
+  }
+
+  let fileMenu = $state<ContextMenuRequest | null>(null);
+
+  function openFileMenu(path: string, resolved: boolean, point: { x: number; y: number }) {
+    const repo = opened.summary.path;
+    fileMenu = {
+      ...point,
+      label: `${splitPath(path).name} 的操作`,
+      entries: conflictFileMenu(
+        { resolved, busyReason: blocked ? BUSY_REASON : null, currentLabel, incomingLabel },
+        {
+          open: () => openConflict(path),
+          takeOurs: () => takeSide(path, "ours"),
+          takeTheirs: () => takeSide(path, "theirs"),
+          markResolved: () => markAsIs(path),
+          openExternal: () => void api.openPath(repo, path).catch(onFailure),
+          reveal: () => void api.revealPath(repo, path).catch(onFailure),
+          copyPath: () => void copyFilePath(path),
+        },
+      ),
+    };
+  }
+
+  /** 完成页的推送：宿主跑推送时会锁住写入（disabled），据此显示进行中；没有真正开始时自动复位。 */
+  let pushPhase = $state<"idle" | "requested" | "running">("idle");
+  $effect(() => {
+    if (pushPhase === "requested" && disabled) pushPhase = "running";
+    else if (pushPhase === "running" && !disabled) pushPhase = "idle";
+  });
+
+  function push() {
+    if (!onPush || blocked) return;
+    pushPhase = "requested";
+    onPush();
+    setTimeout(() => {
+      if (pushPhase === "requested" && !disabled) pushPhase = "idle";
+    }, 60);
+  }
+
+  let steps = $derived(
+    mergeSteps({
+      operation: finished ? "none" : (session?.operation ?? "none"),
+      finished: Boolean(finished),
+      hadConflicts: (finished?.resolvedPaths?.length ?? 0) > 0,
+      expectConflicts: readyPreview?.canStart
+        ? readyPreview.conflictCheck === "conflicts"
+          ? true
+          : readyPreview.conflictCheck === "clean"
+            ? false
+            : undefined
+        : undefined,
+    }),
+  );
+  let finishedPush = $derived(finished && finished.target ? pushState(opened.snapshot.branch, finished.target, finished.rebased) : null);
 
   function complete() {
     const state = session;
@@ -733,7 +846,6 @@
     const repo = opened.summary.path;
     const from = state.source ?? incomingLabel;
     const into = state.target ?? currentLabel;
-    const count = conflictTotal;
     const rebasing = state.operation === "rebase";
     const reverting = state.operation === "revert";
     const resolvedSnapshot = [...resolvedPaths];
@@ -744,55 +856,20 @@
         messageByRepo.delete(repo);
         resolvedPaths = [];
         onSnapshot(done.snapshot);
-        onNotice(done.summary);
         session = await api.mergeSession(repo, done.generation, nextId());
         view = null;
         const matchedPreview = lastPreview && lastPreview.source === from && lastPreview.target === into ? lastPreview : null;
-        const fallbackPaths = [...new Set([...done.files, ...resolvedSnapshot])];
-        const fallbackFiles: CommitFileChange[] = fallbackPaths.map((path) => ({
-          path,
-          originalPath: null,
-          status: "modified",
-        }));
-        const reviewPreview: MergePreview | null = reverting
-          ? null
-          : matchedPreview ??
-            (fallbackFiles.length > 0
-              ? {
-                  generation: done.generation,
-                  source: from,
-                  target: into,
-                  headOid: done.oid ?? state.headOid,
-                  dirty: false,
-                  localPaths: [],
-                  canStart: false,
-                  operation: "none",
-                  note: done.summary,
-                  current: into,
-                  needsSwitch: false,
-                  incoming: count,
-                  outgoing: 0,
-                  upToDate: false,
-                  fastForward: false,
-                  commits: [],
-                  files: fallbackFiles,
-                  filesTotal: fallbackFiles.length,
-                  conflictCheck: "clean",
-                  conflictPaths: resolvedSnapshot,
-                  blocker: null,
-                }
-              : null);
+        const touched = new Set([...done.files, ...resolvedSnapshot]);
         finished = {
           source: from,
           target: into,
           fastForwarded: false,
           rebased: rebasing,
           oid: done.oid,
-          commits: matchedPreview?.incoming ?? count,
+          commits: matchedPreview?.incoming ?? 0,
           outgoing: matchedPreview?.outgoing ?? 0,
-          filesTotal: matchedPreview?.filesTotal || fallbackFiles.length,
+          filesTotal: matchedPreview?.filesTotal || touched.size,
           resolvedPaths: resolvedSnapshot,
-          reviewPreview,
           switchedFrom: switchedFromByRepo.get(repo) ?? null,
           revert: reverting,
         };
@@ -866,31 +943,20 @@
   <!-- 搬走的必须是这个常驻节点：Svelte 销毁 {#if} 分支时沿分支首节点的 nextSibling 走，
        分支首尾节点被搬走后遍历中断，后面的节点会残留。 -->
   <div class="mp-head-host" use:portal={headTarget}>
-    {#if session && active}
-      <div class="mp-head">
-        {#if session.operation === "revert"}
-          <span class="merge-route" title="还原提交：按由新到旧创建逆向提交">
-            <span class="merge-route-branch source"><Icon name="undo" size={12} /><span class="truncate">还原提交</span></span>
-          </span>
-          <span class="mp-note truncate" title={session.note}>{session.note}</span>
-        {:else}
-          <span class="merge-route" title={`把 ${incomingLabel} 合并到 ${currentLabel}`}>
-            <span class="merge-route-branch source"><Icon name="branch" size={12} /><span class="truncate">{incomingLabel}</span></span>
-            <span class="merge-route-arrow"><Icon name="arrow-right" size={14} /></span>
-            <span class="merge-route-branch target"><Icon name="branch" size={12} /><span class="truncate">{currentLabel}</span></span>
-          </span>
-        {/if}
-        {#if session.operation === "unmerged"}
-          <span class="mp-note truncate" title={session.note}>{session.note}</span>
-        {:else if session.operation === "rebase"}
-          <span class="mp-note truncate" title="变基冲突中，当前一侧是基底，来源一侧是正在改写的提交。">变基冲突中，当前一侧是基底，来源一侧是正在改写的提交。</span>
-        {/if}
-        <span class="spacer"></span>
-        {#if showMergeAbort(session.operation, session.canAbort)}
-          <button type="button" class="btn btn-danger-soft btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={askAbort}><Icon name="x" size={14} />{abortLabel(session.operation)}</button>
-        {/if}
-      </div>
-    {/if}
+    <div class="mp-head">
+      {#if session && (session.operation === "none" || active || finished) && displayOperation !== "unmerged"}
+        <MergeSteps {steps} />
+      {/if}
+      {#if session && active && session.operation === "rebase"}
+        <span class="mp-note truncate" title="变基冲突中，当前一侧是基底，来源一侧是正在改写的提交。">当前一侧是基底，来源一侧是正在改写的提交</span>
+      {:else if session && active && (session.operation === "unmerged" || session.operation === "revert")}
+        <span class="mp-note truncate" title={session.note}>{session.note}</span>
+      {/if}
+      <span class="spacer"></span>
+      {#if session && active && showMergeAbort(session.operation, session.canAbort)}
+        <button type="button" class="btn btn-ghost btn-sm mp-abort" title={blocked ? BUSY_REASON : "撤销这次操作，回到开始之前（会先确认）"} disabled={blocked} onclick={askAbort}><Icon name="x" size={14} />{abortLabel(session.operation)}</button>
+      {/if}
+    </div>
   </div>
 
   {#if session && active}
@@ -898,11 +964,28 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="mp-body" onkeydown={onEditorKey}>
       <aside class="conflict-sidebar" aria-label="冲突文件列表">
-        <div class="conflict-sidebar-head">
-          <span>冲突文件</span>
-          {#if session.unresolved > 0}<span class="count danger" title="未解决冲突">{session.unresolved}</span>{/if}
-        </div>
-        {#if resolvedPaths.length > 0}
+        <!-- 侧栏顶部回答两个问题：在合并什么、还剩多少。进度条一开始就在，不等第一个文件解决才出现。 -->
+        <div class="mp-side-summary">
+          {#if session.operation === "revert"}
+            <span class="merge-route" title="还原提交：按由新到旧创建逆向提交">
+              <span class="merge-route-branch source"><Icon name="undo" size={12} /><span class="truncate">还原提交</span></span>
+            </span>
+          {:else}
+            <span class="merge-route" title={`把 ${incomingLabel} 合并到 ${currentLabel}`}>
+              <span class="merge-route-branch source"><Icon name="branch" size={12} /><span class="truncate">{incomingLabel}</span></span>
+              <span class="merge-route-arrow"><Icon name="arrow-right" size={13} /></span>
+              <span class="merge-route-branch target"><Icon name="branch" size={12} /><span class="truncate">{currentLabel}</span></span>
+            </span>
+          {/if}
+          <div class="mp-side-progress">
+            <span class="mp-side-count">
+              {#if session.unresolved === 0}
+                <Icon name="check-circle" size={13} />全部文件已解决
+              {:else}
+                已解决 <strong>{resolvedPaths.length}</strong> / {conflictTotal} 个文件
+              {/if}
+            </span>
+          </div>
           <div
             class="merge-progress"
             role="progressbar"
@@ -911,9 +994,15 @@
             aria-valuemax={conflictTotal}
             aria-valuenow={resolvedPaths.length}
           >
-            <span style={`width:${resolvedPercent}%`}></span>
+            <span style={`width:${session.unresolved === 0 ? 100 : resolvedPercent}%`}></span>
           </div>
-        {/if}
+        </div>
+        <div class="conflict-sidebar-head">
+          <span>冲突文件</span>
+          {#if session.unresolved > 0}<span class="count danger" title="未解决冲突">{session.unresolved}</span>{/if}
+          <span class="spacer"></span>
+          <span class="mp-side-tip" title="右键文件可整份采用一侧、按工作区内容标记、打开或复制路径">右键更多操作</span>
+        </div>
         {#if session.conflicts.length > 6}
           <div class="conflict-filter">
             <div class="field sm">
@@ -954,9 +1043,19 @@
               style="height:56px"
               aria-label={`${conflictKindLabel(entry.kind)} ${entry.path}`}
               aria-pressed={view?.path === entry.path}
-              disabled={blocked}
-              title={entry.path}
+              aria-haspopup="menu"
+              aria-disabled={blocked}
+              title={blocked ? BUSY_REASON : entry.path}
               onclick={() => openConflict(entry.path)}
+              oncontextmenu={(event) => {
+                event.preventDefault();
+                openFileMenu(entry.path, false, { x: event.clientX, y: event.clientY });
+              }}
+              onkeydown={(event) => {
+                if (!isContextKey(event)) return;
+                event.preventDefault();
+                openFileMenu(entry.path, false, pointFor(event.currentTarget));
+              }}
             >
               <span class="conflict-file-icon"><Icon name="alert" size={13} /></span>
               <span class="conflict-file-copy">
@@ -971,7 +1070,24 @@
             </button>
             {:else}
               {@const parts = splitPath(row.path)}
-              <div class="conflict-file resolved" style="height:56px" title={row.path}>
+              <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+              <div
+                class="conflict-file resolved"
+                style="height:56px"
+                title={row.path}
+                role="group"
+                aria-label={`已解决 ${row.path}`}
+                tabindex="0"
+                oncontextmenu={(event) => {
+                  event.preventDefault();
+                  openFileMenu(row.path, true, { x: event.clientX, y: event.clientY });
+                }}
+                onkeydown={(event) => {
+                  if (!isContextKey(event)) return;
+                  event.preventDefault();
+                  openFileMenu(row.path, true, pointFor(event.currentTarget));
+                }}
+              >
                 <span class="conflict-file-icon"><Icon name="check-circle" size={13} /></span>
                 <span class="conflict-file-copy"><strong>{parts.name}</strong><small>{parts.dir || "已标记"}</small></span>
                 <span class="chip current">已标记</span>
@@ -1043,7 +1159,7 @@
         {:else}
           <div class="empty conflict-picker-empty">
             <span class={`empty-icon ${session.unresolved === 0 ? "ok" : ""}`}><Icon name={session.unresolved === 0 ? "check-circle" : "file-diff"} size={23} /></span>
-            <strong>{session.unresolved === 0 ? "所有冲突都已标记" : "选择一个冲突文件"}</strong>
+            <strong>{session.unresolved === 0 ? "冲突已全部解决" : "选择一个冲突文件"}</strong>
             <p>
               {#if session.unresolved === 0}
                 {#if session.operation === "rebase"}
@@ -1065,10 +1181,10 @@
                     还原序列停在后续目标，无法继续应用。可以在上方中止回到本次还原开始前；已经创建的还原提交会一并撤销。
                   {/if}
                 {:else}
-                  检查无误后，在下方填写说明并完成合并。完成只在本地提交，不会推送。
+                  确认右下角的合并说明，点「完成合并」。只在本地提交，不会推送。
                 {/if}
               {:else}
-                从左侧选择文件，逐处对照两边的版本，再决定最终结果。
+                从左侧选择文件，逐处选择保留哪一边；右键文件可以整份采用一侧。
                 {#if session.operation === "rebase"}变基冲突中，当前一侧是基底，来源一侧是正在改写的提交。{/if}
               {/if}
             </p>
@@ -1077,66 +1193,74 @@
       </div>
     </div>
   {:else if finished}
-    {@const hasReview = Boolean(
-      !finished.revert &&
-        finished.reviewPreview &&
-        (finished.reviewPreview.files.length > 0 || finished.reviewPreview.commits.length > 0),
-    )}
+    {@const kind = finished.revert ? "还原提交" : finished.rebased ? "当前位置" : finished.fastForwarded ? "新位置" : "合并提交"}
+    {@const resolvedCount = finished.resolvedPaths?.length ?? 0}
+    <!-- 完成页只回答：结果是什么、带进来多少、推没推，以及下一步。代码明细去提交历史里看。 -->
     <div class="panel-scroll mp-scroll">
-      <div class="merge-done" class:has-review={hasReview} role="status">
-        <div class="merge-done-summary">
-          <span class="merge-done-icon"><Icon name="check" size={hasReview ? 22 : 28} stroke={2.4} /></span>
-          <div class="merge-done-copy">
-            <div class="merge-done-headline">
-              <h2>{finished.revert ? "已继续还原" : finished.rebased ? `已把 ${finished.target} 接到 ${finished.source} 顶端` : finished.fastForwarded ? `已把 ${finished.target} 快进到 ${finished.source}` : `已把 ${finished.source} 合并到 ${finished.target}`}</h2>
-              {#if !finished.revert && finished.source && finished.target}
-                <span class="merge-route" title={`方向：${finished.source} → ${finished.target}`}>
-                  <span class="merge-route-branch source"><Icon name="branch" size={12} /><span class="truncate">{finished.source}</span></span>
-                  <span class="merge-route-arrow"><Icon name="arrow-right" size={13} /></span>
-                  <span class="merge-route-branch target"><Icon name="branch" size={12} /><span class="truncate">{finished.target}</span></span>
-                </span>
-              {/if}
-            </div>
-            <p>
-              {#if finished.revert}
-                后续目标已处理，还原提交已创建{#if finished.oid}<code>{shortOid(finished.oid)}</code>{/if}。结果只在本地，尚未推送。
-              {:else if finished.rebased}
-                当前分支已被改写。远程不变，没有推送。
-              {:else if finished.fastForwarded}没有创建合并提交，{finished.target} 现在指向 {finished.oid ? shortOid(finished.oid) : "来源的最新提交"}。结果只在本地，尚未推送。
-              {:else}已创建合并提交{#if finished.oid}<code>{shortOid(finished.oid)}</code>{/if}。结果只在本地，尚未推送。{/if}
-            </p>
-            {#if !finished.revert && (finished.commits > 0 || (finished.outgoing ?? 0) > 0 || (finished.filesTotal ?? 0) > 0 || (finished.resolvedPaths?.length ?? 0) > 0)}
-              <div class="merge-done-stats" aria-label="本次合并两侧概览">
-                {#if finished.commits > 0}<span class="chip">来源带入 {finished.commits} 个提交</span>{/if}
-                {#if (finished.outgoing ?? 0) > 0}<span class="chip">目标原有 {finished.outgoing} 个提交</span>{/if}
-                {#if (finished.filesTotal ?? 0) > 0}<span class="chip">涉及 {finished.filesTotal} 个文件</span>{/if}
-                {#if (finished.resolvedPaths?.length ?? 0) > 0}<span class="chip current">已解决 {finished.resolvedPaths?.length} 个冲突文件</span>{/if}
-              </div>
+      <div class="merge-done" role="status">
+        <span class="merge-done-icon"><Icon name="check" size={28} stroke={2.4} /></span>
+        <div class="merge-done-copy">
+          <h2>{finished.revert ? "已继续还原" : finished.rebased ? `已把 ${finished.target} 接到 ${finished.source} 顶端` : finished.fastForwarded ? `已把 ${finished.target} 快进到 ${finished.source}` : `已把 ${finished.source} 合并到 ${finished.target}`}</h2>
+          <p>
+            {#if finished.revert}
+              后续目标已处理，还原提交已创建。
+            {:else if finished.rebased}
+              当前分支的提交已接到 {finished.source} 之后，历史已改写。
+            {:else if finished.fastForwarded}
+              没有产生合并记录，{finished.target} 直接前移到了 {finished.source}。
+            {:else}
+              两边的历史都保留，多了一条合并记录。
             {/if}
-          </div>
-          <div class="merge-done-actions">
-            {#if finished.switchedFrom && !finished.revert}
-              <button type="button" class="btn btn-secondary" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={switchBack}><Icon name="arrow-left" size={14} />切回 {finished.switchedFrom}</button>
-            {/if}
-            {#if onOpenHistory}<button type="button" class="btn btn-secondary" onclick={onOpenHistory}><Icon name="history" size={14} />查看提交历史</button>{/if}
-            {#if !finished.revert}
-              <button type="button" class="btn btn-ghost" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={startOver}><Icon name="merge" size={14} />再合并一次</button>
-            {/if}
-          </div>
+          </p>
         </div>
-        {#if hasReview && finished.reviewPreview}
-          <div class="merge-done-review">
-            <MergeReview
-              {opened}
-              preview={finished.reviewPreview}
-              postMerge={true}
-              resolvedPaths={finished.resolvedPaths ?? []}
-              disabled={blocked}
-              {nextId}
-              {onGeneration}
-              {onFailure}
-            />
-          </div>
+
+        <dl class="merge-done-facts" aria-label="本次合并概览">
+          {#if finished.oid}
+            <div>
+              <dt>{kind}</dt>
+              <dd>
+                <code title={finished.oid}>{shortOid(finished.oid)}</code>
+                <button type="button" class="icon-btn sm" aria-label="复制完整提交标识" title={copiedOid ? "已复制" : "复制完整提交标识"} onclick={() => void copyOid(finished?.oid ?? "")}>
+                  <Icon name={copiedOid ? "check" : "copy"} size={12} />
+                </button>
+              </dd>
+            </div>
+          {/if}
+          {#if !finished.revert && (finished.commits > 0 || (finished.filesTotal ?? 0) > 0)}
+            <div>
+              <dt>带入</dt>
+              <dd>
+                {#if finished.commits > 0}{finished.commits} 个提交{/if}{#if finished.commits > 0 && (finished.filesTotal ?? 0) > 0}<i class="merge-done-dot">·</i>{/if}{#if (finished.filesTotal ?? 0) > 0}{finished.filesTotal} 个文件{/if}
+              </dd>
+            </div>
+          {/if}
+          {#if resolvedCount > 0}
+            <div><dt>解决冲突</dt><dd>{resolvedCount} 个文件</dd></div>
+          {/if}
+          {#if finishedPush}
+            <div>
+              <dt>推送</dt>
+              <dd class={`merge-done-push ${finishedPush.kind}`}>
+                <span class="merge-done-push-dot" aria-hidden="true"></span>
+                {#if pushPhase !== "idle"}正在推送…{:else}{finishedPush.text}{/if}
+              </dd>
+            </div>
+          {/if}
+        </dl>
+
+        <div class="merge-done-actions">
+          {#if onPush && finishedPush?.canPush}
+            <button type="button" class="btn btn-primary" title={blocked ? BUSY_REASON : `推送到 ${opened.snapshot.branch.upstream}`} disabled={blocked} onclick={push}>
+              {#if pushPhase !== "idle"}<span class="spinner"></span>{:else}<Icon name="upload" size={14} />{/if}推送
+            </button>
+          {/if}
+          {#if onOpenHistory}<button type="button" class="btn btn-secondary" onclick={onOpenHistory}><Icon name="history" size={14} />查看提交历史</button>{/if}
+          {#if finished.switchedFrom && !finished.revert}
+            <button type="button" class="btn btn-secondary" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={switchBack}><Icon name="arrow-left" size={14} />切回 {finished.switchedFrom}</button>
+          {/if}
+        </div>
+        {#if !finished.revert}
+          <button type="button" class="link-btn merge-done-again" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={startOver}>再合并一次</button>
         {/if}
       </div>
     </div>
@@ -1185,7 +1309,6 @@
           {onOpenStash}
           {onOpenChanges}
           {branchGroups}
-          optionsTarget={footOptions}
         />
       {:else}
         <div class="empty" role="status"><span class="empty-icon"><span class="spinner"></span></span><strong>正在读取合并状态</strong></div>
@@ -1199,7 +1322,6 @@
 
   <div class="mp-foot" class:strip>
     <div class="mp-foot-file" bind:this={footFile}></div>
-    <div class="mp-foot-options" bind:this={footOptions}></div>
     {#if session && active && view && !view.editable && conflictTotal > 1}
       <!-- 二进制这类文件按文件停留：没有 ConflictResolver，导航在这里提供，语义相同。 -->
       <div class="cr-nav" role="group" aria-label="冲突导航">
@@ -1265,7 +1387,7 @@
       <button type="button" class="btn btn-ghost btn-sm" title={blocked ? BUSY_REASON : undefined} disabled={blocked} onclick={onOpenStash}>查看临时保存</button>
     {/if}
     <span class="spacer"></span>
-    {#if onClose}<button type="button" class={`btn btn-secondary ${strip ? "btn-sm" : ""}`} onclick={() => onClose?.()}>{#if closeLabel && !finished}<Icon name="arrow-left" size={14} />{closeLabel}{:else}{finished ? "完成" : "关闭"}{/if}</button>{/if}
+    {#if onClose}<button type="button" class={`btn ${finished && !(onPush && finishedPush?.canPush) ? "btn-primary" : "btn-secondary"} ${strip ? "btn-sm" : ""}`} onclick={() => onClose?.()}>{#if closeLabel && !finished}<Icon name="arrow-left" size={14} />{closeLabel}{:else}{finished ? "完成" : "关闭"}{/if}</button>{/if}
     {#if session?.operation === "merge" || session?.operation === "rebase" || session?.operation === "cherry-pick" || session?.operation === "revert"}
       <button
         type="button"
@@ -1337,6 +1459,10 @@
     />
   {/if}
 
+  {#if fileMenu}
+    <ContextMenu request={fileMenu} onClose={() => (fileMenu = null)} />
+  {/if}
+
   {#if confirmingRebase}
     <ConfirmDialog
       title="确认变基"
@@ -1356,3 +1482,45 @@
     />
   {/if}
 </section>
+
+<style>
+  /* 标题行：步骤条在标题之后，中止靠右，弱化成幽灵按钮（中止有确认，不需要抢眼）。 */
+  .mp-head { gap: var(--space-16); }
+  .mp-abort { color: var(--danger-text); }
+  .mp-abort:hover:not(:disabled) { background: var(--danger-soft); }
+
+  /* 冲突侧栏顶部：在合并什么、还剩多少。 */
+  .mp-side-summary { display: flex; flex-direction: column; gap: var(--space-8); padding: var(--space-12) var(--space-12) var(--space-4); flex: none; min-width: 0; }
+  .mp-side-summary .merge-route { min-width: 0; flex-wrap: wrap; row-gap: var(--space-4); }
+  .mp-side-summary .merge-route-branch { max-width: 100%; }
+  .mp-side-progress { display: flex; align-items: center; gap: var(--space-6); min-width: 0; }
+  .mp-side-count { display: inline-flex; align-items: center; gap: var(--space-4); color: var(--fg-muted); font-size: var(--text-sm); }
+  .mp-side-count strong { color: var(--fg); font-variant-numeric: tabular-nums; }
+  .mp-side-count :global(.icon) { color: var(--success-text); }
+  .mp-side-summary .merge-progress { height: 4px; margin: 0; }
+  .mp-side-tip { color: var(--fg-subtle); font-size: 11px; font-weight: var(--weight-normal); }
+  .conflict-sidebar { border-right: 1px solid var(--border); }
+  /* 右键时 WebKit 会先选中光标下的词：文件行不可选文字，菜单出来时不会带着一段高亮。 */
+  .conflict-file { user-select: none; -webkit-user-select: none; }
+  .conflict-file[aria-disabled="true"] { cursor: not-allowed; }
+  .conflict-file.resolved:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+  /* 完成页：一列居中，一句结论 + 几条事实 + 下一步。 */
+  .merge-done { max-width: 520px; gap: var(--space-16); padding-bottom: 72px; }
+  .merge-done-copy { display: flex; flex-direction: column; align-items: center; gap: var(--space-6); }
+  .merge-done-copy h2 { overflow-wrap: anywhere; }
+  .merge-done-facts { display: flex; flex-direction: column; width: 100%; margin: 0; padding: var(--space-4) var(--space-16); border-radius: var(--radius-lg); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--border); text-align: left; }
+  .merge-done-facts > div { display: flex; align-items: center; gap: var(--space-12); min-height: 40px; }
+  .merge-done-facts > div + div { border-top: 1px solid var(--border); }
+  .merge-done-facts dt { flex: none; width: 72px; color: var(--fg-muted); font-size: var(--text-sm); }
+  .merge-done-facts dd { flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--space-4); margin: 0; color: var(--fg); font-size: var(--text-sm); }
+  .merge-done-facts code { margin: 0; }
+  .merge-done-dot { margin: 0 var(--space-6); color: var(--fg-subtle); font-style: normal; }
+  .merge-done-push-dot { flex: none; width: 8px; height: 8px; margin-right: var(--space-4); border-radius: 50%; background: var(--fg-subtle); }
+  .merge-done-push.ahead .merge-done-push-dot { background: var(--warning); }
+  .merge-done-push.pushed .merge-done-push-dot { background: var(--success); }
+  .merge-done-push.rewritten .merge-done-push-dot { background: var(--danger); }
+  .merge-done-actions { margin-top: 0; }
+  .merge-done-again { font-size: var(--text-sm); }
+  .merge-done-again:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
+</style>

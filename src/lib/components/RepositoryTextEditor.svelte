@@ -9,6 +9,7 @@
   } from "../file-editor.svelte";
   import { commentPrefix, cursorInfo, detectIndent, indentEdit, newlineEdit, toggleCommentEdit, type TextEdit } from "../editor-keys";
   import { expandReplacement, findMatches, firstEndingAfter, matchAtOrAfter, parseGoto, replaceAllEdit, type FindOptions } from "../editor-find";
+  import { findSeed } from "../find-seed";
   import { visibleRange } from "../layout";
   import { createHighlight } from "../syntax/highlight.svelte";
   import { lineSegments } from "../syntax/segments";
@@ -186,17 +187,17 @@
     }
   }
 
-  function selectionSeed(): string {
+  /** 与只读视图共用 findSeed：单行选区带入查找框，跨行选区保留原查找词。 */
+  function selectionSeed(): string | null {
     const node = textarea;
-    if (!node || node.selectionStart === node.selectionEnd) return "";
-    const text = node.value.slice(node.selectionStart, node.selectionEnd);
-    return text.includes("\n") || text.length > 200 ? "" : text;
+    if (!node || node.selectionStart === node.selectionEnd) return null;
+    return findSeed(node.value.slice(node.selectionStart, node.selectionEnd));
   }
 
   async function openFind(withReplace: boolean): Promise<void> {
     gotoOpen = false;
     const seed = selectionSeed();
-    if (seed) findQuery = seed;
+    if (seed !== null) findQuery = seed;
     findAnchor = textarea ? Math.min(textarea.selectionStart, textarea.selectionEnd) : 0;
     findOpen = true;
     replaceOpen = withReplace || replaceOpen;

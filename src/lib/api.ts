@@ -5,6 +5,7 @@ import type {
   BatchDeleteResult,
   BranchState,
   BranchListing,
+  BranchTracking,
   ClioraOutcome,
   ClioraReturnSent,
   DiffLineSelection,
@@ -527,6 +528,15 @@ export const api = {
     }),
   branchList: (path: string, generation: number, requestId: number) =>
     invoke<BranchListing>("branch_list", { path, generation, requestId }),
+  /** 全部本地分支相对上游的领先/落后：只读、不访问远程，一次 for-each-ref。 */
+  branchTracking: (path: string, generation: number, requestId: number) =>
+    invoke<BranchTracking>("branch_tracking", { path, generation, requestId }),
+  /** 不切换分支地快进一个非当前本地分支（git fetch <remote> <src>:<dst>）；分叉时拒绝。 */
+  updateBranch: (path: string, name: string, generation: number, requestId: number) =>
+    invoke<BranchState>("update_branch", { path, name, generation, requestId }),
+  /** 不切换分支地推送一个本地分支；没有上游时发布并建立跟踪。不强推。 */
+  pushLocalBranch: (path: string, name: string, generation: number, requestId: number) =>
+    invoke<BranchState>("push_local_branch", { path, name, generation, requestId }),
   branchState: (path: string, generation: number, requestId: number) =>
     invoke<BranchState>("branch_state", { path, generation, requestId }),
   createBranch: (path: string, name: string, generation: number, requestId: number) =>

@@ -11,8 +11,15 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
-/** 本次工作流标识：manifest 与 report 都用它，runner 不接受沿用上一批的 ID。 */
-const WORKFLOW_ID = process.argv.includes("--projects") ? "2026-11-16-multi-repository-project-workspaces" : "2026-11-13-modern-ui-ux-redesign";
+/**
+ * 本次批次身份：唯一来源就在这里。runner 把它显式传给截图脚本（--workflow/--task），
+ * 截图脚本不再自带上一个批次的默认 ID；下面的核对读 manifest 并与这里的期望值逐项比较，
+ * 因此「manifest 写了别的批次」会直接失败，而不是由同一个常量自己对自己成立。
+ * 换批次只改这一处。
+ */
+const IDENTITY = process.argv.includes("--projects")
+  ? { workflow: "2026-11-20-project-ui-ux-optimization", task: "T1" }
+  : { workflow: "2026-11-13-modern-ui-ux-redesign", task: "T6" };
 const args = process.argv.slice(2);
 const has = (name) => args.includes(name);
 const readArg = (name, fallback) => {
@@ -108,7 +115,8 @@ async function stopServer(child) {
 const failures = [];
 const report = {
   format: "ui_verification_report",
-  workflow: WORKFLOW_ID,
+  workflow: IDENTITY.workflow,
+  task: IDENTITY.task,
   createdAt: new Date().toISOString(),
   startedAt: startedAt.toISOString(),
   base,
@@ -125,7 +133,7 @@ const report = {
   },
   health: null,
   scenarios: { total: 0, passed: 0, failed: 0, failures: [], exitCode: null, output: "" },
-  shots: { manifest: null, workflow: null, capturedAt: null, fresh: false, groups: {}, files: 0, exitCode: null },
+  shots: { manifest: null, workflow: null, task: null, capturedAt: null, fresh: false, groups: {}, files: 0, exitCode: null },
   limits: [
     "浏览器 + mock 数据：不代表真实 Git 行为、桌面 WebView、安装包或其它平台。",
     has("--projects") ? "项目模式只验证项目导航、草稿和关联快照；不验证审查协议或系统深链往返。" : "mock 不注册系统 Cliora 深链协议；返回来源按「手动起点 + 回到提交区」路径验证，深链路径由 tests/cliora-integration.spec.ts 与真实 Git 脚本覆盖。",
@@ -198,6 +206,9 @@ try {
     const shots = await run(process.execPath, [
       ...(has("--projects") ? ["scripts/ui-preview/baseline-shots.mjs", "--projects"] : ["scripts/ui-preview/baseline-shots.mjs"]),
       "--base", base,
+      // 身份只由 runner 提供：截图脚本没有默认工作流，manifest 不允许出现别的批次。
+      "--workflow", IDENTITY.workflow,
+      "--task", IDENTITY.task,
       "--out", path.join(outDir, "after"),
       "--manifest", manifestPath,
       "--failure-targets", "dark:1280x840,light:1280x840,dark:900x600,light:900x600",
@@ -212,6 +223,7 @@ try {
       const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
       report.shots.manifest = show(manifestPath);
       report.shots.workflow = manifest.workflow ?? null;
+      report.shots.task = manifest.task ?? null;
       report.shots.capturedAt = manifest.capturedAt ?? null;
       report.shots.files = manifest.shots?.length ?? 0;
       for (const shot of manifest.shots ?? []) {
@@ -220,8 +232,13 @@ try {
       const capturedMs = Date.parse(String(manifest.capturedAt ?? ""));
       report.shots.fresh = Number.isFinite(capturedMs) && capturedMs >= startedAt.getTime();
       if (!report.shots.fresh) failures.push("manifest 的 capturedAt 不是本次运行写出的（旧 manifest 不算证据）");
-      if (manifest.workflow !== WORKFLOW_ID) {
-        failures.push("manifest workflow 是 " + JSON.stringify(manifest.workflow ?? null) + "，不是本次 " + WORKFLOW_ID);
+      // 读 manifest 的字段与 runner 的期望值比较：截图脚本拿到的身份就是这里传下去的，
+      // 任何一边写错、或截图脚本改回自己的常量，都会在这里失败。
+      if (manifest.workflow !== IDENTITY.workflow) {
+        failures.push("manifest workflow 是 " + JSON.stringify(manifest.workflow ?? null) + "，不是本次 " + JSON.stringify(IDENTITY.workflow));
+      }
+      if (manifest.task !== IDENTITY.task) {
+        failures.push("manifest task 是 " + JSON.stringify(manifest.task ?? null) + "，不是本次 " + JSON.stringify(IDENTITY.task));
       }
       if (report.shots.files === 0) failures.push("manifest 里没有任何截图");
       // manifest 逐张声明了文件：缺图说明 report 与现场不一致，不能用旧图补齐。

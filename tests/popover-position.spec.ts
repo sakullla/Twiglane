@@ -155,6 +155,38 @@ describe("共用弹层：首帧位置与展开方向", () => {
     expect(popover.style.left).toBe(`${140 - 100}px`);
   });
 
+  it("content-visibility 的祖先同样接管 fixed：没枚举到就会按视口原点摆放而整体偏移", async () => {
+    // 实测 content-visibility: auto/hidden 会带 layout 与 paint 包含，浏览器因此把它当作 fixed 的包含块；
+    // 判定里漏掉它时弹层仍按视口原点算，位置与锚点的间隙凭空多出这个祖先的偏移。
+    const block = document.createElement("div");
+    block.setAttribute("data-test-block", "");
+    block.style.setProperty("content-visibility", "auto");
+    document.body.append(block);
+    origin = { left: 100, top: 50 };
+    blockBox = { top: 50, left: 100, width: 900, height: 500 };
+    anchorBox = { top: 120, left: 140, width: 120, height: 32 };
+    const anchor = makeAnchor();
+    block.append(anchor);
+    const { popover } = await mount({ anchor, container: block });
+    expect(popover.style.top).toBe(`${120 + 32 + 6 - 50}px`);
+    expect(popover.style.left).toBe(`${140 - 100}px`);
+  });
+
+  it("content-visibility: visible（默认值）不算包含块：仍按视口原点摆放", async () => {
+    const block = document.createElement("div");
+    block.setAttribute("data-test-block", "");
+    block.style.setProperty("content-visibility", "visible");
+    document.body.append(block);
+    origin = { left: 100, top: 50 };
+    blockBox = { top: 50, left: 100, width: 900, height: 500 };
+    anchorBox = { top: 120, left: 140, width: 120, height: 32 };
+    const anchor = makeAnchor();
+    block.append(anchor);
+    const { popover } = await mount({ anchor, container: block });
+    expect(popover.style.top).toBe(`${120 + 32 + 6}px`);
+    expect(popover.style.left).toBe("140px");
+  });
+
   it("贴在窗口内：靠近右边缘时收在边距里，不横向溢出", async () => {
     anchorBox = { top: 100, left: VIEWPORT.width - 60, width: 120, height: 32 };
     const { popover } = await mount();

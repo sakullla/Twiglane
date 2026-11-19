@@ -7,7 +7,11 @@
 // manifest.json 默认写到 --out 的上一级（可用 --manifest 覆盖），逐张记录 bytes 与 sha256，
 // 因此提交后的证据可以由这个脚本原样重建与校验。
 //
-// 用法：node scripts/ui-preview/baseline-shots.mjs [--base http://127.0.0.1:1430] [--out docs/verification/ui-ux-markdown-2026-11-08/after] [--manifest <path>] [--failure-targets dark:1280x840,light:1280x840,dark:900x600,light:900x600] [--scale 2]
+// 用法：node scripts/ui-preview/baseline-shots.mjs [--base http://127.0.0.1:1430] [--out docs/verification/ui-ux-markdown-2026-11-08/after] [--manifest <path>] [--workflow <id> --task <id>] [--failure-targets dark:1280x840,light:1280x840,dark:900x600,light:900x600] [--scale 2]
+//
+// manifest 的 workflow/task 身份不在本脚本里维护：由调用方（scripts/run-ui-verification.mjs）用
+// --workflow/--task 传入，脚本自己不再保留「上一批的默认身份」。两个参数都不传时 manifest 写 null
+// 并标注来源，只当图片用（README 截图）；只传一个视为调用错误。
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -22,6 +26,22 @@ const readArg = (name, fallback) => {
   return index >= 0 && args[index + 1] ? args[index + 1] : fallback;
 };
 const projectsOnly = args.includes("--projects");
+/** 批次身份只能由调用方给：这里没有默认工作流，也不会替调用方猜。 */
+const workflowId = readArg("--workflow", "").trim();
+const taskId = readArg("--task", "").trim();
+const identity = workflowId || taskId
+  ? {
+      source: "cli",
+      note: "由调用方传入：身份只有一处来源（run-ui-verification.mjs），本脚本不维护默认工作流。",
+      workflow: workflowId,
+      task: taskId,
+    }
+  : {
+      source: "unspecified",
+      note: "未传 --workflow/--task：这份 manifest 只说明图片（README 截图用），不作为任何批次的交付证据。",
+      workflow: null,
+      task: null,
+    };
 const base = readArg("--base", "http://127.0.0.1:1430");
 const outDir = path.resolve(readArg("--out", "docs/verification/ui-ux-markdown-2026-11-08/after"));
 // 与已提交证据一致：图片在 after/，manifest 在验证目录根部，file 字段相对 manifest。
@@ -457,6 +477,10 @@ function runtimeExceptions(cdp, sessionId) {
 }
 
 async function main() {
+  // 身份只许成套给：只有一半的 workflow/task 说明调用方拼错了参数，不能拿它生成一份半新半空的 manifest。
+  if (identity.source === "cli" && (!identity.workflow || !identity.task)) {
+    throw new Error("--workflow 与 --task 必须同时提供（当前 " + JSON.stringify({ workflow: identity.workflow, task: identity.task }) + "）");
+  }
   fs.mkdirSync(outDir, { recursive: true });
   fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
   const port = await freePort();
@@ -478,9 +502,10 @@ async function main() {
   );
 
   const manifest = {
-    // 当前工作流标识：runner 会核对它，不能沿用上一批证据的 ID。
-    workflow: projectsOnly ? "2026-11-16-multi-repository-project-workspaces" : "2026-11-13-modern-ui-ux-redesign",
-    task: projectsOnly ? "T2" : "T6",
+    // 当前批次身份：来自调用方（--workflow/--task），这里不存默认值，也不沿用上一批证据的 ID。
+    workflow: identity.workflow,
+    task: identity.task,
+    identity,
     capturedAt: new Date().toISOString(),
     environment: {
       browser: "",
@@ -492,11 +517,11 @@ async function main() {
     page: {
       url: base,
       build: "npm run preview:ui（scripts/ui-preview/vite.config.mjs，mock API，127.0.0.1:1430）",
-      data: projectsOnly ? "?projects=1/missing：60 个项目成员、长名称、同名路径、收藏和外机/缺源快照" : "scripts/ui-preview/mock-api.ts + mock-files.ts + samples.ts（与 01 基线同一组数据）",
+      data: projectsOnly ? "?projects=1/missing：60 个项目成员、长名称、同名路径、收藏、外机/缺源快照与项目外仓库" : "scripts/ui-preview/mock-api.ts + mock-files.ts + samples.ts（与 01 基线同一组数据）",
       worker: "预览页的 Markdown 解析在工作线程里进行；失败态由 ?remote= / ?commit= / ?doc= / ?search= 参数进入",
     },
     groups: {
-      ...(projectsOnly ? { projects: "项目总览、项目管理、候选搜索预览、来源失效快照；各按两主题两尺寸采集" } : {}),
+      ...(projectsOnly ? { projects: "项目总览、项目管理、候选搜索预览、来源失效快照、项目外仓库；各按两主题两尺寸采集" } : {}),
       baseline: "start/changes/history/task/worktree/composer/merge/settings：与 01 基线同数据、同主题、同尺寸",
       markdown: "files-markdown/files-markdown-toc：Markdown 排版预览与目录工具行，单独成组，不参与优化前后对照",
       failure:
@@ -620,6 +645,35 @@ async function main() {
           await selectProjectMenu(1);
           await openManageProjects();
           await shot("project-source-missing", "projects", "来源失效仍保留最后快照，禁止旧名单覆盖，提供重新预览/刷新");
+          // 项目外仓库：选中的项目不含当前仓库。标题栏的「项目外」标签与仓库弹层顶部范围说明都在这一屏，
+          // 这是 R2 新增的可见状态，必须有实际画面而不只是场景 DOM 断言。
+          await cdp.send("Page.navigate", { url: base + "/?projects=1" }, sessionId);
+          await waitFor(
+            cdp,
+            sessionId,
+            'Boolean(document.querySelector(\'.welcome-recent button[title="C:/Users/dev/work/design-system"]\'))',
+            "项目外仓库入口",
+          );
+          await evaluate(cdp, sessionId, click('.welcome-recent button[title="C:/Users/dev/work/design-system"]'));
+          await waitFor(cdp, sessionId, "Boolean(document.querySelector('.file-list'))", "项目外仓库打开");
+          await selectProjectMenu(1);
+          await waitFor(
+            cdp,
+            sessionId,
+            "document.querySelector('.project-chip-tag')?.textContent.includes('项目外')",
+            "标题栏项目外标记",
+          );
+          await evaluate(cdp, sessionId, click('[aria-label^="当前仓库"]'));
+          await waitFor(
+            cdp,
+            sessionId,
+            "Boolean(document.querySelector('.popover [data-project-scope=\"outside\"]'))",
+            "仓库弹层里的范围说明",
+          );
+          await pause(300);
+          await shot("project-outside", "projects", "当前仓库不属于所选项目：标题栏「项目外」标签与仓库弹层顶部的范围说明、改看全部仓库入口");
+          await evaluate(cdp, sessionId, pressEscape);
+          await waitFor(cdp, sessionId, "!document.querySelector('.popover')", "仓库弹层收起");
           await cdp.send("Target.closeTarget", { targetId });
           continue;
         }

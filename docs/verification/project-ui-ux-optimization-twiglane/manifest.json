@@ -1,7 +1,13 @@
 {
-  "workflow": "2026-11-16-multi-repository-project-workspaces",
-  "task": "T2",
-  "capturedAt": "2026-11-19T17:07:05.083Z",
+  "workflow": "2026-11-20-project-ui-ux-optimization",
+  "task": "T1",
+  "identity": {
+    "source": "cli",
+    "note": "由调用方传入：身份只有一处来源（run-ui-verification.mjs），本脚本不维护默认工作流。",
+    "workflow": "2026-11-20-project-ui-ux-optimization",
+    "task": "T1"
+  },
+  "capturedAt": "2026-11-19T17:30:40.359Z",
   "environment": {
     "browser": "Chrome 158.0.8127.36（DevTools 协议驱动）",
     "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/158.0.0.0 Safari/537.36",
@@ -12,11 +18,11 @@
   "page": {
     "url": "http://127.0.0.1:1430",
     "build": "npm run preview:ui（scripts/ui-preview/vite.config.mjs，mock API，127.0.0.1:1430）",
-    "data": "?projects=1/missing：60 个项目成员、长名称、同名路径、收藏和外机/缺源快照",
+    "data": "?projects=1/missing：60 个项目成员、长名称、同名路径、收藏、外机/缺源快照与项目外仓库",
     "worker": "预览页的 Markdown 解析在工作线程里进行；失败态由 ?remote= / ?commit= / ?doc= / ?search= 参数进入"
   },
   "groups": {
-    "projects": "项目总览、项目管理、候选搜索预览、来源失效快照；各按两主题两尺寸采集",
+    "projects": "项目总览、项目管理、候选搜索预览、来源失效快照、项目外仓库；各按两主题两尺寸采集",
     "baseline": "start/changes/history/task/worktree/composer/merge/settings：与 01 基线同数据、同主题、同尺寸",
     "markdown": "files-markdown/files-markdown-toc：Markdown 排版预览与目录工具行，单独成组，不参与优化前后对照",
     "failure": "关键失败/未知状态：sync-unchecked/sync-stale/commit-error/commit-push-error/doc-error/doc-large/search-error/filter-error/find-error/task-error/history-cancel-recovered，逐张对应需求"
@@ -36,8 +42,8 @@
         "backdropOpacity": null
       },
       "horizontalOverflow": 0,
-      "bytes": 206837,
-      "sha256": "ca6b16c42efc9f6dab5e4bd0d11222d2bcc925b33d00ebf22fc472c892d71856"
+      "bytes": 206700,
+      "sha256": "3bd807819199a7ac6f129c515378855489803a3e0046cca640bea03b410cc84d"
     },
     {
       "file": "after/dark-1280x840-project-manager.png",
@@ -53,8 +59,8 @@
         "backdropOpacity": "1"
       },
       "horizontalOverflow": 0,
-      "bytes": 214451,
-      "sha256": "fe67684361f3140728d37bb6172728d28351b2105c38bad6a5d8c0ad02edc9ce"
+      "bytes": 214399,
+      "sha256": "434e23c48ea93c7bcb02ca4110fdb79bcfd98aef9632ae8b562244d31a9ae8b9"
     },
     {
       "file": "after/dark-1280x840-project-candidates.png",
@@ -70,8 +76,8 @@
         "backdropOpacity": "1"
       },
       "horizontalOverflow": 0,
-      "bytes": 211872,
-      "sha256": "4e24ede4beb0b002523d7cd09114679cfd72e3b9733955ece62658794aa60d4e"
+      "bytes": 211826,
+      "sha256": "864ba19b2e2c6e0e81064fe2c8619f68ae01cb28d23ab26a1a0975608868b77b"
     },
     {
       "file": "after/dark-1280x840-project-source-missing.png",
@@ -91,6 +97,23 @@
       "sha256": "4774336c5380d5ac7f1b1270d7cd2f56e1ed0e9adadc0da2c3a455e47ad12cb6"
     },
     {
+      "file": "after/dark-1280x840-project-outside.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "project-outside",
+      "group": "projects",
+      "state": "当前仓库不属于所选项目：标题栏「项目外」标签与仓库弹层顶部的范围说明、改看全部仓库入口",
+      "paint": {
+        "theme": "dark",
+        "surface": "#15161c",
+        "modalOpacity": null,
+        "backdropOpacity": null
+      },
+      "horizontalOverflow": 0,
+      "bytes": 212471,
+      "sha256": "7a09c43495fdb1eb8329a91746e15666fe30182d2e1f0478f9c1c1d445d823e1"
+    },
+    {
       "file": "after/dark-900x600-project-overview.png",
       "theme": "dark",
       "size": "900x600",
@@ -104,8 +127,8 @@
         "backdropOpacity": null
       },
       "horizontalOverflow": 0,
-      "bytes": 146967,
-      "sha256": "6adbc5ad7a59603981df16bff0eb6fbb4d09d83bbadac0455d46b5b700588839"
+      "bytes": 146830,
+      "sha256": "382ccdb5c9e72cec68ae3d93553b15d341b6395699677e787f710cdeaac96585"
     },
     {
       "file": "after/dark-900x600-project-manager.png",
@@ -121,8 +144,8 @@
         "backdropOpacity": "1"
       },
       "horizontalOverflow": 0,
-      "bytes": 120806,
-      "sha256": "233f547b919bd93888732d7d8714965355c1c8f0c261b086a9982308c0b38f7a"
+      "bytes": 120747,
+      "sha256": "36fddfb10aa793ee6d58f80c14fba7f6de7738abb3342a76a200acbb847c7eaf"
     },
     {
       "file": "after/dark-900x600-project-candidates.png",
@@ -138,8 +161,8 @@
         "backdropOpacity": "1"
       },
       "horizontalOverflow": 0,
-      "bytes": 125753,
-      "sha256": "7533ab52beb1306df0eb53ea6471b345fb17b87b8159ca0dc1119c85f7ff30ec"
+      "bytes": 125686,
+      "sha256": "8670237b6cf9ccc7c3e76e8836fc018d02dc2566494c2a880cccd8a4013246a8"
     },
     {
       "file": "after/dark-900x600-project-source-missing.png",
@@ -159,6 +182,23 @@
       "sha256": "125de841cd4b97c3ed8d4d9f3d788a669b73add46a207189e55426c4c6d8d477"
     },
     {
+      "file": "after/dark-900x600-project-outside.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "project-outside",
+      "group": "projects",
+      "state": "当前仓库不属于所选项目：标题栏「项目外」标签与仓库弹层顶部的范围说明、改看全部仓库入口",
+      "paint": {
+        "theme": "dark",
+        "surface": "#15161c",
+        "modalOpacity": null,
+        "backdropOpacity": null
+      },
+      "horizontalOverflow": 0,
+      "bytes": 144794,
+      "sha256": "2fc737099e4a5252df288bfd0632977adeb336656e8d03e90712781d3fa1161f"
+    },
+    {
       "file": "after/light-1280x840-project-overview.png",
       "theme": "light",
       "size": "1280x840",
@@ -172,8 +212,8 @@
         "backdropOpacity": null
       },
       "horizontalOverflow": 0,
-      "bytes": 199733,
-      "sha256": "8f7046a28dea5e5ed7b796d2aa88b47b35a6e2db234f8f25bfdc152f8c1465de"
+      "bytes": 199580,
+      "sha256": "bc64b264953012aaa11b90fafed9b2e350c074bd8f3d5b27984d9e8244c4ead2"
     },
     {
       "file": "after/light-1280x840-project-manager.png",
@@ -189,8 +229,8 @@
         "backdropOpacity": "1"
       },
       "horizontalOverflow": 0,
-      "bytes": 223080,
-      "sha256": "acda733c3fb4012a70cb55ce27f2dd583cc6a869c8ef00f88c61ad98929eb752"
+      "bytes": 223094,
+      "sha256": "5cfc54cc7d047fa866a8847361cedca0c4b6b05563e4dc0bb6818786e66b7ac3"
     },
     {
       "file": "after/light-1280x840-project-candidates.png",
@@ -206,8 +246,8 @@
         "backdropOpacity": "1"
       },
       "horizontalOverflow": 0,
-      "bytes": 220542,
-      "sha256": "7ac48e3e21945fa79e442b2f290f65ed00085620058a68a01249bc68c1a9a7da"
+      "bytes": 220552,
+      "sha256": "0fc74baab0daf22d68d1a335f3589c1f9214582b9573b1486b9b7b5a868f3686"
     },
     {
       "file": "after/light-1280x840-project-source-missing.png",
@@ -227,6 +267,23 @@
       "sha256": "23f0377dad7becd0728a652d7ba6880ff891b3f4ad5f59c51897e88b0e178260"
     },
     {
+      "file": "after/light-1280x840-project-outside.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "project-outside",
+      "group": "projects",
+      "state": "当前仓库不属于所选项目：标题栏「项目外」标签与仓库弹层顶部的范围说明、改看全部仓库入口",
+      "paint": {
+        "theme": "light",
+        "surface": "#ffffff",
+        "modalOpacity": null,
+        "backdropOpacity": null
+      },
+      "horizontalOverflow": 0,
+      "bytes": 204184,
+      "sha256": "7740d19770eae74885ee39b7962f95aa97ab0466c3e036a12c76bda3f952472c"
+    },
+    {
       "file": "after/light-900x600-project-overview.png",
       "theme": "light",
       "size": "900x600",
@@ -240,8 +297,8 @@
         "backdropOpacity": null
       },
       "horizontalOverflow": 0,
-      "bytes": 140461,
-      "sha256": "35d56a258b119a7b1873ec174706b7ebec4f5222e7fcef73162a09335236ccdf"
+      "bytes": 140430,
+      "sha256": "1ec09b499e236d68171708712419426823cf3e5fc6e4180c46994fe3901addf4"
     },
     {
       "file": "after/light-900x600-project-manager.png",
@@ -257,8 +314,8 @@
         "backdropOpacity": "1"
       },
       "horizontalOverflow": 0,
-      "bytes": 125567,
-      "sha256": "3953d9f7a0f95475adf2fef053b5737847b7dc666ad31171532aaecadd8fb9e9"
+      "bytes": 125581,
+      "sha256": "e9e0eb2f26a5f64a6b1e6d622091bb40cb028a7da9cdfc14d44c12702ca940bc"
     },
     {
       "file": "after/light-900x600-project-candidates.png",
@@ -274,8 +331,8 @@
         "backdropOpacity": "1"
       },
       "horizontalOverflow": 0,
-      "bytes": 129172,
-      "sha256": "1b165f2722dab187c1bbe7e5846040335eb304fd03f69cc1009159af7f0a4494"
+      "bytes": 129187,
+      "sha256": "77263bd4b61ca63a7135ea5a6dd992ffcf47946008e09a44e01cd0919fb8e574"
     },
     {
       "file": "after/light-900x600-project-source-missing.png",
@@ -293,6 +350,23 @@
       "horizontalOverflow": 0,
       "bytes": 111011,
       "sha256": "706283c994c1b44d593a177d4caa48f8ebdfc19217f82b5d19fda2f34f70ab7c"
+    },
+    {
+      "file": "after/light-900x600-project-outside.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "project-outside",
+      "group": "projects",
+      "state": "当前仓库不属于所选项目：标题栏「项目外」标签与仓库弹层顶部的范围说明、改看全部仓库入口",
+      "paint": {
+        "theme": "light",
+        "surface": "#ffffff",
+        "modalOpacity": null,
+        "backdropOpacity": null
+      },
+      "horizontalOverflow": 0,
+      "bytes": 138633,
+      "sha256": "9b0ae91449266a7183baf9075a195f23cb834b70dca146bcf551008bf4ca64b8"
     }
   ],
   "skipped": []

@@ -102,7 +102,8 @@
   }
 
   /**
-   * fixed 定位的包含块原点：视口时为 0；被带变换的祖先接管时是那个祖先的左上（以及到视口底的距离）。
+   * fixed 定位的包含块原点：视口时为 0；被接管 fixed 的祖先（变换、contain、content-visibility 等）
+   * 接管时是那个祖先的左上（以及到视口底的距离）。
    * 只从祖先取，不拿弹层自己的矩形反推：入场变换会让弹层矩形和它的相邻边一起偏移，
    * 「矩形 − 内联 top」减出来的原点就把动画位移算成了包含块偏移——首次摆放偏低，动画结束后
    * 再量一次才回到正确位置，看起来就是打开后向上回跳。位置因此必须先于任何自身变换确定。
@@ -119,7 +120,13 @@
     };
   }
 
-  /** 会接管 fixed 后代的最近祖先：带变换、滤镜、透视、contain 或 will-change 的那一层。 */
+  /**
+   * 会接管 fixed 后代的最近祖先：带变换、滤镜、透视、contain、will-change 或 content-visibility 的那一层。
+   * contain 只认 layout/paint/strict/content，container-type 不列入：实测 container-type（inline-size/size）
+   * 不会成为 fixed 后代的包含块，把它算进来反而会扣掉不该扣的偏移。
+   * content-visibility 的 auto/hidden 会带上 layout 与 paint 包含，同样接管 fixed 后代；
+   * 枚举漏掉它时弹层会按视口原点摆放，而浏览器按那个祖先定位，整块偏移且没有任何报错。
+   */
   function fixedContainingBlock(from: HTMLElement | null): HTMLElement | null {
     for (let node = from?.parentElement ?? null; node && node !== document.body; node = node.parentElement) {
       const style = getComputedStyle(node);
@@ -127,9 +134,15 @@
         moved(style.transform) || moved(style.filter) || moved(style.backdropFilter) || moved(style.perspective)
         || /(^|\s)(paint|layout|strict|content)(\s|$)/.test(style.contain ?? "")
         || /transform|filter|perspective|backdrop-filter/.test(style.willChange ?? "")
+        || skippedContent(style.contentVisibility)
       ) return node;
     }
     return null;
+  }
+
+  /** content-visibility 只有 visible（默认）不创建包含块；auto/hidden 都带 layout 与 paint 包含。 */
+  function skippedContent(value: string | undefined): boolean {
+    return value != null && value !== "" && value !== "visible";
   }
 
   /** 计算值可能是 none 或空（未实现该属性）：只有真正的非空非 none 才创建包含块。 */

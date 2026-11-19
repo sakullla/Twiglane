@@ -205,6 +205,9 @@
   const projectOutside = $derived(selectedProject !== null && opened !== null && !currentProjectMember);
   /** 项目标签上的可见状态字：项目外、名单待处理都要有文字，不能只留提示点与悬浮说明（R2）。 */
   const projectScopeTag = $derived(projectProblem ? "名单待处理" : projectOutside ? "项目外" : "");
+
+  /** 标签配色与文字同序判定：名单问题优先。两种异常同时成立时，配色不能反过来指向「项目外」。 */
+  const projectScopeTone = $derived(projectProblem ? "broken" : projectOutside ? "outside" : undefined);
   /**
    * 仓库弹层顶部的范围说明：当前仓库不属于所选项目、或名单读不到时，说清实际关系并给出下一步。
    * 只描述已有事实，不因为「看起来该属于」去改写范围或换个仓库顶替。
@@ -4707,7 +4710,7 @@
   {#snippet projectChipContent()}
     <Icon name="layers" size={14} />
     <span class="select-menu-text" class:empty={!selectedProject}>{selectedProject?.manifest.name ?? "全部仓库"}</span>
-    {#if projectScopeTag}<span class="project-chip-tag" data-project-scope-tag={projectOutside ? "outside" : "broken"}>{projectScopeTag}</span>{/if}
+    {#if projectScopeTag}<span class="project-chip-tag" data-project-scope-tag={projectScopeTone}>{projectScopeTag}</span>{/if}
   {/snippet}
   {#snippet projectSwitcherNote()}
     <div class="project-switcher-note">

@@ -4405,6 +4405,36 @@ it.each([0, 650])("返修：新草稿等待 %d 毫秒后忘记当前仓库并从
   expect(saved.get(repoPath)).toBe("A-new-preserve");
 });
 
+it("返修：名单待处理与项目外同时成立时，标题栏标签的配色按同一顺序判定（名单问题优先）", async () => {
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  const hostId = "11111111-1111-4111-8111-111111111111";
+  mocks.repoHeads.mockResolvedValue([]);
+  // 项目名单读不到（error），当前仓库又不在留存名单里：两种异常同时成立。
+  // 文字取「名单待处理」，配色也必须指向 broken；按 projectOutside 决定就会给出项目外的蓝色。
+  mocks.workspaceList.mockResolvedValue({ hostId, projects: [{ manifest: {
+    schemaVersion: 1, workspaceId: projectId, name: "项目 P", revision: 1,
+    repositories: [{ id: "repo-0", name: "other", locations: [{ hostId, path: "C:/work/other" }] }],
+  }, sourcePath: null, digest: null, error: "项目清单无法读取：源文件已移动", favorites: [], bindings: {} }] });
+  render(App); await openRepo();
+  await pickMenu("业务项目", projectId);
+  const tag = await waitFor(() => {
+    const found = document.querySelector<HTMLElement>(".project-chip-tag");
+    if (!found) throw new Error("标题栏没有项目标签");
+    return found;
+  });
+  expect(tag.textContent).toBe("名单待处理");
+  expect(tag.dataset.projectScopeTag).toBe("broken");
+  // 仓库弹层顶部的说明与标签同一判定：说明名单读不到，而不是「当前仓库不在项目里」。
+  await fireEvent.click(screen.getByRole("button", { name: /当前仓库/ }));
+  const hint = await waitFor(() => {
+    const found = document.querySelector<HTMLElement>(".popover [data-project-scope]");
+    if (!found) throw new Error("仓库弹层没有范围说明");
+    return found;
+  });
+  expect(hint.dataset.projectScope).toBe("broken");
+  expect(hint.textContent).toContain("项目名单待处理");
+});
+
 it("返修：忘记前保存失败会保留当前仓库和未保存草稿，重试成功才关闭", async () => {
   mocks.saveDraft.mockRejectedValue({ code: "state_write", message: "无法保存草稿，请重试" });
   mocks.forgetRecent.mockResolvedValue([]);

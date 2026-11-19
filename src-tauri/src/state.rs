@@ -145,6 +145,23 @@ impl AppStore {
         self.lock().data.clone()
     }
 
+    /// Copy only this host's registered paths and IDs before discovery performs disk I/O.
+    pub(crate) fn workspace_locations(&self, host: &str) -> Vec<(String, String)> {
+        let state = self.lock();
+        let mut locations = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for project in &state.data.workspaces {
+            for repo in &project.manifest.repositories {
+                for location in &repo.locations {
+                    if location.host_id == host && seen.insert(&location.path) {
+                        locations.push((location.path.clone(), repo.id.clone()));
+                    }
+                }
+            }
+        }
+        locations
+    }
+
     pub fn set_theme(&self, theme: Theme) -> Result<(), AppError> {
         self.update(|data| {
             data.theme = theme;

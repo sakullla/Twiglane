@@ -8,6 +8,7 @@
 
 <script lang="ts">
   import { tick } from "svelte";
+  import { SvelteSet } from "svelte/reactivity";
   import { api, pickDirectories, pickDirectory, pickFile, saveWorkspaceFile } from "../api";
   import { normalizeError } from "../errors";
   import type { RepoHead } from "../types";
@@ -89,7 +90,9 @@
   let notice = $state<string | null>(null);
   let preview = $state<WorkspacePreview | null>(null);
   let adopt = $state(false);
-  let candidates = $state<WorkspaceCandidate[]>([]);
+  const CANDIDATES_PER_PAGE = 100;
+  let candidatePage = $state(0);
+  let candidates = $state.raw<WorkspaceCandidate[]>([]);
   let candidateQuery = $state("");
   const matchingCandidates = $derived.by(() => {
     const tokens = candidateQuery.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
@@ -98,7 +101,13 @@
       tokens.every((token) => [candidate.name, candidate.path].some((text) => text.toLocaleLowerCase().includes(token))),
     );
   });
-  let chosen = $state<Set<string>>(new Set());
+  $effect(() => {
+    void matchingCandidates;
+    candidatePage = 0;
+  });
+  const pageCount = $derived(Math.ceil(matchingCandidates.length / CANDIDATES_PER_PAGE));
+  const pageCandidates = $derived(matchingCandidates.slice(candidatePage * CANDIDATES_PER_PAGE, (candidatePage + 1) * CANDIDATES_PER_PAGE));
+  const chosen = new SvelteSet<string>();
   let repairId = $state<string | null>(null);
   let cancelRequested = $state(false);
   let creating = $state(false);
@@ -267,6 +276,7 @@
     if (id === viewId) return;
     viewId = id;
     candidates = [];
+    chosen.clear();
     query = "";
     memberFilter = "all";
     renaming = false;
@@ -316,6 +326,7 @@
       accept(next);
       confirmDelete = false;
       candidates = [];
+      chosen.clear();
       query = "";
       renaming = false;
       memberFilter = "all";
@@ -380,7 +391,7 @@
       cancelRequested = false;
       if (discover) {
         const root = await pickDirectory("选择发现根目录（只扫描此目录，不跟随目录链接）");
-        if (!root) return;
+        if (!root || cancelRequested) return;
         const result = await api.workspaceDiscover(root, nextId());
         candidates = result.candidates;
         notice = result.cancelled
@@ -395,7 +406,8 @@
         candidates = await api.workspaceCandidates(valid, nextId());
       }
       candidateQuery = "";
-      chosen = new Set(candidates.filter((candidate) => !candidate.error).map((candidate) => candidate.path));
+      chosen.clear();
+      for (const candidate of candidates) if (!candidate.error) chosen.add(candidate.path);
     });
   }
 
@@ -425,7 +437,7 @@
         await save(addCandidates(current.manifest, picked, data.hostId));
       }
       candidates = [];
-      chosen = new Set();
+      chosen.clear();
       repairId = null;
       notice = "项目名单已保存，源码与 Git 内容未移动。";
     });
@@ -456,20 +468,16 @@
   }
 
   function selectMatching(enabled: boolean) {
-    const next = new Set(chosen);
     for (const candidate of matchingCandidates) {
       if (candidate.error) continue;
-      if (enabled) next.add(candidate.path);
-      else next.delete(candidate.path);
+      if (enabled) chosen.add(candidate.path);
+      else chosen.delete(candidate.path);
     }
-    chosen = next;
   }
 
   function toggle(path: string) {
-    const next = new Set(chosen);
-    if (next.has(path)) next.delete(path);
-    else next.add(path);
-    chosen = next;
+    if (chosen.has(path)) chosen.delete(path);
+    else chosen.add(path);
   }
 
   /** 项目行右键：与详情页顶部同一组动作。 */
@@ -802,7 +810,7 @@
             <section class="pm-panel" aria-label="候选仓库">
               <header class="pm-panel-head">
                 <h4>{repairId ? "选择一个目录替换此仓库的本机位置" : "选择要纳入的仓库"}</h4>
-                <small role="status">显示 {matchingCandidates.length} / {candidates.length} · 已选 {chosen.size}</small>
+                <small role="status">匹配 {matchingCandidates.length} / {candidates.length} · 已选 {chosen.size}</small>
               </header>
               <div class="pm-inline">
                 <div class="field sm pm-search">
@@ -832,8 +840,9 @@
                   >清除当前结果的选择</button>
                 {/if}
               </div>
+              {#key candidatePage}
               <div class="preview-members candidate-results">
-                {#each matchingCandidates as candidate, index (`${candidate.path}:${index}`)}
+                {#each pageCandidates as candidate, index (`${candidate.path}:${index}`)}
                   <label class="candidate" class:disabled={Boolean(candidate.error)}>
                     <input
                       class="checkbox"
@@ -843,8 +852,10 @@
                       disabled={Boolean(busy) || Boolean(candidate.error)}
                       title={busyReason ?? candidate.error ?? undefined}
                       onchange={() => {
-                        if (repairId) chosen = new Set([candidate.path]);
-                        else toggle(candidate.path);
+                        if (repairId) {
+                          chosen.clear();
+                          chosen.add(candidate.path);
+                        } else toggle(candidate.path);
                       }}
                     />
                     <span class="candidate-text">
@@ -857,8 +868,16 @@
                   <p class="project-note">没有匹配的候选，换个名称或路径；筛选外的选择仍然保留。</p>
                 {/each}
               </div>
+              {/key}
+              {#if pageCount > 1}
+                <nav class="pm-actions" aria-label="候选仓库分页">
+                  <button class="btn btn-ghost btn-sm" disabled={candidatePage === 0} title={candidatePage === 0 ? "已是第一页" : "查看上一页候选"} onclick={() => candidatePage--}>上一页</button>
+                  <span>{candidatePage + 1} / {pageCount}</span>
+                  <button class="btn btn-ghost btn-sm" disabled={candidatePage + 1 >= pageCount} title={candidatePage + 1 >= pageCount ? "已是最后一页" : "查看下一页候选"} onclick={() => candidatePage++}>下一页</button>
+                </nav>
+              {/if}
               <div class="pm-actions">
-                <button class="btn btn-ghost" disabled={Boolean(busy)} title={busyReason} onclick={() => { candidates = []; repairId = null; }}>取消</button>
+                <button class="btn btn-ghost" disabled={Boolean(busy)} title={busyReason} onclick={() => { candidates = []; chosen.clear(); repairId = null; }}>取消</button>
                 <button
                   class="btn btn-primary"
                   disabled={Boolean(busy) || !chosen.size}

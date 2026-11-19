@@ -59,16 +59,28 @@ export function projectRepos(project: Project | null, hostId: string, recent: Re
 }
 export function addCandidates(manifest: WorkspaceManifest, candidates: WorkspaceCandidate[], hostId: string): WorkspaceManifest {
   const repositories = manifest.repositories.map((repo) => ({ ...repo, locations: repo.locations.map((l) => ({ ...l })) }));
+  const byId = new Map(repositories.map((repo) => [repo.id, repo]));
+  const paths = new Set<string>();
+  for (const repo of repositories) {
+    for (const location of repo.locations) {
+      if (location.hostId === hostId) paths.add(checkoutKey(location.path));
+    }
+  }
   const commonIds = new Map<string, string>();
   for (const candidate of candidates) {
     if (candidate.error) continue;
-    if (repositories.some((repo) => repo.locations.some((l) => l.hostId === hostId && checkoutKey(l.path) === checkoutKey(candidate.path)))) continue;
+    const key = checkoutKey(candidate.path);
+    if (paths.has(key)) continue;
+    paths.add(key);
     const id = candidate.repositoryId ?? (candidate.commonDirectory ? commonIds.get(candidate.commonDirectory) : null) ?? crypto.randomUUID();
     if (candidate.commonDirectory) commonIds.set(candidate.commonDirectory, id);
-    const repo = repositories.find((r) => r.id === id);
-    const location = { hostId, path: candidate.path };
-    if (repo) repo.locations.push(location);
-    else repositories.push({ id, name: candidate.name, locations: [location] });
+    let repo = byId.get(id);
+    if (!repo) {
+      repo = { id, name: candidate.name, locations: [] };
+      repositories.push(repo);
+      byId.set(id, repo);
+    }
+    repo.locations.push({ hostId, path: candidate.path });
   }
   return { ...manifest, repositories };
 }

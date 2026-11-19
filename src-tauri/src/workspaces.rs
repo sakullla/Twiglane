@@ -3,7 +3,8 @@ use crate::error::AppError;
 use crate::state::{AppStore, Persisted};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{atomic::Ordering, Arc};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -797,87 +798,125 @@ pub async fn candidates(
     backend: &crate::git::ops::Backend,
     paths: Vec<String>,
     request_id: u64,
+    discovery: Option<Arc<Discovery>>,
 ) -> Result<Vec<Candidate>, AppError> {
-    use crate::git::{
-        command::toplevel_command,
-        ops::{canonical_existing, repo_key, require_git, run_git, validate_input_path},
-        schedule::JobKind,
+    let cancelled = || {
+        discovery
+            .as_ref()
+            .is_some_and(|scan| scan.0.load(Ordering::Relaxed))
     };
-    let git = require_git(backend).await?;
-    let state = backend.store.snapshot();
-    let host = host_id_for(&backend.store).map_err(failure)?;
-    let mut seen = HashSet::new();
-    let mut result = Vec::new();
-    for (offset, path) in paths.into_iter().enumerate() {
-        let mut candidate = Candidate {
-            name: Path::new(&path)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned(),
-            path: path.clone(),
-            common_directory: None,
-            repository_id: None,
-            error: None,
-        };
-        let found = async {
-            let root = canonical_existing(&validate_input_path(&path)?)?;
-            let (program, args) = toplevel_command(&git.path, &root);
-            let output = run_git(
-                backend,
-                &repo_key(&root),
-                JobKind::Read,
-                request_id.wrapping_add(offset as u64 * 4),
-                program,
-                args,
-                None,
-            )
-            .await?;
-            if output.output.exit_code != 0 {
-                return Err(failure("不是可读取的 Git 仓库"));
-            }
-            let top = std::str::from_utf8(&output.output.stdout)
-                .map_err(|_| failure("仓库路径编码无法读取"))?
-                .trim_end_matches(['\n', '\r']);
-            identity(top).ok_or_else(|| failure("无法确认 Git common directory"))
-        }
-        .await;
-        match found {
-            Ok((root, common)) => {
-                candidate.name = Path::new(&root)
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                candidate.path = root.clone();
-                candidate.common_directory = Some(common.clone());
-                candidate.repository_id = state
-                    .workspaces
-                    .iter()
-                    .flat_map(|p| &p.manifest.repositories)
-                    .find(|repo| {
-                        repo.locations.iter().any(|l| {
-                            l.host_id == host
-                                && identity(&l.path).is_some_and(|(_, found)| found == common)
-                        })
-                    })
-                    .map(|repo| repo.id.clone());
-                if !seen.insert(root) {
-                    candidate.error = Some("重复工作目录，未再次添加".into());
+    if paths.is_empty() || cancelled() {
+        return Ok(Vec::new());
+    }
+    backend
+        .scheduler
+        .read_batch(request_id, async {
+            let git = crate::git::ops::require_git(backend).await?;
+            let host = host_id_for(&backend.store).map_err(failure)?;
+            let locations = backend.store.workspace_locations(&host);
+            let scan = discovery.clone();
+            let ids = tokio::task::spawn_blocking(move || {
+                let mut ids = HashMap::new();
+                for (path, id) in locations {
+                    if scan
+                        .as_ref()
+                        .is_some_and(|scan| scan.0.load(Ordering::Relaxed))
+                    {
+                        break;
+                    }
+                    if let Some((_, common)) = identity(&path) {
+                        ids.entry(common).or_insert(id);
+                    }
+                }
+                ids
+            })
+            .await
+            .map_err(|_| failure("读取项目仓库身份时中断"))?;
+
+            let mut paths = paths.into_iter();
+            let mut seen = HashSet::new();
+            let mut result = Vec::new();
+            while !cancelled() {
+                let Some(path) = paths.next() else { break };
+                let first = inspect_candidate(backend, &git.path, path, &ids);
+                let pair = if let Some(path) = paths.next() {
+                    let (first, second) =
+                        tokio::join!(first, inspect_candidate(backend, &git.path, path, &ids));
+                    [Some(first), Some(second)]
+                } else {
+                    [Some(first.await), None]
+                };
+                for mut candidate in pair.into_iter().flatten() {
+                    if candidate.error.is_none() && !seen.insert(candidate.path.clone()) {
+                        candidate.error = Some("重复工作目录，未再次添加".into());
+                    }
+                    result.push(candidate);
                 }
             }
-            Err(error) => candidate.error = Some(error.message),
-        }
-        result.push(candidate);
-    }
-    Ok(result)
+            Ok(result)
+        })
+        .await
 }
+
+async fn inspect_candidate(
+    backend: &crate::git::ops::Backend,
+    git: &Path,
+    path: String,
+    ids: &HashMap<String, String>,
+) -> Candidate {
+    use crate::git::{
+        command::toplevel_command,
+        ops::{canonical_existing, repo_key, run_git, validate_input_path},
+        schedule::{internal_request_id, JobKind},
+    };
+    let found = async {
+        let root = canonical_existing(&validate_input_path(&path)?)?;
+        let (program, args) = toplevel_command(git, &root);
+        let output = run_git(
+            backend,
+            &repo_key(&root),
+            JobKind::Read,
+            internal_request_id(),
+            program,
+            args,
+            None,
+        )
+        .await?;
+        if output.output.exit_code != 0 {
+            return Err(failure("不是可读取的 Git 仓库"));
+        }
+        let top = std::str::from_utf8(&output.output.stdout)
+            .map_err(|_| failure("仓库路径编码无法读取"))?
+            .trim_end_matches(['\n', '\r']);
+        identity(top).ok_or_else(|| failure("无法确认 Git common directory"))
+    }
+    .await;
+    let (path, common_directory, repository_id, error) = match found {
+        Ok((root, common)) => {
+            let id = ids.get(&common).cloned();
+            (root, Some(common), id, None)
+        }
+        Err(error) => (path, None, None, Some(error.message)),
+    };
+    Candidate {
+        name: Path::new(&path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        path,
+        common_directory,
+        repository_id,
+        error,
+    }
+}
+
 /// Bounded to the explicit root; never follow directory symlinks or enter .git metadata.
 pub fn discover_paths(
     root: &str,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<(Vec<String>, Vec<Candidate>, bool), AppError> {
-    use std::sync::atomic::Ordering;
+    const DIRECTORY_LIMIT: usize = 50_000;
     let root = dunce::canonicalize(crate::git::ops::validate_input_path(root)?)
         .map_err(|e| failure(e.to_string()))?;
     let mut queue = std::collections::VecDeque::from([root]);
@@ -890,16 +929,16 @@ pub fn discover_paths(
             return Ok((paths, issues, true));
         }
         visited += 1;
-        if visited > 50_000 {
-            partial = true;
-            break;
-        }
-        if path.join(".git").exists() {
-            paths.push(text(&path).map_err(failure)?);
-        }
+        let mut has_marker = false;
+        let mut exact_marker = false;
+        let mut case_variants = Vec::new();
+        let mut saw_case_variant = false;
         let entries = match fs::read_dir(&path) {
             Ok(entries) => entries,
             Err(error) => {
+                if path.join(".git").exists() {
+                    paths.push(text(&path).map_err(failure)?);
+                }
                 partial = true;
                 issues.push(Candidate {
                     path: text(&path).map_err(failure)?,
@@ -916,17 +955,34 @@ pub fn discover_paths(
             }
         };
         for entry in entries {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok((paths, issues, true));
+            }
             let Ok(entry) = entry else {
                 partial = true;
+                has_marker |= path.join(".git").exists();
                 continue;
             };
-            if entry.file_name() == ".git" {
+            let name = entry.file_name();
+            // Confirm only potential markers, including alternate casing on
+            // case-insensitive volumes. Never descend into Git metadata.
+            if name == ".git" {
+                exact_marker = path.join(".git").exists();
+                has_marker |= exact_marker;
+                continue;
+            }
+            if name.eq_ignore_ascii_case(".git") && path.join(".git").exists() {
+                saw_case_variant = true;
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    case_variants.push(entry.path());
+                }
                 continue;
             }
             match entry.file_type() {
                 Ok(kind) if kind.is_dir() => {
-                    if visited + queue.len() >= 50_000 {
+                    if visited + queue.len() >= DIRECTORY_LIMIT {
                         partial = true;
+                        has_marker |= path.join(".git").exists();
                         break;
                     }
                     queue.push_back(entry.path());
@@ -934,6 +990,22 @@ pub fn discover_paths(
                 Err(_) => partial = true,
                 _ => {}
             }
+        }
+        // Both spellings can coexist on a case-sensitive volume. In that case
+        // only the exact .git entry is metadata and the others are searchable.
+        if exact_marker {
+            for variant in case_variants {
+                if visited + queue.len() == DIRECTORY_LIMIT {
+                    partial = true;
+                    break;
+                }
+                queue.push_back(variant);
+            }
+        } else if saw_case_variant {
+            has_marker = true;
+        }
+        if has_marker {
+            paths.push(text(&path).map_err(failure)?);
         }
     }
     Ok((paths, issues, partial))
@@ -1194,6 +1266,30 @@ mod tests {
         );
         output.stdout
     }
+    #[test]
+    fn discovery_ignores_metadata_with_the_volumes_actual_casing() {
+        let fixture = TempDir::new("discovery-case");
+        let upper = fixture.path().join(".GIT");
+        fs::create_dir_all(upper.join("inner/.git")).unwrap();
+        let marker = fixture.path().join(".git");
+        let insensitive = marker.exists();
+        if !insensitive {
+            fs::create_dir_all(marker.join("hidden/.git")).unwrap();
+        }
+        let (mut found, issues, partial) = discover_paths(
+            fixture.path().to_str().unwrap(),
+            &std::sync::atomic::AtomicBool::new(false),
+        ).unwrap();
+        assert!(issues.is_empty() && !partial);
+        let mut expected = vec![text(fixture.path()).unwrap()];
+        if !insensitive {
+            expected.push(text(&upper.join("inner")).unwrap());
+        }
+        found.sort();
+        expected.sort();
+        assert_eq!(found, expected);
+    }
+
     #[tokio::test]
     async fn thirty_five_real_repositories_keep_members_and_isolate_selected_git_writes() {
         use crate::git::{changes, ops};
@@ -1215,6 +1311,7 @@ mod tests {
             &backend,
             vec![text(&a.join("src")).unwrap(), paths[0].clone()],
             100,
+            None,
         )
         .await
         .unwrap();
@@ -1244,6 +1341,7 @@ mod tests {
                 text(&a.join("modules/child")).unwrap(),
             ],
             200,
+            None,
         )
         .await
         .unwrap();
@@ -1268,7 +1366,14 @@ mod tests {
                 }],
             })
             .collect();
+        let main_id = definition.repositories[0].id.clone();
         update(&backend.store, definition, 1).unwrap();
+        let checked = candidates(&backend, discovered, 250, None).await.unwrap();
+        assert_eq!(checked.len(), 37);
+        assert!(checked.iter().all(|candidate| candidate.error.is_none()));
+        assert_eq!(checked.iter().filter(|candidate| candidate.repository_id.is_some()).count(), 36);
+        let linked_candidate = checked.iter().find(|candidate| Path::new(&candidate.path) == linked).unwrap();
+        assert_eq!(linked_candidate.repository_id.as_deref(), Some(main_id.as_str()));
         for path in &paths {
             backend
                 .store
@@ -1344,7 +1449,7 @@ mod tests {
             git(root, &["commit", "-m", "base"]);
             paths.push(text(root).unwrap());
         }
-        let found = candidates(&backend, paths.clone(), 800).await.unwrap();
+        let found = candidates(&backend, paths.clone(), 800, None).await.unwrap();
         assert!(found.iter().all(|candidate| candidate.error.is_none()));
         assert_ne!(found[0].path, found[1].path);
         assert_ne!(found[0].common_directory, found[1].common_directory);

@@ -118,6 +118,28 @@ describe("项目管理实际交互", () => {
     expect(mocks.attach).not.toHaveBeenCalled();
     expect(mocks.update).not.toHaveBeenCalled();
   });
+  it("两千个发现结果只挂载当前页，搜索覆盖末页，批量纳入保留跨页选择", async () => {
+    const { data } = mount(project(0));
+    const found = Array.from({ length: 2000 }, (_, index) => ({
+      name: `service-${index}`, path: `/scale/${index}`, commonDirectory: `/git/${index}`, repositoryId: null, error: null,
+    }));
+    mocks.discover.mockResolvedValue({ candidates: found, partial: false, cancelled: false });
+    mocks.update.mockResolvedValue(data);
+    await fireEvent.click(screen.getByRole("button", { name: "从目录发现" }));
+    const region = within(await screen.findByRole("region", { name: "候选仓库" }));
+    expect(region.getAllByRole("checkbox")).toHaveLength(100);
+    await fireEvent.click(region.getByRole("button", { name: "下一页" }));
+    await fireEvent.click(region.getByRole("checkbox", { name: "service-100 /scale/100" }));
+    const search = region.getByRole("textbox", { name: "搜索候选仓库" });
+    await fireEvent.input(search, { target: { value: "/scale/1999" } });
+    expect(region.getAllByRole("checkbox")).toHaveLength(1);
+    await fireEvent.click(region.getByRole("button", { name: "确认纳入 1999 个位置" }));
+    await waitFor(() => expect(mocks.update).toHaveBeenCalled());
+    const repos = mocks.update.mock.calls[0][0].repositories as WorkspaceManifest["repositories"];
+    expect(repos).toHaveLength(1999);
+    expect(repos.some((repo) => repo.name === "service-100")).toBe(false);
+    expect(repos.at(-1)?.name).toBe("service-1999");
+  });
   it("发现结果先选择再纳入，失败候选不写入；保留现有名单", async () => {
     const { p, data } = mount(project(1)); mocks.update.mockResolvedValue(data);
     mocks.discover.mockResolvedValue({ partial: true, cancelled: false, candidates: [

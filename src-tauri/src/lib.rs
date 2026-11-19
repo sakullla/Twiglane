@@ -3127,7 +3127,7 @@ async fn workspace_favorite(state: State<'_, Arc<Backend>>, id: String, reposito
 }
 #[tauri::command(rename_all = "camelCase")]
 async fn workspace_candidates(state: State<'_, Arc<Backend>>, paths: Vec<String>, request_id: u64) -> Result<Vec<workspaces::Candidate>, AppError> {
-    workspaces::candidates(state.inner(), paths, request_id).await
+    workspaces::candidates(state.inner(), paths, request_id, None).await
 }
 #[tauri::command(rename_all = "camelCase")]
 async fn workspace_discover(state: State<'_, Arc<Backend>>, discovery: State<'_, Arc<workspaces::Discovery>>, root: String, request_id: u64) -> Result<workspaces::DiscoveryResult, AppError> {
@@ -3142,14 +3142,8 @@ async fn workspace_discover(state: State<'_, Arc<Backend>>, discovery: State<'_,
     discovery.0.store(false, Ordering::SeqCst);
     let scan = Arc::clone(&discovery);
     let (paths, issues, partial) = workspace_io(move || workspaces::discover_paths(&root, &scan.0)).await?;
-    let cancelled = discovery.0.load(Ordering::SeqCst);
     let mut candidates = issues;
-    if !cancelled {
-        for path in paths {
-            if discovery.0.load(Ordering::SeqCst) { break; }
-            candidates.extend(workspaces::candidates(state.inner(), vec![path], request_id.wrapping_add(candidates.len() as u64 * 4)).await?);
-        }
-    }
+    candidates.extend(workspaces::candidates(state.inner(), paths, request_id, Some(discovery.clone())).await?);
     Ok(workspaces::DiscoveryResult { candidates, partial, cancelled: discovery.0.load(Ordering::SeqCst) })
 }
 #[tauri::command]

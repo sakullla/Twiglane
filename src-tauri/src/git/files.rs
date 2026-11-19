@@ -109,6 +109,7 @@ fn read_directory(
     if !directory.starts_with(&root) || !directory.is_dir() {
         return Err(AppError::new("file_path", "目录必须位于当前仓库内。"));
     }
+    let prefix = display_path(&relative);
     let mut entries = Vec::new();
     let mut errors = Vec::new();
     for item in fs::read_dir(&directory).map_err(|error| {
@@ -136,7 +137,7 @@ fn read_directory(
         let path = if relative.as_os_str().is_empty() {
             name.clone()
         } else {
-            format!("{}/{}", display_path(&relative), name)
+            format!("{prefix}/{name}")
         };
         let mut entry = RepositoryDirectoryEntry {
             name,
@@ -147,7 +148,7 @@ fn read_directory(
             version: None,
             error: None,
         };
-        match item.path().symlink_metadata() {
+        match item.metadata() {
             Ok(meta) if meta.file_type().is_symlink() => {
                 entry.kind = RepositoryEntryKind::Symlink;
             }
@@ -260,12 +261,10 @@ fn natural_cmp(left: &str, right: &str) -> std::cmp::Ordering {
 fn ignore_input(entries: &[RepositoryDirectoryEntry]) -> Vec<u8> {
     let mut input = Vec::new();
     for entry in entries {
-        let mut path = entry.path.clone();
+        input.extend_from_slice(entry.path.as_bytes());
         if is_directory_entry(entry.kind) {
-            // 目录必须带尾部路径分隔符，Git 才会用 `dir/` 这类只匹配目录的模式判定。
-            path.push('/');
+            input.push(b'/');
         }
-        input.extend_from_slice(path.as_bytes());
         input.push(0);
     }
     input
@@ -414,15 +413,15 @@ fn tracked_index_result(output: &ProcessOutput) -> Result<TrackedIndex, AppError
 ///
 /// 返回的是"路径本身匹配了某条排除规则"的子项。`check-ignore` 默认也会跳过索引里已有的路径，
 /// 但调用方仍要按索引复核一次（见 `TrackedIndex`）：忽略规则永远不该让已跟踪路径消失。
-async fn ignore_rule_matches(
+async fn ignore_rule_output(
     backend: &Backend,
     root: &Path,
+    git: &Path,
     key: String,
     generation: u64,
     entries: &[RepositoryDirectoryEntry],
-) -> Result<HashSet<Vec<u8>>, AppError> {
-    let git = require_git(backend).await?;
-    let (program, args) = ignore_check_command(&git.path, root);
+) -> Result<Vec<u8>, AppError> {
+    let (program, args) = ignore_check_command(git, root);
     let output = match backend
         .scheduler
         .execute(GitJob {
@@ -461,14 +460,57 @@ async fn ignore_rule_matches(
             "无法判断目录忽略状态。",
         ));
     }
-    Ok(output
-        .output
-        .stdout
-        .split(|byte| *byte == 0)
-        .map(|path| path.strip_suffix(b"/".as_slice()).unwrap_or(path))
-        .filter(|path| !path.is_empty())
-        .map(<[u8]>::to_vec)
-        .collect())
+    Ok(output.output.stdout)
+}
+
+/// A batch's NUL-delimited input bounds its possible output. Only retain matches
+/// from the current batch, even if every file in a very wide directory is ignored.
+async fn mark_ignored(
+    backend: &Backend,
+    root: &Path,
+    key: &str,
+    generation: u64,
+    mut entries: &mut [RepositoryDirectoryEntry],
+) -> Result<(), AppError> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let git = require_git(backend).await?;
+    let budget = backend.runner.output_limit.min(512 * 1024);
+    let mut tracked = None;
+    while !entries.is_empty() {
+        let mut bytes = 0;
+        let mut count = 0;
+        for entry in entries.iter() {
+            let len = entry.path.len() + 1 + usize::from(is_directory_entry(entry.kind));
+            if count > 0 && bytes + len > budget {
+                break;
+            }
+            bytes += len;
+            count += 1;
+        }
+        let (batch, rest) = entries.split_at_mut(count);
+        entries = rest;
+        let output =
+            ignore_rule_output(backend, root, &git.path, key.to_owned(), generation, batch).await?;
+        if output.is_empty() {
+            continue;
+        }
+        let matches: HashSet<&[u8]> = output
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| path.strip_suffix(b"/").unwrap_or(path))
+            .collect();
+        let index = match &tracked {
+            Some(index) => index,
+            None => tracked.insert(tracked_index(backend, root, key, generation).await?),
+        };
+        for entry in batch {
+            entry.ignored =
+                matches.contains(entry.path.as_bytes()) && !index.is_tracked(&entry.path);
+        }
+    }
+    Ok(())
 }
 
 pub async fn repository_directory(
@@ -484,34 +526,27 @@ pub async fn repository_directory(
     let relative_text = display_path(&relative_path);
     let key = repo_key(&root);
     let task_root = root.clone();
-    let task_relative = relative_path.clone();
-    let (mut entries, errors) = backend
+    backend
         .scheduler
-        .execute_blocking_read(&key, request_id, generation, move |cancel| {
-            read_directory(task_root, task_relative, cancel)
-        })
-        .await?;
-    if !entries.is_empty() {
-        let matched =
-            ignore_rule_matches(backend, &root, key.clone(), generation, &entries).await?;
-        if !matched.is_empty() {
-            // 规则匹配只是"可以被忽略"：还必须确认它不在索引里，已跟踪路径不算忽略项。
-            let tracked = tracked_index(backend, &root, &key, generation).await?;
-            for entry in &mut entries {
-                entry.ignored =
-                    matched.contains(entry.path.as_bytes()) && !tracked.is_tracked(&entry.path);
+        .read_session(&key, request_id, generation, |_| async {
+            let (mut entries, errors) = backend
+                .scheduler
+                .execute_blocking_read(&key, internal_request_id(), generation, move |cancel| {
+                    read_directory(task_root, relative_path, cancel)
+                })
+                .await?;
+            mark_ignored(backend, &root, &key, generation, &mut entries).await?;
+            if !include_ignored {
+                entries.retain(|entry| !entry.ignored);
             }
-        }
-    }
-    if !include_ignored {
-        entries.retain(|entry| !entry.ignored);
-    }
-    Ok(RepositoryDirectory {
-        generation,
-        path: relative_text,
-        entries,
-        errors,
-    })
+            Ok(RepositoryDirectory {
+                generation,
+                path: relative_text,
+                entries,
+                errors,
+            })
+        })
+        .await
 }
 
 fn empty_content(
@@ -5399,6 +5434,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wide_directory_batches_ignore_checks_within_the_git_output_limit() {
+        let fixture = crate::test_support::git_fixture("wide-ignore-batches");
+        let root = fixture.repo("repo");
+        let backend = fixture.backend_with_limit(2048, Vec::new());
+        git(&root, &["init", "-b", "main"]);
+        fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+        for index in 0..1024 {
+            fs::write(root.join(format!("wide-directory-entry-{index}.log")), "").unwrap();
+        }
+        git(&root, &["add", "-f", "wide-directory-entry-42.log"]);
+        let dir = repository_directory(&backend, root.to_str().unwrap(), "", false, 1, 1)
+            .await.unwrap();
+        assert_eq!(dir.entries.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
+            [".gitignore", "wide-directory-entry-42.log"]);
+        let all = repository_directory(&backend, root.to_str().unwrap(), "", true, 1, 2)
+            .await.unwrap();
+        assert_eq!(all.entries.len(), 1025);
+        assert_eq!(all.entries.iter().filter(|entry| entry.ignored).count(), 1023);
+    }
+
+    #[tokio::test]
     async fn directory_is_direct_sorted_and_honours_ignore_switch() {
         let fixture = crate::test_support::git_fixture("repository-files-directory");
         let root = fixture.repo("repo");
@@ -5884,7 +5940,7 @@ mod tests {
     ///
     /// 为了让这条契约跨平台稳定，`git_io`（写 stdin 时 Git 已经退出的 EPIPE）与
     /// 非 0/1 退出码都归到 `ignore_check`：前者在 Linux 上比 Windows 更容易出现，
-    /// 只断言其中一种会让同一语义随管道时序摇摆（见 `ignore_rule_matches`）。
+    /// 只断言其中一种会让同一语义随管道时序摇摆（见 `ignore_rule_output`）。
     #[tokio::test]
     async fn ignore_check_failure_is_reported_instead_of_hiding_entries() {
         let fixture = crate::test_support::git_fixture("repository-files-ignore-failure");

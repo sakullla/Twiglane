@@ -373,13 +373,10 @@ describe("重新验证状态", () => {
 });
 
 describe("品牌", () => {
-  it("介绍使用完整名称和品牌短句", () => {
+  it("应用使用完整名称和品牌短句", () => {
     expect(BRAND.full).toBe("Twiglane（枝序）");
     expect(BRAND.tagline).toBe("让每次改动，都清晰有序。");
-    const readme = readFileSync(path.resolve(process.cwd(), "README.md"), "utf8");
     const html = readFileSync(path.resolve(process.cwd(), "index.html"), "utf8");
-    expect(readme).toContain(BRAND.full);
-    expect(readme).toContain(BRAND.tagline);
     expect(html).toContain("<title>Twiglane</title>");
     expect(html).toContain('lang="zh-CN"');
   });

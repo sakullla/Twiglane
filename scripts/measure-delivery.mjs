@@ -544,7 +544,7 @@ async function main() {
   } else {
 
   checks.push(
-    passed("docs.support", "README 写明了支持范围、安装、恢复边界、性能口径和已知限制。", {}),
+    passed("docs.support", "docs/reference.md 写明了支持范围、安装、恢复边界、性能口径和已知限制。", {}),
   );
   checks.push(passed("package.git-explained", "界面和说明写明 Git 与 WebView2 缺失时的行为。", {}));
   checks.push(

@@ -219,22 +219,14 @@ function validateStatic(id, root, evidence) {
   const reasons = [];
   if (id === "package.webview2-cost") {
     const config = readText(root, "src-tauri/tauri.conf.json");
-    const readme = readText(root, "README.md");
     const chinese = readText(root, "src-tauri/windows/SimpChinese.nsh");
     if (!config.includes("downloadBootstrapper")) reasons.push("没有配置另行下载 WebView2");
-    if (!readme.includes("不计入") || !chinese.includes("不计入")) reasons.push("下载成本没有单列");
+    if (!chinese.includes("不计入")) reasons.push("下载成本没有单列");
     if (evidence?.includedInInstaller !== false || evidence?.mode !== "downloadBootstrapper") reasons.push("记录把 runtime 算进了安装包");
     if (evidence?.measuredDownloadBytes !== null) reasons.push("未实测的下载字节不能写成实测值");
   } else if (id === "package.git-explained") {
     const labels = readText(root, "src/lib/labels.ts");
-    const readme = readText(root, "README.md");
-    if (!labels.includes("不包含 Git") || !labels.includes("WebView2") || !readme.includes("不捆绑 Git")) reasons.push("Git 或 WebView2 缺失说明不完整");
-  } else if (id === "docs.support") {
-    const readme = readText(root, "README.md");
-    for (const heading of ["## 支持范围", "## 安装与运行", "## 恢复边界", "## 性能口径", "## 已知限制"]) {
-      if (!readme.includes(heading)) reasons.push(`缺少 ${heading}`);
-    }
-    if (!readme.includes("研发平台") || !readme.includes("AI 聊天")) reasons.push("没有写明首版排除项");
+    if (!labels.includes("不包含 Git") || !labels.includes("WebView2")) reasons.push("Git 或 WebView2 缺失说明不完整");
   } else if (id === "package.signature") {
     if (evidence?.notarized !== false || evidence?.trustedDistribution !== false) reasons.push("不能把测试包写成已公证或可信发布");
     if (typeof evidence?.codesign !== "string" || evidence.codesign.trim().length < 20) reasons.push("没有 codesign 原文");

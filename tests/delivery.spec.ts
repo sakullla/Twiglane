@@ -65,10 +65,6 @@ describe("交付测量", () => {
 
   it("完整双平台记录与产物摘要一致时可以通过", () => {
     const root = tempDir();
-    writeFileSync(
-      path.join(root, "README.md"),
-      "# Twiglane\n\n不捆绑 Git。\n\n## 支持范围\n\n## 安装与运行\n\n不计入\n\n## 恢复边界\n\n## 性能口径\n\n## 已知限制\n\n研发平台与 AI 聊天不在首版。\n",
-    );
     mkdirSync(path.join(root, "src/lib"), { recursive: true });
     writeFileSync(path.join(root, "src/lib/labels.ts"), "不包含 Git\nWebView2\n");
     mkdirSync(path.join(root, "src-tauri/windows"), { recursive: true });

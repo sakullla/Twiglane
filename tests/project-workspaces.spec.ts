@@ -109,7 +109,7 @@ describe("项目管理实际交互", () => {
   });
   it("同 ID 不同内容先完整预览并明确勾选接收；取消没有写入", async () => {
     const { p } = mount();
-    mocks.preview.mockResolvedValue({ manifest: p.manifest, path: "/work/project.dev-workspace.json", digest: "observed", conflict: true });
+    mocks.preview.mockResolvedValue({ manifest: p.manifest, path: "/work/project.dev-workspace.json", digest: "observed", conflict: true, sourceRepositoryId: null, attached: false });
     await fireEvent.click(screen.getByRole("button", { name: "打开项目清单" }));
     const preview = await screen.findByRole("region", { name: "项目清单预览" });
     expect(within(preview).getByText("/work/team-59/demo", { exact: false })).toBeTruthy();
@@ -285,11 +285,96 @@ describe("项目管理生命周期、筛选、打开与深链预览一次性消�
     expect(search.value).toBe("");
     expect(document.querySelectorAll(".project-member")).toHaveLength(3);
 
-    // 在 Cliora 打开共享清单 + 打开某个成员仓库。
-    await fireEvent.click(screen.getByRole("button", { name: "在 Cliora 打开" }));
-    await waitFor(() => expect(mocks.openInCliora).toHaveBeenCalledWith("/work/shared.dev-workspace.json"));
+    // 来源仓库直达挂在成员行：项目级入口不再冒充某个仓库。
+    expect(screen.queryByRole("button", { name: "在 Cliora 打开" })).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "在 Cliora 中定位 gamma-fav" }));
+    await waitFor(() => expect(mocks.openInCliora).toHaveBeenCalledWith("/work/shared.dev-workspace.json", "repo-fav"));
     await fireEvent.click(screen.getByRole("button", { name: "打开 gamma-fav" }));
     expect(onOpenRepo).toHaveBeenCalledWith("/work/platform/gamma");
+  });
+
+  it("v2 深链接受关联后直接打开来源仓库，取消预览则既不关联也不打开", async () => {
+    const shared = project(2);
+    shared.sourcePath = "/work/shared.dev-workspace.json";
+    shared.digest = "d1";
+    mocks.repoHeads.mockResolvedValue([
+      { path: "/work/team-0/demo", mainPath: null, branch: "main", detached: null, missing: false, worktree: false },
+    ]);
+    const onOpenRepo = vi.fn();
+    const preview = {
+      manifest: shared.manifest,
+      path: "/work/shared.dev-workspace.json",
+      digest: "d1",
+      conflict: false,
+      sourceRepositoryId: "repo-0",
+      attached: false,
+    };
+    const data: Projects = { hostId: host, projects: [shared] };
+    mocks.attach.mockResolvedValue(data);
+    const { unmount } = render(ProjectManager, {
+      data,
+      selectedId: null,
+      initialPreview: preview,
+      nextId: () => 1,
+      onData: vi.fn(),
+      onSelect: vi.fn(),
+      onOpenRepo,
+      onConsumeInitialPreview: vi.fn(),
+      onClose: vi.fn(),
+    });
+
+    const region = await screen.findByRole("region", { name: "项目清单预览" });
+    // 取消即消费掉这次意图：不关联、不打开，也不会留下可重放的来源仓库。
+    await fireEvent.click(within(region).getByRole("button", { name: "取消预览" }));
+    expect(mocks.attach).not.toHaveBeenCalled();
+    expect(onOpenRepo).not.toHaveBeenCalled();
+    unmount();
+
+    render(ProjectManager, {
+      data,
+      selectedId: null,
+      initialPreview: preview,
+      nextId: () => 1,
+      onData: vi.fn(),
+      onSelect: vi.fn(),
+      onOpenRepo,
+      onConsumeInitialPreview: vi.fn(),
+      onClose: vi.fn(),
+    });
+    await fireEvent.click(within(await screen.findByRole("region", { name: "项目清单预览" })).getByRole("button", { name: "关联此项目清单" }));
+    await waitFor(() => expect(mocks.attach).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onOpenRepo).toHaveBeenCalledWith("/work/team-0/demo"));
+  });
+
+  it("来源仓库位置失效时留在项目里说明原因，不用另一个仓库顶替", async () => {
+    const shared = project(2);
+    shared.sourcePath = "/work/shared.dev-workspace.json";
+    shared.digest = "d1";
+    mocks.repoHeads.mockImplementation(async (paths: string[]) => paths.map((path) => ({
+      path, mainPath: null, branch: null, detached: null, missing: path === "/work/team-0/demo", worktree: false,
+    })));
+    const onOpenRepo = vi.fn();
+    const onSelect = vi.fn();
+    render(ProjectManager, {
+      data: { hostId: host, projects: [shared] },
+      selectedId: null,
+      initialPreview: { manifest: shared.manifest, path: shared.sourcePath, digest: "d1", conflict: false, sourceRepositoryId: "repo-0", attached: true },
+      nextId: () => 1,
+      onData: vi.fn(),
+      onSelect,
+      onOpenRepo,
+      onConsumeInitialPreview: vi.fn(),
+      onClose: vi.fn(),
+    });
+
+    // 已关联（attached）的链接不再弹预览，而是直接续接来源仓库。
+    await waitFor(() => expect(screen.queryByRole("region", { name: "项目清单预览" })).toBeNull());
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("在本机没有可用位置"));
+    expect(onOpenRepo).not.toHaveBeenCalled();
+    expect(onSelect).toHaveBeenCalledWith(shared.manifest.workspaceId);
+    // 落点是被续接的那个成员行的重新关联入口，而不是别的仓库。
+    expect(document.activeElement?.getAttribute("aria-label")).toBe("重新关联目录");
+    expect(document.activeElement?.closest("[data-repository-id]")?.getAttribute("data-repository-id")).toBe("repo-0");
   });
 
   it("移除本地项目与取消关联共享清单均需明确确认，且切换选中项目", async () => {
@@ -329,7 +414,7 @@ describe("项目管理生命周期、筛选、打开与深链预览一次性消�
     render(ProjectManager, {
       data: { hostId: host, projects: [] },
       selectedId: null,
-      initialPreview: { manifest: p.manifest, path: "/work/incoming.dev-workspace.json", digest: "obs", conflict: false },
+      initialPreview: { manifest: p.manifest, path: "/work/incoming.dev-workspace.json", digest: "obs", conflict: false, sourceRepositoryId: null, attached: false },
       nextId: () => 1,
       onData: vi.fn(),
       onSelect: vi.fn(),

@@ -3161,6 +3161,6 @@ async fn workspace_preview_link(state: State<'_, Arc<Backend>>, url: String) -> 
     workspace_io(move || workspaces::preview_link(&backend.store, &url)).await
 }
 #[tauri::command]
-fn workspace_open_in_cliora<R: Runtime>(app: AppHandle<R>, path: String) -> Result<(), AppError> {
-    workspaces::open_in_cliora(&app, &path)
+fn workspace_open_in_cliora<R: Runtime>(app: AppHandle<R>, path: String, repository_id: String) -> Result<(), AppError> {
+    workspaces::open_in_cliora(&app, &path, &repository_id)
 }

@@ -25,6 +25,37 @@ const BASELINE = "a".repeat(40);
 const COMMITTED = "b".repeat(40);
 const URL_A = "twiglane://review?v=2&reviewId=" + REVIEW_A + "&sessionId=" + SESSION_A + "&worktreePath=" + encodeURIComponent(WORKTREE) + "&baseline=" + BASELINE;
 const URL_B = "twiglane://review?v=2&reviewId=" + REVIEW_B + "&sessionId=" + SESSION_B + "&worktreePath=" + encodeURIComponent(WORKTREE);
+const WORKSPACE_HOST = "11111111-1111-4111-8111-111111111111";
+const LINKED_PROJECT = "深链预览项目";
+const LINKED_WORKSPACE = "22222222-2222-4222-8222-222222222222";
+const LINKED_MEMBER = "33333333-3333-4333-8333-000000000000";
+const LINKED_MEMBER_PATH = "/work/team/commerce";
+const LINKED_SOURCE = "/work/shared.dev-workspace.json";
+/** v2 项目清单链接：清单路径与来源仓库 ID 缺一不可，由 Rust 侧严格解析。 */
+const WORKSPACE_URL = "twiglane://workspace?v=2&file=" + encodeURIComponent(LINKED_SOURCE) + "&repository=" + LINKED_MEMBER;
+
+/** `attached` 由后端按本机名单与清单内容是否一致给出：一致就不再要求确认关联。 */
+function linkedPreview(attached: boolean) {
+  return {
+    path: LINKED_SOURCE,
+    digest: "digest-1",
+    conflict: false,
+    sourceRepositoryId: LINKED_MEMBER,
+    attached,
+    manifest: {
+      schemaVersion: 1 as const,
+      workspaceId: LINKED_WORKSPACE,
+      name: LINKED_PROJECT,
+      revision: 1,
+      repositories: [{ id: LINKED_MEMBER, name: "commerce", locations: [{ hostId: WORKSPACE_HOST, path: LINKED_MEMBER_PATH }] }],
+    },
+  };
+}
+
+function workspaceProject(digest: string) {
+  const manifest = linkedPreview(false).manifest;
+  return { manifest, sourcePath: LINKED_SOURCE, digest, error: null, favorites: [], bindings: {} };
+}
 
 /**
  * 前端交给后端的返回参数：只有 Git outcome。工作区状态由后端按来源工作树读取真实 Git
@@ -654,27 +685,23 @@ describe("cliora v2 审查链接", () => {
     await waitFor(() => expect(mocks.api.taskReview).toHaveBeenCalledWith(OTHER_WORKTREE, COMMITTED, expect.anything(), expect.anything()));
   });
 
-  it("twiglane://workspace 深链先走预览且不触发 clioraReviewRequest，关闭重开项目管理不会复现旧预览", async () => {
-    mocks.api.workspaceList.mockResolvedValue({ hostId: "11111111-1111-4111-8111-111111111111", projects: [] });
-    mocks.api.workspacePreviewLink.mockResolvedValue({
-      path: "/work/shared.dev-workspace.json",
-      digest: "digest-1",
-      conflict: false,
-      manifest: {
-        schemaVersion: 1,
-        workspaceId: "22222222-2222-4222-8222-222222222222",
-        name: "深链预览项目",
-        revision: 1,
-        repositories: [],
-      },
-    });
+  it("twiglane://workspace?v=2 深链先走预览、取消即丢弃来源意图，关闭重开不会复现旧预览", async () => {
+    mocks.api.workspaceList.mockResolvedValue({ hostId: WORKSPACE_HOST, projects: [] });
+    mocks.api.workspacePreviewLink.mockResolvedValue(linkedPreview(false));
     const handle = await mountShell();
-    handle(["twiglane://workspace?v=1&file=%2Fwork%2Fshared.dev-workspace.json"]);
+    handle([WORKSPACE_URL]);
 
     const previewRegion = await screen.findByRole("region", { name: "项目清单预览" });
-    expect(within(previewRegion).getByText("深链预览项目")).toBeTruthy();
+    expect(within(previewRegion).getByText(LINKED_PROJECT)).toBeTruthy();
+    // 只有项目清单预览：审查链接的解析与回执都不该被触发。
     expect(mocks.api.clioraReviewRequest).not.toHaveBeenCalled();
     expect(mocks.api.workspaceAttach).not.toHaveBeenCalled();
+    expect(mocks.api.openRepository).not.toHaveBeenCalled();
+
+    // 取消即消费掉这次意图：不关联、不打开来源仓库。
+    await fireEvent.click(within(previewRegion).getByRole("button", { name: "取消预览" }));
+    expect(mocks.api.workspaceAttach).not.toHaveBeenCalled();
+    expect(mocks.api.openRepository).not.toHaveBeenCalled();
 
     // 关闭项目管理弹窗后，再从起始页「业务项目」打开：旧预览已被消费，不会复现。
     await fireEvent.keyDown(document.querySelector(".modal-card")!, { key: "Escape" });
@@ -682,6 +709,41 @@ describe("cliora v2 审查链接", () => {
     await fireEvent.click(screen.getByRole("button", { name: "业务项目" }));
     await screen.findByRole("dialog", { name: "管理项目" });
     expect(screen.queryByRole("region", { name: "项目清单预览" })).toBeNull();
+  });
+
+  it("首次关联后继续同一来源仓库，已关联的链接不再弹预览而直接打开来源仓库", async () => {
+    const linked = workspaceProject("digest-1");
+    mocks.api.workspaceList.mockResolvedValue({ hostId: WORKSPACE_HOST, projects: [] });
+    mocks.api.workspacePreviewLink.mockResolvedValue(linkedPreview(false));
+    mocks.api.workspaceAttach.mockResolvedValue({ hostId: WORKSPACE_HOST, projects: [linked] });
+    mocks.api.repoHeads.mockResolvedValue([{ path: LINKED_MEMBER_PATH, mainPath: null, branch: "main", detached: null, missing: false, worktree: false }]);
+    mocks.api.openRepository.mockImplementation(async (path: string) => openedAt(path));
+    const handle = await mountShell();
+    handle([WORKSPACE_URL]);
+
+    const previewRegion = await screen.findByRole("region", { name: "项目清单预览" });
+    await fireEvent.click(within(previewRegion).getByRole("button", { name: "关联此项目清单" }));
+    await waitFor(() => expect(mocks.api.workspaceAttach).toHaveBeenCalledTimes(1));
+    // 接受关联后自动续接同一来源仓库：只打开那个目录，不写 Git、不触发审查链接。
+    await waitFor(() => expect(mocks.api.openRepository).toHaveBeenCalledWith(LINKED_MEMBER_PATH, expect.any(Number)));
+    expect(mocks.api.clioraReviewRequest).not.toHaveBeenCalled();
+    expect(mocks.api.commitChanges).not.toHaveBeenCalled();
+    expect(mocks.api.startMerge).not.toHaveBeenCalled();
+
+    // 本机名单已一致（attached）：再收到同一项目的链接不再确认关联，直接定位来源仓库。
+    cleanup();
+    deepLink.onOpenUrl.mockClear();
+    mocks.api.workspaceAttach.mockClear();
+    mocks.api.openRepository.mockClear();
+    mocks.api.workspaceList.mockResolvedValue({ hostId: WORKSPACE_HOST, projects: [linked] });
+    mocks.api.workspaceRefresh.mockResolvedValue({ hostId: WORKSPACE_HOST, projects: [linked] });
+    mocks.api.workspacePreviewLink.mockResolvedValue(linkedPreview(true));
+    const reopen = await mountShell();
+    reopen([WORKSPACE_URL]);
+    await waitFor(() => expect(mocks.api.openRepository).toHaveBeenCalledWith(LINKED_MEMBER_PATH, expect.any(Number)));
+    expect(mocks.api.workspaceAttach).not.toHaveBeenCalled();
+    expect(screen.queryByRole("region", { name: "项目清单预览" })).toBeNull();
+    expect(mocks.api.clioraReviewRequest).not.toHaveBeenCalled();
   });
 
   it("同一会话对同一工作树重复发起时，下拉标出发起次序与审查号，不再出现两行一样的文字", async () => {

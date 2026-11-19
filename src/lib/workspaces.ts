@@ -17,7 +17,16 @@ export interface Project {
   bindings: Record<string, string>;
 }
 export interface Projects { hostId: string; projects: Project[] }
-export interface WorkspacePreview { manifest: WorkspaceManifest; path: string; digest: string; conflict: boolean }
+/** 深链预览：`sourceRepositoryId` 只在 `twiglane://workspace?v=2` 里出现，普通文件预览为空。 */
+export interface WorkspacePreview {
+  manifest: WorkspaceManifest;
+  path: string;
+  digest: string;
+  conflict: boolean;
+  sourceRepositoryId: string | null;
+  /** 本机名单已与这份内容一致：可直接续接来源仓库，不必再次确认关联。 */
+  attached: boolean;
+}
 export interface WorkspaceCandidate { path: string; name: string; commonDirectory: string | null; repositoryId: string | null; error: string | null }
 export interface WorkspaceDiscovery { candidates: WorkspaceCandidate[]; cancelled: boolean; partial: boolean }
 /** POSIX is case-sensitive; drive/UNC path comparison follows the receiving Windows convention. */

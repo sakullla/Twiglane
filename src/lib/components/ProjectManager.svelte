@@ -89,6 +89,10 @@
   const editReason = $derived(busyReason ?? (project?.error ? "请先刷新或重新预览清单，确认来源后再修改名单。" : undefined));
   let notice = $state<string | null>(null);
   let preview = $state<WorkspacePreview | null>(null);
+  /** 预览里的来源仓库：只有用户接受关联后才执行一次，取消即作废。 */
+  let pendingSourceId = $state<string | null>(null);
+  /** 待执行的续接意图；等待项目数据就绪后一次性消费。 */
+  let sourceIntent = $state<{ workspaceId: string; repositoryId: string } | null>(null);
   let adopt = $state(false);
   const CANDIDATES_PER_PAGE = 100;
   let candidatePage = $state(0);
@@ -149,13 +153,33 @@
   });
 
   // 入站 twiglane://workspace 链接只做一次性预览移交：收到后立即消费父层意图，关闭重开不会复现旧预览。
+  // v2 链接还带来源仓库：已关联时直接续接，否则在用户接受关联后续接同一仓库。
   $effect(() => {
-    if (!initialPreview) return;
-    preview = initialPreview;
+    const incoming = initialPreview;
+    if (!incoming) return;
+    onConsumeInitialPreview?.();
+    const workspaceId = incoming.manifest.workspaceId;
+    if (incoming.attached && !incoming.conflict) {
+      // 名单与本机一致：不为同一次交接重复弹预览，直接定位来源仓库。
+      view(workspaceId);
+      onSelect(workspaceId);
+      if (incoming.sourceRepositoryId) sourceIntent = { workspaceId, repositoryId: incoming.sourceRepositoryId };
+      return;
+    }
+    preview = incoming;
     adopt = false;
     creating = false;
     confirmDelete = false;
-    onConsumeInitialPreview?.();
+    pendingSourceId = incoming.sourceRepositoryId ?? null;
+  });
+
+  // 来源仓库意图只执行一次：等这份名单出现在最新项目数据里，再续接或进入修复上下文。
+  $effect(() => {
+    const intent = sourceIntent;
+    if (!intent) return;
+    if (!data.projects.some((item) => item.manifest.workspaceId === intent.workspaceId)) return;
+    sourceIntent = null;
+    void resumeSource(intent.workspaceId, intent.repositoryId);
   });
 
   // 只读各成员本机位置的 HEAD 元数据，立刻标出磁盘上已不存在的目录，不启动 Git 子进程。
@@ -301,19 +325,73 @@
       const path = await pickFile("打开与 Cliora 共用的项目清单");
       if (!path) return;
       preview = await api.workspacePreview(path);
+      pendingSourceId = null;
       creating = false;
       adopt = false;
     });
   }
 
+  /** 取消预览即作废来源仓库意图：离开再回来不会自动打开任何仓库。 */
+  function cancelPreview() {
+    preview = null;
+    pendingSourceId = null;
+    adopt = false;
+  }
+
+  /**
+   * 深链续接：来源仓库本机可用就走既有打开流程；位置失效或没有本机位置时留在该成员行，
+   * 说明原因并给出重新关联入口，不用另一个仓库顶替，也不执行任何 Git 写操作。
+   */
+  async function resumeSource(workspaceId: string, repositoryId: string) {
+    view(workspaceId);
+    onSelect(workspaceId);
+    const target = data.projects.find((item) => item.manifest.workspaceId === workspaceId) ?? null;
+    const repo = target?.manifest.repositories.find((item) => item.id === repositoryId) ?? null;
+    if (!repo) {
+      error = "这份项目名单里没有链接指定的仓库，未打开任何仓库。";
+      return;
+    }
+    const locals = repo.locations.filter((location) => location.hostId === data.hostId);
+    const heads = locals.length > 0 && typeof api.repoHeads === "function"
+      ? await Promise.resolve(api.repoHeads(locals.map((location) => location.path))).catch(() => [])
+      : [];
+    const alive = new Set(heads.filter((head) => head && !head.missing).map((head) => checkoutKey(head.path)));
+    const path = locals.find((location) => alive.has(checkoutKey(location.path)))?.path ?? null;
+    if (!path) {
+      error = `来源仓库「${repo.name}」在本机没有可用位置，请在成员行重新关联这个目录。`;
+      await tick();
+      focusMember(repositoryId);
+      return;
+    }
+    onOpenRepo?.(path);
+  }
+
+  /** 定位到成员行并落到它当前可用的主操作：可打开时是「打开」，位置失效时是「重新关联目录」。 */
+  function focusMember(repositoryId: string) {
+    if (query.trim()) query = "";
+    if (memberFilter !== "all") memberFilter = "all";
+    const row = document.querySelector<HTMLElement>(`[data-workspace-manager] [data-repository-id="${CSS.escape(repositoryId)}"]`);
+    if (!row) return;
+    row.scrollIntoView({ block: "nearest" });
+    const target = row.querySelector<HTMLElement>(".member-actions .project-member-primary")
+      ?? row.querySelector<HTMLElement>(".member-actions .project-member-repair")
+      ?? row.querySelector<HTMLElement>(".member-actions button");
+    target?.focus({ preventScroll: true });
+  }
+
   async function attach() {
     const observed = preview;
     if (!observed) return;
+    const source = pendingSourceId;
+    const workspaceId = observed.manifest.workspaceId;
     await run("正在关联清单", async () => {
       accept(await api.workspaceAttach(observed, adopt));
-      view(observed.manifest.workspaceId);
+      view(workspaceId);
       preview = null;
+      pendingSourceId = null;
       notice = "已关联。以后打开项目、窗口获焦或刷新会重新读取这份名单。";
+      // 接受关联后继续同一来源仓库：不要求用户再搜索一次项目或仓库。
+      if (source) sourceIntent = { workspaceId, repositoryId: source };
     });
   }
 
@@ -378,10 +456,11 @@
     });
   }
 
-  function openInCliora(target: Project) {
+  /** 来源仓库直达：链接带上这份清单里的成员仓库 ID，项目级入口不再冒充单个仓库。 */
+  function openInCliora(target: Project, repositoryId: string) {
     void run("正在唤起 Cliora", async () => {
-      await api.workspaceOpenInCliora(target.sourcePath!);
-      notice = "已请求在 Cliora 中预览此项目清单。";
+      await api.workspaceOpenInCliora(target.sourcePath!, repositoryId);
+      notice = "已请求在 Cliora 中定位这个来源仓库（只请求预览，不自动关联）。";
     });
   }
 
@@ -498,9 +577,10 @@
       { id: "rename", label: "重命名…", icon: "pencil", disabledReason: editBlocked, run: () => startRename() },
       { id: "members", label: "编辑成员…", icon: "folder-plus", disabledReason: editBlocked, run: () => void tick().then(() => memberSearch?.focus()) },
       { id: "refresh", label: "刷新清单", icon: "refresh", disabledReason: busyReason, run: () => refreshProject(target) },
-      target.sourcePath
-        ? { id: "cliora", label: "在 Cliora 打开", icon: "link", disabledReason: busyReason, run: () => openInCliora(target) }
-        : { id: "publish", label: "发布共享清单…", icon: "upload", disabledReason: busyReason, run: () => publish(target) },
+      // 来源仓库直达只挂在具体成员行：项目本身不冒充某一个仓库。
+      ...(target.sourcePath
+        ? []
+        : [{ id: "publish", label: "发布共享清单…", icon: "upload", disabledReason: busyReason, run: () => publish(target) } as ContextMenuEntry]),
       { separator: true },
       {
         id: "delete",
@@ -535,6 +615,9 @@
     ];
     const first = localLocationsOf(repo)[0]?.path;
     if (first) entries.push({ id: "copy", label: "复制完整路径", icon: "copy", run: () => void copyText(first, "完整路径") });
+    if (project?.sourcePath) {
+      entries.push({ id: "cliora", label: "在 Cliora 中定位这个仓库", icon: "link", disabledReason: editReason, run: () => openInCliora(project!, repo.id) });
+    }
     entries.push({ separator: true });
     entries.push({ id: "relink", label: "重新关联目录…", icon: "folder", disabledReason: editReason, run: () => void choosePaths(false, repo.id) });
     entries.push({ id: "remove", label: "从项目移除", icon: "x", danger: true, disabledReason: editReason, run: () => removeMember(repo) });
@@ -664,7 +747,7 @@
             <label class="pm-confirm"><input type="checkbox" class="checkbox" bind:checked={adopt} /> 同一项目 ID 的名单与本机快照不同，确认以此清单替换本机成员关系</label>
           {/if}
           <div class="pm-actions">
-            <button class="btn btn-ghost" disabled={Boolean(busy)} title={busyReason} onclick={() => (preview = null)}>取消预览</button>
+            <button class="btn btn-ghost" disabled={Boolean(busy)} title={busyReason} onclick={cancelPreview}>取消预览</button>
             <button
               class="btn btn-primary"
               disabled={Boolean(busy) || (preview.conflict && !adopt)}
@@ -770,16 +853,11 @@
               {:else}
                 <button class="btn btn-primary btn-sm" disabled={Boolean(busy)} title={busyReason ?? "标题栏改为按这个项目筛选仓库"} onclick={() => onSelect(current.manifest.workspaceId)}>设为当前范围</button>
               {/if}
-              <button
-                class="btn btn-ghost btn-sm"
-                disabled={Boolean(busy)}
-                title={busyReason ?? (current.sourcePath ? "重新读取共享清单" : "重新读取本机名单")}
-                onclick={() => refreshProject(current)}
-              ><Icon name="refresh" size={13} />刷新清单</button>
               {#if current.sourcePath}
-                <button class="btn btn-ghost btn-sm" disabled={Boolean(busy)} title={busyReason ?? "在 Cliora 中预览这份共享项目清单"} onclick={() => openInCliora(current)}><Icon name="link" size={13} />在 Cliora 打开</button>
+              <button class="btn btn-ghost btn-sm" disabled={Boolean(busy)} title={busyReason ?? "重新读取共享清单"} onclick={() => refreshProject(current)}><Icon name="refresh" size={13} />刷新清单</button>
               {:else}
-                <button class="btn btn-ghost btn-sm" disabled={Boolean(busy)} title={busyReason ?? "另存为 .dev-workspace.json，给 Cliora 或同事共用"} onclick={() => publish(current)}><Icon name="upload" size={13} />发布共享清单</button>
+              <button class="btn btn-ghost btn-sm" disabled={Boolean(busy)} title={busyReason ?? "重新读取本机名单"} onclick={() => refreshProject(current)}><Icon name="refresh" size={13} />刷新清单</button>
+              <button class="btn btn-ghost btn-sm" disabled={Boolean(busy)} title={busyReason ?? "另存为 .dev-workspace.json，给 Cliora 或同事共用"} onclick={() => publish(current)}><Icon name="upload" size={13} />发布共享清单</button>
               {/if}
               <button
                 class="btn btn-ghost btn-sm btn-danger-soft"
@@ -934,7 +1012,7 @@
               {@const broken = isRepoBroken(repo)}
               {@const isCurrent = isRepoCurrent(repo)}
               {@const branch = branchOf(repo)}
-              <article class="project-member" class:broken role="listitem" oncontextmenu={(event) => memberMenu(event, repo)} ondblclick={() => !isCurrent && openablePath && onOpenRepo?.(openablePath)}>
+              <article class="project-member" class:broken role="listitem" data-repository-id={repo.id} oncontextmenu={(event) => memberMenu(event, repo)} ondblclick={() => !isCurrent && openablePath && onOpenRepo?.(openablePath)}>
                 <span class="pm-badge" style={"--hue:" + hueOf(repo.locations[0]?.path ?? repo.id)} aria-hidden="true">{initial(repo.name)}</span>
                 <div class="member-main">
                   <div class="member-title">
@@ -954,9 +1032,18 @@
                 </div>
                 <div class="member-actions">
                   {#if !isCurrent && openablePath && onOpenRepo}
-                    <button class="btn btn-secondary btn-sm" disabled={Boolean(busy)} title={busyReason ?? `打开 ${openablePath}`} aria-label={`打开 ${repo.name}`} onclick={() => onOpenRepo(openablePath)}>打开</button>
+                    <button class="btn btn-secondary btn-sm project-member-primary" disabled={Boolean(busy)} title={busyReason ?? `打开 ${openablePath}`} aria-label={`打开 ${repo.name}`} onclick={() => onOpenRepo(openablePath)}>打开</button>
                   {/if}
-                  <button class="icon-btn sm" disabled={Boolean(busy) || Boolean(current.error)} aria-label="重新关联目录" title={editReason ?? "换成本机另一个目录"} onclick={() => void choosePaths(false, repo.id)}><Icon name="folder" size={13} /></button>
+                  {#if current.sourcePath}
+                    <button
+                      class="icon-btn sm"
+                      disabled={Boolean(busy) || Boolean(current.error)}
+                      aria-label={`在 Cliora 中定位 ${repo.name}`}
+                      title={editReason ?? "在 Cliora 中定位这个仓库（携带来源仓库，只请求预览）"}
+                      onclick={() => openInCliora(current, repo.id)}
+                    ><Icon name="link" size={13} /></button>
+                  {/if}
+                  <button class="icon-btn sm project-member-repair" disabled={Boolean(busy) || Boolean(current.error)} aria-label="重新关联目录" title={editReason ?? "换成本机另一个目录"} onclick={() => void choosePaths(false, repo.id)}><Icon name="folder" size={13} /></button>
                   <button class="icon-btn sm danger" disabled={Boolean(busy) || Boolean(current.error)} aria-label="移除项目关联" title={editReason ?? "只从项目名单移除，不删除文件"} onclick={() => removeMember(repo)}><Icon name="x" size={13} /></button>
                 </div>
                 <button

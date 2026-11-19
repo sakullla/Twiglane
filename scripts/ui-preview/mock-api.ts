@@ -630,8 +630,10 @@ function terminalReply(session: PreviewTerminal, data: string) {
 export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   workspaceList: workspaceResult,
   workspaceCreate: (name: string) => { projectData.projects.push({ manifest: { schemaVersion: 1, workspaceId: crypto.randomUUID(), name, revision: 1, repositories: [] }, sourcePath: null, digest: null, error: null, favorites: [], bindings: {} }); return workspaceResult(); },
-  workspacePreview: (path: string) => ok({ path, manifest: projectData.projects[0]?.manifest, digest: "mock-preview-digest", conflict: previewParams.get("projects") === "conflict" }),
-  workspaceAttach: (preview: WorkspacePreview, _adopt: boolean) => { const existing = projectData.projects.find((p) => p.manifest.workspaceId === preview.manifest.workspaceId); if (existing) { existing.manifest = preview.manifest; existing.error = null; } return workspaceResult(); },
+  workspacePreview: (path: string) => ok({ path, manifest: projectData.projects[0]?.manifest, digest: "mock-preview-digest", conflict: previewParams.get("projects") === "conflict", sourceRepositoryId: null, attached: false }),
+  // 预览对象来自页面里的响应式代理，直接存进 mock 项目表会让 workspaceResult 的
+  // structuredClone 报「could not be cloned」；复制成普通对象再落库。
+  workspaceAttach: (preview: WorkspacePreview, _adopt: boolean) => { const existing = projectData.projects.find((p) => p.manifest.workspaceId === preview.manifest.workspaceId); if (existing) { existing.manifest = JSON.parse(JSON.stringify(preview.manifest)) as WorkspaceManifest; existing.error = null; } return workspaceResult(); },
   workspaceUpdate: (manifest: WorkspaceManifest, expectedRevision: number) => { const p = projectData.projects.find((p) => p.manifest.workspaceId === manifest.workspaceId); if (!p || p.manifest.revision !== expectedRevision) return Promise.reject({ code: "workspace_conflict", message: "项目名单已变化，请刷新后重试" }); p.manifest = { ...manifest, revision: expectedRevision + 1 }; return workspaceResult(); },
   workspaceRefresh: (_id: string) => workspaceResult(),
   workspacePublish: (id: string, _revision: number, path: string) => { const p = projectData.projects.find((p) => p.manifest.workspaceId === id); if (p) p.sourcePath = path; return workspaceResult(); },
@@ -648,18 +650,35 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     return workspaceResult();
   },
   workspacePreviewLink: (url: string) => {
+    // 与 Rust 侧同一份严格规则：只接受 v=2 + file + repository，且 repository 必须是成员。
     if (!url.startsWith("twiglane://workspace?") && !url.startsWith("twiglane://workspace/?")) {
       return Promise.reject({ code: "workspace", message: "项目清单链接格式无效" });
     }
     const query = url.slice(url.indexOf("?") + 1);
     const params = new URLSearchParams(query);
     const file = params.get("file");
-    if (params.get("v") !== "1" || !file || !file.endsWith(".dev-workspace.json")) {
-      return Promise.reject({ code: "workspace", message: "请选择绝对路径的 *.dev-workspace.json 项目清单" });
+    const repository = params.get("repository");
+    if (params.get("v") !== "2" || !file || !file.endsWith(".dev-workspace.json") || !repository) {
+      return Promise.reject({ code: "workspace", message: "仅支持 v=2 项目清单链接，旧版项目链接请重新发起" });
     }
-    return ok({ path: file, manifest: projectData.projects[0]?.manifest, digest: "mock-preview-digest", conflict: previewParams.get("projects") === "conflict" });
+    if ([...params.keys()].some((key) => !["v", "file", "repository"].includes(key)) || [...params.keys()].filter((key) => key === "repository").length !== 1) {
+      return Promise.reject({ code: "workspace", message: "项目清单链接含协议之外的参数" });
+    }
+    const shared = projectData.projects.find((project) => project.manifest.workspaceId === "22222222-2222-4222-8222-222222222222") ?? projectData.projects[0];
+    if (!shared) return Promise.reject({ code: "workspace", message: "项目清单里没有链接指定的仓库，未打开任何项目" });
+    if (!shared.manifest.repositories.some((repo) => repo.id === repository)) {
+      return Promise.reject({ code: "workspace", message: "项目清单里没有链接指定的仓库，未打开任何项目" });
+    }
+    return ok({
+      path: file,
+      manifest: shared.manifest,
+      digest: "mock-preview-digest",
+      conflict: previewParams.get("projects") === "conflict",
+      sourceRepositoryId: repository,
+      attached: previewParams.get("projects") === "attached",
+    });
   },
-  workspaceOpenInCliora: (_path: string) => ok(undefined, 20),
+  workspaceOpenInCliora: (_path: string, _repositoryId: string) => ok(undefined, 20),
   detectGit: () => ok(previewGit),
   setGitExecutable: () => ok({}),
   clearGitExecutable: () => ok({}),

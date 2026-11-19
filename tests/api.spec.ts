@@ -984,11 +984,12 @@ describe("cliora 审查接线", () => {
   it("业务项目删除、深链预览与在 Cliora 打开按结构化参数调用", async () => {
     await api.workspaceDelete("ws-1");
     expect(invoke).toHaveBeenLastCalledWith("workspace_delete", { id: "ws-1" });
-    await api.workspacePreviewLink("twiglane://workspace?v=1&file=%2Fwork%2Fshared.dev-workspace.json");
+    await api.workspacePreviewLink("twiglane://workspace?v=2&file=%2Fwork%2Fshared.dev-workspace.json&repository=22222222-2222-4222-8222-222222222222");
     expect(invoke).toHaveBeenLastCalledWith("workspace_preview_link", {
-      url: "twiglane://workspace?v=1&file=%2Fwork%2Fshared.dev-workspace.json",
+      url: "twiglane://workspace?v=2&file=%2Fwork%2Fshared.dev-workspace.json&repository=22222222-2222-4222-8222-222222222222",
     });
-    await api.workspaceOpenInCliora("/work/shared.dev-workspace.json");
-    expect(invoke).toHaveBeenLastCalledWith("workspace_open_in_cliora", { path: "/work/shared.dev-workspace.json" });
+    // 来源仓库直达：成员仓库 ID 与清单路径一起跨进程传递，缺一不可。
+    await api.workspaceOpenInCliora("/work/shared.dev-workspace.json", "22222222-2222-4222-8222-222222222222");
+    expect(invoke).toHaveBeenLastCalledWith("workspace_open_in_cliora", { path: "/work/shared.dev-workspace.json", repositoryId: "22222222-2222-4222-8222-222222222222" });
   });
 });

@@ -3139,8 +3139,9 @@
   });
 
   /**
-   * 入站 `twiglane://workspace?v=1&file=<abs-path>`：只请求预览，绝不自动关联或执行 Git。
-   * 交给 ProjectManager 后立即清除父层意图，关闭或关联后再重开不会复现旧预览。
+   * 入站 `twiglane://workspace?v=2&file=<abs-path>&repository=<member-uuid>`：只请求预览并带上
+   * 来源仓库，绝不自动关联或执行 Git。交给 ProjectManager 后立即清除父层意图，
+   * 关闭或关联后再重开不会复现旧预览；已关联的项目由它直接续接来源仓库。
    */
   async function handleWorkspaceLink(url: string) {
     try {
@@ -3149,7 +3150,9 @@
       projectInitialPreview = observed;
       projectManagerOpen = true;
       void loadProjects();
-      live = `已预览项目清单 ${observed.manifest.name}`;
+      live = observed.attached
+        ? `已定位项目 ${observed.manifest.name} 的来源仓库`
+        : `已预览项目清单 ${observed.manifest.name}`;
     } catch (error) {
       live = "项目清单链接无效，未修改任何项目或仓库。";
       showError(error);
@@ -4740,7 +4743,9 @@
       onSelect={selectProject}
       onOpenRepo={(path) => {
         projectManagerOpen = false;
-        void openRecent(path);
+        // 管理弹窗自己的 modal 层要等这一批渲染卸载后才释放；同一批里切仓库会被
+        // 「请先关闭当前对话框」挡下，深链续接来源仓库也就打不开了。
+        void tick().then(() => openRecent(path));
       }}
       onConsumeInitialPreview={() => {
         projectInitialPreview = null;

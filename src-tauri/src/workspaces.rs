@@ -245,6 +245,12 @@ pub struct Preview {
     pub path: String,
     pub digest: String,
     pub conflict: bool,
+    /// 深链指定的来源仓库；普通“打开项目清单”为 None。
+    #[serde(default)]
+    pub source_repository_id: Option<String>,
+    /// 本机名单已与这份内容一致：不必再确认关联，可直接续接来源仓库。
+    #[serde(default)]
+    pub attached: bool,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -375,7 +381,16 @@ fn encode_percent(value: &str) -> String {
     }
     out
 }
-fn parse_workspace_link_with_scheme(url: &str, expected_scheme: &str) -> Result<String, AppError> {
+/// Strict workspace deep link v2: exactly `v=2`, an absolute `file` and a member `repository` UUID.
+/// A v1 project link and a missing, repeated or unknown field are rejected before anything is read.
+pub struct WorkspaceLink {
+    pub file: String,
+    pub repository_id: String,
+}
+fn parse_workspace_link_with_scheme(
+    url: &str,
+    expected_scheme: &str,
+) -> Result<WorkspaceLink, AppError> {
     if url.len() > MAX_WORKSPACE_URL_LEN {
         return Err(failure("项目清单链接超过长度上限"));
     }
@@ -397,6 +412,7 @@ fn parse_workspace_link_with_scheme(url: &str, expected_scheme: &str) -> Result<
     }
     let mut version: Option<String> = None;
     let mut file: Option<String> = None;
+    let mut repository: Option<String> = None;
     for pair in query.split('&') {
         if pair.is_empty() {
             return Err(failure("项目清单链接含空查询参数"));
@@ -417,11 +433,17 @@ fn parse_workspace_link_with_scheme(url: &str, expected_scheme: &str) -> Result<
                 }
                 file = Some(decode_percent(raw_value)?);
             }
+            "repository" => {
+                if repository.is_some() {
+                    return Err(failure("项目清单链接含重复参数 repository"));
+                }
+                repository = Some(decode_percent(raw_value)?);
+            }
             _ => return Err(failure("项目清单链接含协议之外的参数")),
         }
     }
-    if version.as_deref() != Some("1") {
-        return Err(failure("仅支持 v=1 项目清单链接"));
+    if version.as_deref() != Some("2") {
+        return Err(failure("仅支持 v=2 项目清单链接，旧版项目链接请重新发起"));
     }
     let file = file.filter(|value| !value.is_empty()).ok_or_else(|| {
         failure("项目清单链接缺少 file 参数")
@@ -434,32 +456,67 @@ fn parse_workspace_link_with_scheme(url: &str, expected_scheme: &str) -> Result<
     {
         return Err(failure("项目清单链接里的文件路径必须是本机绝对路径"));
     }
-    Ok(file)
+    let repository_id = repository
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| failure("项目清单链接缺少 repository 参数"))?;
+    if Uuid::parse_str(&repository_id).is_err() {
+        return Err(failure("项目清单链接里的 repository 不是有效仓库 ID"));
+    }
+    Ok(WorkspaceLink {
+        file,
+        repository_id,
+    })
 }
-pub fn parse_workspace_url(url: &str) -> Result<String, AppError> {
+pub fn parse_workspace_url(url: &str) -> Result<WorkspaceLink, AppError> {
     parse_workspace_link_with_scheme(url, "twiglane")
 }
-/// Preview-only deep-link entry (`twiglane://workspace?v=1&file=<abs-path>`).
-/// Never auto-adopts a manifest or executes Git.
+/// Preview-only deep-link entry
+/// (`twiglane://workspace?v=2&file=<abs-path>&repository=<member-uuid>`).
+/// Never auto-adopts a manifest or executes Git; a repository outside this manifest is refused.
 pub fn preview_link(store: &AppStore, url: &str) -> Result<Preview, AppError> {
-    let file = parse_workspace_url(url)?;
-    preview(store, &file)
+    let link = parse_workspace_url(url)?;
+    let mut observed = preview(store, &link.file)?;
+    if !observed
+        .manifest
+        .repositories
+        .iter()
+        .any(|repo| repo.id == link.repository_id)
+    {
+        return Err(failure("项目清单里没有链接指定的仓库，未打开任何项目"));
+    }
+    observed.source_repository_id = Some(link.repository_id);
+    Ok(observed)
 }
-pub fn build_cliora_workspace_url(path: &str) -> Result<String, AppError> {
+pub fn build_cliora_workspace_url(path: &str, repository_id: &str) -> Result<String, AppError> {
     let canonical = canonical_source(path, false)?;
     if fs::symlink_metadata(&canonical).is_ok_and(|metadata| !metadata.file_type().is_file()) {
         return Err(failure("项目清单来源已变化，需重新选择普通文件"));
     }
+    // Only a current member is a source repository: read the shared file before building a link,
+    // so the other product never receives a repository id this manifest does not carry.
+    let (manifest, _) = read_manifest(&canonical).map_err(failure)?;
+    if !manifest
+        .repositories
+        .iter()
+        .any(|repo| repo.id == repository_id)
+    {
+        return Err(failure("这份共享清单没有该仓库，请刷新项目成员后重试"));
+    }
     let file = text(&canonical).map_err(failure)?;
-    let url = format!("cliora://workspace?v=1&file={}", encode_percent(&file));
+    let url = format!(
+        "cliora://workspace?v=2&file={}&repository={}",
+        encode_percent(&file),
+        encode_percent(repository_id)
+    );
     parse_workspace_link_with_scheme(&url, "cliora")?;
     Ok(url)
 }
 pub fn open_in_cliora<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     path: &str,
+    repository_id: &str,
 ) -> Result<(), AppError> {
-    let url = build_cliora_workspace_url(path)?;
+    let url = build_cliora_workspace_url(path, repository_id)?;
     use tauri_plugin_opener::OpenerExt;
     app.opener()
         .open_url(&url, None::<&str>)
@@ -471,11 +528,16 @@ pub fn preview(store: &AppStore, path: &str) -> Result<Preview, AppError> {
     let conflict = store.snapshot().workspaces.iter().any(|project| {
         project.manifest.workspace_id == manifest.workspace_id && project.manifest != manifest
     });
+    let attached = store.snapshot().workspaces.iter().any(|project| {
+        project.manifest.workspace_id == manifest.workspace_id && project.manifest == manifest
+    });
     Ok(Preview {
         manifest,
         digest,
         path: text(&path).map_err(failure)?,
         conflict,
+        source_repository_id: None,
+        attached,
     })
 }
 /// Read identity using the same on-disk Git layout as the existing HEAD/worktree reader.
@@ -1540,6 +1602,7 @@ mod tests {
         let dir = TempDir::new("workspace-link");
         let store = store(&dir);
         let initial = manifest();
+        let member = initial.repositories[0].id.clone();
         let plus_dir = dir.path().join("c++ team");
         fs::create_dir_all(&plus_dir).unwrap();
         let path = plus_dir.join("shared+v1.dev-workspace.json");
@@ -1548,12 +1611,14 @@ mod tests {
         let encoded = encode_percent(canonical.to_str().unwrap());
 
         for valid in [
-            format!("twiglane://workspace?v=1&file={encoded}"),
-            format!("twiglane://workspace/?file={encoded}&v=1"),
+            format!("twiglane://workspace?v=2&file={encoded}&repository={member}"),
+            format!("twiglane://workspace/?file={encoded}&v=2&repository={member}"),
         ] {
             let observed = preview_link(&store, &valid).unwrap();
             assert_eq!(observed.manifest, initial);
             assert_eq!(observed.path, canonical.to_str().unwrap());
+            assert_eq!(observed.source_repository_id.as_deref(), Some(member.as_str()));
+            assert!(!observed.attached, "仅预览时本机还没有这份名单");
             assert!(
                 store.snapshot().workspaces.is_empty(),
                 "preview_link must never auto-adopt"
@@ -1564,44 +1629,78 @@ mod tests {
         let literal_plus = encoded.replace("%2B", "+").replace("%2b", "+");
         let observed_plus = preview_link(
             &store,
-            &format!("twiglane://workspace?v=1&file={literal_plus}"),
+            &format!("twiglane://workspace?v=2&file={literal_plus}&repository={member}"),
         )
         .unwrap();
         assert_eq!(observed_plus.path, canonical.to_str().unwrap());
 
+        let outsider = Uuid::new_v4().to_string();
         for invalid in [
-            format!("cliora://workspace?v=1&file={encoded}"),
-            format!("https://workspace?v=1&file={encoded}"),
-            format!("twiglane://review?v=1&file={encoded}"),
-            format!("twiglane://workspace/extra?v=1&file={encoded}"),
-            format!("twiglane://user@workspace?v=1&file={encoded}"),
-            format!("twiglane://workspace:8080?v=1&file={encoded}"),
+            format!("cliora://workspace?v=2&file={encoded}&repository={member}"),
+            format!("https://workspace?v=2&file={encoded}&repository={member}"),
+            format!("twiglane://review?v=2&file={encoded}&repository={member}"),
+            format!("twiglane://workspace/extra?v=2&file={encoded}&repository={member}"),
+            format!("twiglane://user@workspace?v=2&file={encoded}&repository={member}"),
+            format!("twiglane://workspace:8080?v=2&file={encoded}&repository={member}"),
+            // 旧版 v1 项目链接不再被接受，也不能退化成没有来源仓库的预览。
+            format!("twiglane://workspace?v=1&file={encoded}"),
+            format!("twiglane://workspace?v=1&file={encoded}&repository={member}"),
+            format!("twiglane://workspace?v=3&file={encoded}&repository={member}"),
+            format!("twiglane://workspace?file={encoded}&repository={member}"),
+            format!("twiglane://workspace?v=2&repository={member}"),
             format!("twiglane://workspace?v=2&file={encoded}"),
-            format!("twiglane://workspace?file={encoded}"),
-            "twiglane://workspace?v=1".to_string(),
-            format!("twiglane://workspace?v=1&v=1&file={encoded}"),
-            format!("twiglane://workspace?v=1&file={encoded}&file={encoded}"),
-            format!("twiglane://workspace?v=1&file={encoded}&adopt=1"),
-            format!("twiglane://workspace?v=1&file={encoded}#frag"),
-            format!("twiglane://workspace?v=1&file={} raw", encoded),
-            format!("twiglane://workspace?v=1&file={encoded}\n"),
-            "twiglane://workspace?v=1&file=relative.dev-workspace.json".to_string(),
-            "twiglane://workspace?v=1&file=~/shared.dev-workspace.json".to_string(),
-            "twiglane://workspace?v=1&file=%ZZ".to_string(),
-            format!("twiglane://workspace?v=1&file={}", "a".repeat(16_385)),
+            format!("twiglane://workspace?v=2&file={encoded}&repository={outsider}"),
+            format!("twiglane://workspace?v=2&file={encoded}&repository=not-a-uuid"),
+            format!("twiglane://workspace?v=2&file={encoded}&repository="),
+            "twiglane://workspace?v=2".to_string(),
+            format!("twiglane://workspace?v=2&v=2&file={encoded}&repository={member}"),
+            format!("twiglane://workspace?v=2&file={encoded}&file={encoded}&repository={member}"),
+            format!("twiglane://workspace?v=2&file={encoded}&repository={member}&repository={member}"),
+            format!("twiglane://workspace?v=2&file={encoded}&repository={member}&adopt=1"),
+            format!("twiglane://workspace?v=2&file={encoded}&repository={member}#frag"),
+            format!("twiglane://workspace?v=2&file={} raw&repository={member}", encoded),
+            format!("twiglane://workspace?v=2&file={encoded}&repository={member}\n"),
+            format!("twiglane://workspace?v=2&file=relative.dev-workspace.json&repository={member}"),
+            format!("twiglane://workspace?v=2&file=~/shared.dev-workspace.json&repository={member}"),
+            format!("twiglane://workspace?v=2&file=%ZZ&repository={member}"),
+            format!("twiglane://workspace?v=2&file={}&repository={member}", "a".repeat(16_385)),
         ] {
             assert!(preview_link(&store, &invalid).is_err(), "{invalid}");
         }
-        assert!(store.snapshot().workspaces.is_empty());
+        assert!(store.snapshot().workspaces.is_empty(), "失败的链接不写入任何状态");
 
-        let outbound = build_cliora_workspace_url(path.to_str().unwrap()).unwrap();
-        assert!(outbound.starts_with("cliora://workspace?v=1&file="));
-        assert_eq!(
-            parse_workspace_link_with_scheme(&outbound, "cliora").unwrap(),
-            canonical.to_str().unwrap()
-        );
+        let outbound = build_cliora_workspace_url(path.to_str().unwrap(), &member).unwrap();
+        assert!(outbound.starts_with("cliora://workspace?v=2&file="));
+        assert!(outbound.ends_with(&format!("&repository={member}")));
+        let parsed = parse_workspace_link_with_scheme(&outbound, "cliora").unwrap();
+        assert_eq!(parsed.file, canonical.to_str().unwrap());
+        assert_eq!(parsed.repository_id, member);
+        // 非成员仓库不能被包装成来源仓库直达。
+        assert!(build_cliora_workspace_url(path.to_str().unwrap(), &outsider).is_err());
         let non_manifest = plus_dir.join("notes.json");
         fs::write(&non_manifest, "{}").unwrap();
-        assert!(build_cliora_workspace_url(non_manifest.to_str().unwrap()).is_err());
+        assert!(build_cliora_workspace_url(non_manifest.to_str().unwrap(), &member).is_err());
+    }
+
+    #[test]
+    fn workspace_link_reports_a_linked_project_once_and_keeps_membership_untouched() {
+        let dir = TempDir::new("workspace-link-attached");
+        let store = store(&dir);
+        let initial = manifest();
+        let member = initial.repositories[0].id.clone();
+        let path = write_source(&dir, &initial);
+        let canonical = dunce::canonicalize(&path).unwrap();
+        let encoded = encode_percent(canonical.to_str().unwrap());
+        let link = format!("twiglane://workspace?v=2&file={encoded}&repository={member}");
+
+        let observed = preview_link(&store, &link).unwrap();
+        assert!(!observed.attached);
+        attach(&store, observed, false).unwrap();
+        let again = preview_link(&store, &link).unwrap();
+        // 已关联且内容一致：接收端可直接续接，不必再次确认。
+        assert!(again.attached);
+        assert!(!again.conflict);
+        assert_eq!(again.source_repository_id.as_deref(), Some(member.as_str()));
+        assert_eq!(store.snapshot().workspaces.len(), 1);
     }
 }

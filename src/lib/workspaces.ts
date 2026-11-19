@@ -39,9 +39,11 @@ export function checkoutKey(path: string): string {
 export function projectRepos(project: Project | null, hostId: string, recent: RecentRepo[], currentPath: string | null = null): RecentRepo[] {
   if (!project) return recent;
   const opened = new Map(recent.map((r) => [checkoutKey(r.path), r.openedAtMs]));
+  const favorites = new Set(project.favorites);
+  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
   const current = currentPath ? checkoutKey(currentPath) : null;
   const rows = project.manifest.repositories.flatMap((repo) => {
-    const favorite = project.favorites.includes(repo.id);
+    const favorite = favorites.has(repo.id);
     return repo.locations.filter((l) => l.hostId === hostId).map((location) => ({
       repo: { name: repo.name, path: location.path, openedAtMs: opened.get(checkoutKey(location.path)) ?? 0 },
       favorite,
@@ -52,7 +54,7 @@ export function projectRepos(project: Project | null, hostId: string, recent: Re
     Number(b.current) - Number(a.current)
     || Number(b.favorite) - Number(a.favorite)
     || b.repo.openedAtMs - a.repo.openedAtMs
-    || a.repo.name.localeCompare(b.repo.name, undefined, { numeric: true, sensitivity: "base" }));
+    || collator.compare(a.repo.name, b.repo.name));
   return rows.map((row) => row.repo);
 }
 export function addCandidates(manifest: WorkspaceManifest, candidates: WorkspaceCandidate[], hostId: string): WorkspaceManifest {

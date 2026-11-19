@@ -10,6 +10,7 @@ import StatusBar from "../src/lib/components/StatusBar.svelte";
 import TitleBar from "../src/lib/components/TitleBar.svelte";
 import ViewSwitcher from "../src/lib/components/ViewSwitcher.svelte";
 import Welcome from "../src/lib/components/Welcome.svelte";
+import { api } from "../src/lib/api";
 import { rowOffsets, rowWindow } from "../src/lib/recent";
 import type { RecentRepo, RepoSummary, Theme } from "../src/lib/types";
 
@@ -113,6 +114,52 @@ describe("大量最近仓库", () => {
     expect(options().length).toBeLessThan(30);
     expect(parseInt((document.querySelector(".switcher-space") as HTMLElement).style.height, 10)).toBeGreaterThan(500 * 30);
     expect(options()[0].getAttribute("aria-setsize")).toBe("500");
+  });
+
+  it("一万个仓库分批读 HEAD，能按最后一项的分支切换，状态总览的请求仍有上限", async () => {
+    const repos = Array.from({ length: 10_000 }, (_, i) => ({
+      name: `suite-${i}`, path: `/stress/suite-${i}`, openedAtMs: 0,
+    }));
+    const last = repos[repos.length - 1];
+    const heads = vi.spyOn(api, "repoHeads").mockImplementation(async (paths) => paths.map((path) => ({
+      path, branch: path === last.path ? "needle-at-end" : "main", detached: null,
+      missing: false, worktree: false, mainPath: null,
+    })));
+    const overview = vi.spyOn(api, "worktreeOverview").mockResolvedValue({ items: [], checkedAtMs: 1 });
+    try {
+      const onSelect = vi.fn();
+      render(RepoSwitcher, { props: props({ repos, onSelect }) as never });
+      expect(options().length).toBeLessThan(30);
+      expect(options()[0].getAttribute("aria-setsize")).toBe("10000");
+      await fireEvent.input(input(), { target: { value: "needle-at-end" } });
+      await waitFor(() => expect(options()[0]?.dataset.worktreePath).toBe(last.path));
+      const batches = heads.mock.calls.map(([paths]) => paths);
+      expect(batches.every((paths) => paths.length <= 600)).toBe(true);
+      expect(batches.flat()).toEqual(repos.map((repo) => repo.path));
+      expect(overview.mock.calls.map(([paths]) => paths.length)).toEqual([600]);
+      await fireEvent.keyDown(input(), { key: "Enter" });
+      expect(onSelect).toHaveBeenCalledWith(last.path);
+    } finally {
+      heads.mockRestore();
+      overview.mockRestore();
+    }
+  });
+
+  it("关闭弹层时正在读取的一批 HEAD 返回后，不再调度后续批次", async () => {
+    let finish!: () => void;
+    const heads = vi.spyOn(api, "repoHeads").mockImplementation(() => new Promise((resolve) => {
+      finish = () => resolve([]);
+    }));
+    try {
+      const view = render(RepoSwitcher, { props: props() as never });
+      expect(heads.mock.calls[0][0].length).toBeLessThan(many.length);
+      view.unmount();
+      finish();
+      await tick();
+      expect(heads).toHaveBeenCalledTimes(1);
+    } finally {
+      heads.mockRestore();
+    }
   });
 
   it("滚动后渲染窗口跟着走，定位按全量下标", async () => {

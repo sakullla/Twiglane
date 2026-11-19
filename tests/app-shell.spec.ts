@@ -3655,6 +3655,25 @@ describe("worktree 总览（R3）", () => {
     expect(mocks.worktreeOverview).toHaveBeenCalledTimes(2);
   });
 
+  it("大工作区组关闭后只保留一批缓存，再打开能从最新总览恢复整组", async () => {
+    const main = "C:/work/cache-budget";
+    useRecent([{ name: "cache-budget", path: main, openedAtMs: 1 }]);
+    const items = [item({ path: main }), ...Array.from({ length: 1500 }, (_, i) =>
+      item({ path: main + "-" + i, mainPath: main, linked: true, recent: false }))];
+    const overview = { items, checkedAtMs: 10 };
+    mocks.worktreeOverview.mockResolvedValueOnce(overview);
+    let popover = await openSwitcher();
+    const groupSize = () => popover.querySelector(".rs-group-count")?.textContent;
+    await waitFor(() => expect(groupSize()).toBe("1501 个工作区"));
+    await closeSwitcher(popover);
+    let finish!: (result: typeof overview) => void;
+    mocks.worktreeOverview.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    popover = await openRepoSwitcher();
+    expect(groupSize()).toBe("600 个工作区");
+    finish(overview);
+    await waitFor(() => expect(groupSize()).toBe("1501 个工作区"));
+  });
+
   it("已关闭弹层的迟到响应不回写模块缓存", async () => {
     const main = "C:/work/closed-scan";
     useRecent([{ name: "closed-scan", path: main, openedAtMs: 1 }]);

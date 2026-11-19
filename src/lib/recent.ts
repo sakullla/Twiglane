@@ -33,7 +33,7 @@ export function baseName(path: string): string {
 }
 
 /** 出现不止一次的仓库名：这些仓库只能靠路径区分，界面要显示完整路径而不是截断。 */
-export function repeatedNames(repos: RecentRepo[]): Set<string> {
+export function repeatedNames(repos: readonly { name: string }[]): Set<string> {
   const seen = new Set<string>();
   const repeated = new Set<string>();
   for (const repo of repos) (seen.has(repo.name) ? repeated : seen).add(repo.name);
@@ -297,8 +297,7 @@ export function rowMatchesFilter(row: WorktreeRow, filter: WorktreeFilter): bool
 }
 
 /** 关键字同时匹配名称、路径、分支、游离提交、主仓库路径与主仓库名。 */
-export function rowMatchesQuery(row: WorktreeRow, group: WorktreeGroup, query: string): boolean {
-  const needle = query.trim().toLocaleLowerCase();
+function rowMatchesQuery(row: WorktreeRow, group: WorktreeGroup, needle: string): boolean {
   if (!needle) return true;
   return [row.name, row.path, row.branch, row.detached, row.mainPath, group.name].some((text) =>
     text?.toLocaleLowerCase().includes(needle),
@@ -307,14 +306,16 @@ export function rowMatchesQuery(row: WorktreeRow, group: WorktreeGroup, query: s
 
 /** 关键字与筛选可组合：先按真实状态筛，再按关键字筛；没有命中的组整体隐藏。 */
 export function filterWorktreeGroups(
-  groups: readonly WorktreeGroup[],
+  groups: WorktreeGroup[],
   query: string,
   filter: WorktreeFilter,
 ): WorktreeGroup[] {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle && filter === "all") return groups;
   const kept: WorktreeGroup[] = [];
   for (const group of groups) {
     const rows = group.rows.filter(
-      (row) => rowMatchesFilter(row, filter) && rowMatchesQuery(row, group, query),
+      (row) => rowMatchesFilter(row, filter) && rowMatchesQuery(row, group, needle),
     );
     if (rows.length > 0) kept.push({ ...group, rows });
   }
@@ -334,13 +335,6 @@ export function flattenWorktreeGroups(groups: readonly WorktreeGroup[]): Worktre
     }
   }
   return rows;
-}
-
-/** 可选择的项（分组头不在其中）：键盘当前项和 openRecent 的入口都取这一份。 */
-export function selectableWorktreeRows(rows: readonly WorktreeListRow[]): WorktreeRow[] {
-  return rows
-    .filter((row): row is Extract<WorktreeListRow, { kind: "item" }> => row.kind === "item")
-    .map((row) => row.row);
 }
 
 /** 右键菜单沿用 RepoHead：总览里的字段够用，不需要再造一份来源。 */
@@ -399,19 +393,20 @@ export function authoritativeMains(items: readonly WorktreeItem[]): Set<string> 
  * 而它的附属工作区在移除后仍然在场（枚举结果没被重新请求）。
  */
 export function pruneWorktreeItems(
-  recent: readonly RecentRepo[],
+  recentKeys: ReadonlySet<string>,
   items: ReadonlyMap<string, WorktreeItem>,
-): Map<string, WorktreeItem> {
-  const recentKeys = new Set(recent.map((repo) => normalizeRepoPath(repo.path)));
+): ReadonlyMap<string, WorktreeItem> {
   const mains = new Set<string>();
-  for (const item of items.values()) {
-    const key = normalizeRepoPath(item.path);
+  for (const [key, item] of items) {
     if (recentKeys.has(key) && item.mainPath) mains.add(normalizeRepoPath(item.mainPath));
   }
-  const kept = new Map<string, WorktreeItem>();
+  let kept: Map<string, WorktreeItem> | undefined;
   for (const [key, item] of items) {
+    if (recentKeys.has(key)) continue;
     const main = item.mainPath ? normalizeRepoPath(item.mainPath) : null;
-    if (recentKeys.has(key) || (main !== null && (recentKeys.has(main) || mains.has(main)))) kept.set(key, item);
+    if (main !== null && (recentKeys.has(main) || mains.has(main))) continue;
+    kept ??= new Map(items);
+    kept.delete(key);
   }
-  return kept;
+  return kept ?? items;
 }

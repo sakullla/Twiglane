@@ -20,48 +20,57 @@ export function initialOf(value: string): string {
   return first.toUpperCase();
 }
 
-function repoBadgeChars(name: string): string[] {
-  return [...name.trim().replace(/^[._\-\s]+/, "")];
+function badgeGlyphs(name: string): string[] {
+  return Array.from(name.trim().replace(/^[._\-\s]+/, ""), (char) => char.toUpperCase());
 }
 
-/**
- * 同一处可见的仓库名各自的徽标文字。
- * 每个名称相对其余名称，取把它和最接近的那个分开的字符并大写。
- * 只有一个名称、与其余名称完全相同、或区分点超出自身长度时，取首字符。
- * 空名是 ?，并且不参与比较。比较忽略大小写。
- */
+function commonPrefix(left: string[], right: string[]): number {
+  const limit = Math.min(left.length, right.length);
+  let index = 0;
+  while (index < limit && left[index] === right[index]) index += 1;
+  return index;
+}
+
+/** 排序后，最长公共前缀一定出现在相邻的两个不同名称之间。同名项共用结果。 */
 export function repoBadgeLetters(names: readonly string[]): string[] {
-  const glyphs = names.map(repoBadgeChars);
-  return names.map((name, index) => {
-    const chars = glyphs[index];
-    if (chars.length === 0) return "?";
-    let split = -1;
-    for (let other = 0; other < glyphs.length; other += 1) {
-      if (other === index || glyphs[other].length === 0) continue;
-      const mismatch = firstMismatch(chars, glyphs[other]);
-      if (mismatch > split) split = mismatch;
-    }
-    const glyph = split >= 0 ? chars[split] : undefined;
-    return glyph === undefined ? initialOf(name) : glyph.toUpperCase();
+  const sorted = names.map((name, index) => ({ glyphs: badgeGlyphs(name), index }));
+  sorted.sort((a, b) => {
+    const at = commonPrefix(a.glyphs, b.glyphs);
+    if (at === Math.min(a.glyphs.length, b.glyphs.length)) return a.glyphs.length - b.glyphs.length;
+    return a.glyphs[at] < b.glyphs[at] ? -1 : 1;
   });
-}
-
-/** 大小写视为相同。完全相同返回 -1，这样 Kite-web 与 kite-api 仍在后缀处分歧。 */
-function firstMismatch(left: string[], right: string[]): number {
-  const limit = Math.max(left.length, right.length);
-  for (let index = 0; index < limit; index += 1) {
-    const a = left[index]?.toUpperCase() ?? "";
-    const b = right[index]?.toUpperCase() ?? "";
-    if (a !== b) return index;
+  const letters = new Array<string>(names.length);
+  let previousPrefix = 0;
+  for (let start = 0; start < sorted.length;) {
+    const glyphs = sorted[start].glyphs;
+    let end = start + 1;
+    let nextPrefix = 0;
+    while (end < sorted.length) {
+      const next = sorted[end].glyphs;
+      nextPrefix = commonPrefix(glyphs, next);
+      if (nextPrefix !== glyphs.length || nextPrefix !== next.length) break;
+      end += 1;
+    }
+    if (end === sorted.length) nextPrefix = 0;
+    const letter = glyphs[Math.max(previousPrefix, nextPrefix)] ?? glyphs[0] ?? "?";
+    for (let index = start; index < end; index += 1) letters[sorted[index].index] = letter;
+    previousPrefix = nextPrefix;
+    start = end;
   }
-  return -1;
+  return letters;
 }
 
-/** 在一组同时可见的名称里取这一个仓库的徽标文字。名称不在组里时按加入该组计算。 */
+/** 标题栏只需要当前仓库的徽标，扫描一次即可。 */
 export function repoBadgeLetter(name: string, names: readonly string[]): string {
-  const index = names.indexOf(name);
-  if (index >= 0) return repoBadgeLetters(names)[index] ?? "?";
-  return repoBadgeLetters([...names, name]).at(-1) ?? "?";
+  const glyphs = badgeGlyphs(name);
+  let longest = 0;
+  for (const other of names) {
+    if (other === name) continue;
+    const candidate = badgeGlyphs(other);
+    const prefix = commonPrefix(glyphs, candidate);
+    if (prefix !== glyphs.length || prefix !== candidate.length) longest = Math.max(longest, prefix);
+  }
+  return glyphs[longest] ?? glyphs[0] ?? "?";
 }
 
 /** 把路径拆成目录与文件名，用于“文件名在前、目录弱化”的展示。 */

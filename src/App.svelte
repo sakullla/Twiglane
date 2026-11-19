@@ -173,8 +173,8 @@
 
   let widths = $state<PanelWidths>({ sidebar: 256, files: 360 });
   let opened = $state.raw<OpenedRepository | null>(null);
-  let recent = $state<RecentRepo[]>([]);
-  let projects = $state<Projects>({ hostId: "", projects: [] });
+  let recent = $state.raw<RecentRepo[]>([]);
+  let projects = $state.raw<Projects>({ hostId: "", projects: [] });
   let selectedProjectId = $state<string | null>(null);
   let projectManagerOpen = $state(false);
   let projectInitialPreview = $state<WorkspacePreview | null>(null);

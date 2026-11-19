@@ -1,23 +1,36 @@
 <script module lang="ts">
   import { api } from "../api";
-  import type { RepoHead, WorktreeItem, WorktreeOverview } from "../types";
+  import type { RepoHead, WorktreeItem } from "../types";
 
-  // Only share an unfinished scan. A later open still refreshes local Git state.
-  let pendingOverview: { key: string; promise: Promise<WorktreeOverview> } | null = null;
-  let overviewRequestId = 1_000_000_000_000;
-
-  function requestOverview(paths: string[]): Promise<WorktreeOverview> {
-    const key = JSON.stringify(paths);
-    if (pendingOverview?.key === key) return pendingOverview.promise;
-    const promise = api.worktreeOverview(paths, ++overviewRequestId);
-    const pending = { key, promise };
-    pendingOverview = pending;
-    const clear = () => {
-      if (pendingOverview === pending) pendingOverview = null;
+  // A close/reopen may overlap the same disk read, including when switching projects.
+  // Drop completed requests so the next open observes new local Git state.
+  function sharePending<T>(load: (paths: string[]) => Promise<T>) {
+    const pending = new Map<string, Promise<T>>();
+    return (paths: string[]) => {
+      const key = JSON.stringify(paths);
+      const existing = pending.get(key);
+      if (existing) return existing;
+      const request = load(paths).finally(() => pending.delete(key));
+      pending.set(key, request);
+      return request;
     };
-    void promise.then(clear, clear);
-    return promise;
   }
+
+  // Matches the native MAX_HEADS per call. Retain at most one batch of warm
+  // entries between opens, while the mounted menu can show every returned row.
+  const PATH_BATCH = 600;
+
+  function trimWarmCache(cache: Map<string, unknown>) {
+    if (cache.size <= PATH_BATCH) return;
+    let count = 0;
+    for (const key of cache.keys()) {
+      if (++count > PATH_BATCH) cache.delete(key);
+    }
+  }
+
+  let overviewRequestId = 1_000_000_000_000;
+  const requestHeads = sharePending((paths) => api.repoHeads(paths));
+  const requestOverview = sharePending((paths) => api.worktreeOverview(paths, ++overviewRequestId));
 
   /**
    * 上次读到的 HEAD 与总览：弹层再次打开时先显示上次结果，后台再刷新。
@@ -47,10 +60,9 @@
     pruneWorktreeItems,
     remoteText,
     repeatedNames,
-    rowMatchesFilter,
+    syncPending,
     rowOffsets,
     rowWindow,
-    selectableWorktreeRows,
     statusTimeText,
     type WorktreeFilter,
     type WorktreeListRow,
@@ -127,6 +139,7 @@
   /** 超过这个数量才给搜索加防抖：少量仓库时输入即筛，几百个时合并连续击键。 */
   const DEBOUNCE_FROM = 120;
   const DEBOUNCE_MS = 120;
+  const FIRST_HEAD_BATCH = 64;
 
   let query = $state("");
   /** 真正参与筛选的关键词：仓库多时比输入框晚一拍。 */
@@ -138,7 +151,7 @@
       if (searchTimer) clearTimeout(searchTimer);
       searchTimer = null;
       if (next === searchTerm) return;
-      if (repos.length < DEBOUNCE_FROM || next === "") {
+      if (filterCounts.all < DEBOUNCE_FROM || next === "") {
         searchTerm = next;
         return;
       }
@@ -167,26 +180,15 @@
   let headsVersion = $state(0);
   let itemsVersion = $state(0);
   let statusLoading = $state(false);
+  let headsLoading = $state(false);
   let statusError = $state<string | null>(null);
   let statusCheckedAt = $state<number | null>(null);
-  /** 谁最后发起的请求谁写结果：旧响应不覆盖新列表。 */
-  let overviewSerial = 0;
 
-  function itemMap(): Map<string, WorktreeItem> {
+  let recentKeys = $derived(new Set(repos.map((repo) => normalizeRepoPath(repo.path))));
+  let visibleItems = $derived.by(() => {
     void itemsVersion;
-    return new Map(knownItems);
-  }
-
-  function headMap(): Map<string, RepoHead> {
-    void headsVersion;
-    return new Map(knownHeads);
-  }
-
-  /** 最近一次成功刷新确认过的路径；还没成功过时为 null（不把缓存说成过期）。 */
-  function confirmedSet(): Set<string> | null {
-    void itemsVersion;
-    return confirmedItems.size === 0 ? null : new Set(confirmedItems);
-  }
+    return pruneWorktreeItems(recentKeys, knownItems);
+  });
 
   /** 当前项记成路径：键盘、鼠标和异步落地都走同一份身份。 */
   function setActive(index: number) {
@@ -202,24 +204,24 @@
     return totals;
   });
 
-  let groups = $derived(
-    buildWorktreeGroups(
-      repos,
-      headMap(),
-      pruneWorktreeItems(repos, itemMap()),
-      currentPath,
-      reviewedTotals,
-      confirmedSet(),
-    ),
-  );
+  let groups = $derived.by(() => {
+    void headsVersion;
+    void itemsVersion;
+    return buildWorktreeGroups(repos, knownHeads, visibleItems, currentPath, reviewedTotals, confirmedItems);
+  });
   let filtered = $derived(filterWorktreeGroups(groups, searchTerm, filter));
   let flat = $derived(flattenWorktreeGroups(filtered));
-  let selectable = $derived(selectableWorktreeRows(flat));
+  let itemPositions = $derived.by(() => {
+    const positions: number[] = [];
+    for (let index = 0; index < flat.length; index += 1) {
+      if (flat[index].kind === "item") positions.push(index);
+    }
+    return positions;
+  });
+  let selectable = $derived(filtered.flatMap((group) => group.rows));
   let badgeLetters = $derived(repoBadgeLetters(selectable.map((row) => row.name)));
   /** 同名仓库只能靠路径区分，这些行显示完整路径而不是截断（R6）。 */
-  let sameNames = $derived(
-    repeatedNames(selectable.map((row) => ({ name: row.name, path: row.path, openedAtMs: 0 }))),
-  );
+  let sameNames = $derived(repeatedNames(selectable));
   /* 同名仓库路径里的差异段：整组一起算公共前缀，各行只高亮自己与众不同的那一段。 */
   let divergences = $derived.by(() => {
     const map = new Map<string, { head: string; diverge: string; tail: string }>();
@@ -237,55 +239,69 @@
   });
 
   onMount(() => {
-    const paths = repos.map((repo) => repo.path);
     pruneCache();
-    if (paths.length === 0) return;
+    if (repos.length === 0) return;
+    const snapshot = repos;
+    headsLoading = true;
     let alive = true;
+    // Release this instance's list even if a shared native read takes a long time.
+    let stop!: () => void;
+    const closed = new Promise<void>((resolve) => { stop = resolve; });
     void (async () => {
-      try {
-        const heads = await api.repoHeads(paths);
-        if (!alive) return;
-        const answered = new Set((heads ?? []).map((head) => normalizeRepoPath(head.path)));
-        // 这次没读到的仓库不能继续用上次的 HEAD：缓存只解释「读到过什么」，不是事实来源。
-        for (const path of paths) {
-          const key = normalizeRepoPath(path);
-          if (!answered.has(key)) knownHeads.delete(key);
+      // First paint gets branch hints early. Bound IPC payloads to the native
+      // HEAD limit, and publish at doubling intervals to avoid rebuilding the
+      // whole list after every batch in a very large project.
+      let publishAt = FIRST_HEAD_BATCH;
+      for (let start = 0; alive && start < snapshot.length;) {
+        const end = Math.min(start + (start === 0 ? FIRST_HEAD_BATCH : PATH_BATCH), snapshot.length);
+        const paths = snapshot.slice(start, end).map((repo) => repo.path);
+        try {
+          const heads = await Promise.race([requestHeads(paths), closed]);
+          if (!alive) return;
+          for (const path of paths) knownHeads.delete(normalizeRepoPath(path));
+          for (const head of heads ?? []) {
+            const key = normalizeRepoPath(head.path);
+            if (recentKeys.has(key)) knownHeads.set(key, head);
+          }
+        } catch {
+          // A failed batch leaves its previous hints available.
         }
-        for (const head of heads ?? []) knownHeads.set(normalizeRepoPath(head.path), head);
-        headsVersion += 1;
-      } catch {
-        // 读不到分支只是少一条提示，不影响切换。
+        if (alive && (end >= publishAt || end === snapshot.length)) {
+          headsVersion += 1;
+          publishAt = end * 2;
+        }
+        start = end;
       }
+      if (alive) headsLoading = false;
     })();
-    void loadOverview(paths);
+    void loadOverview(snapshot.slice(0, PATH_BATCH).map((repo) => repo.path), closed, () => alive);
     return () => {
       alive = false;
-      overviewSerial += 1;
+      stop();
+      trimWarmCache(knownHeads);
+      trimWarmCache(knownItems);
+      for (const key of confirmedItems) if (!knownItems.has(key)) confirmedItems.delete(key);
     };
   });
 
   // Evict forgotten repositories from the module cache, not just the rendered list.
   function pruneCache() {
-    const paths = new Set(repos.map((repo) => normalizeRepoPath(repo.path)));
-    for (const key of knownHeads.keys()) if (!paths.has(key)) knownHeads.delete(key);
-    const kept = pruneWorktreeItems(repos, knownItems);
+    for (const key of knownHeads.keys()) if (!recentKeys.has(key)) knownHeads.delete(key);
+    const kept = visibleItems;
     for (const key of knownItems.keys()) if (!kept.has(key)) knownItems.delete(key);
     for (const key of confirmedItems) if (!knownItems.has(key)) confirmedItems.delete(key);
-    headsVersion += 1;
-    itemsVersion += 1;
   }
 
   /**
    * 逐项状态：单独请求，慢或失败都不影响搜索与切换。
    * 失败时保留上次结果并说明「读取失败」，行上的时间仍然是被保留结果自己的时间。
    */
-  async function loadOverview(paths: string[]) {
-    const serial = ++overviewSerial;
+  async function loadOverview(paths: string[], closed: Promise<void>, alive: () => boolean) {
     statusLoading = true;
     statusError = null;
     try {
-      const overview = await requestOverview(paths);
-      if (serial !== overviewSerial) return;
+      const overview = await Promise.race([requestOverview(paths), closed]);
+      if (!overview || !alive()) return;
       const items = overview.items ?? [];
       const answered = new Set(items.map((item) => normalizeRepoPath(item.path)));
       // 本次没有结果的最近项不再沿用旧状态；枚举出来的工作区（不在请求里）保留自己的结果。
@@ -296,22 +312,23 @@
       // 权威枚举过的主仓库以这次结果为准：缓存里已经不在枚举中的附属工作区就是被删掉的，
       // 不能继续显示旧分支/旧 dirty/旧时间，更不能还能打开或删除。
       const authoritative = authoritativeMains(items);
-      for (const [key, cached] of [...knownItems]) {
+      for (const [key, cached] of knownItems) {
         if (answered.has(key)) continue;
         const main = cached.mainPath ? normalizeRepoPath(cached.mainPath) : null;
         if (main !== null && authoritative.has(main)) knownItems.delete(key);
       }
       for (const item of items) knownItems.set(normalizeRepoPath(item.path), item);
       // 未确认的缓存项留在原处，但只算过期结果。
-      for (const key of [...confirmedItems]) if (!answered.has(key)) confirmedItems.delete(key);
+      for (const key of confirmedItems) if (!answered.has(key)) confirmedItems.delete(key);
       for (const key of answered) confirmedItems.add(key);
+      itemsVersion += 1;
       pruneCache();
       statusCheckedAt = overview.checkedAtMs ?? Date.now();
     } catch (error) {
-      if (serial !== overviewSerial) return;
+      if (!alive()) return;
       statusError = errorText(error);
     } finally {
-      if (serial === overviewSerial) statusLoading = false;
+      if (alive()) statusLoading = false;
     }
   }
 
@@ -324,11 +341,19 @@
   }
 
   /** 筛选按钮上的实时条数：按真实状态统计，未知项不混进任何一档。 */
-  function countFor(id: WorktreeFilter): number {
-    let total = 0;
-    for (const group of groups) for (const row of group.rows) if (rowMatchesFilter(row, id)) total += 1;
-    return total;
-  }
+  let filterCounts = $derived.by(() => {
+    const counts: Record<WorktreeFilter, number> = { all: 0, worktree: 0, dirty: 0, conflict: 0, sync: 0 };
+    for (const group of groups) {
+      counts.all += group.rows.length;
+      for (const row of group.rows) {
+        if (row.linked) counts.worktree++;
+        if (row.dirty) counts.dirty++;
+        if ((row.conflicted ?? 0) > 0) counts.conflict++;
+        if (syncPending(row)) counts.sync++;
+      }
+    }
+    return counts;
+  });
 
   function setFilter(next: WorktreeFilter) {
     filter = next;
@@ -362,10 +387,9 @@
     const rows: { row: WorktreeListRow; index: number }[] = [];
     for (let index = range.start; index < range.end; index += 1) rows.push({ row: flat[index], index });
     // 键盘当前项必须留在 DOM：aria-activedescendant 与 scrollIntoView 都要有落点。
-    const current = selectable[active];
-    if (current && !rows.some((entry) => entry.row.kind === "item" && entry.row.row.path === current.path)) {
-      const at = flat.findIndex((entry) => entry.kind === "item" && entry.row.path === current.path);
-      if (at >= 0) rows.push({ row: flat[at], index: at });
+    const at = itemPositions[active];
+    if (at !== undefined && (at < range.start || at >= range.end)) {
+      rows.push({ row: flat[at], index: at });
     }
     return rows;
   });
@@ -461,6 +485,7 @@
 
   function emptyText(): string {
     if (repos.length === 0) return "还没有最近仓库，从下面打开或克隆一个。";
+    if (headsLoading && searchTerm.trim()) return "正在读取分支，搜索结果会随读取进度更新。";
     if (searchTerm.trim() || filter !== "all") return "没有符合当前搜索与筛选的工作区，换个关键词或筛选条件试试。";
     return "没有可显示的工作区。";
   }
@@ -499,7 +524,7 @@
       <div class="rs-toolbar">
         <div class="switcher-filters rs-filters" role="group" aria-label="筛选工作区">
           {#each WORKTREE_FILTERS as option (option.id)}
-            {@const count = option.id === "all" ? 0 : countFor(option.id)}
+            {@const count = filterCounts[option.id]}
             {#if option.id === "all" || count > 0 || filter === option.id}
               <button
                 type="button"

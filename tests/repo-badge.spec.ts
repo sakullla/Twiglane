@@ -97,6 +97,14 @@ describe("仓库徽标文字", () => {
     expect(repoBadgeLetter("kite-web", ["kite-web", "kite-api"])).toBe("W");
   });
 
+  it("忽略大小写与前导符号，重复项和 Unicode 大写扩展都保留原字符边界", () => {
+    const names = ["..ßab", "ßac", "ssab", "ßAB", "🐙", "🐙X", "🐙x", " "];
+    const letters = ["B", "C", "S", "B", "🐙", "X", "X", "?"];
+    expect(repoBadgeLetters(names)).toEqual(letters);
+    expect(names.map((name) => repoBadgeLetter(name, names))).toEqual(letters);
+    expect(repoBadgeLetter("ßad", names)).toBe("D");
+  });
+
   it("颜色只由路径决定，同一路径反复计算不变", () => {
     expect(hueOf(webPath)).toBe(hueOf(webPath));
     expect(hueOf(webPath)).not.toBe(hueOf(apiPath));

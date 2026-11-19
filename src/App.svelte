@@ -457,6 +457,8 @@
   let branchCreateIntent = $state(false);
   /** 从分支弹层右键「从此分支新建」带来的起点；空串表示当前分支。 */
   let branchCreateBase = $state("");
+  /** 分支弹层右键「删除」：打开分支管理并直接弹出统一的删除确认。 */
+  let branchDeleteIntent = $state<{ name: string; remote: boolean } | null>(null);
   let paletteOpen = $state(false);
   /**
    * 命令面板打开前的有效焦点。
@@ -1139,6 +1141,11 @@
     }
   }
 
+  function runBranchDelete(branch: { name: string; remote: boolean }) {
+    runFromSwitcher("task.branch");
+    if (taskModal === "branch") branchDeleteIntent = { name: branch.name, remote: branch.remote };
+  }
+
   /** 把某个分支合并到当前分支：打开分支合并并预选来源。分支弹层和分支管理共用。 */
   function mergeBranchIntoCurrent(name: string) {
     mergeSource = name;
@@ -1191,6 +1198,7 @@
     paletteOpen = false;
     branchCreateIntent = false;
     branchCreateBase = "";
+    branchDeleteIntent = null;
     taskReturn = null;
     taskModal = task;
     if (task === "merge") void probeMerge();
@@ -4725,6 +4733,7 @@
       onNotice={notice}
       onCommand={runFromSwitcher}
       onCreateBranch={runBranchCreate}
+      onDeleteBranch={runBranchDelete}
       onMergeBranch={(name) => {
         closeSwitcher();
         mergeBranchIntoCurrent(name);
@@ -5351,6 +5360,7 @@
     onRebaseBranch={(name) => mergeFromBranches(() => rebaseCurrentOnto(name))}
     startCreating={branchCreateIntent}
     startBase={branchCreateBase}
+    startDelete={branchDeleteIntent}
     backgroundClone={pending === "clone"}
     {branchGroups}
     blockedReason={writeLocked ? switchBlockedReason(commandState) : null}

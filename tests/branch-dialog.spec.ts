@@ -368,6 +368,12 @@ describe("分支管理", () => {
     expect(screen.getByRole("tab", { name: /本地分支/ }).getAttribute("aria-selected")).toBe("true");
   });
 
+  it("带删除意图打开时，列表读完直接弹出统一的删除确认", async () => {
+    render(BranchDialog, { props: { ...props(), startDelete: { name: "main", remote: false } } });
+    const dialog = await screen.findByRole("dialog", { name: "删除本地分支" });
+    expect(within(dialog).getByRole("list", { name: "要删除的分支" }).textContent).toContain("main");
+  });
+
   it("删除确认是叠在列表上的对话框：焦点在取消上，列表原样留着；取消后回到触发按钮", async () => {
     render(BranchDialog, { props: props() });
     await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());

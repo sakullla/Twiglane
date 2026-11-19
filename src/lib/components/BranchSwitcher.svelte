@@ -34,6 +34,8 @@
     onCommand: (id: string) => void;
     /** 「新建分支」：打开分支 modal 并直接展开新建表单；base 是预选的起点。 */
     onCreateBranch: (base?: string) => void;
+    /** 删除分支：走分支管理里统一的删除确认（未合入再确认、同名远程、占用的工作区）。 */
+    onDeleteBranch?: (branch: BranchRecord) => void;
     /** 把所点分支合并到当前分支：打开分支合并并预选来源。 */
     onMergeBranch?: (name: string) => void;
     /** 把当前分支合并到所点本地分支：打开分支合并并预选目标。 */
@@ -66,6 +68,7 @@
     onNotice,
     onCommand,
     onCreateBranch,
+    onDeleteBranch,
     onMergeBranch,
     onMergeInto,
     onRebaseBranch,
@@ -102,13 +105,8 @@
   let summary = $derived(trackingSummary([...tracks.values()]));
   /** 只看需要拉取 / 推送的分支。 */
   let syncFilter = $state<"pull" | "push" | null>(null);
-  /** 就地展开的重命名 / 删除确认。 */
-  let editing = $state<
-    | { kind: "rename"; branch: BranchRecord; value: string }
-    | { kind: "delete"; branch: BranchRecord; unmerged: boolean }
-    | { kind: "delete-remote"; branch: BranchRecord }
-    | null
-  >(null);
+  /** 就地展开的重命名；删除统一交给分支管理里的删除确认框。 */
+  let editing = $state<{ kind: "rename"; branch: BranchRecord; value: string } | null>(null);
   let working = $state<string | null>(null);
   /** 远程分支的短名被跟踪别处的本地分支占用：给出「切到本地同名分支」或「以新名称检出」两条路。 */
   let mismatch = $state<{ remote: string; local: string; suggested: string } | null>(null);
@@ -354,10 +352,6 @@
       if (opened.summary.path !== repo.summary.path) return false;
       if (failure.generation !== undefined) onGeneration(failure.generation);
       if (mounted) errorText = failure.message;
-      if (failure.code === "branch_unmerged" && editing?.kind === "delete") {
-        editing = { ...editing, unmerged: true };
-        return false;
-      }
       onFailure(failure);
       return false;
     } finally {
@@ -414,27 +408,6 @@
       (path, generation) => api.renameBranch(path, branch.name, next, generation, nextId()),
       `已把 ${branch.name} 重命名为 ${next}。`,
     );
-  }
-
-  function submitDelete() {
-    const target = editing;
-    if (!target) return;
-    if (target.kind === "delete") {
-      void runWrite(
-        `正在删除 ${target.branch.name}`,
-        "branch",
-        (path, generation) => api.deleteBranch(path, target.branch.name, target.unmerged, generation, nextId()),
-        `已删除本地分支 ${target.branch.name}。`,
-      );
-    } else if (target.kind === "delete-remote") {
-      const { remote, short } = splitRemote(target.branch.name);
-      void runWrite(
-        `正在删除远程分支 ${target.branch.name}`,
-        "sync",
-        (path, generation) => api.deleteRemoteBranch(path, remote, short, true, generation, nextId()),
-        `已从 ${remote} 删除 ${short}。`,
-      );
-    }
   }
 
   /** 分支行的操作菜单：拉取 / 推送不切换分支；重命名与删除就地确认。 */
@@ -529,10 +502,7 @@
         icon: "trash",
         danger: true,
         disabledReason: (current ? "不能删除当前分支，请先切换到其他分支" : undefined) ?? occupied ?? busy,
-        run: () => {
-          errorText = null;
-          editing = { kind: "delete", branch, unmerged: false };
-        },
+        run: () => onDeleteBranch?.(branch),
       });
     } else {
       entries.push({
@@ -541,10 +511,7 @@
         icon: "trash",
         danger: true,
         disabledReason: busy,
-        run: () => {
-          errorText = null;
-          editing = { kind: "delete-remote", branch };
-        },
+        run: () => onDeleteBranch?.(branch),
       });
     }
     entries.push({ id: "manage", label: "在分支管理中打开…", icon: "settings", run: () => onCommand("task.branch") });
@@ -705,27 +672,6 @@
           <button type="submit" class="btn btn-primary btn-sm" disabled={working !== null || blockedReason !== null || !editing.value.trim()} title={blockedReason ?? undefined}>重命名</button>
         </div>
       </form>
-    {:else if editing?.kind === "delete" || editing?.kind === "delete-remote"}
-      {@const target = editing.branch}
-      {@const remoteDelete = editing.kind === "delete-remote"}
-      {@const unmerged = editing.kind === "delete" && editing.unmerged}
-      <div class="branch-inline-form danger" role="alertdialog" aria-label={`删除 ${target.name}`} tabindex="-1" onmousedown={(event) => event.stopPropagation()}>
-        <p>
-          {#if remoteDelete}
-            从远程删除 <code>{target.name}</code>？其他人将不再能拉取它；本地分支不受影响。
-          {:else if unmerged}
-            <code>{target.name}</code> 有提交没有合入当前分支或上游，删除后这些提交只能通过 reflog 找回。仍要删除吗？
-          {:else}
-            删除本地分支 <code>{target.name}</code>？{#if target.merged}它已完整合入主干，不会丢失提交。{:else}未合入的提交会先拦下并再次确认。{/if}
-          {/if}
-        </p>
-        <div class="row">
-          <button type="button" class="btn btn-ghost btn-sm" onclick={() => (editing = null)}>取消</button>
-          <button type="button" class="btn btn-danger btn-sm" disabled={working !== null || blockedReason !== null} title={blockedReason ?? undefined} onclick={submitDelete}>
-            {remoteDelete ? "从远程删除" : unmerged ? "仍然删除" : "删除分支"}
-          </button>
-        </div>
-      </div>
     {/if}
     {#if working}
       <p class="switcher-notice" role="status"><span class="spinner"></span><span>{working}…</span></p>

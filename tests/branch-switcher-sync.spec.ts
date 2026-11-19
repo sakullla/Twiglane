@@ -177,8 +177,9 @@ describe("分支弹层的同步徽标与不切换的拉取 / 推送", () => {
     expect(within(menu).getByRole("menuitem", { name: /^推送/ }).getAttribute("title")).toBe("正在写入，稍后再试");
   });
 
-  it("重命名就地展开表单；删除未合并分支先拦下再确认", async () => {
-    const props = show();
+  it("重命名就地展开表单；删除交给分支管理里统一的删除确认", async () => {
+    const onDeleteBranch = vi.fn();
+    const props = show({ onDeleteBranch });
     mocks.renameBranch.mockResolvedValue({ generation: 6, branches, snapshot });
     let menu = await menuFor("dev");
     await fireEvent.click(within(menu).getByRole("menuitem", { name: "重命名…" }));
@@ -188,34 +189,26 @@ describe("分支弹层的同步徽标与不切换的拉取 / 推送", () => {
     await waitFor(() => expect(mocks.renameBranch).toHaveBeenCalledWith("/repo", "dev", "develop", 4, 9));
     await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("已把 dev 重命名为 develop。"));
 
-    mocks.deleteBranch
-      .mockRejectedValueOnce({ code: "branch_unmerged", generation: 5, message: "分支没有完全合并" })
-      .mockResolvedValueOnce({ generation: 7, branches, snapshot });
     menu = await menuFor("dev");
     await fireEvent.click(within(menu).getByRole("menuitem", { name: "删除分支…" }));
-    const confirm = await screen.findByRole("alertdialog", { name: "删除 dev" });
-    await fireEvent.click(within(confirm).getByRole("button", { name: "删除分支" }));
-    await waitFor(() => expect(mocks.deleteBranch).toHaveBeenCalledWith("/repo", "dev", false, 4, 9));
-    const again = await screen.findByRole("button", { name: "仍然删除" });
-    expect(props.onFailure).not.toHaveBeenCalled();
-    await fireEvent.click(again);
-    await waitFor(() => expect(mocks.deleteBranch).toHaveBeenLastCalledWith("/repo", "dev", true, 4, 9));
+    expect(onDeleteBranch).toHaveBeenCalledWith(expect.objectContaining({ name: "dev", remote: false }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(mocks.deleteBranch).not.toHaveBeenCalled();
 
     menu = await menuFor("main");
     expect(within(menu).getByRole("menuitem", { name: "删除分支…" }).getAttribute("aria-disabled")).toBe("true");
   });
 
-  it("远程分支有自己的右键菜单：检出、合并、复制、从远程删除（按远程名拆分）", async () => {
-    show({ onMergeBranch: vi.fn() });
-    mocks.deleteRemoteBranch.mockResolvedValue({ generation: 6, branches, snapshot });
+  it("远程分支有自己的右键菜单：检出、合并、复制、从远程删除走统一确认", async () => {
+    const onDeleteBranch = vi.fn();
+    show({ onMergeBranch: vi.fn(), onDeleteBranch });
     const menu = await menuFor("origin/feature/x");
     const labels = within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim());
     expect(labels).toEqual(expect.arrayContaining(["检出为本地分支并切换", "复制分支名", "从远程删除…"]));
     expect(labels.some((label) => label?.startsWith("拉取"))).toBe(false);
     await fireEvent.click(within(menu).getByRole("menuitem", { name: "从远程删除…" }));
-    const confirm = await screen.findByRole("alertdialog", { name: "删除 origin/feature/x" });
-    await fireEvent.click(within(confirm).getByRole("button", { name: "从远程删除" }));
-    await waitFor(() => expect(mocks.deleteRemoteBranch).toHaveBeenCalledWith("/repo", "origin", "feature/x", true, 4, 9));
+    expect(onDeleteBranch).toHaveBeenCalledWith(expect.objectContaining({ name: "origin/feature/x", remote: true }));
+    expect(mocks.deleteRemoteBranch).not.toHaveBeenCalled();
   });
 
   it("分组行与列表空白处不出 WebView 原生菜单：分组行给自己的菜单", async () => {

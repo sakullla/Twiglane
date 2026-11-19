@@ -33,6 +33,8 @@
     startCreating?: boolean;
     /** 和 startCreating 一起给出的起点（例如分支弹层里右键「从此分支新建」）；空串表示当前分支。 */
     startBase?: string;
+    /** 打开后直接对这个分支弹出删除确认（分支弹层右键「删除」）；列表读完才执行，只执行一次。 */
+    startDelete?: { name: string; remote: boolean } | null;
     /** 写锁来自后台克隆：它不碰当前仓库，读取照常，写入仍被拦住。 */
     backgroundClone?: boolean;
     /** 设置里的分支分组。缺省开启，与持久化缺省一致。 */
@@ -67,6 +69,7 @@
     onRebaseBranch,
     startCreating = false,
     startBase = "",
+    startDelete = null,
     backgroundClone = false,
     branchGroups = true,
     blockedReason = null,
@@ -683,6 +686,18 @@
     worktreePrompt = null;
     void restoreOrigin();
   }
+
+  let startDeleteDone = false;
+  $effect(() => {
+    if (startDeleteDone || !startDelete || !listReady || blocked) return;
+    const wanted = startDelete;
+    // 列表在读取结束后才写入：没找到就等下一次列表更新，不提前作废意图。
+    const target = branches.find((item) => item.name === wanted.name && item.remote === wanted.remote);
+    if (!target) return;
+    startDeleteDone = true;
+    tab = target.remote ? "remote" : "local";
+    untrack(() => requestDelete(target));
+  });
 
   /** 图标、右键和更多菜单共用删除入口，按当前列表的占用状态选择确认框。 */
   function requestDelete(branch: BranchRecord) {

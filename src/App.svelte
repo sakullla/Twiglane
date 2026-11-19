@@ -457,6 +457,10 @@
   let branchCreateIntent = $state(false);
   /** 从分支弹层右键「从此分支新建」带来的起点；空串表示当前分支。 */
   let branchCreateBase = $state("");
+  /** 从分支搜索无结果直接新建带来的预设名称。 */
+  let branchCreateName = $state("");
+  /** 指针悬停或焦点停在成功通知条上时暂停自动收起，读到一半不会突然消失。 */
+  let toastPaused = $state(false);
   /** 分支弹层右键「删除」：打开分支管理并直接弹出统一的删除确认。 */
   let branchDeleteIntent = $state<{ name: string; remote: boolean } | null>(null);
   let paletteOpen = $state(false);
@@ -804,7 +808,7 @@
 
   $effect(() => {
     const note = phaseNote;
-    if (!note || pushRetry) return;
+    if (!note || pushRetry || toastPaused) return;
     const timer = setTimeout(() => {
       if (phaseNote === note) phaseNote = null;
     }, 6000);
@@ -1133,11 +1137,12 @@
   }
 
   /** 分支弹层的「新建分支」：和其它入口走同一个命令，只多带一个打开意图。 */
-  function runBranchCreate(base?: string) {
+  function runBranchCreate(base?: string, name?: string) {
     runFromSwitcher("task.branch");
     if (taskModal === "branch") {
       branchCreateIntent = true;
       branchCreateBase = base ?? "";
+      branchCreateName = name ?? "";
     }
   }
 
@@ -1198,6 +1203,7 @@
     paletteOpen = false;
     branchCreateIntent = false;
     branchCreateBase = "";
+    branchCreateName = "";
     branchDeleteIntent = null;
     taskReturn = null;
     taskModal = task;
@@ -5360,6 +5366,7 @@
     onRebaseBranch={(name) => mergeFromBranches(() => rebaseCurrentOnto(name))}
     startCreating={branchCreateIntent}
     startBase={branchCreateBase}
+    startName={branchCreateName}
     startDelete={branchDeleteIntent}
     backgroundClone={pending === "clone"}
     {branchGroups}
@@ -5477,10 +5484,17 @@
     </div>
   {/if}
   {#if phaseNote}
-    <div class="toast ok" role="status">
+    <div
+      class="toast ok"
+      role="status"
+      onmouseenter={() => (toastPaused = true)}
+      onmouseleave={() => (toastPaused = false)}
+      onfocusin={() => (toastPaused = true)}
+      onfocusout={() => (toastPaused = false)}
+    >
       <span class="toast-icon"><Icon name="check-circle" size={16} /></span>
       <span class="toast-text">{phaseNote}</span>
-      <button type="button" class="icon-btn sm" aria-label="关闭提示" onclick={() => (phaseNote = null)}><Icon name="x" size={14} /></button>
+      <button type="button" class="icon-btn sm" aria-label="关闭提示" onclick={() => { toastPaused = false; phaseNote = null; }}><Icon name="x" size={14} /></button>
     </div>
   {/if}
   {#if warning}

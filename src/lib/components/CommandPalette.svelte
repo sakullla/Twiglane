@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { MODIFIER_LABEL } from "../brand";
-  import { rankPalette } from "../palette-match";
+  import { paletteHighlightParts, rankPalette } from "../palette-match";
   import Icon from "./Icon.svelte";
 
   /**
@@ -173,14 +173,30 @@
       trapFocus(event.shiftKey ? -1 : 1);
       return;
     }
-    if (event.key === "ArrowDown") {
+    if (event.key === "ArrowDown" || (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "n")) {
       event.preventDefault();
       move(1);
       return;
     }
-    if (event.key === "ArrowUp") {
+    if (event.key === "ArrowUp" || (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "p")) {
       event.preventDefault();
       move(-1);
+      return;
+    }
+    if (event.key === "PageDown" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+      if (filtered.length === 0) return;
+      event.preventDefault();
+      active = Math.min(filtered.length - 1, active + 8);
+      const current = document.activeElement;
+      if (current instanceof HTMLElement && current.classList.contains("palette-item")) optionAt(active)?.focus();
+      return;
+    }
+    if (event.key === "PageUp" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+      if (filtered.length === 0) return;
+      event.preventDefault();
+      active = Math.max(0, active - 8);
+      const current = document.activeElement;
+      if (current instanceof HTMLElement && current.classList.contains("palette-item")) optionAt(active)?.focus();
       return;
     }
     if (event.key === "Enter") {
@@ -264,7 +280,7 @@
                     }
                   }}
                 >
-                  <span>{item.title}</span>
+                  <span>{#each paletteHighlightParts(item.title, query) as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
                   {#if item.detail}
                     <small class="palette-detail"><bdi>{item.detail}</bdi></small>
                   {:else if item.hint}
@@ -278,6 +294,15 @@
               {/each}
             </div>
           {/each}
+        {/if}
+      </div>
+      <div class="palette-foot" aria-hidden="true">
+        <span><kbd>↑</kbd><kbd>↓</kbd> 选择</span>
+        <span><kbd>↵</kbd> 执行</span>
+        <span><kbd>Esc</kbd> 关闭</span>
+        <span class="spacer"></span>
+        {#if query.trim() && filtered.length > 0}
+          <span class="palette-foot-count">共 {filtered.length} 项</span>
         {/if}
       </div>
     </div>

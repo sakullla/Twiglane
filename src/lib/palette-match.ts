@@ -106,3 +106,46 @@ export function rankPalette<T extends PaletteSearchable>(items: readonly T[], qu
   shown.sort((a, b) => a.total - b.total || a.index - b.index);
   return shown.map((entry) => entry.item);
 }
+
+export interface HighlightPart {
+  text: string;
+  hit: boolean;
+}
+
+/**
+ * 把命令标题按搜索词拆成「普通 / 命中」片段，供命令面板高亮显示。
+ * 支持空格分隔的多词与 3 字以上的中文乱序命中；小写化会改变长度的极少数字符不标亮。
+ */
+export function paletteHighlightParts(text: string, query: string): HighlightPart[] {
+  const tokens = queryTokens(query);
+  if (tokens.length === 0 || text.length === 0) return [{ text, hit: false }];
+  const lower = text.toLowerCase();
+  if (lower.length !== text.length) return [{ text, hit: false }];
+  const marks = new Uint8Array(text.length);
+  for (const token of tokens) {
+    let matched = false;
+    for (let at = lower.indexOf(token); at >= 0; at = lower.indexOf(token, at + token.length)) {
+      matched = true;
+      for (let index = at; index < at + token.length; index++) marks[index] = 1;
+    }
+    if (!matched && token.length >= LOOSE_MIN && CJK.test(token) && looseHit(token, lower)) {
+      const chars = new Set(token);
+      for (let index = 0; index < lower.length; index++) {
+        if (chars.has(lower[index])) marks[index] = 1;
+      }
+    }
+  }
+  const parts: HighlightPart[] = [];
+  let start = 0;
+  let current = marks[0] === 1;
+  for (let index = 1; index < text.length; index++) {
+    const hit = marks[index] === 1;
+    if (hit !== current) {
+      parts.push({ text: text.slice(start, index), hit: current });
+      start = index;
+      current = hit;
+    }
+  }
+  parts.push({ text: text.slice(start), hit: current });
+  return parts;
+}

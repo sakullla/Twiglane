@@ -1,5 +1,6 @@
 <script lang="ts">
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
+  import { matchParts } from "../history";
   import { bucketByDirectory, filterRows, groupFiles } from "../labels";
   import type { DiffSide, FileChange, FileRow, FileSelection } from "../types";
   import {
@@ -404,6 +405,11 @@
       return;
     }
     if (event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.key === "/" && !event.shiftKey) {
+      event.preventDefault();
+      document.getElementById(searchId)?.focus();
+      return;
+    }
     if ((event.key === "ArrowUp" || event.key === "k") && !event.shiftKey && current === 0) {
       event.preventDefault();
       document.getElementById(searchId)?.focus();
@@ -441,6 +447,9 @@
       onkeydown={onSearchKey}
     />
     {#if query}
+      {#if total > 0}
+        <span class="field-count" title={`当前匹配 ${rows.length} 条，共 ${total} 条`}>{rows.length}/{total}</span>
+      {/if}
       <button type="button" class="field-clear" aria-label="清空筛选" onclick={() => onQuery("")}>
         <Icon name="x" size={12} />
       </button>
@@ -726,11 +735,11 @@
             {/if}
             <span class={`st ${mark.tone}`} title={mark.label} aria-label={mark.label}>{mark.letter}</span>
             <span class="file-name">
-              <span class="fn">{parts.name}</span>
+              <span class="fn">{#if query.trim()}{#each matchParts(parts.name, query) as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}{:else}{parts.name}{/if}</span>
               {#if row.originalPath}
                 <span class="fd from" title={`重命名自 ${row.originalPath}`}>← {row.originalPath}</span>
               {:else if parts.dir}
-                <span class="fd"><bdi>{parts.dir}</bdi></span>
+                <span class="fd"><bdi>{#if query.trim()}{#each matchParts(parts.dir, query) as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}{:else}{parts.dir}{/if}</bdi></span>
               {/if}
             </span>
             {#if row.rebuilt}

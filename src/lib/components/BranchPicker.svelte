@@ -342,6 +342,7 @@
                   setsize={visibleOptions.length}
                   name={option.name}
                   text={option.text}
+                  query={query}
                   icon={option.icon}
                   remote={option.remote}
                   active={row.index === active}

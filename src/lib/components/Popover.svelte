@@ -170,9 +170,17 @@
       else cycleFocus(event.shiftKey ? -1 : 1);
       return;
     }
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    const ctrlMove =
+      event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+        ? event.key.toLowerCase() === "n"
+          ? 1
+          : event.key.toLowerCase() === "p"
+            ? -1
+            : 0
+        : 0;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp" || ctrlMove !== 0) {
       event.preventDefault();
-      const step = event.key === "ArrowDown" ? 1 : -1;
+      const step = ctrlMove !== 0 ? ctrlMove : event.key === "ArrowDown" ? 1 : -1;
       if (event.target !== keyTarget()) {
         cycleFocus(step);
       } else if (count > 0) {
@@ -182,6 +190,13 @@
       return;
     }
     if (event.target !== keyTarget()) return;
+    if ((event.key === "PageDown" || event.key === "PageUp") && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+      if (count === 0) return;
+      event.preventDefault();
+      active = event.key === "PageDown" ? Math.min(count - 1, active + 8) : Math.max(0, active - 8);
+      reveal();
+      return;
+    }
     if (event.key === "Home" || event.key === "End") {
       if (searchable || count === 0) return;
       event.preventDefault();

@@ -33,6 +33,8 @@
     startCreating?: boolean;
     /** 和 startCreating 一起给出的起点（例如分支弹层里右键「从此分支新建」）；空串表示当前分支。 */
     startBase?: string;
+    /** 和 startCreating 一起给出的新分支名称（例如从分支搜索无结果直接新建时带入）。 */
+    startName?: string;
     /** 打开后直接对这个分支弹出删除确认（分支弹层右键「删除」）；列表读完才执行，只执行一次。 */
     startDelete?: { name: string; remote: boolean } | null;
     /** 写锁来自后台克隆：它不碰当前仓库，读取照常，写入仍被拦住。 */
@@ -69,6 +71,7 @@
     onRebaseBranch,
     startCreating = false,
     startBase = "",
+    startName = "",
     startDelete = null,
     backgroundClone = false,
     branchGroups = true,
@@ -96,7 +99,7 @@
   let branchQuery = $state("");
   /** 新建表单按需展开，展开时替换搜索和列表（R10：不和列表同时铺开）。 */
   let creating = $state(untrack(() => startCreating));
-  let branchName = $state("");
+  let branchName = $state(untrack(() => (startCreating ? startName : "")));
   /** 新分支的起点：空串表示当前分支（或游离 HEAD 的当前提交）。 */
   let createBase = $state(untrack(() => (startCreating ? startBase : "")));
   let createCheckout = $state(true);

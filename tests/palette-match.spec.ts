@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { paletteScore, queryTokens, rankPalette } from "../src/lib/palette-match";
+import { paletteHighlightParts, paletteScore, queryTokens, rankPalette } from "../src/lib/palette-match";
 import { paletteItems, type CommandState } from "../src/lib/commands";
 
 const items = [
@@ -79,5 +79,27 @@ describe("命令面板匹配与排序", () => {
     expect(first("clone")).toBe("repo.clone");
     expect(first("深色")).toBe("theme.dark");
     expect(first("侧边栏")).toBe("rail.toggle");
+  });
+
+  it("高亮命中片段：支持大小写无关子串、多词与中文乱序命中", () => {
+    expect(paletteHighlightParts("分支合并", "")).toEqual([{ text: "分支合并", hit: false }]);
+    expect(paletteHighlightParts("分支合并", "合并")).toEqual([
+      { text: "分支", hit: false },
+      { text: "合并", hit: true },
+    ]);
+    expect(paletteHighlightParts("提交并推送", "提交 推送")).toEqual([
+      { text: "提交", hit: true },
+      { text: "并", hit: false },
+      { text: "推送", hit: true },
+    ]);
+    expect(paletteHighlightParts("分支合并", "合并分")).toEqual([
+      { text: "分", hit: true },
+      { text: "支", hit: false },
+      { text: "合并", hit: true },
+    ]);
+    expect(paletteHighlightParts("Git Push", "push")).toEqual([
+      { text: "Git ", hit: false },
+      { text: "Push", hit: true },
+    ]);
   });
 });

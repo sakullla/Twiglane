@@ -1,5 +1,6 @@
 <script lang="ts">
   import { MODIFIER_LABEL } from "../brand";
+  import { matchParts } from "../history";
   import { filterRecent, pathDivergence, repeatedNames } from "../recent";
   import type { RecentRepo } from "../types";
   import { hueOf, relativeTime, repoBadgeLetters } from "../ui";
@@ -234,7 +235,7 @@
             >
               <span class="repo-badge" style={`--hue:${hueOf(repo.path)}`} aria-hidden="true">{badgeLetters[index]}</span>
               <span class="repo-text">
-                <span class="repo-name">{repo.name}</span>
+                <span class="repo-name">{#each matchParts(repo.name, searching ? query : "") as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
                 <span class={sameNames.has(repo.name) ? "repo-path-full" : "repo-path"}>
                   <bdi>
                     {#if divergences.get(repo.path)?.diverge}

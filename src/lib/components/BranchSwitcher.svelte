@@ -32,8 +32,8 @@
     onFailure: (error: unknown) => void;
     onNotice: (message: string) => void;
     onCommand: (id: string) => void;
-    /** 「新建分支」：打开分支 modal 并直接展开新建表单；base 是预选的起点。 */
-    onCreateBranch: (base?: string) => void;
+    /** 「新建分支」：打开分支 modal 并直接展开新建表单；base 是预选起点，name 是带入的分支名。 */
+    onCreateBranch: (base?: string, name?: string) => void;
     /** 删除分支：走分支管理里统一的删除确认（未合入再确认、同名远程、占用的工作区）。 */
     onDeleteBranch?: (branch: BranchRecord) => void;
     /** 把所点分支合并到当前分支：打开分支合并并预选来源。 */
@@ -711,7 +711,23 @@
     {#if loading}
       <p class="branch-popover-empty"><span class="spinner"></span> 正在读取分支</p>
     {:else if filtered.length === 0}
-      <p class="branch-popover-empty">没有匹配的分支</p>
+      {@const candidate = query.trim()}
+      <div class="branch-popover-empty">
+        <p>没有匹配的分支</p>
+        {#if candidate && !syncFilter}
+          <button
+            type="button"
+            class="btn btn-secondary btn-sm branch-create-match"
+            disabled={blockedReason !== null}
+            title={blockedReason ?? `打开新建分支并带入名称「${candidate}」`}
+            onmousedown={(event) => event.stopPropagation()}
+            onclick={() => onCreateBranch(undefined, candidate)}
+          >
+            <Icon name="plus" size={13} />
+            <span class="truncate">以「{candidate}」新建分支</span>
+          </button>
+        {/if}
+      </div>
     {/if}
     <div class="branch-picker-space" role="presentation" style={`height:${tops[view.rows.length]}px`} use:trackList oncontextmenu={quietMenu}>
     {#each shown as { row, at } (row.key)}
@@ -746,6 +762,7 @@
           index={row.index}
           setsize={matched.length}
           name={branch.name}
+          query={query}
           remote={branch.remote}
           active={row.index === active}
           selected={isCurrent(branch)}

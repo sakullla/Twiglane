@@ -1232,6 +1232,11 @@
       applyScroll(scrollByRows(0, total, total, height, ROW_HEIGHT));
       return;
     }
+    if ((event.key === "]" || event.key === "[") && !event.shiftKey && (hunkState.total > 0 || moreToRead)) {
+      event.preventDefault();
+      jump(event.key === "]" ? 1 : -1);
+      return;
+    }
     const page = Math.max(1, height > 0 ? Math.floor(height / ROW_HEIGHT) : 1);
     const delta =
       event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : event.key === "PageDown" ? page : event.key === "PageUp" ? -page : null;
@@ -1265,7 +1270,7 @@
   <!-- 工具条分三段：文件位置/身份 → 能对这个文件做什么 → 怎么显示。同段靠在一起，
        段与段之间一条装饰竖线，扫视顺序与操作顺序一致（先认出文件，再选动作，最后是布局）。
        窄窗口只把低频项收进末尾的溢出入口，本行三段的主操作不搬家。 -->
-  <div class="diff-toolbar" bind:this={toolbar}>
+  <div class="diff-toolbar" class:scrolled={scrollTop > 0} bind:this={toolbar}>
     <div class="diff-toolbar-group context">
       {#if fileNav}<FileNav nav={fileNav} />{/if}
       {#if hunkState.total > 0 || moreToRead}

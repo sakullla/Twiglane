@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
+  import { matchParts } from "../history";
   import type { IconName } from "../icons";
   import Icon from "./Icon.svelte";
 
@@ -16,6 +17,8 @@
     name: string;
     /** 名称之外的显示文字（例如「当前分支（main）」）；缺省显示 name。 */
     text?: string;
+    /** 当前搜索关键词：传入时在分支名里加亮命中片段。 */
+    query?: string;
     remote?: boolean;
     /** 非分支条目（例如「全部分支」）用自己的图标，名称不用等宽字体。 */
     icon?: IconName;
@@ -53,6 +56,7 @@
     setsize,
     name,
     text,
+    query = "",
     remote = false,
     icon,
     active,
@@ -110,7 +114,7 @@
     <Icon name={icon ?? (main ? "star" : remote ? "cloud" : "branch")} size={14} />
   </span>
   <span class="branch-option-label">
-    <span class="branch-option-name">{text ?? name}</span>
+    <span class="branch-option-name">{#each matchParts(text ?? name, query) as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
     {#if merged}<span class="merged-badge" data-merged-branch role="img" aria-label="已合入主干" title={mergedTitle}><Icon name="check" size={10} /></span>{/if}
   </span>
   {#if gone}

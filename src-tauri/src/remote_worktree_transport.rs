@@ -2,12 +2,14 @@
 
 use std::collections::HashMap;
 use std::io::{self, Write};
+use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
@@ -62,13 +64,20 @@ pub struct AgentTransport {
 }
 
 impl AgentTransport {
-    /// The caller has already selected, authenticated and launched the helper.
-    /// It must pipe both stdin and stdout. A piped stderr is drained privately.
-    pub fn from_child(child: Child) -> Result<Self, AppError> {
-        let mut child = OwnedChild(child);
-        let (Some(stdin), Some(stdout)) = (child.0.stdin.take(), child.0.stdout.take()) else {
-            // A failed constructor owns the child just as a successful one does.
-            tokio::spawn(async move { child.terminate().await });
+    /// Spawn the preconfigured helper in its own process scope. The transport
+    /// creates all three pipes and drains stderr without exposing its contents.
+    pub fn spawn(command: &mut Command) -> Result<Self, AppError> {
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = ScopedChild::spawn(command)
+            .map_err(|_| AppError::new("remote_spawn", "无法启动受控的远端连接工具。"))?;
+        Self::start(child)
+    }
+
+    fn start(mut child: ScopedChild) -> Result<Self, AppError> {
+        let (Some(stdin), Some(stdout)) = (child.take_stdin(), child.take_stdout()) else {
             return Err(AppError::new(
                 "remote_pipes",
                 "连接工具缺少标准输入或输出管道。",
@@ -79,12 +88,15 @@ impl AgentTransport {
         let (finished, stopped) = watch::channel(false);
         let pending = Arc::new(Mutex::new(Pending::default()));
         let waiting = Arc::clone(&pending);
-        let stderr = child.0.stderr.take();
+        let stderr = child.take_stderr();
         tokio::spawn(async move {
+            let reading = read_responses(stdout, &waiting);
+            tokio::pin!(reading);
             let failure = tokio::select! {
-                _ = stopping.changed() => disconnected(),
-                error = write_requests(stdin, requests) => error,
-                error = read_responses(stdout, &waiting) => error,
+                _ = stopping.changed() => Some(disconnected()),
+                _ = child.exited() => None,
+                _ = write_requests(stdin, requests) => None,
+                error = &mut reading => Some(error),
                 _ = async {
                     if let Some(mut pipe) = stderr {
                         let _ = tokio::io::copy(&mut pipe, &mut tokio::io::sink()).await;
@@ -92,11 +104,21 @@ impl AgentTransport {
                     std::future::pending::<()>().await;
                 } => unreachable!(),
             };
+            // A proxy may outlive the helper with a copy of its stdout handle.
+            // Stop the owners first; keep the same decoder (including partial bytes)
+            // long enough to deliver complete replies already in the pipe.
+            child.stop_tree();
+            let failure = match failure {
+                Some(reason) => reason,
+                None => tokio::time::timeout(Duration::from_secs(2), reading)
+                    .await
+                    .unwrap_or_else(|_| disconnected()),
+            };
             waiting
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .close(failure);
-            child.terminate().await;
+            let _ = child.wait().await;
             finished.send_replace(true);
         });
         Ok(Self {
@@ -195,42 +217,177 @@ impl Write for RequestBuffer {
     }
 }
 
-struct OwnedChild(Child);
+/// Owns a single helper and its child-process scope. Also suitable for the
+/// short-lived probe/install commands: take their pipes and await wait()
+/// concurrently with reading output. Dropping the owner cancels the scope.
+pub struct ScopedChild {
+    child: Child,
+    #[cfg(unix)]
+    group: Option<libc::pid_t>,
+    #[cfg(windows)]
+    group: Option<windows_job::Job>,
+}
 
-impl OwnedChild {
-    async fn terminate(&mut self) {
+impl ScopedChild {
+    pub fn spawn(command: &mut Command) -> io::Result<Self> {
+        command.kill_on_drop(true);
+        #[cfg(unix)]
+        {
+            // Set PGID in the child before exec, so even its first descendant
+            // inherits the connection's group rather than Twiglane's own group.
+            let child = command.process_group(0).spawn()?;
+            let pid = child
+                .id()
+                .ok_or_else(|| io::Error::other("missing helper PID"))?;
+            Ok(Self {
+                child,
+                group: Some(pid as libc::pid_t),
+            })
+        }
         #[cfg(windows)]
-        if let Some(pid) = self.0.id() {
-            // On Windows Cliora waits for its SSH child instead of exec'ing it.
-            // Close both pipes (above), and terminate remaining descendants before
-            // dropping the process handle. No shell or caller-supplied PID.
-            if let Some(root) = std::env::var_os("SystemRoot") {
-                let taskkill = std::path::PathBuf::from(root)
-                    .join("System32")
-                    .join("taskkill.exe");
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    tokio::process::Command::new(taskkill)
-                        .args(["/T", "/F", "/PID", &pid.to_string()])
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .kill_on_drop(true)
-                        .status(),
-                )
-                .await;
+        {
+            // Stable Tokio exposes the process handle after spawn. A child that
+            // starts another process before assignment cannot retroactively put
+            // that descendant in the job. This startup window needs Windows
+            // integration verification for helpers that immediately launch SSH.
+            let group = windows_job::Job::new()?;
+            let child = command.spawn()?;
+            group.assign(&child)?;
+            Ok(Self {
+                child,
+                group: Some(group),
+            })
+        }
+    }
+
+    pub fn take_stdin(&mut self) -> Option<ChildStdin> {
+        self.child.stdin.take()
+    }
+    pub fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.child.stdout.take()
+    }
+    pub fn take_stderr(&mut self) -> Option<ChildStderr> {
+        self.child.stderr.take()
+    }
+
+    async fn exited(&mut self) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            let Some(pid) = self.group else {
+                return Ok(());
+            };
+            // Observe termination WITHOUT reaping. The unreaped leader pins
+            // the numeric PGID until we have signalled the group exactly once.
+            loop {
+                if leader_exited(pid)? {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
         }
-        // Unix Cliora execs SSH in place, retaining the same PID and pipes.
-        let _ = self.0.start_kill();
-        let _ = self.0.wait().await;
+        #[cfg(windows)]
+        {
+            self.child.wait().await.map(|_| ())
+        }
+    }
+
+    fn stop_tree(&mut self) {
+        #[cfg(unix)]
+        if let Some(group) = self.group.take() {
+            // The PID was obtained only after a successful process_group(0)
+            // spawn. Never send a group signal after reaping or to PID zero.
+            unsafe {
+                libc::kill(-group, libc::SIGKILL);
+            }
+        }
+        #[cfg(windows)]
+        drop(self.group.take()); // Last job handle closes the whole group.
+    }
+
+    pub async fn wait(&mut self) -> io::Result<ExitStatus> {
+        // Match Child::wait: close unclaimed stdin so a one-shot helper can see EOF.
+        drop(self.child.stdin.take());
+        if self.group.is_some() {
+            self.exited().await?;
+            self.stop_tree();
+        }
+        self.child.wait().await
     }
 }
 
-impl Drop for OwnedChild {
+impl Drop for ScopedChild {
     fn drop(&mut self) {
-        // Also covers a runtime shutting down while the supervisor is suspended.
-        let _ = self.0.start_kill();
+        self.stop_tree();
+    }
+}
+
+#[cfg(unix)]
+fn leader_exited(pid: libc::pid_t) -> io::Result<bool> {
+    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    let ret = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            info.as_mut_ptr(),
+            libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+        )
+    };
+    if ret == -1 {
+        let error = io::Error::last_os_error();
+        return if error.kind() == io::ErrorKind::Interrupted {
+            Ok(false)
+        } else {
+            Err(error)
+        };
+    }
+    Ok(unsafe { info.assume_init().si_pid() } == pid)
+}
+
+#[cfg(windows)]
+mod windows_job {
+    use super::{io, Child};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    pub(super) struct Job(OwnedHandle);
+
+    impl Job {
+        pub(super) fn new() -> io::Result<Self> {
+            // The non-inheritable job handle remains owned only by Twiglane.
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if handle.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let job = Self(unsafe { OwnedHandle::from_raw_handle(handle) });
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = unsafe {
+                SetInformationJobObject(
+                    job.0.as_raw_handle(),
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::from_ref(&info).cast(),
+                    std::mem::size_of_val(&info) as u32,
+                )
+            };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(job)
+        }
+
+        pub(super) fn assign(&self, child: &Child) -> io::Result<()> {
+            let handle = child
+                .raw_handle()
+                .ok_or_else(|| io::Error::other("missing helper handle"))?;
+            if unsafe { AssignProcessToJobObject(self.0.as_raw_handle(), handle) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
     }
 }
 
@@ -318,8 +475,6 @@ async fn read_responses(stdout: ChildStdout, pending: &Mutex<Pending>) -> AppErr
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::process::Stdio;
-    use std::time::Duration;
 
     fn helper(body: &str) -> (AgentTransport, u32) {
         let prelude = r#"
@@ -328,16 +483,16 @@ const send = frame => process.stdout.write(JSON.stringify(frame) + '\n');
 const result = (req, obj) => send({v:1,id:req.id,ok:true,result:obj});
 input.on('line', line => receive(JSON.parse(line)));
 "#;
-        let child = tokio::process::Command::new("node")
+        let mut command = Command::new("node");
+        command
             .args(["-e", &format!("{prelude}\n{body}")])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
-        let pid = child.id().unwrap();
-        (AgentTransport::from_child(child).unwrap(), pid)
+            .kill_on_drop(true);
+        let child = ScopedChild::spawn(&mut command).unwrap();
+        let pid = child.child.id().unwrap();
+        (AgentTransport::start(child).unwrap(), pid)
     }
 
     #[tokio::test]
@@ -494,6 +649,90 @@ function receive(req) {
         }
         #[cfg(not(unix))]
         let _ = pid;
+    }
+
+    #[tokio::test]
+    async fn leader_exit_drains_a_complete_receipt_and_fails_other_pending_ids() {
+        // The bounded-lived fixture descendant deliberately holds all three pipes.
+        // The direct helper exits after its complete reply has reached stdout.
+        let (agent, _) = helper(
+            r#"
+const child = require('node:child_process').spawn(process.execPath,
+    ['-e','setTimeout(() => {}, 4000)'], {stdio:'inherit'});
+const requests = [];
+function receive(r) {
+    requests.push(r);
+    if (requests.length === 2) {
+        const answered = requests.find(r => r.op === 'receipt');
+        process.stdout.write(JSON.stringify({v:1,id:answered.id,ok:true,result:{state:'completed'}}) + '\n',
+                             () => process.exit(0));
+    }
+}"#,
+        );
+        let pending = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(
+                agent.rpc("receipt", json!({})),
+                agent.rpc("diff", json!({}))
+            )
+        })
+        .await;
+        agent.close().await;
+        let (receipt, diff) =
+            pending.expect("helper exit must wake pending RPC despite inherited stdout");
+        assert_eq!(receipt.unwrap(), json!({"state":"completed"}));
+        assert_eq!(diff.unwrap_err().code, "remote_disconnected");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closing_transport_also_stops_its_openssh_proxy() {
+        // No network connection. OpenSSH launches a local fixture ProxyCommand.
+        let directory = tempfile::tempdir().unwrap();
+        let proxy_pid = directory.path().join("proxy.pid");
+        let proxy_script = directory.path().join("proxy.sh");
+        std::fs::write(
+            &proxy_script,
+            "echo $$ > \"$TWIGLANE_TEST_PROXY_PID\"\nexec sleep 4\n",
+        )
+        .unwrap();
+        let mut command = tokio::process::Command::new("ssh");
+        command
+            .env("TWIGLANE_TEST_PROXY_PID", &proxy_pid)
+            .env("TWIGLANE_TEST_PROXY_SCRIPT", &proxy_script)
+            .args([
+                "-F",
+                "/dev/null",
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ProxyCommand=exec /bin/sh \"$TWIGLANE_TEST_PROXY_SCRIPT\"",
+                "localhost",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let agent = AgentTransport::spawn(&mut command).unwrap();
+        let pid = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&proxy_pid) {
+                    if let Ok(pid) = pid.trim().parse::<i32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        agent.close().await;
+        tokio::time::timeout(Duration::from_millis(750), async {
+            while unsafe { libc::kill(pid, 0) } == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("connection proxy survived close");
     }
 
     #[cfg(unix)]

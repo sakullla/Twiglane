@@ -234,6 +234,36 @@ describe("远端工作树页面", () => {
     );
   });
 
+  it("重连后回执仍未知时，继续显示唯一文件的新差异并禁用写入", async () => {
+    const port = fixture();
+    const before = { ...snapshot, files: [{ path: "small.txt", xy: "MM" }] };
+    const after = { ...snapshot, generation: "g2", files: [{ path: "small.txt", xy: " M" }] };
+    port.open.mockResolvedValueOnce(opened("before", before)).mockResolvedValueOnce(opened("after", after));
+    port.diff.mockResolvedValueOnce(page("+旧连接差异\n")).mockResolvedValueOnce(page("+重连后的差异\n"));
+    port.write.mockRejectedValueOnce({ code: "transport", message: "SSH 已断开" });
+    port.recover.mockImplementationOnce(async (_, operationId) => ({
+      state: "unknown", operationId, message: "远端没有足够证据确认该提交。",
+    }));
+    render(RemoteWorktree, { port });
+    await openFromPicker();
+    await screen.findByText("+旧连接差异");
+    await fireEvent.input(screen.getByRole("textbox", { name: "提交说明" }), { target: { value: "Update remote" } });
+    await fireEvent.click(screen.getByRole("button", { name: "提交已暂存改动" }));
+    expect(await screen.findByText("尚未读取当前文件的差异。")).toBeTruthy();
+    expect(screen.queryByText("没有可显示的文本差异。")).toBeNull();
+    await fireEvent.click(await screen.findByRole("button", { name: "重连并核对" }));
+
+    expect(await screen.findByText("+重连后的差异")).toBeTruthy();
+    expect(screen.getByText("结果待确认")).toBeTruthy();
+    expect(screen.getByText("远端没有足够证据确认该提交。")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "暂存 small.txt" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "提交已暂存改动" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(port.diff.mock.calls.at(-1)?.[0]).toEqual({
+      path: "small.txt", view: "unstaged", sessionId: "after", generation: "g2",
+    });
+    expect(port.write).toHaveBeenCalledTimes(1);
+  });
+
   it("打开后的持久待确认操作不会向同名的另一台主机或新工作树查询", async () => {
     const port = fixture();
     const pendingWrite = { op: "commit", operationId: "5d751ed7-c132-4ae8-b48f-b801db4db2ba" } as const;

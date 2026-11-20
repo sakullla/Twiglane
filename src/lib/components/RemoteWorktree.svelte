@@ -99,7 +99,7 @@
       !message.trim() ? "请输入提交说明。" : "")
   );
   let selected = $state<FileRow | null>(null);
-  let diff = $state("");
+  let diff = $state<string | null>(null);
   let nextCursor = $state<string | null>(null);
   let loadingDiff = $state(false);
   let diffError = $state("");
@@ -183,7 +183,7 @@
   function resetDiff() {
     readEpoch += 1;
     decoder = new TextDecoder();
-    diff = "";
+    diff = null;
     nextCursor = null;
     loadingDiff = false;
     diffError = "";
@@ -204,7 +204,7 @@
       });
       if (destroyed || epoch !== readEpoch) return;
       const bytes = Uint8Array.from(atob(page.data), (byte) => byte.charCodeAt(0));
-      diff += decoder.decode(bytes, { stream: page.nextCursor !== null });
+      diff = (diff ?? "") + decoder.decode(bytes, { stream: page.nextCursor !== null });
       nextCursor = page.nextCursor;
     } catch (failure) {
       if (!destroyed && epoch === readEpoch) {
@@ -422,7 +422,9 @@
     } finally {
       if (!destroyed && workspace?.sessionId === current.sessionId) {
         writing = null;
-        if (!pending) chooseFromSnapshot(workspace);
+        // Recovery follows a successful reopen, so an unknown receipt blocks writes
+        // while reads can still use the new session and snapshot.
+        if (recovering || !pending) chooseFromSnapshot(workspace);
       }
     }
   }
@@ -615,8 +617,8 @@
           {#if diff}
             <!-- svelte-ignore a11y_no_noninteractive_tabindex (键盘用户需要滚动长差异) -->
             <div class="remote-patch" role="region" tabindex="0" aria-label="差异内容"><pre>{diff}</pre></div>
-          {:else if !loadingDiff && !diffError}
-            <p class="hint">没有可显示的文本差异。</p>
+          {:else if !loadingDiff && !diffError && nextCursor === null}
+            <p class="hint">{diff === null ? "尚未读取当前文件的差异。" : "没有可显示的文本差异。"}</p>
           {/if}
           {#if loadingDiff}
             <p class="hint" role="status">正在读取差异…</p>

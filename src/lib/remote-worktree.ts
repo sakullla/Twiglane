@@ -40,6 +40,7 @@ export interface RemoteOpenRequest extends RemoteWorktreeLocation {
   requestId: string;
   allowInstall: boolean;
   installConfirmation?: string;
+  reviewId?: string;
 }
 
 export interface RemoteConnectionProgress {
@@ -116,4 +117,23 @@ export const remoteWorktreePort: RemoteWorktreePort = {
   diff: (request) => invoke("remote_worktree_diff", { request }),
   write: (request) => invoke("remote_worktree_write", { request }),
   recover: (sessionId, operationId) => invoke("remote_worktree_recover", { sessionId, operationId }),
+};
+
+export interface RemoteReviewSource {
+  reviewId: string;
+  sessionId: string;
+  targetId: string;
+  targetRevision: string;
+  peerRevision: string;
+  peerIdentity: string;
+  worktreeIdentity: string;
+  worktreePath: string;
+  baseline: string | null;
+}
+
+export const remoteReviewPort = {
+  begin: (url: string) => invoke<RemoteReviewSource | null>("remote_review_begin", { url }),
+  accept: (reviewId: string, sessionId: string) => invoke<void>("remote_review_accept", { reviewId, sessionId }),
+  end: (reviewId: string, reason: string) => invoke<void>("remote_review_end", { reviewId, reason }),
+  returnReview: (reviewId: string, sessionId: string) => invoke<void>("remote_review_return", { reviewId, sessionId }),
 };

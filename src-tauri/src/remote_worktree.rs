@@ -1,3 +1,5 @@
+pub(crate) mod review;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -28,6 +30,7 @@ pub(crate) struct RemoteWorktrees {
     openings: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     installs: Mutex<HashMap<String, InstallTarget>>,
     mutations: Mutex<()>,
+    reviews: Mutex<review::Book>,
 }
 
 impl RemoteWorktrees {
@@ -38,6 +41,7 @@ impl RemoteWorktrees {
             openings: Mutex::default(),
             installs: Mutex::default(),
             mutations: Mutex::default(),
+            reviews: Mutex::default(),
         }
     }
 
@@ -76,10 +80,12 @@ pub struct OpenRequest {
     baseline: Option<String>,
     allow_install: bool,
     install_confirmation: Option<String>,
+    review_id: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
 struct InstallTarget {
+    review_id: Option<String>,
     target_id: String,
     revision: String,
     peer: String,
@@ -102,6 +108,8 @@ pub struct Progress {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Pending {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_id: Option<String>,
     operation_id: String,
     op: WriteKind,
     repo: String,
@@ -126,6 +134,8 @@ impl WriteKind {
 }
 
 struct Session {
+    review_id: Option<String>,
+    peer_revision: String,
     agent: AgentTransport,
     repo: String,
     target: Target,
@@ -149,8 +159,12 @@ impl Session {
     }
 
     async fn status(&self) -> Result<Value> {
+        self.status_for(self.baseline.as_deref()).await
+    }
+
+    async fn status_for(&self, baseline: Option<&str>) -> Result<Value> {
         let mut fields = json!({"repo":self.repo});
-        if let Some(baseline) = &self.baseline {
+        if let Some(baseline) = baseline {
             fields["baseline"] = json!(baseline);
         }
         let result = self.agent.rpc("status", fields).await?;
@@ -501,6 +515,7 @@ async fn connect(
     path: &Path,
     request: &OpenRequest,
     confirm: Option<InstallTarget>,
+    source: Option<&review::Source>,
     progress: &Channel<Progress>,
 ) -> Result<Opened> {
     publish(progress, "connecting", None);
@@ -535,7 +550,11 @@ async fn connect(
     }
     let peer = probe_identity(&probe["peerRevision"])?;
     let peer_identity = probe_identity(&probe["peerIdentity"])?.to_owned();
+    if let Some(source) = source {
+        source.check_peer(peer, &peer_identity)?;
+    }
     let selected = InstallTarget {
+        review_id: request.review_id.clone(),
         target_id: target.target_id.clone(),
         revision: target.target_revision.clone(),
         peer: peer.to_owned(),
@@ -602,9 +621,14 @@ async fn connect(
     let root = snapshot["root"]
         .as_str()
         .filter(|value| valid_path(value, true));
+    if let Some(source) = source {
+        source.check_tree(root.unwrap_or_default(), repo.unwrap_or_default())?;
+    }
     match (repo, root) {
         (Some(repo), Some(root)) => Ok(Opened::Worktree(
             Box::new(Session {
+                review_id: request.review_id.clone(),
+                peer_revision: peer.to_owned(),
                 agent,
                 repo: repo.into(),
                 root: root.into(),
@@ -663,6 +687,15 @@ pub async fn remote_worktree_open(
     if !uuid(&request.request_id) || !valid_path(&request.path, true) {
         return Err(AppError::new("invalid_path", "请选择有效的远端绝对目录。"));
     }
+    let source = request
+        .review_id
+        .as_deref()
+        .map(|id| state.reviews.lock().unwrap().source(id))
+        .transpose()?;
+    if let Some(source) = &source {
+        source.check_request(&request)?;
+    }
+    let review_id = request.review_id.clone();
     let key = request.request_id.clone();
     let confirm = if request.allow_install {
         request
@@ -679,7 +712,7 @@ pub async fn remote_worktree_open(
         }
         let join = tokio::spawn(async move {
             let path = connector().await?;
-            connect(&path, &request, confirm, &on_progress).await
+            connect(&path, &request, confirm, source.as_ref(), &on_progress).await
         });
         openings.insert(key.clone(), join.abort_handle());
         join
@@ -691,6 +724,11 @@ pub async fn remote_worktree_open(
     }
     let response =
         response.map_err(|_| AppError::new("remote_cancelled", "远端打开操作已取消。"))??;
+    // A cancelled/rejected review cannot leave an orphan session or a usable
+    // install offer if its asynchronous connection completes afterwards.
+    if let Some(id) = review_id {
+        state.reviews.lock().unwrap().source(&id)?;
+    }
     let (session, snapshot) = match response {
         Opened::Worktree(session, snapshot) => (session, snapshot),
         Opened::NeedsInstall(offer) => {
@@ -820,6 +858,8 @@ async fn finish_write(
     pending: &Pending,
     response: Result<Value>,
 ) -> Result<Value> {
+    let proven_commit =
+        pending.op == WriteKind::Commit && response.as_ref().is_ok_and(|r| r["op"] == "commit");
     let completed = match response {
         Ok(response)
             if response["repo"].as_str() == Some(&session.repo)
@@ -856,6 +896,15 @@ async fn finish_write(
     {
         return Ok(unknown(&pending.operation_id));
     }
+    if proven_commit && completed["state"] == "completed" {
+        if let (Some(id), Some(head)) = (&pending.review_id, completed["head"].as_str()) {
+            state
+                .reviews
+                .lock()
+                .unwrap()
+                .record_commit(id, session, head);
+        }
+    }
     Ok(completed)
 }
 
@@ -890,7 +939,15 @@ pub async fn remote_worktree_write(state: Managed<'_>, request: WriteRequest) ->
         }
     }
     let journal = session.journal(&state.data);
+    if let Some(id) = &session.review_id {
+        state
+            .reviews
+            .lock()
+            .unwrap()
+            .check_bound(id, &request.session_id, &session)?;
+    }
     let pending = Pending {
+        review_id: session.review_id.clone(),
         operation_id: request.operation_id,
         op: request.op,
         repo: session.repo.clone(),
@@ -913,6 +970,13 @@ pub async fn remote_worktree_recover(
     operation_id: String,
 ) -> Result<Value> {
     let session = state.session(&session_id)?;
+    if let Some(id) = &session.review_id {
+        state
+            .reviews
+            .lock()
+            .unwrap()
+            .check_bound(id, &session_id, &session)?;
+    }
     let journal = session.journal(&state.data);
     let pending = {
         let _guard = state.mutations.lock().unwrap();
@@ -985,8 +1049,10 @@ esac
             baseline: None,
             allow_install: true,
             install_confirmation: Some(Uuid::new_v4().to_string()),
+            review_id: None,
         };
         let confirmed = InstallTarget {
+            review_id: None,
             target_id: request.target_id.clone(),
             revision: request.target_revision.clone(),
             peer: "a".repeat(64),
@@ -996,6 +1062,7 @@ esac
             &helper,
             &request,
             Some(confirmed),
+            None,
             &Channel::new(|_| Ok(())),
         )
         .await;
@@ -1019,6 +1086,8 @@ esac
         }))
         .unwrap();
         let mut session = Session {
+            review_id: None,
+            peer_revision: "same-peer-revision".into(),
             agent,
             repo: "repo-a".into(),
             target,
@@ -1034,6 +1103,7 @@ esac
         session.peer_identity = "same-host".into();
 
         let pending = Pending {
+            review_id: None,
             operation_id: Uuid::new_v4().to_string(),
             op: WriteKind::Commit,
             repo: session.repo.clone(),

@@ -3,6 +3,8 @@
   import { normalizeError } from "../errors";
   import {
     remoteWorktreePort,
+    remoteReviewPort,
+    type RemoteReviewSource,
     type RemoteConnectionProgress,
     type RemoteDiffView,
     type RemoteOpenResult,
@@ -20,6 +22,7 @@
   interface Props {
     port?: RemoteWorktreePort;
     prefill?: RemoteWorktreeLocation;
+    reviewSource?: RemoteReviewSource;
     onWriting?: (writing: boolean) => void;
     onOpened?: (workspace: RemoteWorkspace) => void;
     onWriteResult?: (workspace: RemoteWorkspace, result: RemoteWriteResult) => void;
@@ -58,8 +61,34 @@
     U: "冲突",
   };
 
-  let { port = remoteWorktreePort, prefill, onOpened, onWriteResult, onWriting, actions }: Props = $props();
-  const initialLocation = untrack(() => prefill);
+  let { port = remoteWorktreePort, prefill, reviewSource, onOpened, onWriteResult, onWriting, actions }: Props = $props();
+  const source = untrack(() => reviewSource);
+  const initialLocation = source ? {
+    targetId: source.targetId, targetRevision: source.targetRevision,
+    path: source.worktreePath, baseline: source.baseline ?? undefined,
+  } : untrack(() => prefill);
+  let reviewAccepted = $state(false);
+  let reviewEnded = $state(false);
+  let returning = $state(false);
+  async function endReview(reason: string) {
+    if (!source || reviewEnded) return;
+    reviewEnded = true;
+    try { await remoteReviewPort.end(source.reviewId, reason); }
+    catch (failure) { if (!destroyed) error = normalizeError(failure).message; }
+  }
+
+  async function returnReview() {
+    if (!source || !workspace || !reviewAccepted || reviewEnded || returning || pending || writing) return;
+    returning = true;
+    notice = "";
+    error = "";
+    try {
+      await remoteReviewPort.returnReview(source.reviewId, workspace.sessionId);
+      if (!destroyed) notice = "已向原 Cliora 会话发送审查结果。";
+    } catch (failure) {
+      if (!destroyed) error = normalizeError(failure).message;
+    } finally { returning = false; }
+  }
   let targets = $state<RemoteTarget[]>([]);
   let targetId = $state(initialLocation?.targetId ?? "");
   let path = $state(initialLocation?.path ?? "");
@@ -81,6 +110,7 @@
 
   const files = $derived(workspace ? rows(workspace.snapshot, workspace.baseline) : []);
   const busyReason = $derived(
+    returning ? "正在向 Cliora 返回审查结果。" :
     connection ? "请等待远端连接完成。" :
     writing ? "远端操作正在处理。" :
     refreshing ? "正在刷新工作树状态。" : ""
@@ -152,7 +182,10 @@
         const exact = list.find((item) => item.targetId === initialLocation.targetId);
         if (!exact || exact.unavailableReason || exact.targetRevision !== initialLocation.targetRevision) {
           targetId = "";
-          error = exact?.unavailableReason || "原远端主机的配置已变化或不可用，请重新选择主机。";
+          if (source) void endReview("target_changed");
+          error = exact?.unavailableReason || (source
+            ? "原远端主机的配置已变化或不可用，请从 Cliora 重新发起审查。"
+            : "原远端主机的配置已变化或不可用，请重新选择主机。");
         } else {
           targetId = exact.targetId;
         }
@@ -166,9 +199,16 @@
         else if (selected.unavailableReason) error = selected.unavailableReason;
       }
     } catch (failure) {
-      if (!destroyed) error = normalizeError(failure).message;
+      if (!destroyed) {
+        error = normalizeError(failure).message;
+        if (source) void endReview("open_failed");
+      }
     } finally {
       if (!destroyed) loadingTargets = false;
+    }
+    if (source && !destroyed && !reviewEnded) {
+      const exact = targets.find((host) => host.targetId === source.targetId && host.targetRevision === source.targetRevision);
+      if (exact) await openRemote({ target: exact, path: source.worktreePath, baseline: source.baseline ?? undefined, recover: false });
     }
   }
 
@@ -255,6 +295,7 @@
   onMount(() => { void loadTargets(); });
   onDestroy(() => {
     destroyed = true;
+    if (source) void endReview("cancelled");
     clearConnection();
     if (workspace) closeSession(workspace.sessionId);
   });
@@ -275,6 +316,7 @@
         path: intent.path,
         baseline: intent.baseline,
         allowInstall: !!confirmation,
+        ...(source ? { reviewId: source.reviewId } : {}),
         ...(confirmation?.confirmationId ? { installConfirmation: confirmation.confirmationId } : {}),
       }, (progress) => {
         if (connection?.requestId === requestId) connection = { requestId, progress };
@@ -304,6 +346,22 @@
         snapshot: result.snapshot,
         baseline: intent.baseline,
       };
+      if (source) {
+        try {
+          await remoteReviewPort.accept(source.reviewId, current.sessionId);
+        } catch (failure) {
+          if (normalizeError(failure).code !== "cliora_unavailable") {
+            closeSession(current.sessionId);
+            throw failure;
+          }
+          notice = "远端工作树已打开，但确认回执未送达 Cliora。";
+        }
+        if (destroyed || connection?.requestId !== requestId) {
+          closeSession(current.sessionId);
+          return;
+        }
+        reviewAccepted = true;
+      }
       workspace = current;
       pending = result.pendingWrite ?? pending;
       connection = null;
@@ -318,7 +376,12 @@
     } catch (failure) {
       if (connection?.requestId === requestId) {
         const phase = phaseLabel[connection.progress.phase];
-        error = `${phase}失败：${normalizeError(failure).message}`;
+        const { code, message } = normalizeError(failure);
+        error = `${phase}失败：${message}`;
+        if (source && !reviewAccepted) {
+          const reason = code === "not_worktree" ? "not_a_worktree" : code === "remote_cancelled" ? "cancelled" : code;
+          void endReview(reason);
+        }
       }
     } finally {
       if (connection?.requestId === requestId) connection = null;
@@ -335,6 +398,7 @@
   }
 
   function stopConnecting() {
+    if (source && !reviewAccepted) void endReview("cancelled");
     const installing = connection?.progress.phase === "installing";
     clearConnection();
     notice = installing ? "已取消安装。可重新连接以检查远端状态。" : "已取消连接。";
@@ -466,7 +530,7 @@
         <p>{confirm.result.version} · {(confirm.result.size / 1024).toFixed(1)} KiB</p>
       </div>
       <div class="remote-actions">
-        <button type="button" class="btn btn-secondary btn-sm" onclick={() => (install = null)}>取消</button>
+        <button type="button" class="btn btn-secondary btn-sm" onclick={() => { install = null; if (source && !reviewAccepted) { void endReview("cancelled"); notice = "已取消远端审查。"; } }}>取消</button>
         <button type="button" class="btn btn-primary btn-sm" onclick={() => void openRemote(confirm.intent, confirm.result)}>确认安装</button>
       </div>
     </section>
@@ -478,7 +542,10 @@
 <section class="remote-worktree" aria-label="远端工作树">
   {#if !workspace}
     <div class="remote-picker">
-      <h1>打开远端仓库</h1>
+      <h1>{source ? "Cliora 远端审查" : "打开远端仓库"}</h1>
+      {#if source}
+        <p>{target?.name || source.targetId} · <code>{source.worktreePath}</code></p>
+      {:else}
       <form onsubmit={submitLocation}>
         <label>
           <span>Cliora 主机</span>
@@ -513,6 +580,7 @@
           </button>
         </div>
       </form>
+      {/if}
       {#if loadingTargets}
         <p class="hint" role="status">正在读取 Cliora 主机…</p>
       {:else if !targets.length && !error}
@@ -536,17 +604,27 @@
       </div>
       <div class="remote-actions">
         {@render actions?.(workspace)}
+        {#if source && reviewAccepted}
+          <button type="button" class="btn btn-primary btn-sm" disabled={!!busyReason || !!pending}
+            title={busyReason || (pending ? "请先核对远端操作结果。" : undefined)}
+            onclick={() => void returnReview()}>{returning ? "正在核对远端状态…" : "返回 Cliora"}</button>
+        {/if}
         {#if needsRefresh && !pending}
           <button type="button" class="btn btn-secondary btn-sm" disabled={!!connectionReason} title={connectionReason || undefined} onclick={reconnect}>重连</button>
         {/if}
         <button type="button" class="btn btn-secondary btn-sm" disabled={!!connectionReason} title={connectionReason || undefined} onclick={() => void refresh()}>
           <Icon name="refresh" size={14} />{refreshing ? "刷新中…" : "刷新状态"}
         </button>
-        <button type="button" class="btn btn-secondary btn-sm" disabled={!!busyReason} title={busyReason || undefined} onclick={() => { install = null; resetWorkspace(); }}>
-          更换仓库
-        </button>
+        {#if !source}
+          <button type="button" class="btn btn-secondary btn-sm" disabled={!!busyReason} title={busyReason || undefined} onclick={() => { install = null; resetWorkspace(); }}>
+            更换仓库
+          </button>
+        {/if}
       </div>
     </header>
+    {#if source && !workspace.baseline}
+      <p class="hint">原会话没有可用基线，当前显示远端工作区改动。</p>
+    {/if}
     {#if pending}
       <div class="remote-feedback remote-pending">
         <span role="status"><strong>结果待确认</strong> · {writeLabel[pending.op]}</span>

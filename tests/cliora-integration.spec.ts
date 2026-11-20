@@ -990,3 +990,71 @@ describe("cliora 联动证据门禁", () => {
     expect(result.stdout).toContain("firstReviewId、reReviewId 必须互不相同");
   });
 });
+
+describe("Cliora 远端审查入口", () => {
+  const target = {
+    targetId: "remote-a", targetRevision: "a".repeat(64), name: "服务器 A",
+    host: "host-a", user: "tester", port: 22, authMethod: "key", defaultPath: "/srv/worktree",
+  };
+  const source = {
+    reviewId: REVIEW_A, sessionId: SESSION_A, targetId: target.targetId, targetRevision: target.targetRevision,
+    peerRevision: "b".repeat(64), peerIdentity: "c".repeat(64), worktreeIdentity: "f".repeat(64), worktreePath: "/srv/worktree", baseline: BASELINE,
+  };
+  const url = "twiglane://remote-review?" + new URLSearchParams({ v: "1", ...source }).toString();
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("冷启动定位原远端会话，等待用户安装，再接收和返回；同名本机路径始终未被打开", async () => {
+    const { remoteReviewPort: reviews, remoteWorktreePort: remote } = await import("../src/lib/remote-worktree");
+    deepLink.getCurrent.mockResolvedValue([url]);
+    const begin = vi.spyOn(reviews, "begin").mockResolvedValueOnce(source).mockResolvedValue(null);
+    const accept = vi.spyOn(reviews, "accept").mockResolvedValue();
+    const end = vi.spyOn(reviews, "end").mockResolvedValue();
+    const returned = vi.spyOn(reviews, "returnReview").mockResolvedValue();
+    vi.spyOn(remote, "targets").mockResolvedValue([target]);
+    const open = vi.spyOn(remote, "open").mockResolvedValueOnce({
+      kind: "install_required", version: "v1", size: 2048, confirmationId: "offered",
+    }).mockResolvedValueOnce({ kind: "open", sessionId: "verified-local-binding", pendingWrite: null, snapshot: {
+      repo: "agent-a", root: source.worktreePath, host: "host-a", head: BASELINE, branch: "main",
+      generation: "g1", files: [], reviewFiles: ["committed.txt"],
+    } });
+    vi.spyOn(remote, "close").mockResolvedValue();
+    const diff = vi.spyOn(remote, "diff").mockResolvedValue({ data: btoa("+actual task diff"), nextCursor: null });
+    const handle = await mountShell();
+    const install = await screen.findByRole("button", { name: "确认安装" });
+    expect(begin).toHaveBeenCalledWith(url);
+    expect(accept).not.toHaveBeenCalled();
+    expect(open).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      targetId: source.targetId, path: source.worktreePath, reviewId: REVIEW_A, baseline: BASELINE, allowInstall: false,
+    }), expect.any(Function));
+    handle([url]);
+    await waitFor(() => expect(begin).toHaveBeenCalledTimes(2));
+    expect(open).toHaveBeenCalledTimes(1);
+    await fireEvent.click(install);
+    await waitFor(() => expect(accept).toHaveBeenCalledWith(REVIEW_A, "verified-local-binding"));
+    await waitFor(() => expect(diff).toHaveBeenCalledWith(expect.objectContaining({ view: "task", path: "committed.txt" })));
+    await fireEvent.click(await screen.findByRole("button", { name: "返回 Cliora" }));
+    expect(returned).toHaveBeenCalledWith(REVIEW_A, "verified-local-binding");
+    expect(mocks.api.openRepository).not.toHaveBeenCalled();
+    expect(mocks.api.clioraReviewRequest).not.toHaveBeenCalled();
+    expect(end).not.toHaveBeenCalled();
+    cleanup();
+  });
+
+  it("活动窗口收到远端来源，原主机已变更时回送拒绝，不会选择其它同路径主机", async () => {
+    const { remoteReviewPort: reviews, remoteWorktreePort: remote } = await import("../src/lib/remote-worktree");
+    vi.spyOn(reviews, "begin").mockResolvedValue(source);
+    const end = vi.spyOn(reviews, "end").mockResolvedValue();
+    const accept = vi.spyOn(reviews, "accept").mockResolvedValue();
+    vi.spyOn(remote, "targets").mockResolvedValue([{ ...target, targetRevision: "e".repeat(64) }]);
+    const open = vi.spyOn(remote, "open");
+    const handle = await mountShell();
+    handle([url]);
+    await waitFor(() => expect(end).toHaveBeenCalledWith(REVIEW_A, "target_changed"));
+    expect(accept).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+    expect(mocks.api.openRepository).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "返回 Cliora" })).toBeNull();
+    cleanup();
+  });
+});

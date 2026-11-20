@@ -106,6 +106,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            remote_worktree::review::remote_review_begin,
+            remote_worktree::review::remote_review_accept,
+            remote_worktree::review::remote_review_end,
+            remote_worktree::review::remote_review_return,
             remote_worktree::remote_worktree_targets,
             remote_worktree::remote_worktree_open,
             remote_worktree::remote_worktree_cancel_open,

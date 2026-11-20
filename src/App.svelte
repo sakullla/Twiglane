@@ -139,6 +139,7 @@
   import TitleBar from "./lib/components/TitleBar.svelte";
   import ViewSwitcher from "./lib/components/ViewSwitcher.svelte";
   import RemoteWorktree from "./lib/components/RemoteWorktree.svelte";
+  import { remoteReviewPort, type RemoteReviewSource } from "./lib/remote-worktree";
   import Welcome from "./lib/components/Welcome.svelte";
   import { createQuietActivity } from "./lib/quiet-activity";
   import { setAbbrevLength } from "./lib/abbrev.svelte";
@@ -472,6 +473,7 @@
   let taskHunk = $state<HunkNavReport | null>(null);
   let taskModal = $state<TaskModal | null>(null);
   let remoteWorktreeOpen = $state(false);
+  let remoteReviewSource = $state<RemoteReviewSource | undefined>();
   let remoteWorktreeWriting = $state(false);
   /**
    * 只读文档阅读窗口的请求。
@@ -3189,6 +3191,18 @@
     }
   }
 
+  async function handleRemoteReviewLink(url: string) {
+    const source = await remoteReviewPort.begin(url);
+    if (!source) return;
+    if (remoteWorktreeOpen || openModalCount() > 0 || switchBlocked(commandState)) {
+      await remoteReviewPort.end(source.reviewId, "busy");
+      notice("请先完成当前操作，再从 Cliora 重新发起远端审查。");
+      return;
+    }
+    remoteReviewSource = source;
+    remoteWorktreeOpen = true;
+  }
+
   /**
    * 本实例已处理过的 reviewId。冷启动的 getCurrent 与运行中的 onOpenUrl 可能对同一条
    * 链接各派发一次，协议要求同一 reviewId 只处理一次。Set 是组件实例变量，不跨实例保留。
@@ -4489,6 +4503,10 @@
       })();
       clioraLinkQueue = restoreSources;
       stopClioraLink = await watchClioraReviewLinks((url) => {
+        if (url.startsWith("twiglane://remote-review")) {
+          clioraLinkQueue = clioraLinkQueue.then(() => handleRemoteReviewLink(url)).catch(showError);
+          return;
+        }
         if (url.startsWith("twiglane://workspace")) {
           clioraLinkQueue = clioraLinkQueue.then(() => handleWorkspaceLink(url)).catch(showError);
           return;
@@ -5257,16 +5275,16 @@
 
 {#if remoteWorktreeOpen}
   <Modal
-    title="远端仓库"
+    title={remoteReviewSource ? "Cliora 远端审查" : "远端仓库"}
     titleId="remote-worktree-title"
     icon="folder-open"
     size="xl"
     width="min(1200px, 100%)"
     fill
     locked={remoteWorktreeWriting}
-    onClose={() => { remoteWorktreeOpen = false; }}
+    onClose={() => { remoteWorktreeOpen = false; remoteReviewSource = undefined; }}
   >
-    <RemoteWorktree onWriting={(value) => (remoteWorktreeWriting = value)} />
+    <RemoteWorktree reviewSource={remoteReviewSource} onWriting={(value) => (remoteWorktreeWriting = value)} />
   </Modal>
 {/if}
 

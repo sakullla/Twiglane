@@ -991,18 +991,21 @@
               </div>
             {/if}
             <span class="spacer"></span>
-            <button
-              class="btn btn-secondary btn-sm"
-              disabled={Boolean(busy) || Boolean(current.error)}
-              title={editReason ?? "选择一个或多个本机仓库目录"}
-              onclick={() => void choosePaths(false)}
-            ><Icon name="plus" size={13} />批量选择仓库</button>
-            <button
-              class="btn btn-secondary btn-sm"
-              disabled={Boolean(busy) || Boolean(current.error)}
-              title={editReason ?? "扫描一个目录，列出其中的 Git 仓库再挑选"}
-              onclick={() => void choosePaths(true)}
-            ><Icon name="search" size={13} />从目录发现</button>
+            <!-- 两个纳入入口作为一组换行，窄窗口下不会只剩一个按钮掉到下一行。 -->
+            <div class="pm-add-group" role="group" aria-label="纳入仓库">
+              <button
+                class="btn btn-secondary btn-sm"
+                disabled={Boolean(busy) || Boolean(current.error)}
+                title={editReason ?? "选择一个或多个本机仓库目录"}
+                onclick={() => void choosePaths(false)}
+              ><Icon name="plus" size={13} />批量选择仓库</button>
+              <button
+                class="btn btn-secondary btn-sm"
+                disabled={Boolean(busy) || Boolean(current.error)}
+                title={editReason ?? "扫描一个目录，列出其中的 Git 仓库再挑选"}
+                onclick={() => void choosePaths(true)}
+              ><Icon name="search" size={13} />从目录发现</button>
+            </div>
           </div>
           <div class="project-members" role="list">
             {#each filtered as repo (repo.id)}
@@ -1022,7 +1025,8 @@
                     {#if repo.locations.length > 1}<small>{repo.locations.length} 个位置</small>{/if}
                   </div>
                   {#each repo.locations as location}
-                    <span class="project-path" title={location.path}><bdi>{location.path}</bdi>{#if location.hostId !== data.hostId}<em> · 其他主机，暂不可用</em>{:else if isLocationMissing(location.path)}<em class="missing-note"> · 目录已缺失</em>{/if}</span>
+                    <!-- 整行失效时由下方一条说明交代原因，路径后不再重复“目录已缺失”。 -->
+                    <span class="project-path" title={location.path}><bdi>{location.path}</bdi>{#if location.hostId !== data.hostId}<em> · 其他主机，暂不可用</em>{:else if !broken && isLocationMissing(location.path)}<em class="missing-note"> · 目录已缺失</em>{/if}</span>
                   {/each}
                   {#if locals.length === 0}
                     <span class="project-error">本机没有位置，请重新关联目录。</span>
@@ -1043,7 +1047,12 @@
                       onclick={() => openInCliora(current, repo.id)}
                     ><Icon name="link" size={13} /></button>
                   {/if}
-                  <button class="icon-btn sm project-member-repair" disabled={Boolean(busy) || Boolean(current.error)} aria-label="重新关联目录" title={editReason ?? "换成本机另一个目录"} onclick={() => void choosePaths(false, repo.id)}><Icon name="folder" size={13} /></button>
+                  {#if broken}
+                    <!-- 失效成员的主操作就是修复：用文字按钮而不是含义不明的图标。 -->
+                    <button class="btn btn-secondary btn-sm project-member-repair" disabled={Boolean(busy) || Boolean(current.error)} aria-label="重新关联目录" title={editReason ?? "选择本机目录，替换这个仓库已失效的位置"} onclick={() => void choosePaths(false, repo.id)}><Icon name="folder" size={13} />重新关联</button>
+                  {:else}
+                    <button class="icon-btn sm project-member-repair" disabled={Boolean(busy) || Boolean(current.error)} aria-label="重新关联目录" title={editReason ?? "换成本机另一个目录"} onclick={() => void choosePaths(false, repo.id)}><Icon name="folder" size={13} /></button>
+                  {/if}
                   <button class="icon-btn sm danger" disabled={Boolean(busy) || Boolean(current.error)} aria-label="移除项目关联" title={editReason ?? "只从项目名单移除，不删除文件"} onclick={() => removeMember(repo)}><Icon name="x" size={13} /></button>
                 </div>
                 <button
@@ -1113,6 +1122,7 @@
   .pm-inline { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
   .pm-inline > .input { flex: 1; min-width: 180px; }
   .pm-search { flex: 1 1 220px; min-width: 180px; }
+  .pm-add-group { display: inline-flex; flex: none; align-items: center; gap: 6px; margin-left: auto; }
   .pm-msg { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 10px; border-radius: var(--radius); background: var(--surface-2); color: var(--fg-muted); font-size: var(--text-sm); overflow-wrap: anywhere; }
   .pm-msg.ok { background: var(--success-soft); color: var(--success-text); }
   .pm-msg.danger { background: var(--danger-soft); color: var(--danger-text); }
@@ -1173,8 +1183,9 @@
   .project-member:hover { background: var(--hover); }
   .member-main { display: grid; flex: 1; min-width: 0; gap: 1px; }
   .member-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .member-title strong { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .pm-branch { display: inline-flex; align-items: center; gap: 3px; flex: 0 1 auto; min-width: 0; max-width: 220px; height: 18px; padding: 0 6px; border-radius: 999px; background: var(--surface-2); color: var(--fg-muted); font: 11px/1 var(--mono); }
+  .member-title strong { flex: 0 10 auto; min-width: 3em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 长仓库名先截断，分支保留可读的长度，而不是被挤成“ma…”。 */
+  .pm-branch { display: inline-flex; align-items: center; gap: 3px; flex: 0 1 auto; min-width: min(7em, 100%); max-width: 220px; height: 18px; padding: 0 6px; border-radius: 999px; background: var(--surface-2); color: var(--fg-muted); font: 11px/1 var(--mono); }
   .pm-branch > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .pm-branch > :global(.icon) { flex: none; }
   .member-actions { display: flex; align-items: center; gap: 4px; flex: none; opacity: 0; transition: opacity var(--duration-fast) var(--ease); }

@@ -131,7 +131,9 @@ describe("项目管理实际交互", () => {
     await fireEvent.click(region.getByRole("button", { name: "下一页" }));
     await fireEvent.click(region.getByRole("checkbox", { name: "service-100 /scale/100" }));
     const search = region.getByRole("textbox", { name: "搜索候选仓库" });
-    await fireEvent.input(search, { target: { value: "/scale/1999" } });
+    await fireEvent.input(search, { target: { value: "no-match" } });
+    expect(region.getByText(/没有匹配的候选/)).toBeTruthy();
+    await fireEvent.input(search, { target: { value: "service-1999 /scale/1999" } });
     expect(region.getAllByRole("checkbox")).toHaveLength(1);
     await fireEvent.click(region.getByRole("button", { name: "确认纳入 1999 个位置" }));
     await waitFor(() => expect(mocks.update).toHaveBeenCalled());
@@ -199,33 +201,6 @@ describe("返修：POSIX 字面路径身份", () => {
   });
 });
 
-it("返修：60 个发现候选可按名称和完整路径搜索，隐藏的多选仍保留", async () => {
-  const p = project(0);
-  const data: Projects = { hostId: host, projects: [p] };
-  const found = Array.from({ length: 60 }, (_, index) => ({ path: `/work/team-${index}/service-${index}`, name: `service-${index}`, commonDirectory: `/git/${index}`, repositoryId: null, error: null }));
-  mocks.discover.mockResolvedValue({ candidates: found, partial: false, cancelled: false });
-  mocks.update.mockResolvedValue(data);
-  render(ProjectManager, { data, selectedId: p.manifest.workspaceId, nextId: () => 1, onData: vi.fn(), onSelect: vi.fn(), onClose: vi.fn() });
-  await fireEvent.click(screen.getByRole("button", { name: "从目录发现" }));
-  const candidates = await screen.findByRole("region", { name: "候选仓库" });
-  const search = within(candidates).getByRole("textbox", { name: "搜索候选仓库" });
-  await fireEvent.input(search, { target: { value: "service-48" } });
-  expect(within(candidates).getAllByRole("checkbox")).toHaveLength(1);
-  await fireEvent.click(within(candidates).getByRole("checkbox"));
-  await fireEvent.input(search, { target: { value: "/work/team-59/" } });
-  expect(within(candidates).getAllByRole("checkbox")).toHaveLength(1);
-  expect((within(candidates).getByRole("checkbox") as HTMLInputElement).checked).toBe(true);
-  await fireEvent.input(search, { target: { value: "no-match" } });
-  expect(within(candidates).queryAllByRole("checkbox")).toHaveLength(0);
-  expect(within(candidates).getByText(/没有匹配的候选/)).toBeTruthy();
-  await fireEvent.input(search, { target: { value: "" } });
-  expect(within(candidates).getAllByRole("checkbox")).toHaveLength(60);
-  await fireEvent.click(within(candidates).getByRole("button", { name: "确认纳入 59 个位置" }));
-  await waitFor(() => expect(mocks.update).toHaveBeenCalled());
-  expect(mocks.update.mock.calls[0][0].repositories).toHaveLength(59);
-  expect(mocks.update.mock.calls[0][0].repositories.some((repo: { locations: { path: string }[] }) => repo.locations[0].path.includes("team-48/"))).toBe(false);
-});
-
 describe("项目管理生命周期、筛选、打开与深链预览一次性消费", () => {
   it("成员按收藏置前，识别缺失目录并提供筛选胶囊、多词搜索、直接打开与在 Cliora 打开", async () => {
     const p: Project = {
@@ -270,6 +245,9 @@ describe("项目管理生命周期、筛选、打开与深链预览一次性消�
     expect(items.map((el) => el.querySelector("strong")?.textContent)).toEqual(["gamma-fav", "alpha-current", "beta-missing"]);
     expect(items[1].querySelector(".pm-current-badge")?.textContent).toBe("当前");
     expect(items[2].classList.contains("broken")).toBe(true);
+    // 失效成员的修复是可读的文字主操作，原因只说一次。
+    expect(items[2].querySelector(".project-member-repair")?.textContent?.trim()).toBe("重新关联");
+    expect(items[2].querySelector(".missing-note")).toBeNull();
 
     // 筛选胶囊：待处理只留缺失目录项，再点恢复全部。
     const filters = screen.getByRole("group", { name: "筛选项目成员" });
@@ -311,6 +289,7 @@ describe("项目管理生命周期、筛选、打开与深链预览一次性消�
     };
     const data: Projects = { hostId: host, projects: [shared] };
     mocks.attach.mockResolvedValue(data);
+    const onConsumeInitialPreview = vi.fn();
     const { unmount } = render(ProjectManager, {
       data,
       selectedId: null,
@@ -319,11 +298,12 @@ describe("项目管理生命周期、筛选、打开与深链预览一次性消�
       onData: vi.fn(),
       onSelect: vi.fn(),
       onOpenRepo,
-      onConsumeInitialPreview: vi.fn(),
+      onConsumeInitialPreview,
       onClose: vi.fn(),
     });
 
     const region = await screen.findByRole("region", { name: "项目清单预览" });
+    expect(onConsumeInitialPreview).toHaveBeenCalledTimes(1);
     // 取消即消费掉这次意图：不关联、不打开，也不会留下可重放的来源仓库。
     await fireEvent.click(within(region).getByRole("button", { name: "取消预览" }));
     expect(mocks.attach).not.toHaveBeenCalled();
@@ -407,24 +387,6 @@ describe("项目管理生命周期、筛选、打开与深链预览一次性消�
     expect(onSelect).toHaveBeenCalledWith(local.manifest.workspaceId);
   });
 
-  it("initialPreview 交给弹窗后立即消费父层意图，关闭预览后不会残留", async () => {
-    const p = project(1);
-    mocks.repoHeads.mockResolvedValue([]);
-    const onConsumeInitialPreview = vi.fn();
-    render(ProjectManager, {
-      data: { hostId: host, projects: [] },
-      selectedId: null,
-      initialPreview: { manifest: p.manifest, path: "/work/incoming.dev-workspace.json", digest: "obs", conflict: false, sourceRepositoryId: null, attached: false },
-      nextId: () => 1,
-      onData: vi.fn(),
-      onSelect: vi.fn(),
-      onConsumeInitialPreview,
-      onClose: vi.fn(),
-    });
-    expect(await screen.findByRole("region", { name: "项目清单预览" })).toBeTruthy();
-    expect(onConsumeInitialPreview).toHaveBeenCalledTimes(1);
-    expect(mocks.attach).not.toHaveBeenCalled();
-  });
 });
 
 describe("管理项目页：新建项目", () => {

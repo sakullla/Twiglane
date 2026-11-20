@@ -1,0 +1,535 @@
+#!/usr/bin/env python3
+"""Twiglane remote Git agent. The authenticated SSH channel owns this process."""
+import argparse
+import base64
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import queue
+import re
+import select
+import socket
+import sqlite3
+import stat
+import subprocess
+import sys
+import threading
+import tempfile
+import uuid
+from pathlib import Path
+
+VERSION = 1
+MAX_REQUEST = 128 * 1024
+MAX_OUTPUT = 4 * 1024 * 1024
+PAGE_BYTES = 16 * 1024
+OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+TOKEN = re.compile(r"[a-zA-Z0-9_-]{1,80}\Z")
+GIT_ENV = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+GIT_ENV.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", LC_ALL="C")
+
+
+class Fault(Exception):
+    def __init__(self, code, message):
+        self.code = code
+        self.message = message
+
+
+def require(condition, code="bad_request", message="Invalid request"):
+    if not condition:
+        raise Fault(code, message)
+
+
+def string(value, limit=4096):
+    require(isinstance(value, str) and 0 < len(value) <= limit and "\0" not in value)
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise Fault("invalid_encoding", "UTF-8 required") from None
+    return value
+
+
+def filename(raw):
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Fault("invalid_encoding", "Worktree contains a non-UTF-8 filename") from None
+
+
+def digest(value):
+    return hashlib.sha256(value).hexdigest()
+
+
+def encode(data):
+    return json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+
+
+def git_args(root, *args):
+    return ["git", "--literal-pathspecs", "-c", "color.ui=false", "-C", str(root), *args]
+
+
+def git(root, *args, ok=(0,), env=None, input_bytes=None):
+    # No user hooks or commit messages enter the JSON channel.
+    with subprocess.Popen(git_args(root, *args), env=env or GIT_ENV,
+                          stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
+                          stdout=subprocess.DEVNULL if input_bytes is not None else subprocess.PIPE,
+                          stderr=subprocess.DEVNULL) as process:
+        try:
+            if input_bytes is not None:
+                # The message is bounded by MAX_REQUEST. git commit consumes stdin
+                # only after running pre-commit hooks; don't block the protocol pipe.
+                process.communicate(input=input_bytes)
+                out = b""
+            else:
+                out = process.stdout.read(MAX_OUTPUT + 1)
+                require(len(out) <= MAX_OUTPUT, "output_limit", "Git output exceeds the agent limit")
+                process.wait()
+            require(process.returncode in ok, "git_failed", "Git could not complete the operation")
+            return out
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+
+def git_path(root, *args):
+    # Git appends exactly one LF, and a legal path can itself end with LF.
+    raw = git(root, *args)
+    require(raw.endswith(b"\n"), "git_failed", "Git did not return a directory")
+    return Path(filename(raw[:-1]))
+
+
+def head_branch(root):
+    head = git(root, "rev-parse", "--verify", "--quiet", "HEAD", ok=(0, 1)).strip().decode("ascii") or None
+    branch = git(root, "symbolic-ref", "--quiet", "--short", "HEAD", ok=(0, 1))
+    return head, filename(branch.rstrip(b"\n")) or None
+
+
+def stat_key(path):
+    try:
+        info = path.lstat()
+        return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode]
+    except FileNotFoundError:
+        return None
+
+
+def directory_key(path):
+    info = path.stat()
+    return [str(path), info.st_dev, info.st_ino]
+
+
+def host_name():
+    return socket.gethostname()
+
+
+class Worktree:
+    def __init__(self, path):
+        require(Path(path).is_absolute(), "invalid_path", "An absolute worktree path is required")
+        root = Path(path).resolve(strict=True)
+        require(root.is_dir() and git_path(root, "rev-parse", "--show-toplevel").resolve() == root,
+                "not_worktree", "Select the worktree root directory")
+        self.root = root
+        self.gitdir = git_path(root, "rev-parse", "--absolute-git-dir").resolve(strict=True)
+        common = git_path(root, "rev-parse", "--git-common-dir")
+        self.common = (root / common).resolve(strict=True)
+        self.key = digest(encode([host_name(), directory_key(root), directory_key(self.gitdir)]))
+        self.lock_key = digest(encode(directory_key(self.common)))
+
+    def verify(self, expected):
+        require(expected == self.key and Worktree(str(self.root)).key == self.key,
+                "target_changed", "The worktree identity changed")
+
+    def snapshot(self, baseline=None):
+        head, branch = head_branch(self.root)
+        raw = git(self.root, "-c", "status.renames=false", "status", "--porcelain=v1", "-z", "-uall",
+                  "--ignore-submodules=none")
+        rows, metadata = [], []
+        for record in raw.split(b"\0"):
+            if not record:
+                continue
+            require(len(record) > 3 and record[2:3] == b" ", "git_failed", "Unsupported status record")
+            name = filename(record[3:])
+            rows.append({"path": name, "xy": record[:2].decode("ascii")})
+            metadata.append(stat_key(self.root / name))
+        # The raw staged blob IDs distinguish same-status replacements, including
+        # updates from other clients. Avoid using mutable index stat/cache metadata.
+        staged = git(self.root, "diff", "--cached", "--raw", "--no-abbrev", "--no-renames", "-z")
+        generation = digest(encode([self.key, head, branch, digest(raw), digest(staged), metadata]))
+        result = {"repo": self.key, "root": str(self.root), "host": host_name(), "head": head,
+                  "branch": branch, "generation": generation, "files": rows}
+        if baseline is not None:
+            self.check_baseline(baseline)
+            changed = git(self.root, "diff", "--name-only", "-z", "--no-renames", baseline, "--")
+            names = {filename(item) for item in changed.split(b"\0") if item}
+            for item in rows:
+                if item["xy"] != "??":
+                    continue
+                name = item["path"]
+                if name in names:
+                    # Git normally reports a committed/staged deletion even when
+                    # the developer recreated that path as an untracked file.
+                    with baseline_file_index(self.root, baseline, name) as env:
+                        if env is not None:
+                            check = subprocess.run(git_args(self.root, "diff", "--quiet", "--no-ext-diff",
+                                                           "--no-textconv", "--", name), env=env,
+                                                   stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            require(check.returncode in (0, 1), "diff_failed", "Cannot compare the task baseline")
+                            if check.returncode == 0:
+                                names.remove(name)
+                                continue
+                names.add(name)
+            result["reviewFiles"] = sorted(names)
+        require(len(encode(result)) < MAX_OUTPUT, "output_limit", "File list exceeds the agent limit")
+        return result
+
+    def check_baseline(self, baseline):
+        require(isinstance(baseline, str) and OID.fullmatch(baseline), "invalid_baseline", "Invalid baseline")
+        try:
+            git(self.root, "merge-base", "--is-ancestor", baseline, "HEAD")
+        except Fault:
+            raise Fault("invalid_baseline", "Baseline is unavailable in this worktree") from None
+
+    def status_for(self, request, baseline=None):
+        snapshot = self.snapshot(baseline)
+        require(request.get("generation") == snapshot["generation"],
+                "stale_state", "Refresh the worktree before continuing")
+        return snapshot
+
+    def path(self, name):
+        string(name)
+        parts = name.split("/")
+        require(all(part and part not in (".", "..") and part.casefold() != ".git" for part in parts),
+                "invalid_path", "Invalid repository-relative path")
+        # Do not follow directory links when selecting a worktree item. Git
+        # handles a symlink leaf as a Git object (its target text).
+        parent = (self.root / name).parent
+        require(parent.resolve() == parent, "invalid_path", "A parent directory has changed")
+        return name
+
+
+def write_dir(tree):
+    base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+    require(base.is_absolute(), "storage_failed", "Invalid state directory")
+    folder = base / "twiglane" / "agent-v1" / tree.lock_key
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    mode = folder.lstat()
+    require(stat.S_ISDIR(mode.st_mode) and mode.st_uid == os.getuid() and mode.st_mode & 0o077 == 0,
+            "storage_failed", "Private state directory required")
+    return folder
+
+
+@contextlib.contextmanager
+def journal(tree):
+    folder = write_dir(tree)
+    with (folder / "lock").open("ab") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with contextlib.closing(sqlite3.connect(folder / "writes.sqlite")) as db:
+            db.execute("PRAGMA synchronous=FULL")
+            db.execute("CREATE TABLE IF NOT EXISTS writes (id TEXT PRIMARY KEY, repo TEXT NOT NULL, "
+                       "request TEXT NOT NULL, receipt TEXT NOT NULL)")
+            yield db
+
+
+def read_receipt(db, tree, operation, request_hash=None):
+    row = db.execute("SELECT repo,request,receipt FROM writes WHERE id=?", [operation]).fetchone()
+    if not row:
+        return None
+    require(row[0] == tree.key and (request_hash is None or row[1] == request_hash),
+            "operation_conflict", "This operation ID belongs to another request")
+    receipt = json.loads(row[2])
+    if receipt["state"] == "completed":
+        if receipt["op"] == "commit":
+            head, branch = head_branch(tree.root)
+            matches = (head, branch) == (receipt["head"], receipt["branch"])
+        else:
+            matches = tree.snapshot()["generation"] == receipt["generation"]
+        if not matches:
+            return {**receipt, "state": "unknown", "reason": "worktree_changed"}
+    return receipt
+
+
+def operation_id(request):
+    value = request.get("operationId")
+    try:
+        require(isinstance(value, str) and str(uuid.UUID(value)) == value,
+                "bad_request", "A canonical operation UUID is required")
+    except ValueError:
+        raise Fault("bad_request", "A canonical operation UUID is required") from None
+    return value
+
+
+def write(tree, request):
+    op = request["op"]
+    operation = operation_id(request)
+    message, paths = None, None
+    if op == "commit":
+        message = string(request.get("message"), 32768)
+        require(message.strip(), "empty_message", "A commit message is required")
+    else:
+        paths = request.get("paths")
+        require(isinstance(paths, list) and 0 < len(paths) <= 512)
+        paths = list(dict.fromkeys(tree.path(path) for path in paths))
+    intent = digest(encode([tree.key, op, request.get("generation"), message, paths]))
+    with journal(tree) as db:
+        tree.verify(request.get("repo"))
+        previous = read_receipt(db, tree, operation, intent)
+        if previous is not None:
+            return previous
+        before = tree.status_for(request)
+        statuses = {row["path"]: row["xy"] for row in before["files"]}
+        conflicts = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
+        if op == "commit":
+            require(not any(xy in conflicts for xy in statuses.values()), "unmerged", "Resolve conflicts first")
+            require(any(xy[0] not in " ?" for xy in statuses.values()), "nothing_staged", "Nothing staged")
+        else:
+            require(all(path in statuses and statuses[path] not in conflicts for path in paths),
+                    "invalid_selection", "Refresh and select changed files")
+            eligible = 1 if op == "stage" else 0
+            require(all(statuses[path][eligible] != " " and (op != "unstage" or statuses[path] != "??")
+                        for path in paths), "invalid_selection", "Select files with matching changes")
+        receipt = {"operationId": operation, "op": op, "state": "unknown", "repo": tree.key,
+                   "beforeHead": before["head"], "branch": before["branch"]}
+        db.execute("INSERT INTO writes VALUES (?,?,?,?)", (operation, tree.key, intent, json.dumps(receipt)))
+        db.commit()
+        # Once registered, an ambiguous interruption is never automatically replayed.
+        if op == "stage":
+            git(tree.root, "add", "--", *paths)
+        elif op == "unstage":
+            if before["head"] is None:
+                git(tree.root, "rm", "--cached", "-f", "--", *paths)
+            else:
+                git(tree.root, "restore", "--staged", "--", *paths)
+        else:
+            git(tree.root, "commit", "-F", "-", env={**GIT_ENV, "GIT_REFLOG_ACTION": "twiglane-" + operation},
+                input_bytes=message.encode())
+        after = tree.snapshot()
+        if op == "commit":
+            # A current HEAD alone cannot identify our write in the presence of
+            # external Git clients. Match the UUID marker in Git's own reflog.
+            reflog = git(tree.root, "reflog", "show", "-1", "--format=%H%x00%gs", "HEAD")
+            prefix = ((after["head"] or "") + "\0twiglane-" + operation + ":").encode()
+            if after["branch"] != before["branch"] or not reflog.startswith(prefix):
+                return receipt
+        receipt.update(state="completed", head=after["head"], generation=after["generation"])
+        db.execute("UPDATE writes SET receipt=? WHERE id=?", (json.dumps(receipt), operation))
+        db.commit()
+        return receipt
+
+
+@contextlib.contextmanager
+def baseline_file_index(root, baseline, path):
+    entry = git(root, "ls-tree", "-z", baseline, "--", path)
+    if not entry:
+        yield None
+        return
+    metadata, _, raw_name = entry.rstrip(b"\0").partition(b"\t")
+    mode, kind, oid = metadata.split(b" ")
+    if kind != b"blob" or filename(raw_name) != path:
+        yield None
+        return
+    # Build only the selected entry, in a temporary index. Git itself handles
+    # executable bits, symlinks, attributes, quoted filenames and binary diffs.
+    with tempfile.TemporaryDirectory(prefix="twiglane-baseline-") as directory:
+        env = {**GIT_ENV, "GIT_INDEX_FILE": str(Path(directory) / "index")}
+        git(root, "update-index", "-z", "--index-info", env=env,
+            input_bytes=mode + b" " + oid + b"\t" + raw_name + b"\0")
+        yield env
+
+
+class DiffStream:
+    def __init__(self, tree, context, snapshot):
+        _, _, path, view, baseline = context
+        state = {row["path"]: row["xy"] for row in snapshot["files"]}
+        options = ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color"]
+        if view == "task":
+            require(path in snapshot["reviewFiles"], "invalid_selection", "File is not in the task diff")
+        else:
+            require(path in state, "invalid_selection", "File is not in the current worktree changes")
+        self.cleanup = contextlib.ExitStack()
+        env = None
+        if view == "task" and state.get(path) == "??":
+            env = self.cleanup.enter_context(baseline_file_index(tree.root, baseline, path))
+        if env is not None:
+            args = options + ["--", path]
+            self.exit_codes = (0,)
+        elif state.get(path) == "??" and view != "staged":
+            mode = (tree.root / path).lstat().st_mode
+            require(stat.S_ISREG(mode) or stat.S_ISLNK(mode), "invalid_selection", "Unsupported file type")
+            args = options + ["--no-index", "--", "/dev/null", path]
+            self.exit_codes = (0, 1)
+        else:
+            revision = ["--cached"] if view == "staged" else ([baseline] if view == "task" else [])
+            args = options + revision + ["--", path]
+            self.exit_codes = (0,)
+        self.process = subprocess.Popen(git_args(tree.root, *args), env=env or GIT_ENV, stdin=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL, stdout=subprocess.PIPE)
+        self.context = context
+        self.stamp = self.file_stamp(tree, path)
+        self.cursor = None
+        self.remainder = b""
+
+    @staticmethod
+    def file_stamp(tree, path):
+        return (stat_key(tree.root / path), stat_key(tree.gitdir / "index"), head_branch(tree.root))
+
+    def page(self, cancel):
+        data = bytearray(self.remainder)
+        while len(data) < PAGE_BYTES + 1:
+            require(not cancel.is_set(), "superseded", "A newer selection replaced this diff")
+            ready, _, _ = select.select([self.process.stdout], [], [], 0.05)
+            if ready:
+                chunk = os.read(self.process.stdout.fileno(), PAGE_BYTES + 1 - len(data))
+                if not chunk:
+                    break
+                data.extend(chunk)
+        self.remainder = data[PAGE_BYTES:]
+        if self.remainder:
+            self.cursor = uuid.uuid4().hex
+        else:
+            self.cursor = None
+            require(self.process.wait() in self.exit_codes, "diff_failed", "Git could not read the selected diff")
+        return {"data": base64.b64encode(data[:PAGE_BYTES]).decode("ascii"), "nextCursor": self.cursor}
+
+    def close(self):
+        if self.process.poll() is None:
+            self.process.kill()
+        self.process.stdout.close()
+        self.process.wait()
+        self.cleanup.close()
+
+
+class Session:
+    def __init__(self):
+        self.tree = None
+        self.stream = None
+
+    def discard_diff(self):
+        if self.stream is not None:
+            self.stream.close()
+            self.stream = None
+
+    def diff(self, request, cancel):
+        path = self.tree.path(request.get("path"))
+        view, cursor, baseline = request.get("view"), request.get("cursor"), request.get("baseline")
+        require(view in ("staged", "unstaged", "task") and (view == "task") == (baseline is not None))
+        context = (self.tree.key, request.get("generation"), path, view, baseline)
+        if cursor is None:
+            self.discard_diff()
+            snapshot = self.tree.status_for(request, baseline)
+            require(not cancel.is_set(), "superseded", "A newer selection replaced this diff")
+            self.stream = DiffStream(self.tree, context, snapshot)
+        else:
+            require(self.stream is not None and self.stream.context == context and cursor == self.stream.cursor,
+                    "stale_cursor", "The diff cursor expired")
+            require(self.stream.stamp == self.stream.file_stamp(self.tree, path),
+                    "stale_state", "File or index changed while reading its diff")
+        try:
+            page = self.stream.page(cancel)
+        except Exception:
+            self.discard_diff()
+            raise
+        if page["nextCursor"] is None:
+            self.discard_diff()
+        return page
+
+    def dispatch(self, request, cancel):
+        op = request.get("op")
+        if op == "hello":
+            return {"protocol": VERSION, "agent": "twiglane-agent/1", "host": host_name()}
+        if op == "open":
+            self.discard_diff()
+            self.tree = None
+            tree = Worktree(string(request.get("path")))
+            snapshot = tree.snapshot(request.get("baseline"))
+            self.tree = tree
+            return snapshot
+        require(self.tree is not None, "no_worktree", "Open the worktree first")
+        self.tree.verify(request.get("repo"))
+        if op == "status":
+            return self.tree.snapshot(request.get("baseline"))
+        if op == "diff":
+            return self.diff(request, cancel)
+        if op == "receipt":
+            operation = operation_id(request)
+            with journal(self.tree) as db:
+                return read_receipt(db, self.tree, operation) or {
+                    "state": "unknown", "reason": "not_recorded", "repo": self.tree.key, "operationId": operation}
+        if op in ("stage", "unstage", "commit"):
+            self.discard_diff()
+            return write(self.tree, request)
+        raise Fault("unsupported_operation", "Unknown operation")
+
+
+def receive(pending):
+    # Keep reading bounded requests while Git prepares a diff. A fresh selection
+    # can preempt Git even when it has not yet produced its first byte.
+    previous_read = None
+    while True:
+        line = sys.stdin.buffer.readline(MAX_REQUEST + 1)
+        if not line:
+            break
+        cancel = threading.Event()
+        request, error, request_id = None, None, None
+        try:
+            require(len(line) <= MAX_REQUEST and line.endswith(b"\n"), "frame_limit", "Invalid request framing")
+            request = json.loads(line)
+            require(isinstance(request, dict))
+            require(isinstance(request.get("id"), str) and TOKEN.fullmatch(request["id"]))
+            request_id = request["id"]
+            require(type(request.get("v")) is int and request["v"] == VERSION,
+                    "unsupported_version", "Unsupported protocol version")
+            if request.get("op") == "open" or (request.get("op") == "diff" and not request.get("cursor")):
+                if previous_read is not None:
+                    previous_read.set()
+            if request.get("op") == "diff":
+                previous_read = cancel
+        except Fault as failure:
+            error = failure
+        except (ValueError, RecursionError, UnicodeError):
+            error = Fault("bad_request", "Invalid request encoding")
+        pending.put((request_id, request, error, cancel))
+        if len(line) > MAX_REQUEST:
+            break
+    pending.put(None)
+
+
+def serve():
+    session = Session()
+    pending = queue.Queue(maxsize=4)
+    reader = threading.Thread(target=receive, args=(pending,), daemon=True)
+    reader.start()
+    try:
+        while True:
+            item = pending.get()
+            if item is None:
+                break
+            request_id, request, error, cancel = item
+            try:
+                if error:
+                    raise error
+                response = {"ok": True, "result": session.dispatch(request, cancel)}
+            except Fault as error:
+                response = {"ok": False, "error": {"code": error.code, "message": error.message}}
+            except (ValueError, RecursionError, UnicodeError):
+                response = {"ok": False, "error": {"code": "bad_request", "message": "Invalid request encoding"}}
+            except FileNotFoundError:
+                response = {"ok": False, "error": {"code": "not_found", "message": "A required path or tool is missing"}}
+            except (OSError, sqlite3.Error, RuntimeError):
+                response = {"ok": False, "error": {"code": "io_failed", "message": "Agent I/O failed"}}
+            response.update(v=VERSION, id=request_id)
+            sys.stdout.buffer.write(encode(response) + b"\n")
+            sys.stdout.buffer.flush()
+    finally:
+        session.discard_diff()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--version", action="version", version="twiglane-agent/1")
+    parser.add_argument("--stdio", action="store_true")
+    parser.parse_args()
+    try:
+        serve()
+    except BrokenPipeError:
+        os._exit(0)

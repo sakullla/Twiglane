@@ -424,6 +424,7 @@ const R11_ACTIONS: { id: string; title: string }[] = [
   { id: "task.remote", title: "远程" },
   { id: "task.settings", title: "设置" },
   { id: "repo.add", title: "添加仓库" },
+  { id: "repo.openRemote", title: "打开远端仓库" },
   { id: "repo.clone", title: "克隆仓库" },
   { id: "repo.create", title: "新建仓库" },
   { id: "repo.copyPath", title: "复制路径" },
@@ -2785,7 +2786,7 @@ describe("应用外壳", () => {
     });
   });
 
-  it("起始页三个入口不可用时就地说明原因", async () => {
+  it("起始页仓库入口不可用时就地说明原因", async () => {
     let finish: (value: unknown) => void = () => {};
     render(App);
     await waitFor(() => expect(document.querySelector(".welcome")).toBeTruthy());
@@ -2801,7 +2802,7 @@ describe("应用外壳", () => {
     });
     expect(reason.textContent).toBe("正在读取，稍后再试");
     const cards = document.querySelectorAll<HTMLButtonElement>(".action-card");
-    expect(cards).toHaveLength(3);
+    expect(cards).toHaveLength(4);
     for (const card of cards) {
       expect(card.disabled).toBe(true);
       expect(card.title).toBe("正在读取，稍后再试");
@@ -2809,11 +2810,21 @@ describe("应用外壳", () => {
     finish(undefined);
   });
 
-  it("起始页空状态保留三个入口，不再堆说明文字", async () => {
+  it("从起始页打开 Cliora 远端仓库选择器", async () => {
+    mocks.getSettings.mockResolvedValue({ theme: "system", recent: [] });
+    render(App);
+    await fireEvent.click(await screen.findByRole("button", { name: /打开远端仓库/ }));
+    const dialog = await screen.findByRole("dialog", { name: "远端仓库" });
+    expect(within(dialog).getByLabelText("Cliora 主机")).toBeTruthy();
+    expect(within(dialog).getByLabelText("远端工作树路径")).toBeTruthy();
+    expect(mocks.openRepository).not.toHaveBeenCalled();
+  });
+
+  it("起始页空状态保留四个仓库入口", async () => {
     useRecent([]);
     render(App);
     await waitFor(() => expect(document.querySelector("[data-welcome-empty]")).toBeTruthy());
-    expect(document.querySelectorAll(".action-card")).toHaveLength(3);
+    expect(document.querySelectorAll(".action-card")).toHaveLength(4);
     expect(screen.queryByRole("textbox", { name: "搜索最近仓库" }), "没有仓库时不出现搜索").toBeNull();
     expect(document.querySelector("[data-welcome-empty]")?.textContent).toContain("还没有最近仓库");
     expect(document.querySelector("[data-welcome-empty-note]")).toBeNull();

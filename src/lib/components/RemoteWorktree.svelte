@@ -20,6 +20,7 @@
   interface Props {
     port?: RemoteWorktreePort;
     prefill?: RemoteWorktreeLocation;
+    onWriting?: (writing: boolean) => void;
     onOpened?: (workspace: RemoteWorkspace) => void;
     onWriteResult?: (workspace: RemoteWorkspace, result: RemoteWriteResult) => void;
     actions?: Snippet<[RemoteWorkspace]>;
@@ -57,7 +58,7 @@
     U: "冲突",
   };
 
-  let { port = remoteWorktreePort, prefill, onOpened, onWriteResult, actions }: Props = $props();
+  let { port = remoteWorktreePort, prefill, onOpened, onWriteResult, onWriting, actions }: Props = $props();
   const initialLocation = untrack(() => prefill);
   let targets = $state<RemoteTarget[]>([]);
   let targetId = $state(initialLocation?.targetId ?? "");
@@ -71,6 +72,7 @@
   let workspace = $state<RemoteWorkspace | null>(null);
   let pending = $state<RemotePendingWrite | null>(null);
   let writing = $state<RemotePendingWrite | null>(null);
+  $effect(() => onWriting?.(writing !== null));
   let refreshing = $state(false);
   let needsRefresh = $state(false);
   let error = $state("");

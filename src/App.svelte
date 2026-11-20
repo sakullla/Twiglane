@@ -138,6 +138,7 @@
   import StatusBar from "./lib/components/StatusBar.svelte";
   import TitleBar from "./lib/components/TitleBar.svelte";
   import ViewSwitcher from "./lib/components/ViewSwitcher.svelte";
+  import RemoteWorktree from "./lib/components/RemoteWorktree.svelte";
   import Welcome from "./lib/components/Welcome.svelte";
   import { createQuietActivity } from "./lib/quiet-activity";
   import { setAbbrevLength } from "./lib/abbrev.svelte";
@@ -470,6 +471,8 @@
   let taskNav = $state.raw<FileNavState | null>(null);
   let taskHunk = $state<HunkNavReport | null>(null);
   let taskModal = $state<TaskModal | null>(null);
+  let remoteWorktreeOpen = $state(false);
+  let remoteWorktreeWriting = $state(false);
   /**
    * 只读文档阅读窗口的请求。
    *
@@ -485,7 +488,7 @@
    * 键盘、命令分发与写入入口都用这一份判定，不逐个列举 documentRequest（漏一处就会让
    * Ctrl+Enter 真的提交、Alt+箭头改掉底下的差异选择）。
    */
-  let taskLayerOpen = $derived(taskModal !== null || documentRequest !== null);
+  let taskLayerOpen = $derived(taskModal !== null || documentRequest !== null || remoteWorktreeOpen);
   /** 阅读位置按「仓库 + 版本 + 路径」保存在这里，关闭再打开仍能接着读。 */
   const documentSession = createDocumentSession({ repository: () => opened?.summary.path ?? null });
   /** 从哪个任务 modal 跳过来的：例如从「分支与标签」打开合并，关闭合并时回到那里。 */
@@ -1084,6 +1087,9 @@
         return;
       case "palette.open":
         openPalette();
+        return;
+      case "repo.openRemote":
+        remoteWorktreeOpen = true;
         return;
       case "repo.add":
         void addRepo();
@@ -4069,7 +4075,7 @@
 
   /** 键盘层：把按键翻成命令 id，再走与四个入口相同的 runCommand。 */
   function onWindowKeydown(event: KeyboardEvent) {
-    if (paletteOpen) return;
+    if (paletteOpen || remoteWorktreeOpen) return;
     // 任务级 modal 层占着单槽（任务弹窗或只读阅读窗口）时按键全部让位：
     // 阅读窗口同样由 Modal 占层并让背景 inert，外壳键盘不能落到 inert 底下（R3/R6）。
     if (taskLayerOpen || cloneOpen || dependencyOpen || confirmPath !== null) return;
@@ -5200,6 +5206,7 @@
           onAdd={() => runCommand("repo.add")}
           onClone={() => runCommand("repo.clone")}
           onCreate={() => runCommand("repo.create")}
+          onOpenRemote={() => runCommand("repo.openRemote")}
           onOpen={openRecent}
           onContextMenu={repoContextMenu}
         />
@@ -5246,6 +5253,22 @@
     onToggleTerminal={() => runCommand("terminal.toggle")}
   />
 </div>
+
+
+{#if remoteWorktreeOpen}
+  <Modal
+    title="远端仓库"
+    titleId="remote-worktree-title"
+    icon="folder-open"
+    size="xl"
+    width="min(1200px, 100%)"
+    fill
+    locked={remoteWorktreeWriting}
+    onClose={() => { remoteWorktreeOpen = false; }}
+  >
+    <RemoteWorktree onWriting={(value) => (remoteWorktreeWriting = value)} />
+  </Modal>
+{/if}
 
 <CommandPalette open={paletteOpen} commands={paletteCommands} onClose={() => (paletteOpen = false)} />
 

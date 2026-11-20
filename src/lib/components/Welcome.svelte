@@ -28,6 +28,7 @@
     onAdd: () => void;
     onClone: () => void;
     onCreate: () => void;
+    onOpenRemote?: () => void;
     onOpen: (path: string) => void;
     onContextMenu?: (repo: RecentRepo, point: { x: number; y: number }) => void;
     diagnostic?: string | null;
@@ -43,6 +44,7 @@
     onAdd,
     onClone,
     onCreate,
+    onOpenRemote,
     onOpen,
     onContextMenu,
     diagnostic = null,
@@ -150,7 +152,7 @@
   <div class="welcome-inner">
     <div class="welcome-brand"><BrandMark /></div>
 
-    <section class="welcome-actions" aria-label="开始使用">
+    <section class="welcome-actions" class:has-remote-action={!!onOpenRemote} aria-label="开始使用">
       <button type="button" class="action-card primary" {disabled} title={actionTitle} onclick={onAdd} onkeydown={onActionKey}>
         <Icon name="folder-open" size={18} />
         <span class="ac-copy"><strong>打开本地仓库</strong><span>选择或拖入本地文件夹</span></span>
@@ -163,6 +165,12 @@
         <Icon name="folder-plus" size={18} />
         <span class="ac-copy"><strong>新建仓库</strong><span>在空目录初始化新仓库</span></span>
       </button>
+      {#if onOpenRemote}
+        <button type="button" class="action-card" {disabled} title={actionTitle} onclick={onOpenRemote} onkeydown={onActionKey}>
+          <Icon name="terminal" size={18} />
+          <span class="ac-copy"><strong>打开远端仓库</strong><span>连接 Cliora 主机</span></span>
+        </button>
+      {/if}
     </section>
 
     {#if disabled && disabledReason}

@@ -5,6 +5,7 @@ mod git;
 mod measure;
 mod model;
 mod redact;
+pub mod remote_worktree_transport;
 mod shutdown;
 mod state;
 mod terminal;

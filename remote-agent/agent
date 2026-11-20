@@ -10,6 +10,7 @@ import os
 import queue
 import re
 import select
+import shutil
 import socket
 import sqlite3
 import stat
@@ -110,7 +111,7 @@ def stat_key(path):
     try:
         info = path.lstat()
         return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode]
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError):
         return None
 
 
@@ -140,21 +141,30 @@ class Worktree:
         require(expected == self.key and Worktree(str(self.root)).key == self.key,
                 "target_changed", "The worktree identity changed")
 
-    def snapshot(self, baseline=None):
+    def snapshot(self, baseline=None, env=None):
         head, branch = head_branch(self.root)
         raw = git(self.root, "-c", "status.renames=false", "status", "--porcelain=v1", "-z", "-uall",
-                  "--ignore-submodules=none")
-        rows, metadata = [], []
+                  "--ignore-submodules=none", env=env)
+        states = {}
+        metadata = []
         for record in raw.split(b"\0"):
             if not record:
                 continue
             require(len(record) > 3 and record[2:3] == b" ", "git_failed", "Unsupported status record")
             name = filename(record[3:])
-            rows.append({"path": name, "xy": record[:2].decode("ascii")})
+            xy = record[:2].decode("ascii")
+            if name in states:
+                # The index deletion and the unrelated new worktree file occupy
+                # the same name. Preserve both sides regardless of report order.
+                prior = states[name]
+                require("??" in (prior, xy), "git_failed", "Ambiguous path status")
+                xy = (xy if prior == "??" else prior)[0] + "?"
+            states[name] = xy
             metadata.append(stat_key(self.root / name))
         # The raw staged blob IDs distinguish same-status replacements, including
         # updates from other clients. Avoid using mutable index stat/cache metadata.
-        staged = git(self.root, "diff", "--cached", "--raw", "--no-abbrev", "--no-renames", "-z")
+        rows = [{"path": name, "xy": xy} for name, xy in states.items()]
+        staged = staged_diff(self.root, env)
         generation = digest(encode([self.key, head, branch, digest(raw), digest(staged), metadata]))
         result = {"repo": self.key, "root": str(self.root), "host": host_name(), "head": head,
                   "branch": branch, "generation": generation, "files": rows}
@@ -163,7 +173,7 @@ class Worktree:
             changed = git(self.root, "diff", "--name-only", "-z", "--no-renames", baseline, "--")
             names = {filename(item) for item in changed.split(b"\0") if item}
             for item in rows:
-                if item["xy"] != "??":
+                if item["xy"][1] != "?":
                     continue
                 name = item["path"]
                 if name in names:
@@ -190,8 +200,8 @@ class Worktree:
         except Fault:
             raise Fault("invalid_baseline", "Baseline is unavailable in this worktree") from None
 
-    def status_for(self, request, baseline=None):
-        snapshot = self.snapshot(baseline)
+    def status_for(self, request, baseline=None, env=None):
+        snapshot = self.snapshot(baseline, env)
         require(request.get("generation") == snapshot["generation"],
                 "stale_state", "Refresh the worktree before continuing")
         return snapshot
@@ -238,6 +248,15 @@ def read_receipt(db, tree, operation, request_hash=None):
     require(row[0] == tree.key and (request_hash is None or row[1] == request_hash),
             "operation_conflict", "This operation ID belongs to another request")
     receipt = json.loads(row[2])
+    if receipt["state"] == "unknown" and receipt.get("candidateHead"):
+        marker = receipt_ref(operation)
+        recovered = git(tree.root, "rev-parse", "--verify", "--quiet", marker, ok=(0, 1)).decode().strip()
+        if recovered == receipt["candidateHead"]:
+            snapshot = tree.snapshot()
+            if (snapshot["head"], snapshot["branch"]) == (recovered, receipt["branch"]):
+                receipt.update(state="completed", head=recovered, generation=snapshot["generation"])
+                save_receipt(db, receipt)
+                git(tree.root, "update-ref", "-d", marker, recovered, ok=(0, 1, 128))
     if receipt["state"] == "completed":
         if receipt["op"] == "commit":
             head, branch = head_branch(tree.root)
@@ -259,6 +278,183 @@ def operation_id(request):
     return value
 
 
+def staged_diff(root, env):
+    return git(root, "diff", "--cached", "--raw", "--no-abbrev", "--no-renames", "-z", env=env)
+
+
+def staged_entries(root, env):
+    fields = staged_diff(root, env).split(b"\0")
+    return {filename(path): header for header, path in zip(fields[::2], fields[1::2])}
+
+
+@contextlib.contextmanager
+def frozen_index(tree):
+    # The rename of a native Git index is atomic. This copy represents one
+    # index even if an independent git add publishes a newer one immediately.
+    with tempfile.TemporaryDirectory(prefix="twiglane-index-", dir=tree.gitdir) as folder:
+        copy = Path(folder) / "index"
+        try:
+            shutil.copyfile(tree.gitdir / "index", copy)
+        except FileNotFoundError:
+            pass  # Empty worktree without its first index.
+        yield {**GIT_ENV, "GIT_INDEX_FILE": str(copy)}
+
+
+@contextlib.contextmanager
+def index_publication(tree):
+    # Cooperate with native Git's index lock. Keep our own hard link to identify
+    # and safely recover a lock left by a killed agent. journal() serializes
+    # agents; a lock held by another Git client belongs entirely to that client.
+    lock = tree.gitdir / "index.lock"
+    marker = tree.gitdir / "twiglane-agent-index-owner"
+    if marker.exists():
+        if lock.exists() and marker.samefile(lock):
+            lock.unlink()
+        marker.unlink()
+    with marker.open("xb") as owner:
+        try:
+            try:
+                os.link(marker, lock)
+            except FileExistsError:
+                raise Fault("index_locked", "Another Git operation holds the index lock") from None
+            yield owner
+        finally:
+            if lock.exists() and marker.samefile(lock):
+                lock.unlink()
+            marker.unlink()
+
+
+def apply_index(tree, request, paths, receipt):
+    with index_publication(tree) as lock, frozen_index(tree) as env:
+        before = tree.status_for(request, env=env)
+        statuses = {row["path"]: row["xy"] for row in before["files"]}
+        conflicts = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
+        require(all(path in statuses and statuses[path] not in conflicts for path in paths),
+                "invalid_selection", "Refresh and select changed files")
+        stage = request["op"] == "stage"
+        require(all(statuses[path][1] != " " if stage else statuses[path][0] not in " ?"
+                    for path in paths), "invalid_selection", "Select files with matching changes")
+        original = staged_entries(tree.root, env)
+        if stage:
+            additions, deletions = [], []
+            for path in paths:
+                if (tree.root / path).is_dir() and statuses[path][1] == "D":
+                    deletions.append(path)
+                else:
+                    additions.append(path)
+            if deletions:
+                git(tree.root, "update-index", "--force-remove", "--", *deletions, env=env)
+            if additions:
+                git(tree.root, "add", "--", *additions, env=env)
+        elif before["head"] is None:
+            git(tree.root, "rm", "--cached", "-f", "--", *paths, env=env)
+        else:
+            git(tree.root, "restore", "--source=" + before["head"], "--staged", "--", *paths, env=env)
+        updated = staged_entries(tree.root, env)
+        changed = {name for name in original.keys() | updated.keys() if original.get(name) != updated.get(name)}
+        require(changed <= set(paths), "selection_expands", "Select all affected paths before changing the index")
+        # Recheck the live checkout after collecting the proposed changes, before
+        # making them visible. The native lock excludes other index writers.
+        tree.status_for(request)
+        with open(env["GIT_INDEX_FILE"], "rb") as index:
+            shutil.copyfileobj(index, lock)
+        lock.flush()
+        if (tree.gitdir / "index").exists():
+            os.fchmod(lock.fileno(), stat.S_IMODE((tree.gitdir / "index").stat().st_mode))
+        os.fsync(lock.fileno())
+        os.replace(tree.gitdir / "index.lock", tree.gitdir / "index")
+        try:
+            after = tree.snapshot()
+        except (Fault, OSError):
+            return receipt
+        return {**receipt, "state": "completed", "head": after["head"], "generation": after["generation"]}
+
+
+def hook(tree, name, args, env, required=True):
+    # rev-parse resolves core.hooksPath and the per-worktree/common layout.
+    path = tree.root / git_path(tree.root, "rev-parse", "--git-path", "hooks/" + name)
+    if not path.is_file() or not os.access(path, os.X_OK):
+        return
+    args = [str(path), *map(str, args)]
+    try:
+        run = subprocess.run(args, cwd=tree.root, env={**env, "GIT_EDITOR": ":"}, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        if required:
+            raise Fault("hook_failed", "Could not run the repository commit hook") from None
+        return
+    require(not required or run.returncode == 0, "hook_failed", "Repository hook declined the commit")
+
+
+def receipt_ref(operation):
+    return "refs/worktree/twiglane/receipts/" + operation
+
+
+def save_receipt(db, receipt):
+    db.execute("UPDATE writes SET receipt=? WHERE id=?", (json.dumps(receipt), receipt["operationId"]))
+    db.commit()
+
+
+def publish_commit(tree, request, receipt):
+    # Git resolves and locks HEAD (and its current referent) during prepare.
+    # While those locks are held, verify the branch, old HEAD and exact staged
+    # snapshot. The marker is created in the SAME ref transaction as the commit.
+    new = receipt["candidateHead"]
+    old = receipt["beforeHead"] or "0" * len(new)
+    marker = receipt_ref(receipt["operationId"])
+    with subprocess.Popen(git_args(tree.root, "update-ref", "-m", "Twiglane commit", "--stdin"),
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                          env=GIT_ENV) as process:
+        try:
+            process.stdin.write(f"start\nupdate HEAD {new} {old}\ncreate {marker} {new}\nprepare\n".encode())
+            process.stdin.flush()
+            require(process.stdout.readline() == b"start: ok\n" and process.stdout.readline() == b"prepare: ok\n",
+                    "stale_state", "The branch could not be locked at its original HEAD")
+            with index_publication(tree):
+                tree.verify(request["repo"])
+                tree.status_for(request)
+                process.stdin.write(b"commit\n")
+                process.stdin.flush()
+                require(process.stdout.readline() == b"commit: ok\n", "commit_unknown", "Check the operation receipt")
+        finally:
+            # EOF aborts an uncommitted explicit transaction and releases Git locks.
+            process.stdin.close()
+            process.wait()
+
+
+def commit_snapshot(db, tree, request, receipt, message):
+    with frozen_index(tree) as env:
+        before = tree.status_for(request, env=env)
+        require(not any(row["xy"] in {"DD", "AU", "UD", "UA", "DU", "AA", "UU"} for row in before["files"]),
+                "unmerged", "Resolve conflicts first")
+        require(any(row["xy"][0] not in " ?" for row in before["files"]), "nothing_staged", "Nothing staged")
+        require(not any((tree.gitdir / item).exists() for item in ("MERGE_HEAD", "CHERRY_PICK_HEAD",
+                    "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer")),
+                "git_operation_active", "Complete the existing Git operation first")
+        index_tree = git(tree.root, "write-tree", env=env).decode().strip()
+        hook(tree, "pre-commit", [], env)
+        message_file = Path(env["GIT_INDEX_FILE"]).parent / "COMMIT_EDITMSG"
+        message_file.write_text(message + "\n", encoding="utf8")
+        hook(tree, "prepare-commit-msg", [message_file, "message"], env)
+        hook(tree, "commit-msg", [message_file], env)
+        require(message_file.read_bytes().strip(), "empty_message", "A commit message is required")
+        require(git(tree.root, "write-tree", env=env).decode().strip() == index_tree,
+                "stale_state", "A hook changed the selected index contents")
+        args = ["commit-tree", index_tree, "-F", str(message_file)]
+        if before["head"]:
+            args.extend(["-p", before["head"]])
+        if git(tree.root, "config", "--bool", "--get", "commit.gpgSign", ok=(0, 1)).strip() == b"true":
+            args.append("-S")
+        new = git(tree.root, *args, env=env).decode("ascii").strip()
+        require(OID.fullmatch(new), "git_failed", "Git did not create a commit object")
+        receipt.update(candidateHead=new, beforeHead=before["head"], branch=before["branch"])
+        save_receipt(db, receipt)
+        publish_commit(tree, request, receipt)
+    hook(tree, "post-commit", [], GIT_ENV, required=False)
+    # Keep provenance until the verified completion is durable locally.
+    return read_receipt(db, tree, receipt["operationId"])
+
+
 def write(tree, request):
     op = request["op"]
     operation = operation_id(request)
@@ -277,44 +473,24 @@ def write(tree, request):
         if previous is not None:
             return previous
         before = tree.status_for(request)
-        statuses = {row["path"]: row["xy"] for row in before["files"]}
-        conflicts = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
-        if op == "commit":
-            require(not any(xy in conflicts for xy in statuses.values()), "unmerged", "Resolve conflicts first")
-            require(any(xy[0] not in " ?" for xy in statuses.values()), "nothing_staged", "Nothing staged")
-        else:
-            require(all(path in statuses and statuses[path] not in conflicts for path in paths),
-                    "invalid_selection", "Refresh and select changed files")
-            eligible = 1 if op == "stage" else 0
-            require(all(statuses[path][eligible] != " " and (op != "unstage" or statuses[path] != "??")
-                        for path in paths), "invalid_selection", "Select files with matching changes")
         receipt = {"operationId": operation, "op": op, "state": "unknown", "repo": tree.key,
                    "beforeHead": before["head"], "branch": before["branch"]}
         db.execute("INSERT INTO writes VALUES (?,?,?,?)", (operation, tree.key, intent, json.dumps(receipt)))
         db.commit()
-        # Once registered, an ambiguous interruption is never automatically replayed.
-        if op == "stage":
-            git(tree.root, "add", "--", *paths)
-        elif op == "unstage":
-            if before["head"] is None:
-                git(tree.root, "rm", "--cached", "-f", "--", *paths)
-            else:
-                git(tree.root, "restore", "--staged", "--", *paths)
-        else:
-            git(tree.root, "commit", "-F", "-", env={**GIT_ENV, "GIT_REFLOG_ACTION": "twiglane-" + operation},
-                input_bytes=message.encode())
-        after = tree.snapshot()
-        if op == "commit":
-            # A current HEAD alone cannot identify our write in the presence of
-            # external Git clients. Match the UUID marker in Git's own reflog.
-            reflog = git(tree.root, "reflog", "show", "-1", "--format=%H%x00%gs", "HEAD")
-            prefix = ((after["head"] or "") + "\0twiglane-" + operation + ":").encode()
-            if after["branch"] != before["branch"] or not reflog.startswith(prefix):
-                return receipt
-        receipt.update(state="completed", head=after["head"], generation=after["generation"])
-        db.execute("UPDATE writes SET receipt=? WHERE id=?", (json.dumps(receipt), operation))
-        db.commit()
-        return receipt
+        try:
+            if op == "commit":
+                return commit_snapshot(db, tree, request, receipt, message)
+            completed = apply_index(tree, request, paths, receipt)
+            save_receipt(db, completed)
+            return completed
+        except Fault as error:
+            if error.code in {"invalid_selection", "selection_expands", "index_locked", "stale_state",
+                              "target_changed", "hook_failed", "empty_message", "git_operation_active",
+                              "nothing_staged", "unmerged"}:
+                # These conditions reject the write before publishing its index
+                # or ref. Preserve the same definitive failure on later lookup.
+                save_receipt(db, {**receipt, "state": "failed", "reason": error.code})
+            raise
 
 
 @contextlib.contextmanager
@@ -348,12 +524,12 @@ class DiffStream:
             require(path in state, "invalid_selection", "File is not in the current worktree changes")
         self.cleanup = contextlib.ExitStack()
         env = None
-        if view == "task" and state.get(path) == "??":
+        if view == "task" and state.get(path, "  ")[1] == "?":
             env = self.cleanup.enter_context(baseline_file_index(tree.root, baseline, path))
         if env is not None:
             args = options + ["--", path]
             self.exit_codes = (0,)
-        elif state.get(path) == "??" and view != "staged":
+        elif state.get(path, "  ")[1] == "?" and view != "staged":
             mode = (tree.root / path).lstat().st_mode
             require(stat.S_ISREG(mode) or stat.S_ISLNK(mode), "invalid_selection", "Unsupported file type")
             args = options + ["--no-index", "--", "/dev/null", path]

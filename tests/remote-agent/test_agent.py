@@ -231,7 +231,126 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(next(r for r in results if not r["ok"])["error"]["code"], "stale_state")
         self.assertEqual(self.git("rev-list", "--count", "HEAD"), "2")
 
-    def test_record_without_completion_stays_unknown(self):
+    def test_file_replaced_by_directory_stages_only_selected_deletion(self):
+        target = self.root / "tracked"
+        target.unlink()
+        target.mkdir()
+        (target / "child").write_text("leave untracked")
+        meta = self.meta()
+        self.assertEqual(self.client.result("stage", **meta, paths=["tracked"],
+                                           operationId=str(uuid.uuid4()))["state"], "completed")
+        self.assertEqual(self.git("diff", "--cached", "--name-status"), "D\ttracked")
+        self.assertEqual(self.git("ls-files", "--others", "--exclude-standard"), "tracked/child")
+
+    def test_staged_deletion_with_recreated_file_can_be_reset_or_committed(self):
+        self.git("rm", "-q", "--", "tracked")
+        (self.root / "tracked").write_text("recreated")
+        status = self.open()
+        self.assertEqual(status["files"], [{"path": "tracked", "xy": "D?"}])
+        meta = {key: status[key] for key in ("repo", "generation")}
+        self.client.result("unstage", **meta, paths=["tracked"], operationId=str(uuid.uuid4()))
+        self.assertEqual(self.git("diff", "--cached", "--name-status"), "")
+        self.assertEqual((self.root / "tracked").read_text(), "recreated")
+        self.git("rm", "--cached", "tracked")
+        meta = self.meta()
+        result = self.client.result("commit", **meta, message="delete only", operationId=str(uuid.uuid4()))
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(self.git("ls-tree", "--name-only", "HEAD"), "")
+        self.assertEqual(self.git("status", "--porcelain"), "?? tracked")
+
+    def commit_barrier(self):
+        tools = self.tmp / "gate-tools"
+        tools.mkdir()
+        marker = self.tmp / "git-started"
+        release = self.tmp / "git-continue"
+        executable = shutil.which("git")
+        wrapper = tools / "git"
+        wrapper.write_text("#!/usr/bin/env python3\nimport os,sys,time\nfrom pathlib import Path\n"
+                           "if 'commit-tree' in sys.argv or 'commit' in sys.argv:\n"
+                           f"    Path({str(marker)!r}).touch()\n"
+                           f"    while not Path({str(release)!r}).exists(): time.sleep(.01)\n"
+                           f"os.execv({executable!r}, [{executable!r}, *sys.argv[1:]])\n")
+        wrapper.chmod(0o755)
+        client = Client({**self.env, "PATH": str(tools) + os.pathsep + self.env["PATH"]})
+        self.addCleanup(client.close)
+        self.addCleanup(release.touch)
+        (self.root / "tracked").write_text("approved")
+        self.git("add", "tracked")
+        meta = self.meta(client)
+        client.send("commit", **meta, message="intended", operationId=str(uuid.uuid4()))
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertTrue(marker.exists())
+        return client, release
+
+    def test_external_add_after_validation_is_not_committed(self):
+        (self.root / "outside").write_text("external")
+        old_head = self.git("rev-parse", "HEAD")
+        client, release = self.commit_barrier()
+        self.git("add", "outside")
+        release.touch()
+        self.assertFalse(client.receive()["ok"])
+        self.assertEqual(self.git("rev-parse", "HEAD"), old_head)
+        self.assertEqual(set(self.git("diff", "--cached", "--name-only").splitlines()), {"tracked","outside"})
+
+    def test_external_branch_switch_does_not_write_either_branch(self):
+        original = self.git("symbolic-ref", "HEAD")
+        old_head = self.git("rev-parse", "HEAD")
+        self.git("branch", "other")
+        client, release = self.commit_barrier()
+        self.git("switch", "-q", "other")
+        release.touch()
+        self.assertFalse(client.receive()["ok"])
+        self.assertEqual(self.git("rev-parse", "HEAD"), old_head)
+        self.assertEqual(self.git("rev-parse", original), old_head)
+
+    def test_agent_killed_after_ref_update_can_recover_without_reflog(self):
+        self.git("config", "core.logAllRefUpdates", "false")
+        shutil.rmtree(self.root / ".git" / "logs")
+        started, release = self.tmp / "post-start", self.tmp / "post-stop"
+        hook = self.root / ".git" / "hooks" / "post-commit"
+        hook.write_text("#!/usr/bin/env python3\nimport time\nfrom pathlib import Path\n"
+                        f"Path({str(started)!r}).touch()\n"
+                        f"while not Path({str(release)!r}).exists(): time.sleep(.01)\n")
+        hook.chmod(0o755)
+        self.addCleanup(release.touch)
+        (self.root / "tracked").write_text("staged")
+        self.git("add", "tracked")
+        meta = self.meta()
+        operation = str(uuid.uuid4())
+        self.client.send("commit", **meta, message="one", operationId=operation)
+        deadline = time.monotonic() + 5
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertTrue(started.exists())
+        self.assertEqual(self.git("rev-list", "--count", "HEAD"), "2")
+        self.client.process.kill()
+        self.client.process.wait()
+        release.touch()
+        new_client = self.connect()
+        reopened = self.meta(new_client)
+        result = new_client.result("receipt", operationId=operation, repo=reopened["repo"])
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(result["head"], self.git("rev-parse", "HEAD"))
+        self.assertEqual(new_client.result("commit", **meta, message="one", operationId=operation), result)
+        self.assertEqual(self.git("rev-list", "--count", "HEAD"), "2")
+
+    def test_precommit_hook_failure_leaves_original_index_and_head(self):
+        hook = self.root / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        (self.root / "tracked").write_text("staged")
+        self.git("add", "tracked")
+        meta = self.meta()
+        operation = str(uuid.uuid4())
+        failure = self.client.call("commit", **meta, message="one", operationId=operation)
+        self.assertEqual(failure["error"]["code"], "hook_failed")
+        self.assertEqual(self.client.result("receipt", operationId=operation, repo=meta["repo"])["state"], "failed")
+        self.assertEqual(self.git("rev-list", "--count", "HEAD"), "1")
+        self.assertEqual(self.git("diff", "--cached", "--name-only"), "tracked")
+
+    def test_reflog_disabled_still_confirms_original_commit(self):
         (self.root / "tracked").write_text("new\n")
         self.git("add", "--", "tracked")
         self.git("config", "core.logAllRefUpdates", "false")
@@ -239,10 +358,10 @@ class AgentTests(unittest.TestCase):
         operation = str(uuid.uuid4())
         meta = self.meta()
         receipt = self.client.result("commit", **meta, operationId=operation, message="no proof")
-        self.assertEqual(receipt["state"], "unknown")
+        self.assertEqual(receipt["state"], "completed")
         retry = self.connect()
         self.meta(retry)
-        self.assertEqual(retry.result("commit", **meta, operationId=operation, message="no proof")["state"], "unknown")
+        self.assertEqual(retry.result("commit", **meta, operationId=operation, message="no proof")["state"], "completed")
         self.assertEqual(self.git("rev-list", "--count", "HEAD"), "2")
 
 

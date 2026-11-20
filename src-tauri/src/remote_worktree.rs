@@ -130,7 +130,7 @@ struct Session {
     repo: String,
     target: Target,
     root: String,
-    peer_revision: String,
+    peer_identity: String,
     baseline: Option<String>,
 }
 
@@ -138,8 +138,8 @@ impl Session {
     fn journal(&self, base: &Path) -> PathBuf {
         let key = json!([
             self.target.target_id,
-            self.target.target_revision,
-            self.peer_revision,
+            self.peer_identity,
+            self.target.user,
             self.root
         ]);
         base.join(format!(
@@ -175,6 +175,10 @@ fn remote_error(code: &str) -> AppError {
             "无法在该 SSH 账号的个人目录安全安装远端组件。"
         }
         "stale_state" => "远端工作树已有变化，请刷新后重试。",
+        "remote_busy" => "远端请求仍在处理，本次操作尚未发送，可以重试。",
+        "remote_request_size" => "操作内容超出单次请求大小，请缩短提交说明后重试。",
+        "remote_not_sent" => "远端连接已关闭，本次操作尚未发送，请重连后重试。",
+        "remote_request" => "远端操作参数无效，本次操作尚未发送。",
         "invalid_selection" | "selection_expands" => "远端文件状态已变化或选择范围不完整。",
         "index_locked" => "远端 Git 正在写入暂存区，请等待后刷新。",
         "nothing_staged" => "远端暂存区没有可提交的内容。",
@@ -476,6 +480,23 @@ fn valid_path(value: &str, absolute: bool) -> bool {
         && value.len() <= 4096
 }
 
+fn probe_identity(value: &Value) -> Result<&str> {
+    value
+        .as_str()
+        .filter(|value| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or_else(|| {
+            AppError::new(
+                "cliora_incompatible",
+                "请更新 Cliora，以核对实际 SSH 主机身份。",
+            )
+        })
+}
+
 async fn connect(
     path: &Path,
     request: &OpenRequest,
@@ -512,20 +533,8 @@ async fn connect(
             "远端需要 Linux 或 macOS、Python 3.8 及以上与系统 Git。",
         ));
     }
-    let peer = probe["peerRevision"]
-        .as_str()
-        .filter(|value| {
-            value.len() == 64
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
-        .ok_or_else(|| {
-            AppError::new(
-                "cliora_incompatible",
-                "请更新 Cliora，以核对实际 SSH 主机身份。",
-            )
-        })?;
+    let peer = probe_identity(&probe["peerRevision"])?;
+    let peer_identity = probe_identity(&probe["peerIdentity"])?.to_owned();
     let selected = InstallTarget {
         target_id: target.target_id.clone(),
         revision: target.target_revision.clone(),
@@ -600,7 +609,7 @@ async fn connect(
                 repo: repo.into(),
                 root: root.into(),
                 target,
-                peer_revision: selected.peer,
+                peer_identity,
                 baseline: request.baseline.clone(),
             }),
             snapshot,
@@ -786,7 +795,11 @@ fn unknown(operation_id: &str) -> Value {
 fn definitive_error(code: &str) -> bool {
     matches!(
         code,
-        "bad_request"
+        "remote_busy"
+            | "remote_not_sent"
+            | "remote_request"
+            | "remote_request_size"
+            | "bad_request"
             | "invalid_path"
             | "invalid_selection"
             | "selection_expands"
@@ -948,8 +961,7 @@ mod tests {
             "host": "test.invalid", "port": 22, "user": "test", "authMethod": "key",
         });
         let catalog = json!({"protocol": 1, "targets": [target]});
-        let probe =
-            json!({"system": "Linux", "pythonVersion": "3.13.5", "peerRevision": current_peer});
+        let probe = json!({"system": "Linux", "pythonVersion": "3.13.5", "peerRevision": current_peer, "peerIdentity": "c".repeat(64)});
         std::fs::write(
             &helper,
             format!(
@@ -992,5 +1004,56 @@ esac
             "target_changed"
         );
         assert!(!dir.path().join("upload-dispatched").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unsent_oversized_commit_does_not_leave_an_uncertain_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = RemoteWorktrees::new(dir.path().to_path_buf());
+        let mut child = Command::new("/bin/cat");
+        let agent = AgentTransport::spawn(&mut child).unwrap();
+        let target = serde_json::from_value(json!({
+            "targetId": "host-a", "targetRevision": "original-catalog", "name": "A",
+            "host": "test.invalid", "port": 22, "user": "test", "authMethod": "key",
+        }))
+        .unwrap();
+        let mut session = Session {
+            agent,
+            repo: "repo-a".into(),
+            target,
+            root: "/repo".into(),
+            peer_identity: "same-host".into(),
+            baseline: None,
+        };
+        let journal = session.journal(dir.path());
+        session.target.target_revision = "edited-catalog".into();
+        assert_eq!(journal, session.journal(dir.path()));
+        session.peer_identity = "replacement-host".into();
+        assert_ne!(journal, session.journal(dir.path()));
+        session.peer_identity = "same-host".into();
+
+        let pending = Pending {
+            operation_id: Uuid::new_v4().to_string(),
+            op: WriteKind::Commit,
+            repo: session.repo.clone(),
+        };
+        save_pending(&journal, &pending).unwrap();
+        let response = session
+            .agent
+            .rpc("commit", json!({"message": "\u{0001}".repeat(24_000)}))
+            .await;
+        assert_eq!(response.as_ref().unwrap_err().code, "remote_request_size");
+        let result = finish_write(&state, &session, &journal, &pending, response)
+            .await
+            .unwrap();
+        assert_eq!(result["state"], "failed");
+        assert!(!journal.exists());
+        assert!(definitive_error("remote_busy"));
+        assert!(!definitive_error("remote_disconnected"));
+        session.agent.close().await;
+        let rejected = session.agent.rpc("commit", json!({})).await.unwrap_err();
+        assert_eq!(rejected.code, "remote_not_sent");
+        assert!(definitive_error(&rejected.code));
     }
 }

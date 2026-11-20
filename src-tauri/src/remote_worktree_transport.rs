@@ -29,6 +29,10 @@ fn disconnected() -> AppError {
     )
 }
 
+fn not_sent() -> AppError {
+    AppError::new("remote_not_sent", "远端连接已关闭，本次请求尚未发送。")
+}
+
 fn protocol_error() -> AppError {
     AppError::new(
         "remote_protocol",
@@ -156,8 +160,8 @@ impl AgentTransport {
         let (reply, response) = oneshot::channel();
         {
             let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(error) = &pending.failure {
-                return Err(error.clone());
+            if pending.failure.is_some() {
+                return Err(not_sent());
             }
             if pending.waiters.len() >= MAX_IN_FLIGHT {
                 return Err(busy());
@@ -165,7 +169,7 @@ impl AgentTransport {
             self.outgoing
                 .try_send(bytes.0)
                 .map_err(|error| match error {
-                    mpsc::error::TrySendError::Closed(_) => disconnected(),
+                    mpsc::error::TrySendError::Closed(_) => not_sent(),
                     mpsc::error::TrySendError::Full(_) => busy(),
                 })?;
             pending.waiters.insert(id, reply);
@@ -576,7 +580,7 @@ function receive(req) {
             );
             assert_eq!(
                 agent.rpc("status", json!({})).await.unwrap_err().code,
-                "remote_protocol"
+                "remote_not_sent"
             );
             agent.close().await;
         }

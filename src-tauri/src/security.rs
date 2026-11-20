@@ -137,6 +137,7 @@ fn capabilities_grant_only_explicit_terminal_ipc_not_a_generic_shell() {
         "allow-set-pull-integration",
         "allow-set-branch-groups",
         "allow-set-files-view",
+        "allow-set-change-requests-enabled",
         "allow-set-panel-widths",
         "allow-save-draft",
         "allow-cancel-reads",

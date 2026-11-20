@@ -1292,26 +1292,45 @@
   }
 
   /** back：用户自己关闭（关闭按钮、右上角、Esc）时回到来源 modal；跳去别的视图时不回。 */
+  type BranchDialogView = {
+    repo: string;
+    tab: "local" | "remote" | "tags";
+    query: string;
+    groupOverrides: Record<string, boolean>;
+    scrollTop: number;
+  };
+  let branchDialog = $state<{ captureView?: () => Omit<BranchDialogView, "repo"> } | null>(null);
+  let branchDialogSaved = $state<BranchDialogView | null>(null);
+
   function closeTask(back = false) {
     const closed = taskModal;
     const origin = back === true ? taskReturn : null;
     taskReturn = null;
     taskModal = null;
     settingsSection = null;
+    if (closed === "branch") {
+      branchDialogSaved = null;
+    }
     if (closed === "merge") {
       conflictFocus = null;
       mergeAbortIntent = false;
       mergeSource = null;
       mergeTarget = null;
       mergeMode = null;
+      if (origin !== "branch") branchDialogSaved = null;
       void probeMerge();
     }
     if (origin && origin !== closed) openTask(origin);
   }
 
-  /** 从「分支与标签」进入合并：关闭合并时回到分支与标签，而不是直接回到工作区。 */
+  /** 从「分支与标签」进入合并：关闭合并时回到分支与标签，并恢复进入前的分区、搜索词与滚动位置。 */
   function mergeFromBranches(start: () => void) {
+    const captured = branchDialog?.captureView?.();
+    const repoPath = opened?.summary.path ?? null;
     closeTask();
+    if (captured && repoPath) {
+      branchDialogSaved = { repo: repoPath, ...captured };
+    }
     start();
     taskReturn = "branch";
   }
@@ -5106,6 +5125,7 @@
               onReveal={(path) => void revealInFolder(path)}
               onOpenDefault={(path) => void openWithDefault(path)}
               onCopyPath={(text, what) => void copyText(text, what)}
+              onRefreshRepo={() => void refresh()}
               onIgnore={(path, local) => void ignore(path, local)}
               onInsertToTerminal={(paths) => void insertIntoTerminal(paths)}
               toAbsolute={absolutePath}
@@ -5409,7 +5429,9 @@
   />
 {:else if opened && taskModal === "branch"}
   <BranchDialog
+    bind:this={branchDialog}
     {opened}
+    initialView={branchDialogSaved && branchDialogSaved.repo === opened.summary.path ? branchDialogSaved : null}
     returnFocus={taskReturnFocus}
     disabled={writeLocked}
     onClose={closeTask}

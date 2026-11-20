@@ -38,6 +38,8 @@
     onMode?: (mode: DocumentMode) => void;
     /** 文件本身的元数据版本：有版本时无关仓库变化不重读正文。 */
     contentVersion?: string | null;
+    /** 手动刷新目录等无代次变化时的强制重读信号。 */
+    reloadKey?: number;
     /** 指定源码行：序号变化即进入源码并定位，优先于保存的位置。 */
     line?: number | null;
     lineSerial?: number;
@@ -68,6 +70,7 @@
     mode = "preview",
     onMode,
     contentVersion = null,
+    reloadKey = 0,
     line = null,
     lineSerial = 0,
     onFollow,
@@ -240,12 +243,13 @@
     previewNavigation += 1;
   }
 
-  /** 正文读取：内容版本已知时无关代次变化不重读；隐藏或换文档立即作废在途结果。 */
+  /** 正文读取：内容版本已知时无关代次变化不重读；手动刷新信号前进时强制重读；隐藏或换文档立即作废在途结果。 */
   $effect(() => {
     const target = activeSource;
     const visible = active;
     const version = contentVersion ?? null;
     const generationNow = generation;
+    const key = reloadKey;
     untrack(() => {
       if (!visible) {
         documentSerial += 1;
@@ -254,7 +258,7 @@
         sourceLoading = false;
         return;
       }
-      const signature = JSON.stringify([repository, target.revision, target.path, target.snapshot ?? null, version ?? generationNow]);
+      const signature = JSON.stringify([repository, target.revision, target.path, target.snapshot ?? null, version ?? generationNow, key]);
       if (signature === lastRead) return;
       lastRead = signature;
       readDocument();

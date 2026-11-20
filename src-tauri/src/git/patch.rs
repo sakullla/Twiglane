@@ -4,7 +4,8 @@ use sha2::{Digest, Sha256};
 
 use crate::error::AppError;
 use crate::model::{
-    ChangeKind, CommitFileChange, DiffHunk, DiffLine, DiffLineSelection, FileChange, LineStat,
+    ChangeKind, CommitFileChange, DiffHunk, DiffLine, DiffLineEnding, DiffLineSelection,
+    FileChange, LineStat,
 };
 
 pub const DIFF_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
@@ -101,7 +102,7 @@ pub fn parse_diff(bytes: &[u8], mut truncated_input: bool) -> Result<ParsedDiff,
         Some(index) => (&lines[..index], &lines[index..]),
         None => (lines.as_slice(), &[][..]),
     };
-    let preamble = preamble_lines.concat();
+    let preamble = contiguous_slice(text, preamble_lines).to_owned();
     let mut hunks = Vec::new();
     let mut cursor = 0;
     let mut clipped = preamble_lines
@@ -113,7 +114,7 @@ pub fn parse_diff(bytes: &[u8], mut truncated_input: bool) -> Result<ParsedDiff,
             .position(|line| line.starts_with("@@"))
             .map(|offset| cursor + 1 + offset)
             .unwrap_or(hunk_lines.len());
-        let raw = hunk_lines[cursor..end].concat();
+        let raw = contiguous_slice(text, &hunk_lines[cursor..end]).to_owned();
         let full_header = hunk_lines[cursor].trim_end_matches(['\n', '\r']);
         let header = display_text(full_header);
         let last = end == hunk_lines.len();
@@ -504,6 +505,7 @@ pub fn view_lines(
                 old_no: None,
                 new_no: None,
                 hunk_index: None,
+                eol: None,
             });
         }
     }
@@ -626,19 +628,42 @@ fn body_counts(lines: &[&str]) -> (u32, u32) {
     (old_seen, new_seen)
 }
 
+/// 检测行尾类型：仅 CRLF 与单独 CR 需要标注，普通 LF 省略以节省内存与序列化开销。
+fn detect_eol(line: &str) -> Option<DiffLineEnding> {
+    if line.ends_with("\r\n") {
+        Some(DiffLineEnding::Crlf)
+    } else if line.ends_with('\r') {
+        Some(DiffLineEnding::Cr)
+    } else {
+        None
+    }
+}
+
+/// 从原始 text 直接切片连续行，避免 Vec<&str>::concat 的逐行拷贝与多次扩容。
+fn contiguous_slice<'a>(base: &'a str, slice: &[&str]) -> &'a str {
+    let (Some(first), Some(last)) = (slice.first(), slice.last()) else {
+        return "";
+    };
+    let start = first.as_ptr() as usize - base.as_ptr() as usize;
+    let end = (last.as_ptr() as usize - base.as_ptr() as usize) + last.len();
+    &base[start..end]
+}
+
 fn hunk_display_lines(index: u32, header: &str, lines: &[&str]) -> Vec<DiffLine> {
-    let mut display = Vec::new();
+    let mut display = Vec::with_capacity(lines.len());
     display.push(DiffLine {
         kind: "hunk".to_string(),
         text: header.to_string(),
         old_no: None,
         new_no: None,
         hunk_index: Some(index),
+        eol: None,
     });
     let (mut old_no, mut new_no) = parse_hunk_header(header)
         .map(|(old_start, _, new_start, _)| (old_start, new_start))
         .unwrap_or((0, 0));
     for line in lines.iter().skip(1) {
+        let eol = detect_eol(line);
         let body = line.trim_end_matches(['\n', '\r']);
         if body.starts_with('\\') {
             display.push(DiffLine {
@@ -647,6 +672,7 @@ fn hunk_display_lines(index: u32, header: &str, lines: &[&str]) -> Vec<DiffLine>
                 old_no: None,
                 new_no: None,
                 hunk_index: Some(index),
+                eol: None,
             });
             continue;
         }
@@ -659,6 +685,7 @@ fn hunk_display_lines(index: u32, header: &str, lines: &[&str]) -> Vec<DiffLine>
                 old_no: None,
                 new_no: Some(current),
                 hunk_index: Some(index),
+                eol,
             });
         } else if body.starts_with('-') {
             let current = old_no;
@@ -669,6 +696,7 @@ fn hunk_display_lines(index: u32, header: &str, lines: &[&str]) -> Vec<DiffLine>
                 old_no: Some(current),
                 new_no: None,
                 hunk_index: Some(index),
+                eol,
             });
         } else {
             let current_old = old_no;
@@ -681,6 +709,7 @@ fn hunk_display_lines(index: u32, header: &str, lines: &[&str]) -> Vec<DiffLine>
                 old_no: Some(current_old),
                 new_no: Some(current_new),
                 hunk_index: Some(index),
+                eol,
             });
         }
     }
@@ -1366,5 +1395,31 @@ index 1111111..2222222 100644
         let binary = line_stat_of_bytes(b"a\0b");
         assert_eq!(binary.additions, None);
         assert_eq!(binary.deletions, None);
+    }
+
+    #[test]
+    fn parse_diff_preserves_crlf_and_lf_line_ending_metadata() {
+        let raw = concat!(
+            "diff --git a/eol.txt b/eol.txt\n",
+            "index 1111111..2222222 100644\n",
+            "--- a/eol.txt\n",
+            "+++ b/eol.txt\n",
+            "@@ -1,2 +1,2 @@\n",
+            "-const a = 1;\n",
+            "+const a = 1;\r\n",
+            " keep();\n",
+        );
+        let parsed = parse_diff(raw.as_bytes(), false).unwrap();
+        assert_eq!(parsed.hunks.len(), 1);
+        let lines = &parsed.hunks[0].lines;
+        assert_eq!(lines[0].eol, None); // hunk header
+        assert_eq!(lines[1].kind, "del");
+        assert_eq!(lines[1].text, "-const a = 1;");
+        assert_eq!(lines[1].eol, None); // LF omitted
+        assert_eq!(lines[2].kind, "add");
+        assert_eq!(lines[2].text, "+const a = 1;");
+        assert_eq!(lines[2].eol, Some(DiffLineEnding::Crlf));
+        assert_eq!(lines[3].kind, "context");
+        assert_eq!(lines[3].eol, None);
     }
 }

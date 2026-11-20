@@ -1,4 +1,5 @@
 import type { DiffLine, DiffResponse } from "./types";
+import type { WhitespaceIgnoreMode } from "./diff-prefs.svelte";
 
 /** 「查看完整文件」请求的上下文行数：足够覆盖整份文件，与后端 FULL_FILE_CONTEXT 一致。 */
 export const FULL_FILE_CONTEXT = 1_000_000;
@@ -107,6 +108,7 @@ export interface ViewLine {
   oldNo: number | null;
   newNo: number | null;
   hunkIndex: number | null;
+  eol?: "crlf" | "cr";
 }
 
 /** 并排一行左右各要放下行号。暂存按钮再占一列。宽度还没量到时先按放得下处理。 */
@@ -258,6 +260,94 @@ function previewDiffLines(text: string): { lines: string[]; truncated: boolean }
   return { lines, truncated: truncated || budgetEnd < text.length || start < text.length };
 }
 
+const MYERS_MAX_D = 1600;
+
+/**
+ * Myers O((N+M)D) 文本行比对：在常见编辑下可毫秒级处理上万行且仅占 O(D) 内存；
+ * 仅当两份文本几乎完全重写（编辑距离 > MYERS_MAX_D）时才退化为整块删除+新增。
+ */
+function myersDiffLines(oldMiddle: readonly string[], newMiddle: readonly string[]): TextLine[] {
+  const n = oldMiddle.length;
+  const m = newMiddle.length;
+  if (n === 0) return newMiddle.map((text) => ({ kind: "add", text }));
+  if (m === 0) return oldMiddle.map((text) => ({ kind: "del", text }));
+
+  const maxD = Math.min(n + m, MYERS_MAX_D);
+  const offset = maxD;
+  const v = new Int32Array(2 * maxD + 1);
+  const trace: Int32Array[] = [];
+  let foundD = -1;
+
+  for (let d = 0; d <= maxD; d += 1) {
+    // 只拷贝当前步活跃区间 [-d..d]，把内存压到 O(D²/2) 且无嵌套对象开销。
+    const snapshot = new Int32Array(2 * d + 1);
+    for (let k = -d; k <= d; k += 2) {
+      let x: number;
+      if (k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1])) {
+        x = v[offset + k + 1];
+      } else {
+        x = v[offset + k - 1] + 1;
+      }
+      let y = x - k;
+      while (x < n && y < m && oldMiddle[x] === newMiddle[y]) {
+        x += 1;
+        y += 1;
+      }
+      v[offset + k] = x;
+      snapshot[k + d] = x;
+      if (x >= n && y >= m) {
+        foundD = d;
+        break;
+      }
+    }
+    trace.push(snapshot);
+    if (foundD >= 0) break;
+  }
+
+  if (foundD < 0) {
+    const fallback: TextLine[] = [];
+    for (const text of oldMiddle) fallback.push({ kind: "del", text });
+    for (const text of newMiddle) fallback.push({ kind: "add", text });
+    return fallback;
+  }
+
+  const reversed: TextLine[] = [];
+  let x = n;
+  let y = m;
+  for (let d = foundD; d > 0; d -= 1) {
+    const prev = trace[d - 1];
+    const k = x - y;
+    const prevD = d - 1;
+    let prevK: number;
+    if (k === -d || (k !== d && prev[k - 1 + prevD] < prev[k + 1 + prevD])) {
+      prevK = k + 1;
+    } else {
+      prevK = k - 1;
+    }
+    const prevX = prev[prevK + prevD];
+    const prevY = prevX - prevK;
+    while (x > prevX && y > prevY) {
+      reversed.push({ kind: "context", text: oldMiddle[x - 1] });
+      x -= 1;
+      y -= 1;
+    }
+    if (x === prevX) {
+      reversed.push({ kind: "add", text: newMiddle[y - 1] });
+      y -= 1;
+    } else {
+      reversed.push({ kind: "del", text: oldMiddle[x - 1] });
+      x -= 1;
+    }
+  }
+  while (x > 0 && y > 0) {
+    reversed.push({ kind: "context", text: oldMiddle[x - 1] });
+    x -= 1;
+    y -= 1;
+  }
+  reversed.reverse();
+  return reversed;
+}
+
 export function createTextDiff(path: string, before: string, after: string, generation = 0): DiffResponse {
   const oldPreview = previewDiffLines(before);
   const newPreview = previewDiffLines(after);
@@ -277,76 +367,54 @@ export function createTextDiff(path: string, before: string, after: string, gene
 
   const oldMiddle = oldLines.slice(prefix, oldLines.length - suffix);
   const newMiddle = newLines.slice(prefix, newLines.length - suffix);
-  const middle: TextLine[] = [];
-  if (oldMiddle.length > 0 && newMiddle.length > 0 && (oldMiddle.length + 1) * (newMiddle.length + 1) <= 500_000) {
-    const table = Array.from({ length: oldMiddle.length + 1 }, () => new Uint32Array(newMiddle.length + 1));
-    for (let i = oldMiddle.length - 1; i >= 0; i -= 1) {
-      for (let j = newMiddle.length - 1; j >= 0; j -= 1) {
-        table[i][j] = oldMiddle[i] === newMiddle[j]
-          ? table[i + 1][j + 1] + 1
-          : Math.max(table[i + 1][j], table[i][j + 1]);
-      }
-    }
-    let i = 0;
-    let j = 0;
-    while (i < oldMiddle.length && j < newMiddle.length) {
-      if (oldMiddle[i] === newMiddle[j]) {
-        middle.push({ kind: "context", text: oldMiddle[i] });
-        i += 1;
-        j += 1;
-      } else if (table[i + 1][j] >= table[i][j + 1]) {
-        middle.push({ kind: "del", text: oldMiddle[i] });
-        i += 1;
-      } else {
-        middle.push({ kind: "add", text: newMiddle[j] });
-        j += 1;
-      }
-    }
-    while (i < oldMiddle.length) {
-      middle.push({ kind: "del", text: oldMiddle[i] });
-      i += 1;
-    }
-    while (j < newMiddle.length) {
-      middle.push({ kind: "add", text: newMiddle[j] });
-      j += 1;
-    }
-  } else {
-    for (const text of oldMiddle) middle.push({ kind: "del", text });
-    for (const text of newMiddle) middle.push({ kind: "add", text });
-  }
+  const middle = myersDiffLines(oldMiddle, newMiddle);
 
-  const raw = [
-    ...oldLines.slice(0, prefix).map((text) => ({ kind: "context" as const, text })),
-    ...middle,
-    ...oldLines.slice(oldLines.length - suffix).map((text) => ({ kind: "context" as const, text })),
-  ];
+  const numbered: DiffLine[] = new Array(prefix + middle.length + suffix);
+  let cursor = 0;
   let oldNo = 0;
   let newNo = 0;
-  const numbered: DiffLine[] = raw.map((line) => {
-    if (line.kind === "del") {
-      oldNo += 1;
-      return { kind: "del", text: `-${line.text}`, oldNo, newNo: null, hunkIndex: null };
-    }
-    if (line.kind === "add") {
-      newNo += 1;
-      return { kind: "add", text: `+${line.text}`, oldNo: null, newNo, hunkIndex: null };
-    }
+  let additions = 0;
+  let deletions = 0;
+  for (let i = 0; i < prefix; i += 1) {
     oldNo += 1;
     newNo += 1;
-    return { kind: "context", text: ` ${line.text}`, oldNo, newNo, hunkIndex: null };
-  });
+    numbered[cursor++] = { kind: "context", text: ` ${oldLines[i]}`, oldNo, newNo, hunkIndex: null };
+  }
+  for (let i = 0; i < middle.length; i += 1) {
+    const line = middle[i];
+    if (line.kind === "del") {
+      oldNo += 1;
+      deletions += 1;
+      numbered[cursor++] = { kind: "del", text: `-${line.text}`, oldNo, newNo: null, hunkIndex: null };
+    } else if (line.kind === "add") {
+      newNo += 1;
+      additions += 1;
+      numbered[cursor++] = { kind: "add", text: `+${line.text}`, oldNo: null, newNo, hunkIndex: null };
+    } else {
+      oldNo += 1;
+      newNo += 1;
+      numbered[cursor++] = { kind: "context", text: ` ${line.text}`, oldNo, newNo, hunkIndex: null };
+    }
+  }
+  for (let i = oldLines.length - suffix; i < oldLines.length; i += 1) {
+    oldNo += 1;
+    newNo += 1;
+    numbered[cursor++] = { kind: "context", text: ` ${oldLines[i]}`, oldNo, newNo, hunkIndex: null };
+  }
 
-  const changed = numbered.some((line) => line.kind !== "context");
+  const changed = additions > 0 || deletions > 0;
   const lines: DiffLine[] = [];
   if (!changed) {
     for (const line of numbered) lines.push(line);
   } else {
-    const included = numbered.map((line, index) => {
-      if (line.kind !== "context") return true;
-      const beforeChanged = numbered.slice(Math.max(0, index - 3), index).some((line) => line.kind !== "context");
-      const afterChanged = numbered.slice(index + 1, index + 4).some((line) => line.kind !== "context");
-      return beforeChanged || afterChanged;
-    });
+    // O(N) 线性上下文窗口标记，避免逐行 slice 分配临时数组。
+    const included = new Uint8Array(numbered.length);
+    for (let i = 0; i < numbered.length; i += 1) {
+      if (numbered[i].kind === "context") continue;
+      const from = Math.max(0, i - 3);
+      const to = Math.min(numbered.length - 1, i + 3);
+      for (let j = from; j <= to; j += 1) included[j] = 1;
+    }
     let index = 0;
     while (index < numbered.length) {
       if (!included[index]) {
@@ -355,16 +423,25 @@ export function createTextDiff(path: string, before: string, after: string, gene
       }
       const start = index;
       while (index < numbered.length && included[index]) index += 1;
-      const group = numbered.slice(start, index);
-      const oldStart = group.find((line) => line.oldNo !== null)?.oldNo ?? 1;
-      const newStart = group.find((line) => line.newNo !== null)?.newNo ?? 1;
+      let oldStart = 1;
+      let newStart = 1;
+      for (let j = start; j < index; j += 1) {
+        if (numbered[j].oldNo !== null) {
+          oldStart = numbered[j].oldNo as number;
+          break;
+        }
+      }
+      for (let j = start; j < index; j += 1) {
+        if (numbered[j].newNo !== null) {
+          newStart = numbered[j].newNo as number;
+          break;
+        }
+      }
       lines.push({ kind: "hunk", text: `@@ -${oldStart} +${newStart} @@`, oldNo: null, newNo: null, hunkIndex: null });
-      for (const line of group) lines.push(line);
+      for (let j = start; j < index; j += 1) lines.push(numbered[j]);
     }
   }
 
-  const additions = numbered.filter((line) => line.kind === "add").length;
-  const deletions = numbered.filter((line) => line.kind === "del").length;
   return {
     generation,
     path,
@@ -430,40 +507,157 @@ function contentOf(text: string): string {
   return text;
 }
 
-function squeeze(text: string): string {
-  return contentOf(text).replace(/[ \t\r\n\f\v]+/g, "");
-}
-
 export function whitespaceOnlyHunks(
   lines: readonly { kind: string; text: string; hunkIndex: number | null }[],
 ): WhitespaceFilter {
+  return filterDiffHunks(lines, { whitespaceMode: "all", ignoreBlankLines: false, ignoreCase: false });
+}
+
+export interface DiffFilterRules {
+  whitespaceMode: WhitespaceIgnoreMode;
+  ignoreBlankLines: boolean;
+  ignoreCase: boolean;
+}
+
+function normalizeForRule(text: string, rules: DiffFilterRules): string {
+  let value = contentOf(text);
+  switch (rules.whitespaceMode) {
+    case "all":
+      value = value.replace(/[ \t\r\n\f\v]+/g, "");
+      break;
+    case "change":
+      value = value.replace(/[ \t]+/g, " ").replace(/[ \t]+$/, "");
+      break;
+    case "trailing":
+      value = value.replace(/[ \t]+$/, "");
+      break;
+    case "eol":
+    case "none":
+      break;
+  }
+  if (rules.ignoreCase) value = value.toLowerCase();
+  return value;
+}
+
+/**
+ * 按比对规则做只读块级过滤（支持 CRLF↔LF、行尾空白、空白数量变化、所有空白、纯空行、大小写）。
+ * 绝不改写原始行、hunkIndex、snapshot 或暂存补丁；仅隐藏完全满足规则的整块。
+ */
+export function filterDiffHunks(
+  lines: readonly { kind: string; text: string; hunkIndex: number | null; eol?: "crlf" | "cr" }[],
+  rules: DiffFilterRules,
+): WhitespaceFilter {
+  const active = rules.whitespaceMode !== "none" || rules.ignoreBlankLines || rules.ignoreCase;
+  if (!active) return { hunks: new Set<number>(), lines: 0 };
+
   const order: number[] = [];
   const dels = new Map<number, string[]>();
   const adds = new Map<number, string[]>();
+  const counts = new Map<number, number>();
   for (const line of lines) {
     if (line.hunkIndex === null) continue;
     if (line.kind !== "add" && line.kind !== "del") continue;
     if (!dels.has(line.hunkIndex)) {
       dels.set(line.hunkIndex, []);
       adds.set(line.hunkIndex, []);
+      counts.set(line.hunkIndex, 0);
       order.push(line.hunkIndex);
     }
+    counts.set(line.hunkIndex, (counts.get(line.hunkIndex) ?? 0) + 1);
+    const body = contentOf(line.text);
+    if (rules.ignoreBlankLines && body.trim().length === 0) continue;
     const bucket = line.kind === "del" ? dels : adds;
-    bucket.get(line.hunkIndex)?.push(squeeze(line.text));
+    let normalized = normalizeForRule(line.text, rules);
+    // 未开启忽略换行符/空白时，保留行尾身份，避免仅开启「忽略空行/大小写」时误把 CRLF↔LF 块藏掉。
+    if (rules.whitespaceMode === "none") normalized += `\u0000${line.eol ?? "lf"}`;
+    bucket.get(line.hunkIndex)?.push(normalized);
   }
+
   const hunks = new Set<number>();
-  let count = 0;
+  let totalHidden = 0;
   for (const index of order) {
     const left = dels.get(index) ?? [];
     const right = adds.get(index) ?? [];
-    if (left.length === 0 || right.length === 0) continue;
-    // 序列长度与每一项都要一致：多一行少一行都属于真实改动。
+    const rawCount = counts.get(index) ?? 0;
+    if (rawCount === 0) continue;
+    if (left.length === 0 && right.length === 0) {
+      // 仅当开启「忽略纯空行」时，删增全是空行才算可隐藏。
+      if (rules.ignoreBlankLines) {
+        hunks.add(index);
+        totalHidden += rawCount;
+      }
+      continue;
+    }
     if (left.length !== right.length) continue;
     if (!left.every((text, at) => text === right[at])) continue;
     hunks.add(index);
-    count += left.length + right.length;
+    totalHidden += rawCount;
   }
-  return { hunks, lines: count };
+  return { hunks, lines: totalHidden };
+}
+
+/** 差异里的特殊规则诊断：换行符变化（CRLF/LF/CR/混合）、BOM 变化、纯换行符块数。 */
+export interface DiffSpecialSummary {
+  /** 换行符变化说明，例如「LF → CRLF」「CRLF → LF」「混合换行符」；无变化时为 null。 */
+  eolLabel: string | null;
+  /** 仅换行符不同的改动块数量。 */
+  eolOnlyHunks: number;
+  /** 是否存在 UTF-8 BOM（\uFEFF）的增删变化。 */
+  bomChanged: boolean;
+}
+
+const EOL_LF = 1;
+const EOL_CRLF = 2;
+const EOL_CR = 4;
+
+function eolName(mask: number): string | null {
+  if (mask === 0) return null;
+  if (mask === EOL_LF) return "LF";
+  if (mask === EOL_CRLF) return "CRLF";
+  if (mask === EOL_CR) return "CR";
+  return "混合";
+}
+
+export function analyzeDiffSpecials(
+  lines: readonly { kind: string; text: string; hunkIndex: number | null; eol?: "crlf" | "cr" }[],
+): DiffSpecialSummary {
+  let oldMask = 0;
+  let newMask = 0;
+  let oldBom = false;
+  let newBom = false;
+
+  for (const line of lines) {
+    if (line.kind !== "add" && line.kind !== "del" && line.kind !== "context") continue;
+    const bit = line.eol === "crlf" ? EOL_CRLF : line.eol === "cr" ? EOL_CR : EOL_LF;
+    const body = contentOf(line.text);
+    const hasBom = body.charCodeAt(0) === 0xfeff;
+    if (line.kind === "del") {
+      oldMask |= bit;
+      if (hasBom) oldBom = true;
+    } else if (line.kind === "add") {
+      newMask |= bit;
+      if (hasBom) newBom = true;
+    } else {
+      oldMask |= bit;
+      newMask |= bit;
+    }
+  }
+
+  let eolLabel: string | null = null;
+  const oldName = eolName(oldMask);
+  const newName = eolName(newMask);
+  if (oldName && newName && oldMask !== newMask) {
+    eolLabel = `${oldName} → ${newName}`;
+  } else if (newName === "混合") {
+    eolLabel = "混合换行符";
+  }
+
+  const eolOnly = filterDiffHunks(lines, { whitespaceMode: "eol", ignoreBlankLines: false, ignoreCase: false });
+  return {
+    eolLabel,
+    eolOnlyHunks: eolOnly.hunks.size,
+    bomChanged: oldBom !== newBom,
+  };
 }
 
 /**
@@ -477,6 +671,7 @@ export interface LineSelectionScope {
   mode: "unified" | "split";
   fullFile: boolean;
   hideWhitespaceOnly: boolean;
+  filterKey?: string;
 }
 
 export function lineSelectionScope(scope: LineSelectionScope): string {
@@ -487,6 +682,7 @@ export function lineSelectionScope(scope: LineSelectionScope): string {
     scope.mode,
     scope.fullFile ? "full" : "hunks",
     scope.hideWhitespaceOnly ? "hide-ws" : "all-ws",
+    ...(scope.filterKey ? [scope.filterKey] : []),
   ].join("\u0000");
 }
 

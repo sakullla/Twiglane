@@ -121,6 +121,25 @@ describe("分支弹层的同步徽标与不切换的拉取 / 推送", () => {
     await waitFor(() => expect(document.querySelectorAll(".branch-option-name").length).toBe(branches.length));
   });
 
+  it("筛选「需要拉取」后把最后一个落后分支拉取完成，0 个需要拉取会自动消失并恢复列表", async () => {
+    const oneBehind = [track("main", 0, 0), track("dev", 0, 2)];
+    const allSynced = [track("main", 0, 0), track("dev", 0, 0)];
+    mocks.branchTracking.mockResolvedValueOnce({ generation: 4, branches: oneBehind }).mockResolvedValueOnce({ generation: 5, branches: allSynced });
+    mocks.updateBranch.mockResolvedValue({ generation: 5, branches, snapshot, defaultBranch: "main", mergeBases: [] });
+
+    show();
+    const summary = await screen.findByRole("group", { name: "需要同步的分支" });
+    const pullChip = within(summary).getByRole("button", { name: /1 个需要拉取/ });
+    await fireEvent.click(pullChip);
+    await waitFor(() => expect([...document.querySelectorAll(".branch-option-name")].map((node) => node.textContent)).toEqual(["dev"]));
+
+    const menu = await menuFor("dev");
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: /拉取 2 个提交/ }));
+
+    await waitFor(() => expect(screen.queryByRole("group", { name: "需要同步的分支" })).toBeNull());
+    await waitFor(() => expect(document.querySelectorAll(".branch-option-name").length).toBe(branches.length));
+  });
+
   it("非当前分支右键拉取：走快进 updateBranch，不切换分支，弹层留着并刷新列表", async () => {
     const props = show();
     mocks.updateBranch.mockResolvedValue({ generation: 6, branches, snapshot, defaultBranch: "main", mergeBases: [] });

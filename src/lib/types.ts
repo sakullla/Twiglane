@@ -98,6 +98,8 @@ export interface DiffLine {
   oldNo: number | null;
   newNo: number | null;
   hunkIndex: number | null;
+  /** 行尾类型：普通 LF 省略，仅 CRLF / CR 时存在，用于识别换行符差异与显示不可见字符。 */
+  eol?: "crlf" | "cr";
 }
 
 /**

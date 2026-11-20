@@ -105,6 +105,11 @@
   let summary = $derived(trackingSummary([...tracks.values()]));
   /** 只看需要拉取 / 推送的分支。 */
   let syncFilter = $state<"pull" | "push" | null>(null);
+  /* 拉取/推送完成、对应数量归零后自动退出筛选，避免停留在「0 个需要拉取」的空列表。 */
+  $effect(() => {
+    if (syncFilter === "pull" && summary.pull === 0) syncFilter = null;
+    else if (syncFilter === "push" && summary.push === 0) syncFilter = null;
+  });
   /** 就地展开的重命名；删除统一交给分支管理里的删除确认框。 */
   let editing = $state<{ kind: "rename"; branch: BranchRecord; value: string } | null>(null);
   let working = $state<string | null>(null);

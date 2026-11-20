@@ -1383,6 +1383,7 @@
         {onGeneration}
         session={documentSession}
         contentVersion={contentVersion}
+        reloadKey={reloadKey}
         onMode={setDocumentMode}
         onFollow={followWorktreeLink}
         header={false}

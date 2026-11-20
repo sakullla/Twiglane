@@ -52,19 +52,19 @@ kbd {
   white-space: nowrap;
 }
 
-/* 滚动条：细轨 + 圆头，悬浮时向前景色靠近 */
+/* 滚动条：极细安静轨 + 圆头，悬浮时柔和显色 */
 * { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
-*::-webkit-scrollbar { width: 10px; height: 10px; }
-*::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; border: 3px solid transparent; background-clip: content-box; }
+*::-webkit-scrollbar { width: 9px; height: 9px; }
+*::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--border-strong) 85%, transparent); border-radius: 999px; border: 2.5px solid transparent; background-clip: content-box; transition: background-color var(--duration-fast) var(--ease); }
 *::-webkit-scrollbar-thumb:hover { background-color: var(--fg-subtle); border: 2px solid transparent; background-clip: content-box; }
 *::-webkit-scrollbar-track { background: transparent; }
 *::-webkit-scrollbar-corner { background: transparent; }
 
-/* 共享动效基元。弹层、菜单和弹窗共用 pop 入场，只有时长按尺寸分两档。 */
+/* 共享动效基元。弹层、菜单和弹窗共用丝滑弹入，时长克制。 */
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
-@keyframes pop { from { opacity: 0; transform: translateY(-5px) scale(0.985); } to { opacity: 1; transform: none; } }
-@keyframes toast-in { from { opacity: 0; transform: translateY(8px) scale(0.985); } to { opacity: 1; transform: none; } }
+@keyframes pop { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes toast-in { from { opacity: 0; transform: translateY(10px) scale(0.975); } to { opacity: 1; transform: none; } }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 
 /* 减少动效：只保留状态切换，去掉位移与淡入；加载、错误、选中与完成状态由静态形状、

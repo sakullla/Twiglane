@@ -1310,4 +1310,60 @@ describe("名称排序", () => {
     await fireEvent.click(within(tree).getByRole("treeitem", { name: "a2.txt" }), { shiftKey: true });
     expect(screen.getByText(/已选\s*3\s*项/)).toBeTruthy();
   });
+
+  it("重新读取目录会刷新合并单链下已展开的子目录并触发仓库刷新回调", async () => {
+    const item = (p: string, kind: "directory" | "file") => ({
+      name: p.split("/").pop() ?? p,
+      path: p,
+      kind,
+      ignored: false,
+      size: kind === "file" ? 4 : null,
+      error: null,
+    });
+    let added = false;
+    repositoryDirectory.mockImplementation(async (_repo: string, target: string) => {
+      if (target === "") return dir("", [item("docs", "directory"), item("README.md", "file")]);
+      if (target === "docs") return dir("docs", [item("docs/run", "directory")]);
+      if (target === "docs/run") {
+        return dir(
+          "docs/run",
+          added ? [item("docs/run/T1.md", "file"), item("docs/run/T2.md", "file")] : [item("docs/run/T1.md", "file")],
+        );
+      }
+      return dir(target, []);
+    });
+    const onRefreshRepo = vi.fn();
+    render(RepositoryFiles, {
+      props: {
+        active: true,
+        opened: opened(),
+        disabled: false,
+        nextId: () => 1,
+        paneWidth: 280,
+        windowWidth: 1280,
+        onResize: vi.fn(),
+        onResizeCommit: vi.fn(),
+        onGeneration: vi.fn(),
+        onFileHistory: vi.fn(),
+        onNav: vi.fn(),
+        onRefreshRepo,
+      } as never,
+    });
+    const tree = await screen.findByRole("tree", { name: "仓库文件" });
+    await waitFor(() => expect(within(tree).getByRole("treeitem", { name: "docs" })).toBeTruthy());
+    await fireEvent.click(within(tree).getByRole("treeitem", { name: "docs" }));
+    // docs 与唯一子目录 run 合并成单链 docs/run；点击展开末级目录
+    await waitFor(() => expect(within(tree).getByRole("treeitem", { name: "docs/run" })).toBeTruthy());
+    await fireEvent.click(within(tree).getByRole("treeitem", { name: "docs/run" }));
+    await waitFor(() => expect(within(tree).getByRole("treeitem", { name: "docs/run/T1.md" })).toBeTruthy());
+
+    // 即使当前选中项不在该合并单链里，重新读取目录也必须刷新 docs/run 并发现新增文件
+    await fireEvent.click(within(tree).getByRole("treeitem", { name: "README.md" }));
+    added = true;
+    await fireEvent.contextMenu(within(tree).getByRole("treeitem", { name: "docs/run/T1.md" }));
+    await fireEvent.click(within(await openTreeSubmenu(rootMenu())).getByRole("menuitem", { name: "重新读取目录" }));
+
+    await waitFor(() => expect(within(tree).getByRole("treeitem", { name: "docs/run/T2.md" })).toBeTruthy());
+    expect(onRefreshRepo).toHaveBeenCalledTimes(1);
+  });
 });

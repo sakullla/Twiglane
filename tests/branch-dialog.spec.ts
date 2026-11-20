@@ -1375,4 +1375,33 @@ describe("打开其他工作区、默认徽章与斜杠分组", () => {
     expect(height(".branch-row .chip.default-branch")).toBeLessThanOrEqual(height(".chip"));
     expect(height(".branch-picker-tag.default-branch")).toBeLessThanOrEqual(height(".branch-picker-tag"));
   });
+
+  it("从分支与标签跳转合并再返回时，保留原分区与搜索条件", async () => {
+    branchState.mockResolvedValue({
+      generation: 4,
+      branches: [
+        { name: "develop", remote: false, current: true, upstream: "origin/develop", worktree: null },
+        { name: "origin/develop-hualu", remote: true, current: false, upstream: null, worktree: null },
+        { name: "origin/feature/hualu-carrier", remote: true, current: false, upstream: null, worktree: null },
+        { name: "origin/other", remote: true, current: false, upstream: null, worktree: null },
+      ],
+      snapshot: opened.snapshot,
+    });
+    const first = render(BranchDialog, { props: { ...props(), branchGroups: false } });
+    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
+    await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
+    const search = screen.getByRole("textbox", { name: "搜索分支" }) as HTMLInputElement;
+    await fireEvent.input(search, { target: { value: "hual" } });
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+
+    const captured = (first.component as { captureView: () => { tab: "local" | "remote" | "tags"; query: string; groupOverrides: Record<string, boolean>; scrollTop: number } }).captureView();
+    expect(captured.tab).toBe("remote");
+    expect(captured.query).toBe("hual");
+    first.unmount();
+
+    render(BranchDialog, { props: { ...props(), branchGroups: false, initialView: captured } });
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+    expect(screen.getByRole("tab", { name: /远程分支/ }).getAttribute("aria-selected")).toBe("true");
+    expect((screen.getByRole("textbox", { name: "搜索分支" }) as HTMLInputElement).value).toBe("hual");
+  });
 });

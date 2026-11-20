@@ -137,10 +137,30 @@ describe("差异行与行内改动", () => {
     expect(docs.newLines).toEqual(["const LIMIT = 50;", "keep();"]);
     const del = diff.lines.findIndex((line) => line.kind === "del");
     const add = diff.lines.findIndex((line) => line.kind === "add");
-    expect(docs.ranges.get(del)).toEqual([14, 15]);
-    expect(docs.ranges.get(add)).toEqual([14, 15]);
+    expect(docs.ranges.get(del)).toEqual([[14, 15]]);
+    expect(docs.ranges.get(add)).toEqual([[14, 15]]);
     // 几乎完全不同的两行不标（整行标亮等于没标）
     expect(changedRange("return legacy();", "const view = render();")).toBeNull();
+
+    // 同一行多处词级改动：分别标出，不把中间未改部分糊成一整块
+    const multi = createTextDiff("a.ts", "const res = calc(alpha, shared, beta);\n", "const res = calc(gamma, shared, delta);\n", 1);
+    const multiDocs = buildDiffDocuments(multi.lines);
+    const multiDel = multi.lines.findIndex((line) => line.kind === "del");
+    const multiAdd = multi.lines.findIndex((line) => line.kind === "add");
+    expect(multiDocs.ranges.get(multiDel)?.length).toBe(2);
+    expect(multiDocs.ranges.get(multiAdd)?.length).toBe(2);
+
+    // 仅换行符（LF ↔ CRLF）差异时记录到 eolChanged
+    const eolDocs = buildDiffDocuments([
+      { kind: "del", text: "-hello", oldNo: 1, newNo: null, hunkIndex: 0 },
+      { kind: "add", text: "+hello", oldNo: null, newNo: 1, hunkIndex: 0, eol: "crlf" },
+    ]);
+    expect(eolDocs.eolChanged.has(0)).toBe(true);
+    expect(eolDocs.eolChanged.has(1)).toBe(true);
+
+    // 不可见特殊字符（BOM）即使未开启 showWhitespace 也会标出微标签
+    const bomSegments = lineSegments("\uFEFFconst a = 1;", null, null, false);
+    expect(bomSegments.some((seg) => seg.ws === "special" && seg.wsLabel === "BOM")).toBe(true);
   });
 
   it("语法片段与改动区间叠加切分；片段与文本对不上时退回整行", () => {

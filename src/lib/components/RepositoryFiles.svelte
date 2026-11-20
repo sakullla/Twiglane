@@ -53,6 +53,8 @@
     onIgnore?: (path: string, local: boolean) => void;
     /** 当前仓库里存在未保存草稿的路径，供表单提前提示与禁用删除确认。 */
     draftPaths?: string[];
+    /** 手动重新读取目录时同步刷新仓库 Git 状态（装饰点、仅改动树、索引缓存）。 */
+    onRefreshRepo?: () => void | Promise<void>;
   }
 
   let {
@@ -81,6 +83,7 @@
     onEntry,
     onIgnore,
     draftPaths = [],
+    onRefreshRepo,
   }: Props = $props();
 
   const store = createFilesStore({
@@ -224,6 +227,7 @@
 
   function refresh(): void {
     void store.revalidate(true);
+    void onRefreshRepo?.();
   }
 
   /* 文件操作：树只上报右键目标，表单与删除确认放在对话框里，命令与状态应用交给外壳。 */

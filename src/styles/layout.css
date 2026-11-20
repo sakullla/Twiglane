@@ -53,11 +53,11 @@
 .branch-pill > .icon:first-child { color: var(--accent-text); }
 .branch-pill > .icon:last-child { color: var(--fg-subtle); }
 .branch-pill:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
-.titlebar-palette { display: inline-flex; align-items: center; gap: var(--space-8); flex: 0 1 248px; min-width: 0; height: var(--titlebar-control); padding: 0 var(--space-6) 0 10px; border-radius: var(--radius); border: 1px solid var(--control-border); background: var(--surface); color: var(--fg-subtle); font-size: var(--text-xs); box-shadow: var(--shadow-xs); transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease); }
-.titlebar-palette:hover { border-color: var(--control-border-hover); color: var(--fg); }
+.titlebar-palette { display: inline-flex; align-items: center; gap: var(--space-8); flex: 0 1 260px; min-width: 0; height: var(--titlebar-control); padding: 0 var(--space-6) 0 11px; border-radius: 999px; border: 1px solid var(--control-border); background: var(--surface); color: var(--fg-subtle); font-size: var(--text-xs); box-shadow: var(--shadow-xs); transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease); }
+.titlebar-palette:hover { border-color: var(--control-border-hover); color: var(--fg); box-shadow: var(--shadow-sm); }
 .titlebar-palette > .icon { flex: none; color: var(--fg-subtle); }
 .titlebar-palette-label { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.titlebar-palette kbd { flex: none; padding: 2px 5px; font-size: 10px; background: var(--surface-2); border-color: var(--border); }
+.titlebar-palette kbd { flex: none; padding: 2px 6px; border-radius: 999px; font-size: 10px; background: var(--surface-2); border-color: var(--border); }
 .titlebar .icon-btn { width: var(--titlebar-control); height: var(--titlebar-control); border-radius: var(--radius); }
 /* 标题栏里的焦点环收在控件内：40px 条高上外扩 2px 会盖住相邻控件与分隔线。 */
 .titlebar [data-titlebar-control]:focus-visible { outline-offset: -2px; }
@@ -147,8 +147,8 @@
 .welcome-brand .brand-text strong { font-size: 30px; font-weight: var(--weight-bold); letter-spacing: -0.035em; line-height: 1.1; }
 .welcome-brand .brand-text span { margin-top: var(--space-6); color: var(--fg-muted); font-size: var(--text-base); }
 .welcome-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-12); }
-.action-card { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-12); min-width: 0; padding: var(--space-16); border-radius: var(--radius-xl); border: 1px solid var(--control-border); background: var(--surface); color: var(--fg); box-shadow: var(--shadow-xs); text-align: left; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), transform var(--duration-base) var(--ease), box-shadow var(--duration-base) var(--ease); }
-.action-card:hover:not(:disabled) { background: var(--surface); border-color: var(--control-border-hover); box-shadow: var(--shadow-md); transform: translateY(-1px); }
+.action-card { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-12); min-width: 0; padding: 18px; border-radius: var(--radius-xl); border: 1px solid var(--control-border); background: var(--surface); color: var(--fg); box-shadow: var(--shadow-xs); text-align: left; transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), transform var(--duration-base) var(--ease), box-shadow var(--duration-base) var(--ease); }
+.action-card:hover:not(:disabled) { background: var(--surface); border-color: var(--control-border-hover); box-shadow: var(--shadow-md); transform: translateY(-2px); }
 .action-card:active:not(:disabled) { transform: none; }
 .action-card > .icon { flex: none; box-sizing: content-box; padding: 9px; border-radius: var(--radius-lg); background: var(--accent-soft); color: var(--accent-text); }
 .ac-copy { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }

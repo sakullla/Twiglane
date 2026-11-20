@@ -1272,11 +1272,21 @@ export function createFilesStore(deps: FilesStoreDeps) {
     return job;
   }
 
+  /**
+   * 节点自身或合并单链里的末级目录是否处于展开状态：
+   * 合并单链（如 a/b）只把展开态记在末级节点上，中间层的 node.expanded 可能仍为 false，
+   * 重验目录时必须认出整条已展开链路，不能误把中间层当成折叠目录清空缓存。
+   */
+  function hasExpandedChain(node: FileNode): boolean {
+    if (node.expanded) return true;
+    if (node.kind !== "directory" || node.children === null) return false;
+    return chainOf(node).some((item) => item.expanded);
+  }
+
   async function runRevalidate(forceContent = false): Promise<boolean> {
     const refresh = ++refreshSerial;
     const current = repo;
     const owns = () => refresh === refreshSerial && repo === current && deps.active();
-    if (forceContent) revision += 1;
     if (!repo || !deps.active()) return false;
     // 根目录本身也是"已加载的目录"：顶层的新增与删除只能靠它发现。
     if (!(await loadDirectory("", null))) return false;
@@ -1285,7 +1295,7 @@ export function createFilesStore(deps: FilesStoreDeps) {
     const enqueue = (list: FileNode[]) => {
       for (const node of list) {
         if (!isDirectoryKind(node.kind) || node.children === null) continue;
-        if (node.expanded || selectedPath?.startsWith(`${node.path}/`)) targets.push(node);
+        if (hasExpandedChain(node) || selectedPath?.startsWith(`${node.path}/`)) targets.push(node);
         else {
           serials.delete(node.path);
           node.loading = false;
@@ -1295,16 +1305,19 @@ export function createFilesStore(deps: FilesStoreDeps) {
     };
     enqueue(nodes);
     // 每批最多三个读取，父目录刷新后才排入仍存在的子目录。
-    // 隐藏或切仓库后，不再把旧树上的路径排进读取通道。
+    // 隐藏或切仓库后，不再把旧树上的路径排进读取通道；单个兄弟目录失败不阻断其余已展开目录刷新。
     for (let start = 0; start < targets.length;) {
       if (!owns()) return false;
       const batch = targets.slice(start, start + 3);
       start += batch.length;
       const results = await Promise.all(batch.map((node) => loadDirectory(node.path, node)));
-      if (!owns() || !results.every(Boolean)) return false;
-      for (const node of batch) if (node.children) enqueue(node.children);
+      if (!owns()) return false;
+      batch.forEach((node, index) => {
+        if (results[index] && node.children) enqueue(node.children);
+      });
     }
     verifiedGeneration = deps.generation();
+    if (forceContent) revision += 1;
     // 树重验完再按当前代次重跑还在显示的搜索：隐藏期间的结果一律不再当作当前。
     if (query.trim()) void completeFilter();
     if (pathQuery.trim()) void searchPaths();

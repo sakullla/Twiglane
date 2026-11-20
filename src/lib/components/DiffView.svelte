@@ -2,8 +2,8 @@
   import { onDestroy, tick, untrack } from "svelte";
   import { createQuietActivity } from "../quiet-activity";
   import { MODIFIER_LABEL } from "../brand";
-  import { HUNK_LAST, changeRunIndexes, hunkCaption, hunkJump, hunkRowIndexes, lineSelectionScope, splitColumnsFit, toSideRows, visibleDiffLines, whitespaceOnlyHunks, type HunkNavReport, type ViewLine, type WhitespaceFilter } from "../diff";
-  import { diffPrefs, setHideWhitespaceOnly, toggleHideWhitespaceOnly, toggleShowWhitespace } from "../diff-prefs.svelte";
+  import { HUNK_LAST, analyzeDiffSpecials, changeRunIndexes, filterDiffHunks, hunkCaption, hunkJump, hunkRowIndexes, lineSelectionScope, splitColumnsFit, toSideRows, visibleDiffLines, type HunkNavReport, type ViewLine, type WhitespaceFilter } from "../diff";
+  import { clearDiffFilterRules, diffPrefs, hasActiveDiffFilters, setWhitespaceMode, toggleHideWhitespaceOnly, toggleIgnoreBlankLines, toggleIgnoreCase, toggleIgnoreEol, toggleShowWhitespace } from "../diff-prefs.svelte";
   import type { IconName } from "../icons";
   import { rememberScroll } from "../checkout-context";
   import { trackCodeScroll } from "../codeScroll.svelte";
@@ -190,9 +190,29 @@
         !currentDiff.truncated && currentDiff.lines.length > 0,
     ),
   );
+  let activeFilterRules = $derived(hasActiveDiffFilters(diffPrefs));
   let whitespaceFilter = $derived<WhitespaceFilter>(
-    diffPrefs.hideWhitespaceOnly && canFilterWhitespace ? whitespaceOnlyHunks(shown.lines) : EMPTY_FILTER,
+    activeFilterRules && canFilterWhitespace
+      ? filterDiffHunks(shown.lines, {
+          whitespaceMode: diffPrefs.whitespaceMode,
+          ignoreBlankLines: diffPrefs.ignoreBlankLines,
+          ignoreCase: diffPrefs.ignoreCase,
+        })
+      : EMPTY_FILTER,
   );
+  let specials = $derived(
+    canFilterWhitespace ? analyzeDiffSpecials(shown.lines) : { eolLabel: null, eolOnlyHunks: 0, bomChanged: false },
+  );
+  let activeFilterSummary = $derived.by(() => {
+    const parts: string[] = [];
+    if (diffPrefs.whitespaceMode === "eol") parts.push("忽略换行符差异");
+    else if (diffPrefs.whitespaceMode === "trailing") parts.push("忽略行尾空白");
+    else if (diffPrefs.whitespaceMode === "change") parts.push("忽略空白数量变化");
+    else if (diffPrefs.whitespaceMode === "all") parts.push("忽略纯空白改动");
+    if (diffPrefs.ignoreBlankLines) parts.push("忽略纯空行");
+    if (diffPrefs.ignoreCase) parts.push("忽略大小写");
+    return parts.join("、") || "当前过滤条件";
+  });
   /* 过滤后仍然保持 origin 与行一一对应：右键按块操作还要按原始下标找块。 */
   let view = $derived.by(() => {
     if (whitespaceFilter.hunks.size === 0) return { lines: shown.lines as ViewLine[], origin: shown.origin };
@@ -366,9 +386,10 @@
   let pickAnchorIndex = $state<number | null>(null);
   let pickAnchorSelecting = $state(true);
 
+  let pickedKeys = $derived(new Set(picked.map(pickKey)));
+
   function isPicked(line: PickableLine): boolean {
-    const key = pickKey(line);
-    return picked.some((item) => pickKey(item) === key);
+    return pickedKeys.has(pickKey(line));
   }
 
   function pickLabel(line: PickableLine): string {
@@ -478,6 +499,7 @@
       mode: renderMode,
       fullFile,
       hideWhitespaceOnly: diffPrefs.hideWhitespaceOnly,
+      filterKey: `${diffPrefs.whitespaceMode}:${diffPrefs.ignoreBlankLines ? 1 : 0}:${diffPrefs.ignoreCase ? 1 : 0}`,
     }),
   );
 
@@ -596,7 +618,36 @@
           selected: diffPrefs.showWhitespace,
           pressed: diffPrefs.showWhitespace,
           state: diffPrefs.showWhitespace ? "已开启" : "已关闭",
+          note: "空格、制表符、CRLF/LF 与不可见字符",
           run: toggleShowWhitespace,
+        },
+        {
+          id: "ignore-eol",
+          label: "忽略换行符差异（CRLF ↔ LF）",
+          icon: "filter",
+          selected: diffPrefs.whitespaceMode === "eol",
+          pressed: diffPrefs.whitespaceMode === "eol",
+          state: diffPrefs.whitespaceMode === "eol" ? "已开启" : "已关闭",
+          note: specials.eolOnlyHunks > 0 ? `检测到 ${specials.eolOnlyHunks} 处仅换行符不同的改动` : undefined,
+          run: toggleIgnoreEol,
+        },
+        {
+          id: "ignore-trailing-ws",
+          label: "忽略行尾空白",
+          icon: "filter",
+          selected: diffPrefs.whitespaceMode === "trailing",
+          pressed: diffPrefs.whitespaceMode === "trailing",
+          state: diffPrefs.whitespaceMode === "trailing" ? "已开启" : "已关闭",
+          run: () => setWhitespaceMode(diffPrefs.whitespaceMode === "trailing" ? "none" : "trailing"),
+        },
+        {
+          id: "ignore-ws-change",
+          label: "忽略空白数量变化",
+          icon: "filter",
+          selected: diffPrefs.whitespaceMode === "change",
+          pressed: diffPrefs.whitespaceMode === "change",
+          state: diffPrefs.whitespaceMode === "change" ? "已开启" : "已关闭",
+          run: () => setWhitespaceMode(diffPrefs.whitespaceMode === "change" ? "none" : "change"),
         },
         {
           id: "hide-whitespace",
@@ -605,8 +656,26 @@
           selected: diffPrefs.hideWhitespaceOnly,
           pressed: diffPrefs.hideWhitespaceOnly,
           state: diffPrefs.hideWhitespaceOnly ? "已开启" : "已关闭",
-          note: whitespaceFilter.hunks.size > 0 ? `已隐藏 ${whitespaceFilter.hunks.size} 处只改了空白的改动` : undefined,
+          note: whitespaceFilter.hunks.size > 0 && diffPrefs.hideWhitespaceOnly ? `已隐藏 ${whitespaceFilter.hunks.size} 处只改了空白的改动` : undefined,
           run: toggleHideWhitespaceOnly,
+        },
+        {
+          id: "ignore-blank-lines",
+          label: "忽略纯空行改动",
+          icon: "filter",
+          selected: diffPrefs.ignoreBlankLines,
+          pressed: diffPrefs.ignoreBlankLines,
+          state: diffPrefs.ignoreBlankLines ? "已开启" : "已关闭",
+          run: toggleIgnoreBlankLines,
+        },
+        {
+          id: "ignore-case",
+          label: "忽略大小写差异",
+          icon: "filter",
+          selected: diffPrefs.ignoreCase,
+          pressed: diffPrefs.ignoreCase,
+          state: diffPrefs.ignoreCase ? "已开启" : "已关闭",
+          run: toggleIgnoreCase,
         },
       );
     }
@@ -1462,6 +1531,21 @@
       <!-- 溢出入口：低频工具与显示偏好常驻这里，与主行动作共用同一份 diffPrefs / fullFile /
            renderMode 状态，生效状态写在条目右侧，禁用原因就地说明；关闭后焦点回到触发按钮。 -->
       <div class="diff-toolbar-group diff-overflow">
+        {#if specials.eolLabel}
+          <button
+            type="button"
+            class="diff-eol-pill"
+            data-diff-eol
+            aria-pressed={diffPrefs.whitespaceMode === "eol"}
+            title={specials.eolOnlyHunks > 0
+              ? `换行符变化：${specials.eolLabel}（${specials.eolOnlyHunks} 处仅换行符不同，点击可切换忽略换行符差异）`
+              : `换行符变化：${specials.eolLabel}`}
+            onclick={toggleIgnoreEol}
+          >{specials.eolLabel}</button>
+        {/if}
+        {#if specials.bomChanged}
+          <span class="diff-eol-pill bom" data-diff-bom title="文件头 UTF-8 BOM 标记（U+FEFF）发生变化">BOM</span>
+        {/if}
         {#if fullFile && onFullFile && selection}
           <!-- 「查看完整文件」收进溢出，但生效期间主行留一个一眼可见的恢复入口。 -->
           <button
@@ -1478,9 +1562,17 @@
             type="button"
             class="diff-ws-note diff-ws-note-btn"
             data-diff-trimmed
-            title={whitespaceFilter.lines + " 行只改了空白，按当前设置没有显示；点击重新显示"}
-            onclick={() => setHideWhitespaceOnly(false)}
+            title={`${whitespaceFilter.lines} 行按「${activeFilterSummary}」规则已隐藏；点击显示全部差异`}
+            onclick={clearDiffFilterRules}
           >已隐藏 {whitespaceFilter.hunks.size} 处</button>
+        {:else if activeFilterRules && canFilterWhitespace}
+          <button
+            type="button"
+            class="diff-rule-pill"
+            data-diff-rule-active
+            title={`当前生效比对规则：${activeFilterSummary}；点击清除过滤规则`}
+            onclick={clearDiffFilterRules}
+          ><Icon name="filter" size={11} /><span>{activeFilterSummary}</span><Icon name="x" size={10} /></button>
         {/if}
         <button
           type="button"
@@ -1610,8 +1702,10 @@
     <div class="empty" role="status" data-diff-filtered>
       <span class="empty-icon"><Icon name="filter" size={24} /></span>
       <strong>差异已被当前过滤条件隐藏</strong>
-      <p>{whitespaceFilter.hunks.size} 个改动块只改了空白字符，按「略过纯空白改动」没有显示。</p>
-      <button type="button" class="btn btn-secondary btn-sm" onclick={() => setHideWhitespaceOnly(false)}>显示空白改动</button>
+      <p>{whitespaceFilter.hunks.size} 个改动块按「{activeFilterSummary}」没有显示。</p>
+      <button type="button" class="btn btn-secondary btn-sm" onclick={clearDiffFilterRules}>
+        {diffPrefs.hideWhitespaceOnly && !diffPrefs.ignoreBlankLines && !diffPrefs.ignoreCase ? "显示空白改动" : "显示全部差异"}
+      </button>
     </div>
   {:else if !currentDiff || (currentDiff.lines.length === 0 && currentDiff.totalLines === 0)}
     <div class="empty" role="status">
@@ -1681,7 +1775,8 @@
               <span class="ln">{line.newNo ?? ""}</span>
               {#if line.kind === "add" || line.kind === "del" || line.kind === "context"}
                 {@const segs = segmentsAt(absolute)}
-                <span class="code"><span class="code-in" data-sign={sign(line.text)} data-len={codeOf(line).length}>{#if segs.length === 1 && !segs[0].k && !segs[0].m && !segs[0].ws}{segs[0].t}{:else}{#each segs as seg, i (i)}<span class={seg.k} class:wd={seg.m} class:ws-space={seg.ws === "space"} class:ws-tab={seg.ws === "tab"}>{seg.t}</span>{/each}{/if}</span></span>
+                {@const showEol = markWhitespace || documents.eolChanged.has(absolute)}
+                <span class="code"><span class="code-in" data-sign={sign(line.text)} data-len={codeOf(line).length}>{#if segs.length === 1 && !segs[0].k && !segs[0].m && !segs[0].ws}{segs[0].t}{:else}{#each segs as seg, i (i)}<span class={seg.k} class:wd={seg.m} class:ws-space={seg.ws === "space"} class:ws-tab={seg.ws === "tab"} class:ws-special={seg.ws === "special"} data-ws-label={seg.wsLabel}>{seg.t}</span>{/each}{/if}{#if showEol}<span class="ws-eol" class:eol-changed={documents.eolChanged.has(absolute)} data-eol={line.eol ?? "lf"} aria-hidden="true"></span>{/if}</span></span>
               {:else if line.kind === "hunk"}
                 {@const caption = hunkCaption(line.text)}
                 <span class="code hunk-caption"><span class="hunk-at">{caption.at}</span>{#if caption.context}<span class="hunk-context" title={caption.context}>{caption.context}</span>{/if}</span>
@@ -1740,7 +1835,7 @@
                 title={canPick(pickLineOf(row.left)) ? pickLabel(pickLineOf(row.left)!) : undefined}
                 data-line={row.left?.index}
               >
-                {#if row.left}<span class="ln">{row.left.no ?? ""}</span>{#if row.left.index !== undefined && !row.span}<span class="code"><span class="code-in" data-sign={sign(row.left.text)} data-len={codeOf(row.left).length}>{#each segmentsAt(row.left.index) as seg, i (i)}{#if !seg.k && !seg.m && !seg.ws}{seg.t}{:else}<span class={seg.k} class:wd={seg.m} class:ws-space={seg.ws === "space"} class:ws-tab={seg.ws === "tab"}>{seg.t}</span>{/if}{/each}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.left.text.length}>{row.left.text}</span></span>{/if}{/if}
+                {#if row.left}<span class="ln">{row.left.no ?? ""}</span>{#if row.left.index !== undefined && !row.span}{@const leftLine = lines[row.left.index]}{@const showLeftEol = markWhitespace || documents.eolChanged.has(row.left.index)}<span class="code"><span class="code-in" data-sign={sign(row.left.text)} data-len={codeOf(row.left).length}>{#each segmentsAt(row.left.index) as seg, i (i)}{#if !seg.k && !seg.m && !seg.ws}{seg.t}{:else}<span class={seg.k} class:wd={seg.m} class:ws-space={seg.ws === "space"} class:ws-tab={seg.ws === "tab"} class:ws-special={seg.ws === "special"} data-ws-label={seg.wsLabel}>{seg.t}</span>{/if}{/each}{#if showLeftEol && leftLine}<span class="ws-eol" class:eol-changed={documents.eolChanged.has(row.left.index)} data-eol={leftLine.eol ?? "lf"} aria-hidden="true"></span>{/if}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.left.text.length}>{row.left.text}</span></span>{/if}{/if}
               </span>
               <span
                 class={`side-cell side-r ${row.right?.kind ?? "blank"}`}
@@ -1749,7 +1844,7 @@
                 title={canPick(pickLineOf(row.right)) ? pickLabel(pickLineOf(row.right)!) : undefined}
                 data-line={row.right?.index}
               >
-                {#if row.right}<span class="ln">{row.right.no ?? ""}</span>{#if row.right.index !== undefined && !row.span}<span class="code"><span class="code-in" data-sign={sign(row.right.text)} data-len={codeOf(row.right).length}>{#each segmentsAt(row.right.index) as seg, i (i)}{#if !seg.k && !seg.m && !seg.ws}{seg.t}{:else}<span class={seg.k} class:wd={seg.m} class:ws-space={seg.ws === "space"} class:ws-tab={seg.ws === "tab"}>{seg.t}</span>{/if}{/each}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.right.text.length}>{row.right.text}</span></span>{/if}{/if}
+                {#if row.right}<span class="ln">{row.right.no ?? ""}</span>{#if row.right.index !== undefined && !row.span}{@const rightLine = lines[row.right.index]}{@const showRightEol = markWhitespace || documents.eolChanged.has(row.right.index)}<span class="code"><span class="code-in" data-sign={sign(row.right.text)} data-len={codeOf(row.right).length}>{#each segmentsAt(row.right.index) as seg, i (i)}{#if !seg.k && !seg.m && !seg.ws}{seg.t}{:else}<span class={seg.k} class:wd={seg.m} class:ws-space={seg.ws === "space"} class:ws-tab={seg.ws === "tab"} class:ws-special={seg.ws === "special"} data-ws-label={seg.wsLabel}>{seg.t}</span>{/if}{/each}{#if showRightEol && rightLine}<span class="ws-eol" class:eol-changed={documents.eolChanged.has(row.right.index)} data-eol={rightLine.eol ?? "lf"} aria-hidden="true"></span>{/if}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.right.text.length}>{row.right.text}</span></span>{/if}{/if}
               </span>
               {/if}
               {#if !readOnly && !fullFile && row.showStage && row.hunkIndex !== null}

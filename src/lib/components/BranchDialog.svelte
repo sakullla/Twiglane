@@ -54,6 +54,13 @@
     onRecent?: (recent: RecentRepo[]) => void;
     /** 关闭后焦点去处（命令面板打开时由外壳传入）。 */
     returnFocus?: HTMLElement | null;
+    /** 从「合并分支」返回时恢复进入前的分区、搜索词、分组展开与滚动位置。 */
+    initialView?: {
+      tab: BranchTab;
+      query: string;
+      groupOverrides: Record<string, boolean>;
+      scrollTop: number;
+    } | null;
     nextId: () => number;
   }
 
@@ -80,12 +87,13 @@
     beforeOpen,
     onRecent,
     returnFocus = null,
+    initialView = null,
     nextId,
   }: Props = $props();
 
   let branches = $state<BranchRecord[]>([]);
   let defaultBranch = $state<string | null>(null);
-  let groupOverrides = $state<Record<string, boolean>>({});
+  let groupOverrides = $state<Record<string, boolean>>(untrack(() => (initialView ? { ...initialView.groupOverrides } : {})));
   let openingWorktree = $state(false);
   /**
    * 被其他工作区占用的分支所在目录的身份：是不是 `git worktree add` 建的附属工作区、目录还在不在。
@@ -96,7 +104,7 @@
   let worktreePrompt = $state<{ branch: BranchRecord; path: string; force: boolean; error: string | null } | null>(null);
   /** 删除工作区后顺手删掉这个本地分支。默认不勾：分支和工作区是两件事。 */
   let alsoDeleteBranch = $state(false);
-  let branchQuery = $state("");
+  let branchQuery = $state(untrack(() => initialView?.query ?? ""));
   /** 新建表单按需展开，展开时替换搜索和列表（R10：不和列表同时铺开）。 */
   let creating = $state(untrack(() => startCreating));
   let branchName = $state(untrack(() => (startCreating ? startName : "")));
@@ -116,7 +124,17 @@
   let tagWriting = $state(false);
   /** 确认区打开前的焦点和列表滚动位置，收起时原样还回去。 */
   let promptOrigin: { focus: HTMLElement | null; scrollTop: number } | null = null;
-  let tab = $state<BranchTab>("local");
+  let tab = $state<BranchTab>(untrack(() => (startCreating ? "local" : (initialView?.tab ?? "local"))));
+
+  /** 跳转到合并分支前捕获当前浏览上下文，返回时原样恢复分区、搜索词与滚动位置。 */
+  export function captureView() {
+    return {
+      tab,
+      query: branchQuery,
+      groupOverrides: { ...groupOverrides },
+      scrollTop: listBox?.scrollTop ?? 0,
+    };
+  }
   let localBusy = $state(false);
   let errorText = $state<string | null>(null);
   /**
@@ -218,13 +236,23 @@
   let grouping = $derived(branchGroups !== false && branchQuery.trim() === "");
   let buckets = $derived(grouping ? bucketBranches(visibleBranches) : { top: visibleBranches, groups: [] });
   /** 换仓库或重新打开分组时回到「当前分支所在组展开」。 */
-  let layoutKey = "";
+  let layoutKey = untrack(() => (initialView ? `${opened.summary.path}\0${branchGroups !== false}` : ""));
+  let pendingScrollRestore = untrack(() => (initialView && initialView.scrollTop > 0 ? initialView.scrollTop : null));
 
   $effect(() => {
     const nextKey = `${opened.summary.path}\0${branchGroups !== false}`;
     if (nextKey === layoutKey) return;
     layoutKey = nextKey;
     groupOverrides = {};
+  });
+
+  $effect(() => {
+    if (pendingScrollRestore === null || !listReady || !listBox) return;
+    const top = pendingScrollRestore;
+    pendingScrollRestore = null;
+    void tick().then(() => {
+      if (listBox) listBox.scrollTop = top;
+    });
   });
 
   $effect(() => {

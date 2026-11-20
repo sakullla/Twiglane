@@ -158,6 +158,14 @@ pub struct StatusSnapshot {
     pub files: Vec<FileChange>,
 }
 
+/// 差异行的行尾类型：普通 LF 省略（不序列化，节省内存与 JSON 体积），只在 CRLF / CR 时标注。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffLineEnding {
+    Crlf,
+    Cr,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffLine {
@@ -166,6 +174,8 @@ pub struct DiffLine {
     pub old_no: Option<u32>,
     pub new_no: Option<u32>,
     pub hunk_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eol: Option<DiffLineEnding>,
 }
 
 /// 选中的差异行身份。kind 只允许 add / del；上下文、块标题、meta 与「没有换行」标记

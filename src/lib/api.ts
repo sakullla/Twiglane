@@ -861,6 +861,8 @@ export const api = {
     invoke<void>("set_pull_integration", { pullIntegration }),
   setBranchGroups: (branchGroups: boolean) => invoke<void>("set_branch_groups", { branchGroups }),
   setFilesView: (filesView: boolean) => invoke<void>("set_files_view", { filesView }),
+  setChangeRequestsEnabled: (changeRequestsEnabled: boolean) =>
+    invoke<void>("set_change_requests_enabled", { changeRequestsEnabled }),
   setPanelWidths: (widths: PanelWidths) => invoke<PanelWidths>("set_panel_widths", { widths }),
   saveDraft: (path: string, message: string) => invoke<void>("save_draft", { path, message }),
   cancelReads: () => invoke<void>("cancel_reads"),

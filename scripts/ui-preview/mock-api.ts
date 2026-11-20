@@ -66,6 +66,9 @@ const previewGit = {
 
 let generation = 1;
 let theme: Theme = (localStorage.getItem("preview-theme") as Theme) || "dark";
+// 「创建 MR / PR」默认关闭；?changeRequests=on 用来预览启用后的设置状态。
+// 这里只保存 mock 内存值，不代表原生持久化。
+let changeRequestsEnabled = previewParams.get("changeRequests") === "on";
 let recent = [
   { name: "twiglane", path: "C:/Users/dev/project/twiglane", openedAtMs: Date.now() },
   { name: "design-system", path: "C:/Users/dev/work/design-system", openedAtMs: Date.now() - 1000 },
@@ -692,6 +695,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       recent,
       settingsWarning: null,
       terminal: { profile: null, fontSize: 13 },
+      changeRequestsEnabled,
     }),
   addRepository: () => ok(opened(recent[0].path)),
   createRepository: (path: string) => ok(opened(path)),
@@ -1729,6 +1733,10 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   setPullIntegration: () => ok(undefined, 0),
   setBranchGroups: () => ok(undefined, 0),
   setFilesView: () => ok(undefined, 0),
+  setChangeRequestsEnabled: (enabled: boolean) => {
+    changeRequestsEnabled = enabled;
+    return ok(undefined, 0);
+  },
   setPanelWidths: (widths: unknown) => ok(widths, 0),
   measureProbe: () => ok({ enabled: false, elapsedMs: 0, script: null }, 0),
   measureSample: () => ok(undefined, 0),

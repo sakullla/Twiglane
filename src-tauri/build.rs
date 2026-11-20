@@ -123,6 +123,7 @@ fn main() {
             "set_pull_integration",
             "set_branch_groups",
             "set_files_view",
+            "set_change_requests_enabled",
             "set_panel_widths",
             "save_draft",
             "cancel_reads",

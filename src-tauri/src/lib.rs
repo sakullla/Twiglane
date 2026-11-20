@@ -218,6 +218,7 @@ pub fn run() {
             set_pull_integration,
             set_branch_groups,
             set_files_view,
+            set_change_requests_enabled,
             set_panel_widths,
             save_draft,
             cancel_reads,
@@ -2192,6 +2193,14 @@ fn set_files_view(state: State<'_, Arc<Backend>>, files_view: bool) -> Result<()
     ops::set_files_view(state.inner(), files_view)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn set_change_requests_enabled(
+    state: State<'_, Arc<Backend>>,
+    change_requests_enabled: bool,
+) -> Result<(), AppError> {
+    ops::set_change_requests_enabled(state.inner(), change_requests_enabled)
+}
+
 #[tauri::command]
 fn set_panel_widths(
     state: State<'_, Arc<Backend>>,
@@ -3078,6 +3087,53 @@ two
         assert_eq!(created["summary"]["name"], "plain-dir");
         assert!(plain.join(".git").is_dir());
         assert_eq!(fs::read(plain.join("keep.txt")).unwrap(), b"same");
+        backend.watches.stop();
+    }
+
+    #[test]
+    fn change_request_switch_ipc_defaults_off_and_keeps_camel_case() {
+        let fixture = crate::test_support::git_fixture("ipc-change-requests");
+        let backend = Arc::new(fixture.backend());
+        let app = tauri::test::mock_builder()
+            .manage(Arc::clone(&backend))
+            .invoke_handler(tauri::generate_handler![
+                super::set_change_requests_enabled,
+                super::get_settings
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+
+        // 升级/新装：IPC 上读到的就是关闭，前端不需要额外推断。
+        let initial = invoke(&window, "get_settings", serde_json::json!({})).expect("settings");
+        assert_eq!(initial["changeRequestsEnabled"], false);
+
+        // snake_case 参数必须被拒绝，否则前端 camelCase 契约会悄悄失效。
+        let snake = invoke(
+            &window,
+            "set_change_requests_enabled",
+            serde_json::json!({ "change_requests_enabled": true }),
+        )
+        .expect_err("snake_case must be rejected");
+        assert!(snake.contains("changeRequestsEnabled"), "{snake}");
+        assert!(!backend.store.change_requests_enabled());
+
+        invoke(
+            &window,
+            "set_change_requests_enabled",
+            serde_json::json!({ "changeRequestsEnabled": true }),
+        )
+        .expect("camelCase");
+        assert!(backend.store.change_requests_enabled());
+        let after = invoke(&window, "get_settings", serde_json::json!({})).expect("settings");
+        assert_eq!(after["changeRequestsEnabled"], true);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&fs::read_to_string(backend.store.path()).unwrap())
+                .unwrap()["changeRequestsEnabled"],
+            true
+        );
         backend.watches.stop();
     }
 }

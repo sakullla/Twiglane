@@ -559,6 +559,8 @@ export interface SettingsDto {
   branchGroups?: boolean;
   /** 左栏是否显示「文件」视图；旧响应缺省时按显示处理。 */
   filesView?: boolean;
+  /** 「创建 MR / PR」功能开关；旧响应缺省时按关闭处理，默认不展示创建入口。 */
+  changeRequestsEnabled?: boolean;
   /** 终端偏好；旧响应缺省时按平台默认与 13 号字处理。 */
   terminal?: TerminalPrefs;
 }

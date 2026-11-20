@@ -165,6 +165,8 @@
   let branchGroups = $state(true);
   /** 设置里的「显示文件视图」：关闭后左栏只有改动与历史，文件视图不挂载。 */
   let filesViewEnabled = $state(true);
+  /** 设置里的「创建 MR / PR」：默认关闭；关闭时不做平台探测、不读令牌、不展示创建入口。 */
+  let changeRequestsEnabled = $state(false);
   let resolvedTheme = $derived(resolveTheme(theme, systemDark));
 
   $effect(() => {
@@ -1407,6 +1409,7 @@
       pullIntegration = settings.pullIntegration === "rebase" ? "rebase" : "merge";
       branchGroups = settings.branchGroups !== false;
       filesViewEnabled = settings.filesView !== false;
+      changeRequestsEnabled = settings.changeRequestsEnabled === true;
       terminalPrefs = {
         profile: settings.terminal?.profile ?? null,
         fontSize: clampFontSize(settings.terminal?.fontSize ?? TERMINAL_FONT_DEFAULT),
@@ -4011,6 +4014,20 @@
     }
   }
 
+  /**
+   * 「创建 MR / PR」开关：setter 成功后才提交界面状态。
+   * 与其它布尔设置不同，这里不先改后报错：写盘失败时开关必须停在旧值，
+   * 不能让未保存的状态看起来已经持久化（R1）。
+   */
+  async function applyChangeRequests(next: boolean) {
+    try {
+      await api.setChangeRequestsEnabled(next);
+      changeRequestsEnabled = next;
+    } catch (error) {
+      showError(error);
+    }
+  }
+
   async function persistWidths() {
     try {
       widths = await api.setPanelWidths({
@@ -5470,9 +5487,11 @@
     {pullIntegration}
     {branchGroups}
     filesView={filesViewEnabled}
+    changeRequestsEnabled={changeRequestsEnabled}
     onPullIntegration={(next) => void changePullIntegration(next)}
     onBranchGroups={(next) => void changeBranchGroups(next)}
     onFilesView={(next) => void changeFilesView(next)}
+    onChangeRequests={(next) => void applyChangeRequests(next)}
     {terminalPrefs}
     {terminalProfiles}
     onTerminalPrefs={changeTerminalPrefs}

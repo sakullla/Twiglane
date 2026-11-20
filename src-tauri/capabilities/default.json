@@ -123,6 +123,7 @@
     "allow-set-pull-integration",
     "allow-set-branch-groups",
     "allow-set-files-view",
+    "allow-set-change-requests-enabled",
     "allow-set-panel-widths",
     "allow-save-draft",
     "allow-cancel-reads",

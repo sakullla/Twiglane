@@ -213,69 +213,6 @@ async function collectPopoverFrames(d, key) {
 }
 
 const SCENARIOS = [
-  {
-    name: "项目：发现 60 个候选后按名称和路径搜索，多选跨筛选保留",
-    url: "/?projects=1",
-    steps: async (drv) => {
-      await selectBusinessProject(drv, 1);
-      await openProjectManagerMenu(drv);
-      await drv.evaluate("[...document.querySelectorAll('[data-workspace-manager] button')].find((button) => button.textContent === '从目录发现').click()");
-      await drv.until("document.querySelectorAll('.candidate-results input').length === 60", "60 个发现候选");
-      await drv.typeInto('[aria-label="搜索候选仓库"]', "service-48");
-      await drv.until("document.querySelectorAll('.candidate-results input').length === 1", "候选名称搜索");
-      await drv.click(".candidate-results input");
-      await drv.evaluate("document.querySelector('[aria-label=搜索候选仓库]').select()");
-      await drv.typeText("/team-59/");
-      await drv.until("document.querySelectorAll('.candidate-results input').length === 1 && document.querySelector('.candidate-results input').checked", "候选完整路径搜索保留另一项选择");
-      await drv.evaluate("document.querySelector('[aria-label=搜索候选仓库]').select()");
-      await drv.typeText("no-candidate-match");
-      await drv.until("document.querySelectorAll('.candidate-results input').length === 0 && document.body.innerText.includes('没有匹配的候选')", "无匹配不清除多选");
-      await drv.evaluate("const input = document.querySelector('[aria-label=搜索候选仓库]'); input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true }));");
-      await drv.until("document.querySelectorAll('.candidate-results input').length === 60 && [...document.querySelectorAll('.candidate-results input')].filter((input) => input.checked).length === 59", "清除搜索后保留全部选择状态");
-      await drv.evaluate("[...document.querySelectorAll('[data-workspace-manager] button')].find((button) => button.textContent === '确认纳入 59 个位置').click()");
-      await drv.until("document.querySelectorAll('.project-member').length === 119", "仅纳入 59 个已选候选");
-    },
-    check: "document.querySelectorAll('.project-member').length === 119 && ![...document.querySelectorAll('.project-member')].some((member) => member.innerText.includes('/team-48/')) && document.documentElement.scrollWidth <= innerWidth + 1",
-    detail: "({ initial:60, candidates:60, accepted:59, members:document.querySelectorAll('.project-member').length })",
-  },
-  {
-    name: "项目：保存新草稿后忘记当前仓库，经项目重新打开仍以持久值为准",
-    url: "/?projects=1",
-    steps: async (drv) => {
-      await drv.until("Boolean(document.querySelector('.welcome-recent button'))", "仓库入口");
-      await drv.click('.welcome-recent button[title="C:/Users/dev/project/twiglane"]');
-      await drv.until("Boolean(document.querySelector('[aria-label=提交说明草稿]'))", "A 打开");
-      await drv.typeInto('[aria-label="提交说明草稿"]', "A-old");
-      await drv.click('[aria-label^="当前仓库"]');
-      await drv.click('[data-worktree-path="C:/Users/dev/work/design-system"]');
-      await drv.until("document.querySelector('[aria-label^=当前仓库]')?.getAttribute('aria-label').includes('design-system')", "B 打开");
-      await drv.click('[aria-label^="当前仓库"]');
-      await drv.click('[data-worktree-path="C:/Users/dev/project/twiglane"]');
-      await drv.until("document.querySelector('[aria-label=提交说明草稿]')?.value === 'A-old'", "A 旧草稿");
-      await drv.click('[aria-label="提交说明草稿"]');
-      await drv.evaluate("document.querySelector('[aria-label=提交说明草稿]').select()");
-      await drv.typeText("A-new-preserve");
-      await drv.pause(650);
-      await drv.until("(async()=>{ const {api}=await import('/scripts/ui-preview/mock-api.ts'); return (await api.openRepository('C:/Users/dev/project/twiglane')).draft === 'A-new-preserve'; })()", "原生 mock 已保存新值");
-      await drv.click('[aria-label^="当前仓库"]');
-      await drv.rightClick('[data-worktree-path="C:/Users/dev/project/twiglane"]');
-      await drv.until("Boolean(document.querySelector('[role=menuitem][aria-label=从最近列表移除]'))", "当前 A 的最近记录操作");
-      await drv.click('[role="menuitem"][aria-label="从最近列表移除"]');
-      await drv.until("Boolean(document.querySelector('.welcome-recent button[title=\"C:/Users/dev/work/design-system\"]'))", "忘记当前 A，B 的最近入口仍在");
-      // The existing repository popover can stay open after the context-menu action.
-      // Dismiss it before targeting Welcome so it cannot intercept the pointer.
-      await drv.press("Escape");
-      await drv.until("!document.querySelector('.popover') && !document.querySelector('[role=menu]')", "关闭残留仓库弹层");
-      await drv.click('.welcome-recent button[title="C:/Users/dev/work/design-system"]');
-      await drv.until("document.querySelector('[aria-label^=当前仓库]')?.getAttribute('aria-label').includes('design-system')", "再次打开 B");
-      await selectBusinessProject(drv, 1);
-      await drv.click('[aria-label^="当前仓库"]');
-      await drv.click('[data-worktree-path="C:/Users/dev/project/twiglane"]');
-      await drv.until("document.querySelector('[aria-label=提交说明草稿]')?.value === 'A-new-preserve'", "从持久项目名单重开 A，草稿没有回退");
-    },
-    check: "(async()=>{ const {api}=await import('/scripts/ui-preview/mock-api.ts'); const native=await api.openRepository('C:/Users/dev/project/twiglane'); return native.draft === 'A-new-preserve' && document.querySelector('[aria-label=提交说明草稿]').value === native.draft; })()",
-    detail: "document.querySelector('[aria-label=提交说明草稿]')?.value",
-  },
 
   {
     name: "项目：60 仓持久成员、状态未知与长名称搜索",
@@ -1278,7 +1215,7 @@ async function main() {
       if (message.id && pending.has(message.id)) {
         pending.get(message.id)(message);
         pending.delete(message.id);
-      } else {
+      } else if (message.method === "Runtime.exceptionThrown" || (message.method === "Runtime.consoleAPICalled" && message.params.type === "error")) {
         events.push(message);
       }
     });

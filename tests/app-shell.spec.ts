@@ -4405,6 +4405,23 @@ it.each([0, 650])("返修：新草稿等待 %d 毫秒后忘记当前仓库并从
   expect(saved.get(repoPath)).toBe("A-new-preserve");
 });
 
+it("当前检出直接属于所选项目时不再探测所有成员的 HEAD", async () => {
+  const projectId = "22222222-2222-4222-8222-222222222222";
+  const hostId = "11111111-1111-4111-8111-111111111111";
+  const repositories = Array.from({ length: 400 }, (_, index) => ({
+    id: `repo-${index}`, name: `成员 ${index}`, locations: [{ hostId, path: index === 399 ? repoPath : `/workspace/${index}` }],
+  }));
+  mocks.workspaceList.mockResolvedValue({ hostId, projects: [{ manifest: {
+    schemaVersion: 1, workspaceId: projectId, name: "项目 P", revision: 1, repositories,
+  }, sourcePath: null, digest: null, error: null, favorites: [], bindings: {} }] });
+  render(App);
+  await openRepo();
+  mocks.repoHeads.mockClear();
+  await pickMenu("业务项目", projectId);
+  await waitFor(() => expect(document.querySelector(".project-context-path")?.textContent).toContain("成员 399"));
+  expect(mocks.repoHeads).not.toHaveBeenCalled();
+});
+
 it("返修：名单待处理与项目外同时成立时，标题栏标签的配色按同一顺序判定（名单问题优先）", async () => {
   const projectId = "22222222-2222-4222-8222-222222222222";
   const hostId = "11111111-1111-4111-8111-111111111111";

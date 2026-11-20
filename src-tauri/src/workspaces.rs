@@ -381,8 +381,10 @@ fn encode_percent(value: &str) -> String {
     }
     out
 }
-/// Strict workspace deep link v2: exactly `v=2`, an absolute `file` and a member `repository` UUID.
-/// A v1 project link and a missing, repeated or unknown field are rejected before anything is read.
+/// Forward-compatible workspace deep link v2+: an absolute `file` and a member `repository` UUID
+/// are required exactly once; `v` must be an integer of at least 2. Unknown query parameters are
+/// ignored so a newer sender can add fields without breaking an older receiver. A v1 project link
+/// and a missing or repeated required field are rejected before anything is read.
 pub struct WorkspaceLink {
     pub file: String,
     pub repository_id: String,
@@ -415,11 +417,15 @@ fn parse_workspace_link_with_scheme(
     let mut repository: Option<String> = None;
     for pair in query.split('&') {
         if pair.is_empty() {
-            return Err(failure("项目清单链接含空查询参数"));
+            continue;
         }
-        let (raw_key, raw_value) = pair
-            .split_once('=')
-            .ok_or_else(|| failure("项目清单链接查询参数缺少键值分隔"))?;
+        let Some((raw_key, raw_value)) = pair.split_once('=') else {
+            if matches!(pair, "v" | "file" | "repository") {
+                return Err(failure("项目清单链接查询参数缺少键值分隔"));
+            }
+            // A newer sender may add bare or free-form parameters; they carry no meaning here.
+            continue;
+        };
         match raw_key {
             "v" => {
                 if version.is_some() {
@@ -439,11 +445,20 @@ fn parse_workspace_link_with_scheme(
                 }
                 repository = Some(decode_percent(raw_value)?);
             }
-            _ => return Err(failure("项目清单链接含协议之外的参数")),
+            // Unknown parameters are ignored for forward compatibility.
+            _ => {}
         }
     }
-    if version.as_deref() != Some("2") {
-        return Err(failure("仅支持 v=2 项目清单链接，旧版项目链接请重新发起"));
+    // v1 carries no source repository; later versions keep the same required fields and
+    // preview semantics, so an older receiver can accept them without guessing.
+    let supported = version
+        .as_deref()
+        .and_then(|value| value.parse::<u32>().ok())
+        .is_some_and(|value| value >= 2);
+    if !supported {
+        return Err(failure(
+            "仅支持 v=2 及更新的项目清单链接，旧版项目链接请重新发起",
+        ));
     }
     let file = file.filter(|value| !value.is_empty()).ok_or_else(|| {
         failure("项目清单链接缺少 file 参数")
@@ -1598,7 +1613,7 @@ mod tests {
         update(&store, rebound, 1).unwrap();
     }
     #[test]
-    fn workspace_preview_link_validates_strictly_never_auto_adopts_and_builds_cliora_url() {
+    fn workspace_preview_link_validates_required_fields_never_auto_adopts_and_builds_cliora_url() {
         let dir = TempDir::new("workspace-link");
         let store = store(&dir);
         let initial = manifest();
@@ -1613,6 +1628,10 @@ mod tests {
         for valid in [
             format!("twiglane://workspace?v=2&file={encoded}&repository={member}"),
             format!("twiglane://workspace/?file={encoded}&v=2&repository={member}"),
+            // Unknown parameters and later versions keep the required-field contract.
+            format!("twiglane://workspace?v=2&file={encoded}&repository={member}&adopt=1"),
+            format!("twiglane://workspace?v=3&file={encoded}&future=1&repository={member}"),
+            format!("twiglane://workspace?v=2&&file={encoded}&repository={member}&"),
         ] {
             let observed = preview_link(&store, &valid).unwrap();
             assert_eq!(observed.manifest, initial);
@@ -1645,7 +1664,7 @@ mod tests {
             // 旧版 v1 项目链接不再被接受，也不能退化成没有来源仓库的预览。
             format!("twiglane://workspace?v=1&file={encoded}"),
             format!("twiglane://workspace?v=1&file={encoded}&repository={member}"),
-            format!("twiglane://workspace?v=3&file={encoded}&repository={member}"),
+            format!("twiglane://workspace?v=two&file={encoded}&repository={member}"),
             format!("twiglane://workspace?file={encoded}&repository={member}"),
             format!("twiglane://workspace?v=2&repository={member}"),
             format!("twiglane://workspace?v=2&file={encoded}"),
@@ -1656,7 +1675,6 @@ mod tests {
             format!("twiglane://workspace?v=2&v=2&file={encoded}&repository={member}"),
             format!("twiglane://workspace?v=2&file={encoded}&file={encoded}&repository={member}"),
             format!("twiglane://workspace?v=2&file={encoded}&repository={member}&repository={member}"),
-            format!("twiglane://workspace?v=2&file={encoded}&repository={member}&adopt=1"),
             format!("twiglane://workspace?v=2&file={encoded}&repository={member}#frag"),
             format!("twiglane://workspace?v=2&file={} raw&repository={member}", encoded),
             format!("twiglane://workspace?v=2&file={encoded}&repository={member}\n"),

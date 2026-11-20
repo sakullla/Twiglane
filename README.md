@@ -88,7 +88,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 npm run tauri build     # 打包
 ```
 
-README 截图来自 `npm run preview:ui` 的模拟数据，用 `node scripts/ui-preview/baseline-shots.mjs --scale 2 --out <目录> --failure-targets none` 生成后挑选。行为细节、验证方法和发布流程见[技术参考](docs/reference.md)与 [AGENTS.md](AGENTS.md)。
+README 截图来自 `npm run preview:ui` 的模拟数据，用 `node scripts/ui-preview/baseline-shots.mjs --full --scale 2 --out <目录> --failure-targets none` 生成后挑选。行为细节、验证方法和发布流程见[技术参考](docs/reference.md)与 [AGENTS.md](AGENTS.md)。
 
 ## 参与贡献
 

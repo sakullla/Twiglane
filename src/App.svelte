@@ -127,7 +127,7 @@
   import ProjectManager from "./lib/components/ProjectManager.svelte";
   import SelectMenu, { type SelectMenuOption } from "./lib/components/SelectMenu.svelte";
   import { projectInitial } from "./lib/workspaces";
-  import { checkoutKey, projectMemberForCheckout, projectRepos, type Projects, type WorkspacePreview } from "./lib/workspaces";
+  import { checkoutKey, projectMemberForCheckout, projectRepos, type Projects, type WorkspacePreview, type WorkspaceRepository } from "./lib/workspaces";
   import { CheckoutContexts } from "./lib/checkout-context";
   import RepoSwitcher from "./lib/components/RepoSwitcher.svelte";
   import ScopeModal from "./lib/components/ScopeModal.svelte";
@@ -195,9 +195,11 @@
       tag: project.sourcePath ? "共享" : undefined,
     })),
   ]);
-  const switcherRepos = $derived(projectRepos(selectedProject, projects.hostId, recent, opened?.summary.path ?? null));
-  let projectHeads = $state.raw<RepoHead[]>([]);
-  const currentProjectRepository = $derived(selectedProject && opened ? projectMemberForCheckout(selectedProject, projects.hostId, opened.summary.path, projectHeads) : null);
+  const projectCheckoutPath = $derived(opened?.summary.path ?? null);
+  const switcherRepos = $derived(projectRepos(selectedProject, projects.hostId, recent, projectCheckoutPath));
+  const directMember = $derived(selectedProject && projectCheckoutPath ? projectMemberForCheckout(selectedProject, projects.hostId, projectCheckoutPath, []) : null);
+  let linkedMember = $state.raw<WorkspaceRepository | null>(null);
+  const currentProjectRepository = $derived(directMember ?? linkedMember);
   const currentProjectMember = $derived(currentProjectRepository !== null);
   /** 名单本身的问题：读取失败或留存的是待处理快照。两者都让「属于哪个项目」不可信，必须说出区别。 */
   const projectProblem = $derived(projectFailure ?? selectedProject?.error ?? null);
@@ -232,15 +234,18 @@
       : 0,
   );
   $effect(() => {
-    const current = opened?.summary.path;
+    const current = projectCheckoutPath;
     const project = selectedProject;
     const host = projects.hostId;
-    projectHeads = [];
-    if (!current || !project) return;
+    linkedMember = null;
+    if (!current || !project || directMember) return;
     // Bounded on-disk HEAD metadata only; Git status stays in the existing Scheduler overview.
     const paths = [...new Set([current, ...projectRepos(project, host, []).map((repo) => repo.path)])];
     let alive = true;
-    void api.repoHeads(paths).then((heads) => { if (alive) projectHeads = heads ?? []; }).catch(() => {});
+    if (paths.length === 1) return; // No local member path to compare with this checkout.
+    void api.repoHeads(paths).then((heads) => {
+      if (alive) linkedMember = projectMemberForCheckout(project, host, current, heads ?? []);
+    }).catch(() => {});
     return () => { alive = false; };
   });
   async function loadProjects(refresh = false) {
@@ -3139,7 +3144,7 @@
   });
 
   /**
-   * 入站 `twiglane://workspace?v=2&file=<abs-path>&repository=<member-uuid>`：只请求预览并带上
+   * 入站 `twiglane://workspace?v=2&file=<abs-path>&repository=<member-uuid>`（更新版本沿用同一契约）：只请求预览并带上
    * 来源仓库，绝不自动关联或执行 Git。交给 ProjectManager 后立即清除父层意图，
    * 关闭或关联后再重开不会复现旧预览；已关联的项目由它直接续接来源仓库。
    */

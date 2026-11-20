@@ -1,6 +1,7 @@
 // 可独立复跑的 UI 验证入口：起 mock 预览 → 核验健康端点 → 跑场景自检 → 出双主题/双尺寸截图。
 //
-// 用法：node scripts/run-ui-verification.mjs [--skip-shots] [--only <场景名片段>] [--out <目录>]
+// 用法：node scripts/run-ui-verification.mjs [--skip-shots | --shots-only] [--full] [--only <场景名片段>] [--out <目录>]
+//       [--workflow <id>] [--task <id>]
 // 产物：<out>/manifest.json + <out>/after/*.png（截图）、<out>/report.json（本次汇总）。
 // 默认写到操作系统临时目录：正式交付验证不得改写候选输入。只有显式 --out 才写调用者目录（归档证据）。
 // 结论边界：这里全部是浏览器 + mock 数据，不代表真实 Git、桌面 WebView 或安装包。
@@ -11,20 +12,25 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
-/**
- * 本次批次身份：唯一来源就在这里。runner 把它显式传给截图脚本（--workflow/--task），
- * 截图脚本不再自带上一个批次的默认 ID；下面的核对读 manifest 并与这里的期望值逐项比较，
- * 因此「manifest 写了别的批次」会直接失败，而不是由同一个常量自己对自己成立。
- * 换批次只改这一处。
- */
-const IDENTITY = process.argv.includes("--projects")
-  ? { workflow: "2026-11-20-project-ui-ux-optimization", task: "T1" }
-  : { workflow: "2026-11-13-modern-ui-ux-redesign", task: "T6" };
 const args = process.argv.slice(2);
 const has = (name) => args.includes(name);
 const readArg = (name, fallback) => {
   const index = args.indexOf(name);
   return index >= 0 && args[index + 1] ? args[index + 1] : fallback;
+};
+/**
+ * 本次批次身份：唯一来源就在这里。runner 把它显式传给截图脚本（--workflow/--task），
+ * 截图脚本不再自带上一个批次的默认 ID；下面的核对读 manifest 并与这里的期望值逐项比较，
+ * 因此「manifest 写了别的批次」会直接失败，而不是由同一个常量自己对自己成立。
+ * --workflow/--task 可按批次覆盖；跨多个 task 的交付图集应显式传 --task delivery，
+ * 不要借某个实现 task 的名义归档。
+ */
+const IDENTITY = {
+  workflow: readArg(
+    "--workflow",
+    has("--projects") ? "2026-11-20-project-ui-ux-optimization" : "2026-11-13-modern-ui-ux-redesign",
+  ),
+  task: readArg("--task", has("--projects") ? "delivery" : "T6"),
 };
 const base = readArg("--base", "http://127.0.0.1:1430");
 const explicitOut = has("--out");
@@ -34,6 +40,8 @@ const outDir = explicitOut
   : fs.mkdtempSync(path.join(os.tmpdir(), "twiglane-ui-verification-"));
 const only = readArg("--only", has("--projects") ? "项目：" : null);
 const skipShots = has("--skip-shots");
+const shotsOnly = has("--shots-only");
+if (skipShots && shotsOnly) throw new Error("--skip-shots 和 --shots-only 只能选一个");
 const startedAt = new Date();
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** 终端与 report 里展示路径：仓库内的写相对路径，临时目录写绝对路径。 */
@@ -132,7 +140,7 @@ const report = {
     temp: os.tmpdir(),
   },
   health: null,
-  scenarios: { total: 0, passed: 0, failed: 0, failures: [], exitCode: null, output: "" },
+  scenarios: { skipped: shotsOnly, total: 0, passed: 0, failed: 0, failures: [], exitCode: null, output: "" },
   shots: { manifest: null, workflow: null, task: null, capturedAt: null, fresh: false, groups: {}, files: 0, exitCode: null },
   limits: [
     "浏览器 + mock 数据：不代表真实 Git 行为、桌面 WebView、安装包或其它平台。",
@@ -154,7 +162,7 @@ try {
   // 与 npm run preview:ui 同一条命令：同一个 vite 配置、同一个 mock 替换与健康端点。
   server = spawn(
     process.execPath,
-    [path.join("node_modules", "vite", "bin", "vite.js"), "--config", "scripts/ui-preview/vite.config.mjs"],
+    [path.join("node_modules", "vite", "bin", "vite.js"), "--config", "scripts/ui-preview/vite.config.mjs", "--port", String(port), "--strictPort"],
     { stdio: ["ignore", "pipe", "pipe"] },
   );
   server.stdout.resume();
@@ -179,28 +187,39 @@ try {
   console.log("健康端点确认：" + JSON.stringify(report.health));
 
   // ---- 场景自检 ----
-  const scenarioArgs = ["scripts/ui-preview/check-scenarios.mjs", "--base", base];
-  if (only) scenarioArgs.push("--only", only);
-  const scenarios = await run(process.execPath, scenarioArgs);
-  report.scenarios.exitCode = scenarios.code;
-  report.scenarios.output = scenarios.stdout.trim();
-  const summary = /场景自检：(\d+)\/(\d+) 通过/.exec(scenarios.stdout);
-  if (summary) {
-    report.scenarios.passed = Number(summary[1]);
-    report.scenarios.total = Number(summary[2]);
-    report.scenarios.failed = report.scenarios.total - report.scenarios.passed;
+  if (!shotsOnly) {
+    const scenarioArgs = ["scripts/ui-preview/check-scenarios.mjs", "--base", base];
+    if (only) scenarioArgs.push("--only", only);
+    const scenarios = await run(process.execPath, scenarioArgs);
+    report.scenarios.exitCode = scenarios.code;
+    report.scenarios.output = scenarios.stdout.trim();
+    const summary = /场景自检：(\d+)\/(\d+) 通过/.exec(scenarios.stdout);
+    if (summary) {
+      report.scenarios.passed = Number(summary[1]);
+      report.scenarios.total = Number(summary[2]);
+      report.scenarios.failed = report.scenarios.total - report.scenarios.passed;
+    }
+    report.scenarios.failures = scenarios.stdout
+      .split("\n")
+      .filter((line) => line.startsWith("FAIL"))
+      .map((line) => line.trim());
+    if (scenarios.code !== 0) failures.push("场景子进程退出码 " + scenarios.code + "（有失败场景或自检没跑完）");
+    if (report.scenarios.total === 0) failures.push("场景自检没有产出任何场景结果（零场景不算通过）");
+    else if (report.scenarios.failed !== 0) failures.push("失败场景 " + report.scenarios.failed + " 个");
   }
-  report.scenarios.failures = scenarios.stdout
-    .split("\n")
-    .filter((line) => line.startsWith("FAIL"))
-    .map((line) => line.trim());
-  if (scenarios.code !== 0) failures.push("场景子进程退出码 " + scenarios.code + "（有失败场景或自检没跑完）");
-  if (report.scenarios.total === 0) failures.push("场景自检没有产出任何场景结果（零场景不算通过）");
-  else if (report.scenarios.failed !== 0) failures.push("失败场景 " + report.scenarios.failed + " 个");
 
   // ---- 截图与 manifest ----
   if (!skipShots) {
     const manifestPath = path.join(outDir, "manifest.json");
+    let previousFiles = [];
+    if (fs.existsSync(manifestPath)) {
+      try {
+        const previous = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+        if (previous.workflow === IDENTITY.workflow) previousFiles = previous.shots
+          .filter((shot) => (!has("--projects") || shot.group === "projects") && /^after\/(dark|light)-\d+x\d+-[a-z0-9-]+\.png$/.test(shot.file))
+          .map((shot) => shot.file);
+      } catch { /* An incomplete prior gallery has no file list to clean up. */ }
+    }
     // 先移走旧 manifest：这次运行必须自己写出新的一份，不能拿上一批的结果冒充。
     fs.rmSync(manifestPath, { force: true });
     const shots = await run(process.execPath, [
@@ -211,7 +230,10 @@ try {
       "--task", IDENTITY.task,
       "--out", path.join(outDir, "after"),
       "--manifest", manifestPath,
-      "--failure-targets", "dark:1280x840,light:1280x840,dark:900x600,light:900x600",
+      ...(has("--full") ? ["--full"] : []),
+      ...(has("--failure-targets")
+        ? ["--failure-targets", readArg("--failure-targets", "none")]
+        : has("--full") ? ["--failure-targets", "dark:1280x840,light:1280x840,dark:900x600,light:900x600"] : []),
     ]);
     report.shots.exitCode = shots.code;
     if (shots.code !== 0) {
@@ -246,7 +268,12 @@ try {
         (shot) => !fs.existsSync(path.resolve(path.dirname(manifestPath), shot.file)),
       );
       if (missing.length > 0) failures.push(missing.length + " 张截图在 manifest 里登记了但文件不存在");
-      if (report.shots.files !== (manifest.shots?.length ?? 0)) failures.push("report 记录的截图数与 manifest 不一致");
+      if (!failures.length && previousFiles.length) {
+        const written = new Set(manifest.shots.map((shot) => shot.file));
+        for (const file of previousFiles) {
+          if (!written.has(file)) fs.rmSync(path.join(outDir, file), { force: true });
+        }
+      }
     }
   }
 
@@ -254,7 +281,7 @@ try {
   fs.mkdirSync(outDir, { recursive: true });
   fs.writeFileSync(path.join(outDir, "report.json"), JSON.stringify(report, null, 2) + "\n");
   console.log(
-    "UI 验证：" + report.status + "｜场景 " + report.scenarios.passed + "/" + report.scenarios.total +
+    "UI 验证：" + report.status + (shotsOnly ? "｜仅截图" : "｜场景 " + report.scenarios.passed + "/" + report.scenarios.total) +
       "｜截图 " + report.shots.files + "（" + JSON.stringify(report.shots.groups) + "）" +
       "｜输出 " + report.output.dir,
   );

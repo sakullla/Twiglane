@@ -26,6 +26,7 @@ const readArg = (name, fallback) => {
   return index >= 0 && args[index + 1] ? args[index + 1] : fallback;
 };
 const projectsOnly = args.includes("--projects");
+const full = args.includes("--full");
 /** 批次身份只能由调用方给：这里没有默认工作流，也不会替调用方猜。 */
 const workflowId = readArg("--workflow", "").trim();
 const taskId = readArg("--task", "").trim();
@@ -43,7 +44,7 @@ const identity = workflowId || taskId
       task: null,
     };
 const base = readArg("--base", "http://127.0.0.1:1430");
-const outDir = path.resolve(readArg("--out", "docs/verification/ui-ux-markdown-2026-11-08/after"));
+const outDir = path.resolve(readArg("--out", "") || path.join(fs.mkdtempSync(path.join(os.tmpdir(), "twiglane-shots-")), "after"));
 // 与已提交证据一致：图片在 after/，manifest 在验证目录根部，file 字段相对 manifest。
 const manifestPath = path.resolve(readArg("--manifest", path.join(path.dirname(outDir), "manifest.json")));
 
@@ -64,7 +65,12 @@ const SIZES = [
   { label: "1280x840", width: 1280, height: 840 },
   { label: "900x600", width: 900, height: 600 },
 ];
-const VIEWS = ["start", "changes", "history", "merge", "settings"];
+const representative = {
+  "dark:1280x840": ["changes", "task", "worktree", "sync-stale", "commit-push-error"],
+  "light:1280x840": ["history", "composer", "settings", "files-markdown-toc", "doc-large"],
+  "dark:900x600": ["start", "task-error"],
+  "light:900x600": ["merge", "search-error"],
+};
 
 function chromePath() {
   const found = CHROME_CANDIDATES.find((candidate) => candidate && fs.existsSync(candidate));
@@ -117,13 +123,16 @@ class Cdp {
     socket.addEventListener("message", (event) => {
       const message = JSON.parse(event.data);
       if (message.id && this.pending.has(message.id)) {
-        const { resolve, reject } = this.pending.get(message.id);
+        const { resolve, reject, timer } = this.pending.get(message.id);
+        clearTimeout(timer);
         this.pending.delete(message.id);
         if (message.error) reject(new Error(message.error.message));
         else resolve(message.result);
         return;
       }
-      this.events.push(message);
+      if (message.method === "Runtime.exceptionThrown" || (message.method === "Runtime.consoleAPICalled" && message.params.type === "error")) {
+        this.events.push(message);
+      }
     });
   }
 
@@ -141,13 +150,18 @@ class Cdp {
     const payload = { id, method, params };
     if (sessionId) payload.sessionId = sessionId;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.socket.send(JSON.stringify(payload));
-      setTimeout(() => {
-        if (!this.pending.has(id)) return;
+      const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`CDP 超时: ${method}`));
       }, 30_000);
+      this.pending.set(id, { resolve, reject, timer });
+      try {
+        this.socket.send(JSON.stringify(payload));
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error);
+      }
     });
   }
 
@@ -440,6 +454,7 @@ const FAILURE_STATES = [
  * 正常视图仍覆盖两主题 × 两尺寸；失败态在 README 里逐张对应需求，不混进同数据对照。
  */
 const DEFAULT_FAILURE_TARGETS = ["dark:1280x840", "light:1280x840", "dark:900x600"];
+const customFailureTargets = args.includes("--failure-targets");
 const failureTargets = new Set(
   readArg("--failure-targets", DEFAULT_FAILURE_TARGETS.join(","))
     .split(",")
@@ -449,7 +464,7 @@ const failureTargets = new Set(
 /** 拼错的组合不能安静地少采：明确列出可选值，避免「跑完了但少了一组」被当成脚本行为。 */
 const KNOWN_TARGETS = new Set(THEMES.flatMap((theme) => SIZES.map((size) => `${theme}:${size.label}`)));
 for (const target of failureTargets) {
-  if (!KNOWN_TARGETS.has(target)) {
+  if (target !== "none" && !KNOWN_TARGETS.has(target)) {
     console.warn(`忽略未知的失败态组合 ${target}；可选：${[...KNOWN_TARGETS].join(", ")}`);
   }
 }
@@ -521,13 +536,14 @@ async function main() {
       worker: "预览页的 Markdown 解析在工作线程里进行；失败态由 ?remote= / ?commit= / ?doc= / ?search= 参数进入",
     },
     groups: {
-      ...(projectsOnly ? { projects: "项目总览、项目管理、候选搜索预览、来源失效快照、项目外仓库；各按两主题两尺寸采集" } : {}),
+      ...(projectsOnly || !full ? { projects: "桌面展示项目管理和项目外仓库，窄窗口展示候选选择和来源失效；每个状态采集一次" } : {}),
       baseline: "start/changes/history/task/worktree/composer/merge/settings：与 01 基线同数据、同主题、同尺寸",
       markdown: "files-markdown/files-markdown-toc：Markdown 排版预览与目录工具行，单独成组，不参与优化前后对照",
       failure:
         "关键失败/未知状态：sync-unchecked/sync-stale/commit-error/commit-push-error/doc-error/doc-large/" +
         "search-error/filter-error/find-error/task-error/history-cancel-recovered，逐张对应需求",
     },
+    profile: full && !projectsOnly ? "full" : "curated",
     shots: [],
     // 没有采集到的视图与原因：证据清单必须能解释「为什么少了一张」，不能安静跳过。
     skipped: [],
@@ -546,7 +562,6 @@ async function main() {
         const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
         await cdp.send("Page.enable", {}, sessionId);
         await cdp.send("Runtime.enable", {}, sessionId);
-        await cdp.send("Network.enable", {}, sessionId);
         await cdp.send(
           "Emulation.setDeviceMetricsOverride",
           { width: size.width, height: size.height, deviceScaleFactor: SCALE, mobile: false },
@@ -557,31 +572,26 @@ async function main() {
           { source: `try { localStorage.setItem("preview-theme", ${JSON.stringify(theme)}); } catch (error) {}` },
           sessionId,
         );
-        await cdp.send("Page.navigate", { url: base + "/" }, sessionId);
-        await waitFor(cdp, sessionId, "Boolean(document.querySelector('.welcome-recent button, .action-card'))", "起始页");
-        await pause(600);
-
+        const target = `${theme}:${size.label}`;
+        const wants = (view) => full || representative[target].includes(view);
+        const shouldCaptureFailure = (view) => full || customFailureTargets ? failureTargets.has(target) : wants(view);
         const skipped = manifest.skipped;
         const shot = async (view, group = "baseline", state = "normal") => {
-          if (projectsOnly) {
+          if (projectsOnly || !full) {
             await waitFor(cdp, sessionId, `document.documentElement.dataset.theme === ${JSON.stringify(theme)}`, "实际主题已应用");
-            // 等有限次数的动画结束：入场动画不结束就截图会拍到中间帧。
-            // 已经离开渲染树的动画可能永远不结束，所以每个动画都带一个上限，并把卡住的动画报出来。
-            const stuck = await evaluate(cdp, sessionId, `(async () => {
-              const finite = document.getAnimations().filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity);
-              const stuck = await Promise.all(finite.map((animation) => Promise.race([
-                animation.finished.then(() => null, () => null),
-                new Promise((resolve) => setTimeout(() => resolve(animation.animationName || animation.transitionProperty || animation.constructor.name), 1500)),
-              ])));
+            // Capture the settled state. The frame-by-frame scenario exercises real transitions separately.
+            await evaluate(cdp, sessionId, `(async () => {
+              for (const animation of document.getAnimations()) {
+                if (animation.playState === 'running' && animation.playbackRate !== 0 &&
+                    Number.isFinite(animation.effect?.getComputedTiming().endTime)) animation.finish();
+              }
               await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-              return stuck.filter(Boolean);
             })()`);
-            if (Array.isArray(stuck) && stuck.length > 0) console.warn(view + ": 动画没有自行结束 " + JSON.stringify(stuck));
           }
           const paint = await evaluate(cdp, sessionId, `({ theme:document.documentElement.dataset.theme, surface:getComputedStyle(document.documentElement).getPropertyValue('--surface').trim(), modalOpacity:document.querySelector('.modal-card') ? getComputedStyle(document.querySelector('.modal-card')).opacity : null, backdropOpacity:document.querySelector('.modal-backdrop') ? getComputedStyle(document.querySelector('.modal-backdrop')).opacity : null })`);
-          if (projectsOnly && (paint.theme !== theme || (paint.modalOpacity !== null && paint.modalOpacity !== "1") || (paint.backdropOpacity !== null && paint.backdropOpacity !== "1"))) throw new Error(`${view}: paint not ready ${JSON.stringify(paint)}`);
+          if ((projectsOnly || !full) && (paint.theme !== theme || (paint.modalOpacity !== null && paint.modalOpacity !== "1") || (paint.backdropOpacity !== null && paint.backdropOpacity !== "1"))) throw new Error(`${view}: paint not ready ${JSON.stringify(paint)}`);
           const overflow = await evaluate(cdp, sessionId, "Math.max(0, document.documentElement.scrollWidth - innerWidth)");
-          if (projectsOnly && overflow > 1) throw new Error(`${view}: horizontal overflow ${overflow}px`);
+          if ((projectsOnly || !full) && overflow > 1) throw new Error(`${view}: horizontal overflow ${overflow}px`);
           const image = await cdp.send("Page.captureScreenshot", { format: "png" }, sessionId);
           const buffer = Buffer.from(image.data, "base64");
           const file = `${theme}-${size.label}-${view}.png`;
@@ -604,7 +614,7 @@ async function main() {
           console.log("captured", file, `group=${group}`, errors.length > 0 ? `控制台错误 ${errors.length} 条` : "");
         };
 
-        if (projectsOnly) {
+        const captureProjects = async () => {
           const selectProjectMenu = async (index = 1) => {
             await waitFor(cdp, sessionId, 'Boolean(document.querySelector(\'[aria-label="业务项目"]\'))', "项目菜单入口");
             await evaluate(cdp, sessionId, click('[aria-label="业务项目"]'));
@@ -618,165 +628,146 @@ async function main() {
             await evaluate(cdp, sessionId, click('.popover[aria-label="业务项目"] .select-menu-action'));
             await waitFor(cdp, sessionId, "Boolean(document.querySelector('[data-workspace-manager]'))", "项目管理");
           };
-          await cdp.send("Page.navigate", { url: base + "/?projects=1" }, sessionId);
-          await selectProjectMenu(1);
-          await waitFor(cdp, sessionId, "Boolean(document.querySelector('.welcome-recent button'))", "项目起始页仓库入口");
-          await evaluate(cdp, sessionId, click('.welcome-recent button'));
-          await waitFor(cdp, sessionId, "Boolean(document.querySelector('.file-list'))", "仓库打开");
-          await pause(500);
-          await evaluate(cdp, sessionId, click('[aria-label^="当前仓库"]'));
-          await waitFor(cdp, sessionId, "Boolean(document.querySelector('[data-worktree-state=unknown]'))", "项目总览读取");
-          await pause(300);
-          await shot("project-overview", "projects", "60 仓成员源，收藏优先、未知/缺失状态和 worktree 分组");
-          await evaluate(cdp, sessionId, pressEscape);
-          await openManageProjects();
-          await shot("project-manager", "projects", "共享文件、60 仓名单、批量纳入与目录修复入口");
-          await evaluate(cdp, sessionId, "[...document.querySelectorAll('[data-workspace-manager] button')].find((button) => button.textContent === '从目录发现').click()");
-          await waitFor(cdp, sessionId, "document.querySelectorAll('.candidate-results input').length === 60", "60 个发现候选");
-          await evaluate(cdp, sessionId, typeInto('[aria-label="搜索候选仓库"]', "service-48"));
-          await waitFor(cdp, sessionId, "document.querySelectorAll('.candidate-results input').length === 1", "候选搜索结果");
-          await evaluate(cdp, sessionId, click('.candidate-results input'));
-          await evaluate(cdp, sessionId, "document.querySelector('[aria-label=搜索候选仓库]').closest('section').scrollIntoView({ block: 'center' })");
-          await shot("project-candidates", "projects", "60 个发现候选名称/完整路径搜索，取消匹配项后仍保留筛选外的 59 项选择");
-          // First Escape clears candidate search query, second Escape closes Modal.
-          await evaluate(cdp, sessionId, pressEscape);
-          await evaluate(cdp, sessionId, pressEscape);
-          await cdp.send("Page.navigate", { url: base + "/?projects=missing" }, sessionId);
-          await selectProjectMenu(1);
-          await openManageProjects();
-          await shot("project-source-missing", "projects", "来源失效仍保留最后快照，禁止旧名单覆盖，提供重新预览/刷新");
-          // 项目外仓库：选中的项目不含当前仓库。标题栏的「项目外」标签与仓库弹层顶部范围说明都在这一屏，
-          // 这是 R2 新增的可见状态，必须有实际画面而不只是场景 DOM 断言。
-          await cdp.send("Page.navigate", { url: base + "/?projects=1" }, sessionId);
-          await waitFor(
-            cdp,
-            sessionId,
-            'Boolean(document.querySelector(\'.welcome-recent button[title="C:/Users/dev/work/design-system"]\'))',
-            "项目外仓库入口",
-          );
-          await evaluate(cdp, sessionId, click('.welcome-recent button[title="C:/Users/dev/work/design-system"]'));
-          await waitFor(cdp, sessionId, "Boolean(document.querySelector('.file-list'))", "项目外仓库打开");
-          await selectProjectMenu(1);
-          await waitFor(
-            cdp,
-            sessionId,
-            "document.querySelector('.project-chip-tag')?.textContent.includes('项目外')",
-            "标题栏项目外标记",
-          );
-          await evaluate(cdp, sessionId, click('[aria-label^="当前仓库"]'));
-          await waitFor(
-            cdp,
-            sessionId,
-            "Boolean(document.querySelector('.popover [data-project-scope=\"outside\"]'))",
-            "仓库弹层里的范围说明",
-          );
-          await pause(300);
-          await shot("project-outside", "projects", "当前仓库不属于所选项目：标题栏「项目外」标签与仓库弹层顶部的范围说明、改看全部仓库入口");
-          await evaluate(cdp, sessionId, pressEscape);
-          await waitFor(cdp, sessionId, "!document.querySelector('.popover')", "仓库弹层收起");
+          const narrow = size.width === 900;
+          const missing = narrow && theme === "dark";
+          if (!narrow && theme === "dark") {
+            await cdp.send("Page.navigate", { url: base + "/?projects=1" }, sessionId);
+            await waitFor(
+              cdp,
+              sessionId,
+              'Boolean(document.querySelector(\'.welcome-recent button[title="C:/Users/dev/work/design-system"]\'))',
+              "项目外仓库入口",
+            );
+            await evaluate(cdp, sessionId, click('.welcome-recent button[title="C:/Users/dev/work/design-system"]'));
+            await waitFor(cdp, sessionId, "Boolean(document.querySelector('.file-list'))", "项目外仓库打开");
+            await selectProjectMenu(1);
+            await waitFor(
+              cdp,
+              sessionId,
+              "document.querySelector('.project-chip-tag')?.textContent.includes('项目外')",
+              "标题栏项目外标记",
+            );
+            await evaluate(cdp, sessionId, click('[aria-label^="当前仓库"]'));
+            await waitFor(
+              cdp,
+              sessionId,
+              "Boolean(document.querySelector('.popover [data-project-scope=\"outside\"]'))",
+              "仓库弹层里的范围说明",
+            );
+            await shot("project-outside", "projects", "当前仓库不属于所选项目：标题栏「项目外」标签与仓库弹层顶部的范围说明、改看全部仓库入口");
+          } else {
+            await cdp.send("Page.navigate", { url: base + (missing ? "/?projects=missing" : "/?projects=1") }, sessionId);
+            await selectProjectMenu(1);
+            await openManageProjects();
+            if (missing) {
+              await shot("project-source-missing", "projects", "来源失效仍显示快照与修复入口");
+            } else if (narrow) {
+              await evaluate(cdp, sessionId, "[...document.querySelectorAll('[data-workspace-manager] button')].find((button) => button.textContent === '从目录发现').click()");
+              await waitFor(cdp, sessionId, "document.querySelectorAll('.candidate-results input').length === 60", "60 个发现候选");
+              await evaluate(cdp, sessionId, typeInto('[aria-label="搜索候选仓库"]', "service-48"));
+              await waitFor(cdp, sessionId, "document.querySelectorAll('.candidate-results input').length === 1", "候选搜索结果");
+              await evaluate(cdp, sessionId, click('.candidate-results input'));
+              await evaluate(cdp, sessionId, "document.querySelector('[aria-label=搜索候选仓库]').closest('section').scrollIntoView({ block: 'center' })");
+              await shot("project-candidates", "projects", "60 个发现候选名称/完整路径搜索，取消匹配项后仍保留筛选外的 59 项选择");
+            } else {
+              await shot("project-manager", "projects", "60 仓名单、批量纳入与目录修复入口");
+            }
+          }
+        };
+        if (projectsOnly) {
+          await captureProjects();
           await cdp.send("Target.closeTarget", { targetId });
           continue;
         }
 
-        await shot("start", "baseline", "起始页");
+        // A requested normal view only opens the surfaces needed for its own capture.
+        const openWorkspace = full || ["changes", "history", "merge", "settings", "files-markdown-toc"].some(wants);
+        if (openWorkspace || wants("start")) {
+          await cdp.send("Page.navigate", { url: base + "/" }, sessionId);
+          await waitFor(cdp, sessionId, "Boolean(document.querySelector('.welcome-recent button'))", "起始页");
+          if (wants("start")) await shot("start", "baseline", "起始页");
+          if (openWorkspace) {
+            await evaluate(cdp, sessionId, click(".welcome-recent button"));
+            await waitFor(cdp, sessionId, "Boolean(document.querySelector('.view-switcher'))", "工作区");
+          }
+        }
 
-        await evaluate(cdp, sessionId, click(".welcome-recent button"));
-        await waitFor(cdp, sessionId, "Boolean(document.querySelector('.view-switcher'))", "工作区");
-        await pause(900);
-        await shot("changes", "baseline", "改动视图（同数据对照）");
+        if (wants("changes")) {
+          await waitFor(cdp, sessionId, "Boolean(document.querySelector('.file-list .file-row'))", "改动文件列表");
+          await shot("changes", "baseline", "改动视图");
+        }
+        if (wants("history")) {
+          await evaluate(cdp, sessionId, click('[data-view="history"]'));
+          await waitFor(cdp, sessionId, "Boolean(document.querySelector('.history-view[aria-busy=false] .history-row[role=option]'))", "提交历史");
+          await evaluate(cdp, sessionId, click('.history-view .history-row'));
+          await waitFor(cdp, sessionId, "Boolean(document.querySelector('.commit-files .file-row'))", "提交文件列表");
+          await shot("history", "baseline", "历史列表与选中提交的文件");
+        }
 
-        await evaluate(cdp, sessionId, click('[data-view="history"]'));
-        await pause(900);
-        await shot("history", "baseline", "历史视图（同数据对照）");
+        if (["task", "worktree", "composer"].some(wants)) {
+          await cdp.send("Page.navigate", { url: base + "/?cliora=1" }, sessionId);
+          await waitFor(cdp, sessionId, "Boolean(document.querySelector('.history-task-row[aria-pressed=true]'))", "历史里的任务净差异");
+          await waitFor(cdp, sessionId, "document.querySelectorAll('.task-detail .file-list .file-row').length > 0", "任务文件队列");
+          if (wants("task")) {
+            await evaluate(cdp, sessionId, click('.task-detail .file-list .file-row'));
+            await waitFor(cdp, sessionId, "Boolean(document.querySelector('.task-detail [data-diff-row]'))", "任务净差异正文");
+            await shot("task", "baseline", "历史里的任务净差异");
+          }
+          if (wants("worktree")) {
+            await evaluate(cdp, sessionId, click('[aria-label^="当前仓库"]'));
+            await waitFor(cdp, sessionId, "Boolean(document.querySelector('.rs-option[data-worktree-path]'))", "工作区总览");
+            await shot("worktree", "baseline", "按主仓库分组的工作区总览");
+            await evaluate(cdp, sessionId, pressEscape);
+            await waitFor(cdp, sessionId, "!document.querySelector('[role=dialog]')", "关闭工作区总览");
+          }
+          if (wants("composer")) {
+            await evaluate(cdp, sessionId, click('[data-view="changes"]'));
+            await waitFor(cdp, sessionId, "Boolean(document.querySelector('.composer textarea'))", "提交区");
+            await evaluate(cdp, sessionId, typeIntoArea(".composer textarea", "审阅任务范围并提交\n\n- 起点 main~2\n- 净差异只读，提交只按真实暂存范围"));
+            await waitFor(cdp, sessionId, "Boolean(document.querySelector('[data-view-scope=changes] .file-row'))", "待提交文件");
+            await shot("composer", "baseline", "真实暂存范围与提交草稿");
+          }
+        }
 
-        // T5：任务净差异、工作区总览与提交区各留一张同数据对照（同一 mock 数据、同一主题与尺寸）。
-        // 任务范围只来自 cliora 链接：预览用 ?cliora=1 模拟一次跳转，历史按起点过滤并选中任务净差异。
-        await cdp.send("Page.navigate", { url: base + "/?cliora=1" }, sessionId);
-        await waitFor(cdp, sessionId, "Boolean(document.querySelector('.history-task-row[aria-pressed=true]'))", "历史里的任务净差异");
-        await waitFor(cdp, sessionId, "document.querySelectorAll('.task-detail .file-list .file-row').length > 0", "任务文件队列");
-        await pause(800);
-        await shot("task", "baseline", "历史里的任务净差异：起点范围、任务文件队列与净差异");
-
-        await evaluate(cdp, sessionId, click('[aria-label^="当前仓库"]'));
-        await waitFor(cdp, sessionId, "Boolean(document.querySelector('.switcher-group-name'))", "工作区总览");
-        await pause(700);
-        await shot("worktree", "baseline", "工作区总览：按主仓库分组与逐项状态");
-        await evaluate(cdp, sessionId, pressEscape);
-        await waitFor(cdp, sessionId, "!document.querySelector('[role=dialog]')", "关闭工作区总览");
-
-        await evaluate(cdp, sessionId, click('[data-view="changes"]'));
-        await waitFor(cdp, sessionId, "Boolean(document.querySelector('.composer textarea'))", "提交区");
-        await evaluate(cdp, sessionId, typeIntoArea(".composer textarea", "审阅任务范围并提交\n\n- 起点 main~2\n- 净差异只读，提交只按真实暂存范围"));
-        await pause(500);
-        await shot("composer", "baseline", "提交区：真实暂存范围与提交草稿");
-
-        await openCommand(cdp, sessionId, "分支合并", "#merge-modal-title");
-        await waitFor(cdp, sessionId, "Boolean(document.querySelector('.merge-check[aria-busy=\"false\"] .merge-verdict:not(.idle)'))", "合并检查完成");
-        await pause(400);
-        await shot("merge", "baseline", "合并弹窗（同数据对照）");
-        await evaluate(cdp, sessionId, pressEscape);
-        await waitFor(cdp, sessionId, "!document.querySelector('[role=dialog]')", "关闭合并弹窗");
-
-        await openCommand(cdp, sessionId, "设置", '[role="dialog"]');
-        await shot("settings", "baseline", "设置弹窗（同数据对照）");
-        await evaluate(cdp, sessionId, pressEscape);
-        await waitFor(cdp, sessionId, "!document.querySelector('[role=dialog]')", "关闭设置弹窗");
-
-        // Markdown 阅读是这一轮新增的样例，单独成组（group: "markdown"）：
-        // 它与「同一数据前后对照」不是一回事，manifest 里分开记录，统计时不能混在一起。
-        await evaluate(cdp, sessionId, click('[data-view="files"]'));
-        await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view'))", "文件视图");
-        await pause(600);
-        await openReadme(cdp, sessionId, "Boolean(document.querySelector('.files-view .markdown-preview .md-body'))", "Markdown 预览");
-        // 解析在工作线程里：预览容器出现不等于正文已经上屏，截图要等标题锚点渲染出来。
-        await waitFor(
-          cdp,
-          sessionId,
-          "Boolean(document.querySelector('.files-view .markdown-preview .md-body [data-markdown-anchor]'))",
-          "Markdown 正文",
-        );
-        await pause(400);
-        await shot("files-markdown", "markdown", "Markdown 默认排版预览");
-        // 文件视图的预览有标题时在工具条上给出目录图标开关（aria-label「文档目录」）；
-        // 仍然按「开关真的存在」决定是否截图，缺失时把原因写进 manifest，不伪造一张目录图。
-        const toggled = await evaluate(
-          cdp,
-          sessionId,
-          `(() => {
-            const toggle = document.querySelector('.files-view button[aria-label="文档目录"]');
-            if (!toggle) return false;
-            toggle.click();
-            return true;
-          })()`,
-        );
-        if (toggled) {
+        if (wants("merge")) {
+          await openCommand(cdp, sessionId, "分支合并", "#merge-modal-title");
+          await waitFor(cdp, sessionId, "Boolean(document.querySelector('.merge-check[aria-busy=false] .merge-verdict:not(.idle)'))", "合并检查完成");
+          await shot("merge", "baseline", "合并弹窗");
+          await evaluate(cdp, sessionId, pressEscape);
+          await waitFor(cdp, sessionId, "!document.querySelector('[role=dialog]')", "关闭合并弹窗");
+        }
+        if (wants("settings")) {
+          await openCommand(cdp, sessionId, "设置", '[role="dialog"]');
+          await shot("settings", "baseline", "设置弹窗");
+          await evaluate(cdp, sessionId, pressEscape);
+          await waitFor(cdp, sessionId, "!document.querySelector('[role=dialog]')", "关闭设置弹窗");
+        }
+        if (wants("files-markdown-toc")) {
+          await evaluate(cdp, sessionId, click('[data-view="files"]'));
+          await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view'))", "文件视图");
+          await openReadme(cdp, sessionId, "Boolean(document.querySelector('.files-view .markdown-preview .md-body [data-markdown-anchor]'))", "Markdown 正文");
+          if (full) await shot("files-markdown", "markdown", "Markdown 默认排版预览");
+          const toggle = '.files-view button[aria-label="文档目录"]';
           try {
+            await waitFor(cdp, sessionId, `Boolean(document.querySelector(${JSON.stringify(toggle)}))`, "文档目录开关");
+            await evaluate(cdp, sessionId, click(toggle));
             await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view .md-outline button'))", "文档目录");
-            await pause(300);
-            await shot("files-markdown-toc", "markdown", "Markdown 标题目录展开");
+            await shot("files-markdown-toc", "markdown", "Markdown 正文与展开的标题目录");
           } catch (error) {
+            if (!full) throw error;
             skipped.push({ view: "files-markdown-toc", group: "markdown", reason: error.message });
             console.log("跳过 files-markdown-toc：", error.message);
           }
-        } else {
-          skipped.push({
-            view: "files-markdown-toc",
-            group: "markdown",
-            reason: "文件视图的 Markdown 预览没有目录开关：文档没有标题，或目录入口没有随预览出现。",
-          });
-          console.log("跳过 files-markdown-toc：文件视图的预览没有目录开关");
         }
 
-        // 关键失败/未知状态：同一 mock 数据上的参数化场景，逐项对应 R3/R4/R6。
-        // 组合固定为两主题 1280×840 + 深色 900×600，与 README 的证据表一致。
-        if (failureTargets.has(`${theme}:${size.label}`)) {
-          for (const failure of FAILURE_STATES) {
-            await cdp.send("Page.navigate", { url: `${base}/?${failure.query}` }, sessionId);
-            await waitFor(cdp, sessionId, "Boolean(document.querySelector('.welcome-recent button'))", `${failure.view} 起始页`);
-            await failure.run(cdp, sessionId);
-            await shot(failure.view, "failure", failure.state);
-          }
+        for (const failure of FAILURE_STATES) {
+          if (!shouldCaptureFailure(failure.view)) continue;
+          await cdp.send("Page.navigate", { url: `${base}/?${failure.query}` }, sessionId);
+          await waitFor(cdp, sessionId, "Boolean(document.querySelector('.welcome-recent button'))", `${failure.view} 起始页`);
+          await failure.run(cdp, sessionId);
+          await shot(failure.view, "failure", failure.state);
         }
+        if (!full) await captureProjects();
 
         await cdp.send("Target.closeTarget", { targetId });
       }
@@ -795,6 +786,14 @@ async function main() {
 
   const counts = (group) => manifest.shots.filter((item) => item.group === group).length;
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+  const figures = manifest.shots.map(({ file, view, theme, size }) => {
+    const href = file.split("/").map(encodeURIComponent).join("/");
+    const label = `${view} · ${theme} · ${size}`;
+    return `<figure><a href="${href}"><img loading="lazy" src="${href}" alt="${label}"></a><figcaption>${label}</figcaption></figure>`;
+  });
+  fs.writeFileSync(path.join(path.dirname(manifestPath), "index.html"),
+    `<!doctype html><meta charset="utf-8"><title>Twiglane UI 捕获</title><style>body{font:14px system-ui;margin:2rem;background:#16181c;color:#eee}main{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:1rem}figure{margin:0}img{display:block;width:100%;height:auto}</style><h1>Twiglane UI 捕获</h1><p>${manifest.shots.length} 张 · 浏览器合成数据</p><main>${figures.join("")}</main>`);
+
   console.log(
     `完成：${manifest.shots.length} 张截图（对照 ${counts("baseline")} / Markdown ${counts("markdown")} / 失败态 ${counts("failure")}），` +
       `输出目录 ${outDir}，manifest ${manifestPath}`,

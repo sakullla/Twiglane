@@ -650,7 +650,8 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     return workspaceResult();
   },
   workspacePreviewLink: (url: string) => {
-    // 与 Rust 侧同一份严格规则：只接受 v=2 + file + repository，且 repository 必须是成员。
+    // 与 Rust 侧同一份规则：v/file/repository 各一次且版本至少为 2，未知参数忽略；
+    // repository 必须是成员。
     if (!url.startsWith("twiglane://workspace?") && !url.startsWith("twiglane://workspace/?")) {
       return Promise.reject({ code: "workspace", message: "项目清单链接格式无效" });
     }
@@ -658,11 +659,12 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     const params = new URLSearchParams(query);
     const file = params.get("file");
     const repository = params.get("repository");
-    if (params.get("v") !== "2" || !file || !file.endsWith(".dev-workspace.json") || !repository) {
-      return Promise.reject({ code: "workspace", message: "仅支持 v=2 项目清单链接，旧版项目链接请重新发起" });
+    const version = Number(params.get("v"));
+    if (!Number.isInteger(version) || version < 2 || !file || !file.endsWith(".dev-workspace.json") || !repository) {
+      return Promise.reject({ code: "workspace", message: "仅支持 v=2 及更新的项目清单链接，旧版项目链接请重新发起" });
     }
-    if ([...params.keys()].some((key) => !["v", "file", "repository"].includes(key)) || [...params.keys()].filter((key) => key === "repository").length !== 1) {
-      return Promise.reject({ code: "workspace", message: "项目清单链接含协议之外的参数" });
+    if (["v", "file", "repository"].some((key) => params.getAll(key).length > 1)) {
+      return Promise.reject({ code: "workspace", message: "项目清单链接含重复参数" });
     }
     const shared = projectData.projects.find((project) => project.manifest.workspaceId === "22222222-2222-4222-8222-222222222222") ?? projectData.projects[0];
     if (!shared) return Promise.reject({ code: "workspace", message: "项目清单里没有链接指定的仓库，未打开任何项目" });

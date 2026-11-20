@@ -17,7 +17,7 @@ export interface Project {
   bindings: Record<string, string>;
 }
 export interface Projects { hostId: string; projects: Project[] }
-/** 深链预览：`sourceRepositoryId` 只在 `twiglane://workspace?v=2` 里出现，普通文件预览为空。 */
+/** 深链预览：`sourceRepositoryId` 只在 `twiglane://workspace?v=2` 及更新的链接里出现，普通文件预览为空。 */
 export interface WorkspacePreview {
   manifest: WorkspaceManifest;
   path: string;
@@ -101,10 +101,11 @@ export function projectMemberForCheckout(
   path: string,
   heads: readonly import("./types").RepoHead[],
 ): WorkspaceRepository | null {
-  const direct = project.manifest.repositories.find((repo) => repo.locations.some((location) => location.hostId === hostId && checkoutKey(location.path) === checkoutKey(path)));
-  if (direct) return direct;
+  const key = checkoutKey(path);
+  const direct = project.manifest.repositories.find((repo) => repo.locations.some((location) => location.hostId === hostId && checkoutKey(location.path) === key));
+  if (direct || !heads.length) return direct ?? null;
   const byPath = new Map(heads.map((head) => [checkoutKey(head.path), head]));
-  const current = byPath.get(checkoutKey(path));
+  const current = byPath.get(key);
   if (!current || current.missing) return null;
   const main = checkoutKey(current.mainPath ?? current.path);
   return project.manifest.repositories.find((repo) => repo.locations.some((location) => {

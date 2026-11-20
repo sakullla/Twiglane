@@ -26,7 +26,7 @@ curl -s http://127.0.0.1:1430/__ui-preview/health
   - `?terminal=error` / `?terminal=exited` / `?terminal=write`：底部终端的启动失败、打开时已退出（可重新启动）与写入失败。默认 mock 只在内存里回显输入，输入 `exit` 回车后给出退出码 0；它不执行真实命令，也不代表桌面 PTY 行为；
   - `?recent=many`、`?recent=empty`、`?git=missing`、`?merge=conflict`、`?filter=truncated`、`?filter=error`、`?search=error` 等按异常状态展开。`?filter=error` 让树过滤的全仓补齐整体失败（说明里给「重试补齐」），`?search=error` 让全仓库文本搜索与文件内查找都失败（各自给出「重试搜索 / 重新读取目录」与「重试查找 / 重新读取文件」）。
 - `mock-files.ts` / `samples.ts`：目录、文档与差异样例。`README.md` 覆盖中文标题、同名重复标题、GFM 表格、只读任务列表、相对/缺失/外链、本地图片与远程图片占位。
-- `baseline-shots.mjs`：用 Chrome DevTools Protocol 驱动真实浏览器，按「起始页/改动/历史/任务/工作区总览/提交区/合并/设置」× 深色/浅色 × 1280×840/900×600 截图；Markdown 阅读样例另存为 `files-markdown`、`files-markdown-toc`，manifest 里 `group: "markdown"`，与对照图分开统计（新样例不能混进优化前后对照）；再用 `?remote=unchecked`、`?remote=stale`、`?commit=error`、`?commit=push`、`?doc=error`、`?doc=large`、`?search=error`、`?filter=error`、文件内查找失败、`?task=error` 与 `?history=hang` 截 11 个关键失败/未知状态（`group: "failure"`）。manifest 顶层写当前 workflow 标识（`2026-11-09-ai-coding-ui-ux`）与 `capturedAt`，runner 会核对这两项。失败态采哪几种「主题 × 尺寸」组合由 `--failure-targets` 决定（逗号分隔的 `<theme>:<size>`，默认 `dark:1280x840,light:1280x840,dark:900x600`；列四种即采全四组合），拼错的组合会打印可选值而不是安静跳过。产物命名是 `<theme>-<size>-<view>.png`，写到 `--out` 目录；`manifest.json` 默认写到 `--out` 的上一级（可用 `--manifest` 覆盖），`shots` 逐张记录 `theme/size/view/group/state/bytes/sha256`，收尾按 `group` 打印三类数量，与 `docs/verification/ui-ux-markdown-2026-11-08/manifest.json` 的结构一致。`--base` 换地址，`CHROME_PATH` 指定浏览器。
+- `baseline-shots.mjs` 驱动 Chrome 截取精选图集，包含起始页、改动、历史、任务净差异、工作区、提交、合并、设置、Markdown、项目与关键失败状态。覆盖深浅主题和 1280×840、900×600 两种窗口。加 `--full` 复跑原来的主题尺寸矩阵，或用 `--failure-targets dark:1280x840,light:900x600` 指定失败态组合。输出 `index.html` 与逐图记录尺寸和 SHA-256 的 `manifest.json`。
 - 任务、工作区总览与历史取消（T5 新增，全部只用于界面呈现）：
   - `?task=error`：起点校验失败——任务页就地说明「起点不是当前分支的祖先」，并给出重新读取与重选起点；
   - `?task=empty`：成功读取但任务为空（空任务只在完整读取成功后才出现）；
@@ -61,19 +61,18 @@ node node_modules/vite/bin/vite.js build --config scripts/ui-preview/vite.config
 ## 一键复跑（场景 + 截图）
 
 ```bash
-node scripts/run-ui-verification.mjs
+node scripts/run-ui-verification.mjs --shots-only
 ```
 
-它按顺序做四件事，任何一步失败都以非 0 退出并把原因写进 `report.json`。默认把场景、截图、manifest 与 report
+日常用 `--shots-only` 生成整套精选图集。去掉该参数同时运行场景自检。失败时以非 0 退出并把原因写进 `report.json`。默认把场景、截图、manifest 与 report
 全写到操作系统临时目录（终端会打印路径），只有显式 `--out` 才写调用者目录，正式验证不会改写候选输入：
 
 1. 确认 1430 空闲，否则直接报「端口被占用」而不是对着旧页面出证据；
 2. 用 `scripts/ui-preview/vite.config.mjs` 起 mock 预览，轮询 `/__ui-preview/health` 直到 `mockApi` 为 `true`；
 3. 跑 `check-scenarios.mjs`（场景自检，含键鼠闭环）；
-4. 跑 `baseline-shots.mjs`：两主题 × 1280×840/900×600 的起始页、改动、历史、任务、工作区总览、提交区与设置，
-   外加失败/未知状态（`group: "failure"`）与「历史多选换选择后恢复」的证据图。
+4. 跑 `baseline-shots.mjs` 并生成图集，检查逐张截图文件。默认生成 18 张，4 张项目图包含在总数中。
 
-可选参数：`--skip-shots` 只跑场景、`--only <场景名片段>` 只跑匹配的场景、`--base` 换地址、`--out <目录>` 归档证据（例如 `--out docs/verification/ai-coding-ui-ux-2026-11-09`）。runner 会核对场景与截图两个子进程的退出码、本次新写出的 `capturedAt`、manifest 的 workflow 标识与逐张截图文件；零场景、子失败或沿用旧 manifest 都判为 failed 并非 0 退出。
+可选参数：`--skip-shots` 只跑场景，`--full` 展开截图矩阵，`--only <场景名片段>` 只跑匹配的场景、`--base` 换地址、`--out <目录>` 归档证据（例如 `--out docs/verification/ai-coding-ui-ux-2026-11-09`）、`--workflow <id>`/`--task <id>` 覆盖 manifest 身份（跨 task 的交付图集用 `--task delivery`）。runner 会核对场景与截图两个子进程的退出码、本次新写出的 `capturedAt`、manifest 的 workflow 身份与逐张截图文件；零场景、子失败或沿用旧 manifest 都判为 failed 并非 0 退出。
 
 ### 采集不到时的写法
 
@@ -82,7 +81,7 @@ node scripts/run-ui-verification.mjs
 
 ## 多仓库项目场景
 
-`?projects=1` 提供 60 个持久成员、60 个发现候选、同名不同路径、长名称、收藏及外机位置；`?projects=missing` 保留来源失效的最后快照。与 recent30 独立。`--projects` 只跑本任务的项目场景与项目截图（深浅主题、1280/900），不会改原有完整 gallery。
+`?projects=1` 提供 60 个持久成员、60 个发现候选、同名不同路径、长名称、收藏及外机位置；`?projects=missing` 保留来源失效的最后快照。与 recent30 独立。`--projects` 运行项目交互检查，并精选 4 张图：1280 桌面的项目管理和项目外提示、900 窄窗口的候选选择和来源失效。深浅主题各两张。
 
 ```bash
 node scripts/run-ui-verification.mjs --projects --out docs/verification/multi-repository-project-workspaces-ui

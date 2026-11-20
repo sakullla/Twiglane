@@ -138,6 +138,13 @@ fn capabilities_grant_only_explicit_terminal_ipc_not_a_generic_shell() {
         "allow-set-branch-groups",
         "allow-set-files-view",
         "allow-set-change-requests-enabled",
+        // change-request 平台命令只接受仓库路径与用户输入；令牌不进普通设置，
+        // 没有 shell、文件系统或任意 HTTP 权限。
+        "allow-change-request-prepare",
+        "allow-change-request-create",
+        "allow-change-request-token-status",
+        "allow-change-request-set-token",
+        "allow-change-request-delete-token",
         "allow-set-panel-widths",
         "allow-save-draft",
         "allow-cancel-reads",

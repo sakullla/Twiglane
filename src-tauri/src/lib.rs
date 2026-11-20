@@ -1,4 +1,5 @@
 mod atomic;
+mod change_request;
 mod cliora;
 mod error;
 mod git;
@@ -219,6 +220,11 @@ pub fn run() {
             set_branch_groups,
             set_files_view,
             set_change_requests_enabled,
+            change_request_prepare,
+            change_request_create,
+            change_request_token_status,
+            change_request_set_token,
+            change_request_delete_token,
             set_panel_widths,
             save_draft,
             cancel_reads,
@@ -2201,6 +2207,103 @@ fn set_change_requests_enabled(
     ops::set_change_requests_enabled(state.inner(), change_requests_enabled)
 }
 
+/// 用 tauri-plugin-opener 打开已校验过的回退网页。打开失败由 change_request
+/// 映射成 browser_open，不显示创建或回退成功。
+struct OpenerHandle<R: Runtime>(AppHandle<R>);
+
+impl<R: Runtime> change_request::WebOpener for OpenerHandle<R> {
+    fn open(&self, url: &str) -> Result<(), AppError> {
+        use tauri_plugin_opener::OpenerExt;
+        self.0
+            .opener()
+            .open_url(url, None::<&str>)
+            .map_err(|_| AppError::new("browser_open", "无法打开系统浏览器。"))
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn change_request_prepare(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    remote: Option<String>,
+    generation: u64,
+    request_id: u64,
+) -> Result<change_request::ChangeRequestPrepare, AppError> {
+    change_request::prepare(state.inner(), &path, remote.as_deref(), generation, request_id).await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+async fn change_request_create<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    remote: Option<String>,
+    target_branch: String,
+    title: String,
+    body: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<change_request::ChangeRequestOutcome, AppError> {
+    let input = change_request::CreateInput {
+        path,
+        remote,
+        target_branch,
+        title,
+        body,
+    };
+    change_request::create(
+        state.inner(),
+        input,
+        generation,
+        request_id,
+        &OpenerHandle(app),
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn change_request_token_status(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    remote: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<change_request::ChangeRequestTokenStatus, AppError> {
+    change_request::token_status(state.inner(), &path, &remote, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn change_request_set_token(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    remote: String,
+    token: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<change_request::ChangeRequestTokenStatus, AppError> {
+    change_request::set_token(
+        state.inner(),
+        &path,
+        &remote,
+        &token,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn change_request_delete_token(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    remote: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<change_request::ChangeRequestTokenStatus, AppError> {
+    change_request::delete_token(state.inner(), &path, &remote, generation, request_id).await
+}
+
 #[tauri::command]
 fn set_panel_widths(
     state: State<'_, Arc<Backend>>,
@@ -3134,6 +3237,114 @@ two
                 .unwrap()["changeRequestsEnabled"],
             true
         );
+        backend.watches.stop();
+    }
+
+    #[test]
+    fn change_request_commands_are_gated_and_use_camel_case_arguments() {
+        let fixture = crate::test_support::git_fixture("ipc-change-request-commands");
+        let backend = Arc::new(fixture.backend());
+        let app = tauri::test::mock_builder()
+            .manage(Arc::clone(&backend))
+            .invoke_handler(tauri::generate_handler![
+                super::change_request_prepare,
+                super::change_request_create,
+                super::change_request_token_status,
+                super::change_request_set_token,
+                super::change_request_delete_token,
+                super::set_change_requests_enabled
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let path = repo_key(fixture.path());
+
+        // snake_case 参数被拒绝，前端必须传 camelCase。
+        for (cmd, body) in [
+            (
+                "change_request_prepare",
+                serde_json::json!({ "path": path, "remote": null, "generation": 0, "request_id": 1 }),
+            ),
+            (
+                "change_request_create",
+                serde_json::json!({
+                    "path": path,
+                    "remote": "origin",
+                    "targetBranch": "main",
+                    "title": "t",
+                    "body": "",
+                    "generation": 0,
+                    "request_id": 1
+                }),
+            ),
+            (
+                "change_request_token_status",
+                serde_json::json!({ "path": path, "remote": "origin", "generation": 0, "request_id": 1 }),
+            ),
+            (
+                "change_request_set_token",
+                serde_json::json!({ "path": path, "remote": "origin", "token": "t", "generation": 0, "request_id": 1 }),
+            ),
+            (
+                "change_request_delete_token",
+                serde_json::json!({ "path": path, "remote": "origin", "generation": 0, "request_id": 1 }),
+            ),
+        ] {
+            let error = invoke(&window, cmd, body).expect_err(cmd);
+            assert!(error.contains("requestId"), "{cmd}: {error}");
+        }
+
+        // 关闭时全部拒绝：不读钥匙串、不探测远程、不发平台请求。
+        for (cmd, body) in [
+            (
+                "change_request_prepare",
+                serde_json::json!({ "path": path, "remote": null, "generation": 0, "requestId": 1 }),
+            ),
+            (
+                "change_request_create",
+                serde_json::json!({
+                    "path": path,
+                    "remote": "origin",
+                    "targetBranch": "main",
+                    "title": "标题",
+                    "body": "",
+                    "generation": 0,
+                    "requestId": 1
+                }),
+            ),
+            (
+                "change_request_token_status",
+                serde_json::json!({ "path": path, "remote": "origin", "generation": 0, "requestId": 1 }),
+            ),
+            (
+                "change_request_set_token",
+                serde_json::json!({ "path": path, "remote": "origin", "token": "token-value-1234", "generation": 0, "requestId": 1 }),
+            ),
+            (
+                "change_request_delete_token",
+                serde_json::json!({ "path": path, "remote": "origin", "generation": 0, "requestId": 1 }),
+            ),
+        ] {
+            let error = invoke(&window, cmd, body).expect_err(cmd);
+            assert!(error.contains("已关闭"), "{cmd}: {error}");
+        }
+
+        // 启用后应用参数进入实际解析：这里刻意用一个不是仓库的目录。
+        invoke(
+            &window,
+            "set_change_requests_enabled",
+            serde_json::json!({ "changeRequestsEnabled": true }),
+        )
+        .expect("enable");
+        let error = invoke(
+            &window,
+            "change_request_prepare",
+            serde_json::json!({ "path": path, "remote": null, "generation": 0, "requestId": 2 }),
+        )
+        .expect_err("prepare on non-repository");
+        assert!(error.contains("不是 Git 仓库"), "{error}");
         backend.watches.stop();
     }
 }

@@ -10,6 +10,10 @@ use crate::error::AppError;
 /// 钥匙串服务名。固定命名空间，不与 Git 凭据助手或其它应用混用。
 pub const KEYRING_SERVICE: &str = "twiglane.change-request";
 
+/// 远程 SSH 密码的独立命名空间。SSH 密码不复用 MR/PR 令牌条目，
+/// 因此删除令牌不会断开已保存的 SSH 主机，反之亦然。
+pub const REMOTE_SSH_SERVICE: &str = "twiglane.remote-ssh";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialFailure {
     /// store 初始化、解锁或读写失败。调用方据此提示，不转而打开网页。
@@ -34,28 +38,41 @@ pub trait CredentialStore: Send + Sync {
 }
 
 /// keyring v1 的系统钥匙串实现。条目不存在时返回 Ok(None)，
-/// 只有真正的 store 失败才返回 Unavailable。
-pub struct KeyringStore;
+/// 只有真正的 store 失败才返回 Unavailable。`service` 固定为编译期常量，
+/// 调用方不能把任意命名空间传进来。
+pub struct KeyringStore {
+    service: &'static str,
+}
 
 impl KeyringStore {
+    /// MR / PR 令牌条目。
     pub fn new() -> Self {
-        Self
+        Self {
+            service: KEYRING_SERVICE,
+        }
     }
 
-    fn entry(key: &str) -> Result<keyring::Entry, CredentialFailure> {
-        keyring::Entry::new(KEYRING_SERVICE, key).map_err(|_| CredentialFailure::Unavailable)
+    /// 远程 SSH 密码条目，与令牌命名空间互不可见。
+    pub fn remote_ssh() -> Self {
+        Self {
+            service: REMOTE_SSH_SERVICE,
+        }
+    }
+
+    fn entry(&self, key: &str) -> Result<keyring::Entry, CredentialFailure> {
+        keyring::Entry::new(self.service, key).map_err(|_| CredentialFailure::Unavailable)
     }
 }
 
 impl Default for KeyringStore {
     fn default() -> Self {
-        Self
+        Self::new()
     }
 }
 
 impl CredentialStore for KeyringStore {
     fn load(&self, key: &str) -> Result<Option<String>, CredentialFailure> {
-        let entry = Self::entry(key)?;
+        let entry = self.entry(key)?;
         match entry.get_password() {
             Ok(secret) => Ok(Some(secret)),
             Err(keyring::Error::NoEntry) => Ok(None),
@@ -64,18 +81,34 @@ impl CredentialStore for KeyringStore {
     }
 
     fn save(&self, key: &str, secret: &str) -> Result<(), CredentialFailure> {
-        Self::entry(key)?
+        self.entry(key)?
             .set_password(secret)
             .map_err(|_| CredentialFailure::Unavailable)
     }
 
     fn delete(&self, key: &str) -> Result<(), CredentialFailure> {
-        let entry = Self::entry(key)?;
+        let entry = self.entry(key)?;
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(_) => Err(CredentialFailure::Unavailable),
         }
     }
+}
+
+/// SSH 密码在进入钥匙串前的形态校验：只拒绝空值、控制字符与超长输入。
+/// 不做 trim，也不校验字符集——密码就是用户输入的原样字节。
+pub(crate) fn validate_ssh_password(password: &str) -> Result<(), AppError> {
+    if password.is_empty()
+        || password.len() > 4096
+        || password.contains('\0')
+        || password.chars().any(|value| value.is_control() && value != '\t')
+    {
+        return Err(AppError::new(
+            "ssh_password_invalid",
+            "SSH 密码不能为空、不能包含控制字符，且长度不超过 4096。未保存任何内容。",
+        ));
+    }
+    Ok(())
 }
 
 /// 用户输入的令牌在进入钥匙串前的形态校验。不做 trim，避免悄悄改动令牌；

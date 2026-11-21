@@ -44,6 +44,12 @@ import type {
   RemoteState,
   RemoteTag,
   SettingsDto,
+  RemoteSshSettings,
+  SshInstallOutcome,
+  SshInstallProgress,
+  SshProbe,
+  SshTarget,
+  SshTargetInput,
   AbortImpact,
   ConflictView,
   DiscardResult,
@@ -868,6 +874,45 @@ export const api = {
   setFilesView: (filesView: boolean) => invoke<void>("set_files_view", { filesView }),
   setChangeRequestsEnabled: (changeRequestsEnabled: boolean) =>
     invoke<void>("set_change_requests_enabled", { changeRequestsEnabled }),
+  /**
+   * 远程 SSH 设置：只读主机簿与总开关。主机记录不含密码，每台只带 hasPassword。
+   * 总开关缺省关闭；关闭时任何连接操作都在原生边界被拒。
+   */
+  remoteSshSettings: () => invoke<RemoteSshSettings>("remote_ssh_settings"),
+  /** 只写开关：不删除主机、不删除密码、不等同于断开活动会话。 */
+  setRemoteSshEnabled: (enabled: boolean) => invoke<void>("set_remote_ssh_enabled", { enabled }),
+  /** 新建或更新一条主机记录；revision 由存储按连接身份变化推进。 */
+  saveRemoteSshTarget: (target: SshTargetInput) =>
+    invoke<SshTarget>("remote_ssh_save_target", { target }),
+  /** 删除主机记录，并清理该主机在 twiglane.remote-ssh 命名空间里的密码。 */
+  deleteRemoteSshTarget: (targetId: string) =>
+    invoke<void>("remote_ssh_delete_target", { targetId }),
+  /** 密码只经这个参数进入原生并立即写入系统钥匙串，不落 state.json。 */
+  setRemoteSshPassword: (targetId: string, password: string) =>
+    invoke<void>("remote_ssh_set_password", { targetId, password }),
+  deleteRemoteSshPassword: (targetId: string) =>
+    invoke<void>("remote_ssh_delete_password", { targetId }),
+  /** 可取消的连接测试：只读探测，不创建目录、不写远端文件。 */
+  testRemoteSsh: (requestId: string, targetId: string) =>
+    invoke<SshProbe>("remote_ssh_test", { requestId, targetId }),
+  cancelRemoteSsh: (requestId: string) => invoke<void>("remote_ssh_cancel", { requestId }),
+  /**
+   * 安装远端组件：不带 confirmationId 只返回待确认信息（size/version/sha256），
+   * 传输必须由用户显式确认后进行。
+   */
+  installRemoteSshAgent: async (
+    request: {
+      requestId: string;
+      targetId: string;
+      peerRevision: string;
+      confirmationId?: string;
+    },
+    progress: (value: SshInstallProgress) => void,
+  ) => {
+    const { Channel, invoke: call } = await import("@tauri-apps/api/core");
+    const onProgress = new Channel<SshInstallProgress>(progress);
+    return call<SshInstallOutcome>("remote_ssh_install_agent", { request, onProgress });
+  },
   /**
    * 「创建 MR / PR」的只读准备：远程解析、平台发现与来源分支都由原生从当前仓库重新推导，
    * 前端不传 owner/repo/API base。remote 为空时按上游或唯一远程推断，多远程返回候选。

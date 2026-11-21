@@ -13,6 +13,9 @@ use crate::redact::reject_secret_draft;
 
 const STATE_VERSION: u32 = 2;
 
+/// 主机簿上限：设置界面不适合无限增长，也限制一次同步的作用范围。
+pub const MAX_SSH_TARGETS: usize = 64;
+
 /// 分叉拉取预选的方式。旧设置文件没有这一项时读成合并。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -29,6 +32,14 @@ fn default_branch_groups() -> bool {
 /// 「创建 MR / PR」开关的缺省值。新安装、旧设置文件缺字段都读成关闭。
 fn default_change_requests() -> bool {
     false
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+
+fn default_auth_method() -> String {
+    "key".to_string()
 }
 
 /// 终端字号的允许范围与缺省值；前端缩放与设置都夹在这个范围里。
@@ -72,6 +83,60 @@ impl TerminalPrefs {
     }
 }
 
+/// Twiglane 自己的 SSH 主机记录（R3）。只保存非秘密配置：
+/// 密码在 `twiglane.remote-ssh` 系统钥匙串，`state.json` 里不出现秘密字段。
+/// `revision` 是单调配置修订，只有连接身份字段变化才推进；仅改显示名不推进。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SshTarget {
+    pub id: String,
+    pub display_name: String,
+    pub host: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    pub user: String,
+    #[serde(default = "default_auth_method")]
+    pub auth_method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_config: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_path: Option<String>,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_host_id: Option<String>,
+    #[serde(default)]
+    pub revision: u64,
+}
+
+impl SshTarget {
+    /// 连接身份：这些字段决定连到哪台主机、用哪种认证。显示名与默认目录不在这里。
+    fn identity(&self) -> (&str, u16, &str, &str, &Option<String>, &Option<String>, bool) {
+        (
+            &self.host,
+            self.port,
+            &self.user,
+            &self.auth_method,
+            &self.identity_file,
+            &self.ssh_config,
+            self.enabled,
+        )
+    }
+}
+
+/// 远程 SSH 总开关与主机簿。缺省关闭：没有字段的旧设置文件读成关闭，
+/// 关闭时任何连接路径都不得新建 SSH 连接。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSsh {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub targets: Vec<SshTarget>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Persisted {
@@ -96,6 +161,9 @@ pub struct Persisted {
     pub drafts: BTreeMap<String, String>,
     #[serde(default)]
     pub workspaces: Vec<crate::workspaces::Project>,
+    /// 远程 SSH 设置：只存非秘密配置，缺省关闭。
+    #[serde(default)]
+    pub remote_ssh: RemoteSsh,
 }
 
 impl Default for Persisted {
@@ -113,8 +181,84 @@ impl Default for Persisted {
             recent: Vec::new(),
             drafts: BTreeMap::new(),
             workspaces: Vec::new(),
+            remote_ssh: RemoteSsh::default(),
         }
     }
+}
+
+/// 主机记录的文本字段：去掉首尾空白后必须非空、无控制字符、长度有限，
+/// 且不能以 `-` 开头（避免被 OpenSSH 当成选项）。
+fn ssh_text(value: &str, max: usize) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > max
+        || trimmed.chars().any(char::is_control)
+        || trimmed.starts_with('-')
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn ssh_host(value: &str) -> Option<String> {
+    let host = ssh_text(value, 255)?;
+    if host
+        .chars()
+        .any(|part| part.is_whitespace() || matches!(part, '@' | '/'))
+    {
+        return None;
+    }
+    Some(host)
+}
+
+fn ssh_path(value: Option<String>) -> Option<Option<String>> {
+    match value.map(|path| path.trim().to_string()) {
+        None => Some(None),
+        Some(path) if path.is_empty() => Some(None),
+        Some(path)
+            if path.len() <= 4096
+                && std::path::Path::new(&path).is_absolute()
+                && !path.contains('\0')
+                && !path.chars().any(char::is_control) =>
+        {
+            Some(Some(path))
+        }
+        Some(_) => None,
+    }
+}
+
+fn invalid_target() -> AppError {
+    AppError::new(
+        "ssh_target_invalid",
+        "主机记录无效：请填写主机、用户名与 1-65535 之间的端口，认证方式只能是密钥、密码或 ssh-agent，路径必须是绝对路径。未保存任何内容。",
+    )
+}
+
+/// 规范化并校验用户输入的主机记录。秘密字段不在这里，也不接受。
+pub fn validate_ssh_target(mut target: SshTarget) -> Result<SshTarget, AppError> {
+    if target.id.trim().is_empty() || target.id.len() > 64 || target.id.chars().any(char::is_control)
+    {
+        return Err(invalid_target());
+    }
+    target.id = target.id.trim().to_string();
+    target.display_name = ssh_text(&target.display_name, 64).ok_or_else(invalid_target)?;
+    target.host = ssh_host(&target.host).ok_or_else(invalid_target)?;
+    target.user = ssh_host(&target.user).ok_or_else(invalid_target)?;
+    if target.port == 0 {
+        return Err(invalid_target());
+    }
+    target.auth_method = target.auth_method.trim().to_ascii_lowercase();
+    if !matches!(target.auth_method.as_str(), "key" | "password" | "agent") {
+        return Err(invalid_target());
+    }
+    target.identity_file = ssh_path(target.identity_file).ok_or_else(invalid_target)?;
+    target.ssh_config = ssh_path(target.ssh_config).ok_or_else(invalid_target)?;
+    target.default_path = ssh_path(target.default_path).ok_or_else(invalid_target)?;
+    // 密钥认证可以不指定文件（由 ssh-agent 或默认身份文件提供）；给了就必须是绝对路径。
+    if let Some(id) = &target.shared_host_id {
+        target.shared_host_id = Some(ssh_text(id, 128).ok_or_else(invalid_target)?);
+    }
+    Ok(target)
 }
 
 #[derive(Debug)]
@@ -212,6 +356,87 @@ impl AppStore {
             data.change_requests_enabled = enabled;
             Ok(())
         })
+    }
+
+    /// 远程 SSH 总开关。关闭只阻止新建连接，不删除主机、密码或活动会话。
+    pub fn remote_ssh_enabled(&self) -> bool {
+        self.lock().data.remote_ssh.enabled
+    }
+
+    pub fn set_remote_ssh_enabled(&self, enabled: bool) -> Result<(), AppError> {
+        self.update(|data| {
+            data.remote_ssh.enabled = enabled;
+            Ok(())
+        })
+    }
+
+    pub fn remote_ssh_targets(&self) -> Vec<SshTarget> {
+        self.lock().data.remote_ssh.targets.clone()
+    }
+
+    pub fn remote_ssh_target(&self, id: &str) -> Option<SshTarget> {
+        self.lock()
+            .data
+            .remote_ssh
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .cloned()
+    }
+
+    /// 新建或更新一条主机记录。只有连接身份字段变化才推进 `revision`；
+    /// 仅改显示名或默认目录时保持原修订，因此不算连接身份变化。
+    pub fn save_remote_ssh_target(&self, target: SshTarget) -> Result<SshTarget, AppError> {
+        let target = validate_ssh_target(target)?;
+        let mut saved = target.clone();
+        self.update(|data| {
+            let existing = data
+                .remote_ssh
+                .targets
+                .iter()
+                .position(|item| item.id == target.id);
+            match existing {
+                Some(index) => {
+                    let previous = &data.remote_ssh.targets[index];
+                    let revision = if previous.identity() == target.identity() {
+                        previous.revision.max(1)
+                    } else {
+                        previous.revision.max(1) + 1
+                    };
+                    let shared = target
+                        .shared_host_id
+                        .clone()
+                        .or_else(|| previous.shared_host_id.clone());
+                    saved.revision = revision;
+                    saved.shared_host_id = shared;
+                    data.remote_ssh.targets[index] = saved.clone();
+                }
+                None => {
+                    if data.remote_ssh.targets.len() >= MAX_SSH_TARGETS {
+                        return Err(AppError::new(
+                            "ssh_target_limit",
+                            "主机簿已满，请先删除不再使用的主机。",
+                        ));
+                    }
+                    saved.revision = 1;
+                    data.remote_ssh.targets.push(saved.clone());
+                }
+            }
+            Ok(())
+        })?;
+        Ok(saved)
+    }
+
+    /// 删除一条主机记录；返回是否真的删掉了。密码条目由调用方按同一 id 显式清理。
+    pub fn delete_remote_ssh_target(&self, id: &str) -> Result<bool, AppError> {
+        let mut removed = false;
+        self.update(|data| {
+            let before = data.remote_ssh.targets.len();
+            data.remote_ssh.targets.retain(|target| target.id != id);
+            removed = data.remote_ssh.targets.len() != before;
+            Ok(())
+        })?;
+        Ok(removed)
     }
 
     pub fn set_terminal_prefs(&self, prefs: TerminalPrefs) -> Result<TerminalPrefs, AppError> {
@@ -658,6 +883,146 @@ mod tests {
         let store = AppStore::open(path.clone());
         assert!(store.set_theme(Theme::Light).is_err());
         assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+
+    fn ssh_target(id: &str) -> SshTarget {
+        SshTarget {
+            id: id.into(),
+            display_name: "构建机".into(),
+            host: "build.example.com".into(),
+            port: 22,
+            user: "deploy".into(),
+            auth_method: "key".into(),
+            identity_file: Some("/home/deploy/.ssh/id_ed25519".into()),
+            ssh_config: None,
+            default_path: Some("/srv/app".into()),
+            enabled: true,
+            shared_host_id: None,
+            revision: 0,
+        }
+    }
+
+    #[test]
+    fn remote_ssh_defaults_off_for_new_and_old_state() {
+        let dir = crate::test_support::TempDir::new("state-ssh-default");
+        let path = dir.path().join("state.json");
+        let fresh = store_in(dir.path());
+        assert!(!fresh.remote_ssh_enabled(), "缺省必须关闭");
+        assert!(fresh.remote_ssh_targets().is_empty());
+        assert!(fresh.settings_warning().is_none());
+
+        // 旧 v2 文件缺少整个字段：仍然关闭，且不是损坏文件。
+        let mut old = serde_json::to_value(Persisted::default()).unwrap();
+        old.as_object_mut().unwrap().remove("remoteSsh");
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let loaded = AppStore::open(path.clone());
+        assert!(loaded.settings_warning().is_none());
+        assert!(!loaded.remote_ssh_enabled());
+
+        // 写入一次别的设置后，磁盘上出现显式的关闭值。
+        loaded.set_theme(Theme::Light).unwrap();
+        let written: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["remoteSsh"]["enabled"], false);
+        assert_eq!(written["remoteSsh"]["targets"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn remote_ssh_targets_persist_without_any_secret_field() {
+        let dir = crate::test_support::TempDir::new("state-ssh-persist");
+        let store = store_in(dir.path());
+        store.set_remote_ssh_enabled(true).unwrap();
+        let saved = store.save_remote_ssh_target(ssh_target("host-a")).unwrap();
+        assert_eq!(saved.revision, 1);
+
+        let restarted = store_in(dir.path());
+        assert!(restarted.remote_ssh_enabled());
+        let targets = restarted.remote_ssh_targets();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].host, "build.example.com");
+        assert_eq!(targets[0].auth_method, "key");
+
+        // state.json 只含非秘密配置：没有密码、令牌或口令字段。
+        let raw = fs::read_to_string(store.path()).unwrap();
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        for key in object_keys(&value) {
+            let lower = key.to_ascii_lowercase();
+            assert!(
+                !lower.contains("password")
+                    && !lower.contains("passphrase")
+                    && !lower.contains("secret")
+                    && !lower.contains("token"),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn renaming_keeps_revision_but_connection_changes_advance_it() {
+        let dir = crate::test_support::TempDir::new("state-ssh-revision");
+        let store = store_in(dir.path());
+        let first = store.save_remote_ssh_target(ssh_target("host-a")).unwrap();
+        assert_eq!(first.revision, 1);
+
+        // 仅显示名与默认目录变化：连接身份不变，修订不动。
+        let mut renamed = first.clone();
+        renamed.display_name = "构建机（改名）".into();
+        renamed.default_path = Some("/srv/app2".into());
+        let renamed = store.save_remote_ssh_target(renamed).unwrap();
+        assert_eq!(renamed.revision, 1);
+        assert_eq!(renamed.display_name, "构建机（改名）");
+
+        // 主机变化：必须推进修订，要求重新确认。
+        let mut moved = renamed.clone();
+        moved.host = "other.example.com".into();
+        let moved = store.save_remote_ssh_target(moved).unwrap();
+        assert_eq!(moved.revision, 2);
+
+        // 认证方式变化同样推进。
+        let mut password = moved.clone();
+        password.auth_method = "password".into();
+        password.identity_file = None;
+        let password = store.save_remote_ssh_target(password).unwrap();
+        assert_eq!(password.revision, 3);
+        assert_eq!(store.remote_ssh_targets().len(), 1, "更新不是新增");
+    }
+
+    #[test]
+    fn invalid_ssh_targets_are_rejected_without_writing() {
+        let dir = crate::test_support::TempDir::new("state-ssh-invalid");
+        let store = store_in(dir.path());
+        let cases: [fn(&mut SshTarget); 5] = [
+            |target| target.host = "  ".into(),
+            |target| target.user = "-oProxyCommand=evil".into(),
+            |target| target.port = 0,
+            |target| target.auth_method = "telnet".into(),
+            |target| target.identity_file = Some("relative/key".into()),
+        ];
+        for mutate in cases {
+            let mut target = ssh_target("host-a");
+            mutate(&mut target);
+            let error = store.save_remote_ssh_target(target).unwrap_err();
+            assert_eq!(error.code, "ssh_target_invalid");
+            assert!(store.remote_ssh_targets().is_empty());
+        }
+        assert!(!store.path().exists(), "失败不得留下设置文件");
+    }
+
+    #[test]
+    fn deleting_a_target_keeps_other_hosts_and_the_switch() {
+        let dir = crate::test_support::TempDir::new("state-ssh-delete");
+        let store = store_in(dir.path());
+        store.set_remote_ssh_enabled(true).unwrap();
+        store.save_remote_ssh_target(ssh_target("host-a")).unwrap();
+        store.save_remote_ssh_target(ssh_target("host-b")).unwrap();
+        assert!(store.delete_remote_ssh_target("host-a").unwrap());
+        assert!(!store.delete_remote_ssh_target("host-a").unwrap());
+        let targets = store.remote_ssh_targets();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, "host-b");
+        assert!(store.remote_ssh_enabled(), "删除主机不改总开关");
+        // 关闭总开关也不删除主机记录。
+        store.set_remote_ssh_enabled(false).unwrap();
+        assert_eq!(store.remote_ssh_targets().len(), 1);
     }
 
     fn object_keys(value: &Value) -> Vec<String> {

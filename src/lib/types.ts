@@ -555,6 +555,85 @@ export interface PanelWidths {
   files: number;
 }
 
+/**
+ * 远程 SSH 主机记录（R3）。只含非秘密配置：密码在系统钥匙串，
+ * 列表接口只回布尔 hasPassword，因此这里没有、也不该出现秘密字段。
+ */
+export interface SshTarget {
+  id: string;
+  displayName: string;
+  host: string;
+  port: number;
+  user: string;
+  /** key | password | agent。密钥与 agent 认证不使用 askpass。 */
+  authMethod: string;
+  identityFile: string | null;
+  sshConfig: string | null;
+  defaultPath: string | null;
+  enabled: boolean;
+  sharedHostId: string | null;
+  /** 单调配置修订：只有连接身份字段变化才推进，显示名变化不推进。 */
+  revision: number;
+  /** 只表示钥匙串里有没有密码，永远不含密码本身。 */
+  hasPassword?: boolean;
+}
+
+/** 保存主机时提交的字段；revision 由存储推进，前端不提供。 */
+export interface SshTargetInput {
+  id: string;
+  displayName: string;
+  host: string;
+  port: number;
+  user: string;
+  authMethod: string;
+  identityFile: string | null;
+  sshConfig: string | null;
+  defaultPath: string | null;
+  enabled: boolean;
+  sharedHostId?: string | null;
+}
+
+export interface RemoteSshSettings {
+  /** 缺省关闭：关闭时不新建任何 SSH 连接。 */
+  enabled: boolean;
+  targets: SshTarget[];
+}
+
+/** 连接测试结果：契约里的对端修订与身份都来自本次真实握手。 */
+export interface SshProbe {
+  targetId: string;
+  displayName: string;
+  effectiveHost: string;
+  configRevision: string;
+  peerRevision: string;
+  peerIdentity: string;
+  system: string;
+  architecture: string;
+  git: string | null;
+  agentInstalled: boolean;
+  agentVersion: string | null;
+  agentDigest: string | null;
+  agentCompatible: boolean;
+  hops: string[];
+}
+
+export interface SshInstallProgress {
+  phase: string;
+  sentBytes: number;
+  totalBytes: number;
+}
+
+/** 安装结果：install_required 只是待确认信息，不传输任何字节。 */
+export interface SshInstallOutcome {
+  kind: "install_required" | "installed" | "reused" | string;
+  confirmationId?: string;
+  version?: string | null;
+  size?: number;
+  sha256?: string | null;
+  system?: string;
+  architecture?: string;
+}
+
 export interface SettingsDto {
   theme: Theme;
   panelWidths: PanelWidths;

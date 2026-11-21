@@ -6,6 +6,7 @@ mod git;
 mod measure;
 mod model;
 mod redact;
+mod remote_ssh;
 mod remote_worktree;
 pub mod remote_worktree_transport;
 mod shutdown;
@@ -92,6 +93,9 @@ pub fn run() {
             ));
             app.manage(backend);
             app.manage(Arc::new(remote_worktree::RemoteWorktrees::new(dir.join("remote-worktrees"))));
+            // Twiglane 自有 SSH 主机簿：产物目录随发行包，测试/开发可用环境变量指定。
+            let agent_artifacts = remote_ssh::RemoteSsh::artifacts_for(app.handle(), &dir);
+            app.manage(Arc::new(remote_ssh::RemoteSsh::new(agent_artifacts)));
             // 终端独立于 Git 调度器与当前仓库监听：按仓库保存在应用内存中。
             app.manage(TerminalManager::new(Arc::new(terminal::AppEvents::new(
                 app.handle().clone(),
@@ -119,6 +123,15 @@ pub fn run() {
             remote_worktree::remote_worktree_diff,
             remote_worktree::remote_worktree_write,
             remote_worktree::remote_worktree_recover,
+            remote_ssh::remote_ssh_settings,
+            remote_ssh::set_remote_ssh_enabled,
+            remote_ssh::remote_ssh_save_target,
+            remote_ssh::remote_ssh_delete_target,
+            remote_ssh::remote_ssh_set_password,
+            remote_ssh::remote_ssh_delete_password,
+            remote_ssh::remote_ssh_test,
+            remote_ssh::remote_ssh_cancel,
+            remote_ssh::remote_ssh_install_agent,
             detect_git,
             set_git_executable,
             clear_git_executable,

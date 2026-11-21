@@ -2,8 +2,18 @@
   import { onMount, untrack } from "svelte";
   import { BUSY_REASON } from "../ui";
   import { dependencyNote } from "../labels";
-  import { appVersion } from "../api";
-  import type { GitInfo, PullIntegration, TerminalPrefs, TerminalProfile, Theme } from "../types";
+  import { api, appVersion, pickDirectory, pickFile } from "../api";
+  import type {
+    GitInfo,
+    PullIntegration,
+    RemoteSshSettings,
+    SshProbe,
+    SshTarget,
+    SshTargetInput,
+    TerminalPrefs,
+    TerminalProfile,
+    Theme,
+  } from "../types";
   import { TERMINAL_FONT_DEFAULT, TERMINAL_FONT_MAX, TERMINAL_FONT_MIN, clampFontSize } from "../terminal";
   import { LANGUAGE_OPTIONS } from "../syntax/languages";
   import { setSyntaxEnabled, syntaxPrefs } from "../syntax/prefs.svelte";
@@ -257,6 +267,325 @@
     return { tone: "save", label: `新版本 ${updateOffer.version}` };
   });
   const updateMb = (bytes: number) => `${(bytes / 1048576).toFixed(1)}`;
+
+  /* ---- 远程 SSH 主机簿（R3） --------------------------------------------
+     这一节自己读取并写回主机簿，外壳的设置接口不变：主机记录不是外壳状态。
+     三条不变量在这里可见：总开关缺省关闭、密码只有布尔状态、失败保留草稿。 */
+
+  type SshDraft = SshTargetInput;
+
+  let ssh = $state<RemoteSshSettings>({ enabled: false, targets: [] });
+  let sshLoaded = $state(false);
+  let sshMessage = $state<{ tone: "error" | "info"; text: string } | null>(null);
+  let sshSaving = $state(false);
+  let sshDraft = $state<SshDraft | null>(null);
+  let sshDraftPassword = $state("");
+  let sshTest = $state<{
+    requestId: string;
+    targetId: string;
+    status: "running" | "ok" | "failed";
+    text: string;
+    probe?: SshProbe;
+  } | null>(null);
+  let sshInstall = $state<{
+    targetId: string;
+    peerRevision: string;
+    version: string;
+    size: number;
+    confirmationId: string;
+    progress: number | null;
+  } | null>(null);
+
+  function sshErrorText(error: unknown): string {
+    const value = error as { message?: string } | null;
+    if (value && typeof value.message === "string" && value.message.length > 0) return value.message;
+    return "操作未完成，请检查后重试。";
+  }
+
+  function sshDraftId(): string {
+    const source = typeof crypto !== "undefined" ? crypto : undefined;
+    if (source && "randomUUID" in source) return source.randomUUID();
+    return `draft-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  function replaceTarget(targets: SshTarget[], saved: SshTarget): SshTarget[] {
+    const next = targets.filter((item) => item.id !== saved.id);
+    next.push(saved);
+    return next;
+  }
+
+  async function loadSsh() {
+    // 浏览器预览与未接这一节的宿主没有原生命令：保持关闭，不把读取失败当成已启用。
+    if (typeof api.remoteSshSettings !== "function") {
+      sshLoaded = true;
+      return;
+    }
+    try {
+      const loaded = await api.remoteSshSettings();
+      // 只接受形状正确的响应：老宿主或缺这一节的 mock 返回 undefined，
+      // 不能把它当成"已启用"，也不能让界面读一个 undefined。
+      if (loaded && typeof loaded === "object" && Array.isArray(loaded.targets)) {
+        ssh = { enabled: loaded.enabled === true, targets: loaded.targets };
+      }
+    } catch (error) {
+      sshMessage = { tone: "error", text: sshErrorText(error) };
+    } finally {
+      sshLoaded = true;
+    }
+  }
+
+  void loadSsh();
+
+  async function toggleSsh(enabled: boolean) {
+    sshMessage = null;
+    try {
+      await api.setRemoteSshEnabled(enabled);
+      // 写回成功后才改变显示：失败时界面仍读作原来的关闭状态。
+      ssh = { ...ssh, enabled };
+    } catch (error) {
+      sshMessage = { tone: "error", text: sshErrorText(error) };
+    }
+  }
+
+  function beginCreate() {
+    sshMessage = null;
+    sshDraftPassword = "";
+    sshDraft = {
+      id: sshDraftId(),
+      displayName: "",
+      host: "",
+      port: 22,
+      user: "",
+      authMethod: "key",
+      identityFile: null,
+      sshConfig: null,
+      defaultPath: null,
+      enabled: true,
+      sharedHostId: null,
+    };
+  }
+
+  function beginEdit(target: SshTarget) {
+    sshMessage = null;
+    sshDraftPassword = "";
+    sshDraft = {
+      id: target.id,
+      displayName: target.displayName,
+      host: target.host,
+      port: target.port,
+      user: target.user,
+      authMethod: target.authMethod,
+      identityFile: target.identityFile,
+      sshConfig: target.sshConfig,
+      defaultPath: target.defaultPath,
+      enabled: target.enabled,
+      sharedHostId: target.sharedHostId,
+    };
+  }
+
+  function editDraft(patch: Partial<SshDraft>) {
+    if (!sshDraft) return;
+    sshDraft = { ...sshDraft, ...patch };
+  }
+
+  async function saveDraft() {
+    if (!sshDraft || sshSaving) return;
+    const draft = sshDraft;
+    sshSaving = true;
+    sshMessage = null;
+    try {
+      const saved = await api.saveRemoteSshTarget({ ...draft });
+      let next = replaceTarget(ssh.targets, saved);
+      // 密码只在用户填了内容时写入钥匙串；留空表示不改动已保存的密码。
+      if (draft.authMethod === "password" && sshDraftPassword.length > 0) {
+        await api.setRemoteSshPassword(saved.id, sshDraftPassword);
+        next = replaceTarget(next, { ...saved, hasPassword: true });
+      }
+      ssh = { ...ssh, targets: next };
+      sshDraft = null;
+      sshDraftPassword = "";
+    } catch (error) {
+      // 失败保留草稿：已填的字段还在，用户不必重填。
+      sshMessage = { tone: "error", text: sshErrorText(error) };
+    } finally {
+      sshSaving = false;
+    }
+  }
+
+  async function toggleTarget(target: SshTarget) {
+    sshMessage = null;
+    try {
+      const saved = await api.saveRemoteSshTarget({
+        id: target.id,
+        displayName: target.displayName,
+        host: target.host,
+        port: target.port,
+        user: target.user,
+        authMethod: target.authMethod,
+        identityFile: target.identityFile,
+        sshConfig: target.sshConfig,
+        defaultPath: target.defaultPath,
+        enabled: !target.enabled,
+        sharedHostId: target.sharedHostId,
+      });
+      ssh = { ...ssh, targets: replaceTarget(ssh.targets, { ...saved, hasPassword: target.hasPassword }) };
+    } catch (error) {
+      sshMessage = { tone: "error", text: sshErrorText(error) };
+    }
+  }
+
+  async function removeTarget(target: SshTarget) {
+    sshMessage = null;
+    try {
+      await api.deleteRemoteSshTarget(target.id);
+      ssh = { ...ssh, targets: ssh.targets.filter((item) => item.id !== target.id) };
+      if (sshDraft?.id === target.id) sshDraft = null;
+    } catch (error) {
+      sshMessage = { tone: "error", text: sshErrorText(error) };
+    }
+  }
+
+  async function savePasswordForDraft() {
+    if (!sshDraft || sshDraftPassword.length === 0) return;
+    sshMessage = null;
+    try {
+      await api.setRemoteSshPassword(sshDraft.id, sshDraftPassword);
+      sshDraftPassword = "";
+      ssh = {
+        ...ssh,
+        targets: ssh.targets.map((item) => (item.id === sshDraft?.id ? { ...item, hasPassword: true } : item)),
+      };
+    } catch (error) {
+      sshMessage = { tone: "error", text: sshErrorText(error) };
+    }
+  }
+
+  async function deletePasswordForDraft() {
+    if (!sshDraft) return;
+    sshMessage = null;
+    try {
+      await api.deleteRemoteSshPassword(sshDraft.id);
+      ssh = {
+        ...ssh,
+        targets: ssh.targets.map((item) => (item.id === sshDraft?.id ? { ...item, hasPassword: false } : item)),
+      };
+    } catch (error) {
+      sshMessage = { tone: "error", text: sshErrorText(error) };
+    }
+  }
+
+  async function pickDefaultPath() {
+    if (!sshDraft) return;
+    const picked = await pickDirectory("选择远端默认目录");
+    if (picked) editDraft({ defaultPath: picked });
+  }
+
+  async function pickIdentityFile() {
+    if (!sshDraft) return;
+    const picked = await pickFile("选择私钥文件");
+    if (picked) editDraft({ identityFile: picked });
+  }
+
+  async function pickSshConfig() {
+    if (!sshDraft) return;
+    const picked = await pickFile("选择 SSH 配置文件");
+    if (picked) editDraft({ sshConfig: picked });
+  }
+
+  async function runSshTest(target: SshTarget, peerRevision?: string) {
+    const requestId = sshDraftId();
+    sshTest = { requestId, targetId: target.id, status: "running", text: "正在测试连接…" };
+    sshInstall = null;
+    sshMessage = null;
+    try {
+      const probe = await api.testRemoteSsh(requestId, target.id);
+      sshTest = {
+        requestId,
+        targetId: target.id,
+        status: "ok",
+        text: probe.agentCompatible
+          ? `连接成功：${probe.system}/${probe.architecture}，远端组件 ${probe.agentVersion ?? ""} 可复用。`
+          : `连接成功：${probe.system}/${probe.architecture}，远端组件需要安装。`,
+        probe,
+      };
+      void peerRevision;
+    } catch (error) {
+      // 取消与失败都落在这里；提示按真实原因显示，不把"已取消"说成"失败"。
+      if (sshTest?.requestId === requestId) {
+        sshTest = { requestId, targetId: target.id, status: "failed", text: sshErrorText(error) };
+      }
+    }
+  }
+
+  async function cancelSshTest() {
+    if (!sshTest || sshTest.status !== "running") return;
+    // 取消由原生中止进程树；这里只发请求，状态等真实结果回来再改。
+    await api.cancelRemoteSsh(sshTest.requestId);
+  }
+
+  async function prepareInstall(target: SshTarget) {
+    const probe = sshTest?.targetId === target.id ? sshTest.probe : undefined;
+    if (!probe) return;
+    sshMessage = null;
+    try {
+      const outcome = await api.installRemoteSshAgent(
+        { requestId: sshDraftId(), targetId: target.id, peerRevision: probe.peerRevision },
+        () => {},
+      );
+      if (outcome.kind === "reused") {
+        sshMessage = { tone: "info", text: `远端组件 ${outcome.version ?? ""} 已可复用，未传输任何字节。` };
+        return;
+      }
+      if (outcome.kind === "install_required" && outcome.confirmationId) {
+        sshInstall = {
+          targetId: target.id,
+          peerRevision: probe.peerRevision,
+          version: outcome.version ?? "",
+          size: outcome.size ?? 0,
+          confirmationId: outcome.confirmationId,
+          progress: null,
+        };
+        return;
+      }
+      sshMessage = { tone: "error", text: "远端组件安装没有返回可核实的信息。" };
+    } catch (error) {
+      sshMessage = { tone: "error", text: sshErrorText(error) };
+    }
+  }
+
+  async function confirmInstall() {
+    if (!sshInstall) return;
+    const pending = sshInstall;
+    sshMessage = null;
+    try {
+      const outcome = await api.installRemoteSshAgent(
+        {
+          requestId: sshDraftId(),
+          targetId: pending.targetId,
+          peerRevision: pending.peerRevision,
+          confirmationId: pending.confirmationId,
+        },
+        (progress) => {
+          const percent =
+            progress.totalBytes > 0
+              ? Math.min(100, Math.round((progress.sentBytes / progress.totalBytes) * 100))
+              : null;
+          if (sshInstall && sshInstall.confirmationId === pending.confirmationId) {
+            sshInstall = { ...pending, progress: percent };
+          }
+        },
+      );
+      sshInstall = null;
+      sshMessage = { tone: "info", text: `已安装远端组件 ${outcome.version ?? ""}。` };
+    } catch (error) {
+      // 失败或取消都不留下"已安装"的印象，也不假装进度完成。
+      sshInstall = null;
+      sshMessage = { tone: "error", text: sshErrorText(error) };
+    }
+  }
+
+  let sshTestRunning = $derived(sshTest?.status === "running");
+
 </script>
 
 <Modal
@@ -513,4 +842,330 @@
       {/if}
     </div>
   </section>
+
+  <section
+    class="settings-section"
+    data-settings-section="remote"
+    aria-labelledby="settings-remote-title"
+  >
+    <div class="settings-section-head">
+      <h2 id="settings-remote-title">远程 SSH</h2>
+      {#if ssh.enabled}
+        <span class="chip ok">已开启</span>
+      {:else}
+        <span class="chip skip">已关闭</span>
+      {/if}
+    </div>
+    <div class="settings-group">
+      <label class="settings-row switch">
+        <span class="settings-label">
+          启用远程 SSH
+          <small>关闭时不建立任何新的 SSH 连接；已保存的主机与密码仍保留，活动会话不受影响</small>
+        </span>
+        <input
+          type="checkbox"
+          checked={ssh.enabled}
+          aria-label="启用远程 SSH"
+          title={disabled || !sshLoaded ? BUSY_REASON : "关闭后不建立新的 SSH 连接，主机与密码保留"}
+          disabled={disabled || !sshLoaded}
+          onchange={(event) => {
+            const input = event.currentTarget as HTMLInputElement;
+            // 复选框会先变成用户点的状态；写回成功后由 checked 的新值更新。
+            input.checked = ssh.enabled;
+            void toggleSsh(!ssh.enabled);
+          }}
+        />
+      </label>
+
+      {#if sshMessage}
+        <p
+          class="settings-note"
+          role={sshMessage.tone === "error" ? "alert" : "status"}
+          data-ssh-message={sshMessage.tone}
+        >
+          {sshMessage.text}
+        </p>
+      {/if}
+
+      {#if ssh.targets.length === 0}
+        <p class="settings-note">
+          主机簿还是空的。添加主机后可以逐台启停，并单独测试连接与远端组件。
+        </p>
+      {/if}
+
+      {#each ssh.targets as target (target.id)}
+        <div class="settings-row" data-ssh-target={target.id}>
+          <span class="settings-label">
+            {target.displayName}
+            <small>{target.user}@{target.host}:{target.port}{target.defaultPath ? ` · ${target.defaultPath}` : ""}</small>
+            <span class="chip-row">
+              <span class="chip">
+                {target.authMethod === "password"
+                  ? "密码认证"
+                  : target.authMethod === "agent"
+                    ? "ssh-agent"
+                    : "密钥认证"}
+              </span>
+              <span class={`chip ${target.hasPassword ? "ok" : "skip"}`}>
+                {target.hasPassword ? "已保存密码" : "未保存密码"}
+              </span>
+              <span class={`chip ${target.enabled ? "ok" : "skip"}`}>
+                {target.enabled ? "已启用" : "已停用"}
+              </span>
+            </span>
+          </span>
+          <div class="settings-actions">
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              aria-pressed={target.enabled}
+              onclick={() => void toggleTarget(target)}
+            >
+              {target.enabled ? "停用" : "启用"}
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick={() => beginEdit(target)}>
+              编辑
+            </button>
+            <button
+              type="button"
+              class="btn btn-secondary btn-sm"
+              disabled={!ssh.enabled || !target.enabled || sshTestRunning}
+              title={!ssh.enabled ? "远程 SSH 已关闭" : undefined}
+              onclick={() => void runSshTest(target)}
+            >
+              测试连接
+            </button>
+            <button type="button" class="btn btn-ghost btn-sm" onclick={() => void removeTarget(target)}>
+              删除
+            </button>
+          </div>
+        </div>
+        {#if sshTest && sshTest.targetId === target.id}
+          <p
+            class="settings-note"
+            role={sshTest.status === "failed" ? "alert" : "status"}
+            data-ssh-test={sshTest.status}
+          >
+            {sshTest.text}
+          </p>
+          {#if sshTest.status === "running"}
+            <div class="settings-actions">
+              <button type="button" class="btn btn-ghost btn-sm" onclick={() => void cancelSshTest()}>
+                取消测试
+              </button>
+            </div>
+          {/if}
+          {#if sshTest.status === "ok" && sshTest.probe && !sshTest.probe.agentCompatible}
+            <div class="settings-actions">
+              <button
+                type="button"
+                class="btn btn-primary btn-sm"
+                onclick={() => void prepareInstall(target)}
+              >
+                安装远端组件
+              </button>
+            </div>
+          {/if}
+        {/if}
+        {#if sshInstall && sshInstall.targetId === target.id}
+          <p class="settings-note" role="status">
+            将向该主机安装 Twiglane 远端组件 {sshInstall.version}（{sshInstall.size} 字节）。安装会先写入临时文件并核对摘要，通过后才原子替换。
+          </p>
+          {#if sshInstall.progress !== null}
+            <div class="update-progress-row">
+              <div
+                class="update-progress"
+                role="progressbar"
+                aria-label="远端组件传输进度"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={sshInstall.progress}
+              >
+                <div style={`width: ${sshInstall.progress}%;`}></div>
+              </div>
+              <small>{sshInstall.progress}%</small>
+            </div>
+          {/if}
+          <div class="settings-actions">
+            <button type="button" class="btn btn-primary btn-sm" onclick={() => void confirmInstall()}>
+              确认安装
+            </button>
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              onclick={() => {
+                sshInstall = null;
+              }}
+            >
+              取消安装
+            </button>
+          </div>
+        {/if}
+      {/each}
+
+      {#if !sshDraft}
+        <div class="settings-actions">
+          <button type="button" class="btn btn-secondary btn-sm" onclick={beginCreate}>
+            添加主机
+          </button>
+        </div>
+      {:else}
+        <div class="settings-group" data-ssh-editor>
+          <div class="settings-row">
+            <span class="settings-label">显示名<small>只用于界面；改名不改变连接身份</small></span>
+            <input
+              class="input"
+              aria-label="显示名"
+              value={sshDraft.displayName}
+              oninput={(event) => editDraft({ displayName: (event.currentTarget as HTMLInputElement).value })}
+            />
+          </div>
+          <div class="settings-row">
+            <span class="settings-label">主机<small>Host 别名或地址，由 ssh -G 解析成有效配置</small></span>
+            <input
+              class="input"
+              aria-label="主机"
+              value={sshDraft.host}
+              oninput={(event) => editDraft({ host: (event.currentTarget as HTMLInputElement).value })}
+            />
+          </div>
+          <div class="settings-row">
+            <span class="settings-label">端口</span>
+            <input
+              class="input"
+              aria-label="端口"
+              inputmode="numeric"
+              value={String(sshDraft.port)}
+              oninput={(event) => {
+                const parsed = Number.parseInt((event.currentTarget as HTMLInputElement).value, 10);
+                editDraft({ port: Number.isFinite(parsed) ? parsed : 0 });
+              }}
+            />
+          </div>
+          <div class="settings-row">
+            <span class="settings-label">用户名</span>
+            <input
+              class="input"
+              aria-label="用户名"
+              value={sshDraft.user}
+              oninput={(event) => editDraft({ user: (event.currentTarget as HTMLInputElement).value })}
+            />
+          </div>
+          <div class="settings-row">
+            <span class="settings-label">
+              认证方式<small>密钥与 ssh-agent 不使用 askpass；密码保存在系统钥匙串</small>
+            </span>
+            <select
+              class="select"
+              aria-label="认证方式"
+              value={sshDraft.authMethod}
+              onchange={(event) => editDraft({ authMethod: (event.currentTarget as HTMLSelectElement).value })}
+            >
+              <option value="key">密钥</option>
+              <option value="agent">ssh-agent</option>
+              <option value="password">密码</option>
+            </select>
+          </div>
+          {#if sshDraft.authMethod === "key"}
+            <div class="settings-row">
+              <span class="settings-label">私钥文件<small>可选；留空时使用 ssh-agent 或默认身份文件</small></span>
+              <div class="settings-actions">
+                <button type="button" class="btn btn-secondary btn-sm" onclick={() => void pickIdentityFile()}>
+                  选择私钥
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-sm"
+                  onclick={() => editDraft({ identityFile: null })}
+                >
+                  清除
+                </button>
+              </div>
+            </div>
+            {#if sshDraft.identityFile}
+              <p class="settings-note" data-ssh-identity>{sshDraft.identityFile}</p>
+            {/if}
+          {/if}
+          {#if sshDraft.authMethod === "password"}
+            <div class="settings-row">
+              <span class="settings-label">
+                SSH 密码<small>只写入 twiglane.remote-ssh 钥匙串；设置文件里不保存密码</small>
+              </span>
+              <input
+                class="input"
+                type="password"
+                aria-label="SSH 密码"
+                value={sshDraftPassword}
+                oninput={(event) => (sshDraftPassword = (event.currentTarget as HTMLInputElement).value)}
+              />
+            </div>
+            <div class="settings-actions">
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm"
+                title={sshDraftPassword.length === 0 ? "先填写要保存的密码" : "保存到系统钥匙串"}
+                disabled={sshDraftPassword.length === 0}
+                onclick={() => void savePasswordForDraft()}
+              >
+                保存密码
+              </button>
+              <button type="button" class="btn btn-ghost btn-sm" onclick={() => void deletePasswordForDraft()}>
+                删除已保存密码
+              </button>
+            </div>
+          {/if}
+          <div class="settings-row">
+            <span class="settings-label">SSH 配置文件<small>可选；指定后只用该文件解析有效配置</small></span>
+            <div class="settings-actions">
+              <button type="button" class="btn btn-secondary btn-sm" onclick={() => void pickSshConfig()}>
+                选择配置
+              </button>
+              <button type="button" class="btn btn-ghost btn-sm" onclick={() => editDraft({ sshConfig: null })}>
+                清除
+              </button>
+            </div>
+          </div>
+          {#if sshDraft.sshConfig}
+            <p class="settings-note" data-ssh-config>{sshDraft.sshConfig}</p>
+          {/if}
+          <div class="settings-row">
+            <span class="settings-label">默认目录<small>远端仓库的默认绝对路径</small></span>
+            <div class="settings-actions">
+              <button type="button" class="btn btn-secondary btn-sm" onclick={() => void pickDefaultPath()}>
+                选择目录
+              </button>
+              <button type="button" class="btn btn-ghost btn-sm" onclick={() => editDraft({ defaultPath: null })}>
+                清除
+              </button>
+            </div>
+          </div>
+          {#if sshDraft.defaultPath}
+            <p class="settings-note" data-ssh-default-path>{sshDraft.defaultPath}</p>
+          {/if}
+          <div class="settings-actions">
+            <button
+              type="button"
+              class="btn btn-primary btn-sm"
+              title={sshSaving ? BUSY_REASON : undefined}
+              disabled={sshSaving}
+              onclick={() => void saveDraft()}
+            >
+              保存主机
+            </button>
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              onclick={() => {
+                sshDraft = null;
+                sshDraftPassword = "";
+              }}
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      {/if}
+    </div>
+  </section>
+
 </Modal>

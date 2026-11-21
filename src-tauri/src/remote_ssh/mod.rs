@@ -229,6 +229,8 @@ impl<'a> Context<'a> {
                 command.env("SSH_ASKPASS", &askpass.script);
                 command.env("SSH_ASKPASS_REQUIRE", "force");
                 command.env(password::SECRET_ENV, &askpass.secret);
+                // askpass 只在提示里出现该主机时才作答：跳板机提示拿不到这个秘密。
+                command.env(password::HOST_ENV, &target.host);
                 // 没有终端时 OpenSSH 才走 askpass；DISPLAY 让它认为有交互可能。
                 command.env("DISPLAY", ":0");
             }

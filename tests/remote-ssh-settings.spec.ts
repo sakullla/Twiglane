@@ -278,6 +278,80 @@ describe("连接测试与远端组件", () => {
     );
   });
 
+  it("迟到的成功结果被丢弃，不覆盖当前请求", async () => {
+    const other = { ...host, id: "host-b", displayName: "第二台", host: "second.example.com" };
+    mocks.remoteSshSettings.mockResolvedValue({ enabled: true, targets: [host, other] });
+    const stale = deferred<unknown>();
+    const current = deferred<unknown>();
+    mocks.testRemoteSsh
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValueOnce(current.promise);
+    await openSettings();
+
+    const testButtons = async () =>
+      (await screen.findAllByRole("button", { name: "测试连接" })) as HTMLButtonElement[];
+    await fireEvent.click((await testButtons())[0]);
+    await waitFor(() => expect(mocks.testRemoteSsh).toHaveBeenCalledTimes(1));
+    const staleRequestId = mocks.testRemoteSsh.mock.calls[0][0] as string;
+
+    // 真实界面在测试进行中禁用按钮；这里先确认它确实被禁用，再临时去掉该属性派发一次
+    // 点击，模拟两次请求重叠（例如取消赢了竞争、原生又回包一次），以覆盖归属校验。
+    const second = (await testButtons())[1];
+    expect(second.disabled).toBe(true);
+    second.disabled = false;
+    second.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await waitFor(() => expect(mocks.testRemoteSsh).toHaveBeenCalledTimes(2));
+    const currentRequestId = mocks.testRemoteSsh.mock.calls[1][0] as string;
+    expect(currentRequestId).not.toBe(staleRequestId);
+
+    // 旧的请求成功了，但它已经不属于当前状态：不能显示"连接成功"。
+    stale.resolve({
+      targetId: "host-a",
+      displayName: "构建机",
+      effectiveHost: "10.9.0.4",
+      configRevision: "a".repeat(64),
+      peerRevision: "b".repeat(64),
+      peerIdentity: "c".repeat(64),
+      system: "Linux",
+      architecture: "x86_64",
+      git: "git version 2.45.0",
+      agentInstalled: true,
+      agentVersion: "0.3.40",
+      agentDigest: "d".repeat(64),
+      agentCompatible: true,
+      hops: [],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(staleRequestId.length).toBeGreaterThan(8);
+    expect(document.querySelector('[data-ssh-test="ok"]')).toBeNull();
+    expect(document.querySelector('[data-ssh-test="running"]')?.textContent ?? "").toContain(
+      "正在测试连接",
+    );
+
+    // 当前的请求成功后照常显示，证明丢弃只针对过期请求。
+    current.resolve({
+      targetId: "host-b",
+      displayName: "第二台",
+      effectiveHost: "10.9.0.5",
+      configRevision: "e".repeat(64),
+      peerRevision: "f".repeat(64),
+      peerIdentity: "1".repeat(64),
+      system: "Linux",
+      architecture: "aarch64",
+      git: "git version 2.45.0",
+      agentInstalled: false,
+      agentVersion: null,
+      agentDigest: null,
+      agentCompatible: false,
+      hops: [],
+    });
+    await waitFor(() =>
+      expect(document.querySelector('[data-ssh-test="ok"]')?.textContent ?? "").toContain(
+        "连接成功",
+      ),
+    );
+  });
+
   it("兼容的远端组件只报告可复用，不触发传输", async () => {
     mocks.remoteSshSettings.mockResolvedValue({ enabled: true, targets: [host] });
     mocks.testRemoteSsh.mockResolvedValue({

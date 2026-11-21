@@ -450,13 +450,22 @@ async fn password_auth_needs_a_saved_secret_and_then_uses_askpass_only() {
     let command = context
         .build(&password_target, &snapshot, folder.path(), "true", false)
         .unwrap();
-    let env: Vec<String> = command
+    let env: Vec<(String, String)> = command
         .as_std()
         .get_envs()
-        .map(|(key, _)| key.to_string_lossy().to_string())
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().to_string(),
+                value.unwrap_or_default().to_string_lossy().to_string(),
+            )
+        })
         .collect();
-    assert!(env.contains(&"SSH_ASKPASS".to_string()));
-    assert!(env.contains(&password::SECRET_ENV.to_string()));
+    assert!(env.iter().any(|(key, _)| key == "SSH_ASKPASS"));
+    assert!(env.iter().any(|(key, _)| *key == password::SECRET_ENV));
+    // askpass 绑定目标主机：跳板机的密码提示不会被目标主机的密码回答。
+    assert!(env
+        .iter()
+        .any(|(key, value)| *key == password::HOST_ENV && value == "build.example.com"));
     let args: Vec<String> = command
         .as_std()
         .get_args()

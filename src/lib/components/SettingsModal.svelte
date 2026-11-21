@@ -499,6 +499,10 @@
     sshMessage = null;
     try {
       const probe = await api.testRemoteSsh(requestId, target.id);
+      // 与失败分支一致：只有仍属于当前请求的结果才更新界面。
+      // 已经被取消或被新一次测试取代的迟到成功结果直接丢弃，
+      // 不能把旧请求的"连接成功"盖在当前状态上。
+      if (sshTest?.requestId !== requestId) return;
       sshTest = {
         requestId,
         targetId: target.id,

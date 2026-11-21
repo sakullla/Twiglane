@@ -45,9 +45,15 @@ enabled）变化才推进；仅改显示名或默认目录不推进，因此"改
   `peerRevision`（配置修订 + 对端密钥）。只改信任文件时 `peerRevision` 变、`peerIdentity`
   不变，与"同一台主机、不同信任材料"一致。
 - 密钥与 ssh-agent 认证使用 `BatchMode=yes`，没有已保存密码时不会退回交互提示。密码认证
-  生成一次性 askpass 脚本（0700）与秘密文件（0600）放在本次连接的私有目录里，只回答
-  `password` / `passphrase` 类提示；主机密钥的 `authenticity`、`fingerprint`、`yes/no`
-  提示一律拒绝回答，因此 Twiglane 不会替用户信任新主机。
+  生成一次性 askpass 脚本（0700）与秘密文件（0600）放在本次连接的私有目录里，只有提示文本
+  既出现 `password` / `passphrase`、又出现该目标主机名（`host` 或 `user@host`）时才作答。
+  ProxyJump 跳板机的密码提示（例如 `deploy@jump.example.com's password:`）里没有目标主机名，
+  因此拿到的是拒绝而不是目标主机的密码；目标主机名只经 `TWIGLANE_SSH_ASKPASS_HOST` 传给脚本，
+  `HostName` / `CanonicalizeHostname` 把名字改写成与所填主机不一致时同样拒绝（宁可失败也不外泄）。
+  密钥口令提示（`Enter passphrase for key '...'`）里没有目标主机名，因此也会被拒绝：
+  askpass 只在密码认证时安装，绝不会把登录密码当作私钥口令交出去。
+  主机密钥的 `authenticity`、`fingerprint`、`yes/no` 提示一律拒绝回答，因此 Twiglane
+  不会替用户信任新主机。
 
 ### 远端组件 v2 的安装
 
@@ -83,28 +89,47 @@ v2 产物是原生二进制，必须按目标 `system`/`architecture` 选择，�
   并返回明确错误。取消安装会终止本机拥有的 SSH 进程树。
 - 安装路径与 v1 的 `agent/v1` 不重叠，两者可以同时存在。
 
-相关命令（前端只经这些入口，全部在 `build.rs` 与主窗口 capability 中登记）：
+相关命令（前端只经这些入口，共 9 条，同一份清单出现在三处，任一处缺失都会被测试或构建拦下）：
 `remote_ssh_settings`、`set_remote_ssh_enabled`、`remote_ssh_save_target`、
 `remote_ssh_delete_target`、`remote_ssh_set_password`、`remote_ssh_delete_password`、
 `remote_ssh_test`、`remote_ssh_cancel`、`remote_ssh_install_agent`。
 
+- `src-tauri/build.rs` 的 `tauri_build::Attributes::app_manifest().commands(..)` 逐条登记这 9 个
+  命令；漏登记时生成的应用清单与 `generate_handler!` 不匹配，构建即失败。
+- `src-tauri/capabilities/default.json` 为每个命令给出对应的 `allow-remote-ssh-*` 等最小 ACL
+  条目；`src-tauri/src/security.rs` 的 `capabilities_grant_only_explicit_terminal_ipc_not_a_generic_shell`
+  断言 capability 集合与这份白名单逐一相等，多一条或漏一条都会让 `cargo test` 失败。
+
 ### 发行与验证
 
+- 安装路径可达靠 `src-tauri/tauri.conf.json` 的 `bundle.resources`：`"agent-v2/": "agent-v2/"`
+  把该目录整棵打进安装包的资源目录，运行时 `RemoteSsh::artifacts_for` 读
+  `resource_dir()/agent-v2`（开发/测试可用 `TWIGLANE_AGENT_V2_DIR` 显式指定）。
+- 发行步骤：先在 `src-tauri/agent-v2/` 放好各平台 `twiglane-agent-v2` 与生成的
+  `manifest.json`（含同名 `.sig` 签名），再执行 `npm run tauri build`；打包时目录里有
+  什么就收录什么。
+- 仓库里通常没有这些产物，而 tauri-build 遇到不存在的资源路径会让构建直接失败，因此
+  `build.rs` 的 `ensure_agent_bundle_dir` 会先保证该目录存在（并在为空时打印
+  `cargo:warning`）。于是空仓库照样能 `cargo check` / `cargo test` / `npm run tauri build`，
+  只是装出来的包不带远端组件：此时运行时会返回 `agent_artifact_manifest`（清单读不到），
+  提示重新安装 Twiglane，而不会上传任何文件。
 - 清单由 `scripts/remote-worktree/agent-v2-manifest.mjs` 生成：`--write <目录>` 为每个
   `<system>-<arch>/twiglane-agent-v2` 计算摘要并要求同名 `.sig` 签名；
   `--check <目录>` 只核对已有清单与文件是否一致（可用于 CI 与本地复核）。
 - 本机回归：`cargo test --manifest-path src-tauri/Cargo.toml remote_ssh` 用 `ssh` 替身在临时
   HOME 下真实执行探测、上传、摘要核对和原子替换；`npm test` 覆盖设置界面与原生契约
   （`tests/remote-ssh-settings.spec.ts`、`tests/remote-ssh-native.spec.ts`）。
-- 真实 SSH 双主机、弱网与签名桌面包的验收属于 T9/Delivery 的集成证据；当前仓库没有该环境，
+- 真实 SSH 双主机、弱网与已签名安装包的验收属于 T9/Delivery 的集成证据；当前仓库没有该环境，
   这一层没有被这些测试替代。
 
 ### 已知缺口
 
-- 登录时对签名做**密码学复核**需要 `minisign-verify` 依赖（`src-tauri/Cargo.toml` 属 T1 范围，
-  本 Task 不改）。当前运行时核对"清单里的签名存在且格式有效 + 产物摘要与清单一致"，签名
-  本身由发行步骤用 Twiglane 更新钥匙验证。补齐该依赖后应把 `artifact::select` 的签名检查换成
-  真正的 `PublicKey::verify`。
+- 签名字段目前**只做存在性检查**：`artifact::select` 要求 `signature` 非空且长度不超过
+  4096 字节，不解码 minisign 结构，也不做任何密码学验签。安装前唯一的完整性保证是清单里的
+  `sha256` 与产物实际摘要逐字节比对（不一致返回 `agent_digest_mismatch`），以及清单由发行步骤
+  用 Twiglane 更新钥匙签名这件事本身。要真正做到运行时可验证，需要 `minisign-verify` 依赖
+  （`src-tauri/Cargo.toml` 属 T1 范围，本 Task 不改），补齐后应把这里的长度检查换成
+  真正的 `PublicKey::verify`，并对 `--app-version` 绑定做校验。
 - 密码认证的 askpass 目前只在 unix 实现（`sh` 脚本 + 私有秘密文件）；Windows 桌面用密码认证
   会返回 `ssh_askpass_unavailable` 并提示改用密钥或 ssh-agent，尚未在 Windows 实机验收。
 - `remote-worktree_open` 尚未切换到这个 provider（T6 负责把远端仓库接入主窗口）；当前它仍

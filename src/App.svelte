@@ -4275,16 +4275,25 @@
     themes.push(document.documentElement.dataset.theme ?? "");
     await changeTheme("dark");
     themes.push(document.documentElement.dataset.theme ?? "");
-    // ⌘K 现在打开命令面板：焦点落在面板搜索框，Esc 之后回到主界面。
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, ctrlKey: true, bubbles: true }));
-    const shortcutFocused = Boolean(paletteInput()) && document.activeElement === paletteInput();
-    paletteOpen = false;
-    const list = document.querySelector<HTMLElement>(".file-list");
-    const before = selectionKey();
+    const mac = /Mac|iPhone|iPad/.test(navigator.platform);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: mac, ctrlKey: !mac, bubbles: true }));
+    await tick();
+    const input = paletteInput();
+    const shortcutFocused = input !== null && document.activeElement === input;
+    input?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await tick();
+
+    const list = document.querySelector<HTMLElement>('[data-view-scope="changes"][data-active="true"] .file-list');
     list?.focus();
-    list?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    const press = (key: string) => list?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    press("Home");
+    await tick();
+    const before = selectionKey();
+    press("ArrowDown");
+    await tick();
     const moved = selectionKey();
-    list?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    press("ArrowUp");
+    await tick();
     const after = selectionKey();
     const selectionChanged = moved.length > 0 && after.length > 0 && moved !== before && after !== moved;
     return {

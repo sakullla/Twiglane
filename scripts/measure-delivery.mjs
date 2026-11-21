@@ -952,6 +952,11 @@ async function main() {
     writeFileSync(path.join(keyboardRepo, "b.txt"), "b changed\n");
     const keyboardHead = await gitText(keyboardRepo, ["rev-parse", "HEAD"]);
     const mergeSession = path.join(rawDir, "accept-merge");
+    const mergeRun = await launchApp(binary, mergeSession, [
+      { op: "open", repo: mergeRepo, expectChanges: 0, expectHead: mergeHead },
+      { op: "merge", source: "other", content: "resolved\n" },
+    ], 120000);
+    const keyboardSession = path.join(rawDir, "accept-keyboard");
     const screenshot = path.join(rawDir, "macos-desktop.png");
     let shot = false;
     let shotError = "";
@@ -960,9 +965,7 @@ async function main() {
       shot = true;
       shotError = textOf(run("screencapture", ["-x", screenshot]));
     };
-    const mergePromise = launchApp(binary, mergeSession, [
-      { op: "open", repo: mergeRepo, expectChanges: 0, expectHead: mergeHead },
-      { op: "merge", source: "other", content: "resolved\n" },
+    const keyboardPromise = launchApp(binary, keyboardSession, [
       { op: "open", repo: keyboardRepo, expectChanges: 2, expectHead: keyboardHead },
       { op: "keyboard-theme" },
       { op: "sleep", ms: 3000, mark: "screenshot" },
@@ -970,7 +973,7 @@ async function main() {
       if (samples.some((item) => item.name === "keyboard-theme" || item.name === "screenshot")) takeShot();
     });
     const shotTimer = setTimeout(takeShot, 4000);
-    const mergeRun = await mergePromise;
+    const keyboardRun = await keyboardPromise;
     clearTimeout(shotTimer);
     if (!shot) takeShot();
     let partialOk = false;
@@ -993,7 +996,7 @@ async function main() {
       if (merged === "resolved\n" && mergeOid && mergeOid !== mergeHead) oids.push(mergeOid);
       else mergeOid = "";
     }
-    const theme = sampleByName(mergeRun.samples, "keyboard-theme").at(-1)?.detail ?? {};
+    const theme = sampleByName(keyboardRun.samples, "keyboard-theme").at(-1)?.detail ?? {};
     const keyboardOk =
       theme.shortcutFocused === true &&
       theme.selectionChanged === true &&
@@ -1019,7 +1022,7 @@ async function main() {
       selectionAfter: typeof theme.selectionAfter === "string" ? theme.selectionAfter : "",
       screenshot: shotOk ? relativeToRoot(screenshot) : "",
       screenshotError: shotError.slice(0, 500),
-      stderr: [cloneRun.stderr, pushRun.stderr, mergeRun.stderr].join("\n").slice(0, 4000),
+      stderr: [cloneRun.stderr, pushRun.stderr, mergeRun.stderr, keyboardRun.stderr].join("\n").slice(0, 4000),
     };
     const operationsReady = partialOk && pushed && Boolean(mergeOid) && keyboardOk && (theme.theme ?? []).includes("light") && (theme.theme ?? []).includes("dark");
     const acceptReady = operationsReady && shotOk;

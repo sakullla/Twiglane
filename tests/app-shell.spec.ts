@@ -292,6 +292,29 @@ describe("原生状态测量", () => {
     await waitFor(() => expect(mocks.measureSample).toHaveBeenCalledWith("measure-error", { message: "仓库状态刷新失败" }));
     expect(mocks.measureSample.mock.calls.some(([name]) => name === "status-refresh")).toBe(false);
   });
+
+  it("双文件的键盘验收等到命令面板焦点并记录两次实际选择变化", async () => {
+    const files = [change("a.txt", "none", "modified"), change("b.txt", "none", "modified")];
+    mocks.openRepository.mockResolvedValue({
+      summary: { name: "demo", path: repoPath },
+      generation: snapshot.generation,
+      snapshot: { ...snapshot, files },
+      draft: "",
+      watchDegraded: false,
+    });
+    mocks.measureProbe.mockResolvedValue({ enabled: true, script: { steps: [
+      { op: "open", repo: repoPath, expectChanges: files.length },
+      { op: "keyboard-theme" },
+    ] } });
+    render(App);
+    await waitFor(() => expect(mocks.measureSample).toHaveBeenCalledWith("keyboard-theme", expect.objectContaining({
+      contentOk: true,
+      shortcutFocused: true,
+      selectionBefore: "unstaged:a.txt",
+      selectionMoved: "unstaged:b.txt",
+      selectionAfter: "unstaged:a.txt",
+    })));
+  });
 });
 
 async function dragEvent(name: "enter" | "leave" | "drop", paths: string[] = []) {

@@ -4,6 +4,9 @@ import { normalizeError } from "./errors";
 import type {
   BatchDeleteResult,
   BranchState,
+  ChangeRequestOutcome,
+  ChangeRequestPrepare,
+  ChangeRequestTokenStatus,
   BranchListing,
   BranchTracking,
   ClioraOutcome,
@@ -863,6 +866,52 @@ export const api = {
   setFilesView: (filesView: boolean) => invoke<void>("set_files_view", { filesView }),
   setChangeRequestsEnabled: (changeRequestsEnabled: boolean) =>
     invoke<void>("set_change_requests_enabled", { changeRequestsEnabled }),
+  /**
+   * 「创建 MR / PR」的只读准备：远程解析、平台发现与来源分支都由原生从当前仓库重新推导，
+   * 前端不传 owner/repo/API base。remote 为空时按上游或唯一远程推断，多远程返回候选。
+   */
+  prepareChangeRequest: (path: string, remote: string | null, generation: number, requestId: number) =>
+    invoke<ChangeRequestPrepare>("change_request_prepare", { path, remote, generation, requestId }),
+  /** 显式创建：成功只接受平台返回且原生已验证的链接；普通/未知错误由调用方分类展示。 */
+  createChangeRequest: (
+    path: string,
+    remote: string,
+    targetBranch: string,
+    title: string,
+    body: string,
+    generation: number,
+    requestId: number,
+  ) =>
+    invoke<ChangeRequestOutcome>("change_request_create", {
+      path,
+      remote,
+      targetBranch,
+      title,
+      body,
+      generation,
+      requestId,
+    }),
+  /** 当前实例的令牌状态：只有布尔值，不回传令牌。 */
+  changeRequestTokenStatus: (path: string, remote: string, generation: number, requestId: number) =>
+    invoke<ChangeRequestTokenStatus>("change_request_token_status", { path, remote, generation, requestId }),
+  /** 保存或替换当前实例的令牌：只经 IPC 参数进入原生，随后直接写入系统钥匙串。 */
+  setChangeRequestToken: (
+    path: string,
+    remote: string,
+    token: string,
+    generation: number,
+    requestId: number,
+  ) =>
+    invoke<ChangeRequestTokenStatus>("change_request_set_token", {
+      path,
+      remote,
+      token,
+      generation,
+      requestId,
+    }),
+  /** 只删除用户显式点选的当前实例令牌；关闭功能开关不会调用它。 */
+  deleteChangeRequestToken: (path: string, remote: string, generation: number, requestId: number) =>
+    invoke<ChangeRequestTokenStatus>("change_request_delete_token", { path, remote, generation, requestId }),
   setPanelWidths: (widths: PanelWidths) => invoke<PanelWidths>("set_panel_widths", { widths }),
   saveDraft: (path: string, message: string) => invoke<void>("save_draft", { path, message }),
   cancelReads: () => invoke<void>("cancel_reads"),

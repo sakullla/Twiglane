@@ -42,6 +42,10 @@
     onMergeInto?: (name: string) => void;
     /** 把当前分支变基到所点分支。 */
     onRebaseBranch?: (name: string) => void;
+    /** 「创建 MR / PR」设置开关；关闭时当前分支创建入口不出现。 */
+    changeRequestsEnabled?: boolean;
+    /** 当前分支创建 MR/PR 的入口：只在开关开启且当前分支有名字时出现。 */
+    onCreateChangeRequest?: () => void;
     /** 设置里的分支分组。缺省开启。 */
     branchGroups?: boolean;
     /** 打开其他工作区成功后交给外壳切换当前仓库。 */
@@ -72,6 +76,8 @@
     onMergeBranch,
     onMergeInto,
     onRebaseBranch,
+    changeRequestsEnabled = false,
+    onCreateChangeRequest,
     branchGroups = true,
     onOpened,
     beforeOpen,
@@ -815,6 +821,20 @@
         <span>{action.label}</span>
       </button>
     {/each}
+    <!-- 当前分支的创建入口：只在设置开关开启、当前分支有名字（非游离 HEAD、非空仓库）时出现。
+         关闭时不渲染，因此也不会调用任何平台命令或读取令牌。 -->
+    {#if changeRequestsEnabled && onCreateChangeRequest && currentName}
+      <button
+        type="button"
+        class="menu-item"
+        data-create-change-request
+        title={`为当前分支 ${currentName} 创建 MR/PR：先确认远程与目标分支，再显式提交`}
+        onclick={() => onCreateChangeRequest?.()}
+      >
+        <Icon name="upload" size={14} />
+        <span>为 {currentName} 创建 MR / PR…</span>
+      </button>
+    {/if}
   {/snippet}
 </Popover>
 

@@ -12,8 +12,16 @@ export type WorkspaceView = "changes" | "files" | "history";
  * 审阅队列、整文件暂存等命令据此作用在任务范围上。
  */
 export type CommandView = WorkspaceView | "task";
-/** 单槽 modal 的七个任务入口（data-task-modal 的取值集合就由它决定）。 */
-export type TaskModal = "stash" | "merge" | "branch" | "remote" | "settings" | "scope" | "publish";
+/** 单槽 modal 的八个任务入口（data-task-modal 的取值集合就由它决定）。 */
+export type TaskModal =
+  | "stash"
+  | "merge"
+  | "branch"
+  | "remote"
+  | "settings"
+  | "scope"
+  | "publish"
+  | "changeRequest";
 
 export type ChangeKind =
   | "none"
@@ -563,6 +571,57 @@ export interface SettingsDto {
   changeRequestsEnabled?: boolean;
   /** 终端偏好；旧响应缺省时按平台默认与 13 号字处理。 */
   terminal?: TerminalPrefs;
+}
+
+/** 多远程时的候选：用户显式选择前不会向任何实例发起平台请求。 */
+export interface ChangeRequestRemoteChoice {
+  remote: string;
+  host: string;
+  repository: string;
+  /** 公共 host 能确认的平台名；自托管实例为 null，需要原生按元数据发现。 */
+  provider: string | null;
+}
+
+/**
+ * prepare 结果。status 为 ready 时其余字段可用；为 remoteChoice 时 choices 非空，
+ * 且没有向任何实例发过平台请求。
+ */
+export interface ChangeRequestPrepare {
+  status: "ready" | "remoteChoice" | string;
+  choices: ChangeRequestRemoteChoice[];
+  provider: string;
+  providerLabel: string;
+  remote: string;
+  host: string;
+  repository: string;
+  /** 平台仓库网页地址（canonical）；只用于展示，不作为前端请求目标。 */
+  repositoryWeb: string;
+  sourceBranch: string;
+  /** 平台元数据给出的目标分支；本地默认分支只作预选。 */
+  targetBranch: string;
+  defaultBranch: string | null;
+  generation: number;
+}
+
+/** 令牌状态只有布尔值：原生永不把令牌本身交给前端。 */
+export interface ChangeRequestTokenStatus {
+  configured: boolean;
+}
+
+/**
+ * 创建结果。created 是平台返回并已验证的链接；fallbackOpened 表示原生已打开
+ * 新建网页、需要用户在网页继续，不当作创建成功。
+ */
+export interface ChangeRequestOutcome {
+  status: "created" | "fallbackOpened" | string;
+  url: string;
+  provider: string;
+  providerLabel: string;
+  repository: string;
+  sourceBranch: string;
+  targetBranch: string;
+  /** 网页回退时标题与描述是否已预填（GitLab 只确认来源参数，因此为 false）。 */
+  webPrefilled: boolean;
 }
 
 export interface RepoChanged {

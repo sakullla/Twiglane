@@ -461,6 +461,44 @@ export interface ClioraReturnSent {
 }
 
 /**
+ * 一次 feedback-v1 交接里的行定位意见。身份来自任务差异（路径 + 块号 + 行类型 + 行号），
+ * 只描述「哪一行、说了什么」，不复用任何暂存语义。
+ */
+export interface ReviewFeedbackComment {
+  id: string;
+  path: string;
+  hunkIndex: number;
+  kind: "add" | "del" | "context";
+  oldNo: number | null;
+  newNo: number | null;
+  body: string;
+}
+
+/**
+ * 准备送回原任务的请求。feedbackId 与 digest 由原生生成，前端只给已校验的来源身份、
+ * 当前任务范围和这一批意见；不传 URL、路径片段或凭据。
+ */
+export interface ReviewFeedbackRequest {
+  reviewId: string;
+  sessionId: string;
+  resultRevision: number;
+  worktreePath: string;
+  rangeVersion: string;
+  baselineOid: string;
+  headOid: string;
+  comments: ReviewFeedbackComment[];
+}
+
+/** 原生准备成功后的结果：只有标识、digest 与条数，没有正文。 */
+export interface ReviewFeedbackPrepared {
+  feedbackId: string;
+  digest: string;
+  commentCount: number;
+  /** 只带标识与 digest 的深链；正文、路径与代码都不在其中。 */
+  url: string;
+}
+
+/**
  * 任务范围请求：只来自已校验的 cliora 审查链接。
  * 链接没有起点时不建立任务范围——不会退回当前 HEAD 或默认分支。
  */

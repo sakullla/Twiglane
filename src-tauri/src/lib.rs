@@ -1,6 +1,7 @@
 mod atomic;
 mod change_request;
 mod cliora;
+mod cliora_feedback;
 mod error;
 mod git;
 mod measure;
@@ -254,6 +255,7 @@ pub fn run() {
             cliora_review_return,
             cliora_review_forget,
             cliora_review_sources,
+            prepare_review_feedback,
             terminal_profiles,
             terminal_list,
             terminal_create,
@@ -360,6 +362,78 @@ fn cliora_review_sources(sources: State<'_, cliora::ReviewSources>, reset_pendin
 #[tauri::command(rename_all = "camelCase")]
 fn cliora_review_forget(sources: State<'_, cliora::ReviewSources>, review_id: String, session_id: String) -> Result<(), AppError> {
     sources.forget(&review_id, &session_id)
+}
+
+/// 准备 feedback-v1 交接：先核对来源、结果版本、工作树与任务起点，再把这一批意见写进
+/// 私有一次性文件并回读核对，最后才打开只带标识与 digest 的深链。
+///
+/// 失败不打开 cliora、不写仓库、也不产生任何 Agent 操作；正文只留在文件里，不进 URL 与日志。
+#[tauri::command(rename_all = "camelCase")]
+fn prepare_review_feedback<R: Runtime>(
+    app: AppHandle<R>,
+    sources: State<'_, cliora::ReviewSources>,
+    request: cliora_feedback::FeedbackRequest,
+) -> Result<cliora_feedback::PreparedFeedback, AppError> {
+    // 只有已被前端接受（真正打开过）的来源才能准备交接。
+    let source = sources.request_for(&request.review_id, &request.session_id, true)?;
+    let revision = sources
+        .current_return_revision(&request.review_id, &request.session_id)
+        .ok_or_else(|| AppError::new("source_expired", "审查来源已失效，请从 Cliora 重新发起。"))?;
+    if request.result_revision != revision {
+        return Err(AppError::new(
+            "stale_result",
+            "这批意见对应的结果版本已经变化，请重新读取任务后再准备。",
+        ));
+    }
+    let root = ops::canonical_existing(std::path::Path::new(&request.worktree_path)).map_err(|_| {
+        AppError::new(
+            "feedback_source_mismatch",
+            "意见来自的目录已经不可用，未打开 cliora。",
+        )
+    })?;
+    if std::path::Path::new(&source.worktree_path) != root {
+        return Err(AppError::new(
+            "feedback_source_mismatch",
+            "这批意见不属于当前打开的工作树，未打开 cliora。",
+        ));
+    }
+    if source.baseline.as_deref() != Some(request.baseline_oid.as_str()) {
+        return Err(AppError::new(
+            "feedback_range_changed",
+            "任务起点与这次审查的来源不一致，请重新读取任务。",
+        ));
+    }
+    // 原生记录过的提交/合入结果必须是这批意见看到的 HEAD；否则旧意见已经不对应当前范围。
+    if let Some(head) = sources.recorded_head(&request.review_id, &request.session_id) {
+        if head != request.head_oid {
+            return Err(AppError::new(
+                "feedback_range_changed",
+                "任务 HEAD 已经变化，这批意见已失效，请重新读取任务。",
+            ));
+        }
+    }
+    let feedback = cliora_feedback::Feedback {
+        v: cliora_feedback::VERSION,
+        feedback_id: uuid::Uuid::new_v4().to_string(),
+        review_id: request.review_id,
+        session_id: request.session_id,
+        result_revision: request.result_revision,
+        worktree_path: request.worktree_path,
+        range_version: request.range_version,
+        baseline_oid: request.baseline_oid,
+        head_oid: request.head_oid,
+        comments: request.comments,
+        digest: String::new(),
+    };
+    let written = cliora_feedback::prepare(&cliora_feedback::feedback_dir(), feedback)?;
+    let url = cliora_feedback::feedback_url(&written)?;
+    cliora::open_checked_cliora(&app, &url)?;
+    Ok(cliora_feedback::PreparedFeedback {
+        feedback_id: written.feedback_id,
+        digest: written.digest,
+        comment_count: written.comments.len(),
+        url,
+    })
 }
 
 /// 返回后告诉前端这次实际发送的工作区状态，提示据此如实说明；uncommitted 只在读到时有值。

@@ -521,7 +521,11 @@ if (previewParams.get("projects") === "many") {
 }
 // Synthetic scheme records for the double-product capture; never loaded by the native app.
 const previewSources = new Map<string, { version: string; sessionId: string; revision: number; request?: ClioraReviewSource; accepted?: boolean; lastReturn?: ClioraSourceSnapshot["lastReturn"] }>();
-const previewReviewEvidence = { receipts: [] as string[], returns: [] as { url: string; uncommitted: number }[] };
+const previewReviewEvidence = {
+  receipts: [] as string[],
+  returns: [] as { url: string; uncommitted: number }[],
+  feedback: [] as { url: string; count: number }[],
+};
 (window as unknown as { __clioraPreviewEvidence: typeof previewReviewEvidence }).__clioraPreviewEvidence = previewReviewEvidence;
 
 const workspaceResult = () => ok(structuredClone(projectData), 30);
@@ -1175,6 +1179,41 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     source.lastReturn = { revision: source.revision, declaration: { reviewId, sessionId, outcome: outcome as "reviewed" | "committed" | "merged", headOid, worktreeState: uncommitted ? "dirty" : "clean", meta: [] } };
     previewReviewEvidence.returns.push({ url: "cliora://review?" + params.toString(), uncommitted });
     return ok({ worktreeState: uncommitted ? "dirty" : "clean", uncommitted });
+  },
+  /**
+   * feedback-v1 的准备路径：?feedback=fail 模拟原生校验/写入失败。成功时只返回标识与 digest，
+   * 深链里没有正文、路径或代码。浏览器预览没有真实文件、ACL 或系统 scheme 路由。
+   */
+  prepareReviewFeedback: (request: {
+    reviewId: string;
+    sessionId: string;
+    resultRevision: number;
+    worktreePath: string;
+    rangeVersion: string;
+    baselineOid: string;
+    headOid: string;
+    comments: { id: string; body: string }[];
+  }) => {
+    const source = previewSources.get(request.reviewId);
+    if (!source || !source.accepted || source.sessionId !== request.sessionId) {
+      return Promise.reject({ code: "source_expired", message: "审查来源已失效，请从 Cliora 重新发起。" });
+    }
+    if (request.resultRevision !== source.revision) {
+      return Promise.reject({ code: "stale_result", message: "这批意见对应的结果版本已经变化，请重新读取任务后再准备。" });
+    }
+    if (request.comments.length === 0 || request.comments.length > 64) {
+      return Promise.reject({ code: "feedback_invalid", message: "这批意见的条数不合法，未准备交接。" });
+    }
+    if (previewParams.get("feedback") === "fail") {
+      return Promise.reject({ code: "feedback_write_failed", message: "无法写入意见交接文件，未打开 cliora。" });
+    }
+    const feedbackId = "9b8c7d6e-5f40-4213-8495-b6c7d8e9f0a2";
+    const digest = "d".repeat(64);
+    const url =
+      "cliora://review-feedback?v=1&feedbackId=" + feedbackId + "&reviewId=" + request.reviewId +
+      "&sessionId=" + request.sessionId + "&resultRevision=" + request.resultRevision + "&digest=" + digest;
+    previewReviewEvidence.feedback.push({ url, count: request.comments.length });
+    return ok({ feedbackId, digest, commentCount: request.comments.length, url }, 60);
   },
   cherryPickCommits: () => ok({ generation, created: 1, headOid: branch.headOid, conflicted: false, skipped: [], note: "已按从旧到新拣选到当前分支。没有推送。", snapshot: snapshot() }),
   /**

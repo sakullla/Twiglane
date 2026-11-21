@@ -268,6 +268,25 @@ impl ReviewSources {
         Ok(entry.result_revision)
     }
 
+    /// 这条来源已经发送过的结果版本；接受但还没返回过就是 Some(0)，没有来源是 None。
+    /// feedback-v1 用它核对这批意见是否属于当前结果。
+    pub fn current_return_revision(&self, review_id: &str, session_id: &str) -> Option<u64> {
+        let book = self.lock();
+        book.accepted
+            .iter()
+            .find(|entry| entry.request.review_id == review_id && entry.request.session_id == session_id)
+            .map(|entry| entry.last_return.as_ref().map(|result| result.revision).unwrap_or(0))
+    }
+
+    /// 原生成功边界记录过的提交/合入 HEAD；没有这类结果时是 None（不是 0 或空串）。
+    pub fn recorded_head(&self, review_id: &str, session_id: &str) -> Option<String> {
+        let book = self.lock();
+        book.accepted
+            .iter()
+            .find(|entry| entry.request.review_id == review_id && entry.request.session_id == session_id)
+            .and_then(|entry| entry.result.as_ref().map(|result| result.head_oid.clone()))
+    }
+
     pub fn forget(&self, review_id: &str, session_id: &str) -> Result<(), AppError> {
         self.request_for(review_id, session_id, false)?;
         let mut book = self.lock();
@@ -1303,6 +1322,39 @@ mod tests {
         assert!(sources.next_result_revision(REVIEW, SESSION).is_err());
         assert!(sources.stage_request(&request).is_err(), "a released source cannot be revived by an old link");
         assert!(ReviewSources::default().request_for(REVIEW, SESSION, true).is_err());
+    }
+
+
+    /// feedback-v1 准备只认已被接受的来源：未接受、已释放或换过会话都读不到结果版本。
+    /// 首次返回前是 0（还没有 returned），返回后是那一次的序号；原生记录的 HEAD 只来自
+    /// 真实成功的 Git 写入，没有记录时是 None，不用 0 或空串冒充。
+    #[test]
+    fn feedback_preparation_reads_the_accepted_source_revision_and_head() {
+        let sources = ReviewSources::default();
+        let request = request(REVIEW, "/work/a");
+        assert_eq!(sources.current_return_revision(REVIEW, SESSION), None);
+        sources.stage_request(&request).unwrap();
+        assert_eq!(sources.current_return_revision(REVIEW, SESSION), None, "未接受的来源不能准备交接");
+        sources.accept_path(REVIEW, SESSION, "/work/a".into()).unwrap();
+        assert_eq!(sources.current_return_revision(REVIEW, SESSION), Some(0));
+        assert_eq!(sources.recorded_head(REVIEW, SESSION), None);
+        assert_eq!(sources.current_return_revision(REVIEW, "other-session"), None);
+        assert_eq!(sources.recorded_head(REVIEW, "other-session"), None);
+
+        let revision = sources.next_result_revision(REVIEW, SESSION).unwrap();
+        let declaration = ReviewReturn {
+            review_id: REVIEW.into(),
+            session_id: SESSION.into(),
+            outcome: Outcome::Reviewed,
+            head_oid: None,
+            worktree_state: WorktreeState::Dirty,
+            meta: Vec::new(),
+        };
+        sources.remember_return(revision, &declaration).unwrap();
+        assert_eq!(sources.current_return_revision(REVIEW, SESSION), Some(revision));
+
+        sources.forget(REVIEW, SESSION).unwrap();
+        assert_eq!(sources.current_return_revision(REVIEW, SESSION), None);
     }
 
     #[test]

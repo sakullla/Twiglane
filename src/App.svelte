@@ -31,8 +31,22 @@
     selectClioraSource,
     hydrateClioraReviews,
     clioraSourceEpoch,
+    sameWorktreePath,
     watchClioraReviewLinks,
   } from "./lib/cliora-review.svelte";
+  import {
+    addComment as addTaskCommentRecord,
+    adoptCommentScope,
+    commentLines,
+    commentsIn,
+    deleteComment as deleteTaskCommentRecord,
+    editComment as editTaskCommentRecord,
+    feedbackComments,
+    forgetComments,
+    staleBatches as staleCommentBatches,
+    type CommentScope,
+    type ReviewCommentAnchor,
+  } from "./lib/review-comments.svelte";
   import { fileEditor, type EditContext } from "./lib/file-editor.svelte";
   import { normalizeError } from "./lib/errors";
   import { showMergeAbort } from "./lib/resolve";
@@ -322,7 +336,8 @@
   interface ReadingContext {
     view: WorkspaceView; selected: FileSelection | null; selectedSet: FileSelection[]; query: string;
     historyPath: string | null; historyQuery: string; taskRequest: TaskRequest | null;
-    taskSelectedPath: string | null; taskScope: { worktree: string; baselineOid: string; headOid: string } | null;
+    taskSelectedPath: string | null;
+    taskScope: { worktree: string; baselineOid: string; headOid: string; rangeVersion: string } | null;
   }
   const readingContexts = new CheckoutContexts<ReadingContext>();
   let git = $state<GitInfo | null>(null);
@@ -628,7 +643,34 @@
   let reviewSerial = 0;
   let taskReviewSerial = 0;
   /** 任务页报告的已解析范围：只有后端校验过的起点与 HEAD 才能作为任务快照 token 的依据。 */
-  let taskScope = $state.raw<{ worktree: string; baselineOid: string; headOid: string } | null>(null);
+  let taskScope = $state.raw<{ worktree: string; baselineOid: string; headOid: string; rangeVersion: string } | null>(null);
+  /**
+   * 任务审阅意见（R5）：只在当前来源的当前任务范围里成立。范围一变就整批失效，
+   * 不把旧行号映射到新内容上；准备送回是唯一会写交接文件与打开深链的动作。
+   */
+  let feedbackPreparing = $state(false);
+  let feedbackNotice = $state<string | null>(null);
+  let commentScope = $derived.by<CommentScope | null>(() => {
+    const source = clioraReview.source;
+    const scope = taskScope;
+    if (!source || !scope) return null;
+    // 意见只属于同一条来源工作树：别的仓库里打开的同名任务不会借用这次审查的身份。
+    if (!sameWorktreePath(scope.worktree, source.worktreePath)) return null;
+    return {
+      reviewId: source.reviewId,
+      sessionId: source.sessionId,
+      worktree: scope.worktree,
+      baselineOid: scope.baselineOid,
+      headOid: scope.headOid,
+      rangeVersion: scope.rangeVersion,
+    };
+  });
+  let taskComments = $derived(commentScope ? commentsIn(commentScope) : []);
+  let taskCommentKeys = $derived(commentScope ? commentLines(commentScope) : new Set<string>());
+  /** 上一条失效说明：只有来源还在时才成立，用户换会话后不冒充新意见的结论。 */
+  let staleCommentNotice = $derived(
+    clioraReview.source ? staleCommentBatches(clioraReview.source.reviewId)[0]?.reason ?? null : null,
+  );
   let taskSelectedPath = $state<string | null>(null);
   let taskReviewNav = $state.raw<ReviewQueueState | null>(null);
   let changesTarget = $derived<ReviewTarget | null>(
@@ -2224,11 +2266,77 @@
    * 任务页每次成功读取后报告它解析出的范围。任务快照 token 绑定这个范围，
    * 所以范围一变，进度立刻按新身份显示，旧标记不会被当成这次任务的结果。
    */
-  function adoptTaskScope(scope: { worktree: string; baselineOid: string; headOid: string } | null): void {
+  function adoptTaskScope(scope: { worktree: string; baselineOid: string; headOid: string; rangeVersion: string } | null): void {
     taskScope = scope;
     taskSelectedPath = scope ? taskSelectedPath : null;
+    // 任务范围变了：上一批意见整体失效，不猜新行号；提示在意见栏里如实说出来。
+    if (scope && commentScope) adoptCommentScope(commentScope);
+    if (!scope) feedbackNotice = null;
     if (scope) void reverifyTaskReviewed();
     else taskReviewNav = null;
+  }
+
+  /** 新增一条行意见：只写当前运行期内存，不改 Git、不发送提示词。 */
+  function addReviewComment(anchor: ReviewCommentAnchor, body: string): void {
+    const scope = commentScope;
+    if (!scope) throw new Error("当前没有任务范围，这条意见没有保存。");
+    addTaskCommentRecord(scope, anchor, body);
+    feedbackNotice = null;
+  }
+
+  function editReviewComment(id: string, body: string): void {
+    const scope = commentScope;
+    if (!scope) throw new Error("当前没有任务范围，这条意见没有保存。");
+    if (!editTaskCommentRecord(scope, id, body)) throw new Error("这条意见已经不在当前批次里，请重新读取任务。");
+    feedbackNotice = null;
+  }
+
+  function deleteReviewComment(id: string): void {
+    const scope = commentScope;
+    if (scope) deleteTaskCommentRecord(scope, id);
+    feedbackNotice = null;
+  }
+
+  /**
+   * 显式准备送回原任务：原生校验来源、结果版本、工作树与任务起点，写私有一次性文件并回读
+   * 核对后才打开只带标识与 digest 的深链。失败时不唤起 Cliora，意见与原任务都保留。
+   */
+  async function prepareTaskFeedback(): Promise<void> {
+    const scope = commentScope;
+    const source = clioraReview.source;
+    if (!scope || !source) {
+      notice("当前没有可送回的任务来源。", "warn");
+      return;
+    }
+    const comments = feedbackComments(scope);
+    if (comments.length === 0) {
+      notice("先写一条意见，再准备送回原任务。", "warn");
+      return;
+    }
+    if (feedbackPreparing) return;
+    feedbackPreparing = true;
+    feedbackNotice = null;
+    try {
+      const prepared = await api.prepareReviewFeedback({
+        reviewId: source.reviewId,
+        sessionId: source.sessionId,
+        // 结果版本以这条来源最近一次 returned 的序号为准；从未返回过就是 0。
+        resultRevision: clioraReview.lastReturn?.revision ?? 0,
+        worktreePath: scope.worktree,
+        rangeVersion: scope.rangeVersion,
+        baselineOid: scope.baselineOid,
+        headOid: scope.headOid,
+        comments,
+      });
+      feedbackNotice = "已准备 " + prepared.commentCount + " 条意见（批次 " + prepared.feedbackId.slice(0, 8) + "）。到 Cliora 里确认预览后再发送，这里没有发送任何内容。";
+      notice(feedbackNotice);
+    } catch (error) {
+      // 失败不打开 cliora：意见、原任务与所有草稿都保留，用户可以重新准备。
+      feedbackNotice = "这批意见没有准备好，Cliora 没有被唤起。意见仍保留，可以再试一次。";
+      showError(error);
+    } finally {
+      feedbackPreparing = false;
+    }
   }
 
   /**
@@ -3386,6 +3494,7 @@
     try {
       await api.clioraReviewForget(source.reviewId, source.sessionId);
       forgetClioraReview(source.reviewId);
+      forgetComments(source.reviewId);
       if (wasActive) closeTask();
       notice("已关闭此审查来源；仓库、阅读记录和草稿仍保留。需要审查时从 Cliora 重新发起。");
     } catch (error) { showError(error); }
@@ -5010,6 +5119,14 @@
       onReviewNav={(nav) => (taskReviewNav = nav)}
       onSummary={(summary) => (taskSummary = summary)}
       onEditFile={filesViewEnabled ? (path, line) => void editInFiles(path, line, "task") : undefined}
+      comments={taskComments}
+      commentKeys={taskCommentKeys}
+      commentNotice={commentScope ? feedbackNotice ?? staleCommentNotice : null}
+      onAddComment={addReviewComment}
+      onEditComment={editReviewComment}
+      onDeleteComment={deleteReviewComment}
+      onPrepareFeedback={commentScope ? () => void prepareTaskFeedback() : undefined}
+      feedbackPreparing={feedbackPreparing}
     />
   {/if}
 {/snippet}

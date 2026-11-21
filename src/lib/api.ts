@@ -11,6 +11,8 @@ import type {
   BranchTracking,
   ClioraOutcome,
   ClioraReturnSent,
+  ReviewFeedbackPrepared,
+  ReviewFeedbackRequest,
   DiffLineSelection,
   PreviewSource,
   DocumentSource,
@@ -968,4 +970,10 @@ export const api = {
     outcome: ClioraOutcome,
     headOid: string | null = null,
   ) => invoke<ClioraReturnSent>("cliora_review_return", { reviewId, sessionId, outcome, headOid }),
+  /**
+   * 准备 feedback-v1 交接：原生核对来源、结果版本、工作树与任务起点，写入私有一次性文件并
+   * 回读核对后才打开只带标识与 digest 的深链。失败时不打开 cliora，也不做任何 Agent 操作。
+   */
+  prepareReviewFeedback: (request: ReviewFeedbackRequest) =>
+    invoke<ReviewFeedbackPrepared>("prepare_review_feedback", { request }),
 };

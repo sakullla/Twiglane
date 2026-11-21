@@ -14,6 +14,7 @@
   import { createHighlight } from "../syntax/highlight.svelte";
   import { effectiveLanguage } from "../syntax/prefs.svelte";
   import { lineSegments } from "../syntax/segments";
+  import { commentLineKey } from "../review-comments.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
   import BinaryPreview from "./BinaryPreview.svelte";
   import FileNav from "./FileNav.svelte";
@@ -92,6 +93,23 @@
      */
     onReadDocument?: (sources: PreviewSources, side: "old" | "new", trigger: HTMLElement | null) => void;
     /**
+     * 当前任务范围里已挂意见的行身份（路径 + 块号 + 行类型 + 行号）。
+     * 只用来在行上标出「这里已经有意见」，不参与读取或写入。
+     */
+    comments?: ReadonlySet<string>;
+    /**
+     * 给某一行添加意见：只有任务审阅的只读差异传入。意见只保存在当前来源的运行期内存里，
+     * 不改 Git、不写索引，也不触发任何 Agent 操作。
+     */
+    onCommentLine?: (anchor: {
+      path: string;
+      hunkIndex: number;
+      kind: "add" | "del" | "context";
+      oldNo: number | null;
+      newNo: number | null;
+      quote: string;
+    }) => void;
+    /**
      * 在文件视图里编辑当前工作区这一侧的文件（带上当前位置附近的新侧行号）。
      * 只在新侧就是工作区文件时由调用方传入；历史、旧侧、删除与多文件聚合不传。
      * 差异本身仍然只读，保存只在文件视图的编辑器里发生。
@@ -140,6 +158,8 @@
     onViewAsText,
     onReadDocument,
     onEdit,
+    comments,
+    onCommentLine,
   }: Props = $props();
   let menu = $state<ContextMenuRequest | null>(null);
   /**
@@ -396,6 +416,48 @@
     const no = line.kind === "del" ? line.oldNo : line.newNo;
     const what = line.kind === "del" ? "删除" : "新增";
     return (isPicked(line) ? "取消选择" : "选择") + what + "第 " + (no ?? "?") + " 行";
+  }
+
+  /**
+   * 行意见：与行选共用同一份行身份，但完全不依赖暂存权限——只读的任务净差异也能加意见。
+   * 只有带块号的代码行可挂意见；块标题、meta 与「没有换行」标记都不接受。
+   */
+  let commentPath = $derived(selection?.path ?? "");
+
+  function commentKeyOf(line: { hunkIndex: number | null; kind: string; oldNo: number | null; newNo: number | null }): string {
+    return commentLineKey(commentPath, line);
+  }
+
+  function hasComment(line: { hunkIndex: number | null; kind: string; oldNo: number | null; newNo: number | null }): boolean {
+    return Boolean(comments?.size && comments.has(commentKeyOf(line)));
+  }
+
+  function canComment(line: { hunkIndex: number | null; kind: string; oldNo: number | null; newNo: number | null } | null | undefined): boolean {
+    if (!onCommentLine || !line || line.hunkIndex === null) return false;
+    return line.kind === "add" || line.kind === "del" || line.kind === "context";
+  }
+
+  function commentLabel(line: { kind: string; oldNo: number | null; newNo: number | null }): string {
+    const no = line.kind === "del" ? line.oldNo : line.newNo;
+    const what = line.kind === "del" ? "删除" : line.kind === "add" ? "新增" : "第";
+    return "给" + what + "第 " + (no ?? "?") + " 行加一条意见";
+  }
+
+  function commentAt(line: ViewLine): void {
+    if (!canComment(line) || !onCommentLine) return;
+    onCommentLine({
+      path: commentPath,
+      hunkIndex: line.hunkIndex as number,
+      kind: line.kind as "add" | "del" | "context",
+      oldNo: line.oldNo,
+      newNo: line.newNo,
+      quote: codeOf(line).slice(0, 200),
+    });
+  }
+
+  function commentCell(cell: { index?: number } | null): void {
+    const line = pickLineOf(cell);
+    if (line) commentAt(line);
   }
 
   function toggleLine(line: PickableLine): void {
@@ -1811,6 +1873,21 @@
                   <Icon name={isPicked(line) ? "check" : line.kind === "del" ? "minus" : "plus"} size={11} />
                 </button>
               {/if}
+              {#if canComment(line)}
+                <!-- 行意见：只读的任务净差异也能加，不改 Git，也不占用暂存入口。 -->
+                <button
+                  type="button"
+                  class="btn btn-sm hunk-btn line-comment"
+                  class:commented={hasComment(line)}
+                  aria-pressed={hasComment(line)}
+                  aria-label={commentLabel(line)}
+                  title={hasComment(line) ? commentLabel(line) + "（这一行已有意见）" : commentLabel(line)}
+                  data-comment-line={absolute}
+                  onclick={() => commentAt(line)}
+                >
+                  <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+                </button>
+              {/if}
             </div>
           {/each}
         {:else}
@@ -1859,7 +1936,7 @@
                   >{hunkLabel(hunk)}</button>
                 {/if}
               {/if}
-              {#if canPick(pickLineOf(row.left)) || canPick(pickLineOf(row.right))}
+              {#if canPick(pickLineOf(row.left)) || canPick(pickLineOf(row.right)) || canComment(pickLineOf(row.left)) || canComment(pickLineOf(row.right))}
                 <!-- 并排视图：左右两侧各自独立选择，身份与统一视图完全一致。 -->
                 <span class="side-picks">
                   {#if canPick(pickLineOf(row.left))}
@@ -1890,6 +1967,34 @@
                       onclick={(event) => pickRowSide(row.right, event.shiftKey)}
                     >
                       <Icon name={isPicked(pickLineOf(row.right)!) ? "check" : "plus"} size={11} />
+                    </button>
+                  {/if}
+                  {#if canComment(pickLineOf(row.left))}
+                    <button
+                      type="button"
+                      class="btn btn-sm hunk-btn line-comment"
+                      class:commented={hasComment(pickLineOf(row.left)!)}
+                      aria-pressed={hasComment(pickLineOf(row.left)!)}
+                      aria-label={commentLabel(pickLineOf(row.left)!)}
+                      title={commentLabel(pickLineOf(row.left)!)}
+                      data-comment-line={row.left?.index}
+                      onclick={() => commentCell(row.left)}
+                    >
+                      <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+                    </button>
+                  {/if}
+                  {#if canComment(pickLineOf(row.right))}
+                    <button
+                      type="button"
+                      class="btn btn-sm hunk-btn line-comment"
+                      class:commented={hasComment(pickLineOf(row.right)!)}
+                      aria-pressed={hasComment(pickLineOf(row.right)!)}
+                      aria-label={commentLabel(pickLineOf(row.right)!)}
+                      title={commentLabel(pickLineOf(row.right)!)}
+                      data-comment-line={row.right?.index}
+                      onclick={() => commentCell(row.right)}
+                    >
+                      <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
                     </button>
                   {/if}
                 </span>

@@ -183,6 +183,8 @@ fn capabilities_grant_only_explicit_terminal_ipc_not_a_generic_shell() {
         "allow-cliora-review-return",
         "allow-cliora-review-forget",
         "allow-cliora-review-sources",
+        // feedback-v1 交接只有一个命令：校验、写私有一次性文件、打开标识深链。没有正文出口。
+        "allow-prepare-review-feedback",
         // 终端只开放结构化命令：探测类型、列出/新建/附着/重启/关闭会话、写入、resize、
         // 全部终止与保存偏好。没有任何命令允许前端指定程序、参数或仓库之外的工作目录。
         "allow-terminal-profiles",

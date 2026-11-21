@@ -2775,3 +2775,24 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .popover-list:has(> .select-menu-option) { padding-top: var(--space-6); }
 .popover-foot .select-menu-action { gap: var(--space-8); }
 .popover-list:focus { outline: none; }
+
+/* 行意见：与行选同一列，但状态独立——已经挂过意见的行用强调色标出，空心时是「加一条」。
+   只读的任务净差异也用它，不做任何 Git 写入。 */
+.hunk-btn.line-comment { min-width: 24px; padding: 0 var(--space-6) !important; color: var(--fg-subtle); }
+.hunk-btn.line-comment:hover:not(:disabled) { color: var(--fg); background: var(--hover); }
+.hunk-btn.line-comment.commented { color: var(--accent-text); background: var(--accent-soft); }
+.hunk-btn.line-comment.commented:hover:not(:disabled) { background: var(--accent); color: var(--accent-fg); }
+
+/* 任务审阅的意见栏：标题行只留一句计数与两个动作，展开后才是可编辑列表与整批预览。 */
+.task-comments { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); }
+.task-comments-count { color: var(--fg-subtle); font-size: var(--text-xs); }
+.task-comments-panel { display: flex; flex-direction: column; gap: var(--space-8); padding: var(--space-8) var(--space-12); border-top: 1px solid var(--border); max-height: 320px; overflow: auto; }
+.task-comment { display: flex; flex-direction: column; gap: 4px; padding: var(--space-6) var(--space-8); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.task-comment-head { display: flex; align-items: baseline; gap: var(--space-8); font-size: var(--text-xs); color: var(--fg-subtle); }
+.task-comment-path { font-family: var(--font-mono); color: var(--fg); overflow-wrap: anywhere; }
+.task-comment-quote { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg-subtle); white-space: pre-wrap; overflow-wrap: anywhere; }
+.task-comment-body { font-size: var(--text-sm); color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
+.task-comment-actions { display: flex; gap: var(--space-6); }
+.task-comment-preview { font-family: var(--font-mono); font-size: var(--text-xs); white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-raised); padding: var(--space-8); border-radius: var(--radius-sm); }
+.task-comment-composer { display: flex; flex-direction: column; gap: var(--space-6); padding: var(--space-8) var(--space-12); border-top: 1px solid var(--border); }
+.task-comment-note { font-size: var(--text-xs); color: var(--fg-subtle); }

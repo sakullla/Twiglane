@@ -6,6 +6,7 @@
   import { shortOid } from "../history";
   import { branchLabel } from "../labels";
   import { LatestReadQueue } from "../latest-read";
+  import { anchorLabel, previewComments, type ReviewComment, type ReviewCommentAnchor } from "../review-comments.svelte";
   import type {
     AppFailure,
     ChangeKind,
@@ -95,7 +96,7 @@
     /** 回到改动视图的提交区：提交只按真实暂存范围执行。 */
     onOpenChanges?: () => void;
     /** 任务范围解析成功/撤下：外壳据此绑定快照 token 与进度记录。 */
-    onSnapshot?: (scope: { worktree: string; baselineOid: string; headOid: string } | null) => void;
+    onSnapshot?: (scope: { worktree: string; baselineOid: string; headOid: string; rangeVersion: string } | null) => void;
     /** 当前任务文件：命令面板的标记/暂存动作作用在这里。 */
     onSelection?: (path: string | null) => void;
     /** 未审阅队列状态：与改动视图共用同一套命令与按钮。 */
@@ -109,6 +110,18 @@
      * 保存后任务按新的代次重读。删除与冲突文件没有这个入口。
      */
     onEditFile?: (path: string, line: number | null) => void;
+    /** 当前任务范围的已存意见：外壳拥有这份状态，任务页只展示、编辑与预览。 */
+    comments?: readonly ReviewComment[];
+    /** 已挂意见的行身份，交给差异行上的气泡按钮标出。 */
+    commentKeys?: ReadonlySet<string>;
+    /** 上一条说明（意见已失效或这批已经准备好）：由外壳决定，这里只如实展示。 */
+    commentNotice?: string | null;
+    onAddComment?: (anchor: ReviewCommentAnchor, body: string) => void;
+    onEditComment?: (id: string, body: string) => void;
+    onDeleteComment?: (id: string) => void;
+    /** 显式准备送回原任务：只有这个动作会写交接文件并打开深链。 */
+    onPrepareFeedback?: () => void;
+    feedbackPreparing?: boolean;
   }
 
   let {
@@ -146,6 +159,14 @@
     onSummary,
     visible = true,
     onEditFile,
+    comments = [],
+    commentKeys = new Set<string>(),
+    commentNotice = null,
+    onAddComment,
+    onEditComment,
+    onDeleteComment,
+    onPrepareFeedback,
+    feedbackPreparing = false,
   }: Props = $props();
 
   /** 这些错误说明「任务范围不再成立」，要撤下结果而不是把它当成一次普通读取失败。 */
@@ -330,6 +351,79 @@
     selected = item;
   }
 
+  /*
+   * 行意见：只在这里保存「哪一行、写了什么」。意见不改 Git、不写索引，也不触发 Agent；
+   * 只有用户点「准备送回原任务」时外壳才会写交接文件。范围变化后外壳整体失效这批意见，
+   * 这里不做任何行号重映射。
+   */
+  let commentsOpen = $state(false);
+  let draftAnchor = $state<ReviewCommentAnchor | null>(null);
+  let draftBody = $state("");
+  let editingId = $state<string | null>(null);
+  let editBody = $state("");
+  let commentError = $state<string | null>(null);
+
+  let canPrepare = $derived(comments.length > 0 && !feedbackPreparing && Boolean(onPrepareFeedback));
+
+  function beginComment(anchor: ReviewCommentAnchor): void {
+    draftAnchor = anchor;
+    draftBody = "";
+    editingId = null;
+    commentError = null;
+    commentsOpen = true;
+  }
+
+  function cancelDraft(): void {
+    draftAnchor = null;
+    draftBody = "";
+  }
+
+  /** 新增一条意见：上限与空正文由意见状态层统一校验，失败消息原样给用户看。 */
+  function saveDraft(): void {
+    const anchor = draftAnchor;
+    if (!anchor || !onAddComment) return;
+    try {
+      onAddComment(anchor, draftBody);
+    } catch (error) {
+      commentError = error instanceof Error ? error.message : "这条意见没有保存。";
+      return;
+    }
+    commentError = null;
+    cancelDraft();
+  }
+
+  function beginEdit(comment: ReviewComment): void {
+    editingId = comment.id;
+    editBody = comment.body;
+    draftAnchor = null;
+    commentError = null;
+  }
+
+  function saveEdit(): void {
+    const id = editingId;
+    if (!id || !onEditComment) return;
+    try {
+      onEditComment(id, editBody);
+    } catch (error) {
+      commentError = error instanceof Error ? error.message : "这条意见没有保存。";
+      return;
+    }
+    commentError = null;
+    editingId = null;
+    editBody = "";
+  }
+
+  function cancelEdit(): void {
+    editingId = null;
+    editBody = "";
+    commentError = null;
+  }
+
+  function removeComment(id: string): void {
+    onDeleteComment?.(id);
+    if (editingId === id) cancelEdit();
+  }
+
   let fileMenu = $state<ContextMenuRequest | null>(null);
 
   function menuTargets(row: FileRow): FileRow[] {
@@ -463,7 +557,7 @@
       failure = null;
       invalidRange = false;
       // 范围身份交给外壳：任务快照 token 与已审阅记录都绑定这份解析结果。
-      onSnapshot?.({ worktree: result.worktree, baselineOid: result.baselineOid, headOid: result.headOid });
+      onSnapshot?.({ worktree: result.worktree, baselineOid: result.baselineOid, headOid: result.headOid, rangeVersion: result.rangeVersion });
       // 刷新后按路径保留仍然存在的选择；消失的文件让位给列表第一个。
       const keptFocus = keep(selected);
       const keptSet = selectedSet.flatMap((item) => {
@@ -702,6 +796,106 @@
     {/if}
   </header>
 
+  {#if onPrepareFeedback}
+    <!-- 意见是任务级的下一步：一行计数 + 两个动作，展开后才显示可编辑列表与整批预览。 -->
+    <div class="task-comments" role="group" aria-label="审阅意见">
+      <span class="task-comments-count">{comments.length > 0 ? comments.length + " 条意见" : "还没有意见"}</span>
+      <button
+        type="button"
+        class="btn btn-ghost btn-sm"
+        aria-expanded={commentsOpen}
+        aria-label={commentsOpen ? "收起意见列表" : "查看意见列表"}
+        onclick={() => (commentsOpen = !commentsOpen)}
+      >
+        <Icon name="list" size={13} /><span>{commentsOpen ? "收起意见" : "查看意见"}</span>
+      </button>
+      <button
+        type="button"
+        class="btn btn-secondary btn-sm"
+        disabled={!canPrepare}
+        aria-label="准备把这批意见送回原任务"
+        title={comments.length === 0
+          ? "先在差异行上写一条意见"
+          : "写一个私有的交接文件，并打开 cliora 深链；这里不会自动发送或修改代码"}
+        onclick={() => onPrepareFeedback?.()}
+      >
+        <Icon name="sparkle" size={13} /><span>{feedbackPreparing ? "正在准备…" : "准备送回原任务"}</span>
+      </button>
+      {#if commentNotice}<span class="task-comment-note" role="status">{commentNotice}</span>{/if}
+    </div>
+  {/if}
+
+  {#if draftAnchor}
+    <form
+      class="task-comment-composer"
+      aria-label="给这一行添加意见"
+      onsubmit={(event) => {
+        event.preventDefault();
+        saveDraft();
+      }}
+    >
+      <div class="task-comment-head">
+        <span class="task-comment-path">{draftAnchor.path}</span>
+        <span>{anchorLabel(draftAnchor)}</span>
+      </div>
+      {#if draftAnchor.quote}<p class="task-comment-quote">{draftAnchor.quote}</p>{/if}
+      <textarea
+        class="textarea"
+        rows={3}
+        bind:value={draftBody}
+        aria-label="意见正文"
+        placeholder="这一行要改成什么样？说清楚就够了，不会自动发送。"
+      ></textarea>
+      <div class="task-comment-actions">
+        <button
+          type="submit"
+          class="btn btn-primary btn-sm"
+          disabled={draftBody.trim() === ""}
+          title={draftBody.trim() === "" ? "先写一句这一行要改成什么" : "把这条意见加到当前批次"}
+        >添加意见</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick={cancelDraft}>取消</button>
+      </div>
+    </form>
+  {/if}
+
+  {#if commentsOpen}
+    <div class="task-comments-panel" aria-label="意见列表">
+      {#if comments.length === 0}
+        <p class="task-comment-note">还没有意见。在差异行右侧点气泡按钮，就能给那一行写一条。</p>
+      {:else}
+        {#each comments as comment (comment.id)}
+          <article class="task-comment" data-comment-id={comment.id}>
+            <div class="task-comment-head">
+              <span class="task-comment-path">{comment.anchor.path}</span>
+              <span>{anchorLabel(comment.anchor)}</span>
+            </div>
+            {#if comment.anchor.quote}<p class="task-comment-quote">{comment.anchor.quote}</p>{/if}
+            {#if editingId === comment.id}
+              <textarea
+                class="textarea"
+                rows={3}
+                bind:value={editBody}
+                aria-label={comment.anchor.path + " 的意见正文"}
+              ></textarea>
+              <div class="task-comment-actions">
+                <button type="button" class="btn btn-primary btn-sm" onclick={saveEdit}>保存意见</button>
+                <button type="button" class="btn btn-ghost btn-sm" onclick={cancelEdit}>取消</button>
+              </div>
+            {:else}
+              <p class="task-comment-body">{comment.body}</p>
+              <div class="task-comment-actions">
+                <button type="button" class="btn btn-ghost btn-sm" onclick={() => beginEdit(comment)}>编辑</button>
+                <button type="button" class="btn btn-ghost btn-sm" onclick={() => removeComment(comment.id)}>删除</button>
+              </div>
+            {/if}
+          </article>
+        {/each}
+        <pre class="task-comment-preview" aria-label="整批意见预览">{previewComments(comments)}</pre>
+      {/if}
+      {#if commentError}<p class="task-comment-note" role="alert">{commentError}</p>{/if}
+    </div>
+  {/if}
+
   {#if phase === "failed"}
     <div class="empty task-failure" role="alert">
       <span class="empty-icon err"><Icon name="alert-circle" size={22} /></span>
@@ -817,6 +1011,8 @@
               onStage={() => {}}
               onUnstage={() => {}}
               onDiscard={() => {}}
+              comments={commentKeys}
+              onCommentLine={beginComment}
               onClear={() => selected && select(selected)}
             />
           {:else}
@@ -838,6 +1034,8 @@
               onReadDocument={onReadDocument}
               {fullFile}
               onFullFile={onFullFile}
+              comments={commentKeys}
+              onCommentLine={beginComment}
               asText={asTextFor !== null && asTextFor === selected?.path}
               onViewAsText={(next) => {
                 asTextFor = next && selected ? selected.path : null;

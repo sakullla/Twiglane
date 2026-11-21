@@ -13,6 +13,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clioraReview, clioraBaseline, recordClioraCommit, resetClioraReview } from "../src/lib/cliora-review.svelte";
 import { resetReviewProgress } from "../src/lib/review-progress.svelte";
+import { resetReviewComments } from "../src/lib/review-comments.svelte";
 import type { DiffLine, DiffResponse, FileChange, StatusSnapshot } from "../src/lib/types";
 
 const WORKTREE = "C:/work/代码 demo";
@@ -261,11 +262,13 @@ beforeEach(() => {
   resetMocks();
   resetClioraReview();
   resetReviewProgress();
+  resetReviewComments();
 });
 
 afterEach(() => {
   cleanup();
   resetClioraReview();
+  resetReviewComments();
 });
 
 /** 等到外壳注册好 deep link 监听，返回运行中链接的处理函数。 */
@@ -1056,5 +1059,83 @@ describe("Cliora 远端审查入口", () => {
     expect(mocks.api.openRepository).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "返回 Cliora" })).toBeNull();
     cleanup();
+  });
+});
+
+describe("feedback-v1 准备送回", () => {
+  async function openTaskWithDiff() {
+    deepLink.getCurrent.mockResolvedValue([URL_A]);
+    mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE));
+    mocks.api.taskReview.mockResolvedValue(taskFor(BASELINE));
+    mocks.api.loadTaskDiff.mockImplementation(async (_worktree: string, _base: string, _head: string, path: string) => diffFor(path));
+    await mountShell();
+    await waitFor(() => expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy());
+    await waitFor(() => expect(document.querySelector("[data-comment-line]")).toBeTruthy(), { timeout: 8000 });
+  }
+
+  async function composeComment(text: string): Promise<void> {
+    await fireEvent.click(document.querySelector<HTMLButtonElement>("[data-comment-line]")!);
+    const form = await screen.findByRole("form", { name: "给这一行添加意见" });
+    await fireEvent.input(within(form).getByRole("textbox", { name: "意见正文" }), { target: { value: text } });
+    await fireEvent.click(within(form).getByRole("button", { name: "添加意见" }));
+  }
+
+  it("准备时带来源、结果版本与任务范围，成功只说明已准备，不声称已发送", async () => {
+    const prepared = {
+      feedbackId: "8b7c6d5e-4f30-4121-8394-a5b6c7d8e9f1",
+      digest: "a".repeat(64),
+      commentCount: 1,
+      url: "cliora://review-feedback?v=1&feedbackId=8b7c6d5e-4f30-4121-8394-a5b6c7d8e9f1",
+    };
+    mocks.api.prepareReviewFeedback.mockResolvedValueOnce(prepared);
+    await openTaskWithDiff();
+
+    // 没有意见时按钮是禁用的：不会凭空生成 feedbackId。
+    const empty = screen.getByRole("button", { name: "准备把这批意见送回原任务" });
+    expect((empty as HTMLButtonElement).disabled).toBe(true);
+    expect(mocks.api.prepareReviewFeedback).not.toHaveBeenCalled();
+
+    await composeComment("这一行要在失败时保留上一份结果。");
+    await waitFor(() => expect(document.body.textContent).toContain("1 条意见"));
+
+    await fireEvent.click(screen.getByRole("button", { name: "准备把这批意见送回原任务" }));
+    await waitFor(() => expect(mocks.api.prepareReviewFeedback).toHaveBeenCalledTimes(1));
+    const request = mocks.api.prepareReviewFeedback.mock.calls[0][0];
+    expect(request).toMatchObject({
+      reviewId: REVIEW_A,
+      sessionId: SESSION_A,
+      resultRevision: 0,
+      worktreePath: WORKTREE,
+      rangeVersion: "range-" + BASELINE,
+      baselineOid: BASELINE,
+      headOid: BASELINE,
+    });
+    expect(request.comments).toHaveLength(1);
+    expect(request.comments[0]).toMatchObject({ path: "src/a.ts", kind: expect.stringMatching(/add|del|context/), body: "这一行要在失败时保留上一份结果。" });
+    // 准备不等于发送：没有 PTY 写入、没有 Git 写入、也没有返回事件。
+    expect(mocks.api.terminalWrite).not.toHaveBeenCalled();
+    expect(mocks.api.commitChanges).not.toHaveBeenCalled();
+    expect(mocks.api.clioraReviewReturn).not.toHaveBeenCalled();
+    await waitFor(() => expect(document.body.textContent).toContain("已准备 1 条意见"));
+    expect(document.body.textContent).not.toContain("已发送");
+  });
+
+  it("准备失败时不唤起 cliora，意见与提示都保留并可以再试", async () => {
+    mocks.api.prepareReviewFeedback.mockRejectedValueOnce({
+      code: "feedback_write_failed",
+      message: "无法写入意见交接文件，未打开 cliora。",
+    });
+    await openTaskWithDiff();
+    await composeComment("这条意见要留在界面上。");
+    await waitFor(() => expect(document.body.textContent).toContain("1 条意见"));
+
+    await fireEvent.click(screen.getByRole("button", { name: "准备把这批意见送回原任务" }));
+    await waitFor(() => expect(document.body.textContent).toContain("没有准备好"));
+    // 意见仍在，任务仍可继续编辑；没有发送、没有 Git 写入。
+    expect(document.body.textContent).toContain("1 条意见");
+    await fireEvent.click(screen.getByRole("button", { name: "准备把这批意见送回原任务" }));
+    await waitFor(() => expect(mocks.api.prepareReviewFeedback).toHaveBeenCalledTimes(2));
+    expect(mocks.api.terminalWrite).not.toHaveBeenCalled();
+    expect(mocks.api.clioraReviewReturn).not.toHaveBeenCalled();
   });
 });

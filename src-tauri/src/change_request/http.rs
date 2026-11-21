@@ -4,6 +4,7 @@
 //! 不自动跟随重定向（避免把令牌带到别的来源），响应体在读取过程中限界。
 //! 这里只返回状态、头和限界后的字节，不记录请求头或响应原文。
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -29,6 +30,7 @@ impl Default for HttpSettings {
     }
 }
 
+#[derive(Clone)]
 pub struct Http {
     client: reqwest::Client,
     body_limit: usize,
@@ -66,6 +68,8 @@ impl Http {
             .redirect(reqwest::redirect::Policy::none())
             .timeout(settings.timeout)
             .connect_timeout(settings.connect_timeout)
+            .pool_max_idle_per_host(1)
+            .pool_idle_timeout(Duration::from_secs(30))
             .no_proxy()
             .build()
             .map_err(|_| AppError::new("change_request_network", "无法初始化平台请求。"))?;
@@ -76,7 +80,12 @@ impl Http {
     }
 
     pub fn default_app() -> Result<Self, AppError> {
-        Self::new(HttpSettings::default())
+        static APP: OnceLock<Http> = OnceLock::new();
+        if let Some(http) = APP.get() {
+            return Ok(http.clone());
+        }
+        let http = Self::new(HttpSettings::default())?;
+        Ok(APP.get_or_init(|| http).clone())
     }
 
     /// 不带认证的读取：只用于平台发现。认证头不会出现在这里。

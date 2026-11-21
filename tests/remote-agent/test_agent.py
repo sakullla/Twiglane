@@ -101,6 +101,14 @@ class AgentTests(unittest.TestCase):
         self.assertFalse(self.client.call("open", path=str(self.tmp))["ok"])
         self.assertEqual(self.client.call("status", repo=linked_state["repo"])["error"]["code"], "no_worktree")
 
+    def test_worktree_paths_with_literal_newlines(self):
+        renamed = self.tmp / "repo\nwith newline"
+        self.root.rename(renamed)
+        self.root = renamed
+        state = self.open()
+        self.assertEqual(state["root"], str(renamed))
+        self.assertEqual(self.client.result("status", repo=state["repo"])["generation"], state["generation"])
+
     def test_snapshot_task_net_diff_and_literal_paths(self):
         initial = self.git("rev-parse", "HEAD")
         path = "file :[a]* 空.txt"

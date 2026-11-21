@@ -4409,19 +4409,38 @@
   async function mergeMeasured(source: string, content: string) {
     const current = opened;
     if (!current) throw new Error("没有打开的仓库");
+    const epoch = repositoryEpoch;
     live = "正在合并";
     const session = await api.startMerge(current.summary.path, source, null, "merge", current.generation, nextId());
     applySnapshot(session.snapshot);
     openTask("merge");
     const conflict = session.conflicts[0];
     if (!conflict) throw new Error("没有出现冲突");
-    await api.conflictView(current.summary.path, conflict.path, session.generation, nextId());
+    const path = current.summary.path;
+    let view;
+    try {
+      view = await api.conflictView(path, conflict.path, session.generation, nextId());
+    } catch (error) {
+      const failure = normalizeError(error);
+      if (failure.code !== "stale" || failure.generation === undefined || repositoryEpoch !== epoch) throw error;
+      // The watcher can advance generation for the merge's own writes. Refresh
+      // the read once, with the same conflict set and merge still in progress.
+      const latest = await api.mergeSession(path, failure.generation, nextId());
+      if (repositoryEpoch !== epoch ||
+          latest.operation !== session.operation || latest.headOid !== session.headOid ||
+          latest.source !== session.source || latest.target !== session.target ||
+          latest.conflicts.length !== session.conflicts.length ||
+          !session.conflicts.every((entry, index) =>
+            entry.path === latest.conflicts[index].path && entry.kind === latest.conflicts[index].kind)) throw error;
+      view = await api.conflictView(path, conflict.path, latest.generation, nextId());
+    }
+    if (repositoryEpoch !== epoch) throw new Error("合并测量的仓库已切换");
     const resolved = await api.resolveConflict(
       current.summary.path,
       conflict.path,
       "text",
       content,
-      session.generation,
+      view.generation,
       nextId(),
     );
     const done = await api.completeMerge(current.summary.path, "合并分支", resolved.generation, nextId());

@@ -136,6 +136,9 @@ const mocks = vi.hoisted(() => ({
   branchState: vi.fn(),
   mergePreview: vi.fn(),
   startMerge: vi.fn(),
+  conflictView: vi.fn(),
+  resolveConflict: vi.fn(),
+  completeMerge: vi.fn(),
   switchBranch: vi.fn(),
   tagState: vi.fn(),
   stashState: vi.fn(),
@@ -291,6 +294,35 @@ describe("原生状态测量", () => {
     render(App);
     await waitFor(() => expect(mocks.measureSample).toHaveBeenCalledWith("measure-error", { message: "仓库状态刷新失败" }));
     expect(mocks.measureSample.mock.calls.some(([name]) => name === "status-refresh")).toBe(false);
+  });
+
+  it("合并测量遇到监听刷新时重读同一冲突，只执行一次写入", async () => {
+    const initial = {
+      ...mergeSessionWith("merge"),
+      source: "other",
+      conflicts: [{ path: "conflict.txt", kind: "UU", summary: "" }],
+      unresolved: 1,
+      snapshot,
+    };
+    mocks.startMerge.mockResolvedValue(initial);
+    mocks.mergeSession.mockResolvedValue({ ...initial, generation: 5, snapshot: { ...snapshot, generation: 5 } });
+    const side = { present: true, binary: false, truncated: false, text: "conflict\n", summary: "" };
+    mocks.conflictView.mockImplementation(async (_path: string, path: string, generation: number) => {
+      if (generation === 4) throw { code: "stale", message: "状态已变化", generation: 5 };
+      return { path, generation, kind: "UU", editable: true, ours: side, theirs: side, result: side, note: "" };
+    });
+    mocks.resolveConflict.mockResolvedValue({ ...initial, generation: 6 });
+    mocks.completeMerge.mockResolvedValue({ oid: "b".repeat(40), snapshot: { ...snapshot, generation: 7 } });
+    mocks.measureProbe.mockResolvedValue({ enabled: true, script: { steps: [
+      { op: "open", repo: repoPath, expectChanges: changes.length },
+      { op: "merge", source: "other", content: "resolved\n" },
+    ] } });
+    render(App);
+    await waitFor(() => expect(mocks.measureSample).toHaveBeenCalledWith("merge", expect.objectContaining({ contentOk: true })));
+    expect(mocks.conflictView).toHaveBeenCalledWith(repoPath, "conflict.txt", 5, expect.any(Number));
+    expect(mocks.startMerge).toHaveBeenCalledTimes(1);
+    expect(mocks.resolveConflict).toHaveBeenCalledExactlyOnceWith(repoPath, "conflict.txt", "text", "resolved\n", 5, expect.any(Number));
+    expect(mocks.completeMerge).toHaveBeenCalledTimes(1);
   });
 
   it("双文件的键盘验收等到命令面板焦点并记录两次实际选择变化", async () => {

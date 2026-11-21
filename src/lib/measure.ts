@@ -1,4 +1,5 @@
 import { api } from "./api";
+import { normalizeError } from "./errors";
 import { highlightLines } from "./syntax/client";
 
 export interface OpenedView {
@@ -137,9 +138,11 @@ export async function startDesktopMeasure(actions: MeasureActions): Promise<void
     }
     await api.measureFinish();
   } catch (error) {
-    const message = error instanceof Error ? error.message : "测量步骤失败";
     try {
-      await sample("measure-error", { message });
+      const failure = normalizeError(error);
+      await sample("measure-error", error instanceof Error
+        ? { message: error.message }
+        : { message: failure.message, code: failure.code, generation: failure.generation });
       await api.measureFinish();
     } catch {
       // 测量进程由外部超时回收。

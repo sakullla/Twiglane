@@ -5,6 +5,7 @@ import base64
 import contextlib
 import fcntl
 import hashlib
+import io
 import json
 import os
 import queue
@@ -83,8 +84,18 @@ def git(root, *args, ok=(0,), env=None, input_bytes=None):
                 process.communicate(input=input_bytes)
                 out = b""
             else:
-                out = process.stdout.read(MAX_OUTPUT + 1)
-                require(len(out) <= MAX_OUTPUT, "output_limit", "Git output exceeds the agent limit")
+                # BufferedReader.read(n) can reserve n bytes even for a short
+                # result. Keep the same ceiling without preallocating it.
+                with io.BytesIO() as buffer:
+                    remaining = MAX_OUTPUT + 1
+                    while remaining:
+                        chunk = process.stdout.read(min(remaining, 64 * 1024))
+                        if not chunk:
+                            break
+                        buffer.write(chunk)
+                        remaining -= len(chunk)
+                    require(remaining > 0, "output_limit", "Git output exceeds the agent limit")
+                    out = buffer.getvalue()
                 process.wait()
             require(process.returncode in ok, "git_failed", "Git could not complete the operation")
             return out
@@ -99,6 +110,15 @@ def git_path(root, *args):
     raw = git(root, *args)
     require(raw.endswith(b"\n"), "git_failed", "Git did not return a directory")
     return Path(filename(raw[:-1]))
+
+
+def worktree_directories(root):
+    options = ("--show-toplevel", "--absolute-git-dir", "--git-common-dir")
+    output = git(root, "rev-parse", *options).split(b"\n")
+    if len(output) == 4 and output[-1] == b"":
+        return tuple(Path(filename(path)) for path in output[:-1])
+    # Git does not delimit these paths with NUL. Preserve literal newlines.
+    return tuple(git_path(root, "rev-parse", option) for option in options)
 
 
 def head_branch(root):
@@ -128,11 +148,11 @@ class Worktree:
     def __init__(self, path):
         require(Path(path).is_absolute(), "invalid_path", "An absolute worktree path is required")
         root = Path(path).resolve(strict=True)
-        require(root.is_dir() and git_path(root, "rev-parse", "--show-toplevel").resolve() == root,
-                "not_worktree", "Select the worktree root directory")
+        require(root.is_dir(), "not_worktree", "Select the worktree root directory")
+        top, gitdir, common = worktree_directories(root)
+        require(top.resolve() == root, "not_worktree", "Select the worktree root directory")
         self.root = root
-        self.gitdir = git_path(root, "rev-parse", "--absolute-git-dir").resolve(strict=True)
-        common = git_path(root, "rev-parse", "--git-common-dir")
+        self.gitdir = gitdir.resolve(strict=True)
         self.common = (root / common).resolve(strict=True)
         self.key = digest(encode([host_name(), directory_key(root), directory_key(self.gitdir)]))
         self.lock_key = digest(encode(directory_key(self.common)))
@@ -516,20 +536,21 @@ def baseline_file_index(root, baseline, path):
 class DiffStream:
     def __init__(self, tree, context, snapshot):
         _, _, path, view, baseline = context
-        state = {row["path"]: row["xy"] for row in snapshot["files"]}
+        state = next((row["xy"] for row in snapshot["files"] if row["path"] == path), None)
+        untracked = state is not None and state[1] == "?"
         options = ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color"]
         if view == "task":
             require(path in snapshot["reviewFiles"], "invalid_selection", "File is not in the task diff")
         else:
-            require(path in state, "invalid_selection", "File is not in the current worktree changes")
+            require(state is not None, "invalid_selection", "File is not in the current worktree changes")
         self.cleanup = contextlib.ExitStack()
         env = None
-        if view == "task" and state.get(path, "  ")[1] == "?":
+        if view == "task" and untracked:
             env = self.cleanup.enter_context(baseline_file_index(tree.root, baseline, path))
         if env is not None:
             args = options + ["--", path]
             self.exit_codes = (0,)
-        elif state.get(path, "  ")[1] == "?" and view != "staged":
+        elif untracked and view != "staged":
             mode = (tree.root / path).lstat().st_mode
             require(stat.S_ISREG(mode) or stat.S_ISLNK(mode), "invalid_selection", "Unsupported file type")
             args = options + ["--no-index", "--", "/dev/null", path]

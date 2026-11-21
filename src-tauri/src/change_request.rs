@@ -147,8 +147,8 @@ pub(crate) async fn prepare_with(
             source,
             generation,
         } => {
-            let url = remote_url(&state, &remote)?;
-            let repo = remote::resolve_repository(http, &url).await?;
+            let url = remote_url(&state.remotes, &remote)?;
+            let repo = remote::resolve_repository(http, url).await?;
             Ok(ChangeRequestPrepare {
                 status: "ready".to_string(),
                 choices: Vec::new(),
@@ -243,8 +243,8 @@ pub(crate) async fn create_with(
         }
     };
 
-    let url = remote_url(&state, &remote)?;
-    let repo = remote::resolve_repository(http, &url).await?;
+    let url = remote_url(&state.remotes, &remote)?;
+    let repo = remote::resolve_repository(http, url).await?;
     ensure_secure_channel(&repo)?;
 
     let token = match store.load(&repo.token_key()) {
@@ -447,9 +447,9 @@ async fn token_repository(
     http: &Http,
 ) -> Result<Repository, AppError> {
     ops::require_change_requests(backend)?;
-    let state = sync::change_request_git_state(backend, path, generation, request_id).await?;
-    let url = remote_url(&state, remote)?;
-    remote::resolve_repository(http, &url).await
+    let remotes = sync::change_request_remotes(backend, path, generation, request_id).await?;
+    let url = remote_url(&remotes, remote)?;
+    remote::resolve_repository(http, url).await
 }
 
 // ---------------------------------------------------------------- 选择与校验
@@ -533,15 +533,15 @@ async fn tracking_has(
     remote: &str,
     branch: &str,
 ) -> Result<(bool, u64), AppError> {
-    let (branches, generation) = sync::remote_tracking_branches(
+    sync::remote_tracking_ref_exists(
         backend,
         path,
         remote,
+        branch,
         state.generation,
         internal_request_id(),
     )
-    .await?;
-    Ok((branches.iter().any(|name| name == branch), generation))
+    .await
 }
 
 /// 上游远程不在远程列表时返回 None，让调用方退回候选选择。
@@ -594,18 +594,15 @@ fn upstream_remote(state: &sync::ChangeRequestGitState) -> Option<(String, Strin
         .then(|| (name.to_string(), branch.to_string()))
 }
 
-fn remote_url(state: &sync::ChangeRequestGitState, name: &str) -> Result<String, AppError> {
-    let Some(remote) = state.remotes.iter().find(|remote| remote.name == name) else {
+fn remote_url<'a>(remotes: &'a [RemoteInfo], name: &str) -> Result<&'a str, AppError> {
+    let Some(remote) = remotes.iter().find(|remote| remote.name == name) else {
         return Err(AppError::new(
             "change_request_remote_missing",
             "没有这个远程，未创建 MR/PR。",
         ));
     };
     // 创建针对实际推送仓库：优先 push URL。
-    Ok(remote
-        .push_url
-        .clone()
-        .unwrap_or_else(|| remote.fetch_url.clone()))
+    Ok(remote.push_url.as_deref().unwrap_or(&remote.fetch_url))
 }
 
 fn choice_for(remote: &RemoteInfo) -> ChangeRequestRemoteChoice {

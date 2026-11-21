@@ -1758,6 +1758,12 @@ pub fn remote_tracking_command(git: &Path, root: &Path, remote: &str) -> (PathBu
     (git.to_path_buf(), args)
 }
 
+pub fn verify_ref_command(git: &Path, root: &Path, reference: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend(["show-ref", "--verify", "--quiet", "--", reference].map(OsString::from));
+    (git.to_path_buf(), args)
+}
+
 pub fn push_reflog_command(git: &Path, root: &Path, refname: &str) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.extend([

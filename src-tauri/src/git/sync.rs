@@ -11,7 +11,7 @@ use crate::git::command::{
     create_branch_command, delete_branch_command, delete_remote_branch_command,
     fetch_command, publish_command, pull_ff_command, push_command, remote_names_command,
     push_to_remote_command, push_to_upstream_command,
-    remote_add_command, remote_set_url_command, remote_tracking_command, remote_verbose_command,
+    remote_add_command, remote_set_url_command, remote_verbose_command, verify_ref_command,
     rename_branch_command,
     set_upstream_to_command, status_command, switch_command, switch_track_as_command,
     switch_track_command,
@@ -240,61 +240,41 @@ pub(crate) async fn change_request_git_state(
     ))
 }
 
-/// 某个远程上已有的分支名（来自本地远程跟踪引用）。用来在创建前确认来源分支
-/// 确实已经存在于所选远程；这里只读引用，不 fetch、不推送。
-pub(crate) async fn remote_tracking_branches(
+/// 令牌操作只依赖远程地址，不读取工作区状态或分支列表。
+pub(crate) async fn change_request_remotes(
+    backend: &Backend,
+    path: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<Vec<RemoteInfo>, AppError> {
+    let root = repo_root(path)?;
+    let git = require_git(backend).await?;
+    let (pairs, _) = settle_read!(backend, &root, generation, |current| {
+        remote_pairs(backend, &root, &git.path, current, request_id).await
+    })?;
+    Ok(pairs.into_iter().map(RemotePair::present).collect())
+}
+
+/// Only verify the selected tracking ref, at the generation that read its remote.
+pub(crate) async fn remote_tracking_ref_exists(
     backend: &Backend,
     path: &str,
     remote: &str,
+    branch: &str,
     generation: u64,
     request_id: u64,
-) -> Result<(Vec<String>, u64), AppError> {
+) -> Result<(bool, u64), AppError> {
     let root = repo_root(path)?;
     let git = require_git(backend).await?;
-    let (program, args) = remote_tracking_command(&git.path, &root, remote);
-    let mut expected = generation;
-    let mut scheduled = None;
-    for attempt in 0..2 {
-        match read_repo(
-            backend,
-            &root,
-            expected,
-            request_id,
-            program.clone(),
-            args.clone(),
-        )
-        .await
-        {
-            Ok(read) => {
-                scheduled = Some(read);
-                break;
-            }
-            Err(error) if error.code == "stale" && attempt == 0 => {
-                expected = error.generation.unwrap_or(expected);
-            }
-            Err(error) => return Err(error),
-        }
+    let reference = format!("refs/remotes/{remote}/{branch}");
+    let (program, args) = verify_ref_command(&git.path, &root, &reference);
+    let read = read_repo(backend, &root, generation, request_id, program, args).await?;
+    match read.output.exit_code {
+        0 => Ok((true, read.generation)),
+        1 => Ok((false, read.generation)),
+        _ => Err(git_failure("remote_failed", &read.output, "无法读取远程分支。")
+            .with_generation(read.generation)),
     }
-    let Some(scheduled) = scheduled else {
-        return Err(AppError::new(
-            "change_request_stale",
-            "仓库状态在读取过程中持续变化，请刷新后重试。",
-        ));
-    };
-    if scheduled.output.exit_code != 0 {
-        return Err(
-            git_failure("remote_failed", &scheduled.output, "无法读取远程分支。")
-                .with_generation(scheduled.generation),
-        );
-    }
-    let prefix = format!("refs/remotes/{remote}/");
-    let text = String::from_utf8_lossy(&scheduled.output.stdout);
-    let branches = text
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix(&prefix))
-        .map(str::to_string)
-        .collect();
-    Ok((branches, scheduled.generation))
 }
 
 pub async fn add_remote(

@@ -1,6 +1,6 @@
 # AI 编码界面与交互验证（2026-11-09 批次，T6）
 
-本目录是工作流 `2026-11-09-ai-coding-ui-ux` 的 T6（隔离正式 UI 验证输出并修复既有 Markdown 文件预览场景）实际运行产物。
+本目录归档工作流 `2026-11-09-ai-coding-ui-ux` 的 T6 截图与验证结果。实际采集的 84 张中，每个视图或失败状态各保留一张，共 21 张。
 **这里的全部结论都只覆盖「Chrome headless + mock 数据」**，不代表真实 Git 行为、桌面 WebView、安装包或其它平台。
 
 ## 一键复跑
@@ -9,19 +9,17 @@
 # 正式验证：默认写操作系统临时目录，不改写候选输入
 node scripts/run-ui-verification.mjs
 
-# 归档证据：只有显式 --out 才写本目录
-node scripts/run-ui-verification.mjs --out docs/verification/ai-coding-ui-ux-2026-11-09
+# 当前新归档使用单独目录
+node scripts/run-ui-verification.mjs --out /tmp/twiglane-ai-coding-ui
 ```
 
-顺序是：确认 1430 空闲 → 用 `scripts/ui-preview/vite.config.mjs` 起 mock 预览 → 轮询
-`/__ui-preview/health` 直到 `mockApi: true` → 跑 `check-scenarios.mjs`（33 个场景）→
-跑 `baseline-shots.mjs`（两主题 × 1280×840/900×600 + 失败态）→ 写 `report.json`。
+当前 runner 使用独立预览端口，确认 mock 接线后执行场景与精选截图，再写入 `report.json`。下列测试计数对应历史采集。
 
 runner 对证据的要求（任一不满足即输出 `failed` 并以非 0 退出）：
 
 - 场景与截图两个子进程的退出码都必须是 0；
 - 场景数必须大于 0，失败场景必须为 0；
-- `manifest.json` 必须是本次运行新写出的（`capturedAt` 不早于运行开始），且 `workflow` 等于 `2026-11-09-ai-coding-ui-ux`；
+- `manifest.json` 必须是本次运行新写出的（`capturedAt` 不早于运行开始），且 `workflow` 匹配本次请求的批次 ID；
 - manifest 里逐张登记的截图文件必须真的存在。
 
 ## 本次实际结果
@@ -30,28 +28,28 @@ runner 对证据的要求（任一不满足即输出 `failed` 并以非 0 退出
 | --- | --- |
 | 健康端点 | `mockApi: true`，`resolvedApi: scripts/ui-preview/mock-api.ts` |
 | 场景自检 | **33 / 33 通过**（原 3 个 Markdown 场景已真实修复，见下） |
-| 截图 | **84 张**：对照 32（`group: "baseline"`）、Markdown 8、失败/未知状态 44（`group: "failure"`） |
+| 截图 | 历史采集 **84 张**（32 / 8 / 44）。当前归档 **21 张**（对照 8 / Markdown 2 / 失败态 11） |
 | manifest | `workflow: 2026-11-09-ai-coding-ui-ux`、`task: T6`、`skipped: []`（没有跳过项） |
 | 对比度门禁 | `node scripts/check-contrast.mjs` 通过（1454 对，正文最低 4.59:1，交互最低 3.16:1） |
 | 环境 | Windows x64、Node v26.4.0、Chrome 157.0.8103.38（DevTools 协议驱动，headless） |
 
-逐张清单与 sha256 见 `manifest.json`；本次汇总（含子进程退出码、失败原因与限制）见 `report.json`。
+[manifest.json](manifest.json) 记录保留图及其 SHA-256。[report.json](report.json) 区分历史采集数和当前保留数，场景结果与退出码来自原采集。
 84 张 = 8 个视图 × 2 主题 × 2 尺寸（32）+ 2 个 Markdown 样例 × 4 组合（8）+ 11 类失败态 × 4 组合（44）。
 上一批的 80 张缺的正是 `files-markdown-toc` 的 4 张：文件视图没有目录开关时脚本只登记跳过原因，
 本次修复后这个入口真实存在，4 张目录图按现场采集，不用旧图补齐。
 
-### 同数据对照（`group: "baseline"`，两主题 × 两个尺寸，各 8 张 = 32 张）
+### 同数据对照（`group: "baseline"`，归档 8 张）
 
 起始页 `start`、改动 `changes`、历史 `history`、任务 `task`、工作区总览 `worktree`、
 提交区 `composer`、合并弹窗 `merge`、设置 `settings`。命名是 `<theme>-<size>-<view>.png`，
-四种组合都能同数据横向比较（1280×840 / 900×600 × dark / light）。
+按视图保留代表性窗口，覆盖深浅主题和两档尺寸。
 
-### Markdown 阅读（`group: "markdown"`，4 组合 × 2 张 = 8 张）
+### Markdown 阅读（`group: "markdown"`，归档 2 张）
 
 - `files-markdown`：默认排版预览（含远程图片「尚未加载」提示、本地图片加载入口）；
 - `files-markdown-toc`：目录工具行展开后的中文重复标题目录。
 
-### 失败与恢复（`group: "failure"`，11 类 × 4 组合 = 44 张）
+### 失败与恢复（`group: "failure"`，归档 11 张）
 
 远程未核对、远程过期、提交被钩子拒绝、本地提交成功推送失败、文档读取失败、文档超限、
 树过滤/全仓搜索/文件内查找失败、`task-error`（任务起点不是当前分支的祖先）、

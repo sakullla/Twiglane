@@ -57,57 +57,6 @@
       "sha256": "ee8902ee267e0a15b81cf9d1474570516c46b16a05cb2fec8a2a5fd312b138b5"
     },
     {
-      "file": "after/dark-1280x840-project-candidates.png",
-      "theme": "dark",
-      "size": "1280x840",
-      "view": "project-candidates",
-      "group": "projects",
-      "state": "60 个发现候选名称/完整路径搜索，取消匹配项后仍保留筛选外的 59 项选择",
-      "paint": {
-        "theme": "dark",
-        "surface": "#16181d",
-        "modalOpacity": "1",
-        "backdropOpacity": "1"
-      },
-      "horizontalOverflow": 0,
-      "bytes": 180689,
-      "sha256": "f1cf1b71ef75512488f0c5b337bc2afff257b00c1db9b0517c26065dd9cb8fd3"
-    },
-    {
-      "file": "after/dark-1280x840-project-source-missing.png",
-      "theme": "dark",
-      "size": "1280x840",
-      "view": "project-source-missing",
-      "group": "projects",
-      "state": "来源失效仍保留最后快照，禁止旧名单覆盖，提供重新预览/刷新",
-      "paint": {
-        "theme": "dark",
-        "surface": "#16181d",
-        "modalOpacity": "1",
-        "backdropOpacity": "1"
-      },
-      "horizontalOverflow": 0,
-      "bytes": 112947,
-      "sha256": "bfd45934a96df6c0b6608073692a72f23fa88146782cb92c21d0ccf23bb7d5d9"
-    },
-    {
-      "file": "after/dark-900x600-project-overview.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "project-overview",
-      "group": "projects",
-      "state": "60 仓成员源，收藏优先、未知/缺失状态和 worktree 分组",
-      "paint": {
-        "theme": "dark",
-        "surface": "#16181d",
-        "modalOpacity": null,
-        "backdropOpacity": null
-      },
-      "horizontalOverflow": 0,
-      "bytes": 178213,
-      "sha256": "df690d9ee0bad082bb37e57b6cbfb79b17710f865e01d6636c5a5e563763dac3"
-    },
-    {
       "file": "after/dark-900x600-project-manager.png",
       "theme": "dark",
       "size": "900x600",
@@ -140,23 +89,6 @@
       "horizontalOverflow": 0,
       "bytes": 92025,
       "sha256": "7e4c49e0cc2e9238e53ba296cf1975bb745597a5652566fd24d66f67c6942652"
-    },
-    {
-      "file": "after/dark-900x600-project-source-missing.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "project-source-missing",
-      "group": "projects",
-      "state": "来源失效仍保留最后快照，禁止旧名单覆盖，提供重新预览/刷新",
-      "paint": {
-        "theme": "dark",
-        "surface": "#16181d",
-        "modalOpacity": "1",
-        "backdropOpacity": "1"
-      },
-      "horizontalOverflow": 0,
-      "bytes": 82847,
-      "sha256": "43e223ab1e514441a9d03cee3056e4412eefd2095a975151474affc486697eaa"
     },
     {
       "file": "after/light-1280x840-project-overview.png",
@@ -210,74 +142,6 @@
       "sha256": "8e16b6913062fb9a848ee92d3b82297780ef1a9a43e18b40a49afc9df279372a"
     },
     {
-      "file": "after/light-1280x840-project-source-missing.png",
-      "theme": "light",
-      "size": "1280x840",
-      "view": "project-source-missing",
-      "group": "projects",
-      "state": "来源失效仍保留最后快照，禁止旧名单覆盖，提供重新预览/刷新",
-      "paint": {
-        "theme": "light",
-        "surface": "#ffffff",
-        "modalOpacity": "1",
-        "backdropOpacity": "1"
-      },
-      "horizontalOverflow": 0,
-      "bytes": 118802,
-      "sha256": "86adfc2310790a4a880f5365b84e71213f5f21d33d9cd3d7779647a3505f866a"
-    },
-    {
-      "file": "after/light-900x600-project-overview.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "project-overview",
-      "group": "projects",
-      "state": "60 仓成员源，收藏优先、未知/缺失状态和 worktree 分组",
-      "paint": {
-        "theme": "light",
-        "surface": "#ffffff",
-        "modalOpacity": null,
-        "backdropOpacity": null
-      },
-      "horizontalOverflow": 0,
-      "bytes": 174122,
-      "sha256": "a392627ae47dfb876133399ebccf051a69c03d59387463569672b7bb3c3a109a"
-    },
-    {
-      "file": "after/light-900x600-project-manager.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "project-manager",
-      "group": "projects",
-      "state": "共享文件、60 仓名单、批量纳入与目录修复入口",
-      "paint": {
-        "theme": "light",
-        "surface": "#ffffff",
-        "modalOpacity": "1",
-        "backdropOpacity": "1"
-      },
-      "horizontalOverflow": 0,
-      "bytes": 103790,
-      "sha256": "b84882d867b39d488c239b63876ea6ebacaaabdcf5ec0aa46711b3af9f5a050f"
-    },
-    {
-      "file": "after/light-900x600-project-candidates.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "project-candidates",
-      "group": "projects",
-      "state": "60 个发现候选名称/完整路径搜索，取消匹配项后仍保留筛选外的 59 项选择",
-      "paint": {
-        "theme": "light",
-        "surface": "#ffffff",
-        "modalOpacity": "1",
-        "backdropOpacity": "1"
-      },
-      "horizontalOverflow": 0,
-      "bytes": 104598,
-      "sha256": "9a4d5604c18561ad1d4e3301a8e547eae51bd886b98a7689720d74349368ec28"
-    },
-    {
       "file": "after/light-900x600-project-source-missing.png",
       "theme": "light",
       "size": "900x600",
@@ -295,5 +159,11 @@
       "sha256": "da4409caec5af040cf0eb35cb3a026df4171970eb4c500d6912c4481aeb06335"
     }
   ],
-  "skipped": []
+  "skipped": [],
+  "archive": {
+    "capturedFiles": 16,
+    "capturedGroups": {
+      "projects": 16
+    }
+  }
 }

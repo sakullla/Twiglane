@@ -38,7 +38,7 @@ curl -s http://127.0.0.1:1430/__ui-preview/health
   发真实输入（不是 `element.click()` 或直接改 value）：任务打开、连续审阅（Alt+M / Alt+Shift+→）、空格整文件暂存、
   提交区提交、历史换选择后的加载结束，以及工作区总览的分组/未知/缺失/过期。滚动定位关掉了平滑滚动，并对候选点做
   `elementFromPoint` 命中测试，避免点到吸顶标题上。
-- `check-scenarios.mjs`：异常、大规模、提交/同步失败与 Markdown 阅读场景的可复跑自检（41 个场景，含轻量编辑的保存/冲突/写入失败/混合行尾只读、文档预览、目录、源码往返、相对链接、超限退路、读取失败、历史提交里的 Markdown 差异、远程未核/过期、提交失败展开，以及终端的展开/输入退出、启动失败、已退出重启与写入失败）。其中「目录列出中文重复标题且各自可辨」会实际点击两个同名目录项，核对 heading 锚点不同、`aria-current` 落在各自条目且滚动位置不同；三个查找失败场景（全文搜索、树过滤补齐、文件内查找）会实际点击恢复按钮并核对同一条失败重新出现，确认恢复入口可执行。
+- `check-scenarios.mjs`：异常、大规模、提交/同步失败与 Markdown 阅读场景的可复跑自检（含轻量编辑的保存/冲突/写入失败/混合行尾只读、文档预览、目录、源码往返、相对链接、超限退路、读取失败、历史提交里的 Markdown 差异、远程未核/过期、提交失败展开，以及终端的展开/输入退出、启动失败、已退出重启与写入失败）。其中 Markdown 场景在同一会话验证默认预览、两个同名标题的独立锚点和滚动位置，以及收起目录后正文仍可读。三个查找失败场景（全文搜索、树过滤补齐、文件内查找）会实际点击恢复按钮并核对同一条失败重新出现，确认恢复入口可执行。
 
 ## 静态单文件页（没有常驻服务器时）
 
@@ -67,12 +67,12 @@ node scripts/run-ui-verification.mjs --shots-only
 日常用 `--shots-only` 生成整套精选图集。去掉该参数同时运行场景自检。失败时以非 0 退出并把原因写进 `report.json`。默认把场景、截图、manifest 与 report
 全写到操作系统临时目录（终端会打印路径），只有显式 `--out` 才写调用者目录，正式验证不会改写候选输入：
 
-1. 确认 1430 空闲，否则直接报「端口被占用」而不是对着旧页面出证据；
-2. 用 `scripts/ui-preview/vite.config.mjs` 起 mock 预览，轮询 `/__ui-preview/health` 直到 `mockApi` 为 `true`；
+1. 用 `scripts/ui-preview/vite.config.mjs` 启动本次独立的 mock 预览。默认由操作系统分配空闲端口，`--base` 可显式指定端口；
+2. 监听就绪后通过 `/__ui-preview/health` 核对 `mockApi: true`；
 3. 跑 `check-scenarios.mjs`（场景自检，含键鼠闭环）；
-4. 跑 `baseline-shots.mjs` 并生成图集，检查逐张截图文件。默认生成 18 张，4 张项目图包含在总数中。
+4. 按界面就绪、主题、字体及绘制状态生成图集，校验每张图的路径、字节数和 SHA-256。默认 18 张，包含 4 张项目图。
 
-可选参数：`--skip-shots` 只跑场景，`--full` 展开截图矩阵，`--only <场景名片段>` 只跑匹配的场景、`--base` 换地址、`--out <目录>` 归档证据（例如 `--out docs/verification/ai-coding-ui-ux-2026-11-09`）、`--workflow <id>`/`--task <id>` 覆盖 manifest 身份（跨 task 的交付图集用 `--task delivery`）。runner 会核对场景与截图两个子进程的退出码、本次新写出的 `capturedAt`、manifest 的 workflow 身份与逐张截图文件；零场景、子失败或沿用旧 manifest 都判为 failed 并非 0 退出。
+可选参数：`--skip-shots` 只跑场景，`--full` 展开截图矩阵，`--only <场景名片段>` 只跑匹配的场景、`--base` 换地址、`--out <目录>` 归档证据（例如 `--out /tmp/twiglane-ai-coding-ui`）、`--workflow <id>`/`--task <id>` 覆盖 manifest 身份（跨 task 的交付图集用 `--task delivery`）。runner 会核对场景与截图两个子进程的退出码、本次新写出的 `capturedAt`、manifest 的 workflow 身份与逐张截图文件；零场景、子失败或沿用旧 manifest 都判为 failed 并非 0 退出。
 
 ### 采集不到时的写法
 
@@ -84,7 +84,7 @@ node scripts/run-ui-verification.mjs --shots-only
 `?projects=1` 提供 60 个持久成员、60 个发现候选、同名不同路径、长名称、收藏及外机位置；`?projects=missing` 保留来源失效的最后快照。与 recent30 独立。`--projects` 运行项目交互检查，并精选 4 张图：1280 桌面的项目管理和项目外提示、900 窄窗口的候选选择和来源失效。深浅主题各两张。
 
 ```bash
-node scripts/run-ui-verification.mjs --projects --out docs/verification/multi-repository-project-workspaces-ui
+node scripts/run-ui-verification.mjs --projects --out /tmp/twiglane-project-ui
 ```
 
-该入口核对真实浏览器页面错误、水平溢出、A→B→A 及忘记后重开的草稿、选中上下文、候选搜索和跨筛选多选，并使用既有 CDP 截图工具。项目模式采集四种状态 × 两主题 × 两尺寸，共 16 图。Git、文件选择和共享清单 IO 由 synthetic API 提供；不能据此宣称两端已安装应用或原生 Git 验收通过。
+该入口核对真实浏览器页面错误、水平溢出、A→B→A 及忘记后重开的草稿、选中上下文、候选搜索和跨筛选多选，并使用既有 CDP 截图工具。项目模式每个状态采集一张代表图，共 4 张。Git、文件选择和共享清单 IO 由 synthetic API 提供；不能据此宣称两端已安装应用或原生 Git 验收通过。

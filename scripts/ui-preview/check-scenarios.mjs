@@ -631,60 +631,44 @@ const SCENARIOS = [
       "(() => { const result = window.__toolOpts; if (!result) return '(未记录)'; if (result.leak) return '主行漏出低频控件：' + result.leak.join(' / '); return JSON.stringify({ lang: result.lang, opts: result.opts.length }); })()",
   },
   {
-    name: "文档阅读：Markdown 默认排版预览",
+    name: "文档阅读：Markdown 默认排版预览、重复标题定位与目录收起",
     url: "/",
-    ready: OPEN_README,
-    check:
-      "(() => { const body = document.querySelector('.files-view .markdown-preview .md-body'); return Boolean(body) && (body.textContent || '').includes('目录与版本') && Boolean(document.querySelector('.files-view .doc-source, .files-view .doc-path')); })()",
-    detail:
-      "(document.querySelector('.files-view .doc-source')?.textContent || '') + ' · ' + (document.querySelector('.files-view .md-note')?.textContent || '')",
-  },
-  {
-    name: "文档阅读：目录列出中文重复标题且各自可辨",
-    url: "/",
-    ready:
-      "(() => { if (!" +
-      OPEN_README +
-      ") return false; " +
-      "const nav = document.querySelector('.files-view .md-outline'); " +
-      "if (!nav) { const toggle = document.querySelector('.files-view button[aria-label=\"文档目录\"]'); if (toggle) toggle.click(); return false; } " +
-      "const duplicated = [...nav.querySelectorAll('button')].filter((item) => item.textContent.includes('中文重复标题')); return duplicated.length >= 2; })()",
-    // 不只数条目：真的点击两个同名项，核对锚点 id 不同、aria-current 落在各自条目上、滚动位置也不同。
-    // 若回归把两个重复标题合并到同一 heading id，这里会失败，而不是靠顺序蒙混过关。
-    check:
-      "(async () => { " +
-      "const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); " +
-      "const nav = document.querySelector('.files-view .md-outline'); " +
-      "const scroller = document.querySelector('.files-view .md-scroll'); " +
-      "if (!nav || !scroller) return false; " +
-      "const buttons = [...nav.querySelectorAll('button')]; " +
-      "const duplicated = buttons.map((button, index) => (button.textContent.includes('中文重复标题') ? index : -1)).filter((index) => index >= 0); " +
-      "if (duplicated.length < 2) return false; " +
-      "const read = () => ({ scrollTop: scroller.scrollTop, current: buttons.findIndex((button) => button.getAttribute('aria-current') === 'location') }); " +
-      "buttons[duplicated[0]].click(); await wait(700); const first = read(); " +
-      "buttons[duplicated[1]].click(); await wait(700); const second = read(); " +
-      "const anchors = [...document.querySelectorAll('.files-view .md-body [data-markdown-anchor]')] " +
-      ".map((node) => node.dataset.markdownAnchor).filter((value) => value.includes('中文重复标题')); " +
-      "window.__dupHrefs = { duplicated, first, second, anchors }; " +
-      "return anchors.length >= 2 && new Set(anchors).size === anchors.length && " +
-      "first.current === duplicated[0] && second.current === duplicated[1] && first.scrollTop !== second.scrollTop; })()",
-    detail:
-      "(() => { const result = window.__dupHrefs; if (!result) return '(未记录)'; return JSON.stringify({ anchors: result.anchors, first: Math.round(result.first.scrollTop), second: Math.round(result.second.scrollTop) }); })()",
-  },
-  {
-    name: "文档阅读：目录收起后正文仍可读",
-    url: "/",
-    ready:
-      "(() => { if (!" +
-      OPEN_README +
-      ") return false; " +
-      "const open = document.querySelector('.files-view button[aria-label=\"文档目录\"][aria-pressed=\"true\"]'); " +
-      "if (open) { if (!window.__outlineClosing) { window.__outlineClosing = true; open.click(); } return false; } " +
-      "return Boolean(document.querySelector('.files-view .markdown-preview .md-body')); })()",
-    check:
-      "!document.querySelector('.files-view .md-outline') && Boolean(document.querySelector('.files-view .markdown-preview .md-body'))",
-    detail:
-      "[...document.querySelectorAll('.files-view button[aria-label=\"文档目录\"]')].map((item) => item.getAttribute('aria-pressed')).join(' / ')",
+    steps: async (d) => {
+      const body = ".files-view .markdown-preview .md-body";
+      const outline = ".files-view .md-outline";
+      const toggle = '.files-view button[aria-label="文档目录"]';
+      const duplicates = `[...document.querySelectorAll(${JSON.stringify(outline + " button")})]
+        .filter((item) => item.textContent.includes("中文重复标题"))`;
+      await d.until(OPEN_README, "README 排版预览已解析");
+      await d.until(
+        `document.querySelector(${JSON.stringify(body)})?.textContent.includes("目录与版本") &&
+          Boolean(document.querySelector('.files-view .doc-source, .files-view .doc-path'))`,
+        "默认预览含正文和文件来源",
+      );
+      await d.evaluate(`document.querySelector(${JSON.stringify(toggle)})?.click()`);
+      await d.until(`${duplicates}.length >= 2`, "目录列出重复标题");
+      const positions = [];
+      for (const index of [0, 1]) {
+        await d.evaluate(`${duplicates}[${index}].click()`);
+        await d.until(`${duplicates}[${index}]?.getAttribute("aria-current") === "location"`, "定位到第 " + (index + 1) + " 个重复标题");
+        positions.push(await d.evaluate("document.querySelector('.files-view .md-scroll').scrollTop"));
+      }
+      const anchors = await d.evaluate(
+        "[...document.querySelectorAll('.files-view .md-body [data-markdown-anchor]')]" +
+          ".map((node) => node.dataset.markdownAnchor).filter((value) => value.includes('中文重复标题'))",
+      );
+      if (anchors.length < 2 || new Set(anchors).size !== anchors.length || positions[0] === positions[1]) {
+        throw new Error("同名标题没有独立锚点和滚动位置");
+      }
+      await d.evaluate(`document.querySelector(${JSON.stringify(toggle)})?.click()`);
+      await d.until(
+        `!document.querySelector(${JSON.stringify(outline)}) && Boolean(document.querySelector(${JSON.stringify(body)}))`,
+        "收起目录后正文仍可读",
+      );
+      await d.evaluate(`window.__dupHrefs = ${JSON.stringify({ anchors, positions })}`);
+    },
+    check: "Boolean(window.__dupHrefs)",
+    detail: "JSON.stringify(window.__dupHrefs)",
   },
   {
     name: "文档阅读：预览与源码往返不离开这个文件",
@@ -911,12 +895,15 @@ const SCENARIOS = [
       await drv.click(".welcome-recent button");
       await drv.until("Boolean(document.querySelector('.view-switcher'))", "工作区");
       await drv.click('[aria-label^="当前仓库"]');
-      await drv.until("Boolean(document.querySelector('.switcher-status[data-worktree-status=\"ready\"]'))", "总览读取完成");
+      await drv.until(
+        "Boolean(document.querySelector('[data-worktree-remote=stale]')) && !document.querySelector('[data-worktree-status=loading]')",
+        "总览已显示过期远程状态",
+      );
     },
     check:
-      "document.querySelectorAll('.switcher-group-name').length >= 1 && Boolean(document.querySelector('[data-worktree-state=unknown]')) && Boolean(document.querySelector('[data-worktree-state=missing]')) && Boolean(document.querySelector('[data-worktree-remote=stale]')) && Boolean(document.querySelector('.switcher-filter'))",
+      "Boolean(document.querySelector('[data-group-row]')) && Boolean(document.querySelector('[data-worktree-state=unknown]')) && Boolean(document.querySelector('[data-worktree-state=missing]')) && Boolean(document.querySelector('[data-worktree-remote=stale]')) && Boolean(document.querySelector('[data-worktree-filter]'))",
     detail:
-      "document.querySelectorAll('.switcher-group-name').length + ' 个分组；未知 ' + document.querySelectorAll('[data-worktree-state=unknown]').length + ' 项；缺失 ' + document.querySelectorAll('[data-worktree-state=missing]').length + ' 项；过期 ' + document.querySelectorAll('[data-worktree-remote=stale]').length + ' 项'",
+      "document.querySelectorAll('[data-group-row]').length + ' 个分组；未知 ' + document.querySelectorAll('[data-worktree-state=unknown]').length + ' 项；缺失 ' + document.querySelectorAll('[data-worktree-state=missing]').length + ' 项；过期 ' + document.querySelectorAll('[data-worktree-remote=stale]').length + ' 项'",
     },
   {
     name: "终端：展开、输入回显与退出码",

@@ -125,7 +125,7 @@ macOS 使用系统 WebKit，不下载 WebView2。Windows 使用系统 WebView2�
 
 ## 验证
 
-本轮 UI/UX 与 Markdown 阅读的证据、同数据前后对照与未覆盖项记录在 `docs/verification/ui-ux-markdown-2026-11-08/`：界面截图来自浏览器 + mock 数据（Chrome、浅深两主题 × 1280×840 与 900×600，另有 9 个关键失败/未知状态的四种「主题 × 尺寸」组合），由 `scripts/ui-preview/baseline-shots.mjs` 实际跑出；`scripts/ui-preview/check-scenarios.mjs` 复跑 41 个交互场景（含工作台终端的展开、输入退出、启动失败、已退出重启与写入失败）。Rust 真实 Git 夹具负责版本与路径边界。当前开发、CI 与发布构建统一使用 Node.js 26；上述历史记录的环境与未覆盖项保留原样，不随版本升级改写为已验证。
+本轮 UI/UX 与 Markdown 阅读的证据、同数据前后对照与未覆盖项记录在 `docs/verification/ui-ux-markdown-2026-11-08/`：界面截图来自 Chrome 与 mock 数据，由 `scripts/ui-preview/baseline-shots.mjs` 生成。历史图集现按视图或失败状态保留代表图。`scripts/ui-preview/check-scenarios.mjs` 可复跑交互场景（含工作台终端的展开、输入退出、启动失败、已退出重启与写入失败）。Rust 真实 Git 夹具负责版本与路径边界。当前开发、CI 与发布构建统一使用 Node.js 26；上述历史记录的环境与未覆盖项保留原样，不随版本升级改写为已验证。
 
 ### CI 与版本发布
 

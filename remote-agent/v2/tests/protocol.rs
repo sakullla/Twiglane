@@ -6,16 +6,22 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
+/// 单条回答的最长等待。agent 卡住（比如请求永远不回答）时用例必须失败而不是挂死。
+const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+
 struct Agent {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    /// 输出由独立线程切成行送进来：阻塞读换成 `recv_timeout`，因此「agent 不再回答」
+    /// 会变成有时限的失败，而不是把整条用例挂死（溢出 panic 之类正是这种表现）。
+    lines: mpsc::Receiver<String>,
 }
 
 impl Agent {
@@ -44,11 +50,23 @@ impl Agent {
             .spawn()
             .expect("agent 进程应能启动");
         let stdin = child.stdin.take().expect("stdin");
-        let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+        let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+        let (sender, lines) = mpsc::channel::<String>();
+        std::thread::spawn(move || loop {
+            let mut line = String::new();
+            match stdout.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if sender.send(line).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
         Self {
             child,
             stdin,
-            stdout,
+            lines,
         }
     }
 
@@ -68,10 +86,7 @@ impl Agent {
     /// 读到指定 id 的响应；通道是多路的，其他 id 的响应被丢弃。
     fn read_id(&mut self, id: &str) -> Value {
         loop {
-            let mut line = String::new();
-            let read = self.stdout.read_line(&mut line).expect("读响应");
-            assert!(read > 0, "agent 在回答之前关闭了输出");
-            let value: Value = serde_json::from_str(&line).expect("响应必须是 JSON 行");
+            let value = self.next_line();
             assert_eq!(value["v"], json!(2), "响应必须声明 v2");
             if value["id"] == json!(id) {
                 return value;
@@ -80,20 +95,27 @@ impl Agent {
     }
 
     /// 读一行并解析：响应或事件都可能是下一行（终端与变化通知会和响应交错）。
+    ///
+    /// 超过 `REPLY_TIMEOUT` 没有新行就失败：agent 不回答比回答错误更难诊断，
+    /// 不允许把它表现成「用例一直跑」。
     fn next_line(&mut self) -> Value {
-        let mut line = String::new();
-        let read = self.stdout.read_line(&mut line).expect("读通道");
-        assert!(read > 0, "agent 在回答之前关闭了输出");
+        let line = match self.lines.recv_timeout(REPLY_TIMEOUT) {
+            Ok(line) => line,
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                "agent 在 {} 秒内没有回答也没有关闭输出",
+                REPLY_TIMEOUT.as_secs()
+            ),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("agent 在回答之前关闭了输出")
+            }
+        };
         serde_json::from_str(&line).expect("通道里的每一行都必须是 JSON")
     }
 
     /// 读下一条事件帧（不带 `id` 的帧）：变化通知与终端输出都走这条路。
     fn read_event(&mut self, kind: &str) -> Value {
         loop {
-            let mut line = String::new();
-            let read = self.stdout.read_line(&mut line).expect("读事件");
-            assert!(read > 0, "agent 在推送 {kind} 之前关闭了输出");
-            let value: Value = serde_json::from_str(&line).expect("事件必须是 JSON 行");
+            let value = self.next_line();
             assert_eq!(value["v"], json!(2), "事件必须声明 v2");
             if value["event"] == json!(kind) {
                 return value;
@@ -236,9 +258,7 @@ fn handshake_reports_v2_capabilities_and_rejects_v1_frames() {
         .write_all(raw.as_bytes())
         .expect("写 v1 帧");
     agent.stdin.flush().unwrap();
-    let mut line = String::new();
-    agent.stdout.read_line(&mut line).unwrap();
-    let rejected: Value = serde_json::from_str(&line).unwrap();
+    let rejected = agent.next_line();
     assert_eq!(rejected["ok"], json!(false));
     assert_eq!(rejected["error"]["code"], json!("unsupported_protocol"));
 }
@@ -880,9 +900,7 @@ fn two_requests_in_flight_are_answered_by_id() {
     let mut succeeded: Vec<(String, String)> = Vec::new();
     let mut superseded = 0;
     for _ in 0..2 {
-        let mut line = String::new();
-        assert!(agent.stdout.read_line(&mut line).unwrap() > 0);
-        let value: Value = serde_json::from_str(&line).unwrap();
+        let value = agent.next_line();
         let id = value["id"].as_str().unwrap().to_string();
         assert!(
             id == "multi-a" || id == "multi-b",
@@ -3374,8 +3392,169 @@ fn an_oversized_request_is_rejected_without_execution() {
     assert_eq!(response["ok"], json!(false));
     assert_eq!(response["error"]["code"], json!("request_too_large"));
     assert_eq!(response["id"], json!("0"));
+
+    // 读取侧的围栏必须只丢掉这一行：后面的正常请求照常执行。
+    // 超限行和紧随其后的请求写在同一次写入里，覆盖「换行处恢复切行」这条路径。
+    let follow = json!({ "v": 2, "id": "after-huge", "op": "status", "repo": repo }).to_string();
+    let mut burst = Vec::with_capacity(frame.len() + follow.len() + 2);
+    burst.extend_from_slice(frame.as_bytes());
+    burst.push(b'\n');
+    burst.extend_from_slice(follow.as_bytes());
+    burst.push(b'\n');
+    agent.stdin.write_all(&burst).unwrap();
+    agent.stdin.flush().unwrap();
+    let mut rejected = 0;
+    let mut answered = false;
+    for _ in 0..8 {
+        let value = agent.next_line();
+        if value["error"]["code"] == json!("request_too_large") {
+            rejected += 1;
+        }
+        if value["id"] == json!("after-huge") && value["ok"] == json!(true) {
+            answered = true;
+        }
+        if rejected >= 1 && answered {
+            break;
+        }
+    }
+    assert_eq!(rejected, 1, "超限行只应产生一条拒绝");
+    assert!(answered, "超限行之后的正常请求必须照常执行");
 }
 
+/// 游标是客户端给的整数：`u64::MAX` 只能得到「没有可补发的事件」，不能让进程算崩。
+///
+/// 旧实现在 `after + 1` 处溢出：调试构建直接 panic，release 的 `panic = "abort"` 会让
+/// 整个 agent 退出，一次越界游标就能断开所有人的连接。
+#[test]
+fn an_out_of_range_event_cursor_is_answered_without_panicking() {
+    let fixture = Fixture::new("io-cursor-max");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
 
+    let mut agent = fixture.agent();
+    open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
 
+    // 先制造一条真实事件：让游标查询真的走到「有保留事件」的分支，而不是空窗口。
+    // watch 的首次投递有延迟，这里轮询水位而不是赌一个固定睡眠。
+    let mut first = Value::Null;
+    for index in 0..40 {
+        fixture.write(&format!("b-{index}.txt"), "b\n");
+        std::thread::sleep(Duration::from_millis(50));
+        let reply = agent.ok("cursor-0", "events", json!({ "repo": repo, "after": 0 }));
+        if reply["seq"].as_u64().unwrap() >= 1 {
+            first = reply;
+            break;
+        }
+    }
+    assert!(
+        first["seq"].as_u64().unwrap() >= 1,
+        "应至少记录一条变化事件"
+    );
+    assert_eq!(first["resync"], json!(false));
+    assert!(
+        !first["events"].as_array().unwrap().is_empty(),
+        "游标应读到失效事件"
+    );
 
+    for (id, after) in [
+        ("cursor-max", u64::MAX),
+        ("cursor-max-minus-one", u64::MAX - 1),
+    ] {
+        let reply = agent.ok(id, "events", json!({ "repo": repo, "after": after }));
+        // 游标跑到水位之前等于一代无效序号：只能整体重读，不能补发。
+        assert_eq!(reply["resync"], json!(true), "after={after} 应回 resync");
+        assert_eq!(reply["events"], json!([]), "after={after} 不应补发历史");
+        assert_eq!(reply["seq"], first["seq"], "水位不该被游标查询改动");
+    }
+
+    // 进程仍然活着：后续请求照常可用（abort 会让这里读不到回答）。
+    let state = agent.ok("cursor-max-status", "status", json!({ "repo": repo }));
+    assert!(state["snapshot"]["files"].is_array());
+}
+
+/// 关闭是跨仓库可达的破坏性操作：用另一个仓库的 `repo` 关不掉这里的 shell。
+#[test]
+fn terminal_close_cannot_reach_a_session_from_another_repository() {
+    let fixture = Fixture::new("io-pty-cross");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+
+    let repo_a = fixture.repo_str();
+    let base = std::fs::canonicalize(fixture.root.path()).unwrap();
+    let other = base.join("repo-b");
+    std::fs::create_dir_all(&other).unwrap();
+    git(&other, &fixture.config, &["init", "-b", "main"]);
+    let repo_b = other.to_string_lossy().into_owned();
+    assert_ne!(repo_a, repo_b);
+
+    let mut agent = Agent::start_with(&fixture.state, &fixture.config, &[("SHELL", "/bin/sh")]);
+    open(&mut agent, &repo_a);
+    let session = agent.ok("cross-create", "terminalCreate", json!({ "repo": repo_a }))["terminal"]
+        ["sessionId"]
+        .as_str()
+        .expect("创建会话应返回 id")
+        .to_string();
+
+    // 切到另一个仓库：A 的会话不该再从 B 的视角被操作。
+    open(&mut agent, &repo_b);
+    let refused = agent.error_code(
+        "cross-close",
+        "terminalClose",
+        json!({ "repo": repo_b, "sessionId": session }),
+    );
+    assert_eq!(refused, "unknown_repo", "跨仓库关闭必须被拒绝");
+    for (op, fields) in [
+        (
+            "terminalAttach",
+            json!({ "repo": repo_b, "sessionId": session }),
+        ),
+        (
+            "terminalInput",
+            json!({ "repo": repo_b, "sessionId": session, "data": "echo hijack\n" }),
+        ),
+        (
+            "terminalResize",
+            json!({ "repo": repo_b, "sessionId": session, "rows": 20, "cols": 60 }),
+        ),
+        (
+            "terminalRestart",
+            json!({ "repo": repo_b, "sessionId": session }),
+        ),
+    ] {
+        assert_eq!(
+            agent.error_code("cross-op", op, fields),
+            "unknown_repo",
+            "{op} 不得跨仓库命中会话"
+        );
+    }
+
+    // 回到 A：误用之后会话仍然存活，输入与输出都还在。
+    open(&mut agent, &repo_a);
+    let attached = agent.ok(
+        "cross-attach-a",
+        "terminalAttach",
+        json!({ "repo": repo_a, "sessionId": session }),
+    );
+    assert_eq!(
+        attached["terminal"]["running"],
+        json!(true),
+        "会话不能被跨仓库关掉"
+    );
+    let input = agent.ok(
+        "cross-input-a",
+        "terminalInput",
+        json!({ "repo": repo_a, "sessionId": session, "data": "echo still-alive\n" }),
+    );
+    assert_eq!(input["accepted"], json!(true));
+
+    // A 自己仍然关得掉：拒绝针对的是归属，不是关闭本身。
+    let closed = agent.ok(
+        "cross-close-a",
+        "terminalClose",
+        json!({ "repo": repo_a, "sessionId": session }),
+    );
+    assert_eq!(closed["closed"], json!(true));
+}

@@ -31,7 +31,7 @@ use crate::git::worktree as worktree_ops;
 use crate::git::runner::RealRunner;
 use crate::git::schedule::{internal_request_id, JobKind};
 use crate::model::{DiffLineSelection, RepositorySearchScope};
-use crate::protocol::{self, Request, CAPABILITIES, MAX_IN_FLIGHT, PROTOCOL};
+use crate::protocol::{self, Request, CAPABILITIES, MAX_IN_FLIGHT, MAX_REQUEST_BYTES, PROTOCOL};
 use crate::pty::{self, FrameEvents};
 use crate::terminal::{TerminalManager, TerminalProfile, TerminalSnapshot};
 use crate::receipts::{Receipt, ReceiptStore, COMPLETED, FAILED};
@@ -300,11 +300,15 @@ pub async fn serve() -> Result<(), AppError> {
         terminal_repos,
     });
 
-    let (lines, mut incoming) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (lines, mut incoming) = mpsc::unbounded_channel::<Line>();
     std::thread::spawn(move || read_lines(lines));
 
     while let Some(line) = incoming.recv().await {
-        context.handle_line(&line);
+        match line {
+            Line::Frame(bytes) => context.handle_line(&bytes),
+            // 超限行在读取侧就被丢弃，这里只补一条与解析侧完全一致的拒绝。
+            Line::TooLarge => context.reject_too_large(),
+        }
     }
     // 标准输入关闭：等在途请求收尾再结束，不半途丢弃已登记的写入。
     let _ = tokio::time::timeout(
@@ -317,31 +321,86 @@ pub async fn serve() -> Result<(), AppError> {
     Ok(())
 }
 
-fn read_lines(sender: mpsc::UnboundedSender<Vec<u8>>) {
-    use std::io::BufRead;
+/// 读取侧交给处理循环的一行：正常帧，或「这一行超过 `MAX_REQUEST_BYTES`」的围栏命中。
+enum Line {
+    Frame(Vec<u8>),
+    TooLarge,
+}
+
+/// 单次读取的块大小：比上限小得多，超限的行因此不会被整行缓冲。
+const READ_CHUNK: usize = 64 * 1024;
+
+/// 按块读标准输入并切行：任何时刻内存里最多只有一条上限内的行。
+///
+/// 单帧上限是 8 MiB，但客户端可以送来任意大的行。旧实现用 `read_until` 把整行读进
+/// 无界 `Vec` 才判断上限，等于把内存交给对端；这里改成边读边算长度，越过上限就立刻
+/// 丢弃该行剩余字节并交一条 `TooLarge`，下一个换行处恢复切行，通道本身不会再变大。
+fn read_lines(sender: mpsc::UnboundedSender<Line>) {
+    use std::io::Read;
     let stdin = std::io::stdin();
     let mut handle = stdin.lock();
-    let mut line = Vec::new();
+    let mut line: Vec<u8> = Vec::new();
+    // 已判定超限、正在丢弃剩余字节：到下一个换行为止都不再累积。
+    let mut discarding = false;
+    let mut chunk = [0u8; READ_CHUNK];
     loop {
-        line.clear();
-        match handle.read_until(b'\n', &mut line) {
+        let read = match handle.read(&mut chunk) {
             Ok(0) => break,
-            Ok(_) => {
-                while line
-                    .last()
-                    .is_some_and(|byte| *byte == b'\n' || *byte == b'\r')
-                {
-                    line.pop();
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        let mut start = 0;
+        while start < read {
+            let rest = &chunk[start..read];
+            let newline = rest.iter().position(|byte| *byte == b'\n');
+            match newline {
+                Some(index) => {
+                    if !discarding {
+                        push_bounded(&mut line, &rest[..index], &mut discarding, &sender);
+                    }
+                    discarding = false;
+                    if !deliver(&sender, std::mem::take(&mut line)) {
+                        return;
+                    }
+                    start += index + 1;
                 }
-                if line.is_empty() {
-                    continue;
-                }
-                if sender.send(line.clone()).is_err() {
-                    break;
+                None => {
+                    if !discarding {
+                        push_bounded(&mut line, rest, &mut discarding, &sender);
+                    }
+                    start = read;
                 }
             }
-            Err(_) => break,
         }
+    }
+    // 标准输入结束时残留的最后一帧按同样规则处理：`read_until` 原本也接受无结尾换行的帧。
+    if !discarding {
+        let _ = deliver(&sender, line);
+    }
+}
+
+/// 交出一帧；通道已关闭时返回 false（读线程没有继续的意义）。空行直接跳过。
+fn deliver(sender: &mpsc::UnboundedSender<Line>, line: Vec<u8>) -> bool {
+    line.is_empty() || sender.send(Line::Frame(line)).is_ok()
+}
+
+/// 追加一段字节并在越过上限时立即收手：清空缓冲、发一条 `TooLarge`、转入丢弃状态。
+fn push_bounded(
+    line: &mut Vec<u8>,
+    bytes: &[u8],
+    discarding: &mut bool,
+    sender: &mpsc::UnboundedSender<Line>,
+) {
+    if line.len().saturating_add(bytes.len()) > MAX_REQUEST_BYTES {
+        line.clear();
+        *discarding = true;
+        let _ = sender.send(Line::TooLarge);
+        return;
+    }
+    line.extend_from_slice(bytes);
+    while line.last().is_some_and(|byte| *byte == b'\r') {
+        line.pop();
     }
 }
 
@@ -377,6 +436,12 @@ pub fn host_name() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 impl Context {
+    /// 读取侧围栏命中：与解析侧超限拒绝同一份 `code` 与文案，且不执行任何东西。
+    fn reject_too_large(&self) {
+        let rejection = protocol::too_large_rejection();
+        self.respond(protocol::err_frame(&rejection.id, &rejection.error));
+    }
+
     fn handle_line(self: &Arc<Self>, line: &[u8]) {
         match protocol::parse_request(line) {
             Ok(request) => self.dispatch(request),
@@ -1476,7 +1541,14 @@ impl Context {
         })
         .await
         .map_err(|_| AppError::new("terminal_start", "终端启动被中断，未创建会话。"))??;
-        self.remember_terminal(&snapshot, &session.key)?;
+        if let Err(error) = self.remember_terminal(&snapshot, &session.key) {
+            // 归属校验失败说明这个 shell 不能留在远端：已建会话必须就地回收，
+            // 否则会出现一个没有仓库能认领、却能继续写文件的孤儿进程。
+            let manager = Arc::clone(&self.terminal);
+            let orphan = snapshot.session_id.clone();
+            let _ = tokio::task::spawn_blocking(move || manager.close(&orphan)).await;
+            return Err(error);
+        }
         Ok(json!({ "repo": session.key, "terminal": snapshot }))
     }
 
@@ -1494,7 +1566,8 @@ impl Context {
         let session = self.session(fields)?;
         let id = string_field(fields, "sessionId")?;
         let data = raw_text_field(fields, "data")?;
-        self.check_terminal_repo(&self.terminal.attach(&id)?, &session.key)?;
+        // 只要归属：`attach` 会复制最多 2 MiB 的重放缓冲，写输入不该为它付代价。
+        self.check_terminal_owner(&self.terminal.repo_of(&id)?, &session.key)?;
         self.terminal.write(&id, &data)?;
         Ok(json!({ "repo": session.key, "sessionId": id, "accepted": true }))
     }
@@ -1509,7 +1582,7 @@ impl Context {
             u16::try_from(rows).map_err(|_| AppError::new("terminal_size", "终端行数超出范围。"))?;
         let cols =
             u16::try_from(cols).map_err(|_| AppError::new("terminal_size", "终端列数超出范围。"))?;
-        self.check_terminal_repo(&self.terminal.attach(&id)?, &session.key)?;
+        self.check_terminal_owner(&self.terminal.repo_of(&id)?, &session.key)?;
         self.terminal.resize(&id, rows, cols)?;
         Ok(json!({
             "repo": session.key,
@@ -1523,7 +1596,7 @@ impl Context {
     async fn terminal_restart(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
         let session = self.session(fields)?;
         let id = string_field(fields, "sessionId")?;
-        self.check_terminal_repo(&self.terminal.attach(&id)?, &session.key)?;
+        self.check_terminal_owner(&self.terminal.repo_of(&id)?, &session.key)?;
         let manager = Arc::clone(&self.terminal);
         let snapshot = tokio::task::spawn_blocking(move || manager.restart(&id))
             .await
@@ -1536,6 +1609,11 @@ impl Context {
     async fn terminal_close(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
         let session = self.session(fields)?;
         let id = string_field(fields, "sessionId")?;
+        // 关闭也是跨仓库可达的破坏性操作：先确认会话属于当前打开的工作树。
+        // 会话已不存在时按幂等处理（重复关闭仍然是 `closed: true`），不在这里报未知。
+        if let Ok(owner) = self.terminal.repo_of(&id) {
+            self.check_terminal_owner(&owner, &session.key)?;
+        }
         let manager = Arc::clone(&self.terminal);
         let target = id.clone();
         let closed = tokio::task::spawn_blocking(move || manager.close(&target))
@@ -1566,7 +1644,12 @@ impl Context {
 
     /// 会话所属仓库必须与请求的 `repo` 一致：终端不会跨仓库找会话。
     fn check_terminal_repo(&self, snapshot: &TerminalSnapshot, key: &str) -> Result<(), AppError> {
-        if snapshot.repo_path == key {
+        self.check_terminal_owner(&snapshot.repo_path, key)
+    }
+
+    /// 归属校验的本体：只比较仓库键，不需要重放缓冲。
+    fn check_terminal_owner(&self, repo_key: &str, key: &str) -> Result<(), AppError> {
+        if repo_key == key {
             Ok(())
         } else {
             Err(AppError::new(

@@ -220,6 +220,18 @@ impl TerminalManager {
         Ok(self.find(session_id)?.snapshot(true))
     }
 
+    /// 会话所属仓库键：只回答「这个会话属于哪棵工作树」。
+    ///
+    /// 归属校验不应该为了拿一个键去复制最多 2 MiB 的重放缓冲（`attach` 的代价），
+    /// 因此单独给一条只读轻量查询。
+    ///
+    /// 只有远端 agent 需要它：桌面的终端命令按窗口持有会话，不跨仓库校验归属，
+    /// 所以这里跟着 `agent` feature 编译，避免在桌面侧留下无用接口。
+    #[cfg(feature = "agent")]
+    pub fn repo_of(&self, session_id: &str) -> Result<String, AppError> {
+        Ok(self.find(session_id)?.repo_key.clone())
+    }
+
     /// 用同一终端类型重启已退出的会话；新会话占原位置，旧会话的输出随之丢弃。
     /// 仍在运行时拒绝，避免误把正在跑的命令替换掉。
     pub fn restart(&self, session_id: &str) -> Result<TerminalSnapshot, AppError> {

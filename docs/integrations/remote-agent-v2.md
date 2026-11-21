@@ -28,7 +28,9 @@ v1 的安装、版本握手和写入记录保持可读；v2 不读取也不 rein
 - 请求最多 8 MiB，单条响应最多 4 MiB，同一通道最多 16 个在途请求（超限返回 `remote_busy`）。
   8 MiB 是为了让文件保存与终端输入装得下共享实现的 2 MiB 编辑上限（JSON 转义还会放大）；
   超过上限的整条请求被拒绝（`request_too_large`，此时回答的 `id` 是占位符 `0`，因为超限行
-  在解析出 `id` 之前就被丢掉），不截断正文，也不执行。
+  在解析出 `id` 之前就被丢掉），不截断正文，也不执行。围栏在读取侧生效：标准输入按 64 KiB
+  分块读入，越过上限就立刻丢弃该行剩余字节（到下一个换行为止）并回 `request_too_large`，
+  不会先把任意大的行缓冲进内存；后续帧照常解析。
 - 一个进程持有一个打开的工作树；`repo` 字段必须等于打开时的规范路径。
 
 `--probe` 输出一行 JSON，供安装方在选择产物前判断目标：
@@ -248,6 +250,9 @@ v1 的安装、版本握手和写入记录保持可读；v2 不读取也不 rein
   所以丢通知既不会让界面停在过期状态，也不会触发补发历史。
 - `events {repo,after}`：返回水位 `seq`、`watchDegraded`、`resync` 和 `after` 之后的事件。
   `after` 比保留窗口（最近 32 条）还旧时 `resync:true` 且不回事件，客户端整体重读一次当前视图。
+  `after` 大于水位（客户端留着上一代 agent 的序号）同样按无效游标处理，回 `resync:true` 且
+  不补发历史。`after` 是客户端给的整数，取到 `u64::MAX` 也只是「没有可补发的事件」：游标的
+  算术全部饱和，越界不会让 agent 崩溃或卡住请求。
 - `watchDegraded:true`（远端无法 watch，或环境变量 `TWIGLANE_AGENT_DISABLE_WATCH` 显式关闭）时
   不启动任何轮询线程、也不产生通知帧：状态只在用户聚焦或显式刷新（`status`）时读取。聚焦、
   显式刷新与通知后续读取走同一个失效入口，与本地后端「不可 watch 就只按显式刷新」一致。
@@ -277,6 +282,9 @@ v1 的安装、版本握手和写入记录保持可读；v2 不读取也不 rein
 - 断线：PTY 属于 agent 进程，进程退出即会话结束。重连后旧 `sessionId` 一律返回
   `terminal_unknown`，绝不假装原 PTY 还活着；客户端要么附着新会话，要么重建。
 - 会话按远端仓库键隔离：`repo` 与打开的工作树不一致时返回 `unknown_repo`，不会跨仓库找会话。
+  `terminalClose` 也先核对归属再终止：用另一个仓库的 `repo` 关不掉这里的 shell（会话报
+  `unknown_repo` 并保持运行）。归属校验只查会话的仓库键，只有 `terminalAttach` 需要复制
+  重放缓冲，`terminalInput`、`terminalResize`、`terminalRestart` 不为拿一个键付这份代价。
 
 ## 安全边界
 
@@ -308,7 +316,9 @@ v2 不复制 Git 语义，而是编译同一批桌面源文件，所以「同效
 | 文件保存与目录写入（创建/复制/移动/删除） | `git::files` + 写锁与回执 | `saving_a_file_requires_the_expected_content_version`、`folder_writes_create_copy_move_and_delete_leave_receipts` |
 | 资源预览与 Markdown 来源/资源 | `git::preview`、`git::document` | 同一批用例里经共享实现返回 `FilePreview`；桌面侧由 `cargo test --manifest-path src-tauri/Cargo.toml git::` 覆盖 |
 | 变化事件（合并、序号、降级） | `remote-agent/v2/src/events.rs`（notify） | `change_events_carry_repo_and_merge_bursts`、`watch_unavailable_degrades_to_explicit_refresh_only` |
+| 变化事件游标的越界边界 | `remote-agent/v2/src/events.rs`（饱和算术） | `an_out_of_range_event_cursor_is_answered_without_panicking`（`after:u64::MAX` 回可控结果且进程仍可服务） |
 | 远端 PTY 会话 | `src-tauri/src/terminal.rs`（与桌面同一份 PTY/重放/背压） | `remote_pty_supports_create_attach_input_resize_restart_and_close`、`a_reconnected_agent_reports_previous_pty_sessions_as_unknown` |
+| 终端会话的仓库归属（含 `terminalClose`） | `src-tauri/src/terminal.rs`（`repo_of`）+ 协议分派 | `terminal_close_cannot_reach_a_session_from_another_repository`（跨仓库关闭被拒、会话仍可附着与输入） |
 | 执行字段边界 | 协议分派 | `every_op_rejects_execution_fields`、`an_oversized_request_is_rejected_without_execution` |
 
 每条断言都读取真实 Git（`rev-parse`、`rev-list`、文件内容、`status`），而不是只看 DTO 字段，
@@ -329,4 +339,16 @@ v2 不复制 Git 语义，而是编译同一批桌面源文件，所以「同效
   单次读取大小之外的性能数字。
 - 断线期间的重连代理：agent 不保存会话状态，重连后提交 id 之外的会话身份全部作废。
 - 普通 Git RPC 没有程序或命令字段：本协议只在显式终端会话里提供 PTY 输入，不提供任意 shell。
+
+## 已知证据缺口
+
+这些行为已经实现，但目前的自动化证据只覆盖一半，交付时不要按「已端到端验证」讲：
+
+- `documentRemoteImage` 的真实抓取：回归只覆盖 URL 校验与拒绝路径（`file://` 等返回
+  `document_url`），成功下载一张外链图片需要在有出网环境的真实 agent 上手工验证，仓库里
+  没有这条端到端证据（也不引入网络夹具，避免 CI 依赖外网）。
+- `tests/fixtures/remote-parity/scenarios.json` 只有远端侧的执行器
+  （`shared_parity_scenarios_drive_the_remote_agent` 用 `include_str!` 驱动）。桌面侧没有按
+  `id` 回放同一份场景的代码，靠的是「同一批共享源文件被桌面单元测试覆盖」，因此这些场景
+  不是「两端各跑一遍」的契约。
 

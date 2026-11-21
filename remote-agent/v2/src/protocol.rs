@@ -1,8 +1,8 @@
 //! v2 协议边界：有界 JSON Lines、请求标识、版本握手与响应帧。
 //!
-//! 与 v1 的差别只在于版本号和能力面，帧的约束保持一致：一条请求一行、UTF-8、请求最多
-//! 128 KiB、单条响应最多 4 MiB、同一通道最多 16 个在途请求。响应可以乱序返回，客户端按
-//! `id` 匹配，因此取消与选择抢占不需要独占整条通道。
+//! 与 v1 的差别只在版本号、能力面和请求上限：一条请求一行、UTF-8、请求最多
+//! 8 MiB（`MAX_REQUEST_BYTES`）、单条响应最多 4 MiB、同一通道最多 16 个在途请求。
+//! 响应可以乱序返回，客户端按 `id` 匹配，因此取消与选择抢占不需要独占整条通道。
 
 use serde_json::{Map, Value};
 
@@ -12,8 +12,11 @@ pub const PROTOCOL: u32 = 2;
 /// 一条请求的上限。
 ///
 /// 比 v1 的 128 KiB 宽，是因为文件保存走同一条通道：共享实现的编辑上限是 2 MiB 文本，
-/// 进 JSON 后还要按转义放大，128 KiB 会让稍大的源文件在远端永远存不进去。上限依然明确：
-/// 超过就整条拒绝，不截断正文。
+/// 进 JSON 后还要按转义放大，v1 的 128 KiB 会让稍大的源文件在远端永远存不进去。上限依然
+/// 明确：超过就整条拒绝，不截断正文。
+///
+/// 这个上限在读取侧就生效：`read_lines` 按块读入，一旦超限就丢弃该行剩余字节并回
+/// `request_too_large`，不会先把任意大的行缓冲进内存再判断。
 pub const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_IN_FLIGHT: usize = 16;
@@ -148,13 +151,21 @@ pub fn token(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
+/// 超限的唯一回答：读取侧围栏与解析侧检查共用，两处的 `code` 与文案不会漂移。
+///
+/// 超限行没有可用的 `id`（帧本身不可信），因此固定用占位 `0`。
+pub fn too_large_rejection() -> Rejection {
+    let limit = MAX_REQUEST_BYTES / (1024 * 1024);
+    Rejection::new(
+        "0",
+        "request_too_large",
+        &format!("请求超过 {limit} MiB，未执行。"),
+    )
+}
+
 pub fn parse_request(line: &[u8]) -> Result<Request, Rejection> {
     if line.len() > MAX_REQUEST_BYTES {
-        return Err(Rejection::new(
-            "0",
-            "request_too_large",
-            "请求超过 128 KiB，未执行。",
-        ));
+        return Err(too_large_rejection());
     }
     let value: Value = match serde_json::from_slice(line) {
         Ok(value) => value,

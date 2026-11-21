@@ -237,11 +237,18 @@ pub struct CursorReply {
 
 /// `after` 之后的事件。比最老事件还旧的游标只回 `resync`，不补发历史：
 /// 失效通知不是变更日志，多刷一次比逐条重放更安全。
+///
+/// `after` 是客户端给的整数，可能取到 `u64::MAX`：所有算术都用 `saturating_add`，
+/// 游标越界只是「没有可补发的事件」，绝不能在这里溢出。游标跑到水位之前（例如
+/// agent 重启后客户端还留着旧的一代序号）同样按无效游标处理，回 `resync`。
 pub fn cursor(feed: &ChangeFeed, after: u64) -> CursorReply {
     let seq = feed.seq.load(Ordering::SeqCst);
     let recent = feed.recent.lock().unwrap_or_else(|error| error.into_inner());
-    let oldest = recent.front().map(|event| event.seq).unwrap_or(seq + 1);
-    let resync = after + 1 < oldest && after < seq;
+    let oldest = recent
+        .front()
+        .map(|event| event.seq)
+        .unwrap_or_else(|| seq.saturating_add(1));
+    let resync = after.saturating_add(1) < oldest || after > seq;
     CursorReply {
         seq,
         degraded: feed.degraded(),

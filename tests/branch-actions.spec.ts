@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   deleteBranch: vi.fn(),
   deleteRemoteBranch: vi.fn(),
   cancelRemote: vi.fn(),
+  fetchBranches: vi.fn(),
   tagState: vi.fn(),
   openRepository: vi.fn(),
   repoHeads: vi.fn(),
@@ -694,6 +695,44 @@ describe("删除本地分支时同时删除同名远程分支、已合入主干�
     finish(afterLocal);
     await waitFor(() => expect(rowNames()).not.toContain("done"));
     await waitFor(() => expect(refresh.disabled).toBe(false));
+    expect(api.fetchBranches).not.toHaveBeenCalled();
+  });
+
+  it("远程页直接显示 fetch 后的列表，成功时只读取一次分支状态", async () => {
+    api.fetchBranches.mockResolvedValue(afterBoth);
+    setup();
+    await waitFor(() => expect(rowNames()).toContain("done"));
+    await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "展开分组 origin" }));
+    expect(rowNames()).toContain("origin/done");
+    await fireEvent.click(screen.getByRole("button", { name: "刷新分支列表" }));
+    await waitFor(() => expect(rowNames()).not.toContain("origin/done"));
+    expect(api.fetchBranches).toHaveBeenCalledTimes(1);
+    expect(api.branchState).toHaveBeenCalledTimes(1); // 打开弹窗时的初读
+  });
+
+  it("远程缓存为空也能发现首个分支，generation 过期时重试一次", async () => {
+    api.branchState.mockResolvedValueOnce({ ...withTwins, branches: withTwins.branches.filter((b) => !b.remote) });
+    api.fetchBranches.mockRejectedValueOnce({ code: "stale", message: "仓库已更新", generation: 5 }).mockResolvedValueOnce(afterBoth);
+    setup();
+    await waitFor(() => expect(rowNames()).toContain("done"));
+    await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "刷新分支列表" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "展开分组 origin" }));
+    expect(rowNames()).toContain("origin/renamed");
+    expect(api.fetchBranches.mock.calls.map(([, generation]) => generation)).toEqual([4, 5]);
+    expect(api.branchState).toHaveBeenCalledTimes(1);
+  });
+
+  it("远程分支页获取失败时报错，仍按本地重读列表", async () => {
+    api.fetchBranches.mockRejectedValue({ code: "network", message: "网络不可用" });
+    const { onFailure } = setup();
+    await waitFor(() => expect(rowNames()).toContain("done"));
+    await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "刷新分支列表" }));
+    await waitFor(() => expect(onFailure).toHaveBeenCalled());
+    await waitFor(() => expect(api.branchState).toHaveBeenCalledTimes(2));
+    expect((await screen.findByRole("alert")).textContent).toContain("网络不可用");
   });
 });
 

@@ -1,7 +1,7 @@
 {
   "format": "twiglane-remote-worktree-evidence/v1",
   "source": {
-    "twiglane": "6cc410c7409ae05850786287bf5e1387e507f6fa",
+    "twiglane": "7102ec1b5a953fb28e69a8eec7bbeb02dc70a79d",
     "cliora": "cf2347d8db9c0ef72ca69edb24969d014c4a4268"
   },
   "ssh": {
@@ -22,24 +22,24 @@
       "profile": "baseline",
       "configuredBytesPerSec": null,
       "oneWayDelayMs": 0,
-      "observedRoundTripMs": 4,
+      "observedRoundTripMs": 25,
       "lists": [
         {
           "files": 5,
-          "elapsedMs": 13,
+          "elapsedMs": 43,
           "downBytes": 516,
           "rpcCount": 1
         },
         {
           "files": 252,
-          "elapsedMs": 18,
+          "elapsedMs": 29,
           "downBytes": 8076,
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 19,
+      "smallDiffMs": 40,
       "smallDiffDownBytes": 284,
-      "switchMs": 23,
+      "switchMs": 48,
       "switchDownBytes": 432,
       "oldReply": "superseded",
       "sshUp": 5478,
@@ -49,7 +49,7 @@
       "profile": "high-rtt",
       "configuredBytesPerSec": null,
       "oneWayDelayMs": 400,
-      "observedRoundTripMs": 807,
+      "observedRoundTripMs": 806,
       "lists": [
         {
           "files": 5,
@@ -59,14 +59,14 @@
         },
         {
           "files": 252,
-          "elapsedMs": 827,
+          "elapsedMs": 821,
           "downBytes": 8076,
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 821,
+      "smallDiffMs": 824,
       "smallDiffDownBytes": 284,
-      "switchMs": 840,
+      "switchMs": 828,
       "switchDownBytes": 432,
       "oldReply": "superseded",
       "sshUp": 5478,
@@ -76,51 +76,51 @@
       "profile": "low-bw",
       "configuredBytesPerSec": 32768,
       "oneWayDelayMs": 0,
-      "observedRoundTripMs": 14,
+      "observedRoundTripMs": 17,
       "lists": [
         {
           "files": 5,
-          "elapsedMs": 33,
+          "elapsedMs": 35,
           "downBytes": 516,
           "rpcCount": 1
         },
         {
           "files": 252,
-          "elapsedMs": 271,
+          "elapsedMs": 272,
           "downBytes": 8076,
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 68,
+      "smallDiffMs": 38,
       "smallDiffDownBytes": 284,
-      "switchMs": 66,
+      "switchMs": 64,
       "switchDownBytes": 432,
       "oldReply": "superseded",
-      "sshUp": 5522,
+      "sshUp": 5478,
       "sshDown": 35673
     },
     {
       "profile": "combined",
       "configuredBytesPerSec": 32768,
       "oneWayDelayMs": 400,
-      "observedRoundTripMs": 830,
+      "observedRoundTripMs": 817,
       "lists": [
         {
           "files": 5,
-          "elapsedMs": 838,
+          "elapsedMs": 835,
           "downBytes": 516,
           "rpcCount": 1
         },
         {
           "files": 252,
-          "elapsedMs": 1073,
+          "elapsedMs": 1078,
           "downBytes": 8076,
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 853,
+      "smallDiffMs": 840,
       "smallDiffDownBytes": 284,
-      "switchMs": 857,
+      "switchMs": 851,
       "switchDownBytes": 432,
       "oldReply": "superseded",
       "sshUp": 5478,
@@ -130,28 +130,28 @@
       "profile": "stress",
       "configuredBytesPerSec": 8192,
       "oneWayDelayMs": 900,
-      "observedRoundTripMs": 1836,
+      "observedRoundTripMs": 1833,
       "lists": [
         {
           "files": 5,
-          "elapsedMs": 1925,
+          "elapsedMs": 1893,
           "downBytes": 516,
           "rpcCount": 1
         },
         {
           "files": 252,
-          "elapsedMs": 2833,
+          "elapsedMs": 2818,
           "downBytes": 8076,
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 1888,
+      "smallDiffMs": 1889,
       "smallDiffDownBytes": 284,
-      "switchMs": 4575,
-      "switchDownBytes": 22264,
-      "oldReply": "one_page",
-      "sshUp": 5522,
-      "sshDown": 57505
+      "switchMs": 1931,
+      "switchDownBytes": 432,
+      "oldReply": "superseded",
+      "sshUp": 5478,
+      "sshDown": 35673
     }
   ],
   "protocol": {

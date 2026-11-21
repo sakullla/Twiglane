@@ -426,13 +426,10 @@ async fn upload(
     let mut stdin = child.take_stdin().unwrap();
     let stdout = child.take_stdout().unwrap();
     let stderr = child.take_stderr().unwrap();
-    let write = async {
+    // Own the pipe so completing the write delivers EOF to the installer.
+    let write = async move {
         stdin
             .write_all(AGENT)
-            .await
-            .map_err(|_| remote_error("ssh_failed"))?;
-        stdin
-            .shutdown()
             .await
             .map_err(|_| remote_error("ssh_failed"))
     };
@@ -1010,6 +1007,44 @@ mod tests {
         supported.extend_from_slice(b"cliora-twiglane-connector-v1");
         std::fs::write(&executable, supported).unwrap();
         assert!(connector_marker(&executable));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn upload_delivers_eof_before_waiting_for_install_receipt() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let helper = dir.path().join("cliora");
+        std::fs::write(
+            &helper,
+            r#"#!/bin/sh
+cat > "$(dirname "$0")/received" || exit 1
+printf '{"installed":true,"agentSha256":"%s"}\n' "$5"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let target = serde_json::from_value(json!({
+            "targetId": "host-a", "targetRevision": "peer", "name": "A",
+            "host": "test.invalid", "port": 22, "user": "test", "authMethod": "key",
+        }))
+        .unwrap();
+        let digest = format!("{:x}", Sha256::digest(AGENT));
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            upload(
+                &helper,
+                &target,
+                &digest,
+                "development",
+                &Channel::new(|_| Ok(())),
+            ),
+        )
+        .await
+        .expect("installer did not receive EOF")
+        .unwrap();
+        assert_eq!(std::fs::read(dir.path().join("received")).unwrap(), AGENT);
     }
 
     #[cfg(unix)]

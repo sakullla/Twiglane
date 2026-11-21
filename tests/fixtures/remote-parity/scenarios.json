@@ -1,0 +1,59 @@
+{
+  "format": "remote_parity_scenarios",
+  "version": 1,
+  "description": "本地后端与远端 agent v2 必须同效的 Git 场景清单。两侧各自真实执行 Git 并核对结果，只共享场景、步骤与期望值，不共享断言代码：桌面侧按 id 引用（src-tauri/src/git 的回归与 tests/remote-agent），远端侧由 remote-agent/v2/tests/protocol.rs 读取本文件驱动。",
+  "scenarios": [
+    {
+      "id": "merge-conflict-resolve",
+      "title": "冲突合并挡住完成，直到冲突被显式解决",
+      "ops": ["mergeStart", "mergeComplete", "conflictView", "resolveConflict"],
+      "steps": [
+        "main 与 side 分支修改同一个文件并各自提交",
+        "mergeStart source=side",
+        "未解决冲突时 mergeComplete 必须失败",
+        "conflictView 分别报出 ours 与 theirs 的文本",
+        "resolveConflict choice=ours 后 mergeComplete 成功",
+        "合并完成后 HEAD 可达的提交数增加 2（side 的提交 + 合并提交）"
+      ],
+      "expect": {
+        "conflictPath": "a.txt",
+        "blockedBeforeResolve": true,
+        "resolvedContent": "main",
+        "commitCountIncrement": 2
+      }
+    },
+    {
+      "id": "stash-round-trip",
+      "title": "stash 保存、应用、删除往返不丢改动",
+      "ops": ["stashSave", "stashApply", "stashDelete"],
+      "steps": [
+        "工作树有未提交改动",
+        "stashSave 后工作树干净且文件回到已提交内容",
+        "stashApply 把同一处改动放回工作树",
+        "stashDelete 后记录为空"
+      ],
+      "expect": {
+        "message": "parity wip",
+        "changedFile": "a.txt",
+        "restoredLine": "change",
+        "recordsAfterDelete": 0
+      }
+    },
+    {
+      "id": "worktree-add-remove",
+      "title": "附属工作区可列出并只由自己删除，主工作区始终拒绝",
+      "ops": ["worktrees", "worktreeRemove"],
+      "steps": [
+        "worktree add 一个附属工作区并建立新分支",
+        "worktrees 列出两棵工作树",
+        "附属工作区的会话可以删除自己",
+        "主工作区的会话删除被判为 not_worktree"
+      ],
+      "expect": {
+        "linkedBranch": "parity-linked",
+        "listedCount": 2,
+        "mainRefusalCode": "not_worktree"
+      }
+    }
+  ]
+}

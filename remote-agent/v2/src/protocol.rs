@@ -32,8 +32,18 @@ pub const CAPABILITIES: &[&str] = &[
     "commitDetail",
     "commitDiff",
     "compare",
+    // 提交与任意两点之间的单文件差异（桌面主窗口已在用，v2 必须同名可用）
+    "commitBranches",
+    "compareFileDiff",
     // 分支、标签、同步（T2）
     "branchList",
+    "branchState",
+    "branchTracking",
+    "fetchBranches",
+    "deleteRemoteBranch",
+    "setUpstream",
+    "associateUpstream",
+    "tagRemoteState",
     "branchCreate",
     "branchSwitch",
     "branchRename",

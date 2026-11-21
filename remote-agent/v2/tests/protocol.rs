@@ -42,8 +42,8 @@ impl Agent {
         }
     }
 
-    /// 发一条请求并读到同一 id 的响应；通道是多路的，其他 id 的响应被丢弃。
-    fn call(&mut self, id: &str, op: &str, fields: Value) -> Value {
+    /// 只发请求、不等回答：验证取消这类「提问时请求还在途」的行为需要它。
+    fn send(&mut self, id: &str, op: &str, fields: Value) {
         let mut body = fields;
         let object = body.as_object_mut().expect("字段必须是对象");
         object.insert("v".into(), json!(2));
@@ -53,6 +53,10 @@ impl Agent {
         self.stdin.write_all(frame.as_bytes()).expect("写请求");
         self.stdin.write_all(b"\n").expect("写换行");
         self.stdin.flush().expect("刷新请求");
+    }
+
+    /// 读到指定 id 的响应；通道是多路的，其他 id 的响应被丢弃。
+    fn read_id(&mut self, id: &str) -> Value {
         loop {
             let mut line = String::new();
             let read = self.stdout.read_line(&mut line).expect("读响应");
@@ -63,6 +67,12 @@ impl Agent {
                 return value;
             }
         }
+    }
+
+    /// 发一条请求并读到同一 id 的响应。
+    fn call(&mut self, id: &str, op: &str, fields: Value) -> Value {
+        self.send(id, op, fields);
+        self.read_id(id)
     }
 
     fn ok(&mut self, id: &str, op: &str, fields: Value) -> Value {
@@ -1813,3 +1823,619 @@ fn every_advertised_capability_has_a_handler() {
     }
     assert!(capabilities.contains(&json!("worktreeRemove")));
 }
+
+#[test]
+fn the_window_read_entries_track_branches_tags_and_commit_membership() {
+    let fixture = Fixture::new("read-parity");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+    let base = base_of(&fixture);
+    let bare = base.join("remote.git");
+    git(&base, &fixture.config, &["init", "--bare", "remote.git"]);
+    let bare_str = bare.to_string_lossy().into_owned();
+    git(&fixture.repo, &fixture.config, &["remote", "add", "origin", &bare_str]);
+    git(&fixture.repo, &fixture.config, &["push", "-u", "origin", "main"]);
+    // feature 推上去后从远端删掉：本地仍配置上游，跟踪信息必须是 gone。
+    git(&fixture.repo, &fixture.config, &["checkout", "-b", "feature"]);
+    git(&fixture.repo, &fixture.config, &["push", "-u", "origin", "feature"]);
+    git(&fixture.repo, &fixture.config, &["checkout", "main"]);
+    git(&fixture.repo, &fixture.config, &["push", "origin", "--delete", "feature"]);
+    fixture.write("b.txt", "b\n");
+    fixture.commit_all("local ahead");
+    git(&fixture.repo, &fixture.config, &["fetch", "--prune", "origin"]);
+
+    let mut agent = fixture.agent();
+    open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+
+    let tracking = agent.ok("tracking-1", "branchTracking", json!({ "repo": repo }))["branchTracking"]
+        .clone();
+    let branches = tracking["branches"].as_array().unwrap();
+    let main = branches
+        .iter()
+        .find(|item| item["name"] == json!("main"))
+        .expect("main 必须在跟踪信息里");
+    assert_eq!(main["upstream"], json!("origin/main"));
+    assert_eq!(main["ahead"], json!(1), "本地比 origin/main 多一个提交");
+    assert_eq!(main["behind"], json!(0));
+    assert_eq!(main["gone"], json!(false));
+    let feature = branches
+        .iter()
+        .find(|item| item["name"] == json!("feature"))
+        .expect("feature 必须在跟踪信息里");
+    assert_eq!(feature["gone"], json!(true), "远程分支已删除，跟踪引用是 gone");
+
+    let state = agent.ok("branch-state-1", "branchState", json!({ "repo": repo }))["branchState"]
+        .clone();
+    assert_eq!(state["snapshot"]["branch"]["name"], json!("main"));
+    assert!(state["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["name"] == json!("feature")));
+
+    // 远端标签是 ls-remote 的结果，与本地标签分开读。
+    git(&fixture.repo, &fixture.config, &["tag", "v-parity"]);
+    git(&fixture.repo, &fixture.config, &["push", "origin", "v-parity"]);
+    let remote_tags = agent.ok(
+        "tag-remote-1",
+        "tagRemoteState",
+        json!({ "repo": repo, "remote": "origin" }),
+    )["tagRemoteState"]
+        .clone();
+    assert!(remote_tags
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tag| tag["name"] == json!("v-parity")));
+
+    // 含该提交的分支：当前分支命中，远端跟踪分支也算一条。
+    let head = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let membership = agent.ok(
+        "commit-branches-1",
+        "commitBranches",
+        json!({ "repo": repo, "oid": head }),
+    )["commitBranches"]
+        .clone();
+    assert_eq!(membership["current"], json!("main"));
+    let containing = membership["branches"].as_array().unwrap();
+    assert!(containing
+        .iter()
+        .any(|item| item["name"] == json!("main") && item["current"] == json!(true)));
+    assert_eq!(membership["total"], json!(1), "只有 main 还指向这个新提交：{membership}");
+
+    // 更早的提交同时被 main 与 feature 包含：清单不能只看当前分支。
+    let first = git(
+        &fixture.repo,
+        &fixture.config,
+        &["rev-list", "--max-parents=0", "HEAD"],
+    )
+    .trim()
+    .to_string();
+    let older = agent.ok(
+        "commit-branches-2",
+        "commitBranches",
+        json!({ "repo": repo, "oid": first }),
+    )["commitBranches"]
+        .clone();
+    let older_branches = older["branches"].as_array().unwrap();
+    assert!(older_branches
+        .iter()
+        .any(|item| item["name"] == json!("main")));
+    assert!(
+        older_branches
+            .iter()
+            .any(|item| item["name"] == json!("feature")),
+        "更早的提交也被 feature 包含：{older}"
+    );
+
+    let diff = agent.ok(
+        "compare-file-1",
+        "compareFileDiff",
+        json!({ "repo": repo, "base": first, "head": head, "path": "b.txt" }),
+    )["compareFileDiff"]
+        .clone();
+    assert_eq!(diff["path"], json!("b.txt"));
+    assert!(
+        diff["lines"].as_array().unwrap().iter().any(|line| {
+            line["kind"] == json!("add") && line["text"].as_str().unwrap_or_default().contains("b")
+        }),
+        "新增行必须来自真实差异：{diff}"
+    );
+
+    // 空 base 表示与空树比较：历史多选的最早提交没有父提交。
+    let from_empty = agent.ok(
+        "compare-file-2",
+        "compareFileDiff",
+        json!({ "repo": repo, "base": "", "head": head, "path": "a.txt" }),
+    )["compareFileDiff"]
+        .clone();
+    assert!(from_empty["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line["kind"] == json!("add")));
+}
+
+#[test]
+fn upstream_and_remote_branch_writes_go_through_shared_sync() {
+    let fixture = Fixture::new("upstream");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+    let base = base_of(&fixture);
+    let bare = base.join("remote.git");
+    git(&base, &fixture.config, &["init", "--bare", "remote.git"]);
+    let bare_str = bare.to_string_lossy().into_owned();
+    git(&fixture.repo, &fixture.config, &["remote", "add", "origin", &bare_str]);
+    git(&fixture.repo, &fixture.config, &["push", "-u", "origin", "main"]);
+    // work 已推到远端，但刻意清掉本地上游配置：这正是「关联上游」要处理的状态。
+    git(&fixture.repo, &fixture.config, &["checkout", "-b", "work"]);
+    git(&fixture.repo, &fixture.config, &["push", "-u", "origin", "work"]);
+    git(&fixture.repo, &fixture.config, &["branch", "--unset-upstream"]);
+    // 别人往远端推一条新分支：fetchBranches 之后本地应出现 origin/distant。
+    let other = base.join("other");
+    git(&base, &fixture.config, &["clone", &bare_str, "other"]);
+    git(&other, &fixture.config, &["checkout", "-b", "distant"]);
+    std::fs::write(other.join("d.txt"), "d\n").unwrap();
+    git(&other, &fixture.config, &["add", "-A"]);
+    git(&other, &fixture.config, &["commit", "-m", "distant"]);
+    git(&other, &fixture.config, &["push", "origin", "distant"]);
+
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+
+    let fetched = agent.ok(
+        "fetch-branches-1",
+        "fetchBranches",
+        json!({
+            "repo": repo,
+            "operationId": "op-fetch-branches-1",
+            "stateToken": opened["stateToken"],
+        }),
+    );
+    assert_eq!(fetched["receipt"]["state"], json!("completed"));
+    assert!(
+        fetched["branches"]["branches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == json!("origin/distant")),
+        "fetch 之后必须能看到远端跟踪分支：{fetched}"
+    );
+
+    // 关联上游：桌面端会带空远程名，由共享实现按现有远程决定。
+    let associated = agent.ok(
+        "associate-1",
+        "associateUpstream",
+        json!({
+            "repo": repo,
+            "operationId": "op-associate-upstream-1",
+            "stateToken": token_of(&fetched),
+            "remote": "",
+        }),
+    );
+    assert_eq!(associated["receipt"]["state"], json!("completed"));
+    assert_eq!(associated["snapshot"]["branch"]["upstream"], json!("origin/work"));
+
+    // 改成另一条已有的远程分支：branch.<name>.merge 必须真的被改写。
+    let switched = agent.ok(
+        "set-upstream-1",
+        "setUpstream",
+        json!({
+            "repo": repo,
+            "operationId": "op-set-upstream-1",
+            "stateToken": token_of(&associated),
+            "upstream": "origin/main",
+        }),
+    );
+    assert_eq!(
+        switched["branches"]["snapshot"]["branch"]["upstream"],
+        json!("origin/main")
+    );
+    let merge_ref = git(
+        &fixture.repo,
+        &fixture.config,
+        &["config", "--get", "branch.work.merge"],
+    );
+    assert_eq!(merge_ref.trim(), "refs/heads/main");
+
+    // 删除远端分支：远端真的少了一条，本地跟踪引用同步消失。
+    let deleted = agent.ok(
+        "delete-remote-1",
+        "deleteRemoteBranch",
+        json!({
+            "repo": repo,
+            "operationId": "op-delete-remote-branch-1",
+            "stateToken": token_of(&switched),
+            "remote": "origin",
+            "name": "distant",
+            "confirm": true,
+        }),
+    );
+    assert_eq!(deleted["receipt"]["state"], json!("completed"));
+    let remote_heads = git(
+        &base,
+        &fixture.config,
+        &["--git-dir", "remote.git", "branch", "--list"],
+    );
+    assert!(
+        !remote_heads.contains("distant"),
+        "远端分支应已删除：{remote_heads}"
+    );
+    assert!(!deleted["branches"]["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["name"] == json!("origin/distant")));
+}
+
+#[test]
+fn cancel_stops_an_in_flight_fetch_and_leaves_the_result_unknown() {
+    let fixture = Fixture::new("cancel-fetch");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+    let base = base_of(&fixture);
+    // 本机就能构造的「在途远程命令」：ext:: 传输先建标记文件再挂住 30 秒，
+    // 不依赖弱网或外部主机，慢远端的行为是确定性的。
+    let script = base.join("slow-remote.sh");
+    let marker = base.join("remote-started");
+    let body = format!(
+        "#!/bin/sh\ntouch \"{}\"\nsleep 30\n",
+        marker.display()
+    );
+    std::fs::write(&script, body).unwrap();
+    git(
+        &fixture.repo,
+        &fixture.config,
+        &["config", "protocol.ext.allow", "always"],
+    );
+    let url = format!("ext::sh {}", script.to_string_lossy());
+    git(&fixture.repo, &fixture.config, &["remote", "add", "origin", &url]);
+
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+
+    agent.send(
+        "fetch-slow",
+        "fetch",
+        json!({
+            "repo": repo,
+            "operationId": "op-fetch-slow-1",
+            "stateToken": opened["stateToken"],
+        }),
+    );
+    // 等到远程命令真的启动：只有这时取消才证明「能中止在途传输」。
+    let mut started = false;
+    for _ in 0..300 {
+        if marker.exists() {
+            started = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(started, "远程命令没有启动，用例无法证明取消生效");
+
+    let cancelled = agent.ok("cancel-fetch", "cancel", json!({ "targetId": "fetch-slow" }));
+    assert_eq!(cancelled["cancelled"], json!(true));
+    assert_eq!(
+        cancelled["remoteStopped"],
+        json!(true),
+        "访问远程的请求必须同时停掉共享 sync 层的远程命令"
+    );
+
+    let response = agent.read_id("fetch-slow");
+    assert_eq!(response["ok"], json!(false));
+    assert_eq!(response["error"]["code"], json!("cancelled"));
+
+    // 结果未知：回执是 pending，不是 failed；同一个 operationId 不能重发。
+    let receipt = agent.ok(
+        "receipt-slow",
+        "receipt",
+        json!({ "repo": repo, "operationId": "op-fetch-slow-1" }),
+    );
+    assert_eq!(receipt["receipt"]["state"], json!("pending"));
+    assert_eq!(receipt["receipt"]["reason"], json!("cancelled"));
+    let again = agent.error_code(
+        "fetch-slow-again",
+        "fetch",
+        json!({
+            "repo": repo,
+            "operationId": "op-fetch-slow-1",
+            "stateToken": opened["stateToken"],
+        }),
+    );
+    assert_eq!(again, "operation_pending");
+
+    // 取消之后仓库仍然可用：读取照常，工作树没被动过。
+    let status = agent.ok("status-after-cancel", "status", json!({ "repo": repo }));
+    assert_eq!(status["snapshot"]["branch"]["name"], json!("main"));
+    assert_eq!(
+        std::fs::read_to_string(fixture.repo.join("a.txt")).unwrap(),
+        "a\n"
+    );
+}
+
+#[test]
+fn worktree_remove_rejects_fields_it_does_not_understand() {
+    let fixture = Fixture::new("worktree-fields");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+    let base = base_of(&fixture);
+    let linked = base.join("linked");
+    let linked_str = linked.to_string_lossy().into_owned();
+    git(
+        &fixture.repo,
+        &fixture.config,
+        &["worktree", "add", &linked_str, "-b", "linked-branch"],
+    );
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &linked_str);
+    // 多带一个 path 说明调用方按本地命令的形状在调用：必须拒绝，而不是按当前工作树删除。
+    let code = agent.error_code(
+        "worktree-remove-extra",
+        "worktreeRemove",
+        json!({
+            "repo": linked_str.clone(),
+            "operationId": "op-worktree-remove-extra",
+            "stateToken": opened["stateToken"],
+            "force": true,
+            "path": linked_str,
+        }),
+    );
+    assert_eq!(code, "invalid_request");
+    assert!(linked.exists(), "被拒绝的请求不能删掉工作区");
+}
+
+/// 共享行为清单：`tests/fixtures/remote-parity/scenarios.json` 是本地与远端共用的场景表，
+/// 这里直接用它里面的期望值驱动真实 Git，改期望只改那一份。
+#[test]
+fn shared_parity_scenarios_drive_the_remote_agent() {
+    let raw: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/remote-parity/scenarios.json"
+    ))
+    .expect("共享场景清单必须是合法 JSON");
+    let list = raw["scenarios"].as_array().expect("scenarios 必须是数组").clone();
+    let find = |id: &str| {
+        list.iter()
+            .find(|scenario| scenario["id"] == json!(id))
+            .unwrap_or_else(|| panic!("共享场景清单缺少 {id}"))
+            .clone()
+    };
+
+    // 场景一：冲突合并必须挡住完成，直到冲突被显式解决。
+    let scenario = find("merge-conflict-resolve");
+    let expect = &scenario["expect"];
+    let conflict_path = expect["conflictPath"].as_str().unwrap().to_string();
+    let resolved_content = expect["resolvedContent"].as_str().unwrap().to_string();
+    let blocked_before = expect["blockedBeforeResolve"].as_bool().unwrap();
+    let increment = expect["commitCountIncrement"].as_u64().unwrap();
+
+    let fixture = Fixture::new("parity-merge");
+    fixture.init();
+    fixture.write("a.txt", "base\n");
+    fixture.commit_all("base");
+    git(&fixture.repo, &fixture.config, &["checkout", "-b", "side"]);
+    fixture.write("a.txt", "side\n");
+    fixture.commit_all("side");
+    git(&fixture.repo, &fixture.config, &["checkout", "main"]);
+    fixture.write("a.txt", "main\n");
+    fixture.commit_all("main");
+    let before: u64 = git(&fixture.repo, &fixture.config, &["rev-list", "--count", "HEAD"])
+        .trim()
+        .parse()
+        .unwrap();
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+    let started = agent.ok(
+        "parity-merge-start",
+        "mergeStart",
+        json!({
+            "repo": repo,
+            "operationId": "op-parity-merge-start",
+            "stateToken": opened["stateToken"],
+            "source": "side",
+        }),
+    );
+    assert_eq!(started["merge"]["conflicts"][0]["path"], json!(conflict_path));
+    assert_eq!(started["merge"]["canContinue"], json!(false));
+    let blocked = agent.call(
+        "parity-merge-complete-early",
+        "mergeComplete",
+        json!({
+            "repo": repo,
+            "operationId": "op-parity-merge-complete-early",
+            "stateToken": token_of(&started),
+            "message": "merge side",
+        }),
+    );
+    assert_eq!(
+        blocked["ok"],
+        json!(!blocked_before),
+        "冲突未解决时不应完成合并：{blocked}"
+    );
+    let resolved = agent.ok(
+        "parity-resolve",
+        "resolveConflict",
+        json!({
+            "repo": repo,
+            "operationId": "op-parity-resolve",
+            "stateToken": token_of(&started),
+            "path": conflict_path.clone(),
+            "choice": "ours",
+        }),
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.repo.join(&conflict_path))
+            .unwrap()
+            .trim(),
+        resolved_content,
+        "冲突解决后的文件内容必须是被选中的那一侧"
+    );
+    let completed = agent.ok(
+        "parity-merge-complete",
+        "mergeComplete",
+        json!({
+            "repo": repo,
+            "operationId": "op-parity-merge-complete",
+            "stateToken": token_of(&resolved),
+            "message": "merge side",
+        }),
+    );
+    assert!(!completed["merge"]["oid"].as_str().unwrap().is_empty());
+    let after: u64 = git(&fixture.repo, &fixture.config, &["rev-list", "--count", "HEAD"])
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(after, before + increment, "合并必须真的产生一个提交");
+
+    // 场景二：stash 保存、应用、删除往返不丢改动。
+    let scenario = find("stash-round-trip");
+    let expect = &scenario["expect"];
+    let message = expect["message"].as_str().unwrap().to_string();
+    let changed_file = expect["changedFile"].as_str().unwrap().to_string();
+    let restored_line = expect["restoredLine"].as_str().unwrap().to_string();
+    let records_after_delete = expect["recordsAfterDelete"].as_u64().unwrap();
+
+    let fixture = Fixture::new("parity-stash");
+    fixture.init();
+    fixture.write(&changed_file, "a\n");
+    fixture.commit_all("init");
+    let mut agent = fixture.agent();
+    open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+    fixture.write(&changed_file, "a\nchange\n");
+    let state = agent.ok("parity-status", "status", json!({ "repo": repo }));
+    let saved = agent.ok(
+        "parity-stash-save",
+        "stashSave",
+        json!({
+            "repo": repo,
+            "operationId": "op-parity-stash-save",
+            "stateToken": state["stateToken"],
+            "includeUntracked": true,
+            "message": message,
+        }),
+    );
+    let records = saved["stash"]["state"]["records"].as_array().unwrap();
+    assert_eq!(records.len(), 1, "保存后应有一条 stash 记录");
+    let oid = records[0]["oid"].as_str().unwrap().to_string();
+    assert_eq!(
+        std::fs::read_to_string(fixture.repo.join(&changed_file)).unwrap(),
+        "a\n",
+        "stash 保存后工作树必须回到已提交内容"
+    );
+    let applied = agent.ok(
+        "parity-stash-apply",
+        "stashApply",
+        json!({
+            "repo": repo,
+            "operationId": "op-parity-stash-apply",
+            "stateToken": token_of(&saved),
+            "oid": oid,
+        }),
+    );
+    assert!(
+        std::fs::read_to_string(fixture.repo.join(&changed_file))
+            .unwrap()
+            .contains(&restored_line),
+        "应用 stash 后改动必须回到工作树"
+    );
+    assert!(applied["stash"]["snapshot"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|file| file["path"] == json!(changed_file)));
+    let removed = agent.ok(
+        "parity-stash-delete",
+        "stashDelete",
+        json!({
+            "repo": repo,
+            "operationId": "op-parity-stash-delete",
+            "stateToken": token_of(&applied),
+            "oid": oid,
+            "confirm": true,
+        }),
+    );
+    assert_eq!(
+        removed["stash"]["records"].as_array().unwrap().len() as u64,
+        records_after_delete
+    );
+
+    // 场景三：附属工作区可列出并只由自己删除，主工作区始终拒绝。
+    let scenario = find("worktree-add-remove");
+    let expect = &scenario["expect"];
+    let linked_branch = expect["linkedBranch"].as_str().unwrap().to_string();
+    let listed_count = expect["listedCount"].as_u64().unwrap();
+    let refusal = expect["mainRefusalCode"].as_str().unwrap().to_string();
+
+    let fixture = Fixture::new("parity-worktree");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+    let base = base_of(&fixture);
+    let linked = base.join("parity-linked");
+    let linked_str = linked.to_string_lossy().into_owned();
+    git(
+        &fixture.repo,
+        &fixture.config,
+        &["worktree", "add", &linked_str, "-b", &linked_branch],
+    );
+    let mut main_agent = fixture.agent();
+    let opened_main = open(&mut main_agent, &fixture.repo_str());
+    let overview = main_agent.ok(
+        "parity-worktrees",
+        "worktrees",
+        json!({ "repo": fixture.repo_str(), "paths": [fixture.repo_str()] }),
+    )["worktrees"]
+        .clone();
+    assert_eq!(
+        overview["items"].as_array().unwrap().len() as u64,
+        listed_count,
+        "两棵工作树都要出现在同一份总览里"
+    );
+    assert!(overview["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["path"] == json!(linked_str.clone())));
+
+    let mut linked_agent = fixture.agent();
+    let opened_linked = open(&mut linked_agent, &linked_str);
+    let removed_worktree = linked_agent.ok(
+        "parity-worktree-remove",
+        "worktreeRemove",
+        json!({
+            "repo": linked_str.clone(),
+            "operationId": "op-parity-worktree-remove",
+            "stateToken": opened_linked["stateToken"],
+            "force": true,
+        }),
+    );
+    assert_eq!(removed_worktree["receipt"]["state"], json!("completed"));
+    assert!(!linked.exists(), "附属工作区应被真的删除");
+
+    let refused = main_agent.error_code(
+        "parity-worktree-remove-main",
+        "worktreeRemove",
+        json!({
+            "repo": fixture.repo_str(),
+            "operationId": "op-parity-worktree-remove-main",
+            "stateToken": opened_main["stateToken"],
+            "force": true,
+        }),
+    );
+    assert_eq!(refused, refusal, "主工作区不能删除自己");
+}
+
+
+
+

@@ -19,6 +19,9 @@ pub const RECEIPT_DIR: &str = "twiglane-agent-v2";
 pub const REGISTERED: &str = "registered";
 pub const COMPLETED: &str = "completed";
 pub const FAILED: &str = "failed";
+/// 结果未知：远程写入被取消、超时或网络中断，远端可能已经收到请求。
+/// 这类回执既不能当失败重发，也不能当完成，客户端只能按「待核对」处理。
+pub const PENDING: &str = "pending";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -153,6 +156,19 @@ impl ReceiptStore {
         reason: impl Into<String>,
     ) -> Result<Receipt, AppError> {
         receipt.state = FAILED.to_string();
+        receipt.reason = Some(reason.into());
+        receipt.at_ms = now_ms();
+        self.write(&receipt)?;
+        Ok(receipt)
+    }
+
+    /// 结果未确认：记录真实原因，但不声称失败——远端可能已经执行过。
+    pub fn pending(
+        &self,
+        mut receipt: Receipt,
+        reason: impl Into<String>,
+    ) -> Result<Receipt, AppError> {
+        receipt.state = PENDING.to_string();
         receipt.reason = Some(reason.into());
         receipt.at_ms = now_ms();
         self.write(&receipt)?;

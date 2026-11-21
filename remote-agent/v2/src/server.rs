@@ -46,12 +46,39 @@ const MESSAGE_LIMIT: usize = 1024 * 1024;
 /// 标准输入关闭后等待在途请求收尾的宽限时间。
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// 一条在途请求的可取消句柄。
+///
+/// 只翻转本进程的标记只能让「还没开始执行」的请求停下来；访问远程的请求还要同时停止共享
+/// `git::sync` 调度器里那条远程命令（排队中或运行中的子进程），否则 cancel 对已经在传输中的
+/// fetch/pull/push 毫无作用。因此句柄一并记下这次请求是否访问远程。
+struct InFlight {
+    flag: Arc<AtomicBool>,
+    remote: bool,
+}
+
 pub struct Context {
     backend: Arc<Backend>,
     session: Mutex<Option<Session>>,
-    cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    cancels: Mutex<HashMap<String, InFlight>>,
     slots: Arc<Semaphore>,
     out: mpsc::Sender<Vec<u8>>,
+}
+
+/// 会启动远程命令的操作：取消时必须交给共享 sync 层的取消通道，而不能只看本地标记。
+/// 读类只有 `tagRemoteState` 走 ls-remote，它的取消同样经由同一条远程通道生效。
+fn remote_op(op: &str) -> bool {
+    matches!(
+        op,
+        "fetch"
+            | "pull"
+            | "push"
+            | "pushToRemote"
+            | "publishBranch"
+            | "fetchBranches"
+            | "deleteRemoteBranch"
+            | "tagPush"
+            | "tagRemoteState"
+    )
 }
 
 /// 写操作分类：请求摘要、回执与执行分支都以它为准。
@@ -71,16 +98,20 @@ enum WriteOp {
     BranchTrack,
     BranchUpdate,
     BranchPublish,
+    SetUpstream,
+    AssociateUpstream,
     TagCreate,
     TagDelete,
     TagPush,
     RemoteAdd,
     RemoteSetUrl,
     Fetch,
+    FetchBranches,
     Pull,
     Push,
     PushToRemote,
     PublishBranch,
+    DeleteRemoteBranch,
     StashSave,
     StashApply,
     StashDelete,
@@ -110,16 +141,20 @@ const WRITE_OPS: &[WriteOp] = &[
     WriteOp::BranchTrack,
     WriteOp::BranchUpdate,
     WriteOp::BranchPublish,
+    WriteOp::SetUpstream,
+    WriteOp::AssociateUpstream,
     WriteOp::TagCreate,
     WriteOp::TagDelete,
     WriteOp::TagPush,
     WriteOp::RemoteAdd,
     WriteOp::RemoteSetUrl,
     WriteOp::Fetch,
+    WriteOp::FetchBranches,
     WriteOp::Pull,
     WriteOp::Push,
     WriteOp::PushToRemote,
     WriteOp::PublishBranch,
+    WriteOp::DeleteRemoteBranch,
     WriteOp::StashSave,
     WriteOp::StashApply,
     WriteOp::StashDelete,
@@ -150,16 +185,20 @@ impl WriteOp {
             Self::BranchTrack => "branchTrack",
             Self::BranchUpdate => "branchUpdate",
             Self::BranchPublish => "branchPublish",
+            Self::SetUpstream => "setUpstream",
+            Self::AssociateUpstream => "associateUpstream",
             Self::TagCreate => "tagCreate",
             Self::TagDelete => "tagDelete",
             Self::TagPush => "tagPush",
             Self::RemoteAdd => "remoteAdd",
             Self::RemoteSetUrl => "remoteSetUrl",
             Self::Fetch => "fetch",
+            Self::FetchBranches => "fetchBranches",
             Self::Pull => "pull",
             Self::Push => "push",
             Self::PushToRemote => "pushToRemote",
             Self::PublishBranch => "publishBranch",
+            Self::DeleteRemoteBranch => "deleteRemoteBranch",
             Self::StashSave => "stashSave",
             Self::StashApply => "stashApply",
             Self::StashDelete => "stashDelete",
@@ -320,7 +359,13 @@ impl Context {
         self.cancels
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert(request.id.clone(), Arc::clone(&cancel));
+            .insert(
+                request.id.clone(),
+                InFlight {
+                    flag: Arc::clone(&cancel),
+                    remote: remote_op(&request.op),
+                },
+            );
         let context = Arc::clone(self);
         tokio::spawn(async move {
             let id = request.id.clone();
@@ -369,6 +414,12 @@ impl Context {
             "mergeSession" => self.merge_session(&request.fields, cancel).await,
             "conflictView" => self.conflict_view(&request.fields, cancel).await,
             "worktrees" => self.worktrees(&request.fields, cancel).await,
+            // 主窗口已在调用、v2 必须同名可用的只读入口。
+            "branchState" => self.branch_state(&request.fields, cancel).await,
+            "branchTracking" => self.branch_tracking(&request.fields, cancel).await,
+            "tagRemoteState" => self.tag_remote_state(&request.fields, cancel).await,
+            "commitBranches" => self.commit_branches(&request.fields, cancel).await,
+            "compareFileDiff" => self.compare_file_diff(&request.fields, cancel).await,
             "receipt" => self.receipt(&request.fields),
             other => match WriteOp::parse(other) {
                 Some(op) => self.write(op, &request.fields).await,
@@ -869,6 +920,126 @@ impl Context {
         Ok(json!({ "repo": session.key, "worktrees": overview }))
     }
 
+    /// 分支跟踪：领先/落后与 gone 由共享实现读取，客户端不能从 BranchListing 推出来。
+    async fn branch_tracking(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let tracking = sync::branch_tracking(
+            &self.backend,
+            &session.key,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({ "repo": session.key, "branchTracking": tracking }))
+    }
+
+    /// 分支总览：分支列表与当前状态快照一次返回，等价于桌面端的 `branch_state`。
+    async fn branch_state(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let state = sync::branch_state(
+            &self.backend,
+            &session.key,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({ "repo": session.key, "branchState": state }))
+    }
+
+    /// 远端标签：ls-remote 的结果，供标签界面对照本地标签。
+    async fn tag_remote_state(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let remote = string_field(fields, "remote")?;
+        check_cancel(cancel)?;
+        let tags = tags::tag_remote_state(&self.backend, &session.key, &remote).await?;
+        check_cancel(cancel)?;
+        Ok(json!({ "repo": session.key, "remote": remote, "tagRemoteState": tags }))
+    }
+
+    /// 含某个提交的所有分支。
+    async fn commit_branches(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let oid = string_field(fields, "oid")?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let branches = history::commit_branches(
+            &self.backend,
+            &session.key,
+            &oid,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({ "repo": session.key, "oid": oid, "commitBranches": branches }))
+    }
+
+    /// 任意 base..head 之间一个文件的差异：`commitDiff` 只能到父提交，`compare` 只回文件清单，
+    /// 比较视图与合并审阅需要这个入口。base 为空串时按空树比较，与桌面命令层一致。
+    async fn compare_file_diff(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let base = optional_text_field(fields, "base")?.unwrap_or_default();
+        let head = string_field(fields, "head")?;
+        let relative = string_field(fields, "path")?;
+        let offset = optional_u64_field(fields, "offset")?.unwrap_or(0) as u32;
+        let limit = optional_u64_field(fields, "limit")?
+            .map(|limit| (limit as u32).min(MAX_DIFF_LINES))
+            .unwrap_or(0);
+        let context = optional_u64_field(fields, "context")?
+            .map(|context| (context as u32).min(MAX_CONTEXT))
+            .unwrap_or(3);
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let diff = history::compare_file_diff(
+            &self.backend,
+            &session.key,
+            &base,
+            &head,
+            &relative,
+            generation,
+            internal_request_id(),
+            offset,
+            limit,
+            context,
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({
+            "repo": session.key,
+            "path": relative,
+            "base": base,
+            "head": head,
+            "generation": diff.generation,
+            "compareFileDiff": diff,
+        }))
+    }
+
     /// 一次写入的完整顺序：跨进程写锁 → 回执查重 → 令牌核对 → 登记 registered →
     /// 执行共享写入 → 取得新状态 → 改为 completed。
     ///
@@ -876,6 +1047,15 @@ impl Context {
     /// 只有拿到锁的一方看到「没有记录」并登记，另一方必然看到 registered/completed。
     /// 回执文件存在但读不出来时直接报 receipt_unreadable，不按「没写过」重新执行。
     async fn write(&self, op: WriteOp, fields: &Map<String, Value>) -> Result<Value, AppError> {
+        // worktreeRemove 只接受声明的字段。客户端若按本地命令的习惯多带一个 path 之类的字段，
+        // 必须被明确拒绝：静默忽略后按「当前打开的工作树」删除，会删掉另一棵工作区。
+        if op == WriteOp::WorktreeRemove {
+            reject_undeclared(
+                fields,
+                &["repo", "operationId", "stateToken", "force"],
+                "worktreeRemove",
+            )?;
+        }
         let session = self.session(fields)?;
         let operation_id = string_field(fields, "operationId")?;
         if !protocol::token(&operation_id) || operation_id.len() < 8 {
@@ -904,7 +1084,14 @@ impl Context {
                 ));
             }
             return match existing.state.as_str() {
-                COMPLETED => Ok(json!({ "receipt": existing, "replayed": true })),
+                // 重放只回原回执：v2 不保存上次的结果 DTO，客户端应按回执里的 head/branch
+                // 重新读取一次状态，而不是复用一条没有结果的响应。
+                COMPLETED => Ok(json!({
+                    "receipt": existing,
+                    "replayed": true,
+                    "result": Value::Null,
+                    "reconcile": "reread",
+                })),
                 FAILED => Err(AppError::new(
                     existing.reason.clone().unwrap_or_else(|| "failed".to_string()),
                     "该操作此前已明确失败，未再次写入。",
@@ -948,7 +1135,13 @@ impl Context {
         let (key, value) = match self.execute(op, fields, &session, generation).await {
             Ok(written) => written,
             Err(error) => {
-                store.fail(receipt, &error.code)?;
+                if remote_write_unconfirmed(op, &error) {
+                    // 取消、超时、网络中断：远端可能已经收到这次请求，按「结果未知」登记，
+                    // 客户端据此核对而不是当成失败重发。
+                    store.pending(receipt, &error.code)?;
+                } else {
+                    store.fail(receipt, &error.code)?;
+                }
                 return Err(error);
             }
         };
@@ -1144,6 +1337,20 @@ impl Context {
                     sync::push_local_branch(backend, path, &name, generation, request_id).await?;
                 Ok(("branches".to_string(), to_value(state)?))
             }
+            WriteOp::SetUpstream => {
+                let upstream = string_field(fields, "upstream")?;
+                let state =
+                    sync::set_upstream(backend, path, &upstream, generation, request_id).await?;
+                Ok(("branches".to_string(), to_value(state)?))
+            }
+            WriteOp::AssociateUpstream => {
+                // 桌面端的「关联上游」会带空远程名，交给共享实现按当前分支决定，这里不拒绝空串。
+                let remote = optional_text_field(fields, "remote")?.unwrap_or_default();
+                let snapshot =
+                    sync::associate_upstream(backend, path, &remote, generation, request_id)
+                        .await?;
+                Ok(("snapshot".to_string(), to_value(snapshot)?))
+            }
             WriteOp::TagCreate => {
                 let name = string_field(fields, "name")?;
                 let target = string_field(fields, "target")?;
@@ -1221,6 +1428,11 @@ impl Context {
                     sync::fetch_remote(backend, path, generation, request_id).await?;
                 Ok(("snapshot".to_string(), to_value(snapshot)?))
             }
+            WriteOp::FetchBranches => {
+                let state =
+                    sync::fetch_branches(backend, path, generation, request_id).await?;
+                Ok(("branches".to_string(), to_value(state)?))
+            }
             WriteOp::Pull => {
                 let snapshot =
                     sync::pull_fast_forward(backend, path, generation, request_id).await?;
@@ -1241,6 +1453,22 @@ impl Context {
                 let snapshot =
                     sync::publish_branch(backend, path, &remote, generation, request_id).await?;
                 Ok(("snapshot".to_string(), to_value(snapshot)?))
+            }
+            WriteOp::DeleteRemoteBranch => {
+                let remote = string_field(fields, "remote")?;
+                let name = string_field(fields, "name")?;
+                let confirm = bool_field(fields, "confirm");
+                let state = sync::delete_remote_branch(
+                    backend,
+                    path,
+                    &remote,
+                    &name,
+                    confirm,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("branches".to_string(), to_value(state)?))
             }
             WriteOp::StashSave => {
                 let include_untracked = field(fields, "includeUntracked")
@@ -1446,20 +1674,44 @@ impl Context {
         }
     }
 
+    /// 取消一条在途请求。
+    ///
+    /// 两条路一起走：本进程标记让尚未进入共享实现的请求立即停下；访问远程的请求还要停掉共享
+    /// sync 层那条远程命令（等价于桌面端的 `cancel_remote`）。远程可能已经收到部分请求，因此
+    /// 这里的回答只说明「已停止等待」，不表示远端没有变化，结果以刷新后的状态为准。
     fn cancel(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
         let target = string_field(fields, "targetId")?;
-        let flag = self
+        let entry = self
             .cancels
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .get(&target)
-            .cloned();
-        match flag {
-            Some(flag) => {
+            .map(|entry| (Arc::clone(&entry.flag), entry.remote));
+        match entry {
+            Some((flag, remote)) => {
                 flag.store(true, Ordering::SeqCst);
-                Ok(json!({ "targetId": target, "cancelled": true }))
+                let remote_stopped = if remote { self.stop_remote() } else { false };
+                Ok(json!({
+                    "targetId": target,
+                    "cancelled": true,
+                    "remoteStopped": remote_stopped,
+                }))
             }
             None => Ok(json!({ "targetId": target, "cancelled": false })),
+        }
+    }
+
+    /// 停止当前仓库正在运行或排队中的远程命令；没有打开仓库时只翻标记。
+    fn stop_remote(&self) -> bool {
+        let key = self
+            .session
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|session| session.key.clone());
+        match key {
+            Some(key) => sync::cancel_remote(&self.backend, &key).is_ok(),
+            None => false,
         }
     }
 
@@ -1579,6 +1831,40 @@ fn request_digest(op: WriteOp, fields: &Map<String, Value>) -> String {
         text.push_str(&format!("{byte:02x}"));
     }
     text
+}
+
+/// 只接受声明过的字段：多带一个字段说明客户端按本地命令的形状在调用，
+/// 静默忽略可能让它以为某个字段生效了（例如 worktreeRemove 带 path）。
+fn reject_undeclared(
+    fields: &Map<String, Value>,
+    allowed: &[&str],
+    op: &str,
+) -> Result<(), AppError> {
+    for key in fields.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(AppError::new(
+                "invalid_request",
+                format!("{op} 不接受字段 {key}，未写入仓库。"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 远程写入在取消、超时、网络中断时结果未知：远端可能已经收到请求。
+/// 这类错误不能记成 failed，否则客户端会把一次可能成功的写入当成可重发。
+fn remote_write_unconfirmed(op: WriteOp, error: &AppError) -> bool {
+    matches!(
+        op,
+        WriteOp::Fetch
+            | WriteOp::FetchBranches
+            | WriteOp::Pull
+            | WriteOp::Push
+            | WriteOp::PushToRemote
+            | WriteOp::PublishBranch
+            | WriteOp::DeleteRemoteBranch
+            | WriteOp::TagPush
+    ) && matches!(error.code.as_str(), "cancelled" | "timeout" | "network")
 }
 
 fn check_cancel(cancel: &AtomicBool) -> Result<(), AppError> {

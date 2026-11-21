@@ -4,7 +4,7 @@
 
 让每次改动，都清晰有序。
 
-Twiglane 是面向个人开发者和小团队的轻量 Git 桌面客户端。安装名称和主界面使用 Twiglane，中文介绍使用枝序。首版围绕本地仓库的日常操作，不内置研发平台、专用资源管理或 AI 聊天。
+Twiglane 是面向个人开发者和小团队的轻量 Git 桌面客户端。安装名称和主界面使用 Twiglane，中文介绍使用枝序。主线围绕本地仓库的日常操作，不内置研发平台的评审、合并与 Issue 管理，也没有 AI 聊天；唯一的平台交互是可选的「创建 MR / PR」，默认关闭。
 
 ## 当前工作区
 
@@ -115,13 +115,29 @@ macOS 使用系统 WebKit，不下载 WebView2。Windows 使用系统 WebView2�
 
 撤销最近提交只针对唯一远程上尚未推送的普通提交，并保留文件改动；首个提交、合并提交、脏暂存区、进行中的操作，或离线、传播范围不明时不会写入。修订最近提交同样只针对唯一远程上尚未推送的普通 HEAD（包括首个提交），可以只改说明或明确纳入当前暂存改动，未暂存与未跟踪内容不会自动加入；合并提交、游离 HEAD、进行中的操作、已推送或传播范围不明、确认时 HEAD 或暂存区发生变化时不会写入，说明未变化且没有纳入非空暂存改动时也不写入。两者都不推送。放弃修改会先列出所选文件的暂存和未暂存影响；取消不写入，确认只影响所选文件。还原会创建逆向提交，冲突时可以在现有冲突处理里继续处理剩余目标或中止，中止只撤销这次还原，不删除预先存在的临时保存。合并中止只恢复这次合并，不删除预先存在的临时保存。临时保存恢复失败时保留原记录。这些操作都不能从这里找回已经丢弃的未提交内容。
 
+## 创建 MR / PR
+
+默认关闭。设置里打开后，分支弹层的当前分支动作区出现「为当前分支创建 MR / PR…」；关闭时入口不渲染，前端不调用任何平台命令，原生命令也在读钥匙串、探测远程或发平台请求之前返回，因此关闭不产生平台副作用。关闭只停用功能，不删除已经保存的令牌；令牌只能由用户在创建对话框里显式删除。
+
+**远程与来源**。prepare 只读当前分支、远程与远程跟踪引用，接收的 generation 只是提示，遇到仓库状态变化会按调度器报告的新编号重读一次。有上游时按上游远程解析来源分支；无上游时只有在「唯一远程且远程跟踪分支证实同名来源存在」时才自动使用；其余情况返回候选远程，选择前不向任何实例发请求。创建目标使用 push URL（不存在时用 fetch URL），来源分支由原生从当前仓库重新推导，不接受前端指定。来源不在所选远程上时直接报错并提示先推送，应用不会自动推送。公共 host 精确识别 github.com、gitlab.com、gitea.com；自托管实例靠平台元数据发现，无法唯一确认时返回「平台无法确认」，不创建也不自动打开网页。非 loopback 的 API 只走 HTTPS；明文 HTTP 上既不保存也不发送令牌。
+
+**令牌**。按「provider + 规范化 API base」分隔条目，service 固定为本应用的 change-request 命名空间，写入 keyring v1（macOS Keychain Services、Windows Credential Manager、*nix Secret Service）。status 只返回布尔值；set 的令牌只经当前 IPC 参数进入原生并直接 set_password，不写设置、草稿、URL、命令行或日志。缺少条目返回 token_missing，钥匙串初始化/解锁/读写失败返回 credential_store，两者都不会触发网页回退。认证头分别是 GitHub `Authorization: Bearer`、GitLab `PRIVATE-TOKEN`、Gitea `Authorization: token`。
+
+**创建与结果**。三平台实现同一合同：GitHub/Gitea `POST {api}/repos/{owner}/{repo}/pulls`（head/base/title/body，201 取 `html_url`），GitLab `POST {api}/projects/{url-encoded-full-path}/merge_requests`（source_branch/target_branch/title/description，201 取 `web_url`）。成功必须是 201、可解析对象、链接通过既有的 HTTP(S) web 校验并与已确认实例同源，否则按未知结果处理。前端状态覆盖 preparing、ready、submitting、created、fallbackOpened、failed、unknown：submitting 期间不能重复提交，模态框加锁不能关闭；created 只展示平台返回并校验过的链接，并说明这不代表评审、测试或合并完成；创建回 404 时先做一次列表路由探测（见下），只有探测后仍无法归因于缺少创建路由，才按普通失败处理；普通失败（401/403/409/422/429、探测后仍不能判定的 404、输入校验、来源缺失等）保留表单内容，由用户决定是否再次提交；请求已发出但拿不到完整响应（POST 超时、连接中断、响应超限、无法归类的响应）显示「结果未知」，提示先在平台核对，不提供再次创建的按钮，也不报告成功。每次响应都核对请求序号与仓库路径：切换仓库或关闭对话框后，迟到响应不再作用于新上下文。
+
+**网页回退**。只有适配器能证明当前实例缺少创建路由时才回退，证据只有两种：创建请求直接回 405/501；或创建请求回 404 之后，对同一实例同一条集合路由（GitHub/Gitea `{api}/repos/{owner}/{repo}/pulls`、GitLab `{api}/projects/{url-encoded-full-path}/merge_requests`）发一次 GET，同样使用创建请求的认证头与同一份超时、响应上限，该列表路由也回 404/405/501。探测不重发创建请求，也不增加重试。回退由原生 opener 打开：GitHub `{repoWeb}/compare/{base}...{head}?quick_pull=1`（带 title/body）、Gitea `{repoWeb}/compare/{base}...{head}?expand=1`（带 title/body）、GitLab `{repoWeb}/-/merge_requests/new?merge_request[source_branch]=...`。路径段与 query 分别百分号编码；完整 URL 超过 8192 字节时先省略 title/body，仍超限则报错而不打开截断地址；opener 失败返回 browser_open，不显示创建或回退成功。创建 404 但列表路由可用或回 200/3xx/401/403/429/5xx 等非能力状态、探测自身网络失败或超时，都保持普通失败；认证/权限/限流/超时、无法识别的响应和缺少令牌同样不回退。极旧实例无法确认 provider 或 web base 时显示「无法确认平台」，不向猜测地址打开浏览器。
+
+**本地仓库不变**。创建不发 Git 写命令、不进入写入调度、不改 HEAD、索引、工作区、上游或分支。预览 mock（`?changeRequests=on` 加 `?changeRequest=ready|choice|token|created|fallback|error|unknown`）只演示前端状态，不代表真实平台行为。
+
+**验证范围**。可证明的部分来自原生可控测试（127.0.0.1 HTTP 服务、credential store 替身、三平台请求头/body/201 链接、错误分类、创建 404 的列表路由探测与不重发 POST、网页编码与超长降级、opener 失败）与前端行为测试（入口开关、远程选择、表单保留、重复提交、结果状态、迟到响应隔离）。没有实机证据的部分：真实 GitHub Enterprise、较旧的 GitLab / Gitea 版本、自托管实例的元数据发现、三个操作系统的系统钥匙串与重启持久化、系统默认浏览器行为。这些缺口不能用 mock 替代，也不能据此声称已支持全部历史版本。
+
 ## 性能口径
 
 预算来自技术方案里的首轮工程预算，不是已经达标的结果。S/M/L 由 `scripts/generate-fixture.mjs` 固定生成，并核对真实文件数、提交数和未提交改动。界面耗时从真实安装包进程开始，记到主要控件可操作或差异显示为止；脚本里的 Git 时间只作为对照，不能代替界面延迟。不把未清除系统缓存的结果叫做磁盘冷启动。内存按本机口径记录，macOS 与 Windows 的数字不能直接比较。缺测、超预算或构建摘要不一致时，`node scripts/verify-delivery.mjs` 必须失败，不能生成通过记录。
 
 ## 已知限制
 
-尚未在 Windows 上安装运行，也没有受控 HTTPS/SSH 远程的成功与认证失败记录，公开发布签名同样没有。这些缺口留在验证记录的下一步里。本地 bare remote 只能说明同步语义，不能代替协议验收。CI 配置存在也不等于已经在两个系统上跑过。
+尚未在 Windows 上安装运行，也没有受控 HTTPS/SSH 远程的成功与认证失败记录，公开发布签名同样没有。这些缺口留在验证记录的下一步里。本地 bare remote 只能说明同步语义，不能代替协议验收。CI 配置存在也不等于已经在两个系统上跑过。「创建 MR / PR」同理：真实平台实例、系统钥匙串与系统浏览器都没有实机记录，只作为限制列出，不写成已验证。
 
 ## 验证
 

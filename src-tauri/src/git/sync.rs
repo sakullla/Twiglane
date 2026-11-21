@@ -11,7 +11,8 @@ use crate::git::command::{
     create_branch_command, delete_branch_command, delete_remote_branch_command,
     fetch_command, publish_command, pull_ff_command, push_command, remote_names_command,
     push_to_remote_command, push_to_upstream_command,
-    remote_add_command, remote_set_url_command, remote_verbose_command, rename_branch_command,
+    remote_add_command, remote_set_url_command, remote_tracking_command, remote_verbose_command,
+    rename_branch_command,
     set_upstream_to_command, status_command, switch_command, switch_track_as_command,
     switch_track_command,
 };
@@ -181,6 +182,119 @@ pub async fn remote_state(
 ) -> Result<RemoteState, AppError> {
     let root = repo_root(path)?;
     load_remote_state(backend, &root, generation, request_id).await
+}
+
+/// change-request 只读上下文：当前分支、远程列表和本地默认分支推导。
+/// 读路径与 remote_state/branch_list 相同，不进入写队列，也不改 HEAD、工作区或上游。
+pub(crate) struct ChangeRequestGitState {
+    pub generation: u64,
+    pub branch: crate::model::BranchInfo,
+    pub remotes: Vec<RemoteInfo>,
+    pub default_branch: Option<String>,
+}
+
+pub(crate) async fn change_request_git_state(
+    backend: &Backend,
+    path: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<ChangeRequestGitState, AppError> {
+    let root = repo_root(path)?;
+    // 前端带来的 generation 只是提示：这两步都是只读重读，遇到仓库状态变化
+    // 就按调度器报告的新 generation 再读一次，不把过期编号当成用户错误。
+    let mut expected = generation;
+    for attempt in 0..2 {
+        let remote = match load_remote_state(backend, &root, expected, request_id).await {
+            Ok(remote) => remote,
+            Err(error) if error.code == "stale" && attempt == 0 => {
+                expected = error.generation.unwrap_or(expected);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let listed = match load_branch_list(
+            backend,
+            &root,
+            remote.generation,
+            internal_request_id(),
+        )
+        .await
+        {
+            Ok(listed) => listed,
+            Err(error) if error.code == "stale" && attempt == 0 => {
+                expected = error.generation.unwrap_or(remote.generation);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        return Ok(ChangeRequestGitState {
+            generation: listed.generation,
+            branch: remote.snapshot.branch,
+            remotes: remote.remotes,
+            default_branch: listed.default_branch,
+        });
+    }
+    Err(AppError::new(
+        "change_request_stale",
+        "仓库状态在读取过程中持续变化，未创建 MR/PR。请刷新后重试。",
+    ))
+}
+
+/// 某个远程上已有的分支名（来自本地远程跟踪引用）。用来在创建前确认来源分支
+/// 确实已经存在于所选远程；这里只读引用，不 fetch、不推送。
+pub(crate) async fn remote_tracking_branches(
+    backend: &Backend,
+    path: &str,
+    remote: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<(Vec<String>, u64), AppError> {
+    let root = repo_root(path)?;
+    let git = require_git(backend).await?;
+    let (program, args) = remote_tracking_command(&git.path, &root, remote);
+    let mut expected = generation;
+    let mut scheduled = None;
+    for attempt in 0..2 {
+        match read_repo(
+            backend,
+            &root,
+            expected,
+            request_id,
+            program.clone(),
+            args.clone(),
+        )
+        .await
+        {
+            Ok(read) => {
+                scheduled = Some(read);
+                break;
+            }
+            Err(error) if error.code == "stale" && attempt == 0 => {
+                expected = error.generation.unwrap_or(expected);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let Some(scheduled) = scheduled else {
+        return Err(AppError::new(
+            "change_request_stale",
+            "仓库状态在读取过程中持续变化，请刷新后重试。",
+        ));
+    };
+    if scheduled.output.exit_code != 0 {
+        return Err(
+            git_failure("remote_failed", &scheduled.output, "无法读取远程分支。")
+                .with_generation(scheduled.generation),
+        );
+    }
+    let prefix = format!("refs/remotes/{remote}/");
+    let text = String::from_utf8_lossy(&scheduled.output.stdout);
+    let branches = text
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(&prefix))
+        .map(str::to_string)
+        .collect();
+    Ok((branches, scheduled.generation))
 }
 
 pub async fn add_remote(

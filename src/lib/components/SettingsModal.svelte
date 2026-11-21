@@ -26,6 +26,9 @@
     /** 左栏是否显示「文件」视图。 */
     filesView?: boolean;
     onFilesView?: (enabled: boolean) => void;
+    /** 「创建 MR / PR」功能开关；缺省关闭，与原生默认一致。 */
+    changeRequestsEnabled?: boolean;
+    onChangeRequests?: (enabled: boolean) => void;
     /** 终端偏好与本机探测到的终端类型；打开设置时由外壳探测一次。 */
     terminalPrefs?: TerminalPrefs;
     terminalProfiles?: TerminalProfile[];
@@ -55,6 +58,8 @@
     onBranchGroups = () => {},
     filesView = true,
     onFilesView = () => {},
+    changeRequestsEnabled = false,
+    onChangeRequests = () => {},
     terminalPrefs = { profile: null, fontSize: TERMINAL_FONT_DEFAULT },
     terminalProfiles = [],
     onTerminalPrefs = () => {},
@@ -315,6 +320,24 @@
           type="checkbox"
           checked={filesView}
           onchange={(event) => onFilesView((event.currentTarget as HTMLInputElement).checked)}
+        />
+      </label>
+      <label class="settings-row switch">
+        <span class="settings-label">
+          创建 MR / PR<small>开启后可在当前分支发起合并请求；关闭时不读取平台令牌、不发起平台请求</small>
+        </span>
+        <input
+          type="checkbox"
+          checked={changeRequestsEnabled}
+          title={disabled ? BUSY_REASON : undefined}
+          disabled={disabled}
+          onchange={(event) => {
+            const input = event.currentTarget as HTMLInputElement;
+            // 复选框会先自行变成用户点的状态。写回成功后由 checked 的新值更新，
+            // 写回失败时外壳不会改这个值，这里先退回已保存状态，避免看起来已持久化。
+            input.checked = changeRequestsEnabled;
+            onChangeRequests(!changeRequestsEnabled);
+          }}
         />
       </label>
     </div>

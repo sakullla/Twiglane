@@ -26,6 +26,11 @@ fn default_branch_groups() -> bool {
     true
 }
 
+/// 「创建 MR / PR」开关的缺省值。新安装、旧设置文件缺字段都读成关闭。
+fn default_change_requests() -> bool {
+    false
+}
+
 /// 终端字号的允许范围与缺省值；前端缩放与设置都夹在这个范围里。
 pub const TERMINAL_FONT_MIN: u8 = 9;
 pub const TERMINAL_FONT_MAX: u8 = 24;
@@ -79,6 +84,9 @@ pub struct Persisted {
     /// 左栏是否显示「文件」视图；旧设置文件缺省为显示。
     #[serde(default = "default_branch_groups")]
     pub files_view: bool,
+    /// 「创建 MR / PR」功能开关；默认关闭，旧设置文件缺字段也是关闭。
+    #[serde(default = "default_change_requests")]
+    pub change_requests_enabled: bool,
     #[serde(default)]
     pub terminal: TerminalPrefs,
     pub panel_widths: PanelWidths,
@@ -98,6 +106,7 @@ impl Default for Persisted {
             pull_integration: PullIntegration::Merge,
             branch_groups: true,
             files_view: true,
+            change_requests_enabled: false,
             terminal: TerminalPrefs::default(),
             panel_widths: PanelWidths::default(),
             git_executable: None,
@@ -186,6 +195,21 @@ impl AppStore {
     pub fn set_files_view(&self, files_view: bool) -> Result<(), AppError> {
         self.update(|data| {
             data.files_view = files_view;
+            Ok(())
+        })
+    }
+
+    /// 平台创建命令的原生门禁读这个值，不只依赖前端隐藏入口。
+    // T2 接上平台命令前只有本 Task 的测试调用；cdylib 不把仅测试调用算作可达。
+    #[allow(dead_code)]
+    pub fn change_requests_enabled(&self) -> bool {
+        self.lock().data.change_requests_enabled
+    }
+
+    /// 只切换开关；关闭不删除任何钥匙串条目（令牌删除由用户显式触发）。
+    pub fn set_change_requests_enabled(&self, enabled: bool) -> Result<(), AppError> {
+        self.update(|data| {
+            data.change_requests_enabled = enabled;
             Ok(())
         })
     }
@@ -446,6 +470,98 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(again.path()).unwrap()).unwrap();
         assert_eq!(saved["pullIntegration"], "rebase");
         assert_eq!(saved["branchGroups"], false);
+    }
+
+    #[test]
+    fn change_requests_default_off_for_new_and_old_state() {
+        let dir = crate::test_support::TempDir::new("state-change-requests-default");
+        let path = dir.path().join("state.json");
+        // 新安装：本地还没有设置文件。
+        let fresh = AppStore::open(path.clone());
+        assert!(!fresh.snapshot().change_requests_enabled);
+        assert!(!fresh.change_requests_enabled());
+
+        // v1 旧文件（字段缺失，需迁移）与 v2 旧文件都读成关闭。
+        let mut v1 = serde_json::to_value(Persisted::default()).unwrap();
+        v1["version"] = 1.into();
+        v1.as_object_mut().unwrap().remove("changeRequestsEnabled");
+        fs::write(&path, serde_json::to_vec(&v1).unwrap()).unwrap();
+        let old_v1 = AppStore::open(path.clone());
+        assert!(old_v1.settings_warning().is_none());
+        assert!(!old_v1.snapshot().change_requests_enabled);
+        assert!(!old_v1.change_requests_enabled());
+
+        let mut v2 = serde_json::to_value(Persisted::default()).unwrap();
+        v2.as_object_mut().unwrap().remove("changeRequestsEnabled");
+        fs::write(&path, serde_json::to_vec(&v2).unwrap()).unwrap();
+        let old_v2 = AppStore::open(path.clone());
+        assert!(!old_v2.snapshot().change_requests_enabled);
+
+        // 写入成功后磁盘上出现显式的 false，不必靠字段缺失推断关闭。
+        old_v2.set_theme(Theme::Light).unwrap();
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["changeRequestsEnabled"], false);
+    }
+
+    #[test]
+    fn change_requests_toggle_survives_restart_and_leaves_other_settings() {
+        let dir = crate::test_support::TempDir::new("state-change-requests-restart");
+        let path = dir.path().join("state.json");
+        let store = AppStore::open(path.clone());
+        store.set_branch_groups(false).unwrap();
+        store.set_change_requests_enabled(true).unwrap();
+        assert!(store.change_requests_enabled());
+
+        // 重启：重新打开同一个文件后保持用户已保存的选择。
+        let restarted = AppStore::open(path.clone());
+        assert!(restarted.snapshot().change_requests_enabled);
+        assert!(!restarted.snapshot().branch_groups);
+
+        // 关闭只是写回 false，不重置其它设置。
+        restarted.set_change_requests_enabled(false).unwrap();
+        let again = AppStore::open(path.clone());
+        assert!(!again.change_requests_enabled());
+        assert!(!again.snapshot().branch_groups);
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["changeRequestsEnabled"], false);
+    }
+
+    #[test]
+    fn change_requests_write_failure_keeps_previous_value() {
+        let dir = crate::test_support::TempDir::new("state-change-requests-corrupt");
+        let path = dir.path().join("state.json");
+        fs::write(&path, b"{not-json").unwrap();
+        let original = fs::read(&path).unwrap();
+        let store = AppStore::open(path.clone());
+        assert!(store.settings_warning().is_some());
+        let error = store.set_change_requests_enabled(true).unwrap_err();
+        assert_eq!(error.code, "settings_corrupt");
+        assert!(!store.change_requests_enabled());
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn change_requests_disk_error_keeps_previous_value() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = crate::test_support::TempDir::new("state-change-requests-disk");
+        let path = dir.path().join("state.json");
+        let store = AppStore::open(path.clone());
+        assert!(!store.change_requests_enabled());
+        // 目录不可写时 atomic_write 建不了临时文件，这就是真实的磁盘写入失败。
+        let mut locked = fs::metadata(dir.path()).unwrap().permissions();
+        locked.set_mode(0o500);
+        fs::set_permissions(dir.path(), locked).unwrap();
+        let result = store.set_change_requests_enabled(true);
+        let mut restore = fs::metadata(dir.path()).unwrap().permissions();
+        restore.set_mode(0o700);
+        fs::set_permissions(dir.path(), restore).unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "settings_write", "{}", error.message);
+        assert!(!store.change_requests_enabled(), "写入失败不得改内存快照");
+        assert!(!path.exists(), "失败不得留下新设置文件");
     }
 
     #[test]

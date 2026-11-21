@@ -101,6 +101,8 @@ pub struct AppSettings {
     pub pull_integration: PullIntegration,
     pub branch_groups: bool,
     pub files_view: bool,
+    /// 「创建 MR / PR」开关；旧前端缺这个字段时按关闭处理。
+    pub change_requests_enabled: bool,
     /// 终端默认类型与字号。
     pub terminal: TerminalPrefs,
 }
@@ -119,6 +121,7 @@ pub async fn get_settings(backend: &Backend) -> Result<AppSettings, AppError> {
         pull_integration: snapshot.pull_integration,
         branch_groups: snapshot.branch_groups,
         files_view: snapshot.files_view,
+        change_requests_enabled: snapshot.change_requests_enabled,
         terminal: snapshot.terminal,
     })
 }
@@ -140,6 +143,29 @@ pub fn set_branch_groups(backend: &Backend, branch_groups: bool) -> Result<(), A
 
 pub fn set_files_view(backend: &Backend, files_view: bool) -> Result<(), AppError> {
     backend.store.set_files_view(files_view)
+}
+
+pub fn set_change_requests_enabled(
+    backend: &Backend,
+    change_requests_enabled: bool,
+) -> Result<(), AppError> {
+    backend.store.set_change_requests_enabled(change_requests_enabled)
+}
+
+/// 「创建 MR / PR」的原生门禁：平台相关命令（T2 的 prepare/create/令牌读写）在进入
+/// 平台发现、钥匙串或 HTTP 之前先走这里。关闭时只读持久化开关就返回，不读钥匙串、
+/// 不探测远程、不发平台请求；关闭也不删除任何令牌。
+// T2 接上平台命令前只有本 Task 的测试调用；cdylib 不把仅测试调用算作可达。
+#[allow(dead_code)]
+pub fn require_change_requests(backend: &Backend) -> Result<(), AppError> {
+    if backend.store.change_requests_enabled() {
+        Ok(())
+    } else {
+        Err(AppError::new(
+            "change_requests_disabled",
+            "「创建 MR / PR」已关闭，未读取令牌也未发起平台请求。可在设置中启用。",
+        ))
+    }
 }
 
 pub fn set_panel_widths(backend: &Backend, widths: PanelWidths) -> Result<PanelWidths, AppError> {
@@ -1495,5 +1521,48 @@ mod tests {
 
         let invalid = forget_recent(&backend, "relative/nope").unwrap_err();
         assert_eq!(invalid.code, "invalid_path");
+    }
+
+    #[tokio::test]
+    async fn settings_report_change_requests_switch_off_by_default() {
+        let fixture = crate::test_support::git_fixture("change-request-settings");
+        let backend = fixture.backend();
+        let settings = get_settings(&backend).await.unwrap();
+        assert!(!settings.change_requests_enabled);
+        // 与前端约定的 camelCase 字段名，旧前端缺这个字段时按关闭处理。
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["changeRequestsEnabled"], false);
+        assert_eq!(json["branchGroups"], true);
+
+        set_change_requests_enabled(&backend, true).unwrap();
+        let settings = get_settings(&backend).await.unwrap();
+        assert!(settings.change_requests_enabled);
+        assert_eq!(
+            serde_json::to_value(&settings).unwrap()["changeRequestsEnabled"],
+            true
+        );
+    }
+
+    #[test]
+    fn change_request_gate_rejects_while_disabled_without_writing_state() {
+        let fixture = crate::test_support::git_fixture("change-request-gate");
+        let backend = fixture.backend();
+        let state_path = backend.store.path().to_path_buf();
+        let before = fs::read(&state_path).ok();
+
+        let error = require_change_requests(&backend).unwrap_err();
+        assert_eq!(error.code, "change_requests_disabled");
+        assert!(error.message.contains("已关闭"));
+        // 门禁只读开关：被拒时既不写设置，也没有平台侧动作可发生（T2 才接命令）。
+        assert_eq!(fs::read(&state_path).ok(), before);
+
+        backend.store.set_change_requests_enabled(true).unwrap();
+        require_change_requests(&backend).unwrap();
+        // 关闭后门禁重新生效；关闭本身不删除令牌由 T2 的钥匙串测试覆盖。
+        backend.store.set_change_requests_enabled(false).unwrap();
+        assert_eq!(
+            require_change_requests(&backend).unwrap_err().code,
+            "change_requests_disabled"
+        );
     }
 }

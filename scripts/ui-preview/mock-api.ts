@@ -66,6 +66,17 @@ const previewGit = {
 
 let generation = 1;
 let theme: Theme = (localStorage.getItem("preview-theme") as Theme) || "dark";
+// 「创建 MR / PR」默认关闭；?changeRequests=on 用来预览启用后的设置状态。
+// 这里只保存 mock 内存值，不代表原生持久化。
+let changeRequestsEnabled = previewParams.get("changeRequests") === "on";
+/**
+ * 创建流程的预览场景：?changeRequests=on 打开开关后，再用 ?changeRequest= 选一种结果。
+ * ready（默认）直接进表单，choice 先选远程，token 显示未配置令牌，
+ * created / fallback 分别预览平台创建成功与网页回退，error / unknown 预览普通失败与结果未知。
+ * 这些只是前端状态，平台请求、钥匙串和系统浏览器都没有真的发生。
+ */
+const changeRequestScenario = previewParams.get("changeRequest") ?? "ready";
+let changeRequestToken = changeRequestScenario !== "token";
 let recent = [
   { name: "twiglane", path: "C:/Users/dev/project/twiglane", openedAtMs: Date.now() },
   { name: "design-system", path: "C:/Users/dev/work/design-system", openedAtMs: Date.now() - 1000 },
@@ -692,6 +703,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       recent,
       settingsWarning: null,
       terminal: { profile: null, fontSize: 13 },
+      changeRequestsEnabled,
     }),
   addRepository: () => ok(opened(recent[0].path)),
   createRepository: (path: string) => ok(opened(path)),
@@ -1730,6 +1742,98 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   setPullIntegration: () => ok(undefined, 0),
   setBranchGroups: () => ok(undefined, 0),
   setFilesView: () => ok(undefined, 0),
+  setChangeRequestsEnabled: (enabled: boolean) => {
+    changeRequestsEnabled = enabled;
+    return ok(undefined, 0);
+  },
+  // 创建 MR / PR：结构照原生 DTO。prepare 不向任何实例发请求，create 也不会真的发出去。
+  prepareChangeRequest: (_path: string, remote: string | null) => {
+    if (changeRequestScenario === "choice" && !remote) {
+      return ok({
+        status: "remoteChoice",
+        choices: [
+          { remote: "origin", host: "github.com", repository: "sakullla/twiglane", provider: "GitHub" },
+          { remote: "gitea", host: "git.example.com", repository: "dev/twiglane", provider: null },
+        ],
+        provider: "",
+        providerLabel: "",
+        remote: "",
+        host: "",
+        repository: "",
+        repositoryWeb: "",
+        sourceBranch: "",
+        targetBranch: "",
+        defaultBranch: null,
+        generation,
+      });
+    }
+    const remoteName = remote ?? "origin";
+    return ok({
+      status: "ready",
+      choices: [],
+      provider: remoteName === "origin" ? "github" : "gitea",
+      providerLabel: remoteName === "origin" ? "GitHub" : "Gitea",
+      remote: remoteName,
+      host: remoteName === "origin" ? "github.com" : "git.example.com",
+      repository: remoteName === "origin" ? "sakullla/twiglane" : "dev/twiglane",
+      repositoryWeb: remoteName === "origin" ? "https://github.com/sakullla/twiglane" : "https://git.example.com/dev/twiglane",
+      sourceBranch: "feature/modern-ui",
+      targetBranch: "main",
+      defaultBranch: "main",
+      generation,
+    });
+  },
+  createChangeRequest: (
+    _path: string,
+    remote: string,
+    targetBranch: string,
+    _title: string,
+    _body: string,
+  ) => {
+    if (changeRequestScenario === "error") {
+      return Promise.reject({
+        code: "change_request_rate_limited",
+        message: "平台限流（429）。请稍后再由你手动重试；应用不会自动重试。",
+      });
+    }
+    if (changeRequestScenario === "unknown") {
+      return Promise.reject({
+        code: "change_request_unknown",
+        message: "请求已发出但未拿到完整响应，创建结果未知。请先在平台核对，不要直接重复创建。",
+      });
+    }
+    if (changeRequestScenario === "fallback") {
+      return ok({
+        status: "fallbackOpened",
+        url: "https://github.com/sakullla/twiglane/compare/main...feature/modern-ui?quick_pull=1",
+        provider: "github",
+        providerLabel: "GitHub",
+        repository: "sakullla/twiglane",
+        sourceBranch: "feature/modern-ui",
+        targetBranch,
+        webPrefilled: true,
+      });
+    }
+    return ok({
+      status: "created",
+      url: "https://github.com/sakullla/twiglane/pull/128",
+      provider: remote === "origin" ? "github" : "gitea",
+      providerLabel: remote === "origin" ? "GitHub" : "Gitea",
+      repository: remote === "origin" ? "sakullla/twiglane" : "dev/twiglane",
+      sourceBranch: "feature/modern-ui",
+      targetBranch,
+      webPrefilled: false,
+    });
+  },
+  changeRequestTokenStatus: () => ok({ configured: changeRequestToken }, 0),
+  setChangeRequestToken: () => {
+    changeRequestToken = true;
+    return ok({ configured: true }, 0);
+  },
+  deleteChangeRequestToken: () => {
+    changeRequestToken = false;
+    return ok({ configured: false }, 0);
+  },
   setPanelWidths: (widths: unknown) => ok(widths, 0),
   measureProbe: () => ok({ enabled: false, elapsedMs: 0, script: null }, 0),
   measureSample: () => ok(undefined, 0),

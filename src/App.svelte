@@ -105,6 +105,7 @@
   import BranchDialog from "./lib/components/BranchDialog.svelte";
   import type { MergeMode } from "./lib/components/MergeSetup.svelte";
   import BranchSwitcher from "./lib/components/BranchSwitcher.svelte";
+  import ChangeRequestModal from "./lib/components/ChangeRequestModal.svelte";
   import CommandPalette from "./lib/components/CommandPalette.svelte";
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./lib/components/ContextMenu.svelte";
@@ -167,6 +168,8 @@
   let branchGroups = $state(true);
   /** 设置里的「显示文件视图」：关闭后左栏只有改动与历史，文件视图不挂载。 */
   let filesViewEnabled = $state(true);
+  /** 设置里的「创建 MR / PR」：默认关闭；关闭时不做平台探测、不读令牌、不展示创建入口。 */
+  let changeRequestsEnabled = $state(false);
   let resolvedTheme = $derived(resolveTheme(theme, systemDark));
 
   $effect(() => {
@@ -486,7 +489,7 @@
   /**
    * 任务级 modal 层是否占着单槽：任务弹窗与只读阅读窗口二选一。
    *
-   * 阅读窗口和七个任务弹窗一样由 Modal 占层并把背景设为 inert，所以外壳也要把它当成一层：
+   * 阅读窗口和八个任务弹窗一样由 Modal 占层并把背景设为 inert，所以外壳也要把它当成一层：
    * 键盘、命令分发与写入入口都用这一份判定，不逐个列举 documentRequest（漏一处就会让
    * Ctrl+Enter 真的提交、Alt+箭头改掉底下的差异选择）。
    */
@@ -1196,6 +1199,14 @@
     if (taskModal === "branch") branchDeleteIntent = { name: branch.name, remote: branch.remote };
   }
 
+  /**
+   * 分支弹层的「创建 MR / PR」：只在设置开启时才有入口，这里仍按单槽打开。
+   * 创建不写 Git，因此不占用外壳的写锁。
+   */
+  function openChangeRequest() {
+    openTask("changeRequest");
+  }
+
   /** 把某个分支合并到当前分支：打开分支合并并预选来源。分支弹层和分支管理共用。 */
   function mergeBranchIntoCurrent(name: string) {
     mergeSource = name;
@@ -1227,7 +1238,7 @@
     if (taskModal === "merge") mergeAbortIntent = true;
   }
 
-  /** 七个任务入口共用单槽：任一时刻只有一个任务 modal。 */
+  /** 八个任务入口共用单槽：任一时刻只有一个任务 modal。 */
   function openTask(task: TaskModal) {
     if (task !== "settings" && !opened) return;
     mergeAbortIntent = false;
@@ -1415,6 +1426,7 @@
       pullIntegration = settings.pullIntegration === "rebase" ? "rebase" : "merge";
       branchGroups = settings.branchGroups !== false;
       filesViewEnabled = settings.filesView !== false;
+      changeRequestsEnabled = settings.changeRequestsEnabled === true;
       terminalPrefs = {
         profile: settings.terminal?.profile ?? null,
         fontSize: clampFontSize(settings.terminal?.fontSize ?? TERMINAL_FONT_DEFAULT),
@@ -4031,6 +4043,20 @@
     }
   }
 
+  /**
+   * 「创建 MR / PR」开关：setter 成功后才提交界面状态。
+   * 与其它布尔设置不同，这里不先改后报错：写盘失败时开关必须停在旧值，
+   * 不能让未保存的状态看起来已经持久化（R1）。
+   */
+  async function applyChangeRequests(next: boolean) {
+    try {
+      await api.setChangeRequestsEnabled(next);
+      changeRequestsEnabled = next;
+    } catch (error) {
+      showError(error);
+    }
+  }
+
   async function persistWidths() {
     try {
       widths = await api.setPanelWidths({
@@ -4858,6 +4884,8 @@
       onOpened={rememberOpened}
       beforeOpen={switcherWorktreeGate}
       onTracking={(tracks) => acceptBranchTracking(opened!.summary.path, tracks)}
+      {changeRequestsEnabled}
+      onCreateChangeRequest={openChangeRequest}
       onClose={closeSwitcher}
     />
   {/if}
@@ -5511,9 +5539,11 @@
     {pullIntegration}
     {branchGroups}
     filesView={filesViewEnabled}
+    changeRequestsEnabled={changeRequestsEnabled}
     onPullIntegration={(next) => void changePullIntegration(next)}
     onBranchGroups={(next) => void changeBranchGroups(next)}
     onFilesView={(next) => void changeFilesView(next)}
+    onChangeRequests={(next) => void applyChangeRequests(next)}
     {terminalPrefs}
     {terminalProfiles}
     onTerminalPrefs={changeTerminalPrefs}
@@ -5547,6 +5577,15 @@
       closeTask();
       runSync("associate", (path, generation) => api.associateUpstream(path, "", generation, nextId()));
     }}
+  />
+{:else if opened && taskModal === "changeRequest"}
+  <!-- 创建 MR/PR：平台、令牌和网页回退都在原生侧；这里只挂对话框并交回通知与关闭。 -->
+  <ChangeRequestModal
+    {opened}
+    returnFocus={taskReturnFocus}
+    {nextId}
+    onClose={closeTask}
+    onNotice={notice}
   />
 {/if}
 

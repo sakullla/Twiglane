@@ -169,6 +169,10 @@ const mocks = vi.hoisted(() => ({
   clioraReviewRequest: vi.fn(),
   clioraReviewReceipt: vi.fn(),
   clioraReviewReturn: vi.fn(),
+  prepareChangeRequest: vi.fn(),
+  changeRequestTokenStatus: vi.fn(),
+  createChangeRequest: vi.fn(),
+  setChangeRequestsEnabled: vi.fn(),
 }));
 
 const deepLink = vi.hoisted(() => ({
@@ -611,6 +615,15 @@ function stubSystemDark(matches: boolean) {
   };
 }
 
+/** 外壳默认设置：单个用例要开启「创建 MR / PR」时按此展开，避免改到共享夹具。 */
+const appSettings = {
+  theme: "dark",
+  panelWidths: { sidebar: 256, files: 360 },
+  git: { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "Git 2.49.0 可用" },
+  recent: [{ name: "demo", path: repoPath, openedAtMs: 1 }],
+  settingsWarning: null,
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   // cliora 来源是模块级会话状态：上一个用例的跳转不能把「返回 cliora」带进下一个用例。
@@ -623,13 +636,7 @@ beforeEach(() => {
   });
   // 审阅进度是模块级会话状态：用例之间必须清空，否则上一个用例的标记会带进来。
   resetReviewProgress();
-  mocks.getSettings.mockResolvedValue({
-    theme: "dark",
-    panelWidths: { sidebar: 256, files: 360 },
-    git: { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "Git 2.49.0 可用" },
-    recent: [{ name: "demo", path: repoPath, openedAtMs: 1 }],
-    settingsWarning: null,
-  });
+  mocks.getSettings.mockResolvedValue({ ...appSettings });
   mocks.workspaceList.mockResolvedValue({ hostId: "host", projects: [] });
   mocks.listenEvent.mockResolvedValue(() => {});
   mocks.pickDirectory.mockResolvedValue(null);
@@ -4506,4 +4513,64 @@ it("返修：忘记等待在途保存，再串行保存更新的文本，不把�
   await waitFor(() => expect(mocks.forgetRecent).toHaveBeenCalledWith(repoPath));
   expect(mocks.saveDraft).toHaveBeenLastCalledWith(repoPath, "newest-before-forget");
   expect(saved.get(repoPath)).toBe("newest-before-forget");
+});
+
+/* ------------------------------------------------------------------ *
+ * 创建 MR / PR 的外壳接线：入口 → 对话框 → 准备失败提示，整条链路都可观察
+ * ------------------------------------------------------------------ */
+
+describe("创建 MR / PR 接线（R1、R2）", () => {
+  it("分支弹层入口挂起对话框，prepare 失败的原因显示在正文里", async () => {
+    mocks.getSettings.mockResolvedValue({ ...appSettings, changeRequestsEnabled: true });
+    mocks.branchState.mockResolvedValue(branchFixture());
+    mocks.prepareChangeRequest.mockRejectedValue({
+      code: "change_request_source_missing",
+      message: "当前来源分支 main 还没有推送到远程 origin。请先推送后重试；应用不会自动推送。",
+      generation: 4,
+    });
+    render(App);
+    await openRepo();
+
+    await fireEvent.click(screen.getByRole("button", { name: "当前分支 main" }));
+    const popover = await screen.findByRole("dialog", { name: "切换分支" });
+    const entry = await waitFor(() => {
+      const found = popover.querySelector<HTMLButtonElement>("[data-create-change-request]");
+      if (!found) throw new Error("开关开启时应有创建入口");
+      return found;
+    });
+
+    await fireEvent.click(entry);
+    const dialog = await screen.findByRole("dialog", { name: "创建 MR / PR" });
+    // 外壳把当前仓库交出去：prepare 拿到路径与 generation。
+    await waitFor(() =>
+      expect(mocks.prepareChangeRequest).toHaveBeenCalledWith(repoPath, null, 4, expect.any(Number)),
+    );
+
+    const failure = await waitFor(() => {
+      const found = within(dialog).getByRole("alert");
+      if (!found.textContent?.includes("还没有推送到远程")) throw new Error("准备失败原因没有显示");
+      return found;
+    });
+    // 没有 prepared 时正文也不能是空的：这正是分支弹层之外最容易漏掉的一段。
+    expect(failure.textContent).toContain("应用不会自动推送");
+    expect(document.body.textContent ?? "").not.toContain("已在 GitHub 创建");
+    expect(mocks.createChangeRequest).not.toHaveBeenCalled();
+    expect(within(dialog).getByRole("button", { name: "重新读取" })).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: "再次创建" })).toBeNull();
+    // 关闭对话框回到外壳，不留下创建请求。
+    await fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "创建 MR / PR" })).toBeNull());
+    expect(mocks.createChangeRequest).not.toHaveBeenCalled();
+  });
+
+  it("开关关闭时同一入口不存在，也不调用平台命令", async () => {
+    mocks.branchState.mockResolvedValue(branchFixture());
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: "当前分支 main" }));
+    const popover = await screen.findByRole("dialog", { name: "切换分支" });
+    await waitFor(() => expect(within(popover).getAllByRole("option").length).toBeGreaterThan(0));
+    expect(popover.querySelector("[data-create-change-request]")).toBeNull();
+    expect(mocks.prepareChangeRequest).not.toHaveBeenCalled();
+  });
 });

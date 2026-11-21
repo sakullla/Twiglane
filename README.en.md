@@ -43,6 +43,7 @@ Stage, commit, merge, resolve conflicts and browse history without memorizing Gi
 - **Files** – full tree, repository-wide text search, Markdown reading view and lightweight text editing
 - **Terminal** – built-in terminal panel with tabs, split panes and file drag-and-drop; sessions keep running across views
 - **Worktrees** – manage git worktrees, with instant search across hundreds of repositories
+- **Create MR/PR** (off by default) – when enabled in settings, open a merge/pull request from the current branch on GitHub, GitLab or Gitea (including self-hosted). Pick a remote when several are ambiguous, confirm the target branch, title and description, then submit explicitly
 - **Speed** – `⌘/Ctrl K` command palette, keyboard shortcuts, light/dark/system themes and in-app updates
 
 ## Install
@@ -53,9 +54,21 @@ Download the package for your system from [Releases](https://github.com/sakullla
 - Windows uses the system WebView2 runtime; the installer downloads it if missing.
 - The macOS build is not notarized. On first launch, Control-click the app in Finder and choose Open, or run `xattr -dr com.apple.quarantine /Applications/Twiglane.app`.
 
-Authentication is handled by your system credential helper or SSH agent; Twiglane stores no tokens or private keys.
+Git authentication is handled by your system credential helper or SSH agent; Twiglane stores no Git tokens or private keys. Platform access tokens for the optional "Create MR/PR" feature are only saved when you explicitly enter them, one entry per provider and instance, in the system keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service). They can be deleted from the dialog and never reach the settings file, logs or the UI.
 
-Twiglane focuses on Git itself. It includes no code-hosting platform features (PRs, issues) and no AI chat. Verified platforms, recovery boundaries and performance methodology are documented in the [technical reference](docs/reference.md).
+Twiglane focuses on Git itself: apart from the optional "Create MR/PR" flow it includes no platform features (review, merging, issues) and no AI chat. Verified platforms, recovery boundaries and performance methodology are documented in the [technical reference](docs/reference.md).
+
+## Create MR/PR (off by default)
+
+Open "Settings → General" and turn on "Create MR/PR" to get a "Create MR/PR for the current branch…" entry at the bottom of the branch popover. While the feature is off the entry is hidden and no platform token is read and no platform request is made.
+
+- **Source and target** – the source branch is always the current branch and Twiglane never pushes for you. The upstream remote is used when present; a single remote is used when its remote-tracking branch proves the same branch exists; otherwise you pick a remote first, and nothing is sent to any instance before that choice.
+- **Explicit submit** – after confirming the target branch, title and description you click "Create MR/PR". Duplicate submits are blocked while the request is in flight, and nothing is retried automatically.
+- **Tokens** – a missing token, or a keychain failure, creates nothing and opens no web page. Tokens are per instance and can be configured, replaced or deleted in the dialog.
+- **Honest results** – only a link returned and verified by the platform is shown as created. When the platform is proven not to support the create API, Twiglane opens the new-request page instead (GitLab only pre-fills the source branch; target, title and description are completed there). If the request was sent but no complete response arrived, the dialog says the result is unknown and asks you to check the platform; ordinary failures (auth, permission, rate limit, validation, conflict) keep your input so you can decide whether to submit again.
+- **No local Git writes** – creating never changes branches, upstreams, the index or the worktree.
+
+Verification scope: these behaviours are covered by controllable local tests (mock HTTP, a keychain double and frontend behaviour tests). Real GitHub Enterprise, older GitLab/Gitea instances, the system keychain on all three operating systems and the default browser have no hands-on record here, so they are not claimed as verified. See the [technical reference (Chinese)](docs/reference.md).
 
 ## Build from source
 

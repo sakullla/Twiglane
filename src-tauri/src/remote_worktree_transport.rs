@@ -485,7 +485,11 @@ mod tests {
 const input = require('node:readline').createInterface({input:process.stdin});
 const send = frame => process.stdout.write(JSON.stringify(frame) + '\n');
 const result = (req, obj) => send({v:1,id:req.id,ok:true,result:obj});
-input.on('line', line => receive(JSON.parse(line)));
+input.on('line', line => {
+    const req = JSON.parse(line);
+    if (req.op === 'fixture_ready') result(req, {ready:true});
+    else receive(req);
+});
 "#;
         let mut command = Command::new("node");
         command
@@ -499,9 +503,22 @@ input.on('line', line => receive(JSON.parse(line)));
         (AgentTransport::start(child).unwrap(), pid)
     }
 
+    async fn ready_helper(body: &str) -> AgentTransport {
+        let (agent, _) = helper(body);
+        let ready = tokio::time::timeout(
+            Duration::from_secs(60),
+            agent.rpc("fixture_ready", json!({})),
+        )
+        .await
+        .expect("Node fixture did not finish starting")
+        .expect("Node fixture disconnected during startup");
+        assert_eq!(ready, json!({"ready":true}));
+        agent
+    }
+
     #[tokio::test]
     async fn a_new_request_reaches_the_peer_before_the_old_reply() {
-        let (agent, _) = helper(
+        let agent = ready_helper(
             r#"
 const requests = [];
 function receive(req) {
@@ -513,7 +530,7 @@ function receive(req) {
         }
     }
 }"#,
-        );
+        ).await;
         let (old, new) = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(
                 agent.rpc("diff", json!({"path":"old"})),
@@ -659,10 +676,10 @@ function receive(req) {
     async fn leader_exit_drains_a_complete_receipt_and_fails_other_pending_ids() {
         // The bounded-lived fixture descendant deliberately holds all three pipes.
         // The direct helper exits after its complete reply has reached stdout.
-        let (agent, _) = helper(
+        let agent = ready_helper(
             r#"
 const child = require('node:child_process').spawn(process.execPath,
-    ['-e','setTimeout(() => {}, 4000)'], {stdio:'inherit'});
+    ['-e','setTimeout(() => {}, 30000)'], {stdio:'inherit'});
 const requests = [];
 function receive(r) {
     requests.push(r);
@@ -672,7 +689,7 @@ function receive(r) {
                              () => process.exit(0));
     }
 }"#,
-        );
+        ).await;
         let pending = tokio::time::timeout(Duration::from_secs(2), async {
             tokio::join!(
                 agent.rpc("receipt", json!({})),

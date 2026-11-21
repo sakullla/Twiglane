@@ -710,7 +710,8 @@ function receive(r) {
                 "-o",
                 "BatchMode=yes",
                 "-o",
-                "ProxyCommand=exec /bin/sh \"$TWIGLANE_TEST_PROXY_SCRIPT\"",
+                // OpenSSH adds its own exec prefix to ProxyCommand.
+                "ProxyCommand=/bin/sh \"$TWIGLANE_TEST_PROXY_SCRIPT\"",
                 "localhost",
             ])
             .stdin(Stdio::piped())

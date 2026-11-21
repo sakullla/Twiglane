@@ -1,0 +1,162 @@
+{
+  "format": "twiglane-remote-worktree-evidence/v1",
+  "source": {
+    "twiglane": "f83b5b83226d9e800656da6719c75cbe0f753b82",
+    "cliora": "d45491a260494ad69cd7d1a7e4ec08d3d85f84ac"
+  },
+  "ssh": {
+    "platform": "Linux x86_64",
+    "authenticatedKey": true,
+    "authenticatedPassword": true,
+    "ordinaryAccounts": true,
+    "sameCanonicalPath": true,
+    "isolatedCommit": true,
+    "remoteAgentInstalledAndReused": true,
+    "interruptedInstallRetried": true,
+    "lostReceiptRecoveredExactlyOnce": true,
+    "independentReviewBaselineAndHead": true,
+    "gui": false
+  },
+  "network": [
+    {
+      "profile": "baseline",
+      "configuredBytesPerSec": null,
+      "observedRoundTripMs": 4,
+      "lists": [
+        {
+          "files": 5,
+          "elapsedMs": 13,
+          "downBytes": 516,
+          "rpcCount": 1
+        },
+        {
+          "files": 252,
+          "elapsedMs": 17,
+          "downBytes": 8076,
+          "rpcCount": 1
+        }
+      ],
+      "smallDiffMs": 19,
+      "smallDiffDownBytes": 284,
+      "switchMs": 24,
+      "switchDownBytes": 432,
+      "oldSuperseded": true,
+      "sshUp": 5478,
+      "sshDown": 35673
+    },
+    {
+      "profile": "high-rtt",
+      "configuredBytesPerSec": null,
+      "observedRoundTripMs": 808,
+      "lists": [
+        {
+          "files": 5,
+          "elapsedMs": 816,
+          "downBytes": 516,
+          "rpcCount": 1
+        },
+        {
+          "files": 252,
+          "elapsedMs": 821,
+          "downBytes": 8076,
+          "rpcCount": 1
+        }
+      ],
+      "smallDiffMs": 821,
+      "smallDiffDownBytes": 284,
+      "switchMs": 825,
+      "switchDownBytes": 432,
+      "oldSuperseded": true,
+      "sshUp": 5522,
+      "sshDown": 35673
+    },
+    {
+      "profile": "low-bw",
+      "configuredBytesPerSec": 32768,
+      "observedRoundTripMs": 13,
+      "lists": [
+        {
+          "files": 5,
+          "elapsedMs": 34,
+          "downBytes": 516,
+          "rpcCount": 1
+        },
+        {
+          "files": 252,
+          "elapsedMs": 269,
+          "downBytes": 8076,
+          "rpcCount": 1
+        }
+      ],
+      "smallDiffMs": 37,
+      "smallDiffDownBytes": 284,
+      "switchMs": 52,
+      "switchDownBytes": 432,
+      "oldSuperseded": true,
+      "sshUp": 5522,
+      "sshDown": 35673
+    },
+    {
+      "profile": "combined",
+      "configuredBytesPerSec": 32768,
+      "observedRoundTripMs": 814,
+      "lists": [
+        {
+          "files": 5,
+          "elapsedMs": 835,
+          "downBytes": 516,
+          "rpcCount": 1
+        },
+        {
+          "files": 252,
+          "elapsedMs": 1071,
+          "downBytes": 8076,
+          "rpcCount": 1
+        }
+      ],
+      "smallDiffMs": 838,
+      "smallDiffDownBytes": 284,
+      "switchMs": 856,
+      "switchDownBytes": 432,
+      "oldSuperseded": true,
+      "sshUp": 5522,
+      "sshDown": 35673
+    },
+    {
+      "profile": "stress",
+      "configuredBytesPerSec": 8192,
+      "observedRoundTripMs": 1836,
+      "lists": [
+        {
+          "files": 5,
+          "elapsedMs": 1893,
+          "downBytes": 516,
+          "rpcCount": 1
+        },
+        {
+          "files": 252,
+          "elapsedMs": 2821,
+          "downBytes": 8076,
+          "rpcCount": 1
+        }
+      ],
+      "smallDiffMs": 1890,
+      "smallDiffDownBytes": 284,
+      "switchMs": 1939,
+      "switchDownBytes": 432,
+      "oldSuperseded": true,
+      "sshUp": 5522,
+      "sshDown": 35673
+    }
+  ],
+  "protocol": {
+    "requests": "pass",
+    "events": "pass",
+    "fixtureSha256": "e7a4ed6d98babf2a2917dc79c8047cdf8c195413d48d8c9b6b713c361a144a30"
+  },
+  "limitations": [
+    "本机 macOS 开发连接工具与目标 Linux x86_64 实测。公钥及临时输入密码均完成真实 SSH 登录。",
+    "SSH/Git、协议往返和窗口流程分别验证。两份正式签名桌面安装包的 OS 深链联跑仍待验证。",
+    "Windows 与 Linux 桌面客户端的安装运行未实测。"
+  ]
+}

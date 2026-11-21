@@ -393,6 +393,18 @@ pub fn cached_raw_diff_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsStrin
     (git.to_path_buf(), args)
 }
 
+/// common Git dir：同一仓库的多个工作区共用这里，agent v2 的跨进程写锁与持久回执都放在其中。
+/// 桌面主窗口不直接调用它；远端 agent v2 通过共享实现使用同一命令。
+#[allow(dead_code)]
+pub fn common_dir_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("rev-parse"),
+        OsString::from("--git-common-dir"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
 pub fn head_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.extend([OsString::from("rev-parse"), OsString::from("HEAD")]);

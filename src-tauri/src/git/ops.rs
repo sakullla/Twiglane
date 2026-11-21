@@ -5,10 +5,12 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::error::AppError;
 use crate::git::command::{
-    abbrev_command, init_command, numstat_command, status_command, toplevel_command,
+    abbrev_command, git_path_command, head_command, init_command, numstat_command, status_command,
+    toplevel_command,
 };
 use crate::git::gate::{remote_check_is_stale, ActionGate, RemoteChecks};
 use crate::git::locate::{detect_git_binary, validate_git, GitLocator, ResolvedGit};
@@ -312,6 +314,183 @@ pub async fn refresh_status(
     )
     .await?;
     status_from_output(backend, &root, &scheduled).await
+}
+
+/// 远端写入前的仓库状态令牌（v2 协议）。
+///
+/// 数值 generation 只是界面侧的仓库代次，agent 进程重启后会从 1 重新开始，它证明不了
+/// 客户端读到的就是当前状态。令牌把 HEAD、索引字节、状态条目和每个改动路径的文件身份
+/// 摘要在一起；写入前比对令牌即可发现 HEAD、索引或工作树在上次读取之后发生了变化。
+// 状态令牌由远端 agent v2 在写入前核对；桌面主窗口在 T6 接入同一入口。库以 cdylib 发布，
+// 只有远端消费者用到的入口在这里仍算不可达，按既有约定显式放行。
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoState {
+    pub head: Option<String>,
+    pub index_digest: String,
+    pub worktree_digest: String,
+    pub token: String,
+}
+
+/// 令牌里最多读取多少个改动文件的内容。超出预算的路径只按大小与修改时间参与摘要，
+/// 与 Git 自己判断「文件是否可能变化」的 stat 规则一致。
+#[allow(dead_code)]
+const TOKEN_CONTENT_BYTES: u64 = 64 * 1024;
+#[allow(dead_code)]
+const TOKEN_CONTENT_FILES: usize = 256;
+
+#[allow(dead_code)]
+pub async fn state_token(
+    backend: &Backend,
+    root: &Path,
+    request_id: u64,
+) -> Result<RepoState, AppError> {
+    let git = require_git(backend).await?;
+    let key = repo_key(root);
+
+    let (program, args) = head_command(&git.path, root);
+    let head = run_git(backend, &key, JobKind::Read, request_id, program, args, None).await?;
+    let head_oid = (head.output.exit_code == 0)
+        .then(|| String::from_utf8_lossy(&head.output.stdout).trim().to_string())
+        .filter(|oid| !oid.is_empty());
+
+    let (program, args) = git_path_command(&git.path, root, "index");
+    let index = run_git(
+        backend,
+        &key,
+        JobKind::Read,
+        request_id,
+        program,
+        args,
+        None,
+    )
+    .await?;
+    let index_digest = if index.output.exit_code == 0 {
+        let raw = String::from_utf8_lossy(&index.output.stdout).trim().to_string();
+        digest_file(&resolve_repo_path(root, &raw))
+    } else {
+        "unavailable".to_string()
+    };
+
+    let (program, args) = status_command(&git.path, root);
+    let status = run_git(
+        backend,
+        &key,
+        JobKind::Read,
+        request_id,
+        program,
+        args,
+        None,
+    )
+    .await?;
+    if status.output.exit_code != 0 {
+        return Err(git_failure(
+            "status_failed",
+            &status.output,
+            "无法读取仓库状态。",
+        ));
+    }
+    let snapshot = parse_status(&status.output.stdout)?;
+    let worktree_digest = digest_worktree(root, &snapshot.files, &status.output.stdout);
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"twiglane-repo-state/v2\0");
+    hasher.update(head_oid.as_deref().unwrap_or("").as_bytes());
+    hasher.update([0]);
+    hasher.update(index_digest.as_bytes());
+    hasher.update([0]);
+    hasher.update(worktree_digest.as_bytes());
+    Ok(RepoState {
+        head: head_oid,
+        index_digest,
+        worktree_digest,
+        token: hex_digest(hasher),
+    })
+}
+
+/// `git rev-parse --git-path` 的输出可能相对仓库根（`-C root` 之后的当前目录）。
+#[allow(dead_code)]
+fn resolve_repo_path(root: &Path, raw: &str) -> PathBuf {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }
+}
+
+#[allow(dead_code)]
+fn digest_file(path: &Path) -> String {
+    match fs::read(path) {
+        Ok(bytes) => {
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            hex_digest(hasher)
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => "absent".to_string(),
+        Err(_) => "unreadable".to_string(),
+    }
+}
+
+/// 状态条目本身加上每个改动路径的文件身份。工作树一侧有改动的路径在预算内直接摘要内容，
+/// 因此「大小和修改时间都没变但内容变了」也会得到不同的令牌。
+#[allow(dead_code)]
+fn digest_worktree(root: &Path, files: &[FileChange], status_bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"worktree\0");
+    hasher.update(status_bytes);
+    let mut ordered: Vec<&FileChange> = files.iter().collect();
+    ordered.sort_by(|left, right| left.path.cmp(&right.path));
+    let mut content_budget = TOKEN_CONTENT_FILES;
+    for file in ordered {
+        hasher.update(file.path.as_bytes());
+        hasher.update([0]);
+        hasher.update(file.original_path.as_deref().unwrap_or("").as_bytes());
+        hasher.update([0]);
+        hasher.update(format!("{:?}/{:?}", file.staged, file.unstaged).as_bytes());
+        hasher.update([
+            u8::from(file.untracked),
+            u8::from(file.unmerged),
+        ]);
+        let changed = file.untracked || file.unmerged || file.unstaged != ChangeKind::None;
+        let mut sides = vec![file.path.as_str()];
+        if let Some(original) = file.original_path.as_deref() {
+            sides.push(original);
+        }
+        for side in sides {
+            match fs::metadata(root.join(side)) {
+                Ok(metadata) => {
+                    hasher.update(side.as_bytes());
+                    hasher.update(metadata.len().to_le_bytes());
+                    if let Ok(modified) = metadata.modified() {
+                        if let Ok(since) = modified.duration_since(std::time::UNIX_EPOCH) {
+                            hasher.update(since.as_nanos().to_le_bytes());
+                        }
+                    }
+                    if changed && content_budget > 0 && metadata.len() <= TOKEN_CONTENT_BYTES {
+                        content_budget -= 1;
+                        if let Ok(bytes) = fs::read(root.join(side)) {
+                            hasher.update((bytes.len() as u64).to_le_bytes());
+                            hasher.update(&bytes);
+                        }
+                    }
+                }
+                Err(_) => hasher.update(side.as_bytes()),
+            }
+        }
+    }
+    hex_digest(hasher)
+}
+
+#[allow(dead_code)]
+fn hex_digest(hasher: Sha256) -> String {
+    let digest = hasher.finalize();
+    let mut text = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        text.push_str(&format!("{byte:02x}"));
+    }
+    text
 }
 
 async fn open_root(
@@ -1564,5 +1743,51 @@ mod tests {
             require_change_requests(&backend).unwrap_err().code,
             "change_requests_disabled"
         );
+    }
+
+    /// 状态令牌要能区分 HEAD、索引与工作树真实内容，而不是只跟着数值 generation 走。
+    #[tokio::test]
+    async fn state_token_tracks_head_index_and_worktree_content() {
+        let fixture = crate::test_support::git_fixture("state-token");
+        let backend = fixture.backend();
+        let repo = fixture.repo("repo");
+        run_git_ok(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("note.txt"), "one\n").unwrap();
+        run_git_ok(&repo, &["add", "--", "note.txt"]);
+        run_git_ok(&repo, &["commit", "-m", "init"]);
+
+        let opened = open_repository(&backend, &repo_key(&repo), 1).await.unwrap();
+        let root = PathBuf::from(&opened.summary.path);
+        let before = state_token(&backend, &root, 2).await.unwrap();
+
+        // 同样的输入必须得到同样的令牌，否则写入前的比对会误判。
+        let again = state_token(&backend, &root, 3).await.unwrap();
+        assert_eq!(before, again);
+        assert!(before.head.is_some());
+        assert_ne!(before.index_digest, "absent");
+
+        // 内容变了但大小、修改时间都没变：只有摘要内容才能发现。
+        let mut same_size = fs::read(repo.join("note.txt")).unwrap();
+        same_size[0] = b't';
+        fs::write(repo.join("note.txt"), &same_size).unwrap();
+        let edited = state_token(&backend, &root, 4).await.unwrap();
+        assert_ne!(before.token, edited.token);
+        assert_ne!(before.worktree_digest, edited.worktree_digest);
+
+        // 暂存区变化（索引字节）同样换令牌，HEAD 不变。
+        run_git_ok(&repo, &["add", "--", "note.txt"]);
+        let staged = state_token(&backend, &root, 5).await.unwrap();
+        assert_ne!(edited.token, staged.token);
+        assert_ne!(edited.index_digest, staged.index_digest);
+        assert_eq!(edited.head, staged.head);
+
+        // 提交推进 HEAD。
+        run_git_ok(
+            &repo,
+            &["commit", "-m", "edit", "--no-verify", "--allow-empty-message"],
+        );
+        let committed = state_token(&backend, &root, 6).await.unwrap();
+        assert_ne!(staged.token, committed.token);
+        assert_ne!(staged.head, committed.head);
     }
 }

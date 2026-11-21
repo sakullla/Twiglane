@@ -1,0 +1,82 @@
+[package]
+name = "twiglane-agent-v2"
+version = "0.3.40"
+description = "Twiglane remote Git agent v2 (shared Rust Git capability)"
+edition = "2021"
+publish = false
+license = "UNLICENSED"
+
+[[bin]]
+name = "twiglane-agent-v2"
+path = "src/main.rs"
+# 共享的 Git 源文件带有桌面库自己的 cfg(test) 测试块（依赖 crate::test_support），
+# 不适合在远端二进制里再跑一遍；v2 的行为由 tests/protocol.rs 以真实进程黑盒验证。
+test = false
+
+[dependencies]
+base64 = "0.22"
+dunce = "1.0.5"
+flate2 = "1"
+# 共享的 git/preview.rs 与 git/document.rs 会编译进本进程（T3 会用到远端 Markdown/图片），
+# 因此与桌面端保持同样的依赖，而不是在两边各自实现一份预览与 URL 校验。
+imagesize = "0.15"
+notify = "8.2.1"
+regex = "1.13.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10.9"
+tar = "0.4"
+zip = { version = "9.3", default-features = false }
+tokio = { version = "1", features = [
+  "fs",
+  "io-std",
+  "io-util",
+  "macros",
+  "process",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-core = "0.62.2"
+windows = { version = "0.62.2", features = [
+  "Win32_Storage_FileSystem",
+  "Win32_System_Com",
+  "Win32_UI_Shell",
+] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# 共享的 files.rs 在 macOS 用 objc2 绑定已打开文件的身份（回收站删除）。
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", features = [
+  "std",
+  "NSData",
+  "NSError",
+  "NSFileManager",
+  "NSString",
+  "NSURL",
+  "NSValue",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+incremental = false

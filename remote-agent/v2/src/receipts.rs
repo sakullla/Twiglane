@@ -77,10 +77,31 @@ impl ReceiptStore {
         }
     }
 
-    pub fn read(&self, operation_id: &str) -> Option<Receipt> {
-        // 存盘内容由本模块写入；读不出来时按「没有记录」处理，调用方会保持待确认。
-        let bytes = fs::read(self.dir.join(format!("{operation_id}.json"))).ok()?;
-        serde_json::from_slice(&bytes).ok()
+    /// 读取一条回执。
+    ///
+    /// 三种结果必须分开：没有任何记录（Ok(None)，可以开始新写入）、读到完整记录、以及
+    /// 「文件存在但读不出来」（Err）。最后一种说明磁盘上已经有该操作 ID 的痕迹，但内容
+    /// 不可核对；它既不能当成没写过而重新执行，也不能当成已完成，调用方只能按「结果
+    /// 待确认」处理，并拒绝同一 operationId 的再次写入。
+    pub fn read(&self, operation_id: &str) -> Result<Option<Receipt>, AppError> {
+        let path = self.dir.join(format!("{operation_id}.json"));
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(AppError::new(
+                    "receipt_unreadable",
+                    format!("回执文件无法读取，结果未确认，不会重复写入。{error}"),
+                ))
+            }
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(receipt) => Ok(Some(receipt)),
+            Err(_) => Err(AppError::new(
+                "receipt_unreadable",
+                "回执文件存在但无法解析，结果未确认，不会重复写入。",
+            )),
+        }
     }
 
     /// 原子替换：先写临时文件并 fsync，再 rename，最后 fsync 目录。任何一步失败都报错，

@@ -877,3 +877,939 @@ fn two_requests_in_flight_are_answered_by_id() {
     assert_eq!(again["diff"]["path"], "a.txt");
     let _ = fixture.root.path();
 }
+
+// ===== T2：历史与搜索、分支标签、同步、stash、合并与修订撤销、worktree =====
+
+/// 写入结果里的令牌是下一次写入的预期状态；每个用例都必须沿用它，不能复用旧值。
+fn token_of(result: &Value) -> String {
+    result["stateToken"]
+        .as_str()
+        .expect("写入结果必须带 stateToken")
+        .to_string()
+}
+
+fn base_of(fixture: &Fixture) -> PathBuf {
+    std::fs::canonicalize(fixture.root.path()).unwrap()
+}
+
+#[test]
+fn history_search_file_history_and_commit_diff_page_the_selected_range() {
+    let fixture = Fixture::new("history");
+    fixture.init();
+    fixture.write("note.txt", "one\n");
+    fixture.commit_all("alpha one");
+    fixture.write("note.txt", "one\ntwo\n");
+    fixture.commit_all("beta two");
+    fixture.write("note.txt", "one\ntwo\nthree\n");
+    fixture.commit_all("gamma three");
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+
+    let page = agent.ok("history-1", "history", json!({ "repo": repo }))["page"].clone();
+    assert_eq!(page["state"], json!("ok"));
+    assert_eq!(page["offset"], json!(0));
+    assert_eq!(page["scope"], json!("current"));
+    assert_eq!(page["commits"].as_array().unwrap().len(), 3);
+    assert_eq!(page["commits"][0]["summary"], json!("gamma three"));
+    assert_eq!(page["hasMore"], json!(false));
+    assert!(page["pageSize"].as_u64().unwrap() >= 3);
+    assert_eq!(page["head"], opened["snapshot"]["branch"]["name"]);
+
+    let search = agent.ok(
+        "history-2",
+        "history",
+        json!({ "repo": repo, "query": "beta" }),
+    )["page"]
+        .clone();
+    assert_eq!(search["commits"].as_array().unwrap().len(), 1);
+    assert_eq!(search["commits"][0]["summary"], json!("beta two"));
+
+    let missing = agent.ok(
+        "history-3",
+        "history",
+        json!({ "repo": repo, "query": "no-such-commit" }),
+    )["page"]
+        .clone();
+    assert_eq!(missing["state"], json!("no_match"));
+
+    let oldest = page["commits"][2]["oid"].as_str().unwrap().to_string();
+    let newest = page["commits"][0]["oid"].as_str().unwrap().to_string();
+    let file_page = agent.ok(
+        "file-history-1",
+        "fileHistory",
+        json!({ "repo": repo, "path": "note.txt" }),
+    )["page"]
+        .clone();
+    assert_eq!(file_page["path"], json!("note.txt"));
+    assert_eq!(file_page["state"], json!("ok"));
+    assert_eq!(file_page["commits"].as_array().unwrap().len(), 3);
+
+    let detail = agent.ok(
+        "detail-1",
+        "commitDetail",
+        json!({ "repo": repo, "oid": oldest }),
+    )["commit"]
+        .clone();
+    assert_eq!(detail["commit"]["summary"], json!("alpha one"));
+    assert!(detail["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|file| file["path"] == json!("note.txt")));
+
+    // 提交里的文件差异按页读取：limit=1 只回一行，同时报出总行数。
+    let diff = agent.ok(
+        "commit-diff-1",
+        "commitDiff",
+        json!({ "repo": repo, "oid": newest, "path": "note.txt", "limit": 1 }),
+    )["diff"]
+        .clone();
+    assert_eq!(diff["lines"].as_array().unwrap().len(), 1);
+    assert!(diff["totalLines"].as_u64().unwrap() > 1);
+
+    let compare = agent.ok(
+        "compare-1",
+        "compare",
+        json!({ "repo": repo, "base": oldest, "head": newest }),
+    )["compare"]
+        .clone();
+    assert_eq!(compare["head"], json!(newest));
+    assert!(compare["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|file| file["path"] == json!("note.txt")));
+}
+
+#[test]
+fn branch_and_tag_writes_return_the_shared_state_and_replay_receipts() {
+    let fixture = Fixture::new("branches");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+
+    let created = agent.ok(
+        "branch-create",
+        "branchCreate",
+        json!({
+            "repo": repo,
+            "operationId": "op-branch-create-1",
+            "stateToken": opened["stateToken"],
+            "name": "feature",
+            "start": "main",
+        }),
+    );
+    assert_eq!(created["receipt"]["state"], json!("completed"));
+    assert_eq!(created["receipt"]["op"], json!("branchCreate"));
+    assert!(created["branches"]["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|branch| branch["name"] == json!("feature")));
+
+    // 同一个操作 ID + 同一个请求摘要：直接重放完成结果，不新建第二次。
+    let replay = agent.ok(
+        "branch-create-replay",
+        "branchCreate",
+        json!({
+            "repo": repo,
+            "operationId": "op-branch-create-1",
+            "stateToken": opened["stateToken"],
+            "name": "feature",
+            "start": "main",
+        }),
+    );
+    assert_eq!(replay["replayed"], json!(true));
+
+    let token = token_of(&created);
+    let switched = agent.ok(
+        "branch-switch",
+        "branchSwitch",
+        json!({
+            "repo": repo,
+            "operationId": "op-branch-switch-1",
+            "stateToken": token,
+            "name": "feature",
+        }),
+    );
+    assert_eq!(switched["branches"]["snapshot"]["branch"]["name"], json!("feature"));
+
+    let token = token_of(&switched);
+    let renamed = agent.ok(
+        "branch-rename",
+        "branchRename",
+        json!({
+            "repo": repo,
+            "operationId": "op-branch-rename-1",
+            "stateToken": token,
+            "old": "feature",
+            "new": "feature-2",
+        }),
+    );
+    assert!(renamed["branches"]["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|branch| branch["name"] == json!("feature-2")));
+
+    let token = token_of(&renamed);
+    let back = agent.ok(
+        "branch-switch-back",
+        "branchSwitch",
+        json!({
+            "repo": repo,
+            "operationId": "op-branch-switch-2",
+            "stateToken": token,
+            "name": "main",
+        }),
+    );
+
+    let token = token_of(&back);
+    let deleted = agent.ok(
+        "branch-delete",
+        "branchDelete",
+        json!({
+            "repo": repo,
+            "operationId": "op-branch-delete-1",
+            "stateToken": token,
+            "name": "feature-2",
+        }),
+    );
+    assert_eq!(deleted["receipt"]["state"], json!("completed"));
+    assert!(!deleted["branches"]["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|branch| branch["name"] == json!("feature-2")));
+
+    let token = token_of(&deleted);
+    let tagged = agent.ok(
+        "tag-create",
+        "tagCreate",
+        json!({
+            "repo": repo,
+            "operationId": "op-tag-create-1",
+            "stateToken": token,
+            "name": "v1",
+            "target": "HEAD",
+            "message": "first release",
+        }),
+    );
+    assert!(tagged["tags"]["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tag| tag["name"] == json!("v1")));
+
+    let token = token_of(&tagged);
+    let untagged = agent.ok(
+        "tag-delete",
+        "tagDelete",
+        json!({
+            "repo": repo,
+            "operationId": "op-tag-delete-1",
+            "stateToken": token,
+            "name": "v1",
+            "confirm": true,
+        }),
+    );
+    assert!(untagged["tags"]["tags"].as_array().unwrap().is_empty());
+
+    // 每个写入都留下可查询的回执，并按 operationId 回答。
+    let receipt = agent.ok(
+        "receipt-tag",
+        "receipt",
+        json!({ "repo": repo, "operationId": "op-tag-delete-1" }),
+    );
+    assert_eq!(receipt["receipt"]["state"], json!("completed"));
+    assert_eq!(receipt["operationId"], json!("op-tag-delete-1"));
+}
+
+#[test]
+fn fetch_push_and_pull_run_real_git_on_the_remote_side() {
+    let fixture = Fixture::new("sync");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+    let base = base_of(&fixture);
+    let bare = base.join("remote.git");
+    git(&base, &fixture.config, &["init", "--bare", "remote.git"]);
+    let bare_str = bare.to_string_lossy().into_owned();
+    git(&fixture.repo, &fixture.config, &["remote", "add", "origin", &bare_str]);
+    git(&fixture.repo, &fixture.config, &["push", "-u", "origin", "main"]);
+
+    let mut agent = fixture.agent();
+    open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+
+    let remote_state = agent.ok(
+        "remote-state",
+        "remoteState",
+        json!({ "repo": repo }),
+    )["remote"]
+        .clone();
+    assert!(remote_state["remotes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|remote| remote["name"] == json!("origin")));
+
+    // 提交由别人造成：先按 status 重新取令牌，再推送。远端 HEAD 必须真的前进。
+    fixture.write("pushed.txt", "pushed\n");
+    fixture.commit_all("pushed from agent");
+    let state = agent.ok("status-1", "status", json!({ "repo": repo }));
+    let token = state["stateToken"].as_str().unwrap().to_string();
+    let pushed = agent.ok(
+        "push",
+        "push",
+        json!({ "repo": repo, "operationId": "op-push-0001", "stateToken": token }),
+    );
+    assert_eq!(pushed["receipt"]["state"], json!("completed"));
+    let local_head = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]);
+    let remote_head = git(
+        &base,
+        &fixture.config,
+        &["--git-dir", "remote.git", "rev-parse", "main"],
+    );
+    assert_eq!(local_head.trim(), remote_head.trim());
+
+    // 别人往远端推了一个新提交，agent 在自己的工作树里把它拉下来。
+    let other = base.join("other");
+    git(&base, &fixture.config, &["clone", &bare_str, "other"]);
+    std::fs::write(other.join("from-remote.txt"), "remote\n").unwrap();
+    git(&other, &fixture.config, &["add", "-A"]);
+    git(&other, &fixture.config, &["commit", "-m", "from other"]);
+    git(&other, &fixture.config, &["push", "origin", "main"]);
+
+    let token = token_of(&pushed);
+    let fetched = agent.ok(
+        "fetch",
+        "fetch",
+        json!({ "repo": repo, "operationId": "op-fetch-0001", "stateToken": token }),
+    );
+    assert_eq!(fetched["receipt"]["state"], json!("completed"));
+    let token = token_of(&fetched);
+    let pulled = agent.ok(
+        "pull",
+        "pull",
+        json!({ "repo": repo, "operationId": "op-pull-0001", "stateToken": token }),
+    );
+    assert_eq!(pulled["receipt"]["state"], json!("completed"));
+    assert_eq!(
+        std::fs::read_to_string(fixture.repo.join("from-remote.txt"))
+            .unwrap()
+            .trim(),
+        "remote"
+    );
+}
+
+#[test]
+fn stash_save_apply_and_delete_round_trip_through_the_agent() {
+    let fixture = Fixture::new("stash");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+    let mut agent = fixture.agent();
+    open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+
+    // 外部改动会改变状态令牌，写入前必须重新读取。
+    fixture.write("a.txt", "a\nchange\n");
+    let state = agent.ok("status-save", "status", json!({ "repo": repo }));
+    let saved = agent.ok(
+        "stash-save",
+        "stashSave",
+        json!({
+            "repo": repo,
+            "operationId": "op-stash-save-1",
+            "stateToken": state["stateToken"],
+            "includeUntracked": true,
+            "message": "wip",
+        }),
+    );
+    assert_eq!(saved["receipt"]["state"], json!("completed"));
+    let records = saved["stash"]["state"]["records"].as_array().unwrap();
+    assert_eq!(records.len(), 1);
+    let oid = records[0]["oid"].as_str().unwrap().to_string();
+    // 保存后工作树干净，改动确实进了 stash。
+    assert!(saved["stash"]["state"]["snapshot"]["files"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        std::fs::read_to_string(fixture.repo.join("a.txt")).unwrap(),
+        "a\n"
+    );
+
+    let token = token_of(&saved);
+    let applied = agent.ok(
+        "stash-apply",
+        "stashApply",
+        json!({ "repo": repo, "operationId": "op-stash-apply-1", "stateToken": token, "oid": oid }),
+    );
+    assert!(applied["stash"]["snapshot"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|file| file["path"] == json!("a.txt")));
+
+    let token = token_of(&applied);
+    let deleted = agent.ok(
+        "stash-delete",
+        "stashDelete",
+        json!({
+            "repo": repo,
+            "operationId": "op-stash-delete-1",
+            "stateToken": token,
+            "oid": oid,
+            "confirm": true,
+        }),
+    );
+    assert!(deleted["stash"]["records"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn merge_conflict_blocks_completion_until_the_conflict_is_resolved() {
+    let fixture = Fixture::new("merge");
+    fixture.init();
+    fixture.write("a.txt", "base\n");
+    fixture.commit_all("base");
+    git(&fixture.repo, &fixture.config, &["checkout", "-b", "side"]);
+    fixture.write("a.txt", "side\n");
+    fixture.commit_all("side");
+    git(&fixture.repo, &fixture.config, &["checkout", "main"]);
+    fixture.write("a.txt", "main\n");
+    fixture.commit_all("main");
+
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+
+    let preview = agent.ok(
+        "merge-preview",
+        "mergePreview",
+        json!({ "repo": repo, "source": "side" }),
+    )["preview"]
+        .clone();
+    assert_eq!(preview["source"], json!("side"));
+    assert_eq!(preview["canStart"], json!(true));
+
+    let started = agent.ok(
+        "merge-start",
+        "mergeStart",
+        json!({
+            "repo": repo,
+            "operationId": "op-merge-start-1",
+            "stateToken": opened["stateToken"],
+            "source": "side",
+        }),
+    );
+    assert_eq!(started["merge"]["operation"], json!("merge"));
+    assert_eq!(started["merge"]["unresolved"], json!(1));
+    assert_eq!(started["merge"]["conflicts"][0]["path"], json!("a.txt"));
+    assert_eq!(started["merge"]["canContinue"], json!(false));
+
+    // 还有未解决冲突时不允许完成合并。
+    let blocked = agent.call(
+        "merge-complete-early",
+        "mergeComplete",
+        json!({
+            "repo": repo,
+            "operationId": "op-merge-complete-early",
+            "stateToken": token_of(&started),
+            "message": "merge side",
+        }),
+    );
+    assert_eq!(blocked["ok"], json!(false), "冲突未解决时不应完成合并");
+
+    let view = agent.ok(
+        "conflict-view",
+        "conflictView",
+        json!({ "repo": repo, "path": "a.txt" }),
+    )["conflict"]
+        .clone();
+    assert!(view["ours"]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("main"));
+    assert!(view["theirs"]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("side"));
+
+    let resolved = agent.ok(
+        "resolve",
+        "resolveConflict",
+        json!({
+            "repo": repo,
+            "operationId": "op-resolve-1",
+            "stateToken": token_of(&started),
+            "path": "a.txt",
+            "choice": "ours",
+        }),
+    );
+    assert_eq!(resolved["merge"]["unresolved"], json!(0));
+    assert_eq!(resolved["merge"]["canContinue"], json!(true));
+
+    let completed = agent.ok(
+        "merge-complete",
+        "mergeComplete",
+        json!({
+            "repo": repo,
+            "operationId": "op-merge-complete-1",
+            "stateToken": token_of(&resolved),
+            "message": "merge side",
+        }),
+    );
+    assert_eq!(completed["merge"]["operation"], json!("merge"));
+    assert!(!completed["merge"]["oid"].as_str().unwrap().is_empty());
+    assert!(completed["merge"]["snapshot"]["files"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // 合并提交是真实写入：HEAD 前进到合并结果，工作树干净。
+    assert_eq!(
+        git(&fixture.repo, &fixture.config, &["rev-list", "--count", "HEAD"]).trim(),
+        "4"
+    );
+}
+
+#[test]
+fn cherry_pick_undo_and_revert_write_real_commits() {
+    let fixture = Fixture::new("pick");
+    fixture.init();
+    fixture.write("a.txt", "1\n");
+    fixture.commit_all("one");
+    fixture.write("a.txt", "1\n2\n");
+    fixture.commit_all("two");
+    let second = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    git(&fixture.repo, &fixture.config, &["checkout", "-b", "topic"]);
+    fixture.write("b.txt", "b\n");
+    fixture.commit_all("topic work");
+    let topic = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    git(&fixture.repo, &fixture.config, &["checkout", "main"]);
+    // 修订撤销需要且仅需要一个远程来核对传播范围：给夹具一个真实的裸仓库 origin。
+    let base = base_of(&fixture);
+    let bare = base.join("remote.git");
+    let bare_str = bare.to_string_lossy().into_owned();
+    git(&base, &fixture.config, &["init", "--bare", "remote.git"]);
+    git(&fixture.repo, &fixture.config, &["remote", "add", "origin", &bare_str]);
+    git(&fixture.repo, &fixture.config, &["push", "-u", "origin", "main"]);
+
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+
+    let picked = agent.ok(
+        "cherry-pick",
+        "cherryPick",
+        json!({
+            "repo": repo,
+            "operationId": "op-cherry-pick-1",
+            "stateToken": opened["stateToken"],
+            "oids": [topic],
+        }),
+    );
+    assert_eq!(picked["cherryPick"]["created"], json!(1));
+    let picked_head = picked["cherryPick"]["headOid"].as_str().unwrap().to_string();
+    assert_ne!(picked_head, second);
+
+    let undone = agent.ok(
+        "undo-pick",
+        "undoCommit",
+        json!({
+            "repo": repo,
+            "operationId": "op-undo-pick-1",
+            "stateToken": token_of(&picked),
+            "expectedHead": picked_head,
+            "confirm": true,
+        }),
+    );
+    assert_eq!(undone["undo"]["wrote"], json!(true));
+    assert_eq!(
+        git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]).trim(),
+        second
+    );
+
+    // 撤销把改动留在暂存区；先让工作树回到已提交状态，再演示还原一个已推送的提交。
+    git(&fixture.repo, &fixture.config, &["reset", "--hard", "HEAD"]);
+    let state = agent.ok("status-before-revert", "status", json!({ "repo": repo }));
+    let reverted = agent.ok(
+        "revert",
+        "revert",
+        json!({
+            "repo": repo,
+            "operationId": "op-revert-1",
+            "stateToken": state["stateToken"],
+            "oids": [second],
+            "expectedHead": second,
+            "confirm": true,
+        }),
+    );
+    assert_eq!(reverted["revert"]["wrote"], json!(true));
+    assert_eq!(reverted["revert"]["created"], json!(1));
+    // 还原第二个提交之后，a.txt 回到第一个提交的内容。
+    assert_eq!(
+        std::fs::read_to_string(fixture.repo.join("a.txt")).unwrap(),
+        "1\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failing_hook_keeps_the_receipt_failed_and_is_never_reenacted() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new("hook");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+    let hook = fixture.repo.join(".git/hooks/pre-commit");
+    std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut agent = fixture.agent();
+    open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+
+    fixture.write("b.txt", "b\n");
+    let state = agent.ok("status-hook", "status", json!({ "repo": repo }));
+    let staged = agent.ok(
+        "stage",
+        "stage",
+        json!({
+            "repo": repo,
+            "operationId": "op-hook-stage-1",
+            "stateToken": state["stateToken"],
+            "paths": ["b.txt"],
+        }),
+    );
+    let token = token_of(&staged);
+
+    let failed = agent.call(
+        "commit-hook",
+        "commit",
+        json!({
+            "repo": repo,
+            "operationId": "op-hook-commit-1",
+            "stateToken": token,
+            "message": "should be rejected by hook",
+        }),
+    );
+    assert_eq!(failed["ok"], json!(false), "钩子失败时提交必须失败");
+    let code = failed["error"]["code"].as_str().unwrap().to_string();
+    assert!(!code.is_empty());
+
+    let receipt = agent.ok(
+        "receipt-hook",
+        "receipt",
+        json!({ "repo": repo, "operationId": "op-hook-commit-1" }),
+    );
+    assert_eq!(receipt["receipt"]["state"], json!("failed"));
+    assert_eq!(receipt["receipt"]["reason"], json!(code));
+
+    // 同一个操作 ID 重试只会回到原失败原因，绝不重新执行写入。
+    let retried = agent.call(
+        "commit-hook-retry",
+        "commit",
+        json!({
+            "repo": repo,
+            "operationId": "op-hook-commit-1",
+            "stateToken": token,
+            "message": "should be rejected by hook",
+        }),
+    );
+    assert_eq!(retried["ok"], json!(false));
+    assert_eq!(retried["error"]["code"], json!(code));
+    assert_eq!(
+        git(&fixture.repo, &fixture.config, &["rev-list", "--count", "HEAD"]).trim(),
+        "1"
+    );
+
+    // 去掉钩子后用新的操作 ID 才能继续；失败尝试可能刷新了索引统计，先重读状态。
+    std::fs::remove_file(&hook).unwrap();
+    let state = agent.ok("status-after-hook", "status", json!({ "repo": repo }));
+    let committed = agent.ok(
+        "commit-after-hook",
+        "commit",
+        json!({
+            "repo": repo,
+            "operationId": "op-hook-commit-2",
+            "stateToken": state["stateToken"],
+            "message": "no hook now",
+        }),
+    );
+    assert_eq!(committed["receipt"]["state"], json!("completed"));
+}
+
+#[test]
+fn an_index_lock_is_reported_without_touching_the_repository() {
+    let fixture = Fixture::new("index-lock");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+    let mut agent = fixture.agent();
+    open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+
+    fixture.write("a.txt", "a\nchange\n");
+    let state = agent.ok("status-lock", "status", json!({ "repo": repo }));
+    let lock = fixture.repo.join(".git/index.lock");
+    std::fs::write(&lock, b"").unwrap();
+    let code = agent.error_code(
+        "stash-save",
+        "stashSave",
+        json!({
+            "repo": repo,
+            "operationId": "op-index-lock-1",
+            "stateToken": state["stateToken"],
+            "includeUntracked": true,
+            "message": "wip",
+        }),
+    );
+    assert_eq!(code, "index_lock");
+    assert_eq!(
+        std::fs::read_to_string(fixture.repo.join("a.txt")).unwrap(),
+        "a\nchange\n"
+    );
+    std::fs::remove_file(&lock).unwrap();
+
+    // 锁清掉之后同一个仓库照常可用。
+    let state = agent.ok("stash-state", "stashState", json!({ "repo": repo }));
+    assert!(state["stash"]["records"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn an_unreadable_receipt_blocks_a_repeat_write() {
+    let fixture = Fixture::new("corrupt-receipt");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+
+    let receipts = fixture.repo.join(".git/twiglane-agent-v2/receipts");
+    std::fs::create_dir_all(&receipts).unwrap();
+    let corrupt = receipts.join("op-corrupt-0001.json");
+    std::fs::write(&corrupt, b"{ not a receipt").unwrap();
+
+    fixture.write("b.txt", "b\n");
+    let code = agent.error_code(
+        "stage-corrupt",
+        "stage",
+        json!({
+            "repo": repo,
+            "operationId": "op-corrupt-0001",
+            "stateToken": opened["stateToken"],
+            "paths": ["b.txt"],
+        }),
+    );
+    assert_eq!(code, "receipt_unreadable");
+    // 回执文件不能被覆盖，仓库也不能被写。
+    assert_eq!(std::fs::read(&corrupt).unwrap(), b"{ not a receipt");
+    let status = git(&fixture.repo, &fixture.config, &["status", "--porcelain"]);
+    assert!(status.contains("b.txt"));
+    assert!(!status.lines().any(|line| line.starts_with("A ")));
+
+    let query = agent.call(
+        "receipt-corrupt",
+        "receipt",
+        json!({ "repo": repo, "operationId": "op-corrupt-0001" }),
+    );
+    assert_eq!(query["ok"], json!(false));
+    assert_eq!(query["error"]["code"], json!("receipt_unreadable"));
+}
+
+#[test]
+fn receipts_survive_reconnect_and_registered_ones_stay_pending() {
+    let fixture = Fixture::new("reconnect");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+    let repo = fixture.repo_str();
+
+    let head = {
+        let mut agent = fixture.agent();
+        open(&mut agent, &repo);
+        fixture.write("b.txt", "b\n");
+        let state = agent.ok("status-before-stage", "status", json!({ "repo": repo }));
+        let staged = agent.ok(
+            "stage",
+            "stage",
+            json!({
+                "repo": repo,
+                "operationId": "op-reconnect-0001",
+                "stateToken": state["stateToken"],
+                "paths": ["b.txt"],
+            }),
+        );
+        assert_eq!(staged["receipt"]["state"], json!("completed"));
+        staged["receipt"]["head"].as_str().unwrap().to_string()
+    };
+
+    // 新进程、同一 Git 目录：回执仍然可查，且能核对到当时的 HEAD。
+    let mut second = fixture.agent();
+    open(&mut second, &repo);
+    let receipt = second.ok(
+        "receipt-after-restart",
+        "receipt",
+        json!({ "repo": repo, "operationId": "op-reconnect-0001" }),
+    );
+    assert_eq!(receipt["receipt"]["state"], json!("completed"));
+    assert_eq!(receipt["receipt"]["head"], json!(head));
+
+    // 人为留下一条 registered 回执：重连后只能查询，同一操作 ID 不能再写。
+    let receipts = fixture.repo.join(".git/twiglane-agent-v2/receipts");
+    let pending = receipts.join("op-pending-0001.json");
+    let body = serde_json::json!({
+        "operationId": "op-pending-0001",
+        "repo": repo,
+        "op": "stage",
+        "requestDigest": "not-the-same-request",
+        "state": "registered",
+        "generation": 1,
+        "atMs": 1,
+    });
+    std::fs::write(&pending, serde_json::to_vec(&body).unwrap()).unwrap();
+    let query = second.ok(
+        "receipt-pending",
+        "receipt",
+        json!({ "repo": repo, "operationId": "op-pending-0001" }),
+    );
+    assert_eq!(query["receipt"]["state"], json!("registered"));
+
+    let token = second.ok("status-1", "status", json!({ "repo": repo }))["stateToken"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let code = second.error_code(
+        "stage-pending",
+        "stage",
+        json!({
+            "repo": repo,
+            "operationId": "op-pending-0001",
+            "stateToken": token,
+            "paths": ["b.txt"],
+        }),
+    );
+    assert_eq!(code, "operation_conflict");
+}
+
+#[test]
+fn linked_worktrees_are_listed_and_removable_from_the_agent() {
+    let fixture = Fixture::new("worktree");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+    let base = base_of(&fixture);
+    let linked = base.join("linked");
+    let linked_str = linked.to_string_lossy().into_owned();
+    git(
+        &fixture.repo,
+        &fixture.config,
+        &["worktree", "add", &linked_str, "-b", "linked-branch"],
+    );
+
+    let mut agent = fixture.agent();
+    let opened_main = open(&mut agent, &fixture.repo_str());
+    let overview = agent.ok(
+        "worktrees",
+        "worktrees",
+        json!({ "repo": fixture.repo_str(), "paths": [fixture.repo_str()] }),
+    )["worktrees"]
+        .clone();
+    let items = overview["items"].as_array().unwrap();
+    assert!(items.iter().any(|item| item["path"] == json!(linked_str)));
+
+    // 附属工作区自己的会话才能删除它；主工作区始终拒绝。
+    let mut second = fixture.agent();
+    let opened_linked = open(&mut second, &linked_str);
+    let removed = second.ok(
+        "worktree-remove",
+        "worktreeRemove",
+        json!({
+            "repo": linked_str,
+            "operationId": "op-worktree-remove-1",
+            "stateToken": opened_linked["stateToken"],
+            "force": true,
+        }),
+    );
+    assert_eq!(removed["receipt"]["state"], json!("completed"));
+    assert!(!linked.exists());
+
+    let refused = agent.error_code(
+        "worktree-remove-main",
+        "worktreeRemove",
+        json!({
+            "repo": fixture.repo_str(),
+            "operationId": "op-worktree-remove-2",
+            "stateToken": opened_main["stateToken"],
+            "force": true,
+        }),
+    );
+    assert_eq!(refused, "not_worktree");
+}
+
+#[test]
+fn cancel_reports_unknown_targets_and_leaves_the_repository_usable() {
+    let fixture = Fixture::new("cancel");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+    let mut agent = fixture.agent();
+    open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+
+    let unknown = agent.ok("cancel-1", "cancel", json!({ "targetId": "never-issued" }));
+    assert_eq!(unknown["cancelled"], json!(false));
+
+    // 取消一个已经结束的请求只是标记失败：仓库仍可读。
+    let history = agent.ok("history-1", "history", json!({ "repo": repo }));
+    assert!(!history["page"]["commits"].as_array().unwrap().is_empty());
+    let late = agent.ok("cancel-2", "cancel", json!({ "targetId": "history-1" }));
+    assert_eq!(late["cancelled"], json!(false));
+    let again = agent.ok("history-2", "history", json!({ "repo": repo }));
+    assert_eq!(again["page"]["state"], json!("ok"));
+}
+
+#[test]
+fn every_advertised_capability_has_a_handler() {
+    let fixture = Fixture::new("capabilities");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &fixture.repo_str());
+    let hello = agent.ok("hello-1", "hello", json!({ "client": "test" }));
+    let capabilities = hello["capabilities"].as_array().unwrap().clone();
+    // 能力面不能多报：每个声明过的 op 都必须有分派分支，缺字段时应答 invalid_request 一类错误，
+    // 而不是 unsupported_op。
+    for (index, capability) in capabilities.iter().enumerate() {
+        let op = capability.as_str().expect("能力名必须是字符串");
+        let response = agent.call(
+            &format!("cap-{index}"),
+            op,
+            json!({ "repo": opened["repo"] }),
+        );
+        if response["ok"] == json!(true) {
+            // 少数读取（如 status）可以只靠仓库标识完成，这同样说明有分派分支。
+            continue;
+        }
+        assert_ne!(
+            response["error"]["code"],
+            json!("unsupported_op"),
+            "{op} 已声明为能力但未实现"
+        );
+    }
+    assert!(capabilities.contains(&json!("worktreeRemove")));
+}

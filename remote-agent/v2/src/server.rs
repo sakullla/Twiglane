@@ -18,10 +18,16 @@ use crate::error::AppError;
 use crate::git::changes;
 use crate::git::command::common_dir_command;
 use crate::git::gate::RepoWriteLock;
+use crate::git::heads;
+use crate::git::history::{self, HistoryRequest};
 use crate::git::ops::{self, Backend, RepoState};
+use crate::git::resolve;
+use crate::git::sync;
+use crate::git::tags;
+use crate::git::worktree as worktree_ops;
 use crate::git::runner::RealRunner;
 use crate::git::schedule::{internal_request_id, JobKind};
-use crate::model::{CommitResult, DiffLineSelection, StatusSnapshot};
+use crate::model::DiffLineSelection;
 use crate::protocol::{self, Request, CAPABILITIES, MAX_IN_FLIGHT, PROTOCOL};
 use crate::receipts::{Receipt, ReceiptStore, COMPLETED, FAILED};
 use crate::session::{Selection, Session};
@@ -49,13 +55,86 @@ pub struct Context {
 }
 
 /// 写操作分类：请求摘要、回执与执行分支都以它为准。
+///
+/// 每个写入都自成一类，而不是共用「有 operationId 就算同类」：合并、变基、拣选、回退、
+/// 修订撤销、stash 和 worktree 的 Git 原子边界不同，回执必须能区分是哪一个动作停在半途。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WriteOp {
     Stage,
     Unstage,
     Patch,
     Commit,
+    BranchCreate,
+    BranchSwitch,
+    BranchRename,
+    BranchDelete,
+    BranchTrack,
+    BranchUpdate,
+    BranchPublish,
+    TagCreate,
+    TagDelete,
+    TagPush,
+    RemoteAdd,
+    RemoteSetUrl,
+    Fetch,
+    Pull,
+    Push,
+    PushToRemote,
+    PublishBranch,
+    StashSave,
+    StashApply,
+    StashDelete,
+    MergeStart,
+    MergeComplete,
+    MergeAbort,
+    ResolveConflict,
+    CherryPick,
+    Revert,
+    UndoCommit,
+    CheckoutCommit,
+    AmendCommit,
+    Discard,
+    WorktreeRemove,
 }
+
+/// 全部写入操作：`parse` 与 `name` 用同一份清单，避免协议名和执行分支各记一份。
+const WRITE_OPS: &[WriteOp] = &[
+    WriteOp::Stage,
+    WriteOp::Unstage,
+    WriteOp::Patch,
+    WriteOp::Commit,
+    WriteOp::BranchCreate,
+    WriteOp::BranchSwitch,
+    WriteOp::BranchRename,
+    WriteOp::BranchDelete,
+    WriteOp::BranchTrack,
+    WriteOp::BranchUpdate,
+    WriteOp::BranchPublish,
+    WriteOp::TagCreate,
+    WriteOp::TagDelete,
+    WriteOp::TagPush,
+    WriteOp::RemoteAdd,
+    WriteOp::RemoteSetUrl,
+    WriteOp::Fetch,
+    WriteOp::Pull,
+    WriteOp::Push,
+    WriteOp::PushToRemote,
+    WriteOp::PublishBranch,
+    WriteOp::StashSave,
+    WriteOp::StashApply,
+    WriteOp::StashDelete,
+    WriteOp::MergeStart,
+    WriteOp::MergeComplete,
+    WriteOp::MergeAbort,
+    WriteOp::ResolveConflict,
+    WriteOp::CherryPick,
+    WriteOp::Revert,
+    WriteOp::UndoCommit,
+    WriteOp::CheckoutCommit,
+    WriteOp::AmendCommit,
+    WriteOp::Discard,
+    WriteOp::WorktreeRemove,
+];
 
 impl WriteOp {
     fn name(self) -> &'static str {
@@ -64,14 +143,55 @@ impl WriteOp {
             Self::Unstage => "unstage",
             Self::Patch => "patch",
             Self::Commit => "commit",
+            Self::BranchCreate => "branchCreate",
+            Self::BranchSwitch => "branchSwitch",
+            Self::BranchRename => "branchRename",
+            Self::BranchDelete => "branchDelete",
+            Self::BranchTrack => "branchTrack",
+            Self::BranchUpdate => "branchUpdate",
+            Self::BranchPublish => "branchPublish",
+            Self::TagCreate => "tagCreate",
+            Self::TagDelete => "tagDelete",
+            Self::TagPush => "tagPush",
+            Self::RemoteAdd => "remoteAdd",
+            Self::RemoteSetUrl => "remoteSetUrl",
+            Self::Fetch => "fetch",
+            Self::Pull => "pull",
+            Self::Push => "push",
+            Self::PushToRemote => "pushToRemote",
+            Self::PublishBranch => "publishBranch",
+            Self::StashSave => "stashSave",
+            Self::StashApply => "stashApply",
+            Self::StashDelete => "stashDelete",
+            Self::MergeStart => "mergeStart",
+            Self::MergeComplete => "mergeComplete",
+            Self::MergeAbort => "mergeAbort",
+            Self::ResolveConflict => "resolveConflict",
+            Self::CherryPick => "cherryPick",
+            Self::Revert => "revert",
+            Self::UndoCommit => "undoCommit",
+            Self::CheckoutCommit => "checkoutCommit",
+            Self::AmendCommit => "amendCommit",
+            Self::Discard => "discard",
+            Self::WorktreeRemove => "worktreeRemove",
         }
+    }
+
+    fn parse(op: &str) -> Option<Self> {
+        WRITE_OPS.iter().copied().find(|candidate| candidate.name() == op)
     }
 }
 
-enum Written {
-    Files(StatusSnapshot),
-    Commit(Box<CommitResult>),
+/// 写入成功后回执需要的分支名：优先用返回 DTO 里的 snapshot.branch.name。
+fn written_branch(value: &Value) -> Option<String> {
+    value
+        .get("snapshot")
+        .and_then(|snapshot| snapshot.get("branch"))
+        .and_then(|branch| branch.get("name"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
+
 
 pub async fn serve() -> Result<(), AppError> {
     let (out, mut outgoing) = mpsc::channel::<Vec<u8>>(MAX_IN_FLIGHT * 4);
@@ -234,15 +354,29 @@ impl Context {
             "open" => self.open(&request.fields, cancel).await,
             "status" => self.status(&request.fields, cancel).await,
             "diff" => self.diff(&request.fields, cancel).await,
-            "stage" => self.write(WriteOp::Stage, &request.fields).await,
-            "unstage" => self.write(WriteOp::Unstage, &request.fields).await,
-            "patch" => self.write(WriteOp::Patch, &request.fields).await,
-            "commit" => self.write(WriteOp::Commit, &request.fields).await,
+            // 历史、比较与文件历史：只按页读取当前选择。
+            "history" => self.history(&request.fields, cancel).await,
+            "fileHistory" => self.file_history(&request.fields, cancel).await,
+            "commitDetail" => self.commit_detail(&request.fields, cancel).await,
+            "commitDiff" => self.commit_diff(&request.fields, cancel).await,
+            "compare" => self.compare(&request.fields, cancel).await,
+            // 分支、标签、同步、stash、合并会话与 worktree 的只读入口。
+            "branchList" => self.branches(&request.fields, cancel).await,
+            "tagState" => self.tag_state(&request.fields, cancel).await,
+            "remoteState" => self.remote_state(&request.fields, cancel).await,
+            "stashState" => self.stash_state(&request.fields, cancel).await,
+            "mergePreview" => self.merge_preview(&request.fields, cancel).await,
+            "mergeSession" => self.merge_session(&request.fields, cancel).await,
+            "conflictView" => self.conflict_view(&request.fields, cancel).await,
+            "worktrees" => self.worktrees(&request.fields, cancel).await,
             "receipt" => self.receipt(&request.fields),
-            other => Err(AppError::new(
-                "unsupported_op",
-                format!("v2 不支持操作 {}。", safe_op(other)),
-            )),
+            other => match WriteOp::parse(other) {
+                Some(op) => self.write(op, &request.fields).await,
+                None => Err(AppError::new(
+                    "unsupported_op",
+                    format!("v2 不支持操作 {}。", safe_op(other)),
+                )),
+            },
         }
     }
 
@@ -412,8 +546,335 @@ impl Context {
             "diff": diff,
         }))
     }
-    /// 一次写入的完整顺序：回执查重 → 令牌核对 → 跨进程写锁 → 拿锁后再次核对 →
-    /// 登记 registered → 执行共享写入 → 成功后改为 completed。
+    /// 历史与搜索：按 offset 分页读取当前范围，只返回这一页和是否还有下一页。
+    async fn history(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let request = history_request(fields)?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let page = history::history_page(
+            &self.backend,
+            &session.key,
+            &request,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        let next = page
+            .has_more
+            .then(|| page.offset + page.commits.len() as u32);
+        Ok(json!({
+            "repo": session.key,
+            "page": page,
+            "nextOffset": next,
+            "generation": page.generation,
+        }))
+    }
+
+    /// 单个文件的历史：同一个分页与过滤条件，只把范围限制在一条路径上。
+    async fn file_history(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let relative = string_field(fields, "path")?;
+        let request = history_request(fields)?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let page = history::file_history(
+            &self.backend,
+            &session.key,
+            &relative,
+            &request,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        let next = page
+            .has_more
+            .then(|| page.offset + page.commits.len() as u32);
+        Ok(json!({
+            "repo": session.key,
+            "path": relative,
+            "page": page,
+            "nextOffset": next,
+            "generation": page.generation,
+        }))
+    }
+
+    async fn commit_detail(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let oid = string_field(fields, "oid")?;
+        let parent = optional_text_field(fields, "parent")?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let detail = history::commit_detail(
+            &self.backend,
+            &session.key,
+            &oid,
+            parent.as_deref(),
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({
+            "repo": session.key,
+            "commit": detail,
+            "generation": detail.generation,
+        }))
+    }
+
+    /// 某个提交里一个文件的分页差异；limit 与 diff 使用同一默认值和上限。
+    async fn commit_diff(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let oid = string_field(fields, "oid")?;
+        let parent = optional_text_field(fields, "parent")?;
+        let relative = string_field(fields, "path")?;
+        let offset = optional_u64_field(fields, "offset")?.unwrap_or(0) as u32;
+        let limit = optional_u64_field(fields, "limit")?
+            .map(|limit| (limit as u32).clamp(1, MAX_DIFF_LINES))
+            .unwrap_or(DEFAULT_DIFF_LINES);
+        let context = optional_u64_field(fields, "context")?
+            .map(|context| (context as u32).min(MAX_CONTEXT))
+            .unwrap_or(3);
+        let as_text = bool_field(fields, "asText");
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let diff = history::commit_file_diff(
+            &self.backend,
+            &session.key,
+            &oid,
+            parent.as_deref(),
+            &relative,
+            generation,
+            internal_request_id(),
+            offset,
+            limit,
+            context,
+            as_text,
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({
+            "repo": session.key,
+            "path": relative,
+            "diff": diff,
+            "generation": diff.generation,
+        }))
+    }
+
+    /// 两个提交之间改动的文件清单（base 缺省表示与工作树比较）。
+    async fn compare(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let head = string_field(fields, "head")?;
+        let base = optional_text_field(fields, "base")?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let files = history::compare_files(
+            &self.backend,
+            &session.key,
+            base.as_deref(),
+            &head,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({
+            "repo": session.key,
+            "base": base,
+            "head": head,
+            "compare": files,
+        }))
+    }
+
+    async fn branches(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let listing = sync::branch_list(
+            &self.backend,
+            &session.key,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({ "repo": session.key, "branches": listing }))
+    }
+
+    async fn tag_state(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let state = tags::tag_state(
+            &self.backend,
+            &session.key,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({ "repo": session.key, "tags": state }))
+    }
+
+    async fn remote_state(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let state = sync::remote_state(
+            &self.backend,
+            &session.key,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({ "repo": session.key, "remote": state }))
+    }
+
+    async fn stash_state(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let include_untracked = field(fields, "includeUntracked")
+            .map(|value| value.as_bool().unwrap_or(true))
+            .unwrap_or(true);
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let state = history::stash_state(
+            &self.backend,
+            &session.key,
+            include_untracked,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({ "repo": session.key, "stash": state }))
+    }
+
+    /// 合并预览：只读，供危险操作确认界面显示将要发生的变化。
+    async fn merge_preview(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let source = string_field(fields, "source")?;
+        let target = optional_text_field(fields, "target")?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let preview = resolve::merge_preview(
+            &self.backend,
+            &session.key,
+            &source,
+            target.as_deref(),
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({ "repo": session.key, "preview": preview }))
+    }
+
+    async fn merge_session(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let merge = resolve::merge_session(
+            &self.backend,
+            &session.key,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({ "repo": session.key, "merge": merge }))
+    }
+
+    async fn conflict_view(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let relative = string_field(fields, "path")?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let view = resolve::conflict_view(
+            &self.backend,
+            &session.key,
+            &relative,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({ "repo": session.key, "conflict": view }))
+    }
+
+    /// worktree 总览：默认只看当前仓库；显式 paths 时按给定顺序逐项读取。
+    async fn worktrees(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let paths = match field(fields, "paths") {
+            Some(_) => paths_field(fields)?,
+            None => vec![session.key.clone()],
+        };
+        check_cancel(cancel)?;
+        let overview = heads::worktree_overview(&self.backend, &paths, internal_request_id()).await?;
+        check_cancel(cancel)?;
+        Ok(json!({ "repo": session.key, "worktrees": overview }))
+    }
+
+    /// 一次写入的完整顺序：跨进程写锁 → 回执查重 → 令牌核对 → 登记 registered →
+    /// 执行共享写入 → 取得新状态 → 改为 completed。
+    ///
+    /// 回执查重与登记都在写锁临界区内完成：两个客户端用同一个 operationId 并发提交时，
+    /// 只有拿到锁的一方看到「没有记录」并登记，另一方必然看到 registered/completed。
+    /// 回执文件存在但读不出来时直接报 receipt_unreadable，不按「没写过」重新执行。
     async fn write(&self, op: WriteOp, fields: &Map<String, Value>) -> Result<Value, AppError> {
         let session = self.session(fields)?;
         let operation_id = string_field(fields, "operationId")?;
@@ -424,8 +885,18 @@ impl Context {
             ));
         }
         let request_digest = request_digest(op, fields);
+        let expected = string_field(fields, "stateToken")?;
+        // 跨进程写锁：同一 common Git dir 在任一时刻只有一个 agent 在写。
+        let lock = {
+            let git_dir = session.git_dir.clone();
+            tokio::task::spawn_blocking(move || RepoWriteLock::acquire(&git_dir, WRITE_LOCK_WAIT))
+                .await
+                .map_err(|_| {
+                    AppError::new("write_lock_unavailable", "写入锁已中断，未写入仓库。")
+                })??
+        };
         let store = ReceiptStore::new(&session.git_dir);
-        if let Some(existing) = store.read(&operation_id) {
+        if let Some(existing) = store.read(&operation_id)? {
             if existing.request_digest != request_digest || existing.op != op.name() {
                 return Err(AppError::new(
                     "operation_conflict",
@@ -444,38 +915,10 @@ impl Context {
                 )),
             };
         }
-
-        let expected = string_field(fields, "stateToken")?;
-        let seen: RepoState =
-            ops::state_token(&self.backend, &session.root, internal_request_id()).await?;
-        let generation = self.backend.scheduler.current_generation(&session.key);
-        if seen.token != expected {
-            let receipt = Receipt::registered(
-                &operation_id,
-                &session.key,
-                op.name(),
-                &request_digest,
-                seen.head,
-                generation,
-            );
-            store.fail(receipt, "state_mismatch")?;
-            return Err(AppError::new(
-                "state_mismatch",
-                "仓库状态在读取之后已经变化，未写入。请刷新后重试。",
-            ));
-        }
-        // 跨进程写锁：同一 common Git dir 在任一时刻只有一个 agent 在写。
-        let lock = {
-            let git_dir = session.git_dir.clone();
-            tokio::task::spawn_blocking(move || RepoWriteLock::acquire(&git_dir, WRITE_LOCK_WAIT))
-                .await
-                .map_err(|_| {
-                    AppError::new("write_lock_unavailable", "写入锁已中断，未写入仓库。")
-                })??
-        };
-        // 排队等锁期间仓库可能已被另一个进程改过：拿锁后重新核对令牌。
+        // 拿到锁之后再核对令牌：排队期间仓库可能已被另一个进程改过。
         let guarded: RepoState =
             ops::state_token(&self.backend, &session.root, internal_request_id()).await?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
         if guarded.token != expected {
             let receipt = Receipt::registered(
                 &operation_id,
@@ -488,7 +931,7 @@ impl Context {
             store.fail(receipt, "state_mismatch")?;
             return Err(AppError::new(
                 "state_mismatch",
-                "仓库状态在等待写入锁时发生变化，未写入。请刷新后重试。",
+                "仓库状态在读取之后已经变化，未写入。请刷新后重试。",
             ));
         }
 
@@ -502,85 +945,75 @@ impl Context {
         );
         store.write(&receipt)?;
 
-        let written = match self.execute(op, fields, &session, generation).await {
+        let (key, value) = match self.execute(op, fields, &session, generation).await {
             Ok(written) => written,
             Err(error) => {
                 store.fail(receipt, &error.code)?;
                 return Err(error);
             }
         };
+        // 写后一次返回新状态：令牌、generation 与具体结果一起回，客户端不需要再补一次 status。
+        //
+        // 读不到新状态不等于写入失败：worktreeRemove 删掉的正是被读取的那个工作区。
+        // 这种情况仍然如实登记为 completed，只是不附令牌，由客户端重新打开仓库。
+        let state = ops::state_token(&self.backend, &session.root, internal_request_id())
+            .await
+            .ok();
+        if let Some(state) = state.as_ref() {
+            session.set_state(state.clone());
+        }
         let generation = self.backend.scheduler.current_generation(&session.key);
-        let (head, branch, mut body) = match written {
-            Written::Files(snapshot) => {
-                let state: RepoState =
-                    ops::state_token(&self.backend, &session.root, internal_request_id())
-                        .await?;
-                session.set_state(state.clone());
-                (
-                    state.head,
-                    snapshot.branch.name.clone(),
-                    json!({ "snapshot": snapshot, "stateToken": state.token.clone() }),
-                )
-            }
-            Written::Commit(result) => {
-                let state: RepoState =
-                    ops::state_token(&self.backend, &session.root, internal_request_id())
-                        .await?;
-                session.set_state(state.clone());
-                (
-                    Some(result.oid.clone()),
-                    Some(result.branch.clone()),
-                    json!({ "commit": result, "stateToken": state.token.clone() }),
-                )
-            }
-        };
-        let receipt = store.complete(receipt, head, branch, generation)?;
+        let branch = written_branch(&value);
+        let receipt = store.complete(
+            receipt,
+            state.as_ref().and_then(|state| state.head.clone()),
+            branch,
+            generation,
+        )?;
+        let token = state.map(|state| state.token);
         drop(lock);
+        let mut body = json!({
+            "repo": session.key,
+            "generation": generation,
+            "receipt": receipt,
+        });
         if let Value::Object(map) = &mut body {
-            map.insert(
-                "receipt".into(),
-                serde_json::to_value(&receipt).unwrap_or(Value::Null),
-            );
-            map.insert("repo".into(), Value::String(session.key.clone()));
-            map.insert("generation".into(), Value::from(generation));
+            map.insert(key, value);
+            if let Some(token) = token {
+                map.insert("stateToken".into(), Value::String(token));
+            }
         }
         Ok(body)
     }
+
+    /// 执行共享写入。返回 (结果字段名, 结果 DTO)：字段名让响应保持与本地同名，
+    /// 客户端不需要为远端另写一套解析。
     async fn execute(
         &self,
         op: WriteOp,
         fields: &Map<String, Value>,
         session: &Session,
         generation: u64,
-    ) -> Result<Written, AppError> {
+    ) -> Result<(String, Value), AppError> {
+        let backend = &self.backend;
+        let path = session.key.as_str();
+        let request_id = internal_request_id();
         match op {
             WriteOp::Stage => {
                 let paths = paths_field(fields)?;
-                let snapshot = changes::stage_files(
-                    &self.backend,
-                    &session.key,
-                    &paths,
-                    generation,
-                    internal_request_id(),
-                )
-                .await?;
-                Ok(Written::Files(snapshot))
+                let snapshot = changes::stage_files(backend, path, &paths, generation, request_id)
+                    .await?;
+                Ok(("snapshot".to_string(), to_value(snapshot)?))
             }
             WriteOp::Unstage => {
                 let paths = paths_field(fields)?;
-                let snapshot = changes::unstage_files(
-                    &self.backend,
-                    &session.key,
-                    &paths,
-                    generation,
-                    internal_request_id(),
-                )
-                .await?;
-                Ok(Written::Files(snapshot))
+                let snapshot = changes::unstage_files(backend, path, &paths, generation, request_id)
+                    .await?;
+                Ok(("snapshot".to_string(), to_value(snapshot)?))
             }
             WriteOp::Patch => {
-                let path = string_field(fields, "path")?;
-                let original = optional_string_field(fields, "original")?;
+                let path_relative = string_field(fields, "path")?;
+                let original = optional_text_field(fields, "original")?;
                 let staged = bool_field(fields, "staged");
                 let snapshot_token = string_field(fields, "snapshot")?;
                 let hunks = optional_u32_list(fields, "hunks")?;
@@ -588,29 +1021,29 @@ impl Context {
                 let snapshot = match (hunks, lines) {
                     (Some(hunks), None) if !hunks.is_empty() => {
                         changes::stage_hunks(
-                            &self.backend,
-                            &session.key,
-                            &path,
+                            backend,
+                            path,
+                            &path_relative,
                             original.as_deref(),
                             staged,
                             &hunks,
                             &snapshot_token,
                             generation,
-                            internal_request_id(),
+                            request_id,
                         )
                         .await?
                     }
                     (None, Some(lines)) if !lines.is_empty() => {
                         changes::stage_lines(
-                            &self.backend,
-                            &session.key,
-                            &path,
+                            backend,
+                            path,
+                            &path_relative,
                             original.as_deref(),
                             staged,
                             &lines,
                             &snapshot_token,
                             generation,
-                            internal_request_id(),
+                            request_id,
                         )
                         .await?
                     }
@@ -618,10 +1051,10 @@ impl Context {
                         return Err(AppError::new(
                             "invalid_patch",
                             "按块或按行写入必须且只能给出一组选择。",
-                        ))
+                        ));
                     }
                 };
-                Ok(Written::Files(snapshot))
+                Ok(("snapshot".to_string(), to_value(snapshot)?))
             }
             WriteOp::Commit => {
                 let message = string_field(fields, "message")?;
@@ -631,24 +1064,374 @@ impl Context {
                         "提交说明过长，未创建提交。",
                     ));
                 }
-                let result = changes::commit_index(
-                    &self.backend,
-                    &session.key,
-                    &message,
+                let result =
+                    changes::commit_index(backend, path, &message, generation, request_id).await?;
+                Ok(("commit".to_string(), to_value(result)?))
+            }
+            WriteOp::BranchCreate => {
+                let name = string_field(fields, "name")?;
+                let start = optional_text_field(fields, "start")?.filter(|value| !value.is_empty());
+                let checkout = bool_field(fields, "checkout");
+                let state = match start {
+                    Some(start) => {
+                        sync::create_branch_from(
+                            backend,
+                            path,
+                            &name,
+                            &start,
+                            checkout,
+                            generation,
+                            request_id,
+                        )
+                        .await?
+                    }
+                    None => {
+                        sync::create_branch(backend, path, &name, generation, request_id).await?
+                    }
+                };
+                Ok(("branches".to_string(), to_value(state)?))
+            }
+            WriteOp::BranchSwitch => {
+                let name = string_field(fields, "name")?;
+                let state =
+                    sync::switch_branch(backend, path, &name, generation, request_id).await?;
+                Ok(("branches".to_string(), to_value(state)?))
+            }
+            WriteOp::BranchRename => {
+                let old = string_field(fields, "old")?;
+                let new = string_field(fields, "new")?;
+                let state =
+                    sync::rename_branch(backend, path, &old, &new, generation, request_id).await?;
+                Ok(("branches".to_string(), to_value(state)?))
+            }
+            WriteOp::BranchDelete => {
+                let name = string_field(fields, "name")?;
+                let confirm_unmerged = bool_field(fields, "confirmUnmerged");
+                let state = sync::delete_branch(
+                    backend,
+                    path,
+                    &name,
+                    confirm_unmerged,
                     generation,
-                    internal_request_id(),
+                    request_id,
                 )
                 .await?;
-                Ok(Written::Commit(Box::new(result)))
+                Ok(("branches".to_string(), to_value(state)?))
+            }
+            WriteOp::BranchTrack => {
+                let remote_branch = string_field(fields, "remoteBranch")?;
+                let local = string_field(fields, "name")?;
+                let state = sync::track_remote_as(
+                    backend,
+                    path,
+                    &remote_branch,
+                    &local,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("branches".to_string(), to_value(state)?))
+            }
+            WriteOp::BranchUpdate => {
+                let name = string_field(fields, "name")?;
+                let state =
+                    sync::update_branch(backend, path, &name, generation, request_id).await?;
+                Ok(("branches".to_string(), to_value(state)?))
+            }
+            WriteOp::BranchPublish => {
+                let name = string_field(fields, "name")?;
+                let state =
+                    sync::push_local_branch(backend, path, &name, generation, request_id).await?;
+                Ok(("branches".to_string(), to_value(state)?))
+            }
+            WriteOp::TagCreate => {
+                let name = string_field(fields, "name")?;
+                let target = string_field(fields, "target")?;
+                let message = optional_text_field(fields, "message")?.unwrap_or_default();
+                let state = tags::create_tag(
+                    backend,
+                    path,
+                    &name,
+                    &target,
+                    &message,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("tags".to_string(), to_value(state)?))
+            }
+            WriteOp::TagDelete => {
+                let name = string_field(fields, "name")?;
+                let confirm = bool_field(fields, "confirm");
+                let state = tags::delete_tag(
+                    backend,
+                    path,
+                    &name,
+                    confirm,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("tags".to_string(), to_value(state)?))
+            }
+            WriteOp::TagPush => {
+                let remote = string_field(fields, "remote")?;
+                let name = string_field(fields, "name")?;
+                let state = tags::push_tag(
+                    backend,
+                    path,
+                    &remote,
+                    &name,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("tags".to_string(), to_value(state)?))
+            }
+            WriteOp::RemoteAdd => {
+                let name = string_field(fields, "name")?;
+                let url = string_field(fields, "url")?;
+                let state = sync::add_remote(
+                    backend,
+                    path,
+                    &name,
+                    &url,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("remote".to_string(), to_value(state)?))
+            }
+            WriteOp::RemoteSetUrl => {
+                let name = string_field(fields, "name")?;
+                let url = string_field(fields, "url")?;
+                let state = sync::set_remote_url(
+                    backend,
+                    path,
+                    &name,
+                    &url,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("remote".to_string(), to_value(state)?))
+            }
+            WriteOp::Fetch => {
+                let snapshot =
+                    sync::fetch_remote(backend, path, generation, request_id).await?;
+                Ok(("snapshot".to_string(), to_value(snapshot)?))
+            }
+            WriteOp::Pull => {
+                let snapshot =
+                    sync::pull_fast_forward(backend, path, generation, request_id).await?;
+                Ok(("snapshot".to_string(), to_value(snapshot)?))
+            }
+            WriteOp::Push => {
+                let snapshot = sync::push_branch(backend, path, generation, request_id).await?;
+                Ok(("snapshot".to_string(), to_value(snapshot)?))
+            }
+            WriteOp::PushToRemote => {
+                let remote = string_field(fields, "remote")?;
+                let snapshot =
+                    sync::push_to_remote(backend, path, &remote, generation, request_id).await?;
+                Ok(("snapshot".to_string(), to_value(snapshot)?))
+            }
+            WriteOp::PublishBranch => {
+                let remote = string_field(fields, "remote")?;
+                let snapshot =
+                    sync::publish_branch(backend, path, &remote, generation, request_id).await?;
+                Ok(("snapshot".to_string(), to_value(snapshot)?))
+            }
+            WriteOp::StashSave => {
+                let include_untracked = field(fields, "includeUntracked")
+                    .map(|value| value.as_bool().unwrap_or(true))
+                    .unwrap_or(true);
+                let message = optional_text_field(fields, "message")?.unwrap_or_default();
+                let result = history::save_stash(
+                    backend,
+                    path,
+                    include_untracked,
+                    &message,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("stash".to_string(), to_value(result)?))
+            }
+            WriteOp::StashApply => {
+                let oid = string_field(fields, "oid")?;
+                let result =
+                    history::apply_stash(backend, path, &oid, generation, request_id).await?;
+                Ok(("stash".to_string(), to_value(result)?))
+            }
+            WriteOp::StashDelete => {
+                let oid = string_field(fields, "oid")?;
+                let confirm = bool_field(fields, "confirm");
+                let state = history::delete_stash(
+                    backend,
+                    path,
+                    &oid,
+                    confirm,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("stash".to_string(), to_value(state)?))
+            }
+            WriteOp::MergeStart => {
+                let source = string_field(fields, "source")?;
+                let target = optional_text_field(fields, "target")?;
+                let mode = optional_text_field(fields, "mode")?;
+                let session_state = resolve::start_merge(
+                    backend,
+                    path,
+                    &source,
+                    target.as_deref(),
+                    mode.as_deref(),
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("merge".to_string(), to_value(session_state)?))
+            }
+            WriteOp::MergeComplete => {
+                let message = optional_text_field(fields, "message")?.unwrap_or_default();
+                let result = resolve::complete_merge(
+                    backend,
+                    path,
+                    &message,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("merge".to_string(), to_value(result)?))
+            }
+            WriteOp::MergeAbort => {
+                let confirm = bool_field(fields, "confirm");
+                let impact =
+                    resolve::abort_merge(backend, path, confirm, generation, request_id).await?;
+                Ok(("merge".to_string(), to_value(impact)?))
+            }
+            WriteOp::ResolveConflict => {
+                let relative = string_field(fields, "path")?;
+                let choice = string_field(fields, "choice")?;
+                let content = optional_text_field(fields, "content")?;
+                let session_state = resolve::resolve_conflict(
+                    backend,
+                    path,
+                    &relative,
+                    &choice,
+                    content,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("merge".to_string(), to_value(session_state)?))
+            }
+            WriteOp::CherryPick => {
+                let oids = string_list_field(fields, "oids")?;
+                let result = resolve::cherry_pick_commits(
+                    backend,
+                    path,
+                    &oids,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("cherryPick".to_string(), to_value(result)?))
+            }
+            WriteOp::Revert => {
+                let oids = string_list_field(fields, "oids")?;
+                let expected_head = string_field(fields, "expectedHead")?;
+                let confirm = bool_field(fields, "confirm");
+                let result = resolve::revert_commits(
+                    backend,
+                    path,
+                    &oids,
+                    &expected_head,
+                    confirm,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("revert".to_string(), to_value(result)?))
+            }
+            WriteOp::UndoCommit => {
+                let expected_head = string_field(fields, "expectedHead")?;
+                let confirm = bool_field(fields, "confirm");
+                let result = resolve::undo_commit(
+                    backend,
+                    path,
+                    &expected_head,
+                    confirm,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("undo".to_string(), to_value(result)?))
+            }
+            WriteOp::CheckoutCommit => {
+                let oid = string_field(fields, "oid")?;
+                let snapshot =
+                    resolve::checkout_commit(backend, path, &oid, generation, request_id).await?;
+                Ok(("snapshot".to_string(), to_value(snapshot)?))
+            }
+            WriteOp::AmendCommit => {
+                let expected_head = string_field(fields, "expectedHead")?;
+                let message = optional_text_field(fields, "message")?;
+                let include_staged = field(fields, "includeStaged")
+                    .map(|value| value.as_bool().unwrap_or(true))
+                    .unwrap_or(true);
+                let staged_token = optional_text_field(fields, "stagedToken")?;
+                let confirm = bool_field(fields, "confirm");
+                let outcome = resolve::amend_commit(
+                    backend,
+                    path,
+                    &expected_head,
+                    message.as_deref(),
+                    include_staged,
+                    staged_token.as_deref(),
+                    confirm,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("amend".to_string(), to_value(outcome)?))
+            }
+            WriteOp::Discard => {
+                let paths = paths_field(fields)?;
+                let confirm = bool_field(fields, "confirm");
+                let result = resolve::discard_changes(
+                    backend,
+                    path,
+                    &paths,
+                    confirm,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("discard".to_string(), to_value(result)?))
+            }
+            WriteOp::WorktreeRemove => {
+                let force = bool_field(fields, "force");
+                let recent =
+                    worktree_ops::remove_worktree(backend, path, force, request_id).await?;
+                Ok(("recent".to_string(), to_value(recent)?))
             }
         }
     }
+
     fn receipt(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
         let session = self.session(fields)?;
         let operation_id = string_field(fields, "operationId")?;
         let store = ReceiptStore::new(&session.git_dir);
-        match store.read(&operation_id) {
-            Some(receipt) if receipt.repo == session.key => Ok(json!({ "receipt": receipt })),
+        // 回执文件存在但读不出来时不能回答「没有记录」：那会让客户端以为可以重发。
+        match store.read(&operation_id)? {
+            Some(receipt) if receipt.repo == session.key => Ok(json!({
+                "receipt": receipt,
+                "operationId": operation_id,
+                "repo": session.key,
+            })),
             Some(_) => Err(AppError::new(
                 "receipt_conflict",
                 "该操作 ID 属于另一个仓库，未匹配。",
@@ -871,6 +1654,88 @@ fn optional_lines(
     let lines: Vec<DiffLineSelection> = serde_json::from_value(value.clone())
         .map_err(|_| AppError::new("invalid_request", "字段 lines 不是有效的行选择。"))?;
     Ok(Some(lines))
+}
+/// 可缺省且允许空串的文本字段：搜索词、提交说明、rebase 基底等都可能被清空。
+fn optional_text_field(
+    fields: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<String>, AppError> {
+    match field(fields, key) {
+        None => Ok(None),
+        Some(value) => {
+            let text = value.as_str().ok_or_else(|| {
+                AppError::new(
+                    "invalid_request",
+                    format!("字段 {key} 必须是字符串。"),
+                )
+            })?;
+            if text.len() > MAX_FIELD || text.contains('\0') {
+                return Err(AppError::new(
+                    "invalid_request",
+                    format!("字段 {key} 过长或包含非法字符。"),
+                ));
+            }
+            Ok(Some(text.to_string()))
+        }
+    }
+}
+
+/// 提交、标签与回退共用的过滤条件；缺省值与桌面命令层保持一致。
+fn history_request(fields: &Map<String, Value>) -> Result<HistoryRequest, AppError> {
+    Ok(HistoryRequest {
+        query: optional_text_field(fields, "query")?.unwrap_or_default(),
+        offset: optional_u64_field(fields, "offset")?.unwrap_or(0) as u32,
+        scope: optional_text_field(fields, "scope")?.unwrap_or_else(|| "current".to_string()),
+        author: optional_text_field(fields, "author")?.unwrap_or_default(),
+        since: optional_i64_field(fields, "since")?,
+        until: optional_i64_field(fields, "until")?,
+        path: optional_text_field(fields, "pathFilter")?.unwrap_or_default(),
+    })
+}
+
+fn optional_i64_field(fields: &Map<String, Value>, key: &str) -> Result<Option<i64>, AppError> {
+    match field(fields, key) {
+        None => Ok(None),
+        Some(value) => value.as_i64().map(Some).ok_or_else(|| {
+            AppError::new(
+                "invalid_request",
+                format!("字段 {key} 必须是整数。"),
+            )
+        }),
+    }
+}
+
+fn string_list_field(fields: &Map<String, Value>, key: &str) -> Result<Vec<String>, AppError> {
+    let value = field(fields, key)
+        .ok_or_else(|| AppError::new("invalid_request", format!("缺少字段 {key}。")))?;
+    let Value::Array(items) = value else {
+        return Err(AppError::new(
+            "invalid_request",
+            format!("字段 {key} 必须是数组。"),
+        ));
+    };
+    let mut values = Vec::with_capacity(items.len());
+    for item in items {
+        let text = item.as_str().ok_or_else(|| {
+            AppError::new(
+                "invalid_request",
+                format!("字段 {key} 只能包含字符串。"),
+            )
+        })?;
+        if text.is_empty() || text.len() > MAX_FIELD || text.contains('\0') {
+            return Err(AppError::new(
+                "invalid_request",
+                format!("字段 {key} 中存在无效条目。"),
+            ));
+        }
+        values.push(text.to_string());
+    }
+    Ok(values)
+}
+
+fn to_value<T: Serialize>(value: T) -> Result<Value, AppError> {
+    serde_json::to_value(value)
+        .map_err(|_| AppError::new("result_unserializable", "写入结果无法序列化。"))
 }
 fn field<'a>(fields: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
     fields.get(key).filter(|value| !value.is_null())

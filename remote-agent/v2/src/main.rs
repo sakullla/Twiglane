@@ -36,8 +36,11 @@ mod state;
 #[allow(dead_code)]
 #[path = "../../../src-tauri/src/git/mod.rs"]
 mod git;
-// 共享源文件的 #[cfg(test)] 单测用桌面侧的临时仓库脚手架；远端进程同样编译它，
-// 这样 cargo test / clippy --all-targets 能覆盖同一批 Git 单测，而不是把它们静默跳过。
+// 共享源文件里的 #[cfg(test)] 单测依赖桌面侧的临时仓库脚手架。Cargo.toml 对 [[bin]] 设了
+// test = false，所以 cargo test 不会在本 crate 里运行那些单测：它们仍由桌面
+// cargo test --manifest-path src-tauri/Cargo.toml 覆盖，v2 自己的行为只由 tests/protocol.rs
+// 以真实进程黑盒验证。这里编译 test_support 只是让 --all-targets 的检查不缺模块，
+// 不代表本 crate 会跑那批单测。
 #[allow(dead_code)]
 #[cfg(test)]
 #[path = "../../../src-tauri/src/test_support.rs"]

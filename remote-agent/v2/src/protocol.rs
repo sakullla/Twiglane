@@ -14,8 +14,65 @@ pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_IN_FLIGHT: usize = 16;
 const MAX_TOKEN: usize = 80;
 
-pub const CAPABILITIES: [&str; 9] = [
-    "open", "status", "diff", "stage", "unstage", "patch", "commit", "receipt", "cancel",
+/// 能力面：客户端据此判断能否操作某类仓库行为，缺项即不支持，不回退本机 Git。
+pub const CAPABILITIES: &[&str] = &[
+    // 基础（T1）
+    "open",
+    "status",
+    "diff",
+    "stage",
+    "unstage",
+    "patch",
+    "commit",
+    "receipt",
+    "cancel",
+    // 历史、比较与文件历史（T2）
+    "history",
+    "fileHistory",
+    "commitDetail",
+    "commitDiff",
+    "compare",
+    // 分支、标签、同步（T2）
+    "branchList",
+    "branchCreate",
+    "branchSwitch",
+    "branchRename",
+    "branchDelete",
+    "branchTrack",
+    "branchUpdate",
+    "branchPublish",
+    "tagState",
+    "tagCreate",
+    "tagDelete",
+    "tagPush",
+    "remoteState",
+    "remoteAdd",
+    "remoteSetUrl",
+    "fetch",
+    "pull",
+    "push",
+    "pushToRemote",
+    "publishBranch",
+    // stash、合并/变基/拣选/回退、修订撤销、worktree（T2）
+    "stashState",
+    "stashSave",
+    "stashApply",
+    "stashDelete",
+    "mergePreview",
+    "mergeSession",
+    "mergeStart",
+    "mergeComplete",
+    "mergeAbort",
+    "conflictView",
+    "resolveConflict",
+    "cherryPick",
+    "revert",
+    "undoCommit",
+    "checkoutCommit",
+    "amendCommit",
+    "discard",
+    "worktrees",
+    "worktreeRemove",
 ];
 
 pub struct Request {

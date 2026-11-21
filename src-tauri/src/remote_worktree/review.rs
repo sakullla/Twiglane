@@ -470,6 +470,41 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
+    #[test]
+    fn shared_remote_review_request_and_return_fixtures() {
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/reviews/remote-protocol-v1.json"
+        ))
+        .unwrap();
+        for case in fixtures["requests"].as_array().unwrap() {
+            let result = Source::parse(case["url"].as_str().unwrap());
+            assert_eq!(
+                result.is_ok(),
+                case["valid"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+        let source = Source::parse(fixtures["requests"][0]["url"].as_str().unwrap()).unwrap();
+        assert_eq!(source.worktree_path, "/srv/任务 + Git");
+        let commit = "e".repeat(40);
+        let snapshot = json!({
+            "root":source.worktree_path,"repo":source.worktree_identity,"head":commit,
+            "files":[{"path":"changed","xy":" M"}]
+        });
+        let actual = returned(&source, 1, Some(&commit), &snapshot).unwrap();
+        let expected = Url::parse(fixtures["events"][3]["url"].as_str().unwrap()).unwrap();
+        assert_eq!(actual.host_str(), expected.host_str());
+        assert_eq!(
+            actual
+                .query_pairs()
+                .collect::<std::collections::BTreeMap<_, _>>(),
+            expected
+                .query_pairs()
+                .collect::<std::collections::BTreeMap<_, _>>()
+        );
+    }
+
     fn source_link() -> String {
         let mut u = Url::parse("twiglane://remote-review").unwrap();
         u.query_pairs_mut()

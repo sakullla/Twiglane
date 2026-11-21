@@ -22,16 +22,6 @@
   },
   "shots": [
     {
-      "file": "after/dark-1280x840-start.png",
-      "theme": "dark",
-      "size": "1280x840",
-      "view": "start",
-      "group": "baseline",
-      "state": "起始页",
-      "bytes": 58418,
-      "sha256": "6a07ffd8a4dd894842c390a70673dc00d9813a16086474117b5a699e51781f72"
-    },
-    {
       "file": "after/dark-1280x840-changes.png",
       "theme": "dark",
       "size": "1280x840",
@@ -40,16 +30,6 @@
       "state": "改动视图（同数据对照）",
       "bytes": 142508,
       "sha256": "d3b9c09454b1d2264b05b855d309ad91c64face85975e4ae4fe7706ad6c60f35"
-    },
-    {
-      "file": "after/dark-1280x840-history.png",
-      "theme": "dark",
-      "size": "1280x840",
-      "view": "history",
-      "group": "baseline",
-      "state": "历史视图（同数据对照）",
-      "bytes": 200096,
-      "sha256": "9f8622af3fa8bdfff1c67c613b1613565a954c28e569bfa0cfa4afe505bc6432"
     },
     {
       "file": "after/dark-1280x840-task.png",
@@ -72,56 +52,6 @@
       "sha256": "3f61387d85988a7a918d722e7c1d620343cb34c80f09c1dcff0ce4db8427906e"
     },
     {
-      "file": "after/dark-1280x840-composer.png",
-      "theme": "dark",
-      "size": "1280x840",
-      "view": "composer",
-      "group": "baseline",
-      "state": "提交区：真实暂存范围与提交草稿",
-      "bytes": 143412,
-      "sha256": "cb7f5e4b70ef2a92db6e853114bae966c9fd74e54709c75c1fd146cf8f2340fc"
-    },
-    {
-      "file": "after/dark-1280x840-merge.png",
-      "theme": "dark",
-      "size": "1280x840",
-      "view": "merge",
-      "group": "baseline",
-      "state": "合并弹窗（同数据对照）",
-      "bytes": 41765,
-      "sha256": "087247305902df4dc48deff02fbc0bb2627c26607f8df24bb6d1f8d61f65ca94"
-    },
-    {
-      "file": "after/dark-1280x840-settings.png",
-      "theme": "dark",
-      "size": "1280x840",
-      "view": "settings",
-      "group": "baseline",
-      "state": "设置弹窗（同数据对照）",
-      "bytes": 160265,
-      "sha256": "4d40f016c8f3adfeb9757aa865e7f2492eca3ad4a650f4f8afdb56174312e839"
-    },
-    {
-      "file": "after/dark-1280x840-files-markdown.png",
-      "theme": "dark",
-      "size": "1280x840",
-      "view": "files-markdown",
-      "group": "markdown",
-      "state": "Markdown 默认排版预览",
-      "bytes": 72121,
-      "sha256": "8b9e2a109c17de401dfc3ffef155d358efca3f65d603e9de33d50617b117a805"
-    },
-    {
-      "file": "after/dark-1280x840-files-markdown-toc.png",
-      "theme": "dark",
-      "size": "1280x840",
-      "view": "files-markdown-toc",
-      "group": "markdown",
-      "state": "Markdown 标题目录展开",
-      "bytes": 75826,
-      "sha256": "da6cb9caaa170877d4f56ebc8f93b43d70d4a3745aa86c7f9575e6eeef4b9c20"
-    },
-    {
       "file": "after/dark-1280x840-sync-unchecked.png",
       "theme": "dark",
       "size": "1280x840",
@@ -130,36 +60,6 @@
       "state": "远程未核对：折叠的同步按钮显示「未核」，计数只是记录的对比",
       "bytes": 142607,
       "sha256": "9041e7016f80984b1e383694dc7c00a05e98153517c55e3027855c132e868af7"
-    },
-    {
-      "file": "after/dark-1280x840-sync-stale.png",
-      "theme": "dark",
-      "size": "1280x840",
-      "view": "sync-stale",
-      "group": "failure",
-      "state": "远程已过期：折叠的同步按钮显示「过期」并带上次核对时间",
-      "bytes": 139093,
-      "sha256": "071bef31c32628ac404f276e80429e45fd175d7462a54f67b00ede62ac8b172d"
-    },
-    {
-      "file": "after/dark-1280x840-commit-error.png",
-      "theme": "dark",
-      "size": "1280x840",
-      "view": "commit-error",
-      "group": "failure",
-      "state": "本地提交失败：长原因展开换行读全，草稿与暂存保留",
-      "bytes": 171426,
-      "sha256": "6e89bf964ddf86b94b356234dccb41fd0fb2d12f9112767f17b6c3d60060585a"
-    },
-    {
-      "file": "after/dark-1280x840-commit-push-error.png",
-      "theme": "dark",
-      "size": "1280x840",
-      "view": "commit-push-error",
-      "group": "failure",
-      "state": "本地提交成功、推送失败：两个阶段分开说明，长原因展开且只重试推送",
-      "bytes": 181204,
-      "sha256": "15c3e89cd4a201901c6d49212df9519a833a3b8111ed7ff4b9e8fd68ff2fc1dd"
     },
     {
       "file": "after/dark-1280x840-doc-error.png",
@@ -172,26 +72,6 @@
       "sha256": "8c361b6ef017224ba7d11ddc35214fb79533cab4da4c503477d5c24385a52893"
     },
     {
-      "file": "after/dark-1280x840-doc-large.png",
-      "theme": "dark",
-      "size": "1280x840",
-      "view": "doc-large",
-      "group": "failure",
-      "state": "文档超过排版预览上限：给出真实状态与查看源码的退路",
-      "bytes": 48340,
-      "sha256": "0681bfb9e644ac9f8bbf2db6afa1df6893df2ff785307a14226900da84bedb6e"
-    },
-    {
-      "file": "after/dark-1280x840-search-error.png",
-      "theme": "dark",
-      "size": "1280x840",
-      "view": "search-error",
-      "group": "failure",
-      "state": "搜索局部失败：显示失败原因而不是「没有匹配」，原因旁就地给出「重试搜索 / 重新读取目录」",
-      "bytes": 44299,
-      "sha256": "a101dec4b92075b55829e68d912100e5d9793df0af54a3731ed464028dac169d"
-    },
-    {
       "file": "after/dark-1280x840-filter-error.png",
       "theme": "dark",
       "size": "1280x840",
@@ -200,26 +80,6 @@
       "state": "树过滤补齐失败：说明补齐失败而不是「没有匹配」，并给「重试补齐」",
       "bytes": 44350,
       "sha256": "7923ad7dfc0cdfca090b6cdb3252e3289aa000318b7e19879c5d7dbea3b4b877"
-    },
-    {
-      "file": "after/dark-1280x840-find-error.png",
-      "theme": "dark",
-      "size": "1280x840",
-      "view": "find-error",
-      "group": "failure",
-      "state": "文件内查找失败：原因旁就地给出「重试查找 / 重新读取文件」",
-      "bytes": 73877,
-      "sha256": "9addd8d94f5ef594563aa2749f368d2453ae58bed378b0d6407475ecdfb6f362"
-    },
-    {
-      "file": "after/dark-1280x840-task-error.png",
-      "theme": "dark",
-      "size": "1280x840",
-      "view": "task-error",
-      "group": "failure",
-      "state": "任务起点不可用：就地说明并给出重新读取与重选起点",
-      "bytes": 38290,
-      "sha256": "7144b5457acbe4660d865cdf22cd55a759f508b45d4c93db959b52ee97dcd6ba"
     },
     {
       "file": "after/dark-1280x840-history-cancel-recovered.png",
@@ -242,76 +102,6 @@
       "sha256": "93c2d467cc2c8d92abf8c2a7c62c4b7084c7f545b2189c10bca467667663a064"
     },
     {
-      "file": "after/dark-900x600-changes.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "changes",
-      "group": "baseline",
-      "state": "改动视图（同数据对照）",
-      "bytes": 118223,
-      "sha256": "fa76893ec997e8e1feb869a33626a1d6d8fabf5462ff3a3844b19ac6603e4b06"
-    },
-    {
-      "file": "after/dark-900x600-history.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "history",
-      "group": "baseline",
-      "state": "历史视图（同数据对照）",
-      "bytes": 122821,
-      "sha256": "3ff4f41791b12d8233b80fa204416f1b31501d0570d019ae6a79604813dbdbca"
-    },
-    {
-      "file": "after/dark-900x600-task.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "task",
-      "group": "baseline",
-      "state": "任务视图：起点、范围内提交与净文件队列",
-      "bytes": 127335,
-      "sha256": "3395770b02bf7318cf09210624535028c5752ef2ff35c703e93cabaf6147e32b"
-    },
-    {
-      "file": "after/dark-900x600-worktree.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "worktree",
-      "group": "baseline",
-      "state": "工作区总览：按主仓库分组与逐项状态",
-      "bytes": 149354,
-      "sha256": "6a9e7b84b865a0a5c147031bedab5c0fa94522bed92f2123dfa55f82ca70e9a1"
-    },
-    {
-      "file": "after/dark-900x600-composer.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "composer",
-      "group": "baseline",
-      "state": "提交区：真实暂存范围与提交草稿",
-      "bytes": 117514,
-      "sha256": "5d84bd51507d0cba0eb87f48e2725e540c3d3553586b350179338cb0b3c411d6"
-    },
-    {
-      "file": "after/dark-900x600-merge.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "merge",
-      "group": "baseline",
-      "state": "合并弹窗（同数据对照）",
-      "bytes": 36248,
-      "sha256": "44405ea91662b57d52629c1ab78ddc40c525df8fc96dc4a43cea08eeba34198e"
-    },
-    {
-      "file": "after/dark-900x600-settings.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "settings",
-      "group": "baseline",
-      "state": "设置弹窗（同数据对照）",
-      "bytes": 112537,
-      "sha256": "cf0194cdd9175556436b40ca8658452b4f7951c535eb993d354c0c2517458304"
-    },
-    {
       "file": "after/dark-900x600-files-markdown.png",
       "theme": "dark",
       "size": "900x600",
@@ -320,36 +110,6 @@
       "state": "Markdown 默认排版预览",
       "bytes": 58588,
       "sha256": "2cacfbbf865510e1f77e71f877e3bcb5ae5e7e67a66be8dd7a90705a079c0d24"
-    },
-    {
-      "file": "after/dark-900x600-files-markdown-toc.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "files-markdown-toc",
-      "group": "markdown",
-      "state": "Markdown 标题目录展开",
-      "bytes": 57247,
-      "sha256": "ab40de0f8d06440504bb117ab195047360dfb2e774c2fada991bbf314db2ae8e"
-    },
-    {
-      "file": "after/dark-900x600-sync-unchecked.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "sync-unchecked",
-      "group": "failure",
-      "state": "远程未核对：折叠的同步按钮显示「未核」，计数只是记录的对比",
-      "bytes": 118508,
-      "sha256": "5ac018e9655994f33b1b15e4e9a3e4293c597e26f68195ebce8f4ed97c4a02c5"
-    },
-    {
-      "file": "after/dark-900x600-sync-stale.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "sync-stale",
-      "group": "failure",
-      "state": "远程已过期：折叠的同步按钮显示「过期」并带上次核对时间",
-      "bytes": 119071,
-      "sha256": "60afae476ab755ae850b395fca6f13f35e30f60e978876fea943205c3f7ced51"
     },
     {
       "file": "after/dark-900x600-commit-error.png",
@@ -372,56 +132,6 @@
       "sha256": "c244d90c489c9fc654575938ae250f66d86e61656999a409f8aafd3d5253ca68"
     },
     {
-      "file": "after/dark-900x600-doc-error.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "doc-error",
-      "group": "failure",
-      "state": "文档读取失败：就地说明原因，仍给出重新读取与源码退路",
-      "bytes": 44698,
-      "sha256": "fdec08330603888de8e692c4a84e26ecb26dc9584724dd412f5d7d44061fdbcf"
-    },
-    {
-      "file": "after/dark-900x600-doc-large.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "doc-large",
-      "group": "failure",
-      "state": "文档超过排版预览上限：给出真实状态与查看源码的退路",
-      "bytes": 45105,
-      "sha256": "3cdbd975d623f4e8b15e91c6d6b210e703f6a86c1a01d3ac6d343d4240653669"
-    },
-    {
-      "file": "after/dark-900x600-search-error.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "search-error",
-      "group": "failure",
-      "state": "搜索局部失败：显示失败原因而不是「没有匹配」，原因旁就地给出「重试搜索 / 重新读取目录」",
-      "bytes": 41312,
-      "sha256": "530000c400d5735cb96e50b84b7b958849f136ba5a36ff13c1688f5607657dfb"
-    },
-    {
-      "file": "after/dark-900x600-filter-error.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "filter-error",
-      "group": "failure",
-      "state": "树过滤补齐失败：说明补齐失败而不是「没有匹配」，并给「重试补齐」",
-      "bytes": 41267,
-      "sha256": "fccf3be0a1b7903b7258b9785626583e7383917336ebdaa44b39ef3583bf360f"
-    },
-    {
-      "file": "after/dark-900x600-find-error.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "find-error",
-      "group": "failure",
-      "state": "文件内查找失败：原因旁就地给出「重试查找 / 重新读取文件」",
-      "bytes": 55135,
-      "sha256": "97c8e386c761d009f344ff186e10a00e6d0da116f8419c3dd23a369a7547be93"
-    },
-    {
       "file": "after/dark-900x600-task-error.png",
       "theme": "dark",
       "size": "900x600",
@@ -430,36 +140,6 @@
       "state": "任务起点不可用：就地说明并给出重新读取与重选起点",
       "bytes": 35224,
       "sha256": "d24e9c9fde391244410f32d4be162f500b90dcf6a209e488c66f91af3bc54848"
-    },
-    {
-      "file": "after/dark-900x600-history-cancel-recovered.png",
-      "theme": "dark",
-      "size": "900x600",
-      "view": "history-cancel-recovered",
-      "group": "failure",
-      "state": "历史多选：旧批次请求挂住后换选择，加载结束并列出文件与差异",
-      "bytes": 118615,
-      "sha256": "b03fc0cccce90d2d8ae76aaf91316ce5594605aea4a841fa9f1dcccd0de20fbe"
-    },
-    {
-      "file": "after/light-1280x840-start.png",
-      "theme": "light",
-      "size": "1280x840",
-      "view": "start",
-      "group": "baseline",
-      "state": "起始页",
-      "bytes": 58886,
-      "sha256": "d1ad3a9c69e4dd36ffaabdaddf73651e4355e4ab2c651a7b38d1a9acb269a971"
-    },
-    {
-      "file": "after/light-1280x840-changes.png",
-      "theme": "light",
-      "size": "1280x840",
-      "view": "changes",
-      "group": "baseline",
-      "state": "改动视图（同数据对照）",
-      "bytes": 141485,
-      "sha256": "9ba3861dff7e58c00fa677bc46b6fa3ef6c49034668ec0040e5bd7f002f6ffdc"
     },
     {
       "file": "after/light-1280x840-history.png",
@@ -472,26 +152,6 @@
       "sha256": "1f433024df0c61e4783ef321bd66eff00b144d8a931676d296c883e50aebd119"
     },
     {
-      "file": "after/light-1280x840-task.png",
-      "theme": "light",
-      "size": "1280x840",
-      "view": "task",
-      "group": "baseline",
-      "state": "任务视图：起点、范围内提交与净文件队列",
-      "bytes": 163016,
-      "sha256": "0d480806723c0ad1a2b4033f9abb4982d4e7e533631dc56b931089a34980edf7"
-    },
-    {
-      "file": "after/light-1280x840-worktree.png",
-      "theme": "light",
-      "size": "1280x840",
-      "view": "worktree",
-      "group": "baseline",
-      "state": "工作区总览：按主仓库分组与逐项状态",
-      "bytes": 183632,
-      "sha256": "3b31ca71415bf6d55f25ecf8667882b56249df2366f3ab06feb6829e518002e1"
-    },
-    {
       "file": "after/light-1280x840-composer.png",
       "theme": "light",
       "size": "1280x840",
@@ -500,16 +160,6 @@
       "state": "提交区：真实暂存范围与提交草稿",
       "bytes": 143163,
       "sha256": "c3b21b87668585aefe1ad8a705e40ad19cc1c05bea55d4ccfbe6af8a2d57aa90"
-    },
-    {
-      "file": "after/light-1280x840-merge.png",
-      "theme": "light",
-      "size": "1280x840",
-      "view": "merge",
-      "group": "baseline",
-      "state": "合并弹窗（同数据对照）",
-      "bytes": 48165,
-      "sha256": "ab66b1da48812982391da98585424ec8a28c0a87b5a5dbb9281ff98ad911d936"
     },
     {
       "file": "after/light-1280x840-settings.png",
@@ -522,16 +172,6 @@
       "sha256": "f3d7833e9becf567cfe7ffe5ab14e0174c654fa06f2393341f1df4ed03815d6b"
     },
     {
-      "file": "after/light-1280x840-files-markdown.png",
-      "theme": "light",
-      "size": "1280x840",
-      "view": "files-markdown",
-      "group": "markdown",
-      "state": "Markdown 默认排版预览",
-      "bytes": 75366,
-      "sha256": "61f7cca9b5a7ec4ef392c6a514ed26fdbe9bdbb3f3c808df7e5552bfe8d17f08"
-    },
-    {
       "file": "after/light-1280x840-files-markdown-toc.png",
       "theme": "light",
       "size": "1280x840",
@@ -540,16 +180,6 @@
       "state": "Markdown 标题目录展开",
       "bytes": 78889,
       "sha256": "c61f95bbfc4e77a55f73f12343f336c90a40949788f3d355d0597a78c2126472"
-    },
-    {
-      "file": "after/light-1280x840-sync-unchecked.png",
-      "theme": "light",
-      "size": "1280x840",
-      "view": "sync-unchecked",
-      "group": "failure",
-      "state": "远程未核对：折叠的同步按钮显示「未核」，计数只是记录的对比",
-      "bytes": 141640,
-      "sha256": "42b3d2a22731399872d411704e4f6633e74eab658612386e6e89e133ae1163b4"
     },
     {
       "file": "after/light-1280x840-sync-stale.png",
@@ -562,36 +192,6 @@
       "sha256": "278791b62b538f98c149c4e0754b79ffefacd29c122fdb8bb3cb895e584a2d10"
     },
     {
-      "file": "after/light-1280x840-commit-error.png",
-      "theme": "light",
-      "size": "1280x840",
-      "view": "commit-error",
-      "group": "failure",
-      "state": "本地提交失败：长原因展开换行读全，草稿与暂存保留",
-      "bytes": 171072,
-      "sha256": "d5b06ea6ed742c633b4951ac78ba6c468f0ed3bfadde8d48e80b3e36fe14f909"
-    },
-    {
-      "file": "after/light-1280x840-commit-push-error.png",
-      "theme": "light",
-      "size": "1280x840",
-      "view": "commit-push-error",
-      "group": "failure",
-      "state": "本地提交成功、推送失败：两个阶段分开说明，长原因展开且只重试推送",
-      "bytes": 179680,
-      "sha256": "e0f750a45a0d400b19f7bf33108351f906d1b39d29d88a6d0ebee5e5c40b5471"
-    },
-    {
-      "file": "after/light-1280x840-doc-error.png",
-      "theme": "light",
-      "size": "1280x840",
-      "view": "doc-error",
-      "group": "failure",
-      "state": "文档读取失败：就地说明原因，仍给出重新读取与源码退路",
-      "bytes": 48600,
-      "sha256": "a36e5a7c213b12e9178ae79f23ee9d1350eb3226994c376a1cacf635f459c7fe"
-    },
-    {
       "file": "after/light-1280x840-doc-large.png",
       "theme": "light",
       "size": "1280x840",
@@ -600,26 +200,6 @@
       "state": "文档超过排版预览上限：给出真实状态与查看源码的退路",
       "bytes": 48908,
       "sha256": "98f4527228bbc15fd78ed707efb2979ec9a9cb3849d7ab9427e11b5780ced382"
-    },
-    {
-      "file": "after/light-1280x840-search-error.png",
-      "theme": "light",
-      "size": "1280x840",
-      "view": "search-error",
-      "group": "failure",
-      "state": "搜索局部失败：显示失败原因而不是「没有匹配」，原因旁就地给出「重试搜索 / 重新读取目录」",
-      "bytes": 44657,
-      "sha256": "90c1205486f0d3978d58570e0e2634ac7ba20c20730199aace41f4708996dc1c"
-    },
-    {
-      "file": "after/light-1280x840-filter-error.png",
-      "theme": "light",
-      "size": "1280x840",
-      "view": "filter-error",
-      "group": "failure",
-      "state": "树过滤补齐失败：说明补齐失败而不是「没有匹配」，并给「重试补齐」",
-      "bytes": 44972,
-      "sha256": "650b53fed30e43b8f4a225cb71f692b3aff34b537150ba602b1fe8dcde6a6031"
     },
     {
       "file": "after/light-1280x840-find-error.png",
@@ -632,86 +212,6 @@
       "sha256": "73f957487c7be4f3f01265f4d4f18f7ad468ed4994699de1919eef1608b1254a"
     },
     {
-      "file": "after/light-1280x840-task-error.png",
-      "theme": "light",
-      "size": "1280x840",
-      "view": "task-error",
-      "group": "failure",
-      "state": "任务起点不可用：就地说明并给出重新读取与重选起点",
-      "bytes": 38532,
-      "sha256": "da19c9b8f9cb71816e97171a3262ede55ecd2dcfe47ea23022c0e62f58fc5647"
-    },
-    {
-      "file": "after/light-1280x840-history-cancel-recovered.png",
-      "theme": "light",
-      "size": "1280x840",
-      "view": "history-cancel-recovered",
-      "group": "failure",
-      "state": "历史多选：旧批次请求挂住后换选择，加载结束并列出文件与差异",
-      "bytes": 202684,
-      "sha256": "6b6e0073816952100c8118b3b9e3663f513178a891137cc9f62f1daeffd08d27"
-    },
-    {
-      "file": "after/light-900x600-start.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "start",
-      "group": "baseline",
-      "state": "起始页",
-      "bytes": 52296,
-      "sha256": "d644e9058bb1e1eae1f1c42dfff28ec62ecff8064e30c0b2826a1e1f88653914"
-    },
-    {
-      "file": "after/light-900x600-changes.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "changes",
-      "group": "baseline",
-      "state": "改动视图（同数据对照）",
-      "bytes": 117398,
-      "sha256": "6c7ed0193c0b59035f80696d31317e2eefb6af9a92c02713f9aba0f4415e62ac"
-    },
-    {
-      "file": "after/light-900x600-history.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "history",
-      "group": "baseline",
-      "state": "历史视图（同数据对照）",
-      "bytes": 123219,
-      "sha256": "a266bb4041433cc0096abe49603bb0ec27336793b41bec6f4ff3d72fabcb191f"
-    },
-    {
-      "file": "after/light-900x600-task.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "task",
-      "group": "baseline",
-      "state": "任务视图：起点、范围内提交与净文件队列",
-      "bytes": 126501,
-      "sha256": "eb19cf4f0475e4a228955b274285c52cc912e76a56d439809b31cdf188e0a6c6"
-    },
-    {
-      "file": "after/light-900x600-worktree.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "worktree",
-      "group": "baseline",
-      "state": "工作区总览：按主仓库分组与逐项状态",
-      "bytes": 144185,
-      "sha256": "4ae7162239ba2aaaa177614f0283e9ffc7a514b963d80c05d7d4d73ce1888fa7"
-    },
-    {
-      "file": "after/light-900x600-composer.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "composer",
-      "group": "baseline",
-      "state": "提交区：真实暂存范围与提交草稿",
-      "bytes": 117515,
-      "sha256": "fe3d790bc3e9b4bd1c4981e7b573a4fa5c3fed848fe41d33982d661a9c5c88c9"
-    },
-    {
       "file": "after/light-900x600-merge.png",
       "theme": "light",
       "size": "900x600",
@@ -722,96 +222,6 @@
       "sha256": "e9a427d0579b6c00d0ac72293386eb300135784b6bbdb1636e23f224731bff2a"
     },
     {
-      "file": "after/light-900x600-settings.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "settings",
-      "group": "baseline",
-      "state": "设置弹窗（同数据对照）",
-      "bytes": 126622,
-      "sha256": "ac8cd0bf81f03834a87e07c1ca9ebdb6a09900c135ee9e31a1800ec0e6f88b28"
-    },
-    {
-      "file": "after/light-900x600-files-markdown.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "files-markdown",
-      "group": "markdown",
-      "state": "Markdown 默认排版预览",
-      "bytes": 61292,
-      "sha256": "a8430b5dc77697fcd0a266e405dee5641d7a950ebae3ef40d9b77c3f74168cb1"
-    },
-    {
-      "file": "after/light-900x600-files-markdown-toc.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "files-markdown-toc",
-      "group": "markdown",
-      "state": "Markdown 标题目录展开",
-      "bytes": 59683,
-      "sha256": "320daf79f2e756b3810ebcb814403d8bf3fa1c4a3140bc6cc2300f4a382df3ad"
-    },
-    {
-      "file": "after/light-900x600-sync-unchecked.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "sync-unchecked",
-      "group": "failure",
-      "state": "远程未核对：折叠的同步按钮显示「未核」，计数只是记录的对比",
-      "bytes": 117601,
-      "sha256": "a7aabd4b439565981512bee7fc212e768d0dda7220787af667598e5ca5b22fc4"
-    },
-    {
-      "file": "after/light-900x600-sync-stale.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "sync-stale",
-      "group": "failure",
-      "state": "远程已过期：折叠的同步按钮显示「过期」并带上次核对时间",
-      "bytes": 118240,
-      "sha256": "ee2601a0e33ddb7733a1f4e3c24e189b56c5ac10f089f3a3abbf886b4917b8bb"
-    },
-    {
-      "file": "after/light-900x600-commit-error.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "commit-error",
-      "group": "failure",
-      "state": "本地提交失败：长原因展开换行读全，草稿与暂存保留",
-      "bytes": 136322,
-      "sha256": "6864ca777799b3ea3a70053a005044a9b4682ffe493c549e3b08ad32f99c926d"
-    },
-    {
-      "file": "after/light-900x600-commit-push-error.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "commit-push-error",
-      "group": "failure",
-      "state": "本地提交成功、推送失败：两个阶段分开说明，长原因展开且只重试推送",
-      "bytes": 140103,
-      "sha256": "1054623bbadbde13176620cedd2dcc729e0921e881a9ab1c993c6a61a224fe7b"
-    },
-    {
-      "file": "after/light-900x600-doc-error.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "doc-error",
-      "group": "failure",
-      "state": "文档读取失败：就地说明原因，仍给出重新读取与源码退路",
-      "bytes": 45449,
-      "sha256": "0995324320581005a5f7efa47f6f0c4b9850351e290910cb58c095f28e362b5e"
-    },
-    {
-      "file": "after/light-900x600-doc-large.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "doc-large",
-      "group": "failure",
-      "state": "文档超过排版预览上限：给出真实状态与查看源码的退路",
-      "bytes": 45831,
-      "sha256": "308f302cc549b89207ecccabb77d98c11be0e842c2bc9b523e249253d3c5f19a"
-    },
-    {
       "file": "after/light-900x600-search-error.png",
       "theme": "light",
       "size": "900x600",
@@ -820,47 +230,15 @@
       "state": "搜索局部失败：显示失败原因而不是「没有匹配」，原因旁就地给出「重试搜索 / 重新读取目录」",
       "bytes": 41684,
       "sha256": "e1a2996f124cede19e6b9289f4b2ee881625bc1552fb22892fb468844a2bdc26"
-    },
-    {
-      "file": "after/light-900x600-filter-error.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "filter-error",
-      "group": "failure",
-      "state": "树过滤补齐失败：说明补齐失败而不是「没有匹配」，并给「重试补齐」",
-      "bytes": 42008,
-      "sha256": "77c6738c178cfdf6cb724cf4edb62a2aac9712507f154e7f91104b366add01f5"
-    },
-    {
-      "file": "after/light-900x600-find-error.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "find-error",
-      "group": "failure",
-      "state": "文件内查找失败：原因旁就地给出「重试查找 / 重新读取文件」",
-      "bytes": 55294,
-      "sha256": "8f5bb0f146972cc6b65612a2eaad5a2da68eb7dd868e87abf39e96507914b5e1"
-    },
-    {
-      "file": "after/light-900x600-task-error.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "task-error",
-      "group": "failure",
-      "state": "任务起点不可用：就地说明并给出重新读取与重选起点",
-      "bytes": 35528,
-      "sha256": "940da59ad386d700f7aa1a39694ca68cea7578167ef43b3acbbb88c5b08ef684"
-    },
-    {
-      "file": "after/light-900x600-history-cancel-recovered.png",
-      "theme": "light",
-      "size": "900x600",
-      "view": "history-cancel-recovered",
-      "group": "failure",
-      "state": "历史多选：旧批次请求挂住后换选择，加载结束并列出文件与差异",
-      "bytes": 120822,
-      "sha256": "ed33e69f5321a2ed460357b372d4c20c76aa96f4dc3f24c9ee279cc4525fcca0"
     }
   ],
-  "skipped": []
+  "skipped": [],
+  "archive": {
+    "capturedFiles": 84,
+    "capturedGroups": {
+      "baseline": 32,
+      "markdown": 8,
+      "failure": 44
+    }
+  }
 }

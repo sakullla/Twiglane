@@ -730,6 +730,11 @@ pub fn open_in_cliora<R: tauri::Runtime>(
     url: &str,
 ) -> Result<(), AppError> {
     validate_inbound(url)?;
+    open_checked_cliora(app, url)
+}
+
+/// Only called with a receipt built or validated in Rust.
+pub(crate) fn open_checked_cliora<R: tauri::Runtime>(app: &tauri::AppHandle<R>, url: &str) -> Result<(), AppError> {
     use tauri_plugin_opener::OpenerExt;
     app.opener()
         .open_url(url, None::<&str>)
@@ -744,6 +749,10 @@ pub fn notify_cliora<R: tauri::Runtime>(
     url: &str,
 ) -> Result<(), AppError> {
     validate_inbound(url)?;
+    notify_checked_cliora(app, url)
+}
+
+pub(crate) fn notify_checked_cliora<R: tauri::Runtime>(app: &tauri::AppHandle<R>, url: &str) -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
     {
         let _ = app;
@@ -762,7 +771,7 @@ pub fn notify_cliora<R: tauri::Runtime>(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        open_in_cliora(app, url)?;
+        open_checked_cliora(app, url)?;
         let handle = app.clone();
         tauri::async_runtime::spawn(async move {
             for delay in [250u64, 750] {

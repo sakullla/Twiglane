@@ -6,6 +6,8 @@ mod git;
 mod measure;
 mod model;
 mod redact;
+mod remote_worktree;
+pub mod remote_worktree_transport;
 mod shutdown;
 mod state;
 mod terminal;
@@ -89,6 +91,7 @@ pub fn run() {
                 Arc::new(shutdown),
             ));
             app.manage(backend);
+            app.manage(Arc::new(remote_worktree::RemoteWorktrees::new(dir.join("remote-worktrees"))));
             // 终端独立于 Git 调度器与当前仓库监听：按仓库保存在应用内存中。
             app.manage(TerminalManager::new(Arc::new(terminal::AppEvents::new(
                 app.handle().clone(),
@@ -104,6 +107,18 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            remote_worktree::review::remote_review_begin,
+            remote_worktree::review::remote_review_accept,
+            remote_worktree::review::remote_review_end,
+            remote_worktree::review::remote_review_return,
+            remote_worktree::remote_worktree_targets,
+            remote_worktree::remote_worktree_open,
+            remote_worktree::remote_worktree_cancel_open,
+            remote_worktree::remote_worktree_close,
+            remote_worktree::remote_worktree_status,
+            remote_worktree::remote_worktree_diff,
+            remote_worktree::remote_worktree_write,
+            remote_worktree::remote_worktree_recover,
             detect_git,
             set_git_executable,
             clear_git_executable,
@@ -2494,8 +2509,9 @@ mod ipc_contract {
         let end = start + LIB_SOURCE[start..].find(']').expect("handler end");
         LIB_SOURCE[start..end]
             .split(',')
-            .map(|name| name.trim().to_string())
+            .filter_map(|name| name.trim().rsplit("::").next())
             .filter(|name| !name.is_empty())
+            .map(str::to_owned)
             .collect()
     }
 

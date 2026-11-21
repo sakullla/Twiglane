@@ -1,0 +1,167 @@
+{
+  "format": "twiglane-remote-worktree-evidence/v1",
+  "source": {
+    "twiglane": "f83b5b83226d9e800656da6719c75cbe0f753b82",
+    "cliora": "d45491a260494ad69cd7d1a7e4ec08d3d85f84ac"
+  },
+  "ssh": {
+    "platform": "Linux x86_64",
+    "authenticatedKey": true,
+    "authenticatedPassword": true,
+    "ordinaryAccounts": true,
+    "sameCanonicalPath": true,
+    "isolatedCommit": true,
+    "remoteAgentInstalledAndReused": true,
+    "interruptedInstallRetried": true,
+    "lostReceiptRecoveredExactlyOnce": true,
+    "independentReviewBaselineAndHead": true,
+    "gui": false
+  },
+  "network": [
+    {
+      "profile": "baseline",
+      "configuredBytesPerSec": null,
+      "oneWayDelayMs": 0,
+      "observedRoundTripMs": 4,
+      "lists": [
+        {
+          "files": 5,
+          "elapsedMs": 12,
+          "downBytes": 516,
+          "rpcCount": 1
+        },
+        {
+          "files": 252,
+          "elapsedMs": 18,
+          "downBytes": 8076,
+          "rpcCount": 1
+        }
+      ],
+      "smallDiffMs": 18,
+      "smallDiffDownBytes": 284,
+      "switchMs": 23,
+      "switchDownBytes": 432,
+      "oldReply": "superseded",
+      "sshUp": 5478,
+      "sshDown": 35673
+    },
+    {
+      "profile": "high-rtt",
+      "configuredBytesPerSec": null,
+      "oneWayDelayMs": 400,
+      "observedRoundTripMs": 814,
+      "lists": [
+        {
+          "files": 5,
+          "elapsedMs": 818,
+          "downBytes": 516,
+          "rpcCount": 1
+        },
+        {
+          "files": 252,
+          "elapsedMs": 827,
+          "downBytes": 8076,
+          "rpcCount": 1
+        }
+      ],
+      "smallDiffMs": 823,
+      "smallDiffDownBytes": 284,
+      "switchMs": 831,
+      "switchDownBytes": 432,
+      "oldReply": "superseded",
+      "sshUp": 5522,
+      "sshDown": 35673
+    },
+    {
+      "profile": "low-bw",
+      "configuredBytesPerSec": 32768,
+      "oneWayDelayMs": 0,
+      "observedRoundTripMs": 13,
+      "lists": [
+        {
+          "files": 5,
+          "elapsedMs": 33,
+          "downBytes": 516,
+          "rpcCount": 1
+        },
+        {
+          "files": 252,
+          "elapsedMs": 270,
+          "downBytes": 8076,
+          "rpcCount": 1
+        }
+      ],
+      "smallDiffMs": 38,
+      "smallDiffDownBytes": 284,
+      "switchMs": 52,
+      "switchDownBytes": 432,
+      "oldReply": "superseded",
+      "sshUp": 5478,
+      "sshDown": 35673
+    },
+    {
+      "profile": "combined",
+      "configuredBytesPerSec": 32768,
+      "oneWayDelayMs": 400,
+      "observedRoundTripMs": 814,
+      "lists": [
+        {
+          "files": 5,
+          "elapsedMs": 836,
+          "downBytes": 516,
+          "rpcCount": 1
+        },
+        {
+          "files": 252,
+          "elapsedMs": 1071,
+          "downBytes": 8076,
+          "rpcCount": 1
+        }
+      ],
+      "smallDiffMs": 839,
+      "smallDiffDownBytes": 284,
+      "switchMs": 853,
+      "switchDownBytes": 432,
+      "oldReply": "superseded",
+      "sshUp": 5522,
+      "sshDown": 35673
+    },
+    {
+      "profile": "stress",
+      "configuredBytesPerSec": 8192,
+      "oneWayDelayMs": 900,
+      "observedRoundTripMs": 1832,
+      "lists": [
+        {
+          "files": 5,
+          "elapsedMs": 1896,
+          "downBytes": 516,
+          "rpcCount": 1
+        },
+        {
+          "files": 252,
+          "elapsedMs": 2821,
+          "downBytes": 8076,
+          "rpcCount": 1
+        }
+      ],
+      "smallDiffMs": 1905,
+      "smallDiffDownBytes": 284,
+      "switchMs": 1939,
+      "switchDownBytes": 432,
+      "oldReply": "superseded",
+      "sshUp": 5522,
+      "sshDown": 35673
+    }
+  ],
+  "protocol": {
+    "requests": "pass",
+    "events": "pass",
+    "fixtureSha256": "e7a4ed6d98babf2a2917dc79c8047cdf8c195413d48d8c9b6b713c361a144a30"
+  },
+  "limitations": [
+    "本机 macOS 开发连接工具与目标 Linux x86_64 实测。公钥及临时输入密码均完成真实 SSH 登录。",
+    "SSH/Git、协议往返和窗口流程分别验证。两份正式签名桌面安装包的 OS 深链联跑仍待验证。",
+    "Windows 与 Linux 桌面客户端的安装运行未实测。"
+  ]
+}

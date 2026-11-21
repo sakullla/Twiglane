@@ -6,11 +6,13 @@
 // 默认写到操作系统临时目录：正式交付验证不得改写候选输入。只有显式 --out 才写调用者目录（归档证据）。
 // 结论边界：这里全部是浏览器 + mock 数据，不代表真实 Git、桌面 WebView 或安装包。
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { once } from "node:events";
 import fs from "node:fs";
 import http from "node:http";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { createServer as createViteServer } from "vite";
 
 const args = process.argv.slice(2);
 const has = (name) => args.includes(name);
@@ -32,7 +34,7 @@ const IDENTITY = {
   ),
   task: readArg("--task", has("--projects") ? "delivery" : "T6"),
 };
-const base = readArg("--base", "http://127.0.0.1:1430");
+let base = readArg("--base", null);
 const explicitOut = has("--out");
 // 没有 --out 时绝不落到仓库里的归档目录：临时目录每次新建，跑完把路径打在终端与 report 里。
 const outDir = explicitOut
@@ -43,7 +45,6 @@ const skipShots = has("--skip-shots");
 const shotsOnly = has("--shots-only");
 if (skipShots && shotsOnly) throw new Error("--skip-shots 和 --shots-only 只能选一个");
 const startedAt = new Date();
-const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** 终端与 report 里展示路径：仓库内的写相对路径，临时目录写绝对路径。 */
 const show = (target) => {
   const relative = path.relative(process.cwd(), target);
@@ -53,33 +54,6 @@ const show = (target) => {
 function portOf(url) {
   const parsed = new URL(url);
   return Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
-}
-
-function portFree(port) {
-  return new Promise((resolve) => {
-    const server = net.createServer();
-    server.once("error", () => resolve(false));
-    server.listen(port, "127.0.0.1", () => server.close(() => resolve(true)));
-  });
-}
-
-function health(url) {
-  const parsed = new URL("/__ui-preview/health", url);
-  return new Promise((resolve, reject) => {
-    const request = http.get({ host: parsed.hostname, port: parsed.port, path: parsed.pathname }, (response) => {
-      const chunks = [];
-      response.on("data", (chunk) => chunks.push(chunk));
-      response.on("end", () => {
-        try {
-          resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-        } catch (error) {
-          reject(error);
-        }
-      });
-    });
-    request.on("error", reject);
-    request.setTimeout(2000, () => request.destroy(new Error("健康端点超时")));
-  });
 }
 
 /** 跑一个子进程并把输出同时回显与收集：失败要能落进 report，不能只打在终端上。 */
@@ -99,25 +73,6 @@ function run(command, commandArgs) {
     child.on("error", (error) => resolve({ code: 1, stdout, stderr: stderr + String(error.message) }));
     child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
   });
-}
-
-/** 结束预览：先正常 kill，再确认端口真的释放；Windows 下残留的 vite 子进程用 taskkill 兜底。 */
-async function stopServer(child) {
-  if (!child || child.exitCode !== null) return;
-  const port = portOf(base);
-  child.kill();
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    if (await portFree(port)) return;
-    await pause(150);
-  }
-  if (process.platform === "win32" && child.pid) {
-    await run("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      if (await portFree(port)) return;
-      await pause(150);
-    }
-  }
-  console.warn("预览进程没有释放端口 " + port + "：下一次运行前请先关掉它。");
 }
 
 const failures = [];
@@ -151,34 +106,23 @@ const report = {
   status: "unknown",
 };
 
-let server = null;
+let vite;
+let server;
 try {
-  const port = portOf(base);
-  if (!(await portFree(port))) {
-    throw new Error(
-      "端口 " + port + " 已被占用（可能是上一次的预览没关）。请先关掉它，或用 --base 指向别的端口。",
-    );
-  }
-  // 与 npm run preview:ui 同一条命令：同一个 vite 配置、同一个 mock 替换与健康端点。
-  server = spawn(
-    process.execPath,
-    [path.join("node_modules", "vite", "bin", "vite.js"), "--config", "scripts/ui-preview/vite.config.mjs", "--port", String(port), "--strictPort"],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
-  server.stdout.resume();
-  server.stderr.resume();
-
-  let healthBody = null;
-  for (let attempt = 0; attempt < 120 && !healthBody; attempt += 1) {
-    try {
-      const body = await health(base);
-      if (body && body.mockApi === true) healthBody = body;
-    } catch {
-      // 还没起来：继续等。
-    }
-    if (!healthBody) await pause(500);
-  }
-  if (!healthBody) throw new Error("预览没有起来，或健康端点没有确认 mockApi=true（可能连到了非 mock 页面）");
+  // 由操作系统原子分配端口，监听事件与健康端点分别确认服务和 mock 接线。
+  vite = await createViteServer({
+    configFile: "scripts/ui-preview/vite.config.mjs",
+    server: { middlewareMode: true, hmr: false, watch: null },
+  });
+  server = http.createServer(vite.middlewares);
+  const listening = once(server, "listening");
+  server.listen(base ? portOf(base) : 0, "127.0.0.1");
+  await listening;
+  base ??= `http://127.0.0.1:${server.address().port}`;
+  report.base = base;
+  const response = await fetch(new URL("/__ui-preview/health", base), { signal: AbortSignal.timeout(2000) });
+  const healthBody = await response.json();
+  if (!response.ok || healthBody.mockApi !== true) throw new Error("健康端点没有确认 mockApi=true");
   report.health = {
     mockApi: healthBody.mockApi === true,
     resolvedApi: path.relative(process.cwd(), String(healthBody.resolvedApi ?? "")).split(path.sep).join("/"),
@@ -263,11 +207,22 @@ try {
         failures.push("manifest task 是 " + JSON.stringify(manifest.task ?? null) + "，不是本次 " + JSON.stringify(IDENTITY.task));
       }
       if (report.shots.files === 0) failures.push("manifest 里没有任何截图");
-      // manifest 逐张声明了文件：缺图说明 report 与现场不一致，不能用旧图补齐。
-      const missing = (manifest.shots ?? []).filter(
-        (shot) => !fs.existsSync(path.resolve(path.dirname(manifestPath), shot.file)),
-      );
-      if (missing.length > 0) failures.push(missing.length + " 张截图在 manifest 里登记了但文件不存在");
+      const files = new Set();
+      for (const shot of manifest.shots ?? []) {
+        if (typeof shot.file !== "string" || !/^after\/(dark|light)-\d+x\d+-[a-z0-9-]+\.png$/.test(shot.file) || files.has(shot.file)) {
+          failures.push("manifest 截图路径无效或重复：" + shot.file);
+          continue;
+        }
+        files.add(shot.file);
+        try {
+          const buffer = fs.readFileSync(path.join(outDir, shot.file));
+          if (buffer.length !== shot.bytes || createHash("sha256").update(buffer).digest("hex") !== shot.sha256) {
+            failures.push("截图的字节数或 SHA-256 不一致：" + shot.file);
+          }
+        } catch (error) {
+          failures.push("截图无法读取：" + shot.file + "（" + error.code + "）");
+        }
+      }
       if (!failures.length && previousFiles.length) {
         const written = new Set(manifest.shots.map((shot) => shot.file));
         for (const file of previousFiles) {
@@ -299,5 +254,9 @@ try {
   console.error("UI 验证失败：", error.message);
   process.exitCode = 1;
 } finally {
-  await stopServer(server);
+  try {
+    if (server?.listening) await new Promise((resolve) => server.close(resolve));
+  } finally {
+    await vite?.close();
+  }
 }

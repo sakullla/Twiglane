@@ -192,7 +192,7 @@ async function waitFor(cdp, sessionId, expression, label, timeoutMs = 20_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await evaluate(cdp, sessionId, expression)) return;
-    await pause(120);
+    await pause(60);
   }
   throw new Error(`等待超时：${label}`);
 }
@@ -234,14 +234,19 @@ const pressEscape = `(() => {
   return true;
 })()`;
 
+async function navigate(cdp, sessionId, url) {
+  const expected = new URL(url).href;
+  await cdp.send("Page.navigate", { url: expected }, sessionId);
+  await waitFor(cdp, sessionId, `location.href === ${JSON.stringify(expected)} && document.readyState !== "loading"`, expected);
+}
+
 async function openCommand(cdp, sessionId, text, readySelector) {
   await evaluate(cdp, sessionId, click(".titlebar-brand"));
   await waitFor(cdp, sessionId, "Boolean(document.querySelector('#palette-input'))", "命令面板");
   await evaluate(cdp, sessionId, typeInto("#palette-input", text));
-  await pause(200);
+  await waitFor(cdp, sessionId, `document.querySelector('.palette-item[aria-selected="true"][aria-disabled="false"] > span')?.textContent.trim() === ${JSON.stringify(text)}`, "命令可用：" + text);
   await evaluate(cdp, sessionId, pressEnter);
   await waitFor(cdp, sessionId, `Boolean(document.querySelector(${JSON.stringify(readySelector)}))`, text);
-  await pause(500);
 }
 
 /** 打开起始页第一条最近仓库，等到调用方给的就绪条件。 */
@@ -249,26 +254,14 @@ async function openRepository(cdp, sessionId, ready, label) {
   await waitFor(cdp, sessionId, "Boolean(document.querySelector('.welcome-recent button'))", "起始页");
   await evaluate(cdp, sessionId, click(".welcome-recent button"));
   await waitFor(cdp, sessionId, ready, label);
-  await pause(700);
 }
 
-/** 文件视图 + 打开 README.md：目录树刚渲染时点击可能被随后的刷新覆盖，所以按「行还在就再点一次」重试。 */
+/** 打开 README.md 后按调用方指定的预览、失败或超限状态判断完成。 */
 async function openReadme(cdp, sessionId, ready, label) {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    if (await evaluate(cdp, sessionId, ready)) return;
-    await evaluate(
-      cdp,
-      sessionId,
-      `(() => {
-        const row = [...document.querySelectorAll(".files-view .file-tree-row")]
-          .find((item) => item.textContent.includes("README.md"));
-        if (!row) return false;
-        row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-        return true;
-      })()`,
-    );
-    await pause(600);
-  }
+  const row = `[...document.querySelectorAll('.workbench-view[data-active="true"] .files-view .file-tree-row')]
+    .find((item) => item.textContent.includes("README.md"))`;
+  await waitFor(cdp, sessionId, `Boolean(${row})`, "README.md 目录树项");
+  if (!(await evaluate(cdp, sessionId, ready))) await evaluate(cdp, sessionId, `(${row})?.click()`);
   await waitFor(cdp, sessionId, ready, label);
 }
 
@@ -302,12 +295,11 @@ const FAILURE_STATES = [
     run: async (cdp, sessionId) => {
       await openRepository(cdp, sessionId, "Boolean(document.querySelector('.composer textarea'))", "提交区");
       await evaluate(cdp, sessionId, typeIntoArea(".composer textarea", "修复同步标记与提交失败说明"));
-      await pause(250);
+      await waitFor(cdp, sessionId, "Boolean(document.querySelector('.composer-commit:not(:disabled)'))", "提交可用");
       await evaluate(cdp, sessionId, click(".composer-commit"));
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('[data-commit-error]'))", "提交失败原因");
       await evaluate(cdp, sessionId, click(".composer-meta .composer-expand"));
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('[data-commit-error].expanded'))", "展开的失败原因");
-      await pause(350);
     },
   },
   {
@@ -317,12 +309,11 @@ const FAILURE_STATES = [
     run: async (cdp, sessionId) => {
       await openRepository(cdp, sessionId, "Boolean(document.querySelector('.composer textarea'))", "提交区");
       await evaluate(cdp, sessionId, typeIntoArea(".composer textarea", "修复同步标记与提交失败说明"));
-      await pause(250);
+      await waitFor(cdp, sessionId, "Boolean(document.querySelector('.composer-push:not(:disabled)'))", "提交并推送可用");
       await evaluate(cdp, sessionId, click(".composer-push"));
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('[data-push-error]'))", "推送失败原因");
       await evaluate(cdp, sessionId, click("[data-push-error] .composer-expand"));
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('[data-push-error] [role=status].expanded'))", "展开的推送失败原因");
-      await pause(350);
     },
   },
   {
@@ -333,7 +324,6 @@ const FAILURE_STATES = [
       await openRepository(cdp, sessionId, "Boolean(document.querySelector('.view-switcher'))", "工作区");
       await evaluate(cdp, sessionId, click('[data-view="files"]'));
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view'))", "文件视图");
-      await pause(600);
       await openReadme(cdp, sessionId, "Boolean(document.querySelector('.files-view .doc-state[role=\"alert\"]'))", "文档读取失败");
     },
   },
@@ -345,7 +335,6 @@ const FAILURE_STATES = [
       await openRepository(cdp, sessionId, "Boolean(document.querySelector('.view-switcher'))", "工作区");
       await evaluate(cdp, sessionId, click('[data-view="files"]'));
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view'))", "文件视图");
-      await pause(600);
       await openReadme(
         cdp,
         sessionId,
@@ -362,7 +351,6 @@ const FAILURE_STATES = [
       await openRepository(cdp, sessionId, "Boolean(document.querySelector('.view-switcher'))", "工作区");
       await evaluate(cdp, sessionId, click('[data-view="files"]'));
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view'))", "文件视图");
-      await pause(600);
       await openCommand(cdp, sessionId, "全仓库搜索", "#file-content-search");
       await evaluate(cdp, sessionId, typeInto("#file-content-search", "import"));
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('.file-search-note.danger'))", "搜索失败原因");
@@ -372,7 +360,6 @@ const FAILURE_STATES = [
         "Boolean(document.querySelector('.file-search-note.danger [data-search-retry=\"content\"]'))",
         "搜索失败的就地重试入口",
       );
-      await pause(350);
     },
   },
   {
@@ -383,7 +370,6 @@ const FAILURE_STATES = [
       await openRepository(cdp, sessionId, "Boolean(document.querySelector('.view-switcher'))", "工作区");
       await evaluate(cdp, sessionId, click('[data-view="files"]'));
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view'))", "文件视图");
-      await pause(600);
       await evaluate(cdp, sessionId, typeInto('.files-view [aria-label="过滤文件树"]', "part"));
       // 没有可显示的行时，失败说明与「重试补齐」在树体空态里（状态行不重复一遍）。
       await waitFor(
@@ -392,7 +378,6 @@ const FAILURE_STATES = [
         "Boolean(document.querySelector('.files-view .empty.compact[role=\"alert\"] [data-search-retry=\"tree\"]'))",
         "补齐失败的就地重试入口",
       );
-      await pause(350);
     },
   },
   {
@@ -403,13 +388,11 @@ const FAILURE_STATES = [
       await openRepository(cdp, sessionId, "Boolean(document.querySelector('.view-switcher'))", "工作区");
       await evaluate(cdp, sessionId, click('[data-view="files"]'));
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view'))", "文件视图");
-      await pause(600);
       await openReadme(cdp, sessionId, "Boolean(document.querySelector('.files-view .markdown-preview .md-body'))", "README 打开");
       await evaluate(cdp, sessionId, click('.files-view [aria-label="在文件内搜索"]'));
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('.files-view [data-search-scope=\"file\"]'))", "文件内查找输入");
       await evaluate(cdp, sessionId, typeInto('.files-view [data-search-scope="file"]', "import"));
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('.file-note.danger [data-search-retry=\"file\"]'))", "文件内查找的失败原因与重试入口");
-      await pause(350);
     },
   },
   {
@@ -420,7 +403,6 @@ const FAILURE_STATES = [
     run: async (cdp, sessionId) => {
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('.history-task-row'))", "任务净差异行");
       await waitFor(cdp, sessionId, "Boolean(document.querySelector('.task-failure'))", "任务读取失败");
-      await pause(500);
     },
   },
   {
@@ -442,7 +424,6 @@ const FAILURE_STATES = [
       await evaluate(cdp, sessionId, pick(0, false));
       await evaluate(cdp, sessionId, pick(3, true));
       await waitFor(cdp, sessionId, "document.body.textContent.includes('最终变更没有读取成功')", "失败说明");
-      await pause(500);
     },
   },
 ];
@@ -516,6 +497,8 @@ async function main() {
     { stdio: "ignore" },
   );
 
+  const browserClosed = new Promise((resolve) => browser.once("close", resolve));
+
   const manifest = {
     // 当前批次身份：来自调用方（--workflow/--task），这里不存默认值，也不沿用上一批证据的 ID。
     workflow: identity.workflow,
@@ -531,7 +514,7 @@ async function main() {
     },
     page: {
       url: base,
-      build: "npm run preview:ui（scripts/ui-preview/vite.config.mjs，mock API，127.0.0.1:1430）",
+      build: "scripts/ui-preview/vite.config.mjs（mock API）",
       data: projectsOnly ? "?projects=1/missing：60 个项目成员、长名称、同名路径、收藏、外机/缺源快照与项目外仓库" : "scripts/ui-preview/mock-api.ts + mock-files.ts + samples.ts（与 01 基线同一组数据）",
       worker: "预览页的 Markdown 解析在工作线程里进行；失败态由 ?remote= / ?commit= / ?doc= / ?search= 参数进入",
     },
@@ -541,7 +524,7 @@ async function main() {
       markdown: "files-markdown/files-markdown-toc：Markdown 排版预览与目录工具行，单独成组，不参与优化前后对照",
       failure:
         "关键失败/未知状态：sync-unchecked/sync-stale/commit-error/commit-push-error/doc-error/doc-large/" +
-        "search-error/filter-error/find-error/task-error/history-cancel-recovered，逐张对应需求",
+        "search-error/filter-error/find-error/task-error/history-final-error，逐张对应需求",
     },
     profile: full && !projectsOnly ? "full" : "curated",
     shots: [],
@@ -577,19 +560,20 @@ async function main() {
         const shouldCaptureFailure = (view) => full || customFailureTargets ? failureTargets.has(target) : wants(view);
         const skipped = manifest.skipped;
         const shot = async (view, group = "baseline", state = "normal") => {
-          if (projectsOnly || !full) {
-            await waitFor(cdp, sessionId, `document.documentElement.dataset.theme === ${JSON.stringify(theme)}`, "实际主题已应用");
-            // Capture the settled state. The frame-by-frame scenario exercises real transitions separately.
-            await evaluate(cdp, sessionId, `(async () => {
-              for (const animation of document.getAnimations()) {
-                if (animation.playState === 'running' && animation.playbackRate !== 0 &&
-                    Number.isFinite(animation.effect?.getComputedTiming().endTime)) animation.finish();
-              }
-              await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-            })()`);
-          }
+          await waitFor(cdp, sessionId, `document.documentElement.dataset.theme === ${JSON.stringify(theme)}`, "实际主题已应用");
+          // Capture the settled state. The frame-by-frame scenario exercises real transitions separately.
+          await evaluate(cdp, sessionId, `(async () => {
+            await document.fonts.ready;
+            for (const animation of document.getAnimations()) {
+              if (animation.playState === 'running' && animation.playbackRate !== 0 &&
+                  Number.isFinite(animation.effect?.getComputedTiming().endTime)) animation.finish();
+            }
+            await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          })()`);
           const paint = await evaluate(cdp, sessionId, `({ theme:document.documentElement.dataset.theme, surface:getComputedStyle(document.documentElement).getPropertyValue('--surface').trim(), modalOpacity:document.querySelector('.modal-card') ? getComputedStyle(document.querySelector('.modal-card')).opacity : null, backdropOpacity:document.querySelector('.modal-backdrop') ? getComputedStyle(document.querySelector('.modal-backdrop')).opacity : null })`);
-          if ((projectsOnly || !full) && (paint.theme !== theme || (paint.modalOpacity !== null && paint.modalOpacity !== "1") || (paint.backdropOpacity !== null && paint.backdropOpacity !== "1"))) throw new Error(`${view}: paint not ready ${JSON.stringify(paint)}`);
+          if (paint.theme !== theme || [paint.modalOpacity, paint.backdropOpacity].some((opacity) => opacity !== null && opacity !== "1")) {
+            throw new Error(`${view}: paint not ready ${JSON.stringify(paint)}`);
+          }
           const overflow = await evaluate(cdp, sessionId, "Math.max(0, document.documentElement.scrollWidth - innerWidth)");
           if ((projectsOnly || !full) && overflow > 1) throw new Error(`${view}: horizontal overflow ${overflow}px`);
           const image = await cdp.send("Page.captureScreenshot", { format: "png" }, sessionId);
@@ -631,7 +615,7 @@ async function main() {
           const narrow = size.width === 900;
           const missing = narrow && theme === "dark";
           if (!narrow && theme === "dark") {
-            await cdp.send("Page.navigate", { url: base + "/?projects=1" }, sessionId);
+            await navigate(cdp, sessionId, base + "/?projects=1");
             await waitFor(
               cdp,
               sessionId,
@@ -656,7 +640,7 @@ async function main() {
             );
             await shot("project-outside", "projects", "当前仓库不属于所选项目：标题栏「项目外」标签与仓库弹层顶部的范围说明、改看全部仓库入口");
           } else {
-            await cdp.send("Page.navigate", { url: base + (missing ? "/?projects=missing" : "/?projects=1") }, sessionId);
+            await navigate(cdp, sessionId, base + (missing ? "/?projects=missing" : "/?projects=1"));
             await selectProjectMenu(1);
             await openManageProjects();
             if (missing) {
@@ -683,7 +667,7 @@ async function main() {
         // A requested normal view only opens the surfaces needed for its own capture.
         const openWorkspace = full || ["changes", "history", "merge", "settings", "files-markdown-toc"].some(wants);
         if (openWorkspace || wants("start")) {
-          await cdp.send("Page.navigate", { url: base + "/" }, sessionId);
+          await navigate(cdp, sessionId, base + "/");
           await waitFor(cdp, sessionId, "Boolean(document.querySelector('.welcome-recent button'))", "起始页");
           if (wants("start")) await shot("start", "baseline", "起始页");
           if (openWorkspace) {
@@ -705,7 +689,7 @@ async function main() {
         }
 
         if (["task", "worktree", "composer"].some(wants)) {
-          await cdp.send("Page.navigate", { url: base + "/?cliora=1" }, sessionId);
+          await navigate(cdp, sessionId, base + "/?cliora=1");
           await waitFor(cdp, sessionId, "Boolean(document.querySelector('.history-task-row[aria-pressed=true]'))", "历史里的任务净差异");
           await waitFor(cdp, sessionId, "document.querySelectorAll('.task-detail .file-list .file-row').length > 0", "任务文件队列");
           if (wants("task")) {
@@ -762,8 +746,7 @@ async function main() {
 
         for (const failure of FAILURE_STATES) {
           if (!shouldCaptureFailure(failure.view)) continue;
-          await cdp.send("Page.navigate", { url: `${base}/?${failure.query}` }, sessionId);
-          await waitFor(cdp, sessionId, "Boolean(document.querySelector('.welcome-recent button'))", `${failure.view} 起始页`);
+          await navigate(cdp, sessionId, `${base}/?${failure.query}`);
           await failure.run(cdp, sessionId);
           await shot(failure.view, "failure", failure.state);
         }
@@ -774,9 +757,11 @@ async function main() {
     }
   } finally {
     cdp?.close();
+    const killTimer = setTimeout(() => browser.kill("SIGKILL"), 2000);
     browser.kill();
-    // 浏览器进程退出前仍占着 profile 目录，清理失败不应掩盖真正的报错。
-    await pause(400);
+    await browserClosed;
+    clearTimeout(killTimer);
+    // 浏览器退出后再清理 profile。
     try {
       fs.rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
     } catch (error) {

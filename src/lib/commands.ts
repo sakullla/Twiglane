@@ -545,6 +545,14 @@ const REPO_COMMANDS: CommandSpec[] = [
     reason: busyReason,
   },
   {
+    id: "repo.openRemote",
+    group: "仓库",
+    title: "打开远端仓库",
+    hint: "打开 Cliora SSH 主机上的 Git 工作树",
+    available: idle,
+    reason: busyReason,
+  },
+  {
     id: "repo.clone",
     group: "仓库",
     title: "克隆仓库",

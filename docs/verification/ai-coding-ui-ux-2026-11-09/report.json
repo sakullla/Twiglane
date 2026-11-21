@@ -34,12 +34,18 @@
     "capturedAt": "2026-11-10T00:01:06.482Z",
     "fresh": true,
     "groups": {
+      "baseline": 8,
+      "failure": 11,
+      "markdown": 2
+    },
+    "files": 21,
+    "exitCode": 0,
+    "capturedFiles": 84,
+    "capturedGroups": {
       "baseline": 32,
       "markdown": 8,
       "failure": 44
-    },
-    "files": 84,
-    "exitCode": 0
+    }
   },
   "limits": [
     "浏览器 + mock 数据：不代表真实 Git 行为、桌面 WebView、安装包或其它平台。",

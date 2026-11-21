@@ -315,6 +315,41 @@ describe("原生状态测量", () => {
       selectionAfter: "unstaged:a.txt",
     })));
   });
+
+  it("已有仓库时等待本次大仓库读取，再用焦点、取消和切换完成测量", async () => {
+    const slowRepo = "C:/work/large";
+    const nextRepo = "C:/work/next";
+    let finishSlowRead: (() => void) | undefined;
+    mocks.openRepository.mockImplementation((path: string) => {
+      const result = {
+        summary: { name: path.split("/").at(-1), path },
+        generation: snapshot.generation,
+        snapshot,
+        draft: "",
+        watchDegraded: false,
+      };
+      if (path !== slowRepo) return Promise.resolve(result);
+      return new Promise((resolve) => { finishSlowRead = () => resolve(result); });
+    });
+    mocks.cancelReads.mockImplementation(async () => {
+      const finish = finishSlowRead;
+      finishSlowRead = undefined;
+      finish?.();
+    });
+    mocks.measureProbe.mockResolvedValue({ enabled: true, script: { steps: [
+      { op: "open", repo: repoPath, expectChanges: changes.length },
+      { op: "cancel-open", slowRepo, nextRepo },
+    ] } });
+    render(App);
+    try {
+      await waitFor(() => expect(mocks.measureSample).toHaveBeenCalledWith("cancel-open", expect.objectContaining({
+        contentOk: true, readStarted: true, keyboard: true, cancelled: true, switched: true,
+      })));
+      expect(mocks.openRepository.mock.calls.map(([path]) => path)).toEqual([repoPath, slowRepo, slowRepo, nextRepo]);
+    } finally {
+      finishSlowRead?.();
+    }
+  });
 });
 
 async function dragEvent(name: "enter" | "leave" | "drop", paths: string[] = []) {

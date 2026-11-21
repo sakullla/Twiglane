@@ -394,7 +394,6 @@
   let pending = $state<string | null>(null);
   let reading = $state(false);
   let readSerial = 0;
-  let readPhase: "idle" | "reading" | "settled" = "idle";
   let dependencyOpen = $state(false);
   let historyPanel = $state<Promise<typeof import("./lib/components/HistoryPanel.svelte")> | null>(null);
   /**
@@ -3482,7 +3481,7 @@
     return true;
   }
 
-  async function openRecent(path: string) {
+  async function openRecent(path: string, onReadStart?: (serial: number) => void) {
     // 任何确认层/任务弹窗打开时都不切换仓库：旧确认层不能留在新仓库上继续生效。
     if (openModalCount() > 0) {
       notice("请先关闭当前对话框，再切换仓库。");
@@ -3501,7 +3500,6 @@
     }
     const serial = ++readSerial;
     reading = true;
-    readPhase = "idle";
     stopRefreshIndicator();
     live = "正在读取仓库状态";
     try {
@@ -3509,8 +3507,9 @@
       if (serial !== readSerial) return;
       await api.cancelReads();
       if (serial !== readSerial) return;
-      readPhase = "reading";
-      const openedRepo = await api.openRepository(path, nextId());
+      const request = api.openRepository(path, nextId());
+      onReadStart?.(serial);
+      const openedRepo = await request;
       if (serial !== readSerial) return;
       banner = null;
       rememberOpened(openedRepo);
@@ -3526,7 +3525,6 @@
     } finally {
       if (serial === readSerial) {
         reading = false;
-        readPhase = "settled";
       }
     }
   }
@@ -4269,12 +4267,7 @@
     return { samples, painted, operations, started };
   }
 
-  async function keyboardAndTheme() {
-    const themes: string[] = [];
-    await changeTheme("light");
-    themes.push(document.documentElement.dataset.theme ?? "");
-    await changeTheme("dark");
-    themes.push(document.documentElement.dataset.theme ?? "");
+  async function measurePaletteFocus() {
     const mac = /Mac|iPhone|iPad/.test(navigator.platform);
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: mac, ctrlKey: !mac, bubbles: true }));
     await tick();
@@ -4282,7 +4275,16 @@
     const shortcutFocused = input !== null && document.activeElement === input;
     input?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
     await tick();
+    return shortcutFocused;
+  }
 
+  async function keyboardAndTheme() {
+    const themes: string[] = [];
+    await changeTheme("light");
+    themes.push(document.documentElement.dataset.theme ?? "");
+    await changeTheme("dark");
+    themes.push(document.documentElement.dataset.theme ?? "");
+    const shortcutFocused = await measurePaletteFocus();
     const list = document.querySelector<HTMLElement>('[data-view-scope="changes"][data-active="true"] .file-list');
     list?.focus();
     const press = (key: string) => list?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
@@ -4307,50 +4309,44 @@
     };
   }
 
-  async function waitUntilRepositoryRead(opening: Promise<unknown>) {
-    const started = performance.now();
-    while (performance.now() - started < 15000) {
-      if (readPhase === "reading") return true;
-      if (readPhase === "settled") return false;
-      await sleep(5);
-    }
-    await opening.catch(() => undefined);
-    return false;
+  function startMeasuredRead(path: string) {
+    let markStarted!: (serial: number) => void;
+    const started = new Promise<number>((resolve) => { markStarted = resolve; });
+    const opening = openRecent(path, markStarted);
+    return { opening, started: Promise.race([started, opening.then(() => null)]) };
   }
 
   async function cancelDuringOpen(slowRepo: string, nextRepo: string) {
     const normalizePath = (value: string) => value.replace(/\/+$/, "").replace(/^\/private/, "");
-    const opening = openRecent(slowRepo);
-    const sawRead = await waitUntilRepositoryRead(opening);
+    const first = startMeasuredRead(slowRepo);
+    const firstSerial = await first.started;
     let keyboard = false;
-    if (sawRead && readPhase === "reading") {
-      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, ctrlKey: true, bubbles: true }));
-      keyboard = Boolean(paletteInput()) && document.activeElement === paletteInput() && readPhase === "reading";
-      paletteOpen = false;
+    let clickedCancel = false;
+    if (reading && firstSerial === readSerial) {
+      keyboard = (await measurePaletteFocus()) && reading && firstSerial === readSerial;
       const cancelButton = [...document.querySelectorAll("button")].find((button) => button.textContent?.includes("取消读取"));
-      if (cancelButton instanceof HTMLButtonElement && !cancelButton.disabled && readPhase === "reading") cancelButton.click();
-      else await cancelReading();
+      if (cancelButton && !cancelButton.disabled && reading && firstSerial === readSerial) {
+        clickedCancel = true;
+        cancelButton.click();
+      }
     }
-    await opening;
+    await first.opening;
     const cancelled =
-      sawRead &&
+      clickedCancel &&
       live.includes("已取消读取") &&
       normalizePath(opened?.summary.path ?? "") !== normalizePath(slowRepo);
-    const openingSlow = openRecent(slowRepo);
-    const sawReadAgain = await waitUntilRepositoryRead(openingSlow);
-    let switchedDuringRead = false;
-    if (sawReadAgain && readPhase === "reading") {
-      switchedDuringRead = true;
-      await openRecent(nextRepo);
-    }
-    await openingSlow;
+    const second = startMeasuredRead(slowRepo);
+    const secondSerial = await second.started;
+    const switchedDuringRead = reading && secondSerial === readSerial;
+    if (switchedDuringRead) await openRecent(nextRepo);
+    await second.opening;
     const switched =
       switchedDuringRead && Boolean(opened && normalizePath(opened.summary.path) === normalizePath(nextRepo));
     return {
       cancelled,
       switched,
       keyboard,
-      readStarted: sawRead && sawReadAgain,
+      readStarted: firstSerial !== null && secondSerial !== null,
     };
   }
 

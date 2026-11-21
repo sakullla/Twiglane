@@ -4,6 +4,8 @@ use crate::error::AppError;
 
 use super::*;
 
+const TOKEN: &str = "gitea-token-1234567890";
+
 struct Harness {
     fixture: crate::test_support::GitFixture,
     backend: Backend,
@@ -225,10 +227,11 @@ async fn gitea_create_sends_token_header_and_accepts_201_link() {
 
 #[tokio::test]
 async fn ordinary_failures_are_classified_and_never_fall_back() {
+    const TOKEN: &str = "gitea-token-1234567890";
     for (status, expected) in [
         (401, "change_request_auth"),
         (403, "change_request_permission"),
-        // 孤立 404 是普通失败：不当作“不支持”，也不打开网页。
+        // 创建 404 但列表路由可用（探测 200）：仍是普通失败，不打开网页。
         (404, "change_request_not_found"),
         (409, "change_request_conflict"),
         (422, "change_request_invalid"),
@@ -243,12 +246,18 @@ async fn ordinary_failures_are_classified_and_never_fall_back() {
             "api/v1",
             gitea_discovery(),
             |base| {
-                vec![
+                let mut replies = vec![
                     reply(200, &filled(GITEA_META, base)),
                     reply(status, "{\"message\":\"boom\"}"),
-                ]
+                ];
+                if status == 404 {
+                    // 创建 404 之后一定会做一次列表探测：列表本身可用，说明
+                    // 路由存在，因此仍是普通失败，不构成能力不支持的证据。
+                    replies.push(reply(200, "[]"));
+                }
+                replies
             },
-            Some("gitea-token-1234567890"),
+            Some(TOKEN),
             512 * 1024,
             2000,
         );
@@ -263,8 +272,28 @@ async fn ordinary_failures_are_classified_and_never_fall_back() {
             Err(error) => error,
         };
         assert_eq!(error.code, expected, "HTTP {status}: {}", error.message);
-        let (requests, _) = probe.finish();
-        assert_eq!(requests.len(), 4, "HTTP {status} 只发一次创建请求");
+        let (requests, extra) = probe.finish();
+        let expected_requests = if status == 404 { 5 } else { 4 };
+        assert_eq!(
+            requests.len(),
+            expected_requests,
+            "HTTP {status} 只发一次创建请求"
+        );
+        assert_eq!(extra, 0, "HTTP {status} 不得自动重试");
+        assert_eq!(
+            requests.iter().filter(|request| request.method == "POST").count(),
+            1,
+            "HTTP {status} 只允许一次 POST"
+        );
+        if status == 404 {
+            // 探测是同一集合路由的 GET，且沿用同一份认证。
+            assert_eq!(requests[4].method, "GET");
+            assert_eq!(requests[4].path, "/api/v1/repos/acme/app/pulls");
+            assert_eq!(
+                requests[4].header("authorization"),
+                Some(&format!("token {TOKEN}")[..])
+            );
+        }
     }
 }
 
@@ -322,6 +351,223 @@ async fn only_method_not_allowed_or_not_implemented_opens_the_web_fallback() {
         assert_eq!(requests.len(), 4);
         assert_eq!(requests[3].method, "POST");
         assert_eq!(extra, 0);
+    }
+}
+
+#[tokio::test]
+async fn create_404_with_missing_list_route_falls_back() {
+    // 旧实例缺少创建路由时会回 404；同一条集合路由的 GET 也缺失才算能力证据。
+    for status in [404, 405, 501] {
+        let probe = harness(
+            "cr-route-missing",
+            "gitea",
+            "api/v1",
+            gitea_discovery(),
+            |base| {
+                vec![
+                    reply(200, &filled(GITEA_META, base)),
+                    reply(404, "{\"message\":\"Not Found\"}"),
+                    reply(status, "{\"message\":\"unsupported\"}"),
+                ]
+            },
+            Some(TOKEN),
+            512 * 1024,
+            2000,
+        );
+        let base = probe.base.clone();
+        let pending = fallback(probe.create("标题", "main", "描述").await.unwrap());
+        assert_eq!(
+            pending.url,
+            format!(
+                "{base}/acme/app/compare/main...feature?expand=1&title=%E6%A0%87%E9%A2%98&body=%E6%8F%8F%E8%BF%B0"
+            )
+        );
+        let (requests, extra) = probe.finish();
+        assert_eq!(extra, 0, "探测不能带来重试");
+        assert_eq!(requests.len(), 5, "探测只多一次 GET");
+        assert_eq!(
+            requests.iter().filter(|request| request.method == "POST").count(),
+            1,
+            "POST 只发一次，不因探测重发创建请求"
+        );
+        assert_eq!(requests[4].method, "GET");
+        assert_eq!(requests[4].path, "/api/v1/repos/acme/app/pulls");
+        assert_eq!(
+            requests[4].header("authorization"),
+            Some(&format!("token {TOKEN}")[..])
+        );
+    }
+}
+
+#[tokio::test]
+async fn create_404_with_usable_or_unclear_list_route_never_falls_back() {
+    // 列表路由可用、认证/权限/限流/未知响应都不能证明创建路由缺失。
+    for status in [200, 401, 403, 429, 500] {
+        let probe = harness(
+            "cr-route-present",
+            "gitea",
+            "api/v1",
+            gitea_discovery(),
+            |base| {
+                vec![
+                    reply(200, &filled(GITEA_META, base)),
+                    reply(404, "{\"message\":\"Not Found\"}"),
+                    reply(status, "[]"),
+                ]
+            },
+            Some(TOKEN),
+            512 * 1024,
+            2000,
+        );
+        let error = match probe.create("标题", "main", "描述").await {
+            Ok(decision) => panic!(
+                "列表路由 HTTP {status} 不构成能力证据：{}",
+                match decision {
+                    CreateDecision::Created(outcome) => outcome.url,
+                    CreateDecision::Fallback(pending) => pending.url,
+                }
+            ),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "change_request_not_found", "HTTP {status}");
+        let (requests, extra) = probe.finish();
+        assert_eq!(extra, 0, "HTTP {status} 不得自动重试");
+        assert_eq!(requests.len(), 5, "HTTP {status} 只多一次探测 GET");
+        assert_eq!(
+            requests.iter().filter(|request| request.method == "POST").count(),
+            1,
+            "HTTP {status} 只允许一次 POST"
+        );
+    }
+}
+
+#[tokio::test]
+async fn route_probe_network_failure_never_falls_back() {
+    // 探测本身中断时没有能力证据：保持普通失败，也不报告结果未知。
+    let probe = harness(
+        "cr-route-network",
+        "gitea",
+        "api/v1",
+        gitea_discovery(),
+        |base| {
+            vec![
+                reply(200, &filled(GITEA_META, base)),
+                reply(404, "{\"message\":\"Not Found\"}"),
+                reply(200, "[]").slow(400),
+            ]
+        },
+        Some(TOKEN),
+        512 * 1024,
+        150,
+    );
+    let error = match probe.create("标题", "main", "描述").await {
+        Ok(decision) => panic!(
+            "探测超时不能回退：{}",
+            match decision {
+                CreateDecision::Created(outcome) => outcome.url,
+                CreateDecision::Fallback(pending) => pending.url,
+            }
+        ),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, "change_request_not_found");
+    let (requests, extra) = probe.finish();
+    assert_eq!(extra, 0);
+    assert_eq!(
+        requests.iter().filter(|request| request.method == "POST").count(),
+        1,
+        "探测失败也不能重发 POST"
+    );
+}
+
+#[tokio::test]
+async fn route_probe_asks_each_provider_list_route_with_the_same_auth() {
+    struct Case {
+        label: &'static str,
+        provider: &'static str,
+        api: &'static str,
+        discovery: fn() -> Vec<Reply>,
+        meta: &'static str,
+        list_path: &'static str,
+        auth_name: &'static str,
+        auth_value: &'static str,
+    }
+    let cases = [
+        Case {
+            label: "cr-probe-github",
+            provider: "github",
+            api: "api/v3",
+            discovery: github_enterprise_discovery,
+            meta: "{\"html_url\":\"{base}/acme/app\",\"default_branch\":\"main\"}",
+            list_path: "/api/v3/repos/acme/app/pulls",
+            auth_name: "authorization",
+            auth_value: "Bearer gitea-token-1234567890",
+        },
+        Case {
+            label: "cr-probe-gitlab",
+            provider: "gitlab",
+            api: "api/v4",
+            discovery: gitlab_discovery,
+            meta: GITLAB_META,
+            list_path: "/api/v4/projects/acme%2Fapp/merge_requests",
+            auth_name: "PRIVATE-TOKEN",
+            auth_value: "gitea-token-1234567890",
+        },
+        Case {
+            label: "cr-probe-gitea",
+            provider: "gitea",
+            api: "api/v1",
+            discovery: gitea_discovery,
+            meta: GITEA_META,
+            list_path: "/api/v1/repos/acme/app/pulls",
+            auth_name: "authorization",
+            auth_value: "token gitea-token-1234567890",
+        },
+    ];
+    for case in cases {
+        let reply_meta = case.meta;
+        let probe = harness(
+            case.label,
+            case.provider,
+            case.api,
+            (case.discovery)(),
+            |base| {
+                vec![
+                    reply(200, &filled(reply_meta, base)),
+                    reply(404, "{\"message\":\"Not Found\"}"),
+                    reply(404, "{\"message\":\"Not Found\"}"),
+                ]
+            },
+            Some(TOKEN),
+            512 * 1024,
+            2000,
+        );
+        let base = probe.base.clone();
+        let pending = fallback(probe.create("标题", "main", "描述").await.unwrap());
+        assert!(
+            pending.url.starts_with(&format!("{base}/acme/app")),
+            "{} 回退到该实例的创建网页：{}",
+            case.label,
+            pending.url
+        );
+        let (requests, extra) = probe.finish();
+        assert_eq!(extra, 0, "{} 不得自动重试", case.label);
+        let posts = requests
+            .iter()
+            .filter(|request| request.method == "POST")
+            .collect::<Vec<_>>();
+        assert_eq!(posts.len(), 1, "{} 只允许一次 POST", case.label);
+        // 探测与创建指向同一条集合路由。
+        assert_eq!(posts[0].path, case.list_path, "{}", case.label);
+        let probed = requests.last().unwrap();
+        assert_eq!(probed.method, "GET", "{}", case.label);
+        assert_eq!(probed.path, case.list_path, "{}", case.label);
+        assert_eq!(
+            probed.header(case.auth_name),
+            Some(case.auth_value),
+            "{} 探测沿用同一份认证",
+            case.label
+        );
     }
 }
 

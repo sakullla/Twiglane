@@ -1,9 +1,11 @@
 //! 三个平台的创建适配器。平台差异（认证头、路径、字段、结果链接字段）只留在
 //! 这里；上层只看到统一的成功链接或统一分类的失败。
 //!
-//! 成功只接受 201、可解析对象、同一实例的可信 HTTP(S) 链接。只有创建路由明确
-//! 回“方法不支持/未实现”（405 / 501）才算能力不支持，孤立 404、认证、权限、
-//! 限流、超时和未知响应都不回退。
+//! 成功只接受 201、可解析对象、同一实例的可信 HTTP(S) 链接。能力不支持的证据
+//! 只有两种：创建路由直接回“方法不支持/未实现”（405 / 501），或创建路由回 404
+//! 之后、同一实例的列表路由也用同一份认证与限界回“不存在/方法不支持/未实现”
+//! （404 / 405 / 501）。孤立 404、列表可用、认证、权限、限流、网络失败、超时和
+//! 未知响应都不回退。
 
 use serde_json::{json, Value};
 
@@ -66,7 +68,9 @@ impl Provider {
         }
     }
 
-    fn create_url(self, repo: &Repository) -> String {
+    /// 创建与列表是同一条集合路由：POST 创建，GET 列表。把两者绑在一个方法上，
+    /// 能力探测才能保证问的是“创建失败的那条路由还在不在”。
+    fn collection_url(self, repo: &Repository) -> String {
         match self {
             Provider::GitLab => format!(
                 "{}/projects/{}/merge_requests",
@@ -204,10 +208,13 @@ async fn create_inner(
     title: &str,
     body: &str,
 ) -> Result<CreateAttempt, AppError> {
-    let url = repo.provider.create_url(repo);
+    let url = repo.provider.collection_url(repo);
     let payload = repo.provider.create_body(source, target, title, body);
     let headers = auth_headers(repo.provider, token)?;
-    let reply = http.send("POST", &url, headers, Some(&payload)).await?;
+    // 探测要复用同一份认证头，但 POST 只发一次：这里克隆，不重发创建请求。
+    let reply = http
+        .send("POST", &url, headers.clone(), Some(&payload))
+        .await?;
     match reply.status {
         201 => {
             let Some(json) = reply.json() else {
@@ -231,7 +238,30 @@ async fn create_inner(
             Ok(CreateAttempt::Created(link))
         }
         405 | 501 => Ok(CreateAttempt::Unsupported),
+        404 => {
+            // 仓库元数据阶段已经用同一次认证确认过仓库可见，此处的 404 可能是
+            // 旧实例缺少创建路由，但孤立 404 本身不能证明这件事。再用同一条集合
+            // 路由做一次列表探测，只有列表路由也明确缺失才判定能力不支持。
+            if list_route_missing(http, &url, headers).await {
+                Ok(CreateAttempt::Unsupported)
+            } else {
+                Err(classify(&reply, repo.provider).into_error())
+            }
+        }
         _ => Err(classify(&reply, repo.provider).into_error()),
+    }
+}
+
+/// 创建路由返回 404 后的保守能力探测：对同一实例的同一条集合路由发一次 GET，
+/// 沿用创建请求的认证头与同一个限界 HTTP 客户端。
+///
+/// 只有列表路由本身也明确回“不存在/方法不支持/未实现”（404 / 405 / 501）才算
+/// 能力证据。列表可用、认证/权限/限流/未知响应，或探测自身网络失败，都说明
+/// 证据不足，保持普通失败、不回退。探测不重发 POST，也不消耗额外重试。
+async fn list_route_missing(http: &Http, url: &str, headers: Vec<(&'static str, String)>) -> bool {
+    match http.send("GET", url, headers, None).await {
+        Ok(reply) => matches!(reply.status, 404 | 405 | 501),
+        Err(_) => false,
     }
 }
 

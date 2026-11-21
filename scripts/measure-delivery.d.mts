@@ -4,6 +4,12 @@ export function remoteKind(url: string): "https" | "ssh" | "local";
 
 export function resetSampleLog(file: string): void;
 
+export function bundlePaths(roots?: string[]): {
+  app: string | null;
+  dmg: string | null;
+  nsis: string | null;
+};
+
 export function startupTiming(
   samples: Array<{
     name?: string;

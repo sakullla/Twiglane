@@ -1,7 +1,7 @@
 {
   "format": "twiglane-remote-worktree-evidence/v1",
   "source": {
-    "twiglane": "064575de8e81beed42a240fad763589dfb315ee4",
+    "twiglane": "6cc410c7409ae05850786287bf5e1387e507f6fa",
     "cliora": "cf2347d8db9c0ef72ca69edb24969d014c4a4268"
   },
   "ssh": {
@@ -22,24 +22,24 @@
       "profile": "baseline",
       "configuredBytesPerSec": null,
       "oneWayDelayMs": 0,
-      "observedRoundTripMs": 5,
+      "observedRoundTripMs": 4,
       "lists": [
         {
           "files": 5,
-          "elapsedMs": 12,
+          "elapsedMs": 13,
           "downBytes": 516,
           "rpcCount": 1
         },
         {
           "files": 252,
-          "elapsedMs": 17,
+          "elapsedMs": 18,
           "downBytes": 8076,
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 16,
+      "smallDiffMs": 19,
       "smallDiffDownBytes": 284,
-      "switchMs": 22,
+      "switchMs": 23,
       "switchDownBytes": 432,
       "oldReply": "superseded",
       "sshUp": 5478,
@@ -49,34 +49,34 @@
       "profile": "high-rtt",
       "configuredBytesPerSec": null,
       "oneWayDelayMs": 400,
-      "observedRoundTripMs": 809,
+      "observedRoundTripMs": 807,
       "lists": [
         {
           "files": 5,
-          "elapsedMs": 815,
+          "elapsedMs": 817,
           "downBytes": 516,
           "rpcCount": 1
         },
         {
           "files": 252,
-          "elapsedMs": 819,
+          "elapsedMs": 827,
           "downBytes": 8076,
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 819,
+      "smallDiffMs": 821,
       "smallDiffDownBytes": 284,
-      "switchMs": 827,
+      "switchMs": 840,
       "switchDownBytes": 432,
       "oldReply": "superseded",
-      "sshUp": 5522,
+      "sshUp": 5478,
       "sshDown": 35673
     },
     {
       "profile": "low-bw",
       "configuredBytesPerSec": 32768,
       "oneWayDelayMs": 0,
-      "observedRoundTripMs": 11,
+      "observedRoundTripMs": 14,
       "lists": [
         {
           "files": 5,
@@ -86,72 +86,72 @@
         },
         {
           "files": 252,
-          "elapsedMs": 273,
+          "elapsedMs": 271,
           "downBytes": 8076,
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 37,
+      "smallDiffMs": 68,
       "smallDiffDownBytes": 284,
-      "switchMs": 703,
-      "switchDownBytes": 22264,
-      "oldReply": "one_page",
+      "switchMs": 66,
+      "switchDownBytes": 432,
+      "oldReply": "superseded",
       "sshUp": 5522,
-      "sshDown": 57505
+      "sshDown": 35673
     },
     {
       "profile": "combined",
       "configuredBytesPerSec": 32768,
       "oneWayDelayMs": 400,
-      "observedRoundTripMs": 813,
+      "observedRoundTripMs": 830,
       "lists": [
         {
           "files": 5,
-          "elapsedMs": 834,
+          "elapsedMs": 838,
           "downBytes": 516,
           "rpcCount": 1
         },
         {
           "files": 252,
-          "elapsedMs": 1072,
+          "elapsedMs": 1073,
           "downBytes": 8076,
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 839,
+      "smallDiffMs": 853,
       "smallDiffDownBytes": 284,
-      "switchMs": 850,
+      "switchMs": 857,
       "switchDownBytes": 432,
       "oldReply": "superseded",
-      "sshUp": 5522,
+      "sshUp": 5478,
       "sshDown": 35673
     },
     {
       "profile": "stress",
       "configuredBytesPerSec": 8192,
       "oneWayDelayMs": 900,
-      "observedRoundTripMs": 1835,
+      "observedRoundTripMs": 1836,
       "lists": [
         {
           "files": 5,
-          "elapsedMs": 1892,
+          "elapsedMs": 1925,
           "downBytes": 516,
           "rpcCount": 1
         },
         {
           "files": 252,
-          "elapsedMs": 2821,
+          "elapsedMs": 2833,
           "downBytes": 8076,
           "rpcCount": 1
         }
       ],
       "smallDiffMs": 1888,
       "smallDiffDownBytes": 284,
-      "switchMs": 1938,
-      "switchDownBytes": 432,
-      "oldReply": "superseded",
+      "switchMs": 4575,
+      "switchDownBytes": 22264,
+      "oldReply": "one_page",
       "sshUp": 5522,
-      "sshDown": 35673
+      "sshDown": 57505
     }
   ],
   "protocol": {

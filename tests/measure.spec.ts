@@ -1,15 +1,15 @@
 // @vitest-environment node
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   cancelContentOk,
   feedbackContentOk,
   keyboardContentOk,
   largeSummaryContentOk,
 } from "../src/lib/measure";
-import { idleCpuPercent, measureProtocol, parseCpuTime, remoteKind, resetSampleLog, startupTiming } from "../scripts/measure-delivery.mjs";
+import { bundlePaths, idleCpuPercent, measureProtocol, parseCpuTime, remoteKind, resetSampleLog, startupTiming } from "../scripts/measure-delivery.mjs";
 
 const scratch: string[] = [];
 
@@ -18,6 +18,39 @@ afterEach(() => {
 });
 
 describe("测量口径", () => {
+  it("只采集当前版本的安装包，显式目标目录独立于共享缓存", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "twiglane-bundles-"));
+    scratch.push(dir);
+    const { productName, version } = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8"));
+    const shared = path.join(dir, "shared");
+    const selected = path.join(dir, "selected");
+    const add = (root: string, name: string, text = "") => {
+      const file = path.join(root, "release/bundle", name);
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, text);
+      return file;
+    };
+    const plist = (value: string) => `<key>CFBundleShortVersionString</key>\n<string>${value}</string>`;
+    add(shared, "macos/Billow.app/Contents/Info.plist", plist(version));
+    add(shared, `macos/${productName}.app/Contents/Info.plist`, plist("0.0.0"));
+    add(shared, "dmg/Billow_0.1.16_aarch64.dmg");
+    add(shared, `dmg/${productName}_0.0.0_aarch64.dmg`);
+    add(shared, `nsis/${productName}_0.0.0_x64-setup.exe`);
+    expect(bundlePaths([shared])).toEqual({ app: null, dmg: null, nsis: null });
+
+    const info = add(selected, `macos/${productName}.app/Contents/Info.plist`, plist(version));
+    const dmg = add(selected, `dmg/${productName}_${version}_aarch64.dmg`);
+    const nsis = add(selected, `nsis/${productName}_${version}_x64-setup.exe`);
+    const expected = { app: path.dirname(path.dirname(info)), dmg, nsis };
+    expect(bundlePaths([shared, selected])).toEqual(expected);
+    vi.stubEnv("CARGO_TARGET_DIR", selected);
+    try {
+      expect(bundlePaths()).toEqual(expected);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("大文件摘要必须留下每一次截断摘要，而不是一次未缓存耗时", () => {
     const once = [85];
     const thirty = Array.from({ length: 30 }, () => true);

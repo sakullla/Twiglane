@@ -222,15 +222,15 @@ function passed(id, summary, evidence) {
   return { id, status: "pass", summary, evidence };
 }
 
-function findChild(dir, suffix) {
+function findChild(dir, matches) {
   if (!existsSync(dir)) return null;
-  const name = readdirSync(dir).find((item) => item.endsWith(suffix));
+  const name = readdirSync(dir).find(matches);
   return name ? path.join(dir, name) : null;
 }
 
 function cargoBundleRoot() {
+  if (process.env.CARGO_TARGET_DIR) return [path.resolve(root, process.env.CARGO_TARGET_DIR)];
   const roots = [path.join(root, "src-tauri/target")];
-  if (process.env.CARGO_TARGET_DIR) roots.unshift(process.env.CARGO_TARGET_DIR);
   const config = path.join(os.homedir(), ".cargo/config.toml");
   if (existsSync(config)) {
     const match = readFileSync(config, "utf8").match(/target-dir\s*=\s*"([^"]+)"/);
@@ -239,15 +239,22 @@ function cargoBundleRoot() {
   return roots;
 }
 
-function bundlePaths() {
+export function bundlePaths(roots = cargoBundleRoot()) {
+  const { productName, version } = JSON.parse(readFileSync(path.join(root, "src-tauri/tauri.conf.json"), "utf8"));
+  const installer = (suffix) => (name) => name.startsWith(`${productName}_${version}_`) && name.endsWith(suffix);
   let app = null;
   let dmg = null;
   let nsis = null;
-  for (const target of cargoBundleRoot()) {
+  for (const target of roots) {
     const bundle = path.join(target, "release/bundle");
-    app ??= findChild(path.join(bundle, "macos"), ".app");
-    dmg ??= findChild(path.join(bundle, "dmg"), ".dmg") ?? findChild(path.join(bundle, "macos"), ".dmg");
-    nsis ??= findChild(path.join(bundle, "nsis"), ".exe");
+    const candidate = path.join(bundle, "macos", `${productName}.app`);
+    const plist = path.join(candidate, "Contents", "Info.plist");
+    if (!app && existsSync(plist)) {
+      const bundledVersion = readFileSync(plist, "utf8").match(/<key>CFBundleShortVersionString<\/key>\s*<string>([^<]+)<\/string>/)?.[1];
+      if (bundledVersion === version) app = candidate;
+    }
+    dmg ??= findChild(path.join(bundle, "dmg"), installer(".dmg")) ?? findChild(path.join(bundle, "macos"), installer(".dmg"));
+    nsis ??= findChild(path.join(bundle, "nsis"), installer(".exe"));
   }
   return { app, dmg, nsis };
 }

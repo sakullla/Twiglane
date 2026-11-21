@@ -1,8 +1,8 @@
 {
   "format": "twiglane-remote-worktree-evidence/v1",
   "source": {
-    "twiglane": "f83b5b83226d9e800656da6719c75cbe0f753b82",
-    "cliora": "d45491a260494ad69cd7d1a7e4ec08d3d85f84ac"
+    "twiglane": "064575de8e81beed42a240fad763589dfb315ee4",
+    "cliora": "cf2347d8db9c0ef72ca69edb24969d014c4a4268"
   },
   "ssh": {
     "platform": "Linux x86_64",
@@ -22,7 +22,7 @@
       "profile": "baseline",
       "configuredBytesPerSec": null,
       "oneWayDelayMs": 0,
-      "observedRoundTripMs": 4,
+      "observedRoundTripMs": 5,
       "lists": [
         {
           "files": 5,
@@ -32,14 +32,14 @@
         },
         {
           "files": 252,
-          "elapsedMs": 18,
+          "elapsedMs": 17,
           "downBytes": 8076,
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 18,
+      "smallDiffMs": 16,
       "smallDiffDownBytes": 284,
-      "switchMs": 23,
+      "switchMs": 22,
       "switchDownBytes": 432,
       "oldReply": "superseded",
       "sshUp": 5478,
@@ -49,24 +49,24 @@
       "profile": "high-rtt",
       "configuredBytesPerSec": null,
       "oneWayDelayMs": 400,
-      "observedRoundTripMs": 814,
+      "observedRoundTripMs": 809,
       "lists": [
         {
           "files": 5,
-          "elapsedMs": 818,
+          "elapsedMs": 815,
           "downBytes": 516,
           "rpcCount": 1
         },
         {
           "files": 252,
-          "elapsedMs": 827,
+          "elapsedMs": 819,
           "downBytes": 8076,
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 823,
+      "smallDiffMs": 819,
       "smallDiffDownBytes": 284,
-      "switchMs": 831,
+      "switchMs": 827,
       "switchDownBytes": 432,
       "oldReply": "superseded",
       "sshUp": 5522,
@@ -76,7 +76,7 @@
       "profile": "low-bw",
       "configuredBytesPerSec": 32768,
       "oneWayDelayMs": 0,
-      "observedRoundTripMs": 13,
+      "observedRoundTripMs": 11,
       "lists": [
         {
           "files": 5,
@@ -86,41 +86,41 @@
         },
         {
           "files": 252,
-          "elapsedMs": 270,
+          "elapsedMs": 273,
           "downBytes": 8076,
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 38,
+      "smallDiffMs": 37,
       "smallDiffDownBytes": 284,
-      "switchMs": 52,
-      "switchDownBytes": 432,
-      "oldReply": "superseded",
-      "sshUp": 5478,
-      "sshDown": 35673
+      "switchMs": 703,
+      "switchDownBytes": 22264,
+      "oldReply": "one_page",
+      "sshUp": 5522,
+      "sshDown": 57505
     },
     {
       "profile": "combined",
       "configuredBytesPerSec": 32768,
       "oneWayDelayMs": 400,
-      "observedRoundTripMs": 814,
+      "observedRoundTripMs": 813,
       "lists": [
         {
           "files": 5,
-          "elapsedMs": 836,
+          "elapsedMs": 834,
           "downBytes": 516,
           "rpcCount": 1
         },
         {
           "files": 252,
-          "elapsedMs": 1071,
+          "elapsedMs": 1072,
           "downBytes": 8076,
           "rpcCount": 1
         }
       ],
       "smallDiffMs": 839,
       "smallDiffDownBytes": 284,
-      "switchMs": 853,
+      "switchMs": 850,
       "switchDownBytes": 432,
       "oldReply": "superseded",
       "sshUp": 5522,
@@ -130,11 +130,11 @@
       "profile": "stress",
       "configuredBytesPerSec": 8192,
       "oneWayDelayMs": 900,
-      "observedRoundTripMs": 1832,
+      "observedRoundTripMs": 1835,
       "lists": [
         {
           "files": 5,
-          "elapsedMs": 1896,
+          "elapsedMs": 1892,
           "downBytes": 516,
           "rpcCount": 1
         },
@@ -145,9 +145,9 @@
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 1905,
+      "smallDiffMs": 1888,
       "smallDiffDownBytes": 284,
-      "switchMs": 1939,
+      "switchMs": 1938,
       "switchDownBytes": 432,
       "oldReply": "superseded",
       "sshUp": 5522,

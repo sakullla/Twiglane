@@ -11,3 +11,8 @@
 - 断言只在两端各自的实现里写：本文件描述「应该发生什么」，不描述「怎么读 DTO」。
   新增场景时保持 `expect` 里只放稳定、可观察的值（文件内容、次数、错误码），
   不放 generation、时间戳这类每次运行都会变的值。
+- T3 新增的 `file-tree-edit-version` 与 `remote-pty-round-trip` 描述的是文件与终端行为：
+  远端由 `remote-agent/v2/tests/protocol.rs` 直接驱动；桌面侧的对应断言来自共享实现自己的
+  回归（`cargo test --manifest-path src-tauri/Cargo.toml git::` 覆盖 `git::files`，终端由
+  `src-tauri/src/terminal.rs` 的单元测试覆盖），因此这两条场景的本机一半是「同一份实现被覆盖」，
+  不是另写一份步骤文本。

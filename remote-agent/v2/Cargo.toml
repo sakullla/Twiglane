@@ -13,6 +13,12 @@ path = "src/main.rs"
 # 不适合在远端二进制里再跑一遍；v2 的行为由 tests/protocol.rs 以真实进程黑盒验证。
 test = false
 
+[features]
+# 远端 agent 关掉只服务桌面 webview 的那段代码（terminal.rs 的 AppEvents）。桌面 crate
+# 没有这个 feature，因此同一份共享源文件可以在这两处各自编译。
+default = ["agent"]
+agent = []
+
 [dependencies]
 base64 = "0.22"
 dunce = "1.0.5"
@@ -21,6 +27,8 @@ flate2 = "1"
 # 因此与桌面端保持同样的依赖，而不是在两边各自实现一份预览与 URL 校验。
 imagesize = "0.15"
 notify = "8.2.1"
+# 共享的 terminal.rs 用真实 PTY 管理远端 shell：会话、重放缓冲、背压和整树终止都与桌面同一份实现。
+portable-pty = "0.9"
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
@@ -42,6 +50,8 @@ tokio = { version = "1", features = [
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# 共享的 terminal.rs 在 Unix 用 sysinfo 枚举 shell 的后代进程，整树终止不依赖进程组假设。
+sysinfo = "0.31"
 
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.62.2"

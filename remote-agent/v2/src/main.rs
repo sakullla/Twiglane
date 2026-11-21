@@ -46,10 +46,18 @@ mod git;
 #[path = "../../../src-tauri/src/test_support.rs"]
 mod test_support;
 
+// 共享的终端会话管理：与桌面同一份 PTY、重放缓冲、背压与整树终止。
+// 只有「把事件广播给 webview」的 AppEvents 在 `feature = "agent"` 下不编译。
+#[allow(dead_code)]
+#[path = "../../../src-tauri/src/terminal.rs"]
+mod terminal;
+
 // 边界适配：桌面侧的 workspaces 依赖 Tauri，远端进程只需要设置模型里的占位结构。
 mod workspaces;
 
+mod events;
 mod protocol;
+mod pty;
 mod receipts;
 mod server;
 mod session;

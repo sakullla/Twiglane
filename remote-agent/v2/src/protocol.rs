@@ -9,7 +9,12 @@ use serde_json::{Map, Value};
 use crate::error::AppError;
 
 pub const PROTOCOL: u32 = 2;
-pub const MAX_REQUEST_BYTES: usize = 128 * 1024;
+/// 一条请求的上限。
+///
+/// 比 v1 的 128 KiB 宽，是因为文件保存走同一条通道：共享实现的编辑上限是 2 MiB 文本，
+/// 进 JSON 后还要按转义放大，128 KiB 会让稍大的源文件在远端永远存不进去。上限依然明确：
+/// 超过就整条拒绝，不截断正文。
+pub const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_IN_FLIGHT: usize = 16;
 const MAX_TOKEN: usize = 80;
@@ -83,6 +88,34 @@ pub const CAPABILITIES: &[&str] = &[
     "discard",
     "worktrees",
     "worktreeRemove",
+    // 文件树、正文与资源、文档来源、路径/全文搜索、内容版本（T3）
+    "directory",
+    "fileContent",
+    "filePreview",
+    "document",
+    "documentResource",
+    "documentRemoteImage",
+    "pathSearch",
+    "contentSearch",
+    "reviewToken",
+    "editSnapshot",
+    // 文件与目录写入（T3）：与 stage/commit 同一套锁、令牌与回执
+    "editSave",
+    "createEntry",
+    "copyEntry",
+    "moveEntry",
+    "deleteEntries",
+    // 远端变化事件（T3）：带仓库与单调序号的失效通知
+    "events",
+    // 远端 PTY 会话（T3）：与仓库 RPC 分离的会话 op
+    "terminalProfiles",
+    "terminalList",
+    "terminalCreate",
+    "terminalAttach",
+    "terminalInput",
+    "terminalResize",
+    "terminalRestart",
+    "terminalClose",
 ];
 
 pub struct Request {
@@ -180,6 +213,27 @@ pub fn err_frame(id: &str, error: &AppError) -> Vec<u8> {
     bounded(id, frame)
 }
 
+/// 事件帧：不携带请求 `id`，客户端按 `event` 字段分派。
+///
+/// 事件是「失效通知」，不是请求结果：与请求/响应帧在同一条通道上多路复用，丢了或重复
+/// 都不改变仓库状态，客户端只按序号前进。帧体超过单帧上限时由调用方负责切分（终端输出
+/// 按字符边界分片），这里只在真的放不下时换成一条说明情况的边界帧，绝不发送半截 JSON。
+pub fn event_frame(kind: &str, body: Map<String, Value>) -> Vec<u8> {
+    let mut frame = body;
+    frame.insert("v".into(), Value::Number(PROTOCOL.into()));
+    frame.insert("event".into(), Value::String(kind.to_string()));
+    let value = Value::Object(frame);
+    let mut bytes = serde_json::to_vec(&value).unwrap_or_default();
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        bytes = serde_json::to_vec(&serde_json::json!({
+            "v": PROTOCOL,
+            "event": kind,
+            "oversized": true,
+        }))
+        .unwrap_or_default();
+    }
+    bytes
+}
 /// 结果超出单帧上限时换成明确的错误，绝不发送半截 JSON。
 fn bounded(id: &str, frame: Value) -> Vec<u8> {
     let mut bytes = serde_json::to_vec(&frame).unwrap_or_default();

@@ -4,6 +4,13 @@
 //! （profile）由后端在固定候选里探测：Windows 依次是 PowerShell 7、Windows PowerShell 5.1、
 //! `%COMSPEC%`/`cmd.exe`、Git Bash 与 WSL；Unix 取 `$SHELL` 与 `/etc/shells` 中实际存在的
 //! shell。前端只能按 id 选择探测结果，不能传入程序名或参数。
+//!
+//! 这个文件同时被桌面库和远端 agent v2 编译（agent 用 `#[path]` 复用同一份 PTY 会话管理）。
+//! agent 进程里没有 tauri，因此只有「把事件广播给 webview」这一小段（`AppEvents`）关在
+//! `feature = "agent"` 之外；会话本身、重放缓冲、背压和整树终止都与宿主无关。
+//! 桌面 crate 没有声明 `agent` 这个 feature，所以这里按模块关闭 cfg 取值检查，否则桌面侧
+//! 会为这个不存在的 feature 名报 unexpected_cfgs。
+#![allow(unexpected_cfgs)]
 
 #[cfg(unix)]
 use std::collections::HashSet;
@@ -112,16 +119,21 @@ pub trait TerminalEvents: Send + Sync {
 }
 
 /// 生产事件出口：通过 Tauri 广播给界面。终端会话本身不依赖 Webview 生命周期。
+///
+/// 只在桌面进程里存在：远端 agent 用自己的事件出口（协议帧）实现同一个 `TerminalEvents`。
+#[cfg(not(feature = "agent"))]
 pub struct AppEvents {
     app: tauri::AppHandle,
 }
 
+#[cfg(not(feature = "agent"))]
 impl AppEvents {
     pub fn new(app: tauri::AppHandle) -> Self {
         Self { app }
     }
 }
 
+#[cfg(not(feature = "agent"))]
 impl TerminalEvents for AppEvents {
     fn output(&self, event: TerminalOutputEvent) {
         use tauri::Emitter;

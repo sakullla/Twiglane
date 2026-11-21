@@ -25,13 +25,16 @@ v1 的安装、版本握手和写入记录保持可读；v2 不读取也不 rein
 
 - 启动：`--stdio`（无参数等价）、`--version`、`--probe`。
 - 标准输入输出均为 UTF-8 JSON Lines，一问一答，响应可以乱序返回，客户端按 `id` 匹配。
-- 请求最多 128 KiB，单条响应最多 4 MiB，同一通道最多 16 个在途请求（超限返回 `remote_busy`）。
+- 请求最多 8 MiB，单条响应最多 4 MiB，同一通道最多 16 个在途请求（超限返回 `remote_busy`）。
+  8 MiB 是为了让文件保存与终端输入装得下共享实现的 2 MiB 编辑上限（JSON 转义还会放大）；
+  超过上限的整条请求被拒绝（`request_too_large`，此时回答的 `id` 是占位符 `0`，因为超限行
+  在解析出 `id` 之前就被丢掉），不截断正文，也不执行。
 - 一个进程持有一个打开的工作树；`repo` 字段必须等于打开时的规范路径。
 
 `--probe` 输出一行 JSON，供安装方在选择产物前判断目标：
 
 ``json
-{"protocol":2,"agent":"twiglane-agent/2","version":"0.3.40","os":"macos","arch":"aarch64","host":"…","git":"git version …","capabilities":["open","status","diff","stage","unstage","patch","commit","receipt","cancel","history","fileHistory","commitDetail","commitDiff","compare","commitBranches","compareFileDiff","branchList","branchState","branchTracking","fetchBranches","deleteRemoteBranch","setUpstream","associateUpstream","tagRemoteState","branchCreate","branchSwitch","branchRename","branchDelete","branchTrack","branchUpdate","branchPublish","tagState","tagCreate","tagDelete","tagPush","remoteState","remoteAdd","remoteSetUrl","fetch","pull","push","pushToRemote","publishBranch","stashState","stashSave","stashApply","stashDelete","mergePreview","mergeSession","mergeStart","mergeComplete","mergeAbort","conflictView","resolveConflict","cherryPick","revert","undoCommit","checkoutCommit","amendCommit","discard","worktrees","worktreeRemove"]}
+{"protocol":2,"agent":"twiglane-agent/2","version":"0.3.40","os":"macos","arch":"aarch64","host":"…","git":"git version …","capabilities":["open","status","diff","stage","unstage","patch","commit","receipt","cancel","history","fileHistory","commitDetail","commitDiff","compare","commitBranches","compareFileDiff","branchList","branchState","branchTracking","fetchBranches","deleteRemoteBranch","setUpstream","associateUpstream","tagRemoteState","branchCreate","branchSwitch","branchRename","branchDelete","branchTrack","branchUpdate","branchPublish","tagState","tagCreate","tagDelete","tagPush","remoteState","remoteAdd","remoteSetUrl","fetch","pull","push","pushToRemote","publishBranch","stashState","stashSave","stashApply","stashDelete","mergePreview","mergeSession","mergeStart","mergeComplete","mergeAbort","conflictView","resolveConflict","cherryPick","revert","undoCommit","checkoutCommit","amendCommit","discard","worktrees","worktreeRemove","directory","fileContent","filePreview","document","documentResource","documentRemoteImage","pathSearch","contentSearch","reviewToken","editSnapshot","editSave","createEntry","copyEntry","moveEntry","deleteEntries","events","terminalProfiles","terminalList","terminalCreate","terminalAttach","terminalInput","terminalResize","terminalRestart","terminalClose"]}
 ``
 
 ## 帧
@@ -50,7 +53,7 @@ v1 的安装、版本握手和写入记录保持可读；v2 不读取也不 rein
 | op | 其余字段 | result |
 |---|---|---|
 | hello | `client?` | `{protocol,agent,version,os,arch,host,client,capabilities,receipts:"git-common-dir",generation:"numeric",stateToken:"opaque"}` |
-| open | `path` | 打开摘要：`{repo,root,name,host,generation,stateToken,snapshot,draft,abbrevLength,watchDegraded:true,capabilities}` |
+| open | `path` | 打开摘要：`{repo,root,name,host,generation,stateToken,snapshot,draft,abbrevLength,watchDegraded,events:"notification",capabilities}`；`watchDegraded` 为真表示远端 watch 不可用，只剩显式刷新 |
 | status | `repo,generation?` | `{repo,generation,stateToken,snapshot}` |
 | diff | `repo,path,view,original?,offset?,limit?,context?,cursor?` | `{repo,path,staged,generation,stateToken,nextCursor,diff}` |
 | history | `repo,query?,offset?,scope?,author?,since?,until?,pathFilter?` | `{repo,generation,page,nextOffset}`，`page` 是桌面的 `HistoryPage` |
@@ -71,6 +74,17 @@ v1 的安装、版本握手和写入记录保持可读；v2 不读取也不 rein
 | mergeSession | `repo` | `{repo,merge}`，`merge` 是进行中的 `MergeSession`（没有进行中的操作时也返回该结构） |
 | conflictView | `repo,path` | `{repo,conflict}`，`conflict` 是 `ConflictView` |
 | worktrees | `repo,paths?` | `{repo,worktrees}`，`worktrees` 是 `WorktreeOverview`；缺省只查当前仓库 |
+| directory | `repo,relative?,includeIgnored?` | `{repo,generation,directory}`，`directory` 是 `RepositoryDirectory`（一层条目、`errors[]`、被跳过的原因） |
+| fileContent | `repo,relative,offset?,limit?` | `{repo,generation,content}`，`content` 是 `RepositoryFileContent`（`kind`、`lines`、`nextOffset`、`hasMore`、`version`） |
+| filePreview | `repo,source:{revision,path},download?` | `{repo,generation,preview}`，`preview` 是 `FilePreview`（图片/压缩包/LFS 指针；与桌面同一份大小与类型边界） |
+| document | `repo,source,mode?,offset?,limit?,expectedVersion?` | `{repo,generation,document}`，`document` 是 `RepositoryDocument`；`mode` 为 `document`（排版）或 `source`（分页源码） |
+| documentResource | `repo,source` | `{repo,generation,resource}`，`resource` 是 `FilePreview`（Markdown 内嵌图片、字体） |
+| documentRemoteImage | `repo,url` | `{repo,image}`，`image` 是 `FilePreview`；抓取发生在远端，只接受 `http(s)` 外链 |
+| pathSearch | `repo,query,directory?,includeIgnored?,limit?` | `{repo,generation,search}`，`search` 是 `RepositoryPathSearch`（`truncated` 显式标记截断） |
+| contentSearch | `repo,query,scope,includeIgnored?,limit?` | `{repo,generation,search}`，`search` 是 `RepositoryContentSearch`（`matches[].line` 从 1 起算，`skipped[]` 给出跳过原因） |
+| reviewToken | `repo,relative` | `{repo,generation,token}`，`token` 是 `RepositoryReviewToken`（只有 `current` 带 token 与 `contentVersion`） |
+| editSnapshot | `repo,relative` | `{repo,generation,edit}`，`edit` 是 `RepositoryEditSnapshot`（`digest` 是保存时要回传的预期内容版本） |
+| events | `repo,after?` | `{repo,seq,watchDegraded,resync,events[]}`；见「变化事件」 |
 | receipt | `repo,operationId` | `{receipt,operationId,repo}` 或 `{receipt:null,state:"unknown",reason:"not_recorded",operationId,repo}` |
 | cancel | `targetId` | `{targetId,cancelled:bool,remoteStopped?:bool}` |
 
@@ -130,6 +144,10 @@ v1 的安装、版本握手和写入记录保持可读；v2 不读取也不 rein
 | 历史 | `undoCommit` | `expectedHead,confirm` |
 | 历史 | `checkoutCommit` | `oid` |
 | worktree | `worktreeRemove` | `force`（只接受这四个字段，见下文） |
+| 文件 | `editSave` | `path,expectedDigest,content`（`expectedDigest` 是保存的预期内容版本） |
+| 文件 | `createEntry` | `path,kind`（`kind` 为 `file` 或 `directory`） |
+| 文件 | `copyEntry` / `moveEntry` | `source,target` |
+| 文件 | `deleteEntries` | `relatives[],permanent?`（`permanent` 缺省为假，即进系统回收站） |
 
 写入结果统一为 `{repo,generation,stateToken,receipt,<结果字段>}`，结果字段沿用本地同名 DTO：
 
@@ -147,6 +165,9 @@ v1 的安装、版本握手和写入记录保持可读；v2 不读取也不 rein
 | `amendCommit` | `amend` |
 | `discard` | `discard` |
 | `worktreeRemove` | `recent` |
+| `editSave` | `edit`（`RepositoryEditSnapshot`，含保存后的新 `digest`） |
+| `createEntry` / `copyEntry` / `moveEntry` | `snapshot` |
+| `deleteEntries` | `delete`（`BatchDeleteResult`：`deleted[]`、`skipped[]`、`failures[]`、`snapshot`） |
 
 - `patch` 用 `hunks` 或 `lines` 二选一，另一项必须缺省或为空；`snapshot` 是读取该差异时得到的
   `diff.snapshot` 令牌，写入时重新读取差异并核对，因此行身份过期会失败而不是错写。
@@ -168,6 +189,9 @@ v1 的安装、版本握手和写入记录保持可读；v2 不读取也不 rein
   在 `cancelled`、`timeout`、`network` 下回执记为 `pending`（`reason` 为真实错误码）而不是
   `failed`：远端可能已经收到这次请求。`pending` 与 `registered` 一样不能重发，只能用 `receipt`
   核对后重读状态。
+- 文件与目录写入（`editSave`、`createEntry`、`copyEntry`、`moveEntry`、`deleteEntries`）是远端
+  本地操作，不经过网络：失败记 `failed` 与该阶段的真实错误码；进程在 `registered` 与完成之间
+  崩溃时回执停在 `registered`，重连只能查询。`pending` 只用于可能已被对端收下的远程写入。
 
 ## 数值 generation 与不透明状态令牌
 
@@ -210,6 +234,59 @@ v1 的安装、版本握手和写入记录保持可读；v2 不读取也不 rein
 和多条连接看到同一份记录。进程在 `registered` 与完成之间崩溃时回执停在 `registered`，重连只能查询，
 不能重发。
 
+## 变化事件
+
+`open` 之后 agent 在远端合并文件系统变化，只推送带序号的失效通知；不开轮询，也不因为通知
+就去全量读取。
+
+- 通知帧：`{"v":2,"event":"change","repo":"<仓库键>","seq":<单调序号>,"kind":"worktree|git|mixed","paths":[...]}`。
+  没有 `id`，与请求/响应帧在同一条通道上多路复用；`seq` 从 1 开始只增不减。
+- 合并在远端完成，去抖时钟与桌面后端是同一份（`watch::DebounceClock`，同一个 300 ms 窗口）：
+  窗口内的多次写入合成一条通知；连续写入攒满 900 ms 也一定上报一次，不会被无穷的写入饿死。
+  `paths[]` 最多 16 条，只提示「哪里变了」，不是变更清单。
+- 发送队列满时这一条通知直接丢弃（它们是纯失效信号），客户端用下面的游标查询重新对齐，
+  所以丢通知既不会让界面停在过期状态，也不会触发补发历史。
+- `events {repo,after}`：返回水位 `seq`、`watchDegraded`、`resync` 和 `after` 之后的事件。
+  `after` 比保留窗口（最近 32 条）还旧时 `resync:true` 且不回事件，客户端整体重读一次当前视图。
+- `watchDegraded:true`（远端无法 watch，或环境变量 `TWIGLANE_AGENT_DISABLE_WATCH` 显式关闭）时
+  不启动任何轮询线程、也不产生通知帧：状态只在用户聚焦或显式刷新（`status`）时读取。聚焦、
+  显式刷新与通知后续读取走同一个失效入口，与本地后端「不可 watch 就只按显式刷新」一致。
+
+## 远端 PTY 会话
+
+终端是与仓库 RPC 分离的一组会话 op：普通 Git RPC 没有程序或命令字段，只有这里能把字节写进 PTY。
+
+| op | 其余字段 | result |
+|---|---|---|
+| terminalProfiles | `repo` | `{repo,profiles:[{id,label,path}]}`：远端探测到的终端类型，前端只能按 `id` 选 |
+| terminalList | `repo` | `{repo,sessions[]}`：当前工作树的会话（含已退出但保留输出的会话） |
+| terminalCreate | `repo,profile?` | `{repo,terminal}`：在仓库根启动远端登录 shell |
+| terminalAttach | `repo,sessionId` | `{repo,terminal}`：重放 + 覆盖到的 `seq`；超过单帧上限时只回尾部并置 `replayTruncated` |
+| terminalInput | `repo,sessionId,data` | `{repo,sessionId,accepted:true}` |
+| terminalResize | `repo,sessionId,rows,cols` | `{repo,sessionId,rows,cols}` |
+| terminalRestart | `repo,sessionId` | `{repo,terminal}`：只对已退出的会话生效，仍在运行时拒绝 |
+| terminalClose | `repo,sessionId` | `{repo,sessionId,closed:true}`：先终止 shell 及其子进程再移除 |
+
+- 输出帧：`{"v":2,"event":"terminalOutput","repo":…,"sessionId":…,"seq":…,"part":n,"parts":m,"data":…}`。
+  `seq` 是会话的输出序号（与 `TerminalSnapshot.seq` 同源），`part`/`parts` 把一次事件切成不超过
+  64 KiB 的片段：客户端先按 `seq` 丢旧片段，再按 `part` 组装。
+- 退出帧：`{"v":2,"event":"terminalExit","repo":…,"sessionId":…,"seq":…,"exitCode":…,"signal":…}`。
+- 背压：帧走同一条有界写通道，写不进去就阻塞 PTY 读线程，PTY 缓冲再回压到远端 shell 的写入端——
+  不静默丢字节，也不无限堆内存。重放缓冲仍有 2 MiB 上限，`terminalAttach` 只回尾部并在
+  `replayTruncated` 中说明。
+- 断线：PTY 属于 agent 进程，进程退出即会话结束。重连后旧 `sessionId` 一律返回
+  `terminal_unknown`，绝不假装原 PTY 还活着；客户端要么附着新会话，要么重建。
+- 会话按远端仓库键隔离：`repo` 与打开的工作树不一致时返回 `unknown_repo`，不会跨仓库找会话。
+
+## 安全边界
+
+- 任何 op（含终端 op）都不接受 `program`、`command`、`args`、`argv`、`shell`、`cwd`、`env`、
+  `environment` 字段：带这些字段的请求返回 `invalid_request` 且什么都不执行。终端只能按
+  `terminalProfiles` 的探测结果选 `id`，并只能写 PTY 输入（`data`）。
+- 文件与目录操作沿用共享实现的路径校验（相对路径、拒绝 `.git` 元数据、拒绝越界与符号链接
+  逃逸），二进制、非 UTF-8、超限截断与跳过原因与桌面同名 DTO 一致。
+- 远端外链图片由远端进程抓取，桌面不代理仓库或第三方网络流量；`validate_web_url` 只放行 `http(s)`。
+
 ## 与本地同效的核对方式
 
 v2 不复制 Git 语义，而是编译同一批桌面源文件，所以「同效」是按模块对齐的：
@@ -227,6 +304,12 @@ v2 不复制 Git 语义，而是编译同一批桌面源文件，所以「同效
 | 写锁、回执、未知结果 | `git::gate`、`receipts` | 钩子失败、索引锁、外部 HEAD 漂移、断线重连、并发占用锁等用例 |
 | 分支跟踪、上游关联、远端分支删除、远端标签、提交所属分支、任意两点单文件差异 | `git::sync`、`git::tags`、`git::history` | `the_window_read_entries_track_branches_tags_and_commit_membership`、`upstream_and_remote_branch_writes_go_through_shared_sync` |
 | 在途远程命令的取消 | `git::schedule`（`cancel_remote`）+ `git::runner` | `cancel_stops_an_in_flight_fetch_and_leaves_the_result_unknown` |
+| 文件树、正文分页、路径/全文搜索、内容版本 | `git::files` | `file_tree_content_and_search_reuse_the_local_dtos`、`file_writes_stay_inside_the_worktree` |
+| 文件保存与目录写入（创建/复制/移动/删除） | `git::files` + 写锁与回执 | `saving_a_file_requires_the_expected_content_version`、`folder_writes_create_copy_move_and_delete_leave_receipts` |
+| 资源预览与 Markdown 来源/资源 | `git::preview`、`git::document` | 同一批用例里经共享实现返回 `FilePreview`；桌面侧由 `cargo test --manifest-path src-tauri/Cargo.toml git::` 覆盖 |
+| 变化事件（合并、序号、降级） | `remote-agent/v2/src/events.rs`（notify） | `change_events_carry_repo_and_merge_bursts`、`watch_unavailable_degrades_to_explicit_refresh_only` |
+| 远端 PTY 会话 | `src-tauri/src/terminal.rs`（与桌面同一份 PTY/重放/背压） | `remote_pty_supports_create_attach_input_resize_restart_and_close`、`a_reconnected_agent_reports_previous_pty_sessions_as_unknown` |
+| 执行字段边界 | 协议分派 | `every_op_rejects_execution_fields`、`an_oversized_request_is_rejected_without_execution` |
 
 每条断言都读取真实 Git（`rev-parse`、`rev-list`、文件内容、`status`），而不是只看 DTO 字段，
 因此「远端返回本地同名 DTO」与「远端真的执行了这次 Git」是分别被验证的两件事。同一批共享源文件
@@ -235,13 +318,15 @@ v2 不复制 Git 语义，而是编译同一批桌面源文件，所以「同效
 跨两端的共享行为清单在 `tests/fixtures/remote-parity/scenarios.json`：每个场景有稳定的 `id`、
 步骤和 `expect`（文件内容、次数、错误码这类稳定值）。远端侧由
 `shared_parity_scenarios_drive_the_remote_agent` 直接 `include_str!` 读取该文件，按其中的期望值
-驱动冲突合并、stash 往返、worktree 增删三个场景；桌面侧按同一批 `id` 引用，不复制步骤文本。
+驱动冲突合并、stash 往返、worktree 增删、文件树/正文分页/保存版本、远端 PTY 往返五个场景；
+桌面侧按同一批 `id` 引用，不复制步骤文本。
 改期望只改这一份，避免两端各自维护一份会漂移的清单。
 
 ## 明确不在 v2 本版本内的能力
 
 - 审阅基线（`baseline`）：请求带 `baseline` 会返回 `unsupported_baseline`。
-- 远端文件变化事件：`open` 返回 `watchDegraded:true`，客户端按聚焦或显式刷新读取状态，不承诺轮询周期。
-- 文件树、文件正文、文档与资源、路径/全文搜索、终端 PTY：由后续任务在同一协议上补齐。
-- 普通 Git RPC 没有程序或命令字段：本协议不提供任意 shell。
+- 固定刷新周期或传输量阈值：变化事件只承诺「有变化就有一条失效通知」，不承诺时延或
+  单次读取大小之外的性能数字。
+- 断线期间的重连代理：agent 不保存会话状态，重连后提交 id 之外的会话身份全部作废。
+- 普通 Git RPC 没有程序或命令字段：本协议只在显式终端会话里提供 PTY 输入，不提供任意 shell。
 

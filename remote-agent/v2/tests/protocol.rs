@@ -7,6 +7,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -19,8 +20,17 @@ struct Agent {
 
 impl Agent {
     fn start(state_home: &Path, config: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_twiglane-agent-v2"))
-            .arg("--stdio")
+        Self::start_with(state_home, config, &[])
+    }
+
+    /// 带额外环境变量的启动：终端用例固定 `SHELL`，降级用例显式关掉 watch。
+    fn start_with(state_home: &Path, config: &Path, extra: &[(&str, &str)]) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_twiglane-agent-v2"));
+        command.arg("--stdio");
+        for (key, value) in extra {
+            command.env(key, value);
+        }
+        let mut child = command
             .env("XDG_STATE_HOME", state_home)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", config)
@@ -64,6 +74,28 @@ impl Agent {
             let value: Value = serde_json::from_str(&line).expect("响应必须是 JSON 行");
             assert_eq!(value["v"], json!(2), "响应必须声明 v2");
             if value["id"] == json!(id) {
+                return value;
+            }
+        }
+    }
+
+    /// 读一行并解析：响应或事件都可能是下一行（终端与变化通知会和响应交错）。
+    fn next_line(&mut self) -> Value {
+        let mut line = String::new();
+        let read = self.stdout.read_line(&mut line).expect("读通道");
+        assert!(read > 0, "agent 在回答之前关闭了输出");
+        serde_json::from_str(&line).expect("通道里的每一行都必须是 JSON")
+    }
+
+    /// 读下一条事件帧（不带 `id` 的帧）：变化通知与终端输出都走这条路。
+    fn read_event(&mut self, kind: &str) -> Value {
+        loop {
+            let mut line = String::new();
+            let read = self.stdout.read_line(&mut line).expect("读事件");
+            assert!(read > 0, "agent 在推送 {kind} 之前关闭了输出");
+            let value: Value = serde_json::from_str(&line).expect("事件必须是 JSON 行");
+            assert_eq!(value["v"], json!(2), "事件必须声明 v2");
+            if value["event"] == json!(kind) {
                 return value;
             }
         }
@@ -233,7 +265,8 @@ fn open_returns_the_full_snapshot_and_diff_pages_by_cursor() {
         .find(|file| file["path"] == json!("note.txt"))
         .unwrap();
     assert_eq!(note["unstagedLines"]["additions"], json!(2));
-    assert_eq!(opened["watchDegraded"], json!(true));
+    // T3 起远端真的推送变化事件，watch 可用时必须如实报告（不可用时才是 true）。
+    assert_eq!(opened["watchDegraded"], json!(false));
 
     let repo = fixture.repo_str();
     let token = opened["stateToken"].as_str().unwrap().to_string();
@@ -2434,6 +2467,913 @@ fn shared_parity_scenarios_drive_the_remote_agent() {
         }),
     );
     assert_eq!(refused, refusal, "主工作区不能删除自己");
+
+    // 场景四：文件树、正文分页与保存回执（T3）。
+    let scenario = find("file-tree-edit-version");
+    let expect = &scenario["expect"];
+    let file_name = expect["fileName"].as_str().unwrap().to_string();
+    let page_lines = expect["pageLines"].as_u64().unwrap() as usize;
+    let first_line = expect["firstLine"].as_str().unwrap().to_string();
+    let saved_line = expect["savedLine"].as_str().unwrap().to_string();
+    let stale_code = expect["staleSaveCode"].as_str().unwrap().to_string();
+    let receipt_state = expect["receiptState"].as_str().unwrap().to_string();
+
+    let fixture = Fixture::new("parity-io");
+    fixture.init();
+    fixture.write(&file_name, "alpha\nsecond\n");
+    fixture.commit_all("init");
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+    let token = opened["stateToken"].as_str().unwrap().to_string();
+
+    let tree = agent.ok(
+        "parity-io-dir",
+        "directory",
+        json!({ "repo": repo, "relative": "" }),
+    );
+    // directory 只列一层：仓库根下应当出现该文件的顶层目录。
+    let top = file_name.split('/').next().unwrap_or_default().to_string();
+    assert!(tree["directory"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["name"] == json!(top)));
+
+    let page = agent.ok(
+        "parity-io-page",
+        "fileContent",
+        json!({ "repo": repo, "relative": file_name, "offset": 0, "limit": page_lines }),
+    );
+    assert_eq!(
+        page["content"]["lines"].as_array().unwrap().len(),
+        page_lines,
+        "每页行数必须按 limit 生效"
+    );
+    assert_eq!(page["content"]["lines"][0], json!(first_line));
+    assert_eq!(page["content"]["hasMore"], json!(true));
+
+    let snapshot = agent.ok(
+        "parity-io-snapshot",
+        "editSnapshot",
+        json!({ "repo": repo, "relative": file_name }),
+    );
+    let digest = snapshot["edit"]["digest"].as_str().unwrap().to_string();
+    let stale = agent.error_code(
+        "parity-io-stale",
+        "editSave",
+        json!({
+            "repo": repo,
+            "operationId": "op-parity-io-stale",
+            "stateToken": token,
+            "path": file_name,
+            "expectedDigest": "0".repeat(64),
+            "content": "nope\n",
+        }),
+    );
+    assert_eq!(stale, stale_code);
+    assert_eq!(
+        std::fs::read_to_string(fixture.repo.join(&file_name)).unwrap(),
+        "alpha\nsecond\n",
+        "版本不符时不能覆盖文件"
+    );
+    let saved = agent.ok(
+        "parity-io-save",
+        "editSave",
+        json!({
+            "repo": repo,
+            "operationId": "op-parity-io-save",
+            "stateToken": token,
+            "path": file_name,
+            "expectedDigest": digest,
+            "content": format!("{first_line}\n{saved_line}\n"),
+        }),
+    );
+    assert_eq!(saved["receipt"]["state"], json!(receipt_state));
+    assert!(std::fs::read_to_string(fixture.repo.join(&file_name))
+        .unwrap()
+        .contains(&saved_line));
+
+    // 场景五：远端 PTY 往返（T3）。
+    let scenario = find("remote-pty-round-trip");
+    let expect = &scenario["expect"];
+    let echoed = expect["echoed"].as_str().unwrap().to_string();
+    let resize_rows = expect["resizeRows"].as_u64().unwrap();
+    let unknown_code = expect["unknownCode"].as_str().unwrap().to_string();
+
+    let mut agent = Agent::start_with(&fixture.state, &fixture.config, &[("SHELL", "/bin/sh")]);
+    open(&mut agent, &repo);
+    let profiles = agent.ok("parity-pty-profiles", "terminalProfiles", json!({ "repo": repo }));
+    assert!(!profiles["profiles"].as_array().unwrap().is_empty());
+    let profile = profiles["profiles"][0]["id"].as_str().unwrap().to_string();
+    let created = agent.ok(
+        "parity-pty-create",
+        "terminalCreate",
+        json!({ "repo": repo, "profile": profile }),
+    );
+    let session = created["terminal"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    agent.ok(
+        "parity-pty-input",
+        "terminalInput",
+        json!({ "repo": repo, "sessionId": session, "data": format!("echo {echoed}\n") }),
+    );
+    let mut replayed = false;
+    for _ in 0..100 {
+        let attached = agent.ok(
+            "parity-pty-attach",
+            "terminalAttach",
+            json!({ "repo": repo, "sessionId": session }),
+        );
+        if attached["terminal"]["output"]
+            .as_str()
+            .unwrap()
+            .contains(&echoed)
+        {
+            replayed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(replayed, "PTY 重放必须包含刚输入命令的输出");
+    let resized = agent.ok(
+        "parity-pty-resize",
+        "terminalResize",
+        json!({ "repo": repo, "sessionId": session, "rows": resize_rows, "cols": 100 }),
+    );
+    assert_eq!(resized["rows"], json!(resize_rows));
+    let closed = agent.ok(
+        "parity-pty-close",
+        "terminalClose",
+        json!({ "repo": repo, "sessionId": session }),
+    );
+    assert_eq!(closed["closed"], json!(true));
+    let unknown = agent.error_code(
+        "parity-pty-attach-closed",
+        "terminalAttach",
+        json!({ "repo": repo, "sessionId": session }),
+    );
+    assert_eq!(unknown, unknown_code);
+}
+
+// ---------- T3：文件树、正文、搜索、文档与保存回执 ----------
+
+/// 文件树 / 正文 / 路径搜索 / 全文搜索必须返回与桌面同名的 DTO，
+/// 并且按当前文件与当前页读取，二进制内容不冒充文本。
+#[test]
+fn file_tree_content_and_search_reuse_the_local_dtos() {
+    let fixture = Fixture::new("io-read");
+    fixture.init();
+    fixture.write("notes/a.txt", "alpha\nneedle here\nthird\n");
+    fixture.write("notes/b.txt", "beta\n");
+    std::fs::create_dir_all(fixture.repo.join("assets")).unwrap();
+    std::fs::write(fixture.repo.join("assets/logo.png"), [0x89, b'P', b'N', b'G', 0, 1, 2]).unwrap();
+    fixture.commit_all("init");
+    fixture.write("notes/a.txt", "alpha\nneedle here\nthird\nfourth\n");
+
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+
+    let tree = agent.ok("io-dir", "directory", json!({ "repo": repo, "relative": "" }));
+    let entries = tree["directory"]["entries"].as_array().unwrap();
+    assert!(entries
+        .iter()
+        .any(|entry| entry["name"] == json!("notes") && entry["kind"] == json!("directory")));
+    assert_eq!(tree["directory"]["generation"], opened["generation"]);
+
+    let first = agent.ok(
+        "io-file",
+        "fileContent",
+        json!({ "repo": repo, "relative": "notes/a.txt", "offset": 0, "limit": 2 }),
+    );
+    assert_eq!(first["content"]["kind"], json!("text"));
+    assert_eq!(first["content"]["lines"], json!(["alpha", "needle here"]));
+    assert_eq!(first["content"]["hasMore"], json!(true));
+    assert!(
+        first["content"]["version"].as_str().is_some(),
+        "正文必须带内容版本：{first}"
+    );
+    let next = first["content"]["nextOffset"].as_u64().unwrap();
+    assert_eq!(next, 2);
+
+    let second = agent.ok(
+        "io-file-2",
+        "fileContent",
+        json!({ "repo": repo, "relative": "notes/a.txt", "offset": next, "limit": 2 }),
+    );
+    assert_eq!(second["content"]["lines"], json!(["third", "fourth"]));
+    assert_eq!(second["content"]["hasMore"], json!(false));
+
+    // 二进制文件不进文本页：类型必须明确，而不是给一段替换字符。
+    let png = agent.ok(
+        "io-png",
+        "fileContent",
+        json!({ "repo": repo, "relative": "assets/logo.png" }),
+    );
+    assert_ne!(png["content"]["kind"], json!("text"));
+    assert!(png["content"]["lines"].as_array().unwrap().is_empty());
+
+    let paths = agent.ok("io-path", "pathSearch", json!({ "repo": repo, "query": "b.txt" }));
+    assert!(paths["search"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["path"] == json!("notes/b.txt")));
+
+    let text = agent.ok(
+        "io-text",
+        "contentSearch",
+        json!({ "repo": repo, "query": "needle", "scope": { "kind": "repository" } }),
+    );
+    assert!(
+        text["search"]["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| hit["path"] == json!("notes/a.txt") && hit["line"] == json!(2)),
+        "全文搜索必须给出行号：{text}"
+    );
+
+    // 审阅令牌只对当前内容给出 token，并带上内容版本。
+    let review = agent.ok(
+        "io-review",
+        "reviewToken",
+        json!({ "repo": repo, "relative": "notes/a.txt" }),
+    );
+    assert_eq!(review["token"]["state"], json!("current"));
+    assert!(review["token"]["contentVersion"].as_str().is_some());
+}
+
+/// 1x1 透明 PNG：资源预览必须真的能识别成图片，而不是「二进制」。
+const ONE_PIXEL_PNG: [u8; 67] = [
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+    0x42, 0x60, 0x82,
+];
+
+/// 资源预览、Markdown 来源与文档内嵌资源：同一份 `git::preview`/`git::document` 实现，
+/// 版本不符按 stale 拒绝，外链只放行 http(s)。
+#[test]
+fn previews_and_markdown_sources_reuse_the_local_dtos() {
+    let fixture = Fixture::new("io-document");
+    fixture.init();
+    fixture.write("README.md", "# Title\n\n![logo](assets/logo.png)\n");
+    std::fs::create_dir_all(fixture.repo.join("assets")).unwrap();
+    std::fs::write(fixture.repo.join("assets/logo.png"), ONE_PIXEL_PNG).unwrap();
+    fixture.commit_all("init");
+
+    let mut agent = fixture.agent();
+    open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+
+    let preview = agent.ok(
+        "io-preview",
+        "filePreview",
+        json!({
+            "repo": repo,
+            "source": { "revision": "HEAD", "path": "assets/logo.png" },
+        }),
+    );
+    assert_eq!(preview["preview"]["kind"], json!("image"));
+    assert!(preview["preview"]["dataUrl"]
+        .as_str()
+        .unwrap()
+        .starts_with("data:image/png"));
+
+    let document = agent.ok(
+        "io-doc",
+        "document",
+        json!({
+            "repo": repo,
+            "source": { "revision": "HEAD", "path": "README.md" },
+            "mode": "document",
+        }),
+    );
+    assert_eq!(document["document"]["kind"], json!("text"));
+    let version = document["document"]["version"].as_str().unwrap().to_string();
+    assert!(document["document"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Title"));
+
+    // 预期版本不符：必须拒绝，而不是把另一份内容当成这一份。
+    let stale = agent.error_code(
+        "io-doc-stale",
+        "document",
+        json!({
+            "repo": repo,
+            "source": { "revision": "HEAD", "path": "README.md" },
+            "mode": "source",
+            "expectedVersion": "0".repeat(64),
+        }),
+    );
+    assert_eq!(stale, "stale");
+
+    // 源码模式按页读取，仍然带同一个版本。
+    let source = agent.ok(
+        "io-doc-source",
+        "document",
+        json!({
+            "repo": repo,
+            "source": { "revision": "HEAD", "path": "README.md" },
+            "mode": "source",
+            "expectedVersion": version,
+            "limit": 1,
+        }),
+    );
+    assert_eq!(source["document"]["kind"], json!("text"));
+    assert_eq!(source["document"]["lines"].as_array().unwrap().len(), 1);
+
+    // 文档内嵌资源走同一份资源预览 DTO。
+    let resource = agent.ok(
+        "io-doc-resource",
+        "documentResource",
+        json!({
+            "repo": repo,
+            "source": { "revision": "HEAD", "path": "assets/logo.png" },
+        }),
+    );
+    assert_eq!(resource["resource"]["kind"], json!("image"));
+
+    // 外链图片只接受 http(s)：本机路径与其它协议一律拒绝。
+    let refused = agent.error_code(
+        "io-remote-image",
+        "documentRemoteImage",
+        json!({ "repo": repo, "url": "file:///etc/passwd" }),
+    );
+    assert_eq!(refused, "document_url");
+}
+
+/// 保存必须带预期内容版本：版本不符时一个字都不写；吻合时留 completed 回执，
+/// 同一 operationId 重放只回原回执。
+#[test]
+fn saving_a_file_requires_the_expected_content_version() {
+    let fixture = Fixture::new("io-save");
+    fixture.init();
+    fixture.write("notes/a.txt", "alpha\n");
+    fixture.commit_all("init");
+
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+    let token = opened["stateToken"].as_str().unwrap().to_string();
+
+    let snapshot = agent.ok(
+        "io-edit",
+        "editSnapshot",
+        json!({ "repo": repo, "relative": "notes/a.txt" }),
+    );
+    assert_eq!(snapshot["edit"]["editable"], json!(true));
+    let digest = snapshot["edit"]["digest"].as_str().unwrap().to_string();
+
+    let stale = agent.error_code(
+        "io-save-stale",
+        "editSave",
+        json!({
+            "repo": repo,
+            "operationId": "op-io-save-stale",
+            "stateToken": token,
+            "path": "notes/a.txt",
+            "expectedDigest": "0".repeat(64),
+            "content": "overwritten\n",
+        }),
+    );
+    assert_eq!(stale, "edit_conflict");
+    assert_eq!(
+        std::fs::read_to_string(fixture.repo.join("notes/a.txt")).unwrap(),
+        "alpha\n",
+        "版本不符时不能覆盖原文件"
+    );
+
+    let saved = agent.ok(
+        "io-save",
+        "editSave",
+        json!({
+            "repo": repo,
+            "operationId": "op-io-save-0001",
+            "stateToken": token,
+            "path": "notes/a.txt",
+            "expectedDigest": digest,
+            "content": "alpha\nsaved\n",
+        }),
+    );
+    assert_eq!(saved["receipt"]["state"], json!("completed"));
+    assert_eq!(
+        std::fs::read_to_string(fixture.repo.join("notes/a.txt")).unwrap(),
+        "alpha\nsaved\n"
+    );
+    let new_digest = saved["edit"]["digest"].as_str().unwrap().to_string();
+    assert_ne!(new_digest, digest, "保存后必须给出新的内容版本");
+    // 回执可核实：同一个操作 ID 再查一次仍是 completed，并带新的 HEAD 解释。
+    let receipt = agent.ok(
+        "io-save-receipt",
+        "receipt",
+        json!({ "repo": repo, "operationId": "op-io-save-0001" }),
+    );
+    assert_eq!(receipt["receipt"]["state"], json!("completed"));
+    assert_eq!(receipt["receipt"]["op"], json!("editSave"));
+
+    let replay = agent.ok(
+        "io-save-replay",
+        "editSave",
+        json!({
+            "repo": repo,
+            "operationId": "op-io-save-0001",
+            // 重放必须逐字段相同（含 stateToken）：摘要不同就是另一个请求。
+            "stateToken": token,
+            "path": "notes/a.txt",
+            "expectedDigest": digest,
+            "content": "alpha\nsaved\n",
+        }),
+    );
+    assert_eq!(replay["replayed"], json!(true));
+    assert_eq!(
+        std::fs::read_to_string(fixture.repo.join("notes/a.txt")).unwrap(),
+        "alpha\nsaved\n",
+        "重放不能再写一次"
+    );
+}
+
+/// 目录与文件的创建、复制、移动、删除都走同一套写入顺序，并各自留下回执。
+#[test]
+fn folder_writes_create_copy_move_and_delete_leave_receipts() {
+    let fixture = Fixture::new("io-folder");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+
+    let mut agent = fixture.agent();
+    open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+    let token = agent.ok("io-folder-open", "status", json!({ "repo": repo }))["stateToken"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let directory = agent.ok(
+        "io-mkdir",
+        "createEntry",
+        json!({
+            "repo": repo,
+            "operationId": "op-io-mkdir-0001",
+            "stateToken": token,
+            "path": "docs",
+            "kind": "directory",
+        }),
+    );
+    assert!(fixture.repo.join("docs").is_dir());
+    assert_eq!(directory["receipt"]["state"], json!("completed"));
+
+    let created = agent.ok(
+        "io-mkfile",
+        "createEntry",
+        json!({
+            "repo": repo,
+            "operationId": "op-io-mkfile-0001",
+            "stateToken": token_of(&directory),
+            "path": "docs/note.md",
+            "kind": "file",
+        }),
+    );
+    assert!(fixture.repo.join("docs/note.md").exists());
+    assert!(created["snapshot"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|file| file["path"] == json!("docs/note.md")));
+
+    let moved = agent.ok(
+        "io-move",
+        "moveEntry",
+        json!({
+            "repo": repo,
+            "operationId": "op-io-move-0001",
+            "stateToken": token_of(&created),
+            "source": "docs/note.md",
+            "target": "docs/moved.md",
+        }),
+    );
+    assert!(!fixture.repo.join("docs/note.md").exists());
+    assert!(fixture.repo.join("docs/moved.md").exists());
+
+    let copied = agent.ok(
+        "io-copy",
+        "copyEntry",
+        json!({
+            "repo": repo,
+            "operationId": "op-io-copy-0001",
+            "stateToken": token_of(&moved),
+            "source": "docs/moved.md",
+            "target": "docs/copy.md",
+        }),
+    );
+    assert!(fixture.repo.join("docs/copy.md").exists());
+
+    // 显式永久删除：没有回收站时不谎报，也不隐式切换模式。
+    let deleted = agent.ok(
+        "io-delete",
+        "deleteEntries",
+        json!({
+            "repo": repo,
+            "operationId": "op-io-delete-0001",
+            "stateToken": token_of(&copied),
+            "relatives": ["docs/copy.md"],
+            "permanent": true,
+        }),
+    );
+    assert!(!fixture.repo.join("docs/copy.md").exists());
+    assert_eq!(deleted["delete"]["deleted"], json!(["docs/copy.md"]));
+    assert_eq!(deleted["receipt"]["state"], json!("completed"));
+}
+
+/// 路径越界必须被共享的路径校验挡住，不能因为走远端就放过 `..`。
+#[test]
+fn file_writes_stay_inside_the_worktree() {
+    let fixture = Fixture::new("io-boundary");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+    let token = opened["stateToken"].as_str().unwrap().to_string();
+    let code = agent.error_code(
+        "io-escape",
+        "editSave",
+        json!({
+            "repo": repo,
+            "operationId": "op-io-escape-0001",
+            "stateToken": token,
+            "path": "../outside.txt",
+            "expectedDigest": "0".repeat(64),
+            "content": "x\n",
+        }),
+    );
+    assert!(
+        !code.is_empty(),
+        "越界路径必须被拒绝，而不是写入工作树之外"
+    );
+    assert!(!fixture.root.path().join("outside.txt").exists());
+}
+
+// ---------- T3：远端变化事件 ----------
+
+/// 变化事件带仓库键与单调序号，突发写入被合并，游标能对齐且不补发历史。
+#[test]
+fn change_events_carry_repo_and_merge_bursts() {
+    let fixture = Fixture::new("io-events");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+    assert_eq!(
+        opened["watchDegraded"],
+        json!(false),
+        "本机夹具应能 watch：{opened}"
+    );
+
+    for index in 0..5 {
+        fixture.write(&format!("burst-{index}.txt"), "x\n");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // 通知帧必须自己到达：不靠任何轮询请求，并且带仓库与序号。
+    let frame = agent.read_event("change");
+    assert_eq!(frame["repo"], json!(repo));
+    let first_seq = frame["seq"].as_u64().expect("事件必须带序号");
+    assert!(first_seq >= 1);
+
+    let cursor = agent.ok("io-ev-cursor", "events", json!({ "repo": repo, "after": 0 }));
+    assert_eq!(cursor["watchDegraded"], json!(false));
+    let events = cursor["events"].as_array().unwrap();
+    assert!(!events.is_empty(), "游标必须能读到已发生的失效事件");
+    assert!(
+        events.len() < 5,
+        "一次突发写入必须被合并，实际 {} 条",
+        events.len()
+    );
+    assert!(events
+        .iter()
+        .any(|event| event["seq"] == json!(first_seq)));
+    for pair in events.windows(2) {
+        assert!(
+            pair[1]["seq"].as_u64().unwrap() > pair[0]["seq"].as_u64().unwrap(),
+            "事件序号必须严格递增"
+        );
+    }
+
+    let watermark = cursor["seq"].as_u64().unwrap();
+    let drained = agent.ok(
+        "io-ev-drained",
+        "events",
+        json!({ "repo": repo, "after": watermark }),
+    );
+    assert_eq!(drained["events"], json!([]));
+    assert_eq!(drained["seq"], json!(watermark));
+    // 未来的序号不补发历史：只说明当前水位。
+    let ahead = agent.ok(
+        "io-ev-ahead",
+        "events",
+        json!({ "repo": repo, "after": watermark + 10 }),
+    );
+    assert_eq!(ahead["events"], json!([]));
+}
+
+/// watch 不可用时如实降级：没有事件，只有显式刷新能拿到新状态。
+#[test]
+fn watch_unavailable_degrades_to_explicit_refresh_only() {
+    let fixture = Fixture::new("io-events-degraded");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+
+    let mut agent =
+        Agent::start_with(&fixture.state, &fixture.config, &[("TWIGLANE_AGENT_DISABLE_WATCH", "1")]);
+    let opened = open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+    assert_eq!(opened["watchDegraded"], json!(true));
+
+    fixture.write("after.txt", "x\n");
+    std::thread::sleep(Duration::from_millis(200));
+    let cursor = agent.ok("io-deg-cursor", "events", json!({ "repo": repo, "after": 0 }));
+    assert_eq!(cursor["watchDegraded"], json!(true));
+    assert_eq!(cursor["events"], json!([]));
+    assert_eq!(cursor["seq"], json!(0));
+
+    // 降级时唯一的状态路径是显式刷新：它仍然要看到新文件。
+    let state = agent.ok("io-deg-status", "status", json!({ "repo": repo }));
+    assert!(state["snapshot"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|file| file["path"] == json!("after.txt")));
+}
+
+// ---------- T3：远端 PTY 会话 ----------
+
+/// 创建 → 输入 → 输出帧（有界、带序号）→ 附着重放 → resize → 退出 → 重启 → 关闭。
+#[test]
+fn remote_pty_supports_create_attach_input_resize_restart_and_close() {
+    let fixture = Fixture::new("io-pty");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+
+    let mut agent = Agent::start_with(&fixture.state, &fixture.config, &[("SHELL", "/bin/sh")]);
+    open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+
+    let profiles = agent.ok("pty-profiles", "terminalProfiles", json!({ "repo": repo }));
+    let profile = profiles["profiles"][0]["id"]
+        .as_str()
+        .expect("远端必须探测到至少一个终端类型")
+        .to_string();
+    let created = agent.ok(
+        "pty-create",
+        "terminalCreate",
+        json!({ "repo": repo, "profile": profile }),
+    );
+    let session = created["terminal"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(created["terminal"]["running"], json!(true));
+    assert_eq!(created["terminal"]["repoPath"], json!(repo));
+
+    // 输入后读输出帧：每帧都带仓库、会话与单调序号，并且有大小上限。
+    agent.send(
+        "pty-input",
+        "terminalInput",
+        json!({ "repo": repo, "sessionId": session, "data": "echo parity-pty\n" }),
+    );
+    let mut seen = String::new();
+    let mut largest = 0;
+    let mut last_seq = 0;
+    let mut frames = 0;
+    loop {
+        let value = agent.next_line();
+        if value["event"] == json!("terminalOutput") {
+            assert_eq!(value["repo"], json!(repo));
+            assert_eq!(value["sessionId"], json!(session));
+            let seq = value["seq"].as_u64().expect("输出帧必须带序号");
+            assert!(seq >= last_seq, "输出序号必须单调不倒退");
+            last_seq = seq;
+            let data = value["data"].as_str().unwrap_or_default();
+            largest = largest.max(data.len());
+            seen.push_str(data);
+            if seen.contains("parity-pty") {
+                break;
+            }
+        }
+        frames += 1;
+        assert!(frames < 2000, "输出帧过多，可能没有合并且没有边界");
+    }
+    assert!(largest <= 64 * 1024, "单帧输出必须有界，实际 {largest}");
+
+    let attached = agent.ok(
+        "pty-attach",
+        "terminalAttach",
+        json!({ "repo": repo, "sessionId": session }),
+    );
+    assert!(attached["terminal"]["output"]
+        .as_str()
+        .unwrap()
+        .contains("parity-pty"));
+    assert_eq!(attached["terminal"]["replayTruncated"], json!(false));
+    assert!(attached["terminal"]["seq"].as_u64().unwrap() >= 1);
+    assert!(attached["terminal"]["output"].as_str().unwrap().len() <= 512 * 1024);
+
+    let resized = agent.ok(
+        "pty-resize",
+        "terminalResize",
+        json!({ "repo": repo, "sessionId": session, "rows": 30, "cols": 100 }),
+    );
+    assert_eq!(resized["rows"], json!(30));
+
+    // 大量输出：帧仍然有界，且一个字节都不丢。
+    agent.send(
+        "pty-bulk",
+        "terminalInput",
+        json!({
+            "repo": repo,
+            "sessionId": session,
+            "data": "i=0; while [ $i -lt 3000 ]; do echo line$i; i=$((i+1)); done; echo __PARITY_DONE__\n",
+        }),
+    );
+    let mut bulk = String::new();
+    let mut largest = 0;
+    let mut guard = 0;
+    loop {
+        let value = agent.next_line();
+        if value["event"] == json!("terminalOutput") {
+            let data = value["data"].as_str().unwrap_or_default();
+            largest = largest.max(data.len());
+            bulk.push_str(data);
+            // 只在最后一行真的到达时才收尾：命令本身的回显里也有这个标记。
+            if bulk.contains("line2999") {
+                break;
+            }
+        }
+        guard += 1;
+        assert!(guard < 5000, "大量输出时的帧数没有收敛");
+    }
+    assert!(largest <= 64 * 1024, "大量输出时单帧仍须有界");
+    assert!(bulk.contains("line2999"), "终端输出不能静默丢字节");
+
+    // 退出后会话保留输出但报告为已结束。
+    agent.send(
+        "pty-exit",
+        "terminalInput",
+        json!({ "repo": repo, "sessionId": session, "data": "exit\n" }),
+    );
+    let mut exited = false;
+    for _ in 0..100 {
+        let list = agent.ok("pty-list", "terminalList", json!({ "repo": repo }));
+        let entry = list["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["sessionId"] == json!(session))
+            .cloned()
+            .expect("会话在退出后仍保留");
+        if entry["running"] == json!(false) {
+            exited = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(exited, "shell 退出后会话必须报告为已结束");
+
+    let restarted = agent.ok(
+        "pty-restart",
+        "terminalRestart",
+        json!({ "repo": repo, "sessionId": session }),
+    );
+    let replacement = restarted["terminal"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(replacement, session, "重启必须得到新的会话 id");
+    assert_eq!(restarted["terminal"]["running"], json!(true));
+    assert_eq!(restarted["terminal"]["output"], json!(""));
+
+    let closed = agent.ok(
+        "pty-close",
+        "terminalClose",
+        json!({ "repo": repo, "sessionId": replacement }),
+    );
+    assert_eq!(closed["closed"], json!(true));
+    let gone = agent.error_code(
+        "pty-attach-closed",
+        "terminalAttach",
+        json!({ "repo": repo, "sessionId": replacement }),
+    );
+    assert_eq!(gone, "terminal_unknown");
+}
+
+/// 断线后重连：旧 PTY 已经不存在，必须明确报未知，绝不假装还活着。
+#[test]
+fn a_reconnected_agent_reports_previous_pty_sessions_as_unknown() {
+    let fixture = Fixture::new("io-pty-reconnect");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+    let repo = fixture.repo_str();
+
+    let session = {
+        let mut agent =
+            Agent::start_with(&fixture.state, &fixture.config, &[("SHELL", "/bin/sh")]);
+        open(&mut agent, &repo);
+        let created = agent.ok("re-create", "terminalCreate", json!({ "repo": repo }));
+        created["terminal"]["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+        // agent 在这里被终止：等同于连接断开。
+    };
+
+    let mut agent = Agent::start_with(&fixture.state, &fixture.config, &[("SHELL", "/bin/sh")]);
+    open(&mut agent, &repo);
+    let code = agent.error_code(
+        "re-attach",
+        "terminalAttach",
+        json!({ "repo": repo, "sessionId": session }),
+    );
+    assert_eq!(code, "terminal_unknown", "重连不得假装原 PTY 仍存活");
+}
+
+/// 任何 op 都不接受执行字段：普通 RPC 不能执行程序，终端只接受 PTY 输入。
+#[test]
+fn every_op_rejects_execution_fields() {
+    let fixture = Fixture::new("io-exec");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+
+    let mut agent = fixture.agent();
+    open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+    let cases = [
+        ("status", json!({ "repo": repo, "command": "sh -c id" })),
+        ("open", json!({ "path": repo, "program": "/bin/sh" })),
+        (
+            "terminalInput",
+            json!({ "repo": repo, "sessionId": "nope", "data": "x", "args": ["-l"] }),
+        ),
+        ("terminalCreate", json!({ "repo": repo, "shell": "/bin/zsh" })),
+    ];
+    for (index, (op, fields)) in cases.iter().enumerate() {
+        let code = agent.error_code(&format!("exec-{index}"), op, fields.clone());
+        assert_eq!(code, "invalid_request", "{op} 带执行字段必须被拒绝");
+    }
+    // 终端输入本身仍然可用（这里只验证它没被执行字段检查误伤）。
+    let missing = agent.error_code(
+        "exec-terminal-ok",
+        "terminalInput",
+        json!({ "repo": repo, "sessionId": "nope", "data": "x" }),
+    );
+    assert_eq!(missing, "terminal_unknown");
+}
+
+/// 单帧上限是硬边界：超过就整条拒绝，不执行也不截断。
+#[test]
+fn an_oversized_request_is_rejected_without_execution() {
+    let fixture = Fixture::new("io-huge");
+    fixture.init();
+    fixture.write("a.txt", "a\n");
+    fixture.commit_all("init");
+
+    let mut agent = fixture.agent();
+    open(&mut agent, &fixture.repo_str());
+    let repo = fixture.repo_str();
+    let huge = "x".repeat(9 * 1024 * 1024);
+    let frame = json!({
+        "v": 2,
+        "id": "huge-1",
+        "op": "commit",
+        "repo": repo,
+        "operationId": "op-huge-0001",
+        "stateToken": "0".repeat(64),
+        "message": huge,
+    })
+    .to_string();
+    agent.stdin.write_all(frame.as_bytes()).unwrap();
+    agent.stdin.write_all(b"\n").unwrap();
+    agent.stdin.flush().unwrap();
+    // 超限行在解析前就被拒绝，因此回答的 `id` 是占位符 `0`，不能按请求 id 匹配。
+    let response = agent.next_line();
+    assert_eq!(response["ok"], json!(false));
+    assert_eq!(response["error"]["code"], json!("request_too_large"));
+    assert_eq!(response["id"], json!("0"));
 }
 
 

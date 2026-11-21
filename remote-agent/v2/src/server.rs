@@ -15,7 +15,10 @@ use serde_json::{json, Map, Value};
 use tokio::sync::{mpsc, Semaphore};
 
 use crate::error::AppError;
+use crate::events::{self, ChangeFeed};
 use crate::git::changes;
+use crate::git::document::{self, DocumentSource};
+use crate::git::files::{self, DeleteMode, RepositoryCreateEntryKind};
 use crate::git::command::common_dir_command;
 use crate::git::gate::RepoWriteLock;
 use crate::git::heads;
@@ -27,8 +30,10 @@ use crate::git::tags;
 use crate::git::worktree as worktree_ops;
 use crate::git::runner::RealRunner;
 use crate::git::schedule::{internal_request_id, JobKind};
-use crate::model::DiffLineSelection;
+use crate::model::{DiffLineSelection, RepositorySearchScope};
 use crate::protocol::{self, Request, CAPABILITIES, MAX_IN_FLIGHT, PROTOCOL};
+use crate::pty::{self, FrameEvents};
+use crate::terminal::{TerminalManager, TerminalProfile, TerminalSnapshot};
 use crate::receipts::{Receipt, ReceiptStore, COMPLETED, FAILED};
 use crate::session::{Selection, Session};
 use crate::shutdown::Shutdown;
@@ -42,6 +47,15 @@ const MAX_DIFF_LINES: u32 = 2000;
 const MAX_CONTEXT: u32 = 1_000_000;
 const WRITE_LOCK_WAIT: Duration = Duration::from_secs(10);
 const MESSAGE_LIMIT: usize = 1024 * 1024;
+/// 附着时回放的尾部预算：完整回放可能有 2 MiB，进 JSON 后还会被转义放大。
+const MAX_ATTACH_TAIL: usize = 512 * 1024;
+/// 单条附着响应的上限：给 JSON 转义与其它字段留出余量。
+const ATTACH_FRAME_LIMIT: usize = protocol::MAX_RESPONSE_BYTES - 512 * 1024;
+
+/// 普通 Git RPC 与终端 op 都拒绝的字段：任何 op 都不执行任意程序，终端只接受 PTY 输入。
+const EXEC_FIELDS: &[&str] = &[
+    "program", "command", "args", "argv", "shell", "cwd", "env", "environment",
+];
 
 /// 标准输入关闭后等待在途请求收尾的宽限时间。
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -62,6 +76,12 @@ pub struct Context {
     cancels: Mutex<HashMap<String, InFlight>>,
     slots: Arc<Semaphore>,
     out: mpsc::Sender<Vec<u8>>,
+    /// 当前仓库的变化事件源；打开新仓库时替换。
+    changes: Mutex<Option<Arc<ChangeFeed>>>,
+    /// 远端 PTY 会话：与仓库 RPC 物理分离，只有显式的终端 op 会碰它。
+    terminal: Arc<TerminalManager>,
+    /// 终端会话 → 仓库键，事件帧据此带上 `repo`。
+    terminal_repos: Arc<Mutex<HashMap<String, String>>>,
 }
 
 /// 会启动远程命令的操作：取消时必须交给共享 sync 层的取消通道，而不能只看本地标记。
@@ -126,6 +146,12 @@ enum WriteOp {
     AmendCommit,
     Discard,
     WorktreeRemove,
+    // 文件与目录写入（T3）：与 Git 写入同一套锁、令牌与回执顺序。
+    EditSave,
+    CreateEntry,
+    CopyEntry,
+    MoveEntry,
+    DeleteEntries,
 }
 
 /// 全部写入操作：`parse` 与 `name` 用同一份清单，避免协议名和执行分支各记一份。
@@ -169,6 +195,11 @@ const WRITE_OPS: &[WriteOp] = &[
     WriteOp::AmendCommit,
     WriteOp::Discard,
     WriteOp::WorktreeRemove,
+    WriteOp::EditSave,
+    WriteOp::CreateEntry,
+    WriteOp::CopyEntry,
+    WriteOp::MoveEntry,
+    WriteOp::DeleteEntries,
 ];
 
 impl WriteOp {
@@ -213,6 +244,11 @@ impl WriteOp {
             Self::AmendCommit => "amendCommit",
             Self::Discard => "discard",
             Self::WorktreeRemove => "worktreeRemove",
+            Self::EditSave => "editSave",
+            Self::CreateEntry => "createEntry",
+            Self::CopyEntry => "copyEntry",
+            Self::MoveEntry => "moveEntry",
+            Self::DeleteEntries => "deleteEntries",
         }
     }
 
@@ -247,12 +283,21 @@ pub async fn serve() -> Result<(), AppError> {
         }
     });
 
+    // 终端事件走同一条写出通道：会话、重放与背压都由共享实现负责，这里只把事件写成帧。
+    let terminal_repos = Arc::new(Mutex::new(HashMap::new()));
+    let terminal = Arc::new(TerminalManager::new(Arc::new(FrameEvents::new(
+        out.clone(),
+        Arc::clone(&terminal_repos),
+    ))));
     let context = Arc::new(Context {
         backend: Arc::new(build_backend()),
         session: Mutex::new(None),
         cancels: Mutex::new(HashMap::new()),
         slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         out,
+        changes: Mutex::new(None),
+        terminal,
+        terminal_repos,
     });
 
     let (lines, mut incoming) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -394,6 +439,22 @@ impl Context {
         }
     }
     async fn run(&self, request: &Request, cancel: &AtomicBool) -> Result<Value, AppError> {
+        // 普通 Git RPC 没有「执行程序」这一维：仓库操作只经共享 Git 实现执行。任何请求带上
+        // program/command/shell/cwd/env 都必须被拒绝；显式终端会话也不例外——它接受的是
+        // PTY 输入（data），不是要执行的程序名或参数。
+        if let Some(key) = request
+            .fields
+            .keys()
+            .find(|key| EXEC_FIELDS.contains(&key.as_str()))
+        {
+            return Err(AppError::new(
+                "invalid_request",
+                format!(
+                    "{} 不接受字段 {key}：任何 op 都不执行任意程序。",
+                    safe_op(&request.op)
+                ),
+            ));
+        }
         match request.op.as_str() {
             "hello" => self.hello(&request.fields),
             "open" => self.open(&request.fields, cancel).await,
@@ -420,6 +481,28 @@ impl Context {
             "tagRemoteState" => self.tag_remote_state(&request.fields, cancel).await,
             "commitBranches" => self.commit_branches(&request.fields, cancel).await,
             "compareFileDiff" => self.compare_file_diff(&request.fields, cancel).await,
+            // 文件树、正文与资源、文档来源、搜索与内容版本（T3）。
+            "directory" => self.directory(&request.fields, cancel).await,
+            "fileContent" => self.file_content(&request.fields, cancel).await,
+            "filePreview" => self.file_preview(&request.fields, cancel).await,
+            "document" => self.document(&request.fields, cancel).await,
+            "documentResource" => self.document_resource(&request.fields, cancel).await,
+            "documentRemoteImage" => self.document_remote_image(&request.fields, cancel).await,
+            "pathSearch" => self.path_search(&request.fields, cancel).await,
+            "contentSearch" => self.content_search(&request.fields, cancel).await,
+            "reviewToken" => self.review_token(&request.fields, cancel).await,
+            "editSnapshot" => self.edit_snapshot(&request.fields, cancel).await,
+            // 变化事件游标：通知、聚焦与显式刷新都走同一个入口。
+            "events" => self.events(&request.fields),
+            // 远端 PTY 会话（与仓库 RPC 分离）。
+            "terminalProfiles" => self.terminal_profiles(&request.fields),
+            "terminalList" => self.terminal_list(&request.fields),
+            "terminalCreate" => self.terminal_create(&request.fields).await,
+            "terminalAttach" => self.terminal_attach(&request.fields),
+            "terminalInput" => self.terminal_input(&request.fields),
+            "terminalResize" => self.terminal_resize(&request.fields),
+            "terminalRestart" => self.terminal_restart(&request.fields).await,
+            "terminalClose" => self.terminal_close(&request.fields).await,
             "receipt" => self.receipt(&request.fields),
             other => match WriteOp::parse(other) {
                 Some(op) => self.write(op, &request.fields).await,
@@ -467,6 +550,18 @@ impl Context {
             ops::state_token(&self.backend, &root, internal_request_id()).await?;
         let git_dir = self.common_dir(&root).await?;
         let session = Session::new(root, opened.summary.path.clone(), git_dir, state.clone());
+        // 变化事件源与仓库同生命周期：watch 不可用时如实降级，不启动任何轮询。
+        let feed = ChangeFeed::start(
+            &session.key,
+            &session.root,
+            &session.git_dir,
+            self.out.clone(),
+        );
+        let degraded = feed.degraded();
+        *self
+            .changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(feed);
         *self
             .session
             .lock()
@@ -484,8 +579,9 @@ impl Context {
             "snapshot": opened.snapshot,
             "draft": opened.draft,
             "abbrevLength": opened.abbrev_length,
-            // v2 的远端变化事件在后续任务接入；这里如实报告没有实时通知。
-            "watchDegraded": true,
+            // 远端变化事件经有序通知帧推送；watch 不可用时为 true，只剩显式刷新。
+            "watchDegraded": degraded,
+            "events": "notification",
             "capabilities": CAPABILITIES,
         }))
     }
@@ -1038,6 +1134,446 @@ impl Context {
             "generation": diff.generation,
             "compareFileDiff": diff,
         }))
+    }
+
+    /// 文件树：一层目录 + 被跳过条目的原因，与桌面同名 DTO。`relative` 留空表示仓库根。
+    async fn directory(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let relative = optional_text_field(fields, "relative")?.unwrap_or_default();
+        let include_ignored = bool_field(fields, "includeIgnored");
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let listing = files::repository_directory(
+            &self.backend,
+            &session.key,
+            &relative,
+            include_ignored,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({
+            "repo": session.key,
+            "generation": listing.generation,
+            "directory": listing,
+        }))
+    }
+
+    /// 文件正文：只读当前文件、只读当前页；分页游标由共享实现给出。
+    async fn file_content(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let relative = string_field(fields, "relative")?;
+        let offset = optional_u64_field(fields, "offset")?.unwrap_or(0);
+        let limit = optional_u64_field(fields, "limit")?
+            .map(|limit| limit.clamp(1, MAX_DIFF_LINES as u64) as usize);
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let content = files::repository_file_content(
+            &self.backend,
+            &session.key,
+            &relative,
+            offset,
+            limit,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({
+            "repo": session.key,
+            "generation": content.generation,
+            "content": content,
+        }))
+    }
+
+    /// 资源预览（图片、压缩包、LFS 指针）：与桌面共用同一份大小、类型与下载边界。
+    async fn file_preview(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let source: crate::git::preview::PreviewSource = deserialize_field(fields, "source")?;
+        let download = bool_field(fields, "download");
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let preview = crate::git::preview::file_preview(
+            &self.backend,
+            &session.key,
+            &source,
+            generation,
+            download,
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({
+            "repo": session.key,
+            "generation": preview.generation,
+            "preview": preview,
+        }))
+    }
+
+    /// Markdown 文档：`mode=document` 排版、`mode=source` 分页源码；版本不一致按 stale 拒绝。
+    async fn document(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let mut source: DocumentSource = deserialize_field(fields, "source")?;
+        // 来源绑定到当前打开的仓库：另一棵工作树的 source 不能被当成本仓库的文件。
+        if source.repository.is_none() {
+            source.repository = Some(session.key.clone());
+        }
+        let mode = optional_text_field(fields, "mode")?.unwrap_or_else(|| "document".to_string());
+        let offset = optional_u64_field(fields, "offset")?.unwrap_or(0);
+        let limit = optional_u64_field(fields, "limit")?.map(|limit| limit as usize);
+        let expected = optional_text_field(fields, "expectedVersion")?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let document = document::repository_document(
+            &self.backend,
+            &session.key,
+            &source,
+            generation,
+            internal_request_id(),
+            &mode,
+            offset,
+            limit,
+            expected.as_deref(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({
+            "repo": session.key,
+            "generation": document.generation,
+            "document": document,
+        }))
+    }
+
+    /// 文档内嵌资源：图片、字体等，仍走同一份资源预览 DTO 与大小上限。
+    async fn document_resource(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let mut source: DocumentSource = deserialize_field(fields, "source")?;
+        if source.repository.is_none() {
+            source.repository = Some(session.key.clone());
+        }
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let resource = document::document_resource(
+            &self.backend,
+            &session.key,
+            &source,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({
+            "repo": session.key,
+            "generation": resource.generation,
+            "resource": resource,
+        }))
+    }
+
+    /// 远端外链图片：抓取发生在远端（远端自己的网络与信任边界），不经过桌面代理。
+    async fn document_remote_image(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let url = string_field(fields, "url")?;
+        // 只接受明确的 http(s) 外链：validate_web_url 同时拒绝其它协议与本机路径。
+        document::validate_web_url(&url)?;
+        check_cancel(cancel)?;
+        let image =
+            document::document_remote_image(&self.backend, &url, internal_request_id()).await?;
+        check_cancel(cancel)?;
+        Ok(json!({
+            "repo": session.key,
+            "image": image,
+        }))
+    }
+
+    /// 路径搜索：只按当前查询和当前目录读取，结果条数有上限并显式标记截断。
+    async fn path_search(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let query = optional_text_field(fields, "query")?.unwrap_or_default();
+        let directory = optional_text_field(fields, "directory")?;
+        let include_ignored = bool_field(fields, "includeIgnored");
+        let limit = optional_u64_field(fields, "limit")?.map(|limit| limit as usize);
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let search = files::repository_path_search(
+            &self.backend,
+            &session.key,
+            &query,
+            directory.as_deref(),
+            include_ignored,
+            limit,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({
+            "repo": session.key,
+            "generation": search.generation,
+            "search": search,
+        }))
+    }
+
+    /// 全文搜索：范围是封闭类型，跳过原因与本地一致（二进制、非 UTF-8、超限、符号链接）。
+    async fn content_search(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let query = optional_text_field(fields, "query")?.unwrap_or_default();
+        let scope: RepositorySearchScope = deserialize_field(fields, "scope")?;
+        let include_ignored = bool_field(fields, "includeIgnored");
+        let limit = optional_u64_field(fields, "limit")?.map(|limit| limit as usize);
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let search = files::repository_content_search(
+            &self.backend,
+            &session.key,
+            &query,
+            scope,
+            include_ignored,
+            limit,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({
+            "repo": session.key,
+            "generation": search.generation,
+            "search": search,
+        }))
+    }
+
+    /// 单条路径的审阅令牌：内容版本与暂存状态一起回来，前端据此判断能否标记已审阅。
+    async fn review_token(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let relative = string_field(fields, "relative")?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let token = files::repository_review_token(
+            &self.backend,
+            &session.key,
+            &relative,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({
+            "repo": session.key,
+            "generation": token.generation,
+            "token": token,
+        }))
+    }
+
+    /// 编辑基线：`digest` 是保存时要回传的预期内容版本。
+    async fn edit_snapshot(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let relative = string_field(fields, "relative")?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let snapshot = files::repository_edit_snapshot(
+            &self.backend,
+            &session.key,
+            &relative,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        check_cancel(cancel)?;
+        Ok(json!({
+            "repo": session.key,
+            "generation": snapshot.generation,
+            "edit": snapshot,
+        }))
+    }
+
+    /// 变化事件游标。客户端只在收到通知、聚焦窗口或显式刷新时调用它；agent 不轮询仓库。
+    fn events(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let after = optional_u64_field(fields, "after")?.unwrap_or(0);
+        let feed = self
+            .changes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+            .ok_or_else(|| AppError::new("no_repository", "还没有打开远端工作树，请先 open。"))?;
+        if feed.key() != session.key {
+            return Err(AppError::new(
+                "unknown_repo",
+                "请求指向的仓库不是当前打开的工作树。",
+            ));
+        }
+        let reply = events::cursor(&feed, after);
+        Ok(json!({
+            "repo": session.key,
+            "seq": reply.seq,
+            "watchDegraded": reply.degraded,
+            "resync": reply.resync,
+            "events": reply.events,
+        }))
+    }
+
+    /// 远端可用的终端类型。前端只能按 id 选择，不能传程序名或参数。
+    fn terminal_profiles(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let profiles: Vec<TerminalProfile> = self.terminal.profiles();
+        Ok(json!({ "repo": session.key, "profiles": profiles }))
+    }
+
+    /// 当前仓库的终端会话（含已退出但保留输出的会话）；不带输出，附着时再取。
+    fn terminal_list(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let sessions = self.terminal.list(&session.key)?;
+        Ok(json!({ "repo": session.key, "sessions": sessions }))
+    }
+
+    /// 新建终端会话：在远端仓库根解析登录 shell，客户端不能指定程序与本机路径。
+    async fn terminal_create(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let profile = optional_text_field(fields, "profile")?;
+        let manager = Arc::clone(&self.terminal);
+        let path = session.key.clone();
+        let snapshot = tokio::task::spawn_blocking(move || {
+            manager.create(&path, profile.as_deref(), None)
+        })
+        .await
+        .map_err(|_| AppError::new("terminal_start", "终端启动被中断，未创建会话。"))??;
+        self.remember_terminal(&snapshot, &session.key)?;
+        Ok(json!({ "repo": session.key, "terminal": snapshot }))
+    }
+
+    /// 附着：返回完整重放与它覆盖到的序号。重放超过单帧上限时只回尾部并标记截短。
+    fn terminal_attach(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let id = string_field(fields, "sessionId")?;
+        let snapshot = self.terminal.attach(&id)?;
+        self.check_terminal_repo(&snapshot, &session.key)?;
+        fit_attach(&session.key, &snapshot)
+    }
+
+    /// 输入：只有显式创建的终端会话接受 PTY 输入。
+    fn terminal_input(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let id = string_field(fields, "sessionId")?;
+        let data = raw_text_field(fields, "data")?;
+        self.check_terminal_repo(&self.terminal.attach(&id)?, &session.key)?;
+        self.terminal.write(&id, &data)?;
+        Ok(json!({ "repo": session.key, "sessionId": id, "accepted": true }))
+    }
+
+    /// resize：行列数由共享实现校验上限，越界即拒绝而不是静默截断。
+    fn terminal_resize(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let id = string_field(fields, "sessionId")?;
+        let rows = optional_u64_field(fields, "rows")?.unwrap_or(0);
+        let cols = optional_u64_field(fields, "cols")?.unwrap_or(0);
+        let rows =
+            u16::try_from(rows).map_err(|_| AppError::new("terminal_size", "终端行数超出范围。"))?;
+        let cols =
+            u16::try_from(cols).map_err(|_| AppError::new("terminal_size", "终端列数超出范围。"))?;
+        self.check_terminal_repo(&self.terminal.attach(&id)?, &session.key)?;
+        self.terminal.resize(&id, rows, cols)?;
+        Ok(json!({
+            "repo": session.key,
+            "sessionId": id,
+            "rows": rows,
+            "cols": cols,
+        }))
+    }
+
+    /// 重启：只对已退出的会话生效，仍在运行时拒绝，避免替换正在跑的命令。
+    async fn terminal_restart(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let id = string_field(fields, "sessionId")?;
+        self.check_terminal_repo(&self.terminal.attach(&id)?, &session.key)?;
+        let manager = Arc::clone(&self.terminal);
+        let snapshot = tokio::task::spawn_blocking(move || manager.restart(&id))
+            .await
+            .map_err(|_| AppError::new("terminal_start", "终端重启被中断。"))??;
+        self.remember_terminal(&snapshot, &session.key)?;
+        fit_attach(&session.key, &snapshot)
+    }
+
+    /// 关闭：先终止 shell 及其子进程，确认结束后才移除会话；重复关闭是幂等的。
+    async fn terminal_close(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        let id = string_field(fields, "sessionId")?;
+        let manager = Arc::clone(&self.terminal);
+        let target = id.clone();
+        let closed = tokio::task::spawn_blocking(move || manager.close(&target))
+            .await
+            .map_err(|_| AppError::new("terminal_stop", "终端关闭被中断。"))?;
+        self.terminal_repos
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&id);
+        closed?;
+        Ok(json!({ "repo": session.key, "sessionId": id, "closed": true }))
+    }
+
+    /// 记录会话所属仓库：事件帧据此带上 `repo`，跨仓库的会话 id 不会串台。
+    fn remember_terminal(&self, snapshot: &TerminalSnapshot, key: &str) -> Result<(), AppError> {
+        if snapshot.repo_path != key {
+            return Err(AppError::new(
+                "unknown_repo",
+                "终端会话不属于当前打开的工作树。",
+            ));
+        }
+        self.terminal_repos
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(snapshot.session_id.clone(), key.to_string());
+        Ok(())
+    }
+
+    /// 会话所属仓库必须与请求的 `repo` 一致：终端不会跨仓库找会话。
+    fn check_terminal_repo(&self, snapshot: &TerminalSnapshot, key: &str) -> Result<(), AppError> {
+        if snapshot.repo_path == key {
+            Ok(())
+        } else {
+            Err(AppError::new(
+                "unknown_repo",
+                "终端会话不属于当前打开的工作树。",
+            ))
+        }
     }
 
     /// 一次写入的完整顺序：跨进程写锁 → 回执查重 → 令牌核对 → 登记 registered →
@@ -1646,6 +2182,84 @@ impl Context {
                     worktree_ops::remove_worktree(backend, path, force, request_id).await?;
                 Ok(("recent".to_string(), to_value(recent)?))
             }
+            // 文件保存：预期内容版本（digest）就是这次写入的状态前提，写前写后都要核实。
+            WriteOp::EditSave => {
+                let relative = string_field(fields, "path")?;
+                let expected = string_field(fields, "expectedDigest")?;
+                let content = raw_text_field(fields, "content")?;
+                let snapshot = files::repository_edit_save(
+                    backend,
+                    path,
+                    &relative,
+                    &expected,
+                    &content,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("edit".to_string(), to_value(snapshot)?))
+            }
+            WriteOp::CreateEntry => {
+                let relative = string_field(fields, "path")?;
+                let kind: RepositoryCreateEntryKind = deserialize_field(fields, "kind")?;
+                let snapshot = files::repository_create_entry(
+                    backend,
+                    path,
+                    &relative,
+                    kind,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("snapshot".to_string(), to_value(snapshot)?))
+            }
+            WriteOp::CopyEntry => {
+                let source = string_field(fields, "source")?;
+                let target = string_field(fields, "target")?;
+                let snapshot = files::repository_copy_entry(
+                    backend,
+                    path,
+                    &source,
+                    &target,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("snapshot".to_string(), to_value(snapshot)?))
+            }
+            WriteOp::MoveEntry => {
+                let source = string_field(fields, "source")?;
+                let target = string_field(fields, "target")?;
+                let snapshot = files::repository_move_entry(
+                    backend,
+                    path,
+                    &source,
+                    &target,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("snapshot".to_string(), to_value(snapshot)?))
+            }
+            // 删除：permanent 缺省为假，即进系统回收站；绝不隐式切换成不可恢复的删除。
+            WriteOp::DeleteEntries => {
+                let relatives = string_list_field(fields, "relatives")?;
+                let mode = if bool_field(fields, "permanent") {
+                    DeleteMode::Permanent
+                } else {
+                    DeleteMode::Trash
+                };
+                let result = files::repository_delete_entries(
+                    backend,
+                    path,
+                    &relatives,
+                    mode,
+                    generation,
+                    request_id,
+                )
+                .await?;
+                Ok(("delete".to_string(), to_value(result)?))
+            }
         }
     }
 
@@ -1872,6 +2486,50 @@ fn check_cancel(cancel: &AtomicBool) -> Result<(), AppError> {
         Err(AppError::new("cancelled", "请求已取消，未继续。"))
     } else {
         Ok(())
+    }
+}
+
+/// 反序列化一个结构字段（预览来源、搜索范围、新建类型）；形状不对就明确拒绝。
+fn deserialize_field<T: serde::de::DeserializeOwned>(
+    fields: &Map<String, Value>,
+    key: &str,
+) -> Result<T, AppError> {
+    let value = field(fields, key)
+        .ok_or_else(|| AppError::new("invalid_request", format!("缺少字段 {key}。")))?;
+    serde_json::from_value(value.clone())
+        .map_err(|_| AppError::new("invalid_request", format!("字段 {key} 的形状无效。")))
+}
+
+/// 正文类字段：允许空串与超长文本（文件内容、终端输入），只受单帧上限约束。
+/// 路径类字段仍然走带长度与 NUL 检查的 `string_field`。
+fn raw_text_field(fields: &Map<String, Value>, key: &str) -> Result<String, AppError> {
+    match field(fields, key) {
+        None => Ok(String::new()),
+        Some(value) => value
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| AppError::new("invalid_request", format!("字段 {key} 必须是字符串。"))),
+    }
+}
+
+/// 附着响应有界：先按尾部预算裁剪重放，仍超出单帧上限就继续减半，绝不发出半截 JSON。
+fn fit_attach(key: &str, snapshot: &TerminalSnapshot) -> Result<Value, AppError> {
+    let mut budget = MAX_ATTACH_TAIL;
+    loop {
+        let (output, truncated) = pty::fit_tail(&snapshot.output, budget);
+        let mut value = to_value(snapshot.clone())?;
+        if let Value::Object(map) = &mut value {
+            map.insert("output".into(), Value::String(output));
+            map.insert("replayTruncated".into(), Value::Bool(truncated));
+        }
+        let body = json!({ "repo": key, "terminal": value });
+        let size = serde_json::to_vec(&body)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX);
+        if size <= ATTACH_FRAME_LIMIT || budget == 0 {
+            return Ok(body);
+        }
+        budget /= 2;
     }
 }
 

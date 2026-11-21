@@ -54,6 +54,45 @@
         "listedCount": 2,
         "mainRefusalCode": "not_worktree"
       }
+    },
+    {
+      "id": "file-tree-edit-version",
+      "title": "文件树、正文分页与保存回执按内容版本核对",
+      "ops": ["directory", "fileContent", "editSnapshot", "editSave"],
+      "steps": [
+        "仓库里有 notes/a.txt 两行文本与一张图片",
+        "directory 读出仓库根的一层条目",
+        "fileContent 每页一行，续页偏移来自上一页",
+        "editSnapshot 取 digest 作为保存的预期内容版本",
+        "用错误 digest 保存必须失败且文件不变",
+        "用正确 digest 保存成功并留下 completed 回执"
+      ],
+      "expect": {
+        "fileName": "notes/a.txt",
+        "pageLines": 1,
+        "firstLine": "alpha",
+        "savedLine": "saved",
+        "staleSaveCode": "edit_conflict",
+        "receiptState": "completed"
+      }
+    },
+    {
+      "id": "remote-pty-round-trip",
+      "title": "远端 PTY 会话可创建、输入、附着重放、resize 并关闭",
+      "ops": ["terminalProfiles", "terminalCreate", "terminalInput", "terminalAttach", "terminalResize", "terminalClose"],
+      "steps": [
+        "terminalProfiles 至少返回一个终端类型",
+        "terminalCreate 在仓库根新建会话",
+        "输入 echo 一行后输出帧按序号到达",
+        "terminalAttach 的重放包含这一行",
+        "terminalResize 接受新的行列数",
+        "terminalClose 后再次附着报 terminal_unknown"
+      ],
+      "expect": {
+        "echoed": "parity-pty",
+        "resizeRows": 30,
+        "unknownCode": "terminal_unknown"
+      }
     }
   ]
 }

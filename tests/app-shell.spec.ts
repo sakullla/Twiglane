@@ -316,7 +316,7 @@ describe("原生状态测量", () => {
     })));
   });
 
-  it("已有仓库时等待本次大仓库读取，再用焦点、取消和切换完成测量", async () => {
+  it.each([true, false])("已有仓库时测量本次读取、焦点和切换，依据原生取消回执 %s 判定", async (nativeCancelled) => {
     const slowRepo = "C:/work/large";
     const nextRepo = "C:/work/next";
     let finishSlowRead: (() => void) | undefined;
@@ -329,7 +329,12 @@ describe("原生状态测量", () => {
         watchDegraded: false,
       };
       if (path !== slowRepo) return Promise.resolve(result);
-      return new Promise((resolve) => { finishSlowRead = () => resolve(result); });
+      return new Promise((resolve, reject) => {
+        finishSlowRead = () => {
+          if (nativeCancelled) reject({ code: "cancelled", message: "读取已取消。" });
+          else resolve(result);
+        };
+      });
     });
     mocks.cancelReads.mockImplementation(async () => {
       const finish = finishSlowRead;
@@ -343,7 +348,11 @@ describe("原生状态测量", () => {
     render(App);
     try {
       await waitFor(() => expect(mocks.measureSample).toHaveBeenCalledWith("cancel-open", expect.objectContaining({
-        contentOk: true, readStarted: true, keyboard: true, cancelled: true, switched: true,
+        contentOk: nativeCancelled,
+        readStarted: nativeCancelled,
+        keyboard: true,
+        cancelled: nativeCancelled,
+        switched: nativeCancelled,
       })));
       expect(mocks.openRepository.mock.calls.map(([path]) => path)).toEqual([repoPath, slowRepo, slowRepo, nextRepo]);
     } finally {

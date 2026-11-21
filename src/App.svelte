@@ -3481,7 +3481,7 @@
     return true;
   }
 
-  async function openRecent(path: string, onReadStart?: (serial: number) => void) {
+  async function openRecent(path: string, onRequest?: (serial: number, request: Promise<OpenedRepository>) => void) {
     // 任何确认层/任务弹窗打开时都不切换仓库：旧确认层不能留在新仓库上继续生效。
     if (openModalCount() > 0) {
       notice("请先关闭当前对话框，再切换仓库。");
@@ -3508,7 +3508,7 @@
       await api.cancelReads();
       if (serial !== readSerial) return;
       const request = api.openRepository(path, nextId());
-      onReadStart?.(serial);
+      onRequest?.(serial, request);
       const openedRepo = await request;
       if (serial !== readSerial) return;
       banner = null;
@@ -4310,43 +4310,50 @@
   }
 
   function startMeasuredRead(path: string) {
-    let markStarted!: (serial: number) => void;
-    const started = new Promise<number>((resolve) => { markStarted = resolve; });
-    const opening = openRecent(path, markStarted);
-    return { opening, started: Promise.race([started, opening.then(() => null)]) };
+    let observe!: (read: { serial: number; cancelled: Promise<boolean> }) => void;
+    const issued = new Promise<{ serial: number; cancelled: Promise<boolean> }>((resolve) => { observe = resolve; });
+    const opening = openRecent(path, (serial, request) => {
+      const cancelled = request.then(() => false, (error: unknown) => normalizeError(error).code === "cancelled");
+      observe({ serial, cancelled });
+    });
+    return { opening, issued: Promise.race([issued, opening.then(() => null)]) };
   }
 
   async function cancelDuringOpen(slowRepo: string, nextRepo: string) {
     const normalizePath = (value: string) => value.replace(/\/+$/, "").replace(/^\/private/, "");
     const first = startMeasuredRead(slowRepo);
-    const firstSerial = await first.started;
+    const firstRead = await first.issued;
     let keyboard = false;
     let clickedCancel = false;
-    if (reading && firstSerial === readSerial) {
-      keyboard = (await measurePaletteFocus()) && reading && firstSerial === readSerial;
+    if (firstRead && (await nextPaint()).painted && reading && firstRead.serial === readSerial) {
+      keyboard = (await measurePaletteFocus()) && reading && firstRead.serial === readSerial;
       const cancelButton = [...document.querySelectorAll("button")].find((button) => button.textContent?.includes("取消读取"));
-      if (cancelButton && !cancelButton.disabled && reading && firstSerial === readSerial) {
+      if (cancelButton && !cancelButton.disabled && reading && firstRead.serial === readSerial) {
         clickedCancel = true;
         cancelButton.click();
       }
     }
     await first.opening;
+    // 忽略迟到的成功响应能保护界面，原生返回 cancelled 才证明该次读取确实被打断。
+    const firstCancelled = (await firstRead?.cancelled) === true;
     const cancelled =
-      clickedCancel &&
+      clickedCancel && firstCancelled &&
       live.includes("已取消读取") &&
       normalizePath(opened?.summary.path ?? "") !== normalizePath(slowRepo);
     const second = startMeasuredRead(slowRepo);
-    const secondSerial = await second.started;
-    const switchedDuringRead = reading && secondSerial === readSerial;
+    const secondRead = await second.issued;
+    const switchedDuringRead =
+      secondRead !== null && (await nextPaint()).painted && reading && secondRead.serial === readSerial;
     if (switchedDuringRead) await openRecent(nextRepo);
     await second.opening;
+    const secondCancelled = (await secondRead?.cancelled) === true;
     const switched =
-      switchedDuringRead && Boolean(opened && normalizePath(opened.summary.path) === normalizePath(nextRepo));
+      switchedDuringRead && secondCancelled && Boolean(opened && normalizePath(opened.summary.path) === normalizePath(nextRepo));
     return {
       cancelled,
       switched,
       keyboard,
-      readStarted: firstSerial !== null && secondSerial !== null,
+      readStarted: firstCancelled && secondCancelled,
     };
   }
 

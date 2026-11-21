@@ -21,89 +21,93 @@
     {
       "profile": "baseline",
       "configuredBytesPerSec": null,
+      "oneWayDelayMs": 0,
       "observedRoundTripMs": 4,
       "lists": [
         {
           "files": 5,
-          "elapsedMs": 13,
+          "elapsedMs": 12,
           "downBytes": 516,
           "rpcCount": 1
         },
         {
           "files": 252,
-          "elapsedMs": 17,
+          "elapsedMs": 18,
           "downBytes": 8076,
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 19,
+      "smallDiffMs": 18,
       "smallDiffDownBytes": 284,
-      "switchMs": 24,
+      "switchMs": 23,
       "switchDownBytes": 432,
-      "oldSuperseded": true,
+      "oldReply": "superseded",
       "sshUp": 5478,
       "sshDown": 35673
     },
     {
       "profile": "high-rtt",
       "configuredBytesPerSec": null,
-      "observedRoundTripMs": 808,
+      "oneWayDelayMs": 400,
+      "observedRoundTripMs": 814,
       "lists": [
         {
           "files": 5,
-          "elapsedMs": 816,
+          "elapsedMs": 818,
           "downBytes": 516,
           "rpcCount": 1
         },
         {
           "files": 252,
-          "elapsedMs": 821,
+          "elapsedMs": 827,
           "downBytes": 8076,
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 821,
+      "smallDiffMs": 823,
       "smallDiffDownBytes": 284,
-      "switchMs": 825,
+      "switchMs": 831,
       "switchDownBytes": 432,
-      "oldSuperseded": true,
+      "oldReply": "superseded",
       "sshUp": 5522,
       "sshDown": 35673
     },
     {
       "profile": "low-bw",
       "configuredBytesPerSec": 32768,
+      "oneWayDelayMs": 0,
       "observedRoundTripMs": 13,
       "lists": [
         {
           "files": 5,
-          "elapsedMs": 34,
+          "elapsedMs": 33,
           "downBytes": 516,
           "rpcCount": 1
         },
         {
           "files": 252,
-          "elapsedMs": 269,
+          "elapsedMs": 270,
           "downBytes": 8076,
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 37,
+      "smallDiffMs": 38,
       "smallDiffDownBytes": 284,
       "switchMs": 52,
       "switchDownBytes": 432,
-      "oldSuperseded": true,
-      "sshUp": 5522,
+      "oldReply": "superseded",
+      "sshUp": 5478,
       "sshDown": 35673
     },
     {
       "profile": "combined",
       "configuredBytesPerSec": 32768,
+      "oneWayDelayMs": 400,
       "observedRoundTripMs": 814,
       "lists": [
         {
           "files": 5,
-          "elapsedMs": 835,
+          "elapsedMs": 836,
           "downBytes": 516,
           "rpcCount": 1
         },
@@ -114,22 +118,23 @@
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 838,
+      "smallDiffMs": 839,
       "smallDiffDownBytes": 284,
-      "switchMs": 856,
+      "switchMs": 853,
       "switchDownBytes": 432,
-      "oldSuperseded": true,
+      "oldReply": "superseded",
       "sshUp": 5522,
       "sshDown": 35673
     },
     {
       "profile": "stress",
       "configuredBytesPerSec": 8192,
-      "observedRoundTripMs": 1836,
+      "oneWayDelayMs": 900,
+      "observedRoundTripMs": 1832,
       "lists": [
         {
           "files": 5,
-          "elapsedMs": 1893,
+          "elapsedMs": 1896,
           "downBytes": 516,
           "rpcCount": 1
         },
@@ -140,11 +145,11 @@
           "rpcCount": 1
         }
       ],
-      "smallDiffMs": 1890,
+      "smallDiffMs": 1905,
       "smallDiffDownBytes": 284,
       "switchMs": 1939,
       "switchDownBytes": 432,
-      "oldSuperseded": true,
+      "oldReply": "superseded",
       "sshUp": 5522,
       "sshDown": 35673
     }

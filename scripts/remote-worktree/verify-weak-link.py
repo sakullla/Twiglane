@@ -98,13 +98,20 @@ async def profile(name, delay, rate, root):
         await push("old", "diff", path="big.txt", cursor=big["result"]["nextCursor"], **fields)
         await push("new", "diff", path="small.txt", **fields)
         old = await read("old")
+        if old["ok"]:
+            old_reply = "one_page"
+            assert len(base64.b64decode(old["result"]["data"])) <= 16 * 1024
+            assert old["result"]["nextCursor"]
+        else:
+            assert old["error"]["code"] == "superseded", old
+            old_reply = "superseded"
         new = await read("new")
         assert b"+changed small" in base64.b64decode(new["result"]["data"])
         assert counts[1] - before[1] < 64*1024
-        print(json.dumps(dict(profile=name, configuredBytesPerSec=rate or None, observedRoundTripMs=rtt,
+        print(json.dumps(dict(profile=name, configuredBytesPerSec=rate or None, oneWayDelayMs=round(delay*1000), observedRoundTripMs=rtt,
             lists=[dict(files=n,elapsedMs=t,downBytes=b,rpcCount=1) for n,t,b in durations],
             smallDiffMs=small_ms,smallDiffDownBytes=small_bytes,
-            switchMs=ms(start),switchDownBytes=counts[1] - before[1],oldSuperseded=not old["ok"],
+            switchMs=ms(start),switchDownBytes=counts[1] - before[1],oldReply=old_reply,
             sshUp=counts[0],sshDown=counts[1])),flush=True)
     finally:
         process.stdin.close()

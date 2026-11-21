@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 
 const root = process.cwd();
 const cliora = resolve(process.env.TWIGLANE_VERIFY_CLIORA ?? "../cliora");
-const report = JSON.parse(readFileSync(resolve(root, "docs/verification/remote-worktrees.json"), "utf8"));
+const report = JSON.parse(readFileSync(resolve(root, process.argv[2] ?? "docs/verification/remote-worktrees.json"), "utf8"));
 const git = (repo, args) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
 
 assert.equal(report.format, "twiglane-remote-worktree-evidence/v1");
@@ -24,17 +24,33 @@ for (const field of [
 ]) {
   assert.equal(report.ssh[field], true, `Linux SSH verification missing: ${field}`);
 }
-assert.deepEqual(report.network.map(({ profile }) => profile), ["baseline", "high-rtt", "low-bw", "combined", "stress"]);
+const profiles = {
+  baseline: { delayMs: 0, rate: null },
+  "high-rtt": { delayMs: 400, rate: null },
+  "low-bw": { delayMs: 0, rate: 32768 },
+  combined: { delayMs: 400, rate: 32768 },
+  stress: { delayMs: 900, rate: 8192 },
+};
+assert.deepEqual(report.network.map(({ profile }) => profile), Object.keys(profiles));
 for (const sample of report.network) {
-  assert.ok(sample.observedRoundTripMs > 0);
-  assert.equal(sample.lists.length, 2);
-  assert.ok(sample.lists[0].files < sample.lists[1].files);
+  const { delayMs, rate } = profiles[sample.profile];
+  assert.equal(sample.oneWayDelayMs, delayMs);
+  assert.equal(sample.configuredBytesPerSec, rate);
+  assert.ok(sample.observedRoundTripMs > 0 && sample.observedRoundTripMs >= 2 * delayMs,
+    `${sample.profile} RTT does not demonstrate the injected delay`);
+  assert.deepEqual(sample.lists.map(({ files }) => files), [5, 252]);
   for (const list of sample.lists) {
     assert.equal(list.rpcCount, 1);
     assert.ok(list.elapsedMs > 0 && list.downBytes > 0);
+    if (rate) {
+      assert.ok(list.elapsedMs + 1 >= 1000 * list.downBytes / rate,
+        `${sample.profile} list timing is incompatible with the declared rate`);
+    }
   }
-  assert.ok(sample.smallDiffMs > 0 && sample.smallDiffDownBytes > 0);
-  assert.ok(sample.switchMs > 0 && sample.switchDownBytes > 0);
+  assert.ok(sample.smallDiffMs > 0 && sample.smallDiffDownBytes > 0 && sample.smallDiffDownBytes < 32 * 1024);
+  assert.ok(["superseded", "one_page"].includes(sample.oldReply), "Old read must stop or return at most one page");
+  assert.ok(sample.switchMs > 0 && sample.switchDownBytes > 0 && sample.switchDownBytes < 64 * 1024,
+    "Switching should not transfer the old full diff");
   assert.ok(sample.sshUp > 0 && sample.sshDown > 0);
 }
 const fixturePath = "tests/fixtures/reviews/remote-protocol-v1.json";

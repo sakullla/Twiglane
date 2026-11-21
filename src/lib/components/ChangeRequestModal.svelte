@@ -60,6 +60,8 @@
   let target = $state("");
   let title = $state("");
   let body = $state("");
+  /** 用户动过目标分支（含清空）后，重新准备不再用平台默认值覆盖它。 */
+  let targetTouched = $state(false);
 
   /** 请求序号：任何更晚发出的请求或关闭都会让更早的响应失效。 */
   let serial = 0;
@@ -120,8 +122,8 @@
         return;
       }
       prepared = result;
-      // 目标分支以平台元数据为准，只在用户还没改过时预选。
-      if (target.trim() === "") target = result.targetBranch;
+      // 目标分支以平台元数据为准，只在用户还没动过时预选：清空过的输入不被覆盖。
+      if (!targetTouched) target = result.targetBranch;
       phase = { kind: "ready" };
       void readToken(result.remote, result.generation);
     } catch (error) {
@@ -222,7 +224,11 @@
       if (!current(path, ticket)) return;
       if (outcome.status === "created") phase = { kind: "created", outcome };
       else if (outcome.status === "fallbackOpened") phase = { kind: "fallback", outcome };
-      else phase = { kind: "unknown", message: "平台返回了无法确认的结果，请先在平台核对。" };
+      else
+        phase = {
+          kind: "unknown",
+          message: "平台返回了无法确认的结果：请先在平台核对是否已创建，不要直接重复创建。",
+        };
     } catch (error) {
       if (!current(path, ticket)) return;
       const failure = normalizeError(error);
@@ -277,15 +283,18 @@
         </li>
       {/each}
     </ul>
-  {:else if prepared}
-    {@const info = prepared}
-    <ul class="scope-list" aria-label="创建范围">
-      <li>平台 · {info.providerLabel || info.provider}</li>
-      <li>远程 · {info.remote}（{info.host}）</li>
-      <li>仓库 · {info.repository}</li>
-      <li>来源分支 · {info.sourceBranch}（只读，来自当前分支）</li>
-    </ul>
+  {:else}
+    {#if prepared}
+      {@const info = prepared}
+      <ul class="scope-list" aria-label="创建范围">
+        <li>平台 · {info.providerLabel || info.provider}</li>
+        <li>远程 · {info.remote}（{info.host}）</li>
+        <li>仓库 · {info.repository}</li>
+        <li>来源分支 · {info.sourceBranch}（只读，来自当前分支）</li>
+      </ul>
+    {/if}
 
+    <!-- 结果提示与表单分开渲染：prepare 阶段失败时没有 prepared，正文也不能是空的。 -->
     {#if phase.kind === "created"}
       <div class="callout info" role="status" data-change-request-result="created">
         <Icon name="check-circle" size={15} />
@@ -312,7 +321,7 @@
     {:else if phase.kind === "unknown"}
       <div class="callout warn" role="alert" data-change-request-result="unknown">
         <Icon name="alert-circle" size={15} />
-        <span>{phase.message} 结果未知：请先在平台核对是否已经创建，再决定是否重试。</span>
+        <span>{phase.message}</span>
       </div>
     {:else if phase.kind === "failed"}
       <p class="change-request-error" role="alert" data-change-request-result="failed">
@@ -322,7 +331,8 @@
     {/if}
 
     <!-- 结果未知时也保留表单：用户要照着界面内容去平台核对，不能把输入收走。 -->
-    {#if phase.kind === "ready" || phase.kind === "submitting" || phase.kind === "failed" || phase.kind === "unknown"}
+    {#if prepared && (phase.kind === "ready" || phase.kind === "submitting" || phase.kind === "failed" || phase.kind === "unknown")}
+      {@const info = prepared}
       <div class="change-request-form">
         <label class="label" for="change-request-target">目标分支</label>
         <input
@@ -331,6 +341,7 @@
           autocomplete="off"
           spellcheck="false"
           readonly={submitting}
+          oninput={() => (targetTouched = true)}
           bind:value={target}
         />
         <label class="label" for="change-request-title">标题</label>
@@ -442,14 +453,18 @@
       <button
         type="button"
         class="btn btn-secondary"
+        title={prepared ? undefined : "重新读取远程与平台信息后再决定"}
         onclick={() => void start(prepared?.remote ?? null)}
       >重新读取</button>
-      <button
-        type="button"
-        class="btn btn-primary"
-        title={submitReason}
-        disabled={submitting || !canSubmit}
-        onclick={() => void submit()}>再次创建</button>
+      {#if prepared}
+        <!-- 没有可信上下文（prepare 失败）时不提供创建：先重新读取。 -->
+        <button
+          type="button"
+          class="btn btn-primary"
+          title={submitReason}
+          disabled={submitting || !canSubmit}
+          onclick={() => void submit()}>再次创建</button>
+      {/if}
     {:else}
       <button
         type="button"

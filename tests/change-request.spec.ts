@@ -467,3 +467,127 @@ describe("结果状态（R4、R5、R6）", () => {
     expect(screen.queryByLabelText("标题")).toBeNull();
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * 准备阶段失败（R2、R6）：没有 prepared 时正文也必须说明原因
+ * ------------------------------------------------------------------ */
+
+const sourceMissing = {
+  code: "change_request_source_missing",
+  message: "当前来源分支 feature/login 还没有推送到远程 origin。请先推送后重试；应用不会自动推送。",
+  generation: 4,
+};
+
+describe("准备阶段失败与重新读取（R2、R6）", () => {
+  it("prepare 拒绝时正文显示原生原因，不报成功，也没有可用的创建按钮", async () => {
+    mocks.prepareChangeRequest.mockRejectedValue(sourceMissing);
+    const { props } = showModal();
+
+    const failure = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>('[data-change-request-result="failed"]');
+      if (!found) throw new Error("prepare 失败没有可见提示");
+      return found;
+    });
+    // 原生在无远程、来源未推送、平台无法确认时给出的原因必须能读到。
+    expect(failure.textContent).toContain("还没有推送到远程 origin");
+    expect(failure.textContent).toContain("应用不会自动推送");
+    // 没有任何成功字样或成功结果块。
+    expect(document.querySelector('[data-change-request-result="created"]')).toBeNull();
+    expect(document.querySelector('[data-change-request-result="fallback"]')).toBeNull();
+    expect(document.body.textContent ?? "").not.toContain("已在 GitHub 创建");
+    expect(document.body.textContent ?? "").not.toContain("不表示评审、测试或合并已经完成");
+    // 没有可信上下文时不渲染表单，也不提供创建。
+    expect(screen.queryByLabelText("标题")).toBeNull();
+    expect(screen.queryByRole("button", { name: "再次创建" })).toBeNull();
+    expect(mocks.createChangeRequest).not.toHaveBeenCalled();
+
+    // 重新读取是唯一的前进方向：再问一次原生，不带猜测的远程。
+    await fireEvent.click(screen.getByRole("button", { name: "重新读取" }));
+    await waitFor(() => expect(mocks.prepareChangeRequest).toHaveBeenCalledTimes(2));
+    expect(mocks.prepareChangeRequest).toHaveBeenLastCalledWith(repoPath, null, 4, expect.any(Number));
+    // 仍失败时保住原因，而不是回到空白。
+    await waitFor(() =>
+      expect(document.querySelector('[data-change-request-result="failed"]')?.textContent).toContain(
+        "还没有推送到远程 origin",
+      ),
+    );
+
+    await fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("准备失败后重新读取成功，再展示表单与默认目标", async () => {
+    mocks.prepareChangeRequest.mockRejectedValueOnce(sourceMissing).mockResolvedValueOnce(ready);
+    showModal();
+
+    await waitFor(() =>
+      expect(document.querySelector('[data-change-request-result="failed"]')?.textContent).toContain(
+        "还没有推送到远程",
+      ),
+    );
+    await fireEvent.click(screen.getByRole("button", { name: "重新读取" }));
+
+    await readyForm();
+    expect(document.querySelector('[data-change-request-result="failed"]')).toBeNull();
+    expect((screen.getByLabelText("目标分支") as HTMLInputElement).value).toBe("main");
+    expect(mocks.createChangeRequest).not.toHaveBeenCalled();
+  });
+
+  it("无远程、平台无法确认、网络失败与未知结果都在正文可见", async () => {
+    const cases = [
+      { code: "change_request_no_remote", message: "还没有远程，不能创建 MR/PR。请先添加远程。" },
+      {
+        code: "change_request_platform_unknown",
+        message: "无法确认该远程所在的平台实例，未创建 MR/PR，也未打开网页。",
+      },
+      { code: "change_request_network", message: "无法连接平台实例，请检查网络、地址或代理；没有创建 MR/PR。" },
+      {
+        code: "change_request_unknown",
+        message: "请求已发出但未拿到完整响应，创建结果未知。请先在平台核对，不要直接重复创建。",
+      },
+    ];
+    for (const sample of cases) {
+      mocks.prepareChangeRequest.mockRejectedValue(sample);
+      const { unmount } = showModal();
+      const selector =
+        sample.code === "change_request_unknown"
+          ? '[data-change-request-result="unknown"]'
+          : '[data-change-request-result="failed"]';
+      const shown = await waitFor(() => {
+        const found = document.querySelector<HTMLElement>(selector);
+        if (!found) throw new Error(`${sample.code} 没有可见提示`);
+        return found;
+      });
+      expect(shown.textContent?.trim().length, `${sample.code} 正文不能为空`).toBeGreaterThan(0);
+      expect(shown.textContent).toContain(sample.message);
+      expect(document.body.textContent ?? "").not.toContain("已在 GitHub 创建");
+      unmount();
+      document.body.innerHTML = "";
+    }
+  });
+
+  it("用户清空目标分支后重新读取不会把默认分支写回", async () => {
+    mocks.createChangeRequest.mockRejectedValue({
+      code: "change_request_rate_limited",
+      message: "平台限流（429）。请稍后再由你手动重试；应用不会自动重试。",
+    });
+    showModal();
+    const dialog = await readyForm();
+    await fillForm();
+    await fireEvent.click(within(dialog).getByRole("button", { name: "创建 MR / PR" }));
+    await waitFor(() =>
+      expect(document.querySelector('[data-change-request-result="failed"]')).toBeTruthy(),
+    );
+
+    const target = screen.getByLabelText("目标分支") as HTMLInputElement;
+    await fireEvent.input(target, { target: { value: "" } });
+    expect((screen.getByLabelText("目标分支") as HTMLInputElement).value).toBe("");
+
+    await fireEvent.click(within(dialog).getByRole("button", { name: "重新读取" }));
+    await waitFor(() => expect(mocks.prepareChangeRequest).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByLabelText("目标分支")).toBeTruthy());
+    // 用户明确清空过：重新准备只更新平台信息，不再覆盖目标分支。
+    expect((screen.getByLabelText("目标分支") as HTMLInputElement).value).toBe("");
+    expect(document.body.textContent ?? "").not.toContain("已在 GitHub 创建");
+  });
+});

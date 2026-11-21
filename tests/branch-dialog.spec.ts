@@ -395,20 +395,6 @@ describe("分支管理", () => {
     expect(list.scrollTop).toBe(40);
   });
 
-  it("删除确认里 Esc 只收起确认，不关 modal，焦点回到触发按钮", async () => {
-    const base = props();
-    render(BranchDialog, { props: base });
-    await waitFor(() => expect(document.querySelector(".branch-row")).toBeTruthy());
-    const trigger = screen.getByRole("button", { name: "删除 main" });
-    trigger.focus();
-    await fireEvent.click(trigger);
-    await waitFor(() => expect(document.querySelector("[data-modal-impact]")).toBeTruthy());
-    await fireEvent.keyDown(document.activeElement!, { key: "Escape" });
-    await waitFor(() => expect(document.activeElement).toBe(trigger));
-    expect(document.querySelector("[data-modal-impact]")).toBeNull();
-    expect(base.onClose).not.toHaveBeenCalled();
-  });
-
   it("行内垃圾桶：Esc 收起确认后再按 Esc 关闭 modal", async () => {
     const base = props();
     render(BranchDialog, { props: base });
@@ -419,6 +405,7 @@ describe("分支管理", () => {
     await waitFor(() => expect(document.querySelector("[data-modal-impact]")).toBeTruthy());
     await fireEvent.keyDown(document.activeElement!, { key: "Escape" });
     await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(document.querySelector("[data-modal-impact]")).toBeNull();
     expect(base.onClose).not.toHaveBeenCalled();
     await fireEvent.keyDown(document.activeElement!, { key: "Escape" });
     expect(base.onClose).toHaveBeenCalledTimes(1);
@@ -567,16 +554,9 @@ describe("分支管理", () => {
     expect(current.onBusy).toHaveBeenLastCalledWith(null);
   });
 
-  it("关闭按钮始终调用关闭回调", async () => {
-    const onClose = vi.fn();
-    render(BranchDialog, { props: props({ onClose }) });
-    await screen.findByRole("button", { name: "切换到 main" });
-    await fireEvent.click(screen.getByRole("button", { name: /^关闭$/ }));
-    expect(onClose).toHaveBeenCalledTimes(1);
-  });
-
   it("分支与标签在同一 modal 内同层切换，不出现第二层 dialog", async () => {
-    render(BranchDialog, { props: props() });
+    const base = props();
+    render(BranchDialog, { props: base });
     await screen.findByRole("button", { name: "切换到 main" });
 
     const dialog = screen.getByRole("dialog");
@@ -605,6 +585,8 @@ describe("分支管理", () => {
     await fireEvent.click(screen.getByRole("tab", { name: /本地分支/ }));
     expect(await screen.findByRole("button", { name: "切换到 main" })).toBeTruthy();
     expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+    await fireEvent.click(screen.getByRole("button", { name: /^关闭$/ }));
+    expect(base.onClose).toHaveBeenCalledTimes(1);
   });
 
   it("背景施加 inert，Esc 关闭后焦点回到触发元素", async () => {
@@ -836,16 +818,6 @@ describe("打开其他工作区、默认徽章与斜杠分组", () => {
     return { ...opened, snapshot: { ...opened.snapshot, branch: { ...opened.snapshot.branch, name } } };
   }
 
-  function rowNames(): string[] {
-    return [...document.querySelectorAll<HTMLElement>(".branch-row")].map((row) => row.querySelector(".lr-title span")?.textContent ?? "");
-  }
-
-  function badgedRows(): string[] {
-    return [...document.querySelectorAll<HTMLElement>(".branch-row [data-default-branch]")].map(
-      (chip) => chip.closest(".branch-row")?.querySelector(".lr-title span")?.textContent ?? "",
-    );
-  }
-
   function optionNames(): string[] {
     return [...document.querySelectorAll<HTMLElement>('[role="option"] .branch-option-name')].map((node) => node.textContent ?? "");
   }
@@ -977,48 +949,6 @@ describe("打开其他工作区、默认徽章与斜杠分组", () => {
     expect(props.onSnapshot).toHaveBeenCalledWith(changed);
   });
 
-  it("分支菜单打开其他工作区；路径无效或正在写入时留在原仓库", async () => {
-    const listed = [record("feature/ui", true), record("shared", false, "D:/wt")];
-    const next = { ...opened, summary: { name: "wt", path: "D:/wt" }, generation: 8 };
-    openRepository.mockResolvedValueOnce(next);
-    const { props } = await showDialog(listed, null);
-    const shared = () => {
-      const found = [...document.querySelectorAll<HTMLElement>(".branch-row")].find((row) => row.querySelector(".lr-title span")?.textContent === "shared");
-      if (!found) throw new Error("没有 shared");
-      return found;
-    };
-    await fireEvent.click(shared());
-    expect(switchBranch).not.toHaveBeenCalled();
-    await fireEvent.contextMenu(shared(), { clientX: 12, clientY: 12 });
-    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "打开此工作区" }));
-    await waitFor(() => expect(openRepository).toHaveBeenCalledWith("D:/wt", 9));
-    expect(props.onOpened).toHaveBeenCalledWith(next);
-    expect(props.onClose).toHaveBeenCalled();
-    expect(switchBranch).not.toHaveBeenCalled();
-    cleanup();
-
-    openRepository.mockRejectedValueOnce({ code: "not_repository", message: "该目录不是 Git 仓库，未做任何修改。" });
-    const failed = await showDialog(listed, null);
-    await fireEvent.contextMenu(shared(), { clientX: 12, clientY: 20 });
-    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "打开此工作区" }));
-    expect((await screen.findByRole("alert")).textContent).toContain("该目录不是 Git 仓库，未做任何修改。");
-    expect(failed.props.onOpened).not.toHaveBeenCalled();
-    expect(failed.props.onClose).not.toHaveBeenCalled();
-    expect(document.querySelector("[data-branch-status]")?.textContent).toContain("feature/ui");
-    cleanup();
-
-    const blocked = await showDialog(listed, null);
-    await blocked.view.rerender({ ...blocked.props, disabled: true, blockedReason: "正在写入，稍后再试" });
-    await fireEvent.contextMenu(shared(), { clientX: 12, clientY: 28 });
-    const item = within(screen.getByRole("menu")).getByRole("menuitem", { name: "打开此工作区" });
-    expect(item.getAttribute("aria-disabled")).toBe("true");
-    expect(item.getAttribute("title")).toBe("正在写入，稍后再试");
-    await fireEvent.click(item);
-    expect(openRepository).toHaveBeenCalledTimes(2);
-    expect(blocked.props.onOpened).not.toHaveBeenCalled();
-    expect(document.querySelector("[data-branch-status]")?.textContent).toContain("feature/ui");
-  });
-
   it("切换器打开其他工作区；路径不存在或正在写入时不切走", async () => {
     const listed = [record("feature/ui", true), record("shared", false, "D:/wt"), record("origin/shared", false, null, true)];
     const next = { ...opened, summary: { name: "wt", path: "D:/wt" }, generation: 8 };
@@ -1059,15 +989,7 @@ describe("打开其他工作区、默认徽章与斜杠分组", () => {
     expect(writing.props.onClose).not.toHaveBeenCalled();
   });
 
-  it("列表和切换器按四种结果标默认徽章，徽章不单独占横幅", async () => {
-    await showDialog(
-      [record("feature/ui", true), record("main"), record("master"), record("release"), record("origin/main", false, null, true)],
-      "release",
-    );
-    expect(badgedRows()).toEqual(["release"]);
-    expect(document.querySelector(".branch-status [data-default-branch], .list-section [data-default-branch]")).toBeNull();
-    cleanup();
-
+  it("切换器只给本地默认分支加徽章，与当前标记并存", async () => {
     const currentDefault = showSwitcher([record("main", true), record("master"), record("origin/main", false, null, true)], "main", "main");
     await waitFor(() => expect(badgedOptions()).toEqual(["main"]));
     const mainOption = screen.getByRole("option", { name: /^main/ });
@@ -1075,16 +997,6 @@ describe("打开其他工作区、默认徽章与斜杠分组", () => {
     expect(mainOption.textContent).toContain("当前");
     expect(mainOption.querySelector("[data-default-branch]")?.textContent).toBe("默认");
     expect(currentDefault.props.onCommand).not.toHaveBeenCalled();
-    cleanup();
-
-    await showDialog([record("feature/ui", true), record("master"), record("develop")], "master");
-    expect(badgedRows()).toEqual(["master"]);
-    cleanup();
-    await showDialog([record("feature/ui", true), record("develop")], "develop");
-    expect(badgedRows()).toEqual(["develop"]);
-    cleanup();
-    await showDialog([record("feature/ui", true), record("main"), record("master"), record("develop")], "main");
-    expect(badgedRows()).toEqual(["main"]);
     cleanup();
 
     const none = showSwitcher([record("topic", true)], null, "topic");
@@ -1135,24 +1047,6 @@ describe("打开其他工作区、默认徽章与斜杠分组", () => {
     expect(screen.getByRole("option", { name: /^feature\/a/ }).getAttribute("aria-selected")).toBe("true");
     expect(switchBranch).not.toHaveBeenCalled();
     expect(openRepository).not.toHaveBeenCalled();
-  });
-
-  it("对话框分组随设置关闭后平铺，再打开仍只展开当前分支所在组", async () => {
-    const listed = [record("feature/ui", true), record("feature/extra"), record("bugfix/login"), record("main")];
-    const mounted = await showDialog(listed, "main");
-    expect(rowNames()).toEqual(["main", "feature/ui", "feature/extra"]);
-    await mounted.view.rerender({ ...mounted.props, branchGroups: false });
-    await waitFor(() => expect(rowNames()).toEqual(["feature/ui", "feature/extra", "bugfix/login", "main"]));
-    expect(document.querySelector(".branch-group")).toBeNull();
-    expect(badgedRows()).toEqual(["main"]);
-    await mounted.view.rerender({ ...mounted.props, branchGroups: true });
-    await waitFor(() => expect(rowNames()).toEqual(["main", "feature/ui", "feature/extra"]));
-    expect(screen.getByRole("button", { name: "展开分组 bugfix" })).toBeTruthy();
-    const title = screen.getByRole("button", { name: "收起分组 feature" });
-    await fireEvent.click(title);
-    expect(switchBranch).not.toHaveBeenCalled();
-    expect(document.querySelector("[data-branch-status]")?.textContent).toContain("feature/ui");
-    expect(badgedRows()).toEqual(["main"]);
   });
 
   it("合并的分支选择器按设置分组：含当前或已选分支的组展开，关掉设置后平铺，搜索时也平铺", async () => {

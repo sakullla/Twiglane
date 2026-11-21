@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_ABBREV_LENGTH, abbrevLength, normalizeAbbrevLength, setAbbrevLength } from "../src/lib/abbrev.svelte";
 import { shortOid } from "../src/lib/history";

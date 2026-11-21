@@ -325,9 +325,11 @@ describe("分支右键菜单", () => {
     await fireEvent.contextMenu(rowOf("main"), { clientX: 100, clientY: 100 });
     await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "重命名…" }));
     const input = await screen.findByLabelText(/重命名本地分支/);
+    const confirm = screen.getByRole("button", { name: "确认重命名" });
+    expect(confirm.hasAttribute("disabled")).toBe(true);
     await fireEvent.input(input, { target: { value: "trunk" } });
-    await fireEvent.click(screen.getByRole("button", { name: "确认重命名" }));
-    await waitFor(() => expect(api.renameBranch).toHaveBeenCalled());
+    await fireEvent.click(confirm);
+    await waitFor(() => expect(api.renameBranch).toHaveBeenCalledWith("/repo", "main", "trunk", 4, 7));
     await tick();
     expect((screen.getByRole("button", { name: "取消" }) as HTMLButtonElement).disabled).toBe(true);
     await fireEvent.keyDown(input, { key: "Escape" });
@@ -336,18 +338,6 @@ describe("分支右键菜单", () => {
     finish(state);
     await waitFor(() => expect(document.querySelector("[data-branch-rename]")).toBeNull());
     await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("搜索分支")));
-  });
-
-  it("重命名：就地输入新名称，确认后调用后端；名称没变时不可确认", async () => {
-    setup();
-    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
-    await fireEvent.contextMenu(rowOf("main"), { clientX: 100, clientY: 100 });
-    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "重命名…" }));
-    const confirm = screen.getByRole("button", { name: "确认重命名" });
-    expect(confirm.hasAttribute("disabled")).toBe(true);
-    await fireEvent.input(screen.getByLabelText(/重命名本地分支/), { target: { value: "trunk" } });
-    await fireEvent.click(screen.getByRole("button", { name: "确认重命名" }));
-    await waitFor(() => expect(api.renameBranch).toHaveBeenCalledWith("/repo", "main", "trunk", 4, 7));
   });
 
   function occupiedState() {
@@ -460,7 +450,7 @@ describe("分支右键菜单", () => {
     );
     expect(badgedBranchNames()).toEqual(["release"]);
     expect(rowOf("release").querySelector(".chip.current")).toBeNull();
-    expect(document.querySelector(".branch-status [data-default-branch]")).toBeNull();
+    expect(document.querySelector(".branch-status [data-default-branch], .list-section [data-default-branch]")).toBeNull();
     await fireEvent.contextMenu(rowOf("release"), { clientX: 30, clientY: 30 });
     await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: /合并到当前分支/ }));
     expect(onMergeBranch).toHaveBeenCalledWith("release");
@@ -476,22 +466,6 @@ describe("分支右键菜单", () => {
     expect(row.querySelector(".chip.current")?.textContent).toBe("当前");
     expect(row.querySelector("[data-default-branch]")?.textContent).toBe("默认");
     expect(badgedBranchNames()).toEqual(["main"]);
-  });
-
-  it("没有远程 HEAD 时徽章按 main、master、develop 取第一个存在的本地分支", async () => {
-    await openListed(
-      [branchRecord("feature/ui", true), branchRecord("main"), branchRecord("master"), branchRecord("develop")],
-      "main",
-    );
-    expect(badgedBranchNames()).toEqual(["main"]);
-    cleanup();
-
-    await openListed([branchRecord("feature/ui", true), branchRecord("master"), branchRecord("develop")], "master");
-    expect(badgedBranchNames()).toEqual(["master"]);
-    cleanup();
-
-    await openListed([branchRecord("feature/ui", true), branchRecord("develop")], "develop");
-    expect(badgedBranchNames()).toEqual(["develop"]);
   });
 
   it("main、master、develop 都不存在时没有默认徽章", async () => {

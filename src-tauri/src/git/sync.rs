@@ -2919,15 +2919,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_branch_delete_requires_confirmation() {
+    async fn remote_branch_delete_requires_confirmation_and_preserves_tag_on_repeat() {
         let fixture = crate::test_support::git_fixture("remote-branch");
         let backend = fixture.backend();
-        let (_origin, work) = seed_bare(&fixture);
-        git(&work, &["switch", "-c", "topic"]);
-        fs::write(work.join("topic.txt"), "topic\n").unwrap();
-        git(&work, &["add", "--", "topic.txt"]);
-        git(&work, &["commit", "-m", "topic"]);
-        git(&work, &["push", "-u", "origin", "topic"]);
+        let (origin, work) = seed_bare(&fixture);
+        git(&work, &["push", "origin", "HEAD:refs/heads/topic", "HEAD:refs/tags/topic"]);
+        let tag = git_text(&origin, &["rev-parse", "refs/tags/topic"]);
         let opened = add_repository(&backend, &repo_key(&work), 1).await.unwrap();
         let held = delete_remote_branch(
             &backend,
@@ -2941,11 +2938,7 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(held.code, "confirm_required");
-        assert!(git_text(
-            fixture.path(),
-            &["--git-dir", "origin.git", "branch", "--list"]
-        )
-        .contains("topic"));
+        assert_eq!(git_text(&origin, &["rev-parse", "refs/heads/topic"]), tag);
         let removed = delete_remote_branch(
             &backend,
             &opened.summary.path,
@@ -2957,35 +2950,22 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!git_text(
-            fixture.path(),
-            &["--git-dir", "origin.git", "branch", "--list"]
-        )
-        .contains("topic"));
+        assert!(git_text(&origin, &["branch", "--list", "topic"]).is_empty());
         assert!(!removed
             .branches
             .iter()
             .any(|branch| branch.remote && branch.name == "origin/topic"));
-    }
 
-    #[tokio::test]
-    async fn remote_branch_already_gone_clears_tracking_and_preserves_same_named_tag() {
-        let fixture = crate::test_support::git_fixture("remote-branch-gone");
-        let backend = fixture.backend();
-        let (origin, work) = seed_bare(&fixture);
-        git(&work, &["push", "origin", "HEAD:refs/heads/topic", "HEAD:refs/tags/topic"]);
-        git(&origin, &["update-ref", "-d", "refs/heads/topic"]);
-        let tag = git_text(&origin, &["rev-parse", "refs/tags/topic"]);
-        assert!(git_text(&work, &["branch", "-r"]).contains("origin/topic"));
-        let opened = add_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        // 模拟远程已删除、客户端仍持有旧跟踪引用的状态。
+        git(&work, &["update-ref", "refs/remotes/origin/topic", "HEAD"]);
         let removed = delete_remote_branch(
             &backend,
             &opened.summary.path,
             "origin",
             "topic",
             true,
-            opened.generation,
-            2,
+            removed.generation,
+            4,
         )
         .await
         .unwrap();

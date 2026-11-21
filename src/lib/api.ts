@@ -539,6 +539,8 @@ export const api = {
     invoke<BranchState>("push_local_branch", { path, name, generation, requestId }),
   branchState: (path: string, generation: number, requestId: number) =>
     invoke<BranchState>("branch_state", { path, generation, requestId }),
+  fetchBranches: (path: string, generation: number, requestId: number) =>
+    invoke<BranchState>("fetch_branches", { path, generation, requestId }),
   createBranch: (path: string, name: string, generation: number, requestId: number) =>
     invoke<BranchState>("create_branch", { path, name, generation, requestId }),
   /** 从指定起点（分支名或提交标识）创建分支，checkout 为 true 时创建后立即切换。 */

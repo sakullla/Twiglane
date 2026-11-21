@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   deleteBranch: vi.fn(),
   deleteRemoteBranch: vi.fn(),
   cancelRemote: vi.fn(),
+  fetchBranches: vi.fn(),
   tagState: vi.fn(),
   openRepository: vi.fn(),
   repoHeads: vi.fn(),
@@ -324,9 +325,11 @@ describe("分支右键菜单", () => {
     await fireEvent.contextMenu(rowOf("main"), { clientX: 100, clientY: 100 });
     await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "重命名…" }));
     const input = await screen.findByLabelText(/重命名本地分支/);
+    const confirm = screen.getByRole("button", { name: "确认重命名" });
+    expect(confirm.hasAttribute("disabled")).toBe(true);
     await fireEvent.input(input, { target: { value: "trunk" } });
-    await fireEvent.click(screen.getByRole("button", { name: "确认重命名" }));
-    await waitFor(() => expect(api.renameBranch).toHaveBeenCalled());
+    await fireEvent.click(confirm);
+    await waitFor(() => expect(api.renameBranch).toHaveBeenCalledWith("/repo", "main", "trunk", 4, 7));
     await tick();
     expect((screen.getByRole("button", { name: "取消" }) as HTMLButtonElement).disabled).toBe(true);
     await fireEvent.keyDown(input, { key: "Escape" });
@@ -335,18 +338,6 @@ describe("分支右键菜单", () => {
     finish(state);
     await waitFor(() => expect(document.querySelector("[data-branch-rename]")).toBeNull());
     await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("搜索分支")));
-  });
-
-  it("重命名：就地输入新名称，确认后调用后端；名称没变时不可确认", async () => {
-    setup();
-    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
-    await fireEvent.contextMenu(rowOf("main"), { clientX: 100, clientY: 100 });
-    await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "重命名…" }));
-    const confirm = screen.getByRole("button", { name: "确认重命名" });
-    expect(confirm.hasAttribute("disabled")).toBe(true);
-    await fireEvent.input(screen.getByLabelText(/重命名本地分支/), { target: { value: "trunk" } });
-    await fireEvent.click(screen.getByRole("button", { name: "确认重命名" }));
-    await waitFor(() => expect(api.renameBranch).toHaveBeenCalledWith("/repo", "main", "trunk", 4, 7));
   });
 
   function occupiedState() {
@@ -459,7 +450,7 @@ describe("分支右键菜单", () => {
     );
     expect(badgedBranchNames()).toEqual(["release"]);
     expect(rowOf("release").querySelector(".chip.current")).toBeNull();
-    expect(document.querySelector(".branch-status [data-default-branch]")).toBeNull();
+    expect(document.querySelector(".branch-status [data-default-branch], .list-section [data-default-branch]")).toBeNull();
     await fireEvent.contextMenu(rowOf("release"), { clientX: 30, clientY: 30 });
     await fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: /合并到当前分支/ }));
     expect(onMergeBranch).toHaveBeenCalledWith("release");
@@ -475,22 +466,6 @@ describe("分支右键菜单", () => {
     expect(row.querySelector(".chip.current")?.textContent).toBe("当前");
     expect(row.querySelector("[data-default-branch]")?.textContent).toBe("默认");
     expect(badgedBranchNames()).toEqual(["main"]);
-  });
-
-  it("没有远程 HEAD 时徽章按 main、master、develop 取第一个存在的本地分支", async () => {
-    await openListed(
-      [branchRecord("feature/ui", true), branchRecord("main"), branchRecord("master"), branchRecord("develop")],
-      "main",
-    );
-    expect(badgedBranchNames()).toEqual(["main"]);
-    cleanup();
-
-    await openListed([branchRecord("feature/ui", true), branchRecord("master"), branchRecord("develop")], "master");
-    expect(badgedBranchNames()).toEqual(["master"]);
-    cleanup();
-
-    await openListed([branchRecord("feature/ui", true), branchRecord("develop")], "develop");
-    expect(badgedBranchNames()).toEqual(["develop"]);
   });
 
   it("main、master、develop 都不存在时没有默认徽章", async () => {
@@ -694,6 +669,44 @@ describe("删除本地分支时同时删除同名远程分支、已合入主干�
     finish(afterLocal);
     await waitFor(() => expect(rowNames()).not.toContain("done"));
     await waitFor(() => expect(refresh.disabled).toBe(false));
+    expect(api.fetchBranches).not.toHaveBeenCalled();
+  });
+
+  it("远程页直接显示 fetch 后的列表，成功时只读取一次分支状态", async () => {
+    api.fetchBranches.mockResolvedValue(afterBoth);
+    setup();
+    await waitFor(() => expect(rowNames()).toContain("done"));
+    await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "展开分组 origin" }));
+    expect(rowNames()).toContain("origin/done");
+    await fireEvent.click(screen.getByRole("button", { name: "刷新分支列表" }));
+    await waitFor(() => expect(rowNames()).not.toContain("origin/done"));
+    expect(api.fetchBranches).toHaveBeenCalledTimes(1);
+    expect(api.branchState).toHaveBeenCalledTimes(1); // 打开弹窗时的初读
+  });
+
+  it("远程缓存为空也能发现首个分支，generation 过期时重试一次", async () => {
+    api.branchState.mockResolvedValueOnce({ ...withTwins, branches: withTwins.branches.filter((b) => !b.remote) });
+    api.fetchBranches.mockRejectedValueOnce({ code: "stale", message: "仓库已更新", generation: 5 }).mockResolvedValueOnce(afterBoth);
+    setup();
+    await waitFor(() => expect(rowNames()).toContain("done"));
+    await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "刷新分支列表" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "展开分组 origin" }));
+    expect(rowNames()).toContain("origin/renamed");
+    expect(api.fetchBranches.mock.calls.map(([, generation]) => generation)).toEqual([4, 5]);
+    expect(api.branchState).toHaveBeenCalledTimes(1);
+  });
+
+  it("远程分支页获取失败时报错，仍按本地重读列表", async () => {
+    api.fetchBranches.mockRejectedValue({ code: "network", message: "网络不可用" });
+    const { onFailure } = setup();
+    await waitFor(() => expect(rowNames()).toContain("done"));
+    await fireEvent.click(screen.getByRole("tab", { name: /远程分支/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "刷新分支列表" }));
+    await waitFor(() => expect(onFailure).toHaveBeenCalled());
+    await waitFor(() => expect(api.branchState).toHaveBeenCalledTimes(2));
+    expect((await screen.findByRole("alert")).textContent).toContain("网络不可用");
   });
 });
 

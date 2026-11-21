@@ -99,6 +99,7 @@ fn capabilities_grant_only_explicit_terminal_ipc_not_a_generic_shell() {
         "allow-add-remote",
         "allow-set-remote-url",
         "allow-fetch-remote",
+        "allow-fetch-branches",
         "allow-pull-fast-forward",
         "allow-push-branch",
         "allow-publish-branch",

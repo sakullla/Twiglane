@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // 返回类型放宽成 unknown：新增的 cliora 用例会按真实命令的返回值准备一次性响应。

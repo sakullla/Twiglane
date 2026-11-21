@@ -9,7 +9,7 @@ use crate::git::changes::commit_index;
 use crate::git::command::{
     branch_list_command, check_branch_command, credential_approve_command, credential_helper_command, merged_branches_command, clone_command, create_branch_at_command,
     create_branch_command, delete_branch_command, delete_remote_branch_command,
-    delete_remote_tracking_command, fetch_command, publish_command, pull_ff_command, push_command,
+    fetch_command, publish_command, pull_ff_command, push_command, remote_names_command,
     push_to_remote_command, push_to_upstream_command,
     remote_add_command, remote_set_url_command, remote_tracking_command, remote_verbose_command,
     rename_branch_command,
@@ -398,20 +398,50 @@ pub async fn fetch_remote(
     let root = repo_root(path)?;
     let key = repo_key(&root);
     let _guard = backend.actions.enter(action_key("sync", &key))?;
+    let generation = fetch_refs(backend, &root, generation, request_id).await?;
+    settle_read!(backend, &root, generation, |current| snapshot_at(
+        backend, &root, current, internal_request_id()
+    ).await)
+}
+
+pub async fn fetch_branches(
+    backend: &Backend,
+    path: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    let root = repo_root(path)?;
+    let _guard = backend.actions.enter(action_key("sync", &repo_key(&root)))?;
+    let generation = fetch_refs(backend, &root, generation, request_id).await?;
+    settle_read!(backend, &root, generation, |current| {
+        load_branch_state(backend, &root, current, internal_request_id()).await
+    })
+}
+
+async fn fetch_refs(
+    backend: &Backend,
+    root: &Path,
+    generation: u64,
+    request_id: u64,
+) -> Result<u64, AppError> {
     let git = require_git(backend).await?;
-    let (pairs, generation) =
-        remote_pairs(backend, &root, &git.path, generation, request_id).await?;
-    if pairs.is_empty() {
+    let (program, args) = remote_names_command(&git.path, root);
+    let remotes = read_repo(backend, root, generation, request_id, program, args).await?;
+    if remotes.output.exit_code != 0 {
+        return Err(git_failure("remote_failed", &remotes.output, "无法读取远程。")
+            .with_generation(remotes.generation));
+    }
+    if remotes.output.stdout.is_empty() {
         return Err(AppError::new(
             "no_remote",
             "还没有远程，无法检查。工作区没有改动。",
         ));
     }
-    let (program, args) = fetch_command(&git.path, &root);
+    let (program, args) = fetch_command(&git.path, root);
     let scheduled = remote_write_repo(
         backend,
-        &root,
-        generation,
+        root,
+        remotes.generation,
         internal_request_id(),
         program,
         args,
@@ -424,14 +454,8 @@ pub async fn fetch_remote(
             "检查远程失败，工作区没有改动。",
         ));
     }
-    backend.remote_checks.note(&key, now_ms());
-    settle_read!(backend, &root, scheduled.generation, |current| snapshot_at(
-        backend,
-        &root,
-        current,
-        internal_request_id()
-    )
-    .await)
+    backend.remote_checks.note(&repo_key(root), now_ms());
+    Ok(scheduled.generation)
 }
 
 pub async fn pull_fast_forward(
@@ -1136,18 +1160,8 @@ pub async fn delete_remote_branch(
             "没有删除远程分支。",
         ));
     }
-    let tracking = format!("{remote}/{name}");
-    let (program, args) = delete_remote_tracking_command(&git.path, &root, &tracking);
-    let pruned = write_repo(
-        backend,
-        &root,
-        scheduled.generation,
-        internal_request_id(),
-        program,
-        args,
-    )
-    .await?;
-    settle_read!(backend, &root, pruned.generation, |current| {
+    // push 按远程的 fetch refspec 同步本地跟踪引用。
+    settle_read!(backend, &root, scheduled.generation, |current| {
         load_branch_state(backend, &root, current, internal_request_id()).await
     })
 }
@@ -3019,15 +3033,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_branch_delete_requires_confirmation() {
+    async fn remote_branch_delete_requires_confirmation_and_preserves_tag_on_repeat() {
         let fixture = crate::test_support::git_fixture("remote-branch");
         let backend = fixture.backend();
-        let (_origin, work) = seed_bare(&fixture);
-        git(&work, &["switch", "-c", "topic"]);
-        fs::write(work.join("topic.txt"), "topic\n").unwrap();
-        git(&work, &["add", "--", "topic.txt"]);
-        git(&work, &["commit", "-m", "topic"]);
-        git(&work, &["push", "-u", "origin", "topic"]);
+        let (origin, work) = seed_bare(&fixture);
+        git(&work, &["push", "origin", "HEAD:refs/heads/topic", "HEAD:refs/tags/topic"]);
+        let tag = git_text(&origin, &["rev-parse", "refs/tags/topic"]);
         let opened = add_repository(&backend, &repo_key(&work), 1).await.unwrap();
         let held = delete_remote_branch(
             &backend,
@@ -3041,11 +3052,7 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(held.code, "confirm_required");
-        assert!(git_text(
-            fixture.path(),
-            &["--git-dir", "origin.git", "branch", "--list"]
-        )
-        .contains("topic"));
+        assert_eq!(git_text(&origin, &["rev-parse", "refs/heads/topic"]), tag);
         let removed = delete_remote_branch(
             &backend,
             &opened.summary.path,
@@ -3057,15 +3064,44 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!git_text(
-            fixture.path(),
-            &["--git-dir", "origin.git", "branch", "--list"]
-        )
-        .contains("topic"));
+        assert!(git_text(&origin, &["branch", "--list", "topic"]).is_empty());
         assert!(!removed
             .branches
             .iter()
             .any(|branch| branch.remote && branch.name == "origin/topic"));
+
+        // 模拟远程已删除、客户端仍持有旧跟踪引用的状态。
+        git(&work, &["update-ref", "refs/remotes/origin/topic", "HEAD"]);
+        let removed = delete_remote_branch(
+            &backend,
+            &opened.summary.path,
+            "origin",
+            "topic",
+            true,
+            removed.generation,
+            4,
+        )
+        .await
+        .unwrap();
+        assert!(!removed
+            .branches
+            .iter()
+            .any(|branch| branch.remote && branch.name == "origin/topic"));
+        assert_eq!(git_text(&origin, &["rev-parse", "refs/tags/topic"]), tag);
+    }
+
+    #[tokio::test]
+    async fn fetch_branches_returns_discovered_and_pruned_refs_with_current_snapshot() {
+        let fixture = crate::test_support::git_fixture("fetch-branches");
+        let backend = fixture.backend();
+        let (origin, work) = seed_bare(&fixture);
+        git(&origin, &["branch", "new-topic", "main"]);
+        git(&work, &["update-ref", "refs/remotes/origin/old-topic", "HEAD"]);
+        let opened = add_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        let state = fetch_branches(&backend, &opened.summary.path, opened.generation, 2).await.unwrap();
+        assert!(state.branches.iter().any(|b| b.remote && b.name == "origin/new-topic"));
+        assert!(!state.branches.iter().any(|b| b.remote && b.name == "origin/old-topic"));
+        assert_eq!(state.snapshot.generation, state.generation);
     }
 
     #[tokio::test]

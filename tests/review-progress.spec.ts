@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * 审阅进度（R2）：会话内按 canonical worktree 与范围隔离的 path -> token 记录。
  *

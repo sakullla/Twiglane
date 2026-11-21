@@ -931,6 +931,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   associateUpstream: () => ok(snapshot()),
   branchList: () => ok(branchData()),
   branchState: () => ok(branchData()),
+  fetchBranches: () => ok(branchData(), 900),
   branchTracking: () =>
     ok({
       generation,

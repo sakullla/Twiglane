@@ -160,6 +160,7 @@ pub fn run() {
             add_remote,
             set_remote_url,
             fetch_remote,
+            fetch_branches,
             pull_fast_forward,
             push_branch,
             push_to_remote,
@@ -913,6 +914,16 @@ async fn fetch_remote(
     request_id: u64,
 ) -> Result<StatusSnapshot, AppError> {
     crate::git::sync::fetch_remote(state.inner(), &path, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn fetch_branches(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<BranchState, AppError> {
+    crate::git::sync::fetch_branches(state.inner(), &path, generation, request_id).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2854,6 +2865,7 @@ two
             "add_remote",
             "set_remote_url",
             "fetch_remote",
+            "fetch_branches",
             "pull_fast_forward",
             "push_branch",
             "publish_branch",

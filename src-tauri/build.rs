@@ -73,6 +73,7 @@ fn main() {
             "add_remote",
             "set_remote_url",
             "fetch_remote",
+            "fetch_branches",
             "pull_fast_forward",
             "push_branch",
             "publish_branch",

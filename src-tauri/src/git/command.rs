@@ -570,7 +570,7 @@ pub fn delete_remote_branch_command(
         OsString::from("--delete"),
         OsString::from("--"),
         OsString::from(remote),
-        OsString::from(branch),
+        OsString::from(format!("refs/heads/{branch}")),
     ]);
     (git.to_path_buf(), args)
 }
@@ -712,22 +712,6 @@ pub fn delete_branch_command(
     args.extend([
         OsString::from("branch"),
         OsString::from(if force { "-D" } else { "-d" }),
-        OsString::from("--"),
-        OsString::from(name),
-    ]);
-    (git.to_path_buf(), args)
-}
-
-pub fn delete_remote_tracking_command(
-    git: &Path,
-    root: &Path,
-    name: &str,
-) -> (PathBuf, Vec<OsString>) {
-    let mut args = repo_prefix(root, false);
-    args.extend([
-        OsString::from("branch"),
-        OsString::from("-d"),
-        OsString::from("-r"),
         OsString::from("--"),
         OsString::from(name),
     ]);

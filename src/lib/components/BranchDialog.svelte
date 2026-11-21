@@ -217,8 +217,8 @@
       confirm: target.force ? "仍然删除" : twin ? "删除本地和远程" : "删除分支",
     };
   });
-  let localCount = $derived(branches.filter((branch) => !branch.remote).length);
-  let remoteCount = $derived(branches.filter((branch) => branch.remote).length);
+  let remoteCount = $derived(branches.reduce((count, branch) => count + Number(branch.remote), 0));
+  let localCount = $derived(branches.length - remoteCount);
   let listScope = $derived(tab === "remote" ? "remote" : "local");
   let visibleBranches = $derived(
     filterBranches(
@@ -420,13 +420,14 @@
   }
 
   /** 过期时用后端给的 generation 重读一次；成功后由 onSnapshot 让外壳跟上，再过期就按失败处理。 */
-  async function readBranches(path: string): Promise<BranchState> {
+  async function readBranches(path: string, request = api.branchState): Promise<BranchState> {
     try {
-      return await api.branchState(path, opened.generation, nextId());
+      return await request(path, opened.generation, nextId());
     } catch (error) {
       const failure = normalizeError(error);
       if (failure.code !== "stale" || failure.generation === undefined) throw failure;
-      return api.branchState(path, failure.generation, nextId());
+      if (opened.summary.path !== path) throw failure;
+      return request(path, failure.generation, nextId());
     }
   }
 
@@ -446,13 +447,30 @@
     applyBranches(result);
   }
 
-  /** 刷新：列表留在原处，只在按钮上转圈；读完替换成新列表（含「已合入主干」标记）。 */
+  /**
+   * 刷新：列表留在原处，只在按钮上转圈；读完替换成新列表（含「已合入主干」标记）。
+   * 远程分支页先从远程获取并清理已删除的分支，否则远程上删掉的分支会一直留在列表里。
+   */
   let refreshing = $state(false);
   async function refresh() {
     if (refreshing || readBlocked) return;
     refreshing = true;
     try {
+      if (tab !== "remote" || blocked) {
+        await loadBranches();
+        return;
+      }
+      const path = opened.summary.path;
+      const result = await write(() => readBranches(path, api.fetchBranches));
+      if (opened.summary.path !== path) return;
+      if (result) {
+        applyBranches(result);
+        return;
+      }
+      // fetch --all 可能只更新了部分远程，重读本地引用，同时保留获取失败的原因。
+      const fetchError = errorText;
       await loadBranches();
+      if (opened.summary.path === path && !errorText) errorText = fetchError;
     } finally {
       refreshing = false;
     }
@@ -1182,7 +1200,11 @@
           type="button"
           class="btn btn-secondary branch-refresh"
           aria-label="刷新分支列表"
-          title={readBlocked ? BUSY_REASON : "重新读取本地和远程分支（远程分支以最近一次获取为准）"}
+          title={readBlocked
+            ? BUSY_REASON
+            : tab === "remote" && !blocked
+              ? "从远程获取最新分支，并清理远程已删除的分支"
+              : "重新读取本地和远程分支（远程分支以最近一次获取为准）"}
           disabled={readBlocked || !listReady || refreshing}
           onclick={refresh}
         >

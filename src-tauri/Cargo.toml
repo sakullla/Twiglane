@@ -1,6 +1,6 @@
 [package]
 name = "twiglane"
-version = "0.3.38"
+version = "0.3.39"
 description = "Twiglane desktop Git workspace"
 edition = "2021"
 publish = false

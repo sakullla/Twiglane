@@ -43,6 +43,8 @@ fn capabilities_grant_only_explicit_terminal_ipc_not_a_generic_shell() {
         "allow-remote-worktree-diff",
         "allow-remote-worktree-write",
         "allow-remote-worktree-recover",
+        // 通用远端桥接只开放 op 白名单内的 Git 能力：没有 shell、程序、工作目录或环境变量。
+        "allow-remote-worktree-call",
         "allow-remote-ssh-settings",
         "allow-set-remote-ssh-enabled",
         "allow-remote-ssh-save-target",
@@ -392,6 +394,73 @@ fn assert_terminal_start_is_fixed(root: &Path) {
             );
         }
     }
+}
+
+/// 三处注册必须逐名字一致：`generate_handler!` 里的命令、`build.rs` 的
+/// `AppManifest::commands` 与 `capabilities/default.json` 的 allow-* 权限。
+///
+/// 任何一处漏加都会让命令在打包后不可调用（或被 capabilities 拒绝），而漏加只会
+/// 表现为运行时的 `not allowed`，所以这里做全量比对而不是只抽查新增项。
+#[test]
+fn command_registration_is_identical_in_handler_manifest_and_capabilities() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    let marker = "generate_handler![";
+    let start = lib.find(marker).expect("缺少 generate_handler") + marker.len();
+    let end = lib[start..]
+        .find("])")
+        .map(|offset| start + offset)
+        .expect("generate_handler 缺少结尾");
+    let handler = registered_commands(&lib[start..end]);
+
+    let build = fs::read_to_string(root.join("build.rs")).unwrap();
+    let marker = "commands(&[";
+    let start = build.find(marker).expect("缺少 AppManifest::commands") + marker.len();
+    let end = build[start..]
+        .find("])")
+        .map(|offset| start + offset)
+        .expect("AppManifest::commands 缺少结尾");
+    let manifest = registered_commands(&build[start..end]);
+
+    let capabilities: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join("capabilities/default.json")).unwrap(),
+    )
+    .unwrap();
+    let mut allowed: Vec<String> = capabilities["permissions"]
+        .as_array()
+        .expect("capabilities permissions 必须是数组")
+        .iter()
+        .filter_map(|value| value.as_str())
+        .filter_map(|permission| permission.strip_prefix("allow-"))
+        .map(|name| name.replace('-', "_"))
+        .collect();
+    allowed.sort();
+
+    assert_eq!(handler, manifest, "generate_handler 与 build.rs 不一致");
+    assert_eq!(handler, allowed, "capabilities 与命令注册不一致");
+    assert!(
+        handler.iter().any(|name| name == "remote_worktree_call"),
+        "通用远端桥接命令必须在三处同时登记"
+    );
+}
+
+/// 从注册片段里取出命令名：`module::command` 与 `"command"` 两种写法都取最后一段。
+fn registered_commands(source: &str) -> Vec<String> {
+    let mut names: Vec<String> = source
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == '"'))
+        .map(|token| token.trim_matches('"'))
+        .filter_map(|token| token.rsplit("::").next())
+        .filter(|token| {
+            !token.is_empty()
+                && token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn command_signature<'a>(source: &'a str, name: &str) -> &'a str {

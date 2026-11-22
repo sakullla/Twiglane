@@ -132,6 +132,7 @@ pub fn run() {
             remote_worktree::remote_worktree_diff,
             remote_worktree::remote_worktree_write,
             remote_worktree::remote_worktree_recover,
+            remote_worktree::remote_worktree_call,
             remote_ssh::remote_ssh_settings,
             remote_ssh::set_remote_ssh_enabled,
             remote_ssh::remote_ssh_save_target,

@@ -80,6 +80,13 @@ export interface RemoteDiffRequest {
 export interface RemoteDiffPage {
   data: string;
   nextCursor: string | null;
+  /**
+   * 这份差异里的块能不能按块暂存。由远端命令按会话能力与视图给出，
+   * 界面与解析器都不自行推断；缺省（旧载荷）一律按不可暂存处理。
+   */
+  hunksStageable?: boolean;
+  /** 不可暂存时的一句话原因；可暂存时为 null 或缺省。 */
+  hunksStageableReason?: string | null;
 }
 
 export type RemoteWriteAction =
@@ -97,6 +104,85 @@ export type RemoteWriteRequest = RemoteWriteAction & {
   operationId: string;
 };
 
+/**
+ * 桥接 op 白名单：与 `src-tauri/src/remote_worktree.rs` 的 `BRIDGE_READ_OPS` /
+ * `BRIDGE_WRITE_OPS` 逐项一致（有单测比对两处）。未列入的 op 由后端直接拒绝，
+ * 前端不得据此回退到本机 Git。
+ */
+export const REMOTE_READ_OPS = [
+  "history",
+  "fileHistory",
+  "commitDetail",
+  "commitDiff",
+  "compare",
+  "commitBranches",
+  "compareFileDiff",
+  "branchList",
+  "branchState",
+  "branchTracking",
+  "tagState",
+  "tagRemoteState",
+  "remoteState",
+  "stashState",
+  "mergePreview",
+  "mergeSession",
+  "conflictView",
+  "worktrees",
+] as const;
+
+export const REMOTE_WRITE_OPS = [
+  "branchCreate",
+  "branchSwitch",
+  "branchRename",
+  "branchDelete",
+  "branchTrack",
+  "branchUpdate",
+  "branchPublish",
+  "tagCreate",
+  "tagDelete",
+  "tagPush",
+  "remoteAdd",
+  "remoteSetUrl",
+  "fetch",
+  "pull",
+  "push",
+  "pushToRemote",
+  "publishBranch",
+  "stashSave",
+  "stashApply",
+  "stashDelete",
+  "mergeStart",
+  "mergeComplete",
+  "mergeAbort",
+  "resolveConflict",
+  "cherryPick",
+  "revert",
+  "undoCommit",
+  "checkoutCommit",
+  "amendCommit",
+  "discard",
+  "worktreeRemove",
+] as const;
+
+export type RemoteReadOp = (typeof REMOTE_READ_OPS)[number];
+export type RemoteWriteOp = (typeof REMOTE_WRITE_OPS)[number];
+export type RemoteCallOp = RemoteReadOp | RemoteWriteOp;
+
+export interface RemoteCallRequest {
+  sessionId: string;
+  op: RemoteCallOp;
+  /** op 自己的字段；仓库键由会话决定，后端会覆盖 repo。 */
+  fields?: Record<string, unknown>;
+  /** 状态代次；有就随请求带上，由远端核对。 */
+  generation?: string;
+}
+
+/**
+ * 桥接结果：只读 op 原样返回 agent v2 的同名 DTO；写入 op 与 `write` 共用同一套
+ * 待确认语义，因而沿用同一个结果类型。
+ */
+export type RemoteCallResult = RemoteWriteResult | Record<string, unknown>;
+
 export type RemoteWriteResult =
   | { state: "completed"; operationId: string; snapshot: RemoteWorktreeSnapshot; head?: string | null }
   // Return "failed" only when the outcome is verified and the write had no effect.
@@ -111,6 +197,8 @@ export interface RemoteWorktreePort {
   diff: (request: RemoteDiffRequest) => Promise<RemoteDiffPage>;
   write: (request: RemoteWriteRequest) => Promise<RemoteWriteResult>;
   recover: (sessionId: string, operationId: string) => Promise<RemoteWriteResult>;
+  /** 通用桥接：按 op 白名单调用远端 agent v2 的其余 Git 能力。 */
+  call: (request: RemoteCallRequest) => Promise<RemoteCallResult>;
 }
 
 async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -131,6 +219,7 @@ export const remoteWorktreePort: RemoteWorktreePort = {
   diff: (request) => invoke("remote_worktree_diff", { request }),
   write: (request) => invoke("remote_worktree_write", { request }),
   recover: (sessionId, operationId) => invoke("remote_worktree_recover", { sessionId, operationId }),
+  call: (request) => invoke("remote_worktree_call", { request }),
 };
 
 export interface RemoteReviewSource {
@@ -147,11 +236,16 @@ export interface RemoteReviewSource {
   hostSync?: string | null;
 }
 
+/** 审查结果阶段：与后端 `Outcome` 同名，缺省为 reviewed（旧调用方的语义）。 */
+export type RemoteReviewOutcome = "reviewed" | "committed" | "merged";
+
 export const remoteReviewPort = {
   begin: (url: string) => invoke<RemoteReviewSource | null>("remote_review_begin", { url }),
   accept: (reviewId: string, sessionId: string) => invoke<void>("remote_review_accept", { reviewId, sessionId }),
   end: (reviewId: string, reason: string) => invoke<void>("remote_review_end", { reviewId, reason }),
-  returnReview: (reviewId: string, sessionId: string) => invoke<void>("remote_review_return", { reviewId, sessionId }),
+  /** 结果阶段只能前进（reviewed → committed → merged），回退或重复由后端拒绝。 */
+  returnReview: (reviewId: string, sessionId: string, outcome?: RemoteReviewOutcome) =>
+    invoke<void>("remote_review_return", { reviewId, sessionId, outcome }),
 };
 
 /**
@@ -397,8 +491,17 @@ export interface RemotePatch {
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
+export interface ParseRemotePatchOptions {
+  /** 远端命令返回的 hunksStageable：块级写入是否由远端支持。 */
+  hunksStageable?: boolean;
+}
+
 /** 解析远端 unified diff 的完整文本：一次算出行号、块索引与增删计数。 */
-export function parseRemotePatch(text: string): RemotePatch {
+export function parseRemotePatch(text: string, patchOptions: ParseRemotePatchOptions = {}): RemotePatch {
+  /**
+   * 块级可暂存只认远端给的标记：缺省、二进制与非文本差异一律不可暂存，
+   * 因此「显示可暂存」永远不会超出远端实际支持的写入范围。
+   */
   const raw = text.split("\n");
   if (raw.length > 0 && raw[raw.length - 1] === "") raw.pop();
   const lines: DiffLine[] = [];
@@ -420,8 +523,7 @@ export function parseRemotePatch(text: string): RemotePatch {
         index: hunkIndex,
         header: body,
         complete: true,
-        // 远端写入只支持整文件暂存；块级暂存不会发出，按钮必须保持不可用。
-        stageable: false,
+        stageable: patchOptions.hunksStageable === true && !binary,
         startLine: lines.length,
         lineCount: 1,
       });
@@ -466,6 +568,8 @@ export function parseRemotePatch(text: string): RemotePatch {
     newNo += 1;
     hunk.lineCount += 1;
   }
+  // 二进制差异没有可写入的块：即使载荷标了可暂存，也不能让按钮亮起来。
+  if (binary) for (const hunk of hunks) hunk.stageable = false;
   return { binary, truncated: false, lines, hunks, additions, deletions };
 }
 

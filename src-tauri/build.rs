@@ -67,6 +67,7 @@ fn main() {
             "remote_worktree_diff",
             "remote_worktree_write",
             "remote_worktree_recover",
+            "remote_worktree_call",
             "remote_ssh_settings",
             "set_remote_ssh_enabled",
             "remote_ssh_save_target",

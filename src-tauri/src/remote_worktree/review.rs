@@ -28,6 +28,44 @@ fn mismatch() -> AppError {
     )
 }
 
+/// 结果阶段回退或重复：reviewed → committed → merged 只能严格递增。
+fn conflict() -> AppError {
+    AppError::new(
+        "conflict",
+        "审查结果的阶段必须严格递增（reviewed → committed → merged），本次没有返回给 Cliora。",
+    )
+}
+
+/// 返回给 Cliora 的结果阶段。顺序本身就是约束：`Ord` 用来判定「必须严格递增」。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Outcome {
+    Reviewed,
+    Committed,
+    Merged,
+}
+
+impl Outcome {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "reviewed" => Ok(Self::Reviewed),
+            "committed" => Ok(Self::Committed),
+            "merged" => Ok(Self::Merged),
+            _ => Err(AppError::new(
+                "invalid_outcome",
+                "审查结果只能是 reviewed、committed 或 merged。",
+            )),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Reviewed => "reviewed",
+            Self::Committed => "committed",
+            Self::Merged => "merged",
+        }
+    }
+}
+
 fn hex(value: &str, length: usize) -> bool {
     value.len() == length
         && value
@@ -222,6 +260,8 @@ struct Entry {
     binding: Option<(String, String)>,
     ended: bool,
     committed: Option<String>,
+    /// 最近一次返回给 Cliora 的阶段；下一次必须更靠后，不能回退也不能重复。
+    outcome: Option<Outcome>,
     revision: u64,
 }
 
@@ -247,6 +287,7 @@ impl Book {
                 binding: None,
                 ended: false,
                 committed: None,
+                outcome: None,
                 revision: 0,
             },
         );
@@ -382,9 +423,12 @@ pub async fn remote_review_end<R: Runtime>(
     Ok(())
 }
 
+/// `outcome` 由调用方按本次实际进展给出，并在这里核对证据：只有 `reviewed` 可以不
+/// 带已记录的提交，`committed`/`merged` 都必须能报出那个提交。
 fn returned(
     source: &Source,
     revision: u64,
+    outcome: Outcome,
     committed: Option<&str>,
     snapshot: &Value,
 ) -> Result<Url> {
@@ -403,17 +447,13 @@ fn returned(
     if committed.is_some_and(|head| !oid(head)) {
         return Err(mismatch());
     }
+    if outcome != Outcome::Reviewed && committed.is_none() {
+        return Err(conflict());
+    }
     let mut url = source.event("returned");
     url.query_pairs_mut()
         .append_pair("resultRevision", &revision.to_string())
-        .append_pair(
-            "outcome",
-            if committed.is_some() {
-                "committed"
-            } else {
-                "reviewed"
-            },
-        )
+        .append_pair("outcome", outcome.name())
         .append_pair(
             "worktreeState",
             if files.is_empty() { "clean" } else { "dirty" },
@@ -424,13 +464,27 @@ fn returned(
     Ok(url)
 }
 
+/// 下一次返回的阶段必须严格晚于上一次：同阶段重复或不带记录的回退都按 `conflict` 拒绝。
+fn next_outcome(previous: Option<Outcome>, requested: Outcome) -> Result<Outcome> {
+    if previous.is_some_and(|previous| requested <= previous) {
+        return Err(conflict());
+    }
+    Ok(requested)
+}
+
 #[tauri::command]
 pub async fn remote_review_return<R: Runtime>(
     app: AppHandle<R>,
     state: Managed<'_>,
     review_id: String,
     session_id: String,
+    outcome: Option<String>,
 ) -> Result<()> {
+    let requested = match outcome.as_deref() {
+        Some(value) => Outcome::parse(value)?,
+        // 旧调用方不带 outcome：语义仍是「只做了审查」。
+        None => Outcome::Reviewed,
+    };
     let session = state.session(&session_id)?;
     let check_pending = || {
         let _guard = state.mutations.lock().unwrap();
@@ -443,13 +497,20 @@ pub async fn remote_review_return<R: Runtime>(
         Ok(())
     };
     check_pending()?;
-    let (source, revision, committed) = {
+    let (source, revision, stage, committed) = {
         let mut book = state.reviews.lock().unwrap();
         let entry = book.bound(&review_id, &session_id, &session)?;
+        let stage = next_outcome(entry.outcome, requested)?;
+        // committed / merged 都必须报得出这次审查的提交，否则只是声称进展。
+        if stage != Outcome::Reviewed && entry.committed.is_none() {
+            return Err(conflict());
+        }
         entry.revision = entry.revision.checked_add(1).ok_or_else(expired)?;
+        entry.outcome = Some(stage);
         (
             entry.source.clone(),
             entry.revision,
+            stage,
             entry.committed.clone(),
         )
     };
@@ -474,13 +535,16 @@ pub async fn remote_review_return<R: Runtime>(
     )
     .await
     .map_err(|_| AppError::new("remote_timeout", "等待远端工作树复核超时，请重试。"))??;
-    let url = returned(&source, revision, committed.as_deref(), &snapshot)?;
+    let url = returned(&source, revision, stage, committed.as_deref(), &snapshot)?;
     state.session(&session_id)?;
     check_pending()?;
     {
         let mut book = state.reviews.lock().unwrap();
         let entry = book.bound(&review_id, &session_id, &session)?;
-        if entry.revision != revision || entry.committed != committed {
+        if entry.revision != revision
+            || entry.committed != committed
+            || entry.outcome != Some(stage)
+        {
             return Err(expired());
         }
     }
@@ -515,7 +579,7 @@ mod tests {
             "root":source.worktree_path,"repo":source.worktree_identity,"head":commit,
             "files":[{"path":"changed","xy":" M"}]
         });
-        let actual = returned(&source, 1, Some(&commit), &snapshot).unwrap();
+        let actual = returned(&source, 1, Outcome::Committed, Some(&commit), &snapshot).unwrap();
         let expected = Url::parse(fixtures["events"][3]["url"].as_str().unwrap()).unwrap();
         assert_eq!(actual.host_str(), expected.host_str());
         assert_eq!(
@@ -840,6 +904,7 @@ esac
             root: source.worktree_path.clone(),
             baseline: source.baseline.clone(),
             review_id: Some(source.review_id.clone()),
+            hunk_stageable: false,
         };
         let state = RemoteWorktrees::new(root.path().join("journal"));
         let mut other = source.clone();
@@ -856,14 +921,14 @@ esac
                 .is_some());
             assert!(book.bound(&source.review_id, "local-b", &session).is_err());
         }
-        let reviewed = returned(&source, 1, None, &snapshot).unwrap();
+        let reviewed = returned(&source, 1, Outcome::Reviewed, None, &snapshot).unwrap();
         assert!(reviewed.as_str().contains("outcome=reviewed"));
         assert!(reviewed.as_str().contains("worktreeState=dirty"));
         let operation = Uuid::new_v4().to_string();
         let pending = Pending {
             review_id: Some(source.review_id.clone()),
             operation_id: operation.clone(),
-            op: WriteKind::Commit,
+            op: WriteKind::Commit.name().to_owned(),
             repo: session.repo.clone(),
         };
         let journal = session.journal(&state.data);
@@ -879,11 +944,26 @@ esac
             let mut book = state.reviews.lock().unwrap();
             let e = book.bound(&source.review_id, "local-a", &session).unwrap();
             assert_eq!(e.committed.as_deref(), Some(head.as_str()));
-            let url = returned(&source, 2, e.committed.as_deref(), &observed).unwrap();
+            let url = returned(
+                &source,
+                2,
+                Outcome::Committed,
+                e.committed.as_deref(),
+                &observed,
+            )
+            .unwrap();
             assert!(url.as_str().contains("outcome=committed"));
             assert!(url.as_str().contains("worktreeState=clean"));
             assert!(url.as_str().contains(&format!("headOid={head}")));
-            let drifted = returned(&source, 3, e.committed.as_deref(), &snapshot).unwrap();
+            // 已记录的提交仍是 headOid：这里只是复核工作树状态，不改变结果阶段。
+            let drifted = returned(
+                &source,
+                3,
+                Outcome::Committed,
+                e.committed.as_deref(),
+                &snapshot,
+            )
+            .unwrap();
             assert!(drifted.as_str().contains(&format!("headOid={head}")));
             assert!(!drifted
                 .as_str()
@@ -894,5 +974,60 @@ esac
             assert!(book.bound(&source.review_id, "local-a", &session).is_err());
         }
         session.agent.close().await;
+    }
+
+    /// reviewed → committed → merged 只能严格递增：同阶段重复与回退都是 conflict，
+    /// 而 committed/merged 都必须带着这次审查记录的提交。
+    #[test]
+    fn returned_outcomes_only_advance_and_merged_carries_the_recorded_commit() {
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/reviews/remote-protocol-v1.json"
+        ))
+        .unwrap();
+        let source = Source::parse(fixtures["requests"][0]["url"].as_str().unwrap()).unwrap();
+        let commit = "e".repeat(40);
+        let snapshot = json!({
+            "root": source.worktree_path, "repo": source.worktree_identity,
+            "head": commit, "files": []
+        });
+
+        assert_eq!(
+            next_outcome(None, Outcome::Reviewed).unwrap(),
+            Outcome::Reviewed
+        );
+        assert_eq!(
+            next_outcome(Some(Outcome::Reviewed), Outcome::Committed).unwrap(),
+            Outcome::Committed
+        );
+        assert_eq!(
+            next_outcome(Some(Outcome::Committed), Outcome::Merged).unwrap(),
+            Outcome::Merged
+        );
+        for (previous, requested) in [
+            (Some(Outcome::Committed), Outcome::Reviewed),
+            (Some(Outcome::Reviewed), Outcome::Reviewed),
+            (Some(Outcome::Merged), Outcome::Committed),
+        ] {
+            assert_eq!(
+                next_outcome(previous, requested).unwrap_err().code,
+                "conflict",
+                "{previous:?} -> {requested:?}"
+            );
+        }
+        assert_eq!(Outcome::parse("merged").unwrap(), Outcome::Merged);
+        assert_eq!(Outcome::parse("done").unwrap_err().code, "invalid_outcome");
+
+        let merged = returned(&source, 3, Outcome::Merged, Some(&commit), &snapshot).unwrap();
+        assert!(merged.as_str().contains("outcome=merged"));
+        assert!(merged.as_str().contains("resultRevision=3"));
+        assert!(merged.as_str().contains(&format!("headOid={commit}")));
+        assert!(merged.as_str().contains("worktreeState=clean"));
+        // 没有记录的提交时不能声称已经提交或合并。
+        for outcome in [Outcome::Committed, Outcome::Merged] {
+            assert_eq!(
+                returned(&source, 1, outcome, None, &snapshot).unwrap_err().code,
+                "conflict"
+            );
+        }
     }
 }

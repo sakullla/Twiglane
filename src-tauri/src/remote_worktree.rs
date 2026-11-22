@@ -111,7 +111,9 @@ struct Pending {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     review_id: Option<String>,
     operation_id: String,
-    op: WriteKind,
+    /// 远端 op 名：既覆盖 `stage`/`unstage`/`commit`，也覆盖桥接命令转发的写入 op。
+    /// 旧记录里存的就是 `stage` 这类小写名，改成字符串后仍能读回。
+    op: String,
     repo: String,
 }
 
@@ -142,6 +144,9 @@ struct Session {
     root: String,
     peer_identity: String,
     baseline: Option<String>,
+    /// 远端组件是否声明了按块/按行写入（agent v2 的 `patch`）。只由 `open` 返回的
+    /// capabilities 决定：没有声明就一律按整文件暂存处理，不假设远端能力。
+    hunk_stageable: bool,
 }
 
 impl Session {
@@ -176,6 +181,44 @@ impl Session {
 }
 
 fn remote_error(code: &str) -> AppError {
+    // agent v2 的错误码与本地分类不同名：把它们翻成同一套面向用户的分类，既不把
+    // 「仓库状态已变」说成 SSH 失败，也不把「组件不支持」折叠成连接问题。
+    match code {
+        "unsupported_operation" | "unsupported_capability" => {
+            return AppError::new(
+                "remote_unsupported",
+                "当前远端组件不支持这项操作，请更新远端组件后重试。",
+            )
+        }
+        "state_mismatch" => {
+            return AppError::new("stale_state", "远端工作树已有变化，请刷新后重试。")
+        }
+        "operation_conflict" => {
+            return AppError::new(
+                "remote_request",
+                "这个操作标识已经用于另一个请求，本次没有再次写入。",
+            )
+        }
+        "operation_pending" => {
+            return AppError::new(
+                "write_pending",
+                "此前的远端操作结果仍未确认，请先核对再重试。",
+            )
+        }
+        "invalid_operation" | "invalid_patch" | "verify_failed" => {
+            return AppError::new(
+                "remote_request",
+                "远端拒绝了这次请求，工作树没有按此请求改动。",
+            )
+        }
+        "message_too_large" | "request_too_large" => {
+            return AppError::new(
+                "remote_request_size",
+                "操作内容超出单次请求大小，请缩短后重试。",
+            )
+        }
+        _ => {}
+    }
     let message = match code {
         "remote_disabled" => "请先在 Cliora 中启用 SSH 主机。",
         "database_unavailable" => "无法读取 Cliora 的主机配置。",
@@ -618,6 +661,10 @@ async fn connect(
     let root = snapshot["root"]
         .as_str()
         .filter(|value| valid_path(value, true));
+    // 块级暂存必须由远端自己声明：v1 组件没有 `patch`，`capabilities` 缺省即不支持。
+    let hunk_stageable = snapshot["capabilities"]
+        .as_array()
+        .is_some_and(|caps| caps.iter().any(|cap| cap.as_str() == Some("patch")));
     if let Some(source) = source {
         source.check_tree(root.unwrap_or_default(), repo.unwrap_or_default())?;
     }
@@ -632,6 +679,7 @@ async fn connect(
                 target,
                 peer_identity,
                 baseline: request.baseline.clone(),
+                hunk_stageable,
             }),
             snapshot,
         )),
@@ -785,8 +833,26 @@ pub struct DiffRequest {
     cursor: Option<String>,
 }
 
-#[tauri::command]
-pub async fn remote_worktree_diff(state: Managed<'_>, request: DiffRequest) -> Result<Value> {
+/// 差异载荷里的块级可暂存标记：只由远端声明的能力和视图决定，界面不自行推断。
+///
+/// `task` 是只读视图（审查基线），即使远端支持按块写入也不能暂存。
+fn annotate_diff(session: &Session, view: &str, mut result: Value) -> Value {
+    let stageable = session.hunk_stageable && view != "task";
+    let reason = if stageable {
+        None
+    } else if view == "task" {
+        Some("任务差异是只读视图，不能暂存。")
+    } else {
+        Some("当前远端组件只支持整文件暂存，请更新远端组件后重试。")
+    };
+    if let Value::Object(map) = &mut result {
+        map.insert("hunksStageable".into(), json!(stageable));
+        map.insert("hunksStageableReason".into(), json!(reason));
+    }
+    result
+}
+
+async fn diff_call(state: &RemoteWorktrees, request: DiffRequest) -> Result<Value> {
     let session = state.session(&request.session_id)?;
     if !valid_path(&request.path, false)
         || !matches!(request.view.as_str(), "staged" | "unstaged" | "task")
@@ -809,7 +875,185 @@ pub async fn remote_worktree_diff(state: Managed<'_>, request: DiffRequest) -> R
     if let Some(cursor) = request.cursor {
         fields["cursor"] = json!(cursor);
     }
-    session.agent.rpc("diff", fields).await
+    let result = session.agent.rpc("diff", fields).await?;
+    Ok(annotate_diff(&session, &request.view, result))
+}
+
+#[tauri::command]
+pub async fn remote_worktree_diff(state: Managed<'_>, request: DiffRequest) -> Result<Value> {
+    diff_call(&state, request).await
+}
+
+/* ------------------------------------------------------------------ *
+ * 通用桥接：一条远端命令覆盖 agent v2 的其余 Git 能力
+ *
+ * 白名单与 agent v2 的 CAPABILITIES 同名，分成只读与写入两组：
+ * - 只读 op 直通，不写待确认记录；
+ * - 写入 op 复用 journal + finish_write，先记待确认，只有明确未生效才清记录，
+ *   没有可核对的回执一律 unknown。
+ * 未列入白名单的 op 返回 remote_unsupported；参数里出现程序、命令、shell、
+ * 工作目录或环境变量一律 invalid_request —— 桥接不引入任何任意执行面。
+ * ------------------------------------------------------------------ */
+
+/// 只读 op：与 agent v2 的只读入口同名，直接转发 `fields`。
+const BRIDGE_READ_OPS: &[&str] = &[
+    "history",
+    "fileHistory",
+    "commitDetail",
+    "commitDiff",
+    "compare",
+    "commitBranches",
+    "compareFileDiff",
+    "branchList",
+    "branchState",
+    "branchTracking",
+    "tagState",
+    "tagRemoteState",
+    "remoteState",
+    "stashState",
+    "mergePreview",
+    "mergeSession",
+    "conflictView",
+    "worktrees",
+];
+
+/// 写入 op：每类写入自成一类回执，因此 op 名原样进入 journal，不作为「同类」合并。
+const BRIDGE_WRITE_OPS: &[&str] = &[
+    "branchCreate",
+    "branchSwitch",
+    "branchRename",
+    "branchDelete",
+    "branchTrack",
+    "branchUpdate",
+    "branchPublish",
+    "tagCreate",
+    "tagDelete",
+    "tagPush",
+    "remoteAdd",
+    "remoteSetUrl",
+    "fetch",
+    "pull",
+    "push",
+    "pushToRemote",
+    "publishBranch",
+    "stashSave",
+    "stashApply",
+    "stashDelete",
+    "mergeStart",
+    "mergeComplete",
+    "mergeAbort",
+    "resolveConflict",
+    "cherryPick",
+    "revert",
+    "undoCommit",
+    "checkoutCommit",
+    "amendCommit",
+    "discard",
+    "worktreeRemove",
+];
+
+/// 桥接参数里永远不允许出现的字段：普通 Git RPC 也照样拒绝这些名字。
+const BRIDGE_FORBIDDEN_FIELDS: &[&str] = &[
+    "program", "command", "shell", "cwd", "env", "args", "id", "v", "op",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BridgeKind {
+    Read,
+    Write,
+}
+
+fn bridge_kind(op: &str) -> Result<BridgeKind> {
+    if BRIDGE_READ_OPS.contains(&op) {
+        Ok(BridgeKind::Read)
+    } else if BRIDGE_WRITE_OPS.contains(&op) {
+        Ok(BridgeKind::Write)
+    } else {
+        Err(AppError::new(
+            "remote_unsupported",
+            "这项远端操作还没有接通，没有在本机回退执行。",
+        ))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallRequest {
+    session_id: String,
+    op: String,
+    #[serde(default)]
+    fields: Value,
+    generation: Option<String>,
+}
+
+/// 组装转发字段：仓库键由会话决定，调用方给的 `repo` 一律被覆盖；
+/// 出现禁用字段则整条拒绝，不做「静默忽略」。只读时不带 `operationId`。
+fn bridge_fields(session: &Session, request: &CallRequest) -> Result<Value> {
+    let mut fields = match request.fields.clone() {
+        Value::Object(fields) => fields,
+        Value::Null => serde_json::Map::new(),
+        _ => {
+            return Err(AppError::new(
+                "invalid_request",
+                "远端操作参数必须是对象。",
+            ))
+        }
+    };
+    if BRIDGE_FORBIDDEN_FIELDS
+        .iter()
+        .any(|name| fields.contains_key(*name))
+    {
+        return Err(AppError::new(
+            "invalid_request",
+            "远端操作参数包含不允许的字段（程序、命令、shell、工作目录或环境变量）。",
+        ));
+    }
+    fields.insert("repo".into(), json!(session.repo));
+    if let Some(generation) = &request.generation {
+        fields.insert("generation".into(), json!(generation));
+    }
+    Ok(Value::Object(fields))
+}
+
+async fn bridge_call(state: &RemoteWorktrees, request: CallRequest) -> Result<Value> {
+    let session = state.session(&request.session_id)?;
+    let kind = bridge_kind(&request.op)?;
+    let fields = bridge_fields(&session, &request)?;
+    if let Some(id) = &session.review_id {
+        state
+            .reviews
+            .lock()
+            .unwrap()
+            .check_bound(id, &request.session_id, &session)?;
+    }
+    if kind == BridgeKind::Read {
+        return session.agent.rpc(&request.op, fields).await;
+    }
+    let operation_id = Uuid::new_v4().to_string();
+    let mut fields = fields;
+    fields["operationId"] = json!(operation_id);
+    let pending = Pending {
+        review_id: session.review_id.clone(),
+        operation_id,
+        op: request.op,
+        repo: session.repo.clone(),
+    };
+    let journal = session.journal(&state.data);
+    {
+        let _guard = state.mutations.lock().unwrap();
+        // 已有待确认记录时不再发第二条写入：结果未知的写入只能先核对。
+        if read_pending(&journal, &session.repo)?.is_some() {
+            return Ok(unknown(&pending.operation_id));
+        }
+        save_pending(&journal, &pending)?;
+    }
+    let response = session.agent.rpc(&pending.op, fields).await;
+    finish_write(state, &session, &journal, &pending, response).await
+}
+
+#[tauri::command]
+pub async fn remote_worktree_call(state: Managed<'_>, request: CallRequest) -> Result<Value> {
+    bridge_call(&state, request).await
 }
 
 #[derive(Deserialize)]
@@ -845,7 +1089,49 @@ fn definitive_error(code: &str) -> bool {
             | "git_operation_active"
             | "hook_failed"
             | "empty_message"
+            // 远端组件明确说「没有这个操作」或在执行前拒绝：请求没有生效，不算结果未知。
+            // 这里同时收 v1/v2 的原始码与翻译后的码，避免先在 remote_error 里翻过一遍而漏判。
+            | "remote_unsupported"
+            | "unsupported_operation"
+            | "unsupported_capability"
+            | "state_mismatch"
+            | "operation_conflict"
+            | "invalid_operation"
+            | "invalid_patch"
     )
+}
+
+/// 一次写入的回执证据：v1 组件把 `operationId`/`state` 放在响应顶层，
+/// v2 组件把它放在 `receipt` 里。两种形态都要能核对，不能只看一种就当成功。
+struct WriteProof<'a> {
+    operation_id: &'a str,
+    state: &'a str,
+    head: Option<&'a str>,
+    branch: Option<&'a str>,
+    reason: Option<&'a str>,
+}
+
+fn write_proof(response: &Value) -> Option<WriteProof<'_>> {
+    if let (Some(operation_id), Some(state)) = (
+        response["operationId"].as_str(),
+        response["state"].as_str(),
+    ) {
+        return Some(WriteProof {
+            operation_id,
+            state,
+            head: response["head"].as_str(),
+            branch: response["branch"].as_str(),
+            reason: response["reason"].as_str(),
+        });
+    }
+    let receipt = response.get("receipt")?;
+    Some(WriteProof {
+        operation_id: receipt["operationId"].as_str()?,
+        state: receipt["state"].as_str()?,
+        head: receipt["head"].as_str(),
+        branch: receipt["branch"].as_str(),
+        reason: receipt["reason"].as_str(),
+    })
 }
 
 async fn finish_write(
@@ -855,27 +1141,32 @@ async fn finish_write(
     pending: &Pending,
     response: Result<Value>,
 ) -> Result<Value> {
-    let proven_commit =
-        pending.op == WriteKind::Commit && response.as_ref().is_ok_and(|r| r["op"] == "commit");
+    let proven_commit = pending.op == "commit"
+        && response
+            .as_ref()
+            .is_ok_and(|r| r["op"] == "commit" || r["receipt"]["op"] == "commit");
     let completed = match response {
-        Ok(response)
-            if response["repo"].as_str() == Some(&session.repo)
-                && response["operationId"].as_str() == Some(&pending.operation_id) =>
-        {
-            match response["state"].as_str() {
-                Some("completed") => {
+        Ok(response) => {
+            let Some(proof) = write_proof(&response).filter(|proof| {
+                proof.operation_id == pending.operation_id
+                    && response["repo"].as_str().is_none_or(|repo| repo == session.repo)
+            }) else {
+                return Ok(unknown(&pending.operation_id));
+            };
+            match proof.state {
+                "completed" => {
                     let Ok(snapshot) = session.status().await else {
                         return Ok(unknown(&pending.operation_id));
                     };
-                    if snapshot["head"] != response["head"]
-                        || snapshot["branch"] != response["branch"]
+                    if snapshot["head"].as_str() != proof.head
+                        || snapshot["branch"].as_str() != proof.branch
                     {
                         return Ok(unknown(&pending.operation_id));
                     }
-                    json!({"state":"completed","operationId":pending.operation_id,"snapshot":snapshot,"head":response["head"]})
+                    json!({"state":"completed","operationId":pending.operation_id,"snapshot":snapshot,"head":snapshot["head"]})
                 }
-                Some("failed") => {
-                    let error = remote_error(response["reason"].as_str().unwrap_or("ssh_failed"));
+                "failed" => {
+                    let error = remote_error(proof.reason.unwrap_or("ssh_failed"));
                     json!({"state":"failed","operationId":pending.operation_id,"message":error.message})
                 }
                 _ => return Ok(unknown(&pending.operation_id)),
@@ -946,7 +1237,7 @@ pub async fn remote_worktree_write(state: Managed<'_>, request: WriteRequest) ->
     let pending = Pending {
         review_id: session.review_id.clone(),
         operation_id: request.operation_id,
-        op: request.op,
+        op: request.op.name().to_owned(),
         repo: session.repo.clone(),
     };
     {
@@ -1129,6 +1420,7 @@ esac
             root: "/repo".into(),
             peer_identity: "same-host".into(),
             baseline: None,
+            hunk_stageable: false,
         };
         let journal = session.journal(dir.path());
         session.target.target_revision = "edited-catalog".into();
@@ -1140,7 +1432,7 @@ esac
         let pending = Pending {
             review_id: None,
             operation_id: Uuid::new_v4().to_string(),
-            op: WriteKind::Commit,
+            op: WriteKind::Commit.name().to_owned(),
             repo: session.repo.clone(),
         };
         save_pending(&journal, &pending).unwrap();
@@ -1160,5 +1452,261 @@ esac
         let rejected = session.agent.rpc("commit", json!({})).await.unwrap_err();
         assert_eq!(rejected.code, "remote_not_sent");
         assert!(definitive_error(&rejected.code));
+    }
+
+    /* ---------------- 通用桥接：白名单、待确认语义与块级标记 ---------------- */
+
+    const FAKE_AGENT: &str = r#"
+const fs = require("node:fs");
+const input = require("node:readline").createInterface({input:process.stdin});
+const log = process.env.FAKE_LOG;
+const mode = process.env.FAKE_MODE || "complete";
+const head = "a".repeat(40);
+const send = frame => process.stdout.write(JSON.stringify(frame) + "\n");
+input.on("line", line => {
+    const req = JSON.parse(line);
+    fs.appendFileSync(log, req.op + "\n");
+    if (req.op === "status") {
+        return send({v:1, id:req.id, ok:true, result:{repo:req.repo, head, branch:"main", files:[]}});
+    }
+    if (mode === "silent") {
+        return send({v:1, id:req.id, ok:true, result:{}});
+    }
+    if (mode === "unsupported") {
+        return send({v:1, id:req.id, ok:false,
+            error:{code:"unsupported_operation", message:"Unknown operation"}});
+    }
+    send({v:1, id:req.id, ok:true, result:{repo:req.repo, operationId:req.operationId, op:req.op,
+        state:"completed", head, branch:"main"}});
+});
+"#;
+
+    /// 一个只会回固定帧的假远端组件：用来确认「桥接有没有真的发出去」以及
+    /// 「没有可核对回执时不谎称完成」。
+    fn fake_agent(dir: &Path, mode: &str) -> AgentTransport {
+        let mut command = Command::new("node");
+        command
+            .args(["-e", FAKE_AGENT])
+            .env("FAKE_LOG", dir.join("requests.log"))
+            .env("FAKE_MODE", mode)
+            .kill_on_drop(true);
+        AgentTransport::spawn(&mut command).unwrap()
+    }
+
+    fn test_session(agent: AgentTransport) -> Session {
+        let target = serde_json::from_value(json!({
+            "targetId": "host-a", "targetRevision": "peer", "name": "A",
+            "host": "test.invalid", "port": 22, "user": "test", "authMethod": "key",
+        }))
+        .unwrap();
+        Session {
+            review_id: None,
+            peer_revision: "peer-revision".into(),
+            agent,
+            repo: "repo-a".into(),
+            target,
+            root: "/repo".into(),
+            peer_identity: "a".repeat(64),
+            baseline: None,
+            hunk_stageable: false,
+        }
+    }
+
+    fn requests(dir: &Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("requests.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn bridged_calls_only_accept_the_whitelisted_git_ops() {
+        assert!(matches!(bridge_kind("history"), Ok(BridgeKind::Read)));
+        assert!(matches!(
+            bridge_kind("mergeSession"),
+            Ok(BridgeKind::Read)
+        ));
+        assert!(matches!(bridge_kind("fetch"), Ok(BridgeKind::Write)));
+        assert!(matches!(bridge_kind("worktreeRemove"), Ok(BridgeKind::Write)));
+        for op in ["stage", "commit", "open", "targets", "receipt"] {
+            assert_eq!(
+                bridge_kind(op).unwrap_err().code,
+                "remote_unsupported",
+                "{op} 有自己的命令，不经过桥接"
+            );
+        }
+        for op in ["program", "command", "shell", "cwd", "env", "node"] {
+            assert!(bridge_kind(op).is_err(), "{op} 必须被白名单拒绝");
+        }
+        for op in BRIDGE_READ_OPS.iter().chain(BRIDGE_WRITE_OPS.iter()) {
+            assert!(bridge_kind(op).is_ok(), "{op}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bridged_fields_never_carry_programs_shells_directories_or_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(fake_agent(dir.path(), "complete"));
+        for forbidden in ["program", "command", "shell", "cwd", "env", "args", "op"] {
+            let mut fields = serde_json::Map::new();
+            fields.insert("remote".into(), json!("origin"));
+            fields.insert(forbidden.into(), json!("x"));
+            let request = CallRequest {
+                session_id: "session-a".into(),
+                op: "fetch".into(),
+                fields: Value::Object(fields),
+                generation: None,
+            };
+            assert_eq!(
+                bridge_fields(&session, &request).unwrap_err().code,
+                "invalid_request",
+                "{forbidden}"
+            );
+        }
+        // 仓库键由会话决定，调用方给的值被覆盖；generation 原样带上。
+        let request = CallRequest {
+            session_id: "session-a".into(),
+            op: "history".into(),
+            fields: json!({"repo":"other/repo","offset":40}),
+            generation: Some("7".into()),
+        };
+        let fields = bridge_fields(&session, &request).unwrap();
+        assert_eq!(fields["repo"], json!("repo-a"));
+        assert_eq!(fields["generation"], json!("7"));
+        assert_eq!(fields["offset"], json!(40));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_bridged_write_without_a_receipt_is_unknown_and_is_never_sent_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = RemoteWorktrees::new(dir.path().join("state"));
+        let session = test_session(fake_agent(dir.path(), "silent"));
+        let journal = session.journal(&state.data);
+        state
+            .sessions
+            .lock()
+            .unwrap()
+            .insert("session-a".into(), Arc::new(session));
+
+        let first = bridge_call(
+            &state,
+            CallRequest {
+                session_id: "session-a".into(),
+                op: "fetch".into(),
+                fields: json!({"remote":"origin"}),
+                generation: Some("7".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["state"], "unknown");
+        assert!(journal.exists(), "没有回执时必须留下待确认记录");
+        assert_eq!(requests(dir.path()), vec!["fetch".to_string()]);
+
+        // 待确认期间再请求一次：只回 unknown，不重发同一条写入。
+        let second = bridge_call(
+            &state,
+            CallRequest {
+                session_id: "session-a".into(),
+                op: "pull".into(),
+                fields: json!({}),
+                generation: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(second["state"], "unknown");
+        assert_eq!(requests(dir.path()), vec!["fetch".to_string()]);
+        state.session("session-a").unwrap().agent.close().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_bridged_write_completes_only_with_a_matching_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = RemoteWorktrees::new(dir.path().join("state"));
+        let session = test_session(fake_agent(dir.path(), "complete"));
+        let journal = session.journal(&state.data);
+        state
+            .sessions
+            .lock()
+            .unwrap()
+            .insert("session-a".into(), Arc::new(session));
+
+        let result = bridge_call(
+            &state,
+            CallRequest {
+                session_id: "session-a".into(),
+                op: "branchCreate".into(),
+                fields: json!({"name":"feature"}),
+                generation: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["state"], "completed");
+        assert_eq!(result["head"], json!("a".repeat(40)));
+        assert!(!journal.exists(), "确认完成后必须清掉待确认记录");
+        assert_eq!(
+            requests(dir.path()),
+            vec!["branchCreate".to_string(), "status".to_string()]
+        );
+        state.session("session-a").unwrap().agent.close().await;
+    }
+
+    /// 现在发行的 v1 组件没有这些 op：明确拒绝要按「未生效」收尾并清掉待确认记录，
+    /// 而不是留下一条永远核对不掉的写入。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_op_the_remote_component_lacks_fails_without_leaving_a_pending_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = RemoteWorktrees::new(dir.path().join("state"));
+        let session = test_session(fake_agent(dir.path(), "unsupported"));
+        let journal = session.journal(&state.data);
+        state
+            .sessions
+            .lock()
+            .unwrap()
+            .insert("session-a".into(), Arc::new(session));
+
+        let result = bridge_call(
+            &state,
+            CallRequest {
+                session_id: "session-a".into(),
+                op: "fetch".into(),
+                fields: json!({}),
+                generation: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["state"], "failed");
+        assert!(result["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("不支持")));
+        assert!(!journal.exists(), "明确未生效的写入不能留下待确认记录");
+        assert_eq!(requests(dir.path()), vec!["fetch".to_string()]);
+        state.session("session-a").unwrap().agent.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn diff_payload_says_whether_hunks_can_be_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = test_session(fake_agent(dir.path(), "complete"));
+        let patch = json!({"data":"eA==","nextCursor":null});
+        let plain = annotate_diff(&session, "unstaged", patch.clone());
+        assert_eq!(plain["hunksStageable"], json!(false));
+        assert!(plain["hunksStageableReason"].as_str().is_some());
+
+        session.hunk_stageable = true;
+        let capable = annotate_diff(&session, "unstaged", patch.clone());
+        assert_eq!(capable["hunksStageable"], json!(true));
+        assert!(capable["hunksStageableReason"].is_null());
+        // 任务差异是只读视图：远端支持按块写入也不能暂存。
+        let task = annotate_diff(&session, "task", patch);
+        assert_eq!(task["hunksStageable"], json!(false));
+        assert!(task["hunksStageableReason"].as_str().is_some());
     }
 }

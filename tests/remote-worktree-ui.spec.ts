@@ -37,7 +37,12 @@ vi.mock("../src/lib/remote-worktree", async (importOriginal) => {
 });
 
 import { api, openRemoteRepository, remoteRepositoryState } from "../src/lib/api";
-import { remoteRepositoryKey } from "../src/lib/remote-worktree";
+import {
+  REMOTE_READ_OPS,
+  REMOTE_WRITE_OPS,
+  parseRemotePatch,
+  remoteRepositoryKey,
+} from "../src/lib/remote-worktree";
 
 const hostA = {
   targetId: "host-a",
@@ -443,6 +448,60 @@ describe("远端仓库在主窗口：审查基线、草稿与新建/克隆的边
     await api.openRepository("C:/work/demo", 25);
     expect(port.close).toHaveBeenCalledWith("session-a");
     expect(remoteRepositoryState(keyA)).toBeNull();
+  });
+});
+
+describe("远端桥接：op 白名单与块级可暂存标记", () => {
+  it("白名单与 Rust 侧的 BRIDGE_READ_OPS / BRIDGE_WRITE_OPS 逐项一致", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("../src-tauri/src/remote_worktree.rs", import.meta.url), "utf8");
+    const declared = (name: string): string[] => {
+      const marker = `const ${name}: &[&str] = &[`;
+      const start = source.indexOf(marker);
+      expect(start, `缺少 ${name}`).toBeGreaterThanOrEqual(0);
+      const end = source.indexOf("];", start);
+      const block = source.slice(start + marker.length, end);
+      return [...block.matchAll(/"([A-Za-z]+)"/g)].map((match) => match[1]);
+    };
+    expect([...REMOTE_READ_OPS]).toEqual(declared("BRIDGE_READ_OPS"));
+    expect([...REMOTE_WRITE_OPS]).toEqual(declared("BRIDGE_WRITE_OPS"));
+    // 有独立命令的 op 不经桥接，避免同一条能力出现两个入口。
+    for (const op of ["open", "status", "diff", "write", "recover"]) {
+      expect([...REMOTE_READ_OPS, ...REMOTE_WRITE_OPS]).not.toContain(op);
+    }
+  });
+
+  it("解析器按远端载荷标记填 stageable，缺省时保持不可暂存", () => {
+    const patch = [
+      "diff --git a/a.txt b/a.txt",
+      "--- a/a.txt",
+      "+++ b/a.txt",
+      "@@ -1,2 +1,3 @@",
+      " one",
+      "-two",
+      "+two!",
+      "+three",
+      "@@ -9,1 +10,1 @@",
+      "-old",
+      "+new",
+      "",
+    ].join("\n");
+
+    const capable = parseRemotePatch(patch, { hunksStageable: true });
+    expect(capable.hunks.map((hunk) => hunk.stageable)).toEqual([true, true]);
+
+    const fallback = parseRemotePatch(patch);
+    expect(fallback.hunks.map((hunk) => hunk.stageable)).toEqual([false, false]);
+    expect(parseRemotePatch(patch, { hunksStageable: false }).hunks[0].stageable).toBe(false);
+  });
+
+  it("二进制差异即使被标成可暂存也不给按块写入", () => {
+    const binary = parseRemotePatch(
+      ["Binary files a/logo.png and b/logo.png differ", ""].join("\n"),
+      { hunksStageable: true },
+    );
+    expect(binary.binary).toBe(true);
+    expect(binary.hunks).toEqual([]);
   });
 });
 

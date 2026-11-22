@@ -6,10 +6,12 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { gunzipSync } from "node:zlib";
 
 const MANIFEST = "manifest.json";
 const FORMAT = 1;
 const MAX_ARTIFACT_BYTES = 32 * 1024 * 1024;
+const MAX_GZIP_BYTES = MAX_ARTIFACT_BYTES + 64 * 1024;
 const VERSION = /^[0-9A-Za-z.+-]{1,32}$/;
 const SIGNATURE = /^[A-Za-z0-9+/]+={0,2}$/;
 
@@ -25,23 +27,34 @@ function collect(dir, requireAll) {
   const artifacts = [];
   for (const [folder, system, architecture] of TARGETS) {
     const name = system === "Windows" ? "twiglane-agent-v2.exe" : "twiglane-agent-v2";
-    const relative = `${folder}/${name}`;
+    const raw = `${folder}/${name}`;
+    // A loose Mach-O resource is re-signed when signing the Mac desktop app.
+    // The gzip resource keeps the already signed remote binary byte-for-byte.
+    const wrapped = system === "macOS" && (requireAll || existsSync(join(dir, `${raw}.gz`)));
+    if (wrapped && existsSync(join(dir, raw))) {
+      throw new Error(`发行资源中不能包含未封装的 macOS 组件 ${raw}`);
+    }
+    const relative = wrapped ? `${raw}.gz` : raw;
     const file = join(dir, relative);
     if (!existsSync(file)) {
       if (requireAll) throw new Error(`缺少远端组件 ${relative}`);
       continue;
     }
     const stat = statSync(file);
-    if (!stat.isFile() || stat.size === 0 || stat.size > MAX_ARTIFACT_BYTES) {
+    if (!stat.isFile() || stat.size === 0 || stat.size > (wrapped ? MAX_GZIP_BYTES : MAX_ARTIFACT_BYTES)) {
       throw new Error(`远端组件文件大小异常 ${relative}`);
     }
+    const resource = readFileSync(file);
+    const bytes = wrapped ? gunzipSync(resource, { maxOutputLength: MAX_ARTIFACT_BYTES }) : resource;
+    if (bytes.length === 0) throw new Error(`远端组件内容为空 ${relative}`);
     const signature = readSignature(`${file}.sig`, true);
     const digestSignature = readSignature(`${file}.digest.sig`, requireAll);
     artifacts.push({
       system,
       architecture,
       file: relative,
-      sha256: createHash("sha256").update(readFileSync(file)).digest("hex"),
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      ...(wrapped ? { resourceSha256: createHash("sha256").update(resource).digest("hex") } : {}),
       signature,
       ...(digestSignature ? { digestSignature } : {}),
     });
@@ -76,6 +89,7 @@ function check(dir, requireAll, version) {
     const target = `${entry?.system}/${entry?.architecture}`;
     const actual = byTarget.get(target);
     if (!actual || actual.file !== entry.file || actual.sha256 !== entry.sha256 ||
+        actual.resourceSha256 !== entry.resourceSha256 ||
         actual.signature !== entry.signature || actual.digestSignature !== entry.digestSignature ||
         typeof entry.version !== "string" ||
         !VERSION.test(entry.version) || (version !== undefined && entry.version !== version)) {

@@ -1,7 +1,9 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 
 /* ------------------------------------------------------------------ *
@@ -97,7 +99,7 @@ describe("远程 SSH 的命令边界", () => {
 });
 
 describe("远端组件发行清单", () => {
-  it("逐平台要求二进制和两种签名，并检查 Windows exe 的摘要", () => {
+  it("逐平台核对签名、Windows exe 与 macOS 原始二进制的摘要", () => {
     const root = mkdtempSync(join(tmpdir(), "twiglane-agent-manifest-"));
     const run = (action: "--write" | "--check") =>
       spawnSync(process.execPath, [
@@ -105,15 +107,19 @@ describe("远端组件发行清单", () => {
         "--version", "1.2.3", "--require-all",
       ], { encoding: "utf8" });
     try {
-      const unixTargets = ["Linux-x86_64", "Linux-aarch64", "macOS-x86_64", "macOS-aarch64"];
+      const linux = ["Linux-x86_64", "Linux-aarch64"];
+      const mac = ["macOS-x86_64", "macOS-aarch64"];
       const windows = join(root, "Windows-x86_64", "twiglane-agent-v2.exe");
+      const macAsset = join(root, "macOS-x86_64", "twiglane-agent-v2.gz");
+      const binary = Buffer.from([0xcf, 0xfa, 0xed, 0xfe, 0, 10, 13, 127, 255]);
       const writeArtifact = (path: string) => {
         mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, Buffer.from([0, 10, 13, 127, 255]));
+        writeFileSync(path, path.endsWith(".gz") ? gzipSync(binary) : binary);
         writeFileSync(`${path}.sig`, "c2ln");
         writeFileSync(`${path}.digest.sig`, "YXR0");
       };
-      for (const target of unixTargets) writeArtifact(join(root, target, "twiglane-agent-v2"));
+      for (const target of linux) writeArtifact(join(root, target, "twiglane-agent-v2"));
+      for (const target of mac) writeArtifact(join(root, target, "twiglane-agent-v2.gz"));
       const missing = run("--write");
       expect(missing.status).toBe(1);
       expect(missing.stderr).toContain("Windows-x86_64/twiglane-agent-v2.exe");
@@ -129,6 +135,21 @@ describe("远端组件发行清单", () => {
         signature: "c2ln",
         digestSignature: "YXR0",
       });
+      const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+      const macZip = readFileSync(macAsset);
+      expect(manifest.artifacts.find((entry: { file: string }) => entry.file.startsWith("macOS-x86_64/"))).toMatchObject({
+        sha256: digest(binary),
+        resourceSha256: digest(macZip),
+        digestSignature: "YXR0",
+      });
+      const rawMac = macAsset.slice(0, -3);
+      writeFileSync(rawMac, binary);
+      expect(run("--check").status).toBe(1);
+      unlinkSync(rawMac);
+      macZip[4] ^= 1;
+      writeFileSync(macAsset, macZip);
+      expect(run("--check").status).toBe(1);
+      writeArtifact(macAsset);
       writeFileSync(windows, "tampered");
       expect(run("--check").status).toBe(1);
       writeArtifact(windows);

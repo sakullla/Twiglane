@@ -5,7 +5,7 @@
 //! （`ssh -G` 快照、known_hosts/撤销文件、ProxyJump、实际对端身份、配置修订），
 //! 但这里不查找也不调用 Cliora。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
@@ -171,7 +171,7 @@ pub(crate) struct Snapshot {
     /// OpenSSH 实际解析出的主机名，用于界面展示。
     pub(crate) hostname: String,
     sections: Vec<(String, String)>,
-    trust: BTreeMap<PathBuf, Option<Vec<u8>>>,
+    trust: Vec<(PathBuf, Option<Vec<u8>>)>,
     pub(crate) hops: Vec<Hop>,
 }
 
@@ -183,7 +183,7 @@ impl Snapshot {
         let root_profile = run_profile(exec, &root)?;
 
         let mut sections: Vec<(String, String)> = Vec::new();
-        let mut trust: BTreeMap<PathBuf, Option<Vec<u8>>> = BTreeMap::new();
+        let mut trust = Vec::new();
         let mut hops: Vec<Hop> = Vec::new();
         let mut hostname = None;
         let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -328,15 +328,12 @@ impl Snapshot {
     /// 把冻结配置与信任材料写进本次连接的私有目录，返回 `ssh` 参数（止于 `--` 与目标）。
     /// 目录生命周期跟随调用方：连接结束即删除，权限只给当前用户。
     pub(crate) fn args(&self, folder: &Path, target: &SshTarget) -> Result<Vec<OsString>, AppError> {
-        let mut names: BTreeMap<&Path, String> = BTreeMap::new();
-        for (index, (path, bytes)) in self.trust.iter().enumerate() {
-            let name = format!("trust-{index}");
+        for (index, (_, bytes)) in self.trust.iter().enumerate() {
             if let Some(bytes) = bytes {
-                let file = folder.join(&name);
+                let file = folder.join(format!("trust-{index}"));
                 let mut handle = fs::File::create(&file).map_err(|_| unavailable())?;
                 handle.write_all(bytes).map_err(|_| unavailable())?;
             }
-            names.insert(path.as_path(), name);
         }
         let mut output = String::new();
         for (alias, body) in &self.sections {
@@ -361,10 +358,13 @@ impl Snapshot {
                 {
                     output.push_str(key);
                     for part in value.split_whitespace() {
-                        let path = PathBuf::from(part);
-                        let name = names.get(path.as_path()).ok_or_else(unavailable)?;
+                        let index = part.parse::<usize>().map_err(|_| unavailable())?;
+                        if index >= self.trust.len() {
+                            return Err(unavailable());
+                        }
                         output.push(' ');
-                        output.push_str(&quoted(&folder.join(name).to_string_lossy()));
+                        let file = folder.join(format!("trust-{index}"));
+                        output.push_str(&quoted(&file.to_string_lossy()));
                     }
                     output.push('\n');
                     continue;
@@ -413,7 +413,7 @@ fn trust_directive(
     key: &str,
     value: &str,
     multiple: bool,
-    trust: &mut BTreeMap<PathBuf, Option<Vec<u8>>>,
+    trust: &mut Vec<(PathBuf, Option<Vec<u8>>)>,
 ) -> Result<String, AppError> {
     if value == "none" {
         return Ok(format!("{key} none\n"));
@@ -426,42 +426,133 @@ fn trust_directive(
     if parts.is_empty() {
         return Ok(format!("{key} none\n"));
     }
-    let mut names = Vec::new();
+    let mut indices = Vec::new();
     for part in parts {
-        let path = PathBuf::from(part);
-        if !path.is_absolute() {
-            return Err(unavailable());
+        let path = trust_path(part)?;
+        if let Some(index) = trust.iter().position(|(known, _)| known == &path) {
+            indices.push(index.to_string());
+            continue;
         }
-        if !trust.contains_key(&path) {
-            let bytes = match fs::metadata(&path) {
-                Ok(info) if info.is_file() => {
-                    if info.len() > 8 * 1024 * 1024 {
-                        return Err(AppError::new(
-                            "ssh_trust_unavailable",
-                            "已知主机文件过大，拒绝读取。",
-                        ));
-                    }
-                    Some(fs::read(&path).map_err(|_| {
-                        AppError::new("ssh_trust_unavailable", "无法读取已知主机文件。")
-                    })?)
-                }
-                Ok(info) if info.is_dir() => {
+        let bytes = match fs::metadata(&path) {
+            Ok(info) if info.is_file() => {
+                if info.len() > 8 * 1024 * 1024 {
                     return Err(AppError::new(
                         "ssh_trust_unavailable",
-                        "已知主机路径不是文件。",
-                    ))
+                        "已知主机文件过大，拒绝读取。",
+                    ));
                 }
-                // /dev/null 一类的设备文件按"存在但没有内容"处理。
-                Ok(_) => Some(Vec::new()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(_) => {
-                    return Err(AppError::new("ssh_trust_unavailable", "无法读取已知主机文件。"))
-                }
-            };
-            trust.insert(path.clone(), bytes);
-        }
-        names.push(path.to_string_lossy().to_string());
+                Some(fs::read(&path).map_err(|_| {
+                    AppError::new("ssh_trust_unavailable", "无法读取已知主机文件。")
+                })?)
+            }
+            Ok(info) if info.is_dir() => {
+                return Err(AppError::new(
+                    "ssh_trust_unavailable",
+                    "已知主机路径不是文件。",
+                ))
+            }
+            // /dev/null 一类的设备文件按"存在但没有内容"处理。
+            Ok(_) => Some(Vec::new()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => {
+                return Err(AppError::new("ssh_trust_unavailable", "无法读取已知主机文件。"))
+            }
+        };
+        indices.push(trust.len().to_string());
+        trust.push((path, bytes));
     }
-    // 这一行稍后在 args() 里改写成私有副本的绝对路径；原路径只在快照里占位。
-    Ok(format!("{key} {}\n", names.join(" ")))
+    // 按索引引用冻结的文件，ProgramData 和单路径参数中的空格不会改变路径边界。
+    Ok(format!("{key} {}\n", indices.join(" ")))
+}
+
+fn trust_path(value: &str) -> Result<PathBuf, AppError> {
+    #[cfg(windows)]
+    if let Some(tail) = value.strip_prefix("__PROGRAMDATA__") {
+        // ssh -G 原样打印 Win32 OpenSSH 的两个内建全局路径。只展开固定的目录和文件名。
+        let normalized = tail.replace('\\', "/");
+        let file = match normalized.as_str() {
+            "/ssh/ssh_known_hosts" => "ssh_known_hosts",
+            "/ssh/ssh_known_hosts2" => "ssh_known_hosts2",
+            _ => return Err(unavailable()),
+        };
+        let dir = program_data()?;
+        return Ok(dir.join("ssh").join(file));
+    }
+    let path = PathBuf::from(value);
+    path.is_absolute().then_some(path).ok_or_else(unavailable)
+}
+
+#[cfg(windows)]
+fn program_data() -> Result<PathBuf, AppError> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{
+        FOLDERID_ProgramData, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+    };
+
+    // SAFETY: Folder ID is valid and no user token is required for ProgramData. A
+    // successful lookup gives a NUL-terminated UTF-16 allocation owned by the caller.
+    let path = unsafe {
+        let name = SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, None)
+            .map_err(|_| unavailable())?;
+        let path = PathBuf::from(OsString::from_wide(name.as_wide()));
+        CoTaskMemFree(Some(name.0.cast()));
+        path
+    };
+    path.is_absolute().then_some(path).ok_or_else(unavailable)
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_windows_ssh_defaults_are_frozen_as_absolute_trust_files() {
+        let target = SshTarget {
+            id: "windows-profile".into(),
+            display_name: "Windows OpenSSH".into(),
+            host: "localhost".into(),
+            port: 22,
+            user: "fixture".into(),
+            auth_method: "agent".into(),
+            identity_file: None,
+            ssh_config: Some("none".into()),
+            default_path: None,
+            enabled: true,
+            shared_host_id: None,
+            revision: 0,
+        };
+        let exec = SshExec {
+            program: PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join("System32/OpenSSH/ssh.exe"),
+            env: Vec::new(),
+        };
+        let snapshot = Snapshot::resolve(&exec, &target).unwrap();
+        for name in ["ssh_known_hosts", "ssh_known_hosts2"] {
+            let expected = program_data().unwrap().join("ssh").join(name);
+            assert!(snapshot.trust.iter().any(|(path, _)| path == &expected));
+        }
+        let dir = tempfile::Builder::new()
+            .prefix("Twiglane SSH profile ")
+            .tempdir()
+            .unwrap();
+        let args = snapshot.args(dir.path(), &target).unwrap();
+        let frozen = fs::read_to_string(dir.path().join("config")).unwrap();
+        assert!(!frozen.contains("__PROGRAMDATA__"));
+        assert!(frozen.contains("StrictHostKeyChecking yes"));
+        let checked = exec.command().arg("-G").args(args).output().unwrap();
+        assert!(checked.status.success(), "{:?}", checked.status);
+    }
+
+    #[test]
+    fn windows_program_data_token_rejects_paths_outside_the_default_pair() {
+        for path in [
+            r"__PROGRAMDATA__\..\ssh_known_hosts",
+            r"__PROGRAMDATA__\ssh\ssh_known_hosts:alternate",
+            r"__PROGRAMDATA__\C:\ssh\ssh_known_hosts",
+            r"__PROGRAMDATA__ssh\ssh_known_hosts",
+        ] {
+            assert!(trust_path(path).is_err(), "{path}");
+        }
+    }
 }

@@ -205,6 +205,11 @@ jobs:
             minisign -Vm "$statement" -P "$pubkey" -x "$RUNNER_TEMP/twiglane-agent-v2.minisig"
             mv "$statement.sig" "$agent.digest.sig"
           done
+          for agent in "$agent_dir"/{macOS-x86_64,macOS-aarch64}/twiglane-agent-v2; do
+            gzip -n -- "$agent"
+            mv "$agent.sig" "$agent.gz.sig"
+            mv "$agent.digest.sig" "$agent.gz.digest.sig"
+          done
           node scripts/remote-worktree/agent-v2-manifest.mjs --write "$agent_dir" --version "$version" --require-all
           node scripts/remote-worktree/agent-v2-manifest.mjs --check "$agent_dir" --version "$version" --require-all
       - uses: actions/upload-artifact@v7
@@ -310,6 +315,27 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           TARGET: ${{ matrix.target }}
         run: bash .github/scripts/sign-macos.sh
+      - name: Verify remote agents in the signed macOS disk image
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          arch="${TARGET%%-*}"
+          dmg="src-tauri/target/$TARGET/release/bundle/dmg/Twiglane_${version}_${arch}.dmg"
+          mount="$(mktemp -d "$RUNNER_TEMP/twiglane-agent-check.XXXXXX")"
+          mounted=false
+          cleanup() {
+            if "$mounted"; then hdiutil detach "$mount"; fi
+            rmdir "$mount"
+          }
+          trap cleanup EXIT
+          hdiutil attach "$dmg" -mountpoint "$mount" -readonly -nobrowse -noverify -noautoopen
+          mounted=true
+          node scripts/remote-worktree/agent-v2-manifest.mjs --check \
+            "$mount/Twiglane.app/Contents/Resources/agent-v2" --require-all
       - name: Upload verified macOS release artifacts
         if: runner.os == 'macOS'
         env:

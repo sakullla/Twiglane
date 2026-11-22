@@ -359,6 +359,7 @@ async fn install_streams_the_signed_artifact_and_replaces_atomically() {
             version: "0.3.40".into(),
             file: "linux-x86_64/twiglane-agent-v2".into(),
             sha256: digest.clone(),
+            resource_sha256: None,
             signature: "c2lnbmF0dXJl".into(),
             digest_signature: String::new(),
         }],

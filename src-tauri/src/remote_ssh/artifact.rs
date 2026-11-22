@@ -7,8 +7,10 @@
 //! SHA-256，签署二进制和域分离的摘要声明并核实签名。桌面端按目标选择产物并核对
 //! 清单摘要；交给 Cliora 连接器的摘要声明签名可在连接器独立验证。
 
+use std::io::Read;
 use std::path::Path;
 
+use flate2::read::MultiGzDecoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -16,6 +18,7 @@ use crate::error::AppError;
 
 /// 单个产物大小上限：远大于当前 agent，也避免把任意大文件读进内存。
 pub(crate) const MAX_ARTIFACT_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_GZIP_BYTES: u64 = MAX_ARTIFACT_BYTES + 64 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +28,9 @@ pub(crate) struct Entry {
     pub(crate) version: String,
     pub(crate) file: String,
     pub(crate) sha256: String,
+    /// gzip 发行资源的摘要。sha256 和两种签名始终归属原始二进制。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) resource_sha256: Option<String>,
     #[serde(default)]
     pub(crate) signature: String,
     #[serde(default)]
@@ -144,19 +150,55 @@ pub(crate) fn select(dir: &Path, system: &str, architecture: &str) -> Result<Art
             "清单登记了远端组件，但发行包内没有该文件。请重新安装 Twiglane。",
         )
     })?;
-    if !info.is_file() || info.len() > MAX_ARTIFACT_BYTES || info.len() == 0 {
+    let wrapped = entry.file.ends_with(".gz");
+    let resource_limit = if wrapped {
+        MAX_GZIP_BYTES
+    } else {
+        MAX_ARTIFACT_BYTES
+    };
+    if !info.is_file() || info.len() > resource_limit || info.len() == 0 {
         return Err(AppError::new(
             "agent_artifact_missing",
             "远端组件文件缺失或大小异常。请重新安装 Twiglane。",
         ));
     }
-    let bytes = std::fs::read(&path).map_err(|_| manifest_error())?;
+    let mut resource = Vec::new();
+    std::fs::File::open(&path)
+        .map_err(|_| manifest_error())?
+        .take(resource_limit + 1)
+        .read_to_end(&mut resource)
+        .map_err(|_| manifest_error())?;
+    if resource.len() as u64 > resource_limit {
+        return Err(manifest_error());
+    }
+    let bytes = if wrapped {
+        let expected_resource = entry
+            .resource_sha256
+            .as_deref()
+            .and_then(upper_hex)
+            .ok_or_else(manifest_error)?;
+        let resource_digest = format!("{:x}", Sha256::digest(&resource));
+        if resource_digest != expected_resource {
+            return Err(digest_mismatch());
+        }
+        let mut bytes = Vec::new();
+        MultiGzDecoder::new(resource.as_slice())
+            .take(MAX_ARTIFACT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| manifest_error())?;
+        if bytes.is_empty() || bytes.len() as u64 > MAX_ARTIFACT_BYTES {
+            return Err(manifest_error());
+        }
+        bytes
+    } else {
+        if entry.resource_sha256.is_some() {
+            return Err(manifest_error());
+        }
+        resource
+    };
     let digest = format!("{:x}", Sha256::digest(&bytes));
     if digest != expected {
-        return Err(AppError::new(
-            "agent_digest_mismatch",
-            "远端组件与发布清单的摘要不一致，拒绝安装。",
-        ));
+        return Err(digest_mismatch());
     }
     Ok(Artifact {
         bytes,
@@ -165,6 +207,13 @@ pub(crate) fn select(dir: &Path, system: &str, architecture: &str) -> Result<Art
         signature: entry.signature.clone(),
         digest_signature: entry.digest_signature.clone(),
     })
+}
+
+fn digest_mismatch() -> AppError {
+    AppError::new(
+        "agent_digest_mismatch",
+        "远端组件与发布清单的摘要不一致，拒绝安装。",
+    )
 }
 
 #[cfg(test)]
@@ -204,6 +253,7 @@ mod tests {
             version: "0.3.40".into(),
             file: file.into(),
             sha256: digest(b"windows-agent"),
+            resource_sha256: None,
             signature: "c2ln".into(),
             digest_signature: "YXR0".into(),
         }]);
@@ -211,6 +261,46 @@ mod tests {
         assert_eq!(selected.bytes, b"windows-agent");
         assert_eq!(selected.digest_signature, "YXR0");
         assert!(normalize("Windows", "ARM64").is_none());
+    }
+
+    #[test]
+    fn macos_gzip_resources_provide_the_original_signed_binary() {
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let raw = b"\xcf\xfa\xed\xfeoriginal Mac binary";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(raw).unwrap();
+        let mut wrapped = encoder.finish().unwrap();
+        let file = "macOS-aarch64/twiglane-agent-v2.gz";
+        write(dir.path(), file, &wrapped);
+        manifest(
+            dir.path(),
+            vec![Entry {
+                system: "macOS".into(),
+                architecture: "aarch64".into(),
+                version: "0.3.40".into(),
+                file: file.into(),
+                sha256: digest(raw),
+                resource_sha256: Some(digest(&wrapped)),
+                signature: "c2ln".into(),
+                digest_signature: "YXR0".into(),
+            }],
+        );
+
+        let selected = select(dir.path(), "Darwin", "arm64").unwrap();
+        assert_eq!(selected.bytes, raw);
+        assert_eq!(selected.sha256, digest(raw));
+        assert_eq!(selected.signature, "c2ln");
+        assert_eq!(selected.digest_signature, "YXR0");
+
+        wrapped[4] ^= 1; // gzip timestamp only, uncompressed bytes are unchanged
+        write(dir.path(), file, &wrapped);
+        assert_eq!(
+            select(dir.path(), "Darwin", "arm64").unwrap_err().code,
+            "agent_digest_mismatch"
+        );
     }
 
     #[test]
@@ -227,6 +317,7 @@ mod tests {
                     version: "0.3.40".into(),
                     file: "linux-x86_64/twiglane-agent-v2".into(),
                     sha256: digest(b"linux-agent"),
+                    resource_sha256: None,
                     signature: "c2lnbmF0dXJl".into(),
                     digest_signature: String::new(),
                 },
@@ -236,6 +327,7 @@ mod tests {
                     version: "0.3.40".into(),
                     file: "macos-aarch64/twiglane-agent-v2".into(),
                     sha256: digest(b"mac-agent"),
+                    resource_sha256: None,
                     signature: "c2lnbmF0dXJl".into(),
                     digest_signature: String::new(),
                 },
@@ -261,6 +353,7 @@ mod tests {
                 version: "0.3.40".into(),
                 file: "linux-x86_64/twiglane-agent-v2".into(),
                 sha256: digest(b"linux-agent"),
+                resource_sha256: None,
                 signature: "c2ln".into(),
                 digest_signature: String::new(),
             }],
@@ -284,6 +377,7 @@ mod tests {
                 version: "0.3.40".into(),
                 file: "linux-x86_64/twiglane-agent-v2".into(),
                 sha256: digest(b"original"),
+                resource_sha256: None,
                 signature: "c2ln".into(),
                 digest_signature: String::new(),
             }],
@@ -301,6 +395,7 @@ mod tests {
                 version: "0.3.40".into(),
                 file: "linux-x86_64/twiglane-agent-v2".into(),
                 sha256: digest(b"replaced"),
+                resource_sha256: None,
                 signature: "  ".into(),
                 digest_signature: String::new(),
             }],
@@ -318,6 +413,7 @@ mod tests {
                 version: "0.3.40".into(),
                 file: "../escape".into(),
                 sha256: digest(b"replaced"),
+                resource_sha256: None,
                 signature: "c2ln".into(),
                 digest_signature: String::new(),
             }],

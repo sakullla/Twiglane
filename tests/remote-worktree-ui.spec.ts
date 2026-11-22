@@ -359,3 +359,53 @@ describe("远端仓库在主窗口：安装确认与审查来源", () => {
   });
 });
 
+
+describe("远端仓库在主窗口：审查基线、草稿与新建/克隆的边界", () => {
+  it("审查来源的基线随打开请求原样发送，没有基线时不带这个字段", async () => {
+    const baseline = "d".repeat(40);
+    port.open.mockResolvedValueOnce(opened("session-review"));
+    const outcome = await openRemoteRepository(
+      { kind: "ssh", hostId: hostA.targetId, hostRevision: hostA.targetRevision, path: "/srv/repo" },
+      { reviewId: "review-1", baseline },
+    );
+    expect(outcome.kind).toBe("opened");
+    // 后端按 baseline 相等判定这条打开是不是那条审查：前端必须原样回传。
+    expect(port.open.mock.calls[0][0]).toMatchObject({ reviewId: "review-1", baseline });
+
+    port.open.mockResolvedValueOnce(opened("session-plain"));
+    await openRemoteRepository(
+      { kind: "ssh", hostId: hostA.targetId, hostRevision: hostA.targetRevision, path: "/srv/repo" },
+      { reviewId: "review-2", baseline: null },
+    );
+    expect(port.open.mock.calls[1][0].baseline).toBeUndefined();
+  });
+
+  it("远端草稿只留在会话内存里：切到别处再回来仍是那份，且不写本机草稿库", async () => {
+    await openHost(hostA, keyA, "session-a");
+    await api.saveDraft(keyA, "远端草稿正文");
+    // 本机草稿库只按本机仓库路径保存：远端草稿一次都没有交给本机命令。
+    expect(invoke).not.toHaveBeenCalled();
+
+    await openHost(hostB, keyB, "session-b");
+    expect(remoteRepositoryState(keyA)).toBeNull();
+
+    const reopened = await openHost(hostA, keyA, "session-a2");
+    expect(reopened.draft).toBe("远端草稿正文");
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("新建与克隆之前先结束远端会话，不留下一个已取消的远端壳", async () => {
+    await openHost(hostA, keyA, "session-a");
+    invoke.mockResolvedValueOnce({});
+    await api.createRepository("C:/work/new", 20);
+    expect(port.close).toHaveBeenCalledWith("session-a");
+    expect(remoteRepositoryState(keyA)).toBeNull();
+
+    await openHost(hostA, keyA, "session-a2");
+    invoke.mockResolvedValueOnce({});
+    await api.cloneRepository("https://example.invalid/r.git", "C:/work", "r", 21, null);
+    expect(port.close).toHaveBeenCalledWith("session-a2");
+    expect(remoteRepositoryState(keyA)).toBeNull();
+  });
+});
+

@@ -498,7 +498,21 @@
   let remoteReturning = $state(false);
   /** 当前打开的远端仓库键；本机仓库为 null。 */
   const remoteKey = $derived(opened && isRemoteRepositoryKey(opened.summary.path) ? opened.summary.path : null);
-  const remoteRepoState = $derived(remoteKey ? api.remoteRepositoryState(remoteKey) : null);
+  /**
+   * 远端会话状态的版本号：api 在待确认写入、断线与会话增删时自增。
+   * 这里订阅它并落进 $state，下面的 $derived 才会重新读取状态。
+   */
+  let remoteStateNonce = $state(0);
+  $effect(() =>
+    // 订阅可能缺省（测试夹具里的 api 只有用到的那些方法）：没有订阅就退回打开时读到的值。
+    api.onRemoteStateChange?.(() => {
+      remoteStateNonce += 1;
+    }),
+  );
+  const remoteRepoState = $derived.by(() => {
+    void remoteStateNonce;
+    return remoteKey ? api.remoteRepositoryState(remoteKey) : null;
+  });
   /**
    * 只读文档阅读窗口的请求。
    *
@@ -1617,8 +1631,15 @@
     mergeAbortable = false;
     mergeOperation = "none";
     mergeCanContinue = false;
+    // 远端仓库的最近记录要带上主机与远端路径：只留 {name,path} 会让重开后的标题显示内部仓库键。
     recent = [
-      { name: next.summary.name, path: next.summary.path, openedAtMs: Date.now() },
+      {
+        name: next.summary.name,
+        path: next.summary.path,
+        openedAtMs: Date.now(),
+        ...(next.summary.host ? { host: next.summary.host } : {}),
+        ...(next.summary.remotePath ? { remotePath: next.summary.remotePath } : {}),
+      },
       ...recent.filter((repo) => repo.path !== next.summary.path),
     ];
     live = `已打开 ${next.summary.name}`;
@@ -1666,6 +1687,9 @@
    * 空窗内的外部改动由 refresh 补上，它自带 epoch、generation 保护和合并探测。
    */
   async function rewatchCurrent(path: string) {
+    // 远端仓库没有本机监听可接：重新 openRepository 会以 cancelled 结束现有远端会话，
+    // 还会丢掉审查来源，所以远端键直接不动。
+    if (isRemoteRepositoryKey(path)) return;
     try {
       let current: OpenedRepository;
       try {
@@ -3361,6 +3385,8 @@
         { kind: "ssh", hostId: spec.hostId, hostRevision: spec.hostRevision, path: spec.path },
         {
           ...(spec.reviewId ? { reviewId: spec.reviewId } : {}),
+          // 审查来源带基线时一起发送：后端按 baseline 相等判定这次打开是不是那条审查。
+          ...(spec.source?.baseline ? { baseline: spec.source.baseline } : {}),
           // 安装始终显式：缺省为 false，只有用户确认后的那一次请求才是 true。
           allowInstall: options.allowInstall === true,
           ...(options.installConfirmation ? { installConfirmation: options.installConfirmation } : {}),

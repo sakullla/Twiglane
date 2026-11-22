@@ -1041,10 +1041,11 @@ describe("Cliora 远端审查入口", () => {
     const install = await screen.findByRole("button", { name: "确认安装" });
     expect(begin).toHaveBeenCalledWith(url);
     // 主窗口打开：主机、工作树与审查来源一起传，安装缺省不传输。
+    // 主窗口路径发送了来源基线：后端按 baseline 相等判定这条打开是不是那条审查。
     expect(mocks.api.openRemoteRepository).toHaveBeenNthCalledWith(
       1,
       { kind: "ssh", hostId: source.targetId, hostRevision: source.targetRevision, path: source.worktreePath },
-      expect.objectContaining({ reviewId: REVIEW_A, allowInstall: false }),
+      expect.objectContaining({ reviewId: REVIEW_A, allowInstall: false, baseline: BASELINE }),
     );
     expect(mocks.api.remoteRepositoryState).not.toHaveBeenCalled();
     handle([url]);
@@ -1056,7 +1057,12 @@ describe("Cliora 远端审查入口", () => {
       expect(mocks.api.openRemoteRepository).toHaveBeenNthCalledWith(
         2,
         { kind: "ssh", hostId: source.targetId, hostRevision: source.targetRevision, path: source.worktreePath },
-        expect.objectContaining({ reviewId: REVIEW_A, allowInstall: true, installConfirmation: "offered" }),
+        expect.objectContaining({
+          reviewId: REVIEW_A,
+          allowInstall: true,
+          installConfirmation: "offered",
+          baseline: BASELINE,
+        }),
       ),
     );
     // 打开后主窗口显示真实主机与远端路径，并给出返回入口；没有独立的远端弹层。
@@ -1082,5 +1088,112 @@ describe("Cliora 远端审查入口", () => {
     expect(mocks.api.openRepository).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "返回 Cliora" })).toBeNull();
     cleanup();
+  });
+});
+
+describe("远端仓库在主窗口：最近记录与草稿", () => {
+  const REMOTE_KEY = "ssh://remote-a/srv/worktree";
+  const REMOTE_HOST = "服务器 A";
+  const REMOTE_PATH = "/srv/worktree";
+  const host = {
+    targetId: "remote-a", targetRevision: "a".repeat(64), name: "服务器 A",
+    host: "host-a", user: "tester", port: 22, authMethod: "key", defaultPath: REMOTE_PATH,
+  };
+  const source = {
+    reviewId: REVIEW_A, sessionId: SESSION_A, targetId: host.targetId, targetRevision: host.targetRevision,
+    peerRevision: "b".repeat(64), peerIdentity: "c".repeat(64), worktreeIdentity: "f".repeat(64),
+    worktreePath: REMOTE_PATH, baseline: BASELINE,
+  };
+  const url = "twiglane://remote-review?" + new URLSearchParams({ v: "1", ...source }).toString();
+
+  /** 远端仓库在主窗口的 DTO：summary 带主机与远端路径，path 是内部仓库键。 */
+  function remoteOpened(draft = "") {
+    return {
+      summary: { name: "worktree", path: REMOTE_KEY, host: REMOTE_HOST, remotePath: REMOTE_PATH },
+      generation: 21,
+      snapshot: { ...snapshot, files: [] },
+      draft,
+      watchDegraded: false,
+    };
+  }
+
+  /** 从标题栏仓库弹层切到另一个仓库：按当前显示名打开，再按目标名选择。 */
+  async function switchRepo(current: string, target: RegExp) {
+    await fireEvent.click(await screen.findByRole("button", { name: `当前仓库 ${current}` }));
+    const popover = await screen.findByRole("dialog", { name: "切换仓库" });
+    await fireEvent.click(within(popover).getByRole("option", { name: target }));
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  /** 打开一条带基线的远端审查，并把「打开远端仓库」与「远端状态」都接上。 */
+  async function openReview(opened: () => unknown) {
+    deepLink.getCurrent.mockResolvedValue([url]);
+    vi.spyOn(reviews, "begin").mockResolvedValue(source);
+    vi.spyOn(reviews, "end").mockResolvedValue();
+    mocks.api.remoteTargets.mockResolvedValue([host]);
+    mocks.api.openRemoteRepository.mockResolvedValue({
+      kind: "opened",
+      repository: opened(),
+      key: REMOTE_KEY,
+      host: REMOTE_HOST,
+      path: REMOTE_PATH,
+      pending: null,
+      reviewId: REVIEW_A,
+    });
+    mocks.api.remoteRepositoryState.mockReturnValue({
+      key: REMOTE_KEY,
+      host: REMOTE_HOST,
+      path: REMOTE_PATH,
+      pending: false,
+      reviewId: REVIEW_A,
+      connected: true,
+    });
+    mocks.api.openRepository.mockImplementation(async (path: string) => (path === REMOTE_KEY ? opened() : openedAt(path)));
+    await mountShell();
+    await waitFor(() => expect(document.querySelector("[data-remote-repository]")).toBeTruthy());
+  }
+
+  it("重开远端仓库后最近记录仍带主机与远端路径，弹层不显示内部仓库键", async () => {
+    await openReview(() => remoteOpened());
+
+    // 先切到本机仓库，再从弹层切回远端仓库：这一步由 rememberOpened 重写最近记录。
+    await switchRepo("worktree", /demo/);
+    await waitFor(() => expect(mocks.api.openRepository).toHaveBeenCalledWith("C:/work/demo", expect.any(Number)));
+    await switchRepo("demo", /worktree/);
+    await waitFor(() => expect(mocks.api.openRepository).toHaveBeenCalledWith(REMOTE_KEY, expect.any(Number)));
+    await screen.findByRole("button", { name: "当前仓库 worktree" });
+
+    await fireEvent.click(screen.getByRole("button", { name: "当前仓库 worktree" }));
+    const popover = await screen.findByRole("dialog", { name: "切换仓库" });
+    const rows = within(popover).getAllByRole("option");
+    const remoteRow = rows.find((row) => row.textContent?.includes("worktree"));
+    expect(remoteRow, "远端仓库仍在最近记录里").toBeTruthy();
+    expect(remoteRow!.querySelector(".repo-path bdi")?.textContent).toBe(`${REMOTE_HOST} · ${REMOTE_PATH}`);
+    expect(remoteRow!.textContent).not.toContain("ssh://");
+  });
+
+  it("远端草稿切走再回来仍在：离开时存进会话内存，回到这个仓库时回读", async () => {
+    const saved = new Map<string, string>();
+    // 顶替 api 的草稿契约：保存进内存，重开同一个仓库时随 OpenedRepository.draft 回读。
+    mocks.api.saveDraft.mockImplementation(async (path: string, message: string) => {
+      saved.set(path, message);
+    });
+    await openReview(() => remoteOpened(saved.get(REMOTE_KEY) ?? ""));
+
+    const message = (await screen.findByRole("textbox", { name: "提交说明草稿" })) as HTMLTextAreaElement;
+    await fireEvent.input(message, { target: { value: "远端草稿正文" } });
+    await fireEvent.blur(message);
+    await waitFor(() => expect(mocks.api.saveDraft).toHaveBeenCalledWith(REMOTE_KEY, "远端草稿正文"));
+
+    await switchRepo("worktree", /demo/);
+    await waitFor(() => expect(mocks.api.openRepository).toHaveBeenCalledWith("C:/work/demo", expect.any(Number)));
+    await switchRepo("demo", /worktree/);
+    await waitFor(() => expect(mocks.api.openRepository).toHaveBeenCalledWith(REMOTE_KEY, expect.any(Number)));
+
+    await waitFor(() => {
+      const back = screen.getByRole("textbox", { name: "提交说明草稿" }) as HTMLTextAreaElement;
+      expect(back.value).toBe("远端草稿正文");
+    });
   });
 });

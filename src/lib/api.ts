@@ -249,6 +249,32 @@ const remoteSessions = new Map<string, RemoteRepositorySession>();
 const remoteHostLabels = new Map<string, string>();
 let remoteGeneration = 1000;
 
+/**
+ * 远端仓库的提交说明草稿：只留在本次会话内存里，按仓库键分开。
+ *
+ * 本机草稿库只认本机仓库的规范路径，所以远端的草稿不写 state.json，但也不能丢：
+ * 切走再回来（会话已结束重开）时由这里回读，用户看到的还是自己写的那份。
+ */
+const remoteDrafts = new Map<string, string>();
+
+/**
+ * 远端会话状态的订阅者：待确认写入、断线与会话增删都叫醒一次，
+ * 外壳据此重新读取 remoteRepositoryState，不必轮询。
+ */
+const remoteStateListeners = new Set<() => void>();
+
+function noteRemoteState(): void {
+  for (const listener of [...remoteStateListeners]) listener();
+}
+
+/** 订阅远端会话状态变化，返回取消订阅函数。 */
+export function onRemoteStateChange(listener: () => void): () => void {
+  remoteStateListeners.add(listener);
+  return () => {
+    remoteStateListeners.delete(listener);
+  };
+}
+
 function remoteError(code: string, message: string, generation?: number): AppFailure {
   return generation === undefined ? { code, message } : { code, message, generation };
 }
@@ -314,8 +340,9 @@ function openedRemote(session: RemoteRepositorySession): OpenedRepository {
     },
     generation: session.generation,
     snapshot: remoteStatus(session.latest, session.generation),
-    // 远端仓库的提交说明草稿只在本会话内保留：本机 state.json 只服务本机仓库。
-    draft: "",
+    // 远端仓库的提交说明草稿只在本会话内保留：本机 state.json 只服务本机仓库，
+    // 但切走再回来要回到用户写下的那份，所以从会话内存里回读。
+    draft: remoteDrafts.get(session.key) ?? "",
     // 远端没有本机文件监听，变化由显式刷新与聚焦刷新发现。
     watchDegraded: false,
   };
@@ -330,11 +357,17 @@ async function remoteStatusOf(session: RemoteRepositorySession): Promise<RemoteW
     snapshot = await remoteWorktreePort.status(session.sessionId);
   } catch (error) {
     const failure = normalizeError(error);
-    if (DISCONNECT_CODES.has(failure.code)) session.disconnected = true;
+    if (DISCONNECT_CODES.has(failure.code) && !session.disconnected) {
+      session.disconnected = true;
+      noteRemoteState();
+    }
     session.diffs.clear();
     throw failure;
   }
-  session.disconnected = false;
+  if (session.disconnected) {
+    session.disconnected = false;
+    noteRemoteState();
+  }
   if (snapshot.repo !== session.repo) {
     throw remoteError("target_changed", "远端工作树身份已变化，请重新打开这个远端仓库。");
   }
@@ -390,6 +423,7 @@ async function settleRemoteWrite(
 ): Promise<RemoteWorktreeSnapshot> {
   if (result.state === "completed") {
     session.pending = null;
+    noteRemoteState();
     if (result.snapshot.repo !== session.repo) {
       throw remoteError("target_changed", "远端工作树身份已变化，请重新打开这个远端仓库。", session.generation);
     }
@@ -400,9 +434,11 @@ async function settleRemoteWrite(
   if (result.state === "failed") {
     // 远端已核实这次写入没有生效：清掉待确认记录，错误如实上报。
     session.pending = null;
+    noteRemoteState();
     throw remoteError("remote_write_failed", result.message || "远端操作失败，工作树没有被改动。", session.generation);
   }
   session.pending = { operationId: result.operationId, op };
+  noteRemoteState();
   throw remoteError("write_pending", result.message || "远端操作结果待确认，请重新打开这个远端仓库核对。", session.generation);
 }
 
@@ -439,6 +475,7 @@ async function remoteWrite(
   }
   const operationId = newOperationId();
   session.pending = { operationId, op: action.op };
+  noteRemoteState();
   let result: RemoteWriteResult;
   try {
     result = await remoteWorktreePort.write({
@@ -451,6 +488,7 @@ async function remoteWrite(
     const failure = normalizeError(error);
     if (DEFINITIVE_WRITE_CODES.has(failure.code)) {
       session.pending = null;
+      noteRemoteState();
       throw failure;
     }
     // 未收到回执：按「结果未知」处理，不重发、不冒充失败，写入保持禁用。
@@ -464,6 +502,7 @@ async function closeRemoteSession(
   reason: string,
 ): Promise<void> {
   remoteSessions.delete(session.key);
+  noteRemoteState();
   try {
     await remoteWorktreePort.close(session.sessionId);
   } catch {
@@ -480,6 +519,8 @@ async function closeRemoteSession(
 
 export interface RemoteOpenOptions {
   reviewId?: string;
+  /** 审查来源带来的任务基线：有基线就必须原样回传，否则后端按 target_changed 拒绝。 */
+  baseline?: string | null;
   allowInstall?: boolean;
   installConfirmation?: string | null;
   onProgress?: (value: RemoteConnectionProgress) => void;
@@ -523,6 +564,8 @@ async function openRemote(
         allowInstall: options.allowInstall ?? false,
         ...(options.installConfirmation ? { installConfirmation: options.installConfirmation } : {}),
         ...(options.reviewId ? { reviewId: options.reviewId } : {}),
+        // 基线一起带着走：后端按 baseline 相等判定这次打开是不是那条审查。
+        ...(options.baseline ? { baseline: options.baseline } : {}),
       } as RemoteOpenRequest,
       options.onProgress ?? (() => {}),
     );
@@ -561,6 +604,7 @@ async function openRemote(
     diffs: new Map(),
   };
   remoteSessions.set(key, session);
+  noteRemoteState();
   if (session.reviewId) {
     try {
       await remoteReviewPort.accept(session.reviewId, session.sessionId);
@@ -1525,6 +1569,7 @@ const apiExtras = {
   openRemoteRepository,
   remoteReturnReview,
   remoteRepositoryState,
+  onRemoteStateChange,
   closeRemoteRepository,
 };
 
@@ -1686,7 +1731,27 @@ const remoteOverrides: Record<string, unknown> = {
     if (!isRemoteRepositoryKey(path)) return apiBase.saveDraft(path, message);
     // 本机草稿库只按本机仓库规范路径保存；远端仓库的草稿留在会话内存里，
     // 换仓库再回来仍然可用，但不会写进本机 state.json。
-    return Promise.resolve();
+    remoteDrafts.set(path, message);
+  },
+
+  /**
+   * 新建与克隆在远端仓库打开时也要先结束远端会话：后端启动新仓库的监听会顶掉现有会话，
+   * 若此时还留着远端连接，界面上那个远端仓库会变成一个永远 cancelled 的壳。
+   */
+  async createRepository(path: string, requestId: number): Promise<OpenedRepository> {
+    await closeAllRemoteSessions();
+    return apiBase.createRepository(path, requestId);
+  },
+
+  async cloneRepository(
+    url: string,
+    parent: string,
+    name: string,
+    requestId: number,
+    credential: HttpCredential | null = null,
+  ): Promise<CloneResult> {
+    await closeAllRemoteSessions();
+    return apiBase.cloneRepository(url, parent, name, requestId, credential);
   },
 
   async forgetRecent(path: string): Promise<RecentRepo[]> {

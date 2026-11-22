@@ -26,7 +26,8 @@ export interface RemoteWorktreeLocation {
   targetId: string;
   targetRevision: string;
   path: string;
-  baseline?: string;
+  /** 任务基线：审查来源带基线时，打开请求必须原样回传，后端才会放行。 */
+  baseline?: string | null;
 }
 
 export interface RemoteWorktreeSnapshot {
@@ -52,6 +53,8 @@ export interface RemoteOpenRequest extends RemoteWorktreeLocation {
   allowInstall: boolean;
   installConfirmation?: string;
   reviewId?: string;
+  /** 与审查来源一致的基线；没有来源或来源没有基线时缺省。 */
+  baseline?: string | null;
 }
 
 export interface RemoteConnectionProgress {

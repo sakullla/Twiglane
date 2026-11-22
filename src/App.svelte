@@ -3515,11 +3515,10 @@
     if (!key || remoteReturning) return;
     remoteReturning = true;
     try {
+      // 两种结果都按返回的那句话显示：声明了哪个阶段、以及为什么没能声明更高的阶段
+      // （远端合入没有记录提交）只有 API 层知道，界面不自己编一句话盖掉它。
       const returned = await api.remoteReturnReview(key);
-      phaseNote =
-        returned.state === "duplicate"
-          ? returned.message
-          : "已向原 Cliora 会话返回远端审查结果。";
+      phaseNote = returned.message;
     } catch (error) {
       showError(error);
     } finally {

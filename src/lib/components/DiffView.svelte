@@ -1328,9 +1328,20 @@
     return "diff-line";
   }
 
+  /**
+   * 块不可暂存的原因：远端没有 patch 写入时由 API 层带一句话下来（那是能力限制，不是
+   * 截断），本地差异没有这句话，仍按块自身的截断状态说明。
+   */
+  const hunkStageBlocked = $derived<string | null>(diff?.hunksStageableReason ?? null);
+
   function hunkLabel(hunk: DiffHunk): string {
-    if (!hunk.stageable) return "已截断";
+    if (!hunk.stageable) return hunkStageBlocked ? "不可暂存" : "已截断";
     return selection?.side === "staged" ? "取消暂存" : "暂存此块";
+  }
+
+  function hunkStageTitle(hunk: DiffHunk): string {
+    if (hunk.stageable) return "";
+    return hunkStageBlocked ?? "截断的代码块不能部分暂存";
   }
 </script>
 
@@ -1790,7 +1801,7 @@
                     type="button"
                     class={`btn btn-sm hunk-btn ${hunk.stageable ? "btn-secondary" : "btn-ghost"}`}
                     disabled={disabled || !hunk.stageable}
-                    title={hunk.stageable ? "" : "截断的代码块不能部分暂存"}
+                    title={hunkStageTitle(hunk)}
                     onclick={() => onStageHunk(hunk)}
                   >{hunkLabel(hunk)}</button>
                 {/if}
@@ -1854,7 +1865,7 @@
                     type="button"
                     class={`btn btn-sm hunk-btn ${hunk.stageable ? "btn-secondary" : "btn-ghost"}`}
                     disabled={disabled || !hunk.stageable}
-                    title={hunk.stageable ? "" : "截断的代码块不能部分暂存"}
+                    title={hunkStageTitle(hunk)}
                     onclick={() => onStageHunk(hunk)}
                   >{hunkLabel(hunk)}</button>
                 {/if}

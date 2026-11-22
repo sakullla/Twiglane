@@ -31,6 +31,10 @@ import {
   type RemoteWriteRequest,
   type RemoteWriteResult,
 } from "./remote-worktree";
+import {
+  REMOTE_HUNKS_UNSTAGEABLE_REASON,
+  type RemotePatchStageability,
+} from "./types";
 import type {
   BatchDeleteResult,
   BranchState,
@@ -101,7 +105,10 @@ import type {
   PullIntegration,
   UndoResult,
   RevertOutcome,
+  RevertTarget,
   AmendOutcome,
+  ChangeKind,
+  DiscardFilePlan,
   AppFailure,
   RepositoryLocation,
 } from "./types";
@@ -220,6 +227,16 @@ const DEFINITIVE_WRITE_CODES = new Set([
   "empty_message",
 ]);
 
+/**
+ * 远端差异缓存的一项：解析好的文档，以及这份差异「不能按块暂存」的真实原因。
+ *
+ * 原因属于整份差异（而不是某一页），随文档一起缓存，翻页与命中缓存都给同一句话。
+ */
+interface RemoteDiffCacheEntry {
+  document: RemoteDiffDocument;
+  hunksStageableReason: string | null;
+}
+
 interface RemoteRepositorySession {
   key: string;
   hostId: string;
@@ -238,16 +255,23 @@ interface RemoteRepositorySession {
   reviewId: string | null;
   pending: RemotePendingWrite | null;
   /**
-   * 这次远端会话里实际做成的 Git 结果阶段：只由已经核对完成的写入推进，
-   * 返回 Cliora 时按它声明结果（没有提交或合入就是 reviewed）。
+   * 这次远端会话里实际做成的 Git 结果阶段：只由已经核对完成的 commit 推进，
+   * 返回 Cliora 时按它声明结果（没有提交就是 reviewed）。
    */
   outcome: RemoteReviewOutcome;
+  /**
+   * 这次会话里改变过 HEAD、却没有被原生审查账本登记的 op（合入、修订、拣选、还原）。
+   * 有值时不能声明 committed/merged，返回 Cliora 时必须说明原因。
+   */
+  unrecordedHeadOp: string | null;
+  /** 这次会话已经成功送回 Cliora 的阶段：只有它能让冲突收到 duplicate 的说法。 */
+  returnedOutcome: RemoteReviewOutcome | null;
   /**
    * 连接断开后只读：已读内容保留，但写入与新的读取都不再发送，
    * 直到重新打开这个远端仓库。绝不因为断线改用本机 Git。
    */
   disconnected: boolean;
-  diffs: Map<string, RemoteDiffDocument>;
+  diffs: Map<string, RemoteDiffCacheEntry>;
 }
 
 /** 传输层错误：连接已不可用，界面转入只读。 */
@@ -387,14 +411,15 @@ async function loadRemotePatch(
   session: RemoteRepositorySession,
   path: string,
   view: RemoteDiffView,
-): Promise<RemotePatch> {
+): Promise<RemotePatch & RemotePatchStageability> {
   const chunks: Uint8Array[] = [];
   let cursor: string | null = null;
   let pages = 0;
   let total = 0;
   let truncated = false;
-  // 块级可暂存只认远端第一页给的标记：续页是同一份差异，不能用后面的页改口径。
-  let hunksStageable = false;
+  // 不可暂存的原因只认远端第一页给的说明（续页是同一份差异）；没有说明时用这一层能
+  // 确认的那句：patch 写入不在桥接白名单里，远端永远发不出块级/逐行写入。
+  let reason: string | null = null;
   while (pages < REMOTE_DIFF_PAGE_LIMIT) {
     let page: RemoteDiffPage;
     try {
@@ -408,7 +433,7 @@ async function loadRemotePatch(
     } catch (error) {
       throw normalizeError(error);
     }
-    if (pages === 0) hunksStageable = page.hunksStageable === true;
+    if (pages === 0) reason = page.hunksStageableReason ?? null;
     const bytes = decodeBase64(page.data);
     chunks.push(bytes);
     total += bytes.length;
@@ -423,27 +448,40 @@ async function loadRemotePatch(
     joined.set(chunk, at);
     at += chunk.length;
   }
-  const patch = parseRemotePatch(new TextDecoder().decode(joined), { hunksStageable });
-  return truncated ? { ...patch, truncated: true } : patch;
+  /**
+   * 一律按「不可按块暂存」解析：patch 写入不在桥接白名单里，远端永远发不出块级/逐行
+   * 写入。载荷里的 hunksStageable 不能当成能力证据，否则界面会亮起按不动的按钮。
+   */
+  const patch = parseRemotePatch(new TextDecoder().decode(joined));
+  return {
+    ...patch,
+    hunksStageableReason: reason ?? REMOTE_HUNKS_UNSTAGEABLE_REASON,
+    ...(truncated ? { truncated: true } : {}),
+  };
 }
 
 /**
- * 每个写入 op 做成的结果阶段。只有提交类 op 才是 committed，合并要在完成时才推进到 merged：
- * 停在冲突的合并没有产生任何合入结果，返回 Cliora 时仍然只是 reviewed。
+ * 每个写入 op 做成的结果阶段。只有走 write 通道的 commit 才会被原生记进审查账本
+ * （`finish_write` 只在 op 为 commit 时 record_commit），committed 也只能由它声明。
  */
 const REVIEW_OUTCOME_BY_OP: Record<string, RemoteReviewOutcome> = {
   commit: "committed",
-  amendCommit: "committed",
-  cherryPick: "committed",
-  revert: "committed",
-  undoCommit: "committed",
-  mergeComplete: "merged",
 };
+
+/**
+ * 会改变 HEAD、但原生不会登记成审查提交的 op。
+ *
+ * mergeComplete 经桥接执行，原生不 record_commit，审查账本里永远没有合入提交：把它记成
+ * merged 只会在返回 Cliora 时被后端按 conflict 拒绝。这里单独记住「有过没有登记的
+ * 新提交」，返回时如实说明为什么只能按 reviewed 送。
+ */
+const UNRECORDED_HEAD_OPS = new Set(["mergeComplete", "amendCommit", "cherryPick", "revert"]);
 
 const REVIEW_OUTCOME_ORDER: RemoteReviewOutcome[] = ["reviewed", "committed", "merged"];
 
 /** 记录这次会话真正做成的阶段；阶段只前进，回退的写入不会把声明降下来。 */
 function noteRemoteOutcome(session: RemoteRepositorySession, op: string): void {
+  if (UNRECORDED_HEAD_OPS.has(op) && session.unrecordedHeadOp === null) session.unrecordedHeadOp = op;
   const reached = REVIEW_OUTCOME_BY_OP[op];
   if (!reached) return;
   if (REVIEW_OUTCOME_ORDER.indexOf(reached) > REVIEW_OUTCOME_ORDER.indexOf(session.outcome)) {
@@ -637,6 +675,8 @@ async function openRemote(
     reviewId: options.reviewId ?? null,
     pending: opened.pendingWrite ?? null,
     outcome: "reviewed",
+    unrecordedHeadOp: null,
+    returnedOutcome: null,
     disconnected: false,
     diffs: new Map(),
   };
@@ -696,12 +736,34 @@ export function remoteRepositoryState(key: string): RemoteRepositoryState | null
 }
 
 /**
- * 一次「返回 Cliora」的结果：sent 是这次真的送出了新阶段；
- * duplicate 表示远端已经记过这一阶段（重复点击或阶段回退），本次没有发送任何内容。
+ * 一次「返回 Cliora」的结果：sent 是这次真的送出了新阶段，message 是给用户的一句话；
+ * duplicate 只表示这次会话自己已经送过同一阶段，本次没有发送任何内容。
  */
 export type RemoteReturnOutcome =
-  | { state: "sent"; outcome: RemoteReviewOutcome }
+  | { state: "sent"; outcome: RemoteReviewOutcome; message: string }
   | { state: "duplicate"; message: string };
+
+/**
+ * 返回前给用户的一句话：声明的是哪个阶段，以及为什么没能声明更高的阶段。
+ *
+ * 合入与修订经桥接执行，原生审查账本里没有对应的合入提交，所以这两类只能在 reviewed
+ * 上停留；这里把真实原因说出来，不把「送不上去」写成「已经合入」。
+ */
+function remoteReturnMessage(session: RemoteRepositorySession): string {
+  const merged = session.unrecordedHeadOp === "mergeComplete";
+  if (session.outcome === "reviewed") {
+    if (merged) {
+      return "已返回 cliora：远端合入未记录提交，无法作为 merged 送回 Cliora，本次按 reviewed 声明。";
+    }
+    if (session.unrecordedHeadOp) {
+      return "已返回 cliora：远端这次的新提交没有登记进审查记录，无法作为 committed 送回 Cliora，本次按 reviewed 声明。";
+    }
+    return "已向原 Cliora 会话返回远端审查结果（reviewed）。";
+  }
+  return merged
+    ? "已向原 Cliora 会话返回远端审查结果（committed）；远端这次合入仍未记录提交，没有作为 merged 声明。"
+    : "已向原 Cliora 会话返回远端审查结果（committed）。";
+}
 
 /** 向原 Cliora 会话返回审查结果：只发送真实 Git 结果，不推进任何本地仓库状态。 */
 export async function remoteReturnReview(key: string): Promise<RemoteReturnOutcome> {
@@ -710,24 +772,32 @@ export async function remoteReturnReview(key: string): Promise<RemoteReturnOutco
   if (session.pending) {
     throw remoteError("write_pending", "请先核对远端操作结果，再返回 Cliora。", session.generation);
   }
+  const declared = session.outcome;
   try {
-    // 阶段由这次会话里真正做成的提交或合入决定。什么都没做就是 reviewed，而这个阶段
-    // 沿旧调用方的语义省略 outcome：端口与后端都把它当缺省值处理，协议保持向后兼容。
-    if (session.outcome === "reviewed") {
+    // 阶段由这次会话里真正被审查账本登记的提交决定。什么都没有就是 reviewed，而这个
+    // 阶段沿旧调用方的语义省略 outcome：端口与后端都把它当缺省值处理，协议保持向后兼容。
+    if (declared === "reviewed") {
       await remoteReviewPort.returnReview(session.reviewId, session.sessionId);
     } else {
-      await remoteReviewPort.returnReview(session.reviewId, session.sessionId, session.outcome);
+      await remoteReviewPort.returnReview(session.reviewId, session.sessionId, declared);
     }
   } catch (error) {
     const failure = normalizeError(error);
-    // 同一阶段重复点击（或阶段回退）由远端按 conflict 拒绝：这一阶段已经送达过，
-    // 本次没有送出任何新结果，因此按幂等刷新处理，不把 conflict 抛给用户。
-    if (failure.code === "conflict") {
+    // conflict 有两种来源：同一阶段已经送回，或这次声明的证据不足（阶段被别处推进、
+    // 审查账本里没有记录提交）。只有前一种能说成「已经送回」——判据是这次会话自己
+    // 成功送过不早于它的阶段；其余一律把后端原因原样抛给用户。
+    const sent = session.returnedOutcome;
+    if (
+      failure.code === "conflict" &&
+      sent !== null &&
+      REVIEW_OUTCOME_ORDER.indexOf(sent) >= REVIEW_OUTCOME_ORDER.indexOf(declared)
+    ) {
       return { state: "duplicate", message: "这一阶段已经送回 Cliora，本次没有重复发送。" };
     }
     throw failure;
   }
-  return { state: "sent", outcome: session.outcome };
+  session.returnedOutcome = declared;
+  return { state: "sent", outcome: declared, message: remoteReturnMessage(session) };
 }
 
 
@@ -1773,6 +1843,96 @@ async function remoteMergeSessionOf(
 }
 
 /**
+ * 一次只读的提交详情：桥接的写回执只回新状态，DTO 里与提交有关的证据只能这样补。
+ * 读不到就按协议错误抛出，绝不填空值冒充「这个提交没有说明、没有父提交」。
+ */
+async function remoteCommitDetailOf(session: RemoteRepositorySession, oid: string): Promise<CommitDetail> {
+  const result = await remoteBridgeRead(session, "commitDetail", { oid });
+  return bridgeField<CommitDetail>(result, "commit");
+}
+
+/**
+ * 远端放弃修改的影响清单：字段与原生计划器一致，内容只取自最近一次读到的远端状态。
+ *
+ * 远端回执只回新状态，本机也读不到远端索引的具体内容，因此这里说明的是这一层能确定的
+ * 边界；确认后远端仍会在写锁内按最新的状态令牌重新核对路径。
+ */
+function remoteDiscardPlans(session: RemoteRepositorySession, paths: string[]): DiscardFilePlan[] {
+  const files = new Map(remoteChanges(session.latest.files).map((file) => [file.path, file]));
+  return paths.map((path) => {
+    const file = files.get(path);
+    if (!file) {
+      return {
+        path,
+        originalPath: null,
+        staged: "none" as ChangeKind,
+        unstaged: "none" as ChangeKind,
+        untracked: false,
+        impact: "最近一次读到的工作树状态里没有这个文件的改动。",
+        recovery: "远端会在写锁内重新核对状态；如果改动已经不在，这次不会写入任何内容。",
+      };
+    }
+    if (file.untracked) {
+      return {
+        path,
+        originalPath: null,
+        staged: file.staged,
+        unstaged: file.unstaged,
+        untracked: true,
+        impact: "这是未跟踪文件。确认后会删除该文件。",
+        recovery: "删除后不能通过 Git 恢复，本应用也不能撤销这次放弃。",
+      };
+    }
+    const staged = file.staged !== "none";
+    const unstaged = file.unstaged !== "none";
+    const impact =
+      staged && unstaged
+        ? "暂存区和未暂存的修改都会回到当前提交。"
+        : staged
+          ? "已暂存的修改会从暂存区和工作区移除，回到当前提交。"
+          : unstaged
+            ? "未暂存的修改会回到当前提交。"
+            : "这个文件没有可放弃的本地修改。";
+    return {
+      path,
+      originalPath: null,
+      staged: file.staged,
+      unstaged: file.unstaged,
+      untracked: false,
+      impact,
+      recovery: "放弃后 Git 不保留这份未提交内容，本应用不能撤销这次放弃。",
+    };
+  });
+}
+
+/** 远端放弃修改的边界说明：预览取自最近一次状态，确认才写入。 */
+const REMOTE_DISCARD_BOUNDARY =
+  "确认只影响所选文件。取消不写入，未选择的文件保持原内容。已放弃的内容不能用撤销提交找回；影响清单取自最近一次读到的远端状态。";
+
+/** 远端提交在历史里的元数据：预览的还原清单与撤销预览都只能这样读到。 */
+async function remoteCommitTargets(
+  session: RemoteRepositorySession,
+  oids: string[],
+): Promise<{ targets: RevertTarget[]; details: CommitDetail[] }> {
+  const details = await Promise.all(oids.map((oid) => remoteCommitDetailOf(session, oid)));
+  return {
+    details,
+    targets: details.map((detail) => ({
+      oid: detail.commit.oid,
+      summary: detail.commit.summary,
+      authorName: detail.commit.authorName,
+      authoredAt: detail.commit.authoredAt,
+    })),
+  };
+}
+
+/** 远端修订的提交说明：详情里主题行与正文分开给，这里按原样拼回一份可编辑的说明。 */
+function remoteAmendMessage(detail: CommitDetail): string {
+  const body = detail.body.trim();
+  return body === "" ? detail.commit.summary : detail.commit.summary + "\n\n" + body;
+}
+
+/**
  * 远端不接受的方法仍然明确失败：这些 DTO 里的证据（写回执给出的影响面、本机最近列表、
  * 远端 v2 尚未列入桥接白名单的 op）现在拿不到，就不用推测值冒充。
  */
@@ -1890,21 +2050,25 @@ const remoteOverrides: Record<string, unknown> = {
     }
     const view: RemoteDiffView = staged ? "staged" : "unstaged";
     const cacheKey = view + "\u0000" + relative + "\u0000" + session.token;
-    let document = session.diffs.get(cacheKey);
-    if (!document) {
+    let entry = session.diffs.get(cacheKey);
+    if (!entry) {
       const patch = await loadRemotePatch(session, relative, view);
       // 等待期间切了仓库：这次响应属于旧连接，直接丢弃而不是贴到新仓库上。
       if (remoteSessions.get(path) !== session) {
         throw remoteError("remote_disconnected", "远端仓库已切换，这次差异读取已丢弃。");
       }
-      document = remoteDiffDocument(patch, session.generation, relative, staged, session.token);
+      entry = {
+        document: remoteDiffDocument(patch, session.generation, relative, staged, session.token),
+        // 原因跟着文档一起缓存：翻页与命中缓存给出的都是同一句话。
+        hunksStageableReason: patch.hunksStageableReason ?? REMOTE_HUNKS_UNSTAGEABLE_REASON,
+      };
       if (session.diffs.size >= REMOTE_DIFF_CACHE_LIMIT) session.diffs.clear();
-      session.diffs.set(cacheKey, document);
+      session.diffs.set(cacheKey, entry);
     }
-    if (document.generation !== generation) {
+    if (entry.document.generation !== generation) {
       throw remoteError("stale", "远端仓库已有变化，请刷新后重试。", session.generation);
     }
-    return remoteDiffPage(document, offset, limit);
+    return { ...remoteDiffPage(entry.document, offset, limit), hunksStageableReason: entry.hunksStageableReason };
   },
 
   async stageFiles(path: string, paths: string[], generation: number, requestId: number): Promise<StatusSnapshot> {
@@ -2646,10 +2810,12 @@ const remoteOverrides: Record<string, unknown> = {
   },
 
   /* ---------------------------------------------------------------- *
-   * 远端桥接：拿不到证据的写入口仍然明确失败
+   * 远端桥接：危险写入
    *
-   * 这些方法的本机 DTO 由写锁内的计划器给出（影响面文案、撤销目标、创建数量、
-   * 本机最近列表），而桥接回执只回新状态。与其猜一个值，不如明确说不出。
+   * 这几条都在桥接白名单里，因此按现有写通道执行：预览（confirm=false）一律不发送任何
+   * 写入，确认（confirm=true）只发送一次写入，随后按「回执 + 一次只读 op」组成 DTO。
+   * 回执里确实没有的证据（创建了几个提交、跳过哪些、暂存区快照令牌）在 note 里如实说
+   * 读不到，绝不猜一个数字冒充。
    * ---------------------------------------------------------------- */
 
   async discardChanges(
@@ -2660,12 +2826,47 @@ const remoteOverrides: Record<string, unknown> = {
     requestId: number,
   ): Promise<DiscardResult> {
     if (!isRemoteRepositoryKey(path)) return apiBase.discardChanges(path, paths, confirm, generation, requestId);
-    remoteUnsupported("丢弃改动", "丢弃的影响面与恢复说明由本机计划器给出，远端回执只回新状态。");
+    const session = remoteBridgeSession(path, generation);
+    const files = remoteDiscardPlans(session, paths);
+    if (!confirm) {
+      // 预览与取消都不写入：远端一次写都没有收到。
+      return {
+        generation: session.generation,
+        wrote: false,
+        files,
+        boundary: REMOTE_DISCARD_BOUNDARY,
+        snapshot: remoteStatus(session.latest, session.generation),
+      };
+    }
+    const snapshot = await remoteBridgeWrite(session, generation, "discard", { paths, confirm: true });
+    return {
+      generation: session.generation,
+      wrote: true,
+      files,
+      boundary: REMOTE_DISCARD_BOUNDARY,
+      snapshot: remoteStatus(snapshot, session.generation),
+    };
   },
 
   async cherryPickCommits(path: string, oids: string[], generation: number, requestId: number): Promise<CherryPickOutcome> {
     if (!isRemoteRepositoryKey(path)) return apiBase.cherryPickCommits(path, oids, generation, requestId);
-    remoteUnsupported("拣选提交", "拣选结果里的创建数量与被跳过项由回执证明，远端桥接还没有带回它。");
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "cherryPick", { oids });
+    // 回执只回新状态：实际创建了几个提交、跳过了哪些，这条通道读不到。
+    const conflictPaths = remoteChanges(snapshot.files)
+      .filter((file) => file.unmerged)
+      .map((file) => file.path);
+    return {
+      generation: session.generation,
+      created: 0,
+      headOid: snapshot.head ?? null,
+      conflicted: conflictPaths.length > 0,
+      skipped: [],
+      note: conflictPaths.length > 0
+        ? "远端停在冲突：解决后可以继续或中止。实际创建了几个提交、跳过了哪些，远端回执里没有这项证据，读不到。"
+        : "远端已拣选这些提交。实际创建了几个提交、跳过了哪些，远端回执里没有这项证据，读不到。",
+      snapshot: remoteStatus(snapshot, session.generation),
+    };
   },
 
   async revertCommits(
@@ -2679,7 +2880,51 @@ const remoteOverrides: Record<string, unknown> = {
     if (!isRemoteRepositoryKey(path)) {
       return apiBase.revertCommits(path, oids, expectedHead, confirm, generation, requestId);
     }
-    remoteUnsupported("还原提交", "还原的目标清单与创建数量由回执证明，远端桥接还没有带回它。");
+    const session = remoteBridgeSession(path, generation);
+    // 目标清单要从远端历史里读：预览只读，取消不写入。
+    const { targets } = await remoteCommitTargets(session, oids);
+    if (!confirm) {
+      if (targets.length === 0) {
+        throw remoteError("revert_empty", "没有可还原的提交，这次没有发送任何写入。", session.generation);
+      }
+      return {
+        generation: session.generation,
+        code: "ok",
+        eligible: true,
+        wrote: false,
+        headOid: session.latest.head ?? null,
+        targets,
+        created: 0,
+        conflicted: false,
+        note:
+          "远端预览：按由新到旧为上面这些提交创建逆向提交。取消不会写入；是否已推送、有没有进行中的操作，" +
+          "远端没有提供预览证据，确认后由远端在写锁内复核。",
+        snapshot: remoteStatus(session.latest, session.generation),
+      };
+    }
+    const snapshot = await remoteBridgeWrite(session, generation, "revert", {
+      oids,
+      expectedHead,
+      confirm: true,
+    });
+    const conflictPaths = remoteChanges(snapshot.files)
+      .filter((file) => file.unmerged)
+      .map((file) => file.path);
+    return {
+      generation: session.generation,
+      code: conflictPaths.length > 0 ? "revert_conflict" : "ok",
+      eligible: true,
+      wrote: true,
+      headOid: snapshot.head ?? null,
+      targets,
+      // 实际创建了几个逆向提交，回执里没有这项证据。
+      created: 0,
+      conflicted: conflictPaths.length > 0,
+      note: conflictPaths.length > 0
+        ? "远端已开始还原，停在冲突：解决后可以继续，也可以中止回到开始前。实际创建了几个逆向提交，远端回执里没有这项证据，读不到。"
+        : "远端已还原这些提交，本应用不推送。实际创建了几个逆向提交，远端回执里没有这项证据，读不到。",
+      snapshot: remoteStatus(snapshot, session.generation),
+    };
   },
 
   async undoCommit(
@@ -2690,7 +2935,39 @@ const remoteOverrides: Record<string, unknown> = {
     requestId: number,
   ): Promise<UndoResult> {
     if (!isRemoteRepositoryKey(path)) return apiBase.undoCommit(path, expectedHead, confirm, generation, requestId);
-    remoteUnsupported("撤销最近提交", "撤销的预览与写入结果由回执证明，远端桥接还没有带回它。");
+    const session = remoteBridgeSession(path, generation);
+    if (!confirm) {
+      // 预览只读一次提交详情：拿不到父提交就是首个提交，不能撤销。
+      const detail = await remoteCommitDetailOf(session, expectedHead);
+      const parent = detail.commit.parents[0] ?? null;
+      return {
+        generation: session.generation,
+        code: parent === null ? "undo_root" : "ok",
+        eligible: parent !== null,
+        wrote: false,
+        headOid: detail.commit.oid,
+        parentOid: parent,
+        summary: detail.commit.summary,
+        reason: parent === null
+          ? "这是首个提交，撤销会让分支没有提交，因此不会写入。"
+          : "远端预览：撤销只把 HEAD 移回上一个提交，改动保留在暂存区。是否已推送、是否合并提交、有没有进行中的操作，远端没有提供预览证据，确认后由远端在写锁内复核。",
+        snapshot: remoteStatus(session.latest, session.generation),
+      };
+    }
+    const snapshot = await remoteBridgeWrite(session, generation, "undoCommit", { expectedHead, confirm: true });
+    // 写入后的那一次只读：撤销的是被移走的那个提交，它的父提交就是新的 HEAD。
+    const detail = await remoteCommitDetailOf(session, expectedHead);
+    return {
+      generation: session.generation,
+      code: "ok",
+      eligible: true,
+      wrote: true,
+      headOid: snapshot.head ?? "",
+      parentOid: detail.commit.parents[0] ?? null,
+      summary: detail.commit.summary,
+      reason: "远端已撤销这次提交，改动保留在暂存区。",
+      snapshot: remoteStatus(snapshot, session.generation),
+    };
   },
 
   async amendCommit(
@@ -2706,13 +2983,71 @@ const remoteOverrides: Record<string, unknown> = {
     if (!isRemoteRepositoryKey(path)) {
       return apiBase.amendCommit(path, expectedHead, message, includeStaged, stagedToken, confirm, generation, requestId);
     }
-    remoteUnsupported("修订最近提交", "预览里的暂存快照令牌由本机计划器给出，远端回执只回新状态。");
+    const session = remoteBridgeSession(path, generation);
+    const detail = await remoteCommitDetailOf(session, expectedHead);
+    const stagedPaths = remoteChanges(session.latest.files)
+      .filter((file) => file.staged !== "none" && !file.unmerged)
+      .map((file) => file.path);
+    if (!confirm) {
+      return {
+        generation: session.generation,
+        code: "ok",
+        eligible: true,
+        wrote: false,
+        headOid: detail.commit.oid,
+        parentOid: detail.commit.parents[0] ?? null,
+        summary: detail.commit.summary,
+        message: remoteAmendMessage(detail),
+        files: detail.files,
+        stagedPaths,
+        // 暂存区快照令牌是远端写锁内算出来的摘要，只读桥接没有这项证据。
+        stagedToken: null,
+        note:
+          "远端预览：说明取自远端提交详情（主题行 + 正文）。远端的暂存区快照令牌没有列入只读桥接，" +
+          "这里读不到它，因此本次没有可确认的修订；请在远端终端执行，或等远端组件补上这项只读能力。",
+        snapshot: remoteStatus(session.latest, session.generation),
+      };
+    }
+    if (!stagedToken) {
+      // 明知会被远端按 amend_stale_index 拒绝的写入不发：宁可说清原因，也不发一条注定失败的写。
+      throw remoteError(
+        "amend_stale_index",
+        "远端没有提供暂存区快照令牌，这次修订没有发送任何写入：远端的暂存区内容只能由远端自己核对，请在远端终端执行修订。",
+        session.generation,
+      );
+    }
+    const snapshot = await remoteBridgeWrite(session, generation, "amendCommit", {
+      expectedHead,
+      message,
+      includeStaged,
+      stagedToken,
+      confirm: true,
+    });
+    const rewritten = snapshot.head ? await remoteCommitDetailOf(session, snapshot.head) : null;
+    return {
+      generation: session.generation,
+      code: "ok",
+      eligible: true,
+      wrote: true,
+      headOid: snapshot.head ?? null,
+      parentOid: rewritten?.commit.parents[0] ?? null,
+      summary: rewritten?.commit.summary ?? (message ?? "").split("\n")[0] ?? "",
+      message: rewritten ? remoteAmendMessage(rewritten) : message ?? "",
+      files: rewritten?.files ?? detail.files,
+      stagedPaths,
+      stagedToken,
+      note: "远端已改写最近提交，本应用不推送。远端审查账本没有登记这次修订，返回 Cliora 时只能按 reviewed 声明。",
+      snapshot: remoteStatus(snapshot, session.generation),
+    };
   },
 
   async removeWorktree(path: string, force: boolean, requestId: number): Promise<RecentRepo[]> {
     if (!isRemoteRepositoryKey(path)) return apiBase.removeWorktree(path, force, requestId);
-    // 远端 worktreeRemove 删除的始终是「当前打开的那棵工作树」，不接受 path；返回值又是本机最近列表。
-    remoteUnsupported("删除工作区", "远端组件只删除当前打开的工作树，且这条命令要返回本机最近列表。");
+    // 远端 v2 的 worktreeRemove 只删「当前打开的那棵工作树」，不接受 path，也不返回本机最近列表。
+    remoteUnsupported(
+      "删除工作区",
+      "远端 v2 只删除当前打开的那棵工作树、不接受 path；这条命令还要返回本机最近列表，两处都对不上。",
+    );
   },
 
   async stageHunks(

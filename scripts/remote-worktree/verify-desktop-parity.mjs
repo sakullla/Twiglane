@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { machine } from "node:os";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
@@ -24,9 +24,11 @@ const inputs = [
   "TWIGLANE_T4_SSH_USER",
   "TWIGLANE_T4_SSH_PORT",
   "TWIGLANE_AGENT_V2_DIR",
+  "TWIGLANE_T4_PEER_HELPER",
   "TWIGLANE_CLIORA_CONNECTOR",
   "CLIORA_TWIGLANE_TEST_DB",
 ];
+const legacyInput = "TWIGLANE_T4_LEGACY_FIXTURE";
 const platforms = ["linux", "macos", "windows"];
 const remoteTargets = [
   { platform: "linux", architecture: "x86_64" },
@@ -42,14 +44,16 @@ const usage = `Usage
   node scripts/remote-worktree/verify-desktop-parity.mjs --run [--output NEW.json]
 
 Run against an operator-approved disposable SSH fixture. Use a debug Cliora
-connector and keep its isolated database and agent manifest beside the SSH
-config or in its subdirectories. The test may install the fixture agent.
+connector and the built Twiglane peer helper. Keep the isolated database,
+agent manifest and optional legacy receipt fixture beside the SSH config or
+in its subdirectories. The test may install the fixture agent.
 
 Required environment variables
   ${inputs.join("\n  ")}
 
 TWIGLANE_VERIFY_CLIORA optionally points at the Cliora checkout (default ../cliora).
 Keep CLIORA_TWIGLANE_TEST_V2_PUBLISHER when the fixture uses a development signer.
+${legacyInput} optionally points at the legacy receipt fixture.
 Without --output the sanitized JSON record goes to stdout. Skips exit nonzero.
 `;
 
@@ -68,9 +72,11 @@ export function unverifiedFor(status, desktop, remote) {
 }
 
 function platformName(value) {
-  switch (String(value).toLowerCase()) {
+  if (typeof value !== "string") return null;
+  switch (value.toLowerCase()) {
     case "linux": return "linux";
-    case "darwin": return "macos";
+    case "darwin":
+    case "macos": return "macos";
     case "win32":
     case "windows": return "windows";
     default: return null;
@@ -78,7 +84,8 @@ function platformName(value) {
 }
 
 function architectureName(value) {
-  switch (String(value).toLowerCase()) {
+  if (typeof value !== "string") return null;
+  switch (value.toLowerCase()) {
     case "amd64":
     case "x64":
     case "x86_64": return "x86_64";
@@ -126,14 +133,41 @@ function digest(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function fixtureEnvironment(environment) {
+function fixtureFile(value, root) {
+  const path = file(value);
+  if (!inside(root, path)) throw new Error("fixture input escapes its directory");
+  return path;
+}
+
+function optionalFixtureDigest(path, root) {
+  return existsSync(path) ? digest(readFileSync(fixtureFile(path, root))) : null;
+}
+
+function agentResourceDigest(manifestBytes, artifactsDir) {
+  const manifest = JSON.parse(manifestBytes);
+  if (manifest.format !== 1 || !Array.isArray(manifest.artifacts) || manifest.artifacts.length === 0) {
+    throw new Error("fixture manifest is invalid");
+  }
+  const resources = manifest.artifacts.map((entry) => {
+    const path = fixtureFile(resolve(artifactsDir, entry.file), artifactsDir);
+    const actual = digest(readFileSync(path));
+    const expected = entry.resourceSha256 ?? entry.sha256;
+    if (typeof expected !== "string" || actual !== expected.toLowerCase()) {
+      throw new Error("fixture resource digest mismatch");
+    }
+    return [path, actual];
+  });
+  return digest(JSON.stringify(resources));
+}
+
+export function fixtureEnvironment(environment) {
   const config = file(environment.TWIGLANE_T4_SSH_CONFIG);
   const fixtureRoot = dirname(config);
-  const database = file(environment.CLIORA_TWIGLANE_TEST_DB);
+  const database = fixtureFile(environment.CLIORA_TWIGLANE_TEST_DB, fixtureRoot);
+  const legacy = environment[legacyInput] === undefined ? null : fixtureFile(environment[legacyInput], fixtureRoot);
   const artifacts = realpathSync(resolve(environment.TWIGLANE_AGENT_V2_DIR));
-  const manifest = file(resolve(artifacts, "manifest.json"));
-  if ((fixtureRoot !== artifacts && !inside(fixtureRoot, artifacts))
-      || !inside(fixtureRoot, database) || !inside(fixtureRoot, manifest)) {
+  const manifest = fixtureFile(resolve(artifacts, "manifest.json"), artifacts);
+  if (fixtureRoot !== artifacts && !inside(fixtureRoot, artifacts)) {
     throw new Error("fixture paths must be contained by the SSH config directory");
   }
   const port = Number(environment.TWIGLANE_T4_SSH_PORT);
@@ -141,28 +175,50 @@ function fixtureEnvironment(environment) {
     throw new Error("invalid fixture port");
   }
   const connector = file(environment.TWIGLANE_CLIORA_CONNECTOR);
+  const peerHelper = file(environment.TWIGLANE_T4_PEER_HELPER);
   const connectorBytes = readFileSync(connector);
+  const peerHelperBytes = readFileSync(peerHelper);
   // Release builds ignore the test database override. Check for both
   // development-only inputs before asking the connector to open a database.
   if (!connectorBytes.includes("CLIORA_TWIGLANE_TEST_DB")
       || !connectorBytes.includes("CLIORA_TWIGLANE_TEST_V2_PUBLISHER")) {
     throw new Error("debug connector with fixture database support required");
   }
-  return {
-    env: {
-      ...environment,
-      TWIGLANE_T4_SSH_CONFIG: config,
-      TWIGLANE_AGENT_V2_DIR: artifacts,
-      TWIGLANE_CLIORA_CONNECTOR: connector,
-      CLIORA_TWIGLANE_TEST_DB: database,
-      CLIORA_SSH_PROXY: "off",
-      CARGO_TERM_COLOR: "never",
-    },
-    artifacts: {
-      connectorSha256: digest(connectorBytes),
-      agentManifestSha256: digest(readFileSync(manifest)),
-    },
+  if (!peerHelperBytes.includes("--twiglane-ssh-host-key")) {
+    throw new Error("Twiglane peer helper executable required");
+  }
+  const env = {
+    ...environment,
+    TWIGLANE_T4_SSH_CONFIG: config,
+    TWIGLANE_AGENT_V2_DIR: artifacts,
+    TWIGLANE_T4_PEER_HELPER: peerHelper,
+    TWIGLANE_CLIORA_CONNECTOR: connector,
+    CLIORA_TWIGLANE_TEST_DB: database,
+    CLIORA_SSH_PROXY: "off",
+    CARGO_TERM_COLOR: "never",
+    ...(legacy === null ? {} : { [legacyInput]: legacy }),
   };
+  const manifestBytes = readFileSync(manifest);
+  const artifactDigests = {
+    connectorSha256: digest(connectorBytes),
+    peerHelperSha256: digest(peerHelperBytes),
+    agentManifestSha256: digest(manifestBytes),
+    agentResourcesSha256: agentResourceDigest(manifestBytes, artifacts),
+  };
+  const parameters = [
+    ...inputs, legacyInput, "CLIORA_TWIGLANE_TEST_V2_PUBLISHER",
+    "CLIORA_SSH_PROXY", "SSH_AUTH_SOCK", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE",
+  ].map((name) => [name, env[name] ?? null]);
+  const sha256 = digest(JSON.stringify({
+    parameters,
+    config: digest(readFileSync(config)),
+    database: digest(readFileSync(database)),
+    databaseWal: optionalFixtureDigest(`${database}-wal`, fixtureRoot),
+    databaseJournal: optionalFixtureDigest(`${database}-journal`, fixtureRoot),
+    legacy: legacy === null ? null : digest(readFileSync(legacy)),
+    ...artifactDigests,
+  }));
+  return { env, artifacts: artifactDigests, sha256, legacyRequested: legacy !== null };
 }
 
 function connectorJson(args, cwd, env) {
@@ -188,10 +244,39 @@ function probeFixture(cwd, env) {
   if (!platform || !architecture || !sha256.test(reply.peerIdentity ?? "") || !sha256.test(reply.peerRevision ?? "")) {
     throw new Error("fixture platform or authentication unavailable");
   }
-  return { platform, architecture, probe: "cliora-connector/probe-v2", authenticated: true };
+  return {
+    platform,
+    architecture,
+    sha256: digest(JSON.stringify([target.targetId, target.targetRevision, reply.peerIdentity, reply.peerRevision])),
+  };
 }
 
-export function parseGate({ error, status, stdout }) {
+function sessionEvidence(output, legacyRequested) {
+  const markers = [...output.matchAll(/^Twiglane real SSH evidence: (\{[^\r\n]+\})\r?$/gm)];
+  if (markers.length !== 1 || markers[0][1].length > 1024) return null;
+  let marker;
+  try {
+    marker = JSON.parse(markers[0][1]);
+  } catch {
+    return null;
+  }
+  const native = { platform: platformName(marker.native?.system), architecture: architectureName(marker.native?.architecture) };
+  const cliora = { platform: platformName(marker.cliora?.system), architecture: architectureName(marker.cliora?.architecture) };
+  if (!native.platform || !native.architecture || native.platform !== cliora.platform
+      || native.architecture !== cliora.architecture || marker.samePeerAndWorktree !== true
+      || marker.legacyReceiptRecovered !== legacyRequested) {
+    return null;
+  }
+  return {
+    ...native,
+    probe: "authenticated-agent-hello",
+    authenticated: true,
+    samePeerAndWorktree: true,
+    sessions: { native, cliora },
+  };
+}
+
+export function parseGate({ error, status, stdout }, legacyRequested = false) {
   const output = stdout ?? "";
   const tests = output.match(/^running 1 test\r?$/gm);
   const result = output.match(/^test result: ok\. 1 passed; 0 failed; 0 ignored;/gm);
@@ -203,6 +288,7 @@ export function parseGate({ error, status, stdout }) {
   const checks = {
     directV2History: Number.isSafeInteger(historyCommits) && historyCommits > 0 ? historyCommits : null,
     clioraV2Baseline: baseline?.length === 1,
+    legacyV1ReceiptRecovery: "untested",
   };
   if (error || status !== 0) return { status: "failed", reason: "cargo_failed", checks };
   if (/^Skipped real SSH:/m.test(output) || /^running 0 tests\r?$/m.test(output)) {
@@ -212,7 +298,10 @@ export function parseGate({ error, status, stdout }) {
       || checks.directV2History === null || !checks.clioraV2Baseline) {
     return { status: "failed", reason: "missing_gate_evidence", checks };
   }
-  return { status: "passed", reason: null, checks };
+  const remote = sessionEvidence(output, legacyRequested);
+  if (!remote) return { status: "failed", reason: "invalid_session_evidence", checks };
+  if (legacyRequested) checks.legacyV1ReceiptRecovery = "passed";
+  return { status: "passed", reason: null, checks, remote };
 }
 
 function collect() {
@@ -228,6 +317,7 @@ function collect() {
     source: null,
     remote: null,
     artifacts: null,
+    fixture: null,
     test: { command, source: testSource, exitCode: null, checks: null },
   };
   const missing = inputs.filter((name) => !process.env[name]?.trim());
@@ -247,15 +337,37 @@ function collect() {
       cliora: cleanRef(cliora, sourcePaths.cliora),
     };
     failure = "invalid_fixture";
-    const { env, artifacts } = fixtureEnvironment(process.env);
-    report.artifacts = artifacts;
+    const before = fixtureEnvironment(process.env);
+    report.artifacts = before.artifacts;
+    report.fixture = {
+      beforeSha256: before.sha256,
+      afterSha256: null,
+      probeBeforeSha256: null,
+      probeAfterSha256: null,
+      legacyRequested: before.legacyRequested,
+    };
     failure = "fixture_probe_failed";
-    report.remote = probeFixture(root, env);
+    const probeBefore = probeFixture(root, before.env);
+    report.fixture.probeBeforeSha256 = probeBefore.sha256;
     failure = "cargo_failed";
-    const result = run("cargo", cargoArgs, root, env);
+    const result = run("cargo", cargoArgs, root, before.env);
     report.test.exitCode = result.status;
-    const outcome = parseGate(result);
+    const outcome = parseGate(result, before.legacyRequested);
     report.test.checks = outcome.checks;
+    failure = "fixture_changed";
+    const after = fixtureEnvironment(process.env);
+    report.fixture.afterSha256 = after.sha256;
+    if (before.sha256 !== after.sha256) throw new Error("fixture changed during execution");
+    if (outcome.status === "passed") {
+      const probeAfter = probeFixture(root, after.env);
+      report.fixture.probeAfterSha256 = probeAfter.sha256;
+      if (probeBefore.sha256 !== probeAfter.sha256 || probeBefore.platform !== outcome.remote.platform
+          || probeBefore.architecture !== outcome.remote.architecture || probeAfter.platform !== outcome.remote.platform
+          || probeAfter.architecture !== outcome.remote.architecture) {
+        throw new Error("running SSH sessions differ from the fixture probes");
+      }
+      report.remote = outcome.remote;
+    }
     failure = "source_changed";
     if (cleanRef(root, sourcePaths.twiglane) !== report.source.twiglane
         || cleanRef(cliora, sourcePaths.cliora) !== report.source.cliora) {

@@ -23,15 +23,25 @@ function verifyNativeSmoke() {
     assert.ok(["linux", "macos", "windows"].includes(platform.platform));
     assert.ok(["x86_64", "aarch64"].includes(platform.architecture));
   }
-  assert.equal(report.remote.probe, "cliora-connector/probe-v2");
+  assert.equal(report.remote.probe, "authenticated-agent-hello");
   assert.equal(report.remote.authenticated, true);
-  assert.match(report.artifacts.connectorSha256, /^[0-9a-f]{64}$/);
-  assert.match(report.artifacts.agentManifestSha256, /^[0-9a-f]{64}$/);
+  assert.equal(report.remote.samePeerAndWorktree, true);
+  const sessionPlatform = { platform: report.remote.platform, architecture: report.remote.architecture };
+  assert.deepEqual(report.remote.sessions, { native: sessionPlatform, cliora: sessionPlatform });
+  for (const field of ["connectorSha256", "peerHelperSha256", "agentManifestSha256", "agentResourcesSha256"]) {
+    assert.match(report.artifacts[field], /^[0-9a-f]{64}$/);
+  }
+  assert.match(report.fixture.beforeSha256, /^[0-9a-f]{64}$/);
+  assert.equal(report.fixture.afterSha256, report.fixture.beforeSha256, "Fixture inputs changed");
+  assert.match(report.fixture.probeBeforeSha256, /^[0-9a-f]{64}$/);
+  assert.equal(report.fixture.probeAfterSha256, report.fixture.probeBeforeSha256, "Fixture peer changed");
+  assert.equal(typeof report.fixture.legacyRequested, "boolean");
   assert.equal(report.test.command, command);
   assert.equal(report.test.source, testSource);
   assert.equal(report.test.exitCode, 0);
   assert.ok(Number.isSafeInteger(report.test.checks.directV2History) && report.test.checks.directV2History > 0);
   assert.equal(report.test.checks.clioraV2Baseline, true);
+  assert.equal(report.test.checks.legacyV1ReceiptRecovery, report.fixture.legacyRequested ? "passed" : "untested");
   assert.deepEqual(report.unverified, unverifiedFor(report.status, report.desktop, report.remote));
   for (const [name, cwd] of [["twiglane", root], ["cliora", cliora]]) {
     const ref = report.source[name];

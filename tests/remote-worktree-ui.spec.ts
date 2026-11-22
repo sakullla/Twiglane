@@ -394,17 +394,54 @@ describe("远端仓库在主窗口：审查基线、草稿与新建/克隆的边
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it("新建与克隆之前先结束远端会话，不留下一个已取消的远端壳", async () => {
+  it("新建仓库失败时远端会话不连坐结束，成功后才结束", async () => {
     await openHost(hostA, keyA, "session-a");
+    // 目录不可用：没有切换发生，当前远端仓库必须原样留着。
+    invoke.mockRejectedValueOnce({ code: "path_missing", message: "父目录不存在。" });
+    await expect(api.createRepository("C:/work/new", 20)).rejects.toMatchObject({ code: "path_missing" });
+    expect(port.close).not.toHaveBeenCalled();
+    expect(review.end).not.toHaveBeenCalled();
+    expect(remoteRepositoryState(keyA)).toMatchObject({ key: keyA, connected: true });
+
+    // 成功即确认要切换：这时才结束远端会话。
     invoke.mockResolvedValueOnce({});
-    await api.createRepository("C:/work/new", 20);
+    await api.createRepository("C:/work/new", 21);
     expect(port.close).toHaveBeenCalledWith("session-a");
     expect(remoteRepositoryState(keyA)).toBeNull();
+  });
 
-    await openHost(hostA, keyA, "session-a2");
-    invoke.mockResolvedValueOnce({});
-    await api.cloneRepository("https://example.invalid/r.git", "C:/work", "r", 21, null);
-    expect(port.close).toHaveBeenCalledWith("session-a2");
+  it("克隆失败不动当前远端会话，成功也不替外壳决定切换", async () => {
+    await openHost(hostA, keyA, "session-a");
+    invoke.mockRejectedValueOnce({ code: "auth", message: "认证失败。" });
+    await expect(
+      api.cloneRepository("https://example.invalid/r.git", "C:/work", "r", 22, null),
+    ).rejects.toMatchObject({ code: "auth" });
+    // 失败时用户还在原远端仓库：连接与审查来源都保留，Cliora 不会收到提前的 cancelled。
+    expect(port.close).not.toHaveBeenCalled();
+    expect(review.end).not.toHaveBeenCalled();
+    expect(remoteRepositoryState(keyA)).not.toBeNull();
+
+    // 成功后仍可能点「在后台继续」：api 不结束会话，等外壳确认切换时再结束。
+    invoke.mockResolvedValueOnce({ path: "C:/work/r", opened: { summary: { name: "r", path: "C:/work/r" } } });
+    await api.cloneRepository("https://example.invalid/r.git", "C:/work", "r", 23, null);
+    expect(port.close).not.toHaveBeenCalled();
+    expect(remoteRepositoryState(keyA)).not.toBeNull();
+
+    await api.closeRemoteRepository(keyA);
+    expect(port.close).toHaveBeenCalledWith("session-a");
+    expect(remoteRepositoryState(keyA)).toBeNull();
+  });
+
+  it("切到本机仓库失败时当前远端会话仍是可用的那个", async () => {
+    await openHost(hostA, keyA, "session-a");
+    invoke.mockRejectedValueOnce({ code: "path_missing", message: "仓库目录不存在。" });
+    await expect(api.openRepository("C:/work/missing", 24)).rejects.toMatchObject({ code: "path_missing" });
+    expect(port.close).not.toHaveBeenCalled();
+    expect(remoteRepositoryState(keyA)).toMatchObject({ key: keyA, connected: true });
+
+    invoke.mockResolvedValueOnce({ summary: { name: "demo", path: "C:/work/demo" }, generation: 4 });
+    await api.openRepository("C:/work/demo", 25);
+    expect(port.close).toHaveBeenCalledWith("session-a");
     expect(remoteRepositoryState(keyA)).toBeNull();
   });
 });

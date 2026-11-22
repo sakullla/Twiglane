@@ -1576,9 +1576,11 @@ const apiExtras = {
 const remoteOverrides: Record<string, unknown> = {
   async openRepository(path: string, requestId: number): Promise<OpenedRepository> {
     if (!isRemoteRepositoryKey(path)) {
-      // 切到本机仓库前先结束远端会话：一条连接只服务一个当前仓库。
+      const repository = await apiBase.openRepository(path, requestId);
+      // 确认切到本机仓库之后才结束远端会话：一条连接只服务一个当前仓库，
+      // 但打开失败时当前远端仓库必须原样留着，不能替用户把它结束掉。
       await closeAllRemoteSessions();
-      return apiBase.openRepository(path, requestId);
+      return repository;
     }
     const parsed = parseRemoteRepositoryKey(path);
     if (!parsed) throw remoteError("invalid_path", "远端仓库地址无效。");
@@ -1602,8 +1604,10 @@ const remoteOverrides: Record<string, unknown> = {
   },
 
   async addRepository(path: string, requestId: number): Promise<OpenedRepository> {
+    // 和 openRepository 一样：加成功就是要切换，成功后再结束远端会话；失败不动它。
+    const repository = await apiBase.addRepository(path, requestId);
     await closeAllRemoteSessions();
-    return apiBase.addRepository(path, requestId);
+    return repository;
   },
 
   async refreshStatus(path: string, generation: number, requestId: number): Promise<StatusSnapshot> {
@@ -1735,14 +1739,20 @@ const remoteOverrides: Record<string, unknown> = {
   },
 
   /**
-   * 新建与克隆在远端仓库打开时也要先结束远端会话：后端启动新仓库的监听会顶掉现有会话，
-   * 若此时还留着远端连接，界面上那个远端仓库会变成一个永远 cancelled 的壳。
+   * 新建仓库一定紧接着切换过去：基础命令成功后（确认要切换）才结束远端会话，
+   * 否则失败时界面上那个远端仓库会变成一个永远 cancelled 的壳，Cliora 侧还会收到 cancelled。
    */
   async createRepository(path: string, requestId: number): Promise<OpenedRepository> {
+    const repository = await apiBase.createRepository(path, requestId);
     await closeAllRemoteSessions();
-    return apiBase.createRepository(path, requestId);
+    return repository;
   },
 
+  /**
+   * 克隆**不**在这里结束远端会话：克隆落盘后是否切换由外壳决定（可以点「在后台继续」），
+   * 失败更不会切换。真正的关闭发生在外壳确认切换时（App.svelte 的 cloneFinished / cloneRepo
+   * 调 closeRemoteRepository），此前当前远端仓库必须保持可用。
+   */
   async cloneRepository(
     url: string,
     parent: string,
@@ -1750,7 +1760,6 @@ const remoteOverrides: Record<string, unknown> = {
     requestId: number,
     credential: HttpCredential | null = null,
   ): Promise<CloneResult> {
-    await closeAllRemoteSessions();
     return apiBase.cloneRepository(url, parent, name, requestId, credential);
   },
 

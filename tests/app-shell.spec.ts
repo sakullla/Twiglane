@@ -2844,6 +2844,108 @@ describe("应用外壳", () => {
     });
   });
 
+  describe("远端仓库开克隆：只在确认切换时结束远端连接", () => {
+    const remoteKey = "ssh://host-a/srv/repo";
+    const remoteRepo = {
+      summary: { name: "repo", path: remoteKey, host: "构建主机 A", remotePath: "/srv/repo" },
+      generation: 9,
+      snapshot: { ...snapshot, generation: 9 },
+      draft: "",
+      watchDegraded: false,
+    };
+    const clonedRepo = { summary: { name: "fresh", path: "/parent/fresh" }, generation: 1, snapshot, draft: "", watchDegraded: false };
+
+    /** 打开一个远端仓库：主窗口的当前仓库就是那条 SSH 连接。 */
+    async function openRemoteRepo() {
+      mocks.remoteTargets.mockResolvedValue([
+        {
+          targetId: "host-a",
+          targetRevision: "a".repeat(64),
+          name: "构建主机 A",
+          host: "builder-a.example",
+          user: "dev",
+          port: 22,
+          authMethod: "key",
+          defaultPath: "/srv/repo",
+        },
+      ]);
+      mocks.openRemoteRepository.mockResolvedValueOnce({
+        kind: "opened",
+        repository: remoteRepo,
+        key: remoteKey,
+        host: "构建主机 A",
+        path: "/srv/repo",
+        pending: null,
+        reviewId: null,
+      });
+      mocks.remoteRepositoryState.mockReturnValue({
+        key: remoteKey,
+        host: "构建主机 A",
+        path: "/srv/repo",
+        pending: false,
+        reviewId: null,
+        connected: true,
+      });
+      render(App);
+      await fireEvent.click(await screen.findByRole("button", { name: /打开远端仓库/ }));
+      const dialog = await screen.findByRole("dialog", { name: "打开远端仓库" });
+      await within(dialog).findByRole("option", { name: /构建主机 A/ });
+      await fireEvent.click(within(dialog).getByRole("button", { name: "打开仓库" }));
+      await waitFor(() => expect(screen.getByRole("button", { name: /^当前仓库 repo/ })).toBeTruthy());
+      expect(document.querySelector("[data-remote-repository]"), "当前是远端仓库").toBeTruthy();
+    }
+
+    /** 从仓库弹层开始克隆，窗口停在「在后台继续」这个状态。 */
+    async function startClone() {
+      let finish: (value: unknown) => void = () => {};
+      let fail: (reason: unknown) => void = () => {};
+      mocks.cloneRepository.mockReset();
+      mocks.cloneRepository.mockReturnValue(new Promise((resolve, reject) => ((finish = resolve), (fail = reject))));
+      mocks.pickDirectory.mockResolvedValue("/parent");
+      await fireEvent.click(screen.getByRole("button", { name: /^当前仓库/ }));
+      await fireEvent.click(await screen.findByRole("button", { name: "克隆远程仓库" }));
+      const dialog = await screen.findByRole("dialog", { name: "克隆仓库" });
+      await fireEvent.input(within(dialog).getByLabelText("远程地址"), { target: { value: "https://e.com/fresh.git" } });
+      await fireEvent.click(within(dialog).getByRole("button", { name: /选择目录/ }));
+      const start = within(dialog).getByRole("button", { name: /开始克隆/ });
+      await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+      await fireEvent.click(start);
+      await within(dialog).findByRole("button", { name: "在后台继续" });
+      return { dialog, finish: () => finish({ path: "/parent/fresh", opened: clonedRepo }), fail };
+    }
+
+    it("克隆失败：不结束当前远端会话，远端仓库仍然可用", async () => {
+      await openRemoteRepo();
+      const clone = await startClone();
+      clone.fail({ code: "clone_destination", message: "目标目录已有内容。" });
+      await waitFor(() => expect(document.body.textContent).toContain("目标目录已有内容。"));
+      expect(mocks.closeRemoteRepository, "失败分支不结束远端会话").not.toHaveBeenCalled();
+      // 克隆窗口还开着，标题栏在模态背后不可访问：直接看它在不在、仍是那个远端仓库。
+      expect(document.querySelector('[aria-label="当前仓库 repo"]'), "当前仓库不变").toBeTruthy();
+      expect(document.querySelector("[data-remote-repository]"), "远端仓库入口还在").toBeTruthy();
+    });
+
+    it("点过在后台继续：克隆完成也不结束远端会话", async () => {
+      await openRemoteRepo();
+      const clone = await startClone();
+      await fireEvent.click(within(clone.dialog).getByRole("button", { name: "在后台继续" }));
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "克隆仓库" })).toBeNull());
+      clone.finish();
+      await waitFor(() => expect(document.querySelector(".toast.ok")?.textContent).toContain("克隆完成：fresh"));
+      expect(mocks.closeRemoteRepository, "后台继续不切换仓库").not.toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: /^当前仓库 repo/ }), "当前仓库不变").toBeTruthy();
+    });
+
+    it("窗口还开着时完成：确认切换才结束远端会话", async () => {
+      await openRemoteRepo();
+      const clone = await startClone();
+      clone.finish();
+      await waitFor(() => expect(screen.getByRole("button", { name: "当前仓库 fresh" })).toBeTruthy());
+      expect(mocks.closeRemoteRepository).toHaveBeenCalledWith(remoteKey);
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "克隆仓库" })).toBeNull());
+    });
+  });
+
   describe("删除 worktree", () => {
     const linked = "/work/app-feature";
     function useWorktreeHeads() {

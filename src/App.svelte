@@ -1654,6 +1654,20 @@
   }
 
   /**
+   * 只有真的要切到别的仓库了才结束当前远端会话：克隆失败、或点过「在后台继续」时当前仓库不变，
+   * 那条远端连接必须留着，否则界面会变成 remote_disconnected 的空壳，Cliora 侧还会收到 cancelled。
+   */
+  async function closeCurrentRemoteSession(): Promise<void> {
+    const current = opened?.summary.path ?? "";
+    if (!isRemoteRepositoryKey(current)) return;
+    try {
+      await api.closeRemoteRepository(current);
+    } catch {
+      // 连接可能已经断开：结束不了也要把切换做完。
+    }
+  }
+
+  /**
    * 克隆窗口还开着时用户在等结果，完成后照常打开。点过“在后台继续”就不再打断：
    * 不切换仓库、不关任何窗口，只加入最近仓库并通知。
    */
@@ -1665,6 +1679,8 @@
       // 取消只是不切换：克隆已经完成，按「在后台继续」的收尾记入最近仓库并把监听接回当前仓库。
       const proceed = await confirmEditorLeave("打开克隆好的仓库");
       if (proceed && cloneOpen) {
+        // 这里是「确认要切换」的那一刻：结束当前远端会话，再切到克隆好的本机仓库。
+        await closeCurrentRemoteSession();
         rememberOpened(next);
         notice(`已克隆并打开 ${name}`);
         return;
@@ -4724,6 +4740,8 @@
     try {
       const result = await api.cloneRepository(url, parent, name, nextId());
       banner = null;
+      // 这条路径一定切换到克隆好的仓库：切换前结束当前远端会话。
+      await closeCurrentRemoteSession();
       rememberOpened(result.opened);
       live = `已克隆 ${result.path}`;
       return result.path;

@@ -63,8 +63,7 @@ pub(crate) fn install(digest: &str) -> Result<String, AppError> {
 }
 
 /// 会话：核对已安装文件摘要后再 exec，标准输入输出此后专属于 agent 协议。
-/// 打开远端仓库的会话入口由 T6 接入，这里先只提供已核对过的命令串。
-#[allow(dead_code)]
+/// 远端仓库会话（`remote_ssh::open_session`）与这里共用同一条命令串，不另写一份。
 pub(crate) fn connect(digest: &str) -> Result<String, AppError> {
     let digest = checked_hex(digest)?;
     Ok([

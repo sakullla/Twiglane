@@ -1,4 +1,8 @@
-//! Version 1 JSONL over the stdin/stdout of one owned Cliora helper process.
+//! Versioned JSONL over the stdin/stdout of one owned helper process.
+//!
+//! 同一条通道上跑两种已发行协议：v1 是内嵌在 Cliora 连接工具里的组件，v2 是 Twiglane
+//! 自己安装的原生组件。请求形状相同，差异只在 `v` 的取值、请求字节上限，以及 v2 会在
+//! 同一条通道上多路复用**事件帧**（不带 `id` 的失效通知）。
 
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -17,7 +21,20 @@ use crate::error::AppError;
 
 const MAX_IN_FLIGHT: usize = 16;
 const REQUEST_BYTES: usize = 128 * 1024;
+/// v2 的请求上限：文件保存走同一条通道，128 KiB 会让稍大的源文件永远存不进去。
+const REQUEST_BYTES_V2: usize = 8 * 1024 * 1024;
 const RESPONSE_BYTES: usize = 4 * 1024 * 1024 + 1024;
+/// 事件帧只是失效通知：只保留最近若干条，绝不因为它们挤掉请求回执或撑大内存。
+const MAX_EVENTS: usize = 64;
+
+/// 会话协议的请求字节上限。v1 与 v2 各自的协议规定不同，不能共用一个常量。
+fn request_limit(protocol: u32) -> usize {
+    if protocol >= 2 {
+        REQUEST_BYTES_V2
+    } else {
+        REQUEST_BYTES
+    }
+}
 
 type Reply = Result<Value, AppError>;
 type Waiter = oneshot::Sender<Reply>;
@@ -59,28 +76,54 @@ impl Pending {
     }
 }
 
-/// Share this object using Arc. Each outstanding RPC retains its own reply ID.
+/// 一条已建立起来的 agent 会话：请求按 id 多路复用，响应按期望的协议版本校验。
+/// 用 Arc 共享；每个在途请求各自保留自己的回执 ID。
 pub struct AgentTransport {
     pending: Arc<Mutex<Pending>>,
     outgoing: mpsc::Sender<Vec<u8>>,
     stop: watch::Sender<bool>,
     stopped: watch::Receiver<bool>,
+    /// 会话期望的协议版本：请求帧写这个版本，响应帧也必须是这个版本。
+    protocol: u32,
+    /// v2 事件帧队列：不带 id，不唤醒任何 waiter，只在这里等待调用方取走。
+    events: Arc<Mutex<Vec<Value>>>,
 }
 
 impl AgentTransport {
     /// Spawn the preconfigured helper in its own process scope. The transport
     /// creates all three pipes and drains stderr without exposing its contents.
+    /// 默认按 v1 会话：它对应的内嵌组件只说 v1。
     pub fn spawn(command: &mut Command) -> Result<Self, AppError> {
+        Self::spawn_with(command, 1)
+    }
+
+    /// 按 v2 会话启动同一个 helper：请求写 v2，响应必须是 v2，事件帧被收集。
+    pub fn spawn_v2(command: &mut Command) -> Result<Self, AppError> {
+        Self::spawn_with(command, 2)
+    }
+
+    fn spawn_with(command: &mut Command, protocol: u32) -> Result<Self, AppError> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let child = ScopedChild::spawn(command)
             .map_err(|_| AppError::new("remote_spawn", "无法启动受控的远端连接工具。"))?;
-        Self::start(child)
+        Self::start(child, protocol)
     }
 
-    fn start(mut child: ScopedChild) -> Result<Self, AppError> {
+    /// 这条会话使用的协议版本。
+    pub fn protocol(&self) -> u32 {
+        self.protocol
+    }
+
+    /// 取走已收集的事件帧（按到达顺序）。事件只是失效通知，丢了也不改变仓库状态。
+    pub fn take_events(&self) -> Vec<Value> {
+        let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *events)
+    }
+
+    fn start(mut child: ScopedChild, protocol: u32) -> Result<Self, AppError> {
         let (Some(stdin), Some(stdout)) = (child.take_stdin(), child.take_stdout()) else {
             return Err(AppError::new(
                 "remote_pipes",
@@ -92,9 +135,11 @@ impl AgentTransport {
         let (finished, stopped) = watch::channel(false);
         let pending = Arc::new(Mutex::new(Pending::default()));
         let waiting = Arc::clone(&pending);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let pushed = Arc::clone(&events);
         let stderr = child.take_stderr();
         tokio::spawn(async move {
-            let reading = read_responses(stdout, &waiting);
+            let reading = read_responses(stdout, &waiting, protocol, &pushed);
             tokio::pin!(reading);
             let failure = tokio::select! {
                 _ = stopping.changed() => Some(disconnected()),
@@ -130,6 +175,8 @@ impl AgentTransport {
             outgoing,
             stop,
             stopped,
+            protocol,
+            events,
         })
     }
 
@@ -150,12 +197,20 @@ impl AgentTransport {
         }
         let id = Uuid::new_v4().simple().to_string();
         frame.insert("id".into(), Value::String(id.clone()));
-        frame.insert("v".into(), Value::from(1));
+        frame.insert("v".into(), Value::from(self.protocol));
         frame.insert("op".into(), Value::String(op.into()));
-        let mut bytes = RequestBuffer(Vec::new());
-        serde_json::to_writer(&mut bytes, &frame)
-            .map_err(|_| AppError::new("remote_request_size", "远端请求超过 128 KiB。"))?;
-        bytes.0.push(b'\n');
+        let limit = request_limit(self.protocol);
+        let mut bytes = RequestBuffer {
+            bytes: Vec::new(),
+            limit,
+        };
+        serde_json::to_writer(&mut bytes, &frame).map_err(|_| {
+            AppError::new(
+                "remote_request_size",
+                format!("远端请求超过 {} KiB。", limit / 1024),
+            )
+        })?;
+        bytes.bytes.push(b'\n');
 
         let (reply, response) = oneshot::channel();
         {
@@ -167,7 +222,7 @@ impl AgentTransport {
                 return Err(busy());
             }
             self.outgoing
-                .try_send(bytes.0)
+                .try_send(bytes.bytes)
                 .map_err(|error| match error {
                     mpsc::error::TrySendError::Closed(_) => not_sent(),
                     mpsc::error::TrySendError::Full(_) => busy(),
@@ -204,15 +259,18 @@ fn token(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
 }
 
-struct RequestBuffer(Vec<u8>);
+struct RequestBuffer {
+    bytes: Vec<u8>,
+    limit: usize,
+}
 
 impl Write for RequestBuffer {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         // The newline counts towards the agent's request limit.
-        if bytes.len() >= REQUEST_BYTES - self.0.len() {
+        if bytes.len() >= self.limit - self.bytes.len() {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "request size"));
         }
-        self.0.extend_from_slice(bytes);
+        self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
     }
 
@@ -432,7 +490,48 @@ struct AgentError {
     message: String,
 }
 
-async fn read_responses(stdout: ChildStdout, pending: &Mutex<Pending>) -> AppError {
+/// 读一帧：解析成通用 JSON 后先分流事件帧，再按会话期望的协议版本校验响应。
+///
+/// 事件帧（`{v,event,...}`，没有 `id`）只有 v2 会话会收到：它既不是任何请求的回执，
+/// 也不能唤醒 waiter。v1 会话收到同样形态属于协议不匹配，照旧报错。
+fn decode_frame(
+    bytes: &[u8],
+    protocol: u32,
+    events: &Mutex<Vec<Value>>,
+) -> std::result::Result<Option<Response>, AppError> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| protocol_error())?;
+    if value.get("event").is_some() {
+        // 事件帧只属于 v2 会话；v1 会话收到同形态就是无效帧。
+        if protocol != 2 {
+            return Err(protocol_error());
+        }
+        let Some(kind) = value.get("event").and_then(Value::as_str) else {
+            return Err(protocol_error());
+        };
+        if value.get("v").and_then(Value::as_u64) != Some(2) || !token(kind) {
+            return Err(protocol_error());
+        }
+        let mut queue = events.lock().unwrap_or_else(|e| e.into_inner());
+        if queue.len() >= MAX_EVENTS {
+            queue.remove(0);
+        }
+        queue.push(value);
+        return Ok(None);
+    }
+    let response: Response = serde_json::from_value(value).map_err(|_| protocol_error())?;
+    // 版本闸门：期望 v2 却收到 v1 帧（或反之）一律按无效帧处理，绝不"兼容"对端。
+    if response.v != protocol || !token(&response.id) {
+        return Err(protocol_error());
+    }
+    Ok(Some(response))
+}
+
+async fn read_responses(
+    stdout: ChildStdout,
+    pending: &Mutex<Pending>,
+    protocol: u32,
+    events: &Mutex<Vec<Value>>,
+) -> AppError {
     let mut pipe = BufReader::new(stdout);
     let mut frame = Vec::new();
     loop {
@@ -452,13 +551,14 @@ async fn read_responses(stdout: ChildStdout, pending: &Mutex<Pending>) -> AppErr
         if newline.is_none() {
             continue;
         }
-        let Ok(response) = serde_json::from_slice::<Response>(&frame) else {
-            return protocol_error();
-        };
+        let decoded = decode_frame(&frame, protocol, events);
         frame.clear();
-        if response.v != 1 || !token(&response.id) {
-            return protocol_error();
-        }
+        let Some(response) = (match decoded {
+            Ok(frame) => frame,
+            Err(error) => return error,
+        }) else {
+            continue;
+        };
         let result = match (response.ok, response.result, response.error) {
             (true, Some(result), None) if result.is_object() => Ok(result),
             (false, None, Some(err)) if token(&err.code) => Err(AppError::new(
@@ -480,17 +580,20 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn helper(body: &str) -> (AgentTransport, u32) {
+    fn helper_version(body: &str, version: u32) -> (AgentTransport, u32) {
+        // 夹具的协议版本由占位符替换，避免把两种会话各写一份。
         let prelude = r#"
 const input = require('node:readline').createInterface({input:process.stdin});
 const send = frame => process.stdout.write(JSON.stringify(frame) + '\n');
-const result = (req, obj) => send({v:1,id:req.id,ok:true,result:obj});
+const version = __V__;
+const result = (req, obj) => send({v:version,id:req.id,ok:true,result:obj});
 input.on('line', line => {
     const req = JSON.parse(line);
     if (req.op === 'fixture_ready') result(req, {ready:true});
     else receive(req);
 });
-"#;
+"#
+        .replace("__V__", &version.to_string());
         let mut command = Command::new("node");
         command
             .args(["-e", &format!("{prelude}\n{body}")])
@@ -500,8 +603,14 @@ input.on('line', line => {
             .kill_on_drop(true);
         let child = ScopedChild::spawn(&mut command).unwrap();
         let pid = child.child.id().unwrap();
-        (AgentTransport::start(child).unwrap(), pid)
+        (AgentTransport::start(child, version).unwrap(), pid)
     }
+
+    /// v1 会话的夹具：请求与响应都按 v1。
+    fn helper(body: &str) -> (AgentTransport, u32) {
+        helper_version(body, 1)
+    }
+
 
     async fn ready_helper(body: &str) -> AgentTransport {
         let (agent, _) = helper(body);
@@ -771,5 +880,90 @@ function receive(r) {
         .await
         .unwrap();
         assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
+
+    /* ---------- 协议版本闸门、事件帧与按版本取的请求上限 ---------- */
+
+    /// 期望 v2 却收到 v1 帧，或期望 v1 却收到 v2 帧：都按无效帧断开，不做版本兼容。
+    #[tokio::test]
+    async fn a_session_only_accepts_frames_of_its_own_protocol_version() {
+        for (version, body) in [
+            (2u32, "send({v:1,id:req.id,ok:true,result:{}})"),
+            (1u32, "send({v:2,id:req.id,ok:true,result:{}})"),
+        ] {
+            let (agent, _) = helper_version(&format!("function receive(req){{ {body} }}"), version);
+            assert_eq!(agent.protocol(), version);
+            assert_eq!(
+                agent.rpc("hello", json!({})).await.unwrap_err().code,
+                "remote_protocol",
+                "v{version}"
+            );
+            assert_eq!(
+                agent.rpc("status", json!({})).await.unwrap_err().code,
+                "remote_not_sent"
+            );
+            agent.close().await;
+        }
+    }
+
+    /// v2 事件帧不带 id：收集起来，不唤醒任何 waiter，也不让会话断开。
+    #[tokio::test]
+    async fn v2_event_frames_are_collected_without_waking_or_breaking_the_session() {
+        let (agent, _) = helper_version(
+            r#"
+function receive(req) {
+    send({v:2,event:"change",repo:"repo-a",generation:7});
+    send({v:2,event:"change",repo:"repo-a",generation:8});
+    result(req, {delivered:true});
+}"#,
+            2,
+        );
+        assert_eq!(
+            agent.rpc("hello", json!({})).await.unwrap(),
+            json!({"delivered":true})
+        );
+        let events = agent.take_events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["event"], json!("change"));
+        assert_eq!(events[1]["generation"], json!(8));
+        assert!(events[0].get("id").is_none(), "事件帧没有请求标识");
+        assert!(agent.take_events().is_empty(), "取走后不重复投递");
+        // 事件没有打断会话：下一条请求照常往返。
+        assert_eq!(
+            agent.rpc("hello", json!({})).await.unwrap(),
+            json!({"delivered":true})
+        );
+        agent.close().await;
+    }
+
+    /// v1 组件不会发事件帧：收到同形态就是无效帧，不能被当成「空结果」悄悄吞掉。
+    #[tokio::test]
+    async fn event_frames_are_a_protocol_error_on_a_v1_session() {
+        let (agent, _) = helper("function receive(req){ send({v:1,event:'change'}); }");
+        assert_eq!(
+            agent.rpc("hello", json!({})).await.unwrap_err().code,
+            "remote_protocol"
+        );
+        assert!(agent.take_events().is_empty());
+        agent.close().await;
+    }
+
+    /// 请求上限按会话版本取：v1 仍拒 200 KiB，v2 接受（v2 的保存路径需要更大的上限）。
+    #[tokio::test]
+    async fn request_limit_follows_the_session_version() {
+        let body = "function receive(req) { result(req, {len:String(req.value).length}); }";
+        let oversized = json!({"value":"x".repeat(200 * 1024)});
+        let (v1, _) = helper(body);
+        assert_eq!(
+            v1.rpc("hello", oversized.clone()).await.unwrap_err().code,
+            "remote_request_size"
+        );
+        v1.close().await;
+        let (v2, _) = helper_version(body, 2);
+        assert_eq!(
+            v2.rpc("hello", oversized).await.unwrap()["len"],
+            json!(200 * 1024)
+        );
+        v2.close().await;
     }
 }

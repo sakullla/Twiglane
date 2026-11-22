@@ -272,6 +272,9 @@ pub struct Probe {
     agent_version: Option<String>,
     agent_digest: Option<String>,
     agent_compatible: bool,
+    /// 远端组件自述（`--probe` 的 JSON）。只给进程内使用，不进前端契约。
+    #[serde(skip)]
+    agent_probe: Option<Value>,
     hops: Vec<String>,
 }
 
@@ -519,6 +522,7 @@ async fn probe_target(context: &Context<'_>, target: &SshTarget) -> Result<Probe
             .map(str::to_string),
         agent_digest: fields.digest,
         agent_compatible: compatible,
+        agent_probe: agent.cloned(),
         hops: snapshot
             .hops
             .iter()
@@ -527,12 +531,31 @@ async fn probe_target(context: &Context<'_>, target: &SshTarget) -> Result<Probe
     })
 }
 
-/// 传输产物：标准输入只放产物字节，进度按已写入字节上报。
+/// 传输一次安装：产物按摘要从本机清单取，进度经 Channel 回传前端。
 async fn upload(
     context: &Context<'_>,
     target: &SshTarget,
     offer: &InstallOffer,
     progress: &Channel<InstallProgress>,
+) -> Result<()> {
+    let bytes = offer_bytes(context, &offer.digest)?;
+    upload_bytes(context, target, &offer.digest, &bytes, &|sent, total| {
+        let _ = progress.send(InstallProgress {
+            phase: "installing",
+            sent_bytes: sent,
+            total_bytes: total,
+        });
+    })
+    .await
+}
+
+/// 传输产物：标准输入只放产物字节，进度按已写入字节上报。
+async fn upload_bytes(
+    context: &Context<'_>,
+    target: &SshTarget,
+    digest: &str,
+    bytes: &[u8],
+    progress: &(dyn Fn(u64, u64) + Send + Sync),
 ) -> Result<()> {
     let snapshot = context.snapshot(target).await?;
     let folder = Context::private_dir()?;
@@ -540,7 +563,7 @@ async fn upload(
         target,
         &snapshot,
         folder.path(),
-        &transport::install(&offer.digest)?,
+        &transport::install(digest)?,
         false,
     )?;
     command
@@ -551,23 +574,14 @@ async fn upload(
     let mut stdin = child.stdin.take().ok_or_else(ssh_failed)?;
     let stdout = child.stdout.take().ok_or_else(ssh_failed)?;
     let stderr = child.stderr.take().ok_or_else(ssh_failed)?;
-    let bytes = offer_bytes(context, &offer.digest)?;
     let total = bytes.len() as u64;
-    let _ = progress.send(InstallProgress {
-        phase: "installing",
-        sent_bytes: 0,
-        total_bytes: total,
-    });
+    progress(0, total);
     let write = async {
         let mut sent = 0u64;
         for chunk in bytes.chunks(64 * 1024) {
             stdin.write_all(chunk).await.map_err(|_| ssh_failed())?;
             sent += chunk.len() as u64;
-            let _ = progress.send(InstallProgress {
-                phase: "installing",
-                sent_bytes: sent,
-                total_bytes: total,
-            });
+            progress(sent, total);
         }
         // 关闭标准输入等于告诉远端"上传结束"，安装脚本据此开始核对。
         // 必须显式 drop：try_join 会一直持有已完成的 future，句柄不释放就永远没有 EOF。
@@ -596,7 +610,7 @@ async fn upload(
         )
     })?;
     if receipt["installed"].as_bool() != Some(true)
-        || receipt["agentSha256"].as_str() != Some(&offer.digest)
+        || receipt["agentSha256"].as_str() != Some(digest)
     {
         return Err(AppError::new(
             "remote_protocol",
@@ -863,4 +877,171 @@ pub async fn remote_ssh_install_agent(
         return Err(AppError::new("remote_cancelled", "远端组件安装已取消。"));
     }
     result.map_err(|_| AppError::new("remote_cancelled", "远端组件安装已取消。"))?
+}
+
+/* ------------------------------------------------------------------ *
+ * 给远端仓库会话（remote_worktree）用的最小接口
+ *
+ * v2 组件只能经本模块的 SSH 规则拉起：冻结配置、known_hosts 副本、askpass 与主机密钥
+ * 校验都在这里，调用方不复制任何一条。这里只暴露「探测 / 选产物 / 开会话 / 装产物」
+ * 四件事，不暴露 Context、快照或凭据存储。
+ * ------------------------------------------------------------------ */
+
+/// 本机 v2 产物：清单选出的字节、摘要、发布签名与版本。
+#[derive(Clone)]
+pub(crate) struct AgentArtifact {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) sha256: String,
+    /// 发布签名随产物一起带出；安装脚本只核对摘要，因此这里不做密码学复核。
+    #[allow(dead_code)]
+    pub(crate) signature: String,
+    pub(crate) version: String,
+}
+
+impl std::fmt::Debug for AgentArtifact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 不打印产物字节：只看摘要、版本与大小就够判断是哪一份。
+        f.debug_struct("AgentArtifact")
+            .field("sha256", &self.sha256)
+            .field("version", &self.version)
+            .field("bytes", &self.bytes.len())
+            .finish()
+    }
+}
+
+/// 一次 v2 会话的探测结果：只带调用方需要的字段。
+pub(crate) struct AgentProbe {
+    pub(crate) system: String,
+    pub(crate) architecture: String,
+    /// 远端已安装 v2 组件的摘要；没有安装时为 None。
+    pub(crate) digest: Option<String>,
+    /// 远端组件自述（`--probe` 的 JSON）：协议、os/arch 与版本。
+    pub(crate) agent: Option<Value>,
+}
+
+/// 一条已拉起的 v2 会话：传输 + 本次连接的私有目录。
+///
+/// 目录里是冻结配置、known_hosts 副本与一次性 askpass 脚本，必须活到会话结束，
+/// 因此与传输一起持有，不能在使用后提前释放。
+pub(crate) struct AgentSession {
+    pub(crate) transport: crate::remote_worktree_transport::AgentTransport,
+    pub(crate) folder: tempfile::TempDir,
+}
+
+/// 只在测试里指定 ssh 可执行文件与环境；生产一律走 PATH 上的 ssh。
+#[cfg(test)]
+impl RemoteSsh {
+    pub(crate) fn with_exec(
+        artifacts: PathBuf,
+        program: PathBuf,
+        env: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            artifacts,
+            exec: SshExec { program, env },
+            running: Mutex::new(HashMap::new()),
+            offers: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl RemoteSsh {
+    /// 本机 v2 产物目录（发行包资源目录或环境变量指定的开发目录）。
+    pub(crate) fn artifacts(&self) -> PathBuf {
+        self.artifacts.clone()
+    }
+}
+
+/// 按 Cliora 的共享主机标识找到本机主机簿里对应的目标。
+///
+/// 只有「同一台远端账号」才共用连接身份；总开关关闭或逐台停用时没有可用目标，
+/// 调用方据此回退内嵌 v1，而不是绕过开关自己连。
+pub(crate) fn shared_target(store: &AppStore, shared_host_id: &str) -> Option<SshTarget> {
+    if !store.remote_ssh_enabled() {
+        return None;
+    }
+    store.remote_ssh_targets().into_iter().find(|target| {
+        target.enabled && target.shared_host_id.as_deref() == Some(shared_host_id)
+    })
+}
+
+/// 目标平台规范化：远端 `uname` 给出的 system/architecture 与产物命名对齐。
+pub(crate) fn platform(system: &str, architecture: &str) -> Option<(String, String)> {
+    artifact::normalize(system, architecture)
+}
+
+/// 清单是否可读：决定「本机有没有 v2 产物」，读不到就当作没有。
+pub(crate) fn manifest_ready(dir: &Path) -> Result<()> {
+    artifact::load_manifest(dir).map(|_| ())
+}
+
+/// 按远端 system/architecture 选产物；没有匹配项时明确失败，调用方不得开始上传。
+pub(crate) fn select_agent(dir: &Path, system: &str, architecture: &str) -> Result<AgentArtifact> {
+    let manifest = artifact::load_manifest(dir)?;
+    let selected = artifact::select(dir, system, architecture)?;
+    let signature = manifest
+        .artifacts
+        .iter()
+        .find(|entry| entry.sha256.eq_ignore_ascii_case(&selected.sha256))
+        .map(|entry| entry.signature.clone())
+        .unwrap_or_default();
+    Ok(AgentArtifact {
+        bytes: selected.bytes,
+        sha256: selected.sha256,
+        signature,
+        version: selected.version,
+    })
+}
+
+/// 探测远端：系统/架构、已安装 v2 组件摘要与自述。只读，不写任何文件。
+pub(crate) async fn probe_agent(
+    store: &AppStore,
+    ssh: &RemoteSsh,
+    target: &SshTarget,
+) -> Result<AgentProbe> {
+    let context = Context::new(store, ssh);
+    let probe = probe_target(&context, target).await?;
+    Ok(AgentProbe {
+        system: probe.system,
+        architecture: probe.architecture,
+        digest: probe.agent_digest,
+        agent: probe.agent_probe,
+    })
+}
+
+/// 拉起 v2 会话：命令串先核对远端已安装组件的摘要，标准输入输出此后专属于 agent 协议。
+pub(crate) async fn open_session(
+    store: &AppStore,
+    ssh: &RemoteSsh,
+    target: &SshTarget,
+    digest: &str,
+) -> Result<AgentSession> {
+    let context = Context::new(store, ssh);
+    let snapshot = context.snapshot(target).await?;
+    let folder = Context::private_dir()?;
+    let mut command = context.build(
+        target,
+        &snapshot,
+        folder.path(),
+        &transport::connect(digest)?,
+        false,
+    )?;
+    let transport = crate::remote_worktree_transport::AgentTransport::spawn_v2(&mut command)
+        .map_err(|_| ssh_unavailable())?;
+    Ok(AgentSession {
+        transport,
+        folder,
+    })
+}
+
+/// 安装 v2 产物：上传后由远端脚本核对摘要并原子替换，进度按已写入字节回传。
+pub(crate) async fn install_artifact(
+    store: &AppStore,
+    ssh: &RemoteSsh,
+    target: &SshTarget,
+    artifact: &AgentArtifact,
+    progress: &(dyn Fn(u64, u64) + Send + Sync),
+) -> Result<()> {
+    let context = Context::new(store, ssh);
+    upload_bytes(&context, target, &artifact.sha256, &artifact.bytes, progress).await
 }

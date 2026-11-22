@@ -211,13 +211,13 @@ fn ssh_host(value: &str) -> Option<String> {
     Some(host)
 }
 
-fn ssh_path(value: Option<String>) -> Option<Option<String>> {
+fn ssh_path(value: Option<String>, is_absolute: impl Fn(&str) -> bool) -> Option<Option<String>> {
     match value.map(|path| path.trim().to_string()) {
         None => Some(None),
         Some(path) if path.is_empty() => Some(None),
         Some(path)
             if path.len() <= 4096
-                && std::path::Path::new(&path).is_absolute()
+                && is_absolute(&path)
                 && !path.contains('\0')
                 && !path.chars().any(char::is_control) =>
         {
@@ -251,9 +251,14 @@ pub fn validate_ssh_target(mut target: SshTarget) -> Result<SshTarget, AppError>
     if !matches!(target.auth_method.as_str(), "key" | "password" | "agent") {
         return Err(invalid_target());
     }
-    target.identity_file = ssh_path(target.identity_file).ok_or_else(invalid_target)?;
-    target.ssh_config = ssh_path(target.ssh_config).ok_or_else(invalid_target)?;
-    target.default_path = ssh_path(target.default_path).ok_or_else(invalid_target)?;
+    let local_absolute = |path: &str| Path::new(path).is_absolute();
+    target.identity_file = ssh_path(target.identity_file, local_absolute).ok_or_else(invalid_target)?;
+    target.ssh_config = ssh_path(target.ssh_config, local_absolute).ok_or_else(invalid_target)?;
+    // Remote repositories are on Linux or macOS, regardless of the desktop OS.
+    target.default_path = ssh_path(target.default_path, |path| {
+        path.starts_with('/') || local_absolute(path)
+    })
+    .ok_or_else(invalid_target)?;
     // 密钥认证可以不指定文件（由 ssh-agent 或默认身份文件提供）；给了就必须是绝对路径。
     if let Some(id) = &target.shared_host_id {
         target.shared_host_id = Some(ssh_text(id, 128).ok_or_else(invalid_target)?);
@@ -886,6 +891,11 @@ mod tests {
     }
 
     fn ssh_target(id: &str) -> SshTarget {
+        let identity_file = if cfg!(windows) {
+            "C:/Users/deploy/.ssh/id_ed25519"
+        } else {
+            "/home/deploy/.ssh/id_ed25519"
+        };
         SshTarget {
             id: id.into(),
             display_name: "构建机".into(),
@@ -893,7 +903,7 @@ mod tests {
             port: 22,
             user: "deploy".into(),
             auth_method: "key".into(),
-            identity_file: Some("/home/deploy/.ssh/id_ed25519".into()),
+            identity_file: Some(identity_file.into()),
             ssh_config: None,
             default_path: Some("/srv/app".into()),
             enabled: true,
@@ -990,12 +1000,13 @@ mod tests {
     fn invalid_ssh_targets_are_rejected_without_writing() {
         let dir = crate::test_support::TempDir::new("state-ssh-invalid");
         let store = store_in(dir.path());
-        let cases: [fn(&mut SshTarget); 5] = [
+        let cases: [fn(&mut SshTarget); 6] = [
             |target| target.host = "  ".into(),
             |target| target.user = "-oProxyCommand=evil".into(),
             |target| target.port = 0,
             |target| target.auth_method = "telnet".into(),
             |target| target.identity_file = Some("relative/key".into()),
+            |target| target.default_path = Some("relative/repository".into()),
         ];
         for mutate in cases {
             let mut target = ssh_target("host-a");

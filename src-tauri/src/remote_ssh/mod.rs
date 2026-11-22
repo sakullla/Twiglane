@@ -641,7 +641,7 @@ fn offer_bytes(context: &Context<'_>, digest: &str) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod live;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
 #[tauri::command(rename_all = "camelCase")]

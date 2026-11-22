@@ -1,4 +1,38 @@
+/// 发行包把远端组件放在资源目录的 `agent-v2/`（见 `tauri.conf.json` 的
+/// `bundle.resources` 与 `remote_ssh::RemoteSsh::artifacts_for`）。
+///
+/// 这些二进制由发行流水线生成，普通 checkout 里没有；而 tauri-build 遇到不存在的
+/// 资源路径会直接让整个构建失败。所以这里先保证目录存在，做到「存在即打包」：
+/// 目录为空时 tauri-build 跳过（不打包任何文件），有产物时按原样收录。
+fn ensure_agent_bundle_dir() {
+    let dir = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
+        .join("agent-v2");
+    if !dir.is_dir() {
+        match std::fs::create_dir_all(&dir) {
+            Ok(()) => println!(
+                "cargo:warning=仓库里没有发行用的远端组件产物，已创建空的 {}。本次构建的安装包不带远端组件，远端 SSH 安装会在运行时报 agent_artifact_manifest。",
+                dir.display()
+            ),
+            Err(error) => {
+                println!(
+                    "cargo:warning=无法创建远端组件资源目录 {}：{error}。tauri-build 会因资源路径缺失而失败，请手动创建该目录后重试。",
+                    dir.display()
+                );
+                return;
+            }
+        }
+    }
+    let empty = std::fs::read_dir(&dir).map(|mut entries| entries.next().is_none());
+    if empty.unwrap_or(false) {
+        println!(
+            "cargo:warning={} 是空目录：发行包只会在放入 manifest.json 与各平台 twiglane-agent-v2 后携带远端组件。",
+            dir.display()
+        );
+    }
+}
+
 fn main() {
+    ensure_agent_bundle_dir();
     let attributes = tauri_build::Attributes::new();
     let attributes = if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
         && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
@@ -33,6 +67,15 @@ fn main() {
             "remote_worktree_diff",
             "remote_worktree_write",
             "remote_worktree_recover",
+            "remote_ssh_settings",
+            "set_remote_ssh_enabled",
+            "remote_ssh_save_target",
+            "remote_ssh_delete_target",
+            "remote_ssh_set_password",
+            "remote_ssh_delete_password",
+            "remote_ssh_test",
+            "remote_ssh_cancel",
+            "remote_ssh_install_agent",
             "workspace_list",
             "workspace_create",
             "workspace_preview",

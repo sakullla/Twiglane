@@ -6,7 +6,7 @@
 //!
 //! 关闭开关时所有命令在读钥匙串、探测远程或发平台请求之前就返回。
 
-mod credential;
+pub(crate) mod credential;
 mod http;
 mod provider;
 mod remote;

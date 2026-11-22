@@ -1293,6 +1293,100 @@ fn requests_verify_git_identity_when_the_worktree_root_stays_in_place() {
 }
 
 #[test]
+fn requests_reject_retargeting_the_common_git_directory() {
+    let fixture = Fixture::new("original-common-dir");
+    fixture.init();
+    fixture.write("note.txt", "same content\n");
+    fixture.commit_all("same commit");
+
+    let replacement = Fixture::new("replacement-common-dir");
+    git(
+        &replacement.repo,
+        &replacement.config,
+        &["clone", "--no-hardlinks", &fixture.repo_str(), "."],
+    );
+    git(
+        &replacement.repo,
+        &replacement.config,
+        &["branch", "replacement-only"],
+    );
+    let linked = fixture.repo.with_file_name("linked");
+    let linked_path = linked.to_str().unwrap();
+    git(
+        &fixture.repo,
+        &fixture.config,
+        &["worktree", "add", "--detach", linked_path],
+    );
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, linked_path);
+    let linked_git_dir = git(&linked, &fixture.config, &["rev-parse", "--absolute-git-dir"]);
+    let commondir = Path::new(linked_git_dir.trim_end_matches(['\r', '\n'])).join("commondir");
+    let replacement_git_dir = replacement.repo.join(".git");
+    std::fs::write(
+        commondir,
+        format!("{}\n", replacement_git_dir.display()),
+    )
+    .unwrap();
+
+    let current_refs = git(
+        &linked,
+        &fixture.config,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    );
+    assert!(current_refs.lines().any(|name| name == "replacement-only"));
+    assert_eq!(
+        agent.error_code("retargeted-read", "branchList", json!({ "repo": opened["repo"] })),
+        "target_changed",
+    );
+    assert_eq!(
+        agent.error_code(
+            "retargeted-write",
+            "branchCreate",
+            json!({
+                "repo": opened["repo"],
+                "operationId": "op-retargeted-write",
+                "stateToken": opened["stateToken"],
+                "name": "must-not-create",
+                "start": "main",
+            }),
+        ),
+        "target_changed",
+    );
+    for repo in [&fixture.repo, &replacement.repo] {
+        assert!(
+            git(repo, &fixture.config, &["branch", "--list", "must-not-create"]).is_empty()
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn opens_a_worktree_whose_common_git_directory_ends_in_a_space() {
+    let fixture = Fixture::new("common-dir-space");
+    let metadata = fixture.repo.with_file_name("git metadata ");
+    git(
+        &fixture.repo,
+        &fixture.config,
+        &["init", "-b", "main", "--separate-git-dir", metadata.to_str().unwrap()],
+    );
+    fixture.write("note.txt", "visible content\n");
+    fixture.commit_all("separate git directory");
+    let reported = git(&fixture.repo, &fixture.config, &["rev-parse", "--git-common-dir"]);
+    assert!(reported.ends_with("git metadata \n"));
+
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &fixture.repo_str());
+    let history = agent.ok("space-history", "history", json!({ "repo": opened["repo"] }));
+    assert_eq!(history["page"]["commits"][0]["summary"], json!("separate git directory"));
+    let content = agent.ok(
+        "space-file",
+        "fileContent",
+        json!({ "repo": opened["repo"], "relative": "note.txt" }),
+    );
+    assert_eq!(content["content"]["lines"], json!(["visible content"]));
+}
+
+#[test]
 #[cfg(unix)]
 fn task_diff_cursors_round_trip_with_a_long_path() {
     let fixture = Fixture::new("long-diff-path");

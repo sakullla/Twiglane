@@ -41,14 +41,8 @@ impl WorktreeIdentity {
                 "无法定位远端工作树的 Git 目录。",
             ));
         }
-        let raw = std::str::from_utf8(&output.output.stdout).map_err(|_| unavailable())?;
-        let raw = raw.strip_suffix('\n').unwrap_or(raw);
-        let raw = if cfg!(windows) {
-            raw.strip_suffix('\r').unwrap_or(raw)
-        } else {
-            raw
-        };
-        let git_dir = dunce::canonicalize(Path::new(raw)).map_err(|_| unavailable())?;
+        let git_dir = dunce::canonicalize(git_path(&output.output.stdout)?)
+            .map_err(|_| unavailable())?;
         let path = wire_path(root)?;
         let git_path = wire_path(&git_dir)?;
         let root = DirectoryIdentity::read(root)?;
@@ -109,6 +103,20 @@ impl DirectoryIdentity {
 
 pub fn worktree_changed() -> AppError {
     AppError::new("target_changed", "远端工作树身份已变化，请重新打开。")
+}
+
+pub fn git_path(stdout: &[u8]) -> Result<&Path, AppError> {
+    let raw = std::str::from_utf8(stdout).map_err(|_| unavailable())?;
+    // A Git path is data. Remove only the line ending added by the command.
+    let path = if cfg!(windows) && raw.ends_with("\r\n") {
+        &raw[..raw.len() - 2]
+    } else {
+        raw.strip_suffix('\n').unwrap_or(raw)
+    };
+    if path.is_empty() || path.contains('\0') {
+        return Err(unavailable());
+    }
+    Ok(Path::new(path))
 }
 
 fn unavailable() -> AppError {

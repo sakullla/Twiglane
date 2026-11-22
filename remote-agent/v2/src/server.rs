@@ -31,7 +31,7 @@ use crate::git::sync;
 use crate::git::tags;
 use crate::git::task;
 use crate::git::worktree as worktree_ops;
-use crate::identity::{worktree_changed, WorktreeIdentity};
+use crate::identity::{git_path, worktree_changed, WorktreeIdentity};
 use crate::model::{DiffLineSelection, RepositorySearchScope, TaskReview};
 use crate::protocol::{self, Request, CAPABILITIES, MAX_IN_FLIGHT, MAX_REQUEST_BYTES, PROTOCOL};
 use crate::pty::{self, FrameEvents};
@@ -720,7 +720,10 @@ impl Context {
         if identity.digest != session.identity.digest || identity.path != session.identity.path {
             return Err(worktree_changed());
         }
-        Ok(())
+        // A linked worktree can keep its own Git directory while its
+        // commondir points to another store for refs, objects and writes.
+        let common_dir = self.common_dir(&session.root).await?;
+        session.git_dir_identity.check(&common_dir)
     }
 
     async fn review_identity(
@@ -2619,17 +2622,14 @@ impl Context {
             None,
         )
         .await?;
-        if output.output.exit_code != 0 {
+        if output.output.exit_code != 0 || output.output.stdout_truncated {
             return Err(AppError::new(
                 "not_repository",
                 "无法定位 Git 目录，未打开仓库。",
             ));
         }
-        let raw = String::from_utf8_lossy(&output.output.stdout)
-            .trim()
-            .to_string();
-        let path = PathBuf::from(&raw);
-        Ok(if path.is_absolute() { path } else { root.join(path) })
+        let path = git_path(&output.output.stdout)?;
+        Ok(if path.is_absolute() { path.to_path_buf() } else { root.join(path) })
     }
 }
 /// 一次性差异游标：绑定仓库、状态令牌、查询与下一页偏移。

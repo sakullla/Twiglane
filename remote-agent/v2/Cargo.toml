@@ -23,6 +23,7 @@ agent = []
 base64 = "0.22"
 dunce = "1.0.5"
 flate2 = "1"
+getrandom = "0.4"
 gethostname = "1.1"
 # 共享的 git/preview.rs 与 git/document.rs 会编译进本进程（T3 会用到远端 Markdown/图片），
 # 因此与桌面端保持同样的依赖，而不是在两边各自实现一份预览与 URL 校验。
@@ -37,6 +38,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10.9"
 tar = "0.4"
+tempfile = "3"
 zip = { version = "9.3", default-features = false }
 tokio = { version = "1", features = [
   "fs",
@@ -80,9 +82,6 @@ objc2-foundation = { version = "0.3.2", features = [
   "NSURL",
   "NSValue",
 ] }
-
-[dev-dependencies]
-tempfile = "3"
 
 [profile.release]
 opt-level = 3

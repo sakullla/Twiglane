@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
@@ -26,6 +26,7 @@ const REQUEST_BYTES_V2: usize = 8 * 1024 * 1024;
 const RESPONSE_BYTES: usize = 4 * 1024 * 1024 + 1024;
 /// 事件帧只是失效通知：只保留最近若干条，绝不因为它们挤掉请求回执或撑大内存。
 const MAX_EVENTS: usize = 64;
+const STDERR_BYTES: usize = 64 * 1024;
 
 /// 会话协议的请求字节上限。v1 与 v2 各自的协议规定不同，不能共用一个常量。
 fn request_limit(protocol: u32) -> usize {
@@ -38,6 +39,7 @@ fn request_limit(protocol: u32) -> usize {
 
 type Reply = Result<Value, AppError>;
 type Waiter = oneshot::Sender<Reply>;
+type StderrClassifier = fn(&[u8]) -> AppError;
 
 fn disconnected() -> AppError {
     AppError::new(
@@ -65,6 +67,7 @@ fn busy() -> AppError {
 struct Pending {
     waiters: HashMap<String, Waiter>,
     failure: Option<AppError>,
+    received_response: bool,
 }
 
 impl Pending {
@@ -94,22 +97,34 @@ impl AgentTransport {
     /// creates all three pipes and drains stderr without exposing its contents.
     /// Connect to the installed v1 agent for recovery of legacy receipts.
     pub fn spawn(command: &mut Command) -> Result<Self, AppError> {
-        Self::spawn_with(command, 1)
+        Self::spawn_with(command, 1, None)
     }
 
     /// 按 v2 会话启动同一个 helper：请求写 v2，响应必须是 v2，事件帧被收集。
+    #[cfg(test)]
     pub fn spawn_v2(command: &mut Command) -> Result<Self, AppError> {
-        Self::spawn_with(command, 2)
+        Self::spawn_with(command, 2, None)
     }
 
-    fn spawn_with(command: &mut Command, protocol: u32) -> Result<Self, AppError> {
+    pub(crate) fn spawn_connector_v2(
+        command: &mut Command,
+        classify: StderrClassifier,
+    ) -> Result<Self, AppError> {
+        Self::spawn_with(command, 2, Some(classify))
+    }
+
+    fn spawn_with(
+        command: &mut Command,
+        protocol: u32,
+        classify: Option<StderrClassifier>,
+    ) -> Result<Self, AppError> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let child = ScopedChild::spawn(command)
             .map_err(|_| AppError::new("remote_spawn", "无法启动受控的远端连接工具。"))?;
-        Self::start(child, protocol)
+        Self::start(child, protocol, classify)
     }
 
     /// 这条会话使用的协议版本。
@@ -123,7 +138,11 @@ impl AgentTransport {
         std::mem::take(&mut *events)
     }
 
-    fn start(mut child: ScopedChild, protocol: u32) -> Result<Self, AppError> {
+    fn start(
+        mut child: ScopedChild,
+        protocol: u32,
+        classify: Option<StderrClassifier>,
+    ) -> Result<Self, AppError> {
         let (Some(stdin), Some(stdout)) = (child.take_stdin(), child.take_stdout()) else {
             return Err(AppError::new(
                 "remote_pipes",
@@ -131,12 +150,12 @@ impl AgentTransport {
             ));
         };
         let stderr = child.take_stderr();
-        Ok(Self::with_pipes(child, stdin, stdout, stderr, protocol))
+        Ok(Self::with_pipes(child, stdin, stdout, stderr, protocol, classify))
     }
 
     pub(crate) fn checked_v2(connection: crate::remote_ssh::AgentConnection) -> (Self, tempfile::TempDir) {
         let crate::remote_ssh::AgentConnection { child, stdin, stdout, stderr, folder } = connection;
-        (Self::with_pipes(child, stdin, stdout, Some(stderr), 2), folder)
+        (Self::with_pipes(child, stdin, stdout, Some(stderr), 2, None), folder)
     }
 
     fn with_pipes(
@@ -145,6 +164,7 @@ impl AgentTransport {
         stdout: ChildStdout,
         stderr: Option<ChildStderr>,
         protocol: u32,
+        classify: Option<StderrClassifier>,
     ) -> Self {
         let (outgoing, requests) = mpsc::channel(MAX_IN_FLIGHT);
         let (stop, mut stopping) = watch::channel(false);
@@ -154,6 +174,7 @@ impl AgentTransport {
         let events = Arc::new(Mutex::new(Vec::new()));
         let pushed = Arc::clone(&events);
         tokio::spawn(async move {
+            let mut diagnostic = tokio::spawn(drain_stderr(stderr, classify));
             let reading = read_responses(stdout, &waiting, protocol, &pushed);
             tokio::pin!(reading);
             let failure = tokio::select! {
@@ -161,23 +182,24 @@ impl AgentTransport {
                 _ = child.exited() => None,
                 _ = write_requests(stdin, requests) => None,
                 error = &mut reading => Some(error),
-                _ = async {
-                    if let Some(mut pipe) = stderr {
-                        let _ = tokio::io::copy(&mut pipe, &mut tokio::io::sink()).await;
-                    }
-                    std::future::pending::<()>().await;
-                } => unreachable!(),
             };
             // A proxy may outlive the helper with a copy of its stdout handle.
             // Stop the owners first; keep the same decoder (including partial bytes)
             // long enough to deliver complete replies already in the pipe.
             child.stop_tree();
-            let failure = match failure {
+            let mut failure = match failure {
                 Some(reason) => reason,
                 None => tokio::time::timeout(Duration::from_secs(2), reading)
                     .await
                     .unwrap_or_else(|_| disconnected()),
             };
+            let before_response = !waiting.lock().unwrap_or_else(|e| e.into_inner()).received_response;
+            if classify.is_some() && before_response && failure.code == "remote_disconnected" {
+                if let Ok(Ok(Some(error))) = tokio::time::timeout(Duration::from_secs(2), &mut diagnostic).await {
+                    failure = error;
+                }
+            }
+            diagnostic.abort();
             waiting
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -230,8 +252,12 @@ impl AgentTransport {
         let (reply, response) = oneshot::channel();
         {
             let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            if pending.failure.is_some() {
-                return Err(not_sent());
+            if let Some(error) = &pending.failure {
+                return Err(if op == "hello" && !pending.received_response {
+                    error.clone()
+                } else {
+                    not_sent()
+                });
             }
             if pending.waiters.len() >= MAX_IN_FLIGHT {
                 return Err(busy());
@@ -258,6 +284,29 @@ impl AgentTransport {
         let mut stopped = self.stopped.clone();
         let _ = stopped.wait_for(|value| *value).await;
     }
+}
+
+async fn drain_stderr(
+    pipe: Option<ChildStderr>,
+    classify: Option<StderrClassifier>,
+) -> Option<AppError> {
+    let mut pipe = pipe?;
+    let Some(classify) = classify else {
+        let _ = tokio::io::copy(&mut pipe, &mut tokio::io::sink()).await;
+        return None;
+    };
+    let mut tail = Vec::new();
+    let mut chunk = [0; 4096];
+    while let Ok(count) = pipe.read(&mut chunk).await {
+        if count == 0 {
+            break;
+        }
+        tail.extend_from_slice(&chunk[..count]);
+        if tail.len() > STDERR_BYTES {
+            tail.drain(..tail.len() - STDERR_BYTES);
+        }
+    }
+    (!tail.is_empty()).then(|| classify(&tail))
 }
 
 impl Drop for AgentTransport {
@@ -586,6 +635,7 @@ async fn read_responses(
         let Some(waiter) = pending.waiters.remove(&response.id) else {
             return protocol_error();
         };
+        pending.received_response = true;
         let _ = waiter.send(result);
     }
 }
@@ -618,7 +668,7 @@ input.on('line', line => {
             .kill_on_drop(true);
         let child = ScopedChild::spawn(&mut command).unwrap();
         let pid = child.child.id().unwrap();
-        (AgentTransport::start(child, version).unwrap(), pid)
+        (AgentTransport::start(child, version, None).unwrap(), pid)
     }
 
     /// v1 会话的夹具：请求与响应都按 v1。

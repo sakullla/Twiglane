@@ -1138,6 +1138,7 @@ impl std::fmt::Debug for AgentArtifact {
 
 /// 一次 v2 会话的探测结果：只带调用方需要的字段。
 pub(crate) struct AgentProbe {
+    pub(crate) effective_host: String,
     pub(crate) system: String,
     pub(crate) architecture: String,
     /// 远端已安装 v2 组件的摘要；没有安装时为 None。
@@ -1216,6 +1217,7 @@ pub(crate) async fn probe_agent(
     let context = Context::new(store, ssh);
     let probe = probe_target_with_host_key(&context, target, true).await?;
     Ok(AgentProbe {
+        effective_host: probe.effective_host,
         system: probe.system,
         architecture: probe.architecture,
         digest: probe.agent_digest,

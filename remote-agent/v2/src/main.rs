@@ -57,6 +57,7 @@ mod workspaces;
 
 mod events;
 mod identity;
+mod journal_identity;
 mod protocol;
 mod pty;
 mod receipts;

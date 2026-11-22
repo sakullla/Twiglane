@@ -96,6 +96,7 @@ async fn real_v2_opens_native_and_cliora_task() {
     assert!(!commits.is_empty());
     let baseline = commits.last().unwrap()["oid"].as_str().unwrap().to_owned();
     let native_host_identity = session.host_identity.clone();
+    let native_journal_identity = session.journal_identity.clone();
     let native_platform = platform_evidence(&session).await;
     let state = RemoteWorktrees::new(dir.path().join("journal"));
     let native_journal = session.journal(&state.data);
@@ -138,7 +139,10 @@ async fn real_v2_opens_native_and_cliora_task() {
     assert_eq!(session.protocol(), 2);
     assert_eq!(snapshot["worktreeIdentity"], identity);
     assert_eq!(snapshot["baseline"], baseline);
-    assert_eq!(session.host_identity, native_host_identity, "providers identify the same authenticated SSH key");
+    if env::var_os("TWIGLANE_T4_EXPECT_DISTINCT_HOST_KEYS").is_some() {
+        assert_ne!(session.host_identity, native_host_identity, "fixture must negotiate different SSH keys");
+    }
+    assert_eq!(session.journal_identity, native_journal_identity, "providers reach the same authenticated account");
     assert_eq!(session.journal(&state.data), native_journal);
     assert_eq!(
         find_pending(&state.data, &session).unwrap().unwrap().record.operation_id,
@@ -164,7 +168,7 @@ async fn real_v2_opens_native_and_cliora_task() {
             install_confirmation: None,
             review_id: None,
         };
-        let (native_session, _) = open(None, &access, legacy_request.clone(), None).await;
+        let (mut native_session, _) = open(None, &access, legacy_request.clone(), None).await;
         let old_journal = native_session.legacy_journal(
             &state.data, legacy["targetId"].as_str().unwrap(), legacy["peerIdentity"].as_str().unwrap(),
         );
@@ -176,6 +180,7 @@ async fn real_v2_opens_native_and_cliora_task() {
             worktree_identity: None,
         };
         save_pending(&old_journal, &old_record).unwrap();
+        bind_legacy_cliora(&state.data, &mut native_session, &access, &Channel::new(|_| Ok(()))).await;
         let detected = find_pending(&state.data, &native_session).unwrap().unwrap();
         assert_eq!(detected.record.repo, old_record.repo);
         let wrong = recover_pending(&state, &native_session, &old_record.operation_id).await.unwrap();

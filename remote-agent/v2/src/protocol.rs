@@ -36,6 +36,7 @@ pub const CAPABILITIES: &[&str] = &[
     "patch",
     "commit",
     "receipt",
+    "journalIdentity",
     "cancel",
     // 历史、比较与文件历史（T2）
     "history",

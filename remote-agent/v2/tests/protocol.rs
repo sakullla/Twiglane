@@ -253,6 +253,7 @@ fn handshake_reports_v2_capabilities_and_rejects_v1_frames() {
         "patch",
         "commit",
         "receipt",
+        "journalIdentity",
         "taskReview",
         "reviewIdentity",
     ] {
@@ -272,6 +273,35 @@ fn handshake_reports_v2_capabilities_and_rejects_v1_frames() {
     let rejected = agent.next_line();
     assert_eq!(rejected["ok"], json!(false));
     assert_eq!(rejected["error"]["code"], json!("unsupported_protocol"));
+}
+
+#[test]
+fn journal_identity_survives_concurrent_start_and_reconnect() {
+    let fixture = Fixture::new("journal-identity");
+    let mut first = fixture.agent();
+    let mut second = fixture.agent();
+    first.send("first", "hello", json!({}));
+    second.send("second", "hello", json!({}));
+    let first_reply = first.read_id("first");
+    let second_reply = second.read_id("second");
+    assert_eq!(first_reply["ok"], true);
+    assert_eq!(second_reply["ok"], true);
+    let identity = &first_reply["result"]["journalIdentity"];
+    assert_eq!(identity.as_str().unwrap().len(), 64);
+    assert_eq!(second_reply["result"]["journalIdentity"], *identity);
+    drop(first);
+    drop(second);
+
+    let mut reopened = fixture.agent();
+    assert_eq!(reopened.ok("reconnect", "hello", json!({}))["journalIdentity"], *identity);
+    let other = Fixture::new("different-account-state");
+    assert_ne!(other.agent().ok("other", "hello", json!({}))["journalIdentity"], *identity);
+
+    let identity_file = fixture.state.join("twiglane").join("agent").join("v2")
+        .join("journal").join("journal-identity");
+    std::fs::write(&identity_file, "damaged").unwrap();
+    assert_eq!(fixture.agent().error_code("invalid", "hello", json!({})), "remote_journal_identity");
+    assert_eq!(std::fs::read_to_string(identity_file).unwrap(), "damaged");
 }
 
 #[test]

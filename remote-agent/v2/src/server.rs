@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use base64::Engine;
@@ -75,6 +75,7 @@ struct InFlight {
 
 pub struct Context {
     backend: Arc<Backend>,
+    journal_identity: OnceLock<Result<String, AppError>>,
     session: Mutex<Option<Session>>,
     cancels: Mutex<HashMap<String, InFlight>>,
     slots: Arc<Semaphore>,
@@ -294,6 +295,7 @@ pub async fn serve() -> Result<(), AppError> {
     ))));
     let context = Arc::new(Context {
         backend: Arc::new(build_backend()),
+        journal_identity: OnceLock::new(),
         session: Mutex::new(None),
         cancels: Mutex::new(HashMap::new()),
         slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
@@ -439,6 +441,13 @@ pub fn host_name() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 impl Context {
+    fn journal_identity(&self) -> Result<&str, AppError> {
+        self.journal_identity
+            .get_or_init(crate::journal_identity::load)
+            .as_deref()
+            .map_err(Clone::clone)
+    }
+
     /// 读取侧围栏命中：与解析侧超限拒绝同一份 `code` 与文案，且不执行任何东西。
     fn reject_too_large(&self) {
         let rejection = protocol::too_large_rejection();
@@ -597,6 +606,7 @@ impl Context {
             "client": client,
             "capabilities": CAPABILITIES,
             "receipts": "git-common-dir",
+            "journalIdentity": self.journal_identity()?,
             "generation": "numeric",
             "stateToken": "opaque",
         }))
@@ -607,6 +617,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
+        let journal_identity = self.journal_identity()?;
         let baseline = baseline_field(fields)?.map(str::to_owned);
         let expected_identity = optional_string_field(fields, "worktreeIdentity")?;
         let path = string_field(fields, "path")?;
@@ -665,6 +676,7 @@ impl Context {
             "watchDegraded": degraded,
             "events": "notification",
             "capabilities": CAPABILITIES,
+            "journalIdentity": journal_identity,
             "worktreeIdentity": session.identity.digest,
             "worktreePath": session.identity.path,
             "baseline": session.baseline,

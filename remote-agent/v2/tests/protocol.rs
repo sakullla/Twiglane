@@ -276,7 +276,7 @@ fn handshake_reports_v2_capabilities_and_rejects_v1_frames() {
 }
 
 #[test]
-fn journal_identity_survives_concurrent_start_and_reconnect() {
+fn journal_identity_survives_concurrent_start_and_forwarded_environment_changes() {
     let fixture = Fixture::new("journal-identity");
     let mut first = fixture.agent();
     let mut second = fixture.agent();
@@ -294,14 +294,19 @@ fn journal_identity_survives_concurrent_start_and_reconnect() {
 
     let mut reopened = fixture.agent();
     assert_eq!(reopened.ok("reconnect", "hello", json!({}))["journalIdentity"], *identity);
-    let other = Fixture::new("different-account-state");
-    assert_ne!(other.agent().ok("other", "hello", json!({}))["journalIdentity"], *identity);
-
-    let identity_file = fixture.state.join("twiglane").join("agent").join("v2")
-        .join("journal").join("journal-identity");
-    std::fs::write(&identity_file, "damaged").unwrap();
-    assert_eq!(fixture.agent().error_code("invalid", "hello", json!({})), "remote_journal_identity");
-    assert_eq!(std::fs::read_to_string(identity_file).unwrap(), "damaged");
+    let forwarded = Fixture::new("forwarded-state");
+    let decoy_profile = forwarded.state.to_str().unwrap();
+    let mut redirected = Agent::start_with(&forwarded.state, &forwarded.config, &[
+        ("HOME", decoy_profile),
+        ("USERPROFILE", decoy_profile),
+        ("LOCALAPPDATA", decoy_profile),
+        ("APPDATA", decoy_profile),
+        ("HOMEPATH", decoy_profile),
+        ("USER", "twiglane-test-forwarded-user"),
+    ]);
+    assert_eq!(redirected.ok("forwarded", "hello", json!({}))["journalIdentity"], *identity);
+    assert!(!forwarded.state.join("twiglane").join("agent").join("v2")
+        .join("journal").join("journal-identity").exists());
 }
 
 #[test]

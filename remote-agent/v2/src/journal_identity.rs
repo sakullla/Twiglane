@@ -17,24 +17,88 @@ pub fn load() -> Result<String, AppError> {
 }
 
 fn account_state_dir() -> Option<PathBuf> {
-    let configured = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute());
+    // SSH clients can forward environment variables. Resolve the account's
+    // storage through the OS so changing a connection profile cannot fork it.
+    let profile = account_profile()?;
+    if !profile.is_absolute() {
+        return None;
+    }
     #[cfg(windows)]
-    let default = || {
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from).or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .map(|profile| PathBuf::from(profile).join("AppData").join("Local"))
-        })
-    };
-    #[cfg(not(windows))]
-    let default = || {
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("state"))
-    };
-    configured
-        .or_else(default)
-        .filter(|path| path.is_absolute())
-        .map(|path| path.join("twiglane").join("agent").join("v2").join("journal"))
+    let root = profile.join("AppData").join("Local");
+    #[cfg(unix)]
+    let root = profile.join(".local").join("state");
+    Some(root.join("twiglane").join("agent").join("v2").join("journal"))
+}
+
+#[cfg(unix)]
+fn account_profile() -> Option<PathBuf> {
+    use std::ffi::{CStr, OsStr};
+    use std::mem::MaybeUninit;
+    use std::os::unix::ffi::OsStrExt;
+    use std::ptr;
+
+    let mut record = MaybeUninit::<libc::passwd>::uninit();
+    let mut result = ptr::null_mut();
+    let mut buffer = vec![0; 4096];
+    loop {
+        // SAFETY: passwd and result are writable, and the buffer remains
+        // alive while reading the home pointer returned by getpwuid_r.
+        let status = unsafe {
+            libc::getpwuid_r(
+                libc::geteuid(),
+                record.as_mut_ptr(),
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE && buffer.len() < 1024 * 1024 {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if status != 0 || result.is_null() {
+            return None;
+        }
+        // SAFETY: a successful lookup with a non-null result initializes passwd.
+        let home = unsafe { (*result).pw_dir };
+        if home.is_null() {
+            return None;
+        }
+        // SAFETY: the successful lookup supplies a NUL-terminated home in buffer.
+        return Some(PathBuf::from(OsStr::from_bytes(unsafe { CStr::from_ptr(home) }.to_bytes())));
+    }
+}
+
+#[cfg(windows)]
+fn account_profile() -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::ptr;
+    use windows_sys::Win32::Security::TOKEN_QUERY;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows_sys::Win32::UI::Shell::GetUserProfileDirectoryW;
+
+    let mut token = ptr::null_mut();
+    // SAFETY: GetCurrentProcess returns a pseudo handle. token holds the owned
+    // access token on success, and is closed when OwnedHandle is dropped.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return None;
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut length = 0;
+    // SAFETY: a null output buffer asks this API for the required UTF-16 length.
+    unsafe { GetUserProfileDirectoryW(token.as_raw_handle(), ptr::null_mut(), &mut length) };
+    if !(2..=32768).contains(&length) {
+        return None;
+    }
+    let mut profile = vec![0; length as usize];
+    // SAFETY: profile owns a writable buffer of the length requested by the API.
+    if unsafe { GetUserProfileDirectoryW(token.as_raw_handle(), profile.as_mut_ptr(), &mut length) } == 0 {
+        return None;
+    }
+    let length = profile.iter().position(|&unit| unit == 0)?;
+    Some(PathBuf::from(OsString::from_wide(&profile[..length])))
 }
 
 fn load_or_create(dir: &Path) -> io::Result<String> {
@@ -103,4 +167,24 @@ fn owned_state(metadata: &fs::Metadata) -> bool {
 fn owned_state(_metadata: &fs::Metadata) -> bool {
     // The account's LocalAppData directory supplies the inherited Windows ACL.
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_identity_distinguishes_stores_and_preserves_corruption() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        let identity = load_or_create(&first).unwrap();
+        assert_eq!(load_or_create(&first).unwrap(), identity);
+        assert_ne!(load_or_create(&second).unwrap(), identity);
+
+        let damaged = first.join(FILE);
+        fs::write(&damaged, "damaged").unwrap();
+        assert_eq!(load_or_create(&first).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read_to_string(damaged).unwrap(), "damaged");
+    }
 }

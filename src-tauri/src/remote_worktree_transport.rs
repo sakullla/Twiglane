@@ -252,22 +252,22 @@ impl AgentTransport {
         let (reply, response) = oneshot::channel();
         {
             let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            let starting = op == "hello" && !pending.received_response;
             if let Some(error) = &pending.failure {
-                return Err(if op == "hello" && !pending.received_response {
-                    error.clone()
-                } else {
-                    not_sent()
-                });
+                return Err(if starting { error.clone() } else { not_sent() });
             }
             if pending.waiters.len() >= MAX_IN_FLIGHT {
                 return Err(busy());
             }
-            self.outgoing
-                .try_send(bytes.bytes)
-                .map_err(|error| match error {
-                    mpsc::error::TrySendError::Closed(_) => not_sent(),
-                    mpsc::error::TrySendError::Full(_) => busy(),
-                })?;
+            use mpsc::error::TrySendError;
+            match self.outgoing.try_send(bytes.bytes) {
+                Ok(()) => {}
+                // The writer has stopped but stderr may still be draining. A
+                // startup waiter receives the supervisor's classified error.
+                Err(TrySendError::Closed(_)) if starting => {}
+                Err(TrySendError::Closed(_)) => return Err(not_sent()),
+                Err(TrySendError::Full(_)) => return Err(busy()),
+            }
             pending.waiters.insert(id, reply);
         }
         // A cancelled caller leaves its bounded ID until its reply or EOF so a
@@ -775,6 +775,45 @@ function receive(req) {
             );
             agent.close().await;
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn first_hello_waits_for_auth_error_after_the_writer_has_closed() {
+        use std::future::{poll_fn, Future};
+        use std::task::Poll;
+
+        struct DiagnosticGate {
+            started: oneshot::Sender<()>,
+            resume: std::sync::mpsc::Receiver<()>,
+        }
+        static GATE: Mutex<Option<DiagnosticGate>> = Mutex::new(None);
+        fn classify(stderr: &[u8]) -> AppError {
+            assert!(String::from_utf8_lossy(stderr).contains("Permission denied (publickey)."));
+            let gate = GATE.lock().unwrap().take().unwrap();
+            gate.started.send(()).unwrap();
+            let _ = gate.resume.recv_timeout(Duration::from_secs(5));
+            AppError::new("ssh_auth_failed", "SSH 认证失败。")
+        }
+
+        let (started, classifying) = oneshot::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        *GATE.lock().unwrap() = Some(DiagnosticGate { started, resume });
+        let mut command = Command::new("node");
+        command.args(["-e", "process.stderr.write('host: Permission denied (publickey).\\n', () => process.exit(255))"]);
+        let agent = AgentTransport::spawn_connector_v2(&mut command, classify).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            classifying.await.unwrap();
+            agent.outgoing.closed().await;
+        }).await.unwrap();
+        assert!(agent.pending.lock().unwrap().failure.is_none());
+
+        let mut hello = std::pin::pin!(agent.rpc("hello", json!({})));
+        let polled = poll_fn(|cx| Poll::Ready(hello.as_mut().poll(cx))).await;
+        assert!(polled.is_pending(), "hello must wait for the startup error: {polled:?}");
+        release.send(()).unwrap();
+        assert_eq!(hello.await.unwrap_err().code, "ssh_auth_failed");
+        assert_eq!(agent.rpc("status", json!({})).await.unwrap_err().code, "remote_not_sent");
+        agent.close().await;
     }
 
     #[tokio::test]

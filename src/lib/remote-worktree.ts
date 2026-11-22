@@ -71,7 +71,7 @@ export interface RemoteConnectionProgress {
 }
 
 export type RemoteOpenResult =
-  | { kind: "open"; sessionId: string; snapshot: RemoteWorktreeSnapshot; pendingWrite: RemotePendingWrite | null; pushContinuation?: RemotePushContinuation | null; reviewOutcome?: RemoteReviewOutcome | null; events?: boolean }
+  | { kind: "open"; sessionId: string; snapshot: RemoteWorktreeSnapshot; pendingWrite: RemotePendingWrite | null; pushContinuations?: RemotePushContinuation[]; reviewOutcome?: RemoteReviewOutcome | null; events?: boolean }
   | { kind: "install_required"; version: string; size: number; confirmationId?: string };
 
 export type RemoteDiffView = "staged" | "unstaged" | "task";
@@ -110,6 +110,7 @@ export type RemoteWriteAction =
 export interface RemotePushContinuation {
   head: string;
   branch: string | null;
+  commitOperationId?: string;
 }
 
 export interface RemotePendingWrite {
@@ -190,6 +191,7 @@ export const REMOTE_WRITE_OPS = [
   "fetch",
   "pull",
   "push",
+  "resumePush",
   "pushToRemote",
   "publishBranch",
   "stashSave",
@@ -252,9 +254,10 @@ export interface RemoteEventBatch {
 export type RemoteCallResult = RemoteWriteResult | Record<string, unknown>;
 
 export type RemoteWriteResult =
-  | { state: "completed"; operationId: string; snapshot: RemoteWorktreeSnapshot; head?: string | null; reviewOutcome?: RemoteReviewOutcome | null; pushContinuation?: RemotePushContinuation | null; edit?: RepositoryEditSnapshot; delete?: BatchDeleteResult }
+  | { state: "completed"; operationId: string; snapshot: RemoteWorktreeSnapshot; head?: string | null; reviewOutcome?: RemoteReviewOutcome | null; pushContinuations?: RemotePushContinuation[]; pushTargetError?: string; edit?: RepositoryEditSnapshot; delete?: BatchDeleteResult }
+  | { state: "partial"; operationId: string; code: string; phase: "fetched"; message: string; pushContinuations?: RemotePushContinuation[] }
   // Return "failed" only when the outcome is verified and the write had no effect.
-  | { state: "failed" | "unknown"; operationId: string; op?: RemotePendingWrite["op"]; message: string; code?: string };
+  | { state: "failed" | "unknown"; operationId: string; op?: RemotePendingWrite["op"]; message: string; code?: string; pushContinuations?: RemotePushContinuation[] };
 
 export interface RemoteWorktreePort {
   targets: () => Promise<RemoteTarget[]>;

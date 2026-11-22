@@ -1,9 +1,12 @@
+// The shared Git implementation also compiles in the Agent crate, which defines `agent`.
+#![allow(unexpected_cfgs)]
+
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::error::AppError;
+use crate::error::{AppError, SyncEffect};
 use crate::git::advice::{classify_problem, problem_error, remote_timeout};
 use crate::git::changes::commit_index;
 use crate::git::command::{
@@ -30,6 +33,10 @@ use crate::model::{
 };
 use crate::redact::{contains_secret, redact};
 use crate::state::now_ms;
+
+fn sync_readback(error: AppError) -> AppError {
+    error.after_sync_effect(SyncEffect::Completed)
+}
 
 pub async fn clone_repository(
     backend: &Backend,
@@ -381,7 +388,7 @@ pub async fn fetch_remote(
     let generation = fetch_refs(backend, &root, generation, request_id).await?;
     settle_read!(backend, &root, generation, |current| snapshot_at(
         backend, &root, current, internal_request_id()
-    ).await)
+    ).await).map_err(sync_readback)
 }
 
 pub async fn fetch_branches(
@@ -395,7 +402,7 @@ pub async fn fetch_branches(
     let generation = fetch_refs(backend, &root, generation, request_id).await?;
     settle_read!(backend, &root, generation, |current| {
         load_branch_state(backend, &root, current, internal_request_id()).await
-    })
+    }).map_err(sync_readback)
 }
 
 async fn fetch_refs(
@@ -483,7 +490,7 @@ pub async fn pull_fast_forward(
         current,
         internal_request_id()
     )
-    .await)
+    .await).map_err(sync_readback)
 }
 
 pub async fn push_branch(
@@ -557,7 +564,8 @@ pub async fn associate_upstream(
         ));
     }
     let (program, args) = set_upstream_to_command(&git.path, &root, &upstream, &branch);
-    reject_force(&args)?;
+    let after_fetch = |error: AppError| error.after_sync_effect(SyncEffect::Fetched);
+    reject_force(&args).map_err(after_fetch)?;
     let scheduled = write_repo(
         backend,
         &root,
@@ -566,7 +574,7 @@ pub async fn associate_upstream(
         program,
         args,
     )
-    .await?;
+    .await.map_err(after_fetch)?;
     if scheduled.output.exit_code != 0 {
         let text = output_text(&scheduled.output);
         if upstream_ref_missing(&text) {
@@ -574,13 +582,14 @@ pub async fn associate_upstream(
                 "upstream_missing",
                 format!("远程还没有 {upstream}，未建立上游，也没有推送。请使用发布创建远程分支。"),
             )
-            .with_generation(scheduled.generation));
+            .with_generation(scheduled.generation)
+            .after_sync_effect(SyncEffect::Fetched));
         }
         return Err(finish_remote(
             "upstream_failed",
             &scheduled,
             "没有关联上游，也没有推送。",
-        ));
+        ).after_sync_effect(SyncEffect::Fetched));
     }
     backend.remote_checks.note(&key, now_ms());
     let after = settle_read!(backend, &root, scheduled.generation, |current| snapshot_at(
@@ -589,13 +598,14 @@ pub async fn associate_upstream(
         current,
         internal_request_id()
     )
-    .await)?;
+    .await).map_err(sync_readback)?;
     if after.branch.upstream.as_deref() != Some(upstream.as_str()) {
         return Err(AppError::new(
             "upstream_unconfirmed",
             "上游关联没有被 Git 确认，没有推送。",
         )
-        .with_generation(after.generation));
+        .with_generation(after.generation)
+        .after_sync_effect(SyncEffect::Fetched));
     }
     Ok(after)
 }
@@ -1143,7 +1153,7 @@ pub async fn delete_remote_branch(
     // push 按远程的 fetch refspec 同步本地跟踪引用。
     settle_read!(backend, &root, scheduled.generation, |current| {
         load_branch_state(backend, &root, current, internal_request_id()).await
-    })
+    }).map_err(sync_readback)
 }
 
 async fn push_after_commit(
@@ -1201,7 +1211,7 @@ async fn push_with_upstream(
         current,
         internal_request_id()
     )
-    .await)
+    .await).map_err(sync_readback)
 }
 
 async fn publish_to(
@@ -1247,7 +1257,197 @@ async fn publish_to(
         current,
         internal_request_id()
     )
-    .await)
+    .await).map_err(sync_readback)
+}
+
+#[cfg(feature = "agent")]
+pub(crate) use push_continuation::{capture_push_destination, resume_pinned_push};
+
+#[cfg(feature = "agent")]
+mod push_continuation {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    struct PushDestination {
+        remote: String,
+        remote_ref: String,
+        publish: bool,
+        digest: String,
+        urls: Vec<u8>,
+    }
+
+    async fn read_sync_config(
+        backend: &Backend,
+        root: &Path,
+        git: &Path,
+        key: &str,
+        generation: u64,
+    ) -> Result<Vec<String>, AppError> {
+        let (program, args) = crate::git::command::config_values_command(git, root, key);
+        let read = read_repo(backend, root, generation, internal_request_id(), program, args).await?;
+        match read.output.exit_code {
+            0 => Ok(String::from_utf8_lossy(&read.output.stdout).lines().map(str::to_owned).collect()),
+            1 => Ok(Vec::new()),
+            _ => Err(AppError::new("push_config_unavailable", "无法读取当前推送配置。")),
+        }
+    }
+
+    async fn push_urls(
+        backend: &Backend,
+        root: &Path,
+        git: &Path,
+        remote: &str,
+        generation: u64,
+    ) -> Result<Vec<u8>, AppError> {
+        let (program, args) = crate::git::command::push_urls_command(git, root, remote);
+        let urls = read_repo(backend, root, generation, internal_request_id(), program, args).await?;
+        if urls.output.exit_code != 0 || urls.output.stdout.is_empty() {
+            return Err(AppError::new("push_target_missing", "无法读取远程的推送地址。"));
+        }
+        let count = urls.output.stdout.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()).count();
+        if count != 1 {
+            return Err(AppError::new("push_target_ambiguous", "这个远程配置了多个推送地址。请选择并单独推送。"));
+        }
+        Ok(urls.output.stdout)
+    }
+
+    async fn tracked_push_ref(
+        backend: &Backend,
+        root: &Path,
+        git: &Path,
+        line: &TrackLine,
+        remote: &str,
+        generation: u64,
+    ) -> Result<String, AppError> {
+        let branch = &line.track.name;
+        let local_ref = format!("refs/heads/{branch}");
+        let unsupported = || AppError::new("push_target_ambiguous", "当前 Git 推送配置没有唯一的单分支目标。请单独推送。");
+        let mapping = read_sync_config(backend, root, git, &format!("remote.{remote}.push"), generation).await?;
+        match mapping.as_slice() {
+            [] => {}
+            [spec] => {
+                let (source, target) = spec.split_once(':').unwrap_or((spec, spec));
+                if source != branch && source != local_ref {
+                    return Err(unsupported());
+                }
+                let target = if target.starts_with("refs/") { target.to_owned() } else { format!("refs/heads/{target}") };
+                validate_remote_ref(&target).map_err(|_| unsupported())?;
+                return Ok(target);
+            }
+            _ => return Err(unsupported()),
+        }
+        let raw_mode = read_sync_config(backend, root, git, "push.default", generation).await?;
+        let mode = if line.remote_ref != local_ref { "upstream" } else {
+            raw_mode.last().map_or("simple", String::as_str)
+        };
+        match mode {
+            "simple" | "current" => Ok(local_ref),
+            "upstream" | "tracking" if remote == line.remote => Ok(line.remote_ref.clone()),
+            _ => Err(unsupported()),
+        }
+    }
+
+    async fn resolve_push_destination(
+        backend: &Backend,
+        root: &Path,
+        git: &Path,
+        branch: &str,
+        generation: u64,
+    ) -> Result<PushDestination, AppError> {
+        validate_branch_input(branch)?;
+        let (branches, generation) =
+            read_tracking(backend, root, git, generation, internal_request_id()).await?;
+        let tracked = branches.into_iter().find(|line| {
+            line.track.name == branch && line.track.upstream.is_some()
+        });
+        let publish = tracked.is_none();
+        let (remote, remote_ref) = match tracked {
+            Some(line) => {
+                let remote = line.push_remote.clone();
+                validate_remote_name(&remote)?;
+                let mirror = read_sync_config(backend, root, git, &format!("remote.{remote}.mirror"), generation).await?;
+                if mirror.last().is_some_and(|value| !matches!(value.to_ascii_lowercase().as_str(), "false" | "no" | "off" | "0")) {
+                    return Err(AppError::new("push_target_ambiguous", "镜像远程可能推送多个引用。请核对远程后单独推送。"));
+                }
+                let target = tracked_push_ref(backend, root, git, &line, &remote, generation).await?;
+                (remote, target)
+            }
+            None => (
+                resolve_remote(backend, root, git, "", generation).await?,
+                format!("refs/heads/{branch}"),
+            ),
+        };
+        validate_remote_name(&remote)?;
+        validate_remote_ref(&remote_ref)?;
+        let urls = push_urls(backend, root, git, &remote, generation).await?;
+        let mut digest = Sha256::new();
+        digest.update(b"twiglane-push-destination/v1\0");
+        digest.update([u8::from(publish)]);
+        for field in [branch.as_bytes(), remote.as_bytes(), remote_ref.as_bytes(), &urls] {
+            digest.update((field.len() as u64).to_be_bytes());
+            digest.update(field);
+        }
+        Ok(PushDestination {
+            remote,
+            remote_ref,
+            publish,
+            digest: format!("{:x}", digest.finalize()),
+            urls,
+        })
+    }
+
+    pub(crate) async fn capture_push_destination(
+        backend: &Backend,
+        root: &Path,
+        branch: Option<&str>,
+        generation: u64,
+    ) -> Result<String, AppError> {
+        let branch = branch.ok_or_else(detached_error)?;
+        let git = require_git(backend).await?;
+        Ok(resolve_push_destination(backend, root, &git.path, branch, generation).await?.digest)
+    }
+
+    pub(crate) async fn resume_pinned_push(
+        backend: &Backend,
+        root: &Path,
+        branch: &str,
+        oid: &str,
+        expected: &str,
+        generation: u64,
+    ) -> Result<StatusSnapshot, AppError> {
+        let changed = || AppError::new(
+            "push_target_changed",
+            "原推送目标已变化。请恢复提交时的远程地址和上游分支后再重试。",
+        );
+        let key = repo_key(root);
+        let _guard = backend.actions.enter(action_key("sync", &key))?;
+        let git = require_git(backend).await?;
+        let destination = resolve_push_destination(backend, root, &git.path, branch, generation)
+            .await
+            .map_err(|_| changed())?;
+        if destination.digest != expected {
+            return Err(changed());
+        }
+        if push_urls(backend, root, &git.path, &destination.remote, generation)
+            .await
+            .map_err(|_| changed())? != destination.urls
+        {
+            return Err(changed());
+        }
+        let (program, args) = crate::git::command::push_continuation_command(
+            &git.path, root, &destination.remote, branch, oid, &destination.remote_ref, destination.publish,
+        );
+        let scheduled =
+            remote_write_repo(backend, root, generation, internal_request_id(), program, args).await?;
+        if scheduled.output.exit_code != 0 {
+            return Err(finish_remote("push_failed", &scheduled, "推送没有完成，没有强行推送。"));
+        }
+        backend.remote_checks.note(&key, now_ms());
+        settle_read!(backend, root, scheduled.generation, |current| snapshot_at(
+            backend, root, current, internal_request_id()
+        ).await)
+        .map_err(sync_readback)
+    }
 }
 
 async fn resolve_remote(
@@ -1623,7 +1823,7 @@ pub async fn push_to_remote(
         current,
         internal_request_id()
     )
-    .await)
+    .await).map_err(sync_readback)
 }
 
 /// 一条本地分支的上游跟踪信息（含快进/推送需要的远程名与远程引用名）。
@@ -1632,6 +1832,8 @@ struct TrackLine {
     track: crate::model::BranchTrack,
     remote: String,
     remote_ref: String,
+    #[cfg(feature = "agent")]
+    push_remote: String,
 }
 
 /// 解析 `ahead 3, behind 2` / `ahead 1` / `behind 4` / `gone` / 空。
@@ -1668,6 +1870,8 @@ fn parse_tracking(bytes: &[u8]) -> Vec<TrackLine> {
         let (ahead, behind, gone) = parse_track(parts.next().unwrap_or(""));
         let remote = parts.next().unwrap_or("").trim().to_string();
         let remote_ref = parts.next().unwrap_or("").trim().to_string();
+        #[cfg(feature = "agent")]
+        let push_remote = parts.next().unwrap_or("").trim().to_string();
         lines.push(TrackLine {
             track: crate::model::BranchTrack {
                 name: name.to_string(),
@@ -1678,6 +1882,8 @@ fn parse_tracking(bytes: &[u8]) -> Vec<TrackLine> {
             },
             remote,
             remote_ref,
+            #[cfg(feature = "agent")]
+            push_remote,
         });
     }
     lines
@@ -1816,7 +2022,7 @@ pub async fn update_branch(
     backend.remote_checks.note(&key, now_ms());
     settle_read!(backend, &root, scheduled.generation, |current| {
         load_branch_state(backend, &root, current, internal_request_id()).await
-    })
+    }).map_err(sync_readback)
 }
 
 /// 不切换分支地推送一个本地分支：有上游时推到上游，没有上游时发布到默认远程并建立跟踪。不强推。
@@ -1859,7 +2065,7 @@ pub async fn push_local_branch(
     backend.remote_checks.note(&key, now_ms());
     settle_read!(backend, &root, scheduled.generation, |current| {
         load_branch_state(backend, &root, current, internal_request_id()).await
-    })
+    }).map_err(sync_readback)
 }
 
 fn attach_generation(backend: &Backend, root: &Path, error: AppError) -> AppError {

@@ -9,6 +9,14 @@ pub struct AppError {
     pub generation: Option<u64>,
     #[serde(skip)]
     pub(crate) write_unconfirmed: bool,
+    #[serde(skip)]
+    pub(crate) sync_effect: Option<SyncEffect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncEffect {
+    Completed,
+    Fetched,
 }
 
 impl AppError {
@@ -18,6 +26,7 @@ impl AppError {
             message: message.into(),
             generation: None,
             write_unconfirmed: false,
+            sync_effect: None,
         }
     }
 
@@ -28,6 +37,11 @@ impl AppError {
 
     pub(crate) fn after_unconfirmed_write(mut self) -> Self {
         self.write_unconfirmed = true;
+        self
+    }
+
+    pub(crate) fn after_sync_effect(mut self, effect: SyncEffect) -> Self {
+        self.sync_effect = Some(effect);
         self
     }
 }

@@ -388,9 +388,9 @@ describe("远端仓库在主窗口：写入与仓库键隔离", () => {
     const repo = await openHost();
     const head = "c".repeat(40);
     const committed = snapshot({ generation: "g2", head, files: [] });
-    const continuation = { head, branch: "feature" };
+    const continuation = { head, branch: "feature", commitOperationId: "commit1" };
     port.write.mockResolvedValueOnce({
-      state: "completed", operationId: "commit1", snapshot: committed, pushContinuation: continuation,
+      state: "completed", operationId: "commit1", snapshot: committed, pushContinuations: [continuation],
     });
     port.call.mockResolvedValueOnce({
       state: "failed", operationId: "push1", code: "push_failed", message: "upstream rejected the push",
@@ -400,17 +400,20 @@ describe("远端仓库在主窗口：写入与仓库键隔离", () => {
     expect(report).toMatchObject({ committed: true, pushed: false, retryPush: true, oid: head });
     expect(port.write).toHaveBeenCalledWith(expect.objectContaining({ op: "commit", pushAfter: true }));
 
-    port.open.mockResolvedValueOnce({ ...opened("session-reopened", committed), pushContinuation: continuation });
+    port.open.mockResolvedValueOnce({ ...opened("session-reopened", committed), pushContinuations: [continuation] });
     const reopened = await api.openRepository(keyA, 2);
     expect(remoteRepositoryState(keyA)?.pushContinuation).toEqual(continuation);
     await expect(api.commitAndPush(keyA, "do not repeat", reopened.generation, 3))
       .rejects.toMatchObject({ code: "push_pending" });
     port.call.mockResolvedValueOnce({
-      state: "completed", operationId: "push2", snapshot: committed, pushContinuation: null,
+      state: "completed", operationId: "push2", snapshot: committed, pushContinuations: [],
     });
-    await api.pushBranch(keyA, reopened.generation, 4);
+    await api.retryRemotePush(keyA, reopened.generation);
     expect(port.write).toHaveBeenCalledTimes(1);
-    expect(port.call.mock.calls.map(([request]) => request.op)).toEqual(["push", "push"]);
+    expect(port.call.mock.calls.map(([request]) => [request.op, request.fields])).toEqual([
+      ["resumePush", { commitOperationId: "commit1" }],
+      ["resumePush", { commitOperationId: "commit1" }],
+    ]);
     expect(remoteRepositoryState(keyA)?.pushContinuation).toBeNull();
   });
 
@@ -418,21 +421,21 @@ describe("远端仓库在主窗口：写入与仓库键隔离", () => {
     const repo = await openHost();
     const head = "c".repeat(40);
     const committed = snapshot({ generation: "g2", head, files: [] });
-    const continuation = { head, branch: "feature" };
+    const continuation = { head, branch: "feature", commitOperationId: "commit1" };
     port.write.mockResolvedValueOnce({
-      state: "completed", operationId: "commit1", snapshot: committed, pushContinuation: continuation,
+      state: "completed", operationId: "commit1", snapshot: committed, pushContinuations: [continuation],
     });
-    port.call.mockResolvedValueOnce({ state: "unknown", operationId: "push1", op: "push", message: "连接已断开" });
+    port.call.mockResolvedValueOnce({ state: "unknown", operationId: "push1", op: "resumePush", message: "连接已断开" });
     const report = await api.commitAndPush(keyA, "new commit", repo.generation, 1);
     expect(report).toMatchObject({ committed: true, pushed: false, oid: head, pushUnconfirmed: true });
     expect(remoteRepositoryState(keyA)?.pending).toBe(true);
 
     port.open.mockResolvedValueOnce({
-      ...opened("session-reopened", committed, { operationId: "push1", op: "push" }),
-      pushContinuation: continuation,
+      ...opened("session-reopened", committed, { operationId: "push1", op: "resumePush" }),
+      pushContinuations: [continuation],
     });
     port.recover.mockResolvedValueOnce({
-      state: "completed", operationId: "push1", snapshot: committed, pushContinuation: null,
+      state: "completed", operationId: "push1", snapshot: committed, pushContinuations: [],
     });
     await api.openRepository(keyA, 2);
     expect(port.recover).toHaveBeenCalledExactlyOnceWith("session-reopened", "push1");
@@ -445,27 +448,74 @@ describe("远端仓库在主窗口：写入与仓库键隔离", () => {
     const repo = await openHost();
     const head = "c".repeat(40);
     const committed = snapshot({ generation: "g2", head, files: [] });
-    const continuation = { head, branch: "feature" };
     port.write.mockImplementationOnce(async (request) => ({
       state: "unknown", operationId: request.operationId, op: "commitAndPush", message: "连接已断开",
     }));
     await expect(api.commitAndPush(keyA, "new commit", repo.generation, 1)).rejects.toMatchObject({ code: "write_pending" });
     const pendingWrite = { operationId: port.write.mock.lastCall![0].operationId, op: "commitAndPush" };
+    const continuation = { head, branch: "feature", commitOperationId: pendingWrite.operationId };
     expect(port.call).not.toHaveBeenCalled();
 
     port.open.mockResolvedValueOnce(opened("session-reopened", committed, pendingWrite));
     port.recover.mockResolvedValueOnce({
-      state: "completed", operationId: pendingWrite.operationId, snapshot: committed, pushContinuation: continuation,
+      state: "completed", operationId: pendingWrite.operationId, snapshot: committed, pushContinuations: [continuation],
     });
     const reopened = await api.openRepository(keyA, 2);
     expect(port.recover).toHaveBeenCalledExactlyOnceWith("session-reopened", pendingWrite.operationId);
     expect(remoteRepositoryState(keyA)).toMatchObject({ pending: false, pushContinuation: continuation });
     port.call.mockResolvedValueOnce({
-      state: "completed", operationId: "push1", snapshot: committed, pushContinuation: null,
+      state: "completed", operationId: "push1", snapshot: committed, pushContinuations: [],
     });
-    await api.pushBranch(keyA, reopened.generation, 3);
-    expect(port.call.mock.calls.map(([request]) => request.op)).toEqual(["push"]);
+    await api.retryRemotePush(keyA, reopened.generation);
+    expect(port.call.mock.calls.map(([request]) => request.op)).toEqual(["resumePush"]);
     expect(port.write).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps two branch continuations and switches the selected receipt with the actual HEAD", async () => {
+    const main = { branch: "feature", head: "a".repeat(40), commitOperationId: "commit-main" };
+    const topic = { branch: "topic", head: "b".repeat(40), commitOperationId: "commit-topic" };
+    port.open.mockResolvedValueOnce({ ...opened(), pushContinuations: [main, topic] });
+    const repo = await api.openRepository(keyA, 1);
+    expect(remoteRepositoryState(keyA)?.pushContinuation).toEqual(main);
+    port.call.mockResolvedValueOnce({
+      state: "failed", operationId: "push1", code: "push_target_changed", message: "原推送目标已变化",
+      pushContinuations: [main, topic],
+    });
+    await expect(api.retryRemotePush(keyA, repo.generation)).rejects.toMatchObject({ code: "push_target_changed" });
+    expect(remoteRepositoryState(keyA)?.pushContinuation).toEqual(main);
+
+    const topicSnapshot = snapshot({ branch: topic.branch, head: topic.head, generation: "g2" });
+    port.status.mockResolvedValueOnce(topicSnapshot);
+    const current = await api.refreshStatus(keyA, repo.generation, 2);
+    expect(remoteRepositoryState(keyA)?.pushContinuation).toEqual(topic);
+    port.call.mockResolvedValueOnce({
+      state: "completed", operationId: "push2", snapshot: topicSnapshot, pushContinuations: [main],
+    });
+    await api.retryRemotePush(keyA, current.generation);
+    expect(remoteRepositoryState(keyA)?.pushContinuation).toBeNull();
+    port.status.mockResolvedValueOnce(snapshot({ generation: "g3" }));
+    await api.refreshStatus(keyA, current.generation, 3);
+    expect(remoteRepositoryState(keyA)?.pushContinuation).toEqual(main);
+    expect(port.call.mock.calls.map(([request]) => request.fields)).toEqual([
+      { commitOperationId: "commit-main" },
+      { commitOperationId: "commit-topic" },
+    ]);
+    expect(port.write).not.toHaveBeenCalled();
+  });
+
+  it("keeps the completed fetch visible when association stops before linking upstream", async () => {
+    const repo = await openHost();
+    const message = "已获取远程引用，上游关联尚未确认。远程没有对应分支。";
+    port.call.mockResolvedValueOnce({
+      state: "partial", operationId: "associate", code: "upstream_missing", phase: "fetched", message,
+    });
+    port.status.mockResolvedValueOnce(snapshot({ generation: "g2" }));
+    await expect(api.associateUpstream(keyA, "", repo.generation, 1)).rejects.toMatchObject({
+      code: "upstream_missing", message,
+    });
+    expect(remoteRepositoryState(keyA)).toMatchObject({ pending: false, recoveryNotice: message });
+    expect(port.call).toHaveBeenCalledTimes(1);
+    expect(port.status).toHaveBeenCalledTimes(1);
   });
 
   it("keeps linked-worktree actions on the active SSH host and checks the deletion preview", async () => {

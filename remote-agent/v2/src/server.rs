@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tokio::sync::{mpsc, Semaphore};
 
-use crate::error::AppError;
+use crate::error::{AppError, SyncEffect};
 use crate::events::{self, ChangeFeed};
 use crate::git::changes;
 use crate::git::command::common_dir_command;
@@ -35,7 +35,7 @@ use crate::identity::{git_path, worktree_changed, WorktreeIdentity};
 use crate::model::{DiffLineSelection, RepositorySearchScope, TaskReview};
 use crate::protocol::{self, Request, CAPABILITIES, MAX_IN_FLIGHT, MAX_REQUEST_BYTES, PROTOCOL};
 use crate::pty::{self, FrameEvents};
-use crate::receipts::{Receipt, ReceiptStore, COMPLETED, FAILED};
+use crate::receipts::{Receipt, ReceiptStore, COMPLETED, FAILED, PARTIAL};
 use crate::session::{DiffView, Selection, Session};
 use crate::shutdown::Shutdown;
 use crate::state::AppStore;
@@ -124,6 +124,7 @@ enum WriteOp {
     FetchBranches,
     Pull,
     Push,
+    ResumePush,
     PushToRemote,
     PublishBranch,
     DeleteRemoteBranch,
@@ -174,6 +175,7 @@ const WRITE_OPS: &[WriteOp] = &[
     WriteOp::FetchBranches,
     WriteOp::Pull,
     WriteOp::Push,
+    WriteOp::ResumePush,
     WriteOp::PushToRemote,
     WriteOp::PublishBranch,
     WriteOp::DeleteRemoteBranch,
@@ -210,6 +212,7 @@ impl WriteOp {
                 | Self::BranchPublish
                 | Self::Pull
                 | Self::Push
+                | Self::ResumePush
                 | Self::PushToRemote
                 | Self::PublishBranch
                 | Self::DeleteRemoteBranch
@@ -241,6 +244,7 @@ impl WriteOp {
             Self::FetchBranches => "fetchBranches",
             Self::Pull => "pull",
             Self::Push => "push",
+            Self::ResumePush => "resumePush",
             Self::PushToRemote => "pushToRemote",
             Self::PublishBranch => "publishBranch",
             Self::DeleteRemoteBranch => "deleteRemoteBranch",
@@ -2012,7 +2016,7 @@ impl Context {
             return match existing.state.as_str() {
                 // 重放只回原回执：v2 不保存上次的结果 DTO，客户端应按回执里的 head/branch
                 // 重新读取一次状态，而不是复用一条没有结果的响应。
-                COMPLETED => Ok(json!({
+                COMPLETED | PARTIAL => Ok(json!({
                     "receipt": existing,
                     "replayed": true,
                     "result": Value::Null,
@@ -2069,11 +2073,35 @@ impl Context {
             guarded.head,
             generation,
         );
+        if op == WriteOp::Commit && bool_field(fields, "recordPushIntent") {
+            match sync::capture_push_destination(
+                &self.backend, &session.root, before_branch.as_deref(), generation,
+            ).await {
+                Ok(destination) => receipt.push_destination = Some(destination),
+                Err(error) => receipt.push_target_error = Some(error.code),
+            }
+        }
         store.write(&receipt)?;
 
         let (key, value) = match self.execute(op, fields, &session, generation).await {
             Ok(written) => written,
             Err(error) => {
+                match error.sync_effect {
+                    Some(SyncEffect::Completed) => {
+                        receipt.readback_error = Some(error.code.clone());
+                        let current = self.backend.scheduler.current_generation(&session.key);
+                        let receipt = store.complete(receipt, None, None, current)?;
+                        return Ok(json!({"repo": session.key, "receipt": receipt}));
+                    }
+                    Some(SyncEffect::Fetched) => {
+                        let receipt = store.partial(receipt, "fetched", &error.code)?;
+                        return Ok(json!({
+                            "repo": session.key, "receipt": receipt,
+                            "effectError": {"code": error.code, "message": error.message},
+                        }));
+                    }
+                    None => {}
+                }
                 if remote_write_unconfirmed(op, &error) {
                     // 取消、超时、网络中断：远端可能已经收到这次请求，按「结果未知」登记，
                     // 客户端据此核对而不是当成失败重发。
@@ -2108,6 +2136,10 @@ impl Context {
             Err(error) if matches!(op, WriteOp::EditSave | WriteOp::CreateEntry | WriteOp::CopyEntry | WriteOp::MoveEntry | WriteOp::DeleteEntries) => {
                 store.pending(receipt, error.code)?;
                 return Err(AppError::new("operation_pending", "文件操作已执行，写入后的状态无法核对。请重新连接并检查工作树。"));
+            }
+            Err(error) if op.uses_upstream() => {
+                receipt.readback_error = Some(error.code);
+                None
             }
             Err(_) => None,
         };
@@ -2420,6 +2452,25 @@ impl Context {
                 let snapshot = sync::push_branch(backend, path, generation, request_id).await?;
                 Ok(("snapshot".to_string(), to_value(snapshot)?))
             }
+            WriteOp::ResumePush => {
+                let commit = string_field(fields, "commitOperationId")?;
+                if !protocol::token(&commit) || commit.len() < 8 {
+                    return Err(AppError::new("invalid_operation", "原提交操作 ID 无效。"));
+                }
+                let invalid = || AppError::new("push_intent_changed", "原提交回执与当前分支或提交不符，请重新打开仓库核对。");
+                let receipt = ReceiptStore::new(&session.git_dir).read(&commit)?
+                    .filter(|proof| proof.repo == session.key && proof.op == "commit" && proof.state == COMPLETED)
+                    .ok_or_else(invalid)?;
+                let current = ops::state_token(backend, &session.root, internal_request_id()).await?;
+                let branch = receipt.branch.as_deref().ok_or_else(invalid)?;
+                let head = receipt.head.as_deref().ok_or_else(invalid)?;
+                let destination = receipt.push_destination.as_deref().ok_or_else(invalid)?;
+                if current.branch.as_deref() != Some(branch) || current.head.as_deref() != Some(head) {
+                    return Err(invalid());
+                }
+                let snapshot = sync::resume_pinned_push(backend, &session.root, branch, head, destination, generation).await?;
+                Ok(("snapshot".to_owned(), to_value(snapshot)?))
+            }
             WriteOp::PushToRemote => {
                 let remote = string_field(fields, "remote")?;
                 let snapshot =
@@ -2427,7 +2478,7 @@ impl Context {
                 Ok(("snapshot".to_string(), to_value(snapshot)?))
             }
             WriteOp::PublishBranch => {
-                let remote = string_field(fields, "remote")?;
+                let remote = optional_text_field(fields, "remote")?.unwrap_or_default();
                 let snapshot =
                     sync::publish_branch(backend, path, &remote, generation, request_id).await?;
                 Ok(("snapshot".to_string(), to_value(snapshot)?))
@@ -2627,11 +2678,22 @@ impl Context {
             WriteOp::WorktreeRemoveTarget => {
                 let target = string_field(fields, "target")?;
                 let expected = string_field(fields, "targetToken")?;
+                let stale = || AppError::new("stale_worktree", "附属工作区已变化，请重新预览后确认。");
                 let (identity, state) = self.linked_worktree_state(session, &target).await?;
                 if identity.path != target || worktree_removal_token(&identity, &state) != expected {
-                    return Err(AppError::new("stale_worktree", "附属工作区已变化，请重新预览后确认。"));
+                    return Err(stale());
                 }
-                worktree_ops::remove_linked_worktree(backend, &identity.path, bool_field(fields, "force"), request_id).await?;
+                let target = Path::new(&identity.path);
+                session.git_dir_identity.check(&session.git_dir)?;
+                identity.check_root(target).map_err(|_| stale())?;
+                worktree_ops::remove_linked_worktree(
+                    backend,
+                    &session.root,
+                    Some(&session.git_dir),
+                    target,
+                    bool_field(fields, "force"),
+                    request_id,
+                ).await?;
                 Ok(("removedWorktree".to_string(), json!(identity.path)))
             }
             // 文件保存：预期内容版本（digest）就是这次写入的状态前提，写前写后都要核实。

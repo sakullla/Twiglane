@@ -463,6 +463,7 @@
   let confirmPath = $state<string | null>(null);
   let cloneOpen = $state(false);
   let pushRetry = $state(false);
+  let remotePushFailure = $state<{ branch: string | null; head: string | null } | null>(null);
   /** 本地提交成功后推送失败的原因：提交区把两个阶段分开显示，并提供只重试推送的入口。 */
   let pushFailure = $state<string | null>(null);
   let phaseNote = $state<string | null>(null);
@@ -543,6 +544,15 @@
   const remoteRepoState = $derived.by(() => {
     void remoteStateNonce;
     return remoteKey ? api.remoteRepositoryState(remoteKey) : null;
+  });
+  const visiblePushFailure = $derived(!remoteKey || (
+    opened && remotePushFailure?.branch === opened.snapshot.branch.name &&
+    remotePushFailure?.head === opened.snapshot.branch.headOid
+  ) ? pushFailure : null);
+  $effect(() => {
+    if (remoteKey && remotePushFailure && pushFailure && !visiblePushFailure && banner === pushFailure) {
+      banner = null;
+    }
   });
   /**
    * 只读文档阅读窗口的请求。
@@ -981,7 +991,7 @@
 
   $effect(() => {
     const note = phaseNote;
-    if (!note || pushRetry || toastPaused) return;
+    if (!note || (remoteKey ? visiblePushFailure && remoteRepoState?.pushContinuation : pushRetry) || toastPaused) return;
     const timer = setTimeout(() => {
       if (phaseNote === note) phaseNote = null;
     }, 6000);
@@ -3072,6 +3082,7 @@
       selected = selectionAfterEdit(result.snapshot.files, selected);
       selectedSet = [];
       pushRetry = result.retryPush;
+      remotePushFailure = remote && !result.pushed ? { head: result.oid, branch: result.branch || null } : null;
       if (result.pushed) {
         pushFailure = null;
         phaseNote = result.summary;
@@ -3083,7 +3094,9 @@
           "推送",
           result.pushUnconfirmed
             ? `${commitLabel} ${shortOid(result.oid)} 已完成。推送结果待确认，请重连核对。`
-            : `${commitLabel} ${shortOid(result.oid)} 已完成，重试只推送，不会再次提交。`,
+            : result.retryPush
+              ? `${commitLabel} ${shortOid(result.oid)} 已完成，重试只推送，不会再次提交。`
+              : `${commitLabel} ${shortOid(result.oid)} 已完成。`,
         );
         phaseNote = null;
         banner = pushFailure;
@@ -3120,9 +3133,11 @@
       if (remote && !api.remoteRepositoryState(current.summary.path)?.pushContinuation) {
         throw { code: "stale", message: "当前分支或提交与待推送记录不同，请先切回相应提交。" };
       }
-      const snapshot = remote || current.snapshot.branch.upstream
-        ? await api.pushBranch(current.summary.path, current.generation, nextId())
-        : await api.publishBranch(current.summary.path, "", current.generation, nextId());
+      const snapshot = remote
+        ? await api.retryRemotePush(current.summary.path, current.generation)
+        : current.snapshot.branch.upstream
+          ? await api.pushBranch(current.summary.path, current.generation, nextId())
+          : await api.publishBranch(current.summary.path, "", current.generation, nextId());
       if (opened?.summary.path !== current.summary.path) return;
       applySnapshot(snapshot);
       pushRetry = false;
@@ -3133,6 +3148,9 @@
     } catch (error) {
       if (opened?.summary.path === current.summary.path) {
         pushRetry = true;
+        if (remote) {
+          remotePushFailure = { head: current.snapshot.branch.headOid, branch: current.snapshot.branch.name };
+        }
         pushFailure = handleMutationError(
           error,
           "推送",
@@ -3198,7 +3216,12 @@
           return;
         }
         const context = SYNC_FAILURE[name];
-        handleMutationError(failure, context?.stage, context?.next);
+        const next = remoteKey && failure.code === "write_pending"
+          ? "请重新打开仓库核对远端回执。"
+          : remoteKey && name === "associate" && failure.message === remoteRepoState?.recoveryNotice
+            ? "可在分支列表选择已获取的上游，或发布尚不存在的远程分支。"
+            : context?.next;
+        handleMutationError(failure, context?.stage, next);
       }
     } finally {
       pending = null;
@@ -3993,7 +4016,11 @@
       notice(switchBlockedReason(commandState));
       return false;
     }
-    notice(name === "commit-push" ? "已停止推送并切换；本地提交已保留，回到原仓库可以只重试推送。" : "已停止远程操作并切换；原仓库没有被改动。");
+    notice(isRemoteRepositoryKey(fromPath)
+      ? "已停止等待远端操作并切换。重新打开原仓库可以核对结果。"
+      : name === "commit-push"
+        ? "已停止推送并切换；本地提交已保留，回到原仓库可以只重试推送。"
+        : "已停止远程操作并切换；原仓库没有被改动。");
     return true;
   }
 
@@ -5530,6 +5557,8 @@
           远端操作结果待确认：写入已禁用，重新打开这个远端仓库可核对原操作。
         {:else if remoteRepoState?.connected === false}
           远端连接已断开。重新打开仓库可继续读取和编辑，旧终端已失效。
+        {:else if remoteRepoState?.recoveryNotice}
+          {remoteRepoState.recoveryNotice}
         {:else}
           远端仓库 {remoteRepoState?.host ?? opened?.summary.host ?? ""} · {remoteRepoState?.path ?? opened?.summary.remotePath ?? ""}
         {/if}
@@ -5673,8 +5702,8 @@
                   disabled={writeLocked || remoteRepoState?.pending === true || remoteRepoState?.connected === false}
                   busy={pending}
                   error={commitError}
-                  pushError={pushFailure ?? (remoteRepoState?.pushContinuation ? "提交已完成，可以继续推送。" : null)}
-                  onRetryPush={retryPush}
+                  pushError={visiblePushFailure ?? (remoteRepoState?.pushContinuation ? "提交已完成，可以继续推送。" : null)}
+                  onRetryPush={!remoteKey || remoteRepoState?.pushContinuation ? retryPush : undefined}
                   stageableCount={stageTargets.length}
                   onStageAll={() => runCommand("stage.all")}
                   onInput={onDraftInput}

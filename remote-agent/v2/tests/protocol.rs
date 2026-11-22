@@ -1967,6 +1967,195 @@ fn fetch_push_and_pull_run_real_git_on_the_remote_side() {
 }
 
 #[test]
+fn publish_with_an_empty_remote_uses_the_only_configured_destination() {
+    let fixture = Fixture::new("default-publish");
+    fixture.init();
+    fixture.write("a.txt", "initial\n");
+    fixture.commit_all("init");
+    let base = base_of(&fixture);
+    git(&base, &fixture.config, &["init", "--bare", "only.git"]);
+    let bare = base.join("only.git");
+    git(&fixture.repo, &fixture.config, &["remote", "add", "only", bare.to_str().unwrap()]);
+    let repo = fixture.repo_str();
+    let mut agent = fixture.agent();
+    let state = open(&mut agent, &repo);
+    let result = agent.ok("publish-default", "publishBranch", json!({
+        "repo": repo, "operationId": "op-default-publish", "stateToken": state["stateToken"], "remote": "",
+    }));
+    assert_eq!(result["receipt"]["state"], "completed");
+    assert_eq!(result["snapshot"]["branch"]["upstream"], "only/main");
+    assert_eq!(
+        git(&bare, &fixture.config, &["rev-parse", "refs/heads/main"]),
+        git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]),
+    );
+}
+
+#[test]
+fn resumed_pushes_use_each_original_commit_and_effective_push_destination() {
+    let fixture = Fixture::new("resume-push");
+    fixture.init();
+    fixture.write("a.txt", "initial\n");
+    fixture.commit_all("init");
+    let base = base_of(&fixture);
+    for remote in ["origin", "fork", "wrong"] {
+        let bare = base.join(format!("{remote}.git"));
+        git(&base, &fixture.config, &["init", "--bare", bare.to_str().unwrap()]);
+        git(&fixture.repo, &fixture.config, &["remote", "add", remote, bare.to_str().unwrap()]);
+    }
+    git(&fixture.repo, &fixture.config, &["push", "-u", "origin", "main"]);
+    git(&fixture.repo, &fixture.config, &["config", "branch.main.pushRemote", "fork"]);
+    let initial = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]);
+    let repo = fixture.repo_str();
+    let mut agent = fixture.agent();
+    open(&mut agent, &repo);
+    let commit = |agent: &mut Agent, name: &str, id: &str| {
+        fixture.write(name, "new\n");
+        git(&fixture.repo, &fixture.config, &["add", "--", name]);
+        let state = agent.ok("state-for-commit", "status", json!({"repo": repo}));
+        let result = agent.ok("intent-commit", "commit", json!({
+            "repo": repo, "operationId": id, "stateToken": state["stateToken"],
+            "message": "commit for push", "recordPushIntent": true,
+        }));
+        let receipt = &result["receipt"];
+        assert_eq!(receipt["state"], "completed");
+        assert_eq!(receipt["pushDestination"].as_str().unwrap().len(), 64);
+        assert!(!receipt.to_string().contains(".git"));
+        receipt["head"].as_str().unwrap().to_owned()
+    };
+    let first = commit(&mut agent, "main.txt", "op-intent-main");
+    git(&fixture.repo, &fixture.config, &["switch", "-c", "topic", initial.trim()]);
+    let second = commit(&mut agent, "topic.txt", "op-intent-topic");
+
+    let resume = |agent: &mut Agent, id: &str, commit: &str| {
+        let state = agent.ok("state-for-resume", "status", json!({"repo": repo}));
+        agent.call("resume-intent", "resumePush", json!({
+            "repo": repo, "operationId": id, "stateToken": state["stateToken"],
+            "commitOperationId": commit,
+        }))
+    };
+    let wrong_branch = resume(&mut agent, "op-resume-main-on-topic", "op-intent-main");
+    assert_eq!(wrong_branch["error"]["code"], "push_intent_changed");
+    git(&fixture.repo, &fixture.config, &["switch", "main"]);
+    let fork = base.join("fork.git");
+    let wrong = base.join("wrong.git");
+    git(&fixture.repo, &fixture.config, &["remote", "set-url", "--push", "fork", wrong.to_str().unwrap()]);
+    let wrong_target = resume(&mut agent, "op-resume-changed", "op-intent-main");
+    assert_eq!(wrong_target["error"]["code"], "push_target_changed");
+    assert!(git(&wrong, &fixture.config, &["for-each-ref", "refs/heads"]).is_empty());
+    git(&fixture.repo, &fixture.config, &["remote", "set-url", "--push", "fork", fork.to_str().unwrap()]);
+    let pushed = resume(&mut agent, "op-resume-main", "op-intent-main");
+    assert_eq!(pushed["result"]["receipt"]["state"], "completed", "{pushed}");
+    assert_eq!(git(&fork, &fixture.config, &["rev-parse", "refs/heads/main"]).trim(), first);
+    let origin = base.join("origin.git");
+    assert_eq!(git(&origin, &fixture.config, &["rev-parse", "refs/heads/main"]), initial);
+    git(&fixture.repo, &fixture.config, &["switch", "topic"]);
+    let pushed = resume(&mut agent, "op-resume-topic", "op-intent-topic");
+    assert_eq!(pushed["result"]["receipt"]["state"], "completed", "{pushed}");
+    assert_eq!(pushed["result"]["snapshot"]["branch"]["upstream"], "origin/topic");
+    assert_eq!(git(&origin, &fixture.config, &["rev-parse", "refs/heads/topic"]).trim(), second);
+    assert_eq!(git(&fixture.repo, &fixture.config, &["rev-list", "--count", "HEAD"]).trim(), "2");
+}
+
+#[test]
+fn failed_upstream_association_keeps_the_completed_fetch_phase() {
+    let fixture = Fixture::new("associate-partial");
+    fixture.init();
+    fixture.write("a.txt", "initial\n");
+    fixture.commit_all("init");
+    let base = base_of(&fixture);
+    let bare = base.join("origin.git");
+    git(&base, &fixture.config, &["init", "--bare", bare.to_str().unwrap()]);
+    git(&fixture.repo, &fixture.config, &["remote", "add", "origin", bare.to_str().unwrap()]);
+    let head = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]);
+    git(&bare, &fixture.config, &["fetch", fixture.repo.to_str().unwrap(), "refs/heads/main:refs/heads/available"]);
+    git(&fixture.repo, &fixture.config, &["switch", "-c", "missing"]);
+    assert!(git(&fixture.repo, &fixture.config, &["for-each-ref", "refs/remotes/origin"]).is_empty());
+    let repo = fixture.repo_str();
+    let mut agent = fixture.agent();
+    let state = open(&mut agent, &repo);
+    let fields = json!({
+        "repo": repo, "operationId": "op-associate-partial", "stateToken": state["stateToken"], "remote": "",
+    });
+    let result = agent.ok("associate-partial", "associateUpstream", fields.clone());
+    assert_eq!(result["receipt"]["state"], "partial");
+    assert_eq!(result["receipt"]["phase"], "fetched");
+    assert_eq!(result["receipt"]["reason"], "upstream_missing");
+    assert_eq!(git(&fixture.repo, &fixture.config, &["rev-parse", "refs/remotes/origin/available"]), head);
+    let replay = agent.ok("associate-replay", "associateUpstream", fields);
+    assert_eq!(replay["receipt"], result["receipt"]);
+    assert_eq!(replay["replayed"], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_successful_push_stays_completed_when_the_git_status_readback_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new("push-readback");
+    fixture.init();
+    fixture.write("a.txt", "initial\n");
+    fixture.commit_all("init");
+    let base = base_of(&fixture);
+    let bare = base.join("origin.git");
+    git(&base, &fixture.config, &["init", "--bare", bare.to_str().unwrap()]);
+    git(&fixture.repo, &fixture.config, &["remote", "add", "origin", bare.to_str().unwrap()]);
+    git(&fixture.repo, &fixture.config, &["push", "-u", "origin", "main"]);
+    fixture.write("b.txt", "new commit\n");
+    fixture.commit_all("push with readback failure");
+    let marker = base.join("fail-after-push");
+    let executable = base.join("git-with-failing-status");
+    std::fs::write(&executable, r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = status ] && [ -f "$TWIGLANE_TEST_FAIL_STATUS" ]; then
+    echo 'injected status failure after the successful push' >&2
+    exit 1
+  fi
+  if [ "$arg" = push ]; then
+    git "$@" || exit $?
+    touch "$TWIGLANE_TEST_FAIL_STATUS"
+    exit 0
+  fi
+done
+exec git "$@"
+"#).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let repo = fixture.repo_str();
+    {
+        let mut agent = fixture.agent();
+        open(&mut agent, &repo);
+    }
+    let settings = fixture.state.join("twiglane/agent/v2/settings.json");
+    let mut data: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    data["gitExecutable"] = json!(executable);
+    std::fs::write(settings, data.to_string()).unwrap();
+    let extra = [("TWIGLANE_TEST_FAIL_STATUS", marker.to_str().unwrap())];
+    let (fields, receipt) = {
+        let mut agent = Agent::start_with(&fixture.state, &fixture.config, &extra);
+        let state = open(&mut agent, &repo);
+        let fields = json!({
+            "repo": repo, "operationId": "op-push-readback", "stateToken": state["stateToken"],
+        });
+        let result = agent.ok("push-readback", "push", fields.clone());
+        assert_eq!(result["receipt"]["state"], "completed");
+        assert_eq!(result["receipt"]["readbackError"], "status_failed");
+        assert!(marker.exists());
+        (fields, result["receipt"].clone())
+    };
+    assert_eq!(
+        git(&bare, &fixture.config, &["rev-parse", "refs/heads/main"]),
+        git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]),
+    );
+    std::fs::remove_file(&marker).unwrap();
+    let mut agent = Agent::start_with(&fixture.state, &fixture.config, &extra);
+    open(&mut agent, &repo);
+    let saved = agent.ok("read-push-receipt", "receipt", json!({"repo": repo, "operationId": "op-push-readback"}));
+    assert_eq!(saved["receipt"], receipt);
+    let replay = agent.ok("replay-push", "push", fields);
+    assert_eq!(replay["replayed"], true);
+    assert!(!marker.exists());
+}
+
+#[test]
 fn stash_save_apply_and_delete_round_trip_through_the_agent() {
     let fixture = Fixture::new("stash");
     fixture.init();

@@ -7,6 +7,8 @@
 //!   由界面再确认一次才带 `--force`；锁定的工作区（`git worktree lock`）始终拒绝；
 //! - 成功后把它移出最近列表，分支本身和提交都保留。
 
+use std::path::Path;
+
 use crate::error::AppError;
 use crate::git::command::worktree_remove_command;
 use crate::git::heads::{linked_main, resolve_git_dir};
@@ -23,16 +25,6 @@ pub async fn remove_worktree(
     force: bool,
     request_id: u64,
 ) -> Result<Vec<RecentRepo>, AppError> {
-    remove_linked_worktree(backend, path, force, request_id).await?;
-    forget_recent(backend, path)
-}
-
-pub(crate) async fn remove_linked_worktree(
-    backend: &Backend,
-    path: &str,
-    force: bool,
-    request_id: u64,
-) -> Result<(), AppError> {
     let input = validate_input_path(path)?;
     let root = canonical_existing(&input)?;
     let main = resolve_git_dir(&root)
@@ -43,11 +35,26 @@ pub(crate) async fn remove_linked_worktree(
                 "这个目录不是附属工作区（git worktree），未删除任何文件。",
             )
         })?;
+    remove_linked_worktree(backend, &main, None, &root, force, request_id).await?;
+    forget_recent(backend, path)
+}
+
+/// Callers that already verified membership bind Git to the verified common
+/// directory. Looking up the target's owning repository again could choose a
+/// different repository if the target path was replaced.
+pub(crate) async fn remove_linked_worktree(
+    backend: &Backend,
+    anchor: &Path,
+    common_git_dir: Option<&Path>,
+    target: &Path,
+    force: bool,
+    request_id: u64,
+) -> Result<(), AppError> {
     let git = require_git(backend).await?;
-    let (program, args) = worktree_remove_command(&git.path, &main, &root, force);
+    let (program, args) = worktree_remove_command(&git.path, anchor, common_git_dir, target, force);
     let scheduled = run_git(
         backend,
-        &repo_key(&main),
+        &repo_key(anchor),
         JobKind::Write,
         request_id,
         program,
@@ -58,20 +65,28 @@ pub(crate) async fn remove_linked_worktree(
     if scheduled.output.exit_code != 0 {
         let detail = redact_error_text(String::from_utf8_lossy(&scheduled.output.stderr).trim());
         let lower = detail.to_ascii_lowercase();
-        return Err(if lower.contains("locked") {
+        return Err(if lower.contains("cannot remove a locked working tree") {
             AppError::new(
                 "worktree_locked",
                 "该工作区已被锁定（git worktree lock），未删除。请先在命令行解锁后再试。",
             )
-        } else if lower.contains("modified or untracked") {
+        } else if lower.contains("contains modified or untracked files") {
             AppError::new(
                 "worktree_dirty",
                 "该工作区有未提交的改动或未跟踪文件，未删除。",
             )
-        } else if detail.is_empty() {
-            AppError::new("worktree_remove_failed", "Git 没有删除这个工作区。")
         } else {
-            AppError::new("worktree_remove_failed", format!("Git 没有删除这个工作区。{detail}"))
+            let validation_failed = lower.contains("validation failed, cannot remove working tree")
+                || lower.contains("is not a working tree")
+                || lower.contains("is a main working tree");
+            if validation_failed {
+                AppError::new("worktree_remove_failed", format!("Git 拒绝删除工作区。{detail}"))
+            } else {
+                // Git may have removed files or the worktree registration before
+                // returning a filesystem error. Keep the operation queryable.
+                AppError::new("worktree_remove_failed", format!("无法确认 Git 是否已删除该工作区。{detail}"))
+                    .after_unconfirmed_write()
+            }
         });
     }
     Ok(())
@@ -98,6 +113,51 @@ mod tests {
             .unwrap();
         assert!(output.status.success(), "{args:?} {}", String::from_utf8_lossy(&output.stderr));
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn anchored_removal_does_not_follow_a_replacement_worktree() {
+        let fixture = crate::test_support::git_fixture("wt-remove-replaced");
+        let backend = fixture.backend();
+        let anchor = fixture.repo("anchor");
+        let foreign = fixture.repo("foreign");
+        for repo in [&anchor, &foreign] {
+            git(repo, &["init", "-b", "main"]);
+            fs::write(repo.join("kept.txt"), "base\n").unwrap();
+            git(repo, &["add", "--", "kept.txt"]);
+            git(repo, &["commit", "-m", "base"]);
+        }
+        let target = fixture.path().join("selected worktree");
+        let neighbor = fixture.path().join("anchor worktree");
+        let other = fixture.path().join("foreign worktree");
+        git(&anchor, &["worktree", "add", "-b", "selected", &repo_key(&target)]);
+        git(&anchor, &["worktree", "add", "-b", "neighbor", &repo_key(&neighbor)]);
+        git(&foreign, &["worktree", "add", "-b", "foreign", &repo_key(&other)]);
+
+        let common = canonical_existing(&anchor.join(".git")).unwrap();
+        let displaced = fixture.path().join("displaced worktree");
+        fs::rename(&target, &displaced).unwrap();
+        git(&foreign, &["worktree", "move", &repo_key(&other), &repo_key(&target)]);
+        fs::write(target.join("kept.txt"), "foreign data\n").unwrap();
+
+        let error = remove_linked_worktree(&backend, &anchor, Some(&common), &target, true, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "worktree_remove_failed");
+        assert!(!error.write_unconfirmed);
+        assert_eq!(fs::read_to_string(target.join("kept.txt")).unwrap(), "foreign data\n");
+        assert_eq!(fs::read_to_string(displaced.join("kept.txt")).unwrap(), "base\n");
+        assert_eq!(git(&target, &["symbolic-ref", "HEAD"]), "refs/heads/foreign");
+        assert!(git(&foreign, &["worktree", "list", "--porcelain"]).contains("branch refs/heads/foreign"));
+
+        git(&foreign, &["worktree", "move", &repo_key(&target), &repo_key(&other)]);
+        fs::rename(&displaced, &target).unwrap();
+        remove_linked_worktree(&backend, &neighbor, Some(&common), &target, true, 2)
+            .await
+            .unwrap();
+        assert!(!target.exists());
+        assert!(neighbor.join("kept.txt").is_file());
+        assert_eq!(fs::read_to_string(other.join("kept.txt")).unwrap(), "foreign data\n");
     }
 
     #[tokio::test]

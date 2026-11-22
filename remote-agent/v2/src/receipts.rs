@@ -19,6 +19,7 @@ pub const RECEIPT_DIR: &str = "twiglane-agent-v2";
 pub const REGISTERED: &str = "registered";
 pub const COMPLETED: &str = "completed";
 pub const FAILED: &str = "failed";
+pub const PARTIAL: &str = "partial";
 /// 结果未知：远程写入被取消、超时或网络中断，远端可能已经收到请求。
 /// 这类回执既不能当失败重发，也不能当完成，客户端只能按「待核对」处理。
 pub const PENDING: &str = "pending";
@@ -42,6 +43,14 @@ pub struct Receipt {
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_destination: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_target_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readback_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
     pub generation: u64,
     pub at_ms: u64,
 }
@@ -66,6 +75,10 @@ impl Receipt {
             head: None,
             branch: None,
             review_outcome: None,
+            push_destination: None,
+            push_target_error: None,
+            readback_error: None,
+            phase: None,
             generation,
             at_ms: now_ms(),
         }
@@ -173,6 +186,20 @@ impl ReceiptStore {
     ) -> Result<Receipt, AppError> {
         receipt.state = PENDING.to_string();
         receipt.reason = Some(reason.into());
+        receipt.at_ms = now_ms();
+        self.write(&receipt)?;
+        Ok(receipt)
+    }
+
+    pub fn partial(
+        &self,
+        mut receipt: Receipt,
+        phase: &str,
+        reason: &str,
+    ) -> Result<Receipt, AppError> {
+        receipt.state = PARTIAL.to_owned();
+        receipt.phase = Some(phase.to_owned());
+        receipt.reason = Some(reason.to_owned());
         receipt.at_ms = now_ms();
         self.write(&receipt)?;
         Ok(receipt)

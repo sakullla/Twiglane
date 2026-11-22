@@ -106,6 +106,7 @@ async fn real_v2_opens_native_and_cliora_task() {
         op: "commit".into(),
         repo: session.repo.clone(),
         worktree_identity: session.worktree_identity.clone(),
+        push_commit_id: None,
     };
     save_pending(&native_journal, &alternate_pending).unwrap();
     session.agent.close().await;
@@ -178,6 +179,7 @@ async fn real_v2_opens_native_and_cliora_task() {
             op: "stage".into(),
             repo: legacy["repo"].as_str().unwrap().into(),
             worktree_identity: None,
+            push_commit_id: None,
         };
         save_pending(&old_journal, &old_record).unwrap();
         bind_legacy_cliora(&state.data, &mut native_session, &access, &Channel::new(|_| Ok(()))).await;

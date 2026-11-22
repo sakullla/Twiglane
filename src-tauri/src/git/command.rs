@@ -1,3 +1,6 @@
+// The shared Git commands also compile in the Agent crate, which defines `agent`.
+#![allow(unexpected_cfgs)]
+
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -554,6 +557,52 @@ pub fn publish_command(
     (git.to_path_buf(), args)
 }
 
+#[cfg(feature = "agent")]
+pub(crate) fn push_urls_command(git: &Path, root: &Path, remote: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend(["remote", "get-url", "--push", "--all", "--", remote].map(OsString::from));
+    (git.to_path_buf(), args)
+}
+
+#[cfg(feature = "agent")]
+pub(crate) fn config_values_command(git: &Path, root: &Path, key: &str) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend(["config", "--get-all", "--", key].map(OsString::from));
+    (git.to_path_buf(), args)
+}
+
+#[cfg(feature = "agent")]
+pub(crate) fn push_continuation_command(
+    git: &Path,
+    root: &Path,
+    remote: &str,
+    branch: &str,
+    oid: &str,
+    destination: &str,
+    publish: bool,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("-c"),
+        OsString::from(format!("remote.{remote}.mirror=false")),
+        OsString::from("push"),
+        OsString::from("--no-follow-tags"),
+        OsString::from("--recurse-submodules=no"),
+    ]);
+    let source = if publish {
+        args.push(OsString::from("--set-upstream"));
+        format!("refs/heads/{branch}")
+    } else {
+        oid.to_owned()
+    };
+    args.extend([
+        OsString::from("--"),
+        OsString::from(remote),
+        OsString::from(format!("{source}:{destination}")),
+    ]);
+    (git.to_path_buf(), args)
+}
+
 pub fn set_upstream_to_command(
     git: &Path,
     root: &Path,
@@ -734,7 +783,7 @@ pub fn delete_branch_command(
 /// 字段：引用名、上游短名、`ahead N, behind M` / `gone`、上游所在远程名、上游在远程上的引用名。
 pub fn branch_tracking_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
-    let format = "%(refname)\u{1f}%(upstream:short)\u{1f}%(upstream:track,nobracket)\u{1f}%(upstream:remotename)\u{1f}%(upstream:remoteref)".to_string();
+    let format = "%(refname)\u{1f}%(upstream:short)\u{1f}%(upstream:track,nobracket)\u{1f}%(upstream:remotename)\u{1f}%(upstream:remoteref)\u{1f}%(push:remotename)".to_string();
     args.extend([
         OsString::from("for-each-ref"),
         OsString::from("--format"),
@@ -1687,15 +1736,22 @@ pub fn git_path_command(git: &Path, root: &Path, name: &str) -> (PathBuf, Vec<Os
 /// `force` 时加一个 `--force`：丢弃其中未提交的改动；锁定的工作区仍然拒绝。
 pub fn worktree_remove_command(
     git: &Path,
-    main: &Path,
+    anchor: &Path,
+    common_git_dir: Option<&Path>,
     target: &Path,
     force: bool,
 ) -> (PathBuf, Vec<OsString>) {
-    let mut args = repo_prefix(main, false);
+    let mut args = repo_prefix(anchor, false);
+    if let Some(directory) = common_git_dir {
+        let mut option = OsString::from("--git-dir=");
+        option.push(directory);
+        args.push(option);
+    }
     args.extend([OsString::from("worktree"), OsString::from("remove")]);
     if force {
         args.push(OsString::from("--force"));
     }
+    args.push(OsString::from("--"));
     args.push(target.as_os_str().to_os_string());
     (git.to_path_buf(), args)
 }

@@ -262,7 +262,8 @@ interface RemoteRepositorySession {
   baseline: string | null;
   statusRequest: number;
   pending: RemotePendingWrite | null;
-  pushContinuation: RemotePushContinuation | null;
+  pushContinuations: RemotePushContinuation[];
+  recoveryNotice: string | null;
   /**
    * 这次远端会话里实际做成的 Git 结果阶段：只由已经核对完成的 commit 推进，
    * 返回 Cliora 时按它声明结果（没有提交就是 reviewed）。
@@ -430,7 +431,9 @@ async function remoteStatusOf(session: RemoteRepositorySession): Promise<RemoteW
   if (snapshot.repo !== session.repo) {
     throw remoteError("target_changed", "远端工作树身份已变化，请重新打开这个远端仓库。");
   }
+  const changedHead = session.latest.head !== snapshot.head || session.latest.branch !== snapshot.branch;
   advanceRemoteGeneration(session, snapshot);
+  if (changedHead) noteRemoteState();
   return snapshot;
 }
 
@@ -535,22 +538,26 @@ async function settleRemoteWrite(
   op: RemotePendingWrite["op"],
 ): Promise<RemoteWorktreeSnapshot> {
   checkRemoteResponse(session);
+  if (result.state === "completed" && result.snapshot.repo !== session.repo) {
+    throw remoteError("target_changed", "远端工作树身份已变化，请重新打开这个远端仓库。", session.generation);
+  }
+  if (result.pushContinuations !== undefined) session.pushContinuations = result.pushContinuations;
   if (result.state === "completed") {
-    if (result.snapshot.repo !== session.repo) {
-      throw remoteError("target_changed", "远端工作树身份已变化，请重新打开这个远端仓库。", session.generation);
-    }
     session.pending = null;
-    if (result.pushContinuation !== undefined) session.pushContinuation = result.pushContinuation;
-    else if (op === "commitAndPush" && result.snapshot.head) {
-      session.pushContinuation = { head: result.snapshot.head, branch: result.snapshot.branch };
-    } else if (op === "push" || op === "publishBranch") {
-      session.pushContinuation = null;
-    }
+    session.recoveryNotice = null;
     noteRemoteOutcome(session, op, result.reviewOutcome);
     session.diffs.clear();
     advanceRemoteGeneration(session, result.snapshot);
     noteRemoteState();
     return result.snapshot;
+  }
+  if (result.state === "partial") {
+    session.pending = null;
+    session.recoveryNotice = result.message;
+    await remoteStatusOf(session).catch(() => undefined);
+    checkRemoteResponse(session);
+    noteRemoteState();
+    throw remoteError(result.code, result.message, session.generation);
   }
   if (result.state === "failed") {
     // 远端已核实这次写入没有生效：清掉待确认记录，错误如实上报。
@@ -580,7 +587,7 @@ async function remoteWrite(
   session: RemoteRepositorySession,
   action: RemoteWriteAction,
   generation: number,
-): Promise<RemoteWorktreeSnapshot> {
+): Promise<Extract<RemoteWriteResult, { state: "completed" }>> {
   if (session.disconnected) {
     throw remoteError("remote_disconnected", "远端连接已断开，本次写入没有发送；请重新打开这个远端仓库。");
   }
@@ -616,7 +623,9 @@ async function remoteWrite(
     // 未收到回执：按「结果未知」处理，不重发、不冒充失败，写入保持禁用。
     throw remoteError("write_pending", failure.message, session.generation);
   }
-  return settleRemoteWrite(session, result, op);
+  await settleRemoteWrite(session, result, op);
+  if (result.state !== "completed") throw remoteError("remote_protocol", "远端写入回执格式无效。");
+  return result;
 }
 
 async function closeRemoteSession(
@@ -674,6 +683,7 @@ export interface RemoteRepositoryState {
   connected: boolean;
   connectionId: string;
   pushContinuation: RemotePushContinuation | null;
+  recoveryNotice: string | null;
 }
 
 async function openRemote(
@@ -733,7 +743,8 @@ async function openRemote(
     baseline: options.baseline ?? null,
     statusRequest: 0,
     pending: opened.pendingWrite ?? null,
-    pushContinuation: opened.pushContinuation ?? null,
+    pushContinuations: opened.pushContinuations ?? [],
+    recoveryNotice: null,
     outcome: opened.reviewOutcome ?? "reviewed",
     unrecordedHeadOp: null,
     returnedOutcome: null,
@@ -803,12 +814,24 @@ export function remoteRepositoryState(key: string): RemoteRepositoryState | null
     connected: !session.disconnected,
     connectionId: session.sessionId,
     pushContinuation: currentPushContinuation(session),
+    recoveryNotice: session.recoveryNotice,
   };
 }
 
 function currentPushContinuation(session: RemoteRepositorySession): RemotePushContinuation | null {
-  const continuation = session.pushContinuation;
-  return continuation?.head === session.latest.head && continuation.branch === session.latest.branch ? continuation : null;
+  return session.pushContinuations.find((intent) =>
+    intent.commitOperationId && intent.head === session.latest.head && intent.branch === session.latest.branch,
+  ) ?? null;
+}
+
+async function retryRemotePush(path: string, generation: number): Promise<StatusSnapshot> {
+  const session = remoteBridgeSession(path, generation);
+  const commitOperationId = currentPushContinuation(session)?.commitOperationId;
+  if (!commitOperationId) {
+    throw remoteError("push_intent_changed", "当前分支和提交没有可核对的待推送记录。", generation);
+  }
+  const snapshot = await remoteBridgeWrite(session, generation, "resumePush", { commitOperationId });
+  return remoteStatus(snapshot, session.generation);
 }
 
 /**
@@ -1776,6 +1799,7 @@ const BRIDGE_DEFINITIVE_CODES = new Set([
   "operation_conflict",
   "invalid_operation",
   "invalid_patch",
+  "push_intent_changed",
   "write_locked",
 ]);
 
@@ -2243,6 +2267,7 @@ const apiExtras = {
   openRemoteRepository,
   remoteReturnReview,
   remoteRepositoryState,
+  retryRemotePush,
   onRemoteStateChange,
   closeRemoteRepository,
   linkedWorktreeHeads,
@@ -2598,7 +2623,7 @@ const remoteOverrides: Record<string, unknown> = {
     const staged = remoteChanges(session.latest.files)
       .filter((file) => file.staged !== "none")
       .map((file) => file.path);
-    const snapshot = await remoteWrite(session, { op: "commit", message }, generation);
+    const { snapshot } = await remoteWrite(session, { op: "commit", message }, generation);
     return {
       oid: snapshot.head ?? "",
       generation: session.generation,
@@ -3397,15 +3422,19 @@ const remoteOverrides: Record<string, unknown> = {
     if (currentPushContinuation(session)) {
       throw remoteError("push_pending", "上一条提交已完成，请使用重试推送。", generation);
     }
-    const committed = await remoteWrite(session, { op: "commit", message, pushAfter: true }, generation);
+    const result = await remoteWrite(session, { op: "commit", message, pushAfter: true }, generation);
+    const committed = result.snapshot;
     const oid = committed.head;
     if (!oid) throw remoteError("remote_protocol", "远端提交回执缺少提交身份。", session.generation);
     let pushError: string | null = null;
     try {
+      if (result.pushTargetError) {
+        throw remoteError(result.pushTargetError, "提交时无法确定推送目标。请核对远程和分支后单独推送。", session.generation);
+      }
       if (currentPushContinuation(session)?.head !== oid) {
         throw remoteError("stale", "当前分支或提交与待推送记录不同，请先切回相应提交。", session.generation);
       }
-      await remoteBridgeWrite(session, session.generation, "push");
+      await retryRemotePush(path, session.generation);
     } catch (error) {
       checkRemoteResponse(session);
       pushError = normalizeError(error).message;
@@ -3414,10 +3443,10 @@ const remoteOverrides: Record<string, unknown> = {
     }
     const short = oid.slice(0, 7);
     return {
-      committed: true, pushed: pushError === null, retryPush: pushError !== null,
+      committed: true, pushed: pushError === null, retryPush: pushError !== null && currentPushContinuation(session) !== null,
       pushUnconfirmed: session.pending !== null,
       oid, branch: committed.branch ?? "", pushError,
-      summary: pushError === null ? `已创建远端提交 ${short}，推送已完成。` : `已创建远端提交 ${short}，可以只重试推送。`,
+      summary: pushError === null ? `已创建远端提交 ${short}，推送已完成。` : `已创建远端提交 ${short}。`,
       generation: session.generation,
       snapshot: remoteStatus(session.latest, session.generation),
     };

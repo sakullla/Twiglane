@@ -37,6 +37,7 @@ pub const CAPABILITIES: &[&str] = &[
     "unstage",
     "patch",
     "commit",
+    "resumePush",
     "receipt",
     "cancel",
     "cancelRemote",

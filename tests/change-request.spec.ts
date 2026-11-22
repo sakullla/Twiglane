@@ -248,7 +248,7 @@ describe("远程选择与表单（R2、R4）", () => {
     expect(mocks.createChangeRequest).not.toHaveBeenCalled();
   });
 
-  it("显式提交把来源留给原生：只传仓库、远程、目标、标题与描述", async () => {
+  it("显式提交携带已核对的来源，供原生重新核验", async () => {
     mocks.createChangeRequest.mockResolvedValue(outcome());
     showModal();
     const dialog = await readyForm();
@@ -266,6 +266,7 @@ describe("远程选择与表单（R2、R4）", () => {
       "说明",
       4,
       expect.any(Number),
+      ready,
     );
   });
 
@@ -300,6 +301,7 @@ describe("按实例令牌（R3）", () => {
       "ghp_example_token",
       4,
       expect.any(Number),
+      ready,
     );
     // 保存后输入框与界面都不再保留明文。
     await waitFor(() => expect(screen.queryByLabelText("Personal Access Token")).toBeNull());
@@ -314,7 +316,7 @@ describe("按实例令牌（R3）", () => {
     await waitFor(() => expect(within(dialog).getByText(/已保存到系统钥匙串/)).toBeTruthy());
     await fireEvent.click(within(dialog).getByRole("button", { name: "删除令牌" }));
     await waitFor(() => expect(mocks.deleteChangeRequestToken).toHaveBeenCalledTimes(1));
-    expect(mocks.deleteChangeRequestToken).toHaveBeenCalledWith(repoPath, "origin", 4, expect.any(Number));
+    expect(mocks.deleteChangeRequestToken).toHaveBeenCalledWith(repoPath, "origin", 4, expect.any(Number), ready);
     await waitFor(() => expect(within(dialog).getByText(/未配置/)).toBeTruthy());
   });
 });
@@ -442,6 +444,7 @@ describe("结果状态（R4、R5、R6）", () => {
       "",
       4,
       expect.any(Number),
+      ready,
     );
 
     await rerender({ opened: openedFor(otherPath) });

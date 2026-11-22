@@ -233,6 +233,149 @@ fn open(agent: &mut Agent, repo: &str) -> Value {
     agent.ok("open-1", "open", json!({ "path": repo }))
 }
 
+#[test]
+fn remote_file_copy_pages_keep_one_file_version() {
+    use base64::Engine;
+
+    let fixture = Fixture::new("file-copy");
+    fixture.init();
+    let name = "资源 中文.bin";
+    let mut content = vec![0x7f; 1024 * 1024];
+    content.extend_from_slice(&[0, 1, 255]);
+    std::fs::write(fixture.repo.join(name), &content).unwrap();
+    fixture.commit_all("init");
+    let mut agent = Agent::start_with(&fixture.state, &fixture.config, &[("TWIGLANE_AGENT_DISABLE_WATCH", "1")]);
+    let repo = fixture.repo_str();
+    let opened = open(&mut agent, &repo);
+    let generation = &opened["generation"];
+    let first = agent.ok("copy-first", "fileCopy", json!({ "repo":repo, "relative":name, "generation":generation }));
+    assert_eq!(first["offset"], 0);
+    assert_eq!(first["size"], content.len());
+    let decode = |reply: &Value| base64::engine::general_purpose::STANDARD.decode(reply["data"].as_str().unwrap()).unwrap();
+    assert_eq!(decode(&first), content[..1024 * 1024]);
+    let more = json!({ "repo":repo, "relative":name, "generation":generation, "offset":1024 * 1024, "version":first["version"] });
+    let last = agent.ok("copy-last", "fileCopy", more.clone());
+    assert_eq!(decode(&last), [0, 1, 255]);
+    content.push(2);
+    std::fs::write(fixture.repo.join(name), &content).unwrap();
+    assert_eq!(agent.error_code("copy-changed", "fileCopy", more), "file_changed");
+    for relative in ["../secret.bin", ".git/config"] {
+        assert_eq!(agent.error_code("copy-outside", "fileCopy", json!({ "repo":repo, "relative":relative, "generation":generation })), "invalid_path");
+    }
+}
+
+#[test]
+fn ignore_rules_write_to_the_selected_repository_target_and_replay_once() {
+    let fixture = Fixture::new("ignore-rules");
+    fixture.init();
+    fixture.write("readme.txt", "base\n");
+    fixture.commit_all("init");
+    fixture.write("shared.tmp", "on the worktree\n");
+    fixture.write("local.tmp", "on the worktree\n");
+    let mut agent = fixture.agent();
+    let repo = fixture.repo_str();
+    let opened = open(&mut agent, &repo);
+    let base = json!({ "repo":repo, "operationId":"op-ignore-shared", "stateToken":opened["stateToken"], "pattern":"/shared.tmp", "local":false });
+    let shared = agent.ok("ignore-shared", "ignorePath", base.clone());
+    assert_eq!(shared["receipt"]["state"], "completed");
+    assert!(shared["ignore"]["note"].is_string());
+    let replay = agent.ok("ignore-replay", "ignorePath", base);
+    assert_eq!(replay["receipt"], shared["receipt"]);
+    let local = agent.ok("ignore-local", "ignorePath", json!({
+        "repo":repo, "operationId":"op-ignore-local", "stateToken":token_of(&shared), "pattern":"/local.tmp", "local":true,
+    }));
+    assert_eq!(local["receipt"]["state"], "completed");
+    assert_eq!(std::fs::read_to_string(fixture.repo.join(".gitignore")).unwrap(), "/shared.tmp\n");
+    let exclude = std::fs::read_to_string(fixture.repo.join(".git/info/exclude")).unwrap();
+    assert_eq!(exclude.lines().filter(|line| *line == "/local.tmp").count(), 1);
+    assert!(!exclude.contains("/shared.tmp"));
+    let snapshot = agent.ok("ignore-status", "status", json!({ "repo":repo }));
+    let files = snapshot["snapshot"]["files"].as_array().unwrap();
+    assert!(files.iter().all(|file| file["path"] != "shared.tmp" && file["path"] != "local.tmp"));
+}
+
+#[test]
+fn project_discovery_finds_real_worktrees_and_reuses_member_identity() {
+    let fixture = Fixture::new("project-discovery");
+    fixture.init();
+    fixture.write("readme.txt", "base\n");
+    fixture.commit_all("init");
+    let linked = fixture.repo.with_file_name("附属 项目");
+    git(&fixture.repo, &fixture.config, &["worktree", "add", "-b", "linked", linked.to_str().unwrap()]);
+    let mut agent = fixture.agent();
+    let repo = fixture.repo_str();
+    open(&mut agent, &repo);
+    let host_repo = "15151515-1515-4515-8515-151515151515";
+    let scanned = agent.ok("project-scan", "projectCandidates", json!({
+        "repo":repo, "root":fixture.repo.parent().unwrap(), "known":[[repo,host_repo]],
+    }));
+    assert_eq!(scanned["repo"], repo);
+    assert_eq!(scanned["discovery"]["partial"], false);
+    let candidates = scanned["discovery"]["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates.iter().all(|candidate| candidate["repositoryId"] == host_repo && candidate["error"].is_null()));
+    assert_eq!(candidates[0]["commonDirectory"], candidates[1]["commonDirectory"]);
+    let invalid = agent.error_code("project-relative", "projectCandidates", json!({
+        "repo":repo, "paths":["relative/path"], "known":[],
+    }));
+    assert_eq!(invalid, "invalid_path");
+}
+
+#[test]
+fn pre_open_create_and_clone_recover_through_the_same_worktree_identity() {
+    let fixture = Fixture::new("pre-open-provision");
+    let base = base_of(&fixture);
+    fixture.init();
+    fixture.write("readme.txt", "cloned from the selected host\n");
+    fixture.commit_all("seed");
+    let source_head = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]);
+    let create_path = base.join("新建 repo");
+    let create = json!({"path": create_path, "operation": {"kind":"create"}});
+    let clone = json!({"path":base,"operation":{"kind":"clone","url":fixture.repo,"name":"克隆 repo"}});
+
+    for (request, name) in [(create, "新建 repo"), (clone, "克隆 repo")] {
+        let proof = {
+            let mut first = fixture.agent();
+            first.ok("write-before-open", "provisionRepository", request.clone())
+        };
+        let target = base.join(name);
+        assert!(target.join(".git").is_dir());
+        let mut reconnected = fixture.agent();
+        let recovered = reconnected.ok("reconcile-provision", "provisionRepository", request.clone());
+        assert_eq!(recovered["path"], proof["path"]);
+        assert_eq!(recovered["worktreeIdentity"], proof["worktreeIdentity"]);
+        let opened = reconnected.ok("open-provisioned", "open", json!({
+            "path": recovered["path"], "worktreeIdentity": recovered["worktreeIdentity"],
+        }));
+        assert_eq!(opened["worktreeIdentity"], recovered["worktreeIdentity"]);
+        assert_eq!(reconnected.error_code("reject-provision-after-open", "provisionRepository", request), "provision_session");
+        if name == "克隆 repo" {
+            assert_eq!(git(&target, &fixture.config, &["rev-parse", "HEAD"]), source_head);
+            assert_eq!(std::fs::read(target.join("readme.txt")).unwrap(), b"cloned from the selected host\n");
+        } else {
+            assert!(opened["snapshot"]["branch"]["unborn"].as_bool().unwrap());
+        }
+    }
+}
+
+#[test]
+fn pre_open_provision_refuses_to_reopen_a_replacement_as_its_result() {
+    let fixture = Fixture::new("provision-replacement");
+    let root = base_of(&fixture);
+    let target = root.join("target");
+    let request = json!({"path":target,"operation":{"kind":"create"}});
+    {
+        let mut agent = fixture.agent();
+        agent.ok("initial-create", "provisionRepository", request.clone());
+    }
+    std::fs::rename(&target, root.join("original")).unwrap();
+    std::fs::create_dir(&target).unwrap();
+    git(&target, &fixture.config, &["init", "-b", "other"]);
+    let mut agent = fixture.agent();
+    assert_eq!(agent.error_code("changed-provision-result", "provisionRepository", request), "target_changed");
+    assert_eq!(git(&target, &fixture.config, &["symbolic-ref", "--short", "HEAD"]).trim(), "other");
+}
+
 fn pty_fixture_profile(response: &Value) -> String {
     let profiles = response["profiles"].as_array().unwrap();
     let profile = if cfg!(windows) {

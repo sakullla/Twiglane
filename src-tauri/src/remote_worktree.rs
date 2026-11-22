@@ -12,15 +12,17 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tauri::{ipc::Channel, State};
+use tauri::{ipc::Channel, AppHandle, Runtime, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use uuid::Uuid;
 
+use crate::change_request;
 use crate::error::AppError;
 use crate::remote_ssh::{self, AgentArtifact, AgentProbe, RemoteSsh};
 use crate::remote_worktree_transport::{AgentTransport, ScopedChild};
 use crate::state::{AppStore, SshTarget};
+use crate::terminal::TerminalActivity;
 
 const FLAG: &str = "--twiglane-remote-v1";
 /// v2 差异一页的解析行数：分页只切远端行窗口，前端看到的仍是拼接后的完整 unified 文本。
@@ -36,6 +38,13 @@ pub(crate) struct RemoteWorktrees {
     installs: Mutex<HashMap<String, InstallTarget>>,
     mutations: Mutex<()>,
     reviews: Mutex<review::Book>,
+    terminals: Mutex<HashMap<(String, String), TerminalRecord>>,
+    file_copies: Mutex<Vec<tempfile::TempDir>>,
+}
+
+struct TerminalRecord {
+    seq: u64,
+    running: bool,
 }
 
 impl RemoteWorktrees {
@@ -47,6 +56,8 @@ impl RemoteWorktrees {
             installs: Mutex::default(),
             mutations: Mutex::default(),
             reviews: Mutex::default(),
+            terminals: Mutex::default(),
+            file_copies: Mutex::default(),
         }
     }
 
@@ -58,6 +69,78 @@ impl RemoteWorktrees {
             .cloned()
             .ok_or_else(|| AppError::new("remote_disconnected", "远端工作树连接已断开，请重连。"))
     }
+
+    fn record_terminal(&self, connection: &str, id: &str, seq: u64, running: bool) {
+        let key = (connection.to_owned(), id.to_owned());
+        let mut entries = self.terminals.lock().unwrap();
+        if entries.get(&key).is_none_or(|old| seq > old.seq || seq == old.seq && !running) {
+            entries.insert(key, TerminalRecord { seq, running });
+        }
+    }
+
+    fn record_terminal_snapshot(&self, connection: &str, session: &Session, value: &Value) {
+        if value["repoPath"].as_str() != Some(session.repo.as_str()) {
+            return;
+        }
+        if let (Some(id), Some(seq), Some(running)) = (
+            value["sessionId"].as_str(), value["seq"].as_u64(), value["running"].as_bool(),
+        ) {
+            self.record_terminal(connection, id, seq, running);
+        }
+    }
+
+    fn terminal_targets(&self) -> Vec<(String, String, Arc<Session>)> {
+        let sessions = self.sessions.lock().unwrap();
+        self.terminals.lock().unwrap().iter().filter_map(|((connection, id), record)| {
+            if !record.running {
+                return None;
+            }
+            let session = sessions.get(connection)?;
+            session.agent.is_connected().then(|| (connection.clone(), id.clone(), Arc::clone(session)))
+        }).collect()
+    }
+
+    pub(crate) fn active_terminals(&self) -> Vec<TerminalActivity> {
+        self.terminal_targets().iter().map(|(connection, id, session)| {
+            terminal_activity(connection, id, session)
+        }).collect()
+    }
+
+    pub(crate) async fn terminate_terminals(&self) -> Result<Vec<TerminalActivity>> {
+        let mut terminated = Vec::new();
+        let mut first_error = None;
+        for (connection, id, session) in self.terminal_targets() {
+            let result = session.agent.rpc("terminalClose", json!({
+                "repo": session.repo, "sessionId": id,
+            })).await;
+            match result {
+                Ok(reply) if terminal_closed_reply(&session, &id, &reply) => {
+                    self.record_terminal(&connection, &id, u64::MAX, false);
+                    terminated.push(terminal_activity(&connection, &id, &session));
+                }
+                Ok(_) => {
+                    first_error.get_or_insert_with(protocol_mismatch);
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        first_error.map_or(Ok(terminated), Err)
+    }
+}
+
+fn terminal_activity(connection: &str, id: &str, session: &Session) -> TerminalActivity {
+    TerminalActivity {
+        session_id: format!("ssh-terminal:{connection}:{id}"),
+        repo_path: format!("{} · {}", session.target.name, session.root),
+    }
+}
+
+fn terminal_closed_reply(session: &Session, id: &str, reply: &Value) -> bool {
+    reply["repo"].as_str() == Some(session.repo.as_str())
+        && reply["sessionId"].as_str() == Some(id)
+        && reply["closed"].as_bool() == Some(true)
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -86,6 +169,8 @@ pub struct OpenRequest {
     allow_install: bool,
     install_confirmation: Option<String>,
     review_id: Option<String>,
+    provision: Option<crate::remote_provision::RepositoryProvision>,
+    project_host_id: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -96,6 +181,8 @@ struct InstallTarget {
     peer: String,
     path: String,
     baseline: Option<String>,
+    provision_digest: Option<String>,
+    project_host_id: Option<String>,
     digest: String,
     version: String,
     size: u64,
@@ -103,7 +190,7 @@ struct InstallTarget {
 
 enum Opened {
     Worktree(Box<Session>, Value),
-    NeedsInstall(InstallTarget),
+    NeedsInstall(Box<InstallTarget>),
 }
 
 /// 本机保存的目标与 Cliora 主机簿各自有独立的身份空间。
@@ -171,6 +258,8 @@ struct Pending {
     worktree_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     push_commit_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    draft_digest: Option<String>,
 }
 
 impl Pending {
@@ -297,6 +386,16 @@ impl Session {
         let worktree = self.worktree_identity.as_deref().unwrap_or(&self.repo);
         let key = json!([self.journal_identity, worktree]);
         base.join(format!("journal-{:x}.json", Sha256::digest(key.to_string().as_bytes())))
+    }
+
+    fn checkout_preferences_key(&self) -> Result<String> {
+        let worktree = self.worktree_identity.as_deref().ok_or_else(protocol_mismatch)?;
+        let identity = json!([self.journal_identity, worktree]);
+        Ok(format!("{:x}", Sha256::digest(identity.to_string().as_bytes())))
+    }
+
+    fn project_host_id(&self) -> String {
+        project_host_id(&self.journal_identity)
     }
 
     fn push_continuation_path(&self, base: &Path) -> PathBuf {
@@ -913,6 +1012,16 @@ fn protocol_mismatch() -> AppError {
     )
 }
 
+fn project_host_id(journal_identity: &str) -> String {
+    let identity = json!(["twiglane-project-ssh-host-v1", journal_identity]);
+    let digest = Sha256::digest(identity.to_string().as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes).to_string()
+}
+
 enum V2Route {
     Native(Box<(SshTarget, AgentProbe)>),
     Cliora(PathBuf),
@@ -1062,6 +1171,10 @@ async fn connect_planned(
         peer: plan.peer_revision.clone(),
         path: request.path.clone(),
         baseline: request.baseline.clone(),
+        provision_digest: request.provision.as_ref().map(|operation| {
+            format!("{:x}", Sha256::digest(json!(operation).to_string().as_bytes()))
+        }),
+        project_host_id: request.project_host_id.clone(),
         digest: plan.artifact.sha256.clone(),
         version: plan.artifact.version.clone(),
         size: plan.artifact.bytes.len() as u64,
@@ -1071,7 +1184,7 @@ async fn connect_planned(
     }
     let needs_install = plan.installed.as_deref() != Some(&plan.artifact.sha256);
     if needs_install && !request.allow_install {
-        return Ok(Opened::NeedsInstall(selected));
+        return Ok(Opened::NeedsInstall(Box::new(selected)));
     }
     if needs_install {
         let install = async {
@@ -1120,13 +1233,35 @@ async fn connect_planned(
         || ["open", "status", "diff", "reviewIdentity", "receipt", "commit"]
             .iter().copied().chain(BRIDGE_READ_OPS.iter().copied())
             .chain(BRIDGE_WRITE_OPS.iter().copied()).chain(TERMINAL_OPS.iter().copied())
+            .chain(["changeRequestGitState", "changeRequestRemotes", "changeRequestTracking", "fileCopy"])
             .any(|required| !capabilities.iter().any(|value| value.as_str() == Some(required)))
     {
         return Err(protocol_mismatch());
     }
+    if request.project_host_id.as_ref().is_some_and(|expected| expected != &project_host_id(&journal_identity)) {
+        return Err(AppError::new("target_changed", "SSH 主机的账号身份与项目记录不一致。"));
+    }
 
+    let provisioned = if let Some(operation) = &request.provision {
+        if !capabilities.iter().any(|capability| capability.as_str() == Some("provisionRepository")) {
+            return Err(protocol_mismatch());
+        }
+        publish(progress, "provisioning", None, None);
+        let proof = tokio::time::timeout(
+            Duration::from_secs(600),
+            agent.rpc("provisionRepository", json!({"path":request.path, "operation":operation})),
+        ).await.map_err(|_| remote_error("operation_pending"))??;
+        let path = proof["path"].as_str().filter(|path| valid_path(path, true)).ok_or_else(protocol_mismatch)?.to_owned();
+        let identity = probe_identity(&proof["worktreeIdentity"]).map_err(|_| protocol_mismatch())?.to_owned();
+        Some((path, identity, proof["credentialNote"].clone()))
+    } else {
+        None
+    };
     publish(progress, "opening", None, None);
-    let mut fields = json!({"path":request.path});
+    let mut fields = json!({"path":provisioned.as_ref().map_or(request.path.as_str(), |(path, _, _)| path.as_str())});
+    if let Some((_, identity, _)) = &provisioned {
+        fields["worktreeIdentity"] = json!(identity);
+    }
     if let Some(baseline) = &request.baseline {
         fields["baseline"] = json!(baseline);
     }
@@ -1141,6 +1276,9 @@ async fn connect_planned(
     let root = snapshot["worktreePath"].as_str().filter(|value| valid_path(value, true))
         .ok_or_else(protocol_mismatch)?.to_owned();
     let worktree_identity = probe_identity(&snapshot["worktreeIdentity"]).map_err(|_| protocol_mismatch())?.to_owned();
+    if provisioned.as_ref().is_some_and(|(path, identity, _)| path != &root || identity != &worktree_identity) {
+        return Err(remote_error("target_changed"));
+    }
     if snapshot["journalIdentity"].as_str() != Some(&journal_identity) {
         return Err(AppError::new("target_changed", "远端账号的待确认操作身份已变化，请重新连接。"));
     }
@@ -1177,7 +1315,10 @@ async fn connect_planned(
         _session_dir: session_dir,
     };
     session.remember_state(&snapshot, None)?;
-    let view = flatten_v2(&snapshot)?;
+    let mut view = flatten_v2(&snapshot)?;
+    if let Some((_, _, note)) = provisioned {
+        view["credentialNote"] = note;
+    }
     Ok(Opened::Worktree(Box::new(session), view))
 }
 
@@ -1274,6 +1415,8 @@ async fn bind_legacy_cliora(
             allow_install: false,
             install_confirmation: None,
             review_id: None,
+            provision: None,
+            project_host_id: None,
         };
         let Ok(plan) = plan_cliora(helper.clone(), target, None, access).await else {
             continue;
@@ -1388,6 +1531,9 @@ pub async fn remote_worktree_open(
     if !uuid(&request.request_id) || !valid_path(&request.path, true) {
         return Err(AppError::new("invalid_path", "请选择有效的远端绝对目录。"));
     }
+    if request.provision.is_some() && (request.review_id.is_some() || request.baseline.is_some()) {
+        return Err(AppError::new("invalid_request", "创建或克隆与打开 Cliora 审查是独立操作。"));
+    }
     let source = request
         .review_id
         .as_deref()
@@ -1457,7 +1603,7 @@ pub async fn remote_worktree_open(
             let id = Uuid::new_v4().to_string();
             let version = offer.version.clone();
             let size = offer.size;
-            installs.insert(id.clone(), offer);
+            installs.insert(id.clone(), *offer);
             return Ok(json!({
                 "kind":"install_required",
                 "version":version,
@@ -1474,6 +1620,24 @@ pub async fn remote_worktree_open(
         )
     };
     let protocol = session.protocol();
+    let preferences = backend.store.remote_checkout(&session.checkout_preferences_key()?);
+    let workspace_host_id = session.project_host_id();
+    let name = session.root.rsplit('/').next()
+        .filter(|_| !session.root.as_bytes().get(1).is_some_and(|byte| *byte == b':'))
+        .or_else(|| session.root.rsplit(['/', '\\']).next())
+        .filter(|name| !name.is_empty()).unwrap_or(&session.root).to_owned();
+    let recent_warning = backend.store.touch_remote_recent(crate::state::RemoteRecentRepo {
+        target_id: session.target.target_id.clone(),
+        project_host_id: Some(workspace_host_id.clone()),
+        host: session.target.name.clone(),
+        path: session.root.clone(),
+        name,
+        opened_at_ms: crate::state::now_ms(),
+    }, crate::state::RemoteProjectHost {
+        workspace_host_id: workspace_host_id.clone(),
+        target_id: session.target.target_id.clone(),
+        host: session.target.name.clone(),
+    }).err().map(|error| error.message);
     let agent_version = session.agent_version.clone();
     let review_outcome = session.review_id.as_deref()
         .and_then(|id| state.reviews.lock().unwrap().latest(id))
@@ -1488,6 +1652,9 @@ pub async fn remote_worktree_open(
         "kind":"open",
         "sessionId":session_id,
         "snapshot":snapshot,
+        "preferences":preferences,
+        "preferencesWarning":recent_warning,
+        "projectHostId":workspace_host_id,
         "pendingWrite":pending,
         "pushContinuations":push_continuations,
         "protocol":protocol,
@@ -1507,6 +1674,7 @@ pub fn remote_worktree_cancel_open(state: Managed<'_>, request_id: String) {
 #[tauri::command]
 pub async fn remote_worktree_close(state: Managed<'_>, session_id: String) -> Result<()> {
     let session = state.sessions.lock().unwrap().remove(&session_id);
+    state.terminals.lock().unwrap().retain(|(connection, _), _| connection != &session_id);
     if let Some(session) = session {
         session.agent.close().await;
     }
@@ -1523,6 +1691,17 @@ pub async fn remote_worktree_events(state: Managed<'_>, session_id: String) -> R
     let session = state.session(&session_id)?;
     let (mut events, overflow, disconnected) = session.agent.next_events().await;
     events.retain(|event| event["repo"].as_str() == Some(session.repo.as_str()));
+    if disconnected {
+        state.terminals.lock().unwrap().retain(|(connection, _), _| connection != &session_id);
+    } else {
+        for event in &events {
+            if event["event"].as_str() == Some("terminalExit") {
+                if let (Some(id), Some(seq)) = (event["sessionId"].as_str(), event["seq"].as_u64()) {
+                    state.record_terminal(&session_id, id, seq, false);
+                }
+            }
+        }
+    }
     Ok(json!({"events": events, "overflow": overflow, "disconnected": disconnected}))
 }
 
@@ -1672,6 +1851,7 @@ pub async fn remote_worktree_diff(state: Managed<'_>, request: DiffRequest) -> R
 
 /// 只读 op：与 agent v2 的只读入口同名，直接转发 `fields`。
 const BRIDGE_READ_OPS: &[&str] = &[
+    "reviewToken",
     "taskReview",
     "taskReviewToken",
     "history",
@@ -1702,6 +1882,7 @@ const BRIDGE_READ_OPS: &[&str] = &[
     "directory",
     "fileContent",
     "filePreview",
+    "projectCandidates",
     "document",
     "documentResource",
     "documentRemoteImage",
@@ -1752,6 +1933,7 @@ const BRIDGE_WRITE_OPS: &[&str] = &[
     "discard",
     "worktreeRemoveTarget",
     "editSave",
+    "ignorePath",
     "createEntry",
     "copyEntry",
     "moveEntry",
@@ -1760,7 +1942,7 @@ const BRIDGE_WRITE_OPS: &[&str] = &[
 
 const FILE_READ_OPS: &[&str] = &[
     "directory", "fileContent", "filePreview", "document", "documentResource",
-    "documentRemoteImage", "pathSearch", "contentSearch", "editSnapshot",
+    "documentRemoteImage", "pathSearch", "contentSearch", "editSnapshot", "projectCandidates",
 ];
 const TERMINAL_OPS: &[&str] = &[
     "terminalProfiles", "terminalList", "terminalCreate", "terminalAttach",
@@ -1865,7 +2047,29 @@ async fn bridge_call(state: &RemoteWorktrees, request: CallRequest) -> Result<Va
             }
             return session.agent.rpc_read(&request.op, fields, id).await;
         }
-        return session.agent.rpc(&request.op, fields).await;
+        let id = fields["sessionId"].as_str().map(str::to_owned);
+        let result = session.agent.rpc(&request.op, fields).await?;
+        if kind == BridgeKind::Terminal {
+            match request.op.as_str() {
+                "terminalCreate" | "terminalAttach" | "terminalRestart" => {
+                    state.record_terminal_snapshot(&request.session_id, &session, &result["terminal"]);
+                }
+                "terminalList" => {
+                    if let Some(snapshots) = result["sessions"].as_array() {
+                        for snapshot in snapshots {
+                            state.record_terminal_snapshot(&request.session_id, &session, snapshot);
+                        }
+                    }
+                }
+                "terminalClose" => {
+                    if let Some(id) = id.filter(|id| terminal_closed_reply(&session, id, &result)) {
+                        state.record_terminal(&request.session_id, &id, u64::MAX, false);
+                    }
+                }
+                _ => {}
+            }
+        }
+        return Ok(result);
     }
     if request.read_id.is_some() {
         return Err(AppError::new("invalid_request", "写入不能作为文件读取取消。"));
@@ -1892,6 +2096,7 @@ async fn bridge_call(state: &RemoteWorktrees, request: CallRequest) -> Result<Va
         repo: session.repo.clone(),
         worktree_identity: session.worktree_identity.clone(),
         push_commit_id,
+        draft_digest: None,
     };
     let journal = session.journal(&state.data);
     {
@@ -1909,12 +2114,293 @@ async fn bridge_call(state: &RemoteWorktrees, request: CallRequest) -> Result<Va
         save_pending(&journal, &pending)?;
     }
     let response = session.agent.rpc(&pending.op, fields).await;
-    finish_write(state, &session, &journal, &pending, response, false).await
+    finish_write(state, &session, &journal, &pending, response, false, None).await
 }
 
 #[tauri::command]
-pub async fn remote_worktree_call(state: Managed<'_>, request: CallRequest) -> Result<Value> {
-    bridge_call(&state, request).await
+pub async fn remote_worktree_call(
+    state: Managed<'_>,
+    backend: State<'_, Arc<crate::git::ops::Backend>>,
+    mut request: CallRequest,
+) -> Result<Value> {
+    match request.op.as_str() {
+        "desktopForgetRemoteRecent" => {
+            let target = request.fields["targetId"].as_str().filter(|target| !target.is_empty())
+                .ok_or_else(|| remote_error("remote_request"))?;
+            let path = request.fields["path"].as_str().filter(|path| valid_path(path, true))
+                .ok_or_else(|| remote_error("remote_request"))?;
+            backend.store.forget_remote_recent(target, path)?;
+            let snapshot = backend.store.snapshot();
+            Ok(json!({"recent":snapshot.recent, "remoteRecent":snapshot.remote_recent}))
+        }
+        "desktopSaveRemoteDraft" => {
+            let identity = state.session(&request.session_id)?.checkout_preferences_key()?;
+            let message = request.fields["message"].as_str().ok_or_else(|| remote_error("remote_request"))?;
+            backend.store.save_remote_checkout_draft(identity, message.to_owned())?;
+            Ok(json!({"saved":true}))
+        }
+        "desktopSaveReviewProgress" => {
+            let identity = state.session(&request.session_id)?.checkout_preferences_key()?;
+            let progress: crate::state::StoredReviewProgress = serde_json::from_value(request.fields["progress"].clone())
+                .map_err(|_| remote_error("remote_request"))?;
+            if progress.iter().any(|(scope, paths)| {
+                let valid_scope = scope == "changes" || scope.strip_prefix("task:").is_some_and(|oid| {
+                    matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+                });
+                !valid_scope || paths.iter().any(|(path, token)| {
+                    !valid_path(path, false) || token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            }) {
+                return Err(remote_error("remote_request"));
+            }
+            backend.store.save_remote_review_progress(identity, progress)?;
+            Ok(json!({"saved":true}))
+        }
+        "projectCandidates" => {
+            let session = state.session(&request.session_id)?;
+            let fields = request.fields.as_object_mut().ok_or_else(|| remote_error("remote_request"))?;
+            let known = backend.store.workspace_locations(&session.project_host_id());
+            fields.insert("known".into(), json!(known.into_iter().take(400).collect::<Vec<_>>()));
+            bridge_call(&state, request).await
+        }
+        "worktreeRemoveTarget" => {
+            let target = state.session(&request.session_id)?.target.target_id.clone();
+            let path = request.fields["target"].as_str().map(str::to_owned);
+            let result = bridge_call(&state, request).await?;
+            if result["state"] == "completed" {
+                if let Some(path) = path {
+                    let _ = backend.store.forget_remote_recent(&target, &path);
+                }
+            }
+            Ok(result)
+        }
+        _ => bridge_call(&state, request).await,
+    }
+}
+
+struct ChangeRequestReader<'a>(&'a Session);
+
+impl ChangeRequestReader<'_> {
+    async fn read<T: serde::de::DeserializeOwned>(&self, op: &str, mut fields: Value) -> Result<T> {
+        fields["repo"] = json!(self.0.repo);
+        let response = self.0.agent.rpc(op, fields).await?;
+        if response["repo"].as_str() != Some(&self.0.repo) {
+            return Err(remote_error("worktree_changed"));
+        }
+        serde_json::from_value(response["facts"].clone()).map_err(|_| protocol_mismatch())
+    }
+}
+
+impl change_request::RepositoryReader for ChangeRequestReader<'_> {
+    async fn state(&self) -> Result<crate::git::sync::ChangeRequestGitState> {
+        self.read("changeRequestGitState", json!({})).await
+    }
+
+    async fn remotes(&self) -> Result<Vec<crate::model::RemoteInfo>> {
+        self.read("changeRequestRemotes", json!({})).await
+    }
+
+    async fn tracking(&self, remote: &str, branch: &str, generation: u64) -> Result<(bool, u64)> {
+        self.read("changeRequestTracking", json!({
+            "remote": remote,
+            "branch": branch,
+            "generation": generation,
+        })).await
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteChangeRequest {
+    session_id: String,
+    generation: String,
+    #[serde(flatten)]
+    action: ChangeRequestAction,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+enum ChangeRequestAction {
+    Prepare { remote: Option<String> },
+    Create {
+        remote: String,
+        expected: change_request::ExpectedSource,
+        target_branch: String,
+        title: String,
+        body: String,
+    },
+    Token {
+        remote: String,
+        expected: change_request::ExpectedSource,
+        credential: ChangeRequestCredential,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "operation", rename_all = "camelCase")]
+enum ChangeRequestCredential {
+    Status,
+    Set { token: String },
+    Delete,
+}
+
+#[tauri::command]
+pub async fn remote_change_request<R: Runtime>(
+    app: AppHandle<R>,
+    backend: State<'_, Arc<crate::git::ops::Backend>>,
+    state: Managed<'_>,
+    request: RemoteChangeRequest,
+) -> Result<Value> {
+    crate::git::ops::require_change_requests(backend.inner())?;
+    let session = state.session(&request.session_id)?;
+    if let Some(id) = &session.review_id {
+        state.reviews.lock().unwrap().check_bound(id, &request.session_id, &session)?;
+    }
+    if !session.with_generation(&mut json!({}), Some(&request.generation)) {
+        return Err(AppError::new(
+            "change_request_stale",
+            "远端仓库已有变化，请重新打开创建 MR/PR 的页面。",
+        ));
+    }
+    let git = ChangeRequestReader(&session);
+    let http = change_request::Http::default_app()?;
+    match request.action {
+        ChangeRequestAction::Prepare { remote } => {
+            Ok(json!(change_request::prepare_for(&git, remote.as_deref(), &http).await?))
+        }
+        ChangeRequestAction::Create { remote, expected, target_branch, title, body } => {
+            let input = change_request::CreateInput {
+                path: session.root.clone(),
+                remote: Some(remote),
+                target_branch,
+                title,
+                body,
+            };
+            let store = change_request::KeyringStore::new();
+            let decision = change_request::create_for(&git, &input, &http, &store, Some(&expected)).await?;
+            let outcome = match decision {
+                change_request::CreateDecision::Created(outcome) => outcome,
+                change_request::CreateDecision::Fallback(pending) => {
+                    change_request::complete_fallback(&crate::OpenerHandle(app), pending)?
+                }
+            };
+            Ok(json!(outcome))
+        }
+        ChangeRequestAction::Token { remote, expected, credential } => {
+            use change_request::TokenAction;
+            let action = match &credential {
+                ChangeRequestCredential::Status => TokenAction::Status,
+                ChangeRequestCredential::Set { token } => TokenAction::Set(token),
+                ChangeRequestCredential::Delete => TokenAction::Delete,
+            };
+            let store = change_request::KeyringStore::new();
+            Ok(json!(change_request::token_for(&git, &remote, action, &http, &store, Some(&expected)).await?))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteFileCopyRequest {
+    session_id: String,
+    generation: String,
+    relative: String,
+    reveal: bool,
+}
+
+#[tauri::command]
+pub async fn remote_worktree_file_copy<R: Runtime>(
+    app: AppHandle<R>,
+    state: Managed<'_>,
+    request: RemoteFileCopyRequest,
+) -> Result<()> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let session = state.session(&request.session_id)?;
+    if let Some(id) = &session.review_id {
+        state.reviews.lock().unwrap().check_bound(id, &request.session_id, &session)?;
+    }
+    let stale = || AppError::new("stale_state", "远端状态已有变化，请刷新后重试。");
+    let mut fields = json!({"repo": session.repo, "relative": request.relative});
+    if !session.with_generation(&mut fields, Some(&request.generation)) {
+        return Err(stale());
+    }
+    let name = local_copy_name(&request.relative)?;
+    let write_error = |_| AppError::new("open_failed", "无法在本机临时目录创建远端文件副本。");
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("twiglane-ssh-file-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let folder = builder.tempdir().map_err(write_error)?;
+    let path = folder.path().join(name);
+    let mut copy = tokio::fs::File::create_new(&path).await.map_err(write_error)?;
+    let mut offset = 0_u64;
+    let mut version = None;
+    let mut size = None;
+    loop {
+        if !Arc::ptr_eq(&session, &state.session(&request.session_id)?)
+            || !session.with_generation(&mut fields, Some(&request.generation))
+        {
+            return Err(stale());
+        }
+        fields["offset"] = json!(offset);
+        if let Some(version) = &version {
+            fields["version"] = json!(version);
+        }
+        let reply = session.agent.rpc("fileCopy", fields.clone()).await?;
+        let reply_version = probe_identity(&reply["version"]).map_err(|_| protocol_mismatch())?;
+        let reply_size = reply["size"].as_u64().filter(|size| *size >= offset).ok_or_else(protocol_mismatch)?;
+        if reply["repo"].as_str() != Some(&session.repo)
+            || reply["generation"] != fields["generation"]
+            || reply["offset"].as_u64() != Some(offset)
+            || version.as_deref().is_some_and(|expected| expected != reply_version)
+            || size.is_some_and(|expected| expected != reply_size)
+        {
+            return Err(protocol_mismatch());
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(reply["data"].as_str().ok_or_else(protocol_mismatch)?)
+            .map_err(|_| protocol_mismatch())?;
+        let expected_length = (reply_size - offset).min(crate::git::files::FILE_COPY_CHUNK_BYTES as u64);
+        if bytes.len() as u64 != expected_length {
+            return Err(protocol_mismatch());
+        }
+        copy.write_all(&bytes).await.map_err(write_error)?;
+        offset += expected_length;
+        if offset == reply_size {
+            break;
+        }
+        version = Some(reply_version.to_owned());
+        size = Some(reply_size);
+    }
+    copy.flush().await.map_err(write_error)?;
+    drop(copy);
+    if !Arc::ptr_eq(&session, &state.session(&request.session_id)?)
+        || !session.with_generation(&mut json!({}), Some(&request.generation))
+    {
+        return Err(stale());
+    }
+    let result = if request.reveal {
+        app.opener().reveal_item_in_dir(&path)
+    } else {
+        app.opener().open_path(path.to_string_lossy(), None::<&str>)
+    };
+    result.map_err(|_| AppError::new("open_failed", "系统无法打开远端文件的本机副本。"))?;
+    state.file_copies.lock().unwrap().push(folder);
+    Ok(())
+}
+
+fn local_copy_name(relative: &str) -> Result<String> {
+    let name = relative.rsplit('/').next().unwrap_or_default();
+    if name.is_empty() || matches!(name, "." | "..") || name.chars().any(|ch| ch.is_control() || ch == '\\') {
+        return Err(AppError::new("invalid_path", "远端文件名无法用于本机副本。"));
+    }
+    #[cfg(windows)]
+    crate::git::files::windows_entry::validate_name(name.as_ref())?;
+    Ok(name.to_owned())
 }
 
 #[derive(Deserialize)]
@@ -2052,6 +2538,7 @@ fn matching_proof<'a>(response: &'a Value, session: &Session, pending: &Pending,
 fn write_result_field(op: &str) -> Option<&'static str> {
     match op {
         "editSave" => Some("edit"),
+        "ignorePath" => Some("ignore"),
         "deleteEntries" => Some("delete"),
         "commit" => Some("commit"),
         "mergeStart" | "mergeComplete" | "mergeAbort" | "resolveConflict" => Some("merge"),
@@ -2072,6 +2559,7 @@ async fn finish_write(
     pending: &Pending,
     response: Result<Value>,
     receipt_lookup: bool,
+    store: Option<&AppStore>,
 ) -> Result<Value> {
     let mut outcome = None;
     let mut push = None;
@@ -2103,6 +2591,9 @@ async fn finish_write(
                         _ => None,
                     };
                     let mut result = json!({"state":"completed","operationId":pending.operation_id,"snapshot":snapshot,"head":snapshot["head"]});
+                    if pending.wire_op() == "commit" {
+                        result["op"] = json!(pending.op);
+                    }
                     if pending.op == "commitAndPush" {
                         if let Some((head, branch)) = proof.head.zip(proof.branch).filter(|_| {
                             proof.push_destination.is_some_and(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
@@ -2179,6 +2670,18 @@ async fn finish_write(
         Some(current) if current.path == journal && current.record == *pending => {
             let intents = update_push_continuations(&state.data, session, pending, &completed, push)?;
             completed["pushContinuations"] = json!(intents);
+            if let Some((store, expected)) = store.zip(pending.draft_digest.as_deref()).filter(|_| completed["op"].is_string()) {
+                let identity = session.checkout_preferences_key()?;
+                let cleared = match store.clear_remote_checkout_draft(&identity, expected) {
+                    Ok(cleared) => cleared,
+                    Err(error) => {
+                        let mut result = pending_unknown(pending);
+                        result["message"] = json!(error.message);
+                        return Ok(result);
+                    }
+                };
+                completed["draftCleared"] = json!(cleared);
+            }
             if std::fs::remove_file(journal).is_err() {
                 return Ok(pending_unknown(pending));
             }
@@ -2201,7 +2704,11 @@ async fn finish_write(
 }
 
 #[tauri::command]
-pub async fn remote_worktree_write(state: Managed<'_>, request: WriteRequest) -> Result<Value> {
+pub async fn remote_worktree_write(
+    state: Managed<'_>,
+    backend: State<'_, Arc<crate::git::ops::Backend>>,
+    request: WriteRequest,
+) -> Result<Value> {
     let session = state.session(&request.session_id)?;
     let fail = |message: &str| json!({"state":"failed","operationId":request.operation_id,"message":message});
     if !uuid(&request.operation_id) {
@@ -2254,6 +2761,8 @@ pub async fn remote_worktree_write(state: Managed<'_>, request: WriteRequest) ->
         repo: session.repo.clone(),
         worktree_identity: session.worktree_identity.clone(),
         push_commit_id: None,
+        draft_digest: request.message.as_deref().filter(|_| request.op == WriteKind::Commit)
+            .map(|message| format!("{:x}", Sha256::digest(message.as_bytes()))),
     };
     {
         let _guard = state.mutations.lock().unwrap();
@@ -2263,12 +2772,13 @@ pub async fn remote_worktree_write(state: Managed<'_>, request: WriteRequest) ->
         save_pending(&journal, &pending)?;
     }
     let response = session.agent.rpc(request.op.name(), fields).await;
-    finish_write(&state, &session, &journal, &pending, response, false).await
+    finish_write(&state, &session, &journal, &pending, response, false, Some(&backend.store)).await
 }
 
 #[tauri::command]
 pub async fn remote_worktree_recover(
     state: Managed<'_>,
+    backend: State<'_, Arc<crate::git::ops::Backend>>,
     session_id: String,
     operation_id: String,
 ) -> Result<Value> {
@@ -2280,10 +2790,12 @@ pub async fn remote_worktree_recover(
             .unwrap()
             .check_bound(id, &session_id, &session)?;
     }
-    recover_pending(&state, &session, &operation_id).await
+    recover_pending(&state, &session, &operation_id, Some(&backend.store)).await
 }
 
-async fn recover_pending(state: &RemoteWorktrees, session: &Session, operation_id: &str) -> Result<Value> {
+async fn recover_pending(
+    state: &RemoteWorktrees, session: &Session, operation_id: &str, store: Option<&AppStore>,
+) -> Result<Value> {
     let file = {
         let _guard = state.mutations.lock().unwrap();
         find_pending(&state.data, session)?.filter(|file| file.record.operation_id == operation_id)
@@ -2296,7 +2808,7 @@ async fn recover_pending(state: &RemoteWorktrees, session: &Session, operation_i
     } else {
         session.agent.rpc("receipt", json!({"repo":session.repo,"operationId":operation_id})).await
     };
-    finish_write(state, session, &file.path, &file.record, response, true).await
+    finish_write(state, session, &file.path, &file.record, response, true, store).await
 }
 
 /// v1 and v2 store receipts separately. The legacy connection is used only to
@@ -2461,6 +2973,7 @@ printf '{"installed":true,"agentSha256":"%s"}\n' "$5"
             repo: session.repo.clone(),
             worktree_identity: None,
             push_commit_id: None,
+            draft_digest: None,
         };
         save_pending(&journal, &pending).unwrap();
         let response = session
@@ -2468,7 +2981,7 @@ printf '{"installed":true,"agentSha256":"%s"}\n' "$5"
             .rpc("commit", json!({"message": "\u{0001}".repeat(24_000)}))
             .await;
         assert_eq!(response.as_ref().unwrap_err().code, "remote_request_size");
-        let result = finish_write(&state, &session, &journal, &pending, response, false)
+        let result = finish_write(&state, &session, &journal, &pending, response, false, None)
             .await
             .unwrap();
         assert_eq!(result["state"], "failed");
@@ -2578,6 +3091,7 @@ input.on("line", line => {
             repo: session.repo.clone(),
             worktree_identity: None,
             push_commit_id: None,
+            draft_digest: None,
         };
         let first = operation.operation_id.clone();
         let second = Uuid::new_v4().to_string();
@@ -2654,6 +3168,7 @@ input.on("line", line => {
             repo: session.repo.clone(),
             worktree_identity: None,
             push_commit_id: Some(commit_id.clone()),
+            draft_digest: None,
         };
         let intent = PushContinuation {
             head: "c".repeat(40),
@@ -2670,7 +3185,7 @@ input.on("line", line => {
             "state": "completed",
             "readbackError": "status_failed",
         }});
-        let result = finish_write(&state, &session, &journal, &pending, Ok(response), true).await.unwrap();
+        let result = finish_write(&state, &session, &journal, &pending, Ok(response), true, None).await.unwrap();
         assert_eq!(result["state"], "completed");
         assert_eq!(result["snapshot"]["branch"], "main");
         assert_eq!(result["pushContinuations"], json!([]));
@@ -2802,7 +3317,7 @@ input.on("line", line => {
         assert_eq!(requests(dir.path()), vec!["fetch".to_string()]);
         let alternate = state.session("alternate").unwrap();
         let operation_id = first["operationId"].as_str().unwrap();
-        let mismatch = recover_pending(&state, &alternate, operation_id).await.unwrap();
+        let mismatch = recover_pending(&state, &alternate, operation_id, None).await.unwrap();
         assert_eq!(mismatch["state"], "unknown");
         assert!(journal.exists());
         assert_eq!(requests(dir.path()), vec!["fetch", "receipt"]);
@@ -2822,6 +3337,7 @@ input.on("line", line => {
             repo: session.repo.clone(),
             worktree_identity: session.worktree_identity.clone(),
             push_commit_id: None,
+            draft_digest: None,
         };
         let current = session.journal(dir.path());
         let mut different_host = test_session(fake_agent(dir.path(), "complete"));
@@ -3145,6 +3661,8 @@ esac
             allow_install: false,
             install_confirmation: None,
             review_id: None,
+            provision: None,
+            project_host_id: None,
         };
         let progress = Channel::new(|_| Ok(()));
         let absent = connect(Some(&helper), &request, None, None, &progress, &access).await.err().unwrap();
@@ -3166,7 +3684,7 @@ esac
         request.allow_install = true;
         probe["peerRevision"] = json!("d".repeat(64));
         write("probe-v2.json", probe);
-        let stale = connect(Some(&helper), &request, Some(offer), None, &progress, &access).await.err().unwrap();
+        let stale = connect(Some(&helper), &request, Some(*offer), None, &progress, &access).await.err().unwrap();
         assert_eq!(stale.code, "target_changed");
         assert!(!root.join("wrote").exists(), "mismatched configuration must not install or connect");
     }

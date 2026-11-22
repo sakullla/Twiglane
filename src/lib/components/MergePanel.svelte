@@ -45,6 +45,7 @@
 </script>
 
 <script lang="ts">
+  import { isRemoteRepositoryKey } from "../remote-worktree";
   import { untrack } from "svelte";
   import { api } from "../api";
   import { mainBranchNames } from "../branches";
@@ -789,18 +790,22 @@
 
   function openFileMenu(path: string, resolved: boolean, point: { x: number; y: number }) {
     const repo = opened.summary.path;
+    const remote = isRemoteRepositoryKey(repo);
+    const generation = opened.generation;
     fileMenu = {
       ...point,
       label: `${splitPath(path).name} 的操作`,
       entries: conflictFileMenu(
-        { resolved, busyReason: blocked ? BUSY_REASON : null, currentLabel, incomingLabel },
+        { resolved, busyReason: blocked ? BUSY_REASON : null, currentLabel, incomingLabel,
+          externalLabel: remote ? "用本机默认程序打开临时副本" : undefined,
+          revealLabel: remote ? "在本机显示临时副本" : undefined },
         {
           open: () => openConflict(path),
           takeOurs: () => takeSide(path, "ours"),
           takeTheirs: () => takeSide(path, "theirs"),
           markResolved: () => markAsIs(path),
-          openExternal: () => void api.openPath(repo, path).catch(onFailure),
-          reveal: () => void api.revealPath(repo, path).catch(onFailure),
+          openExternal: () => void (remote ? api.openRemoteFileCopy(repo, path, generation, false) : api.openPath(repo, path)).catch(onFailure),
+          reveal: () => void (remote ? api.openRemoteFileCopy(repo, path, generation, true) : api.revealPath(repo, path)).catch(onFailure),
           copyPath: () => void copyFilePath(path),
         },
       ),

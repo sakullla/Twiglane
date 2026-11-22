@@ -139,6 +139,35 @@ pub struct RemoteSsh {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct RemoteRecentRepo {
+    pub target_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_host_id: Option<String>,
+    pub host: String,
+    pub path: String,
+    pub name: String,
+    pub opened_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteProjectHost {
+    pub workspace_host_id: String,
+    pub target_id: String,
+    pub host: String,
+}
+
+pub type StoredReviewProgress = BTreeMap<String, BTreeMap<String, String>>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RemoteCheckoutPreferences {
+    pub draft: String,
+    pub review_progress: StoredReviewProgress,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct Persisted {
     pub version: u32,
     pub theme: Theme,
@@ -160,6 +189,12 @@ pub struct Persisted {
     pub recent: Vec<RecentRepo>,
     pub drafts: BTreeMap<String, String>,
     #[serde(default)]
+    pub remote_recent: Vec<RemoteRecentRepo>,
+    #[serde(default)]
+    pub remote_project_hosts: Vec<RemoteProjectHost>,
+    #[serde(default)]
+    pub remote_checkouts: BTreeMap<String, RemoteCheckoutPreferences>,
+    #[serde(default)]
     pub workspaces: Vec<crate::workspaces::Project>,
     /// 远程 SSH 设置：只存非秘密配置，缺省关闭。
     #[serde(default)]
@@ -180,6 +215,9 @@ impl Default for Persisted {
             git_executable: None,
             recent: Vec::new(),
             drafts: BTreeMap::new(),
+            remote_recent: Vec::new(),
+            remote_project_hosts: Vec::new(),
+            remote_checkouts: BTreeMap::new(),
             workspaces: Vec::new(),
             remote_ssh: RemoteSsh::default(),
         }
@@ -501,6 +539,74 @@ impl AppStore {
         Ok(self.snapshot().recent)
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn touch_remote_recent(&self, recent: RemoteRecentRepo, host: RemoteProjectHost) -> Result<(), AppError> {
+        self.update(move |data| {
+            data.remote_recent.retain(|entry| entry.target_id != recent.target_id || entry.path != recent.path);
+            data.remote_recent.insert(0, recent);
+            data.remote_recent.truncate(MAX_RECENT);
+            data.remote_project_hosts.retain(|entry| entry.target_id != host.target_id);
+            data.remote_project_hosts.insert(0, host);
+            Ok(())
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn forget_remote_recent(&self, target_id: &str, path: &str) -> Result<(), AppError> {
+        self.update(|data| {
+            data.remote_recent.retain(|entry| entry.target_id != target_id || entry.path != path);
+            Ok(())
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn remote_checkout(&self, identity: &str) -> RemoteCheckoutPreferences {
+        self.lock().data.remote_checkouts.get(identity).cloned().unwrap_or_default()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn save_remote_checkout_draft(&self, identity: String, message: String) -> Result<(), AppError> {
+        if message.chars().count() > MAX_DRAFT_CHARS {
+            return Err(AppError::new("draft_too_large", "提交说明过长，未保存。"));
+        }
+        reject_secret_draft(&message)?;
+        self.update(move |data| {
+            data.remote_checkouts.entry(identity).or_default().draft = message;
+            Ok(())
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn clear_remote_checkout_draft(&self, identity: &str, expected: &str) -> Result<bool, AppError> {
+        use sha2::{Digest, Sha256};
+
+        let matches = |draft: &str| !draft.is_empty() && format!("{:x}", Sha256::digest(draft.as_bytes())) == expected;
+        if !matches(&self.remote_checkout(identity).draft) {
+            return Ok(false);
+        }
+        let mut cleared = false;
+        self.update(|data| {
+            if let Some(preferences) = data.remote_checkouts.get_mut(identity).filter(|entry| matches(&entry.draft)) {
+                preferences.draft.clear();
+                cleared = true;
+            }
+            Ok(())
+        })?;
+        Ok(cleared)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn save_remote_review_progress(
+        &self,
+        identity: String,
+        progress: StoredReviewProgress,
+    ) -> Result<(), AppError> {
+        self.update(move |data| {
+            data.remote_checkouts.entry(identity).or_default().review_progress = progress;
+            Ok(())
+        })
+    }
+
     pub fn draft(&self, path: &str) -> String {
         self.lock()
             .data
@@ -614,6 +720,49 @@ mod tests {
         assert_eq!(recent[0].path, "/work/b/demo");
         assert_eq!(recent[1].path, "/work/a/demo");
         assert!(recent.iter().all(|repo| repo.name == "demo"));
+    }
+
+    #[test]
+    fn remote_checkout_preferences_and_routes_survive_restart_independently() {
+        use sha2::Digest;
+
+        let dir = crate::test_support::TempDir::new("remote-checkout-state");
+        let path = dir.path().join("state.json");
+        let store = AppStore::open(path.clone());
+        for (index, target, identity) in [(1, "host-a", "first"), (2, "host-b", "second")] {
+            let remote = RemoteRecentRepo {
+                target_id: target.into(), project_host_id: Some(identity.into()),
+                host: target.into(), path: "/same/repo".into(),
+                name: "repo".into(), opened_at_ms: index,
+            };
+            let project_host = RemoteProjectHost {
+                workspace_host_id: identity.into(), target_id: target.into(), host: target.into(),
+            };
+            store.touch_remote_recent(remote, project_host).unwrap();
+            store.save_remote_checkout_draft(identity.into(), format!("draft {identity}")).unwrap();
+            let progress = BTreeMap::from([("changes".to_owned(), BTreeMap::from([
+                ("readme.txt".to_owned(), format!("token for {identity}")),
+            ]))]);
+            store.save_remote_review_progress(identity.into(), progress).unwrap();
+        }
+        drop(store);
+
+        let store = AppStore::open(path);
+        assert_eq!(store.snapshot().remote_recent.len(), 2);
+        assert_eq!(store.snapshot().remote_recent[0].project_host_id.as_deref(), Some("second"));
+        assert_eq!(store.snapshot().remote_project_hosts.len(), 2);
+        assert_eq!(store.remote_checkout("first").draft, "draft first");
+        assert_eq!(store.remote_checkout("second").review_progress["changes"]["readme.txt"], "token for second");
+        assert!(store.remote_checkout("different-worktree").draft.is_empty());
+        store.forget_remote_recent("host-a", "/same/repo").unwrap();
+        assert_eq!(store.snapshot().remote_recent[0].target_id, "host-b");
+        assert_eq!(store.snapshot().remote_project_hosts.len(), 2);
+        assert_eq!(store.remote_checkout("first").draft, "draft first");
+        let committed = format!("{:x}", sha2::Sha256::digest(b"draft second"));
+        assert!(!store.clear_remote_checkout_draft("first", &committed).unwrap());
+        assert_eq!(store.remote_checkout("first").draft, "draft first");
+        assert!(store.clear_remote_checkout_draft("second", &committed).unwrap());
+        assert!(store.remote_checkout("second").draft.is_empty());
     }
 
     #[test]

@@ -145,6 +145,7 @@ enum WriteOp {
     WorktreeRemoveTarget,
     // 文件与目录写入（T3）：与 Git 写入同一套锁、令牌与回执顺序。
     EditSave,
+    IgnorePath,
     CreateEntry,
     CopyEntry,
     MoveEntry,
@@ -195,6 +196,7 @@ const WRITE_OPS: &[WriteOp] = &[
     WriteOp::WorktreeRemove,
     WriteOp::WorktreeRemoveTarget,
     WriteOp::EditSave,
+    WriteOp::IgnorePath,
     WriteOp::CreateEntry,
     WriteOp::CopyEntry,
     WriteOp::MoveEntry,
@@ -264,6 +266,7 @@ impl WriteOp {
             Self::WorktreeRemove => "worktreeRemove",
             Self::WorktreeRemoveTarget => "worktreeRemoveTarget",
             Self::EditSave => "editSave",
+            Self::IgnorePath => "ignorePath",
             Self::CreateEntry => "createEntry",
             Self::CopyEntry => "copyEntry",
             Self::MoveEntry => "moveEntry",
@@ -509,7 +512,7 @@ impl Context {
         tokio::spawn(async move {
             let id = request.id.clone();
             let limit = file_response_limit(&request);
-            let result = if matches!(request.op.as_str(), "directory" | "fileContent" | "filePreview"
+            let result = if matches!(request.op.as_str(), "directory" | "fileContent" | "filePreview" | "fileCopy" | "projectCandidates"
                 | "document" | "documentResource" | "documentRemoteImage" | "pathSearch" | "contentSearch" | "editSnapshot")
             {
                 tokio::select! {
@@ -537,7 +540,7 @@ impl Context {
         };
         let _ = self.replies.send(frame).await;
     }
-    async fn run(&self, request: &Request, cancel: &AtomicBool) -> Result<Value, AppError> {
+    async fn run(&self, request: &Request, cancel: &Arc<AtomicBool>) -> Result<Value, AppError> {
         // 普通 Git RPC 没有「执行程序」这一维：仓库操作只经共享 Git 实现执行。任何请求带上
         // program/command/shell/cwd/env 都必须被拒绝；显式终端会话也不例外——它接受的是
         // PTY 输入（data），不是要执行的程序名或参数。
@@ -557,6 +560,16 @@ impl Context {
         match request.op.as_str() {
             "hello" => self.hello(&request.fields),
             "open" => self.open(&request.fields, cancel).await,
+            "provisionRepository" => {
+                if self.session.lock().unwrap().is_some() {
+                    return Err(AppError::new("provision_session", "请从新的 SSH 连接创建或克隆仓库。"));
+                }
+                self.journal_identity()?;
+                let path = string_field(&request.fields, "path")?;
+                let operation = deserialize_field(&request.fields, "operation")?;
+                check_cancel(cancel)?;
+                crate::provision::run(&self.backend, &path, operation).await
+            }
             "status" => self.status(&request.fields, cancel).await,
             "diff" => self.diff(&request.fields, cancel).await,
             "taskReview" => self.task_review(&request.fields, cancel).await,
@@ -572,6 +585,9 @@ impl Context {
             "branchList" => self.branches(&request.fields, cancel).await,
             "tagState" => self.tag_state(&request.fields, cancel).await,
             "remoteState" => self.remote_state(&request.fields, cancel).await,
+            op @ ("changeRequestGitState" | "changeRequestRemotes" | "changeRequestTracking") => {
+                self.change_request_facts(op, &request.fields, cancel).await
+            }
             "stashState" => self.stash_state(&request.fields, cancel).await,
             "mergePreview" => self.merge_preview(&request.fields, cancel).await,
             "mergeSession" => self.merge_session(&request.fields, cancel).await,
@@ -597,6 +613,8 @@ impl Context {
             "directory" => self.directory(&request.fields, cancel).await,
             "fileContent" => self.file_content(&request.fields, cancel).await,
             "filePreview" => self.file_preview(&request.fields, cancel).await,
+            "fileCopy" => self.file_copy(&request.fields, cancel).await,
+            "projectCandidates" => self.project_candidates(&request.fields, cancel).await,
             "document" => self.document(&request.fields, cancel).await,
             "documentResource" => self.document_resource(&request.fields, cancel).await,
             "documentRemoteImage" => self.document_remote_image(&request.fields, cancel).await,
@@ -1205,6 +1223,39 @@ impl Context {
         Ok(json!({ "repo": session.key, "remote": state }))
     }
 
+    async fn change_request_facts(
+        &self,
+        op: &str,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.repo_session(fields).await?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let facts = match op {
+            "changeRequestGitState" => to_value(sync::change_request_git_state(
+                &self.backend, &session.key, generation, internal_request_id(),
+            ).await?)?,
+            "changeRequestRemotes" => to_value(sync::change_request_remotes(
+                &self.backend, &session.key, generation, internal_request_id(),
+            ).await?)?,
+            "changeRequestTracking" => {
+                let remote = string_field(fields, "remote")?;
+                let branch = string_field(fields, "branch")?;
+                let expected = optional_u64_field(fields, "generation")?
+                    .ok_or_else(|| AppError::new("invalid_request", "缺少仓库代次。"))?;
+                let (exists, generation) = sync::remote_tracking_ref_exists(
+                    &self.backend, &session.key, &remote, &branch,
+                    expected, internal_request_id(),
+                ).await?;
+                json!([exists, generation])
+            }
+            _ => unreachable!("only negotiated change request reads are dispatched here"),
+        };
+        check_cancel(cancel)?;
+        Ok(json!({ "repo": session.key, "facts": facts }))
+    }
+
     async fn stash_state(
         &self,
         fields: &Map<String, Value>,
@@ -1556,6 +1607,81 @@ impl Context {
             "generation": preview.generation,
             "preview": preview,
         }))
+    }
+
+    async fn file_copy(&self, fields: &Map<String, Value>, cancel: &AtomicBool) -> Result<Value, AppError> {
+        let session = self.repo_session(fields).await?;
+        let relative = string_field(fields, "relative")?;
+        let offset = optional_u64_field(fields, "offset")?.unwrap_or(0);
+        let version = optional_text_field(fields, "version")?;
+        if offset != 0 && version.is_none() {
+            return Err(AppError::new("invalid_request", "缺少远端文件版本。"));
+        }
+        let generation = optional_u64_field(fields, "generation")?
+            .ok_or_else(|| AppError::new("invalid_request", "缺少仓库代次。"))?;
+        check_cancel(cancel)?;
+        let page = files::repository_file_copy(
+            &self.backend, &session.key, &relative, offset, version, generation, internal_request_id(),
+        ).await?;
+        check_cancel(cancel)?;
+        Ok(json!({
+            "repo": session.key,
+            "generation": generation,
+            "version": page.version,
+            "size": page.size,
+            "offset": offset,
+            "data": base64::engine::general_purpose::STANDARD.encode(page.bytes),
+        }))
+    }
+
+    async fn project_candidates(&self, fields: &Map<String, Value>, cancel: &Arc<AtomicBool>) -> Result<Value, AppError> {
+        use crate::git::project_paths::{discover_paths, identity, inspect_candidate};
+
+        const MAX_CANDIDATES: usize = 400;
+        let session = self.repo_session(fields).await?;
+        let known: Vec<(String, String)> = deserialize_field(fields, "known")?;
+        let scan = optional_text_field(fields, "root")?;
+        let requested = if scan.is_none() { string_list_field(fields, "paths")? } else { Vec::new() };
+        for path in requested.iter().map(String::as_str).chain(scan.as_deref()) {
+            ops::validate_input_path(path)?;
+        }
+        if requested.len() > MAX_CANDIDATES {
+            return Err(AppError::new("workspace", "一次最多核对 400 个远端仓库位置。"));
+        }
+        let stop = Arc::clone(cancel);
+        let (paths, mut candidates, mut partial, known) = tokio::task::spawn_blocking(move || {
+            let (paths, issues, partial) = match scan {
+                Some(root) => discover_paths(&root, &stop)?,
+                None => (requested, Vec::new(), false),
+            };
+            let mut ids = HashMap::new();
+            for (path, id) in known.into_iter().take(MAX_CANDIDATES) {
+                check_cancel(&stop)?;
+                if let Some((_, common)) = identity(&path) {
+                    ids.entry(common).or_insert(id);
+                }
+            }
+            Ok::<_, AppError>((paths, issues, partial, ids))
+        }).await.map_err(|_| AppError::new("workspace", "远端目录检查中断。"))??;
+        check_cancel(cancel)?;
+        partial |= paths.len() + candidates.len() > MAX_CANDIDATES;
+        candidates.truncate(MAX_CANDIDATES);
+        let git = ops::require_git(&self.backend).await?;
+        let remaining = MAX_CANDIDATES - candidates.len();
+        let mut seen: std::collections::HashSet<_> = candidates.iter().map(|candidate| candidate.path.clone()).collect();
+        for path in paths.into_iter().take(remaining) {
+            check_cancel(cancel)?;
+            let candidate = inspect_candidate(&self.backend, &git.path, path, &known).await;
+            if seen.insert(candidate.path.clone()) {
+                candidates.push(candidate);
+            }
+        }
+        #[cfg(windows)]
+        for candidate in &mut candidates {
+            candidate.path = candidate.path.replace('\\', "/");
+            candidate.common_directory = candidate.common_directory.take().map(|path| path.replace('\\', "/"));
+        }
+        Ok(json!({"repo":session.key, "discovery":{"candidates":candidates,"cancelled":false,"partial":partial}}))
     }
 
     /// Markdown 文档：`mode=document` 排版、`mode=source` 分页源码；版本不一致按 stale 拒绝。
@@ -2137,7 +2263,7 @@ impl Context {
                 store.pending(receipt, error.code)?;
                 return Err(AppError::new("operation_pending", "提交命令已执行，新的分支状态无法核对。请重新连接并核对原操作。"));
             }
-            Err(error) if matches!(op, WriteOp::EditSave | WriteOp::CreateEntry | WriteOp::CopyEntry | WriteOp::MoveEntry | WriteOp::DeleteEntries) => {
+            Err(error) if matches!(op, WriteOp::EditSave | WriteOp::IgnorePath | WriteOp::CreateEntry | WriteOp::CopyEntry | WriteOp::MoveEntry | WriteOp::DeleteEntries) => {
                 store.pending(receipt, error.code)?;
                 return Err(AppError::new("operation_pending", "文件操作已执行，写入后的状态无法核对。请重新连接并检查工作树。"));
             }
@@ -2718,6 +2844,14 @@ impl Context {
                 )
                 .await?;
                 Ok(("edit".to_string(), to_value(snapshot)?))
+            }
+            WriteOp::IgnorePath => {
+                let pattern = raw_text_field(fields, "pattern")?;
+                let local = bool_field(fields, "local");
+                let written = crate::git::workspace::ignore_path(
+                    backend, path, &pattern, local, generation, request_id,
+                ).await?;
+                Ok(("ignore".to_string(), json!({ "note": written.note })))
             }
             WriteOp::CreateEntry => {
                 let relative = string_field(fields, "path")?;

@@ -45,6 +45,8 @@ fn capabilities_grant_only_explicit_terminal_ipc_not_a_generic_shell() {
         "allow-remote-worktree-recover",
         // 通用远端桥接只开放 op 白名单内的 Git 能力：没有 shell、程序、工作目录或环境变量。
         "allow-remote-worktree-call",
+        "allow-remote-worktree-file-copy",
+        "allow-remote-change-request",
         "allow-remote-worktree-events",
         "allow-remote-worktree-cancel-reads",
         "allow-remote-ssh-settings",

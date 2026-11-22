@@ -439,7 +439,7 @@ describe("目录树右键菜单", () => {
     render(FileTree, { props: props as never });
     const menu = await openMenu("src/lib/components");
     await fireEvent.click(within(menu).getByRole("menuitem", { name: /资源管理器|访达/ }));
-    expect(props.onReveal).toHaveBeenCalledWith("src/lib/components");
+    expect(props.onReveal).toHaveBeenCalledWith("src/lib/components", true);
     await pickMenuItem(await openMenu("src/lib/components"), "路径", "复制目录名");
     expect(props.onCopyPath).toHaveBeenLastCalledWith("components", "目录名");
   });
@@ -448,7 +448,7 @@ describe("目录树右键菜单", () => {
     const props = baseProps();
     render(FileTree, { props: props as never });
     await fireEvent.click(within(await openMenu("src/lib/components/Button.svelte")).getByRole("menuitem", { name: /资源管理器|访达/ }));
-    expect(props.onReveal).toHaveBeenCalledWith("src/lib/components/Button.svelte");
+    expect(props.onReveal).toHaveBeenCalledWith("src/lib/components/Button.svelte", false);
     await fireEvent.click(within(await openMenu("src/lib/components/Button.svelte")).getByRole("menuitem", { name: "用默认程序打开" }));
     expect(props.onOpenDefault).toHaveBeenCalledWith("src/lib/components/Button.svelte");
   });

@@ -56,12 +56,7 @@ pub async fn clone_repository(
     };
     let parent = canonical_existing(&validate_input_path(parent)?)?;
     ensure_directory(&parent)?;
-    let directory = if name.trim().is_empty() {
-        clone_dir_name(url)?
-    } else {
-        name.trim().to_string()
-    };
-    validate_clone_name(&directory)?;
+    let directory = clone_destination_name(url, name)?;
     let destination = parent.join(&directory);
     if destination.exists() && (!destination.is_dir() || !dir_empty(&destination)?) {
         return Err(AppError::new(
@@ -196,6 +191,8 @@ pub async fn remote_state(
 
 /// change-request 只读上下文：当前分支、远程列表和本地默认分支推导。
 /// 读路径与 remote_state/branch_list 相同，不进入写队列，也不改 HEAD、工作区或上游。
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ChangeRequestGitState {
     pub generation: u64,
     pub branch: crate::model::BranchInfo,
@@ -2384,7 +2381,12 @@ fn validate_clone_name(name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn clone_dir_name(url: &str) -> Result<String, AppError> {
+pub(crate) fn clone_destination_name(url: &str, name: &str) -> Result<String, AppError> {
+    if !name.trim().is_empty() {
+        let name = name.trim();
+        validate_clone_name(name)?;
+        return Ok(name.to_owned());
+    }
     let trimmed = url.trim_end_matches(['/', '\\']);
     let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
     let name = trimmed.rsplit(['/', '\\', ':']).next().unwrap_or("");
@@ -4337,7 +4339,7 @@ mod tests {
         let (_, args) = crate::git::command::push_branch_to_command(Path::new("git"), root, "origin", "dev", "refs/heads/dev");
         let text: Vec<String> = args.iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
         let at = text.iter().position(|arg| arg == "push").unwrap();
-        assert_eq!(&text[at..], ["push", "--", "origin", "refs/heads/dev:refs/heads/dev"]);
+        assert_eq!(&text[at..], ["push", "--porcelain", "--", "origin", "refs/heads/dev:refs/heads/dev"]);
         assert!(!text.iter().any(|arg| arg.starts_with('+')));
     }
 

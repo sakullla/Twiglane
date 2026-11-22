@@ -60,6 +60,8 @@
     pruneReviewProgressIn,
     reviewPaths,
     reviewSessionSummary,
+    hydrateStoredReviewProgress,
+    onStoredReviewProgressChanged,
     reviewSummaryIn,
     reviewTokens,
     taskReviewScope,
@@ -90,6 +92,7 @@
     RecentRepo,
     RepoChanged,
     RepoHead,
+    RemoteProjectHost,
     StatusSnapshot,
     PullIntegration,
     RepositoryEditSnapshot,
@@ -143,7 +146,7 @@
   import ProjectManager from "./lib/components/ProjectManager.svelte";
   import SelectMenu, { type SelectMenuOption } from "./lib/components/SelectMenu.svelte";
   import { projectInitial } from "./lib/workspaces";
-  import { checkoutKey, projectMemberForCheckout, projectRepos, type Projects, type WorkspacePreview, type WorkspaceRepository } from "./lib/workspaces";
+  import { checkoutKey, projectLocationRepo, projectMemberForCheckout, projectRepos, type Projects, type WorkspaceCheckout, type WorkspacePreview, type WorkspaceRepository } from "./lib/workspaces";
   import { CheckoutContexts } from "./lib/checkout-context";
   import RepoSwitcher from "./lib/components/RepoSwitcher.svelte";
   import ScopeModal from "./lib/components/ScopeModal.svelte";
@@ -161,6 +164,7 @@
     remoteReviewPort,
     repositoryBaseName,
     type RemoteConnectionProgress,
+    type RemoteProvision,
     type RemoteReviewSource,
     type RemoteTarget,
   } from "./lib/remote-worktree";
@@ -203,6 +207,7 @@
   let opened = $state.raw<OpenedRepository | null>(null);
   let recent = $state.raw<RecentRepo[]>([]);
   let projects = $state.raw<Projects>({ hostId: "", projects: [] });
+  let remoteProjectHosts = $state.raw<RemoteProjectHost[]>([]);
   let selectedProjectId = $state<string | null>(null);
   let projectManagerOpen = $state(false);
   let projectInitialPreview = $state<WorkspacePreview | null>(null);
@@ -223,9 +228,15 @@
       tag: project.sourcePath ? "共享" : undefined,
     })),
   ]);
-  const projectCheckoutPath = $derived(opened?.summary.path ?? null);
-  const switcherRepos = $derived(projectRepos(selectedProject, projects.hostId, recent, projectCheckoutPath));
-  const directMember = $derived(selectedProject && projectCheckoutPath ? projectMemberForCheckout(selectedProject, projects.hostId, projectCheckoutPath, []) : null);
+  const projectCheckout = $derived.by((): WorkspaceCheckout | null => {
+    if (!opened) return null;
+    const { path: key, name, remotePath } = opened.summary;
+    if (!isRemoteRepositoryKey(key)) return { hostId: projects.hostId, path: key, key, name };
+    const hostId = opened.remoteProjectHostId;
+    return hostId && remotePath ? { hostId, path: remotePath, key, name } : null;
+  });
+  const switcherRepos = $derived(projectRepos(selectedProject, projects.hostId, recent, opened?.summary.path, remoteProjectHosts, projectCheckout));
+  const directMember = $derived(selectedProject && projectCheckout ? projectMemberForCheckout(selectedProject, projectCheckout.hostId, projectCheckout.path, []) : null);
   let linkedMember = $state.raw<WorkspaceRepository | null>(null);
   const currentProjectRepository = $derived(directMember ?? linkedMember);
   const currentProjectMember = $derived(currentProjectRepository !== null);
@@ -255,26 +266,24 @@
     }
     return null;
   });
-  /** 所选项目里本机真的有位置的成员数：与名单总数不同时说明有成员只存在于别的主机，需要重新关联。 */
-  const projectLocalCount = $derived(
+  const projectAvailableCount = $derived(
     selectedProject
-      ? selectedProject.manifest.repositories.filter((repo) => repo.locations.some((location) => location.hostId === projects.hostId)).length
+      ? selectedProject.manifest.repositories.filter((repo) => repo.locations.some((location) => projectLocationRepo(location, repo.name, projects.hostId, remoteProjectHosts))).length
       : 0,
   );
   $effect(() => {
-    const current = projectCheckoutPath;
+    const current = projectCheckout;
     const project = selectedProject;
-    const host = projects.hostId;
     linkedMember = null;
     if (!current || !project || directMember) return;
-    // 远端仓库不在本机磁盘上：仓库键不能交给本机 HEAD 读取，也不参与本机成员比对。
-    if (isRemoteRepositoryKey(current)) return;
-    // Bounded on-disk HEAD metadata only; Git status stays in the existing Scheduler overview.
-    const paths = [...new Set([current, ...projectRepos(project, host, []).map((repo) => repo.path)])];
+    const memberPaths = project.manifest.repositories.flatMap((repo) => repo.locations
+      .filter((location) => location.hostId === current.hostId).map((location) => location.path));
+    const paths = [...new Set([current.path, ...memberPaths])];
     let alive = true;
-    if (paths.length === 1) return; // No local member path to compare with this checkout.
-    void api.repoHeads(paths).then((heads) => {
-      if (alive) linkedMember = projectMemberForCheckout(project, host, current, heads ?? []);
+    if (paths.length === 1) return;
+    const read = isRemoteRepositoryKey(current.key) ? api.linkedWorktreeHeads(current.key, paths) : api.repoHeads(paths);
+    void read.then((heads) => {
+      if (alive) linkedMember = projectMemberForCheckout(project, current.hostId, current.path, heads ?? []);
     }).catch(() => {});
     return () => { alive = false; };
   });
@@ -524,6 +533,16 @@
   let remotePickerTargets = $state.raw<RemoteTarget[]>([]);
   let remoteTargetId = $state("");
   let remotePath = $state("");
+  let remotePickerAction = $state<"open" | "create" | "clone">("open");
+  let remotePickerProjectHostId = $state<string | null>(null);
+  let remoteCloneUrl = $state("");
+  let remoteCloneName = $state("");
+  let remoteCloneAuth = $state(false);
+  let remoteCloneUser = $state("");
+  let remoteClonePassword = $state("");
+  let remoteCloneRemember = $state(false);
+  let remoteCloneCanDetach = $state(false);
+  let remoteOpenAttempt: { background: boolean } | null = null;
   let remoteInstall = $state<{ version: string; size: number; confirmationId: string | null } | null>(null);
   let remoteProgress = $state<string | null>(null);
   let remoteReviewSource = $state<RemoteReviewSource | null>(null);
@@ -1575,6 +1594,7 @@
         files: clampWidth(settings.panelWidths.files),
       };
       recent = settings.recent;
+      remoteProjectHosts = settings.remoteProjectHosts ?? [];
       git = settings.git;
       warning = settings.settingsWarning;
       live = settings.git.available ? "已准备就绪" : settings.git.message;
@@ -1648,9 +1668,16 @@
     draft = drafts.peek(next.summary.path) ?? next.draft;
     if (drafts.peek(next.summary.path) !== null) scheduleDraftSave();
     opened = next;
+    const remoteLocation = parseRemoteRepositoryKey(next.summary.path);
+    if (remoteLocation && next.remoteProjectHostId && next.summary.host) {
+      remoteProjectHosts = [
+        { workspaceHostId: next.remoteProjectHostId, targetId: remoteLocation.hostId, host: next.summary.host },
+        ...remoteProjectHosts.filter((host) => host.targetId !== remoteLocation.hostId),
+      ];
+    }
     setAbbrevLength(next.abbrevLength);
-    // 换仓库清空审阅进度；同一个 worktree 重新打开保留。进度只在本会话内有效。
     beginReviewProgress(next.summary.path);
+    if (next.remoteReviewProgress) hydrateStoredReviewProgress(next.summary.path, next.remoteReviewProgress);
     reviewNote = null;
     selectedSet = context?.selectedSet ?? [];
     degraded = next.watchDegraded;
@@ -1702,6 +1729,8 @@
         openedAtMs: Date.now(),
         ...(next.summary.host ? { host: next.summary.host } : {}),
         ...(next.summary.remotePath ? { remotePath: next.summary.remotePath } : {}),
+        ...(next.remoteProjectHostId ? { projectHostId: next.remoteProjectHostId } : {}),
+        ...(next.remoteProjectHostId ? { projectHostId: next.remoteProjectHostId } : {}),
       },
       ...recent.filter((repo) => repo.path !== next.summary.path),
     ];
@@ -1715,6 +1744,13 @@
       notice(`另有 ${keptDrafts.length} 个文件的未保存草稿留在原仓库，回到那个仓库后可以保存或放弃。`);
     }
   }
+
+  onDestroy(onStoredReviewProgressChanged((worktree, progress) => {
+    if (!isRemoteRepositoryKey(worktree)) return;
+    void api.saveRemoteReviewProgress(worktree, progress).catch((error) => {
+      if (opened?.summary.path === worktree) reviewNote = `审阅进度未保存。${normalizeError(error).message}`;
+    });
+  }));
 
   /**
    * 只有真的要切到别的仓库了才结束当前远端会话：克隆失败、或点过「在后台继续」时当前仓库不变，
@@ -3319,7 +3355,7 @@
 
   /** 有对话框或命令面板盖着时终端不可见也不可操作，不接收拖入。 */
   function terminalDropAllowed(): boolean {
-    return remoteKey === null && terminalOpen && !taskModal && !cloneOpen && !dependencyOpen && !confirmPath && !paletteOpen && openModalCount() === 0;
+    return terminalOpen && !taskModal && !cloneOpen && !dependencyOpen && !confirmPath && !paletteOpen && openModalCount() === 0;
   }
 
   function dragOverTerminal(position: { x: number; y: number } | undefined): boolean {
@@ -3502,6 +3538,7 @@
    */
   function remoteProgressLabel(value: RemoteConnectionProgress): string {
     if (value.phase === "connecting") return "正在连接主机…";
+    if (value.phase === "provisioning") return remotePickerAction === "clone" ? "正在 SSH 主机上克隆仓库…" : "正在 SSH 主机上创建仓库…";
     if (value.phase === "opening") return "正在打开远端工作树…";
     if (value.totalBytes && value.sentBytes !== undefined) {
       const percent = Math.round((value.sentBytes / value.totalBytes) * 100);
@@ -3516,18 +3553,59 @@
     remotePickerBusy ? "正在读取主机或连接远端。" :
     !remoteTarget ? "请选择一台 SSH 主机。" :
     remoteTarget.unavailableReason ? remoteTarget.unavailableReason :
-    remoteOpenPath === null ? "请输入远端绝对路径。" : "",
+    remoteOpenPath === null ? "请输入远端绝对路径。" :
+    remotePickerAction === "clone" && !remoteCloneUrl.trim() ? "请输入克隆地址。" :
+    remotePickerAction === "clone" && remoteCloneAuth && (!remoteCloneUser.trim() || !remoteClonePassword)
+      ? "请填写 HTTP 用户名和密码或令牌。" : "",
   );
 
-  async function openRemotePicker() {
+  function clearRemoteCloneFields() {
+    remoteCloneUrl = "";
+    remoteCloneName = "";
+    remoteCloneAuth = false;
+    remoteCloneUser = "";
+    remoteClonePassword = "";
+    remoteCloneRemember = false;
+  }
+
+  function continueRemoteCloneInBackground() {
+    if (!remoteOpenAttempt || !remoteCloneCanDetach) return;
+    remoteOpenAttempt.background = true;
+    remoteOpenAttempt = null;
+    remoteCloneCanDetach = false;
+    remotePickerOpen = false;
+    remotePickerBusy = false;
+    remotePickerError = null;
+    remoteInstall = null;
+    remoteProgress = null;
+    clearRemoteCloneFields();
+  }
+
+  function remoteProvision(): RemoteProvision | undefined {
+    if (remotePickerAction === "create") return { kind: "create" };
+    if (remotePickerAction !== "clone") return undefined;
+    return {
+      kind: "clone",
+      url: remoteCloneUrl.trim(),
+      name: remoteCloneName.trim(),
+      ...(remoteCloneAuth ? {
+        credential: { username: remoteCloneUser.trim(), password: remoteClonePassword, remember: remoteCloneRemember },
+      } : {}),
+    };
+  }
+
+  async function openRemotePicker(prefill?: { hostId: string; path: string; projectHostId: string }) {
     closeSwitcher(false);
     remoteReviewSource = null;
     remotePickerOpen = true;
     remotePickerError = null;
     remoteProgress = null;
     remoteInstall = null;
-    remoteTargetId = "";
-    remotePath = "";
+    remoteTargetId = prefill?.hostId ?? "";
+    remotePath = prefill?.path ?? "";
+    remotePickerAction = "open";
+    remotePickerProjectHostId = prefill?.projectHostId ?? null;
+    clearRemoteCloneFields();
     await loadRemoteTargets();
   }
 
@@ -3563,6 +3641,8 @@
     path: string;
     reviewId: string | null;
     source: RemoteReviewSource | null;
+    provision?: RemoteProvision;
+    projectHostId?: string;
   }
 
   /** 打开远端仓库并把结果交给主窗口；安装待确认时停在选择层，不假装已打开。 */
@@ -3570,9 +3650,12 @@
     spec: RemoteOpenSpec,
     options: { allowInstall?: boolean; installConfirmation?: string | null } = {},
   ): Promise<boolean> {
+    const attempt = { background: false };
+    remoteOpenAttempt = attempt;
     remotePickerBusy = true;
     remotePickerError = null;
     remoteProgress = null;
+    remoteCloneCanDetach = false;
     try {
       const outcome = await api.openRemoteRepository(
         { kind: "ssh", hostId: spec.hostId, hostRevision: spec.hostRevision, path: spec.path },
@@ -3580,11 +3663,21 @@
           ...(spec.reviewId ? { reviewId: spec.reviewId } : {}),
           // 审查来源带基线时一起发送：后端按 baseline 相等判定这次打开是不是那条审查。
           ...(spec.source?.baseline ? { baseline: spec.source.baseline } : {}),
+          ...(spec.provision ? { provision: spec.provision } : {}),
+          ...(spec.provision?.kind === "clone" ? {
+            keepBackground: () => {
+              if (remoteOpenAttempt === attempt) remoteCloneCanDetach = false;
+              return attempt.background;
+            },
+          } : {}),
+          ...(spec.projectHostId ? { projectHostId: spec.projectHostId } : {}),
           // 安装始终显式：缺省为 false，只有用户确认后的那一次请求才是 true。
           allowInstall: options.allowInstall === true,
           ...(options.installConfirmation ? { installConfirmation: options.installConfirmation } : {}),
           onProgress: (value) => {
+            if (remoteOpenAttempt !== attempt) return;
             remoteProgress = remoteProgressLabel(value);
+            remoteCloneCanDetach = spec.provision?.kind === "clone" && value.phase === "provisioning";
           },
         },
       );
@@ -3593,35 +3686,52 @@
         remoteProgress = null;
         return false;
       }
+      if (outcome.kind === "background") {
+        recent = [
+          {
+            name: repositoryBaseName(outcome.path),
+            path: outcome.key,
+            openedAtMs: Date.now(),
+            host: outcome.host,
+            remotePath: outcome.path,
+            projectHostId: outcome.projectHostId,
+          },
+          ...recent.filter((repo) => repo.path !== outcome.key),
+        ];
+        const warning = outcome.credentialNote || outcome.preferencesWarning;
+        const message = "已克隆 " + outcome.host + "：" + outcome.path;
+        notice(warning ? message + "。" + warning : message, warning ? "warn" : "ok");
+        return true;
+      }
       remoteInstall = null;
       remoteProgress = null;
       remotePickerOpen = false;
       remotePickerError = null;
+      clearRemoteCloneFields();
       remoteReviewSource = spec.source;
       banner = null;
       rememberOpened(outcome.repository);
       if (spec.source) openTaskReview(spec.source.baseline);
-      // 远端仓库在本次会话的最近列表里：键是 hostId + 远端路径，别的仓库不会串到它上面。
-      recent = [
-        {
-          name: repositoryBaseName(outcome.path),
-          path: outcome.key,
-          openedAtMs: Date.now(),
-          host: outcome.host,
-          remotePath: outcome.path,
-        },
-        ...recent.filter((repo) => repo.path !== outcome.key),
-      ];
       live = "已打开远端仓库 " + outcome.host + "：" + outcome.path;
       if (outcome.pending) {
         notice("上一次远端操作的结果还没有核对：写入保持禁用，重新打开这个远端仓库可核对原操作。");
+      } else if (outcome.credentialNote) {
+        notice(outcome.credentialNote);
+      } else if (outcome.preferencesWarning) {
+        notice(outcome.preferencesWarning);
       }
       return true;
     } catch (error) {
-      remotePickerError = normalizeError(error).message;
+      const message = normalizeError(error).message;
+      if (attempt.background) notice(`远端克隆失败：${message}`, "warn");
+      else if (remoteOpenAttempt === attempt) remotePickerError = message;
       return false;
     } finally {
-      remotePickerBusy = false;
+      if (remoteOpenAttempt === attempt) {
+        remoteOpenAttempt = null;
+        remotePickerBusy = false;
+        remoteCloneCanDetach = false;
+      }
     }
   }
 
@@ -3648,6 +3758,7 @@
       path: source?.worktreePath ?? path,
       reviewId: source?.reviewId ?? null,
       source,
+      ...(source ? {} : { provision: remoteProvision(), projectHostId: remotePickerProjectHostId ?? undefined }),
     });
   }
 
@@ -3671,9 +3782,12 @@
     }
     const target = remoteTarget;
     const path = remoteOpenPath;
-    if (!target || path === null) return;
+    if (!target || path === null || remoteOpenReason) return;
     await attemptRemoteOpen(
-      { hostId: target.targetId, hostRevision: target.targetRevision, path, reviewId: null, source: null },
+      {
+        hostId: target.targetId, hostRevision: target.targetRevision, path, reviewId: null, source: null,
+        provision: remoteProvision(), projectHostId: remotePickerProjectHostId ?? undefined,
+      },
       { allowInstall: true, installConfirmation: offer.confirmationId },
     );
   }
@@ -3685,6 +3799,7 @@
     remotePickerError = null;
     remoteInstall = null;
     remoteProgress = null;
+    clearRemoteCloneFields();
     const source = remoteReviewSource;
     remoteReviewSource = null;
     if (source) {
@@ -3737,6 +3852,9 @@
     }
     // 主窗口直接打开这条审查：主机、工作树与基线都绑在来源上，安装需要再确认一次。
     remoteReviewSource = source;
+    remotePickerAction = "open";
+    remotePickerProjectHostId = null;
+    clearRemoteCloneFields();
     remotePickerOpen = true;
     remotePickerError = null;
     remoteProgress = null;
@@ -4029,7 +4147,10 @@
     return true;
   }
 
-  async function openRecent(path: string, onRequest?: (serial: number, request: Promise<OpenedRepository>) => void, anchor?: string) {
+  async function openRecent(path: string, onRequest?: (serial: number, request: Promise<OpenedRepository>) => void, anchor?: string, projectHostId?: string) {
+    const expectedProjectHost = projectHostId
+      ?? switcherRepos.find((repo) => repo.path === path)?.projectHostId
+      ?? recent.find((repo) => repo.path === path)?.projectHostId;
     // 最近列表与快捷入口打开的都不是审查来源：旧来源不能跟到新仓库上。
     remoteReviewSource = null;
     // 任何确认层/任务弹窗打开时都不切换仓库：旧确认层不能留在新仓库上继续生效。
@@ -4058,7 +4179,11 @@
       await api.cancelReads();
       if (serial !== readSerial) return;
       const target = anchor ? parseRemoteRepositoryKey(path) : null;
-      const request = anchor && target ? api.openLinkedWorktree(anchor, target.path) : api.openRepository(path, nextId());
+      const request = anchor && target
+        ? api.openLinkedWorktree(anchor, target.path)
+        : expectedProjectHost
+          ? api.openRemoteProjectRepository(path, expectedProjectHost)
+          : api.openRepository(path, nextId());
       onRequest?.(serial, request);
       const openedRepo = await request;
       if (serial !== readSerial) return;
@@ -4068,6 +4193,13 @@
     } catch (error) {
       if (serial !== readSerial) return;
       const failure = normalizeError(error);
+      if (failure.code === "remote_install_required" && expectedProjectHost) {
+        const target = parseRemoteRepositoryKey(path);
+        if (target) {
+          await openRemotePicker({ ...target, projectHostId: expectedProjectHost });
+          return;
+        }
+      }
       if (failure.code === "cancelled") {
         live = "已取消读取，没有写入仓库。";
         return;
@@ -4092,6 +4224,11 @@
     }
   }
 
+  function replaceLocalRecents(list: RecentRepo[]) {
+    recent = [...list, ...recent.filter((repo) => isRemoteRepositoryKey(repo.path))]
+      .sort((a, b) => b.openedAtMs - a.openedAtMs);
+  }
+
   async function forget(path: string) {
     if (
       opened?.summary.path === path &&
@@ -4103,15 +4240,9 @@
         if ((await flushDraft(path)) === false) return;
       }
       if (isRemoteRepositoryKey(path)) {
-        // 远端仓库的最近记录只在本次会话里：结束连接并从列表移除，不写本机最近记录。
-        try {
-          await api.closeRemoteRepository(path);
-        } catch {
-          // 连接可能已经断开：记录移除仍要完成。
-        }
-        recent = recent.filter((repo) => repo.path !== path);
-      } else {
         recent = await api.forgetRecent(path);
+      } else {
+        replaceLocalRecents(await api.forgetRecent(path));
       }
       if (opened?.summary.path === path) {
         if (!isRemoteRepositoryKey(path)) await api.closeRepository();
@@ -4158,7 +4289,7 @@
 
   async function copyPath(path: string) {
     try {
-      await navigator.clipboard.writeText(path);
+      await navigator.clipboard.writeText(parseRemoteRepositoryKey(path)?.path ?? path);
       notice("已复制仓库完整路径。");
     } catch {
       showError(new Error("无法写入剪贴板，请手动复制仓库路径。"));
@@ -4217,24 +4348,56 @@
     await terminalPanel?.insertPaths(paths);
   }
 
-  async function revealInFolder(relative: string) {
+  async function revealInFolder(relative: string, directory = false) {
     const current = opened;
-    if (!current || isRemoteRepositoryKey(current.summary.path)) return;
+    if (!current) return;
     try {
+      if (isRemoteRepositoryKey(current.summary.path)) {
+        if (directory || !relative) {
+          if (relative) await revealInFiles(relative);
+          else showFiles();
+          return;
+        }
+        await api.openRemoteFileCopy(current.summary.path, relative, current.generation, true);
+        return;
+      }
       await api.revealPath(current.summary.path, relative);
     } catch (error) {
-      showError(normalizeError(error));
+      const failure = normalizeError(error);
+      if (opened?.summary.path !== current.summary.path) return;
+      if (isRemoteRepositoryKey(current.summary.path) && failure.code === "path_missing") {
+        const parent = relative.slice(0, Math.max(0, relative.lastIndexOf("/")));
+        await revealInFolder(parent, true);
+      } else showError(failure);
     }
   }
 
   async function openWithDefault(relative: string) {
     const current = opened;
-    if (!current || isRemoteRepositoryKey(current.summary.path)) return;
+    if (!current) return;
     try {
-      await api.openPath(current.summary.path, relative);
+      if (isRemoteRepositoryKey(current.summary.path)) {
+        await api.openRemoteFileCopy(current.summary.path, relative, current.generation, false);
+      } else await api.openPath(current.summary.path, relative);
     } catch (error) {
-      showError(normalizeError(error));
+      if (opened?.summary.path === current.summary.path) showError(normalizeError(error));
     }
+  }
+
+  function systemFileMenu(path: string, deleted: boolean): ContextMenuEntry[] {
+    const revealLabel = navigator.platform?.toLowerCase().includes("mac") ? "在访达中显示" : "在资源管理器中显示";
+    return [{
+      id: "reveal",
+      label: remoteKey && deleted ? "在文件树中显示所在目录" : remoteKey ? "在本机显示临时副本" : revealLabel,
+      icon: "folder-open",
+      run: () => void revealInFolder(path),
+    }, {
+      id: "open",
+      label: remoteKey ? "用本机默认程序打开临时副本" : "用默认程序打开",
+      icon: "file",
+      disabledReason: deleted ? "文件已删除，工作区里没有它" : undefined,
+      run: () => void openWithDefault(path),
+    }, { separator: true }];
   }
 
   async function ignore(relative: string, local: boolean) {
@@ -4312,20 +4475,7 @@
       });
     }
     entries.push({ separator: true });
-    if (!remoteKey) {
-      entries.push({
-        id: "reveal",
-        label: navigator.platform?.toLowerCase().includes("mac") ? "在访达中显示" : "在资源管理器中显示",
-        icon: "folder-open",
-        run: () => void revealInFolder(row.path),
-      }, {
-        id: "open",
-        label: "用默认程序打开",
-        icon: "file",
-        disabledReason: deleted ? "文件已删除，工作区里没有它" : undefined,
-        run: () => void openWithDefault(row.path),
-      }, { separator: true });
-    }
+    entries.push(...systemFileMenu(row.path, deleted));
     entries.push({ id: "copy-rel", label: "复制相对路径", icon: "copy", run: () => void copyText(row.path, "相对路径") });
     entries.push({ id: "copy-abs", label: "复制完整路径", icon: "copy", run: () => void copyText(absolutePath(row.path), "完整路径") });
     entries.push({ id: "copy-name", label: "复制文件名", icon: "copy", run: () => void copyText(row.path.split("/").pop() ?? row.path, "文件名") });
@@ -4382,20 +4532,7 @@
       }
       entries.push({ separator: true });
     }
-    if (!remoteKey) {
-      entries.push({
-        id: "reveal",
-        label: navigator.platform?.toLowerCase().includes("mac") ? "在访达中显示" : "在资源管理器中显示",
-        icon: "folder-open",
-        run: () => void revealInFolder(path),
-      }, {
-        id: "open",
-        label: "用默认程序打开",
-        icon: "file",
-        disabledReason: deleted ? "文件已删除，工作区里没有它" : undefined,
-        run: () => void openWithDefault(path),
-      }, { separator: true });
-    }
+    entries.push(...systemFileMenu(path, deleted));
     entries.push({ id: "copy-rel", label: "复制相对路径", icon: "copy", run: () => void copyText(path, "相对路径") });
     entries.push({ id: "copy-abs", label: "复制完整路径", icon: "copy", run: () => void copyText(absolutePath(path), "完整路径") });
     entries.push({ id: "copy-name", label: "复制文件名", icon: "copy", run: () => void copyText(name, "文件名") });
@@ -4443,7 +4580,7 @@
         applySnapshot(await api.removeLinkedWorktree(pending.anchor, pending.preview, pending.force, opened.generation));
         recent = recent.filter((repo) => repo.path !== pending.repo.path);
       } else {
-        recent = await api.removeWorktree(pending.repo.path, pending.force, nextId());
+        replaceLocalRecents(await api.removeWorktree(pending.repo.path, pending.force, nextId()));
       }
       worktreeRemoval = null;
       const branch = pending.preview ? pending.preview.branch : pending.head.branch;
@@ -4474,10 +4611,16 @@
       },
       {
         id: "reveal",
-        label: navigator.platform?.toLowerCase().includes("mac") ? "在访达中显示" : "在资源管理器中显示",
+        label: isRemoteRepositoryKey(repo.path) ? "在远端文件树中显示" : navigator.platform?.toLowerCase().includes("mac") ? "在访达中显示" : "在资源管理器中显示",
         icon: "folder",
         run: async () => {
           try {
+            if (isRemoteRepositoryKey(repo.path)) {
+              closeSwitcher();
+              if (!current) await openRecent(repo.path);
+              if (opened?.summary.path === repo.path) showFiles();
+              return;
+            }
             await api.revealPath(repo.path, "");
           } catch (error) {
             showError(normalizeError(error));
@@ -5074,6 +5217,12 @@
       }),
       registerDrag<{ paths: string[]; position?: { x: number; y: number } }>("tauri://drag-drop", (event) => {
         const point = dropPoint(event.position);
+        if (point && remoteKey && terminalDropAllowed() && terminalPanel?.dragOver(point.x, point.y)) {
+          draggingRepository = false;
+          terminalPanel.dragEnd();
+          notice("请从文件树使用「路径 → 插入到终端」，将 SSH 主机上的路径插入终端。");
+          return;
+        }
         if (point && terminalDropAllowed() && terminalPanel?.dropPaths(event.paths, point.x, point.y)) {
           draggingRepository = false;
           return;
@@ -5422,7 +5571,7 @@
   {/snippet}
   {#snippet projectSwitcherNote()}
     <div class="project-switcher-note">
-      <span>{selectedProject ? `${selectedProject.manifest.name} · ${selectedProject.manifest.repositories.length} 个仓库${projectLocalCount < selectedProject.manifest.repositories.length ? ` · 本机可用 ${projectLocalCount} 个` : ""}` : "最近使用 · 独立仓库"}</span>
+      <span>{selectedProject ? `${selectedProject.manifest.name} · ${selectedProject.manifest.repositories.length} 个仓库${projectAvailableCount < selectedProject.manifest.repositories.length ? ` · 可用 ${projectAvailableCount} 个` : ""}` : "最近使用 · 独立仓库"}</span>
       <button class="btn btn-ghost btn-sm" onclick={manageProjects}><Icon name="settings" size={13} />管理项目</button>
     </div>
     <!-- 范围说明与恢复入口：说清当前仓库与项目的关系，并给一条不改身份的下一步（切到全部仓库 / 重读名单）。 -->
@@ -5442,15 +5591,17 @@
       selectedId={selectedProjectId}
       focus={projectManagerFocus}
       currentPath={opened?.summary.path ?? null}
+      currentCheckout={projectCheckout}
+      {remoteProjectHosts}
       initialPreview={projectInitialPreview}
       {nextId}
       onData={acceptProjects}
       onSelect={selectProject}
-      onOpenRepo={(path) => {
+      onOpenRepo={(path, projectHostId) => {
         projectManagerOpen = false;
         // 管理弹窗自己的 modal 层要等这一批渲染卸载后才释放；同一批里切仓库会被
         // 「请先关闭当前对话框」挡下，深链续接来源仓库也就打不开了。
-        void tick().then(() => openRecent(path));
+        void tick().then(() => openRecent(path, undefined, undefined, projectHostId));
       }}
       onConsumeInitialPreview={() => {
         projectInitialPreview = null;
@@ -5841,11 +5992,12 @@
               onGeneration={adoptGeneration}
               onFileHistory={openFileHistory}
               onOpenDiff={(path, side) => openFileDiff(path, side)}
-              onReveal={remoteKey ? undefined : (path) => void revealInFolder(path)}
-              onOpenDefault={remoteKey ? undefined : (path) => void openWithDefault(path)}
+              remote={remoteKey !== null}
+              onReveal={(path, directory) => void revealInFolder(path, directory)}
+              onOpenDefault={(path) => void openWithDefault(path)}
               onCopyPath={(text, what) => void copyText(text, what)}
               onRefreshRepo={() => void refresh()}
-              onIgnore={remoteKey ? undefined : (path, local) => void ignore(path, local)}
+              onIgnore={(path, local) => void ignore(path, local)}
               onInsertToTerminal={(paths) => void insertIntoTerminal(paths)}
               toAbsolute={absolutePath}
               onNav={(nav) => (filesNav = nav)}
@@ -5884,6 +6036,7 @@
                   onGeneration={adoptGeneration}
                   onFailure={handleMutationError}
                   onFilePath={openFileHistory}
+                  onRevealFile={(path) => void revealInFolder(path)}
                   onReadDocument={openDocument}
                   onClearFile={() => (historyPath = null)}
                   onSnapshot={mergeSnapshot}
@@ -5978,7 +6131,7 @@
     icon="cloud"
     size="md"
     width="min(560px, 100%)"
-    description="远端仓库在主窗口打开；主机与路径来自当前主机簿，连接失败不会改用本机仓库。"
+    description="选择 SSH 主机及其文件系统中的路径。"
     locked={remotePickerBusy}
     onClose={() => void closeRemotePicker()}
   >
@@ -5990,6 +6143,7 @@
           aria-label="SSH 主机"
           title={remotePickerBusy ? "正在连接远端，完成后才能换主机" : "选择要连接的 SSH 主机"}
           bind:value={remoteTargetId}
+          onchange={() => (remoteInstall = null)}
           disabled={remotePickerBusy}
         >
           {#each remotePickerTargets as target (target.targetId)}
@@ -5999,12 +6153,36 @@
           {/each}
         </select>
       </div>
+      {#if !remoteReviewSource && !remotePickerProjectHostId}
+        <label>
+          <span class="hint">仓库操作</span>
+          <select
+            class="select"
+            aria-label="远端仓库操作"
+            title={remotePickerBusy ? "正在连接远端，完成后才能更改操作" : "选择仓库操作"}
+            value={remotePickerAction}
+            onchange={(event) => {
+              const action = event.currentTarget.value;
+              if (action === "open" || action === "create" || action === "clone") {
+                remotePickerAction = action;
+                remoteInstall = null;
+              }
+            }}
+            disabled={remotePickerBusy}
+          >
+            <option value="open">打开已有仓库</option>
+            <option value="create">新建仓库</option>
+            <option value="clone">克隆仓库</option>
+          </select>
+        </label>
+      {/if}
       <div>
-        <span class="hint">远端路径</span>
+        <span class="hint">{remotePickerAction === "clone" ? "远端父目录" : "远端路径"}</span>
         <input
           class="input"
           aria-label="远端路径"
           bind:value={remotePath}
+          oninput={() => (remoteInstall = null)}
           placeholder="/srv/repo 或 C:/repo"
           title={remotePickerBusy
             ? "正在连接远端，完成后才能修改路径"
@@ -6015,6 +6193,47 @@
           disabled={remotePickerBusy}
         />
       </div>
+      {#if remotePickerAction === "clone" && !remoteReviewSource}
+        <label>
+          <span class="hint">克隆地址</span>
+          <input
+            class="input"
+            aria-label="克隆地址"
+            placeholder="https://git.example/repo.git"
+            title={remotePickerBusy ? "连接期间无法修改克隆地址" : "输入 SSH 主机能够访问的 Git 地址"}
+            disabled={remotePickerBusy}
+            bind:value={remoteCloneUrl}
+            oninput={(event) => {
+              remoteInstall = null;
+              if (!/^https?:\/\//i.test(event.currentTarget.value.trim())) remoteCloneAuth = false;
+            }}
+          />
+        </label>
+        <label>
+          <span class="hint">目录名（可选）</span>
+          <input class="input" aria-label="克隆目录名" title={remotePickerBusy ? "连接期间无法修改克隆目录名" : undefined} disabled={remotePickerBusy} bind:value={remoteCloneName} oninput={() => (remoteInstall = null)} />
+        </label>
+        {#if /^https?:\/\//i.test(remoteCloneUrl.trim())}
+          <label>
+            <input type="checkbox" bind:checked={remoteCloneAuth} title={remotePickerBusy ? "连接期间无法更改认证方式" : undefined} disabled={remotePickerBusy} onchange={() => (remoteInstall = null)} />
+            <span>为这次克隆提供 HTTP 凭据</span>
+          </label>
+          {#if remoteCloneAuth}
+            <label>
+              <span class="hint">HTTP 用户名</span>
+              <input class="input" autocomplete="username" title={remotePickerBusy ? "连接期间无法修改 HTTP 用户名" : undefined} disabled={remotePickerBusy} bind:value={remoteCloneUser} oninput={() => (remoteInstall = null)} />
+            </label>
+            <label>
+              <span class="hint">密码或令牌</span>
+              <input class="input" type="password" autocomplete="off" title={remotePickerBusy ? "连接期间无法修改凭据" : undefined} disabled={remotePickerBusy} bind:value={remoteClonePassword} oninput={() => (remoteInstall = null)} />
+            </label>
+            <label>
+              <input type="checkbox" bind:checked={remoteCloneRemember} title={remotePickerBusy ? "连接期间无法更改凭据保存选项" : undefined} disabled={remotePickerBusy} onchange={() => (remoteInstall = null)} />
+              <span>交给 SSH 主机上已配置的 Git 凭据助手</span>
+            </label>
+          {/if}
+        {/if}
+      {/if}
       {#if remoteReviewSource}
         <p class="hint">这条审查绑定原主机与远端工作树；任一项已变化时请从 Cliora 重新发起。</p>
       {/if}
@@ -6035,30 +6254,39 @@
     </div>
     {#snippet footer()}
       <span class="spacer"></span>
-      <button
-        type="button"
-        class="btn btn-secondary"
-        title={remotePickerBusy ? "连接进行中，完成后才能取消" : "不打开任何远端仓库"}
-        disabled={remotePickerBusy}
-        onclick={() => void closeRemotePicker()}
-      >取消</button>
-      {#if remoteInstall}
+      {#if remoteCloneCanDetach}
         <button
           type="button"
-          class="btn btn-primary"
-          title={remotePickerBusy ? "正在传输远端组件" : "确认后才会向这台主机传输并安装组件"}
-          disabled={remotePickerBusy}
-          onclick={() => void confirmRemoteInstall()}
-        >确认安装</button>
+          class="btn btn-secondary"
+          title="继续在 SSH 主机克隆，保留当前仓库"
+          onclick={continueRemoteCloneInBackground}
+        >在后台继续</button>
       {:else}
         <button
           type="button"
-          class="btn btn-primary"
-          aria-busy={remotePickerBusy}
-          title={remoteOpenReason !== "" ? remoteOpenReason : remotePickerBusy ? "正在连接远端" : "在主窗口打开这个远端仓库"}
-          disabled={remotePickerBusy || remoteOpenReason !== ""}
-          onclick={() => void openRemoteFromPicker()}
-        >打开仓库</button>
+          class="btn btn-secondary"
+          title={remotePickerBusy ? "连接进行中，完成后才能取消" : "不打开任何远端仓库"}
+          disabled={remotePickerBusy}
+          onclick={() => void closeRemotePicker()}
+        >取消</button>
+        {#if remoteInstall}
+          <button
+            type="button"
+            class="btn btn-primary"
+            title={remotePickerBusy ? "正在传输远端组件" : "确认后才会向这台主机传输并安装组件"}
+            disabled={remotePickerBusy}
+            onclick={() => void confirmRemoteInstall()}
+          >确认安装</button>
+        {:else}
+          <button
+            type="button"
+            class="btn btn-primary"
+            aria-busy={remotePickerBusy}
+            title={remoteOpenReason !== "" ? remoteOpenReason : remotePickerBusy ? "正在连接远端" : undefined}
+            disabled={remotePickerBusy || remoteOpenReason !== ""}
+            onclick={() => void openRemoteFromPicker()}
+          >{remotePickerAction === "create" ? "创建并打开" : remotePickerAction === "clone" ? "克隆并打开" : "打开仓库"}</button>
+        {/if}
       {/if}
     {/snippet}
   </Modal>
@@ -6277,7 +6505,7 @@
     blockedReason={writeLocked ? switchBlockedReason(commandState) : null}
     onOpened={rememberOpened}
     beforeOpen={worktreeLeaveGate}
-    onRecent={(list) => (recent = list)}
+    onRecent={replaceLocalRecents}
     {nextId}
   />
 {:else if taskModal === "settings"}

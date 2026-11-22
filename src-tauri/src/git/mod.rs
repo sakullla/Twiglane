@@ -37,6 +37,7 @@ pub mod ops;
 pub mod parse;
 pub mod patch;
 pub mod preview;
+pub(crate) mod project_paths;
 pub mod resolve;
 pub mod runner;
 pub mod schedule;

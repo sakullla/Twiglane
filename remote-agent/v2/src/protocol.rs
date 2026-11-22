@@ -28,6 +28,7 @@ const MAX_TOKEN: usize = 80;
 pub const CAPABILITIES: &[&str] = &[
     // 基础（T1）
     "open",
+    "provisionRepository",
     "status",
     "diff",
     "taskReview",
@@ -71,6 +72,9 @@ pub const CAPABILITIES: &[&str] = &[
     "tagDelete",
     "tagPush",
     "remoteState",
+    "changeRequestGitState",
+    "changeRequestRemotes",
+    "changeRequestTracking",
     "remoteAdd",
     "remoteSetUrl",
     "fetch",
@@ -109,6 +113,8 @@ pub const CAPABILITIES: &[&str] = &[
     "directory",
     "fileContent",
     "filePreview",
+    "fileCopy",
+    "projectCandidates",
     "document",
     "documentResource",
     "documentRemoteImage",
@@ -122,6 +128,7 @@ pub const CAPABILITIES: &[&str] = &[
     "copyEntry",
     "moveEntry",
     "deleteEntries",
+    "ignorePath",
     // 远端变化事件（T3）：带仓库与单调序号的失效通知
     "events",
     // 远端 PTY 会话（T3）：与仓库 RPC 分离的会话 op

@@ -62,7 +62,8 @@
      * 系统文件管理器中定位：文件选中、目录直接打开。经 App 的 reveal_path 后端，
      * 组件内不拼路径、不碰 api——保持与全应用一致的仓库边界与错误提示。
      */
-    onReveal?: (path: string) => void;
+    onReveal?: (path: string, directory: boolean) => void;
+    remote?: boolean;
     /** 用系统默认程序打开文件：已删除文件不可用（在菜单内灰显说明）。 */
     onOpenDefault?: (path: string) => void;
     /** 复制一段文本到剪贴板：由 App 的 copyText 给出成功提示与失败可见错误，不再静默吞错。 */
@@ -124,6 +125,7 @@
     onRefresh,
     onCollapseAll,
     onReveal,
+    remote = false,
     onOpenDefault,
     onCopyPath,
     onInsertToTerminal,
@@ -361,7 +363,7 @@
 
   function revealSelected(): void {
     if (!onReveal) return;
-    for (const row of selectedRows) onReveal(row.path);
+    for (const row of selectedRows) onReveal(row.path, row.expandable);
   }
 
   /**
@@ -523,7 +525,7 @@
     actions.push(...blockedNotes());
 
     const system: ContextMenuEntry[] = [];
-    if (onReveal) system.push({ id: "reveal-selected", label: revealLabel, icon: "folder-open", run: revealSelected });
+    if (onReveal) system.push({ id: "reveal-selected", label: remote ? "显示所选远端项目" : revealLabel, icon: "folder-open", run: revealSelected });
     const paths: ContextMenuEntry[] = [];
     if (onCopyPath) {
       paths.push({ id: "copy-selected-rel", label: "复制相对路径", icon: "copy", run: () => copySelected() });
@@ -561,11 +563,16 @@
     }
 
     const system: ContextMenuEntry[] = [];
-    if (onReveal) system.push({ id: "reveal", label: revealLabel, icon: "folder-open", run: () => onReveal?.(row.path) });
+    if (onReveal) system.push({
+      id: "reveal",
+      label: remote ? row.expandable ? "在文件树中定位" : row.deleted ? "在文件树中显示所在目录" : "在本机显示临时副本" : revealLabel,
+      icon: "folder-open",
+      run: () => onReveal?.(row.path, row.expandable),
+    });
     if (!row.expandable && onOpenDefault) {
       system.push({
         id: "open-default",
-        label: "用默认程序打开",
+        label: remote ? "用本机默认程序打开临时副本" : "用默认程序打开",
         icon: "file",
         disabledReason: row.deleted ? "文件已删除，工作区里没有它" : undefined,
         run: () => onOpenDefault?.(row.path),
@@ -625,7 +632,7 @@
       });
     }
     const system: ContextMenuEntry[] = [];
-    if (onReveal) system.push({ id: "reveal-root", label: revealLabel, icon: "folder-open", run: () => onReveal?.("") });
+    if (onReveal) system.push({ id: "reveal-root", label: remote ? "在文件树中显示仓库" : revealLabel, icon: "folder-open", run: () => onReveal?.("", true) });
     const paths: ContextMenuEntry[] = [];
     if (onCopyPath && toAbsolute) {
       paths.push({ id: "copy-root-abs", label: "复制完整路径", icon: "copy", run: () => onCopyPath?.(toAbsolute(""), "仓库路径") });

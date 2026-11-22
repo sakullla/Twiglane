@@ -59,6 +59,9 @@ mod events;
 mod identity;
 mod journal_identity;
 mod protocol;
+#[path = "../../../src-tauri/src/remote_provision.rs"]
+mod remote_provision;
+mod provision;
 mod pty;
 mod receipts;
 mod server;

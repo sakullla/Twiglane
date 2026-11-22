@@ -2936,6 +2936,40 @@ describe("应用外壳", () => {
       expect(screen.getByRole("button", { name: /^当前仓库 repo/ }), "当前仓库不变").toBeTruthy();
     });
 
+    it("SSH 主机上的克隆可从远端选择器继续在后台运行", async () => {
+      await openRemoteRepo();
+      let completeClone = () => {};
+      mocks.openRemoteRepository.mockImplementationOnce((_location, options) => new Promise((resolve) => {
+        options.onProgress({ phase: "provisioning" });
+        completeClone = () => {
+          expect(options.keepBackground()).toBe(true);
+          resolve({
+            kind: "background",
+            key: "ssh://host-a/srv/fresh",
+            host: "构建主机 A",
+            path: "/srv/fresh",
+          });
+        };
+      }));
+      const palette = await openPalette();
+      await fireEvent.click(within(palette).getByRole("option", { name: /^打开远端仓库/ }));
+      const dialog = await screen.findByRole("dialog", { name: "打开远端仓库" });
+      await within(dialog).findByRole("option", { name: /构建主机 A/ });
+      const mode = within(dialog).getByLabelText<HTMLSelectElement>("远端仓库操作");
+      mode.value = "clone";
+      await fireEvent.change(mode);
+      await fireEvent.input(within(dialog).getByLabelText("远端路径"), { target: { value: "/srv" } });
+      await fireEvent.input(await within(dialog).findByLabelText("克隆地址"), { target: { value: "https://e.com/fresh.git" } });
+      await fireEvent.click(within(dialog).getByRole("button", { name: "克隆并打开" }));
+      await fireEvent.click(await within(dialog).findByRole("button", { name: "在后台继续" }));
+
+      completeClone();
+      await waitFor(() => expect(document.querySelector(".toast.ok")?.textContent).toContain("已克隆 构建主机 A：/srv/fresh"));
+      expect(screen.queryByRole("dialog", { name: "打开远端仓库" })).toBeNull();
+      expect(screen.getByRole("button", { name: /^当前仓库 repo/ })).toBeTruthy();
+      expect(mocks.closeRemoteRepository).not.toHaveBeenCalled();
+    });
+
     it("窗口还开着时完成：确认切换才结束远端会话", async () => {
       await openRemoteRepo();
       const clone = await startClone();

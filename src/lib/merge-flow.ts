@@ -103,6 +103,7 @@ export interface ConflictMenuInput {
   incomingLabel: string;
   /** 在文件管理器中显示的平台文案。 */
   revealLabel?: string;
+  externalLabel?: string;
 }
 
 export function revealLabel(platform = typeof navigator !== "undefined" ? navigator.platform ?? "" : ""): string {
@@ -130,7 +131,7 @@ export function conflictFileMenu(input: ConflictMenuInput, handlers: ConflictMen
     }
     entries.push({ separator: true });
   }
-  if (handlers.openExternal) entries.push({ id: "external", label: "用默认程序打开", icon: "file", run: handlers.openExternal });
+  if (handlers.openExternal) entries.push({ id: "external", label: input.externalLabel ?? "用默认程序打开", icon: "file", run: handlers.openExternal });
   if (handlers.reveal) entries.push({ id: "reveal", label: input.revealLabel ?? revealLabel(), icon: "folder-open", run: handlers.reveal });
   if (handlers.copyPath) entries.push({ id: "copy", label: "复制路径", icon: "copy", run: handlers.copyPath });
   return tidySeparators(entries);

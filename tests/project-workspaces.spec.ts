@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CheckoutContexts } from "../src/lib/checkout-context";
 import { addCandidates, checkoutKey, projectMemberForCheckout, projectRepos, type Project, type Projects, type WorkspaceManifest } from "../src/lib/workspaces";
 import { buildWorktreeGroups } from "../src/lib/recent";
+import { remoteRepositoryKey } from "../src/lib/remote-worktree";
 const mocks = vi.hoisted(() => ({
   create: vi.fn(),
   update: vi.fn(),
@@ -13,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   remove: vi.fn(),
   openInCliora: vi.fn(),
   repoHeads: vi.fn(),
+  remoteProjectCandidates: vi.fn(),
 }));
 vi.mock("../src/lib/api", () => ({
   api: {
@@ -25,6 +27,7 @@ vi.mock("../src/lib/api", () => ({
     workspaceDelete: mocks.remove,
     workspaceOpenInCliora: mocks.openInCliora,
     repoHeads: mocks.repoHeads,
+    remoteProjectCandidates: mocks.remoteProjectCandidates,
   },
   pickFile: vi.fn(async () => "/work/project.dev-workspace.json"), pickDirectories: vi.fn(async () => ["/work/new-repo"]), pickDirectory: vi.fn(async () => "/work"), saveWorkspaceFile: vi.fn(async () => "/work/new.dev-workspace.json"),
 }));
@@ -65,6 +68,19 @@ describe("项目与 checkout 的身份和持久成员", () => {
     const recent = [{ name: "alone", path: "/other/alone", openedAtMs: 1 }];
     expect(projectRepos(null, host, recent)).toBe(recent);
   });
+  it("已核验的 SSH 位置和同路径本机位置独立排序与打开", () => {
+    const p = project(1);
+    const path = p.manifest.repositories[0].locations[0].path;
+    p.manifest.repositories[0].locations.push({ hostId: "ssh-user-a", path }, { hostId: "ssh-user-b", path });
+    const remoteHosts = [{ workspaceHostId: "ssh-user-a", targetId: "host-a", host: "A" }];
+    const key = remoteRepositoryKey("host-a", path);
+    const recent = [{ name: "demo", path: key, openedAtMs: 10 }];
+    expect(projectRepos(p, host, recent, key, remoteHosts)).toEqual([
+      { name: "demo", path: key, openedAtMs: 10, host: "A", remotePath: path, projectHostId: "ssh-user-a" },
+      { name: "demo", path, openedAtMs: 0 },
+    ]);
+    expect(projectMemberForCheckout(p, "ssh-user-b", path, [])?.id).toBe("repo-0");
+  });
   it("批量纳入去重并把附属 worktree 合入同一个稳定仓库；子模块 common 不同独立保留", () => {
     const manifest = { ...project(0).manifest };
     const candidate = (path: string, commonDirectory: string) => ({ path, name: "demo", commonDirectory, repositoryId: null, error: null });
@@ -91,6 +107,52 @@ describe("项目管理实际交互", () => {
     render(ProjectManager, { data, selectedId: p.manifest.workspaceId, nextId: () => 1, onData, onSelect: vi.fn(), onClose: vi.fn() });
     return { p, data, onData };
   }
+  it("将当前 SSH 路径与已核验主机写入项目，并用主机绑定重开成员", async () => {
+    const p = project(0);
+    const remoteHost = { workspaceHostId: "33333333-3333-4333-8333-333333333333", targetId: "native:target-a", host: "SSH A" };
+    const path = "/work/远端 仓库";
+    const key = remoteRepositoryKey(remoteHost.targetId, path);
+    const data = { hostId: host, projects: [p] };
+    const props = {
+      data, selectedId: p.manifest.workspaceId, currentCheckout: { hostId: remoteHost.workspaceHostId, path, key, name: "remote repo" },
+      remoteProjectHosts: [remoteHost], nextId: () => 1, onData: vi.fn(), onSelect: vi.fn(), onClose: vi.fn(), onOpenRepo: vi.fn(),
+    };
+    mocks.update.mockResolvedValue(data);
+    const view = render(ProjectManager, props);
+    await fireEvent.click(screen.getByRole("button", { name: "纳入当前 SSH 仓库" }));
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(1));
+    const [manifest] = mocks.update.mock.calls[0] as [WorkspaceManifest, number];
+    expect(manifest.repositories[0].locations).toEqual([{ hostId: remoteHost.workspaceHostId, path }]);
+    await view.rerender({ ...props, currentCheckout: null, data: { hostId: host, projects: [{ ...p, manifest }] } });
+    await fireEvent.click(await screen.findByRole("button", { name: "打开 remote repo" }));
+    expect(props.onOpenRepo).toHaveBeenCalledWith(key, remoteHost.workspaceHostId);
+    expect(mocks.repoHeads).not.toHaveBeenCalled();
+  });
+  it("从当前 SSH 主机扫描项目候选并确认选择", async () => {
+    const p = project(0);
+    const sshHost = "44444444-4444-4444-8444-444444444444";
+    const key = remoteRepositoryKey("host-a", "/work/current");
+    const data = { hostId: host, projects: [p] };
+    mocks.remoteProjectCandidates.mockResolvedValue({ candidates: [
+      { name: "demo", path: "/work/repos/demo", repositoryId: null, commonDirectory: "/work/repos/demo/.git", error: null },
+    ], cancelled: false, partial: false });
+    mocks.update.mockResolvedValue(data);
+    render(ProjectManager, {
+      data, selectedId: p.manifest.workspaceId, currentCheckout: { hostId: sshHost, key, path: "/work/current", name: "current" },
+      nextId: () => 12, onData: vi.fn(), onSelect: vi.fn(), onClose: vi.fn(),
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "添加 SSH 位置…" }));
+    await fireEvent.input(screen.getByLabelText("远端绝对路径"), { target: { value: "/work/repos" } });
+    await fireEvent.click(screen.getByRole("checkbox", { name: "从此 SSH 目录发现仓库" }));
+    await fireEvent.click(screen.getByRole("button", { name: "发现远端仓库" }));
+    await waitFor(() => expect(mocks.remoteProjectCandidates).toHaveBeenCalledWith(key, { root: "/work/repos" }, 12));
+    expect(mocks.update).not.toHaveBeenCalled();
+    await fireEvent.click(await screen.findByRole("button", { name: "确认纳入 1 个位置" }));
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(1));
+    const [manifest] = mocks.update.mock.calls[0] as [WorkspaceManifest, number];
+    expect(manifest.repositories[0].locations).toEqual([{ hostId: sshHost, path: "/work/repos/demo" }]);
+    expect(mocks.discover).not.toHaveBeenCalled();
+  });
   it("搜索完整路径、收藏与移除关联只提交目标项目成员", async () => {
     const { p, data } = mount();
     mocks.favorite.mockResolvedValue(data); mocks.update.mockResolvedValue(data);
@@ -268,7 +330,7 @@ describe("项目管理生命周期、筛选、打开与深链预览一次性消�
     await fireEvent.click(screen.getByRole("button", { name: "在 Cliora 中定位 gamma-fav" }));
     await waitFor(() => expect(mocks.openInCliora).toHaveBeenCalledWith("/work/shared.dev-workspace.json", "repo-fav"));
     await fireEvent.click(screen.getByRole("button", { name: "打开 gamma-fav" }));
-    expect(onOpenRepo).toHaveBeenCalledWith("/work/platform/gamma");
+    expect(onOpenRepo).toHaveBeenCalledWith("/work/platform/gamma", undefined);
   });
 
   it("v2 深链接受关联后直接打开来源仓库，取消预览则既不关联也不打开", async () => {

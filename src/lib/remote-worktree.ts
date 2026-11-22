@@ -46,6 +46,7 @@ export interface RemoteWorktreeSnapshot {
   reviewError?: { code: string; message: string } | null;
   worktreeIdentity?: string;
   watchDegraded?: boolean;
+  credentialNote?: string | null;
 }
 
 export interface RemoteWorkspace {
@@ -62,16 +63,28 @@ export interface RemoteOpenRequest extends RemoteWorktreeLocation {
   reviewId?: string;
   /** 与审查来源一致的基线；没有来源或来源没有基线时缺省。 */
   baseline?: string | null;
+  provision?: RemoteProvision;
+  projectHostId?: string;
 }
 
+export type RemoteProvision =
+  | { kind: "create" }
+  | { kind: "clone"; url: string; name: string; credential?: import("./types").HttpCredential };
+
 export interface RemoteConnectionProgress {
-  phase: "connecting" | "installing" | "opening";
+  phase: "connecting" | "installing" | "provisioning" | "opening";
   sentBytes?: number;
   totalBytes?: number;
 }
 
 export type RemoteOpenResult =
-  | { kind: "open"; sessionId: string; snapshot: RemoteWorktreeSnapshot; pendingWrite: RemotePendingWrite | null; pushContinuations?: RemotePushContinuation[]; reviewOutcome?: RemoteReviewOutcome | null; events?: boolean }
+  | {
+    kind: "open"; sessionId: string; snapshot: RemoteWorktreeSnapshot; pendingWrite: RemotePendingWrite | null;
+    pushContinuations?: RemotePushContinuation[]; reviewOutcome?: RemoteReviewOutcome | null; events?: boolean;
+    preferences?: { draft: string; reviewProgress: import("./types").StoredReviewProgress };
+    preferencesWarning?: string | null;
+    projectHostId?: string;
+  }
   | { kind: "install_required"; version: string; size: number; confirmationId?: string };
 
 export type RemoteDiffView = "staged" | "unstaged" | "task";
@@ -130,6 +143,7 @@ export type RemoteWriteRequest = RemoteWriteAction & {
  * 前端不得据此回退到本机 Git。
  */
 export const REMOTE_READ_OPS = [
+  "reviewToken",
   "taskReview",
   "taskReviewToken",
   "history",
@@ -160,6 +174,7 @@ export const REMOTE_READ_OPS = [
   "directory",
   "fileContent",
   "filePreview",
+  "projectCandidates",
   "document",
   "documentResource",
   "documentRemoteImage",
@@ -209,6 +224,7 @@ export const REMOTE_WRITE_OPS = [
   "discard",
   "worktreeRemoveTarget",
   "editSave",
+  "ignorePath",
   "createEntry",
   "copyEntry",
   "moveEntry",
@@ -229,7 +245,8 @@ export const REMOTE_TERMINAL_OPS = [
 export type RemoteReadOp = (typeof REMOTE_READ_OPS)[number];
 export type RemoteWriteOp = (typeof REMOTE_WRITE_OPS)[number];
 export type RemoteTerminalOp = (typeof REMOTE_TERMINAL_OPS)[number];
-export type RemoteCallOp = RemoteReadOp | RemoteWriteOp | RemoteTerminalOp;
+export type RemoteCallOp = RemoteReadOp | RemoteWriteOp | RemoteTerminalOp |
+  "desktopForgetRemoteRecent" | "desktopSaveRemoteDraft" | "desktopSaveReviewProgress";
 
 export interface RemoteCallRequest {
   sessionId: string;
@@ -254,7 +271,7 @@ export interface RemoteEventBatch {
 export type RemoteCallResult = RemoteWriteResult | Record<string, unknown>;
 
 export type RemoteWriteResult =
-  | { state: "completed"; operationId: string; snapshot: RemoteWorktreeSnapshot; head?: string | null; reviewOutcome?: RemoteReviewOutcome | null; pushContinuations?: RemotePushContinuation[]; pushTargetError?: string; edit?: RepositoryEditSnapshot; delete?: BatchDeleteResult }
+  | { state: "completed"; operationId: string; snapshot: RemoteWorktreeSnapshot; head?: string | null; reviewOutcome?: RemoteReviewOutcome | null; pushContinuations?: RemotePushContinuation[]; pushTargetError?: string; draftCleared?: boolean; edit?: RepositoryEditSnapshot; delete?: BatchDeleteResult; ignore?: { note: string } }
   | { state: "partial"; operationId: string; code: string; phase: "fetched" | "pushed" | "refs_pushed"; message: string; pushContinuations?: RemotePushContinuation[] }
   // Return "failed" only when the outcome is verified and the write had no effect.
   | { state: "failed" | "unknown"; operationId: string; op?: RemotePendingWrite["op"]; message: string; code?: string; pushContinuations?: RemotePushContinuation[] };
@@ -734,7 +751,4 @@ export function remoteDiffPage(document: RemoteDiffDocument, offset: number, lim
  * 远端审阅 token：绑定仓库键、状态令牌与路径。状态或内容一变 token 就不同，
  * 旧标记随之失效；它只是本地人工记录，不参与 Cliora 结果。
  */
-export function remoteReviewToken(snapshot: string, key: string, path: string): string {
-  return "remote:" + key + ":" + snapshot + ":" + path;
-}
 

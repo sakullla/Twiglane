@@ -1,5 +1,7 @@
-import type { RecentRepo } from "./types";
+import { isRemoteRepositoryKey, parseRemoteRepositoryKey, remoteRepositoryKey } from "./remote-worktree";
+import type { RecentRepo, RemoteProjectHost } from "./types";
 export interface WorkspaceLocation { hostId: string; path: string }
+export interface WorkspaceCheckout extends WorkspaceLocation { key: string; name: string }
 export interface WorkspaceRepository { id: string; name: string; locations: WorkspaceLocation[] }
 export interface WorkspaceManifest {
   schemaVersion: 1;
@@ -45,19 +47,50 @@ export function checkoutKey(path: string): string {
  * 项目里的仓库顺序按「我接下来最可能打开谁」排：当前仓库 → 收藏 → 最近打开（新的在前）→ 其余按名称。
  * 名单原始顺序只是导入顺序，对挑选没有意义；同名同时间时保持名单顺序（排序稳定）。
  */
-export function projectRepos(project: Project | null, hostId: string, recent: RecentRepo[], currentPath: string | null = null): RecentRepo[] {
+export function projectLocationRepo(
+  location: WorkspaceLocation, name: string, hostId: string, remoteHosts: readonly RemoteProjectHost[],
+  current?: WorkspaceCheckout | null,
+): RecentRepo | null {
+  if (location.hostId === hostId) return { name, path: location.path, openedAtMs: 0 };
+  const host = remoteHosts.find((item) => item.workspaceHostId === location.hostId);
+  if (!host) return null;
+  const matchesCurrent = current?.hostId === location.hostId && checkoutKey(current.path) === checkoutKey(location.path);
+  return {
+    name,
+    path: matchesCurrent ? current.key : remoteRepositoryKey(host.targetId, location.path),
+    remotePath: location.path,
+    host: host.host,
+    projectHostId: location.hostId,
+    openedAtMs: 0,
+  };
+}
+
+export function projectRepos(
+  project: Project | null, hostId: string, recent: RecentRepo[], currentPath: string | null = null,
+  remoteHosts: readonly RemoteProjectHost[] = [], currentCheckout?: WorkspaceCheckout | null,
+): RecentRepo[] {
   if (!project) return recent;
-  const opened = new Map(recent.map((r) => [checkoutKey(r.path), r.openedAtMs]));
+  const remoteIds = new Map(remoteHosts.map((host) => [host.targetId, host.workspaceHostId]));
+  const locationKey = (host: string, path: string) => JSON.stringify([host, checkoutKey(path)]);
+  const opened = new Map<string, number>();
+  for (const item of recent) {
+    const remote = parseRemoteRepositoryKey(item.path);
+    const owner = remote ? item.projectHostId ?? remoteIds.get(remote.hostId) : hostId;
+    if (!owner) continue;
+    const key = locationKey(owner, remote?.path ?? item.path);
+    opened.set(key, Math.max(opened.get(key) ?? 0, item.openedAtMs));
+  }
   const favorites = new Set(project.favorites);
   const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
   const current = currentPath ? checkoutKey(currentPath) : null;
   const rows = project.manifest.repositories.flatMap((repo) => {
     const favorite = favorites.has(repo.id);
-    return repo.locations.filter((l) => l.hostId === hostId).map((location) => ({
-      repo: { name: repo.name, path: location.path, openedAtMs: opened.get(checkoutKey(location.path)) ?? 0 },
-      favorite,
-      current: current !== null && checkoutKey(location.path) === current,
-    }));
+    return repo.locations.flatMap((location) => {
+      const row = projectLocationRepo(location, repo.name, hostId, remoteHosts, currentCheckout);
+      if (!row) return [];
+      row.openedAtMs = opened.get(locationKey(location.hostId, location.path)) ?? 0;
+      return [{ repo: row, favorite, current: isRemoteRepositoryKey(row.path) ? row.path === currentPath : checkoutKey(row.path) === current }];
+    });
   });
   rows.sort((a, b) =>
     Number(b.current) - Number(a.current)

@@ -714,8 +714,9 @@
 
   /** 拖动经过时由外壳调用：返回是否落在终端上，落在上面就高亮那一格。 */
   export function dragOver(x: number, y: number): boolean {
-    dropTarget = paneAt(x, y);
-    return dropTarget !== null;
+    const target = paneAt(x, y);
+    dropTarget = isRemoteRepositoryKey(path) ? null : target;
+    return target !== null;
   }
 
   export function dragEnd() {

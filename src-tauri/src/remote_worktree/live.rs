@@ -5,6 +5,24 @@
 use super::*;
 use std::env;
 
+#[test]
+fn terminal_exit_and_close_win_over_stale_snapshots() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = RemoteWorktrees::new(directory.path().to_owned());
+    state.record_terminal("older", "shell", 4, true);
+    state.record_terminal("current", "shell", 0, true);
+    state.record_terminal("older", "shell", 5, false);
+    state.record_terminal("older", "shell", 5, true);
+    state.record_terminal("older", "shell", 4, true);
+    state.record_terminal("current", "shell", u64::MAX, false);
+    state.record_terminal("current", "shell", 3, true);
+    let terminals = state.terminals.lock().unwrap();
+    assert!(!terminals[&("older".into(), "shell".into())].running);
+    assert_eq!(terminals[&("older".into(), "shell".into())].seq, 5);
+    assert!(!terminals[&("current".into(), "shell".into())].running);
+    assert_eq!(terminals[&("current".into(), "shell".into())].seq, u64::MAX);
+}
+
 async fn open(
     helper: Option<&Path>,
     access: &V2Access<'_>,
@@ -18,7 +36,7 @@ async fn open(
     let result = match result {
         Opened::NeedsInstall(offer) => {
             request.allow_install = true;
-            connect(helper, &request, Some(offer), review_source, &progress, access)
+            connect(helper, &request, Some(*offer), review_source, &progress, access)
                 .await
                 .unwrap_or_else(|error| panic!("install and open: {} / {}", error.code, error.message))
         }
@@ -86,6 +104,8 @@ async fn real_v2_opens_native_and_cliora_task() {
         allow_install: false,
         install_confirmation: None,
         review_id,
+        provision: None,
+        project_host_id: None,
     };
     let (session, snapshot) = open(None, &access, request(&Target::native(&native), None, None), None).await;
     assert_eq!(session.protocol(), 2);
@@ -107,6 +127,7 @@ async fn real_v2_opens_native_and_cliora_task() {
         repo: session.repo.clone(),
         worktree_identity: session.worktree_identity.clone(),
         push_commit_id: None,
+        draft_digest: None,
     };
     save_pending(&native_journal, &alternate_pending).unwrap();
     session.agent.close().await;
@@ -168,6 +189,8 @@ async fn real_v2_opens_native_and_cliora_task() {
             allow_install: false,
             install_confirmation: None,
             review_id: None,
+            provision: None,
+            project_host_id: None,
         };
         let (mut native_session, _) = open(None, &access, legacy_request.clone(), None).await;
         let old_journal = native_session.legacy_journal(
@@ -180,17 +203,18 @@ async fn real_v2_opens_native_and_cliora_task() {
             repo: legacy["repo"].as_str().unwrap().into(),
             worktree_identity: None,
             push_commit_id: None,
+            draft_digest: None,
         };
         save_pending(&old_journal, &old_record).unwrap();
         bind_legacy_cliora(&state.data, &mut native_session, &access, &Channel::new(|_| Ok(()))).await;
         let detected = find_pending(&state.data, &native_session).unwrap().unwrap();
         assert_eq!(detected.record.repo, old_record.repo);
-        let wrong = recover_pending(&state, &native_session, &old_record.operation_id).await.unwrap();
+        let wrong = recover_pending(&state, &native_session, &old_record.operation_id, Some(&store)).await.unwrap();
         assert_eq!(wrong["state"], "unknown");
         assert!(old_journal.is_file());
         old_record.op = legacy["op"].as_str().unwrap().into();
         save_pending(&old_journal, &old_record).unwrap();
-        let recovered = recover_pending(&state, &native_session, &old_record.operation_id).await.unwrap();
+        let recovered = recover_pending(&state, &native_session, &old_record.operation_id, Some(&store)).await.unwrap();
         assert_eq!(recovered["state"], "completed");
         assert_eq!(recovered["head"], legacy["head"]);
         assert!(!old_journal.exists());
@@ -200,7 +224,7 @@ async fn real_v2_opens_native_and_cliora_task() {
         legacy_request.target_revision = legacy["targetRevision"].as_str().unwrap().into();
         let (cliora_session, _) = open(Some(&helper), &access, legacy_request, None).await;
         save_pending(&old_journal, &old_record).unwrap();
-        let recovered = recover_pending(&state, &cliora_session, &old_record.operation_id).await.unwrap();
+        let recovered = recover_pending(&state, &cliora_session, &old_record.operation_id, Some(&store)).await.unwrap();
         assert_eq!(recovered["state"], "completed");
         assert_eq!(recovered["head"], legacy["head"]);
         assert!(!old_journal.exists());

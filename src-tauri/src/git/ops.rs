@@ -107,6 +107,8 @@ pub struct AppSettings {
     pub change_requests_enabled: bool,
     /// 终端默认类型与字号。
     pub terminal: TerminalPrefs,
+    pub remote_recent: Vec<crate::state::RemoteRecentRepo>,
+    pub remote_project_hosts: Vec<crate::state::RemoteProjectHost>,
 }
 
 pub async fn get_settings(backend: &Backend) -> Result<AppSettings, AppError> {
@@ -125,6 +127,8 @@ pub async fn get_settings(backend: &Backend) -> Result<AppSettings, AppError> {
         files_view: snapshot.files_view,
         change_requests_enabled: snapshot.change_requests_enabled,
         terminal: snapshot.terminal,
+        remote_recent: snapshot.remote_recent,
+        remote_project_hosts: snapshot.remote_project_hosts,
     })
 }
 

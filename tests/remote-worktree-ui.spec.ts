@@ -114,6 +114,27 @@ async function openHost(target = hostA, key = keyA, sessionId = "session-a", sna
   return api.openRepository(key, 1);
 }
 
+it("keeps PR credentials in desktop IPC and binds the prepared source to the active SSH connection", async () => {
+  const repository = await openHost();
+  const generation = repository.generation;
+  const expected = { provider: "gitea", host: "git.example", repository: "owner/project", repositoryWeb: "https://git.example/owner/project", sourceBranch: "feature" };
+  const ready = { ...expected, status: "ready", remote: "origin", choices: [], providerLabel: "Gitea", targetBranch: "main", defaultBranch: "main" };
+  invoke.mockResolvedValueOnce(ready);
+  const prepared = await api.prepareChangeRequest(keyA, null, generation, 1);
+  expect(invoke).toHaveBeenLastCalledWith("remote_change_request", {
+    request: { sessionId: "session-a", generation: "g1", action: "prepare", remote: null },
+  });
+  await api.setChangeRequestToken(keyA, "origin", "test-only-token", generation, 2, prepared);
+  expect(invoke).toHaveBeenLastCalledWith("remote_change_request", {
+    request: { sessionId: "session-a", generation: "g1", action: "token", remote: "origin", expected, credential: { operation: "set", token: "test-only-token" } },
+  });
+  await api.createChangeRequest(keyA, "origin", "main", "Deploy", "", generation, 3, prepared);
+  expect(invoke).toHaveBeenLastCalledWith("remote_change_request", {
+    request: { sessionId: "session-a", generation: "g1", action: "create", remote: "origin", expected, targetBranch: "main", title: "Deploy", body: "" },
+  });
+  expect(port.call).not.toHaveBeenCalled();
+});
+
 it("closes a late native open result without replacing the newer SSH worktree", async () => {
   const late = deferred<ReturnType<typeof opened>>();
   port.open.mockImplementationOnce(() => late.promise)
@@ -129,6 +150,31 @@ it("closes a late native open result without replacing the newer SSH worktree", 
   await expect(first).rejects.toMatchObject({ code: "cancelled" });
   expect(port.close).toHaveBeenCalledWith("late-a");
   expect(remoteRepositoryState(keyA)).toBeNull();
+  expect(remoteRepositoryState(keyB)).toMatchObject({ connected: true });
+});
+
+it("finishes an SSH clone in the background without replacing a newer worktree", async () => {
+  await openHost();
+  const clone = deferred<ReturnType<typeof opened>>();
+  let continueInBackground = false;
+  port.open.mockImplementationOnce(() => clone.promise)
+    .mockResolvedValueOnce(opened("session-b", snapshot({ repo: "repo-b" })));
+  const pending = openRemoteRepository({
+    kind: "ssh", hostId: hostA.targetId, hostRevision: hostA.targetRevision, path: "/srv",
+  }, {
+    provision: { kind: "clone", url: "https://git.example/project.git", name: "project" },
+    keepBackground: () => continueInBackground,
+  });
+  continueInBackground = true;
+  expect(remoteRepositoryState(keyA)).toMatchObject({ connected: true });
+  await openHost(hostB, keyB, "session-b", snapshot({ repo: "repo-b" }));
+  port.close.mockClear();
+
+  clone.resolve(opened("cloned", snapshot({ root: "/srv/project" })));
+  const clonedKey = remoteRepositoryKey(hostA.targetId, "/srv/project");
+  await expect(pending).resolves.toMatchObject({ kind: "background", key: clonedKey, path: "/srv/project" });
+  expect(port.close).toHaveBeenCalledExactlyOnceWith("cloned");
+  expect(remoteRepositoryState(clonedKey)).toBeNull();
   expect(remoteRepositoryState(keyB)).toMatchObject({ connected: true });
 });
 
@@ -752,18 +798,86 @@ describe("远端仓库在主窗口：审查基线、草稿与新建/克隆的边
     expect(port.open.mock.calls[1][0].baseline).toBeUndefined();
   });
 
-  it("远端草稿只留在会话内存里：切到别处再回来仍是那份，且不写本机草稿库", async () => {
+  it("从已核验的远端会话保存草稿和审阅进度，并在重新打开时用持久状态恢复", async () => {
     await openHost(hostA, keyA, "session-a");
     await api.saveDraft(keyA, "远端草稿正文");
-    // 本机草稿库只按本机仓库路径保存：远端草稿一次都没有交给本机命令。
+    const reviewProgress = { changes: { "small.txt": "f".repeat(64) } };
+    await api.saveRemoteReviewProgress(keyA, reviewProgress);
+    expect(port.call.mock.calls.map(([request]) => request)).toEqual([
+      { sessionId: "session-a", op: "desktopSaveRemoteDraft", fields: { message: "远端草稿正文" } },
+      { sessionId: "session-a", op: "desktopSaveReviewProgress", fields: { progress: reviewProgress } },
+    ]);
     expect(invoke).not.toHaveBeenCalled();
 
-    await openHost(hostB, keyB, "session-b");
+    const other = await openHost(hostB, keyB, "session-b");
+    expect(other.draft).toBe("");
+    expect(other.remoteReviewProgress).toBeUndefined();
     expect(remoteRepositoryState(keyA)).toBeNull();
 
-    const reopened = await openHost(hostA, keyA, "session-a2");
+    port.open.mockResolvedValueOnce({
+      ...opened("session-a2"), preferences: { draft: "远端草稿正文", reviewProgress },
+    });
+    const reopened = await api.openRepository(keyA, 2);
     expect(reopened.draft).toBe("远端草稿正文");
+    expect(reopened.remoteReviewProgress).toEqual(reviewProgress);
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("uses the remote file review token across unrelated status changes", async () => {
+    const repo = await openHost();
+    const token = { path: "small.txt", state: "current", token: "f".repeat(64), generation: 112 };
+    port.call.mockResolvedValue({ repo: "repo-a", token });
+    expect(await api.repositoryReviewToken(keyA, "small.txt", repo.generation, 2))
+      .toMatchObject({ ...token, generation: repo.generation });
+    port.status.mockResolvedValueOnce(snapshot({ generation: "g2" }));
+    const refreshed = await api.refreshStatus(keyA, repo.generation, 3);
+    expect(await api.repositoryReviewToken(keyA, "small.txt", refreshed.generation, 4))
+      .toMatchObject({ ...token, generation: refreshed.generation });
+    expect(port.call.mock.calls.map(([request]) => request.fields)).toEqual([
+      { relative: "small.txt" }, { relative: "small.txt" },
+    ]);
+  });
+
+  it("keeps the SSH clone action bound to the requested host when installation is confirmed", async () => {
+    const location = { kind: "ssh" as const, hostId: hostA.targetId, hostRevision: hostA.targetRevision, path: "/srv" };
+    const provision = { kind: "clone" as const, url: "https://git.example/repo.git", name: "复制 repo" };
+    port.open
+      .mockResolvedValueOnce({ kind: "install_required", version: "test", size: 1, confirmationId: "signed-offer" })
+      .mockResolvedValueOnce(opened("clone-session", snapshot({ root: "/srv/复制 repo" })));
+    expect(await openRemoteRepository(location, { provision })).toMatchObject({ kind: "install_required" });
+    expect(await openRemoteRepository(location, { provision, allowInstall: true, installConfirmation: "signed-offer" }))
+      .toMatchObject({ kind: "opened", path: "/srv/复制 repo" });
+    expect(port.open.mock.calls.map(([request]) => request)).toEqual([
+      expect.objectContaining({ targetId: hostA.targetId, targetRevision: hostA.targetRevision, path: "/srv", allowInstall: false, provision }),
+      expect.objectContaining({ targetId: hostA.targetId, targetRevision: hostA.targetRevision, path: "/srv", allowInstall: true, installConfirmation: "signed-offer", provision }),
+    ]);
+  });
+
+  it("restores the recent list with host-isolated SSH keys", async () => {
+    invoke.mockResolvedValueOnce({
+      recent: [{ name: "local", path: "/srv/repo", openedAtMs: 1 }],
+      remoteRecent: [
+        { name: "A", targetId: hostA.targetId, host: hostA.name, path: "/srv/repo", openedAtMs: 3, projectHostId: "verified-account-a" },
+        { name: "B", targetId: hostB.targetId, host: hostB.name, path: "/srv/repo", openedAtMs: 2 },
+      ],
+    });
+    const settings = await api.getSettings();
+    expect(settings.recent.map((repo) => repo.path)).toEqual([keyA, keyB, "/srv/repo"]);
+    expect(settings.recent[0].projectHostId).toBe("verified-account-a");
+  });
+
+  it("recovers an older completed commit without clearing a newer saved SSH draft", async () => {
+    port.open.mockResolvedValueOnce({
+      ...opened("session-a", snapshot(), { operationId: "previous", op: "commit" }),
+      preferences: { draft: "A newer draft" },
+    });
+    port.recover.mockResolvedValueOnce({
+      state: "completed", operationId: "previous", snapshot: snapshot(), draftCleared: false,
+    });
+    const repository = await api.openRepository(keyA, 1);
+    expect(repository.draft).toBe("A newer draft");
+    expect(remoteRepositoryState(keyA)?.pending).toBe(false);
+    expect(port.write).not.toHaveBeenCalled();
   });
 
   it("新建仓库失败时远端会话不连坐结束，成功后才结束", async () => {

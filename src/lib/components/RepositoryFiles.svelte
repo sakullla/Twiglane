@@ -28,7 +28,8 @@
     /** 从文件进入它的 staged / unstaged 改动：切换视图由外壳负责。 */
     onOpenDiff?: (path: string, side: DiffSide) => void;
     /** 在系统文件管理器中定位：经 App 的 reveal_path 后端（守仓库边界、无 shell）。 */
-    onReveal?: (path: string) => void;
+    onReveal?: (path: string, directory: boolean) => void;
+    remote?: boolean;
     /** 用系统默认程序打开文件：经 App 的 open_path 后端，已删除文件由菜单灰显拦下。 */
     onOpenDefault?: (path: string) => void;
     /** 复制文本到剪贴板：由 App 的 copyText 给出成功提示与失败可见错误。 */
@@ -70,6 +71,7 @@
     onFileHistory,
     onOpenDiff,
     onReveal,
+    remote = false,
     onOpenDefault,
     onCopyPath,
     onInsertToTerminal,
@@ -348,6 +350,7 @@
         onRefresh={refresh}
         onCollapseAll={() => store.collapseAll()}
         {onReveal}
+        {remote}
         {onOpenDefault}
         {onCopyPath}
         {onInsertToTerminal}

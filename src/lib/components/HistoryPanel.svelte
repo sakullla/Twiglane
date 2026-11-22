@@ -3,6 +3,7 @@
   import { LatestReadQueue } from "../latest-read";
   import { api, type HistoryFilters } from "../api";
   import { normalizeError } from "../errors";
+  import { isRemoteRepositoryKey } from "../remote-worktree";
   import {
     commitFileLabel,
     commitLineStat,
@@ -81,6 +82,7 @@
     onGeneration: (generation: number) => void;
     onFailure: (error: unknown) => void;
     onFilePath: (path: string) => void;
+    onRevealFile?: (path: string) => void;
     onClearFile: () => void;
     /** 从某个提交新建分支后回写最新状态（切换时工作区与分支都会变）。 */
     onSnapshot?: (snapshot: StatusSnapshot) => void;
@@ -187,6 +189,7 @@
     onGeneration,
     onFailure,
     onFilePath,
+    onRevealFile,
     onClearFile,
     onSnapshot,
     onNotice,
@@ -359,12 +362,16 @@
     const entries: ContextMenuEntry[] = [
       { id: "history", label: "查看此文件历史", icon: "history", run: () => onFilePath(relative) },
       { id: "copy", label: "复制相对路径", icon: "copy", run: () => void copyText(relative, `相对路径 ${relative}`) },
-      { id: "reveal", label: "在系统文件管理器中显示", icon: "folder", run: () => void revealFile(relative) },
+      { id: "reveal", label: isRemoteRepositoryKey(opened.summary.path) ? "在本机显示临时副本" : "在系统文件管理器中显示", icon: "folder", run: () => void revealFile(relative) },
     ];
     menu = { x: point.x, y: point.y, entries, label: `文件 ${relative} 的操作` };
   }
 
   async function revealFile(relative: string) {
+    if (onRevealFile) {
+      onRevealFile(relative);
+      return;
+    }
     try {
       await api.revealPath(opened.summary.path, relative);
     } catch (error) {

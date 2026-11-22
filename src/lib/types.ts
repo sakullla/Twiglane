@@ -39,11 +39,29 @@ export interface RecentRepo {
   /** 稳定仓库键；远端仓库是 ssh://hostId/远端路径，不是本机路径。 */
   path: string;
   openedAtMs: number;
+  projectHostId?: string;
   /** 远端仓库的主机地址；本机仓库缺省。 */
   host?: string | null;
   /** 远端仓库真实的远端路径；本机仓库缺省，此时 path 就是用户路径。 */
   remotePath?: string | null;
 }
+
+export interface RemoteRecentRepo {
+  targetId: string;
+  projectHostId?: string;
+  host: string;
+  path: string;
+  name: string;
+  openedAtMs: number;
+}
+
+export interface RemoteProjectHost {
+  workspaceHostId: string;
+  targetId: string;
+  host: string;
+}
+
+export type StoredReviewProgress = Record<string, Record<string, string>>;
 
 export interface GitInfo {
   available: boolean;
@@ -630,6 +648,8 @@ export interface OpenedRepository {
   snapshot: StatusSnapshot;
   draft: string;
   watchDegraded: boolean;
+  remoteReviewProgress?: StoredReviewProgress;
+  remoteProjectHostId?: string;
   /** 提交缩写长度（Git 的 core.abbrev / 自动长度）。旧响应可能缺省，按 7 位处理。 */
   abbrevLength?: number;
 }
@@ -723,6 +743,8 @@ export interface SettingsDto {
   panelWidths: PanelWidths;
   git: GitInfo;
   recent: RecentRepo[];
+  remoteRecent?: RemoteRecentRepo[];
+  remoteProjectHosts?: RemoteProjectHost[];
   settingsWarning: string | null;
   /** 旧响应可能缺省；外壳按 merge 处理。 */
   pullIntegration?: PullIntegration;

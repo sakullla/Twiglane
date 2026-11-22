@@ -125,7 +125,7 @@
       // 目标分支以平台元数据为准，只在用户还没动过时预选：清空过的输入不被覆盖。
       if (!targetTouched) target = result.targetBranch;
       phase = { kind: "ready" };
-      void readToken(result.remote, result.generation);
+      void readToken(result);
     } catch (error) {
       if (!current(path, ticket)) return;
       const failure = normalizeError(error);
@@ -138,11 +138,12 @@
   }
 
   /** 令牌状态只读布尔值；读不到时按「未配置」提示，但不禁用创建（原生会给准确原因）。 */
-  async function readToken(remote: string, generation: number) {
+  async function readToken(request: ChangeRequestPrepare) {
+    const { remote, generation } = request;
     const path = opened.summary.path;
     const ticket = serial;
     try {
-      const status = await api.changeRequestTokenStatus(path, remote, generation, nextId());
+      const status = await api.changeRequestTokenStatus(path, remote, generation, nextId(), request);
       if (!current(path, ticket)) return;
       if (prepared?.remote !== remote) return;
       token = status.configured ? "configured" : "missing";
@@ -165,6 +166,7 @@
         tokenDraft,
         request.generation,
         nextId(),
+        request,
       );
       if (!alive || opened.summary.path !== path) return;
       token = status.configured ? "configured" : "missing";
@@ -192,6 +194,7 @@
         request.remote,
         request.generation,
         nextId(),
+        request,
       );
       if (!alive || opened.summary.path !== path) return;
       token = status.configured ? "configured" : "missing";
@@ -220,6 +223,7 @@
         body,
         request.generation,
         nextId(),
+        request,
       );
       if (!current(path, ticket)) return;
       if (outcome.status === "created") phase = { kind: "created", outcome };

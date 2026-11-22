@@ -155,7 +155,7 @@ pub(super) fn replace_edit_file(
     Ok(())
 }
 
-pub(super) fn validate_name(name: &OsStr) -> Result<(), AppError> {
+pub(crate) fn validate_name(name: &OsStr) -> Result<(), AppError> {
     if is_git_metadata_name(name) {
         return Err(git_metadata_error());
     }
@@ -226,6 +226,16 @@ struct Source {
     file: fs::File,
     path: PathBuf,
     directory: bool,
+}
+
+#[cfg(feature = "agent")]
+pub(super) fn open_file_copy(boundary: &EditBoundary, relative: &Path) -> Result<fs::File, AppError> {
+    let target = Destination::bind(boundary, relative)?;
+    let source = Source::open(boundary, &target.path, false)?;
+    if source.directory {
+        return Err(unsupported_entry_error());
+    }
+    Ok(source.file)
 }
 
 impl Source {

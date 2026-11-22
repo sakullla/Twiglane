@@ -16,7 +16,7 @@ pub fn load() -> Result<String, AppError> {
     })
 }
 
-fn account_state_dir() -> Option<PathBuf> {
+pub(crate) fn account_state_dir() -> Option<PathBuf> {
     // SSH clients can forward environment variables. Resolve the account's
     // storage through the OS so changing a connection profile cannot fork it.
     let profile = account_profile()?;

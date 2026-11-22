@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -1792,6 +1794,75 @@ pub(crate) fn review_path(path: &str) -> Result<PathBuf, AppError> {
     Ok(relative)
 }
 
+pub(crate) const FILE_COPY_CHUNK_BYTES: usize = 1024 * 1024;
+
+#[cfg(feature = "agent")]
+pub(crate) struct FileCopyPage {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) version: String,
+    pub(crate) size: u64,
+}
+
+#[cfg(feature = "agent")]
+pub(crate) async fn repository_file_copy(
+    backend: &Backend,
+    path: &str,
+    relative: &str,
+    offset: u64,
+    version: Option<String>,
+    generation: u64,
+    request_id: u64,
+) -> Result<FileCopyPage, AppError> {
+    let relative = review_path(relative)?;
+    let root = canonical_existing(&validate_input_path(path)?)?;
+    let key = repo_key(&root);
+    let boundary = read_edit_boundary(backend, &key, generation, request_id, &root).await?;
+    backend.scheduler.execute_blocking_read(&key, request_id, generation, move |cancel| {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let mut file = secure_entry_ops::open_file_copy(&boundary, &relative)?;
+        #[cfg(windows)]
+        let mut file = windows_entry::open_file_copy(&boundary, &relative)?;
+        let unreadable = |_| AppError::new("path_unreadable", "无法读取远端文件的副本。");
+        let changed = || AppError::new("file_changed", "远端文件在复制期间变化，请重新打开。");
+        let info = file.metadata().map_err(unreadable)?;
+        let size = info.len();
+        let current = copy_file_version(&file, &info)?;
+        if offset > size || version.as_ref().is_some_and(|expected| *expected != current) {
+            return Err(changed());
+        }
+        check_cancel(&cancel)?;
+        file.seek(SeekFrom::Start(offset)).map_err(unreadable)?;
+        let mut bytes = vec![0; (size - offset).min(FILE_COPY_CHUNK_BYTES as u64) as usize];
+        file.read_exact(&mut bytes).map_err(|error| {
+            if error.kind() == ErrorKind::UnexpectedEof { changed() } else { unreadable(error) }
+        })?;
+        let after = file.metadata().map_err(unreadable)?;
+        if copy_file_version(&file, &after)? != current {
+            return Err(changed());
+        }
+        check_cancel(&cancel)?;
+        Ok(FileCopyPage { bytes, version: current, size })
+    }).await
+}
+
+#[cfg(feature = "agent")]
+fn copy_file_version(_file: &fs::File, metadata: &fs::Metadata) -> Result<String, AppError> {
+    #[cfg(unix)]
+    let stamp = {
+        use std::os::unix::fs::MetadataExt;
+        format!("{}:{}:{}:{}:{}:{}:{}", metadata.dev(), metadata.ino(), metadata.len(),
+            metadata.mtime(), metadata.mtime_nsec(), metadata.ctime(), metadata.ctime_nsec())
+    };
+    #[cfg(windows)]
+    let stamp = {
+        let info = windows_trash::info(_file)?;
+        let time = info.ftLastWriteTime;
+        format!("{}:{}:{}:{}:{}:{}", info.dwVolumeSerialNumber, info.nFileIndexHigh,
+            info.nFileIndexLow, metadata.len(), time.dwHighDateTime, time.dwLowDateTime)
+    };
+    Ok(sha256_hex(stamp.as_bytes()))
+}
+
 fn review_prefix(root: &Path) -> Vec<OsString> {
     vec![
         OsString::from("--literal-pathspecs"),
@@ -2702,7 +2773,7 @@ mod windows_trash;
 use windows_trash::BoundTrashTarget;
 #[cfg(windows)]
 #[path = "windows_entry.rs"]
-mod windows_entry;
+pub(crate) mod windows_entry;
 
 /// 没有回收站适配器的平台不存在可绑定的回收站目标：命令在校验前就失败关闭，
 /// 适配器永远不会被调用。保留该类型只为让 `repository_delete_entry` 的适配器签名跨平台一致。
@@ -3216,7 +3287,7 @@ mod secure_entry_ops {
                 OrdinaryEntryKind::File => open_at(
                     parent.directory.fd,
                     &parent.name,
-                    libc::O_RDONLY,
+                    libc::O_RDONLY | libc::O_NONBLOCK,
                 ),
                 OrdinaryEntryKind::Directory => open_at(
                     parent.directory.fd,
@@ -3265,6 +3336,11 @@ mod secure_entry_ops {
                 directory,
             })
         }
+    }
+
+    #[cfg(feature = "agent")]
+    pub(super) fn open_file_copy(boundary: &EditBoundary, relative: &Path) -> Result<fs::File, AppError> {
+        SecureRoot::open(boundary)?.source(relative, false)?.file.ok_or_else(unsupported_entry_error)
     }
 
     fn open_new_file(directory: &Directory, name: &OsStr) -> std::io::Result<fs::File> {

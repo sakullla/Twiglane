@@ -12,6 +12,7 @@ mod remote_ssh;
 pub use remote_ssh::handle_ssh_host_key_callback;
 mod remote_ssh_sync;
 mod remote_worktree;
+mod remote_provision;
 pub mod remote_worktree_transport;
 mod shutdown;
 mod state;
@@ -136,6 +137,8 @@ pub fn run() {
             remote_worktree::remote_worktree_write,
             remote_worktree::remote_worktree_recover,
             remote_worktree::remote_worktree_call,
+            remote_worktree::remote_change_request,
+            remote_worktree::remote_worktree_file_copy,
             remote_worktree::remote_worktree_events,
             remote_worktree::remote_worktree_cancel_reads,
             remote_ssh::remote_ssh_settings,
@@ -688,10 +691,10 @@ fn route_run_event(app: &AppHandle, event: &RunEvent, fallback: &Shutdown) {
 
 /// 只以管理器记录的活动进程为准，不看前端面板是否展开。发出确认事件后返回 true。
 fn request_terminal_confirmation(app: &AppHandle) -> bool {
-    let Some(manager) = app.try_state::<TerminalManager>() else {
-        return false;
-    };
-    let sessions = manager.active();
+    let mut sessions = app.try_state::<TerminalManager>().map_or_else(Vec::new, |manager| manager.active());
+    if let Some(remote) = app.try_state::<Arc<remote_worktree::RemoteWorktrees>>() {
+        sessions.extend(remote.active_terminals());
+    }
     if sessions.is_empty() {
         return false;
     }
@@ -2529,11 +2532,16 @@ fn terminal_resize(
     state.resize(&session_id, rows, cols)
 }
 
-#[tauri::command(async)]
-fn terminate_terminals(
+#[tauri::command]
+async fn terminate_terminals<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, TerminalManager>,
 ) -> Result<Vec<TerminalActivity>, AppError> {
-    state.terminate_all()
+    let mut terminated = state.terminate_all()?;
+    if let Some(remote) = app.try_state::<Arc<remote_worktree::RemoteWorktrees>>() {
+        terminated.extend(remote.terminate_terminals().await?);
+    }
+    Ok(terminated)
 }
 
 #[derive(serde::Serialize)]

@@ -370,6 +370,10 @@ impl AgentTransport {
         response.await.unwrap_or_else(|_| Err(disconnected()))
     }
 
+    pub(crate) fn is_connected(&self) -> bool {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).failure.is_none()
+    }
+
     pub async fn close(&self) {
         self.pending
             .lock()

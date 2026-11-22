@@ -11,15 +11,19 @@
   import { SvelteSet } from "svelte/reactivity";
   import { api, pickDirectories, pickDirectory, pickFile, saveWorkspaceFile } from "../api";
   import { normalizeError } from "../errors";
-  import type { RepoHead } from "../types";
+  import { isRemoteRepositoryKey, normalizeRemotePath } from "../remote-worktree";
+  import type { RemoteProjectHost, RepoHead } from "../types";
   import { hueOf } from "../ui";
   import {
     addCandidates,
     checkoutKey,
     projectInitial,
+    projectLocationRepo,
+    projectMemberForCheckout,
     type Project,
     type Projects,
     type WorkspaceCandidate,
+    type WorkspaceCheckout,
     type WorkspaceManifest,
     type WorkspacePreview,
     type WorkspaceRepository,
@@ -38,13 +42,15 @@
     /** 标题栏当前选中的项目范围。 */
     selectedId: string | null;
     currentPath?: string | null;
+    currentCheckout?: WorkspaceCheckout | null;
+    remoteProjectHosts?: readonly RemoteProjectHost[];
     initialPreview?: WorkspacePreview | null;
     /** 打开时直接定位的项目与动作。 */
     focus?: ProjectManagerFocus | null;
     nextId: () => number;
     onData: (data: Projects) => void;
     onSelect: (id: string | null) => void;
-    onOpenRepo?: (path: string) => void;
+    onOpenRepo?: (path: string, projectHostId?: string) => void;
     onConsumeInitialPreview?: () => void;
     onClose: () => void;
   }
@@ -53,6 +59,8 @@
     data,
     selectedId,
     currentPath = null,
+    currentCheckout = null,
+    remoteProjectHosts = [],
     initialPreview = null,
     focus = null,
     nextId,
@@ -113,6 +121,11 @@
   const pageCandidates = $derived(matchingCandidates.slice(candidatePage * CANDIDATES_PER_PAGE, (candidatePage + 1) * CANDIDATES_PER_PAGE));
   const chosen = new SvelteSet<string>();
   let repairId = $state<string | null>(null);
+  let remoteSelectionOpen = $state(false);
+  let remoteSelection = $state("");
+  let remoteDiscover = $state(false);
+  let candidateHost = $state<WorkspaceCheckout | null>(null);
+  let remoteScan: { key: string; requestId: number } | null = null;
   let cancelRequested = $state(false);
   let creating = $state(false);
   let renaming = $state(false);
@@ -231,15 +244,27 @@
     return localLocationsOf(repo).find((location) => !isLocationMissing(location.path))?.path ?? null;
   }
 
+  function remoteLocationsOf(repo: WorkspaceRepository) {
+    return repo.locations.flatMap((location) => {
+      if (location.hostId === data.hostId) return [];
+      const openable = projectLocationRepo(location, repo.name, data.hostId, remoteProjectHosts, currentCheckout);
+      return openable ? [openable] : [];
+    });
+  }
+
+  function preferredLocation(repo: WorkspaceRepository) {
+    const local = validLocalPath(repo);
+    return local ? { path: local, projectHostId: undefined } : remoteLocationsOf(repo)[0] ?? null;
+  }
+
   function isRepoBroken(repo: WorkspaceRepository): boolean {
     const locals = localLocationsOf(repo);
-    return locals.length === 0 || locals.some((location) => isLocationMissing(location.path));
+    return locals.length === 0 ? remoteLocationsOf(repo).length === 0 : locals.some((location) => isLocationMissing(location.path));
   }
 
   function isRepoCurrent(repo: WorkspaceRepository): boolean {
-    if (!currentPath) return false;
-    const key = checkoutKey(currentPath);
-    return localLocationsOf(repo).some((location) => checkoutKey(location.path) === key);
+    const active = currentCheckout ?? (currentPath ? { hostId: data.hostId, path: currentPath } : null);
+    return !!active && repo.locations.some((location) => location.hostId === active.hostId && checkoutKey(location.path) === checkoutKey(active.path));
   }
 
   function branchOf(repo: WorkspaceRepository): string | null {
@@ -306,6 +331,8 @@
     renaming = false;
     confirmDelete = false;
     repairId = null;
+    remoteSelectionOpen = false;
+    candidateHost = null;
   }
 
   async function create() {
@@ -358,6 +385,11 @@
     const alive = new Set(heads.filter((head) => head && !head.missing).map((head) => checkoutKey(head.path)));
     const path = locals.find((location) => alive.has(checkoutKey(location.path)))?.path ?? null;
     if (!path) {
+      const remote = remoteLocationsOf(repo)[0];
+      if (remote) {
+        onOpenRepo?.(remote.path, remote.projectHostId);
+        return;
+      }
       error = `来源仓库「${repo.name}」在本机没有可用位置，请在成员行重新关联这个目录。`;
       await tick();
       focusMember(repositoryId);
@@ -421,6 +453,36 @@
     accept(await api.workspaceUpdate(manifest, manifest.revision));
   }
 
+  const currentRemote = $derived(currentCheckout && isRemoteRepositoryKey(currentCheckout.key) ? currentCheckout : null);
+
+  function addRemote(repositoryId?: string) {
+    const target = project;
+    const checkout = currentRemote;
+    if (!target || !checkout || editReason) return;
+    void run("正在关联远端仓库", async () => {
+      const memberPaths = target.manifest.repositories.flatMap((repo) => repo.locations
+        .filter((location) => location.hostId === checkout.hostId).map((location) => location.path));
+      const direct = projectMemberForCheckout(target, checkout.hostId, checkout.path, []);
+      if (direct) {
+        if (repositoryId && repositoryId !== direct.id) throw new Error(`此工作区已属于「${direct.name}」。`);
+        notice = "此工作区已在项目中。";
+        return;
+      }
+      const heads = memberPaths.length > 0 ? await api.linkedWorktreeHeads(checkout.key, [checkout.path, ...memberPaths]) : [];
+      const linked = projectMemberForCheckout(target, checkout.hostId, checkout.path, heads);
+      if (linked && repositoryId && linked.id !== repositoryId) throw new Error(`此工作区属于「${linked.name}」。`);
+      if (currentRemote?.key !== checkout.key || currentRemote?.hostId !== checkout.hostId) {
+        throw new Error("当前远端仓库已变化，请重新关联。");
+      }
+      const next = addCandidates(target.manifest, [{
+        path: checkout.path, name: checkout.name, repositoryId: repositoryId ?? linked?.id ?? null,
+        error: null, commonDirectory: null,
+      }], checkout.hostId);
+      await save(next);
+      notice = "已将当前远端仓库关联到项目。";
+    });
+  }
+
   function startRename() {
     if (!project) return;
     renameValue = project.manifest.name;
@@ -466,6 +528,9 @@
 
   async function choosePaths(discover: boolean, repositoryId: string | null = null) {
     repairId = repositoryId;
+    remoteSelectionOpen = false;
+    candidateHost = null;
+    candidates = [];
     await run(discover ? "正在发现仓库" : "正在检查仓库", async () => {
       cancelRequested = false;
       if (discover) {
@@ -490,14 +555,67 @@
     });
   }
 
+  function chooseRemotePaths(repositoryId: string | null = null) {
+    if (!currentRemote || editReason) return;
+    repairId = repositoryId;
+    remoteDiscover = false;
+    remoteSelection = "";
+    candidates = [];
+    chosen.clear();
+    candidateHost = null;
+    remoteSelectionOpen = true;
+  }
+
+  function inspectRemotePaths() {
+    const checkout = currentRemote;
+    const paths = remoteSelection.split(/\r?\n/).map((path) => path.trim()).filter(Boolean);
+    if (!checkout || !paths.length || editReason) return;
+    const discover = remoteDiscover;
+    if (paths.some((path) => !normalizeRemotePath(path)) || ((discover || repairId) && paths.length !== 1)) {
+      error = discover || repairId ? "请输入一个远端绝对路径。" : "每行输入一个远端绝对路径。";
+      return;
+    }
+    void run(discover ? "正在发现仓库" : "正在检查仓库", async () => {
+      const requestId = nextId();
+      cancelRequested = false;
+      remoteScan = { key: checkout.key, requestId };
+      try {
+        const result = await api.remoteProjectCandidates(checkout.key, discover ? { root: paths[0] } : { paths }, requestId);
+        if (cancelRequested) return;
+        if (currentRemote?.key !== checkout.key || currentRemote?.hostId !== checkout.hostId) {
+          throw new Error("当前 SSH 主机已变化，请重新检查远端位置。");
+        }
+        candidates = result.candidates;
+        candidateHost = checkout;
+        candidateQuery = "";
+        chosen.clear();
+        for (const candidate of candidates) if (!candidate.error) chosen.add(candidate.path);
+        if (candidates.length) remoteSelectionOpen = false;
+        notice = result.partial ? "仅列出已确认的候选。请缩小目录范围后检查其余位置。" : `找到 ${candidates.length} 个候选。`;
+      } catch (failure) {
+        if (!cancelRequested) throw failure;
+      } finally {
+        remoteScan = null;
+        if (cancelRequested) notice = "已取消检查，未添加任何仓库。";
+      }
+    });
+  }
+
   async function add() {
     if (!project) return;
     const current = project;
     await run("正在保存项目成员", async () => {
       const picked = candidates.filter((candidate) => chosen.has(candidate.path) && !candidate.error);
+      if (candidateHost && candidateHost.hostId !== currentRemote?.hostId) {
+        throw new Error("当前 SSH 主机已变化，请重新检查远端位置。");
+      }
+      const host = candidateHost?.hostId ?? data.hostId;
       if (repairId) {
         const candidate = picked[0];
         if (!candidate) return;
+        if (candidateHost && candidate.repositoryId && candidate.repositoryId !== repairId) {
+          throw new Error("此远端位置已关联到另一个项目仓库。");
+        }
         await save({
           ...current.manifest,
           repositories: current.manifest.repositories.map((repo) =>
@@ -505,19 +623,20 @@
               ? {
                   ...repo,
                   locations: [
-                    ...repo.locations.filter((location) => location.hostId !== data.hostId),
-                    { hostId: data.hostId, path: candidate.path },
+                    ...repo.locations.filter((location) => location.hostId !== host),
+                    { hostId: host, path: candidate.path },
                   ],
                 }
               : repo,
           ),
         });
       } else {
-        await save(addCandidates(current.manifest, picked, data.hostId));
+        await save(addCandidates(current.manifest, picked, host));
       }
       candidates = [];
       chosen.clear();
       repairId = null;
+      candidateHost = null;
       notice = "项目名单已保存，源码与 Git 内容未移动。";
     });
   }
@@ -601,25 +720,38 @@
   /** 成员行右键：打开、收藏、复制路径、重新关联、移除。 */
   function memberMenu(event: MouseEvent, repo: WorkspaceRepository) {
     event.preventDefault();
-    const openable = validLocalPath(repo);
+    const openable = preferredLocation(repo);
     const favorite = favoriteSet.has(repo.id);
     const entries: ContextMenuEntry[] = [
       {
         id: "open",
         label: isRepoCurrent(repo) ? "当前仓库" : "打开仓库",
         icon: "folder-open",
-        disabledReason: isRepoCurrent(repo) ? "已经是当前仓库" : !openable ? "本机没有可用目录" : !onOpenRepo ? "这里不能打开仓库" : busyReason,
-        run: () => openable && onOpenRepo?.(openable),
+        disabledReason: isRepoCurrent(repo) ? "已经是当前仓库" : !openable ? "没有可用的仓库位置" : !onOpenRepo ? "这里不能打开仓库" : busyReason,
+        run: () => openable && onOpenRepo?.(openable.path, openable.projectHostId),
       },
       { id: "favorite", label: favorite ? "取消收藏" : "收藏（排在切换列表前面）", icon: "star", disabledReason: busyReason, run: () => toggleFavorite(repo) },
     ];
-    const first = localLocationsOf(repo)[0]?.path;
+    const remote = remoteLocationsOf(repo);
+    if (remote.length > 0 && onOpenRepo) {
+      entries.push({ id: "open-ssh", label: "打开 SSH 位置", icon: "globe", submenu: remote.map((location) => ({
+        id: location.path, label: `${location.host} · ${location.remotePath}`,
+        disabledReason: location.path === currentCheckout?.key ? "已经是当前仓库" : busyReason,
+        run: () => onOpenRepo(location.path, location.projectHostId),
+      })) });
+    }
+    const first = localLocationsOf(repo)[0]?.path ?? remote[0]?.remotePath;
     if (first) entries.push({ id: "copy", label: "复制完整路径", icon: "copy", run: () => void copyText(first, "完整路径") });
     if (project?.sourcePath) {
       entries.push({ id: "cliora", label: "在 Cliora 中定位这个仓库", icon: "link", disabledReason: editReason, run: () => openInCliora(project!, repo.id) });
     }
     entries.push({ separator: true });
     entries.push({ id: "relink", label: "重新关联目录…", icon: "folder", disabledReason: editReason, run: () => void choosePaths(false, repo.id) });
+    if (currentRemote) entries.push({
+      id: "attach-ssh", label: "关联当前 SSH 仓库", icon: "link", disabledReason: editReason, run: () => addRemote(repo.id),
+    }, {
+      id: "relink-ssh", label: "重新关联 SSH 位置…", icon: "globe", disabledReason: editReason, run: () => chooseRemotePaths(repo.id),
+    });
     entries.push({ id: "remove", label: "从项目移除", icon: "x", danger: true, disabledReason: editReason, run: () => removeMember(repo) });
     menu = { x: event.clientX, y: event.clientY, entries, label: `${repo.name} 的操作` };
   }
@@ -717,7 +849,8 @@
               title={cancelRequested ? "已请求取消，正在等待当前读取结束。" : "取消后不添加任何仓库。"}
               onclick={() => {
                 cancelRequested = true;
-                void api.workspaceCancelDiscovery().catch((e) => (error = normalizeError(e).message));
+                const cancel = remoteScan ? api.cancelRemoteProjectCandidates(remoteScan.key, remoteScan.requestId) : api.workspaceCancelDiscovery();
+                void cancel.catch((e) => (error = normalizeError(e).message));
               }}
             >取消发现</button>
           {/if}
@@ -884,10 +1017,21 @@
             </section>
           {/if}
           {#if current.error}<p class="pm-msg danger" role="alert"><Icon name="alert-circle" size={14} />最后可读快照：{current.error}。可刷新重试，或重新打开清单预览并明确接收。</p>{/if}
+          {#if remoteSelectionOpen && currentRemote}
+            <section class="pm-panel" aria-label="检查 SSH 仓库位置">
+              <label class="label" for="workspace-ssh-paths">远端绝对路径</label>
+              <textarea id="workspace-ssh-paths" class="input" rows="3" bind:value={remoteSelection} disabled={Boolean(busy)} title={busyReason} placeholder={remoteDiscover || repairId ? "/srv/repos" : "每行一个仓库路径"}></textarea>
+              {#if !repairId}<label><input type="checkbox" bind:checked={remoteDiscover} disabled={Boolean(busy)} title={busyReason} /> 从此 SSH 目录发现仓库</label>{/if}
+              <div class="pm-actions">
+                <button class="btn btn-ghost" disabled={Boolean(busy)} title={busyReason} onclick={() => { remoteSelectionOpen = false; repairId = null; }}>取消</button>
+                <button class="btn btn-primary" disabled={Boolean(editReason) || !remoteSelection.trim()} title={editReason ?? (!remoteSelection.trim() ? "先输入远端绝对路径" : undefined)} onclick={inspectRemotePaths}>{remoteDiscover ? "发现远端仓库" : "检查 SSH 路径"}</button>
+              </div>
+            </section>
+          {/if}
           {#if candidates.length}
             <section class="pm-panel" aria-label="候选仓库">
               <header class="pm-panel-head">
-                <h4>{repairId ? "选择一个目录替换此仓库的本机位置" : "选择要纳入的仓库"}</h4>
+                <h4>{repairId ? `选择一个目录替换此仓库的${candidateHost ? "SSH" : "本机"}位置` : "选择要纳入的仓库"}</h4>
                 <small role="status">匹配 {matchingCandidates.length} / {candidates.length} · 已选 {chosen.size}</small>
               </header>
               <div class="pm-inline">
@@ -955,7 +1099,7 @@
                 </nav>
               {/if}
               <div class="pm-actions">
-                <button class="btn btn-ghost" disabled={Boolean(busy)} title={busyReason} onclick={() => { candidates = []; chosen.clear(); repairId = null; }}>取消</button>
+                <button class="btn btn-ghost" disabled={Boolean(busy)} title={busyReason} onclick={() => { candidates = []; chosen.clear(); repairId = null; candidateHost = null; }}>取消</button>
                 <button
                   class="btn btn-primary"
                   disabled={Boolean(busy) || !chosen.size}
@@ -1005,17 +1149,21 @@
                 title={editReason ?? "扫描一个目录，列出其中的 Git 仓库再挑选"}
                 onclick={() => void choosePaths(true)}
               ><Icon name="search" size={13} />从目录发现</button>
+              {#if currentRemote}
+                <button class="btn btn-secondary btn-sm" disabled={Boolean(editReason)} title={editReason ?? currentRemote.path} onclick={() => addRemote()}><Icon name="link" size={13} />纳入当前 SSH 仓库</button>
+                <button class="btn btn-secondary btn-sm" disabled={Boolean(editReason)} title={editReason} onclick={() => chooseRemotePaths()}><Icon name="globe" size={13} />添加 SSH 位置…</button>
+              {/if}
             </div>
           </div>
           <div class="project-members" role="list">
             {#each filtered as repo (repo.id)}
               {@const favorite = favoriteSet.has(repo.id)}
               {@const locals = localLocationsOf(repo)}
-              {@const openablePath = validLocalPath(repo)}
+              {@const openable = preferredLocation(repo)}
               {@const broken = isRepoBroken(repo)}
               {@const isCurrent = isRepoCurrent(repo)}
               {@const branch = branchOf(repo)}
-              <article class="project-member" class:broken role="listitem" data-repository-id={repo.id} oncontextmenu={(event) => memberMenu(event, repo)} ondblclick={() => !isCurrent && openablePath && onOpenRepo?.(openablePath)}>
+              <article class="project-member" class:broken role="listitem" data-repository-id={repo.id} oncontextmenu={(event) => memberMenu(event, repo)} ondblclick={() => !isCurrent && openable && onOpenRepo?.(openable.path, openable.projectHostId)}>
                 <span class="pm-badge" style={"--hue:" + hueOf(repo.locations[0]?.path ?? repo.id)} aria-hidden="true">{initial(repo.name)}</span>
                 <div class="member-main">
                   <div class="member-title">
@@ -1025,18 +1173,19 @@
                     {#if repo.locations.length > 1}<small>{repo.locations.length} 个位置</small>{/if}
                   </div>
                   {#each repo.locations as location}
+                    {@const remote = remoteProjectHosts.find((host) => host.workspaceHostId === location.hostId)}
                     <!-- 整行失效时由下方一条说明交代原因，路径后不再重复“目录已缺失”。 -->
-                    <span class="project-path" title={location.path}><bdi>{location.path}</bdi>{#if location.hostId !== data.hostId}<em> · 其他主机，暂不可用</em>{:else if !broken && isLocationMissing(location.path)}<em class="missing-note"> · 目录已缺失</em>{/if}</span>
+                    <span class="project-path" title={location.path}><bdi>{location.path}</bdi>{#if location.hostId !== data.hostId}<em> · {remote?.host ?? "其他主机，暂不可用"}</em>{:else if !broken && isLocationMissing(location.path)}<em class="missing-note"> · 目录已缺失</em>{/if}</span>
                   {/each}
-                  {#if locals.length === 0}
+                  {#if locals.length === 0 && !openable}
                     <span class="project-error">本机没有位置，请重新关联目录。</span>
                   {:else if broken}
                     <span class="project-error">目录不存在，请重新关联。</span>
                   {/if}
                 </div>
                 <div class="member-actions">
-                  {#if !isCurrent && openablePath && onOpenRepo}
-                    <button class="btn btn-secondary btn-sm project-member-primary" disabled={Boolean(busy)} title={busyReason ?? `打开 ${openablePath}`} aria-label={`打开 ${repo.name}`} onclick={() => onOpenRepo(openablePath)}>打开</button>
+                  {#if !isCurrent && openable && onOpenRepo}
+                    <button class="btn btn-secondary btn-sm project-member-primary" disabled={Boolean(busy)} title={busyReason ?? `打开 ${openable.path}`} aria-label={`打开 ${repo.name}`} onclick={() => onOpenRepo(openable.path, openable.projectHostId)}>打开</button>
                   {/if}
                   {#if current.sourcePath}
                     <button

@@ -6,14 +6,16 @@
  * 其他文件不受影响、其他 worktree 与范围互不覆盖、跨 worktree 摘要只含真实已审阅数。
  * 界面入口在 app-shell、changes 与 task-review 的用例里验证。
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as progress from "../src/lib/review-progress.svelte";
 import {
   CHANGES_SCOPE,
   applyReviewReverificationIn,
   beginReviewProgress,
+  hydrateStoredReviewProgress,
   isReviewedIn,
   markReviewedIn,
+  onStoredReviewProgressChanged,
   pruneReviewProgressIn,
   resetReviewProgress,
   reviewPaths,
@@ -181,14 +183,16 @@ describe("跨 worktree 摘要", () => {
 });
 
 describe("R8-R10 边界", () => {
-  it("审阅进度模块只有内存状态，没有写入、保存或批准入口", () => {
+  it("审阅进度模块只提供标记、复验及持久化接线", () => {
     const exported = Object.keys(progress).sort();
     expect(exported).toEqual([
       "CHANGES_SCOPE",
       "applyReviewReverificationIn",
       "beginReviewProgress",
+      "hydrateStoredReviewProgress",
       "isReviewedIn",
       "markReviewedIn",
+      "onStoredReviewProgressChanged",
       "pruneReviewProgressIn",
       "resetReviewProgress",
       "reviewPaths",
@@ -206,5 +210,25 @@ describe("R8-R10 边界", () => {
 
   it("状态里没有持久化或批准字段", () => {
     expect(Object.keys(reviewProgress).sort()).toEqual(["worktree", "worktrees"]);
+  });
+
+  it("恢复 SSH 进度时不重复保存，复验后只保存对应工作树的新快照", () => {
+    const remote = "ssh://host-a/srv/repo";
+    const other = "ssh://host-b/srv/repo";
+    const listener = vi.fn();
+    const unsubscribe = onStoredReviewProgressChanged(listener);
+    try {
+      hydrateStoredReviewProgress(remote, { changes: { "src/app.ts": "old" } });
+      hydrateStoredReviewProgress(other, { changes: { "src/app.ts": "other" } });
+      expect(isReviewedIn(changes(remote), "src/app.ts")).toBe(true);
+      expect(listener).not.toHaveBeenCalled();
+
+      applyReviewReverificationIn(changes(remote), [{ path: "src/app.ts", token: "new" }]);
+      expect(listener).toHaveBeenCalledExactlyOnceWith(remote, { changes: {} });
+      expect(isReviewedIn(changes(remote), "src/app.ts")).toBe(false);
+      expect(isReviewedIn(changes(other), "src/app.ts")).toBe(true);
+    } finally {
+      unsubscribe();
+    }
   });
 });

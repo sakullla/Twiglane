@@ -12,13 +12,13 @@
 use std::ffi::OsString;
 
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 
 const MAX_FIELD: usize = 4096;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HttpCredential {
     pub username: String,

@@ -8,13 +8,13 @@
  * 同一路径在不同范围里是两条独立记录：任务范围里的标记不会替改动范围作证，反之亦然。
  * 切换 worktree 不再销毁其他 worktree 的记录——重新进入时只显示并复验对应范围。
  *
- * 进度不写 state.json，也不参与 Cliora 结果：全部文件标为已审阅仍只是本地人工记录，
- * 返回 Cliora 时照旧按真实 Git 操作给出 reviewed / committed / merged。
+ * SSH 工作树的进度由桌面原生端按已核验的远端工作树身份保存。进度只描述人工审查，
+ * 返回 Cliora 时按真实 Git 操作给出 reviewed / committed / merged。
  * token 来自后端（`repository_review_token` 或 `task_review_token`），代表标记那一刻的
  * 整文件快照；内容、暂存状态或删除等变化都会让旧 token 不再相同，从而自动失效。
  */
 import { sameWorktreePath } from "./cliora-review.svelte";
-import type { FileChange } from "./types";
+import type { FileChange, StoredReviewProgress } from "./types";
 
 /** 未提交改动这一侧的固定范围身份。 */
 export const CHANGES_SCOPE = "changes";
@@ -51,6 +51,25 @@ const EMPTY: Record<string, string> = Object.freeze({}) as Record<string, string
 
 export const reviewProgress = $state<ReviewProgressState>({ worktree: null, worktrees: {} });
 
+const progressListeners = new Set<(worktree: string, progress: StoredReviewProgress) => void>();
+
+export function onStoredReviewProgressChanged(listener: (worktree: string, progress: StoredReviewProgress) => void): () => void {
+  progressListeners.add(listener);
+  return () => progressListeners.delete(listener);
+}
+
+export function hydrateStoredReviewProgress(worktree: string, progress: StoredReviewProgress): void {
+  const key = keyOf(worktree);
+  reviewProgress.worktrees = {
+    ...reviewProgress.worktrees,
+    [key]: {
+      path: worktree,
+      scopes: Object.fromEntries(Object.entries(progress).map(([scope, tokens]) => [scope, { tokens: { ...tokens } }])),
+      updatedAtMs: Date.now(),
+    },
+  };
+}
+
 /** Windows 上大小写与分隔符都不参与判定：同一个 worktree 只有一条记录。 */
 function keyOf(worktree: string): string {
   const known = Object.keys(reviewProgress.worktrees).find((key) => sameWorktreePath(key, worktree));
@@ -80,6 +99,11 @@ function writeTokens(
       updatedAtMs: Date.now(),
     },
   };
+  const scopes = reviewProgress.worktrees[key].scopes;
+  if (progressListeners.size > 0) {
+    const progress = Object.fromEntries(Object.entries(scopes).map(([scope, record]) => [scope, { ...record.tokens }]));
+    for (const listener of progressListeners) listener(target.worktree, progress);
+  }
 }
 
 /**

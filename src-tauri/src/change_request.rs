@@ -15,7 +15,9 @@ mod web;
 #[cfg(test)]
 mod tests;
 
-use serde::Serialize;
+use std::future::Future;
+
+use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 use crate::git::ops::{self, Backend};
@@ -29,6 +31,67 @@ pub use web::WebOpener;
 
 use provider::CreateAttempt;
 use remote::Repository;
+
+pub(crate) trait RepositoryReader {
+    fn state(&self) -> impl Future<Output = Result<sync::ChangeRequestGitState, AppError>> + Send;
+    fn remotes(&self) -> impl Future<Output = Result<Vec<RemoteInfo>, AppError>> + Send;
+    fn tracking(
+        &self,
+        remote: &str,
+        branch: &str,
+        generation: u64,
+    ) -> impl Future<Output = Result<(bool, u64), AppError>> + Send;
+}
+
+struct LocalReader<'a> {
+    backend: &'a Backend,
+    path: &'a str,
+    generation: u64,
+    request_id: u64,
+}
+
+impl RepositoryReader for LocalReader<'_> {
+    async fn state(&self) -> Result<sync::ChangeRequestGitState, AppError> {
+        sync::change_request_git_state(self.backend, self.path, self.generation, self.request_id).await
+    }
+
+    async fn remotes(&self) -> Result<Vec<RemoteInfo>, AppError> {
+        sync::change_request_remotes(self.backend, self.path, self.generation, self.request_id).await
+    }
+
+    async fn tracking(&self, remote: &str, branch: &str, generation: u64) -> Result<(bool, u64), AppError> {
+        sync::remote_tracking_ref_exists(
+            self.backend, self.path, remote, branch, generation, internal_request_id(),
+        ).await
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExpectedSource {
+    pub provider: String,
+    pub host: String,
+    pub repository: String,
+    pub repository_web: String,
+    pub source_branch: String,
+}
+
+impl ExpectedSource {
+    fn check(&self, repository: &Repository, source: Option<&str>) -> Result<(), AppError> {
+        if self.provider != repository.provider.key()
+            || self.host != repository.host
+            || self.repository != repository.full_path()
+            || self.repository_web != repository.web_url()
+            || source.is_some_and(|source| source != self.source_branch)
+        {
+            return Err(AppError::new(
+                "change_request_stale",
+                "远程仓库或来源分支已变化，请重新打开创建 MR/PR 的页面。",
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// 多远程时的候选。选择前不会向任何候选实例发起平台请求。
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -138,9 +201,18 @@ pub(crate) async fn prepare_with(
     http: &Http,
 ) -> Result<ChangeRequestPrepare, AppError> {
     ops::require_change_requests(backend)?;
-    let state = sync::change_request_git_state(backend, path, generation, request_id).await?;
+    let git = LocalReader { backend, path, generation, request_id };
+    prepare_for(&git, requested, http).await
+}
+
+pub(crate) async fn prepare_for(
+    git: &impl RepositoryReader,
+    requested: Option<&str>,
+    http: &Http,
+) -> Result<ChangeRequestPrepare, AppError> {
+    let state = git.state().await?;
     current_branch(&state)?;
-    match select_remote(backend, path, &state, requested).await? {
+    match select_remote(git, &state, requested).await? {
         RemoteSelection::Choice(choices) => Ok(empty_prepare("remoteChoice", choices, state.generation)),
         RemoteSelection::Ready {
             remote,
@@ -216,14 +288,24 @@ pub(crate) async fn create_with(
 ) -> Result<CreateDecision, AppError> {
     // 门禁在读令牌、探测平台之前：关闭时不读钥匙串、不发平台请求。
     ops::require_change_requests(backend)?;
+    let git = LocalReader { backend, path: &input.path, generation, request_id };
+    create_for(&git, &input, http, store, None).await
+}
+
+pub(crate) async fn create_for(
+    git: &impl RepositoryReader,
+    input: &CreateInput,
+    http: &Http,
+    store: &dyn CredentialStore,
+    expected: Option<&ExpectedSource>,
+) -> Result<CreateDecision, AppError> {
     let title = validate_title(&input.title)?;
     let target = validate_target(&input.target_branch)?;
     validate_body(&input.body)?;
 
-    let state =
-        sync::change_request_git_state(backend, &input.path, generation, request_id).await?;
+    let state = git.state().await?;
     current_branch(&state)?;
-    let selection = select_remote(backend, &input.path, &state, input.remote.as_deref()).await?;
+    let selection = select_remote(git, &state, input.remote.as_deref()).await?;
     let (remote, source, _generation) = match selection {
         RemoteSelection::Ready {
             remote,
@@ -245,6 +327,9 @@ pub(crate) async fn create_with(
 
     let url = remote_url(&state.remotes, &remote)?;
     let repo = remote::resolve_repository(http, url).await?;
+    if let Some(expected) = expected {
+        expected.check(&repo, Some(&source))?;
+    }
     ensure_secure_channel(&repo)?;
 
     let token = match store.load(&repo.token_key()) {
@@ -349,12 +434,9 @@ pub(crate) async fn token_status_with(
     http: &Http,
     store: &dyn CredentialStore,
 ) -> Result<ChangeRequestTokenStatus, AppError> {
-    let repo = token_repository(backend, path, remote, generation, request_id, http).await?;
-    let configured = store
-        .load(&repo.token_key())
-        .map_err(|failure| failure.into_error())?
-        .is_some();
-    Ok(ChangeRequestTokenStatus { configured })
+    ops::require_change_requests(backend)?;
+    let git = LocalReader { backend, path, generation, request_id };
+    token_for(&git, remote, TokenAction::Status, http, store, None).await
 }
 
 pub async fn set_token(
@@ -391,14 +473,8 @@ pub(crate) async fn set_token_with(
     store: &dyn CredentialStore,
 ) -> Result<ChangeRequestTokenStatus, AppError> {
     ops::require_change_requests(backend)?;
-    credential::validate_token_input(token)?;
-    let repo = token_repository(backend, path, remote, generation, request_id, http).await?;
-    // 明文 HTTP 上不保存令牌：保存后只会在不安全的通道上被发送。
-    ensure_secure_channel(&repo)?;
-    store
-        .save(&repo.token_key(), token)
-        .map_err(|failure| failure.into_error())?;
-    Ok(ChangeRequestTokenStatus { configured: true })
+    let git = LocalReader { backend, path, generation, request_id };
+    token_for(&git, remote, TokenAction::Set(token), http, store, None).await
 }
 
 pub async fn delete_token(
@@ -431,32 +507,54 @@ pub(crate) async fn delete_token_with(
     store: &dyn CredentialStore,
 ) -> Result<ChangeRequestTokenStatus, AppError> {
     ops::require_change_requests(backend)?;
-    let repo = token_repository(backend, path, remote, generation, request_id, http).await?;
-    store
-        .delete(&repo.token_key())
-        .map_err(|failure| failure.into_error())?;
-    Ok(ChangeRequestTokenStatus { configured: false })
+    let git = LocalReader { backend, path, generation, request_id };
+    token_for(&git, remote, TokenAction::Delete, http, store, None).await
 }
 
-async fn token_repository(
-    backend: &Backend,
-    path: &str,
+pub(crate) enum TokenAction<'a> {
+    Status,
+    Set(&'a str),
+    Delete,
+}
+
+pub(crate) async fn token_for(
+    git: &impl RepositoryReader,
     remote: &str,
-    generation: u64,
-    request_id: u64,
+    action: TokenAction<'_>,
     http: &Http,
-) -> Result<Repository, AppError> {
-    ops::require_change_requests(backend)?;
-    let remotes = sync::change_request_remotes(backend, path, generation, request_id).await?;
+    store: &dyn CredentialStore,
+    expected: Option<&ExpectedSource>,
+) -> Result<ChangeRequestTokenStatus, AppError> {
+    if let TokenAction::Set(token) = action {
+        credential::validate_token_input(token)?;
+    }
+    let remotes = git.remotes().await?;
     let url = remote_url(&remotes, remote)?;
-    remote::resolve_repository(http, url).await
+    let repo = remote::resolve_repository(http, url).await?;
+    if let Some(expected) = expected {
+        expected.check(&repo, None)?;
+    }
+    let key = repo.token_key();
+    let configured = match action {
+        TokenAction::Status => store.load(&key).map_err(|failure| failure.into_error())?.is_some(),
+        TokenAction::Set(token) => {
+            // 明文 HTTP 上不保存令牌。
+            ensure_secure_channel(&repo)?;
+            store.save(&key, token).map_err(|failure| failure.into_error())?;
+            true
+        }
+        TokenAction::Delete => {
+            store.delete(&key).map_err(|failure| failure.into_error())?;
+            false
+        }
+    };
+    Ok(ChangeRequestTokenStatus { configured })
 }
 
 // ---------------------------------------------------------------- 选择与校验
 
 async fn select_remote(
-    backend: &Backend,
-    path: &str,
+    git: &impl RepositoryReader,
     state: &sync::ChangeRequestGitState,
     requested: Option<&str>,
 ) -> Result<RemoteSelection, AppError> {
@@ -473,8 +571,7 @@ async fn select_remote(
             Some((remote_name, branch)) if remote_name == &remote.name => branch.clone(),
             _ => local,
         };
-        let (present, generation) =
-            tracking_has(backend, path, state, &remote.name, &source).await?;
+        let (present, generation) = git.tracking(&remote.name, &source, state.generation).await?;
         if !present {
             return Err(source_missing(&remote.name, &source));
         }
@@ -488,7 +585,7 @@ async fn select_remote(
     if let Some((remote_name, branch)) = upstream {
         // 有上游时只按上游远程解析；上游远程已不在远程列表里，就退回候选选择。
         if let Some((present, generation)) =
-            tracking_if_present(backend, path, state, &remote_name, &branch).await?
+            tracking_if_present(git, state, &remote_name, &branch).await?
         {
             if present {
                 return Ok(RemoteSelection::Ready {
@@ -509,8 +606,7 @@ async fn select_remote(
     }
     if state.remotes.len() == 1 {
         let remote = &state.remotes[0];
-        let (present, generation) =
-            tracking_has(backend, path, state, &remote.name, &local).await?;
+        let (present, generation) = git.tracking(&remote.name, &local, state.generation).await?;
         if !present {
             return Err(source_missing(&remote.name, &local));
         }
@@ -526,28 +622,9 @@ async fn select_remote(
     ))
 }
 
-async fn tracking_has(
-    backend: &Backend,
-    path: &str,
-    state: &sync::ChangeRequestGitState,
-    remote: &str,
-    branch: &str,
-) -> Result<(bool, u64), AppError> {
-    sync::remote_tracking_ref_exists(
-        backend,
-        path,
-        remote,
-        branch,
-        state.generation,
-        internal_request_id(),
-    )
-    .await
-}
-
 /// 上游远程不在远程列表时返回 None，让调用方退回候选选择。
 async fn tracking_if_present(
-    backend: &Backend,
-    path: &str,
+    git: &impl RepositoryReader,
     state: &sync::ChangeRequestGitState,
     remote: &str,
     branch: &str,
@@ -555,9 +632,7 @@ async fn tracking_if_present(
     if !state.remotes.iter().any(|candidate| candidate.name == remote) {
         return Ok(None);
     }
-    tracking_has(backend, path, state, remote, branch)
-        .await
-        .map(Some)
+    git.tracking(remote, branch, state.generation).await.map(Some)
 }
 
 fn current_branch(state: &sync::ChangeRequestGitState) -> Result<String, AppError> {

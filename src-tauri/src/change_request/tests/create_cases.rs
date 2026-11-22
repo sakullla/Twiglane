@@ -103,6 +103,38 @@ fn fallback(decision: CreateDecision) -> FallbackPending {
 }
 
 #[tokio::test]
+async fn changes_to_prepared_source_are_rejected_before_token_access() {
+    for changed_branch in [true, false] {
+        let probe = harness(
+            "cr-stale-source", "gitea", "api/v1", gitea_discovery(),
+            |_| vec![], Some(TOKEN), 1024 * 1024, 1500,
+        );
+        let path = probe.path();
+        let git = LocalReader { backend: &probe.backend, path: &path, generation: 0, request_id: 1 };
+        let input = CreateInput {
+            path: path.clone(), remote: Some("origin".into()), target_branch: "main".into(),
+            title: "Deploy feature".into(), body: String::new(),
+        };
+        let expected = ExpectedSource {
+            provider: "gitea".into(),
+            host: probe.base.trim_start_matches("http://").into(),
+            repository: "acme/app".into(),
+            repository_web: if changed_branch { format!("{}/acme/app", probe.base) }
+                else { "http://127.0.0.1:1/acme/app".into() },
+            source_branch: if changed_branch { "old-feature" } else { "feature" }.into(),
+        };
+        let error = create_for(&git, &input, &probe.http, probe.store.as_ref(), Some(&expected))
+            .await.expect_err("stale source");
+        assert_eq!(error.code, "change_request_stale");
+        assert_eq!(probe.store.loads(), 0);
+        let (requests, extra) = probe.finish();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(extra, 0);
+        assert!(requests.iter().all(|request| request.method == "GET" && request.header("Authorization").is_none()));
+    }
+}
+
+#[tokio::test]
 async fn github_enterprise_create_sends_bearer_and_accepts_201_link() {
     const TOKEN: &str = "gh-token-1234567890";
     let probe = harness(

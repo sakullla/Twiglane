@@ -10,7 +10,6 @@ import {
   remoteDiffPage,
   remoteRepositoryKey,
   remoteReviewPort,
-  remoteReviewToken,
   remoteStatus,
   remoteWorktreePort,
   repositoryBaseName,
@@ -20,6 +19,7 @@ import {
   type RemoteDiffView,
   type RemoteOpenRequest,
   type RemoteOpenResult,
+  type RemoteProvision,
   type RemoteCallOp,
   type RemotePatch,
   type RemotePendingWrite,
@@ -68,6 +68,7 @@ import type {
   OpenedRepository,
   PanelWidths,
   RecentRepo,
+  RemoteRecentRepo,
   RepositoryContentSearch,
   RepositoryDirectory,
   RepositoryEditSnapshot,
@@ -96,6 +97,7 @@ import type {
   StashSaveResult,
   StashState,
   StatusSnapshot,
+  StoredReviewProgress,
   TagState,
   TaskReview,
   TaskReviewToken,
@@ -264,6 +266,10 @@ interface RemoteRepositorySession {
   pending: RemotePendingWrite | null;
   pushContinuations: RemotePushContinuation[];
   recoveryNotice: string | null;
+  draft: string;
+  reviewProgress?: StoredReviewProgress;
+  projectHostId?: string;
+  personalWrites: Promise<unknown>;
   /**
    * 这次远端会话里实际做成的 Git 结果阶段：只由已经核对完成的 commit 推进，
    * 返回 Cliora 时按它声明结果（没有提交就是 reviewed）。
@@ -302,14 +308,6 @@ function checkRemoteResponse(session: RemoteRepositorySession, generation = sess
     throw remoteError("stale", "远端仓库已有变化，请重新读取。", session.generation);
   }
 }
-
-/**
- * 远端仓库的提交说明草稿：只留在本次会话内存里，按仓库键分开。
- *
- * 本机草稿库只认本机仓库的规范路径，所以远端的草稿不写 state.json，但也不能丢：
- * 切走再回来（会话已结束重开）时由这里回读，用户看到的还是自己写的那份。
- */
-const remoteDrafts = new Map<string, string>();
 
 /**
  * 远端会话状态的订阅者：待确认写入、断线与会话增删都叫醒一次，
@@ -394,9 +392,9 @@ function openedRemote(session: RemoteRepositorySession): OpenedRepository {
     },
     generation: session.generation,
     snapshot: remoteStatus(session.latest, session.generation),
-    // 远端仓库的提交说明草稿只在本会话内保留：本机 state.json 只服务本机仓库，
-    // 但切走再回来要回到用户写下的那份，所以从会话内存里回读。
-    draft: remoteDrafts.get(session.key) ?? "",
+    draft: session.draft,
+    remoteReviewProgress: session.reviewProgress,
+    remoteProjectHostId: session.projectHostId,
     watchDegraded: session.latest.watchDegraded ?? false,
   };
 }
@@ -545,6 +543,7 @@ async function settleRemoteWrite(
   if (result.state === "completed") {
     session.pending = null;
     session.recoveryNotice = null;
+    if ((op === "commit" || op === "commitAndPush") && result.draftCleared !== false) session.draft = "";
     noteRemoteOutcome(session, op, result.reviewOutcome);
     session.diffs.clear();
     advanceRemoteGeneration(session, result.snapshot);
@@ -637,6 +636,7 @@ async function closeRemoteSession(
     remoteSessions.delete(session.key);
     noteRemoteState();
   }
+  await session.personalWrites.catch(() => undefined);
   try {
     await remoteWorktreePort.close(session.sessionId);
   } catch {
@@ -658,6 +658,9 @@ export interface RemoteOpenOptions {
   allowInstall?: boolean;
   installConfirmation?: string | null;
   onProgress?: (value: RemoteConnectionProgress) => void;
+  provision?: RemoteProvision;
+  projectHostId?: string;
+  keepBackground?: () => boolean;
 }
 
 export type RemoteOpenOutcome =
@@ -669,6 +672,17 @@ export type RemoteOpenOutcome =
       path: string;
       pending: RemotePendingWrite | null;
       reviewId: string | null;
+      credentialNote?: string | null;
+      preferencesWarning?: string | null;
+    }
+  | {
+      kind: "background";
+      key: string;
+      host: string;
+      path: string;
+      projectHostId?: string;
+      credentialNote?: string | null;
+      preferencesWarning?: string | null;
     }
   | { kind: "install_required"; version: string; size: number; confirmationId: string | null };
 
@@ -704,6 +718,8 @@ async function openRemote(
         ...(options.reviewId ? { reviewId: options.reviewId } : {}),
         // 基线一起带着走：后端按 baseline 相等判定这次打开是不是那条审查。
         ...(options.baseline ? { baseline: options.baseline } : {}),
+        ...(options.provision ? { provision: options.provision } : {}),
+        ...(options.projectHostId ? { projectHostId: options.projectHostId } : {}),
       } as RemoteOpenRequest,
       options.onProgress ?? (() => {}),
     );
@@ -721,13 +737,25 @@ async function openRemote(
   }
   const root = opened.snapshot.root;
   const host = await hostLabel(location.hostId, opened.snapshot.host || location.hostId);
+  const key = remoteRepositoryKey(location.hostId, root);
+  if (options.provision?.kind === "clone" && options.keepBackground?.()) {
+    await remoteWorktreePort.close(opened.sessionId).catch(() => undefined);
+    return {
+      kind: "background",
+      key,
+      host,
+      path: root,
+      projectHostId: opened.projectHostId,
+      credentialNote: opened.snapshot.credentialNote,
+      preferencesWarning: opened.preferencesWarning,
+    };
+  }
   const keepCurrent = () => {
     if (epoch === remoteOpenEpoch) return;
     void remoteWorktreePort.close(opened.sessionId).catch(() => undefined);
     throw remoteError("cancelled", "已取消这次远端连接。");
   };
   keepCurrent();
-  const key = remoteRepositoryKey(location.hostId, root);
   const session: RemoteRepositorySession = {
     key,
     hostId: location.hostId,
@@ -745,6 +773,10 @@ async function openRemote(
     pending: opened.pendingWrite ?? null,
     pushContinuations: opened.pushContinuations ?? [],
     recoveryNotice: null,
+    draft: opened.preferences?.draft ?? "",
+    reviewProgress: opened.preferences?.reviewProgress,
+    projectHostId: opened.projectHostId,
+    personalWrites: Promise.resolve(),
     outcome: opened.reviewOutcome ?? "reviewed",
     unrecordedHeadOp: null,
     returnedOutcome: null,
@@ -782,6 +814,8 @@ async function openRemote(
     path: root,
     pending: session.pending,
     reviewId: session.reviewId,
+    credentialNote: opened.snapshot.credentialNote,
+    preferencesWarning: opened.preferencesWarning,
   };
 }
 
@@ -816,6 +850,38 @@ export function remoteRepositoryState(key: string): RemoteRepositoryState | null
     pushContinuation: currentPushContinuation(session),
     recoveryNotice: session.recoveryNotice,
   };
+}
+
+function recentWithRemote(recent: RecentRepo[], remotes: RemoteRecentRepo[] = []): RecentRepo[] {
+  return [
+    ...recent,
+    ...remotes.map((repo) => ({
+      name: repo.name,
+      path: remoteRepositoryKey(repo.targetId, repo.path),
+      ...(repo.projectHostId ? { projectHostId: repo.projectHostId } : {}),
+      host: repo.host,
+      remotePath: repo.path,
+      openedAtMs: repo.openedAtMs,
+    })),
+  ].sort((a, b) => b.openedAtMs - a.openedAtMs);
+}
+
+async function saveRemotePreference(
+  session: RemoteRepositorySession,
+  op: "desktopSaveRemoteDraft" | "desktopSaveReviewProgress",
+  fields: BridgePayload,
+): Promise<void> {
+  const write = session.personalWrites.catch(() => undefined).then(() => remoteWorktreePort.call({
+    sessionId: session.sessionId, op, fields,
+  }));
+  session.personalWrites = write;
+  await write;
+}
+
+async function saveRemoteReviewProgress(path: string, progress: StoredReviewProgress): Promise<void> {
+  const session = remoteSession(path);
+  await saveRemotePreference(session, "desktopSaveReviewProgress", { progress });
+  session.reviewProgress = progress;
 }
 
 function currentPushContinuation(session: RemoteRepositorySession): RemotePushContinuation | null {
@@ -1686,6 +1752,7 @@ const apiBase = {
     body: string,
     generation: number,
     requestId: number,
+    _prepared?: ChangeRequestPrepare,
   ) =>
     invoke<ChangeRequestOutcome>("change_request_create", {
       path,
@@ -1697,7 +1764,7 @@ const apiBase = {
       requestId,
     }),
   /** 当前实例的令牌状态：只有布尔值，不回传令牌。 */
-  changeRequestTokenStatus: (path: string, remote: string, generation: number, requestId: number) =>
+  changeRequestTokenStatus: (path: string, remote: string, generation: number, requestId: number, _prepared?: ChangeRequestPrepare) =>
     invoke<ChangeRequestTokenStatus>("change_request_token_status", { path, remote, generation, requestId }),
   /** 保存或替换当前实例的令牌：只经 IPC 参数进入原生，随后直接写入系统钥匙串。 */
   setChangeRequestToken: (
@@ -1706,6 +1773,7 @@ const apiBase = {
     token: string,
     generation: number,
     requestId: number,
+    _prepared?: ChangeRequestPrepare,
   ) =>
     invoke<ChangeRequestTokenStatus>("change_request_set_token", {
       path,
@@ -1715,7 +1783,7 @@ const apiBase = {
       requestId,
     }),
   /** 只删除用户显式点选的当前实例令牌；关闭功能开关不会调用它。 */
-  deleteChangeRequestToken: (path: string, remote: string, generation: number, requestId: number) =>
+  deleteChangeRequestToken: (path: string, remote: string, generation: number, requestId: number, _prepared?: ChangeRequestPrepare) =>
     invoke<ChangeRequestTokenStatus>("change_request_delete_token", { path, remote, generation, requestId }),
   setPanelWidths: (widths: PanelWidths) => invoke<PanelWidths>("set_panel_widths", { widths }),
   saveDraft: (path: string, message: string) => invoke<void>("save_draft", { path, message }),
@@ -2263,16 +2331,55 @@ async function openLinkedWorktree(anchor: string, target: string): Promise<Opene
   const overview = bridgeField<WorktreeOverview>(await remoteBridgeRead(session, "worktrees"), "worktrees");
   const worktree = overview.items.find((item) => !item.missing && sameRemoteWorktreePath(item.path, target));
   if (!worktree) throw remoteError("target_changed", "选中的路径已不在远端仓库的工作区列表中。");
-  const result = await openRemote({ kind: "ssh", hostId: session.hostId, hostRevision: session.hostRevision, path: worktree.path });
+  const result = await openRemote(
+    { kind: "ssh", hostId: session.hostId, hostRevision: session.hostRevision, path: worktree.path },
+    { projectHostId: session.projectHostId },
+  );
   if (result.kind !== "opened") throw remoteError("remote_install_required", "请在打开远端仓库时确认升级组件。");
   return result.repository;
 }
 
+async function openRemoteProjectRepository(key: string, workspaceHostId: string): Promise<OpenedRepository> {
+  const location = parseRemoteRepositoryKey(key);
+  if (!location) throw remoteError("invalid_path", "项目里的 SSH 仓库位置无效。");
+  const target = (await remoteTargets()).find((host) => host.targetId === location.hostId && !host.unavailableReason);
+  if (!target) throw remoteError("target_unavailable", "项目绑定的 SSH 主机不可用。");
+  const result = await openRemote(
+    { kind: "ssh", hostId: location.hostId, hostRevision: target.targetRevision, path: location.path },
+    { projectHostId: workspaceHostId },
+  );
+  if (result.kind !== "opened") throw remoteError("remote_install_required", "请确认安装或升级 SSH 主机的组件。");
+  return result.repository;
+}
+
+async function openRemoteFileCopy(path: string, relative: string, generation: number, reveal: boolean) {
+  const session = remoteBridgeSession(path, generation);
+  await invoke<void>("remote_worktree_file_copy", {
+    request: { sessionId: session.sessionId, generation: session.token, relative, reveal },
+  });
+}
+
+async function remoteProjectCandidates(path: string, selection: { root: string } | { paths: string[] }, requestId: number) {
+  const session = remoteSession(path);
+  const result = await remoteBridgeRead(session, "projectCandidates", selection, requestId);
+  if (result.repo !== session.repo) throw remoteError("remote_protocol", "远端仓库候选属于另一工作区会话。");
+  return bridgeField<WorkspaceDiscovery>(result, "discovery");
+}
+
+async function cancelRemoteProjectCandidates(path: string, requestId: number) {
+  const session = remoteSession(path);
+  await remoteWorktreePort.cancelReads(session.sessionId, requestId);
+}
+
 const apiExtras = {
+  openRemoteFileCopy,
+  remoteProjectCandidates,
+  cancelRemoteProjectCandidates,
   remoteTargets,
   openRemoteRepository,
   remoteReturnReview,
   remoteRepositoryState,
+  saveRemoteReviewProgress,
   retryRemotePush,
   onRemoteStateChange,
   closeRemoteRepository,
@@ -2281,9 +2388,77 @@ const apiExtras = {
   previewLinkedWorktreeRemoval,
   removeLinkedWorktree,
   openLinkedWorktree,
+  openRemoteProjectRepository,
 };
 
+function preparedChangeSource(prepared?: ChangeRequestPrepare) {
+  if (!prepared || prepared.status !== "ready") {
+    throw remoteError("change_request_stale", "请重新打开创建 MR/PR 的页面并核对远程仓库。");
+  }
+  const { provider, host, repository, repositoryWeb, sourceBranch } = prepared;
+  return { provider, host, repository, repositoryWeb, sourceBranch };
+}
+
+async function remoteChangeRequest<T>(session: RemoteRepositorySession, fields: BridgePayload): Promise<T> {
+  return invoke<T>("remote_change_request", {
+    request: { sessionId: session.sessionId, generation: session.token, ...fields },
+  });
+}
+
 const remoteOverrides: Record<string, unknown> = {
+  async getSettings(): Promise<SettingsDto> {
+    const settings = await apiBase.getSettings();
+    return { ...settings, recent: recentWithRemote(settings.recent, settings.remoteRecent) };
+  },
+  async ignorePath(path: string, pattern: string, local: boolean, generation: number, requestId: number): Promise<IgnoreOutcome> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.ignorePath(path, pattern, local, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const result = await remoteBridgeWriteResult(session, generation, "ignorePath", { pattern, local });
+    if (typeof result.ignore?.note !== "string") {
+      throw remoteError("remote_protocol", "已写入忽略规则，但远端未返回操作说明。");
+    }
+    return { snapshot: remoteStatus(result.snapshot, session.generation), note: result.ignore.note };
+  },
+
+  async prepareChangeRequest(path: string, remote: string | null, generation: number, requestId: number) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.prepareChangeRequest(path, remote, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const prepared = await remoteChangeRequest<ChangeRequestPrepare>(session, { action: "prepare", remote });
+    checkRemoteResponse(session, generation);
+    return { ...prepared, generation };
+  },
+
+  async createChangeRequest(path: string, remote: string, targetBranch: string, title: string, body: string,
+    generation: number, requestId: number, prepared?: ChangeRequestPrepare) {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.createChangeRequest(path, remote, targetBranch, title, body, generation, requestId);
+    }
+    return remoteChangeRequest<ChangeRequestOutcome>(remoteBridgeSession(path, generation), {
+      action: "create", remote, targetBranch, title, body, expected: preparedChangeSource(prepared),
+    });
+  },
+
+  async changeRequestTokenStatus(path: string, remote: string, generation: number, requestId: number, prepared?: ChangeRequestPrepare) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.changeRequestTokenStatus(path, remote, generation, requestId);
+    return remoteChangeRequest<ChangeRequestTokenStatus>(remoteBridgeSession(path, generation), {
+      action: "token", remote, expected: preparedChangeSource(prepared), credential: { operation: "status" },
+    });
+  },
+
+  async setChangeRequestToken(path: string, remote: string, token: string, generation: number, requestId: number, prepared?: ChangeRequestPrepare) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.setChangeRequestToken(path, remote, token, generation, requestId);
+    return remoteChangeRequest<ChangeRequestTokenStatus>(remoteBridgeSession(path, generation), {
+      action: "token", remote, expected: preparedChangeSource(prepared), credential: { operation: "set", token },
+    });
+  },
+
+  async deleteChangeRequestToken(path: string, remote: string, generation: number, requestId: number, prepared?: ChangeRequestPrepare) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.deleteChangeRequestToken(path, remote, generation, requestId);
+    return remoteChangeRequest<ChangeRequestTokenStatus>(remoteBridgeSession(path, generation), {
+      action: "token", remote, expected: preparedChangeSource(prepared), credential: { operation: "delete" },
+    });
+  },
+
   async openRepository(path: string, requestId: number): Promise<OpenedRepository> {
     if (!isRemoteRepositoryKey(path)) {
       const repository = await apiBase.openRepository(path, requestId);
@@ -2305,7 +2480,7 @@ const remoteOverrides: Record<string, unknown> = {
       hostRevision: target.targetRevision,
       path: parsed.path,
     }, previous?.reviewId ? { reviewId: previous.reviewId, baseline: previous.baseline } : {});
-    if (outcome.kind === "install_required") {
+    if (outcome.kind !== "opened") {
       throw remoteError(
         "remote_install_required",
         "这台主机还没有可用的 Twiglane 远端组件，请在“打开远端仓库”里确认安装后再打开。",
@@ -2653,44 +2828,23 @@ const remoteOverrides: Record<string, unknown> = {
     requestId: number,
   ): Promise<RepositoryReviewToken> {
     if (!isRemoteRepositoryKey(path)) return apiBase.repositoryReviewToken(path, relative, generation, requestId);
-    const session = remoteSession(path);
-    if (generation !== session.generation) {
-      throw remoteError("stale", "远端仓库已有变化，请刷新后重试。", session.generation);
+    const session = remoteBridgeSession(path, generation);
+    const token = bridgeField<RepositoryReviewToken>(
+      await remoteBridgeRead(session, "reviewToken", { relative }), "token",
+    );
+    if (token.path !== relative || (token.state === "current" && !/^[a-f0-9]{64}$/.test(token.token ?? ""))) {
+      throw remoteError("remote_protocol", "远端返回的审阅令牌与所选文件不一致。");
     }
-    const file = remoteChanges(session.latest.files).find((item) => item.path === relative);
-    if (!file) {
-      return {
-        generation,
-        path: relative,
-        state: "missing",
-        token: null,
-        staged: "none",
-        unstaged: "none",
-        untracked: false,
-        unmerged: false,
-        contentVersion: null,
-        message: "这条改动已不在远端工作树里。",
-      };
-    }
-    return {
-      generation,
-      path: relative,
-      state: "current",
-      token: remoteReviewToken(session.token, path, relative),
-      staged: file.staged,
-      unstaged: file.unstaged,
-      untracked: file.untracked,
-      unmerged: file.unmerged,
-      contentVersion: session.token,
-      message: "",
-    };
+    return { ...token, generation: session.generation };
   },
 
   async saveDraft(path: string, message: string): Promise<void> {
     if (!isRemoteRepositoryKey(path)) return apiBase.saveDraft(path, message);
     // 本机草稿库只按本机仓库规范路径保存；远端仓库的草稿留在会话内存里，
     // 换仓库再回来仍然可用，但不会写进本机 state.json。
-    remoteDrafts.set(path, message);
+    const session = remoteSession(path);
+    await saveRemotePreference(session, "desktopSaveRemoteDraft", { message });
+    session.draft = message;
   },
 
   /**
@@ -2720,7 +2874,13 @@ const remoteOverrides: Record<string, unknown> = {
 
   async forgetRecent(path: string): Promise<RecentRepo[]> {
     if (!isRemoteRepositoryKey(path)) return apiBase.forgetRecent(path);
-    throw remoteError("remote_unsupported", "远端仓库的最近记录只在本次会话内，移除请从仓库弹层里操作。");
+    const location = parseRemoteRepositoryKey(path);
+    if (!location) throw remoteError("invalid_path", "远端仓库位置无效。");
+    await closeRemoteRepository(path);
+    const result = await remoteWorktreePort.call({
+      sessionId: "", op: "desktopForgetRemoteRecent", fields: { targetId: location.hostId, path: location.path },
+    }) as { recent: RecentRepo[]; remoteRecent: RemoteRecentRepo[] };
+    return recentWithRemote(result.recent, result.remoteRecent);
   },
 
   /* ---------------------------------------------------------------- *

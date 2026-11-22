@@ -7,6 +7,7 @@ mod measure;
 mod model;
 mod redact;
 mod remote_ssh;
+mod remote_ssh_sync;
 mod remote_worktree;
 pub mod remote_worktree_transport;
 mod shutdown;
@@ -57,6 +58,10 @@ use crate::terminal::{
 };
 
 pub fn run() {
+    // host-sync helper 必须在 Tauri 之前分流：来源应用已退出也要能完成一次同步会话。
+    if remote_ssh_sync::helper_entry() {
+        return;
+    }
     let shutdown = Shutdown::new();
     let shutdown_for_run = shutdown.clone();
     let app = tauri::Builder::default()
@@ -96,6 +101,10 @@ pub fn run() {
             // Twiglane 自有 SSH 主机簿：产物目录随发行包，测试/开发可用环境变量指定。
             let agent_artifacts = remote_ssh::RemoteSsh::artifacts_for(app.handle(), &dir);
             app.manage(Arc::new(remote_ssh::RemoteSsh::new(agent_artifacts)));
+            // host-sync 会话与 helper 指向同一目录：桌面退出后仍能按 sessionRef 结算。
+            app.manage(Arc::new(remote_ssh_sync::HostSync::new(
+                dir.join("host-sync"),
+            )));
             // 终端独立于 Git 调度器与当前仓库监听：按仓库保存在应用内存中。
             app.manage(TerminalManager::new(Arc::new(terminal::AppEvents::new(
                 app.handle().clone(),
@@ -2574,6 +2583,30 @@ mod ipc_contract {
             assert!(
                 commands.iter().any(|name| name == command),
                 "{command} 没有注册到 invoke handler",
+            );
+        }
+    }
+
+    /// 本版本的 host-sync 只有 helper 级入口：run() 必须在 Tauri 初始化之前分流
+    /// --host-sync-v1，否则来源应用桌面退出后无法完成同步。应用内 IPC 接收接线
+    /// 延后到 T6，所以这里同时断言 handler 里还没有这两条命令。
+    #[test]
+    fn host_sync_helper_entry_runs_before_tauri() {
+        let helper = LIB_SOURCE
+            .find("remote_ssh_sync::helper_entry()")
+            .expect("run() 缺少 helper 分流");
+        let builder = LIB_SOURCE
+            .find("tauri::Builder::default()")
+            .expect("run() 缺少 Tauri 初始化");
+        assert!(
+            helper < builder,
+            "helper 必须在 Tauri 初始化之前分流，桌面退出后才能同步",
+        );
+        let commands = handler_commands();
+        for command in ["remote_host_sync_begin", "remote_host_sync_receive"] {
+            assert!(
+                !commands.iter().any(|name| name == command),
+                "{command} 属于 T6 的接收接线，本版本不应注册",
             );
         }
     }

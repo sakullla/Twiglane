@@ -1,0 +1,167 @@
+{
+  "protocol": 1,
+  "kind": "host-sync-v1",
+  "secretSentinel": "s3cret-do-not-leak",
+  "sessionRef": "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f",
+  "deepLink": "twiglane://remote-review?v=1&reviewId=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee&sessionId=11111111-2222-3333-4444-666666666666&targetId=host-a&targetRevision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&peerRevision=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&peerIdentity=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc&worktreeIdentity=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd&worktreePath=%2Fsrv%2Fapp&hostSync=9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f",
+  "sourceCheck": {
+    "protocol": 1,
+    "kind": "host-sync-v1",
+    "role": "source",
+    "hostId": "host-a",
+    "sharedHostId": "11111111-2222-3333-4444-555555555555",
+    "configFingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "configRevision": 2,
+    "password": {
+      "state": "available",
+      "proof": "abababababababababababababababababababababababababababababababab"
+    },
+    "expiresAt": 1893456000
+  },
+  "cases": [
+    {
+      "name": "consistent",
+      "description": "两端完全一致：不取回配置或密码，不写记录，不推进修订",
+      "receive": {
+        "protocol": 1,
+        "kind": "host-sync-v1",
+        "role": "receiver",
+        "result": "consistent",
+        "hostId": "host-a",
+        "sharedHostId": "11111111-2222-3333-4444-555555555555",
+        "password": "equal",
+        "receipts": [
+          {
+            "kind": "config",
+            "state": "unchanged"
+          },
+          {
+            "kind": "password",
+            "state": "unchanged"
+          }
+        ],
+        "sessionClosed": true
+      }
+    },
+    {
+      "name": "fetch-config",
+      "description": "配置不同、密码相同：只写配置，密码不动",
+      "receive": {
+        "protocol": 1,
+        "kind": "host-sync-v1",
+        "role": "receiver",
+        "result": "applied",
+        "hostId": "host-a",
+        "sharedHostId": "11111111-2222-3333-4444-555555555555",
+        "password": "equal",
+        "receipts": [
+          {
+            "kind": "config",
+            "state": "saved"
+          },
+          {
+            "kind": "password",
+            "state": "unchanged"
+          }
+        ],
+        "sessionClosed": true
+      }
+    },
+    {
+      "name": "password-only",
+      "description": "配置相同而密码不同：只更新密码，配置不重写",
+      "receive": {
+        "protocol": 1,
+        "kind": "host-sync-v1",
+        "role": "receiver",
+        "result": "applied",
+        "hostId": "host-a",
+        "sharedHostId": "11111111-2222-3333-4444-555555555555",
+        "password": "equal",
+        "receipts": [
+          {
+            "kind": "config",
+            "state": "unchanged"
+          },
+          {
+            "kind": "password",
+            "state": "saved"
+          }
+        ],
+        "sessionClosed": true
+      }
+    },
+    {
+      "name": "partial",
+      "description": "配置已保存、密码写入失败：保留原密码，会话可重试",
+      "receive": {
+        "protocol": 1,
+        "kind": "host-sync-v1",
+        "role": "receiver",
+        "result": "partial",
+        "hostId": "host-a",
+        "sharedHostId": "11111111-2222-3333-4444-555555555555",
+        "password": "differs",
+        "receipts": [
+          {
+            "kind": "config",
+            "state": "saved"
+          },
+          {
+            "kind": "password",
+            "state": "failed"
+          }
+        ],
+        "sessionClosed": false
+      }
+    },
+    {
+      "name": "unknown",
+      "description": "本机读不到密码：只能报 unknown，不当作一致",
+      "receive": {
+        "protocol": 1,
+        "kind": "host-sync-v1",
+        "role": "receiver",
+        "result": "unknown",
+        "hostId": "host-a",
+        "sharedHostId": "11111111-2222-3333-4444-555555555555",
+        "password": "unknown",
+        "receipts": [
+          {
+            "kind": "config",
+            "state": "unchanged"
+          },
+          {
+            "kind": "password",
+            "state": "unchanged"
+          }
+        ],
+        "sessionClosed": false
+      }
+    },
+    {
+      "name": "association-required",
+      "description": "存在未关联候选：要求显式解决，不按名称或地址自动合并",
+      "receive": {
+        "protocol": 1,
+        "kind": "host-sync-v1",
+        "role": "receiver",
+        "result": "association_required",
+        "hostId": null,
+        "sharedHostId": "11111111-2222-3333-4444-555555555555",
+        "password": "absent",
+        "receipts": [],
+        "sessionClosed": false,
+        "candidates": [
+          {
+            "hostId": "host-a",
+            "displayName": "prod",
+            "host": "example.test",
+            "port": 22,
+            "user": "deploy"
+          }
+        ]
+      }
+    }
+  ]
+}

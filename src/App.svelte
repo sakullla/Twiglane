@@ -3202,6 +3202,16 @@
     }
   }
 
+  /**
+   * 跳转附带的当前主机同步：本版本只有 helper 级入口（--host-sync-v1），应用内接收
+   * 接线延后到 T6。会话引用仍然解析并保留，但必须如实说明本版本不会改动本机配置或密码，
+   * 也不能假称已经同步。
+   */
+  function announceHostSyncHint(hasSession: boolean) {
+    if (!hasSession) return;
+    notice("本次跳转带有主机同步会话；本版本还没有应用内的同步接收，本机主机配置与密码不会被改动。");
+  }
+
   async function handleRemoteReviewLink(url: string) {
     const source = await remoteReviewPort.begin(url);
     if (!source) return;
@@ -3210,6 +3220,8 @@
       notice("请先完成当前操作，再从 Cliora 重新发起远端审查。");
       return;
     }
+    // 只有真正要打开这条审查时才提示：被 busy 拒绝的跳转什么都不说。
+    announceHostSyncHint(Boolean(source.hostSync));
     remoteReviewSource = source;
     remoteWorktreeOpen = true;
   }

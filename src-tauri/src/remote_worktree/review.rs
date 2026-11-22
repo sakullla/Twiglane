@@ -51,6 +51,8 @@ pub struct Source {
     worktree_identity: String,
     worktree_path: String,
     baseline: Option<String>,
+    /// 可选的一次性同步会话引用：只有引用，没有配置或密码。
+    host_sync: Option<String>,
 }
 
 impl Source {
@@ -118,6 +120,7 @@ impl Source {
             worktree_identity: required("worktreeIdentity")?,
             worktree_path: required("worktreePath")?,
             baseline: values.remove("baseline"),
+            host_sync: values.remove("hostSync"),
         };
         if !values.is_empty()
             || !super::uuid(&result.review_id)
@@ -132,6 +135,7 @@ impl Source {
                     .split('/')
                     .any(|p| matches!(p, "" | "." | "..")))
             || result.baseline.as_deref().is_some_and(|v| !oid(v))
+            || result.host_sync.as_deref().is_some_and(|v| !hex(v, 64))
         {
             return Err(invalid());
         }
@@ -549,6 +553,33 @@ mod tests {
         ] {
             assert!(Source::parse(&bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn sync_session_reference_is_optional_and_carries_no_secrets() {
+        let valid = source_link();
+        let plain = Source::parse(&valid).unwrap();
+        assert_eq!(plain.host_sync, None, "旧链接不带同步引用仍然有效");
+        let reference = "a".repeat(64);
+        let source = Source::parse(&format!("{valid}&hostSync={reference}")).unwrap();
+        assert_eq!(source.host_sync.as_deref(), Some(reference.as_str()));
+        // 前端只从 begin 的回执里读这个引用（camelCase），没有别的入口。
+        let payload = serde_json::to_value(&source).unwrap();
+        assert_eq!(payload["hostSync"], reference.as_str());
+        for bad in [
+            format!("{valid}&hostSync={}", "A".repeat(64)),
+            format!("{valid}&hostSync={}", "a".repeat(63)),
+            format!("{valid}&hostSync={}", "a".repeat(65)),
+            format!("{valid}&hostSync="),
+            format!("{valid}&hostSync=password%3Dhunter2"),
+            format!("{valid}&hostSync={reference}&hostSync={}", "b".repeat(64)),
+        ] {
+            assert!(Source::parse(&bad).is_err(), "{bad}");
+        }
+        // 返回事件只回审查事实：同步引用不外溢到返回链接，也没有配置或密码。
+        let event = source.event("opening").to_string();
+        assert!(!event.contains("hostSync"));
+        assert!(!event.contains("hunter2"));
     }
 
     #[test]

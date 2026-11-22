@@ -263,6 +263,9 @@ struct Entry {
     /// 最近一次返回给 Cliora 的阶段；下一次必须更靠后，不能回退也不能重复。
     outcome: Option<Outcome>,
     revision: u64,
+    /// 已经有一次返回正在复核/送达：期间不放行第二条，避免同一阶段送达两次。
+    /// 阶段本身只有在送达成功之后才推进，见 return_review。
+    delivering: bool,
 }
 
 impl Book {
@@ -289,6 +292,7 @@ impl Book {
                 committed: None,
                 outcome: None,
                 revision: 0,
+                delivering: false,
             },
         );
         Ok(true)
@@ -472,6 +476,134 @@ fn next_outcome(previous: Option<Outcome>, requested: Outcome) -> Result<Outcome
     Ok(requested)
 }
 
+/// 清掉送达占位，保留原来的阶段：所有失败路径的唯一出口。
+///
+/// 这里刻意不碰 outcome/revision —— 失败意味着 Cliora 没收到结果，账本也必须原地不动，
+/// 否则同一阶段的合法重试会被 next_outcome 判成 conflict，动作再也发不出去。
+fn release_delivery(state: &super::RemoteWorktrees, review_id: &str) {
+    let mut book = state.reviews.lock().unwrap();
+    if let Some(entry) = book.entries.get_mut(review_id) {
+        entry.delivering = false;
+    }
+}
+
+/// 一次「返回 Cliora」：先复核对端与工作树，只有 deliver 成功之后才推进阶段。
+///
+/// 顺序就是这条链的约束：connector/list/probe/check_peer/status/returned 任一步失败，
+/// outcome 与 revision 都必须保持原样（Cliora 什么都没收到）；deliver 失败同样不推进。
+async fn return_review<F>(
+    state: &super::RemoteWorktrees,
+    review_id: &str,
+    session_id: &str,
+    requested: Outcome,
+    deliver: F,
+) -> Result<()>
+where
+    F: FnOnce(&Url) -> Result<()>,
+{
+    let session = state.session(session_id)?;
+    let check_pending = || {
+        let _guard = state.mutations.lock().unwrap();
+        if super::read_pending(&session.journal(&state.data), &session.repo)?.is_some() {
+            return Err(AppError::new(
+                "write_pending",
+                "请先核对远端操作结果，再返回 Cliora。",
+            ));
+        }
+        Ok(())
+    };
+    check_pending()?;
+    // 只读地算出这次要送达的阶段，并占住这条来源：阶段一步都还没有写进账本。
+    let (source, previous_revision, previous_outcome, stage, committed) = {
+        let mut book = state.reviews.lock().unwrap();
+        let entry = book.bound(review_id, session_id, &session)?;
+        if entry.delivering {
+            return Err(AppError::new(
+                "remote_busy",
+                "这个审查结果正在返回 Cliora，请稍后重试。",
+            ));
+        }
+        let stage = next_outcome(entry.outcome, requested)?;
+        // committed / merged 都必须报得出这次审查的提交，否则只是声称进展。
+        if stage != Outcome::Reviewed && entry.committed.is_none() {
+            return Err(conflict());
+        }
+        entry.delivering = true;
+        (
+            entry.source.clone(),
+            entry.revision,
+            entry.outcome,
+            stage,
+            entry.committed.clone(),
+        )
+    };
+    let revision = match previous_revision.checked_add(1) {
+        Some(revision) => revision,
+        None => {
+            release_delivery(state, review_id);
+            return Err(expired());
+        }
+    };
+    // 复核：这些 await 期间账本一行都不写。
+    let prepared: Result<Url> = async {
+        let helper = connector().await?;
+        let target = list(&helper)
+            .await?
+            .into_iter()
+            .find(|t| {
+                t.target_id == source.target_id
+                    && t.target_revision == source.target_revision
+                    && t.unavailable_reason.is_none()
+            })
+            .ok_or_else(mismatch)?;
+        let observed = query(&helper, "probe", Some(&target)).await?;
+        source.check_peer(
+            probe_identity(&observed["peerRevision"])?,
+            probe_identity(&observed["peerIdentity"])?,
+        )?;
+        let snapshot = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            session.status_for(None),
+        )
+        .await
+        .map_err(|_| AppError::new("remote_timeout", "等待远端工作树复核超时，请重试。"))??;
+        let url = returned(&source, revision, stage, committed.as_deref(), &snapshot)?;
+        state.session(session_id)?;
+        check_pending()?;
+        // 最后一道状态核对：复核期间账本被别的路径改过（记录新提交或已结束）就不再送达。
+        let book = state.reviews.lock().unwrap();
+        match book.entries.get(review_id) {
+            Some(entry)
+                if !entry.ended
+                    && entry.revision == previous_revision
+                    && entry.outcome == previous_outcome
+                    && entry.committed == committed => {}
+            _ => return Err(expired()),
+        }
+        Ok(url)
+    }
+    .await;
+    let url = match prepared {
+        Ok(url) => url,
+        Err(error) => {
+            release_delivery(state, review_id);
+            return Err(error);
+        }
+    };
+    // Cliora 收下之后才允许推进阶段：送达失败同样保持原样，同一阶段可以原样重试。
+    if let Err(error) = deliver(&url) {
+        release_delivery(state, review_id);
+        return Err(error);
+    }
+    let mut book = state.reviews.lock().unwrap();
+    if let Some(entry) = book.entries.get_mut(review_id) {
+        entry.delivering = false;
+        entry.revision = revision;
+        entry.outcome = Some(stage);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn remote_review_return<R: Runtime>(
     app: AppHandle<R>,
@@ -485,70 +617,10 @@ pub async fn remote_review_return<R: Runtime>(
         // 旧调用方不带 outcome：语义仍是「只做了审查」。
         None => Outcome::Reviewed,
     };
-    let session = state.session(&session_id)?;
-    let check_pending = || {
-        let _guard = state.mutations.lock().unwrap();
-        if super::read_pending(&session.journal(&state.data), &session.repo)?.is_some() {
-            return Err(AppError::new(
-                "write_pending",
-                "请先核对远端操作结果，再返回 Cliora。",
-            ));
-        }
-        Ok(())
-    };
-    check_pending()?;
-    let (source, revision, stage, committed) = {
-        let mut book = state.reviews.lock().unwrap();
-        let entry = book.bound(&review_id, &session_id, &session)?;
-        let stage = next_outcome(entry.outcome, requested)?;
-        // committed / merged 都必须报得出这次审查的提交，否则只是声称进展。
-        if stage != Outcome::Reviewed && entry.committed.is_none() {
-            return Err(conflict());
-        }
-        entry.revision = entry.revision.checked_add(1).ok_or_else(expired)?;
-        entry.outcome = Some(stage);
-        (
-            entry.source.clone(),
-            entry.revision,
-            stage,
-            entry.committed.clone(),
-        )
-    };
-    let helper = connector().await?;
-    let target = list(&helper)
-        .await?
-        .into_iter()
-        .find(|t| {
-            t.target_id == source.target_id
-                && t.target_revision == source.target_revision
-                && t.unavailable_reason.is_none()
-        })
-        .ok_or_else(mismatch)?;
-    let observed = query(&helper, "probe", Some(&target)).await?;
-    source.check_peer(
-        probe_identity(&observed["peerRevision"])?,
-        probe_identity(&observed["peerIdentity"])?,
-    )?;
-    let snapshot = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        session.status_for(None),
-    )
+    return_review(state.inner(), &review_id, &session_id, requested, |url| {
+        crate::cliora::open_checked_cliora(&app, url.as_str())
+    })
     .await
-    .map_err(|_| AppError::new("remote_timeout", "等待远端工作树复核超时，请重试。"))??;
-    let url = returned(&source, revision, stage, committed.as_deref(), &snapshot)?;
-    state.session(&session_id)?;
-    check_pending()?;
-    {
-        let mut book = state.reviews.lock().unwrap();
-        let entry = book.bound(&review_id, &session_id, &session)?;
-        if entry.revision != revision
-            || entry.committed != committed
-            || entry.outcome != Some(stage)
-        {
-            return Err(expired());
-        }
-    }
-    crate::cliora::open_checked_cliora(&app, url.as_str())
 }
 
 #[cfg(test)]
@@ -814,6 +886,7 @@ esac
                 None,
                 Some(&source),
                 &Channel::new(|_| Ok(())),
+                None,
             )
             .await;
             assert_eq!(result.err().unwrap().code, "target_changed");
@@ -830,6 +903,7 @@ esac
             None,
             Some(&source),
             &Channel::new(|_| Ok(())),
+            None,
         )
         .await;
         assert_eq!(replaced.err().unwrap().code, "target_changed");
@@ -840,6 +914,7 @@ esac
             None,
             Some(&source),
             &Channel::new(|_| Ok(())),
+            None,
         )
         .await
         .unwrap();
@@ -905,6 +980,10 @@ esac
             baseline: source.baseline.clone(),
             review_id: Some(source.review_id.clone()),
             hunk_stageable: false,
+            // 这条测试只走 v1 内嵌组件：没有 v2 写入令牌，也没有 v2 私有目录。
+            agent_version: super::super::V1_VERSION.to_string(),
+            state_token: std::sync::Mutex::new(None),
+            _session_dir: None,
         };
         let state = RemoteWorktrees::new(root.path().join("journal"));
         let mut other = source.clone();
@@ -1029,5 +1108,191 @@ esac
                 "conflict"
             );
         }
+    }
+
+    /// 阶段推进必须发生在 Cliora 真正收到结果之后。
+    ///
+    /// 旧实现拿到锁就写 outcome/revision，随后 connector/list/probe/status/送达任一步失败
+    /// 都会让阶段已经前进：同一阶段重试命中 next_outcome 的 conflict，返回动作永久卡死，
+    /// 而 Cliora 从未收到结果。这里对 reviewed → committed → merged 三段各做一次
+    /// 「复核失败 / 送达失败 → 状态不动 → 同一阶段重试成功」。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stage_is_recorded_only_after_cliora_receives_the_result() {
+        use super::super::{RemoteWorktrees, Session, Target};
+        use crate::remote_worktree_transport::AgentTransport;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command as Git;
+        use std::sync::Arc;
+
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            let output = Git::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["commit", "--allow-empty", "-qm", "base"]);
+
+        let mut command = tokio::process::Command::new(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../remote-agent/agent"),
+        );
+        command.env("XDG_STATE_HOME", root.path().join("state"));
+        let agent = AgentTransport::spawn(&mut command).unwrap();
+        let mut source = Source::parse(&source_link()).unwrap();
+        // 链接里的基线是占位值：open 会核对它在这个工作树里可达，必须换成真实提交。
+        source.baseline = Some(git(&["rev-parse", "HEAD"]));
+        source.worktree_path = repo.to_str().unwrap().into();
+        let opened = agent
+            .rpc(
+                "open",
+                json!({"path": source.worktree_path, "baseline": source.baseline}),
+            )
+            .await
+            .unwrap();
+        source.worktree_identity = opened["repo"].as_str().unwrap().into();
+        let target: Target = serde_json::from_value(json!({
+            "name": "A", "host": "A", "user": "dev", "port": 22, "authMethod": "key",
+            "targetId": source.target_id, "targetRevision": source.target_revision,
+        }))
+        .unwrap();
+        let session = Arc::new(Session {
+            agent,
+            repo: opened["repo"].as_str().unwrap().into(),
+            target,
+            peer_identity: source.peer_identity.clone(),
+            peer_revision: source.peer_revision.clone(),
+            root: source.worktree_path.clone(),
+            baseline: source.baseline.clone(),
+            review_id: Some(source.review_id.clone()),
+            hunk_stageable: false,
+            agent_version: super::super::V1_VERSION.to_string(),
+            state_token: std::sync::Mutex::new(None),
+            _session_dir: None,
+        });
+        let state = RemoteWorktrees::new(root.path().join("journal"));
+        let session_id = "local-a".to_string();
+        state
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(session_id.clone(), Arc::clone(&session));
+        {
+            let mut book = state.reviews.lock().unwrap();
+            book.prepare(&source).unwrap();
+            book.accept(&source.review_id, &session_id, &session)
+                .unwrap();
+        }
+
+        // 假连接器：list/probe 各读自己那份 JSON；把 probe.json 改坏就让这一次复核失败。
+        let helper = root.path().join("helper");
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\ncd -- \"$(dirname \"$0\")\" || exit 1\ncase \"$2\" in\nlist|probe) cat \"$2.json\" ;;\n*) exit 1 ;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let catalog = json!({"protocol":1,"targets":[{
+            "targetId":source.target_id,"name":"A","host":"A","user":"dev",
+            "port":22,"authMethod":"key","targetRevision":source.target_revision}]});
+        std::fs::write(root.path().join("list.json"), catalog.to_string()).unwrap();
+        let good = json!({"system":"Linux","pythonVersion":"3.11",
+            "peerRevision":source.peer_revision,"peerIdentity":source.peer_identity});
+        let broken = json!({"system":"Linux","pythonVersion":"3.11",
+            "peerRevision":source.peer_revision,
+            "peerIdentity":"e".repeat(64)});
+        let write_probe = |value: &Value| {
+            std::fs::write(root.path().join("probe.json"), value.to_string()).unwrap();
+        };
+        write_probe(&good);
+        // connector() 只认这一个环境变量；本用例独占它，结束时清掉。
+        std::env::set_var("TWIGLANE_CLIORA_CONNECTOR", &helper);
+
+        let observed = |state: &RemoteWorktrees| {
+            let book = state.reviews.lock().unwrap();
+            let entry = book.entries.get(&source.review_id).unwrap();
+            (entry.outcome, entry.revision, entry.delivering)
+        };
+        let mut delivered = 0usize;
+        let mut last: Option<String> = None;
+        for (stage, need_commit) in [
+            (Outcome::Reviewed, false),
+            (Outcome::Committed, true),
+            (Outcome::Merged, true),
+        ] {
+            // committed/merged 都必须有这次审查记录的提交，否则连尝试都只是声称进展。
+            if need_commit {
+                git(&["commit", "--allow-empty", "-qm", stage.name()]);
+                let head = git(&["rev-parse", "HEAD"]);
+                state
+                    .reviews
+                    .lock()
+                    .unwrap()
+                    .record_commit(&source.review_id, &session, &head);
+            }
+            let before = observed(&state);
+            // 1) 复核在送达之前失败：阶段与修订号原地不动，占位也释放，Cliora 没收到任何东西。
+            write_probe(&broken);
+            let failed = return_review(&state, &source.review_id, &session_id, stage, |url| {
+                delivered += 1;
+                last = Some(url.to_string());
+                Ok(())
+            })
+            .await;
+            assert_eq!(failed.unwrap_err().code, "target_changed", "{stage:?}");
+            assert_eq!(observed(&state), before, "{stage:?} 阶段在送达前就前进了");
+            assert_eq!(delivered, before.1 as usize, "{stage:?} 未就绪就送达了");
+
+            // 2) 送达本身失败：同样不推进，同一阶段仍可原样重试。
+            write_probe(&good);
+            let refused = return_review(
+                &state,
+                &source.review_id,
+                &session_id,
+                stage,
+                |_url: &Url| Err(AppError::new("cliora_unavailable", "Cliora 没有接受返回结果。")),
+            )
+            .await;
+            assert_eq!(refused.unwrap_err().code, "cliora_unavailable", "{stage:?}");
+            assert_eq!(observed(&state), before, "{stage:?} 送达失败却前进了阶段");
+
+            // 3) 同一阶段重试：复核通过且送达成功之后才推进一格。
+            return_review(&state, &source.review_id, &session_id, stage, |url| {
+                delivered += 1;
+                last = Some(url.to_string());
+                Ok(())
+            })
+            .await
+            .unwrap();
+            let after = observed(&state);
+            assert_eq!(after.0, Some(stage));
+            assert_eq!(after.1, before.1 + 1, "{stage:?} 送达后只前进一格");
+            assert!(!after.2, "{stage:?} 送达结束后占位必须释放");
+            assert_eq!(delivered, after.1 as usize);
+            let url = last.clone().unwrap();
+            assert!(url.contains(&format!("outcome={}", stage.name())), "{url}");
+            assert!(url.contains(&format!("resultRevision={}", after.1)), "{url}");
+        }
+        // 三段都送达之后语义没有放宽：重复同一阶段仍然是 conflict。
+        assert_eq!(
+            return_review(&state, &source.review_id, &session_id, Outcome::Merged, |_| Ok(()))
+                .await
+                .unwrap_err()
+                .code,
+            "conflict"
+        );
+        assert_eq!(observed(&state).0, Some(Outcome::Merged));
+        assert_eq!(observed(&state).1, 3);
+        std::env::remove_var("TWIGLANE_CLIORA_CONNECTOR");
     }
 }

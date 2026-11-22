@@ -264,7 +264,7 @@ async fn probe_reports_effective_config_peer_identity_and_agent_state() {
     let harness = Harness::new("ssh-probe");
     let digest = install_fake_agent(
         &harness,
-        "#!/bin/sh\nprintf '{\"protocol\":2,\"os\":\"macos\",\"arch\":\"%s\",\"version\":\"0.3.40\"}\\n' \"$(uname -m)\"\n",
+        "#!/bin/sh\nprintf '{\"protocol\":2,\"os\":\"%s\",\"arch\":\"%s\",\"version\":\"0.3.40\"}\\n' \"$(uname -s)\" \"$(uname -m)\"\n",
     );
     let credentials = FakeStore::default();
     let context = harness.context(&credentials);

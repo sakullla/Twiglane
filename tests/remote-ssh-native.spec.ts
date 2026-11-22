@@ -60,7 +60,7 @@ describe("远程 SSH 的命令边界", () => {
   it("总开关在设置里缺省关闭，主机记录不含密码字段", () => {
     const state = read("src-tauri/src/state.rs");
     expect(state).toContain("pub struct RemoteSsh");
-    expect(state).toMatch(/#\[serde\(default\)\]\n\s+pub enabled: bool,/);
+    expect(state).toMatch(/#\[serde\(default\)\]\r?\n\s+pub enabled: bool,/);
     const start = state.indexOf("pub struct SshTarget {");
     const end = state.indexOf("}", start);
     const block = state.slice(start, end);

@@ -2367,6 +2367,7 @@ input.on("line", line => {
     /* ---------------- 远端会话优先 v2 组件，不可用才回退内嵌 v1 ---------------- */
 
     /// 本机有没有 v2 产物：有清单才算，没有就回退内嵌 v1 并说明原因。
+    #[cfg(unix)]
     #[test]
     fn provider_prefers_local_v2_artifacts_and_explains_the_fallback() {
         assert!(

@@ -6,6 +6,7 @@
 //! 以及 ProxyJump 跳板机的 `user@jump` 密码提示）一律退出 1，因此 Twiglane 既不会
 //! 替用户接受一台新主机的密钥，也不会把目标主机的密码交给跳板机。
 
+#[cfg(unix)]
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +18,7 @@ pub(crate) const SECRET_ENV: &str = "TWIGLANE_SSH_ASKPASS_SECRET";
 /// 目标主机名也经环境变量传入：只有提示里出现它（或 `user@host`）才作答。
 pub(crate) const HOST_ENV: &str = "TWIGLANE_SSH_ASKPASS_HOST";
 
+#[cfg(unix)]
 const SCRIPT: &str = r#"#!/bin/sh
 prompt=$1
 host=$TWIGLANE_SSH_ASKPASS_HOST
@@ -88,7 +90,7 @@ pub(crate) fn install(dir: &Path, password: &str) -> Result<Askpass, AppError> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -149,7 +151,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn secret_file_is_private_and_removed_with_the_directory() {
         use std::os::unix::fs::PermissionsExt;

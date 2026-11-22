@@ -3387,8 +3387,8 @@ fn an_oversized_request_is_rejected_without_execution() {
     agent.stdin.write_all(frame.as_bytes()).unwrap();
     agent.stdin.write_all(b"\n").unwrap();
     agent.stdin.flush().unwrap();
-    // 超限行在解析前就被拒绝，因此回答的 `id` 是占位符 `0`，不能按请求 id 匹配。
-    let response = agent.next_line();
+    // 超限行在解析前就被拒绝，按占位符 `0` 找到响应，跳过仓库事件。
+    let response = agent.read_id("0");
     assert_eq!(response["ok"], json!(false));
     assert_eq!(response["error"]["code"], json!("request_too_large"));
     assert_eq!(response["id"], json!("0"));

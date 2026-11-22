@@ -64,6 +64,17 @@
     stageSideFor?: (path: string) => "staged" | "unstaged" | "none";
     onStageFiles?: (paths: string[]) => void;
     onUnstageFiles?: (paths: string[]) => void;
+    /** 任务多选里的行意见：与单文件视图共用同一份行身份与同一份运行期状态。 */
+    comments?: ReadonlySet<string>;
+    onCommentLine?: (anchor: {
+      path: string;
+      hunkIndex: number;
+      kind: "add" | "del" | "context";
+      oldNo: number | null;
+      newNo: number | null;
+      quote: string;
+      range?: { from: number; to: number };
+    }) => void;
   }
 
   /** 同时在途的差异读取数：选 100 个文件也不会一次把读取通道占满。 */
@@ -108,6 +119,8 @@
     stageSideFor,
     onStageFiles,
     onUnstageFiles,
+    comments,
+    onCommentLine,
   }: Props = $props();
 
   let scroller = $state<HTMLDivElement | null>(null);
@@ -537,6 +550,8 @@
                 onStageHunk={(hunk) => loaded && onStageHunk({ path: row.path, side: row.side }, loaded, hunk)}
                 onLoadMore={() => void loadMore(row)}
                 onFileHistory={onFileHistory}
+                {comments}
+                {onCommentLine}
               />
             </div>
           {/if}

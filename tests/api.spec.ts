@@ -768,6 +768,42 @@ describe("cliora 审查接线", () => {
     }
   });
 
+
+  it("准备 feedback-v1 交接把整批意见原样交给原生，不带 request_id 也不自行生成标识", async () => {
+    const request = {
+      reviewId: REVIEW,
+      sessionId: SESSION,
+      resultRevision: 2,
+      worktreePath: "/work/team/demo",
+      rangeVersion: "range-7",
+      baselineOid: OID,
+      headOid: OID,
+      comments: [
+        {
+          id: "33333333-3333-4333-8333-000000000001",
+          path: "src/lib/api.ts",
+          hunkIndex: 0,
+          kind: "add" as const,
+          oldNo: null,
+          newNo: 12,
+          body: "这里要保留上一份结果。",
+        },
+      ],
+    };
+    const prepared = {
+      feedbackId: "8b7c6d5e-4f30-4121-8394-a5b6c7d8e9f1",
+      digest: "a".repeat(64),
+      commentCount: 1,
+      url: "cliora://review-feedback?v=1&feedbackId=8b7c6d5e-4f30-4121-8394-a5b6c7d8e9f1",
+    };
+    invoke.mockResolvedValueOnce(prepared);
+    await expect(api.prepareReviewFeedback(request)).resolves.toEqual(prepared);
+    expect(invoke).toHaveBeenLastCalledWith("prepare_review_feedback", { request });
+    for (const call of invoke.mock.calls) {
+      expect(call[1]).not.toHaveProperty("request_id");
+    }
+  });
+
   it("提交成功记录结果，失败和推送失败阶段都不声称成功", async () => {
     invoke.mockResolvedValueOnce({ oid: OID, generation: 5, branch: "main", summary: "s", files: [], pushed: false, snapshot: {} });
     await api.commitChanges("/repo", "note", 4, 1);

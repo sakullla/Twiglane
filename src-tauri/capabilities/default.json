@@ -175,6 +175,7 @@
     "allow-cliora-review-return",
     "allow-cliora-review-forget",
     "allow-cliora-review-sources",
+    "allow-prepare-review-feedback",
     "allow-terminal-profiles",
     "allow-terminal-list",
     "allow-terminal-create",

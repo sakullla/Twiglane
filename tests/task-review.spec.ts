@@ -175,6 +175,7 @@ vi.mock("../src/lib/api", () => ({
 import App from "../src/App.svelte";
 import TaskReview from "../src/lib/components/TaskReview.svelte";
 import { resetClioraReview } from "../src/lib/cliora-review.svelte";
+import type { ReviewComment } from "../src/lib/review-comments.svelte";
 import { resetReviewProgress } from "../src/lib/review-progress.svelte";
 
 function resetMocks() {
@@ -889,5 +890,159 @@ describe("任务净差异的轻量编辑入口（T2）", () => {
     await screen.findByRole("listbox", { name: "任务文件" });
     await waitFor(() => expect(mocks.api.loadTaskDiff).toHaveBeenCalled());
     expect(screen.queryByRole("button", { name: "编辑工作区文件" })).toBeNull();
+  });
+});
+
+describe("任务审阅的行意见（feedback-v1 准备侧）", () => {
+  const anchorKeyValue = "src/app.ts|0|add||3";
+
+  function comment(overrides: Partial<ReviewComment> = {}): ReviewComment {
+    return {
+      id: "11111111-1111-4111-8111-111111111111",
+      anchor: {
+        path: "src/app.ts",
+        hunkIndex: 0,
+        kind: "add",
+        oldNo: null,
+        newNo: 3,
+        quote: "+任务净改动",
+      },
+      body: "这里要保留上一份结果，不要显示零改动。",
+      createdAt: 1,
+      updatedAt: 1,
+      ...overrides,
+    };
+  }
+
+  it("在差异行上加意见：行身份来自真实行号，正文非空才提交", async () => {
+    const onAddComment = vi.fn();
+    render(TaskReview, { props: reviewProps({ onAddComment, onPrepareFeedback: vi.fn() }) });
+    await screen.findByRole("listbox", { name: "任务文件" });
+    const button = await waitFor(() => {
+      const found = document.querySelector<HTMLButtonElement>("[data-comment-line]");
+      expect(found).toBeTruthy();
+      return found!;
+    });
+    await fireEvent.click(button);
+    const form = await screen.findByRole("form", { name: "给这一行添加意见" });
+    const textarea = within(form).getByRole("textbox", { name: "意见正文" });
+    await fireEvent.input(textarea, { target: { value: "这一行要在失败时保留上一份结果。" } });
+    await fireEvent.click(within(form).getByRole("button", { name: "添加意见" }));
+    expect(onAddComment).toHaveBeenCalledTimes(1);
+    // 行身份来自真实差异行：路径、块号与这一行的行号一起交给意见状态层。
+    const anchor = onAddComment.mock.calls[0][0] as { path: string; hunkIndex: number; kind: string; oldNo: number | null; newNo: number | null };
+    expect(anchor).toMatchObject({ path: "src/app.ts", hunkIndex: 0 });
+    expect(["add", "del", "context"]).toContain(anchor.kind);
+    expect(anchor.oldNo !== null || anchor.newNo !== null).toBe(true);
+    expect(onAddComment.mock.calls[0][1]).toBe("这一行要在失败时保留上一份结果。");
+    // 提交后表单关闭，不写文件也不调用任何 Git 或原生命令。
+    await waitFor(() => expect(screen.queryByRole("form", { name: "给这一行添加意见" })).toBeNull());
+    expect(mocks.created.get("stageLines")?.mock.calls.length ?? 0).toBe(0);
+  });
+
+  it("评论此块：一次给整块写意见，锚点落在块内第一条改动行并带上行号区间", async () => {
+    const onAddComment = vi.fn();
+    // 真实差异的每块前面都有一条块标题行；按钮就挂在它上面。
+    mocks.api.loadTaskDiff.mockImplementation(async (_worktree: string, _base: string, _head: string, relative: string) => {
+      const base = diffFor(relative);
+      const header: DiffLine = { kind: "hunk", text: "@@ -1,6 +1,6 @@", oldNo: null, newNo: null, hunkIndex: 0 };
+      return { ...base, lines: [header, ...base.lines], totalLines: base.lines.length + 1 };
+    });
+    render(TaskReview, { props: reviewProps({ onAddComment, onPrepareFeedback: vi.fn() }) });
+    await screen.findByRole("listbox", { name: "任务文件" });
+    const button = await waitFor(() => {
+      const found = document.querySelector<HTMLButtonElement>("[data-hunk-comment]");
+      expect(found).toBeTruthy();
+      return found!;
+    });
+    await fireEvent.click(button);
+    const form = await screen.findByRole("form", { name: "给这一块添加意见" });
+    // 写意见时不顺手展开空的意见列表。
+    expect(screen.queryByLabelText("意见列表")).toBeNull();
+    const textarea = within(form).getByRole("textbox", { name: "意见正文" });
+    await fireEvent.input(textarea, { target: { value: "这一块的失败分支要保留旧结果。" } });
+    // Ctrl+Enter 直接加入批次。
+    await fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
+    expect(onAddComment).toHaveBeenCalledTimes(1);
+    const anchor = onAddComment.mock.calls[0][0] as { hunkIndex: number; kind: string; range?: { from: number; to: number } };
+    expect(anchor.hunkIndex).toBe(0);
+    expect(["add", "del"]).toContain(anchor.kind);
+    expect(anchor.range).toBeTruthy();
+    expect(anchor.range!.from).toBeLessThanOrEqual(anchor.range!.to);
+    await waitFor(() => expect(screen.queryByRole("form", { name: "给这一块添加意见" })).toBeNull());
+  });
+
+  it("已存意见可查看、编辑、删除，并给出整批预览", async () => {
+    const onEditComment = vi.fn();
+    const onDeleteComment = vi.fn();
+    const stored = comment();
+    const { rerender } = render(TaskReview, {
+      props: reviewProps({
+        comments: [stored],
+        commentKeys: new Set([anchorKeyValue]),
+        onEditComment,
+        onDeleteComment,
+        onPrepareFeedback: vi.fn(),
+      }),
+    });
+    await screen.findByRole("listbox", { name: "任务文件" });
+    await fireEvent.click(await screen.findByRole("button", { name: "查看意见列表" }));
+    const panel = await screen.findByLabelText("意见列表");
+    expect(within(panel).getByText("这里要保留上一份结果，不要显示零改动。")).toBeTruthy();
+    expect(within(panel).getByLabelText("整批意见预览").textContent).toContain("src/app.ts（新增第 3 行）");
+
+    await fireEvent.click(within(panel).getByRole("button", { name: "编辑" }));
+    const editor = within(panel).getByRole("textbox", { name: "src/app.ts 的意见正文" });
+    await fireEvent.input(editor, { target: { value: "保留上一份结果，并且说明为什么。" } });
+    await fireEvent.click(within(panel).getByRole("button", { name: "保存意见" }));
+    expect(onEditComment).toHaveBeenCalledWith(stored.id, "保留上一份结果，并且说明为什么。");
+
+    await fireEvent.click(within(panel).getByRole("button", { name: "删除" }));
+    expect(onDeleteComment).toHaveBeenCalledWith(stored.id);
+    rerender(reviewProps({ comments: [], commentKeys: new Set(), onPrepareFeedback: vi.fn() }));
+    await waitFor(() => expect(document.body.textContent).toContain("还没有意见"));
+  });
+
+  it("只有写好的意见才允许准备送回，准备中禁用按钮并显示进行中", async () => {
+    const onPrepareFeedback = vi.fn();
+    const { rerender } = render(TaskReview, {
+      props: reviewProps({ comments: [], onPrepareFeedback }),
+    });
+    await screen.findByRole("listbox", { name: "任务文件" });
+    const empty = await screen.findByRole("button", { name: "准备把这批意见送回原任务" });
+    expect((empty as HTMLButtonElement).disabled).toBe(true);
+    expect(empty.getAttribute("title")).toContain("先在差异行上写一条意见");
+
+    rerender(reviewProps({ comments: [comment()], commentKeys: new Set([anchorKeyValue]), onPrepareFeedback }));
+    const ready = await screen.findByRole("button", { name: "准备把这批意见送回原任务" });
+    expect((ready as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.click(ready);
+    expect(onPrepareFeedback).toHaveBeenCalledTimes(1);
+
+    rerender(reviewProps({
+      comments: [comment()],
+      commentKeys: new Set([anchorKeyValue]),
+      onPrepareFeedback,
+      feedbackPreparing: true,
+    }));
+    const busy = await screen.findByRole("button", { name: "准备把这批意见送回原任务" });
+    expect((busy as HTMLButtonElement).disabled).toBe(true);
+    expect(busy.textContent).toContain("正在准备");
+  });
+
+  it("失效说明与准备结果只作为说明展示，不会把旧意见当成当前范围的意见", async () => {
+    render(TaskReview, {
+      props: reviewProps({
+        comments: [],
+        commentKeys: new Set(),
+        commentNotice: "任务范围（起点、HEAD 或工作区）已经变化，这批意见不会自动对应到新行号。",
+        onPrepareFeedback: vi.fn(),
+      }),
+    });
+    await screen.findByRole("listbox", { name: "任务文件" });
+    const group = await screen.findByRole("group", { name: "审阅意见" });
+    expect(within(group).getByText(/不会自动对应到新行号/)).toBeTruthy();
+    await fireEvent.click(within(group).getByRole("button", { name: "查看意见列表" }));
+    expect(within(await screen.findByLabelText("意见列表")).getByText("还没有意见。点块标题上的「评论此块」一次说一整块，或用行尾气泡说某一行。")).toBeTruthy();
   });
 });

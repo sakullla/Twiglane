@@ -208,6 +208,7 @@ fn main() {
             "cliora_review_return",
             "cliora_review_forget",
             "cliora_review_sources",
+            "prepare_review_feedback",
             "terminal_profiles",
             "terminal_list",
             "terminal_create",

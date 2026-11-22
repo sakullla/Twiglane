@@ -31,8 +31,22 @@
     selectClioraSource,
     hydrateClioraReviews,
     clioraSourceEpoch,
+    sameWorktreePath,
     watchClioraReviewLinks,
   } from "./lib/cliora-review.svelte";
+  import {
+    addComment as addTaskCommentRecord,
+    adoptCommentScope,
+    commentLines,
+    commentsIn,
+    deleteComment as deleteTaskCommentRecord,
+    editComment as editTaskCommentRecord,
+    feedbackComments,
+    forgetComments,
+    staleBatches as staleCommentBatches,
+    type CommentScope,
+    type ReviewCommentAnchor,
+  } from "./lib/review-comments.svelte";
   import { fileEditor, type EditContext } from "./lib/file-editor.svelte";
   import { normalizeError } from "./lib/errors";
   import { showMergeAbort } from "./lib/resolve";
@@ -69,6 +83,7 @@
     FileRow,
     FileSelection,
     GitInfo,
+    FileChange,
     OpenedRepository,
     PanelWidths,
     PreviewSources,
@@ -327,10 +342,24 @@
     ];
   }
   /** 项目下拉里「管理项目…」的哨兵值：选中它只打开管理弹窗，不改变当前项目。 */
+
+  /**
+   * 任务页报告的已解析范围。`generation` 是这次读取被校验过的仓库代次：起点、HEAD 与
+   * 未提交状态的形状都没变、只有已修改文件的内容被改写时，rangeVersion 不变而代次前进。
+   * 任务快照 token、审阅进度与行意见都以它为身份，旧结论不会挂到已经变化的内容上。
+   */
+  interface TaskScopeSnapshot {
+    worktree: string;
+    baselineOid: string;
+    headOid: string;
+    rangeVersion: string;
+    generation: number;
+  }
   interface ReadingContext {
     view: WorkspaceView; selected: FileSelection | null; selectedSet: FileSelection[]; query: string;
     historyPath: string | null; historyQuery: string; taskRequest: TaskRequest | null;
-    taskSelectedPath: string | null; taskScope: { worktree: string; baselineOid: string; headOid: string } | null;
+    taskSelectedPath: string | null;
+    taskScope: TaskScopeSnapshot | null;
   }
   const readingContexts = new CheckoutContexts<ReadingContext>();
   let git = $state<GitInfo | null>(null);
@@ -690,7 +719,55 @@
   let reviewSerial = 0;
   let taskReviewSerial = 0;
   /** 任务页报告的已解析范围：只有后端校验过的起点与 HEAD 才能作为任务快照 token 的依据。 */
-  let taskScope = $state.raw<{ worktree: string; baselineOid: string; headOid: string } | null>(null);
+  let taskScope = $state.raw<TaskScopeSnapshot | null>(null);
+  /**
+   * 任务审阅意见（R5）：只在当前来源的当前任务范围里成立。范围一变就整批失效，
+   * 不把旧行号映射到新内容上；准备送回是唯一会写交接文件与打开深链的动作。
+   */
+  let feedbackPreparing = $state(false);
+  let feedbackNotice = $state<string | null>(null);
+  let commentScope = $derived.by<CommentScope | null>(() => {
+    const source = clioraReview.source;
+    const scope = taskScope;
+    if (!source || !scope) return null;
+    // 意见只属于同一条来源工作树：别的仓库里打开的同名任务不会借用这次审查的身份。
+    if (!sameWorktreePath(scope.worktree, source.worktreePath)) return null;
+    return {
+      reviewId: source.reviewId,
+      sessionId: source.sessionId,
+      worktree: scope.worktree,
+      baselineOid: scope.baselineOid,
+      headOid: scope.headOid,
+      rangeVersion: scope.rangeVersion,
+      // 读取代次进身份：「状态形状没变、内容被改写」只有代次能说明。
+      generation: scope.generation,
+    };
+  });
+  /**
+   * 任务读取代次已经落后于仓库代次：读完之后工作区又变了，而任务页还没重读完。
+   * 这一小段窗口里这批意见锚的行可能已经不同，所以不能准备送回。
+   */
+  let commentScopeOutdated = $derived(
+    Boolean(
+      commentScope &&
+        taskScope &&
+        opened &&
+        sameWorktreePath(taskScope.worktree, opened.summary.path) &&
+        taskScope.generation !== opened.generation,
+    ),
+  );
+  let taskComments = $derived(commentScope ? commentsIn(commentScope) : []);
+  let taskCommentKeys = $derived(commentScope ? commentLines(commentScope) : new Set<string>());
+  /** 上一条失效说明：只有来源还在时才成立，用户换会话后不冒充新意见的结论。 */
+  let staleCommentNotice = $derived(
+    clioraReview.source ? staleCommentBatches(clioraReview.source.reviewId)[0]?.reason ?? null : null,
+  );
+  /** 读取代次落后于仓库代次时的就地说明：只有真的还有意见会被误送出时才提示。 */
+  let commentScopeOutdatedNotice = $derived(
+    commentScopeOutdated && taskComments.length > 0
+      ? "工作区在这次读取之后又变化了，这批意见挂的行可能已经不是原来那一行；先重新读取任务，再写或送回意见。"
+      : null,
+  );
   let taskSelectedPath = $state<string | null>(null);
   let taskReviewNav = $state.raw<ReviewQueueState | null>(null);
   let changesTarget = $derived<ReviewTarget | null>(
@@ -717,6 +794,14 @@
     inTask ? taskReviewNav : workspaceView === "changes" ? changesReviewNav : null,
   );
 
+  let snapshotFiles = $derived(opened?.snapshot.files);
+  let filesByPath = $derived.by(() => {
+    const index = new Map<string, FileChange>();
+    for (const file of snapshotFiles ?? []) {
+      if (!index.has(file.path)) index.set(file.path, file);
+    }
+    return index;
+  });
   let changeCount = $derived(opened?.snapshot.files.length ?? 0);
   let conflictCount = $derived(opened?.snapshot.files.filter((file) => file.unmerged).length ?? 0);
   let upstreamMissing = $derived(opened ? !opened.snapshot.branch.upstream : false);
@@ -803,7 +888,7 @@
   let activeFileStage = $derived.by<{ path: string | null; side: "staged" | "unstaged" | "none"; otherSide: boolean }>(() => {
     // 只有改动与任务视图把选择作用在真实 Git 状态上；文件/历史视图没有可写的这一侧。
     const path = workspaceView === "changes" || inTask ? activeSelectedPath : null;
-    const file = path ? opened?.snapshot.files.find((item) => item.path === path) : undefined;
+    const file = path ? filesByPath.get(path) : undefined;
     // 改动视图按用户选中的那一侧判定：同一路径同时有已暂存与未暂存时，选中已暂存就必须能取消暂存。
     // 任务行的侧别只是净结果（不等于真实索引状态），所以任务视图只按真实文件状态判定。
     const chosen = workspaceView === "changes" ? (selected?.side ?? null) : null;
@@ -1997,7 +2082,7 @@
   let changesEditPath = $derived.by(() => {
     if (!filesViewEnabled || !opened || !selected || multiActive || selected.side !== "unstaged") return null;
     const path = selected.path;
-    const file = opened.snapshot.files.find((item) => item.path === path);
+    const file = filesByPath.get(path);
     if (!file || file.unmerged || file.unstaged === "deleted") return null;
     return path;
   });
@@ -2119,7 +2204,7 @@
    * 这里转到同一文件的真实未提交差异，部分暂存仍走写锁内重读与过期保护。
    */
   function openUnstagedDiff(path: string): void {
-    const file = opened?.snapshot.files.find((item) => item.path === path);
+    const file = filesByPath.get(path);
     if (!file || file.unmerged) {
       notice("这个文件当前没有可部分暂存的未提交差异：任务净差异不能直接做块/行补丁。");
       return;
@@ -2139,7 +2224,7 @@
    * 列表按钮、空格与命令面板读的都是这一份判定，界面声明的动作与写入方向才不会相反。
    */
   function taskFileStage(path: string): "staged" | "unstaged" | "none" {
-    return fileStageSide(opened?.snapshot.files.find((item) => item.path === path) ?? null);
+    return fileStageSide(filesByPath.get(path) ?? null);
   }
 
   /** 在真实状态下把这个任务文件整文件暂存；任务净差异本身不被写入。 */
@@ -2319,11 +2404,91 @@
    * 任务页每次成功读取后报告它解析出的范围。任务快照 token 绑定这个范围，
    * 所以范围一变，进度立刻按新身份显示，旧标记不会被当成这次任务的结果。
    */
-  function adoptTaskScope(scope: { worktree: string; baselineOid: string; headOid: string } | null): void {
+  function adoptTaskScope(scope: TaskScopeSnapshot | null): void {
     taskScope = scope;
     taskSelectedPath = scope ? taskSelectedPath : null;
+    // 任务范围或读取代次变了：上一批意见整体失效，不猜新行号；提示在意见栏里如实说出来。
+    if (scope && commentScope) adoptCommentScope(commentScope);
+    if (!scope) feedbackNotice = null;
     if (scope) void reverifyTaskReviewed();
     else taskReviewNav = null;
+  }
+
+  /** 新增一条行意见：只写当前运行期内存，不改 Git、不发送提示词。 */
+  function addReviewComment(anchor: ReviewCommentAnchor, body: string): void {
+    const scope = commentScope;
+    if (!scope) throw new Error("当前没有任务范围，这条意见没有保存。");
+    // 读取代次落后时先别往过期批次里写：那批意见马上会整体失效，写了也会丢。
+    if (commentScopeOutdated) throw new Error("工作区在这次读取之后又变化了，先重新读取任务再写意见。");
+    addTaskCommentRecord(scope, anchor, body);
+    feedbackNotice = null;
+  }
+
+  function editReviewComment(id: string, body: string): void {
+    const scope = commentScope;
+    if (!scope) throw new Error("当前没有任务范围，这条意见没有保存。");
+    if (!editTaskCommentRecord(scope, id, body)) throw new Error("这条意见已经不在当前批次里，请重新读取任务。");
+    feedbackNotice = null;
+  }
+
+  function deleteReviewComment(id: string): void {
+    const scope = commentScope;
+    if (scope) deleteTaskCommentRecord(scope, id);
+    feedbackNotice = null;
+  }
+
+  /**
+   * 显式准备送回原任务：原生校验来源、结果版本、工作树与任务起点，写私有一次性文件并回读
+   * 核对后才打开只带标识与 digest 的深链。失败时不唤起 Cliora，意见与原任务都保留。
+   */
+  async function prepareTaskFeedback(): Promise<void> {
+    const scope = commentScope;
+    const source = clioraReview.source;
+    if (!scope || !source) {
+      notice("当前没有可送回的任务来源。", "warn");
+      return;
+    }
+    const comments = feedbackComments(scope);
+    if (comments.length === 0) {
+      // 失效的批次不会回到当前范围里：这里要如实说「已经失效」，不能让用户以为只是没写。
+      const invalidated = staleCommentBatches(source.reviewId).length > 0;
+      notice(
+        invalidated
+          ? "上一批意见已经失效，不会送回；请按当前任务内容重新写一批。"
+          : "先写一条意见，再准备送回原任务。",
+        "warn",
+      );
+      return;
+    }
+    // 任务页还没按最新代次重读：这批意见锚的行可能已经变了，绝不把过期批次送出去。
+    if (commentScopeOutdated) {
+      notice("工作区在这次任务读取之后又变化了，先重新读取任务再准备送回；这批意见不会送出。", "warn");
+      return;
+    }
+    if (feedbackPreparing) return;
+    feedbackPreparing = true;
+    feedbackNotice = null;
+    try {
+      const prepared = await api.prepareReviewFeedback({
+        reviewId: source.reviewId,
+        sessionId: source.sessionId,
+        // 结果版本以这条来源最近一次 returned 的序号为准；从未返回过就是 0。
+        resultRevision: clioraReview.lastReturn?.revision ?? 0,
+        worktreePath: scope.worktree,
+        rangeVersion: scope.rangeVersion,
+        baselineOid: scope.baselineOid,
+        headOid: scope.headOid,
+        comments,
+      });
+      feedbackNotice = "已准备 " + prepared.commentCount + " 条意见（批次 " + prepared.feedbackId.slice(0, 8) + "）。到 Cliora 里确认预览后再发送，这里没有发送任何内容。";
+      notice(feedbackNotice);
+    } catch (error) {
+      // 失败不打开 cliora：意见、原任务与所有草稿都保留，用户可以重新准备。
+      feedbackNotice = "这批意见没有准备好，Cliora 没有被唤起。意见仍保留，可以再试一次。";
+      showError(error);
+    } finally {
+      feedbackPreparing = false;
+    }
   }
 
   /**
@@ -3743,6 +3908,7 @@
     try {
       await api.clioraReviewForget(source.reviewId, source.sessionId);
       forgetClioraReview(source.reviewId);
+      forgetComments(source.reviewId);
       if (wasActive) closeTask();
       notice("已关闭此审查来源；仓库、阅读记录和草稿仍保留。需要审查时从 Cliora 重新发起。");
     } catch (error) { showError(error); }
@@ -4154,7 +4320,7 @@
    */
   function stashFileMenu(path: string, kind: "tracked" | "untracked" | "ignored", point: { x: number; y: number }) {
     const busy = writeLocked ? switchBlockedReason(commandState) : undefined;
-    const row = opened?.snapshot.files.find((file) => file.path === path) ?? null;
+    const row = filesByPath.get(path) ?? null;
     const deleted = row ? row.unstaged === "deleted" || (row.unstaged === "none" && row.staged === "deleted") : false;
     const name = path.split("/").pop() ?? path;
     const entries: ContextMenuEntry[] = [];
@@ -5407,6 +5573,14 @@
       onReviewNav={(nav) => (taskReviewNav = nav)}
       onSummary={(summary) => (taskSummary = summary)}
       onEditFile={filesViewEnabled ? (path, line) => void editInFiles(path, line, "task") : undefined}
+      comments={taskComments}
+      commentKeys={taskCommentKeys}
+      commentNotice={commentScope ? feedbackNotice ?? staleCommentNotice ?? commentScopeOutdatedNotice : null}
+      onAddComment={addReviewComment}
+      onEditComment={editReviewComment}
+      onDeleteComment={deleteReviewComment}
+      onPrepareFeedback={commentScope ? () => void prepareTaskFeedback() : undefined}
+      feedbackPreparing={feedbackPreparing}
     />
   {/if}
 {/snippet}
@@ -5566,7 +5740,7 @@
                   fileCount={opened.snapshot.files.length}
                   onRetry={() => void loadSelectedDiff()}
                   onHunkNav={reportChangesHunk}
-                  conflicted={selected ? (opened.snapshot.files.find((file) => file.path === selected?.path)?.unmerged ?? false) : false}
+                  conflicted={selected ? (filesByPath.get(selected.path)?.unmerged ?? false) : false}
                   onResolve={() => {
                     if (selected) openConflict(selected.path);
                   }}

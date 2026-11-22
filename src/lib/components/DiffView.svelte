@@ -14,6 +14,7 @@
   import { createHighlight } from "../syntax/highlight.svelte";
   import { effectiveLanguage } from "../syntax/prefs.svelte";
   import { lineSegments } from "../syntax/segments";
+  import { commentLineKey } from "../review-comments.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
   import BinaryPreview from "./BinaryPreview.svelte";
   import FileNav from "./FileNav.svelte";
@@ -98,6 +99,25 @@
      */
     onReadDocument?: (sources: PreviewSources, side: "old" | "new", trigger: HTMLElement | null) => void;
     /**
+     * 当前任务范围里已挂意见的行身份（路径 + 块号 + 行类型 + 行号）。
+     * 只用来在行上标出「这里已经有意见」，不参与读取或写入。
+     */
+    comments?: ReadonlySet<string>;
+    /**
+     * 给某一行添加意见：只有任务审阅的只读差异传入。意见只保存在当前来源的运行期内存里，
+     * 不改 Git、不写索引，也不触发任何 Agent 操作。
+     */
+    onCommentLine?: (anchor: {
+      path: string;
+      hunkIndex: number;
+      kind: "add" | "del" | "context";
+      oldNo: number | null;
+      newNo: number | null;
+      quote: string;
+      /** 整块意见：这块在新侧（删除块看旧侧）覆盖的行号区间。 */
+      range?: { from: number; to: number };
+    }) => void;
+    /**
      * 在文件视图里编辑当前工作区这一侧的文件（带上当前位置附近的新侧行号）。
      * 只在新侧就是工作区文件时由调用方传入；历史、旧侧、删除与多文件聚合不传。
      * 差异本身仍然只读，保存只在文件视图的编辑器里发生。
@@ -147,6 +167,8 @@
     onViewAsText,
     onReadDocument,
     onEdit,
+    comments,
+    onCommentLine,
   }: Props = $props();
   let menu = $state<ContextMenuRequest | null>(null);
   /**
@@ -413,6 +435,89 @@
     return (isPicked(line) ? "取消选择" : "选择") + what + "第 " + (no ?? "?") + " 行";
   }
 
+  /**
+   * 行意见：与行选共用同一份行身份，但完全不依赖暂存权限——只读的任务净差异也能加意见。
+   * 只有带块号的代码行可挂意见；块标题、meta 与「没有换行」标记都不接受。
+   */
+  let commentPath = $derived(selection?.path ?? "");
+
+  function commentKeyOf(line: { hunkIndex: number | null; kind: string; oldNo: number | null; newNo: number | null }): string {
+    return commentLineKey(commentPath, line);
+  }
+
+  function hasComment(line: { hunkIndex: number | null; kind: string; oldNo: number | null; newNo: number | null }): boolean {
+    return Boolean(comments?.size && comments.has(commentKeyOf(line)));
+  }
+
+  function canComment(line: { hunkIndex: number | null; kind: string; oldNo: number | null; newNo: number | null } | null | undefined): boolean {
+    if (!onCommentLine || !line || line.hunkIndex === null) return false;
+    return line.kind === "add" || line.kind === "del" || line.kind === "context";
+  }
+
+  function commentLabel(line: { kind: string; oldNo: number | null; newNo: number | null }): string {
+    const no = line.kind === "del" ? line.oldNo : line.newNo;
+    const what = line.kind === "del" ? "删除" : line.kind === "add" ? "新增" : "第";
+    return "给" + what + "第 " + (no ?? "?") + " 行加一条意见";
+  }
+
+  function commentAt(line: ViewLine): void {
+    if (!canComment(line) || !onCommentLine) return;
+    onCommentLine({
+      path: commentPath,
+      hunkIndex: line.hunkIndex as number,
+      kind: line.kind as "add" | "del" | "context",
+      oldNo: line.oldNo,
+      newNo: line.newNo,
+      quote: codeOf(line).slice(0, 200),
+    });
+  }
+
+  /**
+   * 整块意见：一次说清一整块改动，不必逐行点。协议仍是单行锚点，所以落在这块第一条
+   * 改动行上（新增优先，纯删除块用删除行），并带上这块覆盖的行号区间给界面与正文用。
+   */
+  function hunkCommentTarget(hunkIndex: number): { anchor: ViewLine; from: number; to: number; changed: ViewLine[] } | null {
+    const own = lines.filter((line) => line.hunkIndex === hunkIndex && canComment(line));
+    const changed = own.filter((line) => line.kind === "add" || line.kind === "del");
+    const anchor = changed.find((line) => line.kind === "add") ?? changed[0];
+    if (!anchor) return null;
+    const side = anchor.kind === "add" ? "newNo" : "oldNo";
+    const numbers = changed.map((line) => line[side]).filter((no): no is number => typeof no === "number");
+    if (numbers.length === 0) return null;
+    return { anchor, from: Math.min(...numbers), to: Math.max(...numbers), changed };
+  }
+
+  /** 块标题行自己没有块号时，取紧随其后的第一条代码行的块号。 */
+  function headerHunk(index: number): number | null {
+    const own = lines[index]?.hunkIndex;
+    if (own !== null && own !== undefined) return own;
+    const next = lines[index + 1]?.hunkIndex;
+    return next === null || next === undefined ? null : next;
+  }
+
+  function hunkCommented(hunkIndex: number): boolean {
+    return Boolean(comments?.size) && lines.some((line) => line.hunkIndex === hunkIndex && canComment(line) && hasComment(line));
+  }
+
+  function commentHunk(hunkIndex: number): void {
+    const target = hunkCommentTarget(hunkIndex);
+    if (!target || !onCommentLine) return;
+    onCommentLine({
+      path: commentPath,
+      hunkIndex,
+      kind: target.anchor.kind as "add" | "del",
+      oldNo: target.anchor.oldNo,
+      newNo: target.anchor.newNo,
+      quote: target.changed.map((line) => codeOf(line)).join("\n").slice(0, 200),
+      range: { from: target.from, to: target.to },
+    });
+  }
+
+  function commentCell(cell: { index?: number } | null): void {
+    const line = pickLineOf(cell);
+    if (line) commentAt(line);
+  }
+
   function toggleLine(line: PickableLine): void {
     if (!canPick(line)) return;
     const key = pickKey(line);
@@ -600,8 +705,42 @@
     reason?: string;
     /** 补充说明（例如已隐藏几处），不阻止执行。 */
     note?: string;
+    /** 执行后菜单保持打开：比对规则常连着改几项，进出二级页也不该关菜单。 */
+    keepOpen?: boolean;
+    /** 打开二级页的入口：右侧画箭头而不是勾。 */
+    submenu?: boolean;
     run: () => void;
   }
+
+  /** 溢出菜单的二级页：各类「忽略」比对规则收在这里，一级菜单只留一个入口。 */
+  let moreView = $state<"root" | "rules">("root");
+  let ruleTools = $derived.by<DiffTool[]>(() => {
+    if (!canFilterWhitespace) return [];
+    const rule = (id: string, label: string, on: boolean, run: () => void, note?: string): DiffTool => ({
+      id, label, icon: "filter", selected: on, pressed: on, state: on ? "已开启" : undefined, keepOpen: true, note, run,
+    });
+    return [
+      rule("ignore-eol", "忽略换行符差异（CRLF ↔ LF）", diffPrefs.whitespaceMode === "eol", toggleIgnoreEol,
+        specials.eolOnlyHunks > 0 ? `检测到 ${specials.eolOnlyHunks} 处仅换行符不同的改动` : undefined),
+      rule("ignore-trailing-ws", "忽略行尾空白", diffPrefs.whitespaceMode === "trailing",
+        () => setWhitespaceMode(diffPrefs.whitespaceMode === "trailing" ? "none" : "trailing")),
+      rule("ignore-ws-change", "忽略空白数量变化", diffPrefs.whitespaceMode === "change",
+        () => setWhitespaceMode(diffPrefs.whitespaceMode === "change" ? "none" : "change")),
+      rule("hide-whitespace", "忽略纯空白改动", diffPrefs.hideWhitespaceOnly, toggleHideWhitespaceOnly,
+        whitespaceFilter.hunks.size > 0 && diffPrefs.hideWhitespaceOnly ? `已隐藏 ${whitespaceFilter.hunks.size} 处只改了空白的改动` : undefined),
+      rule("ignore-blank-lines", "忽略纯空行改动", diffPrefs.ignoreBlankLines, toggleIgnoreBlankLines),
+      rule("ignore-case", "忽略大小写差异", diffPrefs.ignoreCase, toggleIgnoreCase),
+    ];
+  });
+  let activeRuleCount = $derived(ruleTools.filter((tool) => tool.pressed).length);
+  /** 二级页的条目：返回、规则，以及有规则生效时的一键恢复。 */
+  let ruleViewTools = $derived.by<DiffTool[]>(() => [
+    { id: "rules-back", label: "返回", icon: "chevron-left", keepOpen: true, run: () => { moreView = "root"; moreActive = 0; } },
+    ...ruleTools,
+    ...(activeRuleCount > 0
+      ? [{ id: "rules-reset", label: "恢复默认比对", icon: "x" as IconName, keepOpen: true, run: clearDiffFilterRules }]
+      : []),
+  ]);
 
   let overflowTools = $derived.by<DiffTool[]>(() => {
     const tools: DiffTool[] = [];
@@ -633,65 +772,20 @@
           icon: "eye",
           selected: diffPrefs.showWhitespace,
           pressed: diffPrefs.showWhitespace,
-          state: diffPrefs.showWhitespace ? "已开启" : "已关闭",
+          state: diffPrefs.showWhitespace ? "已开启" : undefined,
           note: "空格、制表符、CRLF/LF 与不可见字符",
           run: toggleShowWhitespace,
         },
         {
-          id: "ignore-eol",
-          label: "忽略换行符差异（CRLF ↔ LF）",
+          id: "compare-rules",
+          label: "比对规则",
           icon: "filter",
-          selected: diffPrefs.whitespaceMode === "eol",
-          pressed: diffPrefs.whitespaceMode === "eol",
-          state: diffPrefs.whitespaceMode === "eol" ? "已开启" : "已关闭",
-          note: specials.eolOnlyHunks > 0 ? `检测到 ${specials.eolOnlyHunks} 处仅换行符不同的改动` : undefined,
-          run: toggleIgnoreEol,
-        },
-        {
-          id: "ignore-trailing-ws",
-          label: "忽略行尾空白",
-          icon: "filter",
-          selected: diffPrefs.whitespaceMode === "trailing",
-          pressed: diffPrefs.whitespaceMode === "trailing",
-          state: diffPrefs.whitespaceMode === "trailing" ? "已开启" : "已关闭",
-          run: () => setWhitespaceMode(diffPrefs.whitespaceMode === "trailing" ? "none" : "trailing"),
-        },
-        {
-          id: "ignore-ws-change",
-          label: "忽略空白数量变化",
-          icon: "filter",
-          selected: diffPrefs.whitespaceMode === "change",
-          pressed: diffPrefs.whitespaceMode === "change",
-          state: diffPrefs.whitespaceMode === "change" ? "已开启" : "已关闭",
-          run: () => setWhitespaceMode(diffPrefs.whitespaceMode === "change" ? "none" : "change"),
-        },
-        {
-          id: "hide-whitespace",
-          label: "忽略纯空白改动",
-          icon: "filter",
-          selected: diffPrefs.hideWhitespaceOnly,
-          pressed: diffPrefs.hideWhitespaceOnly,
-          state: diffPrefs.hideWhitespaceOnly ? "已开启" : "已关闭",
-          note: whitespaceFilter.hunks.size > 0 && diffPrefs.hideWhitespaceOnly ? `已隐藏 ${whitespaceFilter.hunks.size} 处只改了空白的改动` : undefined,
-          run: toggleHideWhitespaceOnly,
-        },
-        {
-          id: "ignore-blank-lines",
-          label: "忽略纯空行改动",
-          icon: "filter",
-          selected: diffPrefs.ignoreBlankLines,
-          pressed: diffPrefs.ignoreBlankLines,
-          state: diffPrefs.ignoreBlankLines ? "已开启" : "已关闭",
-          run: toggleIgnoreBlankLines,
-        },
-        {
-          id: "ignore-case",
-          label: "忽略大小写差异",
-          icon: "filter",
-          selected: diffPrefs.ignoreCase,
-          pressed: diffPrefs.ignoreCase,
-          state: diffPrefs.ignoreCase ? "已开启" : "已关闭",
-          run: toggleIgnoreCase,
+          pressed: activeRuleCount > 0,
+          state: activeRuleCount > 0 ? `已开启 ${activeRuleCount} 项` : "默认",
+          note: activeRuleCount > 0 ? activeFilterSummary : "换行符、空白、空行与大小写",
+          submenu: true,
+          keepOpen: true,
+          run: () => { moreView = "rules"; moreActive = 0; },
         },
       );
     }
@@ -754,12 +848,17 @@
   });
   let visibleTools = $derived.by(() => {
     const needle = moreQuery.trim().toLowerCase();
-    if (!needle) return overflowTools;
-    return overflowTools.filter((tool) =>
-      [tool.label, tool.state, tool.note, tool.reason].some((part) => part?.toLowerCase().includes(needle)),
-    );
+    // 搜索跨两级：输入「忽略」直接列出规则本身，不必先进二级页。
+    if (needle) {
+      return [...overflowTools.filter((tool) => !tool.submenu), ...ruleTools].filter((tool) =>
+        [tool.label, tool.state, tool.note, tool.reason].some((part) => part?.toLowerCase().includes(needle)),
+      );
+    }
+    return moreView === "rules" ? ruleViewTools : overflowTools;
   });
-  let pressedToolCount = $derived(overflowTools.filter((tool) => tool.pressed).length);
+  let pressedToolCount = $derived(
+    overflowTools.filter((tool) => tool.pressed && !tool.submenu).length + activeRuleCount,
+  );
   let moreLabel = $derived(
     pressedToolCount > 0 ? `更多差异工具（${pressedToolCount} 项已开启）` : "更多差异工具",
   );
@@ -855,6 +954,7 @@
     if (!moreAnchor) return;
     moreQuery = "";
     seenToolQuery = "";
+    moreView = "root";
     const first = overflowTools.findIndex((tool) => !tool.reason);
     moreActive = first >= 0 ? first : 0;
     moreOpen = true;
@@ -862,11 +962,16 @@
 
   function closeMore(refocus = true): void {
     moreOpen = false;
+    moreView = "root";
     if (refocus) moreAnchor?.focus({ preventScroll: true });
   }
 
   function runTool(tool: DiffTool | undefined): void {
     if (!tool || tool.reason) return;
+    if (tool.keepOpen) {
+      tool.run();
+      return;
+    }
     closeMore(true);
     tool.run();
   }
@@ -1656,7 +1761,7 @@
                       {#if tool.reason}<small class="diff-tool-reason">{tool.reason}</small>{:else if tool.note}<small>{tool.note}</small>{/if}
                     </span>
                     {#if tool.state}<span class="diff-tool-state">{tool.state}</span>{/if}
-                    {#if tool.selected}<Icon name="check" size={13} />{/if}
+                    {#if tool.submenu}<Icon name="chevron-right" size={13} />{:else if tool.selected}<Icon name="check" size={13} />{/if}
                   </button>
                 {/each}
               {/if}
@@ -1801,7 +1906,18 @@
                 <span class="code"><span class="code-in" data-sign={sign(line.text)} data-len={codeOf(line).length}>{#if segs.length === 1 && !segs[0].k && !segs[0].m && !segs[0].ws}{segs[0].t}{:else}{#each segs as seg, i (i)}<span class={seg.k} class:wd={seg.m} class:ws-space={seg.ws === "space"} class:ws-tab={seg.ws === "tab"} class:ws-special={seg.ws === "special"} data-ws-label={seg.wsLabel}>{seg.t}</span>{/each}{/if}{#if showEol}<span class="ws-eol" class:eol-changed={documents.eolChanged.has(absolute)} data-eol={line.eol ?? "lf"} aria-hidden="true"></span>{/if}</span></span>
               {:else if line.kind === "hunk"}
                 {@const caption = hunkCaption(line.text)}
+                {@const headHunk = onCommentLine ? headerHunk(absolute) : null}
                 <span class="code hunk-caption"><span class="hunk-at">{caption.at}</span>{#if caption.context}<span class="hunk-context" title={caption.context}>{caption.context}</span>{/if}</span>
+                {#if headHunk !== null && hunkCommentTarget(headHunk)}
+                  <button
+                    type="button"
+                    class="btn btn-sm hunk-btn hunk-comment"
+                    class:commented={hunkCommented(headHunk)}
+                    data-hunk-comment={headHunk}
+                    title="给这一整块改动写一条意见"
+                    onclick={() => commentHunk(headHunk)}
+                  ><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg><span>评论此块</span></button>
+                {/if}
               {:else}
                 <span class="code"><span class="code-in" data-len={line.text.length || 1}>{line.text.length === 0 ? " " : line.text}</span></span>
               {/if}
@@ -1833,6 +1949,21 @@
                   <Icon name={isPicked(line) ? "check" : line.kind === "del" ? "minus" : "plus"} size={11} />
                 </button>
               {/if}
+              {#if canComment(line)}
+                <!-- 行意见：只读的任务净差异也能加，不改 Git，也不占用暂存入口。 -->
+                <button
+                  type="button"
+                  class="btn btn-sm hunk-btn line-comment"
+                  class:commented={hasComment(line)}
+                  aria-pressed={hasComment(line)}
+                  aria-label={commentLabel(line)}
+                  title={hasComment(line) ? commentLabel(line) + "（这一行已有意见）" : commentLabel(line)}
+                  data-comment-line={absolute}
+                  onclick={() => commentAt(line)}
+                >
+                  <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+                </button>
+              {/if}
             </div>
           {/each}
         {:else}
@@ -1848,7 +1979,18 @@
               <!-- 占位格用 blank 而不是 empty：.empty 是全局空状态（flex + 32px 内边距），会把单元格撑到 64px，相邻行文字叠在一起。 -->
               {#if row.span && row.left?.kind === "hunk"}
                 {@const caption = hunkCaption(row.left.text)}
+                {@const sideHunk = onCommentLine && row.left.index !== undefined ? headerHunk(row.left.index) : null}
                 <span class="side-cell hunk side-hunk"><span class="ln"></span><span class="code hunk-caption"><span class="hunk-at">{caption.at}</span>{#if caption.context}<span class="hunk-context" title={caption.context}>{caption.context}</span>{/if}</span></span>
+                {#if sideHunk !== null && hunkCommentTarget(sideHunk)}
+                  <button
+                    type="button"
+                    class="btn btn-sm hunk-btn hunk-comment"
+                    class:commented={hunkCommented(sideHunk)}
+                    data-hunk-comment={sideHunk}
+                    title="给这一整块改动写一条意见"
+                    onclick={() => commentHunk(sideHunk)}
+                  ><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg><span>评论此块</span></button>
+                {/if}
               {:else}
               <span
                 class={`side-cell side-l ${row.left?.kind ?? "blank"}`}
@@ -1881,7 +2023,7 @@
                   >{hunkLabel(hunk)}</button>
                 {/if}
               {/if}
-              {#if canPick(pickLineOf(row.left)) || canPick(pickLineOf(row.right))}
+              {#if canPick(pickLineOf(row.left)) || canPick(pickLineOf(row.right)) || canComment(pickLineOf(row.left)) || canComment(pickLineOf(row.right))}
                 <!-- 并排视图：左右两侧各自独立选择，身份与统一视图完全一致。 -->
                 <span class="side-picks">
                   {#if canPick(pickLineOf(row.left))}
@@ -1912,6 +2054,34 @@
                       onclick={(event) => pickRowSide(row.right, event.shiftKey)}
                     >
                       <Icon name={isPicked(pickLineOf(row.right)!) ? "check" : "plus"} size={11} />
+                    </button>
+                  {/if}
+                  {#if canComment(pickLineOf(row.left))}
+                    <button
+                      type="button"
+                      class="btn btn-sm hunk-btn line-comment"
+                      class:commented={hasComment(pickLineOf(row.left)!)}
+                      aria-pressed={hasComment(pickLineOf(row.left)!)}
+                      aria-label={commentLabel(pickLineOf(row.left)!)}
+                      title={commentLabel(pickLineOf(row.left)!)}
+                      data-comment-line={row.left?.index}
+                      onclick={() => commentCell(row.left)}
+                    >
+                      <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+                    </button>
+                  {/if}
+                  {#if canComment(pickLineOf(row.right))}
+                    <button
+                      type="button"
+                      class="btn btn-sm hunk-btn line-comment"
+                      class:commented={hasComment(pickLineOf(row.right)!)}
+                      aria-pressed={hasComment(pickLineOf(row.right)!)}
+                      aria-label={commentLabel(pickLineOf(row.right)!)}
+                      title={commentLabel(pickLineOf(row.right)!)}
+                      data-comment-line={row.right?.index}
+                      onclick={() => commentCell(row.right)}
+                    >
+                      <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
                     </button>
                   {/if}
                 </span>

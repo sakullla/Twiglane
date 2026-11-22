@@ -1,4 +1,6 @@
 pub(crate) mod review;
+#[cfg(test)]
+mod live;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

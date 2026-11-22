@@ -563,6 +563,7 @@ fn remote_error(code: &str) -> AppError {
         "upstream_missing" => "远程还没有对应分支。可以选择已有上游或发布当前分支。",
         "upstream_failed" | "upstream_unconfirmed" => "Git 未确认上游关联，请在分支列表核对。",
         "diverged" => "当前分支和上游已分叉，请选择合并或变基。",
+        "local_changes" => "未提交的工作区改动阻止整合。请提交或贮藏这些改动后再拉取。",
         "push_rejected" => "Git 拒绝更新部分或全部远程引用，请核对最新远程状态。",
         "push_tracking_unfinished" => "请刷新分支列表并核对上游。如需建立跟踪，请从分支列表设置。",
         "push_target_changed" => "原推送目标已变化。请恢复提交时的远程地址和上游分支后再重试。",
@@ -2131,7 +2132,7 @@ async fn finish_write(
                 "partial" => {
                     let (phase, detail) = match (pending.op.as_str(), proof.phase) {
                         ("associateUpstream", Some("fetched")) => ("fetched", "已获取远程引用，上游关联尚未确认。"),
-                        ("pull", Some("fetched")) => ("fetched", "已获取远程引用，当前分支未快进。"),
+                        ("pull", Some("fetched")) => ("fetched", "已获取远程引用，拉取未全部完成。"),
                         ("resumePush", Some("pushed")) => ("pushed", "原提交已推送，上游跟踪尚未确认。"),
                         ("push" | "publishBranch" | "pushToRemote" | "branchPublish" | "deleteRemoteBranch" | "tagPush", Some("refs_pushed")) =>
                             ("refs_pushed", "部分远程引用已更新。"),

@@ -2472,7 +2472,9 @@ impl Context {
                 if current.branch.as_deref() != Some(branch) || current.head.as_deref() != Some(head) {
                     return Err(invalid());
                 }
-                let snapshot = sync::resume_pinned_push(backend, &session.root, branch, head, destination, generation).await?;
+                let snapshot = sync::resume_pinned_push(
+                    backend, &session.root, &session.git_dir, branch, head, destination, generation,
+                ).await?;
                 Ok(("snapshot".to_owned(), to_value(snapshot)?))
             }
             WriteOp::PushToRemote => {

@@ -522,6 +522,18 @@ pub fn pull_ff_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     (git.to_path_buf(), args)
 }
 
+pub(crate) fn fetch_refs_evidence_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(objectname)%00%(refname)",
+        "refs/remotes",
+        "refs/tags",
+    ].map(OsString::from));
+    (git.to_path_buf(), args)
+}
+
 pub fn push_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, false);
     args.extend(["push", "--porcelain"].map(OsString::from));
@@ -569,7 +581,28 @@ pub(crate) fn push_urls_command(git: &Path, root: &Path, remote: &str) -> (PathB
 #[cfg(feature = "agent")]
 pub(crate) fn config_values_command(git: &Path, root: &Path, key: &str) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
-    args.extend(["config", "--get-all", "--", key].map(OsString::from));
+    args.extend(["config", "--null", "--get-all", "--", key].map(OsString::from));
+    (git.to_path_buf(), args)
+}
+
+#[cfg(feature = "agent")]
+pub(crate) fn set_config_in_file_command(
+    git: &Path,
+    root: &Path,
+    file: &Path,
+    key: &str,
+    value: &str,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("config"),
+        OsString::from("--no-includes"),
+        OsString::from("--file"),
+        file.as_os_str().to_os_string(),
+        OsString::from("--"),
+        OsString::from(key),
+        OsString::from(value),
+    ]);
     (git.to_path_buf(), args)
 }
 

@@ -6,6 +6,9 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+use tokio::io::AsyncReadExt;
+
 use crate::error::{AppError, SyncEffect};
 use crate::git::advice::{classify_problem, problem_error, remote_timeout};
 use crate::git::changes::commit_index;
@@ -466,6 +469,7 @@ pub async fn pull_fast_forward(
         )
         .with_generation(before.generation));
     }
+    let initial_fetch = fetch_evidence(backend, &root, &git.path, before.generation).await;
     let (program, args) = pull_ff_command(&git.path, &root);
     let scheduled = remote_write_repo(
         backend,
@@ -482,11 +486,17 @@ pub async fn pull_fast_forward(
             &scheduled,
             "拉取没有完成，工作区保持原样。",
         );
-        // Git reaches this error in the integration phase, after fetch.
-        return Err(if error.code == "diverged" {
-            error.after_sync_effect(SyncEffect::Fetched)
-        } else {
-            error
+        let current = backend.scheduler.current_generation(&key);
+        let final_fetch = fetch_evidence(backend, &root, &git.path, current).await;
+        let effect = initial_fetch.changed_from(&final_fetch);
+        // Divergence also proves that Git reached integration after fetching.
+        return Err(match effect {
+            _ if error.code == "diverged" => error.after_sync_effect(SyncEffect::Fetched),
+            Some(true) => error.after_sync_effect(SyncEffect::Fetched),
+            Some(false) => error,
+            None => AppError::new("pull_unverified", "拉取结果待确认，无法核对远程引用或 FETCH_HEAD。")
+                .with_generation(current)
+                .after_unconfirmed_write(),
         });
     }
     backend.remote_checks.note(&key, now_ms());
@@ -497,6 +507,81 @@ pub async fn pull_fast_forward(
         internal_request_id()
     )
     .await).map_err(sync_readback)
+}
+
+#[derive(PartialEq, Eq)]
+enum FetchHead {
+    NoRecords,
+    Entries([u8; 32]),
+}
+
+struct FetchEvidence {
+    refs: Option<Vec<u8>>,
+    head: Option<FetchHead>,
+}
+
+impl FetchEvidence {
+    fn changed_from(&self, later: &Self) -> Option<bool> {
+        let refs = self.refs.as_ref().zip(later.refs.as_ref()).map(|(before, after)| before != after);
+        let head = match (self.head.as_ref(), later.head.as_ref()) {
+            (Some(before), Some(after @ FetchHead::Entries(_))) => Some(before != after),
+            (Some(FetchHead::NoRecords), Some(FetchHead::NoRecords)) => Some(false),
+            _ => None,
+        };
+        match (refs, head) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        }
+    }
+}
+
+async fn fetch_evidence(backend: &Backend, root: &Path, git: &Path, generation: u64) -> FetchEvidence {
+    let (program, args) = crate::git::command::fetch_refs_evidence_command(git, root);
+    let refs = read_repo(backend, root, generation, internal_request_id(), program, args)
+        .await
+        .ok()
+        .filter(|read| read.output.exit_code == 0 && !read.output.stdout_truncated)
+        .map(|read| read.output.stdout);
+    let (program, args) = crate::git::command::git_path_command(git, root, "FETCH_HEAD");
+    let path = read_repo(backend, root, generation, internal_request_id(), program, args)
+        .await
+        .ok()
+        .filter(|read| read.output.exit_code == 0 && !read.output.stdout_truncated)
+        .and_then(|read| String::from_utf8(read.output.stdout).ok())
+        .map(|path| path.trim_end_matches(['\r', '\n']).to_owned())
+        .filter(|path| !path.is_empty());
+    let head = match path {
+        Some(path) => fetch_head_evidence(&root.join(path)).await,
+        None => None,
+    };
+    FetchEvidence { refs, head }
+}
+
+async fn fetch_head_evidence(path: &Path) -> Option<FetchHead> {
+    match tokio::fs::metadata(path).await {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(FetchHead::NoRecords),
+        Ok(metadata) if metadata.is_file() => {}
+        _ => return None,
+    }
+    let mut file = tokio::fs::File::open(path).await.ok()?;
+    let mut hasher = Sha256::new();
+    let mut bytes = [0u8; 8 * 1024];
+    let mut prefix = Vec::with_capacity(65);
+    loop {
+        let length = file.read(&mut bytes).await.ok()?;
+        if length == 0 {
+            if prefix.is_empty() {
+                return Some(FetchHead::NoRecords);
+            }
+            let oid_len = prefix.iter().position(|byte| *byte == b'\t')?;
+            return (matches!(oid_len, 40 | 64) && prefix[..oid_len].iter().all(u8::is_ascii_hexdigit))
+                .then(|| FetchHead::Entries(hasher.finalize().into()));
+        }
+        let prefix_bytes = (65 - prefix.len()).min(length);
+        prefix.extend_from_slice(&bytes[..prefix_bytes]);
+        hasher.update(&bytes[..length]);
+    }
 }
 
 pub async fn push_branch(
@@ -1272,7 +1357,19 @@ pub(crate) use push_continuation::{capture_push_destination, resume_pinned_push}
 #[cfg(feature = "agent")]
 mod push_continuation {
     use super::*;
-    use sha2::{Digest, Sha256};
+
+    fn lock_config(git_dir: &Path) -> std::io::Result<tempfile::TempPath> {
+        let path = git_dir.join("config.lock");
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(&path)?;
+        tempfile::TempPath::try_from_path(path)
+    }
 
     struct PushDestination {
         remote: String,
@@ -1292,8 +1389,10 @@ mod push_continuation {
         let (program, args) = crate::git::command::config_values_command(git, root, key);
         let read = read_repo(backend, root, generation, internal_request_id(), program, args).await?;
         match read.output.exit_code {
-            0 => Ok(String::from_utf8_lossy(&read.output.stdout).lines().map(str::to_owned).collect()),
-            1 => Ok(Vec::new()),
+            0 if !read.output.stdout_truncated => String::from_utf8(read.output.stdout)
+                .map(|values| values.split_terminator('\0').map(str::to_owned).collect())
+                .map_err(|_| AppError::new("push_config_unavailable", "无法读取当前推送配置。")),
+            1 if read.output.stdout.is_empty() => Ok(Vec::new()),
             _ => Err(AppError::new("push_config_unavailable", "无法读取当前推送配置。")),
         }
     }
@@ -1416,6 +1515,7 @@ mod push_continuation {
     pub(crate) async fn resume_pinned_push(
         backend: &Backend,
         root: &Path,
+        git_dir: &Path,
         branch: &str,
         oid: &str,
         expected: &str,
@@ -1462,26 +1562,78 @@ mod push_continuation {
         if !destination.publish {
             return Ok(after);
         }
-        let upstream = format!("{}/{}", destination.remote, branch);
         if after.branch.name.as_deref() != Some(branch) || after.branch.head_oid.as_deref() != Some(oid) {
             return Err(tracking_unfinished(after.generation));
         }
-        match after.branch.upstream.as_deref() {
-            Some(found) if found == upstream => return Ok(after),
-            Some(_) => return Err(tracking_unfinished(after.generation)),
-            None => {}
-        }
-        let (program, args) = set_upstream_to_command(&git.path, root, &upstream, branch);
-        let linked = write_repo(backend, root, after.generation, internal_request_id(), program, args)
-            .await
-            .map_err(|error| tracking_unfinished(error.generation.unwrap_or(after.generation)))?;
-        if linked.output.exit_code != 0 {
-            return Err(tracking_unfinished(linked.generation));
-        }
-        settle_read!(backend, root, linked.generation, |current| snapshot_at(
+        let linked_generation = establish_published_upstream(
+            backend, root, &git.path, git_dir, &destination, &after,
+        ).await?;
+        settle_read!(backend, root, linked_generation, |current| snapshot_at(
             backend, root, current, internal_request_id()
         ).await)
         .map_err(sync_readback)
+    }
+
+    /// A narrow fetch refspec may not create refs/remotes/<remote>/<branch>.
+    /// Use Git to prepare both branch settings and publish them under its
+    /// normal config lock without requiring that tracking ref.
+    async fn establish_published_upstream(
+        backend: &Backend,
+        root: &Path,
+        git: &Path,
+        git_dir: &Path,
+        destination: &PushDestination,
+        pushed: &StatusSnapshot,
+    ) -> Result<u64, AppError> {
+        let generation = pushed.generation;
+        let unfinished = || tracking_unfinished(generation);
+        let branch = pushed.branch.name.as_deref().ok_or_else(unfinished)?;
+        let remote_key = format!("branch.{branch}.remote");
+        let merge_key = format!("branch.{branch}.merge");
+        let draft = lock_config(git_dir).map_err(|_| unfinished())?;
+        let remote = read_sync_config(backend, root, git, &remote_key, generation).await.map_err(|_| unfinished())?;
+        let merge = read_sync_config(backend, root, git, &merge_key, generation).await.map_err(|_| unfinished())?;
+        if remote == [destination.remote.as_str()] && merge == [destination.remote_ref.as_str()] {
+            return Ok(generation);
+        }
+        if !remote.is_empty() || !merge.is_empty() {
+            return Err(unfinished());
+        }
+
+        let config = git_dir.join("config");
+        let metadata = fs::symlink_metadata(&config).map_err(|_| unfinished())?;
+        if !metadata.is_file() {
+            return Err(unfinished());
+        }
+        let before = fs::read(&config).map_err(|_| unfinished())?;
+        fs::write(&draft, &before).map_err(|_| unfinished())?;
+        for (key, value) in [(&remote_key, &destination.remote), (&merge_key, &destination.remote_ref)] {
+            let (program, args) = crate::git::command::set_config_in_file_command(git, root, &draft, key, value);
+            let edit = read_repo(backend, root, generation, internal_request_id(), program, args)
+                .await
+                .map_err(|_| unfinished())?;
+            if edit.output.exit_code != 0 {
+                return Err(unfinished());
+            }
+        }
+        let prepared = fs::OpenOptions::new().write(true).open(&draft).map_err(|_| unfinished())?;
+        prepared.set_permissions(metadata.permissions()).map_err(|_| unfinished())?;
+        prepared.sync_all().map_err(|_| unfinished())?;
+        drop(prepared);
+        if !read_sync_config(backend, root, git, &remote_key, generation).await.map_err(|_| unfinished())?.is_empty()
+            || !read_sync_config(backend, root, git, &merge_key, generation).await.map_err(|_| unfinished())?.is_empty()
+        {
+            return Err(unfinished());
+        }
+        let current = snapshot_at(backend, root, generation, internal_request_id()).await.map_err(|_| unfinished())?;
+        if current.branch.name != pushed.branch.name
+            || current.branch.head_oid != pushed.branch.head_oid
+            || !fs::read(&config).is_ok_and(|bytes| bytes == before)
+        {
+            return Err(unfinished());
+        }
+        draft.persist(&config).map_err(|_| unfinished())?;
+        Ok(backend.scheduler.bump_generation(&repo_key(root)))
     }
 
     fn tracking_unfinished(generation: u64) -> AppError {

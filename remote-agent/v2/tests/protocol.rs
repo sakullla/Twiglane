@@ -2081,6 +2081,46 @@ fn a_divergent_pull_keeps_its_fetch_effect_without_advancing_the_checkout() {
 }
 
 #[test]
+fn a_dirty_pull_keeps_fetched_refs_and_the_users_worktree_bytes() {
+    let fixture = Fixture::new("pull-dirty-partial");
+    fixture.init();
+    fixture.write("shared.txt", "base\n");
+    fixture.commit_all("base");
+    let base = base_of(&fixture);
+    let origin = base.join("origin.git");
+    git(&base, &fixture.config, &["init", "--bare", "origin.git"]);
+    git(&fixture.repo, &fixture.config, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(&fixture.repo, &fixture.config, &["push", "-u", "origin", "main"]);
+    let before = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]);
+    let other = base.join("other");
+    git(&base, &fixture.config, &["clone", "-b", "main", origin.to_str().unwrap(), "other"]);
+    std::fs::write(other.join("shared.txt"), "upstream bytes\n").unwrap();
+    git(&other, &fixture.config, &["commit", "-am", "upstream change"]);
+    git(&other, &fixture.config, &["push", "origin", "main"]);
+    let upstream = git(&other, &fixture.config, &["rev-parse", "HEAD"]);
+    fixture.write("shared.txt", "user bytes\n");
+    assert_ne!(before, upstream);
+    assert_eq!(git(&fixture.repo, &fixture.config, &["rev-parse", "refs/remotes/origin/main"]), before);
+
+    let repo = fixture.repo_str();
+    let mut agent = fixture.agent();
+    let state = open(&mut agent, &repo);
+    let fields = json!({
+        "repo": repo, "operationId": "op-dirty-pull", "stateToken": state["stateToken"],
+    });
+    let result = agent.ok("pull-dirty", "pull", fields.clone());
+    assert_eq!(result["receipt"]["state"], "partial");
+    assert_eq!(result["receipt"]["phase"], "fetched");
+    assert_eq!(result["receipt"]["reason"], "local_changes");
+    assert_eq!(git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]), before);
+    assert_eq!(git(&fixture.repo, &fixture.config, &["rev-parse", "refs/remotes/origin/main"]), upstream);
+    assert_eq!(std::fs::read(fixture.repo.join("shared.txt")).unwrap(), b"user bytes\n");
+    let replay = agent.ok("replay-dirty-pull", "pull", fields);
+    assert_eq!(replay["receipt"], result["receipt"]);
+    assert_eq!(replay["replayed"], true);
+}
+
+#[test]
 fn resumed_pushes_use_each_original_commit_and_effective_push_destination() {
     let fixture = Fixture::new("resume-push");
     fixture.init();
@@ -2154,6 +2194,11 @@ fn saved_first_publish_intent(fixture: &Fixture) -> (PathBuf, String) {
     let origin = base.join("origin.git");
     git(&base, &fixture.config, &["init", "--bare", "origin.git"]);
     git(&fixture.repo, &fixture.config, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    let head = record_first_publish_intent(fixture);
+    (origin, head)
+}
+
+fn record_first_publish_intent(fixture: &Fixture) -> String {
     git(&fixture.repo, &fixture.config, &["switch", "-c", "topic"]);
     fixture.write("topic.txt", "publish this commit\n");
     git(&fixture.repo, &fixture.config, &["add", "topic.txt"]);
@@ -2166,7 +2211,65 @@ fn saved_first_publish_intent(fixture: &Fixture) -> (PathBuf, String) {
     }));
     assert_eq!(committed["receipt"]["state"], "completed");
     assert!(committed["receipt"]["pushDestination"].is_string());
-    (origin, committed["receipt"]["head"].as_str().unwrap().to_owned())
+    committed["receipt"]["head"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn first_publish_sets_upstream_config_in_a_single_branch_clone() {
+    let mut fixture = Fixture::new("publish-narrow-fetch");
+    fixture.init();
+    fixture.write("a.txt", "seed\n");
+    fixture.commit_all("seed");
+    let base = base_of(&fixture);
+    let origin = base.join("origin.git");
+    git(&base, &fixture.config, &["init", "--bare", "origin.git"]);
+    git(&fixture.repo, &fixture.config, &["push", origin.to_str().unwrap(), "main"]);
+    git(&base, &fixture.config, &[
+        "clone", "--single-branch", "--branch", "main", origin.to_str().unwrap(), "single",
+    ]);
+    fixture.repo = base.join("single");
+    let fetch = git(&fixture.repo, &fixture.config, &["config", "--get-all", "remote.origin.fetch"]);
+    assert_eq!(fetch.trim(), "+refs/heads/main:refs/remotes/origin/main");
+    let planned = record_first_publish_intent(&fixture);
+
+    let repo = fixture.repo_str();
+    let mut agent = fixture.agent();
+    let state = open(&mut agent, &repo);
+    let result = agent.ok("publish-with-narrow-fetch", "resumePush", json!({
+        "repo": repo, "operationId": "op-publish-narrow", "stateToken": state["stateToken"],
+        "commitOperationId": "op-first-publish",
+    }));
+    assert_eq!(result["receipt"]["state"], "completed");
+    assert_eq!(git(&origin, &fixture.config, &["rev-parse", "refs/heads/topic"]).trim(), planned);
+    assert_eq!(git(&fixture.repo, &fixture.config, &["config", "--get-all", "branch.topic.remote"]).trim(), "origin");
+    assert_eq!(git(&fixture.repo, &fixture.config, &["config", "--get-all", "branch.topic.merge"]).trim(), "refs/heads/topic");
+    assert_eq!(git(&fixture.repo, &fixture.config, &["config", "--get-all", "remote.origin.fetch"]), fetch);
+    assert!(git(&fixture.repo, &fixture.config, &["for-each-ref", "refs/remotes/origin/topic"]).is_empty());
+    assert!(!fixture.repo.join(".git/config.lock").exists());
+}
+
+#[test]
+fn first_publish_leaves_an_independent_upstream_configuration_untouched() {
+    let fixture = Fixture::new("publish-independent-tracking");
+    let (origin, planned) = saved_first_publish_intent(&fixture);
+    git(&fixture.repo, &fixture.config, &[
+        "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main",
+    ]);
+    git(&fixture.repo, &fixture.config, &["config", "branch.topic.remote", "origin"]);
+    git(&fixture.repo, &fixture.config, &["config", "branch.topic.merge", "refs/heads/private"]);
+    let repo = fixture.repo_str();
+    let mut agent = fixture.agent();
+    let state = open(&mut agent, &repo);
+    let result = agent.ok("publish-with-new-tracking", "resumePush", json!({
+        "repo": repo, "operationId": "op-publish-keep-config", "stateToken": state["stateToken"],
+        "commitOperationId": "op-first-publish",
+    }));
+    assert_eq!(result["receipt"]["state"], "partial");
+    assert_eq!(result["receipt"]["phase"], "pushed");
+    assert_eq!(git(&origin, &fixture.config, &["rev-parse", "refs/heads/topic"]).trim(), planned);
+    assert_eq!(git(&fixture.repo, &fixture.config, &["config", "--get-all", "branch.topic.remote"]).trim(), "origin");
+    assert_eq!(git(&fixture.repo, &fixture.config, &["config", "--get-all", "branch.topic.merge"]).trim(), "refs/heads/private");
+    assert!(!fixture.repo.join(".git/config.lock").exists());
 }
 
 #[test]

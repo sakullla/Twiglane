@@ -92,8 +92,7 @@ pub struct AgentTransport {
 impl AgentTransport {
     /// Spawn the preconfigured helper in its own process scope. The transport
     /// creates all three pipes and drains stderr without exposing its contents.
-    /// 默认按 v1 会话：它对应的内嵌组件只说 v1。
-    #[cfg(test)]
+    /// Connect to the installed v1 agent for recovery of legacy receipts.
     pub fn spawn(command: &mut Command) -> Result<Self, AppError> {
         Self::spawn_with(command, 1)
     }

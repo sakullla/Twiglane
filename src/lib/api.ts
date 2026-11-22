@@ -540,7 +540,7 @@ async function settleRemoteWrite(
     noteRemoteState();
     throw remoteError("remote_write_failed", result.message || "远端操作失败，工作树没有被改动。", session.generation);
   }
-  session.pending = { operationId: result.operationId, op };
+  session.pending = { operationId: result.operationId, op: result.op ?? op };
   noteRemoteState();
   throw remoteError("write_pending", result.message || "远端操作结果待确认，请重新打开这个远端仓库核对。", session.generation);
 }

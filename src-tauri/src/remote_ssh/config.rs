@@ -327,7 +327,17 @@ impl Snapshot {
 
     /// 把冻结配置与信任材料写进本次连接的私有目录，返回 `ssh` 参数（止于 `--` 与目标）。
     /// 目录生命周期跟随调用方：连接结束即删除，权限只给当前用户。
+    #[cfg(test)]
     pub(crate) fn args(&self, folder: &Path, target: &SshTarget) -> Result<Vec<OsString>, AppError> {
+        self.args_with_host_key(folder, target, None)
+    }
+
+    pub(crate) fn args_with_host_key(
+        &self,
+        folder: &Path,
+        target: &SshTarget,
+        helper: Option<&Path>,
+    ) -> Result<Vec<OsString>, AppError> {
         for (index, (_, bytes)) in self.trust.iter().enumerate() {
             if let Some(bytes) = bytes {
                 let file = folder.join(format!("trust-{index}"));
@@ -336,7 +346,7 @@ impl Snapshot {
             }
         }
         let mut output = String::new();
-        for (alias, body) in &self.sections {
+        for (index, (alias, body)) in self.sections.iter().enumerate() {
             output.push_str("Host ");
             output.push_str(alias);
             output.push('\n');
@@ -344,6 +354,13 @@ impl Snapshot {
             for line in FROZEN {
                 output.push_str(line);
                 output.push('\n');
+            }
+            if let Some(helper) = helper.filter(|_| index == 0) {
+                let executable = helper.to_str().ok_or_else(unavailable)?.replace('%', "%%");
+                output.push_str(&format!(
+                    "KnownHostsCommand {} {} %I %K\n",
+                    quoted(&executable), super::HOST_KEY_FLAG
+                ));
             }
             for line in body.lines() {
                 let Some((key, value)) = line.split_once(' ') else {

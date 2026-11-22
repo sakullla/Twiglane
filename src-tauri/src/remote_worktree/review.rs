@@ -29,15 +29,15 @@ fn mismatch() -> AppError {
     )
 }
 
-/// 结果阶段回退或重复：reviewed → committed → merged 只能严格递增。
+/// 拒绝阶段回退、无变更的重复结果和缺少提交证据的结果。
 fn conflict() -> AppError {
     AppError::new(
         "conflict",
-        "审查结果的阶段必须严格递增（reviewed → committed → merged），本次没有返回给 Cliora。",
+        "审查结果没有更新，或缺少该阶段的提交证据。",
     )
 }
 
-/// 返回给 Cliora 的结果阶段。顺序本身就是约束：`Ord` 用来判定「必须严格递增」。
+/// 返回给 Cliora 的结果阶段，已完成的阶段不能回退。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Outcome {
     Reviewed,
@@ -260,10 +260,8 @@ struct Entry {
     // None during installation/connection. A reconnect replaces the local session ID.
     binding: Option<(String, String)>,
     ended: bool,
-    committed: Option<String>,
-    merged: Option<String>,
-    /// 最近一次返回给 Cliora 的阶段；下一次必须更靠后，不能回退也不能重复。
-    outcome: Option<Outcome>,
+    result: ReviewResult,
+    confirmed: Option<ReviewResult>,
     revision: u64,
     /// 已经有一次返回正在复核/送达：期间不放行第二条，避免同一阶段送达两次。
     /// 阶段本身只有在送达成功之后才推进，见 return_review。
@@ -273,28 +271,38 @@ struct Entry {
 
 #[derive(Clone)]
 struct Delivery {
-    stage: Outcome,
+    result: ReviewResult,
     revision: u64,
     url: Url,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReviewResult {
+    stage: Outcome,
+    head: Option<String>,
+}
+
 impl Entry {
-    fn head_for(&self, stage: Outcome) -> Option<&str> {
-        match stage {
-            Outcome::Reviewed => None,
-            Outcome::Committed => self.committed.as_deref(),
-            Outcome::Merged => self.merged.as_deref(),
-        }
+    fn record_verified(&mut self, outcome: Outcome, head: &str) -> Outcome {
+        self.result.stage = self.result.stage.max(outcome);
+        self.result.head = Some(head.to_owned());
+        self.result.stage
     }
 
-    fn latest(&self) -> Outcome {
-        if self.merged.is_some() {
-            Outcome::Merged
-        } else if self.committed.is_some() {
-            Outcome::Committed
-        } else {
-            Outcome::Reviewed
+    fn delivery_for(&self, requested: Outcome) -> Result<(ReviewResult, u64, Option<Url>)> {
+        if requested != self.result.stage || self.confirmed.as_ref().is_some_and(|confirmed| {
+            requested < confirmed.stage || confirmed == &self.result
+        }) {
+            return Err(conflict());
         }
+        let revision = match &self.pending_delivery {
+            Some(pending) if pending.result == self.result => {
+                return Ok((pending.result.clone(), pending.revision, Some(pending.url.clone())));
+            }
+            Some(pending) => pending.revision,
+            None => self.revision,
+        };
+        Ok((self.result.clone(), revision.checked_add(1).ok_or_else(expired)?, None))
     }
 }
 
@@ -319,9 +327,8 @@ impl Book {
                 source: source.clone(),
                 binding: None,
                 ended: false,
-                committed: None,
-                merged: None,
-                outcome: None,
+                result: ReviewResult { stage: Outcome::Reviewed, head: None },
+                confirmed: None,
                 revision: 0,
                 delivering: false,
                 pending_delivery: None,
@@ -369,24 +376,19 @@ impl Book {
         self.bound(id, sid, session).map(|_| ())
     }
     pub(super) fn latest(&mut self, id: &str) -> Option<Outcome> {
-        self.entry(id).ok().map(|entry| entry.latest())
+        self.entry(id).ok().map(|entry| entry.result.stage)
     }
 
     pub(super) fn record_result(&mut self, id: &str, session: &Session, outcome: Outcome, head: &str) -> Option<Outcome> {
         if let Ok(entry) = self.entry(id) {
-            if oid(head)
+            if outcome != Outcome::Reviewed && oid(head)
                 && entry.source.check_session(session).is_ok()
                 && entry
                     .binding
                     .as_ref()
                     .is_some_and(|(_, repo)| repo == &session.repo)
             {
-                match outcome {
-                    Outcome::Committed => entry.committed = Some(head.to_owned()),
-                    Outcome::Merged => entry.merged = Some(head.to_owned()),
-                    Outcome::Reviewed => return None,
-                }
-                return Some(entry.latest());
+                return Some(entry.record_verified(outcome, head));
             }
         }
         None
@@ -510,14 +512,6 @@ fn returned(
     Ok(url)
 }
 
-/// 下一次返回的阶段必须严格晚于上一次：同阶段重复或不带记录的回退都按 `conflict` 拒绝。
-fn next_outcome(previous: Option<Outcome>, requested: Outcome) -> Result<Outcome> {
-    if previous.is_some_and(|previous| requested <= previous) {
-        return Err(conflict());
-    }
-    Ok(requested)
-}
-
 struct DeliveryGuard<'a> {
     state: &'a super::RemoteWorktrees,
     review_id: &'a str,
@@ -553,36 +547,27 @@ where
     let session = state.session(session_id)?;
     let check_pending = || {
         let _guard = state.mutations.lock().unwrap();
-        if super::read_pending(&session.journal(&state.data), &session.repo)?.is_some() {
+        if super::find_pending(&state.data, &session)?.is_some() {
             return Err(AppError::new("write_pending", "请先核对远端操作结果，再返回 Cliora。"));
         }
         Ok(())
     };
     check_pending()?;
-    let (source, stage, revision, head, previous) = {
+    let (source, result, revision, previous_url) = {
         let mut book = state.reviews.lock().unwrap();
         let entry = book.bound(review_id, session_id, &session)?;
         if entry.delivering {
             return Err(AppError::new("remote_busy", "这个审查结果正在返回 Cliora，请稍后重试。"));
         }
-        let previous = entry.pending_delivery.clone();
-        let (stage, revision) = if let Some(pending) = &previous {
-            (pending.stage, pending.revision)
-        } else {
-            (next_outcome(entry.outcome, requested)?, entry.revision.checked_add(1).ok_or_else(expired)?)
-        };
-        let head = entry.head_for(stage).map(str::to_owned);
-        if previous.is_none() && stage != Outcome::Reviewed && head.is_none() {
-            return Err(conflict());
-        }
+        let (result, revision, previous_url) = entry.delivery_for(requested)?;
         entry.delivering = true;
-        (entry.source.clone(), stage, revision, head, previous)
+        (entry.source.clone(), result, revision, previous_url)
     };
     let _delivery = DeliveryGuard { state, review_id };
     let helper = connector().await?;
     connector_capability(&helper, "reviewReceipt").await?;
     let already_stored = receipt(&helper, &source, revision).await?;
-    if already_stored && previous.is_none() {
+    if already_stored && previous_url.is_none() {
         // A restarted Twiglane process must not mistake the receipt for an
         // earlier use of this source and revision for a new delivery.
         return Err(expired());
@@ -599,23 +584,26 @@ where
             probe_identity(&observed["peerRevision"])?,
             probe_identity(&observed["peerIdentity"])?,
         )?;
-        let url = if let Some(pending) = previous {
-            pending.url
+        let url = if let Some(url) = previous_url {
+            url
         } else {
             let snapshot = tokio::time::timeout(std::time::Duration::from_secs(120), session.status_for(None))
                 .await
                 .map_err(|_| AppError::new("remote_timeout", "等待远端工作树复核超时，请重试。"))??;
-            returned(&source, revision, stage, head.as_deref(), &snapshot)?
+            if result.head.as_deref().is_some_and(|head| snapshot["head"].as_str() != Some(head)) {
+                return Err(AppError::new("stale_state", "远端 HEAD 与已核对的审查提交不同，请刷新后核对。"));
+            }
+            returned(&source, revision, result.stage, result.head.as_deref(), &snapshot)?
         };
         state.session(session_id)?;
         check_pending()?;
         {
             let mut book = state.reviews.lock().unwrap();
             let entry = book.bound(review_id, session_id, &session)?;
-            if entry.pending_delivery.is_none() && entry.head_for(stage) != head.as_deref() {
+            if entry.result != result {
                 return Err(expired());
             }
-            entry.pending_delivery = Some(Delivery { stage, revision, url: url.clone() });
+            entry.pending_delivery = Some(Delivery { result: result.clone(), revision, url: url.clone() });
         }
         deliver(&url)?;
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
@@ -635,9 +623,9 @@ where
     if let Some(entry) = book.entries.get_mut(review_id) {
         entry.pending_delivery = None;
         entry.revision = revision;
-        entry.outcome = Some(stage);
+        entry.confirmed = Some(result.clone());
     }
-    Ok(stage)
+    Ok(result.stage)
 }
 
 #[tauri::command]
@@ -887,6 +875,8 @@ mod tests {
             repo: snapshot["repo"].as_str().unwrap().into(),
             target,
             peer_identity: source.peer_identity.clone(),
+            host_identity: source.peer_identity.clone(),
+            cliora_connector: None,
             peer_revision: source.peer_revision.clone(),
             root: source.worktree_path.clone(),
             worktree_identity: None,
@@ -922,11 +912,12 @@ mod tests {
             operation_id: operation.clone(),
             op: WriteKind::Commit.name().to_owned(),
             repo: session.repo.clone(),
+            worktree_identity: None,
         };
         let journal = session.journal(&state.data);
         save_pending(&journal, &pending).unwrap();
         let proof=session.agent.rpc("commit",json!({"repo":session.repo,"operationId":operation,"generation":snapshot["generation"],"message":"recorded"})).await;
-        let result = finish_write(&state, &session, &journal, &pending, proof)
+        let result = finish_write(&state, &session, &journal, &pending, proof, false)
             .await
             .unwrap();
         assert_eq!(result["state"], "completed");
@@ -935,12 +926,12 @@ mod tests {
         {
             let mut book = state.reviews.lock().unwrap();
             let e = book.bound(&source.review_id, "local-a", &session).unwrap();
-            assert_eq!(e.committed.as_deref(), Some(head.as_str()));
+            assert_eq!(e.result.head.as_deref(), Some(head.as_str()));
             let url = returned(
                 &source,
                 2,
                 Outcome::Committed,
-                e.committed.as_deref(),
+                e.result.head.as_deref(),
                 &observed,
             )
             .unwrap();
@@ -952,7 +943,7 @@ mod tests {
                 &source,
                 3,
                 Outcome::Committed,
-                e.committed.as_deref(),
+                e.result.head.as_deref(),
                 &snapshot,
             )
             .unwrap();
@@ -961,15 +952,14 @@ mod tests {
                 .as_str()
                 .contains(source.baseline.as_deref().unwrap()));
             book.record_result(&other.review_id, &session, Outcome::Committed, &head);
-            assert!(book.entry(&other.review_id).unwrap().committed.is_none());
+            assert!(book.entry(&other.review_id).unwrap().result.head.is_none());
             assert!(book.end(&source.review_id, "cancelled").unwrap().is_none());
             assert!(book.bound(&source.review_id, "local-a", &session).is_err());
         }
         session.agent.close().await;
     }
 
-    /// reviewed → committed → merged 只能严格递增：同阶段重复与回退都是 conflict，
-    /// 而 committed/merged 都必须带着这次审查记录的提交。
+    /// committed/merged 必须带着这次审查记录的提交。
     #[test]
     fn returned_outcomes_only_advance_and_merged_carries_the_recorded_commit() {
         let fixtures: Value = serde_json::from_str(include_str!(
@@ -983,29 +973,6 @@ mod tests {
             "head": commit, "files": []
         });
 
-        assert_eq!(
-            next_outcome(None, Outcome::Reviewed).unwrap(),
-            Outcome::Reviewed
-        );
-        assert_eq!(
-            next_outcome(Some(Outcome::Reviewed), Outcome::Committed).unwrap(),
-            Outcome::Committed
-        );
-        assert_eq!(
-            next_outcome(Some(Outcome::Committed), Outcome::Merged).unwrap(),
-            Outcome::Merged
-        );
-        for (previous, requested) in [
-            (Some(Outcome::Committed), Outcome::Reviewed),
-            (Some(Outcome::Reviewed), Outcome::Reviewed),
-            (Some(Outcome::Merged), Outcome::Committed),
-        ] {
-            assert_eq!(
-                next_outcome(previous, requested).unwrap_err().code,
-                "conflict",
-                "{previous:?} -> {requested:?}"
-            );
-        }
         assert_eq!(Outcome::parse("merged").unwrap(), Outcome::Merged);
         assert_eq!(Outcome::parse("done").unwrap_err().code, "invalid_outcome");
 
@@ -1023,10 +990,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn later_commit_supersedes_the_pending_merge_with_a_new_revision() {
+        let source = Source::parse(&source_link()).unwrap();
+        let mut book = Book::default();
+        book.prepare(&source).unwrap();
+        let entry = book.entry(&source.review_id).unwrap();
+        let merge_head = "a".repeat(40);
+        let new_head = "b".repeat(40);
+        entry.record_verified(Outcome::Merged, &merge_head);
+        let (result, revision, _) = entry.delivery_for(Outcome::Merged).unwrap();
+        let url = returned(&source, revision, result.stage, result.head.as_deref(), &json!({
+            "root":source.worktree_path,"repo":source.worktree_identity,"head":merge_head,"files":[],
+        })).unwrap();
+        entry.pending_delivery = Some(Delivery { result, revision, url: url.clone() });
+        assert!(entry.confirmed.is_none());
+        assert_eq!(entry.delivery_for(Outcome::Merged).unwrap().2, Some(url.clone()));
+
+        assert_eq!(entry.record_verified(Outcome::Committed, &new_head), Outcome::Merged);
+        let (result, next_revision, retry) = entry.delivery_for(Outcome::Merged).unwrap();
+        assert_eq!(next_revision, revision + 1);
+        assert_eq!(result.head.as_deref(), Some(new_head.as_str()));
+        assert!(retry.is_none());
+        assert!(entry.confirmed.is_none());
+        assert_eq!(entry.pending_delivery.as_ref().unwrap().url, url);
+        assert_eq!(entry.delivery_for(Outcome::Committed).unwrap_err().code, "conflict");
+    }
+
     /// 阶段推进必须发生在 Cliora 真正收到结果之后。
     ///
     /// 旧实现拿到锁就写 outcome/revision，随后 connector/list/probe/status/送达任一步失败
-    /// 都会让阶段已经前进：同一阶段重试命中 next_outcome 的 conflict，返回动作永久卡死，
+    /// 都会让阶段已经前进：同一阶段重试命中 conflict，返回动作永久卡死，
     /// 而 Cliora 从未收到结果。这里对 reviewed → committed → merged 三段各做一次
     /// 「复核失败 / 送达失败 → 状态不动 → 同一阶段重试成功」。
     #[cfg(unix)]
@@ -1084,6 +1078,8 @@ mod tests {
             repo: opened["repo"].as_str().unwrap().into(),
             target,
             peer_identity: source.peer_identity.clone(),
+            host_identity: source.peer_identity.clone(),
+            cliora_connector: None,
             peer_revision: source.peer_revision.clone(),
             root: source.worktree_path.clone(),
             worktree_identity: None,
@@ -1139,7 +1135,7 @@ mod tests {
         let observed = |state: &RemoteWorktrees| {
             let book = state.reviews.lock().unwrap();
             let entry = book.entries.get(&source.review_id).unwrap();
-            (entry.outcome, entry.revision, entry.delivering)
+            (entry.confirmed.as_ref().map(|result| result.stage), entry.revision, entry.delivering)
         };
         let mut delivered = 0usize;
         let mut last: Option<String> = None;
@@ -1214,6 +1210,46 @@ mod tests {
         );
         assert_eq!(observed(&state).0, Some(Outcome::Merged));
         assert_eq!(observed(&state).1, 3);
+
+        let commit = |message: &str| {
+            git(&["commit", "--allow-empty", "-qm", message]);
+            let head = git(&["rev-parse", "HEAD"]);
+            assert_eq!(state.reviews.lock().unwrap().record_result(
+                &source.review_id, &session, Outcome::Committed, &head,
+            ), Some(Outcome::Merged));
+            head
+        };
+        let first_head = commit("commit after merge");
+        write_receipt(false);
+        let mut pending_url = None;
+        let failed = return_review(&state, &source.review_id, &session_id, Outcome::Merged, |url| {
+            pending_url = Some(url.clone());
+            std::fs::write(root.path().join("review-receipt.json"), "{}").unwrap();
+            Ok(())
+        }).await.unwrap_err();
+        let pending_url = pending_url.unwrap();
+        assert_eq!(failed.code, "remote_protocol");
+        assert_eq!(observed(&state).1, 3);
+        assert!(pending_url.as_str().contains("resultRevision=4"));
+        assert!(pending_url.as_str().contains(&format!("headOid={first_head}")));
+        write_receipt(false);
+        let failed = return_review(&state, &source.review_id, &session_id, Outcome::Merged, |url| {
+            assert_eq!(url, &pending_url);
+            Err(AppError::new("cliora_unavailable", "Cliora 没有接受返回结果。"))
+        }).await.unwrap_err();
+        assert_eq!(failed.code, "cliora_unavailable");
+        assert_eq!(observed(&state).1, 3);
+
+        let new_head = commit("superseding commit");
+        return_review(&state, &source.review_id, &session_id, Outcome::Merged, |url| {
+            assert!(url.as_str().contains("outcome=merged"));
+            assert!(url.as_str().contains("resultRevision=5"));
+            assert!(url.as_str().contains(&format!("headOid={new_head}")));
+            assert_eq!(observed(&state).1, 3);
+            write_receipt(true);
+            Ok(())
+        }).await.unwrap();
+        assert_eq!(observed(&state).1, 5);
         std::env::remove_var("TWIGLANE_CLIORA_CONNECTOR");
     }
 }

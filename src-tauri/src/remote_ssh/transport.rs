@@ -196,7 +196,8 @@ impl ProbeFields {
 pub(crate) fn host_keys(stderr: &str) -> Vec<String> {
     let mut keys: Vec<String> = Vec::new();
     for line in stderr.lines() {
-        let Some(rest) = line.strip_prefix("debug1: Server host key: ") else {
+        let Some(rest) = line.strip_prefix("debug1: Server host key: ")
+            .or_else(|| line.strip_prefix("debug1: Server host certificate: ")) else {
             continue;
         };
         let key = rest.trim();
@@ -248,6 +249,10 @@ mod tests {
         );
         assert_eq!(keys.len(), 2);
         assert!(crate::remote_ssh::config::Snapshot::peer_identity(&keys).is_some());
+        assert_eq!(
+            host_keys("debug1: Server host certificate: ssh-ed25519-cert-v01@openssh.com SHA256:aaa"),
+            ["ssh-ed25519-cert-v01@openssh.com SHA256:aaa"],
+        );
     }
 
     #[test]

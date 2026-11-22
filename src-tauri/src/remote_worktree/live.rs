@@ -30,6 +30,14 @@ async fn open(
     }
 }
 
+async fn platform_evidence(session: &Session) -> Value {
+    let hello = session.agent.rpc("hello", json!({})).await.unwrap();
+    let (system, architecture) = remote_ssh::platform(
+        hello["os"].as_str().unwrap(), hello["arch"].as_str().unwrap(),
+    ).expect("reported agent platform");
+    json!({"system":system,"architecture":architecture})
+}
+
 #[tokio::test]
 async fn real_v2_opens_native_and_cliora_task() {
     let Ok(config) = env::var("TWIGLANE_T4_SSH_CONFIG") else {
@@ -44,7 +52,16 @@ async fn real_v2_opens_native_and_cliora_task() {
     let dir = tempfile::tempdir().unwrap();
     let store = AppStore::open(dir.path().join("state.json"));
     store.set_remote_ssh_enabled(true).unwrap();
-    let ssh = RemoteSsh::with_exec(resources.into(), PathBuf::from("ssh"), Vec::new());
+    let peer_helper = env::var("TWIGLANE_T4_PEER_HELPER").unwrap_or_else(|_| {
+        let mut path = env::current_exe().unwrap().parent().unwrap().parent().unwrap().join("twiglane");
+        if cfg!(windows) {
+            path.set_extension("exe");
+        }
+        path.to_str().expect("built Twiglane desktop executable").into()
+    });
+    let ssh = RemoteSsh::with_exec(resources.into(), PathBuf::from("ssh"), vec![
+        ("TWIGLANE_SSH_TEST_PEER_HELPER".into(), peer_helper),
+    ]);
     let access = V2Access::new(&store, &ssh);
     let native = store.save_remote_ssh_target(SshTarget {
         id: "fixture-native".into(),
@@ -78,6 +95,18 @@ async fn real_v2_opens_native_and_cliora_task() {
     let commits = page["page"]["commits"].as_array().unwrap();
     assert!(!commits.is_empty());
     let baseline = commits.last().unwrap()["oid"].as_str().unwrap().to_owned();
+    let native_host_identity = session.host_identity.clone();
+    let native_platform = platform_evidence(&session).await;
+    let state = RemoteWorktrees::new(dir.path().join("journal"));
+    let native_journal = session.journal(&state.data);
+    let alternate_pending = Pending {
+        review_id: None,
+        operation_id: Uuid::new_v4().to_string(),
+        op: "commit".into(),
+        repo: session.repo.clone(),
+        worktree_identity: session.worktree_identity.clone(),
+    };
+    save_pending(&native_journal, &alternate_pending).unwrap();
     session.agent.close().await;
     println!("Direct v2 route opened the fixture and returned {} historical commits", commits.len());
 
@@ -109,9 +138,75 @@ async fn real_v2_opens_native_and_cliora_task() {
     assert_eq!(session.protocol(), 2);
     assert_eq!(snapshot["worktreeIdentity"], identity);
     assert_eq!(snapshot["baseline"], baseline);
+    assert_eq!(session.host_identity, native_host_identity, "providers identify the same authenticated SSH key");
+    assert_eq!(session.journal(&state.data), native_journal);
+    assert_eq!(
+        find_pending(&state.data, &session).unwrap().unwrap().record.operation_id,
+        alternate_pending.operation_id,
+    );
+    std::fs::remove_file(native_journal).unwrap();
+    let cliora_platform = platform_evidence(&session).await;
     let review = session.agent.rpc("taskReview", json!({"repo":session.repo,"baseline":baseline})).await.unwrap();
     assert_eq!(review["review"]["baselineOid"], baseline);
     assert!(session.status().await.unwrap()["reviewFiles"].is_array());
     println!("Cliora v2 route reopened the same authenticated worktree with a checked task baseline");
     session.agent.close().await;
+
+    let legacy_receipt_recovered = if let Ok(legacy_path) = env::var("TWIGLANE_T4_LEGACY_FIXTURE") {
+        let legacy: Value = serde_json::from_slice(&std::fs::read(legacy_path).unwrap()).unwrap();
+        let mut legacy_request = OpenRequest {
+            request_id: Uuid::new_v4().to_string(),
+            target_id: Target::native(&native).target_id,
+            target_revision: native.revision.to_string(),
+            path: legacy["path"].as_str().unwrap().into(),
+            baseline: None,
+            allow_install: false,
+            install_confirmation: None,
+            review_id: None,
+        };
+        let (native_session, _) = open(None, &access, legacy_request.clone(), None).await;
+        let old_journal = native_session.legacy_journal(
+            &state.data, legacy["targetId"].as_str().unwrap(), legacy["peerIdentity"].as_str().unwrap(),
+        );
+        let mut old_record = Pending {
+            review_id: None,
+            operation_id: legacy["operationId"].as_str().unwrap().into(),
+            op: "stage".into(),
+            repo: legacy["repo"].as_str().unwrap().into(),
+            worktree_identity: None,
+        };
+        save_pending(&old_journal, &old_record).unwrap();
+        let detected = find_pending(&state.data, &native_session).unwrap().unwrap();
+        assert_eq!(detected.record.repo, old_record.repo);
+        let wrong = recover_pending(&state, &native_session, &old_record.operation_id).await.unwrap();
+        assert_eq!(wrong["state"], "unknown");
+        assert!(old_journal.is_file());
+        old_record.op = legacy["op"].as_str().unwrap().into();
+        save_pending(&old_journal, &old_record).unwrap();
+        let recovered = recover_pending(&state, &native_session, &old_record.operation_id).await.unwrap();
+        assert_eq!(recovered["state"], "completed");
+        assert_eq!(recovered["head"], legacy["head"]);
+        assert!(!old_journal.exists());
+        native_session.agent.close().await;
+
+        legacy_request.target_id = legacy["targetId"].as_str().unwrap().into();
+        legacy_request.target_revision = legacy["targetRevision"].as_str().unwrap().into();
+        let (cliora_session, _) = open(Some(&helper), &access, legacy_request, None).await;
+        save_pending(&old_journal, &old_record).unwrap();
+        let recovered = recover_pending(&state, &cliora_session, &old_record.operation_id).await.unwrap();
+        assert_eq!(recovered["state"], "completed");
+        assert_eq!(recovered["head"], legacy["head"]);
+        assert!(!old_journal.exists());
+        cliora_session.agent.close().await;
+        println!("Legacy v1 commit receipt recovered over both v2 routes, and mismatched operation retained the journal");
+        true
+    } else {
+        false
+    };
+    println!("Twiglane real SSH evidence: {}", json!({
+        "native":native_platform,
+        "cliora":cliora_platform,
+        "samePeerAndWorktree":true,
+        "legacyReceiptRecovered":legacy_receipt_recovered,
+    }));
 }

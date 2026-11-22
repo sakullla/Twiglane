@@ -196,7 +196,7 @@ export type RemoteCallResult = RemoteWriteResult | Record<string, unknown>;
 export type RemoteWriteResult =
   | { state: "completed"; operationId: string; snapshot: RemoteWorktreeSnapshot; head?: string | null; reviewOutcome?: RemoteReviewOutcome | null }
   // Return "failed" only when the outcome is verified and the write had no effect.
-  | { state: "failed" | "unknown"; operationId: string; message: string };
+  | { state: "failed" | "unknown"; operationId: string; op?: RemotePendingWrite["op"]; message: string };
 
 export interface RemoteWorktreePort {
   targets: () => Promise<RemoteTarget[]>;

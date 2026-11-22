@@ -48,6 +48,57 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// 单次命令的诊断输出上限；超限即视为协议异常。
 const DIAGNOSTIC_BYTES: u64 = 256 * 1024;
+const HOST_KEY_FLAG: &str = "--twiglane-ssh-host-key";
+const HOST_KEY_DIR: &str = "TWIGLANE_SSH_HOST_KEY_DIR";
+
+/// OpenSSH invokes this locally while checking the final peer's host key.
+/// The callback supplies no trust entries and stores only the digest used by Cliora.
+pub fn handle_ssh_host_key_callback() {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() != Some(std::ffi::OsStr::new(HOST_KEY_FLAG)) {
+        return;
+    }
+    let captured = (|| -> Option<()> {
+        let phase = args.next()?;
+        let key = args.next()?;
+        if args.next().is_some() {
+            return None;
+        }
+        if phase == "ORDER" || phase == "ADDRESS" {
+            return Some(());
+        }
+        let key = key.to_str().filter(|key| !key.is_empty() && *key != "NONE")?;
+        if phase != "HOSTNAME" {
+            return None;
+        }
+        let folder = PathBuf::from(std::env::var_os(HOST_KEY_DIR)?);
+        if folder.parent() != Some(std::env::temp_dir().as_path())
+            || !folder.file_name()?.to_str()?.starts_with("twiglane-ssh-")
+        {
+            return None;
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"cliora-twiglane-host-key-v1\0");
+        digest.update(Sha256::digest(key.as_bytes()));
+        let identity = format!("{:x}", digest.finalize());
+        let path = folder.join("host-identity");
+        use std::io::Write;
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => file.write_all(identity.as_bytes()).ok(),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                (std::fs::read_to_string(path).ok()? == identity).then_some(())
+            }
+            Err(_) => None,
+        }
+    })();
+    std::process::exit(if captured.is_some() { 0 } else { 1 });
+}
+
+fn captured_host_identity(folder: &Path) -> Option<String> {
+    std::fs::read_to_string(folder.join("host-identity")).ok().filter(|identity| {
+        identity.len() == 64 && identity.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
 
 fn disabled() -> AppError {
     AppError::new(
@@ -204,8 +255,15 @@ impl<'a> Context<'a> {
         folder: &Path,
         remote: &str,
         verbose: bool,
+        capture_host_key: bool,
     ) -> Result<Command> {
-        let mut args = snapshot.args(folder, target)?;
+        #[cfg(not(test))]
+        let helper = capture_host_key.then(std::env::current_exe).transpose().map_err(|_| ssh_unavailable())?;
+        #[cfg(test)]
+        let helper = self.exec.env.iter()
+            .find(|(key, _)| capture_host_key && key == "TWIGLANE_SSH_TEST_PEER_HELPER")
+            .map(|(_, value)| PathBuf::from(value));
+        let mut args = snapshot.args_with_host_key(folder, target, helper.as_deref())?;
         let password = if target.auth_method == "password" {
             match self.password(&target.id) {
                 Some(secret) if !secret.is_empty() => Some(secret),
@@ -220,6 +278,9 @@ impl<'a> Context<'a> {
             None
         };
         let mut command = self.exec.async_command();
+        if helper.is_some() {
+            command.env(HOST_KEY_DIR, folder);
+        }
         let mut prefix: Vec<OsString> = Vec::new();
         if verbose {
             prefix.push(OsString::from("-v"));
@@ -266,6 +327,8 @@ pub struct Probe {
     config_revision: String,
     peer_revision: String,
     peer_identity: String,
+    #[serde(skip)]
+    host_identity: Option<String>,
     system: String,
     architecture: String,
     git: Option<String>,
@@ -425,6 +488,16 @@ async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(pipe: R, limit: u64) -> R
 
 /// 把 SSH 失败翻译成可读原因，不把原始诊断文本回传界面（可能含主机名或路径）。
 fn ssh_error(stderr: &str, code: Option<i32>) -> AppError {
+    if stderr.lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        line.contains("knownhostscommand")
+            && (line.contains("bad configuration option") || line.contains("unsupported option"))
+    }) {
+        return AppError::new(
+            "ssh_host_key_lookup_unavailable",
+            "当前 OpenSSH 不支持核对远端仓库所需的主机密钥，请更新本机 OpenSSH 客户端。",
+        );
+    }
     if stderr.contains("Host key verification failed") {
         return AppError::new(
             "ssh_host_key_untrusted",
@@ -483,14 +556,24 @@ fn ssh_error(stderr: &str, code: Option<i32>) -> AppError {
 }
 
 async fn probe_target(context: &Context<'_>, target: &SshTarget) -> Result<Probe> {
+    probe_target_with_host_key(context, target, false).await
+}
+
+async fn probe_target_with_host_key(
+    context: &Context<'_>,
+    target: &SshTarget,
+    capture_host_key: bool,
+) -> Result<Probe> {
     let snapshot = context.snapshot(target).await?;
     // PowerShell 的调用只含 ASCII 参数。在 POSIX shell 中找不到它时再发 POSIX
     // 探测。避免让 Windows 默认的 cmd.exe 解释 Unix 的重定向和管道。
     let mut shell = transport::Shell::Windows;
-    let (mut stdout, mut stderr, mut status) = run_probe(context, target, &snapshot, shell).await?;
+    let (mut stdout, mut stderr, mut status, mut host_identity) =
+        run_probe(context, target, &snapshot, shell, capture_host_key).await?;
     if status.code() == Some(127) {
         shell = transport::Shell::Posix;
-        (stdout, stderr, status) = run_probe(context, target, &snapshot, shell).await?;
+        (stdout, stderr, status, host_identity) =
+            run_probe(context, target, &snapshot, shell, capture_host_key).await?;
     }
     if !status.success() {
         return Err(ssh_error(&stderr, status.code()));
@@ -516,6 +599,7 @@ async fn probe_target(context: &Context<'_>, target: &SshTarget) -> Result<Probe
         config_revision: snapshot.revision.clone(),
         peer_revision: revision,
         peer_identity: identity,
+        host_identity,
         system: fields.system,
         architecture: fields.architecture,
         git: fields.git,
@@ -540,9 +624,10 @@ async fn run_probe(
     target: &SshTarget,
     snapshot: &Snapshot,
     shell: transport::Shell,
-) -> Result<(String, String, ExitStatus)> {
+    capture_host_key: bool,
+) -> Result<(String, String, ExitStatus, Option<String>)> {
     let folder = Context::private_dir()?;
-    let mut command = context.build(target, snapshot, folder.path(), &shell.probe(), true)?;
+    let mut command = context.build(target, snapshot, folder.path(), &shell.probe(), true, capture_host_key)?;
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -560,7 +645,7 @@ async fn run_probe(
     let (stdout, stderr, status) = tokio::time::timeout(PROBE_TIMEOUT, joined)
         .await
         .map_err(|_| timed_out("探测"))??;
-    Ok((stdout_text(&stdout), stdout_text(&stderr), status))
+    Ok((stdout_text(&stdout), stdout_text(&stderr), status, captured_host_identity(folder.path())))
 }
 
 /// 同一个 SSH 子进程的登录确认和数据通道。发送继续字节后仍持有这组管道。
@@ -577,6 +662,7 @@ async fn spawn_connection(
     target: &SshTarget,
     remote: &str,
     expected_peer_revision: Option<&str>,
+    expected_host_identity: Option<&str>,
 ) -> Result<AgentConnection> {
     let snapshot = context.snapshot(target).await?;
     let folder = Context::private_dir()?;
@@ -586,6 +672,7 @@ async fn spawn_connection(
         folder.path(),
         remote,
         expected_peer_revision.is_some(),
+        expected_host_identity.is_some(),
     )?;
     command
         .stdin(Stdio::piped())
@@ -616,6 +703,11 @@ async fn spawn_connection(
             let (verified, ready) = tokio::join!(verify_stderr, wait_ready);
             verified?;
             ready?;
+            if let Some(expected_identity) = expected_host_identity {
+                if captured_host_identity(folder.path()).as_deref() != Some(expected_identity) {
+                    return Err(changed());
+                }
+            }
             stdin
                 .write_all(transport::CONTINUE)
                 .await
@@ -673,7 +765,7 @@ async fn upload(
 ) -> Result<()> {
     let bytes = offer_bytes(context, &offer.digest)?;
     let command = probe.shell.install(&offer.digest, true)?;
-    let connection = spawn_connection(context, target, &command, Some(&offer.peer_revision)).await?;
+    let connection = spawn_connection(context, target, &command, Some(&offer.peer_revision), None).await?;
     upload_bytes(connection, &offer.digest, &bytes, &|sent, total| {
         let _ = progress.send(InstallProgress {
             phase: "installing",
@@ -1055,6 +1147,7 @@ pub(crate) struct AgentProbe {
     /// 原探测使用的 SSH 配置和实际对端主机密钥。
     pub(crate) peer_revision: String,
     pub(crate) peer_identity: String,
+    pub(crate) host_identity: Option<String>,
     shell: transport::Shell,
 }
 
@@ -1121,7 +1214,7 @@ pub(crate) async fn probe_agent(
     target: &SshTarget,
 ) -> Result<AgentProbe> {
     let context = Context::new(store, ssh);
-    let probe = probe_target(&context, target).await?;
+    let probe = probe_target_with_host_key(&context, target, true).await?;
     Ok(AgentProbe {
         system: probe.system,
         architecture: probe.architecture,
@@ -1129,6 +1222,7 @@ pub(crate) async fn probe_agent(
         agent: probe.agent_probe,
         peer_revision: probe.peer_revision,
         peer_identity: probe.peer_identity,
+        host_identity: probe.host_identity,
         shell: probe.shell,
     })
 }
@@ -1151,6 +1245,7 @@ pub(crate) async fn open_session(
         folder.path(),
         &probe.shell.connect(digest, false)?,
         false,
+        false,
     )?;
     let transport = crate::remote_worktree_transport::AgentTransport::spawn_v2(&mut command)
         .map_err(|_| ssh_unavailable())?;
@@ -1170,7 +1265,7 @@ pub(crate) async fn prepare_session(
 ) -> Result<AgentConnection> {
     let context = Context::new(store, ssh);
     let command = probe.shell.connect(digest, true)?;
-    spawn_connection(&context, target, &command, Some(&probe.peer_revision)).await
+    spawn_connection(&context, target, &command, Some(&probe.peer_revision), probe.host_identity.as_deref()).await
 }
 
 /// 保留用户确认时的探测，传输产物前验证同一个 SSH 连接。
@@ -1184,7 +1279,7 @@ pub(crate) async fn install_verified_artifact(
 ) -> Result<()> {
     let context = Context::new(store, ssh);
     let command = probe.shell.install(&artifact.sha256, true)?;
-    let connection = spawn_connection(&context, target, &command, Some(&probe.peer_revision)).await?;
+    let connection = spawn_connection(&context, target, &command, Some(&probe.peer_revision), probe.host_identity.as_deref()).await?;
     upload_bytes(connection, &artifact.sha256, &artifact.bytes, progress).await
 }
 
@@ -1200,6 +1295,6 @@ pub(crate) async fn install_artifact(
     let context = Context::new(store, ssh);
     let probe = probe_target(&context, target).await?;
     let command = probe.shell.install(&artifact.sha256, false)?;
-    let connection = spawn_connection(&context, target, &command, None).await?;
+    let connection = spawn_connection(&context, target, &command, None, None).await?;
     upload_bytes(connection, &artifact.sha256, &artifact.bytes, progress).await
 }

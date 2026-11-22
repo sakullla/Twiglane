@@ -8,6 +8,8 @@ mod measure;
 mod model;
 mod redact;
 mod remote_ssh;
+#[doc(hidden)]
+pub use remote_ssh::handle_ssh_host_key_callback;
 mod remote_ssh_sync;
 mod remote_worktree;
 pub mod remote_worktree_transport;

@@ -157,7 +157,7 @@ pub struct Progress {
     total_bytes: Option<u64>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Pending {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,6 +167,8 @@ struct Pending {
     /// 旧记录里存的就是 `stage` 这类小写名，改成字符串后仍能读回。
     op: String,
     repo: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worktree_identity: Option<String>,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -196,6 +198,8 @@ struct Session {
     root: String,
     worktree_identity: Option<String>,
     peer_identity: String,
+    host_identity: String,
+    cliora_connector: Option<PathBuf>,
     baseline: Option<String>,
     /// 远端组件是否声明了按块/按行写入（agent v2 的 `patch`）。只由 `open` 返回的
     /// capabilities 决定：没有声明就一律按整文件暂存处理，不假设远端能力。
@@ -256,16 +260,20 @@ impl Session {
         true
     }
     fn journal(&self, base: &Path) -> PathBuf {
-        let key = json!([
-            self.target.target_id,
-            self.peer_identity,
-            self.target.user,
-            self.root
-        ]);
+        let key = json!([self.host_identity, self.target.user, self.root]);
         base.join(format!(
-            "{:x}.json",
+            "worktree-{:x}.json",
             Sha256::digest(key.to_string().as_bytes())
         ))
+    }
+
+    fn legacy_journal(&self, base: &Path, target_id: &str, peer_identity: &str) -> PathBuf {
+        let key = json!([target_id, peer_identity, self.target.user, self.root]);
+        base.join(format!("{:x}.json", Sha256::digest(key.to_string().as_bytes())))
+    }
+
+    fn legacy_pending(&self, pending: &Pending) -> bool {
+        self.protocol() == 2 && self.worktree_identity.as_deref() == Some(&pending.repo)
     }
 
     async fn status(&self) -> Result<Value> {
@@ -487,6 +495,7 @@ fn remote_error(code: &str) -> AppError {
         "remote_busy" => "远端请求仍在处理，本次操作尚未发送，可以重试。",
         "remote_request_size" => "操作内容超出单次请求大小，请缩短提交说明后重试。",
         "remote_not_sent" => "远端连接已关闭，本次操作尚未发送，请重连后重试。",
+        "remote_journal" => "无法核对本机保存的远端操作记录。",
         "remote_request" => "远端操作参数无效，本次操作尚未发送。",
         "invalid_selection" | "selection_expands" => "远端文件状态已变化或选择范围不完整。",
         "index_locked" => "远端 Git 正在写入暂存区，请等待后刷新。",
@@ -598,17 +607,34 @@ fn command(path: &Path, action: &str, target: Option<&Target>) -> Command {
 }
 
 fn output_error(stderr: &[u8]) -> AppError {
-    for line in stderr.rsplit(|&byte| byte == b'\n') {
-        if let Ok(value) = serde_json::from_slice::<Value>(line) {
-            if let Some(code) = value.get("error").and_then(Value::as_str) {
-                return remote_error(code);
+    let stderr = String::from_utf8_lossy(stderr);
+    let codes = stderr.lines().rev().filter_map(|line| {
+        serde_json::from_str::<Value>(line).ok()?.get("error")?.as_str().map(str::to_owned)
+    });
+    let mut wrapper = false;
+    for code in codes {
+        if code == "remote_bootstrap_failed" {
+            wrapper = true;
+        } else {
+            let error = remote_error(&code);
+            if error.code != "ssh_failed" {
+                return error;
             }
         }
-        if line.windows(20).any(|part| part == b"Permission denied (p") {
-            return AppError::new("ssh_auth_failed", "SSH 认证失败，请检查主机的密钥或密码。");
-        }
     }
-    remote_error("ssh_failed")
+    if stderr.contains("Host key verification failed")
+        || stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
+    {
+        return AppError::new("ssh_host_key_untrusted", "SSH 主机密钥未受信任，请核对本机已信任的记录。");
+    }
+    if stderr.lines().any(|line| {
+        line.split_once("Permission denied (")
+            .is_some_and(|(_, detail)| [")", ")."].iter().any(|suffix| detail.trim_end().ends_with(suffix)))
+            || line.contains("No more authentication methods to try.")
+    }) {
+        return AppError::new("ssh_auth_failed", "SSH 认证失败，请检查主机的密钥或密码。");
+    }
+    remote_error(if wrapper { "remote_bootstrap_failed" } else { "ssh_failed" })
 }
 
 async fn bounded_output<A: tokio::io::AsyncRead + Unpin>(pipe: A, limit: u64) -> Result<Vec<u8>> {
@@ -831,6 +857,7 @@ struct V2Plan {
     target: Target,
     peer_revision: String,
     peer_identity: String,
+    host_identity: String,
     installed: Option<String>,
     system: String,
     architecture: String,
@@ -885,6 +912,7 @@ async fn plan_v2(
             target,
             peer_revision: probe.peer_revision.clone(),
             peer_identity: probe.peer_identity.clone(),
+            host_identity: probe.host_identity.clone().ok_or_else(|| remote_error("ssh_peer_unverified"))?,
             installed,
             system: probe.system.clone(),
             architecture: probe.architecture.clone(),
@@ -921,6 +949,7 @@ async fn plan_v2(
         route: V2Route::Cliora(helper),
         target,
         peer_revision,
+        host_identity: peer_identity.clone(),
         peer_identity,
         installed: probe["agentSha256"].as_str().map(str::to_owned),
         system,
@@ -1034,6 +1063,11 @@ async fn connect(
         review_id: request.review_id.clone(),
         peer_revision: plan.peer_revision,
         peer_identity: plan.peer_identity,
+        host_identity: plan.host_identity,
+        cliora_connector: match plan.route {
+            V2Route::Native(_) => None,
+            V2Route::Cliora(path) => Some(path),
+        },
         agent,
         repo,
         root,
@@ -1050,17 +1084,11 @@ async fn connect(
     Ok(Opened::Worktree(Box::new(session), view))
 }
 
-fn read_pending(path: &Path, repo: &str) -> Result<Option<Pending>> {
+fn read_pending(path: &Path) -> Result<Option<Pending>> {
     match std::fs::read(path) {
         Ok(bytes) => {
             let pending: Pending = serde_json::from_slice(&bytes)
                 .map_err(|_| AppError::new("remote_journal", "远端操作记录无法读取。"))?;
-            if pending.repo != repo {
-                return Err(AppError::new(
-                    "target_changed",
-                    "远端目录有来自另一工作树的待确认操作。",
-                ));
-            }
             Ok(Some(pending))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -1069,6 +1097,59 @@ fn read_pending(path: &Path, repo: &str) -> Result<Option<Pending>> {
             "无法读取本机保存的远端操作记录。",
         )),
     }
+}
+
+struct PendingFile {
+    path: PathBuf,
+    record: Pending,
+    verified_location: bool,
+}
+
+/// The caller holds the mutations lock while reading or changing the journal set.
+fn find_pending(base: &Path, session: &Session) -> Result<Option<PendingFile>> {
+    let own = session.journal(base);
+    let old = session.legacy_journal(base, &session.target.target_id, &session.peer_identity);
+    let mut pending = None;
+    let mut consider = |path: PathBuf, record: Pending, verified_location| {
+        if pending.is_some() {
+            return Err(AppError::new("remote_journal", "该远端目录有多条待确认记录，请保留记录并核对来源。"));
+        }
+        if (record.repo != session.repo && !session.legacy_pending(&record))
+            || record.worktree_identity.as_ref().is_some_and(|id| Some(id) != session.worktree_identity.as_ref())
+        {
+            return Err(AppError::new("target_changed", "远端目录有来自另一工作树的待确认操作。"));
+        }
+        pending = Some(PendingFile { path, record, verified_location });
+        Ok(())
+    };
+    for path in [&own, &old] {
+        if let Some(record) = read_pending(path)? {
+            consider(path.clone(), record, true)?;
+        }
+    }
+    match std::fs::read_dir(base) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry.map_err(|_| remote_error("remote_journal"))?;
+                let file_name = entry.file_name();
+                let is_old = file_name.to_str().and_then(|name| name.strip_suffix(".json"))
+                    .is_some_and(|name| name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit()));
+                let path = entry.path();
+                if is_old && path != old {
+                    // Old filenames encode the original provider. Without that provider's
+                    // identity, the record can block writes but cannot authenticate a receipt.
+                    if let Ok(Some(record)) = read_pending(&path) {
+                        if record.repo == session.repo || session.legacy_pending(&record) {
+                            consider(path, record, false)?;
+                        }
+                    }
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(remote_error("remote_journal")),
+    }
+    Ok(pending)
 }
 
 fn save_pending(path: &Path, pending: &Pending) -> Result<()> {
@@ -1188,7 +1269,7 @@ pub async fn remote_worktree_open(
     };
     let pending = {
         let _guard = state.mutations.lock().unwrap();
-        read_pending(&session.journal(&state.data), &session.repo)?
+        find_pending(&state.data, &session)?.map(|file| file.record)
     };
     let protocol = session.protocol();
     let agent_version = session.agent_version.clone();
@@ -1519,18 +1600,19 @@ async fn bridge_call(state: &RemoteWorktrees, request: CallRequest) -> Result<Va
         operation_id,
         op: request.op,
         repo: session.repo.clone(),
+        worktree_identity: session.worktree_identity.clone(),
     };
     let journal = session.journal(&state.data);
     {
         let _guard = state.mutations.lock().unwrap();
         // 已有待确认记录时不再发第二条写入：结果未知的写入只能先核对。
-        if read_pending(&journal, &session.repo)?.is_some() {
-            return Ok(unknown(&pending.operation_id));
+        if let Some(existing) = find_pending(&state.data, &session)? {
+            return Ok(pending_unknown(&existing.record));
         }
         save_pending(&journal, &pending)?;
     }
     let response = session.agent.rpc(&pending.op, fields).await;
-    finish_write(state, &session, &journal, &pending, response).await
+    finish_write(state, &session, &journal, &pending, response, false).await
 }
 
 #[tauri::command]
@@ -1551,6 +1633,12 @@ pub struct WriteRequest {
 
 fn unknown(operation_id: &str) -> Value {
     json!({"state":"unknown","operationId":operation_id,"message":"远端操作结果待确认，请重新连接并核对。"})
+}
+
+fn pending_unknown(pending: &Pending) -> Value {
+    let mut result = unknown(&pending.operation_id);
+    result["op"] = json!(pending.op);
+    result
 }
 
 fn definitive_error(code: &str) -> bool {
@@ -1631,17 +1719,18 @@ async fn finish_write(
     journal: &Path,
     pending: &Pending,
     response: Result<Value>,
+    receipt_lookup: bool,
 ) -> Result<Value> {
     let mut outcome = None;
     let mut completed = match response {
         Ok(response) => {
             let Some(proof) = write_proof(&response).filter(|proof| {
                 proof.operation_id == pending.operation_id
-                    && response["repo"].as_str().is_none_or(|repo| repo == session.repo)
-                    && if session.protocol() == 2 && session.worktree_identity.is_some() {
-                        proof.repo == Some(&session.repo) && proof.op == Some(&pending.op)
+                    && response["repo"].as_str().is_none_or(|repo| repo == pending.repo)
+                    && if receipt_lookup || session.protocol() == 2 && session.worktree_identity.is_some() {
+                        proof.repo == Some(&pending.repo) && proof.op == Some(&pending.op)
                     } else {
-                        proof.repo.is_none_or(|repo| repo == session.repo)
+                        proof.repo.is_none_or(|repo| repo == pending.repo)
                             && proof.op.is_none_or(|op| op == pending.op)
                     }
             }) else {
@@ -1672,19 +1761,23 @@ async fn finish_write(
                 _ => return Ok(unknown(&pending.operation_id)),
             }
         }
-        Err(error) if definitive_error(&error.code) => {
+        Err(error) if !receipt_lookup && definitive_error(&error.code) => {
             json!({"state":"failed","operationId":pending.operation_id,"message":remote_error(&error.code).message})
         }
         _ => return Ok(unknown(&pending.operation_id)),
     };
     let _guard = state.mutations.lock().unwrap();
-    if read_pending(journal, &session.repo)?
-        .is_some_and(|value| value.operation_id == pending.operation_id)
-        && std::fs::remove_file(journal).is_err()
-    {
-        return Ok(unknown(&pending.operation_id));
-    }
-    if completed["state"] == "completed" {
+    let cleared = match find_pending(&state.data, session)? {
+        Some(current) if current.path == journal && current.record == *pending => {
+            if std::fs::remove_file(journal).is_err() {
+                return Ok(pending_unknown(pending));
+            }
+            true
+        }
+        Some(current) => return Ok(pending_unknown(&current.record)),
+        None => false, // A concurrent recovery already removed the verified record.
+    };
+    if cleared && completed["state"] == "completed" {
         if let (Some(outcome), Some(id), Some(head)) = (outcome, &pending.review_id, completed["head"].as_str()) {
             let recorded = state
                 .reviews
@@ -1742,16 +1835,17 @@ pub async fn remote_worktree_write(state: Managed<'_>, request: WriteRequest) ->
         operation_id: request.operation_id,
         op: request.op.name().to_owned(),
         repo: session.repo.clone(),
+        worktree_identity: session.worktree_identity.clone(),
     };
     {
         let _guard = state.mutations.lock().unwrap();
-        if read_pending(&journal, &session.repo)?.is_some() {
-            return Ok(unknown(&pending.operation_id));
+        if let Some(existing) = find_pending(&state.data, &session)? {
+            return Ok(pending_unknown(&existing.record));
         }
         save_pending(&journal, &pending)?;
     }
     let response = session.agent.rpc(request.op.name(), fields).await;
-    finish_write(&state, &session, &journal, &pending, response).await
+    finish_write(&state, &session, &journal, &pending, response, false).await
 }
 
 #[tauri::command]
@@ -1768,27 +1862,92 @@ pub async fn remote_worktree_recover(
             .unwrap()
             .check_bound(id, &session_id, &session)?;
     }
-    let journal = session.journal(&state.data);
-    let pending = {
+    recover_pending(&state, &session, &operation_id).await
+}
+
+async fn recover_pending(state: &RemoteWorktrees, session: &Session, operation_id: &str) -> Result<Value> {
+    let file = {
         let _guard = state.mutations.lock().unwrap();
-        read_pending(&journal, &session.repo)?.filter(|record| record.operation_id == operation_id)
+        find_pending(&state.data, session)?.filter(|file| file.record.operation_id == operation_id)
     };
-    let Some(pending) = pending else {
-        return Ok(unknown(&operation_id));
+    let Some(file) = file else {
+        return Ok(unknown(operation_id));
     };
-    let response = session
-        .agent
-        .rpc(
-            "receipt",
-            json!({"repo":session.repo,"operationId":operation_id}),
-        )
-        .await;
-    finish_write(&state, &session, &journal, &pending, response).await
+    let response = if session.legacy_pending(&file.record) {
+        legacy_receipt(&state.data, session, &file).await
+    } else if file.verified_location || legacy_cliora_target(&state.data, session, &file.path).await.is_ok() {
+        session.agent.rpc("receipt", json!({"repo":session.repo,"operationId":operation_id})).await
+    } else {
+        let mut result = pending_unknown(&file.record);
+        result["message"] = json!("请使用发起原操作的 SSH 主机条目核对这条旧版待确认记录。");
+        return Ok(result);
+    };
+    finish_write(state, session, &file.path, &file.record, response, true).await
+}
+
+async fn legacy_cliora_target(base: &Path, session: &Session, path: &Path) -> Result<(PathBuf, Target)> {
+    let helper = match &session.cliora_connector {
+        Some(path) => path.clone(),
+        None => connector().await?,
+    };
+    let target = list(&helper).await?.into_iter().find(|target| {
+        target.user == session.target.user
+            && target.unavailable_reason.is_none()
+            && session.legacy_journal(base, &target.target_id, &session.host_identity) == path
+            && (target.target_id != session.target.target_id || target.target_revision == session.target.target_revision)
+    }).ok_or_else(|| remote_error("target_changed"))?;
+    Ok((helper, target))
+}
+
+/// v1 and v2 store receipts separately. The legacy connection is used only to
+/// authenticate the recorded worktree and read its receipt.
+async fn legacy_receipt(base: &Path, session: &Session, file: &PendingFile) -> Result<Value> {
+    let (helper, target) = legacy_cliora_target(base, session, &file.path).await?;
+    let probe = query(&helper, "probe", Some(&target)).await?;
+    if probe_identity(&probe["peerIdentity"])? != session.host_identity {
+        return Err(remote_error("target_changed"));
+    }
+    let peer_revision = probe_identity(&probe["peerRevision"])?;
+    let digest = probe_identity(&probe["agentSha256"])?;
+    let signature = probe["agentSignature"].as_str().filter(|value| !value.is_empty())
+        .ok_or_else(protocol_mismatch)?;
+    let mut cmd = command(&helper, "connect", None);
+    cmd.args([target.target_id.as_str(), peer_revision, digest, signature]);
+    let agent = AgentTransport::spawn(&mut cmd)?;
+    let result = tokio::time::timeout(Duration::from_secs(120), async {
+        let hello = agent.rpc("hello", json!({})).await?;
+        if hello["protocol"].as_u64() != Some(1) || hello["agent"].as_str() != Some("twiglane-agent/1") {
+            return Err(protocol_mismatch());
+        }
+        let opened = agent.rpc("open", json!({"path":session.root})).await?;
+        if opened["repo"].as_str() != Some(&file.record.repo) || opened["root"].as_str() != Some(&session.root) {
+            return Err(remote_error("target_changed"));
+        }
+        agent.rpc("receipt", json!({"repo":file.record.repo,"operationId":file.record.operation_id})).await
+    }).await;
+    agent.close().await;
+    result.map_err(|_| AppError::new("remote_timeout", "等待旧版远端操作回执超时。"))?
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connector_errors_keep_authentication_and_trust_diagnostics() {
+        let wrapper = r#"{"error":"remote_bootstrap_failed"}"#;
+        for (stderr, expected) in [
+            (format!("secret-host: Permission denied (publickey,password).\n{wrapper}"), "ssh_auth_failed"),
+            (format!("debug1: No more authentication methods to try.\n{wrapper}"), "ssh_auth_failed"),
+            (format!("Host key verification failed.\n{wrapper}"), "ssh_host_key_untrusted"),
+            (format!("Permission denied (publickey).\n{{\"error\":\"target_changed\"}}\n{wrapper}"), "target_changed"),
+            (format!("touch: Permission denied\n{wrapper}"), "remote_bootstrap_failed"),
+        ] {
+            let error = output_error(stderr.as_bytes());
+            assert_eq!(error.code, expected);
+            assert!(!error.message.contains("secret-host"));
+        }
+    }
 
     #[test]
     fn compatibility_probe_reads_the_installed_binary_without_running_it() {
@@ -1849,6 +2008,8 @@ printf '{"installed":true,"agentSha256":"%s"}\n' "$5"
             root: "/repo".into(),
             worktree_identity: None,
             peer_identity: "same-host".into(),
+            host_identity: "same-host".into(),
+            cliora_connector: None,
             baseline: None,
             hunk_stageable: false,
             agent_version: "v1".into(),
@@ -1858,15 +2019,16 @@ printf '{"installed":true,"agentSha256":"%s"}\n' "$5"
         let journal = session.journal(dir.path());
         session.target.target_revision = "edited-catalog".into();
         assert_eq!(journal, session.journal(dir.path()));
-        session.peer_identity = "replacement-host".into();
+        session.host_identity = "replacement-host".into();
         assert_ne!(journal, session.journal(dir.path()));
-        session.peer_identity = "same-host".into();
+        session.host_identity = "same-host".into();
 
         let pending = Pending {
             review_id: None,
             operation_id: Uuid::new_v4().to_string(),
             op: WriteKind::Commit.name().to_owned(),
             repo: session.repo.clone(),
+            worktree_identity: None,
         };
         save_pending(&journal, &pending).unwrap();
         let response = session
@@ -1874,7 +2036,7 @@ printf '{"installed":true,"agentSha256":"%s"}\n' "$5"
             .rpc("commit", json!({"message": "\u{0001}".repeat(24_000)}))
             .await;
         assert_eq!(response.as_ref().unwrap_err().code, "remote_request_size");
-        let result = finish_write(&state, &session, &journal, &pending, response)
+        let result = finish_write(&state, &session, &journal, &pending, response, false)
             .await
             .unwrap();
         assert_eq!(result["state"], "failed");
@@ -1941,6 +2103,8 @@ input.on("line", line => {
             root: "/repo".into(),
             worktree_identity: None,
             peer_identity: "a".repeat(64),
+            host_identity: "a".repeat(64),
+            cliora_connector: None,
             baseline: None,
             hunk_stageable: false,
             agent_version: "test".into(),
@@ -1949,7 +2113,6 @@ input.on("line", line => {
         }
     }
 
-    #[cfg(unix)]
     fn requests(dir: &Path) -> Vec<String> {
         std::fs::read_to_string(dir.join("requests.log"))
             .unwrap_or_default()
@@ -2015,9 +2178,8 @@ input.on("line", line => {
         assert_eq!(fields["offset"], json!(40));
     }
 
-    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
-    async fn a_bridged_write_without_a_receipt_is_unknown_and_is_never_sent_twice() {
+    async fn a_pending_write_blocks_a_second_provider_without_sending_another_write() {
         let dir = tempfile::tempdir().unwrap();
         let state = RemoteWorktrees::new(dir.path().join("state"));
         let session = test_session(fake_agent(dir.path(), "silent"));
@@ -2043,11 +2205,17 @@ input.on("line", line => {
         assert!(journal.exists(), "没有回执时必须留下待确认记录");
         assert_eq!(requests(dir.path()), vec!["fetch".to_string()]);
 
-        // 待确认期间再请求一次：只回 unknown，不重发同一条写入。
+        // The alternative provider has independent catalog and peer guards.
+        let mut alternate = test_session(fake_agent(dir.path(), "complete"));
+        alternate.target.target_id = "alternate-provider".into();
+        alternate.peer_identity = "different-route-peer-key".into();
+        alternate.peer_revision = "different-route-peer-revision".into();
+        assert_eq!(journal, alternate.journal(&state.data));
+        state.sessions.lock().unwrap().insert("alternate".into(), Arc::new(alternate));
         let second = bridge_call(
             &state,
             CallRequest {
-                session_id: "session-a".into(),
+                session_id: "alternate".into(),
                 op: "pull".into(),
                 fields: json!({}),
                 generation: None,
@@ -2056,8 +2224,43 @@ input.on("line", line => {
         .await
         .unwrap();
         assert_eq!(second["state"], "unknown");
+        assert_eq!(second["operationId"], first["operationId"]);
+        assert_eq!(second["op"], "fetch");
         assert_eq!(requests(dir.path()), vec!["fetch".to_string()]);
+        let alternate = state.session("alternate").unwrap();
+        let operation_id = first["operationId"].as_str().unwrap();
+        let mismatch = recover_pending(&state, &alternate, operation_id).await.unwrap();
+        assert_eq!(mismatch["state"], "unknown");
+        assert!(journal.exists());
+        assert_eq!(requests(dir.path()), vec!["fetch", "receipt"]);
         state.session("session-a").unwrap().agent.close().await;
+        alternate.agent.close().await;
+    }
+
+    #[tokio::test]
+    async fn ambiguous_or_mismatched_journals_are_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = test_session(fake_agent(dir.path(), "complete"));
+        session.worktree_identity = Some("c".repeat(64));
+        let record = Pending {
+            review_id: None,
+            operation_id: Uuid::new_v4().to_string(),
+            op: "stage".into(),
+            repo: session.repo.clone(),
+            worktree_identity: session.worktree_identity.clone(),
+        };
+        let current = session.journal(dir.path());
+        let alternate = session.legacy_journal(dir.path(), "old-provider", &session.peer_identity);
+        save_pending(&alternate, &record).unwrap();
+        assert!(!find_pending(dir.path(), &session).unwrap().unwrap().verified_location);
+        save_pending(&current, &record).unwrap();
+        assert!(matches!(find_pending(dir.path(), &session), Err(error) if error.code == "remote_journal"));
+        assert!(current.is_file() && alternate.is_file());
+        std::fs::remove_file(alternate).unwrap();
+        session.worktree_identity = Some("d".repeat(64));
+        assert!(matches!(find_pending(dir.path(), &session), Err(error) if error.code == "target_changed"));
+        assert!(current.is_file());
+        session.agent.close().await;
     }
 
     #[cfg(unix)]

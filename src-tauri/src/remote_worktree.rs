@@ -374,16 +374,47 @@ fn render_v2_diff(diff: &Value) -> String {
     text
 }
 
+const V2_CURSOR_PREFIX: &str = "v2:";
+
 /// v2 差异的分页游标：只记录下一页的行偏移，远端自己的 cursor 不暴露给前端。
 fn v2_cursor(offset: u64) -> String {
-    format!("v2:{offset}")
+    format!("{V2_CURSOR_PREFIX}{offset}")
 }
 
+fn invalid_diff_cursor() -> AppError {
+    AppError::new("remote_request", "远端差异游标无效，请重新打开这个文件。")
+}
+
+/// 游标里的下一页偏移。本地游标直接写着偏移；对端游标是不透明令牌，它内部也记着
+/// 下一页偏移，这里只读那一个字段，绑定关系（仓库、状态令牌、选择）仍由对端自己校验。
 fn v2_cursor_offset(cursor: &str) -> Result<u64> {
-    cursor
-        .strip_prefix("v2:")
-        .and_then(|value| value.parse::<u64>().ok())
-        .ok_or_else(|| AppError::new("remote_request", "远端差异游标无效，请重新打开这个文件。"))
+    if let Some(value) = cursor.strip_prefix(V2_CURSOR_PREFIX) {
+        return value.parse::<u64>().map_err(|_| invalid_diff_cursor());
+    }
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|body| body.get("offset").and_then(Value::as_u64))
+        .ok_or_else(invalid_diff_cursor)
+}
+
+/// 一页 v2 差异的分页结果：渲染好的文本与下一页游标。
+///
+/// 对端的 `DiffResponse` 走 camelCase，总行数只出现在 `totalLines` 上；读错键会让
+/// 「还有下一页」恒假，于是超过一页的差异只能取回首页，界面还把首页当成完整差异。
+/// 对端给了 `nextCursor` 就原样透传（它绑定了仓库状态令牌与选择），只有对端没给
+/// 时才用本地行偏移推算，保证末页游标仍然为 null。
+fn v2_diff_page(diff: &Value, peer_next: Option<&str>, offset: u64) -> (String, Option<String>) {
+    let text = render_v2_diff(diff);
+    let lines = diff["lines"].as_array().map_or(0, |lines| lines.len() as u64);
+    let consumed = offset.saturating_add(lines);
+    let total = diff["totalLines"].as_u64().unwrap_or(consumed);
+    let next = match peer_next.filter(|cursor| !cursor.is_empty()) {
+        Some(cursor) => Some(cursor.to_string()),
+        None => (consumed < total).then(|| v2_cursor(consumed)),
+    };
+    (text, next)
 }
 
 fn remote_error(code: &str) -> AppError {
@@ -1285,32 +1316,28 @@ async fn diff_call(state: &RemoteWorktrees, request: DiffRequest) -> Result<Valu
 /// v2 的差异：远端给的是结构化 `DiffResponse`，这里渲染回前端已经在解析的 unified 文本，
 /// 分页、块索引与块标记都沿用同一条路径。任务视图（基线）只有 v1 支持，不会走到这里。
 async fn diff_v2(session: &Session, request: &DiffRequest) -> Result<Value> {
-    let offset = request
-        .cursor
-        .as_deref()
-        .map(v2_cursor_offset)
-        .transpose()?
-        .unwrap_or(0);
-    let result = session
-        .agent
-        .rpc(
-            "diff",
-            json!({
-                "repo": session.repo,
-                "path": request.path,
-                "view": request.view,
-                "offset": offset,
-                "limit": V2_DIFF_PAGE_LINES,
-            }),
-        )
-        .await?;
+    let cursor = request.cursor.as_deref();
+    let offset = cursor.map(v2_cursor_offset).transpose()?.unwrap_or(0);
+    let mut fields = json!({
+        "repo": session.repo,
+        "path": request.path,
+        "view": request.view,
+        "offset": offset,
+        "limit": V2_DIFF_PAGE_LINES,
+    });
+    // 对端游标绑定了仓库状态令牌与选择：原样回传让它重新校验，状态已变就明确报错，
+    // 而不是拿一个偏移静默读出另一段内容。本地偏移游标没有可校验的令牌，只发偏移。
+    if let Some(cursor) = cursor.filter(|cursor| !cursor.starts_with(V2_CURSOR_PREFIX)) {
+        fields["cursor"] = json!(cursor);
+    }
+    let result = session.agent.rpc("diff", fields).await?;
     session.remember_state(&result);
     let diff = result.get("diff").cloned().unwrap_or_else(|| json!({}));
-    let text = render_v2_diff(&diff);
-    let lines = diff["lines"].as_array().map_or(0, |lines| lines.len() as u64);
-    let consumed = offset.saturating_add(lines);
-    let total = diff["total_lines"].as_u64().unwrap_or(consumed);
-    let next = (consumed < total).then(|| v2_cursor(consumed));
+    let (text, next) = v2_diff_page(
+        &diff,
+        result.get("nextCursor").and_then(Value::as_str),
+        offset,
+    );
     let page = json!({
         "data": base64::engine::general_purpose::STANDARD.encode(text.as_bytes()),
         "nextCursor": next,
@@ -2173,6 +2200,166 @@ input.on("line", line => {
         let task = annotate_diff(&session, "task", patch);
         assert_eq!(task["hunksStageable"], json!(false));
         assert!(task["hunksStageableReason"].as_str().is_some());
+    }
+
+    /* ---------------- v2 差异分页：总行数是 camelCase，游标优先用对端 ------------- */
+
+    /// 按 offset/limit 分页回 v2 差异帧的假远端组件：总行数、游标形态都由环境变量决定。
+    const FAKE_V2_DIFF: &str = r#"
+const fs = require("node:fs");
+const input = require("node:readline").createInterface({input:process.stdin});
+const total = Number(process.env.FAKE_V2_TOTAL || "0");
+const fixed = process.env.FAKE_V2_CURSOR || "";
+const omit = process.env.FAKE_V2_OMIT === "1";
+const log = process.env.FAKE_LOG;
+const send = frame => process.stdout.write(JSON.stringify(frame) + "\n");
+input.on("line", line => {
+    const req = JSON.parse(line);
+    const offset = Number(req.offset || 0);
+    const limit = Number(req.limit || 0);
+    const take = Math.max(0, Math.min(limit, total - offset));
+    const lines = [];
+    for (let at = 0; at < take; at += 1) lines.push({text: "line " + (offset + at), eol: "lf"});
+    fs.appendFileSync(log, JSON.stringify({offset: offset, cursor: req.cursor || null}) + "\n");
+    const consumed = offset + take;
+    const next = consumed < total
+        ? (fixed || Buffer.from(JSON.stringify({offset: consumed})).toString("base64url"))
+        : null;
+    const result = {stateToken: "tok-1", diff: {path: req.path, offset: offset, totalLines: total, lines: lines, binary: false}};
+    if (!omit) result.nextCursor = next;
+    send({v:2, id:req.id, ok:true, result: result});
+});
+"#;
+
+    fn fake_v2_diff_agent(dir: &Path, total: u64, cursor: &str, omit: bool) -> AgentTransport {
+        let mut command = Command::new("node");
+        command
+            .args(["-e", FAKE_V2_DIFF])
+            .env("FAKE_LOG", dir.join("diff.log"))
+            .env("FAKE_V2_TOTAL", total.to_string())
+            .env("FAKE_V2_CURSOR", cursor)
+            .env("FAKE_V2_OMIT", if omit { "1" } else { "0" })
+            .kill_on_drop(true);
+        AgentTransport::spawn_v2(&mut command).unwrap()
+    }
+
+    fn diff_request(cursor: Option<&str>) -> DiffRequest {
+        DiffRequest {
+            session_id: "session-a".into(),
+            generation: "1".into(),
+            path: "a.txt".into(),
+            view: "unstaged".into(),
+            cursor: cursor.map(str::to_string),
+        }
+    }
+
+    fn page_lines(page: &Value) -> Vec<String> {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(page["data"].as_str().unwrap())
+            .unwrap();
+        String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn diff_requests(dir: &Path) -> Vec<Value> {
+        std::fs::read_to_string(dir.join("diff.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    /// 超过一页的 v2 差异必须能连续翻到最后一页：首页游标非空，末页为 null，
+    /// 拼接后的文本既不缺行也不重复。回归点是总行数键：读成 snake_case 时这里只剩一页。
+    #[tokio::test(flavor = "current_thread")]
+    async fn v2_diff_pages_through_every_line_until_the_peer_says_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let total = V2_DIFF_PAGE_LINES + 100;
+        let session = test_session(fake_v2_diff_agent(dir.path(), total, "", false));
+        let mut rendered: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut pages = 0u32;
+        loop {
+            let page = diff_v2(&session, &diff_request(cursor.as_deref()))
+                .await
+                .unwrap();
+            pages += 1;
+            assert!(pages <= 4, "分页没有收敛：第 {pages} 页之后还要下一页");
+            rendered.extend(page_lines(&page));
+            match page["nextCursor"].as_str() {
+                Some(next) => cursor = Some(next.to_string()),
+                None => break,
+            }
+        }
+        assert_eq!(pages, 2, "每页 {V2_DIFF_PAGE_LINES} 行、共 {total} 行应当正好两页");
+        assert_eq!(rendered.len() as u64, total);
+        let last = format!("line {}", total - 1);
+        assert_eq!(rendered.first().map(String::as_str), Some("line 0"));
+        assert_eq!(rendered.last().map(String::as_str), Some(last.as_str()));
+        session.agent.close().await;
+    }
+
+    /// 对端给了 nextCursor 就原样透传，不换成自己的 `v2:` 偏移；下一页请求把对端游标
+    /// 和一个按它解出的偏移一起发回去，让对端继续校验绑定关系。
+    #[tokio::test(flavor = "current_thread")]
+    async fn v2_diff_passes_the_peer_cursor_through_instead_of_deriving_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let total = V2_DIFF_PAGE_LINES + 100;
+        // 对端游标是不透明令牌：形状由对端决定，里面记着下一页偏移。
+        let peer_cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            json!({"offset": V2_DIFF_PAGE_LINES, "token": "tok-1"})
+                .to_string()
+                .as_bytes(),
+        );
+        let session = test_session(fake_v2_diff_agent(dir.path(), total, &peer_cursor, false));
+        let first = diff_v2(&session, &diff_request(None)).await.unwrap();
+        assert_eq!(first["nextCursor"], json!(peer_cursor.clone()));
+        assert_ne!(first["nextCursor"], json!(v2_cursor(V2_DIFF_PAGE_LINES)));
+
+        let second = diff_v2(&session, &diff_request(Some(&peer_cursor)))
+            .await
+            .unwrap();
+        assert!(
+            second["nextCursor"].is_null(),
+            "末页必须为 null：前端据此停止翻页且不标记截断"
+        );
+        let tail = page_lines(&second);
+        assert_eq!(tail.len() as u64, total - V2_DIFF_PAGE_LINES);
+        assert_eq!(tail.first().map(String::as_str), Some("line 2000"));
+
+        let requests = diff_requests(dir.path());
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["offset"], json!(0));
+        assert_eq!(requests[1]["offset"], json!(V2_DIFF_PAGE_LINES));
+        assert_eq!(requests[1]["cursor"], json!(peer_cursor));
+        session.agent.close().await;
+    }
+
+    /// 对端没给 nextCursor 时才用本地行偏移推算；本地游标里没有可回传的令牌。
+    #[tokio::test(flavor = "current_thread")]
+    async fn v2_diff_derives_a_local_cursor_only_when_the_peer_omits_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let total = V2_DIFF_PAGE_LINES + 100;
+        let session = test_session(fake_v2_diff_agent(dir.path(), total, "", true));
+        let first = diff_v2(&session, &diff_request(None)).await.unwrap();
+        assert_eq!(first["nextCursor"], json!(v2_cursor(V2_DIFF_PAGE_LINES)));
+
+        let second = diff_v2(&session, &diff_request(first["nextCursor"].as_str()))
+            .await
+            .unwrap();
+        assert!(second["nextCursor"].is_null());
+        assert_eq!(page_lines(&second).len() as u64, total - V2_DIFF_PAGE_LINES);
+
+        let requests = diff_requests(dir.path());
+        assert_eq!(requests[1]["offset"], json!(V2_DIFF_PAGE_LINES));
+        assert!(
+            requests[1]["cursor"].is_null(),
+            "本地偏移游标没有可回传的令牌"
+        );
+        session.agent.close().await;
     }
 
     /* ---------------- 远端会话优先 v2 组件，不可用才回退内嵌 v1 ---------------- */

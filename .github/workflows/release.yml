@@ -116,7 +116,7 @@ jobs:
           npm run tauri -- signer sign "$agent"
           node scripts/remote-worktree/agent-v2-manifest.mjs --write "$agent_dir" --version "$version"
           node scripts/remote-worktree/agent-v2-manifest.mjs --check "$agent_dir"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: remote-agent-v2
           path: src-tauri/agent-v2/
@@ -170,7 +170,7 @@ jobs:
           cache-on-failure: true
       - name: Install dependencies
         run: npm ci --prefer-offline --no-audit --no-fund
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: remote-agent-v2
           path: src-tauri/agent-v2/

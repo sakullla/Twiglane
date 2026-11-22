@@ -25,7 +25,7 @@
 在 Twiglane 仓库根目录运行以下命令。SSH 目标需可登录且具有私有挂载命名空间、Git、Python 3 和 OpenSSH。Cliora 使用同一候选的开发构建。
 
 ```sh
-python3 scripts/remote-worktree/verify-live.py <Cliora开发版路径> <root@测试主机>
+python3 scripts/remote-worktree/verify-live.py <Cliora开发版路径> <user>@<测试主机>
 python3 scripts/remote-worktree/verify-weak-link.py <user@验证主机>
 node scripts/verify-remote-worktree-evidence.mjs
 ```

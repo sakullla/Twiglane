@@ -121,7 +121,7 @@ mod tests {
         // 跳板机（ProxyJump）的提示里没有目标主机，不得用目标主机的密码作答。
         for prompt in [
             "deploy@jump.example.com's password: ",
-            "root@10.0.0.1's password: ",
+            "ci@10.0.0.1's password: ",
         ] {
             let refused = answer(&askpass.script, prompt, &askpass.secret, host);
             assert_eq!(refused.status.code(), Some(1), "{prompt}");

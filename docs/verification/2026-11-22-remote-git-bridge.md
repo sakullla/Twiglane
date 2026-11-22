@@ -129,23 +129,23 @@ Twiglane 侧另有 `confirmation`（一次性票据门控），Cliora 侧如实�
 ```
 # 本机
 tar czf /tmp/twiglane-agent-src.tgz --exclude target remote-agent/v2 src-tauri/src
-scp /tmp/twiglane-agent-src.tgz user@<host>:/root/
+scp /tmp/twiglane-agent-src.tgz <user>@<host>:~/
 
-# 主机上（/root/twiglane-agent-build，位于源码树外）
-mkdir -p /root/twiglane-agent-build && tar xzf /root/twiglane-agent-src.tgz -C /root/twiglane-agent-build
-cd /root/twiglane-agent-build/remote-agent/v2 && cargo build --release
+# 主机上（~/twiglane-agent-build，位于源码树外）
+mkdir -p ~/twiglane-agent-build && tar xzf ~/twiglane-agent-src.tgz -C ~/twiglane-agent-build
+cd ~/twiglane-agent-build/remote-agent/v2 && cargo build --release
 # Finished `release` profile [optimized] target(s) in 1m 41s → 7 640 136 字节
 
 # 取回本机并生成清单（sha256 = 8f3203b9…b367a8，清单签名标 development：验证用，不是发行签名）
 ```
 
-远端夹具仓库：`/root/twiglane-live-probe`（`git init -b main`，两个提交 `first` / `second`）。
+远端夹具仓库：`<repo>`（`git init -b main`，两个提交 `first` / `second`）。
 
 ### 6.2 第一次执行：远端无组件 → 走真实安装
 
 ```
 $ TWIGLANE_REAL_SSH_TARGET=$TWIGLANE_REAL_SSH_TARGET \
-  TWIGLANE_REAL_SSH_REPO=/root/twiglane-live-probe \
+  TWIGLANE_REAL_SSH_REPO=$TWIGLANE_REAL_SSH_REPO \
   TWIGLANE_AGENT_V2_DIR=/tmp/twiglane-agent-v2 \
   cargo test --manifest-path src-tauri/Cargo.toml real_host_transport_path -- --nocapture
 
@@ -158,7 +158,7 @@ $ TWIGLANE_REAL_SSH_TARGET=$TWIGLANE_REAL_SSH_TARGET \
 [live-ssh] 上传进度 5898240/7640136 字节
 [live-ssh] 上传进度 7640136/7640136 字节
 [live-ssh] hello：protocol=2 agent=twiglane-agent/2 version=0.3.40 os=linux arch=x86_64 capabilities=86
-[live-ssh] open：repo=/root/twiglane-live-probe root=/root/twiglane-live-probe name=twiglane-live-probe
+[live-ssh] open：repo=<repo> root=<repo> name=<name>
            generation=1 stateToken=baed6ed2…1ebceefd branch=main files=0 watchDegraded=false
 [live-ssh] status：generation=1 stateToken=baed6ed2…1ebceefd branch=main files=0
 [live-ssh] history：commits=2 nextOffset=null 最新=257a4d7db311b694d8b83eca1167d947ec6f9a73 second
@@ -243,11 +243,11 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 567 filtered out; finished in 0.
 
 ```
 $ TWIGLANE_REAL_SSH_TARGET=$TWIGLANE_REAL_SSH_TARGET \
-  TWIGLANE_REAL_SSH_REPO=/root/twiglane-live-probe \
+  TWIGLANE_REAL_SSH_REPO=$TWIGLANE_REAL_SSH_REPO \
   TWIGLANE_CLIORA_CONNECTOR=~/.cache/cargo-target/debug/cliora \
   cargo test --manifest-path src-tauri/Cargo.toml real_host_command_layer -- --nocapture
 
-[live-command] 远端仓库：/root/twiglane-live-probe
+[live-command] 远端仓库：<repo>
 [live-command] 夹具改动：note.txt 追加一行（twiglane command layer probe 98abdf20-…）
 [live-command] 目标：live-command-target b6218a8b… host=<host> user=<user>
 [live-command] open：session=887d7485-… repo=9d8fc0a3… head=257a4d7d… branch="main" files=1
@@ -305,7 +305,8 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 568 filtered out; finished in 2.
 
 ### 7.4 回归
 
-- `cargo test --manifest-path src-tauri/Cargo.toml` → 569 passed（原 568 + 新增 1，未设门控时走跳过分支）
+- `cargo test --manifest-path src-tauri/Cargo.toml` → 580 passed（未设门控时走跳过分支）
 - `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` → 0 warning
 - `npm run check` → 0 errors / 0 warnings
 - `npm test` → 71 files / 1718 tests passed
+- 提交前自查：在 src / src-tauri / docs 下检索「192.168 开头形式的私有网段地址」与「root 紧跟 @ 的账号串」应无命中（本行故意不写出可直接命中的字面量，否则自查会命中自己）；主机、用户名、端口只经运行时环境变量传入，文档一律用 `<target>` / `<repo>` 占位

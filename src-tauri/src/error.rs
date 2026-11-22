@@ -15,6 +15,7 @@ pub struct AppError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SyncEffect {
+    NoFetchUpdate,
     Completed,
     Fetched,
     PushRefsUpdated,

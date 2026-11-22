@@ -2121,6 +2121,57 @@ fn a_dirty_pull_keeps_fetched_refs_and_the_users_worktree_bytes() {
 }
 
 #[test]
+fn a_failed_pull_can_clear_fetch_head_without_changing_tracking_refs() {
+    let fixture = Fixture::new("pull-missing-upstream");
+    fixture.init();
+    fixture.write("shared.txt", "unchanged\n");
+    fixture.commit_all("base");
+    let base = base_of(&fixture);
+    let origin = base.join("origin.git");
+    git(&base, &fixture.config, &["init", "--bare", "origin.git"]);
+    git(&fixture.repo, &fixture.config, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(&fixture.repo, &fixture.config, &["push", "-u", "origin", "main"]);
+    git(&fixture.repo, &fixture.config, &["fetch", "origin", "main"]);
+    let fetch_head = fixture.repo.join(".git/FETCH_HEAD");
+    let before = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]);
+    let tracking = git(&fixture.repo, &fixture.config, &["rev-parse", "refs/remotes/origin/main"]);
+    assert!(!std::fs::read(&fetch_head).unwrap().is_empty());
+    let missing = base.join("missing.git");
+    git(&fixture.repo, &fixture.config, &["remote", "set-url", "origin", missing.to_str().unwrap()]);
+
+    let repo = fixture.repo_str();
+    let mut agent = fixture.agent();
+    let state = open(&mut agent, &repo);
+    let fields = json!({
+        "repo": repo, "operationId": "op-pull-missing", "stateToken": state["stateToken"],
+    });
+    assert_eq!(agent.error_code("pull-missing", "pull", fields.clone()), "network");
+    let result = agent.ok("read-failed-pull", "receipt", json!({
+        "repo": repo, "operationId": "op-pull-missing",
+    }));
+    assert_eq!(result["receipt"]["state"], "failed");
+    assert_eq!(result["receipt"]["reason"], "network");
+    assert!(std::fs::read(&fetch_head).unwrap().is_empty());
+    assert_eq!(git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]), before);
+    assert_eq!(git(&fixture.repo, &fixture.config, &["rev-parse", "refs/remotes/origin/main"]), tracking);
+    assert_eq!(std::fs::read(fixture.repo.join("shared.txt")).unwrap(), b"unchanged\n");
+    assert_eq!(agent.error_code("replay-failed-pull", "pull", fields), "network");
+
+    // An unreadable previous fetch record still leaves the outcome uncertain.
+    std::fs::write(&fetch_head, b"invalid previous fetch record\n").unwrap();
+    let state = agent.ok("status-with-invalid-fetch-head", "status", json!({"repo": repo}));
+    let error = agent.error_code("pull-unverified", "pull", json!({
+        "repo": repo, "operationId": "op-pull-unverified", "stateToken": state["stateToken"],
+    }));
+    assert_eq!(error, "operation_pending");
+    let result = agent.ok("read-unverified-pull", "receipt", json!({
+        "repo": repo, "operationId": "op-pull-unverified",
+    }));
+    assert_eq!(result["receipt"]["state"], "pending");
+    assert_eq!(result["receipt"]["reason"], "pull_unverified");
+}
+
+#[test]
 fn resumed_pushes_use_each_original_commit_and_effective_push_destination() {
     let fixture = Fixture::new("resume-push");
     fixture.init();

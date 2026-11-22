@@ -2096,7 +2096,7 @@ impl Context {
                     Some(SyncEffect::Fetched) => Some("fetched"),
                     Some(SyncEffect::PushRefsUpdated) => Some("refs_pushed"),
                     Some(SyncEffect::Pushed) => Some("pushed"),
-                    None => None,
+                    Some(SyncEffect::NoFetchUpdate) | None => None,
                 };
                 if let Some(phase) = phase {
                     receipt.generation = self.backend.scheduler.current_generation(&session.key);
@@ -3069,7 +3069,9 @@ fn reject_undeclared(
 /// 这类错误不能记成 failed，否则客户端会把一次可能成功的写入当成可重发。
 fn remote_write_unconfirmed(op: WriteOp, error: &AppError) -> bool {
     error.write_unconfirmed
-        || op.uses_upstream() && matches!(error.code.as_str(), "cancelled" | "timeout" | "network")
+        || op.uses_upstream()
+            && error.sync_effect != Some(SyncEffect::NoFetchUpdate)
+            && matches!(error.code.as_str(), "cancelled" | "timeout" | "network")
 }
 
 fn check_cancel(cancel: &AtomicBool) -> Result<(), AppError> {

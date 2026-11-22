@@ -493,7 +493,7 @@ pub async fn pull_fast_forward(
         return Err(match effect {
             _ if error.code == "diverged" => error.after_sync_effect(SyncEffect::Fetched),
             Some(true) => error.after_sync_effect(SyncEffect::Fetched),
-            Some(false) => error,
+            Some(false) => error.after_sync_effect(SyncEffect::NoFetchUpdate),
             None => AppError::new("pull_unverified", "拉取结果待确认，无法核对远程引用或 FETCH_HEAD。")
                 .with_generation(current)
                 .after_unconfirmed_write(),
@@ -525,7 +525,8 @@ impl FetchEvidence {
         let refs = self.refs.as_ref().zip(later.refs.as_ref()).map(|(before, after)| before != after);
         let head = match (self.head.as_ref(), later.head.as_ref()) {
             (Some(before), Some(after @ FetchHead::Entries(_))) => Some(before != after),
-            (Some(FetchHead::NoRecords), Some(FetchHead::NoRecords)) => Some(false),
+            // Git may clear an old FETCH_HEAD before failing to reach the remote.
+            (Some(_), Some(FetchHead::NoRecords)) => Some(false),
             _ => None,
         };
         match (refs, head) {
